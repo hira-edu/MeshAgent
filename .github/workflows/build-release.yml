@@ -43,17 +43,7 @@ jobs:
           fetch-depth: 0
 
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Setup Visual Studio components
-        run: |
-          # Install required VS components if missing
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (Test-Path $vsWhere) {
-            $vsPath = & $vsWhere -latest -property installationPath
-            Write-Host "Visual Studio found at: $vsPath"
-          }
-        shell: pwsh
+        uses: microsoft/setup-msbuild@v1.1
 
       - name: Setup Python
         uses: actions/setup-python@v5
