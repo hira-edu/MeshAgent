@@ -42,10 +42,18 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Setup MSBuild
+      - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
-        with:
-          vs-version: '[17.0,)'
+
+      - name: Setup Visual Studio components
+        run: |
+          # Install required VS components if missing
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vsWhere) {
+            $vsPath = & $vsWhere -latest -property installationPath
+            Write-Host "Visual Studio found at: $vsPath"
+          }
+        shell: pwsh
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -55,23 +63,37 @@ jobs:
       - name: Fetch branding configuration
         id: fetch_config
         run: |
-          # Check if branding config exists locally
-          if (Test-Path "../MeshCentral/custom_meshagent/configs/${{ env.BRANDING_CONFIG }}") {
-            Copy-Item "../MeshCentral/custom_meshagent/configs/${{ env.BRANDING_CONFIG }}" -Destination "./branding_config.json"
-            Write-Host "Using local branding config"
+          # Use branding config from repository root (already committed)
+          if (Test-Path "./branding_config.json") {
+            Write-Host "Using branding config from repository"
+            Get-Content "./branding_config.json"
           } elseif ("${{ secrets.BRANDING_CONFIG_JSON }}" -ne "") {
             # Use secret if available
             "${{ secrets.BRANDING_CONFIG_JSON }}" | Out-File -FilePath "./branding_config.json" -Encoding utf8
             Write-Host "Using branding config from secrets"
+            Get-Content "./branding_config.json"
           } else {
-            # Fallback to default
-            Write-Host "No branding config found, using defaults"
-            echo '{"branding":{"companyName":"Acme Corp","serviceName":"AcmeTelemetryCore","displayName":"Acme Telemetry Core Service"}}' | Out-File -FilePath "./branding_config.json" -Encoding utf8
+            # Fallback: create minimal config
+            Write-Host "Creating default branding config"
+            @"
+{
+  "branding": {
+    "companyName": "Acme Corp",
+    "serviceName": "AcmeTelemetryCore",
+    "displayName": "Acme Telemetry Core Service",
+    "binaryName": "AcmeTelemetryCore.exe",
+    "productName": "Acme Telemetry Core",
+    "description": "Acme Telemetry Core Service",
+    "logPath": "C:/ProgramData/Acme/TelemetryCore/logs"
+  },
+  "network": {
+    "primaryEndpoint": "wss://72.60.233.29:443/agent.ashx",
+    "userAgent": "AcmeAgent/1.0"
+  }
+}
+"@ | Out-File -FilePath "./branding_config.json" -Encoding utf8
+            Get-Content "./branding_config.json"
           }
-
-          # Display config (sanitized)
-          Write-Host "Branding configuration loaded"
-          Get-Content "./branding_config.json"
         shell: pwsh
 
       - name: Generate branding headers
@@ -154,17 +176,42 @@ jobs:
 
       - name: Restore NuGet packages
         run: |
+          Write-Host "Restoring NuGet packages for MeshAgent-2022.sln"
           nuget restore MeshAgent-2022.sln
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "NuGet restore failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+        shell: pwsh
 
       - name: Build MeshService (${{ matrix.arch }})
         run: |
+          Write-Host "Building MeshService for ${{ matrix.arch }} platform"
+          Write-Host "Configuration: Release"
+          Write-Host "Platform: ${{ matrix.platform }}"
+
           msbuild MeshAgent-2022.sln `
             /t:MeshService `
             /p:Configuration=Release `
             /p:Platform=${{ matrix.platform }} `
             /p:WindowsTargetPlatformVersion=10.0 `
+            /p:PlatformToolset=v143 `
             /m `
-            /v:minimal
+            /v:normal `
+            /fl `
+            /flp:logfile=build_${{ matrix.arch }}.log
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Build failed with exit code $LASTEXITCODE"
+            Write-Host "Build log:"
+            if (Test-Path "build_${{ matrix.arch }}.log") {
+              Get-Content "build_${{ matrix.arch }}.log" -Tail 100
+            }
+            exit $LASTEXITCODE
+          }
+
+          Write-Host "Build completed successfully"
+        shell: pwsh
 
       - name: Locate and rename binary
         id: locate_binary
@@ -198,6 +245,15 @@ jobs:
             exit 1
           }
         shell: pwsh
+
+      - name: Upload build logs (if exists)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.arch }}
+          path: build_${{ matrix.arch }}.log
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
