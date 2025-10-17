@@ -333,3 +333,78 @@ ASALocalRun/
 *.o
 ToolChains/
 .DS_Store
+
+# ============================================
+# SECURITY: Sensitive Configuration & Secrets
+# ============================================
+
+# Environment configuration with real infrastructure
+.env
+.env.local
+.env.production
+config.env
+*.env
+
+# Real branding configuration (use branding_config.template.json)
+branding_config.json
+
+# MeshCentral installer files with embedded certificates
+*.msh
+*.msh.txt
+
+# Deployment secrets
+deploy_secrets/
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.pfx
+*.p12
+
+# Built binaries (rebuild from source)
+meshservice/Release/*.exe
+meshservice/Debug/*.exe
+*.exe
+!tools/*.exe
+
+# MeshCentral server data
+meshcentral-data/
+meshcentral-app/
+custom_meshagent/
+
+# Database files with configuration
+*.db
+*.sqlite
+*.sqlite3
+
+# Log files with potential sensitive data
+*.log
+logs/
+telemetry.log
+
+# Certificates and keys
+*.crt
+*.cer
+*.pem
+*.key
+*.p7b
+
+# SSH keys
+.ssh/
+authorized_keys
+known_hosts
+
+# Generated network profiles
+meshcore/generated/network_profile.h
+meshcore/generated/network_profile.json
+
+# Build artifacts
+build/
+dist/
+*.zip
+*.tar.gz
+
+# Backup files
+*.bak
+*.backup
+*~

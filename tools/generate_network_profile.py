@@ -156,7 +156,7 @@ def generate_cpp_header(profile: Dict, output_path: str):
     with open(output_path, 'w') as f:
         f.write(header)
 
-    print(f"✅ C++ header generated: {output_path}")
+    print(f"[OK] C++ header generated: {output_path}")
 
 
 def generate_json_profile(profile: Dict, output_path: str):
@@ -166,7 +166,7 @@ def generate_json_profile(profile: Dict, output_path: str):
     with open(output_path, 'w') as f:
         json.dump(profile, f, indent=2)
 
-    print(f"✅ JSON profile generated: {output_path}")
+    print(f"[OK] JSON profile generated: {output_path}")
 
 
 def main():

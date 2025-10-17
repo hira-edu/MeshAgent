@@ -45,8 +45,9 @@ limitations under the License.
 
 #include <WtsApi32.h>
 
-TCHAR* serviceFile = TEXT("Mesh Agent");
-TCHAR* serviceName = TEXT("Mesh Agent background service");
+#include "meshcore/generated/meshagent_branding.h"
+TCHAR* serviceFile = MESH_AGENT_SERVICE_FILE;
+TCHAR* serviceName = MESH_AGENT_SERVICE_NAME;
 
 SERVICE_STATUS serviceStatus;
 SERVICE_STATUS_HANDLE serviceStatusHandle = 0;
@@ -274,14 +275,15 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 {
 	ILib_DumpEnabledContext winException;
 	size_t len = 0;
-	WCHAR str[_MAX_PATH];
+	WCHAR str[_MAX_PATH + 1] = {0};  // SECURITY FIX: Extra byte for null terminator
 
 
 	UNREFERENCED_PARAMETER(argc);
 	UNREFERENCED_PARAMETER(argv);
 
 	// Initialise service status
-	serviceStatus.dwServiceType = SERVICE_WIN32;
+	// Report as our own-process service so SCM manages it as a dedicated process
+	serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
 	serviceStatus.dwCurrentState = SERVICE_STOPPED;
 	serviceStatus.dwControlsAccepted = 0;
 	serviceStatus.dwWin32ExitCode = NO_ERROR;
@@ -301,8 +303,9 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 		serviceStatus.dwCurrentState = SERVICE_RUNNING;
 		SetServiceStatus(serviceStatusHandle, &serviceStatus);
 
-		// Get our own executable name
-		GetModuleFileNameW(NULL, str, _MAX_PATH);
+		// Get our own executable name with buffer overflow protection
+		DWORD pathLen = GetModuleFileNameW(NULL, str, _MAX_PATH);
+		str[_MAX_PATH] = L'\0';  // SECURITY FIX: Force null termination
 
 
 		// Run the mesh agent
@@ -379,6 +382,22 @@ int GetServiceState(LPCSTR servicename)
 	return r;
 }
 
+#if defined(MESHAGENT_WINDOWS_SUBSYSTEM)
+// When linked with /SUBSYSTEM:WINDOWS and MESHAGENT_WINDOWS_SUBSYSTEM defined,
+// use a GUI-subsystem entry point to avoid creating a console window so the
+// process shows under Background processes (not Apps) when run interactively.
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nShow)
+{
+    UNREFERENCED_PARAMETER(hInst);
+    UNREFERENCED_PARAMETER(hPrev);
+    UNREFERENCED_PARAMETER(lpCmdLine);
+    UNREFERENCED_PARAMETER(nShow);
+
+    // Reuse existing wide-argv flow inside wmain
+    return wmain(__argc, (char**)__wargv);
+}
+#endif
+
 
 /*
 int APIENTRY _tWinMain(HINSTANCE hInstance,
@@ -397,7 +416,11 @@ int APIENTRY _tWinMain(HINSTANCE hInstance,
 ILibTransport_DoneState kvm_serviceWriteSink(char *buffer, int bufferLen, void *reserved)
 {
 	DWORD len;
-	WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), buffer, bufferLen, &len, NULL);
+	HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (h != NULL && h != INVALID_HANDLE_VALUE)
+	{
+		WriteFile(h, buffer, bufferLen, &len, NULL);
+	}
 	return ILibTransport_DoneState_COMPLETE;
 }
 BOOL CtrlHandler(DWORD fdwCtrlType)
@@ -699,7 +722,11 @@ int wmain(int argc, char* wargv[])
 	if (argc > 1 && strcasecmp(argv[1], "-updaterversion") == 0)
 	{
 		DWORD dummy;
-		WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), "1\n", 2, &dummy, NULL);
+		HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+		if (h != NULL && h != INVALID_HANDLE_VALUE)
+		{
+			WriteFile(h, "1\n", 2, &dummy, NULL);
+		}
 		wmain_free(argv);
 		return(0);
 	}
