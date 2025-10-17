@@ -1,4 +1,4 @@
-name: Release Custom MeshAgent Binaries
+﻿name: Release Custom MeshAgent Binaries
 
 on:
   push:
@@ -33,11 +33,11 @@ jobs:
         run: |
           if [ -f "meshservice/Release/MeshService64.exe" ] && [ -f "meshservice/Release/MeshService.exe" ]; then
             echo "binaries_found=true" >> $GITHUB_OUTPUT
-            echo "✅ Found pre-built binaries"
+            echo "âœ… Found pre-built binaries"
             ls -lh meshservice/Release/MeshService*.exe
           else
             echo "binaries_found=false" >> $GITHUB_OUTPUT
-            echo "❌ Pre-built binaries not found"
+            echo "âŒ Pre-built binaries not found"
             echo "Please build binaries locally and commit them before creating a release"
             exit 1
           fi
@@ -50,16 +50,16 @@ jobs:
           size32=$(stat -c%s "meshservice/Release/MeshService.exe")
 
           if [ "$size64" -lt 3000000 ]; then
-            echo "❌ MeshService64.exe is too small: $size64 bytes"
+            echo "âŒ MeshService64.exe is too small: $size64 bytes"
             exit 1
           fi
 
           if [ "$size32" -lt 3000000 ]; then
-            echo "❌ MeshService.exe is too small: $size32 bytes"
+            echo "âŒ MeshService.exe is too small: $size32 bytes"
             exit 1
           fi
 
-          echo "✅ Binary sizes validated"
+          echo "âœ… Binary sizes validated"
           echo "  MeshService64.exe: $size64 bytes"
           echo "  MeshService.exe: $size32 bytes"
 
@@ -79,16 +79,16 @@ jobs:
       - name: Create release notes
         run: |
           cat > release_notes.md << 'EOF'
-          ## 🎯 Custom MeshAgent Binaries - Acme Telemetry Core
+          ## ðŸŽ¯ Custom MeshAgent Binaries - Acme Telemetry Core
 
-          ### 📦 What's Included
+          ### ðŸ“¦ What's Included
 
           This release contains custom-branded MeshAgent binaries:
 
           - **MeshService64.exe** - 64-bit Windows agent (x64)
           - **MeshService.exe** - 32-bit Windows agent (x86)
 
-          ### 🏷️ Branding Configuration
+          ### ðŸ·ï¸ Branding Configuration
 
           - **Company**: Acme Corp
           - **Service Name**: AcmeTelemetryCore
@@ -97,7 +97,7 @@ jobs:
           - **Server**: wss://high.support:443/agent.ashx
           - **Version**: 1.0.0.0
 
-          ### 📥 Installation
+          ### ðŸ“¥ Installation
 
           #### Option 1: Direct Install
           ```powershell
@@ -112,10 +112,10 @@ jobs:
           #### Option 2: Deploy via MeshCentral Server
           1. Download from: https://high.support
           2. Login to MeshCentral
-          3. Go to "My Server" → "Installation" → "Windows"
+          3. Go to "My Server" â†’ "Installation" â†’ "Windows"
           4. The agent will have Acme branding
 
-          ### 🔧 Technical Details
+          ### ðŸ”§ Technical Details
 
           - **Build Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
           - **Commit**: ${{ github.sha }}
@@ -123,7 +123,7 @@ jobs:
           - **Built On**: Windows with Visual Studio 2022
           - **Platform Toolset**: v143
 
-          ### 📝 Files
+          ### ðŸ“ Files
 
           EOF
 
@@ -146,18 +146,18 @@ jobs:
 
           cat >> release_notes.md << 'EOF'
 
-          ### 🔐 Security Notes
+          ### ðŸ” Security Notes
 
           - Binaries are code-signed by MeshCentral server during deployment
           - Use HTTPS for all downloads
           - Verify checksums before installation
 
-          ### 📚 Documentation
+          ### ðŸ“š Documentation
 
           - [Deployment Guide](https://github.com/hira-edu/MeshAgent/blob/master/DEPLOYMENT_GUIDE.md)
           - [Build Plan](https://github.com/hira-edu/MeshAgent/blob/master/docs/MESHAGENT_CUSTOM_BUILD_PLAN.md)
 
-          ### 🆘 Support
+          ### ðŸ†˜ Support
 
           For issues or questions:
           1. Check GitHub Actions logs
@@ -166,7 +166,7 @@ jobs:
 
           ---
 
-          🤖 Generated with [Claude Code](https://claude.com/claude-code)
+          ðŸ¤– Generated with [Claude Code](https://claude.com/claude-code)
           EOF
 
       - name: Create GitHub Release
@@ -195,8 +195,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check SSH secret presence
+        id: sshflag
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          if [ -n "$SSH_PRIVATE_KEY" ]; then
+            echo "has_ssh=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_ssh=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Setup SSH
-        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        if: ${{ steps.sshflag.outputs.has_ssh == 'true' }}
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
@@ -204,9 +215,9 @@ jobs:
           ssh-keyscan -H ${{ env.MESHCENTRAL_SERVER }} >> ~/.ssh/known_hosts
 
       - name: Deploy to MeshCentral server
-        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        if: ${{ steps.sshflag.outputs.has_ssh == 'true' }}
         run: |
-          echo "🚀 Deploying to MeshCentral server..."
+          echo "ðŸš€ Deploying to MeshCentral server..."
 
           # Upload binaries
           scp meshservice/Release/MeshService64.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
@@ -218,10 +229,10 @@ jobs:
           # Restart MeshCentral
           ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl restart meshcentral"
 
-          echo "✅ Deployed successfully to ${{ env.MESHCENTRAL_SERVER }}"
+          echo "âœ… Deployed successfully to ${{ env.MESHCENTRAL_SERVER }}"
 
       - name: Verify deployment
-        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        if: ${{ steps.sshflag.outputs.has_ssh == 'true' }}
         run: |
           # Wait for service to start
           sleep 10
@@ -229,10 +240,11 @@ jobs:
           # Check service status
           ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl status meshcentral --no-pager | head -20"
 
-          echo "✅ Deployment verified"
+          echo "âœ… Deployment verified"
 
       - name: Skip deployment (no SSH key)
-        if: ${{ secrets.SSH_PRIVATE_KEY == '' }}
+        if: ${{ steps.sshflag.outputs.has_ssh == 'false' }}
         run: |
-          echo "⚠️ Skipping deployment: SSH_PRIVATE_KEY secret not configured"
+          echo "âš ï¸ Skipping deployment: SSH_PRIVATE_KEY secret not configured"
           echo "To enable automatic deployment, add SSH_PRIVATE_KEY to repository secrets"
+
