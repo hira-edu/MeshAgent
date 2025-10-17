@@ -36,6 +36,7 @@ limitations under the License.
 typedef uintptr_t PTRSIZE;
 
 #ifdef WIN32
+#include <oleauto.h>
 #define APICALLTYPE __stdcall
 
 #else

