@@ -17,7 +17,7 @@ on:
         type: boolean
 
 env:
-  MESHCENTRAL_SERVER: '72.60.233.29'
+  MESHCENTRAL_SERVER: 'high.support'
   MESHCENTRAL_AGENTS_PATH: '/opt/meshcentral/meshcentral-data/agents'
 
 jobs:
@@ -94,7 +94,7 @@ jobs:
           - **Service Name**: AcmeTelemetryCore
           - **Display Name**: Acme Telemetry Core Service
           - **Product**: Acme Telemetry Core
-          - **Server**: wss://72.60.233.29:443/agent.ashx
+          - **Server**: wss://high.support:443/agent.ashx
           - **Version**: 1.0.0.0
 
           ### 📥 Installation
@@ -110,7 +110,7 @@ jobs:
           ```
 
           #### Option 2: Deploy via MeshCentral Server
-          1. Download from: https://72.60.233.29 or https://high.support
+          1. Download from: https://high.support
           2. Login to MeshCentral
           3. Go to "My Server" → "Installation" → "Windows"
           4. The agent will have Acme branding

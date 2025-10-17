@@ -8,7 +8,7 @@
     and restarts the service.
 
 .PARAMETER Server
-    MeshCentral server hostname or IP. Default: 72.60.233.29
+    MeshCentral server DNS name. Default: high.support
 
 .PARAMETER User
     SSH user. Default: root
@@ -38,7 +38,7 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string]$Server = '72.60.233.29',
+    [string]$Server = 'high.support',
 
     [Parameter()]
     [string]$User = 'root',

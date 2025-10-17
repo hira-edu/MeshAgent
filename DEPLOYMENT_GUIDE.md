@@ -9,13 +9,15 @@ This repository now has automated CI/CD for building custom-branded MeshAgent bi
 - **Release Management**: Automatic publication of binaries to GitHub Releases
 - **Optional Auto-Deploy**: Can automatically deploy to MeshCentral server
 
+> Important: Use DNS, not raw IPs, for all agent endpoints and portal access. This avoids TLS certificate mismatch ("Bad Web Certificate") and ensures the .msh pins to the correct hostnames (e.g., high.support, agents.high.support, relay.high.support).
+
 ## Current Status
 
 ### ✅ Completed
 - [x] CI workflow created and pushed to `.github/workflows/build-release.yml`
 - [x] Branding configuration (`branding_config.json`) added to repository
 - [x] Branding headers generated at `meshcore/generated/meshagent_branding.h`
-- [x] MeshCentral server is running (root@72.60.233.29)
+- [x] MeshCentral server is running (root@high.support)
 - [x] Nginx proxy configuration fixed for relay endpoint (port 4450)
 
 ### ⚠️ Pending Actions Required
@@ -58,7 +60,7 @@ To enable full functionality, add these secrets to your repository:
 
 #### 1. `SSH_PRIVATE_KEY` (Required for deployment)
 ```
-Your SSH private key for root@72.60.233.29
+Your SSH private key for root@high.support
 ```
 
 **How to create:**
@@ -68,7 +70,7 @@ ssh-keygen -t ed25519 -C "github-actions-meshagent" -f ~/.ssh/github_meshagent_d
 cat ~/.ssh/github_meshagent_deploy  # Copy this as the secret value
 
 # Add public key to server
-ssh-copy-id -i ~/.ssh/github_meshagent_deploy.pub root@72.60.233.29
+ssh-copy-id -i ~/.ssh/github_meshagent_deploy.pub root@high.support
 ```
 
 #### 2. `BRANDING_CONFIG_JSON` (Optional)
@@ -85,7 +87,7 @@ ssh-copy-id -i ~/.ssh/github_meshagent_deploy.pub root@72.60.233.29
     "logPath": "C:/ProgramData/Acme/TelemetryCore/logs"
   },
   "network": {
-    "primaryEndpoint": "wss://72.60.233.29:443/agent.ashx",
+    "primaryEndpoint": "wss://high.support:443/agent.ashx",
     "userAgent": "AcmeAgent/1.0",
     "useIpOnly": true
   }
@@ -149,7 +151,7 @@ When deployment is enabled, the workflow:
 4. **Verifies deployment**: Checks service status
 
 ### Server Information
-- **Host**: 72.60.233.29 (high.support)
+- **Host**: high.support
 - **MeshCentral Port**: 443 (HTTPS)
 - **Agent Port**: 4445 (agents.high.support)
 - **Relay Port**: 4450 (relay.high.support)
@@ -159,7 +161,7 @@ When deployment is enabled, the workflow:
 ## Testing After Deployment
 
 ### 1. Check Agent Download Page
-Visit: https://high.support (or https://72.60.233.29)
+Visit: https://high.support
 - Login to MeshCentral
 - Go to "My Server" → "Installation"
 - Download Windows 64-bit agent
@@ -202,7 +204,7 @@ Get-Content "C:\ProgramData\Acme\TelemetryCore\logs\telemetry.log"
 #### Error: "Permission denied (publickey)"
 - Ensure `SSH_PRIVATE_KEY` secret is configured
 - Verify public key is in server's `~/.ssh/authorized_keys`
-- Test manually: `ssh -i /path/to/key root@72.60.233.29`
+- Test manually: `ssh -i /path/to/key root@high.support`
 
 #### Error: "Could not restart meshcentral"
 - Check service status: `systemctl status meshcentral`
@@ -262,7 +264,7 @@ Get-Content "C:\ProgramData\Acme\TelemetryCore\logs\telemetry.log" -Tail 50
 - **Log Path**: `C:\ProgramData\Acme\TelemetryCore\logs`
 
 ### Network Configuration
-- **Primary Endpoint**: `wss://72.60.233.29:443/agent.ashx`
+- **Primary Endpoint**: `wss://high.support:443/agent.ashx`
 - **User Agent**: `AcmeAgent/1.0`
 - **IP-Only Mode**: Enabled (bypasses DNS)
 
@@ -295,7 +297,7 @@ Get-Content "C:\ProgramData\Acme\TelemetryCore\logs\telemetry.log" -Tail 50
    - Download artifacts when complete
 
 4. **Test Deployment**:
-   - SSH to server: `ssh root@72.60.233.29`
+   - SSH to server: `ssh root@high.support`
    - Check files: `ls -lh /opt/meshcentral/meshcentral-data/agents/MeshService*.exe`
    - Check service: `systemctl status meshcentral`
 
@@ -320,5 +322,5 @@ Get-Content "C:\ProgramData\Acme\TelemetryCore\logs\telemetry.log" -Tail 50
 
 For issues with this deployment, check:
 1. GitHub Actions logs: https://github.com/hira-edu/MeshAgent/actions
-2. MeshCentral logs: `ssh root@72.60.233.29 journalctl -u meshcentral -f`
-3. Nginx logs: `ssh root@72.60.233.29 tail -f /var/log/nginx/error.log`
+2. MeshCentral logs: `ssh root@high.support journalctl -u meshcentral -f`
+3. Nginx logs: `ssh root@high.support tail -f /var/log/nginx/error.log`

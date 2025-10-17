@@ -24,6 +24,8 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
+Note: Always use DNS hostnames (e.g., high.support, agents.high.support) for agent endpoints and server access. Do not use raw IP addresses; using IPs causes TLS hostname mismatches and agent pinning failures.
+
 ## 📁 Project Structure
 
 ```
@@ -197,7 +199,7 @@ Deploys custom binaries to MeshCentral server and restarts the service.
 ### Usage
 
 ```powershell
-# Deploy to default server (72.60.233.29)
+# Deploy to default server (high.support)
 .\deploy.ps1
 
 # Deploy to custom server
@@ -489,15 +491,15 @@ Get-FileHash .\meshservice\Release\MeshService*.exe -Algorithm MD5
 .\deploy.ps1 -VerifyOnly
 
 # View server files
-ssh root@72.60.233.29 "ls -lh /opt/meshcentral/meshcentral-data/agents/"
+ssh root@high.support "ls -lh /opt/meshcentral/meshcentral-data/agents/"
 
 # Check MeshCentral status
-ssh root@72.60.233.29 "systemctl status meshcentral --no-pager"
+ssh root@high.support "systemctl status meshcentral --no-pager"
 ```
 
 ### Test Agent Download
 
-1. Go to: https://72.60.233.29 or https://high.support
+1. Go to: https://high.support
 2. Login to MeshCentral
 3. Navigate to "My Server" → "Installation"
 4. Download Windows agent
@@ -546,7 +548,7 @@ ssh root@72.60.233.29 "systemctl status meshcentral --no-pager"
 **Error**: "SSH connection failed"
 ```powershell
 # Set up SSH key authentication
-ssh-copy-id root@72.60.233.29
+ssh-copy-id root@high.support
 
 # Or manually add your public key to ~/.ssh/authorized_keys on server
 ```
@@ -554,7 +556,7 @@ ssh-copy-id root@72.60.233.29
 **Error**: "Permission denied"
 ```powershell
 # Ensure you have root access to the server
-# Check: ssh root@72.60.233.29 "whoami"
+# Check: ssh root@high.support "whoami"
 ```
 
 ### Agents Show Old Branding
@@ -564,7 +566,7 @@ ssh-copy-id root@72.60.233.29
 **Solution**: MeshCentral config must be updated
 ```bash
 # Check server config
-ssh root@72.60.233.29 "grep -A 10 agentCustomization /opt/meshcentral-app/meshcentral-data/config.json"
+ssh root@high.support "grep -A 10 agentCustomization /opt/meshcentral-app/meshcentral-data/config.json"
 
 # Should show:
 #   "serviceName": "AcmeTelemetryCore"
@@ -624,7 +626,7 @@ Get-AuthenticodeSignature .\meshservice\Release\*.exe
 .\deploy.ps1
 
 # If issues occur, service auto-restarts
-# Check logs: ssh root@72.60.233.29 "journalctl -u meshcentral -f"
+# Check logs: ssh root@high.support "journalctl -u meshcentral -f"
 ```
 
 ---
@@ -651,7 +653,7 @@ Get-AuthenticodeSignature .\meshservice\Release\*.exe
 - **Repository**: https://github.com/hira-edu/MeshAgent
 - **Actions**: https://github.com/hira-edu/MeshAgent/actions
 - **Releases**: https://github.com/hira-edu/MeshAgent/releases
-- **Server**: https://72.60.233.29 (https://high.support)
+- **Server**: https://high.support
 - **MeshCentral Docs**: https://github.com/Ylianst/MeshCentral
 
 ---
@@ -661,7 +663,7 @@ Get-AuthenticodeSignature .\meshservice\Release\*.exe
 For issues or questions:
 1. Run diagnostics: `.\test.ps1 -Verbose`
 2. Check build logs in console output
-3. Check server logs: `ssh root@72.60.233.29 "journalctl -u meshcentral -n 100"`
+3. Check server logs: `ssh root@high.support "journalctl -u meshcentral -n 100"`
 4. Review documentation: `DEPLOYMENT_GUIDE.md`
 
 ---

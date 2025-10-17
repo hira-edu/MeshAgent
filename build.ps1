@@ -175,6 +175,41 @@ try {
 Write-Host "✅ Branding headers generated" -ForegroundColor Gray
 #endregion
 
+#region Step 2.5: Generate Network Obfuscation Profile
+Write-Host "[2.5/7] Generating network obfuscation profile..." -ForegroundColor Green
+
+# Check if TLS profile is specified in environment or config
+$tlsProfile = $env:TLS_PROFILE
+if (-not $tlsProfile) {
+    $tlsProfile = "windows_update"  # Default to Windows Update profile
+}
+
+$networkProfileScript = Join-Path $RepoRoot "tools\generate_network_profile.py"
+if (Test-Path $networkProfileScript) {
+    try {
+        $networkArgs = @(
+            $networkProfileScript,
+            "--config", $BrandingConfig,
+            "--tls-profile", $tlsProfile,
+            "--output-header", (Join-Path $RepoRoot "meshcore\generated\network_profile.h"),
+            "--output-json", (Join-Path $RepoRoot "build\meshagent\generated\network_profile.json")
+        )
+
+        & python $networkArgs | Out-String | Write-Host
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "✅ Network profile generated (TLS: $tlsProfile)" -ForegroundColor Gray
+        } else {
+            Write-Host "⚠️  Network profile generation failed (continuing without)" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "⚠️  Network profile generation error: $_" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "⚠️  Network profile generator not found (skipping)" -ForegroundColor Yellow
+}
+#endregion
+
 #region Step 3: Fix Resource File
 Write-Host "[3/7] Fixing resource file..." -ForegroundColor Green
 

