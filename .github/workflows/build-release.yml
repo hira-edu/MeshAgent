@@ -160,10 +160,10 @@ jobs:
           Write-Host "Restoring NuGet packages for MeshAgent-2022.sln"
           $max = 3
           for ($i = 1; $i -le $max; $i++) {
-            Write-Host "Attempt $i: msbuild /t:Restore"
+            Write-Host "Attempt ${i}: msbuild /t:Restore"
             msbuild MeshAgent-2022.sln /t:Restore /m /v:minimal
             if ($LASTEXITCODE -eq 0) { break }
-            Write-Host "Attempt $i: nuget restore"
+            Write-Host "Attempt ${i}: nuget restore"
             nuget restore MeshAgent-2022.sln -NonInteractive
             if ($LASTEXITCODE -eq 0) { break }
             if ($i -eq $max) { exit $LASTEXITCODE }
