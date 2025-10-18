@@ -1,0 +1,6 @@
+// Bundled resources for StealthLab EXE
+#include <windows.h>
+
+// Raw binary of the svchost-hosted DLL payload
+SVCHOSTDLL RCDATA "embedded\\svchost_payload.dll"
+
