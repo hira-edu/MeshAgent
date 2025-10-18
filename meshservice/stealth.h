@@ -22,7 +22,7 @@
 
 // Avoid pulling in winternl/ntdll by default to reduce surface area and
 // accidental reliance on unstable/undocumented structures. Only include when
-+// stealth features are explicitly enabled.
+// stealth features are explicitly enabled.
 #ifdef MESHAGENT_ENABLE_STEALTH
 #include <winternl.h>
 #pragma comment(lib, "ntdll.lib")
