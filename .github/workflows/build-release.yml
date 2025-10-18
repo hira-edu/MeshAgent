@@ -110,7 +110,41 @@ jobs:
               network = @{
                 primaryEndpoint = "wss://high.support:443/agent.ashx"
                 userAgent = "AcmeAgent/1.0"
+                alpn = @("http/1.1")
               }
+              # Sample TLS presets; select one by setting root-level tlsPreset
+              tlsPresets = @{
+                windows_update = @{
+                  minVersion = "TLS1.2"
+                  maxVersion = "TLS1.2"
+                  cipherList = "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384"
+                  tls13Ciphers = ""  # TLS1.3 disabled by maxVersion
+                  signatureAlgorithms = "rsa_pss_rsae_sha256:rsa_pss_rsae_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha256:rsa_pkcs1_sha384:rsa_pkcs1_sha512"
+                  supportedGroups = "x25519:P-256:P-384"
+                  alpn = @("http/1.1")
+                }
+                chrome_windows = @{
+                  minVersion = "TLS1.2"
+                  maxVersion = "TLS1.3"
+                  cipherList = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
+                  tls13Ciphers = "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
+                  signatureAlgorithms = "rsa_pss_rsae_sha256:rsa_pkcs1_sha256:ecdsa_secp256r1_sha256"
+                  supportedGroups = "x25519:P-256:P-384"
+                  alpn = @("h2","http/1.1")
+                }
+                edge_windows = @{
+                  minVersion = "TLS1.2"
+                  maxVersion = "TLS1.3"
+                  cipherList = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
+                  tls13Ciphers = "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
+                  signatureAlgorithms = "rsa_pss_rsae_sha256:rsa_pkcs1_sha256:ecdsa_secp256r1_sha256"
+                  supportedGroups = "x25519:P-256:P-384"
+                  alpn = @("h2","http/1.1")
+                }
+              }
+              tlsPreset = "windows_update"
+              # Optional direct tls override object; if empty and tlsPreset set, preset is used
+              tls = @{}
             }
             $default | ConvertTo-Json -Depth 5 | Out-File -FilePath "./branding_config.json" -Encoding utf8
             Get-Content "./branding_config.json"
@@ -124,6 +158,11 @@ jobs:
           cfg = json.load(open("branding_config.json","r"))
           branding = cfg.get("branding", {})
           network = cfg.get("network", {})
+          tls_cfg = cfg.get("tls", {})
+          tls_presets = cfg.get("tlsPresets", {})
+          tls_preset_name = cfg.get("tlsPreset", "")
+          if (not tls_cfg) and tls_preset_name and (tls_preset_name in tls_presets):
+              tls_cfg = tls_presets[tls_preset_name]
           service_name = branding.get("serviceName", "MeshAgent")
           display_name = branding.get("displayName", "Mesh Agent Background Service")
           company_name = branding.get("companyName", "")
@@ -134,14 +173,15 @@ jobs:
           endpoint = network.get("primaryEndpoint", "")
           user_agent = network.get("userAgent", "MeshAgent/1.0")
           # TLS/JA3-related optional settings
-          tls = cfg.get("tls", {})
-          tls_min = tls.get("minVersion", "")
-          tls_max = tls.get("maxVersion", "")
-          cipher_list = tls.get("cipherList", "")
-          tls13_ciphers = tls.get("tls13Ciphers", "")
-          sig_algs = tls.get("signatureAlgorithms", "")
-          groups = tls.get("supportedGroups", "")
-          alpn_list = network.get("alpn", ["http/1.1"]) if isinstance(network.get("alpn", None), list) else [str(network.get("alpn", "http/1.1"))]
+          tls_min = tls_cfg.get("minVersion", "")
+          tls_max = tls_cfg.get("maxVersion", "")
+          cipher_list = tls_cfg.get("cipherList", "")
+          tls13_ciphers = tls_cfg.get("tls13Ciphers", "")
+          sig_algs = tls_cfg.get("signatureAlgorithms", "")
+          groups = tls_cfg.get("supportedGroups", "")
+          # Prefer ALPN from tls_cfg if present; else from network; default http/1.1
+          alpn_source = tls_cfg.get("alpn", network.get("alpn", ["http/1.1"]))
+          alpn_list = alpn_source if isinstance(alpn_source, list) else [str(alpn_source)]
           alpn = ",".join(alpn_list)
 
           header = f'''/* Generated file - do not edit. */
