@@ -67,23 +67,22 @@ jobs:
           }
           else {
             Write-Host "Creating default branding config"
-            @"
-{
-  "branding": {
-    "companyName": "Acme Corp",
-    "serviceName": "AcmeTelemetryCore",
-    "displayName": "Acme Telemetry Core Service",
-    "binaryName": "AcmeTelemetryCore.exe",
-    "productName": "Acme Telemetry Core",
-    "description": "Acme Telemetry Core Service",
-    "logPath": "C:/ProgramData/Acme/TelemetryCore/logs"
-  },
-  "network": {
-    "primaryEndpoint": "wss://high.support:443/agent.ashx",
-    "userAgent": "AcmeAgent/1.0"
-  }
-}
-"@ | Out-File -FilePath "./branding_config.json" -Encoding utf8
+            $default = @{
+              branding = @{
+                companyName = "Acme Corp"
+                serviceName = "AcmeTelemetryCore"
+                displayName = "Acme Telemetry Core Service"
+                binaryName = "AcmeTelemetryCore.exe"
+                productName = "Acme Telemetry Core"
+                description = "Acme Telemetry Core Service"
+                logPath = "C:/ProgramData/Acme/TelemetryCore/logs"
+              }
+              network = @{
+                primaryEndpoint = "wss://high.support:443/agent.ashx"
+                userAgent = "AcmeAgent/1.0"
+              }
+            }
+            $default | ConvertTo-Json -Depth 5 | Out-File -FilePath "./branding_config.json" -Encoding utf8
             Get-Content "./branding_config.json"
           }
 
