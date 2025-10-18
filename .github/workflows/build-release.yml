@@ -34,7 +34,7 @@ jobs:
             platform: x64
             output_name: MeshService64.exe
           - arch: x86
-            platform: Win32
+            platform: x86
             output_name: MeshService.exe
 
     steps:
@@ -190,13 +190,14 @@ jobs:
         id: locate_binary
         shell: pwsh
         run: |
-          $exePath = Get-ChildItem -Path "." -Recurse -Filter "MeshService.exe" | Where-Object {
-            $_.DirectoryName -like "*Release*" -and $_.DirectoryName -like "*${{ matrix.arch }}*"
+          $targetName = "${{ matrix.output_name }}"
+          $exePath = Get-ChildItem -Path "." -Recurse -Filter $targetName | Where-Object {
+            $_.DirectoryName -like "*Release*"
           } | Select-Object -First 1
           if ($exePath) {
             New-Item -ItemType Directory -Force -Path "./artifacts" | Out-Null
-            Copy-Item $exePath.FullName -Destination "./artifacts/${{ matrix.output_name }}"
-            echo "artifact_path=./artifacts/${{ matrix.output_name }}" >> $env:GITHUB_OUTPUT
+            Copy-Item $exePath.FullName -Destination "./artifacts/$targetName"
+            echo "artifact_path=./artifacts/$targetName" >> $env:GITHUB_OUTPUT
           } else {
             Write-Host "ERROR: Could not find built executable"
             exit 1
