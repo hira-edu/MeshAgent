@@ -322,7 +322,9 @@ jobs:
       SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
       SSH_USER: ${{ secrets.SSH_USER }}
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
-      DEPLOY_HOST: ${{ github.event.inputs.server_host != '' && github.event.inputs.server_host || env.MESHCENTRAL_SERVER }}
+      # Note: 'env' context is not available during expression evaluation in job-level env.
+      # Use a literal fallback instead of env.MESHCENTRAL_SERVER to avoid parser error.
+      DEPLOY_HOST: ${{ github.event.inputs.server_host != '' && github.event.inputs.server_host || 'high.support' }}
     if: |
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_server == 'true') ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
