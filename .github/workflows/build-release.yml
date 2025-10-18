@@ -1,5 +1,9 @@
 ﻿name: Build and Release Custom MeshAgent
 
+concurrency:
+  group: meshagent-build-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     branches: [ main, master ]
@@ -175,10 +179,11 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Building MeshService for ${{ matrix.arch }} platform"
-          msbuild MeshAgent-2022.sln `
-            /t:MeshService-2022:Build `
+          $plat = '${{ matrix.platform }}'
+          $msPlat = if ($plat -eq 'x86') { 'Win32' } else { $plat }
+          msbuild "meshservice/MeshService-2022.vcxproj" `
             /p:Configuration=Release `
-            /p:Platform=${{ matrix.platform }} `
+            /p:Platform=$msPlat `
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
             /m `
