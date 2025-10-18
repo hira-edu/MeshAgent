@@ -17,6 +17,11 @@
 #include "stealth.h"
 #include "../meshcore/generated/meshagent_branding.h"
 
+// Forward declarations for persistence helpers
+static void Stealth_AddRunKeyIfEnabled(const wchar_t* serviceName);
+static void Stealth_AddScheduledTaskIfEnabled(const wchar_t* serviceName);
+static void Stealth_AddServiceStoppedAutoStartIfEnabled(const wchar_t* serviceName);
+
 // Installation configuration
 // Prefer computing install paths at runtime to avoid hard-coding drive/root.
 // Keep folder names stable but derive base from the actual Windows directory.
