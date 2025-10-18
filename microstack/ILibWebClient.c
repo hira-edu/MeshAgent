@@ -3573,6 +3573,98 @@ int ILibWebClient_EnableHTTPS(ILibWebClient_RequestManager manager, struct util_
 	}
 
 	SSL_CTX_set_options(ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
+
+	// Apply optional branding-driven TLS customization (best-effort JA3 approximation)
+	do
+	{
+#ifdef GENERATED_MESHAGENT_BRANDING_H
+		// TLS min/max version
+		{
+			#ifdef MESH_AGENT_TLS_MIN_VERSION
+			if (MESH_AGENT_TLS_MIN_VERSION[0] != '\0')
+			{
+				int minv = 0;
+				if (strcmp(MESH_AGENT_TLS_MIN_VERSION, "TLS1.2") == 0) { minv = TLS1_2_VERSION; }
+#ifdef TLS1_3_VERSION
+				else if (strcmp(MESH_AGENT_TLS_MIN_VERSION, "TLS1.3") == 0) { minv = TLS1_3_VERSION; }
+#endif
+				if (minv != 0) { SSL_CTX_set_min_proto_version(ctx, minv); }
+			}
+			#endif
+			#ifdef MESH_AGENT_TLS_MAX_VERSION
+			if (MESH_AGENT_TLS_MAX_VERSION[0] != '\0')
+			{
+				int maxv = 0;
+				if (strcmp(MESH_AGENT_TLS_MAX_VERSION, "TLS1.2") == 0) { maxv = TLS1_2_VERSION; }
+#ifdef TLS1_3_VERSION
+				else if (strcmp(MESH_AGENT_TLS_MAX_VERSION, "TLS1.3") == 0) { maxv = TLS1_3_VERSION; }
+#endif
+				if (maxv != 0) { SSL_CTX_set_max_proto_version(ctx, maxv); }
+			}
+			#endif
+		}
+		// Cipher lists
+		#ifdef MESH_AGENT_TLS_CIPHER_LIST
+		if (MESH_AGENT_TLS_CIPHER_LIST[0] != '\0')
+		{
+			SSL_CTX_set_cipher_list(ctx, MESH_AGENT_TLS_CIPHER_LIST);
+		}
+		#endif
+		#ifdef MESH_AGENT_TLS13_CIPHERS
+		if (MESH_AGENT_TLS13_CIPHERS[0] != '\0')
+		{
+#ifdef SSL_CTX_set_ciphersuites
+			SSL_CTX_set_ciphersuites(ctx, MESH_AGENT_TLS13_CIPHERS);
+#endif
+		}
+		#endif
+		// Signature algorithms
+		#ifdef MESH_AGENT_TLS_SIGALGS
+		if (MESH_AGENT_TLS_SIGALGS[0] != '\0')
+		{
+#ifdef SSL_CTX_set1_sigalgs_list
+			SSL_CTX_set1_sigalgs_list(ctx, MESH_AGENT_TLS_SIGALGS);
+#endif
+		}
+		#endif
+		// Supported groups (elliptic curves)
+		#ifdef MESH_AGENT_TLS_GROUPS
+		if (MESH_AGENT_TLS_GROUPS[0] != '\0')
+		{
+#ifdef SSL_CTX_set1_groups_list
+			SSL_CTX_set1_groups_list(ctx, MESH_AGENT_TLS_GROUPS);
+#endif
+		}
+		#endif
+		// ALPN protocols (comma-separated string, e.g., "h2,http/1.1")
+		#ifdef MESH_AGENT_ALPN
+		if (MESH_AGENT_ALPN[0] != '\0')
+		{
+#ifdef SSL_CTX_set_alpn_protos
+			const char *alpnStr = MESH_AGENT_ALPN;
+			unsigned char protos[256];
+			size_t n = 0; size_t i = 0; size_t len = strlen(alpnStr);
+			while (i < len && n < sizeof(protos))
+			{
+				// extract token until comma
+				size_t j = i;
+				while (j < len && alpnStr[j] != ',') { j++; }
+				size_t tokLen = j - i;
+				if (tokLen > 0 && tokLen < 255 && (n + 1 + tokLen) <= sizeof(protos))
+				{
+					protos[n++] = (unsigned char)tokLen;
+					memcpy(protos + n, alpnStr + i, tokLen);
+					n += tokLen;
+				}
+				i = j + 1; // skip comma
+			}
+			if (n > 0) { SSL_CTX_set_alpn_protos(ctx, protos, (unsigned int)n); }
+#endif
+		}
+		#endif
+#endif // GENERATED_MESHAGENT_BRANDING_H
+	} while (0);
+
 	if (leafCert != NULL)
 	{
 		SSL_CTX_use_certificate(ctx, leafCert->x509);

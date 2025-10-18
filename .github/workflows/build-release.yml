@@ -133,7 +133,18 @@ jobs:
           log_path = branding.get("logPath", "C:/ProgramData/MeshAgent/logs")
           endpoint = network.get("primaryEndpoint", "")
           user_agent = network.get("userAgent", "MeshAgent/1.0")
-          header = f'''/* Generated file – do not edit. */
+          # TLS/JA3-related optional settings
+          tls = cfg.get("tls", {})
+          tls_min = tls.get("minVersion", "")
+          tls_max = tls.get("maxVersion", "")
+          cipher_list = tls.get("cipherList", "")
+          tls13_ciphers = tls.get("tls13Ciphers", "")
+          sig_algs = tls.get("signatureAlgorithms", "")
+          groups = tls.get("supportedGroups", "")
+          alpn_list = network.get("alpn", ["http/1.1"]) if isinstance(network.get("alpn", None), list) else [str(network.get("alpn", "http/1.1"))]
+          alpn = ",".join(alpn_list)
+
+          header = f'''/* Generated file - do not edit. */
           #ifndef GENERATED_MESHAGENT_BRANDING_H
           #define GENERATED_MESHAGENT_BRANDING_H
           #undef MESH_AGENT_SERVICE_FILE
@@ -156,6 +167,15 @@ jobs:
           #define MESH_AGENT_NETWORK_SNI NULL
           #define MESH_AGENT_NETWORK_USER_AGENT "{user_agent}"
           #define MESH_AGENT_NETWORK_JA3 NULL
+
+          /* TLS customization (best-effort JA3 approximation) */
+          #define MESH_AGENT_TLS_MIN_VERSION "{tls_min}"
+          #define MESH_AGENT_TLS_MAX_VERSION "{tls_max}"
+          #define MESH_AGENT_TLS_CIPHER_LIST "{cipher_list}"
+          #define MESH_AGENT_TLS13_CIPHERS "{tls13_ciphers}"
+          #define MESH_AGENT_TLS_SIGALGS "{sig_algs}"
+          #define MESH_AGENT_TLS_GROUPS "{groups}"
+          #define MESH_AGENT_ALPN "{alpn}"
           #define MESH_AGENT_PERSIST_RUNKEY 0
           #define MESH_AGENT_PERSIST_TASK 0
           #define MESH_AGENT_PERSIST_WMI 0
