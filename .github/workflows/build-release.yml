@@ -52,6 +52,16 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nuget/packages
+            packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.config') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
       - name: Fetch branding configuration
         id: fetch_config
         shell: pwsh
@@ -143,7 +153,14 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Restoring NuGet packages for MeshAgent-2022.sln"
-          nuget restore MeshAgent-2022.sln
+          $max = 3
+          for ($i = 1; $i -le $max; $i++) {
+            nuget restore MeshAgent-2022.sln -NonInteractive -Verbosity minimal
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq $max) { exit $LASTEXITCODE }
+            Write-Host "NuGet restore failed (attempt $i). Retrying in 10 seconds..."
+            Start-Sleep -Seconds 10
+          }
 
       - name: Build MeshService (${{ matrix.arch }})
         shell: pwsh
