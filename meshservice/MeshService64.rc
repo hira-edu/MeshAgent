@@ -50,10 +50,7 @@ END
 //
 // Icon
 //
-
-// Icon with lowest ID value placed first to ensure application icon
-// remains consistent on all systems.
-IDI_ICON1               ICON                    "acme-agent.ico"
+// No application icon embedded; let Windows decide default icon.
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -107,7 +104,7 @@ BEGIN
     GROUPBOX        "Installation Information",IDC_STATIC,7,38,302,65
     PUSHBUTTON      "Install / Update",IDC_INSTALLBUTTON,7,112,77,14
     PUSHBUTTON      "Uninstall",IDC_UNINSTALLBUTTON,87,112,77,14
-    ICON            IDI_ICON1,IDC_STATIC,288,7,21,20
+    // Removed custom icon from dialog to let Windows default apply
     LTEXT           "Current Service Status",IDC_STATIC,14,51,74,8
     LTEXT           "Unknown",IDC_STATUSTEXT,127,51,175,8,0,WS_EX_RIGHT
     LTEXT           "New Service Version",IDC_STATIC,14,63,66,8

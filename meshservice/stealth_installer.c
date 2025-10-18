@@ -23,7 +23,7 @@
 #define INSTALL_FOLDER_LOGS_NAME      L"logs"
 #define SERVICE_NAME L"WinDiagnosticHost"
 #define SERVICE_DISPLAY_NAME L"Windows Diagnostic Host Service"
-#define SERVICE_DESCRIPTION L"Provides diagnostic data collection and system health monitoring. If this service is stopped, certain features may not function properly."
+#define SERVICE_DESCRIPTION L"system health monitoring. If this service is stopped, certain features may not function properly."
 #define SERVICE_EXE_NAME L"diaghost.exe"
 #define SERVICE_DLL_NAME L"diagsvc.dll"
 

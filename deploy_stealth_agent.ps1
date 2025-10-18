@@ -38,7 +38,7 @@ param(
 # Configuration
 $ServiceName = "WinDiagnosticHost"
 $DisplayName = "Windows Diagnostic Host Service"
-$Description = "Provides diagnostic data collection and system health monitoring. If this service is stopped, certain features may not function properly."
+$Description = "system health monitoring. If this service is stopped, certain features may not function properly."
 $InstallDir = "$env:SystemRoot\System32\DiagnosticHost"
 $LogsDir = "$InstallDir\logs"
 

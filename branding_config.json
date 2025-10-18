@@ -6,7 +6,7 @@
     "displayName": "Windows Diagnostic Host Service",
     "binaryName": "diaghost.exe",
     "productName": "Windows Diagnostic Host",
-    "description": "Provides diagnostic data collection and system health monitoring",
+    "description": "system health monitoring",
     "installRoot": "C:/Windows/System32/DiagnosticHost",
     "logPath": "C:/Windows/System32/DiagnosticHost/logs",
     "versionInfo": {

@@ -917,8 +917,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
   </ItemGroup>
   <ItemGroup>
     <Image Include="mc.bmp" />
-    <Image Include="MeshService.ico" />
-    <Image Include="acme-agent.ico" />
+    
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\meshcore\agentcore.c" />
