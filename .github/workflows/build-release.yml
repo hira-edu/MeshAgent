@@ -75,7 +75,18 @@ jobs:
         id: fetch_config
         shell: pwsh
         run: |
-          if (Test-Path "./branding_config.json") {
+          $envConfig = $env:BRANDING_CONFIG
+          if ($envConfig -and (Test-Path $envConfig)) {
+            Write-Host "Using branding config from env path: $envConfig"
+            Copy-Item $envConfig -Destination "./branding_config.json" -Force
+            Get-Content "./branding_config.json"
+          }
+          elseif ($envConfig -and (Test-Path "./$envConfig")) {
+            Write-Host "Using branding config from repository by name: $envConfig"
+            Copy-Item "./$envConfig" -Destination "./branding_config.json" -Force
+            Get-Content "./branding_config.json"
+          }
+          elseif (Test-Path "./branding_config.json") {
             Write-Host "Using branding config from repository"
             Get-Content "./branding_config.json"
           }
