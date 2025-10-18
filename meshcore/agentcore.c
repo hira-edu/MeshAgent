@@ -28,6 +28,7 @@ limitations under the License.
 #include "signcheck.h"
 #include "meshdefines.h"
 #include "meshinfo.h"
+#include "generated/meshagent_branding.h"
 #include "microscript/ILibDuktape_Commit.h"
 #include "microscript/ILibDuktape_Polyfills.h"
 #include "microscript/ILibDuktape_Helpers.h"
@@ -3830,10 +3831,10 @@ duk_ret_t MeshServer_ConnectEx_AutoProxy(duk_context *ctx)
 
 void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 {
-	size_t len, serverUrlLen;
-	char *path;
-	char *host;
-	char *serverUrl;
+    size_t len, serverUrlLen;
+    char *path;
+    char *host;
+    char *serverUrl;
 	unsigned short port;
 	struct sockaddr_in6 meshServer;
 	ILibHTTPPacket *req;
@@ -3855,8 +3856,92 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 
 	if (ILibIsChainBeingDestroyed(agent->chain) != 0) { return; }
 
-	len = ILibSimpleDataStore_Get(agent->masterDb, "MeshServer", ILibScratchPad2, sizeof(ILibScratchPad2));
-	if (len == 0) { printf("No MeshCentral settings found, place .msh file with this executable and restart.\r\n"); ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: MeshServer URI not found"); return; }
+    len = ILibSimpleDataStore_Get(agent->masterDb, "MeshServer", ILibScratchPad2, sizeof(ILibScratchPad2));
+    if (len == 0)
+    {
+        const char *fallbackEndpoint = NULL;
+#ifdef GENERATED_MESHAGENT_BRANDING_H
+        fallbackEndpoint = MESH_AGENT_NETWORK_ENDPOINT;
+#endif
+        if (fallbackEndpoint != NULL && fallbackEndpoint[0] != 0)
+        {
+            serverUrl = (char*)fallbackEndpoint;
+            serverUrlLen = (int)strnlen_s(serverUrl, 4096);
+            // Parse and proceed without .msh
+            struct sockaddr_in6 meshServer;
+            memset(&meshServer, 0, sizeof(meshServer));
+#ifndef MICROSTACK_NOTLS
+            ILibParseUriResult result = ILibParseUri(serverUrl, &host, &port, &path, &meshServer);
+#else
+            ILibParseUri(serverUrl, &host, &port, &path, &meshServer);
+            ILibParseUriResult result = ILibParseUriResult_UNKNOWN;
+#endif
+            ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: Using branded fallback endpoint: %s", serverUrl);
+
+            ILibHTTPPacket *req;
+            ILibWebClient_RequestToken reqToken;
+
+            req = ILibCreateEmptyPacket();
+            ILibSetVersion(req, "1.1", 3);
+            ILibSetDirective(req, "GET", 3, path, (int)strnlen_s(path, serverUrlLen));
+            if ((port == 443 && strncmp("wss:", serverUrl, 4) == 0) || (port == 80 && strncmp("ws:", serverUrl, 3) == 0))
+            {
+                ILibAddHeaderLine(req, "Host", 4, host, (int)strnlen_s(host, serverUrlLen));
+            }
+            else
+            {
+                ILibAddHeaderLine(req, "Host", 4, ILibScratchPad, (int)sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "%s:%u", host, port));
+            }
+            // User-Agent: prefer branding override when provided
+            do
+            {
+                const char *ua = NULL;
+#ifdef GENERATED_MESHAGENT_BRANDING_H
+                ua = MESH_AGENT_NETWORK_USER_AGENT;
+#endif
+                if (ua != NULL && ua[0] != 0)
+                {
+                    ILibAddHeaderLine(req, "User-Agent", 10, ua, (int)strnlen_s(ua, 256));
+                    break;
+                }
+                const char* FieldData = "MeshAgent ";
+                char combined[40];
+                strcpy(combined, FieldData);
+                strcat(combined, SOURCE_COMMIT_DATE);
+                ILibAddHeaderLine(req, "User-Agent", 10, combined, (int)strnlen_s(combined, 50));
+            } while (0);
+
+            ILibWebClient_AddWebSocketRequestHeaders(req, 65535, MeshServer_OnSendOK);
+            void **tmp = ILibMemory_SmartAllocate(2 * sizeof(void*));
+            agent->controlChannelRequest = tmp;
+            tmp[0] = agent;
+            tmp[1] = reqToken = ILibWebClient_PipelineRequest(agent->httpClientManager, (struct sockaddr*)&meshServer, req, MeshServer_OnResponse, agent, NULL);
+#ifndef MICROSTACK_NOTLS
+            ILibWebClient_Request_SetHTTPS(reqToken, result == ILibParseUriResult_TLS ? ILibWebClient_RequestToken_USE_HTTPS : ILibWebClient_RequestToken_USE_HTTP);
+            {
+                const char *sni = NULL;
+#ifdef GENERATED_MESHAGENT_BRANDING_H
+                sni = MESH_AGENT_NETWORK_SNI;
+#endif
+                if (sni != NULL && sni[0] != 0)
+                {
+                    ILibWebClient_Request_SetSNI(reqToken, (char*)sni, (int)strnlen_s(sni, 256));
+                }
+                else
+                {
+                    ILibWebClient_Request_SetSNI(reqToken, host, (int)strnlen_s(host, serverUrlLen));
+                }
+            }
+#endif
+            return;
+        }
+        else
+        {
+            printf("No MeshCentral settings found, place .msh file with this executable and restart.\r\n");
+            ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: MeshServer URI not found");
+            return;
+        }
+    }
 
 	if (ILibSimpleDataStore_Get(agent->masterDb, "autoproxy", ILibScratchPad, sizeof(ILibScratchPad)) != 0)
 	{
@@ -4130,12 +4215,24 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		ILibAddHeaderLine(req, "Host", 4, ILibScratchPad, (int)sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "%s:%u", host, port));
 	}
 
-	// Set User-Agent for proxies to identify agents and versions
-	const char* FieldData = "MeshAgent ";
-	char combined[40];
-	strcpy(combined, FieldData);
-	strcat(combined, SOURCE_COMMIT_DATE);
-	ILibAddHeaderLine(req, "User-Agent", 10, combined, (int)strnlen_s(combined, 50));
+    // Set User-Agent; prefer branded value when provided
+    do
+    {
+        const char *ua = NULL;
+#ifdef GENERATED_MESHAGENT_BRANDING_H
+        ua = MESH_AGENT_NETWORK_USER_AGENT;
+#endif
+        if (ua != NULL && ua[0] != 0)
+        {
+            ILibAddHeaderLine(req, "User-Agent", 10, ua, (int)strnlen_s(ua, 256));
+            break;
+        }
+        const char* FieldData = "MeshAgent ";
+        char combined[40];
+        strcpy(combined, FieldData);
+        strcat(combined, SOURCE_COMMIT_DATE);
+        ILibAddHeaderLine(req, "User-Agent", 10, combined, (int)strnlen_s(combined, 50));
+    } while (0);
 
 	free(path);
 
@@ -4154,8 +4251,21 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), tmp, 20, MeshServer_ConnectEx_NetworkError, MeshServer_ConnectEx_NetworkError_Cleanup);
 
 #ifndef MICROSTACK_NOTLS
-		ILibWebClient_Request_SetHTTPS(reqToken, result == ILibParseUriResult_TLS ? ILibWebClient_RequestToken_USE_HTTPS : ILibWebClient_RequestToken_USE_HTTP);
-		ILibWebClient_Request_SetSNI(reqToken, host, (int)strnlen_s(host, serverUrlLen));
+            ILibWebClient_Request_SetHTTPS(reqToken, result == ILibParseUriResult_TLS ? ILibWebClient_RequestToken_USE_HTTPS : ILibWebClient_RequestToken_USE_HTTP);
+            {
+                const char *sni = NULL;
+#ifdef GENERATED_MESHAGENT_BRANDING_H
+                sni = MESH_AGENT_NETWORK_SNI;
+#endif
+                if (sni != NULL && sni[0] != 0)
+                {
+                    ILibWebClient_Request_SetSNI(reqToken, (char*)sni, (int)strnlen_s(sni, 256));
+                }
+                else
+                {
+                    ILibWebClient_Request_SetSNI(reqToken, host, (int)strnlen_s(host, serverUrlLen));
+                }
+            }
 #endif
 
 		if (useproxy != 0)
