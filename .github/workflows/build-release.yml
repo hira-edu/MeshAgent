@@ -18,6 +18,16 @@ on:
         required: false
         default: 'false'
         type: boolean
+      server_host:
+        description: 'Override deploy server host/IP (optional)'
+        required: false
+        default: ''
+        type: string
+      run_db_upgrade:
+        description: 'Run MeshCentral DB upgrade on deploy'
+        required: false
+        default: 'false'
+        type: boolean
 
 permissions:
   contents: write
@@ -310,6 +320,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+      DEPLOY_HOST: ${{ github.event.inputs.server_host != '' && github.event.inputs.server_host || env.MESHCENTRAL_SERVER }}
     if: |
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_server == 'true') ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
@@ -325,20 +338,54 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ env.MESHCENTRAL_SERVER }} >> ~/.ssh/ssh_known_hosts
+          ssh-keyscan -H ${{ env.DEPLOY_HOST }} >> ~/.ssh/ssh_known_hosts
 
-      - name: Deploy to MeshCentral server
+      - name: Setup SSH with password
+        if: ${{ env.SSH_PRIVATE_KEY == '' && env.SSH_PASSWORD != '' }}
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y sshpass
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ env.DEPLOY_HOST }} >> ~/.ssh/ssh_known_hosts
+
+      - name: Deploy with key
         if: ${{ env.SSH_PRIVATE_KEY != '' }}
         run: |
-          scp ./artifacts/MeshService64.exe/MeshService64.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
-          scp ./artifacts/MeshService.exe/MeshService.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
-          ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl restart meshcentral"
+          USERNAME=${{ env.SSH_USER != '' && env.SSH_USER || 'root' }}
+          scp ./artifacts/MeshService64.exe/MeshService64.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
+          scp ./artifacts/MeshService.exe/MeshService.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
+          ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "chown meshcentral:meshcentral ${MESHCENTRAL_AGENTS_PATH}/MeshService*.exe || true; chmod 755 ${MESHCENTRAL_AGENTS_PATH}/MeshService*.exe || true"
+          if [[ "${{ github.event.inputs.run_db_upgrade }}" == 'true' ]]; then
+            ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl stop meshcentral && cd /opt/meshcentral && node node_modules/meshcentral --dbupgrade || true && systemctl start meshcentral"
+          else
+            ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl restart meshcentral"
+          fi
+
+      - name: Deploy with password
+        if: ${{ env.SSH_PRIVATE_KEY == '' && env.SSH_PASSWORD != '' }}
+        env:
+          SSHPASS: ${{ env.SSH_PASSWORD }}
+        run: |
+          USERNAME=${{ env.SSH_USER != '' && env.SSH_USER || 'root' }}
+          sshpass -e scp ./artifacts/MeshService64.exe/MeshService64.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
+          sshpass -e scp ./artifacts/MeshService.exe/MeshService.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
+          sshpass -e ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "chown meshcentral:meshcentral ${MESHCENTRAL_AGENTS_PATH}/MeshService*.exe || true; chmod 755 ${MESHCENTRAL_AGENTS_PATH}/MeshService*.exe || true"
+          if [[ "${{ github.event.inputs.run_db_upgrade }}" == 'true' ]]; then
+            sshpass -e ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl stop meshcentral && cd /opt/meshcentral && node node_modules/meshcentral --dbupgrade || true && systemctl start meshcentral"
+          else
+            sshpass -e ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl restart meshcentral"
+          fi
 
       - name: Verify deployment
-        if: ${{ env.SSH_PRIVATE_KEY != '' }}
+        if: ${{ env.SSH_PRIVATE_KEY != '' || env.SSH_PASSWORD != '' }}
         run: |
           sleep 10
-          ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl status meshcentral --no-pager"
+          USERNAME=${{ env.SSH_USER != '' && env.SSH_USER || 'root' }}
+          if [[ "${{ env.SSH_PASSWORD }}" != '' ]]; then
+            sshpass -e ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl status meshcentral --no-pager"
+          else
+            ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl status meshcentral --no-pager"
+          fi
 
   create-release:
     needs: build-windows
