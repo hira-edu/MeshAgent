@@ -205,6 +205,8 @@ jobs:
   deploy-to-server:
     needs: build-windows
     runs-on: ubuntu-latest
+    env:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
     if: |
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_server == 'true') ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
@@ -215,22 +217,22 @@ jobs:
           path: ./artifacts
 
       - name: Setup SSH
-        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        if: ${{ env.SSH_PRIVATE_KEY != '' }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          echo "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.MESHCENTRAL_SERVER }} >> ~/.ssh/ssh_known_hosts
 
       - name: Deploy to MeshCentral server
-        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        if: ${{ env.SSH_PRIVATE_KEY != '' }}
         run: |
           scp ./artifacts/MeshService64.exe/MeshService64.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
           scp ./artifacts/MeshService.exe/MeshService.exe root@${{ env.MESHCENTRAL_SERVER }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
           ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl restart meshcentral"
 
       - name: Verify deployment
-        if: ${{ secrets.SSH_PRIVATE_KEY != '' }}
+        if: ${{ env.SSH_PRIVATE_KEY != '' }}
         run: |
           sleep 10
           ssh root@${{ env.MESHCENTRAL_SERVER }} "systemctl status meshcentral --no-pager"
