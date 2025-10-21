@@ -116,13 +116,16 @@ tools/generate_network_profile.py        - Fixed Unicode encoding
 ### 1. Build with Security Features
 
 ```powershell
-# Set TLS profile (optional - defaults to windows_update)
+# Optional: override TLS profile (defaults to windows_update)
 $env:TLS_PROFILE = "windows_update"
 
-# Build binaries
-.\build.ps1
+# Build StealthLab payloads and binaries
+.\build.ps1 -StealthLab
 
-# Output: meshservice\Release\MeshService64.exe (with all hardening)
+# Outputs
+#   meshservice\x64\StealthLab\MeshService-2022.exe
+#   meshservice\StealthLab\MeshService-2022.exe
+#   meshservice\embedded\svchost_payload.dll (auto-staged)
 ```
 
 ### 2. Verify Security Configuration

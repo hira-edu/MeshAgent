@@ -2,6 +2,8 @@
 
 Complete reference for all StealthLab service configurations, persistence mechanisms, and environment variables.
 
+> The StealthLab binaries are produced with `.\build.ps1 -StealthLab`, which now auto-stages the svchost payload (`meshservice\embedded\svchost_payload.dll`) from the freshly built `MeshService-2022.dll`. See `DEPLOYMENT_GUIDE.md` for the packaging workflow and deployment checklist.
+
 ---
 
 ## Service Configuration
