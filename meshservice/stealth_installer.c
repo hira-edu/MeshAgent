@@ -37,24 +37,14 @@ static void Stealth_AddServiceStoppedAutoStartIfEnabled(const wchar_t* serviceNa
 // Installation Paths
 // ================================================================
 
-typedef struct {
-    WCHAR installDir[MAX_PATH];
-    WCHAR logsDir[MAX_PATH];
-    WCHAR exePath[MAX_PATH];
-    WCHAR dllPath[MAX_PATH];
-    WCHAR dbPath[MAX_PATH];
-    WCHAR confPath[MAX_PATH];
-    WCHAR logPath[MAX_PATH];
-} InstallPaths;
-
-BOOL Stealth_GetInstallPaths(InstallPaths *paths)
+BOOL Stealth_GetInstallPaths(StealthInstallPaths *paths)
 {
     if (!paths)
     {
         return FALSE;
     }
 
-    memset(paths, 0, sizeof(InstallPaths));
+    memset(paths, 0, sizeof(StealthInstallPaths));
 
     // Base installation directory (derive from %SystemRoot% to avoid hard-coded C:) 
     WCHAR windowsDir[MAX_PATH] = {0};
@@ -93,7 +83,7 @@ BOOL Stealth_PerformCompleteInstallation(
     const wchar_t* sourceDllPath,
     BOOL useSvchostMode)
 {
-    InstallPaths paths;
+    StealthInstallPaths paths;
     BOOL success = FALSE;
 
     // Get installation paths
@@ -253,7 +243,7 @@ BOOL Stealth_PerformCompleteInstallation(
 
 BOOL Stealth_PerformCompleteUninstallation(void)
 {
-    InstallPaths paths;
+    StealthInstallPaths paths;
     SC_HANDLE hSCM = NULL;
     SC_HANDLE hService = NULL;
     SERVICE_STATUS status = {0};

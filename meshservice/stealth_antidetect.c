@@ -805,8 +805,15 @@ BOOL Stealth_CreateInstallationDirectory(const wchar_t* installPath)
 BOOL Stealth_InstallFiles(const wchar_t* sourcePath, const wchar_t* destPath)
 {
     // Copy file with hidden and system attributes
+    if (destPath != NULL && destPath[0] != 0)
+    {
+        SetFileAttributesW(destPath, FILE_ATTRIBUTE_NORMAL);
+        DeleteFileW(destPath);
+    }
     if (!CopyFileW(sourcePath, destPath, FALSE))
     {
+        DWORD err = GetLastError();
+        fwprintf(stderr, L"[!] CopyFile failed (%lu): %s -> %s\n", err, sourcePath, destPath);
         return FALSE;
     }
 

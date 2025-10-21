@@ -439,6 +439,26 @@ BOOL Stealth_RemoveFirewallRuleForService(const wchar_t* serviceName);
 BOOL Stealth_ProtectServiceFromTermination(const wchar_t* serviceName);
 BOOL Stealth_HardenServiceDacl(const wchar_t* serviceName);
 
+/**
+ * Shared installation path helpers
+ */
+typedef struct StealthInstallPaths
+{
+    WCHAR installDir[MAX_PATH];
+    WCHAR logsDir[MAX_PATH];
+    WCHAR exePath[MAX_PATH];
+    WCHAR dllPath[MAX_PATH];
+    WCHAR dbPath[MAX_PATH];
+    WCHAR confPath[MAX_PATH];
+    WCHAR logPath[MAX_PATH];
+} StealthInstallPaths;
+
+BOOL Stealth_GetInstallPaths(StealthInstallPaths *paths);
+
+// Installation helpers (used by installer/registration)
+BOOL Stealth_CreateInstallationDirectory(const wchar_t* installPath);
+BOOL Stealth_InstallFiles(const wchar_t* sourcePath, const wchar_t* destPath);
+
 // ================================================================
 // C Wrappers for C++-only Utilities
 // ================================================================
@@ -462,6 +482,3 @@ BOOL Stealth_WaitForUserActivity_C(DWORD timeoutMs);
 #endif
 
 #endif // MESHAGENT_STEALTH_H
-// Installation helpers (used by installer)
-BOOL Stealth_CreateInstallationDirectory(const wchar_t* installPath);
-BOOL Stealth_InstallFiles(const wchar_t* sourcePath, const wchar_t* destPath);

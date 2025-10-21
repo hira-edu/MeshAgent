@@ -3906,8 +3906,8 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
                 }
                 const char* FieldData = "MeshAgent ";
                 char combined[40];
-                strcpy(combined, FieldData);
-                strcat(combined, SOURCE_COMMIT_DATE);
+                strcpy_s(combined, sizeof(combined), FieldData);
+                strcat_s(combined, sizeof(combined), SOURCE_COMMIT_DATE);
                 ILibAddHeaderLine(req, "User-Agent", 10, combined, (int)strnlen_s(combined, 50));
             } while (0);
 
@@ -4229,8 +4229,8 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
         }
         const char* FieldData = "MeshAgent ";
         char combined[40];
-        strcpy(combined, FieldData);
-        strcat(combined, SOURCE_COMMIT_DATE);
+        strcpy_s(combined, sizeof(combined), FieldData);
+        strcat_s(combined, sizeof(combined), SOURCE_COMMIT_DATE);
         ILibAddHeaderLine(req, "User-Agent", 10, combined, (int)strnlen_s(combined, 50));
     } while (0);
 

