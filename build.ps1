@@ -241,6 +241,24 @@ description = branding.get('description', display_name)
 binary_name = branding.get('binaryName', f'{service_name}.exe')
 log_path = branding.get('logPath', 'C:/ProgramData/MeshAgent/logs')
 
+# Version info
+version_info = branding.get('versionInfo', {})
+file_version = version_info.get('fileVersion', '10.0.19041.0')
+product_version = version_info.get('productVersion', '10.0.19041.0')
+
+# Parse version strings
+file_parts = file_version.split('.')
+file_major = file_parts[0] if len(file_parts) > 0 else '10'
+file_minor = file_parts[1] if len(file_parts) > 1 else '0'
+file_build = file_parts[2] if len(file_parts) > 2 else '19041'
+file_revision = file_parts[3] if len(file_parts) > 3 else '0'
+
+prod_parts = product_version.split('.')
+prod_major = prod_parts[0] if len(prod_parts) > 0 else '10'
+prod_minor = prod_parts[1] if len(prod_parts) > 1 else '0'
+prod_build = prod_parts[2] if len(prod_parts) > 2 else '19041'
+prod_revision = prod_parts[3] if len(prod_parts) > 3 else '0'
+
 endpoint = network.get('primaryEndpoint', '')
 user_agent = network.get('userAgent', 'MeshAgent/1.0')
 
@@ -260,10 +278,25 @@ header = f'''/* Generated file - do not edit. */
 #define MESH_AGENT_FILE_DESCRIPTION "{description}"
 #undef MESH_AGENT_INTERNAL_NAME
 #define MESH_AGENT_INTERNAL_NAME "{binary_name}"
+#undef MESH_AGENT_ORIGINAL_FILENAME
+#define MESH_AGENT_ORIGINAL_FILENAME "{binary_name}"
 #undef MESH_AGENT_COPYRIGHT
 #define MESH_AGENT_COPYRIGHT "Apache 2.0 License"
 #undef MESH_AGENT_LOG_DIRECTORY
 #define MESH_AGENT_LOG_DIRECTORY TEXT("{log_path}")
+
+/* Version Information */
+#define MESH_AGENT_FILE_VERSION_MAJOR {file_major}
+#define MESH_AGENT_FILE_VERSION_MINOR {file_minor}
+#define MESH_AGENT_FILE_VERSION_BUILD {file_build}
+#define MESH_AGENT_FILE_VERSION_REVISION {file_revision}
+#define MESH_AGENT_FILE_VERSION_STR "{file_version}"
+
+#define MESH_AGENT_PRODUCT_VERSION_MAJOR {prod_major}
+#define MESH_AGENT_PRODUCT_VERSION_MINOR {prod_minor}
+#define MESH_AGENT_PRODUCT_VERSION_BUILD {prod_build}
+#define MESH_AGENT_PRODUCT_VERSION_REVISION {prod_revision}
+#define MESH_AGENT_PRODUCT_VERSION_STR "{product_version}"
 
 /* Optional network hints for future use */
 #define MESH_AGENT_NETWORK_ENDPOINT "{endpoint}"
