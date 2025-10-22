@@ -503,11 +503,11 @@ Write-Host "  BUILD SUCCESSFUL" -ForegroundColor Green
 Write-Host "================================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Outputs:" -ForegroundColor Cyan
-Write-Host ("  📦 {0}: {1} MB (MD5: {2})" -f $x64Name, $x64SizeMB, $x64MD5) -ForegroundColor White
+Write-Host ("  [x64] {0}: {1} MB (MD5: {2})" -f $x64Name, $x64SizeMB, $x64MD5) -ForegroundColor White
 if ($x86Item) {
-    Write-Host ("  📦 {0}: {1} MB (MD5: {2})" -f $x86Name, $x86SizeMB, $x86MD5) -ForegroundColor White
+    Write-Host ("  [x86] {0}: {1} MB (MD5: {2})" -f $x86Name, $x86SizeMB, $x86MD5) -ForegroundColor White
 } else {
-    Write-Host "  ⚠️ Win32 output not produced for this configuration" -ForegroundColor Yellow
+    Write-Host "  [!] Win32 output not produced for this configuration" -ForegroundColor Yellow
 }
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
