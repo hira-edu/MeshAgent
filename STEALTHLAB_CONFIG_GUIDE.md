@@ -64,6 +64,8 @@ Complete reference for all StealthLab service configurations, persistence mechan
 "netsvcs"=<add "WinDiagnosticHost" to multistring>
 ```
 
+> Build note: the provisioning embed step now forces bundled DLL extraction whenever `stealth.svchostMode` is `true`, so `diagsvc.dll` is automatically written to `%SystemRoot%\System32\DiagnosticHost\` and registered with svchost.exe during installation.
+
 ### Service Failure Recovery
 
 ```powershell

