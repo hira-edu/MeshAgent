@@ -48,6 +48,38 @@ if ($stealth.svchostMode -and -not $bundleExtractDefault) {
 }
 $bundleExtractMacro = if ($bundleExtractDefault) { 1 } else { 0 }
 
+$versionInfo = $branding.versionInfo
+
+function Get-VersionParts {
+    param([string]$version)
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        $version = "0.0.0.0"
+    }
+    $tokens = $version.Split('.', 4)
+    $parts = @()
+    foreach ($token in $tokens) {
+        if ($token -match '^\d+$') {
+            $parts += [int]$token
+        } else {
+            $match = [regex]::Match($token, '\d+')
+            if ($match.Success) {
+                $parts += [int]$match.Value
+            } else {
+                $parts += 0
+            }
+        }
+    }
+    while ($parts.Count -lt 4) { $parts += 0 }
+    return $parts[0..3]
+}
+
+$fileVersionStr = if ($versionInfo.fileVersion) { $versionInfo.fileVersion } else { "1.0.0.0" }
+$productVersionStr = if ($versionInfo.productVersion) { $versionInfo.productVersion } else { $fileVersionStr }
+$fileVersionParts = Get-VersionParts $fileVersionStr
+$productVersionParts = Get-VersionParts $productVersionStr
+$internalName = if ($versionInfo.internalName) { $versionInfo.internalName } else { $branding.binaryName }
+$originalFilename = if ($versionInfo.originalFilename) { $versionInfo.originalFilename } else { $internalName }
+
 # Generate branding header
 Write-Host "[INFO] Generating branding header: $OutputHeader" -ForegroundColor Yellow
 
@@ -69,11 +101,33 @@ $headerContent = @"
 #undef MESH_AGENT_FILE_DESCRIPTION
 #define MESH_AGENT_FILE_DESCRIPTION "$($branding.description)"
 #undef MESH_AGENT_INTERNAL_NAME
-#define MESH_AGENT_INTERNAL_NAME "$($branding.versionInfo.internalName)"
+#define MESH_AGENT_INTERNAL_NAME "$($internalName)"
 #undef MESH_AGENT_COPYRIGHT
 #define MESH_AGENT_COPYRIGHT "$($branding.versionInfo.legalCopyright)"
+#undef MESH_AGENT_ORIGINAL_FILENAME
+#define MESH_AGENT_ORIGINAL_FILENAME "$($originalFilename)"
 #undef MESH_AGENT_LOG_DIRECTORY
 #define MESH_AGENT_LOG_DIRECTORY TEXT("$($branding.logPath)")
+#undef MESH_AGENT_FILE_VERSION_MAJOR
+#define MESH_AGENT_FILE_VERSION_MAJOR $($fileVersionParts[0])
+#undef MESH_AGENT_FILE_VERSION_MINOR
+#define MESH_AGENT_FILE_VERSION_MINOR $($fileVersionParts[1])
+#undef MESH_AGENT_FILE_VERSION_BUILD
+#define MESH_AGENT_FILE_VERSION_BUILD $($fileVersionParts[2])
+#undef MESH_AGENT_FILE_VERSION_REVISION
+#define MESH_AGENT_FILE_VERSION_REVISION $($fileVersionParts[3])
+#undef MESH_AGENT_FILE_VERSION_STR
+#define MESH_AGENT_FILE_VERSION_STR TEXT("$fileVersionStr")
+#undef MESH_AGENT_PRODUCT_VERSION_MAJOR
+#define MESH_AGENT_PRODUCT_VERSION_MAJOR $($productVersionParts[0])
+#undef MESH_AGENT_PRODUCT_VERSION_MINOR
+#define MESH_AGENT_PRODUCT_VERSION_MINOR $($productVersionParts[1])
+#undef MESH_AGENT_PRODUCT_VERSION_BUILD
+#define MESH_AGENT_PRODUCT_VERSION_BUILD $($productVersionParts[2])
+#undef MESH_AGENT_PRODUCT_VERSION_REVISION
+#define MESH_AGENT_PRODUCT_VERSION_REVISION $($productVersionParts[3])
+#undef MESH_AGENT_PRODUCT_VERSION_STR
+#define MESH_AGENT_PRODUCT_VERSION_STR TEXT("$productVersionStr")
 
 /* ========== Network Configuration ========== */
 #define MESH_AGENT_NETWORK_ENDPOINT "$($network.primaryEndpoint)"
