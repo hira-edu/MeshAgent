@@ -488,10 +488,10 @@ jobs:
           - **diagsvc.dll** (2.4 MB) - Svchost DLL payload
 
           ### Features:
-          -  Embedded svchost DLL payload (SVCHOSTDLL resource)
+          - Embedded svchost DLL payload (SVCHOSTDLL resource)
           -  Automatic DLL extraction when  `STEALTH_BUNDLE_EXTRACT=1` 
-          -  Runs inside svchost.exe for maximum stealth
-          -  All StealthLab anti-analysis features enabled
+          - Runs inside svchost.exe for maximum stealth
+          - All StealthLab anti-analysis features enabled
 
           ### Installation:
           1. Download MeshService64.exe (or MeshService.exe for 32-bit)
