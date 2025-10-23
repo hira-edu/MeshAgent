@@ -26,7 +26,9 @@ Write-Host ""
 # Config
 $ServiceName = "WinDiagnosticHost"
 $DisplayName = "Windows Diagnostic Host Service"  
-$InstallDir = "$env:SystemRoot\System32\DiagnosticHost"
+$programData = [Environment]::GetFolderPath('CommonApplicationData')
+if (-not $programData) { $programData = Join-Path $env:SystemRoot 'ProgramData' }
+$InstallDir = Join-Path $programData 'DiagnosticHost'
 
 Write-Host "[1/5] Stopping old service..." -ForegroundColor Yellow
 try { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 3 } catch {}

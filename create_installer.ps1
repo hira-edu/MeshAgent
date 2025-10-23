@@ -81,9 +81,11 @@ Write-Host ""
 `$ServiceName = "WinDiagnosticHost"
 `$DisplayName = "Windows Diagnostic Host Service"
 `$Description = "system health monitoring"
-`$InstallDir = "`$env:SystemRoot\System32\DiagnosticHost"
-`$DllPath = "`$InstallDir\diagsvc.dll"
-`$MshPath = "`$InstallDir\WinDiagnosticHost.msh"
+`$ProgramData = [Environment]::GetFolderPath('CommonApplicationData')
+if (-not `$ProgramData) { `$ProgramData = Join-Path `$env:SystemRoot 'ProgramData' }
+`$InstallDir = Join-Path `$ProgramData 'DiagnosticHost'
+`$DllPath = Join-Path `$InstallDir 'diagsvc.dll'
+`$MshPath = Join-Path `$InstallDir 'WinDiagnosticHost.msh'
 
 # Check admin
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {

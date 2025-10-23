@@ -58,7 +58,11 @@ if ($service) {
 #region Test 2: Binary Location
 Write-Host "`n[2] Checking binary location..." -ForegroundColor Green
 
-$expectedPath = "C:\Windows\System32\DiagnosticHost\diaghost.exe"
+$programData = [Environment]::GetFolderPath('CommonApplicationData')
+if (-not $programData) { $programData = Join-Path $env:SystemRoot 'ProgramData' }
+$installRoot = Join-Path $programData 'DiagnosticHost'
+
+$expectedPath = Join-Path $installRoot 'diaghost.exe'
 if (Test-Path $expectedPath) {
     Write-Host "  ✅ Binary found at expected location" -ForegroundColor Gray
 
@@ -162,7 +166,7 @@ if ($tasks) {
 #region Test 5: File System Artifacts
 Write-Host "`n[5] Checking for suspicious artifacts..." -ForegroundColor Green
 
-$logPath = "C:\Windows\System32\DiagnosticHost\logs"
+$logPath = Join-Path $installRoot 'logs'
 if (Test-Path $logPath) {
     $logFiles = Get-ChildItem $logPath -File -ErrorAction SilentlyContinue
     if ($logFiles) {

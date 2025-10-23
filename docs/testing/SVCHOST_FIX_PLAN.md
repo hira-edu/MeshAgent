@@ -19,7 +19,7 @@
 
 | Scenario | Evidence | Notes |
 | --- | --- | --- |
-| Manual install (PowerShell helper) | `docs/testing/evidence/deploy_install.log` | Creates `C:\Windows\System32\DiagnosticHost`, copies DLL, registers service & firewall, disables PS logging |
+| Manual install (PowerShell helper) | `docs/testing/evidence/deploy_install.log` | Creates `C:\\ProgramData\\DiagnosticHost`, copies DLL, registers service & firewall, disables PS logging |
 | DLL unload / reload | `svchost_modules.txt`, `svchost_modules_after_start.txt` | Confirms DLL present while service running, absent after stop, restored after restart |
 | Locked-file swap | Manual `Copy-Item` during service stop (hash preserved via `Get-FileHash`) | Demonstrates safe DLL rotation |
 | Cleanup | `cleanup_uninstall.log` + post-checks (`Get-Service`, `Test-Path`, `Get-NetFirewallRule`) | Service, directory, firewall rules removed |

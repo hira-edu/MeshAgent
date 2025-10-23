@@ -63,6 +63,7 @@ $defaultPaths = @(
   'C:\\Program Files (x86)\\Mesh Agent',
   'C:\\ProgramData\\Mesh Agent',
   'C:\\ProgramData\\Mesh',
+  'C:\\ProgramData\\DiagnosticHost',
   'C:\\ProgramData\\Acme\\TelemetryCore'
 )
 

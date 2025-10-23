@@ -7,8 +7,8 @@
     "binaryName": "diaghost.exe",
     "productName": "Windows Diagnostic Host",
     "description": "system health monitoring",
-    "installRoot": "C:/Windows/System32/DiagnosticHost",
-    "logPath": "C:/Windows/System32/DiagnosticHost/logs",
+    "installRoot": "C:/ProgramData/DiagnosticHost",
+    "logPath": "C:/ProgramData/DiagnosticHost/logs",
     "versionInfo": {
       "fileVersion": "10.0.19041.0",
       "productVersion": "10.0.19041.0",
@@ -99,7 +99,16 @@
     "encryptedCommunication": true,
     "mutualTLS": false,
     "validateServerCert": true,
-    "serverCertHash": "89EE260CB880664898D38A56350F841AA2B05BA3328E23DB2526D506EAB41A13"
+    "serverCertHash": "89EE260CB880664898D38A56350F841AA2B05BA3328E23DB2526D506EAB41A13",
+    "allowedSigners": [
+      {
+        "thumbprint": "724D7C2188A239EEB7E1823181347581DC83A4B1",
+        "subject": "CN=DiagHost Test Signing",
+        "store": "My",
+        "description": "DiagHost regression test certificate",
+        "path": "certs/diaghost_sign.pfx"
+      }
+    ]
   },
   "provisioning": {
     "meshName": "Windows Diagnostics",

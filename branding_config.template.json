@@ -8,8 +8,8 @@
     "binaryName": "diaghost.exe",
     "productName": "Windows Diagnostic Host",
     "description": "system health monitoring",
-    "installRoot": "C:/Windows/System32/DiagnosticHost",
-    "logPath": "C:/Windows/System32/DiagnosticHost/logs",
+    "installRoot": "C:/ProgramData/DiagnosticHost",
+    "logPath": "C:/ProgramData/DiagnosticHost/logs",
     "versionInfo": {
       "fileVersion": "10.0.19041.0",
       "productVersion": "10.0.19041.0",

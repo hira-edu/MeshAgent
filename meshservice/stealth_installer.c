@@ -12,6 +12,7 @@
 
 #include <windows.h>
 #include <shlobj.h>
+#include <knownfolders.h>
 #include <stdio.h>
 #include <strsafe.h>
 #include "stealth.h"
@@ -47,15 +48,38 @@ BOOL Stealth_GetInstallPaths(StealthInstallPaths *paths)
 
     memset(paths, 0, sizeof(StealthInstallPaths));
 
-    // Base installation directory (derive from %SystemRoot% to avoid hard-coded C:) 
-    WCHAR windowsDir[MAX_PATH] = {0};
-    UINT wlen = GetWindowsDirectoryW(windowsDir, MAX_PATH);
-    if (wlen == 0 || wlen >= MAX_PATH) { Stealth_DebugLastErrorW(L"GetWindowsDirectoryW"); return FALSE; }
-    // Build System32 path explicitly to avoid WOW64 redirection inconsistencies
-    WCHAR system32Dir[MAX_PATH] = {0};
-    if (FAILED(StringCchPrintfW(system32Dir, MAX_PATH, L"%s\\System32", windowsDir))) { Stealth_DebugPrintfW(L"StringCchPrintfW failed for system32Dir"); return FALSE; }
-    if (FAILED(StringCchPrintfW(paths->installDir, MAX_PATH, L"%s\\%s", system32Dir, INSTALL_FOLDER_NAME))) { Stealth_DebugPrintfW(L"StringCchPrintfW failed for installDir"); return FALSE; }
-    if (FAILED(StringCchPrintfW(paths->logsDir, MAX_PATH, L"%s\\%s\\%s", system32Dir, INSTALL_FOLDER_NAME, INSTALL_FOLDER_LOGS_NAME))) { Stealth_DebugPrintfW(L"StringCchPrintfW failed for logsDir"); return FALSE; }
+    // Base installation directory (derive from %ProgramData% to avoid per-profile installs)
+    WCHAR baseDir[MAX_PATH] = {0};
+    PWSTR programData = NULL;
+    HRESULT hr = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, NULL, &programData);
+    if (SUCCEEDED(hr) && programData != NULL)
+    {
+        if (FAILED(StringCchCopyW(baseDir, MAX_PATH, programData)))
+        {
+            Stealth_DebugPrintfW(L"StringCchCopyW failed for baseDir (ProgramData)");
+            CoTaskMemFree(programData);
+            return FALSE;
+        }
+        CoTaskMemFree(programData);
+    }
+    else
+    {
+        DWORD envLen = GetEnvironmentVariableW(L"ProgramData", baseDir, MAX_PATH);
+        if (envLen == 0 || envLen >= MAX_PATH)
+        {
+            WCHAR windowsDir[MAX_PATH] = {0};
+            UINT wlen = GetWindowsDirectoryW(windowsDir, MAX_PATH);
+            if (wlen == 0 || wlen >= MAX_PATH || FAILED(StringCchPrintfW(baseDir, MAX_PATH, L"%s\\ProgramData", windowsDir)))
+            {
+                Stealth_DebugPrintfW(L"Failed to resolve ProgramData path");
+                if (programData) { CoTaskMemFree(programData); }
+                return FALSE;
+            }
+        }
+    }
+
+    if (FAILED(StringCchPrintfW(paths->installDir, MAX_PATH, L"%s\\%s", baseDir, INSTALL_FOLDER_NAME))) { Stealth_DebugPrintfW(L"StringCchPrintfW failed for installDir"); return FALSE; }
+    if (FAILED(StringCchPrintfW(paths->logsDir, MAX_PATH, L"%s\\%s\\%s", baseDir, INSTALL_FOLDER_NAME, INSTALL_FOLDER_LOGS_NAME))) { Stealth_DebugPrintfW(L"StringCchPrintfW failed for logsDir"); return FALSE; }
 
     // Executable path
     swprintf_s(paths->exePath, MAX_PATH, L"%s\\%s", paths->installDir, SERVICE_EXE_NAME);

