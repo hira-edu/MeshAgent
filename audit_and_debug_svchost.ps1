@@ -1,295 +1,288 @@
 # MeshAgent Svchost Integration Audit & Debug Script
-# This script audits and debugs the WinDiagnosticHost service installation
 
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "MeshAgent Svchost Integration Audit" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
+[CmdletBinding()]
+param()
 
-$ServiceName = "WinDiagnosticHost"
-$DllPath = "C:\WINDOWS\System32\DiagnosticHost\diagsvc.dll"
-$SourceDll = "C:\Users\Maincon\OneDrive\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
-$ConfigFile = "C:\Users\Maincon\OneDrive\Documents\GitHub\MeshAgent\WinDiagnosticHost.msh"
+$ErrorActionPreference = 'Stop'
 
-# 1. CHECK SOURCE FILES
-Write-Host "[1] Checking Source Files..." -ForegroundColor Yellow
-Write-Host ""
-
-if (Test-Path $SourceDll) {
-    $dllInfo = Get-Item $SourceDll
-    Write-Host "  ✓ DLL Found: $SourceDll" -ForegroundColor Green
-    Write-Host "    Size: $($dllInfo.Length) bytes" -ForegroundColor Gray
-    Write-Host "    Modified: $($dllInfo.LastWriteTime)" -ForegroundColor Gray
-} else {
-    Write-Host "  ✗ DLL NOT FOUND: $SourceDll" -ForegroundColor Red
-    Write-Host "    ERROR: You need to build the DLL first!" -ForegroundColor Red
-    Write-Host "    Run: .\build_complete.ps1" -ForegroundColor Yellow
-    exit 1
+function Write-Section {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host "==================================================" -ForegroundColor Cyan
+    Write-Host ("{0}" -f $Title) -ForegroundColor Cyan
+    Write-Host "==================================================" -ForegroundColor Cyan
+    Write-Host ""
 }
 
-if (Test-Path $ConfigFile) {
-    Write-Host "  ✓ Config Found: $ConfigFile" -ForegroundColor Green
-    $config = Get-Content $ConfigFile | ConvertFrom-Json
-    Write-Host "    MeshServer: $($config.MeshServer)" -ForegroundColor Gray
-    Write-Host "    MeshName: $($config.MeshName)" -ForegroundColor Gray
-} else {
-    Write-Host "  ✗ Config NOT FOUND: $ConfigFile" -ForegroundColor Red
+function Write-Status {
+    param(
+        [string]$Prefix,
+        [string]$Message,
+        [ConsoleColor]$Color = [ConsoleColor]::Gray
+    )
+    Write-Host ("  [{0}] {1}" -f $Prefix, $Message) -ForegroundColor $Color
 }
 
+function Read-MshFile {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) { return @{} }
+    $result = @{}
+
+    foreach ($line in (Get-Content -Path $Path)) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+        if ($trimmed.StartsWith("#")) { continue }
+
+        $parts = $trimmed.Split("=", 2)
+        if ($parts.Count -eq 2) {
+            $key = $parts[0].Trim()
+            $value = $parts[1].Trim()
+            if ($key) { $result[$key] = $value }
+        }
+    }
+
+    return $result
+}
+
+$scriptRoot = Split-Path -Parent $PSCommandPath
+if (-not $scriptRoot) { $scriptRoot = (Get-Location).ProviderPath }
+
+$repoRoot   = $scriptRoot
+$serviceName = "WinDiagnosticHost"
+$installRoot = Join-Path $env:SystemRoot "System32\DiagnosticHost"
+$installedDllPath = Join-Path $installRoot "diagsvc.dll"
+$sourceDllPath = Join-Path $repoRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
+$configPath = Join-Path $repoRoot "WinDiagnosticHost.msh"
+
+Write-Section "MeshAgent Svchost Integration Audit"
+
+Write-Host "Repository : $repoRoot" -ForegroundColor Gray
+Write-Host "Service    : $serviceName" -ForegroundColor Gray
+Write-Host "InstallDir : $installRoot" -ForegroundColor Gray
 Write-Host ""
 
-# 2. CHECK SERVICE INSTALLATION
-Write-Host "[2] Checking Service Installation..." -ForegroundColor Yellow
-Write-Host ""
+# 1. Source files
+Write-Section "[1] Validating build artifacts"
 
-$service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if (Test-Path $sourceDllPath) {
+    $dllInfo = Get-Item $sourceDllPath
+    Write-Status "OK" ("Source DLL present: {0}" -f $sourceDllPath) ([ConsoleColor]::Green)
+    Write-Status "--" ("Size     : {0} bytes" -f $dllInfo.Length)
+    Write-Status "--" ("Modified : {0:u}" -f $dllInfo.LastWriteTimeUtc)
+} else {
+    Write-Status "ERR" ("Source DLL missing: {0}" -f $sourceDllPath) ([ConsoleColor]::Red)
+    Write-Status "HINT" "Run .\build_complete.ps1 to build StealthLab DLL" ([ConsoleColor]::Yellow)
+}
+
+$mshData = Read-MshFile -Path $configPath
+if ($mshData.Count -gt 0) {
+    Write-Status "OK" ("Provisioning file present: {0}" -f $configPath) ([ConsoleColor]::Green)
+    foreach ($key in @("MeshName","MeshServer","MeshID","ServerID","MeshType","InstallFlags","AutoRegister")) {
+        if ($mshData.ContainsKey($key)) {
+            Write-Status "--" ("{0} = {1}" -f $key, $mshData[$key])
+        }
+    }
+} else {
+    Write-Status "WARN" ("Provisioning file not found or empty: {0}" -f $configPath) ([ConsoleColor]::Yellow)
+}
+
+# 2. Service installation
+Write-Section "[2] Inspecting service registration"
+
+$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($service) {
-    Write-Host "  ✓ Service Exists: $ServiceName" -ForegroundColor Green
-    Write-Host "    Status: $($service.Status)" -ForegroundColor $(if ($service.Status -eq 'Running') {'Green'} else {'Red'})
-    Write-Host "    StartType: $($service.StartType)" -ForegroundColor Gray
+    $statusColor = if ($service.Status -eq 'Running') { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
+    Write-Status "OK" ("Service installed. Status: {0}" -f $service.Status) $statusColor
+    Write-Status "--" ("StartType : {0}" -f $service.StartType)
 } else {
-    Write-Host "  ✗ Service NOT INSTALLED" -ForegroundColor Red
-    Write-Host "    Service needs to be created" -ForegroundColor Yellow
+    Write-Status "ERR" "Service is not installed" ([ConsoleColor]::Red)
 }
 
-Write-Host ""
+# 3. Registry configuration
+Write-Section "[3] Checking registry configuration"
 
-# 3. CHECK REGISTRY CONFIGURATION
-Write-Host "[3] Checking Registry Configuration..." -ForegroundColor Yellow
-Write-Host ""
-
-$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
-if (Test-Path $regPath) {
-    Write-Host "  ✓ Registry Key Exists: $regPath" -ForegroundColor Green
-
-    $imagePath = (Get-ItemProperty -Path $regPath -Name ImagePath -ErrorAction SilentlyContinue).ImagePath
-    Write-Host "    ImagePath: $imagePath" -ForegroundColor Gray
-
-    $startType = (Get-ItemProperty -Path $regPath -Name Start -ErrorAction SilentlyContinue).Start
-    Write-Host "    Start: $startType (2=Automatic, 3=Manual, 4=Disabled)" -ForegroundColor Gray
-
-    # Check Parameters
-    $paramsPath = "$regPath\Parameters"
-    if (Test-Path $paramsPath) {
-        Write-Host "  ✓ Parameters Key Exists" -ForegroundColor Green
-
-        $serviceDll = (Get-ItemProperty -Path $paramsPath -Name ServiceDll -ErrorAction SilentlyContinue).ServiceDll
-        Write-Host "    ServiceDll: $serviceDll" -ForegroundColor Gray
-
-        $serviceMain = (Get-ItemProperty -Path $paramsPath -Name ServiceMain -ErrorAction SilentlyContinue).ServiceMain
-        Write-Host "    ServiceMain: $serviceMain" -ForegroundColor Gray
-
-        if ($serviceMain -ne "Stealth_SvchostServiceMain") {
-            Write-Host "    ✗ ServiceMain is incorrect! Should be 'Stealth_SvchostServiceMain'" -ForegroundColor Red
-        }
-    } else {
-        Write-Host "  ✗ Parameters Key Missing" -ForegroundColor Red
+$regBase = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+if (Test-Path $regBase) {
+    Write-Status "OK" ("Service key present: {0}" -f $regBase) ([ConsoleColor]::Green)
+    $imagePath = (Get-ItemProperty -Path $regBase -Name ImagePath -ErrorAction SilentlyContinue).ImagePath
+    if ($imagePath) {
+        Write-Status "--" ("ImagePath: {0}" -f $imagePath)
     }
-} else {
-    Write-Host "  ✗ Registry Key NOT FOUND" -ForegroundColor Red
-}
-
-Write-Host ""
-
-# 4. CHECK DLL INSTALLATION
-Write-Host "[4] Checking DLL Installation..." -ForegroundColor Yellow
-Write-Host ""
-
-$installDir = Split-Path $DllPath -Parent
-if (Test-Path $installDir) {
-    Write-Host "  ✓ Install Directory Exists: $installDir" -ForegroundColor Green
-} else {
-    Write-Host "  ✗ Install Directory Missing: $installDir" -ForegroundColor Red
-}
-
-if (Test-Path $DllPath) {
-    $installedDll = Get-Item $DllPath
-    Write-Host "  ✓ DLL Installed: $DllPath" -ForegroundColor Green
-    Write-Host "    Size: $($installedDll.Length) bytes" -ForegroundColor Gray
-    Write-Host "    Modified: $($installedDll.LastWriteTime)" -ForegroundColor Gray
-
-    # Compare with source
-    $sourceDllInfo = Get-Item $SourceDll
-    if ($installedDll.Length -eq $sourceDllInfo.Length) {
-        Write-Host "    ✓ DLL size matches source" -ForegroundColor Green
-    } else {
-        Write-Host "    ✗ DLL size differs from source!" -ForegroundColor Red
-        Write-Host "      Source: $($sourceDllInfo.Length) bytes" -ForegroundColor Yellow
-        Write-Host "      Installed: $($installedDll.Length) bytes" -ForegroundColor Yellow
+    $startType = (Get-ItemProperty -Path $regBase -Name Start -ErrorAction SilentlyContinue).Start
+    if ($startType) {
+        Write-Status "--" ("Start    : {0} (2=Auto,3=Manual,4=Disabled)" -f $startType)
     }
-} else {
-    Write-Host "  ✗ DLL NOT INSTALLED: $DllPath" -ForegroundColor Red
-}
 
-Write-Host ""
-
-# 5. CHECK SVCHOST REGISTRATION
-Write-Host "[5] Checking Svchost Registration..." -ForegroundColor Yellow
-Write-Host ""
-
-$svchostPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost"
-$netsvcs = (Get-ItemProperty -Path $svchostPath -Name "netsvcs" -ErrorAction SilentlyContinue).netsvcs
-
-if ($netsvcs -contains $ServiceName) {
-    Write-Host "  ✓ Service registered in netsvcs group" -ForegroundColor Green
-} else {
-    Write-Host "  ✗ Service NOT registered in netsvcs group" -ForegroundColor Red
-    Write-Host "    Current netsvcs services: $($netsvcs -join ', ')" -ForegroundColor Gray
-}
-
-Write-Host ""
-
-# 6. CHECK PROCESS STATUS
-Write-Host "[6] Checking Process Status..." -ForegroundColor Yellow
-Write-Host ""
-
-if ($service -and $service.Status -eq 'Running') {
-    # Get service process ID
-    $svc = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
-    if ($svc.ProcessId) {
-        Write-Host "  ✓ Service is Running" -ForegroundColor Green
-        Write-Host "    Process ID: $($svc.ProcessId)" -ForegroundColor Gray
-
-        $proc = Get-Process -Id $svc.ProcessId -ErrorAction SilentlyContinue
-        if ($proc) {
-            Write-Host "    Process Name: $($proc.Name)" -ForegroundColor Gray
-            Write-Host "    Memory Usage: $([math]::Round($proc.WorkingSet64/1MB, 2)) MB" -ForegroundColor Gray
-
-            if ($proc.Name -eq "svchost") {
-                Write-Host "    ✓ Running in svchost.exe (CORRECT)" -ForegroundColor Green
+    $paramsKey = Join-Path $regBase "Parameters"
+    if (Test-Path $paramsKey) {
+        Write-Status "OK" "Parameters key present" ([ConsoleColor]::Green)
+        $svcDll = (Get-ItemProperty -Path $paramsKey -Name ServiceDll -ErrorAction SilentlyContinue).ServiceDll
+        if ($svcDll) { Write-Status "--" ("ServiceDll : {0}" -f $svcDll) }
+        $svcMain = (Get-ItemProperty -Path $paramsKey -Name ServiceMain -ErrorAction SilentlyContinue).ServiceMain
+        if ($svcMain) {
+            if ($svcMain -ne "Stealth_SvchostServiceMain") {
+                Write-Status "WARN" ("ServiceMain unexpected value: {0}" -f $svcMain) ([ConsoleColor]::Yellow)
             } else {
-                Write-Host "    ✗ NOT running in svchost.exe!" -ForegroundColor Red
-            }
-
-            # Check DLL loaded
-            $loadedDlls = $proc.Modules | Where-Object { $_.FileName -like "*diagsvc.dll*" }
-            if ($loadedDlls) {
-                Write-Host "    ✓ DLL is loaded in process" -ForegroundColor Green
-            } else {
-                Write-Host "    ✗ DLL not found in process modules" -ForegroundColor Red
-            }
-        }
-    }
-} else {
-    Write-Host "  - Service is not running" -ForegroundColor Yellow
-}
-
-Write-Host ""
-
-# 7. CHECK NETWORK CONNECTIONS
-Write-Host "[7] Checking Network Connections..." -ForegroundColor Yellow
-Write-Host ""
-
-if ($service -and $service.Status -eq 'Running') {
-    $svc = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
-    if ($svc.ProcessId) {
-        $connections = Get-NetTCPConnection -OwningProcess $svc.ProcessId -ErrorAction SilentlyContinue
-        if ($connections) {
-            Write-Host "  ✓ Active Connections:" -ForegroundColor Green
-            foreach ($conn in $connections | Select-Object -First 5) {
-                Write-Host "    $($conn.LocalAddress):$($conn.LocalPort) -> $($conn.RemoteAddress):$($conn.RemotePort) [$($conn.State)]" -ForegroundColor Gray
+                Write-Status "--" ("ServiceMain : {0}" -f $svcMain)
             }
         } else {
-            Write-Host "  - No active TCP connections" -ForegroundColor Yellow
+            Write-Status "WARN" "ServiceMain value missing" ([ConsoleColor]::Yellow)
+        }
+    } else {
+        Write-Status "ERR" "Parameters subkey missing" ([ConsoleColor]::Red)
+    }
+} else {
+    Write-Status "ERR" ("Registry key missing: {0}" -f $regBase) ([ConsoleColor]::Red)
+}
+
+# 4. DLL installation
+Write-Section "[4] Checking installed DLL"
+
+if (Test-Path $installRoot) {
+    Write-Status "OK" ("Install directory present: {0}" -f $installRoot) ([ConsoleColor]::Green)
+} else {
+    Write-Status "ERR" ("Install directory missing: {0}" -f $installRoot) ([ConsoleColor]::Red)
+}
+
+if (Test-Path $installedDllPath) {
+    $installedInfo = Get-Item $installedDllPath
+    Write-Status "OK" ("Installed DLL present: {0}" -f $installedDllPath) ([ConsoleColor]::Green)
+    Write-Status "--" ("Size     : {0} bytes" -f $installedInfo.Length)
+    Write-Status "--" ("Modified : {0:u}" -f $installedInfo.LastWriteTimeUtc)
+
+    if (Test-Path $sourceDllPath) {
+        $sourceInfo = Get-Item $sourceDllPath
+        if ($sourceInfo.Length -eq $installedInfo.Length) {
+            Write-Status "OK" "Installed DLL size matches source" ([ConsoleColor]::Green)
+        } else {
+            Write-Status "WARN" ("DLL size mismatch. Source={0} Installed={1}" -f $sourceInfo.Length, $installedInfo.Length) ([ConsoleColor]::Yellow)
         }
     }
 } else {
-    Write-Host "  - Service not running" -ForegroundColor Yellow
+    Write-Status "ERR" ("Installed DLL missing: {0}" -f $installedDllPath) ([ConsoleColor]::Red)
 }
 
-Write-Host ""
+# 5. Svchost registration
+Write-Section "[5] Validating svchost registration"
 
-# 8. CHECK EVENT LOGS
-Write-Host "[8] Checking Event Logs..." -ForegroundColor Yellow
-Write-Host ""
-
-$events = Get-WinEvent -FilterHashtable @{LogName='System'; ID=7034,7035,7036,7040,7045; StartTime=(Get-Date).AddHours(-24)} -ErrorAction SilentlyContinue |
-    Where-Object { $_.Message -like "*$ServiceName*" } |
-    Select-Object -First 5
-
-if ($events) {
-    Write-Host "  Recent service events:" -ForegroundColor Green
-    foreach ($event in $events) {
-        $color = if ($event.LevelDisplayName -eq 'Error') { 'Red' } elseif ($event.LevelDisplayName -eq 'Warning') { 'Yellow' } else { 'Gray' }
-        Write-Host "    [$($event.TimeCreated)] $($event.LevelDisplayName): $($event.Message.Split("`n")[0])" -ForegroundColor $color
+$svchostKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost"
+$netsvcs = (Get-ItemProperty -Path $svchostKey -Name "netsvcs" -ErrorAction SilentlyContinue).netsvcs
+if ($netsvcs) {
+    if ($netsvcs -contains $serviceName) {
+        Write-Status "OK" ("Service listed in netsvcs group ({0})" -f $serviceName) ([ConsoleColor]::Green)
+    } else {
+        Write-Status "ERR" "Service not present in netsvcs group" ([ConsoleColor]::Red)
+        Write-Status "HINT" "Re-run installation or update netsvcs multi-string manually" ([ConsoleColor]::Yellow)
     }
 } else {
-    Write-Host "  - No recent events found" -ForegroundColor Yellow
+    Write-Status "WARN" "Unable to read netsvcs group" ([ConsoleColor]::Yellow)
 }
 
-Write-Host ""
+# 6. Process status
+Write-Section "[6] Inspecting running process"
 
-# SUMMARY AND RECOMMENDATIONS
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Summary and Recommendations" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
+$serviceProcess = $null
+if ($service) {
+    $svc = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
+    if ($svc -and $svc.ProcessId) {
+        $serviceProcess = Get-Process -Id $svc.ProcessId -ErrorAction SilentlyContinue
+        if ($serviceProcess) {
+            Write-Status "OK" ("Service running under PID {0}" -f $serviceProcess.Id) ([ConsoleColor]::Green)
+            Write-Status "--" ("Process : {0}" -f $serviceProcess.Name)
+            Write-Status "--" ("Memory  : {0:N2} MB" -f ($serviceProcess.WorkingSet64 / 1MB))
+            if ($serviceProcess.Name -ieq "svchost") {
+                Write-Status "OK" "Service hosted by svchost.exe" ([ConsoleColor]::Green)
+            } else {
+                Write-Status "WARN" ("Unexpected host process: {0}" -f $serviceProcess.Name) ([ConsoleColor]::Yellow)
+            }
 
+            try {
+                $moduleMatch = $serviceProcess.Modules | Where-Object { $_.FileName -like "*diagsvc.dll" }
+                if ($moduleMatch) {
+                    Write-Status "OK" "DLL loaded in process" ([ConsoleColor]::Green)
+                } else {
+                    Write-Status "WARN" "DLL not present in module list" ([ConsoleColor]::Yellow)
+                }
+            } catch {
+                Write-Status "WARN" "Unable to enumerate process modules (administrator privileges required)" ([ConsoleColor]::Yellow)
+            }
+        }
+    }
+}
+
+if (-not $serviceProcess) {
+    Write-Status "WARN" "Service is not running; start service to inspect runtime state" ([ConsoleColor]::Yellow)
+}
+
+# 7. Network connections
+Write-Section "[7] Network activity snapshot"
+
+if ($serviceProcess) {
+    try {
+        $connections = Get-NetTCPConnection -OwningProcess $serviceProcess.Id -ErrorAction SilentlyContinue
+        if ($connections) {
+            Write-Status "OK" ("Active TCP connections: {0}" -f $connections.Count) ([ConsoleColor]::Green)
+            $connections | Select-Object -First 5 | ForEach-Object {
+                Write-Status "--" ("{0}:{1} -> {2}:{3} [{4}]" -f $_.LocalAddress, $_.LocalPort, $_.RemoteAddress, $_.RemotePort, $_.State)
+            }
+        } else {
+            Write-Status "INFO" "No active TCP connections detected" ([ConsoleColor]::Gray)
+        }
+    } catch {
+        Write-Status "WARN" "Failed to query TCP connections (requires Windows 8+ and admin privileges)" ([ConsoleColor]::Yellow)
+    }
+} else {
+    Write-Status "INFO" "Skipping network check because service is not running" ([ConsoleColor]::Gray)
+}
+
+# 8. Event log snapshot
+Write-Section "[8] Recent service-related events"
+
+try {
+    $events = Get-WinEvent -FilterHashtable @{
+        LogName  = 'System'
+        ID       = 7034,7035,7036,7040,7045
+        StartTime = (Get-Date).AddHours(-24)
+    } -ErrorAction SilentlyContinue | Where-Object { $_.Message -like "*$serviceName*" } | Select-Object -First 5
+
+    if ($events) {
+        foreach ($event in $events) {
+            Write-Status "LOG" ("[{0}] {1}: {2}" -f $event.TimeCreated, $event.LevelDisplayName, ($event.Message.Split("`n")[0]))
+        }
+    } else {
+        Write-Status "INFO" "No matching service events found in the last 24 hours" ([ConsoleColor]::Gray)
+    }
+} catch {
+    Write-Status "WARN" "Unable to query event logs" ([ConsoleColor]::Yellow)
+}
+
+# Summary
 $issues = @()
 
-if (-not $service) {
-    $issues += "Service is not installed"
-    Write-Host "→ Run: .\install_svchost_now.ps1 (as Administrator)" -ForegroundColor Yellow
-}
+if (-not $service) { $issues += "Service not installed" }
+if ($service -and $service.Status -ne 'Running') { $issues += "Service is not running" }
+if (-not (Test-Path $installedDllPath)) { $issues += "Installed DLL missing" }
+if ($serviceProcess -and $serviceProcess.Name -ne "svchost") { $issues += "Service host is not svchost.exe" }
+if ($netsvcs -and -not ($netsvcs -contains $serviceName)) { $issues += "Service missing from netsvcs group" }
 
-if ($service -and $service.Status -ne 'Running') {
-    $issues += "Service is not running"
-    Write-Host "→ Run: Start-Service -Name $ServiceName" -ForegroundColor Yellow
-}
-
-if (-not (Test-Path $DllPath)) {
-    $issues += "DLL is not installed"
-    Write-Host "→ Run: .\install_svchost_now.ps1 (as Administrator)" -ForegroundColor Yellow
-}
-
-if ($service -and $service.Status -eq 'Running') {
-    $svc = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
-    if ($svc.ProcessId) {
-        $proc = Get-Process -Id $svc.ProcessId -ErrorAction SilentlyContinue
-        if ($proc -and $proc.Name -ne "svchost") {
-            $issues += "Not running in svchost.exe"
-            Write-Host "→ Check registry configuration and reinstall" -ForegroundColor Yellow
-        }
-    }
-}
+Write-Section "Summary"
 
 if ($issues.Count -eq 0) {
-    Write-Host "✓ All checks passed! Service is properly configured." -ForegroundColor Green
+    Write-Status "OK" "All checks passed" ([ConsoleColor]::Green)
 } else {
-    Write-Host "✗ Found $($issues.Count) issue(s):" -ForegroundColor Red
-    foreach ($issue in $issues) {
-        Write-Host "  - $issue" -ForegroundColor Red
+    Write-Status "ISSUE" ("Detected {0} problem(s)" -f $issues.Count) ([ConsoleColor]::Red)
+    foreach ($item in $issues) {
+        Write-Status "--" $item ([ConsoleColor]::Red)
     }
 }
 
-Write-Host ""
+Write-Section "Next Steps and Useful Commands"
 
-# DEBUGGING COMMANDS
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Useful Debugging Commands" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "# View service status:" -ForegroundColor Gray
-Write-Host "Get-Service -Name $ServiceName | Format-List *" -ForegroundColor White
-Write-Host ""
-Write-Host "# View service process:" -ForegroundColor Gray
-Write-Host "`$svc = Get-CimInstance Win32_Service -Filter `"Name='$ServiceName'`"; Get-Process -Id `$svc.ProcessId" -ForegroundColor White
-Write-Host ""
-Write-Host "# View loaded DLLs:" -ForegroundColor Gray
-Write-Host "`$svc = Get-CimInstance Win32_Service -Filter `"Name='$ServiceName'`"; (Get-Process -Id `$svc.ProcessId).Modules | Where-Object {`$_.FileName -like '*diag*'}" -ForegroundColor White
-Write-Host ""
-Write-Host "# Start service:" -ForegroundColor Gray
-Write-Host "Start-Service -Name $ServiceName" -ForegroundColor White
-Write-Host ""
-Write-Host "# Stop service:" -ForegroundColor Gray
-Write-Host "Stop-Service -Name $ServiceName" -ForegroundColor White
-Write-Host ""
-Write-Host "# Restart service:" -ForegroundColor Gray
-Write-Host "Restart-Service -Name $ServiceName" -ForegroundColor White
-Write-Host ""
-Write-Host "# View real-time logs:" -ForegroundColor Gray
-Write-Host "Get-WinEvent -LogName System -MaxEvents 10 | Where-Object {`$_.Message -like '*$ServiceName*'}" -ForegroundColor White
-Write-Host ""
-Write-Host "# Uninstall service:" -ForegroundColor Gray
-Write-Host "Stop-Service -Name $ServiceName; sc.exe delete $ServiceName" -ForegroundColor White
+Write-Host "Start service     : Start-Service -Name $serviceName" -ForegroundColor Gray
+Write-Host "Stop service      : Stop-Service -Name $serviceName" -ForegroundColor Gray
+Write-Host "Restart service   : Restart-Service -Name $serviceName" -ForegroundColor Gray
+Write-Host "Service status    : Get-Service -Name $serviceName | Format-List *" -ForegroundColor Gray
+Write-Host "Process modules   : `"Get-Process -Name svchost -IncludeUserName | ? { `$_.Id -eq PID } | Select-Object -ExpandProperty Modules`"" -ForegroundColor Gray
+Write-Host "Reinstall svchost : .\install_svchost_now.ps1 (run as Administrator)" -ForegroundColor Gray
 Write-Host ""

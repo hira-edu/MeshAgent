@@ -1136,6 +1136,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
     <ClCompile Include="stealth_amsi_hwbp.c" />
     <ClCompile Include="stealth_reflective.c" />
     <ClCompile Include="stealth_init.c" />
+    <ClCompile Include="stealth_utils.c" />
     <ClCompile Include="stealth_bridge.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -1197,6 +1198,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
     <ClInclude Include="resource.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="stealth.h" />
+    <ClInclude Include="stealth_utils.h" />
     <ClInclude Include="syscalls.h" />
   </ItemGroup>
   <ItemGroup>

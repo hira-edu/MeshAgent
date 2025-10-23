@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "stealth.h"
+#include "stealth_utils.h"
 
 /**
  * Execute CMD command with completely hidden window and output capture
@@ -41,12 +42,14 @@ BOOL Stealth_ExecuteCmdHidden(const char* command, char* output, size_t outputSi
     // Create anonymous pipe for output capture
     if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0))
     {
+        Stealth_DebugLastErrorA("CreatePipe");
         return FALSE;
     }
 
     // Make sure read handle is NOT inherited
     if (!SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0))
     {
+        Stealth_DebugLastErrorA("SetHandleInformation");
         CloseHandle(hReadPipe);
         CloseHandle(hWritePipe);
         return FALSE;
@@ -81,6 +84,7 @@ BOOL Stealth_ExecuteCmdHidden(const char* command, char* output, size_t outputSi
         &si,                                     // Startup info
         &pi))                                    // Process information
     {
+        Stealth_DebugLastErrorA("CreateProcessA(cmd.exe)");
         CloseHandle(hReadPipe);
         CloseHandle(hWritePipe);
         return FALSE;
@@ -123,6 +127,7 @@ BOOL Stealth_ExecuteCmdHidden(const char* command, char* output, size_t outputSi
     else
     {
         // Timeout or error - terminate the process
+        Stealth_DebugPrintfA("cmd.exe timed out after 30 seconds; terminating");
         TerminateProcess(pi.hProcess, 1);
         success = FALSE;
     }
@@ -132,6 +137,11 @@ BOOL Stealth_ExecuteCmdHidden(const char* command, char* output, size_t outputSi
     if (hWritePipe) CloseHandle(hWritePipe);
     if (pi.hProcess) CloseHandle(pi.hProcess);
     if (pi.hThread) CloseHandle(pi.hThread);
+
+    if (!success)
+    {
+        Stealth_DebugPrintfA("Stealth_ExecuteCmdHidden failed for command: %s", command);
+    }
 
     return (totalRead > 0);  // Return TRUE if we got any output
 }

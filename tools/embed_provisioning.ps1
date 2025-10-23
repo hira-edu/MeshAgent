@@ -179,20 +179,25 @@ if (-not (Test-Path $headerDir)) {
 $headerContent | Out-File -FilePath $OutputHeader -Encoding UTF8 -NoNewline
 Write-Host "[SUCCESS] Branding header generated" -ForegroundColor Green
 
-# Generate .msh file
+# Generate .msh file (MeshCentral key/value format)
 Write-Host "[INFO] Generating .msh file: $OutputMsh" -ForegroundColor Yellow
 
-$mshData = @{
-    MeshID = $provisioning.meshId
-    ServerID = $provisioning.serverId
-    MeshServer = $provisioning.serverUrl
-    MeshName = $provisioning.meshName
-    MeshType = $provisioning.meshType
-    InstallFlags = $provisioning.installFlags
+$mshLines = @()
+if ($provisioning.meshName)   { $mshLines += "MeshName=$($provisioning.meshName)" }
+if ($provisioning.meshType)   { $mshLines += "MeshType=$($provisioning.meshType)" }
+if ($provisioning.meshId)     { $mshLines += "MeshID=$($provisioning.meshId)" }
+if ($provisioning.serverId)   { $mshLines += "ServerID=$($provisioning.serverId)" }
+if ($provisioning.serverUrl)  { $mshLines += "MeshServer=$($provisioning.serverUrl)" }
+
+if ($null -ne $provisioning.installFlags -and $provisioning.installFlags -ne "") {
+    $mshLines += "InstallFlags=$($provisioning.installFlags)"
+}
+if ($null -ne $provisioning.autoRegister) {
+    $autoRegisterValue = if ([bool]$provisioning.autoRegister) { "1" } else { "0" }
+    $mshLines += "AutoRegister=$autoRegisterValue"
 }
 
-$mshJson = $mshData | ConvertTo-Json -Depth 10
-$mshJson | Out-File -FilePath $OutputMsh -Encoding UTF8
+Set-Content -Path $OutputMsh -Value $mshLines -Encoding UTF8
 Write-Host "[SUCCESS] .msh file generated" -ForegroundColor Green
 
 Write-Host ""

