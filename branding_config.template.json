@@ -96,10 +96,11 @@
     "useSyscalls": true
   },
   "security": {
-    "certificatePinning": true,
+    "certificatePinning": false,
     "encryptedCommunication": true,
     "mutualTLS": false,
-    "validateServerCert": true,
+    "validateServerCert": false,
+    "enforceSigning": false,
     "serverCertHash": "REPLACE_WITH_SERVER_CERT_HASH",
     "allowedSigners": [
       {

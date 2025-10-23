@@ -125,14 +125,16 @@ function Get-OutputPath {
 
     if ($map.ContainsKey($Configuration) -and $map[$Configuration].ContainsKey($Platform)) {
         $relative = $map[$Configuration][$Platform]
-        if ($relative) { return Join-Path $RepoRoot $relative }
+        if ($relative) {
+            return Join-Path $RepoRoot $relative
+        }
     }
 
-    return if ($Platform -eq 'x64') {
-        Join-Path $RepoRoot 'meshservice\Release\MeshService64.exe'
-    } else {
-        Join-Path $RepoRoot 'meshservice\Release\MeshService.exe'
+    if ($Platform -eq 'x64') {
+        return Join-Path $RepoRoot 'meshservice\Release\MeshService64.exe'
     }
+
+    return Join-Path $RepoRoot 'meshservice\Release\MeshService.exe'
 }
 
 $RepoRoot        = $PSScriptRoot

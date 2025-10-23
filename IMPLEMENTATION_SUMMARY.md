@@ -200,7 +200,7 @@ Persistence:    8/10  ✅ Auto-restart, failure recovery
 
 ✅ **Hide from Manual Inspection:**
 - Service name looks like real Windows component
-- Install path is System32 (trusted location)
+- Install path is ProgramData with system/hidden attributes
 - Version info matches Windows 10 build numbers
 
 ✅ **Survive Crashes & Tampering:**

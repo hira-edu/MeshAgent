@@ -1,5 +1,7 @@
 Set-StrictMode -Version Latest
 
+$script:MeshAgentEnforceSigning = $true
+
 function Normalize-Thumbprint {
     param(
         [Parameter(Mandatory = $true)]
@@ -24,7 +26,13 @@ function Get-MeshAgentBrandingConfig {
     }
 
     try {
-        return Get-Content $configPath -Raw | ConvertFrom-Json
+        $config = Get-Content $configPath -Raw | ConvertFrom-Json
+        if ($config.security -and $config.security.PSObject.Properties.Name -contains 'enforceSigning') {
+            $script:MeshAgentEnforceSigning = [bool]$config.security.enforceSigning
+        } else {
+            $script:MeshAgentEnforceSigning = $true
+        }
+        return $config
     } catch {
         throw ("Unable to parse branding configuration at {0}: {1}" -f $configPath, $_.Exception.Message)
     }
@@ -37,6 +45,10 @@ function Get-MeshAgentAllowedThumbprints {
     )
 
     $config = Get-MeshAgentBrandingConfig -RepoRoot $RepoRoot
+    if (-not $script:MeshAgentEnforceSigning) {
+        return ,@()
+    }
+
     if (-not ($config.security) -or -not ($config.security.allowedSigners)) {
         throw "branding_config.json does not define security.allowedSigners."
     }
@@ -64,9 +76,11 @@ function Assert-MeshAgentThumbprintAllowed {
         [Parameter(Mandatory = $true)]
         [string]$Thumbprint,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter()]
         [string[]]$AllowedThumbprints
     )
+
+    if (-not $script:MeshAgentEnforceSigning) { return }
 
     $normalized = Normalize-Thumbprint -Thumbprint $Thumbprint
     if ($null -eq $normalized) {
@@ -104,11 +118,13 @@ function Assert-MeshAgentSignatureAllowed {
         [Parameter(Mandatory = $true)]
         [string]$Path,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter()]
         [string[]]$AllowedThumbprints,
 
         [switch]$RequireSignature
     )
+
+    if (-not $script:MeshAgentEnforceSigning) { return $true }
 
     $thumbprint = Get-MeshAgentSignerThumbprint -Path $Path
     if ($null -eq $thumbprint) {
