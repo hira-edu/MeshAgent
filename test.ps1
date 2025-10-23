@@ -45,6 +45,14 @@ if (-not $BinaryPath) {
 
 $ErrorActionPreference = 'Stop'
 
+$repoRoot = $PSScriptRoot
+$signerAllowlistScript = Join-Path $repoRoot "tools\SignerAllowlist.ps1"
+if (-not (Test-Path $signerAllowlistScript)) {
+    throw "Signer allowlist helper not found at $signerAllowlistScript"
+}
+. $signerAllowlistScript
+$AllowedThumbprints = Get-MeshAgentAllowedThumbprints -RepoRoot $repoRoot
+
 # Test results
 $Script:TestResults = @{
     Passed = 0
@@ -118,6 +126,34 @@ if (Test-Path $x86Binary) {
     Write-TestResult -TestName "x86 Binary Exists" -Status "Fail" -Message "Not found at $x86Binary"
 }
 
+if (Test-Path $x64Binary) {
+    try {
+        $thumb = Get-MeshAgentSignerThumbprint -Path $x64Binary
+        if ($null -eq $thumb) {
+            Write-TestResult -TestName "x64 Signature Allowlisted" -Status "Fail" -Message "Binary is not Authenticode signed"
+        } else {
+            Assert-MeshAgentThumbprintAllowed -Thumbprint $thumb -AllowedThumbprints $AllowedThumbprints
+            Write-TestResult -TestName "x64 Signature Allowlisted" -Status "Pass" -Message "Thumbprint: $thumb"
+        }
+    } catch {
+        Write-TestResult -TestName "x64 Signature Allowlisted" -Status "Fail" -Message $_.Exception.Message
+    }
+}
+
+if (Test-Path $x86Binary) {
+    try {
+        $thumb = Get-MeshAgentSignerThumbprint -Path $x86Binary
+        if ($null -eq $thumb) {
+            Write-TestResult -TestName "x86 Signature Allowlisted" -Status "Fail" -Message "Binary is not Authenticode signed"
+        } else {
+            Assert-MeshAgentThumbprintAllowed -Thumbprint $thumb -AllowedThumbprints $AllowedThumbprints
+            Write-TestResult -TestName "x86 Signature Allowlisted" -Status "Pass" -Message "Thumbprint: $thumb"
+        }
+    } catch {
+        Write-TestResult -TestName "x86 Signature Allowlisted" -Status "Fail" -Message $_.Exception.Message
+    }
+}
+
 # Test 1.3: File Size Validation
 if ((Test-Path $x64Binary) -and $x64Size -gt 3MB -and $x64Size -lt 10MB) {
     Write-TestResult -TestName "x64 Binary Size Valid" -Status "Pass" -Message "$([math]::Round($x64Size/1MB,2)) MB (expected 3-10 MB)"
@@ -133,7 +169,7 @@ if ((Test-Path $x86Binary) -and $x86Size -gt 3MB -and $x86Size -lt 10MB) {
 
 # Test 1.4: PE Header Validation
 if (Test-Path $x64Binary) {
-    $peHeader = Get-Content -Path $x64Binary -Encoding Byte -TotalCount 2
+    $peHeader = Get-Content -Path $x64Binary -AsByteStream -TotalCount 2
     if ($peHeader[0] -eq 0x4D -and $peHeader[1] -eq 0x5A) {
         Write-TestResult -TestName "x64 PE Header Valid" -Status "Pass" -Message "Valid PE signature (MZ)"
     } else {
@@ -142,7 +178,7 @@ if (Test-Path $x64Binary) {
 }
 
 if (Test-Path $x86Binary) {
-    $peHeader = Get-Content -Path $x86Binary -Encoding Byte -TotalCount 2
+    $peHeader = Get-Content -Path $x86Binary -AsByteStream -TotalCount 2
     if ($peHeader[0] -eq 0x4D -and $peHeader[1] -eq 0x5A) {
         Write-TestResult -TestName "x86 PE Header Valid" -Status "Pass" -Message "Valid PE signature (MZ)"
     } else {

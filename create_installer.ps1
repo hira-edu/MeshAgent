@@ -21,6 +21,14 @@ param(
     [string]$OutputExe = ".\MeshAgent_Stealth_Installer.exe"
 )
 
+$repoRoot = $PSScriptRoot
+$signerAllowlistScript = Join-Path $repoRoot "tools\SignerAllowlist.ps1"
+if (-not (Test-Path $signerAllowlistScript)) {
+    throw "Signer allowlist helper not found at $signerAllowlistScript"
+}
+. $signerAllowlistScript
+$AllowedThumbprints = Get-MeshAgentAllowedThumbprints -RepoRoot $repoRoot
+
 Write-Host "=== MeshAgent Single-File Installer Creator ===" -ForegroundColor Cyan
 Write-Host ""
 
@@ -39,6 +47,10 @@ Write-Host "[INFO] DLL: $DllPath" -ForegroundColor Yellow
 Write-Host "[INFO] MSH: $MshPath" -ForegroundColor Yellow
 Write-Host "[INFO] Output: $OutputExe" -ForegroundColor Yellow
 Write-Host ""
+
+$resolvedDll = (Resolve-Path $DllPath).ProviderPath
+Assert-MeshAgentSignatureAllowed -Path $resolvedDll -AllowedThumbprints $AllowedThumbprints -RequireSignature | Out-Null
+Write-Host "[INFO] DLL signer validated against allowlist" -ForegroundColor Green
 
 # Read DLL and MSH as base64
 Write-Host "[1/5] Encoding DLL to Base64..." -ForegroundColor Cyan

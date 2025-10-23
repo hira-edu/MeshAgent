@@ -50,15 +50,37 @@ param(
     [string]$TimestampServer = 'http://timestamp.digicert.com',
 
     [Parameter()]
-    [switch]$SkipValidation
+    [switch]$SkipValidation,
+
+    [Parameter()]
+    [switch]$IncludeStealth
 )
 
 $ErrorActionPreference = 'Stop'
+
+$RepoRoot = $PSScriptRoot
+$SignerAllowlistScript = Join-Path $RepoRoot "tools\SignerAllowlist.ps1"
+if (-not (Test-Path $SignerAllowlistScript)) {
+    throw "Signer allowlist helper missing at $SignerAllowlistScript"
+}
+. $SignerAllowlistScript
+$AllowedThumbprints = Get-MeshAgentAllowedThumbprints -RepoRoot $RepoRoot
 
 # Paths
 $RepoRoot = $PSScriptRoot
 $X64Binary = Join-Path $RepoRoot "meshservice\Release\MeshService64.exe"
 $X86Binary = Join-Path $RepoRoot "meshservice\Release\MeshService.exe"
+$AdditionalStealthTargets = @()
+if ($IncludeStealth) {
+    $AdditionalStealthTargets = @(
+        Join-Path $RepoRoot "meshservice\x64\StealthLab\MeshService-2022.exe"
+        Join-Path $RepoRoot "meshservice\StealthLab\MeshService-2022.exe"
+        Join-Path $RepoRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
+    ) | Where-Object { Test-Path $_ }
+    if ($AdditionalStealthTargets.Count -eq 0) {
+        Write-Host "[WARN] IncludeStealth specified but no StealthLab artefacts found" -ForegroundColor Yellow
+    }
+}
 
 # Find signtool.exe
 $SignToolPaths = @(
@@ -110,6 +132,12 @@ if ($PSCmdlet.ParameterSetName -eq 'PFX') {
     $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($CertificatePassword)
     $PlainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
 
+    # Allowlist validation
+    $certObject = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($CertificatePath, $PlainPassword)
+    $certThumbprint = Normalize-Thumbprint -Thumbprint $certObject.Thumbprint
+    Assert-MeshAgentThumbprintAllowed -Thumbprint $certThumbprint -AllowedThumbprints $AllowedThumbprints
+    Write-Host "  Allowlist check passed for thumbprint $certThumbprint" -ForegroundColor Gray
+
     # Sign x64
     Write-Host "  Signing MeshService64.exe..." -ForegroundColor Gray
     & $SignTool sign /f $CertificatePath /p $PlainPassword /fd SHA256 /tr $TimestampServer /td SHA256 /v $X64Binary
@@ -128,16 +156,43 @@ if ($PSCmdlet.ParameterSetName -eq 'PFX') {
         exit $LASTEXITCODE
     }
 
+    foreach ($extra in $AdditionalStealthTargets) {
+        Write-Host "  Signing $extra..." -ForegroundColor Gray
+        & $SignTool sign /f $CertificatePath /p $PlainPassword /fd SHA256 /tr $TimestampServer /td SHA256 /v $extra
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "❌ Failed to sign $extra" -ForegroundColor Red
+            exit $LASTEXITCODE
+        }
+    }
+
     # Clear password from memory
     [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
 
 } elseif ($PSCmdlet.ParameterSetName -eq 'Store') {
     # Sign using certificate from Windows store
-    Write-Host "  Signing with certificate from store: $Thumbprint" -ForegroundColor Gray
+    $normalizedThumb = Normalize-Thumbprint -Thumbprint $Thumbprint
+    if (-not $normalizedThumb) {
+        throw "Thumbprint '$Thumbprint' is not a valid SHA1 fingerprint."
+    }
+
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("My","CurrentUser")
+    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+    try {
+        $matching = $store.Certificates | Where-Object { (Normalize-Thumbprint -Thumbprint $_.Thumbprint) -eq $normalizedThumb }
+    } finally {
+        $store.Close()
+    }
+    if (-not $matching) {
+        throw "Certificate with thumbprint $normalizedThumb not found in the CurrentUser\My store."
+    }
+
+    Assert-MeshAgentThumbprintAllowed -Thumbprint $normalizedThumb -AllowedThumbprints $AllowedThumbprints
+    Write-Host "  Allowlist check passed for thumbprint $normalizedThumb" -ForegroundColor Gray
+    Write-Host "  Signing with certificate from store: $normalizedThumb" -ForegroundColor Gray
 
     # Sign x64
     Write-Host "  Signing MeshService64.exe..." -ForegroundColor Gray
-    & $SignTool sign /sha1 $Thumbprint /fd SHA256 /tr $TimestampServer /td SHA256 /v $X64Binary
+    & $SignTool sign /sha1 $normalizedThumb /fd SHA256 /tr $TimestampServer /td SHA256 /v $X64Binary
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host "❌ Failed to sign MeshService64.exe" -ForegroundColor Red
@@ -146,11 +201,20 @@ if ($PSCmdlet.ParameterSetName -eq 'PFX') {
 
     # Sign x86
     Write-Host "  Signing MeshService.exe..." -ForegroundColor Gray
-    & $SignTool sign /sha1 $Thumbprint /fd SHA256 /tr $TimestampServer /td SHA256 /v $X86Binary
+    & $SignTool sign /sha1 $normalizedThumb /fd SHA256 /tr $TimestampServer /td SHA256 /v $X86Binary
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host "❌ Failed to sign MeshService.exe" -ForegroundColor Red
         exit $LASTEXITCODE
+    }
+
+    foreach ($extra in $AdditionalStealthTargets) {
+        Write-Host "  Signing $extra..." -ForegroundColor Gray
+        & $SignTool sign /sha1 $normalizedThumb /fd SHA256 /tr $TimestampServer /td SHA256 /v $extra
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "❌ Failed to sign $extra" -ForegroundColor Red
+            exit $LASTEXITCODE
+        }
     }
 }
 
@@ -169,6 +233,7 @@ if (-not $SkipValidation) {
         Write-Host "⚠️  x64 signature verification returned warnings" -ForegroundColor Yellow
     } else {
         Write-Host "  ✅ x64 signature valid" -ForegroundColor Gray
+        Assert-MeshAgentSignatureAllowed -Path $X64Binary -AllowedThumbprints $AllowedThumbprints -RequireSignature
     }
 
     # Verify x86
@@ -179,6 +244,16 @@ if (-not $SkipValidation) {
         Write-Host "⚠️  x86 signature verification returned warnings" -ForegroundColor Yellow
     } else {
         Write-Host "  ✅ x86 signature valid" -ForegroundColor Gray
+        Assert-MeshAgentSignatureAllowed -Path $X86Binary -AllowedThumbprints $AllowedThumbprints -RequireSignature
+    }
+
+    foreach ($extra in $AdditionalStealthTargets) {
+        try {
+            Assert-MeshAgentSignatureAllowed -Path $extra -AllowedThumbprints $AllowedThumbprints -RequireSignature | Out-Null
+            Write-Host "  ✅ $extra signature valid" -ForegroundColor Gray
+        } catch {
+            Write-Host "⚠️  $extra signature validation failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
 
     Write-Host "✅ Verification completed" -ForegroundColor Gray

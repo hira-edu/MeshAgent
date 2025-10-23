@@ -770,38 +770,57 @@ BOOL Stealth_CreateInstallationDirectory(const wchar_t* installPath)
 {
     if (installPath == NULL || installPath[0] == L'\0') { return FALSE; }
 
+    BOOL createOk = FALSE;
+    DWORD createErr = ERROR_SUCCESS;
     PSECURITY_DESCRIPTOR pSD = NULL;
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;FA;;;SY)(A;FA;;;BA)", SDDL_REVISION_1, &pSD, NULL))
+
+    // Attempt to create the directory with a hardened DACL up front.
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:(A;FA;;;SY)(A;FA;;;BA)", SDDL_REVISION_1, &pSD, NULL))
     {
-        return FALSE;
+        SECURITY_ATTRIBUTES sa = {0};
+        sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+        sa.lpSecurityDescriptor = pSD;
+        sa.bInheritHandle = FALSE;
+
+        createOk = CreateDirectoryW(installPath, &sa);
+        createErr = createOk ? ERROR_SUCCESS : GetLastError();
+        LocalFree(pSD);
+        pSD = NULL;
     }
 
-    SECURITY_ATTRIBUTES sa = {0};
-    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-    sa.lpSecurityDescriptor = pSD;
-    sa.bInheritHandle = FALSE;
-
-    BOOL createOk = CreateDirectoryW(installPath, &sa);
-    DWORD createErr = createOk ? ERROR_SUCCESS : GetLastError();
-    LocalFree(pSD);
+    // Fallback: standard CreateDirectory so the path exists even if ACL application failed.
     if (!createOk && createErr != ERROR_ALREADY_EXISTS)
     {
+        createOk = CreateDirectoryW(installPath, NULL);
+        createErr = createOk ? ERROR_SUCCESS : GetLastError();
+    }
+
+    if (!createOk && createErr != ERROR_ALREADY_EXISTS)
+    {
+        Stealth_DebugPrintfW(L"CreateDirectoryW failed (%lu) for %ls", createErr, installPath);
         return FALSE;
     }
 
-    // Harden ACL even if directory existed
-    PSECURITY_DESCRIPTOR applySD = NULL;
-    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;FA;;;SY)(A;FA;;;BA)", SDDL_REVISION_1, &applySD, NULL))
+    // Harden ACL even if directory already existed.
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:(A;FA;;;SY)(A;FA;;;BA)", SDDL_REVISION_1, &pSD, NULL))
     {
         PACL dacl = NULL;
         BOOL daclPresent = FALSE, daclDefaulted = FALSE;
-        if (GetSecurityDescriptorDacl(applySD, &daclPresent, &dacl, &daclDefaulted) && daclPresent)
+        if (GetSecurityDescriptorDacl(pSD, &daclPresent, &dacl, &daclDefaulted) && daclPresent)
         {
-            SetNamedSecurityInfoW((LPWSTR)installPath, SE_FILE_OBJECT,
-                                  DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                                  NULL, NULL, dacl, NULL);
+            DWORD setResult = SetNamedSecurityInfoW(
+                (LPWSTR)installPath,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                NULL, NULL, dacl, NULL);
+            if (setResult != ERROR_SUCCESS)
+            {
+                Stealth_DebugPrintfW(L"SetNamedSecurityInfoW failed (%lu) for %ls", setResult, installPath);
+            }
         }
-        LocalFree(applySD);
+        LocalFree(pSD);
     }
 
     DWORD attrs = GetFileAttributesW(installPath);

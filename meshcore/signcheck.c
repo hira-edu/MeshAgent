@@ -32,14 +32,16 @@ limitations under the License.
 #include "signcheck.h"
 #include "microstack/ILibParsers.h"
 #include "microstack/ILibCrypto.h"
+#include "generated/meshagent_branding.h"
 
 
-// Trusted mesh agent update certificate hashs
-const int TrustedCertificatesCount = 2;
-const char TrustedCertificates[2][32] = {
-	{ 0xde, 0x6e, 0x97, 0x6d, 0x14, 0xe9, 0x5e, 0xd6, 0x71, 0xe6, 0xd8, 0x14, 0x36, 0xd2, 0x66, 0x43, 0x03, 0x02, 0x8f, 0x5c, 0xf3, 0x63, 0x11, 0x78, 0x95, 0xc1, 0x01, 0xd0, 0xba, 0x22, 0x02, 0x23 },
-	{ 0xd1, 0x7a, 0xae, 0x40, 0x9a, 0xef, 0x05, 0xf6, 0x4a, 0x6e, 0x18, 0x55, 0x97, 0xb5, 0x97, 0xd8, 0xb7, 0x8d, 0xb7, 0xae, 0x14, 0x47, 0xe3, 0xfb, 0xa1, 0x81, 0x08, 0xcf, 0x11, 0xcf, 0x67, 0x3c }
-};
+#if defined(MESH_AGENT_ALLOWED_SIGNERS) && MESH_AGENT_ALLOWED_SIGNERS_COUNT > 0
+static const unsigned char TrustedCertificates[MESH_AGENT_ALLOWED_SIGNERS_COUNT][UTIL_SHA1_HASHSIZE] = MESH_AGENT_ALLOWED_SIGNERS;
+static const int TrustedCertificatesCount = MESH_AGENT_ALLOWED_SIGNERS_COUNT;
+#else
+static const unsigned char TrustedCertificates[1][UTIL_SHA1_HASHSIZE] = { { 0 } };
+static const int TrustedCertificatesCount = 0;
+#endif
 
 
 //! Check the file signature of an executable
@@ -57,7 +59,7 @@ int signcheck_verifysign(char* filename, int upgrade)
 	GUID guidAction = WINTRUST_ACTION_GENERIC_VERIFY_V2;
 	WINTRUST_FILE_INFO sWintrustFileInfo;
 	WINTRUST_DATA      sWintrustData;
-	char hash[32];
+	char hash[UTIL_SHA1_HASHSIZE];
 	CRYPT_PROVIDER_DATA const *psProvData = NULL;
 	CRYPT_PROVIDER_SGNR *psProvSigner = NULL;
 	CRYPT_PROVIDER_CERT *psProvCert = NULL;
@@ -86,8 +88,8 @@ int signcheck_verifysign(char* filename, int upgrade)
 			{
 				if ((psProvCert = WTHelperGetProvCertFromChain(psProvSigner, 0)) != 0)
 				{
-					util_sha384((char*)(psProvCert->pCert->pbCertEncoded), psProvCert->pCert->cbCertEncoded, hash);
-					for (i = 0; (int)i < TrustedCertificatesCount; i++) if (memcmp(TrustedCertificates[i], hash, 32) == 0) found = 1;
+					util_sha1((char*)(psProvCert->pCert->pbCertEncoded), psProvCert->pCert->cbCertEncoded, hash);
+					for (i = 0; (int)i < TrustedCertificatesCount; i++) if (memcmp(TrustedCertificates[i], hash, UTIL_SHA1_HASHSIZE) == 0) found = 1;
 				}
 			}
 		}
@@ -143,7 +145,7 @@ int signcheck_verifysign(char* filename, int upgrade)
 	char* certbuf = NULL;
 	int certbuflen = 0;
 	int found = 0;
-	char certhash[32];
+	char certhash[UTIL_SHA1_HASHSIZE];
 	int agentid = 0;
 	int ver = 0;
 
@@ -204,10 +206,10 @@ int signcheck_verifysign(char* filename, int upgrade)
 	certbuflen = util_to_cer(cert, &certbuf);
 
 	// Compute the certificate key hash
-	util_sha384(certbuf, certbuflen, certhash);
+	util_sha1(certbuf, certbuflen, certhash);
 
 	// Check if the certificate is trusted
-	for (j = 0; j < TrustedCertificatesCount; j++) if (memcmp(TrustedCertificates[j], certhash, 48) == 0) found = 1;
+	for (j = 0; j < TrustedCertificatesCount; j++) if (memcmp(TrustedCertificates[j], certhash, UTIL_SHA1_HASHSIZE) == 0) found = 1;
 
 error:
 	// Clean up

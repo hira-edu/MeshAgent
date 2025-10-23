@@ -43,6 +43,17 @@ function Write-Note {
     Write-Host ("    - {0}" -f $Message) -ForegroundColor $Color
 }
 
+function Assert-SignedArtifact {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-MeshAgentSignatureAllowed -Path $Path -AllowedThumbprints $AllowedThumbprints -RequireSignature | Out-Null
+    Write-Note ("Signature validated: {0}" -f $Description) ([ConsoleColor]::Green)
+}
+
+
 $projectRoot   = $PSScriptRoot
 $msbuildPath   = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
 $projectFile   = Join-Path $projectRoot "meshservice\MeshService-2022.vcxproj"
@@ -53,6 +64,14 @@ $outputDir     = Join-Path $projectRoot "dist"
 $toolsDir      = Join-Path $projectRoot "tools"
 $embedScript   = Join-Path $toolsDir "embed_provisioning_simple.ps1"
 $dumpbinPath   = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\dumpbin.exe"
+
+$signerAllowlistScript = Join-Path $toolsDir "SignerAllowlist.ps1"
+if (-not (Test-Path $signerAllowlistScript)) {
+    throw "Signer allowlist helper not found at $signerAllowlistScript"
+}
+. $signerAllowlistScript
+$AllowedThumbprints = Get-MeshAgentAllowedThumbprints -RepoRoot $projectRoot
+
 
 . (Join-Path $toolsDir "ResourceProbe.ps1")
 
@@ -129,6 +148,7 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Verifying build output" -
     $dllInfo = Get-Item $dllOutput
     Write-Note ("DLL size: {0:N0} bytes" -f $dllInfo.Length)
     Write-Note ("Timestamp: {0:u}" -f $dllInfo.LastWriteTimeUtc)
+    Assert-SignedArtifact -Path $dllOutput -Description 'StealthLab_DLL payload'
 
     if (Test-Path $dumpbinPath) {
         $exports = & $dumpbinPath /EXPORTS $dllOutput 2>&1 | Select-String "Stealth_SvchostServiceMain"
@@ -153,6 +173,7 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Preparing package content
     $script:packageDir = Join-Path $outputDir $packageName
     New-Item -Path $script:packageDir -ItemType Directory -Force | Out-Null
 
+    Assert-SignedArtifact -Path $dllOutput -Description 'diagsvc.dll source'
     Copy-Item -Path $dllOutput -Destination (Join-Path $script:packageDir "diagsvc.dll") -Force
 
     $stealthExeX64 = Join-Path $projectRoot "meshservice\x64\StealthLab\MeshService-2022.exe"
@@ -160,6 +181,7 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Preparing package content
         if (-not (Test-SvchostPayload -Path $stealthExeX64)) {
             throw "MeshService-2022.exe (x64) missing SVCHOSTDLL resource. Re-run build.ps1 -StealthLab."
         }
+        Assert-SignedArtifact -Path $stealthExeX64 -Description 'MeshService-2022.exe (x64)'
         Copy-Item -Path $stealthExeX64 -Destination (Join-Path $script:packageDir "MeshService64.exe") -Force
         Write-Note "Added MeshService64.exe (svchost-enabled executable)"
     }
@@ -172,6 +194,7 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Preparing package content
         if (-not (Test-SvchostPayload -Path $stealthExeWin32)) {
             throw "MeshService-2022.exe (Win32) missing SVCHOSTDLL resource. Re-run build.ps1 -StealthLab."
         }
+        Assert-SignedArtifact -Path $stealthExeWin32 -Description 'MeshService-2022.exe (Win32)'
         Copy-Item -Path $stealthExeWin32 -Destination (Join-Path $script:packageDir "MeshService.exe") -Force
         Write-Note "Added MeshService.exe (svchost-enabled Win32 executable)"
     }

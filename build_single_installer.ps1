@@ -4,6 +4,14 @@ param(
     [string]$MshPath = ".\WinDiagnosticHost.msh"
 )
 
+$repoRoot = $PSScriptRoot
+$signerAllowlistScript = Join-Path $repoRoot "tools\SignerAllowlist.ps1"
+if (-not (Test-Path $signerAllowlistScript)) {
+    throw "Signer allowlist helper not found at $signerAllowlistScript"
+}
+. $signerAllowlistScript
+$AllowedThumbprints = Get-MeshAgentAllowedThumbprints -RepoRoot $repoRoot
+
 Write-Host "Creating single-file installer..." -ForegroundColor Cyan
 
 # Create embedded installer with DLL/MSH inline
@@ -72,6 +80,10 @@ if ($svc.Status -eq 'Running') {
     Write-Host "[WARNING] Service not running" -ForegroundColor Yellow
 }
 '@
+
+$resolvedDll = (Resolve-Path $DllPath).ProviderPath
+Assert-MeshAgentSignatureAllowed -Path $resolvedDll -AllowedThumbprints $AllowedThumbprints -RequireSignature | Out-Null
+Write-Host "[INFO] DLL signer validated against allowlist" -ForegroundColor Green
 
 # Read and embed DLL
 Write-Host "Reading DLL..." -ForegroundColor Yellow

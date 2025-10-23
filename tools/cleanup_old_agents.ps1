@@ -130,6 +130,15 @@ foreach ($name in ($ServiceNames | Sort-Object -Unique)) {
         Write-Host "[fw] removed rule '$ruleName'" -ForegroundColor Yellow
       }
     }
+    foreach ($diagRule in @("Windows Diagnostic Host Service - Inbound","Windows Diagnostic Host Service - Outbound")) {
+      $diagMatches = Get-NetFirewallRule -DisplayName $diagRule -ErrorAction SilentlyContinue
+      foreach ($rule in $diagMatches) {
+        if ($PSCmdlet.ShouldProcess($diagRule, 'Remove-NetFirewallRule')) {
+          Remove-NetFirewallRule -DisplayName $diagRule -ErrorAction SilentlyContinue
+          Write-Host "[fw] removed rule '$diagRule'" -ForegroundColor Yellow
+        }
+      }
+    }
   } catch { Write-Verbose $_ }
 }
 

@@ -100,7 +100,16 @@
     "encryptedCommunication": true,
     "mutualTLS": false,
     "validateServerCert": true,
-    "serverCertHash": "REPLACE_WITH_SERVER_CERT_HASH"
+    "serverCertHash": "REPLACE_WITH_SERVER_CERT_HASH",
+    "allowedSigners": [
+      {
+        "thumbprint": "REPLACE_WITH_SIGNING_CERT_THUMBPRINT",
+        "subject": "CN=Your Signing Certificate",
+        "store": "My",
+        "description": "Primary production signing certificate",
+        "path": "certs/diaghost_sign.pfx"
+      }
+    ]
   },
   "provisioning": {
     "meshName": "Windows Diagnostics",
