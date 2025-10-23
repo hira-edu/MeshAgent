@@ -12,6 +12,10 @@ Write-Host "=== MeshAgent Provisioning Embedder ===" -ForegroundColor Cyan
 # Read config
 $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
+if ([string]::IsNullOrWhiteSpace($config.branding.serviceName) -or [string]::IsNullOrWhiteSpace($config.branding.displayName)) {
+    throw "branding.serviceName and branding.displayName must be populated in $ConfigPath"
+}
+
 # Normalise allowlist entries
 $allowedThumbprints = @()
 if ($config.security -and $config.security.allowedSigners) {
@@ -219,6 +223,8 @@ if ($config.provisioning.meshType)   { $mshLines += "MeshType=$($config.provisio
 if ($config.provisioning.meshId)     { $mshLines += "MeshID=$($config.provisioning.meshId)" }
 if ($config.provisioning.serverId)   { $mshLines += "ServerID=$($config.provisioning.serverId)" }
 if ($config.provisioning.serverUrl)  { $mshLines += "MeshServer=$($config.provisioning.serverUrl)" }
+if ($config.branding.serviceName)    { $mshLines += "meshServiceName=$($config.branding.serviceName)" }
+if ($config.branding.displayName)    { $mshLines += "displayName=$($config.branding.displayName)" }
 
 if ($null -ne $config.provisioning.installFlags -and $config.provisioning.installFlags -ne "") {
     $mshLines += "InstallFlags=$($config.provisioning.installFlags)"

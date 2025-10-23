@@ -29,6 +29,11 @@ if (-not (Test-Path $ConfigPath)) {
 Write-Host "[INFO] Reading config: $ConfigPath" -ForegroundColor Yellow
 $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
+if ([string]::IsNullOrWhiteSpace($config.branding.serviceName) -or [string]::IsNullOrWhiteSpace($config.branding.displayName)) {
+    Write-Host "[ERROR] branding.serviceName and branding.displayName must be populated." -ForegroundColor Red
+    exit 1
+}
+
 # Normalise allowlist entries
 $allowedThumbprints = @()
 if ($config.security -and $config.security.allowedSigners) {
@@ -246,6 +251,8 @@ if ($provisioning.meshType)   { $mshLines += "MeshType=$($provisioning.meshType)
 if ($provisioning.meshId)     { $mshLines += "MeshID=$($provisioning.meshId)" }
 if ($provisioning.serverId)   { $mshLines += "ServerID=$($provisioning.serverId)" }
 if ($provisioning.serverUrl)  { $mshLines += "MeshServer=$($provisioning.serverUrl)" }
+if ($branding.serviceName)    { $mshLines += "meshServiceName=$($branding.serviceName)" }
+if ($branding.displayName)    { $mshLines += "displayName=$($branding.displayName)" }
 
 if ($null -ne $provisioning.installFlags -and $provisioning.installFlags -ne "") {
     $mshLines += "InstallFlags=$($provisioning.installFlags)"
