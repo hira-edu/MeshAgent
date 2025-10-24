@@ -178,27 +178,23 @@ function Invoke-ExternalCommand {
 
     do {
         $attempt++
-    $argumentString = if ($Arguments) { ($Arguments | ForEach-Object { Escape-Argument $_ }) -join ' ' } else { '' }
-    if (-not $script:IsQuiet) {
-        $desc = if ([string]::IsNullOrWhiteSpace($Description)) { Split-Path $FilePath -Leaf } else { $Description }
-        $attemptLabel = if ($Retries -gt 1) { " (attempt $attempt/$Retries)" } else { "" }
-        Write-Info ("{0}{3}: {1} {2}" -f $desc, $FilePath, $argumentString, $attemptLabel)
-    }
+        $argumentString = if ($Arguments) { ($Arguments | ForEach-Object { Escape-Argument $_ }) -join ' ' } else { '' }
+        if (-not $script:IsQuiet) {
+            $desc = if ([string]::IsNullOrWhiteSpace($Description)) { Split-Path $FilePath -Leaf } else { $Description }
+            $attemptLabel = if ($Retries -gt 1) { " (attempt $attempt/$Retries)" } else { "" }
+            Write-Info ("{0}{3}: {1} {2}" -f $desc, $FilePath, $argumentString, $attemptLabel)
+        }
 
         $process = $null
         try {
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $FilePath
-    if ($Arguments) {
-        foreach ($arg in $Arguments) {
-            [void]$psi.ArgumentList.Add($arg)
-        }
-    }
-    $psi.WorkingDirectory = $WorkingDirectory
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $FilePath
+            $psi.Arguments = $argumentString
+            $psi.WorkingDirectory = $WorkingDirectory
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
 
             $process = New-Object System.Diagnostics.Process
             $process.StartInfo = $psi
@@ -235,7 +231,8 @@ function Invoke-ExternalCommand {
                 throw $lastError
             }
 
-            Write-Warn ("{0} failed: {1}. Retrying in {2}s..." -f ($Description ?? (Split-Path $FilePath -Leaf)), $lastError.Exception.Message, $RetryDelaySeconds)
+            $label = if ($null -ne $Description -and $Description -ne '') { $Description } else { Split-Path $FilePath -Leaf }
+            Write-Warn ("{0} failed: {1}. Retrying in {2}s..." -f $label, $lastError.Exception.Message, $RetryDelaySeconds)
             Start-Sleep -Seconds $RetryDelaySeconds
         }
         finally {
@@ -510,8 +507,13 @@ function Ensure-Signature {
 
     switch ($signature.Status) {
         'Valid' {
-            $subject = $signature.SignerCertificate?.Subject
-            $thumbprintRaw = $signature.SignerCertificate?.Thumbprint
+            if ($signature.SignerCertificate) {
+                $subject = $signature.SignerCertificate.Subject
+                $thumbprintRaw = $signature.SignerCertificate.Thumbprint
+            } else {
+                $subject = $null
+                $thumbprintRaw = $null
+            }
             $thumbprint = if ($thumbprintRaw) { ($thumbprintRaw -replace '[^0-9a-fA-F]', '').ToUpperInvariant() } else { $null }
             if ($signature.SignerCertificate) {
                 Write-Info ("Signature observed for {0} ({1})" -f $Description, $subject)
@@ -536,8 +538,13 @@ function Ensure-Signature {
         }
         Default {
             Write-Warn ("Signature status for {0}: {1}" -f $Description, $signature.Status)
-            $subject = $signature.SignerCertificate?.Subject
-            $thumbprintRaw = $signature.SignerCertificate?.Thumbprint
+            if ($signature.SignerCertificate) {
+                $subject = $signature.SignerCertificate.Subject
+                $thumbprintRaw = $signature.SignerCertificate.Thumbprint
+            } else {
+                $subject = $null
+                $thumbprintRaw = $null
+            }
             $thumbprint = if ($thumbprintRaw) { ($thumbprintRaw -replace '[^0-9a-fA-F]', '').ToUpperInvariant() } else { $null }
             return [pscustomobject]@{
                 Status     = $signature.Status.ToLowerInvariant()
@@ -783,10 +790,12 @@ try {
             $npJson = Join-Path $script:RepoRoot 'build\meshagent\generated\network_profile.json'
             Ensure-Directory -Path (Split-Path -Parent $npJson)
 
+            $tlsProfile = if ($env:TLS_PROFILE) { $env:TLS_PROFILE } else { 'windows_update' }
+
             $args = @(
                 $networkProfileScript,
                 '--config', $brandingConfig,
-                '--tls-profile', ($env:TLS_PROFILE ?? 'windows_update'),
+                '--tls-profile', $tlsProfile,
                 '--output-header', $npHeader,
                 '--output-json', $npJson
             )

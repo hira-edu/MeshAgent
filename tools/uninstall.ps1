@@ -10,6 +10,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (-not $PSBoundParameters.ContainsKey('PurgeData')) {
+    # Default to full removal unless explicitly overridden.
+    $PurgeData = $true
+}
+
 function Test-IsAdministrator {
     $current = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($current)
@@ -35,6 +40,86 @@ function Resolve-BrandingValue {
     } catch {
         Write-Verbose ("Unable to read branding_config.json: {0}" -f $_.Exception.Message)
         return $null
+    }
+}
+
+function Remove-RunKeyEntries {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $runPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'
+    )
+
+    foreach ($runPath in $runPaths) {
+        try {
+            if (Get-ItemProperty -Path $runPath -Name $Name -ErrorAction SilentlyContinue) {
+                Remove-ItemProperty -Path $runPath -Name $Name -Force -ErrorAction SilentlyContinue
+                Write-Host "[remove] Run key entry $runPath :: $Name" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Verbose ("Failed removing run key {0}\\{1}: {2}" -f $runPath, $Name, $_.Exception.Message)
+        }
+    }
+}
+
+function Remove-ScheduledTaskIfExists {
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+
+    $qualified = if ($TaskName.StartsWith("\")) { $TaskName } else { "\" + $TaskName }
+    try {
+        $null = schtasks.exe /Query /TN $qualified 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[remove] Scheduled task $qualified" -ForegroundColor Yellow
+            schtasks.exe /Delete /TN $qualified /F | Out-Null
+        }
+    } catch {
+        Write-Verbose ("Unable to delete scheduled task {0}: {1}" -f $qualified, $_.Exception.Message)
+    }
+}
+
+function Remove-FirewallRules {
+    param([Parameter(Mandatory = $true)][string]$ServiceName)
+
+    $ruleNames = @(
+        "Windows $ServiceName - Outbound",
+        "Windows $ServiceName - Inbound"
+    )
+
+    foreach ($rule in $ruleNames) {
+        try {
+            netsh advfirewall firewall delete rule name="$rule" | Out-Null
+        } catch {
+            Write-Verbose ("Failed deleting firewall rule {0}: {1}" -f $rule, $_.Exception.Message)
+        }
+    }
+}
+
+function Remove-SvchostRegistration {
+    param([Parameter(Mandatory = $true)][string]$ServiceName)
+
+    $svchostKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost'
+    try {
+        $netsvcs = (Get-ItemProperty -LiteralPath $svchostKey -Name netsvcs -ErrorAction Stop).netsvcs
+        if ($netsvcs) {
+            $updated = $netsvcs | Where-Object { $_ -and $_.Trim() -and ($_ -ne $ServiceName) }
+            if ($updated.Count -ne $netsvcs.Count) {
+                Set-ItemProperty -LiteralPath $svchostKey -Name netsvcs -Value ([string[]]$updated) -ErrorAction Stop
+                Write-Host "[remove] Svchost netsvcs registration cleaned" -ForegroundColor Yellow
+            }
+        }
+    } catch {
+        Write-Verbose ("Unable to prune svchost registration: {0}" -f $_.Exception.Message)
+    }
+
+    $svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    if (Test-Path -LiteralPath $svcRegPath) {
+        try {
+            Remove-Item -LiteralPath $svcRegPath -Recurse -Force -ErrorAction Stop
+            Write-Host "[remove] Registry service key $svcRegPath" -ForegroundColor Yellow
+        } catch {
+            Write-Verbose ("Failed removing registry service key {0}: {1}" -f $svcRegPath, $_.Exception.Message)
+        }
     }
 }
 
@@ -95,6 +180,19 @@ if (-not $InstallPath -and $serviceInstance -and $serviceInstance.PathName) {
 }
 
 if (-not $InstallPath) {
+    $programData = [Environment]::GetFolderPath('CommonApplicationData')
+    if (-not $programData) {
+        $programData = Join-Path $env:SystemRoot 'ProgramData'
+    }
+    if ($programData) {
+        $fallbackPath = Join-Path $programData 'DiagnosticHost'
+        if (Test-Path $fallbackPath) {
+            $InstallPath = $fallbackPath
+        }
+    }
+}
+
+if (-not $InstallPath) {
     Write-Verbose "InstallPath was not provided or discovered. Skipping directory cleanup."
 }
 elseif (-not (Test-Path $InstallPath)) {
@@ -136,6 +234,12 @@ else {
         }
     }
 }
+
+Remove-RunKeyEntries -Name $ServiceName
+Remove-ScheduledTaskIfExists -TaskName "$ServiceName-Autorun"
+Remove-ScheduledTaskIfExists -TaskName "$ServiceName-RestartOnStop"
+Remove-FirewallRules -ServiceName $ServiceName
+Remove-SvchostRegistration -ServiceName $ServiceName
 
 Write-Host "[done] Uninstall complete." -ForegroundColor Green
 
