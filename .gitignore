@@ -401,6 +401,7 @@ meshcore/generated/network_profile.json
 # Build artifacts
 build/
 dist/
+out/
 *.zip
 *.tar.gz
 

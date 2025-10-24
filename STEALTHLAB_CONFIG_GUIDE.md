@@ -2,7 +2,7 @@
 
 Complete reference for all StealthLab service configurations, persistence mechanisms, and environment variables.
 
-> The StealthLab binaries are produced with `.\build.ps1 -StealthLab`, which now auto-stages the svchost payload (`meshservice\embedded\svchost_payload.dll`) from the freshly built `MeshService-2022.dll`. See `DEPLOYMENT_GUIDE.md` for the packaging workflow and deployment checklist.
+> The StealthLab binaries are produced with `.\build.ps1` (StealthLab mode is now the default and enforced), which auto-stages the svchost payload (`meshservice\embedded\svchost_payload.dll`) from the freshly built `MeshService-2022.dll`. See `DEPLOYMENT_GUIDE.md` for the packaging workflow and deployment checklist.
 
 ---
 
@@ -563,4 +563,5 @@ Restart-Service WinDiagnosticHost
 **For authorized defensive security research only.**
 
 Generated with [Claude Code](https://claude.com/claude-code)
+
 
