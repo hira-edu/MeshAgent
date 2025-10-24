@@ -957,8 +957,15 @@ try {
                 }
 
                 try {
-                    $bytes = Get-Content -LiteralPath $output.Path -Encoding Byte -TotalCount 2
-                    if ($bytes.Length -lt 2 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+                    $buffer = New-Object byte[] 2
+                    $read = 0
+                    $stream = [System.IO.File]::Open($output.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    try {
+                        $read = $stream.Read($buffer, 0, 2)
+                    } finally {
+                        $stream.Dispose()
+                    }
+                    if ($read -lt 2 -or $buffer[0] -ne 0x4D -or $buffer[1] -ne 0x5A) {
                         Write-Warn ("{0} failed PE header signature check." -f $output.RelativePath)
                     } else {
                         Write-Ok ("PE header valid for {0}" -f $output.RelativePath)
