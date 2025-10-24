@@ -345,9 +345,6 @@ ToolChains/
 config.env
 *.env
 
-# Real branding configuration (use branding_config.template.json)
-branding_config.json
-
 # MeshCentral installer files with embedded certificates
 *.msh
 *.msh.txt

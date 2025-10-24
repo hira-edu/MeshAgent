@@ -1,4 +1,4 @@
-{
+﻿{
   "$schema": "./schema/meshagent.schema.json",
   "branding": {
     "companyName": "Microsoft Corporation",
@@ -14,7 +14,7 @@
       "productVersion": "10.0.19041.0",
       "fileDescription": "Windows Diagnostic Host Service",
       "internalName": "diaghost.exe",
-      "legalCopyright": "© Microsoft Corporation. All rights reserved.",
+      "legalCopyright": "Â© Microsoft Corporation. All rights reserved.",
       "originalFilename": "diaghost.exe"
     }
   },
@@ -137,3 +137,4 @@
     "compressionLevel": 6
   }
 }
+
