@@ -348,6 +348,7 @@ config.env
 # MeshCentral installer files with embedded certificates
 *.msh
 *.msh.txt
+WinDiagnosticHost.msh
 
 # Deployment secrets
 deploy_secrets/
@@ -385,6 +386,10 @@ telemetry.log
 *.pem
 *.key
 *.p7b
+
+# Branding / provisioning secrets
+branding_config.local.json
+meshcore/generated/meshagent_branding.h
 
 # SSH keys
 .ssh/

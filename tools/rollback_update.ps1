@@ -12,6 +12,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$brandingHelper = Join-Path $repoRoot "tools\BrandingConfig.ps1"
+if (-not (Test-Path -LiteralPath $brandingHelper)) {
+    throw "Branding helper missing at $brandingHelper"
+}
+. $brandingHelper
 
 function Test-IsAdministrator {
     $current = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -22,17 +28,14 @@ function Test-IsAdministrator {
 function Resolve-BrandingValue {
     param([string]$PropertyName)
 
-    $configPath = Join-Path $PSScriptRoot "..\branding_config.json"
-    if (-not (Test-Path $configPath)) { return $null }
-
     try {
-        $config = Get-Content -Path $configPath -Raw | ConvertFrom-Json -Depth 10
+        $config = (Get-BrandingConfig -RepoRoot $repoRoot -Quiet).Config
         switch ($PropertyName) {
             'serviceName' { return $config.branding.serviceName }
             default { return $null }
         }
     } catch {
-        Write-Verbose ("Unable to parse branding_config.json: {0}" -f $_.Exception.Message)
+        Write-Verbose ("Unable to load branding configuration: {0}" -f $_.Exception.Message)
         return $null
     }
 }
@@ -66,7 +69,7 @@ if (-not $ServiceName) {
     $ServiceName = Resolve-BrandingValue -PropertyName 'serviceName'
 }
 if (-not $ServiceName) {
-    throw "ServiceName was not provided and could not be inferred from branding_config.json."
+    throw "ServiceName was not provided and could not be inferred from branding configuration."
 }
 
 $serviceInstance = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue

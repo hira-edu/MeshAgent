@@ -5,6 +5,12 @@ param(
 )
 
 $repoRoot = $PSScriptRoot
+$brandingHelper = Join-Path $repoRoot "tools\BrandingConfig.ps1"
+if (-not (Test-Path -LiteralPath $brandingHelper)) {
+    throw "Branding helper missing at $brandingHelper"
+}
+. $brandingHelper
+$brandingConfigInfo = Get-BrandingConfig -RepoRoot $repoRoot -Quiet
 $validateScript = Join-Path $repoRoot "tools\validate_branding_config.ps1"
 $schemaPath = Join-Path $repoRoot "schema\meshagent.schema.json"
 $brandingHeaderPath = Join-Path $repoRoot "meshcore\generated\meshagent_branding.h"
@@ -20,7 +26,7 @@ if (Test-Path $validateScript) {
         '-NoProfile',
         '-ExecutionPolicy','Bypass',
         '-File', $validateScript,
-        '-ConfigPath', (Join-Path $repoRoot "branding_config.json"),
+        '-ConfigPath', $brandingConfigInfo.Path,
         '-SchemaPath', $schemaPath,
         '-Quiet'
     )

@@ -2,7 +2,7 @@
 
 This guide describes the current, fully automated workflow for producing StealthLab-ready binaries and deploying them to your MeshCentral instance.
 
-> **Use hostnames, not bare IPs.** Keep the MeshCentral URLs (`agents.high.support`, `relay.high.support`, etc.) in both `branding_config.json` and the MeshCentral portal so the TLS pins remain valid.
+> **Use hostnames, not bare IPs.** Keep the MeshCentral URLs (`agents.high.support`, `relay.high.support`, etc.) in both your local `branding_config.local.json` and the MeshCentral portal so the TLS pins remain valid.
 
 ---
 
@@ -32,7 +32,7 @@ GitHub Actions remains available for automation, but the on-device workflow is t
 - PowerShell 7+ (pwsh) recommended; Windows PowerShell 5.1 supported.
 - Python 3.10+ on the PATH (used by helper scripts).
 - Git submodules initialised:  `git submodule update --init --recursive`
-- `branding_config.json` populated with your production values (see the updated template later in this document).
+- `branding_config.local.json` populated with your production values (see the updated template later in this document). The tracked `branding_config.json` now contains only placeholders.
 - Validate branding before building:
   ```powershell
   pwsh ./tools/validate_branding_config.ps1
@@ -56,7 +56,7 @@ GitHub Actions remains available for automation, but the on-device workflow is t
    .\build.ps1
    ```
    The script will:
-   - Revalidate `branding_config.json` and regenerate `meshagent_branding.h`/`WinDiagnosticHost.msh`.
+   - Revalidate your branding configuration (preferring `branding_config.local.json`) and regenerate `meshagent_branding.h`/`WinDiagnosticHost.msh`.
    - Rebuild `MeshService-2022.dll` under `meshservice\x64\StealthLab_DLL`.
    - Copy that DLL into `meshservice\embedded\svchost_payload.dll` (no manual staging required).
    - Emit StealthLab executables for x64 and Win32 and print their sizes plus MD5 hashes.
@@ -106,7 +106,7 @@ pwsh .\test.ps1 -BinaryPath .\dist\MeshAgent_Stealth_YYYYMMDD_HHMMSS
 pwsh .\test_comprehensive.ps1
 ```
 
-`test.ps1` checks branding JSON/schema compliance, embedded service/display names, Mesh/Server IDs, metadata versioning, and optional signer allow-list entries. Warnings about missing Authenticode signatures are expected until you sign the binaries. Failures indicate a mismatch between `branding_config.json` and the compiled artefacts.
+`test.ps1` checks branding JSON/schema compliance, embedded service/display names, Mesh/Server IDs, metadata versioning, and optional signer allow-list entries. Warnings about missing Authenticode signatures are expected until you sign the binaries. Failures indicate a mismatch between your branding configuration and the compiled artefacts.
 
 ### 2. Manual Artifact Pickup
 
@@ -257,7 +257,7 @@ For cross-compiling with MinGW-w64 (e.g., on MSYS2):
   | Warning | Action |
   |---------|--------|
   | `strings` not available | Install GNU binutils within MSYS2 (`pacman -S binutils`). |
-  | Mesh/Server ID missing in log | Re-run `pwsh ./tools/embed_provisioning_simple.ps1` before building; confirm `branding_config.json` values. |
+| Mesh/Server ID missing in log | Re-run `pwsh ./tools/embed_provisioning_simple.ps1` before building; confirm `branding_config.local.json` values. |
   | `osslsigncode verify` failure | Sign the binaries (or disable the check) prior to distribution; local unsigned builds may skip this step. |
 
 ---
@@ -268,7 +268,7 @@ For cross-compiling with MinGW-w64 (e.g., on MSYS2):
 |---------|--------|
 | `svchost_payload.dll` not updated | Re-run `.\\build.ps1`; verify hashes between `meshservice\x64\StealthLab_DLL\MeshService-2022.dll` and `meshservice\embedded\svchost_payload.dll`. |
 | MeshCentral still serving old agent | Confirm upload path, restart MeshCentral, and clear CDN/cache if fronted by a proxy. |
-| Agent fails to enrol | Ensure `branding_config.json` `provisioning.serverUrl` matches the domain you uploaded to, and that the server certificate hash is current. |
+| Agent fails to enrol | Ensure `branding_config.local.json` `provisioning.serverUrl` matches the domain you uploaded to, and that the server certificate hash is current. |
 | Build script exits early | Check that Visual Studio 2022 MSBuild is installed and available at `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe`. |
 | Health check reports missing binaries | Re-run `build_complete.ps1 -RunHealthCheck` with `-HealthCheckArgs @{ InstallPath = ''C:\\ProgramData\\DiagnosticHost'' }` (or your deployment path). |
 
@@ -276,7 +276,7 @@ For cross-compiling with MinGW-w64 (e.g., on MSYS2):
 
 ## Updated Configuration Template
 
-The companion `branding_config.template.json` now mirrors every field consumed by the build scripts. Duplicate it to `branding_config.json` and replace the placeholder values:
+The companion `branding_config.template.json` now mirrors every field consumed by the build scripts. Duplicate it to `branding_config.local.json` (git-ignored) and replace the placeholder values:
 
 ```jsonc
 {

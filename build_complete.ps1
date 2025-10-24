@@ -92,6 +92,17 @@ $script:HealthReportPath = $null
 $script:HealthSummary = $null
 $script:Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
+$brandingHelperScript = Join-Path $script:RepoRoot 'tools\BrandingConfig.ps1'
+if (-not (Test-Path -LiteralPath $brandingHelperScript)) {
+    throw "Branding helper missing at $brandingHelperScript"
+}
+. $brandingHelperScript
+$brandingConfigInfo = Get-BrandingConfig -RepoRoot $script:RepoRoot -Quiet
+$script:BrandingConfigPath = $brandingConfigInfo.Path
+if (-not $script:IsQuiet) {
+    Write-Host ("[INFO] Branding config : {0}" -f $script:BrandingConfigPath) -ForegroundColor Gray
+}
+
 function Write-Section {
     param([string]$Title)
     if (-not $script:IsQuiet) {
@@ -300,7 +311,7 @@ $steps.Add([pscustomobject]@{
         $reportPath = Join-Path $script:VerificationDir 'branding_diff_report.json'
 
         & $validateScript `
-            -ConfigPath (Join-Path $script:RepoRoot 'branding_config.json') `
+            -ConfigPath $script:BrandingConfigPath `
             -SchemaPath (Join-Path $script:RepoRoot 'schema\meshagent.schema.json') `
             -BinaryPaths ([string]::Join(';', $candidates)) `
             -ReportPath $reportPath -Quiet

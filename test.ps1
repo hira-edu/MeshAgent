@@ -58,16 +58,22 @@ if (-not (Test-Path $signerAllowlistScript)) {
 }
 . $signerAllowlistScript
 $AllowedThumbprints = Get-MeshAgentAllowedThumbprints -RepoRoot $repoRoot
-$brandingConfigPath = Join-Path $repoRoot "branding_config.json"
+$brandingHelper = Join-Path $repoRoot "tools\BrandingConfig.ps1"
+if (-not (Test-Path -LiteralPath $brandingHelper)) {
+    throw "Branding helper missing at $brandingHelper"
+}
+. $brandingHelper
 $brandingConfig = $null
-if (Test-Path $brandingConfigPath) {
-    try {
-        $brandingConfig = Get-Content $brandingConfigPath -Raw | ConvertFrom-Json
-    } catch {
-        Write-Host ("[WARN] Unable to parse branding_config.json: {0}" -f $_) -ForegroundColor Yellow
-    }
-} else {
-    Write-Host "[WARN] branding_config.json not found; branding consistency checks will be skipped." -ForegroundColor Yellow
+$brandingConfigPath = $null
+try {
+    $brandingConfigInfo = Get-BrandingConfig -RepoRoot $repoRoot -Quiet
+    $brandingConfigPath = $brandingConfigInfo.Path
+    $brandingConfig = $brandingConfigInfo.Config
+} catch {
+    Write-Host ("[WARN] Unable to load branding configuration: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+}
+if (-not $brandingConfig) {
+    Write-Host "[WARN] Branding configuration missing; branding consistency checks will be skipped." -ForegroundColor Yellow
 }
 
 $mshPath = Join-Path $repoRoot "WinDiagnosticHost.msh"
@@ -247,7 +253,7 @@ function Test-VersionField {
 
     $testName = "{0} {1} matches branding" -f $BinaryLabel, $Description
     if ([string]::IsNullOrWhiteSpace($Expected)) {
-        Write-TestResult -TestName $testName -Status "Warning" -Message "Expected value missing from branding_config.json"
+        Write-TestResult -TestName $testName -Status "Warning" -Message "Expected value missing from branding configuration"
         return
     }
 
@@ -375,7 +381,9 @@ Write-Host ""
 Write-Host "Test Suite 2: Branding Configuration" -ForegroundColor Cyan
 Write-Host "------------------------------------" -ForegroundColor Cyan
 
-$brandingConfigPath = Join-Path $PSScriptRoot "branding_config.json"
+if (-not $brandingConfigPath) {
+    $brandingConfigPath = Join-Path $PSScriptRoot "branding_config.json"
+}
 $brandingHeaderPath = Join-Path $PSScriptRoot "meshcore\generated\meshagent_branding.h"
 
 # Test 2.1: Branding Config Exists
@@ -431,7 +439,7 @@ if (Test-Path $brandingConfigPath) {
         Write-TestResult -TestName "Branding Config Valid JSON" -Status "Fail" -Message "JSON parsing error: $_"
     }
 } else {
-    Write-TestResult -TestName "Branding Config Exists" -Status "Fail" -Message "Not found at $brandingConfigPath"
+    Write-TestResult -TestName "Branding Config Exists" -Status "Fail" -Message "Branding configuration not found at $brandingConfigPath"
 }
 
 # Test 2.6: Branding Header Generated
@@ -529,7 +537,7 @@ if ($brandingConfig) {
 
     Write-Host ""
 } else {
-    Write-TestResult -TestName "Branding configuration available" -Status "Warning" -Message "branding_config.json missing; branding consistency checks skipped."
+    Write-TestResult -TestName "Branding configuration available" -Status "Warning" -Message "Branding configuration missing; branding consistency checks skipped."
     Write-Host ""
 }
 #endregion

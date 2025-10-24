@@ -16,7 +16,7 @@
     Path to binary directory. Default: meshservice\Release
 
 .PARAMETER ConfigPath
-    Path to branding_config.json. Default: branding_config.json
+    Optional path to the branding configuration JSON (defaults to branding_config.local.json when present)
 
 .PARAMETER ReportPath
     Optional path to write JSON verification report
@@ -65,8 +65,15 @@ $repoRoot = $PSScriptRoot
 if (-not $BinaryPath) {
     $BinaryPath = Join-Path $repoRoot "meshservice\Release"
 }
+$brandingHelper = Join-Path $repoRoot "tools\BrandingConfig.ps1"
+if (-not (Test-Path -LiteralPath $brandingHelper)) {
+    throw "Branding helper missing at $brandingHelper"
+}
+. $brandingHelper
 if (-not $ConfigPath) {
-    $ConfigPath = Join-Path $repoRoot "branding_config.json"
+    $ConfigPath = Resolve-BrandingConfigPath -RepoRoot $repoRoot
+} else {
+    $ConfigPath = Resolve-BrandingConfigPath -RepoRoot $repoRoot -ConfigPath $ConfigPath
 }
 
 # Test results structure

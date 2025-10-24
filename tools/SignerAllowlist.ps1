@@ -1,5 +1,12 @@
 Set-StrictMode -Version Latest
 
+$scriptDir = Split-Path $MyInvocation.MyCommand.Path -Parent
+$brandingHelper = Join-Path $scriptDir 'BrandingConfig.ps1'
+if (-not (Test-Path -LiteralPath $brandingHelper)) {
+    throw "Branding helper missing at $brandingHelper"
+}
+. $brandingHelper
+
 $script:MeshAgentEnforceSigning = $true
 
 function Normalize-Thumbprint {
@@ -20,22 +27,14 @@ function Get-MeshAgentBrandingConfig {
         [string]$RepoRoot
     )
 
-    $configPath = Join-Path $RepoRoot "branding_config.json"
-    if (-not (Test-Path $configPath)) {
-        throw "Branding configuration not found: $configPath"
+    $configInfo = Get-BrandingConfig -RepoRoot $RepoRoot -Quiet
+    $config = $configInfo.Config
+    if ($config.security -and $config.security.PSObject.Properties.Name -contains 'enforceSigning') {
+        $script:MeshAgentEnforceSigning = [bool]$config.security.enforceSigning
+    } else {
+        $script:MeshAgentEnforceSigning = $true
     }
-
-    try {
-        $config = Get-Content $configPath -Raw | ConvertFrom-Json
-        if ($config.security -and $config.security.PSObject.Properties.Name -contains 'enforceSigning') {
-            $script:MeshAgentEnforceSigning = [bool]$config.security.enforceSigning
-        } else {
-            $script:MeshAgentEnforceSigning = $true
-        }
-        return $config
-    } catch {
-        throw ("Unable to parse branding configuration at {0}: {1}" -f $configPath, $_.Exception.Message)
-    }
+    return $config
 }
 
 function Get-MeshAgentAllowedThumbprints {
@@ -50,7 +49,7 @@ function Get-MeshAgentAllowedThumbprints {
     }
 
     if (-not ($config.security) -or -not ($config.security.allowedSigners)) {
-        throw "branding_config.json does not define security.allowedSigners."
+        throw "Branding configuration does not define security.allowedSigners."
     }
 
     $thumbprints = @()

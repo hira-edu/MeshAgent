@@ -28,7 +28,7 @@ limitations under the License.
 #include "signcheck.h"
 #include "meshdefines.h"
 #include "meshinfo.h"
-#include "generated/meshagent_branding.h"
+#include "config/group_default.h"
 #include "microscript/ILibDuktape_Commit.h"
 #include "microscript/ILibDuktape_Polyfills.h"
 #include "microscript/ILibDuktape_Helpers.h"

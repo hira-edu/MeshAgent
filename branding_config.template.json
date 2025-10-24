@@ -1,6 +1,6 @@
 {
   "$schema": "./schema/meshagent.schema.json",
-  "_comment": "TEMPLATE FILE – copy to branding_config.json and override the placeholder values for your environment",
+  "_comment": "TEMPLATE FILE – copy to branding_config.local.json and override the placeholder values for your environment",
   "branding": {
     "companyName": "Microsoft Corporation",
     "serviceName": "WinDiagnosticHost",

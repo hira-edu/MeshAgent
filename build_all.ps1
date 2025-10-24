@@ -78,6 +78,15 @@ $script:GitCommit = $null
 $script:HasSvchostProbe = $false
 $script:HealthReportPath = $null
 $script:PackageManifestPath = $null
+
+$brandingHelperScript = Join-Path $script:RepoRoot 'tools\BrandingConfig.ps1'
+if (-not (Test-Path -LiteralPath $brandingHelperScript)) {
+    throw "Branding helper missing at $brandingHelperScript"
+}
+. $brandingHelperScript
+$brandingConfigInfo = Get-BrandingConfig -RepoRoot $script:RepoRoot -Quiet
+$script:BrandingConfigPath = $brandingConfigInfo.Path
+Write-Info ("Branding config : {0}" -f $script:BrandingConfigPath)
 $script:BrandingServiceName = $null
 $script:ResourceProbeScript = $null
 
@@ -386,7 +395,7 @@ if (-not $SkipPackage) {
         }
         $digestLines = New-Object System.Collections.Generic.List[string]
         $brandingObject = $null
-        $brandingConfigPath = Join-Path $script:RepoRoot 'branding_config.json'
+        $brandingConfigPath = $script:BrandingConfigPath
         if (Test-Path -LiteralPath $brandingConfigPath) {
             try {
                 $brandingObject = Get-Content -Path $brandingConfigPath -Raw | ConvertFrom-Json -Depth 10
@@ -401,7 +410,7 @@ if (-not $SkipPackage) {
                     }
                 }
             } catch {
-                Write-Warn ("Unable to parse branding_config.json: {0}" -f $_.Exception.Message)
+                Write-Warn ("Unable to parse branding configuration at {0}: {1}" -f $brandingConfigPath, $_.Exception.Message)
             }
         }
 
@@ -446,7 +455,7 @@ if (-not $SkipPackage) {
 
         $artefacts += @(
             @{ Source = Join-Path $script:RepoRoot 'WinDiagnosticHost.msh'; Destination = 'WinDiagnosticHost.msh'; Required = $true;  Kind = 'data';   ValidateSvchost = $false; Description = 'Provisioning payload (.msh)' },
-            @{ Source = Join-Path $script:RepoRoot 'branding_config.json'; Destination = 'branding_config.json'; Required = $false; Kind = 'data';   ValidateSvchost = $false; Description = 'Branding configuration used for build' },
+            @{ Source = $script:BrandingConfigPath; Destination = 'branding_config.local.json'; Required = $false; Kind = 'data';   ValidateSvchost = $false; Description = 'Branding configuration used for build' },
             @{ Source = Join-Path $script:RepoRoot 'deploy_stealth_agent.ps1'; Destination = 'install.ps1'; Required = $false; Kind = 'script'; ValidateSvchost = $false; Description = 'Installer helper script' },
             @{ Source = Join-Path $script:RepoRoot 'audit_and_debug_svchost.ps1'; Destination = 'tools\audit_and_debug_svchost.ps1'; Required = $false; Kind = 'script'; ValidateSvchost = $false; Description = 'SVCHOST payload audit helper' },
             @{ Source = Join-Path $script:RepoRoot 'IMPLEMENTATION_SUMMARY.md'; Destination = 'docs\IMPLEMENTATION_SUMMARY.md'; Required = $false; Kind = 'doc'; ValidateSvchost = $false; Description = 'Implementation summary' },

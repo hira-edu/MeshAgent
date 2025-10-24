@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     This script validates that built binaries correctly contain the branding
-    configuration specified in branding_config.json. It performs multiple checks:
+    configuration specified in branding_config.local.json (fallback: branding_config.json). It performs multiple checks:
     - Service name embedding
     - Network endpoint validation
     - Version information
@@ -16,7 +16,7 @@
     Path to the binary file or directory containing binaries to verify
 
 .PARAMETER ConfigPath
-    Path to branding_config.json (default: ../branding_config.json)
+    Optional path to a branding configuration JSON file (defaults to branding_config.local.json when present)
 
 .PARAMETER Detailed
     Show detailed verification output
@@ -49,9 +49,15 @@ $ErrorActionPreference = 'Stop'
 # Initialize paths
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = Split-Path -Parent $scriptDir
-
+$brandingHelper = Join-Path $projectRoot "tools\BrandingConfig.ps1"
+if (-not (Test-Path -LiteralPath $brandingHelper)) {
+    throw "Branding helper missing at $brandingHelper"
+}
+. $brandingHelper
 if (-not $ConfigPath) {
-    $ConfigPath = Join-Path $projectRoot "branding_config.json"
+    $ConfigPath = Resolve-BrandingConfigPath -RepoRoot $projectRoot
+} else {
+    $ConfigPath = Resolve-BrandingConfigPath -RepoRoot $projectRoot -ConfigPath $ConfigPath
 }
 
 # Load helper scripts if available

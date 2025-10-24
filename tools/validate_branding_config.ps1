@@ -1,7 +1,7 @@
 # Requires: PowerShell 5.1+
 [CmdletBinding()]
 param(
-    [string]$ConfigPath = "../branding_config.json",
+    [string]$ConfigPath,
     [string]$SchemaPath = "../schema/meshagent.schema.json",
     [string[]]$BinaryPaths,
     [string]$ReportPath,
@@ -10,6 +10,19 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$scriptDir = Split-Path $MyInvocation.MyCommand.Definition -Parent
+$repoRoot = Split-Path $scriptDir -Parent
+$brandingHelper = Join-Path $repoRoot "tools\BrandingConfig.ps1"
+if (-not (Test-Path -LiteralPath $brandingHelper)) {
+    throw "Branding helper missing at $brandingHelper"
+}
+. $brandingHelper
+if (-not $ConfigPath) {
+    $ConfigPath = Resolve-BrandingConfigPath -RepoRoot $repoRoot
+} else {
+    $ConfigPath = Resolve-BrandingConfigPath -RepoRoot $repoRoot -ConfigPath $ConfigPath
+}
 
 $script:ValidationErrors = @()
 $script:BrandingWarnings = New-Object System.Collections.Generic.List[string]
@@ -152,12 +165,12 @@ try {
         $config = $rawJson | ConvertFrom-Json -ErrorAction Stop
     }
 } catch {
-    Add-ValidationError ("branding_config.json is not valid JSON: {0}" -f $_.Exception.Message)
+    Add-ValidationError ("Branding configuration is not valid JSON: {0}" -f $_.Exception.Message)
     Throw-OnErrors
 }
 
 if ($null -eq $config) {
-    Add-ValidationError "branding_config.json deserialized to null object."
+    Add-ValidationError "Branding configuration deserialized to null object."
     Throw-OnErrors
 }
 

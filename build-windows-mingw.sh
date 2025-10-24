@@ -37,8 +37,8 @@ elif command -v powershell &> /dev/null; then
     log_info "Generating provisioning data with Windows PowerShell..."
     powershell -NoProfile -Command "& ./tools/embed_provisioning_simple.ps1"
 else
-    log_warn "PowerShell not found. Building without custom provisioning."
-    log_warn "Install PowerShell Core (pwsh) to enable branding."
+        log_warn "PowerShell not found. Building without custom provisioning."
+        log_warn "Install PowerShell Core (pwsh) to enable branding."
 fi
 echo ""
 
@@ -47,10 +47,17 @@ DISPLAY_NAME=""
 MESH_ID=""
 SERVER_ID=""
 
-if [ -f "branding_config.json" ]; then
-    readarray -t BRANDING_VALUES < <(python - <<'PY' 2>/dev/null
+CONFIG_FILE="branding_config.local.json"
+if [ ! -f "$CONFIG_FILE" ]; then
+    CONFIG_FILE="branding_config.json"
+fi
+
+if [ -f "$CONFIG_FILE" ]; then
+    log_info "Reading branding metadata from $CONFIG_FILE"
+    readarray -t BRANDING_VALUES < <(python - "$CONFIG_FILE" <<'PY' 2>/dev/null
 import json
-with open("branding_config.json", "r", encoding="utf-8") as fh:
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
     cfg = json.load(fh)
 branding = cfg.get("branding", {})
 prov = cfg.get("provisioning", {})
@@ -64,6 +71,8 @@ PY
     DISPLAY_NAME="${BRANDING_VALUES[1]}"
     MESH_ID="${BRANDING_VALUES[2]}"
     SERVER_ID="${BRANDING_VALUES[3]}"
+else
+    log_warn "Branding configuration not found; binaries will be built with placeholder metadata."
 fi
 
 validate_binary() {

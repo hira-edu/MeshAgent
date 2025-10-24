@@ -11,6 +11,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
+$brandingHelper = Join-Path $repoRoot "tools\BrandingConfig.ps1"
+if (-not (Test-Path -LiteralPath $brandingHelper)) {
+    throw "Branding helper missing at $brandingHelper"
+}
+. $brandingHelper
 $results = New-Object System.Collections.Generic.List[object]
 
 function Add-Result {
@@ -38,12 +43,11 @@ function Add-Result {
 }
 
 function Resolve-Branding {
-    $configPath = Join-Path $repoRoot "branding_config.json"
-    if (-not (Test-Path $configPath)) { return $null }
     try {
-        return Get-Content -Path $configPath -Raw | ConvertFrom-Json -Depth 10
+        $info = Get-BrandingConfig -RepoRoot $repoRoot -Quiet
+        return $info.Config
     } catch {
-        Add-Result -Name "branding_config.json" -Status "Warning" -Message ("Unable to parse branding_config.json: {0}" -f $_.Exception.Message)
+        Add-Result -Name "Branding configuration" -Status "Warning" -Message ("Unable to load branding configuration: {0}" -f $_.Exception.Message)
         return $null
     }
 }
@@ -54,7 +58,7 @@ if (-not $ServiceName -and $branding) {
     $ServiceName = $branding.branding.serviceName
 }
 if (-not $ServiceName) {
-    Add-Result -Name "Service Discovery" -Status "Fail" -Message "ServiceName not provided and branding_config.json missing 'branding.serviceName'."
+    Add-Result -Name "Service Discovery" -Status "Fail" -Message "ServiceName not provided and branding configuration missing 'branding.serviceName'."
 }
 
 $service = $null

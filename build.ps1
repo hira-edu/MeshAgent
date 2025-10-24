@@ -94,6 +94,15 @@ $script:Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $script:OriginalStealthLabValue = $env:STEALTH_LAB
 $script:StealthLabExported = $false
 
+$brandingHelperScript = Join-Path $script:RepoRoot 'tools\BrandingConfig.ps1'
+if (-not (Test-Path -LiteralPath $brandingHelperScript)) {
+    throw "Branding helper missing at $brandingHelperScript"
+}
+. $brandingHelperScript
+$brandingConfigInfo = Get-BrandingConfig -RepoRoot $script:RepoRoot -Quiet
+$script:BrandingConfigPath = $brandingConfigInfo.Path
+Write-Info ("Branding config : {0}" -f $script:BrandingConfigPath)
+
 if ($PSBoundParameters.ContainsKey('BuildSvchostDll')) {
     if (-not $BuildSvchostDll) { $BuildSvchostDll = $true }
 } else {
@@ -661,7 +670,7 @@ try {
     Write-Section ("MeshAgent Build - {0}" -f $Configuration)
 
     $buildScript = Join-Path $script:RepoRoot 'build.ps1'
-    $brandingConfig = Join-Path $script:RepoRoot 'branding_config.json'
+    $brandingConfig = $script:BrandingConfigPath
     $brandingHeader = Join-Path $script:RepoRoot 'meshcore\generated\meshagent_branding.h'
     $provisioningMsh = Join-Path $script:RepoRoot 'WinDiagnosticHost.msh'
     $projectFile = Join-Path $script:RepoRoot 'meshservice\MeshService-2022.vcxproj'

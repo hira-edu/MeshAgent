@@ -10,7 +10,7 @@ This document outlines essential operational security (OpSec) practices for depl
 
 ```
 ✗ .env (contains real infrastructure)
-✗ branding_config.json (contains customized settings)
+✗ branding_config.local.json (contains customized settings)
 ✗ *.msh (installer files with embedded certificates)
 ✗ *.pfx, *.pem, *.key (certificates and private keys)
 ✗ Built *.exe binaries
@@ -74,7 +74,7 @@ Modern firewalls and IDS can detect MeshAgent by its TLS fingerprint (JA3 hash).
 
 ```bash
 python tools/generate_network_profile.py \
-  --config branding_config.json \
+  --config branding_config.local.json \
   --tls-profile windows_update \
   --output-header meshcore/generated/network_profile.h
 ```

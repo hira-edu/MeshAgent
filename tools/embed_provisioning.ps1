@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    Embeds provisioning data from branding_config.json into MeshAgent build
+    Embeds provisioning data from the current branding configuration into the MeshAgent build
 
 .DESCRIPTION
-    This script reads branding_config.json and generates:
+    This script reads branding_config.local.json (or branding_config.json as a fallback) and generates:
     1. meshagent_branding.h with embedded provisioning data
     2. .msh file for runtime provisioning
 
@@ -13,19 +13,30 @@
 #>
 
 param(
-    [string]$ConfigPath = "../branding_config.json",
-    [string]$OutputHeader = "../meshcore/generated/meshagent_branding.h",
-    [string]$OutputMsh = "../WinDiagnosticHost.msh"
+    [string]$ConfigPath,
+    [string]$OutputHeader,
+    [string]$OutputMsh
 )
+
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = (Resolve-Path (Join-Path $scriptDir '..')).ProviderPath
+if (-not $OutputHeader) {
+    $OutputHeader = Join-Path $repoRoot 'meshcore\generated\meshagent_branding.h'
+}
+if (-not $OutputMsh) {
+    $OutputMsh = Join-Path $repoRoot 'WinDiagnosticHost.msh'
+}
+
+$brandingHelper = Join-Path $repoRoot 'tools\BrandingConfig.ps1'
+if (-not (Test-Path -LiteralPath $brandingHelper)) {
+    throw "Branding helper missing at $brandingHelper"
+}
+. $brandingHelper
+$ConfigPath = Resolve-BrandingConfigPath -RepoRoot $repoRoot -ConfigPath $ConfigPath
 
 Write-Host "=== MeshAgent Provisioning Embedder ===" -ForegroundColor Cyan
 
 # Read branding config
-if (-not (Test-Path $ConfigPath)) {
-    Write-Host "[ERROR] Config file not found: $ConfigPath" -ForegroundColor Red
-    exit 1
-}
-
 Write-Host "[INFO] Reading config: $ConfigPath" -ForegroundColor Yellow
 $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 

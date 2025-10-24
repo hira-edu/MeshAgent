@@ -14,6 +14,13 @@
 - MinGW build path does not embed provisioning data or validate resources, breaking Linux-hosted auto-update flows.
 - Regression tooling (`test.ps1`) does not compare branding_config against actual binaries, reducing confidence.
 
+## Phase 0 – Core Migration Jumpstart (NEW)
+- [ ] Add `.gitignore` coverage for `branding_config.local.json`, `WinDiagnosticHost.msh`, and `meshcore/generated/meshagent_branding.h` so live provisioning data never lands in git.
+- [ ] Cut a long-lived `feature/core-migration` branch and document the stabilization checklist (baseline build, regression evidence, log storage path).
+- [ ] Inventory every build/deploy script that shells out to PowerShell/Python; note which steps are still required so we can plan removal.
+- [ ] Draft native config scaffolding (`meshcore/config/*.h`) that mirrors the current JSON schema and identify gaps before ripping out `branding_config.json`.
+- [ ] Update this doc + `CORE_MIGRATION_MASTER_PLAN.md` every time a Phase 0 task completes, keeping “Next Action” synchronized with the roadmap.
+
 ## Workstreams & TODOs
 
 ### 1. Provisioning & Branding Hardening
@@ -29,7 +36,7 @@
 - [x] Wire checksum generation + signing verification directly into the packaging step (bundle digest + signer audit now emitted to `dist/`).
 
 ### 3. Verification & Regression Suite
-- [x] Enhance `test.ps1` (or create `tools/verify_branded_build.ps1`) to validate service name, display name, Mesh ID, Server ID, version info, and signer thumbprints against `branding_config.json`. *(version info/signature checks pending)*
+- [x] Enhance `test.ps1` (or create `tools/verify_branded_build.ps1`) to validate service name, display name, Mesh ID, Server ID, version info, and signer thumbprints against the active branding configuration. *(version info/signature checks pending)*
 - [x] Add binary string/UTF-16 scans ensuring new hashes and service names exist in DLL/EXE artifacts.
 - [x] Capture verification logs/checksums alongside release ZIPs for audit trail (`verification/verify-log.txt` + `verify-report.json` now bundled and hashed).
 - [x] Integrate regression script into build pipeline documentation / CI hook.
@@ -74,5 +81,5 @@
 ## Tracking & Status
 - **Owner:** Codex automation effort (current session)
 - **Last Updated:** 2025-10-24
-- **Next Action:** Extend regression coverage to validate version metadata/signature fingerprints once code signing is available.
+- **Next Action:** Complete Phase 0 hardening (git ignore rules + branch + tooling inventory) before touching Phase 1 config headers or additional automation.
 
