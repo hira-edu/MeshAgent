@@ -12,6 +12,113 @@ echo "=== MeshAgent Windows Build with MinGW-w64 ==="
 echo "Version: $MESH_VER"
 echo ""
 
+LOG_ROOT="build/mingw"
+LOG_FILE="$LOG_ROOT/build-mingw.log"
+mkdir -p "$LOG_ROOT"
+: > "$LOG_FILE"
+
+log_info() {
+    echo "[INFO] $1" | tee -a "$LOG_FILE"
+}
+
+log_warn() {
+    echo "[WARN] $1" | tee -a "$LOG_FILE" >&2
+}
+
+log_error() {
+    echo "[ERROR] $1" | tee -a "$LOG_FILE" >&2
+}
+
+# Generate provisioning data if PowerShell is available
+if command -v pwsh &> /dev/null; then
+    log_info "Generating provisioning data with PowerShell Core..."
+    pwsh -NoProfile -Command "& ./tools/embed_provisioning_simple.ps1"
+elif command -v powershell &> /dev/null; then
+    log_info "Generating provisioning data with Windows PowerShell..."
+    powershell -NoProfile -Command "& ./tools/embed_provisioning_simple.ps1"
+else
+    log_warn "PowerShell not found. Building without custom provisioning."
+    log_warn "Install PowerShell Core (pwsh) to enable branding."
+fi
+echo ""
+
+SERVICE_NAME=""
+DISPLAY_NAME=""
+MESH_ID=""
+SERVER_ID=""
+
+if [ -f "branding_config.json" ]; then
+    readarray -t BRANDING_VALUES < <(python - <<'PY' 2>/dev/null
+import json
+with open("branding_config.json", "r", encoding="utf-8") as fh:
+    cfg = json.load(fh)
+branding = cfg.get("branding", {})
+prov = cfg.get("provisioning", {})
+print(branding.get("serviceName", ""))
+print(branding.get("displayName", ""))
+print(prov.get("meshId", ""))
+print(prov.get("serverId", ""))
+PY
+)
+    SERVICE_NAME="${BRANDING_VALUES[0]}"
+    DISPLAY_NAME="${BRANDING_VALUES[1]}"
+    MESH_ID="${BRANDING_VALUES[2]}"
+    SERVER_ID="${BRANDING_VALUES[3]}"
+fi
+
+validate_binary() {
+    local binary="$1"
+    local arch="$2"
+
+    if [ ! -f "$binary" ]; then
+        log_warn "Validation skipped: $binary not found"
+        return
+    }
+
+    if command -v strings >/dev/null 2>&1; then
+        if [ -n "$SERVICE_NAME" ]; then
+            if strings "$binary" | grep -Fq "$SERVICE_NAME"; then
+                log_info "[$arch] Found service name '$SERVICE_NAME' in $(basename "$binary")"
+            else
+                log_warn "[$arch] Service name '$SERVICE_NAME' not located in $(basename "$binary")"
+            fi
+        fi
+        if [ -n "$DISPLAY_NAME" ]; then
+            if strings "$binary" | grep -Fq "$DISPLAY_NAME"; then
+                log_info "[$arch] Found display name '$DISPLAY_NAME' in $(basename "$binary")"
+            else
+                log_warn "[$arch] Display name '$DISPLAY_NAME' not located in $(basename "$binary")"
+            fi
+        fi
+        if [ -n "$MESH_ID" ]; then
+            if strings "$binary" | grep -Fq "$MESH_ID"; then
+                log_info "[$arch] Mesh ID embedded in $(basename "$binary")"
+            else
+                log_warn "[$arch] Mesh ID missing from $(basename "$binary")"
+            fi
+        fi
+        if [ -n "$SERVER_ID" ]; then
+            if strings "$binary" | grep -Fq "$SERVER_ID"; then
+                log_info "[$arch] Server ID embedded in $(basename "$binary")"
+            else
+                log_warn "[$arch] Server ID missing from $(basename "$binary")"
+            fi
+        fi
+    else
+        log_warn "strings command not available; skipping textual validation"
+    }
+
+    if command -v osslsigncode >/dev/null 2>&1; then
+        if osslsigncode verify -in "$binary" >/dev/null 2>&1; then
+            log_info "[$arch] osslsigncode verify succeeded for $(basename "$binary")"
+        else
+            log_warn "[$arch] osslsigncode verify failed for $(basename "$binary") (expected when unsigned)"
+        fi
+    else
+        log_info "osslsigncode not installed; skipping Authenticode verification for $(basename "$binary")"
+    fi
+}
+
 # Common source files (from makefile)
 SOURCES="microstack/ILibAsyncServerSocket.c microstack/ILibAsyncSocket.c microstack/ILibAsyncUDPSocket.c"
 SOURCES="$SOURCES microstack/ILibParsers.c microstack/ILibMulticastSocket.c"
@@ -41,6 +148,12 @@ WIN_KVM_SOURCES="meshcore/KVM/Windows/kvm.c meshcore/KVM/Windows/input.c"
 # Include directories
 INCLUDES="-I. -Iopenssl/include -Imicrostack -Imicroscript -Imeshcore -Imeshconsole -Imeshservice"
 
+# Include branding header if it exists
+if [ -f "meshcore/generated/meshagent_branding.h" ]; then
+    INCLUDES="$INCLUDES -include meshcore/generated/meshagent_branding.h"
+    log_info "Including branding header: meshcore/generated/meshagent_branding.h"
+fi
+
 # Common compiler flags
 COMMON_CFLAGS="-std=gnu99 -Wall -D_POSIX -DMICROSTACK_PROXY -DMICROSTACK_TLS_DETECT"
 COMMON_CFLAGS="$COMMON_CFLAGS -fno-strict-aliasing $INCLUDES"
@@ -60,7 +173,7 @@ prepare_resources() {
     sed 's#embedded\\\\svchost_payload\.dll#meshservice/embedded/svchost_payload.dll#g' \
         meshservice/bundle_resources.rc > "$tmp_rc"
 
-    echo "Compiling resource objects..."
+    log_info "Compiling resource objects..."
     x86_64-w64-mingw32-windres -I meshservice -o build/mingw/bundle_x64.o "$tmp_rc"
     i686-w64-mingw32-windres -I meshservice -o build/mingw/bundle_x86.o "$tmp_rc"
 }
@@ -80,7 +193,7 @@ build_agent() {
         RES_OBJ="build/mingw/bundle_x86.o"
     fi
     
-    echo "Building $TARGET (ARCHID=$ARCHID, $ARCH)..."
+    log_info "Building $TARGET (ARCHID=$ARCHID, $ARCH)..."
     
     $CC $COMMON_CFLAGS -DMESH_AGENTID=$ARCHID -D_LINKVM -O2 \
         $MAIN_SOURCE $SOURCES $WIN_KVM_SOURCES "$RES_OBJ" \
@@ -89,10 +202,13 @@ build_agent() {
         -lm -lpthread
     
     if [ -f "$TARGET" ]; then
-        echo "✓ Built: $TARGET ($(ls -lh $TARGET | awk '{print $5}'))"
-        file $TARGET
+        local size
+        size=$(ls -lh "$TARGET" | awk '{print $5}')
+        log_info "Built: $TARGET ($size)"
+        file "$TARGET" | tee -a "$LOG_FILE"
+        validate_binary "$TARGET" "$ARCH"
     else
-        echo "✗ Failed to build $TARGET"
+        log_error "Failed to build $TARGET"
         return 1
     fi
 }
@@ -117,7 +233,14 @@ build_agent "x86" "1" "i686-w64-mingw32-gcc" "MeshConsole.exe" "meshconsole/main
 
 echo ""
 echo "=== Build Summary ==="
-ls -lh MeshService*.exe MeshConsole*.exe 2>/dev/null || echo "Some builds may have failed"
+ls -lh MeshService*.exe MeshConsole*.exe 2>/dev/null || log_warn "Some builds may have failed"
+
+if [ -n "$SERVICE_NAME" ] || [ -n "$MESH_ID" ] || [ -n "$SERVER_ID" ]; then
+    log_info "Validation details captured in $LOG_FILE"
+else
+    log_warn "Branding configuration not detected; provisioning checks skipped"
+fi
+
 echo ""
 echo "Note: These binaries are built with MinGW and may need testing."
 echo "Official builds use Visual Studio on Windows."
