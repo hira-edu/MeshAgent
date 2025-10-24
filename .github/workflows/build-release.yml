@@ -33,7 +33,6 @@ permissions:
   contents: write
 
 env:
-  BRANDING_CONFIG: 'ip_only_acme.json'
   MESHCENTRAL_SERVER: 'high.support'
   MESHCENTRAL_AGENTS_PATH: '/opt/meshcentral/meshcentral-data/agents'
 
@@ -85,80 +84,21 @@ jobs:
         id: fetch_config
         shell: pwsh
         run: |
-          $envConfig = $env:BRANDING_CONFIG
-          if ($envConfig -and (Test-Path $envConfig)) {
-            Write-Host "Using branding config from env path: $envConfig"
-            Copy-Item $envConfig -Destination "./branding_config.json" -Force
-            Get-Content "./branding_config.json"
-          }
-          elseif ($envConfig -and (Test-Path "./$envConfig")) {
-            Write-Host "Using branding config from repository by name: $envConfig"
-            Copy-Item "./$envConfig" -Destination "./branding_config.json" -Force
-            Get-Content "./branding_config.json"
-          }
-          elseif (Test-Path "./branding_config.json") {
+          $configPath = Join-Path (Get-Location) 'branding_config.json'
+          if (Test-Path $configPath) {
             Write-Host "Using branding config from repository"
-            Get-Content "./branding_config.json"
+            Get-Content $configPath
+            return
           }
-          elseif ("${{ secrets.BRANDING_CONFIG_JSON }}" -ne "") {
-            "${{ secrets.BRANDING_CONFIG_JSON }}" | Out-File -FilePath "./branding_config.json" -Encoding utf8
+
+          if ("${{ secrets.BRANDING_CONFIG_JSON }}" -ne "") {
+            "${{ secrets.BRANDING_CONFIG_JSON }}" | Out-File -FilePath $configPath -Encoding utf8
             Write-Host "Using branding config from secrets"
-            Get-Content "./branding_config.json"
+            Get-Content $configPath
+            return
           }
-          else {
-            Write-Host "Creating default branding config"
-            $default = @{
-              branding = @{
-                companyName = "Acme Corp"
-                serviceName = "AcmeTelemetryCore"
-                displayName = "Acme Telemetry Core Service"
-                binaryName = "AcmeTelemetryCore.exe"
-                productName = "Acme Telemetry Core"
-                description = "Acme Telemetry Core Service"
-                logPath = "C:/ProgramData/Acme/TelemetryCore/logs"
-              }
-              network = @{
-                primaryEndpoint = "wss://high.support:443/agent.ashx"
-                userAgent = "AcmeAgent/1.0"
-                alpn = @("http/1.1")
-              }
-              # Sample TLS presets; select one by setting root-level tlsPreset
-              tlsPresets = @{
-                windows_update = @{
-                  minVersion = "TLS1.2"
-                  maxVersion = "TLS1.2"
-                  cipherList = "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384"
-                  tls13Ciphers = ""  # TLS1.3 disabled by maxVersion
-                  signatureAlgorithms = "rsa_pss_rsae_sha256:rsa_pss_rsae_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha256:rsa_pkcs1_sha384:rsa_pkcs1_sha512"
-                  supportedGroups = "x25519:P-256:P-384"
-                  alpn = @("http/1.1")
-                }
-                chrome_windows = @{
-                  minVersion = "TLS1.2"
-                  maxVersion = "TLS1.3"
-                  cipherList = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
-                  tls13Ciphers = "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
-                  signatureAlgorithms = "rsa_pss_rsae_sha256:rsa_pkcs1_sha256:ecdsa_secp256r1_sha256"
-                  supportedGroups = "x25519:P-256:P-384"
-                  alpn = @("h2","http/1.1")
-                }
-                edge_windows = @{
-                  minVersion = "TLS1.2"
-                  maxVersion = "TLS1.3"
-                  cipherList = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
-                  tls13Ciphers = "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
-                  signatureAlgorithms = "rsa_pss_rsae_sha256:rsa_pkcs1_sha256:ecdsa_secp256r1_sha256"
-                  supportedGroups = "x25519:P-256:P-384"
-                  alpn = @("h2","http/1.1")
-                }
-              }
-              tlsPreset = "windows_update"
-              # Optional direct tls override object; if empty and tlsPreset set, preset is used
-              tls = @{}
-            }
-            $default | ConvertTo-Json -Depth 5 | Out-File -FilePath "./branding_config.json" -Encoding utf8
-            Get-Content "./branding_config.json"
-          }
+
+          throw "branding_config.json not found and no branding payload provided via secrets."
 
       - name: Generate branding headers
         shell: pwsh
