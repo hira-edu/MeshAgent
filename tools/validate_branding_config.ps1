@@ -380,7 +380,12 @@ if ($resolvedBinaryPaths.Count -gt 0) {
         $entry.checks = $checkList.ToArray()
 
         $stringTargets = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($candidateString in @($config.branding.displayName, $config.branding.serviceName)) {
+        $stringCandidates = if ($binaryLabel -ieq 'diagsvc.dll') {
+            @($config.branding.serviceName)
+        } else {
+            @($config.branding.displayName, $config.branding.serviceName)
+        }
+        foreach ($candidateString in $stringCandidates) {
             if (-not [string]::IsNullOrWhiteSpace($candidateString)) {
                 [void]$stringTargets.Add($candidateString)
             }

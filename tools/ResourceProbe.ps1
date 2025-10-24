@@ -59,6 +59,35 @@ function Test-BinaryUtf16String {
     return (Invoke-BytePatternSearch -Buffer $bytes -Pattern $patternNull)
 }
 
+function Test-BinaryAsciiString {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    if (-not (Test-Path $Path) -or [string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+
+    $fullPath = (Resolve-Path -LiteralPath $Path).ProviderPath
+    $bytes = [System.IO.File]::ReadAllBytes($fullPath)
+    if (-not $bytes) {
+        return $false
+    }
+
+    $pattern = [System.Text.Encoding]::ASCII.GetBytes($Value)
+    if (Invoke-BytePatternSearch -Buffer $bytes -Pattern $pattern) {
+        return $true
+    }
+
+    $patternNull = New-Object byte[] ($pattern.Length + 1)
+    [System.Array]::Copy($pattern, $patternNull, $pattern.Length)
+    return (Invoke-BytePatternSearch -Buffer $bytes -Pattern $patternNull)
+}
+
 function Get-BinaryStringPresence {
     [CmdletBinding()]
     param(
@@ -70,10 +99,15 @@ function Get-BinaryStringPresence {
 
     $results = @()
     foreach ($value in $Utf16Strings) {
+        $utf16 = Test-BinaryUtf16String -Path $Path -Value $value
+        $ascii = $false
+        if (-not $utf16) {
+            $ascii = Test-BinaryAsciiString -Path $Path -Value $value
+        }
         $results += [pscustomobject]@{
             value    = $value
-            present  = [bool](Test-BinaryUtf16String -Path $Path -Value $value)
-            encoding = 'utf16'
+            present  = [bool]($utf16 -or $ascii)
+            encoding = if ($utf16) { 'utf16' } elseif ($ascii) { 'ascii' } else { $null }
         }
     }
 
