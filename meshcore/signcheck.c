@@ -32,7 +32,7 @@ limitations under the License.
 #include "signcheck.h"
 #include "microstack/ILibParsers.h"
 #include "microstack/ILibCrypto.h"
-#include "generated/meshagent_branding.h"
+#include "config/active_profile.h"
 
 
 #if defined(MESH_AGENT_ALLOWED_SIGNERS) && MESH_AGENT_ALLOWED_SIGNERS_COUNT > 0

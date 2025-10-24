@@ -15,10 +15,10 @@
 - Regression tooling (`test.ps1`) does not compare branding_config against actual binaries, reducing confidence.
 
 ## Phase 0 – Core Migration Jumpstart (NEW)
-- [ ] Add `.gitignore` coverage for `branding_config.local.json`, `WinDiagnosticHost.msh`, and `meshcore/generated/meshagent_branding.h` so live provisioning data never lands in git.
-- [ ] Cut a long-lived `feature/core-migration` branch and document the stabilization checklist (baseline build, regression evidence, log storage path).
-- [ ] Inventory every build/deploy script that shells out to PowerShell/Python; note which steps are still required so we can plan removal.
-- [ ] Draft native config scaffolding (`meshcore/config/*.h`) that mirrors the current JSON schema and identify gaps before ripping out `branding_config.json`.
+- [x] Add `.gitignore` coverage for `branding_config.local.json`, `WinDiagnosticHost.msh`, and `meshcore/generated/meshagent_branding.h` so live provisioning data never lands in git. *(Validated 2025-10-24; staged deletes keep live provisioning out of history.)*
+- [x] Cut a long-lived `feature/core-migration` branch and document the stabilization checklist (baseline build, regression evidence, log storage path). *(Checklist captured in `docs/CORE_MIGRATION_PHASE0_CHECKLIST.md`.)*
+- [x] Inventory every build/deploy script that shells out to PowerShell/Python; note which steps are still required so we can plan removal. *(See dependency table in `docs/CORE_MIGRATION_MASTER_PLAN.md`.)*
+- [x] Draft native config scaffolding (`meshcore/config/*.h`) that mirrors the current JSON schema and identify gaps before ripping out `branding_config.json`. *(Coverage snapshot added to `CORE_MIGRATION_MASTER_PLAN.md`.)*
 - [ ] Update this doc + `CORE_MIGRATION_MASTER_PLAN.md` every time a Phase 0 task completes, keeping “Next Action” synchronized with the roadmap.
 
 ## Workstreams & TODOs

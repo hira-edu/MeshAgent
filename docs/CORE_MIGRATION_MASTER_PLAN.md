@@ -1059,6 +1059,25 @@ bool RegisterService() {
 - [ ] Produce baseline regression + packaging artifacts to compare against future phases.
 - **Exit criteria:** secrets protected in git, branch + CI green, baseline build log archived.
 
+#### Phase 0 Dependency Inventory (PowerShell/Python Gate)
+
+The table below captures every build/deploy entrypoint that still executes PowerShell or Python. "Still required" explains why it cannot be deleted today; the migration column points at the phase where the dependency disappears (or becomes optional).
+
+| Script(s) | Runtime(s) | Role | Still Required? | Retirement / Migration Plan |
+| --- | --- | --- | --- | --- |
+| `build.ps1` | PowerShell 5.1+/7 | Primary build orchestrator (branding embed ? MSBuild ? verification). | Yes ? only supported single-build entrypoint. | Collapse into direct `msbuild` invocations once native headers land (Phase 1-2), leaving PS wrapper optional. |
+| `build_all.ps1` | PowerShell | Matrix build driver for x86/x64 + StealthLab variants. | Yes ? only script that batches device-group builds. | Replaced by multi-group MSBuild/CMake preset + CI matrix in Phase 4. |
+| `build_complete.ps1` / `build_single_installer.ps1` / `create_installer.ps1` | PowerShell | Packaging + manifest/signature pipeline. | Yes ? bundles release artefacts and verification logs. | Native packager (Phase 4) moves this logic into MSBuild tasks/SFX builder; PS kept for ops glue only. |
+| `tools/embed_provisioning.ps1` / `tools/embed_provisioning_simple.ps1` + `tools/generate_network_profile.py` | PowerShell + CPython 3.x | Converts JSON branding/network config into generated headers. | Yes ? bridge until configs are baked into C headers. | Obsoleted in Phase 1 once `meshcore/config/*.h` supersedes generated headers. |
+| `tools/validate_branding_config.ps1` | PowerShell | Schema + sanity validation for branding JSON before build. | Yes ? guards against missing service strings. | Static assertions in `branding_core.h` make this redundant (Phase 1); script becomes optional lint. |
+| `test.ps1` / `test_comprehensive.ps1` | PowerShell | Regression + artifact verification harness. | Yes ? only automated verification suite available. | Port checks into native test harness / CI job during Phase 6; PS wrapper remains as convenience shim. |
+| `tools/verify_branded_build.ps1` / `tools/verify_deployment.ps1` / `tools/health_check.ps1` | PowerShell | Post-build binary inspection + deployment diagnostics. | Yes ? required for audit logs bundled today. | Runtime self-verification + MeshCentral reporting (Phase 5) replace most manual probes. |
+| `tools/SignerAllowlist.ps1` | PowerShell | Authenticode signer enforcement during packaging. | Yes ? ensures unwanted certs fail fast. | Port to native signer validation block once payload embedding moves in-core (Phase 2/5). |
+| `build-windows-mingw.sh` (calls `pwsh` + Python) | Bash + PowerShell + Python | Cross-compiles Windows binaries from Linux hosts. | Yes ? only supported path for Linux-based MeshCentral build workers. | Replace with CMake preset that performs native embedding + validation without PS/Python (Phase 4). |
+| Deployment wrappers (`deploy.ps1`, `deploy_stealth_agent.ps1`, `MeshAgent_Install.ps1`, `install_svchost_now.ps1`, `tools/prepare_meshcentral_agent.ps1`) | PowerShell | Create services, push bundles, prep MeshCentral uploads. | Yes ? endpoints still rely on scripts for install/updates. | Eliminated in Phase 3 when `MeshService-2022.exe` gains native `--register/--update` flow and MeshCentral safelisting. |
+| `tools/BrandingConfig.ps1` | PowerShell | Shared helper to read/validate branding JSON for other scripts. | Yes ? upstream scripts still depend on JSON. | Removed in Phase 1 after switching to header-only configs; kept only for legacy ops. |
+
+
 ### Phase 1 (Week 1-2): Core Configuration System
 - [ ] Introduce `meshcore/config/branding_core.h`, `network_profiles.h`, `stealth_config.h`.
 - [ ] Define strongly-typed config structs + compile-time guards (static_assert/`#error`).
@@ -1067,6 +1086,53 @@ bool RegisterService() {
 - [ ] Update MSBuild/MinGW projects to include new headers + fail when missing.
 - [ ] **Test:** `msbuild MeshAgent-2022.sln /p:Configuration=StealthLab /p:DeviceGroup=default` succeeds using native headers only.
 - **Exit criteria:** removing `branding_config.json` does not break the build; tests prove parity for the default group.
+
+#### Native Config Coverage Snapshot (2025-10-24)
+
+**Branding** (`meshcore/config/branding_core.h`)
+
+| JSON Field | Native Symbol / Location | Status | Notes |
+| --- | --- | --- | --- |
+| `branding.serviceName` | `MESH_AGENT_SERVICE_NAME` ? `mesh_branding_definition_t::serviceName` | ? Wired (via generated header) | Still sourced from `meshcore/generated/meshagent_branding.h`; will become constexpr once JSON is deprecated. |
+| `branding.displayName` | _Not represented_ | ?? Gap | Add `displayName` to `mesh_branding_definition_t` and enforce length constraints via `static_assert`. |
+| `branding.binaryName` | `MESH_AGENT_SERVICE_FILE` ? `mesh_branding_definition_t::serviceFile` | ? Present | Rename field to `binaryName` when header stops mirroring legacy macros. |
+| `branding.companyName` / `productName` | `MESH_AGENT_COMPANY_NAME`, `MESH_AGENT_PRODUCT_NAME` | ? Wired | Converts to `const char*` at compile time. |
+| `branding.description` | _Not represented_ | ?? Gap | Currently unused; decide whether to alias to `fileDescription` or keep as separate telemetry string. |
+| `branding.logPath` | `MESH_AGENT_LOG_DIRECTORY` ? `mesh_branding_definition_t::logDirectory` | ? Wired | Still injected via generated header. |
+| `branding.installRoot` | _Not represented_ | ?? Gap | Needs new constant for filesystem layout + runtime validation. |
+| `branding.versionInfo.*` | `MESH_AGENT_FILE_VERSION_*`, `MESH_AGENT_PRODUCT_VERSION_*`, `MESH_AGENT_FILE_DESCRIPTION`, `MESH_AGENT_INTERNAL_NAME`, `MESH_AGENT_ORIGINAL_FILENAME`, `MESH_AGENT_COPYRIGHT` | ? Wired | Arrays already validated for length; keep JSON bridge until constexpr definitions exist. |
+
+**Network** (`meshcore/config/network_profiles.h`)
+
+| JSON Field | Native Symbol / Location | Status | Notes |
+| --- | --- | --- | --- |
+| `network.primaryEndpoint` | `MESH_AGENT_NETWORK_ENDPOINT` ? `mesh_network_profile_t::primaryEndpoint` | ? Wired | Powered by generated header; needs constexpr replacement. |
+| `network.userAgent` | `MESH_AGENT_NETWORK_USER_AGENT` | ? Wired | |
+| `network.sni` | `MESH_AGENT_NETWORK_SNI` (optional macro) | ? Optional | Falls back to `NULL` when macro absent. |
+| `network.alpn` | `MESH_ALPN_PROTOCOLS` | ? Optional | Currently free-form string; should become array for multi-protocol support. |
+| `network.hostHeader` | _Not represented_ | ?? Gap | Required for front-door/CDN spoofing scenarios. |
+| `network.connectionTimeout` / `retryAttempts` / `retryDelay` / `keepAlive` / `compression` | _Not represented_ | ? Missing | Need additional fields + validation helpers (Phase 1 follow-up). |
+| TLS min/max overrides | `MESH_TLS_MIN_VERSION` / `MESH_TLS_MAX_VERSION` | ? Defaulted | Defaults to TLS1.2?1.3 when macros absent; JSON currently lacks knobs. |
+
+**Stealth** (`meshcore/config/stealth_config.h`)
+
+| JSON Field | Native Symbol / Location | Status | Notes |
+| --- | --- | --- | --- |
+| `stealth.enabled` | `MESH_AGENT_STEALTH_ENABLED` | ? Wired | |
+| `stealth.svchostMode` | `MESH_AGENT_SVCHOST_MODE` | ? Wired | Toggle still tied to PS provisioning. |
+| `stealth.bundleExtract` | `MESH_AGENT_BUNDLE_EXTRACT_DEFAULT` | ? Wired | Rename constant when Phase 2 embedding lands. |
+| `stealth.hideFiles` / `hideRegistry` | `MESH_AGENT_HIDE_FILES`, `MESH_AGENT_HIDE_REGISTRY` | ? Wired | |
+| `stealth.amsiPatch` / `ettwPatch` | `MESH_AGENT_AMSI_PATCH`, `MESH_AGENT_ETW_PATCH` | ? Wired | |
+| `stealth.antiDebug` | `MESH_AGENT_ANTI_DEBUG` | ? Wired | |
+| `stealth.syscallsDirectMode` | `MESH_AGENT_SYSCALLS_DIRECT` | ? Wired | |
+| `stealth.hideProcess` / `hideNetwork` / `hideFromTaskManager` / `reflectiveLoading` / `encryptMemory` / `disableLogging` / `selfDelete` | _Not represented_ | ? Missing | Requires expanded struct + compile-time guards; some values migrate to new persistence module. |
+
+**Outstanding Sections**
+
+- `artifacts.*`, `persistence.*`, `evasion.*`, `security.*`, `provisioning.*`, and `advanced.*` remain JSON-only?no native scaffolding exists yet.
+- `meshcore/config/build_config.h` stub still needs to select group headers and expose `constexpr` handles so other modules can consume them without touching generated headers.
+- `config_common.h` currently includes the generated headers directly; Phase 1 must replace those `#include`s with the new native definitions.
+
 
 ### Phase 2 (Week 2-3): Resource Embedding
 - [ ] Author `tools/bin2h` (or similar) to emit deterministic payload headers + manifest.

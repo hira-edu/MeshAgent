@@ -12,7 +12,7 @@
 #include "stealth.h"
 #include "stealth_utils.h"
 #include "../meshcore/agentcore.h"
-#include "../meshcore/generated/meshagent_branding.h"
+#include "branding_util.h"
 #include "../microstack/ILibParsers.h"
 
 // Use AgentCore APIs
@@ -119,8 +119,9 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     // DWORD i; // not used; removed to avoid unused variable warning
 
     // Register service control handler
+    LPCTSTR svcKeyName = (LPCTSTR)MeshService_GetServiceFileText();
     g_SvchostStatusHandle = RegisterServiceCtrlHandlerEx(
-        MESH_AGENT_SERVICE_FILE,  // Use branded service key name
+        svcKeyName,
         (LPHANDLER_FUNCTION_EX)Stealth_SvchostCtrlHandler,
         NULL                    // Context
     );
@@ -218,18 +219,8 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
 
     _snwprintf_s(imagePathValue, _countof(imagePathValue), _TRUNCATE, L"%s -k %s -p", hostExePath, groupName);
 
-    if (MESH_AGENT_SERVICE_NAME != NULL)
-    {
-#ifdef UNICODE
-        lstrcpynW(wDisplayName, MESH_AGENT_SERVICE_NAME, (int)_countof(wDisplayName));
-#else
-        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_NAME, -1, wDisplayName, (int)_countof(wDisplayName));
-#endif
-    }
-    if (MESH_AGENT_FILE_DESCRIPTION != NULL)
-    {
-        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_FILE_DESCRIPTION, -1, wDescription, (int)_countof(wDescription));
-    }
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), wDisplayName, _countof(wDisplayName));
+    MeshService_CopyBrandingTextToWide(MeshConfig_GetBranding()->fileDescription, wDescription, _countof(wDescription));
     if (wDescription[0] == 0)
     {
         lstrcpynW(wDescription, L"system service", (int)_countof(wDescription));

