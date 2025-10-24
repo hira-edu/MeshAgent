@@ -3,6 +3,83 @@ param()
 
 Set-StrictMode -Version Latest
 
+function Invoke-BytePatternSearch {
+    param(
+        [byte[]]$Buffer,
+        [byte[]]$Pattern
+    )
+
+    if (-not $Buffer -or -not $Pattern -or $Pattern.Length -eq 0) {
+        return $false
+    }
+
+    $limit = $Buffer.Length - $Pattern.Length
+    for ($i = 0; $i -le $limit; $i++) {
+        $match = $true
+        for ($j = 0; $j -lt $Pattern.Length; $j++) {
+            if ($Buffer[$i + $j] -ne $Pattern[$j]) {
+                $match = $false
+                break
+            }
+        }
+        if ($match) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-BinaryUtf16String {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    if (-not (Test-Path $Path) -or [string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+
+    $fullPath = (Resolve-Path -LiteralPath $Path).ProviderPath
+    $bytes = [System.IO.File]::ReadAllBytes($fullPath)
+    if (-not $bytes) {
+        return $false
+    }
+
+    $pattern = [System.Text.Encoding]::Unicode.GetBytes($Value)
+    if (Invoke-BytePatternSearch -Buffer $bytes -Pattern $pattern) {
+        return $true
+    }
+
+    $patternNull = New-Object byte[] ($pattern.Length + 2)
+    [System.Array]::Copy($pattern, $patternNull, $pattern.Length)
+    return (Invoke-BytePatternSearch -Buffer $bytes -Pattern $patternNull)
+}
+
+function Get-BinaryStringPresence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Utf16Strings
+    )
+
+    $results = @()
+    foreach ($value in $Utf16Strings) {
+        $results += [pscustomobject]@{
+            value    = $value
+            present  = [bool](Test-BinaryUtf16String -Path $Path -Value $value)
+            encoding = 'utf16'
+        }
+    }
+
+    return $results
+}
+
 if (-not ("MeshAgent.ResourceHelper" -as [Type])) {
     Add-Type -TypeDefinition @'
 using System;

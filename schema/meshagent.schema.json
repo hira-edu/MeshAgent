@@ -469,9 +469,12 @@
         "validateServerCert": {
           "type": "boolean"
         },
+        "enforceSigning": {
+          "type": "boolean"
+        },
         "serverCertHash": {
           "type": "string",
-          "pattern": "^[A-Fa-f0-9]{64}$"
+          "pattern": "^([A-Fa-f0-9]{64}|[A-Fa-f0-9]{96})$"
         },
         "allowedSigners": {
           "type": "array",
@@ -534,7 +537,7 @@
         },
         "serverId": {
           "type": "string",
-          "pattern": "^[A-Fa-f0-9]{64}$"
+          "pattern": "^([A-Fa-f0-9]{64}|[A-Fa-f0-9]{96})$"
         },
         "serverUrl": {
           "type": "string",

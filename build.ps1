@@ -146,6 +146,8 @@ $SolutionFile    = Join-Path $RepoRoot "MeshAgent-2022.sln"
 $ProjectFile     = Join-Path $RepoRoot "meshservice\MeshService-2022.vcxproj"
 $NetworkProfileScript = Join-Path $RepoRoot "tools\generate_network_profile.py"
 $EmbedProvisioningScript = Join-Path $RepoRoot "tools\embed_provisioning_simple.ps1"
+$ValidateBrandingScript = Join-Path $RepoRoot "tools\validate_branding_config.ps1"
+$SchemaPath = Join-Path $RepoRoot "schema\meshagent.schema.json"
 
 if ($StealthLab) {
     $env:STEALTH_LAB = '1'
@@ -181,6 +183,20 @@ Write-Section "[2/7] Generating branding artifacts"
 if (-not (Test-Path $EmbedProvisioningScript)) {
     throw "Provisioning embed script missing: $EmbedProvisioningScript"
 }
+if ((Test-Path $ValidateBrandingScript) -and (Test-Path $SchemaPath)) {
+    $validateArgs = @(
+        '-NoProfile',
+        '-ExecutionPolicy','Bypass',
+        '-File', $ValidateBrandingScript,
+        '-ConfigPath', $BrandingConfig,
+        '-SchemaPath', $SchemaPath,
+        '-Quiet'
+    )
+    & powershell.exe $validateArgs
+    if ($LASTEXITCODE -ne 0) { throw "validate_branding_config.ps1 reported an error." }
+} else {
+    Write-Warn "Branding validation script or schema missing; skipping schema validation."
+}
 
 $embedArgs = @(
     '-NoProfile',
@@ -192,6 +208,8 @@ $embedArgs = @(
 )
 & powershell.exe $embedArgs
 if ($LASTEXITCODE -ne 0) { throw "embed_provisioning_simple.ps1 failed with exit code $LASTEXITCODE" }
+
+$brandingHeaderInfo = Get-Item $BrandingHeader
 
 Write-Ok "Branding header and provisioning data refreshed"
 
@@ -268,6 +286,11 @@ if ($LASTEXITCODE -ne 0) { throw "MSBuild (x64) failed with exit code $LASTEXITC
 
 if (-not (Test-Path $OutputX64)) { throw "Expected x64 output not found at $OutputX64" }
 $x64Item = Get-Item $OutputX64
+
+if ($x64Item.LastWriteTimeUtc -lt $brandingHeaderInfo.LastWriteTimeUtc) {
+    throw "x64 output '$($x64Item.Name)' is older than refreshed branding header. Re-run build after resolving stale artefacts."
+}
+
 Write-Ok ("x64 build complete: {0} ({1:N2} MB)" -f $x64Item.Name, ($x64Item.Length / 1MB))
 
 # Refresh staged payload with newly built DLLs (if any)
@@ -292,6 +315,11 @@ if ($OutputX86 -and ($Configuration -notmatch '_DLL$')) {
 
     if (-not (Test-Path $OutputX86)) { throw "Expected Win32 output not found at $OutputX86" }
     $x86Item = Get-Item $OutputX86
+
+    if ($x86Item.LastWriteTimeUtc -lt $brandingHeaderInfo.LastWriteTimeUtc) {
+        throw "Win32 output '$($x86Item.Name)' is older than refreshed branding header. Re-run build after resolving stale artefacts."
+    }
+
     Write-Ok ("Win32 build complete: {0} ({1:N2} MB)" -f $x86Item.Name, ($x86Item.Length / 1MB))
 } else {
     Write-Section "[7/7] Building Win32"

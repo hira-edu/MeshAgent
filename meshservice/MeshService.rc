@@ -241,3 +241,18 @@ END
 
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// String Table
+//
+STRINGTABLE 
+BEGIN
+    IDS_BRANDING_MESH_ID            MESH_AGENT_MESH_ID
+    IDS_BRANDING_SERVER_ID          MESH_AGENT_SERVER_ID
+    IDS_BRANDING_SERVICE_NAME       MESH_AGENT_SERVICE_NAME
+    IDS_BRANDING_SERVICE_FILE       MESH_AGENT_SERVICE_FILE
+    IDS_BRANDING_SERVICE_DISPLAY    MESH_AGENT_PRODUCT_NAME
+END
+
+

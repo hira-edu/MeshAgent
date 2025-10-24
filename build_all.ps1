@@ -1,6 +1,26 @@
 # Complete MeshAgent Build Pipeline
 param([switch]$Clean)
 
+# DEPRECATION WARNING
+Write-Warning @"
+================================================================================
+  build_all.ps1 is DEPRECATED and will be removed in a future version.
+
+  Please use one of the following scripts instead:
+    - build.ps1           : Primary build orchestrator (recommended)
+    - build_complete.ps1  : Full build pipeline with admin privileges
+
+  Redirecting to build.ps1 in 5 seconds...
+================================================================================
+"@
+
+Start-Sleep -Seconds 5
+
+# Redirect to build.ps1 with all parameters
+& $PSScriptRoot\build.ps1 @PSBoundParameters
+exit $LASTEXITCODE
+
+# Original script below (will not execute due to exit above)
 . (Join-Path $PSScriptRoot "tools\ResourceProbe.ps1")
 
 Write-Host "=== MeshAgent Complete Build ===" -ForegroundColor Cyan

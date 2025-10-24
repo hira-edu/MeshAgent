@@ -5,12 +5,36 @@ param(
 )
 
 $repoRoot = $PSScriptRoot
+$validateScript = Join-Path $repoRoot "tools\validate_branding_config.ps1"
+$schemaPath = Join-Path $repoRoot "schema\meshagent.schema.json"
+$brandingHeaderPath = Join-Path $repoRoot "meshcore\generated\meshagent_branding.h"
 $signerAllowlistScript = Join-Path $repoRoot "tools\SignerAllowlist.ps1"
 if (-not (Test-Path $signerAllowlistScript)) {
     throw "Signer allowlist helper not found at $signerAllowlistScript"
 }
 . $signerAllowlistScript
 $AllowedThumbprints = Get-MeshAgentAllowedThumbprints -RepoRoot $repoRoot
+
+if (Test-Path $validateScript) {
+    $validateArgs = @(
+        '-NoProfile',
+        '-ExecutionPolicy','Bypass',
+        '-File', $validateScript,
+        '-ConfigPath', (Join-Path $repoRoot "branding_config.json"),
+        '-SchemaPath', $schemaPath,
+        '-Quiet'
+    )
+    & powershell.exe $validateArgs
+    if ($LASTEXITCODE -ne 0) { throw "Branding configuration validation failed." }
+} else {
+    Write-Warning "Branding validation script not found at $validateScript; skipping schema validation."
+}
+$brandingStampUtc = $null
+if (Test-Path $brandingHeaderPath) {
+    $brandingStampUtc = (Get-Item $brandingHeaderPath).LastWriteTimeUtc
+} else {
+    Write-Warning "Branding header not found at $brandingHeaderPath; stale provisioning may slip through."
+}
 
 Write-Host "Creating single-file installer..." -ForegroundColor Cyan
 
@@ -84,12 +108,16 @@ if ($svc.Status -eq 'Running') {
 '@
 
 $resolvedDll = (Resolve-Path $DllPath).ProviderPath
+$dllItem     = Get-Item $resolvedDll
+if ($brandingStampUtc -and $dllItem.LastWriteTimeUtc -lt $brandingStampUtc) {
+    throw "Selected DLL ($resolvedDll) is older than the branding header. Rebuild the DLL after running embed_provisioning."
+}
 Assert-MeshAgentSignatureAllowed -Path $resolvedDll -AllowedThumbprints $AllowedThumbprints -RequireSignature | Out-Null
 Write-Host "[INFO] DLL signer validated against allowlist" -ForegroundColor Green
 
 # Read and embed DLL
 Write-Host "Reading DLL..." -ForegroundColor Yellow
-$dllBytes = [System.IO.File]::ReadAllBytes((Resolve-Path $DllPath))
+$dllBytes = [System.IO.File]::ReadAllBytes($resolvedDll)
 $dllB64 = [Convert]::ToBase64String($dllBytes)
 $installer = $installer.Replace("DLL_BASE64_HERE", $dllB64)
 

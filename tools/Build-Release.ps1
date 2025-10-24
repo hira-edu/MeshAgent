@@ -163,6 +163,40 @@ $manifest = [ordered]@{
 $manifestPath = Join-Path $bundleDir 'release-manifest.json'
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
 
+# Surface bundle digest + signer audit if present
+$bundleDigestFile = Join-Path $bundleDir ("{0}.sha256" -f $bundleName)
+$bundleAuditFile = Join-Path $bundleDir ("{0}-manifest.json" -f $bundleName)
+if (Test-Path $bundleAuditFile) {
+    try {
+        $bundleAudit = Get-Content -Path $bundleAuditFile -Raw | ConvertFrom-Json -Depth 6
+        $manifest['bundleDigest'] = [ordered]@{
+            manifest = (Split-Path $bundleAuditFile -Leaf)
+            digest = if (Test-Path $bundleDigestFile) { Split-Path $bundleDigestFile -Leaf } else { $null }
+            signerWarnings = $bundleAudit.signerWarnings
+        }
+        if ($bundleAudit.files) {
+            $signatureEntries = @()
+            foreach ($fileEntry in $bundleAudit.files) {
+                if ($fileEntry.PSObject.Properties.Name -contains 'signed') {
+                    $signatureEntries += [ordered]@{
+                        path = $fileEntry.path
+                        signed = [bool]$fileEntry.signed
+                        signerThumbprint = $fileEntry.signerThumbprint
+                        status = $fileEntry.signatureStatus
+                        sha256 = $fileEntry.sha256
+                    }
+                }
+            }
+            if ($signatureEntries.Count -gt 0) {
+                $manifest['signatureAudit'] = $signatureEntries
+            }
+        }
+        $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
+    } catch {
+        Write-Warning ("Unable to incorporate bundle audit '{0}': {1}" -f $bundleAuditFile, $_.Exception.Message)
+    }
+}
+
 # Create zip
 $zipPath = Join-Path $outRoot ("{0}.zip" -f $bundleName)
 if (Test-Path $zipPath) { Remove-Item -Force $zipPath }

