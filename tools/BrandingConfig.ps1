@@ -33,8 +33,8 @@ function Resolve-BrandingConfigPath {
     }
 
     $candidates = @(
-        Join-Path $RepoRoot 'branding_config.local.json',
-        Join-Path $RepoRoot 'branding_config.json'
+        (Join-Path $RepoRoot 'branding_config.local.json')
+        (Join-Path $RepoRoot 'branding_config.json')
     )
 
     foreach ($candidate in $candidates) {

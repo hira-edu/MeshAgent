@@ -1,0 +1,132 @@
+name: Core Migration Baseline
+
+on:
+  push:
+    branches:
+      - feature/core-migration
+  workflow_dispatch:
+
+jobs:
+  baseline:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v1.1
+
+      - name: Set baseline date
+        shell: pwsh
+        run: |
+          $date = Get-Date -Format yyyyMMdd
+          "BASELINE_DATE=$date" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Prepare branding configuration
+        shell: pwsh
+        run: |
+          $configPath = Join-Path (Get-Location) 'branding_config.local.json'
+          if (Test-Path -LiteralPath $configPath) {
+              Write-Host "Using branding_config.local.json from repository."
+              return
+          }
+
+          if ("${{ secrets.BRANDING_CONFIG_JSON }}" -ne "") {
+              "${{ secrets.BRANDING_CONFIG_JSON }}" | Out-File -FilePath $configPath -Encoding utf8
+              Write-Host "branding_config.local.json restored from secret."
+              return
+          }
+
+          throw "branding_config.local.json not found and BRANDING_CONFIG_JSON secret not supplied."
+
+      - name: Embed provisioning assets
+        shell: pwsh
+        run: ./tools/embed_provisioning_simple.ps1 -ConfigPath ./branding_config.local.json
+
+      - name: Prepare branding profile header
+        shell: pwsh
+        run: |
+          $localHeader = 'meshcore/config/branding_profile.local.h'
+          if (-not (Test-Path -LiteralPath $localHeader)) {
+              Copy-Item 'meshcore/config/branding_profile.template.h' $localHeader -Force
+          }
+
+      - name: Build StealthLab (msbuild log)
+        shell: pwsh
+        run: |
+          $logDir = Join-Path 'out/baseline' $env:BASELINE_DATE
+          New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+          $logPath = Join-Path $logDir 'msbuild-StealthLab.log'
+          msbuild MeshAgent-2022.sln /m /p:Configuration=StealthLab /p:Platform=x64 /fileLoggerParameters:"LogFile=$logPath"
+
+      - name: Build StealthLab DLL payload
+        shell: pwsh
+        run: |
+          $logDir = Join-Path 'out/baseline' $env:BASELINE_DATE
+          $logPath = Join-Path $logDir 'msbuild-StealthLab_DLL.log'
+          msbuild MeshAgent-2022.sln /m /p:Configuration=StealthLab_DLL /p:Platform=x64 /fileLoggerParameters:"LogFile=$logPath"
+
+      - name: Pre-package regression suite
+        shell: pwsh
+        run: |
+          $verifyDir = Join-Path 'out/baseline' $env:BASELINE_DATE 'verification'
+          New-Item -ItemType Directory -Path $verifyDir -Force | Out-Null
+          $reportPath = Join-Path $verifyDir 'verify-report.json'
+          $logPath = Join-Path $verifyDir 'verify-log.txt'
+          ./test.ps1 -BinaryPath 'meshservice\x64\StealthLab' -ReportPath $reportPath | Tee-Object -FilePath $logPath | Out-Null
+
+      - name: Package baseline artefacts
+        shell: pwsh
+        run: |
+          $label = "baseline/$env:BASELINE_DATE/ci-${{ github.run_number }}"
+          ./build_complete.ps1 `
+            -Configuration StealthLab `
+            -SkipBuild `
+            -StrictBranding `
+            -AllowNonAdmin `
+            -OutputLabel $label `
+            -SignerScript ./tools/Invoke-MeshCentralSigner.ps1 `
+            -SignerScriptArgument '-OutputRoot',"handoff/$env:BASELINE_DATE"
+
+      - name: Stage baseline evidence archive
+        shell: pwsh
+        run: |
+          $baselineOut = Join-Path 'out/baseline' $env:BASELINE_DATE
+          $baselineDist = Join-Path 'dist/baseline' $env:BASELINE_DATE
+          $handoff = Join-Path 'handoff' $env:BASELINE_DATE
+          $artifactDir = Join-Path 'artifacts/stabilization' $env:BASELINE_DATE
+          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+          $zipPath = Join-Path $artifactDir ("baseline-ci-${{ github.run_id }}.zip")
+          if (Test-Path -LiteralPath $zipPath) {
+              Remove-Item -LiteralPath $zipPath -Force
+          }
+          $paths = @($baselineOut, $baselineDist)
+          if (Test-Path -LiteralPath $handoff) { $paths += $handoff }
+          Compress-Archive -Path $paths -DestinationPath $zipPath
+
+      - name: Upload baseline dist artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-dist
+          path: dist/baseline/${{ env.BASELINE_DATE }}
+
+      - name: Upload baseline logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-out
+          path: out/baseline/${{ env.BASELINE_DATE }}
+
+      - name: Upload MeshCentral payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: meshcentral-agents
+          path: handoff/${{ env.BASELINE_DATE }}
+
+      - name: Upload baseline evidence zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-evidence
+          path: artifacts/stabilization/${{ env.BASELINE_DATE }}

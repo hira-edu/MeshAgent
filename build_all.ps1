@@ -28,7 +28,7 @@
     Do not validate Authenticode signatures when staging binaries.
 
 .PARAMETER SkipSvchostValidation
-    Do not verify that staged binaries contain the SVCHOSTDLL resource.
+    Skip validation of the embedded svchost payload header/metadata.
 
 .PARAMETER SkipTests
     Pass -SkipTests through to build.ps1.
@@ -42,6 +42,9 @@
 
 .PARAMETER OutputLabel
     Custom name for the output folder (defaults to MeshAgent_<config>_<timestamp>).
+
+.PARAMETER AllowNonAdmin
+    Permit execution without administrative privileges (intended for CI runners).
 
 .PARAMETER Quiet
     Suppress informational output (errors still surface).
@@ -63,11 +66,29 @@ param(
     [Parameter()] [switch]$RunHealthCheck,
     [Parameter()] [ValidateRange(0, 32)] [int]$Retention = 3,
     [Parameter()] [string]$OutputLabel,
+    [Parameter()] [switch]$AllowNonAdmin,
     [Parameter()] [switch]$Quiet
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$script:IsCIContext = [bool]$env:GITHUB_ACTIONS -or [bool]$env:CI
+$script:NonAdminOverride = ($AllowNonAdmin -or $script:IsCIContext)
+function Write-Section {
+    param([string]$Title)
+    if (-not $script:IsQuiet) {
+        Write-Host ""
+        Write-Host ("==================================================") -ForegroundColor Cyan
+        Write-Host ("{0}" -f $Title) -ForegroundColor Cyan
+        Write-Host ("==================================================") -ForegroundColor Cyan
+    }
+}
+
+function Write-Info { param([string]$Message) if ($null -eq $script:IsQuiet -or -not $script:IsQuiet) { Write-Host ("[INFO] {0}" -f $Message) -ForegroundColor Gray } }
+function Write-Warn { param([string]$Message) if ($null -eq $script:IsQuiet -or -not $script:IsQuiet) { Write-Host ("[WARN] {0}" -f $Message) -ForegroundColor Yellow } }
+function Write-Ok   { param([string]$Message) if ($null -eq $script:IsQuiet -or -not $script:IsQuiet) { Write-Host ("[ OK ] {0}" -f $Message) -ForegroundColor Green } }
+function Write-Err  { param([string]$Message) Write-Host ("[ERR ] {0}" -f $Message) -ForegroundColor Red }
 
 $script:IsQuiet = [bool]$Quiet
 $script:RepoRoot = $PSScriptRoot
@@ -75,7 +96,7 @@ $script:PackageDir = $null
 $script:ArchivePath = $null
 $script:DllHash = $null
 $script:GitCommit = $null
-$script:HasSvchostProbe = $false
+$script:SvchostHeaderValidated = $false
 $script:HealthReportPath = $null
 $script:PackageManifestPath = $null
 
@@ -88,22 +109,6 @@ $brandingConfigInfo = Get-BrandingConfig -RepoRoot $script:RepoRoot -Quiet
 $script:BrandingConfigPath = $brandingConfigInfo.Path
 Write-Info ("Branding config : {0}" -f $script:BrandingConfigPath)
 $script:BrandingServiceName = $null
-$script:ResourceProbeScript = $null
-
-function Write-Section {
-    param([string]$Title)
-    if (-not $script:IsQuiet) {
-        Write-Host ""
-        Write-Host ("==================================================") -ForegroundColor Cyan
-        Write-Host ("{0}" -f $Title) -ForegroundColor Cyan
-        Write-Host ("==================================================") -ForegroundColor Cyan
-    }
-}
-
-function Write-Info { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[INFO] {0}" -f $Message) -ForegroundColor Gray } }
-function Write-Warn { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[WARN] {0}" -f $Message) -ForegroundColor Yellow } }
-function Write-Ok   { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[ OK ] {0}" -f $Message) -ForegroundColor Green } }
-function Write-Err  { param([string]$Message) Write-Host ("[ERR ] {0}" -f $Message) -ForegroundColor Red }
 
 function Invoke-BuildStep {
     param(
@@ -154,6 +159,11 @@ function Resolve-PowerShellHost {
     throw "Unable to locate PowerShell executable for health check invocation."
 }
 
+function Test-AdminContext {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    return $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+}
+
 function Get-AgentOutputPath {
     param(
         [Parameter(Mandatory = $true)][string]$Configuration,
@@ -182,25 +192,40 @@ function Ensure-SvchostResource {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
-    if ($SkipSvchostValidation) {
-        return
+    if ($SkipSvchostValidation) { return }
+    if ($script:SvchostHeaderValidated) { return }
+
+    $headerPath = Join-Path $script:RepoRoot 'meshcore\embedded\generated\svchost_payload.h'
+    if (-not (Test-Path -LiteralPath $headerPath)) {
+        throw "Embedded svchost payload header missing at $headerPath"
     }
 
-    $probe = Get-Command -Name Test-SvchostPayload -ErrorAction SilentlyContinue
-    if (-not $probe -and $script:ResourceProbeScript -and (Test-Path -LiteralPath $script:ResourceProbeScript)) {
-        . $script:ResourceProbeScript
-        $probe = Get-Command -Name Test-SvchostPayload -ErrorAction SilentlyContinue
+    $metadataPath = Join-Path $script:RepoRoot 'meshcore\embedded\generated\svchost_payload.json'
+    if (Test-Path -LiteralPath $metadataPath) {
+        try {
+            $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json -ErrorAction Stop
+            if ($metadata -and $metadata.sha256 -and $metadata.input -and (Test-Path -LiteralPath $metadata.input)) {
+                $expected = ($metadata.sha256.ToString()).ToLowerInvariant()
+                $actual = ((Get-FileHash -Path $metadata.input -Algorithm SHA256).Hash).ToLowerInvariant()
+                if ($expected -ne $actual) {
+                    throw "Embedded payload metadata hash mismatch (expected $expected, actual $actual)"
+                }
+            }
+        } catch {
+            throw ("Embedded payload metadata invalid: {0}" -f $_.Exception.Message)
+        }
+    } else {
+        Write-Warn "Embedded payload metadata missing; unable to verify svchost payload hash."
     }
 
-    if (-not $probe) {
-        $script:HasSvchostProbe = $false
-        throw "SVCHOSTDLL validation unavailable; ResourceProbe helper failed to load."
-    }
+    $script:SvchostHeaderValidated = $true
+}
 
-    $script:HasSvchostProbe = $true
-
-    if (-not (Test-SvchostPayload -Path $Path)) {
-        throw ("{0} is missing the SVCHOSTDLL embedded payload." -f $Description)
+if (-not (Test-AdminContext)) {
+    if ($script:NonAdminOverride) {
+        Write-Warn "Administrator privileges not detected; continuing due to CI/AllowNonAdmin override."
+    } else {
+        throw "Administrator privileges are required. Relaunch PowerShell as Administrator."
     }
 }
 
@@ -260,7 +285,6 @@ function Ensure-Signature {
 
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $buildScript = Join-Path $script:RepoRoot 'build.ps1'
-$script:ResourceProbeScript = Join-Path $script:RepoRoot 'tools\ResourceProbe.ps1'
 $embedScript = Join-Path $script:RepoRoot 'tools\embed_provisioning_simple.ps1'
 $distRoot = Join-Path $script:RepoRoot 'dist'
 
@@ -279,7 +303,7 @@ $steps += @{ Label = 'Pre-flight checks'; Action = {
     Write-Info ("Output package  : {0}" -f $packageName)
     Write-Info ("Health check   : {0}" -f $(if ($RunHealthCheck) { 'enabled' } else { 'disabled' }))
 
-    foreach ($path in @($buildScript, $script:ResourceProbeScript, $embedScript)) {
+    foreach ($path in @($buildScript, $embedScript)) {
         if (-not (Test-Path $path)) {
             throw ("Required helper missing: {0}" -f $path)
         }
@@ -287,25 +311,16 @@ $steps += @{ Label = 'Pre-flight checks'; Action = {
 
     Ensure-Directory -Path $distRoot
 
-    if (Test-Path -LiteralPath $script:ResourceProbeScript) {
-        . $script:ResourceProbeScript
-    }
-    $script:HasSvchostProbe = [bool](Get-Command -Name Test-SvchostPayload -ErrorAction SilentlyContinue)
-
     if ($SkipSignatureValidation) {
         Write-Warn "Authenticode inspection disabled by request."
     } else {
         Write-Info "Authenticode signatures will be reported for awareness only (no enforcement)."
     }
 
-    if (-not $SkipSvchostValidation) {
-        if ($script:HasSvchostProbe) {
-            Write-Info "SVCHOSTDLL resource validation enabled."
-        } else {
-            throw "ResourceProbe did not expose Test-SvchostPayload; cannot validate svchost payload."
-        }
+    if ($SkipSvchostValidation) {
+        Write-Warn "Svchost payload validation disabled by request."
     } else {
-        Write-Warn "SVCHOSTDLL validation disabled by request."
+        Write-Info "Embedded svchost payload validation enabled."
     }
 
     $gitCmd = Get-Command git -ErrorAction SilentlyContinue
@@ -364,6 +379,10 @@ if (-not $SkipBuild) {
         $buildParams = @{
             Configuration   = $Configuration
             BuildSvchostDll = $true
+        }
+
+        if ($script:NonAdminOverride) {
+            $buildParams['AllowNonAdmin'] = $true
         }
 
         if (-not $Clean) { $buildParams['SkipClean'] = $true }

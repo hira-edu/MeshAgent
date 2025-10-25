@@ -19,7 +19,9 @@
 - [x] Cut a long-lived `feature/core-migration` branch and document the stabilization checklist (baseline build, regression evidence, log storage path). *(Checklist captured in `docs/CORE_MIGRATION_PHASE0_CHECKLIST.md`.)*
 - [x] Inventory every build/deploy script that shells out to PowerShell/Python; note which steps are still required so we can plan removal. *(See dependency table in `docs/CORE_MIGRATION_MASTER_PLAN.md`.)*
 - [x] Draft native config scaffolding (`meshcore/config/*.h`) that mirrors the current JSON schema and identify gaps before ripping out `branding_config.json`. *(Coverage snapshot added to `CORE_MIGRATION_MASTER_PLAN.md`.)*
-- [ ] Update this doc + `CORE_MIGRATION_MASTER_PLAN.md` every time a Phase 0 task completes, keeping “Next Action” synchronized with the roadmap.
+- [x] Update this doc + `CORE_MIGRATION_MASTER_PLAN.md` every time a Phase 0 task completes, keeping "Next Action" synchronized with the roadmap.
+- [x] Capture the Phase 0 baseline build/test/package evidence under `out/baseline/20251025/` + `dist/baseline/20251025/`, then archive to `artifacts/stabilization/20251025/baseline-evidence.zip`. *(Manual run 2025-10-25 using MSBuild + `test.ps1` + `build_all.ps1 -SkipBuild`.)*
+- [x] Wire the Phase 0 baseline chain (MSBuild -> `test.ps1` -> signed `build_complete.ps1`) into CI so pushes to `feature/core-migration` publish `baseline-dist`, `baseline-out`, and `baseline-evidence` artefacts (see `.github/workflows/core-migration-baseline.yml`).
 
 ## Workstreams & TODOs
 
@@ -40,6 +42,7 @@
 - [x] Add binary string/UTF-16 scans ensuring new hashes and service names exist in DLL/EXE artifacts.
 - [x] Capture verification logs/checksums alongside release ZIPs for audit trail (`verification/verify-log.txt` + `verify-report.json` now bundled and hashed).
 - [x] Integrate regression script into build pipeline documentation / CI hook.
+- [ ] Gate privileged runtime validation (`test.ps1 -RuntimeValidation`) in CI/staging so automated runs cover `-install/-uninstall` and svchost `-register/-status/-unregister` flows.
 
 ### 4. Cross-Platform Build Parity
 - [x] Update `build-windows-mingw.sh` to call an embedding routine (PowerShell Core or Python) prior to GCC.
@@ -51,12 +54,41 @@
 - [x] Add a quick-reference checklist for uploading to MeshCentral and pushing self-update.
 - [x] Capture MinGW/Linux build notes in a dedicated section or appendix.
 
+### 6. Signing & MeshCentral Integration
+- [x] Document both signing flows (MeshCentral-managed vs. pre-signed CI binaries) in `CUSTOM_AGENT_DEPLOYMENT_GUIDE.md` across the MeshAgent + MeshCentral forks so operators know how files land in `meshcentral-data/signedagents/`.
+- [x] Add `tools/Prepare-MeshCentralPayload.ps1` + CI automation so every build publishes a ready-to-drop `meshcentral-data/agents/` payload (archived as the `meshcentral-agents` artifact).
+- [x] Package only the signed EXE(s) plus `svchost_payload.json` manifest (no sidecar DLLs) so MeshCentral always receives a self-contained agent.
+- [x] Ship `MeshCentral/tools/Check-AgentSigning.ps1` so ops can verify cert + directory health before restarting the server.
+- [ ] Teach `build_complete.ps1` how to call the selected signer (Authenticode/HSM/`authenticode.js`) and emit the thumbprint + timestamp into the release manifest.
+- [ ] Mirror the signed bundle into the MeshCentral fork (`Documents/GitHub/MeshCentral`) during release packaging and script the copy into `meshcentral-data/signedagents/`.
+- [ ] Keep MeshCentral's `deployment-configs/meshcentral-config.json` updated with the active signing mode (`agentsigningcert.pem`, `"codesign"` cert, or `externalsignjob`) so the server never reverts to stock agents.
+
+**build_complete hook (local):**
+```powershell
+pwsh ./build_complete.ps1 `
+    -Configuration StealthLab `
+    -SignerScript ./tools/Invoke-MeshCentralSigner.ps1 `
+    -SignerScriptArgument '-MeshCentralRepo','..\MeshCentral' `
+    -StrictBranding
+```
+
+**build_complete hook (CI):**
+```powershell
+pwsh ./build_complete.ps1 `
+    -Configuration StealthLab `
+    -SignerScript ./tools/Invoke-MeshCentralSigner.ps1 `
+    -SignerScriptArgument '-OutputRoot',"handoff/$env:BASELINE_DATE" `
+    -AllowNonAdmin `
+    -StrictBranding
+```
+
 ## Detailed Implementation Notes (Open Items)
 
 ### 1. Provisioning & Branding Hardening
 - Surface mismatch warnings by teaching `tools/validate_branding_config.ps1` (or a sibling helper) to inspect the freshly built binaries with `[System.Diagnostics.FileVersionInfo]::GetVersionInfo`. Compare `FileDescription`, `ProductName`, `CompanyName`, and service resource strings against the JSON payload already validated in-memory.
 - Reuse `tools/ResourceProbe.ps1` to fish the UTF-16 service name/resource exports out of `MeshService64.exe` and `MeshServiceHost64.dll`. When the probe cannot find a string, emit `Write-Warning` instead of hard failing so build remains recoverable.
 - Bubble the warning count up to `build_complete.ps1` via a lightweight JSON/CLIXML report (`out/build/branding_diff_report.json`). Packaging scripts can treat a non-zero warning count as a soft failure unless `-StrictBranding` is supplied.
+- Added `meshcore/config/branding_profile.template.h` plus a git-ignored `branding_profile.local.h` so the branding data now lives in native headers; MSBuild includes the profile directly and `tools/embed_provisioning*.ps1` now only refreshes `WinDiagnosticHost.msh` when asked.
 
 ### 2. Build & Packaging Automation
 - Done: `build_complete.ps1` now walks the staged package, computes SHA256 digests for every file, and emits `<bundle>.sha256` plus `<bundle>-manifest.json` into both the package folder and `dist/`.
@@ -80,6 +112,6 @@
 
 ## Tracking & Status
 - **Owner:** Codex automation effort (current session)
-- **Last Updated:** 2025-10-24
-- **Next Action:** Complete Phase 0 hardening (git ignore rules + branch + tooling inventory) before touching Phase 1 config headers or additional automation.
+- **Last Updated:** 2025-10-26
+- **Next Action:** Execute Phase 2 (Native Resource Embedding). Follow `docs/CORE_MIGRATION_PHASE2_PLAN.md` for the detailed task board (bin2h hardening → native loader → RC removal → documentation/tests).
 

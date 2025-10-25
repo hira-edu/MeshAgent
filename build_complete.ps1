@@ -29,7 +29,7 @@
     recommended for release builds).
 
 .PARAMETER SkipSvchostValidation
-    Pass-through to build_all.ps1 to skip SVCHOSTDLL resource validation.
+    Pass-through to build_all.ps1 to skip embedded svchost payload validation.
 
 .PARAMETER StrictBranding
     Treat branding drift warnings as fatal.
@@ -43,6 +43,17 @@
 
 .PARAMETER OutputLabel
     Override the generated package folder name.
+
+.PARAMETER AllowNonAdmin
+    Permit execution without administrative privileges (intended for CI runners).
+
+.PARAMETER SignerScript
+    Optional helper invoked after branding drift analysis. Receives `-PackageDir` and `-Configuration`
+    (plus any `SignerScriptArgument` values) so you can trigger signtool/authenticode hooks or sync artefacts
+    into MeshCentral automatically.
+
+.PARAMETER SignerScriptArgument
+    Additional arguments forwarded to SignerScript (array preserves ordering).
 
 .PARAMETER Quiet
     Suppress informational output (errors still surface).
@@ -70,12 +81,17 @@ param(
     [string]$Configuration = 'StealthLab',
     [Parameter()] [ValidateRange(0, 32)] [int]$Retention = 3,
     [Parameter()] [string]$OutputLabel,
+    [Parameter()] [switch]$AllowNonAdmin,
+    [Parameter()] [string]$SignerScript,
+    [Parameter()] [string[]]$SignerScriptArgument,
     [Parameter()] [switch]$Quiet
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$script:IsCIContext = [bool]$env:GITHUB_ACTIONS -or [bool]$env:CI
+$script:NonAdminOverride = ($AllowNonAdmin -or $script:IsCIContext)
 $script:IsQuiet = [bool]$Quiet
 $script:RepoRoot = $PSScriptRoot
 $script:DistRoot = Join-Path $script:RepoRoot 'dist'
@@ -84,6 +100,7 @@ $script:Timestamp = Get-Date
 $script:GitCommit = $null
 $script:PackageDir = $null
 $script:ArchivePath = $null
+$script:SignerScriptPath = $null
 $script:VerificationDir = $null
 $script:BrandingWarnings = 0
 $script:DllHash = $null
@@ -146,6 +163,12 @@ function Ensure-Directory {
     }
 }
 
+function Resolve-ExistingPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $resolved = Resolve-Path -LiteralPath $Path -ErrorAction Stop
+    return $resolved.ProviderPath
+}
+
 function Test-AdminContext {
     $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     return $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
@@ -160,7 +183,11 @@ function Resolve-TestRunner {
 }
 
 if (-not (Test-AdminContext)) {
-    throw "Administrator privileges are required. Relaunch PowerShell elevated."
+    if ($script:NonAdminOverride) {
+        Write-Warn "Administrator privileges not detected; continuing due to CI/AllowNonAdmin override."
+    } else {
+        throw "Administrator privileges are required. Relaunch PowerShell elevated."
+    }
 }
 
 if (-not (Test-Path -LiteralPath $script:BuildAllScript)) {
@@ -168,6 +195,14 @@ if (-not (Test-Path -LiteralPath $script:BuildAllScript)) {
 }
 
 Ensure-Directory -Path $script:DistRoot
+
+if ($SignerScript) {
+    try {
+        $script:SignerScriptPath = Resolve-ExistingPath $SignerScript
+    } catch {
+        throw "Signer script not found at '$SignerScript'."
+    }
+}
 
 $stamp = $script:Timestamp.ToString('yyyyMMdd_HHmmss')
 $defaultPrefix = if ($Configuration -like 'StealthLab*') { 'MeshAgent_Stealth' } else { "MeshAgent_{0}" -f $Configuration }
@@ -211,6 +246,7 @@ $steps.Add([pscustomobject]@{
         if ($SkipTests)             { $args['SkipTests'] = $true }
         if ($RunHealthCheck)        { $args['RunHealthCheck'] = $true }
         if ($Quiet)                 { $args['Quiet'] = $true }
+        if ($script:NonAdminOverride) { $args['AllowNonAdmin'] = $true }
 
         & $script:BuildAllScript @args
         if ($LASTEXITCODE -ne 0) {
@@ -341,6 +377,27 @@ $steps.Add([pscustomobject]@{
         }
     }
 })
+
+if ($SignerScript) {
+    $steps.Add([pscustomobject]@{
+        Label  = 'Signer hook'
+        Action = {
+            $args = @(
+                '-PackageDir', $script:PackageDir,
+                '-Configuration', $Configuration
+            )
+            if ($SignerScriptArgument) {
+                $args += $SignerScriptArgument
+            }
+
+            Write-Info ("Signer script: {0} {1}" -f $script:SignerScriptPath, ($args -join ' '))
+            & $script:SignerScriptPath @args
+            if ($LASTEXITCODE -ne 0) {
+                throw ("Signer script exited with code {0}" -f $LASTEXITCODE)
+            }
+        }
+    })
+}
 
 if (-not $SkipArchive) {
     $steps.Add([pscustomobject]@{

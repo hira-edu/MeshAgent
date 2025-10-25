@@ -29,6 +29,11 @@ MESHCONFIG_INLINE const mesh_stealth_profile_t* MeshConfig_GetStealth(void)
     return MeshConfig_GetActiveGroup()->stealth;
 }
 
+MESHCONFIG_INLINE const mesh_persistence_profile_t* MeshConfig_GetPersistence(void)
+{
+    return MeshConfig_GetActiveGroup()->persistence;
+}
+
 #undef MESHCONFIG_INLINE
 
 #endif /* MESHCORE_CONFIG_ACTIVE_PROFILE_H */

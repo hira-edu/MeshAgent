@@ -1135,12 +1135,15 @@ The table below captures every build/deploy entrypoint that still executes Power
 
 
 ### Phase 2 (Week 2-3): Resource Embedding
-- [ ] Author `tools/bin2h` (or similar) to emit deterministic payload headers + manifest.
-- [ ] Convert svchost DLL to header/PE section + implement native extraction helper.
-- [ ] Add SHA256 integrity verification + signer thumbprint assertion before loading payload.
-- [ ] Delete legacy RC-based embedding + redundant PowerShell staging.
+- [x] Author `tools/bin2h` (or similar) to emit deterministic payload headers + manifest.
+- [x] Convert svchost DLL to header/PE section + implement native extraction helper inside ServiceMain/installer (RC payload removed).
+- [ ] Add SHA256 integrity verification + signer thumbprint assertion before loading payload (runtime self-check).
+- [ ] Flow payload metadata into MeshCentral packaging so only the EXE + JSON manifest ship (no staged DLL artifacts).
+- [ ] Extend `test.ps1` with privileged runtime validation (`-RuntimeValidation`) to exercise `-install/-uninstall` and svchost `-register/-status/-unregister` flows.
 - [ ] **Test:** Integration test exercises DLL extraction + load validation on x64.
 - **Exit criteria:** Build tree has zero `.rc` payload references; payload integrity failure blocks startup.
+
+> Detailed work breakdown, TODO board, and validation plan live in `docs/CORE_MIGRATION_PHASE2_PLAN.md`. Treat that document as the source of truth for task status during this phase.
 
 ### Phase 3 (Week 3-4): Deployment Automation (Native)
 - [ ] Implement C++ service registration + recovery policy configuration.
@@ -1454,3 +1457,4 @@ msbuild MeshAgent-2022.sln /p:Configuration=StealthLab /p:DeviceGroup=FINANCE /p
 ---
 
 **End of Master Plan**
+

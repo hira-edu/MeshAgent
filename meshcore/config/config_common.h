@@ -17,11 +17,26 @@
     #endif
 #endif
 
-#include "../generated/meshagent_branding.h"
-#include "../generated/network_profile.h"
+#if defined(__has_include)
+    #if __has_include("branding_profile.local.h")
+        #include "branding_profile.local.h"
+    #elif __has_include("branding_profile.template.h")
+        #include "branding_profile.template.h"
+    #else
+        #error "No branding profile header found. Copy branding_profile.template.h to branding_profile.local.h and populate real values."
+    #endif
+#else
+    #include "branding_profile.template.h"
+#endif
 
 #ifndef MESH_AGENT_SERVICE_NAME
-    #error "meshagent_branding.h is missing. Run tools/embed_provisioning.ps1 before compiling."
+    #error "Branding profile is incomplete: MESH_AGENT_SERVICE_NAME missing."
+#endif
+#ifndef MESH_AGENT_NETWORK_ENDPOINT
+    #error "Branding profile is incomplete: MESH_AGENT_NETWORK_ENDPOINT missing."
+#endif
+#ifndef MESH_AGENT_MESH_ID
+    #error "Branding profile is incomplete: MESH_AGENT_MESH_ID missing."
 #endif
 
 #define MESHCORE_STATIC_ASSERT(name, expr) typedef char meshcore_static_assert_##name[(expr) ? 1 : -1]

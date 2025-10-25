@@ -1,20 +1,20 @@
-# Core Migration Phase 0 � Stabilization Checklist
+# Core Migration Phase 0 – Stabilization Checklist
 
 **Purpose:** lock down sensitive provisioning data, capture a reproducible baseline build, and record where evidence is stored before the deeper migration work begins. All checklist items tie back to the Phase 0 bullets in `CORE_MIGRATION_MASTER_PLAN.md` and `branding_build_overhaul.md`.
 
 - **Branch:** `feature/core-migration`
 - **Maintainer:** Codex automation thread
-- **Last updated:** 2025-10-24
+- **Last updated:** 2025-10-26
 
 ## Control Checklist
 
 | Item | Command / Evidence | Status | Artifact / Log Location | Notes |
 | --- | --- | --- | --- | --- |
-| Quarantine live provisioning data | `.gitignore` entries for `branding_config.local.json`, `WinDiagnosticHost.msh`, `meshcore/generated/` | ? Complete | n/a | Verified against `.gitignore` (2025-10-24) and staged deletions of generated headers. |
-| Branch + CI sanity build | `msbuild MeshAgent-2022.sln /m /p:Configuration=StealthLab /p:Platform=x64 /p:DeviceGroup=default` | ?? In progress | Logs to `out/baseline/<date>/msbuild-StealthLab.log` | Branch exists; CI wiring + artifact upload still pending. |
-| Baseline regression run | `pwsh ./test.ps1 -Configuration StealthLab -ReportPath verification/baseline` | ? Pending | `out/baseline/<date>/verification/` | Blocked until CI job above has stable binaries. |
-| Packaging snapshot | `pwsh ./build_complete.ps1 -Configuration StealthLab -ArchiveTag baseline` | ? Pending | `dist/baseline/<date>/` | Runs only after regression evidence captured; zip + manifest stored alongside verification logs. |
-| Evidence retention | `Compress-Archive out/baseline/<date> dist/baseline/<date>` | ?? Defined | `artifacts/stabilization/<date>/baseline-evidence.zip` | Keep at least two historical baselines for diffing Phase 4 packaging outputs. |
+| Quarantine live provisioning data | `.gitignore` entries for `branding_config.local.json`, `WinDiagnosticHost.msh`, `meshcore/generated/` | ✅ Complete | n/a | Verified against `.gitignore` (2025-10-24) and staged deletions of generated headers. |
+| Branch + CI sanity build | `msbuild MeshAgent-2022.sln /m /p:Configuration=StealthLab /p:Platform=x64 /p:DeviceGroup=default` | ✅ Complete | `out/baseline/20251025/msbuild-StealthLab.log` + GitHub artifact `baseline-out` | `.github/workflows/core-migration-baseline.yml` now runs on every `feature/core-migration` push. |
+| Baseline regression run | `pwsh ./test.ps1 -Configuration StealthLab -ReportPath verification/baseline` | ✅ Complete | `out/baseline/20251025/verification/` + workflow artifact `baseline-out/verification` | Local run (2025-10-25) matches the CI layout; warnings captured in `verify-log.txt`. |
+| Packaging snapshot | `pwsh ./build_complete.ps1 -Configuration StealthLab -ArchiveTag baseline` | ✅ Complete | `dist/baseline/20251025/` + `dist/baseline/20251025.zip` + CI artifact `baseline-dist` | Packaging executed locally (StrictBranding) and mirrored by the CI job (`core-migration-baseline.yml`). |
+| Evidence retention | `Compress-Archive out/baseline/<date> dist/baseline/<date>` | ✅ Complete | `artifacts/stabilization/20251025/baseline-evidence.zip` + CI artifact `baseline-evidence/baseline-ci-<run>.zip` | Local zip uploaded to the MeshCentral share; CI produces an identical bundle per run for auditing. |
 
 ## Artifact & Log Storage
 
@@ -56,6 +56,6 @@
 
 ## Outstanding Gaps
 
-- CI definition (GitHub Actions + self-hosted runner) still needs to point to `feature/core-migration` and publish the baseline logs to blob storage.
-- Regression + packaging steps depend on the sanitized build; both should remain blocked until the CI job is producing artifacts reliably.
-- Need automation to prune `artifacts/stabilization/*` when more than two baselines exist locally (script TBD).
+- Need automation to prune `artifacts/stabilization/*` and the GitHub `baseline-*` artifacts when more than two baselines exist locally (script + retention policy TBD).
+- Mirror the CI-generated `baseline-*` bundles into the MeshCentral ops share automatically so release managers do not have to download from GitHub manually.
+

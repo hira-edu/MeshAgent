@@ -390,6 +390,10 @@ telemetry.log
 # Branding / provisioning secrets
 branding_config.local.json
 meshcore/generated/meshagent_branding.h
+meshcore/config/branding_profile.local.h
+
+# Embedded payload artifacts
+meshcore/embedded/generated/
 
 # SSH keys
 .ssh/

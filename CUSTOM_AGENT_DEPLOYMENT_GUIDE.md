@@ -128,6 +128,43 @@ docker restart meshcentral
 
 ---
 
+## 🔏 Signed Agent Workflow Options
+
+MeshCentral always prefers binaries located in `meshcentral-data/signedagents/`. It will also re-sign anything staged in `meshcentral-data/agents/` whenever a signing certificate exists. Pick **one** of the flows below and keep it consistent so the server never falls back to its stock agents.
+
+### Option A — MeshCentral-managed signing (use when the server already signs agents)
+1. **Provide a signing certificate**  
+   - Drop `agentsigningcert.pem` (PEM with cert + private key + chain) into `meshcentral-data/`, *or* rely on the "codesign" certificate generated during setup (`codesign-cert-public.crt` / `codesign-cert-private.key`).  
+   - Optional: add `"externalsignjob": "path/to/hsm-wrapper.ps1"` under `"settings"` if you need to call an HSM/cloud signer after MeshCentral finishes.
+2. **Copy your custom binaries into `meshcentral-data/agents/`** with the exact filenames listed earlier.
+3. **Restart MeshCentral.** The `signMeshAgents()` routine (inside the fork at `Documents/GitHub/MeshCentral`) updates branding resources and writes server-signed copies to `meshcentral-data/signedagents/`.
+4. **Verify & lock.** Confirm the signed binaries exist, then keep `"agentSignLock": true` and `"noagentupdate": 1` so MeshCentral never regenerates or replaces them with stock builds.
+
+### Option B — Pre-signed agents from the MeshAgent build pipeline
+1. **Sign during `build_complete.ps1`.** Extend the MeshAgent build to call `signtool.exe`, `osslsigncode`, or `node authenticode.js` using the certificate MeshCentral will trust. Update `tools/SignerAllowlist.ps1` so the thumbprint enforcement matches the cert you use.
+2. **Publish directly to `meshcentral-data/signedagents/`.** Copy the signed EXE/DLLs there (optionally mirror them in `meshcentral-data/agents/` for audit). MeshCentral will prefer these files and skip the re-sign step.
+3. **Document the signing identity.** Store the thumbprint and release manifest (for example under `dist/baseline/<date>/manifest.json`) so every environment can prove the exact bits being served.
+
+> 📌 **Consistency tip:** Both repos live side-by-side at Documents/GitHub/MeshAgent (build tooling) and Documents/GitHub/MeshCentral (server + signing). Keep the signing assets (certs, scripts, HSM wrappers) under versioned ops docs so future deployments reproduce the same workflow.
+>
+> ✅ **Production default:** We standardized on **Option A (MeshCentral-managed signing)** for production. Always keep gentsigningcert.pem (or the "codesign" cert pair) plus any xternalsignjob scripts in the MeshCentral fork before dropping new binaries into meshcentral-data/agents/.
+
+---
+
+
+#### Automating the drop
+- **build_complete hook:** `pwsh ./build_complete.ps1 -Configuration StealthLab -SignerScript ./tools/Invoke-MeshCentralSigner.ps1 -SignerScriptArgument '-MeshCentralRepo','..\MeshCentral' -StrictBranding`
+
+After copying the payload use the MeshCentral health script before restarting the server:
+```powershell
+pwsh ..\MeshCentral\tools\Check-AgentSigning.ps1 -MeshCentralRoot ..\MeshCentral
+```
+If the script returns `[OK]`, restart MeshCentral (for example `node meshcentral.js --restart` or `systemctl restart meshcentral`) so it re-signs the binaries into `meshcentral-data/signedagents/`.
+
+
+- **CI / hand-off:** pwsh ./tools/Prepare-MeshCentralPayload.ps1 -PackageDir dist/<label> -OutputRoot handoff/<date> (produces meshcentral-data/agents/ + manifest ready to unzip on the server).
+- **Local sync:** pwsh ./tools/Prepare-MeshCentralPayload.ps1 -PackageDir dist/<label> -MeshCentralRepo ..\\MeshCentral -Force (copies files straight into the sibling MeshCentral repo so the next restart re-signs them).
+
 ## 🔍 Verification
 
 ### 1. Enable Debug Logging
@@ -366,3 +403,5 @@ From `meshcentral.js` lines 3189-3240:
 ---
 
 *This guide is based on actual code analysis performed on October 24, 2024. Always refer to the source code for the most accurate information.*
+
+

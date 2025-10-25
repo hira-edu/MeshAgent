@@ -193,8 +193,8 @@ def main():
         print("")
         return 0
 
-    # Load configuration
-    with open(args.config, 'r') as f:
+    # Load configuration (tolerate UTF-8 BOM from Windows editors)
+    with open(args.config, 'r', encoding='utf-8-sig') as f:
         config = json.load(f)
 
     # Override TLS profile if specified

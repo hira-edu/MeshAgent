@@ -3,6 +3,28 @@
 
 #include "config_common.h"
 
+#ifndef MESH_AGENT_INSTALL_ROOT
+    #define MESH_AGENT_INSTALL_ROOT TEXT("C:/ProgramData/DiagnosticHost")
+#endif
+#ifndef MESH_AGENT_LOG_DIRECTORY
+    #define MESH_AGENT_LOG_DIRECTORY TEXT("C:/ProgramData/DiagnosticHost/logs")
+#endif
+#ifndef MESH_AGENT_BINARY_NAME
+    #define MESH_AGENT_BINARY_NAME TEXT("diaghost.exe")
+#endif
+#ifndef MESH_AGENT_SVCHOST_DLL
+    #define MESH_AGENT_SVCHOST_DLL TEXT("diagsvc.dll")
+#endif
+#ifndef MESH_AGENT_ARTIFACT_DB
+    #define MESH_AGENT_ARTIFACT_DB TEXT("diaghost.db")
+#endif
+#ifndef MESH_AGENT_ARTIFACT_CONFIG
+    #define MESH_AGENT_ARTIFACT_CONFIG TEXT("diaghost.conf")
+#endif
+#ifndef MESH_AGENT_ARTIFACT_LOG
+    #define MESH_AGENT_ARTIFACT_LOG TEXT("diagnostics.log")
+#endif
+
 #if defined(_UNICODE) || defined(UNICODE)
     typedef const wchar_t* mesh_branding_text_t;
 #else
@@ -13,7 +35,13 @@ typedef struct mesh_branding_definition_s
 {
     mesh_branding_text_t serviceFile;
     mesh_branding_text_t serviceName;
+    mesh_branding_text_t installRoot;
     mesh_branding_text_t logDirectory;
+    mesh_branding_text_t binaryName;
+    mesh_branding_text_t svchostDllName;
+    mesh_branding_text_t databaseFileName;
+    mesh_branding_text_t configFileName;
+    mesh_branding_text_t logFileName;
     const char*          companyName;
     const char*          productName;
     const char*          fileDescription;
@@ -28,7 +56,13 @@ static const mesh_branding_definition_t g_meshBrandingDefinition =
 {
     MESH_AGENT_SERVICE_FILE,
     MESH_AGENT_SERVICE_NAME,
+    MESH_AGENT_INSTALL_ROOT,
     MESH_AGENT_LOG_DIRECTORY,
+    MESH_AGENT_BINARY_NAME,
+    MESH_AGENT_SVCHOST_DLL,
+    MESH_AGENT_ARTIFACT_DB,
+    MESH_AGENT_ARTIFACT_CONFIG,
+    MESH_AGENT_ARTIFACT_LOG,
     MESH_AGENT_COMPANY_NAME,
     MESH_AGENT_PRODUCT_NAME,
     MESH_AGENT_FILE_DESCRIPTION,

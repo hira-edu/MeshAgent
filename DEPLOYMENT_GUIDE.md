@@ -210,7 +210,7 @@ Deliverable contents:
    ```bash
    sudo systemctl restart meshcentral
    ```
-5. From the MeshCentral portal, download the Windows x64 agent and confirm the timestamp/hash matches the build. Verify the embedded `SVCHOSTDLL` resource with `Test-SvchostPayload`.
+5. From the MeshCentral portal, download the Windows x64 agent and confirm the timestamp/hash matches the build. Compare the agent hash against `meshcore/embedded/generated/svchost_payload.json` (or rerun the runtime validation tests) to ensure the embedded svchost payload matches.
 
 ---
 
