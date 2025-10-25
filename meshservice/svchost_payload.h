@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 const unsigned char* MeshSvchostPayload_GetData(size_t* length);
+BOOL MeshSvchostPayload_VerifyIntegrity(void);
 BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination);
 
 #ifdef __cplusplus

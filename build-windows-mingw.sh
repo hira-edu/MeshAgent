@@ -174,21 +174,6 @@ COMMON_LDFLAGS="-lws2_32 -liphlpapi -lwinhttp -ladvapi32 -lshell32 -lole32 -lole
 COMMON_LDFLAGS="$COMMON_LDFLAGS -luser32 -lgdi32 -lcrypt32 -lwtsapi32 -lkernel32 -luserenv"
 COMMON_LDFLAGS="$COMMON_LDFLAGS -static-libgcc -static-libstdc++"
 
-# Prepare resource objects for bundling svchost DLL payload
-prepare_resources() {
-    local tmp_rc="build/mingw/bundle_resources.rc"
-    mkdir -p build/mingw
-    # Convert Windows-style backslashes to Unix-style paths for windres
-    sed 's#embedded\\\\svchost_payload\.dll#meshservice/embedded/svchost_payload.dll#g' \
-        meshservice/bundle_resources.rc > "$tmp_rc"
-
-    log_info "Compiling resource objects..."
-    x86_64-w64-mingw32-windres -I meshservice -o build/mingw/bundle_x64.o "$tmp_rc"
-    i686-w64-mingw32-windres -I meshservice -o build/mingw/bundle_x86.o "$tmp_rc"
-}
-
-prepare_resources
-
 # Function to build agent
 build_agent() {
     local ARCH=$1
@@ -196,16 +181,11 @@ build_agent() {
     local CC=$3
     local TARGET=$4
     local MAIN_SOURCE=$5
-    local RES_OBJ="build/mingw/bundle_x64.o"
 
-    if [ "$ARCH" = "x86" ]; then
-        RES_OBJ="build/mingw/bundle_x86.o"
-    fi
-    
     log_info "Building $TARGET (ARCHID=$ARCHID, $ARCH)..."
     
     $CC $COMMON_CFLAGS -DMESH_AGENTID=$ARCHID -D_LINKVM -O2 \
-        $MAIN_SOURCE $SOURCES $WIN_KVM_SOURCES "$RES_OBJ" \
+        $MAIN_SOURCE $SOURCES $WIN_KVM_SOURCES \
         -o $TARGET \
         $COMMON_LDFLAGS \
         -lm -lpthread

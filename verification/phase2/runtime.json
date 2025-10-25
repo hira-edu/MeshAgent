@@ -1,0 +1,181 @@
+{
+  "generatedUtc": "2025-10-25T18:59:29.8013230Z",
+  "binaryPath": "meshservice\\x64\\StealthLab",
+  "summary": {
+    "total": 28,
+    "passed": 19,
+    "failed": 1,
+    "warnings": 8,
+    "exitCode": 1
+  },
+  "tests": [
+    {
+      "Message": "Not found. Checked paths: meshservice\\x64\\StealthLab\\MeshService64.exe; meshservice\\x64\\StealthLab\\MeshService-2022.exe; C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
+      "Details": "",
+      "Name": "x64 Binary Exists",
+      "Status": "Fail"
+    },
+    {
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\StealthLab\\MeshService-2022.exe",
+      "Details": "Size: 19.35 MB",
+      "Name": "x86 Binary Exists",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Binary is not Authenticode signed",
+      "Details": "",
+      "Name": "x86 Signature Allowlisted",
+      "Status": "Warning"
+    },
+    {
+      "Message": "19.35 MB (unusual size)",
+      "Details": "",
+      "Name": "x86 Binary Size Valid",
+      "Status": "Warning"
+    },
+    {
+      "Message": "Valid PE signature (MZ)",
+      "Details": "",
+      "Name": "x86 PE Header Valid",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\branding_config.local.json",
+      "Details": "",
+      "Name": "Branding Config Exists",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Successfully parsed JSON",
+      "Details": "",
+      "Name": "Branding Config Valid JSON",
+      "Status": "Pass"
+    },
+    {
+      "Message": "All required fields present",
+      "Details": "",
+      "Name": "Branding Config Has Required Fields",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Service name: WinDiagnosticHost",
+      "Details": "",
+      "Name": "Service Name Valid",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Endpoint: wss://agents.high.support:4445/agent.ashx",
+      "Details": "",
+      "Name": "Network Endpoint Valid",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshcore\\generated\\meshagent_branding.h",
+      "Details": "",
+      "Name": "Branding Header Exists",
+      "Status": "Pass"
+    },
+    {
+      "Message": "All required defines present",
+      "Details": "",
+      "Name": "Branding Header Has Required Defines",
+      "Status": "Pass"
+    },
+    {
+      "Message": "WinDiagnosticHost",
+      "Details": "",
+      "Name": "MSH meshServiceName matches branding",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Windows Diagnostic Host Service",
+      "Details": "",
+      "Name": "MSH displayName matches branding",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\StealthLab\\MeshService-2022.msh",
+      "Details": "",
+      "Name": "Provisioning manifest staged (MeshService-2022.exe)",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Found in MeshService-2022.exe",
+      "Details": "",
+      "Name": "Binaries embed ServerID",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Found in MeshService-2022.exe",
+      "Details": "",
+      "Name": "Binaries embed ServiceName",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Found in MeshService-2022.exe",
+      "Details": "",
+      "Name": "Binaries embed DisplayName",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Found in MeshService-2022.exe",
+      "Details": "",
+      "Name": "Binaries embed MeshID",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Skipped: x64 binary not found; cannot perform runtime validation.",
+      "Details": "",
+      "Name": "Runtime: Install",
+      "Status": "Warning"
+    },
+    {
+      "Message": "Skipped: x64 binary not found; cannot perform runtime validation.",
+      "Details": "",
+      "Name": "Runtime: Service State",
+      "Status": "Warning"
+    },
+    {
+      "Message": "Skipped: x64 binary not found; cannot perform runtime validation.",
+      "Details": "",
+      "Name": "Runtime: Uninstall",
+      "Status": "Warning"
+    },
+    {
+      "Message": "x64 binary not found; cannot perform runtime validation.",
+      "Details": "",
+      "Name": "Runtime: Svchost Register",
+      "Status": "Warning"
+    },
+    {
+      "Message": "Skipped: x64 binary not found; cannot perform runtime validation.",
+      "Details": "",
+      "Name": "Runtime: Svchost Status",
+      "Status": "Warning"
+    },
+    {
+      "Message": "Skipped: x64 binary not found; cannot perform runtime validation.",
+      "Details": "",
+      "Name": "Runtime: Svchost Unregister",
+      "Status": "Warning"
+    },
+    {
+      "Message": "MSBuild found at C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
+      "Details": "",
+      "Name": "Visual Studio 2022 Found",
+      "Status": "Pass"
+    },
+    {
+      "Message": "Python 3.14.0",
+      "Details": "",
+      "Name": "Python Found",
+      "Status": "Pass"
+    },
+    {
+      "Message": "git version 2.51.1.windows.1",
+      "Details": "",
+      "Name": "Git Found",
+      "Status": "Pass"
+    }
+  ]
+}

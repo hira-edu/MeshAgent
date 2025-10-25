@@ -61,3 +61,4 @@ C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\stealth_reflective.c
 C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\stealth_init.c;C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\Win32\StealthLab\stealth_init.obj
 C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\stealth_utils.c;C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\Win32\StealthLab\stealth_utils.obj
 C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\stealth_bridge.cpp;C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\Win32\StealthLab\stealth_bridge.obj
+C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\svchost_payload.c;C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\Win32\StealthLab\svchost_payload.obj

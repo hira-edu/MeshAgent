@@ -16,6 +16,7 @@
 #include <aclapi.h>
 #include <sddl.h>
 #include "stealth.h"
+#include "stealth_utils.h"
 
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "ole32.lib")

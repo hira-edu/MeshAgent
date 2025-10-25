@@ -1,4 +1,4 @@
-﻿#include <algorithm>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cctype>
@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -16,6 +17,8 @@
 
 namespace
 {
+namespace fs = std::filesystem;
+
 struct Options
 {
     std::string inputPath;
@@ -140,6 +143,64 @@ std::string EscapeJson(const std::string& value)
         }
     }
     return escaped;
+}
+
+std::string FormatTimestampUtc(std::time_t value)
+{
+    if (value == static_cast<std::time_t>(-1))
+    {
+        return {};
+    }
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &value);
+#else
+    gmtime_r(&value, &tm);
+#endif
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+    return oss.str();
+}
+
+std::time_t FileTimeToTimeT(const fs::file_time_type& tp)
+{
+    using namespace std::chrono;
+    const auto sctp = time_point_cast<system_clock::duration>(tp - fs::file_time_type::clock::now() + system_clock::now());
+    return system_clock::to_time_t(sctp);
+}
+
+std::string NormalizePath(const std::string& path)
+{
+    if (path.empty())
+    {
+        return path;
+    }
+    try
+    {
+        const auto canonical = fs::weakly_canonical(fs::u8path(path));
+        return canonical.u8string();
+    }
+    catch (...)
+    {
+        return path;
+    }
+}
+
+std::string GetInputTimestamp(const std::string& path)
+{
+    if (path.empty())
+    {
+        return {};
+    }
+    try
+    {
+        const auto writeTime = fs::last_write_time(fs::u8path(path));
+        return FormatTimestampUtc(FileTimeToTimeT(writeTime));
+    }
+    catch (...)
+    {
+        return {};
+    }
 }
 
 class Sha256
@@ -398,7 +459,7 @@ std::vector<uint8_t> ReadBinaryFile(const std::string& path)
     return buffer;
 }
 
-void WriteHeader(const Options& opt, const std::vector<uint8_t>& bytes, const std::string& shaHex)
+void WriteHeader(const Options& opt, const std::vector<uint8_t>& bytes, const std::string& shaHex, const std::string& guard)
 {
     std::ofstream out(opt.outputPath, std::ios::binary);
     if (!out)
@@ -406,7 +467,6 @@ void WriteHeader(const Options& opt, const std::vector<uint8_t>& bytes, const st
         throw std::runtime_error("Unable to open output file: " + opt.outputPath);
     }
 
-    const auto guard = DeriveGuard(opt);
     const auto namespaces = SplitNamespace(opt.nameSpace);
     const bool emitExternC = namespaces.empty();
 
@@ -485,7 +545,14 @@ void WriteHeader(const Options& opt, const std::vector<uint8_t>& bytes, const st
     out << "#endif /* " << guard << " */\n";
 }
 
-void WriteMetadata(const Options& opt, const std::vector<uint8_t>& bytes, const std::string& shaHex)
+void WriteMetadata(
+    const Options& opt,
+    const std::vector<uint8_t>& bytes,
+    const std::string& shaHex,
+    const std::string& guard,
+    const std::string& normalizedInput,
+    const std::string& normalizedOutput,
+    const std::string& inputTimestamp)
 {
     if (opt.metadataPath.empty())
     {
@@ -498,25 +565,29 @@ void WriteMetadata(const Options& opt, const std::vector<uint8_t>& bytes, const 
         throw std::runtime_error("Unable to open metadata output: " + opt.metadataPath);
     }
 
-    auto now = std::chrono::system_clock::now();
-    std::time_t tt = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-#if defined(_WIN32)
-    localtime_s(&tm, &tt);
-#else
-    localtime_r(&tt, &tm);
-#endif
-    std::ostringstream timestamp;
-    timestamp << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+    const auto generatedAt = FormatTimestampUtc(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+    const auto inputPathForMetadata = normalizedInput.empty() ? opt.inputPath : normalizedInput;
+    const auto outputPathForMetadata = normalizedOutput.empty() ? opt.outputPath : normalizedOutput;
 
     meta << "{\n";
-    meta << "  \"input\": \"" << EscapeJson(opt.inputPath) << "\",\n";
-    meta << "  \"output\": \"" << EscapeJson(opt.outputPath) << "\",\n";
+    meta << "  \"input\": \"" << EscapeJson(inputPathForMetadata) << "\",\n";
+    meta << "  \"output\": \"" << EscapeJson(outputPathForMetadata) << "\",\n";
     meta << "  \"symbol\": \"" << EscapeJson(opt.symbolName) << "\",\n";
     meta << "  \"size\": " << bytes.size() << ",\n";
+    if (!inputTimestamp.empty())
+    {
+        meta << "  \"input_last_write_time\": \"" << EscapeJson(inputTimestamp) << "\",\n";
+    }
     meta << "  \"sha256\": \"" << EscapeJson(shaHex) << "\",\n";
-    meta << "  \"generated_at\": \"" << EscapeJson(timestamp.str()) << "\"\n";
-    meta << "}\n";
+    meta << "  \"generated_at\": \"" << EscapeJson(generatedAt) << "\",\n";
+    meta << "  \"header_guard\": \"" << EscapeJson(guard) << "\",\n";
+    meta << "  \"bytes_per_line\": " << opt.bytesPerLine << ",\n";
+    meta << "  \"metadata_only\": " << (opt.metadataOnly ? "true" : "false");
+    if (!opt.nameSpace.empty())
+    {
+        meta << ",\n  \"namespace\": \"" << EscapeJson(opt.nameSpace) << "\"";
+    }
+    meta << "\n}\n";
 }
 
 } // namespace
@@ -529,9 +600,13 @@ int main(int argc, char** argv)
         const auto bytes = ReadBinaryFile(options.inputPath);
         const auto sha = ComputeSha256(bytes);
         const auto shaHex = BytesToHex(sha);
+        const auto guard = DeriveGuard(options);
+        const auto normalizedInput = NormalizePath(options.inputPath);
+        const auto normalizedOutput = NormalizePath(options.outputPath);
+        const auto inputTimestamp = GetInputTimestamp(options.inputPath);
 
-        WriteHeader(options, bytes, shaHex);
-        WriteMetadata(options, bytes, shaHex);
+        WriteHeader(options, bytes, shaHex, guard);
+        WriteMetadata(options, bytes, shaHex, guard, normalizedInput, normalizedOutput, inputTimestamp);
 
         std::cout << "[OK ] Generated header: " << options.outputPath << "\n";
         std::cout << "[INFO] Symbol: " << options.symbolName << " (" << bytes.size() << " bytes)\n";
@@ -543,3 +618,4 @@ int main(int argc, char** argv)
         return 1;
     }
 }
+

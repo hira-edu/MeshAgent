@@ -76,7 +76,7 @@ jobs:
           New-Item -ItemType Directory -Path $verifyDir -Force | Out-Null
           $reportPath = Join-Path $verifyDir 'verify-report.json'
           $logPath = Join-Path $verifyDir 'verify-log.txt'
-          ./test.ps1 -BinaryPath 'meshservice\x64\StealthLab' -ReportPath $reportPath | Tee-Object -FilePath $logPath | Out-Null
+          ./test.ps1 -BinaryPath 'meshservice\x64\StealthLab' -RuntimeValidation -ReportPath $reportPath | Tee-Object -FilePath $logPath | Out-Null
 
       - name: Package baseline artefacts
         shell: pwsh

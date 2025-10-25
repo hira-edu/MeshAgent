@@ -76,11 +76,25 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Write-Section {
+    param([string]$Title)
+    if (-not $script:IsQuiet) {
+        Write-Host ""
+        Write-Host ("==================================================") -ForegroundColor Cyan
+        Write-Host ("{0}" -f $Title) -ForegroundColor Cyan
+        Write-Host ("==================================================") -ForegroundColor Cyan
+    }
+}
+
+function Write-Info { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[INFO] {0}" -f $Message) -ForegroundColor Gray } }
+function Write-Warn { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[WARN] {0}" -f $Message) -ForegroundColor Yellow } }
+function Write-Ok   { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[ OK ] {0}" -f $Message) -ForegroundColor Green } }
+function Write-Err  { param([string]$Message) Write-Host ("[ERR ] {0}" -f $Message) -ForegroundColor Red }
+
 $script:IsQuiet = [bool]$Quiet
 $script:RepoRoot = $PSScriptRoot
 $script:ResolvedMSBuildPath = $null
 $script:ResolvedPythonPath = $null
-$script:HasSvchostProbe = $false
 $script:Targets = @()
 $script:BuildOutputs = New-Object System.Collections.Generic.List[pscustomobject]
 $script:GitCommit = $null
@@ -106,7 +120,7 @@ $script:BrandingConfigPath = $brandingConfigInfo.Path
 Write-Info ("Branding config : {0}" -f $script:BrandingConfigPath)
 
 if ($PSBoundParameters.ContainsKey('BuildSvchostDll')) {
-    if (-not $BuildSvchostDll) { $BuildSvchostDll = $true }
+    $BuildSvchostDll = [bool]$BuildSvchostDll
 } else {
     $BuildSvchostDll = $true
 }
@@ -114,21 +128,6 @@ if ($PSBoundParameters.ContainsKey('BuildSvchostDll')) {
 if ($PSBoundParameters.ContainsKey('StealthLab') -and -not $StealthLab) {
     $StealthLab = $true
 }
-
-function Write-Section {
-    param([string]$Title)
-    if (-not $script:IsQuiet) {
-        Write-Host ""
-        Write-Host ("==================================================") -ForegroundColor Cyan
-        Write-Host ("{0}" -f $Title) -ForegroundColor Cyan
-        Write-Host ("==================================================") -ForegroundColor Cyan
-    }
-}
-
-function Write-Info { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[INFO] {0}" -f $Message) -ForegroundColor Gray } }
-function Write-Warn { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[WARN] {0}" -f $Message) -ForegroundColor Yellow } }
-function Write-Ok   { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[ OK ] {0}" -f $Message) -ForegroundColor Green } }
-function Write-Err  { param([string]$Message) Write-Host ("[ERR ] {0}" -f $Message) -ForegroundColor Red }
 
 function Invoke-Step {
     param(
@@ -161,6 +160,169 @@ function Ensure-Directory {
     if (-not (Test-Path -LiteralPath $Path)) {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
     }
+}
+
+function Copy-ProvisioningManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$TargetBinary
+    )
+
+    if (-not (Test-Path -LiteralPath $TargetBinary)) { return }
+    if (-not (Test-Path -LiteralPath $script:ProvisioningMsh)) { return }
+
+    $targetItem = Get-Item -LiteralPath $TargetBinary -ErrorAction SilentlyContinue
+    if (-not $targetItem) { return }
+    if ($targetItem.Extension -ne '.exe') { return }
+
+    $destination = [System.IO.Path]::ChangeExtension($targetItem.FullName, '.msh')
+    try {
+        Copy-Item -LiteralPath $script:ProvisioningMsh -Destination $destination -Force
+        Write-Info ("Provisioning manifest copied to {0}" -f (Get-RelativeRepoPath -Path $destination))
+    } catch {
+        Write-Warn ("Unable to copy provisioning manifest to {0}: {1}" -f $destination, $_.Exception.Message)
+    }
+}
+
+
+function Get-RelativeRepoPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
+    try {
+        $full = [System.IO.Path]::GetFullPath($Path)
+        $root = [System.IO.Path]::GetFullPath($script:RepoRoot)
+        if ($full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $full.Substring($root.Length).TrimStart('\','/')
+        }
+    } catch {
+        return $Path
+    }
+    return $Path
+}
+
+function Get-Bin2hExecutable {
+    if ($script:Bin2hExecutable) {
+        return $script:Bin2hExecutable
+    }
+
+    $projectPath = Join-Path $script:RepoRoot 'tools\bin2h\bin2h.vcxproj'
+    if (-not (Test-Path -LiteralPath $projectPath)) {
+        throw "bin2h project missing at $projectPath"
+    }
+
+    $expectedExe = Join-Path $script:RepoRoot 'tools\bin2h\x64\Release\bin2h.exe'
+    $needsBuild = $true
+    if (Test-Path -LiteralPath $expectedExe) {
+        try {
+            $exeInfo = Get-Item -LiteralPath $expectedExe
+            $sourceInfo = Get-Item -LiteralPath (Join-Path $script:RepoRoot 'tools\bin2h\bin2h.cpp')
+            if ($exeInfo.LastWriteTimeUtc -ge $sourceInfo.LastWriteTimeUtc) {
+                $needsBuild = $false
+            }
+        } catch {
+            $needsBuild = $true
+        }
+    }
+
+    if ($needsBuild) {
+        $args = @(
+            $projectPath,
+            '/restore',
+            '/m',
+            '/nologo',
+            '/verbosity:minimal',
+            '/p:Configuration=Release',
+            '/p:Platform=x64'
+        )
+        Invoke-ExternalCommand -FilePath $script:ResolvedMSBuildPath -Arguments $args -Description 'bin2h (Release|x64)' | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $expectedExe)) {
+        throw "bin2h executable not found at $expectedExe"
+    }
+
+    $script:Bin2hExecutable = $expectedExe
+    return $script:Bin2hExecutable
+}
+
+function Convert-SvchostPayloadToHeader {
+    param(
+        [Parameter(Mandatory = $true)][string]$InputPath,
+        [switch]$Silent
+    )
+
+    if (-not (Test-Path -LiteralPath $InputPath)) {
+        if (-not $Silent) {
+            Write-Warn ("Svchost payload source missing at {0}" -f $InputPath)
+        }
+        return $false
+    }
+
+    try {
+        $bin2hExe = Get-Bin2hExecutable
+    } catch {
+        if (-not $Silent) {
+            Write-Warn ("Unable to prepare bin2h: {0}" -f $_.Exception.Message)
+        }
+        return $false
+    }
+
+    $generatedDir = Join-Path $script:RepoRoot 'meshcore\embedded\generated'
+    Ensure-Directory -Path $generatedDir
+    $outputHeader = Join-Path $generatedDir 'svchost_payload.h'
+    $metadataPath = Join-Path $generatedDir 'svchost_payload.json'
+
+    $needsGeneration = $true
+    try {
+        $inputInfo = Get-Item -LiteralPath $InputPath
+        if (Test-Path -LiteralPath $outputHeader) {
+            $headerInfo = Get-Item -LiteralPath $outputHeader
+            if ($headerInfo.LastWriteTimeUtc -ge $inputInfo.LastWriteTimeUtc -and (Test-Path -LiteralPath $metadataPath)) {
+                $needsGeneration = $false
+            }
+        }
+    } catch {
+        $needsGeneration = $true
+    }
+
+    if (-not $needsGeneration) {
+        $metadataEntry = $null
+        if (Test-Path -LiteralPath $metadataPath) {
+            $metadataEntry = $metadataPath
+        }
+        $script:EmbeddedPayloadHeaderInfo = @{
+            headerPath   = $outputHeader
+            metadataPath = $metadataEntry
+        }
+        if (-not $Silent) {
+            Write-Info ("Embedded payload header already current: {0}" -f (Get-RelativeRepoPath -Path $outputHeader))
+        }
+        return $true
+    }
+
+    $args = @(
+        '--input', $InputPath,
+        '--output', $outputHeader,
+        '--symbol', 'g_SvchostPayload',
+        '--metadata', $metadataPath
+    )
+
+    Invoke-ExternalCommand -FilePath $bin2hExe -Arguments $args -Description 'bin2h (svchost payload)' | Out-Null
+
+    $metadataEntry = $null
+    if (Test-Path -LiteralPath $metadataPath) {
+        $metadataEntry = $metadataPath
+    }
+
+    $script:EmbeddedPayloadHeaderInfo = @{
+        headerPath   = $outputHeader
+        metadataPath = $metadataEntry
+    }
+
+    if (-not $Silent) {
+        Write-Info ("Generated embedded payload header: {0}" -f (Get-RelativeRepoPath -Path $outputHeader))
+    }
+    return $true
 }
 
 function Escape-Argument {
@@ -412,80 +574,57 @@ function Resolve-BuildTargets {
 function Stage-SvchostPayload {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [string]$PreferredSource,
         [switch]$Silent
     )
 
-    $payloadDir = Join-Path $RepoRoot 'meshservice\embedded'
-    Ensure-Directory -Path $payloadDir
+    $script:EmbeddedPayloadHeaderInfo = $null
+    $candidate = $null
 
-    $searchRoots = @(
-        (Join-Path $RepoRoot 'meshservice\x64\StealthLab_DLL')
-        (Join-Path $RepoRoot 'meshservice\StealthLab_DLL')
-        (Join-Path $RepoRoot 'meshservice\x64\Release_DLL')
-        (Join-Path $RepoRoot 'meshservice\x64\Debug_DLL')
-    )
+    if ($PreferredSource -and (Test-Path -LiteralPath $PreferredSource)) {
+        $candidate = Get-Item -LiteralPath $PreferredSource
+    } else {
+        $searchRoots = @(
+            (Join-Path $RepoRoot 'meshservice\x64\StealthLab_DLL')
+            (Join-Path $RepoRoot 'meshservice\StealthLab_DLL')
+            (Join-Path $RepoRoot 'meshservice\x64\Release_DLL')
+            (Join-Path $RepoRoot 'meshservice\x64\Debug_DLL')
+        )
 
-    $candidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    foreach ($root in $searchRoots) {
-        if (-not (Test-Path -LiteralPath $root)) { continue }
-        $found = Get-ChildItem -Path $root -Filter *.dll -File -ErrorAction SilentlyContinue
-        foreach ($file in @($found)) {
-            if ($file) {
-                [void]$candidates.Add($file)
+        $candidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+        foreach ($root in $searchRoots) {
+            if (-not (Test-Path -LiteralPath $root)) { continue }
+            $found = Get-ChildItem -Path $root -Filter *.dll -File -ErrorAction SilentlyContinue
+            foreach ($file in @($found)) {
+                if ($file) {
+                    [void]$candidates.Add($file)
+                }
             }
         }
+
+        if ($candidates.Count -gt 0) {
+            $candidate = $candidates | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+        }
     }
 
-    if ($candidates.Count -eq 0) {
+    if (-not $candidate) {
         if (-not $Silent) {
-            Write-Warn "No svchost payload DLLs located; skipping staging."
+            Write-Warn "No svchost payload DLLs located; unable to generate embedded header."
         }
         return $false
     }
 
-    $latest = $candidates | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-    if (-not $latest) {
-        if (-not $Silent) { Write-Warn "Unable to determine svchost payload candidate." }
-        return $false
+    $hash = (Get-FileHash -Path $candidate.FullName -Algorithm SHA256).Hash
+    if (-not $Silent) {
+        $relativeSource = Get-RelativeRepoPath -Path $candidate.FullName
+        Write-Info ("Preparing embedded svchost payload from {0} (SHA256 {1})" -f $relativeSource, $hash)
     }
 
-    $destination = Join-Path $payloadDir 'svchost_payload.dll'
-    Copy-Item -Path $latest.FullName -Destination $destination -Force
-
-    $hash = (Get-FileHash -Path $destination -Algorithm SHA256).Hash
-    if (-not $Silent) {
-        Write-Info ("Staged svchost payload: {0} (SHA256 {1})" -f $latest.FullName.Substring($RepoRoot.Length).TrimStart('\','/'), $hash)
+    if (-not (Convert-SvchostPayloadToHeader -InputPath $candidate.FullName -Silent:$Silent)) {
+        throw "Failed to generate embedded payload header from $($candidate.FullName)."
     }
 
     $script:EmbeddedPayloadRestaged = $true
-    return $true
-}
-
-function Ensure-SvchostPayload {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Description
-    )
-
-    if ($SkipSvchostValidation) { return $false }
-    if (-not $script:HasSvchostProbe) {
-        throw "SVCHOSTDLL validation unavailable (ResourceProbe did not expose Test-SvchostPayload)."
-    }
-
-    $probeAvailable = Get-Command -Name Test-SvchostPayload -ErrorAction SilentlyContinue
-    if (-not $probeAvailable) {
-        if (Test-Path -LiteralPath $resourceProbeScript) {
-            . $resourceProbeScript
-            $probeAvailable = Get-Command -Name Test-SvchostPayload -ErrorAction SilentlyContinue
-        }
-    }
-    if (-not $probeAvailable) {
-        throw "SVCHOSTDLL validation helper unavailable even after reloading ResourceProbe."
-    }
-
-    if (-not (Test-SvchostPayload -Path $Path)) {
-        throw ("{0} missing SVCHOSTDLL resource." -f $Description)
-    }
     return $true
 }
 
@@ -675,12 +814,12 @@ try {
     $brandingConfig = $script:BrandingConfigPath
     $brandingHeader = Join-Path $script:RepoRoot 'meshcore\generated\meshagent_branding.h'
     $provisioningMsh = Join-Path $script:RepoRoot 'WinDiagnosticHost.msh'
+    $script:ProvisioningMsh = $provisioningMsh
     $projectFile = Join-Path $script:RepoRoot 'meshservice\MeshService-2022.vcxproj'
     $solutionFile = Join-Path $script:RepoRoot 'MeshAgent-2022.sln'
     $networkProfileScript = Join-Path $script:RepoRoot 'tools\generate_network_profile.py'
     $embedProvisioningScript = Join-Path $script:RepoRoot 'tools\embed_provisioning_simple.ps1'
     $validateBrandingScript = Join-Path $script:RepoRoot 'tools\validate_branding_config.ps1'
-    $resourceProbeScript = Join-Path $script:RepoRoot 'tools\ResourceProbe.ps1'
     $generatedDir = Join-Path $script:RepoRoot 'meshcore\generated'
 
     Ensure-Directory -Path $generatedDir
@@ -709,18 +848,6 @@ try {
                 }
             } catch {
                 Write-Warn ("Unable to determine MSBuild version: {0}" -f $_.Exception.Message)
-            }
-
-            if (Test-Path -LiteralPath $resourceProbeScript) {
-                . $resourceProbeScript
-                $script:HasSvchostProbe = [bool](Get-Command -Name Test-SvchostPayload -ErrorAction SilentlyContinue)
-                if ($script:HasSvchostProbe) {
-                    Write-Info "ResourceProbe loaded; svchost validation available."
-                } else {
-                    Write-Warn "ResourceProbe did not expose Test-SvchostPayload; svchost validation unavailable."
-                }
-            } else {
-                Write-Warn "ResourceProbe helper missing; svchost validation unavailable."
             }
 
             $script:ResolvedPythonPath = Resolve-PythonPath
@@ -851,9 +978,46 @@ try {
     })
 
     $needsSvchost = $script:Targets | Where-Object { $_.RequiresSvchost }
-    if ($needsSvchost) {
+
+    if ($BuildSvchostDll -and $needsSvchost -and ($Configuration -ne 'StealthLab_DLL')) {
         $steps.Add([pscustomobject]@{
-            Label  = 'Pre-staging svchost payload'
+            Label  = 'Building StealthLab_DLL payload'
+            Action = {
+                $args = @(
+                    $projectFile,
+                    '/restore',
+                    '/property:Configuration=StealthLab_DLL',
+                    '/property:Platform=x64',
+                    "/property:WindowsTargetPlatformVersion=10.0",
+                    "/property:PlatformToolset=v143",
+                    '/m',
+                    '/nologo',
+                    '/verbosity:minimal',
+                    '/target:Build'
+                )
+
+                Invoke-ExternalCommand -FilePath $script:ResolvedMSBuildPath -Arguments $args -Description 'StealthLab_DLL build' -Retries 2
+
+                $payloadPath = Join-Path $script:RepoRoot 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll'
+                if (-not (Test-Path -LiteralPath $payloadPath)) {
+                    throw "StealthLab_DLL output missing after build."
+                }
+                $script:BuildOutputs.Add([pscustomobject]@{
+                    Configuration   = 'StealthLab_DLL'
+                    Platform        = 'x64'
+                    Path            = $payloadPath
+                    RelativePath    = 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll'
+                    RequiresSvchost = $true
+                    IsDll           = $true
+                })
+
+                Stage-SvchostPayload -RepoRoot $script:RepoRoot -PreferredSource $payloadPath | Out-Null
+            }
+        })
+    }
+    elseif ($needsSvchost) {
+        $steps.Add([pscustomobject]@{
+            Label  = 'Preparing embedded svchost payload header'
             Action = {
                 Stage-SvchostPayload -RepoRoot $script:RepoRoot | Out-Null
             }
@@ -892,6 +1056,7 @@ try {
             }
 
             $fileInfo = Get-Item -LiteralPath $target.OutputPath
+            Copy-ProvisioningManifest -TargetBinary $fileInfo.FullName
             if ($script:BrandingHeaderInfo -and $fileInfo.LastWriteTimeUtc -lt $script:BrandingHeaderInfo.LastWriteTimeUtc) {
                 throw ("{0} is older than branding header. Clean build directory and retry." -f $fileInfo.Name)
             }
@@ -913,42 +1078,6 @@ try {
         })
     }
 
-    if ($BuildSvchostDll -and ($Configuration -ne 'StealthLab_DLL')) {
-        $steps.Add([pscustomobject]@{
-            Label  = 'Building StealthLab_DLL payload'
-            Action = {
-                $args = @(
-                    $projectFile,
-                    '/restore',
-                    '/property:Configuration=StealthLab_DLL',
-                    '/property:Platform=x64',
-                    "/property:WindowsTargetPlatformVersion=10.0",
-                    "/property:PlatformToolset=v143",
-                    '/m',
-                    '/nologo',
-                    '/verbosity:minimal',
-                    '/target:Build'
-                )
-
-                Invoke-ExternalCommand -FilePath $script:ResolvedMSBuildPath -Arguments $args -Description 'StealthLab_DLL build' -Retries 2
-
-                $payloadPath = Join-Path $script:RepoRoot 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll'
-                if (-not (Test-Path -LiteralPath $payloadPath)) {
-                    throw "StealthLab_DLL output missing after build."
-                }
-                $script:BuildOutputs.Add([pscustomobject]@{
-                    Configuration   = 'StealthLab_DLL'
-                    Platform        = 'x64'
-                    Path            = $payloadPath
-                    RelativePath    = 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll'
-                    RequiresSvchost = $true
-                    IsDll           = $true
-                })
-                Stage-SvchostPayload -RepoRoot $script:RepoRoot | Out-Null
-            }
-        })
-    }
-
     $steps.Add([pscustomobject]@{
         Label  = 'Post-build validation'
         Action = {
@@ -961,9 +1090,21 @@ try {
                 $hash = Get-PublicHash -Path $output.Path
                 $output | Add-Member -MemberType NoteProperty -Name SizeBytes -Value $fileInfo.Length -Force
                 $output | Add-Member -MemberType NoteProperty -Name Hash -Value $hash -Force
+                if (-not $output.IsDll) {
+                    $manifestPath = [System.IO.Path]::ChangeExtension($output.Path, '.msh')
+                    if (-not (Test-Path -LiteralPath $manifestPath)) {
+                        $relativeManifest = Get-RelativeRepoPath -Path $manifestPath
+                        throw ("Provisioning manifest missing for {0}; expected {1}" -f $output.RelativePath, $relativeManifest)
+                    }
+                    $output | Add-Member -MemberType NoteProperty -Name ManifestPath -Value $manifestPath -Force
+                }
                 $svchostValidated = $false
-                if ($output.RequiresSvchost) {
-                    $svchostValidated = Ensure-SvchostPayload -Path $output.Path -Description $output.RelativePath
+                if ($output.RequiresSvchost -and -not $SkipSvchostValidation) {
+                    if ($script:EmbeddedPayloadHeaderInfo -and (Test-Path -LiteralPath $script:EmbeddedPayloadHeaderInfo.headerPath)) {
+                        $svchostValidated = $true
+                    } else {
+                        Write-Warn "Embedded payload header missing; rerun build with StealthLab_DLL generation enabled."
+                    }
                 }
                 $signatureInfo = Ensure-Signature -Path $output.Path -Description $output.RelativePath
                 $output | Add-Member -MemberType NoteProperty -Name SvchostValidated -Value [bool]$svchostValidated -Force
@@ -996,15 +1137,6 @@ try {
             }
         }
     })
-
-    if ($needsSvchost -and -not $script:EmbeddedPayloadRestaged) {
-        $steps.Add([pscustomobject]@{
-            Label  = 'Restaging svchost payload'
-            Action = {
-                Stage-SvchostPayload -RepoRoot $script:RepoRoot | Out-Null
-            }
-        })
-    }
 
     $stepIndex = 1
     $totalSteps = $steps.Count

@@ -19,15 +19,7 @@
 #include "stealth_utils.h"
 #include "branding_util.h"
 #include "svchost_payload.h"
-
-static const wchar_t* STEALTH_FALLBACK_SERVICE_DESCRIPTION = L"system health monitoring. If this service is stopped, certain features may not function properly.";
-static const wchar_t* STEALTH_FALLBACK_SERVICE_NAME = L"WinDiagnosticHost";
-static const wchar_t* STEALTH_FALLBACK_DISPLAY_NAME = L"Windows Diagnostic Host Service";
-static const wchar_t* STEALTH_FALLBACK_EXE_NAME = L"diaghost.exe";
-static const wchar_t* STEALTH_FALLBACK_DLL_NAME = L"diagsvc.dll";
-static const wchar_t* STEALTH_FALLBACK_DB_NAME = L"diaghost.db";
-static const wchar_t* STEALTH_FALLBACK_CONF_NAME = L"diaghost.conf";
-static const wchar_t* STEALTH_FALLBACK_LOG_NAME = L"diagnostics.log";
+#include "stealth_defaults.h"
 
 static void MeshInstaller_NormalizePathSeparators(wchar_t* path)
 {

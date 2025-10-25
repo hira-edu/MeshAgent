@@ -4,7 +4,7 @@
 | --- | --- |
 | **Owner** | Codex automation thread |
 | **Last Updated** | 2025-10-26 |
-| **Status** | 🚧 In progress (header embed + native loader landed; runtime/packaging tasks ongoing) |
+| **Status** | In progress (RC payloads still staged; runtime refactor/tests underway) |
 | **Related Docs** | `CORE_MIGRATION_MASTER_PLAN.md` (Phase 2 section), `branding_build_overhaul.md` |
 
 ## 1. Objectives
@@ -19,6 +19,14 @@
 - `test.ps1 -RuntimeValidation` exercises the native extraction codepaths (x64 mandatory, Win32 best-effort until compiler bug resolved).
 - `build.ps1`/`build_all.ps1` automatically regenerate the payload header only when `MeshService-2022.dll` changes, and `build_complete.ps1` surfaces any validation failures.
 - Packaging docs list the exact regeneration commands/operators must run after touching the svchost payload.
+
+### Recent Updates (2025-10-26)
+- `meshservice/stealth_init.c` now reads `MeshConfig_GetStealth()` to derive bundle-extraction defaults, aligning lab extractions with the branded stealth profile instead of legacy macros.
+- `test.ps1 -RuntimeValidation` can install/uninstall the branded service and exercise the new `-svchost-*` verbs, but it still requires elevation manually (CI gating pending).
+- `meshservice/bundle_resources.rc` was removed; MSBuild no longer compiles RC payloads and `build.ps1` regenerates `meshcore/embedded/generated/svchost_payload.h/.json` via `bin2h` immediately after the StealthLab_DLL build step.
+- `meshservice/svchost_payload.c` validates the embedded payload's SHA-256 digest before writing and re-hashes the staged DLL on disk; `MeshSvchostPayload_VerifyIntegrity` is now available to other service modules/tests.
+- StealthLab_DLL builds now compile `svchost_payload.c` with `/GL- /bigobj` while the configuration itself disables LTCG, eliminating the MSVC C1001 crash without sacrificing the x64 StealthLab application path.
+- Runtime validation now auto-removes any pre-existing `WinDiagnosticHost` service before testing, and the CI baseline workflow runs `test.ps1 -RuntimeValidation` to keep the svchost extraction paths covered.
 
 ## 2. Workstreams & Tasks
 
@@ -59,14 +67,14 @@
 
 | ID | Task | Artifact / Evidence | Status |
 | --- | --- | --- | --- |
-| P2-T01 | Harden `tools/bin2h` (byte array emission, metadata JSON, deterministic guard) | Updated `tools/bin2h/*.cpp`, README, metadata samples | ✅ Completed |
-| P2-T02 | Wire `build.ps1` to regenerate `meshcore/embedded/generated/svchost_payload.h` & `.json` when DLL changes | `build.ps1`, `build_all.ps1`, `build_complete.ps1` diffs + CI log snippet | ✅ Completed |
-| P2-T03 | Implement native loader (`meshservice/svchost_payload.h`) w/ SHA-256 verification | ServiceMain/installer diffs + runtime logs | ✅ Completed (thumbprint validation deferred) |
-| P2-T04 | Delete RC resource pipeline + stop staging `meshservice/embedded/svchost_payload.dll` | Removed files, updated `.vcxproj`, clean build log | ✅ Completed |
-| P2-T05 | Extend regression scripts (`test.ps1`, packaging helpers) to read metadata + run runtime validation | Script diffs + `test.ps1 -RuntimeValidation` output | 🚧 In progress (runtime suite added; CI gating TBD) |
-| P2-T06 | Update docs (branding overhaul, deployment guide, master plan) to describe the new process & operator commands | Doc diffs + PR references | ✅ Completed (will evolve with runtime gating) |
-| P2-T07 | MeshCentral packaging: ensure deliverables include payload metadata and signer hooks | Packaging log + sample manifest snippet | 🚧 In progress (metadata shipped via `svchost_payload.json`; signer hook TBD) |
-| P2-T08 | Risk mitigation for Win32 compiler crash (document gating, optional fallback) | README note + tracker issue link | ⏳ Pending |
+| P2-T01 | Harden `tools/bin2h` (byte array emission, metadata JSON, deterministic guard) | Updated `tools/bin2h/*.cpp`, README, metadata samples | In progress (metadata-only headers still emitted by default) |
+| P2-T02 | Wire `build.ps1` to regenerate `meshcore/embedded/generated/svchost_payload.h` & `.json` when DLL changes | `build.ps1`, `build_all.ps1`, `build_complete.ps1` diffs + CI log snippet | Completed (StealthLab_DLL now builds first and bin2h runs automatically with the fresh DLL) |
+| P2-T03 | Implement native loader (`meshservice/svchost_payload.h`) w/ SHA-256 verification | ServiceMain/installer diffs + runtime logs | In progress (in-memory + on-disk SHA-256 enforcement landed; signer metadata & richer error surfacing still pending) |
+| P2-T04 | Delete RC resource pipeline + stop staging `meshservice/embedded/svchost_payload.dll` | Removed files, updated `.vcxproj`, clean build log | Completed (bundle_resources.rc removed; MSBuild no longer references RC payloads) |
+| P2-T05 | Extend regression scripts (`test.ps1`, packaging helpers) to read metadata + run runtime validation | Script diffs + `test.ps1 -RuntimeValidation` output | In progress (runtime suite now auto-resets services and runs in CI; additional coverage still to-do) |
+| P2-T06 | Update docs (branding overhaul, deployment guide, master plan) to describe the new process & operator commands | Doc diffs + PR references | Pending (docs still mention `.rc` staging) |
+| P2-T07 | MeshCentral packaging: ensure deliverables include payload metadata and signer hooks | Packaging log + sample manifest snippet | In progress (metadata included; signer enforcement TBD) |
+| P2-T08 | Risk mitigation for Win32 compiler crash (document gating, optional fallback) | README note + tracker issue link | In progress (StealthLab_DLL now builds with per-file `/GL- /bigobj` + config-level LTCG disable; Win32 fallback + compiler ticket still pending) |
 
 ## 4. Execution Order & Checkpoints
 1. **Tooling (T01)** â†’ validate locally with sample DLLs.
@@ -97,4 +105,6 @@ Each checkpoint should end with `test.ps1 -RuntimeValidation` and `build_complet
 3. Schedule a follow-up checkpoint to review the tooling changes before touching runtime code.
 
 > **Reminder:** keep Phase 2 changes behind a short-lived feature flag (`MESH_AGENT_EMBEDDED_PAYLOAD_V2`) until both x64 build + runtime tests pass. This allows incremental merges without destabilizing release packaging.
+
+
 

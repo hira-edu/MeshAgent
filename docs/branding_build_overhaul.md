@@ -115,3 +115,4 @@ pwsh ./build_complete.ps1 `
 - **Last Updated:** 2025-10-26
 - **Next Action:** Execute Phase 2 (Native Resource Embedding). Follow `docs/CORE_MIGRATION_PHASE2_PLAN.md` for the detailed task board (bin2h hardening → native loader → RC removal → documentation/tests).
 
+

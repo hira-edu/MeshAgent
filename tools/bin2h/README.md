@@ -7,8 +7,7 @@ Command-line helper that converts arbitrary binaries (DLLs, payloads, provisioni
 bin2h --input meshservice\x64\StealthLab_DLL\MeshService-2022.dll `
       --output meshcore\embedded\svchost_payload.h `
       --symbol g_SvchostPayload `
-      --metadata dist\svchost_payload.json `
-      --metadata-only
+      --metadata dist\svchost_payload.json
 ```
 
 ### Supported switches
@@ -31,5 +30,7 @@ static const uint8_t g_SvchostPayload[] = { /* ... */ };   // omitted when --met
 static const size_t  g_SvchostPayload_SIZE   = sizeof(g_SvchostPayload); // or literal size with --metadata-only
 static const char    g_SvchostPayload_SHA256[] = "fd34...c446";
 ```
+
+When `--metadata` is supplied, bin2h also writes a JSON manifest containing the canonical input/output paths, SHA-256 digest, guard name, byte-line setting, optional namespace, and ISO-8601 timestamps for both the source DLL and the header generation event. Downstream tooling (build/test/packaging) consumes this manifest to validate that the embedded payload matches the last compiled DLL.
 
 When no namespace is requested, the tool also wraps the definitions in `extern "C"` guards so the header can be consumed from both C and C++ translation units.
