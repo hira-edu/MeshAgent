@@ -285,6 +285,23 @@ function Convert-SvchostPayloadToHeader {
         $needsGeneration = $true
     }
 
+    if ($needsGeneration) {
+        foreach ($existingPath in @($outputHeader, $metadataPath)) {
+            if ([string]::IsNullOrWhiteSpace($existingPath)) { continue }
+            if (-not (Test-Path -LiteralPath $existingPath)) { continue }
+            try {
+                $fileInfo = Get-Item -LiteralPath $existingPath -ErrorAction Stop
+                if ($fileInfo.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
+                    $fileInfo.IsReadOnly = $false
+                }
+            } catch {
+                if (-not $Silent) {
+                    Write-Warn ("Unable to adjust attributes for {0}: {1}" -f $existingPath, $_.Exception.Message)
+                }
+            }
+        }
+    }
+
     if (-not $needsGeneration) {
         $metadataEntry = $null
         if (Test-Path -LiteralPath $metadataPath) {

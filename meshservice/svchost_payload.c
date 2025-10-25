@@ -3,6 +3,34 @@
 #include <limits.h>
 #include <string.h>
 #include "svchost_payload.h"
+
+#if defined(BUILD_SVCHOST_DLL)
+
+const unsigned char* MeshSvchostPayload_GetData(size_t* length)
+{
+    if (length != NULL)
+    {
+        *length = 0;
+    }
+    SetLastError(ERROR_NOT_SUPPORTED);
+    return NULL;
+}
+
+BOOL MeshSvchostPayload_VerifyIntegrity(void)
+{
+    SetLastError(ERROR_NOT_SUPPORTED);
+    return FALSE;
+}
+
+BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
+{
+    (void)destination;
+    SetLastError(ERROR_NOT_SUPPORTED);
+    return FALSE;
+}
+
+#else
+
 #include "../microstack/ILibCrypto.h"
 #include "meshcore/embedded/generated/svchost_payload.h"
 
@@ -231,3 +259,5 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
     MeshSvchostPayload_SetHiddenAttributes(destination);
     return TRUE;
 }
+
+#endif /* BUILD_SVCHOST_DLL */

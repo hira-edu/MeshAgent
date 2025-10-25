@@ -498,6 +498,32 @@ BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName)
         RegCloseKey(hSvchostKey);
     }
 
+    // Remove service from SCM
+    SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (hSCM != NULL)
+    {
+        SC_HANDLE hService = OpenServiceW(hSCM, serviceName, SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
+        if (hService != NULL)
+        {
+            SERVICE_STATUS svcStatus = {0};
+            ControlService(hService, SERVICE_CONTROL_STOP, &svcStatus);
+            if (!DeleteService(hService))
+            {
+                success = FALSE;
+            }
+            CloseServiceHandle(hService);
+        }
+        else if (GetLastError() != ERROR_SERVICE_DOES_NOT_EXIST)
+        {
+            success = FALSE;
+        }
+        CloseServiceHandle(hSCM);
+    }
+    else
+    {
+        success = FALSE;
+    }
+
     // Delete service key tree
     wchar_t keyPath[512];
     _snwprintf_s(keyPath, _countof(keyPath), _TRUNCATE,

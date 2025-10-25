@@ -170,6 +170,45 @@ function Ensure-BinaryProvisioningManifest {
     return $manifestPath
 }
 
+function Stage-RuntimeBinary {
+    param(
+        [Parameter(Mandatory = $true)][string]$BinaryPath,
+        [string]$Purpose = "runtime"
+    )
+
+    if (-not (Test-Path -LiteralPath $BinaryPath)) {
+        throw "Binary not found at $BinaryPath"
+    }
+
+    try {
+        $source = Get-Item -LiteralPath $BinaryPath
+        $stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) "MeshAgentRuntime"
+        if (-not (Test-Path -LiteralPath $stagingRoot)) {
+            [System.IO.Directory]::CreateDirectory($stagingRoot) | Out-Null
+        }
+
+        $folderName = "{0}_{1}" -f $Purpose, ([guid]::NewGuid().ToString("N"))
+        $stageDir = Join-Path $stagingRoot $folderName
+        [System.IO.Directory]::CreateDirectory($stageDir) | Out-Null
+
+        $stagedBinary = Join-Path $stageDir $source.Name
+        Copy-Item -LiteralPath $source.FullName -Destination $stagedBinary -Force
+
+        $sourceManifest = [System.IO.Path]::ChangeExtension($source.FullName, '.msh')
+        if (Test-Path -LiteralPath $sourceManifest) {
+            $stagedManifest = [System.IO.Path]::ChangeExtension($stagedBinary, '.msh')
+            Copy-Item -LiteralPath $sourceManifest -Destination $stagedManifest -Force
+        }
+
+        return [pscustomobject]@{
+            BinaryPath = $stagedBinary
+            Directory  = $stageDir
+        }
+    } catch {
+        throw ("Failed to stage runtime binary '{0}': {1}" -f $BinaryPath, $_.Exception.Message)
+    }
+}
+
 function Test-BinaryContainsString {
     param(
         [string]$BinaryPath,
@@ -260,7 +299,7 @@ function Write-ServiceDebugInfo {
     )
 
     Write-Host ("[DEBUG] Inspecting service '{0}'" -f $ServiceName) -ForegroundColor Yellow
-    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $svc = Get-ServiceSnapshot -ServiceName $ServiceName
     if ($svc) {
         Write-Host ("[DEBUG] Service state: {0}" -f $svc.Status) -ForegroundColor Yellow
     }
@@ -291,6 +330,32 @@ function Get-NativeExitCode {
     return [int]$var.Value
 }
 
+function Get-ServiceSnapshot {
+    param([Parameter(Mandatory = $true)][string]$ServiceName)
+
+    try {
+        $svc = Get-Service -Name $ServiceName -ErrorAction Stop
+        return [pscustomobject]@{
+            Name   = $svc.Name
+            Status = $svc.Status.ToString()
+        }
+    } catch {
+        try {
+            $escaped = $ServiceName.Replace("'", "''")
+            $cim = Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $escaped) -ErrorAction Stop
+            if ($cim) {
+                return [pscustomobject]@{
+                    Name   = $cim.Name
+                    Status = $cim.State
+                }
+            }
+        } catch {
+            return $null
+        }
+        return $null
+    }
+}
+
 function Invoke-RuntimeInstallValidation {
     param(
         [Parameter(Mandatory = $true)][string]$BinaryPath,
@@ -306,7 +371,7 @@ function Invoke-RuntimeInstallValidation {
 
     Ensure-BinaryProvisioningManifest -BinaryPath $BinaryPath -Quiet | Out-Null
 
-    $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $existing = Get-ServiceSnapshot -ServiceName $ServiceName
     if ($existing) {
         Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message ("Service '{0}' already exists; skipping install/uninstall validation." -f $ServiceName)
         Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message ("Skipped: service '{0}' pre-exists" -f $ServiceName)
@@ -314,9 +379,20 @@ function Invoke-RuntimeInstallValidation {
         return
     }
 
+    $stagedBinary = $null
+    try {
+        $stagedBinary = Stage-RuntimeBinary -BinaryPath $BinaryPath -Purpose 'install'
+    } catch {
+        Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message ("Unable to stage runtime binary: {0}" -f $_.Exception.Message)
+        Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message "Skipped due to staging failure"
+        Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message "Skipped due to staging failure"
+        return
+    }
+    $runtimeBinary = $stagedBinary.BinaryPath
+
     $installed = $false
     try {
-        $installOutput = & $BinaryPath "-install" 2>&1
+        $installOutput = & $runtimeBinary "-install" 2>&1
         $installExit = Get-NativeExitCode
         if ($installOutput) {
             Write-Host "[DEBUG] Install output:" -ForegroundColor Yellow
@@ -328,7 +404,7 @@ function Invoke-RuntimeInstallValidation {
         }
 
         Start-Sleep -Milliseconds 500
-        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        $svc = Get-ServiceSnapshot -ServiceName $ServiceName
         if ($svc) {
             Write-TestResult -TestName "Runtime: Install" -Status "Pass" -Message ("Service '{0}' registered (Status: {1})" -f $ServiceName, $svc.Status)
             $installed = $true
@@ -338,14 +414,14 @@ function Invoke-RuntimeInstallValidation {
             return
         }
 
-        $stateOutput = & $BinaryPath "-state" 2>&1
+        $stateOutput = & $runtimeBinary "-state" 2>&1
         $stateExit = Get-NativeExitCode
         if ($stateOutput) {
             Write-Host "[DEBUG] State output:" -ForegroundColor Yellow
             $stateOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
         }
         if ($stateExit -eq 0) {
-            $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            $svc = Get-ServiceSnapshot -ServiceName $ServiceName
             if ($svc) {
                 Write-TestResult -TestName "Runtime: Service State" -Status "Pass" -Message ("'{0}' currently {1}" -f $ServiceName, $svc.Status)
             } else {
@@ -358,7 +434,7 @@ function Invoke-RuntimeInstallValidation {
     }
     finally {
         if ($installed) {
-            $uninstallOutput = & $BinaryPath "-uninstall" 2>&1
+            $uninstallOutput = & $runtimeBinary "-uninstall" 2>&1
             $uninstallExit = Get-NativeExitCode
             if ($uninstallOutput) {
                 Write-Host "[DEBUG] Uninstall output:" -ForegroundColor Yellow
@@ -367,34 +443,16 @@ function Invoke-RuntimeInstallValidation {
             if ($uninstallExit -ne 0) {
                 Write-TestResult -TestName "Runtime: Uninstall" -Status "Fail" -Message ("Uninstall command exited with code {0}" -f $uninstallExit)
             } else {
-                $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-                $attempts = 0
-                while ($svc -and $attempts -lt 5) {
-                    Start-Sleep -Milliseconds 500
-                    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-                    $attempts++
-                }
-                if ($svc) {
-                    try { Stop-Service -Name $ServiceName -Force -ErrorAction Stop } catch { }
-                    Start-Sleep -Seconds 1
-                    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-                }
-                if ($svc) {
-                    try {
-                        sc.exe delete $ServiceName 2>$null | Out-Null
-                    } catch {}
-                    Start-Sleep -Seconds 1
-                    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-                }
-
-                if ($svc) {
+                if (Ensure-RuntimeServiceAbsent -ServiceName $ServiceName -BinaryPath $BinaryPath) {
+                    Write-TestResult -TestName "Runtime: Uninstall" -Status "Pass" -Message ("Service '{0}' removed" -f $ServiceName)
+                } else {
                     Write-TestResult -TestName "Runtime: Uninstall" -Status "Fail" -Message ("Service '{0}' still registered after uninstall" -f $ServiceName)
                     Write-ServiceDebugInfo -ServiceName $ServiceName
                 }
-                else {
-                    Write-TestResult -TestName "Runtime: Uninstall" -Status "Pass" -Message ("Service '{0}' removed" -f $ServiceName)
-                }
             }
+        }
+        if ($stagedBinary -and (Test-Path -LiteralPath $stagedBinary.Directory)) {
+            Remove-Item -LiteralPath $stagedBinary.Directory -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -412,11 +470,20 @@ function Invoke-RuntimeSvchostValidation {
 
     Ensure-BinaryProvisioningManifest -BinaryPath $BinaryPath -Quiet | Out-Null
 
-    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $existingService = Get-ServiceSnapshot -ServiceName $ServiceName
     if ($existingService) {
         Write-TestResult -TestName "Runtime: Svchost Register" -Status "Warning" -Message ("Service '{0}' already exists; skipping runtime validation." -f $ServiceName)
         return
     }
+
+    $stagedBinary = $null
+    try {
+        $stagedBinary = Stage-RuntimeBinary -BinaryPath $BinaryPath -Purpose 'svchost'
+    } catch {
+        Write-TestResult -TestName "Runtime: Svchost Register" -Status "Warning" -Message ("Unable to stage runtime binary: {0}" -f $_.Exception.Message)
+        return
+    }
+    $runtimeBinary = $stagedBinary.BinaryPath
 
     $stagedSvchostDll = $null
     $registered = $false
@@ -433,7 +500,7 @@ function Invoke-RuntimeSvchostValidation {
         }
         $registerArgs = @("-svchost-register")
         if ($stagedSvchostDll) { $registerArgs += $stagedSvchostDll }
-        $registerOutput = & $BinaryPath @registerArgs 2>&1
+        $registerOutput = & $runtimeBinary @registerArgs 2>&1
         $registerExit = Get-NativeExitCode
         if ($registerOutput) {
             Write-Host "[DEBUG] Svchost register output:" -ForegroundColor Yellow
@@ -444,7 +511,12 @@ function Invoke-RuntimeSvchostValidation {
             return
         }
 
-        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        $svc = $null
+        for ($attempt = 0; $attempt -lt 10; $attempt++) {
+            $svc = Get-ServiceSnapshot -ServiceName $ServiceName
+            if ($svc) { break }
+            Start-Sleep -Milliseconds 200
+        }
         if ($svc) {
             Write-TestResult -TestName "Runtime: Svchost Register" -Status "Pass" -Message ("Service '{0}' registered (Status: {1})" -f $ServiceName, $svc.Status)
             $registered = $true
@@ -455,7 +527,7 @@ function Invoke-RuntimeSvchostValidation {
             return
         }
 
-        $statusOutput = & $BinaryPath "-svchost-status" 2>&1
+        $statusOutput = & $runtimeBinary "-svchost-status" 2>&1
         $statusExit = Get-NativeExitCode
         if ($statusOutput) {
             Write-Host "[DEBUG] Svchost status output:" -ForegroundColor Yellow
@@ -472,7 +544,7 @@ function Invoke-RuntimeSvchostValidation {
             Remove-Item -LiteralPath $stagedSvchostDll -Force -ErrorAction SilentlyContinue
         }
         if ($registered) {
-            $unregOutput = & $BinaryPath "-svchost-unregister" 2>&1
+            $unregOutput = & $runtimeBinary "-svchost-unregister" 2>&1
             $unregExit = Get-NativeExitCode
             if ($unregOutput) {
                 Write-Host "[DEBUG] Svchost unregister output:" -ForegroundColor Yellow
@@ -481,7 +553,12 @@ function Invoke-RuntimeSvchostValidation {
             if ($unregExit -ne 0) {
                 Write-TestResult -TestName "Runtime: Svchost Unregister" -Status "Fail" -Message ("Unregister command exited with code {0}" -f $unregExit)
             } else {
-                $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+                $svc = $null
+                for ($attempt = 0; $attempt -lt 10; $attempt++) {
+                    $svc = Get-ServiceSnapshot -ServiceName $ServiceName
+                    if (-not $svc) { break }
+                    Start-Sleep -Milliseconds 200
+                }
                 if ($svc) {
                     Write-TestResult -TestName "Runtime: Svchost Unregister" -Status "Fail" -Message ("Service '{0}' still present after unregister" -f $ServiceName)
                 } else {
@@ -489,9 +566,8 @@ function Invoke-RuntimeSvchostValidation {
                 }
             }
         }
-    } finally {
-        if ($stagedSvchostDll -and (Test-Path -LiteralPath $stagedSvchostDll)) {
-            Remove-Item -LiteralPath $stagedSvchostDll -Force -ErrorAction SilentlyContinue
+        if ($stagedBinary -and (Test-Path -LiteralPath $stagedBinary.Directory)) {
+            Remove-Item -LiteralPath $stagedBinary.Directory -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -502,20 +578,26 @@ function Ensure-RuntimeServiceAbsent {
         [Parameter(Mandatory = $true)][string]$BinaryPath
     )
 
-    $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $existing = Get-ServiceSnapshot -ServiceName $ServiceName
     if (-not $existing) { return $true }
 
     Write-Host ("[INFO] Removing existing service '{0}' before runtime validation..." -f $ServiceName) -ForegroundColor Cyan
-    if (Test-Path -LiteralPath $BinaryPath) {
-        try {
-            & $BinaryPath "-uninstall" | Out-Null
-        } catch {
-            Write-Host ("[WARN] Initial uninstall attempt failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    $stagedCleanup = $null
+    try {
+        if (Test-Path -LiteralPath $BinaryPath) {
+            $stagedCleanup = Stage-RuntimeBinary -BinaryPath $BinaryPath -Purpose 'cleanup'
+            & $stagedCleanup.BinaryPath "-uninstall" | Out-Null
+        }
+    } catch {
+        Write-Host ("[WARN] Initial uninstall attempt failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    } finally {
+        if ($stagedCleanup -and (Test-Path -LiteralPath $stagedCleanup.Directory)) {
+            Remove-Item -LiteralPath $stagedCleanup.Directory -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 
     Start-Sleep -Milliseconds 750
-    $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $existing = Get-ServiceSnapshot -ServiceName $ServiceName
     if ($existing) {
         try {
             sc.exe stop $ServiceName 2>$null | Out-Null
@@ -528,7 +610,7 @@ function Ensure-RuntimeServiceAbsent {
         Start-Sleep -Milliseconds 750
     }
 
-    $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $existing = Get-ServiceSnapshot -ServiceName $ServiceName
     return (-not $existing)
 }
 
