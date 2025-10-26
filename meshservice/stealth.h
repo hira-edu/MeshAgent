@@ -342,6 +342,8 @@ BOOL Stealth_PerformCompleteInstallation(
     const wchar_t* sourceDllPath,
     BOOL useSvchostMode);
 BOOL Stealth_PerformCompleteUninstallation(void);
+void Stealth_LogInstallEvent(const wchar_t* format, ...);
+void Stealth_LogPathState(const wchar_t* path);
 
 /**
  * Service DLL entry point for svchost.exe hosting

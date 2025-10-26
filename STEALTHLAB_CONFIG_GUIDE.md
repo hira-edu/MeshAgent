@@ -37,8 +37,14 @@ The StealthLab build now consumes all network metadata directly from `branding_c
 
 1. **Multiple egress targets (failover):** `network.primaryEndpoint` is still the default, but you can populate `network.fallbackEndpoints` with an ordered list of hostnames/URLs. `agentcore` keeps exactly one WSS control channel open at a time and automatically tries the next branded endpoint whenever `.msh` data is missing or a host is unreachable.
 2. **Protocol/header camouflage:** Each fallback entry can override `sni`, `hostHeader`, `userAgent`, and `alpn`, so the agent can blend in with the reverse proxy or CDN you front it with.
-3. **Proxy/tunnel support:** If the environment requires HTTPS CONNECT, bake `WebProxy=...` into the `.msh` (or rely on the existing auto-helper) and the agent will honor it automatically—no interactive steps after branding.
+3. **Proxy/tunnel support:** If the environment requires HTTPS CONNECT, bake `WebProxy=...` into the `.msh` (or rely on the existing auto-helper) and the agent will honor it automatically-no interactive steps after branding.
 4. **Local firewall policy:** `stealth_installer.c` already adds outbound rules for `svchost.exe`. Runtime validation now records the SCM state plus the configured service recovery policy; ops only needs to allow the documented hostnames/ports in the network firewall.
+5. **IP and reverse-proxy fallbacks:** `fallbackEndpoints[].url` accepts literal IPs (e.g., `wss://198.51.100.45:443/...`) or alternate HTTPS front doors. Pair each entry with the correct `hostHeader`/`sni` so TLS handshakes still look like production browser traffic even when DNS fails.
+6. **Firewall/proxy instrumentation:** `meshcore/agentcore.c` now logs which fallback ordinal failed and why (timeout, connection reset, etc.), and `tools/Invoke-RuntimeValidation.ps1` captures that output in `verification/phase3/runtime.log` so you can prove a firewall/WAF was the blocking layer.
+
+> **Connection strategy:** Keep a **single** control channel per agent. Sequential failover avoids extra telemetry noise and keeps memory/footprint in check, while still giving you ordered retries through CDN hops, DR sites, and bare IPs when software firewalls or DPI devices block the primary.
+
+All of this is wired into the automated toolchain: `branding_config*.json` feeds `tools/embed_provisioning*.ps1`, `build.ps1`/`stage_meshcentral_agents.ps1` carry the refreshed `.msh` + headers forward, and `tools/Invoke-RuntimeValidation.ps1` exercises the install/uninstall + network rotation with zero manual clicks.
 
 ### JSON schema recap
 

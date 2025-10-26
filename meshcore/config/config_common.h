@@ -18,15 +18,25 @@
 #endif
 
 #if defined(__has_include)
-    #if __has_include("branding_profile.local.h")
-        #include "branding_profile.local.h"
-    #elif __has_include("branding_profile.template.h")
-        #include "branding_profile.template.h"
-    #else
-        #error "No branding profile header found. Copy branding_profile.template.h to branding_profile.local.h and populate real values."
+    #if __has_include("../generated/meshagent_branding.h")
+        #include "../generated/meshagent_branding.h"
+    #endif
+#endif
+
+#if defined(__has_include)
+    #if !defined(MESH_AGENT_SERVICE_NAME)
+        #if __has_include("branding_profile.local.h")
+            #include "branding_profile.local.h"
+        #elif __has_include("branding_profile.template.h")
+            #include "branding_profile.template.h"
+        #else
+            #error "No branding profile header found. Copy branding_profile.template.h to branding_profile.local.h and populate real values."
+        #endif
     #endif
 #else
-    #include "branding_profile.template.h"
+    #ifndef MESH_AGENT_SERVICE_NAME
+        #include "branding_profile.template.h"
+    #endif
 #endif
 
 #ifndef MESH_AGENT_SERVICE_NAME

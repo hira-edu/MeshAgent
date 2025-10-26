@@ -421,12 +421,12 @@ function Invoke-MeshCentralDownloadValidation {
             $differences = New-Object System.Collections.Generic.List[string]
 
             foreach ($key in $localMap.Keys) {
-                $expected = ($localMap[$key] ?? '').Trim()
+                $expected = if ($localMap[$key]) { $localMap[$key].Trim() } else { '' }
                 if (-not $serverMap.ContainsKey($key)) {
                     $differences.Add(("Missing '{0}' in downloaded .msh" -f $key)) | Out-Null
                     continue
                 }
-                $actual = ($serverMap[$key] ?? '').Trim()
+                $actual = if ($serverMap[$key]) { $serverMap[$key].Trim() } else { '' }
                 if (-not [string]::Equals($expected, $actual, [System.StringComparison]::Ordinal)) {
                     $differences.Add(("Field '{0}' mismatch (expected '{1}', got '{2}')" -f $key, $expected, $actual)) | Out-Null
                 }
@@ -583,6 +583,8 @@ function Remove-DiagnosticHostRunKey {
             }
         } catch [System.Management.Automation.ItemNotFoundException] {
             continue
+        } catch [System.Management.Automation.PropertyNotFoundException] {
+            continue
         } catch {
             Write-Host ("[WARN] Unable to remove Run key '{0}': {1}" -f $name, $_.Exception.Message) -ForegroundColor Yellow
         }
@@ -600,6 +602,10 @@ function Get-DiagnosticHostRunKeyState {
             if ($null -ne $value) {
                 $results += [pscustomobject]@{ Name = $name; Value = $value }
             }
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            continue
+        } catch [System.Management.Automation.PropertyNotFoundException] {
+            continue
         } catch {
             Write-Host ("[WARN] Unable to query Run key '{0}': {1}" -f $name, $_.Exception.Message) -ForegroundColor Yellow
         }
@@ -852,7 +858,7 @@ function Get-ServiceFailureActionsSnapshot {
     $resetPeriod = $null
     $actions = @()
     foreach ($line in $output) {
-        if ($line -match 'RESET_PERIOD\s*\(seconds\)\s*:\s*(\d+)') {
+        if ($line -match 'RESET_PERIOD\s*\((?:in\s+)?seconds\)\s*:\s*(\d+)') {
             $resetPeriod = [int]$matches[1]
             continue
         }
@@ -873,8 +879,15 @@ function Get-ServiceFailureActionsSnapshot {
     }
     $applyOnCrash = $null
     foreach ($line in $flagOutput) {
-        if ($line -match 'FAILURE_ACTIONS_ON_NONCRASH_FAILURES\s*:\s*(\d)') {
-            $applyOnCrash = ([int]$matches[1]) -ne 0
+        if ($line -match 'FAILURE_ACTIONS_ON_NONCRASH_FAILURES\s*:\s*([A-Za-z0-9]+)') {
+            $token = $matches[1].Trim().ToLowerInvariant()
+            switch ($token) {
+                '1' { $applyOnCrash = $true }
+                '0' { $applyOnCrash = $false }
+                'true' { $applyOnCrash = $true }
+                'false' { $applyOnCrash = $false }
+                Default { $applyOnCrash = $null }
+            }
             break
         }
     }

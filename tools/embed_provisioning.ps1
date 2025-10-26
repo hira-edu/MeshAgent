@@ -209,13 +209,15 @@ if ($network.fallbackEndpoints) {
 }
 $fallbackCount = $fallbackEntries.Count
 if ($fallbackCount -gt 0) {
-    $fallbackListMacro = "{ " + ($fallbackEntries | ForEach-Object {
+    $fallbackLiterals = @()
+    foreach ($entry in $fallbackEntries) {
         $alpnValue = $null
-        if ($_.alpn -and $_.alpn.Count -gt 0) {
-            $alpnValue = ($_.alpn -join ";")
+        if ($entry.alpn -and $entry.alpn.Count -gt 0) {
+            $alpnValue = ($entry.alpn -join ";")
         }
-        "{ " + (Convert-ToCLiteral $_.url) + ", " + (Convert-ToCLiteral $_.sni) + ", " + (Convert-ToCLiteral $_.hostHeader) + ", " + (Convert-ToCLiteral $_.userAgent) + ", " + (Convert-ToCLiteral $alpnValue) + " }"
-    }) -join ", " + " }"
+        $fallbackLiterals += ("{ " + (Convert-ToCLiteral $entry.url) + ", " + (Convert-ToCLiteral $entry.sni) + ", " + (Convert-ToCLiteral $entry.hostHeader) + ", " + (Convert-ToCLiteral $entry.userAgent) + ", " + (Convert-ToCLiteral $alpnValue) + " }")
+    }
+    $fallbackListMacro = "{ " + ([string]::Join(", ", $fallbackLiterals)) + " }"
 } else {
     $fallbackListMacro = "{ }"
 }

@@ -305,7 +305,9 @@ msbuild MeshAgent-2022.sln /p:Configuration=StealthLab /p:DeviceGroup=ENGINEERIN
 
 ### Phase 2: Native Resource Embedding (Week 2-3)
 
-> **Status (2025-10-26):** The RC pipeline has been removed (`bundle_resources.rc` deleted) and `build.ps1` now builds `StealthLab_DLL` first so `bin2h` regenerates `meshcore/embedded/generated/svchost_payload.h/.json` before StealthLab binaries compile. Remaining Phase‑2 work tracks payload integrity enforcement and MeshCentral packaging updates.
+> **Status (2025-10-26):** The RC pipeline has been removed (`bundle_resources.rc` deleted) and `build.ps1` now builds `StealthLab_DLL` first so `bin2h` regenerates `meshcore/embedded/generated/svchost_payload.h/.json` before StealthLab binaries compile. Remaining Phase-2 work tracks payload integrity enforcement and MeshCentral packaging updates.
+>
+> **Status (2025-10-27):** StealthLab builds are now *svchost-only* end-to-end. `meshcore/agentcore.c` never falls back to `agent-installer`, the JS entry points throw on Windows, and runtime validation asserts the service type/start state after every install. Network branding now emits ordered fallback endpoints (including CDN/IP reverse proxies) and agentcore logs which ordinal failed when rotating. Next action: document the firewall/proxy allowlists + blocked-host test cases (`NET-05`) and run one non-stealth smoke test to be sure the removed fallback does not regress other platforms.
 
 **Goal:** Replace bundle_resources.rc with C++ embedding
 
@@ -1149,6 +1151,7 @@ The table below captures every build/deploy entrypoint that still executes Power
 - [ ] Add SHA256 integrity verification + signer thumbprint assertion before loading payload (runtime self-check).
 - [ ] Flow payload metadata into MeshCentral packaging so only the EXE + JSON manifest ship (no staged DLL artifacts).
 - [ ] Extend `test.ps1` with privileged runtime validation (`-RuntimeValidation`) to exercise `-install/-uninstall` and svchost `-register/-status/-unregister` flows.
+- [ ] Document firewall/proxy allowlists + fallback rotation test cases so runtime validation can prove each branded endpoint (including CDN/IP reverse proxies) and ops know exactly which hostnames/ports must remain open (NET-05).
 - [ ] **Test:** Integration test exercises DLL extraction + load validation on x64.
 - **Exit criteria:** Build tree has zero `.rc` payload references; payload integrity failure blocks startup.
 

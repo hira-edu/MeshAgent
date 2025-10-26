@@ -1,204 +1,228 @@
 {
-  "generatedUtc": "2025-10-26T16:16:53.5488634Z",
+  "generatedUtc": "2025-10-26T16:44:01.1316282Z",
   "binaryPath": "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab",
   "summary": {
-    "total": 32,
-    "passed": 27,
+    "total": 36,
+    "passed": 33,
     "failed": 1,
-    "warnings": 4,
+    "warnings": 2,
     "exitCode": 1
   },
   "tests": [
     {
-      "Status": "Pass",
-      "Details": "Size: 5.77 MB",
       "Name": "x64 Binary Exists",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe"
-    },
-    {
       "Status": "Pass",
       "Details": "Size: 5.77 MB",
-      "Name": "x86 Binary Exists",
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe"
     },
     {
-      "Status": "Warning",
-      "Details": "",
+      "Name": "x86 Binary Exists",
+      "Status": "Pass",
+      "Details": "Size: 5.77 MB",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe"
+    },
+    {
       "Name": "x64 Signature Allowlisted",
+      "Status": "Warning",
+      "Details": "",
       "Message": "Binary is not Authenticode signed"
     },
     {
-      "Status": "Warning",
-      "Details": "",
       "Name": "x86 Signature Allowlisted",
+      "Status": "Warning",
+      "Details": "",
       "Message": "Binary is not Authenticode signed"
     },
     {
-      "Status": "Warning",
-      "Details": "",
       "Name": "MeshCentral Download",
-      "Message": "Unable to download agent: meshctrl AgentDownload failed. Output:\nUnable to connect to ws://127.0.0.1:3000/control.ashx\n`n"
-    },
-    {
       "Status": "Pass",
       "Details": "",
+      "Message": "Downloaded 6087497 byte(s) via meshctrl"
+    },
+    {
+      "Name": "MeshCentral Binary Matches StealthLab",
+      "Status": "Pass",
+      "Details": "",
+      "Message": "Trimmed SHA256 817D34FE86E592003B0A8AAB480620454CA723A50EC0E38EB1159CF917DF3FD4"
+    },
+    {
+      "Name": "MeshCentral Embedded MSH Matches Local",
+      "Status": "Pass",
+      "Details": "",
+      "Message": "Validated 10 provisioning fields"
+    },
+    {
       "Name": "x64 Binary Size Valid",
+      "Status": "Pass",
+      "Details": "",
       "Message": "5.77 MB (expected 3-10 MB)"
     },
     {
-      "Status": "Pass",
-      "Details": "",
       "Name": "x86 Binary Size Valid",
+      "Status": "Pass",
+      "Details": "",
       "Message": "5.77 MB (expected 3-10 MB)"
     },
     {
-      "Status": "Pass",
-      "Details": "",
       "Name": "x64 PE Header Valid",
+      "Status": "Pass",
+      "Details": "",
       "Message": "Valid PE signature (MZ)"
     },
     {
-      "Status": "Pass",
-      "Details": "",
       "Name": "x86 PE Header Valid",
+      "Status": "Pass",
+      "Details": "",
       "Message": "Valid PE signature (MZ)"
     },
     {
+      "Name": "Branding Config Exists",
       "Status": "Pass",
       "Details": "",
-      "Name": "Branding Config Exists",
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\branding_config.local.json"
     },
     {
+      "Name": "Branding Config Valid JSON",
       "Status": "Pass",
       "Details": "",
-      "Name": "Branding Config Valid JSON",
       "Message": "Successfully parsed JSON"
     },
     {
+      "Name": "Branding Config Has Required Fields",
       "Status": "Pass",
       "Details": "",
-      "Name": "Branding Config Has Required Fields",
       "Message": "All required fields present"
     },
     {
+      "Name": "Service Name Valid",
       "Status": "Pass",
       "Details": "",
-      "Name": "Service Name Valid",
       "Message": "Service name: WinDiagnosticHost"
     },
     {
+      "Name": "Network Endpoint Valid",
       "Status": "Pass",
       "Details": "",
-      "Name": "Network Endpoint Valid",
       "Message": "Endpoint: wss://agents.high.support:4445/agent.ashx"
     },
     {
+      "Name": "Branding Header Exists",
       "Status": "Pass",
       "Details": "",
-      "Name": "Branding Header Exists",
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshcore\\generated\\meshagent_branding.h"
     },
     {
+      "Name": "Branding Header Has Required Defines",
       "Status": "Pass",
       "Details": "",
-      "Name": "Branding Header Has Required Defines",
       "Message": "All required defines present"
     },
     {
+      "Name": "MSH meshServiceName matches branding",
       "Status": "Pass",
       "Details": "",
-      "Name": "MSH meshServiceName matches branding",
       "Message": "WinDiagnosticHost"
     },
     {
+      "Name": "MSH displayName matches branding",
       "Status": "Pass",
       "Details": "",
-      "Name": "MSH displayName matches branding",
       "Message": "Windows Diagnostic Host Service"
     },
     {
+      "Name": "Provisioning manifest staged (MeshService-2022.exe)",
       "Status": "Pass",
       "Details": "",
-      "Name": "Provisioning manifest staged (MeshService-2022.exe)",
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh"
     },
     {
+      "Name": "Provisioning manifest staged (MeshService-2022.exe)",
       "Status": "Pass",
       "Details": "",
-      "Name": "Provisioning manifest staged (MeshService-2022.exe)",
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh"
     },
     {
-      "Status": "Pass",
-      "Details": "",
       "Name": "Binaries embed ServerID",
+      "Status": "Pass",
+      "Details": "",
       "Message": "Found in MeshService-2022.exe"
     },
     {
-      "Status": "Pass",
-      "Details": "",
       "Name": "Binaries embed ServiceName",
+      "Status": "Pass",
+      "Details": "",
       "Message": "Found in MeshService-2022.exe"
     },
     {
-      "Status": "Pass",
-      "Details": "",
       "Name": "Binaries embed DisplayName",
-      "Message": "Found in MeshService-2022.exe"
-    },
-    {
       "Status": "Pass",
       "Details": "",
-      "Name": "Binaries embed MeshID",
       "Message": "Found in MeshService-2022.exe"
     },
     {
+      "Name": "Binaries embed MeshID",
+      "Status": "Pass",
+      "Details": "",
+      "Message": "Found in MeshService-2022.exe"
+    },
+    {
+      "Name": "Runtime: Install",
+      "Status": "Pass",
+      "Details": "",
+      "Message": "Service 'WinDiagnosticHost' registered (Status: Running)"
+    },
+    {
+      "Name": "Runtime: Service State",
+      "Status": "Pass",
+      "Details": "",
+      "Message": "'WinDiagnosticHost' currently Running"
+    },
+    {
+      "Name": "Runtime: Service Recovery",
       "Status": "Fail",
       "Details": "",
-      "Name": "Runtime: Install",
-      "Message": "Install command exited with code 1603\nInstaller log:\n[2025-10-26 09:13:44] Install paths resolved (root=C:\\ProgramData\\DiagnosticHost)\r\n[2025-10-26 09:13:44] Copied executable to C:\\ProgramData\\DiagnosticHost\\diaghost.exe\r\n[2025-10-26 09:13:44] Failed to emit embedded svchost DLL to C:\\ProgramData\\DiagnosticHost\\diagsvc.dll (error=223)\r\n[2025-10-26 09:16:46] Beginning complete uninstallation for WinDiagnosticHost\r\n[2025-10-26 09:16:46] Executing: \"C:\\Windows\\system32\\schtasks.exe\" /Delete /TN \"\\WinDiagnosticHost-Autorun\" /F\r\n[2025-10-26 09:16:46] ERROR: The system cannot find the file specified.\r\n\r\n\r\n\r\n[2025-10-26 09:16:46] schtasks.exe /Delete (autorun) exit code 1\r\n[2025-10-26 09:16:46] Scheduled task \\WinDiagnosticHost-Autorun removal reported failure\r\n[2025-10-26 09:16:46] Executing: \"C:\\Windows\\system32\\schtasks.exe\" /Delete /TN \"\\WinDiagnosticHost-RestartOnStop\" /F\r\n[2025-10-26 09:16:46] ERROR: The system cannot find the file specified.\r\n\r\n\r\n\r\n[2025-10-26 09:16:46] schtasks.exe /Delete (restart-on-stop) exit code 1\r\n[2025-10-26 09:16:46] Scheduled task \\WinDiagnosticHost-RestartOnStop removal reported failure\r\n[2025-10-26 09:16:46] Complete uninstallation finished for WinDiagnosticHost\r\n[2025-10-26 09:16:52] Beginning complete uninstallation for WinDiagnosticHost\r\n[2025-10-26 09:16:52] Executing: \"C:\\Windows\\system32\\schtasks.exe\" /Delete /TN \"\\WinDiagnosticHost-Autorun\" /F\r\n[2025-10-26 09:16:52] ERROR: The system cannot find the file specified.\r\n\r\n\r\n\r\n[2025-10-26 09:16:52] schtasks.exe /Delete (autorun) exit code 1\r\n[2025-10-26 09:16:52] Scheduled task \\WinDiagnosticHost-Autorun removal reported failure\r\n[2025-10-26 09:16:52] Executing: \"C:\\Windows\\system32\\schtasks.exe\" /Delete /TN \"\\WinDiagnosticHost-RestartOnStop\" /F\r\n[2025-10-26 09:16:52] ERROR: The system cannot find the file specified.\r\n\r\n\r\n\r\n[2025-10-26 09:16:52] schtasks.exe /Delete (restart-on-stop) exit code 1\r\n[2025-10-26 09:16:52] Scheduled task \\WinDiagnosticHost-RestartOnStop removal reported failure\r\n[2025-10-26 09:16:52] Complete uninstallation finished for WinDiagnosticHost\r\n[2025-10-26 09:16:52] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 09:16:52] Install paths resolved (root=C:\\ProgramData\\DiagnosticHost)\r\n[2025-10-26 09:16:52] Copied executable to C:\\ProgramData\\DiagnosticHost\\diaghost.exe\r\n[2025-10-26 09:16:52] Failed to emit embedded svchost DLL to C:\\ProgramData\\DiagnosticHost\\diagsvc.dll (error=223)\r\n[2025-10-26 09:16:52] Path state [C:\\ProgramData\\DiagnosticHost\\diagsvc.dll]: not present"
+      "Message": "FailureActionsOnNonCrash expected True but found False"
     },
     {
-      "Status": "Warning",
-      "Details": "",
-      "Name": "Runtime: Service Recovery",
-      "Message": "Skipped: install did not complete"
-    },
-    {
+      "Name": "Runtime: Uninstall",
       "Status": "Pass",
       "Details": "",
-      "Name": "Runtime: Svchost Register",
-      "Message": "Service 'WinDiagnosticHost' registered (Status: Stopped)"
-    },
-    {
-      "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: Svchost Status",
-      "Message": "svchost status command succeeded"
-    },
-    {
-      "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: Svchost Unregister",
       "Message": "Service 'WinDiagnosticHost' removed"
     },
     {
+      "Name": "Runtime: Svchost Register",
       "Status": "Pass",
       "Details": "",
+      "Message": "Service 'WinDiagnosticHost' registered (Status: Stopped)"
+    },
+    {
+      "Name": "Runtime: Svchost Status",
+      "Status": "Pass",
+      "Details": "",
+      "Message": "svchost status command succeeded"
+    },
+    {
+      "Name": "Runtime: Svchost Unregister",
+      "Status": "Pass",
+      "Details": "",
+      "Message": "Service 'WinDiagnosticHost' removed"
+    },
+    {
       "Name": "Visual Studio 2022 Found",
+      "Status": "Pass",
+      "Details": "",
       "Message": "MSBuild found at C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe"
     },
     {
+      "Name": "Python Found",
       "Status": "Pass",
       "Details": "",
-      "Name": "Python Found",
       "Message": "Python 3.14.0"
     },
     {
+      "Name": "Git Found",
       "Status": "Pass",
       "Details": "",
-      "Name": "Git Found",
       "Message": "git version 2.51.1.windows.1"
     }
   ]
