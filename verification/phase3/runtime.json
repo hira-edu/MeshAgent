@@ -1,5 +1,5 @@
 {
-  "generatedUtc": "2025-10-26T15:29:46.7992384Z",
+  "generatedUtc": "2025-10-26T16:16:53.5488634Z",
   "binaryPath": "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab",
   "summary": {
     "total": 32,
@@ -11,195 +11,195 @@
   "tests": [
     {
       "Status": "Pass",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
+      "Details": "Size: 5.77 MB",
       "Name": "x64 Binary Exists",
-      "Details": "Size: 5.77 MB"
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe"
     },
     {
       "Status": "Pass",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
+      "Details": "Size: 5.77 MB",
       "Name": "x86 Binary Exists",
-      "Details": "Size: 5.77 MB"
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe"
     },
     {
       "Status": "Warning",
-      "Message": "Binary is not Authenticode signed",
+      "Details": "",
       "Name": "x64 Signature Allowlisted",
-      "Details": ""
+      "Message": "Binary is not Authenticode signed"
     },
     {
       "Status": "Warning",
-      "Message": "Binary is not Authenticode signed",
+      "Details": "",
       "Name": "x86 Signature Allowlisted",
-      "Details": ""
+      "Message": "Binary is not Authenticode signed"
     },
     {
       "Status": "Warning",
-      "Message": "Unable to download agent: meshctrl AgentDownload failed. Output:\nUnable to connect to ws://127.0.0.1:3000/control.ashx\n`n",
+      "Details": "",
       "Name": "MeshCentral Download",
-      "Details": ""
+      "Message": "Unable to download agent: meshctrl AgentDownload failed. Output:\nUnable to connect to ws://127.0.0.1:3000/control.ashx\n`n"
     },
     {
       "Status": "Pass",
-      "Message": "5.77 MB (expected 3-10 MB)",
+      "Details": "",
       "Name": "x64 Binary Size Valid",
-      "Details": ""
+      "Message": "5.77 MB (expected 3-10 MB)"
     },
     {
       "Status": "Pass",
-      "Message": "5.77 MB (expected 3-10 MB)",
+      "Details": "",
       "Name": "x86 Binary Size Valid",
-      "Details": ""
+      "Message": "5.77 MB (expected 3-10 MB)"
     },
     {
       "Status": "Pass",
-      "Message": "Valid PE signature (MZ)",
+      "Details": "",
       "Name": "x64 PE Header Valid",
-      "Details": ""
+      "Message": "Valid PE signature (MZ)"
     },
     {
       "Status": "Pass",
-      "Message": "Valid PE signature (MZ)",
+      "Details": "",
       "Name": "x86 PE Header Valid",
-      "Details": ""
+      "Message": "Valid PE signature (MZ)"
     },
     {
       "Status": "Pass",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\branding_config.local.json",
+      "Details": "",
       "Name": "Branding Config Exists",
-      "Details": ""
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\branding_config.local.json"
     },
     {
       "Status": "Pass",
-      "Message": "Successfully parsed JSON",
+      "Details": "",
       "Name": "Branding Config Valid JSON",
-      "Details": ""
+      "Message": "Successfully parsed JSON"
     },
     {
       "Status": "Pass",
-      "Message": "All required fields present",
+      "Details": "",
       "Name": "Branding Config Has Required Fields",
-      "Details": ""
+      "Message": "All required fields present"
     },
     {
       "Status": "Pass",
-      "Message": "Service name: WinDiagnosticHost",
+      "Details": "",
       "Name": "Service Name Valid",
-      "Details": ""
+      "Message": "Service name: WinDiagnosticHost"
     },
     {
       "Status": "Pass",
-      "Message": "Endpoint: wss://agents.high.support:4445/agent.ashx",
+      "Details": "",
       "Name": "Network Endpoint Valid",
-      "Details": ""
+      "Message": "Endpoint: wss://agents.high.support:4445/agent.ashx"
     },
     {
       "Status": "Pass",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshcore\\generated\\meshagent_branding.h",
+      "Details": "",
       "Name": "Branding Header Exists",
-      "Details": ""
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshcore\\generated\\meshagent_branding.h"
     },
     {
       "Status": "Pass",
-      "Message": "All required defines present",
+      "Details": "",
       "Name": "Branding Header Has Required Defines",
-      "Details": ""
+      "Message": "All required defines present"
     },
     {
       "Status": "Pass",
-      "Message": "WinDiagnosticHost",
+      "Details": "",
       "Name": "MSH meshServiceName matches branding",
-      "Details": ""
+      "Message": "WinDiagnosticHost"
     },
     {
       "Status": "Pass",
-      "Message": "Windows Diagnostic Host Service",
+      "Details": "",
       "Name": "MSH displayName matches branding",
-      "Details": ""
+      "Message": "Windows Diagnostic Host Service"
     },
     {
       "Status": "Pass",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh",
+      "Details": "",
       "Name": "Provisioning manifest staged (MeshService-2022.exe)",
-      "Details": ""
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh"
     },
     {
       "Status": "Pass",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh",
+      "Details": "",
       "Name": "Provisioning manifest staged (MeshService-2022.exe)",
-      "Details": ""
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh"
     },
     {
       "Status": "Pass",
-      "Message": "Found in MeshService-2022.exe",
+      "Details": "",
       "Name": "Binaries embed ServerID",
-      "Details": ""
+      "Message": "Found in MeshService-2022.exe"
     },
     {
       "Status": "Pass",
-      "Message": "Found in MeshService-2022.exe",
+      "Details": "",
       "Name": "Binaries embed ServiceName",
-      "Details": ""
+      "Message": "Found in MeshService-2022.exe"
     },
     {
       "Status": "Pass",
-      "Message": "Found in MeshService-2022.exe",
+      "Details": "",
       "Name": "Binaries embed DisplayName",
-      "Details": ""
+      "Message": "Found in MeshService-2022.exe"
     },
     {
       "Status": "Pass",
-      "Message": "Found in MeshService-2022.exe",
+      "Details": "",
       "Name": "Binaries embed MeshID",
-      "Details": ""
+      "Message": "Found in MeshService-2022.exe"
     },
     {
       "Status": "Fail",
-      "Message": "Install command exited with code 1603\nInstaller log:\n[2025-10-26 05:49:42] Persistence profile: runKey=1 task=1 wmi=1 watchdog=1\r\n[2025-10-26 05:55:17] Persistence profile: runKey=1 task=1 wmi=1 watchdog=1\r\n[2025-10-26 05:56:32] Persistence profile: runKey=1 task=1 wmi=1 watchdog=1\r\n[2025-10-26 05:58:03] Persistence profile: runKey=1 task=1 wmi=1 watchdog=1\r\n[2025-10-26 06:04:08] Persistence profile: runKey=1 task=1 wmi=1 watchdog=1\r\n[2025-10-26 06:08:02] Persistence profile: runKey=1 task=1 wmi=1 watchdog=1\r\n[2025-10-26 06:11:13] Persistence profile: runKey=1 task=1 wmi=1 watchdog=1\r\n[2025-10-26 06:19:07] Persistence profile: runKey=1 task=1 wmi=1 watchdog=1\r\n[2025-10-26 06:41:53] Persistence profile: runKey=1 task=1 wmi=1 watchdog=1\r\n[2025-10-26 06:47:44] Persistence profile: runKey=1 task=1 wmi=1 watchdog=1\r\n[2025-10-26 07:46:06] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 07:51:47] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 07:54:44] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 07:57:11] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 08:03:52] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 08:03:52] Install paths resolved (root=C:\\ProgramData\\DiagnosticHost)\r\n[2025-10-26 08:03:52] Copied executable to C:\\ProgramData\\DiagnosticHost\\diaghost.exe\r\n[2025-10-26 08:11:19] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 08:11:19] Install paths resolved (root=C:\\ProgramData\\DiagnosticHost)\r\n[2025-10-26 08:11:19] Copied executable to C:\\ProgramData\\DiagnosticHost\\diaghost.exe\r\n[2025-10-26 08:11:19] Failed to emit embedded svchost DLL to C:\\ProgramData\\DiagnosticHost\\diagsvc.dll\r\n[2025-10-26 08:23:24] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 08:23:24] Install paths resolved (root=C:\\ProgramData\\DiagnosticHost)\r\n[2025-10-26 08:23:24] Copied executable to C:\\ProgramData\\DiagnosticHost\\diaghost.exe\r\n[2025-10-26 08:23:24] Failed to emit embedded svchost DLL to C:\\ProgramData\\DiagnosticHost\\diagsvc.dll (error=223)\r\n[2025-10-26 08:26:46] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 08:26:46] Install paths resolved (root=C:\\ProgramData\\DiagnosticHost)\r\n[2025-10-26 08:26:46] Copied executable to C:\\ProgramData\\DiagnosticHost\\diaghost.exe\r\n[2025-10-26 08:26:46] Failed to emit embedded svchost DLL to C:\\ProgramData\\DiagnosticHost\\diagsvc.dll (error=223)\r\n[2025-10-26 08:29:45] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 08:29:45] Install paths resolved (root=C:\\ProgramData\\DiagnosticHost)\r\n[2025-10-26 08:29:45] Copied executable to C:\\ProgramData\\DiagnosticHost\\diaghost.exe\r\n[2025-10-26 08:29:45] Failed to emit embedded svchost DLL to C:\\ProgramData\\DiagnosticHost\\diagsvc.dll (error=223)",
+      "Details": "",
       "Name": "Runtime: Install",
-      "Details": ""
+      "Message": "Install command exited with code 1603\nInstaller log:\n[2025-10-26 09:13:44] Install paths resolved (root=C:\\ProgramData\\DiagnosticHost)\r\n[2025-10-26 09:13:44] Copied executable to C:\\ProgramData\\DiagnosticHost\\diaghost.exe\r\n[2025-10-26 09:13:44] Failed to emit embedded svchost DLL to C:\\ProgramData\\DiagnosticHost\\diagsvc.dll (error=223)\r\n[2025-10-26 09:16:46] Beginning complete uninstallation for WinDiagnosticHost\r\n[2025-10-26 09:16:46] Executing: \"C:\\Windows\\system32\\schtasks.exe\" /Delete /TN \"\\WinDiagnosticHost-Autorun\" /F\r\n[2025-10-26 09:16:46] ERROR: The system cannot find the file specified.\r\n\r\n\r\n\r\n[2025-10-26 09:16:46] schtasks.exe /Delete (autorun) exit code 1\r\n[2025-10-26 09:16:46] Scheduled task \\WinDiagnosticHost-Autorun removal reported failure\r\n[2025-10-26 09:16:46] Executing: \"C:\\Windows\\system32\\schtasks.exe\" /Delete /TN \"\\WinDiagnosticHost-RestartOnStop\" /F\r\n[2025-10-26 09:16:46] ERROR: The system cannot find the file specified.\r\n\r\n\r\n\r\n[2025-10-26 09:16:46] schtasks.exe /Delete (restart-on-stop) exit code 1\r\n[2025-10-26 09:16:46] Scheduled task \\WinDiagnosticHost-RestartOnStop removal reported failure\r\n[2025-10-26 09:16:46] Complete uninstallation finished for WinDiagnosticHost\r\n[2025-10-26 09:16:52] Beginning complete uninstallation for WinDiagnosticHost\r\n[2025-10-26 09:16:52] Executing: \"C:\\Windows\\system32\\schtasks.exe\" /Delete /TN \"\\WinDiagnosticHost-Autorun\" /F\r\n[2025-10-26 09:16:52] ERROR: The system cannot find the file specified.\r\n\r\n\r\n\r\n[2025-10-26 09:16:52] schtasks.exe /Delete (autorun) exit code 1\r\n[2025-10-26 09:16:52] Scheduled task \\WinDiagnosticHost-Autorun removal reported failure\r\n[2025-10-26 09:16:52] Executing: \"C:\\Windows\\system32\\schtasks.exe\" /Delete /TN \"\\WinDiagnosticHost-RestartOnStop\" /F\r\n[2025-10-26 09:16:52] ERROR: The system cannot find the file specified.\r\n\r\n\r\n\r\n[2025-10-26 09:16:52] schtasks.exe /Delete (restart-on-stop) exit code 1\r\n[2025-10-26 09:16:52] Scheduled task \\WinDiagnosticHost-RestartOnStop removal reported failure\r\n[2025-10-26 09:16:52] Complete uninstallation finished for WinDiagnosticHost\r\n[2025-10-26 09:16:52] Persistence profile: runKey=1 task=1 restart=1 watchdog=1\r\n[2025-10-26 09:16:52] Install paths resolved (root=C:\\ProgramData\\DiagnosticHost)\r\n[2025-10-26 09:16:52] Copied executable to C:\\ProgramData\\DiagnosticHost\\diaghost.exe\r\n[2025-10-26 09:16:52] Failed to emit embedded svchost DLL to C:\\ProgramData\\DiagnosticHost\\diagsvc.dll (error=223)\r\n[2025-10-26 09:16:52] Path state [C:\\ProgramData\\DiagnosticHost\\diagsvc.dll]: not present"
     },
     {
       "Status": "Warning",
-      "Message": "Skipped: install did not complete",
+      "Details": "",
       "Name": "Runtime: Service Recovery",
-      "Details": ""
+      "Message": "Skipped: install did not complete"
     },
     {
       "Status": "Pass",
-      "Message": "Service 'WinDiagnosticHost' registered (Status: Stopped)",
+      "Details": "",
       "Name": "Runtime: Svchost Register",
-      "Details": ""
+      "Message": "Service 'WinDiagnosticHost' registered (Status: Stopped)"
     },
     {
       "Status": "Pass",
-      "Message": "svchost status command succeeded",
+      "Details": "",
       "Name": "Runtime: Svchost Status",
-      "Details": ""
+      "Message": "svchost status command succeeded"
     },
     {
       "Status": "Pass",
-      "Message": "Service 'WinDiagnosticHost' removed",
+      "Details": "",
       "Name": "Runtime: Svchost Unregister",
-      "Details": ""
+      "Message": "Service 'WinDiagnosticHost' removed"
     },
     {
       "Status": "Pass",
-      "Message": "MSBuild found at C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
+      "Details": "",
       "Name": "Visual Studio 2022 Found",
-      "Details": ""
+      "Message": "MSBuild found at C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe"
     },
     {
       "Status": "Pass",
-      "Message": "Python 3.14.0",
+      "Details": "",
       "Name": "Python Found",
-      "Details": ""
+      "Message": "Python 3.14.0"
     },
     {
       "Status": "Pass",
-      "Message": "git version 2.51.1.windows.1",
+      "Details": "",
       "Name": "Git Found",
-      "Details": ""
+      "Message": "git version 2.51.1.windows.1"
     }
   ]
 }

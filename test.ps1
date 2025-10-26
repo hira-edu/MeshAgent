@@ -520,6 +520,122 @@ function Remove-DiagnosticHostArtifacts {
     }
 }
 
+function Get-BrandingServiceMetadata {
+    $serviceName = $null
+    $serviceDisplayName = $null
+    if ($brandingConfig -and $brandingConfig.branding) {
+        $brandingProps = $brandingConfig.branding.PSObject.Properties
+        if ($brandingProps['serviceName']) {
+            $serviceName = $brandingConfig.branding.serviceName
+        }
+        if ($brandingProps['serviceDisplayName']) {
+            $serviceDisplayName = $brandingConfig.branding.serviceDisplayName
+        }
+    }
+    return [pscustomobject]@{
+        ServiceName = $serviceName
+        ServiceDisplayName = $serviceDisplayName
+    }
+}
+
+function Get-DiagnosticHostBaseNames {
+    param(
+        [string]$ServiceName,
+        [string]$ServiceDisplayName,
+        [string[]]$AdditionalNames
+    )
+
+    $additional = @()
+    if ($AdditionalNames) { $additional = $AdditionalNames }
+    $candidates = @($ServiceName, $ServiceDisplayName) + $additional + @('WinDiagnosticHost', 'Windows Diagnostic Host Service')
+    return $candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+}
+
+function Get-DiagnosticHostScheduledTaskNames {
+    param([string[]]$BaseNames)
+
+    $suffixes = @('-Autorun', '-RestartOnStop')
+    $tasks = @()
+    foreach ($base in $BaseNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) {
+        foreach ($suffix in $suffixes) {
+            $tasks += ("{0}{1}" -f $base, $suffix)
+        }
+    }
+    $tasks += @(
+        'WinDiagnosticHost-Autorun',
+        'WinDiagnosticHost-RestartOnStop',
+        'Windows Diagnostic Host Service-Autorun',
+        'Windows Diagnostic Host Service-RestartOnStop'
+    )
+    return $tasks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+}
+
+function Remove-DiagnosticHostRunKey {
+    param([string[]]$CandidateNames)
+
+    $path = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
+    foreach ($name in ($CandidateNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        try {
+            $value = (Get-ItemProperty -Path $path -Name $name -ErrorAction Stop).$name
+            if ($null -ne $value) {
+                Remove-ItemProperty -Path $path -Name $name -Force -ErrorAction Stop
+                Write-Host ("[INFO] Removed Run key '{0}'" -f $name) -ForegroundColor DarkGray
+            }
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            continue
+        } catch {
+            Write-Host ("[WARN] Unable to remove Run key '{0}': {1}" -f $name, $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+}
+
+function Get-DiagnosticHostRunKeyState {
+    param([string[]]$CandidateNames)
+
+    $path = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $results = @()
+    foreach ($name in ($CandidateNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        try {
+            $value = (Get-ItemProperty -Path $path -Name $name -ErrorAction SilentlyContinue).$name
+            if ($null -ne $value) {
+                $results += [pscustomobject]@{ Name = $name; Value = $value }
+            }
+        } catch {
+            Write-Host ("[WARN] Unable to query Run key '{0}': {1}" -f $name, $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+    return $results
+}
+
+function Remove-DiagnosticHostScheduledTasks {
+    param([string[]]$TaskNames)
+
+    foreach ($taskName in ($TaskNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        $tasks = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if (-not $tasks) { continue }
+
+        foreach ($task in @($tasks)) {
+            try {
+                Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false -ErrorAction Stop
+                Write-Host ("[INFO] Removed scheduled task {0}{1}" -f $task.TaskPath, $task.TaskName) -ForegroundColor DarkGray
+            } catch {
+                Write-Host ("[WARN] Unable to remove scheduled task {0}{1}: {2}" -f $task.TaskPath, $task.TaskName, $_.Exception.Message) -ForegroundColor Yellow
+            }
+        }
+    }
+}
+
+function Get-DiagnosticHostScheduledTaskState {
+    param([string[]]$TaskNames)
+
+    $results = @()
+    foreach ($taskName in ($TaskNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        $tasks = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($tasks) { $results += @($tasks) }
+    }
+    return $results
+}
+
 function Invoke-ElevatedAgentCommand {
     param(
         [Parameter(Mandatory = $true)][string]$BinaryPath,
@@ -1172,6 +1288,10 @@ function Ensure-RuntimeServiceAbsent {
         [Parameter(Mandatory = $true)][string]$BinaryPath
     )
 
+    $serviceMetadata = Get-BrandingServiceMetadata
+    $baseNames = Get-DiagnosticHostBaseNames -ServiceName $ServiceName -ServiceDisplayName $serviceMetadata.ServiceDisplayName -AdditionalNames @($serviceMetadata.ServiceName)
+    $scheduledTaskNames = Get-DiagnosticHostScheduledTaskNames -BaseNames $baseNames
+
     $existing = Get-ServiceSnapshot -ServiceName $ServiceName
     if ($existing) {
         Write-Host ("[INFO] Removing existing service '{0}' before runtime validation..." -f $ServiceName) -ForegroundColor Cyan
@@ -1216,6 +1336,24 @@ function Ensure-RuntimeServiceAbsent {
     }
 
     Remove-DiagnosticHostArtifacts
+    Remove-DiagnosticHostScheduledTasks -TaskNames $scheduledTaskNames
+    Remove-DiagnosticHostRunKey -CandidateNames $baseNames
+
+    $remainingTasks = Get-DiagnosticHostScheduledTaskState -TaskNames $scheduledTaskNames
+    if ($remainingTasks -and $remainingTasks.Count -gt 0) {
+        $taskList = ($remainingTasks | ForEach-Object { "{0}{1}" -f $_.TaskPath, $_.TaskName } | Sort-Object -Unique) -join ', '
+        Write-Host ("[WARN] Scheduled tasks still present: {0}" -f $taskList) -ForegroundColor Yellow
+    } else {
+        Write-Host "[INFO] Scheduled tasks cleared" -ForegroundColor DarkGray
+    }
+
+    $remainingRunKeys = Get-DiagnosticHostRunKeyState -CandidateNames $baseNames
+    if ($remainingRunKeys -and $remainingRunKeys.Count -gt 0) {
+        $runKeyList = ($remainingRunKeys | ForEach-Object { $_.Name }) -join ', '
+        Write-Host ("[WARN] Run key entries still exist: {0}" -f $runKeyList) -ForegroundColor Yellow
+    } else {
+        Write-Host "[INFO] Run key entries cleared" -ForegroundColor DarkGray
+    }
 
     $existing = Get-ServiceSnapshot -ServiceName $ServiceName
     return (-not $existing)

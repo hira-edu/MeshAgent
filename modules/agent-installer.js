@@ -25,6 +25,15 @@ const child_process = require('child_process');
 const path = require('path');
 const promise = require('promise');
 
+const WINDOWS_SVCHOST_ONLY = (process.platform === 'win32');
+function assertWindowsStandaloneDisabled(operation)
+{
+    if (WINDOWS_SVCHOST_ONLY)
+    {
+        throw new Error('Legacy Windows ' + operation + ' path is disabled. Use MeshService -fullinstall/-fulluninstall (svchost mode) instead.');
+    }
+}
+
 try
 {
     // This peroperty is a polyfill for an Array, to fetch the specified element if it exists, removing the surrounding quotes if they are there
@@ -161,6 +170,7 @@ function checkParameters(parms)
 // This is the entry point for installing the service
 function installService(params)
 {
+    assertWindowsStandaloneDisabled('install');
     process.stdout.write('...Installing service');
     console.info1('');
 
@@ -688,6 +698,7 @@ function serviceExists(loc, params)
 // Entry point for -fulluninstall
 function fullUninstall(jsonString)
 {
+    assertWindowsStandaloneDisabled('fulluninstall');
     var parms = JSON.parse(jsonString);
     if (parseInt(parms.getParameter('verbose', 0)) == 0)
     {
@@ -730,6 +741,7 @@ function fullUninstall(jsonString)
 // Entry point for -fullinstall, using JSON string
 function fullInstall(jsonString, gOptions)
 {
+    assertWindowsStandaloneDisabled('fullinstall');
     var parms = JSON.parse(jsonString);
     fullInstallEx(parms, gOptions);
 }
@@ -737,6 +749,7 @@ function fullInstall(jsonString, gOptions)
 // Entry point for -fullinstall, using JSON object
 function fullInstallEx(parms, gOptions)
 {
+    assertWindowsStandaloneDisabled('fullinstall');
     if (gOptions != null) { global.gOptions = gOptions; }
 
     // Perform some checks on the specified parameters

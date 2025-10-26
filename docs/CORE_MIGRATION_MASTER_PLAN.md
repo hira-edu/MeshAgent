@@ -1114,12 +1114,12 @@ The table below captures every build/deploy entrypoint that still executes Power
 
 | JSON Field | Native Symbol / Location | Status | Notes |
 | --- | --- | --- | --- |
-| `network.primaryEndpoint` | `MESH_AGENT_NETWORK_ENDPOINT` ? `mesh_network_profile_t::primaryEndpoint` | ? Wired | Powered by generated header; needs constexpr replacement. |
+| `network.primaryEndpoint` | `MESH_AGENT_NETWORK_ENDPOINT` ? `mesh_network_profile_t::primaryEndpoint` | ✅ Wired | Powered by generated header; needs constexpr replacement. |
 | `network.fallbackEndpoints` | `MESH_AGENT_NETWORK_FALLBACK_COUNT`, `MESH_AGENT_NETWORK_FALLBACK_LIST`, rotation in `meshcore/agentcore.c` | ✅ Wired | Branding JSON now exposes ordered fallback endpoints; agent rotates through the list (single connection at a time) when `.msh` data is absent. |
-| `network.userAgent` | `MESH_AGENT_NETWORK_USER_AGENT` | ? Wired | |
-| `network.sni` | `MESH_AGENT_NETWORK_SNI` (optional macro) | ? Optional | Falls back to `NULL` when macro absent. |
-| `network.alpn` | `MESH_ALPN_PROTOCOLS` | ? Optional | Currently free-form string; should become array for multi-protocol support. |
-| `network.hostHeader` | _Not represented_ | ?? Gap | Required for front-door/CDN spoofing scenarios. |
+| `network.userAgent` | `MESH_AGENT_NETWORK_USER_AGENT` | ✅ Wired | |
+| `network.sni` | `MESH_AGENT_NETWORK_SNI` (optional macro) | ✅ Optional | Falls back to `NULL` when macro absent; per-endpoint overrides are available via `fallbackEndpoints[].sni`. |
+| `network.alpn` | `MESH_ALPN_PROTOCOLS` | ✅ Optional | Defaults to the branded list; per-endpoint overrides propagate to `ILibWebClient_Request_SetALPN` for camouflage. |
+| `network.hostHeader` | `MESH_AGENT_NETWORK_HOST_HEADER` (primary) + `fallbackEndpoints[].hostHeader` | ✅ Wired | Needed for front-door/CDN spoofing scenarios; branding JSON now drives both the primary and per-fallback Host headers. |
 | `network.connectionTimeout` / `retryAttempts` / `retryDelay` / `keepAlive` / `compression` | _Not represented_ | ? Missing | Need additional fields + validation helpers (Phase 1 follow-up). |
 | TLS min/max overrides | `MESH_TLS_MIN_VERSION` / `MESH_TLS_MAX_VERSION` | ? Defaulted | Defaults to TLS1.2?1.3 when macros absent; JSON currently lacks knobs. |
 
