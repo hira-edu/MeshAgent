@@ -1115,6 +1115,7 @@ The table below captures every build/deploy entrypoint that still executes Power
 | JSON Field | Native Symbol / Location | Status | Notes |
 | --- | --- | --- | --- |
 | `network.primaryEndpoint` | `MESH_AGENT_NETWORK_ENDPOINT` ? `mesh_network_profile_t::primaryEndpoint` | ? Wired | Powered by generated header; needs constexpr replacement. |
+| `network.fallbackEndpoints` | `MESH_AGENT_NETWORK_FALLBACK_COUNT`, `MESH_AGENT_NETWORK_FALLBACK_LIST`, rotation in `meshcore/agentcore.c` | ✅ Wired | Branding JSON now exposes ordered fallback endpoints; agent rotates through the list (single connection at a time) when `.msh` data is absent. |
 | `network.userAgent` | `MESH_AGENT_NETWORK_USER_AGENT` | ? Wired | |
 | `network.sni` | `MESH_AGENT_NETWORK_SNI` (optional macro) | ? Optional | Falls back to `NULL` when macro absent. |
 | `network.alpn` | `MESH_ALPN_PROTOCOLS` | ? Optional | Currently free-form string; should become array for multi-protocol support. |
@@ -1151,7 +1152,7 @@ The table below captures every build/deploy entrypoint that still executes Power
 - [ ] **Test:** Integration test exercises DLL extraction + load validation on x64.
 - **Exit criteria:** Build tree has zero `.rc` payload references; payload integrity failure blocks startup.
 
-> Detailed work breakdown, TODO board, and validation plan live in `docs/CORE_MIGRATION_PHASE2_PLAN.md`. Treat that document as the source of truth for task status during this phase.
+> Detailed work breakdown, TODO board, and validation plan now live in `docs/MeshAgent_Project_Plan.md`. Treat that document as the source of truth for task status during this phase.
 
 ### Phase 3 (Week 3-4): Deployment Automation (Native)
 - [ ] Implement C++ service registration + recovery policy configuration.

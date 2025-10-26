@@ -630,6 +630,7 @@ function serviceManager()
         this.proxy.CreateMethod('StartServiceA');
         this.proxy.CreateMethod('CloseServiceHandle');
         this.proxy.CreateMethod('CreateServiceW');
+        this.proxy.CreateMethod('ChangeServiceConfigW');
         this.proxy.CreateMethod('ChangeServiceConfig2W');
         this.proxy.CreateMethod('DeleteService');
         this.proxy.CreateMethod('AllocateAndInitializeSid');
@@ -819,6 +820,24 @@ function serviceManager()
                         var tokens = this.appLocation().split('\\');
                         tokens.pop();
                         return (tokens.join('\\'));
+                    };
+                    retVal.setStartType = function (newType)
+                    {
+                        var mapping =
+                            {
+                                'AUTO_START': 0x00000002,
+                                'DEMAND_START': 0x00000003,
+                                'DISABLED': 0x00000004
+                            };
+                        var target = mapping[newType];
+                        if (target == null) { throw ('Invalid start type: ' + newType); }
+                        var SERVICE_NO_CHANGE = 0xFFFFFFFF;
+                        if (this._proxy.ChangeServiceConfigW(this._service, SERVICE_NO_CHANGE, target, SERVICE_NO_CHANGE, 0, 0, 0, 0, 0, 0, 0).Val == 0)
+                        {
+                            var err = this._proxy2.GetLastError().Val;
+                            throw ('ChangeServiceConfigW failed (' + err + ')');
+                        }
+                        this.startType = newType;
                     };
                     retVal.isRunning = function ()
                     {

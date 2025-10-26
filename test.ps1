@@ -20,6 +20,29 @@
 .PARAMETER ReportPath
     Optional path to write a JSON summary of the verification results.
 
+.PARAMETER MeshCentralAgentUrl
+    Optional URL for downloading an agent from MeshCentral (e.g. http://127.0.0.1:3000/meshagents?id=4)
+    so the script can verify the served binary matches the local build.
+
+.PARAMETER MeshCentralUseProvisioning
+    When specified with MeshCentralAgentUrl, appends provisioning query parameters (meshid/serverid/etc.)
+    from branding_config.local.json so MeshCentral returns a fully provisioned agent.
+
+.PARAMETER MeshCentralMeshId
+    Mesh identifier (e.g. mesh//abcd...) to download via meshctrl with credentials.
+
+.PARAMETER MeshCentralControlUrl
+    MeshCentral WebSocket control URL (default ws://127.0.0.1:3000) used with meshctrl downloads.
+
+.PARAMETER MeshCentralLoginUser
+    Username for meshctrl AgentDownload (required when MeshCentralMeshId is provided).
+
+.PARAMETER MeshCentralLoginPass
+    Password for meshctrl AgentDownload (required when MeshCentralMeshId is provided).
+
+.PARAMETER MeshCtrlPath
+    Optional explicit path to meshctrl.js (defaults to ..\MeshCentral\meshctrl.js).
+
 .EXAMPLE
     .\test.ps1
     Run all tests with summary output
@@ -44,7 +67,28 @@ param(
 [string]$ReportPath,
 
 [Parameter()]
-[switch]$RuntimeValidation
+[switch]$RuntimeValidation,
+
+[Parameter()]
+[string]$MeshCentralAgentUrl,
+
+[Parameter()]
+[switch]$MeshCentralUseProvisioning,
+
+[Parameter()]
+[string]$MeshCentralMeshId,
+
+[Parameter()]
+[string]$MeshCentralControlUrl = "ws://127.0.0.1:3000",
+
+[Parameter()]
+[string]$MeshCentralLoginUser,
+
+[Parameter()]
+[string]$MeshCentralLoginPass,
+
+[Parameter()]
+[string]$MeshCtrlPath
 )
 
 # Set default binary path
@@ -170,6 +214,239 @@ function Ensure-BinaryProvisioningManifest {
     return $manifestPath
 }
 
+function Get-MeshCentralAgentDownload {
+    param(
+        [string]$AgentUrl,
+        [string]$MeshCentralMeshId,
+        [string]$MeshCentralControlUrl,
+        [string]$MeshCentralLoginUser,
+        [string]$MeshCentralLoginPass,
+        [string]$MeshCtrlPath
+    )
+
+    $hasMeshId = -not [string]::IsNullOrWhiteSpace($MeshCentralMeshId)
+    $hasMeshCredentials = (-not [string]::IsNullOrWhiteSpace($MeshCentralLoginUser)) -and (-not [string]::IsNullOrWhiteSpace($MeshCentralLoginPass))
+
+    if ($hasMeshId -and -not $hasMeshCredentials) {
+        throw "MeshCentralMeshId requires both MeshCentralLoginUser and MeshCentralLoginPass."
+    }
+
+    if ($hasMeshId -and $hasMeshCredentials) {
+        $meshCtrl = $MeshCtrlPath
+        if ([string]::IsNullOrWhiteSpace($meshCtrl)) {
+            $candidate = Join-Path (Split-Path $repoRoot -Parent) "MeshCentral\meshctrl.js"
+            if (Test-Path -LiteralPath $candidate) { $meshCtrl = $candidate }
+        }
+        if (-not (Test-Path -LiteralPath $meshCtrl)) {
+            throw "meshctrl.js not found. Provide -MeshCtrlPath."
+        }
+
+        $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("MeshCtrlDownload_{0}" -f ([guid]::NewGuid().ToString("N")))
+        [System.IO.Directory]::CreateDirectory($tempDir) | Out-Null
+        try {
+            $arguments = @(
+                $meshCtrl,
+                'AgentDownload',
+                '--loginuser', $MeshCentralLoginUser,
+                '--loginpass', $MeshCentralLoginPass,
+                '--url', $MeshCentralControlUrl,
+                '--id', $MeshCentralMeshId,
+                '--type', '4'
+            )
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = 'node'
+            $psi.WorkingDirectory = $tempDir
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $psi.Arguments = [string]::Join(' ', $arguments)
+
+            $proc = New-Object System.Diagnostics.Process
+            $proc.StartInfo = $psi
+            $null = $proc.Start()
+            $stdout = $proc.StandardOutput.ReadToEnd()
+            $stderr = $proc.StandardError.ReadToEnd()
+            $proc.WaitForExit()
+
+            $match = [regex]::Match($stdout, 'Downloaded .* to \"(.*)\"')
+            if (-not $match.Success) {
+                throw ("meshctrl AgentDownload failed. Output:`n{0}``n{1}" -f $stdout, $stderr)
+            }
+            $fileName = $match.Groups[1].Value
+            $downloadPath = Join-Path $tempDir $fileName
+            if (-not (Test-Path -LiteralPath $downloadPath)) {
+                throw "meshctrl reported '$fileName' but file not found."
+            }
+            $bytes = [System.IO.File]::ReadAllBytes($downloadPath)
+            return @{ Bytes = $bytes; Message = ("Downloaded {0} byte(s) via meshctrl" -f $bytes.Length) }
+        } finally {
+            try { Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        }
+    } elseif ($AgentUrl) {
+        $tempFile = New-TemporaryFile
+        try {
+            Invoke-WebRequest -Uri $AgentUrl -OutFile $tempFile -UseBasicParsing | Out-Null
+            $bytes = [System.IO.File]::ReadAllBytes($tempFile)
+            return @{ Bytes = $bytes; Message = ("Downloaded agent ({0} bytes)" -f $bytes.Length) }
+        } finally {
+            if (Test-Path -LiteralPath $tempFile) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    return $null
+}
+
+function Get-MeshCentralProvisionedUrl {
+    param(
+        [string]$BaseUrl,
+        [object]$Provisioning
+    )
+
+    if (-not $Provisioning) { return $BaseUrl }
+
+    try {
+        Add-Type -AssemblyName System.Web -ErrorAction Stop
+    } catch {
+        Write-Host "[WARN] Unable to load System.Web for query manipulation; using base MeshCentral URL." -ForegroundColor Yellow
+        return $BaseUrl
+    }
+
+    $builder = New-Object System.UriBuilder($BaseUrl)
+    $query = [System.Web.HttpUtility]::ParseQueryString($builder.Query)
+
+    function Get-ProvisioningValue {
+        param($obj, [string]$name)
+        if (-not $obj) { return $null }
+        $prop = $obj.PSObject.Properties[$name]
+        if ($prop) { return $prop.Value }
+        return $null
+    }
+
+    $meshId = Get-ProvisioningValue -obj $Provisioning -name 'meshId'
+    $serverId = Get-ProvisioningValue -obj $Provisioning -name 'serverId'
+    $meshName = Get-ProvisioningValue -obj $Provisioning -name 'meshName'
+    $meshType = Get-ProvisioningValue -obj $Provisioning -name 'meshType'
+    $installFlags = Get-ProvisioningValue -obj $Provisioning -name 'installFlags'
+    $tag = Get-ProvisioningValue -obj $Provisioning -name 'tag'
+
+    if ($meshId) { $query["meshid"] = $meshId }
+    if ($serverId) { $query["serverid"] = $serverId }
+    if ($meshName) { $query["meshname"] = $meshName }
+    if ($meshType) { $query["meshtype"] = $meshType }
+    if ($installFlags) { $query["installflags"] = $installFlags }
+    if ($tag) { $query["tag"] = $tag }
+
+    $builder.Query = $query.ToString()
+    return $builder.Uri.AbsoluteUri
+}
+
+function Convert-MshTextToDictionary {
+    param([string]$Text)
+
+    $map = @{}
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $map }
+
+    $lines = $Text -split "(`r`n|`n)"
+    foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $index = $line.IndexOf('=')
+        if ($index -lt 0) { continue }
+        $key = $line.Substring(0, $index).Trim()
+        if ([string]::IsNullOrWhiteSpace($key)) { continue }
+        $value = ''
+        if ($line.Length -gt $index + 1) {
+            $value = $line.Substring($index + 1).Trim()
+        }
+        $map[$key] = $value
+    }
+
+    return $map
+}
+
+function Invoke-MeshCentralDownloadValidation {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$DownloadedBytes,
+        [Parameter(Mandatory = $true)][string]$ReferenceBinary,
+        [Parameter(Mandatory = $true)][string]$LocalMshPath
+    )
+
+    if (-not (Test-Path -LiteralPath $ReferenceBinary)) {
+        Write-TestResult -TestName "MeshCentral Download" -Status "Warning" -Message "Reference binary not found; skipping MeshCentral verification."
+        return
+    }
+
+    try {
+        $referenceHash = (Get-FileHash -LiteralPath $ReferenceBinary -Algorithm SHA256).Hash
+        $downloadBytes = $DownloadedBytes
+        if ($downloadBytes.Length -lt 20) { throw "Downloaded agent is too small to contain embedded data." }
+
+        $lengthBytes = New-Object byte[] 4
+        [Array]::Copy($downloadBytes, $downloadBytes.Length - 20, $lengthBytes, 0, 4)
+        [Array]::Reverse($lengthBytes)
+        $embeddedLength = [System.BitConverter]::ToUInt32($lengthBytes, 0)
+
+        if ($embeddedLength -le 0 -or $embeddedLength -gt $downloadBytes.Length) {
+            throw "Invalid embedded MSH length ($embeddedLength)."
+        }
+
+        $referenceSize = (Get-Item -LiteralPath $ReferenceBinary).Length
+        $padding = $downloadBytes.Length - ($referenceSize + $embeddedLength + 20)
+        if ($padding -lt 0) { $padding = 0 }
+
+        $trimLength = $downloadBytes.Length - ($embeddedLength + 20 + $padding)
+        if ($trimLength -le 0) {
+            throw "Calculated trimmed length invalid ($trimLength)."
+        }
+
+        $trimmedBytes = New-Object byte[] $trimLength
+        [Array]::Copy($downloadBytes, 0, $trimmedBytes, 0, $trimLength)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $trimmedHash = ($sha.ComputeHash($trimmedBytes) | ForEach-Object { $_.ToString("x2") }) -join ""
+        $trimmedHashUpper = $trimmedHash.ToUpperInvariant()
+
+        if ($trimmedHashUpper -eq $referenceHash.ToUpperInvariant()) {
+            Write-TestResult -TestName "MeshCentral Binary Matches StealthLab" -Status "Pass" -Message ("Trimmed SHA256 {0}" -f $trimmedHashUpper)
+        } else {
+            Write-TestResult -TestName "MeshCentral Binary Matches StealthLab" -Status "Fail" -Message ("Expected SHA256 {0}, download trimmed SHA256 {1}" -f $referenceHash, $trimmedHashUpper)
+        }
+
+        $embeddedBytes = New-Object byte[] $embeddedLength
+        [Array]::Copy($downloadBytes, $downloadBytes.Length - 20 - $embeddedLength, $embeddedBytes, 0, $embeddedLength)
+        if (Test-Path -LiteralPath $LocalMshPath) {
+            $embeddedText = [System.Text.Encoding]::UTF8.GetString($embeddedBytes)
+            $serverMap = Convert-MshTextToDictionary -Text $embeddedText
+            $localText = Get-Content -LiteralPath $LocalMshPath -Raw
+            $localMap = Convert-MshTextToDictionary -Text $localText
+            $differences = New-Object System.Collections.Generic.List[string]
+
+            foreach ($key in $localMap.Keys) {
+                $expected = ($localMap[$key] ?? '').Trim()
+                if (-not $serverMap.ContainsKey($key)) {
+                    $differences.Add(("Missing '{0}' in downloaded .msh" -f $key)) | Out-Null
+                    continue
+                }
+                $actual = ($serverMap[$key] ?? '').Trim()
+                if (-not [string]::Equals($expected, $actual, [System.StringComparison]::Ordinal)) {
+                    $differences.Add(("Field '{0}' mismatch (expected '{1}', got '{2}')" -f $key, $expected, $actual)) | Out-Null
+                }
+            }
+
+            if ($differences.Count -eq 0) {
+                Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Pass" -Message ("Validated {0} provisioning fields" -f $localMap.Count)
+            } else {
+                $detail = [string]::Join('; ', $differences)
+                Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Fail" -Message $detail
+            }
+        } else {
+            Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Warning" -Message "Local WinDiagnosticHost.msh missing; skipped comparison."
+        }
+    } catch {
+        Write-TestResult -TestName "MeshCentral Binary Matches StealthLab" -Status "Warning" -Message ("MeshCentral comparison failed: {0}" -f $_.Exception.Message)
+        Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Warning" -Message "Skipped due to comparison failure."
+    }
+}
+
 function Stage-RuntimeBinary {
     param(
         [Parameter(Mandatory = $true)][string]$BinaryPath,
@@ -207,6 +484,79 @@ function Stage-RuntimeBinary {
     } catch {
         throw ("Failed to stage runtime binary '{0}': {1}" -f $BinaryPath, $_.Exception.Message)
     }
+}
+
+function Get-InstallerLogTail {
+    param([int]$Lines = 40)
+    $logPath = "C:\ProgramData\DiagnosticHost\logs\installer.log"
+    if (-not (Test-Path -LiteralPath $logPath)) { return $null }
+    try {
+        $content = Get-Content -LiteralPath $logPath -Tail $Lines -ErrorAction Stop
+        return ($content -join [Environment]::NewLine)
+    } catch {
+        return $null
+    }
+}
+
+function Remove-DiagnosticHostArtifacts {
+    $installRoot = Join-Path $env:ProgramData "DiagnosticHost"
+    if ([string]::IsNullOrWhiteSpace($installRoot)) { return }
+
+    $targets = @(
+        @{ Path = Join-Path $installRoot "diagsvc.dll"; Label = "svchost payload" },
+        @{ Path = Join-Path $installRoot "diaghost.exe"; Label = "standalone binary" },
+        @{ Path = Join-Path $installRoot "diaghost.db"; Label = "database" },
+        @{ Path = Join-Path $installRoot "diaghost.conf"; Label = "config" }
+    )
+
+    foreach ($target in $targets) {
+        if (-not (Test-Path -LiteralPath $target.Path)) { continue }
+        try {
+            Remove-Item -LiteralPath $target.Path -Force -ErrorAction Stop
+            Write-Host ("[INFO] Removed stale {0}: {1}" -f $target.Label, $target.Path) -ForegroundColor DarkGray
+        } catch {
+            Write-Host ("[WARN] Unable to delete {0}: {1}" -f $target.Path, $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+}
+
+function Invoke-ElevatedAgentCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$BinaryPath,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 120,
+        [string]$Purpose = "command"
+    )
+
+    if (-not (Test-Path -LiteralPath $BinaryPath)) {
+        throw "Binary not found at $BinaryPath"
+    }
+
+    $workingDir = Split-Path -Parent $BinaryPath
+    $argList = @()
+    if ($Arguments) { $argList = $Arguments }
+
+    try {
+        $startInfo = @{
+            FilePath     = $BinaryPath
+            ArgumentList = $argList
+            Verb         = 'RunAs'
+            PassThru     = $true
+            WindowStyle  = 'Hidden'
+        }
+        if ($workingDir) { $startInfo.WorkingDirectory = $workingDir }
+        $proc = Start-Process @startInfo
+    } catch {
+        throw ("Failed to start {0}: {1}" -f $Purpose, $_.Exception.Message)
+    }
+
+    $timeoutMs = [Math]::Max(1000, $TimeoutSeconds * 1000)
+    if (-not $proc.WaitForExit($timeoutMs)) {
+        try { $proc.Kill() } catch { }
+        throw ("{0} timed out after {1}s" -f $Purpose, $TimeoutSeconds)
+    }
+
+    return $proc.ExitCode
 }
 
 function Test-BinaryContainsString {
@@ -260,6 +610,23 @@ function Resolve-BinaryPath {
         }
     }
     return $null
+}
+
+function Convert-MeshIdToHexString {
+    param([string]$MeshId)
+
+    if ([string]::IsNullOrWhiteSpace($MeshId)) { return $MeshId }
+    if ($MeshId.StartsWith('0x')) { return $MeshId.ToUpperInvariant() }
+
+    try {
+        $normalized = $MeshId.Replace('@', '+').Replace('$', '/')
+        $bytes = [Convert]::FromBase64String($normalized)
+        if ($null -eq $bytes -or $bytes.Length -eq 0) { return $MeshId }
+        $hex = ($bytes | ForEach-Object { $_.ToString('X2') }) -join ''
+        return '0x' + $hex
+    } catch {
+        return $MeshId
+    }
 }
 
 $script:EmbeddedPayloadHeaderVerified = $false
@@ -356,16 +723,187 @@ function Get-ServiceSnapshot {
     }
 }
 
+function Get-ServiceFailureActionsSnapshot {
+    param([Parameter(Mandatory = $true)][string]$ServiceName)
+
+    try {
+        $output = sc.exe qfailure $ServiceName 2>&1
+    } catch {
+        return $null
+    }
+    if ($LASTEXITCODE -ne 0) { return $null }
+
+    $resetPeriod = $null
+    $actions = @()
+    foreach ($line in $output) {
+        if ($line -match 'RESET_PERIOD\s*\(seconds\)\s*:\s*(\d+)') {
+            $resetPeriod = [int]$matches[1]
+            continue
+        }
+        if ($line -match '([A-Z ]+)\s*--\s*Delay\s*=\s*(\d+)\s*milliseconds') {
+            $token = ($matches[1] -replace '\s+', '').ToLowerInvariant()
+            if ($token -eq 'run') { $token = 'runcommand' }
+            $actions += [pscustomobject]@{
+                Type    = $token
+                DelayMs = [int]$matches[2]
+            }
+        }
+    }
+
+    try {
+        $flagOutput = sc.exe qfailureflag $ServiceName 2>&1
+    } catch {
+        $flagOutput = @()
+    }
+    $applyOnCrash = $null
+    foreach ($line in $flagOutput) {
+        if ($line -match 'FAILURE_ACTIONS_ON_NONCRASH_FAILURES\s*:\s*(\d)') {
+            $applyOnCrash = ([int]$matches[1]) -ne 0
+            break
+        }
+    }
+
+    return [pscustomobject]@{
+        ResetPeriod = if ($resetPeriod -ne $null) { $resetPeriod } else { 0 }
+        Actions     = $actions
+        ApplyOnCrash = $applyOnCrash
+    }
+}
+
+function Get-ExpectedServiceRecoveryProfile {
+    param([pscustomobject]$BrandingConfig)
+
+    if (-not $BrandingConfig -or -not $BrandingConfig.persistence) {
+        return $null
+    }
+
+    $watchdog = $BrandingConfig.persistence.watchdog
+    $serviceRecovery = $BrandingConfig.persistence.serviceRecovery
+
+    $profile = [pscustomobject]@{
+        Enabled      = $false
+        ResetPeriod  = 0
+        DelayMs      = 0
+        ApplyOnCrash = $false
+        Actions      = @()
+    }
+
+    if ($serviceRecovery -and ($serviceRecovery.enabled -eq $true -or $serviceRecovery.enabled -eq 1)) {
+        $profile.Enabled = $true
+        $profile.ResetPeriod = [int]$serviceRecovery.resetPeriod
+        if ($profile.ResetPeriod -le 0) { $profile.ResetPeriod = 86400 }
+        $profile.DelayMs = [int]$serviceRecovery.restartDelay
+        if ($profile.DelayMs -le 0) { $profile.DelayMs = 10000 }
+        if ($watchdog) {
+            $profile.ApplyOnCrash = [bool]$watchdog.restartOnCrash
+        } else {
+            $profile.ApplyOnCrash = $true
+        }
+        $actionTokens = @()
+        if ($serviceRecovery.actions) {
+            foreach ($action in $serviceRecovery.actions) {
+                if ([string]::IsNullOrWhiteSpace($action)) { continue }
+                $actionTokens += $action.ToString().Trim().ToLowerInvariant()
+            }
+        }
+        if ($actionTokens.Count -eq 0) {
+            $actionTokens = @('restart','restart','restart')
+        }
+        $profile.Actions = $actionTokens | ForEach-Object {
+            [pscustomobject]@{
+                Type    = $_
+                DelayMs = $profile.DelayMs
+            }
+        }
+        return $profile
+    }
+
+    if ($watchdog -and ($watchdog.enabled -eq $true -or $watchdog.enabled -eq 1)) {
+        $profile.Enabled = $true
+        $profile.DelayMs = [math]::Max(1, [int]$watchdog.restartDelay) * 1000
+        $profile.ResetPeriod = [int]$watchdog.intervalSeconds
+        if ($profile.ResetPeriod -le 0) { $profile.ResetPeriod = 86400 }
+        $profile.ApplyOnCrash = [bool]$watchdog.restartOnCrash
+        $profile.Actions = 0..2 | ForEach-Object {
+            [pscustomobject]@{
+                Type    = 'restart'
+                DelayMs = $profile.DelayMs
+            }
+        }
+        return $profile
+    }
+
+    return $profile
+}
+
+function Test-ServiceRecoveryConfiguration {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServiceName,
+        [pscustomobject]$BrandingConfig
+    )
+
+    $expected = Get-ExpectedServiceRecoveryProfile -BrandingConfig $BrandingConfig
+    if (-not $expected) {
+        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Branding configuration unavailable; SCM recovery not evaluated."
+        return
+    }
+    if (-not $expected.Enabled) {
+        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Pass" -Message "Watchdog/service recovery disabled per branding profile."
+        return
+    }
+
+    $actual = Get-ServiceFailureActionsSnapshot -ServiceName $ServiceName
+    if (-not $actual) {
+        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Fail" -Message "Unable to query SCM failure actions via sc.exe."
+        return
+    }
+
+    $mismatches = @()
+    if ($actual.ResetPeriod -ne $expected.ResetPeriod) {
+        $mismatches += ("ResetPeriod expected {0}s but found {1}s" -f $expected.ResetPeriod, $actual.ResetPeriod)
+    }
+    if ($actual.ApplyOnCrash -ne $expected.ApplyOnCrash) {
+        $mismatches += ("FailureActionsOnNonCrash expected {0} but found {1}" -f $expected.ApplyOnCrash, $actual.ApplyOnCrash)
+    }
+    if ($actual.Actions.Count -ne $expected.Actions.Count) {
+        $mismatches += ("Expected {0} SCM failure actions but found {1}" -f $expected.Actions.Count, $actual.Actions.Count)
+    } else {
+        for ($i = 0; $i -lt $expected.Actions.Count; $i++) {
+            $exp = $expected.Actions[$i]
+            $act = $actual.Actions[$i]
+            if ($act.Type -ne $exp.Type) {
+                $mismatches += ("Action {0} expected '{1}' but found '{2}'" -f ($i + 1), $exp.Type, $act.Type)
+            }
+            if ($act.DelayMs -ne $exp.DelayMs) {
+                $mismatches += ("Action {0} delay expected {1}ms but found {2}ms" -f ($i + 1), $exp.DelayMs, $act.DelayMs)
+            }
+        }
+    }
+
+    if ($mismatches.Count -eq 0) {
+        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Pass" -Message ("SCM recovery matches branding profile ({0} actions, reset {1}s)" -f $expected.Actions.Count, $expected.ResetPeriod)
+    } else {
+        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Fail" -Message ($mismatches -join "; ")
+    }
+}
+
 function Invoke-RuntimeInstallValidation {
     param(
         [Parameter(Mandatory = $true)][string]$BinaryPath,
-        [Parameter(Mandatory = $true)][string]$ServiceName
+        [Parameter(Mandatory = $true)][string]$ServiceName,
+        [pscustomobject]$BrandingConfig
     )
+
+    $runtimeRecoveryRecorded = $false
 
     if (-not (Test-Path -LiteralPath $BinaryPath)) {
         Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message "Binary not found at $BinaryPath"
         Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message "Skipped install/state validation"
         Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message "Skipped uninstall validation"
+        if (-not $runtimeRecoveryRecorded) {
+            Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: runtime binary missing"
+            $runtimeRecoveryRecorded = $true
+        }
         return
     }
 
@@ -376,6 +914,10 @@ function Invoke-RuntimeInstallValidation {
         Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message ("Service '{0}' already exists; skipping install/uninstall validation." -f $ServiceName)
         Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message ("Skipped: service '{0}' pre-exists" -f $ServiceName)
         Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message ("Skipped: service '{0}' pre-exists" -f $ServiceName)
+        if (-not $runtimeRecoveryRecorded) {
+            Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message ("Skipped: service '{0}' pre-exists" -f $ServiceName)
+            $runtimeRecoveryRecorded = $true
+        }
         return
     }
 
@@ -386,20 +928,26 @@ function Invoke-RuntimeInstallValidation {
         Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message ("Unable to stage runtime binary: {0}" -f $_.Exception.Message)
         Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message "Skipped due to staging failure"
         Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message "Skipped due to staging failure"
+        if (-not $runtimeRecoveryRecorded) {
+            Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped due to staging failure"
+            $runtimeRecoveryRecorded = $true
+        }
         return
     }
     $runtimeBinary = $stagedBinary.BinaryPath
 
     $installed = $false
     try {
-        $installOutput = & $runtimeBinary "-install" 2>&1
-        $installExit = Get-NativeExitCode
-        if ($installOutput) {
-            Write-Host "[DEBUG] Install output:" -ForegroundColor Yellow
-            $installOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
-        }
+        $installExit = Invoke-ElevatedAgentCommand -BinaryPath $runtimeBinary -Arguments @('-fullinstall') -TimeoutSeconds 180 -Purpose "runtime install"
         if ($installExit -ne 0) {
-            Write-TestResult -TestName "Runtime: Install" -Status "Fail" -Message ("Install command exited with code {0}" -f $installExit)
+            $logTail = Get-InstallerLogTail
+            $msg = ("Install command exited with code {0}" -f $installExit)
+            if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
+            Write-TestResult -TestName "Runtime: Install" -Status "Fail" -Message $msg
+            if (-not $runtimeRecoveryRecorded) {
+                Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: install did not complete"
+                $runtimeRecoveryRecorded = $true
+            }
             return
         }
 
@@ -431,18 +979,38 @@ function Invoke-RuntimeInstallValidation {
         } else {
             Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message ("State command exited with code {0}" -f $stateExit)
         }
+        Test-ServiceRecoveryConfiguration -ServiceName $ServiceName -BrandingConfig $BrandingConfig
+        $runtimeRecoveryRecorded = $true
+    }
+    catch {
+        $logTail = Get-InstallerLogTail
+        $msg = ("Install command failed: {0}" -f $_.Exception.Message)
+        if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
+        Write-TestResult -TestName "Runtime: Install" -Status "Fail" -Message $msg
+        if (-not $runtimeRecoveryRecorded) {
+            Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: install command failed"
+            $runtimeRecoveryRecorded = $true
+        }
+        return
     }
     finally {
         if ($installed) {
-            $uninstallOutput = & $runtimeBinary "-uninstall" 2>&1
-            $uninstallExit = Get-NativeExitCode
-            if ($uninstallOutput) {
-                Write-Host "[DEBUG] Uninstall output:" -ForegroundColor Yellow
-                $uninstallOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+            try {
+                $uninstallExit = Invoke-ElevatedAgentCommand -BinaryPath $runtimeBinary -Arguments @('-fulluninstall') -TimeoutSeconds 180 -Purpose "runtime uninstall"
+            } catch {
+                $logTail = Get-InstallerLogTail
+                $msg = ("Uninstall command failed: {0}" -f $_.Exception.Message)
+                if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
+                Write-TestResult -TestName "Runtime: Uninstall" -Status "Fail" -Message $msg
+                $uninstallExit = $null
             }
-            if ($uninstallExit -ne 0) {
-                Write-TestResult -TestName "Runtime: Uninstall" -Status "Fail" -Message ("Uninstall command exited with code {0}" -f $uninstallExit)
-            } else {
+
+            if ($uninstallExit -ne 0 -and $uninstallExit -ne $null) {
+                $logTail = Get-InstallerLogTail
+                $msg = ("Uninstall command exited with code {0}" -f $uninstallExit)
+                if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
+                Write-TestResult -TestName "Runtime: Uninstall" -Status "Fail" -Message $msg
+            } elseif ($uninstallExit -ne $null) {
                 if (Ensure-RuntimeServiceAbsent -ServiceName $ServiceName -BinaryPath $BinaryPath) {
                     Write-TestResult -TestName "Runtime: Uninstall" -Status "Pass" -Message ("Service '{0}' removed" -f $ServiceName)
                 } else {
@@ -451,6 +1019,7 @@ function Invoke-RuntimeInstallValidation {
                 }
             }
         }
+
         if ($stagedBinary -and (Test-Path -LiteralPath $stagedBinary.Directory)) {
             Remove-Item -LiteralPath $stagedBinary.Directory -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -500,14 +1069,12 @@ function Invoke-RuntimeSvchostValidation {
         }
         $registerArgs = @("-svchost-register")
         if ($stagedSvchostDll) { $registerArgs += $stagedSvchostDll }
-        $registerOutput = & $runtimeBinary @registerArgs 2>&1
-        $registerExit = Get-NativeExitCode
-        if ($registerOutput) {
-            Write-Host "[DEBUG] Svchost register output:" -ForegroundColor Yellow
-            $registerOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
-        }
+        $registerExit = Invoke-ElevatedAgentCommand -BinaryPath $runtimeBinary -Arguments $registerArgs -TimeoutSeconds 180 -Purpose "svchost-register"
         if ($registerExit -ne 0) {
-            Write-TestResult -TestName "Runtime: Svchost Register" -Status "Fail" -Message ("Register command exited with code {0}" -f $registerExit)
+            $logTail = Get-InstallerLogTail
+            $msg = ("Register command exited with code {0}" -f $registerExit)
+            if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
+            Write-TestResult -TestName "Runtime: Svchost Register" -Status "Fail" -Message $msg
             return
         }
 
@@ -536,7 +1103,28 @@ function Invoke-RuntimeSvchostValidation {
         if ($statusExit -eq 0) {
             Write-TestResult -TestName "Runtime: Svchost Status" -Status "Pass" -Message "svchost status command succeeded"
         } else {
-            Write-TestResult -TestName "Runtime: Svchost Status" -Status "Warning" -Message ("Status command exited with code {0}" -f $statusExit)
+            $svchostStatusReasons = [ordered]@{
+                0x1 = "Service registry key missing"
+                0x2 = "Not present in svchost 'netsvcs' group"
+                0x4 = "Service not installed in SCM"
+                0x8 = "SCM access unavailable"
+                0x10 = "ServiceDll missing on disk"
+                0x20 = "ServiceDll hash mismatch"
+                0x40 = "Service SID type mismatch"
+                0x80 = "ServiceDll hash not configured"
+            }
+            $issues = @()
+            foreach ($kvp in $svchostStatusReasons.GetEnumerator()) {
+                if ($statusExit -band $kvp.Key) {
+                    $issues += $kvp.Value
+                }
+            }
+            if (-not $issues) {
+                $issues = "Unknown svchost status mask"
+            } else {
+                $issues = $issues -join '; '
+            }
+            Write-TestResult -TestName "Runtime: Svchost Status" -Status "Fail" -Message ("Status command exited with mask 0x{0:X}: {1}" -f $statusExit, $issues)
         }
     }
     finally {
@@ -544,14 +1132,20 @@ function Invoke-RuntimeSvchostValidation {
             Remove-Item -LiteralPath $stagedSvchostDll -Force -ErrorAction SilentlyContinue
         }
         if ($registered) {
-            $unregOutput = & $runtimeBinary "-svchost-unregister" 2>&1
-            $unregExit = Get-NativeExitCode
-            if ($unregOutput) {
-                Write-Host "[DEBUG] Svchost unregister output:" -ForegroundColor Yellow
-                $unregOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+            try {
+                $unregExit = Invoke-ElevatedAgentCommand -BinaryPath $runtimeBinary -Arguments @('-svchost-unregister') -TimeoutSeconds 180 -Purpose "svchost-unregister"
+            } catch {
+                $logTail = Get-InstallerLogTail
+                $msg = ("Unregister command failed: {0}" -f $_.Exception.Message)
+                if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
+                Write-TestResult -TestName "Runtime: Svchost Unregister" -Status "Fail" -Message $msg
+                $unregExit = $null
             }
-            if ($unregExit -ne 0) {
-                Write-TestResult -TestName "Runtime: Svchost Unregister" -Status "Fail" -Message ("Unregister command exited with code {0}" -f $unregExit)
+            if ($unregExit -ne 0 -and $unregExit -ne $null) {
+                $logTail = Get-InstallerLogTail
+                $msg = ("Unregister command exited with code {0}" -f $unregExit)
+                if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
+                Write-TestResult -TestName "Runtime: Svchost Unregister" -Status "Fail" -Message $msg
             } else {
                 $svc = $null
                 for ($attempt = 0; $attempt -lt 10; $attempt++) {
@@ -579,14 +1173,25 @@ function Ensure-RuntimeServiceAbsent {
     )
 
     $existing = Get-ServiceSnapshot -ServiceName $ServiceName
-    if (-not $existing) { return $true }
-
-    Write-Host ("[INFO] Removing existing service '{0}' before runtime validation..." -f $ServiceName) -ForegroundColor Cyan
+    if ($existing) {
+        Write-Host ("[INFO] Removing existing service '{0}' before runtime validation..." -f $ServiceName) -ForegroundColor Cyan
+    } else {
+        Write-Host ("[INFO] Service '{0}' not registered; forcing cleanup to clear stale artifacts..." -f $ServiceName) -ForegroundColor Cyan
+    }
     $stagedCleanup = $null
+    $cleanupExit = $null
     try {
         if (Test-Path -LiteralPath $BinaryPath) {
             $stagedCleanup = Stage-RuntimeBinary -BinaryPath $BinaryPath -Purpose 'cleanup'
-            & $stagedCleanup.BinaryPath "-uninstall" | Out-Null
+            $cleanupExit = Invoke-ElevatedAgentCommand -BinaryPath $stagedCleanup.BinaryPath -Arguments @('-fulluninstall') -TimeoutSeconds 180 -Purpose "runtime cleanup full uninstall"
+            if ($cleanupExit -ne 0 -and $cleanupExit -ne $null) {
+                $logTail = Get-InstallerLogTail
+                Write-Host ("[WARN] Full uninstall exited with code {0}" -f $cleanupExit) -ForegroundColor Yellow
+                if ($logTail) {
+                    Write-Host "[WARN] Installer log tail:" -ForegroundColor Yellow
+                    Write-Host $logTail -ForegroundColor Yellow
+                }
+            }
         }
     } catch {
         Write-Host ("[WARN] Initial uninstall attempt failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
@@ -609,6 +1214,8 @@ function Ensure-RuntimeServiceAbsent {
         }
         Start-Sleep -Milliseconds 750
     }
+
+    Remove-DiagnosticHostArtifacts
 
     $existing = Get-ServiceSnapshot -ServiceName $ServiceName
     return (-not $existing)
@@ -762,6 +1369,25 @@ if ($x86Binary -and (Test-Path $x86Binary)) {
     } catch {
         Write-TestResult -TestName "x86 Signature Allowlisted" -Status "Warning" -Message $_.Exception.Message
     }
+}
+
+$effectiveMeshCentralUrl = $MeshCentralAgentUrl
+if ($MeshCentralAgentUrl -and $MeshCentralUseProvisioning) {
+    if ($brandingConfig -and $brandingConfig.provisioning) {
+        $effectiveMeshCentralUrl = Get-MeshCentralProvisionedUrl -BaseUrl $MeshCentralAgentUrl -Provisioning $brandingConfig.provisioning
+    } else {
+        Write-Host "[WARN] Branding provisioning data missing; MeshCentral URL will be used without extra parameters." -ForegroundColor Yellow
+    }
+}
+
+try {
+    $download = Get-MeshCentralAgentDownload -AgentUrl $effectiveMeshCentralUrl -MeshCentralMeshId $MeshCentralMeshId -MeshCentralControlUrl $MeshCentralControlUrl -MeshCentralLoginUser $MeshCentralLoginUser -MeshCentralLoginPass $MeshCentralLoginPass -MeshCtrlPath $MeshCtrlPath
+    if ($download) {
+        Write-TestResult -TestName "MeshCentral Download" -Status "Pass" -Message $download.Message
+        Invoke-MeshCentralDownloadValidation -DownloadedBytes $download.Bytes -ReferenceBinary $x64Binary -LocalMshPath $mshPath
+    }
+} catch {
+    Write-TestResult -TestName "MeshCentral Download" -Status "Warning" -Message ("Unable to download agent: {0}" -f $_.Exception.Message)
 }
 
 # Test 1.4: File Size Validation
@@ -935,7 +1561,7 @@ if ($brandingConfig) {
     $expectedServerHash = $brandingConfig.security.serverCertHash
     $serviceName = $brandingConfig.branding.serviceName
     $displayName = $brandingConfig.branding.displayName
-    $expectedMeshId = $brandingConfig.provisioning.meshId
+    $expectedMeshId = (Convert-MeshIdToHexString -MeshId $brandingConfig.provisioning.meshId)
 
     $binarySet = @()
     $exeBinaries = @()
@@ -990,6 +1616,7 @@ if ($RuntimeValidation) {
         Write-TestResult -TestName "Runtime: Svchost Register" -Status "Warning" -Message $Reason
         Write-TestResult -TestName "Runtime: Svchost Status" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
         Write-TestResult -TestName "Runtime: Svchost Unregister" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
+        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
     }
 
     if (-not (Test-IsAdmin)) {
@@ -1021,7 +1648,7 @@ if ($RuntimeValidation) {
                 Write-RuntimeSkipResults ("Runtime validation aborted: Unable to remove existing service '{0}'." -f $runtimeServiceName)
             }
             else {
-                Invoke-RuntimeInstallValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName
+                Invoke-RuntimeInstallValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName -BrandingConfig $brandingConfig
                 Invoke-RuntimeSvchostValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName
             }
         } catch {

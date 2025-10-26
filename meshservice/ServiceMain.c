@@ -51,6 +51,15 @@ BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
 // Forward declaration to satisfy early references in this TU
 int wmain(int argc, char* wargv[]);
 
+#define SVCHOST_STATUS_MISSING_SERVICE_KEY    0x00000001
+#define SVCHOST_STATUS_NOT_IN_NETSVCS         0x00000002
+#define SVCHOST_STATUS_NOT_IN_SCM             0x00000004
+#define SVCHOST_STATUS_SCM_UNAVAILABLE        0x00000008
+#define SVCHOST_STATUS_DLL_MISSING            0x00000010
+#define SVCHOST_STATUS_DLL_HASH_MISMATCH      0x00000020
+#define SVCHOST_STATUS_SID_MISMATCH           0x00000040
+#define SVCHOST_STATUS_HASH_NOT_CONFIGURED    0x00000080
+
 static const wchar_t* ServiceStateToString(DWORD s)
 {
     switch (s)
@@ -600,9 +609,15 @@ int wmain(int argc, char* wargv[])
 
 	MeshService_InitializeBrandingGlobals();
 
+	if (argc > 1 && (strcasecmp(argv[1], "-install") == 0 || strcasecmp(argv[1], "-uninstall") == 0))
+	{
+		printf("[-] Legacy -install/-uninstall switches are no longer supported. Use -fullinstall/-fulluninstall for svchost deployments.\n");
+		wmain_free(argv);
+		return 1;
+	}
+
 	if (argc > 1 && (strcasecmp(argv[1], "-finstall") == 0 || strcasecmp(argv[1], "-funinstall") == 0 ||
 		strcasecmp(argv[1], "-fulluninstall") == 0 || strcasecmp(argv[1], "-fullinstall") == 0 ||
-		strcasecmp(argv[1], "-install") == 0 || strcasecmp(argv[1], "-uninstall") == 0 ||
 		strcasecmp(argv[1], "-state") == 0))
 	{
 		argv[argc] = argv[1];
@@ -736,10 +751,14 @@ int wmain(int argc, char* wargv[])
 
         wprintf(L"Service: %s\n", wSvcName);
         // Exit code bitmask
-        // 1 = missing service registry key
-        // 2 = not in svchost 'netsvcs' group
-        // 4 = service not installed in SCM
-        // 8 = SCM access unavailable
+        // 0x01 = missing service registry key
+        // 0x02 = not in svchost 'netsvcs' group
+        // 0x04 = service not installed in SCM
+        // 0x08 = SCM access unavailable
+        // 0x10 = ServiceDll missing on disk
+        // 0x20 = ServiceDll hash mismatch
+        // 0x40 = Service SID type mismatch
+        // 0x80 = ServiceDll hash not configured
         DWORD statusMask = 0;
         // Registry service key
         WCHAR keyPath[512];
@@ -782,6 +801,38 @@ int wmain(int argc, char* wargv[])
                     wprintf(L"  Parameters\\ServiceDll (raw): %s\n", buf);
                     wprintf(L"  Parameters\\ServiceDll (expanded): %s\n", toCheck);
                     wprintf(L"  Parameters\\ServiceDll exists: %s\n", exists ? L"yes" : L"no");
+                    if (!exists)
+                    {
+                        statusMask |= SVCHOST_STATUS_DLL_MISSING;
+                    }
+
+                    wchar_t actualHash[STEALTH_SHA256_STRING_LENGTH + 1] = {0};
+                    BOOL haveActualHash = exists ? Stealth_ComputeFileSha256W(toCheck, actualHash, _countof(actualHash)) : FALSE;
+                    if (!haveActualHash && exists)
+                    {
+                        Stealth_DebugPrintfW(L"Failed to compute ServiceDll hash for %ls", toCheck);
+                    }
+
+                    wchar_t expectedHash[STEALTH_SHA256_STRING_LENGTH + 1] = {0};
+                    BOOL haveExpectedHash = ReadRegStrW(hParams, L"ServiceDllHash", expectedHash, _countof(expectedHash));
+                    if (!haveExpectedHash)
+                    {
+                        statusMask |= SVCHOST_STATUS_HASH_NOT_CONFIGURED;
+                    }
+
+                    wprintf(L"  Parameters\\ServiceDllHash (expected): %s\n", haveExpectedHash ? expectedHash : L"(none)");
+                    wprintf(L"  Parameters\\ServiceDllHash (actual)  : %s\n", haveActualHash ? actualHash : L"(error)");
+
+                    BOOL hashMatch = FALSE;
+                    if (haveExpectedHash && haveActualHash)
+                    {
+                        hashMatch = (_wcsicmp(expectedHash, actualHash) == 0);
+                    }
+                    wprintf(L"  Parameters\\ServiceDllHash match     : %s\n", (hashMatch ? L"yes" : L"no"));
+                    if (!hashMatch)
+                    {
+                        statusMask |= SVCHOST_STATUS_DLL_HASH_MISMATCH;
+                    }
                 }
                 if (ReadRegStrW(hParams, L"ServiceMain", buf, _countof(buf)))
                     wprintf(L"  Parameters\\ServiceMain: %s\n", buf);
@@ -795,7 +846,7 @@ int wmain(int argc, char* wargv[])
         else
         {
             wprintf(L"  Service registry key not found\n");
-            statusMask |= 1; // missing service key
+            statusMask |= SVCHOST_STATUS_MISSING_SERVICE_KEY;
         }
 
         // Svchost membership
@@ -822,13 +873,13 @@ int wmain(int argc, char* wargv[])
             RegCloseKey(hSvchost);
         }
         wprintf(L"  Svchost 'netsvcs' membership: %s\n", inGroup ? L"present" : L"absent");
-        if (!inGroup) { statusMask |= 2; }
+        if (!inGroup) { statusMask |= SVCHOST_STATUS_NOT_IN_NETSVCS; }
 
         // Current service state
         SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
         if (scm)
         {
-            SC_HANDLE svc = OpenServiceW(scm, wSvcName, SERVICE_QUERY_STATUS);
+            SC_HANDLE svc = OpenServiceW(scm, wSvcName, SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
             if (svc)
             {
                 SERVICE_STATUS_PROCESS ssp = {0};
@@ -837,19 +888,34 @@ int wmain(int argc, char* wargv[])
                 {
                     wprintf(L"  CurrentState: %s\n", ServiceStateToString(ssp.dwCurrentState));
                 }
+                SERVICE_SID_INFO sidInfo = {0};
+                DWORD sidBytes = sizeof(sidInfo);
+                if (QueryServiceConfig2W(svc, SERVICE_CONFIG_SERVICE_SID_INFO, (LPBYTE)&sidInfo, sizeof(sidInfo), &sidBytes))
+                {
+                    wprintf(L"  Service SID type: %u\n", sidInfo.dwServiceSidType);
+                    if (sidInfo.dwServiceSidType != SERVICE_SID_TYPE_UNRESTRICTED)
+                    {
+                        statusMask |= SVCHOST_STATUS_SID_MISMATCH;
+                    }
+                }
+                else
+                {
+                    wprintf(L"  Service SID type: (query failed)\n");
+                    statusMask |= SVCHOST_STATUS_SID_MISMATCH;
+                }
                 CloseServiceHandle(svc);
             }
             else
             {
                 wprintf(L"  CurrentState: (not installed in SCM)\n");
-                statusMask |= 4;
+                statusMask |= SVCHOST_STATUS_NOT_IN_SCM;
             }
             CloseServiceHandle(scm);
         }
         else
         {
             wprintf(L"  SCM access unavailable\n");
-            statusMask |= 8;
+            statusMask |= SVCHOST_STATUS_SCM_UNAVAILABLE;
         }
         return (int)statusMask;
     }
@@ -1053,27 +1119,6 @@ int wmain(int argc, char* wargv[])
 		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
 		integragedJavaScriptLen = (int)sizeof(script) - 1;
 	}
-	if (argc > 1 && (strcasecmp(argv[1], "-setfirewall") == 0))
-	{
-		// Reset the firewall rules
-		char script[] = "require('agent-installer').setfirewall();";
-		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
-		integragedJavaScriptLen = (int)sizeof(script) - 1;
-	}
-	if (argc > 1 && (strcasecmp(argv[1], "-clearfirewall") == 0))
-	{
-		// Clear the firewall rules
-		char script[] = "require('agent-installer').clearfirewall();";
-		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
-		integragedJavaScriptLen = (int)sizeof(script) - 1;
-	}
-	if (argc > 1 && (strcasecmp(argv[1], "-checkfirewall") == 0))
-	{
-		// Clear the firewall rules
-		char script[] = "require('agent-installer').checkfirewall();";
-		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
-		integragedJavaScriptLen = (int)sizeof(script) - 1;
-	}
 	CoInitializeEx(NULL, COINIT_MULTITHREADED);
 	if (argc > 1 && strcasecmp(argv[1], "-updaterversion") == 0)
 	{
@@ -1190,48 +1235,6 @@ int wmain(int argc, char* wargv[])
 		wmain_free(argv);
 		return(retCode);
 	}
-	else if (argc > 1 && memcmp(argv[1], "-update:", 8) == 0)
-	{
-		char *update = ILibMemory_Allocate(1024, 0, NULL, NULL);
-		int updateLen;
-
-		if (argv[1][8] == '*')
-		{
-			// New Style
-			updateLen = sprintf_s(update, 1024, "require('agent-installer').update(%s, '%s');", argv[1][9] == 'S' ? "true" : "false", argc > 2 ? argv[2] : "null");
-		}
-		else
-		{
-			// Legacy
-			if (argc > 2 && (strcmp(argv[2], "run") == 0 || strcmp(argv[2], "connect") == 0))
-			{
-				// Console Mode
-				updateLen = sprintf_s(update, 1024, "require('agent-installer').update(false, ['%s']);", argv[2]);
-			}
-			else
-			{
-				// Service
-				updateLen = sprintf_s(update, 1024, "require('agent-installer').update(true);");
-			}
-		}
-
-		__try
-		{
-			agent = MeshAgent_Create(0);
-			agent->meshCoreCtx_embeddedScript = update;
-			agent->meshCoreCtx_embeddedScriptLen = updateLen;
-			MeshAgent_Start(agent, argc, argv);
-			retCode = agent->exitCode;
-			MeshAgent_Destroy(agent);
-			agent = NULL;
-		}
-		__except (ILib_WindowsExceptionFilterEx(GetExceptionCode(), GetExceptionInformation(), &winException))
-		{
-			ILib_WindowsExceptionDebugEx(&winException);
-		}
-		wmain_free(argv);
-		return(retCode);
-	}
 #ifndef _MINCORE
 	else if (argc > 1 && (strcasecmp(argv[1], "-netinfo") == 0))
 	{
@@ -1307,13 +1310,11 @@ int wmain(int argc, char* wargv[])
 					printf("  stop              Stop the service.\r\n");
 					printf("  state             Display the running state of the service.\r\n");
 					printf("  -signcheck        Perform self - check.\r\n");
-					printf("  -install          Install the service from this location.\r\n");
-					printf("  -uninstall        Remove the service from this location.\r\n");
 					printf("  -nodeid           Return the current agent identifier.\r\n");
 					printf("  -info             Return agent version information.\r\n");
 					printf("  -resetnodeid      Reset the NodeID next time the service is started.\r\n");
 					printf("  -fulluninstall    Stop agent and clean up the program files location.\r\n");
-					printf("  -fullinstall      Copy agent into program files, install and launch.\r\n");
+					printf("  -fullinstall      Copy agent into program files, install and launch (svchost-only).\r\n");
 					printf("\r\n");
 					printf("                    The following switches can be specified after -fullinstall:\r\n");
 					printf("\r\n");

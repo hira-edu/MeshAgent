@@ -1,6 +1,6 @@
 # Core Migration Phase 0 – Stabilization Checklist
 
-**Purpose:** lock down sensitive provisioning data, capture a reproducible baseline build, and record where evidence is stored before the deeper migration work begins. All checklist items tie back to the Phase 0 bullets in `CORE_MIGRATION_MASTER_PLAN.md` and `branding_build_overhaul.md`.
+**Purpose:** lock down sensitive provisioning data, capture a reproducible baseline build, and record where evidence is stored before the deeper migration work begins. All checklist items roll up to the Phase 0 bullets in `MeshAgent_Project_Plan.md` (with `CORE_MIGRATION_MASTER_PLAN.md` retained for historical context).
 
 - **Branch:** `feature/core-migration`
 - **Maintainer:** Codex automation thread

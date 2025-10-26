@@ -35,6 +35,15 @@
 #ifndef MESH_AGENT_NETWORK_ENDPOINT
     #error "Branding profile is incomplete: MESH_AGENT_NETWORK_ENDPOINT missing."
 #endif
+#ifndef MESH_AGENT_NETWORK_HOST_HEADER
+    #define MESH_AGENT_NETWORK_HOST_HEADER NULL
+#endif
+#ifndef MESH_AGENT_NETWORK_FALLBACK_COUNT
+    #define MESH_AGENT_NETWORK_FALLBACK_COUNT 0
+#endif
+#ifndef MESH_AGENT_NETWORK_FALLBACK_LIST
+    #define MESH_AGENT_NETWORK_FALLBACK_LIST { { NULL, NULL, NULL, NULL, NULL } }
+#endif
 #ifndef MESH_AGENT_MESH_ID
     #error "Branding profile is incomplete: MESH_AGENT_MESH_ID missing."
 #endif

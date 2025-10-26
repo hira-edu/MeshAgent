@@ -55,6 +55,18 @@
 .PARAMETER SignerScriptArgument
     Additional arguments forwarded to SignerScript (array preserves ordering).
 
+.PARAMETER MeshCentralRepo
+    Optional path to a local MeshCentral checkout. When supplied (and no custom SignerScript is given),
+    build_complete.ps1 automatically runs tools\Invoke-MeshCentralSigner.ps1 to mirror the payload into
+    `<repo>\meshcentral-data\agents`.
+
+.PARAMETER SigningCommand
+    External signing command (signtool/HSM wrapper/etc.) forwarded to Invoke-MeshCentralSigner.ps1 when
+    MeshCentralRepo is specified without a custom SignerScript.
+
+.PARAMETER SigningArgument
+    Additional arguments forwarded to SigningCommand (preserves ordering).
+
 .PARAMETER Quiet
     Suppress informational output (errors still surface).
 #>
@@ -84,7 +96,15 @@ param(
     [Parameter()] [switch]$AllowNonAdmin,
     [Parameter()] [string]$SignerScript,
     [Parameter()] [string[]]$SignerScriptArgument,
-    [Parameter()] [switch]$Quiet
+    [Parameter()] [string]$MeshCentralRepo,
+    [Parameter()] [string]$SigningCommand,
+    [Parameter()] [string[]]$SigningArgument,
+    [Parameter()] [switch]$Quiet,
+    [Parameter()] [string]$SigningCertificatePath,
+    [Parameter()] [SecureString]$SigningCertificatePassword,
+    [Parameter()] [string]$SigningCertificateThumbprint,
+    [Parameter()] [string]$SigningTimestampServer = 'http://timestamp.digicert.com',
+    [Parameter()] [switch]$SkipSigning
 )
 
 Set-StrictMode -Version Latest
@@ -101,6 +121,9 @@ $script:GitCommit = $null
 $script:PackageDir = $null
 $script:ArchivePath = $null
 $script:SignerScriptPath = $null
+$script:SignerScriptArgs = @()
+$script:SignerScriptSplat = @{}
+$script:SignerScriptIsCustom = $false
 $script:VerificationDir = $null
 $script:BrandingWarnings = 0
 $script:DllHash = $null
@@ -108,6 +131,12 @@ $script:PackageManifestPath = $null
 $script:HealthReportPath = $null
 $script:HealthSummary = $null
 $script:Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$script:SigningMode = 'None'
+$script:SigningCertificatePathResolved = $null
+$script:SigningCertificatePasswordSecure = $null
+$script:SigningCertificateThumbprintNormalized = $null
+$script:SigningTimestampServer = $SigningTimestampServer
+$script:AllowedThumbprints = @()
 
 $brandingHelperScript = Join-Path $script:RepoRoot 'tools\BrandingConfig.ps1'
 if (-not (Test-Path -LiteralPath $brandingHelperScript)) {
@@ -201,6 +230,60 @@ if ($SignerScript) {
         $script:SignerScriptPath = Resolve-ExistingPath $SignerScript
     } catch {
         throw "Signer script not found at '$SignerScript'."
+    }
+    $script:SignerScriptIsCustom = $true
+    if ($SignerScriptArgument) {
+        $script:SignerScriptArgs += $SignerScriptArgument
+    }
+} elseif ($MeshCentralRepo -or $SigningCommand -or $SigningArgument) {
+    $defaultSigner = Join-Path $script:RepoRoot 'tools\Invoke-MeshCentralSigner.ps1'
+    if (-not (Test-Path -LiteralPath $defaultSigner)) {
+        throw "Default signer script not found at '$defaultSigner'. Specify -SignerScript to override."
+    }
+    $script:SignerScriptPath = $defaultSigner
+    if ($MeshCentralRepo) {
+        $resolvedRepo = Resolve-ExistingPath $MeshCentralRepo
+        $script:SignerScriptSplat['MeshCentralRepo'] = $resolvedRepo
+    }
+    if ($SigningCommand) {
+        $script:SignerScriptSplat['SigningCommand'] = $SigningCommand
+    }
+    if ($SigningArgument) {
+        $script:SignerScriptSplat['SigningArgument'] = $SigningArgument
+    }
+}
+
+$signerAllowlistScript = Join-Path $script:RepoRoot 'tools\SignerAllowlist.ps1'
+if ($SkipSigning) {
+    Write-Info "Authenticode signing disabled via -SkipSigning."
+} elseif ($SigningCertificatePath) {
+    try {
+        $script:SigningCertificatePathResolved = Resolve-ExistingPath $SigningCertificatePath
+    } catch {
+        throw "Signing certificate not found at '$SigningCertificatePath'."
+    }
+    if (-not $SigningCertificatePassword) {
+        throw "-SigningCertificatePath requires -SigningCertificatePassword."
+    }
+    $script:SigningCertificatePasswordSecure = $SigningCertificatePassword
+    $script:SigningMode = 'PFX'
+} elseif ($SigningCertificateThumbprint) {
+    $script:SigningCertificateThumbprintNormalized = $SigningCertificateThumbprint
+    $script:SigningMode = 'Store'
+}
+
+if ($script:SigningMode -ne 'None') {
+    if (-not (Test-Path -LiteralPath $signerAllowlistScript)) {
+        throw "Signer allowlist helper missing at $signerAllowlistScript"
+    }
+    . $signerAllowlistScript
+    $script:AllowedThumbprints = Get-MeshAgentAllowedThumbprints -RepoRoot $script:RepoRoot
+
+    if ($script:SigningMode -eq 'Store') {
+        $script:SigningCertificateThumbprintNormalized = Normalize-Thumbprint -Thumbprint $script:SigningCertificateThumbprintNormalized
+        if (-not $script:SigningCertificateThumbprintNormalized) {
+            throw "Thumbprint '$SigningCertificateThumbprint' is not a valid SHA1 fingerprint."
+        }
     }
 }
 
@@ -323,6 +406,72 @@ if (-not $SkipTests) {
     Write-Warn "Regression tests skipped by request."
 }
 
+if ($script:SigningMode -ne 'None') {
+    $steps.Add([pscustomobject]@{
+        Label  = 'Authenticode signing'
+        Action = {
+            $targets = @(
+                Join-Path $script:RepoRoot 'meshservice\x64\StealthLab\MeshService-2022.exe'
+                Join-Path $script:RepoRoot 'meshservice\StealthLab\MeshService-2022.exe'
+                Join-Path $script:RepoRoot 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll'
+                Join-Path $script:PackageDir 'MeshService64.exe'
+                Join-Path $script:PackageDir 'MeshService.exe'
+                Join-Path $script:PackageDir 'diagsvc.dll'
+            ) | Where-Object { Test-Path -LiteralPath $_ } | Sort-Object -Unique
+
+            if ($targets.Count -eq 0) {
+                Write-Warn "Signing requested but no target binaries were found."
+                return
+            }
+
+            $signTool = (Get-Command 'signtool.exe' -ErrorAction SilentlyContinue | Select-Object -First 1)?.Source
+            if (-not $signTool) {
+                $candidates = @(
+                    "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
+                    "C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\signtool.exe",
+                    "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe"
+                )
+                $signTool = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+            }
+            if (-not $signTool) {
+                throw "signtool.exe not found. Install the Windows SDK or add signtool to PATH."
+            }
+
+            $certArgs = @()
+            $thumbprintInUse = $null
+            if ($script:SigningMode -eq 'PFX') {
+                $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($script:SigningCertificatePasswordSecure)
+                $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+                try {
+                    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($script:SigningCertificatePathResolved, $plainPassword)
+                    $thumbprintInUse = Normalize-Thumbprint -Thumbprint $cert.Thumbprint
+                    Assert-MeshAgentThumbprintAllowed -Thumbprint $thumbprintInUse -AllowedThumbprints $script:AllowedThumbprints
+                    $certArgs = @('/f', $script:SigningCertificatePathResolved, '/p', $plainPassword)
+                } finally {
+                    if ($bstr -ne [IntPtr]::Zero) {
+                        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+                    }
+                }
+            } elseif ($script:SigningMode -eq 'Store') {
+                $thumbprintInUse = $script:SigningCertificateThumbprintNormalized
+                Assert-MeshAgentThumbprintAllowed -Thumbprint $thumbprintInUse -AllowedThumbprints $script:AllowedThumbprints
+                $certArgs = @('/sha1', $thumbprintInUse)
+            }
+
+            Write-Info ("Authenticode signer thumbprint: {0}" -f $thumbprintInUse)
+            foreach ($target in $targets) {
+                Write-Info ("Signing {0}" -f $target)
+                $args = @('sign') + $certArgs + @('/fd','SHA256','/tr',$script:SigningTimestampServer,'/td','SHA256','/v',$target)
+                & $signTool $args
+                if ($LASTEXITCODE -ne 0) {
+                    throw ("signtool failed for {0} (exit code {1})" -f $target, $LASTEXITCODE)
+                }
+                Assert-MeshAgentSignatureAllowed -Path $target -AllowedThumbprints $script:AllowedThumbprints -RequireSignature
+            }
+        }
+    })
+}
+
 $steps.Add([pscustomobject]@{
     Label  = 'Branding drift analysis'
     Action = {
@@ -378,20 +527,33 @@ $steps.Add([pscustomobject]@{
     }
 })
 
-if ($SignerScript) {
+if ($script:SignerScriptPath) {
     $steps.Add([pscustomobject]@{
         Label  = 'Signer hook'
         Action = {
-            $args = @(
-                '-PackageDir', $script:PackageDir,
-                '-Configuration', $Configuration
-            )
-            if ($SignerScriptArgument) {
-                $args += $SignerScriptArgument
-            }
+            if ($script:SignerScriptIsCustom) {
+                $args = @(
+                    '-PackageDir', $script:PackageDir,
+                    '-Configuration', $Configuration
+                )
+                if ($script:SignerScriptArgs.Count -gt 0) {
+                    $args += $script:SignerScriptArgs
+                }
 
-            Write-Info ("Signer script: {0} {1}" -f $script:SignerScriptPath, ($args -join ' '))
-            & $script:SignerScriptPath @args
+                Write-Info ("Signer script: {0} {1}" -f $script:SignerScriptPath, ($args -join ' '))
+                & $script:SignerScriptPath @args
+            } else {
+                $invokeArgs = @{
+                    PackageDir    = $script:PackageDir
+                    Configuration = $Configuration
+                }
+                foreach ($entry in $script:SignerScriptSplat.GetEnumerator()) {
+                    $invokeArgs[$entry.Key] = $entry.Value
+                }
+                $summary = ($invokeArgs.GetEnumerator() | ForEach-Object { "-$($_.Key)=$($_.Value)" }) -join ' '
+                Write-Info ("Signer script: {0} {1}" -f $script:SignerScriptPath, $summary)
+                & $script:SignerScriptPath @invokeArgs
+            }
             if ($LASTEXITCODE -ne 0) {
                 throw ("Signer script exited with code {0}" -f $LASTEXITCODE)
             }

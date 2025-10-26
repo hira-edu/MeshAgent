@@ -199,6 +199,8 @@ typedef struct MeshAgentHostContainer
 	char serverip[1024];
 	AgentIdentifiers agentID;
 	int serverIndex;
+	int brandedFallbackIndex;
+	int usingBrandedEndpoint;
 	int triedNoProxy_Index;
 	int retryTime;
 	MeshAgentHost_BatteryInfo batteryState;

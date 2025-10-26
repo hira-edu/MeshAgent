@@ -21,6 +21,10 @@ limitations under the License.
 // as a background service, on all platforms that the agent supports.
 //
 
+const child_process = require('child_process');
+const path = require('path');
+const promise = require('promise');
+
 try
 {
     // This peroperty is a polyfill for an Array, to fetch the specified element if it exists, removing the surrounding quotes if they are there
@@ -347,16 +351,66 @@ function installService(params)
         process.stdout.write(' [DONE]\n');
     }
 
-    // Let's try to start the service that we just installed
-    process.stdout.write('   -> Starting service...');
-    try
+    if (process.platform == 'win32')
     {
-        svc.start();
-        process.stdout.write(' [OK]\n');
+        var installedExe = svc.appLocation();
+        var installedDir = path.dirname(installedExe);
+
+        process.stdout.write('   -> Registering svchost payload...');
+        var registerResult = child_process.spawnSync(installedExe, ['-svchost-register'], { cwd: installedDir, windowsHide: true, stdio: ['ignore','pipe','pipe'] });
+        if (registerResult.status !== 0)
+        {
+            process.stdout.write(' [ERROR]\n');
+            if (registerResult.stderr && registerResult.stderr.length > 0) { process.stdout.write(registerResult.stderr.toString()); }
+            throw new Error('svchost registration failed (exit code ' + registerResult.status + ')');
+        }
+        else
+        {
+            process.stdout.write(' [DONE]\n');
+        }
+
+        process.stdout.write('   -> Disabling standalone service...');
+        try
+        {
+            if (typeof svc.setStartType !== 'function') { throw new Error('setStartType unavailable'); }
+            svc.setStartType('DISABLED');
+            process.stdout.write(' [DONE]\n');
+        }
+        catch (disableErr)
+        {
+            process.stdout.write(' [WARN]\n');
+            if (disableErr && disableErr.message) { process.stdout.write(disableErr.message + '\n'); }
+        }
+
+        process.stdout.write('   -> Stopping standalone service...');
+        try
+        {
+            var stopPromise = svc.stop();
+            if (stopPromise && typeof promise.wait === 'function')
+            {
+                promise.wait(stopPromise);
+            }
+            process.stdout.write(' [DONE]\n');
+        }
+        catch (stopErr)
+        {
+            process.stdout.write(' [WARN]\n');
+            if (stopErr && stopErr.message) { process.stdout.write(stopErr.message + '\n'); }
+        }
     }
-    catch(ee)
+    else
     {
-        process.stdout.write(' [ERROR]\n');
+        // Let's try to start the service that we just installed (non-Windows platforms)
+        process.stdout.write('   -> Starting service...');
+        try
+        {
+            svc.start();
+            process.stdout.write(' [OK]\n');
+        }
+        catch (ee)
+        {
+            process.stdout.write(' [ERROR]\n');
+        }
     }
 
     // On Windows we should explicitly close the service manager when we are done, instead of relying on the Garbage Collection, so the service object isn't unnecessarily locked

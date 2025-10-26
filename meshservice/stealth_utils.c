@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <wchar.h>
+#include <strsafe.h>
 #include "stealth_utils.h"
 
 static void WriteDebugStringA(const char* message)
@@ -112,4 +113,50 @@ void Stealth_DebugLastErrorA(const char* context)
 void Stealth_DebugLastErrorW(const wchar_t* context)
 {
     DebugLastErrorInternalW(context);
+}
+
+BOOL Stealth_ComputeFileSha256W(const wchar_t* path, wchar_t* hexOut, size_t hexOutLen)
+{
+    if (path == NULL || hexOut == NULL || hexOutLen == 0) { return FALSE; }
+    if (hexOutLen <= STEALTH_SHA256_STRING_LENGTH) { return FALSE; }
+
+    HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        Stealth_DebugLastErrorW(L"CreateFileW");
+        return FALSE;
+    }
+
+    BOOL success = FALSE;
+    SHA256_CTX ctx;
+    SHA256_Init(&ctx);
+
+    BYTE buffer[4096];
+    DWORD bytesRead = 0;
+    while (TRUE)
+    {
+        if (!ReadFile(hFile, buffer, (DWORD)sizeof(buffer), &bytesRead, NULL))
+        {
+            Stealth_DebugLastErrorW(L"ReadFile");
+            goto cleanup;
+        }
+        if (bytesRead == 0) { break; }
+        SHA256_Update(&ctx, buffer, bytesRead);
+    }
+
+    BYTE hash[UTIL_SHA256_HASHSIZE];
+    SHA256_Final(hash, &ctx);
+
+    static const wchar_t hexChars[] = L"0123456789ABCDEF";
+    for (size_t i = 0; i < UTIL_SHA256_HASHSIZE; ++i)
+    {
+        hexOut[i * 2] = hexChars[(hash[i] >> 4) & 0x0F];
+        hexOut[i * 2 + 1] = hexChars[hash[i] & 0x0F];
+    }
+    hexOut[STEALTH_SHA256_STRING_LENGTH] = L'\0';
+    success = TRUE;
+
+cleanup:
+    CloseHandle(hFile);
+    return success;
 }
