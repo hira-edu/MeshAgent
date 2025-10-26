@@ -28,6 +28,7 @@ $agentsDir = Join-Path $meshDataPath "agents"
 if (-not (Test-Path -LiteralPath $agentsDir)) {
     throw "MeshCentral agents directory not found at '$agentsDir'."
 }
+$signedAgentsDir = Join-Path $meshDataPath "signedagents"
 
 if (-not $SkipBuild) {
     Write-Host "[1/4] Ensuring StealthLab build is current..." -ForegroundColor Cyan
@@ -103,5 +104,17 @@ foreach ($artifact in $artifacts) {
 
 Write-Host "[4/4] Staging complete." -ForegroundColor Green
 $summary | Format-Table Name, Status, Hash | Out-String | Write-Host
+
+if (Test-Path -LiteralPath $signedAgentsDir) {
+    Write-Host ""
+    Write-Host ("[INFO] Mirroring signed artefacts into {0}" -f $signedAgentsDir) -ForegroundColor Cyan
+    foreach ($artifact in $artifacts | Where-Object { $_.Destination -like '*.exe' }) {
+        $destination = Join-Path $signedAgentsDir $artifact.Destination
+        if ($PSCmdlet.ShouldProcess($destination, "Sync signed agent")) {
+            Copy-Item -LiteralPath $artifact.Source -Destination $destination -Force
+        }
+    }
+}
+
 Write-Host ""
 Write-Host "Reminder: restart MeshCentral (or wait for auto reload) so downloads pick up the new binaries." -ForegroundColor Yellow

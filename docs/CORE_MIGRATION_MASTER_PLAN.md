@@ -34,6 +34,7 @@ Result: MeshCentral may still replace on update/version check
 - Custom branding changes version info, breaking validation
 - Server doesn't recognize customized agents as "valid"
 - Auto-update pushes stock binaries over custom ones
+- Staging into MeshCentral\\meshcentral-data (inside the repo) doesn''t work; the live server reads from the sibling ..\\meshcentral-data directory, so copying binaries into the wrong tree guarantees MeshCentral keeps serving the stock build.
 
 ### Issue 2: External Dependency Fragility
 
@@ -307,7 +308,7 @@ msbuild MeshAgent-2022.sln /p:Configuration=StealthLab /p:DeviceGroup=ENGINEERIN
 
 > **Status (2025-10-26):** The RC pipeline has been removed (`bundle_resources.rc` deleted) and `build.ps1` now builds `StealthLab_DLL` first so `bin2h` regenerates `meshcore/embedded/generated/svchost_payload.h/.json` before StealthLab binaries compile. Remaining Phase-2 work tracks payload integrity enforcement and MeshCentral packaging updates.
 >
-> **Status (2025-10-27):** StealthLab builds are now *svchost-only* end-to-end. `meshcore/agentcore.c` never falls back to `agent-installer`, the JS entry points throw on Windows, and runtime validation asserts the service type/start state after every install. Network branding now emits ordered fallback endpoints (including CDN/IP reverse proxies) and agentcore logs which ordinal failed when rotating. Next action: document the firewall/proxy allowlists + blocked-host test cases (`NET-05`) and run one non-stealth smoke test to be sure the removed fallback does not regress other platforms.
+> **Status (2025-10-27):** StealthLab builds are now *svchost-only* end-to-end. `meshcore/agentcore.c` never falls back to `agent-installer`, the JS entry points throw on Windows, and runtime validation asserts the service type/start state after every install. Network branding now emits ordered fallback endpoints (including CDN/IP reverse proxies) and agentcore logs which ordinal failed when rotating. Authenticode signing is wired directly into `build.ps1 -SignStealth`, and `tools/stage_meshcentral_agents.ps1` mirrors the signed binaries into both `meshcentral-data\agents` and `meshcentral-data\signedagents` so MeshCentral’s download cache re-signs the latest payload. Runtime validation now normalizes MeshCentral downloads by subtracting the certificate-table delta before hashing, so signed payloads don’t trigger false-positive mismatches. Firewall/proxy allowlists plus blocked-host test cases are captured in `STEALTHLAB_CONFIG_GUIDE.md` and `MESHCENTRAL_CUSTOM_AGENT_DEPLOYMENT.md`; next action is to run one non-stealth smoke test to be sure the removed fallback does not regress other platforms.
 
 **Goal:** Replace bundle_resources.rc with C++ embedding
 
@@ -1151,7 +1152,7 @@ The table below captures every build/deploy entrypoint that still executes Power
 - [ ] Add SHA256 integrity verification + signer thumbprint assertion before loading payload (runtime self-check).
 - [ ] Flow payload metadata into MeshCentral packaging so only the EXE + JSON manifest ship (no staged DLL artifacts).
 - [ ] Extend `test.ps1` with privileged runtime validation (`-RuntimeValidation`) to exercise `-install/-uninstall` and svchost `-register/-status/-unregister` flows.
-- [ ] Document firewall/proxy allowlists + fallback rotation test cases so runtime validation can prove each branded endpoint (including CDN/IP reverse proxies) and ops know exactly which hostnames/ports must remain open (NET-05).
+- [x] Document firewall/proxy allowlists + fallback rotation test cases so runtime validation can prove each branded endpoint (including CDN/IP reverse proxies) and ops know exactly which hostnames/ports must remain open (NET-05). See `STEALTHLAB_CONFIG_GUIDE.md` (Firewall/Proxy/Fallback checklist) and `MESHCENTRAL_CUSTOM_AGENT_DEPLOYMENT.md` (network validation steps).
 - [ ] **Test:** Integration test exercises DLL extraction + load validation on x64.
 - **Exit criteria:** Build tree has zero `.rc` payload references; payload integrity failure blocks startup.
 
@@ -1469,4 +1470,5 @@ msbuild MeshAgent-2022.sln /p:Configuration=StealthLab /p:DeviceGroup=FINANCE /p
 ---
 
 **End of Master Plan**
+
 

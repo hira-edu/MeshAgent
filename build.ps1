@@ -41,6 +41,21 @@
 
 .PARAMETER Quiet
     Suppress informational output (errors still surface).
+
+.PARAMETER SignStealth
+    After a successful StealthLab build, Authenticode sign MeshService-2022.exe/dll using the provided certificate.
+
+.PARAMETER StealthSignerPfx
+    Path to a PFX that should be used when -SignStealth is specified.
+
+.PARAMETER StealthSignerPassword
+    SecureString password for the PFX when -StealthSignerPfx is used.
+
+.PARAMETER StealthSignerThumbprint
+    SHA1 thumbprint of a certificate in the CurrentUser\My store to use for signing.
+
+.PARAMETER StealthSignerTimestampServer
+    Timestamp server URL used when signing (default: http://timestamp.digicert.com).
 #>
 
 [CmdletBinding(PositionalBinding = $false)]
@@ -70,7 +85,12 @@ param(
     [Parameter()] [switch]$SkipSvchostValidation,
     [Parameter()] [switch]$BuildSvchostDll,
     [Parameter()] [switch]$StealthLab,
-    [Parameter()] [switch]$Quiet
+    [Parameter()] [switch]$Quiet,
+    [Parameter()] [switch]$SignStealth,
+    [Parameter()] [string]$StealthSignerPfx,
+    [Parameter()] [SecureString]$StealthSignerPassword,
+    [Parameter()] [string]$StealthSignerThumbprint,
+    [Parameter()] [string]$StealthSignerTimestampServer = 'http://timestamp.digicert.com'
 )
 
 Set-StrictMode -Version Latest
@@ -90,6 +110,158 @@ function Write-Info { param([string]$Message) if (-not $script:IsQuiet) { Write-
 function Write-Warn { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[WARN] {0}" -f $Message) -ForegroundColor Yellow } }
 function Write-Ok   { param([string]$Message) if (-not $script:IsQuiet) { Write-Host ("[ OK ] {0}" -f $Message) -ForegroundColor Green } }
 function Write-Err  { param([string]$Message) Write-Host ("[ERR ] {0}" -f $Message) -ForegroundColor Red }
+
+function ConvertTo-PlainText {
+    param([SecureString]$Secret)
+    if ($null -eq $Secret) { return $null }
+    return [System.Net.NetworkCredential]::new('', $Secret).Password
+}
+
+function Find-SignToolPath {
+    $sdkBase = Join-Path -Path ${env:ProgramFiles(x86)} -ChildPath 'Windows Kits\10\bin'
+    $preferredVersions = @(
+        '10.0.26100.0',
+        '10.0.25398.0',
+        '10.0.22621.0',
+        '10.0.22000.0'
+    )
+
+    $candidates = @()
+    foreach ($ver in $preferredVersions) {
+        $candidate = Join-Path -Path $sdkBase -ChildPath (Join-Path -Path $ver -ChildPath 'x64\signtool.exe')
+        $candidates += $candidate
+    }
+    $candidates += Join-Path -Path $sdkBase -ChildPath 'x64\signtool.exe'
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+
+    if (Test-Path -LiteralPath $sdkBase) {
+        $match = Get-ChildItem -Path $sdkBase -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object {
+                $candidate = Join-Path -Path $_.FullName -ChildPath 'x64\signtool.exe'
+                if (Test-Path -LiteralPath $candidate) { return $candidate }
+            } |
+            Where-Object { $_ } |
+            Select-Object -First 1
+
+        if ($match) { return $match }
+    }
+
+    return $null
+}
+
+function Invoke-StealthSigning {
+    param(
+        [string]$ConfigurationName,
+        [string]$CertificatePath,
+        [SecureString]$CertificatePassword,
+        [string]$Thumbprint,
+        [string]$TimestampServer,
+        [string[]]$TargetPaths
+    )
+
+    $defaultTargets = @(
+        (Join-Path -Path $script:RepoRoot -ChildPath 'meshservice\x64\StealthLab\MeshService-2022.exe')
+        (Join-Path -Path $script:RepoRoot -ChildPath 'meshservice\StealthLab\MeshService-2022.exe')
+    )
+    if ($TargetPaths -and $TargetPaths.Count -gt 0)
+    {
+        $targets = $TargetPaths | ForEach-Object {
+            if (Test-Path -LiteralPath $_) { (Resolve-Path -LiteralPath $_).ProviderPath }
+        }
+    }
+    else
+    {
+        $targets = $defaultTargets | Where-Object { Test-Path -LiteralPath $_ }
+    }
+
+    $targets = @($targets | Where-Object { $_ } | ForEach-Object { (Resolve-Path -LiteralPath $_).ProviderPath })
+
+    if ($targets.Count -eq 0)
+    {
+        Write-Warn "Stealth signing requested but no StealthLab artefacts were found."
+        return
+    }
+
+    $signTool = Find-SignToolPath
+    if (-not $signTool)
+    {
+        throw "signtool.exe not found. Install the Windows 10/11 SDK to enable Authenticode signing."
+    }
+
+    $signArgs = @()
+    if ($CertificatePath)
+    {
+        $resolved = Resolve-Path -LiteralPath $CertificatePath -ErrorAction Stop
+        $signArgs += '/f', $resolved.ProviderPath
+        $passwordPlain = ConvertTo-PlainText $CertificatePassword
+        if ($passwordPlain) { $signArgs += '/p', $passwordPlain }
+    }
+    elseif ($Thumbprint)
+    {
+        $normalized = ($Thumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+        if ([string]::IsNullOrWhiteSpace($normalized))
+        {
+            throw "Stealth signer thumbprint is empty."
+        }
+        $signArgs += '/sha1', $normalized
+    }
+    else
+    {
+        throw "Provide either -StealthSignerPfx or -StealthSignerThumbprint when using -SignStealth."
+    }
+
+    $timestamp = if ([string]::IsNullOrWhiteSpace($TimestampServer)) { 'http://timestamp.digicert.com' } else { $TimestampServer }
+    $signArgs += '/fd','SHA256','/tr',$timestamp,'/td','SHA256','/v'
+
+    foreach ($target in $targets)
+    {
+        $resolvedTarget = (Resolve-Path -LiteralPath $target).ProviderPath
+        Write-Info ("Signing {0}" -f $resolvedTarget)
+        & $signTool sign @signArgs $resolvedTarget
+        if ($LASTEXITCODE -ne 0)
+        {
+            throw ("signtool.exe exited with code {0} while signing {1}" -f $LASTEXITCODE, $resolvedTarget)
+        }
+        $signature = Get-AuthenticodeSignature -FilePath $resolvedTarget
+        switch ($signature.Status)
+        {
+            'Valid' {
+                Write-Ok ("{0} signed by {1}" -f (Split-Path $resolvedTarget -Leaf), $signature.SignerCertificate.Subject)
+            }
+            'UnknownError' {
+                if ($signature.SignerCertificate)
+                {
+                    Write-Warn ("{0} signature present but Windows does not trust the issuer ({1})." -f (Split-Path $resolvedTarget -Leaf), $signature.SignerCertificate.Subject)
+                }
+                else
+                {
+                    throw ("Authenticode verification failed for {0} (status {1})." -f $resolvedTarget, $signature.Status)
+                }
+            }
+            Default {
+                throw ("Authenticode verification failed for {0} (status {1})." -f $resolvedTarget, $signature.Status)
+            }
+        }
+
+        $signatureSummary = Ensure-Signature -Path $resolvedTarget -Description (Get-RelativeRepoPath -Path $resolvedTarget)
+        foreach ($output in $script:BuildOutputs)
+        {
+            if ((Resolve-Path -LiteralPath $output.Path).ProviderPath -eq $resolvedTarget)
+            {
+                $output.SignatureInfo = $signatureSummary
+            }
+        }
+    }
+
+    $targetNames = ($targets | ForEach-Object { Split-Path $_ -Leaf })
+    Write-Ok ("{0} signing complete: {1}" -f $ConfigurationName, ($targetNames -join ', '))
+}
 
 $script:IsQuiet = [bool]$Quiet
 $script:RepoRoot = $PSScriptRoot
@@ -127,6 +299,14 @@ if ($PSBoundParameters.ContainsKey('BuildSvchostDll')) {
 
 if ($PSBoundParameters.ContainsKey('StealthLab') -and -not $StealthLab) {
     $StealthLab = $true
+}
+
+if ($SignStealth -and (-not $StealthSignerPfx) -and (-not $StealthSignerThumbprint)) {
+    throw "-SignStealth requires either -StealthSignerPfx or -StealthSignerThumbprint."
+}
+
+if ($SignStealth -and ($Configuration -notlike 'StealthLab*')) {
+    Write-Warn ("-SignStealth was supplied for configuration '{0}'. This flag is intended for StealthLab outputs." -f $Configuration)
 }
 
 function Invoke-Step {
@@ -704,7 +884,8 @@ function Ensure-Signature {
             }
         }
         Default {
-            Write-Warn ("Signature status for {0}: {1}" -f $Description, $signature.Status)
+            $rawStatus = $signature.Status.ToString()
+            Write-Warn ("Signature status for {0}: {1}" -f $Description, $rawStatus)
             if ($signature.SignerCertificate) {
                 $subject = $signature.SignerCertificate.Subject
                 $thumbprintRaw = $signature.SignerCertificate.Thumbprint
@@ -714,8 +895,8 @@ function Ensure-Signature {
             }
             $thumbprint = if ($thumbprintRaw) { ($thumbprintRaw -replace '[^0-9a-fA-F]', '').ToUpperInvariant() } else { $null }
             return [pscustomobject]@{
-                Status     = $signature.Status.ToLowerInvariant()
-                Signed     = ($signature.Status -eq 'Valid')
+                Status     = $rawStatus.ToLowerInvariant()
+                Signed     = ($signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid)
                 Subject    = $subject
                 Thumbprint = $thumbprint
             }
@@ -1019,6 +1200,9 @@ try {
                 if (-not (Test-Path -LiteralPath $payloadPath)) {
                     throw "StealthLab_DLL output missing after build."
                 }
+                if ($SignStealth) {
+                    Invoke-StealthSigning -ConfigurationName 'StealthLab_DLL' -CertificatePath $StealthSignerPfx -CertificatePassword $StealthSignerPassword -Thumbprint $StealthSignerThumbprint -TimestampServer $StealthSignerTimestampServer -TargetPaths @($payloadPath)
+                }
                 $script:BuildOutputs.Add([pscustomobject]@{
                     Configuration   = 'StealthLab_DLL'
                     Platform        = 'x64'
@@ -1168,6 +1352,15 @@ try {
 
     if ($script:BuildOutputs.Count -gt 0) {
         Write-BuildManifest -Outputs $script:BuildOutputs
+    }
+
+    if ($SignStealth) {
+        try {
+            Invoke-StealthSigning -ConfigurationName $Configuration -CertificatePath $StealthSignerPfx -CertificatePassword $StealthSignerPassword -Thumbprint $StealthSignerThumbprint -TimestampServer $StealthSignerTimestampServer
+        } catch {
+            Write-Err ("Stealth signing failed: {0}" -f $_.Exception.Message)
+            throw
+        }
     }
 
     Write-Section "Build summary"

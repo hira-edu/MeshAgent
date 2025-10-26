@@ -75,6 +75,17 @@ $ErrorActionPreference = 'Stop'
 
 $script:IsCIContext = [bool]$env:GITHUB_ACTIONS -or [bool]$env:CI
 $script:NonAdminOverride = ($AllowNonAdmin -or $script:IsCIContext)
+$signerAllowlistScript = Join-Path $PSScriptRoot 'tools\SignerAllowlist.ps1'
+$script:AllowedThumbprints = @()
+if (-not $SkipSignatureValidation -and (Test-Path -LiteralPath $signerAllowlistScript)) {
+    . $signerAllowlistScript
+    try {
+        $script:AllowedThumbprints = Get-MeshAgentAllowedThumbprints -RepoRoot $PSScriptRoot
+    } catch {
+        Write-Warn ("Unable to load allowed signer thumbprints: {0}" -f $_.Exception.Message)
+        $script:AllowedThumbprints = @()
+    }
+}
 function Write-Section {
     param([string]$Title)
     if (-not $script:IsQuiet) {
@@ -229,6 +240,17 @@ if (-not (Test-AdminContext)) {
     }
 }
 
+function Invoke-NormalizedThumbprint {
+    param([string]$Thumbprint)
+    if ([string]::IsNullOrWhiteSpace($Thumbprint)) { return $null }
+    if (Get-Command Normalize-Thumbprint -ErrorAction SilentlyContinue) {
+        return (Normalize-Thumbprint -Thumbprint $Thumbprint)
+    }
+    $normalized = ($Thumbprint -replace '[^0-9a-fA-F]', '').ToUpperInvariant()
+    if ($normalized.Length -ne 40) { return $null }
+    return $normalized
+}
+
 function Ensure-Signature {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -241,6 +263,7 @@ function Ensure-Signature {
             Signed     = $false
             Subject    = $null
             Thumbprint = $null
+            Timestamp  = $null
         }
     }
 
@@ -253,6 +276,7 @@ function Ensure-Signature {
             Signed     = $false
             Subject    = $null
             Thumbprint = $null
+            Timestamp  = $null
         }
     }
 
@@ -272,14 +296,30 @@ function Ensure-Signature {
         }
     }
 
-    $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }
-    $thumbprint = if ($signature.SignerCertificate) { $signature.SignerCertificate.Thumbprint } else { $null }
+    $subject = $null
+    $thumbprint = $null
+    $timestamp = $null
+    if ($signature.SignerCertificate) {
+        $subject = $signature.SignerCertificate.Subject
+        $thumbprint = Invoke-NormalizedThumbprint -Thumbprint $signature.SignerCertificate.Thumbprint
+        if (-not $timestamp) {
+            $timestamp = try { $signature.SignerCertificate.NotBefore.ToUniversalTime().ToString('o') } catch { $null }
+        }
+    }
+    if ($signature.TimeStamperCertificate) {
+        $timestamp = try { $signature.TimeStamperCertificate.NotBefore.ToUniversalTime().ToString('o') } catch { $timestamp }
+    }
+
+    if ($signature.Status -eq 'Valid' -and $thumbprint -and $script:AllowedThumbprints.Count -gt 0 -and (Get-Command Assert-MeshAgentThumbprintAllowed -ErrorAction SilentlyContinue)) {
+        Assert-MeshAgentThumbprintAllowed -Thumbprint $thumbprint -AllowedThumbprints $script:AllowedThumbprints
+    }
 
     return [pscustomobject]@{
         Status     = $signature.Status
-        Signed     = ($signature.Status -eq 'Valid')
+        Signed     = ($signature.Status -eq 'Valid' -and $signature.SignerCertificate -ne $null)
         Subject    = $subject
         Thumbprint = $thumbprint
+        Timestamp  = $timestamp
     }
 }
 
@@ -379,10 +419,6 @@ if (-not $SkipBuild) {
         $buildParams = @{
             Configuration   = $Configuration
             BuildSvchostDll = $true
-        }
-
-        if ($script:NonAdminOverride) {
-            $buildParams['AllowNonAdmin'] = $true
         }
 
         if (-not $Clean) { $buildParams['SkipClean'] = $true }
@@ -513,6 +549,7 @@ if (-not $SkipPackage) {
                     Signed     = $false
                     Subject    = $null
                     Thumbprint = $null
+                    Timestamp  = $null
                 }
             }
 
@@ -533,6 +570,7 @@ if (-not $SkipPackage) {
                 signed = [bool]$signatureInfo.Signed
                 signerThumbprint = $signatureInfo.Thumbprint
                 signerSubject = $signatureInfo.Subject
+                signatureTimestamp = $signatureInfo.Timestamp
             }
 
             if ($item.Kind -eq 'dll' -and $item.Destination -eq 'diagsvc.dll') {

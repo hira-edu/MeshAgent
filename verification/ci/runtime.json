@@ -1,9 +1,9 @@
 {
-  "generatedUtc": "2025-10-26T21:31:15.9203909Z",
+  "generatedUtc": "2025-10-26T19:55:29.2478266Z",
   "binaryPath": "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab",
   "summary": {
-    "total": 38,
-    "passed": 36,
+    "total": 36,
+    "passed": 34,
     "failed": 0,
     "warnings": 2,
     "exitCode": 0
@@ -12,230 +12,218 @@
     {
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
       "Status": "Pass",
-      "Details": "Size: 5.78 MB",
-      "Name": "x64 Binary Exists"
+      "Name": "x64 Binary Exists",
+      "Details": "Size: 5.78 MB"
     },
     {
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
       "Status": "Pass",
-      "Details": "Size: 5.78 MB",
-      "Name": "x86 Binary Exists"
+      "Name": "x86 Binary Exists",
+      "Details": "Size: 5.78 MB"
     },
     {
       "Message": "Binary is not Authenticode signed",
       "Status": "Warning",
-      "Details": "",
-      "Name": "x64 Signature Allowlisted"
+      "Name": "x64 Signature Allowlisted",
+      "Details": ""
     },
     {
       "Message": "Binary is not Authenticode signed",
       "Status": "Warning",
-      "Details": "",
-      "Name": "x86 Signature Allowlisted"
+      "Name": "x86 Signature Allowlisted",
+      "Details": ""
     },
     {
       "Message": "Downloaded 6091081 byte(s) via meshctrl",
       "Status": "Pass",
-      "Details": "",
-      "Name": "MeshCentral Download"
+      "Name": "MeshCentral Download",
+      "Details": ""
     },
     {
-      "Message": "Trimmed SHA256 6A0B9E9F0A857E421F08926423CF7CF9A53BAB16B8D31BF82C885EEFB15E1AFA",
+      "Message": "Trimmed SHA256 14B198BBE0647F108A48D9CCBEA94B502425D0701F12A200A10D15D65B9AFA7B",
       "Status": "Pass",
-      "Details": "",
-      "Name": "MeshCentral Binary Matches StealthLab"
+      "Name": "MeshCentral Binary Matches StealthLab",
+      "Details": ""
     },
     {
       "Message": "Validated 10 provisioning fields",
       "Status": "Pass",
-      "Details": "",
-      "Name": "MeshCentral Embedded MSH Matches Local"
+      "Name": "MeshCentral Embedded MSH Matches Local",
+      "Details": ""
     },
     {
       "Message": "5.78 MB (expected 3-10 MB)",
       "Status": "Pass",
-      "Details": "",
-      "Name": "x64 Binary Size Valid"
+      "Name": "x64 Binary Size Valid",
+      "Details": ""
     },
     {
       "Message": "5.78 MB (expected 3-10 MB)",
       "Status": "Pass",
-      "Details": "",
-      "Name": "x86 Binary Size Valid"
+      "Name": "x86 Binary Size Valid",
+      "Details": ""
     },
     {
       "Message": "Valid PE signature (MZ)",
       "Status": "Pass",
-      "Details": "",
-      "Name": "x64 PE Header Valid"
+      "Name": "x64 PE Header Valid",
+      "Details": ""
     },
     {
       "Message": "Valid PE signature (MZ)",
       "Status": "Pass",
-      "Details": "",
-      "Name": "x86 PE Header Valid"
+      "Name": "x86 PE Header Valid",
+      "Details": ""
     },
     {
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\branding_config.local.json",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Branding Config Exists"
+      "Name": "Branding Config Exists",
+      "Details": ""
     },
     {
       "Message": "Successfully parsed JSON",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Branding Config Valid JSON"
+      "Name": "Branding Config Valid JSON",
+      "Details": ""
     },
     {
       "Message": "All required fields present",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Branding Config Has Required Fields"
+      "Name": "Branding Config Has Required Fields",
+      "Details": ""
     },
     {
       "Message": "Service name: WinDiagnosticHost",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Service Name Valid"
+      "Name": "Service Name Valid",
+      "Details": ""
     },
     {
       "Message": "Endpoint: wss://agents.high.support:4445/agent.ashx",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Network Endpoint Valid"
+      "Name": "Network Endpoint Valid",
+      "Details": ""
     },
     {
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshcore\\generated\\meshagent_branding.h",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Branding Header Exists"
+      "Name": "Branding Header Exists",
+      "Details": ""
     },
     {
       "Message": "All required defines present",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Branding Header Has Required Defines"
+      "Name": "Branding Header Has Required Defines",
+      "Details": ""
     },
     {
       "Message": "WinDiagnosticHost",
       "Status": "Pass",
-      "Details": "",
-      "Name": "MSH meshServiceName matches branding"
+      "Name": "MSH meshServiceName matches branding",
+      "Details": ""
     },
     {
       "Message": "Windows Diagnostic Host Service",
       "Status": "Pass",
-      "Details": "",
-      "Name": "MSH displayName matches branding"
+      "Name": "MSH displayName matches branding",
+      "Details": ""
     },
     {
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Provisioning manifest staged (MeshService-2022.exe)"
+      "Name": "Provisioning manifest staged (MeshService-2022.exe)",
+      "Details": ""
     },
     {
       "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Provisioning manifest staged (MeshService-2022.exe)"
+      "Name": "Provisioning manifest staged (MeshService-2022.exe)",
+      "Details": ""
     },
     {
       "Message": "Found in MeshService-2022.exe",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Binaries embed ServerID"
+      "Name": "Binaries embed ServerID",
+      "Details": ""
     },
     {
       "Message": "Found in MeshService-2022.exe",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Binaries embed ServiceName"
+      "Name": "Binaries embed ServiceName",
+      "Details": ""
     },
     {
       "Message": "Found in MeshService-2022.exe",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Binaries embed DisplayName"
+      "Name": "Binaries embed DisplayName",
+      "Details": ""
     },
     {
       "Message": "Found in MeshService-2022.exe",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Binaries embed MeshID"
+      "Name": "Binaries embed MeshID",
+      "Details": ""
     },
     {
       "Message": "Service 'WinDiagnosticHost' registered (Status: Running)",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: Install"
+      "Name": "Runtime: Install",
+      "Details": ""
     },
     {
       "Message": "'WinDiagnosticHost' currently Running",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: Service State"
+      "Name": "Runtime: Service State",
+      "Details": ""
     },
     {
       "Message": "SCM recovery matches branding profile (3 actions, reset 86400s)",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: Service Recovery"
-    },
-    {
-      "Message": "Restart-on-stop task present (\\WinDiagnosticHost-RestartOnStop)",
-      "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: WMI Task"
-    },
-    {
-      "Message": "Installer log confirms AMSI patch executed.",
-      "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: AMSI Patch"
+      "Name": "Runtime: Service Recovery",
+      "Details": ""
     },
     {
       "Message": "Service 'WinDiagnosticHost' removed",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: Uninstall"
+      "Name": "Runtime: Uninstall",
+      "Details": ""
     },
     {
       "Message": "Service 'WinDiagnosticHost' registered (Status: Stopped)",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: Svchost Register"
+      "Name": "Runtime: Svchost Register",
+      "Details": ""
     },
     {
       "Message": "svchost status command succeeded",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: Svchost Status"
+      "Name": "Runtime: Svchost Status",
+      "Details": ""
     },
     {
       "Message": "Service 'WinDiagnosticHost' removed",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Runtime: Svchost Unregister"
+      "Name": "Runtime: Svchost Unregister",
+      "Details": ""
     },
     {
       "Message": "MSBuild found at C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Visual Studio 2022 Found"
+      "Name": "Visual Studio 2022 Found",
+      "Details": ""
     },
     {
       "Message": "Python 3.14.0",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Python Found"
+      "Name": "Python Found",
+      "Details": ""
     },
     {
       "Message": "git version 2.51.1.windows.1",
       "Status": "Pass",
-      "Details": "",
-      "Name": "Git Found"
+      "Name": "Git Found",
+      "Details": ""
     }
   ]
 }

@@ -28,6 +28,36 @@ on:
         required: false
         default: 'false'
         type: boolean
+      runtime_validation:
+        description: 'Run Invoke-RuntimeValidation.ps1 after building (requires reachable MeshCentral instance)'
+        required: false
+        default: 'false'
+        type: boolean
+      runtime_meshcentral_repo:
+        description: 'Alternative MeshCentral repo (owner/name) to checkout for meshctrl.js'
+        required: false
+        default: ''
+        type: string
+      runtime_control_url:
+        description: 'Override MeshCentral control URL used during runtime validation'
+        required: false
+        default: ''
+        type: string
+      runtime_mesh_id:
+        description: 'Mesh ID to use during runtime validation (defaults to branding_config)'
+        required: false
+        default: ''
+        type: string
+      runtime_mesh_user:
+        description: 'MeshCentral username (defaults to diagadmin)'
+        required: false
+        default: ''
+        type: string
+      runtime_mesh_pass:
+        description: 'MeshCentral password (defaults to DiagTest!23)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -39,6 +69,10 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      CODE_SIGN_PFX_BASE64: ${{ secrets.CODE_SIGN_PFX_BASE64 }}
+      CODE_SIGN_PASSWORD: ${{ secrets.CODE_SIGN_PASSWORD }}
+      CODE_SIGN_TIMESTAMP_URL: ${{ secrets.CODE_SIGN_TIMESTAMP_URL }}
     strategy:
       matrix:
         arch: [x64, x86]
@@ -195,6 +229,56 @@ jobs:
           }
 
           echo "artifact_path=$destination" >> $env:GITHUB_OUTPUT
+
+      - name: Sign StealthLab binary (Authenticode)
+        if: env.CODE_SIGN_PFX_BASE64 != '' && env.CODE_SIGN_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $artifact = "${{ steps.locate_binary.outputs.artifact_path }}"
+          if (-not (Test-Path -LiteralPath $artifact)) {
+              throw "Cannot sign missing artifact at $artifact"
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          [System.IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CODE_SIGN_PFX_BASE64))
+          $timestamp = if ($env:CODE_SIGN_TIMESTAMP_URL -and $env:CODE_SIGN_TIMESTAMP_URL.Trim().Length -gt 0) { $env:CODE_SIGN_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+
+          & signtool sign /f $pfxPath /p $env:CODE_SIGN_PASSWORD /fd SHA256 /td SHA256 /tr $timestamp $artifact
+          if ($LASTEXITCODE -ne 0) {
+              throw "signtool sign failed with exit code $LASTEXITCODE"
+          }
+
+          $sig = Get-AuthenticodeSignature -FilePath $artifact
+          if ($sig.Status -ne 'Valid') {
+              Write-Warning ("Authenticode signature status for {0}: {1}" -f $artifact, $sig.Status)
+          } else {
+              Write-Host ("Signed {0} with subject '{1}' (thumbprint {2})" -f $artifact, $sig.SignerCertificate.Subject, $sig.SignerCertificate.Thumbprint)
+          }
+
+      - name: Sign StealthLab DLL (x64 only)
+        if: matrix.arch == 'x64' && env.CODE_SIGN_PFX_BASE64 != '' && env.CODE_SIGN_PASSWORD != ''
+        shell: pwsh
+        run: |
+          $dllPath = "meshservice/x64/StealthLab_DLL/MeshService-2022.dll"
+          if (-not (Test-Path -LiteralPath $dllPath)) {
+              throw "Cannot sign missing DLL at $dllPath"
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'codesign_svchost.pfx'
+          [System.IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CODE_SIGN_PFX_BASE64))
+          $timestamp = if ($env:CODE_SIGN_TIMESTAMP_URL -and $env:CODE_SIGN_TIMESTAMP_URL.Trim().Length -gt 0) { $env:CODE_SIGN_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+
+          & signtool sign /f $pfxPath /p $env:CODE_SIGN_PASSWORD /fd SHA256 /td SHA256 /tr $timestamp $dllPath
+          if ($LASTEXITCODE -ne 0) {
+              throw "signtool sign failed for DLL with exit code $LASTEXITCODE"
+          }
+
+          $sig = Get-AuthenticodeSignature -FilePath $dllPath
+          if ($sig.Status -ne 'Valid') {
+              Write-Warning ("Authenticode signature status for DLL: {0}" -f $sig.Status)
+          } else {
+              Write-Host ("Signed DLL with subject '{0}' (thumbprint {1})" -f $sig.SignerCertificate.Subject, $sig.SignerCertificate.Thumbprint)
+          }
 
       - name: Upload build logs (if exists)
         if: always()
@@ -395,4 +479,90 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  runtime-validation:
+    needs: build-windows
+    runs-on: windows-latest
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.runtime_validation == true) || (github.event_name != 'workflow_dispatch' && secrets.RUNTIME_VALIDATION == 'true') }}
+    env:
+      RUNTIME_CONTROL_URL: ${{ inputs.runtime_control_url != '' && inputs.runtime_control_url || secrets.RUNTIME_CONTROL_URL }}
+      RUNTIME_MESH_ID: ${{ inputs.runtime_mesh_id != '' && inputs.runtime_mesh_id || secrets.RUNTIME_MESH_ID }}
+      RUNTIME_MESH_USER: ${{ inputs.runtime_mesh_user != '' && inputs.runtime_mesh_user || secrets.RUNTIME_MESH_USER }}
+      RUNTIME_MESH_PASS: ${{ inputs.runtime_mesh_pass != '' && inputs.runtime_mesh_pass || secrets.RUNTIME_MESH_PASS }}
+      RUNTIME_MESHCENTRAL_REPO: ${{ inputs.runtime_meshcentral_repo != '' && inputs.runtime_meshcentral_repo || secrets.RUNTIME_MESHCENTRAL_REPO }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v1.1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Build StealthLab (x64)
+        shell: pwsh
+        run: |
+          ./build.ps1 -StealthLab -Platforms x64 -SkipTests
+
+      - name: Checkout MeshCentral repo (custom)
+        if: env.RUNTIME_MESHCENTRAL_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.RUNTIME_MESHCENTRAL_REPO }}
+          path: MeshCentral
+
+      - name: Checkout MeshCentral repo (default)
+        if: env.RUNTIME_MESHCENTRAL_REPO == ''
+        uses: actions/checkout@v4
+        with:
+          repository: Ylianst/MeshCentral
+          path: MeshCentral
+
+      - name: Run runtime validation
+        id: runtime_validation
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'MeshCentral')) {
+              Write-Host "MeshCentral repo missing; skipping runtime validation."
+              exit 0
+          }
+
+          if (-not $env:RUNTIME_CONTROL_URL -or -not $env:RUNTIME_MESH_ID) {
+              Write-Host "Runtime validation inputs missing (control URL or mesh ID). Set workflow inputs or secrets to enable."
+              exit 0
+          }
+
+          $verificationDir = Join-Path (Get-Location) 'verification\ci'
+          New-Item -ItemType Directory -Force -Path $verificationDir | Out-Null
+          $params = @{
+              BinaryPath            = (Join-Path (Get-Location) 'meshservice\x64\StealthLab')
+              MeshCentralRepo       = (Resolve-Path 'MeshCentral').ProviderPath
+              MeshCentralControlUrl = $env:RUNTIME_CONTROL_URL
+              MeshCentralMeshId     = $env:RUNTIME_MESH_ID
+              MeshCentralLoginUser  = ($env:RUNTIME_MESH_USER -and $env:RUNTIME_MESH_USER.Trim().Length -gt 0) ? $env:RUNTIME_MESH_USER : 'diagadmin'
+              MeshCentralLoginPass  = ($env:RUNTIME_MESH_PASS -and $env:RUNTIME_MESH_PASS.Trim().Length -gt 0) ? $env:RUNTIME_MESH_PASS : 'DiagTest!23'
+              ReportPath            = (Join-Path $verificationDir 'runtime.json')
+              LogPath               = (Join-Path $verificationDir 'runtime.log')
+              AllowNonAdmin         = $true
+              SkipMeshCentralPreflight = $true
+          }
+
+          ./tools/Invoke-RuntimeValidation.ps1 @params
+
+      - name: Upload runtime validation artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-validation-results
+          path: |
+            verification/ci/runtime.json
+            verification/ci/runtime.log
+          if-no-files-found: ignore
+          retention-days: 30
 

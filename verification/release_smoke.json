@@ -1,0 +1,169 @@
+{
+  "generatedUtc": "2025-10-26T19:19:45.4319799Z",
+  "binaryPath": "meshservice\\Release",
+  "summary": {
+    "total": 26,
+    "passed": 24,
+    "failed": 0,
+    "warnings": 2,
+    "exitCode": 0
+  },
+  "tests": [
+    {
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\Release\\MeshService64.exe",
+      "Name": "x64 Binary Exists",
+      "Status": "Pass",
+      "Details": "Size: 5.75 MB"
+    },
+    {
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\Release\\MeshService.exe",
+      "Name": "x86 Binary Exists",
+      "Status": "Pass",
+      "Details": "Size: 5.6 MB"
+    },
+    {
+      "Message": "Binary is not Authenticode signed",
+      "Name": "x64 Signature Allowlisted",
+      "Status": "Warning",
+      "Details": ""
+    },
+    {
+      "Message": "Binary is not Authenticode signed",
+      "Name": "x86 Signature Allowlisted",
+      "Status": "Warning",
+      "Details": ""
+    },
+    {
+      "Message": "5.75 MB (expected 3-10 MB)",
+      "Name": "x64 Binary Size Valid",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "5.6 MB (expected 3-10 MB)",
+      "Name": "x86 Binary Size Valid",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Valid PE signature (MZ)",
+      "Name": "x64 PE Header Valid",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Valid PE signature (MZ)",
+      "Name": "x86 PE Header Valid",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\branding_config.local.json",
+      "Name": "Branding Config Exists",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Successfully parsed JSON",
+      "Name": "Branding Config Valid JSON",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "All required fields present",
+      "Name": "Branding Config Has Required Fields",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Service name: WinDiagnosticHost",
+      "Name": "Service Name Valid",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Endpoint: wss://agents.high.support:4445/agent.ashx",
+      "Name": "Network Endpoint Valid",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshcore\\generated\\meshagent_branding.h",
+      "Name": "Branding Header Exists",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "All required defines present",
+      "Name": "Branding Header Has Required Defines",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "WinDiagnosticHost",
+      "Name": "MSH meshServiceName matches branding",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Windows Diagnostic Host Service",
+      "Name": "MSH displayName matches branding",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\Release\\MeshService64.msh",
+      "Name": "Provisioning manifest staged (MeshService64.exe)",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\Release\\MeshService.msh",
+      "Name": "Provisioning manifest staged (MeshService.exe)",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Found in MeshService64.exe",
+      "Name": "Binaries embed ServerID",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Found in MeshService64.exe",
+      "Name": "Binaries embed ServiceName",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Found in MeshService64.exe",
+      "Name": "Binaries embed DisplayName",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Found in MeshService64.exe",
+      "Name": "Binaries embed MeshID",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "MSBuild found at C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe",
+      "Name": "Visual Studio 2022 Found",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "Python 3.14.0",
+      "Name": "Python Found",
+      "Status": "Pass",
+      "Details": ""
+    },
+    {
+      "Message": "git version 2.51.1.windows.1",
+      "Name": "Git Found",
+      "Status": "Pass",
+      "Details": ""
+    }
+  ]
+}

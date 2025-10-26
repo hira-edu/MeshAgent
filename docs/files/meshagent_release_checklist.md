@@ -1,4 +1,4 @@
-﻿# MeshAgent Release Checklist
+# MeshAgent Release Checklist
 
 Quick reference for preparing and publishing a branded MeshAgent build.
 
@@ -34,12 +34,12 @@ Quick reference for preparing and publishing a branded MeshAgent build.
 - âœ… Stage a rollback package and test `tools\rollback_update.ps1 -SourcePath <zip>`.
 
 ## MeshCentral Upload
-- âœ… Copy `diagsvc.dll` to `meshcentral-data/agents-custom/meshagent_win32_x64.exe` (and companion executables to `meshcentral-data/agents/`).
-- âœ… Restart MeshCentral (`systemctl restart meshcentral`) and verify the download link serves the new build.
-- âœ… Download the agent from the portal, install it on a test endpoint, and confirm check-in + service metadata.
-
-## Post-Deployment
+- [ ] Run `pwsh .\tools\stage_meshcentral_agents.ps1 -MeshCentralDataPath ''..\meshcentral-data'' -IncludeWin32` (or copy the binaries + `.msh` to `/opt/meshcentral/meshcentral-data/agents/` on the remote host).
+- [ ] Restart MeshCentral (or rely on `tools\Invoke-RuntimeValidation.ps1` to stop/start `node meshcentral.js` and flush cached downloads).
+- [ ] Execute `pwsh .\tools\Invoke-RuntimeValidation.ps1 -MeshCentralRepo ''..\MeshCentral'' -ReportPath ''verification\phase3\runtime.json'' -LogPath ''verification\phase3\runtime.log''` and confirm `MeshCentral Binary Matches StealthLab`.
+- [ ] Download the agent from the portal (or via `meshctrl AgentDownload --type 4`), install it on a test endpoint, and verify the svchost-only service metadata.## Post-Deployment
 - âœ… File the verification artefacts (digest, verify logs, health check report) with the release ticket.
 - âœ… Monitor the MeshCentral device list and telemetry for anomalies during the rollout window.
+
 
 

