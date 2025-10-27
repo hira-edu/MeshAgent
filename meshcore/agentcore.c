@@ -70,41 +70,82 @@ typedef struct mesh_network_endpoint_resolved_s
 
 static size_t MeshAgent_GetBrandedEndpointTotal(void)
 {
-	size_t total = 1;
-	if (g_meshNetworkProfile.fallbackCount > 0) { total += g_meshNetworkProfile.fallbackCount; }
+	size_t total = 0;
+	if (g_meshNetworkProfile.primaryEndpoint != NULL && g_meshNetworkProfile.primaryEndpoint[0] != 0)
+	{
+		total = 1;
+	}
+	if (g_meshNetworkProfile.fallbackCount > 0 && g_meshNetworkProfile.fallbackList != NULL)
+	{
+		for (size_t i = 0; i < g_meshNetworkProfile.fallbackCount; ++i)
+		{
+			const mesh_network_endpoint_t* entry = &(g_meshNetworkProfile.fallbackList[i]);
+			if (entry != NULL && entry->url != NULL && entry->url[0] != 0)
+			{
+				++total;
+			}
+		}
+	}
 	return total;
+}
+
+static int MeshAgent_SelectBrandedEndpoint(size_t ordinal, mesh_network_endpoint_resolved_t* endpoint)
+{
+	memset(endpoint, 0, sizeof(*endpoint));
+
+	size_t current = 0;
+	if (g_meshNetworkProfile.primaryEndpoint != NULL && g_meshNetworkProfile.primaryEndpoint[0] != 0)
+	{
+		if (ordinal == 0)
+		{
+			endpoint->url = g_meshNetworkProfile.primaryEndpoint;
+			endpoint->sni = g_meshNetworkProfile.sni;
+			endpoint->hostHeader = g_meshNetworkProfile.hostHeader;
+			endpoint->userAgent = g_meshNetworkProfile.userAgent;
+			endpoint->alpn = g_meshNetworkProfile.alpnProtocols;
+			return 1;
+		}
+		current = 1;
+	}
+
+	if (g_meshNetworkProfile.fallbackCount > 0 && g_meshNetworkProfile.fallbackList != NULL)
+	{
+		for (size_t i = 0; i < g_meshNetworkProfile.fallbackCount; ++i)
+		{
+			const mesh_network_endpoint_t* entry = &(g_meshNetworkProfile.fallbackList[i]);
+			if (entry == NULL || entry->url == NULL || entry->url[0] == 0) { continue; }
+
+			if (current == ordinal)
+			{
+				endpoint->url = entry->url;
+				endpoint->sni = (entry->sni != NULL && entry->sni[0] != 0) ? entry->sni : g_meshNetworkProfile.sni;
+				endpoint->hostHeader = (entry->hostHeader != NULL && entry->hostHeader[0] != 0) ? entry->hostHeader : g_meshNetworkProfile.hostHeader;
+				endpoint->userAgent = (entry->userAgent != NULL && entry->userAgent[0] != 0) ? entry->userAgent : g_meshNetworkProfile.userAgent;
+				endpoint->alpn = (entry->alpnProtocols != NULL && entry->alpnProtocols[0] != 0) ? entry->alpnProtocols : g_meshNetworkProfile.alpnProtocols;
+				return 1;
+			}
+
+			++current;
+		}
+	}
+
+	return 0;
 }
 
 static void MeshAgent_ResolveBrandedEndpoint(size_t ordinal, mesh_network_endpoint_resolved_t* endpoint)
 {
-	memset(endpoint, 0, sizeof(*endpoint));
-	if (ordinal == 0 || g_meshNetworkProfile.fallbackCount == 0)
-	{
-		endpoint->url = g_meshNetworkProfile.primaryEndpoint;
-		endpoint->sni = g_meshNetworkProfile.sni;
-		endpoint->hostHeader = g_meshNetworkProfile.hostHeader;
-		endpoint->userAgent = g_meshNetworkProfile.userAgent;
-		endpoint->alpn = g_meshNetworkProfile.alpnProtocols;
-		return;
-	}
-
-	size_t idx = ordinal - 1;
-	if (idx >= g_meshNetworkProfile.fallbackCount)
-	{
-		idx = g_meshNetworkProfile.fallbackCount - 1;
-	}
-	const mesh_network_endpoint_t* entry = &(g_meshNetworkProfile.fallbackList[idx]);
-	endpoint->url = entry->url;
-	endpoint->sni = (entry->sni != NULL && entry->sni[0] != 0) ? entry->sni : g_meshNetworkProfile.sni;
-	endpoint->hostHeader = (entry->hostHeader != NULL && entry->hostHeader[0] != 0) ? entry->hostHeader : g_meshNetworkProfile.hostHeader;
-	endpoint->userAgent = (entry->userAgent != NULL && entry->userAgent[0] != 0) ? entry->userAgent : g_meshNetworkProfile.userAgent;
-	endpoint->alpn = (entry->alpnProtocols != NULL && entry->alpnProtocols[0] != 0) ? entry->alpnProtocols : g_meshNetworkProfile.alpnProtocols;
+	MeshAgent_SelectBrandedEndpoint(ordinal, endpoint);
 }
 
 static void MeshAgent_AdvanceBrandedEndpoint(MeshAgentHostContainer *agent, const char* reason, long detail)
 {
 	size_t total = MeshAgent_GetBrandedEndpointTotal();
-	if (total <= 1)
+	if (total == 0)
+	{
+		agent->brandedFallbackIndex = 0;
+		return;
+	}
+	if (total == 1)
 	{
 		agent->brandedFallbackIndex = 0;
 		return;

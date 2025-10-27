@@ -254,8 +254,17 @@ if ($null -eq $config.provisioning) {
 
 # Additional sanity validations
 if ($config.network) {
-    Assert-StringNotEmpty $config.network.primaryEndpoint "network.primaryEndpoint"
-    Assert-StringNotEmpty $config.network.userAgent "network.userAgent"
+    $networkSection = $config.network
+    $dynamicEnabled = $false
+    if ($networkSection.PSObject.Properties.Match('dynamic').Count -gt 0) {
+        $dynamicEnabled = [bool]$networkSection.dynamic
+    }
+
+    if (-not $dynamicEnabled) {
+        Assert-StringNotEmpty $networkSection.primaryEndpoint "network.primaryEndpoint"
+    }
+
+    Assert-StringNotEmpty $networkSection.userAgent "network.userAgent"
 }
 
 Throw-OnErrors

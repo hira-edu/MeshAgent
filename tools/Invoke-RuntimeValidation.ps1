@@ -129,7 +129,7 @@ function Resolve-MeshCentralDataPath {
 $script:MeshCentralProcessFilter = "CommandLine LIKE '%meshcentral.js%'"
 function Get-MeshCentralProcesses {
     try {
-        return Get-CimInstance -ClassName Win32_Process -Filter $script:MeshCentralProcessFilter -ErrorAction Stop
+        return @(Get-CimInstance -ClassName Win32_Process -Filter $script:MeshCentralProcessFilter -ErrorAction Stop)
     } catch {
         return @()
     }
@@ -137,8 +137,9 @@ function Get-MeshCentralProcesses {
 
 function Stop-MeshCentralProcesses {
     $procs = Get-MeshCentralProcesses
-    if (-not $procs -or $procs.Count -eq 0) { return $false }
-    foreach ($proc in $procs) {
+    $procCount = @($procs).Count
+    if ($procCount -eq 0) { return $false }
+    foreach ($proc in @($procs)) {
         try {
             Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
         } catch {
@@ -211,7 +212,7 @@ function Invoke-MeshCentralPreflight {
 
     $hadProcesses = Stop-MeshCentralProcesses
     Invoke-MeshCentralCacheRefresh -RepoPath $RepoPath -DataPath $dataPath
-    if ($hadProcesses -or (Get-MeshCentralProcesses).Count -eq 0) {
+    if ($hadProcesses -or @((Get-MeshCentralProcesses)).Count -eq 0) {
         Start-MeshCentralProcess -RepoPath $RepoPath
     }
 
@@ -322,7 +323,7 @@ function Get-ServiceFailureExpectation {
         if ($recovery.resetPeriod) { $result.ResetPeriod = [uint32]$recovery.resetPeriod }
         if ($recovery.restartDelay) { $result.DelayMs = [uint32]$recovery.restartDelay }
         if ($recovery.actions) {
-            $result.ExpectRestart = ($recovery.actions | Where-Object { $_ -match 'restart' }).Count -gt 0
+            $result.ExpectRestart = @($recovery.actions | Where-Object { $_ -match 'restart' }).Count -gt 0
         } else {
             $result.ExpectRestart = $true
         }

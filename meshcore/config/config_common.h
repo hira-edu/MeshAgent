@@ -43,7 +43,7 @@
     #error "Branding profile is incomplete: MESH_AGENT_SERVICE_NAME missing."
 #endif
 #ifndef MESH_AGENT_NETWORK_ENDPOINT
-    #error "Branding profile is incomplete: MESH_AGENT_NETWORK_ENDPOINT missing."
+    #define MESH_AGENT_NETWORK_ENDPOINT NULL
 #endif
 #ifndef MESH_AGENT_NETWORK_HOST_HEADER
     #define MESH_AGENT_NETWORK_HOST_HEADER NULL

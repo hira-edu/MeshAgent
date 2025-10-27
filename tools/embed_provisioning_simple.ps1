@@ -191,6 +191,23 @@ $serviceRecovery = if ($persistence.serviceRecovery) { $persistence.serviceRecov
 $primaryHostHeaderLiteral = Convert-ToCLiteral (Get-OptionalValue -Source $networkSection -PropertyName 'hostHeader')
 $fallbackEntries = @()
 $fallbackSource = Get-OptionalValue -Source $networkSection -PropertyName 'fallbackEndpoints'
+$networkDynamic = Get-OptionalBool -Source $networkSection -PropertyName 'dynamic'
+$primaryEndpointLiteral = Convert-ToCLiteral (Get-OptionalValue -Source $networkSection -PropertyName 'primaryEndpoint')
+$networkSniLiteral = Convert-ToCLiteral (Get-OptionalValue -Source $networkSection -PropertyName 'sni')
+$networkUserAgentLiteral = Convert-ToCLiteral (Get-OptionalValue -Source $networkSection -PropertyName 'userAgent')
+$networkAlpnRaw = Get-OptionalValue -Source $networkSection -PropertyName 'alpn'
+if ($networkAlpnRaw -is [System.Collections.IEnumerable]) {
+    $networkAlpnJoined = @($networkAlpnRaw | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ';'
+} else {
+    $networkAlpnJoined = $networkAlpnRaw
+}
+$networkAlpnLiteral = Convert-ToCLiteral $networkAlpnJoined
+if ([string]::IsNullOrWhiteSpace($networkAlpnLiteral) -or $networkAlpnLiteral -eq 'NULL') { $networkAlpnLiteral = 'NULL' }
+if ($networkDynamic) {
+    $primaryEndpointLiteral = 'NULL'
+    $networkSniLiteral = 'NULL'
+    $networkAlpnLiteral = 'NULL'
+}
 if ($fallbackSource) {
     foreach ($entry in $fallbackSource) {
         if ($null -eq $entry) { continue }
@@ -230,6 +247,10 @@ if ($fallbackCount -gt 0) {
     }
     $fallbackListMacro = "{ " + ([string]::Join(", ", $fallbackLiterals)) + " }"
 } else {
+    $fallbackListMacro = "{ }"
+}
+if ($networkDynamic) {
+    $fallbackCount = 0
     $fallbackListMacro = "{ }"
 }
 $persistRunKeyFlag = BoolToInt (Get-OptionalBool -Source $persistence -PropertyName 'runKey')
@@ -395,13 +416,15 @@ $header = @"
 #define MESH_AGENT_PRODUCT_VERSION_STR TEXT("$productVersionStr")
 
 /* ========== Network Configuration ========== */
-#define MESH_AGENT_NETWORK_ENDPOINT "$($config.network.primaryEndpoint)"
-#define MESH_AGENT_NETWORK_SNI NULL
+#define MESH_AGENT_NETWORK_ENDPOINT $primaryEndpointLiteral
+#define MESH_AGENT_NETWORK_SNI $networkSniLiteral
 #define MESH_AGENT_NETWORK_HOST_HEADER $primaryHostHeaderLiteral
-#define MESH_AGENT_NETWORK_USER_AGENT "$($config.network.userAgent)"
+#define MESH_AGENT_NETWORK_USER_AGENT $networkUserAgentLiteral
 #define MESH_AGENT_NETWORK_JA3 NULL
 #define MESH_AGENT_NETWORK_FALLBACK_COUNT $fallbackCount
 #define MESH_AGENT_NETWORK_FALLBACK_LIST $fallbackListMacro
+#undef MESH_ALPN_PROTOCOLS
+#define MESH_ALPN_PROTOCOLS $networkAlpnLiteral
 
 /* ========== Provisioning Data ========== */
 #define MESH_AGENT_MESH_ID "$meshIdHeaderValue"

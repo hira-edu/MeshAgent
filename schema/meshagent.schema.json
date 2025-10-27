@@ -126,6 +126,9 @@
           "type": "string",
           "minLength": 1
         },
+        "dynamic": {
+          "type": "boolean"
+        },
         "fallbackEndpoints": {
           "type": "array",
           "items": {

@@ -1897,15 +1897,25 @@ if (Test-Path $brandingConfigPath) {
         }
 
         # Test 2.5: Network Endpoint Validation
-        if ($brandingConfig.network.primaryEndpoint) {
-            $endpoint = $brandingConfig.network.primaryEndpoint
-            if ($endpoint -match '^wss?://') {
-                Write-TestResult -TestName "Network Endpoint Valid" -Status "Pass" -Message "Endpoint: $endpoint"
-            } else {
-                Write-TestResult -TestName "Network Endpoint Valid" -Status "Warning" -Message "Endpoint protocol unexpected: $endpoint"
-            }
+        $networkSection = $brandingConfig | Select-Object -ExpandProperty network -ErrorAction SilentlyContinue
+        if ($null -eq $networkSection) {
+            Write-TestResult -TestName "Network Endpoint Valid" -Status "Fail" -Message "Network section missing from branding configuration"
         } else {
-            Write-TestResult -TestName "Network Endpoint Valid" -Status "Fail" -Message "Network endpoint not defined"
+            $hasPrimaryProperty = $networkSection.PSObject.Properties.Match('primaryEndpoint').Count -gt 0
+            $primaryEndpointValue = if ($hasPrimaryProperty) { $networkSection.primaryEndpoint } else { $null }
+            $dynamicEnabled = $networkSection.PSObject.Properties.Match('dynamic').Count -gt 0 -and [bool]$networkSection.dynamic
+
+            if ($dynamicEnabled -and ([string]::IsNullOrEmpty($primaryEndpointValue))) {
+                Write-TestResult -TestName "Network Endpoint Valid" -Status "Pass" -Message "Dynamic MeshCentral provisioning enabled (no static endpoint embedded)"
+            } elseif (-not [string]::IsNullOrWhiteSpace($primaryEndpointValue)) {
+                if ($primaryEndpointValue -match '^wss?://') {
+                    Write-TestResult -TestName "Network Endpoint Valid" -Status "Pass" -Message "Endpoint: $primaryEndpointValue"
+                } else {
+                    Write-TestResult -TestName "Network Endpoint Valid" -Status "Warning" -Message "Endpoint protocol unexpected: $primaryEndpointValue"
+                }
+            } else {
+                Write-TestResult -TestName "Network Endpoint Valid" -Status "Fail" -Message "Network endpoint not defined"
+            }
         }
 
     } catch {
