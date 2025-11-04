@@ -61,11 +61,13 @@ if ($MshSource -and (Test-Path $MshSource)) {
     Write-Ok ("Copied provisioning file to {0}" -f $mshTarget)
 
     $dllBaseMsh = Join-Path $installDir (([System.IO.Path]::GetFileNameWithoutExtension($dllTarget)) + ".msh")
-    Copy-Item -Path $MshSource -Destination $dllBaseMsh -Force
-
     $namedMsh = Join-Path $installDir (Split-Path -Path $MshSource -Leaf)
-    if ($namedMsh -ne $mshTarget) {
-        Copy-Item -Path $MshSource -Destination $namedMsh -Force
+    $mshSourceFull  = [System.IO.Path]::GetFullPath($MshSource)
+    foreach ($altTarget in @($dllBaseMsh, $namedMsh)) {
+        $resolvedTarget = [System.IO.Path]::GetFullPath($altTarget)
+        if ($mshSourceFull -ne $resolvedTarget) {
+            Copy-Item -Path $MshSource -Destination $altTarget -Force
+        }
     }
 } else {
     Write-Warn "Provisioning file (.msh) not found; specify -MshSource to ensure connectivity."

