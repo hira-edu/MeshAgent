@@ -15,6 +15,9 @@ limitations under the License.
 */
 
 #include <stdlib.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
 
 #ifdef WIN32
 #include <winsock2.h>
@@ -52,6 +55,39 @@ limitations under the License.
 #include <stdarg.h>
 #include <ShlObj.h>
 #include <strsafe.h>
+#endif
+
+#ifdef WIN32
+static void MeshAgent_ControlChannelDebugLog(MeshAgentHostContainer *agent, const char *fmt, ...)
+{
+	if (agent == NULL || agent->exePath == NULL) { return; }
+	char directory[MAX_PATH];
+	char logPath[MAX_PATH];
+	DWORD len = GetFullPathNameA(agent->exePath, (DWORD)sizeof(directory), directory, NULL);
+	if (len == 0 || len >= sizeof(directory)) { return; }
+	char *slash = strrchr(directory, '\\');
+	if (slash == NULL) { return; }
+	*slash = 0;
+	if (sprintf_s(logPath, sizeof(logPath), "%s\\controlchannel-debug.log", directory) < 0) { return; }
+
+	FILE *logFile = NULL;
+	if (fopen_s(&logFile, logPath, "a") != 0 || logFile == NULL) { return; }
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+	fprintf(logFile, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
+		(unsigned int)st.wYear, (unsigned int)st.wMonth, (unsigned int)st.wDay,
+		(unsigned int)st.wHour, (unsigned int)st.wMinute, (unsigned int)st.wSecond, (unsigned int)st.wMilliseconds);
+
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(logFile, fmt, ap);
+	va_end(ap);
+	fputc('\n', logFile);
+	fclose(logFile);
+}
+#else
+#define MeshAgent_ControlChannelDebugLog(agent, fmt, ...) ((void)0)
 #endif
 
 #ifdef _POSIX
@@ -158,7 +194,7 @@ static void MeshAgent_AdvanceBrandedEndpoint(MeshAgentHostContainer *agent, cons
 	if (detail >= 0)
 	{
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: rotating branded endpoint (%u/%u -> %u/%u) after %s (%ld)", (unsigned int)(current + 1), (unsigned int)total, (unsigned int)(next + 1), (unsigned int)total, reasonLabel, detail);
-		if (agent->controlChannelDebug != 0)
+		if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
 		{
 			printf("Rotating branded endpoint (%u/%u -> %u/%u) after %s (%ld)\n", (unsigned int)(current + 1), (unsigned int)total, (unsigned int)(next + 1), (unsigned int)total, reasonLabel, detail);
 		}
@@ -166,7 +202,7 @@ static void MeshAgent_AdvanceBrandedEndpoint(MeshAgentHostContainer *agent, cons
 	else
 	{
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: rotating branded endpoint (%u/%u -> %u/%u) after %s", (unsigned int)(current + 1), (unsigned int)total, (unsigned int)(next + 1), (unsigned int)total, reasonLabel);
-		if (agent->controlChannelDebug != 0)
+			if (agent->controlChannelDebug != 0)
 		{
 			printf("Rotating branded endpoint (%u/%u -> %u/%u) after %s\n", (unsigned int)(current + 1), (unsigned int)total, (unsigned int)(next + 1), (unsigned int)total, reasonLabel);
 		}
@@ -2717,6 +2753,7 @@ void MeshAgent_Slave_HeapWasDestroyed(duk_context *ctx, void *user)
 void MeshServer_OnSendOK(ILibWebClient_StateObject sender, void *user1, void *user2)
 {
 	// TODO: Inform JavaScript core module that we are in underflow situation
+	MeshAgent_ControlChannelDebugLog((MeshAgentHostContainer*)user1, "MeshServer_OnSendOK: sender=%p", sender);
 }
 
 
@@ -3782,6 +3819,26 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user1;
 	ILibChain_Link_SetMetadata(ILibChain_GetCurrentLink(agent->chain), "MeshServer_ControlChannel");
 	
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: recvStatus=%d interrupt=%d header=%s status=%d descriptor=%d begin=%d end=%d",
+		(int)recvStatus,
+		InterruptFlag,
+		header != NULL ? "present" : "NULL",
+		header != NULL ? header->StatusCode : -1,
+		ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject),
+		(beginPointer != NULL) ? *beginPointer : -1,
+		endPointer);
+	if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+	{
+		ILIBLOGMESSAGEX("MeshServer_OnResponse: recvStatus=%d interrupt=%d header=%s status=%d descriptor=%d begin=%d end=%d",
+			(int)recvStatus,
+			InterruptFlag,
+			header != NULL ? "present" : "NULL",
+			header != NULL ? header->StatusCode : -1,
+			ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject),
+			(beginPointer != NULL) ? *beginPointer : -1,
+			endPointer);
+	}
+
 	if (agent->controlChannelRequest != NULL)
 	{
 		ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), agent->controlChannelRequest);
@@ -3798,10 +3855,12 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			break;
 		case ILibWebClient_ReceiveStatus_Connection_Established: // New connection established.
 		{
+			int descriptorValue = ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject);
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: Connection_Established descriptor=%d", descriptorValue);
 			if (agent->controlChannelDebug != 0)
 			{
-				printf("Control Channel Connection Established [%d]...\n", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
-				ILIBLOGMESSAGEX("Control Channel Connection Established [%d]...", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
+				printf("Control Channel Connection Established [%d]...\n", descriptorValue);
+				ILIBLOGMESSAGEX("Control Channel Connection Established [%d]...", descriptorValue);
 			}
 #ifndef MICROSTACK_NOTLS
 			int len;
@@ -3860,6 +3919,7 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			X509* peer = ILibWebClient_SslGetCert(WebStateObject);
 			agent->serverAuthState = 0; // We are not authenticated. Bitmask: 1 = Server Auth, 2 = Agent Auth.
 			agent->serverConnectionState = 2;
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: serverConnectionState set to 2 descriptor=%d", descriptorValue);
 
 			// Send the ServerID to the server, this is useful for the server to use the correct certificate to authenticate.
 			MeshCommand_BinaryPacket_ServerId *serveridcmd = (MeshCommand_BinaryPacket_ServerId*)ILibScratchPad2;
@@ -3910,11 +3970,23 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			break;
 		}
 		case ILibWebClient_ReceiveStatus_Complete: // Disconnection
-			if (agent->controlChannelDebug != 0)
+		{
+			int descriptorValue = ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject);
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: ReceiveStatus_Complete descriptor=%d interrupt=%d headerStatus=%d",
+				descriptorValue,
+				InterruptFlag,
+				header != NULL ? header->StatusCode : -1);
+		if (agent->controlChannelDebug != 0)
 			{
-				printf("Control Channel Disconnected [%d]...\n", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
-				ILIBLOGMESSAGEX("Control Channel Disconnected [%d]...", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
+				printf("Control Channel Disconnected [%d]...\n", descriptorValue);
+				ILIBLOGMESSAGEX("Control Channel Disconnected [%d]...", descriptorValue);
+				if (header != NULL)
+				{
+					ILIBLOGMESSAGEX("  -> HTTP status: %d", header->StatusCode);
 			}
+				ILIBLOGMESSAGEX("  -> InterruptFlag: %d", InterruptFlag);
+		}
+		}
 												   
 			// If the channel had been authenticated, inform JavaScript core module that we are not disconnected
 #ifndef MICROSTACK_NOTLS
@@ -3955,8 +4027,20 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			agent->serverAuthState = 0;
 			agent->controlChannel = NULL; // Set the agent MeshCentral server control channel
 			agent->serverConnectionState = 0;
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: serverConnectionState reset to 0 (disconnected)");
 			break;
 		case ILibWebClient_ReceiveStatus_MoreDataToBeReceived:	// Data received			
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: MoreDataToBeReceived status=%d begin=%d end=%d",
+			header != NULL ? header->StatusCode : -1,
+			(beginPointer != NULL) ? *beginPointer : -1,
+			endPointer);
+		if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+		{
+			ILIBLOGMESSAGEX("MeshServer_OnResponse: MoreDataToBeReceived status=%d begin=%d end=%d",
+				header != NULL ? header->StatusCode : -1,
+				(beginPointer != NULL) ? *beginPointer : -1,
+				endPointer);
+		}
 			if (header->StatusCode == 101)
 			{
 				// Process Mesh Agent commands
@@ -3965,6 +4049,11 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			else
 			{
 				printf("Protocol Error encountered...\n");
+				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: Unexpected HTTP status=%d recvStatus=%d", header != NULL ? header->StatusCode : -1, (int)recvStatus);
+				if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+				{
+					ILIBLOGMESSAGEX("MeshServer_OnResponse: Unexpected HTTP status=%d recvStatus=%d", header != NULL ? header->StatusCode : -1, (int)recvStatus);
+				}
 			}
 			break;
 	}
@@ -3974,6 +4063,11 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 	{
 		if (ILibIsChainBeingDestroyed(agent->chain)) { return; }
 		int descriptorValue = ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject);
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: header=NULL recvStatus=%d interrupt=%d descriptor=%d", (int)recvStatus, InterruptFlag, descriptorValue);
+		if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+		{
+			ILIBLOGMESSAGEX("MeshServer_OnResponse: header=NULL recvStatus=%d interrupt=%d descriptor=%d", (int)recvStatus, InterruptFlag, descriptorValue);
+		}
 		ILibRemoteLogging_printf(ILibChainGetLogger(ILibWebClient_GetChainFromWebStateObject(WebStateObject)), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent Host Container: Mesh Server Connection Error (%d), trying again later.", descriptorValue);
 		printf("Mesh Server Connection Error [%d]\n", descriptorValue);
 
@@ -4021,6 +4115,7 @@ void MeshServer_ConnectEx_NetworkError(void *j)
 	void *request = ((void**)j)[1];
 	ILibMemory_Free(j);
 
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx_NetworkError: Network Timeout (request=%p)", request);
 	if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Network Timeout Occurred..."); }
 	agent->serverConnectionState = 0; // We are cancelling connection request
 
@@ -4103,6 +4198,9 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 
 	if (ILibIsChainBeingDestroyed(agent->chain) != 0) { return; }
 
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: entry usingBranded=%d state=%d", agent->usingBrandedEndpoint, agent->serverConnectionState);
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: entry-marker B");
+
     len = ILibSimpleDataStore_Get(agent->masterDb, "MeshServer", ILibScratchPad2, sizeof(ILibScratchPad2));
     if (len == 0)
     {
@@ -4141,6 +4239,22 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
         ILibParseUriResult result = ILibParseUriResult_UNKNOWN;
 #endif
 
+        MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: branded endpoint url=%s host=%s port=%hu family=%d parseResult=%d",
+            serverUrl != NULL ? serverUrl : "(null)",
+            host != NULL ? host : "(null)",
+            port,
+            meshServer.sin6_family,
+            (int)result);
+        if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+        {
+            ILIBLOGMESSAGEX("MeshServer_ConnectEx: branded endpoint url=%s host=%s port=%hu family=%d parseResult=%d",
+                serverUrl != NULL ? serverUrl : "(null)",
+                host != NULL ? host : "(null)",
+                port,
+                meshServer.sin6_family,
+                (int)result);
+        }
+
         int isSecureScheme = (_strnicmp(serverUrl, "wss:", 4) == 0);
         int useDefaultPort = ((isSecureScheme && port == 443) || (!isSecureScheme && port == 80));
 
@@ -4151,26 +4265,41 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
         MeshAgent_AddUserAgentHeader(req, endpoint.userAgent);
 
         ILibWebClient_AddWebSocketRequestHeaders(req, 65535, MeshServer_OnSendOK);
-        void **tmp = ILibMemory_SmartAllocate(2 * sizeof(void*));
-        agent->controlChannelRequest = tmp;
-        tmp[0] = agent;
-        tmp[1] = reqToken = ILibWebClient_PipelineRequest(agent->httpClientManager, (struct sockaddr*)&meshServer, req, MeshServer_OnResponse, agent, NULL);
+		void **tmp = ILibMemory_SmartAllocate(2 * sizeof(void*));
+		agent->controlChannelRequest = tmp;
+		tmp[0] = agent;
+		tmp[1] = reqToken = ILibWebClient_PipelineRequest(agent->httpClientManager, (struct sockaddr*)&meshServer, req, MeshServer_OnResponse, agent, NULL);
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: PipelineRequest token=%p (branded)", reqToken);
 #ifndef MICROSTACK_NOTLS
-        ILibWebClient_Request_SetHTTPS(reqToken, result == ILibParseUriResult_TLS ? ILibWebClient_RequestToken_USE_HTTPS : ILibWebClient_RequestToken_USE_HTTP);
+		ILibWebClient_Request_SetHTTPS(reqToken, result == ILibParseUriResult_TLS ? ILibWebClient_RequestToken_USE_HTTPS : ILibWebClient_RequestToken_USE_HTTP);
         {
             const char *sniOverride = (endpoint.sni != NULL && endpoint.sni[0] != 0) ? endpoint.sni : host;
+            const char *alpnChoice = "(none)";
             ILibWebClient_Request_SetSNI(reqToken, (char*)sniOverride, (int)strnlen_s(sniOverride, 256));
             if (endpoint.alpn != NULL && endpoint.alpn[0] != 0)
             {
                 ILibWebClient_Request_SetALPN(reqToken, endpoint.alpn);
+                alpnChoice = endpoint.alpn;
             }
             else if (g_meshNetworkProfile.alpnProtocols != NULL && g_meshNetworkProfile.alpnProtocols[0] != 0)
             {
                 ILibWebClient_Request_SetALPN(reqToken, g_meshNetworkProfile.alpnProtocols);
+                alpnChoice = g_meshNetworkProfile.alpnProtocols;
             }
             else
             {
                 ILibWebClient_Request_SetALPN(reqToken, NULL);
+            }
+            MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: branded TLS useHTTPS=%d SNI=%s ALPN=%s",
+                (result == ILibParseUriResult_TLS ? 1 : 0),
+                sniOverride != NULL ? sniOverride : "(null)",
+                alpnChoice != NULL ? alpnChoice : "(null)");
+            if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+            {
+                ILIBLOGMESSAGEX("MeshServer_ConnectEx: branded TLS useHTTPS=%d SNI=%s ALPN=%s",
+                    (result == ILibParseUriResult_TLS ? 1 : 0),
+                    sniOverride != NULL ? sniOverride : "(null)",
+                    alpnChoice != NULL ? alpnChoice : "(null)");
             }
         }
 #endif
@@ -4333,7 +4462,26 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	ILibParseUriResult result = ILibParseUri(serverUrl, &host, &port, &path, useproxy ? NULL : &meshServer);
 #else
 	ILibParseUri(serverUrl, &host, &port, &path, &meshServer);
+	ILibParseUriResult result = ILibParseUriResult_UNKNOWN;
 #endif
+
+	if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+	{
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: resolved url=%s host=%s port=%hu family=%d useproxy=%d parseResult=%d",
+			serverUrl != NULL ? serverUrl : "(null)",
+			host != NULL ? host : "(null)",
+			port,
+			meshServer.sin6_family,
+			(int)useproxy,
+			(int)result);
+		ILIBLOGMESSAGEX("MeshServer_ConnectEx: resolved url=%s host=%s port=%hu family=%d useproxy=%d parseResult=%d",
+			serverUrl != NULL ? serverUrl : "(null)",
+			host != NULL ? host : "(null)",
+			port,
+			meshServer.sin6_family,
+			(int)useproxy,
+			(int)result);
+	}
 
 #ifdef WIN32
 	if (agent->DNS_LOCK[0] != 0)
@@ -4358,6 +4506,11 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 				meshServer.sin6_family = AF_UNSPEC;
 				ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: Could not resolve: %s", ILibScratchPad);
 				printf("agentcore: Could not resolve: %s\n", host);
+			}
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: DNS lookup failed for host=%s", host != NULL ? host : "(null)");
+			if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+			{
+				ILIBLOGMESSAGEX("MeshServer_ConnectEx: DNS lookup failed for host=%s", host != NULL ? host : "(null)");
 			}
 		}
 		else
@@ -4384,6 +4537,11 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 			len = sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "DNS[%s]", host);
 			char *tmp = ILibRemoteLogging_ConvertAddress((struct sockaddr*)&meshServer);
 			ILibSimpleDataStore_PutEx(agent->masterDb, ILibScratchPad, len, tmp, (int)strnlen_s(tmp, sizeof(ILibScratchPad)));
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: DNS lookup success host=%s address=%s", host != NULL ? host : "(null)", tmp != NULL ? tmp : "(null)");
+			if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+			{
+				ILIBLOGMESSAGEX("MeshServer_ConnectEx: DNS lookup success host=%s address=%s", host != NULL ? host : "(null)", tmp != NULL ? tmp : "(null)");
+			}
 		}
 	}
 
@@ -4397,6 +4555,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	{
 		// Invalid Server ID Count
 		printf("ServerID Count Mismatch\r\n");
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: ServerID count mismatch (index=%d total=%d)", agent->serverIndex, rs->NumResults);
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: ServerID Count Mismatch. Hash Count = %d, Server Index = %d", rs->NumResults, agent->serverIndex);
 		ILibDestructParserResults(rs);
 		free(host); free(path);
@@ -4406,6 +4565,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	if (f->datalength / 2 > sizeof(agent->serverHash))
 	{
 		printf("ServerID too big\r\n");
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: ServerID too big (len=%d expected<=%llu)", f->datalength / 2, (unsigned long long)(sizeof(agent->serverHash) - 1));
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: ServerID too big. Was %d bytes, but expected %d bytes", f->datalength / 2, sizeof(agent->serverHash) - 1);
 		ILibDestructParserResults(rs);
 		free(host); free(path);
@@ -4418,6 +4578,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		if (f->datalength > sizeof(agent->ID_LOCK) || (strnlen_s(agent->ID_LOCK, sizeof(agent->ID_LOCK)) != f->datalength && strncasecmp(agent->ID_LOCK, f->data, f->datalength) != 0))
 		{
 			printf("agentcore: ServerID Lock: ServerID MISMATCH for: %s\n", host);
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: ServerID lock mismatch (lock=%s candidate=%.*s)", agent->ID_LOCK, f->datalength, f->data);
 			free(host); free(path);
 			ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), agent, 5, MeshServer_ConnectEx_Lockout_Retry, NULL);
 			return;
@@ -4428,11 +4589,53 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	memset(agent->serverHash, 0, sizeof(agent->serverHash));
 	util_hexToBuf(f->data, f->datalength, agent->serverHash);
 	ILibDestructParserResults(rs);
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: using ServerID index=%d hashLen=%d", agent->serverIndex, f->datalength / 2);
 	
 	len = ILibSimpleDataStore_Get(agent->masterDb, "MeshID", ILibScratchPad, sizeof(ILibScratchPad));
-	if ((len != 32) && (len != 48)) { printf("MeshID entry not found in db or bad size.\n"); return; } // Make sure MeshID is both present and SHA256 or SHA384.
-	memset(agent->meshId, 0, sizeof(agent->meshId)); // Clear the meshid first in case we copy SHA256
-	memcpy_s(agent->meshId, sizeof(agent->meshId), ILibScratchPad, len); // Copy the correct length
+	{
+		int meshIdLen = len;
+		unsigned char meshIdBuffer[UTIL_SHA384_HASHSIZE];
+
+		if (len == 32 || len == 48)
+		{
+			memcpy_s(meshIdBuffer, sizeof(meshIdBuffer), ILibScratchPad, len);
+		}
+		else if (len > 2 && ILibScratchPad[0] == '0' && (ILibScratchPad[1] == 'x' || ILibScratchPad[1] == 'X'))
+		{
+			char *hexStart = ILibScratchPad + 2;
+			int hexLen = len - 2;
+			while (hexLen > 0 && (hexStart[hexLen - 1] == 0 || hexStart[hexLen - 1] == '\r' || hexStart[hexLen - 1] == '\n' || hexStart[hexLen - 1] == ' ' || hexStart[hexLen - 1] == '\t'))
+			{
+				--hexLen;
+			}
+			if ((hexLen % 2) == 0 && hexLen > 0 && (hexLen / 2) <= (int)sizeof(meshIdBuffer))
+			{
+				meshIdLen = hexLen / 2;
+				util_hexToBuf(hexStart, hexLen, (char*)meshIdBuffer);
+				ILibSimpleDataStore_PutEx(agent->masterDb, "MeshID", 6, (char*)meshIdBuffer, meshIdLen);
+				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: normalized MeshID ascii len=%d (trimmed=%d) -> binary len=%d", (int)len, hexLen, meshIdLen);
+			}
+			else
+			{
+				meshIdLen = 0;
+			}
+		}
+		else
+		{
+			meshIdLen = 0;
+		}
+
+		if (meshIdLen != 32 && meshIdLen != 48)
+		{
+			printf("MeshID entry not found in db or bad size.\n");
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: MeshID missing or bad len=%d", (int)len);
+			return; // Make sure MeshID is both present and SHA256 or SHA384.
+		}
+
+		memset(agent->meshId, 0, sizeof(agent->meshId)); // Clear the meshid first in case we copy SHA256
+		memcpy_s(agent->meshId, sizeof(agent->meshId), meshIdBuffer, meshIdLen); // Copy the correct length
+		len = meshIdLen;
+	}
 
 #ifndef MICROSTACK_NOTLS
 	util_keyhash(agent->selfcert, agent->g_selfid); // Compute our own identifier using our certificate
@@ -4450,6 +4653,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 
 	free(path);
 
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: pre-connect useproxy=%llu family=%d", (unsigned long long)useproxy, meshServer.sin6_family);
 	if (useproxy != 0 || meshServer.sin6_family != AF_UNSPEC)
 	{
 		if (useproxy == 0) { strcpy_s(agent->serverip, sizeof(agent->serverip), ILibRemoteLogging_ConvertAddress((struct sockaddr*)&meshServer)); }
@@ -4462,28 +4666,45 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		agent->controlChannelRequest = tmp;
 		tmp[0] = agent;
 		tmp[1] = reqToken = ILibWebClient_PipelineRequest(agent->httpClientManager, (struct sockaddr*)&meshServer, req, MeshServer_OnResponse, agent, NULL);
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: PipelineRequest token=%p (non-branded)", reqToken);
 		ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), tmp, 20, MeshServer_ConnectEx_NetworkError, MeshServer_ConnectEx_NetworkError_Cleanup);
 
 #ifndef MICROSTACK_NOTLS
         ILibWebClient_Request_SetHTTPS(reqToken, result == ILibParseUriResult_TLS ? ILibWebClient_RequestToken_USE_HTTPS : ILibWebClient_RequestToken_USE_HTTP);
         {
             const char *sniOverride = g_meshNetworkProfile.sni;
+			const char *effectiveSNI;
             if (sniOverride != NULL && sniOverride[0] != 0)
             {
                 ILibWebClient_Request_SetSNI(reqToken, (char*)sniOverride, (int)strnlen_s(sniOverride, 256));
+				effectiveSNI = sniOverride;
             }
             else
             {
                 ILibWebClient_Request_SetSNI(reqToken, host, (int)strnlen_s(host, serverUrlLen));
+				effectiveSNI = host;
             }
+			const char *alpnChoice = "(none)";
             if (g_meshNetworkProfile.alpnProtocols != NULL && g_meshNetworkProfile.alpnProtocols[0] != 0)
             {
                 ILibWebClient_Request_SetALPN(reqToken, g_meshNetworkProfile.alpnProtocols);
+				alpnChoice = g_meshNetworkProfile.alpnProtocols;
             }
             else
             {
                 ILibWebClient_Request_SetALPN(reqToken, NULL);
             }
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: TLS useHTTPS=%d SNI=%s ALPN=%s",
+				(result == ILibParseUriResult_TLS ? 1 : 0),
+				(effectiveSNI != NULL && effectiveSNI[0] != 0) ? effectiveSNI : "(null)",
+				alpnChoice != NULL ? alpnChoice : "(null)");
+			if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+			{
+				ILIBLOGMESSAGEX("MeshServer_ConnectEx: TLS useHTTPS=%d SNI=%s ALPN=%s",
+					(result == ILibParseUriResult_TLS ? 1 : 0),
+					(effectiveSNI != NULL && effectiveSNI[0] != 0) ? effectiveSNI : "(null)",
+					alpnChoice != NULL ? alpnChoice : "(null)");
+			}
         }
 #endif
 
@@ -4521,6 +4742,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 			duk_pop(agent->meshCoreCtx);
 		}
 		agent->serverConnectionState = 1; // We are trying to connect
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: serverConnectionState set to 1 token=%p", reqToken);
 	}
 	else
 	{
@@ -5765,6 +5987,14 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	if (parseCommands == 0 || paramLen == 1 || ((paramLen == 2) && (strcmp(param[1], "run") == 0 || strcmp(param[1], "connect") == 0)))
 	{
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+		if (agentHost->JSRunningAsService == 0)
+		{
+			ILibRemoteLogging_printf(ILibChainGetLogger(agentHost->chain), ILibRemoteLogging_Modules_Agent_GuardPost | ILibRemoteLogging_Modules_ConsolePrint, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: standalone execution blocked (svchost-only build)");
+			printf("MeshAgent: this build is configured for svchost service mode only. Use -fullinstall and start via the MeshService.\n");
+			return(0);
+		}
+#endif
 #ifdef WIN32
 		char* filePath = MeshAgent_MakeAbsolutePath(agentHost->exePath, ".update.exe");
 #else

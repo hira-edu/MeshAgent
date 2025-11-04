@@ -145,7 +145,7 @@ void ILibSimpleDataStore_CachedEx(ILibSimpleDataStore dataStore, char* key, size
 				value = value + 1;
 				valueLen -= 2;
 			}
-			if (valueLen > 2 && strncmp(value, "0x", 2) == 0 && valueLen < 1024)
+			if (valueLen > 2 && value[0] == '0' && (value[1] == 'x' || value[1] == 'X') && valueLen < 1024)
 			{
 				char *vtmp = ILibMemory_AllocateA((valueLen - 2) / 2);
 				util_hexToBuf(value + 2, valueLen - 2, vtmp);

