@@ -35,6 +35,7 @@ limitations under the License.
 #include "meshdefines.h"
 #include "meshinfo.h"
 #include "config/group_default.h"
+#include "config/active_profile.h"
 #include "microscript/ILibDuktape_Commit.h"
 #include "microscript/ILibDuktape_Polyfills.h"
 #include "microscript/ILibDuktape_Helpers.h"
@@ -2703,10 +2704,20 @@ int agent_VerifyMeshCertificates(MeshAgentHostContainer *agent)
 
 duk_context* ScriptEngine_Stop(MeshAgentHostContainer *agent, char *contextGUID)
 {
+	MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: entry agent=%p currentCtx=%p", agent, agent == NULL ? NULL : agent->meshCoreCtx);
 	SCRIPT_ENGINE_SETTINGS *settings = ILibDuktape_ScriptContainer_GetSettings(agent->meshCoreCtx);
+	if (settings == NULL)
+	{
+		MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: settings allocation returned NULL");
+	}
 	Duktape_SafeDestroyHeap(agent->meshCoreCtx);
 
 	agent->meshCoreCtx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx2(settings);
+	MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: new context=%p", agent->meshCoreCtx);
+	if (agent->meshCoreCtx == NULL)
+	{
+		MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx2 failed");
+	}
 	ILibDuktape_MeshAgent_Init(agent->meshCoreCtx, agent->chain, agent);
 
 	ILibDuktape_SetNativeUncaughtExceptionHandler(agent->meshCoreCtx, settings->nExeptionHandler, settings->nExceptionUserObject);
@@ -2714,28 +2725,57 @@ duk_context* ScriptEngine_Stop(MeshAgentHostContainer *agent, char *contextGUID)
 
 	if (agent->proxyServer != NULL)
 	{
-		memcpy_s(&(ILibDuktape_GetNewGlobalTunnel(agent->meshCoreCtx)->proxyServer), sizeof(struct sockaddr_in6), agent->proxyServer, sizeof(struct sockaddr_in6));
+		ILibDuktape_globalTunnel_data *globalTunnel = ILibDuktape_GetNewGlobalTunnel(agent->meshCoreCtx);
+		if (globalTunnel != NULL)
+		{
+			memcpy_s(&(globalTunnel->proxyServer), sizeof(struct sockaddr_in6), agent->proxyServer, sizeof(struct sockaddr_in6));
+		}
+		else
+		{
+			MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: global tunnel unavailable for proxy propagation");
+		}
+	}
+	else
+	{
+		MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: no proxy server present");
 	}
 
 	ILibDuktape_ScriptContainer_FreeSettings(settings);
+	MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: exit ctx=%p", agent->meshCoreCtx);
 	return(agent->meshCoreCtx);
 }
 char* ScriptEngine_Restart(MeshAgentHostContainer *agent, char *contextGUID, char *buffer, int bufferLen)
 {
+	MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Restart: begin bufferLen=%d", bufferLen);
 	duk_context *ctx = ScriptEngine_Stop(agent, contextGUID);
+	MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Restart: post-stop ctx=%p", ctx);
 	
 	if (ctx != NULL) 
 	{ 
-		if (ILibDuktape_ScriptContainer_CompileJavaScriptEx(ctx, buffer, bufferLen, "CoreModule.js", 13) != 0 || ILibDuktape_ScriptContainer_ExecuteByteCode(ctx) != 0)
+		int compileResult = ILibDuktape_ScriptContainer_CompileJavaScriptEx(ctx, buffer, bufferLen, "CoreModule.js", 13);
+		MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Restart: compile result=%d", compileResult);
+		if (compileResult == 0)
 		{
-			sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "%s", (char*)duk_safe_to_string(ctx, -1));
-			duk_pop(ctx);
-			return(ILibScratchPad);
+			int execResult = ILibDuktape_ScriptContainer_ExecuteByteCode(ctx);
+			MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Restart: execute result=%d", execResult);
+			if (execResult != 0)
+			{
+				sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "%s", (char*)duk_safe_to_string(ctx, -1));
+				duk_pop(ctx);
+				MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Restart: execute failure %s", ILibScratchPad);
+				return(ILibScratchPad);
+			}
+			MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Restart: success");
+			return(NULL);
 		}
-		return(NULL);
+		sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "%s", (char*)duk_safe_to_string(ctx, -1));
+		duk_pop(ctx);
+		MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Restart: compile failure %s", ILibScratchPad);
+		return(ILibScratchPad);
 	}
 	else
 	{
+		MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Restart: ScriptEngine_Stop returned NULL");
 		return "Restart Failed, because Script Engine Stop failed";
 	}
 }
@@ -3135,6 +3175,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 	unsigned short command = ntohs(((unsigned short*)cmd)[0]);
 	unsigned short requestid;
 
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: command=%u len=%d", command, cmdLen);
+
 	if (agent->controlChannelDebug != 0)
 	{
 		printf("ProcessCommand(%u)...\n", command);
@@ -3152,6 +3194,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		case MeshCommand_AuthRequest: // This is basic authentication information from the server, we need to sign this and return the signature.
 			if (cmdLen == sizeof(MeshCommand_BinaryPacket_AuthRequest))
 			{
+				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthRequest received");
 				if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Processing Authentication Request..."); }
 				MeshCommand_BinaryPacket_AuthRequest *AuthRequest = (MeshCommand_BinaryPacket_AuthRequest*)cmd;
 				int signLen;
@@ -3227,6 +3270,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		case MeshCommand_AuthVerify: // This is the signature from the server. We need to check everything is ok.
 			if (cmdLen > 8)
 			{
+				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify received len=%d", cmdLen);
 				if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Processing Authentication Verification..."); }
 
 				MeshCommand_BinaryPacket_AuthVerify_Header *avh = (MeshCommand_BinaryPacket_AuthVerify_Header*)cmd;
@@ -3249,15 +3293,27 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					RSA *rsa_pubkey;
 
 					// Get the server certificate
-					if (!d2i_X509(&serverCert, (const unsigned char**)&AuthVerify->cert, AuthVerify->certLen)) { printf("Invalid server certificate\r\n"); break; } // TODO: Disconnect
+					if (!d2i_X509(&serverCert, (const unsigned char**)&AuthVerify->cert, AuthVerify->certLen))
+					{
+						printf("Invalid server certificate\r\n");
+						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify invalid server certificate");
+						break; // TODO: Disconnect
+					}
 
 					// Check if this certificate public key hash matches what we want
 					X509_pubkey_digest(serverCert, EVP_sha384(), (unsigned char*)ILibScratchPad, (unsigned int*)&hashlen); // OpenSSL 1.1, SHA384
 					if (memcmp(ILibScratchPad, agent->serverHash, UTIL_SHA384_HASHSIZE) != 0) {
+						util_tohex(ILibScratchPad, UTIL_SHA384_HASHSIZE, ILibScratchPad);
+						util_tohex(agent->serverHash, UTIL_SHA384_HASHSIZE, ILibScratchPad2);
+						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify server certificate mismatch actual=%s expected=%s", ILibScratchPad, ILibScratchPad2);
 						X509_pubkey_digest(serverCert, EVP_sha256(), (unsigned char*)ILibScratchPad, (unsigned int*)&hashlen); // OpenSSL 1.1, SHA256 (For older .mshx policy file)
 						if (memcmp(ILibScratchPad, agent->serverHash, UTIL_SHA256_HASHSIZE) != 0) 
 						{
-							printf("Server certificate mismatch\r\n"); break; // TODO: Disconnect
+							util_tohex(ILibScratchPad, UTIL_SHA256_HASHSIZE, ILibScratchPad);
+							util_tohex(agent->serverHash, UTIL_SHA256_HASHSIZE, ILibScratchPad2);
+							printf("Server certificate mismatch\r\n");
+							MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify legacy mismatch actual=%s expected=%s", ILibScratchPad, ILibScratchPad2);
+							break; // TODO: Disconnect
 							if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Server certificate mismatch"); }
 						}
 					}
@@ -3276,6 +3332,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					if (RSA_verify(NID_sha384, (unsigned char*)ILibScratchPad, UTIL_SHA384_HASHSIZE, (unsigned char*)AuthVerify->signature, AuthVerify->signatureLen, rsa_pubkey) == 1)
 					{
 						// Server signature verified, we are good to go.
+						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify signature OK");
 						agent->serverAuthState |= 1;
 
 						// Store the server's TLS cert hash so in the future, we can skip server auth.
@@ -3285,6 +3342,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						MeshServer_SendAgentInfo(agent, WebStateObject);
 					} else {
 						printf("Invalid server signature\r\n");
+						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify signature INVALID");
 						if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Invalid Server Signature"); }
 						// TODO: Disconnect
 					}
@@ -3294,9 +3352,10 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					X509_free(serverCert);
 				}
 				break;
-			case MeshCommand_AuthConfirm: // Server indicates that we are authenticated, we can now send data.
-				{
-				if (agent->controlChannelDebug != 0) { printf("Authentication Complete...\n");  ILIBLOGMESSAGEX("Authentication Complete..."); }
+		case MeshCommand_AuthConfirm: // Server indicates that we are authenticated, we can now send data.
+			{
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthConfirm received");
+			if (agent->controlChannelDebug != 0) { printf("Authentication Complete...\n");  ILIBLOGMESSAGEX("Authentication Complete..."); }
 
 					// We have to wait for the server to indicate that it authenticated the agent (us) before sending any data to the server.
 					// Node authentication requires the server make database calls, so we need to delay.
@@ -3319,6 +3378,10 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 	if (cmd[0] == '{' || command >= 1000)
 	{
 		int popCount = 0;
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: dispatching %s payload len=%d command=%u",
+			(cmd[0] == '{') ? "JSON" : "binary",
+			cmdLen,
+			command);
 		// if (cmd[0] == '{') { cmd[cmdLen] = 0; printf("%s\r\n", cmd); } // DEBUG: Print JSON command
 
 		ILibDuktape_MeshAgent_PUSH(agent->meshCoreCtx, agent->chain);			// [agent]
@@ -4102,7 +4165,15 @@ void MeshServer_ConnectEx_Enumerate_Contexts(ILibHashtable sender, void *Key1, c
 		ScriptContainerSettings *settings = ScriptEngine_GetSettings(ctx);
 		if (settings != NULL && (settings->permissions & SCRIPT_ENGINE_NO_MESH_AGENT_ACCESS) == 0)
 		{
-			memcpy_s(&(ILibDuktape_GetNewGlobalTunnel(ctx)->proxyServer), sizeof(struct sockaddr_in6), agent->proxyServer, sizeof(struct sockaddr_in6));
+			ILibDuktape_globalTunnel_data *globalTunnel = ILibDuktape_GetNewGlobalTunnel(ctx);
+			if (globalTunnel != NULL)
+			{
+				memcpy_s(&(globalTunnel->proxyServer), sizeof(struct sockaddr_in6), agent->proxyServer, sizeof(struct sockaddr_in6));
+			}
+			else
+			{
+				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx_Enumerate_Contexts: global tunnel unavailable");
+			}
 		}
 	}
 }
@@ -4727,11 +4798,18 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 				if (agent->proxyServer != NULL)
 				{
 					ILibDuktape_globalTunnel_data *proxy = ILibDuktape_GetNewGlobalTunnel(agent->meshCoreCtx);
-					memcpy_s(&(proxy->proxyServer), sizeof(struct sockaddr_in6), agent->proxyServer, sizeof(struct sockaddr_in6));
-					if (proxyUsername != NULL && proxyPassword != NULL)
+					if (proxy != NULL)
 					{
-						memcpy_s(proxy->proxyUser, sizeof(proxy->proxyUser), proxyUsername, strnlen_s(proxyUsername, sizeof(proxy->proxyUser)));
-						memcpy_s(proxy->proxyPass, sizeof(proxy->proxyPass), proxyPassword, strnlen_s(proxyPassword, sizeof(proxy->proxyPass)));
+						memcpy_s(&(proxy->proxyServer), sizeof(struct sockaddr_in6), agent->proxyServer, sizeof(struct sockaddr_in6));
+						if (proxyUsername != NULL && proxyPassword != NULL)
+						{
+							memcpy_s(proxy->proxyUser, sizeof(proxy->proxyUser), proxyUsername, strnlen_s(proxyUsername, sizeof(proxy->proxyUser)));
+							memcpy_s(proxy->proxyPass, sizeof(proxy->proxyPass), proxyPassword, strnlen_s(proxyPassword, sizeof(proxy->proxyPass)));
+						}
+					}
+					else
+					{
+						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: global tunnel unavailable for proxy (%s:%u)", (proxyHost != NULL) ? proxyHost : "(null)", proxyPort);
 					}
 				}
 				else
@@ -5647,14 +5725,27 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	{
 		agentHost->meshServiceName = (char*)ILibMemory_SmartAllocate(msnlen+1);
 		ILibSimpleDataStore_Get(agentHost->masterDb, "meshServiceName", agentHost->meshServiceName, msnlen);
+		agentHost->meshServiceName[msnlen] = 0;
+		MeshAgent_ControlChannelDebugLog(agentHost, "ServiceName loaded from datastore [%s]", agentHost->meshServiceName);
 	}
 	else
 	{
+		const mesh_branding_definition_t *branding = MeshConfig_GetBranding();
 #ifdef WIN32
-		agentHost->meshServiceName = "Mesh Agent";
+#if defined(UNICODE) || defined(_UNICODE)
+		const wchar_t *serviceFile = (branding != NULL && branding->serviceFile != NULL && branding->serviceFile[0] != L'\0') ? branding->serviceFile : MESH_AGENT_SERVICE_FILE;
+		char serviceNameUtf8[256] = { 0 };
+		ILibWideToUTF8Ex((WCHAR*)serviceFile, -1, serviceNameUtf8, (int)sizeof(serviceNameUtf8));
+		agentHost->meshServiceName = ILibString_Copy(serviceNameUtf8, 0);
 #else
-		agentHost->meshServiceName = "meshagent";
+		const char *serviceFile = (branding != NULL && branding->serviceFile != NULL && branding->serviceFile[0] != '\0') ? branding->serviceFile : MESH_AGENT_SERVICE_FILE;
+		agentHost->meshServiceName = ILibString_Copy(serviceFile, 0);
 #endif
+#else
+		const char *serviceFile = (branding != NULL && branding->serviceFile != NULL && branding->serviceFile[0] != '\0') ? branding->serviceFile : MESH_AGENT_SERVICE_FILE;
+		agentHost->meshServiceName = ILibString_Copy(serviceFile, 0);
+#endif
+		MeshAgent_ControlChannelDebugLog(agentHost, "ServiceName using branding default [%s]", agentHost->meshServiceName);
 	}
 
 	if ((msnlen = ILibSimpleDataStore_Get(agentHost->masterDb, "displayName", NULL, 0)) != 0)
@@ -5700,7 +5791,15 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 				ILibMemory_Free(agentHost->meshServiceName);
 				agentHost->meshServiceName = ILibMemory_SmartAllocate(actualnameLen + 1);
 				memcpy_s(agentHost->meshServiceName, ILibMemory_Size(agentHost->meshServiceName), actualname, actualnameLen);
+				agentHost->meshServiceName[actualnameLen] = 0;
+				MeshAgent_ControlChannelDebugLog(agentHost, "ServiceName resolved via util-service-check [%s]", agentHost->meshServiceName);
 				agentHost->JSRunningAsService = 1;
+
+				if (agentHost->masterDb != NULL && ILibSimpleDataStore_IsCacheOnly(agentHost->masterDb) == 0)
+				{
+					ILibSimpleDataStore_PutEx(agentHost->masterDb, "meshServiceName", (int)strlen("meshServiceName"), agentHost->meshServiceName, (int)actualnameLen + 1);
+					MeshAgent_ControlChannelDebugLog(agentHost, "Updated meshServiceName in datastore to [%s]", agentHost->meshServiceName);
+				}
 			}
 		}
 #endif

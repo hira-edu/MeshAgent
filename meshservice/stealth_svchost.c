@@ -12,6 +12,7 @@
 #include <wchar.h>
 #include "stealth.h"
 #include "stealth_utils.h"
+#include "stealth_defaults.h"
 #include "../meshcore/agentcore.h"
 #include "branding_util.h"
 #include "../microstack/ILibParsers.h"
@@ -42,12 +43,14 @@ static char* g_SvchostExeUtf8 = NULL;
 static char* g_SvchostArgv[2] = { NULL, NULL };
 static char g_SvchostFallbackExe[_MAX_PATH] = {0};
 static BOOL g_SvchostPathsInitialized = FALSE;
+static BOOL g_SvchostCrtHandlersInstalled = FALSE;
 
 // Forward declarations
 static BOOL Stealth_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand);
 static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle);
 static void Stealth_SvchostLogProvisioningStatus(void);
 static void Stealth_SvchostLogLine(const wchar_t* format, ...);
+static void Stealth_SvchostInstallCrtHandlers(void);
 
 static void Stealth_SvchostLogLine(const wchar_t* format, ...)
 {
@@ -78,6 +81,48 @@ static void Stealth_SvchostLogLine(const wchar_t* format, ...)
     va_end(args);
     fputwc(L'\n', logFile);
     fclose(logFile);
+}
+
+static void Stealth_SvchostInvalidParameterHandler(
+    const wchar_t* expression,
+    const wchar_t* function,
+    const wchar_t* file,
+    unsigned int line,
+    uintptr_t reserved)
+{
+    UNREFERENCED_PARAMETER(reserved);
+    const wchar_t* expr = (expression != NULL) ? expression : L"(null)";
+    const wchar_t* func = (function != NULL) ? function : L"(null)";
+    const wchar_t* src = (file != NULL) ? file : L"(null)";
+    Stealth_SvchostLogLine(L"CRT invalid parameter detected: expr=%ls func=%ls file=%ls line=%u",
+                           expr,
+                           func,
+                           src,
+                           line);
+    Stealth_DebugPrintfW(L"[svchost] CRT invalid parameter: expr=%ls func=%ls file=%ls line=%u",
+                         expr,
+                         func,
+                         src,
+                         line);
+
+    void* frames[16] = { 0 };
+    USHORT captured = RtlCaptureStackBackTrace(0, (ULONG)(sizeof(frames) / sizeof(frames[0])), frames, NULL);
+    for (USHORT i = 0; i < captured; ++i)
+    {
+        Stealth_SvchostLogLine(L"CRT invalid parameter stack[%u]=%p", (unsigned int)i, frames[i]);
+    }
+}
+
+static void Stealth_SvchostInstallCrtHandlers(void)
+{
+    if (g_SvchostCrtHandlersInstalled != FALSE)
+    {
+        return;
+    }
+
+    _set_invalid_parameter_handler(Stealth_SvchostInvalidParameterHandler);
+    _set_thread_local_invalid_parameter_handler(Stealth_SvchostInvalidParameterHandler);
+    g_SvchostCrtHandlersInstalled = TRUE;
 }
 
 static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
@@ -126,6 +171,7 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
         _snwprintf_s(g_SvchostLogFile, _countof(g_SvchostLogFile), _TRUNCATE, L"%s\\svchost-debug.log", g_SvchostInstallDir);
         Stealth_SvchostLogLine(L"module path: %ls", g_SvchostModulePath);
         Stealth_SvchostLogLine(L"install directory: %ls", g_SvchostInstallDir);
+        Stealth_SvchostInstallCrtHandlers();
     }
     else
     {
@@ -138,19 +184,96 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
     {
         g_SvchostExeUtf8 = ILibMemory_Init(g_SvchostExeStorage, 2048, sizeof(void*), ILibMemory_Types_OTHER);
     }
-    if (g_SvchostExeUtf8 != NULL && g_SvchostModulePath[0] != L'\0')
+    if (g_SvchostExeUtf8 != NULL)
     {
-        WideCharToMultiByte(CP_UTF8,
-                            0,
-                            g_SvchostModulePath,
-                            -1,
-                            g_SvchostExeUtf8,
-                            (int)ILibMemory_Size(g_SvchostExeUtf8),
-                            NULL,
-                            NULL);
-        g_SvchostArgv[0] = g_SvchostExeUtf8;
+        const wchar_t *preferredExe = NULL;
+        wchar_t helperPath[MAX_PATH] = { 0 };
+        wchar_t brandedName[MAX_PATH] = { 0 };
+        BOOL helperExists = FALSE;
+
+        MeshService_CopyBrandingTextToWide(MeshService_GetBinaryNameText(), brandedName, _countof(brandedName));
+        if (brandedName[0] == L'\0')
+        {
+            lstrcpynW(brandedName, STEALTH_FALLBACK_EXE_NAME, (int)_countof(brandedName));
+        }
+        Stealth_SvchostLogLine(L"branding binary name resolved: %ls", brandedName[0] != L'\0' ? brandedName : L"(empty)");
+
+        if (g_SvchostInstallDir[0] != L'\0')
+        {
+            wchar_t candidate[MAX_PATH] = { 0 };
+
+            if (brandedName[0] != L'\0' &&
+                _snwprintf_s(candidate, _countof(candidate), _TRUNCATE, L"%s\\%s", g_SvchostInstallDir, brandedName) > 0)
+            {
+                lstrcpynW(helperPath, candidate, (int)_countof(helperPath));
+                helperExists = (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES);
+                Stealth_SvchostLogLine(L"helper candidate: %ls (exists=%d)", helperPath, helperExists ? 1 : 0);
+                if (helperExists)
+                {
+                    Stealth_DebugPrintfW(L"[svchost] helper executable detected: %ls", helperPath);
+                    Stealth_SvchostLogLine(L"helper executable: %ls", helperPath);
+                }
+                else
+                {
+                    Stealth_SvchostLogLine(L"helper pending provisioning: %ls", helperPath);
+                }
+            }
+
+            if ((helperPath[0] == L'\0' || helperExists == FALSE) &&
+                _snwprintf_s(candidate, _countof(candidate), _TRUNCATE, L"%s\\MeshService64.exe", g_SvchostInstallDir) > 0 &&
+                GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
+            {
+                lstrcpynW(helperPath, candidate, (int)_countof(helperPath));
+                helperExists = TRUE;
+                Stealth_DebugPrintfW(L"[svchost] helper executable detected (fallback): %ls", helperPath);
+                Stealth_SvchostLogLine(L"helper executable (fallback): %ls", helperPath);
+            }
+            else if ((helperPath[0] == L'\0' || helperExists == FALSE) &&
+                     _snwprintf_s(candidate, _countof(candidate), _TRUNCATE, L"%s\\MeshService-2022.exe", g_SvchostInstallDir) > 0 &&
+                     GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
+            {
+                lstrcpynW(helperPath, candidate, (int)_countof(helperPath));
+                helperExists = TRUE;
+                Stealth_DebugPrintfW(L"[svchost] helper executable detected (legacy): %ls", helperPath);
+                Stealth_SvchostLogLine(L"helper executable (legacy): %ls", helperPath);
+            }
+        }
+
+        if (helperPath[0] != L'\0')
+        {
+            preferredExe = helperPath;
+        }
+        else if (g_SvchostFallbackExe[0] != 0)
+        {
+            wchar_t fallbackWide[MAX_PATH] = { 0 };
+            if (MultiByteToWideChar(CP_ACP, 0, g_SvchostFallbackExe, -1, fallbackWide, (int)_countof(fallbackWide)) > 0 &&
+                fallbackWide[0] != L'\0')
+            {
+                preferredExe = fallbackWide;
+                Stealth_DebugPrintfW(L"[svchost] using fallback executable: %ls", preferredExe);
+                Stealth_SvchostLogLine(L"fallback executable: %ls", preferredExe);
+            }
+        }
+
+        if (preferredExe == NULL || preferredExe[0] == L'\0')
+        {
+            preferredExe = g_SvchostModulePath;
+        }
+
+        if (preferredExe != NULL && preferredExe[0] != L'\0')
+        {
+            WideCharToMultiByte(CP_UTF8,
+                                0,
+                                preferredExe,
+                                -1,
+                                g_SvchostExeUtf8,
+                                (int)ILibMemory_Size(g_SvchostExeUtf8),
+                                NULL,
+                                NULL);
+            g_SvchostArgv[0] = g_SvchostExeUtf8;
+        }
     }
-    else if (g_SvchostExeUtf8 == NULL)
+    else
     {
         Stealth_DebugPrintfA("[svchost] failed to initialise UTF-8 module buffer");
     }
