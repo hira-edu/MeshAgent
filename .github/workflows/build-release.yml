@@ -563,6 +563,6 @@ jobs:
           path: |
             verification/ci/runtime.json
             verification/ci/runtime.log
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 30
 

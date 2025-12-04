@@ -111,6 +111,27 @@ gh run download --name StealthLab-diagsvc.dll
 
 ---
 
+## Runtime Validation (Svchost-Only Mode)
+
+Both `core-migration-baseline.yml` and the optional `runtime-validation` job inside `build-release.yml` now call `tools/Invoke-RuntimeValidation.ps1`, which forces `test.ps1 -RuntimeValidation -SvchostOnly`. That means CI only exercises the svchost register/status/unregister flow (no legacy standalone install paths) and captures evidence under `verification\*\runtime.json`.
+
+### Required inputs/secrets
+- `runtime_validation` (workflow dispatch checkbox) or `secrets.RUNTIME_VALIDATION=true`
+- `runtime_control_url` / `RUNTIME_CONTROL_URL` – e.g. `wss://stealthlab.example.com:443/agent.ashx`
+- `runtime_mesh_id`, `runtime_mesh_user`, `runtime_mesh_pass` – credentials for a MeshCentral device group that already trusts the StealthLab build
+- (Optional) `runtime_meshcentral_repo` if CI should use a fork instead of `Ylianst/MeshCentral`
+
+### Making MeshCentral reachable from CI
+- **GitHub-hosted runners:** point `runtime_control_url` at a public DNS name/front door that terminates to your lab MeshCentral instance. Use the branding JSON to list the same host so runtime hashes line up. If the server is only reachable over VPN, use a self-hosted runner instead.
+- **Self-hosted runners:** you control DNS. Populate `hosts`/split-brain records so the hostname in `runtime_control_url` resolves to the lab MeshCentral address, or set `runtime_control_url` to an IP-based URL (https://10.0.0.5:443/agent.ashx) that your runner can reach directly.
+- Keep the Mesh ID and credentials scoped to a throwaway test group; the runtime helper wipes cached downloads, reinstalls the agent, and unregisters the svchost service every run.
+
+### Evidence / artefacts
+- `runtime-validation-results` artifact: contains `verification/ci/runtime.json` + `.log` (release workflow) or `out/baseline/<date>/verification/runtime.*` (baseline workflow). These uploads now fail the workflow if the files are missing, so every gated build carries verifiable runtime evidence.
+- `Invoke-RuntimeValidation.ps1` exposes `-IncludeFullInstall` if you need to run the legacy install/uninstall checks locally; CI defaults to svchost-only.
+
+---
+
 ## Automatic Deployment (Optional)
 
 ### Setup SSH Secrets

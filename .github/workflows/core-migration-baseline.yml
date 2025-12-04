@@ -102,6 +102,17 @@ jobs:
           }
           ./tools/Invoke-RuntimeValidation.ps1 @params
 
+      - name: Upload runtime validation artefacts
+        if: ${{ always() && env.RUNTIME_VALIDATION_ENABLED != 'false' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-validation-results
+          path: |
+            out/baseline/${{ env.BASELINE_DATE }}/verification/runtime.json
+            out/baseline/${{ env.BASELINE_DATE }}/verification/runtime.log
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Runtime validation skipped
         if: env.RUNTIME_VALIDATION_ENABLED == 'false'
         shell: pwsh

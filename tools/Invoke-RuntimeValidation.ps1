@@ -40,6 +40,9 @@
 .PARAMETER SkipMeshCentralPreflight
     Skips the MeshCentral cache refresh/parity check. By default the helper restarts MeshCentral, clears cached diaghost downloads,
     and verifies that `meshcentral-data\agents\MeshService64.exe` matches the local StealthLab build before running tests.
+
+.PARAMETER IncludeFullInstall
+    When specified, runs the legacy install/uninstall RuntimeValidation checks instead of forcing svchost-only coverage.
 #>
 [CmdletBinding()]
 param(
@@ -53,7 +56,8 @@ param(
     [string]$ReportPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'verification\phase3\runtime.json'),
     [string]$LogPath,
     [switch]$AllowNonAdmin,
-    [switch]$SkipMeshCentralPreflight
+    [switch]$SkipMeshCentralPreflight,
+    [switch]$IncludeFullInstall
 )
 
 Set-StrictMode -Version Latest
@@ -486,6 +490,9 @@ $testArgs = @{
     MeshCentralLoginPass  = $MeshCentralLoginPass
     MeshCtrlPath          = $meshCtrlResolved
     ReportPath            = $ReportPath
+}
+if (-not $IncludeFullInstall) {
+    $testArgs['SvchostOnly'] = $true
 }
 
 Write-Host "[RuntimeValidation] Launching test.ps1 with MeshCentral download verification..." -ForegroundColor Cyan

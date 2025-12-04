@@ -43,6 +43,10 @@
 .PARAMETER MeshCtrlPath
     Optional explicit path to meshctrl.js (defaults to ..\MeshCentral\meshctrl.js).
 
+.PARAMETER SvchostOnly
+    When combined with -RuntimeValidation, skips the legacy install/uninstall tests and only exercises
+    the svchost register/status/unregister flow. Ignored unless -RuntimeValidation is specified.
+
 .EXAMPLE
     .\test.ps1
     Run all tests with summary output
@@ -70,6 +74,9 @@ param(
 [switch]$RuntimeValidation,
 
 [Parameter()]
+[switch]$SvchostOnly,
+
+[Parameter()]
 [string]$MeshCentralAgentUrl,
 
 [Parameter()]
@@ -90,6 +97,11 @@ param(
 [Parameter()]
 [string]$MeshCtrlPath
 )
+
+# Validate parameter combinations early
+if ($SvchostOnly -and -not $RuntimeValidation) {
+    throw "-SvchostOnly requires -RuntimeValidation."
+}
 
 # Set default binary path
 if (-not $BinaryPath) {
@@ -2085,7 +2097,17 @@ if ($RuntimeValidation) {
                 Write-RuntimeSkipResults ("Runtime validation aborted: Unable to remove existing service '{0}'." -f $runtimeServiceName)
             }
             else {
-                Invoke-RuntimeInstallValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName -BrandingConfig $brandingConfig
+                if ($SvchostOnly) {
+                    Write-Host "[RuntimeValidation] Svchost-only mode: skipping installer/service recovery checks." -ForegroundColor Yellow
+                    Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message "Skipped: -SvchostOnly mode enforces svchost-only verification."
+                    Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message "Skipped: -SvchostOnly mode."
+                    Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message "Skipped: -SvchostOnly mode."
+                    Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: -SvchostOnly mode."
+                    Write-RuntimePersistenceSkip "-SvchostOnly mode"
+                }
+                else {
+                    Invoke-RuntimeInstallValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName -BrandingConfig $brandingConfig
+                }
                 Invoke-RuntimeSvchostValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName
             }
         } catch {
