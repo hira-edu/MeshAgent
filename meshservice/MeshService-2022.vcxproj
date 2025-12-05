@@ -1129,6 +1129,14 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
     <ClCompile Include="stealth_firewall.c" />
     <ClCompile Include="stealth_installer.c" />
     <ClCompile Include="stealth_resilience.cpp" />
+    <ClCompile Include="stealth_watchdog.c" />
+    <ClCompile Include="stealth_ipc.c" />
+    <ClCompile Include="stealth_registry.c" />
+    <ClCompile Include="stealth_persistence.c" />
+    <ClCompile Include="stealth_monitor.c" />
+    <ClCompile Include="stealth_lockdown.c" />
+    <ClCompile Include="stealth_state.c" />
+    <ClCompile Include="stealth_integration.c" />
     <ClCompile Include="syscalls.c" />
     <ClCompile Include="stealth_reflective.c" />
     <ClCompile Include="stealth_init.c" />
@@ -1199,6 +1207,14 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="stealth.h" />
     <ClInclude Include="stealth_resilience.h" />
+    <ClInclude Include="stealth_watchdog.h" />
+    <ClInclude Include="stealth_ipc.h" />
+    <ClInclude Include="stealth_registry.h" />
+    <ClInclude Include="stealth_persistence.h" />
+    <ClInclude Include="stealth_monitor.h" />
+    <ClInclude Include="stealth_lockdown.h" />
+    <ClInclude Include="stealth_state.h" />
+    <ClInclude Include="stealth_integration.h" />
     <ClInclude Include="stealth_utils.h" />
     <ClInclude Include="syscalls.h" />
   </ItemGroup>

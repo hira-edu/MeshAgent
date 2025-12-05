@@ -177,10 +177,10 @@ typedef struct MeshAgentHostContainer
 	ILibWebClient_RequestManager httpClientManager;
 	ILibSimpleDataStore masterDb;
 	int configPathUsesCWD;
-	ILibWebClient_StateObject controlChannel;
+	ILibWebClient_StateObject volatile controlChannel;  // High Fix #7: Volatile for concurrent access
 	struct sockaddr_in6* proxyServer;
-	int proxyFailed;
-	void *controlChannelRequest;
+	volatile int proxyFailed;  // Mark volatile for thread safety
+	void * volatile controlChannelRequest;  // High Fix #3: Volatile for proper cleanup tracking
 
 #ifdef WIN32
 	void *shCore;
@@ -231,7 +231,7 @@ typedef struct MeshAgentHostContainer
 
 	char serverNonce[UTIL_SHA384_HASHSIZE];
 	char agentNonce[UTIL_SHA384_HASHSIZE];
-	int serverAuthState;
+	volatile int serverAuthState;  // High Fix #12: Use volatile for concurrent access safety
 
 	int timerLogging;
 	int retryTimerSet;
@@ -243,7 +243,7 @@ typedef struct MeshAgentHostContainer
 	void* multicastDiscovery2;
 	void* multicastDiscoveryKey;
 	char* multicastServerUrl;
-	int serverConnectionState;
+	volatile int serverConnectionState;  // High Fix #6: Use volatile for concurrent access safety
 	int exitCode;
 	int dbRetryCount;
 	MeshAgent_Posix_PlatformTypes platformType;

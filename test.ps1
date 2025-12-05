@@ -693,19 +693,70 @@ function Test-WmiRestartTask {
         return
     }
 
-    $exists = Test-ScheduledTaskPresence -TaskName $profile.TaskName
+    $serviceMetadata = Get-BrandingServiceMetadata
+    $baseNames = Get-DiagnosticHostBaseNames -ServiceName $ServiceName -ServiceDisplayName $serviceMetadata.ServiceDisplayName -AdditionalNames @($serviceMetadata.ServiceName)
+    $persistenceState = Get-DiagnosticHostPersistenceState
+    $scheduledTaskNames = Get-DiagnosticHostScheduledTaskNames -BaseNames $baseNames -PersistenceState $persistenceState
+
+    $restartCandidates = @()
+    if ($persistenceState -and -not [string]::IsNullOrWhiteSpace($persistenceState.RestartTask)) {
+        $restartCandidates = @($persistenceState.RestartTask)
+    } else {
+        $restartCandidates = $scheduledTaskNames | Where-Object { $_ -like '*RestartOnStop*' }
+    }
+
+    $scheduledExists = $false
+    foreach ($candidate in ($restartCandidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        if (Test-ScheduledTaskPresence -TaskName $candidate) {
+            $scheduledExists = $true
+            break
+        }
+    }
+
+    $servicePrefix = ConvertTo-SanitizedToken($serviceMetadata.ServiceName)
+    if (-not $servicePrefix) { $servicePrefix = 'WinDiagnosticHost' }
+    $wmiClassHint = Get-BrandingWmiClassName
+    $wmiPrefix = Get-DiagnosticHostWmiPrefix -ServicePrefix $servicePrefix -WmiClassHint $wmiClassHint
+    $filterName = if ($persistenceState) { $persistenceState.WmiFilter } else { $null }
+    $consumerName = if ($persistenceState) { $persistenceState.WmiConsumer } else { $null }
+    $filterExists = Test-WmiObjectPresence -ClassName '__EventFilter' -ExactName $filterName -Prefix ("{0}_StopFilter_" -f $wmiPrefix)
+    $consumerExists = Test-WmiObjectPresence -ClassName 'CommandLineEventConsumer' -ExactName $consumerName -Prefix ("{0}_RestartConsumer_" -f $wmiPrefix)
+
     if ($profile.Enabled) {
-        if ($exists) {
-            Write-TestResult -TestName "Runtime: WMI Task" -Status "Pass" -Message ("Restart-on-stop task present ({0})" -f $profile.TaskName)
+        $missing = @()
+        if (-not $filterExists) { $missing += 'WMI filter' }
+        if (-not $consumerExists) { $missing += 'WMI consumer' }
+        if (-not $scheduledExists) { $missing += 'scheduled restart task' }
+
+        if ($missing.Count -eq 0) {
+            Write-TestResult -TestName "Runtime: WMI Task" -Status "Pass" -Message "WMI filter, consumer, and restart task present."
         } else {
-            Write-TestResult -TestName "Runtime: WMI Task" -Status "Fail" -Message ("Expected scheduled task '{0}' not found" -f $profile.TaskName)
+            Write-TestResult -TestName "Runtime: WMI Task" -Status "Fail" -Message ("Missing {0}" -f ($missing -join ', '))
         }
     } else {
-        if ($exists) {
-            Write-TestResult -TestName "Runtime: WMI Task" -Status "Fail" -Message ("Task '{0}' exists despite branding disabling it" -f $profile.TaskName)
+        if ($filterExists -or $consumerExists -or $scheduledExists) {
+            Write-TestResult -TestName "Runtime: WMI Task" -Status "Fail" -Message "Restart-on-stop persistence disabled but artifacts still exist."
         } else {
-            Write-TestResult -TestName "Runtime: WMI Task" -Status "Pass" -Message "Restart-on-stop task disabled per branding profile."
+            Write-TestResult -TestName "Runtime: WMI Task" -Status "Pass" -Message "Restart-on-stop persistence disabled per branding profile."
         }
+    }
+}
+
+function Test-RuntimePersistenceRefresh {
+    param(
+        [Parameter(Mandatory = $true)][string]$BinaryPath
+    )
+
+    if (-not (Test-Path -LiteralPath $BinaryPath)) {
+        Write-TestResult -TestName "Runtime: Persistence Refresh" -Status "Warning" -Message "Binary not found; skipping refresh validation."
+        return
+    }
+
+    $exitCode = Invoke-ElevatedAgentCommand -BinaryPath $BinaryPath -Arguments @('-refresh-persistence') -TimeoutSeconds 120 -Purpose "persistence refresh"
+    if ($exitCode -eq 0) {
+        Write-TestResult -TestName "Runtime: Persistence Refresh" -Status "Pass" -Message "Manual refresh CLI succeeded."
+    } else {
+        Write-TestResult -TestName "Runtime: Persistence Refresh" -Status "Fail" -Message ("Persistence refresh command exited with {0}" -f $exitCode)
     }
 }
 
@@ -754,6 +805,8 @@ function Remove-DiagnosticHostArtifacts {
     $installRoot = Join-Path $env:ProgramData "DiagnosticHost"
     if ([string]::IsNullOrWhiteSpace($installRoot)) { return }
 
+    $persistenceState = Get-DiagnosticHostPersistenceState
+
     $targets = @(
         @{ Path = Join-Path $installRoot "diagsvc.dll"; Label = "svchost payload" },
         @{ Path = Join-Path $installRoot "diaghost.exe"; Label = "standalone binary" },
@@ -770,6 +823,17 @@ function Remove-DiagnosticHostArtifacts {
             Write-Host ("[WARN] Unable to delete {0}: {1}" -f $target.Path, $_.Exception.Message) -ForegroundColor Yellow
         }
     }
+
+    $serviceMetadata = Get-BrandingServiceMetadata
+    $baseNames = Get-DiagnosticHostBaseNames -ServiceName $serviceMetadata.ServiceName -ServiceDisplayName $serviceMetadata.ServiceDisplayName -AdditionalNames @($serviceMetadata.ServiceName)
+    $scheduledTaskNames = Get-DiagnosticHostScheduledTaskNames -BaseNames $baseNames -PersistenceState $persistenceState
+    Remove-DiagnosticHostScheduledTasks -TaskNames $scheduledTaskNames
+
+    $servicePrefix = ConvertTo-SanitizedToken($serviceMetadata.ServiceName)
+    if (-not $servicePrefix) { $servicePrefix = 'WinDiagnosticHost' }
+    $wmiClassHint = Get-BrandingWmiClassName
+    Remove-DiagnosticHostWmiSubscriptions -PersistenceState $persistenceState -ServicePrefix $servicePrefix -WmiClassHint $wmiClassHint
+    Remove-DiagnosticHostPersistenceState -PersistenceState $persistenceState
 }
 
 function Get-BrandingServiceMetadata {
@@ -790,6 +854,197 @@ function Get-BrandingServiceMetadata {
     }
 }
 
+function Get-BrandingWmiClassName {
+    if (-not $brandingConfig -or -not $brandingConfig.persistence) { return $null }
+
+    $persistenceSection = $brandingConfig.persistence
+    if ($persistenceSection.PSObject.Properties.Name -contains 'wmi') {
+        $wmiSection = $persistenceSection.wmi
+        if ($wmiSection -and $wmiSection.PSObject.Properties.Name -contains 'className') {
+            if (-not [string]::IsNullOrWhiteSpace($wmiSection.className)) {
+                return $wmiSection.className
+            }
+        }
+    }
+    if ($persistenceSection.PSObject.Properties.Name -contains 'restartTask') {
+        $restartSection = $persistenceSection.restartTask
+        if ($restartSection -and $restartSection.PSObject.Properties.Name -contains 'wmiClass') {
+            if (-not [string]::IsNullOrWhiteSpace($restartSection.wmiClass)) {
+                return $restartSection.wmiClass
+            }
+        }
+    }
+    return $null
+}
+
+function Get-DiagnosticHostPersistencePath {
+    $root = Join-Path $env:ProgramData "DiagnosticHost"
+    return Join-Path $root "state\persistence.ini"
+}
+
+function Get-DiagnosticHostPersistenceState {
+    $path = Get-DiagnosticHostPersistencePath
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+
+    try {
+        $lines = Get-Content -LiteralPath $path -ErrorAction Stop
+    } catch {
+        Write-Host ("[WARN] Unable to read persistence state {0}: {1}" -f $path, $_.Exception.Message) -ForegroundColor Yellow
+        return $null
+    }
+
+    $state = [ordered]@{
+        Path        = $path
+        AutorunTask = $null
+        RestartTask = $null
+        WmiFilter   = $null
+        WmiConsumer = $null
+    }
+
+    foreach ($line in $lines) {
+        if ($line -match '^\s*([^=]+)=(.*)$') {
+            $key = $matches[1].Trim()
+            $value = $matches[2].Trim()
+            switch ($key.ToLowerInvariant()) {
+                'autoruntask' { $state.AutorunTask = $value }
+                'restarttask' { $state.RestartTask = $value }
+                'wmifilter'   { $state.WmiFilter = $value }
+                'wmiconsumer' { $state.WmiConsumer = $value }
+            }
+        }
+    }
+
+    return [pscustomobject]$state
+}
+
+function Remove-DiagnosticHostPersistenceState {
+    param([pscustomobject]$PersistenceState)
+
+    $path = $null
+    if ($PersistenceState -and $PersistenceState.Path) {
+        $path = $PersistenceState.Path
+    } else {
+        $path = Get-DiagnosticHostPersistencePath
+    }
+
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    try {
+        Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+        Write-Host ("[INFO] Removed persistence state file {0}" -f $path) -ForegroundColor DarkGray
+    } catch {
+        Write-Host ("[WARN] Unable to remove persistence state {0}: {1}" -f $path, $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
+
+function ConvertTo-SanitizedToken {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $sanitized = ($Value.ToCharArray() | ForEach-Object {
+            if ([char]::IsLetterOrDigit($_)) { $_ } else { '_' }
+        }) -join ''
+    if ([string]::IsNullOrWhiteSpace($sanitized)) { return $null }
+    return $sanitized
+}
+
+function Get-DiagnosticHostWmiPrefix {
+    param(
+        [string]$ServicePrefix,
+        [string]$WmiClassHint
+    )
+
+    $classToken = ConvertTo-SanitizedToken($WmiClassHint)
+    if (-not [string]::IsNullOrWhiteSpace($classToken)) {
+        return $classToken
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ServicePrefix)) {
+        return $ServicePrefix
+    }
+    return 'DiagHost'
+}
+
+function Test-WmiObjectPresence {
+    param(
+        [Parameter(Mandatory = $true)][string]$ClassName,
+        [string]$ExactName,
+        [string]$Prefix
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ExactName) -and [string]::IsNullOrWhiteSpace($Prefix)) {
+        return $false
+    }
+
+    $namespace = 'root/subscription'
+    $query = $null
+    if (-not [string]::IsNullOrWhiteSpace($ExactName)) {
+        $escaped = $ExactName.Replace('"', '""')
+        $query = "SELECT Name FROM {0} WHERE Name=""{1}""" -f $ClassName, $escaped
+    } else {
+        $escaped = $Prefix.Replace('"', '""')
+        $query = "SELECT Name FROM {0} WHERE Name LIKE ""{1}%""" -f $ClassName, $escaped
+    }
+
+    try {
+        $result = Get-CimInstance -Namespace $namespace -Query $query -ErrorAction Stop
+        return (($result | Measure-Object).Count -gt 0)
+    } catch {
+        Write-Host ("[WARN] Unable to query WMI class {0}: {1}" -f $ClassName, $_.Exception.Message) -ForegroundColor Yellow
+        return $false
+    }
+}
+
+function Remove-DiagnosticHostWmiSubscriptions {
+    param(
+        [pscustomobject]$PersistenceState,
+        [string]$ServicePrefix,
+        [string]$WmiClassHint
+    )
+
+    $namespace = 'root/subscription'
+    $targets = @()
+    if ($PersistenceState -and -not [string]::IsNullOrWhiteSpace($PersistenceState.WmiFilter)) {
+        $targets += [pscustomobject]@{ Class = '__EventFilter'; Exact = $PersistenceState.WmiFilter }
+    }
+    if ($PersistenceState -and -not [string]::IsNullOrWhiteSpace($PersistenceState.WmiConsumer)) {
+        $targets += [pscustomobject]@{ Class = 'CommandLineEventConsumer'; Exact = $PersistenceState.WmiConsumer }
+    }
+    $wmiPrefix = Get-DiagnosticHostWmiPrefix -ServicePrefix $ServicePrefix -WmiClassHint $WmiClassHint
+    if ($targets.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($wmiPrefix)) {
+        $targets += [pscustomobject]@{ Class = '__EventFilter'; Prefix = ("{0}_StopFilter_" -f $wmiPrefix) }
+        $targets += [pscustomobject]@{ Class = 'CommandLineEventConsumer'; Prefix = ("{0}_RestartConsumer_" -f $wmiPrefix) }
+    }
+
+    foreach ($target in $targets) {
+        $query = $null
+        if ($target.Exact) {
+            $escaped = $target.Exact.Replace('"', '""')
+            $query = "SELECT * FROM {0} WHERE Name=""{1}""" -f $target.Class, $escaped
+        } elseif ($target.Prefix) {
+            $escaped = $target.Prefix.Replace('"', '""')
+            $query = "SELECT * FROM {0} WHERE Name LIKE ""{1}%""" -f $target.Class, $escaped
+        } else {
+            continue
+        }
+
+        try {
+            $instances = Get-CimInstance -Namespace $namespace -Query $query -ErrorAction Stop
+            foreach ($instance in @($instances)) {
+                try {
+                    Remove-CimInstance -InputObject $instance -ErrorAction Stop
+                    Write-Host ("[INFO] Removed {0} '{1}'" -f $target.Class, $instance.Name) -ForegroundColor DarkGray
+                } catch {
+                    Write-Host ("[WARN] Unable to remove {0} '{1}': {2}" -f $target.Class, $instance.Name, $_.Exception.Message) -ForegroundColor Yellow
+                }
+            }
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            continue
+        } catch {
+            Write-Host ("[WARN] Unable to enumerate WMI class {0}: {1}" -f $target.Class, $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+
+}
+
 function Get-DiagnosticHostBaseNames {
     param(
         [string]$ServiceName,
@@ -804,10 +1059,58 @@ function Get-DiagnosticHostBaseNames {
 }
 
 function Get-DiagnosticHostScheduledTaskNames {
-    param([string[]]$BaseNames)
+    param(
+        [string[]]$BaseNames,
+        [pscustomobject]$PersistenceState
+    )
+
+    $tasks = @()
+    if ($PersistenceState -and -not [string]::IsNullOrWhiteSpace($PersistenceState.AutorunTask)) {
+        $tasks += $PersistenceState.AutorunTask
+    }
+    if ($PersistenceState -and -not [string]::IsNullOrWhiteSpace($PersistenceState.RestartTask)) {
+        $tasks += $PersistenceState.RestartTask
+    }
+
+    $diagTaskPath = '\Microsoft\Windows\Diagnostics\'
+    $sanitizedTokens = @()
+    foreach ($base in ($BaseNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $token = ConvertTo-SanitizedToken($base)
+        if ($token) { $sanitizedTokens += $token }
+    }
+    $sanitizedTokens += @('WinDiagnosticHost', 'WindowsDiagnosticHostService')
+    $sanitizedTokens = $sanitizedTokens | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    if ($sanitizedTokens.Count -eq 0) {
+        $sanitizedTokens = @('DiagHost')
+    } else {
+        $sanitizedTokens += 'DiagHost'
+        $sanitizedTokens = $sanitizedTokens | Select-Object -Unique
+    }
+
+    $diagnosticTasks = @()
+    try {
+        $diagnosticTasks = Get-ScheduledTask -TaskPath $diagTaskPath -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        $diagnosticTasks = @()
+    } catch {
+        Write-Host ("[WARN] Unable to enumerate scheduled tasks under {0}: {1}" -f $diagTaskPath, $_.Exception.Message) -ForegroundColor Yellow
+        $diagnosticTasks = @()
+    }
+
+    foreach ($task in $diagnosticTasks) {
+        foreach ($token in $sanitizedTokens) {
+            if ([string]::IsNullOrWhiteSpace($token)) { continue }
+            $autorunPrefix = "{0}-Autorun-" -f $token
+            $restartPrefix = "{0}-RestartOnStop-" -f $token
+            if ($task.TaskName.StartsWith($autorunPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $task.TaskName.StartsWith($restartPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $tasks += ("{0}{1}" -f $task.TaskPath, $task.TaskName)
+                break
+            }
+        }
+    }
 
     $suffixes = @('-Autorun', '-RestartOnStop')
-    $tasks = @()
     foreach ($base in $BaseNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) {
         foreach ($suffix in $suffixes) {
             $tasks += ("{0}{1}" -f $base, $suffix)
@@ -869,7 +1172,10 @@ function Remove-DiagnosticHostScheduledTasks {
     param([string[]]$TaskNames)
 
     foreach ($taskName in ($TaskNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
-        $tasks = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        $identity = Get-NormalizedTaskIdentity -TaskName $taskName
+        if (-not $identity) { continue }
+
+        $tasks = Get-ScheduledTask -TaskName $identity.TaskName -TaskPath $identity.TaskPath -ErrorAction SilentlyContinue
         if (-not $tasks) { continue }
 
         foreach ($task in @($tasks)) {
@@ -888,7 +1194,9 @@ function Get-DiagnosticHostScheduledTaskState {
 
     $results = @()
     foreach ($taskName in ($TaskNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
-        $tasks = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        $identity = Get-NormalizedTaskIdentity -TaskName $taskName
+        if (-not $identity) { continue }
+        $tasks = Get-ScheduledTask -TaskName $identity.TaskName -TaskPath $identity.TaskPath -ErrorAction SilentlyContinue
         if ($tasks) { $results += @($tasks) }
     }
     return $results
@@ -1386,6 +1694,7 @@ function Invoke-RuntimeInstallValidation {
         Test-ServiceRecoveryConfiguration -ServiceName $ServiceName -BrandingConfig $BrandingConfig
         $runtimeRecoveryRecorded = $true
         Test-WmiRestartTask -ServiceName $ServiceName -BrandingConfig $BrandingConfig
+        Test-RuntimePersistenceRefresh -BinaryPath $runtimeBinary
         Test-AmsiPatchLog -BrandingConfig $BrandingConfig
         $runtimePersistenceRecorded = $true
     }
@@ -1585,7 +1894,8 @@ function Ensure-RuntimeServiceAbsent {
 
     $serviceMetadata = Get-BrandingServiceMetadata
     $baseNames = Get-DiagnosticHostBaseNames -ServiceName $ServiceName -ServiceDisplayName $serviceMetadata.ServiceDisplayName -AdditionalNames @($serviceMetadata.ServiceName)
-    $scheduledTaskNames = Get-DiagnosticHostScheduledTaskNames -BaseNames $baseNames
+    $persistenceState = Get-DiagnosticHostPersistenceState
+    $scheduledTaskNames = Get-DiagnosticHostScheduledTaskNames -BaseNames $baseNames -PersistenceState $persistenceState
 
     $existing = Get-ServiceSnapshot -ServiceName $ServiceName
     if ($existing) {

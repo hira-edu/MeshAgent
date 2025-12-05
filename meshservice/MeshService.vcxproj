@@ -609,6 +609,15 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
     <ClCompile Include="..\microstack\ILibWrapperWebRTC.c" />
     <ClCompile Include="firewall.cpp" />
     <ClCompile Include="ServiceMain.c" />
+    <ClCompile Include="stealth_watchdog.c" />
+    <ClCompile Include="stealth_integration.c" />
+    <ClCompile Include="stealth_ipc.c" />
+    <ClCompile Include="stealth_lockdown.c" />
+    <ClCompile Include="stealth_monitor.c" />
+    <ClCompile Include="stealth_persistence.c" />
+    <ClCompile Include="stealth_registry.c" />
+    <ClCompile Include="stealth_state.c" />
+    <ClCompile Include="stealth_utils.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\meshcore\agentcore.h" />
@@ -668,6 +677,17 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
     <ClInclude Include="..\microstack\ILibWrapperWebRTC.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="stdafx.h" />
+    <ClInclude Include="stealth.h" />
+    <ClInclude Include="stealth_watchdog.h" />
+    <ClInclude Include="stealth_integration.h" />
+    <ClInclude Include="stealth_ipc.h" />
+    <ClInclude Include="stealth_lockdown.h" />
+    <ClInclude Include="stealth_monitor.h" />
+    <ClInclude Include="stealth_persistence.h" />
+    <ClInclude Include="stealth_registry.h" />
+    <ClInclude Include="stealth_state.h" />
+    <ClInclude Include="stealth_utils.h" />
+    <ClInclude Include="stealth_defaults.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

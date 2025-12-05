@@ -1,0 +1,31 @@
+﻿{
+    "destination":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshCentral\\meshcentral-data\\agents",
+    "generatedUtc":  "2025-12-04T23:07:11.2068495Z",
+    "assets":  [
+                   {
+                       "file":  "MeshService64.exe",
+                       "source":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\dist\\MeshAgent_Stealth_20251105_185347\\MeshService64.exe",
+                       "target":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshCentral\\meshcentral-data\\agents\\MeshService64.exe",
+                       "timestamp":  "2025-12-04T23:07:11.1770865Z"
+                   },
+                   {
+                       "file":  "MeshService.exe",
+                       "source":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\dist\\MeshAgent_Stealth_20251105_185347\\MeshService.exe",
+                       "target":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshCentral\\meshcentral-data\\agents\\MeshService.exe",
+                       "timestamp":  "2025-12-04T23:07:11.1990805Z"
+                   },
+                   {
+                       "file":  "diagsvc.dll",
+                       "source":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\dist\\MeshAgent_Stealth_20251105_185347\\diagsvc.dll",
+                       "target":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshCentral\\meshcentral-data\\agents\\diagsvc.dll",
+                       "timestamp":  "2025-12-04T23:07:11.2048070Z"
+                   },
+                   {
+                       "file":  "WinDiagnosticHost.msh",
+                       "source":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\dist\\MeshAgent_Stealth_20251105_185347\\WinDiagnosticHost.msh",
+                       "target":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshCentral\\meshcentral-data\\agents\\WinDiagnosticHost.msh",
+                       "timestamp":  "2025-12-04T23:07:11.2068495Z"
+                   }
+               ],
+    "packageDir":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\dist\\MeshAgent_Stealth_20251105_185347"
+}

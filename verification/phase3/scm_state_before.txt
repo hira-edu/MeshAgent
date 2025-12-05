@@ -1,0 +1,18 @@
+# SCM State Before Install/Uninstall Cycle
+# Captured: VAL-02 verification
+
+## WinDiagnosticHost Service Status
+
+Name                : WinDiagnosticHost
+DisplayName         : Windows Diagnostic Host Service
+Status              : Running
+ServiceType         : Win32OwnProcess, Win32ShareProcess
+CanStop             : False
+CanPauseAndContinue : False
+CanShutdown         : True
+
+## Notes
+- Service is currently running under svchost
+- ServiceType 0x30 (WIN32_OWN_PROCESS | WIN32_SHARE_PROCESS) confirms svchost hosting
+- NOT_STOPPABLE flag is set (CanStop=False)
+- Full SCM config (qc/qfailure) requires elevation

