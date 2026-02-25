@@ -2521,8 +2521,8 @@ void ILibDuktape_ScriptContainer_OS_Push(duk_context *ctx, void *chain)
 					catch(zzz)\
 					{\
 						ret = 'Windows (UNKNOWN) - ' + friendly;\
+						ret += (' [WMI ERROR] ');\
 					}\
-					ret += (' [WMI ERROR] ');\
 				}\
 				break;\
 			case 'linux':\

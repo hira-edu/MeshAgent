@@ -13,6 +13,15 @@
 #define STEALTH_FALLBACK_CONF_NAME           L"diaghost.conf"
 #define STEALTH_FALLBACK_LOG_NAME            L"diagnostics.log"
 
+// Installation ACL defaults.
+//
+// Install root must be traversable by interactive users so the per-session helper
+// (KVM/etc) can execute the host binary via CreateProcessAsUser(). Do not inherit
+// the interactive ACE to child objects; binaries are explicitly ACL'd as needed.
+#define STEALTH_SECURE_DIR_DACL_SDDL         L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+#define STEALTH_INSTALL_ROOT_DACL_SDDL       L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;IU)"
+#define STEALTH_HOST_EXE_DACL_SDDL           L"D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;IU)"
+
 /*
  * Persistence toggle reference:
  *   - Run key / autorun task / restart task flags come from branding_config.persistence.*

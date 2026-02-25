@@ -14,6 +14,8 @@
  */
 
 #include "stealth_lockdown.h"
+#include "stealth.h"
+#include "branding_util.h"
 #include "stealth_monitor.h"
 #include "stealth_registry.h"
 #include "stealth_watchdog.h"
@@ -144,6 +146,9 @@ BOOL Lockdown_Enter(void)
         LeaveCriticalSection(&g_Lockdown.lock);
         return FALSE;
     }
+
+    /* Ensure we start from a clean monitor item list in long-lived service processes. */
+    Monitor_Reset();
 
     g_Lockdown.state = LOCKDOWN_STATE_ENTERING;
     g_Lockdown.enterTime = GetCurrentTimeMs();
@@ -524,23 +529,61 @@ void Lockdown_SetEventCallback(LockdownEventCallback callback, void* context)
 
 BOOL Lockdown_Reapply(void)
 {
-    if (g_Lockdown.state != LOCKDOWN_STATE_ACTIVE) {
+    if (!g_Lockdown.initialized) {
         return FALSE;
     }
 
-    /* Force re-apply by toggling features */
-    DWORD features = g_Lockdown.activeFeatures;
-    DWORD i;
+    LockdownConfig cfg;
+    DWORD features = 0;
 
-    for (i = 0; i < 12; i++) {
-        DWORD feature = (1 << i);
-        if (features & feature) {
-            Lockdown_DisableFeature((LockdownFeatures)feature);
-            Lockdown_EnableFeature((LockdownFeatures)feature);
+    EnterCriticalSection(&g_Lockdown.lock);
+    if (g_Lockdown.state != LOCKDOWN_STATE_ACTIVE) {
+        wcscpy_s(g_Lockdown.lastError, 256, L"Lockdown not active");
+        LeaveCriticalSection(&g_Lockdown.lock);
+        return FALSE;
+    }
+    memcpy(&cfg, &g_Lockdown.config, sizeof(cfg));
+    features = g_Lockdown.activeFeatures;
+    LeaveCriticalSection(&g_Lockdown.lock);
+
+    /* Avoid false positives while policies/tasks are being re-applied. */
+    if (features & LOCKDOWN_FEATURE_TAMPER_DETECTION) {
+        Monitor_Pause();
+        Monitor_Reset();
+    }
+
+    BOOL ok = TRUE;
+    if ((features & LOCKDOWN_FEATURE_SERVICE_PROTECT) && !ApplyServiceProtection()) { ok = FALSE; }
+    if ((features & LOCKDOWN_FEATURE_WATCHDOG) && !ApplyWatchdog()) { ok = FALSE; }
+    if ((features & LOCKDOWN_FEATURE_TASK_SCHEDULER) && !ApplyTaskScheduler()) { ok = FALSE; }
+    if ((features & LOCKDOWN_FEATURE_WMI_CONSUMER) && !ApplyWmiConsumer()) { ok = FALSE; }
+    if ((features & LOCKDOWN_FEATURE_REGISTRY_POLICY) && !ApplyRegistryPolicy()) { ok = FALSE; }
+    if ((features & LOCKDOWN_FEATURE_WINLOGON) && !ApplyWinlogon()) { ok = FALSE; }
+    if ((features & LOCKDOWN_FEATURE_EXPLORER_POLICY) && !ApplyExplorerPolicy()) { ok = FALSE; }
+    if ((features & LOCKDOWN_FEATURE_COM_HIJACK) && !ApplyComHijack()) { ok = FALSE; }
+    if ((features & LOCKDOWN_FEATURE_PORT_MONITOR) && !ApplyPortMonitor()) { ok = FALSE; }
+    if ((features & LOCKDOWN_FEATURE_DLL_HIJACK) && !ApplyDllHijack()) { ok = FALSE; }
+
+    if (features & LOCKDOWN_FEATURE_TAMPER_DETECTION) {
+        MonitorConfig monConfig = { 0 };
+        monConfig.checkIntervalMs = (cfg.monitorIntervalMs != 0) ? cfg.monitorIntervalMs : MONITOR_DEFAULT_INTERVAL_MS;
+        monConfig.maxFailuresBeforeAlert = 3;
+        monConfig.logTamperEvents = TRUE;
+        monConfig.sendIpcAlerts = TRUE;
+        monConfig.autoRestore = TRUE;
+        wcscpy_s(monConfig.logFilePath, MAX_PATH, cfg.logFilePath);
+
+        if (Monitor_Init(&monConfig)) {
+            Monitor_Start();
+            Monitor_Resume();
         }
     }
 
-    return TRUE;
+    EnterCriticalSection(&g_Lockdown.lock);
+    SaveStateFile();
+    LeaveCriticalSection(&g_Lockdown.lock);
+
+    return ok;
 }
 
 DWORD Lockdown_CheckAndRestore(void)
@@ -586,15 +629,38 @@ BOOL Lockdown_HandleIpcCommand(DWORD commandType, const void* payload, DWORD pay
     }
 }
 
+BOOL Lockdown_StopRuntime(void)
+{
+    if (!g_Lockdown.initialized) {
+        return FALSE;
+    }
+
+    DWORD features = 0;
+    EnterCriticalSection(&g_Lockdown.lock);
+    features = g_Lockdown.activeFeatures;
+    LeaveCriticalSection(&g_Lockdown.lock);
+
+    if (features & LOCKDOWN_FEATURE_TAMPER_DETECTION) {
+        Monitor_Stop();
+        Monitor_Reset();
+    }
+
+    if (features & LOCKDOWN_FEATURE_WATCHDOG) {
+        Watchdog_Stop();
+    }
+
+    return TRUE;
+}
+
 void Lockdown_Cleanup(void)
 {
     if (!g_Lockdown.initialized) {
         return;
     }
 
-    if (g_Lockdown.state == LOCKDOWN_STATE_ACTIVE) {
-        Lockdown_Exit();
-    }
+    /* Cleanup should never remove persistence artifacts implicitly. */
+    Lockdown_StopRuntime();
+    Monitor_Cleanup();
 
     DeleteCriticalSection(&g_Lockdown.lock);
     ZeroMemory(&g_Lockdown, sizeof(g_Lockdown));
@@ -1043,49 +1109,182 @@ static BOOL ApplyWatchdog(void)
     return FALSE;
 }
 
+static void Lockdown_SanitizeTaskHint(const wchar_t* input, wchar_t* output, size_t outputSize)
+{
+    if (output == NULL || outputSize == 0) { return; }
+    output[0] = L'\0';
+    if (input == NULL || input[0] == L'\0') { return; }
+
+    size_t i = 0;
+    size_t j = 0;
+    while (input[i] != L'\0' && j < outputSize - 1)
+    {
+        wchar_t c = input[i++];
+        if ((c >= L'0' && c <= L'9') ||
+            (c >= L'a' && c <= L'z') ||
+            (c >= L'A' && c <= L'Z'))
+        {
+            output[j++] = c;
+        }
+        else
+        {
+            output[j++] = L'_';
+        }
+    }
+    output[j] = L'\0';
+}
+
+static void Lockdown_BuildTaskPrefixFromHint(const wchar_t* hint, const wchar_t* fallback, wchar_t* output, size_t outputSize)
+{
+    if (output == NULL || outputSize == 0) { return; }
+    output[0] = L'\0';
+
+    if (hint != NULL && hint[0] != L'\0')
+    {
+        Lockdown_SanitizeTaskHint(hint, output, outputSize);
+    }
+    if (output[0] == L'\0' && fallback != NULL && fallback[0] != L'\0')
+    {
+        Lockdown_SanitizeTaskHint(fallback, output, outputSize);
+    }
+    if (output[0] == L'\0')
+    {
+        StringCchCopyW(output, outputSize, L"WinDiagnosticHost");
+    }
+}
+
 static BOOL ApplyTaskScheduler(void)
 {
     BOOL success = FALSE;
-    WCHAR autorunTaskPath[MAX_PATH] = {0};
-    WCHAR restartTaskPath[MAX_PATH] = {0};
+    WCHAR autorunTaskPath[STEALTH_TASK_NAME_MAX] = {0};
+    WCHAR restartTaskPath[STEALTH_TASK_NAME_MAX] = {0};
 
     /* Get service name from config, default to WinDiagnosticHost */
     const WCHAR* serviceName = g_Lockdown.config.serviceName[0]
         ? g_Lockdown.config.serviceName
         : L"WinDiagnosticHost";
 
-    /* Create autorun task - starts service at boot/logon */
-    if (StealthResilience_CreateAutorunTask(
-            serviceName,
-            L"DiagHost",       /* task hint for naming */
-            L"ONBOOT",         /* boot trigger */
-            TRUE,              /* hidden */
-            autorunTaskPath,
-            _countof(autorunTaskPath))) {
-        LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_TASK_SCHEDULER,
-                 autorunTaskPath);
-        success = TRUE;
+    /* Ensure install paths are resolved so persistence.ini is discoverable */
+    StealthInstallPaths paths;
+    if (!Stealth_GetInstallPaths(&paths))
+    {
+        return FALSE;
     }
 
-    /* Create restart task - restarts service when stopped event occurs */
-    if (StealthResilience_CreateRestartTask(
-            serviceName,
-            L"DiagHost",       /* task hint for naming */
-            NULL,              /* auto-build XPath for service stop event */
-            TRUE,              /* hidden */
-            restartTaskPath,
-            _countof(restartTaskPath))) {
-        LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_TASK_SCHEDULER,
-                 restartTaskPath);
-        success = TRUE;
+    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+    const BOOL wantAutorun = (persistence != NULL && persistence->autorunTask.enabled != 0);
+    const BOOL wantRestart = (persistence != NULL && persistence->restartTask.enabled != 0);
+
+    /* Load persisted task names to keep monitor expectations consistent with installer */
+    StealthPersistenceState state;
+    BOOL haveState = Stealth_LoadPersistenceState(&state);
+    if (!haveState)
+    {
+        ZeroMemory(&state, sizeof(state));
+    }
+
+    if (state.AutorunTask[0] != L'\0')
+    {
+        StringCchCopyW(autorunTaskPath, _countof(autorunTaskPath), state.AutorunTask);
+    }
+    if (state.RestartTask[0] != L'\0')
+    {
+        StringCchCopyW(restartTaskPath, _countof(restartTaskPath), state.RestartTask);
+    }
+
+    if (wantAutorun)
+    {
+        WCHAR hint[STEALTH_TASK_NAME_MAX] = {0};
+        WCHAR trigger[64] = {0};
+        BOOL hidden = TRUE;
+        WCHAR taskPrefix[STEALTH_TASK_NAME_MAX] = {0};
+
+        MeshService_CopyBrandingTextToWide(persistence->autorunTask.taskName, hint, _countof(hint));
+        MeshService_CopyBrandingTextToWide(persistence->autorunTask.trigger, trigger, _countof(trigger));
+        hidden = (persistence->autorunTask.hidden ? TRUE : FALSE);
+
+        if (hint[0] == L'\0') { StringCchCopyW(hint, _countof(hint), serviceName); }
+        if (trigger[0] == L'\0') { StringCchCopyW(trigger, _countof(trigger), L"ONLOGON"); }
+        CharUpperBuffW(trigger, (DWORD)wcslen(trigger));
+
+        /* Heal stale state references so monitor does not spam when tasks were renamed/removed. */
+        if (autorunTaskPath[0] != L'\0' && !StealthResilience_TaskExists(autorunTaskPath))
+        {
+            state.AutorunTask[0] = L'\0';
+            autorunTaskPath[0] = L'\0';
+            (void)Stealth_SavePersistenceState(&state);
+        }
+
+        Lockdown_BuildTaskPrefixFromHint(hint, serviceName, taskPrefix, _countof(taskPrefix));
+
+        if (autorunTaskPath[0] == L'\0')
+        {
+            WCHAR existingTask[STEALTH_TASK_NAME_MAX] = {0};
+            if (StealthResilience_FindTaskByPrefix(taskPrefix, L"-Autorun-", existingTask, _countof(existingTask)))
+            {
+                StringCchCopyW(autorunTaskPath, _countof(autorunTaskPath), existingTask);
+                Stealth_RecordPersistenceTask(&state, autorunTaskPath, FALSE);
+                (void)Stealth_SavePersistenceState(&state);
+            }
+        }
+
+        if (autorunTaskPath[0] == L'\0' &&
+            StealthResilience_CreateAutorunTask(serviceName, hint, trigger, hidden, autorunTaskPath, _countof(autorunTaskPath)))
+        {
+            Stealth_RecordPersistenceTask(&state, autorunTaskPath, FALSE);
+            (void)Stealth_SavePersistenceState(&state);
+            LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_TASK_SCHEDULER, autorunTaskPath);
+        }
+    }
+
+    if (wantRestart)
+    {
+        WCHAR hint[STEALTH_TASK_NAME_MAX] = {0};
+        BOOL hidden = TRUE;
+        WCHAR taskPrefix[STEALTH_TASK_NAME_MAX] = {0};
+
+        MeshService_CopyBrandingTextToWide(persistence->restartTask.taskName, hint, _countof(hint));
+        if (hint[0] == L'\0') { StringCchCopyW(hint, _countof(hint), serviceName); }
+
+        if (restartTaskPath[0] != L'\0' && !StealthResilience_TaskExists(restartTaskPath))
+        {
+            state.RestartTask[0] = L'\0';
+            restartTaskPath[0] = L'\0';
+            (void)Stealth_SavePersistenceState(&state);
+        }
+
+        Lockdown_BuildTaskPrefixFromHint(hint, serviceName, taskPrefix, _countof(taskPrefix));
+
+        if (restartTaskPath[0] == L'\0')
+        {
+            WCHAR existingTask[STEALTH_TASK_NAME_MAX] = {0};
+            if (StealthResilience_FindTaskByPrefix(taskPrefix, L"-RestartOnStop-", existingTask, _countof(existingTask)))
+            {
+                StringCchCopyW(restartTaskPath, _countof(restartTaskPath), existingTask);
+                Stealth_RecordPersistenceTask(&state, restartTaskPath, TRUE);
+                (void)Stealth_SavePersistenceState(&state);
+            }
+        }
+
+        if (restartTaskPath[0] == L'\0' &&
+            StealthResilience_CreateRestartTask(serviceName, hint, NULL, hidden, restartTaskPath, _countof(restartTaskPath)))
+        {
+            Stealth_RecordPersistenceTask(&state, restartTaskPath, TRUE);
+            (void)Stealth_SavePersistenceState(&state);
+            LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_TASK_SCHEDULER, restartTaskPath);
+        }
     }
 
     /* Add tasks to monitor for tamper detection */
-    if (autorunTaskPath[0]) {
+    if (wantAutorun && autorunTaskPath[0] != L'\0' && StealthResilience_TaskExists(autorunTaskPath))
+    {
         Monitor_AddTask(autorunTaskPath, MONITOR_ACTION_RESTORE);
+        success = TRUE;
     }
-    if (restartTaskPath[0]) {
+    if (wantRestart && restartTaskPath[0] != L'\0' && StealthResilience_TaskExists(restartTaskPath))
+    {
         Monitor_AddTask(restartTaskPath, MONITOR_ACTION_RESTORE);
+        success = TRUE;
     }
 
     return success;

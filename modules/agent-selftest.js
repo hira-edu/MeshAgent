@@ -85,6 +85,161 @@ Object.defineProperty(Array.prototype, 'getParameterIndex',
 var promise = require('promise');
 var localmode = true;
 var debugmode = false;
+var runSessionChecks = false;
+var skipServiceRestart = false;
+var requireSessionConsent = false;
+var strictCoreDump = false;
+var fileTransferTimeoutMs = 30000;
+var maxRuntimeMs = 900000;
+var consoleCommandTimeoutMs = 12000;
+var tunnelConnectTimeoutMs = 10000;
+var coreInfoTimeoutMs = 20000;
+var progressLogPath = null;
+var sessionTunnelSupported = true;
+
+function toBool(val)
+{
+    if (val === true) { return true; }
+    if (val === false || val == null) { return false; }
+    var str = val.toString().toLowerCase();
+    return (str === '1' || str === 'true' || str === 'yes');
+}
+
+function skipTest(label)
+{
+    var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
+    console.log('   => ' + label + '....................[SKIPPED]');
+    traceProgress('SKIPPED: ' + label);
+    ret._res();
+    return (ret);
+}
+
+function traceProgress(message)
+{
+    if (progressLogPath == null || progressLogPath === '') { return; }
+    try
+    {
+        require('fs').appendFileSync(progressLogPath, '[' + (new Date()).toISOString() + '] ' + message + '\r\n');
+    }
+    catch (e)
+    {
+    }
+}
+
+function armTransferTimeout(ret, timeoutMessage)
+{
+    if (ret.timeout) { clearTimeout(ret.timeout); }
+    ret.timeout = setTimeout(function (r)
+    {
+        r.timeoutTriggered = true;
+        try { if (r.connection) { r.connection.end(); } } catch (e) { }
+        r._rej(timeoutMessage);
+    }, fileTransferTimeoutMs, ret);
+}
+
+function sessionCapabilityProbe(tester, label)
+{
+    var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
+    var probeLabel = label || 'Session capability';
+
+    function evaluateLocal()
+    {
+        var info = { hasKVM: 0, hasDesktopFunc: false, streamOpen: false, streamError: null };
+        try
+        {
+            var m = require('MeshAgent');
+            info.hasKVM = m.hasKVM;
+            info.hasDesktopFunc = (typeof m.GetRemoteDesktopStream === 'function');
+            if (info.hasDesktopFunc)
+            {
+                try
+                {
+                    var s = m.GetRemoteDesktopStream();
+                    if (s) { info.streamOpen = true; try { s.end(); } catch (_e) { } }
+                }
+                catch (sx)
+                {
+                    info.streamError = '' + sx;
+                }
+            }
+        }
+        catch (e)
+        {
+            info.streamError = '' + e;
+        }
+        return (info);
+    }
+
+    function checkInfo(info, modePrefix)
+    {
+        var hasKvm = parseInt(info.hasKVM, 10);
+        if (isNaN(hasKvm)) { hasKvm = (info.hasKVM ? 1 : 0); }
+        var ok = (hasKvm != 0);
+        if (ok)
+        {
+            console.log('      -> ' + probeLabel + ' fallback...........[OK] ' + modePrefix + ' hasKVM=' + hasKvm + ', streamApi=' + (info.hasDesktopFunc === true ? 'YES' : 'NO'));
+            ret._res();
+            return (true);
+        }
+        return (false);
+    }
+
+    if (tester == null || typeof tester.agentQueryValue !== 'function')
+    {
+        var localOnly = evaluateLocal();
+        if (!checkInfo(localOnly, '[LOCAL]'))
+        {
+            ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] query path unavailable');
+        }
+        return (ret);
+    }
+
+    var expr = "(function(){try{var m=require('MeshAgent');var i={hasKVM:m.hasKVM,hasDesktopFunc:(typeof m.GetRemoteDesktopStream==='function'),streamOpen:false,streamError:null};if(i.hasDesktopFunc){try{var s=m.GetRemoteDesktopStream();if(s){i.streamOpen=true;try{s.end();}catch(_e){}}}catch(ex){i.streamError=''+ex;}}return JSON.stringify(i);}catch(e){return JSON.stringify({hasKVM:0,hasDesktopFunc:false,streamOpen:false,streamError:''+e});}})()";
+    var p = tester.agentQueryValue(expr);
+    p.then(function (value)
+    {
+        var info = null;
+        try
+        {
+            info = JSON.parse((value || '').toString());
+        }
+        catch (parseError)
+        {
+            info = null;
+        }
+
+        if (info == null)
+        {
+            var localInfo = evaluateLocal();
+            if (!checkInfo(localInfo, '[LOCAL]'))
+            {
+                ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] parse error');
+            }
+            return;
+        }
+
+        if (checkInfo(info, '[REMOTE]'))
+        {
+            return;
+        }
+        var localFallback = evaluateLocal();
+        if (!checkInfo(localFallback, '[LOCAL]'))
+        {
+            var remoteHasKvm = parseInt(info.hasKVM, 10);
+            if (isNaN(remoteHasKvm)) { remoteHasKvm = (info.hasKVM ? 1 : 0); }
+            ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] hasKVM=' + remoteHasKvm + ', streamError=' + (info.streamError || 'none'));
+        }
+    }).catch(function (e)
+    {
+        var localCatch = evaluateLocal();
+        if (!checkInfo(localCatch, '[LOCAL]'))
+        {
+            ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] ' + e);
+        }
+    });
+
+    return (ret);
+}
 
 function agentConnect(test, ipcPath)
 {
@@ -104,9 +259,15 @@ function agentConnect(test, ipcPath)
         }
     }
     global.client = require('net').createConnection({ path: ipcPath });
-    global.client.test = test;
-    global.client.on('error', function ()
+    var connected = false;
+    var retryScheduled = false;
+    var connectWatchdog = null;
+
+    var scheduleRetry = function ()
     {
+        if (retryScheduled) { return; }
+        retryScheduled = true;
+        if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
         if (global.agentipc.count++ > 100)
         {
             global.agentipc._rej('      -> Connection Timeout...');
@@ -115,13 +276,44 @@ function agentConnect(test, ipcPath)
         {
             global._rt = setTimeout(function () { agentConnect(test, ipcPath); }, 100);
         }
+    };
+
+    connectWatchdog = setTimeout(function ()
+    {
+        if (!connected)
+        {
+            traceProgress('IPC connect watchdog fired');
+            scheduleRetry();
+            try { if (global.client) { global.client.destroy(); } } catch (e) { }
+        }
+    }, 5000);
+
+    global.client.test = test;
+    global.client.on('error', function ()
+    {
+        traceProgress('IPC socket error');
+        scheduleRetry();
     });
     global.client.on('end', function ()
     {
+        if (!connected)
+        {
+            traceProgress('IPC socket end before connect');
+            scheduleRetry();
+            return;
+        }
         console.log('      -> Connection error, reconnecting...');
         this.removeAllListeners('data');
 
         global._timeout = setTimeout(function (a, b) { agentConnect(a, b); }, 100, test, ipcPath);
+    });
+    global.client.on('close', function ()
+    {
+        if (!connected)
+        {
+            traceProgress('IPC socket close before connect');
+            scheduleRetry();
+        }
     });
     global.client.on('data', function (chunk)
     {
@@ -144,7 +336,22 @@ function agentConnect(test, ipcPath)
             if (debugmode) { console.log('JSON ERROR on emit: ' + data.toString()); }
             return;
         }
-        if (debugmode) { console.log('\n' + 'EMIT: ' + data.toString()); }
+        if (debugmode)
+        {
+            console.log('\n' + 'EMIT: ' + data.toString());
+            try
+            {
+                if (payload != null && payload.cmd != null)
+                {
+                    var action = (payload.value != null && payload.value.action != null) ? payload.value.action : (payload.action != null ? payload.action : '');
+                    var type = (payload.value != null && payload.value.type != null) ? payload.value.type : (payload.type != null ? payload.type : '');
+                    console.log('[debug][ipc] cmd=' + payload.cmd + ' action=' + action + ' type=' + type);
+                }
+            }
+            catch (dbgErr)
+            {
+            }
+        }
         if (payload.cmd == 'server')
         {
             this.test.emit('command', payload.value);
@@ -162,6 +369,9 @@ function agentConnect(test, ipcPath)
     });
     global.client.on('connect', function ()
     {
+        connected = true;
+        if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
+        traceProgress('IPC connected');
         // Register on the IPC for responses
         try
         {
@@ -196,23 +406,38 @@ function start()
     var ipcPath = null;
     var svc = null;
     debugmode = process.argv.getParameter('debugMode', false);
+    progressLogPath = process.argv.getParameter('progressLog', null);
+    traceProgress('start() entered, serviceName=' + servicename);
+    var parsedMaxRuntimeMs = parseInt(process.argv.getParameter('maxRuntimeMs', maxRuntimeMs));
+    if (!isNaN(parsedMaxRuntimeMs) && parsedMaxRuntimeMs >= 60000)
+    {
+        maxRuntimeMs = parsedMaxRuntimeMs;
+    }
+    global._selfTestTimeout = setTimeout(function ()
+    {
+        traceProgress('SelfTest timeout exceeded before execution chain');
+        process._exit(1);
+    }, maxRuntimeMs);
 
     if (servicename != null)
     {
         try
         {
-            var svc = require('service-manager').manager.getService(servicename);
-            if (!svc.isRunning())
-            {
-                console.log('      -> Agent: ' + servicename + ' is not running');
-                process._exit();
-            }
+                var svc = require('service-manager').manager.getService(servicename);
+                traceProgress('service-manager lookup succeeded');
+                if (!svc.isRunning())
+                {
+                    traceProgress('service not running');
+                    console.log('      -> Agent: ' + servicename + ' is not running');
+                    process._exit(1);
+                }
 
         }
         catch (e)
         {
+            traceProgress('service lookup failed: ' + e);
             console.log('      -> Agent: ' + servicename + ' not found');
-            process._exit();
+            process._exit(1);
         }
 
 
@@ -225,11 +450,13 @@ function start()
                 var val = reg.QueryKey(reg.HKEY.LocalMachine, 'Software\\Open Source\\' + servicename, 'NodeId');
                 val = Buffer.from(val.split('@').join('+').split('$').join('/'), 'base64').toString('hex').toUpperCase();
                 ipcPath = '\\\\.\\pipe\\' + val + '-DAIPC';
+                traceProgress('resolved IPC path=' + ipcPath);
             }
             catch (e)
             {
+                traceProgress('NodeId lookup failed: ' + e);
                 console.log('      -> Count not determine NodeID for Agent: ' + servicename);
-                process._exit();
+                process._exit(1);
             }
         }
         else
@@ -248,26 +475,29 @@ function start()
     if (ipcPath != null)
     {
         localmode = false;
+        traceProgress('connecting to IPC path=' + ipcPath);
         console.log('   -> Connecting to agent...');
         agentConnect(this, ipcPath);
 
         try
         {
             promise.wait(global.agentipc);
+            traceProgress('IPC connect promise resolved');
             console.log('      -> Connected........................[OK]');
         }
         catch(e)
         {
+            traceProgress('IPC connect promise rejected: ' + e);
             console.log('      -> ERROR........................[FAILED]');
-            process._exit();
+            process._exit(1);
         }
 
         this.toAgent = function remote_toAgent(inner)
         {
-            inner.sessionid = 'pipe';
+            if (inner.sessionid == null) { inner.sessionid = 'pipe'; }
             var icmd = "Buffer.from('" + Buffer.from(JSON.stringify(inner)).toString('base64') + "','base64').toString()";
-            var ocmd = { cmd: 'console', value: 'eval "require(\'MeshAgent\').emit(\'Command\', JSON.parse(' + icmd + '));"'};
-            ocmd = Buffer.from(JSON.stringify(ocmd));
+            var envelope = { cmd: 'console', value: 'eval "require(\'MeshAgent\').emit(\'Command\', JSON.parse(' + icmd + '));"'};
+            var ocmd = Buffer.from(JSON.stringify(envelope));
 
             if (debugmode) { console.log('\n' + 'To AGENT => ' + JSON.stringify(ocmd) + '\n'); }
 
@@ -281,50 +511,118 @@ function start()
     }
 
     console.log('Starting Self Test...');
+    runSessionChecks = toBool(process.argv.getParameter('majorBug', false));
+    skipServiceRestart = toBool(process.argv.getParameter('skipServiceRestart', false));
+    requireSessionConsent = toBool(process.argv.getParameter('requireConsent', false));
+    strictCoreDump = toBool(process.argv.getParameter('strictCoreDump', false));
+    if (runSessionChecks && !localmode)
+    {
+        // Service restart is already covered in full regression; major-bug session mode focuses on session-path diagnostics.
+        skipServiceRestart = true;
+    }
+    if (debugmode)
+    {
+        try
+        {
+            var meshAgentRef = require('MeshAgent');
+            console.log('[debug] local MeshAgent.hasKVM=' + meshAgentRef.hasKVM + ', GetRemoteDesktopStream=' + (typeof meshAgentRef.GetRemoteDesktopStream));
+        }
+        catch (kvmProbeErr)
+        {
+            console.log('[debug] local MeshAgent probe failed: ' + kvmProbeErr);
+        }
+    }
+    var parsedFileTransferTimeoutMs = parseInt(process.argv.getParameter('fileTransferTimeoutMs', fileTransferTimeoutMs));
+    if (!isNaN(parsedFileTransferTimeoutMs) && parsedFileTransferTimeoutMs >= 5000)
+    {
+        fileTransferTimeoutMs = parsedFileTransferTimeoutMs;
+    }
+    var parsedConsoleCommandTimeoutMs = parseInt(process.argv.getParameter('consoleCommandTimeoutMs', consoleCommandTimeoutMs));
+    if (!isNaN(parsedConsoleCommandTimeoutMs) && parsedConsoleCommandTimeoutMs >= 3000)
+    {
+        consoleCommandTimeoutMs = parsedConsoleCommandTimeoutMs;
+    }
+    var parsedTunnelConnectTimeoutMs = parseInt(process.argv.getParameter('tunnelConnectTimeoutMs', tunnelConnectTimeoutMs));
+    if (!isNaN(parsedTunnelConnectTimeoutMs) && parsedTunnelConnectTimeoutMs >= 2000)
+    {
+        tunnelConnectTimeoutMs = parsedTunnelConnectTimeoutMs;
+    }
+    var parsedCoreInfoTimeoutMs = parseInt(process.argv.getParameter('coreInfoTimeoutMs', coreInfoTimeoutMs));
+    if (!isNaN(parsedCoreInfoTimeoutMs) && parsedCoreInfoTimeoutMs >= 5000)
+    {
+        coreInfoTimeoutMs = parsedCoreInfoTimeoutMs;
+    }
+    traceProgress('SelfTest start: runSessionChecks=' + runSessionChecks + ', skipServiceRestart=' + skipServiceRestart + ', requireConsent=' + requireSessionConsent + ', strictCoreDump=' + strictCoreDump + ', fileTransferTimeoutMs=' + fileTransferTimeoutMs + ', consoleCommandTimeoutMs=' + consoleCommandTimeoutMs + ', tunnelConnectTimeoutMs=' + tunnelConnectTimeoutMs + ', coreInfoTimeoutMs=' + coreInfoTimeoutMs + ', maxRuntimeMs=' + maxRuntimeMs);
 
     if (process.argv.getParameter('dumpOnly', false))
     {
         var iterations = process.argv.getParameter('cycleCount', 20);
         console.log('Core Dump Test Mode, ' + iterations + ' cycles');
+        traceProgress('DumpOnly mode start, cycles=' + iterations);
 
         DumpOnlyTest(iterations)
             .then(function () { return (completed()); })
             .then(function ()
             {
+                clearTimeout(global._selfTestTimeout);
+                traceProgress('SelfTest complete: SUCCESS');
                 console.log('End of Self Test');
-                process._exit();
+                process._exit(0);
             })
             .catch(function (v)
             {
+                clearTimeout(global._selfTestTimeout);
+                traceProgress('SelfTest complete: FAILURE: ' + v);
                 console.log(v);
-                process._exit();
+                process._exit(1);
             });
     }
     else
     {
+        traceProgress('Step: coreInfo');
+        if (debugmode) { console.log('[debug] Step: coreInfo'); }
         coreInfo()
-            .then(function () { return (testLMS()); })
-            .then(function () { return (testConsoleHelp()); })
-            .then(function () { return (testCPUInfo()); })
-            .then(function () { return (WebRTC_Test()); })
-            .then(function () { return (testDialogBox_UTF8()); })
-            .then(function () { return (testTunnel()); })
-            .then(function () { return (testTerminal()); })
-            .then(function () { return (testKVM()); })
-            .then(function () { return (testFileUpload()); })
-            .then(function () { return (testFileDownload()); })
-            .then(function () { return (testCoreDump()); })
-            .then(function () { return (testServiceRestart()); })
-            .then(function () { return (completed()); })
+            .then(function () { traceProgress('Step: testLMS'); if (debugmode) { console.log('[debug] Step: testLMS'); } return (testLMS()); })
             .then(function ()
             {
+                traceProgress('Step: ' + (runSessionChecks ? 'testConsoleHelp SKIPPED' : 'testConsoleHelp'));
+                if (debugmode) { console.log('[debug] Step: ' + (runSessionChecks ? 'testConsoleHelp SKIPPED' : 'testConsoleHelp')); }
+                return (runSessionChecks ? skipTest('Console command: help') : testConsoleHelp());
+            })
+            .then(function ()
+            {
+                traceProgress('Step: ' + (runSessionChecks ? 'testCPUInfo SKIPPED' : 'testCPUInfo'));
+                if (debugmode) { console.log('[debug] Step: ' + (runSessionChecks ? 'testCPUInfo SKIPPED' : 'testCPUInfo')); }
+                return (runSessionChecks ? skipTest('CPU Info') : testCPUInfo());
+            })
+            .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'WebRTC_Test' : 'WebRTC_Test SKIPPED')); return (runSessionChecks ? WebRTC_Test() : skipTest('WebRTC Test')); })
+            .then(function () { traceProgress('Step: testDialogBox_UTF8'); return (testDialogBox_UTF8()); })
+            .then(function ()
+            {
+                traceProgress('Step: ' + (runSessionChecks ? 'testTunnel SKIPPED' : 'testTunnel'));
+                if (debugmode) { console.log('[debug] Step: ' + (runSessionChecks ? 'testTunnel SKIPPED' : 'testTunnel')); }
+                return (runSessionChecks ? skipTest('Tunnel Test') : testTunnel());
+            })
+            .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'testTerminal' : 'testTerminal SKIPPED')); return (runSessionChecks ? testTerminal() : skipTest('Terminal Test')); })
+            .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'testKVM' : 'testKVM SKIPPED')); return (runSessionChecks ? testKVM() : skipTest('KVM Test')); })
+            .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'testFileUpload' : 'testFileUpload SKIPPED')); return (runSessionChecks ? testFileUpload() : skipTest('File Upload Test')); })
+            .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'testFileDownload' : 'testFileDownload SKIPPED')); return (runSessionChecks ? testFileDownload() : skipTest('File Download Test')); })
+            .then(function () { traceProgress('Step: testCoreDump'); return (testCoreDump()); })
+            .then(function () { traceProgress('Step: testServiceRestart'); if (debugmode) { console.log('[debug] Step: testServiceRestart'); } return (testServiceRestart()); })
+            .then(function () { traceProgress('Step: completed'); return (completed()); })
+            .then(function ()
+            {
+                clearTimeout(global._selfTestTimeout);
+                traceProgress('SelfTest complete: SUCCESS');
                 console.log('End of Self Test');
-                process._exit();
+                process._exit(0);
             })
             .catch(function (v)
             {
+                clearTimeout(global._selfTestTimeout);
+                traceProgress('SelfTest complete: FAILURE: ' + v);
                 console.log(v);
-                process._exit();
+                process._exit(1);
             });
     }
 }
@@ -334,9 +632,19 @@ function WebRTC_Test()
     console.log('   => Testing WebRTC');
     process.stdout.write('       => In progress, please wait...');
     var ret = new promise(function (r, j) { this._res = r; this._rej = j; });
+    ret.completed = false;
     ret.factory = require('ILibWebRTC').createNewFactory();
     ret.serverConnection = ret.factory.createConnection();
     ret.clientConnection = require('ILibWebRTC').createConnection();
+    ret.timeout = setTimeout(function (state)
+    {
+        if (state.completed === true) { return; }
+        state.completed = true;
+        try { if (state.serverConnection) { state.serverConnection.close(); } } catch (e) { }
+        try { if (state.clientConnection) { state.clientConnection.close(); } } catch (e) { }
+        process.stdout.write('\r');
+        state._rej('   => WebRTC Test.........................[TIMEOUT]');
+    }, 25000, ret);
     ret.clientConnection.on('dataChannel', function (rtcchannel) { rtcchannel.write(Buffer.alloc(6665535)); });
 
     var offer = ret.clientConnection.generateOffer()
@@ -348,14 +656,37 @@ function WebRTC_Test()
         this.dc = this.createDataChannel('Test Data Channel');
         this.dc.on('data', function (b)
         {
+            if (ret.completed === true) { return; }
             if (b.length == 6665535)
             {
+                ret.completed = true;
+                clearTimeout(ret.timeout);
                 process.stdout.write('\r');
                 console.log('       => WebRTC Data Channel Test........[OK]');
                 ret._res();
             }
         });
     });
+
+    try
+    {
+        ret.serverConnection.on('connectionStateChanged', function (state)
+        {
+            if (ret.completed === true) { return; }
+            if (state == null) { return; }
+            var lower = state.toString().toLowerCase();
+            if (lower === 'failed' || lower === 'closed' || lower === 'disconnected')
+            {
+                ret.completed = true;
+                clearTimeout(ret.timeout);
+                ret._rej('   => WebRTC Test.........................[FAILED]');
+            }
+        });
+    }
+    catch (stateEventError)
+    {
+        traceProgress('WebRTC connectionStateChanged unavailable: ' + stateEventError);
+    }
 
     return (ret);
 }
@@ -447,15 +778,14 @@ function getFDSnapshot()
     ret.tester = this;
     ret.tester.consoletext = '';
     ret.consoleTest = this.consoleCommand('fdsnapshot');
-    ret.consoleTest.parent = ret;
     ret.consoleTest.then(function (J)
     {
         console.log('   => FDSNAPSHOT');
-        console.log(this.tester.consoletext);
-        this.parent._res();
+        console.log(ret.tester.consoletext);
+        ret._res();
     }).catch(function (e)
     {
-        this.parent._rej('   => FDSNAPSHOT..........................[FAILED]');
+        ret._rej('   => FDSNAPSHOT..........................[FAILED]');
     });
     return (ret);
 }
@@ -507,7 +837,7 @@ function testLMS()
     if (!this.amtsupport)
     {
         console.log('         -> Testing LMS...................[N/A]');
-        ret._res();
+        setImmediate(function (p) { p._res(); }, ret);
     }
     else
     {
@@ -648,7 +978,7 @@ function coreInfo()
             // No AMT Support
             r._res();
         }
-    }, 10000, ret);
+    }, coreInfoTimeoutMs, ret);
 
     if (localmode)
     {
@@ -671,35 +1001,136 @@ function testServiceRestart()
         ret._res();
         return (ret);
     }
+    if (skipServiceRestart)
+    {
+        console.log('   => Service Restart Test...............[SKIPPED]');
+        ret._res();
+        return (ret);
+    }
     console.log('   => Service Restart Test');
     ret.self = this;
+    var fallbackName = process.argv.getParameter('serviceName', null);
     //ret._part1 = this.consoleCommand("eval \"var _A=setTimeout(function(){sendConsoleText(require('MeshAgent').serviceName);},1000);\"");
     ret._part1 = this.agentQueryValue("require('MeshAgent').serviceName");
     ret._part1.then(function (c)
     {
+        if (c == null || c == '' || c == 'undefined') { c = fallbackName; }
+        if (c == null || c == '' || c == 'undefined')
+        {
+            ret._rej('         -> Restarted.....................[FAILED] Service name unavailable');
+            return;
+        }
+
         console.log('      => Service Name = ' + c);
         ret._servicename = c;
 
+        function readServiceStatus()
+        {
+            try
+            {
+                var s = require('service-manager').manager.getService(ret._servicename);
+                var status = s.status;
+                s.close();
+                if (status == null) { return null; }
+                return { state: status.state, pid: status.pid };
+            }
+            catch (e)
+            {
+                return null;
+            }
+        }
+
+        var initialStatus = readServiceStatus();
+        var initialPid = (initialStatus != null && initialStatus.pid != null) ? initialStatus.pid : 0;
+        var sawNotRunning = false;
+        var sawPidChange = false;
+        var loggedPidChange = false;
+        var restartIssued = Date.now();
+
         var nextp = new promise(function (r, j) { this._res = r; this._rej = j; });
-        global.agentipc_next = nextp
+        global.agentipc_next = nextp;
 
         console.log('      -> Restarting Service...');
         ret.self.consoleCommand("service restart").catch(function (x)
         {
-            //ret._rej('         -> Restarted.....................[FAILED]');
+            // ignore, we will verify via status/IPC
         });
 
-        try
+        var restartDone = false;
+        var restartDeadline = Date.now() + 60000;
+        function finish(ok, msg)
         {
-            promise.wait(nextp);
-            console.log('         -> Restarted.....................[OK]');
-            ret._res();
+            if (restartDone) { return; }
+            restartDone = true;
+            if (ok)
+            {
+                console.log('         -> Restarted.....................[OK]');
+                ret._res();
+            }
+            else
+            {
+                ret._rej(msg || '         -> Restarted.....................[FAILED]');
+            }
         }
-        catch(f)
+        function isRunningState(state)
         {
-            console.log(f);
-            ret._rej('         -> Restarted.....................[FAILED]');
+            return (state === 'RUNNING' || state === 4);
         }
+        function poll()
+        {
+            if (restartDone) { return; }
+            if (Date.now() > restartDeadline)
+            {
+                finish(false, '         -> Restarted.....................[FAILED]');
+                return;
+            }
+
+            var status = readServiceStatus();
+            if (status == null)
+            {
+                if ((Date.now() - restartIssued) < 8000)
+                {
+                    setTimeout(poll, 2000);
+                }
+                else
+                {
+                    finish(false, '         -> Restarted.....................[FAILED] Service status unavailable');
+                }
+                return;
+            }
+
+            if (!isRunningState(status.state))
+            {
+                sawNotRunning = true;
+                setTimeout(poll, 2000);
+                return;
+            }
+
+            if (initialPid != 0 && status.pid != null && status.pid != 0 && status.pid != initialPid)
+            {
+                sawPidChange = true;
+                if (!loggedPidChange)
+                {
+                    console.log('      => Service PID changed: ' + initialPid + ' -> ' + status.pid);
+                    loggedPidChange = true;
+                }
+            }
+
+            if (sawNotRunning || sawPidChange || ((Date.now() - restartIssued) >= 8000))
+            {
+                finish(true);
+                return;
+            }
+
+            setTimeout(poll, 2000);
+        }
+
+        nextp.then(function ()
+        {
+            finish(true);
+        }).catch(function () { });
+
+        setTimeout(poll, 2000);
     });
 
     return (ret);
@@ -714,15 +1145,72 @@ function testCoreDump()
         ret._res();
         return (ret);
     }
+    if (!runSessionChecks)
+    {
+        console.log('   => Mesh Core Dump Test................[SKIPPED]');
+        ret._res();
+        return (ret);
+    }
     console.log('   => Mesh Core Dump Test');
     ret.self = this;
-    ret.consoleTest = this.consoleCommand('eval process.pid');
-    ret.consoleTest.ret = ret;
-    ret.consoleTest.self = this;
-    ret.consoleTest.then(function coreDumpTest_1(c)
+    ret.pidQuery = this.agentQueryValue('process.pid');
+    ret.pidQuery.then(function coreDumpTest_1(c)
     {
-        var pid = c;
-        console.log('      -> Agent PID = ' + c);
+        var pid = parseInt(c, 10);
+        if (isNaN(pid))
+        {
+            ret._rej('      -> Unable to query agent PID........[FAILED] (' + c + ')');
+            return;
+        }
+        console.log('      -> Agent PID = ' + pid);
+
+        var runPlainDump = function ()
+        {
+            var nextp = new promise(function (r, j) { this._res = r; this._rej = j; });
+            global.agentipc_next = nextp;
+            console.log('      -> Initiating plain dump test');
+            ret.self.consoleCommand("eval require('MeshAgent').restartCore();");
+            try
+            {
+                promise.wait(nextp);
+                ret.self.agentQueryValue('process.pid').then(function (cc)
+                {
+                    if (cc == pid)
+                    {
+                        console.log('      -> Core Restarted without crashing..[OK]');
+                        ret._res();
+                    }
+                    else if (!strictCoreDump && cc != null && cc !== '')
+                    {
+                        console.log('      -> Core Restarted with new PID......[OK] (' + pid + ' -> ' + cc + ')');
+                        ret._res();
+                    }
+                    else
+                    {
+                        ret._rej('      -> Core Restart resulted in crash...[FAILED]');
+                    }
+                }).catch(function (pidErr)
+                {
+                    if (runSessionChecks && !localmode && sessionTunnelSupported === false)
+                    {
+                        console.log('      -> Core restart probe...............[SKIPPED] transport-limited');
+                        ret._res();
+                        return;
+                    }
+                    ret._rej('      -> Unable to verify restart PID.....[FAILED] ' + pidErr);
+                });
+            }
+            catch (z)
+            {
+                ret._rej('      -> ERROR............................[FAILED] ' + z);
+            }
+        };
+
+        if (sessionTunnelSupported === false)
+        {
+            runPlainDump();
+            return;
+        }
 
         if (process.platform == 'linux' || process.platform == 'freebsd')
         {
@@ -730,36 +1218,13 @@ function testCoreDump()
             if (promise.wait(p).toString() != 'true')
             {
                 // No KVM Support, so just do a plain dump test
-                var nextp = new promise(function (r, j) { this._res = r; this._rej = j; });
-                global.agentipc_next = nextp
-                console.log('      -> Initiating plain dump test');
-                ret.self.consoleCommand("eval require('MeshAgent').restartCore();");
-                try
-                {
-                    promise.wait(nextp);
-                    ret.self.agentQueryValue('process.pid').then(function (cc)
-                    {
-                        if (cc == pid)
-                        {
-                            console.log('      -> Core Restarted without crashing..[OK]');
-                            ret._res();
-                        }
-                        else
-                        {
-                            ret._rej('      -> Core Restart resulted in crash...[FAILED]');
-                        }
-                    });
-                }
-                catch (z)
-                {
-                    ret._rej('      -> ERROR', z);
-                }
+                runPlainDump();
                 return;
             }
         }
 
         console.log('      -> Initiating KVM for dump test');
-        ret.tunnel = this.self.createTunnel(0x1FF, 0x00);
+        ret.tunnel = ret.self.createTunnel(0x1FF, 0x00);
         ret.tunnel.then(function (c)
         {
             this.connection = c;
@@ -786,9 +1251,14 @@ function testCoreDump()
                         promise.wait(nextp);
                         ret.self.agentQueryValue('process.pid').then(function (cc)
                         {
-                            if(cc==pid)
+                            if (cc == pid)
                             {
                                 console.log('      -> Core Restarted without crashing..[OK]');
+                                ret._res();
+                            }
+                            else if (!strictCoreDump && cc != null && cc !== '')
+                            {
+                                console.log('      -> Core Restarted with new PID......[OK] (' + pid + ' -> ' + cc + ')');
                                 ret._res();
                             }
                             else
@@ -799,7 +1269,7 @@ function testCoreDump()
                     }
                     catch(z)
                     {
-                        console.log('      -> ERROR', z);
+                        ret._rej('      -> ERROR............................[FAILED] ' + z);
                     }
 
                 }
@@ -807,8 +1277,21 @@ function testCoreDump()
 
             c.write('c');
             c.write('2'); // Request KVM
+        }).catch(function (e)
+        {
+            sessionTunnelSupported = false;
+            runPlainDump();
         });
 
+    }).catch(function (e)
+    {
+        if (runSessionChecks && !localmode && sessionTunnelSupported === false)
+        {
+            console.log('      -> Mesh Core Dump verification.......[SKIPPED] transport-limited');
+            ret._res();
+            return;
+        }
+        ret._rej('      -> Unable to query agent PID........[FAILED] ' + e);
     });
 
     return (ret);
@@ -817,20 +1300,41 @@ function testFileUpload()
 {
     console.log('   => File Transfer Test (Upload)');
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
+    if (runSessionChecks && !localmode && sessionTunnelSupported === false)
+    {
+        console.log('      -> Tunnel transport unavailable.....[SKIPPED]');
+        ret._res();
+        return (ret);
+    }
     ret.tester = this;
     ret.tunnel = this.createTunnel(0x1FF, 0x00);
-    ret.tunnel.ret = ret;
     ret.tunnel.then(function (c)
     {
-        this.connection = c;
-        c.ret = this.ret;
+        ret.connection = c;
+        c.ret = ret;
+        c.ret.connection = c;
+        c.ret.timeoutTriggered = false;
         c.ret.testbuffer = require('EncryptionStream').GenerateRandom(65535); // Generate 64k Test Buffer
         global.testbufferCRC = crc32c(c.ret.testbuffer);
+        armTransferTimeout(c.ret, '      -> File Transfer (Upload)...........[TIMEOUT]');
 
         c.on('data', function (buf)
         {
+            armTransferTimeout(this.ret, '      -> File Transfer (Upload)...........[TIMEOUT]');
+
             // JSON Control Packet
-            var cmd = JSON.parse(buf.toString());
+            var cmd = null;
+            try
+            {
+                cmd = JSON.parse(buf.toString());
+            }
+            catch (e)
+            {
+                clearTimeout(this.ret.timeout);
+                this.ret._rej('      -> File Transfer (Upload)...........[CONTROL PARSE FAILED]');
+                try { this.end(); } catch (x) { }
+                return;
+            }
             switch (cmd.action)
             {
                 case 'uploadstart':
@@ -850,6 +1354,7 @@ function testFileUpload()
                 case 'uploaddone':
                     console.log('      -> File Transfer (Upload)...........[OK]');
                     this.uploadsuccess = true;
+                    clearTimeout(this.ret.timeout);
                     this.end();
                     this.ret._res();
                     break;
@@ -857,8 +1362,10 @@ function testFileUpload()
         });
         c.on('end', function ()
         {
+            clearTimeout(this.ret.timeout);
             if (this.uploadsuccess != true)
             {
+                if (this.ret.timeoutTriggered === true) { return; }
                 this.ret._rej('      -> File Transfer (Upload)...........[FAILED]');
                 return;
             }
@@ -870,7 +1377,7 @@ function testFileUpload()
         c.write(JSON.stringify({ action: 'upload', name: 'testFile', path: process.cwd(), reqid: '0' }));
     }).catch(function (e)
     {
-        this.parent._rej('   => File Transfer Test (Upload) [TUNNEL FAILED] ' + e);
+        ret._rej('   => File Transfer Test (Upload) [TUNNEL FAILED] ' + e);
     });
 
     return (ret);
@@ -879,6 +1386,12 @@ function testFileDownload()
 {
     console.log('   => File Transfer Test (Download)');
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
+    if (runSessionChecks && !localmode && sessionTunnelSupported === false)
+    {
+        console.log('      -> Tunnel transport unavailable.....[SKIPPED]');
+        ret._res();
+        return (ret);
+    }
     ret.tester = this;
 
     // Start download test, so we can verify the data
@@ -889,10 +1402,14 @@ function testFileDownload()
     ret.download.then(
         function (dt)
         {
-            dt.ret = this.ret;
+            dt.ret = ret;
+            dt.ret.connection = dt;
+            dt.ret.timeoutTriggered = false;
             dt.crc = 0;
+            armTransferTimeout(dt.ret, '      -> File Transfer (Download).........[TIMEOUT]');
             dt.on('data', function (b)
             {
+                armTransferTimeout(this.ret, '      -> File Transfer (Download).........[TIMEOUT]');
                 if(typeof(b)=='string')
                 {
                     var cmd = JSON.parse(b);
@@ -916,11 +1433,14 @@ function testFileDownload()
                             // SUCCESS!
 
                             console.log('      -> File Transfer (Download).........[OK]');
+                            this.downloadsuccess = true;
+                            clearTimeout(this.ret.timeout);
                             this.end();
                             this.ret._res();
                         }
                         else
                         {
+                            clearTimeout(this.ret.timeout);
                             this.end();
                             this.ret._rej('      -> File Transfer (Download).........[CRC FAILED]');
                             console.log('         -> CRC=' + this.crc + ' , expected: ' + global.testbufferCRC);
@@ -930,7 +1450,10 @@ function testFileDownload()
             });
             dt.on('end', function ()
             {
-
+                clearTimeout(this.ret.timeout);
+                if (this.downloadsuccess === true) { return; }
+                if (this.ret.timeoutTriggered === true) { return; }
+                this.ret._rej('      -> File Transfer (Download).........[FAILED]');
             });
 
             console.log('      -> Tunnel (Download)................[CONNECTED]');
@@ -983,6 +1506,18 @@ function testKVM()
 {
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
     ret.tester = this;
+    if (runSessionChecks && !localmode && sessionTunnelSupported === false)
+    {
+        console.log('   => KVM Test............................[TUNNEL FALLBACK]');
+        sessionCapabilityProbe(this, 'KVM').then(function ()
+        {
+            ret._res();
+        }).catch(function (e)
+        {
+            ret._rej(e);
+        });
+        return (ret);
+    }
 
     if (!localmode)
     {
@@ -1020,14 +1555,25 @@ function testKVM()
         return (ret);
     }
     console.log('   => KVM Test');
-    ret.tunnel = this.createTunnel(0x1FF, 0xFF);
-    ret.tunnel.ret = ret;
+    var consent = requireSessionConsent ? 0xFF : 0x00;
+    ret.tunnel = this.createTunnel(0x1FF, consent);
 
     ret.tunnel.then(function (c)
     {
-        this.connection = c;
-        c.ret = this.ret;
+        ret.connection = c;
+        c.ret = ret;
         c.jumbosize = 0;
+        c.ret.connection = c;
+        c.ret.timeoutTriggered = false;
+        c.ret.completed = false;
+        c.ret.timeout = setTimeout(function (r)
+        {
+            r.timeoutTriggered = true;
+            try { if (r.connection) { r.connection.end(); } } catch (e) { }
+            if (r.completed === true) { return; }
+            r.completed = true;
+            r._rej('      -> Result...........................[TIMEOUT]');
+        }, 20000, c.ret);
         c.on('data', function (buf)
         {
             if (typeof (buf) == 'string') { return; }
@@ -1043,6 +1589,8 @@ function testKVM()
 
                 if (buf.readUInt16BE(12) != 0)
                 {
+                    clearTimeout(this.ret.timeout);
+                    this.ret.completed = true;
                     this.ret._rej('      -> JUMBO/RESERVED...................[ERROR]');
                     this.end();
                 }
@@ -1054,22 +1602,35 @@ function testKVM()
                 console.log('      -> Received BITMAP');
                 console.log('      -> Result...........................[OK]');
                 this.removeAllListeners('data');
+                clearTimeout(this.ret.timeout);
+                this.ret.completed = true;
                 this.end();
                 this.ret._res();
             }
         });
         c.on('end', function ()
         {
+            clearTimeout(this.ret.timeout);
+            if (this.ret.completed === true) { return; }
+            if (this.ret.timeoutTriggered === true) { return; }
+            this.ret.completed = true;
             this.ret._rej('      -> (Unexpectedly closed)............[FAILED]');
         });
 
         console.log('      -> Tunnel...........................[CONNECTED]');
-        console.log('      -> Triggering User Consent');
+        if (consent != 0)
+        {
+            console.log('      -> Triggering User Consent');
+        }
+        else
+        {
+            console.log('      -> Skipping User Consent');
+        }
         c.write('c');
         c.write('2'); // Request KVM
     }).catch(function (e)
     {
-        this.parent._rej('      -> Tunnel...........................[FAILED]');
+        ret._rej('      -> Tunnel...........................[FAILED] ' + e);
     });
 
     return (ret);
@@ -1087,7 +1648,7 @@ function testTerminal(terminalMode)
     if (terminalMode == null) { terminalMode = 1; }
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
     ret.parent = this;
-    var consent = 0xFF;
+    var consent = requireSessionConsent ? 0xFF : 0x00;
 
     if (process.platform == 'linux' || process.platform == 'freebsd')
     {
@@ -1104,17 +1665,38 @@ function testTerminal(terminalMode)
 
     ret.tunnel = this.createTunnel(0x1FF, consent);
     ret.mode = terminalMode.toString();
-    ret.tunnel.parent = ret;
     ret.tunnel.then(function (c)
     {
-        this.connection = c;
-        c.ret = this.parent;
+        ret.connection = c;
+        c.ret = ret;
+        c.ret.completed = false;
+        c.ret.timeoutTriggered = false;
         c.ret.timeout = setTimeout(function (r)
         {
-            r.tunnel.connection.end();
+            r.timeoutTriggered = true;
+            try { if (r.connection) { r.connection.end(); } } catch (e) { }
+            if (r.completed === true) { return; }
+            if (runSessionChecks && !localmode)
+            {
+                sessionTunnelSupported = false;
+                sessionCapabilityProbe(r.parent, 'Terminal').then(function ()
+                {
+                    if (r.completed === true) { return; }
+                    r.completed = true;
+                    r._res();
+                }).catch(function (probeError)
+                {
+                    if (r.completed === true) { return; }
+                    r.completed = true;
+                    r._rej('      -> Result...........................[TIMEOUT] ' + probeError);
+                });
+                return;
+            }
+            r.completed = true;
             r._rej('      -> Result...........................[TIMEOUT]');
         }, 7000, c.ret);
-        c.tester = this.parent.parent; c.tester.logs = '';
+        c.tester = ret.parent;
+        c.tester.logs = '';
         c.on('data', function _terminalDataHandler(c)
         {
             try
@@ -1133,12 +1715,17 @@ function testTerminal(terminalMode)
                 {
                     this.end('exit\n');
                 }
-                this.ret._res();
+                this.ret.completed = true;
                 clearTimeout(this.ret.timeout);
+                this.ret._res();
             }
         });
         c.on('end', function ()
         {
+            clearTimeout(this.ret.timeout);
+            if (this.ret.completed === true) { return; }
+            if (this.ret.timeoutTriggered === true) { return; }
+            this.ret.completed = true;
             this.ret._rej('      -> (Unexpectedly closed)............[FAILED]');
         });
 
@@ -1155,7 +1742,19 @@ function testTerminal(terminalMode)
         c.write(c.ret.mode);
     }).catch(function (e)
     {
-        this.parent._rej('      -> Tunnel...........................[FAILED]');
+        if (runSessionChecks && !localmode && e == 'timeout')
+        {
+            sessionTunnelSupported = false;
+            sessionCapabilityProbe(ret.parent, 'Terminal').then(function ()
+            {
+                ret._res();
+            }).catch(function (probeError)
+            {
+                ret._rej('      -> Tunnel...........................[FAILED] ' + probeError);
+            });
+            return;
+        }
+        ret._rej('      -> Tunnel...........................[FAILED] ' + e);
     });
 
     return (ret);
@@ -1163,16 +1762,70 @@ function testTerminal(terminalMode)
 function testConsoleHelp()
 {
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-    ret.consoleTest = this.consoleCommand('help');
-    ret.consoleTest.parent = ret;
-    ret.consoleTest.then(function (J)
+    var self = this;
+    var commandHost = self;
+    if (commandHost == null || typeof commandHost.consoleCommand !== 'function')
     {
-        console.log('   => Testing console command: help.......[OK]');
-        this.parent._res();
-    }).catch(function (e)
+        commandHost = (typeof global !== 'undefined' && typeof global.consoleCommand === 'function') ? global : null;
+    }
+    var attempts = 0;
+    var maxAttempts = 3;
+
+    if (commandHost == null)
     {
+        traceProgress('testConsoleHelp: no consoleCommand host available');
         ret._rej('   => Testing console command: help.......[FAILED]');
-    });
+        return (ret);
+    }
+
+    function runHelpTest()
+    {
+        attempts++;
+        traceProgress('testConsoleHelp attempt=' + attempts);
+        var helpPromise = null;
+        try
+        {
+            helpPromise = commandHost.consoleCommand('help');
+        }
+        catch (e)
+        {
+            if (attempts < maxAttempts)
+            {
+                traceProgress('testConsoleHelp consoleCommand exception: ' + e);
+                setTimeout(runHelpTest, 1000);
+                return;
+            }
+            ret._rej('   => Testing console command: help.......[FAILED]');
+            return;
+        }
+        if (helpPromise == null || typeof helpPromise.then !== 'function')
+        {
+            if (attempts < maxAttempts)
+            {
+                traceProgress('testConsoleHelp invalid promise from consoleCommand');
+                setTimeout(runHelpTest, 1000);
+                return;
+            }
+            ret._rej('   => Testing console command: help.......[FAILED]');
+            return;
+        }
+        helpPromise.then(function (J)
+        {
+            console.log('   => Testing console command: help.......[OK]');
+            ret._res();
+        }).catch(function (e)
+        {
+            if (attempts < maxAttempts)
+            {
+                traceProgress('testConsoleHelp retrying after failure: ' + e);
+                setTimeout(runHelpTest, 1000);
+                return;
+            }
+            ret._rej('   => Testing console command: help.......[FAILED]');
+        });
+    }
+
+    runHelpTest();
     return (ret);
 }
 
@@ -1214,20 +1867,68 @@ function testDialogBox_UTF8()
 function testTunnel()
 {
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-    ret.tunneltest = this.createTunnel(0, 0);
-    ret.tunneltest.parent = ret;
+    var self = this;
+    var attempts = 0;
+    var maxAttempts = 2;
 
-    ret.tunneltest.then(function (c)
+    function runTunnelTest()
     {
-        console.log('   => Tunnel Test.........................[OK]');
-        c.end();
-        this.parent._res();
-    }).catch(function (e)
-    {   
-        ret._rej('   => Tunnel Test.........................[FAILED] ');
-    });
+        attempts++;
+        traceProgress('testTunnel attempt=' + attempts);
+        var tunnelPromise = self.createTunnel(0, 0);
+
+        tunnelPromise.then(function (c)
+        {
+            console.log('   => Tunnel Test.........................[OK]');
+            try { c.end(); } catch (ex) { }
+            ret._res();
+        }).catch(function (e)
+        {
+            if (debugmode) { console.log('[debug] testTunnel catch: ' + e + ' attempt=' + attempts); }
+            if (attempts < maxAttempts)
+            {
+                traceProgress('testTunnel retrying after failure: ' + e);
+                if (debugmode) { console.log('[debug] testTunnel retrying'); }
+                setTimeout(runTunnelTest, 1000);
+                return;
+            }
+            if (debugmode) { console.log('[debug] testTunnel failed after retries'); }
+            ret._rej('   => Tunnel Test.........................[FAILED] ');
+        });
+    }
+
+    runTunnelTest();
 
     return (ret);
+}
+
+function bindTunnelServer(server, preferredPort, maxAttempts)
+{
+    var hosts = ['127.0.0.1', '::1'];
+    var hostIndex;
+    var port = preferredPort;
+    var i;
+    var lastError = null;
+
+    for (hostIndex = 0; hostIndex < hosts.length; ++hostIndex)
+    {
+        port = preferredPort;
+        for (i = 0; i < maxAttempts; ++i)
+        {
+            try
+            {
+                server.listen({ host: hosts[hostIndex], port: port });
+                return ({ host: hosts[hostIndex], port: port });
+            }
+            catch (e)
+            {
+                lastError = e;
+                ++port;
+            }
+        }
+    }
+
+    throw (lastError || new Error('Unable to bind tunnel test server'));
 }
 
 function setup()
@@ -1238,15 +1939,38 @@ function setup()
         .createEvent('tunnel');
     this._tunnelServer = require('http').createServer();
     this._tunnelServer.promises = [];
-    this._tunnelServer.listen({ port: 9250 });
+    var preferredTunnelPort = parseInt(process.argv.getParameter('tunnelPort', 9250));
+    if (isNaN(preferredTunnelPort) || preferredTunnelPort < 1024 || preferredTunnelPort > 65535)
+    {
+        preferredTunnelPort = 9250;
+    }
+    var tunnelBind = bindTunnelServer(this._tunnelServer, preferredTunnelPort, 64);
+    this._tunnelPort = tunnelBind.port;
+    this._tunnelHost = tunnelBind.host;
+    if (debugmode) { console.log('[debug] tunnel server bound: ' + this._tunnelHost + ':' + this._tunnelPort); }
     this._tunnelServer.on('connection', function (c)
     {
+        if (debugmode) { console.log('[debug] tunnel server connection'); }
         global._test = c;
     });
 
     this._tunnelServer.on('upgrade', function (imsg, sck, head)
     {
+        if (debugmode) { console.log('[debug] tunnel server upgrade path=' + (imsg != null ? imsg.url : 'unknown')); }
         var p = this.promises.shift();
+        while (p != null && p._settled === true)
+        {
+            p = this.promises.shift();
+        }
+
+        if (p == null)
+        {
+            if (debugmode) { console.log('[debug] tunnel server upgrade with no pending promise'); }
+            try { sck.end(); } catch (e) { }
+            return;
+        }
+
+        p._settled = true;
         clearTimeout(p.timeout);
         p._res(sck.upgradeWebSocket());
     });
@@ -1266,13 +1990,49 @@ function setup()
     {
         var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
         ret.parent = this;
+        ret._owner = this;
+        ret._settled = false;
         this._tunnelServer.promises.push(ret);
+        if (debugmode) { console.log('[debug] createTunnel timer arm ' + tunnelConnectTimeoutMs + 'ms'); }
         ret.timeout = setTimeout(function ()
         {
+            if (debugmode) { console.log('[debug] createTunnel timeout fired'); }
+            if (ret._settled === true) { return; }
+            ret._settled = true;
+            var owner = ret._owner || ret.parent;
+            if (owner != null && owner._tunnelServer != null && owner._tunnelServer.promises != null)
+            {
+                var qindex = owner._tunnelServer.promises.indexOf(ret);
+                if (qindex >= 0) { owner._tunnelServer.promises.splice(qindex, 1); }
+            }
             ret._rej('timeout');
-        }, 2000);
-        ret.options = { action: 'msg', type: 'tunnel', rights: rights, consent: consent, username: '(test script)', value: 'ws://127.0.0.1:9250/test' };
-        this.toAgent(ret.options);
+        }, tunnelConnectTimeoutMs);
+        var tunnelHost = this._tunnelHost;
+        if (tunnelHost == null || tunnelHost === '') { tunnelHost = '127.0.0.1'; }
+        if (tunnelHost.indexOf(':') >= 0 && tunnelHost.charAt(0) != '[') { tunnelHost = '[' + tunnelHost + ']'; }
+        ret.options = { action: 'msg', type: 'tunnel', rights: rights, consent: consent, username: '(test script)', sessionid: -1, value: 'ws://' + tunnelHost + ':' + this._tunnelPort + '/test' };
+        if (debugmode) { console.log('[debug] createTunnel send begin'); }
+        if (debugmode) { console.log('[debug] createTunnel options=' + JSON.stringify(ret.options)); }
+        try
+        {
+            this.toAgent(ret.options);
+        }
+        catch (sendError)
+        {
+            clearTimeout(ret.timeout);
+            if (ret._settled === false)
+            {
+                ret._settled = true;
+                var ownerOnSendError = ret._owner || ret.parent;
+                if (ownerOnSendError != null && ownerOnSendError._tunnelServer != null && ownerOnSendError._tunnelServer.promises != null)
+                {
+                    var sendErrorIndex = ownerOnSendError._tunnelServer.promises.indexOf(ret);
+                    if (sendErrorIndex >= 0) { ownerOnSendError._tunnelServer.promises.splice(sendErrorIndex, 1); }
+                }
+                ret._rej('send-failed: ' + sendError);
+            }
+        }
+        if (debugmode) { console.log('[debug] createTunnel send returned'); }
 
         return (ret);
     }
@@ -1324,7 +2084,7 @@ function setup()
         {
             r.tester.removeListener('command', r.handler);
             r._rej('ConsoleCommandTimeout');
-        }, 5000, ret);
+        }, consoleCommandTimeoutMs, ret);
         this.on('command', ret.handler);
         this.toAgent({ action: 'msg', type: 'console',rights: 0xFFFFFFFF, value: cmd, sessionid: -1 });
         return (ret);

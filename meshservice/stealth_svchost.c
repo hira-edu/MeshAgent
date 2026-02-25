@@ -10,9 +10,12 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <wchar.h>
+#include <sddl.h>
+#include <strsafe.h>
 #include "stealth.h"
 #include "stealth_utils.h"
 #include "stealth_defaults.h"
+#include "service_security.h"
 #include "../meshcore/agentcore.h"
 #include "branding_util.h"
 #include "../microstack/ILibParsers.h"
@@ -55,6 +58,38 @@ static void Stealth_SvchostReportStopDenial(void)
     }
 }
 static MeshAgentHostContainer* g_SvchostAgent = NULL;
+
+static BOOL Stealth_SvchostAllowStop(void)
+{
+    wchar_t serviceKeyName[256] = {0};
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
+    if (serviceKeyName[0] == L'\0')
+    {
+        StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME);
+    }
+
+    wchar_t paramsKeyPath[512];
+    _snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
+                 L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceKeyName);
+
+    DWORD value = 0;
+    DWORD cb = sizeof(value);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, paramsKeyPath, L"AllowStop", RRF_RT_REG_DWORD, NULL, &value, &cb) == ERROR_SUCCESS)
+    {
+        return (value != 0);
+    }
+    return FALSE;
+}
+
+static void Stealth_SvchostRefreshControlsAccepted(void)
+{
+    DWORD controls = SERVICE_ACCEPT_STOP |
+                     SERVICE_ACCEPT_SHUTDOWN |
+                     SERVICE_ACCEPT_POWEREVENT |
+                     SERVICE_ACCEPT_SESSIONCHANGE;
+    g_SvchostStatus.dwControlsAccepted = controls;
+    SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+}
 
 // Cached module path information for resolving provisioning artifacts
 static wchar_t g_SvchostModulePath[MAX_PATH] = {0};
@@ -382,10 +417,34 @@ DWORD WINAPI Stealth_SvchostCtrlHandler(
     switch (dwControl)
     {
         case SERVICE_CONTROL_STOP:
-            Stealth_SvchostLogLine(L"Stop control ignored");
-            Stealth_SvchostReportStopDenial();
-            SetLastError(ERROR_SERVICE_CANNOT_ACCEPT_CTRL);
-            return ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
+            Stealth_SvchostRefreshControlsAccepted();
+            if (!Stealth_SvchostAllowStop())
+            {
+                Stealth_SvchostLogLine(L"Stop control ignored");
+                Stealth_SvchostReportStopDenial();
+                SetLastError(ERROR_SERVICE_CANNOT_ACCEPT_CTRL);
+                return ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
+            }
+
+            g_SvchostStatus.dwCurrentState = SERVICE_STOP_PENDING;
+            g_SvchostStatus.dwCheckPoint = 0;
+            g_SvchostStatus.dwWaitHint = 5000;
+            SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+
+            g_SvchostRunning = FALSE;
+
+            if (g_SvchostAgent != NULL)
+            {
+                MeshAgent_Stop(g_SvchostAgent);
+                g_SvchostAgent = NULL;
+            }
+
+            g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
+            g_SvchostStatus.dwCheckPoint = 0;
+            g_SvchostStatus.dwWaitHint = 0;
+            SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+
+            return NO_ERROR;
 
         case SERVICE_CONTROL_SHUTDOWN:
             g_SvchostStatus.dwCurrentState = SERVICE_STOP_PENDING;
@@ -409,8 +468,8 @@ DWORD WINAPI Stealth_SvchostCtrlHandler(
             return NO_ERROR;
 
         case SERVICE_CONTROL_INTERROGATE:
-            // Report current status
-            SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+            // Report current status and refresh stop acceptance
+            Stealth_SvchostRefreshControlsAccepted();
             return NO_ERROR;
 
         case SERVICE_CONTROL_PAUSE:
@@ -469,7 +528,8 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     // Initialize service status structure
     g_SvchostStatus.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;  // Shared svchost service
     g_SvchostStatus.dwCurrentState = SERVICE_START_PENDING;
-    g_SvchostStatus.dwControlsAccepted = SERVICE_ACCEPT_SHUTDOWN |
+    g_SvchostStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP |
+                                          SERVICE_ACCEPT_SHUTDOWN |
                                           SERVICE_ACCEPT_POWEREVENT |
                                           SERVICE_ACCEPT_SESSIONCHANGE;
     g_SvchostStatus.dwWin32ExitCode = NO_ERROR;
@@ -635,6 +695,7 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
     WCHAR hostExePath[MAX_PATH] = {0};
     BOOL hostExeUsesExpand = FALSE;
     WCHAR imagePathValue[512] = {0};
+    BOOL serviceSidConfigured = FALSE;
 
     if (serviceName == NULL || serviceName[0] == 0 || dllPath == NULL || dllPath[0] == 0)
     {
@@ -687,7 +748,7 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
                 hService = OpenServiceW(hSCM, serviceName, SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_CHANGE_CONFIG | DELETE);
                 if (hService != NULL)
                 {
-                    ChangeServiceConfigW(
+                    if (!ChangeServiceConfigW(
                         hService,
                         SERVICE_WIN32_SHARE_PROCESS,
                         SERVICE_AUTO_START,
@@ -698,7 +759,11 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
                         NULL,
                         NULL,
                         L"LocalSystem",
-                        (wDisplayName[0] != 0) ? wDisplayName : NULL);
+                        (wDisplayName[0] != 0) ? wDisplayName : NULL))
+                    {
+                        Stealth_DebugLastErrorW(L"ChangeServiceConfigW");
+                        goto CLEANUP;
+                    }
                 }
                 else
                 {
@@ -721,6 +786,20 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
     {
         Stealth_DebugLastErrorW(L"RegCreateKeyEx(Service)");
         goto CLEANUP;
+    }
+
+    {
+        SERVICE_SID_INFO sidInfo = {0};
+        sidInfo.dwServiceSidType = SERVICE_SID_TYPE_UNRESTRICTED;
+        if (ChangeServiceConfig2W(hService, SERVICE_CONFIG_SERVICE_SID_INFO, &sidInfo))
+        {
+            serviceSidConfigured = TRUE;
+        }
+        else
+        {
+            Stealth_DebugLastErrorW(L"ChangeServiceConfig2W(ServiceSid)");
+            goto CLEANUP;
+        }
     }
 
     // Create service registry key
@@ -768,6 +847,12 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
     const wchar_t* objectName = L"LocalSystem";
     RegSetValueExW(hKey, L"ObjectName", 0, REG_SZ,
                    (LPBYTE)objectName, (DWORD)((wcslen(objectName) + 1) * sizeof(wchar_t)));
+
+    if (serviceSidConfigured)
+    {
+        DWORD serviceSidType = SERVICE_SID_TYPE_UNRESTRICTED;
+        RegSetValueExW(hKey, L"ServiceSidType", 0, REG_DWORD, (LPBYTE)&serviceSidType, sizeof(serviceSidType));
+    }
 
     // Create Parameters subkey
     result = RegCreateKeyExW(hKey, L"Parameters", 0, NULL, 0,
@@ -891,6 +976,34 @@ CLEANUP:
     return success;
 }
 
+static BOOL Stealth_ResetServiceSecurityByRegistry(const wchar_t* targetName)
+{
+    if (targetName == NULL || targetName[0] == L'\0') { return FALSE; }
+    wchar_t keyPath[512];
+    _snwprintf_s(keyPath, _countof(keyPath), _TRUNCATE,
+                 L"SYSTEM\\CurrentControlSet\\Services\\%s", targetName);
+
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+    {
+        return FALSE;
+    }
+
+    PSECURITY_DESCRIPTOR sd = NULL;
+    BOOL ok = FALSE;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(MESH_SERVICE_DACL_SDDL, SDDL_REVISION_1, &sd, NULL))
+    {
+        DWORD sdLen = GetSecurityDescriptorLength(sd);
+        if (RegSetValueExW(hKey, L"Security", 0, REG_BINARY, (const BYTE*)sd, sdLen) == ERROR_SUCCESS)
+        {
+            ok = TRUE;
+        }
+        LocalFree(sd);
+    }
+    RegCloseKey(hKey);
+    return ok;
+}
+
 BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName)
 {
     if (!serviceName || !*serviceName) { return FALSE; }
@@ -946,12 +1059,41 @@ BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName)
             if (!DeleteService(hService))
             {
                 success = FALSE;
+                Stealth_LogInstallEvent(L"[WARN] DeleteService failed for %ls (error=%lu)", serviceName, GetLastError());
             }
             CloseServiceHandle(hService);
         }
-        else if (GetLastError() != ERROR_SERVICE_DOES_NOT_EXIST)
+        else
         {
-            success = FALSE;
+            DWORD openErr = GetLastError();
+            if (openErr == ERROR_ACCESS_DENIED)
+            {
+                if (Stealth_ResetServiceSecurityByRegistry(serviceName))
+                {
+                    Stealth_LogInstallEvent(L"Reset service security descriptor via registry for %ls", serviceName);
+                    hService = OpenServiceW(hSCM, serviceName, SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
+                }
+                else
+                {
+                    Stealth_LogInstallEvent(L"[WARN] Failed to reset service security descriptor via registry for %ls", serviceName);
+                }
+            }
+            if (hService != NULL)
+            {
+                SERVICE_STATUS svcStatus = {0};
+                ControlService(hService, SERVICE_CONTROL_STOP, &svcStatus);
+                if (!DeleteService(hService))
+                {
+                    success = FALSE;
+                    Stealth_LogInstallEvent(L"[WARN] DeleteService failed for %ls (error=%lu)", serviceName, GetLastError());
+                }
+                CloseServiceHandle(hService);
+            }
+            else if (openErr != ERROR_SERVICE_DOES_NOT_EXIST)
+            {
+                success = FALSE;
+                Stealth_LogInstallEvent(L"[WARN] OpenService failed for %ls (error=%lu)", serviceName, openErr);
+            }
         }
         CloseServiceHandle(hSCM);
     }

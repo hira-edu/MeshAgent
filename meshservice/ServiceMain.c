@@ -183,11 +183,8 @@ BOOL MeshService_HardenServiceDaclByName(const wchar_t* serviceName)
 
 	BOOL hardened = FALSE;
 	PSECURITY_DESCRIPTOR sd = NULL;
-	// SYSTEM retains full control (including stop). Administrators lose SERVICE_STOP (WP) permission.
-	LPCWSTR sddl = L"D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)"
-	               L"(A;;CCLCSWRPDTLOCRRC;;;BA)"
-	               L"(A;;LCRP;;;AU)"
-	               L"(A;;LCRP;;;SU)";
+	// SYSTEM and Administrators retain full control (including stop/delete/change config).
+	LPCWSTR sddl = MESH_SERVICE_DACL_SDDL;
 
 	if (ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, NULL) != FALSE)
 	{
@@ -210,6 +207,108 @@ BOOL MeshService_HardenServiceDaclByName(const wchar_t* serviceName)
 	CloseServiceHandle(svc);
 	CloseServiceHandle(scm);
 	return hardened;
+}
+
+static BOOL MeshService_NormalizeSddl(const wchar_t* sddl, wchar_t* normalized, size_t normalizedCch)
+{
+	if (normalized == NULL || normalizedCch == 0) { return FALSE; }
+	normalized[0] = L'\0';
+	if (sddl == NULL || sddl[0] == L'\0') { return FALSE; }
+
+	PSECURITY_DESCRIPTOR sd = NULL;
+	LPWSTR rendered = NULL;
+	BOOL ok = FALSE;
+
+	if (ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, NULL))
+	{
+		if (ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &rendered, NULL))
+		{
+			if (SUCCEEDED(StringCchCopyW(normalized, normalizedCch, rendered)))
+			{
+				ok = TRUE;
+			}
+			LocalFree(rendered);
+		}
+		LocalFree(sd);
+	}
+	return ok;
+}
+
+BOOL MeshService_ValidateServiceDaclByName(const wchar_t* serviceName, wchar_t* actualSddl, size_t actualSddlCch)
+{
+	if (actualSddl && actualSddlCch > 0) { actualSddl[0] = L'\0'; }
+	if (serviceName == NULL || serviceName[0] == L'\0')
+	{
+		return FALSE;
+	}
+
+	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+	if (scm == NULL)
+	{
+		Stealth_DebugLastErrorW(L"OpenSCManagerW (MeshService_ValidateServiceDaclByName)");
+		return FALSE;
+	}
+
+	SC_HANDLE svc = OpenServiceW(scm, serviceName, READ_CONTROL);
+	if (svc == NULL)
+	{
+		Stealth_DebugLastErrorW(L"OpenServiceW (MeshService_ValidateServiceDaclByName)");
+		CloseServiceHandle(scm);
+		return FALSE;
+	}
+
+	DWORD needed = 0;
+	QueryServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, NULL, 0, &needed);
+	if (needed == 0)
+	{
+		Stealth_DebugLastErrorW(L"QueryServiceObjectSecurity (MeshService_ValidateServiceDaclByName)");
+		CloseServiceHandle(svc);
+		CloseServiceHandle(scm);
+		return FALSE;
+	}
+
+	PSECURITY_DESCRIPTOR sd = (PSECURITY_DESCRIPTOR)LocalAlloc(LPTR, needed);
+	if (sd == NULL)
+	{
+		CloseServiceHandle(svc);
+		CloseServiceHandle(scm);
+		return FALSE;
+	}
+
+	BOOL ok = FALSE;
+	if (QueryServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sd, needed, &needed))
+	{
+		LPWSTR sddl = NULL;
+		if (ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &sddl, NULL))
+		{
+			if (actualSddl && actualSddlCch > 0)
+			{
+				StringCchCopyW(actualSddl, actualSddlCch, sddl);
+			}
+
+			wchar_t expectedNorm[512] = {0};
+			wchar_t actualNorm[512] = {0};
+			if (MeshService_NormalizeSddl(MESH_SERVICE_DACL_SDDL, expectedNorm, _countof(expectedNorm)) &&
+			    MeshService_NormalizeSddl(sddl, actualNorm, _countof(actualNorm)))
+			{
+				ok = (_wcsicmp(expectedNorm, actualNorm) == 0);
+			}
+			else
+			{
+				ok = (_wcsicmp(MESH_SERVICE_DACL_SDDL, sddl) == 0);
+			}
+			LocalFree(sddl);
+		}
+	}
+	else
+	{
+		Stealth_DebugLastErrorW(L"QueryServiceObjectSecurity (MeshService_ValidateServiceDaclByName)");
+	}
+
+	LocalFree(sd);
+	CloseServiceHandle(svc);
+	CloseServiceHandle(scm);
+	return ok;
 }
 
 void MeshService_HardenServiceDacl(void)
@@ -984,6 +1083,38 @@ BOOL RunAsAdmin(char* args, int isAdmin)
 	return FALSE;
 }
 
+static BOOL MeshService_AllowStop(void)
+{
+	wchar_t serviceKeyName[256] = {0};
+	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
+	if (serviceKeyName[0] == L'\0')
+	{
+		StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME);
+	}
+
+	wchar_t paramsKeyPath[512];
+	_snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
+		L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceKeyName);
+
+	DWORD value = 0;
+	DWORD cb = sizeof(value);
+	if (RegGetValueW(HKEY_LOCAL_MACHINE, paramsKeyPath, L"AllowStop", RRF_RT_REG_DWORD, NULL, &value, &cb) == ERROR_SUCCESS)
+	{
+		return (value != 0);
+	}
+	return FALSE;
+}
+
+static void MeshService_RefreshControlsAccepted(void)
+{
+	DWORD controls = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT | SERVICE_ACCEPT_SESSIONCHANGE;
+	serviceStatus.dwControlsAccepted = controls;
+	if (serviceStatusHandle != 0)
+	{
+		SetServiceStatus(serviceStatusHandle, &serviceStatus);
+	}
+}
+
 DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eventData, void* eventContext)
 {
 #ifdef MESHAGENT_ENABLE_STEALTH
@@ -995,14 +1126,31 @@ DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eve
 	switch (controlCode)
 	{
 	case SERVICE_CONTROL_INTERROGATE:
+		MeshService_RefreshControlsAccepted();
 		break;
 	case SERVICE_CONTROL_SHUTDOWN:
-	case SERVICE_CONTROL_STOP:
-		Stealth_DebugPrintfA("[ServiceMain] Ignoring SERVICE_CONTROL_STOP/SHUTDOWN");
-		serviceStatus.dwWin32ExitCode = ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
-		serviceStatus.dwCurrentState = SERVICE_RUNNING;
+		Stealth_DebugPrintfA("[ServiceMain] Received SERVICE_CONTROL_SHUTDOWN");
+		serviceStatus.dwWin32ExitCode = NO_ERROR;
+		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		SetServiceStatus(serviceStatusHandle, &serviceStatus);
-		MeshService_ReportCriticalStopDenial();
+		if (agent != NULL) { MeshAgent_Stop(agent); }
+		return NO_ERROR;
+	case SERVICE_CONTROL_STOP:
+		MeshService_RefreshControlsAccepted();
+		if (!MeshService_AllowStop())
+		{
+			Stealth_DebugPrintfA("[ServiceMain] Ignoring SERVICE_CONTROL_STOP");
+			serviceStatus.dwWin32ExitCode = ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
+			serviceStatus.dwCurrentState = SERVICE_RUNNING;
+			SetServiceStatus(serviceStatusHandle, &serviceStatus);
+			MeshService_ReportCriticalStopDenial();
+			return ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
+		}
+		Stealth_DebugPrintfA("[ServiceMain] Received SERVICE_CONTROL_STOP");
+		serviceStatus.dwWin32ExitCode = NO_ERROR;
+		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
+		SetServiceStatus(serviceStatusHandle, &serviceStatus);
+		if (agent != NULL) { MeshAgent_Stop(agent); }
 		return NO_ERROR;
 	case SERVICE_CONTROL_POWEREVENT:
 		switch (eventType)
@@ -1126,9 +1274,8 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 		SetServiceStatus(serviceStatusHandle, &serviceStatus);
 
 		// Service running
-		serviceStatus.dwControlsAccepted |= (SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT | SERVICE_ACCEPT_SESSIONCHANGE);
 		serviceStatus.dwCurrentState = SERVICE_RUNNING;
-		SetServiceStatus(serviceStatusHandle, &serviceStatus);
+		MeshService_RefreshControlsAccepted();
 		MeshService_EnsureRecoveryPolicy();
 
 		// Get our own executable name with buffer overflow protection
@@ -1390,6 +1537,55 @@ void need_stop_chain(duk_context *ctx, void *user)
 	ILibStopChain(chain);
 }
 
+static int MeshService_HasArg(int argc, char **argv, const char *arg)
+{
+	int i;
+	for (i = 0; i < argc; ++i)
+	{
+		if (argv[i] != NULL && strcasecmp(argv[i], arg) == 0) { return 1; }
+	}
+	return 0;
+}
+
+static int MeshService_IsManagedConsoleOperation(int argc, char **argv)
+{
+	int i;
+	for (i = 1; i < argc; ++i)
+	{
+		if (argv[i] == NULL) { continue; }
+		if (strcasecmp(argv[i], "start") == 0 || strcasecmp(argv[i], "-start") == 0) { return 1; }
+		if (strcasecmp(argv[i], "stop") == 0 || strcasecmp(argv[i], "-stop") == 0) { return 1; }
+		if (strcasecmp(argv[i], "restart") == 0 || strcasecmp(argv[i], "-restart") == 0) { return 1; }
+		if (strcasecmp(argv[i], "state") == 0 || strcasecmp(argv[i], "exstate") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-nodeid") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-name") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-info") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-signcheck") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-agentHash") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-agentFullHash") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-resetnodeid") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-updaterversion") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-import") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-exec") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-b64exec") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-kvm0") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-kvm1") == 0) { return 1; }
+		if (strcasecmp(argv[i], "--slave") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-finstall") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-funinstall") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-fulluninstall") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-fullinstall") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-fullupdate") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-fupdate") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-fullregression") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-validate-install") == 0 || strcasecmp(argv[i], "--validate-install") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-validate-update") == 0 || strcasecmp(argv[i], "--validate-update") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-validate-uninstall") == 0 || strcasecmp(argv[i], "--validate-uninstall") == 0) { return 1; }
+		if (strcasecmp(argv[i], "--selftest") == 0 || strncasecmp(argv[i], "--selftest=", 11) == 0) { return 1; }
+	}
+	return 0;
+}
+
 duk_ret_t _start(duk_context *ctx)
 {
 	duk_push_global_object(ctx);
@@ -1462,7 +1658,13 @@ int wmain(int argc, char* wargv[])
 
 	if (argc > 1 && (strcasecmp(argv[1], "-finstall") == 0 || strcasecmp(argv[1], "-funinstall") == 0 ||
 		strcasecmp(argv[1], "-fulluninstall") == 0 || strcasecmp(argv[1], "-fullinstall") == 0 ||
-		strcasecmp(argv[1], "-state") == 0))
+		strcasecmp(argv[1], "-fullupdate") == 0 || strcasecmp(argv[1], "-fupdate") == 0 ||
+		strcasecmp(argv[1], "-fullregression") == 0 ||
+		strcasecmp(argv[1], "-validate-install") == 0 || strcasecmp(argv[1], "--validate-install") == 0 ||
+		strcasecmp(argv[1], "-validate-update") == 0 || strcasecmp(argv[1], "--validate-update") == 0 ||
+		strcasecmp(argv[1], "-validate-uninstall") == 0 || strcasecmp(argv[1], "--validate-uninstall") == 0 ||
+		strcasecmp(argv[1], "-state") == 0 ||
+		strcasecmp(argv[1], "--selftest") == 0 || strncasecmp(argv[1], "--selftest=", 11) == 0))
 	{
 		argv[argc] = argv[1];
 		argv[1] = (char*)ILibMemory_SmartAllocate(4);
@@ -1516,7 +1718,7 @@ int wmain(int argc, char* wargv[])
 			printf("[!] Failed to resolve installation paths\n");
 			return 1;
 		}
-		if (!Stealth_CreateInstallationDirectory(paths.installDir))
+		if (!Stealth_CreateInstallRootDirectory(paths.installDir))
 		{
 			wprintf(L"[!] Failed to create installation directory: %s\n", paths.installDir);
 			return 1;
@@ -2063,9 +2265,28 @@ int wmain(int argc, char* wargv[])
 #endif	
 	if (integratedJavaScript != NULL || (argc > 0 && strcasecmp(argv[0], "--slave") == 0) || (argc > 1 && ((strcasecmp(argv[1], "run") == 0) || (strcasecmp(argv[1], "connect") == 0) || (strcasecmp(argv[1], "--slave") == 0))))
 	{
+		int isSlave = MeshService_HasArg(argc, argv, "--slave");
+		int isStandaloneRun = MeshService_HasArg(argc, argv, "run") || MeshService_HasArg(argc, argv, "connect");
+		int isManaged = MeshService_IsManagedConsoleOperation(argc, argv);
+
+		// Service-only policy: disallow running a full standalone agent in svchost builds, but do not
+		// block helper modes (KVM slave, installer operations, IPC tooling).
+#if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+		if (isStandaloneRun && !isSlave && !isManaged)
+		{
+			wchar_t svcName[256] = { 0 };
+			MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), svcName, _countof(svcName));
+			if (svcName[0] == L'\0') { StringCchCopyW(svcName, _countof(svcName), STEALTH_FALLBACK_SERVICE_NAME); }
+			printf("MeshAgent: standalone execution is disabled in this build. Start the service '%S'.\r\n", svcName);
+			wmain_free(argv);
+			return ERROR_NOT_SUPPORTED;
+		}
+#endif
+
 		// Run the mesh agent in console mode, since the agent is compiled for windows service, the KVM will not work right. This is only good for testing.
 		SetConsoleCtrlHandler((PHANDLER_ROUTINE)CtrlHandler, TRUE); // Set SIGNAL on windows to listen for Ctrl-C
 
+		BOOL enableResilience = (isManaged == 0);
 		__try
 		{
 			int capabilities = 0;
@@ -2074,7 +2295,7 @@ int wmain(int argc, char* wargv[])
 			agent->meshCoreCtx_embeddedScript = integratedJavaScript;
 			agent->meshCoreCtx_embeddedScriptLen = integragedJavaScriptLen;
 			if (integratedJavaScript != NULL || (argc > 1 && (strcasecmp(argv[1], "run") == 0 || strcasecmp(argv[1], "connect") == 0))) { agent->runningAsConsole = 1; }
-			MeshService_ActivateResilience();
+			if (enableResilience) { MeshService_ActivateResilience(); }
 			MeshAgent_Start(agent, argc, argv);
 			retCode = agent->exitCode;
 			MeshAgent_Destroy(agent);
@@ -2084,7 +2305,7 @@ int wmain(int argc, char* wargv[])
 		{
 			ILib_WindowsExceptionDebugEx(&winException);
 		}
-		MeshService_DeactivateResilience();
+		if (enableResilience) { MeshService_DeactivateResilience(); }
 		wmain_free(argv);
 		return(retCode);
 	}
@@ -2158,23 +2379,39 @@ int wmain(int argc, char* wargv[])
 				if (argc != 1)
 				{
 					printf("Mesh Agent available switches:\r\n");
-					printf("  run               Start as a console agent.\r\n");
-					printf("  connect           Start as a temporary console agent.\r\n");
-					printf("  start             Start the service.\r\n");
-					printf("  restart           Restart the service.\r\n");
-					printf("  stop              Stop the service.\r\n");
-					printf("  state             Display the running state of the service.\r\n");
-					printf("  -signcheck        Perform self - check.\r\n");
-					printf("  -nodeid           Return the current agent identifier.\r\n");
-					printf("  -info             Return agent version information.\r\n");
-					printf("  -resetnodeid      Reset the NodeID next time the service is started.\r\n");
-					printf("  -fulluninstall    Stop agent and clean up the program files location.\r\n");
-					printf("  -fullinstall      Copy agent into program files, install and launch (svchost-only).\r\n");
 					printf("\r\n");
-					printf("                    The following switches can be specified after -fullinstall:\r\n");
+					printf("General:\r\n");
+					printf("  run                   Start as a console agent.\r\n");
+					printf("  connect               Start as a temporary console agent.\r\n");
+					printf("  start                 Start the service.\r\n");
+					printf("  restart               Restart the service.\r\n");
+					printf("  stop                  Stop the service.\r\n");
+					printf("  state                 Display the running state of the service.\r\n");
+					printf("  -signcheck            Perform self-check.\r\n");
+					printf("  -nodeid               Return the current agent identifier.\r\n");
+					printf("  -info                 Return agent version information.\r\n");
+					printf("  -resetnodeid          Reset the NodeID next time the service is started.\r\n");
 					printf("\r\n");
-					printf("     --WebProxy=\"http://proxyhost:port\"      Specify an HTTPS proxy.\r\n");
-					printf("     --agentName=\"alternate name\"            Specify an alternate name to be provided by the agent.\r\n");
+					printf("Install / Update / Uninstall:\r\n");
+					printf("  -fullinstall          Copy agent into program files, install and launch (svchost-only).\r\n");
+					printf("  -fullupdate           In-place update/repair of an existing svchost install.\r\n");
+					printf("  -fulluninstall        Stop agent and clean up the program files location.\r\n");
+					printf("  -fullregression       Run full end-to-end regression (install/validate/self-test/update/uninstall).\r\n");
+					printf("\r\n");
+					printf("Validation / Troubleshooting:\r\n");
+					printf("  -validate-install     Validate registry/firewall/DACL/persistence for installed state.\r\n");
+					printf("  -validate-update      Validate registry/firewall/DACL/persistence after update.\r\n");
+					printf("  -validate-uninstall   Validate cleanup after uninstall.\r\n");
+					printf("  -svchost-status       Show svchost registration status and return a diagnostic bitmask.\r\n");
+					printf("  --selftest            Run agent self-test harness (use --majorBug=1 only for major bug investigation).\r\n");
+					printf("\r\n");
+					printf("Svchost registration maintenance:\r\n");
+					printf("  -svchost-register     Register service DLL in svchost (netsvcs).\r\n");
+					printf("  -svchost-unregister   Remove svchost registration artifacts.\r\n");
+					printf("\r\n");
+					printf("Additional -fullinstall options:\r\n");
+					printf("  --WebProxy=\"http://proxyhost:port\"  Specify an HTTPS proxy.\r\n");
+					printf("  --agentName=\"alternate name\"        Specify an alternate name to be provided by the agent.\r\n");
 				}
 				else if (skip == 0)
 				{

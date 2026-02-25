@@ -216,6 +216,7 @@ typedef struct MeshAgentHostContainer
 	int coreDumpEnabled;
 	int localConsentMask;
 	int localdebugmode;
+	int selfTestLaunched;
 
 	char agentHash[UTIL_SHA384_HASHSIZE];
 	char serverHash[UTIL_SHA384_HASHSIZE];

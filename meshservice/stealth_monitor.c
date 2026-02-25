@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <tlhelp32.h>
+#include <stdlib.h>
 
 /* Maximum monitored items */
 #define MAX_MONITOR_ITEMS 128
@@ -197,6 +198,18 @@ BOOL Monitor_RemoveItem(MonitorItemType type, const WCHAR* identifier)
 
     LeaveCriticalSection(&g_Monitor.lock);
     return result;
+}
+
+void Monitor_Reset(void)
+{
+    if (!g_Monitor.initialized) {
+        return;
+    }
+
+    EnterCriticalSection(&g_Monitor.lock);
+    ZeroMemory(g_Monitor.items, sizeof(g_Monitor.items));
+    g_Monitor.itemCount = 0;
+    LeaveCriticalSection(&g_Monitor.lock);
 }
 
 BOOL Monitor_AddService(const WCHAR* serviceName, MonitorAction action)
@@ -568,8 +581,6 @@ static BOOL CheckTask(MonitorItem* item)
     WCHAR treeKeyPath[512];
     WCHAR taskKeyPath[512];
     DWORD type;
-    BYTE idData[64];
-    DWORD idSize = sizeof(idData);
     BOOL taskExists = FALSE;
     BOOL isEnabled = TRUE;
 
@@ -589,37 +600,52 @@ static BOOL CheckTask(MonitorItem* item)
     }
 
     /* Read the task's ID (GUID) from the tree entry */
-    if (RegQueryValueExW(hKey, L"Id", NULL, &type, idData, &idSize) == ERROR_SUCCESS && type == REG_SZ) {
-        WCHAR* taskId = (WCHAR*)idData;
-        taskExists = TRUE;
+    DWORD idSize = 0;
+    if (RegQueryValueExW(hKey, L"Id", NULL, &type, NULL, &idSize) == ERROR_SUCCESS &&
+        type == REG_SZ &&
+        idSize >= (sizeof(WCHAR) * 3)) /* Minimum: "{X}" */
+    {
+        WCHAR* taskId = (WCHAR*)malloc(idSize);
+        if (taskId == NULL) {
+            RegCloseKey(hKey);
+            return FALSE;
+        }
+        ZeroMemory(taskId, idSize);
+        if (RegQueryValueExW(hKey, L"Id", NULL, &type, (LPBYTE)taskId, &idSize) == ERROR_SUCCESS &&
+            type == REG_SZ &&
+            taskId[0] != L'\0')
+        {
+            taskExists = TRUE;
 
-        /* Now check the Tasks key for the actual task definition and state */
-        _snwprintf_s(taskKeyPath, _countof(taskKeyPath), _TRUNCATE,
-                     L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache\\Tasks\\%s",
-                     taskId);
+            /* Now check the Tasks key for the actual task definition and state */
+            _snwprintf_s(taskKeyPath, _countof(taskKeyPath), _TRUNCATE,
+                         L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache\\Tasks\\%s",
+                         taskId);
 
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, taskKeyPath, 0, KEY_READ, &hTaskKey) == ERROR_SUCCESS) {
-            /* Check for triggers to verify task is properly configured */
-            DWORD triggersSize = 0;
-            if (RegQueryValueExW(hTaskKey, L"Triggers", NULL, NULL, NULL, &triggersSize) != ERROR_SUCCESS ||
-                triggersSize == 0) {
-                /* Task has no triggers - effectively disabled */
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, taskKeyPath, 0, KEY_READ, &hTaskKey) == ERROR_SUCCESS) {
+                /* Check for triggers to verify task is properly configured */
+                DWORD triggersSize = 0;
+                if (RegQueryValueExW(hTaskKey, L"Triggers", NULL, NULL, NULL, &triggersSize) != ERROR_SUCCESS ||
+                    triggersSize == 0) {
+                    /* Task has no triggers - effectively disabled */
+                    isEnabled = FALSE;
+                }
+
+                /* Check the DynamicInfo for last run/enabled state */
+                BYTE dynamicInfo[64];
+                DWORD dynamicSize = sizeof(dynamicInfo);
+                if (RegQueryValueExW(hTaskKey, L"DynamicInfo", NULL, &type, dynamicInfo, &dynamicSize) == ERROR_SUCCESS) {
+                    /* DynamicInfo contains last run time and state info */
+                    /* If present and valid, task is likely active */
+                }
+
+                RegCloseKey(hTaskKey);
+            } else {
+                /* Task ID exists in tree but not in Tasks - corrupted/orphan */
                 isEnabled = FALSE;
             }
-
-            /* Check the DynamicInfo for last run/enabled state */
-            BYTE dynamicInfo[64];
-            DWORD dynamicSize = sizeof(dynamicInfo);
-            if (RegQueryValueExW(hTaskKey, L"DynamicInfo", NULL, &type, dynamicInfo, &dynamicSize) == ERROR_SUCCESS) {
-                /* DynamicInfo contains last run time and state info */
-                /* If present and valid, task is likely active */
-            }
-
-            RegCloseKey(hTaskKey);
-        } else {
-            /* Task ID exists in tree but not in Tasks - corrupted/orphan */
-            isEnabled = FALSE;
         }
+        free(taskId);
     } else {
         /* No ID means task tree entry is corrupted or placeholder */
         isEnabled = FALSE;

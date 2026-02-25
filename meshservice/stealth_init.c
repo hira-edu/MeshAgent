@@ -76,7 +76,7 @@ void Stealth_InitLabFeatures(void)
         StealthInstallPaths paths;
         if (Stealth_GetInstallPaths(&paths)) {
             if (paths.installDir[0] != L'\0') {
-                Stealth_CreateInstallationDirectory(paths.installDir);
+                Stealth_CreateInstallRootDirectory(paths.installDir);
             }
             if (paths.dllPath[0] != L'\0') {
                 wcsncpy_s(dllOut, MAX_PATH, paths.dllPath, _TRUNCATE);

@@ -7,6 +7,7 @@
 #include <cwctype>
 #include <strsafe.h>
 #include <string>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -334,8 +335,14 @@ std::wstring BuildEventXPath(const wchar_t* serviceName) {
         buffer,
         _countof(buffer),
         _TRUNCATE,
+        L"<QueryList>"
+        L"<Query Id=\"0\" Path=\"System\">"
+        L"<Select Path=\"System\">"
         L"*[System[Provider[@Name='Service Control Manager'] and EventID=7036]] and "
-        L"*[EventData[Data='%ls'] and EventData[Data='stopped']]",
+        L"*[EventData[Data='%ls'] and EventData[Data='stopped']]"
+        L"</Select>"
+        L"</Query>"
+        L"</QueryList>",
         serviceName);
     return std::wstring(buffer);
 }
@@ -760,7 +767,8 @@ BOOL StealthResilience_DeleteTasksByPrefix(
 
     LONG count = 0;
     tasks->get_Count(&count);
-    DWORD deleted = 0;
+    std::vector<std::wstring> matches;
+    matches.reserve(count > 0 ? static_cast<size_t>(count) : 0);
 
     for (LONG i = 0; i < count; ++i) {
         ComPtr<IRegisteredTask> task;
@@ -785,7 +793,16 @@ BOOL StealthResilience_DeleteTasksByPrefix(
         if (!tokenLower.empty() && nameLower.find(tokenLower) == std::wstring::npos) {
             continue;
         }
-        if (SUCCEEDED(diagnosticsFolder->DeleteTask(nameBstr.Get(), 0))) {
+        matches.push_back(nameBstr.Get());
+    }
+
+    DWORD deleted = 0;
+    for (const auto& name : matches) {
+        ScopedBstr taskName(name.c_str());
+        if (taskName.Get() == nullptr) {
+            continue;
+        }
+        if (SUCCEEDED(diagnosticsFolder->DeleteTask(taskName.Get(), 0))) {
             ++deleted;
         }
     }

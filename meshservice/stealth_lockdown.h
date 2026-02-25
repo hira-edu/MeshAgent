@@ -172,8 +172,14 @@ DWORD Lockdown_CheckAndRestore(void);
 BOOL Lockdown_HandleIpcCommand(DWORD commandType, const void* payload, DWORD payloadSize);
 
 /*
+ * Stop runtime monitoring/watchdog components without removing persistence artifacts.
+ * Intended for service stop/restart paths where persistence must remain installed.
+ */
+BOOL Lockdown_StopRuntime(void);
+
+/*
  * Cleanup and free resources
- * Automatically exits lockdown if active
+ * Does not implicitly SecureExit or remove persistence artifacts.
  */
 void Lockdown_Cleanup(void);
 

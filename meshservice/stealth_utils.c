@@ -10,6 +10,7 @@
 #include <knownfolders.h>
 #include "stealth_utils.h"
 #include "stealth_defaults.h"
+#include "service_security.h"
 
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -211,9 +212,15 @@ void Stealth_FormatServiceStopXPath(const wchar_t* serviceName, wchar_t* xPath, 
 
     /* Event Log query for service stop event (Event ID 7036) */
     _snwprintf_s(xPath, xPathSize, _TRUNCATE,
+        L"<QueryList>"
+        L"<Query Id=\"0\" Path=\"System\">"
+        L"<Select Path=\"System\">"
         L"*[System[Provider[@Name='Service Control Manager'] and (EventID=7036)]] "
         L"and *[EventData[Data[@Name='param1']='%ls']] "
-        L"and *[EventData[Data[@Name='param2']='stopped']]",
+        L"and *[EventData[Data[@Name='param2']='stopped']]"
+        L"</Select>"
+        L"</Query>"
+        L"</QueryList>",
         serviceName);
 }
 
@@ -244,14 +251,10 @@ BOOL Stealth_ProtectServiceFromTermination(const wchar_t* serviceName)
         return FALSE;
     }
 
-    /* Build a restrictive DACL that denies SERVICE_STOP to interactive users */
+    /* Apply hardened service DACL (consistent with validation expectations) */
     PSECURITY_DESCRIPTOR pSD = NULL;
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)"   /* SYSTEM: full control */
-            L"(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)" /* Administrators: full control */
-            L"(A;;CCLCSWLOCRRC;;;IU)"           /* Interactive Users: limited (no stop) */
-            L"(A;;CCLCSWLOCRRC;;;SU)",          /* Service Users: limited (no stop) */
-            SDDL_REVISION_1, &pSD, NULL))
+            MESH_SERVICE_DACL_SDDL, SDDL_REVISION_1, &pSD, NULL))
     {
         if (SetServiceObjectSecurity(hService, DACL_SECURITY_INFORMATION, pSD))
         {
