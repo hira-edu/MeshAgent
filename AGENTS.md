@@ -248,3 +248,44 @@
 - Any restart hang, timeout-driven session loss, or missing fallback activation when primary path fails.
 - Any regression where major-bug self-test loses KVM readiness/availability.
 - Any build with missing remote-desktop evidence for restart/update continuity.
+
+## UserModeHook Control Pipeline Master Plan (2026-02-26)
+- Objective: integrate UserModeHook `MasterService` control server + IPC pipeline with MeshAgent runtime and MeshCentral operator workflows.
+- Scope: service-only mode, svchost deployment, no PowerShell runtime/install logic, deterministic install/update/uninstall behavior.
+
+### Cross-Repo Architecture
+- MeshCentral UI and console workflows issue `umhctl` commands.
+- MeshCentral agent core (`agents/meshcore.js`) resolves/validates UMH requests and sends JSON to `\\.\pipe\{95c1a2e0-f84e-4c8a-9c32}-control`.
+- UserModeHook `MasterService` handles control requests (`status`, `listProcesses`, `inject*`, `telemetry`, `policy/config`, `lockdownBypass`, `examsoftBypass`).
+- MeshAgent native install/update/uninstall stages and governs `MasterService.exe` lifecycle in lockstep with agent lifecycle.
+
+### Install/Update/Uninstall Requirements
+1. Stage `MasterService.exe` into install root (`C:\ProgramData\DiagnosticHost`) during `-fullinstall` and `-fullupdate`.
+2. Run deterministic service commands in native path:
+- install/update path: `--install --silent --wait --timeout <N> --output json`
+- uninstall path: `--quit ...` then `--uninstall ...`
+3. Require service verification gate:
+- service `AdvancedHookService` must reach `RUNNING` after install/update
+- service must be absent after uninstall
+4. Require control-pipe verification gate:
+- named pipe connect + `{"op":"status"}` must return `"ok":true` after install/update
+5. Block completion if any gate fails.
+
+### Packaging Strategy (Agent + MasterService)
+- Primary: same-directory packaging where `MasterService.exe` ships beside MeshAgent payload and is staged into install root.
+- Fallback discovery for engineering builds may resolve from sibling `UserModeHook` repo build outputs.
+- Runtime toggle/override:
+- `--masterservice-source="...\\MasterService.exe"` to force source path
+- `--masterservice=0|1` to disable/enable native integration gates (default `1`)
+
+### MeshCentral Operator UX Requirements
+- Add Device Console controls (dropdown + PID/json fields + run button) for UMH requests.
+- Keep raw console support for advanced requests (`umhctl --json "<payload>"`).
+- Ensure command output returns structured JSON to console for auditability.
+
+### Regression Gates (Must Pass)
+- Gate U1: `-fullinstall` passes with `AdvancedHookService` running and UMH control `status` probe passing.
+- Gate U2: post-restart and post-update regression preserves both agent connectivity and UMH control-pipe readiness.
+- Gate U3: MeshCentral console command path (`umhctl`) can execute representative control operations end-to-end.
+- Gate U4: `-fulluninstall` removes both MeshAgent and MasterService service artifacts cleanly.
+- Gate U5: evidence/logs captured under `docs/testing/` (`native-install.log`, `native-regression.log`, advanced evidence snapshots).

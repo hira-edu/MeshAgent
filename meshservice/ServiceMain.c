@@ -2818,6 +2818,8 @@ int wmain(int argc, char* wargv[])
 					printf("Additional -fullinstall options:\r\n");
 					printf("  --WebProxy=\"http://proxyhost:port\"  Specify an HTTPS proxy.\r\n");
 					printf("  --agentName=\"alternate name\"        Specify an alternate name to be provided by the agent.\r\n");
+					printf("  --masterservice-source=\"path\"       Stage MasterService.exe from a specific source path.\r\n");
+					printf("  --masterservice=0|1                  Disable/enable MasterService integration gates (default: 1).\r\n");
 				}
 				else if (skip == 0)
 				{
