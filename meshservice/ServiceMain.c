@@ -55,6 +55,7 @@ BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
 
 // Forward declaration to satisfy early references in this TU
 int wmain(int argc, char* wargv[]);
+static BOOL MeshService_GetServiceNameW(wchar_t* buffer, size_t cchBuffer);
 
 // Macro to free argv allocated by wmain - needs argvi variable in scope
 #define wmain_free(argv) do { int argvi; for(argvi=0;argvi<(int)(ILibMemory_Size(argv)/sizeof(void*));++argvi){ILibMemory_Free(argv[argvi]);}ILibMemory_Free(argv); } while(0)
@@ -67,6 +68,9 @@ int wmain(int argc, char* wargv[]);
 #define SVCHOST_STATUS_DLL_HASH_MISMATCH      0x00000020
 #define SVCHOST_STATUS_SID_MISMATCH           0x00000040
 #define SVCHOST_STATUS_HASH_NOT_CONFIGURED    0x00000080
+#define MESH_SERVICE_CONTROL_TIMEOUT_MS       120000
+#define MESH_SERVICE_CONTROL_POLL_MIN_MS      200
+#define MESH_SERVICE_CONTROL_POLL_MAX_MS      1000
 
 static const wchar_t* ServiceStateToString(DWORD s)
 {
@@ -741,6 +745,8 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 	config->ipcTimeoutMs = MeshService_ReadEnvDword(L"STEALTH_IPC_TIMEOUT_MS", config->ipcTimeoutMs);
 
 	config->autoSecureEnter = MeshService_ReadEnvBool(L"STEALTH_AUTO_SECUREENTER", config->enableWatchdog);
+	config->strictServiceOnly = MeshService_ReadEnvBool(L"STEALTH_STRICT_SERVICE_ONLY", config->strictServiceOnly);
+	config->allowDesktopBridge = MeshService_ReadEnvBool(L"STEALTH_ALLOW_DESKTOP_BRIDGE", config->allowDesktopBridge);
 
 	wchar_t authKey[64];
 	if (GetEnvironmentVariableW(L"STEALTH_IPC_AUTH", authKey, (DWORD)_countof(authKey)) > 0)
@@ -748,12 +754,18 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 		StringCchCopyW(config->ipcAuthKey, _countof(config->ipcAuthKey), authKey);
 	}
 
-	// Helper monitor configuration (defaults to watchdog enabled profile unless overridden)
+	// Helper monitor configuration.
+	// Service-only baseline: never auto-enable user-session helper spawning from
+	// watchdog/persistence defaults. Operators must opt in explicitly.
+	config->enableHelperMonitor = MeshService_ReadEnvBool(
+		L"STEALTH_ENABLE_HELPER_MONITOR",
+		FALSE);
+	if (config->strictServiceOnly &&
+		!config->allowDesktopBridge &&
+		config->enableHelperMonitor)
 	{
-		BOOL helperDefault = (persistence != NULL && persistence->watchdog.enabled != 0);
-		config->enableHelperMonitor = MeshService_ReadEnvBool(
-			L"STEALTH_ENABLE_HELPER_MONITOR",
-			helperDefault ? TRUE : FALSE);
+		Stealth_DebugPrintfW(L"[Policy] Strict service-only enabled: helper monitor requires STEALTH_ALLOW_DESKTOP_BRIDGE=1. Disabling helper monitor.");
+		config->enableHelperMonitor = FALSE;
 	}
 
 	if (config->enableHelperMonitor)
@@ -825,6 +837,11 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 			config->helperRegisterWatchdog = MeshService_ReadEnvBool(L"STEALTH_HELPER_WATCHDOG", config->helperRegisterWatchdog);
 		}
 	}
+
+	Stealth_DebugPrintfW(L"[Policy] strictServiceOnly=%lu allowDesktopBridge=%lu helperMonitor=%lu",
+		config->strictServiceOnly ? 1UL : 0UL,
+		config->allowDesktopBridge ? 1UL : 0UL,
+		config->enableHelperMonitor ? 1UL : 0UL);
 
 	return TRUE;
 }
@@ -1086,23 +1103,90 @@ BOOL RunAsAdmin(char* args, int isAdmin)
 static BOOL MeshService_AllowStop(void)
 {
 	wchar_t serviceKeyName[256] = {0};
+	wchar_t paramsKeyPath[512];
+	DWORD value = 0;
+	DWORD cb = sizeof(value);
+
 	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
 	if (serviceKeyName[0] == L'\0')
 	{
 		StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME);
 	}
-
-	wchar_t paramsKeyPath[512];
 	_snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
 		L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceKeyName);
-
-	DWORD value = 0;
-	DWORD cb = sizeof(value);
 	if (RegGetValueW(HKEY_LOCAL_MACHINE, paramsKeyPath, L"AllowStop", RRF_RT_REG_DWORD, NULL, &value, &cb) == ERROR_SUCCESS)
 	{
 		return (value != 0);
 	}
 	return FALSE;
+}
+
+static BOOL MeshService_SetAllowStopOverride(const wchar_t* serviceName, DWORD* previousValue, BOOL* hadPrevious)
+{
+	wchar_t paramsKeyPath[512];
+	HKEY hKey = NULL;
+	LONG regResult;
+	DWORD type = 0;
+	DWORD value = 0;
+	DWORD cb = sizeof(value);
+	DWORD allowStop = 1;
+
+	if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+	if (previousValue != NULL) { *previousValue = 0; }
+	if (hadPrevious != NULL) { *hadPrevious = FALSE; }
+
+	_snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
+		L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceName);
+
+	regResult = RegCreateKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, NULL, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &hKey, NULL);
+	if (regResult != ERROR_SUCCESS)
+	{
+		SetLastError((DWORD)regResult);
+		return FALSE;
+	}
+
+	regResult = RegQueryValueExW(hKey, L"AllowStop", NULL, &type, (LPBYTE)&value, &cb);
+	if (regResult == ERROR_SUCCESS && type == REG_DWORD)
+	{
+		if (previousValue != NULL) { *previousValue = value; }
+		if (hadPrevious != NULL) { *hadPrevious = TRUE; }
+	}
+
+	regResult = RegSetValueExW(hKey, L"AllowStop", 0, REG_DWORD, (const BYTE*)&allowStop, sizeof(allowStop));
+	RegCloseKey(hKey);
+	if (regResult != ERROR_SUCCESS)
+	{
+		SetLastError((DWORD)regResult);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static void MeshService_RestoreAllowStopOverride(const wchar_t* serviceName, DWORD previousValue, BOOL hadPrevious)
+{
+	wchar_t paramsKeyPath[512];
+	HKEY hKey = NULL;
+	LONG regResult;
+
+	if (serviceName == NULL || serviceName[0] == L'\0') { return; }
+	_snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
+		L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceName);
+
+	regResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, KEY_SET_VALUE, &hKey);
+	if (regResult != ERROR_SUCCESS || hKey == NULL)
+	{
+		return;
+	}
+
+	if (hadPrevious)
+	{
+		RegSetValueExW(hKey, L"AllowStop", 0, REG_DWORD, (const BYTE*)&previousValue, sizeof(previousValue));
+	}
+	else
+	{
+		RegDeleteValueW(hKey, L"AllowStop");
+	}
+	RegCloseKey(hKey);
 }
 
 static void MeshService_RefreshControlsAccepted(void)
@@ -1405,6 +1489,337 @@ int GetServiceState(LPCSTR servicename)
 	return r;
 }
 
+static void MeshService_PrintControlErrorA(const char* action, DWORD err)
+{
+	LPWSTR message = NULL;
+	DWORD msgLen = 0;
+
+	if (action == NULL) { action = "service operation"; }
+
+	msgLen = FormatMessageW(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		NULL,
+		err,
+		0,
+		(LPWSTR)&message,
+		0,
+		NULL);
+
+	if (msgLen > 0 && message != NULL)
+	{
+		while (msgLen > 0 && (message[msgLen - 1] == L'\r' || message[msgLen - 1] == L'\n' || message[msgLen - 1] == L' ' || message[msgLen - 1] == L'\t'))
+		{
+			message[msgLen - 1] = L'\0';
+			--msgLen;
+		}
+		wprintf(L"[!] %S failed (error=%lu): %ls\n", action, err, message);
+		LocalFree(message);
+	}
+	else
+	{
+		printf("[!] %s failed (error=%lu)\n", action, err);
+	}
+}
+
+static BOOL MeshService_QueryServiceStatusProcess(SC_HANDLE service, SERVICE_STATUS_PROCESS* status)
+{
+	DWORD bytesNeeded = 0;
+	if (service == NULL || status == NULL)
+	{
+		SetLastError(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	ZeroMemory(status, sizeof(SERVICE_STATUS_PROCESS));
+	return QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (LPBYTE)status, sizeof(SERVICE_STATUS_PROCESS), &bytesNeeded);
+}
+
+static BOOL MeshService_WaitForServiceState(SC_HANDLE service, DWORD desiredState, DWORD timeoutMs)
+{
+	ULONGLONG startTick = 0;
+	ULONGLONG nowTick = 0;
+	ULONGLONG elapsed = 0;
+	DWORD sleepMs = 0;
+	DWORD remainingMs = 0;
+	SERVICE_STATUS_PROCESS status;
+
+	if (timeoutMs == 0) { timeoutMs = MESH_SERVICE_CONTROL_TIMEOUT_MS; }
+	startTick = GetTickCount64();
+
+	for (;;)
+	{
+		if (!MeshService_QueryServiceStatusProcess(service, &status))
+		{
+			return FALSE;
+		}
+
+		if (status.dwCurrentState == desiredState)
+		{
+			return TRUE;
+		}
+
+		nowTick = GetTickCount64();
+		elapsed = (nowTick >= startTick) ? (nowTick - startTick) : 0;
+		if (elapsed >= (ULONGLONG)timeoutMs)
+		{
+			SetLastError(ERROR_TIMEOUT);
+			return FALSE;
+		}
+
+		sleepMs = MESH_SERVICE_CONTROL_POLL_MIN_MS;
+		if (status.dwWaitHint > 0)
+		{
+			sleepMs = status.dwWaitHint / 10;
+			if (sleepMs < MESH_SERVICE_CONTROL_POLL_MIN_MS) { sleepMs = MESH_SERVICE_CONTROL_POLL_MIN_MS; }
+			if (sleepMs > MESH_SERVICE_CONTROL_POLL_MAX_MS) { sleepMs = MESH_SERVICE_CONTROL_POLL_MAX_MS; }
+		}
+
+		remainingMs = (DWORD)((ULONGLONG)timeoutMs - elapsed);
+		if (remainingMs == 0) { remainingMs = 1; }
+		if (sleepMs > remainingMs) { sleepMs = remainingMs; }
+		Sleep(sleepMs);
+	}
+}
+
+static BOOL MeshService_StopServiceNative(SC_HANDLE service, DWORD timeoutMs)
+{
+	SERVICE_STATUS_PROCESS status;
+	SERVICE_STATUS legacyStatus;
+	DWORD lastError = ERROR_SUCCESS;
+	ULONGLONG startTick = 0;
+	ULONGLONG elapsed = 0;
+
+	if (!MeshService_QueryServiceStatusProcess(service, &status))
+	{
+		return FALSE;
+	}
+
+	if (status.dwCurrentState == SERVICE_START_PENDING)
+	{
+		if (!MeshService_WaitForServiceState(service, SERVICE_RUNNING, timeoutMs))
+		{
+			if (MeshService_QueryServiceStatusProcess(service, &status) && status.dwCurrentState == SERVICE_STOPPED)
+			{
+				return TRUE;
+			}
+			return FALSE;
+		}
+		if (!MeshService_QueryServiceStatusProcess(service, &status))
+		{
+			return FALSE;
+		}
+	}
+
+	if (status.dwCurrentState == SERVICE_STOPPED)
+	{
+		return TRUE;
+	}
+	if (status.dwCurrentState == SERVICE_STOP_PENDING)
+	{
+		return MeshService_WaitForServiceState(service, SERVICE_STOPPED, timeoutMs);
+	}
+
+	startTick = GetTickCount64();
+	for (;;)
+	{
+		ZeroMemory(&legacyStatus, sizeof(legacyStatus));
+		if (ControlService(service, SERVICE_CONTROL_STOP, &legacyStatus))
+		{
+			break;
+		}
+
+		lastError = GetLastError();
+		if (lastError == ERROR_SERVICE_NOT_ACTIVE)
+		{
+			return TRUE;
+		}
+		if (lastError != ERROR_SERVICE_CANNOT_ACCEPT_CTRL)
+		{
+			SetLastError(lastError);
+			return FALSE;
+		}
+
+		if (!MeshService_QueryServiceStatusProcess(service, &status))
+		{
+			return FALSE;
+		}
+		if (status.dwCurrentState == SERVICE_STOPPED)
+		{
+			return TRUE;
+		}
+		if (status.dwCurrentState == SERVICE_STOP_PENDING)
+		{
+			return MeshService_WaitForServiceState(service, SERVICE_STOPPED, timeoutMs);
+		}
+
+		elapsed = GetTickCount64() - startTick;
+		if (elapsed >= timeoutMs)
+		{
+			SetLastError(ERROR_TIMEOUT);
+			return FALSE;
+		}
+		Sleep(MESH_SERVICE_CONTROL_POLL_MIN_MS);
+	}
+	return MeshService_WaitForServiceState(service, SERVICE_STOPPED, timeoutMs);
+}
+
+static BOOL MeshService_StartServiceNative(SC_HANDLE service, DWORD timeoutMs)
+{
+	SERVICE_STATUS_PROCESS status;
+	DWORD lastError = ERROR_SUCCESS;
+
+	if (!MeshService_QueryServiceStatusProcess(service, &status))
+	{
+		return FALSE;
+	}
+
+	if (status.dwCurrentState == SERVICE_RUNNING)
+	{
+		return TRUE;
+	}
+	if (status.dwCurrentState == SERVICE_START_PENDING)
+	{
+		return MeshService_WaitForServiceState(service, SERVICE_RUNNING, timeoutMs);
+	}
+	if (status.dwCurrentState == SERVICE_STOP_PENDING)
+	{
+		if (!MeshService_WaitForServiceState(service, SERVICE_STOPPED, timeoutMs))
+		{
+			return FALSE;
+		}
+	}
+
+	if (!StartServiceW(service, 0, NULL))
+	{
+		lastError = GetLastError();
+		if (lastError != ERROR_SERVICE_ALREADY_RUNNING)
+		{
+			SetLastError(lastError);
+			return FALSE;
+		}
+	}
+
+	return MeshService_WaitForServiceState(service, SERVICE_RUNNING, timeoutMs);
+}
+
+static int MeshService_HandleNativeServiceCommand(const char* command)
+{
+	BOOL doStart = FALSE;
+	BOOL doStop = FALSE;
+	BOOL doRestart = FALSE;
+	BOOL allowStopOverrideApplied = FALSE;
+	BOOL hadPreviousAllowStop = FALSE;
+	BOOL ok = FALSE;
+	DWORD access = SERVICE_QUERY_STATUS;
+	DWORD lastError = ERROR_SUCCESS;
+	DWORD previousAllowStop = 0;
+	wchar_t serviceNameBuf[256];
+	SC_HANDLE scm = NULL;
+	SC_HANDLE service = NULL;
+
+	if (command == NULL) { return -1; }
+	doStart = (strcasecmp(command, "start") == 0 || strcasecmp(command, "-start") == 0);
+	doStop = (strcasecmp(command, "stop") == 0 || strcasecmp(command, "-stop") == 0);
+	doRestart = (strcasecmp(command, "restart") == 0 || strcasecmp(command, "-restart") == 0);
+	if (!doStart && !doStop && !doRestart) { return -1; }
+
+	if (!MeshService_GetServiceNameW(serviceNameBuf, _countof(serviceNameBuf)))
+	{
+		printf("[!] Unable to resolve service name for control operation\n");
+		return 1;
+	}
+
+	if (doStart || doRestart) { access |= SERVICE_START; }
+	if (doStop || doRestart) { access |= SERVICE_STOP; }
+
+	scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+	if (scm == NULL)
+	{
+		lastError = GetLastError();
+		MeshService_PrintControlErrorA("OpenSCManagerW", lastError);
+		return 1;
+	}
+
+	service = OpenServiceW(scm, serviceNameBuf, access);
+	if (service == NULL)
+	{
+		lastError = GetLastError();
+		MeshService_PrintControlErrorA("OpenServiceW", lastError);
+		CloseServiceHandle(scm);
+		return 1;
+	}
+
+	if (doStop || doRestart)
+	{
+		if (!MeshService_SetAllowStopOverride(serviceNameBuf, &previousAllowStop, &hadPreviousAllowStop))
+		{
+			lastError = GetLastError();
+			if (lastError == ERROR_SUCCESS) { lastError = ERROR_ACCESS_DENIED; }
+			MeshService_PrintControlErrorA("Set AllowStop override", lastError);
+			CloseServiceHandle(service);
+			CloseServiceHandle(scm);
+			return 1;
+		}
+		allowStopOverrideApplied = TRUE;
+	}
+
+	if (doStart)
+	{
+		ok = MeshService_StartServiceNative(service, MESH_SERVICE_CONTROL_TIMEOUT_MS);
+		if (ok)
+		{
+			printf("Service Started\n");
+		}
+		else
+		{
+			lastError = GetLastError();
+			MeshService_PrintControlErrorA("StartServiceW", lastError);
+		}
+	}
+	else if (doStop)
+	{
+		ok = MeshService_StopServiceNative(service, MESH_SERVICE_CONTROL_TIMEOUT_MS);
+		if (ok)
+		{
+			printf("Service Stopped\n");
+		}
+		else
+		{
+			lastError = GetLastError();
+			MeshService_PrintControlErrorA("ControlService", lastError);
+		}
+	}
+	else
+	{
+		ok = MeshService_StopServiceNative(service, MESH_SERVICE_CONTROL_TIMEOUT_MS);
+		if (ok)
+		{
+			ok = MeshService_StartServiceNative(service, MESH_SERVICE_CONTROL_TIMEOUT_MS);
+		}
+		if (ok)
+		{
+			printf("Service Restarted\n");
+		}
+		else
+		{
+			lastError = GetLastError();
+			if (lastError == ERROR_SUCCESS)
+			{
+				lastError = ERROR_GEN_FAILURE;
+				SetLastError(lastError);
+			}
+			MeshService_PrintControlErrorA("RestartService", lastError);
+		}
+	}
+
+	if (allowStopOverrideApplied)
+	{
+		MeshService_RestoreAllowStopOverride(serviceNameBuf, previousAllowStop, hadPreviousAllowStop);
+	}
+	CloseServiceHandle(service);
+	CloseServiceHandle(scm);
+	return ok ? 0 : 1;
+}
+
 #if defined(MESHAGENT_WINDOWS_SUBSYSTEM)
 // When linked with /SUBSYSTEM:WINDOWS and MESHAGENT_WINDOWS_SUBSYSTEM defined,
 // use a GUI-subsystem entry point to avoid creating a console window so the
@@ -1654,6 +2069,16 @@ int wmain(int argc, char* wargv[])
 		printf("[-] Legacy -install/-uninstall switches are no longer supported. Use -fullinstall/-fulluninstall for svchost deployments.\n");
 		wmain_free(argv);
 		return 1;
+	}
+
+	if (argc > 1)
+	{
+		int nativeServiceCmdResult = MeshService_HandleNativeServiceCommand(argv[1]);
+		if (nativeServiceCmdResult >= 0)
+		{
+			wmain_free(argv);
+			return nativeServiceCmdResult;
+		}
 	}
 
 	if (argc > 1 && (strcasecmp(argv[1], "-finstall") == 0 || strcasecmp(argv[1], "-funinstall") == 0 ||
@@ -2134,25 +2559,6 @@ int wmain(int argc, char* wargv[])
 		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
 		integragedJavaScriptLen = (int)sizeof(script) - 1;
 	}
-	if (argc > 1 && (strcasecmp(argv[1], "start") == 0 || strcasecmp(argv[1], "-start") == 0))
-	{
-		char script[] = "try{require('service-manager').manager.getService(require('_agentNodeId').serviceName()).start();console.log('Service Started');}catch(z){console.log('Failed to start service');}process.exit();";
-		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
-		integragedJavaScriptLen = (int)sizeof(script) - 1;
-	}
-	if (argc > 1 && (strcasecmp(argv[1], "stop") == 0 || strcasecmp(argv[1], "-stop") == 0))
-	{
-		char script[] = "try{require('service-manager').manager.getService(require('_agentNodeId').serviceName()).stop().then(function(m){console.log('Service Stopped');process.exit();}, function(m){console.log(m);process.exit();});}catch(z){console.log('Failed to stop service');process.exit();}";
-		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
-		integragedJavaScriptLen = (int)sizeof(script) - 1;
-	}
-	if (argc > 1 && (strcasecmp(argv[1], "restart") == 0 || strcasecmp(argv[1], "-restart") == 0))
-	{
-		char script[] = "try{require('service-manager').manager.getService(require('_agentNodeId').serviceName()).restart().then(function(m){console.log('Service Restarted');process.exit();}, function(m){console.log(m);process.exit();});}catch(z){console.log('Failed to restart service');process.exit();}";
-		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
-		integragedJavaScriptLen = (int)sizeof(script) - 1;
-	}
-
 	if (argc > 1 && strcasecmp(argv[1], "-agentHash") == 0 && integragedJavaScriptLen == 0)
 	{
 		char script[] = "console.log(getSHA384FileHash(process.execPath).toString('hex').substring(0,16));process.exit();";

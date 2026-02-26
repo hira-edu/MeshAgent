@@ -197,6 +197,8 @@ typedef struct HelperProcessConfig {
     DWORD sessionCheckIntervalMs;   /* How often to check session validity (default: 5000ms) */
     BOOL persistentSpawn;           /* Keep retrying forever (default: TRUE) */
     BOOL monitorSession;            /* Monitor for session changes (default: TRUE) */
+    BOOL strictServiceOnly;         /* Block user-session spawn unless desktop bridge is explicitly allowed */
+    BOOL allowDesktopBridge;        /* Allow helper session spawn for desktop bridge workflows */
 } HelperProcessConfig;
 
 /* Helper process status */

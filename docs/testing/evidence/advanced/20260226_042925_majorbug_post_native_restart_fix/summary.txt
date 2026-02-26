@@ -1,0 +1,3 @@
+RESTART_EXIT=0
+MAJORBUG_EXIT=0
+RUN_DIR=docs/testing/evidence/advanced/20260226_042925_majorbug_post_native_restart_fix

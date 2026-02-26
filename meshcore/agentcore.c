@@ -1034,6 +1034,134 @@ static BOOL MeshAgent_ReadFileTailW(const wchar_t* path, DWORD maxBytes, char** 
 	return TRUE;
 }
 
+typedef struct MeshAgent_SelfTestProgress
+{
+	DWORD success;
+	DWORD kvmStepSeen;
+	DWORD fallbackPathSeen;
+	DWORD fallbackOkSeen;
+	DWORD ramasSimulationSeen;
+	DWORD fallbackOkCount;
+} MeshAgent_SelfTestProgress;
+
+typedef struct MeshAgent_RemoteDesktopRegressionMetrics
+{
+	DWORD majorBugRuns;
+	DWORD majorBugPasses;
+	DWORD fallbackSimulationRuns;
+	DWORD fallbackSimulationPasses;
+	DWORD fallbackObservedRuns;
+	DWORD readinessSamples;
+	DWORD readinessMinMs;
+	DWORD readinessMaxMs;
+	ULONGLONG readinessTotalMs;
+} MeshAgent_RemoteDesktopRegressionMetrics;
+
+static DWORD MeshAgent_CountSubstringA(const char* haystack, const char* needle)
+{
+	DWORD count = 0;
+	size_t needleLen = 0;
+	const char* current = NULL;
+
+	if (haystack == NULL || needle == NULL || needle[0] == '\0') { return 0; }
+	needleLen = strlen(needle);
+	current = haystack;
+	while ((current = strstr(current, needle)) != NULL)
+	{
+		++count;
+		current += needleLen;
+	}
+	return count;
+}
+
+static void MeshAgent_ParseSelfTestProgressLog(const wchar_t* path, MeshAgent_SelfTestProgress* progress)
+{
+	char* text = NULL;
+	DWORD textLen = 0;
+
+	if (progress == NULL) { return; }
+	ZeroMemory(progress, sizeof(MeshAgent_SelfTestProgress));
+	if (path == NULL || path[0] == L'\0') { return; }
+
+	if (!MeshAgent_ReadFileTailW(path, 2 * 1024 * 1024, &text, &textLen, NULL))
+	{
+		return;
+	}
+	if (text == NULL || textLen == 0)
+	{
+		if (text != NULL) { free(text); }
+		return;
+	}
+
+	progress->success = (strstr(text, "SelfTest complete: SUCCESS") != NULL) ? 1 : 0;
+	progress->kvmStepSeen = (strstr(text, "Step: testKVM") != NULL) ? 1 : 0;
+	progress->fallbackPathSeen = (strstr(text, "KVM fallback path entered") != NULL || strstr(text, "TUNNEL FALLBACK") != NULL) ? 1 : 0;
+	progress->fallbackOkSeen = (strstr(text, "KVM fallback path success") != NULL || strstr(text, "fallback...........[OK]") != NULL) ? 1 : 0;
+	progress->ramasSimulationSeen = (strstr(text, "RAMAS fallback simulation enabled") != NULL) ? 1 : 0;
+	progress->fallbackOkCount = MeshAgent_CountSubstringA(text, "fallback...........[OK]");
+
+	free(text);
+}
+
+static void MeshAgent_InitRemoteDesktopMetrics(MeshAgent_RemoteDesktopRegressionMetrics* metrics)
+{
+	if (metrics == NULL) { return; }
+	ZeroMemory(metrics, sizeof(MeshAgent_RemoteDesktopRegressionMetrics));
+}
+
+static void MeshAgent_RecordReadinessSample(MeshAgent_RemoteDesktopRegressionMetrics* metrics, DWORD sampleMs)
+{
+	if (metrics == NULL) { return; }
+	if (metrics->readinessSamples == 0 || sampleMs < metrics->readinessMinMs)
+	{
+		metrics->readinessMinMs = sampleMs;
+	}
+	if (metrics->readinessSamples == 0 || sampleMs > metrics->readinessMaxMs)
+	{
+		metrics->readinessMaxMs = sampleMs;
+	}
+	metrics->readinessSamples += 1;
+	metrics->readinessTotalMs += sampleMs;
+}
+
+static BOOL MeshAgent_BuildTestingProgressLogPath(const wchar_t* phaseLabel, wchar_t* output, size_t outputLen)
+{
+	wchar_t repoRoot[MAX_PATH * 4] = {0};
+	wchar_t docsDir[MAX_PATH * 4] = {0};
+	wchar_t testingDir[MAX_PATH * 4] = {0};
+	wchar_t timestamp[64] = {0};
+	const wchar_t* label = phaseLabel;
+
+	if (output == NULL || outputLen == 0) { return FALSE; }
+	output[0] = L'\0';
+
+	if (!MeshAgent_FindRepoRootW(repoRoot, _countof(repoRoot)))
+	{
+		return FALSE;
+	}
+
+	StringCchPrintfW(docsDir, _countof(docsDir), L"%s\\docs", repoRoot);
+	StringCchPrintfW(testingDir, _countof(testingDir), L"%s\\docs\\testing", repoRoot);
+	MeshAgent_EnsureDirectoryW(docsDir);
+	MeshAgent_EnsureDirectoryW(testingDir);
+
+	MeshAgent_FormatTimestamp(timestamp, _countof(timestamp));
+	if (label == NULL || label[0] == L'\0') { label = L"selftest"; }
+	StringCchPrintfW(output, outputLen, L"%s\\%s_%s_progress.log", testingDir, timestamp, label);
+	return TRUE;
+}
+
+static BOOL MeshAgent_AppendSelfTestPathArg(wchar_t* args, size_t argsLen, const wchar_t* argName, const wchar_t* value)
+{
+	if (args == NULL || argName == NULL || value == NULL || value[0] == L'\0') { return FALSE; }
+	if (FAILED(StringCchCatW(args, argsLen, L" --"))) { return FALSE; }
+	if (FAILED(StringCchCatW(args, argsLen, argName))) { return FALSE; }
+	if (FAILED(StringCchCatW(args, argsLen, L"=\""))) { return FALSE; }
+	if (FAILED(StringCchCatW(args, argsLen, value))) { return FALSE; }
+	if (FAILED(StringCchCatW(args, argsLen, L"\""))) { return FALSE; }
+	return TRUE;
+}
+
 static BOOL MeshAgent_GetConfigValue(char* text, const char* key, char* valueOut, size_t valueOutLen)
 {
 	if (text == NULL || key == NULL || valueOut == NULL || valueOutLen == 0) { return FALSE; }
@@ -1278,6 +1406,138 @@ static BOOL MeshAgent_RunChildProcess(const wchar_t* exePath, const wchar_t* arg
 	return (childExit == ERROR_SUCCESS);
 }
 
+static BOOL MeshAgent_RunMajorBugSelfTest(
+	const wchar_t* selfTestBinary,
+	const wchar_t* serviceName,
+	const StealthInstallPaths* selfTestPaths,
+	const wchar_t* mshPath,
+	const wchar_t* phaseLabel,
+	BOOL ramasFallbackSimulation,
+	DWORD timeoutMs,
+	DWORD* exitCodeOut,
+	MeshAgent_RemoteDesktopRegressionMetrics* metrics)
+{
+	wchar_t args[4096] = {0};
+	wchar_t progressLogPath[MAX_PATH * 4] = {0};
+	DWORD exitCode = ERROR_SUCCESS;
+	BOOL ok = FALSE;
+	ULONGLONG started = 0;
+	DWORD elapsedMs = 0;
+	MeshAgent_SelfTestProgress progress;
+	ZeroMemory(&progress, sizeof(progress));
+
+	if (selfTestBinary == NULL || selfTestBinary[0] == L'\0' ||
+		serviceName == NULL || serviceName[0] == L'\0')
+	{
+		SetLastError(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+
+	StringCchPrintfW(args, _countof(args),
+		L"--selfTest=1 --serviceName=\"%s\" --majorBug=1 --readonly=1 --skipServiceRestart=1",
+		serviceName);
+
+	if (selfTestPaths != NULL)
+	{
+		if (selfTestPaths->installDir[0] != L'\0' &&
+			!MeshAgent_AppendSelfTestPathArg(args, _countof(args), L"installRoot", selfTestPaths->installDir))
+		{
+			return FALSE;
+		}
+		if (selfTestPaths->confPath[0] != L'\0' &&
+			!MeshAgent_AppendSelfTestPathArg(args, _countof(args), L"confPath", selfTestPaths->confPath))
+		{
+			return FALSE;
+		}
+	}
+	if (mshPath != NULL && mshPath[0] != L'\0' &&
+		!MeshAgent_AppendSelfTestPathArg(args, _countof(args), L"mshPath", mshPath))
+	{
+		return FALSE;
+	}
+
+	if (ramasFallbackSimulation)
+	{
+		if (FAILED(StringCchCatW(args, _countof(args), L" --ramasFallback=1 --skipCoreDump=1")))
+		{
+			return FALSE;
+		}
+	}
+
+	if (MeshAgent_BuildTestingProgressLogPath(phaseLabel, progressLogPath, _countof(progressLogPath)))
+	{
+		DeleteFileW(progressLogPath);
+		if (!MeshAgent_AppendSelfTestPathArg(args, _countof(args), L"progressLog", progressLogPath))
+		{
+			return FALSE;
+		}
+	}
+
+	started = GetTickCount64();
+	ok = MeshAgent_RunChildProcess(selfTestBinary, args, timeoutMs, &exitCode);
+	elapsedMs = (DWORD)(GetTickCount64() - started);
+
+	if (progressLogPath[0] != L'\0')
+	{
+		MeshAgent_ParseSelfTestProgressLog(progressLogPath, &progress);
+	}
+
+	if (metrics != NULL)
+	{
+		metrics->majorBugRuns += 1;
+		if (ramasFallbackSimulation) { metrics->fallbackSimulationRuns += 1; }
+		if (ok)
+		{
+			metrics->majorBugPasses += 1;
+			if (ramasFallbackSimulation) { metrics->fallbackSimulationPasses += 1; }
+			MeshAgent_RecordReadinessSample(metrics, elapsedMs);
+		}
+		if (ramasFallbackSimulation && ok)
+		{
+			metrics->fallbackObservedRuns += 1;
+		}
+		else if (progress.fallbackOkSeen != 0 || progress.fallbackOkCount != 0)
+		{
+			metrics->fallbackObservedRuns += 1;
+		}
+	}
+
+	MeshAgent_LogNativeInstallerEvent(
+		"...Major-bug self-test [%ls]: exit=%lu elapsedMs=%lu success=%lu kvmStep=%lu fallbackPath=%lu fallbackOk=%lu ramasSim=%lu",
+		(phaseLabel != NULL ? phaseLabel : L"majorbug"),
+		(unsigned long)exitCode,
+		(unsigned long)elapsedMs,
+		(unsigned long)progress.success,
+		(unsigned long)progress.kvmStepSeen,
+		(unsigned long)progress.fallbackPathSeen,
+		(unsigned long)((progress.fallbackOkSeen != 0 || progress.fallbackOkCount != 0) ? 1 : 0),
+		(unsigned long)progress.ramasSimulationSeen);
+
+	if (exitCodeOut != NULL) { *exitCodeOut = exitCode; }
+	if (!ok)
+	{
+		return FALSE;
+	}
+
+	if (progressLogPath[0] != L'\0')
+	{
+		if (progress.success == 0 || progress.kvmStepSeen == 0)
+		{
+			MeshAgent_LogNativeInstallerEvent("...Major-bug self-test [%ls] progress markers unavailable; relying on process exit status", (phaseLabel != NULL ? phaseLabel : L"majorbug"));
+		}
+		if (ramasFallbackSimulation && progress.ramasSimulationSeen == 0)
+		{
+			MeshAgent_LogNativeInstallerEvent("...Major-bug self-test [%ls] RAMAS simulation marker not found; relying on process exit status", (phaseLabel != NULL ? phaseLabel : L"majorbug"));
+		}
+		if (ramasFallbackSimulation && progress.fallbackOkSeen == 0 && progress.fallbackOkCount == 0)
+		{
+			MeshAgent_LogNativeInstallerEvent("...Major-bug self-test [%ls] fallback readiness marker not found; relying on process exit status", (phaseLabel != NULL ? phaseLabel : L"majorbug"));
+		}
+	}
+
+	return TRUE;
+}
+
 static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* agentHost, const wchar_t* updateExePath, const wchar_t* updateDllPath)
 {
 	if (agentHost == NULL || agentHost->exePath == NULL) { return FALSE; }
@@ -1315,6 +1575,8 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 
 	wchar_t serviceName[256] = {0};
 	MeshAgent_GetServiceKeyNameW(serviceName, _countof(serviceName));
+	MeshAgent_RemoteDesktopRegressionMetrics rdMetrics;
+	MeshAgent_InitRemoteDesktopMetrics(&rdMetrics);
 
 	MeshAgent_LogNativeInstallerEvent("=== Native Regression Start ===");
 	SetEnvironmentVariableW(L"MESHAGENT_SELFTEST", L"1");
@@ -1379,7 +1641,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	wchar_t selfTestArgs[2048] = {0};
+	wchar_t selfTestArgs[4096] = {0};
 	wchar_t selfTestExe[MAX_PATH * 4] = {0};
 	wchar_t mshPath[MAX_PATH * 4] = {0};
 	const wchar_t* selfTestBinary = exePathW;
@@ -1404,24 +1666,77 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	}
 
 	StringCchPrintfW(selfTestArgs, _countof(selfTestArgs), L"--selfTest=1 --serviceName=\"%s\" --fullRegression=1 --readonly=1 --skipServiceRestart=1", serviceName);
-	if (selfTestPaths.installDir[0] != L'\0')
+	if (selfTestPaths.installDir[0] != L'\0' &&
+		!MeshAgent_AppendSelfTestPathArg(selfTestArgs, _countof(selfTestArgs), L"installRoot", selfTestPaths.installDir))
 	{
-		StringCchCatW(selfTestArgs, _countof(selfTestArgs), L" --installRoot=\"");
-		StringCchCatW(selfTestArgs, _countof(selfTestArgs), selfTestPaths.installDir);
-		StringCchCatW(selfTestArgs, _countof(selfTestArgs), L"\"");
+		MeshAgent_LogNativeInstallerEvent("...Unable to append installRoot self-test argument");
+		return FALSE;
 	}
-	if (selfTestPaths.confPath[0] != L'\0')
+	if (selfTestPaths.confPath[0] != L'\0' &&
+		!MeshAgent_AppendSelfTestPathArg(selfTestArgs, _countof(selfTestArgs), L"confPath", selfTestPaths.confPath))
 	{
-		StringCchCatW(selfTestArgs, _countof(selfTestArgs), L" --confPath=\"");
-		StringCchCatW(selfTestArgs, _countof(selfTestArgs), selfTestPaths.confPath);
-		StringCchCatW(selfTestArgs, _countof(selfTestArgs), L"\"");
+		MeshAgent_LogNativeInstallerEvent("...Unable to append confPath self-test argument");
+		return FALSE;
 	}
-	if (mshPath[0] != L'\0')
+	if (mshPath[0] != L'\0' &&
+		!MeshAgent_AppendSelfTestPathArg(selfTestArgs, _countof(selfTestArgs), L"mshPath", mshPath))
 	{
-		StringCchCatW(selfTestArgs, _countof(selfTestArgs), L" --mshPath=\"");
-		StringCchCatW(selfTestArgs, _countof(selfTestArgs), mshPath);
-		StringCchCatW(selfTestArgs, _countof(selfTestArgs), L"\"");
+		MeshAgent_LogNativeInstallerEvent("...Unable to append mshPath self-test argument");
+		return FALSE;
 	}
+
+	if (!MeshAgent_RunMajorBugSelfTest(
+		selfTestBinary,
+		serviceName,
+		&selfTestPaths,
+		(mshPath[0] != L'\0' ? mshPath : NULL),
+		L"majorbug_post_restart",
+		FALSE,
+		900000,
+		&exitCode,
+		&rdMetrics))
+	{
+		MeshAgent_LogNativeInstallerEvent("...Post-restart major-bug self-test failed (exit=%lu)", exitCode);
+		return FALSE;
+	}
+	MeshAgent_CopyEvidenceSnapshot(L"majorbug_post_restart");
+	if (!MeshAgent_WaitForServiceRunning(serviceName, 120000))
+	{
+		MeshAgent_LogNativeInstallerEvent("...Service did not return to running state after post-restart major-bug test");
+		return FALSE;
+	}
+	if (!MeshAgent_WaitForNodeId(serviceName, 120000))
+	{
+		MeshAgent_LogNativeInstallerEvent("...NodeId unavailable after post-restart major-bug test");
+		return FALSE;
+	}
+
+	if (!MeshAgent_RunMajorBugSelfTest(
+		selfTestBinary,
+		serviceName,
+		&selfTestPaths,
+		(mshPath[0] != L'\0' ? mshPath : NULL),
+		L"majorbug_ramas_fallback_post_restart",
+		TRUE,
+		900000,
+		&exitCode,
+		&rdMetrics))
+	{
+		MeshAgent_LogNativeInstallerEvent("...RAMAS fallback simulation self-test failed (exit=%lu)", exitCode);
+		return FALSE;
+	}
+	MeshAgent_CopyEvidenceSnapshot(L"majorbug_ramas_fallback_post_restart");
+	if (!MeshAgent_WaitForServiceRunning(serviceName, 120000))
+	{
+		MeshAgent_LogNativeInstallerEvent("...Service did not return to running state after RAMAS fallback simulation");
+		return FALSE;
+	}
+	if (!MeshAgent_WaitForNodeId(serviceName, 120000))
+	{
+		MeshAgent_LogNativeInstallerEvent("...NodeId unavailable after RAMAS fallback simulation");
+		return FALSE;
+	}
+
 	if (!MeshAgent_RunChildProcess(selfTestBinary, selfTestArgs, 900000, &exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Self-test failed (exit=%lu)", exitCode);
@@ -1471,6 +1786,52 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 	MeshAgent_CopyEvidenceSnapshot(L"post_update_selftest");
+
+	if (!MeshAgent_RunMajorBugSelfTest(
+		selfTestBinary,
+		serviceName,
+		&selfTestPaths,
+		(mshPath[0] != L'\0' ? mshPath : NULL),
+		L"majorbug_post_update",
+		FALSE,
+		900000,
+		&exitCode,
+		&rdMetrics))
+	{
+		MeshAgent_LogNativeInstallerEvent("...Post-update major-bug self-test failed (exit=%lu)", exitCode);
+		return FALSE;
+	}
+	MeshAgent_CopyEvidenceSnapshot(L"majorbug_post_update");
+	if (!MeshAgent_WaitForServiceRunning(serviceName, 120000))
+	{
+		MeshAgent_LogNativeInstallerEvent("...Service did not return to running state after post-update major-bug test");
+		return FALSE;
+	}
+	if (!MeshAgent_WaitForNodeId(serviceName, 120000))
+	{
+		MeshAgent_LogNativeInstallerEvent("...NodeId unavailable after post-update major-bug test");
+		return FALSE;
+	}
+
+	if (rdMetrics.readinessSamples > 0)
+	{
+		DWORD readinessAvg = (DWORD)(rdMetrics.readinessTotalMs / rdMetrics.readinessSamples);
+		MeshAgent_LogNativeInstallerEvent(
+			"...Remote-desktop readiness metrics: majorBugRuns=%lu majorBugPasses=%lu fallbackSimulationRuns=%lu fallbackSimulationPasses=%lu fallbackObservedRuns=%lu readinessMs[min=%lu avg=%lu max=%lu]",
+			(unsigned long)rdMetrics.majorBugRuns,
+			(unsigned long)rdMetrics.majorBugPasses,
+			(unsigned long)rdMetrics.fallbackSimulationRuns,
+			(unsigned long)rdMetrics.fallbackSimulationPasses,
+			(unsigned long)rdMetrics.fallbackObservedRuns,
+			(unsigned long)rdMetrics.readinessMinMs,
+			(unsigned long)readinessAvg,
+			(unsigned long)rdMetrics.readinessMaxMs);
+	}
+	else
+	{
+		MeshAgent_LogNativeInstallerEvent("...Remote-desktop readiness metrics unavailable (no successful major-bug runs)");
+		return FALSE;
+	}
 
 	MeshAgent_CopyEvidenceSnapshot(L"pre_uninstall");
 	if (!MeshAgent_RunChildProcess(exePathW, L"-fulluninstall", 600000, &exitCode))
@@ -6165,7 +6526,12 @@ void MeshServer_Agent_SelfTest(MeshAgentHostContainer *agent)
 		" try { for (var k in Duktape.modLoaded) {"
 		" if (k.indexOf('agent-selftest') >= 0) { delete Duktape.modLoaded[k]; }"
 		" } } catch (e) {} }"
-		" require('agent-selftest')();") != 0)
+		" var __selfTestPath = null;"
+		" try { var __lastSlash = process.execPath.lastIndexOf('\\\\');"
+		" if (__lastSlash >= 0) { __selfTestPath = process.execPath.substring(0, __lastSlash + 1) + 'agent-selftest.js'; } } catch (e) {}"
+		" if (__selfTestPath != null) {"
+		" try { require(__selfTestPath)(); } catch (e1) { require('agent-selftest')(); }"
+		" } else { require('agent-selftest')(); }") != 0)
 	{
 		printf("   -> Loading Test Script.................[FAILED] %s", duk_safe_to_string(agent->meshCoreCtx, -1));
 		exit(1);

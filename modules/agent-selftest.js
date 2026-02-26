@@ -89,6 +89,7 @@ var runSessionChecks = false;
 var skipServiceRestart = false;
 var requireSessionConsent = false;
 var strictCoreDump = false;
+var skipCoreDumpTest = false;
 var fileTransferTimeoutMs = 30000;
 var maxRuntimeMs = 900000;
 var consoleCommandTimeoutMs = 12000;
@@ -96,6 +97,7 @@ var tunnelConnectTimeoutMs = 10000;
 var coreInfoTimeoutMs = 20000;
 var progressLogPath = null;
 var sessionTunnelSupported = true;
+var simulateRamasFallback = false;
 
 function toBool(val)
 {
@@ -177,6 +179,7 @@ function sessionCapabilityProbe(tester, label)
         var ok = (hasKvm != 0);
         if (ok)
         {
+            traceProgress(probeLabel + ' fallback OK (' + modePrefix + ') hasKVM=' + hasKvm + ', streamApi=' + (info.hasDesktopFunc === true ? 'YES' : 'NO'));
             console.log('      -> ' + probeLabel + ' fallback...........[OK] ' + modePrefix + ' hasKVM=' + hasKvm + ', streamApi=' + (info.hasDesktopFunc === true ? 'YES' : 'NO'));
             ret._res();
             return (true);
@@ -189,6 +192,7 @@ function sessionCapabilityProbe(tester, label)
         var localOnly = evaluateLocal();
         if (!checkInfo(localOnly, '[LOCAL]'))
         {
+            traceProgress(probeLabel + ' fallback FAILED (query path unavailable)');
             ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] query path unavailable');
         }
         return (ret);
@@ -213,6 +217,7 @@ function sessionCapabilityProbe(tester, label)
             var localInfo = evaluateLocal();
             if (!checkInfo(localInfo, '[LOCAL]'))
             {
+                traceProgress(probeLabel + ' fallback FAILED (parse error)');
                 ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] parse error');
             }
             return;
@@ -227,6 +232,7 @@ function sessionCapabilityProbe(tester, label)
         {
             var remoteHasKvm = parseInt(info.hasKVM, 10);
             if (isNaN(remoteHasKvm)) { remoteHasKvm = (info.hasKVM ? 1 : 0); }
+            traceProgress(probeLabel + ' fallback FAILED hasKVM=' + remoteHasKvm + ', streamError=' + (info.streamError || 'none'));
             ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] hasKVM=' + remoteHasKvm + ', streamError=' + (info.streamError || 'none'));
         }
     }).catch(function (e)
@@ -234,6 +240,7 @@ function sessionCapabilityProbe(tester, label)
         var localCatch = evaluateLocal();
         if (!checkInfo(localCatch, '[LOCAL]'))
         {
+            traceProgress(probeLabel + ' fallback FAILED: ' + e);
             ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] ' + e);
         }
     });
@@ -515,10 +522,21 @@ function start()
     skipServiceRestart = toBool(process.argv.getParameter('skipServiceRestart', false));
     requireSessionConsent = toBool(process.argv.getParameter('requireConsent', false));
     strictCoreDump = toBool(process.argv.getParameter('strictCoreDump', false));
+    skipCoreDumpTest = toBool(process.argv.getParameter('skipCoreDump', false));
+    simulateRamasFallback = toBool(process.argv.getParameter('ramasFallback', false));
     if (runSessionChecks && !localmode)
     {
         // Service restart is already covered in full regression; major-bug session mode focuses on session-path diagnostics.
         skipServiceRestart = true;
+    }
+    if (runSessionChecks && simulateRamasFallback)
+    {
+        sessionTunnelSupported = false;
+        // RAMAS fallback simulation intentionally disables tunnel-driven crash/dump probing.
+        skipCoreDumpTest = true;
+        console.log('   => RAMAS Fallback Simulation...........[ENABLED]');
+        traceProgress('RAMAS fallback simulation enabled');
+        traceProgress('RAMAS fallback simulation forcing core dump test skip');
     }
     if (debugmode)
     {
@@ -552,7 +570,7 @@ function start()
     {
         coreInfoTimeoutMs = parsedCoreInfoTimeoutMs;
     }
-    traceProgress('SelfTest start: runSessionChecks=' + runSessionChecks + ', skipServiceRestart=' + skipServiceRestart + ', requireConsent=' + requireSessionConsent + ', strictCoreDump=' + strictCoreDump + ', fileTransferTimeoutMs=' + fileTransferTimeoutMs + ', consoleCommandTimeoutMs=' + consoleCommandTimeoutMs + ', tunnelConnectTimeoutMs=' + tunnelConnectTimeoutMs + ', coreInfoTimeoutMs=' + coreInfoTimeoutMs + ', maxRuntimeMs=' + maxRuntimeMs);
+    traceProgress('SelfTest start: runSessionChecks=' + runSessionChecks + ', skipServiceRestart=' + skipServiceRestart + ', requireConsent=' + requireSessionConsent + ', strictCoreDump=' + strictCoreDump + ', skipCoreDump=' + skipCoreDumpTest + ', fileTransferTimeoutMs=' + fileTransferTimeoutMs + ', consoleCommandTimeoutMs=' + consoleCommandTimeoutMs + ', tunnelConnectTimeoutMs=' + tunnelConnectTimeoutMs + ', coreInfoTimeoutMs=' + coreInfoTimeoutMs + ', maxRuntimeMs=' + maxRuntimeMs);
 
     if (process.argv.getParameter('dumpOnly', false))
     {
@@ -607,7 +625,11 @@ function start()
             .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'testKVM' : 'testKVM SKIPPED')); return (runSessionChecks ? testKVM() : skipTest('KVM Test')); })
             .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'testFileUpload' : 'testFileUpload SKIPPED')); return (runSessionChecks ? testFileUpload() : skipTest('File Upload Test')); })
             .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'testFileDownload' : 'testFileDownload SKIPPED')); return (runSessionChecks ? testFileDownload() : skipTest('File Download Test')); })
-            .then(function () { traceProgress('Step: testCoreDump'); return (testCoreDump()); })
+            .then(function ()
+            {
+                traceProgress('Step: ' + (skipCoreDumpTest ? 'testCoreDump SKIPPED' : 'testCoreDump'));
+                return (skipCoreDumpTest ? skipTest('Mesh Core Dump Test') : testCoreDump());
+            })
             .then(function () { traceProgress('Step: testServiceRestart'); if (debugmode) { console.log('[debug] Step: testServiceRestart'); } return (testServiceRestart()); })
             .then(function () { traceProgress('Step: completed'); return (completed()); })
             .then(function ()
@@ -1509,11 +1531,14 @@ function testKVM()
     if (runSessionChecks && !localmode && sessionTunnelSupported === false)
     {
         console.log('   => KVM Test............................[TUNNEL FALLBACK]');
+        traceProgress('KVM fallback path entered');
         sessionCapabilityProbe(this, 'KVM').then(function ()
         {
+            traceProgress('KVM fallback path success');
             ret._res();
         }).catch(function (e)
         {
+            traceProgress('KVM fallback path failure: ' + e);
             ret._rej(e);
         });
         return (ret);

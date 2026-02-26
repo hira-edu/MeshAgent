@@ -155,3 +155,96 @@
 - `docs/testing/evidence/advanced/20260225_075819_final_runtime_restore_post_const_fix/summary.txt` (`INSTALL_EXIT=0`, `VALIDATE_EXIT=0`, `SVCHOST_STATUS_EXIT=0`, `SC_QUERY_EXIT=0`).
 - `docs/testing/evidence/advanced/20260225_080347_final_runtime_restore_post_warning_fix/summary.txt` (`INSTALL_EXIT=0`, `VALIDATE_EXIT=0`, `SVCHOST_STATUS_EXIT=0`, `SC_QUERY_EXIT=0`).
 - `-validate-install` passed and `-svchost-status` confirms `WinDiagnosticHost` running in svchost mode (`netsvcs`, `ServiceDllHash match: yes`).
+
+## Service-Only Master Plan (Non-Desktop) - 2026-02-25
+- Objective: enforce service-only execution for all install/update/uninstall/runtime control paths, persistence, networking, and management features.
+- Constraint: interactive desktop capture/control cannot be implemented as pure user-mode Session 0 logic on modern Windows; any desktop bridge must be explicit, isolated, and auditable.
+- Quality target: zero policy ambiguity, zero silent fallbacks, zero hidden session-crossing behavior outside the explicit desktop bridge boundary.
+
+### Architecture Policy
+- Session 0 is the authoritative runtime for all core subsystems.
+- No non-desktop subsystem may spawn or dispatch into user sessions.
+- Any user-session transition must be desktop-feature-scoped, explicit, and disabled by default unless policy enables it.
+- Service startup must fail fast on invalid policy state rather than degrade silently.
+- Policy decisions must be observable in logs and validation output.
+
+### Runtime Policy Controls
+- `STEALTH_STRICT_SERVICE_ONLY=1|0`:
+  Enforce strict service-only policy for non-desktop runtime paths. Default: enabled.
+- `STEALTH_ALLOW_DESKTOP_BRIDGE=1|0`:
+  Permit explicit desktop bridge session spawning when strict policy is enabled. Default: disabled.
+- `STEALTH_ENABLE_HELPER_MONITOR=1|0`:
+  Enable helper monitor only when policy allows desktop bridge. Default: disabled.
+
+### Implementation Program
+1. Policy Surface Consolidation
+- Centralize service-only policy evaluation in native startup.
+- Remove implicit defaults that enable session helpers from unrelated features.
+- Require explicit enablement flags for any desktop bridge path.
+2. Runtime Spawn Governance
+- Add a single native spawn-governance layer that classifies process launches as `service-only` or `desktop-bridge`.
+- Block launches that target user sessions unless classified as approved desktop bridge.
+- Emit structured denial logs with reason, caller, session target, and command line hash.
+3. Non-Desktop Subsystem Hardening
+- Audit updater, installer, watchdog, WMI, scheduler, IPC, terminal, and file operations for session crossing.
+- Convert any legacy cross-session code to service-context implementations.
+- Add defensive parameter validation and deterministic error codes for all blocked cross-session attempts.
+4. Desktop Bridge Isolation
+- Keep desktop bridge code physically separated from core service paths.
+- Enforce minimal API surface between service core and desktop bridge.
+- Require explicit runtime marker and telemetry for each bridge activation.
+5. Install/Update/Uninstall Integrity
+- Preserve registry, firewall, DACL, persistence, and svchost invariants under strict service-only policy.
+- Ensure policy state persists correctly through reinstall, update, and reboot cycles.
+- Prevent update rollback into policy-incompatible binaries.
+6. Observability and Evidence
+- Extend installer/native logs with policy decisions and spawn-governance outcomes.
+- Capture machine-readable evidence snapshots under `docs/testing/evidence/`.
+- Add explicit policy-state fields to validation JSON outputs.
+7. Regression and Stress Validation
+- Add strict service-only regression profile to native validation entrypoints.
+- Prove no unauthorized session-targeted process creation under stress/restart/update churn.
+- Validate network persistence and management channel continuity under strict policy.
+8. Release Controls
+- Block release when any strict-policy gate fails.
+- Require evidence bundle with logs, policy snapshots, and regression summaries.
+- Require signed-binary verification and digest publication for each release artifact.
+
+### Acceptance Gates (Must Pass)
+- Gate 1: install/update/uninstall succeed with strict policy enabled.
+- Gate 2: svchost-only service validation succeeds and persists across reboot.
+- Gate 3: no unauthorized user-session process spawn events are observed.
+- Gate 4: registry/firewall/DACL/persistence/WMI/task state are correct before and after update.
+- Gate 5: connectivity and handshake persistence remain stable across restart and update.
+- Gate 6: all policy decisions are present in logs and machine-readable evidence.
+
+### Engineering Rules for This Program
+- No shortcuts, temporary fixes, or hidden compatibility shims.
+- No policy bypasses by script wrappers, environment side channels, or undocumented flags.
+- No silent fallback to weaker behavior.
+- All code must be deterministic, auditable, and production-safe under failure conditions.
+
+## Remote Desktop Always-Ready Master Plan (2026-02-26)
+- Authoritative implementation/testing reference: `docs/testing/REMOTE_DESKTOP_ALWAYS_READY_MASTER_PLAN.md`.
+- Objective: keep remote desktop session path continuously ready while service is running, including across restart and update.
+- Runtime model:
+- Primary path: `PRIMARY_INMEM` (in-memory session startup in service runtime).
+- Fallback path: `RAMAS` (`Resilient Agent Managed Alternate Session`) for deterministic failover.
+- Required behavior:
+- No silent degradation; all failovers/recovery decisions must be logged and evidenced.
+- Restart/update may not leave runtime without at least one ready session path.
+- Recovery must be bounded-time and idempotent (no hangs, no infinite retry loops).
+
+### Remote Desktop Validation Gates (Must Pass)
+- Gate R1: `restart` must exit 0 and service must return `RUNNING`.
+- Gate R2: post-restart major-bug validation must pass:
+- `meshservice\x64\StealthLab\MeshService-2022.exe --selfTest=1 --serviceName="WinDiagnosticHost" --majorBug=1`
+- Gate R3: `-fullregression` must pass with clean end-to-end install/update/uninstall state validation.
+- Gate R4: final restore checks must pass:
+- `-fullinstall`, `-validate-install`, `-svchost-status`, and `sc query WinDiagnosticHost`.
+- Gate R5: evidence package must include commands, logs, summaries, and readiness/failover outcomes under `docs/testing/evidence/advanced/`.
+
+### Release Blockers (Remote Desktop)
+- Any restart hang, timeout-driven session loss, or missing fallback activation when primary path fails.
+- Any regression where major-bug self-test loses KVM readiness/availability.
+- Any build with missing remote-desktop evidence for restart/update continuity.

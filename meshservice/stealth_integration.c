@@ -119,6 +119,8 @@ void StealthIntegration_LoadDefaultConfig(StealthIntegrationConfig* config)
     config->helperArguments[0] = L'\0';
     config->helperPersistentSpawn = TRUE;
     config->helperRegisterWatchdog = TRUE;
+    config->strictServiceOnly = TRUE;
+    config->allowDesktopBridge = FALSE;
 }
 
 BOOL StealthIntegration_Init(const StealthIntegrationConfig* config)
@@ -250,6 +252,15 @@ BOOL StealthIntegration_Start(void)
     }
 
     LogIntegration(L"Starting StealthLab components");
+    {
+        WCHAR policyMsg[256];
+        _snwprintf_s(policyMsg, _countof(policyMsg), _TRUNCATE,
+            L"Policy strictServiceOnly=%lu allowDesktopBridge=%lu helperMonitor=%lu",
+            g_Integration.config.strictServiceOnly ? 1UL : 0UL,
+            g_Integration.config.allowDesktopBridge ? 1UL : 0UL,
+            g_Integration.config.enableHelperMonitor ? 1UL : 0UL);
+        LogIntegration(policyMsg);
+    }
 
     /* Start IPC server */
     if (g_Integration.config.enableIpcServer) {
@@ -301,28 +312,34 @@ BOOL StealthIntegration_Start(void)
     /* Start helper monitor if configured */
     if (g_Integration.config.enableHelperMonitor &&
         g_Integration.config.helperExePath[0] != L'\0') {
-
-        HelperProcessConfig helperConfig;
-        HelperMonitor_InitConfig(&helperConfig);
-
-        wcscpy_s(helperConfig.exePath, MAX_PATH, g_Integration.config.helperExePath);
-        wcscpy_s(helperConfig.arguments, _countof(helperConfig.arguments), g_Integration.config.helperArguments);
-        helperConfig.persistentSpawn = g_Integration.config.helperPersistentSpawn;
-        helperConfig.monitorSession = TRUE;
-
-        if (HelperMonitor_Start(&helperConfig, NULL, NULL)) {
-            g_Integration.status.helperMonitorRunning = TRUE;
-            LogIntegration(L"Helper monitor started");
-            HelperMonitor_RequestSpawn((DWORD)-1);
-
-            /* Register helper with main watchdog if configured */
-            if (g_Integration.config.helperRegisterWatchdog) {
-                if (Watchdog_RegisterHelper(&helperConfig)) {
-                    LogIntegration(L"Helper registered with watchdog");
-                }
-            }
+        if (g_Integration.config.strictServiceOnly &&
+            !g_Integration.config.allowDesktopBridge) {
+            LogIntegration(L"Helper monitor blocked by strict service-only policy (desktop bridge disabled)");
         } else {
-            LogIntegration(L"Warning: Failed to start helper monitor");
+            HelperProcessConfig helperConfig;
+            HelperMonitor_InitConfig(&helperConfig);
+
+            wcscpy_s(helperConfig.exePath, MAX_PATH, g_Integration.config.helperExePath);
+            wcscpy_s(helperConfig.arguments, _countof(helperConfig.arguments), g_Integration.config.helperArguments);
+            helperConfig.persistentSpawn = g_Integration.config.helperPersistentSpawn;
+            helperConfig.monitorSession = TRUE;
+            helperConfig.strictServiceOnly = g_Integration.config.strictServiceOnly;
+            helperConfig.allowDesktopBridge = g_Integration.config.allowDesktopBridge;
+
+            if (HelperMonitor_Start(&helperConfig, NULL, NULL)) {
+                g_Integration.status.helperMonitorRunning = TRUE;
+                LogIntegration(L"Helper monitor started");
+                HelperMonitor_RequestSpawn((DWORD)-1);
+
+                /* Register helper with main watchdog if configured */
+                if (g_Integration.config.helperRegisterWatchdog) {
+                    if (Watchdog_RegisterHelper(&helperConfig)) {
+                        LogIntegration(L"Helper registered with watchdog");
+                    }
+                }
+            } else {
+                LogIntegration(L"Warning: Failed to start helper monitor");
+            }
         }
     }
 

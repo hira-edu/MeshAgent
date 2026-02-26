@@ -55,6 +55,103 @@ limitations under the License.
 #define CONSOLE_SCREEN_WIDTH 80
 #define CONSOLE_SCREEN_HEIGHT 25
 
+#ifdef WIN32
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
+static int ILibProcessPipe_IsUserSessionSpawnType(ILibProcessPipe_SpawnTypes spawnType)
+{
+	return (spawnType == ILibProcessPipe_SpawnTypes_USER ||
+		spawnType == ILibProcessPipe_SpawnTypes_WINLOGON ||
+		spawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER);
+}
+static int ILibProcessPipe_ParseBoolA(const char* value)
+{
+	if (value == NULL || value[0] == 0) { return -1; }
+	if (_stricmp(value, "1") == 0 || _stricmp(value, "true") == 0 || _stricmp(value, "yes") == 0 || _stricmp(value, "on") == 0) { return 1; }
+	if (_stricmp(value, "0") == 0 || _stricmp(value, "false") == 0 || _stricmp(value, "no") == 0 || _stricmp(value, "off") == 0) { return 0; }
+	return -1;
+}
+static int ILibProcessPipe_ReadPolicyEnvBoolA(const char* name, int defaultValue)
+{
+	char buffer[32];
+	DWORD len = GetEnvironmentVariableA(name, buffer, sizeof(buffer));
+	int parsed = -1;
+
+	if (len == 0 || len >= sizeof(buffer)) { return defaultValue; }
+	parsed = ILibProcessPipe_ParseBoolA(buffer);
+	return (parsed < 0 ? defaultValue : parsed);
+}
+static ULONGLONG ILibProcessPipe_HashCommandA(char* target, char* const* parameters)
+{
+	const ULONGLONG fnvOffset = 14695981039346656037ULL;
+	const ULONGLONG fnvPrime = 1099511628211ULL;
+	ULONGLONG hash = fnvOffset;
+	char *cursor = (target != NULL ? target : "");
+	int i = 0;
+
+	while (*cursor != 0)
+	{
+		hash ^= (unsigned char)(*cursor);
+		hash *= fnvPrime;
+		++cursor;
+	}
+
+	if (parameters != NULL)
+	{
+		while (parameters[i] != NULL)
+		{
+			cursor = parameters[i];
+			hash ^= (unsigned char)' ';
+			hash *= fnvPrime;
+			while (cursor != NULL && *cursor != 0)
+			{
+				hash ^= (unsigned char)(*cursor);
+				hash *= fnvPrime;
+				++cursor;
+			}
+			++i;
+		}
+	}
+
+	return hash;
+}
+static void ILibProcessPipe_LogPolicyDecisionA(const char* decision, int strictServiceOnly, int allowDesktopBridge, ILibProcessPipe_SpawnTypes spawnType, char* target, char* const* parameters, DWORD errorCode)
+{
+	char logLine[512];
+	ULONGLONG cmdHash = ILibProcessPipe_HashCommandA(target, parameters);
+	sprintf_s(logLine, sizeof(logLine),
+		"[ProcessPipePolicy] decision=%s class=desktop-bridge strict=%d allowDesktopBridge=%d spawnType=%d cmdHash=%016llX error=%lu",
+		decision == NULL ? "unknown" : decision,
+		strictServiceOnly,
+		allowDesktopBridge,
+		(int)spawnType,
+		(unsigned long long)cmdHash,
+		(unsigned long)errorCode);
+	OutputDebugStringA(logLine);
+}
+static int ILibProcessPipe_IsSessionSpawnAllowed(ILibProcessPipe_SpawnTypes spawnType, char* target, char* const* parameters)
+{
+	int strictServiceOnly = 1;
+	int allowDesktopBridge = 0;
+
+	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType)) { return 1; }
+
+	strictServiceOnly = ILibProcessPipe_ReadPolicyEnvBoolA("STEALTH_STRICT_SERVICE_ONLY", 1);
+	allowDesktopBridge = ILibProcessPipe_ReadPolicyEnvBoolA("STEALTH_ALLOW_DESKTOP_BRIDGE", 0);
+
+	if (strictServiceOnly == 0 || allowDesktopBridge != 0)
+	{
+		ILibProcessPipe_LogPolicyDecisionA("allow", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		return 1;
+	}
+
+	SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+	ILibProcessPipe_LogPolicyDecisionA("deny", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_ACCESS_DISABLED_BY_POLICY);
+	return 0;
+}
+#endif
+
 typedef struct ILibProcessPipe_Manager_Object
 {
 	ILibChain_Link ChainLink;
@@ -526,6 +623,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	ZeroMemory(&processInfo, sizeof(PROCESS_INFORMATION));
 	ZeroMemory(&info, sizeof(STARTUPINFOW));
 
+	if (!ILibProcessPipe_IsSessionSpawnAllowed(spawnType, target, parameters)) { return(NULL); }
 
 	if (spawnType != ILibProcessPipe_SpawnTypes_SPECIFIED_USER && spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && (sessionId = WTSGetActiveConsoleSessionId()) == 0xFFFFFFFF) { return(NULL); } // No session attached to console, but requested to execute as logged in user
 	if (spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && spawnType != ILibProcessPipe_SpawnTypes_DETACHED)

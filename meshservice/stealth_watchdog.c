@@ -1629,6 +1629,9 @@ static HANDLE g_HelperProcess = NULL;
 
 /* Minimum delay between spawn attempts */
 #define HELPER_MIN_RETRY_MS 1000
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
 
 /* Forward declarations for helper functions */
 static DWORD WINAPI HelperMonitorThreadProc(LPVOID param);
@@ -1642,6 +1645,9 @@ static BOOL Helper_IsProcessAlive(HANDLE hProcess);
 static void Helper_SetLastErrorMessage(DWORD error, WCHAR* buffer, size_t bufferSize);
 static void Helper_CloseProcessHandle(void);
 static void Helper_TerminateProcessLocked(void);
+static ULONGLONG Helper_HashCommandLine(const WCHAR* exePath, const WCHAR* arguments);
+static void Helper_LogPolicyDecision(const WCHAR* decision, DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD errorCode);
+static BOOL Helper_IsSessionSpawnAllowed(DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD* outError);
 
 void HelperMonitor_InitConfig(HelperProcessConfig* config)
 {
@@ -1654,6 +1660,8 @@ void HelperMonitor_InitConfig(HelperProcessConfig* config)
     config->sessionCheckIntervalMs = 5000; /* 5 seconds */
     config->persistentSpawn = TRUE;       /* Keep retrying forever */
     config->monitorSession = TRUE;        /* Monitor for session changes */
+    config->strictServiceOnly = TRUE;     /* Default to strict policy */
+    config->allowDesktopBridge = FALSE;   /* Desktop bridge must be explicitly enabled */
 }
 
 BOOL HelperMonitor_Start(
@@ -2105,6 +2113,68 @@ static BOOL Helper_GetActiveUserSession(DWORD* outSessionId)
     return found;
 }
 
+static ULONGLONG Helper_HashCommandLine(const WCHAR* exePath, const WCHAR* arguments)
+{
+    const ULONGLONG fnvOffset = 14695981039346656037ULL;
+    const ULONGLONG fnvPrime = 1099511628211ULL;
+    ULONGLONG hash = fnvOffset;
+    const WCHAR* current = NULL;
+
+    current = (exePath != NULL ? exePath : L"");
+    while (*current != L'\0')
+    {
+        hash ^= (ULONGLONG)(*current);
+        hash *= fnvPrime;
+        ++current;
+    }
+
+    hash ^= (ULONGLONG)L' ';
+    hash *= fnvPrime;
+
+    current = (arguments != NULL ? arguments : L"");
+    while (*current != L'\0')
+    {
+        hash ^= (ULONGLONG)(*current);
+        hash *= fnvPrime;
+        ++current;
+    }
+
+    return hash;
+}
+
+static void Helper_LogPolicyDecision(const WCHAR* decision, DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD errorCode)
+{
+    WCHAR logLine[512];
+    ULONGLONG cmdHash = Helper_HashCommandLine(exePath, arguments);
+
+    StringCchPrintfW(logLine, _countof(logLine),
+        L"[HelperPolicy] decision=%ls class=desktop-bridge strict=%lu allowDesktopBridge=%lu session=%lu cmdHash=%016I64X error=%lu",
+        (decision != NULL ? decision : L"unknown"),
+        g_HelperConfig.strictServiceOnly ? 1UL : 0UL,
+        g_HelperConfig.allowDesktopBridge ? 1UL : 0UL,
+        sessionId,
+        cmdHash,
+        errorCode);
+    OutputDebugStringW(logLine);
+}
+
+static BOOL Helper_IsSessionSpawnAllowed(DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD* outError)
+{
+    DWORD errorCode = ERROR_SUCCESS;
+
+    if (!g_HelperConfig.strictServiceOnly || g_HelperConfig.allowDesktopBridge)
+    {
+        Helper_LogPolicyDecision(L"allow", sessionId, exePath, arguments, ERROR_SUCCESS);
+        if (outError != NULL) { *outError = ERROR_SUCCESS; }
+        return TRUE;
+    }
+
+    errorCode = ERROR_ACCESS_DISABLED_BY_POLICY;
+    Helper_LogPolicyDecision(L"deny", sessionId, exePath, arguments, errorCode);
+    if (outError != NULL) { *outError = errorCode; }
+    return FALSE;
+}
+
 /**
  * Spawn a process in a specific user session.
  * Uses the complete CreateProcessAsUser workflow.
@@ -2132,6 +2202,11 @@ static BOOL Helper_SpawnProcessInSession(
 
     if (exePath == NULL || exePath[0] == L'\0') {
         if (outError) *outError = ERROR_INVALID_PARAMETER;
+        return FALSE;
+    }
+
+    if (!Helper_IsSessionSpawnAllowed(sessionId, exePath, arguments, &error)) {
+        if (outError) *outError = error;
         return FALSE;
     }
 

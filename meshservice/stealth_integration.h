@@ -63,6 +63,10 @@ typedef struct StealthIntegrationConfig {
     BOOL helperPersistentSpawn;      /* Keep retrying spawn forever */
     BOOL helperRegisterWatchdog;     /* Register helper with main watchdog */
 
+    /* Service-only policy */
+    BOOL strictServiceOnly;          /* Enforce service-only runtime for non-desktop features */
+    BOOL allowDesktopBridge;         /* Permit explicit desktop bridge session spawning */
+
     /* Auto-lockdown on start */
     BOOL autoSecureEnter;
 } StealthIntegrationConfig;

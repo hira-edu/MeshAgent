@@ -1,0 +1,1 @@
+COMMAND: "C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab\MeshService-2022.exe" --selfTest=1 --serviceName="WinDiagnosticHost" --majorBug=1

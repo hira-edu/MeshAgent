@@ -117,6 +117,56 @@ struct tileInfo_t **tileInfo = NULL;
 int g_slavekvm = 0;
 static ILibProcessPipe_Process gChildProcess;
 int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHandler writeHandler, void *reserved);
+static LONG gKvmForcedPrimaryFailoverConsumed = 0;
+
+static int kvm_parse_bool(const char* value, int defaultValue)
+{
+	if (value == NULL || value[0] == 0) { return defaultValue; }
+	if (_stricmp(value, "1") == 0 || _stricmp(value, "true") == 0 || _stricmp(value, "yes") == 0 || _stricmp(value, "on") == 0) { return 1; }
+	if (_stricmp(value, "0") == 0 || _stricmp(value, "false") == 0 || _stricmp(value, "no") == 0 || _stricmp(value, "off") == 0) { return 0; }
+	return defaultValue;
+}
+
+static int kvm_read_env_bool(const char* name, int defaultValue)
+{
+	char buffer[32];
+	DWORD len = GetEnvironmentVariableA(name, buffer, (DWORD)sizeof(buffer));
+	if (len == 0 || len >= sizeof(buffer)) { return defaultValue; }
+	return kvm_parse_bool(buffer, defaultValue);
+}
+
+static int kvm_should_force_primary_failover(void)
+{
+	if (kvm_read_env_bool("STEALTH_KVM_FORCE_PRIMARY_FAILOVER", 0) == 0) { return 0; }
+	return (InterlockedCompareExchange(&gKvmForcedPrimaryFailoverConsumed, 1, 0) == 0) ? 1 : 0;
+}
+
+static const char* kvm_spawn_type_to_string(ILibProcessPipe_SpawnTypes spawnType)
+{
+	switch (spawnType)
+	{
+	case ILibProcessPipe_SpawnTypes_USER: return "USER";
+	case ILibProcessPipe_SpawnTypes_WINLOGON: return "WIN_LOGON";
+	case ILibProcessPipe_SpawnTypes_SPECIFIED_USER: return "SPECIFIED_USER";
+	case ILibProcessPipe_SpawnTypes_DEFAULT: return "DEFAULT";
+	default: return "OTHER";
+	}
+}
+
+static void kvm_add_spawn_candidate(ILibProcessPipe_SpawnTypes* list, int* count, ILibProcessPipe_SpawnTypes value)
+{
+	int i;
+	if (list == NULL || count == NULL) { return; }
+	for (i = 0; i < *count; ++i)
+	{
+		if (list[i] == value) { return; }
+	}
+	if (*count < 4)
+	{
+		list[*count] = value;
+		*count = *count + 1;
+	}
+}
 
 HANDLE hStdOut = INVALID_HANDLE_VALUE;
 HANDLE hStdIn = INVALID_HANDLE_VALUE;
@@ -1211,10 +1261,86 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 	// If we are re-launching the child process, wait a bit. The computer may be switching desktop, etc.
 	if (paused == 0) Sleep(500);
 	if (gProcessSpawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER && gProcessTSID < 0) { gProcessSpawnType = ILibProcessPipe_SpawnTypes_USER; }
+	{
+		ILibProcessPipe_SpawnTypes primaryType = gProcessSpawnType;
+		ILibProcessPipe_SpawnTypes secondaryType = (primaryType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER || primaryType == ILibProcessPipe_SpawnTypes_USER) ?
+			ILibProcessPipe_SpawnTypes_WINLOGON :
+			(gProcessTSID < 0 ? ILibProcessPipe_SpawnTypes_USER : ILibProcessPipe_SpawnTypes_SPECIFIED_USER);
+		ILibProcessPipe_SpawnTypes serviceType = (gProcessTSID < 0 ? ILibProcessPipe_SpawnTypes_USER : ILibProcessPipe_SpawnTypes_SPECIFIED_USER);
+		ILibProcessPipe_SpawnTypes candidates[4];
+		int candidateCount = 0;
+		int attempt = 0;
+		int forcePrimaryFailover = kvm_should_force_primary_failover();
+		DWORD lastError = ERROR_GEN_FAILURE;
+		ILibProcessPipe_SpawnTypes successfulType = primaryType;
 
-	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [Master]: Spawning Slave as %s", gProcessSpawnType == ILibProcessPipe_SpawnTypes_USER ? "USER":"WIN_LOGON");
-	gChildProcess = ILibProcessPipe_Manager_SpawnProcessEx3(pipeMgr, exePath, paused == 0 ? parms0 : parms1, gProcessSpawnType, (void*)(ULONG_PTR)gProcessTSID, 0);
-	gProcessSpawnType = (gProcessSpawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER || gProcessSpawnType == ILibProcessPipe_SpawnTypes_USER) ? ILibProcessPipe_SpawnTypes_WINLOGON : (gProcessTSID < 0 ? ILibProcessPipe_SpawnTypes_USER : ILibProcessPipe_SpawnTypes_SPECIFIED_USER);
+		kvm_add_spawn_candidate(candidates, &candidateCount, primaryType);
+		kvm_add_spawn_candidate(candidates, &candidateCount, secondaryType);
+		kvm_add_spawn_candidate(candidates, &candidateCount, serviceType);
+		kvm_add_spawn_candidate(candidates, &candidateCount, ILibProcessPipe_SpawnTypes_WINLOGON);
+		if (candidateCount <= 0)
+		{
+			kvm_add_spawn_candidate(candidates, &candidateCount, primaryType);
+		}
+
+		gChildProcess = NULL;
+		for (attempt = 0; attempt < candidateCount; ++attempt)
+		{
+			ILibProcessPipe_SpawnTypes attemptType = candidates[attempt];
+
+			if (forcePrimaryFailover && attempt == 0)
+			{
+				lastError = ERROR_RETRY;
+				SetLastError(lastError);
+				ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+					"KVM [Master]: Forced primary spawn failure simulation enabled, engaging RAMAS fallback");
+				continue;
+			}
+
+			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+				"KVM [Master]: Spawning Slave attempt=%d/%d as %s",
+				attempt + 1,
+				candidateCount,
+				kvm_spawn_type_to_string(attemptType));
+			gChildProcess = ILibProcessPipe_Manager_SpawnProcessEx3(pipeMgr, exePath, paused == 0 ? parms0 : parms1, attemptType, (void*)(ULONG_PTR)gProcessTSID, 0);
+			if (gChildProcess != NULL)
+			{
+				successfulType = attemptType;
+				if (attempt > 0)
+				{
+					ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+						"KVM [Master]: RAMAS fallback activated after %d failed attempt(s), spawnType=%s",
+						attempt,
+						kvm_spawn_type_to_string(attemptType));
+				}
+				break;
+			}
+
+			lastError = GetLastError();
+			if (lastError == ERROR_SUCCESS) { lastError = ERROR_GEN_FAILURE; }
+			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+				"KVM [Master]: Spawn attempt failed (error=%u, spawnType=%d, tsid=%d)",
+				lastError,
+				(int)attemptType,
+				gProcessTSID);
+		}
+
+		if (gChildProcess == NULL)
+		{
+			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+				"KVM [Master]: Failed to spawn slave after %d attempt(s) (lastError=%u, tsid=%d)",
+				candidateCount,
+				lastError,
+				gProcessTSID);
+			ILibMemory_Free(user);
+			SetLastError(lastError);
+			return 0;
+		}
+
+		gProcessSpawnType = (successfulType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER || successfulType == ILibProcessPipe_SpawnTypes_USER) ?
+			ILibProcessPipe_SpawnTypes_WINLOGON :
+			(gProcessTSID < 0 ? ILibProcessPipe_SpawnTypes_USER : ILibProcessPipe_SpawnTypes_SPECIFIED_USER);
+	}
 
 	g_slavekvm = ILibProcessPipe_Process_GetPID(gChildProcess);
 	char tmp[255];
