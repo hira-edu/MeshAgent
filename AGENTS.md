@@ -289,3 +289,22 @@
 - Gate U3: MeshCentral console command path (`umhctl`) can execute representative control operations end-to-end.
 - Gate U4: `-fulluninstall` removes both MeshAgent and MasterService service artifacts cleanly.
 - Gate U5: evidence/logs captured under `docs/testing/` (`native-install.log`, `native-regression.log`, advanced evidence snapshots).
+
+### Full Control-Surface Coverage (Mandatory)
+- Coverage must validate all MeshCentral UMH operation options end-to-end through agent control pipe:
+- `listProcesses`, `status`, `inject`, `injectAll`, `telemetry`, `repair`, `setFlags`, `disable`, `disableAll`, `getPolicy`, `setPolicy`, `getConfig`, `setConfig`, `lockdownBypass`, `examsoftBypass`.
+- Coverage must validate all MeshCentral UMH injection profile options (20 total) via explicit method requests and evidence:
+- `auto`, `standard`, `setwindowshookex`, `manualmap`, `reflective`, `directsyscall`, `sectionmap`, `poolparty:alpc`, `poolparty:io`, `poolparty:task`, `poolparty:timer`, `poolparty:wait`, `poolparty:worker`, `poolpartynomask:alpc`, `poolpartynomask:io`, `poolpartynomask:task`, `poolpartynomask:timer`, `poolpartynomask:wait`, `poolpartynomask:worker`, `threadhijack`.
+- Explicit method requests may not be silently overridden; any `policy_override=true` is a gate failure unless the run is explicitly marked as a diagnostic override with rationale.
+- Regression evidence must include per-option request payload, response payload, and pass/fail outcome.
+
+### MeshCentral Operator E2E Gates (Playwright Required)
+- Validate MeshCentral operator path (device page UMH controls: dropdown + profile selector + PID/json fields + run button) using Playwright end-to-end automation.
+- Playwright flow must prove:
+- UI command construction correctness (`umhctl` command string and JSON escaping),
+- command dispatch through agent console channel,
+- structured response rendering in MeshCentral UI/log output,
+- parity between desktop (`views/default.handlebars`) and mobile (`views/default-mobile.handlebars`) operator surfaces.
+- Playwright artifacts are mandatory per run:
+- trace (`trace.zip`), screenshots/video (on failure), command/result transcript, and final pass/fail summary under `docs/testing/evidence/advanced/`.
+- Full completion is blocked if Playwright coverage is missing, stale, or does not include the active UMH operation/profile set.
