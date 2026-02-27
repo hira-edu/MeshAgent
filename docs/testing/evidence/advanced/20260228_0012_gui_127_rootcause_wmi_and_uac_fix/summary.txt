@@ -1,0 +1,42 @@
+ROOT_CAUSE_ANALYSIS
+- GUI launch "error=127 / specified procedure could not be found" was coupled with two deterministic installer flow defects:
+  1) Repeated ACL hardening on every installer log write caused severe/full stalls in install child process.
+     - Confirmed by dump: MeshService64 -> Stealth_LogInstallEvent -> Stealth_EnsureLogDirectory -> SetNamedSecurityInfoW (ntmarta).
+  2) WMI restart-subscription creation could block indefinitely during PutInstance RPC.
+     - Confirmed by dump: MeshService64 -> StealthResilience_CreateWmiRestartSubscription -> fastprox!PutInstance.
+- Non-admin GUI relaunch path also surfaced confusing shell UI errors; launch telemetry showed ERROR_CANCELLED (1223).
+
+FIXES_APPLIED
+- meshservice/stealth_installer.c
+  - Added cached, fast log-directory ensure path to avoid repeated DACL re-application per log event.
+  - Reordered restart persistence flow: create/verify restart task first; only attempt WMI subscription when task persistence is not healthy.
+  - Set restartTaskHealthy=true when restart task is created.
+- meshservice/ServiceMain.c
+  - Non-admin runas launch now uses SEE_MASK_FLAG_NO_UI to suppress ambiguous shell popups.
+  - GUI error message for ERROR_CANCELLED now explicitly indicates UAC prompt declined/unavailable.
+- meshservice/MeshService-2022.vcxproj
+  - StealthLab|x64 linker UAC level set to RequireAdministrator for auto-elevation prompt on launch.
+
+DEBUG_EVIDENCE
+- Dump (pre-fix stall #1): docs/testing/evidence/advanced/20260227_hang_debug/MeshService64_fullinstall_hang.dmp
+- Dump (pre-fix stall #2): docs/testing/evidence/advanced/20260227_hang_debug/MeshService64_fullinstall_hang3.dmp
+
+BUILD_COMMANDS
+- "C:\Program Files\Microsoft Visual Studio\18\Professional\MSBuild\Current\Bin\MSBuild.exe" meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m
+- "C:\Program Files\Microsoft Visual Studio\18\Professional\MSBuild\Current\Bin\MSBuild.exe" meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=x64 /m
+
+POST-FIX_VALIDATION
+- Manifest check (MeshService64.exe): requestedExecutionLevel=RequireAdministrator
+- Fullinstall timing (post-fix): EXIT=0 ELAPSED_MS=4330
+- CLI sequence (cmd /c): fullinstall, validate-install, fullupdate, validate-update, fulluninstall, validate-uninstall => EXIT:0 each
+
+DEPLOYMENT
+- Dropped binary to:
+  - C:\Users\Workstation\Downloads\MeshService64.exe
+  - C:\Users\Workstation\Documents\GitHub\MeshCentral\agents\MeshService64.exe
+  - C:\Users\Workstation\Documents\GitHub\MeshCentral\meshcentral-data\signedagents\MeshService64.exe
+- Updated hashagents.json key "4" with:
+  - SHA384:D8559EE21808D7AF9F789E98021D8E7E100DD7E7D730A270AF954BF9F04F36FCA80277F0ED8957386579082E010B7E98
+  - size=7704576
+  - mtime=1772219312 (UTC 2026-02-27T19:08:32Z)
+

@@ -1,0 +1,32 @@
+Timestamp (UTC): 2026-02-27T17:52:00Z
+Issue follow-up: GUI action reported "failed to launch (error=127)" in some operator runs.
+
+Native hardening change:
+- File: meshservice/ServiceMain.c
+- Function: MeshService_RunSelfCommandAndWait()
+- Added resilient launch fallback sequence for GUI install/update/uninstall button path.
+  1) Admin path: try CreateProcessW(self, args, cwd=selfdir)
+  2) On launch errors (126/127/193/740), fallback to ShellExecuteExW verb=open
+  3) Retry fallback without cwd when needed
+  4) Non-admin runas path now retries without cwd and adds ShellExecuteW fallback
+- Added structured retry logging through existing [GUI] log event surface.
+
+Build:
+1) StealthLab_DLL x64: success
+2) StealthLab x64: success
+
+Published artifact:
+- C:\Users\Workstation\Downloads\MeshService64.exe
+- SHA384: FAE5B5D3609DD649C7D59CA6314153F4E15E03B42E63B21BEB0498DA2D3F8DD2CE27D20BE17F1BA4C7D48961B3F9BE30
+- Size: 7700480
+
+Native validation (published binary):
+- -fullinstall => 0
+- -validate-install => 0
+- -fullupdate => 0
+- -validate-update => 0
+- -fulluninstall => 0
+- -validate-uninstall => 0
+
+Note:
+- Legacy alias DiagHostSvc cleanup fix remains active from earlier patch set.

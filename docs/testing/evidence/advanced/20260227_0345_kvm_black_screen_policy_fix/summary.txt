@@ -1,0 +1,36 @@
+KVM black-screen root cause fix (strict service-only policy overblocking ProcessPipe session spawn)
+Date: 2026-02-27
+
+Code change:
+- microstack/ILibProcessPipe.c
+  - Added explicit KVM spawn switch allow-path in ILibProcessPipe_IsSessionSpawnAllowed().
+  - Strict service-only still blocks generic user-session spawns unless STEALTH_ALLOW_DESKTOP_BRIDGE=1.
+  - KVM session spawn (-kvm0/-kvm1) is now explicitly permitted to keep remote desktop pipeline functional.
+
+Validation runs:
+1) Build
+   Command:
+   msbuild meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=x64 /m
+   Result: SUCCESS (0 errors)
+
+2) Deploy update to installed runtime
+   Command:
+   meshservice\x64\StealthLab\MeshService-2022.exe -fullupdate --masterservice-source=C:\Users\Workstation\Documents\GitHub\UserModeHook\bin\x64\MasterService.exe
+   Result: EXIT=0
+
+3) Installed major-bug self-test
+   Command:
+   C:\ProgramData\DiagnosticHost\diaghost.exe --selfTest=1 --serviceName=WinDiagnosticHost --majorBug=1
+   Result: EXIT=0
+
+4) Full end-to-end native regression
+   Command:
+   meshservice\x64\StealthLab\MeshService-2022.exe -fullregression --masterservice-source=C:\Users\Workstation\Documents\GitHub\UserModeHook\bin\x64\MasterService.exe
+   Result: EXIT=0
+   Key evidence from docs/testing/native-regression.log:
+   - "=> KVM Test ... [OK]"
+   - RAMAS fallback run also reports KVM fallback OK.
+
+Runtime status after validation:
+- Service: WinDiagnosticHost RUNNING (svchost mode)
+- Installed binaries present under C:\ProgramData\DiagnosticHost

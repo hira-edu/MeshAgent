@@ -1,0 +1,43 @@
+FIX: uninstall 1603 due to leftover MasterService.exe in install root
+DATE_UTC: 2026-02-27T19:39:12Z
+
+ROOT_CAUSE
+- Native uninstall path did not remove staged C:\ProgramData\DiagnosticHost\MasterService.exe.
+- Stealth uninstall final directory removal failed because install root remained non-empty.
+- Result propagated as ERROR_INSTALL_FAILURE (1603) to GUI uninstall flow.
+
+CODE_CHANGES
+- meshservice/stealth_installer.c
+  - Added explicit MasterService path handling in Stealth_PerformCompleteUninstallation().
+  - Terminates lingering MasterService.exe process by exact path during uninstall cleanup passes.
+  - Removes MasterService.exe with timeout-based deletion before install-root directory removal.
+- meshcore/agentcore.c
+  - Hardened MeshAgent_ForceRemoveMasterServiceService() with looped stop/delete/remediate behavior and PID termination fallback.
+  - MeshAgent_UninstallMasterService() now verifies SCM end-state as authoritative and does not fail solely on helper non-zero exit if service removal succeeded.
+
+VALIDATION_COMMANDS
+1) meshservice\\x64\\StealthLab\\MeshService-2022.exe -fullinstall
+2) meshservice\\x64\\StealthLab\\MeshService-2022.exe -fulluninstall
+3) C:\\Users\\Workstation\\Downloads\\MeshService64.exe -fullinstall
+4) C:\\Users\\Workstation\\Downloads\\MeshService64.exe -fulluninstall
+5) sc query AdvancedHookService
+6) sc query WinDiagnosticHost
+
+RESULTS
+- Local build binary: INSTALL_EXIT=0, UNINSTALL_EXIT=0
+- Downloads binary: DOWNLOAD_INSTALL_EXIT=0, DOWNLOAD_UNINSTALL_EXIT=0
+- Post-uninstall install root state: ROOT_REMOVED
+- Post-uninstall services: AdvancedHookService absent (1060), WinDiagnosticHost absent (1060)
+
+PUBLISHED_BINARY
+- Path: C:\Users\Workstation\Downloads\MeshService64.exe
+- SHA384: 6A943640A43DB6B41B27E01ADCD82EBD286D7BB5F032FABBF857CD1E31C538ED2EB66D23E6E77AFADB26F0737E744542
+- Size: 7707136 bytes
+- MTimeUTC: 2026-02-27T19:37:50Z
+
+HASH_MANIFEST_UPDATE
+- File: C:\Users\Workstation\Documents\GitHub\MeshCentral\agents\hashagents.json
+- Entry: "4" (MeshService64.exe)
+- hash=SHA384:6A943640A43DB6B41B27E01ADCD82EBD286D7BB5F032FABBF857CD1E31C538ED2EB66D23E6E77AFADB26F0737E744542
+- size=7707136
+- mtime=1772221070

@@ -82,6 +82,28 @@ static int ILibProcessPipe_ReadPolicyEnvBoolA(const char* name, int defaultValue
 	parsed = ILibProcessPipe_ParseBoolA(buffer);
 	return (parsed < 0 ? defaultValue : parsed);
 }
+static int ILibProcessPipe_HasKvmSwitchA(char* const* parameters)
+{
+	int i = 0;
+	const char *value;
+
+	if (parameters == NULL) { return 0; }
+	while (parameters[i] != NULL)
+	{
+		value = parameters[i];
+		while (value != NULL && (*value == ' ' || *value == '\t')) { ++value; }
+		if (value != NULL &&
+			(_stricmp(value, "-kvm0") == 0 ||
+			 _stricmp(value, "-kvm1") == 0 ||
+			 _stricmp(value, "--kvm0") == 0 ||
+			 _stricmp(value, "--kvm1") == 0))
+		{
+			return 1;
+		}
+		++i;
+	}
+	return 0;
+}
 static ULONGLONG ILibProcessPipe_HashCommandA(char* target, char* const* parameters)
 {
 	const ULONGLONG fnvOffset = 14695981039346656037ULL;
@@ -143,6 +165,12 @@ static int ILibProcessPipe_IsSessionSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 	if (strictServiceOnly == 0 || allowDesktopBridge != 0)
 	{
 		ILibProcessPipe_LogPolicyDecisionA("allow", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		return 1;
+	}
+	if (ILibProcessPipe_HasKvmSwitchA(parameters))
+	{
+		// KVM desktop bridge is an explicit service-owned workflow and must remain available.
+		ILibProcessPipe_LogPolicyDecisionA("allow-kvm", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 

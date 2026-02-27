@@ -38,8 +38,12 @@ static BOOL g_SvchostRunning = FALSE;
 
 static void Stealth_SvchostReportStopDenial(void)
 {
-    mesh_branding_text_t nameText = MeshService_GetServiceNameText();
-    const wchar_t* logName = (nameText != NULL) ? nameText : STEALTH_FALLBACK_SERVICE_NAME;
+    wchar_t logName[256] = {0};
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), logName, _countof(logName));
+    if (logName[0] == L'\0')
+    {
+        StringCchCopyW(logName, _countof(logName), STEALTH_FALLBACK_SERVICE_NAME);
+    }
     HANDLE evt = RegisterEventSourceW(NULL, logName);
     if (evt != NULL)
     {

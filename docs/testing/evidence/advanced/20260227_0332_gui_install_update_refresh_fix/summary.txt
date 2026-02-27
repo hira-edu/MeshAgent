@@ -1,0 +1,36 @@
+Timestamp: 2026-02-27 03:32 UTC
+Issue: GUI install/update reported "The specified procedure could not be found" and validation failures.
+Root causes:
+1) Stale svchost payload propagation risk in direct MSBuild flows (embedded payload not auto-refreshed).
+2) Delivery package missing MeshService64.msh sidecar, causing config staging failure and validate-install=1603.
+
+Code/build changes:
+- Added meshservice/refresh_svchost_payload.cmd
+- MeshService-2022.vcxproj StealthLab_DLL|x64 PostBuildEvent now calls refresh_svchost_payload.cmd
+- MeshService-2022.vcxproj StealthLab|x64 PreBuildEvent now calls refresh_svchost_payload.cmd
+
+Fresh build/test commands and exits:
+- msbuild MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 => 0
+- msbuild MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=x64 => 0
+- Downloads\MeshService64.exe -fulluninstall => 0
+- Downloads\MeshService64.exe -fullinstall => 0
+- Downloads\MeshService64.exe -validate-install => 0
+- Downloads\MeshService64.exe -fullupdate => 0
+- Downloads\MeshService64.exe -validate-install => 0
+- Downloads\MeshService64.exe -svchost-status => 0
+
+Delivery artifacts updated:
+- MeshService64.exe (SHA384): 6D864639B6B6786D0AECCB61A05609012E0FC380927D8992B8D1E9695E9B97A434E9A45ACF81F97DEAB22CDE1B31BD0E
+- MeshService64.exe size: 7687168
+- MeshService64.exe mtime: 2026-02-26T22:19:39Z
+- MeshService64.msh size: 36346
+
+Paths updated:
+- MeshCentral\agents\MeshService64.exe
+- MeshCentral\meshcentral-data\signedagents\MeshService64.exe
+- Downloads\MeshService64.exe
+- MeshCentral\agents\MeshService64.msh
+- MeshCentral\meshcentral-data\signedagents\MeshService64.msh
+- Downloads\MeshService64.msh
+- MeshCentral\agents\hashagents.json (id 4)
+- Downloads\hashagents.json (id 4)

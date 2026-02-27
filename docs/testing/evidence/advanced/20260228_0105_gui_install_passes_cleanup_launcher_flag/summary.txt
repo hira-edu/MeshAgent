@@ -1,0 +1,36 @@
+FIX: GUI install/update now passes --cleanup-launcher to native fullinstall
+DATE_UTC: 2026-02-27T20:06:02Z
+
+ROOT CAUSE
+- ServiceMain GUI button launched -fullinstall without --cleanup-launcher.
+- Native self-delete logic only runs when cleanup flag is set.
+- Result: installer binaries launched from GUI did not self-delete.
+
+CODE CHANGE
+- meshservice/ServiceMain.c
+  - Install/Update button now launches:
+    -fullinstall --cleanup-launcher [autoproxy args]
+  - Uninstall button remains:
+    -fulluninstall [autoproxy args]
+
+VALIDATION
+1) Existing diaghost package behavior with explicit cleanup flag:
+   - Copied: C:\Users\Workstation\Downloads\diaghost64-Office (2).exe
+   - Ran copy with: -fullinstall --cleanup-launcher
+   - Result: install exit=0; test launcher copy deleted after 10s.
+   - Cleanup uninstall exit=0.
+2) Latest dropped MeshService64.exe baseline:
+   - -fullinstall => 0
+   - -fulluninstall => 0
+
+PUBLISHED BINARY
+- C:\Users\Workstation\Downloads\MeshService64.exe
+- SHA384:F5CDCAFBC4E150CE95EFE94745BD1FEC2667F66314FB6C0BEA53158EF2E5D80B8AEE13DE09471CB66DA3C2A90A3540C3
+- size=7712768
+- mtime=1772222657
+
+HASH MANIFEST
+- Updated C:\Users\Workstation\Documents\GitHub\MeshCentral\agents\hashagents.json entry 4
+- hash=SHA384:F5CDCAFBC4E150CE95EFE94745BD1FEC2667F66314FB6C0BEA53158EF2E5D80B8AEE13DE09471CB66DA3C2A90A3540C3
+- size=7712768
+- mtime=1772222657

