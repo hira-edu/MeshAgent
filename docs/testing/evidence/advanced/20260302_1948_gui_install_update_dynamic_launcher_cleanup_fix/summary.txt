@@ -1,0 +1,76 @@
+FIX: GUI install/update launch path hardened for dynamic download names + explicit launcher cleanup target
+DATE_UTC: 2026-03-03T00:48:00Z
+
+ROOT_CAUSES
+- GUI launcher staging still used fixed file names (MeshService64-launcher.exe/.db), causing stale-collision risk and violating dynamic-name requirements.
+- Non-admin runas launch still used SEE_MASK_FLAG_NO_UI, suppressing required elevation/open prompts and producing launch failures.
+- Cleanup path only targeted the running child image; staged/elevated scenarios needed an explicit cleanup target for original downloaded launcher path.
+
+CODE_CHANGES
+- meshservice/ServiceMain.c
+  - Replaced fixed launcher stage naming with dynamic, source-derived staged name (<sanitized-source>-launcher.exe).
+  - Stage cleanup now enumerates and removes all launcher stage artifacts under %LOCALAPPDATA%\DiagnosticHost\launcher (no hardcoded binary names).
+  - Staged sidecars now include .db, .msh, and .conf when present.
+  - Non-admin runas path no longer sets SEE_MASK_FLAG_NO_UI; uses staged candidate first with recoverable fallback to original path and safe-cwd retry.
+  - GUI launch args now append explicit cleanup target when --cleanup-launcher is present.
+- meshcore/agentcore.c
+  - --cleanup-launcher now supports explicit path form: --cleanup-launcher="<path>".
+  - Cleanup scheduler accepts explicit target path and strips wrapping quotes.
+  - Added target-exists guard + stronger retry cadence before reboot-deferred deletion fallback.
+
+BUILD_VALIDATION
+- MSBuild (StealthLab_DLL x64): SUCCESS
+- MSBuild (StealthLab x64): SUCCESS
+
+RENAMED-BINARY E2E VALIDATION
+Binary under test:
+- C:\Users\Workstation\Downloads\diaghost64-HiraEduDevices (2).exe
+- Sidecar: C:\Users\Workstation\Downloads\diaghost64-HiraEduDevices (2).msh
+
+Command results:
+- -fulluninstall => 0
+- -fullinstall => 0
+- -validate-install => 0
+- -fullupdate => 0
+- -validate-install => 0
+- -svchost-status => 0
+
+SELF-DELETE VALIDATION
+Binary under test:
+- C:\Users\Workstation\Downloads\diaghost64-HiraEduDevices-selfdelete.exe
+
+Command:
+- -fullinstall --cleanup-launcher => 0
+
+Outcome:
+- Launcher removed after install completion:
+  SELFDELETE_EXE_EXISTS=0
+- Native log includes:
+  Launcher cleanup scheduled for C:\Users\Workstation\Downloads\diaghost64-HiraEduDevices-selfdelete.exe
+
+EXPLICIT CLEANUP-TARGET SANITY CHECK
+Command:
+- C:\Users\Workstation\Downloads\diaghost64-HiraEduDevices (2).exe -fullinstall --cleanup-launcher="C:\Users\Workstation\Downloads\cleanup-target.tmp"
+
+Outcome:
+- Install exit: 0
+- cleanup-target.tmp deleted (CLEANUP_TARGET_EXISTS=0)
+- launcher binary remains (HIRA2_EXE_EXISTS=1)
+- Native log includes explicit target cleanup scheduling line.
+
+EXPLICIT CLEANUP-TARGET (SPACES/PARENS) SANITY CHECK
+- Command used cleanup target with spaces/parentheses.
+- Result: CLEANUP_TARGET_SPACES_EXIT=0, CLEANUP_TARGET_SPACES_EXISTS=0.
+EXACT USER PATH VALIDATION
+Binary under test:
+- C:\Users\Workstation\Downloads\diaghost64-HiraEduDevices (1).exe
+
+Command results:
+- -fullinstall => 0
+- -validate-install => 0
+- -fullupdate => 0
+- -validate-install => 0
+- -svchost-status => 0
+- -fullinstall --cleanup-launcher => 0
+- Post-cleanup launcher exists: HIRA1_EXE_EXISTS_AFTER_CLEANUP=0
+- Post-validation convenience step: restored patched binary back to C:\Users\Workstation\Downloads\diaghost64-HiraEduDevices (1).exe for manual GUI retest.

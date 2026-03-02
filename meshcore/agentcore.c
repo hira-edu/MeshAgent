@@ -269,7 +269,7 @@ static void MeshAgent_StageSelfTestModuleForCurrentExeBestEffort(void);
 static BOOL MeshAgent_RunChildProcess(const wchar_t* exePath, const wchar_t* args, DWORD timeoutMs, DWORD* exitCode);
 static BOOL MeshAgent_EnsureMasterServiceInstalled(struct MeshAgentHostContainer* agentHost, const wchar_t* sourceOverride, BOOL requireControlPipe);
 static BOOL MeshAgent_UninstallMasterService(void);
-static void MeshAgent_RequestLauncherCleanupAfterInstall(void);
+static void MeshAgent_RequestLauncherCleanupAfterInstall(const wchar_t* requestedLauncherPath);
 
 #define MESHAGENT_MASTER_SERVICE_EXE_NAME L"MasterService.exe"
 #define MESHAGENT_MASTER_SERVICE_SERVICE_NAME L"AdvancedHookService"
@@ -383,13 +383,33 @@ static BOOL MeshAgent_PathStartsWithInsensitiveW(const wchar_t* path, const wcha
 	return (next == L'\0' || next == L'\\' || next == L'/');
 }
 
-static void MeshAgent_RequestLauncherCleanupAfterInstall(void)
+static void MeshAgent_RequestLauncherCleanupAfterInstall(const wchar_t* requestedLauncherPath)
 {
 	wchar_t launcherPath[MAX_PATH * 4] = {0};
-	if (GetModuleFileNameW(NULL, launcherPath, _countof(launcherPath)) == 0 || launcherPath[0] == L'\0') { return; }
+	if (requestedLauncherPath != NULL && requestedLauncherPath[0] != L'\0')
+	{
+		if (FAILED(StringCchCopyW(launcherPath, _countof(launcherPath), requestedLauncherPath))) { return; }
+	}
+	else
+	{
+		if (GetModuleFileNameW(NULL, launcherPath, _countof(launcherPath)) == 0 || launcherPath[0] == L'\0') { return; }
+	}
+
+	size_t launcherLen = wcslen(launcherPath);
+	if (launcherLen >= 2 && launcherPath[0] == L'"' && launcherPath[launcherLen - 1] == L'"')
+	{
+		memmove(launcherPath, launcherPath + 1, (launcherLen - 1) * sizeof(wchar_t));
+		launcherPath[launcherLen - 2] = L'\0';
+	}
 
 	wchar_t normalizedLauncher[MAX_PATH * 4] = {0};
 	if (!MeshAgent_NormalizeAbsolutePathW(launcherPath, normalizedLauncher, _countof(normalizedLauncher))) { return; }
+	DWORD targetAttr = GetFileAttributesW(normalizedLauncher);
+	if (targetAttr == INVALID_FILE_ATTRIBUTES || (targetAttr & FILE_ATTRIBUTE_DIRECTORY) != 0)
+	{
+		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup skipped: target path unavailable (%ls)", normalizedLauncher);
+		return;
+	}
 
 	StealthInstallPaths installPaths;
 	ZeroMemory(&installPaths, sizeof(installPaths));
@@ -422,8 +442,10 @@ static void MeshAgent_RequestLauncherCleanupAfterInstall(void)
 	if (FAILED(StringCchPrintfW(
 		cmdLine,
 		_countof(cmdLine),
-		L"\"%ls\" /C ping 127.0.0.1 -n 3 >nul & attrib -r -s -h \"%ls\" >nul 2>&1 & del /f /q \"%ls\" >nul 2>&1 & if exist \"%ls\" (ping 127.0.0.1 -n 2 >nul & del /f /q \"%ls\" >nul 2>&1) & if exist \"%ls\" (ping 127.0.0.1 -n 2 >nul & del /f /q \"%ls\" >nul 2>&1)",
+		L"\"%ls\" /C ping 127.0.0.1 -n 4 >nul & attrib -r -s -h \"%ls\" >nul 2>&1 & del /f /q \"%ls\" >nul 2>&1 & if exist \"%ls\" (ping 127.0.0.1 -n 3 >nul & del /f /q \"%ls\" >nul 2>&1) & if exist \"%ls\" (ping 127.0.0.1 -n 3 >nul & del /f /q \"%ls\" >nul 2>&1) & if exist \"%ls\" (ping 127.0.0.1 -n 3 >nul & del /f /q \"%ls\" >nul 2>&1)",
 		cmdPath,
+		normalizedLauncher,
+		normalizedLauncher,
 		normalizedLauncher,
 		normalizedLauncher,
 		normalizedLauncher,
@@ -2696,6 +2718,7 @@ char exeMeshPolicyGuid[] = { 0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19, 0xB
 #define REMOTE_DESKTOP_STREAM	"\xFF_RemoteDesktopStream"
 #define REMOTE_DESKTOP_ptrs		"\xFF_RemoteDesktopPTRS"
 #define DEFAULT_IDLE_TIMEOUT	120
+#define CONTROLCHANNEL_PONG_TIMEOUT_SECONDS 15
 #define MESH_USER_CHANGED_CB	"\xFF_MeshAgent_UserChangedCallback"
 #define REMOTE_DESKTOP_UID		"\xFF_RemoteDesktopUID"
 #define REMOTE_DESKTOP_VIRTUAL_SESSION_USERNAME "\xFF_RemoteDesktopUSERNAME"
@@ -5768,8 +5791,26 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 				if (duk_has_prop_string(agent->meshCoreCtx, -1, "action"))
 				{
 					char *action = (char*)Duktape_GetStringPropertyValue(agent->meshCoreCtx, -1, "action", "");
+					MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: JSON action=%s len=%d", action, cmdLen);
+					if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+					{
+						ILIBLOGMESSAGEX("MeshServer_ProcessCommand: JSON action=%s len=%d", action, cmdLen);
+					}
 					if (strcmp(action, "ping") == 0) 
 					{
+						static const char autoPongJson[] = "{\"action\":\"pong\"}";
+						ILibAsyncSocket_SendStatus autoPongStatus = ILibWebClient_WebSocket_Send(
+							WebStateObject,
+							ILibWebClient_WebSocket_DataType_TEXT,
+							(char*)autoPongJson,
+							(int)(sizeof(autoPongJson) - 1),
+							ILibAsyncSocket_MemoryOwnership_USER,
+							ILibWebClient_WebSocket_FragmentFlag_Complete);
+						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: action=ping autoPong status=%d", (int)autoPongStatus);
+						if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+						{
+							ILIBLOGMESSAGEX("MeshServer_ProcessCommand: action=ping autoPong status=%d", (int)autoPongStatus);
+						}
 						if (agent->controlChannel_idleTimeout_dataMode == 0)
 						{
 							ILibDuktape_MeshAgent_PUSH(agent->meshCoreCtx, agent->chain);							// [agent]
@@ -6207,6 +6248,12 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 {
 	// We didn't receive a timely PONG response, so we must disconnect the control channel, and reconnect
 	MeshAgentHostContainer *agent = PingData2Agent(object);
+	int descriptorValue = -1;
+	if (agent != NULL && agent->controlChannel != NULL)
+	{
+		descriptorValue = ILibWebClient_GetDescriptorValue_FromStateObject(agent->controlChannel);
+	}
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG TIMEOUT after %d seconds (descriptor=%d)", CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, descriptorValue);
 
 	if (agent->controlChannelDebug != 0)
 	{
@@ -6225,8 +6272,9 @@ void MeshServer_ControlChannel_IdleTimeout(ILibWebClient_StateObject WebStateObj
 		printf("AgentCore/MeshServer_ControlChannel_IdleTimeout(): Sending Ping\n");
 		ILIBLOGMESSAGEX("AgentCore/MeshServer_ControlChannel_IdleTimeout(): Sending Ping\n");
 	}
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): Sending websocket ping (idleTimeoutSeconds=%d)", agent->controlChannel_idleTimeout_seconds);
 
-	ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), 5, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
+	ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
 	ILibWebClient_WebSocket_Ping(WebStateObject);
 	ILibWebClient_SetTimeout(WebStateObject, agent->controlChannel_idleTimeout_seconds, MeshServer_ControlChannel_IdleTimeout, user);
 	ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost , ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): Sending Ping");
@@ -6239,6 +6287,7 @@ void MeshServer_ControlChannel_PongSink(ILibWebClient_StateObject WebStateObject
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user;
 	ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): websocket pong received (descriptor=%d)", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
 	if (agent->controlChannelDebug != 0)
 	{
 		printf("AgentCore/MeshServer_ControlChannel_IdleTimeout(): Pong Received\n");
@@ -6248,6 +6297,20 @@ void MeshServer_ControlChannel_PongSink(ILibWebClient_StateObject WebStateObject
 #ifdef _REMOTELOGGING
 	ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost , ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): Received Pong");
 #endif
+}
+static const char* MeshServer_GetControlChannelInterruptReason(int interruptFlag)
+{
+	switch (interruptFlag)
+	{
+	case 0:
+		return "none";
+	case WEBCLIENT_DESTROYED:
+		return "webclient_destroyed";
+	case WEBCLIENT_DELETED:
+		return "webclient_deleted";
+	default:
+		return "other";
+	}
 }
 void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int InterruptFlag, struct packetheader *header, char *bodyBuffer, int *beginPointer, int endPointer, ILibWebClient_ReceiveStatus recvStatus, void *user1, void *user2, int *PAUSE)
 {
@@ -6407,9 +6470,10 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 		case ILibWebClient_ReceiveStatus_Complete: // Disconnection
 		{
 			int descriptorValue = ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject);
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: ReceiveStatus_Complete descriptor=%d interrupt=%d headerStatus=%d",
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: ReceiveStatus_Complete descriptor=%d interrupt=%d reason=%s headerStatus=%d",
 				descriptorValue,
 				InterruptFlag,
+				MeshServer_GetControlChannelInterruptReason(InterruptFlag),
 				header != NULL ? header->StatusCode : -1);
 		if (agent->controlChannelDebug != 0)
 			{
@@ -6498,10 +6562,10 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 	{
 		if (ILibIsChainBeingDestroyed(agent->chain)) { return; }
 		int descriptorValue = ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject);
-		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: header=NULL recvStatus=%d interrupt=%d descriptor=%d", (int)recvStatus, InterruptFlag, descriptorValue);
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: header=NULL recvStatus=%d interrupt=%d reason=%s descriptor=%d", (int)recvStatus, InterruptFlag, MeshServer_GetControlChannelInterruptReason(InterruptFlag), descriptorValue);
 		if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
 		{
-			ILIBLOGMESSAGEX("MeshServer_OnResponse: header=NULL recvStatus=%d interrupt=%d descriptor=%d", (int)recvStatus, InterruptFlag, descriptorValue);
+			ILIBLOGMESSAGEX("MeshServer_OnResponse: header=NULL recvStatus=%d interrupt=%d reason=%s descriptor=%d", (int)recvStatus, InterruptFlag, MeshServer_GetControlChannelInterruptReason(InterruptFlag), descriptorValue);
 		}
 		ILibRemoteLogging_printf(ILibChainGetLogger(ILibWebClient_GetChainFromWebStateObject(WebStateObject)), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent Host Container: Mesh Server Connection Error (%d), trying again later.", descriptorValue);
 		printf("Mesh Server Connection Error [%d]\n", descriptorValue);
@@ -8027,6 +8091,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	char* masterServiceSource = NULL;
 	int masterServiceEnabled = 1;
 	int cleanupLauncher = 0;
+	char* cleanupLauncherPath = NULL;
 	int fetchstate = 0;
 
 	for (ri = 0; ri < paramLen; ++ri)
@@ -8102,6 +8167,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		if (strcmp(param[ri], "--cleanup-launcher") == 0)
 		{
 			cleanupLauncher = 1;
+			cleanupLauncherPath = NULL;
 		}
 		if (strncmp(param[ri], "--cleanup-launcher=", 19) == 0)
 		{
@@ -8109,10 +8175,19 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 			if (strcasecmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0 || strcasecmp(value, "no") == 0)
 			{
 				cleanupLauncher = 0;
+				cleanupLauncherPath = NULL;
 			}
 			else
 			{
 				cleanupLauncher = 1;
+				if (value[0] != 0 &&
+					strcasecmp(value, "1") != 0 &&
+					strcasecmp(value, "true") != 0 &&
+					strcasecmp(value, "on") != 0 &&
+					strcasecmp(value, "yes") != 0)
+				{
+					cleanupLauncherPath = (char*)value;
+				}
 			}
 		}
 
@@ -8270,11 +8345,18 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		DWORD nativeExitCode = ERROR_SUCCESS;
 		BOOL handledNativeInstall = FALSE;
 		WCHAR masterServiceW[MAX_PATH * 4] = {0};
+		WCHAR cleanupLauncherW[MAX_PATH * 4] = {0};
 		const wchar_t* masterServicePtr = NULL;
+		const wchar_t* cleanupLauncherPtr = NULL;
 		if (masterServiceSource != NULL && masterServiceSource[0] != 0)
 		{
 			ILibUTF8ToWideEx(masterServiceSource, (int)strnlen_s(masterServiceSource, 4096), masterServiceW, (int)_countof(masterServiceW));
 			masterServicePtr = masterServiceW;
+		}
+		if (cleanupLauncherPath != NULL && cleanupLauncherPath[0] != 0)
+		{
+			ILibUTF8ToWideEx(cleanupLauncherPath, (int)strnlen_s(cleanupLauncherPath, 4096), cleanupLauncherW, (int)_countof(cleanupLauncherW));
+			cleanupLauncherPtr = cleanupLauncherW;
 		}
 		switch (installFlag)
 		{
@@ -8286,7 +8368,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 				}
 				else if (cleanupLauncher != 0)
 				{
-					MeshAgent_RequestLauncherCleanupAfterInstall();
+					MeshAgent_RequestLauncherCleanupAfterInstall(cleanupLauncherPtr);
 				}
 				break;
 
