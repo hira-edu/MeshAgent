@@ -17,6 +17,7 @@ The following documents remain authoritative in their own domains:
 
 - `docs/DEPLOYMENT.md`
 - `docs/testing/ADVANCED_DEBUG_TOOLCHAIN.md`
+- `docs/testing/20260331_REALIGNMENT_GUARDRAILS.md`
 
 ## Objective
 
@@ -90,6 +91,8 @@ Each retained behavior must be justified by:
 - Remote desktop availability and restart/update continuity remain required release gates.
 - UMH integration remains in scope and must stay first-class.
 - Where screen protections are part of the supported target flow, capture must occur before those protections are applied, or the flow must fail explicitly before protection state is mutated.
+- Windows security boundaries such as protected desktop, protected content, DRM restrictions, and security prompts may not be bypassed; those flows must fail explicitly with evidence.
+- Privileged execution must remain minimal, explicit, and auditable; no permanent generic full-elevation operator mode is allowed.
 - `deploy.py` remains in scope and will be kept.
 
 ## Retain, Reduce, Remove Policy
@@ -104,11 +107,14 @@ Each retained behavior must be justified by:
 | Provisioning staging (`.msh`, `.conf`, sidecars) | RETAIN | single source of truth, deterministic staging, parity validation |
 | NodeID / identity preservation logic | RETAIN | must survive update/reinstall unless explicitly reset |
 | svchost installation and service-only enforcement | RETAIN AND REWRITE | selectively port the required svchost install/update/uninstall behavior onto the clean baseline while keeping standalone execution blocked |
+| Elevation boundary and privileged broker surface | RETAIN AND REWRITE | keep only the minimal privilege surface required for lifecycle and trusted session brokerage; no ambient elevation mode |
 | `deploy.py` remote deployment workflow | RETAIN AND HARDEN | remains authoritative deployment tool for agent binaries |
 | `RecoveryCore.js` expansion unrelated to UMH | REDUCE | keep only what is necessary for UMH/operator requirements |
 | Localhost relay connectivity contract and minimum required control-channel path | RETAIN AND REWRITE | keep the required `localhost` relay transport to the real server endpoint, but remove unrelated networking drift and undocumented proxy behavior |
 | Remote-desktop Session 1 desktop bridge | RETAIN AND REWRITE | keep only the explicit `rundll32`-based Session 1 bridge required for remote desktop/KVM readiness; revert generic desktop-spawn rewrites |
 | Helper-monitor / user-session spawning infrastructure | DEFAULT DISABLED | no persistent cross-session spawning unless explicitly required and validated |
+| Protection-boundary failure semantics | RETAIN AND REWRITE | keep pre-protection capture sequencing where supported, but explicitly fail on OS security boundaries rather than bypassing them |
+| Audit, evidence, and policy-decision logging | RETAIN AND EXPAND | separate security and operational evidence, add correlation IDs, and make privileged/session decisions reconstructible |
 | Generated binaries, `.tlog`, `.iobj`, `.ipdb`, embedded payload artifacts | EXCLUDE AS SOURCE | build outputs are not implementation truth |
 
 ## Required Architectural Shape
@@ -167,6 +173,21 @@ There may not be a silent race where protection state is applied first and captu
 - PowerShell, terminal, file operations, update/install logic, helper monitors, and arbitrary child-process launch may not use the Session 1 `rundll32` path.
 - Standalone agent execution remains blocked; the desktop bridge does not create a second standalone runtime mode.
 
+### Privilege and protection boundaries
+
+- Privileged service context exists only to satisfy svchost lifecycle, trusted session brokerage, and other explicitly gated system operations.
+- No implementation may expose that privileged context as a reusable generic operator shell or generic elevated launcher.
+- The pre-protection capture requirement applies only to supported application-managed protection flows.
+- Windows security boundaries, protected desktop prompts, protected content restrictions, and similar OS-enforced barriers are explicit stop conditions, not bypass candidates.
+- When those boundaries block capture or input, the system must emit a deterministic failure result with evidence, not a workaround attempt.
+
+### Service-to-bridge IPC boundary
+
+- Session 0 service code and any Session 1 bridge must communicate only through explicit local IPC with authenticated endpoints and correlation IDs.
+- IPC contracts must carry the requested action, target session, target identity, policy decision, and final outcome.
+- Generic command execution semantics are prohibited on this IPC surface.
+- Token acquisition and session launch handles must be bounded, audited, and released deterministically.
+
 ## Engineering Guardrails
 
 ### Code quality
@@ -190,6 +211,7 @@ There may not be a silent race where protection state is applied first and captu
 - Default policy is strict service-only behavior.
 - Desktop bridge behavior, if kept, must be minimized and explicit.
 - Any helper monitor or user-session spawn path must be disabled unless the feature-specific gate requires it.
+- Privileged actions must be just-in-time in shape even when performed by a long-running service; no persistent operator-facing elevated execution surface is allowed.
 - Any new flag or environment variable that alters lifecycle or transport behavior must be added to this SSOT before it is accepted.
 
 ### Packaging
@@ -198,6 +220,8 @@ There may not be a silent race where protection state is applied first and captu
 - `.db` sidecar absence may not break supported operator packages unless the package genuinely requires a pre-seeded identity.
 - `MasterService.exe` source resolution must be deterministic and validated.
 - Sidecar rules must be identical across CLI, silent, GUI, staged-launch, and self-update activation paths.
+- Service binaries and payloads must be staged from local trusted paths; remote-share service execution paths are prohibited.
+- Service paths must be quoted and validation must prove the final SCM registration matches the intended local path and `ServiceDll`.
 
 ## Program Phases
 
@@ -235,6 +259,7 @@ Mandatory work:
 - build a file-by-file and subsystem-by-subsystem keep/revert ledger
 - isolate the minimum required UMH deltas
 - isolate the minimum required svchost lifecycle deltas
+- isolate the minimum required privilege boundary, relay boundary, and Session 1 bridge boundary deltas
 - explicitly classify the following hotspots:
   - `meshcore/agentcore.c`
   - `meshservice/ServiceMain.c`
@@ -292,6 +317,9 @@ Mandatory work:
 - service start-type recovery and rollback safety
 - path handling with spaces, parentheses, staging roots, and install-root scenarios
 - stale service registration and stale firewall/DACL cleanup
+- relay listener ACL drift, retargeting attempts, and loopback-only enforcement
+- explicit protected-boundary failure handling for capture and input
+- service-path quoting, local-only staging, and signer validation drift
 
 P4 exit gate:
 
@@ -306,6 +334,8 @@ Mandatory work:
 - GUI regression harness coverage with dialog capture
 - Playwright operator coverage for UMH desktop and mobile surfaces
 - explicit capture-before-protection timing coverage with timestamped artifacts and failure-path evidence
+- explicit negative coverage for OS protection-boundary failures with no bypass attempt
+- privilege-boundary and session-broker audit coverage with correlation IDs
 - stress harness for repeated install/update/uninstall/restart loops
 - evidence schema and summary-file contract enforcement
 
@@ -347,8 +377,10 @@ The program is incomplete until all of the following are true:
 12. Remote desktop readiness and restart/update continuity pass the major-bug profile, with any Session 1 `rundll32` bridge limited to that feature scope.
 13. No unauthorized user-session process spawn path is introduced or retained silently, including PowerShell or arbitrary-process Session 1 dispatch.
 14. Standalone agent execution remains blocked in the shipped service build.
-15. `deploy.py` stage, deploy, health, and rollback workflows remain functional.
-16. Full evidence is written under `docs/testing/`.
+15. Privileged operations remain explicit and bounded; no generic elevated operator shell or generic full-elevation mode exists.
+16. OS protection boundaries produce explicit failure evidence instead of bypass behavior.
+17. `deploy.py` stage, deploy, health, and rollback workflows remain functional.
+18. Full evidence is written under `docs/testing/`.
 
 ## Evidence And Documentation Rules
 
@@ -377,5 +409,6 @@ The authoritative companion documents are:
 - `docs/testing/20260331_REALIGNMENT_TODO_MATRIX.md`
 - `docs/testing/20260331_REALIGNMENT_LEDGER.md`
 - `docs/testing/20260331_REALIGNMENT_REGRESSION_MATRIX.md`
+- `docs/testing/20260331_REALIGNMENT_GUARDRAILS.md`
 
 These documents must stay synchronized.
