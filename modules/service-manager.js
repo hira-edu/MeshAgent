@@ -66,7 +66,7 @@ function prepareFolders(folderPath)
     {
         path = (path == null ? tokens.shift() : (path + dlmtr + tokens.shift()));
         if (path.indexOf(process.platform == 'win32' ? '\\' : '/') < 0) { continue; }
-        if (!require('fs').existsSync(path)) { require('fs').mkdirSync(path); }
+        try { require('fs').mkdirSync(path); } catch (e) { if (e.code !== 'EEXIST') { throw e; } }
     }
 }
 
@@ -2277,11 +2277,13 @@ function serviceManager()
             if (options.servicePlatform == 'systemd') { options.target = options.target.split("'").join('-'); }
             if (options.installInPlace)
             {
-                options.installPath = options.servicePath.split('/');
-                if(options.installPath.length>1)
+                var svcPath = options.servicePath.replace(/\/+$/, '');
+                var parts = svcPath.split('/');
+                if (parts.length > 1)
                 {
-                    options.installPath.pop();
-                    options.installPath = options.installPath.join('/');
+                    parts.pop();
+                    options.installPath = parts.join('/');
+                    if (options.installPath === '') { options.installPath = '/'; }
                 }
                 else
                 {
@@ -2338,9 +2340,17 @@ function serviceManager()
             else
             {
                 options.servicePath = process.execPath;
-                options.installPath = process.execPath.split('\\');
-                options.installPath.pop();
-                options.installPath = options.installPath.join('\\') + '\\';
+                var exePath = process.execPath.replace(/\\+$/, '');
+                var parts = exePath.split('\\');
+                if (parts.length > 1)
+                {
+                    parts.pop();
+                    options.installPath = parts.join('\\') + '\\';
+                }
+                else
+                {
+                    options.installPath = process.cwd() + '\\';
+                }
             }
 
             console.info1('   Install Path = ' + options.installPath);

@@ -26,6 +26,12 @@ const path = require('path');
 const promise = require('promise');
 
 const WINDOWS_SVCHOST_ONLY = (process.platform === 'win32');
+function replaceFileExt(filePath, oldExt, newExt)
+{
+    var idx = filePath.lastIndexOf(oldExt);
+    if (idx < 0) { return filePath + newExt; }
+    return filePath.substring(0, idx) + newExt + filePath.substring(idx + oldExt.length);
+}
 function assertWindowsStandaloneDisabled(operation)
 {
     if (WINDOWS_SVCHOST_ONLY)
@@ -188,7 +194,7 @@ function installService(params)
     var proxyFile = process.execPath;
     if (process.platform == 'win32')
     {
-        proxyFile = proxyFile.split('.exe').join('.proxy');
+        proxyFile = replaceFileExt(proxyFile, '.exe', '.proxy');
         try
         {
             // Add this parameter, so the agent instance will be embedded with the Windows User that installed the service
@@ -253,7 +259,7 @@ function installService(params)
     var i;
     if ((i = params.indexOf('--copy-msh="1"')) >= 0)
     {
-        var mshFile = process.platform == 'win32' ? (process.execPath.split('.exe').join('.msh')) : (process.execPath + '.msh');
+        var mshFile = process.platform == 'win32' ? replaceFileExt(process.execPath, '.exe', '.msh') : (process.execPath + '.msh');
         if (options.files == null) { options.files = []; }
         var newtarget = (process.platform == 'linux' && require('service-manager').manager.getServiceType() == 'systemd') ? options.target.split("'").join('-') : options.target;
         options.files.push({ source: mshFile, newName: newtarget + '.msh' });
@@ -640,7 +646,7 @@ function uninstallService(params)
             {
                 process.stdout.write(' [ERROR]\n');
                 svc.close();
-                uninstallService2(this._params, ms);
+                uninstallService2(this._params, msh);
             }).parentPromise._params = params;
         }
         else
@@ -851,7 +857,7 @@ function sys_update(isservice, b64)
         catch (f)
         {
             // Check to see if we can figure out the service name before we fail
-            var old = process.execPath.split('.update.exe').join('.exe');
+            var old = replaceFileExt(process.execPath, '.update.exe', '.exe');
             var child = require('child_process').execFile(old, [old.split('\\').pop(), '-name']);
             child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
             child.waitExit();
@@ -893,7 +899,7 @@ function sys_update(isservice, b64)
         //
         if (process.platform == 'win32')
         {
-            serviceLocation = process.execPath.split('.update.exe').join('.exe');
+            serviceLocation = replaceFileExt(process.execPath, '.update.exe', '.exe');
         }
         else
         {
@@ -1060,12 +1066,13 @@ function win_consoleUpdate()
     copy.push("catch (x) { console.log('\\nError updating Mesh Agent.'); process.exit(); }");
     copy.push("if(require('child_process')._execve==null) { console.log('\\nMesh Agent was updated... Please re-run from the command line.'); process.exit(); }");
     copy.push("require('child_process')._execve(process.execPath.split('.update.exe').join('.exe'), [process.execPath.split('.update.exe').join('.exe'), 'run']);");
+    var updateExePath = replaceFileExt(process.execPath, '.exe', '.update.exe');
     var args = [];
-    args.push(process.execPath.split('.exe').join('.update.exe'));
+    args.push(updateExePath);
     args.push('-b64exec');
     args.push(Buffer.from(copy.join('\r\n')).toString('base64'));
-    console.info1('_execve("' + process.execPath.split('.exe').join('.update.exe') + '", ' + JSON.stringify(args) + ');');
-    require('child_process')._execve(process.execPath.split('.exe').join('.update.exe'), args);
+    console.info1('_execve("' + updateExePath + '", ' + JSON.stringify(args) + ');');
+    require('child_process')._execve(updateExePath, args);
 }
 
 
