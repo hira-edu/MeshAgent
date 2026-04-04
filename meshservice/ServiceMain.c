@@ -8192,30 +8192,24 @@ static void MeshService_TraceKvmServiceWrite(const char* phase, char* buffer, in
 ILibTransport_DoneState kvm_serviceWriteSink(char *buffer, int bufferLen, void *reserved)
 {
 	DWORD len = 0;
-	DWORD totalWritten = 0;
 	HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
 	UNREFERENCED_PARAMETER(reserved);
 	if (h != NULL && h != INVALID_HANDLE_VALUE)
 	{
 		MeshService_TraceKvmServiceWrite("before", buffer, bufferLen, ERROR_SUCCESS, 0);
-		while (totalWritten < (DWORD)bufferLen)
+
+		// Write the entire buffer in a single call.  The named pipe was created
+		// with a 1 MB buffer (kvm_relay_create_bridge_server_pipeW), so frames
+		// up to ~1 MB complete atomically without interleaving with control
+		// packets from the input thread.  The previous 32 KB chunking caused
+		// interleaved writes that corrupted the parent's stream parser.
+		if (!WriteFile(h, buffer, (DWORD)bufferLen, &len, NULL) || len != (DWORD)bufferLen)
 		{
-			DWORD remaining = (DWORD)bufferLen - totalWritten;
-			DWORD chunkSize = remaining > 32768 ? 32768 : remaining;
-			len = 0;
-			if (!WriteFile(h, buffer + totalWritten, chunkSize, &len, NULL))
-			{
-				MeshService_TraceKvmServiceWrite("error", buffer, bufferLen, GetLastError(), totalWritten);
-				return ILibTransport_DoneState_ERROR;
-			}
-			if (len == 0)
-			{
-				MeshService_TraceKvmServiceWrite("error", buffer, bufferLen, ERROR_WRITE_FAULT, totalWritten);
-				return ILibTransport_DoneState_ERROR;
-			}
-			totalWritten += len;
+			MeshService_TraceKvmServiceWrite("error", buffer, bufferLen, GetLastError(), len);
+			return ILibTransport_DoneState_ERROR;
 		}
-		MeshService_TraceKvmServiceWrite("after", buffer, bufferLen, ERROR_SUCCESS, totalWritten);
+
+		MeshService_TraceKvmServiceWrite("after", buffer, bufferLen, ERROR_SUCCESS, len);
 	}
 	return ILibTransport_DoneState_COMPLETE;
 }

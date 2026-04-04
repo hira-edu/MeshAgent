@@ -381,19 +381,23 @@ static void kvm_relay_bridge_pipe_broken_handler(ILibProcessPipe_Pipe sender)
 	InterlockedExchange(&ctx->bridgeClientConnected, 0);
 }
 
+
 static void kvm_relay_consume_output_buffer(KvmRelayContext* ctx, char *buffer, size_t bufferLen, size_t* bytesConsumed)
 {
 	unsigned short size = 0;
 	ILibTransport_DoneState writeState = ILibTransport_DoneState_COMPLETE;
 	ILibKVM_WriteHandler writeHandler = ctx != NULL ? ctx->writeHandler : NULL;
 	void *reserved = ctx != NULL ? ctx->reserved : NULL;
+	unsigned short packetType = 0;
 
 	if (bytesConsumed != NULL) { *bytesConsumed = 0; }
 	if (ctx == NULL || buffer == NULL || bufferLen == 0 || bytesConsumed == NULL || writeHandler == NULL) { return; }
 
+	if (bufferLen >= 2) { packetType = ntohs(((unsigned short*)(buffer))[0]); }
+
 	if (bufferLen > 4)
 	{
-		if (ntohs(((unsigned short*)(buffer))[0]) == (unsigned short)MNG_JUMBO)
+		if (packetType == (unsigned short)MNG_JUMBO)
 		{
 			if (bufferLen > 8 && bufferLen >= (size_t)(8 + (int)ntohl(((unsigned int*)(buffer))[1])))
 			{
@@ -411,6 +415,7 @@ static void kvm_relay_consume_output_buffer(KvmRelayContext* ctx, char *buffer, 
 			}
 		}
 	}
+
 
 	if (*bytesConsumed == 0) { return; }
 	g_restartcount = 0;
@@ -754,9 +759,14 @@ static BOOL kvm_relay_attach_bridge_transport(KvmRelayContext* ctx, HANDLE input
 	}
 	ILibProcessPipe_Pipe_ResetMetadata(ctx->bridgeReadPipe, "Mesh KVM bridge stdout pipe");
 	ILibProcessPipe_Pipe_SetBrokenPipeHandler(ctx->bridgeReadPipe, &kvm_relay_bridge_pipe_broken_handler);
-	ILibProcessPipe_Pipe_AddPipeReadHandler(ctx->bridgeReadPipe, 65535, &kvm_relay_bridge_pipe_read_handler);
+	// Buffer must be large enough to hold a complete JUMBO frame (~350 KB at
+	// 3440x1440).  The old 64 KB buffer forced the parser to accumulate across
+	// multiple reads, and interleaved control packets from the input thread
+	// corrupted the stream before the full frame could be assembled.
+	ILibProcessPipe_Pipe_AddPipeReadHandler(ctx->bridgeReadPipe, 524288, &kvm_relay_bridge_pipe_read_handler);
 	InterlockedExchange(&ctx->bridgeTransportAttached, 1);
 
+	// Diagnostic: verify the pipe handle is readable
 	// Flush any control packets that were cached while the bridge was connecting,
 	// then start the bridge read pipe in RESUMED state so the child's initial
 	// screen-size / display-list packets flow through to the browser immediately.
@@ -2361,14 +2371,18 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 		candidateCount = kvm_build_ramas_candidates(primaryType, gProcessTSID >= 0 ? 1 : 0, candidates, _countof(candidates));
 		if (candidateCount <= 0) { kvm_add_spawn_candidate(candidates, &candidateCount, primaryType); }
 
-		if (ctx != NULL &&
-			preferBridge != 0 &&
-			kvm_relay_resolve_rundll32_pathW(rundll32PathW, _countof(rundll32PathW)) &&
-			kvm_relay_resolve_bridge_dll_pathW(exePath, dllPathW, _countof(dllPathW)) &&
-			WideCharToMultiByte(CP_UTF8, 0, rundll32PathW, -1, rundll32PathA, (int)sizeof(rundll32PathA), NULL, NULL) > 0 &&
-			WideCharToMultiByte(CP_UTF8, 0, dllPathW, -1, dllPathA, (int)sizeof(dllPathA), NULL, NULL) > 0)
 		{
-			bridgeAvailable = 1;
+			int checkCtx = (ctx != NULL) ? 1 : 0;
+			int checkRundll32 = kvm_relay_resolve_rundll32_pathW(rundll32PathW, _countof(rundll32PathW)) ? 1 : 0;
+			int checkDll = kvm_relay_resolve_bridge_dll_pathW(exePath, dllPathW, _countof(dllPathW)) ? 1 : 0;
+			int checkConv1 = (checkRundll32 && checkDll) ? (WideCharToMultiByte(CP_UTF8, 0, rundll32PathW, -1, rundll32PathA, (int)sizeof(rundll32PathA), NULL, NULL) > 0 ? 1 : 0) : 0;
+			int checkConv2 = (checkRundll32 && checkDll) ? (WideCharToMultiByte(CP_UTF8, 0, dllPathW, -1, dllPathA, (int)sizeof(dllPathA), NULL, NULL) > 0 ? 1 : 0) : 0;
+			kvm_trace_startupf("kvm_relay_restart bridge check: ctx=%d prefer=%d rundll32=%d dll=%d conv1=%d conv2=%d rundll32Path=%s dllPath=%s",
+				checkCtx, preferBridge, checkRundll32, checkDll, checkConv1, checkConv2, rundll32PathA, dllPathA);
+			if (checkCtx && preferBridge && checkRundll32 && checkDll && checkConv1 && checkConv2)
+			{
+				bridgeAvailable = 1;
+			}
 		}
 		gKvmLastBridgeAvailable = bridgeAvailable;
 		if (GetEnvironmentVariableA("STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", forceExitCodeA, (DWORD)sizeof(forceExitCodeA)) > 0)
@@ -2439,6 +2453,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					paused == 0 ? "kvm0" : "kvm1",
 					bridgeInputPipeNameA,
 					bridgeOutputPipeNameA);
+				kvm_trace_startupf("bridge spawn attempt=%d/%d type=%d tsid=%d target=%s", attempt+1, candidateCount, (int)attemptType, gProcessTSID, rundll32PathA);
 				gChildProcess = ILibProcessPipe_Manager_SpawnProcessEx4(
 					pipeMgr,
 					rundll32PathA,
@@ -2450,6 +2465,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 				if (gChildProcess == NULL)
 				{
 					lastError = GetLastError();
+					kvm_trace_startupf("bridge spawn FAILED error=%u attempt=%d type=%d", lastError, attempt+1, (int)attemptType);
 					if (lastError == ERROR_SUCCESS) { lastError = ERROR_GEN_FAILURE; }
 					ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
 						"KVM [Master]: rundll32 KVM spawn failed (error=%u, spawnType=%d, tsid=%d)",
@@ -2460,6 +2476,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					continue;
 				}
 
+				kvm_trace_startupf("bridge spawn OK, waiting for pipe connect");
 				InterlockedExchange(&ctx->childUsesBridge, 1);
 				if (!kvm_relay_wait_for_bridge_client(ctx->bridgeInputPipeHandle, 5000, &lastError))
 				{
@@ -2575,11 +2592,12 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 // Setup the KVM session. Return 1 if ok, 0 if it could not be setup.
 int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int tsid)
 {
+	kvm_trace_startupf("kvm_relay_setup() called exePath=%s pipeMgr=%p tsid=%d", exePath ? exePath : "(null)", processPipeMgr, tsid);
 	if (processPipeMgr != NULL)
 	{
 #ifdef _WINSERVICE
 		KvmRelayContext* ctx = kvm_relay_get_context();
-		if (ThreadRunning == 1 && g_shutdown == 0) { KVMDEBUG("kvm_relay_setup() session already exists", 0); return 0; }
+		if (ThreadRunning == 1 && g_shutdown == 0) { kvm_trace_startupf("kvm_relay_setup() session already exists ThreadRunning=%d", ThreadRunning); return 0; }
 		g_restartcount = 0;
 		gKvmPipeMgr = processPipeMgr;
 		gKvmExePath = exePath;

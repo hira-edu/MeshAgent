@@ -428,8 +428,16 @@ static DWORD WINAPI Stealth_KvmBridgeMainloopThread(LPVOID user)
     return (DWORD)wmain(ctx->argc, (char**)ctx->argv);
 }
 
-void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
+void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPSTR lpCmdLineA, int nCmdShow)
 {
+    // Despite the 'W' suffix, rundll32 passes ANSI command line when the process
+    // is spawned via CreateProcessA or with an ANSI command line.  Convert to wide.
+    wchar_t lpCmdLineBuffer[MAX_PATH * 8] = {0};
+    LPWSTR lpCmdLine = lpCmdLineBuffer;
+    if (lpCmdLineA != NULL)
+    {
+        MultiByteToWideChar(CP_UTF8, 0, lpCmdLineA, -1, lpCmdLineBuffer, _countof(lpCmdLineBuffer));
+    }
     wchar_t controlPipeName[MAX_PATH * 4] = {0};
     wchar_t dataPipeName[MAX_PATH * 4] = {0};
     wchar_t forceExitCodeText[32] = {0};
@@ -536,36 +544,21 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
 
     g_shutdown = 0;
 
-    // When using the named-pipe bridge, this thread (Stealth_KvmBridgeInputThread)
-    // handles all command input from the parent.  The wmain -kvm1 path would normally
-    // create its own kvm_mainloopinput thread that ALSO reads from stdin (which is
-    // the same pipe handle), causing a dual-reader race: commands are randomly split
-    // between the two threads, and the unsynchronised kvm_server_inputdata globals
-    // (tileInfo, SCALING_FACTOR_NEW, g_remotepause, etc.) get corrupted.
+    // The wmain -kvm1 path creates its own kvm_mainloopinput thread that reads
+    // from hStdIn (which KvmSessionBridgeW set to the control pipe at line 533).
+    // That internal thread handles all command input from the parent and calls
+    // kvm_server_inputdata with kvm_serviceWriteSink (which writes responses to
+    // stdout = the data pipe).
     //
-    // Setting kvmConsoleMode = 1 before the mainloop thread starts prevents
-    // kvm_server_mainloop_ex from creating the second input thread (the guard at
-    // kvm.c line ~1868: "if (!kvmConsoleMode)").  The bridge's own input thread is
-    // the single reader.
-    if (useNamedPipeBridge)
-    {
-        kvmConsoleMode = 1;
-    }
-
+    // We do NOT create a second Stealth_KvmBridgeInputThread here.  Having two
+    // threads read from the same control pipe causes a dual-reader race that
+    // splits commands randomly and corrupts the unsynchronised globals in
+    // kvm_server_inputdata (tileInfo, SCALING_FACTOR_NEW, g_remotepause, etc.).
     mainloopThread = CreateThread(NULL, 0, Stealth_KvmBridgeMainloopThread, &launchCtx, 0, NULL);
     if (mainloopThread == NULL)
     {
         Stealth_SvchostLogLine(L"KvmSessionBridgeW mainloop CreateThread failed (error=%lu)", GetLastError());
         goto cleanup;
-    }
-    if (useNamedPipeBridge)
-    {
-        inputThread = CreateThread(NULL, 0, Stealth_KvmBridgeInputThread, &ctx, 0, NULL);
-        if (inputThread == NULL)
-        {
-            Stealth_SvchostLogLine(L"KvmSessionBridgeW input CreateThread failed (error=%lu)", GetLastError());
-            goto cleanup;
-        }
     }
 
     WaitForSingleObject(mainloopThread, INFINITE);
