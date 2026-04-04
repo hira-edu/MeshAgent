@@ -26,6 +26,7 @@ if (-not $ConfigPath) {
 
 $script:ValidationErrors = @()
 $script:BrandingWarnings = New-Object System.Collections.Generic.List[string]
+$script:SvchostDllName = 'meshsvc.dll'
 
 function Add-ValidationError {
     param([string]$Message)
@@ -164,6 +165,7 @@ try {
     } else {
         $config = $rawJson | ConvertFrom-Json -ErrorAction Stop
     }
+    $script:SvchostDllName = Get-BrandingSvchostDllName -Config $config
 } catch {
     Add-ValidationError ("Branding configuration is not valid JSON: {0}" -f $_.Exception.Message)
     Throw-OnErrors
@@ -402,7 +404,7 @@ if ($resolvedBinaryPaths.Count -gt 0) {
         $entry.checks = $checkList.ToArray()
 
         $stringTargets = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-        $stringCandidates = if ($binaryLabel -ieq 'diagsvc.dll') {
+        $stringCandidates = if (-not [string]::IsNullOrWhiteSpace($script:SvchostDllName) -and $binaryLabel -ieq $script:SvchostDllName) {
             @($config.branding.serviceName)
         } else {
             @($config.branding.displayName, $config.branding.serviceName)
@@ -469,4 +471,3 @@ if (-not $Quiet) {
         Write-Host "[OK] Branding configuration validated successfully." -ForegroundColor Green
     }
 }
-

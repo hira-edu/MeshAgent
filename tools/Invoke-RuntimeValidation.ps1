@@ -38,7 +38,7 @@
     Override the elevation requirement (useful for CI). When set, the helper warns but continues even if the session is not running as Administrator.
 
 .PARAMETER SkipMeshCentralPreflight
-    Skips the MeshCentral cache refresh/parity check. By default the helper restarts MeshCentral, clears cached diaghost downloads,
+    Skips the MeshCentral cache refresh/parity check. By default the helper restarts MeshCentral, clears cached meshagent downloads,
     and verifies that `meshcentral-data\agents\MeshService64.exe` matches the local StealthLab build before running tests.
 
 .PARAMETER IncludeFullInstall
@@ -172,8 +172,8 @@ function Invoke-MeshCentralCacheRefresh {
     )
 
     $downloads = @(
-        'diaghost.exe64-WindowsDiagnostics.exe',
-        'diaghost.exe64-testdevices.exe'
+        'meshagent.exe64-WindowsDiagnostics.exe',
+        'meshagent.exe64-testdevices.exe'
     )
 
     foreach ($artifact in $downloads) {
@@ -300,7 +300,7 @@ function Get-ServiceNameFromBranding {
     $state = Get-BrandingState -RepoRoot $RepoRoot
     $serviceName = $state.Config.branding.serviceName
     if ([string]::IsNullOrWhiteSpace($serviceName)) {
-        $serviceName = 'WinDiagnosticHost'
+        $serviceName = 'MeshAgent'
     }
     return $serviceName
 }
@@ -415,8 +415,8 @@ function Assert-SvchostOnlyService {
     if ($svc.PathName -notmatch 'svchost\.exe') {
         throw "Service '$ServiceName' does not point to svchost (PathName=$($svc.PathName))."
     }
-    if ($svc.PathName -match 'diaghost\.exe') {
-        throw "Service '$ServiceName' still references diaghost.exe which indicates a standalone registration."
+    if ($svc.PathName -match 'meshagent\.exe') {
+        throw "Service '$ServiceName' still references meshagent.exe which indicates a standalone registration."
     }
 
     $svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"

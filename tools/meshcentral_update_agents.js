@@ -62,7 +62,7 @@ function loadLoginKey() {
 }
 
 const url = normalizeUrl(args.url);
-const loginUser = typeof args.loginuser === 'string' ? args.loginuser : 'hsadmin';
+const loginUser = typeof args.loginuser === 'string' ? args.loginuser : (process.env.MESHCENTRAL_CONTROL_USER || '');
 const loginDomain = typeof args.logindomain === 'string' ? args.logindomain : '';
 const nodeids = loadNodeIds();
 const loginKey = loadLoginKey();

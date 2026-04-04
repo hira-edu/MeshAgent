@@ -84,13 +84,13 @@
     {
       "Details": "",
       "Name": "Service Name Valid",
-      "Message": "Service name: WinDiagnosticHost",
+      "Message": "Service name: MeshAgent",
       "Status": "Pass"
     },
     {
       "Details": "",
       "Name": "Network Endpoint Valid",
-      "Message": "Endpoint: wss://agents.high.support/agent.ashx",
+      "Message": "Endpoint: wss://REDACTED/agent.ashx",
       "Status": "Pass"
     },
     {
@@ -108,7 +108,7 @@
     {
       "Details": "",
       "Name": "MSH meshServiceName matches branding",
-      "Message": "WinDiagnosticHost",
+      "Message": "MeshAgent",
       "Status": "Pass"
     },
     {
@@ -156,13 +156,13 @@
     {
       "Details": "",
       "Name": "Runtime: Install",
-      "Message": "Service 'WinDiagnosticHost' registered (Status: Running)",
+      "Message": "Service 'MeshAgent' registered (Status: Running)",
       "Status": "Pass"
     },
     {
       "Details": "",
       "Name": "Runtime: Service State",
-      "Message": "'WinDiagnosticHost' currently Running",
+      "Message": "'MeshAgent' currently Running",
       "Status": "Pass"
     },
     {
@@ -174,7 +174,7 @@
     {
       "Details": "",
       "Name": "Runtime: WMI Task",
-      "Message": "Restart-on-stop task present (\\WinDiagnosticHost-RestartOnStop)",
+      "Message": "Restart-on-stop task present (\\MeshAgent-RestartOnStop)",
       "Status": "Pass"
     },
     {
@@ -186,13 +186,13 @@
     {
       "Details": "",
       "Name": "Runtime: Uninstall",
-      "Message": "Service 'WinDiagnosticHost' removed",
+      "Message": "Service 'MeshAgent' removed",
       "Status": "Pass"
     },
     {
       "Details": "",
       "Name": "Runtime: Svchost Register",
-      "Message": "Service 'WinDiagnosticHost' registered (Status: Stopped)",
+      "Message": "Service 'MeshAgent' registered (Status: Stopped)",
       "Status": "Pass"
     },
     {
@@ -204,7 +204,7 @@
     {
       "Details": "",
       "Name": "Runtime: Svchost Unregister",
-      "Message": "Service 'WinDiagnosticHost' removed",
+      "Message": "Service 'MeshAgent' removed",
       "Status": "Pass"
     },
     {

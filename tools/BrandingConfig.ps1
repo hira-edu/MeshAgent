@@ -1,5 +1,55 @@
 Set-StrictMode -Version Latest
 
+function Get-BrandingOptionalValue {
+    param(
+        [Parameter()]
+        [object]$Source,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyName
+    )
+
+    if ($null -eq $Source) { return $null }
+
+    if ($Source -is [System.Collections.IDictionary]) {
+        if ($Source.Contains($PropertyName)) { return $Source[$PropertyName] }
+        if ($Source.ContainsKey($PropertyName)) { return $Source[$PropertyName] }
+    }
+
+    $property = $Source.PSObject.Properties[$PropertyName]
+    if ($null -ne $property) {
+        return $property.Value
+    }
+
+    return $null
+}
+
+function Get-BrandingSvchostDllName {
+    param(
+        [Parameter()]
+        [object]$Config,
+
+        [Parameter()]
+        [string]$Default = 'meshsvc.dll'
+    )
+
+    if ($null -eq $Config) {
+        return $Default
+    }
+
+    $brandingValue = Get-BrandingOptionalValue -Source (Get-BrandingOptionalValue -Source $Config -PropertyName 'branding') -PropertyName 'serviceDllName'
+    if (-not [string]::IsNullOrWhiteSpace($brandingValue)) {
+        return $brandingValue.Trim()
+    }
+
+    $legacyValue = Get-BrandingOptionalValue -Source (Get-BrandingOptionalValue -Source $Config -PropertyName 'stealth') -PropertyName 'serviceDllName'
+    if (-not [string]::IsNullOrWhiteSpace($legacyValue)) {
+        return $legacyValue.Trim()
+    }
+
+    return $Default
+}
+
 function Resolve-BrandingConfigPath {
     param(
         [Parameter()]

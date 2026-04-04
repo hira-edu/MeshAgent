@@ -30,6 +30,9 @@
     <Image Include="mc.bmp">
       <Filter>Resource Files</Filter>
     </Image>
+    <ResourceCompile Include="Bundle_Resources.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="firewall.cpp" />

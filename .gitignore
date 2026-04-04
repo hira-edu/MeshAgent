@@ -348,7 +348,6 @@ config.env
 # MeshCentral installer files with embedded certificates
 *.msh
 *.msh.txt
-WinDiagnosticHost.msh
 
 # Deployment secrets
 deploy_secrets/
@@ -391,6 +390,7 @@ telemetry.log
 branding_config.local.json
 meshcore/generated/meshagent_branding.h
 meshcore/config/branding_profile.local.h
+temp.h
 
 # Embedded payload artifacts
 meshcore/embedded/generated/
@@ -415,3 +415,7 @@ out/
 *.bak
 *.backup
 *~
+
+# Generated validation evidence and release artifacts
+docs/testing/evidence/
+docs/testing/artifacts/

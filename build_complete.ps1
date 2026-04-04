@@ -144,6 +144,8 @@ if (-not (Test-Path -LiteralPath $brandingHelperScript)) {
 }
 . $brandingHelperScript
 $brandingConfigInfo = Get-BrandingConfig -RepoRoot $script:RepoRoot -Quiet
+$script:BrandingConfig = $brandingConfigInfo.Config
+$script:SvchostDllName = Get-BrandingSvchostDllName -Config $script:BrandingConfig
 $script:BrandingConfigPath = $brandingConfigInfo.Path
 if (-not $script:IsQuiet) {
     Write-Host ("[INFO] Branding config : {0}" -f $script:BrandingConfigPath) -ForegroundColor Gray
@@ -345,7 +347,8 @@ $steps.Add([pscustomobject]@{
 
         $checksums = Join-Path $script:PackageDir 'checksums.txt'
         if (Test-Path -LiteralPath $checksums) {
-            $dllLine = Select-String -Path $checksums -Pattern 'diagsvc.dll'
+            $dllLabel = if ([string]::IsNullOrWhiteSpace($script:SvchostDllName)) { 'meshsvc.dll' } else { [regex]::Escape($script:SvchostDllName) }
+            $dllLine = Select-String -Path $checksums -Pattern $dllLabel
             if ($dllLine) {
                 $parts = $dllLine.ToString().Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
                 if ($parts.Length -gt 0) { $script:DllHash = $parts[0] }
@@ -361,7 +364,13 @@ $steps.Add([pscustomobject]@{
         if (Test-Path -LiteralPath $healthCandidate) {
             $script:HealthReportPath = $healthCandidate
             try {
-                $reportObject = Get-Content -Path $healthCandidate -Raw | ConvertFrom-Json -Depth 10
+                $healthRaw = Get-Content -Path $healthCandidate -Raw
+                $convertCmd = Get-Command ConvertFrom-Json -ErrorAction Stop
+                if ($convertCmd.Parameters.ContainsKey('Depth')) {
+                    $reportObject = $healthRaw | ConvertFrom-Json -Depth 10
+                } else {
+                    $reportObject = $healthRaw | ConvertFrom-Json
+                }
                 if ($reportObject -and $reportObject.summary) {
                     $script:HealthSummary = $reportObject.summary
                 }
@@ -416,7 +425,7 @@ if ($script:SigningMode -ne 'None') {
                 Join-Path $script:RepoRoot 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll'
                 Join-Path $script:PackageDir 'MeshService64.exe'
                 Join-Path $script:PackageDir 'MeshService.exe'
-                Join-Path $script:PackageDir 'diagsvc.dll'
+                Join-Path $script:PackageDir $script:SvchostDllName
             ) | Where-Object { Test-Path -LiteralPath $_ } | Sort-Object -Unique
 
             if ($targets.Count -eq 0) {
@@ -424,7 +433,8 @@ if ($script:SigningMode -ne 'None') {
                 return
             }
 
-            $signTool = (Get-Command 'signtool.exe' -ErrorAction SilentlyContinue | Select-Object -First 1)?.Source
+            $signToolCommand = Get-Command 'signtool.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+            $signTool = if ($signToolCommand) { $signToolCommand.Source } else { $null }
             if (-not $signTool) {
                 $candidates = @(
                     "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
@@ -482,7 +492,7 @@ $steps.Add([pscustomobject]@{
         }
 
         $candidates = @(
-            Join-Path $script:PackageDir 'diagsvc.dll'
+            Join-Path $script:PackageDir $script:SvchostDllName
             Join-Path $script:PackageDir 'MeshService64.exe'
             Join-Path $script:PackageDir 'MeshService.exe'
         ) | Where-Object { Test-Path -LiteralPath $_ }
@@ -507,7 +517,13 @@ $steps.Add([pscustomobject]@{
 
         if (Test-Path -LiteralPath $reportPath) {
             try {
-                $report = Get-Content -Path $reportPath -Raw | ConvertFrom-Json -Depth 6
+                $reportRaw = Get-Content -Path $reportPath -Raw
+                $convertCmd = Get-Command ConvertFrom-Json -ErrorAction Stop
+                if ($convertCmd.Parameters.ContainsKey('Depth')) {
+                    $report = $reportRaw | ConvertFrom-Json -Depth 6
+                } else {
+                    $report = $reportRaw | ConvertFrom-Json
+                }
                 if ($report -and $report.warningCount) {
                     $script:BrandingWarnings = [int]$report.warningCount
                 }
@@ -602,7 +618,8 @@ if ($script:HealthReportPath) {
     Write-Warn "Health check was requested but no report was produced. Review build logs."
 }
 if ($script:DllHash) {
-    Write-Host ("diagsvc.dll SHA256 : {0}" -f $script:DllHash) -ForegroundColor Gray
+    $hashLabel = if ([string]::IsNullOrWhiteSpace($script:SvchostDllName)) { 'meshsvc.dll' } else { $script:SvchostDllName }
+    Write-Host ("{0} SHA256 : {1}" -f $hashLabel, $script:DllHash) -ForegroundColor Gray
 }
 if ($script:BrandingWarnings -gt 0) {
     Write-Warn ("Branding warnings detected: {0}" -f $script:BrandingWarnings)
@@ -617,7 +634,8 @@ Write-Info ("Total duration : {0:N1}s" -f $script:Stopwatch.Elapsed.TotalSeconds
 
 Write-Section "Next steps"
 Write-Info "1. Review package contents under dist\\"
-Write-Info "2. Upload diagsvc.dll (rename to meshagent_win32_x64.exe) to MeshCentral agents-custom"
+$uploadLabel = if ([string]::IsNullOrWhiteSpace($script:SvchostDllName)) { 'meshsvc.dll' } else { $script:SvchostDllName }
+Write-Info ("2. Upload {0} to MeshCentral agents-custom only if you are staging the svchost payload separately" -f $uploadLabel)
 Write-Info "3. Redeploy MeshService executables if overriding defaults"
 Write-Info "4. Archive manifest/checksums alongside release documentation"
 if ($script:HealthReportPath) {

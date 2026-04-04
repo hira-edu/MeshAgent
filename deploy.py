@@ -48,8 +48,8 @@ def resolve_ssh_config_path():
 
 # ─── Server Configuration ────────────────────────────────────────────────────
 
-SERVER = "167.88.44.65"
-USER = "root"
+SERVER = os.environ.get("MESHCENTRAL_SERVER", "")
+USER = os.environ.get("MESHCENTRAL_USER", "root")
 SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
 SSH_CONFIG_PATH = resolve_ssh_config_path()
 SSH_HOST = os.environ.get("MESHCENTRAL_SSH_HOST", "meshcentral")
@@ -62,6 +62,8 @@ CONFIG_FILE = f"{MESHCENTRAL_BASE}/meshcentral-data/config.json"
 STAGING_DIR = f"{MESHCENTRAL_BASE}/staging"
 BACKUP_DIR = f"{MESHCENTRAL_BASE}/backups"
 SERVICE_NAME = "meshcentral"
+SVCHOST_EMBEDDED_RESOURCE_ID = 101
+SVCHOST_EMBEDDED_RESOURCE_TYPE = 10
 
 # Local build artifacts to deploy
 LOCAL_REPO = Path(__file__).parent.resolve()
@@ -89,12 +91,13 @@ ARTIFACTS = {
 }
 
 # Additional deploy target for MasterService (public userfiles for agent download)
-USERFILES_DIR = f"{MESHCENTRAL_BASE}/meshcentral-files/domain/user-hsadmin/Public"
-MESHCENTRAL_CONTROL_URL = os.environ.get("MESHCENTRAL_CONTROL_URL", "wss://high.support")
-MESHCENTRAL_CONTROL_USER = os.environ.get("MESHCENTRAL_CONTROL_USER", "hsadmin")
+_USERFILES_USER = os.environ.get("MESHCENTRAL_USERFILES_USER", "")
+USERFILES_DIR = f"{MESHCENTRAL_BASE}/meshcentral-files/domain/user-{_USERFILES_USER}/Public" if _USERFILES_USER else ""
+MESHCENTRAL_CONTROL_URL = os.environ.get("MESHCENTRAL_CONTROL_URL", "")
+MESHCENTRAL_CONTROL_USER = os.environ.get("MESHCENTRAL_CONTROL_USER", "")
 HASHAGENTS_TRACKED_FILENAMES = {"MeshService.exe", "MeshService64.exe"}
 SIGNED_RUNTIME_MUTABLE_FILENAMES = set(HASHAGENTS_TRACKED_FILENAMES)
-WINDOWS_INSTALL_ROOT = r"C:\ProgramData\DiagnosticHost"
+WINDOWS_INSTALL_ROOT = os.environ.get("MESHCENTRAL_INSTALL_ROOT", r"C:\ProgramData\MeshAgent")
 REMOTE_COMMAND_RETRIES = int(os.environ.get("MESHCENTRAL_SSH_RETRIES", "3"))
 REMOTE_RETRY_DELAY_SECONDS = float(os.environ.get("MESHCENTRAL_SSH_RETRY_DELAY", "2"))
 RETRYABLE_REMOTE_ERROR_SNIPPETS = (
@@ -267,6 +270,201 @@ def remote_size(path):
     return None
 
 
+def extract_embedded_svchost_payload(exe_path):
+    """Extract the embedded svchost DLL RCDATA payload from a Windows executable."""
+    if os.name != "nt":
+        raise RuntimeError("Embedded svchost payload extraction is only supported on Windows")
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    load_library_ex = kernel32.LoadLibraryExW
+    load_library_ex.argtypes = [wintypes.LPCWSTR, wintypes.HANDLE, wintypes.DWORD]
+    load_library_ex.restype = wintypes.HMODULE
+
+    find_resource = kernel32.FindResourceW
+    find_resource.argtypes = [wintypes.HMODULE, wintypes.LPCWSTR, wintypes.LPCWSTR]
+    find_resource.restype = wintypes.HRSRC
+
+    load_resource = kernel32.LoadResource
+    load_resource.argtypes = [wintypes.HMODULE, wintypes.HRSRC]
+    load_resource.restype = wintypes.HGLOBAL
+
+    lock_resource = kernel32.LockResource
+    lock_resource.argtypes = [wintypes.HGLOBAL]
+    lock_resource.restype = wintypes.LPVOID
+
+    size_of_resource = kernel32.SizeofResource
+    size_of_resource.argtypes = [wintypes.HMODULE, wintypes.HRSRC]
+    size_of_resource.restype = wintypes.DWORD
+
+    free_library = kernel32.FreeLibrary
+    free_library.argtypes = [wintypes.HMODULE]
+    free_library.restype = wintypes.BOOL
+
+    load_library_as_datafile = 0x00000002
+    module = load_library_ex(str(exe_path), None, load_library_as_datafile)
+    if not module:
+        raise OSError(ctypes.get_last_error(), f"LoadLibraryExW failed for {exe_path}")
+
+    try:
+        resource = find_resource(
+            module,
+            ctypes.cast(ctypes.c_void_p(SVCHOST_EMBEDDED_RESOURCE_ID), wintypes.LPCWSTR),
+            ctypes.cast(ctypes.c_void_p(SVCHOST_EMBEDDED_RESOURCE_TYPE), wintypes.LPCWSTR),
+        )
+        if not resource:
+            raise OSError(ctypes.get_last_error(), f"FindResourceW failed for {exe_path}")
+
+        resource_handle = load_resource(module, resource)
+        if not resource_handle:
+            raise OSError(ctypes.get_last_error(), f"LoadResource failed for {exe_path}")
+
+        resource_size = size_of_resource(module, resource)
+        if resource_size == 0:
+            raise OSError(ctypes.get_last_error(), f"SizeofResource returned 0 for {exe_path}")
+
+        resource_ptr = lock_resource(resource_handle)
+        if not resource_ptr:
+            raise OSError(ctypes.get_last_error(), f"LockResource failed for {exe_path}")
+
+        return ctypes.string_at(resource_ptr, resource_size)
+    finally:
+        free_library(module)
+
+
+def collect_remote_file_metadata(remote_paths, algorithm="sha384"):
+    """Collect hash/size metadata for many remote files in one SSH round trip."""
+    unique_paths = []
+    seen = set()
+    for remote_path in remote_paths:
+        if not remote_path or remote_path in seen:
+            continue
+        seen.add(remote_path)
+        unique_paths.append(remote_path)
+    if not unique_paths:
+        return {}
+
+    payload_json = json.dumps({
+        "algorithm": algorithm,
+        "paths": unique_paths,
+    }, sort_keys=True)
+    remote_script = f"""python3 - <<'PY'
+import hashlib
+import json
+import pathlib
+
+payload = json.loads('''{payload_json}''')
+algorithm = payload['algorithm']
+paths = payload['paths']
+results = {{}}
+for raw_path in paths:
+    path = pathlib.Path(raw_path)
+    if path.exists() is False:
+        results[raw_path] = None
+        continue
+    digest = hashlib.new(algorithm)
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    stats = path.stat()
+    results[raw_path] = {{
+        'hash': digest.hexdigest().upper(),
+        'size': stats.st_size,
+    }}
+print(json.dumps(results))
+PY"""
+    attempts = max(1, REMOTE_COMMAND_RETRIES)
+    for attempt in range(1, attempts + 1):
+        raw = ssh_cmd(remote_script, check=False)
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict) and parsed:
+                return parsed
+        if attempt < attempts:
+            time.sleep(REMOTE_RETRY_DELAY_SECONDS * attempt)
+    return {}
+
+
+def collect_remote_publish_snapshot(agent_artifacts, public_artifacts=None, algorithm="sha384"):
+    """Collect remote artifact metadata plus manifest text in one SSH round trip."""
+    public_artifacts = public_artifacts or []
+    remote_paths = []
+    for entry in agent_artifacts:
+        remote_paths.append(f"{MODULE_AGENTS}/{entry['remote_filename']}")
+        remote_paths.append(f"{SIGNED_AGENTS}/{entry['remote_filename']}")
+    for entry in public_artifacts:
+        remote_paths.append(f"{USERFILES_DIR}/{entry['remote_filename']}")
+    manifest_paths = [
+        f"{MODULE_AGENTS}/hashagents.json",
+        f"{SIGNED_AGENTS}/hashagents.json",
+    ]
+    payload_json = json.dumps({
+        "algorithm": algorithm,
+        "paths": remote_paths,
+        "manifests": manifest_paths,
+    }, sort_keys=True)
+    remote_script = f"""python3 - <<'PY'
+import hashlib
+import json
+import pathlib
+
+payload = json.loads('''{payload_json}''')
+algorithm = payload['algorithm']
+paths = payload['paths']
+manifests = payload['manifests']
+results = {{
+    'files': {{}},
+    'manifests': {{}},
+}}
+for raw_path in paths:
+    path = pathlib.Path(raw_path)
+    if path.exists() is False:
+        results['files'][raw_path] = None
+        continue
+    digest = hashlib.new(algorithm)
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    stats = path.stat()
+    results['files'][raw_path] = {{
+        'hash': digest.hexdigest().upper(),
+        'size': stats.st_size,
+    }}
+for raw_path in manifests:
+    path = pathlib.Path(raw_path)
+    if path.exists() is False:
+        results['manifests'][raw_path] = None
+        continue
+    results['manifests'][raw_path] = path.read_text(encoding='utf-8')
+print(json.dumps(results))
+PY"""
+    attempts = max(1, REMOTE_COMMAND_RETRIES)
+    for attempt in range(1, attempts + 1):
+        raw = ssh_cmd(remote_script, check=False)
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                files = parsed.get("files")
+                manifests = parsed.get("manifests")
+                snapshot = {
+                    "files": files if isinstance(files, dict) else {},
+                    "manifests": manifests if isinstance(manifests, dict) else {},
+                }
+                if snapshot["files"] or snapshot["manifests"]:
+                    return snapshot
+        if attempt < attempts:
+            time.sleep(REMOTE_RETRY_DELAY_SECONDS * attempt)
+    return {"files": {}, "manifests": {}}
+
+
 def remote_quote(path):
     """Quote a remote shell argument."""
     return shlex.quote(path)
@@ -334,6 +532,71 @@ def get_present_local_artifacts():
     return [entry for entry in build_local_artifact_entries() if entry["present"] is True]
 
 
+def find_local_artifact(local_artifacts, artifact_name):
+    """Return the local artifact entry matching a friendly artifact name."""
+    for entry in local_artifacts:
+        if entry.get("name") == artifact_name:
+            return entry
+    return None
+
+
+def validate_local_svchost_payload_artifacts(local_artifacts):
+    """Verify the standalone EXE embeds the same svchost DLL bytes that are published beside it."""
+    report = {
+        "ok": False,
+        "errors": [],
+        "artifacts": {},
+    }
+    exe_entry = find_local_artifact(local_artifacts, "MeshService64.exe")
+    dll_entry = find_local_artifact(local_artifacts, "MeshService64.dll")
+    payload_entry = find_local_artifact(local_artifacts, "svchost_payload.dll")
+
+    missing = [
+        name for name, entry in (
+            ("MeshService64.exe", exe_entry),
+            ("MeshService64.dll", dll_entry),
+            ("svchost_payload.dll", payload_entry),
+        )
+        if entry is None
+    ]
+    if missing:
+        report["errors"].append("Missing required local artifacts: " + ", ".join(missing))
+        return report
+
+    exe_path = Path(exe_entry["local_path"])
+    dll_path = Path(dll_entry["local_path"])
+    payload_path = Path(payload_entry["local_path"])
+    dll_sha256 = file_digest(dll_path, "sha256").upper()
+    payload_sha256 = file_digest(payload_path, "sha256").upper()
+    report["artifacts"]["exe"] = {"path": str(exe_path)}
+    report["artifacts"]["dll"] = {"path": str(dll_path), "sha256": dll_sha256}
+    report["artifacts"]["payload"] = {"path": str(payload_path), "sha256": payload_sha256}
+
+    if dll_sha256 != payload_sha256:
+        report["errors"].append(
+            "Local MeshService64.dll does not match meshservice/embedded/svchost_payload.dll"
+        )
+
+    try:
+        embedded_payload = extract_embedded_svchost_payload(exe_path)
+        embedded_sha256 = hashlib.sha256(embedded_payload).hexdigest().upper()
+        report["artifacts"]["exe"]["embedded_svchost_sha256"] = embedded_sha256
+        report["artifacts"]["exe"]["embedded_svchost_size"] = len(embedded_payload)
+        if embedded_sha256 != dll_sha256:
+            report["errors"].append(
+                "MeshService64.exe embeds a svchost payload that does not match MeshService64.dll"
+            )
+        if embedded_sha256 != payload_sha256:
+            report["errors"].append(
+                "MeshService64.exe embeds a svchost payload that does not match svchost_payload.dll"
+            )
+    except Exception as exc:
+        report["errors"].append(f"Failed to extract embedded svchost payload from {exe_path}: {exc}")
+
+    report["ok"] = len(report["errors"]) == 0
+    return report
+
+
 def get_agent_publish_artifacts(local_artifacts=None):
     """Return artifacts that belong in MeshCentral's agent publish directories."""
     if local_artifacts is None:
@@ -345,6 +608,8 @@ def get_public_download_artifacts(local_artifacts=None):
     """Return artifacts that are published through MeshCentral userfiles."""
     if local_artifacts is None:
         local_artifacts = get_present_local_artifacts()
+    if not USERFILES_DIR:
+        return []
     return [entry for entry in local_artifacts if entry["name"] == "MasterService.exe"]
 
 
@@ -424,6 +689,22 @@ def load_remote_json(path):
         return None
 
 
+def parse_snapshot_manifest(snapshot, manifest_path):
+    """Decode a manifest JSON string from a remote publish snapshot."""
+    if isinstance(snapshot, dict) is False:
+        return None
+    manifests = snapshot.get("manifests")
+    if isinstance(manifests, dict) is False:
+        return None
+    raw = manifests.get(manifest_path)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
 def find_hashagents_entry(manifest, filename):
     """Return the hashagents manifest entry for a given filename."""
     if isinstance(manifest, dict) is False:
@@ -434,8 +715,10 @@ def find_hashagents_entry(manifest, filename):
     return None
 
 
-def get_remote_file_metadata(remote_path):
+def get_remote_file_metadata(remote_path, metadata_cache=None):
     """Return sha384/size metadata for a remote file or None if missing."""
+    if metadata_cache is not None:
+        return metadata_cache.get(remote_path)
     remote_sha = remote_digest(remote_path, "sha384")
     if remote_sha is None:
         return None
@@ -456,13 +739,13 @@ def build_manifest_expectations_from_local(local_artifacts):
     }
 
 
-def build_manifest_expectations_from_remote(remote_base, filenames):
+def build_manifest_expectations_from_remote(remote_base, filenames, metadata_cache=None):
     """Return filename -> expected hash/size from the current remote files."""
     expectations = {}
     errors = []
     for filename in filenames:
         remote_path = f"{remote_base}/{filename}"
-        metadata = get_remote_file_metadata(remote_path)
+        metadata = get_remote_file_metadata(remote_path, metadata_cache=metadata_cache)
         if metadata is None:
             errors.append(f"Missing remote artifact: {remote_path}")
             continue
@@ -495,10 +778,10 @@ def verify_manifest_matches_expectations(manifest, manifest_name, expectations):
     return errors
 
 
-def verify_remote_copy(entry, remote_path):
+def verify_remote_copy(entry, remote_path, metadata_cache=None):
     """Validate that a remote file matches the local artifact bytes."""
     errors = []
-    metadata = get_remote_file_metadata(remote_path)
+    metadata = get_remote_file_metadata(remote_path, metadata_cache=metadata_cache)
     if metadata is None:
         return [f"Missing remote artifact: {remote_path}"]
     if metadata["hash"] != entry["sha384"].upper():
@@ -512,32 +795,80 @@ def verify_remote_copy(entry, remote_path):
     return errors
 
 
+def verify_remote_embedded_svchost_payload(remote_path, expected_sha256):
+    """Download a remote Windows EXE and verify its embedded svchost payload."""
+    errors = []
+    fd, temp_path = tempfile.mkstemp(prefix="meshagent-remote-", suffix=Path(remote_path).suffix or ".bin")
+    os.close(fd)
+    temp_file = Path(temp_path)
+    try:
+        if scp_download(remote_path, temp_file) is False:
+            return [f"Unable to download remote artifact for embedded svchost verification: {remote_path}"]
+        embedded_payload = extract_embedded_svchost_payload(temp_file)
+        embedded_sha256 = hashlib.sha256(embedded_payload).hexdigest().upper()
+        if embedded_sha256 != expected_sha256:
+            errors.append(
+                f"Embedded svchost payload mismatch for {remote_path}: expected {expected_sha256}, got {embedded_sha256}"
+            )
+    except Exception as exc:
+        errors.append(f"Failed to verify embedded svchost payload for {remote_path}: {exc}")
+    finally:
+        try:
+            temp_file.unlink()
+        except OSError:
+            pass
+    return errors
+
+
 def verify_remote_publish(local_artifacts, signed_runtime_mode=False):
     """Validate deployed artifacts and hashagents manifests against the expected publish model."""
     errors = []
     agent_artifacts = get_agent_publish_artifacts(local_artifacts)
     public_artifacts = get_public_download_artifacts(local_artifacts)
-    module_manifest = load_remote_json(f"{MODULE_AGENTS}/hashagents.json")
-    signed_manifest = load_remote_json(f"{SIGNED_AGENTS}/hashagents.json")
+    snapshot = collect_remote_publish_snapshot(agent_artifacts, public_artifacts)
+    metadata_cache = snapshot.get("files", {})
+    module_manifest = parse_snapshot_manifest(snapshot, f"{MODULE_AGENTS}/hashagents.json")
+    signed_manifest = parse_snapshot_manifest(snapshot, f"{SIGNED_AGENTS}/hashagents.json")
     module_expectations = build_manifest_expectations_from_local(local_artifacts)
+    svchost_dll_entry = find_local_artifact(local_artifacts, "MeshService64.dll")
+    expected_embedded_svchost_sha256 = (
+        file_digest(Path(svchost_dll_entry["local_path"]), "sha256").upper()
+        if svchost_dll_entry is not None
+        else None
+    )
 
     for entry in agent_artifacts:
-        errors.extend(verify_remote_copy(entry, f"{MODULE_AGENTS}/{entry['remote_filename']}"))
+        errors.extend(verify_remote_copy(entry, f"{MODULE_AGENTS}/{entry['remote_filename']}", metadata_cache=metadata_cache))
         signed_remote_path = f"{SIGNED_AGENTS}/{entry['remote_filename']}"
         if signed_runtime_mode and entry["remote_filename"] in SIGNED_RUNTIME_MUTABLE_FILENAMES:
-            if get_remote_file_metadata(signed_remote_path) is None:
+            if get_remote_file_metadata(signed_remote_path, metadata_cache=metadata_cache) is None:
                 errors.append(f"Missing remote artifact: {signed_remote_path}")
         else:
-            errors.extend(verify_remote_copy(entry, signed_remote_path))
+            errors.extend(verify_remote_copy(entry, signed_remote_path, metadata_cache=metadata_cache))
+
+        if entry["remote_filename"] == "MeshService64.exe" and expected_embedded_svchost_sha256 is not None:
+            errors.extend(
+                verify_remote_embedded_svchost_payload(
+                    f"{MODULE_AGENTS}/{entry['remote_filename']}",
+                    expected_embedded_svchost_sha256,
+                )
+            )
+            errors.extend(
+                verify_remote_embedded_svchost_payload(
+                    signed_remote_path,
+                    expected_embedded_svchost_sha256,
+                )
+            )
 
     for entry in public_artifacts:
-        errors.extend(verify_remote_copy(entry, f"{USERFILES_DIR}/{entry['remote_filename']}"))
+        errors.extend(verify_remote_copy(entry, f"{USERFILES_DIR}/{entry['remote_filename']}", metadata_cache=metadata_cache))
 
     errors.extend(verify_manifest_matches_expectations(module_manifest, MODULE_AGENTS, module_expectations))
     if signed_runtime_mode:
         signed_expectations, signed_expectation_errors = build_manifest_expectations_from_remote(
             SIGNED_AGENTS,
             sorted(module_expectations.keys()),
+            metadata_cache=metadata_cache,
         )
         errors.extend(signed_expectation_errors)
         errors.extend(verify_manifest_matches_expectations(signed_manifest, SIGNED_AGENTS, signed_expectations))
@@ -555,11 +886,16 @@ def get_publish_runtime_state(local_artifacts=None):
     }
     module_manifest = load_remote_json(f"{MODULE_AGENTS}/hashagents.json")
     signed_manifest = load_remote_json(f"{SIGNED_AGENTS}/hashagents.json")
+    tracked_artifacts = [{"remote_filename": filename} for filename in sorted(HASHAGENTS_TRACKED_FILENAMES)]
+    snapshot = collect_remote_publish_snapshot(tracked_artifacts, [])
+    metadata_cache = snapshot.get("files", {})
+    module_manifest = parse_snapshot_manifest(snapshot, f"{MODULE_AGENTS}/hashagents.json") or module_manifest
+    signed_manifest = parse_snapshot_manifest(snapshot, f"{SIGNED_AGENTS}/hashagents.json") or signed_manifest
     state = []
     for filename in sorted(HASHAGENTS_TRACKED_FILENAMES):
         local_entry = local_by_filename.get(filename)
-        module_metadata = get_remote_file_metadata(f"{MODULE_AGENTS}/{filename}")
-        signed_metadata = get_remote_file_metadata(f"{SIGNED_AGENTS}/{filename}")
+        module_metadata = get_remote_file_metadata(f"{MODULE_AGENTS}/{filename}", metadata_cache=metadata_cache)
+        signed_metadata = get_remote_file_metadata(f"{SIGNED_AGENTS}/{filename}", metadata_cache=metadata_cache)
         module_manifest_entry = find_hashagents_entry(module_manifest, filename)
         signed_manifest_entry = find_hashagents_entry(signed_manifest, filename)
         module_manifest_ok = None
@@ -620,14 +956,64 @@ def format_publish_match(value, ok="ok", fail="drift", unknown="n/a"):
     return unknown
 
 
+def run_remote_script(commands, check=True):
+    """Run one or more commands in a single remote shell invocation."""
+    if isinstance(commands, str):
+        script = commands
+    else:
+        script = "set -e\n" + "\n".join(commands)
+    return ssh_cmd(script, check=check)
+
+
 def copy_staged_artifacts(remote_dir, artifacts):
     """Copy specific staged artifacts into a remote directory."""
+    commands = []
     for entry in artifacts:
         source = remote_quote(f"{STAGING_DIR}/{entry['remote_filename']}")
         destination = remote_quote(f"{remote_dir}/{entry['remote_filename']}")
-        if ssh_cmd(f"cp -f {source} {destination}") is None:
-            return False
-    return True
+        commands.append(f"cp -f {source} {destination}")
+    return run_remote_script(commands) is not None
+
+
+def backup_current_agents(backup_path):
+    """Create a remote backup of the current signed and module agent payloads."""
+    commands = [
+        f"mkdir -p {backup_path}/signedagents {backup_path}/agents",
+        f"cp -a {SIGNED_AGENTS}/* {backup_path}/signedagents/ 2>/dev/null || true",
+        f"cp -a {MODULE_AGENTS}/*.exe {MODULE_AGENTS}/*.dll {backup_path}/agents/ 2>/dev/null || true",
+    ]
+    return run_remote_script(commands) is not None
+
+
+def publish_staged_payloads(agent_artifacts, public_artifacts=None):
+    """Publish staged artifacts to all remote destinations in one shell session."""
+    commands = []
+    for entry in agent_artifacts:
+        source = remote_quote(f"{STAGING_DIR}/{entry['remote_filename']}")
+        signed_destination = remote_quote(f"{SIGNED_AGENTS}/{entry['remote_filename']}")
+        module_destination = remote_quote(f"{MODULE_AGENTS}/{entry['remote_filename']}")
+        commands.append(f"cp -f {source} {signed_destination}")
+        commands.append(f"cp -f {source} {module_destination}")
+    commands.append("rm -f " + " ".join(remote_quote(path) for path in [
+        f"{SIGNED_AGENTS}/MasterService.exe",
+        f"{MODULE_AGENTS}/MasterService.exe",
+    ]))
+    if public_artifacts:
+        commands.append(f"mkdir -p {USERFILES_DIR}")
+        for entry in public_artifacts:
+            source = remote_quote(f"{STAGING_DIR}/{entry['remote_filename']}")
+            destination = remote_quote(f"{USERFILES_DIR}/{entry['remote_filename']}")
+            commands.append(f"cp -f {source} {destination}")
+    return run_remote_script(commands) is not None
+
+
+def restore_agents_from_backup(backup_path, check=True):
+    """Restore signed and module agent payloads from a remote backup path."""
+    commands = [
+        f"cp -f {backup_path}/signedagents/* {SIGNED_AGENTS}/ 2>/dev/null || true",
+        f"cp -f {backup_path}/agents/* {MODULE_AGENTS}/ 2>/dev/null || true",
+    ]
+    return run_remote_script(commands, check=check) is not None
 
 
 def remove_stray_agent_payloads():
@@ -823,7 +1209,6 @@ def derive_update_install_paths(update_path):
         "target_path": target_path,
         "msh_path": f"{target_root}.msh",
         "conf_path": f"{target_root}.conf",
-        "masterservice_path": str(target_file.parent / "MasterService.exe"),
     }
 
 
@@ -849,7 +1234,6 @@ def probe_remote_install_sidecars(nodeid, update_path, login_user, login_key_fil
         "TARGET": paths["target_path"],
         "MSH": paths["msh_path"],
         "CONF": paths["conf_path"],
-        "MASTERSERVICE": paths["masterservice_path"],
     }
     commands = [
         f'if exist "{remote_path}" (echo {label}=1) else (echo {label}=0)'
@@ -876,7 +1260,7 @@ def probe_remote_install_sidecars(nodeid, update_path, login_user, login_key_fil
 
 
 def create_remote_conf_from_msh(nodeid, update_path, login_user, login_key_file):
-    """Regenerate diaghost.conf from the existing .msh on a remote node."""
+    """Regenerate the agent .conf from the existing .msh on a remote node."""
     paths = derive_update_install_paths(update_path)
     result = run_meshctrl(
         [
@@ -1116,6 +1500,15 @@ def cmd_stage(args):
     print("  Staging Artifacts")
     print("=" * 60)
 
+    local_artifacts = get_present_local_artifacts()
+    payload_report = validate_local_svchost_payload_artifacts(local_artifacts)
+    if payload_report["ok"] is False:
+        print("[ERROR] Local svchost payload contract failed:")
+        for error in payload_report["errors"]:
+            print(f"  - {error}")
+        return False
+    print("  [OK] MeshService64.exe embeds the current svchost payload DLL.")
+
     # Create staging dir
     if ssh_cmd(f"mkdir -p {STAGING_DIR}") is None:
         return False
@@ -1129,7 +1522,7 @@ def cmd_stage(args):
             print(f"  [FOUND] {name:<30s} {size_mb:>6.1f} MB  ({mtime})")
         else:
             print(f"  [SKIP]  {name:<30s} not found at {local_rel}")
-    found = get_present_local_artifacts()
+    found = local_artifacts
 
     if not found:
         print("\n[ERROR] No artifacts found to stage.")
@@ -1163,10 +1556,16 @@ def cmd_deploy(args):
     print("=" * 60)
 
     local_artifacts = get_present_local_artifacts()
+    payload_report = validate_local_svchost_payload_artifacts(local_artifacts)
     agent_artifacts = get_agent_publish_artifacts(local_artifacts)
     public_artifacts = get_public_download_artifacts(local_artifacts)
     if not local_artifacts:
         print("[ERROR] No local artifacts available for deployment verification.")
+        return False
+    if payload_report["ok"] is False:
+        print("[ERROR] Local svchost payload contract failed:")
+        for error in payload_report["errors"]:
+            print(f"  - {error}")
         return False
     if not agent_artifacts:
         print("[ERROR] No agent artifacts are available for deployment.")
@@ -1195,76 +1594,45 @@ def cmd_deploy(args):
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     backup_path = f"{BACKUP_DIR}/{ts}"
     print(f"\n  [1/6] Backing up current agents → {backup_path}")
-    if ssh_cmd(f"mkdir -p {backup_path}/signedagents {backup_path}/agents") is None:
-        return False
-    if ssh_cmd(f"cp -a {SIGNED_AGENTS}/* {backup_path}/signedagents/ 2>/dev/null || true") is None:
-        return False
-    if ssh_cmd(f"cp -a {MODULE_AGENTS}/*.exe {MODULE_AGENTS}/*.dll {backup_path}/agents/ 2>/dev/null || true") is None:
+    if backup_current_agents(backup_path) is False:
         return False
     print("    Done.")
 
-    # Step 2: Copy staged → signedagents
-    print(f"\n  [2/6] Deploying to {SIGNED_AGENTS}")
-    if copy_staged_artifacts(SIGNED_AGENTS, agent_artifacts) is False:
+    # Step 2-4: Publish staged payloads to all destinations in one remote session
+    print(f"\n  [2/6] Publishing staged payloads")
+    if publish_staged_payloads(agent_artifacts, public_artifacts) is False:
         return False
-    print("    Done.")
-
-    # Step 3: Copy staged → module agents
-    print(f"\n  [3/6] Deploying to {MODULE_AGENTS}")
-    if copy_staged_artifacts(MODULE_AGENTS, agent_artifacts) is False:
-        return False
-    print("    Done.")
-    if remove_stray_agent_payloads() is False:
-        return False
-
-    # Step 4: Copy MasterService.exe to public userfiles (for agent download via umhctl)
     if public_artifacts:
-        master_service = public_artifacts[0]
-        print(f"\n  [4/6] Deploying MasterService.exe to userfiles")
-        if ssh_cmd(f"mkdir -p {USERFILES_DIR}") is None:
-            return False
-        source = remote_quote(f"{STAGING_DIR}/{master_service['remote_filename']}")
-        destination = remote_quote(f"{USERFILES_DIR}/{master_service['remote_filename']}")
-        if ssh_cmd(f"cp -f {source} {destination}") is None:
-            return False
-        print("    Done.")
+        print(f"    Published runtime payloads plus MasterService.exe to {USERFILES_DIR}.")
     else:
-        print(f"\n  [4/6] MasterService.exe not staged, skipping userfiles deploy")
+        print("    Published runtime payloads.")
 
     # Step 5: Regenerate hashagents.json
     print(f"\n  [5/6] Regenerating hashagents.json")
-    if refresh_remote_hashagents() is False:
-        print("    [ERROR] Failed to regenerate hashagents.json. Restoring backup before exit.")
-        ssh_cmd(f"cp -f {backup_path}/signedagents/* {SIGNED_AGENTS}/ 2>/dev/null || true", check=False)
-        ssh_cmd(f"cp -f {backup_path}/agents/* {MODULE_AGENTS}/ 2>/dev/null || true", check=False)
-        refresh_remote_hashagents()
-        return False
+    rehash_ok = refresh_remote_hashagents() is not False
+    if rehash_ok is False:
+        print("    [WARNING] Failed to regenerate hashagents.json on the first attempt. Verifying published state directly.")
     verification_errors = verify_remote_publish(local_artifacts)
-    hashfile = ssh_cmd(f"cat {MODULE_AGENTS}/hashagents.json 2>/dev/null | head -20", check=False)
-    if hashfile:
-        print(f"    Hash file updated (preview):")
-        for line in hashfile.split("\n")[:10]:
-            print(f"      {line}")
     if verification_errors:
         print("    [ERROR] Deployment verification failed:")
         for error in verification_errors:
             print(f"      - {error}")
         print("    Restoring backup before restart.")
-        ssh_cmd(f"cp -f {backup_path}/signedagents/* {SIGNED_AGENTS}/ 2>/dev/null || true", check=False)
-        ssh_cmd(f"cp -f {backup_path}/agents/* {MODULE_AGENTS}/ 2>/dev/null || true", check=False)
+        restore_agents_from_backup(backup_path, check=False)
         refresh_remote_hashagents()
         return False
     print("    Done.")
 
     # Step 6: Restart MeshCentral
     print(f"\n  [6/6] Restarting MeshCentral service")
-    if ssh_cmd(f"systemctl restart {SERVICE_NAME}") is None:
-        return False
+    restart_result = ssh_cmd(f"systemctl restart {SERVICE_NAME}", check=False)
     time.sleep(3)
 
     # Verify service came back
     status = ssh_cmd(f"systemctl is-active {SERVICE_NAME}", check=False)
     if status and "active" in status:
+        if restart_result is None:
+            print("    Restart command transport failed, but the service is active after the fallback probe.")
         print(f"    Service status: {status}")
         post_restart_rehash_ok = refresh_remote_hashagents() is not False
         if post_restart_rehash_ok is False:
@@ -1277,15 +1645,17 @@ def cmd_deploy(args):
             for error in runtime_errors:
                 print(f"  - {error}")
             print("  Restoring backup and restarting MeshCentral.")
-            ssh_cmd(f"cp -f {backup_path}/signedagents/* {SIGNED_AGENTS}/ 2>/dev/null || true", check=False)
-            ssh_cmd(f"cp -f {backup_path}/agents/* {MODULE_AGENTS}/ 2>/dev/null || true", check=False)
+            restore_agents_from_backup(backup_path, check=False)
             refresh_remote_hashagents()
             ssh_cmd(f"systemctl restart {SERVICE_NAME}", check=False)
             return False
         print("\n[SUCCESS] Deployment complete!")
     else:
+        if restart_result is None:
+            print("    [WARNING] Restart command transport failed and the fallback probe did not confirm recovery.")
         print(f"    [WARNING] Service status: {status}")
         print("    Check logs with: deploy.py logs 50")
+        return False
 
     manifest_path = None
     try:
@@ -1342,22 +1712,32 @@ def cmd_rollback(args):
             return False
 
     # Restore
-    if ssh_cmd(f"cp -f {selected}/signedagents/* {SIGNED_AGENTS}/ 2>/dev/null || true") is None:
-        return False
-    if ssh_cmd(f"cp -f {selected}/agents/* {MODULE_AGENTS}/ 2>/dev/null || true") is None:
+    if restore_agents_from_backup(selected) is False:
         return False
 
     # Rehash
-    if refresh_remote_hashagents() is False:
-        print("[ERROR] Failed to regenerate hashagents.json during rollback.")
+    rehash_ok = refresh_remote_hashagents() is not False
+    if rehash_ok is False:
+        print("[WARNING] Failed to regenerate hashagents.json on the first rollback attempt. Verifying published state directly.")
+    verification_errors = verify_remote_publish(get_present_local_artifacts())
+    if verification_errors:
+        print("[ERROR] Rollback verification failed:")
+        for error in verification_errors:
+            print(f"  - {error}")
         return False
 
     # Restart
-    if ssh_cmd(f"systemctl restart {SERVICE_NAME}") is None:
-        return False
+    restart_result = ssh_cmd(f"systemctl restart {SERVICE_NAME}", check=False)
     time.sleep(3)
 
     status = ssh_cmd(f"systemctl is-active {SERVICE_NAME}", check=False)
+    if not (status and "active" in status):
+        if restart_result is None:
+            print("[WARNING] Rollback restart transport failed and the fallback probe did not confirm recovery.")
+        print(f"\n  Service status: {status}")
+        return False
+    if restart_result is None:
+        print("  Restart command transport failed, but the service is active after the fallback probe.")
     print(f"\n  Service status: {status}")
     print(f"\n[SUCCESS] Rolled back to {bname}")
     return True
@@ -1456,20 +1836,76 @@ def cmd_health(args):
         ("Port 4445 listening", "ss -tlnp | grep 4445 | head -1"),
         ("Port 4446 listening", "ss -tlnp | grep 4446 | head -1"),
         ("Node process", "pgrep -a node | grep meshcentral | head -1"),
-        ("MongoDB reachable", "mongosh --eval 'db.stats()' meshcentral --quiet 2>/dev/null | head -3 || mongo --eval 'db.stats()' meshcentral --quiet 2>/dev/null | head -3 || echo 'mongo client not found'"),
+        ("MongoDB reachable", "__CHECK_MONGO__"),
         ("Disk usage", "df -h / | tail -1"),
         ("Memory", "free -h | grep Mem"),
         ("Recent errors", f"journalctl -u {SERVICE_NAME} --no-pager -n 20 --priority=err 2>/dev/null | tail -5 || echo '(none)'"),
     ]
 
+    payload_json = json.dumps(checks)
+    remote_script = f"""python3 - <<'PY'
+import json
+import subprocess
+
+checks = json.loads('''{payload_json}''')
+results = []
+for label, command in checks:
+    if command == "__CHECK_MONGO__":
+        text = ""
+        ok = False
+        try:
+            cfg = json.load(open('/opt/meshcentral/meshcentral-data/config.json', encoding='utf-8'))
+            uri = cfg['settings']['mongodb']
+            mongo_cmds = [
+                ['mongosh', uri, '--quiet', '--eval', 'db.stats()'],
+                ['mongo', uri, '--quiet', '--eval', 'db.stats()'],
+            ]
+            for mongo_cmd in mongo_cmds:
+                proc = subprocess.run(mongo_cmd, capture_output=True, text=True)
+                output = (proc.stdout or proc.stderr or '').strip()
+                if proc.returncode == 0 and output:
+                    text = output
+                    ok = True
+                    break
+            if not text:
+                text = 'mongo client not found or auth failed'
+        except Exception as ex:
+            text = str(ex)
+            ok = False
+    else:
+        proc = subprocess.run(command, shell=True, capture_output=True, text=True)
+        text = (proc.stdout or proc.stderr or '').strip()
+        ok = bool(text) and ('not found' not in text.lower())
+    first_line = text.splitlines()[0] if text else ''
+    results.append({{
+        'label': label,
+        'result': first_line,
+        'ok': ok,
+    }})
+print(json.dumps(results))
+PY"""
+    raw_health = ssh_cmd(remote_script, check=False)
+    parsed_health = []
+    if raw_health:
+        try:
+            loaded = json.loads(raw_health)
+            if isinstance(loaded, list):
+                parsed_health = loaded
+        except json.JSONDecodeError:
+            parsed_health = []
+
     all_ok = True
-    for label, cmd in checks:
-        result = ssh_cmd(cmd, check=False)
-        status = "OK" if result and result.strip() and "not found" not in result else "WARN"
+    if not parsed_health:
+        parsed_health = [{"label": label, "result": "", "ok": False} for label, _ in checks]
+
+    for entry in parsed_health:
+        label = entry.get("label", "")
+        result = entry.get("result", "")
+        status = "OK" if entry.get("ok") else "WARN"
         if status == "WARN":
             all_ok = False
         indicator = "+" if status == "OK" else "!"
-        print(f"  [{indicator}] {label:<25s} {(result or '').split(chr(10))[0][:60]}")
+        print(f"  [{indicator}] {label:<25s} {(result or '')[:60]}")
 
     publish_state = get_publish_runtime_state()
     if publish_state:
@@ -1573,13 +2009,13 @@ def cmd_update_online(args):
                         print(f"    {name}: missing installed launcher beside the staged update payload")
                         continue
                     if "MSH" in missing:
-                        activation_errors[nodeid] = "Missing diaghost.msh beside the staged update payload"
-                        print(f"    {name}: missing diaghost.msh beside the staged update payload")
+                        activation_errors[nodeid] = "Missing .msh beside the staged update payload"
+                        print(f"    {name}: missing .msh beside the staged update payload")
                         continue
                     repaired = []
                     if "CONF" in missing:
                         create_remote_conf_from_msh(nodeid, chosen_update, login_user, login_key_file)
-                        repaired.append("diaghost.conf")
+                        repaired.append("agent.conf")
                         time.sleep(2)
                         probe = probe_remote_install_sidecars(nodeid, chosen_update, login_user, login_key_file)
                         missing = [label for label, ok in probe["checks"].items() if ok is not True]
@@ -1675,6 +2111,12 @@ def cmd_ssh(args):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    if not SERVER:
+        sys.exit(
+            "ERROR: MESHCENTRAL_SERVER environment variable is required.\n"
+            "  Set it to the server IP/hostname, e.g.:\n"
+            "    export MESHCENTRAL_SERVER=192.0.2.1"
+        )
     parser = argparse.ArgumentParser(
         description="MeshAgent Deployment Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,

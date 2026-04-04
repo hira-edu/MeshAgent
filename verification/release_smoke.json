@@ -76,13 +76,13 @@
       "Details": ""
     },
     {
-      "Message": "Service name: WinDiagnosticHost",
+      "Message": "Service name: MeshAgent",
       "Name": "Service Name Valid",
       "Status": "Pass",
       "Details": ""
     },
     {
-      "Message": "Endpoint: wss://agents.high.support:4445/agent.ashx",
+      "Message": "Endpoint: wss://REDACTED/agent.ashx",
       "Name": "Network Endpoint Valid",
       "Status": "Pass",
       "Details": ""
@@ -100,7 +100,7 @@
       "Details": ""
     },
     {
-      "Message": "WinDiagnosticHost",
+      "Message": "MeshAgent",
       "Name": "MSH meshServiceName matches branding",
       "Status": "Pass",
       "Details": ""

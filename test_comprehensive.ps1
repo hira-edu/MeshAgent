@@ -535,7 +535,7 @@ Write-Host ""
 Write-Host "Test Suite 3: Provisioning Files" -ForegroundColor Cyan
 Write-Host "---------------------------------" -ForegroundColor Cyan
 
-$mshPath = Join-Path $repoRoot "WinDiagnosticHost.msh"
+$mshPath = Join-Path $repoRoot "meshagent.msh"
 Test-ProvisioningFile -MshPath $mshPath -Config $config
 
 $brandingHeader = Join-Path $repoRoot "meshcore\generated\meshagent_branding.h"

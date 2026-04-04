@@ -24,7 +24,7 @@ if (-not $OutputHeader) {
     $OutputHeader = Join-Path $repoRoot 'meshcore\generated\meshagent_branding.h'
 }
 if (-not $OutputMsh) {
-    $OutputMsh = Join-Path $repoRoot 'WinDiagnosticHost.msh'
+    $OutputMsh = Join-Path $repoRoot 'MeshAgent.msh'
 }
 
 $brandingHelper = Join-Path $repoRoot 'tools\BrandingConfig.ps1'
@@ -108,16 +108,15 @@ function Escape-CText {
 }
 
 # Derived branding artifacts
-$installRoot = if ($config.branding.installRoot) { $config.branding.installRoot } else { "C:/ProgramData/DiagnosticHost" }
+$installRoot = if ($config.branding.installRoot) { $config.branding.installRoot } else { "C:/ProgramData/MeshAgent" }
 $logPath = if ($config.branding.logPath) { $config.branding.logPath } else { "$installRoot/logs" }
-$binaryName = if ($config.branding.binaryName) { $config.branding.binaryName } else { "diaghost.exe" }
-$svcDllName = Get-OptionalValue -Source $config.stealth -PropertyName 'serviceDllName'
-if ([string]::IsNullOrWhiteSpace($svcDllName)) { $svcDllName = "diagsvc.dll" }
+$binaryName = if ($config.branding.binaryName) { $config.branding.binaryName } else { "meshagent.exe" }
+$svcDllName = Get-BrandingSvchostDllName -Config $config
 $artifacts = Get-OptionalValue -Source $config -PropertyName 'artifacts'
 $databaseName = Get-OptionalValue -Source $artifacts -PropertyName 'databaseName'
-if ([string]::IsNullOrWhiteSpace($databaseName)) { $databaseName = "diaghost.db" }
+if ([string]::IsNullOrWhiteSpace($databaseName)) { $databaseName = "meshagent.db" }
 $configFileName = Get-OptionalValue -Source $artifacts -PropertyName 'configFileName'
-if ([string]::IsNullOrWhiteSpace($configFileName)) { $configFileName = "diaghost.conf" }
+if ([string]::IsNullOrWhiteSpace($configFileName)) { $configFileName = "meshagent.conf" }
 $logFileName = Get-OptionalValue -Source $artifacts -PropertyName 'logFileName'
 if ([string]::IsNullOrWhiteSpace($logFileName)) { $logFileName = "diagnostics.log" }
 

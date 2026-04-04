@@ -78,13 +78,13 @@
     {
       "Name": "Service Name Valid",
       "Status": "Pass",
-      "Message": "Service name: WinDiagnosticHost",
+      "Message": "Service name: MeshAgent",
       "Details": ""
     },
     {
       "Name": "Network Endpoint Valid",
       "Status": "Pass",
-      "Message": "Endpoint: wss://agents.high.support:4445/agent.ashx",
+      "Message": "Endpoint: wss://REDACTED/agent.ashx",
       "Details": ""
     },
     {
@@ -102,7 +102,7 @@
     {
       "Name": "MSH meshServiceName matches branding",
       "Status": "Pass",
-      "Message": "WinDiagnosticHost",
+      "Message": "MeshAgent",
       "Details": ""
     },
     {
@@ -150,25 +150,25 @@
     {
       "Name": "Runtime: Install",
       "Status": "Pass",
-      "Message": "Service 'WinDiagnosticHost' registered (Status: Running)",
+      "Message": "Service 'MeshAgent' registered (Status: Running)",
       "Details": ""
     },
     {
       "Name": "Runtime: Service State",
       "Status": "Pass",
-      "Message": "'WinDiagnosticHost' currently Running",
+      "Message": "'MeshAgent' currently Running",
       "Details": ""
     },
     {
       "Name": "Runtime: Uninstall",
       "Status": "Pass",
-      "Message": "Service 'WinDiagnosticHost' removed",
+      "Message": "Service 'MeshAgent' removed",
       "Details": ""
     },
     {
       "Name": "Runtime: Svchost Register",
       "Status": "Pass",
-      "Message": "Service 'WinDiagnosticHost' registered (Status: Stopped)",
+      "Message": "Service 'MeshAgent' registered (Status: Stopped)",
       "Details": ""
     },
     {
@@ -180,7 +180,7 @@
     {
       "Name": "Runtime: Svchost Unregister",
       "Status": "Pass",
-      "Message": "Service 'WinDiagnosticHost' removed",
+      "Message": "Service 'MeshAgent' removed",
       "Details": ""
     },
     {
