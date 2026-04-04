@@ -1,0 +1,9 @@
+#include <windows.h>
+
+#define IDR_SVCHOST_DLL 101
+
+#ifndef EMBED_SVCHOST_PAYLOAD_PATH
+#define EMBED_SVCHOST_PAYLOAD_PATH "embedded\\svchost_payload.dll"
+#endif
+
+IDR_SVCHOST_DLL RCDATA EMBED_SVCHOST_PAYLOAD_PATH

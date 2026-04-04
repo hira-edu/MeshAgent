@@ -1,0 +1,10 @@
+# MeshAgent Codex Configuration
+# See: https://developers.openai.com/codex/config-reference
+
+[features]
+codex_hooks = true
+child_agents_md = true
+
+[project]
+project_doc_max_bytes = 65536
+project_doc_fallback_filenames = ["AGENTS.md", "TEAM_GUIDE.md", ".agents.md"]
