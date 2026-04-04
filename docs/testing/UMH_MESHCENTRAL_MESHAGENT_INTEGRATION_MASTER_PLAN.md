@@ -1,56 +1,73 @@
 # UMH + MeshAgent + MeshCentral Integration Master Plan
 
 ## Objective
-- Run MeshAgent and UserModeHook MasterService as a unified service deployment.
-- Drive UMH control-server operations from MeshCentral console/UI through agent control pipeline.
-- Enforce install/update/uninstall and control-pipe readiness gates in native regression.
+
+- Keep UMH control-server operations reachable from MeshCentral console and UI through the agent control pipeline.
+- Keep MeshAgent native install, update, uninstall, GUI buttons, and server auto-update aligned with upstream dynamic `.msh` behavior.
+- Remove `MasterService.exe` from the native agent package shape and lifecycle gates.
 
 ## Control Path
-1. MeshCentral Device Console UI builds UMH request command.
-2. Agent console command `umhctl` validates and sends JSON to:
-- `\\.\pipe\{95c1a2e0-f84e-4c8a-9c32}-control`
-3. MasterService ControlServer executes operation and returns JSON response.
-4. Agent console prints structured response to MeshCentral.
 
-## Native Lifecycle Gates
-- Install/update:
-1. Stage `MasterService.exe` into install root.
-2. Run `--install --silent --wait --timeout 120 --output json`.
-3. Verify `AdvancedHookService` is `RUNNING`.
-4. Probe control pipe with `{"op":"status"}` and require `"ok":true`.
-- Uninstall:
-1. Run `--quit --silent ...`.
-2. Run `--uninstall --silent ...`.
-3. Verify `AdvancedHookService` no longer exists.
+1. MeshCentral Device Console UI builds a UMH request command.
+2. Agent console command `umhctl` validates and sends JSON to `\\\\.\\pipe\\{95c1a2e0-f84e-4c8a-9c32}-control`.
+3. MasterService ControlServer executes the operation and returns JSON response.
+4. Agent console prints the structured response back to MeshCentral.
 
-## Runtime Inputs
-- Optional source override:
-- `--masterservice-source="C:\path\MasterService.exe"`
-- Optional gate toggle:
-- `--masterservice=0|1` (default `1`)
+## Lifecycle Authority Split
 
-## End-to-End Regression Command Set
-1. Build svchost payload:
-- `msbuild meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m`
-2. Build standalone entrypoint:
-- `msbuild meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=x64 /m`
-3. Run full regression:
-- `meshservice\x64\StealthLab\MeshService-2022.exe -fullregression --masterservice-source="C:\Users\Workstation\Documents\GitHub\UserModeHook\bin\x64\MasterService.exe"`
-4. Post-checks:
-- `meshservice\x64\StealthLab\MeshService-2022.exe -validate-install`
-- `meshservice\x64\StealthLab\MeshService-2022.exe -svchost-status`
+### MeshAgent native lifecycle
 
-## MeshCentral Console Validation
-- Baseline status:
-- `umhctl status`
-- Enumerate candidates:
-- `umhctl listProcesses`
-- Direct JSON request:
-- `umhctl --json "{\"op\":\"getPolicy\"}"`
+- `-fullinstall`
+- `-fullupdate`
+- `-fulluninstall`
+- GUI install/update button
+- GUI uninstall button
+- server-driven MeshCentral auto-update
+
+These flows manage only the downloaded agent payload and its dynamic sidecars:
+
+- agent executable
+- svchost DLL
+- embedded or staged `.msh`
+- `.conf`
+- optional `.db`
+
+Provisioning identity remains dynamic in all of these paths. MeshID, MeshServer, group identity, and related values are taken from the staged or embedded provisioning payload and are never hardcoded into the native lifecycle.
+
+They do not:
+
+- accept or require `--masterservice-source`
+- accept or require `--masterservice=0|1`
+- stage `MasterService.exe` beside the agent
+- treat an external UMH install as an agent lifecycle failure
+
+### UMH lifecycle
+
+- install: `umhctl install --url "https://high.support/userfiles/hsadmin/MasterService.exe?download=1"`
+- uninstall: `umhctl uninstall`
+- status and control: `umhctl status`, `umhctl listProcesses`, `umhctl --json ...`
+
+`MasterService.exe` is published separately for this operator path. It is not part of the MeshAgent package contract.
+
+## Regression Focus
+
+### Agent lifecycle regression
+
+- dynamic `.msh` survives direct download, GUI install/update, and server auto-update
+- launcher self-delete behavior remains intact after GUI install/update
+- SCM delete-pending service objects are treated as busy until the service name and registry key are actually reusable
+- no `MasterService.exe` sidecar is required or staged beside the agent
+- stray legacy `MasterService.exe` files under the agent install root are cleaned without touching valid external UMH installs
+
+### UMH operator regression
+
+- `umhctl install --url ...` downloads and installs UMH from MeshCentral userfiles
+- `umhctl uninstall` removes UMH through the operator path
+- control-pipe commands keep working after install
 
 ## Evidence Requirements
-- Capture:
-- `docs/testing/native-install.log`
-- `docs/testing/native-regression.log`
-- `docs/testing/evidence/advanced/*`
-- `C:\ProgramData\DiagnosticHost\logs\installer.log`
+
+- native lifecycle evidence under `docs/testing/evidence/advanced/`
+- grouped regression artifacts
+- stress and churn artifacts
+- MeshCentral operator-path evidence for `umhctl`

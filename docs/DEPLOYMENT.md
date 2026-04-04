@@ -51,7 +51,7 @@ Related operational SSOT:
 | Standalone EXE | `meshservice/x64/StealthLab/MeshService-2022.exe` | **`MeshService64.exe`** |
 | Svchost DLL | `meshservice/x64/StealthLab_DLL/MeshService-2022.dll` | `MeshService64.dll` |
 | Embedded Payload | `meshservice/embedded/svchost_payload.dll` | `svchost_payload.dll` |
-| MasterService | `../UserModeHook/build-fresh/bin/Release/MasterService.exe` | `MasterService.exe` |
+| UMH public payload | `../UserModeHook/build-fresh/bin/Release/MasterService.exe` | `MasterService.exe` |
 
 **Important:** The Visual Studio build output is named `MeshService-2022.exe`. During staging/deploy it is **renamed** to `MeshService64.exe` to match the filename MeshCentral expects when serving agents to endpoints.
 
@@ -114,7 +114,7 @@ python deploy.py ssh "command"   # Run arbitrary remote command
 2. Creates timestamped backup of current agents in both paths
 3. Copies staged agent binaries → `/opt/meshcentral/meshcentral-data/signedagents/`
 4. Copies staged agent binaries → `/opt/meshcentral/node_modules/meshcentral/agents/`
-5. Copies `MasterService.exe` → `/opt/meshcentral/meshcentral-files/domain/user-hsadmin/Public/` (for agent download)
+5. Copies `MasterService.exe` → `/opt/meshcentral/meshcentral-files/domain/user-hsadmin/Public/` (for `umhctl install --url ...` download only)
 6. Regenerates `hashagents.json` for both publish directories from the actual remote files
 7. Restarts `meshcentral` systemd service
 8. Re-runs post-restart publish verification so `node_modules/meshcentral/agents/` and its manifest still match the local build while `signedagents/` remains self-consistent if MeshCentral repacks/signs the EXEs
@@ -156,6 +156,11 @@ scp -i ~/.ssh/id_ed25519 root@167.88.44.65:/opt/meshcentral/meshcentral-data/con
 4. python deploy.py health     → verify service, ports, no errors
 ```
 
+Publish contract for MeshAgent packages:
+- `deploy.py stage` must prove local payload parity before upload: the repo `MeshService64.dll`, `meshservice/embedded/svchost_payload.dll`, and the embedded svchost RCDATA payload inside `MeshService64.exe` must all hash-identically.
+- After `deploy.py deploy`, verify the embedded svchost payload inside both remote `node_modules/meshcentral/agents/MeshService64.exe` and `meshcentral-data/signedagents/MeshService64.exe`.
+- A `signedagents` EXE may have a different raw file size or digest than the local EXE because MeshCentral repacks it, but its embedded svchost payload must still match the repo DLL exactly.
+
 ### Emergency Rollback
 
 ```
@@ -175,13 +180,17 @@ scp -i ~/.ssh/id_ed25519 root@167.88.44.65:/opt/meshcentral/meshcentral-data/con
 
 ## Part 1b: MasterService (UserModeHook) Deployment
 
-MasterService.exe is part of the unified deploy pipeline. It is built from the UserModeHook repo and deployed alongside MeshAgent binaries.
+MasterService.exe is published for UMH operator workflows, but it is not part of the MeshAgent package shape and it is not staged beside MeshAgent binaries for install/update/uninstall.
 
 ### How It Works
 
 1. `deploy.py stage` uploads `MasterService.exe` (from `../UserModeHook/build-fresh/bin/Release/`) to the server staging area
-2. `deploy.py deploy` copies it to both `signedagents/` and the public userfiles directory
-3. Agents download it on-demand via the `umhctl install` console command
+2. `deploy.py deploy` publishes it to the public userfiles directory
+3. Agents download it on-demand via `umhctl install --url ...`
+4. Native MeshAgent `-fullinstall`, `-fullupdate`, `-fulluninstall`, GUI install/update, and server auto-update do not stage or manage `MasterService.exe`
+5. Native MeshAgent provisioning stays dynamic: identity and endpoint values come from the downloaded package's sibling `.msh`, embedded `.msh`, or valid staged config, not from hardcoded mesh/group values
+6. Native lifecycle waits for SCM service-name release before reinstalling; `ERROR_SERVICE_MARKED_FOR_DELETE` is treated as a transient busy state, not a successful uninstall
+7. Native `start` and `restart` service-control commands recover the managed service back to `AUTO_START` before retrying if the start type was found disabled unexpectedly
 
 ### Agent Console Commands (`umhctl`)
 
@@ -210,7 +219,7 @@ The MeshAgent's RecoveryCore.js includes a built-in `umhctl` command for managin
 
 **Download URL**: `https://<server>/userfiles/hsadmin/MasterService.exe?download=1` (auto-derived from agent's server connection; server `Public/` storage is exposed without the `Public` path segment).
 
-**Binary location**: Saved to the agent's install directory (same dir as agent executable).
+**Binary location**: Determined by the UMH installer/operator flow. It is not a MeshAgent package sidecar and must not be appended next to the downloaded agent binary.
 
 **Control pipe**: `\\.\pipe\{95c1a2e0-f84e-4c8a-9c32}-control`
 
@@ -229,8 +238,8 @@ These replace the previous 62+ PowerShell download-and-run buttons with simple a
 
 ```
 1. Build MasterService in VS (from UserModeHook repo)
-2. python deploy.py stage           → uploads MasterService.exe + MeshAgent binaries
-3. python deploy.py deploy          → deploys to signedagents/ + userfiles/
+2. python deploy.py stage           → uploads MasterService.exe and MeshAgent artifacts to staging
+3. python deploy.py deploy          → deploys MeshAgent to agent publish dirs and MasterService.exe to userfiles/
 4. python deploy-server.py push --file "public/scripts/custom.js"  → deploys UI buttons
 5. Test: open agent console → type "umhctl install"
 ```

