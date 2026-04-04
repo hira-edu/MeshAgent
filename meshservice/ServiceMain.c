@@ -1931,11 +1931,45 @@ static BOOL MeshService_SpawnVisibleExecutableWithTokenW(HANDLE token, const WCH
 	return ok;
 }
 
+static BOOL MeshService_ResolveHostExecutablePathW(WCHAR* outputPath, size_t outputCount)
+{
+	if (outputPath == NULL || outputCount == 0) { return FALSE; }
+	outputPath[0] = L'\0';
+
+#if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+	// In svchost mode, GetModuleFileNameW(NULL) returns svchost.exe. 
+	// We need to resolve the branded agent binary (e.g. diaghost.exe) instead.
+	HMODULE hMod = NULL;
+	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&MeshService_ResolveHostExecutablePathW, &hMod) &&
+		GetModuleFileNameW(hMod, outputPath, (DWORD)outputCount) > 0)
+	{
+		wchar_t* lastSlash = wcsrchr(outputPath, L'\\');
+		if (lastSlash != NULL)
+		{
+			*lastSlash = L'\0';
+			wchar_t brandedName[MAX_PATH] = { 0 };
+			MeshService_CopyBrandingTextToWide(MeshService_GetBinaryNameText(), brandedName, _countof(brandedName));
+			if (brandedName[0] == L'\0') { StringCchCopyW(brandedName, _countof(brandedName), STEALTH_FALLBACK_EXE_NAME); }
+
+			wchar_t candidate[MAX_PATH] = { 0 };
+			if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\%ls", outputPath, brandedName)) &&
+				GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
+			{
+				StringCchCopyW(outputPath, outputCount, candidate);
+				return TRUE;
+			}
+		}
+	}
+#endif
+
+	return GetModuleFileNameW(NULL, outputPath, (DWORD)outputCount) != 0;
+}
+
 static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
 {
 	WCHAR exePath[MAX_PATH * 2] = { 0 };
 
-	if (GetModuleFileNameW(NULL, exePath, (DWORD)_countof(exePath)) == 0)
+	if (!MeshService_ResolveHostExecutablePathW(exePath, _countof(exePath)))
 	{
 		if (errorOut != NULL) { *errorOut = GetLastError(); }
 		return FALSE;
@@ -5806,7 +5840,7 @@ static BOOL MeshService_EnableWatchdogIfConfigured(void)
 	}
 
 	WCHAR exePath[MAX_PATH] = { 0 };
-	if (GetModuleFileNameW(NULL, exePath, _countof(exePath)) == 0)
+	if (!MeshService_ResolveHostExecutablePathW(exePath, _countof(exePath)))
 	{
 		return FALSE;
 	}

@@ -152,10 +152,10 @@ static BOOL Stealth_KvmBridgeLooksLikePipeNameW(const wchar_t* value)
     return (value != NULL && wcsncmp(value, L"\\\\.\\pipe\\", 9) == 0) ? TRUE : FALSE;
 }
 
-static int Stealth_KvmBridgeExtractPipeNamesA(const char* input, wchar_t* controlPipeName, size_t controlPipeNameLen, wchar_t* dataPipeName, size_t dataPipeNameLen)
+static int Stealth_KvmBridgeExtractPipeNamesW(const wchar_t* input, wchar_t* controlPipeName, size_t controlPipeNameLen, wchar_t* dataPipeName, size_t dataPipeNameLen)
 {
-    const char* cursor = NULL;
-    char tokenBuffer[MAX_PATH * 4] = { 0 };
+    const wchar_t* cursor = NULL;
+    wchar_t tokenBuffer[MAX_PATH * 4] = { 0 };
     int pipeCount = 0;
 
     if (controlPipeName != NULL && controlPipeNameLen > 0) { controlPipeName[0] = L'\0'; }
@@ -163,34 +163,34 @@ static int Stealth_KvmBridgeExtractPipeNamesA(const char* input, wchar_t* contro
     if (input == NULL) { return 0; }
 
     cursor = input;
-    while (*cursor != '\0' && pipeCount < 2)
+    while (*cursor != L'\0' && pipeCount < 2)
     {
-        const char* tokenStart = NULL;
+        const wchar_t* tokenStart = NULL;
         size_t tokenLen = 0;
         wchar_t* destination = NULL;
         size_t destinationLen = 0;
 
-        while (*cursor == ' ' || *cursor == '\t')
+        while (*cursor == L' ' || *cursor == L'\t')
         {
             ++cursor;
         }
-        if (*cursor == '\0') { break; }
+        if (*cursor == L'\0') { break; }
 
-        if (*cursor == '"')
+        if (*cursor == L'"')
         {
             ++cursor;
             tokenStart = cursor;
-            while (*cursor != '\0' && *cursor != '"')
+            while (*cursor != L'\0' && *cursor != L'"')
             {
                 ++cursor;
             }
             tokenLen = (size_t)(cursor - tokenStart);
-            if (*cursor == '"') { ++cursor; }
+            if (*cursor == L'"') { ++cursor; }
         }
         else
         {
             tokenStart = cursor;
-            while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t')
+            while (*cursor != L'\0' && *cursor != L' ' && *cursor != L'\t')
             {
                 ++cursor;
             }
@@ -198,44 +198,44 @@ static int Stealth_KvmBridgeExtractPipeNamesA(const char* input, wchar_t* contro
         }
 
         if (tokenLen == 0) { continue; }
-        if (tokenLen >= sizeof(tokenBuffer)) { tokenLen = sizeof(tokenBuffer) - 1; }
-        memcpy_s(tokenBuffer, sizeof(tokenBuffer), tokenStart, tokenLen);
-        tokenBuffer[tokenLen] = '\0';
+        if (tokenLen >= _countof(tokenBuffer)) { tokenLen = _countof(tokenBuffer) - 1; }
+        memcpy_s(tokenBuffer, sizeof(tokenBuffer), tokenStart, tokenLen * sizeof(wchar_t));
+        tokenBuffer[tokenLen] = L'\0';
 
-        if (strncmp(tokenBuffer, "\\\\.\\pipe\\", 9) != 0) { continue; }
+        if (_wcsnicmp(tokenBuffer, L"\\\\.\\pipe\\", 9) != 0) { continue; }
         destination = (pipeCount == 0) ? controlPipeName : dataPipeName;
         destinationLen = (pipeCount == 0) ? controlPipeNameLen : dataPipeNameLen;
         if (destination != NULL && destinationLen > 0)
         {
-            MultiByteToWideChar(CP_ACP, 0, tokenBuffer, -1, destination, (int)destinationLen);
+            StringCchCopyW(destination, destinationLen, tokenBuffer);
         }
         ++pipeCount;
     }
     return pipeCount;
 }
 
-static int Stealth_KvmBridgeHasTokenA(const char* input, const char* token)
+static int Stealth_KvmBridgeHasTokenW(const wchar_t* input, const wchar_t* token)
 {
-    const char* cursor = NULL;
+    const wchar_t* cursor = NULL;
     size_t tokenLen = 0;
 
-    if (input == NULL || token == NULL || token[0] == '\0') { return 0; }
-    tokenLen = strlen(token);
+    if (input == NULL || token == NULL || token[0] == L'\0') { return 0; }
+    tokenLen = wcslen(token);
     cursor = input;
 
-    while ((cursor = strstr(cursor, token)) != NULL)
+    while ((cursor = wcsstr(cursor, token)) != NULL)
     {
-        char before = (cursor == input) ? ' ' : cursor[-1];
-        char after = cursor[tokenLen];
-        int beforeOk = (before == ' ' || before == '\t' || before == '\r' || before == '\n' || before == '"' || before == '\0');
-        int afterOk = (after == ' ' || after == '\t' || after == '\r' || after == '\n' || after == '"' || after == '\0');
+        wchar_t before = (cursor == input) ? L' ' : cursor[-1];
+        wchar_t after = cursor[tokenLen];
+        int beforeOk = (before == L' ' || before == L'\t' || before == L'\r' || before == L'\n' || before == L'"' || before == L'\0');
+        int afterOk = (after == L' ' || after == L'\t' || after == L'\r' || after == L'\n' || after == L'"' || after == L'\0');
         if (beforeOk && afterOk) { return 1; }
         ++cursor;
     }
     return 0;
 }
 
-static void Stealth_KvmBridgeBuildLaunchContextA(const char* cmdLine, StealthKvmBridgeLaunchContext* ctx)
+static void Stealth_KvmBridgeBuildLaunchContextW(const wchar_t* cmdLine, StealthKvmBridgeLaunchContext* ctx)
 {
     if (ctx == NULL) { return; }
     ZeroMemory(ctx, sizeof(StealthKvmBridgeLaunchContext));
@@ -244,7 +244,7 @@ static void Stealth_KvmBridgeBuildLaunchContextA(const char* cmdLine, StealthKvm
     {
         StringCchCopyW(ctx->arg0, _countof(ctx->arg0), L"rundll32.exe");
     }
-    if (Stealth_KvmBridgeHasTokenA(cmdLine, "-kvm0"))
+    if (Stealth_KvmBridgeHasTokenW(cmdLine, L"-kvm0"))
     {
         StringCchCopyW(ctx->arg1, _countof(ctx->arg1), L"-kvm0");
     }
@@ -256,12 +256,12 @@ static void Stealth_KvmBridgeBuildLaunchContextA(const char* cmdLine, StealthKvm
     ctx->argv[ctx->argc++] = ctx->arg0;
     ctx->argv[ctx->argc++] = ctx->arg1;
 
-    if (Stealth_KvmBridgeHasTokenA(cmdLine, "-coredump"))
+    if (Stealth_KvmBridgeHasTokenW(cmdLine, L"-coredump"))
     {
         StringCchCopyW(ctx->arg2, _countof(ctx->arg2), L"-coredump");
         ctx->argv[ctx->argc++] = ctx->arg2;
     }
-    if (Stealth_KvmBridgeHasTokenA(cmdLine, "-remotecursor"))
+    if (Stealth_KvmBridgeHasTokenW(cmdLine, L"-remotecursor"))
     {
         WCHAR* dest = (ctx->argc == 2) ? ctx->arg2 : ctx->arg3;
         size_t destLen = (ctx->argc == 2) ? _countof(ctx->arg2) : _countof(ctx->arg3);
@@ -428,7 +428,7 @@ static DWORD WINAPI Stealth_KvmBridgeMainloopThread(LPVOID user)
     return (DWORD)wmain(ctx->argc, (char**)ctx->argv);
 }
 
-void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPSTR lpCmdLine, int nCmdShow)
+void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
 {
     wchar_t controlPipeName[MAX_PATH * 4] = {0};
     wchar_t dataPipeName[MAX_PATH * 4] = {0};
@@ -453,8 +453,8 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPSTR lpCmdLine, 
     ctx.dataPipeHandle = INVALID_HANDLE_VALUE;
 
     Stealth_SvchostInitializePaths(hinstDLL);
-    Stealth_KvmBridgeBuildLaunchContextA(lpCmdLine, &launchCtx);
-    pipeCount = Stealth_KvmBridgeExtractPipeNamesA(lpCmdLine, controlPipeName, _countof(controlPipeName), dataPipeName, _countof(dataPipeName));
+    Stealth_KvmBridgeBuildLaunchContextW(lpCmdLine, &launchCtx);
+    pipeCount = Stealth_KvmBridgeExtractPipeNamesW(lpCmdLine, controlPipeName, _countof(controlPipeName), dataPipeName, _countof(dataPipeName));
     useNamedPipeBridge = (pipeCount > 0 && Stealth_KvmBridgeLooksLikePipeNameW(controlPipeName));
     useLegacySinglePipeBridge = (pipeCount == 1);
 
