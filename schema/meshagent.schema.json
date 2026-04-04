@@ -52,6 +52,10 @@
           "type": "string",
           "minLength": 1
         },
+        "serviceDllName": {
+          "type": "string",
+          "minLength": 1
+        },
         "productName": {
           "type": "string",
           "minLength": 1
@@ -278,6 +282,10 @@
           "type": "boolean"
         },
         "svchostGroup": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceDllName": {
           "type": "string",
           "minLength": 1
         },

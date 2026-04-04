@@ -22,7 +22,6 @@ limitations under the License.
 //
 
 const child_process = require('child_process');
-const path = require('path');
 const promise = require('promise');
 
 const WINDOWS_SVCHOST_ONLY = (process.platform === 'win32');
@@ -32,6 +31,29 @@ function replaceFileExt(filePath, oldExt, newExt)
     if (idx < 0) { return filePath + newExt; }
     return filePath.substring(0, idx) + newExt + filePath.substring(idx + oldExt.length);
 }
+function getPathLastSeparatorIndex(filePath)
+{
+    var forward = filePath.lastIndexOf('/');
+    var backward = filePath.lastIndexOf('\\');
+    return (forward > backward ? forward : backward);
+}
+function getPathBaseName(filePath)
+{
+    var idx = getPathLastSeparatorIndex(filePath);
+    if (idx < 0) { return filePath; }
+    return filePath.substring(idx + 1);
+}
+function getPathDirName(filePath)
+{
+    var idx = getPathLastSeparatorIndex(filePath);
+    if (idx < 0) { return '.'; }
+    if (idx === 0) { return filePath.substring(0, 1); }
+    if (idx === 2 && filePath.length > 2 && filePath.charAt(1) == ':' && (filePath.charAt(2) == '\\' || filePath.charAt(2) == '/'))
+    {
+        return filePath.substring(0, 3);
+    }
+    return filePath.substring(0, idx);
+}
 function assertWindowsStandaloneDisabled(operation)
 {
     if (WINDOWS_SVCHOST_ONLY)
@@ -39,10 +61,199 @@ function assertWindowsStandaloneDisabled(operation)
         throw new Error('Legacy Windows ' + operation + ' path is disabled. Use MeshService -fullinstall/-fulluninstall (svchost mode) instead.');
     }
 }
+function hasWindowsLegacyStandaloneParameter(parms)
+{
+    var i;
+    for (i = 0; i < parms.length; ++i)
+    {
+        if (typeof parms[i] !== 'string') { continue; }
+        if (parms[i].startsWith('--target=') || parms[i].startsWith('--fileName=') || parms[i].startsWith('--installPath=') || parms[i].startsWith('--_localService='))
+        {
+            return (true);
+        }
+    }
+    return (false);
+}
+function prepareWindowsNativeLifecycleParameters(parms)
+{
+    var msh = _MSH();
+    if (parms.getParameter('description', null) == null && msh.description != null) { parms.push('--description="' + ('' + msh.description).split('"').join('') + '"'); }
+    if (parms.getParameter('displayName', null) == null && msh.displayName != null) { parms.push('--displayName="' + ('' + msh.displayName).split('"').join('') + '"'); }
+    if (parms.getParameter('companyName', null) == null && msh.companyName != null) { parms.push('--companyName="' + ('' + msh.companyName).split('"').join('') + '"'); }
+
+    if (hasWindowsLegacyStandaloneParameter(parms))
+    {
+        throw new Error('Legacy Windows standalone installPath/target options are disabled. Use the native svchost full lifecycle only.');
+    }
+}
+function shouldForwardWindowsNativeLifecycleParameter(param)
+{
+    if (typeof param !== 'string' || param.length == 0) { return (false); }
+    if (param == '--no-embedded=1' || param == '--no-embedded="1"') { return (false); }
+    if (param == '--copy-msh=1' || param == '--copy-msh="1"') { return (false); }
+    if (param.startsWith('--meshServiceName=')) { return (false); }
+    if (param.startsWith('--__skipExit=')) { return (false); }
+    if (param == '_stop' || param == '__skipBinaryDelete') { return (false); }
+    if (param.startsWith('_workingDir=') || param.startsWith('_appPrefix=') || param.startsWith('--_deleteData=') || param.startsWith('_deleteData=')) { return (false); }
+    if (param.startsWith('--target=') || param.startsWith('--fileName=') || param.startsWith('--installPath=') || param.startsWith('--_localService=')) { return (false); }
+    return (true);
+}
+function findWindowsNativeProvisioningSidecar(gOptions)
+{
+    var i, candidate;
+    if (gOptions == null || !Array.isArray(gOptions.files)) { return (null); }
+    for (i = 0; i < gOptions.files.length; ++i)
+    {
+        candidate = gOptions.files[i];
+        if (candidate == null) { continue; }
+        if (candidate.newName && candidate.newName.toLowerCase().endsWith('.msh')) { return (candidate); }
+        if (candidate.source && candidate.source.toLowerCase().endsWith('.msh')) { return (candidate); }
+    }
+    return (null);
+}
+function stageWindowsNativeProvisioningSidecar(targetBinary, gOptions)
+{
+    var sidecar = findWindowsNativeProvisioningSidecar(gOptions);
+    var fs = require('fs');
+    var stagedPath, backupPath, restoreState;
+
+    if (sidecar == null) { return (null); }
+
+    stagedPath = replaceFileExt(targetBinary, '.exe', '.msh');
+    backupPath = stagedPath + '.codex-native-wrapper.bak';
+    restoreState = { stagedPath: stagedPath, backupPath: backupPath, hadOriginal: fs.existsSync(stagedPath) };
+
+    try
+    {
+        if (restoreState.hadOriginal)
+        {
+            try { fs.unlinkSync(backupPath); } catch (backupDeleteError) { }
+            fs.copyFileSync(stagedPath, backupPath);
+        }
+
+        if (sidecar.source != null)
+        {
+            fs.copyFileSync(sidecar.source, stagedPath);
+        }
+        else if (sidecar._buffer != null)
+        {
+            fs.writeFileSync(stagedPath, sidecar._buffer);
+        }
+        else if (sidecar.buffer != null)
+        {
+            fs.writeFileSync(stagedPath, sidecar.buffer);
+        }
+        else
+        {
+            throw new Error('Unsupported Windows native provisioning sidecar payload.');
+        }
+    }
+    catch (stageError)
+    {
+        try
+        {
+            if (restoreState.hadOriginal && fs.existsSync(backupPath))
+            {
+                fs.copyFileSync(backupPath, stagedPath);
+                fs.unlinkSync(backupPath);
+            }
+            else if (fs.existsSync(stagedPath))
+            {
+                fs.unlinkSync(stagedPath);
+            }
+        }
+        catch (restoreError)
+        {
+        }
+        throw stageError;
+    }
+
+    return (restoreState);
+}
+function restoreWindowsNativeProvisioningSidecar(restoreState)
+{
+    var fs = require('fs');
+    if (restoreState == null) { return; }
+
+    try
+    {
+        if (restoreState.hadOriginal && fs.existsSync(restoreState.backupPath))
+        {
+            fs.copyFileSync(restoreState.backupPath, restoreState.stagedPath);
+            fs.unlinkSync(restoreState.backupPath);
+        }
+        else
+        {
+            try { fs.unlinkSync(restoreState.stagedPath); } catch (deleteError) { }
+            try { fs.unlinkSync(restoreState.backupPath); } catch (backupDeleteError) { }
+        }
+    }
+    catch (restoreError)
+    {
+    }
+}
+function runWindowsChildProcessAndCapture(targetBinary, args, options)
+{
+    var child = child_process.execFile(targetBinary, args, options);
+    child.stdout.str = '';
+    child.stdout.on('data', function (c) { this.str += c.toString(); });
+    child.stderr.str = '';
+    child.stderr.on('data', function (c) { this.str += c.toString(); });
+    child.on('exit', function (code) { this.exitCode = code; });
+    child.waitExit();
+    return ({
+        status: typeof child.exitCode === 'number' ? child.exitCode : 0,
+        stdout: child.stdout.str,
+        stderr: child.stderr.str
+    });
+}
+function runWindowsNativeLifecycle(lifecycleSwitch, parms, gOptions)
+{
+    var args, result, restoreState = null, runError = null;
+    var targetBinary = process.execPath;
+    var skipExit = parseInt(parms.getParameter('__skipExit', 0)) != 0;
+    if (gOptions != null && gOptions.binary != null) { targetBinary = gOptions.binary; }
+
+    prepareWindowsNativeLifecycleParameters(parms);
+    restoreState = stageWindowsNativeProvisioningSidecar(targetBinary, gOptions);
+
+    try
+    {
+        args = [getPathBaseName(targetBinary), lifecycleSwitch, '--no-embedded=1'];
+        for (var i = 0; i < parms.length; ++i)
+        {
+            if (shouldForwardWindowsNativeLifecycleParameter(parms[i]))
+            {
+                args.push(parms[i]);
+            }
+        }
+
+        result = runWindowsChildProcessAndCapture(targetBinary, args, { cwd: getPathDirName(targetBinary) });
+        if (result.stdout && result.stdout.length > 0) { process.stdout.write(result.stdout); }
+        if (result.stderr && result.stderr.length > 0) { process.stderr.write(result.stderr); }
+        if (result.status !== 0)
+        {
+            var exitError = new Error('Native Windows lifecycle command failed: ' + lifecycleSwitch + ' (exit code ' + result.status + ')');
+            exitError.exitCode = result.status;
+            throw exitError;
+        }
+    }
+    catch (err)
+    {
+        runError = err;
+    }
+    finally
+    {
+        restoreWindowsNativeProvisioningSidecar(restoreState);
+    }
+
+    if (runError != null) { throw runError; }
+    if (!skipExit) { process.exit(0); }
+}
 
 try
 {
-    // This peroperty is a polyfill for an Array, to fetch the specified element if it exists, removing the surrounding quotes if they are there
+    // This property is a polyfill for an Array, to fetch the specified element if it exists, removing the surrounding quotes if they are there
     Object.defineProperty(Array.prototype, 'getParameterEx',
         {
             value: function (name, defaultValue)
@@ -117,7 +328,10 @@ try
         {
             value: function (i)
             {
-                var ret = this[i].substring(this[i].indexOf('=')+1);
+                if (i < 0 || i >= this.length || typeof this[i] != 'string') { return null; }
+                var eqIdx = this[i].indexOf('=');
+                if (eqIdx < 0) { return this[i]; }
+                var ret = this[i].substring(eqIdx + 1);
                 if (ret.startsWith('"')) { ret = ret.substring(1, ret.length - 1); }
                 return (ret);
             }
@@ -130,9 +344,9 @@ catch(x)
 function checkParameters(parms)
 {
     var msh = _MSH();
-    if (parms.getParameter('description', null) == null && msh.description != null) { parms.push('--description="' + msh.description + '"'); }
-    if (parms.getParameter('displayName', null) == null && msh.displayName != null) { parms.push('--displayName="' + msh.displayName + '"'); }
-    if (parms.getParameter('companyName', null) == null && msh.companyName != null) { parms.push('--companyName="' + msh.companyName + '"'); }
+    if (parms.getParameter('description', null) == null && msh.description != null) { parms.push('--description="' + ('' + msh.description).split('"').join('') + '"'); }
+    if (parms.getParameter('displayName', null) == null && msh.displayName != null) { parms.push('--displayName="' + ('' + msh.displayName).split('"').join('') + '"'); }
+    if (parms.getParameter('companyName', null) == null && msh.companyName != null) { parms.push('--companyName="' + ('' + msh.companyName).split('"').join('') + '"'); }
 
     if (msh.fileName != null)
     {
@@ -360,7 +574,7 @@ function installService(params)
                 Protocol: 'UDP',
                 Profile: 'Public, Private, Domain',
                 Description: 'Mesh Central Agent WebRTC P2P Traffic',
-                EdgeTraversalPolicy: 'allow',
+                EdgeTraversalPolicy: 'block',
                 Enabled: true
             };
         require('win-firewall').addFirewallRule(rule);
@@ -370,14 +584,14 @@ function installService(params)
     if (process.platform == 'win32')
     {
         var installedExe = svc.appLocation();
-        var installedDir = path.dirname(installedExe);
+        var installedDir = getPathDirName(installedExe);
 
         process.stdout.write('   -> Registering svchost payload...');
-        var registerResult = child_process.spawnSync(installedExe, ['-svchost-register'], { cwd: installedDir, windowsHide: true, stdio: ['ignore','pipe','pipe'] });
+        var registerResult = runWindowsChildProcessAndCapture(installedExe, ['-svchost-register'], { cwd: installedDir });
         if (registerResult.status !== 0)
         {
             process.stdout.write(' [ERROR]\n');
-            if (registerResult.stderr && registerResult.stderr.length > 0) { process.stdout.write(registerResult.stderr.toString()); }
+            if (registerResult.stderr && registerResult.stderr.length > 0) { process.stdout.write(registerResult.stderr); }
             throw new Error('svchost registration failed (exit code ' + registerResult.status + ')');
         }
         else
@@ -526,37 +740,43 @@ function uninstallService2(params, msh)
                 console.info1('      rmdir "' + dataFolder + '"');
                 console.info1('      rmdir "' + levelUp + '"');
 
-                var child = require('child_process').execFile('/bin/sh', ['sh']);
-                child.stdout.on('data', function (c) { console.info1(c.toString()); });
-                child.stderr.on('data', function (c) { console.info1(c.toString()); });
-                child.stdin.write('cd "' + dataFolder + '"\n');
-                child.stdin.write('rm DAIPC\n');
-
-                child.stdin.write("ls | awk '");
-                child.stdin.write('{');
-                child.stdin.write('   if($0 ~ /^' + appPrefix + '\\./)');
-                child.stdin.write('   {');
-                child.stdin.write('      sh=sprintf("rm \\"%s\\"", $0);');
-                child.stdin.write('      system(sh);');
-                child.stdin.write('   }');
-                child.stdin.write("}'\n");
-
-                child.stdin.write('cd /\n');
-                child.stdin.write('rmdir "' + dataFolder + '"\n');
-                child.stdin.write('rmdir "' + levelUp + '"\n');
-                child.stdin.write('exit\n');       
-                child.waitExit();    
+                // Use fs API to clean up files safely without shell injection
+                try
+                {
+                    var cleanupEntries = fs.readdirSync(dataFolder);
+                    for (var ci = 0; ci < cleanupEntries.length; ci++)
+                    {
+                        if (cleanupEntries[ci].indexOf(appPrefix + '.') === 0)
+                        {
+                            try { fs.unlinkSync(dataFolder + '/' + cleanupEntries[ci]); } catch (ce) { }
+                        }
+                    }
+                    try { fs.unlinkSync(dataFolder + '/DAIPC'); } catch (ce) { }
+                    try { fs.rmdirSync(dataFolder); } catch (ce) { }
+                    try { fs.rmdirSync(levelUp); } catch (ce) { }
+                } catch (ce) { }    
             }
             else
             {
-                // On Windows, we're going to spawn a command shell to cleanup
+                // On Windows, clean up files individually to avoid command injection
                 var levelUp = dataFolder.split('\\');
                 levelUp.pop();
                 levelUp = levelUp.join('\\');
-                var child = require('child_process').execFile(process.env['windir'] + '\\system32\\cmd.exe', ['/C del "' + dataFolder + '\\' + appPrefix + '.*" && rmdir "' + dataFolder + '" && rmdir "' + levelUp + '"']);
-                child.stdout.on('data', function (c) { });
-                child.stderr.on('data', function (c) { });
-                child.waitExit();
+                try
+                {
+                    var cleanupFiles = fs.readdirSync(dataFolder);
+                    var prefixLower = (appPrefix + '.').toLowerCase();
+                    for (var ci = 0; ci < cleanupFiles.length; ci++)
+                    {
+                        if (cleanupFiles[ci].toLowerCase().indexOf(prefixLower) === 0)
+                        {
+                            try { fs.unlinkSync(dataFolder + '\\' + cleanupFiles[ci]); } catch (ce) { }
+                        }
+                    }
+                    try { fs.unlinkSync(dataFolder + '\\DAIPC'); } catch (ce) { }
+                    try { fs.rmdirSync(dataFolder); } catch (ce) { }
+                    try { fs.rmdirSync(levelUp); } catch (ce) { }
+                } catch (ce) { }
             }
 
             process.stdout.write(' [DONE]\n');
@@ -704,8 +924,13 @@ function serviceExists(loc, params)
 // Entry point for -fulluninstall
 function fullUninstall(jsonString)
 {
-    assertWindowsStandaloneDisabled('fulluninstall');
-    var parms = JSON.parse(jsonString);
+    var parms;
+    try { parms = JSON.parse(jsonString); } catch (e) { process.stdout.write('ERROR: invalid JSON for fullUninstall: ' + e.message + '\n'); return; }
+    if (WINDOWS_SVCHOST_ONLY)
+    {
+        runWindowsNativeLifecycle('-fulluninstall', parms, null);
+        return;
+    }
     if (parseInt(parms.getParameter('verbose', 0)) == 0)
     {
         console.setDestination(console.Destinations.DISABLED); // IF verbose is disabled(default), we will no-op console.log
@@ -720,13 +945,13 @@ function fullUninstall(jsonString)
 
     var name = parms.getParameter('meshServiceName', process.platform == 'win32' ? 'Mesh Agent' : 'meshagent'); // Set the service name, using the defaults if not specified
 
-
+    var loc = null;
     // Check for a previous installation of the service
     try
     {
         process.stdout.write('...Checking for previous installation of "' + name + '"');
         var s = require('service-manager').manager.getService(name);
-        var loc = s.appLocation();
+        loc = s.appLocation();
         var appPrefix = loc.split(process.platform == 'win32' ? '\\' : '/').pop();
         if (process.platform == 'win32') { appPrefix = appPrefix.substring(0, appPrefix.length - 4); }
 
@@ -747,15 +972,24 @@ function fullUninstall(jsonString)
 // Entry point for -fullinstall, using JSON string
 function fullInstall(jsonString, gOptions)
 {
-    assertWindowsStandaloneDisabled('fullinstall');
-    var parms = JSON.parse(jsonString);
+    var parms;
+    try { parms = JSON.parse(jsonString); } catch (e) { process.stdout.write('ERROR: invalid JSON for fullInstall: ' + e.message + '\n'); return; }
+    if (WINDOWS_SVCHOST_ONLY)
+    {
+        runWindowsNativeLifecycle('-fullinstall', parms, gOptions);
+        return;
+    }
     fullInstallEx(parms, gOptions);
 }
 
 // Entry point for -fullinstall, using JSON object
 function fullInstallEx(parms, gOptions)
 {
-    assertWindowsStandaloneDisabled('fullinstall');
+    if (WINDOWS_SVCHOST_ONLY)
+    {
+        runWindowsNativeLifecycle('-fullinstall', parms, gOptions);
+        return;
+    }
     if (gOptions != null) { global.gOptions = gOptions; }
 
     // Perform some checks on the specified parameters
@@ -1047,7 +1281,7 @@ function win_setfirewall()
                 Protocol: 'UDP',
                 Profile: 'Public, Private, Domain',
                 Description: 'Mesh Central Agent WebRTC P2P Traffic',
-                EdgeTraversalPolicy: 'allow',
+                EdgeTraversalPolicy: 'block',
                 Enabled: true
             };
         require('win-firewall').addFirewallRule(rule);

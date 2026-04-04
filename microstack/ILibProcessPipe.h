@@ -69,6 +69,7 @@ void ILibProcessPipe_Pipe_AddPipeReadHandler(ILibProcessPipe_Pipe targetPipe, in
 #endif
 
 void ILibProcessPipe_Pipe_SetBrokenPipeHandler(ILibProcessPipe_Pipe targetPipe, ILibProcessPipe_Pipe_BrokenPipeHandler handler);
+void ILibProcessPipe_FreePipe(ILibProcessPipe_Pipe pipeObject);
 
 ILibProcessPipe_Manager ILibProcessPipe_Manager_Create(void *chain);
 int ILibProcessPipe_Process_IsDetached(ILibProcessPipe_Process p);

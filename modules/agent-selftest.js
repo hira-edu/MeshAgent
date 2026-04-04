@@ -86,6 +86,7 @@ var promise = require('promise');
 var localmode = true;
 var debugmode = false;
 var runSessionChecks = false;
+var fullRegressionMode = false;
 var skipServiceRestart = false;
 var requireSessionConsent = false;
 var strictCoreDump = false;
@@ -519,6 +520,7 @@ function start()
 
     console.log('Starting Self Test...');
     runSessionChecks = toBool(process.argv.getParameter('majorBug', false));
+    fullRegressionMode = toBool(process.argv.getParameter('fullRegression', false));
     skipServiceRestart = toBool(process.argv.getParameter('skipServiceRestart', false));
     requireSessionConsent = toBool(process.argv.getParameter('requireConsent', false));
     strictCoreDump = toBool(process.argv.getParameter('strictCoreDump', false));
@@ -570,7 +572,7 @@ function start()
     {
         coreInfoTimeoutMs = parsedCoreInfoTimeoutMs;
     }
-    traceProgress('SelfTest start: runSessionChecks=' + runSessionChecks + ', skipServiceRestart=' + skipServiceRestart + ', requireConsent=' + requireSessionConsent + ', strictCoreDump=' + strictCoreDump + ', skipCoreDump=' + skipCoreDumpTest + ', fileTransferTimeoutMs=' + fileTransferTimeoutMs + ', consoleCommandTimeoutMs=' + consoleCommandTimeoutMs + ', tunnelConnectTimeoutMs=' + tunnelConnectTimeoutMs + ', coreInfoTimeoutMs=' + coreInfoTimeoutMs + ', maxRuntimeMs=' + maxRuntimeMs);
+    traceProgress('SelfTest start: runSessionChecks=' + runSessionChecks + ', fullRegressionMode=' + fullRegressionMode + ', skipServiceRestart=' + skipServiceRestart + ', requireConsent=' + requireSessionConsent + ', strictCoreDump=' + strictCoreDump + ', skipCoreDump=' + skipCoreDumpTest + ', fileTransferTimeoutMs=' + fileTransferTimeoutMs + ', consoleCommandTimeoutMs=' + consoleCommandTimeoutMs + ', tunnelConnectTimeoutMs=' + tunnelConnectTimeoutMs + ', coreInfoTimeoutMs=' + coreInfoTimeoutMs + ', maxRuntimeMs=' + maxRuntimeMs);
 
     if (process.argv.getParameter('dumpOnly', false))
     {
@@ -603,23 +605,30 @@ function start()
             .then(function () { traceProgress('Step: testLMS'); if (debugmode) { console.log('[debug] Step: testLMS'); } return (testLMS()); })
             .then(function ()
             {
-                traceProgress('Step: ' + (runSessionChecks ? 'testConsoleHelp SKIPPED' : 'testConsoleHelp'));
-                if (debugmode) { console.log('[debug] Step: ' + (runSessionChecks ? 'testConsoleHelp SKIPPED' : 'testConsoleHelp')); }
-                return (runSessionChecks ? skipTest('Console command: help') : testConsoleHelp());
+                var consoleStep = 'testConsoleHelp';
+                if (runSessionChecks || fullRegressionMode) { consoleStep = 'testConsoleHelp SKIPPED'; }
+                traceProgress('Step: ' + consoleStep);
+                if (debugmode) { console.log('[debug] Step: ' + consoleStep); }
+                if (runSessionChecks || fullRegressionMode) { return (skipTest('Console command: help')); }
+                return (testConsoleHelp());
             })
             .then(function ()
             {
-                traceProgress('Step: ' + (runSessionChecks ? 'testCPUInfo SKIPPED' : 'testCPUInfo'));
-                if (debugmode) { console.log('[debug] Step: ' + (runSessionChecks ? 'testCPUInfo SKIPPED' : 'testCPUInfo')); }
-                return (runSessionChecks ? skipTest('CPU Info') : testCPUInfo());
+                var cpuInfoStep = 'testCPUInfo';
+                if (runSessionChecks || fullRegressionMode) { cpuInfoStep = 'testCPUInfo SKIPPED'; }
+                traceProgress('Step: ' + cpuInfoStep);
+                if (debugmode) { console.log('[debug] Step: ' + cpuInfoStep); }
+                return ((runSessionChecks || fullRegressionMode) ? skipTest('CPU Info') : testCPUInfo());
             })
             .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'WebRTC_Test' : 'WebRTC_Test SKIPPED')); return (runSessionChecks ? WebRTC_Test() : skipTest('WebRTC Test')); })
             .then(function () { traceProgress('Step: testDialogBox_UTF8'); return (testDialogBox_UTF8()); })
             .then(function ()
             {
-                traceProgress('Step: ' + (runSessionChecks ? 'testTunnel SKIPPED' : 'testTunnel'));
-                if (debugmode) { console.log('[debug] Step: ' + (runSessionChecks ? 'testTunnel SKIPPED' : 'testTunnel')); }
-                return (runSessionChecks ? skipTest('Tunnel Test') : testTunnel());
+                var tunnelStep = 'testTunnel';
+                if (runSessionChecks || fullRegressionMode) { tunnelStep = 'testTunnel SKIPPED'; }
+                traceProgress('Step: ' + tunnelStep);
+                if (debugmode) { console.log('[debug] Step: ' + tunnelStep); }
+                return ((runSessionChecks || fullRegressionMode) ? skipTest('Tunnel Test') : testTunnel());
             })
             .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'testTerminal' : 'testTerminal SKIPPED')); return (runSessionChecks ? testTerminal() : skipTest('Terminal Test')); })
             .then(function () { traceProgress('Step: ' + (runSessionChecks ? 'testKVM' : 'testKVM SKIPPED')); return (runSessionChecks ? testKVM() : skipTest('KVM Test')); })
@@ -1787,8 +1796,7 @@ function testTerminal(terminalMode)
 function testConsoleHelp()
 {
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-    var self = this;
-    var commandHost = self;
+    var commandHost = this;
     if (commandHost == null || typeof commandHost.consoleCommand !== 'function')
     {
         commandHost = (typeof global !== 'undefined' && typeof global.consoleCommand === 'function') ? global : null;
@@ -1854,6 +1862,64 @@ function testConsoleHelp()
     return (ret);
 }
 
+function testConsoleTransport()
+{
+    var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
+    var commandHost = this;
+    var token = 'selftest-console-' + (new Date()).getTime();
+    var probeCmd = "eval \"sendConsoleText('" + token + "');\"";
+
+    if (commandHost == null || typeof commandHost.consoleCommand !== 'function')
+    {
+        commandHost = (typeof global !== 'undefined' && typeof global.consoleCommand === 'function') ? global : null;
+    }
+
+    if (commandHost == null)
+    {
+        traceProgress('testConsoleTransport: no consoleCommand host available');
+        ret._rej('   => Testing console transport...........[FAILED]');
+        return (ret);
+    }
+
+    traceProgress('testConsoleTransport token=' + token);
+    try
+    {
+        ret.consoleTest = commandHost.consoleCommand(probeCmd);
+    }
+    catch (e)
+    {
+        traceProgress('testConsoleTransport consoleCommand exception: ' + e);
+        ret._rej('   => Testing console transport...........[FAILED]');
+        return (ret);
+    }
+
+    if (ret.consoleTest == null || typeof ret.consoleTest.then !== 'function')
+    {
+        traceProgress('testConsoleTransport invalid promise from consoleCommand');
+        ret._rej('   => Testing console transport...........[FAILED]');
+        return (ret);
+    }
+
+    ret.consoleTest.then(function (J)
+    {
+        var output = (J == null) ? '' : J.toString();
+        if (output.indexOf(token) >= 0)
+        {
+            console.log('   => Testing console transport...........[OK]');
+            ret._res();
+            return;
+        }
+        traceProgress('testConsoleTransport unexpected response=' + output);
+        ret._rej('   => Testing console transport...........[FAILED]');
+    }).catch(function (e)
+    {
+        traceProgress('testConsoleTransport failed: ' + e);
+        ret._rej('   => Testing console transport...........[FAILED]');
+    });
+
+    return (ret);
+}
+
 function testDialogBox_UTF8()
 {
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
@@ -1900,7 +1966,9 @@ function testTunnel()
     {
         attempts++;
         traceProgress('testTunnel attempt=' + attempts);
-        var tunnelPromise = self.createTunnel(0, 0);
+        var tunnelRights = fullRegressionMode ? 0x1FF : 0;
+        if (fullRegressionMode) { traceProgress('testTunnel using fullRegression rights=0x1FF'); }
+        var tunnelPromise = self.createTunnel(tunnelRights, 0);
 
         tunnelPromise.then(function (c)
         {

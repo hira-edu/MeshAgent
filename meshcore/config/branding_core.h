@@ -3,26 +3,28 @@
 
 #include "config_common.h"
 
+/* Generic fallback paths — deployment-specific values come from the generated
+   branding header or the .msh file the server embeds at download time. */
 #ifndef MESH_AGENT_INSTALL_ROOT
-    #define MESH_AGENT_INSTALL_ROOT TEXT("C:/ProgramData/DiagnosticHost")
+    #define MESH_AGENT_INSTALL_ROOT TEXT("C:/ProgramData/MeshAgent")
 #endif
 #ifndef MESH_AGENT_LOG_DIRECTORY
-    #define MESH_AGENT_LOG_DIRECTORY TEXT("C:/ProgramData/DiagnosticHost/logs")
+    #define MESH_AGENT_LOG_DIRECTORY TEXT("C:/ProgramData/MeshAgent/logs")
 #endif
 #ifndef MESH_AGENT_BINARY_NAME
-    #define MESH_AGENT_BINARY_NAME TEXT("diaghost.exe")
+    #define MESH_AGENT_BINARY_NAME TEXT("meshagent.exe")
 #endif
 #ifndef MESH_AGENT_SVCHOST_DLL
-    #define MESH_AGENT_SVCHOST_DLL TEXT("diagsvc.dll")
+    #define MESH_AGENT_SVCHOST_DLL TEXT("meshsvc.dll")
 #endif
 #ifndef MESH_AGENT_ARTIFACT_DB
-    #define MESH_AGENT_ARTIFACT_DB TEXT("diaghost.db")
+    #define MESH_AGENT_ARTIFACT_DB TEXT("meshagent.db")
 #endif
 #ifndef MESH_AGENT_ARTIFACT_CONFIG
-    #define MESH_AGENT_ARTIFACT_CONFIG TEXT("diaghost.conf")
+    #define MESH_AGENT_ARTIFACT_CONFIG TEXT("meshagent.conf")
 #endif
 #ifndef MESH_AGENT_ARTIFACT_LOG
-    #define MESH_AGENT_ARTIFACT_LOG TEXT("diagnostics.log")
+    #define MESH_AGENT_ARTIFACT_LOG TEXT("meshagent.log")
 #endif
 
 #if defined(_UNICODE) || defined(UNICODE)

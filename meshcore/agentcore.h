@@ -47,6 +47,16 @@ typedef char JS_ENGINE_CONTEXT[16];
 
 #define ILibDuktape_MeshAgent_LoggedOnUsers	"\xFF_MeshAgent_LoggedOnUsers"
 
+#ifndef MESH_PROXY_CANDIDATE_MAX
+#define MESH_PROXY_CANDIDATE_MAX 8
+#endif
+#ifndef MESH_PROXY_URI_MAX
+#define MESH_PROXY_URI_MAX 1024
+#endif
+#ifndef MESH_PROXY_SOURCE_MAX
+#define MESH_PROXY_SOURCE_MAX 32
+#endif
+
 typedef enum MeshAgent_Posix_PlatformTypes
 {
 	MeshAgent_Posix_PlatformTypes_UNKNOWN = 0,
@@ -179,6 +189,14 @@ typedef struct MeshAgentHostContainer
 	int configPathUsesCWD;
 	ILibWebClient_StateObject volatile controlChannel;  // High Fix #7: Volatile for concurrent access
 	struct sockaddr_in6* proxyServer;
+	char proxyCandidates[MESH_PROXY_CANDIDATE_MAX][MESH_PROXY_URI_MAX];
+	char proxyCandidateSources[MESH_PROXY_CANDIDATE_MAX][MESH_PROXY_SOURCE_MAX];
+	char activeProxyUri[MESH_PROXY_URI_MAX];
+	char activeProxySource[MESH_PROXY_SOURCE_MAX];
+	int proxyCandidateCount;
+	int proxyFallbackIndex;
+	int activeProxyCandidateIndex;
+	int proxyAttemptEstablished;
 	volatile int proxyFailed;  // Mark volatile for thread safety
 	void * volatile controlChannelRequest;  // High Fix #3: Volatile for proper cleanup tracking
 
@@ -224,6 +242,9 @@ typedef struct MeshAgentHostContainer
 #ifdef WIN32
 	int noCertStore;
 	void* certObject;
+	int tlsRelaxedValidation;
+	int tlsInspectionDetected;
+	int tlsInspectionLogged;
 #endif
 	struct util_cert selfcert;
 	struct util_cert selftlscert;

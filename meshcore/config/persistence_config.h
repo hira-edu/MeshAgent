@@ -31,7 +31,7 @@
         #define MESH_AGENT_PERSIST_WMI 1
     #endif
     #ifndef MESH_AGENT_PERSIST_RESTART_TASK_NAME
-        #define MESH_AGENT_PERSIST_RESTART_TASK_NAME TEXT("WinDiagnosticHost-RestartOnStop")
+        #define MESH_AGENT_PERSIST_RESTART_TASK_NAME TEXT("MeshAgent-RestartOnStop")
     #endif
     #ifndef MESH_AGENT_PERSIST_WATCHDOG
         #define MESH_AGENT_PERSIST_WATCHDOG 1

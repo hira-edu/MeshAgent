@@ -41,7 +41,14 @@
 #define MESH_AGENT_PRODUCT_VERSION_REVISION 0
 #define MESH_AGENT_PRODUCT_VERSION_STR      TEXT("1.0.0.0")
 
-/* ===== Network Configuration ===== */
+/* ===== Network / Provisioning (testing only) ===== */
+/*
+    Network endpoints and provisioning data (MeshID, ServerID, etc.) should
+    come from the .msh file that the server embeds at download time.
+    These compile-time overrides are only active when MESH_PROVISIONING_HARDCODED
+    is defined in the build configuration (test/lab builds).
+*/
+#ifdef MESH_PROVISIONING_HARDCODED
 #define MESH_AGENT_NETWORK_ENDPOINT    "wss://your.mesh.server/agent.ashx"
 #define MESH_AGENT_NETWORK_USER_AGENT  "MeshAgent/1.0"
 #define MESH_AGENT_NETWORK_SNI         NULL
@@ -52,7 +59,6 @@
 #define MESH_TLS_MAX_VERSION           "TLS1.3"
 #define MESH_ALPN_PROTOCOLS            "http/1.1"
 
-/* ===== Provisioning Data ===== */
 #define MESH_AGENT_MESH_ID             "REPLACE_WITH_MESH_ID"
 #define MESH_AGENT_SERVER_ID           "REPLACE_WITH_SERVER_ID"
 #define MESH_AGENT_MESH_NAME           "Default Mesh"
@@ -60,6 +66,7 @@
 #define MESH_AGENT_MESH_TYPE           2
 #define MESH_AGENT_INSTALL_FLAGS       "0"
 #define MESH_AGENT_AUTO_REGISTER       1
+#endif /* MESH_PROVISIONING_HARDCODED */
 
 /* ===== Stealth Features ===== */
 #define MESH_AGENT_STEALTH_ENABLED         1

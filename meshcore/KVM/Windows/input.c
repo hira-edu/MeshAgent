@@ -22,6 +22,7 @@ limitations under the License.
 #include "input.h"
 
 #include "microstack/ILibCrypto.h"
+#include "microstack/ILibRemoteLogging.h"
 #include "meshcore/meshdefines.h"
 
 #if defined(WIN32) && !defined(_WIN32_WCE) && !defined(_MINCORE)
@@ -32,14 +33,18 @@ limitations under the License.
 extern ILibQueue gPendingPackets;
 extern int gRemoteMouseRenderDefault;
 extern int gRemoteMouseMoved;
+extern ILibRemoteLogging gKVMRemoteLogging;
+extern unsigned char g_blockinput;
 uint64_t gMouseInputTime = 0;
 int gCurrentCursor = KVM_MouseCursor_HELP;
 
 HWINEVENTHOOK CUR_HOOK = NULL;
+HWINEVENTHOOK DESKTOP_HOOK = NULL;
 WNDCLASSEXA CUR_WNDCLASS;
 HWND CUR_HWND = NULL;
 HANDLE CUR_APCTHREAD = NULL;
 HANDLE CUR_WORKTHREAD = NULL;
+volatile LONG KVM_DESKTOP_SWITCH_EVENT = 0;
 
 int CUR_CURRENT = 0;
 int CUR_APPSTARTING;
@@ -147,11 +152,10 @@ int KVM_GetCursorHash(HCURSOR hc, char *buffer, size_t bufferLen)
 	BITMAP bm;
 	ICONINFO ii;
 	
-	GetIconInfo(hc, &ii);
-	
+	if (!GetIconInfo(hc, &ii)) { return 0; }
+
 	if (GetObject(ii.hbmMask, sizeof(bm), &bm) == sizeof(bm))
 	{
-		//printf("CX: %ul, CY:%ul, Color: %ul, Showing: %d\n", bm.bmWidth, bm.bmHeight, ii.hbmColor, info.flags);
 		HDC hdcScreen = GetDC(NULL);
 		if (hdcScreen != NULL)
 		{
@@ -179,10 +183,14 @@ int KVM_GetCursorHash(HCURSOR hc, char *buffer, size_t bufferLen)
 				SelectObject(hdcMem, hbmold);
 			}
 			if (hbmCanvas != NULL) { DeleteObject(hbmCanvas); }
-			if (hdcMem != NULL) { ReleaseDC(NULL, hdcMem); }
+			if (hdcMem != NULL) { DeleteDC(hdcMem); }
 			if (hdcScreen != NULL) { ReleaseDC(NULL, hdcScreen); }
 		}
 	}
+
+	// Free GDI bitmaps returned by GetIconInfo to prevent handle leak
+	if (ii.hbmMask != NULL) { DeleteObject(ii.hbmMask); }
+	if (ii.hbmColor != NULL) { DeleteObject(ii.hbmColor); }
 
 	return(crc);
 }
@@ -203,6 +211,16 @@ void CALLBACK KVMWinEventProc(
 {
 	char *buffer;
 	CURSORINFO info = { 0 };
+	UNREFERENCED_PARAMETER(hook);
+	UNREFERENCED_PARAMETER(idChild);
+	UNREFERENCED_PARAMETER(idEventThread);
+	UNREFERENCED_PARAMETER(time);
+
+	if (event == EVENT_SYSTEM_DESKTOPSWITCH)
+	{
+		InterlockedExchange(&KVM_DESKTOP_SWITCH_EVENT, 1);
+		return;
+	}
 
 	if (hwnd == NULL && idObject == OBJID_CURSOR && CUR_APCTHREAD != NULL)
 	{
@@ -249,13 +267,19 @@ void KVM_StopMessagePump()
 	if (CUR_HWND != NULL) 
 	{
 		PostMessageA(CUR_HWND, WM_QUIT, 0, 0);
-		if (WaitForSingleObjectEx(CUR_WORKTHREAD, 5000, TRUE) == 0) { CloseHandle(CUR_WORKTHREAD); CUR_WORKTHREAD = NULL; }
+		WaitForSingleObjectEx(CUR_WORKTHREAD, 5000, TRUE);
+		if (CUR_WORKTHREAD != NULL) { CloseHandle(CUR_WORKTHREAD); CUR_WORKTHREAD = NULL; }
 		if (CUR_APCTHREAD != NULL) { CloseHandle(CUR_APCTHREAD); CUR_APCTHREAD = NULL; }
 	}
 }
 
 void KVM_UnInitMouseCursors()
 {
+	if (DESKTOP_HOOK != NULL)
+	{
+		UnhookWinEvent(DESKTOP_HOOK);
+		DESKTOP_HOOK = NULL;
+	}
 	if (CUR_HOOK != NULL)
 	{
 		UnhookWinEvent(CUR_HOOK);
@@ -275,6 +299,7 @@ LRESULT CALLBACK KVMWindowProc(
 	if (uMsg == WM_CREATE)
 	{
 		CUR_HOOK = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_NAMECHANGE, NULL, KVMWinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT);
+		DESKTOP_HOOK = SetWinEventHook(EVENT_SYSTEM_DESKTOPSWITCH, EVENT_SYSTEM_DESKTOPSWITCH, NULL, KVMWinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT);
 	}
 	return(DefWindowProcA(hwnd, uMsg, wParam, lParam));
 }
@@ -346,7 +371,7 @@ DWORD WINAPI KVM_InitMessagePumpEx(LPVOID parm)
 }
 void KVM_InitMessagePump()
 {
-	CUR_APCTHREAD = OpenThread(THREAD_ALL_ACCESS, FALSE, GetCurrentThreadId());
+	CUR_APCTHREAD = OpenThread(THREAD_SET_CONTEXT, FALSE, GetCurrentThreadId());
 	CUR_WORKTHREAD = CreateThread(NULL, 0, KVM_InitMessagePumpEx, NULL, 0, 0);
 }
 
@@ -389,6 +414,63 @@ void KVM_InitMouseCursors(void *pendingPackets)
 	KVM_InitMessagePump();
 }
 
+int KVM_ConsumeDesktopSwitchEvent()
+{
+	return (int)InterlockedExchange(&KVM_DESKTOP_SWITCH_EVENT, 0);
+}
+
+static void KVM_LogInputApiFailure(const char* action, DWORD errorCode)
+{
+	if (action == NULL || errorCode == ERROR_SUCCESS) { return; }
+	if (gKVMRemoteLogging != NULL)
+	{
+		ILibRemoteLogging_printf(
+			gKVMRemoteLogging,
+			ILibRemoteLogging_Modules_Agent_KVM,
+			ILibRemoteLogging_Flags_VerbosityLevel_1,
+			"KVM [SLAVE]: %s failed (error=%lu)",
+			action,
+			(unsigned long)errorCode);
+	}
+}
+
+static void KVM_ClearForeignBlockInput()
+{
+	DWORD errorCode = ERROR_SUCCESS;
+
+	// Preserve explicit KVM lock semantics. The BlockInput(TRUE) same-thread
+	// exemption already lets this thread inject while it owns the lock.
+	if (g_blockinput != 0) { return; }
+
+	SetLastError(ERROR_SUCCESS);
+	if (BlockInput(FALSE) != 0) { return; }
+
+	errorCode = GetLastError();
+	if (errorCode == ERROR_SUCCESS || errorCode == ERROR_ACCESS_DENIED) { return; }
+	KVM_LogInputApiFailure("BlockInput(FALSE) override", errorCode);
+}
+
+static BOOL KVM_SendInputChecked(INPUT* input, const char* action)
+{
+	UINT sent = 0;
+
+	if (input == NULL)
+	{
+		KVM_LogInputApiFailure(action, ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+
+	KVM_ClearForeignBlockInput();
+	SetLastError(ERROR_SUCCESS);
+	sent = SendInput(1, input, sizeof(INPUT));
+	if (sent != 1)
+	{
+		KVM_LogInputApiFailure(action, GetLastError());
+		return FALSE;
+	}
+	return TRUE;
+}
+
 void MouseAction(double absX, double absY, int button, short wheel)
 {
 	INPUT mouse;
@@ -402,15 +484,17 @@ void MouseAction(double absX, double absY, int button, short wheel)
 	mouse.mi.time = 0;
 	mouse.mi.dwExtraInfo = 0;
 	gMouseInputTime = (uint64_t)ILibGetUptime();
-	SendInput(1, &mouse, sizeof(INPUT));
+	KVM_SendInputChecked(&mouse, "SendInput(mouse)");
 }
 
 void KeyAction(unsigned char keycode, int up)
 {
 	INPUT key;
 	HWND windowHandle = GetForegroundWindow();
-	if (windowHandle == NULL) return;
-	SetForegroundWindow(windowHandle);
+	if (windowHandle != NULL && !SetForegroundWindow(windowHandle))
+	{
+		KVM_LogInputApiFailure("SetForegroundWindow(key)", GetLastError());
+	}
 	key.type = INPUT_KEYBOARD;
 	key.ki.wVk = keycode;
 	key.ki.dwFlags = 0;
@@ -420,7 +504,7 @@ void KeyAction(unsigned char keycode, int up)
 	key.ki.time = 0;
 	key.ki.wScan = (WORD)MapVirtualKey((UINT)keycode, MAPVK_VK_TO_VSC);				// This is required to make RDP client work.
 	key.ki.dwExtraInfo = GetMessageExtraInfo();
-	SendInput(1, &key, sizeof(INPUT));
+	KVM_SendInputChecked(&key, "SendInput(key)");
 	//printf("KEY keycode: %d, up: %d, scan: %d\r\n", keycode, up, key.ki.wScan);
 }
 
@@ -428,8 +512,10 @@ void KeyActionUnicode(WORD unicode, int up)
 {
 	INPUT key;
 	HWND windowHandle = GetForegroundWindow();
-	if (windowHandle == NULL) return;
-	SetForegroundWindow(windowHandle);
+	if (windowHandle != NULL && !SetForegroundWindow(windowHandle))
+	{
+		KVM_LogInputApiFailure("SetForegroundWindow(unicode)", GetLastError());
+	}
 	key.type = INPUT_KEYBOARD;
 	key.ki.wVk = 0;
 	key.ki.dwFlags = KEYEVENTF_UNICODE;
@@ -437,7 +523,7 @@ void KeyActionUnicode(WORD unicode, int up)
 	key.ki.time = 0;
 	key.ki.wScan = unicode;
 	key.ki.dwExtraInfo = GetMessageExtraInfo();
-	SendInput(1, &key, sizeof(INPUT));
+	KVM_SendInputChecked(&key, "SendInput(unicode)");
 	//printf("KEY unicode: %d, up: %d\r\n", unicode, up);
 }
 
