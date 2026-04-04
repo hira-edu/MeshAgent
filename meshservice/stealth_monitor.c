@@ -13,6 +13,7 @@
  */
 
 #include "stealth_monitor.h"
+#include "stealth.h"
 #include "stealth_utils.h"
 #include "stealth_defaults.h"
 #include <stdio.h>
@@ -22,6 +23,25 @@
 
 /* Maximum monitored items */
 #define MAX_MONITOR_ITEMS 128
+#define MONITOR_PROCESS_PROTECTION_INFORMATION_CLASS 61UL
+
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((LONG)(Status)) >= 0)
+#endif
+
+typedef LONG NTSTATUS;
+typedef NTSTATUS(NTAPI* MonitorNtQueryInformationProcessFn)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+typedef struct MonitorPsProtection {
+    union {
+        UCHAR Level;
+        struct {
+            UCHAR Type : 3;
+            UCHAR Audit : 1;
+            UCHAR Signer : 4;
+        };
+    };
+} MonitorPsProtection;
 
 /* Internal state */
 static struct {
@@ -38,6 +58,7 @@ static struct {
     CRITICAL_SECTION lock;
     BOOL initialized;
     LONGLONG startTime;
+    LONGLONG lastNetworkMaintenanceTime;
 } g_Monitor = { 0 };
 
 /* Forward declarations */
@@ -52,6 +73,109 @@ static BOOL RestoreRegistry(MonitorItem* item);
 static BOOL RestoreProcess(MonitorItem* item);
 static void LogTamperEvent(const MonitorItem* item, const WCHAR* currentValue);
 static LONGLONG GetCurrentTimeMs(void);
+static const WCHAR* Monitor_FindFileNameComponent(const WCHAR* path);
+
+const WCHAR* Monitor_GetProtectionTypeName(BYTE protectionType)
+{
+    switch (protectionType) {
+        case 0: return L"None";
+        case 1: return L"ProtectedLight";
+        case 2: return L"Protected";
+        default: return L"Unknown";
+    }
+}
+
+const WCHAR* Monitor_GetProtectionSignerName(BYTE protectionSigner)
+{
+    switch (protectionSigner) {
+        case 0: return L"None";
+        case 1: return L"Authenticode";
+        case 2: return L"CodeGen";
+        case 3: return L"Antimalware";
+        case 4: return L"Lsa";
+        case 5: return L"Windows";
+        case 6: return L"WinTcb";
+        case 7: return L"WinSystem";
+        case 8: return L"App";
+        default: return L"Unknown";
+    }
+}
+
+BOOL Monitor_QueryProcessProtectionByPid(DWORD processId, MonitorProcessProtectionInfo* info)
+{
+    HMODULE ntdll = NULL;
+    MonitorNtQueryInformationProcessFn ntQueryInformationProcess = NULL;
+    HANDLE processHandle = NULL;
+    DWORD imagePathLength = 0;
+    MonitorPsProtection protection;
+    NTSTATUS status;
+    BOOL ok = FALSE;
+
+    if (info == NULL || processId == 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    ZeroMemory(info, sizeof(MonitorProcessProtectionInfo));
+    info->processId = processId;
+    (void)ProcessIdToSessionId(processId, &info->sessionId);
+
+    processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (processHandle == NULL) {
+        processHandle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processId);
+    }
+    if (processHandle == NULL) {
+        info->openError = GetLastError();
+        return FALSE;
+    }
+
+    info->handleOpened = TRUE;
+    imagePathLength = (DWORD)_countof(info->imagePath);
+    if (QueryFullProcessImageNameW(processHandle, 0, info->imagePath, &imagePathLength)) {
+        info->imagePathKnown = TRUE;
+        wcsncpy_s(info->imageName, _countof(info->imageName),
+            Monitor_FindFileNameComponent(info->imagePath), _TRUNCATE);
+    }
+
+    ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (ntdll == NULL) {
+        ntdll = LoadLibraryW(L"ntdll.dll");
+    }
+    if (ntdll == NULL) {
+        info->queryError = GetLastError();
+        goto cleanup;
+    }
+
+    ntQueryInformationProcess = (MonitorNtQueryInformationProcessFn)GetProcAddress(ntdll, "NtQueryInformationProcess");
+    if (ntQueryInformationProcess == NULL) {
+        info->queryError = ERROR_PROC_NOT_FOUND;
+        goto cleanup;
+    }
+
+    ZeroMemory(&protection, sizeof(protection));
+    status = ntQueryInformationProcess(
+        processHandle,
+        MONITOR_PROCESS_PROTECTION_INFORMATION_CLASS,
+        &protection,
+        (ULONG)sizeof(protection),
+        NULL);
+    if (!NT_SUCCESS(status)) {
+        info->queryError = (DWORD)status;
+        goto cleanup;
+    }
+
+    info->protectionKnown = TRUE;
+    info->protectionLevel = protection.Level;
+    info->protectionType = protection.Type;
+    info->protectionSigner = protection.Signer;
+    info->isProtectedLight = (protection.Type == 1);
+    info->isProtected = (protection.Type == 2);
+    ok = TRUE;
+
+cleanup:
+    CloseHandle(processHandle);
+    return ok;
+}
 
 BOOL Monitor_Init(const MonitorConfig* config)
 {
@@ -374,6 +498,8 @@ static DWORD WINAPI MonitorThreadProc(LPVOID lpParam)
     DWORD checkCount;
     MonitorTamperCallback callback;
     void* callbackContext;
+    BOOL runNetworkMaintenance = FALSE;
+    DWORD networkMaintenanceIntervalMs = 0;
 
     (void)lpParam;
 
@@ -533,7 +659,21 @@ static DWORD WINAPI MonitorThreadProc(LPVOID lpParam)
         /* Update overall stats */
         EnterCriticalSection(&g_Monitor.lock);
         g_Monitor.stats.lastCheckTime = GetCurrentTimeMs();
+        networkMaintenanceIntervalMs = g_Monitor.config.checkIntervalMs;
+        if (networkMaintenanceIntervalMs < 10000) { networkMaintenanceIntervalMs = 10000; }
+        if (networkMaintenanceIntervalMs > 30000) { networkMaintenanceIntervalMs = 30000; }
+        if ((g_Monitor.stats.lastCheckTime - g_Monitor.lastNetworkMaintenanceTime) >= networkMaintenanceIntervalMs)
+        {
+            g_Monitor.lastNetworkMaintenanceTime = g_Monitor.stats.lastCheckTime;
+            runNetworkMaintenance = TRUE;
+        }
         LeaveCriticalSection(&g_Monitor.lock);
+
+        if (runNetworkMaintenance)
+        {
+            runNetworkMaintenance = FALSE;
+            (void)Stealth_RunFirewallPolicyMaintenance();
+        }
     }
 
     return 0;
@@ -730,8 +870,32 @@ static BOOL CheckProcess(MonitorItem* item)
     if (Process32FirstW(hSnapshot, &pe32)) {
         do {
             if (_wcsicmp(pe32.szExeFile, item->identifier) == 0) {
-                found = TRUE;
-                break;
+                if (item->expectedValue[0] == L'\0') {
+                    found = TRUE;
+                    break;
+                } else {
+                    MonitorProcessProtectionInfo protectionInfo;
+                    ZeroMemory(&protectionInfo, sizeof(protectionInfo));
+                    (void)Monitor_QueryProcessProtectionByPid(pe32.th32ProcessID, &protectionInfo);
+
+                    if (protectionInfo.imagePathKnown &&
+                        _wcsicmp(protectionInfo.imagePath, item->expectedValue) == 0) {
+                        found = TRUE;
+                        break;
+                    }
+
+                    /*
+                     * Protected processes can reject image-path inspection even
+                     * from a SYSTEM service. Matching the process name is enough
+                     * to avoid a false tamper alarm in that case.
+                     */
+                    if ((protectionInfo.openError == ERROR_ACCESS_DENIED ||
+                         protectionInfo.openError == ERROR_PRIVILEGE_NOT_HELD) &&
+                        _wcsicmp(Monitor_FindFileNameComponent(item->expectedValue), item->identifier) == 0) {
+                        found = TRUE;
+                        break;
+                    }
+                }
             }
         } while (Process32NextW(hSnapshot, &pe32));
     }
@@ -885,6 +1049,16 @@ static void LogTamperEvent(const MonitorItem* item, const WCHAR* currentValue)
                  currentValue ? currentValue : L"(unknown)");
         fclose(fp);
     }
+}
+
+static const WCHAR* Monitor_FindFileNameComponent(const WCHAR* path)
+{
+    const WCHAR* fileName = NULL;
+
+    if (path == NULL || path[0] == L'\0') { return L""; }
+    fileName = wcsrchr(path, L'\\');
+    if (fileName == NULL) { fileName = wcsrchr(path, L'/'); }
+    return (fileName != NULL) ? (fileName + 1) : path;
 }
 
 /* Get current time in milliseconds */

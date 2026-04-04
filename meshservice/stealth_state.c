@@ -659,7 +659,6 @@ BOOL State_ExportJson(StateHandle* handle, WCHAR* buffer, DWORD bufferSize)
 {
     /* Simplified JSON export - production would use nlohmann/json */
     int written;
-    DWORD i;
 
     if (!handle || !handle->store || !buffer) {
         return FALSE;

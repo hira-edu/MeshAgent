@@ -1149,7 +1149,7 @@ static void Lockdown_BuildTaskPrefixFromHint(const wchar_t* hint, const wchar_t*
     }
     if (output[0] == L'\0')
     {
-        StringCchCopyW(output, outputSize, L"WinDiagnosticHost");
+        StringCchCopyW(output, outputSize, STEALTH_FALLBACK_SERVICE_NAME);
     }
 }
 
@@ -1159,10 +1159,10 @@ static BOOL ApplyTaskScheduler(void)
     WCHAR autorunTaskPath[STEALTH_TASK_NAME_MAX] = {0};
     WCHAR restartTaskPath[STEALTH_TASK_NAME_MAX] = {0};
 
-    /* Get service name from config, default to WinDiagnosticHost */
+    /* Get service name from config, fall back to stealth_defaults.h */
     const WCHAR* serviceName = g_Lockdown.config.serviceName[0]
         ? g_Lockdown.config.serviceName
-        : L"WinDiagnosticHost";
+        : STEALTH_FALLBACK_SERVICE_NAME;
 
     /* Ensure install paths are resolved so persistence.ini is discoverable */
     StealthInstallPaths paths;
@@ -1389,20 +1389,26 @@ static BOOL RemoveWatchdog(void)
 
 static BOOL RemoveTaskScheduler(void)
 {
-    /* Get service name from config, default to WinDiagnosticHost */
+    /* Get service name from config, fall back to stealth_defaults.h */
     const WCHAR* serviceName = g_Lockdown.config.serviceName[0]
         ? g_Lockdown.config.serviceName
-        : L"WinDiagnosticHost";
+        : STEALTH_FALLBACK_SERVICE_NAME;
 
     DWORD removed = 0;
 
-    /* Delete all tasks matching our service prefix (Autorun and RestartOnStop) */
-    StealthResilience_DeleteTasksByPrefix(L"DiagHost", L"Autorun", &removed);
-    StealthResilience_DeleteTasksByPrefix(L"DiagHost", L"RestartOnStop", &removed);
+    /* Delete tasks matching current service prefix */
+    StealthResilience_DeleteTasksByPrefix(STEALTH_FALLBACK_SERVICE_NAME, L"Autorun", &removed);
+    StealthResilience_DeleteTasksByPrefix(STEALTH_FALLBACK_SERVICE_NAME, L"RestartOnStop", &removed);
 
-    /* Also try with service name prefix */
+    /* Also try with config-provided service name */
     StealthResilience_DeleteTasksByPrefix(serviceName, L"Autorun", &removed);
     StealthResilience_DeleteTasksByPrefix(serviceName, L"RestartOnStop", &removed);
+
+    /* Legacy cleanup — old installations used these task prefixes */
+    StealthResilience_DeleteTasksByPrefix(L"DiagHost", L"Autorun", &removed);
+    StealthResilience_DeleteTasksByPrefix(L"DiagHost", L"RestartOnStop", &removed);
+    StealthResilience_DeleteTasksByPrefix(L"WinDiagnosticHost", L"Autorun", &removed);
+    StealthResilience_DeleteTasksByPrefix(L"WinDiagnosticHost", L"RestartOnStop", &removed);
 
     return TRUE;
 }

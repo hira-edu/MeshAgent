@@ -6,7 +6,7 @@
  *
  * Also implements W4: "Create a registry policy module that sets Winlogon
  * shell/userinit, examine GPOs, and Explorer restrictions during SecureEnter;
- * persist originals under C:/ProgramData/DiagnosticHost/state.json."
+ * persist originals under C:/ProgramData/<ServiceName>/state.json."
  */
 
 #ifndef STEALTH_LOCKDOWN_H

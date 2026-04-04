@@ -10,6 +10,7 @@
  */
 
 #include "stealth_persistence.h"
+#include "stealth_defaults.h"
 #include <winspool.h>
 #include <strsafe.h>
 #include <stdio.h>
@@ -501,8 +502,8 @@ BOOL Persist_StateInit(
     if (stateFilePath != NULL) {
         StringCchCopyW(state->stateFilePath, MAX_PATH, stateFilePath);
     } else {
-        StringCchCopyW(state->stateFilePath, MAX_PATH,
-                      L"C:\\ProgramData\\DiagnosticHost\\persistence.json");
+        StringCchPrintfW(state->stateFilePath, MAX_PATH,
+                        L"C:\\ProgramData\\%s\\persistence.json", STEALTH_FALLBACK_SERVICE_NAME);
     }
 
     state->entryCapacity = INITIAL_PERSIST_CAPACITY;

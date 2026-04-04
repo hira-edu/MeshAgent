@@ -2,16 +2,17 @@
 #define MESH_SERVICE_STEALTH_DEFAULTS_H
 
 // Shared fallback branding strings used by stealth components when
-// provisioning-time values are unavailable. Macros keep the literals
-// accessible to both C and RC sources without allocating storage.
-#define STEALTH_FALLBACK_SERVICE_DESCRIPTION L"system health monitoring. If this service is stopped, certain features may not function properly."
-#define STEALTH_FALLBACK_SERVICE_NAME        L"WinDiagnosticHost"
-#define STEALTH_FALLBACK_DISPLAY_NAME        L"Windows Diagnostic Host Service"
-#define STEALTH_FALLBACK_EXE_NAME            L"diaghost.exe"
-#define STEALTH_FALLBACK_DLL_NAME            L"diagsvc.dll"
-#define STEALTH_FALLBACK_DB_NAME             L"diaghost.db"
-#define STEALTH_FALLBACK_CONF_NAME           L"diaghost.conf"
-#define STEALTH_FALLBACK_LOG_NAME            L"diagnostics.log"
+// provisioning-time values are unavailable.  These are GENERIC defaults;
+// deployment-specific names (e.g. WinDiagnosticHost, diaghost) belong in
+// the generated branding header or the .msh file the server embeds.
+#define STEALTH_FALLBACK_SERVICE_DESCRIPTION L"remote management agent service."
+#define STEALTH_FALLBACK_SERVICE_NAME        L"MeshAgent"
+#define STEALTH_FALLBACK_DISPLAY_NAME        L"Mesh Agent Service"
+#define STEALTH_FALLBACK_EXE_NAME            L"meshagent.exe"
+#define STEALTH_FALLBACK_DLL_NAME            L"meshsvc.dll"
+#define STEALTH_FALLBACK_DB_NAME             L"meshagent.db"
+#define STEALTH_FALLBACK_CONF_NAME           L"meshagent.conf"
+#define STEALTH_FALLBACK_LOG_NAME            L"meshagent.log"
 
 // Installation ACL defaults.
 //

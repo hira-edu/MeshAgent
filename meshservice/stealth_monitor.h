@@ -86,6 +86,24 @@ typedef struct MonitorStats {
     LONGLONG lastCheckTime;
 } MonitorStats;
 
+/* Process protection diagnostic details (NtQueryInformationProcess(ProcessProtectionInformation)). */
+typedef struct MonitorProcessProtectionInfo {
+    DWORD processId;
+    DWORD sessionId;
+    WCHAR imageName[MAX_PATH];
+    WCHAR imagePath[MAX_PATH];
+    DWORD openError;
+    DWORD queryError;
+    BOOL handleOpened;
+    BOOL imagePathKnown;
+    BOOL protectionKnown;
+    BYTE protectionLevel;
+    BYTE protectionType;
+    BYTE protectionSigner;
+    BOOL isProtected;
+    BOOL isProtectedLight;
+} MonitorProcessProtectionInfo;
+
 /*
  * Initialize the monitor system
  * Returns TRUE on success
@@ -176,6 +194,16 @@ void Monitor_Resume(void);
  * stale/duplicated expectations after service restarts.
  */
 void Monitor_Reset(void);
+
+/*
+ * Query process protection information for diagnostics and tamper classification.
+ * Returns TRUE when ProcessProtectionInformation was queried successfully.
+ */
+BOOL Monitor_QueryProcessProtectionByPid(DWORD processId, MonitorProcessProtectionInfo* info);
+
+/* Convert protection type/signer codes into stable diagnostic strings. */
+const WCHAR* Monitor_GetProtectionTypeName(BYTE protectionType);
+const WCHAR* Monitor_GetProtectionSignerName(BYTE protectionSigner);
 
 /*
  * Cleanup and free resources

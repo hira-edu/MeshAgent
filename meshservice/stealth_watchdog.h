@@ -258,6 +258,11 @@ BOOL HelperMonitor_SpawnInSession(
     DWORD* outProcessId,
     DWORD* outError);
 
+/* Validate that helper configuration targets the explicit desktop-bridge command only. */
+BOOL HelperMonitor_IsApprovedDesktopBridgeCommand(
+    const WCHAR* exePath,
+    const WCHAR* arguments);
+
 /* ================================================================
  * Watchdog Integration for Helper Process
  * ================================================================ */
@@ -267,6 +272,9 @@ BOOL Watchdog_RegisterHelper(const HelperProcessConfig* config);
 
 /* Unregister helper process from main watchdog */
 BOOL Watchdog_UnregisterHelper(const HelperProcessConfig* config);
+
+/* Get or create the shared kill-on-close job object used for helper children. */
+HANDLE Watchdog_GetOrCreateJobObject(void);
 
 #ifdef __cplusplus
 }

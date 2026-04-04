@@ -82,6 +82,44 @@ static void ReleaseWatchLock(void)
     }
 }
 
+static BOOL Watchdog_EnsureJobObjectLocked(void)
+{
+    if (g_JobObject != NULL) {
+        return TRUE;
+    }
+
+    g_JobObject = CreateJobObjectW(NULL, NULL);
+    if (g_JobObject == NULL) {
+        return FALSE;
+    }
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo = {0};
+    jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(g_JobObject, JobObjectExtendedLimitInformation, &jobInfo, sizeof(jobInfo))) {
+        CloseHandle(g_JobObject);
+        g_JobObject = NULL;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+HANDLE Watchdog_GetOrCreateJobObject(void)
+{
+    HANDLE job = NULL;
+
+    if (!AcquireWatchLock()) {
+        return NULL;
+    }
+
+    if (Watchdog_EnsureJobObjectLocked()) {
+        job = g_JobObject;
+    }
+
+    ReleaseWatchLock();
+    return job;
+}
+
 static BOOL AcquireHeartbeatLock(void)
 {
     if (!InitOnceExecuteOnce(&g_HeartbeatLockInitOnce, InitHeartbeatLockOnce, NULL, NULL)) {
@@ -143,15 +181,14 @@ BOOL Watchdog_Start(const WatchdogConfig* config)
 
     /* Create job object for child process management */
     if (g_Config.useJobObject) {
-        g_JobObject = CreateJobObjectW(NULL, NULL);
-        if (g_JobObject != NULL) {
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo = {0};
-            jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if (!SetInformationJobObject(g_JobObject, JobObjectExtendedLimitInformation,
-                                    &jobInfo, sizeof(jobInfo))) {
-                /* Log error but continue - job object still useful for tracking */
-            }
+        if (!AcquireWatchLock()) {
+            return FALSE;
         }
+        if (!Watchdog_EnsureJobObjectLocked()) {
+            ReleaseWatchLock();
+            return FALSE;
+        }
+        ReleaseWatchLock();
     }
 
     /* Start watchdog thread */
@@ -1648,6 +1685,8 @@ static void Helper_TerminateProcessLocked(void);
 static ULONGLONG Helper_HashCommandLine(const WCHAR* exePath, const WCHAR* arguments);
 static void Helper_LogPolicyDecision(const WCHAR* decision, DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD errorCode);
 static BOOL Helper_IsSessionSpawnAllowed(DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD* outError);
+static BOOL Helper_EndsWithInsensitiveW(const WCHAR* value, const WCHAR* suffix);
+static BOOL Helper_CommandLineContainsInsensitiveW(const WCHAR* value, const WCHAR* token);
 
 void HelperMonitor_InitConfig(HelperProcessConfig* config)
 {
@@ -1673,6 +1712,10 @@ BOOL HelperMonitor_Start(
         return FALSE;
     }
     if (config->exePath[0] == L'\0') {
+        return FALSE;
+    }
+    if (!HelperMonitor_IsApprovedDesktopBridgeCommand(config->exePath, config->arguments)) {
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
         return FALSE;
     }
 
@@ -2142,6 +2185,45 @@ static ULONGLONG Helper_HashCommandLine(const WCHAR* exePath, const WCHAR* argum
     return hash;
 }
 
+static BOOL Helper_EndsWithInsensitiveW(const WCHAR* value, const WCHAR* suffix)
+{
+    size_t valueLen;
+    size_t suffixLen;
+
+    if (value == NULL || suffix == NULL) { return FALSE; }
+    valueLen = wcslen(value);
+    suffixLen = wcslen(suffix);
+    if (valueLen < suffixLen || suffixLen == 0) { return FALSE; }
+    return (_wcsicmp(value + (valueLen - suffixLen), suffix) == 0) ? TRUE : FALSE;
+}
+
+static BOOL Helper_CommandLineContainsInsensitiveW(const WCHAR* value, const WCHAR* token)
+{
+    WCHAR scratch[1024];
+    WCHAR tokenScratch[128];
+    WCHAR* found = NULL;
+
+    if (value == NULL || token == NULL || value[0] == L'\0' || token[0] == L'\0') { return FALSE; }
+    StringCchCopyW(scratch, _countof(scratch), value);
+    StringCchCopyW(tokenScratch, _countof(tokenScratch), token);
+    _wcslwr_s(scratch, _countof(scratch));
+    _wcslwr_s(tokenScratch, _countof(tokenScratch));
+    found = wcsstr(scratch, tokenScratch);
+    return (found != NULL) ? TRUE : FALSE;
+}
+
+BOOL HelperMonitor_IsApprovedDesktopBridgeCommand(const WCHAR* exePath, const WCHAR* arguments)
+{
+    if (exePath == NULL || exePath[0] == L'\0' || arguments == NULL || arguments[0] == L'\0') {
+        return FALSE;
+    }
+    if (!Helper_CommandLineContainsInsensitiveW(arguments, L"KvmSessionBridgeW")) {
+        return FALSE;
+    }
+    return Helper_EndsWithInsensitiveW(exePath, L"\\rundll32.exe") ||
+           Helper_EndsWithInsensitiveW(exePath, L"\\rundll32");
+}
+
 static void Helper_LogPolicyDecision(const WCHAR* decision, DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD errorCode)
 {
     WCHAR logLine[512];
@@ -2162,9 +2244,10 @@ static BOOL Helper_IsSessionSpawnAllowed(DWORD sessionId, const WCHAR* exePath, 
 {
     DWORD errorCode = ERROR_SUCCESS;
 
-    if (!g_HelperConfig.strictServiceOnly || g_HelperConfig.allowDesktopBridge)
+    if (g_HelperConfig.allowDesktopBridge &&
+        HelperMonitor_IsApprovedDesktopBridgeCommand(exePath, arguments))
     {
-        Helper_LogPolicyDecision(L"allow", sessionId, exePath, arguments, ERROR_SUCCESS);
+        Helper_LogPolicyDecision(L"allow-kvm-bridge", sessionId, exePath, arguments, ERROR_SUCCESS);
         if (outError != NULL) { *outError = ERROR_SUCCESS; }
         return TRUE;
     }

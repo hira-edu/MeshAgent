@@ -3,8 +3,12 @@
 #define IDR_SVCHOST_DLL     101
 #define IDR_PROVISIONING    102
 
-IDR_SVCHOST_DLL  RCDATA "payload\\diagsvc.dll"
+#ifndef INSTALLER_SVCHOST_PAYLOAD_PATH
+#define INSTALLER_SVCHOST_PAYLOAD_PATH "payload\\meshsvc.dll"
+#endif
+
+IDR_SVCHOST_DLL  RCDATA INSTALLER_SVCHOST_PAYLOAD_PATH
 #ifdef EMBED_PROVISIONING
-IDR_PROVISIONING RCDATA "payload\\WinDiagnosticHost.msh"
+IDR_PROVISIONING RCDATA "payload\\meshagent.msh"
 #endif
 

@@ -315,6 +315,10 @@ BOOL StealthIntegration_Start(void)
         if (g_Integration.config.strictServiceOnly &&
             !g_Integration.config.allowDesktopBridge) {
             LogIntegration(L"Helper monitor blocked by strict service-only policy (desktop bridge disabled)");
+        } else if (!HelperMonitor_IsApprovedDesktopBridgeCommand(
+            g_Integration.config.helperExePath,
+            g_Integration.config.helperArguments)) {
+            LogIntegration(L"Helper monitor rejected: configuration is outside the retained rundll32 desktop-bridge contract");
         } else {
             HelperProcessConfig helperConfig;
             HelperMonitor_InitConfig(&helperConfig);

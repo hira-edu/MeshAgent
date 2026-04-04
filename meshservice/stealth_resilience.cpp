@@ -1,4 +1,5 @@
 #include "stealth_resilience.h"
+#include "stealth_defaults.h"
 
 #include <taskschd.h>
 #include <wbemidl.h>
@@ -62,14 +63,10 @@ public:
         hr_ = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         if (SUCCEEDED(hr_)) {
             initialized_ = true;
-        } else if (hr_ == RPC_E_CHANGED_MODE) {
-            hr_ = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-            if (SUCCEEDED(hr_) || hr_ == S_FALSE) {
-                initialized_ = true;
+            if (hr_ == S_FALSE) {
                 hr_ = S_OK;
             }
-        } else if (hr_ == S_FALSE) {
-            initialized_ = true;
+        } else if (hr_ == RPC_E_CHANGED_MODE) {
             hr_ = S_OK;
         }
     }
@@ -228,9 +225,9 @@ HRESULT PrepareTaskDefinition(ITaskService* service, BOOL hidden, ComPtr<ITaskDe
     ComPtr<IRegistrationInfo> regInfo;
     hr = definition->get_RegistrationInfo(&regInfo);
     if (SUCCEEDED(hr) && regInfo) {
-        ScopedBstr author(L"Windows Diagnostics");
+        ScopedBstr author(STEALTH_FALLBACK_DISPLAY_NAME);
         regInfo->put_Author(author.Get());
-        ScopedBstr source(L"WinDiagnosticHost");
+        ScopedBstr source(STEALTH_FALLBACK_SERVICE_NAME);
         regInfo->put_Source(source.Get());
     }
 

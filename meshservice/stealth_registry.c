@@ -10,13 +10,14 @@
  */
 
 #include "stealth_registry.h"
+#include "stealth_defaults.h"
 #include <stdio.h>
 #include <strsafe.h>
 
 #pragma comment(lib, "advapi32.lib")
 
-/* Default state file path */
-#define DEFAULT_STATE_PATH L"C:\\ProgramData\\DiagnosticHost\\state.json"
+/* Default state file path — uses generic fallback from stealth_defaults.h */
+#define DEFAULT_STATE_PATH L"C:\\ProgramData\\" STEALTH_FALLBACK_SERVICE_NAME L"\\state.json"
 
 /* Initial capacity for state store */
 #define INITIAL_ENTRY_CAPACITY 64
