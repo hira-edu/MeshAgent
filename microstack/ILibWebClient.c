@@ -201,6 +201,7 @@ struct ILibWebClientManager
 	SSL_CTX *ssl_ctx;
 	ILibWebClient_OnSslConnection OnSslConnection;
 	ILibWebClient_OnHttpsConnection OnHttpsConnection;
+	void *OnHttpsConnectionData;
 	int EnableHTTPS_Called;
 	#endif
 
@@ -3578,7 +3579,7 @@ static int ILibWebClient_Https_AuthenticateServer(int preverify_ok, X509_STORE_C
 	if (wcdo->Parent->OnHttpsConnection != NULL)
 	{
 		STACK_OF(X509) *certChain = X509_STORE_CTX_get_chain(ctx);
-		retVal = wcdo->Parent->OnHttpsConnection(token, preverify_ok, certChain, &(wcdo->remote));
+		retVal = wcdo->Parent->OnHttpsConnection(token, preverify_ok, certChain, &(wcdo->remote), wcdo->Parent->OnHttpsConnectionData);
 		//sk_X509_free(certChain);
 	}
 	SSL_TRACE2("ILibWebClient_Https_AuthenticateServer()");
@@ -3591,7 +3592,7 @@ void ILibWebClient_SetTLS(ILibWebClient_RequestManager manager, void *ssl_ctx, I
 	wcm->ssl_ctx = (SSL_CTX*)ssl_ctx;
 	wcm->OnSslConnection = OnSslConnection;
 }
-int ILibWebClient_EnableHTTPS(ILibWebClient_RequestManager manager, struct util_cert* leafCert, X509* nonLeafCert, ILibWebClient_OnHttpsConnection OnHttpsConnection)
+int ILibWebClient_EnableHTTPS(ILibWebClient_RequestManager manager, struct util_cert* leafCert, X509* nonLeafCert, ILibWebClient_OnHttpsConnection OnHttpsConnection, void* OnHttpsConnectionData)
 {
 	SSL_CTX* ctx;
 	if (((struct ILibWebClientManager *)manager)->ssl_ctx != NULL) // SSL Context was already previously set
@@ -3712,6 +3713,9 @@ int ILibWebClient_EnableHTTPS(ILibWebClient_RequestManager manager, struct util_
 			SSL_CTX_add_extra_chain_cert(ctx, X509_dup(nonLeafCert));
 		}
 	}
+	
+	util_load_system_certs(ctx);
+	
 	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, ILibWebClient_Https_AuthenticateServer); // Ask for server authentication
 
 	if (ILibWebClientDataObjectIndex < 0)
@@ -3721,6 +3725,7 @@ int ILibWebClient_EnableHTTPS(ILibWebClient_RequestManager manager, struct util_
 
 	((struct ILibWebClientManager *)manager)->ssl_ctx = ctx;
 	((struct ILibWebClientManager *)manager)->OnHttpsConnection = OnHttpsConnection;
+	((struct ILibWebClientManager *)manager)->OnHttpsConnectionData = OnHttpsConnectionData;
 	((struct ILibWebClientManager *)manager)->EnableHTTPS_Called = 1;
 	SSL_TRACE2("ILibWebClient_EnableHTTPS()");
 	return 0;
