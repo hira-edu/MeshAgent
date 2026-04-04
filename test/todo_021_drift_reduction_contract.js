@@ -1,0 +1,150 @@
+const fs = require('fs');
+const path = require('path');
+
+function parseArgs(argv) {
+    const args = {};
+    for (let i = 2; i < argv.length; ++i) {
+        const token = argv[i];
+        if (!token.startsWith('--')) {
+            throw new Error(`Unexpected argument: ${token}`);
+        }
+        const key = token.substring(2);
+        const value = argv[i + 1];
+        if (value == null || value.startsWith('--')) {
+            args[key] = true;
+        } else {
+            args[key] = value;
+            i += 1;
+        }
+    }
+    return args;
+}
+
+function ensureDir(dirPath) {
+    fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function writeJson(filePath, value) {
+    ensureDir(path.dirname(filePath));
+    fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function writeText(filePath, value) {
+    ensureDir(path.dirname(filePath));
+    fs.writeFileSync(filePath, value, 'utf8');
+}
+
+function assert(condition, message) {
+    if (!condition) {
+        throw new Error(message);
+    }
+}
+
+function main() {
+    const args = parseArgs(process.argv);
+    const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
+
+    const processPipePath = path.resolve('microstack', 'ILibProcessPipe.c');
+    const watchdogPath = path.resolve('meshservice', 'stealth_watchdog.c');
+    const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
+    const integrationPath = path.resolve('meshservice', 'stealth_integration.c');
+    const agentcorePath = path.resolve('meshcore', 'agentcore.c');
+
+    const processPipeSource = fs.readFileSync(processPipePath, 'utf8');
+    const watchdogSource = fs.readFileSync(watchdogPath, 'utf8');
+    const serviceMainSource = fs.readFileSync(serviceMainPath, 'utf8');
+    const integrationSource = fs.readFileSync(integrationPath, 'utf8');
+    const agentcoreSource = fs.readFileSync(agentcorePath, 'utf8');
+
+    const forbiddenAgentcoreTokens = [
+        'MeshServer=local',
+        'swarm.meshcentral.com',
+        'MeshAgentDoH',
+        'WinHttpGetProxyForUrl',
+        'MeshAgent_CacheResolvedAddress',
+        'MeshAgent_AdvanceBrandedEndpoint',
+        'MeshServer_ConnectEx_AutoProxy',
+        'MeshServer_ConnectEx_Enumerate_Contexts',
+        'g_meshNetworkProfile.',
+        'autoproxy_setup',
+        'usingBrandedEndpoint'
+    ];
+
+    const forbiddenAgentcoreHits = forbiddenAgentcoreTokens.filter((token) => agentcoreSource.includes(token));
+
+    const checks = {
+        processPipeRemovesLegacySessionKvmException:
+            !processPipeSource.includes('ILibProcessPipe_LogPolicyDecisionA("allow-kvm"') &&
+            !processPipeSource.includes('ILibProcessPipe_HasKvmSwitchA('),
+        processPipeBlocksStandaloneAgentSelfSpawnInUserSessions:
+            !processPipeSource.includes('allow-agent-self') &&
+            !processPipeSource.includes('ILibProcessPipe_IsApprovedAgentSelfSpawnLaunchA') &&
+            !processPipeSource.includes('MESHAGENT_SELF_SPAWN_PATH'),
+        processPipeRestrictsBridgeToRundll32Export: processPipeSource.includes('ILibProcessPipe_IsApprovedDesktopBridgeLaunchA') &&
+            processPipeSource.includes('allow-kvm-bridge') &&
+            processPipeSource.includes('KvmSessionBridgeW'),
+        processPipePreservesInternalHelperReentry:
+            processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
+            processPipeSource.includes('allow-helper-reentry') &&
+            processPipeSource.includes('ILibProcessPipe_TargetMatchesInstalledMeshAgentImageA') &&
+            processPipeSource.includes('Stealth_GetInstallPaths(&installPaths)') &&
+            processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "--slave")') &&
+            processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "-b64exec")'),
+        helperMonitorRequiresApprovedBridgeCommand: watchdogSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand') &&
+            watchdogSource.includes('KvmSessionBridgeW') &&
+            watchdogSource.includes('\\rundll32.exe'),
+        helperMonitorLogsApprovedBridgePolicy: watchdogSource.includes('Helper_LogPolicyDecision(L"allow-kvm-bridge"') &&
+            watchdogSource.includes('Helper_LogPolicyDecision(L"deny"'),
+        serviceMainDisablesImplicitHelperFallback: serviceMainSource.includes('Helper monitor requires an explicit rundll32 desktop-bridge command. Disabling helper monitor.') &&
+            serviceMainSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand(config->helperExePath, config->helperArguments)'),
+        serviceMainRejectsDirectKvmExeModes: serviceMainSource.includes('direct KVM slave execution is disabled') &&
+            serviceMainSource.includes('MeshService_IsRunningUnderRundll32()') &&
+            serviceMainSource.includes('kvm_server_mainloop((void*)parm);'),
+        integrationRejectsOutOfContractHelperMonitor: integrationSource.includes('Helper monitor rejected: configuration is outside the retained rundll32 desktop-bridge contract') &&
+            integrationSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand('),
+        agentcoreDoesNotPublishAuthorizedSelfSpawnPath: !agentcoreSource.includes('MESHAGENT_SELF_SPAWN_PATH'),
+        agentcoreUsesDirectHeadersOnly: agentcoreSource.includes('MeshAgent_AddHostHeader(req, NULL, host, port, useDefaultPort2);') &&
+            agentcoreSource.includes('MeshAgent_AddUserAgentHeader(req, NULL);'),
+        agentcoreUsesDirectTlsOnly: agentcoreSource.includes('ILibWebClient_Request_SetSNI(reqToken, host,') &&
+            agentcoreSource.includes('ILibWebClient_Request_SetALPN(reqToken, NULL);'),
+        agentcoreRemovedRejectedDriftTokens: forbiddenAgentcoreHits.length === 0
+    };
+
+    for (const [name, passed] of Object.entries(checks)) {
+        assert(passed, `TODO-021 drift reduction contract failed: ${name}`);
+    }
+
+    const report = {
+        generatedUtc: new Date().toISOString(),
+        success: true,
+        files: {
+            processPipePath,
+            watchdogPath,
+            serviceMainPath,
+            integrationPath,
+            agentcorePath
+        },
+        forbiddenAgentcoreTokens,
+        forbiddenAgentcoreHits,
+        checks
+    };
+
+    if (evidenceDir) {
+        writeJson(path.join(evidenceDir, 'todo_021_drift_reduction_contract.json'), report);
+        writeText(path.join(evidenceDir, 'summary.txt'), [
+            `GENERATED_UTC=${report.generatedUtc}`,
+            'SUCCESS=true',
+            `CHECKS=${Object.entries(checks).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
+            `FORBIDDEN_AGENTCORE_HITS=${forbiddenAgentcoreHits.join(',') || '(none)'}`
+        ].join('\n') + '\n');
+    } else {
+        process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+    }
+}
+
+try {
+    main();
+} catch (error) {
+    console.error(error && error.stack ? error.stack : String(error));
+    process.exit(1);
+}

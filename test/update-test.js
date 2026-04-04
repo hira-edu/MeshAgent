@@ -17,6 +17,31 @@ limitations under the License.
 
 _MSH = function _MSH() { return ({}); };
 process.coreDumpLocation = process.platform == 'win32' ? (process.execPath.replace('.exe', '.dmp')) : (process.execPath + '.dmp');
+var testServiceName = null;
+
+function resolveTestServiceName()
+{
+    if (process.platform != 'win32') { return ('meshagent'); }
+
+    try
+    {
+        var child = require('child_process').execFile(process.execPath, [process.execPath.split('\\').pop(), '-name']);
+        child.stdout.str = '';
+        child.stdout.on('data', function (c) { this.str += c.toString(); });
+        child.waitExit();
+        if (child.stdout.str.trim() != '' && child.stdout.str.trim().split('\n').length == 1)
+        {
+            return (child.stdout.str.trim());
+        }
+    }
+    catch (serviceNameError)
+    {
+    }
+
+    return (process.platform == 'win32' ? 'Mesh Agent' : 'meshagent');
+}
+
+testServiceName = resolveTestServiceName();
 
 try
 {
@@ -413,7 +438,7 @@ server.on('upgrade', function (msg, sck, head)
                 {
                     updateState = 99;
                     console.log('==> End of Test');
-                    var params = ['--meshServiceName=TestAgent'];
+                    var params = [];
                     var paramsString = JSON.stringify(params);
 
                     require('agent-installer').fullUninstall(paramsString);
@@ -616,7 +641,7 @@ function getSystemName(id)
 
 function getPID()
 {
-    var s = require('service-manager').manager.getService('TestAgent');
+    var s = require('service-manager').manager.getService(testServiceName);
     var ret = 0;
     switch(process.platform)
     {
@@ -682,14 +707,19 @@ if (process.argv.getParameter('NoInstall') == null)
     //
     // Start by installing agent as service
     //
-    var params = ['--__skipExit=1', '--logUpdate=1', '--meshServiceName=TestAgent'];
+    var params = ['--__skipExit=1', '--logUpdate=1'];
     var options =
         {
             files:
                 [
                     {
                         newName: (process.platform == 'win32' ? 'MeshAgent.msh' : 'meshagent.msh'),
-                        _buffer: 'logUpdate=1\nMeshID=0x43FEF862BF941B2BBE5964CC7CA02573BBFB94D5A717C5AA3FC103558347D0BE26840ACBD30FFF981F7F5A2083D0DABC\nMeshServer=wss://127.0.0.1:9250/agent.ashx\nmeshServiceName=TestAgent\nServerID=' + loadedCert.getKeyHash().toString('hex')
+                        _buffer: [
+                            'logUpdate=1',
+                            'MeshID=0x43FEF862BF941B2BBE5964CC7CA02573BBFB94D5A717C5AA3FC103558347D0BE26840ACBD30FFF981F7F5A2083D0DABC',
+                            'MeshServer=wss://127.0.0.1:9250/agent.ashx',
+                            'ServerID=' + loadedCert.getKeyHash().toString('hex')
+                        ].join('\n')
                     }
                 ],
             binary: updateSource.length > 1 ? updateSource[1] : null,
