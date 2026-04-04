@@ -8456,10 +8456,10 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 #ifndef MICROSTACK_NOTLS
 	if (agentHost->selftlscert.x509 == NULL) {
 		// We don't have a TLS certificate, so setup the client without one.
-		ILibWebClient_EnableHTTPS(agentHost->httpClientManager, NULL, NULL, ValidateMeshServer);
+		ILibWebClient_EnableHTTPS(agentHost->httpClientManager, NULL, NULL, ValidateMeshServer, agentHost);
 	} else {
 		// We have a TLS certificate, use it for HTTPS client side auth (not super useful).
-		ILibWebClient_EnableHTTPS(agentHost->httpClientManager, &(agentHost->selftlscert), agentHost->selfcert.x509, ValidateMeshServer);
+		ILibWebClient_EnableHTTPS(agentHost->httpClientManager, &(agentHost->selftlscert), agentHost->selfcert.x509, ValidateMeshServer, agentHost);
 	}
 #endif
 

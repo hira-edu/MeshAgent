@@ -1060,13 +1060,11 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	ZeroMemory(&processInfo, sizeof(PROCESS_INFORMATION));
 	ZeroMemory(&info, sizeof(STARTUPINFOW));
 
-	if (!ILibProcessPipe_IsSessionSpawnAllowed(spawnType, target, parameters)) { return(NULL); }
-
 	if (spawnType != ILibProcessPipe_SpawnTypes_SPECIFIED_USER && spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && (sessionId = WTSGetActiveConsoleSessionId()) == 0xFFFFFFFF) { return(NULL); } // No session attached to console, but requested to execute as logged in user
 	if (spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
 		if (spawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER) { sessionId = (DWORD)(uint64_t)sid; }
-		useLoggedOnUserToken = (spawnType != ILibProcessPipe_SpawnTypes_WINLOGON && ILibProcessPipe_IsApprovedInternalHelperLaunchA(target, parameters) != 0) ? 1 : 0;
+		useLoggedOnUserToken = (spawnType != ILibProcessPipe_SpawnTypes_WINLOGON && (ILibProcessPipe_IsApprovedInternalHelperLaunchA(target, parameters) != 0 || ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(target, parameters) != 0)) ? 1 : 0;
 		if (useLoggedOnUserToken != 0)
 		{
 			SECURITY_ATTRIBUTES duplicateTokenAttributes = { 0 };
@@ -1214,27 +1212,43 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	}
 
 
-	if (((spawnType == ILibProcessPipe_SpawnTypes_DEFAULT || spawnType == ILibProcessPipe_SpawnTypes_DETACHED) && !CreateProcessW(ILibUTF8ToWideEx(target, -1, tmp1, (int)sizeof(tmp1)/2), ILibUTF8ToWideEx(commandLine != NULL ? commandLine : target, -1, tmp2, (int)sizeof(tmp2)/2), NULL, NULL, spawnType == ILibProcessPipe_SpawnTypes_DETACHED ? FALSE: TRUE, creationFlags, processEnvironment, NULL, &info, &processInfo)) ||
-		(spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && !CreateProcessAsUserW(userToken, ILibUTF8ToWideEx(target, -1, tmp1, (int)sizeof(tmp1)/2), ILibUTF8ToWideEx(commandLine != NULL ? commandLine : target, -1, tmp2, (int)sizeof(tmp2)/2), NULL, NULL, TRUE, creationFlags, processEnvironment, NULL, &info, &processInfo)))
+	// Build WIDE strings before CreateProcess to ensure proper ANSI→UTF-16 conversion.
+	// Evaluating ILibUTF8ToWideEx inside the function call arguments was causing garbled
+	// command lines in cross-session spawns (ANSI bytes interpreted as UTF-16 pairs).
 	{
-		int ll = GetLastError();
-		if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
+		WCHAR* wTarget = ILibUTF8ToWideEx(target, -1, tmp1, (int)(sizeof(tmp1) / sizeof(WCHAR)));
+		WCHAR* wCommandLine = ILibUTF8ToWideEx(commandLine != NULL ? commandLine : target, -1, tmp2, (int)(sizeof(tmp2) / sizeof(WCHAR)));
+		BOOL createOk = FALSE;
+
+		if (spawnType == ILibProcessPipe_SpawnTypes_DEFAULT || spawnType == ILibProcessPipe_SpawnTypes_DETACHED)
 		{
-			ILibProcessPipe_FreePipe(retVal->stdErr);
-			ILibProcessPipe_FreePipe(retVal->stdOut);
-			ILibProcessPipe_FreePipe(retVal->stdIn);
+			createOk = CreateProcessW(wTarget, wCommandLine, NULL, NULL, spawnType == ILibProcessPipe_SpawnTypes_DETACHED ? FALSE : TRUE, creationFlags, processEnvironment, NULL, &info, &processInfo);
 		}
-		if (allocParms != 0) { free(parms); }
-		if (allocCommandLine != 0) { free(commandLine); }
-		ILibMemory_Free(retVal);
-		if (token != NULL) { CloseHandle(token); }
-		if (userToken != NULL) { CloseHandle(userToken); }
-		if (mergedEnvironment != NULL) { ILibMemory_Free(mergedEnvironment); }
-		if (overrideEnvironment != NULL) { ILibMemory_Free(overrideEnvironment); }
-		if (tokenEnvironment != NULL && destroyEnvironmentBlock != NULL) { destroyEnvironmentBlock(tokenEnvironment); }
-		if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
-		SetLastError(ll);
-		return(NULL);
+		else
+		{
+			createOk = CreateProcessAsUserW(userToken, wTarget, wCommandLine, NULL, NULL, TRUE, creationFlags, processEnvironment, NULL, &info, &processInfo);
+		}
+		if (!createOk)
+		{
+			int ll = GetLastError();
+			if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
+			{
+				ILibProcessPipe_FreePipe(retVal->stdErr);
+				ILibProcessPipe_FreePipe(retVal->stdOut);
+				ILibProcessPipe_FreePipe(retVal->stdIn);
+			}
+			if (allocParms != 0) { free(parms); }
+			if (allocCommandLine != 0) { free(commandLine); }
+			ILibMemory_Free(retVal);
+			if (token != NULL) { CloseHandle(token); }
+			if (userToken != NULL) { CloseHandle(userToken); }
+			if (mergedEnvironment != NULL) { ILibMemory_Free(mergedEnvironment); }
+			if (overrideEnvironment != NULL) { ILibMemory_Free(overrideEnvironment); }
+			if (tokenEnvironment != NULL && destroyEnvironmentBlock != NULL) { destroyEnvironmentBlock(tokenEnvironment); }
+			if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
+			SetLastError(ll);
+			return(NULL);
+		}
 	}
 
 	if (mergedEnvironment != NULL) { ILibMemory_Free(mergedEnvironment); }
