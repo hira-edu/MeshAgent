@@ -20,10 +20,39 @@ limitations under the License.
 typedef ILibTransport_DoneState(*ILibKVM_WriteHandler)(char *buffer, int bufferLen, void *reserved);
 
 int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, void *reserved);
-void kvm_pause(int pause);
+void kvm_pause(int pause, void *reserved);
 int kvm_relay_setup(char* exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int tsid);
-void kvm_cleanup();
+void kvm_cleanup(void *reserved);
 void kvm_setupSasPermissions();
 void kvm_relay_reset(ILibKVM_WriteHandler writeHandler, void *reserved);
+const char* kvm_get_current_desktop_name();
+void kvm_set_force_default_desktop(int enabled);
+#ifdef WIN32
+void kvm_notify_session_change(DWORD eventType, DWORD sessionId);
+int kvm_bridge_debug_get_child_present(void);
+DWORD kvm_bridge_debug_get_child_pid(void);
+int kvm_bridge_debug_get_child_present_for_reserved(void *reserved);
+DWORD kvm_bridge_debug_get_child_pid_for_reserved(void *reserved);
+int kvm_bridge_debug_is_child_exit_signaled(void);
+int kvm_bridge_debug_get_restart_suppressed(void);
+int kvm_bridge_debug_peek_pending_session_restart(DWORD* eventTypeOut, DWORD* sessionIdOut);
+DWORD kvm_bridge_debug_get_process_session_id(void);
+DWORD kvm_bridge_debug_get_process_session_id_for_reserved(void *reserved);
+int kvm_bridge_debug_get_transport_active(void);
+int kvm_bridge_debug_get_transport_active_for_reserved(void *reserved);
+int kvm_bridge_debug_get_last_bridge_available(void);
+int kvm_bridge_debug_get_last_used_bridge(void);
+int kvm_bridge_debug_get_last_fallback_used(void);
+int kvm_bridge_debug_get_last_used_bridge_for_reserved(void *reserved);
+int kvm_bridge_debug_get_last_fallback_used_for_reserved(void *reserved);
+DWORD kvm_bridge_debug_get_last_bridge_failure_error(void);
+DWORD kvm_bridge_debug_get_last_bridge_failure_stage(void);
+DWORD kvm_bridge_debug_get_last_bridge_failure_spawn_type(void);
+DWORD kvm_bridge_debug_get_consecutive_failures(void);
+DWORD kvm_bridge_debug_get_last_backoff_delay_ms(void);
+DWORD kvm_bridge_debug_get_spawn_attempt_count(void);
+int kvm_bridge_debug_is_retry_scheduled(void);
+int kvm_bridge_debug_get_registered_context_count(void);
+#endif
 
 #endif

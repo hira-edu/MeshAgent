@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <string.h>
 #include <wchar.h>
 #include <sddl.h>
 #include <strsafe.h>
@@ -17,6 +18,8 @@
 #include "stealth_defaults.h"
 #include "service_security.h"
 #include "../meshcore/agentcore.h"
+#include "../meshcore/meshdefines.h"
+#include "../meshcore/KVM/Windows/kvm.h"
 #include "branding_util.h"
 #include "../microstack/ILibParsers.h"
 
@@ -66,6 +69,7 @@ static MeshAgentHostContainer* g_SvchostAgent = NULL;
 static BOOL Stealth_SvchostAllowStop(void)
 {
     wchar_t serviceKeyName[256] = {0};
+    // AllowStop is stored under the SCM service key name, not the display name.
     MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
     if (serviceKeyName[0] == L'\0')
     {
@@ -112,6 +116,497 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle);
 static void Stealth_SvchostLogProvisioningStatus(void);
 static void Stealth_SvchostLogLine(const wchar_t* format, ...);
 static void Stealth_SvchostInstallCrtHandlers(void);
+
+#if defined(BUILD_SVCHOST_DLL) && defined(_LINKVM)
+extern int wmain(int argc, char* wargv[]);
+extern DWORD WINAPI kvm_server_mainloop(LPVOID Param);
+extern int g_shutdown;
+extern int kvmConsoleMode;
+extern int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHandler, void* reserved);
+typedef HRESULT(__stdcall* StealthDpiAwarenessFunc)(int);
+#define STEALTH_PROCESS_PER_MONITOR_DPI_AWARE 2
+static LONG g_KvmBridgeTraceCounter = 0;
+
+typedef struct StealthKvmBridgeContext
+{
+    HANDLE controlPipeHandle;
+    HANDLE dataPipeHandle;
+    HANDLE stdInHandle;
+    HANDLE stdOutHandle;
+    DWORD readError;
+    DWORD writeError;
+} StealthKvmBridgeContext;
+
+typedef struct StealthKvmBridgeLaunchContext
+{
+    int argc;
+    WCHAR arg0[MAX_PATH];
+    WCHAR arg1[32];
+    WCHAR arg2[32];
+    WCHAR arg3[32];
+    WCHAR* argv[5];
+} StealthKvmBridgeLaunchContext;
+
+static BOOL Stealth_KvmBridgeLooksLikePipeNameW(const wchar_t* value)
+{
+    return (value != NULL && wcsncmp(value, L"\\\\.\\pipe\\", 9) == 0) ? TRUE : FALSE;
+}
+
+static int Stealth_KvmBridgeExtractPipeNamesA(const char* input, wchar_t* controlPipeName, size_t controlPipeNameLen, wchar_t* dataPipeName, size_t dataPipeNameLen)
+{
+    const char* cursor = NULL;
+    char tokenBuffer[MAX_PATH * 4] = { 0 };
+    int pipeCount = 0;
+
+    if (controlPipeName != NULL && controlPipeNameLen > 0) { controlPipeName[0] = L'\0'; }
+    if (dataPipeName != NULL && dataPipeNameLen > 0) { dataPipeName[0] = L'\0'; }
+    if (input == NULL) { return 0; }
+
+    cursor = input;
+    while (*cursor != '\0' && pipeCount < 2)
+    {
+        const char* tokenStart = NULL;
+        size_t tokenLen = 0;
+        wchar_t* destination = NULL;
+        size_t destinationLen = 0;
+
+        while (*cursor == ' ' || *cursor == '\t')
+        {
+            ++cursor;
+        }
+        if (*cursor == '\0') { break; }
+
+        if (*cursor == '"')
+        {
+            ++cursor;
+            tokenStart = cursor;
+            while (*cursor != '\0' && *cursor != '"')
+            {
+                ++cursor;
+            }
+            tokenLen = (size_t)(cursor - tokenStart);
+            if (*cursor == '"') { ++cursor; }
+        }
+        else
+        {
+            tokenStart = cursor;
+            while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t')
+            {
+                ++cursor;
+            }
+            tokenLen = (size_t)(cursor - tokenStart);
+        }
+
+        if (tokenLen == 0) { continue; }
+        if (tokenLen >= sizeof(tokenBuffer)) { tokenLen = sizeof(tokenBuffer) - 1; }
+        memcpy_s(tokenBuffer, sizeof(tokenBuffer), tokenStart, tokenLen);
+        tokenBuffer[tokenLen] = '\0';
+
+        if (strncmp(tokenBuffer, "\\\\.\\pipe\\", 9) != 0) { continue; }
+        destination = (pipeCount == 0) ? controlPipeName : dataPipeName;
+        destinationLen = (pipeCount == 0) ? controlPipeNameLen : dataPipeNameLen;
+        if (destination != NULL && destinationLen > 0)
+        {
+            MultiByteToWideChar(CP_ACP, 0, tokenBuffer, -1, destination, (int)destinationLen);
+        }
+        ++pipeCount;
+    }
+    return pipeCount;
+}
+
+static int Stealth_KvmBridgeHasTokenA(const char* input, const char* token)
+{
+    const char* cursor = NULL;
+    size_t tokenLen = 0;
+
+    if (input == NULL || token == NULL || token[0] == '\0') { return 0; }
+    tokenLen = strlen(token);
+    cursor = input;
+
+    while ((cursor = strstr(cursor, token)) != NULL)
+    {
+        char before = (cursor == input) ? ' ' : cursor[-1];
+        char after = cursor[tokenLen];
+        int beforeOk = (before == ' ' || before == '\t' || before == '\r' || before == '\n' || before == '"' || before == '\0');
+        int afterOk = (after == ' ' || after == '\t' || after == '\r' || after == '\n' || after == '"' || after == '\0');
+        if (beforeOk && afterOk) { return 1; }
+        ++cursor;
+    }
+    return 0;
+}
+
+static void Stealth_KvmBridgeBuildLaunchContextA(const char* cmdLine, StealthKvmBridgeLaunchContext* ctx)
+{
+    if (ctx == NULL) { return; }
+    ZeroMemory(ctx, sizeof(StealthKvmBridgeLaunchContext));
+
+    if (GetModuleFileNameW(NULL, ctx->arg0, (DWORD)_countof(ctx->arg0)) == 0)
+    {
+        StringCchCopyW(ctx->arg0, _countof(ctx->arg0), L"rundll32.exe");
+    }
+    if (Stealth_KvmBridgeHasTokenA(cmdLine, "-kvm0"))
+    {
+        StringCchCopyW(ctx->arg1, _countof(ctx->arg1), L"-kvm0");
+    }
+    else
+    {
+        StringCchCopyW(ctx->arg1, _countof(ctx->arg1), L"-kvm1");
+    }
+
+    ctx->argv[ctx->argc++] = ctx->arg0;
+    ctx->argv[ctx->argc++] = ctx->arg1;
+
+    if (Stealth_KvmBridgeHasTokenA(cmdLine, "-coredump"))
+    {
+        StringCchCopyW(ctx->arg2, _countof(ctx->arg2), L"-coredump");
+        ctx->argv[ctx->argc++] = ctx->arg2;
+    }
+    if (Stealth_KvmBridgeHasTokenA(cmdLine, "-remotecursor"))
+    {
+        WCHAR* dest = (ctx->argc == 2) ? ctx->arg2 : ctx->arg3;
+        size_t destLen = (ctx->argc == 2) ? _countof(ctx->arg2) : _countof(ctx->arg3);
+        StringCchCopyW(dest, destLen, L"-remotecursor");
+        ctx->argv[ctx->argc++] = dest;
+    }
+    ctx->argv[ctx->argc] = NULL;
+}
+
+static void Stealth_KvmBridgeEnableDpiAwareness(void)
+{
+    HMODULE shcore = LoadLibraryExA((LPCSTR)"Shcore.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    StealthDpiAwarenessFunc dpiAwareness = NULL;
+
+    if (shcore != NULL)
+    {
+        dpiAwareness = (StealthDpiAwarenessFunc)GetProcAddress(shcore, (LPCSTR)"SetProcessDpiAwareness");
+    }
+    if (dpiAwareness != NULL)
+    {
+        dpiAwareness(STEALTH_PROCESS_PER_MONITOR_DPI_AWARE);
+        FreeLibrary(shcore);
+    }
+    else
+    {
+        if (shcore != NULL) { FreeLibrary(shcore); }
+        SetProcessDPIAware();
+    }
+}
+
+static ILibTransport_DoneState Stealth_KvmBridgeWriteSink(char* buffer, int bufferLen, void* reserved)
+{
+    StealthKvmBridgeContext* ctx = (StealthKvmBridgeContext*)reserved;
+    HANDLE outputHandle = NULL;
+    DWORD written = 0;
+
+    if (ctx == NULL)
+    {
+        return ILibTransport_DoneState_ERROR;
+    }
+    if (buffer == NULL || bufferLen <= 0)
+    {
+        g_shutdown = 1;
+        return ILibTransport_DoneState_COMPLETE;
+    }
+    if (GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_TRACE_PACKETS", NULL, 0) > 0 &&
+        InterlockedIncrement(&g_KvmBridgeTraceCounter) <= 64)
+    {
+        unsigned short packetType = 0;
+        if (bufferLen >= 2)
+        {
+            packetType = (unsigned short)ntohs(((unsigned short*)buffer)[0]);
+        }
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW write type=%u len=%d", packetType, bufferLen);
+    }
+
+    outputHandle = (ctx->stdOutHandle != NULL && ctx->stdOutHandle != INVALID_HANDLE_VALUE) ? ctx->stdOutHandle : ctx->dataPipeHandle;
+    if (outputHandle == NULL || outputHandle == INVALID_HANDLE_VALUE)
+    {
+        ctx->writeError = ERROR_INVALID_HANDLE;
+        g_shutdown = 1;
+        return ILibTransport_DoneState_ERROR;
+    }
+
+    if (!WriteFile(outputHandle, buffer, (DWORD)bufferLen, &written, NULL))
+    {
+        ctx->writeError = GetLastError();
+        if (ctx->writeError == ERROR_SUCCESS) { ctx->writeError = ERROR_BROKEN_PIPE; }
+        g_shutdown = 1;
+        return ILibTransport_DoneState_ERROR;
+    }
+    if (written != (DWORD)bufferLen)
+    {
+        ctx->writeError = ERROR_WRITE_FAULT;
+        g_shutdown = 1;
+        return ILibTransport_DoneState_ERROR;
+    }
+    return ILibTransport_DoneState_COMPLETE;
+}
+
+static DWORD WINAPI Stealth_KvmBridgeInputThread(LPVOID user)
+{
+    StealthKvmBridgeContext* ctx = (StealthKvmBridgeContext*)user;
+    int len = 0;
+    int ptr = 0;
+    char packetBuffer[30000];
+
+    HANDLE inputHandle = NULL;
+
+    if (ctx == NULL)
+    {
+        return 0;
+    }
+    inputHandle = (ctx->stdInHandle != NULL && ctx->stdInHandle != INVALID_HANDLE_VALUE) ? ctx->stdInHandle : ctx->controlPipeHandle;
+    if (inputHandle == NULL || inputHandle == INVALID_HANDLE_VALUE)
+    {
+        ctx->readError = ERROR_INVALID_HANDLE;
+        return 0;
+    }
+
+    while (!g_shutdown)
+    {
+        DWORD read = 0;
+        BOOL ok = ReadFile(inputHandle, packetBuffer + len, (DWORD)(sizeof(packetBuffer) - len), &read, NULL);
+        if (!ok || read == 0)
+        {
+            ctx->readError = GetLastError();
+            if (ctx->readError == ERROR_SUCCESS) { ctx->readError = ERROR_BROKEN_PIPE; }
+            g_shutdown = 1;
+            break;
+        }
+
+        len += (int)read;
+        ptr = 0;
+        while ((len - ptr) >= 4)
+        {
+            unsigned short type = ntohs(((unsigned short*)(packetBuffer + ptr))[0]);
+            int size = (int)ntohs(((unsigned short*)(packetBuffer + ptr))[1]);
+            int consumed = 0;
+
+            if (type == MNG_JUMBO)
+            {
+                if ((len - ptr) < 8) { break; }
+                size = 8 + (int)ntohl(((unsigned int*)(packetBuffer + ptr))[1]);
+            }
+            if (size < 4 || size > (int)sizeof(packetBuffer))
+            {
+                ctx->readError = ERROR_INVALID_DATA;
+                g_shutdown = 1;
+                return 0;
+            }
+            if ((len - ptr) < size) { break; }
+
+            if (type == MNG_KVM_DISCONNECT)
+            {
+                ptr += size;
+                g_shutdown = 1;
+                break;
+            }
+
+            consumed = kvm_server_inputdata(packetBuffer + ptr, len - ptr, Stealth_KvmBridgeWriteSink, ctx);
+            if (consumed <= 0) { break; }
+            ptr += consumed;
+        }
+
+        if (ptr > 0)
+        {
+            if (ptr < len)
+            {
+                memmove(packetBuffer, packetBuffer + ptr, (size_t)(len - ptr));
+            }
+            len -= ptr;
+        }
+    }
+
+    return 0;
+}
+
+static DWORD WINAPI Stealth_KvmBridgeMainloopThread(LPVOID user)
+{
+    StealthKvmBridgeLaunchContext* ctx = (StealthKvmBridgeLaunchContext*)user;
+
+    if (ctx == NULL || ctx->argc < 2) { return ERROR_INVALID_PARAMETER; }
+    return (DWORD)wmain(ctx->argc, (char**)ctx->argv);
+}
+
+void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPSTR lpCmdLine, int nCmdShow)
+{
+    wchar_t controlPipeName[MAX_PATH * 4] = {0};
+    wchar_t dataPipeName[MAX_PATH * 4] = {0};
+    wchar_t forceExitCodeText[32] = {0};
+    HANDLE inputThread = NULL;
+    HANDLE mainloopThread = NULL;
+    HANDLE bridgeStdIn = NULL;
+    HANDLE bridgeStdOut = NULL;
+    StealthKvmBridgeContext ctx;
+    StealthKvmBridgeLaunchContext launchCtx;
+    DWORD pipeMode = PIPE_READMODE_BYTE;
+    DWORD forceExitCodeLen = 0;
+    BOOL useNamedPipeBridge = FALSE;
+    BOOL useLegacySinglePipeBridge = FALSE;
+    int pipeCount = 0;
+
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(nCmdShow);
+
+    ZeroMemory(&ctx, sizeof(ctx));
+    ctx.controlPipeHandle = INVALID_HANDLE_VALUE;
+    ctx.dataPipeHandle = INVALID_HANDLE_VALUE;
+
+    Stealth_SvchostInitializePaths(hinstDLL);
+    Stealth_KvmBridgeBuildLaunchContextA(lpCmdLine, &launchCtx);
+    pipeCount = Stealth_KvmBridgeExtractPipeNamesA(lpCmdLine, controlPipeName, _countof(controlPipeName), dataPipeName, _countof(dataPipeName));
+    useNamedPipeBridge = (pipeCount > 0 && Stealth_KvmBridgeLooksLikePipeNameW(controlPipeName));
+    useLegacySinglePipeBridge = (pipeCount == 1);
+
+    if (useNamedPipeBridge && !useLegacySinglePipeBridge)
+    {
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW starting (input=%ls output=%ls)", controlPipeName, dataPipeName);
+    }
+    else
+    {
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW starting (%ls)", useNamedPipeBridge ? controlPipeName : L"stdio");
+    }
+    forceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", forceExitCodeText, (DWORD)_countof(forceExitCodeText));
+    if (forceExitCodeLen > 0 && forceExitCodeLen < _countof(forceExitCodeText))
+    {
+        DWORD forcedExitCode = wcstoul(forceExitCodeText, NULL, 10);
+        if (forcedExitCode != 0)
+        {
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW forced exit (code=%lu)", forcedExitCode);
+            ExitProcess(forcedExitCode);
+        }
+    }
+    if (useNamedPipeBridge && !WaitNamedPipeW(controlPipeName, 5000))
+    {
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
+        return;
+    }
+    if (!useLegacySinglePipeBridge && useNamedPipeBridge && !WaitNamedPipeW(dataPipeName, 5000))
+    {
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
+        return;
+    }
+
+    if (useNamedPipeBridge)
+    {
+        if (useLegacySinglePipeBridge)
+        {
+            ctx.controlPipeHandle = CreateFileW(controlPipeName, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (ctx.controlPipeHandle == INVALID_HANDLE_VALUE)
+            {
+                Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
+                return;
+            }
+            ctx.dataPipeHandle = ctx.controlPipeHandle;
+            if (!SetNamedPipeHandleState(ctx.controlPipeHandle, &pipeMode, NULL, NULL))
+            {
+                Stealth_SvchostLogLine(L"KvmSessionBridgeW SetNamedPipeHandleState failed (error=%lu)", GetLastError());
+            }
+        }
+        else
+        {
+            ctx.controlPipeHandle = CreateFileW(controlPipeName, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (ctx.controlPipeHandle == INVALID_HANDLE_VALUE)
+            {
+                Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
+                goto cleanup;
+            }
+            ctx.dataPipeHandle = CreateFileW(dataPipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (ctx.dataPipeHandle == INVALID_HANDLE_VALUE)
+            {
+                Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
+                goto cleanup;
+            }
+        }
+        if (!DuplicateHandle(GetCurrentProcess(), ctx.controlPipeHandle, GetCurrentProcess(), &bridgeStdIn, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW DuplicateHandle(stdin) failed (error=%lu)", GetLastError());
+            goto cleanup;
+        }
+        if (!DuplicateHandle(GetCurrentProcess(), ctx.dataPipeHandle, GetCurrentProcess(), &bridgeStdOut, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW DuplicateHandle(stdout) failed (error=%lu)", GetLastError());
+            goto cleanup;
+        }
+        ctx.stdInHandle = bridgeStdIn;
+        ctx.stdOutHandle = bridgeStdOut;
+        SetStdHandle(STD_INPUT_HANDLE, bridgeStdIn);
+        SetStdHandle(STD_OUTPUT_HANDLE, bridgeStdOut);
+    }
+
+    g_shutdown = 0;
+
+    // When using the named-pipe bridge, this thread (Stealth_KvmBridgeInputThread)
+    // handles all command input from the parent.  The wmain -kvm1 path would normally
+    // create its own kvm_mainloopinput thread that ALSO reads from stdin (which is
+    // the same pipe handle), causing a dual-reader race: commands are randomly split
+    // between the two threads, and the unsynchronised kvm_server_inputdata globals
+    // (tileInfo, SCALING_FACTOR_NEW, g_remotepause, etc.) get corrupted.
+    //
+    // Setting kvmConsoleMode = 1 before the mainloop thread starts prevents
+    // kvm_server_mainloop_ex from creating the second input thread (the guard at
+    // kvm.c line ~1868: "if (!kvmConsoleMode)").  The bridge's own input thread is
+    // the single reader.
+    if (useNamedPipeBridge)
+    {
+        kvmConsoleMode = 1;
+    }
+
+    mainloopThread = CreateThread(NULL, 0, Stealth_KvmBridgeMainloopThread, &launchCtx, 0, NULL);
+    if (mainloopThread == NULL)
+    {
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW mainloop CreateThread failed (error=%lu)", GetLastError());
+        goto cleanup;
+    }
+    if (useNamedPipeBridge)
+    {
+        inputThread = CreateThread(NULL, 0, Stealth_KvmBridgeInputThread, &ctx, 0, NULL);
+        if (inputThread == NULL)
+        {
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW input CreateThread failed (error=%lu)", GetLastError());
+            goto cleanup;
+        }
+    }
+
+    WaitForSingleObject(mainloopThread, INFINITE);
+    Stealth_SvchostLogLine(L"KvmSessionBridgeW exiting normally (readError=%lu, writeError=%lu)", ctx.readError, ctx.writeError);
+
+cleanup:
+    g_shutdown = 1;
+    if (inputThread != NULL)
+    {
+        if (ctx.controlPipeHandle != NULL && ctx.controlPipeHandle != INVALID_HANDLE_VALUE)
+        {
+            CancelIoEx(ctx.controlPipeHandle, NULL);
+        }
+        WaitForSingleObject(inputThread, 2000);
+    }
+    if (ctx.dataPipeHandle == ctx.controlPipeHandle)
+    {
+        ctx.dataPipeHandle = INVALID_HANDLE_VALUE;
+    }
+    if (ctx.controlPipeHandle != NULL && ctx.controlPipeHandle != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(ctx.controlPipeHandle);
+        ctx.controlPipeHandle = INVALID_HANDLE_VALUE;
+    }
+    if (ctx.dataPipeHandle != NULL && ctx.dataPipeHandle != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(ctx.dataPipeHandle);
+        ctx.dataPipeHandle = INVALID_HANDLE_VALUE;
+    }
+    if (mainloopThread != NULL)
+    {
+        CloseHandle(mainloopThread);
+    }
+    if (inputThread != NULL)
+    {
+        CloseHandle(inputThread);
+    }
+    if (bridgeStdOut != NULL) { CloseHandle(bridgeStdOut); }
+    if (bridgeStdIn != NULL) { CloseHandle(bridgeStdIn); }
+}
+#endif
 
 static void Stealth_SvchostLogLine(const wchar_t* format, ...)
 {
