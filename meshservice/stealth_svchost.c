@@ -428,16 +428,8 @@ static DWORD WINAPI Stealth_KvmBridgeMainloopThread(LPVOID user)
     return (DWORD)wmain(ctx->argc, (char**)ctx->argv);
 }
 
-void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPSTR lpCmdLineA, int nCmdShow)
+void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
 {
-    // Despite the 'W' suffix, rundll32 passes ANSI command line when the process
-    // is spawned via CreateProcessA or with an ANSI command line.  Convert to wide.
-    wchar_t lpCmdLineBuffer[MAX_PATH * 8] = {0};
-    LPWSTR lpCmdLine = lpCmdLineBuffer;
-    if (lpCmdLineA != NULL)
-    {
-        MultiByteToWideChar(CP_UTF8, 0, lpCmdLineA, -1, lpCmdLineBuffer, _countof(lpCmdLineBuffer));
-    }
     wchar_t controlPipeName[MAX_PATH * 4] = {0};
     wchar_t dataPipeName[MAX_PATH * 4] = {0};
     wchar_t forceExitCodeText[32] = {0};
@@ -461,6 +453,26 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPSTR lpCmdLineA,
     ctx.dataPipeHandle = INVALID_HANDLE_VALUE;
 
     Stealth_SvchostInitializePaths(hinstDLL);
+
+    // rundll32.exe's lpCmdLine parameter is unreliable for W-suffix entry points
+    // in cross-session spawns — it passes the ANSI PEB command line bytes as-is,
+    // producing garbled WIDE text.  Use GetCommandLineW() directly and extract
+    // the arguments after the entry point name.
+    {
+        LPWSTR fullCmdLine = GetCommandLineW();
+        LPWSTR entryPoint = NULL;
+        if (fullCmdLine != NULL)
+        {
+            entryPoint = wcsstr(fullCmdLine, L"KvmSessionBridgeW");
+            if (entryPoint != NULL)
+            {
+                entryPoint += wcslen(L"KvmSessionBridgeW");
+                while (*entryPoint == L' ') { entryPoint++; }
+                lpCmdLine = entryPoint;
+            }
+        }
+    }
+
     Stealth_KvmBridgeBuildLaunchContextW(lpCmdLine, &launchCtx);
     pipeCount = Stealth_KvmBridgeExtractPipeNamesW(lpCmdLine, controlPipeName, _countof(controlPipeName), dataPipeName, _countof(dataPipeName));
     useNamedPipeBridge = (pipeCount > 0 && Stealth_KvmBridgeLooksLikePipeNameW(controlPipeName));
@@ -554,6 +566,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPSTR lpCmdLineA,
     // threads read from the same control pipe causes a dual-reader race that
     // splits commands randomly and corrupts the unsynchronised globals in
     // kvm_server_inputdata (tileInfo, SCALING_FACTOR_NEW, g_remotepause, etc.).
+    Stealth_SvchostLogLine(L"KvmSessionBridgeW launching mainloop argc=%d argv0=[%ls] argv1=[%ls] useNamedPipe=%d", launchCtx.argc, launchCtx.argv[0] ? launchCtx.argv[0] : L"(null)", launchCtx.argv[1] ? launchCtx.argv[1] : L"(null)", useNamedPipeBridge ? 1 : 0);
     mainloopThread = CreateThread(NULL, 0, Stealth_KvmBridgeMainloopThread, &launchCtx, 0, NULL);
     if (mainloopThread == NULL)
     {
@@ -562,7 +575,11 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPSTR lpCmdLineA,
     }
 
     WaitForSingleObject(mainloopThread, INFINITE);
-    Stealth_SvchostLogLine(L"KvmSessionBridgeW exiting normally (readError=%lu, writeError=%lu)", ctx.readError, ctx.writeError);
+    {
+        DWORD exitCode = 0;
+        GetExitCodeThread(mainloopThread, &exitCode);
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW mainloop exited (threadExitCode=%lu readError=%lu writeError=%lu)", exitCode, ctx.readError, ctx.writeError);
+    }
 
 cleanup:
     g_shutdown = 1;

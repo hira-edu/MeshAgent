@@ -4069,6 +4069,14 @@ duk_ret_t ILibDuktape_ScriptContainer_Create(duk_context *ctx)
 		}
 	}
 
+#if defined(BUILD_SVCHOST_DLL)
+	// In svchost-hosted service mode, NEVER spawn standalone child processes.
+	// All ScriptContainer operations run in-process to maintain the svchost-only
+	// process tree contract (no visible diaghost.exe --slave processes).
+	// The KVM bridge uses its own rundll32-based spawn path and is not affected.
+	processIsolation = 0;
+#endif
+
 	duk_push_heap_stash(ctx);
 	duk_get_prop_string(ctx, -1, ILibDuktape_ScriptContainer_ExePath);
 	duk_get_prop_string(ctx, -2, ILibDuktape_ScriptContainer_PipeManager);

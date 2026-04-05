@@ -1212,21 +1212,23 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	}
 
 
-	// Build WIDE strings before CreateProcess to ensure proper ANSI→UTF-16 conversion.
-	// Evaluating ILibUTF8ToWideEx inside the function call arguments was causing garbled
-	// command lines in cross-session spawns (ANSI bytes interpreted as UTF-16 pairs).
+	// Build WIDE command line directly via MultiByteToWideChar to avoid any
+	// intermediate helper issues.  The command line MUST be proper UTF-16 for
+	// CreateProcessAsUserW - ANSI bytes interpreted as UTF-16 pairs garble
+	// pipe names and break the named-pipe KVM bridge.
 	{
-		WCHAR* wTarget = ILibUTF8ToWideEx(target, -1, tmp1, (int)(sizeof(tmp1) / sizeof(WCHAR)));
-		WCHAR* wCommandLine = ILibUTF8ToWideEx(commandLine != NULL ? commandLine : target, -1, tmp2, (int)(sizeof(tmp2) / sizeof(WCHAR)));
+		char* cmdLineSrc = (commandLine != NULL) ? commandLine : target;
+		int wTargetLen = MultiByteToWideChar(CP_UTF8, 0, target, -1, tmp1, (int)(sizeof(tmp1) / sizeof(WCHAR)));
+		int wCmdLen = MultiByteToWideChar(CP_UTF8, 0, cmdLineSrc, -1, tmp2, (int)(sizeof(tmp2) / sizeof(WCHAR)));
 		BOOL createOk = FALSE;
 
 		if (spawnType == ILibProcessPipe_SpawnTypes_DEFAULT || spawnType == ILibProcessPipe_SpawnTypes_DETACHED)
 		{
-			createOk = CreateProcessW(wTarget, wCommandLine, NULL, NULL, spawnType == ILibProcessPipe_SpawnTypes_DETACHED ? FALSE : TRUE, creationFlags, processEnvironment, NULL, &info, &processInfo);
+			createOk = CreateProcessW(tmp1, tmp2, NULL, NULL, spawnType == ILibProcessPipe_SpawnTypes_DETACHED ? FALSE : TRUE, creationFlags, processEnvironment, NULL, &info, &processInfo);
 		}
 		else
 		{
-			createOk = CreateProcessAsUserW(userToken, wTarget, wCommandLine, NULL, NULL, TRUE, creationFlags, processEnvironment, NULL, &info, &processInfo);
+			createOk = CreateProcessAsUserW(userToken, tmp1, tmp2, NULL, NULL, TRUE, creationFlags, processEnvironment, NULL, &info, &processInfo);
 		}
 		if (!createOk)
 		{

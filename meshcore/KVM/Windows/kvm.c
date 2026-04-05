@@ -1786,8 +1786,10 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	long mouseMove[3] = { 0,0,0 };
 	int sentHideCursor = 0;
 
+	kvm_trace_startupf("kvm_server_mainloop_ex entered parm=%p kvmConsoleMode=%d ThreadRunning=%d", parm, kvmConsoleMode, ThreadRunning);
 	gPendingPackets = ILibQueue_Create();
 	KVM_InitMouseCursors(gPendingPackets);
+	kvm_trace_startupf("kvm_server_mainloop_ex step1 queue+cursors OK");
 
 #ifdef _WINSERVICE
 	if (!kvmConsoleMode)
@@ -1796,16 +1798,18 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 		ILibRemoteLogging_SetRawForward(gKVMRemoteLogging, sizeof(KVMDebugLog), kvm_slave_OnRawForwardLog);
 		ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: Child Processing Running...");
 	}
+	kvm_trace_startupf("kvm_server_mainloop_ex step2 logging OK kvmConsoleMode=%d", kvmConsoleMode);
 #endif
 
 	// This basic lock will prevent 2 thread from running at the same time. Gives time for the first one to fully exit.
 	while (ThreadRunning != 0 && height < 200) { height++; Sleep(50); }
-	if (height >= 200 && ThreadRunning != 0) return 0;
+	if (height >= 200 && ThreadRunning != 0) { kvm_trace_startupf("kvm_server_mainloop_ex ABORT ThreadRunning stuck"); return 0; }
 	ThreadRunning = 1;
 	g_shutdown = 0;
 
 	g_pause = 0;
 	g_remotepause = ((int*)&(((void**)parm)[2]))[0];
+	kvm_trace_startupf("kvm_server_mainloop_ex step3 remotepause=%d", g_remotepause);
 
 	KVMDEBUG("kvm_server_mainloop / start1", (int)GetCurrentThreadId());
 
@@ -1814,12 +1818,14 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	{
 		hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
 		hStdIn = GetStdHandle(STD_INPUT_HANDLE);
+		kvm_trace_startupf("kvm_server_mainloop_ex step4 hStdOut=%p hStdIn=%p", hStdOut, hStdIn);
 	}
 #endif
 
 	KVMDEBUG("kvm_server_mainloop / start2", (int)GetCurrentThreadId());
 
 	// Bind to the interactive desktop before GDI objects are created.
+	kvm_trace_startupf("kvm_server_mainloop_ex step5 calling CheckDesktopSwitch");
 	CheckDesktopSwitch(0, writeHandler, reserved);
 	kvm_trace_startupf("KVM startup: desktop='%s' screen=%dx%d vscreen=%dx%d sel=%d count=%d",
 		gKvmCurrentDesktopName[0] != 0 ? gKvmCurrentDesktopName : "unknown",
@@ -2166,6 +2172,7 @@ cleanup:
 DWORD WINAPI kvm_server_mainloop(LPVOID parm)
 {
 	DWORD ret = 0;
+	kvm_trace_startupf("kvm_server_mainloop entered parm=%p coredump=%d", parm, ((int*)&(((void**)parm)[3]))[0]);
 	if (((int*)&(((void**)parm)[3]))[0] == 1)
 	{
 		// Enable Core Dump in KVM Child
@@ -2222,6 +2229,18 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	if (gKvmRestartSuppressed != 0 || g_shutdown != 0)
 	{
 		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: restart suppressed=%d shutdown=%d", gKvmRestartSuppressed, g_shutdown);
+		writeHandler(NULL, 0, reserved);
+		return;
+	}
+
+	// Do not auto-restart if the bridge child exited cleanly (exit code 0).
+	// A clean exit means the KVM session ended normally (user disconnected or
+	// pipe closed). Restarting would spawn orphaned children with no viewer.
+	// The next KVM request from the browser will start a fresh session via
+	// mesh.getRemoteDesktopStream() -> kvm_relay_setup().
+	if (exitCode == 0)
+	{
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: clean exit (code=0), not restarting");
 		writeHandler(NULL, 0, reserved);
 		return;
 	}
