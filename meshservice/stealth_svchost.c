@@ -11,6 +11,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <wchar.h>
+#include <Aclapi.h>
 #include <sddl.h>
 #include <strsafe.h>
 #include "stealth.h"
@@ -115,6 +116,7 @@ static BOOL Stealth_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathO
 static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle);
 static void Stealth_SvchostLogProvisioningStatus(void);
 static void Stealth_SvchostLogLine(const wchar_t* format, ...);
+static BOOL Stealth_SvchostEnsureModuleDacl(void);
 static void Stealth_SvchostInstallCrtHandlers(void);
 
 #if defined(BUILD_SVCHOST_DLL) && defined(_LINKVM)
@@ -649,6 +651,56 @@ static void Stealth_SvchostLogLine(const wchar_t* format, ...)
     fclose(logFile);
 }
 
+static BOOL Stealth_SvchostEnsureModuleDacl(void)
+{
+    PSECURITY_DESCRIPTOR pSD = NULL;
+    PACL dacl = NULL;
+    BOOL daclPresent = FALSE;
+    BOOL daclDefaulted = FALSE;
+    BOOL ok = FALSE;
+    DWORD setResult = ERROR_SUCCESS;
+
+    if (g_SvchostModulePath[0] == L'\0') { return FALSE; }
+    if (GetFileAttributesW(g_SvchostModulePath) == INVALID_FILE_ATTRIBUTES) { return FALSE; }
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            STEALTH_SVCHOST_DLL_DACL_SDDL,
+            SDDL_REVISION_1,
+            &pSD,
+            NULL))
+    {
+        return FALSE;
+    }
+
+    if (GetSecurityDescriptorDacl(pSD, &daclPresent, &dacl, &daclDefaulted) &&
+        daclPresent != FALSE &&
+        dacl != NULL)
+    {
+        setResult = SetNamedSecurityInfoW(
+            g_SvchostModulePath,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            NULL,
+            NULL,
+            dacl,
+            NULL);
+        if (setResult == ERROR_SUCCESS)
+        {
+            ok = TRUE;
+        }
+        else
+        {
+            SetLastError(setResult);
+        }
+    }
+
+    if (pSD != NULL)
+    {
+        LocalFree(pSD);
+    }
+    return ok;
+}
+
 static void Stealth_SvchostInvalidParameterHandler(
     const wchar_t* expression,
     const wchar_t* function,
@@ -738,6 +790,13 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
         Stealth_SvchostLogLine(L"module path: %ls", g_SvchostModulePath);
         Stealth_SvchostLogLine(L"install directory: %ls", g_SvchostInstallDir);
         Stealth_SvchostInstallCrtHandlers();
+        if (!Stealth_SvchostEnsureModuleDacl())
+        {
+            DWORD aclError = GetLastError();
+            if (aclError == ERROR_SUCCESS) { aclError = ERROR_ACCESS_DENIED; }
+            Stealth_DebugPrintfW(L"[svchost] failed to apply DLL DACL to %ls (error=%lu)", g_SvchostModulePath, aclError);
+            Stealth_SvchostLogLine(L"failed to apply DLL DACL to %ls (error=%lu)", g_SvchostModulePath, aclError);
+        }
     }
     else
     {
@@ -805,7 +864,7 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
             }
         }
 
-        if (helperPath[0] != L'\0')
+        if (helperExists != FALSE)
         {
             preferredExe = helperPath;
         }

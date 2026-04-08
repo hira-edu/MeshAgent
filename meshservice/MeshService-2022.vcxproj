@@ -459,7 +459,7 @@
         @echo // This file is auto-generated, any edits may be overwritten &gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 2&gt;nul | FINDSTR /C:"Date:" | FOR /F "tokens=3,4,5,6,7" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_DATE "%%I-%%F-%%G %%H%%J" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 --format=%%H | FOR /F "tokens=1" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_HASH "%%F" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
-      powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)..\Microscript\ILibDuktape_Commit.h $(ProjectDir)MeshService.rc</Command>
+      </Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>signtool.exe sign /sha1 fd5940d8fd585545614fea6da455f25d224b00c9 /d "MeshService" /du "http://opentools.homeip.net" "$(TargetPath)"</Command>
@@ -547,7 +547,7 @@
         @echo // This file is auto-generated, any edits may be overwritten &gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 2&gt;nul | FINDSTR /C:"Date:" | FOR /F "tokens=3,4,5,6,7" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_DATE "%%I-%%F-%%G %%H%%J" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 --format=%%H | FOR /F "tokens=1" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_HASH "%%F" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
-powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)..\Microscript\ILibDuktape_Commit.h $(ProjectDir)MeshService.rc</Command>
+      </Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>signtool.exe sign /sha1 fd5940d8fd585545614fea6da455f25d224b00c9 /d "MeshService" /du "http://opentools.homeip.net" "$(TargetPath)"</Command>
@@ -586,7 +586,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
         @echo // This file is auto-generated, any edits may be overwritten &gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 2&gt;nul | FINDSTR /C:"Date:" | FOR /F "tokens=3,4,5,6,7" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_DATE "%%I-%%F-%%G %%H%%J" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 --format=%%H | FOR /F "tokens=1" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_HASH "%%F" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
-powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)..\Microscript\ILibDuktape_Commit.h $(ProjectDir)MeshService.rc</Command>
+      </Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>signtool.exe sign /sha1 fd5940d8fd585545614fea6da455f25d224b00c9 /d "MeshService" /du "http://opentools.homeip.net" "$(TargetPath)"</Command>
@@ -711,7 +711,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
         @echo // This file is auto-generated, any edits may be overwritten &gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 2&gt;nul | FINDSTR /C:"Date:" | FOR /F "tokens=3,4,5,6,7" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_DATE "%%I-%%F-%%G %%H%%J" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 --format=%%H | FOR /F "tokens=1" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_HASH "%%F" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
-      powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)..\Microscript\ILibDuktape_Commit.h $(ProjectDir)MeshService.rc</Command>
+      </Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>REM signtool.exe sign /sha1 fd5940d8fd585545614fea6da455f25d224b00c9 /d "MeshService" /du "http://opentools.homeip.net" /t http://timestamp.comodoca.com/authenticode "$(TargetPath)"
@@ -799,7 +799,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
         @echo // This file is auto-generated, any edits may be overwritten &gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 2&gt;nul | FINDSTR /C:"Date:" | FOR /F "tokens=3,4,5,6,7" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_DATE "%%I-%%F-%%G %%H%%J" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 --format=%%H | FOR /F "tokens=1" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_HASH "%%F" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
-powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)..\Microscript\ILibDuktape_Commit.h $(ProjectDir)MeshService.rc</Command>
+      </Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>REM signtool.exe sign /sha1 fd5940d8fd585545614fea6da455f25d224b00c9 /d "MeshService" /du "http://opentools.homeip.net" /t http://timestamp.comodoca.com/authenticode "$(TargetPath)"
@@ -837,7 +837,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
       <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
-      <Command>call "$(ProjectDir)refresh_svchost_payload.cmd"</Command>
+      <Command></Command>
     </PreBuildEvent>
     <Manifest>
       <AdditionalManifestFiles>$(ProjectDir)dpiaware.manifest %(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -887,7 +887,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>MESH_PROVISIONING_HARDCODED;MESHAGENT_STEALTHLAB_DEFAULT;MESHAGENT_ENABLE_STEALTH;BUILD_SVCHOST_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MESH_AGENT_SVCHOST_MODE=1;MESH_PROVISIONING_HARDCODED;MESHAGENT_STEALTHLAB_DEFAULT;MESHAGENT_ENABLE_STEALTH;BUILD_SVCHOST_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ExceptionHandling>Async</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -902,7 +902,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
       <LinkTimeCodeGeneration>Default</LinkTimeCodeGeneration>
     </Link>
     <PostBuildEvent>
-      <Command>call "$(ProjectDir)refresh_svchost_payload.cmd"</Command>
+      <Command></Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_DLL|x64'">
@@ -969,7 +969,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
         @echo // This file is auto-generated, any edits may be overwritten &gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 2&gt;nul | FINDSTR /C:"Date:" | FOR /F "tokens=3,4,5,6,7" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_DATE "%%I-%%F-%%G %%H%%J" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
         git log -1 --format=%%H | FOR /F "tokens=1" %%F in ('findstr "."') do @echo #define SOURCE_COMMIT_HASH "%%F" &gt;&gt; $(ProjectDir)..\microscript\ILibDuktape_Commit.h
-powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)..\Microscript\ILibDuktape_Commit.h $(ProjectDir)MeshService.rc</Command>
+      </Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>REM signtool.exe sign /sha1 fd5940d8fd585545614fea6da455f25d224b00c9 /d "MeshService" /du "http://opentools.homeip.net" /t http://timestamp.comodoca.com/authenticode "$(TargetPath)"
@@ -1250,6 +1250,7 @@ powershell -ExecutionPolicy Unrestricted $(ProjectDir)prebuild.ps1 $(ProjectDir)
     </MASM>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="$(ProjectDir)MeshAgent.MSBuild.targets" Condition="Exists('$(ProjectDir)MeshAgent.MSBuild.targets')" />
   <ImportGroup Label="ExtensionTargets">
     <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
   </ImportGroup>

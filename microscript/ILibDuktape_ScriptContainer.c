@@ -199,6 +199,8 @@ typedef enum SCRIPT_ENGINE_COMMAND
 }SCRIPT_ENGINE_COMMAND;
 
 
+typedef struct ILibDuktape_ScriptContainer_Slave ILibDuktape_ScriptContainer_Slave;
+
 typedef struct ILibDuktape_ScriptContainer_Master
 {
 	duk_context *ctx;
@@ -208,10 +210,13 @@ typedef struct ILibDuktape_ScriptContainer_Master
 	void *chain;
 	void *PeerThread, *PeerChain;
 	duk_context *PeerCTX;
+	uintptr_t PeerCTXNonce;
+	ILibDuktape_ScriptContainer_Slave *PeerSlave;
+	ILibSpinLock PeerLock;
 	unsigned int ChildSecurityFlags;
 }ILibDuktape_ScriptContainer_Master;
 
-typedef struct ILibDuktape_ScriptContainer_Slave
+struct ILibDuktape_ScriptContainer_Slave
 {
 	duk_context *ctx;
 	ILibDuktape_EventEmitter *emitter;
@@ -219,7 +224,7 @@ typedef struct ILibDuktape_ScriptContainer_Slave
 	void *chain;
 	int exitCode;
 	int noRespond;
-}ILibDuktape_ScriptContainer_Slave;
+};
 
 
 typedef struct ILibDuktape_ScriptContainer_NonIsolated_Command
@@ -230,6 +235,52 @@ typedef struct ILibDuktape_ScriptContainer_NonIsolated_Command
 
 void ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave(void *chain, void *user);
 void ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsMaster(void *chain, void *user);
+
+static void ILibDuktape_ScriptContainer_SetPeerState(ILibDuktape_ScriptContainer_Master *master, void *peerChain, duk_context *peerCtx, ILibDuktape_ScriptContainer_Slave *peerSlave)
+{
+	if (master == NULL) { return; }
+
+	ILibSpinLock_Lock(&(master->PeerLock));
+	master->PeerChain = peerChain;
+	master->PeerCTX = peerCtx;
+	master->PeerCTXNonce = peerCtx == NULL ? 0 : duk_ctx_nonce(peerCtx);
+	master->PeerSlave = peerSlave;
+	ILibSpinLock_UnLock(&(master->PeerLock));
+}
+
+static void ILibDuktape_ScriptContainer_ClearPeerState(ILibDuktape_ScriptContainer_Master *master, duk_context *expectedCtx, ILibDuktape_ScriptContainer_Slave *expectedSlave)
+{
+	if (master == NULL) { return; }
+
+	ILibSpinLock_Lock(&(master->PeerLock));
+	if ((expectedCtx == NULL || master->PeerCTX == expectedCtx) && (expectedSlave == NULL || master->PeerSlave == expectedSlave))
+	{
+		master->PeerChain = NULL;
+		master->PeerCTX = NULL;
+		master->PeerCTXNonce = 0;
+		master->PeerSlave = NULL;
+	}
+	ILibSpinLock_UnLock(&(master->PeerLock));
+}
+
+static int ILibDuktape_ScriptContainer_DispatchToPeer(ILibDuktape_ScriptContainer_Master *master, ILibDuktape_ScriptContainer_NonIsolated_Command *cmd)
+{
+	int dispatched = 0;
+
+	if (master == NULL || cmd == NULL) { return 0; }
+
+	ILibSpinLock_Lock(&(master->PeerLock));
+	if (master->PeerChain != NULL && master->PeerCTX != NULL && master->PeerCTXNonce != 0 && master->PeerSlave != NULL)
+	{
+		cmd->container.slave = master->PeerSlave;
+		Duktape_RunOnEventLoopEx(master->PeerChain, master->PeerCTXNonce, master->PeerCTX, ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave, cmd, 1);
+		dispatched = 1;
+	}
+	ILibSpinLock_UnLock(&(master->PeerLock));
+
+	if (!dispatched) { free(cmd); }
+	return dispatched;
+}
 
 #ifdef _REMOTELOGGING
 void ILibDuktape_ScriptContainer_Slave_LogForwarder(ILibRemoteLogging sender, ILibRemoteLogging_Modules module, ILibRemoteLogging_Flags flags, char *buffer, int bufferLen)
@@ -2984,7 +3035,10 @@ duk_context *ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx3(duk_conte
 void ILibDuktape_ScriptContainer_Slave_HeapDestroyed(duk_context *ctx, void *user)
 {
 	ILibDuktape_ScriptContainer_Slave *slave = (ILibDuktape_ScriptContainer_Slave*)user;
+	ILibDuktape_ScriptContainer_Master *master = slave == NULL || slave->chain == NULL ? NULL : (ILibDuktape_ScriptContainer_Master*)((void**)ILibMemory_GetExtraMemory(slave->chain, ILibMemory_CHAIN_CONTAINERSIZE))[0];
 	void *p = ILibDuktape_GetProcessObject(ctx);
+
+	ILibDuktape_ScriptContainer_ClearPeerState(master, ctx, slave);
 	if (p != NULL)
 	{
 		duk_push_heapptr(ctx, p);					// [process]
@@ -3477,9 +3531,8 @@ duk_ret_t ILibDuktape_ScriptContainer_Exit(duk_context *ctx)
 	{
 		char json[] = "{\"command\": \"128\"}";
 		ILibDuktape_ScriptContainer_NonIsolated_Command *cmd = ILibMemory_Allocate(sizeof(json) + sizeof(ILibDuktape_ScriptContainer_NonIsolated_Command), 0, NULL, NULL);
-		cmd->container.slave = ((void**)ILibMemory_GetExtraMemory(master->PeerChain, ILibMemory_CHAIN_CONTAINERSIZE))[1];
 		memcpy_s(cmd->json, sizeof(json), json, sizeof(json));
-		Duktape_RunOnEventLoopEx(master->PeerChain, duk_ctx_nonce(master->PeerCTX), master->PeerCTX, ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave, cmd, 1);
+		ILibDuktape_ScriptContainer_DispatchToPeer(master, cmd);
 		return(0);
 	}
 
@@ -3547,13 +3600,12 @@ duk_ret_t ILibDuktape_ScriptContainer_ExecuteString(duk_context *ctx)
 		size_t encodedPayloadLen = ILibBase64EncodeLength(payloadLen);
 		ILibDuktape_ScriptContainer_NonIsolated_Command *cmd = (ILibDuktape_ScriptContainer_NonIsolated_Command*)ILibMemory_Allocate((int)(sizeof(ILibDuktape_ScriptContainer_NonIsolated_Command) + encodedPayloadLen + sizeof(json)), 0, NULL, NULL);
 
-		cmd->container.slave = (ILibDuktape_ScriptContainer_Slave*)((void**)ILibMemory_GetExtraMemory(master->PeerChain, ILibMemory_CHAIN_CONTAINERSIZE))[1];
 		int i = sprintf_s(cmd->json, sizeof(json) + encodedPayloadLen, json);
 		char *output = cmd->json + i -2;
 		i += ILibBase64Encode((unsigned char*)payload, (int)payloadLen, (unsigned char**)&output);
 		sprintf_s(cmd->json + i - 2, 3, "\"}");
 		
-		Duktape_RunOnEventLoopEx(master->PeerChain, duk_ctx_nonce(master->PeerCTX), master->PeerCTX, ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave, cmd, 1);
+		ILibDuktape_ScriptContainer_DispatchToPeer(master, cmd);
 		return(0);
 	}
 
@@ -3769,15 +3821,17 @@ duk_ret_t ILibDuktape_ScriptContainer_Finalizer(duk_context *ctx)
 #endif
 		ILibProcessPipe_Process_SoftKill(master->child);
 	}
-	else if (master->PeerChain != NULL)
+	else
 	{
-		char json[] = "{\"command\": \"128\", \"noResponse\": \"1\"}";
-		ILibDuktape_ScriptContainer_NonIsolated_Command *cmd = ILibMemory_Allocate(sizeof(json) + sizeof(ILibDuktape_ScriptContainer_NonIsolated_Command), 0, NULL, NULL);
-		cmd->container.slave = ((void**)ILibMemory_GetExtraMemory(master->PeerChain, ILibMemory_CHAIN_CONTAINERSIZE))[1];
-		memcpy_s(cmd->json, sizeof(json), json, sizeof(json));
-		Duktape_RunOnEventLoopEx(master->PeerChain, duk_ctx_nonce(master->PeerCTX), master->PeerCTX, ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave, cmd, 1);
+		if (master->PeerChain != NULL)
+		{
+			char json[] = "{\"command\": \"128\", \"noResponse\": \"1\"}";
+			ILibDuktape_ScriptContainer_NonIsolated_Command *cmd = ILibMemory_Allocate(sizeof(json) + sizeof(ILibDuktape_ScriptContainer_NonIsolated_Command), 0, NULL, NULL);
+			memcpy_s(cmd->json, sizeof(json), json, sizeof(json));
+			ILibDuktape_ScriptContainer_DispatchToPeer(master, cmd);
+		}
 #ifdef WIN32
-		WaitForSingleObject(master->PeerThread, INFINITE);
+		if (master->PeerThread != NULL) { WaitForSingleObject(master->PeerThread, INFINITE); }
 #endif
 	}
 
@@ -3817,9 +3871,8 @@ duk_ret_t ILibDuktape_ScriptContainer_SendToSlave(duk_context *ctx)
 		duk_size_t payloadLen;
 		char *payload = (char*)duk_get_lstring(ctx, -1, &payloadLen);
 		ILibDuktape_ScriptContainer_NonIsolated_Command *cmd = ILibMemory_Allocate(sizeof(ILibDuktape_ScriptContainer_NonIsolated_Command) + (int)payloadLen + 1, 0, NULL, NULL);
-		cmd->container.slave = (ILibDuktape_ScriptContainer_Slave*)((void**)ILibMemory_GetExtraMemory(master->PeerChain, ILibMemory_CHAIN_CONTAINERSIZE))[1];
 		memcpy_s(cmd->json, payloadLen + 1, payload, payloadLen + 1);
-		Duktape_RunOnEventLoopEx(master->PeerChain, duk_ctx_nonce(master->PeerCTX), master->PeerCTX, ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave, cmd, 1);
+		ILibDuktape_ScriptContainer_DispatchToPeer(master, cmd);
 	}
 	return(0);
 }
@@ -3853,8 +3906,7 @@ void ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsMaster(void *chain, 
 {
 	ILibDuktape_ScriptContainer_NonIsolated_Command *cmd = (ILibDuktape_ScriptContainer_NonIsolated_Command*)user;
 	ILibDuktape_ScriptContainer_Master *master = cmd->container.master;
-	ILibDuktape_ScriptContainer_Slave *slave = master->PeerChain == NULL ? NULL : (ILibDuktape_ScriptContainer_Slave*)((void**)ILibMemory_GetExtraMemory(master->PeerChain, ILibMemory_CHAIN_CONTAINERSIZE))[1];
-	if (master->ctx == NULL) { return; }
+	if (master->ctx == NULL) { free(cmd); return; }
 
 	int id;
 	duk_push_string(master->ctx, cmd->json);		// [string]
@@ -3868,9 +3920,8 @@ void ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsMaster(void *chain, 
 			// Call INIT first
 			char json[] = "{\"command\": \"1\"}";
 			ILibDuktape_ScriptContainer_NonIsolated_Command* initCmd = (ILibDuktape_ScriptContainer_NonIsolated_Command*)ILibMemory_Allocate(sizeof(json) + sizeof(ILibDuktape_ScriptContainer_NonIsolated_Command), 0, NULL, NULL);
-			initCmd->container.slave = slave;
 			memcpy_s(initCmd->json, sizeof(json), json, sizeof(json));
-			Duktape_RunOnEventLoopEx(master->PeerChain, duk_ctx_nonce(master->PeerCTX), master->PeerCTX, ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave, initCmd, 1);
+			ILibDuktape_ScriptContainer_DispatchToPeer(master, initCmd);
 			break;
 		}
 		case 1:
@@ -3902,8 +3953,7 @@ void ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsMaster(void *chain, 
 			duk_get_prop_string(master->ctx, -4, "exitCode");				// [json][emit][this][exit][msg]
 			if (duk_pcall_method(master->ctx, 2) != 0) { ILibDuktape_Process_UncaughtExceptionEx(master->ctx, "Error Emitting ScriptContainer Exit: "); }
 			duk_pop(master->ctx);											// [json]
-			master->PeerChain = NULL;
-			master->PeerCTX = NULL;
+			ILibDuktape_ScriptContainer_ClearPeerState(master, NULL, NULL);
 			break;
 		case SCRIPT_ENGINE_COMMAND_SEND_JSON:
 			ILibDuktape_EventEmitter_SetupEmit(master->ctx, master->emitter->object, "data");	// [json][emit][this][data]
@@ -4019,9 +4069,8 @@ void ILibDuktape_ScriptContainer_NonIsolatedWorker(void *arg)
 	slave->chain = ILibCreateChainEx(2 * sizeof(void*));
 	((void**)ILibMemory_GetExtraMemory(slave->chain, ILibMemory_CHAIN_CONTAINERSIZE))[0] = master;
 	((void**)ILibMemory_GetExtraMemory(slave->chain, ILibMemory_CHAIN_CONTAINERSIZE))[1] = slave;
-	master->PeerChain = slave->chain;
 	slave->ctx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngine_minimal();
-	master->PeerCTX = slave->ctx;
+	ILibDuktape_ScriptContainer_SetPeerState(master, slave->chain, slave->ctx, slave);
 
 	duk_push_heap_stash(slave->ctx);
 	duk_push_pointer(slave->ctx, slave);
@@ -4055,26 +4104,39 @@ duk_ret_t ILibDuktape_ScriptContainer_Create(duk_context *ctx)
 	char *buffer;
 	char header[4];
 	ILibProcessPipe_SpawnTypes spawnType = (duk_get_top(ctx) > 2 && duk_is_number(ctx, 2)) ? (ILibProcessPipe_SpawnTypes)duk_require_int(ctx, 2) : ILibProcessPipe_SpawnTypes_DEFAULT;
-	int processIsolation = 1;
+
+	// FIX: In svchost mode, diaghost.exe doesn't exist as a standalone binary (agent runs as DLL).
+	// Attempting to spawn processIsolation child causes infinite retry loop with error=2 (FILE_NOT_FOUND).
+	// Default processIsolation to 0 for svchost mode. The processIsolation=0 race condition
+	// (NULL dereference in master->child) was fixed in commit 9ac1df52 by removing the forced override,
+	// but that reintroduced the diaghost.exe spawn dependency. For svchost mode, we MUST disable it.
+#ifdef MESH_AGENT_SVCHOST_MODE
+	int processIsolation = 0;  // Svchost mode: NO separate process (diaghost.exe doesn't exist)
+#else
+	int processIsolation = 1;  // Standalone mode: spawn child process for isolation
+#endif
 	int sessionIdSpecified = 0;
 	void *sessionId = NULL;
 
 	if (duk_get_top(ctx) > 0 && duk_is_object(ctx, 0))
 	{
-		processIsolation = Duktape_GetIntPropertyValue(ctx, 0, "processIsolation", 1);
+		// Allow explicit override via options.processIsolation
+		processIsolation = Duktape_GetIntPropertyValue(ctx, 0, "processIsolation", processIsolation);
 		if (duk_has_prop_string(ctx, 0, "sessionId"))
 		{
 			sessionIdSpecified = 1;
 			sessionId = (void*)(ILibPtrCAST)(uint64_t)Duktape_GetIntPropertyValue(ctx, 0, "sessionId", 0);
 		}
 	}
+#ifdef MESH_AGENT_SVCHOST_MODE
+	// Svchost mode has no standalone --slave image. Keep ScriptContainer in-process
+	// and rely on the dedicated session-helper paths for cross-session execution.
+	processIsolation = 0;
+#endif
 
-	// NOTE: Do NOT force processIsolation=0 here.  The non-isolated (in-process
-	// thread) path has a race: PeerChain is set asynchronously by the worker
-	// thread, but ExecuteString can be called before it initialises, causing a
-	// NULL dereference on master->child (access violation at offset +0x199).
-	// The spawned diaghost.exe --slave child uses CREATE_NO_WINDOW and is
-	// invisible.  Let the upstream process-isolation path work as designed.
+	// NOTE: The processIsolation=0 race condition (PeerChain NULL dereference) must be fixed
+	// for svchost mode to work. See ILibDuktape_ScriptContainer_Slave_Process_Start where
+	// PeerChain is initialized before any ExecuteString calls can occur.
 
 	duk_push_heap_stash(ctx);
 	duk_get_prop_string(ctx, -1, ILibDuktape_ScriptContainer_ExePath);
@@ -4088,6 +4150,8 @@ duk_ret_t ILibDuktape_ScriptContainer_Create(duk_context *ctx)
 	master = (ILibDuktape_ScriptContainer_Master*)Duktape_PushBuffer(ctx, sizeof(ILibDuktape_ScriptContainer_Master));
 	duk_put_prop_string(ctx, -2, ILibDuktape_ScriptContainer_MasterPtr);		// [container]
 
+	memset(master, 0, sizeof(ILibDuktape_ScriptContainer_Master));
+	ILibSpinLock_Init(&(master->PeerLock));
 	master->ctx = ctx;
 	master->emitter = ILibDuktape_EventEmitter_Create(ctx);
 	master->chain = Duktape_GetChain(ctx);

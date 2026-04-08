@@ -24,7 +24,7 @@ This document outlines essential operational security (OpSec) practices for depl
 ✓ Source code (.c, .cpp, .h files)
 ✓ Template files (*.template.json, .env.template)
 ✓ Documentation (*.md files - after sanitizing)
-✓ Build scripts (build.ps1, Makefile)
+✓ Build project files (MeshAgent.Build.proj, Makefile)
 ✓ Tools (tools/*.py)
 ```
 

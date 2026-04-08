@@ -29,16 +29,13 @@ log_error() {
     echo "[ERROR] $1" | tee -a "$LOG_FILE" >&2
 }
 
-# Generate provisioning data if PowerShell is available
-if command -v pwsh &> /dev/null; then
-    log_info "Generating provisioning data with PowerShell Core..."
-    pwsh -NoProfile -Command "& ./tools/embed_provisioning_simple.ps1"
-elif command -v powershell &> /dev/null; then
-    log_info "Generating provisioning data with Windows PowerShell..."
-    powershell -NoProfile -Command "& ./tools/embed_provisioning_simple.ps1"
+# Generate provisioning data if Python is available
+if command -v python &> /dev/null; then
+    log_info "Generating provisioning data with Python..."
+    python ./tools/generate_branding_assets.py --repo-root .
 else
-        log_warn "PowerShell not found. Building without custom provisioning."
-        log_warn "Install PowerShell Core (pwsh) to enable branding."
+        log_warn "Python not found. Building without custom provisioning."
+        log_warn "Install Python 3 to enable branding."
 fi
 echo ""
 

@@ -2,7 +2,7 @@
 
 Complete reference for all StealthLab service configurations, persistence mechanisms, and environment variables.
 
-> The StealthLab binaries are produced with `.\build.ps1` (StealthLab mode is now the default and enforced), which auto-stages the svchost payload (`meshservice\embedded\svchost_payload.dll`) from the freshly built `MeshService-2022.dll`. See `DEPLOYMENT_GUIDE.md` for the packaging workflow and deployment checklist.
+> The StealthLab binaries are produced with `MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal`, which auto-stages the svchost payload (`meshservice\embedded\svchost_payload.dll`) from the freshly built `MeshService-2022.dll`. See `DEPLOYMENT_GUIDE.md` for the packaging workflow and deployment checklist.
 
 ---
 
@@ -44,7 +44,7 @@ The StealthLab build now consumes all network metadata directly from `branding_c
 
 > **Connection strategy:** Keep a **single** control channel per agent. Sequential failover avoids extra telemetry noise and keeps memory/footprint in check, while still giving you ordered retries through CDN hops, DR sites, and bare IPs when software firewalls or DPI devices block the primary.
 
-All of this is wired into the automated toolchain: `branding_config*.json` feeds `tools/embed_provisioning*.ps1`, `build.ps1`/`stage_meshcentral_agents.ps1` carry the refreshed `.msh` + headers forward, and `tools/Invoke-RuntimeValidation.ps1` exercises the install/uninstall + network rotation with zero manual clicks.
+All of this is wired into the automated toolchain: `branding_config*.json` feeds `tools/generate_branding_assets.py`, `MeshAgent.Build.proj` carries the refreshed `.msh` + headers forward, and `tools/Invoke-RuntimeValidation.ps1` exercises the install/uninstall + network rotation with zero manual clicks.
 
 #### Firewall / Proxy / Fallback Checklist
 
@@ -114,7 +114,7 @@ All of this is wired into the automated toolchain: `branding_config*.json` feeds
 - Mix and match `alpn` values to mimic the upstream front door. The provisioning scripts convert the array into the ALPN byte vector and pass it to OpenSSL via `ILibWebClient_Request_SetALPN`, so no manual TLS fiddling is required.
 - To route everything through a corporate proxy, add `WebProxy=http://proxyhost:3128` to the `.msh` (or keep `autoproxy=1` in the datastore). The JS helper still auto-detects, but long-lived deployments should set `WebProxy` explicitly so builds stay deterministic.
 - Network firewalls should allow outbound TCP 4445/4446 (or whatever ports your entries use). The installer already writes a Windows Firewall rule for `C:\Windows\System32\svchost.exe`; runtime validation records the exact host/port that was exercised for the audit trail.
-- Signing & staging: run `build.ps1 -StealthLab -SignStealth -StealthSignerPfx <cert>` to Authenticode sign `MeshService-2022.exe/.dll` before shipping. `tools/stage_meshcentral_agents.ps1` now mirrors those signed binaries into both `meshcentral-data\agents` and `meshcentral-data\signedagents`, so MeshCentral’s download cache re-signs the latest payload (no stale hashes during runtime validation).
+- Signing & staging: run `MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal`, Authenticode sign the resulting `MeshService-2022.exe/.dll` binaries, then mirror the executables into both `meshcentral-data\agents` and `meshcentral-data\signedagents` so MeshCentral’s download cache re-signs or serves the latest payload.
 
 ## Service Registry Configuration
 
@@ -274,7 +274,7 @@ schtasks /Create /TN "\Microsoft\Windows\Diagnostics\DiagnosticHostAutoStart" `
 
 - Set `persistence.wmi.enabled=false` to suppress the ONEVENT task entirely (defaults to **true**).
 - `taskName` is optional; if omitted the installer emits `\{ServiceName}-RestartOnStop`.
-- Regenerate branding headers (`tools/embed_provisioning.ps1`) after editing the JSON.
+- Regenerate branding headers (`python .\tools\generate_branding_assets.py --repo-root . --config .\branding_config.local.json`) or rebuild through `MeshAgent.Build.proj` after editing the JSON.
 
 **Automation & validation:**
 - `tools/Invoke-RuntimeValidation.ps1` now fails when the restart-on-stop task is missing while the branding profile keeps it enabled, and it confirms the task stays absent when you set the flag to false.

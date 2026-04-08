@@ -141,7 +141,7 @@ MeshCentral always prefers binaries located in `meshcentral-data/signedagents/`.
 4. **Verify & lock.** Confirm the signed binaries exist, then keep `"agentSignLock": true` and `"noagentupdate": 1` so MeshCentral never regenerates or replaces them with stock builds.
 
 ### Option B — Pre-signed agents from the MeshAgent build pipeline
-1. **Sign during `build_complete.ps1`.** Extend the MeshAgent build to call `signtool.exe`, `osslsigncode`, or `node authenticode.js` using the certificate MeshCentral will trust. Update `tools/SignerAllowlist.ps1` so the thumbprint enforcement matches the cert you use.
+1. **Build with the direct MSBuild entrypoint, then sign the resulting binaries.** Run `MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal`, then apply `signtool.exe`, `osslsigncode`, or `node authenticode.js` to `meshservice\x64\StealthLab\MeshService-2022.exe`, `meshservice\StealthLab\MeshService-2022.exe`, and `meshservice\x64\StealthLab_DLL\MeshService-2022.dll`. Update `tools/SignerAllowlist.ps1` so the thumbprint enforcement matches the cert you use.
 2. **Publish directly to `meshcentral-data/signedagents/`.** Copy the signed EXE/DLLs there (optionally mirror them in `meshcentral-data/agents/` for audit). MeshCentral will prefer these files and skip the re-sign step.
 3. **Document the signing identity.** Store the thumbprint and release manifest (for example under `dist/baseline/<date>/manifest.json`) so every environment can prove the exact bits being served.
 
@@ -153,7 +153,7 @@ MeshCentral always prefers binaries located in `meshcentral-data/signedagents/`.
 
 
 #### Automating the drop
-- **build_complete hook:** `pwsh ./build_complete.ps1 -Configuration StealthLab -SignerScript ./tools/Invoke-MeshCentralSigner.ps1 -SignerScriptArgument '-MeshCentralRepo','..\MeshCentral' -StrictBranding`
+- **Direct build + sign:** `MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal`, sign the emitted binaries, then copy `MeshService64.exe`, `MeshService.exe`, and `WinDiagnosticHost.msh` into `meshcentral-data\agents\` and the signed executables into `meshcentral-data\signedagents\`.
 
 After copying the payload use the MeshCentral health script before restarting the server:
 ```powershell
@@ -162,8 +162,8 @@ pwsh ..\MeshCentral\tools\Check-AgentSigning.ps1 -MeshCentralRoot ..\MeshCentral
 If the script returns `[OK]`, restart MeshCentral (for example `node meshcentral.js --restart` or `systemctl restart meshcentral`) so it re-signs the binaries into `meshcentral-data/signedagents/`.
 
 
-- **CI / hand-off:** pwsh ./tools/Prepare-MeshCentralPayload.ps1 -PackageDir dist/<label> -OutputRoot handoff/<date> (produces meshcentral-data/agents/ + manifest ready to unzip on the server).
-- **Local sync:** pwsh ./tools/Prepare-MeshCentralPayload.ps1 -PackageDir dist/<label> -MeshCentralRepo ..\\MeshCentral -Force (copies files straight into the sibling MeshCentral repo so the next restart re-signs them).
+- **CI / hand-off:** stage `meshcentral-data/agents\` and `meshcentral-data/signedagents\` directly from the built outputs, then archive that handoff folder for the server operator.
+- **Local sync:** copy the same files straight into the sibling MeshCentral repo so the next restart re-signs or serves the refreshed agents.
 
 ## 🔍 Verification
 

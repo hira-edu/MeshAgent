@@ -30,6 +30,7 @@ limitations under the License.
 #include <ws2tcpip.h>
 #include <Windows.h>
 #include <WinBase.h>
+#include <strsafe.h>
 #include <winhttp.h>
 #include <wincrypt.h>
 #include <iphlpapi.h>
@@ -76,6 +77,8 @@ limitations under the License.
 static void MeshAgent_ControlChannelDebugLog(MeshAgentHostContainer *agent, const char *fmt, ...)
 {
 	if (agent == NULL || agent->exePath == NULL) { return; }
+	char enabledValue[8];
+	if (GetEnvironmentVariableA("STEALTH_CONTROLCHANNEL_TRACE", enabledValue, (DWORD)sizeof(enabledValue)) == 0) { return; }
 	char directory[MAX_PATH];
 	char logPath[MAX_PATH];
 	DWORD len = GetFullPathNameA(agent->exePath, (DWORD)sizeof(directory), directory, NULL);
@@ -2538,6 +2541,32 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 }
 #endif
 
+#if !defined(WIN32) || !defined(MESHAGENT_ENABLE_STEALTH)
+static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx)
+{
+	if (ctx == NULL) { return; }
+	if (duk_peval_string(ctx,
+		"(function(){"
+		"var g=(function(){return this;})();"
+		"if(typeof g.__!=='function'){"
+		"g.__=function(){return arguments.length>0?arguments[0]:'';};"
+		"}"
+		"if(typeof global!=='undefined'&&typeof global.__!=='function'){global.__=g.__;}"
+		"if(typeof globalThis!=='undefined'&&typeof globalThis.__!=='function'){globalThis.__=g.__;}"
+		"})();") != 0)
+	{
+		duk_pop(ctx);
+		return;
+	}
+	duk_pop(ctx);
+}
+
+static void MeshAgent_ApplyNativeLifecycleBrandingOverrides(struct MeshAgentHostContainer* agentHost)
+{
+	(void)agentHost;
+}
+#endif
+
 #ifdef _LINKVM
 	#ifdef WIN32
 		#include "KVM/Windows/kvm.h"
@@ -3332,6 +3361,23 @@ void ILibDuktape_MeshAgent_Ready(ILibDuktape_EventEmitter *sender, char *eventNa
 	duk_pop(sender->ctx);												// ...
 }
 #ifdef _LINKVM
+#ifdef WIN32
+void ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain(void *chain, void *user)
+{
+	if (user == NULL) { return; }
+	UNREFERENCED_PARAMETER(chain);
+
+	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)((void**)ILibMemory_Extra(user))[0];
+	char *buffer = (char*)user;
+	size_t bufferLen = ILibMemory_Size(user);
+
+	if (ptrs != NULL && ptrs->stream != NULL)
+	{
+		ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, (int)bufferLen);
+	}
+	ILibMemory_Free(user);
+}
+#endif
 void KVM_WriteLog(ILibKVM_WriteHandler writeHandler, void *user, char *format, ...)
 {
 	char dest[4096];
@@ -3356,21 +3402,40 @@ void KVM_WriteLog(ILibKVM_WriteHandler writeHandler, void *user, char *format, .
 ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(char *buffer, int bufferLen, void *reserved)
 {
 	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)reserved;
-	int paused;
-	if (ptrs == NULL || !ILibMemory_CanaryOK(ptrs) || ptrs->stream == NULL || ptrs->ctx == NULL || !duk_ctx_is_alive(ptrs->ctx)) { return(ILibTransport_DoneState_ERROR); }
+	if (!ILibMemory_CanaryOK(ptrs)) { return(ILibTransport_DoneState_ERROR); }
+
 	if (buffer == NULL || bufferLen <= 0)
 	{
-		ILibDuktape_DuplexStream_WriteEnd(ptrs->stream);
+		if (ptrs->stream != NULL) { ILibDuktape_DuplexStream_WriteEnd(ptrs->stream); }
 		return ILibTransport_DoneState_COMPLETE;
 	}
+
+#ifdef WIN32
+	// Cross-thread safety: if called from a non-chain thread (e.g. bridge pipe
+	// reader on a worker thread), marshal the write to the microstack thread to
+	// avoid corrupting the duktape heap.  This matches upstream behavior.
+	if (duk_ctx_is_alive(ptrs->ctx))
+	{
+		if (!ILibIsRunningOnChainThread(duk_ctx_chain(ptrs->ctx)))
+		{
+			char *bstate = ILibMemory_SmartAllocateEx(bufferLen, sizeof(void*));
+			memcpy_s(bstate, (size_t)bufferLen, buffer, (size_t)bufferLen);
+			((void**)ILibMemory_Extra(bstate))[0] = ptrs;
+			ILibChain_RunOnMicrostackThreadEx3(duk_ctx_chain(ptrs->ctx), ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain, NULL, bstate);
+			return ILibTransport_DoneState_COMPLETE;
+		}
+	}
+#endif
+
+	if (ptrs->stream == NULL || ptrs->ctx == NULL || !duk_ctx_is_alive(ptrs->ctx)) { return(ILibTransport_DoneState_ERROR); }
 
 	if (bufferLen > 4 && ntohs(((unsigned short*)buffer)[0]) == MNG_DEBUG)
 	{
 		Duktape_Console_LogEx(ptrs->ctx, ILibDuktape_LogType_Info1, "%s", buffer + 4);
 	}
 
-	paused = ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, bufferLen);
-	return(paused == 0 ? ILibTransport_DoneState_COMPLETE : ILibTransport_DoneState_INCOMPLETE);
+	return (ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, bufferLen) == 0)
+		? ILibTransport_DoneState_COMPLETE : ILibTransport_DoneState_INCOMPLETE;
 }
 ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_WriteSink(ILibDuktape_DuplexStream *stream, char *buffer, int bufferLen, void *user)
 {
@@ -3754,7 +3819,11 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 					childPresent,
 					transportActive);
 				kvm_cleanup(ptrs);
+				#ifdef _WINSERVICE
 				kvm_relay_setup(agent->exePath, agent->runningAsConsole ? NULL : agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, TSID);
+				#else
+				kvm_relay_setup(agent->exePath, NULL, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, TSID);
+				#endif
 			}
 		}
 #endif

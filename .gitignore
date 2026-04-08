@@ -419,3 +419,4 @@ out/
 # Generated validation evidence and release artifacts
 docs/testing/evidence/
 docs/testing/artifacts/
+.aider*

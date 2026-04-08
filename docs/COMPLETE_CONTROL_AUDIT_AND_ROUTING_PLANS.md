@@ -1,6 +1,6 @@
 # Complete MeshAgent/MeshCentral Control Audit & Routing Plans
 
-> **Note:** Throughout this document any mention of `branding_config.json` refers to the sanitized template. For active builds, copy it to `branding_config.local.json` (git-ignored) and use that file with the tooling below.
+> **Note:** This document is retained as a historical audit of the legacy wrapper-based build flow. The current supported path is `MSBuild.exe .\MeshAgent.Build.proj` plus `python .\tools\generate_branding_assets.py`; any references below to older PowerShell build wrappers are archival, not current guidance.
 
 **Document Version:** 1.0
 **Date:** 2025-10-24

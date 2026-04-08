@@ -205,7 +205,7 @@ function Invoke-MeshCentralPreflight {
 
     $serverBinary = Join-Path $dataPath 'agents\MeshService64.exe'
     if (-not (Test-Path -LiteralPath $serverBinary)) {
-        throw "MeshCentral agent payload missing at $serverBinary. Run tools/stage_meshcentral_agents.ps1 before invoking runtime validation."
+        throw "MeshCentral agent payload missing at $serverBinary. Copy the current MeshService64.exe build into meshcentral-data\\agents before invoking runtime validation."
     }
 
     $localHash = (Get-FileHash -LiteralPath $localBinary -Algorithm SHA256).Hash
@@ -437,7 +437,7 @@ Assert-Elevation -AllowOverride:$AllowNonAdmin
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $brandingState = Get-BrandingState -RepoRoot $repoRoot
 if ($null -eq $brandingState -or $null -eq $brandingState.Config) {
-    throw "Branding configuration is unavailable. Run tools/embed_provisioning.ps1 to refresh generated headers."
+    throw "Branding configuration is unavailable. Run MSBuild.exe .\\MeshAgent.Build.proj (or python .\\tools\\generate_branding_assets.py --repo-root . --config .\\branding_config.local.json) to refresh generated assets."
 }
 $failureExpectation = Get-ServiceFailureExpectation -PersistenceConfig $brandingState.Config.persistence
 $serviceNameTarget = Get-ServiceNameFromBranding -RepoRoot $repoRoot

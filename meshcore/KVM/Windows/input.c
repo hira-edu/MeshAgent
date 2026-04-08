@@ -359,7 +359,33 @@ DWORD WINAPI KVM_InitMessagePumpEx(LPVOID parm)
 	{
 		HHOOK hhkLowLevelKybd = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardProc, 0, 0);
 
-		CUR_HWND = CreateWindowExA(0x00000088, "MainWWW2Class", "TestTitle", 0x00800000, 0, 0, 100, 100, 0, 0, 0, 0);
+		// ROOT CAUSE FIX: Create message-only window to eliminate taskbar flash
+		// Old code created visible window: dwExStyle=0x88 (TOPMOST|TOOLWINDOW), title="TestTitle", parent=NULL
+		// This caused brief taskbar appearance during RDP connection initialization
+		//
+		// Industrial standard solution: HWND_MESSAGE parent creates invisible message-only window
+		// - Never appears in taskbar (guaranteed by HWND_MESSAGE parent)
+		// - Never visible on screen (no Z-order, no desktop placement)
+		// - Still receives all messages needed for hooks and event monitoring
+		// - Zero visual footprint, zero activation flash
+		//
+		// Window styles:
+		// - WS_EX_NOACTIVATE (0x08000000): Prevents activation flash during creation
+		// - WS_EX_TOOLWINDOW (0x00000080): Ensures no taskbar entry (defense in depth)
+		// - WS_POPUP (0x80000000): Minimal overhead popup style
+		// - hwndParent = HWND_MESSAGE: Creates message-only window (the key fix)
+		// - lpWindowName = NULL: No title (was "TestTitle" - would show in taskbar!)
+		CUR_HWND = CreateWindowExA(
+			WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,  // Never activate, never in taskbar
+			"MainWWW2Class",                       // Class name
+			NULL,                                  // No window title (prevent taskbar leak)
+			WS_POPUP,                              // Minimal popup window
+			0, 0, 1, 1,                            // Minimal size (1x1 pixel, never visible)
+			HWND_MESSAGE,                          // Message-only window parent (ROOT CAUSE FIX)
+			NULL,                                  // No menu
+			GetModuleHandleA(NULL),                // Module instance
+			NULL                                   // No creation parameters
+		);
 		KVM_PumpMessage();
 		DestroyWindow(CUR_HWND);
 		CUR_HWND = NULL;

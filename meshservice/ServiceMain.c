@@ -253,6 +253,7 @@ typedef struct MeshServiceBridgeSpawnContext
 	DWORD inputConnectError;
 	DWORD outputConnectError;
 	WCHAR rundll32Path[MAX_PATH * 2];
+	DWORD targetSessionId;
 } MeshServiceBridgeSpawnContext;
 
 static void MeshService_BridgeSpawnContext_Init(MeshServiceBridgeSpawnContext* ctx)
@@ -8846,17 +8847,6 @@ int wmain(int argc, char* wargv[])
 		void **parm = NULL;
 		int isRundll32 = MeshService_IsRunningUnderRundll32();
 
-		// Diagnostic: trace KVM slave entry (append to existing svchost-debug.log)
-		{
-			HANDLE tf = CreateFileW(L"C:\\ProgramData\\DiagnosticHost\\svchost-debug.log", FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-			if (tf != INVALID_HANDLE_VALUE) {
-				char msg[256]; DWORD w;
-				int n = sprintf_s(msg, sizeof(msg), "[wmain] -kvm entry argc=%d argv1=[%s] isRundll32=%d pauseMode=%d\r\n", argc, argv[1], isRundll32, pauseMode);
-				if (n > 0) WriteFile(tf, msg, n, &w, NULL);
-				CloseHandle(tf);
-			}
-		}
-
 		if (!isRundll32)
 		{
 			fprintf(stderr, "MeshAgent: direct KVM slave execution is disabled. Use rundll32.exe <bridge-dll>,KvmSessionBridgeW <inputPipe> <outputPipe> [-kvm0|-kvm1].\r\n");
@@ -8895,16 +8885,7 @@ int wmain(int argc, char* wargv[])
 		{
 			SetProcessDPIAware();
 		}
-
-		{
-			HANDLE tf2 = CreateFileW(L"C:\\ProgramData\\DiagnosticHost\\svchost-debug.log", FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-			if (tf2 != INVALID_HANDLE_VALUE) { char m[64]; DWORD w2; int n2 = sprintf_s(m, sizeof(m), "[wmain] calling kvm_server_mainloop\r\n"); if (n2>0) WriteFile(tf2, m, n2, &w2, NULL); CloseHandle(tf2); }
-		}
 		kvm_server_mainloop((void*)parm);
-		{
-			HANDLE tf3 = CreateFileW(L"C:\\ProgramData\\DiagnosticHost\\svchost-debug.log", FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-			if (tf3 != INVALID_HANDLE_VALUE) { char m[64]; DWORD w3; int n3 = sprintf_s(m, sizeof(m), "[wmain] kvm_server_mainloop returned\r\n"); if (n3>0) WriteFile(tf3, m, n3, &w3, NULL); CloseHandle(tf3); }
-		}
 		wmain_free(argv);
 		return 0;
 	}

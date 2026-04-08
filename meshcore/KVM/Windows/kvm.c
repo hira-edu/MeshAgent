@@ -1249,12 +1249,13 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 		}
 		else
 		{
-			// If the desktop name has changed, shutdown.
+			// If the desktop name has changed, update and re-read resolution
+			// (upstream behavior: adapt in-place, do NOT kill the child)
 			if (kvm_server_currentDesktopname != ((int*)name)[0])
 			{
-				KVMDEBUG("DESKTOP NAME CHANGE DETECTED, triggering shutdown", 0);
-				ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: kvm_server_currentDesktop: NAME CHANGE DETECTED...");
-				g_shutdown = 1;
+				KVMDEBUG("DESKTOP NAME CHANGE DETECTED, adapting in-place", 0);
+				ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: kvm_server_currentDesktop: NAME CHANGE DETECTED, adapting...");
+				kvm_server_currentDesktopname = ((int*)name)[0];
 			}
 		}
 	}
@@ -2233,17 +2234,11 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 		return;
 	}
 
-	// Do not auto-restart if the bridge child exited cleanly (exit code 0).
-	// A clean exit means the KVM session ended normally (user disconnected or
-	// pipe closed). Restarting would spawn orphaned children with no viewer.
-	// The next KVM request from the browser will start a fresh session via
-	// mesh.getRemoteDesktopStream() -> kvm_relay_setup().
-	if (exitCode == 0)
-	{
-		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: clean exit (code=0), not restarting");
-		writeHandler(NULL, 0, reserved);
-		return;
-	}
+	// Upstream behavior: restart on ANY exit (including code 0) as long as
+	// g_shutdown == 0 and g_restartcount < 4.  Desktop switches cause the child
+	// to exit cleanly, and the master must restart it on the new desktop.
+	// The g_shutdown flag (set by kvm_cleanup on user disconnect) and
+	// gKvmRestartSuppressed prevent unwanted restarts.
 
 	if (g_restartcount < 4)
 	{
@@ -2404,6 +2399,18 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			}
 		}
 		gKvmLastBridgeAvailable = bridgeAvailable;
+		// When bridge mode is active (rundll32 + named pipes), SPECIFIED_USER spawn type
+		// consistently fails to initialize the child process within the pipe timeout,
+		// while USER succeeds in ~15ms. Both resolve to the same session token for
+		// the interactive console, but SPECIFIED_USER children never call the DLL entry
+		// point. Use USER as the primary candidate for bridge launches to eliminate
+		// the 5-second timeout on the dead first attempt.
+		if (bridgeAvailable && primaryType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER)
+		{
+			primaryType = ILibProcessPipe_SpawnTypes_USER;
+			candidateCount = kvm_build_ramas_candidates(primaryType, gProcessTSID >= 0 ? 1 : 0, candidates, _countof(candidates));
+			if (candidateCount <= 0) { kvm_add_spawn_candidate(candidates, &candidateCount, primaryType); }
+		}
 		if (GetEnvironmentVariableA("STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", forceExitCodeA, (DWORD)sizeof(forceExitCodeA)) > 0)
 		{
 			bridgeEnvVars[bridgeEnvPairCount * 2] = "STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE";
@@ -2497,8 +2504,12 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 
 				kvm_trace_startupf("bridge spawn OK, waiting for pipe connect");
 				InterlockedExchange(&ctx->childUsesBridge, 1);
-				if (!kvm_relay_wait_for_bridge_client(ctx->bridgeInputPipeHandle, 5000, &lastError))
+				// Reduced timeout from 5000ms to 1000ms: successful connections complete in ~15ms
+				// (per comment line 2404). 1000ms is still 66× longer than needed, but eliminates
+				// the 10-12 second user delay when spawn attempts fail.
+				if (!kvm_relay_wait_for_bridge_client(ctx->bridgeInputPipeHandle, 1000, &lastError))
 				{
+					kvm_trace_startupf("KVM [Master]: bridge stdin connect FAILED (error=%u, spawnType=%d, tsid=%d)", lastError, (int)attemptType, gProcessTSID);
 					ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
 						"KVM [Master]: bridge stdin connect failed (error=%u, spawnType=%d, tsid=%d)",
 						lastError,
@@ -2507,10 +2518,15 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					ILibProcessPipe_Process_SoftKill(gChildProcess);
 					gChildProcess = NULL;
 					kvm_relay_close_bridge_transport(ctx);
+					kvm_trace_startupf("Attempt %d/%d FAILED - trying next spawn type", attempt+1, candidateCount);
 					continue;
 				}
-				if (!kvm_relay_wait_for_bridge_client(ctx->bridgeOutputPipeHandle, 5000, &lastError))
+				kvm_trace_startupf("bridge stdin pipe connected successfully");
+
+				// Reduced timeout from 5000ms to 1000ms (same rationale as stdin pipe above)
+				if (!kvm_relay_wait_for_bridge_client(ctx->bridgeOutputPipeHandle, 1000, &lastError))
 				{
+					kvm_trace_startupf("KVM [Master]: bridge stdout connect FAILED (error=%u, spawnType=%d, tsid=%d)", lastError, (int)attemptType, gProcessTSID);
 					ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
 						"KVM [Master]: bridge stdout connect failed (error=%u, spawnType=%d, tsid=%d)",
 						lastError,
@@ -2519,8 +2535,10 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					ILibProcessPipe_Process_SoftKill(gChildProcess);
 					gChildProcess = NULL;
 					kvm_relay_close_bridge_transport(ctx);
+					kvm_trace_startupf("Attempt %d/%d FAILED - trying next spawn type", attempt+1, candidateCount);
 					continue;
 				}
+				kvm_trace_startupf("bridge stdout pipe connected successfully");
 				InterlockedExchange(&ctx->bridgeClientConnected, 1);
 				if (!kvm_relay_attach_bridge_transport(ctx, ctx->bridgeInputPipeHandle, ctx->bridgeOutputPipeHandle))
 				{
@@ -2556,16 +2574,10 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			}
 		}
 
-		if (gChildProcess == NULL && usedBridgePath == 0)
-		{
-			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-				"KVM [Master]: rundll32 KVM path required; legacy self-exe fallback is disabled");
-		}
-
 		if (gChildProcess == NULL)
 		{
 			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-				"KVM [Master]: Failed to spawn slave after %d attempt(s) (lastError=%u, tsid=%d)",
+				"KVM [Master]: Failed to spawn rundll32 bridge after %d attempt(s) (lastError=%u, tsid=%d)",
 				candidateCount,
 				lastError,
 				gProcessTSID);
@@ -2596,7 +2608,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 		user);
 	kvm_record_spawn_success(reserved, pipeMgr, exePath, writeHandler);
 	gKvmLastUsedBridge = usedBridgePath;
-	gKvmLastFallbackUsed = usedBridgePath == 0 ? 1 : 0;
+	gKvmLastFallbackUsed = 0;
 
 	KVMDEBUG("kvm_relay_restart() launched child process", g_slavekvm);
 
@@ -2920,6 +2932,7 @@ void kvm_set_force_default_desktop(int enabled)
 
 void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
 {
+#ifdef _WINSERVICE
 	gKvmPendingSessionRestartEvent = eventType;
 	gKvmPendingSessionRestartSessionId = sessionId;
 
@@ -2950,6 +2963,10 @@ void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
 	default:
 		break;
 	}
+#else
+	UNREFERENCED_PARAMETER(eventType);
+	UNREFERENCED_PARAMETER(sessionId);
+#endif
 }
 
 DWORD kvm_bridge_debug_get_child_pid(void)

@@ -1054,6 +1054,9 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	WCHAR* mergedEnvironment = NULL;
 	void* processEnvironment = NULL;
 	DWORD creationFlags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | (needSetSid != 0 ? (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP) : 0x00);
+	// BUGFIX: Prevent taskbar flash during process spawn by explicitly hiding window in STARTUPINFO.
+	// CREATE_NO_WINDOW alone can allow brief window flash before taking effect.
+	// Setting STARTF_USESHOWWINDOW + SW_HIDE ensures window is hidden from creation.
 	int allocParms = 0;
 	int allocCommandLine = 0;
 	
@@ -1141,6 +1144,10 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	WCHAR tmp2[4096];
 
 	info.cb = sizeof(STARTUPINFOW);
+	// BUGFIX: Explicitly hide window to prevent taskbar flash
+	info.dwFlags |= STARTF_USESHOWWINDOW;
+	info.wShowWindow = SW_HIDE;
+
 	if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
 		retVal->stdIn = ILibProcessPipe_CreatePipe(pipeManager, 4096, NULL, extraMemorySize);
