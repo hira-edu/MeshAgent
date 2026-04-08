@@ -271,7 +271,7 @@ async function main() {
         report.logTail = fs.readFileSync(logPath, 'utf8').split(/\r?\n/).filter(Boolean).slice(-40);
         assert(report.logTail.some((line) => line.includes(`KvmSessionBridgeW starting (input=${controlPipeName} output=${dataPipeName})`)), 'bridge log missing exact input/output startup line');
         assert(report.logTail.every((line) => line.includes('WaitNamedPipeW failed') === false), 'bridge log contains WaitNamedPipe failure');
-        assert(report.logTail.some((line) => line.includes('KvmSessionBridgeW exiting normally')), 'bridge log missing normal exit line');
+        assert(report.logTail.some((line) => line.includes('KvmSessionBridgeW mainloop exited') || line.includes('KvmSessionBridgeW exiting normally')), 'bridge log missing graceful exit line');
     }
     report.success = true;
 

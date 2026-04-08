@@ -40,7 +40,7 @@ var cachedSourceConf = CacheSourceFileOptional(options.SourceConf, "source-conf"
 var cliRunnerExe = Path.Combine(
     stageRoot,
     "cli runner (gui harness)",
-    Path.GetFileNameWithoutExtension(cachedSourceExe) + "-cli" + Path.GetExtension(cachedSourceExe));
+    Path.GetFileName(cachedSourceExe));
 StageBinary(cachedSourceExe, cachedSourceDb, cachedSourceMsh, cachedSourceConf, cliRunnerExe);
 
 var selectedScenarios = new HashSet<string>(options.Scenarios, StringComparer.OrdinalIgnoreCase);

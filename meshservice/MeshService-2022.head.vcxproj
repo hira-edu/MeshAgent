@@ -138,12 +138,12 @@
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;d3d11.lib;dxgi.lib;Fwpuclnt.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcrypto64MT.lib;..\openssl\libstatic\libssl64MT.lib;ole32.lib;oleaut32.lib;taskschd.lib;wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;Fwpuclnt.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcrypto64MT.lib;..\openssl\libstatic\libssl64MT.lib;ole32.lib;oleaut32.lib;taskschd.lib;wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Windows</SubSystem>
       <TargetMachine>MachineX64</TargetMachine>
       <ModuleDefinitionFile>MeshServiceHost.def</ModuleDefinitionFile>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <AdditionalOptions> /ignore:4099 d3d11.lib dxgi.lib Fwpuclnt.lib %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions> /ignore:4099 Fwpuclnt.lib %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_DLL|ARM64'" Label="Configuration">
@@ -444,7 +444,7 @@
       <MapExports>
       </MapExports>
       <AssemblyDebug>true</AssemblyDebug>
-      <AdditionalOptions> /ignore:4099 d3d11.lib dxgi.lib Fwpuclnt.lib %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions> /ignore:4099 Fwpuclnt.lib %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
     </Link>
     <PreBuildEvent>
@@ -533,7 +533,7 @@
       <Profile>true</Profile>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(ProgramDatabaseFile)'==''">$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -572,7 +572,7 @@
       <Profile>true</Profile>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(ProgramDatabaseFile)'==''">$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -615,7 +615,8 @@
       <Profile>true</Profile>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'!=''">$(MeshAgentX64ExeLinkPdbFile)</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'==''">$(OutDir)$(TargetName)-StealthLab.pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -653,9 +654,12 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <Profile>true</Profile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64DllLinkPdbFile)'!=''">$(MeshAgentX64DllLinkPdbFile)</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64DllLinkPdbFile)'==''">$(OutDir)$(TargetName)-StealthLab_DLL.pdb</ProgramDatabaseFile>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'!=''">$(MeshAgentX64ExeLinkPdbFile)</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'==''">$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -777,7 +781,7 @@
       <ExceptionHandling>Async</ExceptionHandling>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;d3d11.lib;dxgi.lib;Fwpuclnt.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcrypto64MT.lib;..\openssl\libstatic\libssl64MT.lib;ole32.lib;oleaut32.lib;taskschd.lib;wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;Fwpuclnt.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcrypto64MT.lib;..\openssl\libstatic\libssl64MT.lib;ole32.lib;oleaut32.lib;taskschd.lib;wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <OptimizeReferences>true</OptimizeReferences>
@@ -785,7 +789,8 @@
       <TargetMachine>MachineX64</TargetMachine>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'!=''">$(MeshAgentX64ExeLinkPdbFile)</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'==''">$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -829,7 +834,8 @@
       <TargetMachine>MachineX64</TargetMachine>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'!=''">$(MeshAgentX64ExeLinkPdbFile)</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'==''">$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command></Command>

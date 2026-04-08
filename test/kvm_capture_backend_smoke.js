@@ -1,13 +1,16 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const net = require('net');
 const childProcess = require('child_process');
 
 const PACKET_TYPES = {
     0: 'nop',
     6: 'refresh',
     7: 'screen',
-    11: 'get-displays',
+    11: 'display-list',
     27: 'jumbo',
+    59: 'disconnect',
     82: 'display-info',
     88: 'mouse-cursor'
 };
@@ -15,14 +18,14 @@ const PACKET_TYPES = {
 const SCENARIOS = {
     dxgi: {
         env: {},
-        predicate: (stderr) => /capture backend=dxgi reason=dxgi:/i.test(stderr)
+        predicate: (trace) => /capture backend=dxgi reason=dxgi:/i.test(trace)
     },
     dxgi_to_wgc: {
         env: {
             STEALTH_KVM_CAPTURE_BACKEND: 'auto',
             STEALTH_KVM_DXGI_SIMULATE_UNSUPPORTED: '1'
         },
-        predicate: (stderr) => /capture backend=wgc reason=wgc:/i.test(stderr)
+        predicate: (trace) => /capture backend=wgc reason=wgc:/i.test(trace)
     },
     fallback: {
         env: {
@@ -30,21 +33,21 @@ const SCENARIOS = {
             STEALTH_KVM_DXGI_SIMULATE_UNSUPPORTED: '1',
             STEALTH_KVM_WGC_SIMULATE_UNAVAILABLE: '1'
         },
-        predicate: (stderr) => /capture backend=gdi reason=gdi:wgc-simulated-unavailable/i.test(stderr)
+        predicate: (trace) => /capture backend=gdi reason=gdi:wgc-simulated-unavailable/i.test(trace)
     },
     wgc_to_dxgi: {
         env: {
             STEALTH_KVM_CAPTURE_BACKEND: 'wgc',
             STEALTH_KVM_WGC_SIMULATE_UNAVAILABLE: '1'
         },
-        predicate: (stderr) => /capture backend=dxgi reason=dxgi:/i.test(stderr)
+        predicate: (trace) => /capture backend=dxgi reason=dxgi:/i.test(trace)
     },
     access_lost: {
         env: {
             STEALTH_KVM_CAPTURE_BACKEND: 'dxgi',
             STEALTH_KVM_DXGI_SIMULATE_ACCESS_LOST_ONCE: '1'
         },
-        predicate: (stderr) => /capture backend=gdi reason=gdi:dxgi-access-lost/i.test(stderr)
+        predicate: (trace) => /capture backend=gdi reason=gdi:dxgi-access-lost/i.test(trace)
     }
 };
 
@@ -141,11 +144,19 @@ function parsePacketStream(buffer, packets) {
     return buffer.slice(offset);
 }
 
-function collectBackendTransitions(stderr) {
+function readTextIfExists(filePath) {
+    try {
+        return fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+    } catch (error) {
+        return '';
+    }
+}
+
+function collectBackendTransitions(traceText) {
     const transitions = [];
     const regex = /capture backend=([^\s\x00]+) reason=([^\x00\r\n]+)/ig;
     let match;
-    while ((match = regex.exec(stderr)) !== null) {
+    while ((match = regex.exec(traceText)) !== null) {
         transitions.push({
             backend: match[1],
             reason: match[2].trim()
@@ -159,23 +170,40 @@ async function main() {
     const scenarioName = String(args.scenario || 'dxgi');
     const scenario = SCENARIOS[scenarioName];
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+    const rundll32Path = path.join(systemRoot, 'System32', 'rundll32.exe');
+    const dllPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
+    const logPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'svchost-debug.log');
+    const tracePath = path.join(os.tmpdir(), 'meshagent_tile_trace.log');
+    const controlPipeName = `\\\\.\\pipe\\MeshKvmBackend_${process.pid}_${Date.now()}_in`;
+    const dataPipeName = `\\\\.\\pipe\\MeshKvmBackend_${process.pid}_${Date.now()}_out`;
     const packets = [];
     let remainder = Buffer.alloc(0);
     let stderrText = '';
     let stdoutText = '';
+    let controlSocket = null;
+    let dataSocket = null;
+    let childExited = false;
     let disconnectInitiatedAt = 0;
 
     assert(scenario, `Unknown scenario: ${scenarioName}`);
-    assert(fs.existsSync(exePath), `KVM executable not found at ${exePath}`);
+    assert(fs.existsSync(rundll32Path), `rundll32.exe not found at ${rundll32Path}`);
+    assert(fs.existsSync(dllPath), `bridge DLL not found at ${dllPath}`);
+
+    try { fs.unlinkSync(tracePath); } catch (error) { if (error.code !== 'ENOENT') { throw error; } }
 
     const report = {
         generatedUtc: new Date().toISOString(),
-        exePath,
         scenario: scenarioName,
-        launchArgs: ['-kvm1'],
+        rundll32Path,
+        dllPath,
+        logPath,
+        tracePath,
+        controlPipeName,
+        dataPipeName,
+        launchArgs: [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName, '-kvm1'],
+        env: { ...scenario.env, STEALTH_KVM_TRACE_TILE: '1' },
         packets,
-        env: scenario.env,
         backendTransitions: [],
         aliveBeforeDisconnect: false,
         displayListPacketsAfterCommand: 0,
@@ -183,58 +211,107 @@ async function main() {
         success: false
     };
 
-    const child = childProcess.spawn(exePath, ['-kvm1'], {
-        windowsHide: true,
-        env: { ...process.env, ...scenario.env },
-        stdio: ['pipe', 'pipe', 'pipe']
+    const controlServer = net.createServer((conn) => {
+        controlSocket = conn;
     });
+    const dataServer = net.createServer((conn) => {
+        dataSocket = conn;
+        conn.on('data', (chunk) => {
+            remainder = parsePacketStream(Buffer.concat([remainder, chunk]), packets);
+        });
+    });
+
+    const closeServers = () => {
+        try { controlServer.close(); } catch (error) {}
+        try { dataServer.close(); } catch (error) {}
+    };
+
+    await new Promise((resolve, reject) => {
+        controlServer.once('error', reject);
+        controlServer.listen(controlPipeName, resolve);
+    });
+    await new Promise((resolve, reject) => {
+        dataServer.once('error', reject);
+        dataServer.listen(dataPipeName, resolve);
+    });
+
+    const child = childProcess.spawn(rundll32Path, [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName, '-kvm1'], {
+        windowsHide: true,
+        env: { ...process.env, STEALTH_KVM_TRACE_TILE: '1', ...scenario.env },
+        stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    const getTraceText = () => {
+        return [stdoutText, stderrText, readTextIfExists(tracePath), readTextIfExists(logPath)]
+            .filter((value) => value && value.length > 0)
+            .join('\n');
+    };
 
     child.stdout.on('data', (chunk) => {
         stdoutText += chunk.toString('utf8');
-        remainder = parsePacketStream(Buffer.concat([remainder, chunk]), packets);
     });
     child.stderr.on('data', (chunk) => {
         stderrText += chunk.toString('utf8');
     });
-    child.stdin.on('error', () => {});
 
     const exitPromise = new Promise((resolve, reject) => {
         child.once('error', reject);
-        child.once('exit', (code, signal) => resolve({ code, signal }));
+        child.once('exit', (code, signal) => {
+            childExited = true;
+            resolve({ code, signal });
+        });
     });
 
+    await waitForPredicate(() => controlSocket != null && dataSocket != null, 5000, 'bridge pipe connections');
     await waitForPredicate(() => packets.some((packet) => packet.type === 82 || packet.type === 7), 8000, 'initial KVM packets');
+
+    const displayListCountBefore = packets.filter((packet) => packet.type === 11).length;
+    controlSocket.write(buildPacket(5, Buffer.from([1, 45, 0, 45, 0, 0])));
+    controlSocket.write(buildPacket(8, Buffer.from([0])));
+    controlSocket.write(buildPacket(87));
+    controlSocket.write(buildPacket(6));
+    controlSocket.write(buildPacket(11));
+    await waitForPredicate(() => packets.filter((packet) => packet.type === 11).length > displayListCountBefore, 5000, 'display-list response');
+    report.displayListPacketsAfterCommand = packets.filter((packet) => packet.type === 11).length - displayListCountBefore;
+    await waitForPredicate(() => packets.some((packet) => packet.type === 7), 5000, 'screen packet');
+
     try {
-        await waitForPredicate(() => scenario.predicate(stderrText), 12000, `scenario ${scenarioName} backend transition`);
+        await waitForPredicate(() => scenario.predicate(getTraceText()), 12000, `scenario ${scenarioName} backend transition`);
     } catch (error) {
-        throw new Error(`${error.message}; stderr=${JSON.stringify(stderrText)}`);
+        throw new Error(`${error.message}; trace=${JSON.stringify(getTraceText())}`);
     }
 
     await sleep(500);
-    report.aliveBeforeDisconnect = child.exitCode == null;
-    assert(report.aliveBeforeDisconnect, 'KVM child exited unexpectedly before transport shutdown');
+    assert(childExited === false, 'rundll32 bridge exited unexpectedly before transport shutdown');
+    report.aliveBeforeDisconnect = true;
 
     disconnectInitiatedAt = Date.now();
-    child.stdin.end();
+    if (controlSocket != null) { controlSocket.destroy(); }
+    if (dataSocket != null) { dataSocket.destroy(); }
+    closeServers();
 
     const exitResult = await Promise.race([
         exitPromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('KVM child did not exit within 5000ms of stdin close')), 5000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('rundll32 bridge did not exit within 5000ms of pipe close')), 5000))
     ]);
 
     report.exitAfterDisconnectMs = Date.now() - disconnectInitiatedAt;
     report.exitCode = exitResult.code;
     report.exitSignal = exitResult.signal;
-    report.backendTransitions = collectBackendTransitions(stderrText);
+    report.backendTransitions = collectBackendTransitions(getTraceText());
+    report.logTail = readTextIfExists(logPath).split(/\r?\n/).filter(Boolean).slice(-40);
+    report.traceTail = readTextIfExists(tracePath).split(/\r?\n/).filter(Boolean).slice(-40);
 
     assert(report.backendTransitions.length > 0, 'No capture backend transitions were logged');
-    assert(report.exitAfterDisconnectMs <= 5000, `KVM child exit exceeded 5000ms (${report.exitAfterDisconnectMs}ms)`);
+    assert(scenario.predicate(getTraceText()), `Scenario ${scenarioName} predicate did not match final trace`);
+    assert(report.exitAfterDisconnectMs <= 5000, `rundll32 bridge exit exceeded 5000ms (${report.exitAfterDisconnectMs}ms)`);
     report.success = true;
 
     if (evidenceDir) {
         writeJson(path.join(evidenceDir, `${scenarioName}.json`), report);
         writeText(path.join(evidenceDir, `${scenarioName}.stdout.txt`), stdoutText);
         writeText(path.join(evidenceDir, `${scenarioName}.stderr.txt`), stderrText);
+        writeText(path.join(evidenceDir, `${scenarioName}.trace.txt`), getTraceText());
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             `SCENARIO=${scenarioName}`,
@@ -244,7 +321,7 @@ async function main() {
             `EXIT_AFTER_DISCONNECT_MS=${report.exitAfterDisconnectMs}`,
             `BACKEND_TRANSITIONS=${report.backendTransitions.map((item) => `${item.backend}:${item.reason}`).join(',')}`,
             `PACKET_TYPES=${packets.map((packet) => `${packet.type}:${packet.typeName}`).join(',')}`,
-            `COMMAND=${exePath} -kvm1`
+            `COMMAND=${rundll32Path} ${dllPath},KvmSessionBridgeW ${controlPipeName} ${dataPipeName} -kvm1`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

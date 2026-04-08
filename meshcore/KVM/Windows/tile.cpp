@@ -21,7 +21,6 @@ limitations under the License.
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <dxgi1_5.h>
-#include <roapi.h>
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <winrt/base.h>
@@ -33,6 +32,51 @@ limitations under the License.
 #include "tile.h"
 #include <gdiplus.h>
 #include "meshcore/meshdefines.h"
+
+// Runtime-load optional graphics capture APIs so startup does not depend on DXGI/D3D11 exports.
+typedef HRESULT(WINAPI* PFN_CreateDXGIFactory1)(REFIID riid, void** ppFactory);
+typedef HRESULT(WINAPI* PFN_D3D11CreateDevice)(IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE DriverType, HMODULE Software, UINT Flags, const D3D_FEATURE_LEVEL* pFeatureLevels, UINT FeatureLevels, UINT SDKVersion, ID3D11Device** ppDevice, D3D_FEATURE_LEVEL* pFeatureLevel, ID3D11DeviceContext** ppImmediateContext);
+typedef HRESULT(WINAPI* PFN_CreateDirect3D11DeviceFromDXGIDevice)(IDXGIDevice* dxgiDevice, IInspectable** inspectable);
+
+static PFN_CreateDXGIFactory1 g_pfnCreateDXGIFactory1 = NULL;
+static PFN_D3D11CreateDevice g_pfnD3D11CreateDevice = NULL;
+static PFN_CreateDirect3D11DeviceFromDXGIDevice g_pfnCreateDirect3D11DeviceFromDXGIDevice = NULL;
+
+static HMODULE g_hDxgi = NULL;
+static HMODULE g_hD3D11 = NULL;
+static LONG gGraphicsRuntimeLoaded = 0;
+
+static void tile_load_graphics_runtime()
+{
+	if (InterlockedCompareExchange(&gGraphicsRuntimeLoaded, 1, 0) != 0) { return; }
+	g_hDxgi = LoadLibraryA("dxgi.dll");
+	if (g_hDxgi != NULL) { g_pfnCreateDXGIFactory1 = (PFN_CreateDXGIFactory1)GetProcAddress(g_hDxgi, "CreateDXGIFactory1"); }
+
+	g_hD3D11 = LoadLibraryA("d3d11.dll");
+	if (g_hD3D11 != NULL)
+	{
+		g_pfnD3D11CreateDevice = (PFN_D3D11CreateDevice)GetProcAddress(g_hD3D11, "D3D11CreateDevice");
+		g_pfnCreateDirect3D11DeviceFromDXGIDevice = (PFN_CreateDirect3D11DeviceFromDXGIDevice)GetProcAddress(g_hD3D11, "CreateDirect3D11DeviceFromDXGIDevice");
+	}
+}
+
+static HRESULT tile_create_dxgi_factory1(REFIID riid, void** ppFactory)
+{
+	tile_load_graphics_runtime();
+	return (g_pfnCreateDXGIFactory1 != NULL) ? g_pfnCreateDXGIFactory1(riid, ppFactory) : E_NOTIMPL;
+}
+
+static HRESULT tile_d3d11_create_device(IDXGIAdapter* adapter, D3D_DRIVER_TYPE driverType, HMODULE software, UINT flags, const D3D_FEATURE_LEVEL* featureLevels, UINT featureLevelCount, UINT sdkVersion, ID3D11Device** device, D3D_FEATURE_LEVEL* featureLevel, ID3D11DeviceContext** context)
+{
+	tile_load_graphics_runtime();
+	return (g_pfnD3D11CreateDevice != NULL) ? g_pfnD3D11CreateDevice(adapter, driverType, software, flags, featureLevels, featureLevelCount, sdkVersion, device, featureLevel, context) : E_NOTIMPL;
+}
+
+static HRESULT tile_create_direct3d11_device_from_dxgi_device(IDXGIDevice* dxgiDevice, IInspectable** inspectable)
+{
+	tile_load_graphics_runtime();
+	return (g_pfnCreateDirect3D11DeviceFromDXGIDevice != NULL) ? g_pfnCreateDirect3D11DeviceFromDXGIDevice(dxgiDevice, inspectable) : E_NOTIMPL;
+}
 using namespace Gdiplus;
 namespace wg = winrt::Windows::Graphics;
 namespace wgc = winrt::Windows::Graphics::Capture;
@@ -147,6 +191,7 @@ struct WgcCaptureState
 	int screenHeight = 0;
 	int retryDelayMs = 0;
 	ULONGLONG nextRetryTick = 0;
+	int idleFramePolls = 0;
 	unsigned char* lastFrame = NULL;
 	size_t lastFrameSize = 0;
 	char activateReason[32] = { 0 };
@@ -164,6 +209,15 @@ static int gWgcSimulateUnavailable = 0;
 static int gWinRtApartmentInitialized = 0;
 static int gWinRtApartmentNeedsUninit = 0;
 static LONG gTileTraceCounter = 0;
+static const int TILE_CAPTURE_RETRY_INITIAL_DELAY_MS = 250;
+static const int TILE_CAPTURE_RETRY_MAX_DELAY_MS = 3000;
+static const UINT TILE_DXGI_INITIAL_FRAME_WAIT_MS = 16;
+static const UINT TILE_DXGI_RETRY_FRAME_WAIT_MS = 33;
+static const int TILE_DXGI_FRAME_READY_ATTEMPTS = 4;
+static const DWORD TILE_WGC_FRAME_WAIT_TIMEOUT_MS = 250;
+static const int TILE_WGC_IDLE_RESET_THRESHOLD = 4;
+static const UINT TILE_DXGI_ONESHOT_FRAME_WAIT_MS = 500;
+static const int TILE_DXGI_ONESHOT_FRAME_READY_ATTEMPTS = 3;
 
 int adjust_screen_size(int pixles);
 
@@ -245,6 +299,7 @@ static int tile_read_capture_backend_override()
 
 static void tile_set_capture_backend(KvmCaptureBackend backend, const char* reason)
 {
+	const char* backendName = "gdi";
 	gCaptureBackend = backend;
 	if (reason == NULL)
 	{
@@ -255,7 +310,14 @@ static void tile_set_capture_backend(KvmCaptureBackend backend, const char* reas
 		default: reason = "gdi:active"; break;
 		}
 	}
+	switch (backend)
+	{
+	case KvmCaptureBackend_DXGI: backendName = "dxgi"; break;
+	case KvmCaptureBackend_WGC: backendName = "wgc"; break;
+	default: break;
+	}
 	strcpy_s(gCaptureBackendReason, sizeof(gCaptureBackendReason), reason);
+	tile_tracef("capture backend=%s reason=%s", backendName, gCaptureBackendReason);
 }
 
 static const char* tile_dxgi_reason_from_hresult(HRESULT hr)
@@ -269,6 +331,28 @@ static const char* tile_dxgi_reason_from_hresult(HRESULT hr)
 	case E_ACCESSDENIED: return "gdi:dxgi-access-denied";
 	default: return "gdi:dxgi-error";
 	}
+}
+
+static int tile_capture_next_retry_delay_ms(int currentDelay)
+{
+	int delay = (currentDelay == 0) ? TILE_CAPTURE_RETRY_INITIAL_DELAY_MS : currentDelay;
+	return delay > TILE_CAPTURE_RETRY_MAX_DELAY_MS ? TILE_CAPTURE_RETRY_MAX_DELAY_MS : delay;
+}
+
+static HRESULT tile_dxgi_release_frame(IDXGIOutputDuplication* duplication, IDXGIResource** desktopResource)
+{
+	HRESULT hr = S_OK;
+
+	if (desktopResource != NULL && *desktopResource != NULL)
+	{
+		(*desktopResource)->Release();
+		*desktopResource = NULL;
+	}
+	if (duplication != NULL)
+	{
+		hr = duplication->ReleaseFrame();
+	}
+	return hr;
 }
 
 static void tile_dxgi_release_runtime(int clearCache)
@@ -300,10 +384,9 @@ static void tile_dxgi_release_runtime(int clearCache)
 
 static void tile_dxgi_schedule_retry(const char* reason)
 {
-	int delay = gDxgiCapture.retryDelayMs == 0 ? 250 : gDxgiCapture.retryDelayMs;
-	if (delay > 3000) { delay = 3000; }
+	int delay = tile_capture_next_retry_delay_ms(gDxgiCapture.retryDelayMs);
 	gDxgiCapture.nextRetryTick = GetTickCount64() + (ULONGLONG)delay;
-	gDxgiCapture.retryDelayMs = delay < 3000 ? (delay * 2) : 3000;
+	gDxgiCapture.retryDelayMs = delay < TILE_CAPTURE_RETRY_MAX_DELAY_MS ? (delay * 2) : TILE_CAPTURE_RETRY_MAX_DELAY_MS;
 	tile_dxgi_release_runtime(0);
 	tile_set_capture_backend(KvmCaptureBackend_GDI, reason);
 }
@@ -313,7 +396,7 @@ static int tile_wgc_ensure_apartment()
 	HRESULT hr;
 
 	if (gWinRtApartmentInitialized != 0) { return 1; }
-	hr = RoInitialize(RO_INIT_MULTITHREADED);
+	hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
 	if (SUCCEEDED(hr) || hr == S_FALSE)
 	{
 		gWinRtApartmentNeedsUninit = 1;
@@ -368,6 +451,7 @@ static void tile_wgc_release_runtime(int clearCache)
 	gWgcCapture.screenY = 0;
 	gWgcCapture.screenWidth = 0;
 	gWgcCapture.screenHeight = 0;
+	gWgcCapture.idleFramePolls = 0;
 	gWgcCapture.activateReason[0] = 0;
 	if (clearCache && gWgcCapture.lastFrame != NULL)
 	{
@@ -379,12 +463,30 @@ static void tile_wgc_release_runtime(int clearCache)
 
 static void tile_wgc_schedule_retry(const char* reason)
 {
-	int delay = gWgcCapture.retryDelayMs == 0 ? 250 : gWgcCapture.retryDelayMs;
-	if (delay > 3000) { delay = 3000; }
+	int delay = tile_capture_next_retry_delay_ms(gWgcCapture.retryDelayMs);
 	gWgcCapture.nextRetryTick = GetTickCount64() + (ULONGLONG)delay;
-	gWgcCapture.retryDelayMs = delay < 3000 ? (delay * 2) : 3000;
+	gWgcCapture.retryDelayMs = delay < TILE_CAPTURE_RETRY_MAX_DELAY_MS ? (delay * 2) : TILE_CAPTURE_RETRY_MAX_DELAY_MS;
 	tile_wgc_release_runtime(0);
 	tile_set_capture_backend(KvmCaptureBackend_GDI, reason);
+}
+
+static int tile_wgc_copy_cached_frame(void** buffer, long long* bufferSize);
+
+static int tile_wgc_handle_idle_frame(void** buffer, long long* bufferSize, const char* gdiReason, const char* cachedReason)
+{
+	++gWgcCapture.idleFramePolls;
+	if (gWgcCapture.idleFramePolls >= TILE_WGC_IDLE_RESET_THRESHOLD)
+	{
+		tile_wgc_schedule_retry(gdiReason);
+		return 0;
+	}
+	if (tile_wgc_copy_cached_frame(buffer, bufferSize) != 0)
+	{
+		tile_set_capture_backend(KvmCaptureBackend_WGC, cachedReason != NULL ? cachedReason : "wgc:cached");
+		return 1;
+	}
+	tile_set_capture_backend(KvmCaptureBackend_GDI, gdiReason);
+	return 0;
 }
 
 static int tile_dxgi_target_changed()
@@ -576,7 +678,7 @@ static HRESULT tile_find_adapter_for_monitor(HMONITOR monitor, IDXGIAdapter1** a
 	*adapterOut = NULL;
 
 	IDXGIFactory1* factory = NULL;
-	HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory);
+	HRESULT hr = tile_create_dxgi_factory1(__uuidof(IDXGIFactory1), (void**)&factory);
 	if (FAILED(hr) || factory == NULL) { return hr; }
 
 	for (UINT adapterIndex = 0; ; ++adapterIndex)
@@ -656,7 +758,7 @@ static int tile_should_attempt_dxgi()
 static HRESULT tile_dxgi_find_matching_output(IDXGIAdapter1** adapterOut, IDXGIOutput** outputOut)
 {
 	IDXGIFactory1* factory = NULL;
-	HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory);
+	HRESULT hr = tile_create_dxgi_factory1(__uuidof(IDXGIFactory1), (void**)&factory);
 	if (FAILED(hr)) { return hr; }
 
 	for (UINT adapterIndex = 0; ; ++adapterIndex)
@@ -758,7 +860,7 @@ static int tile_dxgi_initialize()
 		return 0;
 	}
 
-	hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, featureLevels, ARRAYSIZE(featureLevels), D3D11_SDK_VERSION, &gDxgiCapture.device, &featureLevel, &gDxgiCapture.context);
+	hr = tile_d3d11_create_device(adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, featureLevels, ARRAYSIZE(featureLevels), D3D11_SDK_VERSION, &gDxgiCapture.device, &featureLevel, &gDxgiCapture.context);
 	if (FAILED(hr))
 	{
 		if (output != NULL) { output->Release(); }
@@ -843,7 +945,7 @@ static int tile_dxgi_initialize()
 	gDxgiCapture.screenY = SCREEN_Y;
 	gDxgiCapture.screenWidth = SCREEN_WIDTH;
 	gDxgiCapture.screenHeight = SCREEN_HEIGHT;
-	gDxgiCapture.retryDelayMs = 250;
+	gDxgiCapture.retryDelayMs = TILE_CAPTURE_RETRY_INITIAL_DELAY_MS;
 	gDxgiCapture.nextRetryTick = 0;
 
 	hr = tile_dxgi_create_staging_texture(gDxgiCapture.sourceWidth, gDxgiCapture.sourceHeight);
@@ -899,6 +1001,7 @@ static int tile_dxgi_capture_frame(void** buffer, long long* bufferSize)
 	size_t paddedRowSize;
 	UINT paddedWidth;
 	UINT paddedHeight;
+	HRESULT releaseHr;
 
 	if (gDxgiCapture.duplication == NULL || gDxgiCapture.context == NULL || gDxgiCapture.stagingTexture == NULL)
 	{
@@ -907,9 +1010,9 @@ static int tile_dxgi_capture_frame(void** buffer, long long* bufferSize)
 	}
 
 	ZeroMemory(&frameInfo, sizeof(frameInfo));
-	for (acquireAttempt = 0; acquireAttempt < 4; ++acquireAttempt)
+	for (acquireAttempt = 0; acquireAttempt < TILE_DXGI_FRAME_READY_ATTEMPTS; ++acquireAttempt)
 	{
-		hr = gDxgiCapture.duplication->AcquireNextFrame(acquireAttempt == 0 ? 16 : 33, &frameInfo, &desktopResource);
+		hr = gDxgiCapture.duplication->AcquireNextFrame(acquireAttempt == 0 ? TILE_DXGI_INITIAL_FRAME_WAIT_MS : TILE_DXGI_RETRY_FRAME_WAIT_MS, &frameInfo, &desktopResource);
 		if (gDxgiSimulateAccessLostOnce != 0 && gDxgiSimulateAccessLostConsumed == 0)
 		{
 			gDxgiSimulateAccessLostConsumed = 1;
@@ -938,14 +1041,13 @@ static int tile_dxgi_capture_frame(void** buffer, long long* bufferSize)
 			break;
 		}
 
-		if (desktopResource != NULL)
-		{
-			desktopResource->Release();
-			desktopResource = NULL;
-		}
-		gDxgiCapture.duplication->ReleaseFrame();
+		releaseHr = tile_dxgi_release_frame(gDxgiCapture.duplication, &desktopResource);
 		ZeroMemory(&frameInfo, sizeof(frameInfo));
-		Sleep(8);
+		if (FAILED(releaseHr))
+		{
+			tile_dxgi_schedule_retry(tile_dxgi_reason_from_hresult(releaseHr));
+			return 0;
+		}
 	}
 	if (desktopResource == NULL || frameInfo.LastPresentTime.QuadPart == 0)
 	{
@@ -967,8 +1069,12 @@ static int tile_dxgi_capture_frame(void** buffer, long long* bufferSize)
 	hr = desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&desktopTexture);
 	if (FAILED(hr) || desktopTexture == NULL)
 	{
-		gDxgiCapture.duplication->ReleaseFrame();
-		if (desktopResource != NULL) { desktopResource->Release(); }
+		releaseHr = tile_dxgi_release_frame(gDxgiCapture.duplication, &desktopResource);
+		if (FAILED(releaseHr))
+		{
+			tile_dxgi_schedule_retry(tile_dxgi_reason_from_hresult(releaseHr));
+			return 0;
+		}
 		tile_dxgi_schedule_retry(tile_dxgi_reason_from_hresult(hr));
 		return 0;
 	}
@@ -978,9 +1084,13 @@ static int tile_dxgi_capture_frame(void** buffer, long long* bufferSize)
 	hr = gDxgiCapture.context->Map(gDxgiCapture.stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
 	if (FAILED(hr))
 	{
-		gDxgiCapture.duplication->ReleaseFrame();
+		releaseHr = tile_dxgi_release_frame(gDxgiCapture.duplication, &desktopResource);
 		desktopTexture->Release();
-		desktopResource->Release();
+		if (FAILED(releaseHr))
+		{
+			tile_dxgi_schedule_retry(tile_dxgi_reason_from_hresult(releaseHr));
+			return 0;
+		}
 		tile_dxgi_schedule_retry(tile_dxgi_reason_from_hresult(hr));
 		return 0;
 	}
@@ -994,9 +1104,13 @@ static int tile_dxgi_capture_frame(void** buffer, long long* bufferSize)
 	if (frameBuffer == NULL)
 	{
 		gDxgiCapture.context->Unmap(gDxgiCapture.stagingTexture, 0);
-		gDxgiCapture.duplication->ReleaseFrame();
+		releaseHr = tile_dxgi_release_frame(gDxgiCapture.duplication, &desktopResource);
 		desktopTexture->Release();
-		desktopResource->Release();
+		if (FAILED(releaseHr))
+		{
+			tile_dxgi_schedule_retry(tile_dxgi_reason_from_hresult(releaseHr));
+			return 0;
+		}
 		tile_dxgi_schedule_retry("gdi:dxgi-memory");
 		return 0;
 	}
@@ -1009,15 +1123,20 @@ static int tile_dxgi_capture_frame(void** buffer, long long* bufferSize)
 	}
 
 	gDxgiCapture.context->Unmap(gDxgiCapture.stagingTexture, 0);
-	gDxgiCapture.duplication->ReleaseFrame();
+	releaseHr = tile_dxgi_release_frame(gDxgiCapture.duplication, &desktopResource);
 	desktopTexture->Release();
-	desktopResource->Release();
+	if (FAILED(releaseHr))
+	{
+		free(frameBuffer);
+		tile_dxgi_schedule_retry(tile_dxgi_reason_from_hresult(releaseHr));
+		return 0;
+	}
 
 	tile_dxgi_cache_frame(frameBuffer, frameSize);
 	*buffer = frameBuffer;
 	*bufferSize = (long long)frameSize;
 	PIXEL_SIZE = 4;
-	gDxgiCapture.retryDelayMs = 250;
+	gDxgiCapture.retryDelayMs = TILE_CAPTURE_RETRY_INITIAL_DELAY_MS;
 	gDxgiCapture.nextRetryTick = 0;
 	tile_set_capture_backend(KvmCaptureBackend_DXGI, gDxgiCapture.duplicatePath);
 	return 1;
@@ -1059,7 +1178,7 @@ static int tile_wgc_initialize(const char* activateReason)
 			SUCCEEDED(tile_find_adapter_for_monitor(gWgcCapture.targetMonitor, &targetAdapter)) &&
 			targetAdapter != NULL)
 		{
-			hr = D3D11CreateDevice(
+			hr = tile_d3d11_create_device(
 				targetAdapter,
 				D3D_DRIVER_TYPE_UNKNOWN,
 				NULL,
@@ -1074,7 +1193,7 @@ static int tile_wgc_initialize(const char* activateReason)
 		}
 		else
 		{
-			hr = D3D11CreateDevice(
+			hr = tile_d3d11_create_device(
 				NULL,
 				D3D_DRIVER_TYPE_HARDWARE,
 				NULL,
@@ -1100,7 +1219,7 @@ static int tile_wgc_initialize(const char* activateReason)
 		return 0;
 	}
 
-	hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.get(), inspectableDevice.put());
+	hr = tile_create_direct3d11_device_from_dxgi_device(dxgiDevice.get(), inspectableDevice.put());
 	if (FAILED(hr) || inspectableDevice == nullptr)
 	{
 		tile_wgc_schedule_retry("gdi:wgc-winrt-device");
@@ -1155,8 +1274,9 @@ static int tile_wgc_initialize(const char* activateReason)
 	gWgcCapture.screenY = SCREEN_Y;
 	gWgcCapture.screenWidth = SCREEN_WIDTH;
 	gWgcCapture.screenHeight = SCREEN_HEIGHT;
-	gWgcCapture.retryDelayMs = 250;
+	gWgcCapture.retryDelayMs = TILE_CAPTURE_RETRY_INITIAL_DELAY_MS;
 	gWgcCapture.nextRetryTick = 0;
+	gWgcCapture.idleFramePolls = 0;
 	strcpy_s(gWgcCapture.activateReason, sizeof(gWgcCapture.activateReason), activateReason != NULL ? activateReason : "wgc:active");
 
 	hr = tile_wgc_create_staging_texture(gWgcCapture.sourceWidth, gWgcCapture.sourceHeight);
@@ -1192,15 +1312,14 @@ static int tile_wgc_capture_frame(void** buffer, long long* bufferSize)
 		return 0;
 	}
 
-	waitResult = WaitForSingleObject(gWgcCapture.frameArrivedEvent, 250);
+	waitResult = WaitForSingleObject(gWgcCapture.frameArrivedEvent, TILE_WGC_FRAME_WAIT_TIMEOUT_MS);
+	if (waitResult == WAIT_TIMEOUT)
+	{
+		return tile_wgc_handle_idle_frame(buffer, bufferSize, "gdi:wgc-timeout", "wgc:cached-timeout");
+	}
 	if (waitResult != WAIT_OBJECT_0)
 	{
-		if (tile_wgc_copy_cached_frame(buffer, bufferSize) != 0)
-		{
-			tile_set_capture_backend(KvmCaptureBackend_WGC, "wgc:cached");
-			return 1;
-		}
-		tile_wgc_schedule_retry("gdi:wgc-timeout");
+		tile_wgc_schedule_retry("gdi:wgc-event-wait");
 		return 0;
 	}
 
@@ -1215,8 +1334,7 @@ static int tile_wgc_capture_frame(void** buffer, long long* bufferSize)
 	}
 	if (!frame)
 	{
-		tile_wgc_schedule_retry("gdi:wgc-empty");
-		return 0;
+		return tile_wgc_handle_idle_frame(buffer, bufferSize, "gdi:wgc-empty", "wgc:cached-empty");
 	}
 
 	contentSize = frame.ContentSize();
@@ -1302,8 +1420,9 @@ static int tile_wgc_capture_frame(void** buffer, long long* bufferSize)
 	*buffer = frameBuffer;
 	*bufferSize = (long long)frameSize;
 	PIXEL_SIZE = 4;
-	gWgcCapture.retryDelayMs = 250;
+	gWgcCapture.retryDelayMs = TILE_CAPTURE_RETRY_INITIAL_DELAY_MS;
 	gWgcCapture.nextRetryTick = 0;
+	gWgcCapture.idleFramePolls = 0;
 	tile_set_capture_backend(KvmCaptureBackend_WGC, gWgcCapture.activateReason[0] != 0 ? gWgcCapture.activateReason : "wgc:active");
 	return 1;
 }
@@ -2013,7 +2132,7 @@ void teardown_gdiplus()
 	tile_wgc_release_runtime(1);
 	if (gWinRtApartmentInitialized != 0 && gWinRtApartmentNeedsUninit != 0)
 	{
-		RoUninitialize();
+		CoUninitialize();
 	}
 	gWinRtApartmentInitialized = 0;
 	gWinRtApartmentNeedsUninit = 0;
@@ -2078,6 +2197,7 @@ int capture_desktop_dxgi_oneshot(void** buffer, int* outWidth, int* outHeight)
 	DXGI_OUTDUPL_DESC duplDesc;
 	D3D11_TEXTURE2D_DESC texDesc;
 	HRESULT hr;
+	HRESULT releaseHr;
 	int result = 0;
 	UINT captureWidth = 0, captureHeight = 0;
 	D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_9_1;
@@ -2089,7 +2209,7 @@ int capture_desktop_dxgi_oneshot(void** buffer, int* outWidth, int* outHeight)
 	// Skip if in a remote session (DXGI Desktop Duplication doesn't work in RDP)
 	if (GetSystemMetrics(SM_REMOTESESSION) != 0) { return 0; }
 
-	hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory);
+	hr = tile_create_dxgi_factory1(__uuidof(IDXGIFactory1), (void**)&factory);
 	if (FAILED(hr) || factory == NULL) { return 0; }
 
 	// Find primary adapter and output
@@ -2100,7 +2220,7 @@ int capture_desktop_dxgi_oneshot(void** buffer, int* outWidth, int* outHeight)
 	if (FAILED(hr) || output == NULL) { adapter->Release(); factory->Release(); return 0; }
 
 	// Create D3D11 device
-	hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+	hr = tile_d3d11_create_device(adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
 		featureLevels, ARRAYSIZE(featureLevels), D3D11_SDK_VERSION, &device, &featureLevel, &context);
 	if (FAILED(hr) || device == NULL) { goto cleanup; }
 
@@ -2143,18 +2263,17 @@ int capture_desktop_dxgi_oneshot(void** buffer, int* outWidth, int* outHeight)
 	hr = device->CreateTexture2D(&texDesc, NULL, &staging);
 	if (FAILED(hr) || staging == NULL) { goto cleanup; }
 
-	// Acquire a frame (try up to 3 times with short waits for desktop to settle)
-	for (int attempt = 0; attempt < 3; ++attempt)
+	// Reacquire until Desktop Duplication reports a real present or times out.
+	for (int attempt = 0; attempt < TILE_DXGI_ONESHOT_FRAME_READY_ATTEMPTS; ++attempt)
 	{
 		ZeroMemory(&frameInfo, sizeof(frameInfo));
-		hr = duplication->AcquireNextFrame(500, &frameInfo, &desktopResource);
+		hr = duplication->AcquireNextFrame(TILE_DXGI_ONESHOT_FRAME_WAIT_MS, &frameInfo, &desktopResource);
 		if (hr == DXGI_ERROR_WAIT_TIMEOUT) { continue; }
 		if (SUCCEEDED(hr))
 		{
 			if (desktopResource != NULL && frameInfo.LastPresentTime.QuadPart != 0) { break; }
-			if (desktopResource != NULL) { desktopResource->Release(); desktopResource = NULL; }
-			duplication->ReleaseFrame();
-			Sleep(16);
+			releaseHr = tile_dxgi_release_frame(duplication, &desktopResource);
+			if (FAILED(releaseHr)) { goto cleanup; }
 			continue;
 		}
 		goto cleanup; // Real error
@@ -2162,13 +2281,23 @@ int capture_desktop_dxgi_oneshot(void** buffer, int* outWidth, int* outHeight)
 	if (FAILED(hr) || desktopResource == NULL || frameInfo.LastPresentTime.QuadPart == 0) { goto cleanup; }
 
 	hr = desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&desktopTexture);
-	if (FAILED(hr) || desktopTexture == NULL) { duplication->ReleaseFrame(); goto cleanup; }
+	if (FAILED(hr) || desktopTexture == NULL)
+	{
+		releaseHr = tile_dxgi_release_frame(duplication, &desktopResource);
+		(void)releaseHr;
+		goto cleanup;
+	}
 
 	// Copy to staging and read
 	context->CopyResource(staging, desktopTexture);
 	ZeroMemory(&mapped, sizeof(mapped));
 	hr = context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
-	if (FAILED(hr)) { duplication->ReleaseFrame(); goto cleanup; }
+	if (FAILED(hr))
+	{
+		releaseHr = tile_dxgi_release_frame(duplication, &desktopResource);
+		(void)releaseHr;
+		goto cleanup;
+	}
 
 	// Copy row-by-row (staging may have padding) into a flat BGRA buffer
 	{
@@ -2191,7 +2320,8 @@ int capture_desktop_dxgi_oneshot(void** buffer, int* outWidth, int* outHeight)
 	}
 
 	context->Unmap(staging, 0);
-	duplication->ReleaseFrame();
+	releaseHr = tile_dxgi_release_frame(duplication, &desktopResource);
+	(void)releaseHr;
 
 cleanup:
 	if (desktopTexture != NULL) { desktopTexture->Release(); }

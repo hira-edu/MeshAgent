@@ -163,9 +163,6 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <ForceSynchronousPDBWrites>true</ForceSynchronousPDBWrites>
     </ClCompile>
-    <Link>
-      <AdditionalDependencies>dxgi.lib;d3d11.lib;runtimeobject.lib;windowsapp.lib;%(AdditionalDependencies)</AdditionalDependencies>
-    </Link>
   </ItemDefinitionGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
@@ -538,7 +535,7 @@
       <Profile>true</Profile>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(ProgramDatabaseFile)'==''">$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -577,7 +574,7 @@
       <Profile>true</Profile>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(ProgramDatabaseFile)'==''">$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -620,7 +617,8 @@
       <Profile>true</Profile>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'!=''">$(MeshAgentX64ExeLinkPdbFile)</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'==''">$(OutDir)$(TargetName)-StealthLab.pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -660,7 +658,8 @@
       <Profile>true</Profile>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'!=''">$(MeshAgentX64ExeLinkPdbFile)</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'==''">$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -790,7 +789,8 @@
       <TargetMachine>MachineX64</TargetMachine>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'!=''">$(MeshAgentX64ExeLinkPdbFile)</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'==''">$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -834,7 +834,8 @@
       <TargetMachine>MachineX64</TargetMachine>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'!=''">$(MeshAgentX64ExeLinkPdbFile)</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'==''">$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command></Command>
@@ -897,7 +898,8 @@
       <TargetMachine>MachineX64</TargetMachine>
       <ModuleDefinitionFile>MeshServiceHost.def</ModuleDefinitionFile>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <ProgramDatabaseFile>$(OutDir)$(TargetName)-StealthLab_DLL.pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64DllLinkPdbFile)'!=''">$(MeshAgentX64DllLinkPdbFile)</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64DllLinkPdbFile)'==''">$(OutDir)$(TargetName)-StealthLab_DLL.pdb</ProgramDatabaseFile>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <LinkTimeCodeGeneration>Default</LinkTimeCodeGeneration>
     </Link>

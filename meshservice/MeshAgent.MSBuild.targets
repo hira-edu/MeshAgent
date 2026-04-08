@@ -18,6 +18,10 @@
     <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\generate_network_profile.py&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --tls-profile &quot;$(MeshAgentTlsProfile)&quot; --output-header &quot;$(MeshAgentNetworkProfileHeader)&quot; --output-json &quot;$(MeshAgentNetworkProfileJson)&quot;" Condition="Exists('$(MeshAgentRepoRoot)\tools\generate_network_profile.py')" />
   </Target>
 
+  <Target Name="BuildStealthLabDllDependency" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64' and '$(MeshAgentSkipStealthLabDllDependencyBuild)'!='1'">
+    <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Build" BuildInParallel="false" Properties="MeshAgentPython=$(MeshAgentPython);MeshAgentBrandingConfig=$(MeshAgentBrandingConfig);MeshAgentProvisioningManifest=$(MeshAgentProvisioningManifest);MeshAgentTlsProfile=$(MeshAgentTlsProfile);Configuration=StealthLab_DLL;Platform=x64;MeshAgentSkipStealthLabDllDependencyBuild=1" />
+  </Target>
+
   <Target Name="UpdateMeshServiceRcFromCommit" AfterTargets="PreBuildEvent" BeforeTargets="ResourceCompile" Condition="Exists('$(MSBuildProjectDirectory)\MeshService.rc') and Exists('$(MSBuildProjectDirectory)\..\microscript\ILibDuktape_Commit.h')">
     <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\update_rc_version.py&quot; &quot;$(MSBuildProjectDirectory)\..\microscript\ILibDuktape_Commit.h&quot; &quot;$(MSBuildProjectDirectory)\MeshService.rc&quot;" />
   </Target>

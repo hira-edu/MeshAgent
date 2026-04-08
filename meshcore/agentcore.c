@@ -7150,10 +7150,10 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 }
 
 #ifndef MICROSTACK_NOTLS
-int ValidateMeshServer(ILibWebClient_RequestToken sender, int preverify_ok, STACK_OF(X509) *certs, struct sockaddr_in6 *address)
+int ValidateMeshServer(ILibWebClient_RequestToken sender, int preverify_ok, STACK_OF(X509) *certs, struct sockaddr_in6 *address, void *data)
 {
 	void **userObjects = ILibWebClient_RequestToken_GetUserObjects(sender);
-	MeshAgentHostContainer *agent = (userObjects != NULL) ? (MeshAgentHostContainer*)userObjects[0] : NULL;
+	MeshAgentHostContainer *agent = (userObjects != NULL) ? (MeshAgentHostContainer*)userObjects[0] : (MeshAgentHostContainer*)data;
 	UNREFERENCED_PARAMETER(certs);
 	UNREFERENCED_PARAMETER(address);
 

@@ -181,6 +181,36 @@ typedef struct ILibDuktape_WebSocket_State
 	ILibDuktape_DuplexStream *decodedStream;
 }ILibDuktape_WebSocket_State;
 
+static ILibDuktape_WebSocket_State* ILibDuktape_httpStream_webSocket_GetState(void *user)
+{
+	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
+	return (state != NULL && ILibMemory_CanaryOK(state)) ? state : NULL;
+}
+
+static int ILibDuktape_httpStream_webSocket_HasLiveContext(ILibDuktape_WebSocket_State *state)
+{
+	return state != NULL &&
+		state->ctx != NULL &&
+		duk_ctx_is_alive(state->ctx) &&
+		duk_ctx_shutting_down(state->ctx) == 0;
+}
+
+static int ILibDuktape_httpStream_webSocket_HasEncodedWritable(ILibDuktape_WebSocket_State *state)
+{
+	return state != NULL &&
+		state->encodedStream != NULL &&
+		ILibMemory_CanaryOK(state->encodedStream) &&
+		state->encodedStream->writableStream != NULL;
+}
+
+static int ILibDuktape_httpStream_webSocket_HasDecodedWritable(ILibDuktape_WebSocket_State *state)
+{
+	return state != NULL &&
+		state->decodedStream != NULL &&
+		ILibMemory_CanaryOK(state->decodedStream) &&
+		state->decodedStream->writableStream != NULL;
+}
+
 typedef struct ILibDuktape_Http_Server
 {
 	duk_context *ctx;
@@ -4101,7 +4131,8 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_WriteWebSocketPacket(IL
 	char header[10];
 	int maskKeyInt;
 	int headerLen = 0;
-	unsigned short flags = state->noMasking == 0 ? WEBSOCKET_MASK : 0;
+	unsigned short flags = 0;
+	ILibDuktape_WebSocket_State *liveState = ILibDuktape_httpStream_webSocket_GetState(state);
 
 	char *buffer;
 	int bufferLen;
@@ -4111,7 +4142,9 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_WriteWebSocketPacket(IL
 	size_t compressedLen = 0;
 	char *compressedBuffer = NULL;
 
-	if (!ILibMemory_CanaryOK(state)) { return(ILibTransport_DoneState_ERROR); }
+	if (liveState == NULL) { return(ILibTransport_DoneState_ERROR); }
+	state = liveState;
+	flags = state->noMasking == 0 ? WEBSOCKET_MASK : 0;
 
 	buffer = _buffer;
 	bufferLen = _bufferLen;
@@ -4547,8 +4580,8 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_EncodedWriteSink(ILibDu
 }
 void ILibDuktape_httpStream_webSocket_EncodedEndSink(ILibDuktape_DuplexStream *stream, void *user)
 {
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
-	if (!ILibMemory_CanaryOK(state) || duk_ctx_shutting_down(state->ctx)) { return; }
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasLiveContext(state)) { return; }
 
 	duk_push_heapptr(state->ctx, state->ObjectPtr);					// [websocket]
 	duk_get_prop_string(state->ctx, -1, "decoded");					// [websocket][decoded]
@@ -4568,10 +4601,10 @@ void ILibDuktape_httpStream_webSocket_EncodedEndSink(ILibDuktape_DuplexStream *s
 }
 void ILibDuktape_httpStream_webSocket_EncodedPauseSink_Chain(void *chain, void *user)
 {
-	if (!ILibMemory_CanaryOK(user)) { return; }
-
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasDecodedWritable(state)) { return; }
 	duk_context *ctx = state->decodedStream->writableStream->ctx;
+	if (ctx == NULL || !duk_ctx_is_alive(ctx) || duk_ctx_shutting_down(ctx)) { return; }
 
 	if (state->decodedStream->writableStream->pipedReadable != NULL)
 	{
@@ -4585,7 +4618,8 @@ void ILibDuktape_httpStream_webSocket_EncodedPauseSink_Chain(void *chain, void *
 void ILibDuktape_httpStream_webSocket_EncodedPauseSink(ILibDuktape_DuplexStream *sender, void *user)
 {
 	//printf("WebSocket.Encoded.Pause();\n");
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasDecodedWritable(state)) { return; }
 	if (state->decodedStream->writableStream->pipedReadable_native != NULL && state->decodedStream->writableStream->pipedReadable_native->PauseHandler != NULL)
 	{
 		state->decodedStream->writableStream->pipedReadable_native->paused = 1;
@@ -4593,6 +4627,7 @@ void ILibDuktape_httpStream_webSocket_EncodedPauseSink(ILibDuktape_DuplexStream 
 	}
 	else
 	{
+		if (state->chain == NULL || !ILibDuktape_httpStream_webSocket_HasLiveContext(state)) { return; }
 		if (ILibIsRunningOnChainThread(state->chain))
 		{
 			ILibDuktape_httpStream_webSocket_EncodedPauseSink_Chain(NULL, state);
@@ -4605,10 +4640,10 @@ void ILibDuktape_httpStream_webSocket_EncodedPauseSink(ILibDuktape_DuplexStream 
 }
 void ILibDuktape_httpStream_webSocket_EncodedResumeSink_Chain(void *chain, void *user)
 {
-	if (!ILibMemory_CanaryOK(user)) { return; }
-
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasDecodedWritable(state)) { return; }
 	duk_context *ctx = state->decodedStream->writableStream->ctx;
+	if (ctx == NULL || !duk_ctx_is_alive(ctx) || duk_ctx_shutting_down(ctx)) { return; }
 
 	if (state->decodedStream->writableStream->pipedReadable == NULL) { return; }
 	duk_push_heapptr(ctx, state->decodedStream->writableStream->pipedReadable);			// [readable]
@@ -4620,7 +4655,8 @@ void ILibDuktape_httpStream_webSocket_EncodedResumeSink_Chain(void *chain, void 
 void ILibDuktape_httpStream_webSocket_EncodedResumeSink(ILibDuktape_DuplexStream *sender, void *user)
 {
 	//printf("WebSocket.Encoded.Resume();\n");
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasDecodedWritable(state)) { return; }
 	if (state->decodedStream->writableStream->pipedReadable_native != NULL && state->decodedStream->writableStream->pipedReadable_native->ResumeHandler != NULL)
 	{
 		state->decodedStream->writableStream->pipedReadable_native->paused = 0;
@@ -4628,6 +4664,7 @@ void ILibDuktape_httpStream_webSocket_EncodedResumeSink(ILibDuktape_DuplexStream
 	}
 	else
 	{
+		if (state->chain == NULL || !ILibDuktape_httpStream_webSocket_HasLiveContext(state)) { return; }
 		if (ILibIsRunningOnChainThread(state->chain))
 		{
 			ILibDuktape_httpStream_webSocket_EncodedResumeSink_Chain(NULL, state);
@@ -4646,20 +4683,22 @@ int ILibDuktape_httpStream_webSocket_EncodedUnshiftSink(ILibDuktape_DuplexStream
 
 ILibTransport_DoneState ILibDuktape_httpStream_webSocket_DecodedWriteSink(ILibDuktape_DuplexStream *stream, char *buffer, int bufferLen, void *user)
 {
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL || stream == NULL || stream->writableStream == NULL) { return(ILibTransport_DoneState_ERROR); }
 	return(ILibDuktape_httpStream_webSocket_WriteWebSocketPacket(state, stream->writableStream->Reserved == 1 ? ILibWebClient_WebSocket_DataType_TEXT : ILibWebClient_WebSocket_DataType_BINARY, buffer, bufferLen, ILibWebClient_WebSocket_FragmentFlag_Complete));
 }
 void ILibDuktape_httpStream_webSocket_DecodedEndSink(ILibDuktape_DuplexStream *stream, void *user)
 {
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL) { return; }
 	ILibDuktape_httpStream_webSocket_WriteWebSocketPacket(state, WEBSOCKET_OPCODE_CLOSE, NULL, 0, ILibWebClient_WebSocket_FragmentFlag_Complete);
 }
 void ILibDuktape_httpStream_webSocket_DecodedPauseSink_Chain(void *chain, void *user)
 {
-	if (!ILibMemory_CanaryOK(user)) { return; }
-
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasEncodedWritable(state)) { return; }
 	duk_context *ctx = state->encodedStream->writableStream->ctx;
+	if (ctx == NULL || !duk_ctx_is_alive(ctx) || duk_ctx_shutting_down(ctx)) { return; }
 
 	if (state->encodedStream->writableStream->pipedReadable == NULL)
 	{
@@ -4677,8 +4716,8 @@ void ILibDuktape_httpStream_webSocket_DecodedPauseSink_Chain(void *chain, void *
 }
 void ILibDuktape_httpStream_webSocket_DecodedPauseSink(ILibDuktape_DuplexStream *sender, void *user)
 {
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
-	if (state == NULL || !ILibMemory_CanaryOK(state) || state->encodedStream == NULL || state->encodedStream->writableStream == NULL) { return; } // ERROR
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasEncodedWritable(state)) { return; }
 
 	if (state->encodedStream->writableStream->pipedReadable_native != NULL && state->encodedStream->writableStream->pipedReadable_native->PauseHandler != NULL)
 	{
@@ -4687,6 +4726,7 @@ void ILibDuktape_httpStream_webSocket_DecodedPauseSink(ILibDuktape_DuplexStream 
 	}
 	else
 	{
+		if (state->chain == NULL || !ILibDuktape_httpStream_webSocket_HasLiveContext(state)) { return; }
 		if (ILibIsRunningOnChainThread(state->chain))
 		{
 			ILibDuktape_httpStream_webSocket_DecodedPauseSink_Chain(NULL, state);
@@ -4699,9 +4739,10 @@ void ILibDuktape_httpStream_webSocket_DecodedPauseSink(ILibDuktape_DuplexStream 
 }
 void ILibDuktape_httpStream_webSocket_DecodedResumeSink_Chain(void *chain, void *user)
 {
-	if (!ILibMemory_CanaryOK(user)) { return; }
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasEncodedWritable(state)) { return; }
 	duk_context *ctx = state->encodedStream->writableStream->ctx;
+	if (ctx == NULL || !duk_ctx_is_alive(ctx) || duk_ctx_shutting_down(ctx)) { return; }
 
 	if (state->encodedStream->writableStream->pipedReadable == NULL)
 	{
@@ -4717,9 +4758,8 @@ void ILibDuktape_httpStream_webSocket_DecodedResumeSink_Chain(void *chain, void 
 }
 void ILibDuktape_httpStream_webSocket_DecodedResumeSink(ILibDuktape_DuplexStream *sender, void *user)
 {
-	if (!ILibMemory_CanaryOK(user)) { return; }
-
-	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
+	ILibDuktape_WebSocket_State *state = ILibDuktape_httpStream_webSocket_GetState(user);
+	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasEncodedWritable(state)) { return; }
 	if (state->encodedStream->writableStream->pipedReadable_native != NULL && state->encodedStream->writableStream->pipedReadable_native->ResumeHandler != NULL)
 	{
 		state->encodedStream->writableStream->pipedReadable_native->paused = 0;
@@ -4727,6 +4767,7 @@ void ILibDuktape_httpStream_webSocket_DecodedResumeSink(ILibDuktape_DuplexStream
 	}
 	else
 	{
+		if (state->chain == NULL || !ILibDuktape_httpStream_webSocket_HasLiveContext(state)) { return; }
 		if (ILibIsRunningOnChainThread(state->chain))
 		{
 			ILibDuktape_httpStream_webSocket_DecodedResumeSink_Chain(NULL, state);

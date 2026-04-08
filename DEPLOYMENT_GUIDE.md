@@ -68,10 +68,11 @@ GitHub Actions remains available for automation, but the on-device workflow is t
    Expect warnings for unsigned binaries until you apply Authenticode signatures. Any failures must be resolved before packaging.
 5. (Optional) Build individual variants directly when you only need one output:
    ```powershell
-   MSBuild.exe .\meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m /nologo
-   MSBuild.exe .\MeshAgent-2022.sln /p:Configuration=StealthLab /p:Platform=x64 /m /nologo
-   MSBuild.exe .\meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=Win32 /m /nologo
-   ```
+    MSBuild.exe .\meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m /nologo
+    MSBuild.exe .\MeshAgent-2022.sln /p:Configuration=StealthLab /p:Platform=x64 /m /nologo
+    MSBuild.exe .\meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=Win32 /m /nologo
+    ```
+   The supported full-package path remains `MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal`. Direct `StealthLab|x64` project builds now force the `StealthLab_DLL|x64` prerequisite first, but you should still avoid running separate x64 DLL and x64 EXE builds in parallel against the same checkout.
 
 Verify the payload was staged correctly:
 ```powershell
