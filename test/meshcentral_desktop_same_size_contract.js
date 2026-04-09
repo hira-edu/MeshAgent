@@ -48,13 +48,16 @@ function evaluateStandardAsset(source) {
     const functionSource = start >= 0 && end > start ? source.slice(start, end) : '';
     return {
         functionLocated: functionSource.length > 0,
-        ignoresSameSizeScreenPackets: functionSource.includes('if ((obj.ScreenWidth == width) && (obj.ScreenHeight == height)) return;'),
+        acceptsSameSizeScreenPackets: !functionSource.includes('if ((obj.ScreenWidth == width) && (obj.ScreenHeight == height)) return;'),
         updatesScreenDimensions: functionSource.includes('obj.ScreenWidth = obj.width = width;') &&
             functionSource.includes('obj.ScreenHeight = obj.height = height;'),
-        resetsPendingDrawQueue: functionSource.includes('obj.KillDraw = obj.tilesReceived;') &&
-            functionSource.includes('while (obj.PendingOperations.length > 0) { obj.PendingOperations.shift(); }'),
+        resetsPendingDrawQueue: functionSource.includes("obj.resetStreamState('screen:") ||
+            functionSource.includes("obj.resetDrawState('screen:") ||
+            (functionSource.includes('obj.KillDraw = obj.tilesReceived;') &&
+                functionSource.includes('while (obj.PendingOperations.length > 0) { obj.PendingOperations.shift(); }')),
         refreshesCompressionHandshakeOnResize: functionSource.includes('obj.SendCompressionLevel(obj.ImageType);'),
         sendsUnpauseOnResize: functionSource.includes('obj.SendUnPause();'),
+        sendsInputLockQueryOnResize: functionSource.includes('obj.SendRemoteInputLock(2);'),
         firesResizeEventForAcceptedResize: functionSource.includes('if (obj.onScreenSizeChange != null) { obj.onScreenSizeChange(obj, obj.ScreenWidth, obj.ScreenHeight, obj.CanvasId); }')
     };
 }
@@ -62,11 +65,14 @@ function evaluateStandardAsset(source) {
 function evaluateMinifiedAsset(source) {
     return {
         functionLocated: source.includes('n.ProcessScreenMsg=function(e,t){'),
-        ignoresSameSizeScreenPackets: source.includes('n.ScreenWidth!=e||n.ScreenHeight!=t'),
+        acceptsSameSizeScreenPackets: !source.includes('n.ScreenWidth!=e||n.ScreenHeight!=t'),
         updatesScreenDimensions: source.includes('n.ScreenWidth=n.width=e,n.ScreenHeight=n.height=t'),
-        resetsPendingDrawQueue: source.includes('n.KillDraw=n.tilesReceived') &&
-            source.includes('n.PendingOperations.length>0;)n.PendingOperations.shift()'),
+        resetsPendingDrawQueue: source.includes('n.resetStreamState("screen:') ||
+            source.includes('n.resetDrawState("screen:') ||
+            (source.includes('n.KillDraw=n.tilesReceived') &&
+                source.includes('n.PendingOperations.length>0;)n.PendingOperations.shift()')),
         refreshesCompressionHandshakeOnResize: source.includes('n.SendCompressionLevel(n.ImageType),n.SendUnPause(),n.SendRemoteInputLock(2)'),
+        sendsInputLockQueryOnResize: source.includes('n.SendRemoteInputLock(2)'),
         firesResizeEventForAcceptedResize: source.includes('null!=n.onScreenSizeChange&&n.onScreenSizeChange(n,n.ScreenWidth,n.ScreenHeight,n.CanvasId)')
     };
 }

@@ -19,15 +19,36 @@ limitations under the License.
 
 typedef ILibTransport_DoneState(*ILibKVM_WriteHandler)(char *buffer, int bufferLen, void *reserved);
 
+#define KVM_BRIDGE_CONNECT_TIMEOUT_MS 5000
+#define KVM_BRIDGE_CONNECT_DELAY_ENV_A "STEALTH_KVM_BRIDGE_CONNECT_DELAY_MS"
+#define KVM_BRIDGE_CONNECT_DELAY_ENV_W L"STEALTH_KVM_BRIDGE_CONNECT_DELAY_MS"
+
 int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, void *reserved);
 void kvm_pause(int pause, void *reserved);
 int kvm_relay_setup(char* exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int tsid);
 void kvm_cleanup(void *reserved);
 void kvm_setupSasPermissions();
 void kvm_relay_reset(ILibKVM_WriteHandler writeHandler, void *reserved);
+void kvm_relay_request_display_list(ILibKVM_WriteHandler writeHandler, void *reserved);
+void kvm_relay_query_input_lock(ILibKVM_WriteHandler writeHandler, void *reserved);
 const char* kvm_get_current_desktop_name();
 void kvm_set_force_default_desktop(int enabled);
 #ifdef WIN32
+typedef struct KvmBridgeDebugSnapshot
+{
+	int childPresent;
+	DWORD childPid;
+	int transportActive;
+	DWORD processSessionId;
+	ULONGLONG sessionStartTickMs;
+	ULONGLONG lastInputTickMs;
+	ULONGLONG lastOutputTickMs;
+	ULONGLONG lastScreenTickMs;
+	unsigned short lastInputType;
+	unsigned short lastOutputType;
+	unsigned int pendingProbeMask;
+	ULONGLONG pendingProbeSinceTickMs;
+} KvmBridgeDebugSnapshot;
 void kvm_notify_session_change(DWORD eventType, DWORD sessionId);
 int kvm_bridge_debug_get_child_present(void);
 DWORD kvm_bridge_debug_get_child_pid(void);
@@ -48,11 +69,15 @@ int kvm_bridge_debug_get_last_fallback_used_for_reserved(void *reserved);
 DWORD kvm_bridge_debug_get_last_bridge_failure_error(void);
 DWORD kvm_bridge_debug_get_last_bridge_failure_stage(void);
 DWORD kvm_bridge_debug_get_last_bridge_failure_spawn_type(void);
+DWORD kvm_bridge_debug_get_last_launch_attempt_count(void);
+DWORD kvm_bridge_debug_get_last_successful_spawn_type(void);
+DWORD kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal(void);
 DWORD kvm_bridge_debug_get_consecutive_failures(void);
 DWORD kvm_bridge_debug_get_last_backoff_delay_ms(void);
 DWORD kvm_bridge_debug_get_spawn_attempt_count(void);
 int kvm_bridge_debug_is_retry_scheduled(void);
 int kvm_bridge_debug_get_registered_context_count(void);
+int kvm_bridge_debug_get_snapshot_for_reserved(void *reserved, KvmBridgeDebugSnapshot* snapshotOut);
 #endif
 
 #endif

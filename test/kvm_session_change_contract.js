@@ -53,11 +53,17 @@ function main() {
     const checks = {
         headerExportsSessionChangeHook: kvmHeaderSource.includes('void kvm_notify_session_change(DWORD eventType, DWORD sessionId);'),
         serviceMainForwardsSessionChanges: serviceMainSource.includes('kvm_notify_session_change(eventType, sessionId);'),
-        relayDefinesSessionChangeDispatcher: kvmSource.includes('static void kvm_relay_handle_session_change(void* chain, void* user)'),
-        relaySuppressesRestartOnDisconnect: kvmSource.includes('stopping helper and suppressing restart'),
-        relayRetainsContextWhileSuppressed: kvmSource.includes('helper exit retained while session restart is suppressed'),
-        relayRestartsSuppressedHelperOnConnect: kvmSource.includes('restarting suppressed helper'),
-        relayRebindsToNewSession: kvmSource.includes('moving helper from session %u to %u')
+        relayDefinesSessionChangeDispatcher: kvmSource.includes('static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)'),
+        relayDispatchesSessionChangesPerContext: kvmSource.includes('kvm_relay_handle_session_change_for_context(snapshot[i], eventType, sessionId);'),
+        relaySuppressesRestartOnDisconnect: kvmSource.includes('gKvmRestartSuppressed = 1;') &&
+            kvmSource.includes('ILibProcessPipe_Process_SoftKill(gChildProcess);'),
+        relayRetainsPendingRestartReason: kvmSource.includes('gKvmPendingSessionRestartEvent = eventType;') &&
+            kvmSource.includes('gKvmPendingSessionRestartSessionId = sessionId;'),
+        relayRestartsSuppressedHelperOnConnect: kvmSource.includes('gKvmRestartSuppressed = 0;') &&
+            kvmSource.includes('if (gChildProcess == NULL && g_shutdown == 0 && gKvmPipeMgr != NULL && gKvmExePath != NULL && gKvmWriteHandler != NULL)') &&
+            kvmSource.includes('kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);'),
+        relayRebindsToNewSession: kvmSource.includes('gProcessTSID = (int)sessionId;') &&
+            kvmSource.includes('gKvmProcessSessionId = sessionId;')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

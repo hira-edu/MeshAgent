@@ -53,9 +53,11 @@ function main() {
 
     const checks = {
         screenCaseLocated: block.length > 0,
-        dropsSameSizeScreenPackets: block.includes('if ((obj.width === data.readUInt16BE(4)) && (obj.height === data.readUInt16BE(6))) break;'),
-        updatesScreenDimensions: block.includes('obj.width = data.readUInt16BE(4);') &&
-            block.includes('obj.height = data.readUInt16BE(6);'),
+        acceptsSameSizeScreenPackets: !block.includes('if ((obj.width === data.readUInt16BE(4)) && (obj.height === data.readUInt16BE(6))) break;'),
+        updatesScreenDimensions: (block.includes('obj.width = data.readUInt16BE(4);') &&
+            block.includes('obj.height = data.readUInt16BE(6);')) ||
+            (block.includes('obj.width = width;') &&
+                block.includes('obj.height = height;')),
         resetsImageCache: block.includes('obj.screen = new Array(obj.swidth * obj.sheight);') &&
             block.includes('obj.imagesCount = 0;') &&
             block.includes('obj.imagesCounters = {};') &&

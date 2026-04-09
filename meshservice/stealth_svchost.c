@@ -116,6 +116,7 @@ static BOOL Stealth_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathO
 static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle);
 static void Stealth_SvchostLogProvisioningStatus(void);
 static void Stealth_SvchostLogLine(const wchar_t* format, ...);
+static BOOL Stealth_SvchostCanHardenModuleDacl(void);
 static BOOL Stealth_SvchostEnsureModuleDacl(void);
 static void Stealth_SvchostInstallCrtHandlers(void);
 
@@ -434,6 +435,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
 {
     wchar_t controlPipeName[MAX_PATH * 4] = {0};
     wchar_t dataPipeName[MAX_PATH * 4] = {0};
+    wchar_t connectDelayText[32] = {0};
     wchar_t forceExitCodeText[32] = {0};
     HANDLE inputThread = NULL;
     HANDLE mainloopThread = NULL;
@@ -442,10 +444,14 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     StealthKvmBridgeContext ctx;
     StealthKvmBridgeLaunchContext launchCtx;
     DWORD pipeMode = PIPE_READMODE_BYTE;
+    DWORD connectDelayLen = 0;
+    DWORD connectDelayMs = 0;
     DWORD forceExitCodeLen = 0;
+    DWORD forcedExitCode = 0;
     BOOL useNamedPipeBridge = FALSE;
     BOOL useLegacySinglePipeBridge = FALSE;
     int pipeCount = 0;
+    ULONGLONG bridgeStartTickMs = GetTickCount64();
 
     UNREFERENCED_PARAMETER(hwnd);
     UNREFERENCED_PARAMETER(nCmdShow);
@@ -491,19 +497,29 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     forceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", forceExitCodeText, (DWORD)_countof(forceExitCodeText));
     if (forceExitCodeLen > 0 && forceExitCodeLen < _countof(forceExitCodeText))
     {
-        DWORD forcedExitCode = wcstoul(forceExitCodeText, NULL, 10);
-        if (forcedExitCode != 0)
-        {
-            Stealth_SvchostLogLine(L"KvmSessionBridgeW forced exit (code=%lu)", forcedExitCode);
-            ExitProcess(forcedExitCode);
-        }
+        forcedExitCode = wcstoul(forceExitCodeText, NULL, 10);
     }
-    if (useNamedPipeBridge && !WaitNamedPipeW(controlPipeName, 5000))
+    connectDelayLen = GetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, connectDelayText, (DWORD)_countof(connectDelayText));
+    if (connectDelayLen > 0 && connectDelayLen < _countof(connectDelayText))
+    {
+        connectDelayMs = wcstoul(connectDelayText, NULL, 10);
+        if (connectDelayMs > 60000UL) { connectDelayMs = 60000UL; }
+    }
+    if (connectDelayMs > 0)
+    {
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW delaying pipe connect by %lu ms", connectDelayMs);
+        Sleep(connectDelayMs);
+    }
+    if (useNamedPipeBridge)
+    {
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW waiting for pipes (timeout=%u ms)", (unsigned int)KVM_BRIDGE_CONNECT_TIMEOUT_MS);
+    }
+    if (useNamedPipeBridge && !WaitNamedPipeW(controlPipeName, KVM_BRIDGE_CONNECT_TIMEOUT_MS))
     {
         Stealth_SvchostLogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
         return;
     }
-    if (!useLegacySinglePipeBridge && useNamedPipeBridge && !WaitNamedPipeW(dataPipeName, 5000))
+    if (!useLegacySinglePipeBridge && useNamedPipeBridge && !WaitNamedPipeW(dataPipeName, KVM_BRIDGE_CONNECT_TIMEOUT_MS))
     {
         Stealth_SvchostLogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
         return;
@@ -519,6 +535,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
                 Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
                 return;
             }
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW control pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
             ctx.dataPipeHandle = ctx.controlPipeHandle;
             if (!SetNamedPipeHandleState(ctx.controlPipeHandle, &pipeMode, NULL, NULL))
             {
@@ -533,12 +550,14 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
                 Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
                 goto cleanup;
             }
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW control pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
             ctx.dataPipeHandle = CreateFileW(dataPipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
             if (ctx.dataPipeHandle == INVALID_HANDLE_VALUE)
             {
                 Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
                 goto cleanup;
             }
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW data pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
         }
         if (!DuplicateHandle(GetCurrentProcess(), ctx.controlPipeHandle, GetCurrentProcess(), &bridgeStdIn, 0, FALSE, DUPLICATE_SAME_ACCESS))
         {
@@ -574,6 +593,14 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     {
         Stealth_SvchostLogLine(L"KvmSessionBridgeW mainloop CreateThread failed (error=%lu)", GetLastError());
         goto cleanup;
+    }
+    if (forcedExitCode != 0)
+    {
+        // Crash-recovery probes must complete the bridge handshake first so the
+        // service takes the normal helper-exit retry/backoff path.
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW forced exit after bridge attach (code=%lu)", forcedExitCode);
+        Sleep(50);
+        ExitProcess(forcedExitCode);
     }
 
     WaitForSingleObject(mainloopThread, INFINITE);
@@ -647,13 +674,45 @@ static void Stealth_SvchostLogLine(const wchar_t* format, ...)
     va_start(args, format);
     vfwprintf(logFile, format, args);
     va_end(args);
-    fputwc(L'\n', logFile);
-    fclose(logFile);
+	fputwc(L'\n', logFile);
+	fclose(logFile);
+}
+
+static BOOL Stealth_SvchostTokenHasSid(PSID sid)
+{
+    BOOL isMember = FALSE;
+
+    if (sid == NULL) { return FALSE; }
+    if (!CheckTokenMembership(NULL, sid, &isMember)) { return FALSE; }
+    return isMember;
+}
+
+static BOOL Stealth_SvchostCanHardenModuleDacl(void)
+{
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    PSID administratorsSid = NULL;
+    PSID localSystemSid = NULL;
+    BOOL allow = FALSE;
+
+    if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &administratorsSid))
+    {
+        allow = Stealth_SvchostTokenHasSid(administratorsSid);
+        FreeSid(administratorsSid);
+        administratorsSid = NULL;
+    }
+    if (allow == FALSE &&
+        AllocateAndInitializeSid(&ntAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &localSystemSid))
+    {
+        allow = Stealth_SvchostTokenHasSid(localSystemSid);
+        FreeSid(localSystemSid);
+        localSystemSid = NULL;
+    }
+    return allow;
 }
 
 static BOOL Stealth_SvchostEnsureModuleDacl(void)
 {
-    PSECURITY_DESCRIPTOR pSD = NULL;
+	PSECURITY_DESCRIPTOR pSD = NULL;
     PACL dacl = NULL;
     BOOL daclPresent = FALSE;
     BOOL daclDefaulted = FALSE;
@@ -790,12 +849,19 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
         Stealth_SvchostLogLine(L"module path: %ls", g_SvchostModulePath);
         Stealth_SvchostLogLine(L"install directory: %ls", g_SvchostInstallDir);
         Stealth_SvchostInstallCrtHandlers();
-        if (!Stealth_SvchostEnsureModuleDacl())
+        if (Stealth_SvchostCanHardenModuleDacl())
         {
-            DWORD aclError = GetLastError();
-            if (aclError == ERROR_SUCCESS) { aclError = ERROR_ACCESS_DENIED; }
-            Stealth_DebugPrintfW(L"[svchost] failed to apply DLL DACL to %ls (error=%lu)", g_SvchostModulePath, aclError);
-            Stealth_SvchostLogLine(L"failed to apply DLL DACL to %ls (error=%lu)", g_SvchostModulePath, aclError);
+            if (!Stealth_SvchostEnsureModuleDacl())
+            {
+                DWORD aclError = GetLastError();
+                if (aclError == ERROR_SUCCESS) { aclError = ERROR_ACCESS_DENIED; }
+                Stealth_DebugPrintfW(L"[svchost] failed to apply DLL DACL to %ls (error=%lu)", g_SvchostModulePath, aclError);
+                Stealth_SvchostLogLine(L"failed to apply DLL DACL to %ls (error=%lu)", g_SvchostModulePath, aclError);
+            }
+        }
+        else
+        {
+            Stealth_SvchostLogLine(L"skipping DLL DACL hardening for non-elevated process token");
         }
     }
     else

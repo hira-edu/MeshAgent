@@ -1,0 +1,8 @@
+GENERATED_UTC=2026-04-09T17:35:01.576Z
+EXE=C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab\MeshService-2022.exe
+DLL=C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+PICTURE_PACKETS=4
+JUMBO_PACKETS=0
+TOTAL_PICTURE_EVENTS=4
+LAST_PACKET_AT=1775756086535
+PSEXEC_EXIT=0

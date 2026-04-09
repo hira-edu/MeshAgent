@@ -81,9 +81,29 @@ async function waitForReadableFile(filePath, timeoutMs) {
 }
 
 function readJsonText(label, text) {
+    const raw = String(text || '');
+    const trimmed = raw.trim();
+
     try {
-        return JSON.parse(String(text || '').trim());
+        return JSON.parse(trimmed);
     } catch (error) {
+        const lines = trimmed
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0);
+
+        for (let i = lines.length - 1; i >= 0; --i) {
+            const line = lines[i];
+            if (!line.startsWith('{') && !line.startsWith('[')) {
+                continue;
+            }
+            try {
+                return JSON.parse(line);
+            } catch (lineError) {
+                // Ignore non-JSON trace lines and keep walking backward toward the final JSON payload.
+            }
+        }
+
         throw new Error(`Failed to parse ${label} JSON\ncontent:\n${text}\nparse error: ${error.message}`);
     }
 }

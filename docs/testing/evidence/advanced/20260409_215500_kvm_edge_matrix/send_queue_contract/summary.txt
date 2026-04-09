@@ -1,0 +1,3 @@
+MULTIPLEX_PATH=C:\Users\Workstation\Documents\GitHub\MeshCentral\meshdesktopmultiplex.js
+SUCCESS=true
+CHECKS=sendToAgentLocated:true,queueBacklogUsesLength:true,marksSendingBeforeSend:true,fixesAgentOutTrafficAccounting:true

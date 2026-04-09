@@ -143,6 +143,9 @@ async function main() {
     assert(json.initialBridgeAvailable === true, 'bridge DLL path was not resolved');
     assert(json.initialBridgeUsed === true, 'rundll32 bridge path was not used');
     assert(json.initialFallbackUsed === false, 'legacy fallback was used unexpectedly');
+    assert(json.initialLaunchAttemptCount === 1, `initial bridge needed fallback attempts (${json.initialLaunchAttemptCount})`);
+    assert(json.initialSuccessfulSpawnType === 2, `initial bridge used unexpected spawn type ${json.initialSuccessfulSpawnType}`);
+    assert(json.initialSuccessfulSpawnAttemptOrdinal === 1, `initial bridge succeeded on attempt ${json.initialSuccessfulSpawnAttemptOrdinal}`);
     assert(json.initialTransportActive === true, 'bridge transport never became active');
     assert(json.lockStopped === true, 'lock event did not stop the helper');
     assert(json.lockStopMs <= 2000, `lock stop exceeded 2000ms (${json.lockStopMs}ms)`);
@@ -151,11 +154,17 @@ async function main() {
     assert(json.unlockRespawnMs <= 2000, `unlock respawn exceeded 2000ms (${json.unlockRespawnMs}ms)`);
     assert(json.postUnlockBridgeUsed === true, 'bridge path was not restored after unlock');
     assert(json.postUnlockFallbackUsed === false, 'unlock restarted on legacy fallback unexpectedly');
+    assert(json.postUnlockLaunchAttemptCount === 1, `unlock restart needed fallback attempts (${json.postUnlockLaunchAttemptCount})`);
+    assert(json.postUnlockSuccessfulSpawnType === 2, `unlock restart used unexpected spawn type ${json.postUnlockSuccessfulSpawnType}`);
+    assert(json.postUnlockSuccessfulSpawnAttemptOrdinal === 1, `unlock restart succeeded on attempt ${json.postUnlockSuccessfulSpawnAttemptOrdinal}`);
     assert(json.disconnectStopped === true, 'console disconnect did not stop the helper');
     assert(json.disconnectStopMs <= 2000, `console disconnect stop exceeded 2000ms (${json.disconnectStopMs}ms)`);
     assert(json.helperAbsentDuringDisconnect === true, 'helper remained present during disconnect');
     assert(json.reconnectRespawned === true, 'console connect did not respawn the helper');
     assert(json.reconnectRespawnMs <= 2000, `console connect respawn exceeded 2000ms (${json.reconnectRespawnMs}ms)`);
+    assert(json.reconnectLaunchAttemptCount === 1, `reconnect restart needed fallback attempts (${json.reconnectLaunchAttemptCount})`);
+    assert(json.reconnectSuccessfulSpawnType === 2, `reconnect restart used unexpected spawn type ${json.reconnectSuccessfulSpawnType}`);
+    assert(json.reconnectSuccessfulSpawnAttemptOrdinal === 1, `reconnect restart succeeded on attempt ${json.reconnectSuccessfulSpawnAttemptOrdinal}`);
     assert(json.cleanupExited === true, 'cleanup did not stop the final helper');
     assert(json.cleanupExitMs <= 5000, `cleanup exit exceeded 5000ms (${json.cleanupExitMs}ms)`);
     assert(json.initialPid > 0, `invalid initial pid ${json.initialPid}`);
@@ -201,11 +210,17 @@ async function main() {
             `UNLOCK_PID=${json.unlockPid}`,
             `RECONNECT_PID=${json.reconnectPid}`,
             `INITIAL_BRIDGE_USED=${json.initialBridgeUsed}`,
+            `INITIAL_LAUNCH_ATTEMPT_COUNT=${json.initialLaunchAttemptCount}`,
+            `INITIAL_SUCCESSFUL_SPAWN_TYPE=${json.initialSuccessfulSpawnType}`,
             `POST_UNLOCK_BRIDGE_USED=${json.postUnlockBridgeUsed}`,
+            `POST_UNLOCK_LAUNCH_ATTEMPT_COUNT=${json.postUnlockLaunchAttemptCount}`,
+            `POST_UNLOCK_SUCCESSFUL_SPAWN_TYPE=${json.postUnlockSuccessfulSpawnType}`,
             `LOCK_STOP_MS=${json.lockStopMs}`,
             `UNLOCK_RESPAWN_MS=${json.unlockRespawnMs}`,
             `DISCONNECT_STOP_MS=${json.disconnectStopMs}`,
             `RECONNECT_RESPAWN_MS=${json.reconnectRespawnMs}`,
+            `RECONNECT_LAUNCH_ATTEMPT_COUNT=${json.reconnectLaunchAttemptCount}`,
+            `RECONNECT_SUCCESSFUL_SPAWN_TYPE=${json.reconnectSuccessfulSpawnType}`,
             `CLEANUP_EXIT_MS=${json.cleanupExitMs}`,
             `TOTAL_PACKETS=${json.screenPackets + json.displayListPackets + json.displayInfoPackets + json.cursorPackets}`
         ].join('\n') + '\n');

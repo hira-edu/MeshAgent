@@ -40,18 +40,23 @@ function assert(condition, message) {
     }
 }
 
-function evaluateSource(source) {
-    const hasStateChange = source.includes('obj.xxStateChange(3);') || source.includes('r.xxStateChange(3)');
+function evaluateRedirSource(source) {
     return {
         omitsCustomDesktopSyncHelper: !source.includes('xxSendInitialDesktopSync'),
-        omitsForcedDesktopStartupControls: !source.includes('SendCompressionLevel') &&
-            !source.includes('SendUnPause') &&
-            !source.includes('SendRemoteInputLock(2)') &&
-            !source.includes('SendRefresh'),
-        connectPathDoesNotInjectDesktopSync:
-            hasStateChange &&
-            !source.includes('obj.xxStateChange(3);\n                obj.xxSendInitialDesktopSync();') &&
-            !source.includes('xxStateChange(3),r.xxSendInitialDesktopSync(),')
+        kvmConnectDefersConnectedState:
+            source.includes('if (obj.protocol != 2) { obj.xxStateChange(3); }') ||
+            source.includes('2!=r.protocol&&r.xxStateChange(3)'),
+        transportHandshakeStillSendsProtocol:
+            source.includes('obj.socket.send(obj.protocol);') ||
+            source.includes('r.socket.send(r.protocol)')
+    };
+}
+
+function evaluateDesktopSource(source) {
+    return {
+        firstScreenPromotesConnectedState:
+            source.includes('if (obj.parent != null && obj.parent.State < 3) { obj.parent.xxStateChange(3); }') ||
+            source.includes('null!=n.parent&&n.parent.State<3&&n.parent.xxStateChange(3)')
     };
 }
 
@@ -60,12 +65,18 @@ function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const redirPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-redir-ws-0.1.1.js');
     const redirMinPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-redir-ws-0.1.1-min.js');
+    const desktopPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-desktop-0.0.2.js');
+    const desktopMinPath = path.resolve('..', 'MeshCentral', 'public', 'scripts', 'agent-desktop-0.0.2-min.js');
     const source = fs.readFileSync(redirPath, 'utf8');
     const sourceMin = fs.readFileSync(redirMinPath, 'utf8');
+    const desktopSource = fs.readFileSync(desktopPath, 'utf8');
+    const desktopMinSource = fs.readFileSync(desktopMinPath, 'utf8');
 
     const checks = {
-        standard: evaluateSource(source),
-        minified: evaluateSource(sourceMin)
+        standard: evaluateRedirSource(source),
+        minified: evaluateRedirSource(sourceMin),
+        desktopStandard: evaluateDesktopSource(desktopSource),
+        desktopMinified: evaluateDesktopSource(desktopMinSource)
     };
 
     for (const [assetName, assetChecks] of Object.entries(checks)) {
@@ -77,6 +88,8 @@ function main() {
     const report = {
         redirPath,
         redirMinPath,
+        desktopPath,
+        desktopMinPath,
         checks
     };
 
@@ -85,9 +98,13 @@ function main() {
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `REDIR_PATH=${redirPath}`,
             `REDIR_MIN_PATH=${redirMinPath}`,
+            `DESKTOP_PATH=${desktopPath}`,
+            `DESKTOP_MIN_PATH=${desktopMinPath}`,
             'SUCCESS=true',
             `STANDARD_CHECKS=${Object.entries(checks.standard).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
-            `MINIFIED_CHECKS=${Object.entries(checks.minified).map(([name, passed]) => `${name}:${passed}`).join(',')}`
+            `MINIFIED_CHECKS=${Object.entries(checks.minified).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
+            `DESKTOP_STANDARD_CHECKS=${Object.entries(checks.desktopStandard).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
+            `DESKTOP_MINIFIED_CHECKS=${Object.entries(checks.desktopMinified).map(([name, passed]) => `${name}:${passed}`).join(',')}`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

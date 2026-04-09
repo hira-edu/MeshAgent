@@ -2641,6 +2641,10 @@ typedef struct RemoteDesktop_Ptrs
 	duk_context *ctx;
 	void *object;
 	void *MeshAgentObject;
+#ifdef WIN32
+	MeshAgentHostContainer *agent;
+	int tsid;
+#endif
 #ifdef _POSIX
 	void *kvmPipe;
 #ifdef __APPLE__
@@ -3691,16 +3695,16 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop_DomainIPC_Sink(duk_context *ctx
 }
 #endif
 
-#if defined(_LINKVM) && defined(_POSIX) && !defined(__APPLE__)
+#if defined(_LINKVM)
 void ILibDuktape_MeshAgent_RemoteDesktop_SendError(RemoteDesktop_Ptrs* ptrs, char *msg)
 {
-	int msgLen = strnlen_s(msg, 255);
+	size_t msgLen = strnlen_s(msg, 255);
 	char buffer[512];
 
 	((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_ERROR);	// Write the type
 	((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)(msgLen + 4));	// Write the size
 	memcpy_s(buffer + 4, 512 - 4, msg, msgLen);
-	ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(buffer, msgLen + 4, ptrs);
+	ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(buffer, (int)(msgLen + 4), ptrs);
 }
 #endif
 
@@ -3800,35 +3804,15 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 
 
 	duk_push_this(ctx);											// [MeshAgent]
-	agent = ILibDuktape_MeshAgent_ResolveRemoteDesktopAgent(ctx);
 	if (duk_has_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM))
 	{
 		duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM);	// [MeshAgent][RemoteDesktop]
 		duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_ptrs);
 		ptrs = (RemoteDesktop_Ptrs*)Duktape_GetBuffer(ctx, -1, NULL);
 		duk_pop(ctx);
-#ifdef WIN32
-		if (agent != NULL && ptrs != NULL && ptrs->stream != NULL)
-		{
-			int childPresent = kvm_bridge_debug_get_child_present_for_reserved(ptrs);
-			int transportActive = kvm_bridge_debug_get_transport_active_for_reserved(ptrs);
-			if (childPresent == 0 || transportActive == 0)
-			{
-				Duktape_Console_LogEx(ctx, ILibDuktape_LogType_Info1,
-					"KVM cached stream stale, rebuilding remote desktop session (child=%d transport=%d)",
-					childPresent,
-					transportActive);
-				kvm_cleanup(ptrs);
-				#ifdef _WINSERVICE
-				kvm_relay_setup(agent->exePath, agent->runningAsConsole ? NULL : agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, TSID);
-				#else
-				kvm_relay_setup(agent->exePath, NULL, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, TSID);
-				#endif
-			}
-		}
-#endif
 		return 1;
 	}
+	agent = ILibDuktape_MeshAgent_ResolveRemoteDesktopAgent(ctx);
 	if (agent == NULL)
 	{
 		duk_pop(ctx);
@@ -3850,6 +3834,10 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 	ptrs->MeshAgentObject = duk_get_heapptr(ctx, -2);
 	ptrs->ctx = ctx;
 	ptrs->object = duk_get_heapptr(ctx, -1);
+#ifdef WIN32
+	ptrs->agent = agent;
+	ptrs->tsid = TSID;
+#endif
 	ptrs->stream = ILibDuktape_DuplexStream_InitEx(ctx, ILibDuktape_MeshAgent_RemoteDesktop_WriteSink, ILibDuktape_MeshAgent_RemoteDesktop_EndSink, ILibDuktape_MeshAgent_RemoteDesktop_PauseSink, ILibDuktape_MeshAgent_RemoteDesktop_ResumeSink, ILibDuktape_MeshAgent_remoteDesktop_unshiftSink, ptrs);
 	ILibDuktape_CreateFinalizer(ctx, ILibDuktape_MeshAgent_RemoteDesktop_Finalizer);
 	ptrs->stream->readableStream->PipeHookHandler = ILibDuktape_MeshAgent_RemoteDesktop_PipeHook;
@@ -3860,7 +3848,7 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 		kvm_relay_setup(agent->exePath, agent->runningAsConsole ? NULL : agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, TSID);
 	#else
 		kvm_relay_setup(agent->exePath, NULL, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, TSID);
-	#endif	
+	#endif
 #else
 	int console_uid = 0;
 	if (duk_peval_string(ctx, "require('user-sessions').consoleUid();") == 0) { console_uid = duk_get_int(ctx, -1); }

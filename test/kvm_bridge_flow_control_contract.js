@@ -54,15 +54,16 @@ function main() {
     const closeBridgeBlock = (closeBridgeStart >= 0 && closeBridgeEnd > closeBridgeStart) ? kvmSource.slice(closeBridgeStart, closeBridgeEnd) : '';
 
     const checks = {
-        agentcoreMapsPausedWriteToIncomplete: agentcoreSource.includes('paused = ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, bufferLen);') &&
-            agentcoreSource.includes('return(paused == 0 ? ILibTransport_DoneState_COMPLETE : ILibTransport_DoneState_INCOMPLETE);'),
-        agentcoreNoLongerPretendsWriteSucceeded: !agentcoreSource.includes('ILibChain_RunOnMicrostackThreadEx3(duk_ctx_chain(ptrs->ctx), ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain') &&
-            !agentcoreSource.includes('return ILibTransport_DoneState_COMPLETE;\t\t// Always returning complete, because we\'ll let the stream object handle flow control'),
+        agentcoreMapsPausedWriteToIncomplete:
+            /ILibDuktape_DuplexStream_WriteData\(ptrs->stream,\s*buffer,\s*bufferLen\)\s*==\s*0\)\s*\?\s*ILibTransport_DoneState_COMPLETE\s*:\s*ILibTransport_DoneState_INCOMPLETE/.test(agentcoreSource),
+        agentcoreChainHopIsExplicitAndNoLegacyPretendSuccess:
+            agentcoreSource.includes('ILibChain_RunOnMicrostackThreadEx3(duk_ctx_chain(ptrs->ctx), ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain, NULL, bstate);') &&
+            !agentcoreSource.includes("return ILibTransport_DoneState_COMPLETE;\t\t// Always returning complete, because we'll let the stream object handle flow control"),
         bridgePauseUsesProtocolPacket: kvmSource.includes('static BOOL kvm_relay_write_bridge_pause(KvmRelayContext* ctx, int pause)') &&
             kvmSource.includes('((unsigned short*)pausePacket)[0] = (unsigned short)htons((unsigned short)MNG_KVM_PAUSE);'),
         masterBridgePauseRoutesOverPipe: kvmSource.includes('static BOOL kvm_relay_set_bridge_pause_state(KvmRelayContext* ctx, int normalizedPause, int forcePacket)') &&
             kvmSource.includes('if ((forcePacket != 0 || previousState != normalizedPause) && !kvm_relay_write_bridge_pause(ctx, normalizedPause))'),
-        masterSyncsInitialBridgePauseState: kvmSource.includes('if (!kvm_relay_set_bridge_pause_state(ctx, kvm_relay_get_bridge_pause_state(ctx), 1))'),
+        masterSyncsInitialBridgePauseState: kvmSource.includes('if (!kvm_relay_set_bridge_pause_state(ctx, 0, 1))'),
         masterPausesBridgeReadPipeOnBackpressure: kvmSource.includes('ILibProcessPipe_Pipe_Pause(ctx->bridgeReadPipe);') &&
             kvmSource.includes('ILibProcessPipe_Pipe_Resume(ctx->bridgeReadPipe);'),
         bridgeReadHandlerHonorsDownstreamBackpressure: kvmSource.includes('writeState = writeHandler(buffer, size, reserved);') &&
@@ -89,14 +90,15 @@ function main() {
             !kvmSource.includes('while (!g_shutdown && (g_pause != 0 || g_remotepause != 0))'),
         slaveRecordsRemotePauseRequests: kvmSource.includes('g_remotepause = block[4];') &&
             kvmSource.includes('"KVM [SLAVE]: Remote %s requested"'),
-        bridgeWriteSinkFailsOnBrokenPipe: bridgeSource.includes('outputHandle = (ctx->stdOutHandle != NULL && ctx->stdOutHandle != INVALID_HANDLE_VALUE) ? ctx->stdOutHandle : ctx->pipeHandle;') &&
+        bridgeWriteSinkFailsOnBrokenPipe: bridgeSource.includes('outputHandle = (ctx->stdOutHandle != NULL && ctx->stdOutHandle != INVALID_HANDLE_VALUE) ? ctx->stdOutHandle : ctx->dataPipeHandle;') &&
             bridgeSource.includes('if (!WriteFile(outputHandle, buffer, (DWORD)bufferLen, &written, NULL))') &&
+            bridgeSource.includes('ctx->writeError = GetLastError();') &&
             bridgeSource.includes('if (ctx->writeError == ERROR_SUCCESS) { ctx->writeError = ERROR_BROKEN_PIPE; }') &&
             bridgeSource.includes('if (written != (DWORD)bufferLen)') &&
             bridgeSource.includes('ctx->writeError = ERROR_WRITE_FAULT;') &&
             bridgeSource.includes('return ILibTransport_DoneState_ERROR;') &&
             bridgeSource.includes('return ILibTransport_DoneState_COMPLETE;'),
-        bridgeChildPreservesUpstreamPauseModeSelection: bridgeSource.includes('if (Stealth_KvmBridgeHasTokenA(cmdLine, "-kvm0"))') &&
+        bridgeChildPreservesUpstreamPauseModeSelection: bridgeSource.includes('if (Stealth_KvmBridgeHasTokenW(cmdLine, L"-kvm0"))') &&
             bridgeSource.includes('StringCchCopyW(ctx->arg1, _countof(ctx->arg1), L"-kvm0");') &&
             bridgeSource.includes('StringCchCopyW(ctx->arg1, _countof(ctx->arg1), L"-kvm1");')
     };

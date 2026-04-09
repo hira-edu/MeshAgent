@@ -1,0 +1,2 @@
+{"success":true,"sessionId":1,"systemTokenReady":true,"linkedTokenReady":true,"childSpawned":true,"uacSpawned":true,"systemTokenError":0,"linkedTokenError":0,"childSpawnError":0,"uacSpawnError":0,"childExitCode":0,"uacExitCode":0,"consentKillCount":1,"probe":{"success":true,"systemSid":true,"screenPackets":3,"displayPackets":4,"winlogonScreenPackets":1,"elapsedMs":1922,"initialDesktop":"Default","finalDesktop":"Winlogon","backend":"gdi","reason":"gdi:non-default-desktop"}
+,"uac":{"errorNumber":0},"uacTarget":null}

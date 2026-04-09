@@ -1,0 +1,8 @@
+kvm_relay_setup() called exePath=C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab\MeshService-2022.exe pipeMgr=000001BCF3D98F80 tsid=1
+kvm_relay_restart bridge check: ctx=1 prefer=1 rundll32=1 dll=1 conv1=1 conv2=1 rundll32Path=C:\WINDOWS\System32\rundll32.exe dllPath=C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+bridge spawn attempt=1/3 type=2 tsid=1 target=C:\WINDOWS\System32\rundll32.exe
+bridge spawn OK, waiting for pipe connect timeoutMs=5000
+bridge stdin pipe connected successfully after 2015 ms
+bridge stdout pipe connected successfully after 2015 ms
+bridge transport attached after 2015 ms
+{"success":true,"phase":"kvm-bridge-connect-delay-probe","sessionId":1,"requestedConnectDelayMs":2000,"bridgeDllReady":true,"chainStarted":true,"relayStarted":true,"relaySetupMs":2031,"bridgeSpawned":true,"bridgePid":29672,"bridgePacketsReady":true,"bridgePacketMs":63,"bridgeUsed":true,"fallbackUsed":false,"transportActiveAfterPacket":true,"launchAttemptCount":1,"successfulSpawnType":2,"successfulSpawnAttemptOrdinal":1,"failureCount":0,"failureStage":0,"failureError":0,"cleanupExited":true,"cleanupExitMs":62,"screenPackets":2,"displayListPackets":3,"displayInfoPackets":3,"cursorPackets":0,"picturePackets":0,"jumboPackets":0,"chainThreadWaitResult":0}

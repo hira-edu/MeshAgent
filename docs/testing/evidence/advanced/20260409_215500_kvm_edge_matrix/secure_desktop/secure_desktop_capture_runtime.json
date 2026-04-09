@@ -1,0 +1,43 @@
+﻿{
+    "success":  true,
+    "outputDir":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\docs\\testing\\evidence\\advanced\\20260409_215500_kvm_edge_matrix\\secure_desktop",
+    "exe":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\\\x64\\\\StealthLab\\\\MeshService-2022.exe",
+    "taskName":  "MeshAgentSecureDesktopRuntime_3ef4d256848b",
+    "waitSeconds":  45,
+    "sampleIntervalSeconds":  2,
+    "probeStdoutPath":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\docs\\testing\\evidence\\advanced\\20260409_215500_kvm_edge_matrix\\secure_desktop\\probe_stdout.json",
+    "probeStderrPath":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\docs\\testing\\evidence\\advanced\\20260409_215500_kvm_edge_matrix\\secure_desktop\\probe_stderr.txt",
+    "taskQueryPath":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\docs\\testing\\evidence\\advanced\\20260409_215500_kvm_edge_matrix\\secure_desktop\\task_query.txt",
+    "runtimeSamplesPath":  "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\docs\\testing\\evidence\\advanced\\20260409_215500_kvm_edge_matrix\\secure_desktop\\runtime_samples.json",
+    "probe":  {
+                  "success":  true,
+                  "sessionId":  1,
+                  "systemTokenReady":  true,
+                  "linkedTokenReady":  true,
+                  "childSpawned":  true,
+                  "uacSpawned":  true,
+                  "systemTokenError":  0,
+                  "linkedTokenError":  0,
+                  "childSpawnError":  0,
+                  "uacSpawnError":  0,
+                  "childExitCode":  0,
+                  "uacExitCode":  0,
+                  "consentKillCount":  1,
+                  "probe":  {
+                                "success":  true,
+                                "systemSid":  true,
+                                "screenPackets":  3,
+                                "displayPackets":  4,
+                                "winlogonScreenPackets":  1,
+                                "elapsedMs":  1922,
+                                "initialDesktop":  "Default",
+                                "finalDesktop":  "Winlogon",
+                                "backend":  "gdi",
+                                "reason":  "gdi:non-default-desktop"
+                            },
+                  "uac":  {
+                              "errorNumber":  0
+                          },
+                  "uacTarget":  null
+              }
+}

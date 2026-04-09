@@ -48,7 +48,8 @@ function main() {
 
     const checks = {
         opensServiceTokenForDuplication: processPipeSource.includes('OpenProcessToken(procHandle, TOKEN_DUPLICATE | TOKEN_QUERY, &token)'),
-        duplicatesPrimaryTokenMaxAllowed: processPipeSource.includes('DuplicateTokenEx(token, MAXIMUM_ALLOWED'),
+        duplicatesPrimaryTokenWithExplicitRights:
+            processPipeSource.includes('DuplicateTokenEx(token, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_SESSIONID | TOKEN_ADJUST_DEFAULT'),
         rewritesTokenSessionId: processPipeSource.includes('SetTokenInformation(userToken, (TOKEN_INFORMATION_CLASS)TokenSessionId'),
         usesSpecifiedSessionId: processPipeSource.includes('if (spawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER) { sessionId = (DWORD)(uint64_t)sid; }'),
         assignsDesktopBySpawnType: processPipeSource.includes('info.lpDesktop = (spawnType == ILibProcessPipe_SpawnTypes_WINLOGON) ? L"Winsta0\\\\Winlogon" : L"winsta0\\\\default";'),

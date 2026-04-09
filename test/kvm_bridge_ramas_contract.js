@@ -55,10 +55,14 @@ function main() {
         rotatesFromWinlogon: kvmSource.includes('case ILibProcessPipe_SpawnTypes_WINLOGON:') && kvmSource.includes('startIndex = 1;'),
         rotatesFromUser: kvmSource.includes('case ILibProcessPipe_SpawnTypes_USER:') && kvmSource.includes('startIndex = 2;'),
         usesCandidateBuilderAtRestart: kvmSource.includes('candidateCount = kvm_build_ramas_candidates(primaryType, gProcessTSID >= 0 ? 1 : 0, candidates, _countof(candidates));'),
+        bridgePrimaryPrefersWinlogon: kvmSource.includes('if (bridgeAvailable && primaryType != ILibProcessPipe_SpawnTypes_WINLOGON)') && kvmSource.includes('primaryType = ILibProcessPipe_SpawnTypes_WINLOGON;'),
+        bridgeRetainsWinlogonAcrossRestarts: kvmSource.includes('gProcessSpawnType = usedBridgePath ? ILibProcessPipe_SpawnTypes_WINLOGON :'),
         usesGuidPipeNames: kvmSource.includes('CoCreateGuid(&guid)') && kvmSource.includes('StringFromGUID2(&guid, guidText'),
-        logsAttemptSessionAndPipe: kvmSource.includes('Spawning rundll32 bridge attempt=%d/%d as %s tsid=%d pipe=%s'),
-        logsConnectedAttemptResult: kvmSource.includes('rundll32 bridge connected (attempt=%d/%d, spawnType=%s, tsid=%d, pipe=%s)'),
-        logsFailedAttemptResult: kvmSource.includes('rundll32 bridge failed to connect within timeout (error=%u, spawnType=%s, tsid=%d, pipe=%s)')
+        logsAttemptSessionAndPipe: kvmSource.includes('Spawning rundll32 KVM attempt=%d/%d as %s tsid=%d mode=%s transport=named-pipe input=%s output=%s'),
+        logsConnectedAttemptResult: kvmSource.includes('rundll32 KVM launched (attempt=%d/%d, spawnType=%s, tsid=%d)'),
+        logsFailedAttemptResult:
+            kvmSource.includes('bridge stdin connect failed (error=%u, elapsedMs=%llu, timeoutMs=%u, spawnType=%d, tsid=%d)') &&
+            kvmSource.includes('bridge stdout connect failed (error=%u, elapsedMs=%llu, timeoutMs=%u, spawnType=%d, tsid=%d)')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

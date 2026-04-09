@@ -1,0 +1,25 @@
+{
+  "desktopPath": "C:\\Users\\Workstation\\Documents\\GitHub\\MeshCentral\\public\\scripts\\agent-desktop-0.0.2.js",
+  "desktopMinPath": "C:\\Users\\Workstation\\Documents\\GitHub\\MeshCentral\\public\\scripts\\agent-desktop-0.0.2-min.js",
+  "checks": {
+    "standard": {
+      "functionLocated": true,
+      "acceptsSameSizeScreenPackets": true,
+      "updatesScreenDimensions": true,
+      "resetsPendingDrawQueue": true,
+      "refreshesCompressionHandshakeOnResize": true,
+      "sendsUnpauseOnResize": true,
+      "sendsInputLockQueryOnResize": true,
+      "firesResizeEventForAcceptedResize": true
+    },
+    "minified": {
+      "functionLocated": true,
+      "acceptsSameSizeScreenPackets": true,
+      "updatesScreenDimensions": true,
+      "resetsPendingDrawQueue": true,
+      "refreshesCompressionHandshakeOnResize": true,
+      "sendsInputLockQueryOnResize": true,
+      "firesResizeEventForAcceptedResize": true
+    }
+  }
+}

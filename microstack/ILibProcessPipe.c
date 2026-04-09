@@ -1905,23 +1905,22 @@ void ILibProcessPipe_Pipe_Resume(ILibProcessPipe_Pipe pipeObject)
 	}
 	else
 	{
+		void *chain = (p->manager != NULL) ? p->manager->ChainLink.ParentChain : NULL;
 		p->PAUSED = 0;
 		if (ILibProcessPipe_GetStateLong(&p->closeRequested) != 0) { return; }
 
-		// Overlapped Resume() can be triggered from inside the active read callback. Calling the
-		// read handler recursively in that state corrupts readOffset/totalRead accounting, so defer
-		// the resume until the current callback unwinds.
-		if (ILibProcessPipe_GetStateLong(&p->activeReadCallbacks) != 0)
+		// Overlapped Resume() must run on the owning chain thread. Calling the read state machine
+		// directly from an arbitrary control thread races readOffset/totalRead bookkeeping, and
+		// calling it from inside an active read callback re-enters the parser recursively. Defer
+		// both cases onto the chain thread so buffered data is resumed from one authoritative owner.
+		if (chain != NULL &&
+			(ILibProcessPipe_GetStateLong(&p->activeReadCallbacks) != 0 || ILibIsRunningOnChainThread(chain) == 0))
 		{
-			void *chain = (p->manager != NULL) ? p->manager->ChainLink.ParentChain : NULL;
-			if (chain != NULL)
+			if (InterlockedCompareExchange(&p->resumePending, 1, 0) == 0)
 			{
-				if (InterlockedCompareExchange(&p->resumePending, 1, 0) == 0)
-				{
-					ILibChain_RunOnMicrostackThreadEx3(chain, ILibProcessPipe_Pipe_Resume_OnChain, ILibProcessPipe_Pipe_Resume_OnChain, p);
-				}
-				return;
+				ILibChain_RunOnMicrostackThreadEx3(chain, ILibProcessPipe_Pipe_Resume_OnChain, ILibProcessPipe_Pipe_Resume_OnChain, p);
 			}
+			return;
 		}
 		ILibProcessPipe_Pipe_Resume_Continue(p);
 	}

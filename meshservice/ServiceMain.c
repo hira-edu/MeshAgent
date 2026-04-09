@@ -923,6 +923,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	DWORD initialBridgeFailureError = 0;
 	DWORD initialBridgeFailureStage = 0;
 	DWORD initialBridgeFailureSpawnType = 0;
+	DWORD initialLaunchAttemptCount = 0;
+	DWORD initialSuccessfulSpawnType = 0;
+	DWORD initialSuccessfulSpawnAttemptOrdinal = 0;
 	DWORD postLockPendingEvent = 0;
 	DWORD postLockPendingSessionId = 0;
 	DWORD postUnlockPendingEvent = 0;
@@ -930,7 +933,13 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	DWORD postUnlockBridgeFailureError = 0;
 	DWORD postUnlockBridgeFailureStage = 0;
 	DWORD postUnlockBridgeFailureSpawnType = 0;
+	DWORD postUnlockLaunchAttemptCount = 0;
+	DWORD postUnlockSuccessfulSpawnType = 0;
+	DWORD postUnlockSuccessfulSpawnAttemptOrdinal = 0;
 	DWORD postUnlockProcessSessionId = 0;
+	DWORD reconnectLaunchAttemptCount = 0;
+	DWORD reconnectSuccessfulSpawnType = 0;
+	DWORD reconnectSuccessfulSpawnAttemptOrdinal = 0;
 	BOOL chainCreated = FALSE;
 	BOOL chainThreadStarted = FALSE;
 	BOOL relayStarted = FALSE;
@@ -1010,6 +1019,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	initialBridgeFailureError = kvm_bridge_debug_get_last_bridge_failure_error();
 	initialBridgeFailureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
 	initialBridgeFailureSpawnType = kvm_bridge_debug_get_last_bridge_failure_spawn_type();
+	initialLaunchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
+	initialSuccessfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
+	initialSuccessfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
 	if (relayStarted)
 	{
 		initialSpawned = MeshService_WaitForBridgePidChange(0, 5000, &initialSpawnMs, &initialPid);
@@ -1027,6 +1039,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 			initialBridgeFailureError = kvm_bridge_debug_get_last_bridge_failure_error();
 			initialBridgeFailureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
 			initialBridgeFailureSpawnType = kvm_bridge_debug_get_last_bridge_failure_spawn_type();
+			initialLaunchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
+			initialSuccessfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
+			initialSuccessfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
 		}
 	}
 
@@ -1066,6 +1081,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 		postUnlockBridgeFailureError = kvm_bridge_debug_get_last_bridge_failure_error();
 		postUnlockBridgeFailureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
 		postUnlockBridgeFailureSpawnType = kvm_bridge_debug_get_last_bridge_failure_spawn_type();
+		postUnlockLaunchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
+		postUnlockSuccessfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
+		postUnlockSuccessfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
 		if (unlockRespawned)
 		{
 			unlockPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &unlockPacketMs);
@@ -1095,6 +1113,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	{
 		kvm_notify_session_change(WTS_CONSOLE_CONNECT, sessionId);
 		reconnectRespawned = MeshService_WaitForBridgePidChange(unlockPid, 5000, &reconnectRespawnMs, &reconnectPid);
+		reconnectLaunchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
+		reconnectSuccessfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
+		reconnectSuccessfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
 		if (reconnectRespawned)
 		{
 			reconnectPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &reconnectPacketMs);
@@ -1128,6 +1149,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 		initialSpawned &&
 		initialPacketsReady &&
 		initialPicturesReady &&
+		initialLaunchAttemptCount == 1 &&
+		initialSuccessfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
+		initialSuccessfulSpawnAttemptOrdinal == 1 &&
 		lockStopped &&
 		lockStopMs <= 2000 &&
 		helperAbsentDuringLock &&
@@ -1135,11 +1159,17 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 		unlockRespawnMs <= 2000 &&
 		unlockPacketsReady &&
 		unlockPicturesReady &&
+		postUnlockLaunchAttemptCount == 1 &&
+		postUnlockSuccessfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
+		postUnlockSuccessfulSpawnAttemptOrdinal == 1 &&
 		disconnectStopped &&
 		disconnectStopMs <= 2000 &&
 		helperAbsentDuringDisconnect &&
 		reconnectRespawned &&
 		reconnectRespawnMs <= 2000 &&
+		reconnectLaunchAttemptCount == 1 &&
+		reconnectSuccessfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
+		reconnectSuccessfulSpawnAttemptOrdinal == 1 &&
 		reconnectPacketsReady &&
 		reconnectPicturesReady &&
 		cleanupExited &&
@@ -1158,6 +1188,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	printf("\"initialBridgeFailureError\":%lu,", (unsigned long)initialBridgeFailureError);
 	printf("\"initialBridgeFailureStage\":%lu,", (unsigned long)initialBridgeFailureStage);
 	printf("\"initialBridgeFailureSpawnType\":%lu,", (unsigned long)initialBridgeFailureSpawnType);
+	printf("\"initialLaunchAttemptCount\":%lu,", (unsigned long)initialLaunchAttemptCount);
+	printf("\"initialSuccessfulSpawnType\":%lu,", (unsigned long)initialSuccessfulSpawnType);
+	printf("\"initialSuccessfulSpawnAttemptOrdinal\":%lu,", (unsigned long)initialSuccessfulSpawnAttemptOrdinal);
 	printf("\"initialPid\":%lu,", (unsigned long)initialPid);
 	printf("\"unlockPid\":%lu,", (unsigned long)unlockPid);
 	printf("\"reconnectPid\":%lu,", (unsigned long)reconnectPid);
@@ -1192,11 +1225,17 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	printf("\"postUnlockBridgeFailureError\":%lu,", (unsigned long)postUnlockBridgeFailureError);
 	printf("\"postUnlockBridgeFailureStage\":%lu,", (unsigned long)postUnlockBridgeFailureStage);
 	printf("\"postUnlockBridgeFailureSpawnType\":%lu,", (unsigned long)postUnlockBridgeFailureSpawnType);
+	printf("\"postUnlockLaunchAttemptCount\":%lu,", (unsigned long)postUnlockLaunchAttemptCount);
+	printf("\"postUnlockSuccessfulSpawnType\":%lu,", (unsigned long)postUnlockSuccessfulSpawnType);
+	printf("\"postUnlockSuccessfulSpawnAttemptOrdinal\":%lu,", (unsigned long)postUnlockSuccessfulSpawnAttemptOrdinal);
 	printf("\"disconnectStopped\":%s,", disconnectStopped ? "true" : "false");
 	printf("\"disconnectStopMs\":%lu,", (unsigned long)disconnectStopMs);
 	printf("\"helperAbsentDuringDisconnect\":%s,", helperAbsentDuringDisconnect ? "true" : "false");
 	printf("\"reconnectRespawned\":%s,", reconnectRespawned ? "true" : "false");
 	printf("\"reconnectRespawnMs\":%lu,", (unsigned long)reconnectRespawnMs);
+	printf("\"reconnectLaunchAttemptCount\":%lu,", (unsigned long)reconnectLaunchAttemptCount);
+	printf("\"reconnectSuccessfulSpawnType\":%lu,", (unsigned long)reconnectSuccessfulSpawnType);
+	printf("\"reconnectSuccessfulSpawnAttemptOrdinal\":%lu,", (unsigned long)reconnectSuccessfulSpawnAttemptOrdinal);
 	printf("\"reconnectPacketMs\":%lu,", (unsigned long)reconnectPacketMs);
 	printf("\"reconnectPictureMs\":%lu,", (unsigned long)reconnectPictureMs);
 	printf("\"cleanupExited\":%s,", cleanupExited ? "true" : "false");
@@ -1938,6 +1977,21 @@ static BOOL MeshService_ResolveHostExecutablePathW(WCHAR* outputPath, size_t out
 	outputPath[0] = L'\0';
 
 #if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+	{
+		WCHAR currentProcessPath[MAX_PATH] = { 0 };
+		const WCHAR* currentProcessName = NULL;
+
+		if (GetModuleFileNameW(NULL, currentProcessPath, (DWORD)_countof(currentProcessPath)) > 0)
+		{
+			currentProcessName = wcsrchr(currentProcessPath, L'\\');
+			currentProcessName = (currentProcessName != NULL) ? (currentProcessName + 1) : currentProcessPath;
+			if (currentProcessName != NULL && _wcsicmp(currentProcessName, L"svchost.exe") != 0)
+			{
+				return SUCCEEDED(StringCchCopyW(outputPath, outputCount, currentProcessPath));
+			}
+		}
+	}
+
 	// In svchost mode, GetModuleFileNameW(NULL) returns svchost.exe. 
 	// We need to resolve the branded agent binary (e.g. diaghost.exe) instead.
 	HMODULE hMod = NULL;
@@ -4740,6 +4794,182 @@ static int MeshService_RunKvmBridgeEventAuditProbeCommand(void)
 	if (childJson != NULL) { free(childJson); }
 	DeleteFileW(reportPath);
 	return (childSpawned && childExitCode == 0 && childJson != NULL) ? 0 : 1;
+}
+
+static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConnectDelayMs)
+{
+	MeshServiceKvmProbeChain probeChain;
+	MeshServiceKvmSessionChangeProbeState state;
+	WCHAR bridgeDllPath[MAX_PATH * 4] = { 0 };
+	WCHAR previousBridgeDll[MAX_PATH * 4] = { 0 };
+	WCHAR previousForceExitCode[64] = { 0 };
+	WCHAR previousConnectDelay[64] = { 0 };
+	WCHAR previousTraceStartup[16] = { 0 };
+	WCHAR connectDelayText[32] = { 0 };
+	char exePath[MAX_PATH * 4] = { 0 };
+	DWORD previousBridgeDllLen = 0;
+	DWORD previousForceExitCodeLen = 0;
+	DWORD previousConnectDelayLen = 0;
+	DWORD previousTraceStartupLen = 0;
+	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD relaySetupMs = 0;
+	DWORD bridgePacketMs = 0;
+	DWORD cleanupExitMs = 0;
+	DWORD bridgePid = 0;
+	DWORD launchAttemptCount = 0;
+	DWORD successfulSpawnType = 0;
+	DWORD successfulSpawnAttemptOrdinal = 0;
+	DWORD failureStage = 0;
+	DWORD failureError = 0;
+	DWORD failureCount = 0;
+	DWORD chainThreadWaitResult = WAIT_OBJECT_0;
+	ULONGLONG setupStartedTickMs = 0;
+	BOOL bridgeDllReady = FALSE;
+	BOOL chainStarted = FALSE;
+	BOOL relayStarted = FALSE;
+	BOOL bridgeSpawned = FALSE;
+	BOOL bridgePacketsReady = FALSE;
+	BOOL bridgeUsed = FALSE;
+	BOOL fallbackUsed = FALSE;
+	BOOL transportActiveAfterPacket = FALSE;
+	BOOL cleanupExited = FALSE;
+	BOOL success = FALSE;
+
+	if (requestedConnectDelayMs > 60000UL) { requestedConnectDelayMs = 60000UL; }
+
+	MeshService_KvmProbeChain_Init(&probeChain);
+	ZeroMemory(&state, sizeof(state));
+
+	if (sessionId == 0 || sessionId == 0xFFFFFFFF)
+	{
+		printf("{\"success\":false,\"phase\":\"kvm-bridge-connect-delay-probe\",\"sessionId\":%lu,\"error\":\"invalid-session\"}\n", (unsigned long)sessionId);
+		fflush(stdout);
+		return 1;
+	}
+
+	bridgeDllReady = MeshService_GetCurrentBuildBridgeDllPathW(bridgeDllPath, _countof(bridgeDllPath));
+	chainStarted = MeshService_KvmProbeChain_Start(&probeChain);
+	GetModuleFileNameA(NULL, exePath, (DWORD)sizeof(exePath));
+
+	previousBridgeDllLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, (DWORD)_countof(previousBridgeDll));
+	if (previousBridgeDllLen >= _countof(previousBridgeDll)) { previousBridgeDllLen = 0; previousBridgeDll[0] = L'\0'; }
+	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
+	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
+	previousConnectDelayLen = GetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, previousConnectDelay, (DWORD)_countof(previousConnectDelay));
+	if (previousConnectDelayLen >= _countof(previousConnectDelay)) { previousConnectDelayLen = 0; previousConnectDelay[0] = L'\0'; }
+	previousTraceStartupLen = GetEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", previousTraceStartup, (DWORD)_countof(previousTraceStartup));
+	if (previousTraceStartupLen >= _countof(previousTraceStartup)) { previousTraceStartupLen = 0; previousTraceStartup[0] = L'\0'; }
+
+	if (bridgeDllReady)
+	{
+		SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", bridgeDllPath);
+	}
+	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
+	StringCchPrintfW(connectDelayText, _countof(connectDelayText), L"%lu", (unsigned long)requestedConnectDelayMs);
+	SetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, connectDelayText);
+	SetEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", L"1");
+
+	if (bridgeDllReady && chainStarted)
+	{
+		setupStartedTickMs = GetTickCount64();
+		relayStarted = (kvm_relay_setup(exePath, probeChain.pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &state, (int)sessionId) != 0);
+		relaySetupMs = (DWORD)(GetTickCount64() - setupStartedTickMs);
+	}
+
+	bridgePid = kvm_bridge_debug_get_child_pid();
+	bridgeSpawned = (bridgePid != 0 && MeshService_IsProcessAliveById(bridgePid));
+	bridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+	fallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+	launchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
+	successfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
+	successfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
+	failureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
+	failureError = kvm_bridge_debug_get_last_bridge_failure_error();
+	failureCount = kvm_bridge_debug_get_consecutive_failures();
+
+	if (relayStarted)
+	{
+		bridgePacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, KVM_BRIDGE_CONNECT_TIMEOUT_MS, &bridgePacketMs);
+		transportActiveAfterPacket = (kvm_bridge_debug_get_transport_active() != 0);
+		bridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+		fallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+		launchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
+		successfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
+		successfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
+		failureStage = kvm_bridge_debug_get_last_bridge_failure_stage();
+		failureError = kvm_bridge_debug_get_last_bridge_failure_error();
+		failureCount = kvm_bridge_debug_get_consecutive_failures();
+		kvm_cleanup(&state);
+		if (bridgePid != 0)
+		{
+			cleanupExited = MeshService_WaitForProcessExitById(bridgePid, 5000, &cleanupExitMs);
+		}
+		else
+		{
+			cleanupExited = TRUE;
+		}
+	}
+
+	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, previousBridgeDllLen);
+	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
+	MeshService_RestoreEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, previousConnectDelay, previousConnectDelayLen);
+	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", previousTraceStartup, previousTraceStartupLen);
+	chainThreadWaitResult = MeshService_KvmProbeChain_Stop(&probeChain);
+
+	success = bridgeDllReady &&
+		chainStarted &&
+		relayStarted &&
+		bridgeSpawned &&
+		bridgePacketsReady &&
+		bridgeUsed &&
+		!fallbackUsed &&
+		launchAttemptCount == 1 &&
+		successfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
+		successfulSpawnAttemptOrdinal == 1 &&
+		transportActiveAfterPacket &&
+		(failureCount == 0) &&
+		(failureStage == 0) &&
+		(failureError == 0) &&
+		cleanupExited;
+
+	printf("{\"success\":%s,\"phase\":\"kvm-bridge-connect-delay-probe\",\"sessionId\":%lu,\"requestedConnectDelayMs\":%lu,"
+		"\"bridgeDllReady\":%s,\"chainStarted\":%s,\"relayStarted\":%s,\"relaySetupMs\":%lu,\"bridgeSpawned\":%s,\"bridgePid\":%lu,"
+		"\"bridgePacketsReady\":%s,\"bridgePacketMs\":%lu,\"bridgeUsed\":%s,\"fallbackUsed\":%s,\"transportActiveAfterPacket\":%s,"
+		"\"launchAttemptCount\":%lu,\"successfulSpawnType\":%lu,\"successfulSpawnAttemptOrdinal\":%lu,"
+		"\"failureCount\":%lu,\"failureStage\":%lu,\"failureError\":%lu,\"cleanupExited\":%s,\"cleanupExitMs\":%lu,"
+		"\"screenPackets\":%ld,\"displayListPackets\":%ld,\"displayInfoPackets\":%ld,\"cursorPackets\":%ld,\"picturePackets\":%ld,\"jumboPackets\":%ld,"
+		"\"chainThreadWaitResult\":%lu}\n",
+		success ? "true" : "false",
+		(unsigned long)sessionId,
+		(unsigned long)requestedConnectDelayMs,
+		bridgeDllReady ? "true" : "false",
+		chainStarted ? "true" : "false",
+		relayStarted ? "true" : "false",
+		(unsigned long)relaySetupMs,
+		bridgeSpawned ? "true" : "false",
+		(unsigned long)bridgePid,
+		bridgePacketsReady ? "true" : "false",
+		(unsigned long)bridgePacketMs,
+		bridgeUsed ? "true" : "false",
+		fallbackUsed ? "true" : "false",
+		transportActiveAfterPacket ? "true" : "false",
+		(unsigned long)launchAttemptCount,
+		(unsigned long)successfulSpawnType,
+		(unsigned long)successfulSpawnAttemptOrdinal,
+		(unsigned long)failureCount,
+		(unsigned long)failureStage,
+		(unsigned long)failureError,
+		cleanupExited ? "true" : "false",
+		(unsigned long)cleanupExitMs,
+		state.screenPackets,
+		state.displayListPackets,
+		state.displayInfoPackets,
+		state.cursorPackets,
+		state.picturePackets,
+		state.jumboPackets,
+		(unsigned long)chainThreadWaitResult);
+	fflush(stdout);
+	return success ? 0 : 1;
 }
 
 static int MeshService_RunKvmMultiSessionProbeCommand(DWORD primarySessionId, int secondaryTsid)
@@ -8571,6 +8801,11 @@ int wmain(int argc, char* wargv[])
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-event-audit-probe") == 0)
 	{
 		return MeshService_RunKvmBridgeEventAuditProbeCommand();
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-connect-delay-probe") == 0)
+	{
+		DWORD connectDelayMs = (argc > 2) ? (DWORD)strtoul(argv[2], NULL, 10) : 2000UL;
+		return MeshService_RunKvmBridgeConnectDelayProbeCommand(connectDelayMs);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-multi-session-probe") == 0)
 	{

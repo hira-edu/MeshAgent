@@ -498,6 +498,11 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
             evidenceDir: path.join(phaseDir, 'multiplex_contract')
         },
         {
+            name: 'meshcentral-desktop-reconnect-runtime',
+            script: path.join(REPO_ROOT, 'test', 'meshcentral_desktop_reconnect_runtime.js'),
+            evidenceDir: path.join(phaseDir, 'reconnect_runtime')
+        },
+        {
             name: 'meshcentral-location-guard-contract',
             script: path.join(REPO_ROOT, 'test', 'meshcentral_meshagent_location_guard_contract.js'),
             evidenceDir: path.join(phaseDir, 'location_guard_contract')

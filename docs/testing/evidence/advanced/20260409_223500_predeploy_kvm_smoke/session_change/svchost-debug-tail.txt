@@ -1,0 +1,120 @@
+[2026-04-09 22:26:55.256] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:26:55.256] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:26:55.258] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_EAF792A1FD0C435BB47107C0B76E385D_in output=\\.\pipe\MeshKvm_EAF792A1FD0C435BB47107C0B76E385D_out)
+[2026-04-09 22:26:55.259] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:26:55.259] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:26:55.259] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:26:55.259] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:26:55.647] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:26:55.648] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:26:55.648] branding binary name resolved: diaghost.exe
+[2026-04-09 22:26:55.648] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:26:55.649] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:26:55.650] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_436403F96D3A46EC8AC48269CC8FD8CC_in output=\\.\pipe\MeshKvm_436403F96D3A46EC8AC48269CC8FD8CC_out)
+[2026-04-09 22:26:55.651] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:26:55.651] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:26:55.651] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:26:55.651] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:26:55.651] KvmSessionBridgeW forced exit after bridge attach (code=193)
+[2026-04-09 22:27:00.562] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:27:00.562] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:27:00.563] branding binary name resolved: diaghost.exe
+[2026-04-09 22:27:00.563] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:27:00.563] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:27:00.568] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_21624_1775755620551_auto_in output=\\.\pipe\MeshKvm_21624_1775755620551_auto_out)
+[2026-04-09 22:27:00.568] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:27:00.568] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:27:00.568] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:27:00.568] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:27:01.503] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:27:01.503] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:27:01.505] branding binary name resolved: diaghost.exe
+[2026-04-09 22:27:01.505] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:27:01.505] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:27:01.509] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_21624_1775755621491_gdi_in output=\\.\pipe\MeshKvm_21624_1775755621491_gdi_out)
+[2026-04-09 22:27:01.509] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:27:01.509] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:27:01.509] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:27:01.509] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:27:02.285] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:27:02.285] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:27:02.286] branding binary name resolved: diaghost.exe
+[2026-04-09 22:27:02.286] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:27:02.286] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:27:02.291] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_21624_1775755622274_dxgi_in output=\\.\pipe\MeshKvm_21624_1775755622274_dxgi_out)
+[2026-04-09 22:27:02.291] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:27:02.291] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:27:02.291] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:27:02.291] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:27:03.166] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:27:03.166] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:27:03.167] branding binary name resolved: diaghost.exe
+[2026-04-09 22:27:03.168] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:27:03.168] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:27:03.172] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_21624_1775755623155_wgc_in output=\\.\pipe\MeshKvm_21624_1775755623155_wgc_out)
+[2026-04-09 22:27:03.172] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:27:03.172] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:27:03.172] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:27:03.172] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:27:12.173] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:27:12.173] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:27:12.174] branding binary name resolved: diaghost.exe
+[2026-04-09 22:27:12.174] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:27:12.174] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:27:12.175] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_27036_1775755632160_in output=\\.\pipe\MeshKvm_27036_1775755632160_out)
+[2026-04-09 22:27:12.175] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:27:12.175] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:27:12.175] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:27:12.175] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:27:21.250] KvmSessionBridgeW mainloop exited (threadExitCode=0 readError=0 writeError=0)
+[2026-04-09 22:34:41.459] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:34:41.459] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:34:41.460] branding binary name resolved: diaghost.exe
+[2026-04-09 22:34:41.460] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:34:41.460] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:34:41.461] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_14560_1775756081447_in output=\\.\pipe\MeshKvm_14560_1775756081447_out)
+[2026-04-09 22:34:41.461] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:34:41.461] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:34:41.461] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:34:41.461] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:34:50.535] KvmSessionBridgeW mainloop exited (threadExitCode=0 readError=0 writeError=0)
+[2026-04-09 22:44:27.257] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:44:27.257] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:44:27.258] branding binary name resolved: diaghost.exe
+[2026-04-09 22:44:27.258] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:44:27.258] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:44:27.258] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_30592_1775756667244_in output=\\.\pipe\MeshKvm_30592_1775756667244_out)
+[2026-04-09 22:44:27.259] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:44:27.259] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:44:27.259] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:44:27.259] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:44:27.368] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:44:27.368] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:44:27.369] branding binary name resolved: diaghost.exe
+[2026-04-09 22:44:27.369] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:44:27.369] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:44:27.374] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_E425FBD96A6841B68E51790AA9B15F6D_in output=\\.\pipe\MeshKvm_E425FBD96A6841B68E51790AA9B15F6D_out)
+[2026-04-09 22:44:27.374] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:44:27.375] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:44:27.375] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:44:27.375] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:44:28.258] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:44:28.258] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:44:28.259] branding binary name resolved: diaghost.exe
+[2026-04-09 22:44:28.259] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:44:28.259] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:44:28.261] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_2B495CAE75264DD0A4B00B472F83E384_in output=\\.\pipe\MeshKvm_2B495CAE75264DD0A4B00B472F83E384_out)
+[2026-04-09 22:44:28.261] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:44:28.261] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:44:28.261] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:44:28.262] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
+[2026-04-09 22:44:29.151] module path: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
+[2026-04-09 22:44:29.151] install directory: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL
+[2026-04-09 22:44:29.152] branding binary name resolved: diaghost.exe
+[2026-04-09 22:44:29.152] helper candidate: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe (exists=0)
+[2026-04-09 22:44:29.152] helper pending provisioning: C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\diaghost.exe
+[2026-04-09 22:44:29.155] KvmSessionBridgeW starting (input=\\.\pipe\MeshKvm_F6065C76D25E4D4888F95F4984C79C60_in output=\\.\pipe\MeshKvm_F6065C76D25E4D4888F95F4984C79C60_out)
+[2026-04-09 22:44:29.155] KvmSessionBridgeW waiting for pipes (timeout=5000 ms)
+[2026-04-09 22:44:29.155] KvmSessionBridgeW control pipe connected after 0 ms
+[2026-04-09 22:44:29.155] KvmSessionBridgeW data pipe connected after 0 ms
+[2026-04-09 22:44:29.155] KvmSessionBridgeW launching mainloop argc=2 argv0=[C:\WINDOWS\System32\rundll32.exe] argv1=[-kvm1] useNamedPipe=1
