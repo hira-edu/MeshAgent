@@ -88,15 +88,13 @@ var umhctlControlOpMap = {
     injectall: 'injectAll',
     telemetry: 'telemetry',
     repair: 'repair',
-    setflags: 'setFlags',
-    disable: 'disable',
-    disableall: 'disableAll',
     setpolicy: 'setPolicy',
     setconfig: 'setConfig',
     profileprocess: 'profileProcess',
-    getinjectionstate: 'getInjectionState',
-    registerprotectedpid: 'registerProtectedPid',
-    unregisterprotectedpid: 'unregisterProtectedPid',
+    hookprofile: 'hookProfile',
+    methodpolicy: 'methodPolicy',
+    safetystate: 'safetyState',
+    securityboundary: 'securityBoundary',
     injecttargetset: 'injectTargetSet',
     cleartargetscope: 'clearTargetScope',
     lockdownbypass: 'lockdownBypass',
@@ -117,13 +115,8 @@ var umhctlStateChangingOps = {
     injectall: 1,
     telemetry: 1,
     repair: 1,
-    setflags: 1,
-    disable: 1,
-    disableall: 1,
     setpolicy: 1,
     setconfig: 1,
-    registerprotectedpid: 1,
-    unregisterprotectedpid: 1,
     injecttargetset: 1,
     cleartargetscope: 1,
     lockdownbypass: 1,
@@ -138,7 +131,7 @@ var umhctlFlowContextBySession = {};
 var umhctlFlowContextMaxAgeMs = 900000;
 var umhctlDefaultFlowContract = {
     protocol: 'umh-control',
-    contractVersion: '2026-03-07',
+    contractVersion: '2026-03-05',
     flowProfile: 'report-driven-lockdown-v1',
     requiredHeaders: [
         'x-umh-contract-version',
@@ -2044,20 +2037,30 @@ function umhctlSendUiSnapshot(sessionid, requestedPid)
                 else if (parsed.data != null) { parsedConfig = parsed.data; }
                 if (parsedConfig != null) { snapshot.data.config_parsed = parsedConfig; }
             }
+        },
+        {
+            key: 'safety_state',
+            req: { op: 'safetyState' },
+            assign: function (parsed) { snapshot.data.safety_state = parsed.data; }
         }
     ];
 
     if (requestedPid != null)
     {
         jobs.push({
-            key: 'injection_state',
-            req: { op: 'getInjectionState', pid: requestedPid },
-            assign: function (parsed) { snapshot.data.injection_state = parsed.data; }
-        });
-        jobs.push({
             key: 'process_profile',
             req: { op: 'profileProcess', pid: requestedPid },
             assign: function (parsed) { snapshot.data.process_profile = parsed.data; }
+        });
+        jobs.push({
+            key: 'method_policy',
+            req: { op: 'methodPolicy', pid: requestedPid },
+            assign: function (parsed) { snapshot.data.method_policy = parsed.data; }
+        });
+        jobs.push({
+            key: 'security_boundary',
+            req: { op: 'securityBoundary', pid: requestedPid },
+            assign: function (parsed) { snapshot.data.security_boundary = parsed.data; }
         });
     }
 
@@ -2166,31 +2169,27 @@ function umhctlBuildHelp(agentDir, msExePath)
 {
     return 'umhctl - MasterService control\r\n\r\n'
         + 'Lifecycle:\r\n'
-        + '  umhctl install [--url <url>] [--pin <sha384>]\r\n'
+        + '  umhctl install [--url <url>] [--pin <sha384>] [--insecure]\r\n'
         + '  umhctl uninstall\r\n'
         + '  umhctl status --service\r\n'
         + '  umhctl verify\r\n\r\n'
         + 'Control pipe - query:\r\n'
         + '  umhctl status | listProcesses | getFlowContract | getCapabilities\r\n'
-        + '  umhctl getPolicy | getConfig\r\n'
+        + '  umhctl getPolicy | getConfig | safetyState\r\n'
         + '  umhctl uiSnapshot [--pid <pid>]\r\n'
-        + '  umhctl getInjectionState [--pid <pid>]\r\n'
-        + '  umhctl profileProcess --pid <pid>\r\n\r\n'
+        + '  umhctl profileProcess --pid <pid>\r\n'
+        + '  umhctl methodPolicy [--pid <pid>]\r\n'
+        + '  umhctl hookProfile --target <tag> [--exe <path>]\r\n'
+        + '  umhctl securityBoundary [--pid <pid>] [--target <tag>]\r\n\r\n'
         + 'Control pipe - mutation:\r\n'
         + '  umhctl inject --pid <pid> [--method <m>] [--technique <t>]\r\n'
         + '  umhctl injectTargetSet --pids <csv> [--run-id <id>] [--target-tag <tag>] [--method-key <key>]\r\n'
         + '  umhctl injectAll\r\n'
         + '  umhctl telemetry --pid <pid>\r\n'
         + '  umhctl repair --pid <pid>\r\n'
-        + '  umhctl setFlags [--pid <pid>] --flags <json>\r\n'
-        + '  umhctl disable --pid <pid>\r\n'
-        + '  umhctl disableAll\r\n'
         + '  umhctl setPolicy --policy <json>\r\n'
         + '  umhctl setConfig --content <json-or-text>\r\n'
         + '  umhctl clearTargetScope\r\n\r\n'
-        + 'Target-scoped:\r\n'
-        + '  umhctl registerProtectedPid --pid <pid> [--reason <text>]\r\n'
-        + '  umhctl unregisterProtectedPid --pid <pid>\r\n\r\n'
         + 'Bypass:\r\n'
         + '  umhctl ipcBypass --action <list-targets|status|disable|enable> [--target <adapter>] [--domain <screen|input|network|process|all>]\r\n'
         + '  umhctl lockdownBypass --action <status|apply|apply-harness|revert|revert-harness>\r\n'
@@ -2967,10 +2966,6 @@ function umhctlBuildControlRequest(subcmdOp, args)
         delete controlReq.pid;
     }
 
-    if (opKey == 'setflags' && controlReq.flags == null)
-    {
-        return { response: 'umhctl setFlags requires --flags <json>.' };
-    }
     if (opKey == 'setpolicy' && (typeof controlReq.policy != 'string' || controlReq.policy.trim().length == 0))
     {
         return { response: 'umhctl setPolicy requires --policy <json>.' };

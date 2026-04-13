@@ -181,8 +181,10 @@ function runUiSnapshotChecks(results, sandbox, meshAgentStub) {
             listProcesses: { ok: true, data: [{ pid: 4242, name: 'examclient.exe' }] },
             getPolicy: { ok: true, data: { lockdown: false } },
             getConfig: { ok: true, data: '{"capture":"dxgi"}' },
-            getInjectionState: { ok: true, data: { pid: 4242, state: 'ready' } },
-            profileProcess: { ok: true, data: { pid: 4242, profile: 'exam-client' } }
+            safetyState: { ok: true, data: { active_scope: false } },
+            profileProcess: { ok: true, data: { pid: 4242, profile: 'exam-client' } },
+            methodPolicy: { ok: true, data: { effective_order: ['standard'] } },
+            securityBoundary: { ok: true, data: { role: 'browser-main' } }
         };
         callback(null, responses[requestObj.op], JSON.stringify(responses[requestObj.op]));
     };
@@ -192,7 +194,7 @@ function runUiSnapshotChecks(results, sandbox, meshAgentStub) {
     const snapshotMessage = messages.filter((entry) => entry.startsWith('umhctl uiSnapshot:\r\n')).pop();
     assert(snapshotMessage, 'uiSnapshot output missing');
     const snapshot = JSON.parse(snapshotMessage.replace('umhctl uiSnapshot:\r\n', ''));
-    for (const key of ['status', 'flow_contract', 'capabilities', 'processes', 'policy', 'config', 'injection_state', 'process_profile']) {
+    for (const key of ['status', 'flow_contract', 'capabilities', 'processes', 'policy', 'config', 'safety_state', 'process_profile', 'method_policy', 'security_boundary']) {
         assert(Object.prototype.hasOwnProperty.call(snapshot.meta.sections, key), `uiSnapshot missing section: ${key}`);
     }
     results.push({ name: 'ui-snapshot-shape', ok: true, sections: Object.keys(snapshot.meta.sections) });

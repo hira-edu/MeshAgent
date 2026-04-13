@@ -5,6 +5,8 @@
 Related operational SSOT:
 
 - `docs/REPO_SYNC_AND_DEPLOYMENT_PLAN.md` for cross-repo keep-set, sync hygiene, branch policy, and combined release order across `MeshAgent`, `MeshCentral`, and `UserModeHook`.
+- `docs/UMH_CONTROL_SISTER_REPO_SSOT.md` for the agent-side `umhctl` contract and sister-repo update rules.
+- `docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md` for the current MeshAgent-side UMH deployment assumptions and recorded cross-repo drift.
 
 ## Server Infrastructure
 
@@ -195,6 +197,13 @@ Publish contract for MeshAgent packages:
 
 MasterService.exe is published for UMH operator workflows, but it is not part of the MeshAgent package shape and it is not staged beside MeshAgent binaries for install/update/uninstall.
 
+Operator-surface authority note:
+
+- this section documents the MeshAgent-side `umhctl` operator layer
+- it does not claim that the native `UserModeHook` CLI exposes identical text commands
+- `docs/UMH_CONTROL_SISTER_REPO_SSOT.md` is authoritative for the split between the MeshAgent operator layer, MeshCentral UI emitters, and the native `UserModeHook` surface
+- the current operator-layer default header version in this repo is `2026-03-05`, which now matches the current `UserModeHook` hard-fail version recorded in `docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md`
+
 ### How It Works
 
 1. `deploy.py stage` uploads `MasterService.exe` (from `../UserModeHook/build-fresh/bin/Release/`) to the server staging area
@@ -217,16 +226,23 @@ The MeshAgent's RecoveryCore.js includes a built-in `umhctl` command for managin
 | `umhctl status` | Sends `{"op":"status"}` to UMH control pipe |
 | `umhctl status --service` | Runs `MasterService.exe --status --output json` |
 | `umhctl listProcesses` | Sends `{"op":"listProcesses"}` to control pipe |
+| `umhctl getFlowContract` / `getCapabilities` | Sends control-contract and capability queries to the control pipe |
+| `umhctl getPolicy` / `getConfig` | Sends read-only policy/config queries to the control pipe |
+| `umhctl uiSnapshot [--pid <pid>]` | Aggregates the retained read-only UMH snapshot sections |
+| `umhctl profileProcess --pid <pid>` | Sends `{"op":"profileProcess"}` to the control pipe |
+| `umhctl methodPolicy [--pid <pid>]` | Sends `{"op":"methodPolicy"}` to the control pipe |
+| `umhctl safetyState` | Sends `{"op":"safetyState"}` to the control pipe |
+| `umhctl hookProfile --target <tag> [--exe <path>]` | Sends `{"op":"hookProfile"}` to the control pipe |
+| `umhctl securityBoundary [--pid <pid>] [--target <tag>]` | Sends `{"op":"securityBoundary"}` to the control pipe |
 | `umhctl inject --pid <pid> [--method <m>] [--technique <t>]` | Sends inject request to control pipe |
 | `umhctl injectAll` | Sends `{"op":"injectAll"}` to control pipe |
 | `umhctl telemetry` | Sends `{"op":"telemetry"}` to control pipe |
 | `umhctl repair` | Sends `{"op":"repair"}` to control pipe |
-| `umhctl setFlags` | Sends `{"op":"setFlags"}` to control pipe (use `--json` for payload fields) |
-| `umhctl disable` | Sends `{"op":"disable"}` to control pipe |
-| `umhctl disableAll` | Sends `{"op":"disableAll"}` to control pipe |
-| `umhctl getPolicy` / `setPolicy` | Sends policy get/set operations to control pipe |
-| `umhctl getConfig` / `setConfig` | Sends config get/set operations to control pipe |
+| `umhctl injectTargetSet --pids <csv> [--run-id <id>] [--target-tag <tag>] [--method-key <key>]` | Sets the active target scope in the control pipe |
+| `umhctl clearTargetScope` | Clears the active target scope |
+| `umhctl setPolicy` / `setConfig` | Sends the retained write-policy/config operations to the control pipe |
 | `umhctl lockdownBypass` / `examsoftBypass` | Sends bypass operations to control pipe |
+| `umhctl ipcBypass` | Sends IPC bypass operations to the control pipe |
 | `umhctl --json "<json>"` | Sends raw JSON request directly to control pipe |
 | `umhctl help` | Lists commands and runtime paths |
 
@@ -245,6 +261,22 @@ The `custom.js` script (deployed to MeshCentral) adds preset buttons to the Run 
 - **UMH Uninstall** — sends `umhctl uninstall`
 - **UMH Help** — sends `umhctl help`
 
+The curated live UI subset also exposes retained query/mutation buttons for:
+
+- `listProcesses`
+- `getFlowContract`
+- `getCapabilities`
+- `safetyState`
+- `profileProcess`
+- `methodPolicy`
+- `securityBoundary`
+- `inject`
+- `injectAll`
+- `clearTargetScope`
+- `lockdownBypass`
+- `examsoftBypass`
+- `ipcBypass`
+
 These replace the previous 62+ PowerShell download-and-run buttons with simple agent console commands.
 
 ### Deploy Workflow
@@ -253,8 +285,9 @@ These replace the previous 62+ PowerShell download-and-run buttons with simple a
 1. Build MasterService in VS (from UserModeHook repo)
 2. python deploy.py stage           → uploads MasterService.exe and MeshAgent artifacts to staging
 3. python deploy.py deploy          → deploys MeshAgent to agent publish dirs and MasterService.exe to userfiles/
-4. python deploy-server.py push --file "public/scripts/custom.js"  → deploys UI buttons
-5. Test: open agent console → type "umhctl install"
+4. realign/update the local `MeshCentral` live mirror before changing any UMH UI surface
+5. record the same change in the MeshCentral and UserModeHook sister ledgers
+6. test the deployed path from the agent console with `umhctl install`
 ```
 
 ---
@@ -264,11 +297,14 @@ These replace the previous 62+ PowerShell download-and-run buttons with simple a
 ### Overview
 
 MeshCentral v1.1.56 is installed via npm at `/opt/meshcentral/node_modules/meshcentral/`.
-Server-side customizations (views, modules, scripts) are tracked in a local working copy at `meshcentral-server/` and deployed via `deploy-server.py`.
+As of the 2026-04-13 realignment, the local `MeshCentral` repo is treated as a mirror of the live VPS module tree plus selected live overrides, not as an authoritative source checkout with guaranteed local-only deployment tooling.
 
 ### MeshCentral Local Repo
 
-The MeshCentral repo at `C:\Users\Workstation\Documents\GitHub\MeshCentral` is a git clone of `Ylianst/MeshCentral` with customizations synced from the live server. The `deploy-server.py` tool lives in this repo.
+The MeshCentral repo at `C:\Users\Workstation\Documents\GitHub\MeshCentral` is now a live mirror workspace for the deployed VPS state. See:
+
+- `C:\Users\Workstation\Documents\GitHub\MeshCentral\docs\UMH_CONTROL_SISTER_REPO_SSOT.md`
+- `C:\Users\Workstation\Documents\GitHub\MeshCentral\docs\UMH_CONTROL_DEPLOYMENT_LEDGER.md`
 
 ### Tracked File Mapping
 

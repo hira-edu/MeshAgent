@@ -18,15 +18,13 @@
         injectall: 'injectAll',
         telemetry: 'telemetry',
         repair: 'repair',
-        setflags: 'setFlags',
-        disable: 'disable',
-        disableall: 'disableAll',
         setpolicy: 'setPolicy',
         setconfig: 'setConfig',
         profileprocess: 'profileProcess',
-        getinjectionstate: 'getInjectionState',
-        registerprotectedpid: 'registerProtectedPid',
-        unregisterprotectedpid: 'unregisterProtectedPid',
+        hookprofile: 'hookProfile',
+        methodpolicy: 'methodPolicy',
+        safetystate: 'safetyState',
+        securityboundary: 'securityBoundary',
         injecttargetset: 'injectTargetSet',
         cleartargetscope: 'clearTargetScope',
         lockdownbypass: 'lockdownBypass',
@@ -49,13 +47,8 @@
         injectall: 1,
         telemetry: 1,
         repair: 1,
-        setflags: 1,
-        disable: 1,
-        disableall: 1,
         setpolicy: 1,
         setconfig: 1,
-        registerprotectedpid: 1,
-        unregisterprotectedpid: 1,
         injecttargetset: 1,
         cleartargetscope: 1,
         lockdownbypass: 1,
@@ -67,7 +60,7 @@
 
     var defaultFlowContract = {
         protocol: 'umh-control',
-        contractVersion: '2026-03-07',
+        contractVersion: '2026-03-05',
         flowProfile: 'report-driven-lockdown-v1',
         requiredHeaders: [
             'x-umh-contract-version',
@@ -102,21 +95,19 @@
         'getPolicy',
         'getConfig',
         'uiSnapshot',
-        'getInjectionState',
         'profileProcess',
+        'methodPolicy',
+        'safetyState',
+        'hookProfile',
+        'securityBoundary',
         'inject',
         'injectTargetSet',
         'injectAll',
         'telemetry',
         'repair',
-        'setFlags',
-        'disable',
-        'disableAll',
         'setPolicy',
         'setConfig',
         'clearTargetScope',
-        'registerProtectedPid',
-        'unregisterProtectedPid',
         'ipcBypass',
         'lockdownBypass',
         'examsoftBypass'
@@ -326,18 +317,6 @@
                 meta: { sections: { status: { ok: true }, flow_contract: { ok: true } } }
             }
         },
-        getInjectionState: {
-            id: 'getInjectionState',
-            category: 'query',
-            command: 'getInjectionState',
-            renderMode: 'control-json',
-            controlOp: 'getInjectionState',
-            fields: [
-                { name: 'pid', flag: '--pid', type: 'number' }
-            ],
-            sampleInput: { pid: 4242 },
-            sampleResponse: { ok: true, data: { pid: 4242, state: 'ready' } }
-        },
         profileProcess: {
             id: 'profileProcess',
             category: 'query',
@@ -349,6 +328,54 @@
             ],
             sampleInput: { pid: 4242 },
             sampleResponse: { ok: true, data: { pid: 4242, profile: 'exam-client' } }
+        },
+        methodPolicy: {
+            id: 'methodPolicy',
+            category: 'query',
+            command: 'methodPolicy',
+            renderMode: 'control-json',
+            controlOp: 'methodPolicy',
+            fields: [
+                { name: 'pid', flag: '--pid', type: 'number' }
+            ],
+            sampleInput: { pid: 4242 },
+            sampleResponse: { ok: true, data: { default_order_resolved: true, effective_order: ['standard'], methods: [{ key: 'standard', allowed: true }] } }
+        },
+        safetyState: {
+            id: 'safetyState',
+            category: 'query',
+            command: 'safetyState',
+            renderMode: 'control-json',
+            controlOp: 'safetyState',
+            fields: [],
+            sampleInput: {},
+            sampleResponse: { ok: true, data: { active_scope: false, destructive_controls_supported: false } }
+        },
+        hookProfile: {
+            id: 'hookProfile',
+            category: 'query',
+            command: 'hookProfile',
+            renderMode: 'control-json',
+            controlOp: 'hookProfile',
+            fields: [
+                { name: 'target', flag: '--target', type: 'text' },
+                { name: 'exe', flag: '--exe', type: 'text' }
+            ],
+            sampleInput: { target: 'lockdown_browser', exe: 'LockDownBrowser.exe' },
+            sampleResponse: { ok: true, data: { resolved_target_tag: 'lockdown_browser', resolved_layer_policy_id: 'respondus-lockdown-layer-v1' } }
+        },
+        securityBoundary: {
+            id: 'securityBoundary',
+            category: 'query',
+            command: 'securityBoundary',
+            renderMode: 'control-json',
+            controlOp: 'securityBoundary',
+            fields: [
+                { name: 'pid', flag: '--pid', type: 'number' },
+                { name: 'target', flag: '--target', type: 'text' }
+            ],
+            sampleInput: { pid: 4242 },
+            sampleResponse: { ok: true, data: { role: 'browser-main', target_tag: 'lockdown_browser' } }
         },
         inject: {
             id: 'inject',
@@ -413,41 +440,6 @@
             sampleInput: { pid: 4242 },
             sampleResponse: { ok: true, data: { pid: 4242, repaired: true } }
         },
-        setFlags: {
-            id: 'setFlags',
-            category: 'mutation',
-            command: 'setFlags',
-            renderMode: 'control-json',
-            controlOp: 'setFlags',
-            fields: [
-                { name: 'pid', flag: '--pid', type: 'number' },
-                { name: 'flags', flag: '--flags', type: 'json', required: true }
-            ],
-            sampleInput: { pid: 4242, flags: { capture: 'dxgi', telemetry: true } },
-            sampleResponse: { ok: true, data: { updated: true } }
-        },
-        disable: {
-            id: 'disable',
-            category: 'mutation',
-            command: 'disable',
-            renderMode: 'control-json',
-            controlOp: 'disable',
-            fields: [
-                { name: 'pid', flag: '--pid', type: 'number', required: true }
-            ],
-            sampleInput: { pid: 4242 },
-            sampleResponse: { ok: true, data: { disabled: true } }
-        },
-        disableAll: {
-            id: 'disableAll',
-            category: 'mutation',
-            command: 'disableAll',
-            renderMode: 'control-json',
-            controlOp: 'disableAll',
-            fields: [],
-            sampleInput: {},
-            sampleResponse: { ok: true, data: { disabled: 'all' } }
-        },
         setPolicy: {
             id: 'setPolicy',
             category: 'mutation',
@@ -481,31 +473,6 @@
             fields: [],
             sampleInput: {},
             sampleResponse: { ok: true, data: { cleared: true } }
-        },
-        registerProtectedPid: {
-            id: 'registerProtectedPid',
-            category: 'target-registration',
-            command: 'registerProtectedPid',
-            renderMode: 'control-json',
-            controlOp: 'registerProtectedPid',
-            fields: [
-                { name: 'pid', flag: '--pid', type: 'number', required: true },
-                { name: 'reason', flag: '--reason', type: 'text' }
-            ],
-            sampleInput: { pid: 4242, reason: 'proctor-mode' },
-            sampleResponse: { ok: true, data: { pid: 4242, protected: true } }
-        },
-        unregisterProtectedPid: {
-            id: 'unregisterProtectedPid',
-            category: 'target-registration',
-            command: 'unregisterProtectedPid',
-            renderMode: 'control-json',
-            controlOp: 'unregisterProtectedPid',
-            fields: [
-                { name: 'pid', flag: '--pid', type: 'number', required: true }
-            ],
-            sampleInput: { pid: 4242 },
-            sampleResponse: { ok: true, data: { pid: 4242, protected: false } }
         },
         ipcBypass: {
             id: 'ipcBypass',
@@ -553,9 +520,8 @@
             label: 'MeshCentral desktop device page',
             groups: [
                 { id: 'lifecycle', label: 'Lifecycle', operations: ['install', 'uninstall', 'serviceStatus', 'verify'] },
-                { id: 'query', label: 'Query', operations: ['status', 'listProcesses', 'getFlowContract', 'getCapabilities', 'getPolicy', 'getConfig', 'uiSnapshot', 'getInjectionState', 'profileProcess'] },
-                { id: 'mutation', label: 'Mutation', operations: ['inject', 'injectTargetSet', 'injectAll', 'telemetry', 'repair', 'setFlags', 'disable', 'disableAll', 'setPolicy', 'setConfig', 'clearTargetScope'] },
-                { id: 'target-registration', label: 'Target Registration', operations: ['registerProtectedPid', 'unregisterProtectedPid'] },
+                { id: 'query', label: 'Query', operations: ['status', 'listProcesses', 'getFlowContract', 'getCapabilities', 'getPolicy', 'getConfig', 'uiSnapshot', 'profileProcess', 'methodPolicy', 'safetyState', 'hookProfile', 'securityBoundary'] },
+                { id: 'mutation', label: 'Mutation', operations: ['inject', 'injectTargetSet', 'injectAll', 'telemetry', 'repair', 'setPolicy', 'setConfig', 'clearTargetScope'] },
                 { id: 'bypass', label: 'Bypass', operations: ['ipcBypass', 'lockdownBypass', 'examsoftBypass'] }
             ]
         },
@@ -564,9 +530,8 @@
             label: 'MeshCentral mobile device page',
             groups: [
                 { id: 'lifecycle', label: 'Lifecycle', operations: ['install', 'uninstall', 'serviceStatus', 'verify'] },
-                { id: 'query', label: 'Query', operations: ['status', 'listProcesses', 'getFlowContract', 'getCapabilities', 'getPolicy', 'getConfig', 'uiSnapshot', 'getInjectionState', 'profileProcess'] },
-                { id: 'mutation', label: 'Mutation', operations: ['inject', 'injectTargetSet', 'injectAll', 'telemetry', 'repair', 'setFlags', 'disable', 'disableAll', 'setPolicy', 'setConfig', 'clearTargetScope'] },
-                { id: 'target-registration', label: 'Target Registration', operations: ['registerProtectedPid', 'unregisterProtectedPid'] },
+                { id: 'query', label: 'Query', operations: ['status', 'listProcesses', 'getFlowContract', 'getCapabilities', 'getPolicy', 'getConfig', 'uiSnapshot', 'profileProcess', 'methodPolicy', 'safetyState', 'hookProfile', 'securityBoundary'] },
+                { id: 'mutation', label: 'Mutation', operations: ['inject', 'injectTargetSet', 'injectAll', 'telemetry', 'repair', 'setPolicy', 'setConfig', 'clearTargetScope'] },
                 { id: 'bypass', label: 'Bypass', operations: ['ipcBypass', 'lockdownBypass', 'examsoftBypass'] }
             ]
         }
@@ -580,25 +545,21 @@
         '  umhctl verify',
         'Control pipe - query:',
         '  umhctl status | listProcesses | getFlowContract | getCapabilities',
-        '  umhctl getPolicy | getConfig',
+        '  umhctl getPolicy | getConfig | safetyState',
         '  umhctl uiSnapshot [--pid <pid>]',
-        '  umhctl getInjectionState [--pid <pid>]',
         '  umhctl profileProcess --pid <pid>',
+        '  umhctl methodPolicy [--pid <pid>]',
+        '  umhctl hookProfile --target <tag> [--exe <path>]',
+        '  umhctl securityBoundary [--pid <pid>] [--target <tag>]',
         'Control pipe - mutation:',
         '  umhctl inject --pid <pid> [--method <m>] [--technique <t>]',
         '  umhctl injectTargetSet --pids <csv> [--run-id <id>] [--target-tag <tag>] [--method-key <key>]',
         '  umhctl injectAll',
         '  umhctl telemetry --pid <pid>',
         '  umhctl repair --pid <pid>',
-        '  umhctl setFlags [--pid <pid>] --flags <json>',
-        '  umhctl disable --pid <pid>',
-        '  umhctl disableAll',
         '  umhctl setPolicy --policy <json>',
         '  umhctl setConfig --content <json-or-text>',
         '  umhctl clearTargetScope',
-        'Target-scoped:',
-        '  umhctl registerProtectedPid --pid <pid> [--reason <text>]',
-        '  umhctl unregisterProtectedPid --pid <pid>',
         'Bypass:',
         '  umhctl ipcBypass --action <list-targets|status|disable|enable> [--target <adapter>] [--domain <screen|input|network|process|all>]',
         '  umhctl lockdownBypass --action <status|apply|apply-harness|revert|revert-harness>',
@@ -607,12 +568,14 @@
         '  umhctl --json \'{"op":"status"}\''
     ];
 
-    var uiSnapshotSections = ['status', 'flow_contract', 'capabilities', 'processes', 'policy', 'config', 'injection_state', 'process_profile'];
+    var uiSnapshotSections = ['status', 'flow_contract', 'capabilities', 'processes', 'policy', 'config', 'safety_state', 'process_profile', 'method_policy', 'security_boundary'];
 
     var consoleCases = [
         { name: 'status-query', op: 'status', args: {}, expected: { op: 'status' } },
         { name: 'profile-process', op: 'profileProcess', args: { pid: 4242 }, expected: { op: 'profileProcess', pid: 4242 } },
-        { name: 'set-flags', op: 'setFlags', args: { pid: 4242, flags: { capture: 'dxgi', telemetry: true } }, expected: { op: 'setFlags', pid: 4242, flags: { capture: 'dxgi', telemetry: true } } },
+        { name: 'method-policy', op: 'methodPolicy', args: { pid: 4242 }, expected: { op: 'methodPolicy', pid: 4242 } },
+        { name: 'hook-profile', op: 'hookProfile', args: { target: 'lockdown_browser', exe: 'LockDownBrowser.exe' }, expected: { op: 'hookProfile', target: 'lockdown_browser', exe: 'LockDownBrowser.exe' } },
+        { name: 'security-boundary', op: 'securityBoundary', args: { pid: 4242 }, expected: { op: 'securityBoundary', pid: 4242 } },
         { name: 'inject-target-set', op: 'injectTargetSet', args: { pids: '101,202', 'run-id': 'run-lab-100', 'target-tag': 'screen-quizapp', 'method-key': 'remote-thread' }, expected: { op: 'injectTargetSet', target_pids: [101, 202], headers: { 'x-umh-run-id': 'run-lab-100', 'x-umh-target-tag': 'screen-quizapp', 'x-umh-method-key': 'remote-thread' } } },
         { name: 'ipc-bypass', op: 'ipcBypass', args: { action: 'enable', target: 'adapter-blue', domain: 'screen' }, expected: { op: 'ipcBypass', action: 'enable', target: 'adapter-blue', domain: 'screen' } },
         { name: 'lockdown-default-status', op: 'lockdownBypass', args: {}, expected: { op: 'lockdownBypass', action: 'status' } }
@@ -621,7 +584,7 @@
     var rawJsonCases = [
         { name: 'get-policy', payload: { op: 'getPolicy' }, expected: { op: 'getPolicy' } },
         { name: 'inject-json', payload: { op: 'inject', pid: 5151, method: 'load-library', technique: 'remote-thread' }, expected: { op: 'inject', pid: 5151, method: 'load-library', technique: 'remote-thread' } },
-        { name: 'set-flags-json', payload: { op: 'setFlags', pid: 5151, flags: { capture: 'dxgi' } }, expected: { op: 'setFlags', pid: 5151, flags: { capture: 'dxgi' } } },
+        { name: 'method-policy-json', payload: { op: 'methodPolicy', pid: 5151 }, expected: { op: 'methodPolicy', pid: 5151 } },
         { name: 'lockdown-json', payload: { op: 'lockdownBypass', action: 'apply-harness' }, expected: { op: 'lockdownBypass', action: 'apply-harness' } },
         { name: 'ipc-list-targets-json', payload: { op: 'ipcBypass', action: 'list-targets' }, expected: { op: 'ipcBypass', action: 'list-targets' } }
     ];
@@ -686,7 +649,6 @@
             controlReq.target_pids = [controlReq.pid];
             delete controlReq.pid;
         }
-        if (opKey === 'setflags' && controlReq.flags == null) { throw new Error('setFlags requires flags'); }
         if (opKey === 'setpolicy' && (typeof controlReq.policy !== 'string' || controlReq.policy.trim().length === 0)) { throw new Error('setPolicy requires policy'); }
         if (opKey === 'setconfig' && (typeof controlReq.content !== 'string' || controlReq.content.length === 0)) { throw new Error('setConfig requires content'); }
         if (opKey === 'ipcbypass' && controlReq.action !== 'list-targets') {
