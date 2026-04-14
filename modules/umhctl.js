@@ -2,10 +2,6 @@ var http = require('http');
 var childProcess = require('child_process');
 var fs = require('fs');
 var net = require('net');
-
-// RecoveryCore is intentionally reduced to the retained UMH operator surface.
-var meshCoreObj = { "action": "coreinfo", "value": "MeshCore Recovery", "caps": 8 }; // Capability bitmask: 8 = Console only
-
 function sendConsoleText(msg, sessionid)
 {
     var cmd = { "action": "msg", "type": "console", "value": msg };
@@ -2183,10 +2179,10 @@ function umhctlRunMasterServiceStatus(msExePath, sessionid)
             clearTimeout(statusTimer);
             sendConsoleText('umhctl service status error: ' + e.toString(), sessionid);
         });
-        umhctlAttachProcessCompletion(statusProc, function (code) {
-            if (statusDone) { return; }
-            statusDone = true;
-            clearTimeout(statusTimer);
+    umhctlAttachProcessCompletion(statusProc, function (code) {
+        if (statusDone) { return; }
+        statusDone = true;
+        clearTimeout(statusTimer);
             var out = this.stdout.str + (this.stderr.str ? '\r\nSTDERR: ' + this.stderr.str : '');
             sendConsoleText('umhctl service status (exit ' + code + '):\r\n' + out, sessionid);
         });
@@ -3075,56 +3071,11 @@ function umhctlHandleCommand(args, rights, sessionid)
     }
     return 'Unknown umhctl command: "' + subcmd + '". Type "umhctl help" for usage.';
 }
-
-function processConsoleCommand(cmd, args, rights, sessionid)
-{
-    var response = null;
-    try
+module.exports = {
+    consoleaction: function consoleaction(args, rights, sessionid, mesh)
     {
-        switch (cmd)
-        {
-            case 'help':
-                response = 'Available commands:\r\n'
-                    + '  help\r\n'
-                    + '  umhctl <command>\r\n\r\n'
-                    + 'Type "umhctl help" for the retained UMH operator surface.';
-                break;
-            case 'umhctl':
-                response = require('umhctl').consoleaction(args, rights, sessionid, null);
-                break;
-            default:
-                response = 'Unknown command "' + cmd + '", type "help" for list of available commands.';
-                break;
-        }
-    }
-    catch (e)
-    {
-        response = 'Command returned an exception error: ' + e;
-        try { console.log(e); } catch (ee) { }
-    }
-    if (response != null) { sendConsoleText(response, sessionid); }
-}
-
-require('MeshAgent').on('Connected', function ()
-{
-    require('os').name().then(function (v)
-    {
-        sendConsoleText('Mesh Agent Recovery Console, OS: ' + v);
-        require('MeshAgent').SendCommand(meshCoreObj);
-    }, function ()
-    {
-        sendConsoleText('Mesh Agent Recovery Console');
-        require('MeshAgent').SendCommand(meshCoreObj);
-    });
-});
-
-require('MeshAgent').AddCommandHandler(function (data)
-{
-    if (typeof data != 'object' || data == null) { return; }
-    if (data.action != 'msg' || data.type != 'console') { return; }
-    if (!data.value) { return; }
-
-    var args = splitArgs(data.value);
-    if (args.length == 0 || typeof args[0] != 'string' || args[0].length == 0) { return; }
-    processConsoleCommand(args[0].toLowerCase(), parseArgs(args), data.rights, data.sessionid);
-});
+        return umhctlHandleCommand(args, rights, sessionid);
+    },
+    canonicalControlOp: umhctlCanonicalControlOp,
+    flowContract: umhctlGetFlowContract
+};

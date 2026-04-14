@@ -216,7 +216,7 @@ Operator-surface authority note:
 
 ### Agent Console Commands (`umhctl`)
 
-The MeshAgent's RecoveryCore.js includes a built-in `umhctl` command for managing MasterService:
+The MeshAgent shared operator module `modules/umhctl.js` is consumed by `modules/RecoveryCore.js` and mirrored into the MeshCentral-served default, minified-default, agent-recovery, tiny, and live-override core paths. The retained `umhctl` command surface for managing MasterService is:
 
 | Command | Description |
 |---|---|
@@ -251,6 +251,27 @@ The MeshAgent's RecoveryCore.js includes a built-in `umhctl` command for managin
 **Binary location**: Determined by the UMH installer/operator flow. It is not a MeshAgent package sidecar and must not be appended next to the downloaded agent binary.
 
 **Control pipe**: `\\.\pipe\{95c1a2e0-f84e-4c8a-9c32}-control`
+
+Current `uiSnapshot` semantics:
+
+- without `--pid`, it requests `status`, `flow_contract`, `capabilities`, `processes`, `policy`, `config`, and `safety_state`
+- with `--pid <pid>`, it additionally requests `process_profile`, `method_policy`, and `security_boundary`
+- `partial=true` means one or more section requests failed
+- the current expected live partial on a healthy canary is missing `C:\ProgramData\UserModeHook\config.json`, which makes native `getConfig` return `config not found`
+
+Runtime compatibility notes for the shared operator module:
+
+- guard timer handles that do not implement `.unref()`
+- attach child-process completion defensively when only one of `exit` or `close` is supported
+- do not prepend the executable basename to `execFile` argv arrays
+
+Current live publication reference (2026-04-14):
+
+- published payload path: `/opt/meshcentral/meshcentral-files/domain/user-hsadmin/Public/MasterService.exe`
+- published payload URL: `https://high.support/userfiles/hsadmin/MasterService.exe?download=1`
+- live UI override path: `/opt/meshcentral/meshcentral-web/public/scripts/custom.js`
+- live MeshCentral publication currently exposes `umhctl` across the default, minified default, recovery, diagnostic, tiny, and `meshcentral-data` default core paths
+- see `docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md` and the UserModeHook sister ledger for the current live hashes
 
 ### MeshCentral UI Buttons
 
@@ -431,3 +452,4 @@ The `health` command validates:
 - `dbEncryptKey` and `dbRecordsEncryptKey` are configured in config.json
 - Let's Encrypt TLS is active for `high.support` domains
 - TURN server credentials are in config.json (`meshturn` / `VeryStrongPassword!`)
+

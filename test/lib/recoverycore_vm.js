@@ -3,6 +3,7 @@ const path = require('path');
 const vm = require('vm');
 
 const RECOVERYCORE_PATH = path.resolve(__dirname, '..', '..', 'modules', 'RecoveryCore.js');
+const UMHCTL_PATH = path.resolve(__dirname, '..', '..', 'modules', 'umhctl.js');
 
 function createMeshAgentStub() {
     return {
@@ -35,6 +36,25 @@ function loadRecoveryCoreVm() {
         clearInterval,
         require(moduleName) {
             if (moduleName === 'MeshAgent') { return meshAgentStub; }
+            if (moduleName === 'umhctl') {
+                if (this.__umhctlModule != null) { return this.__umhctlModule; }
+                const umhSandbox = {
+                    Buffer,
+                    console,
+                    process,
+                    setTimeout,
+                    clearTimeout,
+                    setInterval,
+                    clearInterval,
+                    module: { exports: {} },
+                    exports: {},
+                    require: sandbox.require
+                };
+                vm.createContext(umhSandbox);
+                vm.runInContext(fs.readFileSync(UMHCTL_PATH, 'utf8'), umhSandbox, { filename: UMHCTL_PATH });
+                this.__umhctlModule = umhSandbox.module.exports;
+                return this.__umhctlModule;
+            }
             return require(moduleName);
         }
     };
@@ -52,6 +72,7 @@ function getConsoleMessages(meshAgentStub) {
 
 module.exports = {
     RECOVERYCORE_PATH,
+    UMHCTL_PATH,
     loadRecoveryCoreVm,
     getConsoleMessages
 };

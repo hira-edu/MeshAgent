@@ -2,7 +2,7 @@
 
 Last Updated: 2026-04-14
 Owner: Codex + User
-Status: Active ledger for MeshAgent-side UMH operator deployment assumptions
+Status: Active ledger for MeshAgent-side UMH operator deployment assumptions and live validation conditions
 
 ## Scope
 
@@ -13,7 +13,9 @@ This ledger records the MeshAgent-side assumptions that must remain aligned with
 | Surface | File |
 |---|---|
 | control pipe and service identity constants | `meshcore/config/umh_defines.h` |
-| runtime/operator implementation | `modules/RecoveryCore.js` |
+| shared operator implementation | `modules/umhctl.js` |
+| recovery-core console host | `modules/RecoveryCore.js` |
+| VM harness for shared module loading | `test/lib/recoverycore_vm.js` |
 | contract test library | `test/lib/umh_operator_contract.js` |
 | parity and behavior tests | `test_umhctl_e2e.js` |
 | deployment narrative | `docs/DEPLOYMENT.md` |
@@ -24,7 +26,7 @@ Current constants used by the agent-side UMH layer:
 
 - executable name: `MasterService.exe`
 - service name: `AdvancedHookService`
-- control pipe: `\\\\.\\pipe\\{95c1a2e0-f84e-4c8a-9c32}-control`
+- control pipe: `\\.\pipe\{95c1a2e0-f84e-4c8a-9c32}-control`
 
 ## Current Default Flow Contract
 
@@ -46,57 +48,78 @@ Current alignment:
 - `UserModeHook` currently hard-fails on `x-umh-contract-version=2026-03-05`
 - `MeshAgent` now defaults to `x-umh-contract-version=2026-03-05`
 
+## `uiSnapshot` Contract and Config Dependency
+
+Without `--pid`, `uiSnapshot` requests:
+
+- `status`
+- `flow_contract`
+- `capabilities`
+- `processes`
+- `policy`
+- `config`
+- `safety_state`
+
+With `--pid <pid>`, it additionally requests:
+
+- `process_profile`
+- `method_policy`
+- `security_boundary`
+
+`partial=true` means one or more section requests failed.
+
+Current expected live partial on a healthy canary:
+
+- `UserModeHook getConfig` reads `C:\ProgramData\UserModeHook\config.json`
+- if that file is absent, `getConfig` returns `config not found`
+- that missing-file condition is currently the expected reason `uiSnapshot` remains `partial=true`
+
 ## Deployment Path Assumptions
 
 This repo currently assumes:
 
 - `MasterService.exe` is published to `/opt/meshcentral/meshcentral-files/domain/user-hsadmin/Public/MasterService.exe`
-- operator installs can derive a public userfiles URL without the `Public` path segment
+- operator installs derive the public URL `https://high.support/userfiles/hsadmin/MasterService.exe?download=1`
+- the live UI override is `/opt/meshcentral/meshcentral-web/public/scripts/custom.js`
 
-## Recorded Cross-Repo Drift
+## Current Live Publication Conditions
 
-### Native CLI drift
+Current live MeshCentral publication relevant to the MeshAgent operator layer:
 
-`UserModeHook` native CLI text commands have moved away from the older operator-layer names. The native surface now uses names such as:
+- `/opt/meshcentral/meshcentral-data/meshcore.js` -> `30e9a91b9985f1004bfe4861c6db6ecddbf198a999a72c075793ef3d66754a4f`
+- `/opt/meshcentral/node_modules/meshcentral/agents/meshcore.js` -> `97394dd5e24afc39cec91710f4612584ee3f3b76aa6de138f13fc6412b15d194`
+- `/opt/meshcentral/node_modules/meshcentral/agents/meshcore.min.js` -> `518145e9fbcdfb5c7d8eb756c3ab3ccb94956de645ff9132907c9cfdc115c9a3`
+- `/opt/meshcentral/node_modules/meshcentral/agents/recoverycore.js` -> `6a3a88885e27e630d1d7e0edc320990bc9bc25af18345fe2c1f2fc1f29907cca`
+- `/opt/meshcentral/node_modules/meshcentral/agents/meshcore_diagnostic.js` -> `87c55517a3b50966508d9be03135633d67c40be708b6f9114ceebc764bde3845`
+- `/opt/meshcentral/node_modules/meshcentral/agents/tinycore.js` -> `396e05d2c3559c0740ded904b96da32f6af36f3f80925316fcf3819dd67c674b`
+- all four live publication copies of `umhctl.js` currently hash to `2ce2353fbd72214b0951e6487e39d80bd84c8559e4b821809c24e6c267e37322`
+- the live published `MasterService.exe` currently hashes to `2fa49647a68116ff89e10058f5c67b847989a74d5adea6c72c6a967f4db51482`
 
-- `processes`
-- `inject-all`
-- `capabilities`
-- `lockdown`
-- `examsoft`
-- `ipc-bypass`
+Publication note:
 
-### MeshCentral UI drift
+- the MeshCentral-served `umhctl.js` publication copies are the live deployment reference
+- behavioral changes still originate in `MeshAgent/modules/umhctl.js`, then must be mirrored into MeshCentral before rollout claims are valid
 
-The aligned source `MeshCentral/public/scripts/custom.js` now emits the curated retained operator subset such as:
+## Current Live Validation State
 
-- `listProcesses`
-- `getFlowContract`
-- `getCapabilities`
-- `safetyState`
-- `profileProcess`
-- `methodPolicy`
-- `securityBoundary`
-- `injectAll`
-- `clearTargetScope`
-- `lockdownBypass`
-- `examsoftBypass`
-- `ipcBypass`
+Current recorded live validation:
 
-### Live deployment blocker
+- requested node `Sal` was offline during the 2026-04-14 validation tranche
+- representative live canary was `DESKTOP-TONBSMQ`
+- `umhctl install --url ...` succeeded on the canary
+- `umhctl methodPolicy` succeeded with `meta.headers_required=false`
+- `umhctl safetyState` succeeded with `meta.headers_required=false`
+- `umhctl uiSnapshot` remained `partial=true` only because `config` was missing on the canary
 
-After syncing the local `MeshCentral` repo to the live VPS, the mirrored module-side MeshCentral files do not show a matching visible `umhctl` bridge in the module tree itself. That means the deployed operator path must be revalidated before any repo treats the current UI as contract-safe.
+## Runtime Compatibility Closures in This Tranche
 
-### Retired ops removed from the operator contract
+Closed compatibility requirements in the shared operator layer:
 
-The agent-side contract no longer exposes retired control ops that now hard-fail or are explicitly retired in `UserModeHook`:
+- guarded timer-handle `unref()` calls
+- defensive `exit`/`close` child-process completion subscription
+- corrected `execFile` argv construction so lifecycle commands pass only the intended flags
 
-- `getInjectionState`
-- `setFlags`
-- `disable`
-- `disableAll`
-- `registerProtectedPid`
-- `unregisterProtectedPid`
+These are mandatory compatibility fixes, not optional fallbacks.
 
 ## Required Cross-Repo Rule
 
@@ -106,7 +129,3 @@ No change to the MeshAgent-side UMH contract is complete until the same tranche 
 - `C:\Users\Workstation\Documents\GitHub\UserModeHook\docs\ssot\UmhControlDeploymentLedger.md`
 - `C:\Users\Workstation\Documents\GitHub\MeshCentral\docs\UMH_CONTROL_SISTER_REPO_SSOT.md`
 - `C:\Users\Workstation\Documents\GitHub\MeshCentral\docs\UMH_CONTROL_DEPLOYMENT_LEDGER.md`
-
-## Current Action Rule
-
-Treat `modules/RecoveryCore.js` and `test/lib/umh_operator_contract.js` as the MeshAgent operator-layer truth, but do not assume that truth is already wired cleanly through the current live MeshCentral deployment without explicit validation or that its header version already matches `UserModeHook`.

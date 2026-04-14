@@ -74,6 +74,27 @@ function runHelpChecks(results, sandbox) {
     results.push({ name: 'help-fragments', ok: true, fragmentCount: contract.helpFragments.length });
 }
 
+function runExecFileArgChecks(results, sandbox) {
+    const argv = sandbox.umhctlBuildExecFileArgs('C:\\ProgramData\\MeshAgent\\MasterService.exe', ['--install', '--silent', '--wait']);
+    assert(deepEqual(argv, ['--install', '--silent', '--wait']), 'execFile args must not prepend the executable basename');
+    results.push({ name: 'execfile-args', ok: true, argv });
+}
+
+function runProcessCompletionBindingChecks(results, sandbox) {
+    const registrations = [];
+    const proc = {
+        on(eventName, handler) {
+            registrations.push(eventName);
+            if (eventName === 'close') { throw new Error('close unsupported'); }
+            this.boundHandler = handler;
+        }
+    };
+    const chosenEvent = sandbox.umhctlAttachProcessCompletion(proc, function () {});
+    assert(chosenEvent === 'exit', 'process completion must prefer exit when available');
+    assert(deepEqual(registrations, ['exit']), 'process completion should stop after first supported event');
+    results.push({ name: 'process-completion-binding', ok: true, chosenEvent });
+}
+
 function runConsoleBuildChecks(results, sandbox) {
     for (const testCase of contract.consoleCases) {
         const buildResult = sandbox.umhctlBuildControlRequest(testCase.op, testCase.args);
@@ -208,6 +229,8 @@ function main() {
 
     runMapParityChecks(checks, sandbox);
     runHelpChecks(checks, sandbox);
+    runExecFileArgChecks(checks, sandbox);
+    runProcessCompletionBindingChecks(checks, sandbox);
     runConsoleBuildChecks(checks, sandbox);
     runRawJsonChecks(checks, sandbox);
     runFlowScopeChecks(checks, sandbox, meshAgentStub);
