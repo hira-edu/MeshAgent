@@ -129,6 +129,8 @@ Every retained change must be backed by targeted trace data that identifies:
 - disconnect reason
 - child exit reason
 
+The DiagnosticHost build must emit this evidence to the module-local `svchost-debug.log` resolved from the loaded `StealthLab_DLL` path. Legacy temporary trace files may remain for standalone probes, but they are not the authoritative evidence lane.
+
 ## Work Program
 
 ### TODO-080

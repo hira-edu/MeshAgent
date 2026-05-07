@@ -1,8 +1,17 @@
 # MeshAgent UMH Control Deployment Ledger
 
-Last Updated: 2026-04-14
+Last Updated: 2026-04-19
 Owner: Codex + User
 Status: Active ledger for MeshAgent-side UMH operator deployment assumptions and live validation conditions
+
+## 2026-04-19 VPS Move / Pending MasterService Republish
+
+- operator-designated replacement MeshCentral VPS IP: `74.208.52.191`
+- current local `MasterService.exe` publish candidate: `C:\Users\Workstation\Documents\GitHub\UserModeHook\build-fresh\bin\Release\MasterService.exe`
+- current local candidate size: `17749504`
+- current local candidate SHA256: `2324961d0d5ca5df82d43118524f39ae3d3752804bf5757729c2fb526e5ffeb3`
+- deployment status: blocked pending SSH reachability; direct SSH to `74.208.52.191:22` timed out on April 19, 2026
+- consequence: the live published hash recorded below remains the last verified VPS value until the new host accepts SSH and the publish step succeeds
 
 ## Scope
 

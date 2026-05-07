@@ -8,11 +8,16 @@ Related operational SSOT:
 - `docs/UMH_CONTROL_SISTER_REPO_SSOT.md` for the agent-side `umhctl` contract and sister-repo update rules.
 - `docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md` for the current MeshAgent-side UMH deployment assumptions and recorded cross-repo drift.
 
+Migration note (2026-04-19):
+- operator-designated replacement VPS IP is `74.208.52.191`
+- direct SSH to `74.208.52.191:22` timed out from the workstation during this update, so any infrastructure facts not explicitly re-captured below remain the last verified pre-migration values
+- update the local `meshcentral` SSH alias or override `MESHCENTRAL_SERVER`/`MESHCENTRAL_SSH_HOST` before using `deploy.py` without explicit host overrides
+
 ## Server Infrastructure
 
 | Property | Value |
 |---|---|
-| **Host** | `167.88.44.65` (`srv1057130.hstgr.cloud`) |
+| **Host** | `74.208.52.191` (hostname pending SSH revalidation after the VPS move) |
 | **DNS** | `high.support` / `agents.high.support` / `relay.high.support` |
 | **OS** | Ubuntu 24.04, Linux 6.8.0-90-generic x86_64 |
 | **SSH User** | `root` |
@@ -132,7 +137,7 @@ python deploy.py ssh "command"   # Run arbitrary remote command
 ### 2. Direct SSH (Ad-Hoc)
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 root@167.88.44.65
+ssh -i ~/.ssh/id_ed25519 root@74.208.52.191
 ```
 
 Passwordless key auth is configured. No password needed.
@@ -141,16 +146,16 @@ Passwordless key auth is configured. No password needed.
 
 - Installed at: `C:\Users\Public\Desktop\WinSCP.lnk`
 - Use for manual file browsing, quick edits, and drag-drop uploads
-- Connect with: Host `167.88.44.65`, User `root`, Key file `C:\Users\Workstation\.ssh\id_ed25519`
+- Connect with: Host `74.208.52.191`, User `root`, Key file `C:\Users\Workstation\.ssh\id_ed25519`
 
 ### 4. SCP (Single-File Transfer)
 
 ```bash
 # Upload
-scp -i ~/.ssh/id_ed25519 localfile.exe root@167.88.44.65:/opt/meshcentral/staging/
+scp -i ~/.ssh/id_ed25519 localfile.exe root@74.208.52.191:/opt/meshcentral/staging/
 
 # Download
-scp -i ~/.ssh/id_ed25519 root@167.88.44.65:/opt/meshcentral/meshcentral-data/config.json ./config.json
+scp -i ~/.ssh/id_ed25519 root@74.208.52.191:/opt/meshcentral/meshcentral-data/config.json ./config.json
 ```
 
 ## Deployment Workflow
@@ -168,6 +173,8 @@ Build contract:
 - `MeshAgent.Build.proj` is the supported entrypoint because it serializes `StealthLab_DLL|x64` before `StealthLab|x64` and `StealthLab|Win32`.
 - Direct `StealthLab|x64` project builds now force the `StealthLab_DLL|x64` prerequisite before the EXE build refreshes `meshservice/embedded/svchost_payload.dll`.
 - Do not run separate x64 DLL and x64 EXE project builds in parallel against the same tree; use `MeshAgent.Build.proj` for full package output.
+- Do not add or use PowerShell build wrappers. Build orchestration lives in MSBuild; Python generators are invoked only through MSBuild targets or explicit pre-build validation.
+- Generated Visual Studio output directories (`meshservice/x64`, `meshservice/Win32`, `meshservice/MeshService-2022/x64`, root `x64`, and embedded svchost payload outputs) are excluded from implementation truth and should not be committed.
 
 Publish contract for MeshAgent packages:
 - `deploy.py stage` must prove the full package set is present before upload: `MeshService64.exe`, `MeshService.exe`, `MeshService64.dll`, `svchost_payload.dll`, `diagsvc.dll`, `MeshService64.msh`, `MeshService.msh`, and `WinDiagnosticHost.msh`.

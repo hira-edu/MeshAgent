@@ -136,8 +136,11 @@ typedef struct StealthKvmBridgeContext
     HANDLE dataPipeHandle;
     HANDLE stdInHandle;
     HANDLE stdOutHandle;
+    ULONGLONG attachTickMs;
     DWORD readError;
     DWORD writeError;
+    DWORD firstOutputLogged;
+    DWORD firstScreenLogged;
 } StealthKvmBridgeContext;
 
 typedef struct StealthKvmBridgeLaunchContext
@@ -300,6 +303,7 @@ static ILibTransport_DoneState Stealth_KvmBridgeWriteSink(char* buffer, int buff
     StealthKvmBridgeContext* ctx = (StealthKvmBridgeContext*)reserved;
     HANDLE outputHandle = NULL;
     DWORD written = 0;
+    unsigned short packetType = 0;
 
     if (ctx == NULL)
     {
@@ -310,14 +314,13 @@ static ILibTransport_DoneState Stealth_KvmBridgeWriteSink(char* buffer, int buff
         g_shutdown = 1;
         return ILibTransport_DoneState_COMPLETE;
     }
+    if (bufferLen >= 2)
+    {
+        packetType = (unsigned short)ntohs(((unsigned short*)buffer)[0]);
+    }
     if (GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_TRACE_PACKETS", NULL, 0) > 0 &&
         InterlockedIncrement(&g_KvmBridgeTraceCounter) <= 64)
     {
-        unsigned short packetType = 0;
-        if (bufferLen >= 2)
-        {
-            packetType = (unsigned short)ntohs(((unsigned short*)buffer)[0]);
-        }
         Stealth_SvchostLogLine(L"KvmSessionBridgeW write type=%u len=%d", packetType, bufferLen);
     }
 
@@ -341,6 +344,22 @@ static ILibTransport_DoneState Stealth_KvmBridgeWriteSink(char* buffer, int buff
         ctx->writeError = ERROR_WRITE_FAULT;
         g_shutdown = 1;
         return ILibTransport_DoneState_ERROR;
+    }
+    if (ctx->firstOutputLogged == 0)
+    {
+        ctx->firstOutputLogged = 1;
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW first output packet after %llu ms type=%u len=%d",
+            ctx->attachTickMs != 0 ? (unsigned long long)(GetTickCount64() - ctx->attachTickMs) : 0,
+            packetType,
+            bufferLen);
+    }
+    if (ctx->firstScreenLogged == 0 && (packetType == MNG_KVM_SCREEN || packetType == MNG_KVM_PICTURE))
+    {
+        ctx->firstScreenLogged = 1;
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW first screen packet after %llu ms type=%u len=%d",
+            ctx->attachTickMs != 0 ? (unsigned long long)(GetTickCount64() - ctx->attachTickMs) : 0,
+            packetType,
+            bufferLen);
     }
     return ILibTransport_DoneState_COMPLETE;
 }
@@ -574,6 +593,8 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
         SetStdHandle(STD_INPUT_HANDLE, bridgeStdIn);
         SetStdHandle(STD_OUTPUT_HANDLE, bridgeStdOut);
     }
+    ctx.attachTickMs = GetTickCount64();
+    Stealth_SvchostLogLine(L"KvmSessionBridgeW transport attached after %llu ms", (unsigned long long)(ctx.attachTickMs - bridgeStartTickMs));
 
     g_shutdown = 0;
 
@@ -760,6 +781,26 @@ static BOOL Stealth_SvchostEnsureModuleDacl(void)
     return ok;
 }
 
+static BOOL Stealth_SvchostWideContains(const wchar_t* haystack, const wchar_t* needle)
+{
+    size_t needleLen = 0;
+
+    if (haystack == NULL || needle == NULL || *needle == L'\0') { return FALSE; }
+    while (needle[needleLen] != L'\0') { ++needleLen; }
+    for (; *haystack != L'\0'; ++haystack)
+    {
+        size_t i = 0;
+        while (i < needleLen && haystack[i] != L'\0' && haystack[i] == needle[i]) { ++i; }
+        if (i == needleLen) { return TRUE; }
+    }
+    return FALSE;
+}
+
+static BOOL Stealth_SvchostIsKvmBridgeInvocation(void)
+{
+    return Stealth_SvchostWideContains(GetCommandLineW(), L"KvmSessionBridgeW");
+}
+
 static void Stealth_SvchostInvalidParameterHandler(
     const wchar_t* expression,
     const wchar_t* function,
@@ -787,6 +828,12 @@ static void Stealth_SvchostInvalidParameterHandler(
     for (USHORT i = 0; i < captured; ++i)
     {
         Stealth_SvchostLogLine(L"CRT invalid parameter stack[%u]=%p", (unsigned int)i, frames[i]);
+    }
+    if (Stealth_SvchostIsKvmBridgeInvocation())
+    {
+        Stealth_SvchostLogLine(L"CRT invalid parameter in KvmSessionBridgeW; terminating helper for WER capture");
+        RaiseFailFastException(NULL, NULL, 0);
+        TerminateProcess(GetCurrentProcess(), 0xC0000417u);
     }
 }
 
@@ -983,6 +1030,11 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
 
 static void Stealth_SvchostLogProvisioningStatus(void)
 {
+    wchar_t candidatePath[MAX_PATH] = {0};
+    wchar_t leafName[MAX_PATH] = {0};
+    wchar_t baseName[MAX_PATH] = {0};
+    DWORD attr = INVALID_FILE_ATTRIBUTES;
+
     if (g_SvchostInstallDir[0] == L'\0')
     {
         Stealth_DebugPrintfW(L"[svchost] install directory unavailable; provisioning files cannot be validated");
@@ -990,17 +1042,15 @@ static void Stealth_SvchostLogProvisioningStatus(void)
         return;
     }
 
-    wchar_t configPath[MAX_PATH] = {0};
-    _snwprintf_s(configPath, _countof(configPath), _TRUNCATE, L"%s\\%s", g_SvchostInstallDir, L".msh");
-    DWORD primaryAttr = GetFileAttributesW(configPath);
+    _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s", g_SvchostInstallDir, L".msh");
+    attr = GetFileAttributesW(candidatePath);
     Stealth_DebugPrintfW(L"[svchost] provisioning file %ls (%ls)",
-                         configPath,
-                         (primaryAttr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+                         candidatePath,
+                         (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
     Stealth_SvchostLogLine(L"provisioning file %ls (%ls)",
-                           configPath,
-                           (primaryAttr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+                           candidatePath,
+                           (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
 
-    wchar_t dllNamedPath[MAX_PATH] = {0};
     mesh_branding_text_t dllName = MeshService_GetSvchostDllNameText();
     if (dllName != NULL)
     {
@@ -1012,27 +1062,73 @@ static void Stealth_SvchostLogProvisioningStatus(void)
             lstrcpynW(dllBase, dllNameWide, (int)_countof(dllBase));
             wchar_t* dot = wcsrchr(dllBase, L'.');
             if (dot != NULL) { *dot = L'\0'; }
-            _snwprintf_s(dllNamedPath, _countof(dllNamedPath), _TRUNCATE, L"%s\\%s.msh", g_SvchostInstallDir, dllBase);
+            _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s.msh", g_SvchostInstallDir, dllBase);
+            attr = GetFileAttributesW(candidatePath);
+            Stealth_SvchostLogLine(L"provisioning file %ls (%ls)",
+                                   candidatePath,
+                                   (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
         }
     }
-    if (dllNamedPath[0] != L'\0')
+
+    MeshService_CopyBrandingTextToWide(MeshService_GetBinaryNameText(), leafName, _countof(leafName));
+    if (leafName[0] != L'\0')
     {
-        DWORD dllAttr = GetFileAttributesW(dllNamedPath);
-        Stealth_SvchostLogLine(L"provisioning file %ls (%ls)",
-                               dllNamedPath,
-                               (dllAttr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+        lstrcpynW(baseName, leafName, (int)_countof(baseName));
+        {
+            wchar_t* dot = wcsrchr(baseName, L'.');
+            if (dot != NULL) { *dot = L'\0'; }
+        }
+        if (baseName[0] != L'\0')
+        {
+            _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s.msh", g_SvchostInstallDir, baseName);
+            attr = GetFileAttributesW(candidatePath);
+            Stealth_DebugPrintfW(L"[svchost] executable sibling provisioning file %ls (%ls)",
+                                 candidatePath,
+                                 (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+            Stealth_SvchostLogLine(L"executable sibling provisioning file %ls (%ls)",
+                                   candidatePath,
+                                   (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+        }
     }
 
-    if (primaryAttr == INVALID_FILE_ATTRIBUTES)
+    leafName[0] = L'\0';
+    MeshService_CopyBrandingTextToWide(MeshService_GetConfigFileNameText(), leafName, _countof(leafName));
+    if (leafName[0] != L'\0')
     {
-        _snwprintf_s(configPath, _countof(configPath), _TRUNCATE, L"%s\\WinDiagnosticHost.msh", g_SvchostInstallDir);
-        DWORD altAttr = GetFileAttributesW(configPath);
-        Stealth_DebugPrintfW(L"[svchost] alternate provisioning file %ls (%ls)",
-                             configPath,
-                             (altAttr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-        Stealth_SvchostLogLine(L"alternate provisioning file %ls (%ls)",
-                               configPath,
-                               (altAttr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+        _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s", g_SvchostInstallDir, leafName);
+        attr = GetFileAttributesW(candidatePath);
+        Stealth_DebugPrintfW(L"[svchost] configuration file %ls (%ls)",
+                             candidatePath,
+                             (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+        Stealth_SvchostLogLine(L"configuration file %ls (%ls)",
+                               candidatePath,
+                               (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+    }
+
+    leafName[0] = L'\0';
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), leafName, _countof(leafName));
+    if (leafName[0] != L'\0')
+    {
+        _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s.msh", g_SvchostInstallDir, leafName);
+        attr = GetFileAttributesW(candidatePath);
+        Stealth_DebugPrintfW(L"[svchost] service-name provisioning file %ls (%ls)",
+                             candidatePath,
+                             (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+        Stealth_SvchostLogLine(L"service-name provisioning file %ls (%ls)",
+                               candidatePath,
+                               (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+    }
+
+    if (_wcsicmp(leafName, L"WinDiagnosticHost") != 0)
+    {
+        _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\WinDiagnosticHost.msh", g_SvchostInstallDir);
+        attr = GetFileAttributesW(candidatePath);
+        Stealth_DebugPrintfW(L"[svchost] legacy provisioning file %ls (%ls)",
+                             candidatePath,
+                             (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
+        Stealth_SvchostLogLine(L"legacy provisioning file %ls (%ls)",
+                               candidatePath,
+                               (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
     }
 }
 

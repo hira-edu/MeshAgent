@@ -1,6 +1,6 @@
 # MeshAgent UMH Control Sister-Repo SSOT
 
-Last Updated: 2026-04-14
+Last Updated: 2026-04-19
 Owner: Codex + User
 Status: Active sister-repo SSOT for the agent-side `umhctl` operator contract
 
@@ -123,6 +123,14 @@ As of 2026-04-14:
 - MeshCentral's live publication exposes `umhctl` across the default core, minified default core, recovery core, diagnostic core, tiny core, and the `meshcentral-data` default override
 - live requested node `Sal` was offline during validation
 - representative live validation used `DESKTOP-TONBSMQ` on core lineage `Apr 9 2026, 3220172809`
+
+## 2026-04-19 VPS Move / Pending MasterService Republish
+
+- operator-designated replacement MeshCentral VPS IP: `74.208.52.191`
+- current local `MasterService.exe` publish candidate: `C:\Users\Workstation\Documents\GitHub\UserModeHook\build-fresh\bin\Release\MasterService.exe`
+- current local candidate size: `17749504`
+- current local candidate SHA256: `2324961d0d5ca5df82d43118524f39ae3d3752804bf5757729c2fb526e5ffeb3`
+- direct SSH to `74.208.52.191:22` timed out on April 19, 2026, so the live publication state above remains the last verified VPS-backed state until the new host accepts SSH
 
 ## Required Sync Rules
 

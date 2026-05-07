@@ -121,6 +121,51 @@ static void kvm_trace_startupf(const char* format, ...)
 	{
 		WriteFile(stderrHandle, buffer, (DWORD)len, &written, NULL);
 	}
+	{
+		HMODULE moduleHandle = NULL;
+		WCHAR modulePath[MAX_PATH * 4] = { 0 };
+		WCHAR diagnosticLogPath[MAX_PATH * 4] = { 0 };
+		WCHAR* slash = NULL;
+
+		if (GetModuleHandleExW(
+			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			(LPCWSTR)(const void*)&kvm_trace_startupf,
+			&moduleHandle) != 0 &&
+			GetModuleFileNameW(moduleHandle, modulePath, (DWORD)_countof(modulePath)) > 0)
+		{
+			slash = wcsrchr(modulePath, L'\\');
+			if (slash != NULL)
+			{
+				SYSTEMTIME now;
+				char prefix[64];
+				int prefixLen;
+
+				*(slash + 1) = L'\0';
+				if (SUCCEEDED(StringCchPrintfW(diagnosticLogPath, _countof(diagnosticLogPath), L"%ls%ls", modulePath, L"svchost-debug.log")))
+				{
+					fileHandle = CreateFileW(diagnosticLogPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+					if (fileHandle != NULL && fileHandle != INVALID_HANDLE_VALUE)
+					{
+						GetLocalTime(&now);
+						prefixLen = sprintf_s(prefix, sizeof(prefix), "[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
+							(unsigned int)now.wYear,
+							(unsigned int)now.wMonth,
+							(unsigned int)now.wDay,
+							(unsigned int)now.wHour,
+							(unsigned int)now.wMinute,
+							(unsigned int)now.wSecond,
+							(unsigned int)now.wMilliseconds);
+						if (prefixLen > 0)
+						{
+							WriteFile(fileHandle, prefix, (DWORD)prefixLen, &written, NULL);
+						}
+						WriteFile(fileHandle, buffer, (DWORD)len, &written, NULL);
+						CloseHandle(fileHandle);
+					}
+				}
+			}
+		}
+	}
 	fileHandle = CreateFileW(L"C:\\Windows\\Temp\\meshagent_kvm_startup.log", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (fileHandle != NULL && fileHandle != INVALID_HANDLE_VALUE)
 	{
@@ -618,12 +663,23 @@ static void kvm_bridge_debug_clear_pending_probe(unsigned int probeMask)
 static void kvm_bridge_debug_note_input(char* buffer, size_t bufferLen)
 {
 	unsigned short packetType;
+	ULONGLONG now;
+	int firstInput;
 
 	if (buffer == NULL || bufferLen < 4) { return; }
 	packetType = kvm_relay_effective_packet_type(buffer, bufferLen);
-	gKvmLastInputTickMs = GetTickCount64();
+	now = GetTickCount64();
+	firstInput = (gKvmLastInputTickMs == 0);
+	gKvmLastInputTickMs = now;
 	gKvmLastInputType = packetType;
 	kvm_bridge_debug_arm_pending_probe(kvm_bridge_debug_probe_mask_for_input(buffer, bufferLen));
+	if (firstInput)
+	{
+		kvm_trace_startupf("bridge first input packet after %llu ms type=%u len=%llu",
+			(unsigned long long)(gKvmSessionStartTickMs != 0 ? now - gKvmSessionStartTickMs : 0),
+			(unsigned int)packetType,
+			(unsigned long long)bufferLen);
+	}
 }
 
 static unsigned int kvm_bridge_debug_probe_mask_for_output(unsigned short packetType)
@@ -645,10 +701,14 @@ static void kvm_bridge_debug_note_output(char* buffer, size_t bufferLen)
 {
 	unsigned short packetType;
 	ULONGLONG now;
+	int firstOutput;
+	int firstScreen;
 
 	if (buffer == NULL || bufferLen < 4) { return; }
 	packetType = kvm_relay_effective_packet_type(buffer, bufferLen);
 	now = GetTickCount64();
+	firstOutput = (gKvmLastOutputTickMs == 0);
+	firstScreen = (gKvmLastScreenTickMs == 0 && (packetType == MNG_KVM_SCREEN || packetType == MNG_KVM_PICTURE));
 	gKvmLastOutputTickMs = now;
 	gKvmLastOutputType = packetType;
 	if (packetType == MNG_KVM_SCREEN || packetType == MNG_KVM_PICTURE)
@@ -656,6 +716,20 @@ static void kvm_bridge_debug_note_output(char* buffer, size_t bufferLen)
 		gKvmLastScreenTickMs = now;
 	}
 	kvm_bridge_debug_clear_pending_probe(kvm_bridge_debug_probe_mask_for_output(packetType));
+	if (firstOutput)
+	{
+		kvm_trace_startupf("bridge first output packet after %llu ms type=%u len=%llu",
+			(unsigned long long)(gKvmSessionStartTickMs != 0 ? now - gKvmSessionStartTickMs : 0),
+			(unsigned int)packetType,
+			(unsigned long long)bufferLen);
+	}
+	if (firstScreen)
+	{
+		kvm_trace_startupf("bridge first screen packet after %llu ms type=%u len=%llu",
+			(unsigned long long)(gKvmSessionStartTickMs != 0 ? now - gKvmSessionStartTickMs : 0),
+			(unsigned int)packetType,
+			(unsigned long long)bufferLen);
+	}
 }
 
 static void kvm_relay_ensure_cache_state(KvmRelayContext* ctx)
@@ -1269,10 +1343,6 @@ static void kvm_update_runtime_state(int childPresent, int transportActive)
 {
 	gKvmChildPresent = childPresent;
 	gKvmTransportActive = transportActive;
-	if (childPresent == 0)
-	{
-		g_slavekvm = 0;
-	}
 }
 
 static void kvm_record_spawn_failure(DWORD error, DWORD stage, DWORD spawnType)
@@ -2975,10 +3045,19 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	DWORD backoffDelayMs = 0;
 	int notifyClosed = 0;
 	int destroyContext = 0;
+	DWORD childPid = ILibProcessPipe_Process_GetPID(sender);
 
 	kvm_relay_lock();
 	kvm_relay_activate_context(ctx);
-	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%d) [EXITED]", g_slavekvm);
+	if (childPid == 0 && ctx != NULL && ctx->childPid != 0) { childPid = (DWORD)ctx->childPid; }
+	if (childPid == 0 && g_slavekvm != 0) { childPid = (DWORD)g_slavekvm; }
+	if (childPid != 0)
+	{
+		g_slavekvm = (int)childPid;
+		if (ctx != NULL) { ctx->childPid = (int)childPid; }
+	}
+	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) [EXITED]", (unsigned int)childPid);
+	kvm_trace_startupf("bridge child exit pid=%u exitCode=%d restartSuppressed=%d shutdown=%d restartCount=%d", (unsigned int)childPid, exitCode, gKvmRestartSuppressed, g_shutdown, g_restartcount);
 	UNREFERENCED_PARAMETER(sender);
 	kvm_relay_close_bridge_transport(kvm_relay_get_context());
 	gChildProcess = NULL;
@@ -3592,6 +3671,7 @@ void kvm_cleanup(void *reserved)
 	}
 	kvm_relay_activate_context(ctx);
 	KVMDEBUG("kvm_cleanup", 0);
+	kvm_trace_startupf("bridge disconnect cleanup requested reserved=%p childPresent=%d", reserved, gChildProcess != NULL ? 1 : 0);
 	g_shutdown = 1;
 	kvm_bridge_debug_reset_activity_state();
 	gKvmRestartSuppressed = 1;

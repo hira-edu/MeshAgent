@@ -411,6 +411,30 @@ out/
 *.zip
 *.tar.gz
 
+# Visual Studio / MSBuild generated outputs. Source truth is the MSBuild
+# project files and generated manifests, not intermediate or linked outputs.
+Release_DLL/
+x64/
+Win32/
+meshservice/Release_DLL/
+meshservice/StealthLab_DLL/
+meshservice/x64/
+meshservice/Win32/
+meshservice/MeshService-2022/Release_DLL/
+meshservice/MeshService-2022/StealthLab/
+meshservice/MeshService-2022/StealthLab_DLL/
+meshservice/MeshService-2022/x64/
+meshservice/MeshService-2022/Win32/
+meshservice/embedded/svchost_payload.dll
+microscript/ILibDuktape_Commit.h
+*.iobj
+*.ipdb
+*.recipe
+*.vcxproj.FileListAbsolute.txt
+*.tlog/
+*.tlog
+*.lastbuildstate
+
 # Backup files
 *.bak
 *.backup
@@ -420,3 +444,6 @@ out/
 docs/testing/evidence/
 docs/testing/artifacts/
 .aider*
+tmp/
+nul
+query

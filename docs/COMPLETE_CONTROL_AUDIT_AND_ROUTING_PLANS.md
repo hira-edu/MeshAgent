@@ -1502,7 +1502,7 @@ if (obj.agentUpdate != null) {
 ```xml
 <PostBuildEvent>  <!-- ← CONTROL POINT #87 -->
     <Command>
-        powershell -File "$(ProjectDir)..\tools\verify_branded_build.ps1" -Path "$(TargetPath)"
+        REM removed: PowerShell branded-build verification wrappers are no longer part of the supported build path
     </Command>
 </PostBuildEvent>
 ```

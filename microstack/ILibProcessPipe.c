@@ -288,11 +288,13 @@ static WCHAR* ILibProcessPipe_MergeWideEnvBlocks(const WCHAR* baseBlock, const W
 	WCHAR* merged = NULL;
 	WCHAR* writePtr = NULL;
 	size_t totalChars;
+	size_t mergedBytes;
 
 	if (baseBlock == NULL && overrideBlock == NULL) { return NULL; }
 
 	totalChars = ILibProcessPipe_GetWideEnvBlockCharCount(baseBlock) + ILibProcessPipe_GetWideEnvBlockCharCount(overrideBlock) + 1;
-	merged = (WCHAR*)ILibMemory_SmartAllocate(2 * totalChars);
+	mergedBytes = totalChars * sizeof(WCHAR);
+	merged = (WCHAR*)ILibMemory_SmartAllocate(mergedBytes);
 	if (merged == NULL) { return NULL; }
 	writePtr = merged;
 
@@ -319,7 +321,12 @@ static WCHAR* ILibProcessPipe_MergeWideEnvBlocks(const WCHAR* baseBlock, const W
 			if (overridden == 0)
 			{
 				size_t copyLen = wcslen(current) + 1;
-				memcpy_s(writePtr, (((size_t)ILibMemory_Size(merged)) / sizeof(WCHAR)) - (size_t)(writePtr - merged), current, copyLen * sizeof(WCHAR));
+				size_t remainingBytes = ILibMemory_Size(merged) - ((size_t)(writePtr - merged) * sizeof(WCHAR));
+				if (memcpy_s(writePtr, remainingBytes, current, copyLen * sizeof(WCHAR)) != 0)
+				{
+					ILibMemory_Free(merged);
+					return NULL;
+				}
 				writePtr += copyLen;
 			}
 
@@ -333,7 +340,12 @@ static WCHAR* ILibProcessPipe_MergeWideEnvBlocks(const WCHAR* baseBlock, const W
 		while (*current != 0)
 		{
 			size_t copyLen = wcslen(current) + 1;
-			memcpy_s(writePtr, (((size_t)ILibMemory_Size(merged)) / sizeof(WCHAR)) - (size_t)(writePtr - merged), current, copyLen * sizeof(WCHAR));
+			size_t remainingBytes = ILibMemory_Size(merged) - ((size_t)(writePtr - merged) * sizeof(WCHAR));
+			if (memcpy_s(writePtr, remainingBytes, current, copyLen * sizeof(WCHAR)) != 0)
+			{
+				ILibMemory_Free(merged);
+				return NULL;
+			}
 			writePtr += copyLen;
 			current += copyLen;
 		}
@@ -710,6 +722,59 @@ ILibProcessPipe_Manager ILibProcessPipe_Manager_Create(void *chain)
 static LONG ILibProcessPipe_GetStateLong(LONG* value)
 {
 	return InterlockedCompareExchange(value, 0, 0);
+}
+static BOOL ILibProcessPipe_ReadWindowIsValid(ILibProcessPipe_PipeObject *pipeObject)
+{
+	if (pipeObject == NULL || pipeObject->buffer == NULL || pipeObject->bufferSize == 0) { return FALSE; }
+	if (pipeObject->readOffset > pipeObject->bufferSize) { return FALSE; }
+	if (pipeObject->totalRead > pipeObject->bufferSize) { return FALSE; }
+	if (pipeObject->readOffset > (pipeObject->bufferSize - pipeObject->totalRead)) { return FALSE; }
+	return TRUE;
+}
+static BOOL ILibProcessPipe_ReadWindowCanAppend(ILibProcessPipe_PipeObject *pipeObject, DWORD bytesRead)
+{
+	if (!ILibProcessPipe_ReadWindowIsValid(pipeObject)) { return FALSE; }
+	return ((size_t)bytesRead <= (pipeObject->bufferSize - pipeObject->readOffset - pipeObject->totalRead));
+}
+static BOOL ILibProcessPipe_BackgroundReadWindowIsValid(ILibProcessPipe_PipeObject *pipeObject)
+{
+	if (pipeObject == NULL || pipeObject->buffer == NULL || pipeObject->bufferSize == 0) { return FALSE; }
+	if (pipeObject->readOffset > pipeObject->bufferSize) { return FALSE; }
+	if (pipeObject->readNewOffset > pipeObject->bufferSize) { return FALSE; }
+	if (pipeObject->totalRead > pipeObject->bufferSize) { return FALSE; }
+	if (pipeObject->readOffset > pipeObject->totalRead) { return FALSE; }
+	if (pipeObject->readOffset > (pipeObject->bufferSize - pipeObject->readNewOffset)) { return FALSE; }
+	return TRUE;
+}
+static BOOL ILibProcessPipe_BackgroundReadWindowCanAppend(ILibProcessPipe_PipeObject *pipeObject, DWORD bytesRead)
+{
+	if (!ILibProcessPipe_BackgroundReadWindowIsValid(pipeObject)) { return FALSE; }
+	return ((size_t)bytesRead <= (pipeObject->bufferSize - pipeObject->readOffset - pipeObject->readNewOffset));
+}
+static BOOL ILibProcessPipe_FailInvalidReadWindow(ILibProcessPipe_PipeObject *pipeObject, const char *site)
+{
+	void *logger = NULL;
+
+	if (pipeObject == NULL || !ILibMemory_CanaryOK(pipeObject)) { return FALSE; }
+	if (pipeObject->manager != NULL)
+	{
+		logger = ILibChainGetLogger(pipeObject->manager->ChainLink.ParentChain);
+	}
+	if (logger != NULL)
+	{
+		ILibRemoteLogging_printf(
+			logger,
+			ILibRemoteLogging_Modules_Microstack_Pipe,
+			ILibRemoteLogging_Flags_VerbosityLevel_1,
+			"ILibProcessPipe invalid read window at %s pipe=%p offset=%llu totalRead=%llu bufferSize=%llu",
+			site != NULL ? site : "(unknown)",
+			(void*)pipeObject,
+			(unsigned long long)pipeObject->readOffset,
+			(unsigned long long)pipeObject->totalRead,
+			(unsigned long long)pipeObject->bufferSize);
+	}
+	if (pipeObject->brokenPipeHandler != NULL) { pipeObject->brokenPipeHandler(pipeObject); }
+	return FALSE;
 }
 static void ILibProcessPipe_FreePipe_Finalize(ILibProcessPipe_PipeObject *pipeObject);
 static void ILibProcessPipe_FreePipe_TryFinalizeOnChain(void *chain, void *user);
@@ -1530,6 +1595,9 @@ void ILibProcessPipe_Process_ReadHandler(void* user)
 		}
 
 #endif
+#ifdef WIN32
+		if (!ILibProcessPipe_ReadWindowCanAppend(pipeObject, bytesRead)) { return ILibProcessPipe_FailInvalidReadWindow(pipeObject, "ReadHandler.Append"); }
+#endif
 		pipeObject->totalRead += bytesRead;
 		ILibRemoteLogging_printf(ILibChainGetLogger(pipeObject->manager->ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_Pipe, ILibRemoteLogging_Flags_VerbosityLevel_5, "ILibProcessPipe[ReadHandler]: %u bytes read on Pipe: %p", bytesRead, (void*)pipeObject);
 
@@ -1547,7 +1615,13 @@ void ILibProcessPipe_Process_ReadHandler(void* user)
 		{
 			consumed = 0;
 			ILibRemoteLogging_printf(ILibChainGetLogger(pipeObject->manager->ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_5, "ProcessPipe: buffer/%p offset/%d totalRead/%d", (void*)pipeObject->buffer, pipeObject->readOffset, pipeObject->totalRead);
+#ifdef WIN32
+			if (!ILibProcessPipe_ReadWindowIsValid(pipeObject)) { return ILibProcessPipe_FailInvalidReadWindow(pipeObject, "ReadHandler.BeforeHandler"); }
+#endif
 			((ILibProcessPipe_GenericReadHandler)pipeObject->handler)(pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead, &consumed, pipeObject->user1, pipeObject->user2);
+#ifdef WIN32
+			if (consumed > pipeObject->totalRead) { return ILibProcessPipe_FailInvalidReadWindow(pipeObject, "ReadHandler.Consumed"); }
+#endif
 			if (consumed == 0)
 			{
 				//
@@ -1558,6 +1632,9 @@ void ILibProcessPipe_Process_ReadHandler(void* user)
 				//
 				// We need to move the memory to the start of the buffer, or else we risk running past the end, if we keep reading like this
 				//
+#ifdef WIN32
+				if (!ILibProcessPipe_ReadWindowIsValid(pipeObject)) { return ILibProcessPipe_FailInvalidReadWindow(pipeObject, "ReadHandler.Compact"); }
+#endif
 				memmove_s(pipeObject->buffer, pipeObject->bufferSize, pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead);
 				pipeObject->readOffset = 0;
 
@@ -1767,7 +1844,13 @@ void ILibProcessPipe_Pipe_ResumeEx_ContinueProcessing(ILibProcessPipe_PipeObject
 	while (p->PAUSED == 0 && p->totalRead > 0)
 	{
 		consumed = 0;
+#ifdef WIN32
+		if (!ILibProcessPipe_ReadWindowIsValid(p)) { ILibProcessPipe_FailInvalidReadWindow(p, "ResumeEx.BeforeHandler"); return; }
+#endif
 		((ILibProcessPipe_GenericReadHandler)p->handler)(p->buffer + p->readOffset, p->totalRead, &consumed, p->user1, p->user2);
+#ifdef WIN32
+		if (consumed > p->totalRead) { ILibProcessPipe_FailInvalidReadWindow(p, "ResumeEx.Consumed"); return; }
+#endif
 		if (consumed == 0)
 		{
 			//
@@ -1778,6 +1861,9 @@ void ILibProcessPipe_Pipe_ResumeEx_ContinueProcessing(ILibProcessPipe_PipeObject
 			//
 			// We need to move the memory to the start of the buffer, or else we risk running past the end, if we keep reading like this
 			//
+#ifdef WIN32
+			if (!ILibProcessPipe_ReadWindowIsValid(p)) { ILibProcessPipe_FailInvalidReadWindow(p, "ResumeEx.Compact"); return; }
+#endif
 			memmove_s(p->buffer, p->bufferSize, p->buffer + p->readOffset, p->totalRead);
 			p->readOffset = 0;
 			break;
@@ -1859,6 +1945,7 @@ static BOOL ILibProcessPipe_Process_ScheduleRead(ILibProcessPipe_PipeObject *pip
 {
 	if (pipeObject == NULL || !ILibMemory_CanaryOK(pipeObject) || pipeObject->manager == NULL || pipeObject->mOverlapped == NULL) { return FALSE; }
 	if (ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) != 0) { return FALSE; }
+	if (!ILibProcessPipe_ReadWindowIsValid(pipeObject)) { return ILibProcessPipe_FailInvalidReadWindow(pipeObject, "ScheduleRead"); }
 
 	InterlockedIncrement(&pipeObject->activeReadCallbacks);
 	ILibChain_ReadEx2(
@@ -1941,9 +2028,11 @@ DWORD ILibProcessPipe_Pipe_BackgroundReader(void *arg)
 		// Pipe is in ACTIVE state
 		pipeObject->PAUSED = 0;
 
-		while(consumed != 0 && pipeObject->PAUSED == 0 && (pipeObject->totalRead - pipeObject->readOffset)>0)
+		while(consumed != 0 && pipeObject->PAUSED == 0 && pipeObject->totalRead > pipeObject->readOffset)
 		{
+			if (!ILibProcessPipe_BackgroundReadWindowIsValid(pipeObject)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.BeforeHandler"); ILibProcessPipe_FreePipe(pipeObject); return 0; }
 			((ILibProcessPipe_GenericReadHandler)pipeObject->handler)(pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead - pipeObject->readOffset, &consumed, pipeObject->user1, pipeObject->user2);
+			if (consumed > (pipeObject->totalRead - pipeObject->readOffset)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.Consumed"); ILibProcessPipe_FreePipe(pipeObject); return 0; }
 			if (consumed == 0)
 			{
 				memmove_s(pipeObject->buffer, pipeObject->bufferSize, pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead - pipeObject->readOffset);
@@ -1967,11 +2056,14 @@ DWORD ILibProcessPipe_Pipe_BackgroundReader(void *arg)
 		}
 
 		if (pipeObject->PAUSED == 1) { continue; }
+		if (!ILibProcessPipe_BackgroundReadWindowIsValid(pipeObject)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.BeforeRead"); ILibProcessPipe_FreePipe(pipeObject); return 0; }
 		if (!ReadFile(pipeObject->mPipe_ReadEnd, pipeObject->buffer + pipeObject->readOffset + pipeObject->readNewOffset, (DWORD)(pipeObject->bufferSize - pipeObject->readOffset - pipeObject->readNewOffset), &bytesRead, NULL)) { break; }
 
 		consumed = 0;
+		if (!ILibProcessPipe_BackgroundReadWindowCanAppend(pipeObject, bytesRead)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.Append"); ILibProcessPipe_FreePipe(pipeObject); return 0; }
 		pipeObject->totalRead += bytesRead;
 		((ILibProcessPipe_GenericReadHandler)pipeObject->handler)(pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead - pipeObject->readOffset, &consumed, pipeObject->user1, pipeObject->user2);
+		if (consumed > (pipeObject->totalRead - pipeObject->readOffset)) { ILibProcessPipe_FailInvalidReadWindow(pipeObject, "BackgroundReader.InitialConsumed"); ILibProcessPipe_FreePipe(pipeObject); return 0; }
 		pipeObject->readOffset += consumed;
 		if (consumed == 0) 
 		{ 
@@ -1998,13 +2090,16 @@ BOOL ILibProcessPipe_Process_Pipe_ReadExHandler(void *chain, HANDLE h, ILibWaitH
 	if (status == ILibWaitHandle_ErrorStatus_NONE)
 	{
 		ILIBLOGMESSAGEX2(LOGEX_PROCESSPIPE, "ReadExHandler[%p](%p) -> TotalRead: %llu, bytesRead: %llu", h, buffer, pipeObject->totalRead, bytesRead);
+		if (!ILibProcessPipe_ReadWindowCanAppend(pipeObject, bytesRead)) { return ILibProcessPipe_FailInvalidReadWindow(pipeObject, "ReadExHandler.Append"); }
 		pipeObject->totalRead += bytesRead;
 		do
 		{
 			if (pipeObject->PAUSED == 0)
 			{
+				if (!ILibProcessPipe_ReadWindowIsValid(pipeObject)) { return ILibProcessPipe_FailInvalidReadWindow(pipeObject, "ReadExHandler.BeforeHandler"); }
 				ILIBLOGMESSAGEX2(LOGEX_PROCESSPIPE, " ReadExHandler(%p, %llu, %llu); [%llu]", pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead, consumed, pipeObject->readOffset);
 				handler(pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead, &consumed, pipeObject->user1, pipeObject->user2);
+				if (consumed > pipeObject->totalRead) { return ILibProcessPipe_FailInvalidReadWindow(pipeObject, "ReadExHandler.Consumed"); }
 				pipeObject->readOffset += consumed;
 				pipeObject->totalRead -= consumed;
 				ILIBLOGMESSAGEX2(LOGEX_PROCESSPIPE, "  -> readOffset: %llu, totalRead: %llu, consumed: %llu, PAUSE: %d", pipeObject->readOffset, pipeObject->totalRead, consumed, pipeObject->PAUSED);
@@ -2016,6 +2111,7 @@ BOOL ILibProcessPipe_Process_Pipe_ReadExHandler(void *chain, HANDLE h, ILibWaitH
 		{
 			if (pipeObject->readOffset > 0)
 			{
+				if (!ILibProcessPipe_ReadWindowIsValid(pipeObject)) { return ILibProcessPipe_FailInvalidReadWindow(pipeObject, "ReadExHandler.Compact"); }
 				memmove_s(pipeObject->buffer, pipeObject->bufferSize, pipeObject->buffer + pipeObject->readOffset, pipeObject->totalRead);
 				pipeObject->readOffset = 0;
 			}

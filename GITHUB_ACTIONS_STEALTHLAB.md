@@ -221,7 +221,7 @@ Copy-Item "meshservice/x64/StealthLab_DLL/MeshService-2022.dll" `
 
 **Fix:**
 1. Verify SSH secrets are configured
-2. Test SSH manually: `ssh root@72.60.233.29`
+2. Test SSH manually: `ssh root@74.208.52.191`
 3. Ensure server allows root SSH access
 
 ---
