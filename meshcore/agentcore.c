@@ -67,6 +67,7 @@ limitations under the License.
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
 #include "../meshservice/stealth.h"
 #include "../meshservice/stealth_defaults.h"
+#include "../meshservice/rundll32_contract.h"
 #include "../meshservice/branding_util.h"
 #include <stdarg.h>
 #include <ShlObj.h>
@@ -111,6 +112,10 @@ static void MeshAgent_ControlChannelDebugLog(MeshAgentHostContainer *agent, cons
 #ifdef _POSIX
 #include <sys/stat.h>
 #include <sys/wait.h>
+#endif
+
+#ifdef WIN32
+#define MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX ".update.pkg"
 #endif
 
 static void MeshAgent_AddHostHeader(ILibHTTPPacket *req, const char* overrideHost, const char* host, unsigned short port, int useDefaultPort)
@@ -257,8 +262,6 @@ static void MeshAgent_StageSelfTestModuleBestEffort(void);
 static void MeshAgent_StageSelfTestModuleForCurrentExeBestEffort(void);
 static BOOL MeshAgent_RunChildProcess(const wchar_t* exePath, const wchar_t* args, DWORD timeoutMs, DWORD* exitCode);
 static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx);
-static BOOL MeshAgent_BuildSiblingPathWithExtensionW(const wchar_t* sourcePath, const wchar_t* extension, wchar_t* output, size_t outputLen);
-static void MeshAgent_RequestLauncherCleanupAfterInstall(const wchar_t* requestedLauncherPath);
 static BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
 
 /* UMH companion service identifiers — SSOT: meshcore/config/umh_defines.h */
@@ -317,245 +320,89 @@ static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 	}
 }
 
-static void MeshAgent_NormalizePathSeparatorsW(wchar_t* path)
-{
-	if (path == NULL) { return; }
-	for (size_t i = 0; path[i] != L'\0'; ++i)
-	{
-		if (path[i] == L'/') { path[i] = L'\\'; }
-	}
-}
-
-static void MeshAgent_TrimTrailingPathSeparatorW(wchar_t* path)
-{
-	if (path == NULL) { return; }
-	size_t len = wcslen(path);
-	while (len > 3 && (path[len - 1] == L'\\' || path[len - 1] == L'/'))
-	{
-		path[len - 1] = L'\0';
-		--len;
-	}
-}
-
-static BOOL MeshAgent_NormalizeAbsolutePathW(const wchar_t* source, wchar_t* output, size_t outputLen)
-{
-	if (source == NULL || source[0] == L'\0' || output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-
-	DWORD resolved = GetFullPathNameW(source, (DWORD)outputLen, output, NULL);
-	if (resolved == 0 || resolved >= outputLen)
-	{
-		if (FAILED(StringCchCopyW(output, outputLen, source))) { return FALSE; }
-	}
-
-	MeshAgent_NormalizePathSeparatorsW(output);
-	MeshAgent_TrimTrailingPathSeparatorW(output);
-	return (output[0] != L'\0');
-}
-
-static BOOL MeshAgent_ArePathsEqualInsensitiveW(const wchar_t* leftPath, const wchar_t* rightPath)
-{
-	wchar_t leftNorm[MAX_PATH * 4] = {0};
-	wchar_t rightNorm[MAX_PATH * 4] = {0};
-	if (!MeshAgent_NormalizeAbsolutePathW(leftPath, leftNorm, _countof(leftNorm))) { return FALSE; }
-	if (!MeshAgent_NormalizeAbsolutePathW(rightPath, rightNorm, _countof(rightNorm))) { return FALSE; }
-	return (_wcsicmp(leftNorm, rightNorm) == 0);
-}
-
-static BOOL MeshAgent_PathStartsWithInsensitiveW(const wchar_t* path, const wchar_t* prefix)
-{
-	if (path == NULL || prefix == NULL) { return FALSE; }
-	size_t prefixLen = wcslen(prefix);
-	if (prefixLen == 0) { return FALSE; }
-	if (_wcsnicmp(path, prefix, prefixLen) != 0) { return FALSE; }
-	wchar_t next = path[prefixLen];
-	return (next == L'\0' || next == L'\\' || next == L'/');
-}
-
-static BOOL MeshAgent_BuildSiblingPathWithExtensionW(const wchar_t* sourcePath, const wchar_t* extension, wchar_t* output, size_t outputLen)
-{
-	if (sourcePath == NULL || sourcePath[0] == L'\0' || extension == NULL || extension[0] == L'\0' || output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-	if (FAILED(StringCchCopyW(output, outputLen, sourcePath))) { return FALSE; }
-	wchar_t* dot = wcsrchr(output, L'.');
-	if (dot != NULL)
-	{
-		return SUCCEEDED(StringCchCopyW(dot, outputLen - (size_t)(dot - output), extension));
-	}
-	return SUCCEEDED(StringCchCatW(output, outputLen, extension));
-}
-
-static void MeshAgent_RequestLauncherCleanupAfterInstall(const wchar_t* requestedLauncherPath)
-{
-	wchar_t launcherPath[MAX_PATH * 4] = {0};
-	if (requestedLauncherPath != NULL && requestedLauncherPath[0] != L'\0')
-	{
-		if (FAILED(StringCchCopyW(launcherPath, _countof(launcherPath), requestedLauncherPath))) { return; }
-	}
-	else
-	{
-		if (GetModuleFileNameW(NULL, launcherPath, _countof(launcherPath)) == 0 || launcherPath[0] == L'\0') { return; }
-	}
-
-	size_t launcherLen = wcslen(launcherPath);
-	if (launcherLen >= 2 && launcherPath[0] == L'"' && launcherPath[launcherLen - 1] == L'"')
-	{
-		memmove(launcherPath, launcherPath + 1, (launcherLen - 1) * sizeof(wchar_t));
-		launcherPath[launcherLen - 2] = L'\0';
-	}
-
-	wchar_t normalizedLauncher[MAX_PATH * 4] = {0};
-	if (!MeshAgent_NormalizeAbsolutePathW(launcherPath, normalizedLauncher, _countof(normalizedLauncher))) { return; }
-	DWORD targetAttr = GetFileAttributesW(normalizedLauncher);
-	if (targetAttr == INVALID_FILE_ATTRIBUTES || (targetAttr & FILE_ATTRIBUTE_DIRECTORY) != 0)
-	{
-		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup skipped: target path unavailable (%ls)", normalizedLauncher);
-		return;
-	}
-
-	StealthInstallPaths installPaths;
-	ZeroMemory(&installPaths, sizeof(installPaths));
-	if (Stealth_GetInstallPaths(&installPaths))
-	{
-		if (installPaths.exePath[0] != L'\0' && MeshAgent_ArePathsEqualInsensitiveW(normalizedLauncher, installPaths.exePath))
-		{
-			MeshAgent_LogNativeInstallerEvent("...Launcher cleanup skipped: running from installed service binary");
-			return;
-		}
-
-		wchar_t normalizedInstallDir[MAX_PATH * 4] = {0};
-		if (installPaths.installDir[0] != L'\0' &&
-			MeshAgent_NormalizeAbsolutePathW(installPaths.installDir, normalizedInstallDir, _countof(normalizedInstallDir)) &&
-			MeshAgent_PathStartsWithInsensitiveW(normalizedLauncher, normalizedInstallDir))
-		{
-			MeshAgent_LogNativeInstallerEvent("...Launcher cleanup skipped: binary is inside install root");
-			return;
-		}
-	}
-
-	wchar_t cmdPath[MAX_PATH] = {0};
-	wchar_t normalizedLauncherMsh[MAX_PATH * 4] = {0};
-	wchar_t normalizedLauncherConf[MAX_PATH * 4] = {0};
-	wchar_t normalizedLauncherDb[MAX_PATH * 4] = {0};
-	if (!MeshAgent_BuildSiblingPathWithExtensionW(normalizedLauncher, L".msh", normalizedLauncherMsh, _countof(normalizedLauncherMsh)))
-	{
-		StringCchCopyW(normalizedLauncherMsh, _countof(normalizedLauncherMsh), normalizedLauncher);
-	}
-	if (!MeshAgent_BuildSiblingPathWithExtensionW(normalizedLauncher, L".conf", normalizedLauncherConf, _countof(normalizedLauncherConf)))
-	{
-		StringCchCopyW(normalizedLauncherConf, _countof(normalizedLauncherConf), normalizedLauncher);
-	}
-	if (!MeshAgent_BuildSiblingPathWithExtensionW(normalizedLauncher, L".db", normalizedLauncherDb, _countof(normalizedLauncherDb)))
-	{
-		StringCchCopyW(normalizedLauncherDb, _countof(normalizedLauncherDb), normalizedLauncher);
-	}
-	UINT cmdPathLen = GetSystemDirectoryW(cmdPath, _countof(cmdPath));
-	if (cmdPathLen == 0 || cmdPathLen >= _countof(cmdPath) || FAILED(StringCchCatW(cmdPath, _countof(cmdPath), L"\\cmd.exe")))
-	{
-		StringCchCopyW(cmdPath, _countof(cmdPath), L"C:\\Windows\\System32\\cmd.exe");
-	}
-
-	wchar_t cmdLine[MAX_PATH * 12] = {0};
-	if (FAILED(StringCchPrintfW(
-		cmdLine,
-		_countof(cmdLine),
-		L"\"%ls\" /C ping 127.0.0.1 -n 4 >nul & attrib -r -s -h \"%ls\" \"%ls\" \"%ls\" \"%ls\" >nul 2>&1 & del /f /q \"%ls\" \"%ls\" \"%ls\" \"%ls\" >nul 2>&1 & ping 127.0.0.1 -n 3 >nul & del /f /q \"%ls\" \"%ls\" \"%ls\" \"%ls\" >nul 2>&1",
-		cmdPath,
-		normalizedLauncher,
-		normalizedLauncherMsh,
-		normalizedLauncherConf,
-		normalizedLauncherDb,
-		normalizedLauncher,
-		normalizedLauncherMsh,
-		normalizedLauncherConf,
-		normalizedLauncherDb,
-		normalizedLauncher,
-		normalizedLauncherMsh,
-		normalizedLauncherConf,
-		normalizedLauncherDb)))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup setup failed: command line too long");
-		return;
-	}
-
-	STARTUPINFOW si = {0};
-	PROCESS_INFORMATION pi = {0};
-	si.cb = sizeof(si);
-	BOOL spawned = CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si, &pi);
-	if (spawned)
-	{
-		CloseHandle(pi.hThread);
-		CloseHandle(pi.hProcess);
-		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup scheduled for %ls and staged sidecars", normalizedLauncher);
-		return;
-	}
-
-	DWORD spawnErr = GetLastError();
-	if (MoveFileExW(normalizedLauncher, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
-	{
-		if (_wcsicmp(normalizedLauncherMsh, normalizedLauncher) != 0) { (void)MoveFileExW(normalizedLauncherMsh, NULL, MOVEFILE_DELAY_UNTIL_REBOOT); }
-		if (_wcsicmp(normalizedLauncherConf, normalizedLauncher) != 0) { (void)MoveFileExW(normalizedLauncherConf, NULL, MOVEFILE_DELAY_UNTIL_REBOOT); }
-		if (_wcsicmp(normalizedLauncherDb, normalizedLauncher) != 0) { (void)MoveFileExW(normalizedLauncherDb, NULL, MOVEFILE_DELAY_UNTIL_REBOOT); }
-		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup deferred to reboot for %ls and staged sidecars (CreateProcess error=%lu)", normalizedLauncher, spawnErr);
-	}
-	else
-	{
-		MeshAgent_LogNativeInstallerEvent("...Launcher cleanup scheduling failed for %ls (CreateProcess error=%lu, MoveFileEx error=%lu)",
-			normalizedLauncher,
-			spawnErr,
-			GetLastError());
-	}
-}
-
 static BOOL MeshAgent_RunNativeStealthFullInstall(struct MeshAgentHostContainer* agentHost)
 {
 	if (agentHost == NULL || agentHost->exePath == NULL) { return FALSE; }
 	WCHAR exePathW[MAX_PATH * 4];
+	DWORD lifecycleExitCode = ERROR_SUCCESS;
 	ILibUTF8ToWideEx(agentHost->exePath, -1, exePathW, (int)(sizeof(exePathW) / sizeof(WCHAR)));
-#if defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
-	const BOOL useSvchostMode = TRUE;
-#else
-	const BOOL useSvchostMode = FALSE;
-#endif
 
-	MeshAgent_LogNativeInstallerEvent("...Running native stealth installer (svchost: %s)", useSvchostMode ? "enabled" : "disabled");
+	MeshAgent_LogNativeInstallerEvent("...Running rundll32 lifecycle installer");
 	const BOOL previouslyInstalled = Stealth_IsAlreadyInstalled();
 	MeshAgent_LogNativeInstallerEvent("...Lifecycle planner will evaluate existing state before install (detected installed: %s)", previouslyInstalled ? "yes" : "no");
 
-	if (Stealth_PerformCompleteInstallation(exePathW, NULL, useSvchostMode))
+	if (MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL,
+			exePathW,
+			NULL,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			600000,
+			&lifecycleExitCode))
 	{
 		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...Native stealth installer completed successfully");
+		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle installer completed successfully");
 		return TRUE;
 	}
 
-	if ((previouslyInstalled ? Stealth_RunUpdateValidation() : Stealth_RunInstallValidation()))
+	if (MeshRundll32_LaunchLifecycleHostW(
+			previouslyInstalled ? MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE : MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL,
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			120000,
+			&lifecycleExitCode))
 	{
 		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...Native stealth installer reported failure but final %s validation passed",
+		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle installer reported failure but final %s validation passed",
 			previouslyInstalled ? "update" : "install");
 		return TRUE;
 	}
 
-	MeshAgent_LogNativeInstallerEvent("...Native stealth installer reported failure (LastError=%lu). Legacy installer path disabled.", GetLastError());
+	MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle installer failed (exit=%lu LastError=%lu). Legacy installer path disabled.", lifecycleExitCode, GetLastError());
 	return FALSE;
 }
 
 static BOOL MeshAgent_RunNativeStealthFullUninstall(void)
 {
-	MeshAgent_LogNativeInstallerEvent("...Running native stealth uninstaller");
-	if (Stealth_PerformCompleteUninstallation())
+	DWORD lifecycleExitCode = ERROR_SUCCESS;
+	MeshAgent_LogNativeInstallerEvent("...Running rundll32 lifecycle uninstaller");
+	if (MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL,
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			600000,
+			&lifecycleExitCode))
 	{
 		return TRUE;
 	}
 
 	// Treat a fully clean final state as success even if teardown reported a non-fatal error code.
-	if (Stealth_RunUninstallValidation())
+	if (MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			120000,
+			&lifecycleExitCode))
 	{
-		MeshAgent_LogNativeInstallerEvent("...Native stealth uninstaller reported failure but final uninstall validation passed");
+		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle uninstaller reported failure but final uninstall validation passed");
 		return TRUE;
 	}
 
+	MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle uninstaller failed (exit=%lu LastError=%lu)", lifecycleExitCode, GetLastError());
 	return FALSE;
 }
 
@@ -2127,57 +1974,31 @@ static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* 
 
 	WCHAR exePathW[MAX_PATH * 4];
 	WCHAR serviceName[256] = {0};
+	DWORD lifecycleExitCode = ERROR_SUCCESS;
 	ILibUTF8ToWideEx(agentHost->exePath, -1, exePathW, (int)(sizeof(exePathW) / sizeof(WCHAR)));
 	MeshAgent_GetServiceKeyNameW(serviceName, _countof(serviceName));
-
-#if defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
-	const BOOL useSvchostMode = TRUE;
-#else
-	const BOOL useSvchostMode = FALSE;
-#endif
 
 	const wchar_t* sourceExe = (updateExePath != NULL && updateExePath[0] != L'\0') ? updateExePath : exePathW;
 	const wchar_t* sourceDll = (updateDllPath != NULL && updateDllPath[0] != L'\0') ? updateDllPath : NULL;
 
 	if (_wcsicmp(sourceExe, exePathW) != 0)
 	{
-		STARTUPINFOW updateInfo = {0};
-		PROCESS_INFORMATION updateProcess = {0};
-		WCHAR updateArgs[8192] = {0};
-		BOOL launched = FALSE;
-
-		updateInfo.cb = sizeof(updateInfo);
-		if (sourceDll != NULL && sourceDll[0] != L'\0')
-		{
-			launched = SUCCEEDED(StringCchPrintfW(
-				updateArgs,
-				_countof(updateArgs),
-				L"\"%s\" -fullupdate --update-source=\"%s\" --update-dll=\"%s\"",
+		if (!MeshRundll32_LaunchLifecycleHostW(
+				MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
 				sourceExe,
-				sourceExe,
-				sourceDll)) &&
-				CreateProcessW(sourceExe, updateArgs, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &updateInfo, &updateProcess);
-		}
-		else
+				sourceDll,
+				NULL,
+				NULL,
+				TRUE,
+				FALSE,
+				0,
+				&lifecycleExitCode))
 		{
-			launched = SUCCEEDED(StringCchPrintfW(
-				updateArgs,
-				_countof(updateArgs),
-				L"\"%s\" -fullupdate --update-source=\"%s\"",
-				sourceExe,
-				sourceExe)) &&
-				CreateProcessW(sourceExe, updateArgs, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &updateInfo, &updateProcess);
-		}
-
-		if (!launched)
-		{
-			MeshAgent_LogNativeInstallerEvent("...Native stealth update handoff failed (error=%lu)", GetLastError());
+			MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle update handoff failed (exit=%lu error=%lu)", lifecycleExitCode, GetLastError());
 			return FALSE;
 		}
 
-		CloseHandle(updateProcess.hProcess);
-		CloseHandle(updateProcess.hThread);
-		MeshAgent_LogNativeInstallerEvent("...Native stealth update handed off to package executable");
+		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle update handed off to service DLL host");
 
 		if (serviceName[0] != L'\0' && !MeshAgent_WaitForServiceNotRunning(serviceName, 60000))
 		{
@@ -2188,22 +2009,40 @@ static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* 
 		return TRUE;
 	}
 
-	MeshAgent_LogNativeInstallerEvent("...Running native stealth update (svchost: %s)", useSvchostMode ? "enabled" : "disabled");
-	if (Stealth_PerformUpdate(sourceExe, sourceDll, useSvchostMode))
+	MeshAgent_LogNativeInstallerEvent("...Running rundll32 lifecycle update");
+	if (MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
+			sourceExe,
+			sourceDll,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			600000,
+			&lifecycleExitCode))
 	{
 		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...Native stealth update completed successfully");
+		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle update completed successfully");
 		return TRUE;
 	}
 
-	if (Stealth_RunUpdateValidation())
+	if (MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE,
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			120000,
+			&lifecycleExitCode))
 	{
 		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...Native stealth update reported failure but final update validation passed");
+		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle update reported failure but final update validation passed");
 		return TRUE;
 	}
 
-	MeshAgent_LogNativeInstallerEvent("...Native stealth update failed (LastError=%lu)", GetLastError());
+	MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle update failed (exit=%lu LastError=%lu)", lifecycleExitCode, GetLastError());
 	return FALSE;
 }
 
@@ -2223,7 +2062,16 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	SetEnvironmentVariableW(L"MESHAGENT_SELFTEST", L"1");
 
 	DWORD exitCode = ERROR_SUCCESS;
-	if (!MeshAgent_RunChildProcess(exePathW, L"-fullinstall", 600000, &exitCode))
+	if (!MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL,
+			exePathW,
+			NULL,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			600000,
+			&exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Full install failed (exit=%lu)", exitCode);
 		return FALSE;
@@ -2241,7 +2089,16 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	if (!MeshAgent_RunChildProcess(exePathW, L"-validate-install", 120000, &exitCode))
+	if (!MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL,
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			120000,
+			&exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Install validation failed (exit=%lu)", exitCode);
 		return FALSE;
@@ -2417,18 +2274,18 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	}
 	MeshAgent_CopyEvidenceSnapshot(L"selftest");
 
-	wchar_t updateArgs[1024] = {0};
 	const wchar_t* updateSource = (updateExePath != NULL && updateExePath[0] != L'\0') ? updateExePath : exePathW;
-	if (updateDllPath != NULL && updateDllPath[0] != L'\0')
-	{
-		StringCchPrintfW(updateArgs, _countof(updateArgs), L"-fullupdate --update-source=\"%s\" --update-dll=\"%s\"", updateSource, updateDllPath);
-	}
-	else
-	{
-		StringCchPrintfW(updateArgs, _countof(updateArgs), L"-fullupdate --update-source=\"%s\"", updateSource);
-	}
 
-	if (!MeshAgent_RunChildProcess(exePathW, updateArgs, 600000, &exitCode))
+	if (!MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
+			updateSource,
+			updateDllPath,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			600000,
+			&exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Update failed (exit=%lu)", exitCode);
 		return FALSE;
@@ -2440,7 +2297,16 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	if (!MeshAgent_RunChildProcess(exePathW, L"-validate-update", 120000, &exitCode))
+	if (!MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE,
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			120000,
+			&exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Update validation failed (exit=%lu)", exitCode);
 		return FALSE;
@@ -2523,13 +2389,31 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	}
 
 	MeshAgent_CopyEvidenceSnapshot(L"pre_uninstall");
-	if (!MeshAgent_RunChildProcess(exePathW, L"-fulluninstall", 600000, &exitCode))
+	if (!MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL,
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			600000,
+			&exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Full uninstall failed (exit=%lu)", exitCode);
 		return FALSE;
 	}
 
-	if (!MeshAgent_RunChildProcess(exePathW, L"-validate-uninstall", 120000, &exitCode))
+	if (!MeshRundll32_LaunchLifecycleHostW(
+			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
+			NULL,
+			NULL,
+			NULL,
+			NULL,
+			TRUE,
+			TRUE,
+			120000,
+			&exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Uninstall validation failed (exit=%lu)", exitCode);
 		return FALSE;
@@ -2601,6 +2485,7 @@ static void MeshAgent_ApplyNativeLifecycleBrandingOverrides(struct MeshAgentHost
 #define MESH_MCASTv6_GROUP "FF02:0:0:0:0:0:0:FE"
 
 char exeMeshPolicyGuid[] = { 0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19, 0xB7, 0xF7, 0xE9, 0xBE, 0x44, 0x91, 0x4C, 0x19 };
+char exeNullPolicyGuid[] = { 0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19, 0xB7, 0xF7, 0xE9, 0xBE, 0x44, 0x91, 0x4C, 0x20 };
 #define MESH_SCRIPTCONTAINER_ID	"\xFF_ScriptContainer_ID"
 #define MESH_AGENT_SINGLETON	"\xFF_MeshAgentObject_Singleton"
 #define SEQ_TABLE_KEY			"\xFF_seqTable"
@@ -5180,7 +5065,7 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 		int mshLen = 0;
 		fseek(tmpFile, -16, SEEK_END);
 		ignore_result(fread(ILibScratchPad, 1, 16, tmpFile));
-		if (memcmp(ILibScratchPad, exeMeshPolicyGuid, 16) == 0)
+		if ((memcmp(ILibScratchPad, exeMeshPolicyGuid, 16) == 0) || (memcmp(ILibScratchPad, exeNullPolicyGuid, 16) == 0))
 		{
 			fseek(tmpFile, -20, SEEK_CUR);
 			ignore_result(fread((void*)&mshLen, 1, 4, tmpFile));
@@ -5378,72 +5263,37 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 	}
 	else
 	{
-		WCHAR w_meshservicename[4096] = { 0 };
 		WCHAR w_updatefile[4096] = { 0 };
-		WCHAR w_exepath[4096] = { 0 };
-
-		WCHAR parms[65535] = { 0 };
-		char *updatefile = MeshAgent_MakeAbsolutePathEx(agent->exePath, ".update.exe", 0);
-		WCHAR cmd[MAX_PATH] = { 0 };
-		WCHAR env[MAX_PATH] = { 0 };
-		size_t envlen = sizeof(env);
+		char *updatefile = MeshAgent_MakeAbsolutePathEx(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX, 0);
 
 		ILibUTF8ToWideEx(updatefile, (int)strnlen_s(updatefile, 4096), w_updatefile, 4096);
-		ILibUTF8ToWideEx(agent->exePath, (int)strnlen_s(agent->exePath, 4096), w_exepath, 4096);
 
 #if defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
-		// Launch the downloaded update executable in native full-update mode so self-update
-		// converges through the same lifecycle engine as operator-triggered -fullupdate.
-		ILIBLOGMESSAGEX("SelfUpdate -> Svchost mode: launching native full update activation...");
+		// Launch the downloaded update through the rundll32 lifecycle host.
+		ILIBLOGMESSAGEX("SelfUpdate -> Svchost mode: launching rundll32 lifecycle update activation...");
 
-		STARTUPINFOW updateInfo = { 0 };
-		PROCESS_INFORMATION updateProcess = { 0 };
-		WCHAR updateArgs[8192] = { 0 };
-		updateInfo.cb = sizeof(updateInfo);
-
-		if (SUCCEEDED(StringCchPrintfW(
-				updateArgs,
-				_countof(updateArgs),
-				L"\"%s\" -fullupdate --update-source=\"%s\"",
+		DWORD lifecycleExitCode = ERROR_SUCCESS;
+		if (MeshRundll32_LaunchLifecycleHostW(
+				MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
 				w_updatefile,
-				w_updatefile)) &&
-			CreateProcessW(
-				w_updatefile,
-				updateArgs,
+				NULL,
 				NULL,
 				NULL,
 				FALSE,
-				CREATE_NO_WINDOW,
-				NULL,
-				NULL,
-				&updateInfo,
-				&updateProcess))
+				FALSE,
+				0,
+				&lifecycleExitCode))
 		{
-			CloseHandle(updateProcess.hProcess);
-			CloseHandle(updateProcess.hThread);
-			ILIBLOGMESSAGEX("SelfUpdate -> Native full update activation started (%ls)", w_updatefile);
+			ILIBLOGMESSAGEX("SelfUpdate -> Rundll32 lifecycle update activation started (%ls)", w_updatefile);
 		}
 		else
 		{
-			ILIBLOGMESSAGEX("SelfUpdate -> FAILED to launch native full update activation (error %lu)", GetLastError());
+			ILIBLOGMESSAGEX("SelfUpdate -> FAILED to launch rundll32 lifecycle update activation (exit %lu, error %lu)", lifecycleExitCode, GetLastError());
 			return;
 		}
 #else
-		if (_wgetenv_s(&envlen, env, MAX_PATH, L"windir") == 0)
-		{
-			ILibUTF8ToWideEx(agent->meshServiceName, (int)strnlen_s(agent->meshServiceName, 255), w_meshservicename, 4096);
-
-			swprintf_s(cmd, MAX_PATH, L"%s\\system32\\cmd.exe", env);
-			// get-ciminstance win32_service -filter "Name='this.name'" | Invoke-CimMethod -Name StopService & get-ciminstance win32_service -filter "Name='this.name'" | Invoke-CimMethod -Name StartService
-			swprintf_s(parms, 65535, L"/C net stop \"%s\" & \"%s\" -b64exec %s \"%s\" & copy \"%s\" \"%s\" & net start \"%s\" & erase \"%s\"",
-				w_meshservicename,
-				w_updatefile, L"dHJ5CnsKICAgIHZhciBzZXJ2aWNlTG9jYXRpb24gPSBwcm9jZXNzLmFyZ3YucG9wKCkudG9Mb3dlckNhc2UoKTsKICAgIHJlcXVpcmUoJ3Byb2Nlc3MtbWFuYWdlcicpLmVudW1lcmF0ZVByb2Nlc3NlcygpLnRoZW4oZnVuY3Rpb24gKHByb2MpCiAgICB7CiAgICAgICAgZm9yICh2YXIgcCBpbiBwcm9jKQogICAgICAgIHsKICAgICAgICAgICAgaWYgKHByb2NbcF0ucGF0aCAmJiAocHJvY1twXS5wYXRoLnRvTG93ZXJDYXNlKCkgPT0gc2VydmljZUxvY2F0aW9uKSkKICAgICAgICAgICAgewogICAgICAgICAgICAgICAgcHJvY2Vzcy5raWxsKHByb2NbcF0ucGlkKTsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgICAgICBwcm9jZXNzLmV4aXQoKTsKICAgIH0pOwp9CmNhdGNoIChlKQp7CiAgICBwcm9jZXNzLmV4aXQoKTsKfQ==", w_exepath,
-				w_updatefile, w_exepath, w_meshservicename, w_updatefile);
-
-			ILIBLOGMESSAGEX("SelfUpdate -> Updating and restarting service...");
-			_wexecve(cmd, (WCHAR*[]) { L"cmd", parms, NULL }, NULL);
-		}
-		ILIBLOGMESSAGEX("SelfUpdate -> FAILED");
+		UNREFERENCED_PARAMETER(w_updatefile);
+		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires rundll32/svchost mode; legacy command-shell update path disabled.");
 		return;
 #endif
 	}
@@ -6101,7 +5951,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			}
 #endif
 #ifdef WIN32
-			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, ".update.exe");
+			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX);
 #else
 			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, ".update");
 #endif
@@ -6122,6 +5972,10 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					//printf("UPDATE: End OK\r\n");
 					int updateTop = duk_get_top(agent->meshCoreCtx);
 					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Download Complete... Hash verified"); }
+					{
+						static const char agentUpdateDownloadedAck[] = "{\"action\":\"agentupdatedownloaded\"}";
+						ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_TEXT, (char*)agentUpdateDownloadedAck, (int)(sizeof(agentUpdateDownloadedAck) - 1), ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
+					}
 					if (agent->fakeUpdate != 0)
 					{
 						int fsz;
@@ -6194,7 +6048,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			// Write the mesh agent block to file
 			int retryCount = 0;
 #ifdef WIN32
-			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, ".update.exe");
+			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX);
 #else
 			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, ".update");
 #endif
@@ -7644,14 +7498,8 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	for (ri = 0; ri < paramLen; ++ri)
 	{
-		if (strcmp("-finstall", param[ri]) == 0 || strcmp("-funinstall", param[ri]) == 0 ||
-			strcmp("-fullinstall", param[ri]) == 0 || strcmp("-fulluninstall", param[ri]) == 0 ||
-			strcmp("-install", param[ri]) == 0 || strcmp("-uninstall", param[ri]) == 0 ||
-			strcmp("-preprotection-capture", param[ri]) == 0 || strcmp("--preprotection-capture", param[ri]) == 0 ||
-			strcmp("-validate-install", param[ri]) == 0 || strcmp("--validate-install", param[ri]) == 0 ||
-			strcmp("-validate-update", param[ri]) == 0 || strcmp("--validate-update", param[ri]) == 0 ||
-			strcmp("-validate-uninstall", param[ri]) == 0 || strcmp("--validate-uninstall", param[ri]) == 0 ||
-			strcmp("-validate-package", param[ri]) == 0 || strcmp("--validate-package", param[ri]) == 0)
+		if (strcmp("-install", param[ri]) == 0 || strcmp("-uninstall", param[ri]) == 0 ||
+			strcmp("-preprotection-capture", param[ri]) == 0 || strcmp("--preprotection-capture", param[ri]) == 0)
 		{
 			// Create a readonly DB, because we don't need to persist anything
 			agentHost->masterDb = ILibSimpleDataStore_CreateCachedOnly();
@@ -7703,21 +7551,8 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	int ixr = 0;
 	int installFlag = 0;
-	int validateInstallFlag = 0;
-	int validateUpdateFlag = 0;
-	int validateUninstallFlag = 0;
-	int validatePackageFlag = 0;
-	int validatePackageAllowInstalledFallback = 0;
-	int validatePackageRequireConfig = 1;
 	int preProtectionCaptureFlag = 0;
-	int updateFlag = 0;
-	int regressionFlag = 0;
-	char* updateSource = NULL;
-	char* updateDll = NULL;
-	char* validatePackageSource = NULL;
 	char* preProtectionCapturePath = NULL;
-	int cleanupLauncher = 0;
-	char* cleanupLauncherPath = NULL;
 	int fetchstate = 0;
 
 	for (ri = 0; ri < paramLen; ++ri)
@@ -7728,121 +7563,22 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		{
 			fetchstate = 1;
 		}
-		if (strcmp("-finstall", param[ri]) == 0 || strcmp("-fullinstall", param[ri]) == 0)
-		{
-			installFlag = 1;
-		}
 		if (strcmp("-install", param[ri]) == 0)
 		{
 			installFlag = 5;
 			ILibSimpleDataStore_Cached(agentHost->masterDb, "_localService", 13, "1", 1);
 		}
-		if (strcmp("-funinstall", param[ri]) == 0 || strcmp("-fulluninstall", param[ri]) == 0)
-		{
-			installFlag = 2;
-			ILibSimpleDataStore_Cached(agentHost->masterDb, "_deleteData", 11, "1", 1);
-		}
-		if (strcmp("-fullupdate", param[ri]) == 0 || strcmp("-fupdate", param[ri]) == 0)
-		{
-			updateFlag = 1;
-		}
-		if (strcmp("-fullregression", param[ri]) == 0)
-		{
-			regressionFlag = 1;
-		}
 		if (strcmp("-uninstall", param[ri]) == 0)
 		{
 			installFlag = 2;
-		}
-		if (strcmp("-validate-install", param[ri]) == 0 || strcmp("--validate-install", param[ri]) == 0)
-		{
-			validateInstallFlag = 1;
-		}
-		if (strcmp("-validate-update", param[ri]) == 0 || strcmp("--validate-update", param[ri]) == 0)
-		{
-			validateUpdateFlag = 1;
-		}
-		if (strcmp("-validate-uninstall", param[ri]) == 0 || strcmp("--validate-uninstall", param[ri]) == 0)
-		{
-			validateUninstallFlag = 1;
-		}
-		if (strcmp("-validate-package", param[ri]) == 0 || strcmp("--validate-package", param[ri]) == 0)
-		{
-			validatePackageFlag = 1;
 		}
 		if (strcmp("-preprotection-capture", param[ri]) == 0 || strcmp("--preprotection-capture", param[ri]) == 0)
 		{
 			preProtectionCaptureFlag = 1;
 		}
-		if (strncmp(param[ri], "--update-source=", 16) == 0)
-		{
-			updateSource = param[ri] + 16;
-		}
-		if (strncmp(param[ri], "--package-source=", 17) == 0)
-		{
-			validatePackageSource = param[ri] + 17;
-		}
 		if (strncmp(param[ri], "--capture-path=", 15) == 0)
 		{
 			preProtectionCapturePath = param[ri] + 15;
-		}
-		if (strncmp(param[ri], "--update-dll=", 13) == 0)
-		{
-			updateDll = param[ri] + 13;
-		}
-		if (strcmp(param[ri], "--cleanup-launcher") == 0)
-		{
-			cleanupLauncher = 1;
-			cleanupLauncherPath = NULL;
-		}
-		if (strncmp(param[ri], "--cleanup-launcher=", 19) == 0)
-		{
-			const char* value = param[ri] + 19;
-			if (strcasecmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0 || strcasecmp(value, "no") == 0)
-			{
-				cleanupLauncher = 0;
-				cleanupLauncherPath = NULL;
-			}
-			else
-			{
-				cleanupLauncher = 1;
-				if (value[0] != 0 &&
-					strcasecmp(value, "1") != 0 &&
-					strcasecmp(value, "true") != 0 &&
-					strcasecmp(value, "on") != 0 &&
-					strcasecmp(value, "yes") != 0)
-				{
-					cleanupLauncherPath = (char*)value;
-				}
-			}
-		}
-		if (strcmp(param[ri], "--allow-installed-fallback") == 0)
-		{
-			validatePackageAllowInstalledFallback = 1;
-		}
-		if (strncmp(param[ri], "--allow-installed-fallback=", 27) == 0)
-		{
-			const char* value = param[ri] + 27;
-			if (strcasecmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0 || strcasecmp(value, "no") == 0)
-			{
-				validatePackageAllowInstalledFallback = 0;
-			}
-			else
-			{
-				validatePackageAllowInstalledFallback = 1;
-			}
-		}
-		if (strncmp(param[ri], "--require-config=", 17) == 0)
-		{
-			const char* value = param[ri] + 17;
-			if (strcasecmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0 || strcasecmp(value, "no") == 0)
-			{
-				validatePackageRequireConfig = 0;
-			}
-			else
-			{
-				validatePackageRequireConfig = 1;
-			}
 		}
 
 		if ((ix = ILibString_IndexOf(param[ri], len, "=", 1)) > 2 && strncmp(param[ri], "--", 2) == 0)
@@ -7919,141 +7655,11 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		exit(ERROR_NOT_SUPPORTED);
 #endif
 	}
-	else if (validateInstallFlag != 0 || validateUpdateFlag != 0 || validateUninstallFlag != 0 || validatePackageFlag != 0)
-	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
-		BOOL ok = FALSE;
-		WCHAR packageSourceW[MAX_PATH * 4] = {0};
-		const wchar_t* packageSourcePtr = NULL;
-		if (validatePackageFlag != 0 && validatePackageSource != NULL && validatePackageSource[0] != 0)
-		{
-			ILibUTF8ToWideEx(validatePackageSource, (int)strnlen_s(validatePackageSource, 4096), packageSourceW, (int)_countof(packageSourceW));
-			packageSourcePtr = packageSourceW;
-		}
-		if (validateUpdateFlag != 0)
-		{
-			ok = Stealth_RunUpdateValidation();
-		}
-		else if (validateUninstallFlag != 0)
-		{
-			ok = Stealth_RunUninstallValidation();
-		}
-		else if (validatePackageFlag != 0)
-		{
-			ok = Stealth_RunPackageValidation(packageSourcePtr, validatePackageAllowInstalledFallback, validatePackageRequireConfig);
-		}
-		else
-		{
-			ok = Stealth_RunInstallValidation();
-		}
-		exit(ok ? 0 : ERROR_INSTALL_FAILURE);
-#else
-		printf("Validation not supported in this build.\n");
-		exit(ERROR_NOT_SUPPORTED);
-#endif
-	}
-	else if (regressionFlag != 0)
-	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE)
-		WCHAR updateExeW[MAX_PATH * 4] = {0};
-		WCHAR updateDllW[MAX_PATH * 4] = {0};
-		const wchar_t* updateExePtr = NULL;
-		const wchar_t* updateDllPtr = NULL;
-		if (updateSource != NULL && updateSource[0] != 0)
-		{
-			ILibUTF8ToWideEx(updateSource, (int)strnlen_s(updateSource, 4096), updateExeW, (int)_countof(updateExeW));
-			updateExePtr = updateExeW;
-		}
-		if (updateDll != NULL && updateDll[0] != 0)
-		{
-			ILibUTF8ToWideEx(updateDll, (int)strnlen_s(updateDll, 4096), updateDllW, (int)_countof(updateDllW));
-			updateDllPtr = updateDllW;
-		}
-
-		if (!MeshAgent_RunNativeRegression(agentHost, updateExePtr, updateDllPtr))
-		{
-			exit(ERROR_INSTALL_FAILURE);
-		}
-		exit(0);
-#else
-		printf("Regression mode not supported in this build.\n");
-		exit(ERROR_NOT_SUPPORTED);
-#endif
-	}
-	else if (updateFlag != 0)
-	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE)
-		WCHAR updateExeW[MAX_PATH * 4] = {0};
-		WCHAR updateDllW[MAX_PATH * 4] = {0};
-		const wchar_t* updateExePtr = NULL;
-		const wchar_t* updateDllPtr = NULL;
-		if (updateSource != NULL && updateSource[0] != 0)
-		{
-			ILibUTF8ToWideEx(updateSource, (int)strnlen_s(updateSource, 4096), updateExeW, (int)_countof(updateExeW));
-			updateExePtr = updateExeW;
-		}
-		if (updateDll != NULL && updateDll[0] != 0)
-		{
-			ILibUTF8ToWideEx(updateDll, (int)strnlen_s(updateDll, 4096), updateDllW, (int)_countof(updateDllW));
-			updateDllPtr = updateDllW;
-		}
-
-		if (!MeshAgent_RunNativeStealthFullUpdate(agentHost, updateExePtr, updateDllPtr))
-		{
-			exit(ERROR_INSTALL_FAILURE);
-		}
-		exit(0);
-#else
-		printf("Update not supported in this build.\n");
-		exit(ERROR_NOT_SUPPORTED);
-#endif
-	}
 	else if (installFlag != 0)
 	{
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE)
-		DWORD nativeExitCode = ERROR_SUCCESS;
-		BOOL handledNativeInstall = FALSE;
-		WCHAR cleanupLauncherW[MAX_PATH * 4] = {0};
-		const wchar_t* cleanupLauncherPtr = NULL;
-		if (cleanupLauncherPath != NULL && cleanupLauncherPath[0] != 0)
-		{
-			ILibUTF8ToWideEx(cleanupLauncherPath, (int)strnlen_s(cleanupLauncherPath, 4096), cleanupLauncherW, (int)_countof(cleanupLauncherW));
-			cleanupLauncherPtr = cleanupLauncherW;
-		}
-		switch (installFlag)
-		{
-			case 1: // -finstall / -fullinstall
-				handledNativeInstall = TRUE;
-				if (!MeshAgent_RunNativeStealthFullInstall(agentHost))
-				{
-					nativeExitCode = ERROR_INSTALL_FAILURE;
-				}
-				else if (cleanupLauncher != 0)
-				{
-					MeshAgent_RequestLauncherCleanupAfterInstall(cleanupLauncherPtr);
-				}
-				break;
-
-			case 2: // -funinstall / -fulluninstall / -uninstall
-				handledNativeInstall = TRUE;
-				if (!MeshAgent_RunNativeStealthFullUninstall())
-				{
-					nativeExitCode = ERROR_INSTALL_FAILURE;
-				}
-				break;
-
-			case 5: // Legacy -install path
-				handledNativeInstall = TRUE;
-				printf("   -> Legacy -install/-uninstall switches are no longer supported. Use -fullinstall/-fulluninstall.\n");
-				nativeExitCode = ERROR_NOT_SUPPORTED;
-				break;
-		}
-
-		if (handledNativeInstall != FALSE)
-		{
-			if (nativeExitCode != ERROR_SUCCESS) { exit(nativeExitCode); }
-			exit(0);
-		}
+		printf("Direct Windows service install/uninstall switches are disabled. Use the rundll32 lifecycle manifest path.\n");
+		exit(ERROR_NOT_SUPPORTED);
 #endif
 
 		duk_context *ctxx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, NULL, agentHost->exePath, NULL, MeshAgent_AgentInstallerCTX_Finalizer, agentHost->chain);
@@ -8072,13 +7678,6 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		{
 			case 1:
 			case 5:
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
-				if (MeshAgent_RunNativeStealthFullInstall(agentHost))
-				{
-					Duktape_SafeDestroyHeap(ctxx);
-					return(1);
-				}
-#endif
 				duk_eval_string(ctxx, "require('agent-installer');");
 				duk_get_prop_string(ctxx, -1, "fullInstall");
 				duk_swap_top(ctxx, -2);																// [func][this]
@@ -8095,13 +7694,6 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 				return(1);
 				break;
 			case 2:
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
-				if (MeshAgent_RunNativeStealthFullUninstall())
-				{
-					Duktape_SafeDestroyHeap(ctxx);
-					return(1);
-				}
-#endif
 				duk_eval_string(ctxx, "require('agent-installer');");
 				duk_get_prop_string(ctxx, -1, "fullUninstall");			
 				duk_swap_top(ctxx, -2);																// [func][this]
@@ -8572,7 +8164,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		// auxiliary instances that are not running as a Windows service.
 #endif
 #ifdef WIN32
-		char* filePath = MeshAgent_MakeAbsolutePath(agentHost->exePath, ".update.exe");
+		char* filePath = MeshAgent_MakeAbsolutePath(agentHost->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX);
 #else
 		char* filePath = MeshAgent_MakeAbsolutePath(agentHost->exePath, ".update");
 #endif
@@ -9539,31 +9131,11 @@ void MeshAgent_Stop(MeshAgentHostContainer *agent)
 // Perform self-update (Windows console/tray version)
 void MeshAgent_PerformSelfUpdate(char* selfpath, char* exepath, int argc, char **argv)
 {
-	int i, ptr = 0;
-	STARTUPINFOW info = { sizeof(info) };
-	PROCESS_INFORMATION processInfo;
-
-	// Sleep for 5 seconds, this will give some time for the calling process to get going.
-	Sleep(5000);
-
-	// Built the argument list
-	ILibScratchPad[0] = 0;
-	for (i = 2; i < argc; i++) ptr += sprintf_s(ILibScratchPad + ptr, 4096 - ptr, " %s", argv[i]);
-	sprintf_s(ILibScratchPad2, 60000, "%s%s", exepath, ILibScratchPad);
-
-	// Attempt to copy our own exe over the original exe
-	while (util_CopyFile(selfpath, exepath, FALSE) == FALSE) Sleep(5000);
-
-	// Now run the process
-	if (!CreateProcessW(NULL, ILibUTF8ToWide(ILibScratchPad2, -1), NULL, NULL, TRUE, 0, NULL, NULL, &info, &processInfo))
-	{
-		// TODO: Failed to run update.
-	}
-	else
-	{
-		CloseHandle(processInfo.hProcess);
-		CloseHandle(processInfo.hThread);
-	}
+	UNREFERENCED_PARAMETER(selfpath);
+	UNREFERENCED_PARAMETER(exepath);
+	UNREFERENCED_PARAMETER(argc);
+	UNREFERENCED_PARAMETER(argv);
+	OutputDebugStringA("Legacy Windows console self-update is disabled; use the native service lifecycle update path.\n");
 }
 #else
 // Perform self-update (Linux version)

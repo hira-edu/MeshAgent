@@ -109,26 +109,6 @@ def version_parts(version_text: str | None) -> list[int]:
     return parts[:4]
 
 
-def choose_output_msh(repo_root: Path, config: dict, explicit: str | None) -> Path:
-    if explicit:
-        out_path = Path(explicit)
-        return out_path if out_path.is_absolute() else (repo_root / out_path)
-    env_name = None
-    if "MESH_MSH_FILENAME" in os.environ:
-        env_name = os.environ["MESH_MSH_FILENAME"]
-    if env_name:
-        return (repo_root / env_name).resolve()
-    existing = sorted(repo_root.glob("*.msh"))
-    if existing:
-        return existing[0].resolve()
-    branding = get_value(config, "branding", {}) or {}
-    service_name = get_value(branding, "serviceName", "MeshAgent")
-    sanitized = re.sub(r'[<>:"/\\\\|?*]', "", str(service_name)).strip()
-    if sanitized:
-        return (repo_root / f"{sanitized}.msh").resolve()
-    return (repo_root / "MeshAgent.msh").resolve()
-
-
 def build_header(config: dict) -> str:
     branding = get_value(config, "branding", {}) or {}
     version_info = get_value(branding, "versionInfo", {}) or {}
@@ -321,7 +301,8 @@ def build_header(config: dict) -> str:
         "#undef MESH_AGENT_PRODUCT_VERSION_STR",
         f'#define MESH_AGENT_PRODUCT_VERSION_STR TEXT("{escape_c_text(product_version)}")',
         "",
-        "/* ========== Network Configuration ========== */",
+        "/* ========== Network Configuration (compile-time only for explicit hardcoded lab builds) ========== */",
+        "#ifdef MESH_PROVISIONING_HARDCODED",
         f"#define MESH_AGENT_NETWORK_ENDPOINT {primary_endpoint_literal}",
         f"#define MESH_AGENT_NETWORK_SNI {network_sni_literal}",
         f"#define MESH_AGENT_NETWORK_HOST_HEADER {network_host_header_literal}",
@@ -331,13 +312,16 @@ def build_header(config: dict) -> str:
         f"#define MESH_AGENT_NETWORK_FALLBACK_LIST {fallback_list_macro}",
         "#undef MESH_ALPN_PROTOCOLS",
         f"#define MESH_ALPN_PROTOCOLS {network_alpn_literal}",
+        "#endif /* MESH_PROVISIONING_HARDCODED */",
         "",
-        "/* ========== Provisioning Data ========== */",
+        "/* ========== Provisioning Data (compile-time only for explicit hardcoded lab builds) ========== */",
+        "#ifdef MESH_PROVISIONING_HARDCODED",
         f'#define MESH_AGENT_MESH_ID "{escape_c_text(mesh_id_macro)}"',
         f'#define MESH_AGENT_SERVER_ID "{escape_c_text(server_id_macro)}"',
         f'#define MESH_AGENT_MESH_NAME "{escape_c_text(mesh_name_macro)}"',
         f'#define MESH_AGENT_SERVER_URL "{escape_c_text(mesh_server_url_macro)}"',
         f"#define MESH_AGENT_MESH_TYPE {mesh_type_macro}",
+        "#endif /* MESH_PROVISIONING_HARDCODED */",
         "",
         "/* ========== Stealth Features ========== */",
         f"#define MESH_AGENT_STEALTH_ENABLED {bool_to_int(get_bool(stealth, 'enabled'))}",
@@ -385,7 +369,7 @@ def build_header(config: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_outputs(config_path: Path, output_header: Path, output_msh: Path) -> None:
+def write_outputs(config_path: Path, output_header: Path) -> None:
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
 
@@ -394,49 +378,24 @@ def write_outputs(config_path: Path, output_header: Path, output_msh: Path) -> N
         raise ValueError(f"branding.serviceName and branding.displayName must be populated in {config_path}")
 
     output_header.parent.mkdir(parents=True, exist_ok=True)
-    output_msh.parent.mkdir(parents=True, exist_ok=True)
     output_header.write_text(build_header(config), encoding="utf-8", newline="\n")
 
-    provisioning = get_value(config, "provisioning", {}) or {}
-    mesh_id_raw = get_value(provisioning, "meshId")
-    mesh_id_header = convert_mesh_id_to_hex_string(mesh_id_raw) or mesh_id_raw
-    msh_lines = []
-    mappings = [
-        ("MeshName", get_value(provisioning, "meshName")),
-        ("MeshType", get_value(provisioning, "meshType")),
-        ("MeshID", mesh_id_header),
-        ("ServerID", get_value(provisioning, "serverId")),
-        ("MeshServer", get_value(provisioning, "serverUrl")),
-        ("meshServiceName", get_value(branding, "serviceName")),
-        ("displayName", get_value(branding, "displayName")),
-        ("companyName", get_value(branding, "companyName")),
-        ("description", get_value(branding, "description")),
-        ("fileName", get_value(branding, "binaryName")),
-    ]
-    for key, value in mappings:
-        if value is not None and str(value).strip() != "":
-            msh_lines.append(f"{key}={value}")
-    output_msh.write_text("\n".join(msh_lines) + "\n", encoding="utf-8", newline="\n")
-
     print(f"[OK] Branding header generated: {output_header}")
-    print(f"[OK] Provisioning manifest generated: {output_msh}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generate MeshAgent branding header and provisioning manifest.")
+    parser = argparse.ArgumentParser(description="Generate MeshAgent branding header.")
     parser.add_argument("--repo-root", dest="repo_root")
     parser.add_argument("--config", dest="config_path")
     parser.add_argument("--output-header", dest="output_header")
-    parser.add_argument("--output-msh", dest="output_msh")
     args = parser.parse_args()
 
     repo_root = repo_root_from(args.repo_root)
     config_path = pick_config_path(repo_root, args.config_path)
     output_header = Path(args.output_header).resolve() if args.output_header else (repo_root / "meshcore" / "generated" / "meshagent_branding.h")
-    output_msh = choose_output_msh(repo_root, json.loads(config_path.read_text(encoding="utf-8")), args.output_msh)
 
     try:
-        write_outputs(config_path, output_header, output_msh)
+        write_outputs(config_path, output_header)
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1

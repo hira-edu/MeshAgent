@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 const exeMeshPolicyGuid = 'B996015880544A19B7F7E9BE44914C19';
+const exeNullPolicyGuid = 'B996015880544A19B7F7E9BE44914C20';
 
 // options <object>
 //  sourcePath: <string> Executable Path
@@ -33,7 +34,7 @@ function hashFile(options)
         // Try to determine what the platform is
         try
         {
-            options.peinfo = require('PE_Parser')(options.sourcePath);
+            options.peinfo = require('./PE_Parser')(options.sourcePath);
             options.platform = 'win32';
         }
         catch (e) {
@@ -53,15 +54,16 @@ function hashFile(options)
     if (options.state.endIndex == 0)
     {
         // We just need to check for Embedded MSH file
-        var fd = fs.openSync(options.sourcePath, 'rb');
+        var fd = fs.openSync(options.sourcePath, 'r');
         var guid = Buffer.alloc(16);
         var bytesRead;
 
         bytesRead = fs.readSync(fd, guid, 0, guid.length, options.state.stats.size - 16);
-        if(guid.toString('hex') == exeMeshPolicyGuid)
+        const guidHex = guid.toString('hex').toUpperCase();
+        if((guidHex == exeMeshPolicyGuid) || (guidHex == exeNullPolicyGuid))
         {
             bytesRead = fs.readSync(fd, guid, 0, 4, options.state.stats.size - 20);
-            options.state.endIndex = options.state.stats.size - 20 - guid.readUInt32LE(0);
+            options.state.endIndex = options.state.stats.size - 20 - guid.readUInt32BE(0);
         }
         else
         {
@@ -72,15 +74,15 @@ function hashFile(options)
 
     if (options.state.checkSumIndex != 0)
     {
-        options.state.source = fs.createReadStream(options.sourcePath, { flags: 'rb', start: 0, end: options.state.checkSumIndex-1 });
+        options.state.source = fs.createReadStream(options.sourcePath, { flags: 'r', start: 0, end: options.state.checkSumIndex-1 });
         options.state.source.on('end', function ()
         {
             options.targetStream.write(Buffer.alloc(4));
-            var source = fs.createReadStream(options.sourcePath, { flags: 'rb', start: options.state.checkSumIndex + 4, end: options.state.tableIndex-1 });
+            var source = fs.createReadStream(options.sourcePath, { flags: 'r', start: options.state.checkSumIndex + 4, end: options.state.tableIndex-1 });
             source.on('end', function ()
             {
                 options.targetStream.write(Buffer.alloc(8));
-                var source = fs.createReadStream(options.sourcePath, { flags: 'rb', start: options.state.tableIndex + 8, end: options.state.endIndex-1 });
+                var source = fs.createReadStream(options.sourcePath, { flags: 'r', start: options.state.tableIndex + 8, end: options.state.endIndex-1 });
                 options.state.source = source;
                 options.state.source.pipe(options.targetStream);
 
@@ -92,8 +94,8 @@ function hashFile(options)
     }
     else
     {
-        options.state.source = fs.createReadStream(options.sourcePath, { flags: 'rb', start: 0, end: options.state.endIndex-1 });
-        options.state.source.pipe(options.state.targetStream);
+        options.state.source = fs.createReadStream(options.sourcePath, { flags: 'r', start: 0, end: options.state.endIndex-1 });
+        options.state.source.pipe(options.targetStream);
     }
 }
 

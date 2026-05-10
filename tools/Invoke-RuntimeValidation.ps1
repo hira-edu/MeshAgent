@@ -41,8 +41,6 @@
     Skips the MeshCentral cache refresh/parity check. By default the helper restarts MeshCentral, clears cached meshagent downloads,
     and verifies that `meshcentral-data\agents\MeshService64.exe` matches the local StealthLab build before running tests.
 
-.PARAMETER IncludeFullInstall
-    When specified, runs the legacy install/uninstall RuntimeValidation checks instead of forcing svchost-only coverage.
 #>
 [CmdletBinding()]
 param(
@@ -56,8 +54,7 @@ param(
     [string]$ReportPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'verification\phase3\runtime.json'),
     [string]$LogPath,
     [switch]$AllowNonAdmin,
-    [switch]$SkipMeshCentralPreflight,
-    [switch]$IncludeFullInstall
+    [switch]$SkipMeshCentralPreflight
 )
 
 Set-StrictMode -Version Latest
@@ -294,144 +291,6 @@ function Test-MeshCentralReachable {
     }
 }
 
-function Get-ServiceNameFromBranding {
-    param([string]$RepoRoot)
-
-    $state = Get-BrandingState -RepoRoot $RepoRoot
-    $serviceName = $state.Config.branding.serviceName
-    if ([string]::IsNullOrWhiteSpace($serviceName)) {
-        $serviceName = 'MeshAgent'
-    }
-    return $serviceName
-}
-
-function Get-ServiceFailureExpectation {
-    param($PersistenceConfig)
-
-    $result = [pscustomobject]@{
-        Enabled       = $false
-        ResetPeriod   = 0
-        DelayMs       = 0
-        ExpectRestart = $false
-    }
-
-    if ($null -eq $PersistenceConfig) {
-        return $result
-    }
-
-    $recovery = $PersistenceConfig.serviceRecovery
-    $watchdog = $PersistenceConfig.watchdog
-
-    if ($recovery -and $recovery.enabled) {
-        $result.Enabled = $true
-        if ($recovery.resetPeriod) { $result.ResetPeriod = [uint32]$recovery.resetPeriod }
-        if ($recovery.restartDelay) { $result.DelayMs = [uint32]$recovery.restartDelay }
-        if ($recovery.actions) {
-            $result.ExpectRestart = @($recovery.actions | Where-Object { $_ -match 'restart' }).Count -gt 0
-        } else {
-            $result.ExpectRestart = $true
-        }
-    }
-    elseif ($watchdog -and $watchdog.enabled) {
-        $result.Enabled = $true
-        if ($watchdog.intervalSeconds) { $result.ResetPeriod = [uint32]$watchdog.intervalSeconds }
-        if ($watchdog.restartDelay) { $result.DelayMs = [uint32]$watchdog.restartDelay * 1000 }
-        $result.ExpectRestart = [bool]$watchdog.restartOnCrash
-    }
-
-    return $result
-}
-
-function Assert-ServiceFailureActions {
-    param(
-        [string]$ServiceName,
-        [pscustomobject]$Expectation
-    )
-
-    if (-not $Expectation -or -not $Expectation.Enabled) {
-        Write-Host ("[RuntimeValidation] Service '{0}' recovery/watchdog disabled per branding configuration." -f $ServiceName) -ForegroundColor Yellow
-        return
-    }
-
-    Write-Host ("[RuntimeValidation] Verifying failure actions for '{0}'..." -f $ServiceName) -ForegroundColor Cyan
-    $scOutput = & sc.exe qfailure $ServiceName 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to query failure actions for service '$ServiceName': $scOutput"
-    }
-    $outputText = ($scOutput | Out-String)
-
-    $resetMatch = [regex]::Match($outputText, 'RESET_PERIOD\s*\(in seconds\)\s*:\s*(\d+)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if (-not $resetMatch.Success) {
-        throw "Service '$ServiceName' failure actions missing reset period."
-    }
-    $actualReset = [uint32]$resetMatch.Groups[1].Value
-    if ($Expectation.ResetPeriod -gt 0 -and $actualReset -ne $Expectation.ResetPeriod) {
-        throw ("Service '{0}' reset period mismatch. Expected {1}, found {2}." -f $ServiceName, $Expectation.ResetPeriod, $actualReset)
-    }
-
-    $delayMatch = [regex]::Match($outputText, 'Delay\s*=\s*(\d+)\s*milliseconds', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if ($Expectation.ExpectRestart -and (-not $delayMatch.Success)) {
-        throw "Service '$ServiceName' failure actions missing restart delay."
-    }
-    elseif ($delayMatch.Success -and $Expectation.DelayMs -gt 0) {
-        $actualDelay = [uint32]$delayMatch.Groups[1].Value
-        if ($actualDelay -ne $Expectation.DelayMs) {
-            throw ("Service '{0}' restart delay mismatch. Expected {1} ms, found {2} ms." -f $ServiceName, $Expectation.DelayMs, $actualDelay)
-        }
-    }
-
-    $restartCount = ([regex]::Matches($outputText, 'RESTART\s+--', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)).Count
-    if ($Expectation.ExpectRestart -and $restartCount -eq 0) {
-        throw "Service '$ServiceName' failure actions do not include any restart entries."
-    }
-    if (-not $Expectation.ExpectRestart -and $restartCount -gt 0) {
-        throw "Service '$ServiceName' failure actions unexpectedly include restart entries while branding disabled them."
-    }
-
-    Write-Host ("[RuntimeValidation] Failure actions verified for '{0}' (reset={1}s delay={2}ms restarts={3})." -f $ServiceName, $actualReset, ($delayMatch.Success ? $delayMatch.Groups[1].Value : 0), $restartCount) -ForegroundColor Green
-}
-
-function Assert-SvchostOnlyService {
-    param(
-        [string]$ServiceName,
-        [pscustomobject]$FailureExpectation
-    )
-
-    Write-Host ("[RuntimeValidation] Validating service '{0}' is svchost-only..." -f $ServiceName) -ForegroundColor Cyan
-    $svc = Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $ServiceName) -ErrorAction SilentlyContinue
-    if ($null -eq $svc) {
-        throw "Service '$ServiceName' not found after runtime validation."
-    }
-
-    if ($svc.ServiceType -ne 'Share Process') {
-        throw "Service '$ServiceName' is not registered as SERVICE_WIN32_SHARE_PROCESS (actual: $($svc.ServiceType))."
-    }
-    if ($svc.StartMode -ne 'Disabled') {
-        throw "Service '$ServiceName' must be disabled after install. Detected StartMode=$($svc.StartMode)."
-    }
-    if ($svc.State -ne 'Stopped') {
-        throw "Service '$ServiceName' must be stopped after install. Detected State=$($svc.State)."
-    }
-    if ($svc.PathName -notmatch 'svchost\.exe') {
-        throw "Service '$ServiceName' does not point to svchost (PathName=$($svc.PathName))."
-    }
-    if ($svc.PathName -match 'meshagent\.exe') {
-        throw "Service '$ServiceName' still references meshagent.exe which indicates a standalone registration."
-    }
-
-    $svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
-    $svcReg = Get-ItemProperty -Path $svcRegPath -ErrorAction Stop
-    if ($svcReg.Type -ne 0x20) {
-        throw ("Service '{0}' registry Type is {1}. Expected 0x20 (SERVICE_WIN32_SHARE_PROCESS)." -f $ServiceName, ('0x{0:X}' -f $svcReg.Type))
-    }
-    if ($svcReg.Start -ne 4) {
-        throw ("Service '{0}' registry Start is {1}. Expected 4 (Disabled)." -f $ServiceName, $svcReg.Start)
-    }
-
-    Write-Host ("[RuntimeValidation] Service '{0}' confirmed svchost-only (disabled/stopped)." -f $ServiceName) -ForegroundColor Green
-    Assert-ServiceFailureActions -ServiceName $ServiceName -Expectation $FailureExpectation
-}
-
 Assert-Elevation -AllowOverride:$AllowNonAdmin
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
@@ -439,8 +298,6 @@ $brandingState = Get-BrandingState -RepoRoot $repoRoot
 if ($null -eq $brandingState -or $null -eq $brandingState.Config) {
     throw "Branding configuration is unavailable. Run MSBuild.exe .\\MeshAgent.Build.proj (or python .\\tools\\generate_branding_assets.py --repo-root . --config .\\branding_config.local.json) to refresh generated assets."
 }
-$failureExpectation = Get-ServiceFailureExpectation -PersistenceConfig $brandingState.Config.persistence
-$serviceNameTarget = Get-ServiceNameFromBranding -RepoRoot $repoRoot
 $binaryRoot = Resolve-ExistingPath $BinaryPath
 
 $meshCentralRepoResolved = $MeshCentralRepo
@@ -491,9 +348,7 @@ $testArgs = @{
     MeshCtrlPath          = $meshCtrlResolved
     ReportPath            = $ReportPath
 }
-if (-not $IncludeFullInstall) {
-    $testArgs['SvchostOnly'] = $true
-}
+$testArgs['SvchostOnly'] = $true
 
 Write-Host "[RuntimeValidation] Launching test.ps1 with MeshCentral download verification..." -ForegroundColor Cyan
 if ($LogPath) {
@@ -504,53 +359,6 @@ if ($LogPath) {
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
     throw "Runtime validation failed (exit code $exitCode). See $ReportPath for details."
-}
-
-$binaryExe = Join-Path $binaryRoot "MeshService-2022.exe"
-if (-not (Test-Path -LiteralPath $binaryExe)) {
-    throw "Runtime binary not found at $binaryExe"
-}
-
-function Invoke-AgentBinary {
-    param(
-        [string]$FilePath,
-        [string[]]$Arguments,
-        [int]$TimeoutSeconds = 180
-    )
-
-    $proc = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Verb RunAs -WindowStyle Hidden -PassThru
-    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
-        try { $proc.Kill() } catch { }
-        throw ("Command '{0} {1}' timed out after {2}s" -f $FilePath, ($Arguments -join ' '), $TimeoutSeconds)
-    }
-    return $proc.ExitCode
-}
-
-Write-Host ("[RuntimeValidation] Reinstalling '{0}' to assert svchost-only posture..." -f $serviceNameTarget) -ForegroundColor Cyan
-$svchostInstallExit = Invoke-AgentBinary -FilePath $binaryExe -Arguments @('-fullinstall')
-if ($svchostInstallExit -ne 0) {
-    throw ("MeshService-2022.exe -fullinstall exited with code {0} during svchost verification." -f $svchostInstallExit)
-}
-
-Write-Host ("[RuntimeValidation] Forcing '{0}' into disabled/stopped state before verification..." -f $serviceNameTarget) -ForegroundColor Yellow
-try {
-    sc.exe stop $serviceNameTarget 2>$null | Out-Null
-} catch { }
-Start-Sleep -Milliseconds 500
-try {
-    sc.exe config $serviceNameTarget start= disabled 2>$null | Out-Null
-} catch {
-    Write-Warning ("Failed to set service '{0}' to disabled: {1}" -f $serviceNameTarget, $_.Exception.Message)
-}
-
-try {
-    Assert-SvchostOnlyService -ServiceName $serviceNameTarget -FailureExpectation $failureExpectation
-} finally {
-    try {
-        Invoke-AgentBinary -FilePath $binaryExe -Arguments @('-fulluninstall') | Out-Null
-    } catch {
-        Write-Warning ("Failed to uninstall '{0}' during svchost cleanup: {1}" -f $serviceNameTarget, $_.Exception.Message)
-    }
 }
 
 Write-Host "[RuntimeValidation] Completed successfully. Report: $ReportPath" -ForegroundColor Green

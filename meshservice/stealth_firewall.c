@@ -369,42 +369,11 @@ static void Stealth_CollectNrptDomainsFromInstalledProvisioning(
     wchar_t domains[STEALTH_NRPT_MAX_DOMAINS][STEALTH_NRPT_DOMAIN_MAX],
     UINT32* count)
 {
-    wchar_t candidate[MAX_PATH];
-    wchar_t dllNamedPath[MAX_PATH];
-    wchar_t dllNameWide[MAX_PATH];
-    wchar_t dllBase[MAX_PATH];
-    mesh_branding_text_t dllName = MeshService_GetSvchostDllNameText();
-
     if (paths == NULL || paths->installDir[0] == L'\0') { return; }
 
-    if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\.msh", paths->installDir)))
+    if (paths->confPath[0] != L'\0')
     {
-        Stealth_CollectNrptDomainsFromMshFile(candidate, domains, count);
-    }
-
-    if (dllName != NULL)
-    {
-        ZeroMemory(dllNameWide, sizeof(dllNameWide));
-        ZeroMemory(dllBase, sizeof(dllBase));
-        ZeroMemory(dllNamedPath, sizeof(dllNamedPath));
-        MeshService_CopyBrandingTextToWide(dllName, dllNameWide, _countof(dllNameWide));
-        if (dllNameWide[0] != L'\0')
-        {
-            (void)StringCchCopyW(dllBase, _countof(dllBase), dllNameWide);
-            wchar_t* dot = wcsrchr(dllBase, L'.');
-            if (dot != NULL) { *dot = L'\0'; }
-            if (SUCCEEDED(StringCchPrintfW(dllNamedPath, _countof(dllNamedPath), L"%ls\\%ls.msh", paths->installDir, dllBase)))
-            {
-                Stealth_CollectNrptDomainsFromMshFile(dllNamedPath, domains, count);
-            }
-        }
-    }
-
-    {
-        /* Fallback .msh name derived from service identity */
-        wchar_t altMshName[MAX_PATH];
-        _snwprintf_s(altMshName, _countof(altMshName), _TRUNCATE, L"%ls\\%s.msh", paths->installDir, STEALTH_FALLBACK_SERVICE_NAME);
-        Stealth_CollectNrptDomainsFromMshFile(altMshName, domains, count);
+        Stealth_CollectNrptDomainsFromMshFile(paths->confPath, domains, count);
     }
 }
 

@@ -15,6 +15,8 @@ limitations under the License.
 */
 
 
+var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
+
 function childContainer()
 {
     this._ObjectID = 'child-container';
@@ -159,20 +161,36 @@ function childContainer()
             }
 
             // Use Task Scheduler, as failover
-            var parms = '/C SCHTASKS /CREATE /F /TN MeshUserTask /SC ONCE /ST 00:00 ';
-            parms += ('/RU ' + options.user + ' ');
-            parms += ('/TR "\\"' + process.execPath + '\\" -b64exec ' + script + '"');
-
-            var child = require('child_process').execFile(process.env['windir'] + '\\system32\\cmd.exe', [parms]);
+            var schtasksPath = winSystemPaths.system32Path('schtasks.exe');
+            var child = require('child_process').execFile(schtasksPath, ['/CREATE', '/F', '/TN', 'MeshUserTask', '/SC', 'ONCE', '/ST', '00:00', '/RU', options.user, '/TR', '"' + process.execPath + '" -b64exec ' + script]);
             child.stderr.on('data', function (c) { });
             child.stdout.on('data', function (c) { });
             child.waitExit();
 
-            child = require('child_process').execFile(process.env['windir'] + '\\system32\\cmd.exe', ['cmd']);
+            child = require('child_process').execFile(schtasksPath, ['/RUN', '/TN', 'MeshUserTask']);
             child.stderr.on('data', function (c) { });
             child.stdout.on('data', function (c) { });
-            child.stdin.write('SCHTASKS /RUN /TN MeshUserTask\r\n');
-            child.stdin.write('SCHTASKS /DELETE /F /TN MeshUserTask\r\nexit\r\n');
+            child.waitExit();
+
+            child = require('child_process').execFile(schtasksPath, ['/DELETE', '/F', '/TN', 'MeshUserTask']);
+            child.stderr.on('data', function (c) { });
+            child.stdout.on('data', function (c) { });
+            child.waitExit();
+            return (ret);
+            var parms = '/C "' + winSystemPaths.system32Path('schtasks.exe') + '" /CREATE /F /TN MeshUserTask /SC ONCE /ST 00:00 ';
+            parms += ('/RU ' + options.user + ' ');
+            parms += ('/TR "\\"' + process.execPath + '\\" -b64exec ' + script + '"');
+
+            var child = require('child_process').execFile(winSystemPaths.commandHostPath(), [parms]);
+            child.stderr.on('data', function (c) { });
+            child.stdout.on('data', function (c) { });
+            child.waitExit();
+
+            child = require('child_process').execFile(winSystemPaths.commandHostPath(), ['cmd']);
+            child.stderr.on('data', function (c) { });
+            child.stdout.on('data', function (c) { });
+            child.stdin.write('"' + winSystemPaths.system32Path('schtasks.exe') + '" /RUN /TN MeshUserTask\r\n');
+            child.stdin.write('"' + winSystemPaths.system32Path('schtasks.exe') + '" /DELETE /F /TN MeshUserTask\r\nexit\r\n');
             child.waitExit();
         }
         else

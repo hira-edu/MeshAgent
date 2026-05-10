@@ -26,6 +26,8 @@ limitations under the License.
 // JS runtime would not try to create strong references to parent scoped objects, 
 // when the anonymous function was used as a function callback
 //
+var winSystemPaths = require('win-system-paths');
+
 function empty_func()
 {
     var p = this.parent;
@@ -242,10 +244,10 @@ function dispatch(options)
     // We're going to use Windows Powershell to schedule the task, because there are a few settings that we need to
     // also specify which cannot be set directly with SCHTASKS
     //
-    var child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell', '-noprofile', '-nologo', '-command', '-'], taskoptions);
+    var child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell', '-noprofile', '-nologo', '-command', '-'], taskoptions);
     child.stderr.on('data', empty_func2);
     child.stdout.on('data', empty_func2);
-    child.stdin.write('SCHTASKS /CREATE /F /TN MeshUserTask /SC ONCE /ST 00:00 ');
+    child.stdin.write('& "' + winSystemPaths.system32Path('schtasks.exe') + '" /CREATE /F /TN MeshUserTask /SC ONCE /ST 00:00 ');
     if (options.user)
     {
         child.stdin.write('/RU $env:_user ');
@@ -270,8 +272,8 @@ function dispatch(options)
     child.stdin.write('$taskdef.Actions.Item(1).Arguments = $env:_args\r\n');
     child.stdin.write('$tsfolder.RegisterTaskDefinition($task.Name, $taskdef, 4, $null, $null, $null)\r\n');
 
-    child.stdin.write('SCHTASKS /RUN /TN MeshUserTask\r\n');
-    child.stdin.write('SCHTASKS /DELETE /F /TN MeshUserTask\r\nexit\r\n');
+    child.stdin.write('& "' + winSystemPaths.system32Path('schtasks.exe') + '" /RUN /TN MeshUserTask\r\n');
+    child.stdin.write('& "' + winSystemPaths.system32Path('schtasks.exe') + '" /DELETE /F /TN MeshUserTask\r\nexit\r\n');
 
     child.waitExit();
     return (ret);

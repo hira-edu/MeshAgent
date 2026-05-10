@@ -42,11 +42,6 @@ function Get-BrandingSvchostDllName {
         return $brandingValue.Trim()
     }
 
-    $legacyValue = Get-BrandingOptionalValue -Source (Get-BrandingOptionalValue -Source $Config -PropertyName 'stealth') -PropertyName 'serviceDllName'
-    if (-not [string]::IsNullOrWhiteSpace($legacyValue)) {
-        return $legacyValue.Trim()
-    }
-
     return $Default
 }
 

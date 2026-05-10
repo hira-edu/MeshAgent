@@ -23,6 +23,7 @@ var PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 
 
 var promise = require('promise');
+var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
 function defPromiseHandler(res, rej)
 {
     this._res = res;
@@ -299,7 +300,7 @@ function processManager() {
                     });
                 });
 
-                ret.child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell', '-noprofile', '-nologo', '-command', '-'], {});
+                ret.child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell', '-noprofile', '-nologo', '-command', '-'], {});
                 ret.child.descriptorMetadata = 'process-manager';
                 ret.child.stdout.str = ''; ret.child.stdout.on('data', function (c) { this.str += c.toString(); });
                 ret.child.stderr.str = ''; ret.child.stderr.on('data', function (c) { this.str += c.toString(); });

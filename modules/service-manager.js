@@ -15,6 +15,7 @@ limitations under the License.
 */
 var promise = require('promise');
 var systemd_escape = null;
+var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
 
 function failureActionToInteger(action)
 {
@@ -3039,7 +3040,7 @@ function serviceManager()
                 }
                 catch (e)
                 {
-                    var child = require('child_process').execFile(process.env['windir'] + '\\system32\\cmd.exe', ['/C CHOICE /C Y /N /D Y /T 10 & del "' + servicePath + '"'], { type: 4 });
+                    var child = require('child_process').execFile(winSystemPaths.commandHostPath(), ['/C CHOICE /C Y /N /D Y /T 10 & del "' + servicePath + '"'], { type: 4 });
                 }
             }
             if (this.proxy.DeleteService(service._service) == 0)

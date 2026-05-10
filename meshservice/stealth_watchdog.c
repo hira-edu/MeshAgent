@@ -11,6 +11,7 @@
  */
 
 #include "stealth_watchdog.h"
+#include "rundll32_contract.h"
 #include <stdio.h>
 #include <strsafe.h>
 #include <io.h>
@@ -2217,7 +2218,7 @@ BOOL HelperMonitor_IsApprovedDesktopBridgeCommand(const WCHAR* exePath, const WC
     if (exePath == NULL || exePath[0] == L'\0' || arguments == NULL || arguments[0] == L'\0') {
         return FALSE;
     }
-    if (!Helper_CommandLineContainsInsensitiveW(arguments, L"KvmSessionBridgeW")) {
+    if (!Helper_CommandLineContainsInsensitiveW(arguments, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W)) {
         return FALSE;
     }
     return Helper_EndsWithInsensitiveW(exePath, L"\\rundll32.exe") ||

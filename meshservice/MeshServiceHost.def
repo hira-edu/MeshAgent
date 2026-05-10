@@ -1,3 +1,4 @@
 EXPORTS
     Stealth_SvchostServiceMain
     KvmSessionBridgeW
+    MeshLifecycleHostW

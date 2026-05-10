@@ -443,6 +443,8 @@ microscript/ILibDuktape_Commit.h
 # Generated validation evidence and release artifacts
 docs/testing/evidence/
 docs/testing/artifacts/
+test/msbuild_tmp/
+test/rundll32_*/
 .aider*
 tmp/
 nul

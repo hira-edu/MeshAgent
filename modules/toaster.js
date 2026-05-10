@@ -21,6 +21,7 @@ limitations under the License.
 
 
 var promise = require('promise');
+var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
 
 if (process.platform == 'linux' || process.platform == 'darwin' || process.platform == 'freebsd')
 {
@@ -102,7 +103,7 @@ function Toaster()
                     }
 
                     // Spawn a powershell process so we can setup everything to display the toast
-                    retVal.child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell', '-noprofile', '-nologo', '-command', '-'], retVal.options);
+                    retVal.child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell', '-noprofile', '-nologo', '-command', '-'], retVal.options);
                     retVal.child.descriptorMetadata = 'toaster';
                     retVal.child.toast = retVal;
                     retVal.child.stdout.stdin = retVal.child.stdin;

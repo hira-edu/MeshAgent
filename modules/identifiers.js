@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
+
 function trimIdentifiers(val)
 {
     for(var v in val)
@@ -432,7 +434,7 @@ function windows_volumes()
     p2._p1 = p1;
 
     var cmd = '"Get-Volume | Select-Object -Property DriveLetter,FileSystemLabel,FileSystemType,Size,SizeRemaining,DriveType | ConvertTo-Csv -NoTypeInformation"';
-    var child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell', '-noprofile', '-nologo', '-command', cmd]);
+    var child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell', '-noprofile', '-nologo', '-command', cmd]);
     p1.child = child;
     child.promise = p1;
     child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
@@ -468,7 +470,7 @@ function windows_volumes()
         var tokens = j.t;
 
         var cmd = '"Get-BitLockerVolume | Select-Object -Property MountPoint,VolumeStatus,ProtectionStatus | ConvertTo-Csv -NoTypeInformation"';
-        var child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell', '-noprofile', '-nologo', '-command', cmd]);
+        var child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell', '-noprofile', '-nologo', '-command', cmd]);
         p2.child = child;
         child.promise = p2;
         child.tokens = tokens;
@@ -803,7 +805,7 @@ function hexToAscii(hexString) {
 function win_chassisType()
 {
     // needs to be replaced with win-wmi but due to bug in win-wmi it doesnt handle arrays correctly
-    var child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell', '-noprofile', '-nologo', '-command', '-'], {});
+    var child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell', '-noprofile', '-nologo', '-command', '-'], {});
     if (child == null) { return ([]); }
     child.descriptorMetadata = 'process-manager';
     child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });

@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 var promise = require('promise');
+var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
 
 function filesearch()
 {
@@ -62,7 +63,7 @@ function filesearch()
                     });
                 });
 
-                ret.child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell']);
+                ret.child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell']);
                 ret.child.stdout.on('data', function (c) { /*console.log('stdout: ' + c.toString());*/ });
                 ret.child.stdin.write('[reflection.Assembly]::LoadWithPartialName("system.core")\r\n');
                 ret.child.stdin.write('$pipe = new-object System.IO.Pipes.NamedPipeClientStream(".", "' + ret._clientpath + '", 3);\r\n');

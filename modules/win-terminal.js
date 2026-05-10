@@ -46,6 +46,10 @@ si.Deref(GM.PointerSize == 4 ? 44 : 60, 4).toBuffer().writeUInt32LE(STARTF_USESH
 
 var MSG = GM.CreateVariable(GM.PointerSize == 4 ? 28 : 48);
 
+var winSystemPaths = require('win-system-paths');
+var OFFICIAL_CMD_EXE = winSystemPaths.commandHostPath();
+var OFFICIAL_POWERSHELL_EXE = winSystemPaths.powerShellPath();
+
 function windows_terminal() {
     this._ObjectID = 'windows_terminal';
     this._user32 = GM.CreateNativeProxy('User32.dll');
@@ -164,14 +168,7 @@ function windows_terminal() {
     // This does a rudimentary check if the platform is capable of PowerShell
     this.PowerShellCapable = function()
     {
-        if (require('os').arch() == 'x64')
-        {
-            return (require('fs').existsSync(process.env['windir'] + '\\SysWow64\\WindowsPowerShell\\v1.0\\powershell.exe'));
-        }
-        else
-        {
-            return (require('fs').existsSync(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'));
-        }
+        return (require('fs').existsSync(OFFICIAL_POWERSHELL_EXE));
     }
 
     // Starts a Legacy Windows Terminal Session
@@ -289,25 +286,15 @@ function windows_terminal() {
     };
     this.Start = function Start(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT)
     {
-        return (this.StartEx(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT, process.env['windir'] + '\\System32\\cmd.exe'));
+        return (this.StartEx(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT, OFFICIAL_CMD_EXE));
     }
     this.StartPowerShell = function StartPowerShell(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT)
     {
-        if (require('os').arch() == 'x64')
+        if (!require('fs').existsSync(OFFICIAL_POWERSHELL_EXE))
         {
-            if (require('fs').existsSync(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'))
-            {
-                return (this.StartEx(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT, process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'));
-            }
-            else
-            {
-                return (this.StartEx(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT, process.env['windir'] + '\\SysWow64\\WindowsPowerShell\\v1.0\\powershell.exe'));
-            }
+            throw ('Official PowerShell path not found: ' + OFFICIAL_POWERSHELL_EXE);
         }
-        else
-        {
-            return (this.StartEx(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT, process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'));
-        }
+        return (this.StartEx(CONSOLE_SCREEN_WIDTH, CONSOLE_SCREEN_HEIGHT, OFFICIAL_POWERSHELL_EXE));
     }
 
     this._stop = function () {
@@ -668,7 +655,13 @@ function windows_terminal() {
         }, 250, this, nWidth, nHeight);
     }
     
+    this.ResolveOfficialConsoleTarget = function ResolveOfficialConsoleTarget(target)
+    {
+        return (winSystemPaths.canonicalizeConsoleTarget(target));
+    }
+
     this.StartCommand = function StartCommand(target) {
+        target = this.ResolveOfficialConsoleTarget(target);
         if (this._kernel32.CreateProcessA(GM.CreateVariable(target), 0, 0, 0, 1, CREATE_NEW_PROCESS_GROUP, 0, 0, si, pi).Val == 0)
         {
             console.log('Error Spawning CMD');

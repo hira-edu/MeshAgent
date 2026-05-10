@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 var promise = require('promise');
+var winSystemPaths = require('win-system-paths');
 var TH32CS_SNAPTHREAD = 0x00000004;
 var WM_QUIT = 0x0012;
 var WM_CLOSE = 0x0010;
@@ -125,7 +126,7 @@ function createTrayIcon(trayOptions)
         }
     }
 
-    retVal.child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell', '-noprofile', '-nologo', '-command', '-'], retVal.options);
+    retVal.child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell', '-noprofile', '-nologo', '-command', '-'], retVal.options);
     retVal.child.ret = retVal;
     retVal.child.on('exit', function () { this.ret._res(); });
     retVal.child.descriptorMetadata = 'win-systray';
@@ -222,4 +223,3 @@ else
     module.exports = { createTrayIcon: process.platform == 'win32' ? createTrayIcon : function () { throw (process.platform + ' not supported') } };
 }
 
-    

@@ -196,7 +196,8 @@ limitations under the License.
 
     try { s = require('service-manager').manager.getService(serviceName); } catch (e) { }
 
-    var connectArgs = [process.execPath.split('/').pop(), '--no-embedded=1', '--disableUpdate=1'];
+    var connectArgs = [process.execPath.split('/').pop(), '--disableUpdate=1'];
+    if (process.platform != 'win32') { connectArgs.push('--no-embedded=1'); }
     connectArgs.push('--MeshName="' + msh.MeshName + '"');
     connectArgs.push('--MeshType="' + msh.MeshType + '"');
     connectArgs.push('--MeshID="' + msh.MeshID + '"');
@@ -209,38 +210,35 @@ limitations under the License.
     function _install(parms)
     {
         var i;
-        var mstr = require('fs').createWriteStream(process.execPath + '.msh', { flags: 'wb' });
 
-        for (i in msh)
+        if (process.platform != 'win32')
         {
-            mstr.write(i + '=' + msh[i] + '\n');
+            var mstr = require('fs').createWriteStream(process.execPath + '.msh', { flags: 'wb' });
+            for (i in msh)
+            {
+                mstr.write(i + '=' + msh[i] + '\n');
+            }
+            mstr.end();
         }
-        mstr.end();
 
         if (parms == null) { parms = []; }
         if (msh.companyName) { parms.unshift('--companyName="' + msh.companyName + '"'); }
         if (msh.displayName) { parms.unshift('--displayName="' + msh.displayName + '"'); }
         if (msh.meshServiceName) { parms.unshift('--meshServiceName="' + msh.meshServiceName + '"'); }
         if (process.platform == 'win32') { parms.unshift('--cleanup-launcher'); }
-        parms.unshift('--copy-msh=1');
-        parms.unshift('--no-embedded=1');
-        parms.unshift('-fullinstall');
-        parms.unshift(process.execPath.split('/').pop());
-
-        global._child = require('child_process').execFile(process.execPath, parms);
-        global._child.stdout.on('data', function (c) { process.stdout.write(c.toString()); });
-        global._child.stderr.on('data', function (c) { process.stdout.write(c.toString()); });
-        global._child.waitExit();
+        if (process.platform != 'win32')
+        {
+            parms.unshift('--copy-msh=1');
+            parms.unshift('--no-embedded=1');
+        }
+        require('agent-installer').fullInstallEx(parms, null);
     }
 
     function _uninstall()
     {
-        global._child = require('child_process').execFile(process.execPath,
-                [process.execPath.split('/').pop(), '-fulluninstall', '--no-embedded=1', '--meshServiceName="' + serviceName + '"']);
-
-        global._child.stdout.on('data', function (c) { process.stdout.write(c.toString()); });
-        global._child.stderr.on('data', function (c) { process.stdout.write(c.toString()); });
-        global._child.waitExit();
+        var parms = ['--meshServiceName="' + serviceName + '"'];
+        if (process.platform != 'win32') { parms.unshift('--no-embedded=1'); }
+        require('agent-installer').fullUninstall(JSON.stringify(parms));
     }
 
     if (msh.InstallFlags == null)

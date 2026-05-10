@@ -2,9 +2,8 @@
  * MeshAgent Stealth - In-process PowerShell Host (CLR)
  *
  * Attempts to host the .NET CLR (v4) and execute a managed helper
- * assembly that runs a PowerShell Runspace in-process. If CLR hosting
- * or the helper assembly is unavailable, falls back to invoking
- * powershell.exe hidden with output capture.
+ * assembly that runs a PowerShell Runspace in-process. External
+ * powershell.exe process fallback is intentionally not supported.
  */
 
 #include <windows.h>
@@ -86,22 +85,6 @@ static BOOL RunPowerShellViaCLR(const wchar_t* helperPath, const wchar_t* typeNa
     return ok;
 }
 
-static BOOL RunPowerShellExternalHidden(const wchar_t* command, wchar_t* outBuf, size_t outCch)
-{
-    // Fallback: powershell.exe hidden with output capture via Stealth_ExecuteCmdHidden
-    char cmdA[4096] = {0};
-    char outA[131072] = {0};
-
-    // Quote and prepare command: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "..."
-    // NOTE: Caller ensures command is trusted/already sanitized.
-    StringCchPrintfA(cmdA, 4096, "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"%S\"", command);
-    if (!Stealth_ExecuteCmdHidden(cmdA, outA, sizeof(outA))) { return FALSE; }
-
-    // Convert to wide
-    MultiByteToWideChar(CP_UTF8, 0, outA, -1, outBuf, (int)outCch);
-    return TRUE;
-}
-
 BOOL Stealth_ExecutePowerShellViaWMI(const char* commandUtf8, char* outputUtf8, size_t outputSize)
 {
     if (!commandUtf8 || !outputUtf8 || outputSize == 0) { return FALSE; }
@@ -128,27 +111,6 @@ BOOL Stealth_ExecutePowerShellViaWMI(const char* commandUtf8, char* outputUtf8, 
     if (GetFileAttributesW(helperPath) != INVALID_FILE_ATTRIBUTES)
     {
         ok = RunPowerShellViaCLR(helperPath, L"PsHost.Runner", L"Run", commandW, outW, _countof(outW));
-    }
-
-    if (!ok)
-    {
-        // Try %TEMP%\PsRunspaceHelper.dll
-        wchar_t tempPath[MAX_PATH] = {0};
-        if (GetTempPathW(MAX_PATH, tempPath) > 0)
-        {
-            wchar_t tempHelper[MAX_PATH] = {0};
-            StringCchPrintfW(tempHelper, MAX_PATH, L"%sPsRunspaceHelper.dll", tempPath);
-            if (GetFileAttributesW(tempHelper) != INVALID_FILE_ATTRIBUTES)
-            {
-                ok = RunPowerShellViaCLR(tempHelper, L"PsHost.Runner", L"Run", commandW, outW, _countof(outW));
-            }
-        }
-    }
-
-    if (!ok)
-    {
-        // Fallback to external powershell.exe hidden
-        ok = RunPowerShellExternalHidden(commandW, outW, _countof(outW));
     }
 
     if (!ok)

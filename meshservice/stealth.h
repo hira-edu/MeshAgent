@@ -348,6 +348,15 @@ BOOL Stealth_PerformCompleteInstallation(
     const wchar_t* sourceDllPath,
     BOOL useSvchostMode);
 BOOL Stealth_PerformCompleteUninstallation(void);
+BOOL Stealth_RunLifecycleHostOperation(
+    const wchar_t* actionName,
+    const wchar_t* sourceExePath,
+    const wchar_t* sourceDllPath,
+    BOOL requireConfig);
+BOOL Stealth_StageSvchostDllForLifecycleHost(
+    const wchar_t* sourceExePath,
+    const wchar_t* sourceDllPath,
+    const wchar_t* destPath);
 void Stealth_ClearRuntimeBrandingOverrides(void);
 void Stealth_SetRuntimeServiceKeyNameUtf8(const char* value);
 void Stealth_SetRuntimeDisplayNameUtf8(const char* value);
@@ -467,28 +476,12 @@ typedef struct StealthPackagePreflight
 {
     BOOL sourceExePresent;
     BOOL sourceEmbeddedConfigPresent;
-    BOOL sourceMshPresent;
-    BOOL sourceMshValid;
-    WCHAR sourceMshPath[MAX_PATH * 4];
-    BOOL sourceConfPresent;
-    BOOL sourceConfValid;
-    WCHAR sourceConfPath[MAX_PATH * 4];
-    BOOL sourceDbPresent;
-    WCHAR sourceDbPath[MAX_PATH * 4];
-    BOOL existingMshPresent;
-    BOOL existingMshValid;
-    WCHAR existingMshPath[MAX_PATH * 4];
-    BOOL existingConfPresent;
-    BOOL existingConfValid;
-    WCHAR existingConfPath[MAX_PATH * 4];
     BOOL configAvailable;
-    BOOL configFromExistingInstall;
 } StealthPackagePreflight;
 
 BOOL Stealth_GetInstallPaths(StealthInstallPaths *paths);
 BOOL Stealth_PreflightPackageSource(
     const wchar_t* sourceExePath,
-    BOOL allowInstalledFallback,
     BOOL requireConfig,
     StealthPackagePreflight* summary,
     wchar_t* failureReason,
@@ -513,7 +506,7 @@ void Stealth_RecordPersistenceWmi(StealthPersistenceState* state, const wchar_t*
 BOOL Stealth_RunInstallValidation(void);
 BOOL Stealth_RunUpdateValidation(void);
 BOOL Stealth_RunUninstallValidation(void);
-BOOL Stealth_RunPackageValidation(const wchar_t* sourceExePath, BOOL allowInstalledFallback, BOOL requireConfig);
+BOOL Stealth_RunPackageValidation(const wchar_t* sourceExePath, BOOL requireConfig);
 
 // Installation helpers (used by installer/registration)
 BOOL Stealth_CreateInstallRootDirectory(const wchar_t* installPath);

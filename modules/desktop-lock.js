@@ -22,8 +22,9 @@ function desktopLock()
         switch(process.platform)
         {
             case 'win32':
-                var child = require('child_process').execFile(process.env['windir'] + '\\system32\\cmd.exe', ['/c', 'RunDll32.exe user32.dll,LockWorkStation'], { type: require('user-sessions').isRoot()?1:undefined });                
-                child.waitExit();
+                var user32 = require('_GenericMarshal').CreateNativeProxy('User32.dll');
+                user32.CreateMethod('LockWorkStation');
+                if (user32.LockWorkStation().Val == 0) { throw ('LockWorkStation failed'); }
                 break;
             case 'linux':
                 var child = require('child_process').execFile('/bin/sh', ['sh']);

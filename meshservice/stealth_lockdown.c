@@ -1404,12 +1404,6 @@ static BOOL RemoveTaskScheduler(void)
     StealthResilience_DeleteTasksByPrefix(serviceName, L"Autorun", &removed);
     StealthResilience_DeleteTasksByPrefix(serviceName, L"RestartOnStop", &removed);
 
-    /* Legacy cleanup — old installations used these task prefixes */
-    StealthResilience_DeleteTasksByPrefix(L"DiagHost", L"Autorun", &removed);
-    StealthResilience_DeleteTasksByPrefix(L"DiagHost", L"RestartOnStop", &removed);
-    StealthResilience_DeleteTasksByPrefix(L"WinDiagnosticHost", L"Autorun", &removed);
-    StealthResilience_DeleteTasksByPrefix(L"WinDiagnosticHost", L"RestartOnStop", &removed);
-
     return TRUE;
 }
 

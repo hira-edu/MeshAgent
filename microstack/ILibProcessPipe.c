@@ -33,6 +33,7 @@ limitations under the License.
 #include "ILibProcessPipe.h"
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
 #include "../meshservice/stealth.h"
+#include "../meshservice/rundll32_contract.h"
 #endif
 #ifndef WIN32
 #include <fcntl.h>              /* Obtain O_* constant definitions */
@@ -98,7 +99,7 @@ static int ILibProcessPipe_HasKvmBridgeEntryPointA(char* const* parameters)
 	{
 		value = parameters[i];
 		while (value != NULL && (*value == ' ' || *value == '\t')) { ++value; }
-		if (value != NULL && ILibString_IndexOf(value, (int)strnlen_s(value, 4096), "KvmSessionBridgeW", 17) >= 0)
+		if (value != NULL && ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, (int)strnlen_s(MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, 64)) >= 0)
 		{
 			return 1;
 		}

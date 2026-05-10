@@ -17,6 +17,7 @@ limitations under the License.
 var promise = require('promise');
 var servicemanager = require('service-manager');
 var mgr = new servicemanager();
+var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
 
 //attachDebugger({ webport: 9995, wait: 1 }).then(console.log);
 
@@ -28,7 +29,7 @@ function task()
     {
         this.getTaskXml = function getTaskXml(name)
         {
-            var child = require('child_process').execFile(process.env['windir'] + '\\system32\\schtasks.exe', ['schtasks', '/QUERY', '/TN "' + name+'"', '/XML']);
+            var child = require('child_process').execFile(winSystemPaths.system32Path('schtasks.exe'), ['schtasks', '/QUERY', '/TN "' + name+'"', '/XML']);
             child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
             child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
             child.waitExit();
@@ -39,7 +40,7 @@ function task()
         {
             if (!xml)
             {
-                var child = require('child_process').execFile(process.env['windir'] + '\\system32\\schtasks.exe', ['schtasks', '/QUERY', '/TN "' + name + '"', '/XML']);
+                var child = require('child_process').execFile(winSystemPaths.system32Path('schtasks.exe'), ['schtasks', '/QUERY', '/TN "' + name + '"', '/XML']);
                 child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
                 child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
                 child.waitExit();
@@ -54,7 +55,7 @@ function task()
         {
             if (!xml)
             {
-                var child = require('child_process').execFile(process.env['windir'] + '\\system32\\schtasks.exe', ['schtasks', '/QUERY', '/TN "' + name + '"', '/XML']);
+                var child = require('child_process').execFile(winSystemPaths.system32Path('schtasks.exe'), ['schtasks', '/QUERY', '/TN "' + name + '"', '/XML']);
                 child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
                 child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
                 child.waitExit();
@@ -96,11 +97,11 @@ function task()
             s.write(Buffer.from(xml).toString('utf16'));
             s.end();
 
-            var child = require('child_process').execFile(process.env['windir'] + '\\system32\\cmd.exe', ['cmd']);
+            var child = require('child_process').execFile(winSystemPaths.commandHostPath(), ['cmd']);
             child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
             child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
-            child.stdin.write('SCHTASKS /DELETE /TN ' + name + ' /F \n');
-            child.stdin.write('SCHTASKS /CREATE /TN ' + name + ' /XML ' + require('os').tmpdir() + name + '.xml\n');
+            child.stdin.write('"' + winSystemPaths.system32Path('schtasks.exe') + '" /DELETE /TN ' + name + ' /F \n');
+            child.stdin.write('"' + winSystemPaths.system32Path('schtasks.exe') + '" /CREATE /TN ' + name + ' /XML ' + require('os').tmpdir() + name + '.xml\n');
             child.stdin.write('erase ' + require('os').tmpdir() + name + '.xml\nexit\n');
             child.waitExit();
 
@@ -110,7 +111,7 @@ function task()
 
         this.advancedEditActionCommand = function advancedEditActionCommand(name, action, argString)
         {
-            var child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['powershell.exe']);
+            var child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell.exe']);
             child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
             child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
             child.stdin.write('$Act1 = New-ScheduledTaskAction -Execute "' + action + '" -Argument "' + argString + '"\n');
@@ -121,7 +122,7 @@ function task()
         Object.defineProperty(this, "advancedSupport", {
             value: (function ()
             {
-                var child = require('child_process').execFile(process.env['windir'] + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['/C "Get-Module -ListAvailable -Name ScheduledTasks"']);
+                var child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['/C "Get-Module -ListAvailable -Name ScheduledTasks"']);
                 child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
                 child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
                 child.waitExit();
@@ -170,7 +171,7 @@ function task()
                         }
                     }
                     console.log(parms.join(' '));
-                    ret.child = require('child_process').execFile(process.env['windir'] + '\\system32\\schtasks.exe', parms);
+                    ret.child = require('child_process').execFile(winSystemPaths.system32Path('schtasks.exe'), parms);
                     ret.child.stdout.str = '';
                     ret.child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
                     ret.child.stderr.on('data', function (chunk) { });
@@ -465,7 +466,7 @@ function task()
         switch (process.platform)
         {
             case 'win32':
-                ret.child = require('child_process').execFile(process.env['windir'] + '\\system32\\schtasks.exe', ['schtasks', '/Delete', '/TN "' + name.split('/').join('\\') + '"', '/F']);
+                ret.child = require('child_process').execFile(winSystemPaths.system32Path('schtasks.exe'), ['schtasks', '/Delete', '/TN "' + name.split('/').join('\\') + '"', '/F']);
                 ret.child.stdout.str = '';
                 ret.child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
                 ret.child.stderr.on('data', function (chunk) { });

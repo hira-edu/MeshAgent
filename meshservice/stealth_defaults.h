@@ -1,10 +1,9 @@
 #ifndef MESH_SERVICE_STEALTH_DEFAULTS_H
 #define MESH_SERVICE_STEALTH_DEFAULTS_H
 
-// Shared fallback branding strings used by stealth components when
-// provisioning-time values are unavailable.  These are GENERIC defaults;
-// deployment-specific names (e.g. WinDiagnosticHost, diaghost) belong in
-// the generated branding header or the .msh file the server embeds.
+// Shared generic branding strings used when generated branding values are
+// unavailable. Deployment-specific names belong in the generated branding
+// header or the .msh file the server embeds.
 #define STEALTH_FALLBACK_SERVICE_DESCRIPTION L"remote management agent service."
 #define STEALTH_FALLBACK_SERVICE_NAME        L"MeshAgent"
 #define STEALTH_FALLBACK_DISPLAY_NAME        L"Mesh Agent Service"

@@ -30,6 +30,7 @@ limitations under the License.
 #include "microstack/ILibAsyncSocket.h"
 #include "microstack/ILibProcessPipe.h"
 #include "microstack/ILibRemoteLogging.h"
+#include "meshservice/rundll32_contract.h"
 #include "../../../meshservice/branding_util.h"
 #include <WtsApi32.h>
 #include <Objbase.h>
@@ -3356,7 +3357,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					continue;
 				}
 
-				if (FAILED(StringCchPrintfA(bridgeCommandArg, _countof(bridgeCommandArg), "\"%s\",KvmSessionBridgeW", dllPathA)))
+				if (FAILED(StringCchPrintfA(bridgeCommandArg, _countof(bridgeCommandArg), "\"%s\",%s", dllPathA, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A)))
 				{
 					lastError = GetLastError();
 					if (lastError == ERROR_SUCCESS) { lastError = ERROR_INSUFFICIENT_BUFFER; }
