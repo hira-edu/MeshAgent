@@ -16,6 +16,7 @@ Evidence:
 
 - `docs/testing/evidence/advanced/20260510_160855_rundll32_lifecycle/summary.txt`
 - `docs/testing/evidence/advanced/20260510_221100_meshcentral_hashfix3_rundll32_update/summary.txt`
+- `docs/testing/evidence/advanced/20260511_052542_meshcentral_autoupdate_rundll32_ingress/summary.txt`
 
 Implemented changes:
 
@@ -32,12 +33,15 @@ Implemented changes:
 - Kept install/reinstall package identity strict: those flows require embedded MeshCentral provisioning from the real MSH GUID payload.
 - Allowed binary-only MeshCentral update packages only when the installed `.conf` and `.msh` are present and valid, preserving the installed identity instead of accepting sibling sidecars or legacy fallback paths.
 - Made the update DLL authority the MeshCentral-served EXE's embedded svchost DLL payload, not the temporary lifecycle host DLL.
+- Added a narrow MeshCentral self-update ingress adapter for `-fullupdate` / `-fupdate` so already-installed agents can hand a downloaded package to `MeshRundll32_LaunchLifecycleHostW`. This adapter does not implement update behavior, does not copy files, and does not fall back to the legacy EXE lifecycle path.
+- Made update lifecycle host staging use the update package's embedded svchost DLL payload instead of copying the installed DLL, so old installed DLLs are never the authority for a new update transaction.
 - Normalized uninstall success to the authoritative final lifecycle discovery state so best-effort cleanup warnings do not return failure after the machine has converged to clean.
 
 Verified gates:
 
 - `msbuild meshservice/MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m` succeeded with 0 warnings and 0 errors.
 - `msbuild meshservice/MeshService-2022.vcxproj /p:Configuration=StealthLab /p:Platform=x64 /m` succeeded with 0 warnings and 0 errors.
+- Explicit VS 2022 BuildTools `MSBuild.exe` was used for the 2026-05-11 verification because the default `msbuild` resolved to VS 18 and failed in the C++ FileTracker before compiler diagnostics.
 - `python -m py_compile deploy.py` passed.
 - `python -m py_compile tools\generate_branding_assets.py deploy.py` passed.
 - `node --check modules\agent-installer.js` and `node --check modules\interactive.js` passed.
@@ -47,6 +51,7 @@ Verified gates:
 - Repo audit has no `.update.exe` hits outside docs.
 - Repo audit has no `process.execPath` direct full-lifecycle spawn hits.
 - Direct lifecycle switch strings remain only in `ServiceMain.c` hard-fail rejection checks.
+- `-fullupdate` / `-fupdate` are retained only as MeshCentral self-update protocol ingress and immediately delegate to the rundll32 lifecycle manifest path.
 - `tools/generate_branding_assets.py` generates branding headers only; it no longer writes static `.msh` manifests or scans repo-root `.msh` files.
 - Windows lifecycle package preflight reports only package executable and embedded MeshCentral provisioning payload authority. Sibling `.msh`, sibling `.conf`, sibling `.db`, and existing-install provisioning fallback fields were removed from the native API/JSON.
 - Windows install/reinstall staging extracts provisioning only from the embedded MeshCentral package payload and fails closed when source package data is absent.
@@ -88,11 +93,14 @@ This inventory records the baseline drift found before the 2026-05-10 migration 
 
 These are planning blockers for the requested no-drift end state. They must be resolved before code is declared aligned.
 
-## Code-Backed Source Map
+## Baseline Code-Backed Source Map
 
-This plan is based on the current source tree, not only on prior SSOT language.
+This map records the source tree as it existed before the 2026-05-10 migration
+pass. It is retained as traceability for what was removed or migrated. The
+current implemented state is documented in the implementation status above and
+the evidence files referenced there.
 
-| Area | Current code anchor | Observed drift risk |
+| Area | Baseline code anchor | Observed drift risk |
 |---|---|---|
 | JavaScript lifecycle wrapper | `modules/agent-installer.js:210`, `modules/agent-installer.js:938`, `modules/agent-installer.js:986`, `modules/agent-installer.js:997`, `modules/agent-installer.js:1093` | Windows install/update/uninstall still launch direct EXE lifecycle switches through `process.execPath` instead of a rundll32 lifecycle export. |
 | Legacy updater body | `modules/agent-installer.js:1109`, `modules/agent-installer.js:1156`, `modules/agent-installer.js:1188`, `modules/agent-installer.js:1361` | `.update.exe`, recursive `sys_update`, and copy/re-exec logic still exist and must be deleted or unreachable for Windows. |
@@ -307,8 +315,7 @@ Delete or hard-fail these Windows paths:
 - `-install`
 - `-uninstall`
 - direct `-fullinstall`
-- direct `-fullupdate`
-- direct `-fupdate`
+- direct `-fullupdate` and direct `-fupdate` lifecycle execution; the only retained acceptance is a MeshCentral self-update protocol ingress that immediately launches the rundll32 lifecycle host
 - direct `-fulluninstall`
 - `.update.exe` copy and re-exec
 - Windows `sys_update` legacy loop
@@ -324,6 +331,8 @@ The EXE may keep only:
 - non-Windows behavior where applicable
 
 No alias may silently call the old code.
+
+The self-update ingress is not a compatibility fallback. It is the server protocol boundary used by already-deployed agents to activate a downloaded package, and its only allowed behavior is to write no lifecycle state itself and delegate once to `MeshRundll32_LaunchLifecycleHostW(MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE, ...)`.
 
 ### Phase 5 - Migrate or remove PowerShell and other helper surfaces
 

@@ -243,21 +243,6 @@ static BOOL MeshRundll32_PrepareLifecycleHostDllW(
         return FALSE;
     }
 
-    if (action == MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE)
-    {
-        if (paths.dllPath[0] == L'\0' || !MeshRundll32_FileExistsW(paths.dllPath))
-        {
-            SetLastError(ERROR_PATH_NOT_FOUND);
-            return FALSE;
-        }
-        if (!CopyFileW(paths.dllPath, hostDllPath, FALSE))
-        {
-            return FALSE;
-        }
-        *deleteHostDllOnExit = TRUE;
-        return TRUE;
-    }
-
     if (!Stealth_StageSvchostDllForLifecycleHost(sourceExePath, sourceDllPath, hostDllPath))
     {
         return FALSE;

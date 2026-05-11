@@ -445,6 +445,7 @@ docs/testing/evidence/
 docs/testing/artifacts/
 test/msbuild_tmp/
 test/rundll32_*/
+rundll32-lifecycle/
 .aider*
 tmp/
 nul

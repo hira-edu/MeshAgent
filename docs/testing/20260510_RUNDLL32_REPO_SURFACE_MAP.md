@@ -8,23 +8,30 @@ evidence are recorded in:
 
 - `docs/testing/20260510_RUNDLL32_SSOT_MIGRATION_PLAN.md`
 - `docs/testing/evidence/advanced/20260510_160855_rundll32_lifecycle/summary.txt`
+- `docs/testing/evidence/advanced/20260511_052542_meshcentral_autoupdate_rundll32_ingress/summary.txt`
 
 As of the implementation pass, Windows install/update/uninstall/validation and
 deploy update activation route through `MeshLifecycleHostW` manifests. `svchost`
 remains the steady-state service runtime, not a duplicate lifecycle transaction
-path.
+path. The only retained `-fullupdate` / `-fupdate` acceptance is the
+MeshCentral self-update protocol ingress in `ServiceMain.c`, and it immediately
+delegates to `MeshRundll32_LaunchLifecycleHostW`; it is not a second lifecycle
+implementation.
 
-This document maps the current Windows lifecycle, bridge, session, KVM, PowerShell,
-update, install, uninstall, server-update, agent-core, and StealthLab surfaces that
-must be realigned behind the rundll32 SSOT contract described in:
+This document maps the baseline Windows lifecycle, bridge, session, KVM,
+PowerShell, update, install, uninstall, server-update, agent-core, and
+StealthLab surfaces that were realigned behind the rundll32 SSOT contract
+described in:
 
 - `docs/testing/20260510_RUNDLL32_SSOT_MIGRATION_PLAN.md`
 - `docs/testing/20260331_REALIGNMENT_SSOT.md`
 - `docs/testing/20260331_REALIGNMENT_TODO_MATRIX.md`
 
-This is a code-backed map. Every item below is anchored to a current source file or
-build/deploy artifact so implementation work can remove drift without relying on a
-parallel interpretation of the system.
+This is a code-backed baseline map. Every item below was anchored to the source
+file or build/deploy artifact that existed when the migration work started, so
+implementation work could remove drift without relying on a parallel
+interpretation of the system. The implemented source state is tracked in the
+migration plan and timestamped evidence listed above.
 
 ## Target SSOT Contract
 
@@ -52,7 +59,7 @@ different executable, export name, command shape, or fallback sequence.
 
 ### 1. Lifecycle Install, Update, Uninstall
 
-Current flow:
+Baseline flow before migration:
 
 1. User, service, deploy, or server command selects lifecycle action.
 2. JavaScript and agent-core code launch the current EXE with direct switches.
@@ -61,9 +68,9 @@ Current flow:
 4. `meshservice/stealth_installer.c` executes service registration, file staging,
    install, update, uninstall, validation, and legacy cleanup.
 
-Current anchors:
+Baseline anchors before migration:
 
-| File | Current surface | Required disposition |
+| File | Baseline surface | Required disposition |
 | --- | --- | --- |
 | `modules/agent-installer.js:210` | `runWindowsNativeLifecycle()` launches `process.execPath` with `-fullinstall`, `-fullupdate`, `-fulluninstall`. | Migrate to manifest plus rundll32 `MeshLifecycleHostW`; delete direct EXE lifecycle path. |
 | `modules/agent-installer.js:938` | `fullUninstall()` calls native direct `-fulluninstall`. | Replace with rundll32 lifecycle manifest. |
@@ -113,16 +120,16 @@ Target flow:
 
 ### 2. Server Update And Update-From-Server
 
-Current flow:
+Baseline flow before migration:
 
 1. Server-side deployment tooling stages agent payloads and updates hashes.
 2. Mesh server sends `updateAgents`.
 3. Agent receives the update command and stages `.update.exe`.
 4. Agent re-enters direct EXE `-fullupdate`.
 
-Current anchors:
+Baseline anchors before migration:
 
-| File | Current surface | Required disposition |
+| File | Baseline surface | Required disposition |
 | --- | --- | --- |
 | `deploy.py:1215` | Sends `updateAgents`. | Retain server command, change client activation contract. |
 | `deploy.py:1398` | Remote staged command runs `"{update_path}" -fullinstall`. | Replace with rundll32 lifecycle activation or deployment manifest. |
@@ -147,16 +154,16 @@ Target flow:
 
 ### 3. KVM Rundll32 Session Bridge
 
-Current flow:
+Baseline flow before migration:
 
 1. KVM selects a target session.
 2. KVM creates named pipe pairs.
 3. KVM launches `rundll32.exe <ServiceDll>,KvmSessionBridgeW <pipe tokens>`.
 4. The bridge connects pipes and runs KVM session code.
 
-Current anchors:
+Baseline anchors before migration:
 
-| File | Current surface | Required disposition |
+| File | Baseline surface | Required disposition |
 | --- | --- | --- |
 | `meshcore/KVM/Windows/kvm.c:3207` | relay restart entry. | Retain. Refactor launcher to consume shared rundll32 contract. |
 | `meshcore/KVM/Windows/kvm.c:3222` | bridge token setup. | Retain named-pipe model; use generated contract names. |
@@ -188,16 +195,16 @@ Target flow:
 
 ### 4. Session, Helper, And Bridge Policy
 
-Current flow:
+Baseline flow before migration:
 
 1. `ILibProcessPipe` and helper monitor code gate user-session process creation.
 2. Some internal helper paths are still approved by local command string checks.
 3. JavaScript modules can schedule or launch helper commands using direct EXE,
    `-b64exec`, command hosts, or PowerShell.
 
-Current anchors:
+Baseline anchors before migration:
 
-| File | Current surface | Required disposition |
+| File | Baseline surface | Required disposition |
 | --- | --- | --- |
 | `microstack/ILibProcessPipe.h:36` | spawn type enum includes user/session modes. | Retain only with centralized policy. |
 | `microstack/ILibProcessPipe.c:211` | internal helper approval helper. | Remove local special cases or register them in SSOT contract. |
@@ -224,15 +231,15 @@ Target flow:
 
 ### 5. PowerShell, Cmd, Schtasks, And Arbitrary Process Launch
 
-Current flow:
+Baseline flow before migration:
 
 Several Windows modules use PowerShell, cmd, schtasks, or external shell hosts for
 runtime discovery, UI, scheduling, and helper actions. Some native code also
 contains cmd and PowerShell helpers.
 
-Current anchors:
+Baseline anchors before migration:
 
-| File | Current surface | Required disposition |
+| File | Baseline surface | Required disposition |
 | --- | --- | --- |
 | `modules/win-system-paths.js:32` | canonical command host resolver. | Retain only if command host remains explicitly allowed. |
 | `modules/win-system-paths.js:39` | canonical PowerShell resolver. | Remove if PowerShell runtime path is eliminated. |
@@ -270,16 +277,16 @@ Target flow:
 
 ### 6. StealthLab DLL, Build, Export, And Payload Surfaces
 
-Current flow:
+Baseline flow before migration:
 
 1. `StealthLab_DLL` builds the service DLL and payload resources.
 2. KVM bridge export exists in the DLL export file.
 3. Lifecycle host export does not yet exist.
 4. Deployment and validation scripts still reference direct EXE lifecycle paths.
 
-Current anchors:
+Baseline anchors before migration:
 
-| File | Current surface | Required disposition |
+| File | Baseline surface | Required disposition |
 | --- | --- | --- |
 | `meshservice/MeshServiceHost.def` | exports `Stealth_SvchostServiceMain` and `KvmSessionBridgeW`. | Add `MeshLifecycleHostW`; keep export table as SSOT output or checked artifact. |
 | `meshservice/MeshServiceHost_ARM64.def` | exports only `Stealth_SvchostServiceMain`. | Add ARM64 parity for approved exports. |
@@ -304,15 +311,15 @@ Target flow:
 
 ### 7. Agent Core, Recovery, And UMH-Adjacent Paths
 
-Current flow:
+Baseline flow before migration:
 
 Agent core owns server update, native regression, cleanup scheduling, and some
 Windows process launch code. Recovery and service-manager code contain direct
 `process.execPath` service paths.
 
-Current anchors:
+Baseline anchors before migration:
 
-| File | Current surface | Required disposition |
+| File | Baseline surface | Required disposition |
 | --- | --- | --- |
 | `meshcore/agentcore.c:453` | command host cleanup scheduler. | Replace with native cleanup or lifecycle-host cleanup action. |
 | `meshcore/agentcore.c:1959` | Windows process launch. | Audit and route through SSOT launcher if lifecycle/helper related. |
@@ -340,15 +347,15 @@ Target flow:
 
 ### 8. Test, Regression, And Evidence Surfaces
 
-Current flow:
+Baseline flow before migration:
 
 Regression tests and validation scripts contain direct lifecycle and some
 PowerShell helper use. Existing KVM rundll32 evidence exists, but lifecycle
 rundll32 evidence does not.
 
-Current anchors:
+Baseline anchors before migration:
 
-| File | Current surface | Required disposition |
+| File | Baseline surface | Required disposition |
 | --- | --- | --- |
 | `docs/testing/20260331_REALIGNMENT_TODO_MATRIX.md` | TODO-007 and TODO-012 define bridge/lifecycle convergence. | Update acceptance criteria to lifecycle rundll32 evidence once implemented. |
 | `docs/testing/20260331_REALIGNMENT_SSOT.md` | SSOT policy baseline. | Add this map and lifecycle contract as authoritative references. |
@@ -372,7 +379,7 @@ Required evidence after implementation:
 
 | Category | Keep | Migrate | Delete or hard-fail |
 | --- | --- | --- | --- |
-| Native lifecycle engine | `Stealth_RunLifecycleOperation()` and supporting state/plan functions. | All callers to `MeshLifecycleHostW`. | Direct `-fullinstall`, `-fullupdate`, `-fulluninstall`, `-validate-update` execution. |
+| Native lifecycle engine | `Stealth_RunLifecycleOperation()` and supporting state/plan functions. | All callers to `MeshLifecycleHostW`; `-fullupdate` / `-fupdate` may only exist as MeshCentral self-update ingress that delegates to the rundll32 launcher. | Direct `-fullinstall`, direct `-fulluninstall`, direct validation, and any direct `-fullupdate` lifecycle execution. |
 | Server update protocol | `updateAgents` server command. | Client activation to rundll32 lifecycle manifest. | `.update.exe` staging/execution. |
 | KVM bridge | `KvmSessionBridgeW`, named pipes, session token handling. | Export names and launch commands to contract constants. | Direct KVM slave, stdio bridge, legacy single-pipe bridge. |
 | Helper/session policy | `ILibProcessPipe` and helper monitor as enforcement points. | Approval checks to contract table. | `--slave`, `-b64exec`, env override, command host fallback. |
@@ -398,7 +405,7 @@ Expected end state:
 
 - Only SSOT contract files, generated checked artifacts, tests, and docs contain
   approved export names.
-- No production lifecycle caller contains direct EXE lifecycle switches.
+- No production lifecycle caller contains direct EXE lifecycle switches, except the MeshCentral self-update ingress adapter that delegates to the rundll32 launcher and performs no lifecycle work itself.
 - No production lifecycle/update path contains `.update.exe`.
 - No production lifecycle/helper path contains PowerShell or cmd fallback code.
 - Any remaining `process.execPath` use is non-Windows or explicitly unrelated to

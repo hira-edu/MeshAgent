@@ -8466,6 +8466,142 @@ static int MeshService_IsManagedConsoleOperation(int argc, char **argv)
 	return 0;
 }
 
+static int MeshService_IsSelfUpdateIngressSwitchW(const WCHAR* arg)
+{
+	if (arg == NULL) { return 0; }
+	return (_wcsicmp(arg, L"-fullupdate") == 0 || _wcsicmp(arg, L"-fupdate") == 0) ? 1 : 0;
+}
+
+static BOOL MeshService_GetWideOptionValue(int argc, WCHAR** argv, const WCHAR* optionName, WCHAR* output, size_t outputCch)
+{
+	int i;
+	size_t optionLen;
+
+	if (output == NULL || outputCch == 0 || optionName == NULL)
+	{
+		SetLastError(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	output[0] = L'\0';
+	optionLen = wcslen(optionName);
+
+	for (i = 1; i < argc; ++i)
+	{
+		const WCHAR* arg = (argv != NULL) ? argv[i] : NULL;
+		const WCHAR* value = NULL;
+
+		if (arg == NULL) { continue; }
+		if (_wcsnicmp(arg, optionName, optionLen) != 0) { continue; }
+
+		if (arg[optionLen] == L'=')
+		{
+			value = arg + optionLen + 1;
+		}
+		else if (arg[optionLen] == L'\0')
+		{
+			if ((i + 1) >= argc || argv[i + 1] == NULL || argv[i + 1][0] == L'\0')
+			{
+				SetLastError(ERROR_INVALID_PARAMETER);
+				return FALSE;
+			}
+			value = argv[i + 1];
+		}
+		else
+		{
+			continue;
+		}
+
+		if (value == NULL || value[0] == L'\0')
+		{
+			SetLastError(ERROR_INVALID_PARAMETER);
+			return FALSE;
+		}
+		if (FAILED(StringCchCopyW(output, outputCch, value)))
+		{
+			output[0] = L'\0';
+			SetLastError(ERROR_INSUFFICIENT_BUFFER);
+			return FALSE;
+		}
+		return TRUE;
+	}
+
+	SetLastError(ERROR_NOT_FOUND);
+	return FALSE;
+}
+
+static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
+{
+	WCHAR sourceExePath[MAX_PATH * 4] = { 0 };
+	WCHAR sourceDllPath[MAX_PATH * 4] = { 0 };
+	DWORD lifecycleExitCode = ERROR_GEN_FAILURE;
+	DWORD moduleLen = 0;
+	DWORD launchError = ERROR_SUCCESS;
+	DWORD optionError = ERROR_SUCCESS;
+	BOOL haveSourceDll = FALSE;
+	BOOL launched = FALSE;
+
+	Stealth_EnsureLoggingDefaults();
+	if (!MeshService_GetWideOptionValue(argc, wideArgv, L"--update-source", sourceExePath, _countof(sourceExePath)))
+	{
+		optionError = GetLastError();
+		if (optionError != ERROR_NOT_FOUND)
+		{
+			Stealth_LogInstallEvent(L"[SELFUPDATE_INGRESS] Invalid --update-source argument (error=%lu)", optionError);
+			wprintf(L"[-] Invalid --update-source argument (error=%lu)\n", optionError);
+			return (int)optionError;
+		}
+		moduleLen = GetModuleFileNameW(NULL, sourceExePath, (DWORD)_countof(sourceExePath));
+		if (moduleLen == 0 || moduleLen >= _countof(sourceExePath))
+		{
+			launchError = (moduleLen == 0) ? GetLastError() : ERROR_INSUFFICIENT_BUFFER;
+			Stealth_LogInstallEvent(L"[SELFUPDATE_INGRESS] Unable to resolve update package path (error=%lu)", launchError);
+			wprintf(L"[-] Unable to resolve update package path (error=%lu)\n", launchError);
+			return (int)launchError;
+		}
+	}
+	haveSourceDll = MeshService_GetWideOptionValue(argc, wideArgv, L"--update-dll", sourceDllPath, _countof(sourceDllPath));
+	if (!haveSourceDll)
+	{
+		optionError = GetLastError();
+		if (optionError != ERROR_NOT_FOUND)
+		{
+			Stealth_LogInstallEvent(L"[SELFUPDATE_INGRESS] Invalid --update-dll argument (error=%lu)", optionError);
+			wprintf(L"[-] Invalid --update-dll argument (error=%lu)\n", optionError);
+			return (int)optionError;
+		}
+	}
+
+	Stealth_LogInstallEvent(
+		L"[SELFUPDATE_INGRESS] Mapping direct self-update activation to rundll32 lifecycle host sourceExe=%ls sourceDll=%ls",
+		sourceExePath,
+		haveSourceDll ? sourceDllPath : L"(embedded)");
+
+	launched = MeshRundll32_LaunchLifecycleHostW(
+		MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
+		sourceExePath,
+		haveSourceDll ? sourceDllPath : NULL,
+		NULL,
+		NULL,
+		FALSE,
+		FALSE,
+		0,
+		&lifecycleExitCode);
+	if (!launched)
+	{
+		launchError = GetLastError();
+		Stealth_LogInstallEvent(
+			L"[SELFUPDATE_INGRESS] Failed to launch rundll32 lifecycle update host (exit=%lu error=%lu)",
+			lifecycleExitCode,
+			launchError);
+		wprintf(L"[-] Failed to launch rundll32 lifecycle update host (exit=%lu error=%lu)\n", lifecycleExitCode, launchError);
+		return (int)((launchError != ERROR_SUCCESS) ? launchError : ERROR_INSTALL_FAILURE);
+	}
+
+	Stealth_LogInstallEvent(L"[SELFUPDATE_INGRESS] Rundll32 lifecycle update host launched");
+	wprintf(L"[+] Self-update activation handed to rundll32 lifecycle host\n");
+	return 0;
+}
+
 static int MeshService_IsUnsupportedLifecycleSwitch(const char* arg)
 {
 	if (arg == NULL) { return 0; }
@@ -8558,6 +8694,13 @@ int wmain(int argc, char* wargv[])
 	}
 
 	MeshService_InitializeBrandingGlobals();
+
+	if (argc > 1 && MeshService_IsSelfUpdateIngressSwitchW(wideArgv != NULL ? wideArgv[1] : NULL))
+	{
+		retCode = MeshService_RunSelfUpdateIngress(argc, wideArgv);
+		wmain_free(argv);
+		return retCode;
+	}
 
 	if (argc > 1 && (strcasecmp(argv[1], "-install") == 0 || strcasecmp(argv[1], "-uninstall") == 0))
 	{
