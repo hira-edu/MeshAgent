@@ -115,11 +115,21 @@ var umhctlStateChangingOps = {
     setconfig: 1,
     injecttargetset: 1,
     cleartargetscope: 1,
+    methodpolicy: 1,
+    safetystate: 1,
     lockdownbypass: 1,
     examsoftbypass: 1,
     ipcbypass: 1
 };
 var umhctlFlowScopedOps = { injecttargetset: 1, injectall: 1, cleartargetscope: 1 };
+var umhctlRuntimeControlOps = {
+    telemetry: 1,
+    repair: 1,
+    setpolicy: 1,
+    setconfig: 1,
+    methodpolicy: 1,
+    safetystate: 1
+};
 var umhctlFlowContractCache = null;
 var umhctlFlowContractCacheUpdated = 0;
 var umhctlFlowContractMaxAgeMs = 30000;
@@ -383,9 +393,24 @@ function umhctlCanonicalTargetTag(raw)
         case 'examsoftbrowser': return 'examplify_browser';
         case 'onvue':
         case 'onvuebrowser': return 'onvue_browser';
+        case 'psi':
+        case 'psibridge':
+        case 'psibridgesecurebrowser':
+        case 'psibridgesecure':
+        case 'psibrowser': return 'psi_bridge_secure_browser';
         case 'seb':
         case 'safeexambrowser':
         case 'safeexam': return 'safe_exam_browser';
+        case 'proctortrack':
+        case 'verificient':
+        case 'verificientproctortrack': return 'proctortrack';
+        case 'pteb':
+        case 'proctortrackexambrowser':
+        case 'proctortrackexam': return 'proctortrack_exam_browser';
+        case 'hooktesthost':
+        case 'hooktest':
+        case 'synthetichost':
+        case 'synthetichooktarget': return 'hook_test_host';
     }
     return null;
 }
@@ -465,6 +490,8 @@ function umhctlDeriveTargetTag(controlReq, opKey, existingHeaders, flowContext)
     {
         return existingHeaders['x-umh-target-tag'].trim();
     }
+    if (umhctlRuntimeControlOps[opKey] === 1) { return 'runtime'; }
+    if (opKey == 'ipcbypass' && umhctlCanonicalAction(controlReq != null ? controlReq.op : null, controlReq != null ? controlReq.action : null) == 'list-targets') { return 'runtime'; }
     if (typeof controlReq.target_tag == 'string' && controlReq.target_tag.trim().length > 0)
     {
         var explicitCanonical = umhctlCanonicalTargetTag(controlReq.target_tag);
@@ -527,6 +554,7 @@ function umhctlDeriveMethodKey(controlReq, opKey, existingHeaders, flowContext)
     }
     if (typeof controlReq.methodKey == 'string' && controlReq.methodKey.trim().length > 0) { return controlReq.methodKey.trim(); }
     if (opKey == 'ipcbypass') { return 'ipc-bypass'; }
+    if (umhctlRuntimeControlOps[opKey] === 1) { return 'runtime-control'; }
     if (typeof controlReq.method == 'string' && controlReq.method.trim().length > 0)
     {
         var methodToken = umhctlCanonicalMethodHeaderKey(controlReq.method);
@@ -537,6 +565,28 @@ function umhctlDeriveMethodKey(controlReq, opKey, existingHeaders, flowContext)
         return flowContext['x-umh-method-key'].trim();
     }
     return 'auto';
+}
+
+function umhctlMethodKeyIsAutoOrDefault(methodKey)
+{
+    if (typeof methodKey != 'string') { return true; }
+    var normalized = umhctlSanitizeHeaderToken(methodKey);
+    return (normalized == null || normalized == 'auto' || normalized == 'default');
+}
+
+function umhctlValidateExactInjectionHeaders(opName, headers)
+{
+    var targetTag = (headers != null && typeof headers['x-umh-target-tag'] == 'string') ? headers['x-umh-target-tag'].trim() : '';
+    var methodKey = (headers != null && typeof headers['x-umh-method-key'] == 'string') ? headers['x-umh-method-key'].trim() : '';
+    if (targetTag.length == 0 || umhctlCanonicalTargetTag(targetTag) == null)
+    {
+        return { ok: false, error: 'umhctl ' + opName + ' requires an explicit report-backed --target-tag; pid/ad-hoc target routing is not valid under the control contract.' };
+    }
+    if (umhctlMethodKeyIsAutoOrDefault(methodKey))
+    {
+        return { ok: false, error: 'umhctl ' + opName + ' requires an explicit exact --method-key; auto/default is not valid for direct injection control.' };
+    }
+    return { ok: true };
 }
 
 function umhctlResolveControlHeaders(controlReq, sessionid)
@@ -579,6 +629,8 @@ function umhctlResolveControlHeaders(controlReq, sessionid)
         if (typeof headers['x-umh-run-id'] != 'string' || headers['x-umh-run-id'].trim().length == 0) { headers['x-umh-run-id'] = umhctlBuildRunId(); }
         if (typeof headers['x-umh-target-tag'] != 'string' || headers['x-umh-target-tag'].trim().length == 0) { headers['x-umh-target-tag'] = umhctlDeriveTargetTag(controlReq, opKey, headers, flowContext); }
         if (typeof headers['x-umh-method-key'] != 'string' || headers['x-umh-method-key'].trim().length == 0) { headers['x-umh-method-key'] = umhctlDeriveMethodKey(controlReq, opKey, headers, flowContext); }
+        var injectScopeValidation = umhctlValidateExactInjectionHeaders(controlReq.op, headers);
+        if (!injectScopeValidation.ok) { return injectScopeValidation; }
         for (var i = 0; i < requiredHeaders.length; ++i) { umhctlCopyHeaderIfMissing(headers, flowContext, requiredHeaders[i]); }
         var injectScopeMissing = [];
         for (var j = 0; j < requiredHeaders.length; ++j)
@@ -603,6 +655,8 @@ function umhctlResolveControlHeaders(controlReq, sessionid)
         {
             return { ok: false, error: 'umhctl ' + controlReq.op + ' requires an active target scope. Run "umhctl injectTargetSet ..." first or supply matching --run-id/--target-tag/--method-key.' };
         }
+        var scopedValidation = umhctlValidateExactInjectionHeaders(controlReq.op, headers);
+        if (!scopedValidation.ok) { return scopedValidation; }
         for (var k = 0; k < requiredHeaders.length; ++k) { umhctlCopyHeaderIfMissing(headers, flowContext, requiredHeaders[k]); }
         var scopedMissing = [];
         for (var m = 0; m < requiredHeaders.length; ++m)
@@ -634,6 +688,11 @@ function umhctlResolveControlHeaders(controlReq, sessionid)
     if (typeof headers['x-umh-method-key'] != 'string' || headers['x-umh-method-key'].trim().length == 0)
     {
         headers['x-umh-method-key'] = umhctlDeriveMethodKey(controlReq, opKey, headers, injectOp ? flowContext : null);
+    }
+    if (injectOp)
+    {
+        var injectValidation = umhctlValidateExactInjectionHeaders(controlReq.op, headers);
+        if (!injectValidation.ok) { return injectValidation; }
     }
 
     for (var n = 0; n < requiredHeaders.length; ++n) { umhctlCopyHeaderIfMissing(headers, flowContext, requiredHeaders[n]); }

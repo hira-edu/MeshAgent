@@ -51,6 +51,8 @@
         setconfig: 1,
         injecttargetset: 1,
         cleartargetscope: 1,
+        methodpolicy: 1,
+        safetystate: 1,
         lockdownbypass: 1,
         examsoftbypass: 1,
         ipcbypass: 1
@@ -576,7 +578,7 @@
         { name: 'method-policy', op: 'methodPolicy', args: { pid: 4242 }, expected: { op: 'methodPolicy', pid: 4242 } },
         { name: 'hook-profile', op: 'hookProfile', args: { target: 'lockdown_browser', exe: 'LockDownBrowser.exe' }, expected: { op: 'hookProfile', target: 'lockdown_browser', exe: 'LockDownBrowser.exe' } },
         { name: 'security-boundary', op: 'securityBoundary', args: { pid: 4242 }, expected: { op: 'securityBoundary', pid: 4242 } },
-        { name: 'inject-target-set', op: 'injectTargetSet', args: { pids: '101,202', 'run-id': 'run-lab-100', 'target-tag': 'screen-quizapp', 'method-key': 'remote-thread' }, expected: { op: 'injectTargetSet', target_pids: [101, 202], headers: { 'x-umh-run-id': 'run-lab-100', 'x-umh-target-tag': 'screen-quizapp', 'x-umh-method-key': 'remote-thread' } } },
+        { name: 'inject-target-set', op: 'injectTargetSet', args: { pids: '101,202', 'run-id': 'run-lab-100', 'target-tag': 'lockdown_browser', 'method-key': 'standard' }, expected: { op: 'injectTargetSet', target_pids: [101, 202], headers: { 'x-umh-run-id': 'run-lab-100', 'x-umh-target-tag': 'lockdown_browser', 'x-umh-method-key': 'standard' } } },
         { name: 'ipc-bypass', op: 'ipcBypass', args: { action: 'enable', target: 'adapter-blue', domain: 'screen' }, expected: { op: 'ipcBypass', action: 'enable', target: 'adapter-blue', domain: 'screen' } },
         { name: 'lockdown-default-status', op: 'lockdownBypass', args: {}, expected: { op: 'lockdownBypass', action: 'status' } }
     ];

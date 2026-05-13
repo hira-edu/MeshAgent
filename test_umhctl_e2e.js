@@ -159,8 +159,8 @@ function runFlowScopeChecks(results, sandbox, meshAgentStub) {
     sandbox.umhctlSendPreparedControlRequest(contract.buildControlRequest('injectTargetSet', {
         pids: '3001,3002',
         runId: 'run-lab-200',
-        targetTag: 'screen-examclient',
-        methodKey: 'load-library'
+        targetTag: 'lockdown_browser',
+        methodKey: 'standard'
     }), 'flow-session');
     sandbox.umhctlSendPreparedControlRequest(contract.buildControlRequest('injectAll', {}), 'flow-session');
     sandbox.umhctlSendPreparedControlRequest(contract.buildControlRequest('clearTargetScope', {}), 'flow-session');
@@ -170,7 +170,7 @@ function runFlowScopeChecks(results, sandbox, meshAgentStub) {
     assert(requestOps.length === 3, 'unexpected number of dispatched flow-scope requests');
     assert(requestOps[0].request.headers['x-umh-run-id'] === 'run-lab-200', 'injectTargetSet lost run-id header');
     assert(requestOps[1].request.headers['x-umh-run-id'] === 'run-lab-200', 'injectAll did not reuse scoped run-id');
-    assert(requestOps[1].request.headers['x-umh-target-tag'] === 'screen-examclient', 'injectAll did not reuse scoped target-tag');
+    assert(requestOps[1].request.headers['x-umh-target-tag'] === 'lockdown_browser', 'injectAll did not reuse scoped target-tag');
     assert(requestOps[2].request.headers['x-umh-run-id'] === 'run-lab-200', 'clearTargetScope did not reuse scoped run-id');
 
     const consoleMessages = getConsoleMessages(meshAgentStub);
@@ -180,6 +180,33 @@ function runFlowScopeChecks(results, sandbox, meshAgentStub) {
         ok: true,
         dispatchedOps: requestOps.map((entry) => entry.request.op)
     });
+}
+
+function runHeaderContractChecks(results, sandbox) {
+    sandbox.umhctlResetFlowState();
+
+    const pidOnlyInject = sandbox.umhctlResolveControlHeaders({ op: 'inject', pid: 123 }, 'header-contract-session');
+    assert(pidOnlyInject.ok === false && /report-backed --target-tag/.test(pidOnlyInject.error), 'pid-only inject must fail closed before native dispatch');
+
+    const explicitInject = sandbox.umhctlResolveControlHeaders({ op: 'inject', pid: 123, target_tag: 'LockDown_Browser', method: 'standard' }, 'header-contract-session');
+    assert(explicitInject.ok === true, 'explicit target/method inject should resolve headers');
+    assert(explicitInject.headers['x-umh-target-tag'] === 'lockdown_browser', 'explicit inject lost target header');
+    assert(explicitInject.headers['x-umh-method-key'] === 'standard', 'explicit inject lost method header');
+
+    const defaultMethodInject = sandbox.umhctlResolveControlHeaders({ op: 'inject', pid: 123, target_tag: 'LockDown_Browser', method: 'default' }, 'header-contract-session');
+    assert(defaultMethodInject.ok === false && /auto\/default/.test(defaultMethodInject.error), 'default injection method must fail closed');
+
+    const methodPolicy = sandbox.umhctlResolveControlHeaders({ op: 'methodPolicy', pid: 123 }, 'header-contract-session');
+    assert(methodPolicy.ok === true, 'methodPolicy should resolve runtime-control headers');
+    assert(methodPolicy.headers['x-umh-target-tag'] === 'runtime', 'methodPolicy must not derive pid target headers');
+    assert(methodPolicy.headers['x-umh-method-key'] === 'runtime-control', 'methodPolicy must use runtime-control method header');
+
+    const listTargets = sandbox.umhctlResolveControlHeaders({ op: 'ipcBypass', action: 'list-targets' }, 'header-contract-session');
+    assert(listTargets.ok === true, 'ipcBypass list-targets should resolve headers');
+    assert(listTargets.headers['x-umh-target-tag'] === 'runtime', 'ipcBypass list-targets must use runtime target header');
+    assert(listTargets.headers['x-umh-method-key'] === 'ipc-bypass', 'ipcBypass list-targets must use ipc-bypass method header');
+
+    results.push({ name: 'control-header-hard-fail', ok: true });
 }
 
 function runUiSnapshotChecks(results, sandbox, meshAgentStub) {
@@ -234,6 +261,7 @@ function main() {
     runConsoleBuildChecks(checks, sandbox);
     runRawJsonChecks(checks, sandbox);
     runFlowScopeChecks(checks, sandbox, meshAgentStub);
+    runHeaderContractChecks(checks, sandbox);
     runUiSnapshotChecks(checks, sandbox, meshAgentStub);
 
     const report = {
