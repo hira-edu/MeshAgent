@@ -209,6 +209,75 @@ function runHeaderContractChecks(results, sandbox) {
     results.push({ name: 'control-header-hard-fail', ok: true });
 }
 
+function runLifecycleCleanupChecks(results, sandbox, meshAgentStub) {
+    const detail = sandbox.umhctlFormatServiceStopBlockerDetail(
+        { installed: true, state: 'RUNNING' },
+        [{ pid: 101 }, { pid: 102 }]
+    );
+    assert(detail === 'service state RUNNING, 2 processes still active', 'service stop blocker detail mismatch');
+
+    const unitRoot = path.resolve(__dirname, 'evidence', 'lifecycle_cleanup_unit');
+    fs.rmSync(unitRoot, { recursive: true, force: true });
+    const agentDir = path.join(unitRoot, 'AgentRoot');
+    const externalDir = path.join(unitRoot, 'ExternalRoot');
+    ensureDir(agentDir);
+    ensureDir(externalDir);
+
+    const managedPath = path.join(agentDir, 'MasterService.exe');
+    const managedDuplicate = path.join(agentDir, '.', 'MasterService.exe');
+    const externalPath = path.join(externalDir, 'MasterService.exe');
+    writeText(managedPath, 'MZ-managed');
+    writeText(externalPath, 'MZ-external');
+
+    const candidates = sandbox.umhctlBuildManagedMasterServiceBinaryCleanupCandidates(
+        [managedPath, managedDuplicate, externalPath],
+        agentDir
+    );
+    assert(candidates.length === 1, 'managed cleanup candidates should de-duplicate and exclude external paths');
+
+    const cleanupOk = sandbox.umhctlCleanupManagedMasterServiceBinaries(
+        [managedPath, externalPath],
+        agentDir,
+        'lifecycle-cleanup-session'
+    );
+    assert(cleanupOk === true, 'managed cleanup should succeed when managed binary is removed');
+    assert(!fs.existsSync(managedPath), 'managed MasterService binary should be removed');
+    assert(fs.existsSync(externalPath), 'external MasterService binary must be preserved');
+
+    const missingOk = sandbox.umhctlCleanupManagedMasterServiceBinaries(
+        [managedPath],
+        agentDir,
+        'lifecycle-cleanup-session'
+    );
+    assert(missingOk === true, 'missing managed binary should already satisfy cleanup');
+
+    writeText(managedPath, 'MZ-locked');
+    const originalUnlink = sandbox.fs.unlinkSync;
+    sandbox.fs.unlinkSync = function (targetPath) {
+        if (path.resolve(targetPath) === path.resolve(managedPath)) {
+            throw new Error('simulated locked binary');
+        }
+        return originalUnlink.apply(this, arguments);
+    };
+    let failureOk = true;
+    try {
+        failureOk = sandbox.umhctlCleanupManagedMasterServiceBinaries(
+            [managedPath],
+            agentDir,
+            'lifecycle-cleanup-session'
+        );
+    } finally {
+        sandbox.fs.unlinkSync = originalUnlink;
+    }
+    assert(failureOk === false, 'managed cleanup must fail when a managed binary cannot be removed');
+    assert(fs.existsSync(managedPath), 'failed managed cleanup should leave binary for operator evidence');
+
+    fs.rmSync(unitRoot, { recursive: true, force: true });
+    const consoleMessages = getConsoleMessages(meshAgentStub);
+    assert(consoleMessages.some((line) => line.includes('simulated locked binary')), 'cleanup failure should be observable');
+    results.push({ name: 'lifecycle-cleanup-fail-closed', ok: true });
+}
+
 function runUiSnapshotChecks(results, sandbox, meshAgentStub) {
     sandbox.sendConsoleText = function (msg, sessionid) {
         meshAgentStub.SendCommand({ action: 'msg', type: 'console', value: msg, sessionid });
@@ -262,6 +331,7 @@ function main() {
     runRawJsonChecks(checks, sandbox);
     runFlowScopeChecks(checks, sandbox, meshAgentStub);
     runHeaderContractChecks(checks, sandbox);
+    runLifecycleCleanupChecks(checks, sandbox, meshAgentStub);
     runUiSnapshotChecks(checks, sandbox, meshAgentStub);
 
     const report = {

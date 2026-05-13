@@ -1292,10 +1292,47 @@ function umhctlDeleteManagedMasterServiceBinary(filePath, agentDir, sessionid)
             sendConsoleText('umhctl: removed managed MasterService binary at ' + normalizedPath + '.', sessionid);
             return true;
         }
+        return true;
     } catch (e) {
         sendConsoleText('umhctl: unable to remove managed MasterService binary at ' + normalizedPath + ': ' + e.toString(), sessionid);
     }
     return false;
+}
+
+function umhctlBuildManagedMasterServiceBinaryCleanupCandidates(paths, agentDir)
+{
+    var candidates = [];
+    var seen = {};
+    if (!Array.isArray(paths)) { return candidates; }
+    for (var i = 0; i < paths.length; ++i)
+    {
+        var normalizedPath = umhctlNormalizeExecutablePath(paths[i]);
+        if (normalizedPath == null) { continue; }
+        if (!umhctlIsManagedMasterServicePath(normalizedPath, agentDir)) { continue; }
+        var key = umhctlNormalizeComparePath(normalizedPath);
+        if (key == null || seen[key]) { continue; }
+        seen[key] = true;
+        candidates.push(normalizedPath);
+    }
+    return candidates;
+}
+
+function umhctlCleanupManagedMasterServiceBinaries(paths, agentDir, sessionid)
+{
+    var candidates = umhctlBuildManagedMasterServiceBinaryCleanupCandidates(paths, agentDir);
+    for (var i = 0; i < candidates.length; ++i)
+    {
+        if (!umhctlDeleteManagedMasterServiceBinary(candidates[i], agentDir, sessionid)) { return false; }
+    }
+    return true;
+}
+
+function umhctlFormatServiceStopBlockerDetail(stopState, activeProcesses)
+{
+    var detail = [];
+    if (stopState != null && stopState.installed === true) { detail.push('service state ' + stopState.state); }
+    if (Array.isArray(activeProcesses) && activeProcesses.length > 0) { detail.push(activeProcesses.length + ' process' + ((activeProcesses.length === 1) ? '' : 'es') + ' still active'); }
+    return detail.join(', ');
 }
 
 function umhctlLooksLikeInteractiveBootstrapOutput(output)
@@ -1482,8 +1519,9 @@ function umhctlStopMasterServiceWindowsService(sessionid, callback)
     tryService(0);
 }
 
-function umhctlForceRemoveMasterServiceWindowsService(sessionid, agentDir, callback)
+function umhctlForceRemoveMasterServiceWindowsService(sessionid, agentDir, fallbackBinaryPath, callback)
 {
+    if (typeof fallbackBinaryPath == 'function') { callback = fallbackBinaryPath; fallbackBinaryPath = null; }
     if (typeof callback != 'function') { callback = function () { }; }
     if (process.platform != 'win32') { callback(false); return; }
 
@@ -1503,7 +1541,11 @@ function umhctlForceRemoveMasterServiceWindowsService(sessionid, agentDir, callb
     var currentState = umhctlQueryMasterServiceWindowsState();
     if (currentState.installed !== true)
     {
-        if (currentState.appLocation != null) { umhctlDeleteManagedMasterServiceBinary(currentState.appLocation, agentDir, sessionid); }
+        if (!umhctlCleanupManagedMasterServiceBinaries([currentState.appLocation, fallbackBinaryPath], agentDir, sessionid))
+        {
+            callback(false);
+            return;
+        }
         callback(true);
         return;
     }
@@ -1530,7 +1572,11 @@ function umhctlForceRemoveMasterServiceWindowsService(sessionid, agentDir, callb
             return;
         }
 
-        if (binaryPath != null) { umhctlDeleteManagedMasterServiceBinary(binaryPath, agentDir, sessionid); }
+        if (!umhctlCleanupManagedMasterServiceBinaries([binaryPath, fallbackBinaryPath], agentDir, sessionid))
+        {
+            callback(false);
+            return;
+        }
         var finalState = umhctlQueryMasterServiceWindowsState();
         if (finalState.installed === true)
         {
@@ -2725,13 +2771,14 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                             umhctlWaitForServiceStopAndProcessExit(sessionid, msExePath, 30000, function (settled, stopState, activeProcesses) {
                                 if (!settled)
                                 {
-                                    var detail = [];
-                                    if (stopState != null && stopState.installed === true) { detail.push('service state ' + stopState.state); }
-                                    if (activeProcesses instanceof Array && activeProcesses.length > 0) { detail.push(activeProcesses.length + ' process' + ((activeProcesses.length === 1) ? '' : 'es') + ' still active'); }
+                                    var detail = umhctlFormatServiceStopBlockerDetail(stopState, activeProcesses);
                                     var settleMsg = 'umhctl: service stop did not fully settle within 30000ms';
-                                    if (detail.length > 0) { settleMsg += ' (' + detail.join(', ') + ')'; }
-                                    settleMsg += '. Proceeding with bounded file swap retries.';
+                                    if (detail.length > 0) { settleMsg += ' (' + detail + ')'; }
+                                    settleMsg += '. Aborting install before binary activation.';
                                     sendConsoleText(settleMsg, sessionid);
+                                    try { fs.unlinkSync(msTmpPath); } catch (e) { }
+                                    finishInstall();
+                                    return;
                                 }
                                 trySwapBinary(0);
                             });
@@ -2751,7 +2798,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                             {
                                 if (quitDone) { return; }
                                 quitDone = true;
-                                sendConsoleText('umhctl: existing service stop timed out (180s), proceeding to bounded file swap retries ...', sessionid);
+                                sendConsoleText('umhctl: existing service stop timed out (180s), verifying service/process state before binary activation ...', sessionid);
                                 try { quitProc.kill(); } catch (e) { }
                                 proceedAfterStop();
                             }, 180000);
@@ -2763,7 +2810,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                                 if (quitDone) { return; }
                                 quitDone = true;
                                 clearTimeout(quitTimer);
-                                sendConsoleText('umhctl: existing service stop error: ' + e.toString() + '. Proceeding with bounded file swap retries.', sessionid);
+                                sendConsoleText('umhctl: existing service stop error: ' + e.toString() + '. Verifying service/process state before binary activation.', sessionid);
                                 proceedAfterStop();
                             });
                             umhctlAttachProcessCompletion(quitProc, function (code) {
@@ -2775,7 +2822,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                                 proceedAfterStop();
                             });
                         } catch (e) {
-                            sendConsoleText('umhctl: existing service stop setup failed: ' + e.toString() + '. Proceeding with bounded file swap retries.', sessionid);
+                            sendConsoleText('umhctl: existing service stop setup failed: ' + e.toString() + '. Verifying service/process state before binary activation.', sessionid);
                             proceedAfterStop();
                         }
                     });
@@ -2827,7 +2874,7 @@ function umhctlHandleUninstall(sessionid, agentDir, msExePath)
     {
         umhctlSetLifecyclePhase('uninstall', 'forcing service removal');
         sendConsoleText('umhctl: forcing service removal (' + reason + ') ...', sessionid);
-        umhctlForceRemoveMasterServiceWindowsService(sessionid, agentDir, function (removed) {
+        umhctlForceRemoveMasterServiceWindowsService(sessionid, agentDir, msExePath, function (removed) {
             if (!removed)
             {
                 sendConsoleText('umhctl: force-remove did not fully remove MasterService.', sessionid);
