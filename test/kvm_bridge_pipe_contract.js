@@ -53,12 +53,14 @@ function main() {
         masterBuildsInputAndOutputPipeNames: kvmSource.includes('kvm_relay_build_bridge_pipe_namesW') &&
             kvmSource.includes('L"%ls_in"') &&
             kvmSource.includes('L"%ls_out"'),
-        masterUsesRestrictedPipeDacl: kvmSource.includes('ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;SY)(A;;GA;;;BA)"'),
+        masterUsesRestrictedPipeDacl: kvmSource.includes('KVM_BRIDGE_PIPE_DACL_SDDL = L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)(A;;GA;;;SU)"') &&
+            kvmSource.includes('ConvertStringSecurityDescriptorToSecurityDescriptorW(KVM_BRIDGE_PIPE_DACL_SDDL'),
         masterCreatesDirectionalOverlappedPipes: kvmSource.includes('static BOOL kvm_relay_create_bridge_server_pipeW(const WCHAR* pipeName, DWORD pipeOpenMode, HANDLE* pipeOut)') &&
             kvmSource.includes('pipeOpenMode | FILE_FLAG_OVERLAPPED') &&
             kvmSource.includes('kvm_relay_create_bridge_server_pipeW(bridgeInputPipeNameW, PIPE_ACCESS_OUTBOUND, &ctx->bridgeInputPipeHandle)') &&
             kvmSource.includes('kvm_relay_create_bridge_server_pipeW(bridgeOutputPipeNameW, PIPE_ACCESS_INBOUND, &ctx->bridgeOutputPipeHandle)'),
-        masterUses64KbPipeBuffers: kvmSource.includes('\t\t65536,\n\t\t65536,') || kvmSource.includes('65536,\r\n\t\t65536,'),
+        masterUsesExplicitPipeBuffers: kvmSource.includes('DWORD pipeBufferSize = 1024 * 1024;') &&
+            (kvmSource.includes('pipeBufferSize,\n\t\tpipeBufferSize,') || kvmSource.includes('pipeBufferSize,\r\n\t\tpipeBufferSize,')),
         masterWaitsAsyncForPipeClient: kvmSource.includes('ConnectNamedPipe(pipeHandle, &overlapped)') && kvmSource.includes('ERROR_IO_PENDING'),
         masterAttachesAsyncReadPipeTransportAndDedicatedWriteHandle: kvmSource.includes('ILibProcessPipe_Pipe_CreateFromExisting(ctx->pipeMgr, duplicatedOutputPipe') &&
             kvmSource.includes('ctx->bridgeInputPipeHandle == NULL || ctx->bridgeInputPipeHandle == INVALID_HANDLE_VALUE') &&
@@ -71,12 +73,12 @@ function main() {
         masterWaitsAndAttachesPipeInLiveSpawnPath: kvmSource.includes('!kvm_relay_build_bridge_pipe_namesW(bridgeInputPipeNameW') &&
             kvmSource.includes('!kvm_relay_create_bridge_server_pipeW(bridgeInputPipeNameW, PIPE_ACCESS_OUTBOUND, &ctx->bridgeInputPipeHandle)') &&
             kvmSource.includes('!kvm_relay_create_bridge_server_pipeW(bridgeOutputPipeNameW, PIPE_ACCESS_INBOUND, &ctx->bridgeOutputPipeHandle)') &&
-            kvmSource.includes('!kvm_relay_wait_for_bridge_client(ctx->bridgeInputPipeHandle, 5000, &lastError)') &&
-            kvmSource.includes('!kvm_relay_wait_for_bridge_client(ctx->bridgeOutputPipeHandle, 5000, &lastError)') &&
+            kvmSource.includes('!kvm_relay_wait_for_bridge_client(ctx->bridgeInputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, &lastError)') &&
+            kvmSource.includes('!kvm_relay_wait_for_bridge_client(ctx->bridgeOutputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, &lastError)') &&
             kvmSource.includes('InterlockedExchange(&ctx->childUsesBridge, 1);') &&
             kvmSource.includes('!kvm_relay_attach_bridge_transport(ctx, ctx->bridgeInputPipeHandle, ctx->bridgeOutputPipeHandle)'),
-        slaveParsesPipeArguments: bridgeSource.includes('static int Stealth_KvmBridgeExtractPipeNamesA(') &&
-            bridgeSource.includes('strncmp(tokenBuffer, "\\\\\\\\.\\\\pipe\\\\", 9) != 0') &&
+        slaveParsesPipeArguments: bridgeSource.includes('static int Stealth_KvmBridgeExtractPipeNamesW(') &&
+            bridgeSource.includes('_wcsnicmp(tokenBuffer, L"\\\\\\\\.\\\\pipe\\\\", 9) != 0') &&
             bridgeSource.includes('destination = (pipeCount == 0) ? controlPipeName : dataPipeName;'),
         slaveConnectsDirectionalPipes: bridgeSource.includes('CreateFileW(controlPipeName, GENERIC_READ') &&
             bridgeSource.includes('CreateFileW(dataPipeName, GENERIC_WRITE'),

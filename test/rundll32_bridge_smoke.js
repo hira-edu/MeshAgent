@@ -268,10 +268,14 @@ async function main() {
     assert(report.firstScreenPacket != null, 'bridge did not emit an initial screen packet');
     assert((report.firstScreenPacket.width >>> 0) > 0 && (report.firstScreenPacket.height >>> 0) > 0, `bridge reported invalid screen size ${report.firstScreenPacket.width}x${report.firstScreenPacket.height}`);
     if (fs.existsSync(logPath)) {
-        report.logTail = fs.readFileSync(logPath, 'utf8').split(/\r?\n/).filter(Boolean).slice(-40);
-        assert(report.logTail.some((line) => line.includes(`KvmSessionBridgeW starting (input=${controlPipeName} output=${dataPipeName})`)), 'bridge log missing exact input/output startup line');
-        assert(report.logTail.every((line) => line.includes('WaitNamedPipeW failed') === false), 'bridge log contains WaitNamedPipe failure');
-        assert(report.logTail.some((line) => line.includes('KvmSessionBridgeW mainloop exited') || line.includes('KvmSessionBridgeW exiting normally')), 'bridge log missing graceful exit line');
+        const logLines = fs.readFileSync(logPath, 'utf8').split(/\r?\n/).filter(Boolean);
+        const startupLine = `KvmSessionBridgeW starting (input=${controlPipeName} output=${dataPipeName})`;
+        const startupIndex = logLines.findIndex((line) => line.includes(startupLine));
+        const runLogLines = startupIndex >= 0 ? logLines.slice(startupIndex) : logLines.slice(-200);
+        report.logTail = runLogLines.slice(-80);
+        assert(startupIndex >= 0, 'bridge log missing exact input/output startup line');
+        assert(runLogLines.every((line) => line.includes('WaitNamedPipeW failed') === false), 'bridge log contains WaitNamedPipe failure');
+        assert(runLogLines.some((line) => line.includes('KvmSessionBridgeW mainloop exited') || line.includes('KvmSessionBridgeW exiting normally')), 'bridge log missing graceful exit line');
     }
     report.success = true;
 

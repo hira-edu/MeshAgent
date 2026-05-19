@@ -914,22 +914,46 @@ function umhctlAttachProcessCompletion(proc, handler)
     {
         throw new Error('child process does not support event subscription');
     }
-    var lastErr = null;
-    var completionEvents = ['exit', 'close'];
-    for (var i = 0; i < completionEvents.length; ++i)
+    var attached = [];
+    var completed = false;
+    var exitFallback = null;
+    var complete = function (code, signal)
     {
-        try
+        if (completed) { return; }
+        completed = true;
+        if (exitFallback != null)
         {
-            subscribe(completionEvents[i], handler);
-            return completionEvents[i];
+            try { clearTimeout(exitFallback); } catch (e) { }
+            exitFallback = null;
         }
-        catch (e)
-        {
-            lastErr = e;
-        }
+        handler.call(proc, code, signal);
+    };
+    var hasClose = false;
+    try
+    {
+        subscribe('close', complete);
+        attached.push('close');
+        hasClose = true;
     }
-    if (lastErr != null) { throw lastErr; }
-    throw new Error('child process completion events are unavailable');
+    catch (e) { }
+    try
+    {
+        subscribe('exit', function (code, signal) {
+            if (!hasClose)
+            {
+                complete(code, signal);
+                return;
+            }
+            if (exitFallback == null)
+            {
+                exitFallback = setTimeout(function () { complete(code, signal); }, 1000);
+            }
+        });
+        attached.push('exit');
+    }
+    catch (e) { }
+    if (attached.length == 0) { throw new Error('child process completion events are unavailable'); }
+    return attached.join(',');
 }
 
 function umhctlGetMasterServiceCandidateNames()

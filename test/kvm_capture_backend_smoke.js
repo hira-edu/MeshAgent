@@ -169,6 +169,7 @@ async function main() {
     const args = parseArgs(process.argv);
     const scenarioName = String(args.scenario || 'dxgi');
     const scenario = SCENARIOS[scenarioName];
+    const holdMs = args['hold-ms'] == null ? 500 : Number(args['hold-ms']);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const systemRoot = process.env.SystemRoot || 'C:\\Windows';
     const rundll32Path = path.join(systemRoot, 'System32', 'rundll32.exe');
@@ -187,6 +188,7 @@ async function main() {
     let disconnectInitiatedAt = 0;
 
     assert(scenario, `Unknown scenario: ${scenarioName}`);
+    assert(Number.isFinite(holdMs) && holdMs >= 0 && holdMs <= 60000, `Invalid hold-ms: ${args['hold-ms']}`);
     assert(fs.existsSync(rundll32Path), `rundll32.exe not found at ${rundll32Path}`);
     assert(fs.existsSync(dllPath), `bridge DLL not found at ${dllPath}`);
 
@@ -203,6 +205,7 @@ async function main() {
         dataPipeName,
         launchArgs: [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName, '-kvm1'],
         env: { ...scenario.env, STEALTH_KVM_TRACE_TILE: '1' },
+        holdMs,
         packets,
         backendTransitions: [],
         aliveBeforeDisconnect: false,
@@ -281,7 +284,7 @@ async function main() {
         throw new Error(`${error.message}; trace=${JSON.stringify(getTraceText())}`);
     }
 
-    await sleep(500);
+    await sleep(holdMs);
     assert(childExited === false, 'rundll32 bridge exited unexpectedly before transport shutdown');
     report.aliveBeforeDisconnect = true;
 
@@ -316,6 +319,7 @@ async function main() {
             `GENERATED_UTC=${report.generatedUtc}`,
             `SCENARIO=${scenarioName}`,
             'SUCCESS=true',
+            `HOLD_MS=${holdMs}`,
             `ALIVE_BEFORE_DISCONNECT=${report.aliveBeforeDisconnect}`,
             `DISPLAY_LIST_PACKETS_AFTER_COMMAND=${report.displayListPacketsAfterCommand}`,
             `EXIT_AFTER_DISCONNECT_MS=${report.exitAfterDisconnectMs}`,

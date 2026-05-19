@@ -26,6 +26,21 @@ function loadRecoveryCoreVm() {
     const code = fs.readFileSync(RECOVERYCORE_PATH, 'utf8');
     const meshAgentStub = createMeshAgentStub();
 
+    function mirrorUmhctlOverrides(sandbox, umhSandbox) {
+        [
+            'childProcess',
+            'sendConsoleText',
+            'umhctlPreflightControlService',
+            'umhctlSendControlRequest',
+            'umhctlRunPreProtectionCapture',
+            'umhctlEnsureFlowContract'
+        ].forEach((name) => {
+            if (Object.prototype.hasOwnProperty.call(sandbox, name)) {
+                umhSandbox[name] = sandbox[name];
+            }
+        });
+    }
+
     const sandbox = {
         Buffer,
         console,
@@ -37,7 +52,10 @@ function loadRecoveryCoreVm() {
         require(moduleName) {
             if (moduleName === 'MeshAgent') { return meshAgentStub; }
             if (moduleName === 'umhctl') {
-                if (this.__umhctlModule != null) { return this.__umhctlModule; }
+                if (sandbox.__umhctlModule != null) {
+                    mirrorUmhctlOverrides(sandbox, sandbox.__umhctlSandbox);
+                    return sandbox.__umhctlModule;
+                }
                 const umhSandbox = {
                     Buffer,
                     console,
@@ -52,8 +70,10 @@ function loadRecoveryCoreVm() {
                 };
                 vm.createContext(umhSandbox);
                 vm.runInContext(fs.readFileSync(UMHCTL_PATH, 'utf8'), umhSandbox, { filename: UMHCTL_PATH });
-                this.__umhctlModule = umhSandbox.module.exports;
-                return this.__umhctlModule;
+                mirrorUmhctlOverrides(sandbox, umhSandbox);
+                sandbox.__umhctlSandbox = umhSandbox;
+                sandbox.__umhctlModule = umhSandbox.module.exports;
+                return sandbox.__umhctlModule;
             }
             return require(moduleName);
         }

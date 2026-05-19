@@ -2481,10 +2481,21 @@ static DWORD MeshService_KvmDesktopAccessMask(void)
 
 static BOOL MeshService_BindCurrentProcessToInteractiveWindowStation(DWORD* errorOut)
 {
-	HWINSTA windowStation = OpenWindowStationW(L"WinSta0", FALSE, WINSTA_ALL_ACCESS);
+	HWINSTA currentWindowStation = GetProcessWindowStation();
+	HWINSTA windowStation = NULL;
 	BOOL ok = FALSE;
+	WCHAR currentName[64];
+	DWORD currentNameBytes = 0;
 
 	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (currentWindowStation != NULL &&
+		GetUserObjectInformationW(currentWindowStation, UOI_NAME, currentName, sizeof(currentName), &currentNameBytes))
+	{
+		currentName[63] = L'\0';
+		if (_wcsicmp(currentName, L"WinSta0") == 0) { return TRUE; }
+	}
+
+	windowStation = OpenWindowStationW(L"WinSta0", FALSE, WINSTA_ALL_ACCESS);
 	if (windowStation == NULL)
 	{
 		if (errorOut != NULL) { *errorOut = GetLastError(); }
@@ -2492,7 +2503,7 @@ static BOOL MeshService_BindCurrentProcessToInteractiveWindowStation(DWORD* erro
 	}
 	ok = SetProcessWindowStation(windowStation);
 	if (!ok && errorOut != NULL) { *errorOut = GetLastError(); }
-	CloseWindowStation(windowStation);
+	if (!ok) { CloseWindowStation(windowStation); }
 	return ok;
 }
 

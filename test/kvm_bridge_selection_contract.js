@@ -46,12 +46,16 @@ function main() {
     const processPipePath = path.resolve('microstack', 'ILibProcessPipe.c');
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
+    const rundll32ContractPath = path.resolve('meshservice', 'rundll32_contract.h');
     const processPipeSource = fs.readFileSync(processPipePath, 'utf8');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const serviceMainSource = fs.readFileSync(serviceMainPath, 'utf8');
+    const rundll32ContractSource = fs.readFileSync(rundll32ContractPath, 'utf8');
 
     const checks = {
-        policyAllowsBridgeEntryPoint: processPipeSource.includes('allow-kvm-bridge') && processPipeSource.includes('KvmSessionBridgeW'),
+        policyAllowsBridgeEntryPoint: processPipeSource.includes('allow-kvm-bridge') &&
+            processPipeSource.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
+            rundll32ContractSource.includes('#define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"'),
         policyAllowsInternalHelperReentry:
             processPipeSource.includes('allow-helper-reentry') &&
             processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
@@ -72,8 +76,8 @@ function main() {
             kvmSource.includes('kvm_relay_build_bridge_pipe_namesW(bridgeInputPipeNameW') &&
             kvmSource.includes('kvm_relay_create_bridge_server_pipeW(bridgeInputPipeNameW, PIPE_ACCESS_OUTBOUND, &ctx->bridgeInputPipeHandle)') &&
             kvmSource.includes('kvm_relay_create_bridge_server_pipeW(bridgeOutputPipeNameW, PIPE_ACCESS_INBOUND, &ctx->bridgeOutputPipeHandle)') &&
-            kvmSource.includes('kvm_relay_wait_for_bridge_client(ctx->bridgeInputPipeHandle, 5000, &lastError)') &&
-            kvmSource.includes('kvm_relay_wait_for_bridge_client(ctx->bridgeOutputPipeHandle, 5000, &lastError)') &&
+            kvmSource.includes('kvm_relay_wait_for_bridge_client(ctx->bridgeInputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, &lastError)') &&
+            kvmSource.includes('kvm_relay_wait_for_bridge_client(ctx->bridgeOutputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, &lastError)') &&
             kvmSource.includes('kvm_relay_attach_bridge_transport(ctx, ctx->bridgeInputPipeHandle, ctx->bridgeOutputPipeHandle)') &&
             kvmSource.includes('WriteFile(ctx->bridgeInputPipeHandle, buffer, (DWORD)bufferLen, NULL, &overlapped)') &&
             kvmSource.includes('transport=named-pipe input=%s output=%s') &&
@@ -106,7 +110,8 @@ function main() {
         files: {
             processPipePath,
             kvmPath,
-            serviceMainPath
+            serviceMainPath,
+            rundll32ContractPath
         },
         checks
     };

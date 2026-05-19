@@ -1021,10 +1021,10 @@ static void Stealth_SvchostLogProvisioningStatus(void)
         {
             _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s.msh", g_SvchostInstallDir, baseName);
             attr = GetFileAttributesW(candidatePath);
-            Stealth_DebugPrintfW(L"[svchost] installed MSH provisioning file %ls (%ls)",
+            Stealth_DebugPrintfW(L"[svchost] executable sibling provisioning file %ls (%ls)",
                                  candidatePath,
                                  (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-            Stealth_SvchostLogLine(L"installed MSH provisioning file %ls (%ls)",
+            Stealth_SvchostLogLine(L"executable sibling provisioning file %ls (%ls)",
                                    candidatePath,
                                    (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
         }

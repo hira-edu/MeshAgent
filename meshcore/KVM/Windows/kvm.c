@@ -31,6 +31,8 @@ limitations under the License.
 #include "microstack/ILibProcessPipe.h"
 #include "microstack/ILibRemoteLogging.h"
 #include "meshservice/rundll32_contract.h"
+#include "meshservice/stealth_utils.h"
+#include "meshservice/stealth_watchdog.h"
 #include "../../../meshservice/branding_util.h"
 #include <WtsApi32.h>
 #include <Objbase.h>
@@ -330,6 +332,7 @@ typedef struct KvmRelayProcessUser
 }KvmRelayProcessUser;
 
 static void kvm_relay_close_bridge_transport(KvmRelayContext* ctx);
+static BOOL kvm_relay_stop_bridge_process(DWORD timeoutMs);
 
 static void kvm_relay_ensure_registry_lock()
 {
@@ -820,6 +823,97 @@ static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int
 		return FALSE;
 	}
 	return (bytesWritten == (DWORD)bufferLen);
+}
+
+static BOOL kvm_relay_stop_bridge_process(DWORD timeoutMs)
+{
+	KvmRelayContext* ctx = kvm_relay_get_context();
+	HANDLE childProcessHandle = NULL;
+	DWORD waitResult = WAIT_FAILED;
+	char disconnectPacket[4];
+
+	if (gChildProcess == NULL) { return TRUE; }
+
+	((unsigned short*)disconnectPacket)[0] = (unsigned short)htons((unsigned short)MNG_KVM_DISCONNECT);
+	((unsigned short*)disconnectPacket)[1] = (unsigned short)htons((unsigned short)4);
+	kvm_trace_startupf("Requesting bridge helper shutdown over pipe timeoutMs=%lu", (unsigned long)timeoutMs);
+	if (ctx != NULL && InterlockedCompareExchange(&ctx->childUsesBridge, 0, 0) != 0)
+	{
+		if (!kvm_relay_write_bridge_input(ctx, disconnectPacket, (int)sizeof(disconnectPacket)))
+		{
+			kvm_trace_startupf("Bridge pipe disconnected during intentional shutdown error=%lu", (unsigned long)GetLastError());
+		}
+	}
+
+	ILibProcessPipe_Process_GetWaitHandles(gChildProcess, &childProcessHandle, NULL, NULL, NULL);
+	if (childProcessHandle == NULL || childProcessHandle == INVALID_HANDLE_VALUE)
+	{
+		ILibProcessPipe_Process_SoftKill(gChildProcess);
+		return FALSE;
+	}
+
+	waitResult = WaitForSingleObject(childProcessHandle, timeoutMs);
+	if (waitResult == WAIT_OBJECT_0) { return TRUE; }
+
+	kvm_trace_startupf("Bridge helper did not exit gracefully waitResult=%lu; terminating", (unsigned long)waitResult);
+	if (!TerminateProcess(childProcessHandle, 0))
+	{
+		kvm_trace_startupf("TerminateProcess bridge helper failed error=%lu", (unsigned long)GetLastError());
+		return FALSE;
+	}
+	return (WaitForSingleObject(childProcessHandle, 1000) == WAIT_OBJECT_0);
+}
+
+static BOOL kvm_relay_harden_bridge_process(ILibProcessPipe_Process childProcess, DWORD* errorOut)
+{
+	HANDLE childProcessHandle = NULL;
+	HANDLE jobObject = NULL;
+
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (childProcess == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+
+	ILibProcessPipe_Process_GetWaitHandles(childProcess, &childProcessHandle, NULL, NULL, NULL);
+	if (childProcessHandle == NULL || childProcessHandle == INVALID_HANDLE_VALUE)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_HANDLE; }
+		return FALSE;
+	}
+
+	if (!Stealth_ProtectProcessByHandle(childProcessHandle))
+	{
+		if (errorOut != NULL)
+		{
+			*errorOut = GetLastError();
+			if (*errorOut == ERROR_SUCCESS) { *errorOut = ERROR_ACCESS_DENIED; }
+		}
+		return FALSE;
+	}
+
+	jobObject = Watchdog_GetOrCreateJobObject();
+	if (jobObject == NULL)
+	{
+		if (errorOut != NULL)
+		{
+			*errorOut = GetLastError();
+			if (*errorOut == ERROR_SUCCESS) { *errorOut = ERROR_INVALID_HANDLE; }
+		}
+		return FALSE;
+	}
+
+	if (!AssignProcessToJobObject(jobObject, childProcessHandle))
+	{
+		if (errorOut != NULL)
+		{
+			*errorOut = GetLastError();
+			if (*errorOut == ERROR_SUCCESS) { *errorOut = ERROR_ACCESS_DENIED; }
+		}
+		return FALSE;
+	}
+	return TRUE;
 }
 
 static BOOL kvm_relay_write_bridge_pause(KvmRelayContext* ctx, int pause)
@@ -1476,10 +1570,21 @@ static DWORD kvm_desktop_access_mask(void)
 
 static BOOL kvm_bind_current_process_to_interactive_window_station(DWORD* errorOut)
 {
-	HWINSTA windowStation = OpenWindowStationW(L"WinSta0", FALSE, WINSTA_ALL_ACCESS);
+	HWINSTA currentWindowStation = GetProcessWindowStation();
+	HWINSTA windowStation = NULL;
 	BOOL ok = FALSE;
+	WCHAR currentName[64];
+	DWORD currentNameBytes = 0;
 
 	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (currentWindowStation != NULL &&
+		GetUserObjectInformationW(currentWindowStation, UOI_NAME, currentName, sizeof(currentName), &currentNameBytes))
+	{
+		currentName[63] = L'\0';
+		if (_wcsicmp(currentName, L"WinSta0") == 0) { return TRUE; }
+	}
+
+	windowStation = OpenWindowStationW(L"WinSta0", FALSE, WINSTA_ALL_ACCESS);
 	if (windowStation == NULL)
 	{
 		if (errorOut != NULL) { *errorOut = GetLastError(); }
@@ -1488,7 +1593,7 @@ static BOOL kvm_bind_current_process_to_interactive_window_station(DWORD* errorO
 
 	ok = SetProcessWindowStation(windowStation);
 	if (!ok && errorOut != NULL) { *errorOut = GetLastError(); }
-	CloseWindowStation(windowStation);
+	if (!ok) { CloseWindowStation(windowStation); }
 	return ok;
 }
 
@@ -1925,12 +2030,24 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 	HDESK desktop;
 	HDESK desktop2;
 	char name[64];
+	char currentName[64] = { 0 };
+	char targetName[64] = { 0 };
+	int haveCurrentName = 0;
+	int haveTargetName = 0;
+	int desktopSwitchEvent = KVM_ConsumeDesktopSwitchEvent();
+	int desktopNameChanged = 0;
+	int explicitWinlogon = 0;
 	DWORD windowStationError = ERROR_SUCCESS;
 
 	// KVMDEBUG("CheckDesktopSwitch", checkres);
 
 	// Check desktop switch
 	if ((desktop2 = GetThreadDesktop(GetCurrentThreadId())) == NULL) { KVMDEBUG("GetThreadDesktop Error", 0); } // CloseDesktop() is not needed
+	if (desktop2 != NULL && GetUserObjectInformationA(desktop2, UOI_NAME, currentName, 63, 0))
+	{
+		currentName[63] = 0;
+		haveCurrentName = 1;
+	}
 	if (!kvm_bind_current_process_to_interactive_window_station(&windowStationError))
 	{
 		kvm_trace_startupf("KVM startup: SetProcessWindowStation(WinSta0) failed error=%lu", windowStationError);
@@ -1960,15 +2077,33 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 		}
 	}
 
-	if (desktop != NULL && SetThreadDesktop(desktop) == 0)
+	if (desktop != NULL && GetUserObjectInformationA(desktop, UOI_NAME, targetName, 63, 0))
+	{
+		targetName[63] = 0;
+		haveTargetName = 1;
+		if (InterlockedCompareExchange(&gKvmForceDefaultDesktop, 0, 0) == 0 && _stricmp(targetName, "Winlogon") == 0)
+		{
+			HDESK secureDesktop = OpenDesktopW(L"Winlogon", 0, FALSE, kvm_desktop_access_mask());
+			explicitWinlogon = 1;
+			if (secureDesktop != NULL)
+			{
+				if (CloseDesktop(desktop) == 0) { KVMDEBUG("CloseDesktop(OpenInputDesktop) Error", 0); }
+				desktop = secureDesktop;
+				strncpy_s(targetName, sizeof(targetName), "Winlogon", _TRUNCATE);
+			}
+		}
+	}
+
+	if (desktop != NULL && haveCurrentName != 0 && haveTargetName != 0 && _stricmp(currentName, targetName) == 0)
+	{
+		if (CloseDesktop(desktop) == 0) { KVMDEBUG("CloseDesktop(UnchangedDesktop) Error", 0); }
+		desktop = desktop2;
+	}
+	else if (desktop != NULL && SetThreadDesktop(desktop) == 0)
 	{
 		kvm_trace_startupf("KVM startup: SetThreadDesktop failed error=%lu desktop=%p", GetLastError(), desktop);
 		if (CloseDesktop(desktop) == 0) { KVMDEBUG("CloseDesktop1 Error", 0); }
 		desktop = desktop2;
-	}
-	else if (desktop != NULL)
-	{
-		CloseDesktop(desktop2);
 	}
 	else
 	{
@@ -1980,26 +2115,6 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 	{
 		name[63] = 0;
 		strncpy_s(gKvmCurrentDesktopName, sizeof(gKvmCurrentDesktopName), name, _TRUNCATE);
-
-		// On the secure desktop, reopen Winlogon explicitly from SYSTEM to keep capture/input aligned.
-		if (InterlockedCompareExchange(&gKvmForceDefaultDesktop, 0, 0) == 0 && _stricmp(name, "Winlogon") == 0)
-		{
-			HDESK secureDesktop = OpenDesktopW(L"Winlogon", 0, FALSE, kvm_desktop_access_mask());
-			if (secureDesktop != NULL)
-			{
-				if (CloseDesktop(desktop) == 0) { KVMDEBUG("CloseDesktop(OpenInputDesktop) Error", 0); }
-				desktop = secureDesktop;
-				if (SetThreadDesktop(desktop) == 0)
-				{
-					if (CloseDesktop(desktop) == 0) { KVMDEBUG("CloseDesktop(Winlogon) Error", 0); }
-					desktop = desktop2;
-				}
-				else
-				{
-					strncpy_s(gKvmCurrentDesktopName, sizeof(gKvmCurrentDesktopName), "Winlogon", _TRUNCATE);
-				}
-			}
-		}
 
 		//ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: name = %s", name);
 
@@ -2015,10 +2130,22 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 			// (upstream behavior: adapt in-place, do NOT kill the child)
 			if (kvm_server_currentDesktopname != ((int*)name)[0])
 			{
+				desktopNameChanged = 1;
 				KVMDEBUG("DESKTOP NAME CHANGE DETECTED, adapting in-place", 0);
 				ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: kvm_server_currentDesktop: NAME CHANGE DETECTED, adapting...");
 				kvm_server_currentDesktopname = ((int*)name)[0];
 			}
+		}
+		if (desktopNameChanged != 0 || desktopSwitchEvent != 0)
+		{
+			ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+				"KVM [SLAVE]: desktop switch old=%s new=%s explicitWinlogon=%d event=%d",
+				haveCurrentName != 0 ? currentName : "(unknown)",
+				name,
+				explicitWinlogon,
+				desktopSwitchEvent);
+			kvm_server_SetResolution(writeHandler, reserved);
+			kvm_send_display_list(writeHandler, reserved);
 		}
 	}
 	else
@@ -2261,6 +2388,12 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 			if (size != 5) break;
 			g_remotepause = block[4];
 			ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: Remote %s requested", g_remotepause != 0 ? "pause" : "resume");
+			break;
+		}
+	case MNG_KVM_DISCONNECT:
+		{
+			ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: Received disconnect request");
+			g_shutdown = 1;
 			break;
 		}
 	case MNG_KVM_FRAME_RATE_TIMER:
@@ -3403,6 +3536,24 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					continue;
 				}
 
+				if (!kvm_relay_harden_bridge_process(gChildProcess, &lastError))
+				{
+					if (lastError == ERROR_SUCCESS) { lastError = ERROR_ACCESS_DENIED; }
+					kvm_trace_startupf("rundll32 bridge hardening failed error=%u attempt=%d type=%d", lastError, attempt + 1, (int)attemptType);
+					ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+						"KVM [Master]: rundll32 bridge hardening failed (error=%u, spawnType=%d, tsid=%d)",
+						lastError,
+						(int)attemptType,
+						gProcessTSID);
+#ifdef _WINSERVICE
+					kvm_bridge_report_outcome_event(L"HARDENING_FAILURE", EVENTLOG_ERROR_TYPE, ILibProcessPipe_Process_GetPID(gChildProcess), lastError, exePath, attemptType);
+#endif
+					ILibProcessPipe_Process_SoftKill(gChildProcess);
+					gChildProcess = NULL;
+					kvm_relay_close_bridge_transport(ctx);
+					continue;
+				}
+
 				bridgeConnectStartTickMs = GetTickCount64();
 				kvm_trace_startupf("bridge spawn OK, waiting for pipe connect timeoutMs=%u", (unsigned int)KVM_BRIDGE_CONNECT_TIMEOUT_MS);
 				InterlockedExchange(&ctx->childUsesBridge, 1);
@@ -3489,7 +3640,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 		if (gChildProcess == NULL)
 		{
 			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-				"KVM [Master]: Failed to spawn rundll32 bridge after %d attempt(s) (lastError=%u, tsid=%d)",
+				"KVM [Master]: Failed to spawn rundll32 bridge after %d attempt(s) (lastError=%u, tsid=%d); rundll32 KVM path required; legacy self-exe fallback is disabled",
 				candidateCount,
 				lastError,
 				gProcessTSID);
@@ -3692,6 +3843,22 @@ void kvm_cleanup(void *reserved)
 	gKvmPipeMgr = NULL;
 	gKvmExePath = NULL;
 	gKvmWriteHandler = NULL;
+	kvm_update_runtime_state(0, 0);
+	hadChildProcess = (gChildProcess != NULL);
+	if (gChildProcess != NULL) 
+	{ 
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM.c/kvm_cleanup: Attempting graceful child shutdown");
+		if (!kvm_relay_stop_bridge_process(5000))
+		{
+			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM.c/kvm_cleanup: Attempting to kill child process");
+			ILibProcessPipe_Process_SoftKill(gChildProcess);
+		}
+		gChildProcess = NULL;
+	}
+	else
+	{
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM.c/kvm_cleanup: gChildProcess = NULL");
+	}
 	if (ctx != NULL)
 	{
 		kvm_relay_close_bridge_transport(ctx);
@@ -3699,18 +3866,6 @@ void kvm_cleanup(void *reserved)
 		ctx->writeHandler = NULL;
 		ctx->reserved = NULL;
 		kvm_relay_reset_cached_control_state(ctx);
-	}
-	kvm_update_runtime_state(0, 0);
-	hadChildProcess = (gChildProcess != NULL);
-	if (gChildProcess != NULL) 
-	{ 
-		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM.c/kvm_cleanup: Attempting to kill child process");
-		ILibProcessPipe_Process_SoftKill(gChildProcess);
-		gChildProcess = NULL;
-	}
-	else
-	{
-		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM.c/kvm_cleanup: gChildProcess = NULL");
 	}
 	kvm_relay_capture_context(ctx);
 	if (ctx != NULL && ctx->childProcess == NULL && hadChildProcess == 0)
