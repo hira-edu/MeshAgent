@@ -5268,7 +5268,7 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 
 		ILibUTF8ToWideEx(updatefile, (int)strnlen_s(updatefile, 4096), w_updatefile, 4096);
 
-#if defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+#if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
 		// Launch the downloaded update through the rundll32 lifecycle host.
 		ILIBLOGMESSAGEX("SelfUpdate -> Svchost mode: launching rundll32 lifecycle update activation...");
 

@@ -31,9 +31,11 @@ limitations under the License.
 #include "ILibParsers.h"
 #include "ILibRemoteLogging.h"
 #include "ILibProcessPipe.h"
+#if defined(WIN32)
+#include "../meshservice/rundll32_contract.h"
+#endif
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
 #include "../meshservice/stealth.h"
-#include "../meshservice/rundll32_contract.h"
 #endif
 #ifndef WIN32
 #include <fcntl.h>              /* Obtain O_* constant definitions */
