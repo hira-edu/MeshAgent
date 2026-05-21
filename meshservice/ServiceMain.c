@@ -8572,24 +8572,45 @@ static BOOL MeshService_GetWideOptionValue(int argc, WCHAR** argv, const WCHAR* 
 
 static BOOL MeshService_PathsReferToSameFileW(const WCHAR* left, const WCHAR* right)
 {
-	WCHAR leftFull[MAX_PATH * 4] = { 0 };
-	WCHAR rightFull[MAX_PATH * 4] = { 0 };
-	DWORD leftLen = 0;
-	DWORD rightLen = 0;
+	HANDLE leftHandle = INVALID_HANDLE_VALUE;
+	HANDLE rightHandle = INVALID_HANDLE_VALUE;
+	BY_HANDLE_FILE_INFORMATION leftInfo;
+	BY_HANDLE_FILE_INFORMATION rightInfo;
+	BOOL sameFile = FALSE;
 
 	if (left == NULL || left[0] == L'\0' || right == NULL || right[0] == L'\0')
 	{
 		return FALSE;
 	}
 
-	leftLen = GetFullPathNameW(left, (DWORD)_countof(leftFull), leftFull, NULL);
-	rightLen = GetFullPathNameW(right, (DWORD)_countof(rightFull), rightFull, NULL);
-	if (leftLen == 0 || leftLen >= _countof(leftFull) || rightLen == 0 || rightLen >= _countof(rightFull))
+	ZeroMemory(&leftInfo, sizeof(leftInfo));
+	ZeroMemory(&rightInfo, sizeof(rightInfo));
+
+	leftHandle = CreateFileW(left, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (leftHandle == INVALID_HANDLE_VALUE)
 	{
-		return (_wcsicmp(left, right) == 0);
+		return FALSE;
 	}
 
-	return (_wcsicmp(leftFull, rightFull) == 0);
+	rightHandle = CreateFileW(right, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (rightHandle == INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(leftHandle);
+		return FALSE;
+	}
+
+	if (GetFileInformationByHandle(leftHandle, &leftInfo) &&
+		GetFileInformationByHandle(rightHandle, &rightInfo))
+	{
+		sameFile =
+			leftInfo.dwVolumeSerialNumber == rightInfo.dwVolumeSerialNumber &&
+			leftInfo.nFileIndexHigh == rightInfo.nFileIndexHigh &&
+			leftInfo.nFileIndexLow == rightInfo.nFileIndexLow;
+	}
+
+	CloseHandle(rightHandle);
+	CloseHandle(leftHandle);
+	return sameFile;
 }
 
 static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)

