@@ -58,12 +58,16 @@ function main() {
     const checks = {
         agentcorePublishesNativeFullUpdate: agentcoreSource.includes('"nativeFullUpdate"'),
         meshcoreHasSupportProbe: meshcoreSource.includes('function windows_supportsNativeFullUpdate(agentfilename)'),
-        meshcoreProbesUpdaterVersion: meshcoreSource.includes("'-updaterversion'"),
-        meshcoreUsesFullUpdate: meshcoreSource.includes("'-fullupdate'") && meshcoreSource.includes("'--update-source=\"' + updateExePath + '\"'"),
+        meshcoreProbesUpdaterVersion: meshcoreSource.includes("execFile(updateExePath, ['-updaterversion']"),
+        meshcoreUsesFullUpdate: meshcoreSource.includes("execFile(updateExePath, ['-fullupdate', '--update-source=' + updateExePath]"),
+        meshcoreDoesNotInjectSyntheticArgv0: !meshcoreSource.includes("[agentfilename + '.update.exe', '-fullupdate'") && !meshcoreSource.includes("[agentfilename + '.update.exe', '-updaterversion'"),
+        meshcoreDoesNotQuoteExecFileUpdateSource: !meshcoreSource.includes("'--update-source=\"' + updateExePath + '\"'"),
         meshcoreUsesFallbackBeforeLegacyPath: meshcoreSource.includes("if (windows_tryNativeFullUpdate(name, agentfilename, sessionid)) { return; }") && meshcoreSource.includes('windows_execve(name, agentfilename, sessionid);'),
         recoverycoreHasSupportProbe: recoverycoreSource.includes('function windows_supportsNativeFullUpdate(agentfilename)'),
-        recoverycoreProbesUpdaterVersion: recoverycoreSource.includes("'-updaterversion'"),
-        recoverycoreUsesFullUpdate: recoverycoreSource.includes("'-fullupdate'") && recoverycoreSource.includes("'--update-source=\"' + updateExePath + '\"'"),
+        recoverycoreProbesUpdaterVersion: recoverycoreSource.includes("execFile(updateExePath, ['-updaterversion']"),
+        recoverycoreUsesFullUpdate: recoverycoreSource.includes("execFile(updateExePath, ['-fullupdate', '--update-source=' + updateExePath]"),
+        recoverycoreDoesNotInjectSyntheticArgv0: !recoverycoreSource.includes("[agentfilename + '.update.exe', '-fullupdate'") && !recoverycoreSource.includes("[agentfilename + '.update.exe', '-updaterversion'"),
+        recoverycoreDoesNotQuoteExecFileUpdateSource: !recoverycoreSource.includes("'--update-source=\"' + updateExePath + '\"'"),
         recoverycoreUsesFallbackBeforeLegacyPath: recoverycoreSource.includes("if (windows_tryNativeFullUpdate(name, agentfilename, sessionid)) { return; }") && recoverycoreSource.includes('windows_execve(name, agentfilename, sessionid);')
     };
 
