@@ -2336,10 +2336,15 @@ void ILibProcessPipe_Process_AddHandlers(ILibProcessPipe_Process module, int buf
 void ILibProcessPipe_Process_GetWaitHandles(ILibProcessPipe_Process p, HANDLE *hProcess, HANDLE *read, HANDLE *write, HANDLE *error)
 {
 	ILibProcessPipe_Process_Object* j = (ILibProcessPipe_Process_Object*)p;
-	*hProcess = j->hProcess;
-	*read = j->stdOut->mOverlapped->hEvent;
-	*error = j->stdErr->mOverlapped->hEvent;
-	*write = j->stdIn->mOverlapped->hEvent;
+	if (hProcess != NULL) { *hProcess = NULL; }
+	if (read != NULL) { *read = NULL; }
+	if (write != NULL) { *write = NULL; }
+	if (error != NULL) { *error = NULL; }
+	if (j == NULL || !ILibMemory_CanaryOK(j)) { return; }
+	if (hProcess != NULL) { *hProcess = j->hProcess; }
+	if (read != NULL && j->stdOut != NULL && j->stdOut->mOverlapped != NULL) { *read = j->stdOut->mOverlapped->hEvent; }
+	if (error != NULL && j->stdErr != NULL && j->stdErr->mOverlapped != NULL) { *error = j->stdErr->mOverlapped->hEvent; }
+	if (write != NULL && j->stdIn != NULL && j->stdIn->mOverlapped != NULL) { *write = j->stdIn->mOverlapped->hEvent; }
 }
 #endif
 void ILibProcessPipe_Pipe_Close(ILibProcessPipe_Pipe po)
