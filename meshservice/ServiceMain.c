@@ -5688,6 +5688,7 @@ static int MeshService_RunSvchostStatusCommand(void)
 	MeshService_CollectProcessProtectionDiagnostics(&summary);
 	summary.success = (summary.statusMask == 0);
 	MeshService_PrintSvchostStatusJson(&summary);
+	fflush(stdout);
 	return (int)summary.statusMask;
 }
 
@@ -6884,6 +6885,35 @@ static void MeshService_DeleteFileIfPresentW(const WCHAR* path)
 			Stealth_LogInstallEvent(L"[GUI] Launcher cleanup delete failed path=%ls error=%lu", path, deleteErr);
 		}
 	}
+}
+
+static BOOL MeshService_PathIsUnderDirectoryW(const WCHAR* path, const WCHAR* directory)
+{
+	size_t directoryLen = 0;
+
+	if (path == NULL || path[0] == L'\0' || directory == NULL || directory[0] == L'\0') { return FALSE; }
+	directoryLen = wcslen(directory);
+	if (directoryLen == 0 || _wcsnicmp(path, directory, directoryLen) != 0) { return FALSE; }
+	if (path[directoryLen] == L'\0') { return TRUE; }
+	return (directory[directoryLen - 1] == L'\\' || directory[directoryLen - 1] == L'/') ||
+		path[directoryLen] == L'\\' ||
+		path[directoryLen] == L'/';
+}
+
+static BOOL MeshService_ShouldCleanupLauncherAfterLifecycle(const WCHAR* modulePath)
+{
+	StealthInstallPaths paths;
+
+	if (modulePath == NULL || modulePath[0] == L'\0') { return FALSE; }
+	ZeroMemory(&paths, sizeof(paths));
+	if (!Stealth_GetInstallPaths(&paths))
+	{
+		return FALSE;
+	}
+	if (paths.exePath[0] != L'\0' && _wcsicmp(modulePath, paths.exePath) == 0) { return FALSE; }
+	if (paths.dllPath[0] != L'\0' && _wcsicmp(modulePath, paths.dllPath) == 0) { return FALSE; }
+	if (paths.installDir[0] != L'\0' && MeshService_PathIsUnderDirectoryW(modulePath, paths.installDir)) { return FALSE; }
+	return TRUE;
 }
 
 static BOOL MeshService_GetLauncherStageDirectory(WCHAR* stageDirOut, size_t stageDirOutCch)
@@ -9913,6 +9943,13 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 
 			if (result)
 			{
+				if (LOWORD(wParam) == IDC_INSTALLBUTTON && MeshService_ShouldCleanupLauncherAfterLifecycle(modulePath))
+				{
+					if (!MeshRundll32_LaunchLauncherCleanupW(modulePath, GetCurrentProcessId(), 60000))
+					{
+						Stealth_LogInstallEvent(L"[GUI] Launcher cleanup scheduling failed path=%ls error=%lu", modulePath, GetLastError());
+					}
+				}
 				EndDialog(hDlg, LOWORD(wParam));
 			}
 			else

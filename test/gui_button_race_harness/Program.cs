@@ -36,17 +36,19 @@ var cachedSourceExe = CacheSourceFile(options.SourceExe, "source-exe");
 var cachedSourceDb = CacheSourceFileOptional(options.SourceDb, "source-db");
 var cachedSourceMsh = CacheSourceFileOptional(options.SourceMsh, "source-msh");
 var cachedSourceConf = CacheSourceFileOptional(options.SourceConf, "source-conf");
+var cachedSourceDll = CacheSourceFileOptional(options.SourceDll, "source-dll");
 
 var cliRunnerExe = Path.Combine(
     stageRoot,
     "cli runner (gui harness)",
     Path.GetFileName(cachedSourceExe));
-StageBinary(cachedSourceExe, cachedSourceDb, cachedSourceMsh, cachedSourceConf, cliRunnerExe);
+StageBinary(cachedSourceExe, cachedSourceDb, cachedSourceMsh, cachedSourceConf, cachedSourceDll, cliRunnerExe);
 
 var selectedScenarios = new HashSet<string>(options.Scenarios, StringComparer.OrdinalIgnoreCase);
 var runAllScenarios = selectedScenarios.Count == 0;
-var serviceName = QueryServiceName();
-if (string.IsNullOrWhiteSpace(serviceName)) { serviceName = "WinDiagnosticHost"; }
+var serviceName = "WinDiagnosticHost";
+var detectedServiceName = QueryServiceName();
+if (!string.IsNullOrWhiteSpace(detectedServiceName)) { serviceName = detectedServiceName; }
 
 try
 {
@@ -454,7 +456,7 @@ string PrepareGuiStage(string scenarioName)
     Directory.CreateDirectory(stageDir);
 
     var guiExe = Path.Combine(stageDir, Path.GetFileName(cachedSourceExe));
-    StageBinary(cachedSourceExe, cachedSourceDb, cachedSourceMsh, cachedSourceConf, guiExe);
+    StageBinary(cachedSourceExe, cachedSourceDb, cachedSourceMsh, cachedSourceConf, cachedSourceDll, guiExe);
     return guiExe;
 }
 
@@ -483,7 +485,7 @@ string? CacheSourceFileOptional(string? sourcePath, string label)
     return cachedPath;
 }
 
-void StageBinary(string sourceExe, string? sourceDb, string? sourceMsh, string? sourceConf, string targetExe)
+void StageBinary(string sourceExe, string? sourceDb, string? sourceMsh, string? sourceConf, string? sourceDll, string targetExe)
 {
     var targetDir = Path.GetDirectoryName(targetExe) ?? throw new InvalidOperationException("Target exe has no parent directory.");
     Directory.CreateDirectory(targetDir);
@@ -492,6 +494,7 @@ void StageBinary(string sourceExe, string? sourceDb, string? sourceMsh, string? 
     CopySidecar(sourceDb, Path.ChangeExtension(targetExe, ".db"));
     CopySidecar(sourceMsh, Path.ChangeExtension(targetExe, ".msh"));
     CopySidecar(sourceConf, Path.ChangeExtension(targetExe, ".conf"));
+    CopySidecar(sourceDll, Path.ChangeExtension(targetExe, ".dll"));
 }
 
 void CopySidecar(string? sourcePath, string destinationPath)
@@ -503,7 +506,7 @@ void CopySidecar(string? sourcePath, string destinationPath)
 void EnsureCliRunnerExists()
 {
     if (File.Exists(cliRunnerExe)) { return; }
-    StageBinary(cachedSourceExe, cachedSourceDb, cachedSourceMsh, cachedSourceConf, cliRunnerExe);
+    StageBinary(cachedSourceExe, cachedSourceDb, cachedSourceMsh, cachedSourceConf, cachedSourceDll, cliRunnerExe);
 }
 
 CommandResult RunCli(string cliExe, string arguments, int timeoutMs)
@@ -511,6 +514,12 @@ CommandResult RunCli(string cliExe, string arguments, int timeoutMs)
     if (string.Equals(cliExe, cliRunnerExe, StringComparison.OrdinalIgnoreCase))
     {
         EnsureCliRunnerExists();
+    }
+
+    var lifecycleAction = TryMapLifecycleAction(arguments);
+    if (lifecycleAction != null)
+    {
+        return RunLifecycle(cliExe, lifecycleAction, timeoutMs);
     }
 
     using var process = new Process
@@ -543,6 +552,119 @@ CommandResult RunCli(string cliExe, string arguments, int timeoutMs)
 
     Task.WaitAll(stdoutTask, stderrTask);
     return new CommandResult(process.ExitCode, stdoutTask.Result, stderrTask.Result, sw.Elapsed);
+}
+
+string? TryMapLifecycleAction(string arguments)
+{
+    var first = arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+    return first?.ToLowerInvariant() switch
+    {
+        "-fullinstall" => "install",
+        "-fullupdate" => "update",
+        "-fulluninstall" => "uninstall",
+        "-validate-install" or "--validate-install" => "validate-install",
+        "-validate-update" or "--validate-update" => "validate-update",
+        "-validate-uninstall" or "--validate-uninstall" => "validate-uninstall",
+        "-validate-package" or "--validate-package" => "validate-package",
+        _ => null
+    };
+}
+
+CommandResult RunLifecycle(string cliExe, string action, int timeoutMs)
+{
+    var hostDll = ResolveLifecycleHostDll(cliExe, action);
+    var sourceDll = ResolveLifecycleSourceDll(cliExe, hostDll);
+    var manifestDir = Path.Combine(Path.GetTempPath(), "mesh-lifecycle-" + Environment.ProcessId + "-" + DateTime.UtcNow.Ticks);
+    Directory.CreateDirectory(manifestDir);
+    var manifestPath = Path.Combine(manifestDir, "manifest.ini");
+    File.WriteAllLines(manifestPath, new[]
+    {
+        "[Lifecycle]",
+        "Action=" + action,
+        "SourceExe=" + SanitizeManifestValue(cliExe),
+        "SourceDll=" + SanitizeManifestValue(sourceDll),
+        "DisplayName=",
+        "Description=",
+        "RequireConfig=1",
+        string.Empty
+    }, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+    var rundll32Path = Path.Combine(Environment.SystemDirectory, "rundll32.exe");
+    using var process = new Process
+    {
+        StartInfo = new ProcessStartInfo
+        {
+            FileName = rundll32Path,
+            Arguments = $"\"{hostDll}\",MeshLifecycleHostW \"{manifestPath}\"",
+            WorkingDirectory = Path.GetDirectoryName(cliExe) ?? Environment.CurrentDirectory,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        }
+    };
+
+    var sw = Stopwatch.StartNew();
+    try
+    {
+        if (!process.Start())
+        {
+            throw new InvalidOperationException($"Failed to start rundll32 lifecycle action={action}");
+        }
+
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit(timeoutMs))
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw new TimeoutException($"Timed out running rundll32 lifecycle action={action}");
+        }
+
+        Task.WaitAll(stdoutTask, stderrTask);
+        return new CommandResult(process.ExitCode, stdoutTask.Result, stderrTask.Result, sw.Elapsed);
+    }
+    finally
+    {
+        try { File.Delete(manifestPath); } catch { }
+        try { Directory.Delete(manifestDir); } catch { }
+    }
+}
+
+string ResolveLifecycleHostDll(string cliExe, string action)
+{
+    var installedDll = ResolveInstalledServiceDll();
+    if (!string.IsNullOrWhiteSpace(installedDll) && File.Exists(installedDll) &&
+        (string.Equals(action, "validate-install", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(action, "validate-update", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(action, "validate-uninstall", StringComparison.OrdinalIgnoreCase)))
+    {
+        return installedDll;
+    }
+
+    return ResolveLifecycleSourceDll(cliExe, null);
+}
+
+string ResolveLifecycleSourceDll(string cliExe, string? fallback)
+{
+    var sidecar = Path.ChangeExtension(cliExe, ".dll");
+    if (File.Exists(sidecar)) { return sidecar; }
+    if (!string.IsNullOrWhiteSpace(cachedSourceDll) && File.Exists(cachedSourceDll)) { return cachedSourceDll; }
+    if (!string.IsNullOrWhiteSpace(fallback) && File.Exists(fallback)) { return fallback; }
+    throw new FileNotFoundException($"Missing lifecycle DLL sidecar for {cliExe}", sidecar);
+}
+
+string? ResolveInstalledServiceDll()
+{
+    using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{serviceName}\Parameters", false);
+    var value = key?.GetValue("ServiceDll")?.ToString();
+    if (string.IsNullOrWhiteSpace(value)) { return null; }
+    var expanded = Environment.ExpandEnvironmentVariables(value);
+    return File.Exists(expanded) ? expanded : null;
+}
+
+string SanitizeManifestValue(string? value)
+{
+    return (value ?? string.Empty).Replace('\r', ' ').Replace('\n', ' ').Replace('"', ' ');
 }
 
 ValidationCommandResult RunCliUntilSuccess(string cliExe, string arguments, int timeoutMs, int attempts, int delayMs)
@@ -980,6 +1102,7 @@ void WriteArtifacts()
     summary.AppendLine($"SOURCE_DB={options.SourceDb ?? "(absent)"}");
     summary.AppendLine($"SOURCE_MSH={options.SourceMsh ?? "(absent)"}");
     summary.AppendLine($"SOURCE_CONF={options.SourceConf ?? "(absent)"}");
+    summary.AppendLine($"SOURCE_DLL={options.SourceDll ?? "(absent)"}");
     summary.AppendLine($"STAGE_ROOT={stageRoot}");
     summary.AppendLine($"SERVICE_NAME={serviceName}");
     summary.AppendLine($"GUI_LOG={guiLogPath}");
@@ -1002,6 +1125,7 @@ void WriteArtifacts()
         sourceDb = options.SourceDb,
         sourceMsh = options.SourceMsh,
         sourceConf = options.SourceConf,
+        sourceDll = options.SourceDll,
         stageRoot,
         cliRunner = cliRunnerExe,
         serviceName,
@@ -1056,6 +1180,7 @@ HarnessOptions ParseArgs(string[] values)
         OptionalFile("source-db", DefaultSidecar(".db")),
         OptionalFile("source-msh", DefaultSidecar(".msh")),
         OptionalFile("source-conf", DefaultSidecar(".conf")),
+        OptionalFile("source-dll", DefaultSidecar(".dll")),
         Full("evidence"),
         map.TryGetValue("gui-log", out var guiLog) ? Path.GetFullPath(guiLog) : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DiagnosticHost", "gui-launch.log"),
         scenarios);
@@ -1086,7 +1211,7 @@ HarnessOptions ParseArgs(string[] values)
     }
 }
 
-record HarnessOptions(string SourceExe, string? SourceDb, string? SourceMsh, string? SourceConf, string EvidenceDir, string GuiLogPath, string[] Scenarios);
+record HarnessOptions(string SourceExe, string? SourceDb, string? SourceMsh, string? SourceConf, string? SourceDll, string EvidenceDir, string GuiLogPath, string[] Scenarios);
 record CommandResult(int ExitCode, string Stdout, string Stderr, TimeSpan Duration);
 record ValidationCommandResult(CommandResult Command, int Attempts);
 record NodeIdState(string RegistryNodeId, string ExecutableNodeIdHex);

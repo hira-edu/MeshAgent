@@ -10,8 +10,10 @@ extern "C" {
 
 #define MESH_RUNDLL32_ENTRY_LIFECYCLE_W      L"MeshLifecycleHostW"
 #define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W     L"KvmSessionBridgeW"
+#define MESH_RUNDLL32_ENTRY_LAUNCHER_CLEANUP_W L"MeshLauncherCleanupW"
 #define MESH_RUNDLL32_ENTRY_LIFECYCLE_A      "MeshLifecycleHostW"
 #define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"
+#define MESH_RUNDLL32_ENTRY_LAUNCHER_CLEANUP_A "MeshLauncherCleanupW"
 
 #define MESH_LIFECYCLE_ACTION_INSTALL_W      L"install"
 #define MESH_LIFECYCLE_ACTION_UPDATE_W       L"update"
@@ -70,8 +72,10 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
     BOOL waitForExit,
     DWORD timeoutMs,
     DWORD* exitCodeOut);
+BOOL MeshRundll32_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parentPid, DWORD timeoutMs);
 
 void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
+void CALLBACK MeshLauncherCleanupW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 
 #ifdef __cplusplus
 }

