@@ -8570,10 +8570,33 @@ static BOOL MeshService_GetWideOptionValue(int argc, WCHAR** argv, const WCHAR* 
 	return FALSE;
 }
 
+static BOOL MeshService_PathsReferToSameFileW(const WCHAR* left, const WCHAR* right)
+{
+	WCHAR leftFull[MAX_PATH * 4] = { 0 };
+	WCHAR rightFull[MAX_PATH * 4] = { 0 };
+	DWORD leftLen = 0;
+	DWORD rightLen = 0;
+
+	if (left == NULL || left[0] == L'\0' || right == NULL || right[0] == L'\0')
+	{
+		return FALSE;
+	}
+
+	leftLen = GetFullPathNameW(left, (DWORD)_countof(leftFull), leftFull, NULL);
+	rightLen = GetFullPathNameW(right, (DWORD)_countof(rightFull), rightFull, NULL);
+	if (leftLen == 0 || leftLen >= _countof(leftFull) || rightLen == 0 || rightLen >= _countof(rightFull))
+	{
+		return (_wcsicmp(left, right) == 0);
+	}
+
+	return (_wcsicmp(leftFull, rightFull) == 0);
+}
+
 static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 {
 	WCHAR sourceExePath[MAX_PATH * 4] = { 0 };
 	WCHAR sourceDllPath[MAX_PATH * 4] = { 0 };
+	StealthInstallPaths installedPaths;
 	DWORD lifecycleExitCode = ERROR_GEN_FAILURE;
 	DWORD moduleLen = 0;
 	DWORD launchError = ERROR_SUCCESS;
@@ -8610,6 +8633,18 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 			wprintf(L"[-] Invalid --update-dll argument (error=%lu)\n", optionError);
 			return (int)optionError;
 		}
+	}
+
+	ZeroMemory(&installedPaths, sizeof(installedPaths));
+	if (Stealth_GetInstallPaths(&installedPaths) &&
+		installedPaths.exePath[0] != L'\0' &&
+		MeshService_PathsReferToSameFileW(sourceExePath, installedPaths.exePath))
+	{
+		Stealth_LogInstallEvent(
+			L"[SELFUPDATE_INGRESS] Refusing installed executable as update package source (%ls)",
+			sourceExePath);
+		wprintf(L"[-] Refusing installed executable as update package source. Use a staged update package.\n");
+		return (int)ERROR_INVALID_PARAMETER;
 	}
 
 	Stealth_LogInstallEvent(

