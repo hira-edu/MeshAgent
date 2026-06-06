@@ -207,6 +207,14 @@ typedef struct ILibAsyncSocketModule
 	ILibAsyncSocket_TimeoutHandler timeout_handler;
 }ILibAsyncSocketModule;
 
+static void ILibAsyncSocket_RecordSendActivity(ILibAsyncSocketModule *module, int bytesSent)
+{
+	if (module != NULL && bytesSent > 0 && module->timeout_milliSeconds != 0)
+	{
+		module->timeout_lastActivity = ILibGetUptime();
+	}
+}
+
 void ILibAsyncSocket_PostSelect(void* object,int slct, fd_set *readset, fd_set *writeset, fd_set *errorset);
 void ILibAsyncSocket_PreSelect(void* object,fd_set *readset, fd_set *writeset, fd_set *errorset, int* blocktime);
 const int ILibMemory_ASYNCSOCKET_CONTAINERSIZE = (const int)sizeof(ILibAsyncSocketModule);
@@ -609,6 +617,7 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 
 							module->TotalBytesSent += bytesSent;
 							module->PendingBytesToSend = (unsigned int)(module->PendingSend_Head->bufferSize);
+							ILibAsyncSocket_RecordSendActivity(module, bytesSent);
 							TLSLOG1("   --> BUFFERING[%d]: %d bytes...\n", module->internalSocket, module->PendingSend_Head->bufferSize);
 
 							ignore_result(BIO_reset(module->writeBio));
@@ -625,6 +634,7 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 						ignore_result(BIO_reset(module->writeBio));
 						module->TotalBytesSent += bytesSent;
 						module->PendingBytesToSend = (unsigned int)(module->writeBioBuffer->length);
+						ILibAsyncSocket_RecordSendActivity(module, bytesSent);
 						TLSLOG1("   --> COMPLETE[%d]\n", module->internalSocket);
 					}
 					else
@@ -776,7 +786,7 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 				// BUGFIX: Reset idle timeout when sending data (including WebSocket PING/PONG frames)
 				// The idle timeout was triggering disconnects every 90-180 seconds because PING/PONG
 				// frames didn't reset timeout_lastActivity, causing webclient_destroyed disconnect.
-				if (module->timeout_milliSeconds != 0) { module->timeout_lastActivity = ILibGetUptime(); }
+				ILibAsyncSocket_RecordSendActivity(module, bytesSent);
 			}
 		}
 	}

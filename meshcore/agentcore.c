@@ -2521,6 +2521,16 @@ extern int ILibInflate(char *buffer, size_t bufferLen, char *decompressed, size_
 #ifndef MICROSTACK_NOTLS
 extern void ILibDuktape_TLS_X509_PUSH(duk_context *ctx, X509* cert);
 #endif
+typedef struct MeshServer_ControlChannelRequestState
+{
+	MeshAgentHostContainer *agent;
+	ILibWebClient_RequestToken requestToken;
+	ILibWebClient_StateObject webStateObject;
+	int connectTimerCompleted;
+	int established;
+	int timeoutFired;
+	int finalized;
+} MeshServer_ControlChannelRequestState;
 typedef struct RemoteDesktop_Ptrs
 {
 	duk_context *ctx;
@@ -3260,9 +3270,12 @@ void ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain(void *chain, void *
 	char *buffer = (char*)user;
 	size_t bufferLen = ILibMemory_Size(user);
 
-	if (ptrs != NULL && ptrs->stream != NULL)
+	if (ptrs != NULL && ILibMemory_CanaryOK(ptrs) && ptrs->stream != NULL && ptrs->ctx != NULL && duk_ctx_is_alive(ptrs->ctx))
 	{
-		ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, (int)bufferLen);
+		if (ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, (int)bufferLen) == 0)
+		{
+			kvm_pause(0, ptrs);
+		}
 	}
 	ILibMemory_Free(user);
 }
@@ -3311,7 +3324,7 @@ ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(char *
 			memcpy_s(bstate, (size_t)bufferLen, buffer, (size_t)bufferLen);
 			((void**)ILibMemory_Extra(bstate))[0] = ptrs;
 			ILibChain_RunOnMicrostackThreadEx3(duk_ctx_chain(ptrs->ctx), ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain, NULL, bstate);
-			return ILibTransport_DoneState_COMPLETE;
+			return ILibTransport_DoneState_INCOMPLETE;
 		}
 	}
 #endif
@@ -3662,6 +3675,44 @@ static MeshAgentHostContainer* ILibDuktape_MeshAgent_ResolveRemoteDesktopAgent(d
 	return agent;
 }
 
+#if defined(_LINKVM)
+static int ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(RemoteDesktop_Ptrs *ptrs)
+{
+	if (ptrs == NULL || !ILibMemory_CanaryOK(ptrs) || ptrs->stream == NULL || ptrs->ctx == NULL) { return 0; }
+#if defined(WIN32) && defined(_WINSERVICE)
+	if (ptrs->agent != NULL && ptrs->agent->runningAsConsole == 0 && ptrs->agent->pipeManager != NULL)
+	{
+		if (kvm_bridge_debug_get_child_present_for_reserved(ptrs) == 0) { return 0; }
+		if (kvm_bridge_debug_get_transport_active_for_reserved(ptrs) == 0) { return 0; }
+	}
+#endif
+	return 1;
+}
+
+static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(duk_context *ctx, RemoteDesktop_Ptrs *ptrs)
+{
+	if (ctx == NULL) { return; }
+
+	duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM);	// [MeshAgent][RemoteDesktop]
+	if (ptrs == NULL || !ILibMemory_CanaryOK(ptrs)) { duk_pop(ctx); return; }
+#if defined(_POSIX) && !defined(__APPLE__)
+	if (ptrs->kvmPipe != NULL)
+	{
+		ILibProcessPipe_FreePipe(ptrs->kvmPipe);
+		ptrs->kvmPipe = NULL;
+	}
+#endif
+#ifdef WIN32
+	kvm_cleanup(ptrs);
+#else
+	kvm_cleanup();
+#endif
+	memset(ptrs, 0, sizeof(RemoteDesktop_Ptrs));
+	duk_del_prop_string(ctx, -2, REMOTE_DESKTOP_STREAM);
+	duk_pop(ctx);											// [MeshAgent]
+}
+#endif
+
 duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 {
 #ifndef _LINKVM
@@ -3695,7 +3746,13 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 		duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_ptrs);
 		ptrs = (RemoteDesktop_Ptrs*)Duktape_GetBuffer(ctx, -1, NULL);
 		duk_pop(ctx);
-		return 1;
+		if (ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(ptrs))
+		{
+			return 1;
+		}
+		duk_pop(ctx);											// [MeshAgent]
+		Duktape_Console_LogEx(ctx, ILibDuktape_LogType_Info1, "KVM cached remote desktop stream is stale; restarting");
+		ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(ctx, ptrs);
 	}
 	agent = ILibDuktape_MeshAgent_ResolveRemoteDesktopAgent(ctx);
 	if (agent == NULL)
@@ -6083,14 +6140,54 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 	}
 }
 
+static void MeshServer_ControlChannel_EmitDisconnected(MeshAgentHostContainer *agent)
+{
+	if (agent == NULL || agent->meshCoreCtx == NULL) { return; }
+#ifndef MICROSTACK_NOTLS
+	if (agent->serverAuthState != 3) { return; }
+#endif
+
+	ILibDuktape_MeshAgent_PUSH(agent->meshCoreCtx, agent->chain);			// [agent]
+	duk_get_prop_string(agent->meshCoreCtx, -1, "emit");					// [agent][emit]
+	duk_swap_top(agent->meshCoreCtx, -2);									// [emit][this]
+	duk_push_string(agent->meshCoreCtx, "Connected");						// [emit][this][Connected]
+	duk_push_int(agent->meshCoreCtx, 0);									// [emit][this][Connected][0] (0 means disconnected)
+	if (duk_pcall_method(agent->meshCoreCtx, 2) != 0) { ILibDuktape_Process_UncaughtException(agent->meshCoreCtx); }
+	duk_pop(agent->meshCoreCtx);
+
+	duk_eval_string(agent->meshCoreCtx, "require('https').globalAgent.sockets;");															// [table]
+	duk_eval_string(agent->meshCoreCtx, "require('http').globalAgent.getName(require('http').parseUri(require('MeshAgent').ServerUrl));");	// [table][key]
+	if (duk_has_prop_string(agent->meshCoreCtx, -2, duk_get_string(agent->meshCoreCtx, -1)) != 0)
+	{
+		duk_get_prop(agent->meshCoreCtx, -2);																								// [table][array]
+		while (duk_get_length(agent->meshCoreCtx, -1) > 0)
+		{
+			duk_array_pop(agent->meshCoreCtx, -1);																							// [table][array][socket]
+			duk_prepare_method_call(agent->meshCoreCtx, -1, "end");																			// [table][array][socket][end][this]
+			duk_pcall_method(agent->meshCoreCtx, 0);																						// [table][array][socket][undef]
+			duk_pop_2(agent->meshCoreCtx);																									// [table][array]
+		}
+		duk_pop(agent->meshCoreCtx);																										// [table]
+	}
+	else
+	{
+		duk_pop(agent->meshCoreCtx);																										// [table]
+	}
+	duk_pop(agent->meshCoreCtx);																											// ...
+}
+
 void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 {
 	// We didn't receive a timely PONG response, so we must disconnect the control channel, and reconnect
 	MeshAgentHostContainer *agent = PingData2Agent(object);
+	ILibWebClient_StateObject timedOutChannel;
 	int descriptorValue = -1;
-	if (agent != NULL && agent->controlChannel != NULL)
+	if (agent == NULL) { return; }
+
+	timedOutChannel = agent->controlChannel;
+	if (timedOutChannel != NULL)
 	{
-		descriptorValue = ILibWebClient_GetDescriptorValue_FromStateObject(agent->controlChannel);
+		descriptorValue = ILibWebClient_GetDescriptorValue_FromStateObject(timedOutChannel);
 	}
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG TIMEOUT after %d seconds (descriptor=%d)", CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, descriptorValue);
 
@@ -6099,8 +6196,22 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 		printf("AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG TIMEOUT\n");
 		ILIBLOGMESSAGEX("AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG TIMEOUT\n");
 	}
-	ILibWebClient_Disconnect(agent->controlChannel);
+
+	if (timedOutChannel == NULL || agent->serverConnectionState != 2)
+	{
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): stale PONG TIMEOUT ignored (state=%d descriptor=%d)", agent->serverConnectionState, descriptorValue);
+		return;
+	}
+
+	MeshServer_ControlChannel_EmitDisconnected(agent);
 	agent->controlChannel = NULL;
+	agent->serverAuthState = 0;
+	agent->serverConnectionState = 0;
+	MeshAgent_ClearGlobalTunnelProxy(agent);
+	MeshAgent_ClearActiveProxyAttempt(agent);
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): serverConnectionState reset to 0 before reconnect (descriptor=%d)", descriptorValue);
+	ILibWebClient_Disconnect(timedOutChannel);
+	MeshServer_Connect(agent);
 }
 void MeshServer_ControlChannel_IdleTimeout(ILibWebClient_StateObject WebStateObject, void *user)
 {
@@ -6151,9 +6262,30 @@ static const char* MeshServer_GetControlChannelInterruptReason(int interruptFlag
 		return "other";
 	}
 }
+static void MeshServer_ControlChannelRequest_MarkConnectComplete(MeshAgentHostContainer *agent, MeshServer_ControlChannelRequestState *requestState)
+{
+	if (requestState == NULL || requestState->connectTimerCompleted != 0) { return; }
+
+	requestState->connectTimerCompleted = 1;
+	if (agent != NULL && agent->controlChannelRequest == requestState)
+	{
+		agent->controlChannelRequest = NULL;
+		ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), requestState);
+	}
+}
+static void MeshServer_ControlChannelRequest_Finalize(MeshAgentHostContainer *agent, MeshServer_ControlChannelRequestState *requestState)
+{
+	if (requestState == NULL || requestState->finalized != 0) { return; }
+
+	MeshServer_ControlChannelRequest_MarkConnectComplete(agent, requestState);
+	requestState->finalized = 1;
+	ILibMemory_Free(requestState);
+}
 void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int InterruptFlag, struct packetheader *header, char *bodyBuffer, int *beginPointer, int endPointer, ILibWebClient_ReceiveStatus recvStatus, void *user1, void *user2, int *PAUSE)
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user1;
+	MeshServer_ControlChannelRequestState *requestState = (MeshServer_ControlChannelRequestState*)user2;
+	int isTrackedControlChannelRequest = (requestState != NULL && agent->controlChannelRequest == requestState);
 	ILibChain_Link_SetMetadata(ILibChain_GetCurrentLink(agent->chain), "MeshServer_ControlChannel");
 	
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: recvStatus=%d interrupt=%d header=%s status=%d descriptor=%d begin=%d end=%d",
@@ -6176,11 +6308,12 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			endPointer);
 	}
 
-	if (agent->controlChannelRequest != NULL)
+	MeshServer_ControlChannelRequest_MarkConnectComplete(agent, requestState);
+	if (requestState != NULL && requestState->timeoutFired != 0 && requestState->established == 0)
 	{
-		ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), agent->controlChannelRequest);
-		ILibMemory_Free(agent->controlChannelRequest);
-		agent->controlChannelRequest = NULL;
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: stale timed-out connect completion ignored (request=%p)", requestState->requestToken);
+		MeshServer_ControlChannelRequest_Finalize(agent, requestState);
+		return;
 	}
 
 	// Look at the various connection states and handle data if needed
@@ -6193,6 +6326,11 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 		case ILibWebClient_ReceiveStatus_Connection_Established: // New connection established.
 		{
 			int descriptorValue = ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject);
+			if (requestState != NULL)
+			{
+				requestState->established = 1;
+				requestState->webStateObject = WebStateObject;
+			}
 			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: Connection_Established descriptor=%d", descriptorValue);
 			if (agent->controlChannelDebug != 0)
 			{
@@ -6224,6 +6362,7 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 				agent->controlChannel_idleTimeout_seconds = DEFAULT_IDLE_TIMEOUT;
 			}
 
+			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
 			agent->controlChannel = WebStateObject; // Set the agent MeshCentral server control channel
 			agent->proxyAttemptEstablished = 1;
 			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost | ILibRemoteLogging_Modules_ConsolePrint, ILibRemoteLogging_Flags_VerbosityLevel_1, "Control Channel Idle Timeout = %d seconds", agent->controlChannel_idleTimeout_seconds);
@@ -6308,6 +6447,9 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 		case ILibWebClient_ReceiveStatus_Complete: // Disconnection
 		{
 			int descriptorValue = ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject);
+			int isActiveControlChannel = (agent->controlChannel == WebStateObject);
+			int isPreClearedEstablishedChannel = (agent->controlChannel == NULL && agent->controlChannelRequest == NULL && requestState != NULL && requestState->established != 0 && requestState->webStateObject == WebStateObject);
+			int isAuthoritativeDisconnect = (isActiveControlChannel != 0 || isTrackedControlChannelRequest != 0 || isPreClearedEstablishedChannel != 0);
 			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: ReceiveStatus_Complete descriptor=%d interrupt=%d reason=%s headerStatus=%d",
 				descriptorValue,
 				InterruptFlag,
@@ -6320,54 +6462,31 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 				if (header != NULL)
 				{
 					ILIBLOGMESSAGEX("  -> HTTP status: %d", header->StatusCode);
-			}
-				ILIBLOGMESSAGEX("  -> InterruptFlag: %d", InterruptFlag);
-		}
-		}
-												   
-			// If the channel had been authenticated, inform JavaScript core module that we are not disconnected
-#ifndef MICROSTACK_NOTLS
-			if (agent->serverAuthState == 3)
-#endif
-			{
-				if (agent->meshCoreCtx != NULL)
-				{
-					ILibDuktape_MeshAgent_PUSH(agent->meshCoreCtx, agent->chain);			// [agent]
-					duk_get_prop_string(agent->meshCoreCtx, -1, "emit");					// [agent][emit]
-					duk_swap_top(agent->meshCoreCtx, -2);									// [emit][this]
-					duk_push_string(agent->meshCoreCtx, "Connected");						// [emit][this][Connected]
-					duk_push_int(agent->meshCoreCtx, 0);									// [emit][this][Connected][0] (0 means disconnected)
-					if (duk_pcall_method(agent->meshCoreCtx, 2) != 0) { ILibDuktape_Process_UncaughtException(agent->meshCoreCtx); }
-					duk_pop(agent->meshCoreCtx);
-
-					duk_eval_string(agent->meshCoreCtx, "require('https').globalAgent.sockets;");															// [table]
-					duk_eval_string(agent->meshCoreCtx, "require('http').globalAgent.getName(require('http').parseUri(require('MeshAgent').ServerUrl));");	// [table][key]
-					if (duk_has_prop_string(agent->meshCoreCtx, -2, duk_get_string(agent->meshCoreCtx, -1)) != 0)
-					{
-						duk_get_prop(agent->meshCoreCtx, -2);																								// [table][array]
-						while (duk_get_length(agent->meshCoreCtx, -1) > 0)
-						{
-							duk_array_pop(agent->meshCoreCtx, -1);																							// [table][array][socket]
-							duk_prepare_method_call(agent->meshCoreCtx, -1, "end");																			// [table][array][socket][end][this]
-							duk_pcall_method(agent->meshCoreCtx, 0);																						// [table][array][socket][undef]
-							duk_pop_2(agent->meshCoreCtx);																									// [table][array]
-						}
-						duk_pop(agent->meshCoreCtx);																										// [table]
-					}
-					else
-					{
-						duk_pop(agent->meshCoreCtx);																										// [table]
-					}
-					duk_pop(agent->meshCoreCtx);																											// ...
 				}
+				ILIBLOGMESSAGEX("  -> InterruptFlag: %d", InterruptFlag);
 			}
-			agent->serverAuthState = 0;
-			agent->controlChannel = NULL; // Set the agent MeshCentral server control channel
-			agent->serverConnectionState = 0;
-			MeshAgent_ClearGlobalTunnelProxy(agent);
-			MeshAgent_ClearActiveProxyAttempt(agent);
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: serverConnectionState reset to 0 (disconnected)");
+												   
+			// If the channel had been authenticated, inform JavaScript core module that we are disconnected
+			if (isAuthoritativeDisconnect != 0)
+			{
+				MeshServer_ControlChannel_EmitDisconnected(agent);
+			}
+			if (isAuthoritativeDisconnect != 0)
+			{
+				agent->serverAuthState = 0;
+				if (isActiveControlChannel != 0) { agent->controlChannel = NULL; } // Set the agent MeshCentral server control channel
+				ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
+				agent->serverConnectionState = 0;
+				MeshAgent_ClearGlobalTunnelProxy(agent);
+				MeshAgent_ClearActiveProxyAttempt(agent);
+				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: serverConnectionState reset to 0 (disconnected authoritative=%d trackedRequest=%d preCleared=%d)", isAuthoritativeDisconnect, isTrackedControlChannelRequest, isPreClearedEstablishedChannel);
+			}
+			else
+			{
+				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: stale disconnect ignored (descriptor=%d)", descriptorValue);
+			}
 			break;
+		}
 		case ILibWebClient_ReceiveStatus_MoreDataToBeReceived:	// Data received			
 		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: MoreDataToBeReceived status=%d begin=%d end=%d",
 			header != NULL ? header->StatusCode : -1,
@@ -6411,23 +6530,46 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 		printf("Mesh Server Connection Error [%d]\n", descriptorValue);
 
 		MeshAgent_RecordProxyAttemptFailure(agent, "connect-error");
+		if (isTrackedControlChannelRequest != 0 || agent->controlChannel == WebStateObject || (agent->controlChannel == NULL && agent->controlChannelRequest == NULL && requestState != NULL && requestState->established != 0 && requestState->webStateObject == WebStateObject))
+		{
+			if (agent->controlChannel == WebStateObject) { agent->controlChannel = NULL; }
+			agent->serverAuthState = 0;
+			agent->serverConnectionState = 0;
+			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
+			MeshAgent_ClearGlobalTunnelProxy(agent);
+			MeshAgent_ClearActiveProxyAttempt(agent);
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: header=NULL reset serverConnectionState to 0 before retry (trackedRequest=%d descriptor=%d)", isTrackedControlChannelRequest, descriptorValue);
+		}
 		if (agent->logUpdate != 0) 
 		{
 			sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "Connection Error [%p, %d, [%d]]...\n", WebStateObject, InterruptFlag, descriptorValue);
 			ILIBLOGMESSSAGE(ILibScratchPad); 
 		}
 
+		MeshServer_ControlChannelRequest_Finalize(agent, requestState);
+		requestState = NULL;
 		MeshServer_Connect(agent);
 		return;
 	}
 
 	if (recvStatus != ILibWebClient_ReceiveStatus_Partial) { *beginPointer = endPointer; } // TODO: Confirm with Bryan that this is how partial data works
+	if (recvStatus == ILibWebClient_ReceiveStatus_Complete)
+	{
+		MeshServer_ControlChannelRequest_Finalize(agent, requestState);
+	}
 }
 void MeshServer_ConnectEx_NetworkError(void *j)
 {
-	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)((void**)j)[0];
-	void *request = ((void**)j)[1];
-	ILibMemory_Free(j);
+	MeshServer_ControlChannelRequestState *requestState = (MeshServer_ControlChannelRequestState*)j;
+	MeshAgentHostContainer *agent = requestState->agent;
+	void *request = requestState->requestToken;
+
+	requestState->timeoutFired = 1;
+	requestState->connectTimerCompleted = 1;
+	if (agent->controlChannelRequest == requestState)
+	{
+		agent->controlChannelRequest = NULL;
+	}
 
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx_NetworkError: Network Timeout (request=%p)", request);
 	if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Network Timeout Occurred..."); }
@@ -6436,12 +6578,16 @@ void MeshServer_ConnectEx_NetworkError(void *j)
 
 	printf("Network Timeout occurred...\n");
 
-	ILibWebClient_CancelRequest(request);
+	if (request != NULL)
+	{
+		ILibWebClient_CancelRequest(request);
+	}
+	else
+	{
+		MeshServer_ControlChannelRequest_Finalize(agent, requestState);
+		requestState = NULL;
+	}
 	MeshServer_ConnectEx(agent);
-}
-void MeshServer_ConnectEx_NetworkError_Cleanup(void *j)
-{
-	ILibMemory_Free(j);
 }
 void MeshServer_ConnectEx_Lockout_Retry(void *j)
 {
@@ -6744,12 +6890,13 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 
 	ILibWebClient_AddWebSocketRequestHeaders(req, 65535, MeshServer_OnSendOK);
 	{
-		void **tmp = ILibMemory_SmartAllocate(2 * sizeof(void*));
-		agent->controlChannelRequest = tmp;
-		tmp[0] = agent;
-		tmp[1] = reqToken = ILibWebClient_PipelineRequest(agent->httpClientManager, (struct sockaddr*)&meshServer, req, MeshServer_OnResponse, agent, NULL);
+		MeshServer_ControlChannelRequestState *requestState = (MeshServer_ControlChannelRequestState*)ILibMemory_SmartAllocate(sizeof(MeshServer_ControlChannelRequestState));
+		requestState->agent = agent;
+		agent->controlChannelRequest = requestState;
+		reqToken = ILibWebClient_PipelineRequest(agent->httpClientManager, (struct sockaddr*)&meshServer, req, MeshServer_OnResponse, agent, requestState);
+		requestState->requestToken = reqToken;
 		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: PipelineRequest token=%p", reqToken);
-		ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), tmp, 60, MeshServer_ConnectEx_NetworkError, MeshServer_ConnectEx_NetworkError_Cleanup);
+		ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), requestState, 60, MeshServer_ConnectEx_NetworkError, NULL);
 	}
 
 #ifndef MICROSTACK_NOTLS
@@ -7795,6 +7942,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	if ((msnlen = ILibSimpleDataStore_Get(agentHost->masterDb, "meshServiceName", NULL, 0)) != 0)
 	{
+		if (agentHost->meshServiceName != NULL) { ILibMemory_Free(agentHost->meshServiceName); agentHost->meshServiceName = NULL; }
 		agentHost->meshServiceName = (char*)ILibMemory_SmartAllocate(msnlen+1);
 		ILibSimpleDataStore_Get(agentHost->masterDb, "meshServiceName", agentHost->meshServiceName, msnlen);
 		agentHost->meshServiceName[msnlen] = 0;
@@ -7803,6 +7951,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	else
 	{
 		const mesh_branding_definition_t *branding = MeshConfig_GetBranding();
+		if (agentHost->meshServiceName != NULL) { ILibMemory_Free(agentHost->meshServiceName); agentHost->meshServiceName = NULL; }
 #ifdef WIN32
 #if defined(UNICODE) || defined(_UNICODE)
 		const wchar_t *serviceFile = (branding != NULL && branding->serviceFile != NULL && branding->serviceFile[0] != L'\0') ? branding->serviceFile : MESH_AGENT_SERVICE_FILE;
@@ -7822,12 +7971,14 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	if ((msnlen = ILibSimpleDataStore_Get(agentHost->masterDb, "displayName", NULL, 0)) != 0)
 	{
+		if (agentHost->displayName != NULL) { ILibMemory_Free(agentHost->displayName); agentHost->displayName = NULL; }
 		agentHost->displayName = (char*)ILibMemory_SmartAllocate(msnlen + 1);
 		ILibSimpleDataStore_Get(agentHost->masterDb, "displayName", agentHost->displayName, msnlen);
 	}
 	else
 	{
-		agentHost->displayName = "MeshCentral";
+		if (agentHost->displayName != NULL) { ILibMemory_Free(agentHost->displayName); agentHost->displayName = NULL; }
+		agentHost->displayName = ILibString_Copy("MeshCentral", 0);
 	}
 
 	duk_push_sprintf(tmpCtx, "require('service-manager').manager.getService('%s').isMe();", agentHost->meshServiceName);

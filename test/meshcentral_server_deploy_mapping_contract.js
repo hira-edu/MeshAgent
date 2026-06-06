@@ -51,9 +51,9 @@ function extractFileMapBlock(source) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
+    const meshcentralRoot = path.resolve('..', 'MeshCentral');
     const deployPath = path.resolve('..', 'MeshCentral', 'deploy-server.py');
-    const source = fs.readFileSync(deployPath, 'utf8');
-    const fileMap = extractFileMapBlock(source);
+    const deploymentDocPath = path.resolve('docs', 'DEPLOYMENT.md');
     const requiredEntries = [
         'meshdesktopmultiplex.js',
         'meshagent.js',
@@ -63,12 +63,23 @@ function main() {
         'public/scripts/agent-desktop-0.0.2-min.js'
     ];
 
-    const checks = {
-        fileMapLocated: fileMap.length > 0
-    };
+    let mode = 'deploy-server-file-map';
+    let checks = {};
+    if (fs.existsSync(deployPath)) {
+        const source = fs.readFileSync(deployPath, 'utf8');
+        const fileMap = extractFileMapBlock(source);
+        checks.fileMapLocated = fileMap.length > 0;
 
-    for (const entry of requiredEntries) {
-        checks[`maps:${entry}`] = fileMap.includes(`"${entry}":`);
+        for (const entry of requiredEntries) {
+            checks[`maps:${entry}`] = fileMap.includes(`"${entry}":`);
+        }
+    } else {
+        mode = 'live-mirror';
+        const deploymentDoc = fs.existsSync(deploymentDocPath) ? fs.readFileSync(deploymentDocPath, 'utf8') : '';
+        checks.deployServerAbsenceDocumented = deploymentDoc.includes('treated as a mirror of the live VPS module tree');
+        for (const entry of requiredEntries) {
+            checks[`mirrorHas:${entry}`] = fs.existsSync(path.join(meshcentralRoot, entry));
+        }
     }
 
     for (const [name, passed] of Object.entries(checks)) {
@@ -76,7 +87,10 @@ function main() {
     }
 
     const report = {
+        mode,
+        meshcentralRoot,
         deployPath,
+        deploymentDocPath,
         requiredEntries,
         checks
     };

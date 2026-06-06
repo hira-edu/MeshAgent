@@ -7,6 +7,15 @@ function assert(condition, message) {
     }
 }
 
+function extractSpan(source, startMarker, endMarker) {
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start);
+    if (start < 0 || end < 0 || end <= start) {
+        throw new Error(`Unable to extract source span: ${startMarker}`);
+    }
+    return source.slice(start, end);
+}
+
 function main() {
     const kvmHeaderPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.h');
     const kvmSourcePath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
@@ -15,6 +24,11 @@ function main() {
     const kvmHeader = fs.readFileSync(kvmHeaderPath, 'utf8');
     const kvmSource = fs.readFileSync(kvmSourcePath, 'utf8');
     const agentcore = fs.readFileSync(agentcorePath, 'utf8');
+    const discardCachedStream = extractSpan(
+        agentcore,
+        'static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream',
+        'duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop'
+    );
 
     const checks = {
         headerExportsSnapshot: kvmHeader.includes('typedef struct KvmBridgeDebugSnapshot'),
@@ -39,10 +53,26 @@ function main() {
             !agentcore.includes('ILibDuktape_MeshAgent_RemoteDesktop_RecoverSession') &&
             !agentcore.includes('ILibDuktape_MeshAgent_RemoteDesktop_Watchdog') &&
             !agentcore.includes('ILibDuktape_MeshAgent_RemoteDesktop_RemoveWatchdog'),
-        agentcoreCachedStreamReuseIsPassive: !agentcore.includes('cached-stream-reuse') &&
-            !agentcore.includes('cached-stream-stale') &&
-            !agentcore.includes('kvm_bridge_debug_get_child_present_for_reserved') &&
-            !agentcore.includes('kvm_bridge_debug_get_transport_active_for_reserved'),
+        agentcoreCachedStreamValidatesNativeBridgeState:
+            agentcore.includes('static int ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(RemoteDesktop_Ptrs *ptrs)') &&
+            agentcore.includes('kvm_bridge_debug_get_child_present_for_reserved(ptrs)') &&
+            agentcore.includes('kvm_bridge_debug_get_transport_active_for_reserved(ptrs)') &&
+            agentcore.includes('static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(duk_context *ctx, RemoteDesktop_Ptrs *ptrs)') &&
+            agentcore.includes('ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(ctx, ptrs);'),
+        discardCachedStreamKeepsObjectAliveThroughNativeCleanup:
+            discardCachedStream.includes('duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM);') &&
+            discardCachedStream.includes('kvm_cleanup(ptrs);') &&
+            discardCachedStream.includes('memset(ptrs, 0, sizeof(RemoteDesktop_Ptrs));') &&
+            discardCachedStream.includes('duk_del_prop_string(ctx, -2, REMOTE_DESKTOP_STREAM);') &&
+            discardCachedStream.includes('duk_pop(ctx);') &&
+            discardCachedStream.indexOf('duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM);') <
+                discardCachedStream.indexOf('kvm_cleanup(ptrs);') &&
+            discardCachedStream.indexOf('kvm_cleanup(ptrs);') <
+                discardCachedStream.indexOf('memset(ptrs, 0, sizeof(RemoteDesktop_Ptrs));') &&
+            discardCachedStream.indexOf('memset(ptrs, 0, sizeof(RemoteDesktop_Ptrs));') <
+                discardCachedStream.indexOf('duk_del_prop_string(ctx, -2, REMOTE_DESKTOP_STREAM);') &&
+            discardCachedStream.indexOf('duk_del_prop_string(ctx, -2, REMOTE_DESKTOP_STREAM);') <
+                discardCachedStream.lastIndexOf('duk_pop(ctx);'),
         agentcoreInitialSetupUsesDirectRelay: agentcore.includes('kvm_relay_setup(agent->exePath, agent->runningAsConsole ? NULL : agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, TSID);') &&
             agentcore.includes('kvm_relay_setup(agent->exePath, NULL, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, TSID);'),
         agentcoreHasNoSetupFailureCallback: !agentcore.includes('ILibDuktape_MeshAgent_RemoteDesktop_SetupFailedCallback') &&

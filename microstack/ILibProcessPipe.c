@@ -2321,7 +2321,7 @@ void ILibProcessPipe_Process_AddHandlers(ILibProcessPipe_Process module, int buf
 		j->exitHandler = exitHandler;
 
 		if (j->stdOut->metadata == NULL) { j->stdOut->metadata = "process_handle_stdout"; }
-		if (j->stdErr->metadata == NULL) { j->stdOut->metadata = "process_handle_stderr"; }
+		if (j->stdErr->metadata == NULL) { j->stdErr->metadata = "process_handle_stderr"; }
 		if (j->metadata == NULL) { j->metadata = "process_handle_exit"; }
 
 		ILibProcessPipe_Process_StartPipeReaderEx(j->stdOut, bufferSize, &ILibProcessPipe_Process_PipeHandler_StdOut, j, stdOut, NULL);

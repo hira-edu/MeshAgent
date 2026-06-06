@@ -52,6 +52,15 @@ function main() {
     const closeBridgeStart = kvmSource.indexOf('static void kvm_relay_close_bridge_transport(KvmRelayContext* ctx)');
     const closeBridgeEnd = closeBridgeStart >= 0 ? kvmSource.indexOf('\nstatic BOOL kvm_relay_resolve_rundll32_pathW', closeBridgeStart) : -1;
     const closeBridgeBlock = (closeBridgeStart >= 0 && closeBridgeEnd > closeBridgeStart) ? kvmSource.slice(closeBridgeStart, closeBridgeEnd) : '';
+    const chainWriteStart = agentcoreSource.indexOf('void ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain');
+    const chainWriteEnd = chainWriteStart >= 0 ? agentcoreSource.indexOf('\nvoid KVM_WriteLog', chainWriteStart) : -1;
+    const chainWriteBlock = (chainWriteStart >= 0 && chainWriteEnd > chainWriteStart) ? agentcoreSource.slice(chainWriteStart, chainWriteEnd) : '';
+    const writeSinkStart = agentcoreSource.indexOf('ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink');
+    const writeSinkEnd = writeSinkStart >= 0 ? agentcoreSource.indexOf('\nILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_WriteSink', writeSinkStart) : -1;
+    const writeSinkBlock = (writeSinkStart >= 0 && writeSinkEnd > writeSinkStart) ? agentcoreSource.slice(writeSinkStart, writeSinkEnd) : '';
+    const offThreadStart = writeSinkBlock.indexOf('if (!ILibIsRunningOnChainThread(duk_ctx_chain(ptrs->ctx)))');
+    const offThreadEnd = offThreadStart >= 0 ? writeSinkBlock.indexOf('#endif', offThreadStart) : -1;
+    const offThreadBlock = (offThreadStart >= 0 && offThreadEnd > offThreadStart) ? writeSinkBlock.slice(offThreadStart, offThreadEnd) : '';
 
     const checks = {
         agentcoreMapsPausedWriteToIncomplete:
@@ -59,6 +68,14 @@ function main() {
         agentcoreChainHopIsExplicitAndNoLegacyPretendSuccess:
             agentcoreSource.includes('ILibChain_RunOnMicrostackThreadEx3(duk_ctx_chain(ptrs->ctx), ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain, NULL, bstate);') &&
             !agentcoreSource.includes("return ILibTransport_DoneState_COMPLETE;\t\t// Always returning complete, because we'll let the stream object handle flow control"),
+        agentcoreOffThreadMarshalBackpressuresBridge:
+            offThreadBlock.includes('ILibChain_RunOnMicrostackThreadEx3(duk_ctx_chain(ptrs->ctx), ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain, NULL, bstate);') &&
+            offThreadBlock.includes('return ILibTransport_DoneState_INCOMPLETE;') &&
+            !offThreadBlock.includes('return ILibTransport_DoneState_COMPLETE;'),
+        agentcoreOffThreadAcceptedWriteResumesBridge:
+            chainWriteBlock.includes('ILibMemory_CanaryOK(ptrs)') &&
+            chainWriteBlock.includes('ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, (int)bufferLen) == 0') &&
+            chainWriteBlock.includes('kvm_pause(0, ptrs);'),
         bridgePauseUsesProtocolPacket: kvmSource.includes('static BOOL kvm_relay_write_bridge_pause(KvmRelayContext* ctx, int pause)') &&
             kvmSource.includes('((unsigned short*)pausePacket)[0] = (unsigned short)htons((unsigned short)MNG_KVM_PAUSE);'),
         masterBridgePauseRoutesOverPipe: kvmSource.includes('static BOOL kvm_relay_set_bridge_pause_state(KvmRelayContext* ctx, int normalizedPause, int forcePacket)') &&
