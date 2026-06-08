@@ -47,6 +47,12 @@ function main() {
     const smokePath = path.resolve('test', 'rundll32_bridge_smoke.js');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const smokeSource = fs.readFileSync(smokePath, 'utf8');
+    const exitStart = kvmSource.indexOf('void kvm_relay_ExitHandler');
+    const exitEnd = exitStart >= 0 ? kvmSource.indexOf('\nvoid kvm_relay_StdOutHandler', exitStart) : -1;
+    const exitBlock = (exitStart >= 0 && exitEnd > exitStart) ? kvmSource.slice(exitStart, exitEnd) : '';
+    const stdoutStart = kvmSource.indexOf('void kvm_relay_StdOutHandler');
+    const stdoutEnd = stdoutStart >= 0 ? kvmSource.indexOf('\nvoid kvm_relay_StdErrHandler', stdoutStart) : -1;
+    const stdoutBlock = (stdoutStart >= 0 && stdoutEnd > stdoutStart) ? kvmSource.slice(stdoutStart, stdoutEnd) : '';
 
     const checks = {
         relayDefinesBridgeShutdownHelper: kvmSource.includes('static BOOL kvm_relay_stop_bridge_process(DWORD timeoutMs)'),
@@ -56,6 +62,14 @@ function main() {
         relayHandlesIntentionalPipeBreak: kvmSource.includes('Bridge pipe disconnected during intentional shutdown'),
         slaveConsumesDisconnectPacket: kvmSource.includes('case MNG_KVM_DISCONNECT:') && kvmSource.includes('KVM [SLAVE]: Received disconnect request'),
         cleanupUsesGracefulShutdown: kvmSource.includes('kvm_relay_stop_bridge_process(5000)') && kvmSource.includes('Attempting graceful child shutdown'),
+        exitDetachesProcessUserBeforeFree:
+            exitBlock.includes('ILibProcessPipe_Process_UpdateUserObject(sender, NULL);') &&
+            exitBlock.indexOf('ILibProcessPipe_Process_UpdateUserObject(sender, NULL);') < exitBlock.indexOf('ILibMemory_Free(processUser);'),
+        lateStdoutCanUseContextOrDropAfterDetach:
+            stdoutBlock.includes('if (writeHandler == NULL && ctx != NULL)') &&
+            stdoutBlock.includes('writeHandler = ctx->writeHandler;') &&
+            stdoutBlock.includes('if (writeHandler != NULL)') &&
+            stdoutBlock.includes('Dropping KVM output after relay user detach'),
         smokeSupportsDisconnectPacketMode: smokeSource.includes("case 'disconnect-packet':") && smokeSource.includes('controlSocket.write(buildPacket(59))')
     };
 

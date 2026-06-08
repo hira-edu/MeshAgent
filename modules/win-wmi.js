@@ -19,11 +19,19 @@ var GM = require('_GenericMarshal');
 const CLSID_WbemAdministrativeLocator = '{CB8555CC-9128-11D1-AD9B-00C04FD8FDFF}';
 const IID_WbemLocator = '{dc12a687-737f-11cf-884d-00aa004b2e24}';
 const WBEM_FLAG_BIDIRECTIONAL = 0;
-const WBEM_INFINITE = -1;
+const WBEM_FLAG_RETURN_IMMEDIATELY = 0x10;
+const WBEM_FLAG_FORWARD_ONLY = 0x20;
+const WBEM_QUERY_FLAGS = WBEM_FLAG_RETURN_IMMEDIATELY | WBEM_FLAG_FORWARD_ONLY;
+const WBEM_DEFAULT_QUERY_TIMEOUT_MS = 15000;
+const WBEM_S_FALSE = 1;
+const WBEM_S_TIMEDOUT = 0x00040004;
 const WBEM_FLAG_ALWAYS = 0;
 const E_NOINTERFACE = 0x80004002;
 var OleAut32 = GM.CreateNativeProxy('OleAut32.dll');
 OleAut32.CreateMethod('SafeArrayAccessData');
+OleAut32.CreateMethod('SafeArrayUnaccessData');
+OleAut32.CreateMethod('SafeArrayDestroy');
+OleAut32.CreateMethod('VariantClear');
 
 var wmi_handlers = {};
 
@@ -220,6 +228,51 @@ const QueryAsyncHandler =
     ];
 
 
+function _isNullPointer(j)
+{
+    if (j == null) { return (true); }
+    var b = j.toBuffer();
+    for (var i = 0; i < b.length; ++i)
+    {
+        if (b[i] != 0) { return (false); }
+    }
+    return (true);
+}
+
+function _readWidePointer(j)
+{
+    if (_isNullPointer(j)) { return (null); }
+    return (j.Deref().Wide2UTF8);
+}
+
+function _queryTimeoutMs(options)
+{
+    var timeoutMs = WBEM_DEFAULT_QUERY_TIMEOUT_MS;
+    if (typeof (options) == 'number')
+    {
+        timeoutMs = options;
+    }
+    else if (options != null && typeof (options.timeoutMs) == 'number')
+    {
+        timeoutMs = options.timeoutMs;
+    }
+    return (timeoutMs > 0 ? timeoutMs : WBEM_DEFAULT_QUERY_TIMEOUT_MS);
+}
+
+function _releaseComPointer(j, funcs)
+{
+    try
+    {
+        if (j != null && funcs != null)
+        {
+            funcs.Release(j);
+        }
+    }
+    catch (x)
+    {
+    }
+}
+
 function enumerateProperties(j, fields)
 {
     //
@@ -241,17 +294,28 @@ function enumerateProperties(j, fields)
     else
     {
         nme = GM.CreatePointer();
-        j.funcs.GetNames(j.Deref(), 0, WBEM_FLAG_ALWAYS, 0, nme);
-        len = nme.Deref().Deref(GM.PointerSize == 8 ? 24 : 16, 4).toBuffer().readUInt32LE();
-        nn = GM.CreatePointer();
-        OleAut32.SafeArrayAccessData(nme.Deref(), nn);
-
-
-        for (var i = 0; i < len; ++i)
+        if (j.funcs.GetNames(j.Deref(), 0, WBEM_FLAG_ALWAYS, 0, nme).Val == 0)
         {
-            var propName = nn.Deref().increment(i * GM.PointerSize).Deref().Wide2UTF8;
-            if (propName.length === 0) { continue; }
-            properties.push(propName);
+            var namesArray = nme.Deref();
+            len = namesArray.Deref(GM.PointerSize == 8 ? 24 : 16, 4).toBuffer().readUInt32LE();
+            nn = GM.CreatePointer();
+            if (OleAut32.SafeArrayAccessData(namesArray, nn).Val == 0)
+            {
+                try
+                {
+                    for (var i = 0; i < len; ++i)
+                    {
+                        var propName = _readWidePointer(nn.Deref().increment(i * GM.PointerSize));
+                        if (propName == null || propName.length === 0) { continue; }
+                        properties.push(propName);
+                    }
+                }
+                finally
+                {
+                    OleAut32.SafeArrayUnaccessData(namesArray);
+                }
+            }
+            OleAut32.SafeArrayDestroy(namesArray);
         }
     }
 
@@ -270,94 +334,113 @@ function enumerateProperties(j, fields)
             var isArray = (vartype & 0x2000) != 0;  // VT_ARRAY flag
             var baseType = vartype & 0x0FFF;
 
-            if (isArray)
+            try
             {
-                // Handle array types (VT_ARRAY | base type)
-                var safeArray = tmp1.Deref(8, GM.PointerSize).Deref();
-                var arrayLength = safeArray.Deref(GM.PointerSize == 8 ? 24 : 16, 4).toBuffer().readUInt32LE();
-                var arrayData = GM.CreatePointer();
-                OleAut32.SafeArrayAccessData(safeArray, arrayData);
-                
-                var arrayValues = [];
-                for (var k = 0; k < arrayLength; ++k)
+                if (isArray)
                 {
-                    switch (baseType)
+                    // Handle array types (VT_ARRAY | base type)
+                    var safeArrayPointer = tmp1.Deref(8, GM.PointerSize);
+                    var arrayValues = [];
+                    if (!_isNullPointer(safeArrayPointer))
                     {
+                        var safeArray = safeArrayPointer.Deref();
+                        var arrayLength = safeArray.Deref(GM.PointerSize == 8 ? 24 : 16, 4).toBuffer().readUInt32LE();
+                        var arrayData = GM.CreatePointer();
+                        if (OleAut32.SafeArrayAccessData(safeArray, arrayData).Val == 0)
+                        {
+                            try
+                            {
+                                for (var k = 0; k < arrayLength; ++k)
+                                {
+                                    switch (baseType)
+                                    {
+                                        case 0x0002:    // VT_I2
+                                            arrayValues.push(arrayData.Deref().Deref(k * 2, 2).toBuffer().readInt16LE());
+                                            break;
+                                        case 0x0003:    // VT_I4
+                                        case 0x0016:    // VT_INT
+                                            arrayValues.push(arrayData.Deref().Deref(k * 4, 4).toBuffer().readInt32LE());
+                                            break;
+                                        case 0x000B:    // VT_BOOL
+                                            arrayValues.push(arrayData.Deref().Deref(k * 2, 2).toBuffer().readInt16LE() != 0);
+                                            break;
+                                        case 0x0010:    // VT_I1
+                                            arrayValues.push(arrayData.Deref().Deref(k, 1).toBuffer().readInt8());
+                                            break;
+                                        case 0x0011:    // VT_UI1
+                                            arrayValues.push(arrayData.Deref().Deref(k, 1).toBuffer().readUInt8());
+                                            break;
+                                        case 0x0012:    // VT_UI2
+                                            arrayValues.push(arrayData.Deref().Deref(k * 2, 2).toBuffer().readUInt16LE());
+                                            break;
+                                        case 0x0013:    // VT_UI4
+                                        case 0x0017:    // VT_UINT
+                                            arrayValues.push(arrayData.Deref().Deref(k * 4, 4).toBuffer().readUInt32LE());
+                                            break;
+                                        case 0x0008:    // VT_BSTR
+                                            arrayValues.push(_readWidePointer(arrayData.Deref().Deref(k * GM.PointerSize, GM.PointerSize)));
+                                            break;
+                                    }
+                                }
+                            }
+                            finally
+                            {
+                                OleAut32.SafeArrayUnaccessData(safeArray);
+                            }
+                        }
+                    }
+                    values[properties[i]] = arrayValues;
+                }
+                else
+                {
+                    // Handle scalar types
+                    switch (vartype)
+                    {
+                        case 0x0000:    // VT_EMPTY
+                        case 0x0001:    // VT_NULL
+                            values[properties[i]] = null;
+                            break;
                         case 0x0002:    // VT_I2
-                            arrayValues.push(arrayData.Deref().Deref(k * 2, 2).toBuffer().readInt16LE());
+                            values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readInt16LE();
                             break;
                         case 0x0003:    // VT_I4
                         case 0x0016:    // VT_INT
-                            arrayValues.push(arrayData.Deref().Deref(k * 4, 4).toBuffer().readInt32LE());
+                            values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readInt32LE();
                             break;
                         case 0x000B:    // VT_BOOL
-                            arrayValues.push(arrayData.Deref().Deref(k * 2, 2).toBuffer().readInt16LE() != 0);
+                            values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readInt32LE() != 0;
+                            break;
+                        case 0x000E:    // VT_DECIMAL
                             break;
                         case 0x0010:    // VT_I1
-                            arrayValues.push(arrayData.Deref().Deref(k, 1).toBuffer().readInt8());
+                            values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readInt8();
                             break;
                         case 0x0011:    // VT_UI1
-                            arrayValues.push(arrayData.Deref().Deref(k, 1).toBuffer().readUInt8());
+                            values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readUInt8();
                             break;
                         case 0x0012:    // VT_UI2
-                            arrayValues.push(arrayData.Deref().Deref(k * 2, 2).toBuffer().readUInt16LE());
+                            values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readUInt16LE();
                             break;
                         case 0x0013:    // VT_UI4
                         case 0x0017:    // VT_UINT
-                            arrayValues.push(arrayData.Deref().Deref(k * 4, 4).toBuffer().readUInt32LE());
+                            values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readUInt32LE();
                             break;
+                        //case 0x0014:    // VT_I8
+                        //    break;
+                        //case 0x0015:    // VT_UI8
+                        //    break;
                         case 0x0008:    // VT_BSTR
-                            arrayValues.push(arrayData.Deref().Deref(k * GM.PointerSize, GM.PointerSize).Deref().Wide2UTF8);
+                            values[properties[i]] = _readWidePointer(tmp1.Deref(8, GM.PointerSize));
+                            break;
+                        default:
+                            console.info1('VARTYPE: ' + vartype);
                             break;
                     }
                 }
-                values[properties[i]] = arrayValues;
             }
-            else
+            finally
             {
-                // Handle scalar types
-                switch (vartype)
-                {
-                    case 0x0000:    // VT_EMPTY
-                    case 0x0001:    // VT_NULL
-                        values[properties[i]] = null;
-                        break;
-                    case 0x0002:    // VT_I2
-                        values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readInt16LE();
-                        break;
-                    case 0x0003:    // VT_I4
-                    case 0x0016:    // VT_INT
-                        values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readInt32LE();
-                        break;
-                    case 0x000B:    // VT_BOOL
-                        values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readInt32LE() != 0;
-                        break;
-                    case 0x000E:    // VT_DECIMAL
-                        break;
-                    case 0x0010:    // VT_I1
-                        values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readInt8();
-                        break;
-                    case 0x0011:    // VT_UI1
-                        values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readUInt8();
-                        break;
-                    case 0x0012:    // VT_UI2
-                        values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readUInt16LE();
-                        break;
-                    case 0x0013:    // VT_UI4
-                    case 0x0017:    // VT_UINT
-                        values[properties[i]] = tmp1.Deref(8, GM.PointerSize).toBuffer().readUInt32LE();
-                        break;
-                    //case 0x0014:    // VT_I8
-                    //    break;
-                    //case 0x0015:    // VT_UI8
-                    //    break;
-                    case 0x0008:    // VT_BSTR
-                        values[properties[i]] = tmp1.Deref(8, GM.PointerSize).Deref().Wide2UTF8;
-                        break;
-                    default:
-                        console.info1('VARTYPE: ' + vartype);
-                        break;
-                }
+                OleAut32.VariantClear(tmp1);
             }
         }
     }
@@ -388,7 +471,7 @@ function queryAsync(resourceString, queryString, fields)
     handlers.p = p;
     
     // Make the COM call
-    if (handlers.services.funcs.ExecQueryAsync(handlers.services.Deref(), language, query, WBEM_FLAG_BIDIRECTIONAL, 0, handlers).Val != 0)
+    if (handlers.services.funcs.ExecQueryAsync(handlers.services.Deref(), language, query, WBEM_QUERY_FLAGS, 0, handlers).Val != 0)
     {
         throw ('Error in Query');
     }
@@ -397,37 +480,64 @@ function queryAsync(resourceString, queryString, fields)
     wmi_handlers[handlers._hashCode()] = handlers;
     return (p);
 }
-function query(resourceString, queryString, fields)
+function query(resourceString, queryString, fields, options)
 {
+    var timeoutMs = _queryTimeoutMs(options);
     var resource = GM.CreateVariable(resourceString, { wide: true });
     var language = GM.CreateVariable("WQL", { wide: true });
     var query = GM.CreateVariable(queryString, { wide: true });
     var results = GM.CreatePointer();
-
-    // Connect the locator connection for WMI
-    var locator = require('win-com').createInstance(require('win-com').CLSIDFromString(CLSID_WbemAdministrativeLocator), require('win-com').IID_IUnknown);
-    locator.funcs = require('win-com').marshalFunctions(locator, LocatorFunctions);
-    var services = require('_GenericMarshal').CreatePointer();
-    if (locator.funcs.ConnectToServer(locator, resource, 0, 0, 0, 0, 0, 0, services).Val != 0) { throw ('Error calling ConnectToService'); }
-
-    // Execute the Query
-    services.funcs = require('win-com').marshalFunctions(services.Deref(), ServiceFunctions);
-    if (services.funcs.ExecQuery(services.Deref(), language, query, WBEM_FLAG_BIDIRECTIONAL, 0, results).Val != 0) { throw ('Error in Query'); }
-
-    results.funcs = require('win-com').marshalFunctions(results.Deref(), ResultsFunctions);
-    var returnedCount = GM.CreateVariable(8);
-    var result = GM.CreatePointer();
+    var locator = null;
+    var services = null;
     var ret = [];
 
-    // Enumerate the results
-    while (results.funcs.Next(results.Deref(), WBEM_INFINITE, 1, result, returnedCount).Val == 0)
+    try
     {
-        ret.push(enumerateProperties(result, fields));
-    }
+        // Connect the locator connection for WMI
+        locator = require('win-com').createInstance(require('win-com').CLSIDFromString(CLSID_WbemAdministrativeLocator), require('win-com').IID_IUnknown);
+        locator.funcs = require('win-com').marshalFunctions(locator, LocatorFunctions);
+        services = require('_GenericMarshal').CreatePointer();
+        if (locator.funcs.ConnectToServer(locator, resource, 0, 0, 0, 0, 0, 0, services).Val != 0) { throw ('Error calling ConnectToService'); }
 
-    results.funcs.Release(results.Deref());
-    services.funcs.Release(services.Deref());
-    locator.funcs.Release(locator);
+        // Execute as a forward-only semisynchronous query. Enumeration owns the bounded wait.
+        services.funcs = require('win-com').marshalFunctions(services.Deref(), ServiceFunctions);
+        if (services.funcs.ExecQuery(services.Deref(), language, query, WBEM_QUERY_FLAGS, 0, results).Val != 0) { throw ('Error in Query'); }
+
+        results.funcs = require('win-com').marshalFunctions(results.Deref(), ResultsFunctions);
+        var returnedCount = GM.CreateVariable(4);
+        var result = GM.CreatePointer();
+
+        // Enumerate the results with a finite provider wait so a bad WMI provider cannot stall the microstack chain.
+        while (true)
+        {
+            returnedCount.toBuffer().fill(0);
+            var nextResult = results.funcs.Next(results.Deref(), timeoutMs, 1, result, returnedCount).Val;
+            var count = returnedCount.toBuffer().readUInt32LE();
+
+            if ((nextResult == 0 || nextResult == WBEM_S_TIMEDOUT) && count > 0)
+            {
+                try
+                {
+                    ret.push(enumerateProperties(result, fields));
+                }
+                finally
+                {
+                    _releaseComPointer(result.Deref(), result.funcs);
+                    result = GM.CreatePointer();
+                }
+            }
+
+            if (nextResult == 0 && count > 0) { continue; }
+            if (nextResult == WBEM_S_FALSE || nextResult == WBEM_S_TIMEDOUT || count == 0) { break; }
+            throw ('Error enumerating Query: ' + nextResult);
+        }
+    }
+    finally
+    {
+        if (results != null && results.funcs != null) { _releaseComPointer(results.Deref(), results.funcs); }
+        if (services != null && services.funcs != null) { _releaseComPointer(services.Deref(), services.funcs); }
+        if (locator != null && locator.funcs != null) { _releaseComPointer(locator, locator.funcs); }
+    }
 
     return (ret);
 }

@@ -872,7 +872,7 @@ function umhctlBuildServerUrlBase(parsed, defaultProtocol)
     if (host == null) { return null; }
     var port = '';
     if (parsed.port != null) { port = ('' + parsed.port).trim(); }
-    if (port.length > 0 && port != '80' && port != '443') { return protocol + '://' + host + ':' + port; }
+    if (port.length > 0 && port != '0' && port != '80' && port != '443') { return protocol + '://' + host + ':' + port; }
     return protocol + '://' + host;
 }
 

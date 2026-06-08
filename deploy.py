@@ -505,12 +505,10 @@ PY"""
         if isinstance(parsed, dict):
             files = parsed.get("files")
             manifests = parsed.get("manifests")
-            snapshot = {
+            return {
                 "files": files if isinstance(files, dict) else {},
                 "manifests": manifests if isinstance(manifests, dict) else {},
             }
-            if snapshot["files"] or snapshot["manifests"]:
-                return snapshot
     return None
 
 
@@ -953,7 +951,7 @@ def get_publish_runtime_state(local_artifacts=None):
         {"remote_filename": filename, "publish_targets": ("data", "signed", "module")}
         for filename in sorted(HASHAGENTS_TRACKED_FILENAMES)
     ]
-    snapshot = collect_remote_publish_snapshot(tracked_artifacts, [])
+    snapshot = collect_remote_publish_snapshot(tracked_artifacts, []) or {"files": {}, "manifests": {}}
     metadata_cache = snapshot.get("files", {})
     module_manifest = parse_snapshot_manifest(snapshot, f"{MODULE_AGENTS}/hashagents.json") or module_manifest
     signed_manifest = parse_snapshot_manifest(snapshot, f"{SIGNED_AGENTS}/hashagents.json") or signed_manifest

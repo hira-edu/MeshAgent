@@ -3181,6 +3181,11 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	int destroyContext = 0;
 	DWORD childPid = ILibProcessPipe_Process_GetPID(sender);
 
+	if (processUser != NULL)
+	{
+		ILibProcessPipe_Process_UpdateUserObject(sender, NULL);
+	}
+
 	kvm_relay_lock();
 	kvm_relay_activate_context(ctx);
 	if (childPid == 0 && ctx != NULL && ctx->childPid != 0) { childPid = (DWORD)ctx->childPid; }
@@ -3274,6 +3279,11 @@ void kvm_relay_StdOutHandler(ILibProcessPipe_Process sender, char *buffer, size_
 	UNREFERENCED_PARAMETER(sender);
 	kvm_relay_lock();
 	kvm_relay_activate_context(ctx);
+	if (writeHandler == NULL && ctx != NULL)
+	{
+		writeHandler = ctx->writeHandler;
+		reserved = ctx->reserved;
+	}
 	if (bufferLen > 4)
 	{
 		if (ntohs(((unsigned short*)(buffer))[0]) > 1000)
@@ -3288,10 +3298,17 @@ void kvm_relay_StdOutHandler(ILibProcessPipe_Process sender, char *buffer, size_
 				{
 					*bytesConsumed = 8 + (int)ntohl(((unsigned int*)(buffer))[1]);
 					KVMDEBUG2("Jumbo Packet received of size: %llu (bufferLen=%llu)", *bytesConsumed, bufferLen);
-					g_restartcount = 0;
-					kvm_record_healthy_output();
-					kvm_bridge_debug_note_output(buffer, *bytesConsumed);
-					writeHandler(buffer, (int)*bytesConsumed, reserved);
+					if (writeHandler != NULL)
+					{
+						g_restartcount = 0;
+						kvm_record_healthy_output();
+						kvm_bridge_debug_note_output(buffer, *bytesConsumed);
+						writeHandler(buffer, (int)*bytesConsumed, reserved);
+					}
+					else
+					{
+						KVMDEBUG2("Dropping KVM jumbo output after relay user detach: %llu bytes", *bytesConsumed);
+					}
 					kvm_relay_capture_context(ctx);
 					kvm_relay_deactivate_context();
 					kvm_relay_unlock();
@@ -3307,10 +3324,17 @@ void kvm_relay_StdOutHandler(ILibProcessPipe_Process sender, char *buffer, size_
 			{
 				KVMDEBUG2("KVM Command: [%u: %llu bytes]", ntohs(((unsigned short*)(buffer))[0]), size);
 				*bytesConsumed = size;
-				g_restartcount = 0;
-				kvm_record_healthy_output();
-				kvm_bridge_debug_note_output(buffer, size);
-				writeHandler(buffer, size, reserved);
+				if (writeHandler != NULL)
+				{
+					g_restartcount = 0;
+					kvm_record_healthy_output();
+					kvm_bridge_debug_note_output(buffer, size);
+					writeHandler(buffer, size, reserved);
+				}
+				else
+				{
+					KVMDEBUG2("Dropping KVM output after relay user detach: %u bytes", size);
+				}
 				kvm_relay_capture_context(ctx);
 				kvm_relay_deactivate_context();
 				kvm_relay_unlock();

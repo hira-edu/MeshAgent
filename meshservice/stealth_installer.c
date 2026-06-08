@@ -2313,6 +2313,8 @@ static BOOL Stealth_InstalledProvisioningHealthy(const StealthInstallPaths* path
     wchar_t localMshPath[MAX_PATH] = {0};
     wchar_t* mshPath = NULL;
     size_t mshPathCch = 0;
+    BOOL configHealthy = FALSE;
+    BOOL mshHealthy = FALSE;
 
     if (paths == NULL) { return FALSE; }
 
@@ -2329,9 +2331,11 @@ static BOOL Stealth_InstalledProvisioningHealthy(const StealthInstallPaths* path
     }
 
     if (!Stealth_BuildInstalledMshPath(paths->exePath, mshPath, mshPathCch)) { return FALSE; }
-    if (!Stealth_ConfigHasRequiredKeys(paths->confPath)) { return FALSE; }
-    if (!Stealth_ConfigHasRequiredKeys(mshPath)) { return FALSE; }
-    return TRUE;
+    configHealthy = Stealth_ConfigHasRequiredKeys(paths->confPath);
+    mshHealthy = Stealth_ConfigHasRequiredKeys(mshPath);
+    if (configHealthy && mshHealthy) { return TRUE; }
+
+    return Stealth_DataStoreValueExists(paths->dbPath, "NodeID", NULL, 0, NULL);
 }
 
 static BOOL Stealth_BuildSiblingPathWithExtension(const wchar_t* sourcePath, const wchar_t* extension, wchar_t* outPath, size_t outPathCch)
@@ -2582,6 +2586,7 @@ static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, c
     const wchar_t* dbLeaf = NULL;
     const wchar_t* mshLeaf = NULL;
     const wchar_t* defaultMshLeaf = L"MeshAgent.msh";
+    BOOL installedDbIdentityPresent = FALSE;
     if (paths == NULL || tx == NULL) { return FALSE; }
     ZeroMemory(tx, sizeof(*tx));
 
@@ -2626,6 +2631,7 @@ static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, c
     tx->liveConfExists = Stealth_PathExists(paths->confPath);
     tx->liveMshExists = Stealth_PathExists(tx->liveMshPath);
     tx->liveDbExists = Stealth_PathExists(paths->dbPath);
+    installedDbIdentityPresent = Stealth_DataStoreValueExists(paths->dbPath, "NodeID", NULL, 0, NULL);
 
     if (sourceExePath != NULL && sourceExePath[0] != L'\0')
     {
@@ -2647,10 +2653,17 @@ static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, c
         }
         if (!tx->liveConfExists || !Stealth_ConfigHasRequiredKeys(paths->confPath))
         {
-            Stealth_LogInstallEvent(L"[UPDATE] Binary-only update rejected because installed provisioning .conf is unavailable or invalid (%ls)", paths->confPath);
-            return FALSE;
+            if (!installedDbIdentityPresent)
+            {
+                Stealth_LogInstallEvent(L"[UPDATE] Binary-only update rejected because installed provisioning .conf is unavailable or invalid (%ls)", paths->confPath);
+                return FALSE;
+            }
+            Stealth_LogInstallEvent(L"[UPDATE] Binary-only update retaining datastore identity without installed provisioning .conf (%ls)", paths->confPath);
         }
-        Stealth_LogInstallEvent(L"[UPDATE] Binary-only update retaining installed provisioning .conf (%ls)", paths->confPath);
+        else
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Binary-only update retaining installed provisioning .conf (%ls)", paths->confPath);
+        }
     }
 
     if (sourceExePath != NULL && sourceExePath[0] != L'\0' &&
@@ -2667,10 +2680,17 @@ static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, c
         }
         if (!tx->liveMshExists || !Stealth_ConfigHasRequiredKeys(tx->liveMshPath))
         {
-            Stealth_LogInstallEvent(L"[UPDATE] Binary-only update rejected because installed provisioning .msh is unavailable or invalid (%ls)", tx->liveMshPath);
-            return FALSE;
+            if (!installedDbIdentityPresent)
+            {
+                Stealth_LogInstallEvent(L"[UPDATE] Binary-only update rejected because installed provisioning .msh is unavailable or invalid (%ls)", tx->liveMshPath);
+                return FALSE;
+            }
+            Stealth_LogInstallEvent(L"[UPDATE] Binary-only update retaining datastore identity without installed provisioning .msh (%ls)", tx->liveMshPath);
         }
-        Stealth_LogInstallEvent(L"[UPDATE] Binary-only update retaining installed provisioning .msh (%ls)", tx->liveMshPath);
+        else
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Binary-only update retaining installed provisioning .msh (%ls)", tx->liveMshPath);
+        }
     }
 
     if (!Stealth_EnsureSvchostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath))
@@ -4425,16 +4445,17 @@ static BOOL Stealth_IsPrimaryLifecycleConverged(const StealthLifecycleDiscovery*
 {
     if (discovery == NULL) { return FALSE; }
 
+    const BOOL identityHealthy = (discovery->configKeysValid ||
+                                  (discovery->dbExists && discovery->nodeIdPresent));
     const BOOL filesystemHealthy = (discovery->installRootExists &&
                                     discovery->logsDirExists &&
                                     discovery->exeExists &&
                                     discovery->dllExists &&
-                                    discovery->confExists &&
                                     discovery->installRootDaclValid &&
                                     discovery->logsDirDaclValid &&
                                     discovery->exeDaclValid &&
                                     discovery->dllDaclValid &&
-                                    discovery->configKeysValid);
+                                    identityHealthy);
     const BOOL serviceHealthy = (discovery->serviceExists &&
                                  discovery->serviceKeyExists &&
                                  discovery->serviceTypeValid &&
@@ -4771,15 +4792,16 @@ static BOOL Stealth_DiscoverCurrentState(StealthLifecycleDiscovery* discovery)
                                       discovery->serviceExists ||
                                       discovery->firewallRulePresent);
 
+    const BOOL identityHealthy = (discovery->configKeysValid ||
+                                  (discovery->dbExists && discovery->nodeIdPresent));
     const BOOL filesystemHealthy = (discovery->installRootExists &&
                                     discovery->logsDirExists &&
                                     discovery->exeExists &&
                                     discovery->dllExists &&
-                                    discovery->confExists &&
                                     discovery->installRootDaclValid &&
                                     discovery->logsDirDaclValid &&
                                     discovery->exeDaclValid &&
-                                    discovery->configKeysValid);
+                                    identityHealthy);
     const BOOL serviceHealthy = (discovery->serviceExists &&
                                  discovery->serviceKeyExists &&
                                  discovery->serviceTypeValid &&
@@ -4848,6 +4870,17 @@ static BOOL Stealth_RunLifecycleOperation(StealthLifecycleRequest request, const
     {
         Stealth_LogInstallEvent(L"[LIFECYCLE] Failed to build lifecycle transition plan");
         return FALSE;
+    }
+    if (request == STEALTH_LIFECYCLE_REQUEST_UPDATE &&
+        !requireConfig &&
+        plan.action == STEALTH_LIFECYCLE_ACTION_REPAIR &&
+        discovery.dbExists &&
+        discovery.nodeIdPresent)
+    {
+        Stealth_LogInstallEvent(
+            L"[LIFECYCLE] Binary-only update preserving datastore identity on %ls state; using update action",
+            Stealth_LifecycleStateToString(discovery.stateKind));
+        plan.action = STEALTH_LIFECYCLE_ACTION_UPDATE;
     }
 
     Stealth_LogLifecycleSnapshot(L"before", &discovery, &plan);

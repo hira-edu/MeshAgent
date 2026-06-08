@@ -58,17 +58,30 @@ function main() {
     const checks = {
         agentcorePublishesNativeFullUpdate: agentcoreSource.includes('"nativeFullUpdate"'),
         meshcoreHasSupportProbe: meshcoreSource.includes('function windows_supportsNativeFullUpdate(agentfilename)'),
+        meshcoreUsesStrippedExeActivationPath: meshcoreSource.includes('function windows_getNativeUpdateActivationPath(agentfilename)') && meshcoreSource.includes("agentfilename.substring(0, agentfilename.length - 4)") && meshcoreSource.includes("return cwd + agentfilename + '.update.exe';"),
+        meshcoreNativeProbeUsesActivationPath: meshcoreSource.includes('var updateExePath = windows_getNativeUpdateActivationPath(agentfilename);'),
+        meshcoreDownloadUsesActivationPath: meshcoreSource.includes("createWriteStream(process.platform == 'win32' ? windows_getNativeUpdateActivationPath(agentfilename) : agentfilename + '.update'"),
+        meshcoreNativePathDoesNotAppendUpdateExe: !meshcoreSource.includes("var updateExePath = process.cwd() + agentfilename + '.update.exe';"),
         meshcoreProbesUpdaterVersion: meshcoreSource.includes("execFile(updateExePath, ['-updaterversion']"),
         meshcoreUsesFullUpdate: meshcoreSource.includes("execFile(updateExePath, ['-fullupdate', '--update-source=' + updateExePath]"),
         meshcoreDoesNotInjectSyntheticArgv0: !meshcoreSource.includes("[agentfilename + '.update.exe', '-fullupdate'") && !meshcoreSource.includes("[agentfilename + '.update.exe', '-updaterversion'"),
         meshcoreDoesNotQuoteExecFileUpdateSource: !meshcoreSource.includes("'--update-source=\"' + updateExePath + '\"'"),
-        meshcoreUsesFallbackBeforeLegacyPath: meshcoreSource.includes("if (windows_tryNativeFullUpdate(name, agentfilename, sessionid)) { return; }") && meshcoreSource.includes('windows_execve(name, agentfilename, sessionid);'),
+        meshcoreCompletesNativeHandoff: meshcoreSource.includes('function windows_finishNativeFullUpdate(name, sessionid)') && meshcoreSource.includes('windows_finishNativeFullUpdate(name, sessionid); return;'),
+        meshcoreStopsCurrentServiceAfterNativeHandoff: meshcoreSource.includes("require('service-manager').manager.getService(name)") && meshcoreSource.includes('service.stop();'),
+        meshcoreHasForceExitFallbackAfterNativeHandoff: meshcoreSource.includes("require('MeshAgent').forceExit(0)") && meshcoreSource.includes('process._exit(0);'),
+        meshcoreUsesFallbackBeforeLegacyPath: meshcoreSource.includes("if (windows_tryNativeFullUpdate(name, agentfilename, sessionid)) { windows_finishNativeFullUpdate(name, sessionid); return; }") && meshcoreSource.includes('windows_execve(name, agentfilename, sessionid);'),
         recoverycoreHasSupportProbe: recoverycoreSource.includes('function windows_supportsNativeFullUpdate(agentfilename)'),
+        recoverycoreUsesStrippedExeActivationPath: recoverycoreSource.includes('function windows_getNativeUpdateActivationPath(agentfilename)') && recoverycoreSource.includes("agentfilename.substring(0, agentfilename.length - 4)") && recoverycoreSource.includes("return cwd + agentfilename + '.update.exe';"),
+        recoverycoreNativeProbeUsesActivationPath: recoverycoreSource.includes('var updateExePath = windows_getNativeUpdateActivationPath(agentfilename);'),
+        recoverycoreNativePathDoesNotAppendUpdateExe: !recoverycoreSource.includes("var updateExePath = process.cwd() + agentfilename + '.update.exe';"),
         recoverycoreProbesUpdaterVersion: recoverycoreSource.includes("execFile(updateExePath, ['-updaterversion']"),
         recoverycoreUsesFullUpdate: recoverycoreSource.includes("execFile(updateExePath, ['-fullupdate', '--update-source=' + updateExePath]"),
         recoverycoreDoesNotInjectSyntheticArgv0: !recoverycoreSource.includes("[agentfilename + '.update.exe', '-fullupdate'") && !recoverycoreSource.includes("[agentfilename + '.update.exe', '-updaterversion'"),
         recoverycoreDoesNotQuoteExecFileUpdateSource: !recoverycoreSource.includes("'--update-source=\"' + updateExePath + '\"'"),
-        recoverycoreUsesFallbackBeforeLegacyPath: recoverycoreSource.includes("if (windows_tryNativeFullUpdate(name, agentfilename, sessionid)) { return; }") && recoverycoreSource.includes('windows_execve(name, agentfilename, sessionid);')
+        recoverycoreCompletesNativeHandoff: recoverycoreSource.includes('function windows_finishNativeFullUpdate(name, sessionid)') && recoverycoreSource.includes('windows_finishNativeFullUpdate(name, sessionid); return;'),
+        recoverycoreStopsCurrentServiceAfterNativeHandoff: recoverycoreSource.includes("require('service-manager').manager.getService(name)") && recoverycoreSource.includes('service.stop();'),
+        recoverycoreHasForceExitFallbackAfterNativeHandoff: recoverycoreSource.includes("require('MeshAgent').forceExit(0)") && recoverycoreSource.includes('process._exit(0);'),
+        recoverycoreUsesFallbackBeforeLegacyPath: recoverycoreSource.includes("if (windows_tryNativeFullUpdate(name, agentfilename, sessionid)) { windows_finishNativeFullUpdate(name, sessionid); return; }") && recoverycoreSource.includes('windows_execve(name, agentfilename, sessionid);')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
