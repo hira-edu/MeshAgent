@@ -682,6 +682,7 @@ int kvm_server_inputdata(char* block, int blocklen)
 	type = ntohs(((unsigned short*)(block))[0]);
 	size = ntohs(((unsigned short*)(block))[1]);
 	if (size > blocklen) return 0;
+	if (size < 4) return blocklen; // Malformed header; drop the rest to avoid a stall/desync of the input stream.
 
 	switch (type)
 	{
@@ -757,6 +758,7 @@ int kvm_server_inputdata(char* block, int blocklen)
 		}
 	case MNG_KVM_FRAME_RATE_TIMER:
 		{
+			if (size < 6) break;
 			int fr = ((int)ntohs(((unsigned short*)(block))[2]));
 			if (fr >= 20 && fr <= 5000) FRAME_RATE_TIMER = fr;
 			break;
@@ -768,6 +770,7 @@ int kvm_server_inputdata(char* block, int blocklen)
 		}
 	case MNG_KVM_SET_DISPLAY:
 		{
+			if (size < 6) break;
 			if (ntohs(((unsigned short*)(block))[2]) == CURRENT_DISPLAY_ID) { break; } // Don't do anything
 			CURRENT_DISPLAY_ID = ntohs(((unsigned short*)(block))[2]);
 			change_display = 1;

@@ -280,6 +280,7 @@ int kvm_init()
 	{
 		CGDisplayModeRef mode = CGDisplayCopyDisplayMode(SCREEN_NUM);
 		SCREEN_SCALE = (int) CGDisplayModeGetPixelWidth(mode) / SCREEN_WIDTH;
+		if (SCREEN_SCALE < 1) SCREEN_SCALE = 1; // Guard against a 0 scale (would zero the screen dims and divide-by-zero in mouse scaling).
 		CGDisplayModeRelease(mode);
 	}
 
@@ -326,6 +327,7 @@ int kvm_server_inputdata(char* block, int blocklen)
 	size = ntohs(((unsigned short*)(block))[1]);
 
 	if (size > blocklen) return 0;
+	if (size < 4) return blocklen; // Malformed header; drop the rest to avoid a stall/desync of the input stream.
 
 	switch (type)
 	{

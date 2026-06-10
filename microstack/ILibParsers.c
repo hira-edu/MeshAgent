@@ -6444,7 +6444,7 @@ struct packetheader* ILibParsePacketHeader(char* buffer, size_t offset, size_t l
 	//
 	StartLine = (struct parser_result*)ILibParseString(f->data, 0, f->datalength, " ", 1);
 	HeaderLine = f->NextResult;
-	if (memcmp(StartLine->FirstResult->data, "HTTP", 4) == 0 && StartLine->FirstResult->NextResult != NULL)
+	if (StartLine->FirstResult->datalength >= 4 && memcmp(StartLine->FirstResult->data, "HTTP", 4) == 0 && StartLine->FirstResult->NextResult != NULL)
 	{
 		//
 		// If the StartLine starts with HTTP/, then we know this is a response packet.
@@ -9327,24 +9327,24 @@ int ILibString_IndexOf(const char *inString, size_t inStringLength, const char *
 */
 int ILibString_LastIndexOfEx(const char *inString, size_t inStringLength, const char *lastIndexOf, size_t lastIndexOfLength, int caseSensitive)
 {
-	size_t *RetVal = NULL;
-	size_t index = ((inStringLength == 0 || inStringLength == (size_t)(-1))? strnlen_s(inString, sizeof(ILibScratchPad)) : inStringLength) - (lastIndexOfLength < 0 ? strnlen_s(lastIndexOf, sizeof(ILibScratchPad)) : lastIndexOfLength);
+	size_t inLen = ((inStringLength == 0 || inStringLength == (size_t)(-1)) ? strnlen_s(inString, sizeof(ILibScratchPad)) : inStringLength);
+	size_t needleLen = (lastIndexOfLength == (size_t)(-1) ? strnlen_s(lastIndexOf, sizeof(ILibScratchPad)) : lastIndexOfLength);
+	size_t index;
 
-	while (index >= 0)
+	if (needleLen > inLen) { return(-1); }
+	index = inLen - needleLen;
+
+	// index is unsigned, so the bottom of the scan needs an explicit check: a
+	// (index >= 0) condition is always true and on no-match would wrap to
+	// SIZE_MAX and walk memory in front of the buffer.
+	while (1)
 	{
-		if (caseSensitive!=0 && memcmp(inString+index,lastIndexOf,lastIndexOfLength)==0)
-		{
-			RetVal = &index;
-			break;
-		}
-		else if (caseSensitive==0 && strncasecmp(inString+index,lastIndexOf,lastIndexOfLength)==0)
-		{
-			RetVal = &index;
-			break;
-		}
+		if (caseSensitive != 0 && memcmp(inString + index, lastIndexOf, needleLen) == 0) { break; }
+		if (caseSensitive == 0 && strncasecmp(inString + index, lastIndexOf, needleLen) == 0) { break; }
+		if (index == 0) { return(-1); }
 		--index;
 	}
-	return((RetVal == NULL || *RetVal > INT32_MAX) ? -1 : (int)(*RetVal));
+	return(index > INT32_MAX ? -1 : (int)index);
 }
 /*! \fn ILibString_LastIndexOf(const char *inString, int inStringLength, const char *lastIndexOf, int lastIndexOfLength)
 \brief Returns the position index of the last occurance of a given substring

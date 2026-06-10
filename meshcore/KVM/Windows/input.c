@@ -680,32 +680,40 @@ void MakeTouchObject(POINTER_TOUCH_INFO* contact, unsigned char id, POINTER_FLAG
 	contact->rcContact.right = contact->pointerInfo.ptPixelLocation.x  + 2;
 }
 
-int TouchAction1(unsigned char id, unsigned int flags, unsigned short x, unsigned short y)
+int TouchAction1(unsigned char id, unsigned int flags, int x, int y)
 {
 	POINTER_TOUCH_INFO contact;
 
 	if (g_TouchLoadLibraryState != 1) return 0;
 	MakeTouchObject(&contact, id, (POINTER_FLAGS)flags, x, y);
-	if (!g_TouchInjectionCall(1, &contact)) { printf("TOUCH1ERROR: id=%u, flags=%u, x=%u, y=%u, err=%ld\r\n", id, flags, x, y, GetLastError()); return 1; }
+	if (!g_TouchInjectionCall(1, &contact)) { printf("TOUCH1ERROR: id=%u, flags=%u, x=%d, y=%d, err=%ld\r\n", id, flags, x, y, GetLastError()); return 1; }
 
 	//printf("TOUCH: id=%d, flags=%d, x=%d, y=%d\r\n", id, flags, x, y);
 	return 0;
 }
 
-int TouchAction2(char* data, int datalen, int scaling)
+int TouchAction2(char* data, int datalen, int scaling, int offsetX, int offsetY)
 {
 	int i, records = datalen / 9;
-	POINTER_TOUCH_INFO contact[16];
+	// One injection frame must describe every active contact, so a frame cannot
+	// be split into chunks; size it to the InitializeTouchInjection count.
+	POINTER_TOUCH_INFO contact[MAX_TOUCH_COUNT];
 
 	if (g_TouchLoadLibraryState != 1) return 0;
+	if (records < 1) return 0;
+	// More contacts than injection supports: silently dropping records would
+	// leave remote contacts stuck down, so reject the frame and request a reset.
+	if (records > MAX_TOUCH_COUNT) return 1;
 
-	if (records > 16) records = 16;
 	for (i = 0; i < records; i++) {
 		int flags = (int)ntohl(((unsigned int*)(data + (9 * i) + 1))[0]);
 		int x = (int)(ntohs(((unsigned short*)(data + (9 * i) + 5))[0]));
 		int y = (int)(ntohs(((unsigned short*)(data + (9 * i) + 7))[0]));
-		x = (x * 1024) / scaling;
-		y = (y * 1024) / scaling;
+
+		// Descale to local pixels (round to nearest), then translate from the
+		// selected display to desktop coordinates for InjectTouchInput.
+		x = KVM_DescaleToPixel(x, scaling) + offsetX;
+		y = KVM_DescaleToPixel(y, scaling) + offsetY;
 		MakeTouchObject(&contact[i], data[i * 9], (POINTER_FLAGS)flags, x, y);
 		//printf("TOUCH2: flags=%d, x=%d, y=%d\r\n", flags, x, y);
 	}

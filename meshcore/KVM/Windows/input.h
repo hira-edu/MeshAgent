@@ -38,6 +38,14 @@ typedef enum KVM_MouseCursors
 	KVM_MouseCursor_WAIT		= 13
 }KVM_MouseCursors;
 
+// Remote coordinates arrive pre-scaled by (SCALING_FACTOR / 1024); descale back
+// to local pixels, rounding to the nearest pixel. Shared by the touch v1 (kvm.c)
+// and v2 (input.c) paths so the coordinate policy lives in one place.
+static __inline int KVM_DescaleToPixel(int v, int scaling)
+{
+	return ((v * 1024) + (scaling / 2)) / scaling;
+}
+
 void KVM_InitMouseCursors(void* pendingPackets);
 void KVM_UnInitMouseCursors();
 int KVM_ConsumeDesktopSwitchEvent();
@@ -46,7 +54,7 @@ void KeyAction(unsigned char keycode, int up);
 void KeyActionUnicode(WORD unicode, int up);
 int TouchInit();
 void TouchUnInit();
-int TouchAction1(unsigned char id, unsigned int flags, unsigned short x, unsigned short y);
-int TouchAction2(char* data, int datalen, int scaling);
+int TouchAction1(unsigned char id, unsigned int flags, int x, int y);
+int TouchAction2(char* data, int datalen, int scaling, int offsetX, int offsetY);
 
 #endif

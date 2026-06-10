@@ -1405,7 +1405,7 @@ int ILibWebClient_ProcessWebSocketData(char* buffer, int offset, int length, ILi
 		}
 	}
 
-	if (length < (i + plen + ((unsigned char)(hdr & WEBSOCKET_MASK) != 0 ? 4 : 0)))
+	if (plen > (length - i - (((unsigned char)(hdr & WEBSOCKET_MASK) != 0) ? 4 : 0))) // rearranged to avoid signed overflow of i + plen
 	{
 		return(offset); // Don't have the entire packet
 	}
@@ -1445,29 +1445,38 @@ int ILibWebClient_ProcessWebSocketData(char* buffer, int offset, int length, ILi
 			}
 			else
 			{
-				if (state->WebSocketFragmentIndex + plen >= state->WebSocketFragmentBufferSize)
+				// Grow the buffer (possibly several doublings, capped at the maximum) so the
+				// fragment fits whenever it can; a single doubling was not always enough.
+				if ((state->WebSocketFragmentIndex + plen) > state->WebSocketFragmentBufferSize && state->WebSocketFragmentBufferSize < state->WebSocketFragmentMaxBufferSize)
 				{
-					// Need to grow the buffer
-
-					if (state->WebSocketFragmentBufferSize == state->WebSocketFragmentMaxBufferSize)
-					{
-						// We are already maxed out, so just send what we have as an unfinished fragment	
-						state->WebSocketCouldNotAutoReassemble = 1; // Set this flag, becuase we can't reassemble, so our FIN flag will be different to reflect that					
-						tempBegin = 0;
-						wr->OnResponse(wcdo, 0, wcdo->header, state->WebSocketFragmentBuffer, &tempBegin, state->WebSocketFragmentIndex, ILibWebClient_ReceiveStatus_Partial, wr->user1, wr->user2, PAUSE);
-						state->WebSocketFragmentIndex = 0; // Reset the index, becuase new data is going to go to the front
-					}
-					else
-					{
-						// We can grow the buffer
-						state->WebSocketFragmentBufferSize = state->WebSocketFragmentBufferSize * 2;
-						if (state->WebSocketFragmentBufferSize > state->WebSocketFragmentMaxBufferSize) { state->WebSocketFragmentBufferSize = state->WebSocketFragmentMaxBufferSize; }
-						if ((state->WebSocketFragmentBuffer = (char*)realloc(state->WebSocketFragmentBuffer, state->WebSocketFragmentBufferSize)) == NULL) { ILIBCRITICALEXIT(254); } // MS Static Analyser erroneously reports that this leaks the original memory block
-					}
+					while (state->WebSocketFragmentBufferSize < (state->WebSocketFragmentIndex + plen) && state->WebSocketFragmentBufferSize < state->WebSocketFragmentMaxBufferSize) { state->WebSocketFragmentBufferSize = state->WebSocketFragmentBufferSize * 2; }
+					if (state->WebSocketFragmentBufferSize > state->WebSocketFragmentMaxBufferSize) { state->WebSocketFragmentBufferSize = state->WebSocketFragmentMaxBufferSize; }
+					if ((state->WebSocketFragmentBuffer = (char*)realloc(state->WebSocketFragmentBuffer, state->WebSocketFragmentBufferSize)) == NULL) { ILIBCRITICALEXIT(254); } // MS Static Analyser erroneously reports that this leaks the original memory block
 				}
 
-				memcpy_s(state->WebSocketFragmentBuffer + state->WebSocketFragmentIndex, state->WebSocketFragmentBufferSize - state->WebSocketFragmentIndex, buffer + i, plen);
-				state->WebSocketFragmentIndex += plen;
+				// Copy the payload, flushing the buffer up as an unfinished fragment whenever it
+				// fills, so no bytes are ever dropped no matter how large the frame is.
+				{
+					int copied = 0;
+					while (copied < plen)
+					{
+						int space = state->WebSocketFragmentBufferSize - state->WebSocketFragmentIndex;
+						if (space == 0)
+						{
+							state->WebSocketCouldNotAutoReassemble = 1; // Set this flag, becuase we can't reassemble, so our FIN flag will be different to reflect that
+							tempBegin = 0;
+							wr->OnResponse(wcdo, 0, wcdo->header, state->WebSocketFragmentBuffer, &tempBegin, state->WebSocketFragmentIndex, ILibWebClient_ReceiveStatus_Partial, wr->user1, wr->user2, PAUSE);
+							state->WebSocketFragmentIndex = 0; // Reset the index, becuase new data is going to go to the front
+							space = state->WebSocketFragmentBufferSize;
+						}
+						{
+							int tocopy = ((plen - copied) <= space) ? (plen - copied) : space;
+							memcpy_s(state->WebSocketFragmentBuffer + state->WebSocketFragmentIndex, space, buffer + i + copied, tocopy);
+							state->WebSocketFragmentIndex += tocopy;
+							copied += tocopy;
+						}
+					}
+				}
 
 				if (FIN != 0)
 				{			

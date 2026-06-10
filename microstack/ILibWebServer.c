@@ -607,7 +607,7 @@ int ILibWebServer_ProcessWebSocketData(struct ILibWebServer_Session *ws, char* b
 		}
 	}
 
-	if (length < (i + plen + ((unsigned char)(hdr & WEBSOCKET_MASK) != 0 ? 4 : 0)))
+	if (plen > (length - i - (((unsigned char)(hdr & WEBSOCKET_MASK) != 0) ? 4 : 0))) // rearranged to avoid signed overflow of i + plen
 	{
 		return(offset); // Don't have the entire packet
 	}
@@ -649,29 +649,44 @@ int ILibWebServer_ProcessWebSocketData(struct ILibWebServer_Session *ws, char* b
 			}
 			else
 			{
-				if (ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentIndex + plen >= ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBufferSize)
 				{
-					// Need to grow the buffer
+					ILibWebServer_Session_SystemData *sd = ILibWebServer_Session_GetSystemData(ws);
 
-					if (ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBufferSize == ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentMaxBufferSize)
+					// Grow (possibly several doublings) until the fragment fits, capped at the maximum.
+					// A single doubling was not always enough, which let memcpy_s overflow and abort.
+					if ((sd->WebSocketFragmentIndex + plen) > sd->WebSocketFragmentBufferSize && sd->WebSocketFragmentBufferSize < sd->WebSocketFragmentMaxBufferSize)
 					{
-						// We are already maxed out, so just send what we have as an unfinished fragment	
-						ILibWebServer_Session_GetSystemData(ws)->WebSocketCouldNotAutoReassemble = 1; // Set this flag, becuase we can't reassemble, so our FIN flag will be different to reflect that					
-						tempBegin = 0;
-						ws->OnReceive(ws, 0, (struct packetheader*)ILibWebServer_Session_GetSystemData(ws)->WebSocket_Request, ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBuffer, &tempBegin, ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentIndex, ILibWebServer_DoneFlag_Partial);
-						ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentIndex = 0; // Reset the index, becuase new data is going to go to the front
+						int newSize = sd->WebSocketFragmentBufferSize;
+						while (newSize < (sd->WebSocketFragmentIndex + plen) && newSize < sd->WebSocketFragmentMaxBufferSize) { newSize *= 2; }
+						if (newSize > sd->WebSocketFragmentMaxBufferSize) { newSize = sd->WebSocketFragmentMaxBufferSize; }
+						sd->WebSocketFragmentBufferSize = newSize;
+						if ((sd->WebSocketFragmentBuffer = (char*)realloc(sd->WebSocketFragmentBuffer, sd->WebSocketFragmentBufferSize)) == NULL) { ILIBCRITICALEXIT(254); }
 					}
-					else
+
+					// Copy the payload, flushing the buffer up as an unfinished fragment whenever it
+					// fills, so no bytes are ever dropped no matter how large the frame is.
 					{
-						// We can grow the buffer
-						ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBufferSize = ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBufferSize * 2;
-						if (ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBufferSize > ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentMaxBufferSize) { ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBufferSize = ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentMaxBufferSize; }
-						if ((ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBuffer = (char*)realloc(ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBuffer, ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBufferSize)) == NULL) { ILIBCRITICALEXIT(254); }
+						int copied = 0;
+						while (copied < plen)
+						{
+							int space = sd->WebSocketFragmentBufferSize - sd->WebSocketFragmentIndex;
+							if (space == 0)
+							{
+								sd->WebSocketCouldNotAutoReassemble = 1; // FIN flag will reflect that we couldn't reassemble
+								tempBegin = 0;
+								ws->OnReceive(ws, 0, (struct packetheader*)sd->WebSocket_Request, sd->WebSocketFragmentBuffer, &tempBegin, sd->WebSocketFragmentIndex, ILibWebServer_DoneFlag_Partial);
+								sd->WebSocketFragmentIndex = 0;
+								space = sd->WebSocketFragmentBufferSize;
+							}
+							{
+								int tocopy = ((plen - copied) <= space) ? (plen - copied) : space;
+								memcpy_s(sd->WebSocketFragmentBuffer + sd->WebSocketFragmentIndex, space, buffer + i + copied, tocopy);
+								sd->WebSocketFragmentIndex += tocopy;
+								copied += tocopy;
+							}
+						}
 					}
 				}
-
-				memcpy_s(ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBuffer + ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentIndex, ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentBufferSize - ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentIndex, buffer + i, plen);
-				ILibWebServer_Session_GetSystemData(ws)->WebSocketFragmentIndex += plen;
 
 				if (FIN != 0)
 				{

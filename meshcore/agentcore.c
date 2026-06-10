@@ -4647,6 +4647,7 @@ char* MeshAgent_MakeAbsolutePathEx(char *basePath, char *localPath, int escapeBa
 		sprintf_s(ILibScratchPad2 + len, sizeof(ILibScratchPad2) - len, "%s", localPath);
 #else
 		int i = ILibString_LastIndexOf(ILibScratchPad2, len, ".", 1);
+		if (i < 0) { i = (int)len; } // No extension to replace: append (matches the non-Windows branch)
 		sprintf_s(ILibScratchPad2 + i, sizeof(ILibScratchPad2) - i, "%s", localPath);
 #endif
 	}
@@ -5598,8 +5599,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 							util_tohex(agent->serverHash, UTIL_SHA256_HASHSIZE, ILibScratchPad2);
 							printf("Server certificate mismatch\r\n");
 							MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify legacy mismatch actual=%s expected=%s", ILibScratchPad, ILibScratchPad2);
-							break; // TODO: Disconnect
 							if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Server certificate mismatch"); }
+							X509_free(serverCert);
+							break; // TODO: Disconnect
 						}
 					}
 
@@ -6174,9 +6176,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			while (util_appendfile(updateFilePath, cmd + 4, cmdLen - 4) == 0 && ++retryCount < 4)
 			{ 
 #ifdef WIN32
-				Sleep(100); 
+				Sleep(100);
 #else
-				sleep(100);
+				usleep(100 * 1000); // 100 ms, matching the Windows branch (POSIX sleep() is seconds)
 #endif
 			}
 
@@ -6559,7 +6561,7 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 				(beginPointer != NULL) ? *beginPointer : -1,
 				endPointer);
 		}
-			if (header->StatusCode == 101)
+			if (header != NULL && header->StatusCode == 101)
 			{
 				// Process Mesh Agent commands
 				MeshServer_ProcessCommand(WebStateObject, agent, bodyBuffer, endPointer);
@@ -7249,6 +7251,8 @@ void checkForEmbeddedMSH_ex(MeshAgentHostContainer *agent, char **eMSH)
 #endif
 	if (tmpFile == NULL) { return; }
 
+	fseek(tmpFile, 0, SEEK_END);
+	long fileSize = ftell(tmpFile);
 	fseek(tmpFile, -16, SEEK_END);
 	ignore_result(fread(ILibScratchPad, 1, 16, tmpFile));
 	if (memcmp(ILibScratchPad, exeMeshPolicyGuid, 16) == 0)
@@ -7258,13 +7262,19 @@ void checkForEmbeddedMSH_ex(MeshAgentHostContainer *agent, char **eMSH)
 		if (fread((void*)&mshLen, 1, 4, tmpFile) == 4)
 		{
 			mshLen = ntohl(mshLen);
-			fseek(tmpFile, -4 - mshLen, SEEK_CUR);
-			
+			// Reject a corrupt/tampered length field before allocating or seeking with it.
+			// The MSH data must fit in front of the 4-byte length and 16-byte GUID trailer.
+			if (mshLen <= 0 || (long)mshLen > fileSize - 20) { fclose(tmpFile); return; }
+			if (fseek(tmpFile, -4 - mshLen, SEEK_CUR) != 0) { fclose(tmpFile); return; }
+
 			data = (char*)ILibMemory_SmartAllocate(mshLen);
-			if (eMSH != NULL) { *eMSH = data; }
 			if (fread(data, 1, mshLen, tmpFile) == mshLen)
 			{
-				if (eMSH == NULL)
+				if (eMSH != NULL)
+				{
+					*eMSH = data; // Hand off only a fully-read buffer
+				}
+				else
 				{
 					FILE *msh = NULL;
 #ifdef WIN32
@@ -7279,6 +7289,10 @@ void checkForEmbeddedMSH_ex(MeshAgentHostContainer *agent, char **eMSH)
 					}
 					ILibMemory_Free(data);
 				}
+			}
+			else
+			{
+				ILibMemory_Free(data); // Short read: don't leak, and don't hand the caller an unfilled buffer
 			}
 		}
 	}
@@ -7322,7 +7336,7 @@ int importSettings(MeshAgentHostContainer *agent, char* fileName)
 				key[keyLen] = 0;
 				val = key + keyLen + 1;
 				valLen = f->datalength - keyLen - 1;
-				if (val[valLen - 1] == 13) { --valLen; }
+				if (valLen > 0 && val[valLen - 1] == 13) { --valLen; }
 				valLen = ILibTrimString(&val, valLen);
 
 				if (!(keyLen == 10 && strncmp("CoreModule", key, 10) == 0))
@@ -9324,6 +9338,7 @@ void MeshAgent_Destroy(MeshAgentHostContainer* agent)
 	if (agent->displayName != NULL) { ILibMemory_Free(agent->displayName); agent->displayName = NULL; }
 	if (agent->execparams != NULL) { ILibMemory_Free(agent->execparams); agent->execparams = NULL; }
 #ifdef WIN32
+	if (agent->certObject != NULL) { wincrypto_close(agent->certObject); agent->certObject = NULL; }
 	if (agent->shCore != NULL)
 	{
 		FreeLibrary((HMODULE)agent->shCore);

@@ -2426,7 +2426,9 @@ function serviceManager()
                 try
                 {
                     var imagePath = reg.QueryKey(reg.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + options.name, 'ImagePath');
-                    imagePath += (' ' + options.parameters.join(' '));
+                    // Quote any parameter that contains whitespace and isn't already internally
+                    // quoted, so the Service Control Manager tokenizes the ImagePath correctly.
+                    imagePath += (' ' + options.parameters.map(function (p) { return (/\s/.test(p) && String(p).indexOf('"') < 0) ? ('"' + p + '"') : p; }).join(' '));
                     reg.WriteKey(reg.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + options.name, 'ImagePath', imagePath);
                 }
                 catch(xxx)
@@ -2450,7 +2452,7 @@ function serviceManager()
                 // For now, we'll only provide an uninstaller if the binary is the mesh agent binary, so we
                 // won't need to copy the binary to run the uninstall script
                 //
-                var script = Buffer.from("try{require('service-manager').manager.uninstallService('" + options.name + "');}catch(x){}process.exit();").toString('base64');
+                var script = Buffer.from("try{require('service-manager').manager.uninstallService(" + JSON.stringify(options.name) + ");}catch(x){}process.exit();").toString('base64');
                 try
                 {
                     reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'DisplayName', options.displayName);
@@ -2463,11 +2465,11 @@ function serviceManager()
                     reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'NoRepair', 0x1);
                     if (options.name == 'Mesh Agent' || options._installer == true)
                     {
-                        reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'UninstallString', options.servicePath + ' -funinstall --meshServiceName="' + options.name + '"');
+                        reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'UninstallString', '"' + options.servicePath + '" -funinstall --meshServiceName="' + options.name + '"');
                     }
                     else
                     {
-                        reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'UninstallString', options.servicePath + ' -b64exec ' + script);
+                        reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'UninstallString', '"' + options.servicePath + '" -b64exec ' + script);
                     }
                     reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'DisplayVersion', process.versions.commitDate.toString());
                 }

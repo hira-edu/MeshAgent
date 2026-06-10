@@ -2273,6 +2273,7 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 	ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_2, "KVM [SLAVE]: Handle Input [Len = %d, type = %u, size = %u]", blocklen, type, size);
 
 	if (size > blocklen) return 0;
+	if (size < 4) return blocklen; // Malformed header (size must cover the 4-byte header); drop the rest to avoid a stall/desync of the input stream.
 
 	//printf("INPUT: %d, %d\r\n", type, size);
 
@@ -2338,17 +2339,28 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 				x = (double)ntohs(((short*)(block))[3]) * 1024 / SCALING_FACTOR;
 				y = (double)ntohs(((short*)(block))[4]) * 1024 / SCALING_FACTOR;
 
-				// Add relative display position
-				x += fabs((double)(SCREEN_X - VSCREEN_X));
-				y += fabs((double)(SCREEN_Y - VSCREEN_Y));
+				// Effective virtual-desktop geometry. In the single-monitor fallback
+				// (SM_CXVIRTUALSCREEN returned 0) VSCREEN_* stay 0 while SCREEN_* are
+				// populated, so fall back to SCREEN_* to avoid a divide-by-zero / NaN.
+				int vox = (VSCREEN_WIDTH > 0) ? VSCREEN_X : SCREEN_X;
+				int voy = (VSCREEN_HEIGHT > 0) ? VSCREEN_Y : SCREEN_Y;
+				int vw = (VSCREEN_WIDTH > 0) ? VSCREEN_WIDTH : SCREEN_WIDTH;
+				int vh = (VSCREEN_HEIGHT > 0) ? VSCREEN_HEIGHT : SCREEN_HEIGHT;
+				if (vw <= 0 || vh <= 0) break; // Geometry not primed yet; cannot map this event.
 
-				// Scale back to the virtual screen
-				x = (x * ((double)SCREEN_WIDTH / (double)VSCREEN_WIDTH)) * (double)65535;
-				y = (y * ((double)SCREEN_HEIGHT / (double)VSCREEN_HEIGHT)) * (double)65535;
+				// Add relative display position
+				x += (double)(SCREEN_X - vox);
+				y += (double)(SCREEN_Y - voy);
+
+				// Normalize to the virtual desktop. SendInput maps the normalized value
+				// back to a pixel with (dx * width) >> 16, so aim at the pixel center to
+				// keep the round trip from drifting toward the top-left.
+				x = ((x + 0.5) * (double)65536) / (double)vw;
+				y = ((y + 0.5) * (double)65536) / (double)vh;
 
 				// Perform the mouse movement
 				if (size == 12) w = ((short)ntohs(((short*)(block))[5]));
-				MouseAction((((double)x / (double)SCREEN_WIDTH)), (((double)y / (double)SCREEN_HEIGHT)), (int)(unsigned char)(block[5]), w);				
+				MouseAction(x, y, (int)(unsigned char)(block[5]), w);
 			}
 			break;
 		}
@@ -2400,6 +2412,7 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 		}
 	case MNG_KVM_FRAME_RATE_TIMER:
 		{
+			if (size < 6) break;
 			int fr = ((int)ntohs(((unsigned short*)(block))[2]));
 			if (fr >= 20 && fr <= 5000) FRAME_RATE_TIMER = fr;
 			break;
@@ -2420,27 +2433,26 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 		{
 			int r = 0;
 
+			// Both versions need at least 14 bytes: the v1 fixed layout
+			// (2 type + 2 size + 1 version + 1 id + 4 flags + 2 x + 2 y),
+			// or the v2 header (5) plus one 9-byte touch record.
+			if (size < 14) break;
+
 			if (block[4] == 1) // Version 1 touch structure (Very simple)
 			{
 				unsigned int flags = (unsigned int)ntohl(((unsigned int*)(block + 6))[0]);
 
-				// Get positions and scale correctly
-				unsigned short x = (unsigned short)(ntohs(((unsigned short*)(block + 10))[0])) * 1024 / (unsigned short)SCALING_FACTOR;
-				unsigned short y = (unsigned short)(ntohs(((unsigned short*)(block + 12))[0])) * 1024 / (unsigned short)SCALING_FACTOR;
-
-				// Add relative display position
-				x += (unsigned short)fabs((double)(SCREEN_X - VSCREEN_X));
-				y += (unsigned short)fabs((double)(SCREEN_Y - VSCREEN_Y));
-
-				// Scale back to the virtual screen
-				x = (unsigned short)(((double)x * ((double)SCREEN_WIDTH / (double)VSCREEN_WIDTH)) * (double)65535);
-				y = (unsigned short)(((double)y * ((double)SCREEN_HEIGHT / (double)VSCREEN_HEIGHT)) * (double)65535);
+				// Descale to local pixels, then translate to desktop coordinates;
+				// InjectTouchInput takes raw pixel positions, not the normalized
+				// values SendInput uses for the mouse.
+				int x = KVM_DescaleToPixel((int)ntohs(((unsigned short*)(block + 10))[0]), SCALING_FACTOR) + SCREEN_X;
+				int y = KVM_DescaleToPixel((int)ntohs(((unsigned short*)(block + 12))[0]), SCALING_FACTOR) + SCREEN_Y;
 
 				r = TouchAction1(block[5], flags, x, y);
 			}
 			else if (block[4] == 2) // Version 2 touch structure array
 			{
-				r = TouchAction2(block + 5, size - 5, SCALING_FACTOR);
+				r = TouchAction2(block + 5, size - 5, SCALING_FACTOR, SCREEN_X, SCREEN_Y);
 			}
 
 			if (r == 1) {
