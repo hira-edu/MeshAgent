@@ -1135,7 +1135,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	if (spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
 		if (spawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER) { sessionId = (DWORD)(uint64_t)sid; }
-		useLoggedOnUserToken = (spawnType != ILibProcessPipe_SpawnTypes_WINLOGON && (ILibProcessPipe_IsApprovedInternalHelperLaunchA(target, parameters) != 0 || ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(target, parameters) != 0)) ? 1 : 0;
+		useLoggedOnUserToken = (spawnType != ILibProcessPipe_SpawnTypes_WINLOGON && ILibProcessPipe_IsApprovedInternalHelperLaunchA(target, parameters) != 0) ? 1 : 0;
 		if (useLoggedOnUserToken != 0)
 		{
 			SECURITY_ATTRIBUTES duplicateTokenAttributes = { 0 };

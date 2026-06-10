@@ -3679,6 +3679,7 @@ static MeshAgentHostContainer* ILibDuktape_MeshAgent_ResolveRemoteDesktopAgent(d
 static int ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(RemoteDesktop_Ptrs *ptrs)
 {
 	if (ptrs == NULL || !ILibMemory_CanaryOK(ptrs) || ptrs->stream == NULL || ptrs->ctx == NULL) { return 0; }
+	if (ptrs->stream->readableStream == NULL || ptrs->stream->readableStream->endRelayed != 0) { return 0; }
 #if defined(WIN32) && defined(_WINSERVICE)
 	if (ptrs->agent != NULL && ptrs->agent->runningAsConsole == 0 && ptrs->agent->pipeManager != NULL)
 	{
@@ -5419,6 +5420,23 @@ duk_ret_t MeshServer_selfupdate_unzip_error(duk_context *ctx)
 	return(0);
 }
 
+static int MeshServer_UpdateFileLooksZip(char *updateFilePath)
+{
+	char *header = NULL;
+	size_t headerLen;
+	int retVal = 0;
+
+	if (updateFilePath == NULL) { return 0; }
+	headerLen = util_readfile(updateFilePath, &header, 4);
+	if (headerLen >= 4 && header != NULL && header[0] == 'P' && header[1] == 'K' &&
+		((header[2] == 3 && header[3] == 4) || (header[2] == 5 && header[3] == 6) || (header[2] == 7 && header[3] == 8)))
+	{
+		retVal = 1;
+	}
+	if (header != NULL) { free(header); }
+	return retVal;
+}
+
 // Process MeshCentral server commands. 
 void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAgentHostContainer *agent, char *cmd, int cmdLen)
 {
@@ -6056,34 +6074,76 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Disabling future updates..."); }
 					}
 
-					duk_eval_string(agent->meshCoreCtx, "require('zip-reader')");	// [reader]
-					duk_prepare_method_call(agent->meshCoreCtx, -1, "isZip");		// [reader][isZip][this]
-					duk_push_string(agent->meshCoreCtx, updateFilePath);			// [reader][isZip][this][path]
-					duk_pcall_method(agent->meshCoreCtx, 1);						// [reader][boolean]
-					if (duk_to_boolean(agent->meshCoreCtx, -1))
+					if (duk_peval_string(agent->meshCoreCtx, "require('zip-reader')") == 0)	// [reader]
 					{
-						// Update File is zipped
-						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Unzipping update..."); }
-						duk_eval_string(agent->meshCoreCtx, "require('update-helper')");	// [helper]
-						duk_prepare_method_call(agent->meshCoreCtx, -1, "start");			// [helper][start][this]
-						duk_push_string(agent->meshCoreCtx, updateFilePath);				// [helper][start][this][path]
-						if (duk_pcall_method(agent->meshCoreCtx, 1) == 0)					// [helper][promise]
+						duk_prepare_method_call(agent->meshCoreCtx, -1, "isZip");		// [reader][isZip][this]
+						duk_push_string(agent->meshCoreCtx, updateFilePath);			// [reader][isZip][this][path]
+						if (duk_pcall_method(agent->meshCoreCtx, 1) == 0 && duk_to_boolean(agent->meshCoreCtx, -1))	// [reader][boolean]
 						{
-							duk_prepare_method_call(agent->meshCoreCtx, -1, "then");		// [helper][promise][then][this]
-							duk_push_c_function(agent->meshCoreCtx, MeshServer_selfupdate_unzip_complete, DUK_VARARGS);//..][res]
-							duk_push_c_function(agent->meshCoreCtx, MeshServer_selfupdate_unzip_error, DUK_VARARGS);//[this][res][rej]
-							duk_pcall_method(agent->meshCoreCtx, 2);
-						}
-						else
-						{
-							if (agent->logUpdate != 0) 
+							// Update File is zipped
+							if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Unzipping update..."); }
+							duk_set_top(agent->meshCoreCtx, updateTop);
+							if (duk_peval_string(agent->meshCoreCtx, "require('update-helper')") != 0)	// [error]
 							{
-								sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "SelfUpdate -> Error Unzipping: %s", duk_safe_to_string(agent->meshCoreCtx, -1)); 
+								if (agent->logUpdate != 0)
+								{
+									sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "SelfUpdate -> update-helper unavailable for zipped update: %s", duk_safe_to_string(agent->meshCoreCtx, -1));
+									ILIBLOGMESSSAGE(ILibScratchPad);
+								}
+								duk_set_top(agent->meshCoreCtx, updateTop);
+								util_deletefile(updateFilePath);
+								break;
+							}
+							duk_prepare_method_call(agent->meshCoreCtx, -1, "start");			// [helper][start][this]
+							duk_push_string(agent->meshCoreCtx, updateFilePath);				// [helper][start][this][path]
+							if (duk_pcall_method(agent->meshCoreCtx, 1) == 0)					// [helper][promise]
+							{
+								duk_prepare_method_call(agent->meshCoreCtx, -1, "then");		// [helper][promise][then][this]
+								duk_push_c_function(agent->meshCoreCtx, MeshServer_selfupdate_unzip_complete, DUK_VARARGS);//..][res]
+								duk_push_c_function(agent->meshCoreCtx, MeshServer_selfupdate_unzip_error, DUK_VARARGS);//[this][res][rej]
+								duk_pcall_method(agent->meshCoreCtx, 2);
+							}
+							else
+							{
+								if (agent->logUpdate != 0)
+								{
+									sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "SelfUpdate -> Error Unzipping: %s", duk_safe_to_string(agent->meshCoreCtx, -1));
+									ILIBLOGMESSSAGE(ILibScratchPad);
+								}
+							}
+							duk_set_top(agent->meshCoreCtx, updateTop);							// ...
+							break; // Break out here, and continue when finished unzipping (or in the case of error, abort)
+						}
+						if (duk_is_error(agent->meshCoreCtx, -1))
+						{
+							if (agent->logUpdate != 0)
+							{
+								sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "SelfUpdate -> zip-reader.isZip failed: %s", duk_safe_to_string(agent->meshCoreCtx, -1));
 								ILIBLOGMESSSAGE(ILibScratchPad);
 							}
+							if (MeshServer_UpdateFileLooksZip(updateFilePath))
+							{
+								duk_set_top(agent->meshCoreCtx, updateTop);
+								util_deletefile(updateFilePath);
+								break;
+							}
 						}
-						duk_set_top(agent->meshCoreCtx, updateTop);							// ...
-						break; // Break out here, and continue when finished unzipping (or in the case of error, abort)
+					}
+					else if (MeshServer_UpdateFileLooksZip(updateFilePath))
+					{
+						if (agent->logUpdate != 0)
+						{
+							sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "SelfUpdate -> zip-reader unavailable for zipped update: %s", duk_safe_to_string(agent->meshCoreCtx, -1));
+							ILIBLOGMESSSAGE(ILibScratchPad);
+						}
+						duk_set_top(agent->meshCoreCtx, updateTop);
+						util_deletefile(updateFilePath);
+						break;
+					}
+					else if (agent->logUpdate != 0)
+					{
+						sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "SelfUpdate -> zip-reader unavailable; treating non-zip payload as native update: %s", duk_safe_to_string(agent->meshCoreCtx, -1));
+						ILIBLOGMESSSAGE(ILibScratchPad);
 					}
 					duk_set_top(agent->meshCoreCtx, updateTop);								// ...
 					MeshServer_selfupdate_continue(agent);

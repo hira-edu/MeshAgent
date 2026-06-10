@@ -991,6 +991,8 @@ static void kvm_relay_bridge_pipe_broken_handler(ILibProcessPipe_Pipe sender)
 	{
 		InterlockedExchange(&ctx->bridgeTransportAttached, 0);
 		InterlockedExchange(&ctx->bridgeClientConnected, 0);
+		ctx->transportActive = 0;
+		gKvmTransportActive = 0;
 		kvm_relay_capture_context(ctx);
 	}
 	kvm_relay_deactivate_context();

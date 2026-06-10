@@ -19,10 +19,12 @@ function extractSpan(source, startMarker, endMarker) {
 function main() {
     const kvmHeaderPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.h');
     const kvmSourcePath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
+    const inputSourcePath = path.resolve('meshcore', 'KVM', 'Windows', 'input.c');
     const agentcorePath = path.resolve('meshcore', 'agentcore.c');
 
     const kvmHeader = fs.readFileSync(kvmHeaderPath, 'utf8');
     const kvmSource = fs.readFileSync(kvmSourcePath, 'utf8');
+    const inputSource = fs.readFileSync(inputSourcePath, 'utf8');
     const agentcore = fs.readFileSync(agentcorePath, 'utf8');
     const discardCachedStream = extractSpan(
         agentcore,
@@ -55,10 +57,17 @@ function main() {
             !agentcore.includes('ILibDuktape_MeshAgent_RemoteDesktop_RemoveWatchdog'),
         agentcoreCachedStreamValidatesNativeBridgeState:
             agentcore.includes('static int ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(RemoteDesktop_Ptrs *ptrs)') &&
+            agentcore.includes('ptrs->stream->readableStream->endRelayed != 0') &&
             agentcore.includes('kvm_bridge_debug_get_child_present_for_reserved(ptrs)') &&
             agentcore.includes('kvm_bridge_debug_get_transport_active_for_reserved(ptrs)') &&
             agentcore.includes('static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(duk_context *ctx, RemoteDesktop_Ptrs *ptrs)') &&
             agentcore.includes('ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(ctx, ptrs);'),
+        kvmPipeBreakClearsTransportActive: kvmSource.includes('static void kvm_relay_bridge_pipe_broken_handler') &&
+            kvmSource.includes('ctx->transportActive = 0;') &&
+            kvmSource.includes('gKvmTransportActive = 0;'),
+        inputDoesNotForegroundCurrentWindow: !inputSource.includes('SetForegroundWindow(windowHandle)') &&
+            !inputSource.includes('KVM_LogInputApiFailure("SetForegroundWindow(key)"') &&
+            !inputSource.includes('KVM_LogInputApiFailure("SetForegroundWindow(unicode)"'),
         discardCachedStreamKeepsObjectAliveThroughNativeCleanup:
             discardCachedStream.includes('duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM);') &&
             discardCachedStream.includes('kvm_cleanup(ptrs);') &&
@@ -86,6 +95,7 @@ function main() {
     process.stdout.write(JSON.stringify({
         kvmHeaderPath,
         kvmSourcePath,
+        inputSourcePath,
         agentcorePath,
         checks
     }, null, 2) + '\n');

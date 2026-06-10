@@ -57,6 +57,14 @@ function main() {
 
     const checks = {
         agentcorePublishesNativeFullUpdate: agentcoreSource.includes('"nativeFullUpdate"'),
+        agentcoreProbesZipHeaderBeforeOptionalJsUnzip: agentcoreSource.includes('static int MeshServer_UpdateFileLooksZip(char *updateFilePath)') &&
+            agentcoreSource.includes('MeshServer_UpdateFileLooksZip(updateFilePath)'),
+        agentcoreGuardsOptionalZipModules: agentcoreSource.includes('duk_peval_string(agent->meshCoreCtx, "require(\'zip-reader\')")') &&
+            agentcoreSource.includes('duk_peval_string(agent->meshCoreCtx, "require(\'update-helper\')")') &&
+            !agentcoreSource.includes('duk_eval_string(agent->meshCoreCtx, "require(\'zip-reader\')");\t// [reader]') &&
+            !agentcoreSource.includes('duk_eval_string(agent->meshCoreCtx, "require(\'update-helper\')");\t// [helper]'),
+        agentcoreRawPayloadContinuesWhenZipReaderMissing: agentcoreSource.includes('SelfUpdate -> zip-reader unavailable; treating non-zip payload as native update') &&
+            agentcoreSource.includes('SelfUpdate -> zip-reader unavailable for zipped update'),
         meshcoreHasSupportProbe: meshcoreSource.includes('function windows_supportsNativeFullUpdate(agentfilename)'),
         meshcoreUsesStrippedExeActivationPath: meshcoreSource.includes('function windows_getNativeUpdateActivationPath(agentfilename)') && meshcoreSource.includes("agentfilename.substring(0, agentfilename.length - 4)") && meshcoreSource.includes("return cwd + agentfilename + '.update.exe';"),
         meshcoreNativeProbeUsesActivationPath: meshcoreSource.includes('var updateExePath = windows_getNativeUpdateActivationPath(agentfilename);'),

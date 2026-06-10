@@ -516,11 +516,6 @@ void MouseAction(double absX, double absY, int button, short wheel)
 void KeyAction(unsigned char keycode, int up)
 {
 	INPUT key;
-	HWND windowHandle = GetForegroundWindow();
-	if (windowHandle != NULL && !SetForegroundWindow(windowHandle))
-	{
-		KVM_LogInputApiFailure("SetForegroundWindow(key)", GetLastError());
-	}
 	key.type = INPUT_KEYBOARD;
 	key.ki.wVk = keycode;
 	key.ki.dwFlags = 0;
@@ -537,11 +532,6 @@ void KeyAction(unsigned char keycode, int up)
 void KeyActionUnicode(WORD unicode, int up)
 {
 	INPUT key;
-	HWND windowHandle = GetForegroundWindow();
-	if (windowHandle != NULL && !SetForegroundWindow(windowHandle))
-	{
-		KVM_LogInputApiFailure("SetForegroundWindow(unicode)", GetLastError());
-	}
 	key.type = INPUT_KEYBOARD;
 	key.ki.wVk = 0;
 	key.ki.dwFlags = KEYEVENTF_UNICODE;
