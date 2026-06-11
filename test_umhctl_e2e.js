@@ -90,8 +90,8 @@ function runProcessCompletionBindingChecks(results, sandbox) {
         }
     };
     const chosenEvent = sandbox.umhctlAttachProcessCompletion(proc, function () {});
-    assert(chosenEvent === 'exit', 'process completion must prefer exit when available');
-    assert(deepEqual(registrations, ['exit']), 'process completion should stop after first supported event');
+    assert(chosenEvent === 'exit', 'process completion must use exit when close is unavailable');
+    assert(deepEqual(registrations, ['close', 'exit']), 'process completion should probe close before falling back to exit');
     results.push({ name: 'process-completion-binding', ok: true, chosenEvent });
 }
 

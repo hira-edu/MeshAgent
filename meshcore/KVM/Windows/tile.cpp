@@ -119,8 +119,8 @@ extern int PIXEL_SIZE;
 extern int TILE_WIDTH_COUNT;
 extern int TILE_HEIGHT_COUNT;
 extern int COMPRESSION_RATIO;
-extern int SCALING_FACTOR;
-extern int SCALING_FACTOR_NEW;
+extern volatile LONG SCALING_FACTOR;
+extern volatile LONG SCALING_FACTOR_NEW;
 extern int FRAME_RATE_TIMER;
 extern tileInfo_t **tileInfo;
 }
@@ -2093,8 +2093,8 @@ short initialize_gdiplus()
 	TILE_HEIGHT = 32;
 	COMPRESSION_RATIO = 100;
 	FRAME_RATE_TIMER = 50;
-	SCALING_FACTOR = 1024;
-	SCALING_FACTOR_NEW = 1024;
+	InterlockedExchange(&SCALING_FACTOR, 1024);
+	InterlockedExchange(&SCALING_FACTOR_NEW, 1024);
 
 	if (SCREEN_WIDTH > 0 && SCREEN_HEIGHT > 0)
 	{

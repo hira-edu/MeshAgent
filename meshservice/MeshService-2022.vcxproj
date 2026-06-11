@@ -1252,6 +1252,11 @@
       <ExcludedFromBuild Condition="'$(Platform)'!='x64' and '$(Platform)'!='ARM64'">true</ExcludedFromBuild>
     </MASM>
   </ItemGroup>
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalDependencies>runtimeobject.lib;windowsapp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="$(ProjectDir)MeshAgent.MSBuild.targets" Condition="Exists('$(ProjectDir)MeshAgent.MSBuild.targets')" />
   <ImportGroup Label="ExtensionTargets">

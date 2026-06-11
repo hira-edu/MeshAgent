@@ -19,6 +19,7 @@ limitations under the License.
 #include <Windows.h>
 #include <Winuser.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "input.h"
 
 #include "microstack/ILibCrypto.h"
@@ -694,16 +695,18 @@ int TouchAction1(unsigned char id, unsigned int flags, int x, int y)
 
 int TouchAction2(char* data, int datalen, int scaling, int offsetX, int offsetY)
 {
-	int i, records = datalen / 9;
-	// One injection frame must describe every active contact, so a frame cannot
-	// be split into chunks; size it to the InitializeTouchInjection count.
-	POINTER_TOUCH_INFO contact[MAX_TOUCH_COUNT];
+	int i, records;
+	POINTER_TOUCH_INFO* contact = NULL;
 
 	if (g_TouchLoadLibraryState != 1) return 0;
+	if (data == NULL || datalen < 9 || (datalen % 9) != 0) return 1;
+	records = datalen / 9;
 	if (records < 1) return 0;
 	// More contacts than injection supports: silently dropping records would
 	// leave remote contacts stuck down, so reject the frame and request a reset.
 	if (records > MAX_TOUCH_COUNT) return 1;
+	contact = (POINTER_TOUCH_INFO*)malloc(sizeof(POINTER_TOUCH_INFO) * (size_t)records);
+	if (contact == NULL) return 1;
 
 	for (i = 0; i < records; i++) {
 		int flags = (int)ntohl(((unsigned int*)(data + (9 * i) + 1))[0]);
@@ -717,7 +720,8 @@ int TouchAction2(char* data, int datalen, int scaling, int offsetX, int offsetY)
 		MakeTouchObject(&contact[i], data[i * 9], (POINTER_FLAGS)flags, x, y);
 		//printf("TOUCH2: flags=%d, x=%d, y=%d\r\n", flags, x, y);
 	}
-	if (!g_TouchInjectionCall(records, contact)) { printf("TOUCH2ERROR: records=%d, err=%ld\r\n", records, GetLastError()); return 1; }
+	if (!g_TouchInjectionCall(records, contact)) { printf("TOUCH2ERROR: records=%d, err=%ld\r\n", records, GetLastError()); free(contact); return 1; }
+	free(contact);
 
 	return 0;
 }

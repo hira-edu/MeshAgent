@@ -197,8 +197,8 @@ int PIXEL_SIZE = 0;
 int TILE_WIDTH_COUNT = 0;
 int TILE_HEIGHT_COUNT = 0;
 int COMPRESSION_RATIO = 0;
-int SCALING_FACTOR = 1024;		// Scaling factor, 1024 = 100%
-int SCALING_FACTOR_NEW = 1024;	// Desired scaling factor, 1024 = 100%
+volatile LONG SCALING_FACTOR = 1024;		// Scaling factor, 1024 = 100%
+volatile LONG SCALING_FACTOR_NEW = 1024;	// Desired scaling factor, 1024 = 100%
 int FRAME_RATE_TIMER = 0;
 HANDLE kvmthread = NULL;
 int g_shutdown = 999;
@@ -250,6 +250,16 @@ static unsigned short gKvmLastInputType = 0;
 static unsigned short gKvmLastOutputType = 0;
 static LONG gKvmPendingProbeMask = 0;
 static ULONGLONG gKvmPendingProbeSinceTickMs = 0;
+
+static int kvm_read_scaling_factor(volatile LONG* scalingFactor)
+{
+	return KVM_NormalizeScalingFactor((int)InterlockedCompareExchange(scalingFactor, 0, 0));
+}
+
+static void kvm_write_scaling_factor(volatile LONG* scalingFactor, int scaling)
+{
+	InterlockedExchange(scalingFactor, KVM_NormalizeScalingFactor(scaling));
+}
 
 #define KVM_PENDING_PROBE_REFRESH	0x01
 #define KVM_PENDING_PROBE_DISPLAYS	0x02
@@ -1931,7 +1941,7 @@ BOOL CALLBACK DisplayInfoEnumProc(HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprc
 	// See if anything changed
 	w = abs(mi.rcMonitor.left - mi.rcMonitor.right);
 	h = abs(mi.rcMonitor.top - mi.rcMonitor.bottom);
-	if (SCREEN_X != mi.rcMonitor.left || SCREEN_Y !=  mi.rcMonitor.top || SCREEN_WIDTH != w || SCREEN_HEIGHT != h || SCALING_FACTOR != SCALING_FACTOR_NEW)
+	if (SCREEN_X != mi.rcMonitor.left || SCREEN_Y !=  mi.rcMonitor.top || SCREEN_WIDTH != w || SCREEN_HEIGHT != h || kvm_read_scaling_factor(&SCALING_FACTOR) != kvm_read_scaling_factor(&SCALING_FACTOR_NEW))
 	{
 		SCREEN_X = mi.rcMonitor.left;
 		SCREEN_Y = mi.rcMonitor.top;
@@ -2222,7 +2232,7 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 				h = VSCREEN_HEIGHT;
 			}
 
-			if (SCREEN_X != x || SCREEN_Y != y || SCREEN_WIDTH != w || SCREEN_HEIGHT != h || SCALING_FACTOR != SCALING_FACTOR_NEW)
+			if (SCREEN_X != x || SCREEN_Y != y || SCREEN_WIDTH != w || SCREEN_HEIGHT != h || kvm_read_scaling_factor(&SCALING_FACTOR) != kvm_read_scaling_factor(&SCALING_FACTOR_NEW))
 			{
 				//printf("RESOLUTION CHANGED! (supposedly)\n");
 				SCREEN_X = x;
@@ -2333,11 +2343,12 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 
 			if (size == 10 || size == 12)
 			{
+				int scaling = kvm_read_scaling_factor(&SCALING_FACTOR);
 				gRemoteMouseMoved = 1;
 
 				// Get positions and scale correctly
-				x = (double)ntohs(((short*)(block))[3]) * 1024 / SCALING_FACTOR;
-				y = (double)ntohs(((short*)(block))[4]) * 1024 / SCALING_FACTOR;
+				x = (double)ntohs(((short*)(block))[3]) * 1024 / scaling;
+				y = (double)ntohs(((short*)(block))[4]) * 1024 / scaling;
 
 				// Effective virtual-desktop geometry. In the single-monitor fallback
 				// (SM_CXVIRTUALSCREEN returned 0) VSCREEN_* stay 0 while SCREEN_* are
@@ -2367,7 +2378,7 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 	case MNG_KVM_COMPRESSION: // Compression
 		{
 			if (size >= 10) { int fr = ((int)ntohs(((unsigned short*)(block + 8))[0])); if (fr >= 20 && fr <= 5000) FRAME_RATE_TIMER = fr; }
-			if (size >=  8) { int ns = ((int)ntohs(((unsigned short*)(block + 6))[0])); if (ns >= 64 && ns <= 4096) SCALING_FACTOR_NEW = ns; }
+			if (size >=  8) { int ns = ((int)ntohs(((unsigned short*)(block + 6))[0])); if (ns >= 64 && ns <= 4096) kvm_write_scaling_factor(&SCALING_FACTOR_NEW, ns); }
 			if (size >=  6) { set_tile_compression((int)block[4], (int)block[5]); }
 			COMPRESSION_RATIO = 100;
 			break;
@@ -2440,19 +2451,20 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 
 			if (block[4] == 1) // Version 1 touch structure (Very simple)
 			{
+				int scaling = kvm_read_scaling_factor(&SCALING_FACTOR);
 				unsigned int flags = (unsigned int)ntohl(((unsigned int*)(block + 6))[0]);
 
 				// Descale to local pixels, then translate to desktop coordinates;
 				// InjectTouchInput takes raw pixel positions, not the normalized
 				// values SendInput uses for the mouse.
-				int x = KVM_DescaleToPixel((int)ntohs(((unsigned short*)(block + 10))[0]), SCALING_FACTOR) + SCREEN_X;
-				int y = KVM_DescaleToPixel((int)ntohs(((unsigned short*)(block + 12))[0]), SCALING_FACTOR) + SCREEN_Y;
+				int x = KVM_DescaleToPixel((int)ntohs(((unsigned short*)(block + 10))[0]), scaling) + SCREEN_X;
+				int y = KVM_DescaleToPixel((int)ntohs(((unsigned short*)(block + 12))[0]), scaling) + SCREEN_Y;
 
 				r = TouchAction1(block[5], flags, x, y);
 			}
 			else if (block[4] == 2) // Version 2 touch structure array
 			{
-				r = TouchAction2(block + 5, size - 5, SCALING_FACTOR, SCREEN_X, SCREEN_Y);
+				r = TouchAction2(block + 5, size - 5, kvm_read_scaling_factor(&SCALING_FACTOR), SCREEN_X, SCREEN_Y);
 			}
 
 			if (r == 1) {
@@ -2651,9 +2663,12 @@ void kvm_server_SetResolution(ILibKVM_WriteHandler writeHandler, void *reserved)
 	if (tileInfo != NULL) { for (row = 0; row < TILE_HEIGHT_COUNT; row++) { free(tileInfo[row]); } free(tileInfo); tileInfo = NULL; }
 
 	// Setup scaling
-	SCALING_FACTOR = SCALING_FACTOR_NEW;
-	SCALED_WIDTH = (SCREEN_WIDTH * SCALING_FACTOR) / 1024;
-	SCALED_HEIGHT = (SCREEN_HEIGHT * SCALING_FACTOR) / 1024;
+	{
+		int scaling = kvm_read_scaling_factor(&SCALING_FACTOR_NEW);
+		kvm_write_scaling_factor(&SCALING_FACTOR, scaling);
+		SCALED_WIDTH = (SCREEN_WIDTH * scaling) / 1024;
+		SCALED_HEIGHT = (SCREEN_HEIGHT * scaling) / 1024;
+	}
 
 	// Compute the tile count
 	TILE_WIDTH_COUNT = SCALED_WIDTH / TILE_WIDTH;
@@ -3002,7 +3017,7 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 			kvm_trace_startupf("KVM loop: before get_desktop_buffer pause=%d remotePause=%d scale=%d backendThread=%d",
 				g_pause,
 				g_remotepause,
-				SCALING_FACTOR,
+				kvm_read_scaling_factor(&SCALING_FACTOR),
 				kvmConsoleMode);
 		}
 		if (get_desktop_buffer(&desktop, &desktopsize, mouseMove) == 1 || desktop == NULL)
@@ -3055,7 +3070,7 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 					// parent reader, not by stalling the capture loop on remote pause state.
 					while (!g_shutdown && g_pause != 0) { Sleep(50); }
 
-					if (g_shutdown || SCALING_FACTOR != SCALING_FACTOR_NEW) { height = SCALED_HEIGHT; width = SCALED_WIDTH; break; }
+					if (g_shutdown || kvm_read_scaling_factor(&SCALING_FACTOR) != kvm_read_scaling_factor(&SCALING_FACTOR_NEW)) { height = SCALED_HEIGHT; width = SCALED_WIDTH; break; }
 					
 					// Skip the tile if it has already been sent or if the CRC is same as before
 					if (tileInfo[row][col].flags == (char)TILE_SENT || tileInfo[row][col].flags == (char)TILE_DONT_SEND) { continue; }

@@ -41,8 +41,15 @@ typedef enum KVM_MouseCursors
 // Remote coordinates arrive pre-scaled by (SCALING_FACTOR / 1024); descale back
 // to local pixels, rounding to the nearest pixel. Shared by the touch v1 (kvm.c)
 // and v2 (input.c) paths so the coordinate policy lives in one place.
+static __inline int KVM_NormalizeScalingFactor(int scaling)
+{
+	if (scaling < 64 || scaling > 4096) return 1024;
+	return scaling;
+}
+
 static __inline int KVM_DescaleToPixel(int v, int scaling)
 {
+	scaling = KVM_NormalizeScalingFactor(scaling);
 	return ((v * 1024) + (scaling / 2)) / scaling;
 }
 

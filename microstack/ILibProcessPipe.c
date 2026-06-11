@@ -24,6 +24,7 @@ limitations under the License.
 #if defined(WIN32) && !defined(_WIN32_WCE)
 #define _CRTDBG_MAP_ALLOC
 #include <crtdbg.h>
+#include <windows.h>
 #include <WtsApi32.h>
 #endif
 

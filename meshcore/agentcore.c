@@ -5300,6 +5300,19 @@ void MeshServer_SendAgentInfo(MeshAgentHostContainer* agent, ILibWebClient_State
 	if (agent->serverAuthState == 3) { MeshServer_ServerAuthenticated(WebStateObject, agent); }
 }
 
+static void MeshServer_MarkForceFakeUpdateConsumed(MeshAgentHostContainer *agent)
+{
+	if (agent == NULL || (agent->fakeUpdate == 0 && agent->forceUpdate == 0)) { return; }
+
+	// Mark consumption only after the selected update path is ready to continue.
+	// If unzip/activation setup fails earlier, leave the trigger intact so the
+	// next reconnect can retry instead of recording the old binary as satisfied.
+	ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdate");
+	ILibSimpleDataStore_Delete(agent->masterDb, "fakeUpdate");
+	ILibSimpleDataStore_Put(agent->masterDb, "forceUpdatePending", "1");
+	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> force/fake trigger consumed; future updates remain enabled"); }
+}
+
 void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 {
 #ifndef WIN32
@@ -5423,6 +5436,7 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 #endif
 
 	// Everything looks good, lets perform the update
+	MeshServer_MarkForceFakeUpdateConsumed(agent);
 	ILIBLOGMESSAGEX("SelfUpdate -> Stopping Chain (%d)", agent->performSelfUpdate);
 	ILibStopChain(agent->chain);
 }
@@ -6187,16 +6201,6 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						}
 						ILibWriteStringToDiskEx(updateFilePath, fsc, fsz);
 					}
-					if (agent->fakeUpdate != 0 || agent->forceUpdate != 0)
-					{
-						// C9: mark that a forced/fake update just completed; the next connect records the ACTUAL resulting
-						// binary hash as the one-shot hold (works for raw AND zip updates). Future updates stay ENABLED.
-						ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdate");
-						ILibSimpleDataStore_Delete(agent->masterDb, "fakeUpdate");
-						ILibSimpleDataStore_Put(agent->masterDb, "forceUpdatePending", "1");
-						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> force/fake trigger consumed; future updates remain enabled"); }
-					}
-
 					if (duk_peval_string(agent->meshCoreCtx, "require('zip-reader')") == 0)	// [reader]
 					{
 						duk_prepare_method_call(agent->meshCoreCtx, -1, "isZip");		// [reader][isZip][this]
