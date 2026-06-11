@@ -43,11 +43,11 @@ Here is a list of the possible keys that are currently supported by the agent. N
 | `controlChannelDebug` | If set, logs/displays control channel messages (except JSON messages). |
 | `controlChannelIdleTimeout` | Idle timeout in seconds; sends Ping/Pong to server to keep connection alive. |
 | `coreDumpEnabled` | If set, writes a dump file when the agent crashes. |
-| `disableUpdate` | If set, prevents the agent from self-updating. |
+| `disableUpdate` | If set (value not `0`/empty), prevents the agent from self-updating. |
 | `noUpdateCoreModule` | If set, prevents the agent from accepting a new meshcore from the server. |
 | `enableILibRemoteLogging` | Port number to enable web logging. Disabled if not set. |
-| `fakeUpdate` | If set, agent self-updates to the same version. Sets `disableUpdate` on completion. |
-| `forceUpdate` | If set, causes the agent to perform a self-update on next start. |
+| `fakeUpdate` | If set, agent fakes a self-update to the same version once per binary. Does not disable future updates. |
+| `forceUpdate` | If set, forces one self-update per binary on next start. No longer permanently disables updates. |
 | `ignoreProxyFile` | If set, causes the agent to ignore any proxy settings. |
 | `logUpdate` | If set, causes the agent to log self-update status. |
 | `jsDebugPort` | Specifies a JS debugger port. |

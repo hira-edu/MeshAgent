@@ -230,6 +230,8 @@ typedef struct MeshAgentHostContainer
 	int fakeUpdate;
 	int controlChannelDebug;
 	void *coreTimeout;
+	char lastFailedCoreHash[UTIL_SHA384_HASHSIZE]; // C7: last core that failed verify/execute this session (in-memory, cleared on success)
+	int lastFailedCoreHashSet;
 	int jsDebugPort;
 	int coreDumpEnabled;
 	int localConsentMask;
@@ -306,11 +308,11 @@ consoleTextMaxRate:			Sets rate limit for sendConsoleText. Default is 10 message
 controlChannelDebug:		If set, will log/display controlChannel messages (Except for JSON messages)
 controlChannelIdleTimeout:  Integer value specifying the idle timeout in seconds, to send Ping/Pong to server, to keep connection alive
 coreDumpEnabled:			If set, a dump file will be written when the agent crashes
-disableUpdate:				If set, will prevent the agent from self-updating
+disableUpdate:				If set (value not "0"/empty), will prevent the agent from self-updating
 noUpdateCoreModule:			If set, will prevent the agent from taking a new meshcore from the server
 enableILibRemoteLogging:	Integer value specifying the port number to enable Web Logging. Disabled otherwise
-fakeUpdate:					If set, when the agent self-updates, it will update to the same version. Will set disableUpdate upon completion
-forceUpdate:				If set, will cause the agent to perform a self-update on next start.
+fakeUpdate:					If set, the agent fakes a self-update to the same version once per binary (does NOT disable future updates)
+forceUpdate:				If set, forces one self-update per binary on next start (no longer permanently disables updates)
 ignoreProxyFile:			If set, will cause the agent to ignore any proxy settings
 logUpdate:					If set, will cause the agent to log self-update status
 jsDebugPort:				Specify a JS Debugger Port

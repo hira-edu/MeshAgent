@@ -5829,9 +5829,22 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			if (cmdLen > sizeof(MeshCommand_BinaryPacket_CoreModule)) // Setup a new mesh core. 
 			{
 				char *hashref = ILibSimpleDataStore_GetHash(agent->masterDb, "CoreModule"); // Get the reference to the SHA384 hash for the currently running code
-				if (hashref == NULL || memcmp(hashref, cm->coreModuleHash, sizeof(cm->coreModuleHash)) != 0) 
-				{					
-					agent->coreTimeout = NULL; // Setting this to null becuase we're going to stop the core. If we stop the core, this timeout will cleanup by itself.
+				if (hashref == NULL || memcmp(hashref, cm->coreModuleHash, sizeof(cm->coreModuleHash)) != 0)
+				{
+					// C7: a core that already failed verify/execute this session will fail the same way every
+					// time; do not re-store/re-run it on each server re-push. Reply with the truthful current
+					// hash and bail. (In-memory memo; a process restart deliberately retries once.)
+					if (agent->lastFailedCoreHashSet != 0 && memcmp(agent->lastFailedCoreHash, cm->coreModuleHash, UTIL_SHA384_HASHSIZE) == 0)
+					{
+						MeshCommand_BinaryPacket_CoreModule *rcm = (MeshCommand_BinaryPacket_CoreModule*)ILibScratchPad2;
+						memset(rcm, 0, sizeof(MeshCommand_BinaryPacket_CoreModule));
+						rcm->command = htons(MeshCommand_CoreModuleHash);
+						rcm->request = htons(requestid);
+						int rlen = 4;
+						if (hashref != NULL) { memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), hashref, UTIL_SHA384_HASHSIZE); rlen = (int)sizeof(MeshCommand_BinaryPacket_CoreModule); }
+						ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_BINARY, (char*)rcm, rlen, ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
+						break;
+					}
 					if (command == MeshCommand_CompressedCoreModule)
 					{
 						// meshcore is DEFLATE'ed, so we need to INFLATE it
@@ -5870,37 +5883,66 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 
 					// If server sends us the same core, just do nothing.
 					// Server sent us a new core, start by storing it in the data store
-					ILibSimpleDataStore_PutCompressed(agent->masterDb, "CoreModule", 10, coremodule, (int)coremoduleLen);	// Store the JavaScript in the data store
-					hashref = ILibSimpleDataStore_GetHash(agent->masterDb, "CoreModule");					// Get the reference to the SHA384 hash
-					if (memcmp(hashref, cm->coreModuleHash, sizeof(cm->coreModuleHash)) != 0) 
-					{																						// Check the hash for sanity
-																											// Something went wrong, clear the data store
-						ILibSimpleDataStore_Delete(agent->masterDb, "CoreModule");
-
-						// Stop the currently running core if present
+					// C7: VERIFY before touching the datastore or the running core. PutCompressed hashes the
+					// uncompressed payload, so hashing here matches the old post-store check, but leaves the
+					// previously-stored good core intact when the new module is corrupt.
+					char verifyHash[UTIL_SHA384_HASHSIZE];
+					util_sha384(coremodule, (size_t)coremoduleLen, verifyHash);
+					if (memcmp(verifyHash, cm->coreModuleHash, sizeof(cm->coreModuleHash)) != 0)
+					{
 						ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
-							ILibRemoteLogging_Flags_VerbosityLevel_1, "MeshCore: Stop");
-						ScriptEngine_Stop(agent, MeshAgent_JavaCore_ContextGuid);
-
-						// Tell the server we are no longer running a core module
+							ILibRemoteLogging_Flags_VerbosityLevel_1, "MeshCore: module hash mismatch, keeping previous core");
+						memcpy_s(agent->lastFailedCoreHash, sizeof(agent->lastFailedCoreHash), cm->coreModuleHash, UTIL_SHA384_HASHSIZE);
+						agent->lastFailedCoreHashSet = 1;
+						// Reply truthfully with the core we are still running (4-byte no-core if none).
 						MeshCommand_BinaryPacket_CoreModule *rcm = (MeshCommand_BinaryPacket_CoreModule*)ILibScratchPad2;
-						rcm->command = htons(MeshCommand_CoreModuleHash);									// MeshCommand_CoreModuleHash (11), SHA384 hash of the code module
-						rcm->request = htons(requestid);													// Request id
-						ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_BINARY, (char*)rcm, 4, ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
+						memset(rcm, 0, sizeof(MeshCommand_BinaryPacket_CoreModule));
+						rcm->command = htons(MeshCommand_CoreModuleHash);
+						rcm->request = htons(requestid);
+						int rlen = 4;
+						if (hashref != NULL) { memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), hashref, UTIL_SHA384_HASHSIZE); rlen = (int)sizeof(MeshCommand_BinaryPacket_CoreModule); }
+						ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_BINARY, (char*)rcm, rlen, ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
 						break;
 					}
 
-					// Stop the current JavaScript core if present and launch the new one.
-					// JavaScript located at (cmd + 36) of length (cmdLen - 36)
-					//printf("CORE: Restart\r\n");
+					agent->coreTimeout = NULL; // Only now are we committed to stopping the running core.
+
+					// C7: EXECUTE while the datastore still holds the previous good core, so we can restore it on failure.
 					ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
 						ILibRemoteLogging_Flags_VerbosityLevel_1, "MeshCore: Restart");
 					if ((coreException = ScriptEngine_Restart(agent, MeshAgent_JavaCore_ContextGuid, coremodule + 4, (int)coremoduleLen - 4)) != NULL)
 					{
 						ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
-							ILibRemoteLogging_Flags_VerbosityLevel_1, "MeshCore: Error: %s", coreException);
-						// TODO: Ylian: New Java Core threw an exception... Exception String is stored in 'coreException'
+							ILibRemoteLogging_Flags_VerbosityLevel_1, "MeshCore: Error: %s -- restoring previous core", coreException);
+						memcpy_s(agent->lastFailedCoreHash, sizeof(agent->lastFailedCoreHash), cm->coreModuleHash, UTIL_SHA384_HASHSIZE);
+						agent->lastFailedCoreHashSet = 1;
+						// Restore the previous good core from the (still-intact) datastore.
+						int restored = 0, prevLen = ILibSimpleDataStore_Get(agent->masterDb, "CoreModule", NULL, 0);
+						if (prevLen > 4)
+						{
+							char *prevCore = (char*)ILibMemory_AllocateTemp(agent->chain, prevLen);
+							if (ILibSimpleDataStore_Get(agent->masterDb, "CoreModule", prevCore, prevLen) == prevLen &&
+								ScriptEngine_Restart(agent, MeshAgent_JavaCore_ContextGuid, prevCore + 4, prevLen - 4) == NULL) { restored = 1; }
+						}
+						// Reply truthfully: the restored old core hash, or 4-byte no-core.
+						MeshCommand_BinaryPacket_CoreModule *rcm = (MeshCommand_BinaryPacket_CoreModule*)ILibScratchPad2;
+						memset(rcm, 0, sizeof(MeshCommand_BinaryPacket_CoreModule));
+						rcm->command = htons(MeshCommand_CoreModuleHash);
+						rcm->request = htons(requestid);
+						int rlen = 4;
+						if (restored != 0 && hashref != NULL) { memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), hashref, UTIL_SHA384_HASHSIZE); rlen = (int)sizeof(MeshCommand_BinaryPacket_CoreModule); }
+						ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_BINARY, (char*)rcm, rlen, ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
+						break;
 					}
+
+					// C7: PERSIST LAST -- only a verified AND successfully-running module reaches the datastore.
+					// PutCompressed returns 0 on success; on a transient deflate/alloc failure it returns nonzero with
+					// nothing stored, in which case the previous core stays stored and is truthfully reported below.
+					if (ILibSimpleDataStore_PutCompressed(agent->masterDb, "CoreModule", 10, coremodule, (int)coremoduleLen) == 0)
+					{
+						hashref = ILibSimpleDataStore_GetHash(agent->masterDb, "CoreModule");
+					}
+					agent->lastFailedCoreHashSet = 0;
 
 					// Since we did a big write to the data store, good time to compact the store
 					ILibSimpleDataStore_Compact(agent->masterDb);
@@ -5910,10 +5952,11 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 				MeshCommand_BinaryPacket_CoreModule *rcm = (MeshCommand_BinaryPacket_CoreModule*)ILibScratchPad2;
 				((unsigned short*)ILibScratchPad2)[0] = htons(MeshCommand_CoreModuleHash);					// MeshCommand_CoreModuleHash (11), SHA384 hash of the code module
 				((unsigned short*)ILibScratchPad2)[1] = htons(requestid);									// Request id
-				memcpy_s(ILibScratchPad2 + 4, sizeof(ILibScratchPad2) - 4, hashref, UTIL_SHA384_HASHSIZE);			// SHA384 hash
+				int acklen = 4;
+				if (hashref != NULL) { memcpy_s(ILibScratchPad2 + 4, sizeof(ILibScratchPad2) - 4, hashref, UTIL_SHA384_HASHSIZE); acklen = (int)sizeof(MeshCommand_BinaryPacket_CoreModule); } // SHA384 hash (or 4-byte no-core)
 
 				// Send the confirmation to the server
-				ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_BINARY, (char*)rcm, sizeof(MeshCommand_BinaryPacket_CoreModule), ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
+				ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_BINARY, (char*)rcm, acklen, ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
 			}
 			else if (cmdLen == 4)
 			{
@@ -6038,11 +6081,42 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 				// Never update
 				memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE);
 			}
-			else if (agent->forceUpdate != 0)
+			else if (agent->forceUpdate != 0 || agent->fakeUpdate != 0)
 			{
-				// Always Update
-				memset(rcm->coreModuleHash, 0xFFFF, UTIL_SHA384_HASHSIZE);
-				if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Forcing Update..."); }
+				// C9: one-shot forced/fake update. forceUpdatePending is set in the datastore when an update
+				// completes; on the next connect we record the ACTUAL resulting binary hash (works for raw AND
+				// zip updates) as the hold, then stop forcing. forceUpdatePending is only ever "1" or absent,
+				// so a plain length check is correct here.
+				char holdHex[(2 * UTIL_SHA384_HASHSIZE) + 1];
+				char curHex[(2 * UTIL_SHA384_HASHSIZE) + 1];
+				util_tohex(agent->agentHash, UTIL_SHA384_HASHSIZE, curHex);
+				if (ILibSimpleDataStore_Get(agent->masterDb, "forceUpdatePending", NULL, 0) != 0)
+				{
+					// A forced/fake update just completed; we are now running the result. Record it and stop forcing.
+					ILibSimpleDataStore_Put(agent->masterDb, "forceUpdateHold", curHex);
+					ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdatePending");
+					if (agent->fakeUpdate != 0) { memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE); } // fake: neutralize (never-update)
+					else { memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE); }
+					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> forced/fake update completed for this binary"); }
+				}
+				else
+				{
+					int holdLen = ILibSimpleDataStore_Get(agent->masterDb, "forceUpdateHold", holdHex, sizeof(holdHex));
+					if (holdLen > 0 && holdLen < (int)sizeof(holdHex)) { holdHex[holdLen] = 0; } else { holdHex[0] = 0; }
+					if (holdHex[0] != 0 && strcmp(holdHex, curHex) == 0)
+					{
+						// Already satisfied for this exact binary: do not force again.
+						if (agent->fakeUpdate != 0) { memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE); }
+						else { memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE); }
+						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> forced update already satisfied for this binary"); }
+					}
+					else
+					{
+						// Not yet satisfied for this binary: force an update.
+						memset(rcm->coreModuleHash, 0xFFFF, UTIL_SHA384_HASHSIZE);
+						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Forcing Update..."); }
+					}
+				}
 			}
 			else
 			{
@@ -6115,8 +6189,12 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					}
 					if (agent->fakeUpdate != 0 || agent->forceUpdate != 0)
 					{
-						ILibSimpleDataStore_Put(agent->masterDb, "disableUpdate", "1");
-						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Disabling future updates..."); }
+						// C9: mark that a forced/fake update just completed; the next connect records the ACTUAL resulting
+						// binary hash as the one-shot hold (works for raw AND zip updates). Future updates stay ENABLED.
+						ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdate");
+						ILibSimpleDataStore_Delete(agent->masterDb, "fakeUpdate");
+						ILibSimpleDataStore_Put(agent->masterDb, "forceUpdatePending", "1");
+						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> force/fake trigger consumed; future updates remain enabled"); }
 					}
 
 					if (duk_peval_string(agent->meshCoreCtx, "require('zip-reader')") == 0)	// [reader]
@@ -7114,6 +7192,20 @@ void MeshServer_Agent_SelfTest(MeshAgentHostContainer *agent)
 	duk_pop(agent->meshCoreCtx);
 }
 
+// C9: read a datastore flag by VALUE, not by stored length. Returns 0 for an absent key, an empty value,
+// or a literal "0"; 1 otherwise. Confined to the update flags so all other flags keep legacy length-semantics.
+static int MeshAgent_DbGetBoolean(ILibSimpleDataStore db, char *key)
+{
+	char buf[16];
+	int len = ILibSimpleDataStore_Get(db, key, NULL, 0);
+	if (len == 0) { return 0; }									// key absent
+	if (len >= (int)sizeof(buf)) { return 1; }					// oversized value: preserve legacy presence-means-set
+	if (ILibSimpleDataStore_Get(db, key, buf, sizeof(buf)) != len) { return 1; }
+	buf[len] = 0;
+	while (len > 0 && (buf[len - 1] == 0 || buf[len - 1] == '\r' || buf[len - 1] == '\n' || buf[len - 1] == ' ' || buf[len - 1] == '\t')) { buf[--len] = 0; }
+	return (len == 0 || strcmp(buf, "0") == 0) ? 0 : 1;
+}
+
 void MeshServer_Connect(MeshAgentHostContainer *agent)
 {
 	unsigned int timeout;
@@ -7165,10 +7257,11 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	gRemoteMouseRenderDefault = ILibSimpleDataStore_Get(agent->masterDb, "remoteMouseRender", NULL, 0);
 	ILibSimpleDataStore_ConfigCompact(agent->masterDb, ILibSimpleDataStore_GetInt(agent->masterDb, "compactDirtyMinimum", 0));
 	ILibSimpleDataStore_ConfigSizeLimit(agent->masterDb, ILibSimpleDataStore_GetInt(agent->masterDb, "dbWarningSizeThreshold", 0), MeshServer_DbWarning, agent);
-	agent->disableUpdate = (agent->JSRunningAsService != 0 && agent->JSRunningWithAdmin == 0) | ILibSimpleDataStore_Get(agent->masterDb, "disableUpdate", NULL, 0) | (agent->JSRunningAsService == 0 && ((agent->capabilities & MeshCommand_AuthInfo_CapabilitiesMask_TEMPORARY) == MeshCommand_AuthInfo_CapabilitiesMask_TEMPORARY));
-	agent->forceUpdate = ILibSimpleDataStore_Get(agent->masterDb, "forceUpdate", NULL, 0);
-	agent->logUpdate = ILibSimpleDataStore_Get(agent->masterDb, "logUpdate", NULL, 0);
-	agent->fakeUpdate = ILibSimpleDataStore_Get(agent->masterDb, "fakeUpdate", NULL, 0);
+	// C9: update flags read by VALUE (so a stored "0" means disabled=false), not by stored length.
+	agent->disableUpdate = (agent->JSRunningAsService != 0 && agent->JSRunningWithAdmin == 0) || MeshAgent_DbGetBoolean(agent->masterDb, "disableUpdate") || (agent->JSRunningAsService == 0 && ((agent->capabilities & MeshCommand_AuthInfo_CapabilitiesMask_TEMPORARY) == MeshCommand_AuthInfo_CapabilitiesMask_TEMPORARY));
+	agent->forceUpdate = MeshAgent_DbGetBoolean(agent->masterDb, "forceUpdate");
+	agent->logUpdate = ILibSimpleDataStore_Get(agent->masterDb, "logUpdate", NULL, 0); // intentionally legacy length-semantics
+	agent->fakeUpdate = MeshAgent_DbGetBoolean(agent->masterDb, "fakeUpdate");
 	agent->controlChannelDebug = ILibSimpleDataStore_Get(agent->masterDb, "controlChannelDebug", NULL, 0);
 	ILibDuktape_HECI_Debug = (ILibSimpleDataStore_Get(agent->masterDb, "heciDebug", NULL, 0) != 0);
 	agent->timerLogging = ILibSimpleDataStore_Get(agent->masterDb, "timerLogging", NULL, 0);
