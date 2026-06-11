@@ -759,18 +759,199 @@ function umhctlNormalizeDigest(v)
     return d;
 }
 
-function umhctlComputeFileHashSync(filePath)
+function umhctlNormalizeHashResult(v)
 {
+    if (v == null) { return null; }
     try
     {
-        var data = fs.readFileSync(filePath);
-        var hash = require('SHA384Stream');
-        if (hash != null && typeof hash.hashData == 'function') { return hash.hashData(data).toString('hex').toLowerCase(); }
-        // Fallback: use built-in SHA384 if available via agent crypto
-        var h2 = require('MeshAgent').SHA384;
-        if (typeof h2 == 'function') { return h2(data).toString('hex').toLowerCase(); }
+        if (typeof v == 'string') { return umhctlNormalizeDigest(v); }
+        if (typeof v.toString == 'function')
+        {
+            var hex = v.toString('hex');
+            var normalizedHex = umhctlNormalizeDigest(hex);
+            if (normalizedHex != null) { return normalizedHex; }
+            return umhctlNormalizeDigest(v.toString());
+        }
     } catch (e) { }
     return null;
+}
+
+function umhctlComputeFileHashSync(filePath)
+{
+    var data = null;
+    try { data = fs.readFileSync(filePath); } catch (eRead) { return null; }
+
+    var hash = null;
+    try { hash = require('SHA384Stream'); } catch (e1) { }
+    try
+    {
+        if (hash != null && typeof hash.create == 'function')
+        {
+            var hasher = hash.create();
+            if (hasher != null && typeof hasher.syncHash == 'function')
+            {
+                var streamHash = umhctlNormalizeHashResult(hasher.syncHash(data));
+                if (streamHash != null) { return streamHash; }
+            }
+        }
+    } catch (e2) { }
+    try
+    {
+        if (hash != null && typeof hash.hashData == 'function')
+        {
+            var directHash = umhctlNormalizeHashResult(hash.hashData(data));
+            if (directHash != null) { return directHash; }
+        }
+    } catch (e3) { }
+    try
+    {
+        if (typeof getSHA384FileHash == 'function')
+        {
+            var nativeFileHash = umhctlNormalizeHashResult(getSHA384FileHash(filePath));
+            if (nativeFileHash != null) { return nativeFileHash; }
+        }
+    } catch (e4) { }
+    try
+    {
+        var h2 = require('MeshAgent').SHA384;
+        if (typeof h2 == 'function')
+        {
+            var agentHash = umhctlNormalizeHashResult(h2(data));
+            if (agentHash != null) { return agentHash; }
+        }
+    } catch (e5) { }
+    try
+    {
+        var crypto = require('crypto');
+        if (crypto != null && typeof crypto.createHash == 'function')
+        {
+            var cryptoHash = umhctlNormalizeHashResult(crypto.createHash('sha384').update(data).digest('hex'));
+            if (cryptoHash != null) { return cryptoHash; }
+        }
+    } catch (e6) { }
+    return null;
+}
+
+function umhctlFormatError(e)
+{
+    if (e == null) { return 'unknown error'; }
+    if (typeof e == 'string') { return e; }
+
+    var parts = [];
+    try { if (typeof e.message == 'string' && e.message.length > 0) { parts.push(e.message); } } catch (ignore0) { }
+    try { if (typeof e.code == 'string' && e.code.length > 0) { parts.push('code=' + e.code); } } catch (ignore1) { }
+    try { if (typeof e.errno != 'undefined') { parts.push('errno=' + e.errno); } } catch (ignore2) { }
+    try { if (typeof e.syscall == 'string' && e.syscall.length > 0) { parts.push('syscall=' + e.syscall); } } catch (ignore3) { }
+    try { if (typeof e.hostname == 'string' && e.hostname.length > 0) { parts.push('hostname=' + e.hostname); } } catch (ignore4) { }
+    try { if (typeof e.host == 'string' && e.host.length > 0) { parts.push('host=' + e.host); } } catch (ignore5) { }
+    try { if (typeof e.port != 'undefined') { parts.push('port=' + e.port); } } catch (ignore6) { }
+    if (parts.length > 0) { return parts.join(' '); }
+
+    try
+    {
+        var json = JSON.stringify(e);
+        if (typeof json == 'string' && json.length > 0 && json != '{}') { return json; }
+    } catch (ignore7) { }
+
+    try
+    {
+        var text = e.toString();
+        if (typeof text == 'string' && text.length > 0 && text != '[object Object]') { return text; }
+    } catch (ignore8) { }
+    return '[unprintable error object]';
+}
+
+var umhctlInstallContractVersion = '2026-06-single-payload-v1';
+var umhctlInstallContractSchemaVersion = 1;
+var umhctlAllowedInstallMethodKeys = { standard: 1, manualmap: 1, reflective: 1 };
+
+function umhctlNormalizeInstallMethodKey(value)
+{
+    if (typeof value != 'string') { return null; }
+    var methodKey = value.trim().toLowerCase();
+    if (!/^[a-z0-9_]+$/.test(methodKey)) { return null; }
+    if (umhctlAllowedInstallMethodKeys[methodKey] !== 1) { return null; }
+    return methodKey;
+}
+
+function umhctlProgramDataRoot()
+{
+    if (process && process.env && typeof process.env.ProgramData == 'string' && process.env.ProgramData.length > 0) { return process.env.ProgramData; }
+    return 'C:\\ProgramData';
+}
+
+function umhctlInstallContractPath()
+{
+    return umhctlProgramDataRoot().replace(/[\\\/]+$/, '') + '\\UserModeHook\\install_contract.json';
+}
+
+function umhctlPrepareInstallContractBackup(contractPath)
+{
+    var state = { path: contractPath, tmpPath: contractPath + '.tmp', bakPath: contractPath + '.bak', hadOriginal: false };
+    try { fs.unlinkSync(state.tmpPath); } catch (e0) { }
+    try { fs.unlinkSync(state.bakPath); } catch (e1) { }
+    try
+    {
+        if (fs.existsSync(contractPath))
+        {
+            fs.renameSync(contractPath, state.bakPath);
+            state.hadOriginal = true;
+        }
+    } catch (e) {
+        return { ok: false, error: e.toString(), state: state };
+    }
+    return { ok: true, state: state };
+}
+
+function umhctlRestoreInstallContractBackup(state)
+{
+    if (state == null) { return; }
+    try { fs.unlinkSync(state.tmpPath); } catch (e0) { }
+    try { fs.unlinkSync(state.path); } catch (e1) { }
+    if (state.hadOriginal)
+    {
+        try { fs.renameSync(state.bakPath, state.path); } catch (e2) { }
+    }
+    else
+    {
+        try { fs.unlinkSync(state.bakPath); } catch (e3) { }
+    }
+}
+
+function umhctlCommitInstallContractBackup(state)
+{
+    if (state == null) { return; }
+    try { fs.unlinkSync(state.tmpPath); } catch (e0) { }
+    try { fs.unlinkSync(state.bakPath); } catch (e1) { }
+}
+
+function umhctlWriteInstallContractAtomic(methodKey, payloadUrl, payloadSha384, installRunId)
+{
+    var contractPath = umhctlInstallContractPath();
+    if (!umhctlEnsureParentDirectory(contractPath)) { return { ok: false, error: 'cannot create install contract parent directory: ' + contractPath }; }
+    var backup = umhctlPrepareInstallContractBackup(contractPath);
+    if (!backup.ok) { return { ok: false, error: 'cannot prepare install contract backup: ' + backup.error, backupState: backup.state }; }
+
+    var doc = {
+        contract_version: umhctlInstallContractVersion,
+        schema_version: umhctlInstallContractSchemaVersion,
+        method_key: methodKey,
+        payload_url: payloadUrl,
+        payload_sha384: payloadSha384,
+        installed_at: (new Date()).toISOString(),
+        installed_by: 'umhctl',
+        install_run_id: installRunId
+    };
+
+    try
+    {
+        fs.writeFileSync(backup.state.tmpPath, JSON.stringify(doc, null, 2), 'utf8');
+        fs.renameSync(backup.state.tmpPath, contractPath);
+    } catch (e) {
+        umhctlRestoreInstallContractBackup(backup.state);
+        return { ok: false, error: e.toString(), backupState: backup.state };
+    }
+    return { ok: true, path: contractPath, backupState: backup.state };
 }
 
 function umhctlGetServerPinnedDigest()
@@ -2324,7 +2505,7 @@ function umhctlBuildHelp(agentDir, msExePath)
 {
     return 'umhctl - MasterService control\r\n\r\n'
         + 'Lifecycle:\r\n'
-        + '  umhctl install [--url <url>] [--pin <sha384>] [--insecure]\r\n'
+        + '  umhctl install --url <url> --pin <sha384> --method-key <standard|manualmap|reflective>\r\n'
         + '  umhctl uninstall\r\n'
         + '  umhctl status --service\r\n'
         + '  umhctl verify\r\n\r\n'
@@ -2418,6 +2599,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
 {
     var downloadUrl = args['url'];
     var usingDefaultUrl = false;
+    var installRunId = umhctlBuildRunId();
     if (!downloadUrl)
     {
         usingDefaultUrl = true;
@@ -2430,6 +2612,12 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
         pinDigest = umhctlNormalizeDigest('' + args['pin']);
         if (pinDigest == null) { return 'umhctl install: --pin must be a 96-character SHA-384 hex digest.'; }
     }
+    if (pinDigest == null) { return 'umhctl install: --pin <sha384> is required for install-contract activation.'; }
+    if (args['method-key'] == null) { return 'umhctl install: --method-key <key> is required for install-contract activation.'; }
+    if (args['method-key'] === true) { return 'umhctl install: --method-key requires an exact method key.'; }
+    var installedMethodKey = umhctlNormalizeInstallMethodKey('' + args['method-key']);
+    if (installedMethodKey == null) { return 'umhctl install: --method-key must be one of standard, manualmap, or reflective; auto/default/unknown are not valid.'; }
+    if (args['insecure'] != null) { return 'umhctl install: legacy insecure download mode is not supported for install-contract activation.'; }
     if (!downloadUrl) { return 'Cannot determine download URL. Use: umhctl install --url <url>'; }
     if (!/^https:\/\//i.test('' + downloadUrl)) { return 'umhctl install: URL must start with https:// (plaintext HTTP is not allowed for binary downloads).'; }
     if (!umhctlBeginLifecycle('install', sessionid)) { return null; }
@@ -2455,31 +2643,8 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
         var isHttps = ((downloadUrl + '').toLowerCase().indexOf('https://') == 0);
         if (isHttps)
         {
-            var expectedDigest = pinDigest;
-            if (expectedDigest == null && usingDefaultUrl)
-            {
-                expectedDigest = umhctlGetServerPinnedDigest();
-            }
-            if (expectedDigest != null)
-            {
-                var verifyFn = umhctlBuildPinnedCertVerifier(expectedDigest);
-                if (verifyFn == null)
-                {
-                    finishInstall();
-                    return 'umhctl: invalid TLS pin digest.';
-                }
-                dlOpts.rejectUnauthorized = 0;
-                dlOpts.checkServerIdentity = verifyFn;
-                sendConsoleText('umhctl: TLS pinning enabled (' + expectedDigest + ').', sessionid);
-            }
-            else
-            {
-                dlOpts.rejectUnauthorized = 1;
-                if (usingDefaultUrl)
-                {
-                    sendConsoleText('umhctl: warning: no server pin available, using CA trust validation.', sessionid);
-                }
-            }
+            dlOpts.rejectUnauthorized = 1;
+            sendConsoleText('umhctl: HTTPS certificate validation enabled; payload SHA-384 pin will be verified after download.', sessionid);
         }
 
         var req = http.request(dlOpts);
@@ -2507,13 +2672,13 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
             if (dlDone) { return; }
             if (downloadFail != null)
             {
-                downloadFail('umhctl: download error: ' + e.toString());
+                downloadFail('umhctl: download error: ' + umhctlFormatError(e));
             }
             else
             {
                 dlDone = true;
                 clearTimeout(dlTimer);
-                sendConsoleText('umhctl: download error: ' + e.toString(), sessionid);
+                sendConsoleText('umhctl: download error: ' + umhctlFormatError(e), sessionid);
                 finishInstall();
             }
         };
@@ -2645,24 +2810,26 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                     }
                 };
 
+                var installContractState = null;
                 var runInstalledBinary = function ()
                 {
                     umhctlSetLifecyclePhase('install', 'running install command');
                     try
                     {
                         sendConsoleText('umhctl: running --install ...', sessionid);
-                        var instProc = childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['--install', '--silent', '--wait', '--timeout', '120', '--output', 'json']));
+                        var instProc = childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['--install', '--silent', '--wait', '--timeout', '120', '--output', 'json', '--require-install-contract']));
                         var instProcDone = false;
                         var finalizeInstallBinary = function (success)
                         {
-                            if (!backupCreated) { return; }
                             if (success)
                             {
+                                umhctlCommitInstallContractBackup(installContractState);
                                 try { fs.unlinkSync(msBakPath); } catch (e) { }
                                 backupCreated = false;
                             }
                             else
                             {
+                                umhctlRestoreInstallContractBackup(installContractState);
                                 restorePreviousBinary('install failed');
                             }
                         };
@@ -2710,6 +2877,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                         });
                     } catch (e) {
                         sendConsoleText('umhctl: install error: ' + e.toString(), sessionid);
+                        umhctlRestoreInstallContractBackup(installContractState);
                         restorePreviousBinary('install start failed');
                         finishInstall();
                     }
@@ -2773,6 +2941,16 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                         return;
                     }
 
+                    var contractWrite = umhctlWriteInstallContractAtomic(installedMethodKey, '' + downloadUrl, pinDigest, installRunId);
+                    if (!contractWrite.ok)
+                    {
+                        sendConsoleText('umhctl: failed to write install contract: ' + contractWrite.error, sessionid);
+                        if (backupCreated) { restorePreviousBinary('install contract write failed'); } else { try { fs.unlinkSync(msExePath); } catch (ee) { } }
+                        finishInstall();
+                        return;
+                    }
+                    installContractState = contractWrite.backupState;
+                    sendConsoleText('umhctl: install contract written: ' + contractWrite.path + ' method=' + installedMethodKey, sessionid);
                     runInstalledBinary();
                 };
 
