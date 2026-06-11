@@ -26,7 +26,46 @@ limitations under the License.
 // JS runtime would not try to create strong references to parent scoped objects, 
 // when the anonymous function was used as a function callback
 //
-var winSystemPaths = require('win-system-paths');
+function windows_system_paths_fallback()
+{
+    function windowsRoot()
+    {
+        var root = process.env['SystemRoot'];
+        if (root == null || root == '') { root = process.env['windir']; }
+        if (root == null || root == '') { throw new Error('SystemRoot is required for Windows system executable resolution.'); }
+        return (root.replace(/[\\\/]+$/, ''));
+    }
+    function system32Path(relativePath)
+    {
+        return (windowsRoot() + '\\System32\\' + relativePath);
+    }
+    function commandHostPath()
+    {
+        return (system32Path('cmd.exe'));
+    }
+    function powerShellPath()
+    {
+        return (system32Path('WindowsPowerShell\\v1.0\\powershell.exe'));
+    }
+    function canonicalizeConsoleTarget(target)
+    {
+        if (typeof(target) != 'string') { return (target); }
+        var leaf = target.split('\\').pop().split('/').pop().toLowerCase();
+        if (leaf == 'cmd.exe') { return (commandHostPath()); }
+        if (leaf == 'powershell.exe') { return (powerShellPath()); }
+        return (target);
+    }
+    return ({
+        windowsRoot: windowsRoot,
+        system32Path: system32Path,
+        commandHostPath: commandHostPath,
+        powerShellPath: powerShellPath,
+        canonicalizeConsoleTarget: canonicalizeConsoleTarget
+    });
+}
+
+var winSystemPaths;
+try { winSystemPaths = require('win-system-paths'); } catch (ex) { winSystemPaths = windows_system_paths_fallback(); }
 
 function empty_func()
 {
@@ -50,6 +89,21 @@ function empty_func()
 //
 function empty_func2()
 {
+}
+
+function bootstrap_module_for_child(moduleName)
+{
+    try
+    {
+        if (typeof getJSModule != 'function') { return (''); }
+        var script = getJSModule(moduleName);
+        if ((typeof script != 'string') || (script.length == 0)) { return (''); }
+        return ("try{addModule('" + moduleName + "',Buffer.from('" + Buffer.from(script).toString('base64') + "','base64').toString());}catch(x){}");
+    }
+    catch (ex)
+    {
+        return ('');
+    }
 }
 
 //
@@ -174,7 +228,7 @@ function dispatch(options)
     //
     // The child process will hide the console, and then initalize as a client to the parent process
     //
-    var str = Buffer.from("require('win-console').hide();require('win-dispatcher').connect('" + ipcInteger + "');").toString('base64');
+    var str = Buffer.from("require('win-console').hide();" + bootstrap_module_for_child('win-system-paths') + "require('win-dispatcher').connect('" + ipcInteger + "');").toString('base64');
     ret._ipc2.once('connection', ipc2_connection);
     ret._ipc.once('connection', ipc_connection);
     ret.close = dispatcher_shutdown;

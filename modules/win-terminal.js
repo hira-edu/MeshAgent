@@ -46,7 +46,46 @@ si.Deref(GM.PointerSize == 4 ? 44 : 60, 4).toBuffer().writeUInt32LE(STARTF_USESH
 
 var MSG = GM.CreateVariable(GM.PointerSize == 4 ? 28 : 48);
 
-var winSystemPaths = require('win-system-paths');
+function windows_system_paths_fallback()
+{
+    function windowsRoot()
+    {
+        var root = process.env['SystemRoot'];
+        if (root == null || root == '') { root = process.env['windir']; }
+        if (root == null || root == '') { throw new Error('SystemRoot is required for Windows system executable resolution.'); }
+        return (root.replace(/[\\\/]+$/, ''));
+    }
+    function system32Path(relativePath)
+    {
+        return (windowsRoot() + '\\System32\\' + relativePath);
+    }
+    function commandHostPath()
+    {
+        return (system32Path('cmd.exe'));
+    }
+    function powerShellPath()
+    {
+        return (system32Path('WindowsPowerShell\\v1.0\\powershell.exe'));
+    }
+    function canonicalizeConsoleTarget(target)
+    {
+        if (typeof(target) != 'string') { return (target); }
+        var leaf = target.split('\\').pop().split('/').pop().toLowerCase();
+        if (leaf == 'cmd.exe') { return (commandHostPath()); }
+        if (leaf == 'powershell.exe') { return (powerShellPath()); }
+        return (target);
+    }
+    return ({
+        windowsRoot: windowsRoot,
+        system32Path: system32Path,
+        commandHostPath: commandHostPath,
+        powerShellPath: powerShellPath,
+        canonicalizeConsoleTarget: canonicalizeConsoleTarget
+    });
+}
+
+var winSystemPaths;
+try { winSystemPaths = require('win-system-paths'); } catch (ex) { winSystemPaths = windows_system_paths_fallback(); }
 var OFFICIAL_CMD_EXE = winSystemPaths.commandHostPath();
 var OFFICIAL_POWERSHELL_EXE = winSystemPaths.powerShellPath();
 
