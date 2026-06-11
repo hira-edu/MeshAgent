@@ -5122,18 +5122,38 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 	{
 		// We just need to check for Embedded MSH file
 		int mshLen = 0;
-		fseek(tmpFile, -16, SEEK_END);
-		ignore_result(fread(ILibScratchPad, 1, 16, tmpFile));
-		if ((memcmp(ILibScratchPad, exeMeshPolicyGuid, 16) == 0) || (memcmp(ILibScratchPad, exeNullPolicyGuid, 16) == 0))
+		fseek(tmpFile, 0, SEEK_END);
+		long fileSize = ftell(tmpFile);
+		if (fileSize < 16)
 		{
-			fseek(tmpFile, -20, SEEK_CUR);
-			ignore_result(fread((void*)&mshLen, 1, 4, tmpFile));
-			mshLen = ntohl(mshLen);
-			endIndex = (unsigned int)ftell(tmpFile) - 4 - mshLen;
+			// Too small to carry a 16-byte policy GUID trailer: hash the whole file.
+			endIndex = (unsigned int)(fileSize < 0 ? 0 : fileSize);
 		}
 		else
 		{
-			endIndex = (unsigned int)ftell(tmpFile);
+			fseek(tmpFile, -16, SEEK_END);
+			ignore_result(fread(ILibScratchPad, 1, 16, tmpFile));
+			if ((memcmp(ILibScratchPad, exeMeshPolicyGuid, 16) == 0) || (memcmp(ILibScratchPad, exeNullPolicyGuid, 16) == 0))
+			{
+				fseek(tmpFile, -20, SEEK_CUR);
+				if (fread((void*)&mshLen, 1, 4, tmpFile) == 4)
+				{
+					mshLen = ntohl(mshLen);
+					// Reject a corrupt/tampered length before using it in unsigned offset arithmetic
+					// (matches the hardened guard in checkForEmbeddedMSH_ex). The MSH data must fit in
+					// front of the 4-byte length and 16-byte GUID trailer.
+					if (mshLen <= 0 || (long)mshLen > fileSize - 20) { endIndex = (unsigned int)fileSize; }
+					else { endIndex = (unsigned int)fileSize - 20 - (unsigned int)mshLen; }
+				}
+				else
+				{
+					endIndex = (unsigned int)fileSize;
+				}
+			}
+			else
+			{
+				endIndex = (unsigned int)fileSize;
+			}
 		}
 	}
 
@@ -5348,11 +5368,13 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 		else
 		{
 			ILIBLOGMESSAGEX("SelfUpdate -> FAILED to launch rundll32 lifecycle update activation (exit %lu, error %lu)", lifecycleExitCode, GetLastError());
+			util_deletefile(updatefile); // Fail closed: drop the staged payload so a failed activation does not leave it behind
 			return;
 		}
 #else
 		UNREFERENCED_PARAMETER(w_updatefile);
 		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires rundll32/svchost mode; legacy command-shell update path disabled.");
+		util_deletefile(updatefile); // Fail closed: this build cannot apply the staged update, so do not leave it on disk
 		return;
 #endif
 	}
@@ -5418,6 +5440,17 @@ duk_ret_t MeshServer_selfupdate_unzip_error(duk_context *ctx)
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, MESH_AGENT_PTR);
 	duk_push_sprintf(ctx, "SelfUpdate -> FAILED to unzip update: %s", (char*)duk_safe_to_string(ctx, 0));
 	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE(duk_safe_to_string(ctx, -1)); }
+
+	// Delete the staged payload so a corrupt update is not re-downloaded and re-unzipped on every
+	// reconnect (mirrors the cleanup the sibling failure paths already perform on the dispatch side).
+	{
+#ifdef WIN32
+		char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX);
+#else
+		char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, ".update");
+#endif
+		util_deletefile(updateFilePath);
+	}
 	return(0);
 }
 
@@ -5823,6 +5856,16 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 								ILibRemoteLogging_Flags_VerbosityLevel_1, "MeshCore: INFLATE error");
 							break;
 						}
+					}
+
+					// Reject an undersized core module before storing or running it: ScriptEngine_Restart is
+					// called with (coremodule + 4, coremoduleLen - 4), so a length < 4 would underflow to a
+					// negative buffer length (out-of-bounds read at compile time).
+					if (coremoduleLen < 4)
+					{
+						ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
+							ILibRemoteLogging_Flags_VerbosityLevel_1, "MeshCore: rejecting undersized core module (%d bytes)", (int)coremoduleLen);
+						break;
 					}
 
 					// If server sends us the same core, just do nothing.
@@ -9248,11 +9291,13 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 				if (agentHost->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Service Check... [YES]"); }
 
 				struct stat results;
-				stat(agentHost->exePath, &results); // This the mode of the current executable
-				chmod(updateFilePath, results.st_mode); // Set the new executable to the same mode as the current one.
-
-				sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "mv \"%s\" \"%s\"", updateFilePath, agentHost->exePath); // Move the update over our own executable
-				if (system(ILibScratchPad)) {}
+				if (stat(agentHost->exePath, &results) != 0) { results.st_mode = 0755; } // Fall back to a sane mode if stat fails
+				if (chmod(updateFilePath, results.st_mode) == 0) // Set the new executable to the same mode as the current one.
+				{
+					sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "mv \"%s\" \"%s\"", updateFilePath, agentHost->exePath); // Move the update over our own executable (atomic, same dir)
+					if (system(ILibScratchPad) != 0 && agentHost->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> WARNING: move failed; restarting current binary"); }
+				}
+				else if (agentHost->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> WARNING: chmod failed; keeping current binary"); }
 				switch (agentHost->platformType)
 				{
 				case MeshAgent_Posix_PlatformTypes_BSD:
@@ -9298,12 +9343,17 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 
 				// Generic update process, call our own update with arguments.
 				struct stat results;
-				stat(agentHost->exePath, &results); // This the mode of the current executable
+				if (stat(agentHost->exePath, &results) != 0) { results.st_mode = 0755; } // Fall back to a sane mode if stat fails
 				chmod(updateFilePath, results.st_mode); // Set the new executable to the same mode as the current one.
 
-				remove(agentHost->exePath);
-				sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "cp \"%s\" \"%s\"", updateFilePath, agentHost->exePath);
-				if (system(ILibScratchPad)) {}
+				// Atomically swap in the new binary. updateFilePath is a sibling of exePath, so rename() is an
+				// intra-filesystem atomic replace: on success the swap is complete; on failure the running binary
+				// is left intact and re-executed. Never remove the running binary before a replacement is in place.
+				if (rename(updateFilePath, agentHost->exePath) != 0)
+				{
+					sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "cp \"%s\" \"%s\"", updateFilePath, agentHost->exePath);
+					if (system(ILibScratchPad)) {}
+				}
 				ignore_result(write(STDOUT_FILENO, "SelfUpdate -> Restarting Agent...\n", 34));
 
 				execv(agentHost->exePath, agentHost->execparams);
