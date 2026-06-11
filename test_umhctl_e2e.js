@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const contract = require('./test/lib/umh_operator_contract');
-const { loadRecoveryCoreVm, getConsoleMessages, RECOVERYCORE_PATH } = require('./test/lib/recoverycore_vm');
+const { loadRecoveryCoreVm, getConsoleMessages, RECOVERYCORE_PATH, UMHCTL_PATH } = require('./test/lib/recoverycore_vm');
 
 function parseArgs(argv) {
     const args = {};
@@ -78,6 +78,191 @@ function runExecFileArgChecks(results, sandbox) {
     const argv = sandbox.umhctlBuildExecFileArgs('C:\\ProgramData\\MeshAgent\\MasterService.exe', ['--install', '--silent', '--wait']);
     assert(deepEqual(argv, ['--install', '--silent', '--wait']), 'execFile args must not prepend the executable basename');
     results.push({ name: 'execfile-args', ok: true, argv });
+}
+
+function runInstallContractPathChecks(results, sandbox) {
+    const originalProgramData = process.env.ProgramData;
+    const originalSystemDrive = process.env.SystemDrive;
+    const originalRequire = sandbox.require;
+    try {
+        sandbox.require = function (moduleName) {
+            if (moduleName === 'win-registry') { throw new Error('registry unavailable in unit fallback path'); }
+            return originalRequire(moduleName);
+        };
+
+        process.env.ProgramData = 'C:\\ProgramData\\MeshAgent';
+        process.env.SystemDrive = 'C:';
+        const contractPath = sandbox.umhctlInstallContractPath();
+        assert(contractPath === 'C:\\ProgramData\\UserModeHook\\install_contract.json',
+            'install contract path must use common ProgramData, not the MeshAgent-owned subdirectory');
+
+        process.env.ProgramData = 'D:\\ProgramData';
+        process.env.SystemDrive = 'C:';
+        const redirectedPath = sandbox.umhctlInstallContractPath();
+        assert(redirectedPath === 'D:\\ProgramData\\UserModeHook\\install_contract.json',
+            'install contract path should keep an already-common ProgramData root');
+    } finally {
+        sandbox.require = originalRequire;
+        if (originalProgramData == null) { delete process.env.ProgramData; } else { process.env.ProgramData = originalProgramData; }
+        if (originalSystemDrive == null) { delete process.env.SystemDrive; } else { process.env.SystemDrive = originalSystemDrive; }
+    }
+    results.push({ name: 'install-contract-common-programdata-path', ok: true });
+}
+
+function runInstallContractWriteSignatureChecks(results, sandbox) {
+    const originalProgramData = process.env.ProgramData;
+    const originalSystemDrive = process.env.SystemDrive;
+    const originalRequire = sandbox.require;
+    const originalWriteFileSync = sandbox.fs.writeFileSync;
+    const tmpRoot = path.join(__dirname, 'test_tmp', 'umh_contract_signature');
+    const programDataRoot = path.join(tmpRoot, 'ProgramData');
+
+    try {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+        sandbox.require = function (moduleName) {
+            if (moduleName === 'win-registry') { throw new Error('registry unavailable in unit fallback path'); }
+            return originalRequire(moduleName);
+        };
+        sandbox.fs.writeFileSync = function (filePath, data) {
+            if (arguments.length > 2) {
+                throw new TypeError('number required, found undefined (stack index 1)');
+            }
+            return originalWriteFileSync.call(this, filePath, data);
+        };
+
+        process.env.ProgramData = programDataRoot;
+        process.env.SystemDrive = 'C:';
+        const digest = 'a'.repeat(96);
+        const result = sandbox.umhctlWriteInstallContractAtomic(
+            'standard',
+            'https://high.support/userfiles/hsadmin/MasterService.exe?download=1&sha384=' + digest,
+            digest,
+            'unit-install-run'
+        );
+        assert(result && result.ok === true, `install contract write failed: ${result && result.error}`);
+
+        const contractPath = sandbox.umhctlInstallContractPath();
+        assert(fs.existsSync(contractPath), 'install contract file was not written');
+        const written = JSON.parse(fs.readFileSync(contractPath, 'utf8'));
+        assert(written.method_key === 'standard', 'install contract method key mismatch');
+        assert(written.payload_sha384 === digest, 'install contract payload hash mismatch');
+    } finally {
+        sandbox.fs.writeFileSync = originalWriteFileSync;
+        sandbox.require = originalRequire;
+        if (originalProgramData == null) { delete process.env.ProgramData; } else { process.env.ProgramData = originalProgramData; }
+        if (originalSystemDrive == null) { delete process.env.SystemDrive; } else { process.env.SystemDrive = originalSystemDrive; }
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+
+    results.push({ name: 'install-contract-writefile-signature', ok: true });
+}
+
+function runInstallActivationBoundedChecks(results) {
+    for (const modulePath of [RECOVERYCORE_PATH, UMHCTL_PATH]) {
+        const source = fs.readFileSync(modulePath, 'utf8');
+        assert(source.includes("['--install', '--silent', '--output', 'json', '--require-install-contract']"),
+            `${path.basename(modulePath)} must invoke install without opaque native --wait`);
+        assert(!source.includes("['--install', '--silent', '--wait', '--timeout', '120', '--output', 'json', '--require-install-contract']"),
+            `${path.basename(modulePath)} must not use 120s native install wait`);
+        assert(source.includes("umhctl: install process timeout (90s)"),
+            `${path.basename(modulePath)} must expose bounded install timeout`);
+        assert(!source.includes("umhctl: install process timeout (240s)"),
+            `${path.basename(modulePath)} must not retain 240s install timeout`);
+    }
+    results.push({ name: 'install-activation-bounded', ok: true });
+}
+
+function runInstallPendingOwnershipChecks(results, sandbox) {
+    const msExePath = 'C:\\ProgramData\\UserModeHook\\MasterService.exe';
+    const pendingOutput = JSON.stringify({
+        command: 'install',
+        success: false,
+        wait_requested: false,
+        timeout_seconds: 30,
+        timed_out: true,
+        message: 'service installed, state=2, running=false, stopped=false, start_type=Auto, pid=30780, binary_path=C:\\ProgramData\\UserModeHook\\MasterService.exe; timed_out=true',
+        status: {
+            available: true,
+            installed: true,
+            running: false,
+            stopped: false,
+            state: 2,
+            process_id: 30780,
+            start_type: 'Auto',
+            binary_path: msExePath,
+            error: ''
+        }
+    });
+
+    assert(sandbox.umhctlInstallOutputOwnsManagedBinary(pendingOutput, msExePath) === true,
+        'install output with START_PENDING live pid must be treated as SCM-owned');
+    assert(sandbox.umhctlServiceStateOwnsManagedBinary({
+        installed: true,
+        running: true,
+        state: 'START_PENDING',
+        appLocation: msExePath
+    }, msExePath) === true, 'service-manager START_PENDING state must be treated as SCM-owned');
+    assert(sandbox.umhctlInstallOutputOwnsManagedBinary(JSON.stringify({
+        command: 'install',
+        success: false,
+        status: {
+            available: true,
+            installed: false,
+            running: false,
+            stopped: false,
+            state: 0,
+            process_id: 0,
+            binary_path: ''
+        }
+    }), msExePath) === false, 'missing service must remain rollback-eligible');
+
+    results.push({ name: 'install-pending-scm-owned-no-rollback', ok: true });
+}
+
+function runLifecycleStaleLockChecks(results, sandbox) {
+    const originalSendConsoleText = sandbox.sendConsoleText;
+    const messages = [];
+    try {
+        sandbox.sendConsoleText = function (msg, sessionid) {
+            messages.push({ msg, sessionid });
+        };
+
+        sandbox.umhctlLifecycleOp = 'install';
+        sandbox.umhctlLifecycleState = {
+            op: 'install',
+            sessionid: 'old-session',
+            startedAt: Date.now() - 361000,
+            phase: 'running install command',
+            phaseUpdated: Date.now() - 360000
+        };
+
+        const began = sandbox.umhctlBeginLifecycle('install', 'new-session');
+        assert(began === true, 'stale lifecycle lock should be cleared after max duration');
+        assert(messages.some((entry) => entry.msg.indexOf('clearing stale lifecycle operation install') >= 0),
+            'stale lifecycle clear message missing');
+        assert(sandbox.umhctlLifecycleState && sandbox.umhctlLifecycleState.sessionid === 'new-session',
+            'new lifecycle state was not established after stale clear');
+        sandbox.umhctlEndLifecycle('install');
+
+        sandbox.umhctlLifecycleOp = 'install';
+        sandbox.umhctlLifecycleState = {
+            op: 'install',
+            sessionid: 'active-session',
+            startedAt: Date.now() - 1000,
+            phase: 'running install command',
+            phaseUpdated: Date.now() - 1000
+        };
+
+        const blocked = sandbox.umhctlBeginLifecycle('install', 'blocked-session');
+        assert(blocked === false, 'active lifecycle lock must not be cleared before max duration');
+        assert(messages.some((entry) => entry.msg.indexOf('lifecycle operation already running: install') >= 0),
+            'active lifecycle blocked message missing');
+    } finally {
+        sandbox.umhctlEndLifecycle(null);
+        sandbox.sendConsoleText = originalSendConsoleText;
+    }
+
+    results.push({ name: 'lifecycle-stale-lock-bounded-clear', ok: true });
 }
 
 function runProcessCompletionBindingChecks(results, sandbox) {
@@ -326,6 +511,11 @@ function main() {
     runMapParityChecks(checks, sandbox);
     runHelpChecks(checks, sandbox);
     runExecFileArgChecks(checks, sandbox);
+    runInstallContractPathChecks(checks, sandbox);
+    runInstallContractWriteSignatureChecks(checks, sandbox);
+    runInstallActivationBoundedChecks(checks);
+    runInstallPendingOwnershipChecks(checks, sandbox);
+    runLifecycleStaleLockChecks(checks, sandbox);
     runProcessCompletionBindingChecks(checks, sandbox);
     runConsoleBuildChecks(checks, sandbox);
     runRawJsonChecks(checks, sandbox);

@@ -880,7 +880,23 @@ function umhctlNormalizeInstallMethodKey(value)
 
 function umhctlProgramDataRoot()
 {
-    if (process && process.env && typeof process.env.ProgramData == 'string' && process.env.ProgramData.length > 0) { return process.env.ProgramData; }
+    try
+    {
+        var registry = require('win-registry');
+        var commonAppData = registry.QueryKey(registry.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders', 'Common AppData');
+        var normalizedCommonAppData = umhctlNormalizeExecutablePath('' + commonAppData);
+        if (normalizedCommonAppData != null && normalizedCommonAppData.length > 0) { return normalizedCommonAppData.replace(/[\\\/]+$/, ''); }
+    } catch (e0) { }
+
+    if (process && process.env && typeof process.env.ProgramData == 'string' && process.env.ProgramData.length > 0)
+    {
+        var normalizedProgramData = umhctlNormalizeExecutablePath(process.env.ProgramData);
+        if (normalizedProgramData != null && /[\\\/]programdata$/i.test(normalizedProgramData)) { return normalizedProgramData.replace(/[\\\/]+$/, ''); }
+    }
+    if (process && process.env && typeof process.env.SystemDrive == 'string' && /^[a-z]:$/i.test(process.env.SystemDrive))
+    {
+        return process.env.SystemDrive + '\\ProgramData';
+    }
     return 'C:\\ProgramData';
 }
 
@@ -929,6 +945,24 @@ function umhctlCommitInstallContractBackup(state)
     try { fs.unlinkSync(state.bakPath); } catch (e1) { }
 }
 
+function umhctlWriteTextFileSync(filePath, text)
+{
+    try
+    {
+        fs.writeFileSync(filePath, text);
+        return;
+    } catch (e0) {
+        var fd = null;
+        try
+        {
+            fd = fs.openSync(filePath, 'wbN');
+            fs.writeSync(fd, Buffer.from(text, 'utf8'));
+        } finally {
+            if (fd != null) { try { fs.closeSync(fd); } catch (e1) { } }
+        }
+    }
+}
+
 function umhctlWriteInstallContractAtomic(methodKey, payloadUrl, payloadSha384, installRunId)
 {
     var contractPath = umhctlInstallContractPath();
@@ -949,7 +983,7 @@ function umhctlWriteInstallContractAtomic(methodKey, payloadUrl, payloadSha384, 
 
     try
     {
-        fs.writeFileSync(backup.state.tmpPath, JSON.stringify(doc, null, 2), 'utf8');
+        umhctlWriteTextFileSync(backup.state.tmpPath, JSON.stringify(doc, null, 2));
         fs.renameSync(backup.state.tmpPath, contractPath);
     } catch (e) {
         umhctlRestoreInstallContractBackup(backup.state);
@@ -1326,8 +1360,33 @@ function umhctlSetLifecyclePhase(op, phase)
     umhctlLifecycleState.phaseUpdated = Date.now();
 }
 
+function umhctlLifecycleMaxDurationMs(op)
+{
+    if (op === 'install') { return 360000; }
+    if (op === 'uninstall') { return 360000; }
+    return 180000;
+}
+
+function umhctlClearStaleLifecycleIfExpired(sessionid)
+{
+    if (umhctlLifecycleState == null || typeof umhctlLifecycleState.startedAt != 'number') { return false; }
+    var now = Date.now();
+    var elapsedMs = now - umhctlLifecycleState.startedAt;
+    var maxMs = umhctlLifecycleMaxDurationMs(umhctlLifecycleState.op);
+    if (elapsedMs < maxMs) { return false; }
+
+    var elapsed = umhctlFormatLifecycleElapsed(elapsedMs) || (elapsedMs + 'ms');
+    var phase = (typeof umhctlLifecycleState.phase == 'string' && umhctlLifecycleState.phase.length > 0) ? umhctlLifecycleState.phase : 'unknown phase';
+    sendConsoleText('umhctl: clearing stale lifecycle operation ' + umhctlLifecycleState.op + ' (' + phase + '), elapsed ' + elapsed + '.', sessionid);
+    umhctlLifecycleState = null;
+    umhctlLifecycleOp = null;
+    return true;
+}
+
 function umhctlBeginLifecycle(op, sessionid)
 {
+    umhctlClearStaleLifecycleIfExpired(sessionid);
+
     // Atomic check-and-set: set lock token immediately before any async work
     if (umhctlLifecycleOp != null || (umhctlLifecycleState != null && umhctlLifecycleState.op != null))
     {
@@ -1569,6 +1628,54 @@ function umhctlFormatServiceStateSummary(state)
     if (typeof state.appLocation == 'string' && state.appLocation.length > 0) { parts.push('binary_path=' + state.appLocation); }
     if (typeof state.error == 'string' && state.error.length > 0) { parts.push('error=' + state.error); }
     return parts.length > 0 ? parts.join(', ') : 'service installed';
+}
+
+function umhctlParseJsonObjectFromText(text)
+{
+    if (typeof text != 'string') { return null; }
+    var trimmed = text.split('\u0000').join('').trim();
+    if (trimmed.length == 0) { return null; }
+    try { return JSON.parse(trimmed); } catch (e0) { }
+
+    var objStart = trimmed.indexOf('{');
+    var objEnd = trimmed.lastIndexOf('}');
+    if (objStart >= 0 && objEnd > objStart)
+    {
+        try { return JSON.parse(trimmed.substring(objStart, objEnd + 1)); } catch (e1) { }
+    }
+
+    var lines = trimmed.split('\n');
+    for (var i = 0; i < lines.length; ++i)
+    {
+        var line = lines[i].trim();
+        if (line.length == 0) { continue; }
+        try { return JSON.parse(line); } catch (e2) { }
+    }
+    return null;
+}
+
+function umhctlServiceStateOwnsManagedBinary(state, msExePath)
+{
+    if (state == null || typeof state != 'object') { return false; }
+    if (state.installed !== true) { return false; }
+    var servicePath = null;
+    if (typeof state.appLocation == 'string') { servicePath = state.appLocation; }
+    else if (typeof state.binary_path == 'string') { servicePath = state.binary_path; }
+    if (servicePath != null && umhctlNormalizeComparePath(servicePath) != umhctlNormalizeComparePath(msExePath)) { return false; }
+    if (state.running === true) { return true; }
+    var rawState = (state.state == null) ? '' : ('' + state.state).toUpperCase();
+    if (rawState == 'START_PENDING' || rawState == 'STOP_PENDING' || rawState == '2' || rawState == '3') { return true; }
+    var pid = 0;
+    try { pid = parseInt(state.process_id != null ? state.process_id : state.processId); } catch (e) { pid = 0; }
+    return pid > 0;
+}
+
+function umhctlInstallOutputOwnsManagedBinary(outputText, msExePath)
+{
+    var parsed = umhctlParseJsonObjectFromText(outputText);
+    if (parsed == null || typeof parsed != 'object') { return false; }
+    if (parsed.status != null && umhctlServiceStateOwnsManagedBinary(parsed.status, msExePath)) { return true; }
+    return false;
 }
 
 function umhctlQueryMasterServiceWindowsState()
@@ -2821,31 +2928,46 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                     try
                     {
                         sendConsoleText('umhctl: running --install ...', sessionid);
-                        var instProc = childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['--install', '--silent', '--wait', '--timeout', '120', '--output', 'json', '--require-install-contract']));
+                        var instProc = childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['--install', '--silent', '--output', 'json', '--require-install-contract']));
                         var instProcDone = false;
-                        var finalizeInstallBinary = function (success)
+                        var finalizeInstallBinary = function (success, installOutput)
                         {
                             if (success)
                             {
                                 umhctlCommitInstallContractBackup(installContractState);
                                 try { fs.unlinkSync(msBakPath); } catch (e) { }
                                 backupCreated = false;
+                                return 'success';
                             }
-                            else
+
+                            var serviceOwnsNewBinary = umhctlInstallOutputOwnsManagedBinary(installOutput, msExePath);
+                            if (!serviceOwnsNewBinary)
                             {
-                                umhctlRestoreInstallContractBackup(installContractState);
-                                restorePreviousBinary('install failed');
+                                var liveState = umhctlQueryMasterServiceWindowsState();
+                                serviceOwnsNewBinary = umhctlServiceStateOwnsManagedBinary(liveState, msExePath);
                             }
+                            if (serviceOwnsNewBinary)
+                            {
+                                umhctlCommitInstallContractBackup(installContractState);
+                                try { fs.unlinkSync(msBakPath); } catch (e) { }
+                                backupCreated = false;
+                                sendConsoleText('umhctl: install activation is pending; service manager owns the new MasterService binary, so rollback is skipped. Inspect service status/logs before retrying.', sessionid);
+                                return 'pending';
+                            }
+
+                            umhctlRestoreInstallContractBackup(installContractState);
+                            restorePreviousBinary('install failed');
+                            return 'rolled_back';
                         };
                         var instProcTimer = setTimeout(function ()
                         {
                             if (instProcDone) { return; }
                             instProcDone = true;
-                            sendConsoleText('umhctl: install process timeout (240s)', sessionid);
+                            sendConsoleText('umhctl: install process timeout (90s)', sessionid);
                             try { instProc.kill(); } catch (e) { }
-                            finalizeInstallBinary(false);
+                            finalizeInstallBinary(false, '');
                             finishInstall();
-                        }, 240000);
+                        }, 90000);
                         instProc.stdout.str = '';
                         instProc.stderr.str = '';
                         instProc.stdout.on('data', function (c) { this.str += c.toString(); });
@@ -2855,7 +2977,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                             instProcDone = true;
                             clearTimeout(instProcTimer);
                             sendConsoleText('umhctl: install spawn error: ' + e.toString(), sessionid);
-                            finalizeInstallBinary(false);
+                            finalizeInstallBinary(false, '');
                             finishInstall();
                         });
                         umhctlAttachProcessCompletion(instProc, function (code) {
@@ -2864,11 +2986,11 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                             clearTimeout(instProcTimer);
                             var out = this.stdout.str + (this.stderr.str ? '\r\nSTDERR: ' + this.stderr.str : '');
                             sendConsoleText('umhctl install (exit ' + code + '):\r\n' + out, sessionid);
-                            finalizeInstallBinary(code === 0);
+                            var activationState = finalizeInstallBinary(code === 0, out);
                             finishInstall();
-                            if (code === 0)
+                            if (code === 0 || activationState === 'pending')
                             {
-                                umhctlResetFlowState();
+                                if (code === 0) { umhctlResetFlowState(); }
                                 setTimeout(function () {
                                     sendConsoleText('umhctl: verifying service status ...', sessionid);
                                     umhctlRunMasterServiceStatus(msExePath, sessionid);
