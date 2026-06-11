@@ -3380,24 +3380,31 @@ void ILibDuktape_MeshAgent_RemoteDesktop_EndSink(ILibDuktape_DuplexStream *strea
 
 		duk_push_heapptr(ptrs->ctx, ptrs->MeshAgentObject);			// [MeshAgent]
 		duk_get_prop_string(ptrs->ctx, -1, REMOTE_DESKTOP_STREAM);	// [MeshAgent][RD]
-		if (duk_has_prop_string(ptrs->ctx, -1, REMOTE_DESKTOP_VIRTUAL_SESSION_USERNAME))
+		if (duk_is_object(ptrs->ctx, -1))
 		{
-			char *user = Duktape_GetStringPropertyValue(ptrs->ctx, -1, REMOTE_DESKTOP_VIRTUAL_SESSION_USERNAME, NULL);
-			if (user != NULL)
+			if (duk_has_prop_string(ptrs->ctx, -1, REMOTE_DESKTOP_VIRTUAL_SESSION_USERNAME))
 			{
-				Duktape_Console_LogEx(ptrs->ctx, ILibDuktape_LogType_Info1, "Need to kill virtual user session: %s", user);
-				duk_push_sprintf(ptrs->ctx, "var _tmp=require('child_process').execFile('/bin/sh', ['sh']);_tmp.stdout.on('data', function (){});_tmp.stdin.write('loginctl kill-user %s\\nexit\\n');_tmp.waitExit();", user);
-				duk_peval_noresult(ptrs->ctx);
+				char *user = Duktape_GetStringPropertyValue(ptrs->ctx, -1, REMOTE_DESKTOP_VIRTUAL_SESSION_USERNAME, NULL);
+				if (user != NULL)
+				{
+					Duktape_Console_LogEx(ptrs->ctx, ILibDuktape_LogType_Info1, "Need to kill virtual user session: %s", user);
+					duk_push_sprintf(ptrs->ctx, "var _tmp=require('child_process').execFile('/bin/sh', ['sh']);_tmp.stdout.on('data', function (){});_tmp.stdin.write('loginctl kill-user %s\\nexit\\n');_tmp.waitExit();", user);
+					duk_peval_noresult(ptrs->ctx);
+				}
+			}
+			if (duk_has_prop_string(ptrs->ctx, -1, KVM_IPC_SOCKET))
+			{
+				duk_get_prop_string(ptrs->ctx, -1, KVM_IPC_SOCKET);		// [MeshAgent][RD][IPC]
+				duk_get_prop_string(ptrs->ctx, -1, "end");				// [MeshAgent][RD][IPC][end]
+				duk_swap_top(ptrs->ctx, -2);							// [MeshAgent][RD][end][this]
+				duk_pcall_method(ptrs->ctx, 0); duk_pop(ptrs->ctx);		// [MeshAgent][RD]
+
+				duk_peval_string(ptrs->ctx, "require('MeshAgent').SendCommand({ 'action': 'msg', 'type' : 'console', 'value' : 'Closing IPC Socket' });"); duk_pop(ptrs->ctx);
 			}
 		}
-		if (duk_has_prop_string(ptrs->ctx, -1, KVM_IPC_SOCKET))
+		else
 		{
-			duk_get_prop_string(ptrs->ctx, -1, KVM_IPC_SOCKET);		// [MeshAgent][RD][IPC]
-			duk_get_prop_string(ptrs->ctx, -1, "end");				// [MeshAgent][RD][IPC][end]
-			duk_swap_top(ptrs->ctx, -2);							// [MeshAgent][RD][end][this]
-			duk_pcall_method(ptrs->ctx, 0); duk_pop(ptrs->ctx);		// [MeshAgent][RD]
-
-			duk_peval_string(ptrs->ctx, "require('MeshAgent').SendCommand({ 'action': 'msg', 'type' : 'console', 'value' : 'Closing IPC Socket' });"); duk_pop(ptrs->ctx);
+			Duktape_Console_LogEx(ptrs->ctx, ILibDuktape_LogType_Info1, "KVM Session Ending: cached remote desktop stream was already cleared");
 		}
 		duk_pop(ptrs->ctx);											// [MeshAgent]
 		
@@ -3406,13 +3413,13 @@ void ILibDuktape_MeshAgent_RemoteDesktop_EndSink(ILibDuktape_DuplexStream *strea
 #if defined(_LINKVM) && defined(_POSIX) && !defined(__APPLE__)
 		if (ptrs->kvmPipe != NULL) { ILibProcessPipe_FreePipe(ptrs->kvmPipe); }
 #endif
-		memset(ptrs, 0, sizeof(RemoteDesktop_Ptrs));
 	}
 #ifdef WIN32
 	kvm_cleanup(ptrs);
 #else
 	kvm_cleanup();
 #endif
+	if (ptrs != NULL) { memset(ptrs, 0, sizeof(RemoteDesktop_Ptrs)); }
 }
 
 void ILibDuktape_MeshAgent_RemoteDesktop_PauseSink(ILibDuktape_DuplexStream *sender, void *user)
