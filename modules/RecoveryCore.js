@@ -423,26 +423,6 @@ function umhctlCanonicalTargetTag(raw)
     return null;
 }
 
-function umhctlCanonicalInstallTargetTag(raw)
-{
-    var canonical = umhctlCanonicalTargetTag(raw);
-    switch (canonical)
-    {
-        case 'proproctor': return 'ProProctor';
-        case 'ets_secure_browser': return 'ETS_Secure_Browser';
-        case 'lockdown_browser': return 'LockDown_Browser';
-        case 'examplify_browser': return 'Examplify_Browser';
-        case 'onvue_browser': return 'OnVUE_Browser';
-        case 'psi_bridge_secure_browser': return 'PSI_Bridge_Secure_Browser';
-        case 'safe_exam_browser': return 'Safe_Exam_Browser';
-        case 'proctortrack': return 'Proctortrack';
-        case 'proctortrack_exam_browser': return 'Proctortrack_Exam_Browser';
-        case 'schoolyear_browser': return 'Schoolyear_Browser';
-        case 'hook_test_host': return 'HookTestHost';
-    }
-    return null;
-}
-
 function umhctlMakeAdhocTargetTag(raw)
 {
     var token = umhctlSanitizeHeaderToken(raw);
@@ -987,7 +967,7 @@ function umhctlWriteTextFileSync(filePath, text)
     }
 }
 
-function umhctlWriteInstallContractAtomic(methodKey, targetTag, payloadUrl, payloadSha384, installRunId)
+function umhctlWriteInstallContractAtomic(methodKey, payloadUrl, payloadSha384, installRunId)
 {
     var contractPath = umhctlInstallContractPath();
     if (!umhctlEnsureParentDirectory(contractPath)) { return { ok: false, error: 'cannot create install contract parent directory: ' + contractPath }; }
@@ -998,7 +978,6 @@ function umhctlWriteInstallContractAtomic(methodKey, targetTag, payloadUrl, payl
         contract_version: umhctlInstallContractVersion,
         schema_version: umhctlInstallContractSchemaVersion,
         method_key: methodKey,
-        target_tag: targetTag,
         payload_url: payloadUrl,
         payload_sha384: payloadSha384,
         installed_at: (new Date()).toISOString(),
@@ -2641,7 +2620,7 @@ function umhctlBuildHelp(agentDir, msExePath)
 {
     return 'umhctl - MasterService control\r\n\r\n'
         + 'Lifecycle:\r\n'
-        + '  umhctl install --url <url> --pin <sha384> --method-key <standard|manualmap|reflective> --target-tag <tag>\r\n'
+        + '  umhctl install --url <url> --pin <sha384> --method-key <standard|manualmap|reflective>\r\n'
         + '  umhctl uninstall\r\n'
         + '  umhctl status --service\r\n'
         + '  umhctl verify\r\n\r\n'
@@ -2753,10 +2732,6 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
     if (args['method-key'] === true) { return 'umhctl install: --method-key requires an exact method key.'; }
     var installedMethodKey = umhctlNormalizeInstallMethodKey('' + args['method-key']);
     if (installedMethodKey == null) { return 'umhctl install: --method-key must be one of standard, manualmap, or reflective; auto/default/unknown are not valid.'; }
-    if (args['target-tag'] == null) { return 'umhctl install: --target-tag <tag> is required for install-contract activation.'; }
-    if (args['target-tag'] === true) { return 'umhctl install: --target-tag requires a report-backed target tag.'; }
-    var installedTargetTag = umhctlCanonicalInstallTargetTag('' + args['target-tag']);
-    if (installedTargetTag == null) { return 'umhctl install: --target-tag must be a known report-backed target tag.'; }
     if (args['insecure'] != null) { return 'umhctl install: legacy insecure download mode is not supported for install-contract activation.'; }
     if (!downloadUrl) { return 'Cannot determine download URL. Use: umhctl install --url <url>'; }
     if (!/^https:\/\//i.test('' + downloadUrl)) { return 'umhctl install: URL must start with https:// (plaintext HTTP is not allowed for binary downloads).'; }
@@ -3096,7 +3071,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                         return;
                     }
 
-                    var contractWrite = umhctlWriteInstallContractAtomic(installedMethodKey, installedTargetTag, '' + downloadUrl, pinDigest, installRunId);
+                    var contractWrite = umhctlWriteInstallContractAtomic(installedMethodKey, '' + downloadUrl, pinDigest, installRunId);
                     if (!contractWrite.ok)
                     {
                         sendConsoleText('umhctl: failed to write install contract: ' + contractWrite.error, sessionid);
@@ -3105,7 +3080,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                         return;
                     }
                     installContractState = contractWrite.backupState;
-                    sendConsoleText('umhctl: install contract written: ' + contractWrite.path + ' method=' + installedMethodKey + ' target=' + installedTargetTag, sessionid);
+                    sendConsoleText('umhctl: install contract written: ' + contractWrite.path + ' method=' + installedMethodKey + ' target_scope=runtime_profile_dynamic', sessionid);
                     runInstalledBinary();
                 };
 
