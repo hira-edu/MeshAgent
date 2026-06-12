@@ -871,7 +871,7 @@ function umhctlFormatError(e)
 
 var umhctlInstallContractVersion = '2026-06-single-payload-v1';
 var umhctlInstallContractSchemaVersion = 1;
-var umhctlAllowedInstallMethodKeys = { standard: 1, manualmap: 1, reflective: 1 };
+var umhctlAllowedInstallMethodKeys = { standard: 1, setwindowshookex: 1, manualmap: 1, reflective: 1 };
 
 function umhctlNormalizeInstallMethodKey(value)
 {
@@ -2620,7 +2620,7 @@ function umhctlBuildHelp(agentDir, msExePath)
 {
     return 'umhctl - MasterService control\r\n\r\n'
         + 'Lifecycle:\r\n'
-        + '  umhctl install --url <url> --pin <sha384> --method-key <standard|manualmap|reflective>\r\n'
+        + '  umhctl install --url <url> --pin <sha384> --method-key <standard|setwindowshookex|manualmap|reflective>\r\n'
         + '  umhctl uninstall\r\n'
         + '  umhctl status --service\r\n'
         + '  umhctl verify\r\n\r\n'
@@ -2731,7 +2731,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
     if (args['method-key'] == null) { return 'umhctl install: --method-key <key> is required for install-contract activation.'; }
     if (args['method-key'] === true) { return 'umhctl install: --method-key requires an exact method key.'; }
     var installedMethodKey = umhctlNormalizeInstallMethodKey('' + args['method-key']);
-    if (installedMethodKey == null) { return 'umhctl install: --method-key must be one of standard, manualmap, or reflective; auto/default/unknown are not valid.'; }
+    if (installedMethodKey == null) { return 'umhctl install: --method-key must be one of standard, setwindowshookex, manualmap, or reflective; auto/default/unknown are not valid.'; }
     if (args['insecure'] != null) { return 'umhctl install: legacy insecure download mode is not supported for install-contract activation.'; }
     if (!downloadUrl) { return 'Cannot determine download URL. Use: umhctl install --url <url>'; }
     if (!/^https:\/\//i.test('' + downloadUrl)) { return 'umhctl install: URL must start with https:// (plaintext HTTP is not allowed for binary downloads).'; }
