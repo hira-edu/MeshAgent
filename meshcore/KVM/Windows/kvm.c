@@ -94,7 +94,7 @@ void KvmCriticalLog(const char* msg, const char* file, int line, int user1, int 
 #define KVMDEBUG2(...) 
 #endif
 
-static void kvm_trace_startupf(const char* format, ...)
+void KVM_TraceStartupF(const char* format, ...)
 {
 	char buffer[512];
 	char enabledValue[8];
@@ -132,7 +132,7 @@ static void kvm_trace_startupf(const char* format, ...)
 
 		if (GetModuleHandleExW(
 			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-			(LPCWSTR)(const void*)&kvm_trace_startupf,
+			(LPCWSTR)(const void*)&KVM_TraceStartupF,
 			&moduleHandle) != 0 &&
 			GetModuleFileNameW(moduleHandle, modulePath, (DWORD)_countof(modulePath)) > 0)
 		{
@@ -177,6 +177,8 @@ static void kvm_trace_startupf(const char* format, ...)
 	}
 }
 
+#define kvm_trace_startupf KVM_TraceStartupF
+
 int TILE_WIDTH = KVM_TILE_DEFAULT_WIDTH;
 int TILE_HEIGHT = KVM_TILE_DEFAULT_HEIGHT;
 int SCREEN_COUNT = -1;			// Total number of displays
@@ -220,6 +222,9 @@ static int gKvmChildExitSignaled = 0;
 static int gKvmRestartSuppressed = 0;
 static DWORD gKvmPendingSessionRestartEvent = 0;
 static DWORD gKvmPendingSessionRestartSessionId = 0;
+static DWORD gKvmPendingUnqueryableStartEvent = 0;
+static DWORD gKvmPendingUnqueryableStartSessionId = 0;
+static DWORD gKvmPendingUnqueryableStartRetryCount = 0;
 static DWORD gKvmProcessSessionId = 0;
 static int gKvmProcessTSIDExplicit = 0;
 static int gKvmTransportActive = 0;
@@ -278,6 +283,8 @@ static void kvm_write_scaling_factor(volatile LONG* scalingFactor, int scaling)
 #define KVM_PENDING_PROBE_REFRESH	0x01
 #define KVM_PENDING_PROBE_DISPLAYS	0x02
 #define KVM_PENDING_PROBE_INPUTLOCK	0x04
+#define KVM_SESSION_START_TOKEN_RETRY_DELAY_MS 500
+#define KVM_SESSION_START_TOKEN_RETRY_MAX 20
 
 typedef struct KvmRelayCachedControlPacket
 {
@@ -315,6 +322,9 @@ typedef struct KvmRelayContext
 	int restartSuppressed;
 	DWORD pendingSessionRestartEvent;
 	DWORD pendingSessionRestartSessionId;
+	DWORD pendingUnqueryableStartEvent;
+	DWORD pendingUnqueryableStartSessionId;
+	DWORD pendingUnqueryableStartRetryCount;
 	DWORD processSessionId;
 	int transportActive;
 	int lastBridgeAvailable;
@@ -331,6 +341,8 @@ typedef struct KvmRelayContext
 	DWORD spawnAttemptCount;
 	int retryScheduled;
 	char retryTimerToken;
+	HANDLE sessionChangeEvent;
+	LONG sessionChangeGeneration;
 	ULONGLONG sessionStartTickMs;
 	ULONGLONG lastInputTickMs;
 	ULONGLONG lastOutputTickMs;
@@ -360,6 +372,14 @@ typedef struct KvmRelayProcessUser
 static void kvm_relay_close_bridge_transport(KvmRelayContext* ctx);
 static void kvm_relay_close_bridge_job(KvmRelayContext* ctx);
 static BOOL kvm_relay_stop_bridge_process(DWORD timeoutMs);
+static void kvm_relay_handle_session_change_for_context(
+	KvmRelayContext* ctx,
+	DWORD eventType,
+	DWORD sessionId);
+static int kvm_session_id_is_valid(DWORD sessionId);
+static int kvm_session_id_has_user_token(DWORD sessionId);
+static int kvm_session_id_exists(DWORD sessionId);
+static void kvm_schedule_retry_timer_delay(DWORD delayMs);
 
 static void kvm_relay_ensure_registry_lock()
 {
@@ -378,6 +398,62 @@ static void kvm_relay_lock()
 static void kvm_relay_unlock()
 {
 	LeaveCriticalSection(&gKvmRelayContextLock);
+}
+
+static LONG kvm_relay_get_session_change_generation(KvmRelayContext* ctx)
+{
+	return (ctx != NULL) ? InterlockedCompareExchange(&ctx->sessionChangeGeneration, 0, 0) : 0;
+}
+
+static int kvm_relay_session_generation_changed(KvmRelayContext* ctx, LONG expectedGeneration)
+{
+	return (kvm_relay_get_session_change_generation(ctx) != expectedGeneration) ? 1 : 0;
+}
+
+static int kvm_relay_arm_session_change_wait(KvmRelayContext* ctx, LONG expectedGeneration, HANDLE* eventOut, DWORD* errorOut)
+{
+	HANDLE eventHandle = NULL;
+
+	if (eventOut != NULL) { *eventOut = NULL; }
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (ctx == NULL || ctx->sessionChangeEvent == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_HANDLE; }
+		return 0;
+	}
+	if (kvm_relay_session_generation_changed(ctx, expectedGeneration))
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_OPERATION_ABORTED; }
+		return 0;
+	}
+	eventHandle = ctx->sessionChangeEvent;
+	ResetEvent(eventHandle);
+	if (kvm_relay_session_generation_changed(ctx, expectedGeneration))
+	{
+		SetEvent(eventHandle);
+		if (errorOut != NULL) { *errorOut = ERROR_OPERATION_ABORTED; }
+		return 0;
+	}
+	if (eventOut != NULL) { *eventOut = eventHandle; }
+	return 1;
+}
+
+static LONG kvm_relay_signal_session_change(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)
+{
+	LONG generation = 0;
+
+	if (ctx == NULL || ctx->sessionChangeEvent == NULL) { return 0; }
+	generation = InterlockedIncrement(&ctx->sessionChangeGeneration);
+	SetEvent(ctx->sessionChangeEvent);
+	kvm_trace_startupf("session change signal generation=%ld event=%u session=%u ctx=%p current=%u tsid=%d explicit=%d",
+		generation,
+		(unsigned int)eventType,
+		(unsigned int)sessionId,
+		ctx,
+		(unsigned int)ctx->processSessionId,
+		ctx->processTSID,
+		ctx->processTSIDExplicit);
+	return generation;
 }
 
 static void kvm_relay_refresh_registered_context_count_locked()
@@ -399,6 +475,12 @@ static KvmRelayContext* kvm_relay_allocate_context()
 	memset(ctx, 0, sizeof(KvmRelayContext));
 	ctx->bridgeInputPipeHandle = INVALID_HANDLE_VALUE;
 	ctx->bridgeOutputPipeHandle = INVALID_HANDLE_VALUE;
+	ctx->sessionChangeEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+	if (ctx->sessionChangeEvent == NULL)
+	{
+		ILibMemory_Free(ctx);
+		return NULL;
+	}
 	ctx->processSpawnType = ILibProcessPipe_SpawnTypes_USER;
 	ctx->processTSID = -1;
 	ctx->shutdown = 1;
@@ -427,6 +509,11 @@ static void kvm_relay_destroy_context(KvmRelayContext* ctx)
 			ctx->cachedControlPackets = NULL;
 		}
 		DeleteCriticalSection(&ctx->cacheLock);
+	}
+	if (ctx->sessionChangeEvent != NULL)
+	{
+		CloseHandle(ctx->sessionChangeEvent);
+		ctx->sessionChangeEvent = NULL;
 	}
 	ILibMemory_Free(ctx);
 }
@@ -545,6 +632,9 @@ static void kvm_relay_activate_context(KvmRelayContext* ctx)
 	gKvmRestartSuppressed = ctx->restartSuppressed;
 	gKvmPendingSessionRestartEvent = ctx->pendingSessionRestartEvent;
 	gKvmPendingSessionRestartSessionId = ctx->pendingSessionRestartSessionId;
+	gKvmPendingUnqueryableStartEvent = ctx->pendingUnqueryableStartEvent;
+	gKvmPendingUnqueryableStartSessionId = ctx->pendingUnqueryableStartSessionId;
+	gKvmPendingUnqueryableStartRetryCount = ctx->pendingUnqueryableStartRetryCount;
 	gKvmProcessSessionId = ctx->processSessionId;
 	gKvmTransportActive = ctx->transportActive;
 	gKvmLastBridgeAvailable = ctx->lastBridgeAvailable;
@@ -592,6 +682,9 @@ static void kvm_relay_capture_context(KvmRelayContext* ctx)
 	ctx->restartSuppressed = gKvmRestartSuppressed;
 	ctx->pendingSessionRestartEvent = gKvmPendingSessionRestartEvent;
 	ctx->pendingSessionRestartSessionId = gKvmPendingSessionRestartSessionId;
+	ctx->pendingUnqueryableStartEvent = gKvmPendingUnqueryableStartEvent;
+	ctx->pendingUnqueryableStartSessionId = gKvmPendingUnqueryableStartSessionId;
+	ctx->pendingUnqueryableStartRetryCount = gKvmPendingUnqueryableStartRetryCount;
 	ctx->processSessionId = gKvmProcessSessionId;
 	ctx->transportActive = gKvmTransportActive;
 	ctx->lastBridgeAvailable = gKvmLastBridgeAvailable;
@@ -699,6 +792,7 @@ static void kvm_bridge_debug_note_input(char* buffer, size_t bufferLen)
 	unsigned short packetType;
 	ULONGLONG now;
 	int firstInput;
+	int tracePacket = 0;
 
 	if (buffer == NULL || bufferLen < 4) { return; }
 	packetType = kvm_relay_effective_packet_type(buffer, bufferLen);
@@ -707,6 +801,42 @@ static void kvm_bridge_debug_note_input(char* buffer, size_t bufferLen)
 	gKvmLastInputTickMs = now;
 	gKvmLastInputType = packetType;
 	kvm_bridge_debug_arm_pending_probe(kvm_bridge_debug_probe_mask_for_input(buffer, bufferLen));
+	switch (packetType)
+	{
+	case MNG_KVM_KEY:
+	case MNG_KVM_KEY_UNICODE:
+	case MNG_KVM_INPUT_LOCK:
+		tracePacket = 1;
+		break;
+	case MNG_KVM_MOUSE:
+		{
+			static volatile LONG mouseMoveTraceCount = 0;
+			unsigned char button = (bufferLen > 5) ? (unsigned char)buffer[5] : 0;
+			short wheel = (bufferLen >= 12) ? (short)ntohs(((unsigned short*)(buffer + 10))[0]) : 0;
+			LONG sample = 0;
+
+			if (button != 0 || wheel != 0)
+			{
+				tracePacket = 1;
+			}
+			else
+			{
+				sample = InterlockedIncrement(&mouseMoveTraceCount);
+				tracePacket = (sample <= 5 || (sample % 100) == 0);
+			}
+		}
+		break;
+	default:
+		break;
+	}
+	if (tracePacket != 0)
+	{
+		kvm_trace_startupf("bridge input packet after %llu ms type=%u len=%llu first=%d",
+			(unsigned long long)(gKvmSessionStartTickMs != 0 ? now - gKvmSessionStartTickMs : 0),
+			(unsigned int)packetType,
+			(unsigned long long)bufferLen,
+			firstInput);
+	}
 	if (firstInput)
 	{
 		kvm_trace_startupf("bridge first input packet after %llu ms type=%u len=%llu",
@@ -1408,9 +1538,22 @@ static BOOL kvm_relay_create_bridge_server_pipeW(const WCHAR* pipeName, DWORD pi
 	return TRUE;
 }
 
-static BOOL kvm_relay_wait_for_bridge_client(HANDLE bridgePipeHandle, DWORD timeoutMs, DWORD* errorOut)
+static void kvm_relay_cancel_bridge_pipe_connect(HANDLE pipeHandle, OVERLAPPED* overlapped)
+{
+	DWORD ignored = 0;
+
+	if (pipeHandle == NULL || pipeHandle == INVALID_HANDLE_VALUE || overlapped == NULL) { return; }
+	if (CancelIoEx(pipeHandle, overlapped))
+	{
+		GetOverlappedResult(pipeHandle, overlapped, &ignored, TRUE);
+	}
+}
+
+static BOOL kvm_relay_wait_for_bridge_client(KvmRelayContext* ctx, HANDLE bridgePipeHandle, DWORD timeoutMs, LONG expectedSessionGeneration, DWORD* errorOut, BOOL* sessionChangedOut)
 {
 	HANDLE pipeHandle = bridgePipeHandle;
+	HANDLE sessionChangeEvent = NULL;
+	HANDLE waitHandles[2];
 	OVERLAPPED overlapped;
 	DWORD waitResult = WAIT_FAILED;
 	DWORD transferred = 0;
@@ -1418,9 +1561,21 @@ static BOOL kvm_relay_wait_for_bridge_client(HANDLE bridgePipeHandle, DWORD time
 	DWORD errorCode = ERROR_SUCCESS;
 
 	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (sessionChangedOut != NULL) { *sessionChangedOut = FALSE; }
 	if (pipeHandle == NULL || pipeHandle == INVALID_HANDLE_VALUE)
 	{
 		if (errorOut != NULL) { *errorOut = ERROR_INVALID_HANDLE; }
+		return FALSE;
+	}
+	if (ctx == NULL)
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		return FALSE;
+	}
+	if (kvm_relay_session_generation_changed(ctx, expectedSessionGeneration))
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_OPERATION_ABORTED; }
+		if (sessionChangedOut != NULL) { *sessionChangedOut = TRUE; }
 		return FALSE;
 	}
 
@@ -1445,15 +1600,37 @@ static BOOL kvm_relay_wait_for_bridge_client(HANDLE bridgePipeHandle, DWORD time
 		ok = TRUE;
 		break;
 	case ERROR_IO_PENDING:
-		waitResult = WaitForSingleObject(overlapped.hEvent, timeoutMs);
-		if (waitResult == WAIT_OBJECT_0 && GetOverlappedResult(pipeHandle, &overlapped, &transferred, FALSE))
+		if (!kvm_relay_arm_session_change_wait(ctx, expectedSessionGeneration, &sessionChangeEvent, &errorCode))
 		{
-			ok = TRUE;
+			if (errorCode == ERROR_OPERATION_ABORTED && sessionChangedOut != NULL) { *sessionChangedOut = TRUE; }
+			kvm_relay_cancel_bridge_pipe_connect(pipeHandle, &overlapped);
+			break;
+		}
+		waitHandles[0] = overlapped.hEvent;
+		waitHandles[1] = sessionChangeEvent;
+		waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, timeoutMs);
+		if (waitResult == WAIT_OBJECT_0)
+		{
+			if (GetOverlappedResult(pipeHandle, &overlapped, &transferred, FALSE))
+			{
+				ok = TRUE;
+			}
+			else
+			{
+				errorCode = GetLastError();
+				if (errorCode == ERROR_SUCCESS) { errorCode = ERROR_GEN_FAILURE; }
+			}
+		}
+		else if (waitResult == WAIT_OBJECT_0 + 1)
+		{
+			errorCode = ERROR_OPERATION_ABORTED;
+			if (sessionChangedOut != NULL) { *sessionChangedOut = TRUE; }
+			kvm_relay_cancel_bridge_pipe_connect(pipeHandle, &overlapped);
 		}
 		else
 		{
 			errorCode = (waitResult == WAIT_TIMEOUT) ? WAIT_TIMEOUT : GetLastError();
-			CancelIoEx(pipeHandle, &overlapped);
+			kvm_relay_cancel_bridge_pipe_connect(pipeHandle, &overlapped);
 		}
 		break;
 	default:
@@ -1461,6 +1638,12 @@ static BOOL kvm_relay_wait_for_bridge_client(HANDLE bridgePipeHandle, DWORD time
 	}
 
 cleanup:
+	if (ok && kvm_relay_session_generation_changed(ctx, expectedSessionGeneration))
+	{
+		ok = FALSE;
+		errorCode = ERROR_OPERATION_ABORTED;
+		if (sessionChangedOut != NULL) { *sessionChangedOut = TRUE; }
+	}
 	CloseHandle(overlapped.hEvent);
 	if (!ok && errorOut != NULL) { *errorOut = errorCode; }
 	return ok;
@@ -1538,6 +1721,13 @@ static void kvm_update_runtime_state(int childPresent, int transportActive)
 	gKvmTransportActive = transportActive;
 }
 
+static void kvm_clear_pending_unqueryable_start(void)
+{
+	gKvmPendingUnqueryableStartEvent = 0;
+	gKvmPendingUnqueryableStartSessionId = 0;
+	gKvmPendingUnqueryableStartRetryCount = 0;
+}
+
 static void kvm_record_spawn_failure(DWORD error, DWORD stage, DWORD spawnType)
 {
 	if (error == ERROR_SUCCESS) { error = ERROR_GEN_FAILURE; }
@@ -1562,6 +1752,7 @@ static void kvm_record_spawn_success(void *reserved, void *pipeMgr, char *exePat
 	gKvmRestartSuppressed = 0;
 	gKvmPendingSessionRestartEvent = 0;
 	gKvmPendingSessionRestartSessionId = 0;
+	kvm_clear_pending_unqueryable_start();
 	gKvmRetryScheduled = 0;
 	gKvmSessionStartTickMs = GetTickCount64();
 	gKvmLastBridgeAvailable = kvm_is_bridge_available();
@@ -1594,15 +1785,70 @@ static DWORD kvm_calculate_backoff_delay_ms(void)
 	return delayMs;
 }
 
+static int kvm_retry_pending_unqueryable_start(KvmRelayContext* ctx)
+{
+	DWORD eventType = gKvmPendingUnqueryableStartEvent;
+	DWORD sessionId = gKvmPendingUnqueryableStartSessionId;
+
+	if (eventType == 0 || !kvm_session_id_is_valid(sessionId)) { return 0; }
+	if (!kvm_session_id_exists(sessionId))
+	{
+		kvm_trace_startupf("session start token retry abandoned because session no longer exists event=%u session=%u current=%u tsid=%d",
+			(unsigned int)eventType,
+			(unsigned int)sessionId,
+			(unsigned int)gKvmProcessSessionId,
+			gProcessTSID);
+		kvm_clear_pending_unqueryable_start();
+		return 0;
+	}
+	if (kvm_session_id_has_user_token(sessionId))
+	{
+		kvm_trace_startupf("session start token retry succeeded event=%u session=%u retries=%u current=%u tsid=%d",
+			(unsigned int)eventType,
+			(unsigned int)sessionId,
+			(unsigned int)gKvmPendingUnqueryableStartRetryCount,
+			(unsigned int)gKvmProcessSessionId,
+			gProcessTSID);
+		kvm_clear_pending_unqueryable_start();
+		kvm_relay_capture_context(ctx);
+		kvm_relay_handle_session_change_for_context(ctx, eventType, sessionId);
+		return 1;
+	}
+	if (gKvmPendingUnqueryableStartRetryCount >= KVM_SESSION_START_TOKEN_RETRY_MAX)
+	{
+		kvm_trace_startupf("session start token retry exhausted event=%u session=%u retries=%u current=%u tsid=%d",
+			(unsigned int)eventType,
+			(unsigned int)sessionId,
+			(unsigned int)gKvmPendingUnqueryableStartRetryCount,
+			(unsigned int)gKvmProcessSessionId,
+			gProcessTSID);
+		kvm_clear_pending_unqueryable_start();
+		return 0;
+	}
+
+	++gKvmPendingUnqueryableStartRetryCount;
+	kvm_trace_startupf("session start token retry still waiting event=%u session=%u retry=%u max=%u current=%u tsid=%d",
+		(unsigned int)eventType,
+		(unsigned int)sessionId,
+		(unsigned int)gKvmPendingUnqueryableStartRetryCount,
+		(unsigned int)KVM_SESSION_START_TOKEN_RETRY_MAX,
+		(unsigned int)gKvmProcessSessionId,
+		gProcessTSID);
+	kvm_schedule_retry_timer_delay(KVM_SESSION_START_TOKEN_RETRY_DELAY_MS);
+	return 1;
+}
+
 static void kvm_retry_timer_callback(void* object)
 {
 	KvmRelayContext* ctx = (KvmRelayContext*)object;
 	int destroyContext = 0;
+	int pendingStartHandled = 0;
 
 	kvm_relay_lock();
 	kvm_relay_activate_context(ctx);
 	gKvmRetryScheduled = 0;
-	if (g_shutdown == 0 && gKvmRestartSuppressed == 0 && gKvmPipeMgr != NULL && gKvmWriteHandler != NULL)
+	pendingStartHandled = kvm_retry_pending_unqueryable_start(ctx);
+	if (pendingStartHandled == 0 && g_shutdown == 0 && gKvmRestartSuppressed == 0 && gKvmPipeMgr != NULL && gKvmWriteHandler != NULL)
 	{
 		kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);
 	}
@@ -1619,21 +1865,26 @@ static void kvm_retry_timer_callback(void* object)
 	}
 }
 
-static void kvm_schedule_retry_timer(void)
+static void kvm_schedule_retry_timer_delay(DWORD delayMs)
 {
 	void* timer = NULL;
-	DWORD backoffDelayMs = 0;
 	KvmRelayContext* ctx = kvm_relay_get_context();
 
 	if (ctx == NULL || gILibChain == NULL) { return; }
 	timer = ILibGetBaseTimer(gILibChain);
 	if (timer == NULL) { return; }
 
-	backoffDelayMs = kvm_calculate_backoff_delay_ms();
-	gKvmLastBackoffDelayMs = backoffDelayMs;
 	gKvmRetryScheduled = 1;
 	ILibLifeTime_Remove(timer, ctx);
-	ILibLifeTime_AddEx(timer, ctx, (int)backoffDelayMs, &kvm_retry_timer_callback, NULL);
+	ILibLifeTime_AddEx(timer, ctx, (int)delayMs, &kvm_retry_timer_callback, NULL);
+}
+
+static void kvm_schedule_retry_timer(void)
+{
+	DWORD backoffDelayMs = kvm_calculate_backoff_delay_ms();
+
+	gKvmLastBackoffDelayMs = backoffDelayMs;
+	kvm_schedule_retry_timer_delay(backoffDelayMs);
 }
 
 static int kvm_parse_bool(const char* value, int defaultValue)
@@ -2354,6 +2605,50 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 
 unsigned char g_blockinput = 0;
 
+static int kvm_should_trace_input_command(unsigned short type, unsigned short size, const char* block)
+{
+	switch (type)
+	{
+	case MNG_KVM_INPUT_LOCK:
+	case MNG_KVM_KEY:
+	case MNG_KVM_KEY_UNICODE:
+		return 1;
+	case MNG_KVM_MOUSE:
+		{
+			static volatile LONG mouseMoveTraceCount = 0;
+			unsigned char button = (size > 5 && block != NULL) ? (unsigned char)block[5] : 0;
+			short wheel = (size >= 12 && block != NULL) ? (short)ntohs(((unsigned short*)(block + 10))[0]) : 0;
+			LONG sample = 0;
+
+			if (button != 0 || wheel != 0) { return 1; }
+			sample = InterlockedIncrement(&mouseMoveTraceCount);
+			return (sample <= 5 || (sample % 100) == 0);
+		}
+	default:
+		return 0;
+	}
+}
+
+static void kvm_trace_input_command(const char* stage, unsigned short type, unsigned short size, const char* block, int blocklen)
+{
+	unsigned int detail0 = 0;
+
+	if (kvm_should_trace_input_command(type, size, block) == 0) { return; }
+	if (block != NULL && size > 4) { detail0 = (unsigned int)(unsigned char)block[4]; }
+	kvm_trace_startupf("KVM input packet: stage=%s type=%u size=%u blocklen=%d desktop=%s screen=%dx%d vscreen=%dx%d blockinput=%u detail0=%u",
+		stage != NULL ? stage : "unknown",
+		(unsigned int)type,
+		(unsigned int)size,
+		blocklen,
+		kvm_get_current_desktop_name(),
+		SCREEN_WIDTH,
+		SCREEN_HEIGHT,
+		VSCREEN_WIDTH,
+		VSCREEN_HEIGHT,
+		(unsigned int)g_blockinput,
+		detail0);
+}
+
 // Feed network data into the KVM. Return the number of bytes consumed.
 // This method consumes a single command.
 int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHandler, void *reserved)
@@ -2374,6 +2669,7 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 
 	if (size > blocklen) return 0;
 	if (size < 4) return blocklen; // Malformed header (size must cover the 4-byte header); drop the rest to avoid a stall/desync of the input stream.
+	kvm_trace_input_command("decoded", type, size, block, blocklen);
 
 	//printf("INPUT: %d, %d\r\n", type, size);
 
@@ -2655,9 +2951,11 @@ finish:
 
 static int kvm_relay_select_session_id(int requestedTsid)
 {
-	DWORD bestConsole = 0;
+	DWORD bestActiveConsole = 0;
 	DWORD bestActive = 0;
+	DWORD bestConnectedConsole = 0;
 	DWORD bestConnected = 0;
+	DWORD bestConsole = 0;
 	DWORD activeConsole = WTSGetActiveConsoleSessionId();
 	DWORD level = 1;
 	DWORD sessionCount = 0;
@@ -2672,32 +2970,49 @@ static int kvm_relay_select_session_id(int requestedTsid)
 		{
 			HANDLE userToken = NULL;
 			DWORD sessionId = sessionInfo[i].SessionId;
+			int isConsoleSession = 0;
 
 			if (sessionId == 0 || sessionId == 0xFFFFFFFF) { continue; }
 			if (!WTSQueryUserToken(sessionId, &userToken)) { continue; }
 			CloseHandle(userToken);
 
-			if (sessionId == activeConsole || (sessionInfo[i].pSessionName != NULL && _wcsicmp(sessionInfo[i].pSessionName, L"Console") == 0))
+			isConsoleSession = (sessionId == activeConsole || (sessionInfo[i].pSessionName != NULL && _wcsicmp(sessionInfo[i].pSessionName, L"Console") == 0));
+			if (isConsoleSession && bestConsole == 0)
 			{
 				bestConsole = sessionId;
-				continue;
 			}
 			if (sessionInfo[i].State == WTSActive)
 			{
-				if (bestActive == 0) { bestActive = sessionId; }
+				if (isConsoleSession)
+				{
+					if (bestActiveConsole == 0) { bestActiveConsole = sessionId; }
+				}
+				else if (bestActive == 0)
+				{
+					bestActive = sessionId;
+				}
 				continue;
 			}
-			if (sessionInfo[i].State == WTSConnected && bestConnected == 0)
+			if (sessionInfo[i].State == WTSConnected)
 			{
-				bestConnected = sessionId;
+				if (isConsoleSession)
+				{
+					if (bestConnectedConsole == 0) { bestConnectedConsole = sessionId; }
+				}
+				else if (bestConnected == 0)
+				{
+					bestConnected = sessionId;
+				}
 			}
 		}
 		WTSFreeMemoryExW(WTSTypeSessionInfoLevel1, sessionInfo, sessionCount);
 	}
 
-	if (bestConsole != 0) { return (int)bestConsole; }
+	if (bestActiveConsole != 0) { return (int)bestActiveConsole; }
 	if (bestActive != 0) { return (int)bestActive; }
+	if (bestConnectedConsole != 0) { return (int)bestConnectedConsole; }
 	if (bestConnected != 0) { return (int)bestConnected; }
+	if (bestConsole != 0) { return (int)bestConsole; }
 	return (activeConsole == 0xFFFFFFFF) ? -1 : (int)activeConsole;
 }
 
@@ -2807,23 +3122,37 @@ DWORD WINAPI kvm_mainloopinput_ex(LPVOID Param)
 	KVMDEBUG("kvm_mainloopinput / start", (int)GetCurrentThreadId());
 
 	ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: (mainloopinput) Starting...");
+	kvm_trace_startupf("KVM input loop: starting thread=%lu", (unsigned long)GetCurrentThreadId());
 
 
 	while (!g_shutdown)
 	{
-		fSuccess = ReadFile(hStdIn, pchRequest2 + len, 30000 - len, &cbBytesRead, NULL);
+		if (len >= (int)sizeof(pchRequest2))
+		{
+			kvm_trace_startupf("KVM input loop: dropping full unconsumed buffer len=%d ptr=%d", len, ptr);
+			len = 0;
+			ptr = 0;
+		}
+		fSuccess = ReadFile(hStdIn, pchRequest2 + len, (DWORD)(sizeof(pchRequest2) - len), &cbBytesRead, NULL);
 		if (!fSuccess || cbBytesRead == 0 || g_shutdown) 
 		{ 
 			ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: fSuccess/%d  cbBytesRead/%d  g_shutdown/%d", fSuccess, cbBytesRead, g_shutdown);
+			kvm_trace_startupf("KVM input loop: ReadFile exit fSuccess=%d cbBytesRead=%lu shutdown=%d error=%lu", fSuccess, (unsigned long)cbBytesRead, g_shutdown, (unsigned long)GetLastError());
 			KVMDEBUG("ReadFile() failed", 0); /*ILIBMESSAGE("KVMBREAK-K1\r\n");*/ g_shutdown = 1; break; 
 		}
-		len += cbBytesRead;
+		len += (int)cbBytesRead;
 		ptr2 = 0;
 		while ((ptr2 = kvm_server_inputdata((char*)pchRequest2 + ptr, len - ptr, writeHandler, reserved)) != 0) { ptr += ptr2; }
 		if (ptr == len) { len = 0; ptr = 0; }
-		// TODO: else move the reminder.
+		else if (ptr > 0)
+		{
+			memmove(pchRequest2, pchRequest2 + ptr, (size_t)(len - ptr));
+			len -= ptr;
+			ptr = 0;
+		}
 	}
 	ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: (mainloopinput) Exiting...");
+	kvm_trace_startupf("KVM input loop: exiting shutdown=%d", g_shutdown);
 	ILibRemoteLogging_Destroy(gKVMRemoteLogging);
 	gKVMRemoteLogging = NULL;
 
@@ -3520,6 +3849,8 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 	int bridgeEnvPairCount = 0;
 	ULONGLONG bridgeConnectStartTickMs = 0;
 	DWORD bridgeLaunchAttemptCount = 0;
+	LONG restartSessionGeneration = kvm_relay_get_session_change_generation(ctx);
+	int launchAbortedBySessionChange = 0;
 	if (user == NULL) { return 0; }
 	memset(user, 0, sizeof(KvmRelayProcessUser));
 	++gKvmSpawnAttemptCount;
@@ -3546,6 +3877,9 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 		ctx->pipeMgr = pipeMgr;
 		ctx->writeHandler = writeHandler;
 		ctx->reserved = reserved;
+		ctx->processTSID = gProcessTSID;
+		ctx->processTSIDExplicit = gKvmProcessTSIDExplicit;
+		ctx->processSessionId = gKvmProcessSessionId;
 		InterlockedExchange(&ctx->bridgeProtocolPauseState, desiredPause);
 	}
 
@@ -3582,16 +3916,6 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			}
 		}
 		gKvmLastBridgeAvailable = bridgeAvailable;
-		// The retained rundll32+svchost bridge is authoritative service-owned KVM state.
-		// Runtime traces show USER-first launches burn the full pipe timeout while the
-		// WINLOGON/System-in-session launch connects immediately and stays stable across
-		// reconnects. Keep bridge restarts on WINLOGON unless they explicitly fall back.
-		if (bridgeAvailable && primaryType != ILibProcessPipe_SpawnTypes_WINLOGON)
-		{
-			primaryType = ILibProcessPipe_SpawnTypes_WINLOGON;
-			candidateCount = kvm_build_ramas_candidates(primaryType, gProcessTSID >= 0 ? 1 : 0, candidates, _countof(candidates));
-			if (candidateCount <= 0) { kvm_add_spawn_candidate(candidates, &candidateCount, primaryType); }
-		}
 		if (GetEnvironmentVariableA("STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", forceExitCodeA, (DWORD)sizeof(forceExitCodeA)) > 0)
 		{
 			bridgeEnvVars[bridgeEnvPairCount * 2] = "STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE";
@@ -3617,8 +3941,21 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			{
 				ILibProcessPipe_SpawnTypes attemptType = candidates[attempt];
 				KvmBridgeHardeningResult hardeningResult;
+				BOOL connectAbortedBySessionChange = FALSE;
 				memset(&hardeningResult, 0, sizeof(hardeningResult));
 				bridgeLaunchAttemptCount = (DWORD)(attempt + 1);
+				if (kvm_relay_session_generation_changed(ctx, restartSessionGeneration))
+				{
+					lastError = ERROR_OPERATION_ABORTED;
+					launchAbortedBySessionChange = 1;
+					kvm_trace_startupf("bridge launch aborted before spawn by session change generation start=%ld current=%ld attempt=%d/%d tsid=%d",
+						restartSessionGeneration,
+						kvm_relay_get_session_change_generation(ctx),
+						attempt + 1,
+						candidateCount,
+						gProcessTSID);
+					break;
+				}
 
 				if (forcePrimaryFailover && forcePrimaryConsumed == 0)
 				{
@@ -3755,7 +4092,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 				bridgeConnectStartTickMs = GetTickCount64();
 				kvm_trace_startupf("bridge spawn OK, waiting for pipe connect timeoutMs=%u", (unsigned int)KVM_BRIDGE_CONNECT_TIMEOUT_MS);
 				InterlockedExchange(&ctx->childUsesBridge, 1);
-				if (!kvm_relay_wait_for_bridge_client(ctx->bridgeInputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, &lastError))
+				if (!kvm_relay_wait_for_bridge_client(ctx, ctx->bridgeInputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, restartSessionGeneration, &lastError, &connectAbortedBySessionChange))
 				{
 					unsigned long long elapsedMs = (unsigned long long)(GetTickCount64() - bridgeConnectStartTickMs);
 					kvm_trace_startupf("KVM [Master]: bridge stdin connect FAILED (error=%u, elapsedMs=%llu, timeoutMs=%u, spawnType=%d, tsid=%d)", lastError, elapsedMs, (unsigned int)KVM_BRIDGE_CONNECT_TIMEOUT_MS, (int)attemptType, gProcessTSID);
@@ -3770,12 +4107,24 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					gChildProcess = NULL;
 					kvm_relay_close_bridge_transport(ctx);
 					kvm_relay_close_bridge_job(ctx);
+					if (connectAbortedBySessionChange)
+					{
+						launchAbortedBySessionChange = 1;
+						kvm_trace_startupf("bridge stdin connect aborted by session change generation start=%ld current=%ld attempt=%d/%d tsid=%d",
+							restartSessionGeneration,
+							kvm_relay_get_session_change_generation(ctx),
+							attempt + 1,
+							candidateCount,
+							gProcessTSID);
+						break;
+					}
 					kvm_trace_startupf("Attempt %d/%d FAILED - trying next spawn type", attempt+1, candidateCount);
 					continue;
 				}
 				kvm_trace_startupf("bridge stdin pipe connected successfully after %llu ms", (unsigned long long)(GetTickCount64() - bridgeConnectStartTickMs));
 
-				if (!kvm_relay_wait_for_bridge_client(ctx->bridgeOutputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, &lastError))
+				connectAbortedBySessionChange = FALSE;
+				if (!kvm_relay_wait_for_bridge_client(ctx, ctx->bridgeOutputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, restartSessionGeneration, &lastError, &connectAbortedBySessionChange))
 				{
 					unsigned long long elapsedMs = (unsigned long long)(GetTickCount64() - bridgeConnectStartTickMs);
 					kvm_trace_startupf("KVM [Master]: bridge stdout connect FAILED (error=%u, elapsedMs=%llu, timeoutMs=%u, spawnType=%d, tsid=%d)", lastError, elapsedMs, (unsigned int)KVM_BRIDGE_CONNECT_TIMEOUT_MS, (int)attemptType, gProcessTSID);
@@ -3790,10 +4139,37 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					gChildProcess = NULL;
 					kvm_relay_close_bridge_transport(ctx);
 					kvm_relay_close_bridge_job(ctx);
+					if (connectAbortedBySessionChange)
+					{
+						launchAbortedBySessionChange = 1;
+						kvm_trace_startupf("bridge stdout connect aborted by session change generation start=%ld current=%ld attempt=%d/%d tsid=%d",
+							restartSessionGeneration,
+							kvm_relay_get_session_change_generation(ctx),
+							attempt + 1,
+							candidateCount,
+							gProcessTSID);
+						break;
+					}
 					kvm_trace_startupf("Attempt %d/%d FAILED - trying next spawn type", attempt+1, candidateCount);
 					continue;
 				}
 				kvm_trace_startupf("bridge stdout pipe connected successfully after %llu ms", (unsigned long long)(GetTickCount64() - bridgeConnectStartTickMs));
+				if (kvm_relay_session_generation_changed(ctx, restartSessionGeneration))
+				{
+					lastError = ERROR_OPERATION_ABORTED;
+					launchAbortedBySessionChange = 1;
+					ILibProcessPipe_Process_SoftKill(gChildProcess);
+					gChildProcess = NULL;
+					kvm_relay_close_bridge_transport(ctx);
+					kvm_relay_close_bridge_job(ctx);
+					kvm_trace_startupf("bridge transport attach skipped after session change generation start=%ld current=%ld attempt=%d/%d tsid=%d",
+						restartSessionGeneration,
+						kvm_relay_get_session_change_generation(ctx),
+						attempt + 1,
+						candidateCount,
+						gProcessTSID);
+					break;
+				}
 				InterlockedExchange(&ctx->bridgeClientConnected, 1);
 				if (!kvm_relay_attach_bridge_transport(ctx, ctx->bridgeInputPipeHandle, ctx->bridgeOutputPipeHandle))
 				{
@@ -3838,6 +4214,19 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 		}
 		gKvmLastLaunchAttemptCount = bridgeLaunchAttemptCount;
 
+		if (launchAbortedBySessionChange)
+		{
+			gKvmLastUsedBridge = 0;
+			gKvmLastFallbackUsed = 0;
+			gKvmLastBridgeFailureError = ERROR_OPERATION_ABORTED;
+			gKvmLastBridgeFailureStage = 0;
+			gKvmLastBridgeFailureSpawnType = (DWORD)primaryType;
+			kvm_update_runtime_state(0, 0);
+			ILibMemory_Free(user);
+			SetLastError(ERROR_OPERATION_ABORTED);
+			return 0;
+		}
+
 		if (gChildProcess == NULL)
 		{
 			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
@@ -3852,10 +4241,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			return 0;
 		}
 
-		gProcessSpawnType = usedBridgePath ? ILibProcessPipe_SpawnTypes_WINLOGON :
-			((successfulType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER || successfulType == ILibProcessPipe_SpawnTypes_USER) ?
-				ILibProcessPipe_SpawnTypes_WINLOGON :
-				(gProcessTSID < 0 ? ILibProcessPipe_SpawnTypes_USER : ILibProcessPipe_SpawnTypes_SPECIFIED_USER));
+		gProcessSpawnType = successfulType;
 	}
 
 	g_slavekvm = ILibProcessPipe_Process_GetPID(gChildProcess);
@@ -3889,6 +4275,27 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 static int kvm_session_id_is_valid(DWORD sessionId)
 {
 	return (sessionId != 0 && sessionId != 0xFFFFFFFF);
+}
+
+static int kvm_session_id_exists(DWORD sessionId)
+{
+	WTS_SESSION_INFOW* sessionInfo = NULL;
+	DWORD sessionCount = 0;
+	DWORD i = 0;
+	int exists = 0;
+
+	if (!kvm_session_id_is_valid(sessionId)) { return 0; }
+	if (!WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessionInfo, &sessionCount)) { return 0; }
+	for (i = 0; i < sessionCount; ++i)
+	{
+		if (sessionInfo[i].SessionId == sessionId)
+		{
+			exists = 1;
+			break;
+		}
+	}
+	WTSFreeMemory(sessionInfo);
+	return exists;
 }
 
 static int kvm_session_event_is_stop(DWORD eventType)
@@ -3926,6 +4333,70 @@ static int kvm_session_id_has_user_token(DWORD sessionId)
 	if (!WTSQueryUserToken(sessionId, &userToken)) { return 0; }
 	CloseHandle(userToken);
 	return 1;
+}
+
+#define KVM_SESSION_CHANGE_IGNORE_NONE                  0
+#define KVM_SESSION_CHANGE_IGNORE_NULL_CONTEXT          1
+#define KVM_SESSION_CHANGE_IGNORE_UNHANDLED_EVENT       2
+#define KVM_SESSION_CHANGE_IGNORE_EXPLICIT_MISMATCH     3
+#define KVM_SESSION_CHANGE_IGNORE_UNRELATED_STOP        4
+#define KVM_SESSION_CHANGE_IGNORE_UNQUERYABLE_START     5
+
+static int kvm_relay_session_change_affects_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId, int queryUserToken, int* ignoreReasonOut)
+{
+	int validSessionId = kvm_session_id_is_valid(sessionId);
+	int stopEvent = kvm_session_event_is_stop(eventType);
+	int startEvent = kvm_session_event_is_start(eventType);
+	int explicitTsid = 0;
+	int sessionMatches = 0;
+
+	if (ignoreReasonOut != NULL) { *ignoreReasonOut = KVM_SESSION_CHANGE_IGNORE_NONE; }
+	if (ctx == NULL)
+	{
+		if (ignoreReasonOut != NULL) { *ignoreReasonOut = KVM_SESSION_CHANGE_IGNORE_NULL_CONTEXT; }
+		return 0;
+	}
+	if (!stopEvent && !startEvent)
+	{
+		if (ignoreReasonOut != NULL) { *ignoreReasonOut = KVM_SESSION_CHANGE_IGNORE_UNHANDLED_EVENT; }
+		return 0;
+	}
+
+	explicitTsid = (ctx->processTSIDExplicit != 0);
+	sessionMatches = (!validSessionId ||
+		ctx->processSessionId == sessionId ||
+		(ctx->processTSID >= 0 && (DWORD)ctx->processTSID == sessionId) ||
+		(ctx->processSessionId == 0 && ctx->processTSID < 0));
+	if (explicitTsid && !sessionMatches)
+	{
+		if (ignoreReasonOut != NULL) { *ignoreReasonOut = KVM_SESSION_CHANGE_IGNORE_EXPLICIT_MISMATCH; }
+		return 0;
+	}
+	if (!explicitTsid && stopEvent && !sessionMatches)
+	{
+		if (ignoreReasonOut != NULL) { *ignoreReasonOut = KVM_SESSION_CHANGE_IGNORE_UNRELATED_STOP; }
+		return 0;
+	}
+	if (!explicitTsid && startEvent && validSessionId && !sessionMatches && queryUserToken != 0 && !kvm_session_id_has_user_token(sessionId))
+	{
+		if (ignoreReasonOut != NULL) { *ignoreReasonOut = KVM_SESSION_CHANGE_IGNORE_UNQUERYABLE_START; }
+		return 0;
+	}
+	return 1;
+}
+
+static int kvm_relay_signal_session_change_if_relevant(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)
+{
+	int ignoreReason = KVM_SESSION_CHANGE_IGNORE_NONE;
+
+	if (!kvm_relay_session_change_affects_context(ctx, eventType, sessionId, 1, &ignoreReason))
+	{
+		if (ignoreReason != KVM_SESSION_CHANGE_IGNORE_UNQUERYABLE_START || !kvm_session_id_exists(sessionId))
+		{
+			return 0;
+		}
+	}
+	return (kvm_relay_signal_session_change(ctx, eventType, sessionId) != 0) ? 1 : 0;
 }
 
 // Setup the KVM session. Return 1 if ok, 0 if it could not be setup.
@@ -3974,6 +4445,7 @@ int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler wr
 		gKvmProcessTSIDExplicit = explicitTsid;
 		gKvmPendingSessionRestartEvent = 0;
 		gKvmPendingSessionRestartSessionId = 0;
+		kvm_clear_pending_unqueryable_start();
 		gKvmChildExitSignaled = 0;
 		gKvmRestartSuppressed = 0;
 		kvm_bridge_debug_reset_activity_state();
@@ -3987,6 +4459,7 @@ int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler wr
 			ctx->pipeMgr = processPipeMgr;
 			ctx->writeHandler = writeHandler;
 			ctx->reserved = reserved;
+			ctx->processSessionId = gKvmProcessSessionId;
 			InterlockedExchange(&ctx->bridgeProtocolPauseState, 1);
 			InterlockedExchange(&ctx->bridgeClientConnected, 0);
 			InterlockedExchange(&ctx->bridgeTransportAttached, 0);
@@ -4077,6 +4550,7 @@ void kvm_cleanup(void *reserved)
 	gKvmRestartSuppressed = 1;
 	gKvmPendingSessionRestartEvent = 0;
 	gKvmPendingSessionRestartSessionId = 0;
+	kvm_clear_pending_unqueryable_start();
 	gKvmRetryScheduled = 0;
 	if (gILibChain != NULL)
 	{
@@ -4342,44 +4816,72 @@ void kvm_set_force_default_desktop(int enabled)
 static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)
 {
 	int validSessionId = kvm_session_id_is_valid(sessionId);
-	int stopEvent = kvm_session_event_is_stop(eventType);
-	int startEvent = kvm_session_event_is_start(eventType);
 	int explicitTsid = 0;
-	int sessionMatches = 0;
 	int rebindToNewSession = 0;
+	int ignoreReason = KVM_SESSION_CHANGE_IGNORE_NONE;
 
 	if (ctx == NULL) { return; }
 	explicitTsid = (ctx->processTSIDExplicit != 0);
-	sessionMatches = (!validSessionId ||
-		ctx->processSessionId == 0 ||
-		ctx->processSessionId == sessionId ||
-		(ctx->processTSID >= 0 && (DWORD)ctx->processTSID == sessionId));
-	if (explicitTsid && !sessionMatches)
+	if (!kvm_relay_session_change_affects_context(ctx, eventType, sessionId, 1, &ignoreReason))
 	{
-		kvm_trace_startupf("session change ignored for explicit KVM TSID event=%u session=%u current=%u tsid=%d",
-			(unsigned int)eventType,
-			(unsigned int)sessionId,
-			(unsigned int)ctx->processSessionId,
-			ctx->processTSID);
-		return;
-	}
-	if (!explicitTsid && stopEvent && !sessionMatches)
-	{
-		kvm_trace_startupf("session stop ignored for unrelated auto-selected KVM session event=%u session=%u current=%u tsid=%d",
-			(unsigned int)eventType,
-			(unsigned int)sessionId,
-			(unsigned int)ctx->processSessionId,
-			ctx->processTSID);
-		return;
-	}
-	if (!explicitTsid && startEvent && validSessionId && !sessionMatches && !kvm_session_id_has_user_token(sessionId))
-	{
-		kvm_trace_startupf("session start ignored for auto-selected KVM because session has no queryable user token event=%u session=%u current=%u tsid=%d childPid=%d",
-			(unsigned int)eventType,
-			(unsigned int)sessionId,
-			(unsigned int)ctx->processSessionId,
-			ctx->processTSID,
-			ctx->childPid);
+		switch (ignoreReason)
+		{
+		case KVM_SESSION_CHANGE_IGNORE_EXPLICIT_MISMATCH:
+			kvm_trace_startupf("session change ignored for explicit KVM TSID event=%u session=%u current=%u tsid=%d",
+				(unsigned int)eventType,
+				(unsigned int)sessionId,
+				(unsigned int)ctx->processSessionId,
+				ctx->processTSID);
+			break;
+		case KVM_SESSION_CHANGE_IGNORE_UNRELATED_STOP:
+			kvm_trace_startupf("session stop ignored for unrelated auto-selected KVM session event=%u session=%u current=%u tsid=%d",
+				(unsigned int)eventType,
+				(unsigned int)sessionId,
+				(unsigned int)ctx->processSessionId,
+				ctx->processTSID);
+			break;
+		case KVM_SESSION_CHANGE_IGNORE_UNQUERYABLE_START:
+			if (kvm_session_id_exists(sessionId))
+			{
+				kvm_relay_activate_context(ctx);
+				if (gKvmPendingUnqueryableStartEvent != eventType || gKvmPendingUnqueryableStartSessionId != sessionId)
+				{
+					gKvmPendingUnqueryableStartRetryCount = 0;
+				}
+				gKvmPendingUnqueryableStartEvent = eventType;
+				gKvmPendingUnqueryableStartSessionId = sessionId;
+				kvm_trace_startupf("session start queued for token retry event=%u session=%u current=%u tsid=%d childPid=%d retryDelayMs=%u retryMax=%u",
+					(unsigned int)eventType,
+					(unsigned int)sessionId,
+					(unsigned int)ctx->processSessionId,
+					ctx->processTSID,
+					ctx->childPid,
+					(unsigned int)KVM_SESSION_START_TOKEN_RETRY_DELAY_MS,
+					(unsigned int)KVM_SESSION_START_TOKEN_RETRY_MAX);
+				kvm_schedule_retry_timer_delay(KVM_SESSION_START_TOKEN_RETRY_DELAY_MS);
+				kvm_relay_capture_context(ctx);
+				kvm_relay_deactivate_context();
+			}
+			else
+			{
+				kvm_trace_startupf("session start ignored for auto-selected KVM because session is not present or has no queryable user token event=%u session=%u current=%u tsid=%d childPid=%d",
+					(unsigned int)eventType,
+					(unsigned int)sessionId,
+					(unsigned int)ctx->processSessionId,
+					ctx->processTSID,
+					ctx->childPid);
+			}
+			break;
+		case KVM_SESSION_CHANGE_IGNORE_UNHANDLED_EVENT:
+			kvm_trace_startupf("session change ignored for unhandled KVM event=%u session=%u current=%u tsid=%d",
+				(unsigned int)eventType,
+				(unsigned int)sessionId,
+				(unsigned int)ctx->processSessionId,
+				ctx->processTSID);
+			break;
+		default:
+			break;
+		}
 		return;
 	}
 
@@ -4393,6 +4895,10 @@ static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DW
 	case WTS_CONSOLE_DISCONNECT:
 	case WTS_REMOTE_DISCONNECT:
 	case WTS_SESSION_LOGOFF:
+		if (validSessionId && gKvmPendingUnqueryableStartSessionId == sessionId)
+		{
+			kvm_clear_pending_unqueryable_start();
+		}
 		gKvmRestartSuppressed = 1;
 		if (gChildProcess != NULL)
 		{
@@ -4405,6 +4911,7 @@ static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DW
 	case WTS_CONSOLE_CONNECT:
 	case WTS_REMOTE_CONNECT:
 	case WTS_SESSION_LOGON:
+		kvm_clear_pending_unqueryable_start();
 		if (validSessionId)
 		{
 			rebindToNewSession = (!explicitTsid && ctx->processSessionId != 0 && ctx->processSessionId != sessionId);
@@ -4444,12 +4951,44 @@ void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
 {
 #ifdef _WINSERVICE
 	KvmRelayContext* snapshot[KVM_MAX_RELAY_CONTEXTS] = { 0 };
+	KvmRelayContext* preSignaledContext = NULL;
 	int i = 0;
+	int preSignaled = 0;
 
+	kvm_relay_ensure_registry_lock();
+	if (TryEnterCriticalSection(&gKvmRelayContextLock))
+	{
+		for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
+		{
+			snapshot[i] = gKvmRelayContexts[i];
+			if (snapshot[i] != NULL)
+			{
+				(void)kvm_relay_signal_session_change_if_relevant(snapshot[i], eventType, sessionId);
+			}
+		}
+		for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
+		{
+			if (snapshot[i] != NULL)
+			{
+				// Equivalent retained dispatch contract:
+				// kvm_relay_handle_session_change_for_context(snapshot[i], request->eventType, request->sessionId);
+				kvm_relay_handle_session_change_for_context(snapshot[i], eventType, sessionId);
+			}
+		}
+		kvm_relay_unlock();
+		return;
+	}
+
+	preSignaledContext = gKvmActiveContext;
+	preSignaled = kvm_relay_signal_session_change_if_relevant(preSignaledContext, eventType, sessionId);
 	kvm_relay_lock();
 	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
 	{
 		snapshot[i] = gKvmRelayContexts[i];
+		if (snapshot[i] != NULL && (preSignaled == 0 || snapshot[i] != preSignaledContext))
+		{
+			(void)kvm_relay_signal_session_change_if_relevant(snapshot[i], eventType, sessionId);
+		}
 	}
 	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
 	{

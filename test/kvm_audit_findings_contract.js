@@ -11,10 +11,12 @@ function main() {
     const bridgePath = path.resolve('meshservice', 'stealth_svchost.c');
     const processPipePath = path.resolve('microstack', 'ILibProcessPipe.c');
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
+    const inputPath = path.resolve('meshcore', 'KVM', 'Windows', 'input.c');
 
     const bridge = fs.readFileSync(bridgePath, 'utf8');
     const processPipe = fs.readFileSync(processPipePath, 'utf8');
     const kvm = fs.readFileSync(kvmPath, 'utf8');
+    const input = fs.readFileSync(inputPath, 'utf8');
 
     const checks = {
         kvmInvalidParameterFailFastIsBridgeScoped:
@@ -58,6 +60,19 @@ function main() {
             kvm.includes('GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS') &&
             kvm.includes('svchost-debug.log') &&
             kvm.includes('FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE'),
+        kvmInputTelemetryClosesSendInputBlindSpot:
+            kvm.includes('bridge input packet after') &&
+            kvm.includes('KVM input packet: stage=') &&
+            kvm.includes('KVM input loop: starting') &&
+            input.includes('KVM input send: action=') &&
+            input.includes('GetForegroundWindow') &&
+            input.includes('foregroundPid=') &&
+            input.includes('KVM_GetThreadDesktopName') &&
+            input.includes('KVM_TraceStartupF'),
+        kvmInputLoopCompactsPartialPackets:
+            kvm.includes('memmove(pchRequest2, pchRequest2 + ptr') &&
+            kvm.includes('len -= ptr') &&
+            kvm.includes('KVM input loop: dropping full unconsumed buffer'),
         kvmLogsDisconnectAndChildExitReasons:
             kvm.includes('bridge child exit pid=') &&
             kvm.includes('ILibProcessPipe_Process_GetPID(sender)') &&

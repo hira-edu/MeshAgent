@@ -188,6 +188,17 @@ function main() {
     let finished = false;
     let refreshSent = false;
 
+    function closeSocketsAfterViewerClose(code) {
+        try { if (relay != null && relay.readyState === WebSocket.OPEN) { relay.close(); } } catch (e) { }
+        try { if (control != null && control.readyState === WebSocket.OPEN) { control.close(); } } catch (e) { }
+        setTimeout(() => {
+            result.localBridgeHelpersAfter = snapshotLocalBridgeHelpers();
+            result.localBridgeHelperDelta = diffHelperSnapshots(result.localBridgeHelpersBefore, result.localBridgeHelpersAfter);
+            process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+            process.exit(result.success ? 0 : (code || 2));
+        }, Number(process.env.MESH_KVM_PROBE_CLEANUP_SETTLE_MS || 1500));
+    }
+
     function finish(code) {
         if (finished) { return; }
         finished = true;
@@ -198,14 +209,17 @@ function main() {
             result.screenPackets > 0 &&
             result.picturePackets > 0 &&
             result.durationMs >= Math.min(durationMs, 12000);
-        try { if (relay != null && relay.readyState === WebSocket.OPEN) { relay.close(); } } catch (e) { }
-        try { if (control != null && control.readyState === WebSocket.OPEN) { control.close(); } } catch (e) { }
-        setTimeout(() => {
-            result.localBridgeHelpersAfter = snapshotLocalBridgeHelpers();
-            result.localBridgeHelperDelta = diffHelperSnapshots(result.localBridgeHelpersBefore, result.localBridgeHelpersAfter);
-            process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-            process.exit(result.success ? 0 : (code || 2));
-        }, Number(process.env.MESH_KVM_PROBE_CLEANUP_SETTLE_MS || 1500));
+        if (process.env.MESH_KVM_PROBE_VIEWER_CLOSE === '1' && relay != null && relay.readyState === WebSocket.OPEN) {
+            try {
+                result.sentViewerClose = true;
+                relay.send(JSON.stringify({ ctrlChannel: '102938', type: 'close' }));
+            } catch (e) {
+                result.errors.push(`viewer-close:${e.message}`);
+            }
+            setTimeout(() => closeSocketsAfterViewerClose(code), Number(process.env.MESH_KVM_PROBE_VIEWER_CLOSE_SETTLE_MS || 250));
+        } else {
+            closeSocketsAfterViewerClose(code);
+        }
     }
 
     control = new WebSocket(`${serverUrl}/control.ashx?auth=${encodeURIComponent(auth)}`, options);

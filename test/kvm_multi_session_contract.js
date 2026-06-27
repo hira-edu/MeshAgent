@@ -40,6 +40,26 @@ function assert(condition, message) {
     }
 }
 
+function extractFunction(source, signature) {
+    const start = source.indexOf(signature);
+    assert(start >= 0, `${signature} not found`);
+    const bodyStart = source.indexOf('{', start);
+    assert(bodyStart >= 0, `${signature} body start not found`);
+    let depth = 0;
+    for (let i = bodyStart; i < source.length; ++i) {
+        const ch = source[i];
+        if (ch === '{') {
+            depth += 1;
+        } else if (ch === '}') {
+            depth -= 1;
+            if (depth === 0) {
+                return source.slice(start, i + 1);
+            }
+        }
+    }
+    throw new Error(`${signature} body end not found`);
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
@@ -51,6 +71,12 @@ function main() {
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const agentcoreSource = fs.readFileSync(agentcorePath, 'utf8');
     const serviceMainSource = fs.readFileSync(serviceMainPath, 'utf8');
+    const sessionSelectorBody = extractFunction(kvmSource, 'static int kvm_relay_select_session_id(int requestedTsid)');
+    const returnActiveConsoleIndex = sessionSelectorBody.indexOf('if (bestActiveConsole != 0) { return (int)bestActiveConsole; }');
+    const returnActiveIndex = sessionSelectorBody.indexOf('if (bestActive != 0) { return (int)bestActive; }');
+    const returnConnectedConsoleIndex = sessionSelectorBody.indexOf('if (bestConnectedConsole != 0) { return (int)bestConnectedConsole; }');
+    const returnConnectedIndex = sessionSelectorBody.indexOf('if (bestConnected != 0) { return (int)bestConnected; }');
+    const returnStaleConsoleIndex = sessionSelectorBody.indexOf('if (bestConsole != 0) { return (int)bestConsole; }');
 
     const checks = {
         exportsReservedPause: kvmHeaderSource.includes('void kvm_pause(int pause, void *reserved);'),
@@ -61,7 +87,22 @@ function main() {
         exactReservedLookupHelper: kvmSource.includes('static KvmRelayContext* kvm_relay_get_registered_context(void* reserved)'),
         multiSessionSelectionUsesWtsEnumerate: kvmSource.includes('WTSEnumerateSessionsExW'),
         multiSessionSelectionValidatesToken: kvmSource.includes('WTSQueryUserToken'),
-        multiSessionSelectionTracksPriorityBuckets: kvmSource.includes('bestConsole') && kvmSource.includes('bestActive') && kvmSource.includes('bestConnected'),
+        multiSessionSelectionTracksPriorityBuckets:
+            sessionSelectorBody.includes('bestActiveConsole') &&
+            sessionSelectorBody.includes('bestActive') &&
+            sessionSelectorBody.includes('bestConnectedConsole') &&
+            sessionSelectorBody.includes('bestConnected') &&
+            sessionSelectorBody.includes('bestConsole'),
+        multiSessionSelectionDoesNotPreferStaleConsoleOverActiveSession:
+            returnActiveConsoleIndex >= 0 &&
+            returnActiveIndex > returnActiveConsoleIndex &&
+            returnConnectedConsoleIndex > returnActiveIndex &&
+            returnConnectedIndex > returnConnectedConsoleIndex &&
+            returnStaleConsoleIndex > returnConnectedIndex,
+        multiSessionSelectionOnlyTreatsConsoleAsHighestPriorityWhenActive:
+            sessionSelectorBody.includes('if (sessionInfo[i].State == WTSActive)') &&
+            sessionSelectorBody.includes('if (isConsoleSession)') &&
+            sessionSelectorBody.includes('if (bestActiveConsole == 0) { bestActiveConsole = sessionId; }'),
         setupRejectsDuplicateReservedContext: kvmSource.includes('kvm_relay_setup() reserved session already exists'),
         feeddataRoutesByReserved: kvmSource.includes('ctx = kvm_relay_find_context_by_reserved(reserved);'),
         pauseRoutesByReserved: kvmSource.includes('void kvm_pause(int pause, void *reserved)') && kvmSource.includes('kvm_relay_lookup_context(reserved);'),

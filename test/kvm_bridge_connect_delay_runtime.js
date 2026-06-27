@@ -27,9 +27,9 @@ function readLastJsonLine(label, text) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
-    const dllPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
-    const logPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'svchost-debug.log');
+    const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const dllPath = args.dll ? path.resolve(args.dll) : path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
+    const logPath = args.log ? path.resolve(args.log) : path.resolve(path.dirname(dllPath), 'svchost-debug.log');
     const requestedConnectDelayMs = Number.parseInt(String(args['connect-delay-ms'] || '2000'), 10);
     const logStartOffset = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
 
@@ -87,10 +87,10 @@ async function main() {
         report.logDelta = logDeltaBuffer.toString('utf8');
         report.logTail = logBuffer.toString('utf8').split(/\r?\n/).filter(Boolean).slice(-120);
         report.logDeltaTail = report.logDelta.split(/\r?\n/).filter(Boolean).slice(-120);
-        assert(report.logTail.some((line) => line.includes(`KvmSessionBridgeW delaying pipe connect by ${requestedConnectDelayMs} ms`)), 'svchost log missing explicit connect-delay line');
-        assert(report.logTail.some((line) => line.includes('KvmSessionBridgeW waiting for pipes (timeout=5000 ms)')), 'svchost log missing shared timeout trace');
-        assert(report.logTail.some((line) => line.includes('KvmSessionBridgeW control pipe connected after')), 'svchost log missing control-pipe connect trace');
-        assert(report.logTail.some((line) => line.includes('KvmSessionBridgeW data pipe connected after')), 'svchost log missing data-pipe connect trace');
+        assert(report.logDelta.includes(`KvmSessionBridgeW delaying pipe connect by ${requestedConnectDelayMs} ms`), 'svchost log delta missing explicit connect-delay line');
+        assert(report.logDelta.includes('KvmSessionBridgeW waiting for pipes (timeout=5000 ms)'), 'svchost log delta missing shared timeout trace');
+        assert(report.logDelta.includes('KvmSessionBridgeW control pipe connected after'), 'svchost log delta missing control-pipe connect trace');
+        assert(report.logDelta.includes('KvmSessionBridgeW data pipe connected after'), 'svchost log delta missing data-pipe connect trace');
     }
 
     if (evidenceDir) {

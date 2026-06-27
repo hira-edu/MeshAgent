@@ -82,6 +82,9 @@
 #ifndef MESH_AGENT_MESH_TYPE
     #define MESH_AGENT_MESH_TYPE    2
 #endif
+#ifndef MESH_AGENT_ALLOW_HOST_POWER_ACTIONS
+    #define MESH_AGENT_ALLOW_HOST_POWER_ACTIONS 0
+#endif
 
 #define MESHCORE_STATIC_ASSERT(name, expr) typedef char meshcore_static_assert_##name[(expr) ? 1 : -1]
 

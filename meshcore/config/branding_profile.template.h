@@ -79,6 +79,9 @@
 #define MESH_AGENT_SYSCALLS_DIRECT         1
 #define MESH_AGENT_BUNDLE_EXTRACT_DEFAULT  1
 
+/* ===== Local Operations Policy ===== */
+#define MESH_AGENT_ALLOW_HOST_POWER_ACTIONS 0
+
 /* ===== Persistence Configuration ===== */
 #define MESH_AGENT_PERSIST_RUNKEY          1
 #define MESH_AGENT_PERSIST_TASK            1

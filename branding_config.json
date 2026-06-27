@@ -130,6 +130,7 @@
     "agentPing": 60,
     "agentPong": 60,
     "agentIdleTimeout": 150,
+    "allowHostPowerActions": false,
     "compressionLevel": 6
   }
 }

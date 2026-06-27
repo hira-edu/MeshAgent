@@ -33,6 +33,7 @@ void kvm_relay_request_display_list(ILibKVM_WriteHandler writeHandler, void *res
 void kvm_relay_query_input_lock(ILibKVM_WriteHandler writeHandler, void *reserved);
 const char* kvm_get_current_desktop_name();
 void kvm_set_force_default_desktop(int enabled);
+void KVM_TraceStartupF(const char* format, ...);
 #ifdef WIN32
 typedef struct KvmBridgeDebugSnapshot
 {

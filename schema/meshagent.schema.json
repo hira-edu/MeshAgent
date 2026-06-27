@@ -652,6 +652,9 @@
           "type": "integer",
           "minimum": 0
         },
+        "allowHostPowerActions": {
+          "type": "boolean"
+        },
         "compressionLevel": {
           "type": "integer",
           "minimum": 0,

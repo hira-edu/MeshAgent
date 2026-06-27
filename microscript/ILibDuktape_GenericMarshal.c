@@ -1277,6 +1277,10 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatch(void *chain, voi
 {
 	ILibDuktape_FFI_AsyncData *data = (ILibDuktape_FFI_AsyncData*)user;
 	if (!ILibMemory_CanaryOK(data)) { return; }
+	if (data->abort != 0 || !duk_ctx_is_alive(data->ctx) || duk_ctx_shutting_down(data->ctx))
+	{
+		return;
+	}
 	duk_context *ctx = data->ctx;
 
 	duk_push_heapptr(data->ctx, data->promise);																// [promise]
@@ -1288,6 +1292,20 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatch(void *chain, voi
 
 	if (duk_pcall_method(data->ctx, 1) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "Error Resolving Promise: "); }
 	duk_pop(ctx);																						// ...
+}
+void ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(ILibDuktape_FFI_AsyncData *data)
+{
+	if (data != NULL && ILibMemory_CanaryOK(data))
+	{
+		data->abort = 1;
+		sem_post(&(data->workAvailable));
+#ifdef WIN32
+		if (data->workerThreadId != 0)
+		{
+			PostThreadMessageW(data->workerThreadId, WM_QUIT, 0, 0);
+		}
+#endif
+	}
 }
 void ILibDuktape_GenericMarshal_MethodInvokeAsync_WorkerRunLoop(void *arg)
 {
@@ -1324,6 +1342,10 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_WorkerRunLoop(void *arg)
 #ifdef WIN32
 		data->lastError = (DWORD)GetLastError();
 #endif
+		if (data->abort != 0)
+		{
+			break;
+		}
 		if (ILibMemory_CanaryOK(data))
 		{
 			if (data->waitingForResult == 0)
@@ -1359,12 +1381,10 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_abort(duk_context *ctx)
 	{
 		if (data->promise == NULL)
 		{
-			sem_t *workAvailable = &(data->workAvailable);
 			void *workerThread = data->workerThread;
 
 			// We can gracefully exit this thread
-			data->abort = 1;
-			sem_post(workAvailable);
+			ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(data);
 			ILibThread_Join(workerThread);
 		}
 		else
@@ -1382,6 +1402,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_abort(duk_context *ctx)
 					data->abort = 1;
 					duk_call_method(ctx, 1);
 					duk_pop(ctx);									// ...
+					ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(data);
 
 					//
 					// We are purposefully not clearing the promise, becuase the hope is that the above layer
@@ -1408,11 +1429,9 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_dataFinalizer(duk_context
 	{
 		if (data->promise == NULL)
 		{
-			sem_t *workAvailable = &(data->workAvailable);
 			void *workerThread = data->workerThread;
 
-			data->abort = 1;
-			sem_post(workAvailable);
+			ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(data);
 			ILibThread_Join(workerThread);
 		}
 		else
@@ -1421,7 +1440,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_dataFinalizer(duk_context
 			{
 				ILibLinkedList_AddTail(duk_ctx_context_data(ctx)->threads, data->workerThread);
 			}
-			data->abort = 1;
+			ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(data);
 		}
 	}
 	return(0);

@@ -21,10 +21,12 @@ limitations under the License.
 #include <stdio.h>
 #include <stdlib.h>
 #include "input.h"
+#include "kvm.h"
 
 #include "microstack/ILibCrypto.h"
 #include "microstack/ILibRemoteLogging.h"
 #include "meshcore/meshdefines.h"
+#include <strsafe.h>
 
 #if defined(WIN32) && !defined(_WIN32_WCE) && !defined(_MINCORE)
 #define _CRTDBG_MAP_ALLOC
@@ -461,6 +463,79 @@ static void KVM_LogInputApiFailure(const char* action, DWORD errorCode)
 	}
 }
 
+static void KVM_GetThreadDesktopName(char* buffer, size_t bufferLen)
+{
+	HDESK desktop = NULL;
+	DWORD needed = 0;
+
+	if (buffer == NULL || bufferLen == 0) { return; }
+	buffer[0] = 0;
+	desktop = GetThreadDesktop(GetCurrentThreadId());
+	if (desktop == NULL || GetUserObjectInformationA(desktop, UOI_NAME, buffer, (DWORD)bufferLen, &needed) == 0)
+	{
+		StringCchCopyA(buffer, bufferLen, "unknown");
+		return;
+	}
+	buffer[bufferLen - 1] = 0;
+}
+
+static int KVM_ShouldTraceInputApiResult(const INPUT* input, BOOL success)
+{
+	if (!success) { return 1; }
+	if (input == NULL) { return 1; }
+	if (input->type == INPUT_KEYBOARD) { return 1; }
+	if (input->type == INPUT_MOUSE)
+	{
+		static volatile LONG mouseMoveTraceCount = 0;
+		LONG sample = 0;
+
+		if ((input->mi.dwFlags & ~(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE)) != 0 || input->mi.mouseData != 0)
+		{
+			return 1;
+		}
+		sample = InterlockedIncrement(&mouseMoveTraceCount);
+		return (sample <= 5 || (sample % 100) == 0);
+	}
+	return 1;
+}
+
+static void KVM_LogInputApiResult(const char* action, BOOL success, UINT sent, DWORD errorCode, const INPUT* input)
+{
+	char desktopName[64];
+	char foregroundTitle[128];
+	char foregroundClass[64];
+	HWND foregroundWindow = NULL;
+	DWORD foregroundPid = 0;
+	DWORD foregroundTid = 0;
+
+	if (KVM_ShouldTraceInputApiResult(input, success) == 0) { return; }
+	KVM_GetThreadDesktopName(desktopName, sizeof(desktopName));
+	foregroundTitle[0] = 0;
+	foregroundClass[0] = 0;
+	foregroundWindow = GetForegroundWindow();
+	if (foregroundWindow != NULL)
+	{
+		foregroundTid = GetWindowThreadProcessId(foregroundWindow, &foregroundPid);
+		GetWindowTextA(foregroundWindow, foregroundTitle, (int)sizeof(foregroundTitle));
+		GetClassNameA(foregroundWindow, foregroundClass, (int)sizeof(foregroundClass));
+	}
+	KVM_TraceStartupF("KVM input send: action=%s status=%s sent=%u error=%lu desktop=%s blockinput=%u type=%lu flags=0x%lx mouseData=%lu foregroundHwnd=%p foregroundPid=%lu foregroundTid=%lu foregroundClass=%s foregroundTitle=%s",
+		action != NULL ? action : "unknown",
+		success ? "success" : "failure",
+		(unsigned int)sent,
+		(unsigned long)errorCode,
+		desktopName,
+		(unsigned int)g_blockinput,
+		input != NULL ? (unsigned long)input->type : 0UL,
+		input != NULL ? (unsigned long)(input->type == INPUT_MOUSE ? input->mi.dwFlags : input->ki.dwFlags) : 0UL,
+		input != NULL && input->type == INPUT_MOUSE ? (unsigned long)input->mi.mouseData : 0UL,
+		foregroundWindow,
+		(unsigned long)foregroundPid,
+		(unsigned long)foregroundTid,
+		foregroundClass[0] != 0 ? foregroundClass : "unknown",
+		foregroundTitle[0] != 0 ? foregroundTitle : "unknown");
+}
+
 static void KVM_ClearForeignBlockInput()
 {
 	DWORD errorCode = ERROR_SUCCESS;
@@ -484,6 +559,7 @@ static BOOL KVM_SendInputChecked(INPUT* input, const char* action)
 	if (input == NULL)
 	{
 		KVM_LogInputApiFailure(action, ERROR_INVALID_PARAMETER);
+		KVM_LogInputApiResult(action, FALSE, 0, ERROR_INVALID_PARAMETER, NULL);
 		return FALSE;
 	}
 
@@ -492,9 +568,12 @@ static BOOL KVM_SendInputChecked(INPUT* input, const char* action)
 	sent = SendInput(1, input, sizeof(INPUT));
 	if (sent != 1)
 	{
-		KVM_LogInputApiFailure(action, GetLastError());
+		DWORD errorCode = GetLastError();
+		KVM_LogInputApiFailure(action, errorCode);
+		KVM_LogInputApiResult(action, FALSE, sent, errorCode, input);
 		return FALSE;
 	}
+	KVM_LogInputApiResult(action, TRUE, sent, ERROR_SUCCESS, input);
 	return TRUE;
 }
 

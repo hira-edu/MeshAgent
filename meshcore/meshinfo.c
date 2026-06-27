@@ -497,31 +497,44 @@ DWORD WINAPI kvm_ctrlaltdel(LPVOID Param);
 int MeshInfo_PowerState(enum AgentPowerStateActions flg, int force)
 {
 #ifdef _MINCORE
+	BOOL shutdownResult = FALSE;
 	if (flg == 0 || flg > 5) return 0; // NOP
 	switch (flg)
 	{
 	case POWERSTATE_SHUTDOWN: // SHUTDOWN
-		InitiateSystemShutdownEx(NULL, NULL, 30, TRUE, FALSE, SHTDN_REASON_MINOR_OTHER);
+		shutdownResult = InitiateSystemShutdownEx(NULL, NULL, 30, TRUE, FALSE, SHTDN_REASON_MINOR_OTHER);
 		break;
 	case POWERSTATE_REBOOT: // REBOOT
-		InitiateSystemShutdownEx(NULL, NULL, 30, TRUE, TRUE, SHTDN_REASON_MINOR_OTHER);
+		shutdownResult = InitiateSystemShutdownEx(NULL, NULL, 30, TRUE, TRUE, SHTDN_REASON_MINOR_OTHER);
 		break;
 	}
-	return 1;
+	return shutdownResult ? 1 : 0;
 #else
 	TOKEN_PRIVILEGES tp;
 	BOOL fResult = 0;
-	HANDLE ht;
+	HANDLE ht = NULL;
 
 	if (flg == POWERSTATE_NOP) return 0; // NOP
-	if (flg == POWERSTATE_DISPLAYON) { SetThreadExecutionState(ES_DISPLAY_REQUIRED); SetThreadExecutionState(ES_USER_PRESENT); return 1; } // Turn on display
-	if (flg == POWERSTATE_KEEPAWAKE) { SetThreadExecutionState(ES_SYSTEM_REQUIRED); return 1; }  // Keep system awake
-	if (flg == POWERSTATE_BEEP) { MessageBeep(0xFFFFFFFF); return 1; }
+	if (flg == POWERSTATE_DISPLAYON)
+	{
+		EXECUTION_STATE displayState = SetThreadExecutionState(ES_DISPLAY_REQUIRED);
+		EXECUTION_STATE userState = SetThreadExecutionState(ES_USER_PRESENT);
+		return (displayState != 0 || userState != 0) ? 1 : 0;
+	}
+	if (flg == POWERSTATE_KEEPAWAKE)
+	{
+		return SetThreadExecutionState(ES_SYSTEM_REQUIRED) != 0 ? 1 : 0;
+	}
+	if (flg == POWERSTATE_BEEP)
+	{
+		return MessageBeep(0xFFFFFFFF) ? 1 : 0;
+	}
 	if (flg == POWERSTATE_CTRLALTDEL)
 	{
 #if defined(_LINKVM)
 		ht = CreateThread(NULL, 0, kvm_ctrlaltdel, 0, 0, 0);
-		if (ht != NULL) CloseHandle(ht);
+		if (ht == NULL) { return 0; }
+		if (!CloseHandle(ht)) { return 0; }
 		return 1;
 #else
 		return 0;
@@ -531,10 +544,11 @@ int MeshInfo_PowerState(enum AgentPowerStateActions flg, int force)
 	// Attempt to exit
 	if (flg > POWERSTATE_HIBERNATE) return 0; // NOP
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &ht)) return 0;
-	LookupPrivilegeValue(NULL, SE_SHUTDOWN_NAME, &tp.Privileges[0].Luid);
+	if (!LookupPrivilegeValue(NULL, SE_SHUTDOWN_NAME, &tp.Privileges[0].Luid)) { CloseHandle(ht); return 0; }
 	tp.PrivilegeCount = 1;
 	tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-	AdjustTokenPrivileges(ht, FALSE, &tp, 0, (PTOKEN_PRIVILEGES)NULL, 0);
+	SetLastError(ERROR_SUCCESS);
+	if (!AdjustTokenPrivileges(ht, FALSE, &tp, 0, (PTOKEN_PRIVILEGES)NULL, 0)) { CloseHandle(ht); return 0; }
 	if (GetLastError() != ERROR_SUCCESS) { CloseHandle(ht); return 0; }
 
 	switch (flg)
@@ -559,8 +573,10 @@ int MeshInfo_PowerState(enum AgentPowerStateActions flg, int force)
 
 	if (!fResult) { CloseHandle(ht); return 0; }
 	tp.Privileges[0].Attributes = 0;
-	AdjustTokenPrivileges(ht, FALSE, &tp, 0, (PTOKEN_PRIVILEGES)NULL, 0);
-	CloseHandle(ht);
+	SetLastError(ERROR_SUCCESS);
+	if (!AdjustTokenPrivileges(ht, FALSE, &tp, 0, (PTOKEN_PRIVILEGES)NULL, 0)) { CloseHandle(ht); return 0; }
+	if (GetLastError() != ERROR_SUCCESS) { CloseHandle(ht); return 0; }
+	if (!CloseHandle(ht)) { return 0; }
 
 	return 1;
 #endif

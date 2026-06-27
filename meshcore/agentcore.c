@@ -4055,6 +4055,36 @@ duk_ret_t ILibDuktape_MeshAgent_NetInfo(duk_context *ctx)
 #endif
 }
 
+static int MeshAgent_IsHostDisruptivePowerAction(AgentPowerStateActions action)
+{
+	switch (action)
+	{
+	case POWERSTATE_LOGOFF:
+	case POWERSTATE_SHUTDOWN:
+	case POWERSTATE_REBOOT:
+	case POWERSTATE_SLEEP:
+	case POWERSTATE_HIBERNATE:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int MeshAgent_HostPowerActionsAllowed()
+{
+#if defined(MESH_AGENT_ALLOW_HOST_POWER_ACTIONS) && (MESH_AGENT_ALLOW_HOST_POWER_ACTIONS != 0)
+	return 1;
+#else
+	return 0;
+#endif
+}
+
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+#define MeshAgent_LogPowerActionAudit(...) MeshAgent_LogNativeInstallerEvent(__VA_ARGS__)
+#else
+#define MeshAgent_LogPowerActionAudit(...) ((void)0)
+#endif
+
 // Javascript ExecPowerState(int), executes power state command on the computer (Sleep, Hibernate...)
 duk_ret_t ILibDuktape_MeshAgent_ExecPowerState(duk_context *ctx)
 {
@@ -4066,8 +4096,18 @@ duk_ret_t ILibDuktape_MeshAgent_ExecPowerState(duk_context *ctx)
 	duk_push_this(ctx);	// [MeshAgent]
 	if (duk_is_number(ctx, 0))
 	{
+		AgentPowerStateActions action = (AgentPowerStateActions)duk_get_int(ctx, 0);
+#ifdef WIN32
+		if (MeshAgent_IsHostDisruptivePowerAction(action) && !MeshAgent_HostPowerActionsAllowed())
+		{
+			MeshAgent_LogPowerActionAudit("...ExecPowerState blocked host-disruptive action=%d force=%d policyAllow=0", (int)action, force);
+			duk_push_int(ctx, 0);
+			return 1;
+		}
+		MeshAgent_LogPowerActionAudit("...ExecPowerState executing action=%d force=%d policyAllow=%d", (int)action, force, MeshAgent_HostPowerActionsAllowed());
+#endif
 #ifdef __APPLE__
-		switch (duk_require_int(ctx, 0))
+		switch (action)
 		{
 			case 2: // SHUTDOWN
 				duk_peval_string_noresult(ctx, "require('mac-powerutil').shutdown();");
@@ -4082,7 +4122,7 @@ duk_ret_t ILibDuktape_MeshAgent_ExecPowerState(duk_context *ctx)
 				break;
 		}
 #else
-		duk_push_int(ctx, MeshInfo_PowerState((AgentPowerStateActions)duk_get_int(ctx, 0), force));
+		duk_push_int(ctx, MeshInfo_PowerState(action, force));
 #endif
 	}
 	else
