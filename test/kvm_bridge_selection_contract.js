@@ -70,7 +70,8 @@ function main() {
         relayResolvesRundll32: kvmSource.includes('kvm_relay_resolve_rundll32_pathW'),
         relayResolvesBridgeDll: kvmSource.includes('kvm_relay_resolve_bridge_dll_pathW'),
         relaySpawnsRundll32First: kvmSource.includes('Spawning rundll32 KVM attempt=') && kvmSource.includes('rundll32PathA'),
-        relayUsesNamedPipeBridgeTransport: kvmSource.includes('ILibProcessPipe_Manager_SpawnProcessEx4(') &&
+        relayUsesNamedPipeBridgeTransport: kvmSource.includes('ILibProcessPipe_Manager_SpawnProcessEx5(') &&
+            kvmSource.includes('&kvm_relay_bridge_pre_start_handler') &&
             kvmSource.includes('char* bridgeParms0[] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm0", NULL, NULL, NULL };') &&
             kvmSource.includes('char* bridgeParms1[] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm1", NULL, NULL, NULL };') &&
             kvmSource.includes('kvm_relay_build_bridge_pipe_namesW(bridgeInputPipeNameW') &&

@@ -2,6 +2,9 @@
 
 const WebSocket = require('ws');
 const crypto = require('crypto');
+const childProcess = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 function requiredEnv(name) {
     const value = process.env[name];
@@ -43,6 +46,100 @@ function parseCommand(buffer) {
     return { command, size, offset };
 }
 
+function rawMessageBuffer(message) {
+    if (Buffer.isBuffer(message)) { return message; }
+    if (message instanceof ArrayBuffer) { return Buffer.from(message); }
+    if (ArrayBuffer.isView(message)) { return Buffer.from(message.buffer, message.byteOffset, message.byteLength); }
+    if (typeof message === 'string') { return Buffer.from(message, 'latin1'); }
+    return Buffer.from(String(message), 'latin1');
+}
+
+function snapshotLocalBridgeHelpers() {
+    if (process.platform !== 'win32') { return { supported: false, helpers: [] }; }
+    const command = [
+        '$ErrorActionPreference = "Stop"',
+        '$rows = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.Name -ieq "rundll32.exe" -and $_.CommandLine -match "KvmSessionBridgeW" } | Select-Object ProcessId,ParentProcessId,Name,CreationDate,CommandLine)',
+        '$rows | ConvertTo-Json -Depth 4 -Compress'
+    ].join('; ');
+    try {
+        const stdout = childProcess.execFileSync('powershell.exe', ['-NoProfile', '-Command', command], {
+            encoding: 'utf8',
+            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'pipe']
+        }).trim();
+        if (stdout.length === 0) { return { supported: true, helpers: [] }; }
+        const parsed = JSON.parse(stdout);
+        const helpers = Array.isArray(parsed) ? parsed : [parsed];
+        return { supported: true, helpers };
+    } catch (error) {
+        return {
+            supported: true,
+            error: error && error.message ? error.message : String(error),
+            helpers: []
+        };
+    }
+}
+
+function helperPidSet(snapshot) {
+    const pids = new Set();
+    for (const helper of (snapshot && Array.isArray(snapshot.helpers) ? snapshot.helpers : [])) {
+        const pid = Number(helper.ProcessId);
+        if (Number.isFinite(pid) && pid > 0) { pids.add(pid); }
+    }
+    return pids;
+}
+
+function diffHelperSnapshots(before, after) {
+    const beforePids = helperPidSet(before);
+    const afterPids = helperPidSet(after);
+    const started = [];
+    const exited = [];
+    for (const pid of afterPids) {
+        if (!beforePids.has(pid)) { started.push(pid); }
+    }
+    for (const pid of beforePids) {
+        if (!afterPids.has(pid)) { exited.push(pid); }
+    }
+    return { started, exited };
+}
+
+function safeArtifactDirectory() {
+    const artifactDir = process.env.MESH_KVM_PROBE_ARTIFACT_DIR;
+    if (artifactDir == null || artifactDir.length === 0) { return null; }
+    const resolved = path.resolve(artifactDir);
+    fs.mkdirSync(resolved, { recursive: true });
+    return resolved;
+}
+
+function picturePayload(buffer, parsed) {
+    const payloadOffset = parsed.offset + 8;
+    if (buffer.length <= payloadOffset) { return null; }
+    return buffer.subarray(payloadOffset);
+}
+
+function picturePayloadEvidence(buffer, parsed, ordinal, artifactDir) {
+    const payload = picturePayload(buffer, parsed);
+    if (payload == null) {
+        return { ordinal, payloadBytes: 0, jpegStart: false, jpegEnd: false };
+    }
+
+    const sample = {
+        ordinal,
+        payloadOffset: parsed.offset + 8,
+        payloadBytes: payload.length,
+        sha256: crypto.createHash('sha256').update(payload).digest('hex'),
+        jpegStart: payload.length >= 2 && payload[0] === 0xFF && payload[1] === 0xD8,
+        jpegEnd: payload.length >= 2 && payload[payload.length - 2] === 0xFF && payload[payload.length - 1] === 0xD9
+    };
+
+    if (artifactDir != null) {
+        const fileName = `picture-${String(ordinal).padStart(4, '0')}.jpg`;
+        fs.writeFileSync(path.join(artifactDir, fileName), payload);
+        sample.file = fileName;
+    }
+    return sample;
+}
+
 function main() {
     const serverUrl = process.env.MESH_SERVER_URL || 'wss://high.support';
     const nodeid = requiredEnv('MESH_NODEID');
@@ -50,6 +147,8 @@ function main() {
     const username = process.env.MESH_LOGIN_USER || 'hsadmin';
     const domainid = process.env.MESH_LOGIN_DOMAIN || '';
     const durationMs = Number(process.env.MESH_KVM_PROBE_MS || 20000);
+    const artifactDir = safeArtifactDirectory();
+    const maxPictureSamples = Number(process.env.MESH_KVM_PROBE_PICTURE_SAMPLES || 3);
     const options = { rejectUnauthorized: false };
     const auth = encodeCookie({ userid: `user/${domainid}/${username}`, domainid }, loginKey);
     const tunnelId = crypto.randomBytes(6).toString('hex');
@@ -66,14 +165,22 @@ function main() {
         screenSizes: [],
         picturePackets: 0,
         pictureBytes: 0,
+        picturePayloadJpegPackets: 0,
+        picturePayloadNonJpegPackets: 0,
+        picturePayloadSamples: [],
         copyPackets: 0,
         displayPackets: 0,
         cursorPackets: 0,
         binaryPackets: 0,
         binaryBytes: 0,
+        textFramedBinaryPackets: 0,
+        textFramedBinaryBytes: 0,
         textMessages: [],
         errors: [],
-        closeEvents: []
+        closeEvents: [],
+        localBridgeHelpersBefore: snapshotLocalBridgeHelpers(),
+        localBridgeHelpersAfter: null,
+        localBridgeHelperDelta: null
     };
 
     let control = null;
@@ -93,8 +200,12 @@ function main() {
             result.durationMs >= Math.min(durationMs, 12000);
         try { if (relay != null && relay.readyState === WebSocket.OPEN) { relay.close(); } } catch (e) { }
         try { if (control != null && control.readyState === WebSocket.OPEN) { control.close(); } } catch (e) { }
-        process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-        setTimeout(() => process.exit(result.success ? 0 : (code || 2)), 250);
+        setTimeout(() => {
+            result.localBridgeHelpersAfter = snapshotLocalBridgeHelpers();
+            result.localBridgeHelperDelta = diffHelperSnapshots(result.localBridgeHelpersBefore, result.localBridgeHelpersAfter);
+            process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+            process.exit(result.success ? 0 : (code || 2));
+        }, Number(process.env.MESH_KVM_PROBE_CLEANUP_SETTLE_MS || 1500));
     }
 
     control = new WebSocket(`${serverUrl}/control.ashx?auth=${encodeURIComponent(auth)}`, options);
@@ -135,9 +246,9 @@ function main() {
                 if (!finished) { finish(5); }
             });
             relay.on('message', (message, isBinary) => {
+                const buffer = rawMessageBuffer(message);
                 if (!isBinary) {
-                    const text = Buffer.isBuffer(message) ? message.toString('utf8') : String(message);
-                    result.textMessages.push(text.slice(0, 160));
+                    const text = Buffer.isBuffer(message) ? message.toString('latin1') : String(message);
                     if (text === 'c' || text === 'cr') {
                         result.receivedConnectMarker = true;
                         result.state3AtUtc = new Date().toISOString();
@@ -152,36 +263,24 @@ function main() {
                             relay.send(text);
                         }
                     } catch (e) { }
+
+                    const parsedTextFrame = parseCommand(buffer);
+                    if (parsedTextFrame != null) {
+                        result.textFramedBinaryPackets++;
+                        result.textFramedBinaryBytes += buffer.length;
+                        handleKvmPacket(buffer, parsedTextFrame);
+                        return;
+                    }
+
+                    result.textMessages.push(text.slice(0, 160));
                     return;
                 }
 
-                const buffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
                 result.binaryPackets++;
                 result.binaryBytes += buffer.length;
                 const parsed = parseCommand(buffer);
                 if (parsed == null) { return; }
-                if (parsed.command === 7 && buffer.length >= parsed.offset + 8) {
-                    result.screenPackets++;
-                    result.screenSizes.push({
-                        width: buffer.readUInt16BE(parsed.offset + 4),
-                        height: buffer.readUInt16BE(parsed.offset + 6)
-                    });
-                    if (!refreshSent) {
-                        refreshSent = true;
-                        relay.send(compressionPacket());
-                        relay.send(Buffer.from([0, 8, 0, 5, 0])); // unpause
-                        relay.send(Buffer.from([0, 6, 0, 4])); // refresh
-                    }
-                } else if (parsed.command === 3) {
-                    result.picturePackets++;
-                    result.pictureBytes += buffer.length;
-                } else if (parsed.command === 4) {
-                    result.copyPackets++;
-                } else if (parsed.command === 11 || parsed.command === 82) {
-                    result.displayPackets++;
-                } else if (parsed.command === 88 || parsed.command === 89) {
-                    result.cursorPackets++;
-                }
+                handleKvmPacket(buffer, parsed);
             });
         } else if (data.responseid === 'kvm-live-test') {
             result.controlResponse = data;
@@ -191,6 +290,41 @@ function main() {
         }
     });
     setTimeout(() => finish(0), durationMs);
+
+    function handleKvmPacket(buffer, parsed) {
+        if (parsed.command === 7 && buffer.length >= parsed.offset + 8) {
+            result.screenPackets++;
+            result.screenSizes.push({
+                width: buffer.readUInt16BE(parsed.offset + 4),
+                height: buffer.readUInt16BE(parsed.offset + 6)
+            });
+            if (!refreshSent) {
+                refreshSent = true;
+                relay.send(compressionPacket());
+                relay.send(Buffer.from([0, 8, 0, 5, 0])); // unpause
+                relay.send(Buffer.from([0, 6, 0, 4])); // refresh
+            }
+        } else if (parsed.command === 3) {
+            result.picturePackets++;
+            result.pictureBytes += buffer.length;
+            const retainSample = result.picturePayloadSamples.length < maxPictureSamples;
+            const sample = picturePayloadEvidence(buffer, parsed, result.picturePackets, retainSample ? artifactDir : null);
+            if (sample.jpegStart) {
+                result.picturePayloadJpegPackets++;
+            } else {
+                result.picturePayloadNonJpegPackets++;
+            }
+            if (retainSample) {
+                result.picturePayloadSamples.push(sample);
+            }
+        } else if (parsed.command === 4) {
+            result.copyPackets++;
+        } else if (parsed.command === 11 || parsed.command === 82) {
+            result.displayPackets++;
+        } else if (parsed.command === 88 || parsed.command === 89) {
+            result.cursorPackets++;
+        }
+    }
 }
 
 try {

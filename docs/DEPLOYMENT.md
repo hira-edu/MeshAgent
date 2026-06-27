@@ -182,6 +182,7 @@ Publish contract for MeshAgent packages:
 - After `deploy.py deploy`, verify the embedded svchost payload inside the remote `meshcentral-data/agents/MeshService64.exe`, `node_modules/meshcentral/agents/MeshService64.exe`, and `meshcentral-data/signedagents/MeshService64.exe`.
 - A `signedagents` EXE may have a different raw file size or digest than the local EXE because MeshCentral repacks it, but its embedded svchost payload must still match the repo DLL exactly.
 - When validating live package identity, distinguish the generic agent URL from a real group download. `https://high.support/meshagents?id=4` is the generic Windows x64 service package and will not prove group-specific identity. Use the portal-generated Office download link or `https://high.support/meshagents?id=4&meshid=<group-meshid>` when checking `-name`, embedded `.msh` identity, or install behavior for a specific group.
+- Remote update activation in `deploy.py` derives the default Windows install root, installed `ServiceDll`, and `state\rundll32-lifecycle` directory from the active branding configuration instead of a hard-coded product path. For the current DiagnosticHost build, `branding_config.local.json` resolves those paths to `C:\ProgramData\DiagnosticHost`, `C:\ProgramData\DiagnosticHost\diagsvc.dll`, and `C:\ProgramData\DiagnosticHost\state\rundll32-lifecycle`; `MESHCENTRAL_INSTALL_ROOT`, `MESHCENTRAL_LIFECYCLE_DLL`, and `MESHCENTRAL_LIFECYCLE_STATE_DIR` remain explicit operator overrides.
 
 ### Emergency Rollback
 

@@ -40,6 +40,7 @@ typedef struct KvmBridgeDebugSnapshot
 	DWORD childPid;
 	int transportActive;
 	DWORD processSessionId;
+	int processTSIDExplicit;
 	ULONGLONG sessionStartTickMs;
 	ULONGLONG lastInputTickMs;
 	ULONGLONG lastOutputTickMs;
@@ -59,6 +60,7 @@ int kvm_bridge_debug_get_restart_suppressed(void);
 int kvm_bridge_debug_peek_pending_session_restart(DWORD* eventTypeOut, DWORD* sessionIdOut);
 DWORD kvm_bridge_debug_get_process_session_id(void);
 DWORD kvm_bridge_debug_get_process_session_id_for_reserved(void *reserved);
+int kvm_bridge_debug_force_process_session_id_for_reserved(void *reserved, DWORD sessionId);
 int kvm_bridge_debug_get_transport_active(void);
 int kvm_bridge_debug_get_transport_active_for_reserved(void *reserved);
 int kvm_bridge_debug_get_last_bridge_available(void);

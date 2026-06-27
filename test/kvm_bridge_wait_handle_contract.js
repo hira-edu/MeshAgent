@@ -49,8 +49,20 @@ function main() {
     const processPipeSource = fs.readFileSync(processPipePath, 'utf8');
 
     const checks = {
-        hardeningRequestsProcessHandleOnly: kvmSource.includes('ILibProcessPipe_Process_GetWaitHandles(childProcess, &childProcessHandle, NULL, NULL, NULL);'),
+        hardeningUsesPreStartCreateHandle:
+            kvmSource.includes('static BOOL kvm_relay_bridge_pre_start_handler(HANDLE childProcessHandle') &&
+            kvmSource.includes('kvm_relay_harden_bridge_process_handle(childProcessHandle'),
+        productionSpawnUsesPreStartHardening:
+            kvmSource.includes('ILibProcessPipe_Manager_SpawnProcessEx5(') &&
+            kvmSource.includes('&kvm_relay_bridge_pre_start_handler'),
+        processPipeSupportsPreStartCallback:
+            processPipeSource.includes('ILibProcessPipe_ProcessPreStartHandler preStartHandler') &&
+            processPipeSource.includes('preStartHandler(processInfo.hProcess, processInfo.hThread, processInfo.dwProcessId, preStartUser, &preStartError)'),
+        preStartSpawnSuspendsAndBreaksAway:
+            processPipeSource.includes('creationFlags |= CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB;') &&
+            processPipeSource.includes('ResumeThread(processInfo.hThread)'),
         shutdownRequestsProcessHandleOnly: kvmSource.includes('ILibProcessPipe_Process_GetWaitHandles(gChildProcess, &childProcessHandle, NULL, NULL, NULL);'),
+        waitHandleHardeningFallbackStillProcessOnly: kvmSource.includes('ILibProcessPipe_Process_GetWaitHandles(childProcess, &childProcessHandle, NULL, NULL, NULL);'),
         waitHandleGetterInitializesOptionalOutputs:
             processPipeSource.includes('if (hProcess != NULL) { *hProcess = NULL; }') &&
             processPipeSource.includes('if (read != NULL) { *read = NULL; }') &&

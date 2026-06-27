@@ -19,6 +19,9 @@ limitations under the License.
 #include <Windows.h>
 #include <tchar.h>
 
+#define KVM_TILE_DEFAULT_WIDTH 32
+#define KVM_TILE_DEFAULT_HEIGHT 32
+
 #if defined(_cplus_plus) || defined(__cplusplus) || defined(_cplusplus)
 extern "C"
 {
@@ -51,6 +54,7 @@ const char* get_capture_backend_reason();
 // with the primary monitor contents. Falls back to 0 (caller should use GDI).
 // width/height are output parameters. Caller must free(*buffer) on success.
 int capture_desktop_dxgi_oneshot(void** buffer, int* width, int* height);
+int kvm_gpu_encoding_benchmark_command(int frames);
 
 #if defined(_cplus_plus) || defined(__cplusplus) || defined(_cplusplus)
 }

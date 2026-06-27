@@ -181,9 +181,9 @@ There may not be a silent race where protection state is applied first and captu
   - **Recommended for rundll32 bridge**: SYSTEM token approach (Approach B) for KVM/capture/input, since the helper needs SYSTEM IL to inject input into elevated windows and capture the secure desktop.
 - The RAMAS (Resilient Adaptive Multi-Attempt Spawn) cascade must be adapted for rundll32: `SPECIFIED_USER` -> `WINLOGON` -> `USER` -> `WINLOGON` fallback with token strategy selection per attempt.
 - Desktop targeting: `Winsta0\Winlogon` for secure desktop (WINLOGON spawn type), `winsta0\default` for normal desktop.
-- `CreateProcessAsUser` call: `rundll32.exe` as the application, DLL path + entry point as command line, `CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW`, proper `CreateEnvironmentBlock` for user profile.
-- Process DACL protection (`Stealth_ProtectProcessByHandle`) must be applied to the spawned rundll32 process immediately after creation to prevent user/lockdown-software termination.
-- Job object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) must be assigned so the rundll32 helper is automatically killed when the service stops.
+- `CreateProcessAsUser` call: `rundll32.exe` as the application, DLL path + entry point as command line, `CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW`, proper `CreateEnvironmentBlock` for user profile. KVM bridge launches that need DACL/job hardening must create the process suspended and resume it only after hardening succeeds.
+- Process DACL protection (`Stealth_ProtectProcessByHandle`) must be applied to the spawned rundll32 process through the original creation handle before the helper thread runs, to prevent user/lockdown-software termination.
+- Job object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) must be per-helper/per-relay-context for KVM bridge helpers. Do not reuse the shared watchdog job across Terminal Services sessions; a job populated by session 1 must not become the authority for a later session 2 helper.
 - Named pipe IPC between service (Session 0) and rundll32 helper (Session 1) for KVM data, using the existing pipe infrastructure with `PIPE_TYPE_MESSAGE` framing.
 - That Session 1 bridge is only for remote desktop/KVM readiness and related capture/control requirements that are explicitly gated.
 - PowerShell, terminal, file operations, update/install logic, helper monitors, and arbitrary child-process launch may not use the Session 1 `rundll32` path.

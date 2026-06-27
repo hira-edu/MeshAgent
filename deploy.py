@@ -83,6 +83,58 @@ LOCAL_REPO = Path(__file__).parent.resolve()
 LOCAL_MESHCENTRAL_REPO = LOCAL_REPO.parent / "MeshCentral"
 LOCAL_USERMODEHOOK_REPO = LOCAL_REPO.parent / "UserModeHook"
 MANIFEST_DIR = LOCAL_REPO / "docs" / "testing" / "artifacts"
+
+
+def normalize_windows_path(path_value):
+    """Normalize a Windows path read from branding JSON without expanding it locally."""
+    normalized = str(path_value or "").strip().replace("/", "\\")
+    return normalized.rstrip("\\")
+
+
+def load_windows_branding_defaults():
+    """Return Windows lifecycle paths from the active branding config used to build the agent."""
+    env_install_root = normalize_windows_path(os.environ.get("MESHCENTRAL_INSTALL_ROOT"))
+    env_lifecycle_dll = normalize_windows_path(os.environ.get("MESHCENTRAL_LIFECYCLE_DLL"))
+    env_state_dir = normalize_windows_path(os.environ.get("MESHCENTRAL_LIFECYCLE_STATE_DIR"))
+    if env_install_root and env_lifecycle_dll:
+        return {
+            "install_root": env_install_root,
+            "service_dll_path": env_lifecycle_dll,
+            "lifecycle_state_dir": env_state_dir or f"{env_install_root}\\state\\rundll32-lifecycle",
+        }
+
+    candidates = []
+    configured = os.environ.get("MESHCENTRAL_BRANDING_CONFIG") or os.environ.get("BRANDING_CONFIG_PATH")
+    if configured:
+        candidates.append(Path(configured))
+    candidates.append(LOCAL_REPO / "branding_config.local.json")
+
+    for candidate in candidates:
+        try:
+            if not candidate.exists():
+                continue
+            with candidate.open("r", encoding="utf-8") as handle:
+                config = json.load(handle)
+            branding = config.get("branding", {}) if isinstance(config, dict) else {}
+            install_root = normalize_windows_path(branding.get("installRoot"))
+            service_dll_name = str(branding.get("serviceDllName") or "").strip()
+            if install_root and service_dll_name:
+                service_dll_name = service_dll_name.replace("/", "\\").strip("\\")
+                return {
+                    "install_root": install_root,
+                    "service_dll_path": f"{install_root}\\{service_dll_name}",
+                    "lifecycle_state_dir": f"{install_root}\\state\\rundll32-lifecycle",
+                }
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+
+    raise RuntimeError(
+        "Active Windows branding installRoot/serviceDllName is required; set "
+        "MESHCENTRAL_BRANDING_CONFIG or explicit MESHCENTRAL_INSTALL_ROOT and MESHCENTRAL_LIFECYCLE_DLL"
+    )
+
+
+WINDOWS_BRANDING_DEFAULTS = load_windows_branding_defaults()
 ARTIFACTS = {
     # "friendly name": {"local_path": ..., "remote_filename": ..., "publish_targets": (...)}
     "MeshService64.exe": {
@@ -149,10 +201,10 @@ REQUIRED_AGENT_ARTIFACTS = {
     "MeshService.msh",
     "WinDiagnosticHost.msh",
 }
-WINDOWS_INSTALL_ROOT = os.environ.get("MESHCENTRAL_INSTALL_ROOT", r"C:\ProgramData\MeshAgent")
+WINDOWS_INSTALL_ROOT = os.environ.get("MESHCENTRAL_INSTALL_ROOT", WINDOWS_BRANDING_DEFAULTS["install_root"])
 WINDOWS_UPDATE_PACKAGE_SUFFIX = ".update.pkg"
-WINDOWS_LIFECYCLE_DLL = os.environ.get("MESHCENTRAL_LIFECYCLE_DLL", "")
-WINDOWS_LIFECYCLE_STATE_DIR = os.environ.get("MESHCENTRAL_LIFECYCLE_STATE_DIR", r"%ProgramData%\MeshAgent\state\rundll32-lifecycle")
+WINDOWS_LIFECYCLE_DLL = os.environ.get("MESHCENTRAL_LIFECYCLE_DLL", WINDOWS_BRANDING_DEFAULTS["service_dll_path"])
+WINDOWS_LIFECYCLE_STATE_DIR = os.environ.get("MESHCENTRAL_LIFECYCLE_STATE_DIR", WINDOWS_BRANDING_DEFAULTS["lifecycle_state_dir"])
 REMOTE_COMMAND_RETRIES = int(os.environ.get("MESHCENTRAL_SSH_RETRIES", "3"))
 REMOTE_RETRY_DELAY_SECONDS = float(os.environ.get("MESHCENTRAL_SSH_RETRY_DELAY", "2"))
 RETRYABLE_REMOTE_ERROR_SNIPPETS = (
@@ -1303,7 +1355,7 @@ def derive_update_install_paths(update_path):
     if update_path.lower().endswith(WINDOWS_UPDATE_PACKAGE_SUFFIX) is False:
         raise ValueError(f"Unexpected update path: {update_path}")
     if not WINDOWS_LIFECYCLE_DLL:
-        raise ValueError("MESHCENTRAL_LIFECYCLE_DLL must be set to the installed ServiceDll path before activating updates")
+        raise ValueError("Installed ServiceDll path is required for activating updates; set MESHCENTRAL_LIFECYCLE_DLL or active branding installRoot/serviceDllName")
     return {
         "update_path": update_path,
         "host_dll_path": WINDOWS_LIFECYCLE_DLL,

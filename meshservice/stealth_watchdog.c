@@ -105,6 +105,26 @@ static BOOL Watchdog_EnsureJobObjectLocked(void)
     return TRUE;
 }
 
+HANDLE Watchdog_CreateKillOnCloseJobObject(void)
+{
+    HANDLE jobObject = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo = { 0 };
+
+    if (jobObject == NULL) {
+        return NULL;
+    }
+
+    jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(jobObject, JobObjectExtendedLimitInformation, &jobInfo, sizeof(jobInfo))) {
+        DWORD error = GetLastError();
+        CloseHandle(jobObject);
+        SetLastError(error);
+        return NULL;
+    }
+
+    return jobObject;
+}
+
 HANDLE Watchdog_GetOrCreateJobObject(void)
 {
     HANDLE job = NULL;

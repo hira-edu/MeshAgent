@@ -300,6 +300,11 @@ static void MeshService_BridgeSpawnContext_Cleanup(MeshServiceBridgeSpawnContext
 		CloseHandle(ctx->pi.hProcess);
 		ctx->pi.hProcess = NULL;
 	}
+	if (ctx->jobObject != NULL && ctx->jobObject != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(ctx->jobObject);
+		ctx->jobObject = NULL;
+	}
 }
 
 static BOOL MeshService_BuildKvmProbePipeBaseNameW(WCHAR* output, size_t outputLen)
@@ -473,7 +478,7 @@ static BOOL MeshService_SpawnBridgeProcessW(
 	}
 	ctx->processProtected = TRUE;
 
-	ctx->jobObject = Watchdog_GetOrCreateJobObject();
+	ctx->jobObject = Watchdog_CreateKillOnCloseJobObject();
 	if (ctx->jobObject == NULL)
 	{
 		ctx->assignError = GetLastError();
@@ -898,20 +903,29 @@ static BOOL MeshService_WaitForKvmRelayPicture(MeshServiceKvmSessionChangeProbeS
 	return FALSE;
 }
 
-static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
+static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSelectedTsid)
 {
 	MeshServiceKvmSessionChangeProbeState state;
+	KvmBridgeDebugSnapshot initialSnapshot;
 	char exePath[MAX_PATH * 4] = { 0 };
 	void* chain = NULL;
 	void* pipeManager = NULL;
 	HANDLE chainThread = NULL;
 	DWORD sessionId = MeshService_GetCurrentSessionId();
+	DWORD unrelatedStopSessionId = 0;
+	DWORD activePid = 0;
 	DWORD initialPid = 0;
 	DWORD unlockPid = 0;
 	DWORD reconnectPid = 0;
+	DWORD validRebindOldSessionId = 0;
+	DWORD validRebindPid = 0;
 	DWORD initialSpawnMs = 0;
 	DWORD initialPacketMs = 0;
 	DWORD initialPictureMs = 0;
+	DWORD validRebindStopMs = 0;
+	DWORD validRebindRespawnMs = 0;
+	DWORD validRebindPacketMs = 0;
+	DWORD validRebindPictureMs = 0;
 	DWORD lockStopMs = 0;
 	DWORD unlockRespawnMs = 0;
 	DWORD unlockPacketMs = 0;
@@ -938,6 +952,12 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	DWORD postUnlockSuccessfulSpawnType = 0;
 	DWORD postUnlockSuccessfulSpawnAttemptOrdinal = 0;
 	DWORD postUnlockProcessSessionId = 0;
+	DWORD validRebindProcessSessionId = 0;
+	DWORD validRebindPendingEvent = 0;
+	DWORD validRebindPendingSessionId = 0;
+	DWORD validRebindLaunchAttemptCount = 0;
+	DWORD validRebindSuccessfulSpawnType = 0;
+	DWORD validRebindSuccessfulSpawnAttemptOrdinal = 0;
 	DWORD reconnectLaunchAttemptCount = 0;
 	DWORD reconnectSuccessfulSpawnType = 0;
 	DWORD reconnectSuccessfulSpawnAttemptOrdinal = 0;
@@ -976,9 +996,35 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	BOOL postUnlockBridgeAvailable = FALSE;
 	BOOL postUnlockBridgeUsed = FALSE;
 	BOOL postUnlockFallbackUsed = FALSE;
+	BOOL initialSnapshotRead = FALSE;
+	BOOL initialProcessTSIDExplicit = FALSE;
+	BOOL unrelatedStartSnapshotRead = FALSE;
+	BOOL unrelatedStartIgnored = FALSE;
+	BOOL unrelatedStartChildPresent = FALSE;
+	BOOL unrelatedStartSessionUnchanged = FALSE;
+	BOOL unrelatedStartRestartSuppressed = FALSE;
+	BOOL unrelatedStartPendingRestart = FALSE;
+	BOOL unrelatedStopIgnored = FALSE;
+	BOOL unrelatedStopChildPresent = FALSE;
+	BOOL unrelatedStopRestartSuppressed = FALSE;
+	BOOL unrelatedStopPendingRestart = FALSE;
+	BOOL validRebindForced = FALSE;
+	BOOL validRebindStopped = FALSE;
+	BOOL validRebindRespawned = FALSE;
+	BOOL validRebindPacketsReady = FALSE;
+	BOOL validRebindPicturesReady = FALSE;
+	BOOL validRebindSnapshotRead = FALSE;
+	BOOL validRebindSessionUpdated = FALSE;
+	BOOL validRebindChildPresent = FALSE;
+	BOOL validRebindRestartSuppressed = FALSE;
+	BOOL validRebindPendingRestart = FALSE;
+	BOOL validRebindTransportActive = FALSE;
+	BOOL validRebindBridgeUsed = FALSE;
+	BOOL validRebindFallbackUsed = FALSE;
 	DWORD chainThreadWaitResult = WAIT_FAILED;
 
 	ZeroMemory(&state, sizeof(state));
+	ZeroMemory(&initialSnapshot, sizeof(initialSnapshot));
 	if (sessionId == 0 || sessionId == 0xFFFFFFFF)
 	{
 		printf("{\"success\":false,\"phase\":\"kvm-bridge-session-change-probe\",\"sessionId\":%lu,\"error\":\"invalid-session\"}\n", (unsigned long)sessionId);
@@ -1012,7 +1058,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 
 	Sleep(200);
 	GetModuleFileNameA(NULL, exePath, (DWORD)sizeof(exePath));
-	relayStarted = (kvm_relay_setup(exePath, pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &state, (int)sessionId) != 0);
+	relayStarted = (kvm_relay_setup(exePath, pipeManager, MeshService_KvmSessionChangeProbeWriteSink, &state, autoSelectedTsid ? -1 : (int)sessionId) != 0);
 	initialBridgeAvailable = (kvm_bridge_debug_get_last_bridge_available() != 0);
 	initialBridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
 	initialFallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
@@ -1028,6 +1074,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 		initialSpawned = MeshService_WaitForBridgePidChange(0, 5000, &initialSpawnMs, &initialPid);
 		if (initialSpawned)
 		{
+			activePid = initialPid;
 			initialPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &initialPacketMs);
 			if (initialPacketsReady)
 			{
@@ -1043,13 +1090,94 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 			initialLaunchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
 			initialSuccessfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
 			initialSuccessfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
+			initialSnapshotRead = (kvm_bridge_debug_get_snapshot_for_reserved(&state, &initialSnapshot) != 0);
+			initialProcessTSIDExplicit = (initialSnapshotRead && initialSnapshot.processTSIDExplicit != 0);
+		}
+	}
+
+	if (initialPacketsReady && autoSelectedTsid)
+	{
+		unrelatedStopSessionId = sessionId + 10000;
+		if (unrelatedStopSessionId == 0 || unrelatedStopSessionId == 0xFFFFFFFF || unrelatedStopSessionId == sessionId)
+		{
+			unrelatedStopSessionId = sessionId + 1;
+		}
+		kvm_notify_session_change(WTS_SESSION_LOGON, unrelatedStopSessionId);
+		Sleep(500);
+		unrelatedStartChildPresent = (kvm_bridge_debug_get_child_present() != 0 && MeshService_IsProcessAliveById(initialPid));
+		unrelatedStartSnapshotRead = (kvm_bridge_debug_get_snapshot_for_reserved(&state, &initialSnapshot) != 0);
+		unrelatedStartSessionUnchanged = (unrelatedStartSnapshotRead && initialSnapshot.processSessionId == sessionId);
+		unrelatedStartRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
+		unrelatedStartPendingRestart = (kvm_bridge_debug_peek_pending_session_restart(NULL, NULL) != 0);
+		unrelatedStartIgnored = unrelatedStartChildPresent && unrelatedStartSessionUnchanged && !unrelatedStartRestartSuppressed && !unrelatedStartPendingRestart;
+
+		kvm_notify_session_change(WTS_SESSION_LOGOFF, unrelatedStopSessionId);
+		Sleep(500);
+		unrelatedStopChildPresent = (kvm_bridge_debug_get_child_present() != 0 && MeshService_IsProcessAliveById(initialPid));
+		unrelatedStopRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
+		unrelatedStopPendingRestart = (kvm_bridge_debug_peek_pending_session_restart(NULL, NULL) != 0);
+		unrelatedStopIgnored = unrelatedStopChildPresent && !unrelatedStopRestartSuppressed && !unrelatedStopPendingRestart;
+	}
+
+	if (initialPacketsReady && autoSelectedTsid)
+	{
+		activePid = (activePid != 0) ? activePid : initialPid;
+		validRebindOldSessionId = sessionId + 20000;
+		if (validRebindOldSessionId == 0 || validRebindOldSessionId == 0xFFFFFFFF || validRebindOldSessionId == sessionId)
+		{
+			validRebindOldSessionId = sessionId + 1;
+		}
+		validRebindForced = (kvm_bridge_debug_force_process_session_id_for_reserved(&state, validRebindOldSessionId) != 0);
+		if (validRebindForced && activePid != 0)
+		{
+			kvm_notify_session_change(WTS_SESSION_LOGOFF, validRebindOldSessionId);
+			validRebindStopped = MeshService_WaitForProcessExitById(activePid, 5000, &validRebindStopMs);
+		}
+		if (validRebindStopped)
+		{
+			Sleep(500);
+			kvm_notify_session_change(WTS_SESSION_LOGON, sessionId);
+			validRebindRespawned = MeshService_WaitForBridgePidChange(activePid, 5000, &validRebindRespawnMs, &validRebindPid);
+			validRebindChildPresent = (kvm_bridge_debug_get_child_present() != 0);
+			validRebindRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
+			validRebindPendingRestart = (kvm_bridge_debug_peek_pending_session_restart(&validRebindPendingEvent, &validRebindPendingSessionId) != 0);
+			validRebindTransportActive = (kvm_bridge_debug_get_transport_active() != 0);
+			validRebindBridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+			validRebindFallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+			validRebindLaunchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
+			validRebindSuccessfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
+			validRebindSuccessfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
+			validRebindSnapshotRead = (kvm_bridge_debug_get_snapshot_for_reserved(&state, &initialSnapshot) != 0);
+			validRebindProcessSessionId = validRebindSnapshotRead ? initialSnapshot.processSessionId : 0;
+			validRebindSessionUpdated = (validRebindSnapshotRead && initialSnapshot.processSessionId == sessionId);
+			if (validRebindRespawned)
+			{
+				activePid = validRebindPid;
+				validRebindPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &validRebindPacketMs);
+				if (validRebindPacketsReady)
+				{
+					validRebindPicturesReady = MeshService_WaitForKvmRelayPicture(&state, 15000, &validRebindPictureMs);
+				}
+				validRebindChildPresent = (kvm_bridge_debug_get_child_present() != 0);
+				validRebindRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
+				validRebindPendingRestart = (kvm_bridge_debug_peek_pending_session_restart(&validRebindPendingEvent, &validRebindPendingSessionId) != 0);
+				validRebindTransportActive = (kvm_bridge_debug_get_transport_active() != 0);
+				validRebindBridgeUsed = (kvm_bridge_debug_get_last_used_bridge() != 0);
+				validRebindFallbackUsed = (kvm_bridge_debug_get_last_fallback_used() != 0);
+				validRebindLaunchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
+				validRebindSuccessfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
+				validRebindSuccessfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
+				validRebindSnapshotRead = (kvm_bridge_debug_get_snapshot_for_reserved(&state, &initialSnapshot) != 0);
+				validRebindProcessSessionId = validRebindSnapshotRead ? initialSnapshot.processSessionId : 0;
+				validRebindSessionUpdated = (validRebindSnapshotRead && initialSnapshot.processSessionId == sessionId);
+			}
 		}
 	}
 
 	if (initialPacketsReady)
 	{
 		kvm_notify_session_change(WTS_SESSION_LOCK, sessionId);
-		lockStopped = MeshService_WaitForProcessExitById(initialPid, 5000, &lockStopMs);
+		lockStopped = MeshService_WaitForProcessExitById(activePid, 5000, &lockStopMs);
 		if (lockStopped)
 		{
 			Sleep(500);
@@ -1058,8 +1186,8 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 			postLockRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
 			postLockPendingRestart = (kvm_bridge_debug_peek_pending_session_restart(&postLockPendingEvent, &postLockPendingSessionId) != 0);
 			postLockTransportActive = (kvm_bridge_debug_get_transport_active() != 0);
-			helperAbsentDuringLock = !MeshService_IsProcessAliveById(initialPid);
-			if (g_slavekvm > 0 && (DWORD)g_slavekvm != initialPid && MeshService_IsProcessAliveById((DWORD)g_slavekvm))
+			helperAbsentDuringLock = !MeshService_IsProcessAliveById(activePid);
+			if (g_slavekvm > 0 && (DWORD)g_slavekvm != activePid && MeshService_IsProcessAliveById((DWORD)g_slavekvm))
 			{
 				helperAbsentDuringLock = FALSE;
 			}
@@ -1069,7 +1197,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	if (helperAbsentDuringLock)
 	{
 		kvm_notify_session_change(WTS_SESSION_UNLOCK, sessionId);
-		unlockRespawned = MeshService_WaitForBridgePidChange(initialPid, 5000, &unlockRespawnMs, &unlockPid);
+		unlockRespawned = MeshService_WaitForBridgePidChange(activePid, 5000, &unlockRespawnMs, &unlockPid);
 		postUnlockChildPresent = (kvm_bridge_debug_get_child_present() != 0);
 		postUnlockChildExitSignaled = (kvm_bridge_debug_is_child_exit_signaled() != 0);
 		postUnlockRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
@@ -1087,6 +1215,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 		postUnlockSuccessfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
 		if (unlockRespawned)
 		{
+			activePid = unlockPid;
 			unlockPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &unlockPacketMs);
 			if (unlockPacketsReady)
 			{
@@ -1098,12 +1227,12 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	if (unlockPacketsReady)
 	{
 		kvm_notify_session_change(WTS_CONSOLE_DISCONNECT, sessionId);
-		disconnectStopped = MeshService_WaitForProcessExitById(unlockPid, 5000, &disconnectStopMs);
+		disconnectStopped = MeshService_WaitForProcessExitById(activePid, 5000, &disconnectStopMs);
 		if (disconnectStopped)
 		{
 			Sleep(500);
-			helperAbsentDuringDisconnect = !MeshService_IsProcessAliveById(unlockPid);
-			if (g_slavekvm > 0 && (DWORD)g_slavekvm != unlockPid && MeshService_IsProcessAliveById((DWORD)g_slavekvm))
+			helperAbsentDuringDisconnect = !MeshService_IsProcessAliveById(activePid);
+			if (g_slavekvm > 0 && (DWORD)g_slavekvm != activePid && MeshService_IsProcessAliveById((DWORD)g_slavekvm))
 			{
 				helperAbsentDuringDisconnect = FALSE;
 			}
@@ -1113,12 +1242,13 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	if (helperAbsentDuringDisconnect)
 	{
 		kvm_notify_session_change(WTS_CONSOLE_CONNECT, sessionId);
-		reconnectRespawned = MeshService_WaitForBridgePidChange(unlockPid, 5000, &reconnectRespawnMs, &reconnectPid);
+		reconnectRespawned = MeshService_WaitForBridgePidChange(activePid, 5000, &reconnectRespawnMs, &reconnectPid);
 		reconnectLaunchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
 		reconnectSuccessfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
 		reconnectSuccessfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
 		if (reconnectRespawned)
 		{
+			activePid = reconnectPid;
 			reconnectPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &reconnectPacketMs);
 			if (reconnectPacketsReady)
 			{
@@ -1130,7 +1260,11 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	if (relayStarted)
 	{
 		kvm_cleanup(&state);
-		if (reconnectPid != 0)
+		if (activePid != 0)
+		{
+			cleanupExited = MeshService_WaitForProcessExitById(activePid, 5000, &cleanupExitMs);
+		}
+		else if (reconnectPid != 0)
 		{
 			cleanupExited = MeshService_WaitForProcessExitById(reconnectPid, 5000, &cleanupExitMs);
 		}
@@ -1150,6 +1284,27 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 		initialSpawned &&
 		initialPacketsReady &&
 		initialPicturesReady &&
+		initialSnapshotRead &&
+		initialProcessTSIDExplicit == (autoSelectedTsid ? FALSE : TRUE) &&
+		(!autoSelectedTsid || (unrelatedStartIgnored && unrelatedStopIgnored)) &&
+		(!autoSelectedTsid || (
+			validRebindForced &&
+			validRebindStopped &&
+			validRebindStopMs <= 2000 &&
+			validRebindRespawned &&
+			validRebindRespawnMs <= 2000 &&
+			validRebindPacketsReady &&
+			validRebindPicturesReady &&
+			validRebindSessionUpdated &&
+			validRebindChildPresent &&
+			!validRebindRestartSuppressed &&
+			!validRebindPendingRestart &&
+			validRebindTransportActive &&
+			validRebindBridgeUsed &&
+			!validRebindFallbackUsed &&
+			validRebindLaunchAttemptCount == 1 &&
+			validRebindSuccessfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
+			validRebindSuccessfulSpawnAttemptOrdinal == 1)) &&
 		initialLaunchAttemptCount == 1 &&
 		initialSuccessfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
 		initialSuccessfulSpawnAttemptOrdinal == 1 &&
@@ -1178,7 +1333,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 
 	printf("{\"success\":%s,", success ? "true" : "false");
 	printf("\"phase\":\"kvm-bridge-session-change-probe\",");
+	printf("\"autoSelectedTsid\":%s,", autoSelectedTsid ? "true" : "false");
 	printf("\"sessionId\":%lu,", (unsigned long)sessionId);
+	printf("\"unrelatedStopSessionId\":%lu,", (unsigned long)unrelatedStopSessionId);
 	printf("\"chainCreated\":%s,", chainCreated ? "true" : "false");
 	printf("\"chainThreadStarted\":%s,", chainThreadStarted ? "true" : "false");
 	printf("\"relayStarted\":%s,", relayStarted ? "true" : "false");
@@ -1192,6 +1349,40 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	printf("\"initialLaunchAttemptCount\":%lu,", (unsigned long)initialLaunchAttemptCount);
 	printf("\"initialSuccessfulSpawnType\":%lu,", (unsigned long)initialSuccessfulSpawnType);
 	printf("\"initialSuccessfulSpawnAttemptOrdinal\":%lu,", (unsigned long)initialSuccessfulSpawnAttemptOrdinal);
+	printf("\"initialSnapshotRead\":%s,", initialSnapshotRead ? "true" : "false");
+	printf("\"initialProcessTSIDExplicit\":%s,", initialProcessTSIDExplicit ? "true" : "false");
+	printf("\"unrelatedStartIgnored\":%s,", unrelatedStartIgnored ? "true" : "false");
+	printf("\"unrelatedStartChildPresent\":%s,", unrelatedStartChildPresent ? "true" : "false");
+	printf("\"unrelatedStartSessionUnchanged\":%s,", unrelatedStartSessionUnchanged ? "true" : "false");
+	printf("\"unrelatedStartRestartSuppressed\":%s,", unrelatedStartRestartSuppressed ? "true" : "false");
+	printf("\"unrelatedStartPendingRestart\":%s,", unrelatedStartPendingRestart ? "true" : "false");
+	printf("\"unrelatedStopIgnored\":%s,", unrelatedStopIgnored ? "true" : "false");
+	printf("\"unrelatedStopChildPresent\":%s,", unrelatedStopChildPresent ? "true" : "false");
+	printf("\"unrelatedStopRestartSuppressed\":%s,", unrelatedStopRestartSuppressed ? "true" : "false");
+	printf("\"unrelatedStopPendingRestart\":%s,", unrelatedStopPendingRestart ? "true" : "false");
+	printf("\"validRebindOldSessionId\":%lu,", (unsigned long)validRebindOldSessionId);
+	printf("\"validRebindForced\":%s,", validRebindForced ? "true" : "false");
+	printf("\"validRebindStopped\":%s,", validRebindStopped ? "true" : "false");
+	printf("\"validRebindStopMs\":%lu,", (unsigned long)validRebindStopMs);
+	printf("\"validRebindRespawned\":%s,", validRebindRespawned ? "true" : "false");
+	printf("\"validRebindRespawnMs\":%lu,", (unsigned long)validRebindRespawnMs);
+	printf("\"validRebindPid\":%lu,", (unsigned long)validRebindPid);
+	printf("\"validRebindPacketMs\":%lu,", (unsigned long)validRebindPacketMs);
+	printf("\"validRebindPictureMs\":%lu,", (unsigned long)validRebindPictureMs);
+	printf("\"validRebindSnapshotRead\":%s,", validRebindSnapshotRead ? "true" : "false");
+	printf("\"validRebindSessionUpdated\":%s,", validRebindSessionUpdated ? "true" : "false");
+	printf("\"validRebindProcessSessionId\":%lu,", (unsigned long)validRebindProcessSessionId);
+	printf("\"validRebindChildPresent\":%s,", validRebindChildPresent ? "true" : "false");
+	printf("\"validRebindRestartSuppressed\":%s,", validRebindRestartSuppressed ? "true" : "false");
+	printf("\"validRebindPendingRestart\":%s,", validRebindPendingRestart ? "true" : "false");
+	printf("\"validRebindPendingEvent\":%lu,", (unsigned long)validRebindPendingEvent);
+	printf("\"validRebindPendingSessionId\":%lu,", (unsigned long)validRebindPendingSessionId);
+	printf("\"validRebindTransportActive\":%s,", validRebindTransportActive ? "true" : "false");
+	printf("\"validRebindBridgeUsed\":%s,", validRebindBridgeUsed ? "true" : "false");
+	printf("\"validRebindFallbackUsed\":%s,", validRebindFallbackUsed ? "true" : "false");
+	printf("\"validRebindLaunchAttemptCount\":%lu,", (unsigned long)validRebindLaunchAttemptCount);
+	printf("\"validRebindSuccessfulSpawnType\":%lu,", (unsigned long)validRebindSuccessfulSpawnType);
+	printf("\"validRebindSuccessfulSpawnAttemptOrdinal\":%lu,", (unsigned long)validRebindSuccessfulSpawnAttemptOrdinal);
 	printf("\"initialPid\":%lu,", (unsigned long)initialPid);
 	printf("\"unlockPid\":%lu,", (unsigned long)unlockPid);
 	printf("\"reconnectPid\":%lu,", (unsigned long)reconnectPid);
@@ -1261,7 +1452,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(void)
 	return success ? 0 : 1;
 }
 
-static int MeshService_RunKvmBridgeSessionChangeProbeChildCommand(const WCHAR* reportPath)
+static int MeshService_RunKvmBridgeSessionChangeProbeChildCommand(const WCHAR* reportPath, BOOL autoSelectedTsid)
 {
 	FILE* redirectedStdout = NULL;
 	errno_t redirectError = 0;
@@ -1274,7 +1465,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeChildCommand(const WCHAR* r
 			return 1;
 		}
 	}
-	return MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand();
+	return MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(autoSelectedTsid);
 }
 
 static int MeshService_RunKvmBridgeSessionChangeProbeCommand(void)
@@ -1294,7 +1485,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeCommand(void)
 
 	if (MeshService_ProcessHasSystemSid())
 	{
-		return MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand();
+		return MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(FALSE);
 	}
 
 	ZeroMemory(&childProcess, sizeof(childProcess));
@@ -6793,9 +6984,44 @@ static BOOL MeshService_BuildSiblingPathWithExtension(const WCHAR* sourcePath, c
 	return TRUE;
 }
 
+static BOOL MeshService_GetUserRuntimeDirectoryNameW(WCHAR* output, size_t outputCch)
+{
+	StealthInstallPaths paths;
+	WCHAR installDir[MAX_PATH] = {0};
+	const WCHAR* leaf = NULL;
+	size_t len = 0;
+
+	if (output == NULL || outputCch == 0) { return FALSE; }
+	output[0] = L'\0';
+
+	ZeroMemory(&paths, sizeof(paths));
+	if (Stealth_GetInstallPaths(&paths) && paths.installDir[0] != L'\0')
+	{
+		if (SUCCEEDED(StringCchCopyW(installDir, _countof(installDir), paths.installDir)))
+		{
+			for (len = wcslen(installDir); len > 0 && (installDir[len - 1] == L'\\' || installDir[len - 1] == L'/'); --len)
+			{
+				installDir[len - 1] = L'\0';
+			}
+			leaf = wcsrchr(installDir, L'\\');
+			if (leaf == NULL) { leaf = wcsrchr(installDir, L'/'); }
+			leaf = (leaf != NULL) ? leaf + 1 : installDir;
+			if (leaf != NULL && leaf[0] != L'\0')
+			{
+				return SUCCEEDED(StringCchCopyW(output, outputCch, leaf));
+			}
+		}
+	}
+
+	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), output, outputCch);
+	if (output[0] != L'\0') { return TRUE; }
+	return SUCCEEDED(StringCchCopyW(output, outputCch, STEALTH_FALLBACK_SERVICE_NAME));
+}
+
 static void MeshService_AppendUserGuiLaunchTrace(const WCHAR* message)
 {
 	WCHAR localAppData[_MAX_PATH + 100];
+	WCHAR runtimeDirName[MAX_PATH];
 	WCHAR traceDir[_MAX_PATH + 160];
 	WCHAR tracePath[_MAX_PATH + 220];
 	HRESULT hr;
@@ -6808,7 +7034,8 @@ static void MeshService_AppendUserGuiLaunchTrace(const WCHAR* message)
 
 	hr = SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, localAppData);
 	if (FAILED(hr)) { return; }
-	if (FAILED(StringCchPrintfW(traceDir, _countof(traceDir), L"%ls\\%s", localAppData, STEALTH_FALLBACK_SERVICE_NAME))) { return; }
+	if (!MeshService_GetUserRuntimeDirectoryNameW(runtimeDirName, _countof(runtimeDirName))) { return; }
+	if (FAILED(StringCchPrintfW(traceDir, _countof(traceDir), L"%ls\\%ls", localAppData, runtimeDirName))) { return; }
 	if (FAILED(StringCchPrintfW(tracePath, _countof(tracePath), L"%ls\\gui-launch.log", traceDir))) { return; }
 	MeshService_EnsureDirectoryExistsW(traceDir);
 
@@ -6919,6 +7146,7 @@ static BOOL MeshService_ShouldCleanupLauncherAfterLifecycle(const WCHAR* moduleP
 static BOOL MeshService_GetLauncherStageDirectory(WCHAR* stageDirOut, size_t stageDirOutCch)
 {
 	WCHAR localAppData[_MAX_PATH + 100];
+	WCHAR runtimeDirName[MAX_PATH];
 	HRESULT hr;
 
 	if (stageDirOut == NULL || stageDirOutCch == 0) { return FALSE; }
@@ -6926,7 +7154,8 @@ static BOOL MeshService_GetLauncherStageDirectory(WCHAR* stageDirOut, size_t sta
 
 	hr = SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, localAppData);
 	if (FAILED(hr)) { return FALSE; }
-	if (FAILED(StringCchPrintfW(stageDirOut, stageDirOutCch, L"%ls\\%s\\launcher", localAppData, STEALTH_FALLBACK_SERVICE_NAME))) { return FALSE; }
+	if (!MeshService_GetUserRuntimeDirectoryNameW(runtimeDirName, _countof(runtimeDirName))) { return FALSE; }
+	if (FAILED(StringCchPrintfW(stageDirOut, stageDirOutCch, L"%ls\\%ls\\launcher", localAppData, runtimeDirName))) { return FALSE; }
 	return TRUE;
 }
 
@@ -7665,6 +7894,7 @@ DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eve
 			StealthIntegration_HandleSessionChange(eventType, sessionId);
 #endif
 #if defined(_LINKVM)
+			Stealth_DebugPrintfA("[ServiceMain] Forwarding KVM session change event=%lu session=%lu", (unsigned long)eventType, (unsigned long)sessionId);
 			kvm_notify_session_change(eventType, sessionId);
 #endif
 
@@ -8980,7 +9210,8 @@ int wmain(int argc, char* wargv[])
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-session-change-probe-child") == 0)
 	{
 		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		return MeshService_RunKvmBridgeSessionChangeProbeChildCommand(reportPath);
+		BOOL autoSelectedTsid = (wideArgv != NULL && argc > 3 && wideArgv[3] != NULL && _wcsicmp(wideArgv[3], L"--auto-selected-tsid") == 0);
+		return MeshService_RunKvmBridgeSessionChangeProbeChildCommand(reportPath, autoSelectedTsid);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-crash-recovery-probe") == 0)
 	{
@@ -9014,6 +9245,11 @@ int wmain(int argc, char* wargv[])
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-secure-desktop-probe") == 0)
 	{
 		return MeshService_RunKvmSecureDesktopProbeCommand();
+	}
+	if (argc > 1 && strcasecmp(argv[1], "-kvm-gpu-encoding-benchmark") == 0)
+	{
+		int frames = (argc > 2) ? (int)strtol(argv[2], NULL, 10) : 5;
+		return kvm_gpu_encoding_benchmark_command(frames);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-elevated-input-probe") == 0)
 	{
@@ -9492,6 +9728,7 @@ int wmain(int argc, char* wargv[])
 					printf("  -kvm-elevated-input-probe             Emit JSON runtime proof for SYSTEM bridge input into elevated cmd.exe.\r\n");
 					printf("  -kvm-blockinput-probe                 Emit JSON runtime proof for same-thread SendInput plus SYSTEM BlockInput(FALSE) override.\r\n");
 					printf("  -kvm-secure-desktop-probe             Emit JSON runtime proof for Winlogon desktop capture during UAC.\r\n");
+					printf("  -kvm-gpu-encoding-benchmark [frames]  Emit JSON GPU encoder probe, DXGI shared-texture, and JPEG benchmark data.\r\n");
 #endif
 					printf("  --selftest            Run agent self-test harness (use --majorBug=1 only for major bug investigation).\r\n");
 					printf("\r\n");

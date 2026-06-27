@@ -18,9 +18,13 @@ limitations under the License.
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <dxgi1_5.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mftransform.h>
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <winrt/base.h>
@@ -2089,8 +2093,8 @@ short initialize_gdiplus()
 	gGdiEscalationFailures = 0;
 	tile_set_capture_backend(KvmCaptureBackend_GDI, gCaptureBackendOverride == 0 ? "gdi:forced" : "gdi:init");
 
-	TILE_WIDTH = 32;
-	TILE_HEIGHT = 32;
+	TILE_WIDTH = KVM_TILE_DEFAULT_WIDTH;
+	TILE_HEIGHT = KVM_TILE_DEFAULT_HEIGHT;
 	COMPRESSION_RATIO = 100;
 	FRAME_RATE_TIMER = 50;
 	InterlockedExchange(&SCALING_FACTOR, 1024);
@@ -2336,6 +2340,860 @@ cleanup:
 	if (adapter != NULL) { adapter->Release(); }
 	if (factory != NULL) { factory->Release(); }
 	return result;
+}
+
+typedef struct KvmGpuRuntimeProbe
+{
+	int dllPresent;
+	int requiredExportPresent;
+	char dllName[64];
+	char exportName[64];
+}KvmGpuRuntimeProbe;
+
+typedef struct KvmGpuAdapterProbe
+{
+	char description[256];
+	UINT vendorId;
+	UINT deviceId;
+	int d3d11Device;
+	int sharedTexture;
+	int openedSharedTexture;
+	int keyedMutex;
+	HRESULT deviceHr;
+	HRESULT sharedHr;
+	HRESULT openHr;
+	HRESULT mutexHr;
+}KvmGpuAdapterProbe;
+
+typedef struct KvmGpuMftProbe
+{
+	int mfplatPresent;
+	int mfStartupOk;
+	UINT h264HardwareCount;
+	UINT hevcHardwareCount;
+	UINT intelHardwareCount;
+	char names[16][160];
+	UINT nameCount;
+	HRESULT startupHr;
+	HRESULT h264EnumHr;
+	HRESULT hevcEnumHr;
+}KvmGpuMftProbe;
+
+typedef struct KvmGpuZeroCopyBenchmark
+{
+	int attempted;
+	int success;
+	int dxgiInitialized;
+	int frameAcquired;
+	int sharedTextureCreated;
+	int sharedHandleCreated;
+	int openedOnEncoderDevice;
+	int keyedMutexSynchronized;
+	UINT width;
+	UINT height;
+	int framesCopied;
+	double elapsedMs;
+	double fps;
+	HRESULT lastHr;
+}KvmGpuZeroCopyBenchmark;
+
+typedef struct KvmGpuJpegBenchmark
+{
+	int attempted;
+	int success;
+	int captureSuccess;
+	char captureBackend[32];
+	char captureReason[96];
+	int width;
+	int height;
+	int pixelSize;
+	int framesEncoded;
+	uint64_t totalBytes;
+	uint64_t averageBytes;
+	double elapsedMs;
+	double fps;
+	double processCpuMs;
+	HRESULT lastHr;
+}KvmGpuJpegBenchmark;
+
+static const GUID MESH_MFT_CATEGORY_VIDEO_ENCODER_GUID =
+{ 0xf79eac7d, 0xe545, 0x4387,{ 0xbd, 0xee, 0xd6, 0x47, 0xd7, 0xbd, 0xe4, 0x2a } };
+static const GUID MESH_MF_MEDIA_TYPE_VIDEO_GUID =
+{ 0x73646976, 0x0000, 0x0010,{ 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MESH_MF_VIDEO_FORMAT_H264_GUID =
+{ 0x34363248, 0x0000, 0x0010,{ 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MESH_MF_VIDEO_FORMAT_HEVC_GUID =
+{ 0x43564548, 0x0000, 0x0010,{ 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MESH_MFT_FRIENDLY_NAME_ATTRIBUTE_GUID =
+{ 0x314ffbae, 0x5b41, 0x4c95,{ 0x9c, 0x19, 0x4e, 0x7d, 0x58, 0x6f, 0xac, 0xe3 } };
+
+typedef HRESULT(WINAPI* PFN_MESH_MFSTARTUP)(ULONG Version, DWORD dwFlags);
+typedef HRESULT(WINAPI* PFN_MESH_MFSHUTDOWN)(void);
+typedef HRESULT(WINAPI* PFN_MESH_MFTENUMEX)(
+	GUID guidCategory,
+	UINT32 Flags,
+	const MFT_REGISTER_TYPE_INFO* pInputType,
+	const MFT_REGISTER_TYPE_INFO* pOutputType,
+	IMFActivate*** pppMFTActivate,
+	UINT32* pnumMFTActivate);
+
+static ULONGLONG tile_gpu_filetime_to_ms(FILETIME value)
+{
+	ULARGE_INTEGER converted;
+	converted.LowPart = value.dwLowDateTime;
+	converted.HighPart = value.dwHighDateTime;
+	return converted.QuadPart / 10000ULL;
+}
+
+static double tile_gpu_elapsed_ms(LARGE_INTEGER start, LARGE_INTEGER end, LARGE_INTEGER freq)
+{
+	if (freq.QuadPart == 0) { return 0.0; }
+	return ((double)(end.QuadPart - start.QuadPart) * 1000.0) / (double)freq.QuadPart;
+}
+
+static void tile_gpu_json_string(const char* value)
+{
+	const unsigned char* cursor = (const unsigned char*)(value != NULL ? value : "");
+	putchar('"');
+	while (*cursor != 0)
+	{
+		switch (*cursor)
+		{
+		case '\\': fputs("\\\\", stdout); break;
+		case '"': fputs("\\\"", stdout); break;
+		case '\b': fputs("\\b", stdout); break;
+		case '\f': fputs("\\f", stdout); break;
+		case '\n': fputs("\\n", stdout); break;
+		case '\r': fputs("\\r", stdout); break;
+		case '\t': fputs("\\t", stdout); break;
+		default:
+			if (*cursor < 0x20) { printf("\\u%04x", (unsigned int)*cursor); }
+			else { putchar((int)*cursor); }
+			break;
+		}
+		++cursor;
+	}
+	putchar('"');
+}
+
+static void tile_gpu_hresult_json(HRESULT hr)
+{
+	printf("\"0x%08lX\"", (unsigned long)((DWORD)hr));
+}
+
+static int tile_gpu_contains_ascii_ci(const char* text, const char* needle)
+{
+	size_t textLen;
+	size_t needleLen;
+	if (text == NULL || needle == NULL) { return 0; }
+	textLen = strlen(text);
+	needleLen = strlen(needle);
+	if (needleLen == 0 || textLen < needleLen) { return 0; }
+	for (size_t i = 0; i <= textLen - needleLen; ++i)
+	{
+		size_t j;
+		for (j = 0; j < needleLen; ++j)
+		{
+			char a = text[i + j];
+			char b = needle[j];
+			if (a >= 'A' && a <= 'Z') { a = (char)(a + ('a' - 'A')); }
+			if (b >= 'A' && b <= 'Z') { b = (char)(b + ('a' - 'A')); }
+			if (a != b) { break; }
+		}
+		if (j == needleLen) { return 1; }
+	}
+	return 0;
+}
+
+static const char* tile_gpu_vendor_name(UINT vendorId)
+{
+	switch (vendorId)
+	{
+	case 0x10DE: return "nvidia";
+	case 0x1002:
+	case 0x1022: return "amd";
+	case 0x8086: return "intel";
+	default: return "unknown";
+	}
+}
+
+static void tile_gpu_probe_runtime_dll(const char* dllName, const char* exportName, KvmGpuRuntimeProbe* probe)
+{
+	HMODULE moduleHandle;
+	if (probe == NULL) { return; }
+	ZeroMemory(probe, sizeof(*probe));
+	strcpy_s(probe->dllName, sizeof(probe->dllName), dllName != NULL ? dllName : "");
+	strcpy_s(probe->exportName, sizeof(probe->exportName), exportName != NULL ? exportName : "");
+	moduleHandle = LoadLibraryA(dllName);
+	if (moduleHandle == NULL) { return; }
+	probe->dllPresent = 1;
+	if (exportName == NULL || exportName[0] == 0 || GetProcAddress(moduleHandle, exportName) != NULL)
+	{
+		probe->requiredExportPresent = 1;
+	}
+	FreeLibrary(moduleHandle);
+}
+
+static HRESULT tile_gpu_probe_adapter_zero_copy(IDXGIAdapter1* adapter, KvmGpuAdapterProbe* probe)
+{
+	ID3D11Device* captureDevice = NULL;
+	ID3D11DeviceContext* captureContext = NULL;
+	ID3D11Device* encoderDevice = NULL;
+	ID3D11DeviceContext* encoderContext = NULL;
+	ID3D11Texture2D* sharedTexture = NULL;
+	ID3D11Texture2D* openedTexture = NULL;
+	IDXGIResource* sharedResource = NULL;
+	IDXGIKeyedMutex* captureMutex = NULL;
+	IDXGIKeyedMutex* encoderMutex = NULL;
+	D3D11_TEXTURE2D_DESC desc;
+	D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_9_1;
+	D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
+	HANDLE sharedHandle = NULL;
+	HRESULT hr;
+	HRESULT result = E_FAIL;
+
+	if (probe == NULL || adapter == NULL) { return E_INVALIDARG; }
+	probe->deviceHr = tile_d3d11_create_device(adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+		featureLevels, ARRAYSIZE(featureLevels), D3D11_SDK_VERSION, &captureDevice, &featureLevel, &captureContext);
+	if (FAILED(probe->deviceHr) || captureDevice == NULL || captureContext == NULL)
+	{
+		result = probe->deviceHr;
+		goto cleanup;
+	}
+	probe->d3d11Device = 1;
+
+	hr = tile_d3d11_create_device(adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+		featureLevels, ARRAYSIZE(featureLevels), D3D11_SDK_VERSION, &encoderDevice, &featureLevel, &encoderContext);
+	if (FAILED(hr) || encoderDevice == NULL)
+	{
+		probe->openHr = hr;
+		result = hr;
+		goto cleanup;
+	}
+
+	ZeroMemory(&desc, sizeof(desc));
+	desc.Width = 64;
+	desc.Height = 64;
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+	desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+	probe->sharedHr = captureDevice->CreateTexture2D(&desc, NULL, &sharedTexture);
+	if (FAILED(probe->sharedHr) || sharedTexture == NULL)
+	{
+		result = probe->sharedHr;
+		goto cleanup;
+	}
+	probe->sharedTexture = 1;
+
+	probe->sharedHr = sharedTexture->QueryInterface(__uuidof(IDXGIResource), (void**)&sharedResource);
+	if (FAILED(probe->sharedHr) || sharedResource == NULL)
+	{
+		result = probe->sharedHr;
+		goto cleanup;
+	}
+	probe->sharedHr = sharedResource->GetSharedHandle(&sharedHandle);
+	if (FAILED(probe->sharedHr) || sharedHandle == NULL)
+	{
+		result = probe->sharedHr;
+		goto cleanup;
+	}
+
+	probe->openHr = encoderDevice->OpenSharedResource(sharedHandle, __uuidof(ID3D11Texture2D), (void**)&openedTexture);
+	if (FAILED(probe->openHr) || openedTexture == NULL)
+	{
+		result = probe->openHr;
+		goto cleanup;
+	}
+	probe->openedSharedTexture = 1;
+
+	probe->mutexHr = sharedTexture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&captureMutex);
+	if (SUCCEEDED(probe->mutexHr) && captureMutex != NULL)
+	{
+		probe->mutexHr = openedTexture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&encoderMutex);
+	}
+	if (FAILED(probe->mutexHr) || captureMutex == NULL || encoderMutex == NULL)
+	{
+		result = probe->mutexHr;
+		goto cleanup;
+	}
+
+	probe->mutexHr = captureMutex->AcquireSync(0, 1000);
+	if (SUCCEEDED(probe->mutexHr))
+	{
+		probe->mutexHr = captureMutex->ReleaseSync(1);
+	}
+	if (SUCCEEDED(probe->mutexHr))
+	{
+		probe->mutexHr = encoderMutex->AcquireSync(1, 1000);
+	}
+	if (SUCCEEDED(probe->mutexHr))
+	{
+		probe->mutexHr = encoderMutex->ReleaseSync(0);
+	}
+	if (FAILED(probe->mutexHr))
+	{
+		result = probe->mutexHr;
+		goto cleanup;
+	}
+	probe->keyedMutex = 1;
+	result = S_OK;
+
+cleanup:
+	if (encoderMutex != NULL) { encoderMutex->Release(); }
+	if (captureMutex != NULL) { captureMutex->Release(); }
+	if (openedTexture != NULL) { openedTexture->Release(); }
+	if (sharedResource != NULL) { sharedResource->Release(); }
+	if (sharedTexture != NULL) { sharedTexture->Release(); }
+	if (encoderContext != NULL) { encoderContext->Release(); }
+	if (encoderDevice != NULL) { encoderDevice->Release(); }
+	if (captureContext != NULL) { captureContext->Release(); }
+	if (captureDevice != NULL) { captureDevice->Release(); }
+	return result;
+}
+
+static UINT tile_gpu_probe_adapters(KvmGpuAdapterProbe* probes, UINT maxProbes)
+{
+	IDXGIFactory1* factory = NULL;
+	UINT count = 0;
+	HRESULT hr;
+
+	if (probes == NULL || maxProbes == 0) { return 0; }
+	ZeroMemory(probes, sizeof(KvmGpuAdapterProbe) * maxProbes);
+	hr = tile_create_dxgi_factory1(__uuidof(IDXGIFactory1), (void**)&factory);
+	if (FAILED(hr) || factory == NULL) { return 0; }
+
+	for (UINT index = 0; index < maxProbes; ++index)
+	{
+		IDXGIAdapter1* adapter = NULL;
+		DXGI_ADAPTER_DESC1 desc;
+		hr = factory->EnumAdapters1(index, &adapter);
+		if (hr == DXGI_ERROR_NOT_FOUND) { break; }
+		if (FAILED(hr) || adapter == NULL) { continue; }
+		ZeroMemory(&desc, sizeof(desc));
+		if (SUCCEEDED(adapter->GetDesc1(&desc)))
+		{
+			WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, probes[count].description, (int)sizeof(probes[count].description), NULL, NULL);
+			probes[count].vendorId = desc.VendorId;
+			probes[count].deviceId = desc.DeviceId;
+		}
+		(void)tile_gpu_probe_adapter_zero_copy(adapter, &probes[count]);
+		adapter->Release();
+		++count;
+	}
+
+	factory->Release();
+	return count;
+}
+
+static void tile_gpu_add_mft_name(KvmGpuMftProbe* probe, const char* name)
+{
+	if (probe == NULL || name == NULL || name[0] == 0 || probe->nameCount >= ARRAYSIZE(probe->names)) { return; }
+	strcpy_s(probe->names[probe->nameCount], sizeof(probe->names[probe->nameCount]), name);
+	++probe->nameCount;
+	if (tile_gpu_contains_ascii_ci(name, "intel") || tile_gpu_contains_ascii_ci(name, "quick sync") || tile_gpu_contains_ascii_ci(name, "qsv"))
+	{
+		++probe->intelHardwareCount;
+	}
+}
+
+static HRESULT tile_gpu_mft_enum_codec(PFN_MESH_MFTENUMEX enumFn, const GUID* subtype, UINT* countOut, KvmGpuMftProbe* probe)
+{
+	MFT_REGISTER_TYPE_INFO outputType;
+	IMFActivate** activates = NULL;
+	UINT32 activateCount = 0;
+	HRESULT hr;
+
+	if (enumFn == NULL || subtype == NULL || countOut == NULL) { return E_INVALIDARG; }
+	*countOut = 0;
+	ZeroMemory(&outputType, sizeof(outputType));
+	outputType.guidMajorType = MESH_MF_MEDIA_TYPE_VIDEO_GUID;
+	outputType.guidSubtype = *subtype;
+
+	hr = enumFn(MESH_MFT_CATEGORY_VIDEO_ENCODER_GUID,
+		MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+		NULL,
+		&outputType,
+		&activates,
+		&activateCount);
+	if (SUCCEEDED(hr))
+	{
+		*countOut = activateCount;
+		for (UINT32 i = 0; i < activateCount; ++i)
+		{
+			WCHAR* friendlyName = NULL;
+			UINT32 friendlyNameCch = 0;
+			if (activates != NULL && activates[i] != NULL)
+			{
+				if (SUCCEEDED(activates[i]->GetAllocatedString(MESH_MFT_FRIENDLY_NAME_ATTRIBUTE_GUID, &friendlyName, &friendlyNameCch)) &&
+					friendlyName != NULL)
+				{
+					char utf8Name[160];
+					ZeroMemory(utf8Name, sizeof(utf8Name));
+					WideCharToMultiByte(CP_UTF8, 0, friendlyName, -1, utf8Name, (int)sizeof(utf8Name), NULL, NULL);
+					tile_gpu_add_mft_name(probe, utf8Name);
+				}
+				activates[i]->Release();
+			}
+			if (friendlyName != NULL) { CoTaskMemFree(friendlyName); }
+		}
+	}
+	if (activates != NULL) { CoTaskMemFree(activates); }
+	return hr;
+}
+
+static void tile_gpu_probe_mft(KvmGpuMftProbe* probe)
+{
+	HMODULE mfplat;
+	PFN_MESH_MFSTARTUP mfStartup;
+	PFN_MESH_MFSHUTDOWN mfShutdown;
+	PFN_MESH_MFTENUMEX mftEnumEx;
+	HRESULT coHr;
+	int coInitialized = 0;
+
+	if (probe == NULL) { return; }
+	ZeroMemory(probe, sizeof(*probe));
+	probe->startupHr = E_NOTIMPL;
+	probe->h264EnumHr = E_NOTIMPL;
+	probe->hevcEnumHr = E_NOTIMPL;
+	mfplat = LoadLibraryA("mfplat.dll");
+	if (mfplat == NULL) { return; }
+	probe->mfplatPresent = 1;
+	mfStartup = (PFN_MESH_MFSTARTUP)GetProcAddress(mfplat, "MFStartup");
+	mfShutdown = (PFN_MESH_MFSHUTDOWN)GetProcAddress(mfplat, "MFShutdown");
+	mftEnumEx = (PFN_MESH_MFTENUMEX)GetProcAddress(mfplat, "MFTEnumEx");
+	if (mfStartup == NULL || mfShutdown == NULL || mftEnumEx == NULL)
+	{
+		FreeLibrary(mfplat);
+		return;
+	}
+
+	coHr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+	if (SUCCEEDED(coHr)) { coInitialized = 1; }
+	probe->startupHr = mfStartup(MF_VERSION, 0);
+	if (SUCCEEDED(probe->startupHr))
+	{
+		probe->mfStartupOk = 1;
+		probe->h264EnumHr = tile_gpu_mft_enum_codec(mftEnumEx, &MESH_MF_VIDEO_FORMAT_H264_GUID, &probe->h264HardwareCount, probe);
+		probe->hevcEnumHr = tile_gpu_mft_enum_codec(mftEnumEx, &MESH_MF_VIDEO_FORMAT_HEVC_GUID, &probe->hevcHardwareCount, probe);
+		mfShutdown();
+	}
+	if (coInitialized) { CoUninitialize(); }
+	FreeLibrary(mfplat);
+}
+
+static int tile_gpu_encode_jpeg_buffer(void* desktop, int width, int height, int pixelSize, DWORD* jpegBytes)
+{
+	BITMAPINFO bmpInfo;
+	BITMAPFILEHEADER bmpFileHeader;
+	LARGE_INTEGER offset;
+	ULARGE_INTEGER size;
+	IStream* bmpStream = NULL;
+	IStream* jpegStream = NULL;
+	Gdiplus::Image* dibImage = NULL;
+	Status status;
+	size_t imageBytes;
+	int ok = 0;
+
+	if (desktop == NULL || width <= 0 || height <= 0 || pixelSize <= 0 || jpegBytes == NULL) { return 0; }
+	*jpegBytes = 0;
+	ZeroMemory(&bmpInfo, sizeof(bmpInfo));
+	bmpInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	bmpInfo.bmiHeader.biBitCount = (WORD)(pixelSize * 8);
+	bmpInfo.bmiHeader.biHeight = height;
+	bmpInfo.bmiHeader.biWidth = width;
+	bmpInfo.bmiHeader.biSizeImage = width * height * pixelSize;
+	bmpInfo.bmiHeader.biPlanes = 1;
+	bmpInfo.bmiHeader.biCompression = BI_RGB;
+	imageBytes = (size_t)bmpInfo.bmiHeader.biSizeImage;
+
+	ZeroMemory(&bmpFileHeader, sizeof(bmpFileHeader));
+	bmpFileHeader.bfSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + bmpInfo.bmiHeader.biSizeImage;
+	bmpFileHeader.bfType = 'MB';
+	bmpFileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+
+	if (CreateStreamOnHGlobal(NULL, TRUE, &bmpStream) != S_OK) { goto cleanup; }
+	if (bmpStream->Write(&bmpFileHeader, sizeof(BITMAPFILEHEADER), NULL) != S_OK) { goto cleanup; }
+	if (bmpStream->Write(&bmpInfo, sizeof(BITMAPINFOHEADER), NULL) != S_OK) { goto cleanup; }
+	if (bmpStream->Write(desktop, (ULONG)imageBytes, NULL) != S_OK) { goto cleanup; }
+	offset.QuadPart = 0;
+	if (bmpStream->Seek(offset, STREAM_SEEK_SET, NULL) != S_OK) { goto cleanup; }
+	dibImage = Gdiplus::Image::FromStream(bmpStream);
+	if (dibImage == NULL || dibImage->GetLastStatus() != Ok) { goto cleanup; }
+	if (CreateStreamOnHGlobal(NULL, TRUE, &jpegStream) != S_OK) { goto cleanup; }
+	status = dibImage->Save(jpegStream, &encoderClsid, &encParam);
+	if (status != Ok) { goto cleanup; }
+	offset.QuadPart = 0;
+	if (jpegStream->Seek(offset, STREAM_SEEK_END, &size) != S_OK) { goto cleanup; }
+	if (size.QuadPart > MAXDWORD) { goto cleanup; }
+	*jpegBytes = (DWORD)size.QuadPart;
+	ok = 1;
+
+cleanup:
+	if (dibImage != NULL) { delete dibImage; }
+	if (jpegStream != NULL) { jpegStream->Release(); }
+	if (bmpStream != NULL) { bmpStream->Release(); }
+	return ok;
+}
+
+static void tile_gpu_run_zero_copy_benchmark(int frames, KvmGpuZeroCopyBenchmark* result)
+{
+	IDXGIResource* desktopResource = NULL;
+	ID3D11Texture2D* desktopTexture = NULL;
+	ID3D11Texture2D* sharedTexture = NULL;
+	ID3D11Texture2D* openedTexture = NULL;
+	IDXGIResource* sharedResource = NULL;
+	ID3D11Device* encoderDevice = NULL;
+	ID3D11DeviceContext* encoderContext = NULL;
+	IDXGIKeyedMutex* captureMutex = NULL;
+	IDXGIKeyedMutex* encoderMutex = NULL;
+	DXGI_OUTDUPL_FRAME_INFO frameInfo;
+	D3D11_TEXTURE2D_DESC desc;
+	D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_9_1;
+	D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
+	HANDLE sharedHandle = NULL;
+	LARGE_INTEGER qpcFreq;
+	LARGE_INTEGER start;
+	LARGE_INTEGER end;
+	HRESULT releaseHr;
+	HRESULT hr = E_FAIL;
+	int acquiredMutex = 0;
+
+	if (result == NULL) { return; }
+	ZeroMemory(result, sizeof(*result));
+	result->attempted = 1;
+	result->lastHr = E_FAIL;
+	if (frames < 1) { frames = 1; }
+
+	if (gDxgiCapture.duplication == NULL && !tile_dxgi_initialize())
+	{
+		result->lastHr = E_FAIL;
+		return;
+	}
+	result->dxgiInitialized = (gDxgiCapture.duplication != NULL && gDxgiCapture.device != NULL && gDxgiCapture.context != NULL);
+	if (!result->dxgiInitialized)
+	{
+		result->lastHr = E_FAIL;
+		return;
+	}
+	result->width = gDxgiCapture.sourceWidth;
+	result->height = gDxgiCapture.sourceHeight;
+
+	ZeroMemory(&frameInfo, sizeof(frameInfo));
+	for (int attempt = 0; attempt < TILE_DXGI_ONESHOT_FRAME_READY_ATTEMPTS; ++attempt)
+	{
+		hr = gDxgiCapture.duplication->AcquireNextFrame(TILE_DXGI_ONESHOT_FRAME_WAIT_MS, &frameInfo, &desktopResource);
+		if (hr == DXGI_ERROR_WAIT_TIMEOUT) { continue; }
+		if (SUCCEEDED(hr))
+		{
+			if (desktopResource != NULL) { break; }
+			releaseHr = tile_dxgi_release_frame(gDxgiCapture.duplication, &desktopResource);
+			if (FAILED(releaseHr)) { hr = releaseHr; goto cleanup; }
+			continue;
+		}
+		goto cleanup;
+	}
+	if (FAILED(hr) || desktopResource == NULL)
+	{
+		result->lastHr = hr;
+		goto cleanup;
+	}
+	result->frameAcquired = 1;
+
+	hr = desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&desktopTexture);
+	if (FAILED(hr) || desktopTexture == NULL) { goto cleanup; }
+	ZeroMemory(&desc, sizeof(desc));
+	desktopTexture->GetDesc(&desc);
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+	desc.CPUAccessFlags = 0;
+	desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+	hr = gDxgiCapture.device->CreateTexture2D(&desc, NULL, &sharedTexture);
+	if (FAILED(hr) || sharedTexture == NULL) { goto cleanup; }
+	result->sharedTextureCreated = 1;
+
+	hr = sharedTexture->QueryInterface(__uuidof(IDXGIResource), (void**)&sharedResource);
+	if (FAILED(hr) || sharedResource == NULL) { goto cleanup; }
+	hr = sharedResource->GetSharedHandle(&sharedHandle);
+	if (FAILED(hr) || sharedHandle == NULL) { goto cleanup; }
+	result->sharedHandleCreated = 1;
+
+	hr = tile_d3d11_create_device(gDxgiCapture.adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+		featureLevels, ARRAYSIZE(featureLevels), D3D11_SDK_VERSION, &encoderDevice, &featureLevel, &encoderContext);
+	if (FAILED(hr) || encoderDevice == NULL) { goto cleanup; }
+	hr = encoderDevice->OpenSharedResource(sharedHandle, __uuidof(ID3D11Texture2D), (void**)&openedTexture);
+	if (FAILED(hr) || openedTexture == NULL) { goto cleanup; }
+	result->openedOnEncoderDevice = 1;
+
+	hr = sharedTexture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&captureMutex);
+	if (SUCCEEDED(hr) && captureMutex != NULL)
+	{
+		hr = openedTexture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&encoderMutex);
+	}
+	if (FAILED(hr) || captureMutex == NULL || encoderMutex == NULL) { goto cleanup; }
+
+	QueryPerformanceFrequency(&qpcFreq);
+	QueryPerformanceCounter(&start);
+	for (int i = 0; i < frames; ++i)
+	{
+		hr = captureMutex->AcquireSync(0, 1000);
+		if (FAILED(hr)) { goto cleanup; }
+		acquiredMutex = 1;
+		gDxgiCapture.context->CopyResource(sharedTexture, desktopTexture);
+		gDxgiCapture.context->Flush();
+		hr = captureMutex->ReleaseSync(1);
+		acquiredMutex = 0;
+		if (FAILED(hr)) { goto cleanup; }
+		hr = encoderMutex->AcquireSync(1, 1000);
+		if (FAILED(hr)) { goto cleanup; }
+		hr = encoderMutex->ReleaseSync(0);
+		if (FAILED(hr)) { goto cleanup; }
+		++result->framesCopied;
+	}
+	QueryPerformanceCounter(&end);
+	result->elapsedMs = tile_gpu_elapsed_ms(start, end, qpcFreq);
+	result->fps = (result->elapsedMs > 0.0) ? ((double)result->framesCopied * 1000.0 / result->elapsedMs) : 0.0;
+	result->keyedMutexSynchronized = (result->framesCopied == frames);
+	result->success = (result->dxgiInitialized && result->frameAcquired && result->sharedTextureCreated &&
+		result->sharedHandleCreated && result->openedOnEncoderDevice && result->keyedMutexSynchronized);
+	hr = S_OK;
+
+cleanup:
+	result->lastHr = hr;
+	if (acquiredMutex && captureMutex != NULL) { (void)captureMutex->ReleaseSync(0); }
+	if (desktopResource != NULL && gDxgiCapture.duplication != NULL)
+	{
+		releaseHr = tile_dxgi_release_frame(gDxgiCapture.duplication, &desktopResource);
+		(void)releaseHr;
+	}
+	if (encoderMutex != NULL) { encoderMutex->Release(); }
+	if (captureMutex != NULL) { captureMutex->Release(); }
+	if (openedTexture != NULL) { openedTexture->Release(); }
+	if (encoderContext != NULL) { encoderContext->Release(); }
+	if (encoderDevice != NULL) { encoderDevice->Release(); }
+	if (sharedResource != NULL) { sharedResource->Release(); }
+	if (sharedTexture != NULL) { sharedTexture->Release(); }
+	if (desktopTexture != NULL) { desktopTexture->Release(); }
+	if (desktopResource != NULL) { desktopResource->Release(); }
+}
+
+static void tile_gpu_run_jpeg_benchmark(int frames, KvmGpuJpegBenchmark* result)
+{
+	void* desktop = NULL;
+	long long desktopSize = 0;
+	long mouseMove[3] = { 0, 0, 0 };
+	LARGE_INTEGER qpcFreq;
+	LARGE_INTEGER start;
+	LARGE_INTEGER end;
+	FILETIME createTime;
+	FILETIME exitTime;
+	FILETIME kernelStart;
+	FILETIME userStart;
+	FILETIME kernelEnd;
+	FILETIME userEnd;
+	DWORD jpegBytes = 0;
+	int width;
+	int height;
+
+	if (result == NULL) { return; }
+	ZeroMemory(result, sizeof(*result));
+	result->attempted = 1;
+	result->lastHr = E_FAIL;
+	if (frames < 1) { frames = 1; }
+
+	if (get_desktop_buffer(&desktop, &desktopSize, mouseMove) != 0 || desktop == NULL || desktopSize <= 0)
+	{
+		return;
+	}
+	result->captureSuccess = 1;
+	strcpy_s(result->captureBackend, sizeof(result->captureBackend), get_capture_backend_name());
+	strcpy_s(result->captureReason, sizeof(result->captureReason), get_capture_backend_reason());
+	width = adjust_screen_size(SCALED_WIDTH);
+	height = adjust_screen_size(SCALED_HEIGHT);
+	result->width = width;
+	result->height = height;
+	result->pixelSize = PIXEL_SIZE;
+
+	GetProcessTimes(GetCurrentProcess(), &createTime, &exitTime, &kernelStart, &userStart);
+	QueryPerformanceFrequency(&qpcFreq);
+	QueryPerformanceCounter(&start);
+	for (int i = 0; i < frames; ++i)
+	{
+		if (!tile_gpu_encode_jpeg_buffer(desktop, width, height, PIXEL_SIZE, &jpegBytes))
+		{
+			break;
+		}
+		result->totalBytes += jpegBytes;
+		++result->framesEncoded;
+	}
+	QueryPerformanceCounter(&end);
+	GetProcessTimes(GetCurrentProcess(), &createTime, &exitTime, &kernelEnd, &userEnd);
+	result->elapsedMs = tile_gpu_elapsed_ms(start, end, qpcFreq);
+	result->fps = (result->elapsedMs > 0.0) ? ((double)result->framesEncoded * 1000.0 / result->elapsedMs) : 0.0;
+	result->processCpuMs = (double)(
+		(tile_gpu_filetime_to_ms(kernelEnd) - tile_gpu_filetime_to_ms(kernelStart)) +
+		(tile_gpu_filetime_to_ms(userEnd) - tile_gpu_filetime_to_ms(userStart)));
+	result->averageBytes = (result->framesEncoded > 0) ? (result->totalBytes / (uint64_t)result->framesEncoded) : 0;
+	result->success = (result->framesEncoded == frames);
+	result->lastHr = result->success ? S_OK : E_FAIL;
+	free(desktop);
+}
+
+static const char* tile_gpu_recommendation(
+	const KvmGpuRuntimeProbe* nvenc,
+	const KvmGpuRuntimeProbe* amf,
+	const KvmGpuMftProbe* qsv,
+	const KvmGpuZeroCopyBenchmark* zeroCopy)
+{
+	if (zeroCopy != NULL && zeroCopy->success)
+	{
+		if (nvenc != NULL && nvenc->dllPresent && nvenc->requiredExportPresent)
+		{
+			return "GO_NVENC_SPIKE_ONLY_VIEWER_NEGOTIATION_REQUIRED";
+		}
+		if (qsv != NULL && qsv->intelHardwareCount > 0)
+		{
+			return "GO_QSV_MFT_SPIKE_ONLY_VIEWER_NEGOTIATION_REQUIRED";
+		}
+		if (amf != NULL && amf->dllPresent && amf->requiredExportPresent)
+		{
+			return "GO_AMF_SPIKE_ONLY_VIEWER_NEGOTIATION_REQUIRED";
+		}
+		return "NO_GO_NO_VENDOR_ENCODER_RUNTIME";
+	}
+	return "NO_GO_ZERO_COPY_DXGI_SHARED_TEXTURE_NOT_VALIDATED";
+}
+
+int kvm_gpu_encoding_benchmark_command(int frames)
+{
+	KvmGpuRuntimeProbe nvenc;
+	KvmGpuRuntimeProbe amf;
+	KvmGpuRuntimeProbe qsvDll;
+	KvmGpuMftProbe qsvMft;
+	KvmGpuAdapterProbe adapters[8];
+	KvmGpuZeroCopyBenchmark zeroCopy;
+	KvmGpuJpegBenchmark jpeg;
+	UINT adapterCount;
+	int initialized;
+	int success;
+	const char* recommendation;
+	char outputPath[MAX_PATH * 4];
+	FILE* redirectedOutput = NULL;
+
+	if (frames < 1) { frames = 5; }
+	if (frames > 120) { frames = 120; }
+	ZeroMemory(outputPath, sizeof(outputPath));
+	if (GetEnvironmentVariableA("MESH_GPU_BENCHMARK_JSON", outputPath, (DWORD)sizeof(outputPath)) > 0 && outputPath[0] != 0)
+	{
+		(void)freopen_s(&redirectedOutput, outputPath, "wb", stdout);
+	}
+
+	tile_gpu_probe_runtime_dll("nvEncodeAPI64.dll", "NvEncodeAPICreateInstance", &nvenc);
+	tile_gpu_probe_runtime_dll("amfrt64.dll", "AMFInit", &amf);
+	tile_gpu_probe_runtime_dll("libmfxhw64.dll", "", &qsvDll);
+	tile_gpu_probe_mft(&qsvMft);
+	adapterCount = tile_gpu_probe_adapters(adapters, ARRAYSIZE(adapters));
+
+	initialized = initialize_gdiplus();
+	ZeroMemory(&zeroCopy, sizeof(zeroCopy));
+	ZeroMemory(&jpeg, sizeof(jpeg));
+	if (initialized)
+	{
+		tile_gpu_run_zero_copy_benchmark(frames, &zeroCopy);
+		tile_gpu_run_jpeg_benchmark(frames, &jpeg);
+		teardown_gdiplus();
+	}
+	recommendation = tile_gpu_recommendation(&nvenc, &amf, &qsvMft, &zeroCopy);
+	success = initialized && jpeg.success && zeroCopy.success;
+
+	printf("{");
+	printf("\"success\":%s,", success ? "true" : "false");
+	printf("\"phase\":\"gpu-encoding-benchmark\",");
+	printf("\"framesRequested\":%d,", frames);
+	printf("\"productionPathChanged\":false,");
+	printf("\"viewerCodecNegotiationImplemented\":false,");
+	printf("\"vendorProbe\":{");
+	printf("\"nvenc\":{\"dll\":"); tile_gpu_json_string(nvenc.dllName); printf(",\"dllPresent\":%s,\"requiredExport\":", nvenc.dllPresent ? "true" : "false"); tile_gpu_json_string(nvenc.exportName); printf(",\"requiredExportPresent\":%s},", nvenc.requiredExportPresent ? "true" : "false");
+	printf("\"amf\":{\"dll\":"); tile_gpu_json_string(amf.dllName); printf(",\"dllPresent\":%s,\"requiredExport\":", amf.dllPresent ? "true" : "false"); tile_gpu_json_string(amf.exportName); printf(",\"requiredExportPresent\":%s},", amf.requiredExportPresent ? "true" : "false");
+	printf("\"qsvRuntime\":{\"dll\":"); tile_gpu_json_string(qsvDll.dllName); printf(",\"dllPresent\":%s,\"requiredExportPresent\":%s},", qsvDll.dllPresent ? "true" : "false", qsvDll.requiredExportPresent ? "true" : "false");
+	printf("\"qsvMft\":{\"mfplatPresent\":%s,\"mfStartupOk\":%s,\"h264HardwareCount\":%u,\"hevcHardwareCount\":%u,\"intelHardwareCount\":%u,\"startupHr\":",
+		qsvMft.mfplatPresent ? "true" : "false",
+		qsvMft.mfStartupOk ? "true" : "false",
+		qsvMft.h264HardwareCount,
+		qsvMft.hevcHardwareCount,
+		qsvMft.intelHardwareCount);
+	tile_gpu_hresult_json(qsvMft.startupHr);
+	printf(",\"h264EnumHr\":"); tile_gpu_hresult_json(qsvMft.h264EnumHr);
+	printf(",\"hevcEnumHr\":"); tile_gpu_hresult_json(qsvMft.hevcEnumHr);
+	printf(",\"names\":[");
+	for (UINT i = 0; i < qsvMft.nameCount; ++i)
+	{
+		if (i != 0) { putchar(','); }
+		tile_gpu_json_string(qsvMft.names[i]);
+	}
+	printf("]}} ,");
+	printf("\"adapters\":[");
+	for (UINT i = 0; i < adapterCount; ++i)
+	{
+		if (i != 0) { putchar(','); }
+		printf("{\"description\":"); tile_gpu_json_string(adapters[i].description);
+		printf(",\"vendor\":"); tile_gpu_json_string(tile_gpu_vendor_name(adapters[i].vendorId));
+		printf(",\"vendorId\":\"0x%04X\",\"deviceId\":\"0x%04X\",\"d3d11Device\":%s,\"sharedTexture\":%s,\"openedSharedTexture\":%s,\"keyedMutex\":%s,\"deviceHr\":",
+			adapters[i].vendorId,
+			adapters[i].deviceId,
+			adapters[i].d3d11Device ? "true" : "false",
+			adapters[i].sharedTexture ? "true" : "false",
+			adapters[i].openedSharedTexture ? "true" : "false",
+			adapters[i].keyedMutex ? "true" : "false");
+		tile_gpu_hresult_json(adapters[i].deviceHr);
+		printf(",\"sharedHr\":"); tile_gpu_hresult_json(adapters[i].sharedHr);
+		printf(",\"openHr\":"); tile_gpu_hresult_json(adapters[i].openHr);
+		printf(",\"mutexHr\":"); tile_gpu_hresult_json(adapters[i].mutexHr);
+		printf("}");
+	}
+	printf("],");
+	printf("\"zeroCopyDxgiToEncoderTexture\":{\"attempted\":%s,\"success\":%s,\"dxgiInitialized\":%s,\"frameAcquired\":%s,\"sharedTextureCreated\":%s,\"sharedHandleCreated\":%s,\"openedOnEncoderDevice\":%s,\"keyedMutexSynchronized\":%s,\"width\":%u,\"height\":%u,\"framesCopied\":%d,\"elapsedMs\":%.3f,\"fps\":%.3f,\"lastHr\":",
+		zeroCopy.attempted ? "true" : "false",
+		zeroCopy.success ? "true" : "false",
+		zeroCopy.dxgiInitialized ? "true" : "false",
+		zeroCopy.frameAcquired ? "true" : "false",
+		zeroCopy.sharedTextureCreated ? "true" : "false",
+		zeroCopy.sharedHandleCreated ? "true" : "false",
+		zeroCopy.openedOnEncoderDevice ? "true" : "false",
+		zeroCopy.keyedMutexSynchronized ? "true" : "false",
+		zeroCopy.width,
+		zeroCopy.height,
+		zeroCopy.framesCopied,
+		zeroCopy.elapsedMs,
+		zeroCopy.fps);
+	tile_gpu_hresult_json(zeroCopy.lastHr);
+	printf("},");
+	printf("\"jpegReference\":{\"attempted\":%s,\"success\":%s,\"captureSuccess\":%s,\"captureBackend\":",
+		jpeg.attempted ? "true" : "false",
+		jpeg.success ? "true" : "false",
+		jpeg.captureSuccess ? "true" : "false");
+	tile_gpu_json_string(jpeg.captureBackend);
+	printf(",\"captureReason\":"); tile_gpu_json_string(jpeg.captureReason);
+	printf(",\"width\":%d,\"height\":%d,\"pixelSize\":%d,\"framesEncoded\":%d,\"totalBytes\":%llu,\"averageBytes\":%llu,\"elapsedMs\":%.3f,\"fps\":%.3f,\"processCpuMs\":%.3f,\"lastHr\":",
+		jpeg.width,
+		jpeg.height,
+		jpeg.pixelSize,
+		jpeg.framesEncoded,
+		(unsigned long long)jpeg.totalBytes,
+		(unsigned long long)jpeg.averageBytes,
+		jpeg.elapsedMs,
+		jpeg.fps,
+		jpeg.processCpuMs);
+	tile_gpu_hresult_json(jpeg.lastHr);
+	printf("},");
+	printf("\"fallbackChain\":[\"gpu encoder disabled until viewer codec negotiation exists\",\"DXGI plus CPU readback plus JPEG tiles\",\"WGC fallback when DXGI is unsupported\",\"GDI plus JPEG tiles\"],");
+	printf("\"recommendation\":"); tile_gpu_json_string(recommendation);
+	printf("}\n");
+	fflush(stdout);
+	return success ? 0 : 1;
 }
 
 }

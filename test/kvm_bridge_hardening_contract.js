@@ -53,11 +53,17 @@ function main() {
     const checks = {
         hasBridgeHardeningHelper: kvmSource.includes('static BOOL kvm_relay_harden_bridge_process'),
         protectsBridgeProcessHandle: kvmSource.includes('Stealth_ProtectProcessByHandle(childProcessHandle)'),
-        getsSharedJobObject: kvmSource.includes('Watchdog_GetOrCreateJobObject()'),
+        createsScopedKillOnCloseJobObject: kvmSource.includes('Watchdog_CreateKillOnCloseJobObject()'),
         assignsBridgeToJobObject: kvmSource.includes('AssignProcessToJobObject(jobObject, childProcessHandle)'),
-        failsSpawnWhenHardeningFails: kvmSource.includes('rundll32 bridge hardening failed'),
+        usesPreStartHardeningCallback: kvmSource.includes('kvm_relay_bridge_pre_start_handler') &&
+            kvmSource.includes('ILibProcessPipe_Manager_SpawnProcessEx5('),
+        rejectsIncompletePreStartHardening: kvmSource.includes('rundll32 bridge hardening contract incomplete') &&
+            kvmSource.includes('rundll32 bridge pre-start hardening failed'),
+        doesNotUseSharedWatchdogJobForKvmBridge: !kvmSource.includes('Watchdog_GetOrCreateJobObject()'),
+        exposesScopedJobCreator: watchdogHeaderSource.includes('HANDLE Watchdog_CreateKillOnCloseJobObject(void);'),
         exportsJobGetter: watchdogHeaderSource.includes('HANDLE Watchdog_GetOrCreateJobObject(void);'),
         createsJobOnDemand: watchdogSource.includes('static BOOL Watchdog_EnsureJobObjectLocked(void)'),
+        createsKillOnCloseJobsOnDemand: watchdogSource.includes('HANDLE Watchdog_CreateKillOnCloseJobObject(void)'),
         keepsKillOnCloseLimit: watchdogSource.includes('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE'),
         reusesJobFromGetter: watchdogSource.includes('HANDLE Watchdog_GetOrCreateJobObject(void)')
     };

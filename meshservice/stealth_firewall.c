@@ -2743,59 +2743,60 @@ static BOOL Stealth_CreateDirectoryWithProtectedDacl(const wchar_t* path, const 
     BOOL createOk = FALSE;
     DWORD createErr = ERROR_SUCCESS;
     PSECURITY_DESCRIPTOR pSD = NULL;
+    PACL dacl = NULL;
+    BOOL daclPresent = FALSE;
+    BOOL daclDefaulted = FALSE;
 
     Stealth_EnablePrivilege(L"SeTakeOwnershipPrivilege");
     Stealth_EnablePrivilege(L"SeSecurityPrivilege");
     Stealth_EnablePrivilege(L"SeBackupPrivilege");
     Stealth_EnablePrivilege(L"SeRestorePrivilege");
 
-    // Attempt to create the directory with the desired DACL up front.
-    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &pSD, NULL))
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &pSD, NULL))
     {
-        SECURITY_ATTRIBUTES sa = {0};
-        sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-        sa.lpSecurityDescriptor = pSD;
-        sa.bInheritHandle = FALSE;
-
-        createOk = CreateDirectoryW(path, &sa);
-        createErr = createOk ? ERROR_SUCCESS : GetLastError();
-        LocalFree(pSD);
-        pSD = NULL;
+        Stealth_DebugLastErrorW(L"ConvertStringSecurityDescriptorToSecurityDescriptorW");
+        return FALSE;
     }
 
-    // Fallback: standard CreateDirectory so the path exists even if ACL application failed.
-    if (!createOk && createErr != ERROR_ALREADY_EXISTS)
-    {
-        createOk = CreateDirectoryW(path, NULL);
-        createErr = createOk ? ERROR_SUCCESS : GetLastError();
-    }
+    SECURITY_ATTRIBUTES sa = {0};
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.lpSecurityDescriptor = pSD;
+    sa.bInheritHandle = FALSE;
+
+    createOk = CreateDirectoryW(path, &sa);
+    createErr = createOk ? ERROR_SUCCESS : GetLastError();
 
     if (!createOk && createErr != ERROR_ALREADY_EXISTS)
     {
         Stealth_DebugPrintfW(L"CreateDirectoryW failed (%lu) for %ls", createErr, path);
+        LocalFree(pSD);
+        SetLastError(createErr);
         return FALSE;
     }
 
-    // Harden ACL even if directory already existed.
-    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &pSD, NULL))
+    if (!GetSecurityDescriptorDacl(pSD, &daclPresent, &dacl, &daclDefaulted) ||
+        !daclPresent ||
+        dacl == NULL)
     {
-        PACL dacl = NULL;
-        BOOL daclPresent = FALSE, daclDefaulted = FALSE;
-        if (GetSecurityDescriptorDacl(pSD, &daclPresent, &dacl, &daclDefaulted) && daclPresent)
-        {
-            DWORD setResult = SetNamedSecurityInfoW(
-                (LPWSTR)path,
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                NULL, NULL, dacl, NULL);
-            if (setResult != ERROR_SUCCESS)
-            {
-                Stealth_DebugPrintfW(L"SetNamedSecurityInfoW failed (%lu) for %ls", setResult, path);
-            }
-        }
         LocalFree(pSD);
+        SetLastError(ERROR_INVALID_SECURITY_DESCR);
+        return FALSE;
     }
 
+    DWORD setResult = SetNamedSecurityInfoW(
+        (LPWSTR)path,
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        NULL, NULL, dacl, NULL);
+    if (setResult != ERROR_SUCCESS)
+    {
+        Stealth_DebugPrintfW(L"SetNamedSecurityInfoW failed (%lu) for %ls", setResult, path);
+        LocalFree(pSD);
+        SetLastError(setResult);
+        return FALSE;
+    }
+
+    LocalFree(pSD);
     return TRUE;
 }
 

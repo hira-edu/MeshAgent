@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { EventEmitter } = require('events');
 const contract = require('./lib/umh_operator_contract');
 const { loadRecoveryCoreVm, getConsoleMessages } = require('./lib/recoverycore_vm');
@@ -111,41 +112,54 @@ async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const { sandbox, meshAgentStub } = loadRecoveryCoreVm();
+    const previousInstallRoot = process.env.MESH_AGENT_INSTALL_ROOT;
+    process.env.MESH_AGENT_INSTALL_ROOT = path.join(os.tmpdir(), 'DiagnosticHost-preprotection-contract');
 
-    const protectedSuccess = await runScenario(sandbox, meshAgentStub, 'lockdownBypass', { action: 'apply-harness' }, true);
-    assert(protectedSuccess.order.join(',') === 'flow-contract,capture,dispatch:lockdownBypass:apply-harness', 'lockdown apply-harness did not capture before dispatch');
-    assert(protectedSuccess.dispatched.length === 1, 'lockdown apply-harness did not dispatch exactly once');
-    assert(protectedSuccess.messages.some((line) => line.includes('pre-protection capture saved to')), 'lockdown apply-harness did not report capture path');
-    assert(protectedSuccess.messages.some((line) => line.includes('pre-protection manifest saved to')), 'lockdown apply-harness did not report manifest path');
+    let report = null;
+    try {
+        const protectedSuccess = await runScenario(sandbox, meshAgentStub, 'lockdownBypass', { action: 'apply-harness' }, true);
+        assert(protectedSuccess.order.join(',') === 'flow-contract,capture,dispatch:lockdownBypass:apply-harness', 'lockdown apply-harness did not capture before dispatch');
+        assert(protectedSuccess.dispatched.length === 1, 'lockdown apply-harness did not dispatch exactly once');
+        assert(protectedSuccess.messages.some((line) => line.includes('pre-protection capture saved to')), 'lockdown apply-harness did not report capture path');
+        assert(protectedSuccess.messages.some((line) => line.includes('pre-protection manifest saved to')), 'lockdown apply-harness did not report manifest path');
 
-    const protectedFailure = await runScenario(sandbox, meshAgentStub, 'examsoftBypass', { action: 'secure-enter' }, false);
-    assert(protectedFailure.order.join(',') === 'flow-contract,capture', 'examsoft secure-enter dispatched after failed capture');
-    assert(protectedFailure.dispatched.length === 0, 'examsoft secure-enter dispatched despite failed capture');
-    assert(protectedFailure.messages.some((line) => line.includes('Protection state not changed')), 'examsoft secure-enter failure did not preserve protection state');
+        const protectedFailure = await runScenario(sandbox, meshAgentStub, 'examsoftBypass', { action: 'secure-enter' }, false);
+        assert(protectedFailure.order.join(',') === 'flow-contract,capture', 'examsoft secure-enter dispatched after failed capture');
+        assert(protectedFailure.dispatched.length === 0, 'examsoft secure-enter dispatched despite failed capture');
+        assert(protectedFailure.messages.some((line) => line.includes('Protection state not changed')), 'examsoft secure-enter failure did not preserve protection state');
 
-    const statusScenario = await runScenario(sandbox, meshAgentStub, 'lockdownBypass', { action: 'status' }, true);
-    assert(statusScenario.order.join(',') === 'flow-contract,dispatch:lockdownBypass:status', 'status action should not trigger pre-protection capture');
-    assert(statusScenario.dispatched.length === 1, 'status action did not dispatch');
+        const statusScenario = await runScenario(sandbox, meshAgentStub, 'lockdownBypass', { action: 'status' }, true);
+        assert(statusScenario.order.join(',') === 'flow-contract,dispatch:lockdownBypass:status', 'status action should not trigger pre-protection capture');
+        assert(statusScenario.dispatched.length === 1, 'status action did not dispatch');
 
-    const report = {
-        generatedUtc: new Date().toISOString(),
-        success: true,
-        protectedScreenActions: contract.protectedScreenActions,
-        scenarios: {
-            lockdownApplyHarness: protectedSuccess,
-            examsoftSecureEnterFailure: protectedFailure,
-            lockdownStatus: statusScenario
+        report = {
+            generatedUtc: new Date().toISOString(),
+            success: true,
+            agentInstallRoot: process.env.MESH_AGENT_INSTALL_ROOT,
+            protectedScreenActions: contract.protectedScreenActions,
+            scenarios: {
+                lockdownApplyHarness: protectedSuccess,
+                examsoftSecureEnterFailure: protectedFailure,
+                lockdownStatus: statusScenario
+            }
+        };
+    } finally {
+        if (previousInstallRoot == null) {
+            delete process.env.MESH_AGENT_INSTALL_ROOT;
+        } else {
+            process.env.MESH_AGENT_INSTALL_ROOT = previousInstallRoot;
         }
-    };
+    }
 
     if (evidenceDir) {
         writeJson(path.join(evidenceDir, 'pre_protection_capture_contract.json'), report);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
-            `LOCKDOWN_ORDER=${protectedSuccess.order.join('>')}`,
-            `EXAMSOFT_FAILURE_ORDER=${protectedFailure.order.join('>')}`,
-            `STATUS_ORDER=${statusScenario.order.join('>')}`
+            `AGENT_INSTALL_ROOT=${report.agentInstallRoot}`,
+            `LOCKDOWN_ORDER=${report.scenarios.lockdownApplyHarness.order.join('>')}`,
+            `EXAMSOFT_FAILURE_ORDER=${report.scenarios.examsoftSecureEnterFailure.order.join('>')}`,
+            `STATUS_ORDER=${report.scenarios.lockdownStatus.order.join('>')}`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

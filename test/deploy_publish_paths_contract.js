@@ -1,12 +1,47 @@
 const fs = require('fs');
 const path = require('path');
 
+function parseArgs(argv) {
+    const args = {};
+    for (let i = 2; i < argv.length; ++i) {
+        const token = argv[i];
+        if (!token.startsWith('--')) {
+            throw new Error(`Unexpected argument: ${token}`);
+        }
+        const key = token.substring(2);
+        const value = argv[i + 1];
+        if (value == null || value.startsWith('--')) {
+            args[key] = true;
+        } else {
+            args[key] = value;
+            i += 1;
+        }
+    }
+    return args;
+}
+
+function ensureDir(dirPath) {
+    fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function writeJson(filePath, value) {
+    ensureDir(path.dirname(filePath));
+    fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function writeText(filePath, value) {
+    ensureDir(path.dirname(filePath));
+    fs.writeFileSync(filePath, value, 'utf8');
+}
+
 function assert(condition, message) {
     if (!condition) {
         throw new Error(message);
     }
 }
 
+const args = parseArgs(process.argv);
+const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
 const deployPath = path.resolve(__dirname, '..', 'deploy.py');
 const source = fs.readFileSync(deployPath, 'utf8');
 
@@ -27,6 +62,12 @@ const requiredSnippets = [
     '"WinDiagnosticHost.msh": {',
     '"publish_targets": ("data", "signed", "module")',
     '"publish_targets": ("data",)',
+    'WINDOWS_BRANDING_DEFAULTS = load_windows_branding_defaults()',
+    'WINDOWS_INSTALL_ROOT = os.environ.get("MESHCENTRAL_INSTALL_ROOT", WINDOWS_BRANDING_DEFAULTS["install_root"])',
+    'WINDOWS_LIFECYCLE_DLL = os.environ.get("MESHCENTRAL_LIFECYCLE_DLL", WINDOWS_BRANDING_DEFAULTS["service_dll_path"])',
+    'WINDOWS_LIFECYCLE_STATE_DIR = os.environ.get("MESHCENTRAL_LIFECYCLE_STATE_DIR", WINDOWS_BRANDING_DEFAULTS["lifecycle_state_dir"])',
+    'LOCAL_REPO / "branding_config.local.json"',
+    'Active Windows branding installRoot/serviceDllName is required',
     'validate_required_deploy_artifacts',
     'find {STAGING_DIR} -maxdepth 1 -type f',
     'if staged is None:',
@@ -44,6 +85,11 @@ for (const snippet of requiredSnippets) {
     assert(source.includes(snippet), `missing snippet: ${snippet}`);
 }
 
+assert(!source.includes('r"C:\\ProgramData\\MeshAgent"'), 'deploy.py must not default remote update discovery to the legacy MeshAgent install root');
+assert(!source.includes('r"%ProgramData%\\MeshAgent\\state\\rundll32-lifecycle"'), 'deploy.py must not default lifecycle state to the legacy MeshAgent install root');
+assert(!source.includes('LOCAL_REPO / "branding_config.json"'), 'deploy.py must not fall back to the generic branding template for production install paths');
+assert(!source.includes('r"C:\\ProgramData\\DiagnosticHost"'), 'deploy.py must not hard-code the DiagnosticHost install root as a fallback');
+
 for (const functionName of ['collect_remote_file_metadata', 'collect_remote_publish_snapshot']) {
     const body = extractFunction(functionName);
     assert(!body.includes('for attempt in range'), `${functionName} must rely on ssh_cmd retry policy only`);
@@ -57,7 +103,28 @@ const verifyPublishBody = extractFunction('verify_remote_publish');
 assert(!verifyPublishBody.includes('verify_remote_embedded_svchost_payload('), 'verify_remote_publish must not SCP-download EXEs for redundant embedded checks');
 assert(verifyPublishBody.includes('return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]'), 'verify_remote_publish must report transport failure explicitly');
 
-process.stdout.write(JSON.stringify({
+const report = {
+    generatedUtc: new Date().toISOString(),
     deployPath,
-    checked: requiredSnippets.length
-}, null, 2) + '\n');
+    success: true,
+    checked: requiredSnippets.length,
+    pathContract: {
+        usesBrandingDefaults: true,
+        rejectsLegacyMeshAgentDefault: true,
+        rejectsGenericTemplateFallback: true
+    }
+};
+
+if (evidenceDir) {
+    writeJson(path.join(evidenceDir, 'deploy_publish_paths_contract.json'), report);
+    writeText(path.join(evidenceDir, 'summary.txt'), [
+        `GENERATED_UTC=${report.generatedUtc}`,
+        'SUCCESS=true',
+        `DEPLOY_PATH=${deployPath}`,
+        'WINDOWS_INSTALL_ROOT_DEFAULT_SOURCE=branding_config.local.json',
+        'LEGACY_MESHAGENT_REMOTE_UPDATE_DEFAULT=false',
+        'GENERIC_TEMPLATE_INSTALL_PATH_FALLBACK=false'
+    ].join('\n') + '\n');
+} else {
+    process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+}

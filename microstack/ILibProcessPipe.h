@@ -45,6 +45,7 @@ typedef enum ILibProcessPipe_SpawnTypes
 }ILibProcessPipe_SpawnTypes;
 
 #ifdef WIN32
+typedef BOOL(*ILibProcessPipe_ProcessPreStartHandler)(HANDLE hProcess, HANDLE hThread, DWORD processId, void* user, DWORD* errorOut);
 typedef void(*ILibProcessPipe_Pipe_ReadExHandler)(ILibProcessPipe_Pipe sender, void *user, DWORD errorCode, char *buffer, int bufferLen);
 typedef void(*ILibProcessPipe_Pipe_WriteExHandler)(ILibProcessPipe_Pipe sender, void *user, DWORD errorCode, int bytesWritten);
 typedef enum ILibProcessPipe_Pipe_ReaderHandleType
@@ -74,6 +75,9 @@ void ILibProcessPipe_FreePipe(ILibProcessPipe_Pipe pipeObject);
 ILibProcessPipe_Manager ILibProcessPipe_Manager_Create(void *chain);
 int ILibProcessPipe_Process_IsDetached(ILibProcessPipe_Process p);
 ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sessionId, void *envvars, int extraMemorySize);
+#ifdef WIN32
+ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx5(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sessionId, void *envvars, int extraMemorySize, ILibProcessPipe_ProcessPreStartHandler preStartHandler, void* preStartUser);
+#endif
 #define ILibProcessPipe_Manager_SpawnProcess(pipeManager, target, parameters) ILibProcessPipe_Manager_SpawnProcessEx2(pipeManager, target, parameters, ILibProcessPipe_SpawnTypes_DEFAULT, 0)
 #define ILibProcessPipe_Manager_SpawnProcessEx(pipeManager, target, parameters, spawnType) ILibProcessPipe_Manager_SpawnProcessEx2(pipeManager, target, parameters, spawnType, 0)
 #define ILibProcessPipe_Manager_SpawnProcessEx2(pipeManager, target, parameters, spawnType, extraMemorySize) ILibProcessPipe_Manager_SpawnProcessEx3(pipeManager, target, parameters, spawnType, NULL, extraMemorySize)

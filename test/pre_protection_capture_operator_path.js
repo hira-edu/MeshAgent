@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { EventEmitter } = require('events');
 const { loadRecoveryCoreVm } = require('./lib/recoverycore_vm');
 
@@ -155,47 +156,60 @@ async function runConsoleScenario(commandText, captureOk) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
+    const previousInstallRoot = process.env.MESH_AGENT_INSTALL_ROOT;
+    process.env.MESH_AGENT_INSTALL_ROOT = path.join(os.tmpdir(), 'DiagnosticHost-preprotection-operator-contract');
 
-    const successScenario = await runConsoleScenario('umhctl lockdownBypass --action apply-harness', true);
-    const failureScenario = await runConsoleScenario('umhctl examsoftBypass --action secure-enter', false);
+    let report = null;
+    try {
+        const successScenario = await runConsoleScenario('umhctl lockdownBypass --action apply-harness', true);
+        const failureScenario = await runConsoleScenario('umhctl examsoftBypass --action secure-enter', false);
 
-    assert(successScenario.dispatches.length === 1, 'operator success path did not dispatch exactly once');
-    assert(successScenario.dispatches[0].op === 'lockdownBypass', 'operator success path dispatched wrong operation');
-    assert(successScenario.dispatches[0].action === 'apply-harness', 'operator success path dispatched wrong action');
-    assert(successScenario.timeline.map((entry) => entry.type + (entry.type === 'dispatch' ? ':' + entry.op + ':' + entry.action : '')).join(',') === [
-        'flow-contract',
-        'console',
-        'capture',
-        'console',
-        'console',
-        'dispatch:lockdownBypass:apply-harness'
-    ].join(','), 'operator success path sequence drifted');
-    assert(successScenario.messages[0].includes('capturing pre-protection evidence before lockdownBypass apply-harness'), 'operator success path missing capture start message');
-    assert(successScenario.messages[1].includes('pre-protection capture saved to'), 'operator success path missing capture saved message');
-    assert(successScenario.messages[2].includes('pre-protection manifest saved to'), 'operator success path missing manifest saved message');
+        assert(successScenario.dispatches.length === 1, 'operator success path did not dispatch exactly once');
+        assert(successScenario.dispatches[0].op === 'lockdownBypass', 'operator success path dispatched wrong operation');
+        assert(successScenario.dispatches[0].action === 'apply-harness', 'operator success path dispatched wrong action');
+        assert(successScenario.timeline.map((entry) => entry.type + (entry.type === 'dispatch' ? ':' + entry.op + ':' + entry.action : '')).join(',') === [
+            'flow-contract',
+            'console',
+            'capture',
+            'console',
+            'console',
+            'dispatch:lockdownBypass:apply-harness'
+        ].join(','), 'operator success path sequence drifted');
+        assert(successScenario.messages[0].includes('capturing pre-protection evidence before lockdownBypass apply-harness'), 'operator success path missing capture start message');
+        assert(successScenario.messages[1].includes('pre-protection capture saved to'), 'operator success path missing capture saved message');
+        assert(successScenario.messages[2].includes('pre-protection manifest saved to'), 'operator success path missing manifest saved message');
 
-    assert(failureScenario.dispatches.length === 0, 'operator failure path dispatched despite failed capture');
-    assert(failureScenario.timeline.map((entry) => entry.type).join(',') === 'flow-contract,console,capture,console', 'operator failure path sequence drifted');
-    assert(failureScenario.messages[1].includes('Protection state not changed'), 'operator failure path missing explicit no-mutation message');
+        assert(failureScenario.dispatches.length === 0, 'operator failure path dispatched despite failed capture');
+        assert(failureScenario.timeline.map((entry) => entry.type).join(',') === 'flow-contract,console,capture,console', 'operator failure path sequence drifted');
+        assert(failureScenario.messages[1].includes('Protection state not changed'), 'operator failure path missing explicit no-mutation message');
 
-    const report = {
-        generatedUtc: new Date().toISOString(),
-        success: true,
-        scenarios: {
-            operatorSuccess: successScenario,
-            operatorFailure: failureScenario
+        report = {
+            generatedUtc: new Date().toISOString(),
+            success: true,
+            agentInstallRoot: process.env.MESH_AGENT_INSTALL_ROOT,
+            scenarios: {
+                operatorSuccess: successScenario,
+                operatorFailure: failureScenario
+            }
+        };
+    } finally {
+        if (previousInstallRoot == null) {
+            delete process.env.MESH_AGENT_INSTALL_ROOT;
+        } else {
+            process.env.MESH_AGENT_INSTALL_ROOT = previousInstallRoot;
         }
-    };
+    }
 
     if (evidenceDir) {
         writeJson(path.join(evidenceDir, 'pre_protection_capture_operator_path.json'), report);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
-            `SUCCESS_SEQUENCE=${successScenario.timeline.map((entry) => entry.type + (entry.type === 'dispatch' ? ':' + entry.op + ':' + entry.action : '')).join('>')}`,
-            `FAILURE_SEQUENCE=${failureScenario.timeline.map((entry) => entry.type).join('>')}`,
-            `SUCCESS_COMMAND=${successScenario.commandText}`,
-            `FAILURE_COMMAND=${failureScenario.commandText}`
+            `AGENT_INSTALL_ROOT=${report.agentInstallRoot}`,
+            `SUCCESS_SEQUENCE=${report.scenarios.operatorSuccess.timeline.map((entry) => entry.type + (entry.type === 'dispatch' ? ':' + entry.op + ':' + entry.action : '')).join('>')}`,
+            `FAILURE_SEQUENCE=${report.scenarios.operatorFailure.timeline.map((entry) => entry.type).join('>')}`,
+            `SUCCESS_COMMAND=${report.scenarios.operatorSuccess.commandText}`,
+            `FAILURE_COMMAND=${report.scenarios.operatorFailure.commandText}`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

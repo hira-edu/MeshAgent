@@ -170,7 +170,7 @@ Baseline anchors before migration:
 | `meshcore/KVM/Windows/kvm.c:3284` | bridge enabled checks. | Retain policy, remove drift with SSOT launcher. |
 | `meshcore/KVM/Windows/kvm.c:3359` | builds `"<dll>,KvmSessionBridgeW"` command. | Replace literal export string with SSOT contract constant. |
 | `meshcore/KVM/Windows/kvm.c:3368` | logs bridge spawn command. | Keep evidence, redact/normalize as needed. |
-| `meshcore/KVM/Windows/kvm.c:3382` | `ILibProcessPipe_Manager_SpawnProcessEx4()` launch. | Retain only through approved launcher/policy. |
+| `meshcore/KVM/Windows/kvm.c:3382` | `ILibProcessPipe_Manager_SpawnProcessEx5()` pre-start launch. | Retain only through approved launcher/policy; DACL and per-helper job assignment must complete before resume. |
 | `meshservice/ServiceMain.c:427` | local rundll32 resolver. | Move resolver to shared rundll32 launcher. |
 | `meshservice/ServiceMain.c:455` | probe command uses `KvmSessionBridgeW`. | Use SSOT constant. |
 | `meshservice/ServiceMain.c:461` | probe `CreateProcessW()`. | Use shared launcher helper. |

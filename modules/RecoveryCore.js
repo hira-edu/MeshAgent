@@ -2165,12 +2165,49 @@ function umhctlSanitizeCaptureToken(value)
     return token;
 }
 
+function umhctlNormalizeDirectoryPath(raw)
+{
+    if (typeof raw != 'string') { return null; }
+    var value = raw.trim();
+    if (value.length == 0) { return null; }
+    if (value.charAt(0) == '"' && value.charAt(value.length - 1) == '"') { value = value.substring(1, value.length - 1); }
+    value = value.replace(/[\\\/]+$/, '');
+    return value.length > 0 ? value : null;
+}
+
+function umhctlGetActiveAgentInstallRoot()
+{
+    var explicitRoot = umhctlNormalizeDirectoryPath(
+        umhctlGetEnvValue('MESH_AGENT_INSTALL_ROOT') ||
+        umhctlGetEnvValue('MESH_INSTALL_ROOT') ||
+        umhctlGetEnvValue('MESHCENTRAL_INSTALL_ROOT'));
+    if (explicitRoot != null) { return explicitRoot; }
+
+    var execPath = null;
+    try { execPath = umhctlNormalizeExecutablePath(process.execPath); } catch (e0) { execPath = null; }
+    if (execPath == null) { return null; }
+
+    var agentDir = umhctlNormalizeDirectoryPath(execPath.replace(/[/\\][^/\\]+$/, ''));
+    var programData = umhctlNormalizeDirectoryPath(umhctlProgramDataRoot());
+    if (agentDir == null || programData == null) { return null; }
+
+    var normalizedAgentDir = agentDir.replace(/\//g, '\\').toLowerCase();
+    var normalizedProgramData = programData.replace(/\//g, '\\').toLowerCase();
+    if (normalizedAgentDir == normalizedProgramData || normalizedAgentDir.indexOf(normalizedProgramData + '\\') == 0)
+    {
+        return agentDir;
+    }
+    return null;
+}
+
 function umhctlBuildPreProtectionCapturePaths(controlReq)
 {
-    var programData = umhctlGetEnvValue('ProgramData');
-    if (programData == null || programData.length == 0) { programData = 'C:\\ProgramData'; }
-    var serviceName = process.env['MESH_SERVICE_NAME'] || 'MeshAgent';
-    var rootDir = programData + '\\' + serviceName + '\\logs\\preprotection';
+    var installRoot = umhctlGetActiveAgentInstallRoot();
+    if (installRoot == null)
+    {
+        throw new Error('active agent install root unavailable for pre-protection capture path');
+    }
+    var rootDir = installRoot + '\\logs\\preprotection';
     var headers = (controlReq != null && typeof controlReq.headers == 'object' && controlReq.headers != null) ? controlReq.headers : {};
     var runId = (typeof headers['x-umh-run-id'] == 'string' && headers['x-umh-run-id'].trim().length > 0) ? headers['x-umh-run-id'].trim() : umhctlBuildRunId();
     var targetTag = (typeof headers['x-umh-target-tag'] == 'string' && headers['x-umh-target-tag'].trim().length > 0) ? headers['x-umh-target-tag'].trim() : umhctlDeriveTargetTag(controlReq, umhctlNormalizeControlOp(controlReq != null ? controlReq.op : null), headers, null);
@@ -2228,7 +2265,16 @@ function umhctlRunPreProtectionCapture(controlReq, sessionid, callback)
         return;
     }
 
-    var paths = umhctlBuildPreProtectionCapturePaths(controlReq);
+    var paths = null;
+    try
+    {
+        paths = umhctlBuildPreProtectionCapturePaths(controlReq);
+    }
+    catch (pathError)
+    {
+        callback('pre-protection evidence path unavailable: ' + umhctlFormatError(pathError), null);
+        return;
+    }
     if (!umhctlEnsureDirectoryPath(paths.rootDir))
     {
         callback('unable to create pre-protection evidence directory: ' + paths.rootDir, null);

@@ -75,17 +75,50 @@ function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
+    const tileHeaderPath = path.resolve('meshcore', 'KVM', 'Windows', 'tile.h');
+    const tileSourcePath = path.resolve('meshcore', 'KVM', 'Windows', 'tile.cpp');
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
+    const tileHeaderSource = fs.readFileSync(tileHeaderPath, 'utf8');
+    const tileSource = fs.readFileSync(tileSourcePath, 'utf8');
     const serviceMainSource = fs.readFileSync(serviceMainPath, 'utf8');
     const kvmBindBody = extractFunction(kvmSource, 'static BOOL kvm_bind_current_process_to_interactive_window_station(DWORD* errorOut)');
     const serviceBindBody = extractFunction(serviceMainSource, 'static BOOL MeshService_BindCurrentProcessToInteractiveWindowStation(DWORD* errorOut)');
     const checkDesktopSwitchBody = extractFunction(kvmSource, 'void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *reserved)');
+    const setResolutionBody = extractFunction(kvmSource, 'void kvm_server_SetResolution(ILibKVM_WriteHandler writeHandler, void *reserved)');
+    const ensureTileGeometryBody = extractFunction(kvmSource, 'static void kvm_server_ensure_tile_geometry()');
+    const primeStartupGeometryBody = extractFunction(kvmSource, 'static void kvm_server_prime_startup_geometry_if_needed()');
+    const initializeGdiplusBody = extractFunction(tileSource, 'short initialize_gdiplus()');
     const winlogonReopenIndex = checkDesktopSwitchBody.indexOf('HDESK secureDesktop = OpenDesktopW(L"Winlogon"');
     const unchangedDesktopIndex = checkDesktopSwitchBody.indexOf('_stricmp(currentName, targetName) == 0');
     const setThreadDesktopIndex = checkDesktopSwitchBody.indexOf('SetThreadDesktop(desktop)');
+    const setResolutionEnsureIndex = setResolutionBody.indexOf('kvm_server_ensure_tile_geometry();');
+    const setResolutionPrimeIndex = setResolutionBody.indexOf('kvm_server_prime_startup_geometry_if_needed();');
+    const setResolutionInvalidGeometryIndex = setResolutionBody.indexOf('if (SCREEN_WIDTH <= 0 || SCREEN_HEIGHT <= 0)');
+    const setResolutionTileCountIndex = setResolutionBody.indexOf('TILE_WIDTH_COUNT = SCALED_WIDTH / TILE_WIDTH;');
 
     const checks = {
+        kvmTileDefaultsAreSharedConstants:
+            tileHeaderSource.includes('#define KVM_TILE_DEFAULT_WIDTH 32') &&
+            tileHeaderSource.includes('#define KVM_TILE_DEFAULT_HEIGHT 32') &&
+            kvmSource.includes('int TILE_WIDTH = KVM_TILE_DEFAULT_WIDTH;') &&
+            kvmSource.includes('int TILE_HEIGHT = KVM_TILE_DEFAULT_HEIGHT;') &&
+            initializeGdiplusBody.includes('TILE_WIDTH = KVM_TILE_DEFAULT_WIDTH;') &&
+            initializeGdiplusBody.includes('TILE_HEIGHT = KVM_TILE_DEFAULT_HEIGHT;'),
+        kvmSetResolutionRestoresTileGeometryBeforeArithmetic:
+            ensureTileGeometryBody.includes('if (TILE_WIDTH <= 0) { TILE_WIDTH = KVM_TILE_DEFAULT_WIDTH;') &&
+            ensureTileGeometryBody.includes('if (TILE_HEIGHT <= 0) { TILE_HEIGHT = KVM_TILE_DEFAULT_HEIGHT;') &&
+            setResolutionEnsureIndex >= 0 &&
+            setResolutionTileCountIndex >= 0 &&
+            setResolutionEnsureIndex < setResolutionTileCountIndex,
+        kvmSetResolutionPrimesAndValidatesScreenGeometryBeforeTileAllocation:
+            primeStartupGeometryBody.includes('VSCREEN_WIDTH = GetSystemMetrics(SM_CXVIRTUALSCREEN);') &&
+            primeStartupGeometryBody.includes('SCREEN_WIDTH = GetSystemMetrics(SM_CXSCREEN);') &&
+            setResolutionPrimeIndex >= 0 &&
+            setResolutionInvalidGeometryIndex >= 0 &&
+            setResolutionTileCountIndex >= 0 &&
+            setResolutionPrimeIndex < setResolutionInvalidGeometryIndex &&
+            setResolutionInvalidGeometryIndex < setResolutionTileCountIndex,
         kvmBindChecksCurrentWindowStationBeforeOpen:
             kvmBindBody.indexOf('GetProcessWindowStation()') >= 0 &&
             kvmBindBody.indexOf('GetProcessWindowStation()') < kvmBindBody.indexOf('OpenWindowStationW(L"WinSta0"'),
@@ -140,6 +173,8 @@ function main() {
         success: true,
         files: {
             kvmPath,
+            tileHeaderPath,
+            tileSourcePath,
             serviceMainPath
         },
         regressionSurface: {

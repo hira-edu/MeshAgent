@@ -275,6 +275,7 @@ BOOL Watchdog_UnregisterHelper(const HelperProcessConfig* config);
 
 /* Get or create the shared kill-on-close job object used for helper children. */
 HANDLE Watchdog_GetOrCreateJobObject(void);
+HANDLE Watchdog_CreateKillOnCloseJobObject(void);
 
 #ifdef __cplusplus
 }

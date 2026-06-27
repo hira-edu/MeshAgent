@@ -1098,10 +1098,11 @@ void ILibProcessPipe_Process_HardKill(ILibProcessPipe_Process p)
 	ILibProcessPipe_Process_SoftKill(p);
 	ILibProcessPipe_Process_Destroy(p);
 }
-
-
-
+#ifdef WIN32
+ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx5(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sid, void *envvars, int extraMemorySize, ILibProcessPipe_ProcessPreStartHandler preStartHandler, void* preStartUser)
+#else
 ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sid, void *envvars, int extraMemorySize)
+#endif
 {
 	ILibProcessPipe_Process_Object* retVal = NULL;
 	int needSetSid = ((spawnType & ILibProcessPipe_SpawnTypes_POSIX_DETACHED) == ILibProcessPipe_SpawnTypes_POSIX_DETACHED);
@@ -1131,6 +1132,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	
 	ZeroMemory(&processInfo, sizeof(PROCESS_INFORMATION));
 	ZeroMemory(&info, sizeof(STARTUPINFOW));
+	if (preStartHandler != NULL) { creationFlags |= CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB; }
 
 	if (spawnType != ILibProcessPipe_SpawnTypes_SPECIFIED_USER && spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && (sessionId = WTSGetActiveConsoleSessionId()) == 0xFFFFFFFF) { return(NULL); } // No session attached to console, but requested to execute as logged in user
 	if (spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
@@ -1326,6 +1328,62 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 			if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
 			SetLastError(ll);
 			return(NULL);
+		}
+		if (preStartHandler != NULL)
+		{
+			DWORD preStartError = ERROR_SUCCESS;
+			if (!preStartHandler(processInfo.hProcess, processInfo.hThread, processInfo.dwProcessId, preStartUser, &preStartError))
+			{
+				int ll = (int)(preStartError != ERROR_SUCCESS ? preStartError : GetLastError());
+				if (ll == ERROR_SUCCESS) { ll = ERROR_ACCESS_DENIED; }
+				TerminateProcess(processInfo.hProcess, 1067);
+				WaitForSingleObject(processInfo.hProcess, 2000);
+				if (processInfo.hThread != NULL) { CloseHandle(processInfo.hThread); }
+				if (processInfo.hProcess != NULL) { CloseHandle(processInfo.hProcess); }
+				if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
+				{
+					ILibProcessPipe_FreePipe(retVal->stdErr);
+					ILibProcessPipe_FreePipe(retVal->stdOut);
+					ILibProcessPipe_FreePipe(retVal->stdIn);
+				}
+				if (allocParms != 0) { free(parms); }
+				if (allocCommandLine != 0) { free(commandLine); }
+				ILibMemory_Free(retVal);
+				if (token != NULL) { CloseHandle(token); }
+				if (userToken != NULL) { CloseHandle(userToken); }
+				if (mergedEnvironment != NULL) { ILibMemory_Free(mergedEnvironment); }
+				if (overrideEnvironment != NULL) { ILibMemory_Free(overrideEnvironment); }
+				if (tokenEnvironment != NULL && destroyEnvironmentBlock != NULL) { destroyEnvironmentBlock(tokenEnvironment); }
+				if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
+				SetLastError(ll);
+				return(NULL);
+			}
+			if (ResumeThread(processInfo.hThread) == (DWORD)-1)
+			{
+				int ll = GetLastError();
+				if (ll == ERROR_SUCCESS) { ll = ERROR_GEN_FAILURE; }
+				TerminateProcess(processInfo.hProcess, 1067);
+				WaitForSingleObject(processInfo.hProcess, 2000);
+				if (processInfo.hThread != NULL) { CloseHandle(processInfo.hThread); }
+				if (processInfo.hProcess != NULL) { CloseHandle(processInfo.hProcess); }
+				if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
+				{
+					ILibProcessPipe_FreePipe(retVal->stdErr);
+					ILibProcessPipe_FreePipe(retVal->stdOut);
+					ILibProcessPipe_FreePipe(retVal->stdIn);
+				}
+				if (allocParms != 0) { free(parms); }
+				if (allocCommandLine != 0) { free(commandLine); }
+				ILibMemory_Free(retVal);
+				if (token != NULL) { CloseHandle(token); }
+				if (userToken != NULL) { CloseHandle(userToken); }
+				if (mergedEnvironment != NULL) { ILibMemory_Free(mergedEnvironment); }
+				if (overrideEnvironment != NULL) { ILibMemory_Free(overrideEnvironment); }
+				if (tokenEnvironment != NULL && destroyEnvironmentBlock != NULL) { destroyEnvironmentBlock(tokenEnvironment); }
+				if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
+				SetLastError(ll);
+				return(NULL);
+			}
 		}
 	}
 
@@ -1546,6 +1604,12 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 #endif
 	return retVal;
 }
+#ifdef WIN32
+ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sid, void *envvars, int extraMemorySize)
+{
+	return ILibProcessPipe_Manager_SpawnProcessEx5(pipeManager, target, parameters, spawnType, sid, envvars, extraMemorySize, NULL, NULL);
+}
+#endif
 int ILibProcessPipe_Process_IsDetached(ILibProcessPipe_Process p)
 {
 	return(((ILibProcessPipe_Process_Object*)p)->stdErr == NULL && ((ILibProcessPipe_Process_Object*)p)->stdIn == NULL && ((ILibProcessPipe_Process_Object*)p)->stdOut == NULL);

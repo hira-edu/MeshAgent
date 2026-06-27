@@ -267,6 +267,21 @@ static BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPa
 /* UMH companion service identifiers — SSOT: meshcore/config/umh_defines.h */
 #include "config/umh_defines.h"
 
+static BOOL MeshAgent_GetActiveStealthLogsDirW(wchar_t* logDir, size_t logDirLen)
+{
+	StealthInstallPaths paths;
+	if (logDir == NULL || logDirLen == 0) { return FALSE; }
+	logDir[0] = L'\0';
+
+	ZeroMemory(&paths, sizeof(paths));
+	if (!Stealth_GetInstallPaths(&paths) || paths.logsDir[0] == L'\0')
+	{
+		return FALSE;
+	}
+
+	return SUCCEEDED(StringCchCopyW(logDir, logDirLen, paths.logsDir));
+}
+
 static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 {
 	va_list ap;
@@ -280,21 +295,19 @@ static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 
 	WCHAR logDir[MAX_PATH] = { 0 };
 	WCHAR logPath[MAX_PATH] = { 0 };
-	if (FAILED(SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, SHGFP_TYPE_CURRENT, logDir)))
+	if (MeshAgent_GetActiveStealthLogsDirW(logDir, _countof(logDir)))
 	{
-		lstrcpynW(logDir, L"C:\\ProgramData", _countof(logDir));
-	}
-	StringCchCatW(logDir, _countof(logDir), L"\\" STEALTH_FALLBACK_SERVICE_NAME L"\\logs");
-	CreateDirectoryW(logDir, NULL);
-	StringCchPrintfW(logPath, _countof(logPath), L"%s\\native-install.log", logDir);
+		MeshAgent_EnsureDirectoryW(logDir);
+		StringCchPrintfW(logPath, _countof(logPath), L"%s\\native-install.log", logDir);
 
-	HANDLE hFile = CreateFileW(logPath, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, NULL);
-	if (hFile != INVALID_HANDLE_VALUE)
-	{
-		DWORD written = 0;
-		WriteFile(hFile, buffer, (DWORD)strlen(buffer), &written, NULL);
-		WriteFile(hFile, "\r\n", 2, &written, NULL);
-		CloseHandle(hFile);
+		HANDLE hFile = CreateFileW(logPath, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, NULL);
+		if (hFile != INVALID_HANDLE_VALUE)
+		{
+			DWORD written = 0;
+			WriteFile(hFile, buffer, (DWORD)strlen(buffer), &written, NULL);
+			WriteFile(hFile, "\r\n", 2, &written, NULL);
+			CloseHandle(hFile);
+		}
 	}
 
 	// Also mirror to docs/testing for evidence capture.
@@ -1022,7 +1035,6 @@ static HANDLE MeshAgent_OpenRegressionLog(void)
 {
 	WCHAR logPath[MAX_PATH * 4] = {0};
 	WCHAR logDir[MAX_PATH * 4] = {0};
-	StealthInstallPaths paths;
 
 	// Prefer evidence directory in repo (docs/testing) to avoid log deletion during uninstall.
 	WCHAR repoRoot[MAX_PATH * 4] = {0};
@@ -1037,17 +1049,12 @@ static HANDLE MeshAgent_OpenRegressionLog(void)
 		StringCchCopyW(logDir, _countof(logDir), evidenceDir);
 		StringCchPrintfW(logPath, _countof(logPath), L"%s\\native-regression.log", logDir);
 	}
-	else if (Stealth_GetInstallPaths(&paths))
+	else if (MeshAgent_GetActiveStealthLogsDirW(logDir, _countof(logDir)))
 	{
-		StringCchCopyW(logDir, _countof(logDir), paths.logsDir);
 	}
 	else
 	{
-		if (FAILED(SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, SHGFP_TYPE_CURRENT, logDir)))
-		{
-			StringCchCopyW(logDir, _countof(logDir), L"C:\\ProgramData");
-		}
-		StringCchCatW(logDir, _countof(logDir), L"\\" STEALTH_FALLBACK_SERVICE_NAME L"\\logs");
+		return INVALID_HANDLE_VALUE;
 	}
 
 	CreateDirectoryW(logDir, NULL);
@@ -1168,8 +1175,7 @@ static void MeshAgent_CopyEvidenceSnapshot(const wchar_t* phaseLabel)
 	}
 	else
 	{
-		StringCchPrintfW(installDir, _countof(installDir), L"C:\\ProgramData\\%s", STEALTH_FALLBACK_SERVICE_NAME);
-		StringCchPrintfW(logsDir, _countof(logsDir), L"C:\\ProgramData\\%s\\logs", STEALTH_FALLBACK_SERVICE_NAME);
+		return;
 	}
 
 	wchar_t srcPath[MAX_PATH * 4] = {0};
@@ -1209,15 +1215,24 @@ static BOOL MeshAgent_BuildDefaultPreProtectionCapturePathW(wchar_t* output, siz
 	if (output == NULL || outputLen == 0) { return FALSE; }
 	output[0] = L'\0';
 
-	wchar_t programData[MAX_PATH] = {0};
-	if (FAILED(SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, SHGFP_TYPE_CURRENT, programData)))
-	{
-		StringCchCopyW(programData, _countof(programData), L"C:\\ProgramData");
-	}
-
 	wchar_t dirPath[MAX_PATH * 4] = {0};
-	StringCchPrintfW(dirPath, _countof(dirPath), L"%s\\" STEALTH_FALLBACK_SERVICE_NAME L"\\logs\\preprotection", programData);
-	SHCreateDirectoryExW(NULL, dirPath, NULL);
+	wchar_t logsDir[MAX_PATH * 4] = {0};
+	if (!MeshAgent_GetActiveStealthLogsDirW(logsDir, _countof(logsDir)))
+	{
+		return FALSE;
+	}
+	if (FAILED(StringCchPrintfW(dirPath, _countof(dirPath), L"%s\\preprotection", logsDir)))
+	{
+		return FALSE;
+	}
+	int createDirResult = SHCreateDirectoryExW(NULL, dirPath, NULL);
+	if (createDirResult != ERROR_SUCCESS &&
+		createDirResult != ERROR_ALREADY_EXISTS &&
+		createDirResult != ERROR_FILE_EXISTS)
+	{
+		SetLastError((DWORD)createDirResult);
+		return FALSE;
+	}
 
 	wchar_t timestamp[64] = {0};
 	MeshAgent_FormatTimestamp(timestamp, _countof(timestamp));

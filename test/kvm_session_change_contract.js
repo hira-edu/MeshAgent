@@ -40,6 +40,26 @@ function assert(condition, message) {
     }
 }
 
+function extractFunction(source, signature) {
+    const start = source.indexOf(signature);
+    assert(start >= 0, `${signature} not found`);
+    const bodyStart = source.indexOf('{', start);
+    assert(bodyStart >= 0, `${signature} body start not found`);
+    let depth = 0;
+    for (let i = bodyStart; i < source.length; ++i) {
+        const ch = source[i];
+        if (ch === '{') {
+            depth += 1;
+        } else if (ch === '}') {
+            depth -= 1;
+            if (depth === 0) {
+                return source.slice(start, i + 1);
+            }
+        }
+    }
+    throw new Error(`${signature} body end not found`);
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
@@ -49,6 +69,8 @@ function main() {
     const kvmHeaderSource = fs.readFileSync(kvmHeaderPath, 'utf8');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const serviceMainSource = fs.readFileSync(serviceMainPath, 'utf8');
+    const relaySetupBody = extractFunction(kvmSource, 'int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int tsid)');
+    const sessionChangeBody = extractFunction(kvmSource, 'static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)');
 
     const checks = {
         headerExportsSessionChangeHook: kvmHeaderSource.includes('void kvm_notify_session_change(DWORD eventType, DWORD sessionId);'),
@@ -63,7 +85,48 @@ function main() {
             kvmSource.includes('if (gChildProcess == NULL && g_shutdown == 0 && gKvmPipeMgr != NULL && gKvmExePath != NULL && gKvmWriteHandler != NULL)') &&
             kvmSource.includes('kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);'),
         relayRebindsToNewSession: kvmSource.includes('gProcessTSID = (int)sessionId;') &&
-            kvmSource.includes('gKvmProcessSessionId = sessionId;')
+            kvmSource.includes('gKvmProcessSessionId = sessionId;'),
+        relayPreservesExplicitVsAutoSelectedTsid:
+            kvmHeaderSource.includes('int processTSIDExplicit;') &&
+            kvmSource.includes('static int gKvmProcessTSIDExplicit = 0;') &&
+            kvmSource.includes('int processTSIDExplicit;') &&
+            relaySetupBody.includes('int requestedTsid = tsid;') &&
+            relaySetupBody.includes('int explicitTsid = (requestedTsid >= 0) ? 1 : 0;') &&
+            relaySetupBody.includes('tsid = kvm_relay_select_session_id(requestedTsid);') &&
+            relaySetupBody.includes('ctx->processTSIDExplicit = explicitTsid;') &&
+            relaySetupBody.includes('gKvmProcessTSIDExplicit = explicitTsid;'),
+        relayExplicitTsidStillFiltersMismatchedSessions:
+            sessionChangeBody.includes('explicitTsid = (ctx->processTSIDExplicit != 0);') &&
+            sessionChangeBody.includes('if (explicitTsid && !sessionMatches)') &&
+            sessionChangeBody.includes('return;'),
+        relayAutoSelectedTsidAllowsNewStartSessionRebind:
+            sessionChangeBody.includes('rebindToNewSession = (!explicitTsid && ctx->processSessionId != 0 && ctx->processSessionId != sessionId);') &&
+            sessionChangeBody.includes('gProcessTSID = (int)sessionId;') &&
+            sessionChangeBody.includes('gKvmProcessSessionId = sessionId;') &&
+            sessionChangeBody.includes('g_restartcount = 0;'),
+        relayAutoSelectedTsidRejectsNonInteractiveStartSession:
+            sessionChangeBody.includes('startEvent = kvm_session_event_is_start(eventType);') &&
+            sessionChangeBody.includes('!kvm_session_id_has_user_token(sessionId)') &&
+            sessionChangeBody.includes('session start ignored for auto-selected KVM because session has no queryable user token'),
+        relayAutoSelectedTsidDoesNotPinLiveOldChildOnValidStart:
+            !sessionChangeBody.includes('session start ignored for unrelated auto-selected KVM session while current child active') &&
+            sessionChangeBody.includes('if (rebindToNewSession && gChildProcess != NULL)') &&
+            sessionChangeBody.includes('ILibProcessPipe_Process_SoftKill(gChildProcess);'),
+        relayAutoSelectedTsidIgnoresUnrelatedStopSession:
+            sessionChangeBody.includes('if (!explicitTsid && stopEvent && !sessionMatches)') &&
+            sessionChangeBody.includes('session stop ignored for unrelated auto-selected KVM session'),
+        relayCoversRemoteConnectAndDisconnect:
+            sessionChangeBody.includes('case WTS_REMOTE_CONNECT:') &&
+            sessionChangeBody.includes('case WTS_REMOTE_DISCONNECT:') &&
+            serviceMainSource.includes('Stealth_DebugPrintfA("[ServiceMain] Forwarding KVM session change event=%lu session=%lu"'),
+        relayRebindsLiveOldChildThroughExistingExitLifecycle:
+            sessionChangeBody.includes('if (rebindToNewSession && gChildProcess != NULL)') &&
+            sessionChangeBody.includes('ILibProcessPipe_Process_SoftKill(gChildProcess);') &&
+            kvmSource.includes('if (gKvmRestartSuppressed != 0 || g_shutdown != 0)') &&
+            kvmSource.includes('kvm_schedule_retry_timer();'),
+        debugSnapshotExposesTsidSelectionContract:
+            kvmHeaderSource.includes('int processTSIDExplicit;') &&
+            kvmSource.includes('snapshotOut->processTSIDExplicit = ctx->processTSIDExplicit;')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
