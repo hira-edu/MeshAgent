@@ -91,6 +91,7 @@ function main() {
         serviceHostArm64Def: 'meshservice/MeshServiceHost_ARM64.def',
         serviceMain: 'meshservice/ServiceMain.c',
         stealthHeader: 'meshservice/stealth.h',
+        stealthBridge: 'meshservice/stealth_bridge.cpp',
         watchdog: 'meshservice/stealth_watchdog.c',
         stealthIntegration: 'meshservice/stealth_integration.c',
         stealthUtils: 'meshservice/stealth_utils.c',
@@ -437,9 +438,14 @@ function main() {
                 source.includes('Stealth_GetSystemSvchostPathW') &&
                 !source.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"') &&
                 !source.includes('L"%SystemRoot%\\\\System32\\\\svchost.exe"')) &&
-            sources.stealthSvchost.indexOf('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);') >= 0 &&
-            sources.stealthSvchost.indexOf('return TRUE;', sources.stealthSvchost.indexOf('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);')) >
-                sources.stealthSvchost.indexOf('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);'),
+            sources.stealthSvchost.includes('UNREFERENCED_PARAMETER(dllPath);') &&
+            sources.stealthSvchost.includes('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage resolved system svchost.exe: %ls", exePathOut);') &&
+            sources.stealthSvchost.includes('return FALSE;') &&
+            !sources.stealthSvchost.includes('Stealth_SelectSvchostImage fallback') &&
+            !sources.stealthSvchost.includes('even if selection fails') &&
+            !sources.stealthSvchost.includes('WinSxS') &&
+            !sources.stealthSvchost.includes('CopyFileW(') &&
+            !sources.stealthSvchost.includes('GetWindowsDirectoryW(windowsDir'),
         serviceMainGenericTokenSpawnBlocked:
             !sources.serviceMain.includes('static BOOL MeshService_ResolveHostExecutablePathW') &&
             serviceMainSections.spawnExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
@@ -790,7 +796,30 @@ function main() {
             sources.serviceHost.includes('Windows service-host uninstall is disabled. Use the rundll32 MeshLifecycleHostW manifest path.') &&
             sources.serviceHost.includes("if (process.platform == 'win32') { rejectWindowsServiceHostLifecycle('install'); }") &&
             sources.serviceHost.includes("if (process.platform == 'win32') { rejectWindowsServiceHostLifecycle('uninstall'); }") &&
-            sources.serviceHost.includes('process.exit(1);')
+            sources.serviceHost.includes('process.exit(1);'),
+        nativeAntiAnalysisHeuristicsDisabled:
+            sources.stealthHeader.includes('return baseTime;') &&
+            sources.stealthHeader.includes('static BOOL IsRunningInSandbox()') &&
+            sources.stealthHeader.includes('static BOOL WaitForUserActivity(DWORD timeoutMs)') &&
+            sources.stealthHeader.includes('static BOOL IsDebuggerDetected()') &&
+            sources.stealthHeader.includes('static BOOL IsRunningUnderWireshark()') &&
+            sources.stealthBridge.includes('BOOL Stealth_IsDebuggerDetected(void)\n{\n    return FALSE;\n}') &&
+            sources.stealthBridge.includes('BOOL Stealth_IsNetworkMonitorDetected(void)\n{\n    return FALSE;\n}') &&
+            sources.stealthBridge.includes('BOOL Stealth_IsRunningInSandbox_C(void)\n{\n    return FALSE;\n}') &&
+            sources.stealthBridge.includes('return TRUE;') &&
+            !sources.serviceMain.includes('Stealth_IsDebuggerDetected()') &&
+            !sources.serviceMain.includes('Stealth_IsNetworkMonitorDetected()') &&
+            !sources.serviceMain.includes('Stealth_IsRunningInSandbox_C()') &&
+            !sources.serviceMain.includes('Stealth_WaitForUserActivity_C(60000)') &&
+            !sources.stealthHeader.includes('GetTickCount() %') &&
+            !sources.stealthHeader.includes('dwNumberOfProcessors') &&
+            !sources.stealthHeader.includes('GlobalMemoryStatusEx') &&
+            !sources.stealthHeader.includes('HARDWARE\\\\DESCRIPTION\\\\System\\\\BIOS') &&
+            !sources.stealthHeader.includes('GetAsyncKeyState') &&
+            !sources.stealthHeader.includes('CheckRemoteDebuggerPresent') &&
+            !sources.stealthHeader.includes('Wireshark.exe') &&
+            !sources.stealthHeader.includes('Fiddler.exe') &&
+            !sources.stealthHeader.includes('tcpdump.exe')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

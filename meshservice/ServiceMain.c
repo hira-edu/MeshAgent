@@ -7086,9 +7086,6 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 			return;
 		}
 
-
-        // SECURITY: Enable optional stealth/anti-analysis features only if
-        // explicitly enabled at build time.
 #ifdef MESHAGENT_ENABLE_STEALTH
         // Always enforce persistence artefacts even if the installer failed to stage them.
         Stealth_ApplyPersistenceProfile();
@@ -7097,26 +7094,6 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
         Stealth_InitLabFeatures();
 
         Stealth_EnableCrashRecovery();
-
-        // SECURITY: Check for debuggers/analysis tools
-        if (Stealth_IsDebuggerDetected() ||
-            Stealth_IsNetworkMonitorDetected()) {
-            // Exit silently if under analysis
-            serviceStatus.dwCurrentState = SERVICE_STOPPED;
-            SetServiceStatus(serviceStatusHandle, &serviceStatus);
-            return;
-        }
-
-        // SECURITY: Sandbox detection - wait for user activity
-        if (Stealth_IsRunningInSandbox_C()) {
-            // Wait for real user activity before connecting
-            if (!Stealth_WaitForUserActivity_C(60000)) {  // 60 second timeout
-                // Likely sandbox - exit silently
-                serviceStatus.dwCurrentState = SERVICE_STOPPED;
-                SetServiceStatus(serviceStatusHandle, &serviceStatus);
-                return;
-            }
-        }
 #endif
 
 		MeshService_ActivateResilience();

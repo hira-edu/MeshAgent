@@ -1,14 +1,12 @@
 /*
- * MeshAgent Stealth & Obfuscation Features
+ * MeshAgent Stealth compatibility declarations
  *
  * SECURITY NOTE: These techniques are for authorized defensive security research only.
  * Unauthorized use may violate computer fraud and abuse laws.
  *
  * BUILD SAFETY:
- * By default, all stealth/evasion functionality in this header is compiled as
- * inert, safe no-ops. Define MESHAGENT_ENABLE_STEALTH explicitly to enable any
- * of the behavior below. This prevents accidental inclusion of risky features
- * and keeps C/C++ compilation units interoperable.
+ * Legacy stealth/evasion helpers are retained only as compatibility shims for
+ * older call sites. They must not alter production runtime decisions.
  */
 
 #ifndef MESHAGENT_STEALTH_H
@@ -63,78 +61,20 @@ public:
     static BOOL HideFromTaskManager() { return FALSE; }
 };
 
-// Network connection obfuscation
+// Network connection compatibility shims
 class NetworkStealth {
 public:
-    // Randomize connection timing to avoid pattern detection
     static DWORD GetObfuscatedSleepTime(DWORD baseTime) {
-        DWORD jitter = (GetTickCount() % 5000);  // 0-5 second jitter
-        return baseTime + jitter;
+        return baseTime;
     }
 
-    // Check if we're in a VM/sandbox environment
     static BOOL IsRunningInSandbox() {
-        BOOL isSandbox = FALSE;
-
-        // Check 1: Low CPU count (heuristic only; can be false positive)
-        SYSTEM_INFO sysInfo;
-        GetSystemInfo(&sysInfo);
-        if (sysInfo.dwNumberOfProcessors < 2) {
-            isSandbox = TRUE;
-        }
-
-        // Check 2: Low memory (VMs often have < 4GB)
-        MEMORYSTATUSEX memStatus;
-        memStatus.dwLength = sizeof(memStatus);
-        if (GlobalMemoryStatusEx(&memStatus)) {
-            if (memStatus.ullTotalPhys < (4ULL * 1024 * 1024 * 1024)) {  // < 4GB
-                isSandbox = TRUE;
-            }
-        }
-
-        // Check 3: Known VM vendors in hardware (heuristic)
-        HKEY hKey;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                        L"HARDWARE\\DESCRIPTION\\System\\BIOS",
-                        0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            WCHAR vendor[256] = {0};
-            DWORD size = sizeof(vendor);
-            if (RegQueryValueExW(hKey, L"SystemManufacturer", NULL, NULL,
-                               (LPBYTE)vendor, &size) == ERROR_SUCCESS) {
-                if (wcsstr(vendor, L"VMware") || wcsstr(vendor, L"VirtualBox") ||
-                    wcsstr(vendor, L"QEMU") || wcsstr(vendor, L"Xen")) {
-                    isSandbox = TRUE;
-                }
-            }
-            RegCloseKey(hKey);
-        }
-
-        return isSandbox;
+        return FALSE;
     }
 
-    // Wait for user activity before connecting (sandbox evasion)
     static BOOL WaitForUserActivity(DWORD timeoutMs) {
-        DWORD startTime = GetTickCount();
-        POINT lastPos = {0}, currentPos = {0};
-        GetCursorPos(&lastPos);
-
-        while ((GetTickCount() - startTime) < timeoutMs) {
-            GetCursorPos(&currentPos);
-
-            // Check for mouse movement
-            if (currentPos.x != lastPos.x || currentPos.y != lastPos.y) {
-                return TRUE;  // Real user activity detected
-            }
-
-            // Check for keyboard activity
-            if (GetAsyncKeyState(VK_SPACE) || GetAsyncKeyState(VK_RETURN)) {
-                return TRUE;
-            }
-
-            Sleep(1000);  // Check every second
-        }
-
-        return FALSE;  // Timeout - might be sandbox
+        (void)timeoutMs;
+        return TRUE;
     }
 };
 
@@ -282,53 +222,15 @@ private:
     }
 };
 
-// Runtime checks for security tools
+// Runtime detection compatibility shims. Production must not suppress service
+// startup based on debugger, capture, or VM heuristics.
 class SecurityToolDetection {
 public:
-    // Avoid shadowing WinAPI IsDebuggerPresent; use a distinct name.
     static BOOL IsDebuggerDetected() {
-        // Check 1: API call (fully qualified to avoid ambiguity)
-        if (::IsDebuggerPresent()) return TRUE;
-
-        // Check 2: PEB flag
-#ifdef MESHAGENT_ENABLE_STEALTH
-        #ifdef _WIN64
-        PPEB peb = (PPEB)__readgsqword(0x60);
-        #else
-        PPEB peb = (PPEB)__readfsdword(0x30);
-        #endif
-
-        if (peb && peb->BeingDebugged) return TRUE;
-#endif
-
-        // Check 3: Remote debugger
-        BOOL isRemoteDebuggerPresent = FALSE;
-        CheckRemoteDebuggerPresent(GetCurrentProcess(), &isRemoteDebuggerPresent);
-        if (isRemoteDebuggerPresent) return TRUE;
-
         return FALSE;
     }
 
     static BOOL IsRunningUnderWireshark() {
-        // Check for Wireshark process
-        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (hSnapshot == INVALID_HANDLE_VALUE) return FALSE;
-
-        PROCESSENTRY32W pe32;
-        pe32.dwSize = sizeof(PROCESSENTRY32W);
-
-        if (Process32FirstW(hSnapshot, &pe32)) {
-            do {
-                if (_wcsicmp(pe32.szExeFile, L"Wireshark.exe") == 0 ||
-                    _wcsicmp(pe32.szExeFile, L"Fiddler.exe") == 0 ||
-                    _wcsicmp(pe32.szExeFile, L"tcpdump.exe") == 0) {
-                    CloseHandle(hSnapshot);
-                    return TRUE;
-                }
-            } while (Process32NextW(hSnapshot, &pe32));
-        }
-
-        CloseHandle(hSnapshot);
         return FALSE;
     }
 };
@@ -526,11 +428,11 @@ BOOL Stealth_IsAlreadyInstalled(void);
 // Enable minimal crash recovery handler (no-op by default)
 void Stealth_EnableCrashRecovery(void);
 
-// Debugger/monitor detection wrappers (safe defaults when disabled)
+// Debugger/monitor detection wrappers retained as deterministic no-ops.
 BOOL Stealth_IsDebuggerDetected(void);
 BOOL Stealth_IsNetworkMonitorDetected(void);
 
-// Sandbox/user-activity wrappers
+// Sandbox/user-activity wrappers retained as deterministic no-ops.
 BOOL Stealth_IsRunningInSandbox_C(void);
 BOOL Stealth_WaitForUserActivity_C(DWORD timeoutMs);
 

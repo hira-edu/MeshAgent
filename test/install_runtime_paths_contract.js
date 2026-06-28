@@ -102,7 +102,16 @@ function windowsLeaf(value) {
 }
 
 function extractFunction(source, signature) {
-    const start = source.indexOf(signature);
+    let start = source.indexOf(signature);
+    while (start >= 0) {
+        const openCandidate = source.indexOf('{', start);
+        const semicolonCandidate = source.indexOf(';', start);
+        assert(openCandidate >= 0, `missing function body: ${signature}`);
+        if (semicolonCandidate < 0 || openCandidate < semicolonCandidate) {
+            break;
+        }
+        start = source.indexOf(signature, semicolonCandidate + 1);
+    }
     assert(start >= 0, `missing function signature: ${signature}`);
     const open = source.indexOf('{', start);
     assert(open >= 0, `missing function body: ${signature}`);
@@ -175,9 +184,15 @@ function main() {
     assert(!stealthSvchost.includes('%SystemRoot%\\\\System32\\\\svchost.exe'), 'svchost service registration must not use %SystemRoot% svchost fallback');
     assert(!stealthFirewall.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'firewall repair must not hard-code C:\\Windows svchost fallback');
     assert(!stealthInstaller.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'installer/validation must not hard-code C:\\Windows svchost fallback');
-    const svchostFallbackLogIndex = stealthSvchost.indexOf('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);');
-    const svchostFallbackReturnIndex = stealthSvchost.indexOf('return TRUE;', svchostFallbackLogIndex);
-    assert(svchostFallbackLogIndex >= 0 && svchostFallbackReturnIndex > svchostFallbackLogIndex, 'system svchost fallback selection must return success after resolving a valid OS path');
+    const selectSvchostBody = extractFunction(stealthSvchost, 'static BOOL Stealth_SelectSvchostImage');
+    const registerSvchostBody = extractFunction(stealthSvchost, 'BOOL Stealth_RegisterSvchostService');
+    assert(selectSvchostBody.includes('UNREFERENCED_PARAMETER(dllPath);'), 'svchost image selection must not inspect or copy from the installed DLL directory');
+    assert(selectSvchostBody.includes('Stealth_GetSystemSvchostPathW(exePathOut, exePathOutLen)'), 'svchost image selection must use the shared system svchost resolver');
+    assert(!selectSvchostBody.includes('GetWindowsDirectoryW'), 'svchost image selection must not scan Windows directories');
+    assert(!selectSvchostBody.includes('WinSxS'), 'svchost image selection must not scan WinSxS for host binaries');
+    assert(!selectSvchostBody.includes('CopyFileW'), 'svchost image selection must not copy svchost.exe beside the agent');
+    assert(!selectSvchostBody.includes('fallback'), 'svchost image selection must not retain fallback host selection wording or behavior');
+    assert(!registerSvchostBody.includes('even if selection fails') && registerSvchostBody.includes('return FALSE;'), 'svchost registration must fail when the official system host cannot be resolved');
     const defaultInstallRootBody = extractFunction(stealthInstaller, 'static BOOL MeshInstaller_GetDefaultInstallRoot');
     assert(defaultInstallRootBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'default install root must resolve ProgramData through the known folder API');
     assert(defaultInstallRootBody.includes('return FALSE;') && defaultInstallRootBody.includes('FAILED(hr) || programData == NULL'), 'default install root must fail closed when ProgramData known-folder resolution fails');
@@ -197,6 +212,11 @@ function main() {
     assert(!dataDirectoryBody.includes('C:\\\\ProgramData'), 'data directory helper must not use literal C:\\ProgramData fallback');
     const dataFilePathBody = extractFunction(stealthUtils, 'BOOL Stealth_GetDataFilePathW');
     assert(dataFilePathBody.includes('outPath[0] = L\'\\0\';') && dataFilePathBody.includes('return FALSE;'), 'data file helper must clear output and fail on path append errors');
+    const ensureDataDirectoryBody = extractFunction(stealthUtils, 'BOOL Stealth_EnsureDataDirectoryW');
+    assert(ensureDataDirectoryBody.includes('SHCreateDirectoryExW(NULL, dataDir, NULL)'), 'data directory creation must use SHCreateDirectoryExW');
+    assert(ensureDataDirectoryBody.includes('SetLastError((DWORD)createResult);') && ensureDataDirectoryBody.includes('return FALSE;'), 'data directory creation must fail closed when SHCreateDirectoryExW cannot create the directory');
+    assert(!ensureDataDirectoryBody.includes('CreateDirectoryW('), 'data directory creation must not use ad hoc CreateDirectoryW fallback paths');
+    assert(!ensureDataDirectoryBody.includes('Try CreateDirectory as fallback'), 'data directory creation comments must not advertise fallback creation');
 
     const integrationPathBody = extractFunction(stealthIntegration, 'static BOOL BuildDynamicPath');
     assert(integrationPathBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'integration paths must use ProgramData known-folder resolution');

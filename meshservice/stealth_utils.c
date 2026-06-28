@@ -327,7 +327,7 @@ BOOL Stealth_GetDataDirectoryW(const wchar_t* serviceName, wchar_t* outPath, siz
 
     outPath[0] = L'\0';
 
-    /* Use fallback service name if not provided */
+    /* Use the configured default service name if not provided. */
     if (serviceName == NULL || serviceName[0] == L'\0') {
         serviceName = STEALTH_FALLBACK_SERVICE_NAME;
     }
@@ -521,40 +521,28 @@ BOOL Stealth_ProtectProcessByHandle(HANDLE hProcess)
 BOOL Stealth_EnsureDataDirectoryW(const wchar_t* serviceName)
 {
     wchar_t dataDir[MAX_PATH];
+    int createResult;
+    DWORD attrs;
 
     if (!Stealth_GetDataDirectoryW(serviceName, dataDir, MAX_PATH)) {
         return FALSE;
     }
 
-    /* Check if directory exists */
-    DWORD attrs = GetFileAttributesW(dataDir);
+    attrs = GetFileAttributesW(dataDir);
     if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-        return TRUE; /* Already exists */
-    }
-
-    /* Create directory (may need to create parent too) */
-    if (SHCreateDirectoryExW(NULL, dataDir, NULL) == ERROR_SUCCESS) {
         return TRUE;
     }
 
-    /* Try CreateDirectory as fallback */
-    if (CreateDirectoryW(dataDir, NULL)) {
+    createResult = SHCreateDirectoryExW(NULL, dataDir, NULL);
+    if (createResult == ERROR_SUCCESS) {
         return TRUE;
     }
 
-    /* Try creating with parent directories */
-    wchar_t* lastSlash = wcsrchr(dataDir, L'\\');
-    if (lastSlash != NULL) {
-        *lastSlash = L'\0';
-        /* Create parent */
-        if (CreateDirectoryW(dataDir, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) {
-            *lastSlash = L'\\';
-            if (CreateDirectoryW(dataDir, NULL)) {
-                return TRUE;
-            }
-        }
-        *lastSlash = L'\\';
+    attrs = GetFileAttributesW(dataDir);
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        return TRUE;
     }
 
-    return GetLastError() == ERROR_ALREADY_EXISTS;
+    SetLastError((DWORD)createResult);
+    return FALSE;
 }
