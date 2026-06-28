@@ -87,6 +87,7 @@ function main() {
         serviceHostArm64Def: 'meshservice/MeshServiceHost_ARM64.def',
         serviceMain: 'meshservice/ServiceMain.c',
         watchdog: 'meshservice/stealth_watchdog.c',
+        stealthIntegration: 'meshservice/stealth_integration.c',
         monitor: 'meshservice/stealth_monitor.c',
         lockdown: 'meshservice/stealth_lockdown.c',
         installer: 'meshservice/stealth_installer.c',
@@ -151,12 +152,25 @@ function main() {
     const checks = {
         processPipeOnlyAllowsKvmRundll32Bridge:
             sources.processPipe.includes('allow-kvm-bridge') &&
+            sources.processPipe.includes('allow-rundll32-lifecycle') &&
+            sources.processPipe.includes('allow-rundll32-preprotection') &&
+            sources.processPipe.includes('allow-rundll32-selftest') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
+            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_LIFECYCLE_A') &&
+            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A') &&
+            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_SELFTEST_A') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModuleArgumentA') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedLifecycleContractLaunchA') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedPreProtectionContractLaunchA') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedSelfTestContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&
-            sources.processPipe.includes('blocked-user-session') &&
+            sources.processPipe.includes('blocked-windows-spawn') &&
+            sources.processPipe.includes('ILibProcessPipe_IsWindowsSpawnAllowed(spawnType, target, parameters)') &&
+            sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedLifecycleContractLaunchA(target, parameters)') &&
+            sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(target, parameters)') &&
+            sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedSelfTestContractLaunchA(target, parameters)') &&
             !sources.processPipe.includes('ILibProcessPipe_HasKvmBridgeEntryPointA') &&
             !sources.processPipe.includes('ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
             !sources.processPipe.includes('allow-helper-reentry') &&
@@ -301,7 +315,26 @@ function main() {
             sources.watchdog.includes('Watchdog watched-process registration blocked by rundll32-only helper policy') &&
             sources.watchdog.includes('Watchdog watched-process launch blocked by rundll32-only helper policy') &&
             sources.watchdog.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
-            !sources.watchdog.includes('CreateProcessW('),
+            sources.watchdog.includes('Watchdog helper user-session launch blocked by rundll32-only helper policy') &&
+            sources.watchdog.includes('Helper monitor start blocked by rundll32-only helper policy') &&
+            !sources.watchdog.includes('CreateProcessW(') &&
+            !sources.watchdog.includes('CreateProcessAsUserW(') &&
+            !sources.watchdog.includes('Helper_IsSessionSpawnAllowed('),
+        watchdogHelperPolicyStrictKvmRundll32Bridge:
+            sources.watchdog.includes('Helper_IsApprovedBridgeModuleArgumentW(argumentVector[0])') &&
+            sources.watchdog.includes('Helper_IsApprovedBridgePipeNameW(argumentVector[1], L"_in")') &&
+            sources.watchdog.includes('Helper_IsApprovedBridgePipeNameW(argumentVector[2], L"_out")') &&
+            sources.watchdog.includes('Helper_IsApprovedBridgeModeW(argumentVector[3])') &&
+            sources.watchdog.includes('Helper_IsApprovedBridgeOptionalFlagW(argumentVector[i])') &&
+            sources.watchdog.includes('CommandLineToArgvW(arguments, &argumentCount)') &&
+            sources.watchdog.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W') &&
+            sources.watchdog.includes('static BOOL Helper_IsApprovedBridgePipeNameW') &&
+            sources.watchdog.includes('MeshKvm_') &&
+            sources.watchdog.includes('i > 5') &&
+            sources.watchdog.includes('sawCoreDump') &&
+            sources.watchdog.includes('sawRemoteCursor') &&
+            !sources.watchdog.includes('Helper_CommandLineContainsInsensitiveW') &&
+            !sources.watchdog.includes('wcsstr(scratch, tokenScratch)'),
         watchdogServiceLifecycleDisabled:
             sources.watchdog.includes('Watchdog service installation blocked by rundll32-only lifecycle policy') &&
             sources.watchdog.includes('Watchdog service uninstall blocked by rundll32-only lifecycle policy') &&
@@ -313,6 +346,17 @@ function main() {
             !sources.watchdog.includes('ChangeServiceConfig2W(') &&
             !sources.watchdog.includes('return Watchdog_AddProcess') &&
             !sources.watchdog.includes(' -watchdog '),
+        helperMonitorConfigAndIntegrationDisabled:
+            sources.serviceMain.includes('Helper monitor is not a retained production launch path') &&
+            sources.serviceMain.includes('config->enableHelperMonitor = FALSE;') &&
+            sources.stealthIntegration.includes('Helper monitor activation blocked by rundll32-only helper policy') &&
+            !sources.serviceMain.includes('STEALTH_HELPER_EXE') &&
+            !sources.serviceMain.includes('STEALTH_HELPER_ARGS') &&
+            !sources.serviceMain.includes('STEALTH_HELPER_PERSISTENT') &&
+            !sources.serviceMain.includes('STEALTH_HELPER_WATCHDOG') &&
+            !sources.stealthIntegration.includes('HelperMonitor_Start(&helperConfig') &&
+            !sources.stealthIntegration.includes('HelperMonitor_RequestSpawn((DWORD)-1)') &&
+            !sources.stealthIntegration.includes('Watchdog_RegisterHelper(&helperConfig)'),
         lockdownWatchdogFeatureBlocked:
             sources.lockdown.includes('Watchdog lockdown feature blocked by rundll32-only lifecycle policy') &&
             sources.lockdown.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&

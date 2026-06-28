@@ -130,6 +130,46 @@ static int ILibProcessPipe_StringEndsWithA(const char* value, const char* suffix
 	if (valueLen == 0 || suffixLen == 0 || valueLen < suffixLen) { return 0; }
 	return _stricmp(value + (valueLen - suffixLen), suffix) == 0;
 }
+static int ILibProcessPipe_IsApprovedRundll32ModuleEntryA(const char* value, const char* expectedEntry)
+{
+	const char* cursor = value;
+	const char* moduleStart = NULL;
+	const char* moduleEnd = NULL;
+	size_t moduleLen = 0;
+	size_t entryLen = 0;
+	char modulePath[MAX_PATH * 4];
+
+	if (cursor == NULL || expectedEntry == NULL || expectedEntry[0] == 0) { return 0; }
+	while (*cursor == ' ' || *cursor == '\t') { ++cursor; }
+	if (*cursor == '"')
+	{
+		moduleStart = ++cursor;
+		while (*cursor != 0 && *cursor != '"') { ++cursor; }
+		if (*cursor != '"') { return 0; }
+		moduleEnd = cursor;
+		++cursor;
+	}
+	else
+	{
+		moduleStart = cursor;
+		while (*cursor != 0 && *cursor != ',') { ++cursor; }
+		moduleEnd = cursor;
+	}
+
+	if (moduleEnd <= moduleStart || *cursor != ',') { return 0; }
+	++cursor;
+	entryLen = strnlen_s(expectedEntry, 64);
+	if (_strnicmp(cursor, expectedEntry, entryLen) != 0) { return 0; }
+	cursor += entryLen;
+	if (*cursor != 0) { return 0; }
+
+	moduleLen = (size_t)(moduleEnd - moduleStart);
+	if (moduleLen == 0 || moduleLen >= sizeof(modulePath)) { return 0; }
+	memcpy_s(modulePath, sizeof(modulePath), moduleStart, moduleLen);
+	modulePath[moduleLen] = 0;
+	ILibProcessPipe_NormalizePathA(modulePath, modulePath, sizeof(modulePath));
+	return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");
+}
 static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(const char* value)
 {
 	const char* cursor = value;
@@ -185,6 +225,26 @@ static int ILibProcessPipe_IsApprovedBridgePipeNameA(const char* value, const ch
 		}
 	}
 	return 1;
+}
+static int ILibProcessPipe_IsApprovedLifecycleContractLaunchA(char* target, char* const* parameters)
+{
+	if (!ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") && !ILibProcessPipe_TargetEndsWithA(target, "\\rundll32")) { return 0; }
+	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] != NULL) { return 0; }
+	if (!ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_LIFECYCLE_A)) { return 0; }
+	return ILibProcessPipe_StringEndsWithA(parameters[1], ".ini");
+}
+static int ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(char* target, char* const* parameters)
+{
+	if (!ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") && !ILibProcessPipe_TargetEndsWithA(target, "\\rundll32")) { return 0; }
+	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] != NULL) { return 0; }
+	if (!ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A)) { return 0; }
+	return parameters[1][0] != 0 ? 1 : 0;
+}
+static int ILibProcessPipe_IsApprovedSelfTestContractLaunchA(char* target, char* const* parameters)
+{
+	if (!ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") && !ILibProcessPipe_TargetEndsWithA(target, "\\rundll32")) { return 0; }
+	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL) { return 0; }
+	return ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_SELFTEST_A);
 }
 static int ILibProcessPipe_IsApprovedBridgeModeA(const char* value)
 {
@@ -441,12 +501,10 @@ static void ILibProcessPipe_LogPolicyDecisionA(const char* decision, const char*
 		(unsigned long)errorCode);
 	OutputDebugStringA(logLine);
 }
-static int ILibProcessPipe_IsSessionSpawnAllowed(ILibProcessPipe_SpawnTypes spawnType, char* target, char* const* parameters)
+static int ILibProcessPipe_IsWindowsSpawnAllowed(ILibProcessPipe_SpawnTypes spawnType, char* target, char* const* parameters)
 {
 	int strictServiceOnly = 1;
 	int allowDesktopBridge = 0;
-
-	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType)) { return 1; }
 
 	if (ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(target, parameters))
 	{
@@ -454,9 +512,24 @@ static int ILibProcessPipe_IsSessionSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 		ILibProcessPipe_LogPolicyDecisionA("allow-kvm-bridge", "desktop-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
+	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedLifecycleContractLaunchA(target, parameters))
+	{
+		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-lifecycle", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		return 1;
+	}
+	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(target, parameters))
+	{
+		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-preprotection", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		return 1;
+	}
+	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedSelfTestContractLaunchA(target, parameters))
+	{
+		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-selftest", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		return 1;
+	}
 
 	SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-	ILibProcessPipe_LogPolicyDecisionA("deny", "blocked-user-session", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_ACCESS_DISABLED_BY_POLICY);
+	ILibProcessPipe_LogPolicyDecisionA("deny", "blocked-windows-spawn", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_ACCESS_DISABLED_BY_POLICY);
 	return 0;
 }
 #endif
@@ -1119,6 +1192,8 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	ZeroMemory(&info, sizeof(STARTUPINFOW));
 	if (preStartHandler != NULL) { creationFlags |= CREATE_SUSPENDED | CREATE_BREAKAWAY_FROM_JOB; }
 
+	if (!ILibProcessPipe_IsWindowsSpawnAllowed(spawnType, target, parameters)) { return(NULL); }
+
 	if (spawnType != ILibProcessPipe_SpawnTypes_SPECIFIED_USER && spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && (sessionId = WTSGetActiveConsoleSessionId()) == 0xFFFFFFFF) { return(NULL); } // No session attached to console, but requested to execute as logged in user
 	if (spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
@@ -1255,8 +1330,8 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 
 
 	// Build WIDE command line directly via MultiByteToWideChar to avoid any
-	// intermediate helper issues.  The command line MUST be proper UTF-16 for
-	// CreateProcessAsUserW - ANSI bytes interpreted as UTF-16 pairs garble
+	// intermediate helper issues. The command line MUST be proper UTF-16;
+	// ANSI bytes interpreted as UTF-16 pairs garble
 	// pipe names and break the named-pipe KVM bridge.
 	{
 		char* cmdLineSrc = (commandLine != NULL) ? commandLine : target;

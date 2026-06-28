@@ -309,42 +309,12 @@ BOOL StealthIntegration_Start(void)
         }
     }
 
-    /* Start helper monitor if configured */
+    /* Helper monitor is not a retained production launch path. */
     if (g_Integration.config.enableHelperMonitor &&
         g_Integration.config.helperExePath[0] != L'\0') {
-        if (g_Integration.config.strictServiceOnly &&
-            !g_Integration.config.allowDesktopBridge) {
-            LogIntegration(L"Helper monitor blocked by strict service-only policy (desktop bridge disabled)");
-        } else if (!HelperMonitor_IsApprovedDesktopBridgeCommand(
-            g_Integration.config.helperExePath,
-            g_Integration.config.helperArguments)) {
-            LogIntegration(L"Helper monitor rejected: configuration is outside the retained rundll32 desktop-bridge contract");
-        } else {
-            HelperProcessConfig helperConfig;
-            HelperMonitor_InitConfig(&helperConfig);
-
-            wcscpy_s(helperConfig.exePath, MAX_PATH, g_Integration.config.helperExePath);
-            wcscpy_s(helperConfig.arguments, _countof(helperConfig.arguments), g_Integration.config.helperArguments);
-            helperConfig.persistentSpawn = g_Integration.config.helperPersistentSpawn;
-            helperConfig.monitorSession = TRUE;
-            helperConfig.strictServiceOnly = g_Integration.config.strictServiceOnly;
-            helperConfig.allowDesktopBridge = g_Integration.config.allowDesktopBridge;
-
-            if (HelperMonitor_Start(&helperConfig, NULL, NULL)) {
-                g_Integration.status.helperMonitorRunning = TRUE;
-                LogIntegration(L"Helper monitor started");
-                HelperMonitor_RequestSpawn((DWORD)-1);
-
-                /* Register helper with main watchdog if configured */
-                if (g_Integration.config.helperRegisterWatchdog) {
-                    if (Watchdog_RegisterHelper(&helperConfig)) {
-                        LogIntegration(L"Helper registered with watchdog");
-                    }
-                }
-            } else {
-                LogIntegration(L"Warning: Failed to start helper monitor");
-            }
-        }
+        LogIntegration(L"Helper monitor activation blocked by rundll32-only helper policy");
+        g_Integration.config.enableHelperMonitor = FALSE;
+        g_Integration.status.helperMonitorRunning = FALSE;
     }
 
     LogIntegration(L"StealthLab components started");

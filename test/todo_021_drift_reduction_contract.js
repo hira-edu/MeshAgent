@@ -88,17 +88,35 @@ function main() {
             !processPipeSource.includes('allow-helper-reentry') &&
             !processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "--slave")') &&
             !processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "-b64exec")') &&
-            processPipeSource.includes('blocked-user-session'),
+            processPipeSource.includes('blocked-windows-spawn') &&
+            processPipeSource.includes('ILibProcessPipe_IsWindowsSpawnAllowed(spawnType, target, parameters)'),
         processPipeDoesNotAllowGenericUserSessionByEnv:
             !processPipeSource.includes('ILibProcessPipe_LogPolicyDecisionA("allow", "generic"') &&
             !processPipeSource.includes('strictServiceOnly == 0 || allowDesktopBridge != 0'),
         helperMonitorRequiresApprovedBridgeCommand: watchdogSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand') &&
             watchdogSource.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W') &&
-            watchdogSource.includes('\\rundll32.exe'),
-        helperMonitorLogsApprovedBridgePolicy: watchdogSource.includes('Helper_LogPolicyDecision(L"allow-kvm-bridge"') &&
-            watchdogSource.includes('Helper_LogPolicyDecision(L"deny"'),
-        serviceMainDisablesImplicitHelperFallback: serviceMainSource.includes('Helper monitor requires an explicit rundll32 desktop-bridge command. Disabling helper monitor.') &&
-            serviceMainSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand(config->helperExePath, config->helperArguments)'),
+            watchdogSource.includes('\\rundll32.exe') &&
+            watchdogSource.includes('CommandLineToArgvW(arguments, &argumentCount)') &&
+            watchdogSource.includes('Helper_IsApprovedBridgeModuleArgumentW(argumentVector[0])') &&
+            watchdogSource.includes('Helper_IsApprovedBridgePipeNameW(argumentVector[1], L"_in")') &&
+            watchdogSource.includes('Helper_IsApprovedBridgePipeNameW(argumentVector[2], L"_out")') &&
+            watchdogSource.includes('Helper_IsApprovedBridgeModeW(argumentVector[3])') &&
+            watchdogSource.includes('Helper_IsApprovedBridgeOptionalFlagW(argumentVector[i])') &&
+            !watchdogSource.includes('Helper_CommandLineContainsInsensitiveW'),
+        helperMonitorLaunchFailsClosed: watchdogSource.includes('Watchdog helper user-session launch blocked by rundll32-only helper policy') &&
+            watchdogSource.includes('Helper monitor start blocked by rundll32-only helper policy') &&
+            watchdogSource.includes('SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY)') &&
+            watchdogSource.includes('Helper_IsApprovedBridgeModuleArgumentW(argumentVector[0])') &&
+            watchdogSource.includes('Helper_IsApprovedBridgePipeNameW(argumentVector[1], L"_in")') &&
+            watchdogSource.includes('CommandLineToArgvW(arguments, &argumentCount)') &&
+            !watchdogSource.includes('Helper_LogPolicyDecision'),
+        serviceMainDisablesImplicitHelperFallback: serviceMainSource.includes('Helper monitor is not a retained production launch path') &&
+            serviceMainSource.includes('config->enableHelperMonitor = FALSE;') &&
+            !serviceMainSource.includes('STEALTH_HELPER_EXE') &&
+            !serviceMainSource.includes('STEALTH_HELPER_ARGS') &&
+            !serviceMainSource.includes('STEALTH_HELPER_PERSISTENT') &&
+            !serviceMainSource.includes('STEALTH_HELPER_WATCHDOG') &&
+            !serviceMainSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand(config->helperExePath, config->helperArguments)'),
         serviceMainRejectsDirectKvmExeModes: serviceMainSource.includes('direct KVM slave execution is disabled') &&
             serviceMainSource.includes('MeshService_IsRunningUnderRundll32()') &&
             serviceMainSource.includes('kvm_server_mainloop((void*)parm);'),
@@ -107,8 +125,10 @@ function main() {
             serviceMainSource.includes('Use an approved rundll32 contract export') &&
             !serviceMainSource.includes('ILibBase64Decode((unsigned char *)argv[2]') &&
             !serviceMainSource.includes('ILibString_Copy(argv[2], 0)'),
-        integrationRejectsOutOfContractHelperMonitor: integrationSource.includes('Helper monitor rejected: configuration is outside the retained rundll32 desktop-bridge contract') &&
-            integrationSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand('),
+        integrationRejectsOutOfContractHelperMonitor: integrationSource.includes('Helper monitor activation blocked by rundll32-only helper policy') &&
+            !integrationSource.includes('HelperMonitor_Start(&helperConfig') &&
+            !integrationSource.includes('HelperMonitor_RequestSpawn((DWORD)-1)') &&
+            !integrationSource.includes('Watchdog_RegisterHelper(&helperConfig)'),
         agentcoreDoesNotPublishAuthorizedSelfSpawnPath: !agentcoreSource.includes('MESHAGENT_SELF_SPAWN_PATH'),
         agentcoreUsesDirectHeadersOnly: agentcoreSource.includes('MeshAgent_AddHostHeader(req, NULL, host, port, useDefaultPort2);') &&
             agentcoreSource.includes('MeshAgent_AddUserAgentHeader(req, NULL);'),

@@ -15,10 +15,12 @@
 #include "stealth_resilience.h"
 #include <stdio.h>
 #include <strsafe.h>
+#include <shellapi.h>
 #include <io.h>
 #include <fcntl.h>
 
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "shell32.lib")
 
 #ifndef ERROR_ACCESS_DISABLED_BY_POLICY
 #define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
@@ -1227,11 +1229,7 @@ static BOOL Helper_IsProcessAlive(HANDLE hProcess);
 static void Helper_SetLastErrorMessage(DWORD error, WCHAR* buffer, size_t bufferSize);
 static void Helper_CloseProcessHandle(void);
 static void Helper_TerminateProcessLocked(void);
-static ULONGLONG Helper_HashCommandLine(const WCHAR* exePath, const WCHAR* arguments);
-static void Helper_LogPolicyDecision(const WCHAR* decision, DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD errorCode);
-static BOOL Helper_IsSessionSpawnAllowed(DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD* outError);
 static BOOL Helper_EndsWithInsensitiveW(const WCHAR* value, const WCHAR* suffix);
-static BOOL Helper_CommandLineContainsInsensitiveW(const WCHAR* value, const WCHAR* token);
 
 void HelperMonitor_InitConfig(HelperProcessConfig* config)
 {
@@ -1253,54 +1251,12 @@ BOOL HelperMonitor_Start(
     HelperProcessCallback callback,
     void* userData)
 {
-    if (config == NULL) {
-        return FALSE;
-    }
-    if (config->exePath[0] == L'\0') {
-        return FALSE;
-    }
-    if (!HelperMonitor_IsApprovedDesktopBridgeCommand(config->exePath, config->arguments)) {
-        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-        return FALSE;
-    }
-
-    /* Check if already running */
-    if (InterlockedCompareExchange(&g_HelperRunning, 0, 0) != 0) {
-        return TRUE;
-    }
-
-    /* Initialize critical section */
-    if (!g_HelperLockInitialized) {
-        InitializeCriticalSection(&g_HelperLock);
-        g_HelperLockInitialized = TRUE;
-    }
-
-    /* Copy configuration */
-    EnterCriticalSection(&g_HelperLock);
-    g_HelperConfig = *config;
-    g_HelperCallback = callback;
-    g_HelperUserData = userData;
-
-    /* Initialize status */
-    ZeroMemory(&g_HelperStatus, sizeof(g_HelperStatus));
-    g_HelperStatus.state = HELPER_STATE_IDLE;
-    LeaveCriticalSection(&g_HelperLock);
-
-    /* Enable required privileges for WTSQueryUserToken */
-    Helper_EnablePrivilege(L"SeTcbPrivilege");
-    Helper_EnablePrivilege(L"SeAssignPrimaryTokenPrivilege");
-    Helper_EnablePrivilege(L"SeIncreaseQuotaPrivilege");
-
-    /* Start monitor thread */
-    InterlockedExchange(&g_HelperRunning, 1);
-    g_HelperThread = CreateThread(NULL, 0, HelperMonitorThreadProc, NULL, 0, NULL);
-
-    if (g_HelperThread == NULL) {
-        InterlockedExchange(&g_HelperRunning, 0);
-        return FALSE;
-    }
-
-    return TRUE;
+    UNREFERENCED_PARAMETER(config);
+    UNREFERENCED_PARAMETER(callback);
+    UNREFERENCED_PARAMETER(userData);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfW(L"Helper monitor start blocked by rundll32-only helper policy");
+    return FALSE;
 }
 
 void HelperMonitor_Stop(void)
@@ -1701,35 +1657,6 @@ static BOOL Helper_GetActiveUserSession(DWORD* outSessionId)
     return found;
 }
 
-static ULONGLONG Helper_HashCommandLine(const WCHAR* exePath, const WCHAR* arguments)
-{
-    const ULONGLONG fnvOffset = 14695981039346656037ULL;
-    const ULONGLONG fnvPrime = 1099511628211ULL;
-    ULONGLONG hash = fnvOffset;
-    const WCHAR* current = NULL;
-
-    current = (exePath != NULL ? exePath : L"");
-    while (*current != L'\0')
-    {
-        hash ^= (ULONGLONG)(*current);
-        hash *= fnvPrime;
-        ++current;
-    }
-
-    hash ^= (ULONGLONG)L' ';
-    hash *= fnvPrime;
-
-    current = (arguments != NULL ? arguments : L"");
-    while (*current != L'\0')
-    {
-        hash ^= (ULONGLONG)(*current);
-        hash *= fnvPrime;
-        ++current;
-    }
-
-    return hash;
-}
-
 static BOOL Helper_EndsWithInsensitiveW(const WCHAR* value, const WCHAR* suffix)
 {
     size_t valueLen;
@@ -1742,76 +1669,160 @@ static BOOL Helper_EndsWithInsensitiveW(const WCHAR* value, const WCHAR* suffix)
     return (_wcsicmp(value + (valueLen - suffixLen), suffix) == 0) ? TRUE : FALSE;
 }
 
-static BOOL Helper_CommandLineContainsInsensitiveW(const WCHAR* value, const WCHAR* token)
+static void Helper_NormalizePathW(const WCHAR* value, WCHAR* output, size_t outputCount)
 {
-    WCHAR scratch[1024];
-    WCHAR tokenScratch[128];
-    WCHAR* found = NULL;
+    WCHAR scratch[MAX_PATH * 4];
+    DWORD fullLen = 0;
+    size_t i;
 
-    if (value == NULL || token == NULL || value[0] == L'\0' || token[0] == L'\0') { return FALSE; }
-    StringCchCopyW(scratch, _countof(scratch), value);
-    StringCchCopyW(tokenScratch, _countof(tokenScratch), token);
-    _wcslwr_s(scratch, _countof(scratch));
-    _wcslwr_s(tokenScratch, _countof(tokenScratch));
-    found = wcsstr(scratch, tokenScratch);
-    return (found != NULL) ? TRUE : FALSE;
+    if (output == NULL || outputCount == 0) { return; }
+    output[0] = L'\0';
+    if (value == NULL || value[0] == L'\0') { return; }
+
+    if (FAILED(StringCchCopyW(scratch, _countof(scratch), value)))
+    {
+        return;
+    }
+    for (i = 0; scratch[i] != L'\0'; ++i)
+    {
+        if (scratch[i] == L'/') { scratch[i] = L'\\'; }
+    }
+
+    fullLen = GetFullPathNameW(scratch, (DWORD)outputCount, output, NULL);
+    if (fullLen == 0 || fullLen >= outputCount)
+    {
+        StringCchCopyW(output, outputCount, scratch);
+    }
+    for (i = 0; output[i] != L'\0'; ++i)
+    {
+        if (output[i] == L'/') { output[i] = L'\\'; }
+    }
+}
+
+static BOOL Helper_TargetEndsWithW(const WCHAR* value, const WCHAR* suffix)
+{
+    WCHAR normalized[MAX_PATH * 4];
+
+    Helper_NormalizePathW(value, normalized, _countof(normalized));
+    return Helper_EndsWithInsensitiveW(normalized, suffix);
+}
+
+static BOOL Helper_IsApprovedBridgeModuleArgumentW(const WCHAR* value)
+{
+    static const WCHAR suffix[] = L"," MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W;
+    WCHAR modulePath[MAX_PATH * 4];
+    WCHAR normalizedModulePath[MAX_PATH * 4];
+    size_t valueLen;
+    size_t suffixLen;
+    size_t moduleLen;
+
+    if (value == NULL || value[0] == L'\0') { return FALSE; }
+    valueLen = wcsnlen_s(value, MAX_PATH * 4);
+    suffixLen = wcsnlen_s(suffix, _countof(suffix));
+    if (valueLen == 0 || valueLen >= (MAX_PATH * 4) || valueLen <= suffixLen) { return FALSE; }
+    if (wcsncmp(value + (valueLen - suffixLen), suffix, suffixLen) != 0) { return FALSE; }
+
+    moduleLen = valueLen - suffixLen;
+    if (moduleLen == 0 || moduleLen >= _countof(modulePath)) { return FALSE; }
+    if (FAILED(StringCchCopyNW(modulePath, _countof(modulePath), value, moduleLen)))
+    {
+        return FALSE;
+    }
+    modulePath[moduleLen] = L'\0';
+
+    Helper_NormalizePathW(modulePath, normalizedModulePath, _countof(normalizedModulePath));
+    return Helper_EndsWithInsensitiveW(normalizedModulePath, L".dll");
+}
+
+static BOOL Helper_IsApprovedBridgePipeNameW(const WCHAR* value, const WCHAR* suffix)
+{
+    static const WCHAR prefix[] = L"\\\\.\\pipe\\MeshKvm_";
+    size_t valueLen;
+    size_t prefixLen;
+    size_t suffixLen;
+    size_t i;
+
+    if (value == NULL || suffix == NULL) { return FALSE; }
+    valueLen = wcsnlen_s(value, MAX_PATH * 4);
+    prefixLen = wcsnlen_s(prefix, _countof(prefix));
+    suffixLen = wcsnlen_s(suffix, 16);
+    if (valueLen == 0 || valueLen >= (MAX_PATH * 4) || valueLen <= (prefixLen + suffixLen)) { return FALSE; }
+    if (_wcsnicmp(value, prefix, prefixLen) != 0) { return FALSE; }
+    if (_wcsicmp(value + (valueLen - suffixLen), suffix) != 0) { return FALSE; }
+
+    for (i = prefixLen; i < valueLen - suffixLen; ++i)
+    {
+        WCHAR c = value[i];
+        if (!((c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'F') || (c >= L'a' && c <= L'f')))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOL Helper_IsApprovedBridgeModeW(const WCHAR* value)
+{
+    return (value != NULL && (wcscmp(value, L"-kvm0") == 0 || wcscmp(value, L"-kvm1") == 0)) ? TRUE : FALSE;
+}
+
+static BOOL Helper_IsApprovedBridgeOptionalFlagW(const WCHAR* value)
+{
+    return (value != NULL && (wcscmp(value, L"-coredump") == 0 || wcscmp(value, L"-remotecursor") == 0)) ? TRUE : FALSE;
 }
 
 BOOL HelperMonitor_IsApprovedDesktopBridgeCommand(const WCHAR* exePath, const WCHAR* arguments)
 {
+    LPWSTR* argumentVector = NULL;
+    int argumentCount = 0;
+    int i;
+    BOOL approved = FALSE;
+    BOOL sawCoreDump = FALSE;
+    BOOL sawRemoteCursor = FALSE;
+
     if (exePath == NULL || exePath[0] == L'\0' || arguments == NULL || arguments[0] == L'\0') {
         return FALSE;
     }
-    if (!Helper_CommandLineContainsInsensitiveW(arguments, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W)) {
+    if (!Helper_TargetEndsWithW(exePath, L"\\rundll32.exe") &&
+        !Helper_TargetEndsWithW(exePath, L"\\rundll32")) {
         return FALSE;
     }
-    return Helper_EndsWithInsensitiveW(exePath, L"\\rundll32.exe") ||
-           Helper_EndsWithInsensitiveW(exePath, L"\\rundll32");
-}
 
-static void Helper_LogPolicyDecision(const WCHAR* decision, DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD errorCode)
-{
-    WCHAR logLine[512];
-    ULONGLONG cmdHash = Helper_HashCommandLine(exePath, arguments);
+    argumentVector = CommandLineToArgvW(arguments, &argumentCount);
+    if (argumentVector == NULL) { return FALSE; }
 
-    StringCchPrintfW(logLine, _countof(logLine),
-        L"[HelperPolicy] decision=%ls class=desktop-bridge strict=%lu allowDesktopBridge=%lu session=%lu cmdHash=%016I64X error=%lu",
-        (decision != NULL ? decision : L"unknown"),
-        g_HelperConfig.strictServiceOnly ? 1UL : 0UL,
-        g_HelperConfig.allowDesktopBridge ? 1UL : 0UL,
-        sessionId,
-        cmdHash,
-        errorCode);
-    OutputDebugStringW(logLine);
-}
+    approved = (argumentCount >= 4 &&
+        Helper_IsApprovedBridgeModuleArgumentW(argumentVector[0]) &&
+        Helper_IsApprovedBridgePipeNameW(argumentVector[1], L"_in") &&
+        Helper_IsApprovedBridgePipeNameW(argumentVector[2], L"_out") &&
+        Helper_IsApprovedBridgeModeW(argumentVector[3]));
 
-static BOOL Helper_IsSessionSpawnAllowed(DWORD sessionId, const WCHAR* exePath, const WCHAR* arguments, DWORD* outError)
-{
-    DWORD errorCode = ERROR_SUCCESS;
-
-    if (g_HelperConfig.allowDesktopBridge &&
-        HelperMonitor_IsApprovedDesktopBridgeCommand(exePath, arguments))
+    if (approved)
     {
-        Helper_LogPolicyDecision(L"allow-kvm-bridge", sessionId, exePath, arguments, ERROR_SUCCESS);
-        if (outError != NULL) { *outError = ERROR_SUCCESS; }
-        return TRUE;
+        for (i = 4; i < argumentCount; ++i)
+        {
+            if (i > 5 || !Helper_IsApprovedBridgeOptionalFlagW(argumentVector[i]))
+            {
+                approved = FALSE;
+                break;
+            }
+            if (wcscmp(argumentVector[i], L"-coredump") == 0)
+            {
+                if (sawCoreDump) { approved = FALSE; break; }
+                sawCoreDump = TRUE;
+            }
+            if (wcscmp(argumentVector[i], L"-remotecursor") == 0)
+            {
+                if (sawRemoteCursor) { approved = FALSE; break; }
+                sawRemoteCursor = TRUE;
+            }
+        }
     }
 
-    errorCode = ERROR_ACCESS_DISABLED_BY_POLICY;
-    Helper_LogPolicyDecision(L"deny", sessionId, exePath, arguments, errorCode);
-    if (outError != NULL) { *outError = errorCode; }
-    return FALSE;
+    LocalFree(argumentVector);
+    return approved;
 }
 
-/**
- * Spawn a process in a specific user session.
- * Uses the complete CreateProcessAsUser workflow.
- *
- * Ported from:
- * - murrayju/CreateProcessAsUser's StartProcessAsCurrentUser
- * - ondrasek's spawnProcess function
- * - masthoon's SystemCMD.cpp
- */
 static BOOL Helper_SpawnProcessInSession(
     DWORD sessionId,
     const WCHAR* exePath,
@@ -1819,121 +1830,15 @@ static BOOL Helper_SpawnProcessInSession(
     DWORD* outPid,
     DWORD* outError)
 {
-    HANDLE hUserToken = NULL;
-    HANDLE hDuplicatedToken = NULL;
-    LPVOID pEnvironment = NULL;
-    BOOL result = FALSE;
-    DWORD error = 0;
+    UNREFERENCED_PARAMETER(sessionId);
+    UNREFERENCED_PARAMETER(exePath);
+    UNREFERENCED_PARAMETER(arguments);
 
-    if (outPid) *outPid = 0;
-    if (outError) *outError = 0;
-
-    if (exePath == NULL || exePath[0] == L'\0') {
-        if (outError) *outError = ERROR_INVALID_PARAMETER;
-        return FALSE;
-    }
-
-    if (!Helper_IsSessionSpawnAllowed(sessionId, exePath, arguments, &error)) {
-        if (outError) *outError = error;
-        return FALSE;
-    }
-
-    /* Step 1: Get user token for the session */
-    if (!WTSQueryUserToken(sessionId, &hUserToken)) {
-        error = GetLastError();
-        if (outError) *outError = error;
-        return FALSE;
-    }
-
-    /* Step 2: Duplicate token with specific required privileges only
-     * Security fix: Use minimum required access instead of MAXIMUM_ALLOWED
-     * to follow principle of least privilege and prevent escalation */
-    SECURITY_ATTRIBUTES sa;
-    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-    sa.lpSecurityDescriptor = NULL;
-    sa.bInheritHandle = FALSE;
-
-    /* Use only the specific access rights required for CreateProcessAsUser */
-    DWORD tokenAccess = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY |
-                        TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID;
-
-    if (!DuplicateTokenEx(hUserToken, tokenAccess, &sa,
-            SecurityImpersonation, TokenPrimary, &hDuplicatedToken)) {
-        error = GetLastError();
-        CloseHandle(hUserToken);
-        if (outError) *outError = error;
-        return FALSE;
-    }
-
-    CloseHandle(hUserToken);
-    hUserToken = NULL;
-
-    /* Step 3: Create environment block for user */
-    if (!CreateEnvironmentBlock(&pEnvironment, hDuplicatedToken, FALSE)) {
-        /* Non-fatal - continue without custom environment */
-        pEnvironment = NULL;
-    }
-
-    /* Step 4: Prepare startup info with correct desktop */
-    STARTUPINFOW si;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(STARTUPINFOW);
-    si.lpDesktop = L"winsta0\\default";
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;  /* Start hidden - helper runs in background */
-
-    /* Step 5: Build command line */
-    WCHAR cmdLine[1024];
-    if (arguments != NULL && arguments[0] != L'\0') {
-        StringCchPrintfW(cmdLine, _countof(cmdLine), L"\"%s\" %s", exePath, arguments);
-    } else {
-        StringCchPrintfW(cmdLine, _countof(cmdLine), L"\"%s\"", exePath);
-    }
-
-    /* Step 6: Create the process */
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&pi, sizeof(pi));
-
-    DWORD creationFlags = NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW;
-    if (pEnvironment != NULL) {
-        creationFlags |= CREATE_UNICODE_ENVIRONMENT;
-    }
-
-    if (CreateProcessAsUserW(
-            hDuplicatedToken,
-            NULL,
-            cmdLine,
-            NULL,
-            NULL,
-            FALSE,
-            creationFlags,
-            pEnvironment,
-            NULL,
-            &si,
-            &pi)) {
-
-        result = TRUE;
-        if (outPid) *outPid = pi.dwProcessId;
-
-        /* Store process handle for monitoring */
-        if (g_HelperProcess != NULL) {
-            CloseHandle(g_HelperProcess);
-        }
-        g_HelperProcess = pi.hProcess;
-
-        CloseHandle(pi.hThread);
-    } else {
-        error = GetLastError();
-        if (outError) *outError = error;
-    }
-
-    /* Cleanup */
-    if (pEnvironment != NULL) {
-        DestroyEnvironmentBlock(pEnvironment);
-    }
-    CloseHandle(hDuplicatedToken);
-
-    return result;
+    if (outPid != NULL) { *outPid = 0; }
+    if (outError != NULL) { *outError = ERROR_ACCESS_DISABLED_BY_POLICY; }
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfW(L"Watchdog helper user-session launch blocked by rundll32-only helper policy");
+    return FALSE;
 }
 
 static BOOL Helper_IsProcessAlive(HANDLE hProcess)

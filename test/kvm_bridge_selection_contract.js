@@ -69,7 +69,8 @@ function main() {
             !processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
             !processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "--slave")') &&
             !processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "-b64exec")') &&
-            processPipeSource.includes('blocked-user-session'),
+            processPipeSource.includes('blocked-windows-spawn') &&
+            processPipeSource.includes('ILibProcessPipe_IsWindowsSpawnAllowed(spawnType, target, parameters)'),
         policyDoesNotAllowGenericUserSessionByEnv:
             !processPipeSource.includes('ILibProcessPipe_LogPolicyDecisionA("allow", "generic"') &&
             !processPipeSource.includes('strictServiceOnly == 0 || allowDesktopBridge != 0'),
