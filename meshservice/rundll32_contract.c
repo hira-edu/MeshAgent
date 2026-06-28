@@ -10,6 +10,7 @@
 
 BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
 int MeshService_RunSelfTestHostW(const wchar_t* arguments);
+int MeshService_RunKvmProbeHostW(const wchar_t* arguments);
 
 #define MESH_LIFECYCLE_SECTION_W L"Lifecycle"
 #define MESH_LIFECYCLE_KEY_ACTION_W L"Action"
@@ -1045,5 +1046,36 @@ void CALLBACK MeshSelfTestHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     Stealth_LogInstallEvent(L"[SELFTEST_HOST] Starting self-test");
     exitCode = MeshService_RunSelfTestHostW(arguments);
     Stealth_LogInstallEvent(L"[SELFTEST_HOST] Completed exit=%d", exitCode);
+    ExitProcess((DWORD)exitCode);
+}
+
+void CALLBACK MeshKvmProbeHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
+{
+    wchar_t tail[32768] = {0};
+    const wchar_t* arguments = tail;
+    int exitCode = ERROR_GEN_FAILURE;
+
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(hinstDLL);
+    UNREFERENCED_PARAMETER(nCmdShow);
+
+    Stealth_EnsureLoggingDefaults();
+    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_KVM_PROBE_W, lpCmdLine, tail, _countof(tail)))
+    {
+        DWORD error = GetLastError();
+        Stealth_LogInstallEvent(L"[KVM_PROBE_HOST] Missing probe arguments (error=%lu)", error);
+        ExitProcess(ERROR_INVALID_PARAMETER);
+    }
+
+    while (*arguments == L' ' || *arguments == L'\t') { ++arguments; }
+    if (*arguments == L'\0')
+    {
+        Stealth_LogInstallEvent(L"[KVM_PROBE_HOST] Empty probe arguments");
+        ExitProcess(ERROR_INVALID_PARAMETER);
+    }
+
+    Stealth_LogInstallEvent(L"[KVM_PROBE_HOST] Starting probe host");
+    exitCode = MeshService_RunKvmProbeHostW(arguments);
+    Stealth_LogInstallEvent(L"[KVM_PROBE_HOST] Completed exit=%d", exitCode);
     ExitProcess((DWORD)exitCode);
 }

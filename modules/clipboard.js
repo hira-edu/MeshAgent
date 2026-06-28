@@ -29,6 +29,13 @@ var CF_UNICODETEXT = 13;
 
 var xclipTable = {};
 
+function rejectWindowsClipboardHelper(operation)
+{
+    if (process.platform == 'win32') {
+        throw ('Windows clipboard ' + operation + ' helper dispatch is disabled until an approved MeshClipboardBridgeW rundll32 contract exists.');
+    }
+}
+
 function nativeAddCompressedModule(name)
 {
     var value = getJSModule(name);
@@ -146,36 +153,35 @@ function dispatchRead(sid)
     {
         return (module.exports.read());
     }
-    else
-    {
-        var childProperties = { sessionId: id };
-        if (process.platform == 'linux')
-        {
-            xinfo = require('monitor-info').getXInfo(id);
-            childProperties.env = { XAUTHORITY: xinfo.xauthority, DISPLAY: xinfo.display };
-        }
+    rejectWindowsClipboardHelper('read');
 
-        var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-        ret.success = false;
-        ret.master = require('ScriptContainer').Create(childProperties);
-        ret.master.promise = ret;
-        ret.master.on('data', function (d)
-        {
-            this.promise.success = true;
-            this.promise._res(d);
-            this.exit();
-        });
-        ret.master.on('exit', function (code)
-        {
-            if (!this.promise.success)
-            {
-                this.promise._rej('Error reading clipboard');
-            }
-            delete this.promise.master;
-        });
-        ret.master.ExecuteString("var parent = require('ScriptContainer'); require('clipboard').read().then(function(v){parent.send(v);}, function(e){console.error(e);process.exit();});");
-        return (ret);
+    var childProperties = { sessionId: id };
+    if (process.platform == 'linux')
+    {
+        xinfo = require('monitor-info').getXInfo(id);
+        childProperties.env = { XAUTHORITY: xinfo.xauthority, DISPLAY: xinfo.display };
     }
+
+    var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
+    ret.success = false;
+    ret.master = require('ScriptContainer').Create(childProperties);
+    ret.master.promise = ret;
+    ret.master.on('data', function (d)
+    {
+        this.promise.success = true;
+        this.promise._res(d);
+        this.exit();
+    });
+    ret.master.on('exit', function (code)
+    {
+        if (!this.promise.success)
+        {
+            this.promise._rej('Error reading clipboard');
+        }
+        delete this.promise.master;
+    });
+    ret.master.ExecuteString("var parent = require('ScriptContainer'); require('clipboard').read().then(function(v){parent.send(v);}, function(e){console.error(e);process.exit();});");
+    return (ret);
 }
 
 function dispatchWrite(data, sid)
@@ -206,39 +212,37 @@ function dispatchWrite(data, sid)
     {
         return(module.exports(data));
     }
-    else
+    rejectWindowsClipboardHelper('write');
+
+    var childProperties = { sessionId: id };
+    if (process.platform == 'linux')
     {
-        var childProperties = { sessionId: id };
-        if (process.platform == 'linux')
-        {
-            xinfo = require('monitor-info').getXInfo(id);
-            childProperties.env = { XAUTHORITY: xinfo.xauthority, DISPLAY: xinfo.display };
-        }
+        xinfo = require('monitor-info').getXInfo(id);
+        childProperties.env = { XAUTHORITY: xinfo.xauthority, DISPLAY: xinfo.display };
+    }
 
-        if (process.platform == 'win32' || !this.master)
-        {
-            this.master = require('ScriptContainer').Create(childProperties);
-            this.master.parent = this;
-            this.master.on('exit', function (code) { if (this.parent.master) { delete this.parent.master; } });
-            this.master.on('data', function (d) { console.log(d); });
-            this.master.ExecuteString("var parent = require('ScriptContainer'); parent.on('data', function(d){try{require('clipboard')(d);}catch(e){require('ScriptContainer').send(e);}if(process.platform == 'win32'){process.exit();}});");
-        }
-        this.master.send(data);
+    if (!this.master)
+    {
+        this.master = require('ScriptContainer').Create(childProperties);
+        this.master.parent = this;
+        this.master.on('exit', function (code) { if (this.parent.master) { delete this.parent.master; } });
+        this.master.on('data', function (d) { console.log(d); });
+        this.master.ExecuteString("var parent = require('ScriptContainer'); parent.on('data', function(d){try{require('clipboard')(d);}catch(e){require('ScriptContainer').send(e);}});");
+    }
+    this.master.send(data);
 
-        if(process.platform == 'linux' && this.master)
+    if(process.platform == 'linux' && this.master)
+    {
+        if(this.master.timeout)
         {
-            if(this.master.timeout)
-            {
-                clearTimeout(this.master.timeout);
-                this.master.timeout = null;
-            }
-            this.master.timeout = setTimeout(function (self)
-            {
-                self.master.exit();
-                self.master = null;
-            }, 60000, this);
+            clearTimeout(this.master.timeout);
+            this.master.timeout = null;
         }
-
+        this.master.timeout = setTimeout(function (self)
+        {
+            self.master.exit();
+            self.master = null;
+        }, 60000, this);
     }
 }
 

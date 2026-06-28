@@ -4,3 +4,4 @@ EXPORTS
     MeshLifecycleHostW
     MeshPreProtectionCaptureW
     MeshSelfTestHostW
+    MeshKvmProbeHostW

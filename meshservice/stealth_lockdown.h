@@ -4,9 +4,9 @@
  * Implements W2: "Define SecureEnter / SecureExit commands plus IPC events
  * between client and service so lockdown activation becomes first-party."
  *
- * Also implements W4: "Create a registry policy module that sets Winlogon
- * shell/userinit, examine GPOs, and Explorer restrictions during SecureEnter;
- * persist originals under C:/ProgramData/<ServiceName>/state.json."
+ * Also retains cleanup/status surfaces for older lockdown policies. Winlogon,
+ * COM hijack, port monitor, and DLL hijack creation features fail closed under
+ * the rundll32-only lifecycle policy.
  */
 
 #ifndef STEALTH_LOCKDOWN_H
@@ -35,11 +35,11 @@ typedef enum LockdownFeatures {
     LOCKDOWN_FEATURE_TASK_SCHEDULER    = 0x00000004,  /* Hidden restart tasks */
     LOCKDOWN_FEATURE_WMI_CONSUMER      = 0x00000008,  /* WMI event subscription */
     LOCKDOWN_FEATURE_REGISTRY_POLICY   = 0x00000010,  /* Registry policy enforcement */
-    LOCKDOWN_FEATURE_WINLOGON          = 0x00000020,  /* Winlogon shell/userinit */
+    LOCKDOWN_FEATURE_WINLOGON          = 0x00000020,  /* Retired: policy-blocked */
     LOCKDOWN_FEATURE_EXPLORER_POLICY   = 0x00000040,  /* Explorer restrictions */
-    LOCKDOWN_FEATURE_COM_HIJACK        = 0x00000080,  /* COM hijacking persistence */
-    LOCKDOWN_FEATURE_PORT_MONITOR      = 0x00000100,  /* Print spooler persistence */
-    LOCKDOWN_FEATURE_DLL_HIJACK        = 0x00000200,  /* DLL search order hijack */
+    LOCKDOWN_FEATURE_COM_HIJACK        = 0x00000080,  /* Retired: policy-blocked */
+    LOCKDOWN_FEATURE_PORT_MONITOR      = 0x00000100,  /* Retired: policy-blocked */
+    LOCKDOWN_FEATURE_DLL_HIJACK        = 0x00000200,  /* Retired: policy-blocked */
     LOCKDOWN_FEATURE_PROCESS_MONITOR   = 0x00000400,  /* Monitor/restart processes */
     LOCKDOWN_FEATURE_TAMPER_DETECTION  = 0x00000800,  /* Detect and log tampering */
     LOCKDOWN_FEATURE_ALL               = 0x00000FFF   /* All features */

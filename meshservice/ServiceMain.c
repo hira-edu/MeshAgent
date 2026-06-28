@@ -77,6 +77,9 @@ static char* MeshService_ReadUtf8TextFileW(const WCHAR* path);
 static BOOL MeshService_OpenPrimarySystemTokenForSession(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut);
 static BOOL MeshService_OpenElevatedPrimaryTokenForSession(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut);
 static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut);
+static BOOL MeshService_SpawnKvmProbeHostWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, BOOL visible, PROCESS_INFORMATION* processInfo, DWORD* errorOut);
+static BOOL MeshService_BuildKvmProbeHostShellParametersW(const WCHAR* arguments, WCHAR* parameters, size_t parametersCch);
+static BOOL MeshService_GetCurrentBuildBridgeDllPathW(WCHAR* output, size_t outputLen);
 typedef HRESULT(__stdcall *DpiAwarenessFunc)(PROCESS_DPI_AWARENESS);
 #if defined(_LINKVM)
 extern DWORD WINAPI kvm_server_mainloop(LPVOID Param);
@@ -1506,7 +1509,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeCommand(void)
 	if (systemTokenReady)
 	{
 		StringCchPrintfW(arguments, _countof(arguments), L"-kvm-bridge-session-change-probe-child \"%ls\"", reportPath);
-		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, arguments, L"winsta0\\default", &childProcess, &spawnError);
+		childSpawned = MeshService_SpawnKvmProbeHostWithTokenW(systemToken, arguments, L"winsta0\\default", FALSE, &childProcess, &spawnError);
 	}
 
 	if (childSpawned)
@@ -2100,47 +2103,171 @@ static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* argume
 	return FALSE;
 }
 
-static BOOL MeshService_TerminateProcessesByNameInSessionW(const WCHAR* processName, DWORD sessionId, DWORD* terminatedCountOut)
+static BOOL MeshService_IsNonEmptyKvmProbeArgumentW(const WCHAR* value)
 {
-	HANDLE snapshot = INVALID_HANDLE_VALUE;
-	PROCESSENTRY32W entry;
-	DWORD terminatedCount = 0;
+	return (value != NULL && value[0] != L'\0');
+}
 
-	if (terminatedCountOut != NULL) { *terminatedCountOut = 0; }
-	if (processName == NULL || processName[0] == L'\0') { return FALSE; }
+static BOOL MeshService_IsUnsignedDecimalKvmProbeArgumentW(const WCHAR* value)
+{
+	const WCHAR* cursor = value;
 
-	snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	if (snapshot == INVALID_HANDLE_VALUE) { return FALSE; }
-
-	ZeroMemory(&entry, sizeof(entry));
-	entry.dwSize = sizeof(entry);
-	if (!Process32FirstW(snapshot, &entry))
+	if (cursor == NULL || *cursor == L'\0') { return FALSE; }
+	while (*cursor != L'\0')
 	{
-		CloseHandle(snapshot);
+		if (*cursor < L'0' || *cursor > L'9') { return FALSE; }
+		++cursor;
+	}
+	return TRUE;
+}
+
+static BOOL MeshService_IsAllowedKvmProbeHostCommandW(const WCHAR* arguments)
+{
+	LPWSTR* argv = NULL;
+	int argc = 0;
+	BOOL allowed = FALSE;
+
+	if (arguments == NULL || arguments[0] == L'\0') { return FALSE; }
+	argv = CommandLineToArgvW(arguments, &argc);
+	if (argv == NULL || argc < 1 || argv[0] == NULL)
+	{
+		if (argv != NULL) { LocalFree(argv); }
 		return FALSE;
 	}
 
-	do
+	if (_wcsicmp(argv[0], L"-kvm-bridge-session-change-probe-child") == 0)
 	{
-		DWORD processSessionId = 0;
-		HANDLE processHandle = NULL;
+		allowed = (argc == 2 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1])) ||
+			(argc == 3 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) && _wcsicmp(argv[2], L"--auto-selected-tsid") == 0);
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-bridge-crash-recovery-probe-child") == 0)
+	{
+		allowed = (argc == 2 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-bridge-event-audit-probe-child") == 0)
+	{
+		allowed = (argc == 2 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-secure-desktop-probe-child") == 0)
+	{
+		allowed = (argc == 3 &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
+			MeshService_IsUnsignedDecimalKvmProbeArgumentW(argv[2]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-elevated-input-probe-child") == 0)
+	{
+		allowed = (argc == 2 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-elevated-input-target") == 0)
+	{
+		allowed = (argc == 5 &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[2]) &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[3]) &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[4]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-blockinput-probe-child") == 0)
+	{
+		allowed = (argc == 2 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-blockinput-target") == 0)
+	{
+		allowed = (argc == 5 &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[2]) &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[3]) &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[4]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-blockinput-holder") == 0)
+	{
+		allowed = (argc == 4 &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[2]) &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[3]));
+	}
 
-		if (_wcsicmp(entry.szExeFile, processName) != 0) { continue; }
-		if (!ProcessIdToSessionId(entry.th32ProcessID, &processSessionId) || processSessionId != sessionId) { continue; }
+	LocalFree(argv);
+	return allowed;
+}
 
-		processHandle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.th32ProcessID);
-		if (processHandle == NULL) { continue; }
-		if (TerminateProcess(processHandle, 1))
-		{
-			++terminatedCount;
-			WaitForSingleObject(processHandle, 5000);
-		}
-		CloseHandle(processHandle);
-	} while (Process32NextW(snapshot, &entry));
+static BOOL MeshService_BuildKvmProbeHostShellParametersW(const WCHAR* arguments, WCHAR* parameters, size_t parametersCch)
+{
+	WCHAR hostDllPath[MAX_PATH * 4] = { 0 };
 
-	CloseHandle(snapshot);
-	if (terminatedCountOut != NULL) { *terminatedCountOut = terminatedCount; }
-	return (terminatedCount > 0);
+	if (parameters != NULL && parametersCch > 0) { parameters[0] = L'\0'; }
+	if (arguments == NULL || arguments[0] == L'\0' || parameters == NULL || parametersCch == 0)
+	{
+		SetLastError(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (!MeshService_IsAllowedKvmProbeHostCommandW(arguments))
+	{
+		SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+		return FALSE;
+	}
+	if (!MeshService_GetCurrentBuildBridgeDllPathW(hostDllPath, _countof(hostDllPath)))
+	{
+		if (GetLastError() == ERROR_SUCCESS) { SetLastError(ERROR_PATH_NOT_FOUND); }
+		return FALSE;
+	}
+	if (FAILED(StringCchPrintfW(
+		parameters,
+		parametersCch,
+		L"\"%ls\",%ls %ls",
+		hostDllPath,
+		MESH_RUNDLL32_ENTRY_KVM_PROBE_W,
+		arguments)))
+	{
+		parameters[0] = L'\0';
+		SetLastError(ERROR_INSUFFICIENT_BUFFER);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static BOOL MeshService_SpawnKvmProbeHostWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, BOOL visible, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
+{
+	STARTUPINFOW startupInfo;
+	WCHAR rundll32Path[MAX_PATH] = { 0 };
+	WCHAR shellParameters[32768] = { 0 };
+	WCHAR commandLine[32768] = { 0 };
+	DWORD createFlags = visible ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW;
+	BOOL ok = FALSE;
+
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (processInfo != NULL) { ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION)); }
+	if (token == NULL || processInfo == NULL || arguments == NULL || arguments[0] == L'\0')
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
+		SetLastError(ERROR_INVALID_PARAMETER);
+		return FALSE;
+	}
+	if (!MeshRundll32_GetSystemRundll32PathW(rundll32Path, _countof(rundll32Path)) ||
+		!MeshService_BuildKvmProbeHostShellParametersW(arguments, shellParameters, _countof(shellParameters)))
+	{
+		DWORD error = GetLastError();
+		if (errorOut != NULL) { *errorOut = error; }
+		return FALSE;
+	}
+	if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\" %ls", rundll32Path, shellParameters)))
+	{
+		if (errorOut != NULL) { *errorOut = ERROR_INSUFFICIENT_BUFFER; }
+		SetLastError(ERROR_INSUFFICIENT_BUFFER);
+		return FALSE;
+	}
+
+	ZeroMemory(&startupInfo, sizeof(startupInfo));
+	startupInfo.cb = sizeof(startupInfo);
+	startupInfo.lpDesktop = (LPWSTR)((desktop != NULL && desktop[0] != L'\0') ? desktop : L"winsta0\\default");
+	if (visible)
+	{
+		startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+		startupInfo.wShowWindow = SW_SHOWNORMAL;
+	}
+
+	ok = CreateProcessAsUserW(token, rundll32Path, commandLine, NULL, NULL, FALSE, createFlags, NULL, NULL, &startupInfo, processInfo);
+	if (!ok && errorOut != NULL) { *errorOut = GetLastError(); }
+	return ok;
 }
 
 static void MeshService_EnableKvmDpiAwareness(void)
@@ -2277,26 +2404,28 @@ static int MeshService_RunKvmUacConsentTargetCommand(DWORD sleepMs, const WCHAR*
 	FILE* file = NULL;
 	errno_t fileErr = 0;
 
+	UNREFERENCED_PARAMETER(sleepMs);
+	SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
 	if (reportPath != NULL && reportPath[0] != L'\0')
 	{
 		fileErr = _wfopen_s(&file, reportPath, L"wb");
 		if (fileErr == 0 && file != NULL)
 		{
-			fprintf(file, "{\"success\":true,\"sleepMs\":%lu}\n", (unsigned long)(sleepMs == 0 ? 1000 : sleepMs));
+			fprintf(file, "{\"success\":false,\"error\":%lu,\"reason\":\"uac-consent-target-disabled-by-rundll32-only-policy\"}\n", (unsigned long)ERROR_ACCESS_DISABLED_BY_POLICY);
 			fclose(file);
 		}
 	}
-	Sleep(sleepMs == 0 ? 1000 : sleepMs);
-	return 0;
+	return 1;
 }
 
-static int MeshService_RunKvmUacConsentTriggerCommand(const WCHAR* reportPath, DWORD timeoutMs)
+static int MeshService_RunKvmUacConsentTriggerCommand(const WCHAR* reportPath, DWORD timeoutMs, const WCHAR* targetReportPath)
 {
 	FILE* file = NULL;
 	errno_t fileErr = 0;
 
 	UNREFERENCED_PARAMETER(timeoutMs);
-
+	UNREFERENCED_PARAMETER(targetReportPath);
+	SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
 	if (reportPath != NULL && reportPath[0] != L'\0')
 	{
 		fileErr = _wfopen_s(&file, reportPath, L"wb");
@@ -2311,12 +2440,86 @@ static int MeshService_RunKvmUacConsentTriggerCommand(const WCHAR* reportPath, D
 
 static int MeshService_RunKvmSecureDesktopProbeCommand(void)
 {
+	WCHAR childReport[MAX_PATH] = { 0 };
+	WCHAR tempPath[MAX_PATH] = { 0 };
+	WCHAR childArgs[512] = { 0 };
+	HANDLE systemToken = NULL;
+	PROCESS_INFORMATION childProcess;
 	DWORD sessionId = MeshService_GetCurrentSessionId();
-	printf("{\"success\":false,\"sessionId\":%lu,\"error\":%lu,\"reason\":\"secure-desktop-uac-probe-disabled-by-rundll32-only-policy\"}\n",
-		(unsigned long)sessionId,
-		(unsigned long)ERROR_ACCESS_DISABLED_BY_POLICY);
+	DWORD childSpawnError = ERROR_SUCCESS;
+	DWORD systemTokenError = ERROR_SUCCESS;
+	DWORD childExitCode = STILL_ACTIVE;
+	BOOL childSpawned = FALSE;
+	BOOL systemTokenReady = FALSE;
+	BOOL debugPrivilegeEnabled = FALSE;
+	BOOL success = FALSE;
+	char* childJson = NULL;
+
+	ZeroMemory(&childProcess, sizeof(childProcess));
+
+	if (ExpandEnvironmentStringsW(L"%PUBLIC%\\Documents\\MeshAgent\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
+	{
+		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+	}
+	else
+	{
+		CreateDirectoryW(tempPath, NULL);
+	}
+	StringCchPrintfW(childReport, _countof(childReport), L"%lsMeshSecureDesktopProbe_%lu_child.json", tempPath, GetCurrentProcessId());
+	DeleteFileW(childReport);
+
+	debugPrivilegeEnabled = MeshService_EnableNamedPrivilegeW(L"SeDebugPrivilege");
+
+	systemTokenReady = MeshService_OpenPrimarySystemTokenForSession(sessionId, &systemToken, &systemTokenError);
+	if (systemTokenReady)
+	{
+		if (FAILED(StringCchPrintfW(childArgs, _countof(childArgs), L"-kvm-secure-desktop-probe-child \"%ls\" %u", childReport, 20000)))
+		{
+			childSpawnError = ERROR_INSUFFICIENT_BUFFER;
+		}
+		else
+		{
+			childSpawned = MeshService_SpawnKvmProbeHostWithTokenW(systemToken, childArgs, L"winsta0\\default", FALSE, &childProcess, &childSpawnError);
+		}
+	}
+	if (childSpawned)
+	{
+		Sleep(1500);
+	}
+
+	if (childSpawned)
+	{
+		WaitForSingleObject(childProcess.hProcess, 30000);
+		GetExitCodeProcess(childProcess.hProcess, &childExitCode);
+	}
+
+	childJson = MeshService_ReadUtf8TextFileW(childReport);
+	success = (childSpawned &&
+		childExitCode == 0 &&
+		childJson != NULL &&
+		strstr(childJson, "\"success\":true") != NULL);
+
+	printf("{\"success\":%s,", success ? "true" : "false");
+	printf("\"sessionId\":%lu,", (unsigned long)sessionId);
+	printf("\"systemTokenReady\":%s,", systemTokenReady ? "true" : "false");
+	printf("\"debugPrivilegeEnabled\":%s,", debugPrivilegeEnabled ? "true" : "false");
+	printf("\"childSpawned\":%s,", childSpawned ? "true" : "false");
+	printf("\"uacSpawned\":false,");
+	printf("\"systemTokenError\":%lu,", (unsigned long)systemTokenError);
+	printf("\"childSpawnError\":%lu,", (unsigned long)childSpawnError);
+	printf("\"uacSpawnError\":%lu,", (unsigned long)ERROR_ACCESS_DISABLED_BY_POLICY);
+	printf("\"childExitCode\":%lu,", (unsigned long)childExitCode);
+	printf("\"rundll32ProbeHost\":true,");
+	printf("\"uacTriggerPolicy\":\"uac-consent-trigger-disabled-by-rundll32-only-policy\",");
+	printf("\"probe\":%s}\n", childJson != NULL ? childJson : "null");
 	fflush(stdout);
-	return 1;
+
+	if (childProcess.hThread != NULL) { CloseHandle(childProcess.hThread); }
+	if (childProcess.hProcess != NULL) { CloseHandle(childProcess.hProcess); }
+	if (systemToken != NULL) { CloseHandle(systemToken); }
+	if (childJson != NULL) { free(childJson); }
+	DeleteFileW(childReport);
+	return success ? 0 : 1;
 }
 
 typedef struct MeshServiceFindWindowContext
@@ -3108,18 +3311,18 @@ static int MeshService_RunKvmElevatedInputProbeWorkerCommand(void)
 		DeleteFileW(capturePath);
 		DeleteFileW(readyPath);
 		DeleteFileW(hwndReportPath);
-			if (GetModuleFileNameW(NULL, targetExePath, (DWORD)_countof(targetExePath)) > 0 &&
-				SUCCEEDED(StringCchPrintfW(
-					targetArgs,
-					_countof(targetArgs),
-					L"-kvm-elevated-input-target \"%ls\" \"%ls\" \"%ls\" \"%ls\"",
-					hwndReportPath,
-					readyPath,
-					capturePath,
-					windowTitle)))
-			{
-				targetSpawned = MeshService_SpawnVisibleExecutableWithTokenW(elevatedToken, targetExePath, targetArgs, targetDesktop, &targetProcess, &targetSpawnError);
-			}
+		if (MeshRundll32_GetSystemRundll32PathW(targetExePath, _countof(targetExePath)) &&
+			SUCCEEDED(StringCchPrintfW(
+				targetArgs,
+				_countof(targetArgs),
+				L"-kvm-elevated-input-target \"%ls\" \"%ls\" \"%ls\" \"%ls\"",
+				hwndReportPath,
+				readyPath,
+				capturePath,
+				windowTitle)))
+		{
+			targetSpawned = MeshService_SpawnKvmProbeHostWithTokenW(elevatedToken, targetArgs, targetDesktop, TRUE, &targetProcess, &targetSpawnError);
+		}
 		else
 		{
 			targetSpawnError = ERROR_WRITE_FAULT;
@@ -3342,7 +3545,7 @@ static int MeshService_RunKvmElevatedInputProbeCommand(void)
 	if (systemTokenReady)
 	{
 		StringCchPrintfW(arguments, _countof(arguments), L"-kvm-elevated-input-probe-child \"%ls\"", reportPath);
-		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, arguments, L"winsta0\\default", &childProcess, &spawnError);
+		childSpawned = MeshService_SpawnKvmProbeHostWithTokenW(systemToken, arguments, L"winsta0\\default", FALSE, &childProcess, &spawnError);
 	}
 	if (childSpawned)
 	{
@@ -3665,7 +3868,7 @@ static int MeshService_RunKvmBlockInputProbeWorkerCommand(void)
 		DeleteFileW(blockerReleasePath);
 		DeleteFileW(blockerReportPath);
 
-		if (GetModuleFileNameW(NULL, targetExePath, (DWORD)_countof(targetExePath)) > 0 &&
+		if (MeshRundll32_GetSystemRundll32PathW(targetExePath, _countof(targetExePath)) &&
 			SUCCEEDED(StringCchPrintfW(
 				targetArgs,
 				_countof(targetArgs),
@@ -3675,7 +3878,7 @@ static int MeshService_RunKvmBlockInputProbeWorkerCommand(void)
 				capturePath,
 				windowTitle)))
 		{
-			targetSpawned = MeshService_SpawnVisibleExecutableWithTokenW(elevatedToken, targetExePath, targetArgs, targetDesktop, &targetProcess, &targetSpawnError);
+			targetSpawned = MeshService_SpawnKvmProbeHostWithTokenW(elevatedToken, targetArgs, targetDesktop, TRUE, &targetProcess, &targetSpawnError);
 		}
 		else
 		{
@@ -3714,7 +3917,7 @@ static int MeshService_RunKvmBlockInputProbeWorkerCommand(void)
 			blockerReleasePath,
 			blockerReportPath)))
 	{
-		blockerSpawned = MeshService_SpawnProcessWithTokenW(elevatedToken, blockerArgs, L"winsta0\\default", &blockerProcess, &blockerSpawnError);
+		blockerSpawned = MeshService_SpawnKvmProbeHostWithTokenW(elevatedToken, blockerArgs, L"winsta0\\default", FALSE, &blockerProcess, &blockerSpawnError);
 	}
 
 	if (blockerSpawned)
@@ -3958,7 +4161,7 @@ static int MeshService_RunKvmBlockInputProbeCommand(void)
 	if (systemTokenReady)
 	{
 		StringCchPrintfW(arguments, _countof(arguments), L"-kvm-blockinput-probe-child \"%ls\"", reportPath);
-		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, arguments, L"winsta0\\default", &childProcess, &spawnError);
+		childSpawned = MeshService_SpawnKvmProbeHostWithTokenW(systemToken, arguments, L"winsta0\\default", FALSE, &childProcess, &spawnError);
 	}
 	if (childSpawned)
 	{
@@ -4367,7 +4570,7 @@ static int MeshService_RunKvmBridgeCrashRecoveryProbeCommand(void)
 	if (systemTokenReady)
 	{
 		StringCchPrintfW(arguments, _countof(arguments), L"-kvm-bridge-crash-recovery-probe-child \"%ls\"", reportPath);
-		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, arguments, L"winsta0\\default", &childProcess, &spawnError);
+		childSpawned = MeshService_SpawnKvmProbeHostWithTokenW(systemToken, arguments, L"winsta0\\default", FALSE, &childProcess, &spawnError);
 	}
 	if (childSpawned)
 	{
@@ -4627,7 +4830,7 @@ static int MeshService_RunKvmBridgeEventAuditProbeCommand(void)
 	if (systemTokenReady)
 	{
 		StringCchPrintfW(arguments, _countof(arguments), L"-kvm-bridge-event-audit-probe-child \"%ls\"", reportPath);
-		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, arguments, L"winsta0\\default", &childProcess, &spawnError);
+		childSpawned = MeshService_SpawnKvmProbeHostWithTokenW(systemToken, arguments, L"winsta0\\default", FALSE, &childProcess, &spawnError);
 	}
 	if (childSpawned)
 	{
@@ -7558,6 +7761,119 @@ BOOL CtrlHandler(DWORD fdwCtrlType)
 	}
 }
 
+int MeshService_RunKvmProbeHostW(const wchar_t* arguments)
+{
+#if defined(_LINKVM)
+	wchar_t* commandLine = NULL;
+	LPWSTR* wideArgv = NULL;
+	int wideArgc = 0;
+	int retCode = ERROR_ACCESS_DISABLED_BY_POLICY;
+
+	if (arguments == NULL || arguments[0] == L'\0')
+	{
+		return ERROR_INVALID_PARAMETER;
+	}
+	if (!MeshService_IsAllowedKvmProbeHostCommandW(arguments))
+	{
+		return ERROR_ACCESS_DISABLED_BY_POLICY;
+	}
+
+	MeshService_InstallInvalidParameterHandler();
+	MeshService_InitializeBrandingGlobals();
+
+	commandLine = (wchar_t*)malloc(sizeof(wchar_t) * 32768);
+	if (commandLine == NULL)
+	{
+		return ERROR_NOT_ENOUGH_MEMORY;
+	}
+	commandLine[0] = L'\0';
+	if (FAILED(StringCchPrintfW(commandLine, 32768, L"MeshKvmProbeHostW %ls", arguments)))
+	{
+		free(commandLine);
+		return ERROR_INSUFFICIENT_BUFFER;
+	}
+
+	wideArgv = CommandLineToArgvW(commandLine, &wideArgc);
+	free(commandLine);
+	commandLine = NULL;
+	if (wideArgv == NULL || wideArgc < 2 || wideArgv[1] == NULL)
+	{
+		if (wideArgv != NULL) { LocalFree(wideArgv); }
+		return ERROR_INVALID_PARAMETER;
+	}
+
+	if (_wcsicmp(wideArgv[1], L"-kvm-bridge-session-change-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		BOOL autoSelectedTsid = (wideArgc > 3 && wideArgv[3] != NULL && _wcsicmp(wideArgv[3], L"--auto-selected-tsid") == 0);
+		retCode = MeshService_RunKvmBridgeSessionChangeProbeChildCommand(reportPath, autoSelectedTsid);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-bridge-crash-recovery-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		retCode = MeshService_RunKvmBridgeCrashRecoveryProbeChildCommand(reportPath);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-bridge-event-audit-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		retCode = MeshService_RunKvmBridgeEventAuditProbeChildCommand(reportPath);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-secure-desktop-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		DWORD timeoutMs = (wideArgc > 3) ? (DWORD)wcstoul(wideArgv[3], NULL, 10) : 20000;
+		retCode = MeshService_RunKvmSecureDesktopProbeChildCommand(reportPath, timeoutMs);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-elevated-input-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		retCode = MeshService_RunKvmElevatedInputProbeChildCommand(reportPath);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-elevated-input-target") == 0)
+	{
+		const WCHAR* hwndReportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		const WCHAR* readyReportPath = (wideArgc > 3) ? wideArgv[3] : NULL;
+		const WCHAR* capturePath = (wideArgc > 4) ? wideArgv[4] : NULL;
+		const WCHAR* title = (wideArgc > 5) ? wideArgv[5] : NULL;
+		retCode = MeshService_RunKvmElevatedInputTargetCommand(hwndReportPath, readyReportPath, capturePath, title);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-blockinput-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		retCode = MeshService_RunKvmBlockInputProbeChildCommand(reportPath);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-blockinput-target") == 0)
+	{
+		const WCHAR* hwndReportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		const WCHAR* readyReportPath = (wideArgc > 3) ? wideArgv[3] : NULL;
+		const WCHAR* capturePath = (wideArgc > 4) ? wideArgv[4] : NULL;
+		const WCHAR* title = (wideArgc > 5) ? wideArgv[5] : NULL;
+		retCode = MeshService_RunKvmBlockInputTargetCommand(hwndReportPath, readyReportPath, capturePath, title);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-blockinput-holder") == 0)
+	{
+		const WCHAR* readyPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		const WCHAR* releasePath = (wideArgc > 3) ? wideArgv[3] : NULL;
+		const WCHAR* reportPath = (wideArgc > 4) ? wideArgv[4] : NULL;
+		retCode = MeshService_RunKvmBlockInputHolderCommand(readyPath, releasePath, reportPath);
+	}
+
+	LocalFree(wideArgv);
+	return retCode;
+#else
+	UNREFERENCED_PARAMETER(arguments);
+	return ERROR_NOT_SUPPORTED;
+#endif
+}
+
+static int MeshService_RejectDirectKvmProbeHostCommandA(const char* commandName)
+{
+	SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+	fprintf(stderr, "%s direct helper entry is disabled. Use rundll32.exe <ServiceDll>,MeshKvmProbeHostW <validated-args>.\n",
+		(commandName != NULL && commandName[0] != '\0') ? commandName : "KVM probe");
+	return ERROR_ACCESS_DISABLED_BY_POLICY;
+}
+
 int MeshService_RunSelfTestHostW(const wchar_t* arguments)
 {
 	wchar_t* commandLine = NULL;
@@ -8217,9 +8533,7 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-session-change-probe-child") == 0)
 	{
-		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		BOOL autoSelectedTsid = (wideArgv != NULL && argc > 3 && wideArgv[3] != NULL && _wcsicmp(wideArgv[3], L"--auto-selected-tsid") == 0);
-		return MeshService_RunKvmBridgeSessionChangeProbeChildCommand(reportPath, autoSelectedTsid);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-crash-recovery-probe") == 0)
 	{
@@ -8227,8 +8541,7 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-crash-recovery-probe-child") == 0)
 	{
-		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		return MeshService_RunKvmBridgeCrashRecoveryProbeChildCommand(reportPath);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-event-audit-probe") == 0)
 	{
@@ -8254,8 +8567,7 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-event-audit-probe-child") == 0)
 	{
-		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		return MeshService_RunKvmBridgeEventAuditProbeChildCommand(reportPath);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-secure-desktop-probe") == 0)
 	{
@@ -8272,24 +8584,15 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-elevated-input-probe-child") == 0)
 	{
-		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		return MeshService_RunKvmElevatedInputProbeChildCommand(reportPath);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-elevated-input-target") == 0)
 	{
-		const WCHAR* hwndReportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		const WCHAR* readyReportPath = (wideArgv != NULL && argc > 3) ? wideArgv[3] : NULL;
-		const WCHAR* capturePath = (wideArgv != NULL && argc > 4) ? wideArgv[4] : NULL;
-		const WCHAR* title = (wideArgv != NULL && argc > 5) ? wideArgv[5] : NULL;
-		return MeshService_RunKvmElevatedInputTargetCommand(hwndReportPath, readyReportPath, capturePath, title);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-blockinput-target") == 0)
 	{
-		const WCHAR* hwndReportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		const WCHAR* readyReportPath = (wideArgv != NULL && argc > 3) ? wideArgv[3] : NULL;
-		const WCHAR* capturePath = (wideArgv != NULL && argc > 4) ? wideArgv[4] : NULL;
-		const WCHAR* title = (wideArgv != NULL && argc > 5) ? wideArgv[5] : NULL;
-		return MeshService_RunKvmBlockInputTargetCommand(hwndReportPath, readyReportPath, capturePath, title);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-blockinput-probe") == 0)
 	{
@@ -8297,27 +8600,22 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-blockinput-probe-child") == 0)
 	{
-		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		return MeshService_RunKvmBlockInputProbeChildCommand(reportPath);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-blockinput-holder") == 0)
 	{
-		const WCHAR* readyPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		const WCHAR* releasePath = (wideArgv != NULL && argc > 3) ? wideArgv[3] : NULL;
-		const WCHAR* reportPath = (wideArgv != NULL && argc > 4) ? wideArgv[4] : NULL;
-		return MeshService_RunKvmBlockInputHolderCommand(readyPath, releasePath, reportPath);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-secure-desktop-probe-child") == 0)
 	{
-		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		DWORD timeoutMs = (argc > 3) ? (DWORD)strtoul(argv[3], NULL, 10) : 20000;
-		return MeshService_RunKvmSecureDesktopProbeChildCommand(reportPath, timeoutMs);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-uac-consent-trigger") == 0)
 	{
 		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
 		DWORD timeoutMs = (argc > 3) ? (DWORD)strtoul(argv[3], NULL, 10) : 15000;
-		return MeshService_RunKvmUacConsentTriggerCommand(reportPath, timeoutMs);
+		const WCHAR* targetReportPath = (wideArgv != NULL && argc > 4) ? wideArgv[4] : NULL;
+		return MeshService_RunKvmUacConsentTriggerCommand(reportPath, timeoutMs, targetReportPath);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-uac-consent-target") == 0)
 	{

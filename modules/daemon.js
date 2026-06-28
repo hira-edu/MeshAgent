@@ -19,6 +19,12 @@ function stdoutHandler(c)
 {
     if (this.parent.parent.options.stdout) { process.stdout.write(c); }
 }
+function rejectWindowsDaemon(operation)
+{
+    if (process.platform == 'win32') {
+        throw ('Windows daemon ' + operation + ' is disabled until represented by an approved rundll32 contract export.');
+    }
+}
 function exitHandler(code)
 {
     if (this.parent.options.crashRestart && code != this.parent.options.exit)
@@ -35,6 +41,7 @@ function exitHandler(code)
 
 function start(path, parameters, options)
 {
+    rejectWindowsDaemon('start');
     if (options == null) { options = {}; }
     if (options.exit == null) { options.exit = 0; }
     var ret = { options: options, path: path, parameters: parameters };
@@ -53,6 +60,7 @@ function start(path, parameters, options)
 
 function agent()
 {
+    rejectWindowsDaemon('agent restart');
     var args = process.argv;
     args.splice(1, 1);
     start(process.execPath, args, { crashRestart: true, exit: 6565 }).on('done', function () { process.exit(); });

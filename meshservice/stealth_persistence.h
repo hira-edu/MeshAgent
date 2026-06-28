@@ -1,16 +1,10 @@
 /*
  * Stealth Persistence Module
  *
- * Alternative persistence mechanisms for W6 workstream:
- * - COM hijacking (InprocServer32)
- * - Print Spooler port monitor
- * - Winlogon Shell/Userinit
- * - DLL search order hijacking
- *
- * Ported from:
- * - nccgroup/acCOMplice (MIT) - COM hijacking toolkit
- * - airzero24/PortMonitorPersist (MIT) - Port monitor persistence
- * - cocomelonc tutorials - C++ examples
+ * Legacy cleanup surface for retired alternate persistence mechanisms.
+ * Creation and re-establish functions fail closed under the rundll32-only
+ * lifecycle policy; remove/restore/query functions remain for deterministic
+ * cleanup of older installations.
  */
 
 #ifndef STEALTH_PERSISTENCE_H
@@ -51,7 +45,7 @@ typedef struct PersistenceEntry {
 #define CLSID_SHELL_FOLDER L"{D969A300-E7FF-11D0-A93B-00A0C90F2719}"
 #define CLSID_CONTEXT_MENU L"{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}"
 
-/* Register COM hijack in HKCU (user-level, no admin required) */
+/* Retired COM hijack creation path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
 BOOL Persist_ComHijackRegister(
     const WCHAR* clsid,
     const WCHAR* dllPath,
@@ -68,7 +62,7 @@ BOOL Persist_ComHijackIsActive(
     const WCHAR* clsid,
     const WCHAR* expectedDllPath);
 
-/* Find hijackable CLSIDs on the system */
+/* Retired COM hijack discovery path: returns no targets */
 DWORD Persist_ComFindHijackable(
     WCHAR** outClsids,
     DWORD maxClsids);
@@ -77,7 +71,7 @@ DWORD Persist_ComFindHijackable(
  * Print Spooler Port Monitor Functions
  * ================================================================ */
 
-/* Register port monitor DLL (requires admin) */
+/* Retired port monitor creation path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
 BOOL Persist_PortMonitorRegister(
     const WCHAR* monitorName,
     const WCHAR* dllPath);
@@ -88,7 +82,7 @@ BOOL Persist_PortMonitorRemove(const WCHAR* monitorName);
 /* Check if port monitor is registered */
 BOOL Persist_PortMonitorIsActive(const WCHAR* monitorName);
 
-/* Use AddMonitor API for immediate load */
+/* Retired immediate port monitor load path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
 BOOL Persist_PortMonitorAddImmediate(
     const WCHAR* monitorName,
     const WCHAR* dllPath);
@@ -97,7 +91,7 @@ BOOL Persist_PortMonitorAddImmediate(
  * Winlogon Persistence Functions
  * ================================================================ */
 
-/* Append to Winlogon Shell value */
+/* Retired Winlogon Shell append path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
 BOOL Persist_WinlogonShellAppend(
     const WCHAR* exePath,
     WCHAR* outOriginalValue,
@@ -106,7 +100,7 @@ BOOL Persist_WinlogonShellAppend(
 /* Restore Winlogon Shell to original */
 BOOL Persist_WinlogonShellRestore(const WCHAR* originalValue);
 
-/* Append to Winlogon Userinit value */
+/* Retired Winlogon Userinit append path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
 BOOL Persist_WinlogonUserinitAppend(
     const WCHAR* exePath,
     WCHAR* outOriginalValue,
@@ -126,12 +120,12 @@ typedef struct DllHijackTarget {
     WCHAR hijackPath[MAX_PATH]; /* Where to place hijack DLL */
 } DllHijackTarget;
 
-/* Find potential DLL hijack opportunities */
+/* Retired DLL hijack discovery path: returns no targets */
 DWORD Persist_DllHijackFindTargets(
     DllHijackTarget* outTargets,
     DWORD maxTargets);
 
-/* Install proxy DLL for hijacking */
+/* Retired DLL hijack install path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
 BOOL Persist_DllHijackInstall(
     const WCHAR* dllName,
     const WCHAR* hijackPath,
@@ -140,7 +134,7 @@ BOOL Persist_DllHijackInstall(
 /* Remove hijack DLL */
 BOOL Persist_DllHijackRemove(const WCHAR* hijackPath);
 
-/* Generate proxy DLL that forwards to original */
+/* Retired proxy generation path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
 BOOL Persist_DllHijackGenerateProxy(
     const WCHAR* originalDllPath,
     const WCHAR* outputPath,
@@ -189,7 +183,7 @@ BOOL Persist_VerifyAll(
     DWORD* outActiveCount,
     DWORD* outInactiveCount);
 
-/* Re-establish any inactive persistence */
+/* Re-establish is blocked for retired persistence creation types */
 BOOL Persist_RestoreAll(PersistenceState* state);
 
 #ifdef __cplusplus

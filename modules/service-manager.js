@@ -3301,6 +3301,7 @@ function serviceManager()
     }
     this.daemonEx = function daemonEx(path, parameters, options)
     {
+        if (process.platform == 'win32') { throw ('Windows daemon wrapper re-entry is disabled until represented by an approved rundll32 contract export.'); }
         parameters.unshift(process.platform == 'win32' ? path.split('\\').pop() : path.split('/').pop());
         var name = options.name ? options.name : parameters[0];
         if (options.cwd) { process.chdir(options.cwd); }

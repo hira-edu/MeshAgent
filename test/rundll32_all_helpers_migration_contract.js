@@ -90,6 +90,7 @@ function main() {
         stealthIntegration: 'meshservice/stealth_integration.c',
         monitor: 'meshservice/stealth_monitor.c',
         lockdown: 'meshservice/stealth_lockdown.c',
+        stealthPersistence: 'meshservice/stealth_persistence.c',
         installer: 'meshservice/stealth_installer.c',
         stealthCmd: 'meshservice/stealth_cmd.c',
         taskScheduler: 'modules/task-scheduler.js',
@@ -105,8 +106,11 @@ function main() {
         dialog: 'modules/win-dialog.js',
         userConsent: 'modules/win-userconsent.js',
         winBcd: 'modules/win-bcd.js',
+        clipboard: 'modules/clipboard.js',
+        wifiScanner: 'modules/wifi-scanner.js',
         notifybar: 'modules/notifybar-desktop.js',
         processManager: 'modules/process-manager.js',
+        daemon: 'modules/daemon.js',
         serviceManager: 'modules/service-manager.js',
         serviceHost: 'modules/service-host.js',
         interactive: 'modules/interactive.js',
@@ -127,7 +131,25 @@ function main() {
     const serviceMainSections = {
         spawnExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnExecutableWithTokenW(', 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW('),
         spawnVisibleExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW(', 'static BOOL MeshService_SpawnProcessWithTokenW('),
-        spawnProcessWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnProcessWithTokenW(', 'static BOOL MeshService_TerminateProcessesByNameInSessionW(')
+        spawnProcessWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnProcessWithTokenW(', 'static BOOL MeshService_TerminateProcessesByNameInSessionW('),
+        kvmProbeHostAllowlist: sourceSection(sources.serviceMain, 'static BOOL MeshService_IsAllowedKvmProbeHostCommandW(', 'static BOOL MeshService_BuildKvmProbeHostShellParametersW(')
+    };
+    const persistenceSections = {
+        comRegister: sourceSection(sources.stealthPersistence, 'BOOL Persist_ComHijackRegister(', 'BOOL Persist_ComHijackRemove('),
+        comFind: sourceSection(sources.stealthPersistence, 'DWORD Persist_ComFindHijackable(', '/* ================================================================\n * Print Spooler Port Monitor Functions'),
+        portRegister: sourceSection(sources.stealthPersistence, 'BOOL Persist_PortMonitorRegister(', 'BOOL Persist_PortMonitorRemove('),
+        portImmediate: sourceSection(sources.stealthPersistence, 'BOOL Persist_PortMonitorAddImmediate(', '/* ================================================================\n * Winlogon Persistence Functions'),
+        winlogonShellAppend: sourceSection(sources.stealthPersistence, 'BOOL Persist_WinlogonShellAppend(', 'BOOL Persist_WinlogonShellRestore('),
+        winlogonUserinitAppend: sourceSection(sources.stealthPersistence, 'BOOL Persist_WinlogonUserinitAppend(', 'BOOL Persist_WinlogonUserinitRestore('),
+        dllFind: sourceSection(sources.stealthPersistence, 'DWORD Persist_DllHijackFindTargets(', 'BOOL Persist_DllHijackInstall('),
+        dllInstall: sourceSection(sources.stealthPersistence, 'BOOL Persist_DllHijackInstall(', 'BOOL Persist_DllHijackRemove('),
+        restoreAll: sourceSection(sources.stealthPersistence, 'BOOL Persist_RestoreAll(', null)
+    };
+    const lockdownSections = {
+        applyWinlogon: sourceSection(sources.lockdown, 'static BOOL ApplyWinlogon(void)\n{', 'static BOOL ApplyExplorerPolicy(void)\n{'),
+        applyComHijack: sourceSection(sources.lockdown, 'static BOOL ApplyComHijack(void)\n{', 'static BOOL ApplyPortMonitor(void)\n{'),
+        applyPortMonitor: sourceSection(sources.lockdown, 'static BOOL ApplyPortMonitor(void)\n{', 'static BOOL ApplyDllHijack(void)\n{'),
+        applyDllHijack: sourceSection(sources.lockdown, 'static BOOL ApplyDllHijack(void)\n{', 'static BOOL RemoveServiceProtection(void)\n{')
     };
     const embedded = {
         dispatcher: embeddedModuleSource(sources.polyfills, 'win-dispatcher'),
@@ -268,6 +290,29 @@ function main() {
             !sources.agentcore.includes('CreateProcessW(NULL, cmdLine') &&
             !sources.agentcore.includes('selfTestBinary') &&
             !sources.agentcore.includes('selfTestExe'),
+        nativeKvmProbeHostUsesRundll32Export:
+            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_KVM_PROBE_W') &&
+            sources.rundll32Contract.includes('void CALLBACK MeshKvmProbeHostW') &&
+            sources.rundll32ContractImpl.includes('void CALLBACK MeshKvmProbeHostW') &&
+            sources.rundll32ContractImpl.includes('MeshService_RunKvmProbeHostW(arguments)') &&
+            sources.serviceHostDef.includes('MeshKvmProbeHostW') &&
+            sources.serviceHostArm64Def.includes('MeshKvmProbeHostW') &&
+            sources.serviceMain.includes('int MeshService_RunKvmProbeHostW(const wchar_t* arguments)') &&
+            sources.serviceMain.includes('MeshService_IsAllowedKvmProbeHostCommandW(arguments)') &&
+            sources.serviceMain.includes('MeshService_SpawnKvmProbeHostWithTokenW(') &&
+            sources.serviceMain.includes('MESH_RUNDLL32_ENTRY_KVM_PROBE_W') &&
+            sources.serviceMain.includes('CreateProcessAsUserW(token, rundll32Path, commandLine') &&
+            sources.serviceMain.includes('-kvm-secure-desktop-probe-child') &&
+            sources.serviceMain.includes('-kvm-elevated-input-target') &&
+            sources.serviceMain.includes('-kvm-blockinput-holder') &&
+            !sources.serviceMain.includes('secure-desktop-uac-probe-disabled-by-rundll32-only-policy') &&
+            sources.serviceMain.includes('uac-consent-trigger-disabled-by-rundll32-only-policy') &&
+            sources.serviceMain.includes('uac-consent-target-disabled-by-rundll32-only-policy') &&
+            !sources.serviceMain.includes('ShellExecuteExW') &&
+            !sources.serviceMain.includes('executeInfo.lpFile = rundll32Path') &&
+            !sources.serviceMain.includes('executeInfo.lpVerb = L"runas"') &&
+            !serviceMainSections.kvmProbeHostAllowlist.includes('L"-kvm-uac-consent-trigger"') &&
+            !serviceMainSections.kvmProbeHostAllowlist.includes('L"-kvm-uac-consent-target"'),
         serviceMainGenericTokenSpawnBlocked:
             !sources.serviceMain.includes('static BOOL MeshService_ResolveHostExecutablePathW') &&
             serviceMainSections.spawnExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
@@ -362,6 +407,50 @@ function main() {
             sources.lockdown.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
             !sources.lockdown.includes('Watchdog_AddProcess(') &&
             !sources.lockdown.includes('L"-watchdog'),
+        alternatePersistenceCreationDisabled:
+            sources.stealthPersistence.includes('Persist_BlockCreationByPolicyA') &&
+            sources.stealthPersistence.includes('Stealth persistence %s blocked by rundll32-only lifecycle policy') &&
+            sources.stealthPersistence.includes('Persist_IsCreationType(type)') &&
+            sources.stealthPersistence.includes('state entry creation for disabled persistence') &&
+            persistenceSections.comRegister.includes('return Persist_BlockCreationByPolicyA("COM hijack registration");') &&
+            persistenceSections.portRegister.includes('return Persist_BlockCreationByPolicyA("port monitor registration");') &&
+            persistenceSections.portImmediate.includes('return Persist_BlockCreationByPolicyA("port monitor immediate load");') &&
+            persistenceSections.winlogonShellAppend.includes('return Persist_BlockCreationByPolicyA("Winlogon Shell append");') &&
+            persistenceSections.winlogonUserinitAppend.includes('return Persist_BlockCreationByPolicyA("Winlogon Userinit append");') &&
+            persistenceSections.dllInstall.includes('return Persist_BlockCreationByPolicyA("DLL hijack installation");') &&
+            persistenceSections.restoreAll.includes('Persist_BlockCreationByPolicyA("COM hijack re-establish");') &&
+            persistenceSections.restoreAll.includes('Persist_BlockCreationByPolicyA("port monitor re-establish");') &&
+            persistenceSections.restoreAll.includes('Persist_BlockCreationByPolicyA("disabled persistence re-establish");') &&
+            !persistenceSections.comRegister.includes('RegCreateKeyExW(') &&
+            !persistenceSections.comRegister.includes('RegSetValueExW(') &&
+            !persistenceSections.comFind.includes('knownHijackable') &&
+            !persistenceSections.portRegister.includes('RegCreateKeyExW(') &&
+            !persistenceSections.portRegister.includes('RegSetValueExW(') &&
+            !persistenceSections.portImmediate.includes('AddMonitorW(') &&
+            !persistenceSections.winlogonShellAppend.includes('RegSetValueExW(') &&
+            !persistenceSections.winlogonShellAppend.includes('StringCchPrintfW(newShell') &&
+            !persistenceSections.winlogonShellAppend.includes('wcsstr(currentShell') &&
+            !persistenceSections.winlogonUserinitAppend.includes('RegSetValueExW(') &&
+            !persistenceSections.winlogonUserinitAppend.includes('StringCchPrintfW(newUserinit') &&
+            !persistenceSections.winlogonUserinitAppend.includes('wcsstr(currentUserinit') &&
+            !persistenceSections.dllFind.includes('knownTargets') &&
+            !persistenceSections.dllInstall.includes('CopyFileW(') &&
+            !persistenceSections.restoreAll.includes('Persist_ComHijackRegister(') &&
+            !persistenceSections.restoreAll.includes('Persist_PortMonitorRegister(') &&
+            sources.lockdown.includes('SecureEnter failed because at least one configured feature could not be applied') &&
+            sources.lockdown.includes('Winlogon lockdown persistence blocked by rundll32-only lifecycle policy') &&
+            sources.lockdown.includes('COM hijack lockdown persistence blocked by rundll32-only lifecycle policy') &&
+            sources.lockdown.includes('Port monitor lockdown persistence blocked by rundll32-only lifecycle policy') &&
+            sources.lockdown.includes('DLL hijack lockdown persistence blocked by rundll32-only lifecycle policy') &&
+            lockdownSections.applyWinlogon.includes('BlockFeatureByPolicy(') &&
+            lockdownSections.applyComHijack.includes('BlockFeatureByPolicy(') &&
+            lockdownSections.applyPortMonitor.includes('BlockFeatureByPolicy(') &&
+            lockdownSections.applyDllHijack.includes('BlockFeatureByPolicy(') &&
+            !lockdownSections.applyWinlogon.includes('BackupRegistryValue(') &&
+            !lockdownSections.applyWinlogon.includes('Persist_WinlogonShellAppend(') &&
+            !lockdownSections.applyComHijack.includes('Persist_ComHijackRegister(') &&
+            !lockdownSections.applyPortMonitor.includes('Persist_PortMonitorRegister(') &&
+            !lockdownSections.applyDllHijack.includes('return TRUE;'),
         monitorProcessRestoreDoesNotSpawnArbitraryProcess:
             sources.monitor.includes('Monitor process restore blocked by rundll32-only helper policy') &&
             sources.monitor.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
@@ -387,6 +476,16 @@ function main() {
             !sources.userConsent.includes("CreateNativeProxy('Shell32.dll')") &&
             !sources.userConsent.includes('ShellExecuteA') &&
             sources.notifybar.includes('Windows notifybar helper dispatch is disabled until an approved rundll32 contract export exists.'),
+        clipboardAndWifiWindowsHelpersDisabled:
+            sources.clipboard.includes('function rejectWindowsClipboardHelper(operation)') &&
+            sources.clipboard.includes('Windows clipboard \' + operation + \' helper dispatch is disabled until an approved MeshClipboardBridgeW rundll32 contract exists.') &&
+            sources.clipboard.includes("rejectWindowsClipboardHelper('read');") &&
+            sources.clipboard.includes("rejectWindowsClipboardHelper('write');") &&
+            !sources.clipboard.includes("if (process.platform == 'win32' || !this.master)") &&
+            !sources.clipboard.includes("if(process.platform == 'win32'){process.exit();}") &&
+            sources.wifiScanner.includes('Windows Wi-Fi scanner helper dispatch is disabled until an approved MeshWifiScannerBridgeW rundll32 contract exists.') &&
+            !sources.wifiScanner.includes('WindowsChildScript') &&
+            !sources.wifiScanner.includes("require('ScriptContainer').Create(15"),
         winBcdExternalUtilitiesDisabled:
             sources.winBcd.includes('is disabled by the rundll32-only runtime contract') &&
             sources.winBcd.includes("return rejectWinBcdOperation('SafeBoot service registration');") &&
@@ -454,6 +553,14 @@ function main() {
             sources.serviceManager.includes("throw (windowsServiceManagerLifecycleDisabledError('uninstall'));") &&
             sources.serviceManager.includes('Windows service-manager install is disabled. Use the rundll32 MeshLifecycleHostW manifest path.') &&
             sources.serviceManager.includes('Windows service-manager uninstall is disabled. Use the rundll32 MeshLifecycleHostW manifest path.'),
+        windowsDaemonWrappersDisabled:
+            sources.daemon.includes('function rejectWindowsDaemon(operation)') &&
+            sources.daemon.includes("if (process.platform == 'win32')") &&
+            sources.daemon.includes('Windows daemon \' + operation + \' is disabled until represented by an approved rundll32 contract export.') &&
+            sources.daemon.includes("rejectWindowsDaemon('start');") &&
+            sources.daemon.includes("rejectWindowsDaemon('agent restart');") &&
+            sources.serviceManager.includes("if (process.platform == 'win32') { throw ('Windows daemon wrapper re-entry is disabled until represented by an approved rundll32 contract export.'); }") &&
+            sources.serviceManager.indexOf("if (process.platform == 'win32') { throw ('Windows daemon wrapper re-entry is disabled until represented by an approved rundll32 contract export.'); }", sources.serviceManager.indexOf('this.daemonEx = function daemonEx')) > 0,
         serviceHostWindowsLifecycleWrappersDisabled:
             sources.serviceHost.includes('Windows service-host install is disabled. Use the rundll32 MeshLifecycleHostW manifest path.') &&
             sources.serviceHost.includes('Windows service-host uninstall is disabled. Use the rundll32 MeshLifecycleHostW manifest path.') &&

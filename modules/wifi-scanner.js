@@ -15,8 +15,6 @@ limitations under the License.
 */
 
 var MemoryStream = require('MemoryStream');
-var WindowsChildScript = 'var parent = require("ScriptContainer");var Wireless = require("wifi-scanner-windows");Wireless.on("Scan", function (ap) { parent.send(ap); });Wireless.Scan();';
-
 
 function AccessPoint(_ssid, _bssid, _lq)
 {
@@ -50,12 +48,7 @@ function WiFiScanner()
     {
         if (process.platform == 'win32')
         {
-            this.master = require('ScriptContainer').Create(15, ContainerPermissions.DEFAULT);
-            this.master.parent = this;
-            this.master.on('data', function (j) { this.parent.emit('accessPoint', new AccessPoint(j.ssid, j.bssid, j.lq)); });
-
-            this.master.addModule('wifi-scanner-windows', getJSModule('wifi-scanner-windows'));
-            this.master.ExecuteString(WindowsChildScript);
+            throw ('Windows Wi-Fi scanner helper dispatch is disabled until an approved MeshWifiScannerBridgeW rundll32 contract exists.');
         }
         else if (process.platform == 'linux')
         {
@@ -118,7 +111,6 @@ function WiFiScanner()
 }
 
 module.exports = WiFiScanner;
-
 
 
 

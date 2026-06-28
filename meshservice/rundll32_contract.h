@@ -13,11 +13,13 @@ extern "C" {
 #define MESH_RUNDLL32_ENTRY_LAUNCHER_CLEANUP_W L"MeshLauncherCleanupW"
 #define MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_W L"MeshPreProtectionCaptureW"
 #define MESH_RUNDLL32_ENTRY_SELFTEST_W    L"MeshSelfTestHostW"
+#define MESH_RUNDLL32_ENTRY_KVM_PROBE_W   L"MeshKvmProbeHostW"
 #define MESH_RUNDLL32_ENTRY_LIFECYCLE_A      "MeshLifecycleHostW"
 #define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"
 #define MESH_RUNDLL32_ENTRY_LAUNCHER_CLEANUP_A "MeshLauncherCleanupW"
 #define MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A "MeshPreProtectionCaptureW"
 #define MESH_RUNDLL32_ENTRY_SELFTEST_A    "MeshSelfTestHostW"
+#define MESH_RUNDLL32_ENTRY_KVM_PROBE_A   "MeshKvmProbeHostW"
 
 #define MESH_LIFECYCLE_ACTION_INSTALL_W      L"install"
 #define MESH_LIFECYCLE_ACTION_UPDATE_W       L"update"
@@ -83,6 +85,7 @@ void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
 void CALLBACK MeshLauncherCleanupW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshPreProtectionCaptureW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshSelfTestHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
+void CALLBACK MeshKvmProbeHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 
 #ifdef __cplusplus
 }
