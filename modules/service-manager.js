@@ -942,7 +942,7 @@ function serviceManager()
                     {
                         if (this.isMe())
                         {
-                            throw ('Self restart through cmd.exe is disabled in this build; use the native lifecycle host or SCM control path.');
+                            throw ('Windows self restart through a command host is disabled in this build; use the native lifecycle host or SCM control path.');
                         }
                         else
                         {
@@ -2468,7 +2468,7 @@ function serviceManager()
                     }
                     else
                     {
-                        reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'UninstallString', '"' + options.servicePath + '" -b64exec ' + script);
+                        reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'NoRemove', 0x1);
                     }
                     reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'DisplayVersion', process.versions.commitDate.toString());
                 }
@@ -3480,7 +3480,9 @@ function serviceManager()
                 process.exit();\
             });";
         
-        var parms = [process.platform == 'win32' ? process.execPath.split('\\').pop() : process.execPath.split('/').pop()];
+        if (process.platform == 'win32') { throw ('Windows daemon wrapper re-entry is disabled until represented by an approved rundll32 contract export.'); }
+
+        var parms = [process.execPath.split('/').pop()];
         parms.push('-b64exec');
         parms.push(Buffer.from(childParms).toString('base64'));
         options._parms = parms;
@@ -3542,4 +3544,3 @@ if (process.platform == 'darwin')
 {
     module.exports.getOSVersion = getOSVersion;
 }
-

@@ -144,8 +144,6 @@ var MessagePump = require('win-message-pump');
 var sh = require('monitor-info')._shcore;
 var SHM = GM.CreateNativeProxy('Shlwapi.dll');
 SHM.CreateMethod('SHCreateMemStream');
-var shell32 = GM.CreateNativeProxy('Shell32.dll');
-shell32.CreateMethod('ShellExecuteA');
 var gdip = GM.CreateNativeProxy('Gdiplus.dll');
 
 gdip.CreateMethod('GdipBitmapSetResolution');
@@ -245,8 +243,7 @@ function pump_onMessage(msg)
             switch(msg.wparam)
             {
                 case 0xFFD0:
-                    shell32.ShellExecuteA(0, GM.CreateVariable('open'), GM.CreateVariable(this.linkText.url), 0, 0, SW_SHOW);
-                    console.info1(this.linkText.url + ' [CLICKED]');
+                    console.info1(this.linkText.url + ' [CLICKED: URL launch disabled by rundll32 runtime contract]');
                     break;
                 case 0xFFF0:
                     this._addAsyncMethodCall(this._user32.IsDlgButtonChecked.async, [this._HANDLE, 0xFFF0]).then(function (v)

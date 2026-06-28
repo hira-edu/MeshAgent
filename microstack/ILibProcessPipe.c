@@ -35,9 +35,6 @@ limitations under the License.
 #if defined(WIN32)
 #include "../meshservice/rundll32_contract.h"
 #endif
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
-#include "../meshservice/stealth.h"
-#endif
 #ifndef WIN32
 #include <fcntl.h>              /* Obtain O_* constant definitions */
 #include <unistd.h>
@@ -74,23 +71,6 @@ static int ILibProcessPipe_IsUserSessionSpawnType(ILibProcessPipe_SpawnTypes spa
 	return (spawnType == ILibProcessPipe_SpawnTypes_USER ||
 		spawnType == ILibProcessPipe_SpawnTypes_WINLOGON ||
 		spawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER);
-}
-static int ILibProcessPipe_ParseBoolA(const char* value)
-{
-	if (value == NULL || value[0] == 0) { return -1; }
-	if (_stricmp(value, "1") == 0 || _stricmp(value, "true") == 0 || _stricmp(value, "yes") == 0 || _stricmp(value, "on") == 0) { return 1; }
-	if (_stricmp(value, "0") == 0 || _stricmp(value, "false") == 0 || _stricmp(value, "no") == 0 || _stricmp(value, "off") == 0) { return 0; }
-	return -1;
-}
-static int ILibProcessPipe_ReadPolicyEnvBoolA(const char* name, int defaultValue)
-{
-	char buffer[32];
-	DWORD len = GetEnvironmentVariableA(name, buffer, sizeof(buffer));
-	int parsed = -1;
-
-	if (len == 0 || len >= sizeof(buffer)) { return defaultValue; }
-	parsed = ILibProcessPipe_ParseBoolA(buffer);
-	return (parsed < 0 ? defaultValue : parsed);
 }
 static int ILibProcessPipe_HasKvmBridgeEntryPointA(char* const* parameters)
 {
@@ -389,9 +369,6 @@ static int ILibProcessPipe_IsSessionSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 	int allowDesktopBridge = 0;
 
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType)) { return 1; }
-
-	strictServiceOnly = ILibProcessPipe_ReadPolicyEnvBoolA("STEALTH_STRICT_SERVICE_ONLY", 1);
-	allowDesktopBridge = ILibProcessPipe_ReadPolicyEnvBoolA("STEALTH_ALLOW_DESKTOP_BRIDGE", 0);
 
 	if (ILibProcessPipe_HasKvmBridgeEntryPointA(parameters) && ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(target, parameters))
 	{
@@ -1046,7 +1023,6 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	char* parms = NULL;
 	char* commandLine = NULL;
 	DWORD sessionId = 0;
-	int useLoggedOnUserToken = 0;
 	HANDLE token = NULL, userToken = NULL, procHandle = NULL;
 	LPVOID tokenEnvironment = NULL;
 	ILibProcessPipe_DestroyEnvironmentBlockFn destroyEnvironmentBlock = NULL;
@@ -1069,31 +1045,10 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	if (spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
 		if (spawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER) { sessionId = (DWORD)(uint64_t)sid; }
-		useLoggedOnUserToken = 0;
-		if (useLoggedOnUserToken != 0)
-		{
-			SECURITY_ATTRIBUTES duplicateTokenAttributes = { 0 };
-			duplicateTokenAttributes.nLength = sizeof(duplicateTokenAttributes);
-			duplicateTokenAttributes.lpSecurityDescriptor = NULL;
-			duplicateTokenAttributes.bInheritHandle = FALSE;
-
-			if (WTSQueryUserToken(sessionId, &token) == 0) { ILIBMARKPOSITION(2); return(NULL); }
-			if (DuplicateTokenEx(token, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_SESSIONID | TOKEN_ADJUST_DEFAULT, &duplicateTokenAttributes, SecurityImpersonation, TokenPrimary, &userToken) == 0)
-			{
-				CloseHandle(token);
-				ILIBMARKPOSITION(2);
-				return(NULL);
-			}
-			CloseHandle(token);
-			token = NULL;
-		}
-		else
-		{
-			procHandle = GetCurrentProcess();
-			if (OpenProcessToken(procHandle, TOKEN_DUPLICATE | TOKEN_QUERY, &token) == 0) { ILIBMARKPOSITION(2); return(NULL); }
-			if (DuplicateTokenEx(token, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_SESSIONID | TOKEN_ADJUST_DEFAULT, 0, SecurityImpersonation, TokenPrimary, &userToken) == 0) { CloseHandle(token); ILIBMARKPOSITION(2); return(NULL); }
-			if (SetTokenInformation(userToken, (TOKEN_INFORMATION_CLASS)TokenSessionId, &sessionId, sizeof(sessionId)) == 0) { CloseHandle(token); CloseHandle(userToken); ILIBMARKPOSITION(2); return(NULL); }
-		}
+		procHandle = GetCurrentProcess();
+		if (OpenProcessToken(procHandle, TOKEN_DUPLICATE | TOKEN_QUERY, &token) == 0) { ILIBMARKPOSITION(2); return(NULL); }
+		if (DuplicateTokenEx(token, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_SESSIONID | TOKEN_ADJUST_DEFAULT, 0, SecurityImpersonation, TokenPrimary, &userToken) == 0) { CloseHandle(token); ILIBMARKPOSITION(2); return(NULL); }
+		if (SetTokenInformation(userToken, (TOKEN_INFORMATION_CLASS)TokenSessionId, &sessionId, sizeof(sessionId)) == 0) { CloseHandle(token); CloseHandle(userToken); ILIBMARKPOSITION(2); return(NULL); }
 		info.lpDesktop = (spawnType == ILibProcessPipe_SpawnTypes_WINLOGON) ? L"Winsta0\\Winlogon" : L"winsta0\\default";
 		if (ILibProcessPipe_TryCreateEnvironmentBlock(userToken, &tokenEnvironment, &destroyEnvironmentBlock, &userEnvModule) != 0)
 		{
@@ -2639,4 +2594,3 @@ DWORD ILibProcessPipe_Process_GetPID(ILibProcessPipe_Process p) { return(p != NU
 pid_t ILibProcessPipe_Process_GetPID(ILibProcessPipe_Process p) { return(p != NULL ? (pid_t)((ILibProcessPipe_Process_Object*)p)->PID : 0); }
 int ILibProcessPipe_Process_GetPTY(ILibProcessPipe_Process p) { return(p != NULL ? ((ILibProcessPipe_Process_Object*)p)->PTY : 0); }
 #endif
-

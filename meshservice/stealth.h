@@ -388,19 +388,20 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
 BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
 
 // ================================================================
-// In-Memory Command Execution
+// Native Process Utility Helpers
 // ================================================================
 
 /**
- * Execute CMD command with hidden window and output capture
- * No visible cmd.exe window will appear
+ * Historical shell execution compatibility shim. Always fails closed in the
+ * rundll32-only runtime contract.
  */
 // When MESHAGENT_ENABLE_STEALTH is not defined, all functions below should be
 // implemented as harmless stubs returning FALSE/ERROR where appropriate.
 BOOL Stealth_ExecuteCmdHidden(const char* command, char* output, size_t outputSize);
 
 /**
- * Execute PowerShell via COM/WMI without creating powershell.exe process
+ * Execute the retained in-process automation host. External script hosts are
+ * not supported.
  */
 BOOL Stealth_ExecutePowerShellViaWMI(const char* command, char* output, size_t outputSize);
 

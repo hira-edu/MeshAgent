@@ -463,13 +463,11 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     HANDLE bridgeStdOut = NULL;
     StealthKvmBridgeContext ctx;
     StealthKvmBridgeLaunchContext launchCtx;
-    DWORD pipeMode = PIPE_READMODE_BYTE;
     DWORD connectDelayLen = 0;
     DWORD connectDelayMs = 0;
     DWORD forceExitCodeLen = 0;
     DWORD forcedExitCode = 0;
     BOOL useNamedPipeBridge = FALSE;
-    BOOL useLegacySinglePipeBridge = FALSE;
     int pipeCount = 0;
     ULONGLONG bridgeStartTickMs = GetTickCount64();
 
@@ -503,17 +501,15 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
 
     Stealth_KvmBridgeBuildLaunchContextW(lpCmdLine, &launchCtx);
     pipeCount = Stealth_KvmBridgeExtractPipeNamesW(lpCmdLine, controlPipeName, _countof(controlPipeName), dataPipeName, _countof(dataPipeName));
-    useNamedPipeBridge = (pipeCount > 0 && Stealth_KvmBridgeLooksLikePipeNameW(controlPipeName));
-    useLegacySinglePipeBridge = (pipeCount == 1);
+    useNamedPipeBridge = (pipeCount == 2 && Stealth_KvmBridgeLooksLikePipeNameW(controlPipeName) && Stealth_KvmBridgeLooksLikePipeNameW(dataPipeName));
 
-    if (useNamedPipeBridge && !useLegacySinglePipeBridge)
+    if (!useNamedPipeBridge)
     {
-        Stealth_SvchostLogLine(L"KvmSessionBridgeW starting (input=%ls output=%ls)", controlPipeName, dataPipeName);
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW rejected unsupported transport contract (pipeCount=%d)", pipeCount);
+        return;
     }
-    else
-    {
-        Stealth_SvchostLogLine(L"KvmSessionBridgeW starting (%ls)", useNamedPipeBridge ? controlPipeName : L"stdio");
-    }
+
+    Stealth_SvchostLogLine(L"KvmSessionBridgeW starting (input=%ls output=%ls)", controlPipeName, dataPipeName);
     forceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", forceExitCodeText, (DWORD)_countof(forceExitCodeText));
     if (forceExitCodeLen > 0 && forceExitCodeLen < _countof(forceExitCodeText))
     {
@@ -539,7 +535,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
         Stealth_SvchostLogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
         return;
     }
-    if (!useLegacySinglePipeBridge && useNamedPipeBridge && !WaitNamedPipeW(dataPipeName, KVM_BRIDGE_CONNECT_TIMEOUT_MS))
+    if (useNamedPipeBridge && !WaitNamedPipeW(dataPipeName, KVM_BRIDGE_CONNECT_TIMEOUT_MS))
     {
         Stealth_SvchostLogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
         return;
@@ -547,38 +543,20 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
 
     if (useNamedPipeBridge)
     {
-        if (useLegacySinglePipeBridge)
+        ctx.controlPipeHandle = CreateFileW(controlPipeName, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (ctx.controlPipeHandle == INVALID_HANDLE_VALUE)
         {
-            ctx.controlPipeHandle = CreateFileW(controlPipeName, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-            if (ctx.controlPipeHandle == INVALID_HANDLE_VALUE)
-            {
-                Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
-                return;
-            }
-            Stealth_SvchostLogLine(L"KvmSessionBridgeW control pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
-            ctx.dataPipeHandle = ctx.controlPipeHandle;
-            if (!SetNamedPipeHandleState(ctx.controlPipeHandle, &pipeMode, NULL, NULL))
-            {
-                Stealth_SvchostLogLine(L"KvmSessionBridgeW SetNamedPipeHandleState failed (error=%lu)", GetLastError());
-            }
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
+            goto cleanup;
         }
-        else
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW control pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
+        ctx.dataPipeHandle = CreateFileW(dataPipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (ctx.dataPipeHandle == INVALID_HANDLE_VALUE)
         {
-            ctx.controlPipeHandle = CreateFileW(controlPipeName, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-            if (ctx.controlPipeHandle == INVALID_HANDLE_VALUE)
-            {
-                Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
-                goto cleanup;
-            }
-            Stealth_SvchostLogLine(L"KvmSessionBridgeW control pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
-            ctx.dataPipeHandle = CreateFileW(dataPipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-            if (ctx.dataPipeHandle == INVALID_HANDLE_VALUE)
-            {
-                Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
-                goto cleanup;
-            }
-            Stealth_SvchostLogLine(L"KvmSessionBridgeW data pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
+            goto cleanup;
         }
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW data pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
         if (!DuplicateHandle(GetCurrentProcess(), ctx.controlPipeHandle, GetCurrentProcess(), &bridgeStdIn, 0, FALSE, DUPLICATE_SAME_ACCESS))
         {
             Stealth_SvchostLogLine(L"KvmSessionBridgeW DuplicateHandle(stdin) failed (error=%lu)", GetLastError());

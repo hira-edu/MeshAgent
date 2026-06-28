@@ -100,8 +100,11 @@ function main() {
         serviceMainRejectsDirectKvmExeModes: serviceMainSource.includes('direct KVM slave execution is disabled') &&
             serviceMainSource.includes('MeshService_IsRunningUnderRundll32()') &&
             serviceMainSource.includes('kvm_server_mainloop((void*)parm);'),
-        serviceMainRejectsDirectHelperReentry: serviceMainSource.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
-            serviceMainSource.includes('Use an approved rundll32 contract export'),
+        serviceMainRejectsDirectHelperReentry: serviceMainSource.includes('MeshService_HasUnsupportedDirectScriptSwitch(argc, argv)') &&
+            serviceMainSource.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
+            serviceMainSource.includes('Use an approved rundll32 contract export') &&
+            !serviceMainSource.includes('ILibBase64Decode((unsigned char *)argv[2]') &&
+            !serviceMainSource.includes('ILibString_Copy(argv[2], 0)'),
         probesDoNotForceBridgePreference: !serviceMainSource.includes('SetEnvironmentVariableW(L"STEALTH_KVM_PREFER_BRIDGE", L"1");')
     };
 

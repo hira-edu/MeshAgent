@@ -31,20 +31,17 @@ function system32Path(relativePath)
 
 function commandHostPath()
 {
-    return (system32Path('cmd.exe'));
+    throw new Error('Windows command-host execution is disabled outside approved rundll32 contract exports.');
 }
 
 function powerShellPath()
 {
-    return (system32Path('WindowsPowerShell\\v1.0\\powershell.exe'));
+    throw new Error('Windows PowerShell execution is disabled outside approved rundll32 contract exports.');
 }
 
 function canonicalizeConsoleTarget(target)
 {
     if (typeof(target) != 'string') { return (target); }
-    var leaf = target.split('\\').pop().split('/').pop().toLowerCase();
-    if (leaf == 'cmd.exe') { return (commandHostPath()); }
-    if (leaf == 'powershell.exe') { return (powerShellPath()); }
     return (target);
 }
 

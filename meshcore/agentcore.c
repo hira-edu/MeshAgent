@@ -9298,7 +9298,7 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 	{
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
 		fprintf(stderr, "MeshAgent: direct --slave helper re-entry is disabled in this build. Use an approved rundll32 contract export.\r\n");
-		return 1;
+		return ERROR_NOT_SUPPORTED;
 #else
 		MeshAgent_Slave(agentHost);
 		return 0;

@@ -131,7 +131,7 @@ function childContainer()
 
         if (options._debugIPC)
         {
-            console.log('-b64exec ' + script);
+            console.log('child-container debug payload: ' + script);
             return (ret);
         }
 

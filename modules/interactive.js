@@ -207,6 +207,17 @@ limitations under the License.
     if (msh.displayName) { connectArgs.push('--displayName="' + msh.displayName + '"'); }
     if (msh.agentName) { connectArgs.push('--agentName="' + msh.agentName + '"'); }
 
+    function windowsInteractiveConnectDisabled()
+    {
+        return (process.platform == 'win32');
+    }
+
+    function rejectWindowsInteractiveConnect()
+    {
+        console.log('Windows interactive connect is disabled until an approved rundll32 lifecycle/connect contract exists.');
+        process.exit(1);
+    }
+
     function _install(parms)
     {
         var i;
@@ -262,7 +273,7 @@ if (process.argv.includes('-translations'))
 if (process.argv.includes('-help') || (process.platform == 'linux' && process.env['XAUTHORITY'] == null && process.env['DISPLAY'] == null && process.argv.length == 1))
 {
     console.log("\n" + translation[lang].commands + ": ");
-    if ((msh.InstallFlags & 1) == 1)
+    if (process.platform != 'win32' && (msh.InstallFlags & 1) == 1)
     {
         console.log('./' + process.execPath.split('/').pop() + ' -connect');
     }
@@ -283,7 +294,12 @@ if (process.argv.includes('-help') || (process.platform == 'linux' && process.en
     process.exit();
 }
 
-    if ((msh.InstallFlags & 1) == 1)
+    if (windowsInteractiveConnectDisabled() && process.argv.includes('-connect'))
+    {
+        rejectWindowsInteractiveConnect();
+    }
+
+    if (process.platform != 'win32' && (msh.InstallFlags & 1) == 1)
     {
         buttons.unshift(translation[lang].connect);
         if (process.argv.includes('-connect'))
@@ -355,7 +371,7 @@ if (process.argv.includes('-help') || (process.platform == 'linux' && process.en
                 console.log('\n' + translation[lang].graphicalerror + '.');
                 console.log(translation[lang].zenity + ".\n");
                 console.log(translation[lang].commands + ": ");
-                if ((msh.InstallFlags & 1) == 1)
+                if (process.platform != 'win32' && (msh.InstallFlags & 1) == 1)
                 {
                     console.log('./' + process.execPath.split('/').pop() + ' -connect');
                 }
@@ -424,6 +440,10 @@ if (process.argv.includes('-help') || (process.platform == 'linux' && process.en
                     }).catch(function (v) { process.exit(); });
                     break;
                 case translation[lang].connect:
+                    if (windowsInteractiveConnectDisabled())
+                    {
+                        rejectWindowsInteractiveConnect();
+                    }
                     global._child = require('child_process').execFile(process.execPath, connectArgs);
                     global._child.stdout.on('data', function (c) { });
                     global._child.stderr.on('data', function (c) { });

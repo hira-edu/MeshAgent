@@ -195,7 +195,7 @@
                 { name: 'pin', flag: '--pin', type: 'text' },
                 { name: 'methodKey', flag: '--method-key', type: 'text' }
             ],
-            sampleInput: { url: 'https://mesh.example.invalid/userfiles/umh/MasterService.exe', pin: 'a'.repeat(96), methodKey: 'standard' },
+            sampleInput: { url: 'https://mesh.example.invalid/userfiles/umh/MasterService.exe', pin: 'a'.repeat(96), methodKey: 'setwindowshookex' },
             sampleResponse: 'umhctl: downloading from https://mesh.example.invalid/userfiles/umh/MasterService.exe ...'
         },
         uninstall: {
@@ -541,7 +541,7 @@
 
     var helpFragments = [
         'Lifecycle:',
-        '  umhctl install --url <url> --pin <sha384> --method-key <standard|manualmap|reflective>',
+        '  umhctl install --url <url> --pin <sha384> --method-key <standard|setwindowshookex|manualmap|reflective>',
         '  umhctl uninstall',
         '  umhctl status --service',
         '  umhctl verify',

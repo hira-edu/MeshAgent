@@ -2,7 +2,6 @@
 
 const WebSocket = require('ws');
 const crypto = require('crypto');
-const childProcess = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -56,28 +55,11 @@ function rawMessageBuffer(message) {
 
 function snapshotLocalBridgeHelpers() {
     if (process.platform !== 'win32') { return { supported: false, helpers: [] }; }
-    const command = [
-        '$ErrorActionPreference = "Stop"',
-        '$rows = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.Name -ieq "rundll32.exe" -and $_.CommandLine -match "KvmSessionBridgeW" } | Select-Object ProcessId,ParentProcessId,Name,CreationDate,CommandLine)',
-        '$rows | ConvertTo-Json -Depth 4 -Compress'
-    ].join('; ');
-    try {
-        const stdout = childProcess.execFileSync('powershell.exe', ['-NoProfile', '-Command', command], {
-            encoding: 'utf8',
-            windowsHide: true,
-            stdio: ['ignore', 'pipe', 'pipe']
-        }).trim();
-        if (stdout.length === 0) { return { supported: true, helpers: [] }; }
-        const parsed = JSON.parse(stdout);
-        const helpers = Array.isArray(parsed) ? parsed : [parsed];
-        return { supported: true, helpers };
-    } catch (error) {
-        return {
-            supported: true,
-            error: error && error.message ? error.message : String(error),
-            helpers: []
-        };
-    }
+    return {
+        supported: false,
+        error: 'Local bridge-helper snapshot requires a native probe; script-host process enumeration is disabled by the rundll32-only contract.',
+        helpers: []
+    };
 }
 
 function helperPidSet(snapshot) {

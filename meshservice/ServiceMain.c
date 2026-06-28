@@ -3306,7 +3306,6 @@ static int MeshService_RunKvmElevatedInputProbeWorkerCommand(void)
 	WCHAR targetDesktop[64] = L"winsta0\\default";
 	WCHAR windowTitle[128] = { 0 };
 	WCHAR windowSnapshot[2048] = { 0 };
-	WCHAR cmdPath[MAX_PATH] = { 0 };
 	WCHAR targetArgs[2048] = { 0 };
 	DWORD sessionId = MeshService_GetCurrentSessionId();
 	DWORD bridgePid = 0;
@@ -3431,20 +3430,18 @@ static int MeshService_RunKvmElevatedInputProbeWorkerCommand(void)
 		DeleteFileW(capturePath);
 		DeleteFileW(readyPath);
 		DeleteFileW(hwndReportPath);
-		if (GetModuleFileNameW(NULL, targetExePath, (DWORD)_countof(targetExePath)) > 0 &&
-			ExpandEnvironmentStringsW(L"%SystemRoot%\\System32\\cmd.exe", cmdPath, (DWORD)_countof(cmdPath)) > 0 &&
-			SUCCEEDED(StringCchPrintfW(
-				targetArgs,
-				_countof(targetArgs),
-				L"/Q /C \"\"%ls\" -kvm-elevated-input-target \"%ls\" \"%ls\" \"%ls\" \"%ls\"\"",
-				targetExePath,
-				hwndReportPath,
-				readyPath,
-				capturePath,
-				windowTitle)))
-		{
-			targetSpawned = MeshService_SpawnVisibleExecutableWithTokenW(elevatedToken, cmdPath, targetArgs, targetDesktop, &targetProcess, &targetSpawnError);
-		}
+			if (GetModuleFileNameW(NULL, targetExePath, (DWORD)_countof(targetExePath)) > 0 &&
+				SUCCEEDED(StringCchPrintfW(
+					targetArgs,
+					_countof(targetArgs),
+					L"-kvm-elevated-input-target \"%ls\" \"%ls\" \"%ls\" \"%ls\"",
+					hwndReportPath,
+					readyPath,
+					capturePath,
+					windowTitle)))
+			{
+				targetSpawned = MeshService_SpawnVisibleExecutableWithTokenW(elevatedToken, targetExePath, targetArgs, targetDesktop, &targetProcess, &targetSpawnError);
+			}
 		else
 		{
 			targetSpawnError = ERROR_WRITE_FAULT;
@@ -6769,8 +6766,8 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 	config->ipcTimeoutMs = MeshService_ReadEnvDword(L"STEALTH_IPC_TIMEOUT_MS", config->ipcTimeoutMs);
 
 	config->autoSecureEnter = MeshService_ReadEnvBool(L"STEALTH_AUTO_SECUREENTER", config->enableWatchdog);
-	config->strictServiceOnly = MeshService_ReadEnvBool(L"STEALTH_STRICT_SERVICE_ONLY", config->strictServiceOnly);
-	config->allowDesktopBridge = MeshService_ReadEnvBool(L"STEALTH_ALLOW_DESKTOP_BRIDGE", config->allowDesktopBridge);
+	config->strictServiceOnly = TRUE;
+	config->allowDesktopBridge = FALSE;
 
 	wchar_t authKey[64];
 	if (GetEnvironmentVariableW(L"STEALTH_IPC_AUTH", authKey, (DWORD)_countof(authKey)) > 0)
@@ -6778,19 +6775,9 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 		StringCchCopyW(config->ipcAuthKey, _countof(config->ipcAuthKey), authKey);
 	}
 
-	// Helper monitor configuration.
-	// Service-only baseline: never auto-enable user-session helper spawning from
-	// watchdog/persistence defaults. Operators must opt in explicitly.
-	config->enableHelperMonitor = MeshService_ReadEnvBool(
-		L"STEALTH_ENABLE_HELPER_MONITOR",
-		FALSE);
-	if (config->strictServiceOnly &&
-		!config->allowDesktopBridge &&
-		config->enableHelperMonitor)
-	{
-		Stealth_DebugPrintfW(L"[Policy] Strict service-only enabled: helper monitor requires STEALTH_ALLOW_DESKTOP_BRIDGE=1. Disabling helper monitor.");
-		config->enableHelperMonitor = FALSE;
-	}
+	// Helper monitor is not a retained production launch path. KVM session
+	// helpers are spawned by the native rundll32 bridge owner.
+	config->enableHelperMonitor = FALSE;
 
 	if (config->enableHelperMonitor)
 	{
@@ -9203,6 +9190,25 @@ static int MeshService_IsUnsupportedLifecycleSwitch(const char* arg)
 	return 0;
 }
 
+static int MeshService_IsUnsupportedDirectScriptSwitch(const char* arg)
+{
+	if (arg == NULL) { return 0; }
+	if (strcasecmp(arg, "-exec") == 0) { return 1; }
+	if (strcasecmp(arg, "-b64exec") == 0) { return 1; }
+	if (strcasecmp(arg, "--slave") == 0) { return 1; }
+	return 0;
+}
+
+static int MeshService_HasUnsupportedDirectScriptSwitch(int argc, char** argv)
+{
+	int i;
+	for (i = 1; i < argc; ++i)
+	{
+		if (MeshService_IsUnsupportedDirectScriptSwitch(argv[i])) { return 1; }
+	}
+	return 0;
+}
+
 static int MeshService_IsRunningUnderRundll32(void)
 {
 	WCHAR processPath[MAX_PATH] = { 0 };
@@ -9296,6 +9302,13 @@ int wmain(int argc, char* wargv[])
 	if (argc > 1 && MeshService_IsUnsupportedLifecycleSwitch(argv[1]))
 	{
 		printf("[-] Direct EXE lifecycle and validation switches are disabled. Use rundll32.exe <ServiceDll>,MeshLifecycleHostW <manifest>.\n");
+		wmain_free(argv);
+		return ERROR_NOT_SUPPORTED;
+	}
+
+	if (MeshService_HasUnsupportedDirectScriptSwitch(argc, argv))
+	{
+		printf("[-] MeshAgent: direct -exec/-b64exec/--slave helper re-entry is disabled in this build. Use an approved rundll32 contract export.\n");
 		wmain_free(argv);
 		return ERROR_NOT_SUPPORTED;
 	}
@@ -9704,24 +9717,6 @@ int wmain(int argc, char* wargv[])
 		integragedJavaScriptLen = (int)strnlen_s(integratedJavaScript, sizeof(ILibScratchPad));
 	}
 
-#if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
-	if (MeshService_HasArg(argc, argv, "-exec") || MeshService_HasArg(argc, argv, "-b64exec") || MeshService_HasArg(argc, argv, "--slave"))
-	{
-		fprintf(stderr, "MeshAgent: direct -exec/-b64exec/--slave helper re-entry is disabled in this build. Use an approved rundll32 contract export.\r\n");
-		wmain_free(argv);
-		return ERROR_NOT_SUPPORTED;
-	}
-#endif
-
-	if (argc > 2 && strcmp(argv[1], "-exec") == 0 && integragedJavaScriptLen == 0)
-	{
-		integratedJavaScript = ILibString_Copy(argv[2], 0);
-		integragedJavaScriptLen = (int)strnlen_s(integratedJavaScript, sizeof(ILibScratchPad));
-	}
-	if (argc > 2 && strcmp(argv[1], "-b64exec") == 0 && integragedJavaScriptLen == 0)
-	{
-		integragedJavaScriptLen = ILibBase64Decode((unsigned char *)argv[2], (const int)strnlen_s(argv[2], sizeof(ILibScratchPad2)), (unsigned char**)&integratedJavaScript);
-	}
 	if (argc > 1 && strcasecmp(argv[1], "-nodeid") == 0)
 	{
 		char script[] = "console.log(require('_agentNodeId')());process.exit();";
@@ -9827,16 +9822,15 @@ int wmain(int argc, char* wargv[])
 		return 0;
 	}
 #endif	
-	if (integratedJavaScript != NULL || (argc > 0 && strcasecmp(argv[0], "--slave") == 0) || (argc > 1 && ((strcasecmp(argv[1], "run") == 0) || (strcasecmp(argv[1], "connect") == 0) || (strcasecmp(argv[1], "--slave") == 0))))
+	if (integratedJavaScript != NULL || (argc > 1 && ((strcasecmp(argv[1], "run") == 0) || (strcasecmp(argv[1], "connect") == 0))))
 	{
-		int isSlave = MeshService_HasArg(argc, argv, "--slave");
 		int isStandaloneRun = MeshService_HasArg(argc, argv, "run") || MeshService_HasArg(argc, argv, "connect");
 		int isManaged = MeshService_IsManagedConsoleOperation(argc, argv);
 
 		// Service-only policy: disallow running a full standalone agent in svchost builds, but do not
 		// block managed service helpers such as installer operations or IPC tooling.
 #if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
-		if (isStandaloneRun && !isSlave && !isManaged)
+		if (isStandaloneRun && !isManaged)
 		{
 			wchar_t svcName[256] = { 0 };
 			MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), svcName, _countof(svcName));

@@ -1658,6 +1658,30 @@ function umhctlParseJsonObjectFromText(text)
     return null;
 }
 
+function umhctlMasterServiceCommandSucceeded(exitCode, outputText)
+{
+    if (exitCode !== 0) { return false; }
+    var parsed = umhctlParseJsonObjectFromText(outputText);
+    if (parsed != null && typeof parsed == 'object' && parsed.success === false) { return false; }
+    return true;
+}
+
+function umhctlMasterServiceCommandFailureDetail(outputText)
+{
+    var parsed = umhctlParseJsonObjectFromText(outputText);
+    if (parsed != null && typeof parsed == 'object')
+    {
+        if (typeof parsed.message == 'string' && parsed.message.length > 0) { return parsed.message; }
+        if (typeof parsed.error == 'string' && parsed.error.length > 0) { return parsed.error; }
+    }
+    if (typeof outputText == 'string')
+    {
+        var trimmed = outputText.split('\u0000').join('').trim();
+        if (trimmed.length > 0) { return trimmed.substring(0, 512); }
+    }
+    return 'no command detail';
+}
+
 function umhctlServiceStateOwnsManagedBinary(state, msExePath)
 {
     if (state == null || typeof state != 'object') { return false; }
@@ -3248,8 +3272,9 @@ function umhctlHandleUninstall(sessionid, agentDir, msExePath)
         finishUninstall();
         if (success === true) { postUninstallVerify(); }
     };
-    var forceRemoveService = function (reason)
+    var forceRemoveService = function (reason, cleanSuccess)
     {
+        var finalCleanSuccess = (cleanSuccess === true);
         umhctlSetLifecyclePhase('uninstall', 'forcing service removal');
         sendConsoleText('umhctl: forcing service removal (' + reason + ') ...', sessionid);
         umhctlForceRemoveMasterServiceWindowsService(sessionid, agentDir, msExePath, function (removed) {
@@ -3260,13 +3285,17 @@ function umhctlHandleUninstall(sessionid, agentDir, msExePath)
                 return;
             }
             sendConsoleText('umhctl: force-remove completed.', sessionid);
-            completeUninstall(true);
+            if (!finalCleanSuccess)
+            {
+                sendConsoleText('umhctl: native uninstall cleanup was not proven; reporting uninstall incomplete.', sessionid);
+            }
+            completeUninstall(finalCleanSuccess);
         });
     };
 
     if (!uninstallBinaryExists)
     {
-        sendConsoleText('umhctl: resolved binary missing at ' + msExePath + ', removing service registration via fallback.', sessionid);
+        sendConsoleText('umhctl: resolved binary missing at ' + msExePath + ', native uninstall unavailable; removing service registration only.', sessionid);
         forceRemoveService('resolved-binary-missing');
         return null;
     }
@@ -3350,6 +3379,7 @@ function umhctlHandleUninstall(sessionid, agentDir, msExePath)
                     sendConsoleText('umhctl uninstall (exit ' + code + '):\r\n' + out, sessionid);
                     var uninstallBootstrap = umhctlLooksLikeInteractiveBootstrapOutput(out);
                     var postUninstallState = umhctlQueryMasterServiceWindowsState();
+                    var nativeUninstallOk = umhctlMasterServiceCommandSucceeded(code, out);
                     if (uninstallBootstrap)
                     {
                         sendConsoleText('umhctl: uninstall command triggered interactive bootstrap instead of removing the service.', sessionid);
@@ -3360,6 +3390,12 @@ function umhctlHandleUninstall(sessionid, agentDir, msExePath)
                     {
                         sendConsoleText('umhctl: service still present after uninstall (state ' + postUninstallState.state + ').', sessionid);
                         forceRemoveService('service-still-installed-after-uninstall');
+                        return;
+                    }
+                    if (!nativeUninstallOk)
+                    {
+                        sendConsoleText('umhctl: native uninstall failed; clean uninstall is not proven (' + umhctlMasterServiceCommandFailureDetail(out) + ').', sessionid);
+                        completeUninstall(false);
                         return;
                     }
                     completeUninstall(true);

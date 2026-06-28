@@ -102,8 +102,11 @@ function main() {
         serviceMainRejectsDirectKvmExeModes: serviceMainSource.includes('direct KVM slave execution is disabled') &&
             serviceMainSource.includes('MeshService_IsRunningUnderRundll32()') &&
             serviceMainSource.includes('kvm_server_mainloop((void*)parm);'),
-        serviceMainRejectsDirectHelperReentry: serviceMainSource.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
-            serviceMainSource.includes('Use an approved rundll32 contract export'),
+        serviceMainRejectsDirectHelperReentry: serviceMainSource.includes('MeshService_HasUnsupportedDirectScriptSwitch(argc, argv)') &&
+            serviceMainSource.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
+            serviceMainSource.includes('Use an approved rundll32 contract export') &&
+            !serviceMainSource.includes('ILibBase64Decode((unsigned char *)argv[2]') &&
+            !serviceMainSource.includes('ILibString_Copy(argv[2], 0)'),
         integrationRejectsOutOfContractHelperMonitor: integrationSource.includes('Helper monitor rejected: configuration is outside the retained rundll32 desktop-bridge contract') &&
             integrationSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand('),
         agentcoreDoesNotPublishAuthorizedSelfSpawnPath: !agentcoreSource.includes('MESHAGENT_SELF_SPAWN_PATH'),

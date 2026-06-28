@@ -1,8 +1,8 @@
 /*
- * MeshAgent Stealth - Hidden CMD Execution
+ * MeshAgent Stealth - Process Lookup Helpers
  *
- * Provides in-memory command execution with hidden console windows
- * and full output capture without creating visible processes.
+ * Direct command-host execution is intentionally not supported in the
+ * rundll32-only runtime contract.
  */
 
 #include <windows.h>

@@ -73,8 +73,8 @@ function main() {
         masterWaitsAndAttachesPipeInLiveSpawnPath: kvmSource.includes('!kvm_relay_build_bridge_pipe_namesW(bridgeInputPipeNameW') &&
             kvmSource.includes('!kvm_relay_create_bridge_server_pipeW(bridgeInputPipeNameW, PIPE_ACCESS_OUTBOUND, &ctx->bridgeInputPipeHandle)') &&
             kvmSource.includes('!kvm_relay_create_bridge_server_pipeW(bridgeOutputPipeNameW, PIPE_ACCESS_INBOUND, &ctx->bridgeOutputPipeHandle)') &&
-            kvmSource.includes('!kvm_relay_wait_for_bridge_client(ctx->bridgeInputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, restartSessionGeneration, &lastError, &connectAbortedBySessionChange)') &&
-            kvmSource.includes('!kvm_relay_wait_for_bridge_client(ctx->bridgeOutputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, restartSessionGeneration, &lastError, &connectAbortedBySessionChange)') &&
+            kvmSource.includes('!kvm_relay_wait_for_bridge_client(ctx, ctx->bridgeInputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, restartSessionGeneration, &lastError, &connectAbortedBySessionChange)') &&
+            kvmSource.includes('!kvm_relay_wait_for_bridge_client(ctx, ctx->bridgeOutputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, restartSessionGeneration, &lastError, &connectAbortedBySessionChange)') &&
             kvmSource.includes('InterlockedExchange(&ctx->childUsesBridge, 1);') &&
             kvmSource.includes('!kvm_relay_attach_bridge_transport(ctx, ctx->bridgeInputPipeHandle, ctx->bridgeOutputPipeHandle)'),
         slaveParsesPipeArguments: bridgeSource.includes('static int Stealth_KvmBridgeExtractPipeNamesW(') &&
@@ -82,8 +82,9 @@ function main() {
             bridgeSource.includes('destination = (pipeCount == 0) ? controlPipeName : dataPipeName;'),
         slaveConnectsDirectionalPipes: bridgeSource.includes('CreateFileW(controlPipeName, GENERIC_READ') &&
             bridgeSource.includes('CreateFileW(dataPipeName, GENERIC_WRITE'),
-        slaveRetainsLegacySinglePipeFallback: bridgeSource.includes('useLegacySinglePipeBridge') &&
-            bridgeSource.includes('CreateFileW(controlPipeName, GENERIC_READ | GENERIC_WRITE'),
+        slaveRejectsLegacySinglePipeFallback: bridgeSource.includes('rejected unsupported transport contract') &&
+            !bridgeSource.includes('useLegacySinglePipeBridge') &&
+            !bridgeSource.includes('CreateFileW(controlPipeName, GENERIC_READ | GENERIC_WRITE'),
         slaveRedirectsPipeToStdHandles: bridgeSource.includes('SetStdHandle(STD_INPUT_HANDLE, bridgeStdIn)') && bridgeSource.includes('SetStdHandle(STD_OUTPUT_HANDLE, bridgeStdOut)')
     };
 

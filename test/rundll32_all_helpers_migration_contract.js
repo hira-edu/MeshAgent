@@ -84,6 +84,8 @@ function main() {
         userConsent: 'modules/win-userconsent.js',
         notifybar: 'modules/notifybar-desktop.js',
         processManager: 'modules/process-manager.js',
+        interactive: 'modules/interactive.js',
+        agentInstaller: 'modules/agent-installer.js',
         polyfills: 'microscript/ILibDuktape_Polyfills.c'
     };
 
@@ -98,6 +100,7 @@ function main() {
         'schtasks.exe',
         'commandHostPath()',
         'powerShellPath()',
+        'ShellExecuteA',
         "['powershell",
         "['cmd']"
     ];
@@ -144,6 +147,8 @@ function main() {
             sources.deskutils.includes('Windows desktop utility session dispatch is disabled until an approved rundll32 contract export exists.') &&
             sources.dialog.includes('Windows dialog helper dispatch is disabled until an approved rundll32 contract export exists.') &&
             sources.userConsent.includes('Windows user-consent helper dispatch is disabled until an approved rundll32 contract export exists.') &&
+            !sources.userConsent.includes("CreateNativeProxy('Shell32.dll')") &&
+            !sources.userConsent.includes('ShellExecuteA') &&
             sources.notifybar.includes('Windows notifybar helper dispatch is disabled until an approved rundll32 contract export exists.'),
         windowsShellModuleHitsRemoved:
             Object.values(windowsModuleHits).every((hits) => hits.length === 0),
@@ -151,6 +156,12 @@ function main() {
             sources.processManager.includes('Windows process detail lookup is disabled until an approved native/rundll32 ProcessInfoBridgeW contract exists.') &&
             !sources.processManager.includes('powerShellPath()') &&
             !sources.processManager.includes("['powershell"),
+        interactiveWindowsConnectDisabled:
+            sources.interactive.includes('Windows interactive connect is disabled until an approved rundll32 lifecycle/connect contract exists.') &&
+            sources.interactive.includes("if (windowsInteractiveConnectDisabled() && process.argv.includes('-connect'))") &&
+            sources.interactive.includes("if (process.platform != 'win32' && (msh.InstallFlags & 1) == 1)") &&
+            sources.interactive.includes('case translation[lang].connect:') &&
+            sources.interactive.includes('if (windowsInteractiveConnectDisabled())'),
         embeddedDispatcherMatchesDisabledSource:
             embedded.dispatcher === sources.dispatcher &&
             embedded.dispatcher.includes('Windows dispatcher helper launch is disabled until an approved rundll32 contract export exists.') &&
@@ -165,7 +176,18 @@ function main() {
         installerNoGenericCommandRunner:
             !sources.installer.includes('Stealth_RunCommand') &&
             !sources.installer.includes('netsh winhttp import proxy source=ie') &&
-            sources.installer.includes('WinHTTP proxy import skipped by rundll32-only helper policy')
+            sources.installer.includes('WinHTTP proxy import skipped by rundll32-only helper policy'),
+        agentInstallerWindowsLifecycleUsesRundll32:
+            sources.agentInstaller.includes('const WINDOWS_SVCHOST_ONLY = (process.platform === \'win32\');') &&
+            sources.agentInstaller.includes("runWindowsNativeLifecycle('install', parms, gOptions);") &&
+            sources.agentInstaller.includes("runWindowsNativeLifecycle('uninstall', parms, null);") &&
+            sources.agentInstaller.includes("runWindowsNativeLifecycle('update', parseWindowsNativeUpdateParameters(b64), null);") &&
+            sources.agentInstaller.includes("args = [sourceDll + ',MeshLifecycleHostW', manifestPath];") &&
+            sources.agentInstaller.includes('result = runWindowsChildProcessAndCapture(rundll32Path, args') &&
+            sources.agentInstaller.includes('if (process.platform == \'win32\') { return (windowsNativeUpdate(isservice, b64)); }') &&
+            sources.agentInstaller.includes('if (process.platform == \'win32\') { return (ret); }') &&
+            !sources.agentInstaller.includes("'.update.exe'") &&
+            !sources.agentInstaller.includes('".update.exe"')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

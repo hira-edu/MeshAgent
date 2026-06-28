@@ -710,8 +710,16 @@ function hexToAscii(hexString) {
 
 function win_chassisType()
 {
-    // No shell fallback in the rundll32-only helper policy. Prefer PCSystemType below.
-    return (2); // unknown
+    try {
+        var values = require('win-wmi').query('ROOT\\CIMV2', 'SELECT ChassisTypes FROM Win32_SystemEnclosure', ['ChassisTypes']);
+        if (values[0] && values[0]['ChassisTypes'] != null) {
+            var chassisTypes = values[0]['ChassisTypes'];
+            if (Array.isArray(chassisTypes)) { chassisTypes = chassisTypes[0]; }
+            var chassisType = parseInt(chassisTypes);
+            if (!isNaN(chassisType)) { return (chassisType); }
+        }
+    } catch (e) { }
+    return (2);
 }
 
 function win_systemType()
@@ -900,4 +908,3 @@ if (process.platform == 'win32')
 // board_serial = BASEBOARD->SerialNumber = ioreg/serial-number | ioreg/IOPlatformSerialNumber
 // board_vendor = BASEBOARD->Manufacturer = ioreg/manufacturer
 // board_version = BASEBOARD->Version
-

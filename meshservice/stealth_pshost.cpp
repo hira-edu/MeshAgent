@@ -2,8 +2,8 @@
  * MeshAgent Stealth - In-process PowerShell Host (CLR)
  *
  * Attempts to host the .NET CLR (v4) and execute a managed helper
- * assembly that runs a PowerShell Runspace in-process. External
- * powershell.exe process fallback is intentionally not supported.
+ * assembly that runs an in-process automation runspace. External script-host
+ * process fallback is intentionally not supported.
  */
 
 #include <windows.h>
@@ -124,4 +124,3 @@ BOOL Stealth_ExecutePowerShellViaWMI(const char* commandUtf8, char* outputUtf8, 
     WideCharToMultiByte(CP_UTF8, 0, outW, -1, outputUtf8, (int)outputSize, NULL, NULL);
     return TRUE;
 }
-
