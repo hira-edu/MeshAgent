@@ -63,6 +63,35 @@ function formatTaskTime(date) {
     return `${hours}:${minutes}`;
 }
 
+function resolveSystemRundll32Path(args) {
+    if (args.rundll32) {
+        return path.resolve(args.rundll32);
+    }
+    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+    return path.win32.join(systemRoot, 'System32', 'rundll32.exe');
+}
+
+function resolveKvmProbeDllPath(exePath, args) {
+    if (args.dll) {
+        return path.resolve(args.dll);
+    }
+
+    const exeDir = path.dirname(exePath);
+    const parentDir = path.dirname(exeDir);
+    const baseName = path.basename(exePath, path.extname(exePath));
+    const candidates = [
+        path.join(exeDir, 'diagsvc.dll'),
+        path.join(exeDir, 'svchost_payload.dll'),
+        path.join(exeDir, `${baseName}.dll`),
+        path.join(parentDir, 'StealthLab_DLL', `${baseName}.dll`)
+    ];
+    const found = candidates.find((candidate) => fs.existsSync(candidate));
+    if (!found) {
+        throw new Error(`probe DLL missing; checked: ${candidates.join(', ')}`);
+    }
+    return found;
+}
+
 async function waitForReadableFile(filePath, timeoutMs) {
     const start = Date.now();
     while ((Date.now() - start) < timeoutMs) {
@@ -84,12 +113,12 @@ async function waitForReadableFile(filePath, timeoutMs) {
     throw new Error(`Timed out waiting for probe report: ${filePath}`);
 }
 
-async function runSystemProbe(exePath, mode) {
+async function runSystemProbe(rundll32Path, dllPath, mode) {
     const taskName = `MeshAgentKvmSessionProbe_${mode}_${process.pid}_${Date.now()}`;
     const reportPath = path.join(os.tmpdir(), `${taskName}.json`);
     const scheduleTime = formatTaskTime(new Date(Date.now() + 60000));
     const modeArgs = mode === 'auto' ? ' --auto-selected-tsid' : '';
-    const commandLine = `"${exePath}" -kvm-bridge-session-change-probe-child "${reportPath}"${modeArgs}`;
+    const commandLine = `"${rundll32Path}" "${dllPath}",MeshKvmProbeHostW -kvm-bridge-session-change-probe-child "${reportPath}"${modeArgs}`;
     const create = runCommand('schtasks', [
         '/Create',
         '/TN', taskName,
@@ -193,8 +222,8 @@ function validateProbeJson(json, expectedAutoSelected) {
     assert((json.screenPackets + json.displayListPackets + json.displayInfoPackets + json.cursorPackets) > 0, `${label} probe did not observe any KVM packets`);
 }
 
-async function runAndParseProbe(exePath, mode) {
-    const systemProbe = await runSystemProbe(exePath, mode);
+async function runAndParseProbe(rundll32Path, dllPath, mode) {
+    const systemProbe = await runSystemProbe(rundll32Path, dllPath, mode);
     let json = null;
 
     try {
@@ -211,16 +240,22 @@ async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const dllPath = resolveKvmProbeDllPath(exePath, args);
+    const rundll32Path = resolveSystemRundll32Path(args);
     const logPath = args.log ? path.resolve(args.log) : path.join(path.dirname(exePath), 'svchost-debug.log');
 
     assert(fs.existsSync(exePath), `probe executable missing at ${exePath}`);
+    assert(fs.existsSync(dllPath), `probe DLL missing at ${dllPath}`);
+    assert(fs.existsSync(rundll32Path), `rundll32.exe missing at ${rundll32Path}`);
 
-    const explicitProbe = await runAndParseProbe(exePath, 'explicit');
-    const autoProbe = await runAndParseProbe(exePath, 'auto');
+    const explicitProbe = await runAndParseProbe(rundll32Path, dllPath, 'explicit');
+    const autoProbe = await runAndParseProbe(rundll32Path, dllPath, 'auto');
 
     const report = {
         generatedUtc: new Date().toISOString(),
         exePath,
+        dllPath,
+        rundll32Path,
         logPath,
         probes: {
             explicit: {
@@ -269,6 +304,8 @@ async function main() {
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
+            `RUNDLL32_PATH=${report.rundll32Path}`,
+            `DLL_PATH=${report.dllPath}`,
             `EXPLICIT_TASK_NAME=${report.probes.explicit.taskName}`,
             `EXPLICIT_SESSION_ID=${explicitProbe.json.sessionId}`,
             `EXPLICIT_TSID_EXPLICIT=${explicitProbe.json.initialProcessTSIDExplicit}`,

@@ -49,6 +49,10 @@ function noneOf(source, tokens) {
     return tokens.filter((token) => source.includes(token));
 }
 
+function countOccurrences(source, token) {
+    return source.split(token).length - 1;
+}
+
 function sourceSection(source, startToken, endToken) {
     const start = source.indexOf(startToken);
     if (start < 0) {
@@ -131,8 +135,9 @@ function main() {
     const serviceMainSections = {
         spawnExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnExecutableWithTokenW(', 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW('),
         spawnVisibleExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW(', 'static BOOL MeshService_SpawnProcessWithTokenW('),
-        spawnProcessWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnProcessWithTokenW(', 'static BOOL MeshService_TerminateProcessesByNameInSessionW('),
-        kvmProbeHostAllowlist: sourceSection(sources.serviceMain, 'static BOOL MeshService_IsAllowedKvmProbeHostCommandW(', 'static BOOL MeshService_BuildKvmProbeHostShellParametersW(')
+        spawnProcessWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnProcessWithTokenW(', 'static BOOL MeshService_IsNonEmptyKvmProbeArgumentW('),
+        kvmProbeHostAllowlist: sourceSection(sources.serviceMain, 'static BOOL MeshService_IsAllowedKvmProbeHostCommandW(', 'static BOOL MeshService_BuildKvmProbeHostShellParametersW('),
+        kvmProbeHostDispatcher: sourceSection(sources.serviceMain, 'int MeshService_RunKvmProbeHostW(const wchar_t* arguments)', 'static int MeshService_RejectDirectKvmProbeHostCommandA(')
     };
     const persistenceSections = {
         comRegister: sourceSection(sources.stealthPersistence, 'BOOL Persist_ComHijackRegister(', 'BOOL Persist_ComHijackRemove('),
@@ -305,14 +310,26 @@ function main() {
             sources.serviceMain.includes('-kvm-secure-desktop-probe-child') &&
             sources.serviceMain.includes('-kvm-elevated-input-target') &&
             sources.serviceMain.includes('-kvm-blockinput-holder') &&
-            !sources.serviceMain.includes('secure-desktop-uac-probe-disabled-by-rundll32-only-policy') &&
             sources.serviceMain.includes('uac-consent-trigger-disabled-by-rundll32-only-policy') &&
             sources.serviceMain.includes('uac-consent-target-disabled-by-rundll32-only-policy') &&
+            sources.serviceMain.includes('MeshService_RejectDirectKvmProbeHostCommandA(argv[1])') &&
+            sources.serviceMain.includes('direct helper entry is disabled. Use rundll32.exe <ServiceDll>,MeshKvmProbeHostW <validated-args>.') &&
+            sources.serviceMain.includes('\\"uacTriggerPolicy\\":\\"uac-consent-trigger-disabled-by-rundll32-only-policy\\"') &&
             !sources.serviceMain.includes('ShellExecuteExW') &&
             !sources.serviceMain.includes('executeInfo.lpFile = rundll32Path') &&
             !sources.serviceMain.includes('executeInfo.lpVerb = L"runas"') &&
+            !sources.serviceMain.includes('MeshService_TerminateProcessesByNameInSessionW') &&
+            !sources.serviceMain.includes('consent.exe') &&
+            !sources.serviceMain.includes('StringCchPrintfW(uacArgs') &&
+            !sources.serviceMain.includes('MeshService_BuildKvmProbeHostShellParametersW(targetArgs') &&
+            !serviceMainSections.kvmProbeHostAllowlist.includes('argc >=') &&
+            serviceMainSections.kvmProbeHostAllowlist.includes('argc == 5') &&
+            serviceMainSections.kvmProbeHostAllowlist.includes('--auto-selected-tsid') &&
             !serviceMainSections.kvmProbeHostAllowlist.includes('L"-kvm-uac-consent-trigger"') &&
-            !serviceMainSections.kvmProbeHostAllowlist.includes('L"-kvm-uac-consent-target"'),
+            !serviceMainSections.kvmProbeHostAllowlist.includes('L"-kvm-uac-consent-target"') &&
+            !serviceMainSections.kvmProbeHostDispatcher.includes('L"-kvm-uac-consent-trigger"') &&
+            !serviceMainSections.kvmProbeHostDispatcher.includes('L"-kvm-uac-consent-target"') &&
+            countOccurrences(sources.serviceMain, 'return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);') >= 9,
         serviceMainGenericTokenSpawnBlocked:
             !sources.serviceMain.includes('static BOOL MeshService_ResolveHostExecutablePathW') &&
             serviceMainSections.spawnExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&

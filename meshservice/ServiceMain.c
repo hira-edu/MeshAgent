@@ -2426,6 +2426,7 @@ static int MeshService_RunKvmUacConsentTriggerCommand(const WCHAR* reportPath, D
 	UNREFERENCED_PARAMETER(timeoutMs);
 	UNREFERENCED_PARAMETER(targetReportPath);
 	SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+
 	if (reportPath != NULL && reportPath[0] != L'\0')
 	{
 		fileErr = _wfopen_s(&file, reportPath, L"wb");
@@ -8612,16 +8613,11 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-uac-consent-trigger") == 0)
 	{
-		const WCHAR* reportPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		DWORD timeoutMs = (argc > 3) ? (DWORD)strtoul(argv[3], NULL, 10) : 15000;
-		const WCHAR* targetReportPath = (wideArgv != NULL && argc > 4) ? wideArgv[4] : NULL;
-		return MeshService_RunKvmUacConsentTriggerCommand(reportPath, timeoutMs, targetReportPath);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-uac-consent-target") == 0)
 	{
-		DWORD sleepMs = (argc > 2) ? (DWORD)strtoul(argv[2], NULL, 10) : 1000;
-		const WCHAR* reportPath = (wideArgv != NULL && argc > 3) ? wideArgv[3] : NULL;
-		return MeshService_RunKvmUacConsentTargetCommand(sleepMs, reportPath);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 #endif
 
