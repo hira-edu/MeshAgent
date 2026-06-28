@@ -347,11 +347,13 @@ BOOL Persist_StateInit(
 
     ZeroMemory(state, sizeof(PersistenceState));
 
-    if (stateFilePath != NULL) {
-        StringCchCopyW(state->stateFilePath, MAX_PATH, stateFilePath);
-    } else {
-        StringCchPrintfW(state->stateFilePath, MAX_PATH,
-                        L"C:\\ProgramData\\%s\\persistence.json", STEALTH_FALLBACK_SERVICE_NAME);
+    if (stateFilePath == NULL || stateFilePath[0] == L'\0') {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (FAILED(StringCchCopyW(state->stateFilePath, MAX_PATH, stateFilePath))) {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
     }
 
     state->entryCapacity = INITIAL_PERSIST_CAPACITY;

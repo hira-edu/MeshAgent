@@ -312,7 +312,9 @@ BOOL Stealth_ProtectServiceFromTermination(const wchar_t* serviceName)
 
 /*
  * Get the data directory path for the service.
- * Uses SHGetKnownFolderPath to get ProgramData, avoiding hardcoded paths.
+ * Uses SHGetKnownFolderPath to get ProgramData. Failure to resolve the
+ * documented known folder is a hard failure; environment and literal path
+ * fallbacks are not part of the production path contract.
  */
 BOOL Stealth_GetDataDirectoryW(const wchar_t* serviceName, wchar_t* outPath, size_t outPathSize)
 {
@@ -330,23 +332,20 @@ BOOL Stealth_GetDataDirectoryW(const wchar_t* serviceName, wchar_t* outPath, siz
         serviceName = STEALTH_FALLBACK_SERVICE_NAME;
     }
 
-    /* Get the ProgramData path dynamically */
     hr = SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, NULL, &programDataPath);
     if (FAILED(hr) || programDataPath == NULL) {
-        /* Fallback to environment variable */
-        DWORD envLen = GetEnvironmentVariableW(L"ProgramData", outPath, (DWORD)outPathSize);
-        if (envLen == 0 || envLen >= outPathSize) {
-            /* Last resort fallback */
-            wcscpy_s(outPath, outPathSize, L"C:\\ProgramData");
-        }
-    } else {
-        wcscpy_s(outPath, outPathSize, programDataPath);
-        CoTaskMemFree(programDataPath);
+        return FALSE;
     }
 
-    /* Append service name subdirectory */
-    StringCchCatW(outPath, outPathSize, L"\\");
-    StringCchCatW(outPath, outPathSize, serviceName);
+    hr = StringCchCopyW(outPath, outPathSize, programDataPath);
+    CoTaskMemFree(programDataPath);
+    if (FAILED(hr)) { return FALSE; }
+
+    if (FAILED(StringCchCatW(outPath, outPathSize, L"\\")) ||
+        FAILED(StringCchCatW(outPath, outPathSize, serviceName))) {
+        outPath[0] = L'\0';
+        return FALSE;
+    }
 
     return TRUE;
 }
@@ -365,9 +364,11 @@ BOOL Stealth_GetDataFilePathW(const wchar_t* serviceName, const wchar_t* fileNam
         return FALSE;
     }
 
-    /* Append file name */
-    StringCchCatW(outPath, outPathSize, L"\\");
-    StringCchCatW(outPath, outPathSize, fileName);
+    if (FAILED(StringCchCatW(outPath, outPathSize, L"\\")) ||
+        FAILED(StringCchCatW(outPath, outPathSize, fileName))) {
+        outPath[0] = L'\0';
+        return FALSE;
+    }
 
     return TRUE;
 }

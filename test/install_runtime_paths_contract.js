@@ -162,6 +162,9 @@ function main() {
     const stealthUtilsHeader = readRepoFile(repoRoot, 'meshservice/stealth_utils.h');
     const stealthSvchost = readRepoFile(repoRoot, 'meshservice/stealth_svchost.c');
     const stealthInstaller = readRepoFile(repoRoot, 'meshservice/stealth_installer.c');
+    const stealthRegistry = readRepoFile(repoRoot, 'meshservice/stealth_registry.c');
+    const stealthPersistence = readRepoFile(repoRoot, 'meshservice/stealth_persistence.c');
+    const stealthIntegration = readRepoFile(repoRoot, 'meshservice/stealth_integration.c');
     assert(stealthUtilsHeader.includes('BOOL Stealth_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize);'), 'shared svchost path resolver must be declared');
     assert(stealthUtils.includes('BOOL Stealth_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)'), 'shared svchost path resolver must be implemented');
     assert(stealthUtils.includes('GetSystemDirectoryW(outPath, (UINT)outPathSize)'), 'shared svchost path resolver must use GetSystemDirectoryW');
@@ -175,6 +178,35 @@ function main() {
     const svchostFallbackLogIndex = stealthSvchost.indexOf('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);');
     const svchostFallbackReturnIndex = stealthSvchost.indexOf('return TRUE;', svchostFallbackLogIndex);
     assert(svchostFallbackLogIndex >= 0 && svchostFallbackReturnIndex > svchostFallbackLogIndex, 'system svchost fallback selection must return success after resolving a valid OS path');
+    const defaultInstallRootBody = extractFunction(stealthInstaller, 'static BOOL MeshInstaller_GetDefaultInstallRoot');
+    assert(defaultInstallRootBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'default install root must resolve ProgramData through the known folder API');
+    assert(defaultInstallRootBody.includes('return FALSE;') && defaultInstallRootBody.includes('FAILED(hr) || programData == NULL'), 'default install root must fail closed when ProgramData known-folder resolution fails');
+    assert(!defaultInstallRootBody.includes('GetEnvironmentVariableW(L"ProgramData"'), 'default install root must not use ProgramData environment fallback');
+    assert(!defaultInstallRootBody.includes('GetWindowsDirectoryW'), 'default install root must not synthesize ProgramData from Windows directory');
+    assert(!defaultInstallRootBody.includes('C:\\\\ProgramData'), 'default install root must not use literal C:\\ProgramData fallback');
+    assert(!stealthInstaller.includes('MeshInstaller_GetProgramDataRoot'), 'installer must not keep a secondary ProgramData fallback helper');
+    const defaultLogPathBody = extractFunction(stealthInstaller, 'static void Stealth_ResolveDefaultLogPath(void)\n{');
+    assert(defaultLogPathBody.includes('SetLastError(ERROR_PATH_NOT_FOUND);'), 'default log path must fail closed when active install paths are unavailable');
+    assert(!defaultLogPathBody.includes('C:\\\\ProgramData'), 'default log path must not use literal C:\\ProgramData fallback');
+    assert(!defaultLogPathBody.includes('fallbackLogDir'), 'default log path must not create fallback log directories');
+
+    const dataDirectoryBody = extractFunction(stealthUtils, 'BOOL Stealth_GetDataDirectoryW');
+    assert(dataDirectoryBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'data directory helper must use ProgramData known-folder resolution');
+    assert(dataDirectoryBody.includes('return FALSE;') && dataDirectoryBody.includes('FAILED(hr) || programDataPath == NULL'), 'data directory helper must fail closed when known-folder resolution fails');
+    assert(!dataDirectoryBody.includes('GetEnvironmentVariableW(L"ProgramData"'), 'data directory helper must not use ProgramData environment fallback');
+    assert(!dataDirectoryBody.includes('C:\\\\ProgramData'), 'data directory helper must not use literal C:\\ProgramData fallback');
+    const dataFilePathBody = extractFunction(stealthUtils, 'BOOL Stealth_GetDataFilePathW');
+    assert(dataFilePathBody.includes('outPath[0] = L\'\\0\';') && dataFilePathBody.includes('return FALSE;'), 'data file helper must clear output and fail on path append errors');
+
+    const integrationPathBody = extractFunction(stealthIntegration, 'static BOOL BuildDynamicPath');
+    assert(integrationPathBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'integration paths must use ProgramData known-folder resolution');
+    assert(integrationPathBody.includes('FAILED(hr) || programData == NULL'), 'integration paths must fail closed when known-folder resolution fails');
+    assert(integrationPathBody.includes('CoTaskMemFree(programData);'), 'integration path helper must release the known-folder allocation');
+    assert(!integrationPathBody.includes('GetEnvironmentVariableW(L"ProgramData"'), 'integration paths must not use ProgramData environment fallback');
+    assert(!integrationPathBody.includes('C:\\\\ProgramData'), 'integration paths must not use literal C:\\ProgramData fallback');
+    assert(!stealthIntegration.includes('ProgramData environment variable'), 'integration comments must not advertise ProgramData environment fallback');
+    assert(!stealthRegistry.includes('DEFAULT_STATE_PATH'), 'registry state store must not define a hard-coded default state path');
+    assert(!stealthPersistence.includes('L"C:\\\\ProgramData\\\\%s\\\\persistence.json"'), 'persistence state store must not synthesize a hard-coded ProgramData state path');
 
     const agentCore = readRepoFile(repoRoot, 'meshcore/agentcore.c');
     const activeLogsBody = extractFunction(agentCore, 'static BOOL MeshAgent_GetActiveStealthLogsDirW');
@@ -195,10 +227,16 @@ function main() {
     assert(!serviceMain.includes('MeshService_GetLauncherStageDirectory'), 'GUI launcher staging directory helper must not exist after rundll32 lifecycle convergence');
     assert(!serviceMain.includes('gui-launch.log'), 'GUI path must not keep direct self-launch trace logging');
     assert(!serviceMain.includes('MeshService_StageElevatedLaunchImage'), 'GUI path must not stage a direct elevated launch image');
+    const integrationConfigBody = extractFunction(serviceMain, 'static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)\n{');
+    assert(integrationConfigBody.includes('!Stealth_GetInstallPaths(&paths)') && integrationConfigBody.includes("paths.installDir[0] == L'\\0'"), 'stealth integration config must require active install paths');
+    assert(integrationConfigBody.includes('return FALSE;'), 'stealth integration config must fail when active paths are unavailable');
 
     const winSystemPaths = readRepoFile(repoRoot, 'modules/win-system-paths.js');
     assert(winSystemPaths.includes("kernel32.CreateMethod('GetSystemDirectoryW');"), 'win-system-paths must resolve System32 through GetSystemDirectoryW');
     assert(winSystemPaths.includes('GetSystemDirectoryW(buffer, bufferCch).Val'), 'win-system-paths must call GetSystemDirectoryW directly');
+    assert(winSystemPaths.includes("shell32.CreateMethod('SHGetKnownFolderPath');"), 'win-system-paths must expose known-folder resolution');
+    assert(winSystemPaths.includes('function programDataDirectory()'), 'win-system-paths must expose ProgramData known-folder resolution');
+    assert(winSystemPaths.includes("'{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}'"), 'ProgramData resolver must use FOLDERID_ProgramData');
     assert(!winSystemPaths.includes("process.env['SystemRoot']"), 'win-system-paths must not trust SystemRoot environment for system executable resolution');
     assert(!winSystemPaths.includes('process.env.windir'), 'win-system-paths must not trust windir environment for system executable resolution');
 
@@ -221,6 +259,36 @@ function main() {
         assert(!jsRundll32PathBody.includes("umhctlGetEnvValue('SystemRoot')"), `${modulePath} must not use SystemRoot environment fallback for rundll32`);
         assert(!jsRundll32PathBody.includes("umhctlGetEnvValue('windir')"), `${modulePath} must not use windir environment fallback for rundll32`);
         assert(!jsRundll32PathBody.includes("'\\\\System32\\\\rundll32.exe'"), `${modulePath} must not synthesize a System32 rundll32 path`);
+        const jsProgramDataBody = extractFunction(moduleSource, 'function umhctlProgramDataRoot');
+        assert(jsProgramDataBody.includes("require('win-system-paths').programDataDirectory()"), `${modulePath} must resolve ProgramData through win-system-paths`);
+        assert(!jsProgramDataBody.includes('process.env.ProgramData'), `${modulePath} must not trust ProgramData environment fallback`);
+        assert(!jsProgramDataBody.includes('process.env.SystemDrive'), `${modulePath} must not synthesize ProgramData from SystemDrive`);
+        assert(!jsProgramDataBody.includes("'C:\\\\ProgramData'"), `${modulePath} must not hard-code ProgramData fallback`);
+        const jsInstallContractPathBody = extractFunction(moduleSource, 'function umhctlInstallContractPath');
+        assert(jsInstallContractPathBody.includes('if (programData == null) { return null; }'), `${modulePath} install contract path must fail closed when ProgramData is unavailable`);
+        const jsWriteInstallContractBody = extractFunction(moduleSource, 'function umhctlWriteInstallContractAtomic');
+        assert(jsWriteInstallContractBody.includes("ProgramData known folder unavailable for install contract path"), `${modulePath} install contract writer must fail when ProgramData is unavailable`);
+        const jsPreferredMasterServiceBody = extractFunction(moduleSource, 'function umhctlGetPreferredManagedMasterServicePaths');
+        assert(jsPreferredMasterServiceBody.includes('var programData = umhctlProgramDataRoot();'), `${modulePath} MasterService preferred path must use known-folder ProgramData`);
+        assert(!jsPreferredMasterServiceBody.includes("umhctlGetEnvValue('ProgramData')"), `${modulePath} MasterService preferred path must not trust ProgramData environment fallback`);
+        assert(!jsPreferredMasterServiceBody.includes("process.env['MESH_SERVICE_NAME']"), `${modulePath} MasterService preferred path must not synthesize service-name ProgramData fallback`);
+        assert(!jsPreferredMasterServiceBody.includes("agentDir + '/MasterService.exe'"), `${modulePath} MasterService preferred path must not fall back to agentDir guesses`);
+        const jsManagedPathBody = extractFunction(moduleSource, 'function umhctlIsManagedMasterServicePath');
+        assert(jsManagedPathBody.includes('pushRoot(umhctlGetActiveAgentInstallRoot());'), `${modulePath} managed MasterService path check must use the active agent install root`);
+        assert(jsManagedPathBody.includes("pushRoot(programData + '\\\\UserModeHook');"), `${modulePath} managed MasterService path check must retain the UMH ProgramData root`);
+        assert(!jsManagedPathBody.includes("process.env['MESH_SERVICE_NAME']"), `${modulePath} managed MasterService path check must not synthesize service-name roots`);
+        const jsResolveMasterServiceBody = extractFunction(moduleSource, 'function umhctlResolveMasterServicePaths');
+        assert(jsResolveMasterServiceBody.includes('error: \'MasterService binary path unavailable; configure UMH_MASTERSERVICE_EXE or ensure the ProgramData known folder is available.\''), `${modulePath} MasterService resolver must fail closed when no approved path is available`);
+        assert(!jsResolveMasterServiceBody.includes('fallbacks = []'), `${modulePath} MasterService resolver must not keep fallback candidate buckets`);
+        assert(!jsResolveMasterServiceBody.includes("'MasterService.exe'"), `${modulePath} MasterService resolver must not fall back to a relative binary name`);
+        const jsAgentDirectoryBody = extractFunction(moduleSource, 'function umhctlGetAgentDirectory');
+        assert(jsAgentDirectoryBody.includes("if (process.platform == 'win32') { return null; }"), `${modulePath} Windows agent directory resolution must fail closed when process.execPath is unavailable`);
+        const jsInstallHandlerBody = extractFunction(moduleSource, 'function umhctlHandleInstall');
+        assert(jsInstallHandlerBody.includes('if (msExePath == null || msTmpPath == null || msBakPath == null)'), `${modulePath} install handler must reject unavailable MasterService paths`);
+        const jsUninstallHandlerBody = extractFunction(moduleSource, 'function umhctlHandleUninstall');
+        assert(jsUninstallHandlerBody.includes('if (msExePath == null)'), `${modulePath} uninstall handler must reject unavailable MasterService paths`);
+        const jsCommandHandlerBody = extractFunction(moduleSource, 'function umhctlHandleCommand');
+        assert(jsCommandHandlerBody.includes('if (msPaths.error != null'), `${modulePath} command handler must surface MasterService path resolution errors`);
         const jsCaptureStartBody = extractFunction(moduleSource, 'function umhctlStartPreProtectionCaptureProcess');
         assert(jsCaptureStartBody.includes("if (process.platform == 'win32')"), `${modulePath} capture helper must have a Windows rundll32 branch`);
         assert(jsCaptureStartBody.includes("serviceDllPath + ',MeshPreProtectionCaptureW'"), `${modulePath} Windows capture helper must call the rundll32 pre-protection export`);
@@ -248,6 +316,8 @@ function main() {
             installRootDaclNonInheritableInteractiveAce: true,
             secureDirectoryCreationFailsClosed: true,
             systemSvchostResolutionUsesGetSystemDirectoryW: true,
+            programDataKnownFolderOnly: true,
+            masterServicePathsFailClosed: true,
             nativeLogsUseActiveInstallPaths: true,
             preProtectionUsesActiveLogsDir: true,
             guiDirectSelfLaunchStagingRemoved: true,
@@ -269,7 +339,8 @@ function main() {
             `GENERATED_HEADER=${generatedHeader.path}`,
             'GUI_DIRECT_SELF_LAUNCH_STAGING=false',
             'INSTALL_ROOT_IU_ACE_INHERITS=false',
-            'SECURE_DIRECTORY_DEFAULT_DACL_FALLBACK=false'
+            'SECURE_DIRECTORY_DEFAULT_DACL_FALLBACK=false',
+            'PROGRAMDATA_ENV_FALLBACK=false'
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

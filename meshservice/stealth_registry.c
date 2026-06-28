@@ -16,9 +16,6 @@
 
 #pragma comment(lib, "advapi32.lib")
 
-/* Default state file path — uses generic fallback from stealth_defaults.h */
-#define DEFAULT_STATE_PATH L"C:\\ProgramData\\" STEALTH_FALLBACK_SERVICE_NAME L"\\state.json"
-
 /* Initial capacity for state store */
 #define INITIAL_ENTRY_CAPACITY 64
 
@@ -46,10 +43,13 @@ BOOL RegState_Init(RegStateStore* store, const WCHAR* stateFilePath)
 
     ZeroMemory(store, sizeof(RegStateStore));
 
-    if (stateFilePath != NULL) {
-        StringCchCopyW(store->stateFilePath, MAX_PATH, stateFilePath);
-    } else {
-        StringCchCopyW(store->stateFilePath, MAX_PATH, DEFAULT_STATE_PATH);
+    if (stateFilePath == NULL || stateFilePath[0] == L'\0') {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (FAILED(StringCchCopyW(store->stateFilePath, MAX_PATH, stateFilePath))) {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
     }
 
     /* Allocate initial entry array */

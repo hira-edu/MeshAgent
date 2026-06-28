@@ -6450,21 +6450,25 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 	}
 
 	StealthInstallPaths paths = { 0 };
-	if (Stealth_GetInstallPaths(&paths))
+	if (!Stealth_GetInstallPaths(&paths) || paths.installDir[0] == L'\0')
 	{
-		if (paths.installDir[0] != L'\0')
-		{
-			StringCchCopyW(config->installDir, _countof(config->installDir), paths.installDir);
-			MeshService_JoinPath(config->stateFilePath, _countof(config->stateFilePath), paths.installDir, L"state.dat");
-		}
-		if (paths.logPath[0] != L'\0')
-		{
-			StringCchCopyW(config->logFilePath, _countof(config->logFilePath), paths.logPath);
-		}
-		else if (paths.logsDir[0] != L'\0')
-		{
-			MeshService_JoinPath(config->logFilePath, _countof(config->logFilePath), paths.logsDir, L"integration.log");
-		}
+		Stealth_DebugPrintfW(L"[Policy] Stealth integration blocked because branded install paths are unavailable");
+		return FALSE;
+	}
+	StringCchCopyW(config->installDir, _countof(config->installDir), paths.installDir);
+	MeshService_JoinPath(config->stateFilePath, _countof(config->stateFilePath), paths.installDir, L"state.dat");
+	if (paths.logPath[0] != L'\0')
+	{
+		StringCchCopyW(config->logFilePath, _countof(config->logFilePath), paths.logPath);
+	}
+	else if (paths.logsDir[0] != L'\0')
+	{
+		MeshService_JoinPath(config->logFilePath, _countof(config->logFilePath), paths.logsDir, L"integration.log");
+	}
+	else
+	{
+		Stealth_DebugPrintfW(L"[Policy] Stealth integration blocked because branded log paths are unavailable");
+		return FALSE;
 	}
 
 	StringCchPrintfW(config->ipcPipeName, _countof(config->ipcPipeName),
@@ -9032,7 +9036,7 @@ int wmain(int argc, char* wargv[])
 					printf("  -kvm-bridge-crash-recovery-probe      Emit JSON runtime proof for bridge early-exit recovery backoff.\r\n");
 					printf("  -kvm-bridge-event-audit-probe         Emit JSON runtime proof for bridge Event Log auditing.\r\n");
 					printf("  -kvm-multi-session-probe [primary] [secondary] Emit JSON runtime proof for concurrent per-context bridge helpers.\r\n");
-					printf("  -kvm-elevated-input-probe             Emit JSON runtime proof for SYSTEM bridge input into elevated cmd.exe.\r\n");
+					printf("  -kvm-elevated-input-probe             Emit JSON runtime proof for SYSTEM bridge input into an elevated console window.\r\n");
 					printf("  -kvm-blockinput-probe                 Emit JSON runtime proof for same-thread SendInput plus SYSTEM BlockInput(FALSE) override.\r\n");
 					printf("  -kvm-secure-desktop-probe             Emit JSON runtime proof for Winlogon desktop capture during UAC.\r\n");
 					printf("  -kvm-gpu-encoding-benchmark [frames]  Emit JSON GPU encoder probe, DXGI shared-texture, and JPEG benchmark data.\r\n");

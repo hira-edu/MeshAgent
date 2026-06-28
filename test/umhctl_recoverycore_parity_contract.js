@@ -49,6 +49,25 @@ function hasAll(source, tokens) {
     return tokens.every((token) => source.includes(token));
 }
 
+function extractFunction(source, signature) {
+    const start = source.indexOf(signature);
+    assert(start >= 0, `missing function signature: ${signature}`);
+    const open = source.indexOf('{', start);
+    assert(open >= 0, `missing function body: ${signature}`);
+    let depth = 0;
+    for (let i = open; i < source.length; ++i) {
+        if (source[i] === '{') {
+            depth += 1;
+        } else if (source[i] === '}') {
+            depth -= 1;
+            if (depth === 0) {
+                return source.substring(start, i + 1);
+            }
+        }
+    }
+    throw new Error(`unterminated function body: ${signature}`);
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
@@ -85,6 +104,39 @@ function main() {
         recoveryCoreAcceptsZeroExitWithoutFailureJson: sandbox.umhctlMasterServiceCommandSucceeded(0, '{"success":true}') === true,
         recoveryCoreFailureDetailUsesJsonMessage: sandbox.umhctlMasterServiceCommandFailureDetail('{"success":false,"message":"native failed"}') === 'native failed'
     };
+
+    for (const [label, source] of [['RecoveryCore', recoveryCore], ['umhctl', umhctl]]) {
+        const preferredBody = extractFunction(source, 'function umhctlGetPreferredManagedMasterServicePaths');
+        const managedPathBody = extractFunction(source, 'function umhctlIsManagedMasterServicePath');
+        const resolveBody = extractFunction(source, 'function umhctlResolveMasterServicePaths');
+        const agentDirBody = extractFunction(source, 'function umhctlGetAgentDirectory');
+        const handleCommandBody = extractFunction(source, 'function umhctlHandleCommand');
+        checks[`${label}UsesKnownFolderUmhRoot`] =
+            preferredBody.includes('umhctlProgramDataRoot()') &&
+            preferredBody.includes("programData + '\\\\UserModeHook\\\\MasterService.exe'");
+        checks[`${label}DoesNotUseProgramDataEnvForUmhRoot`] =
+            !preferredBody.includes("umhctlGetEnvValue('ProgramData')") &&
+            !managedPathBody.includes("umhctlGetEnvValue('ProgramData')") &&
+            !preferredBody.includes("process.env['MESH_SERVICE_NAME']");
+        checks[`${label}DoesNotStageMasterServiceBesideAgent`] =
+            !preferredBody.includes("agentDir + '/MasterService.exe'") &&
+            !resolveBody.includes("agentDir + '/MasterService.exe'") &&
+            !resolveBody.includes(": 'MasterService.exe'");
+        checks[`${label}DoesNotSelectArbitraryServiceImagePath`] =
+            !resolveBody.includes('var fallbacks') &&
+            !resolveBody.includes('pushFallback') &&
+            !resolveBody.includes('fallbackSeen') &&
+            resolveBody.includes('umhctlIsManagedMasterServicePath(imagePath, agentDir)') &&
+            !resolveBody.includes('selected = (typeof agentDir');
+        checks[`${label}PreservesManagedCleanupRoots`] =
+            managedPathBody.includes("pushRoot(programData + '\\\\UserModeHook');") &&
+            managedPathBody.includes('pushRoot(umhctlGetActiveAgentInstallRoot());') &&
+            managedPathBody.includes('pushRoot(agentDir);');
+        checks[`${label}FailsClosedWhenMasterServicePathUnavailable`] =
+            resolveBody.includes('MasterService binary path unavailable') &&
+            agentDirBody.includes("if (process.platform == 'win32') { return null; }") &&
+            handleCommandBody.includes('msPaths.error != null');
+    }
 
     for (const [name, passed] of Object.entries(checks)) {
         assert(passed, `UMH parity contract failed: ${name}`);

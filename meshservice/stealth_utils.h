@@ -42,7 +42,7 @@ BOOL Stealth_ProtectServiceFromTermination(const wchar_t* serviceName);
 /*
  * Process protection - protects the PROCESS from TerminateProcess() calls.
  * CRITICAL: This is different from Stealth_ProtectServiceFromTermination()!
- * - Stealth_ProtectServiceFromTermination() = blocks sc.exe stop, Stop-Service, etc.
+ * - Stealth_ProtectServiceFromTermination() = blocks SCM stop requests.
  * - Stealth_ProtectCurrentProcess() = blocks Task Manager kill, TerminateProcess(), etc.
  */
 BOOL Stealth_ProtectCurrentProcess(void);

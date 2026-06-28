@@ -34,6 +34,10 @@
 #define IDR_SVCHOST_DLL 101
 #endif
 
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
+
 static void MeshInstaller_NormalizePathSeparators(wchar_t* path)
 {
     if (path == NULL) { return; }
@@ -51,29 +55,14 @@ static BOOL MeshInstaller_GetDefaultInstallRoot(wchar_t* buffer, size_t count)
     if (buffer == NULL || count == 0) { return FALSE; }
     PWSTR programData = NULL;
     HRESULT hr = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, NULL, &programData);
-    BOOL resolved = FALSE;
-    if (SUCCEEDED(hr) && programData != NULL)
+    if (FAILED(hr) || programData == NULL)
     {
-        resolved = SUCCEEDED(StringCchCopyW(buffer, count, programData));
-        CoTaskMemFree(programData);
+        return FALSE;
     }
 
-    if (!resolved)
-    {
-        DWORD envLen = GetEnvironmentVariableW(L"ProgramData", buffer, (DWORD)count);
-        resolved = (envLen > 0 && envLen < count);
-    }
-
-    if (!resolved)
-    {
-        WCHAR windowsDir[MAX_PATH] = {0};
-        UINT wlen = GetWindowsDirectoryW(windowsDir, MAX_PATH);
-        if (wlen == 0 || wlen >= MAX_PATH) { return FALSE; }
-        if (FAILED(StringCchPrintfW(buffer, count, L"%s\\ProgramData", windowsDir))) { return FALSE; }
-        resolved = TRUE;
-    }
-
-    if (!resolved) { return FALSE; }
+    hr = StringCchCopyW(buffer, count, programData);
+    CoTaskMemFree(programData);
+    if (FAILED(hr)) { return FALSE; }
 
     MeshInstaller_NormalizePathSeparators(buffer);
     size_t len = wcslen(buffer);
@@ -82,38 +71,6 @@ static BOOL MeshInstaller_GetDefaultInstallRoot(wchar_t* buffer, size_t count)
         if (FAILED(StringCchCatW(buffer, count, L"\\"))) { return FALSE; }
     }
     if (FAILED(StringCchCatW(buffer, count, STEALTH_FALLBACK_SERVICE_NAME))) { return FALSE; }
-    return TRUE;
-}
-
-static BOOL MeshInstaller_GetProgramDataRoot(wchar_t* buffer, size_t count)
-{
-    if (buffer == NULL || count == 0) { return FALSE; }
-    PWSTR programData = NULL;
-    HRESULT hr = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, NULL, &programData);
-    BOOL resolved = FALSE;
-    if (SUCCEEDED(hr) && programData != NULL)
-    {
-        resolved = SUCCEEDED(StringCchCopyW(buffer, count, programData));
-        CoTaskMemFree(programData);
-    }
-
-    if (!resolved)
-    {
-        DWORD envLen = GetEnvironmentVariableW(L"ProgramData", buffer, (DWORD)count);
-        resolved = (envLen > 0 && envLen < count);
-    }
-
-    if (!resolved)
-    {
-        WCHAR windowsDir[MAX_PATH] = {0};
-        UINT wlen = GetWindowsDirectoryW(windowsDir, MAX_PATH);
-        if (wlen == 0 || wlen >= MAX_PATH) { return FALSE; }
-        if (FAILED(StringCchPrintfW(buffer, count, L"%s\\ProgramData", windowsDir))) { return FALSE; }
-        resolved = TRUE;
-    }
-
-    if (!resolved) { return FALSE; }
-    MeshInstaller_NormalizePathSeparators(buffer);
     return TRUE;
 }
 
@@ -432,8 +389,6 @@ BOOL Stealth_LoadPersistenceState(StealthPersistenceState* state);
 BOOL Stealth_SavePersistenceState(const StealthPersistenceState* state);
 void Stealth_ClearPersistenceState(void);
 static BOOL Stealth_GetPersistenceStateDirectory(wchar_t* buffer, size_t bufferCch);
-void Stealth_RecordPersistenceTask(StealthPersistenceState* state, const wchar_t* taskPath, BOOL isRestartTask);
-void Stealth_RecordPersistenceWmi(StealthPersistenceState* state, const wchar_t* filterName, const wchar_t* consumerName);
 
 // Implementation of Stealth_UpdatePersistenceStatePath (after globals)
 static void Stealth_UpdatePersistenceStatePath(const wchar_t* installRoot)
@@ -1280,32 +1235,6 @@ void Stealth_ClearPersistenceState(void)
     DeleteFileW(g_PersistenceStatePath);
 }
 
-void Stealth_RecordPersistenceTask(StealthPersistenceState* state, const wchar_t* taskPath, BOOL isRestartTask)
-{
-    if (state == NULL || taskPath == NULL) { return; }
-    if (isRestartTask)
-    {
-        wcsncpy_s(state->RestartTask, _countof(state->RestartTask), taskPath, _TRUNCATE);
-    }
-    else
-    {
-        wcsncpy_s(state->AutorunTask, _countof(state->AutorunTask), taskPath, _TRUNCATE);
-    }
-}
-
-void Stealth_RecordPersistenceWmi(StealthPersistenceState* state, const wchar_t* filterName, const wchar_t* consumerName)
-{
-    if (state == NULL) { return; }
-    if (filterName != NULL)
-    {
-        wcsncpy_s(state->WmiFilter, _countof(state->WmiFilter), filterName, _TRUNCATE);
-    }
-    if (consumerName != NULL)
-    {
-        wcsncpy_s(state->WmiConsumer, _countof(state->WmiConsumer), consumerName, _TRUNCATE);
-    }
-}
-
 static BOOL Stealth_RemoveFileIfExists(const wchar_t* path, BOOL logOnFailure)
 {
     if (path == NULL || path[0] == L'\0') { return TRUE; }
@@ -1757,16 +1686,7 @@ static void Stealth_ResolveDefaultLogPath(void)
         }
     }
 
-    if (!g_HaveInstallLogPath)
-    {
-        StringCchPrintfW(g_InstallLogPath, _countof(g_InstallLogPath), L"C:\\ProgramData\\%s\\logs\\installer.log", STEALTH_FALLBACK_SERVICE_NAME);
-        {
-            wchar_t fallbackLogDir[MAX_PATH];
-            StringCchPrintfW(fallbackLogDir, _countof(fallbackLogDir), L"C:\\ProgramData\\%s\\logs", STEALTH_FALLBACK_SERVICE_NAME);
-            Stealth_CreateInstallationDirectory(fallbackLogDir);
-        }
-        g_HaveInstallLogPath = TRUE;
-    }
+    if (!g_HaveInstallLogPath) { SetLastError(ERROR_PATH_NOT_FOUND); }
 }
 
 static void Stealth_ImportWinHttpProxyFromIeBestEffort(void)
@@ -6500,31 +6420,9 @@ static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persist
         return;
     }
 
-    HKEY hKey;
-    const wchar_t* runKey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, runKey, 0, NULL, 0, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS)
-    {
-        wchar_t cmd[MAX_PATH];
-        if (GetSystemDirectoryW(cmd, MAX_PATH) > 0)
-        {
-            size_t len = wcslen(cmd);
-            if (len < MAX_PATH - 1) { wcscat_s(cmd, MAX_PATH, L"\\sc.exe"); }
-        }
-        else
-        {
-            wcscpy_s(cmd, MAX_PATH, L"sc.exe");
-        }
-        wchar_t value[256];
-        StringCchPrintfW(value, 256, L"\"%s\" start %s", cmd, serviceName);
-        RegSetValueExW(hKey, serviceName, 0, REG_SZ, (const BYTE*)value, (DWORD)((wcslen(value) + 1) * sizeof(wchar_t)));
-        RegCloseKey(hKey);
-        Stealth_LogInstallEvent(L"Configured Run key for %ls", serviceName);
-    }
-    else
-    {
-        Stealth_DebugLastErrorW(L"RegCreateKeyExW (RunKey)");
-        Stealth_LogInstallEvent(L"Failed to configure Run key for %ls", serviceName);
-    }
+    Stealth_RemoveRunKeyEntry(serviceName);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_LogInstallEvent(L"Run key persistence blocked by rundll32-only lifecycle policy for %ls", serviceName);
 }
 
 static void Stealth_RemoveRunKeyEntry(const wchar_t* serviceName)
@@ -6892,234 +6790,70 @@ static void Stealth_RemoveScheduledTasks(const mesh_persistence_profile_t* persi
 
 static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)
 {
+    UNREFERENCED_PARAMETER(refreshExisting);
+
     if (persistence == NULL || persistence->autorunTask.enabled == 0 || serviceName == NULL || serviceName[0] == L'\0')
     {
         Stealth_LogInstallEvent(L"Autorun scheduled task disabled");
         return;
     }
 
-    wchar_t taskHint[STEALTH_TASK_NAME_MAX] = {0};
-    MeshService_CopyBrandingTextToWide(persistence->autorunTask.taskName, taskHint, _countof(taskHint));
-
-    wchar_t taskPrefix[STEALTH_TASK_NAME_MAX] = {0};
-    Stealth_BuildTaskPrefixFromHint(taskHint, serviceName, taskPrefix, _countof(taskPrefix));
-
-    wchar_t diagnosticsPrefix[STEALTH_TASK_NAME_MAX] = {0};
-    StringCchPrintfW(diagnosticsPrefix, _countof(diagnosticsPrefix), L"%s-", taskPrefix);
-
-    wchar_t trigger[64] = {0};
-    MeshService_CopyBrandingTextToWide(persistence->autorunTask.trigger, trigger, _countof(trigger));
-    if (trigger[0] == L'\0')
-    {
-        StringCchCopyW(trigger, _countof(trigger), L"ONLOGON");
-    }
-    Stealth_ToUppercase(trigger);
-
     StealthPersistenceState state = {0};
-    BOOL haveState = Stealth_LoadPersistenceState(&state);
-
-    if (haveState && state.AutorunTask[0] != L'\0')
+    if (Stealth_LoadPersistenceState(&state) && state.AutorunTask[0] != L'\0')
     {
-        if (StealthResilience_TaskExists(state.AutorunTask))
+        Stealth_RemoveScheduledTaskByName(state.AutorunTask, L"rundll32-only autorun task cleanup");
+        state.AutorunTask[0] = L'\0';
+        if (state.RestartTask[0] == L'\0' && state.WmiFilter[0] == L'\0' && state.WmiConsumer[0] == L'\0')
         {
-            Stealth_LogInstallEvent(L"Scheduled autorun task already present (%ls)", state.AutorunTask);
-            return;
+            Stealth_ClearPersistenceState();
         }
-        else if (refreshExisting)
+        else
         {
-            Stealth_LogInstallEvent(L"Removing stale autorun task reference (%ls)", state.AutorunTask);
-            StealthResilience_DeleteTask(state.AutorunTask);
-            state.AutorunTask[0] = L'\0';
             Stealth_SavePersistenceState(&state);
         }
     }
 
-    if (state.AutorunTask[0] == L'\0')
-    {
-        wchar_t existingTask[STEALTH_TASK_NAME_MAX] = {0};
-        if (StealthResilience_FindTaskByPrefix(diagnosticsPrefix, L"-Autorun-", existingTask, _countof(existingTask)))
-        {
-            Stealth_LogInstallEvent(L"Scheduled autorun task already present (%ls)", existingTask);
-            Stealth_RecordPersistenceTask(&state, existingTask, FALSE);
-            Stealth_SavePersistenceState(&state);
-            return;
-        }
-    }
-
-    wchar_t createdTaskPath[STEALTH_TASK_NAME_MAX] = {0};
-    if (StealthResilience_CreateAutorunTask(
-            serviceName,
-            taskHint,
-            trigger,
-            (persistence->autorunTask.hidden ? TRUE : FALSE),
-            createdTaskPath,
-            _countof(createdTaskPath)))
-    {
-        Stealth_LogInstallEvent(L"Scheduled autorun task %ls", createdTaskPath);
-        Stealth_RecordPersistenceTask(&state, createdTaskPath, FALSE);
-        Stealth_SavePersistenceState(&state);
-    }
-    else
-    {
-        Stealth_LogInstallEvent(L"[WARN] Failed to schedule autorun task for %ls", serviceName);
-    }
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_LogInstallEvent(L"Autorun scheduled task persistence blocked by rundll32-only lifecycle policy for %ls", serviceName);
 }
 
 static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)
 {
+    UNREFERENCED_PARAMETER(refreshExisting);
+
     if (persistence == NULL || persistence->restartTask.enabled == 0 || serviceName == NULL || serviceName[0] == L'\0')
     {
         Stealth_LogInstallEvent(L"Restart-on-stop persistence disabled");
         return;
     }
 
-    wchar_t restartHint[STEALTH_TASK_NAME_MAX] = {0};
-    MeshService_CopyBrandingTextToWide(persistence->restartTask.taskName, restartHint, _countof(restartHint));
-
-    wchar_t taskPrefix[STEALTH_TASK_NAME_MAX] = {0};
-    Stealth_BuildTaskPrefixFromHint(restartHint, serviceName, taskPrefix, _countof(taskPrefix));
-
-    wchar_t diagnosticsPrefix[STEALTH_TASK_NAME_MAX] = {0};
-    StringCchPrintfW(diagnosticsPrefix, _countof(diagnosticsPrefix), L"%s-", taskPrefix);
-
-    wchar_t wmiClass[128] = {0};
-    wchar_t wmiMethod[128] = {0};
-    wchar_t wmiNamespace[128] = {0};
-
-    MeshService_CopyBrandingTextToWide(persistence->restartTask.wmiClass, wmiClass, _countof(wmiClass));
-    MeshService_CopyBrandingTextToWide(persistence->restartTask.wmiMethod, wmiMethod, _countof(wmiMethod));
-    MeshService_CopyBrandingTextToWide(persistence->restartTask.wmiNamespace, wmiNamespace, _countof(wmiNamespace));
-
-    wchar_t wmiPrefix[STEALTH_TASK_NAME_MAX] = {0};
-    Stealth_BuildTaskPrefixFromHint(wmiClass, serviceName, wmiPrefix, _countof(wmiPrefix));
-
-    wchar_t filterPrefix[256] = {0};
-    wchar_t consumerPrefix[256] = {0};
-    StringCchPrintfW(filterPrefix, _countof(filterPrefix), L"%s_StopFilter_", wmiPrefix);
-    StringCchPrintfW(consumerPrefix, _countof(consumerPrefix), L"%s_RestartConsumer_", wmiPrefix);
-
     StealthPersistenceState state = {0};
-    BOOL haveState = Stealth_LoadPersistenceState(&state);
-
-    BOOL restartTaskHealthy = FALSE;
-    BOOL wmiHealthy = FALSE;
-
-    if (haveState)
+    if (Stealth_LoadPersistenceState(&state))
     {
         if (state.RestartTask[0] != L'\0')
         {
-            restartTaskHealthy = StealthResilience_TaskExists(state.RestartTask);
-            if (restartTaskHealthy)
-            {
-                Stealth_LogInstallEvent(L"Restart-on-stop task already present (%ls)", state.RestartTask);
-            }
-            else if (refreshExisting)
-            {
-                Stealth_LogInstallEvent(L"Removing stale restart task reference (%ls)", state.RestartTask);
-                StealthResilience_DeleteTask(state.RestartTask);
-                state.RestartTask[0] = L'\0';
-                Stealth_SavePersistenceState(&state);
-            }
+            Stealth_RemoveScheduledTaskByName(state.RestartTask, L"rundll32-only restart task cleanup");
+            state.RestartTask[0] = L'\0';
         }
-        if (!restartTaskHealthy && (state.WmiFilter[0] != L'\0' || state.WmiConsumer[0] != L'\0'))
+        if (state.WmiFilter[0] != L'\0' || state.WmiConsumer[0] != L'\0')
         {
-            wmiHealthy = StealthResilience_WmiSubscriptionExists(state.WmiFilter, state.WmiConsumer);
-            if (wmiHealthy)
-            {
-                Stealth_LogInstallEvent(L"WMI restart subscription already present (%ls/%ls)", state.WmiFilter, state.WmiConsumer);
-            }
-            else if (refreshExisting)
-            {
-                Stealth_LogInstallEvent(L"Removing stale WMI subscription (%ls/%ls)", state.WmiFilter, state.WmiConsumer);
-                StealthResilience_RemoveWmiSubscription(state.WmiFilter, state.WmiConsumer);
-                state.WmiFilter[0] = L'\0';
-                state.WmiConsumer[0] = L'\0';
-                Stealth_SavePersistenceState(&state);
-            }
+            Stealth_LogInstallEvent(L"Removing WMI restart subscription blocked by rundll32-only policy (%ls/%ls)", state.WmiFilter, state.WmiConsumer);
+            StealthResilience_RemoveWmiSubscription(state.WmiFilter, state.WmiConsumer);
+            state.WmiFilter[0] = L'\0';
+            state.WmiConsumer[0] = L'\0';
         }
-    }
-
-    if (!restartTaskHealthy)
-    {
-        wchar_t existingRestart[STEALTH_TASK_NAME_MAX] = {0};
-        if (StealthResilience_FindTaskByPrefix(diagnosticsPrefix, L"-RestartOnStop-", existingRestart, _countof(existingRestart)))
+        if (state.AutorunTask[0] == L'\0' && state.RestartTask[0] == L'\0' && state.WmiFilter[0] == L'\0' && state.WmiConsumer[0] == L'\0')
         {
-            Stealth_LogInstallEvent(L"Restart-on-stop task already present (%ls)", existingRestart);
-            Stealth_RecordPersistenceTask(&state, existingRestart, TRUE);
-            Stealth_SavePersistenceState(&state);
-            restartTaskHealthy = TRUE;
-        }
-    }
-
-    if (!restartTaskHealthy && !wmiHealthy)
-    {
-        wchar_t existingFilter[128] = {0};
-        wchar_t existingConsumer[128] = {0};
-        if (StealthResilience_FindWmiSubscriptionsByPrefix(
-                filterPrefix,
-                consumerPrefix,
-                existingFilter,
-                _countof(existingFilter),
-                existingConsumer,
-                _countof(existingConsumer)))
-        {
-            Stealth_LogInstallEvent(L"WMI restart subscription already present (%ls/%ls)", existingFilter, existingConsumer);
-            Stealth_RecordPersistenceWmi(&state, existingFilter, existingConsumer);
-            Stealth_SavePersistenceState(&state);
-            wmiHealthy = TRUE;
-        }
-    }
-
-    wchar_t xPath[1024] = {0};
-    Stealth_FormatServiceStopXPath(serviceName, xPath, _countof(xPath));
-
-    if (!restartTaskHealthy)
-    {
-        wchar_t createdTaskPath[STEALTH_TASK_NAME_MAX] = {0};
-        if (StealthResilience_CreateRestartTask(
-                serviceName,
-                restartHint,
-                xPath,
-                TRUE,
-                createdTaskPath,
-                _countof(createdTaskPath)))
-        {
-            Stealth_LogInstallEvent(L"Scheduled restart-on-stop task %ls", createdTaskPath);
-            Stealth_RecordPersistenceTask(&state, createdTaskPath, TRUE);
-            Stealth_SavePersistenceState(&state);
-            restartTaskHealthy = TRUE;
+            Stealth_ClearPersistenceState();
         }
         else
         {
-            Stealth_LogInstallEvent(L"[WARN] Failed to schedule restart-on-stop task for %ls", serviceName);
+            Stealth_SavePersistenceState(&state);
         }
     }
 
-    // Keep install/update bounded-time: only attempt WMI registration if task-based
-    // restart persistence is not healthy. Task persistence satisfies validation gates.
-    if (!wmiHealthy && !restartTaskHealthy)
-    {
-        wchar_t wmiFilter[128] = {0};
-        wchar_t wmiConsumer[128] = {0};
-        if (StealthResilience_CreateWmiRestartSubscription(
-                serviceName,
-                wmiClass,
-                wmiMethod,
-                wmiNamespace,
-                wmiFilter,
-                _countof(wmiFilter),
-                wmiConsumer,
-                _countof(wmiConsumer)))
-        {
-            Stealth_LogInstallEvent(L"Registered WMI restart consumer (Filter=%ls Consumer=%ls)", wmiFilter, wmiConsumer);
-            Stealth_RecordPersistenceWmi(&state, wmiFilter, wmiConsumer);
-            Stealth_SavePersistenceState(&state);
-        }
-        else
-        {
-            Stealth_LogInstallEvent(L"[WARN] Failed to register WMI restart consumer for %ls", serviceName);
-        }
-    }
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_LogInstallEvent(L"Restart-on-stop task/WMI persistence blocked by rundll32-only lifecycle policy for %ls", serviceName);
 }
 
 static void Stealth_TrimWhitespaceInplace(wchar_t* value)

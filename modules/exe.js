@@ -21,7 +21,7 @@ limitations under the License.
 //
 // For example:
 // 
-//   MeshAgent.exe -omeshcmd.exe -imodule1.js -xMeshService64.exe meshcmd.js
+//   MeshAgent.exe -oagent-tool.exe -imodule1.js -xMeshService64.exe entry.js
 //
 
 var fs = require('fs');

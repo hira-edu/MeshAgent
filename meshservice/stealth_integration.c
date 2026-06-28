@@ -15,7 +15,13 @@
 #include "stealth_registry.h"
 #include "stealth_defaults.h"
 #include <stdio.h>
+#include <strsafe.h>
 #include <wtsapi32.h>
+#include <shlobj.h>
+#include <knownfolders.h>
+
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ole32.lib")
 
 /* WTS session change constants (in case not defined) */
 #ifndef WTS_CONSOLE_CONNECT
@@ -47,23 +53,31 @@ static void MonitorTamperHandler(const MonitorItem* item, const WCHAR* currentVa
 static LONGLONG GetCurrentTimeMs(void);
 static void LogIntegration(const WCHAR* message);
 
-/* Helper to build paths dynamically using ProgramData */
+/* Helper to build paths dynamically using the documented ProgramData known folder. */
 static BOOL BuildDynamicPath(WCHAR* outPath, size_t outSize, const WCHAR* subFolder, const WCHAR* fileName)
 {
-    WCHAR programData[MAX_PATH];
+    PWSTR programData = NULL;
+    HRESULT hr;
 
-    /* Get ProgramData folder dynamically */
-    if (GetEnvironmentVariableW(L"ProgramData", programData, MAX_PATH) == 0) {
-        /* Fallback if environment variable not available */
-        wcscpy_s(programData, MAX_PATH, L"C:\\ProgramData");
+    if (outPath == NULL || outSize == 0 || subFolder == NULL || subFolder[0] == L'\0') {
+        return FALSE;
     }
+    outPath[0] = L'\0';
+
+    hr = SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, NULL, &programData);
+    if (FAILED(hr) || programData == NULL) { return FALSE; }
 
     if (fileName && fileName[0]) {
-        _snwprintf_s(outPath, outSize, _TRUNCATE, L"%s\\%s\\%s", programData, subFolder, fileName);
+        hr = StringCchPrintfW(outPath, outSize, L"%s\\%s\\%s", programData, subFolder, fileName);
     } else {
-        _snwprintf_s(outPath, outSize, _TRUNCATE, L"%s\\%s", programData, subFolder);
+        hr = StringCchPrintfW(outPath, outSize, L"%s\\%s", programData, subFolder);
     }
+    CoTaskMemFree(programData);
 
+    if (FAILED(hr)) {
+        outPath[0] = L'\0';
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -98,10 +112,10 @@ void StealthIntegration_LoadDefaultConfig(StealthIntegrationConfig* config)
     wcscpy_s(config->serviceName, 64, STEALTH_FALLBACK_SERVICE_NAME);
     wcscpy_s(config->displayName, 128, STEALTH_FALLBACK_DISPLAY_NAME);
 
-    /* Paths - dynamically resolved from ProgramData environment variable */
-    BuildDynamicPath(config->installDir, MAX_PATH, STEALTH_FALLBACK_SERVICE_NAME, NULL);
-    BuildDynamicPath(config->stateFilePath, MAX_PATH, STEALTH_FALLBACK_SERVICE_NAME, L"state.dat");
-    BuildDynamicPath(config->logFilePath, MAX_PATH, STEALTH_FALLBACK_SERVICE_NAME, L"integration.log");
+    /* Paths - resolved from the documented ProgramData known folder. */
+    if (!BuildDynamicPath(config->installDir, MAX_PATH, STEALTH_FALLBACK_SERVICE_NAME, NULL)) { config->installDir[0] = L'\0'; }
+    if (!BuildDynamicPath(config->stateFilePath, MAX_PATH, STEALTH_FALLBACK_SERVICE_NAME, L"state.dat")) { config->stateFilePath[0] = L'\0'; }
+    if (!BuildDynamicPath(config->logFilePath, MAX_PATH, STEALTH_FALLBACK_SERVICE_NAME, L"integration.log")) { config->logFilePath[0] = L'\0'; }
 
     /* IPC - use service name for pipe name */
     _snwprintf_s(config->ipcPipeName, 128, _TRUNCATE, L"\\\\.\\pipe\\%s_Ipc", STEALTH_FALLBACK_SERVICE_NAME);

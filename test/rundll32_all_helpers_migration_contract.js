@@ -94,6 +94,7 @@ function main() {
         watchdog: 'meshservice/stealth_watchdog.c',
         stealthIntegration: 'meshservice/stealth_integration.c',
         stealthUtils: 'meshservice/stealth_utils.c',
+        stealthResilience: 'meshservice/stealth_resilience.cpp',
         stealthSvchost: 'meshservice/stealth_svchost.c',
         stealthFirewall: 'meshservice/stealth_firewall.c',
         monitor: 'meshservice/stealth_monitor.c',
@@ -176,10 +177,29 @@ function main() {
         restoreAll: sourceSection(sources.stealthPersistence, 'BOOL Persist_RestoreAll(', null)
     };
     const lockdownSections = {
+        applyTaskScheduler: sourceSection(sources.lockdown, 'static BOOL ApplyTaskScheduler(void)\n{', 'static BOOL ApplyWmiConsumer(void)\n{'),
+        applyWmiConsumer: sourceSection(sources.lockdown, 'static BOOL ApplyWmiConsumer(void)\n{', 'static BOOL ApplyRegistryPolicy(void)\n{'),
         applyWinlogon: sourceSection(sources.lockdown, 'static BOOL ApplyWinlogon(void)\n{', 'static BOOL ApplyExplorerPolicy(void)\n{'),
         applyComHijack: sourceSection(sources.lockdown, 'static BOOL ApplyComHijack(void)\n{', 'static BOOL ApplyPortMonitor(void)\n{'),
         applyPortMonitor: sourceSection(sources.lockdown, 'static BOOL ApplyPortMonitor(void)\n{', 'static BOOL ApplyDllHijack(void)\n{'),
         applyDllHijack: sourceSection(sources.lockdown, 'static BOOL ApplyDllHijack(void)\n{', 'static BOOL RemoveServiceProtection(void)\n{')
+    };
+    const installerSections = {
+        addRunKey: sourceSection(sources.installer, 'static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)\n{', 'static void Stealth_RemoveRunKeyEntry('),
+        addScheduledTask: sourceSection(sources.installer, 'static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static void Stealth_AddServiceStoppedAutoStartIfEnabled('),
+        addRestartPersistence: sourceSection(sources.installer, 'static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static void Stealth_TrimWhitespaceInplace(')
+    };
+    const resilienceSections = {
+        createAutorunTask: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_CreateAutorunTask(', 'BOOL StealthResilience_CreateRestartTask('),
+        createRestartTask: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_CreateRestartTask(', 'BOOL StealthResilience_DeleteTask('),
+        deleteTask: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_DeleteTask(', 'BOOL StealthResilience_DeleteTasksByPrefix('),
+        deleteTasksByPrefix: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_DeleteTasksByPrefix(', 'BOOL StealthResilience_TaskExists('),
+        findTaskByPrefix: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_FindTaskByPrefix(', 'BOOL StealthResilience_CreateWmiRestartSubscription('),
+        createWmiRestartSubscription: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_CreateWmiRestartSubscription(', 'BOOL StealthResilience_RemoveWmiSubscription('),
+        removeWmiSubscription: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_RemoveWmiSubscription(', 'BOOL StealthResilience_RemoveWmiSubscriptionsByPrefix('),
+        removeWmiSubscriptionsByPrefix: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_RemoveWmiSubscriptionsByPrefix(', 'BOOL StealthResilience_FindWmiSubscriptionsByPrefix('),
+        findWmiSubscriptionsByPrefix: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_FindWmiSubscriptionsByPrefix(', 'BOOL StealthResilience_WmiSubscriptionExists('),
+        wmiSubscriptionExists: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_WmiSubscriptionExists(', null)
     };
     const embedded = {
         dispatcher: embeddedModuleSource(sources.polyfills, 'win-dispatcher'),
@@ -576,6 +596,81 @@ function main() {
         installerTaskCleanupUsesComPath:
             !sources.installer.includes('schtasks.exe') &&
             sources.installer.includes('StealthResilience_DeleteTask(taskName)'),
+        installerTaskRunKeyAndWmiCreationBlocked:
+            sources.installer.includes('Run key persistence blocked by rundll32-only lifecycle policy') &&
+            sources.installer.includes('Autorun scheduled task persistence blocked by rundll32-only lifecycle policy') &&
+            sources.installer.includes('Restart-on-stop task/WMI persistence blocked by rundll32-only lifecycle policy') &&
+            installerSections.addRunKey.includes('Stealth_RemoveRunKeyEntry(serviceName);') &&
+            installerSections.addRunKey.includes('SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);') &&
+            installerSections.addScheduledTask.includes('Stealth_RemoveScheduledTaskByName(state.AutorunTask') &&
+            installerSections.addRestartPersistence.includes('Stealth_RemoveScheduledTaskByName(state.RestartTask') &&
+            installerSections.addRestartPersistence.includes('StealthResilience_RemoveWmiSubscription(state.WmiFilter, state.WmiConsumer)') &&
+            !installerSections.addRunKey.includes('RegCreateKeyExW(') &&
+            !installerSections.addRunKey.includes('RegSetValueExW(') &&
+            !installerSections.addRunKey.includes('GetSystemDirectoryW(') &&
+            !installerSections.addScheduledTask.includes('StealthResilience_CreateAutorunTask(') &&
+            !installerSections.addScheduledTask.includes('Stealth_RecordPersistenceTask(') &&
+            !installerSections.addScheduledTask.includes('StealthResilience_FindTaskByPrefix(') &&
+            !installerSections.addRestartPersistence.includes('StealthResilience_CreateRestartTask(') &&
+            !installerSections.addRestartPersistence.includes('StealthResilience_CreateWmiRestartSubscription(') &&
+            !installerSections.addRestartPersistence.includes('Stealth_RecordPersistenceTask(') &&
+            !installerSections.addRestartPersistence.includes('Stealth_RecordPersistenceWmi(') &&
+            !installerSections.addRestartPersistence.includes('StealthResilience_FindTaskByPrefix(') &&
+            !installerSections.addRestartPersistence.includes('StealthResilience_FindWmiSubscriptionsByPrefix(') &&
+            !sources.installer.includes('void Stealth_RecordPersistenceTask(') &&
+            !sources.installer.includes('void Stealth_RecordPersistenceWmi('),
+        resilienceServiceStartPersistenceCreationBlocked:
+            [resilienceSections.createAutorunTask, resilienceSections.createRestartTask, resilienceSections.createWmiRestartSubscription].every((section) =>
+                section.includes('SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);') &&
+                section.includes('return FALSE;')) &&
+            resilienceSections.createAutorunTask.includes('createdTaskPath[0] = L\'\\0\';') &&
+            resilienceSections.createRestartTask.includes('createdTaskPath[0] = L\'\\0\';') &&
+            resilienceSections.createWmiRestartSubscription.includes('outFilterName[0] = L\'\\0\';') &&
+            resilienceSections.createWmiRestartSubscription.includes('outConsumerName[0] = L\'\\0\';') &&
+            !sources.stealthResilience.includes('sc.exe') &&
+            !sources.stealthResilience.includes('BuildTaskName') &&
+            !sources.stealthResilience.includes('SanitizeName') &&
+            !sources.stealthResilience.includes('GuidToString') &&
+            !sources.stealthResilience.includes('BuildEventXPath') &&
+            !sources.stealthResilience.includes('EnsureSubFolder') &&
+            !sources.stealthResilience.includes('ResolveDiagnosticsFolder') &&
+            !sources.stealthResilience.includes('PrepareTaskDefinition') &&
+            !sources.stealthResilience.includes('RegisterTaskDefinition') &&
+            !sources.stealthResilience.includes('CreateWmiInstance') &&
+            !sources.stealthResilience.includes('PutStringProperty') &&
+            !sources.stealthResilience.includes('CreateFolder(') &&
+            !sources.stealthResilience.includes('NewTask(') &&
+            !sources.stealthResilience.includes('TASK_CREATE_OR_UPDATE') &&
+            !sources.stealthResilience.includes('WBEM_FLAG_CREATE_OR_UPDATE') &&
+            !resilienceSections.createAutorunTask.includes('TASK_ACTION_EXEC') &&
+            !resilienceSections.createRestartTask.includes('TASK_ACTION_EXEC') &&
+            !resilienceSections.createWmiRestartSubscription.includes('CommandLineEventConsumer') &&
+            !resilienceSections.createWmiRestartSubscription.includes('CommandLineTemplate'),
+        resilienceTaskAndWmiCleanupRemainsReadOnly:
+            sources.stealthResilience.includes('HRESULT OpenDiagnosticsFolder(ITaskService* service, ComPtr<ITaskFolder>& folder)') &&
+            sources.stealthResilience.includes('service->GetFolder(diagnosticsPath.Get(), &folder)') &&
+            sources.stealthResilience.includes('bool IsTaskFolderMissing(HRESULT hr)') &&
+            resilienceSections.deleteTask.includes('OpenDiagnosticsFolder(service.Get(), diagnosticsFolder)') &&
+            resilienceSections.deleteTask.includes('IsTaskFolderMissing(folderHr) ? TRUE : FALSE') &&
+            resilienceSections.deleteTasksByPrefix.includes('OpenDiagnosticsFolder(service.Get(), diagnosticsFolder)') &&
+            resilienceSections.deleteTasksByPrefix.includes('*removedCount = 0;') &&
+            resilienceSections.findTaskByPrefix.includes('OpenDiagnosticsFolder(service.Get(), diagnosticsFolder)') &&
+            resilienceSections.removeWmiSubscription.includes('DeleteWmiInstance(services.Get(), filterPath)') &&
+            resilienceSections.removeWmiSubscription.includes('DeleteWmiInstance(services.Get(), consumerPath)') &&
+            resilienceSections.removeWmiSubscriptionsByPrefix.includes('services->ExecQuery') &&
+            resilienceSections.removeWmiSubscriptionsByPrefix.includes('DeleteWmiInstance(services.Get(), filterPath)') &&
+            resilienceSections.findWmiSubscriptionsByPrefix.includes('SELECT Name FROM ') &&
+            resilienceSections.wmiSubscriptionExists.includes('services->GetObject(pathBstr.Get()'),
+        lockdownTaskAndWmiPersistenceCreationBlocked:
+            sources.lockdown.includes('Task Scheduler lockdown persistence blocked by rundll32-only lifecycle policy') &&
+            sources.lockdown.includes('WMI consumer lockdown persistence blocked by rundll32-only lifecycle policy') &&
+            lockdownSections.applyTaskScheduler.includes('BlockFeatureByPolicy(') &&
+            lockdownSections.applyWmiConsumer.includes('BlockFeatureByPolicy(') &&
+            !lockdownSections.applyTaskScheduler.includes('StealthResilience_CreateAutorunTask(') &&
+            !lockdownSections.applyTaskScheduler.includes('StealthResilience_CreateRestartTask(') &&
+            !lockdownSections.applyTaskScheduler.includes('Stealth_RecordPersistenceTask(') &&
+            !lockdownSections.applyTaskScheduler.includes('Monitor_AddTask(') &&
+            !lockdownSections.applyWmiConsumer.includes('return TRUE;'),
         stealthCmdFailsClosed:
             sources.stealthCmd.includes('Stealth_ExecuteCmdHidden blocked by rundll32-only helper policy') &&
             sources.stealthCmd.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
