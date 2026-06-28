@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
 import base64
 import json
@@ -382,7 +384,8 @@ def write_outputs(config_path: Path, output_header: Path) -> None:
         raise ValueError(f"branding.serviceName and branding.displayName must be populated in {config_path}")
 
     output_header.parent.mkdir(parents=True, exist_ok=True)
-    output_header.write_text(build_header(config), encoding="utf-8", newline="\n")
+    with output_header.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(build_header(config))
 
     print(f"[OK] Branding header generated: {output_header}")
 

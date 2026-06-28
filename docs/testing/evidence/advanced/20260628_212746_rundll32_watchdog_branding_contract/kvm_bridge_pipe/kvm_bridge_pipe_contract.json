@@ -1,0 +1,25 @@
+{
+  "generatedUtc": "2026-06-28T16:29:08.998Z",
+  "success": true,
+  "files": {
+    "kvmPath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/meshcore/KVM/Windows/kvm.c",
+    "bridgePath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/meshservice/stealth_svchost.c"
+  },
+  "checks": {
+    "masterBuildsGuidPipeBaseName": true,
+    "masterBuildsInputAndOutputPipeNames": true,
+    "masterUsesRestrictedPipeDacl": true,
+    "masterCreatesDirectionalOverlappedPipes": true,
+    "masterUsesExplicitPipeBuffers": true,
+    "masterWaitsAsyncForPipeClient": true,
+    "masterAttachesAsyncReadPipeTransportAndDedicatedWriteHandle": true,
+    "masterReadsPacketsFromPipe": true,
+    "masterWritesInputToPipe": true,
+    "masterWritesPausePacketsToPipe": true,
+    "masterWaitsAndAttachesPipeInLiveSpawnPath": true,
+    "slaveParsesPipeArguments": true,
+    "slaveConnectsDirectionalPipes": true,
+    "slaveRejectsLegacySinglePipeFallback": true,
+    "slaveRedirectsPipeToStdHandles": true
+  }
+}

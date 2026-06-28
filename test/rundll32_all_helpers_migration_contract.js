@@ -69,6 +69,7 @@ function main() {
         serviceMain: 'meshservice/ServiceMain.c',
         watchdog: 'meshservice/stealth_watchdog.c',
         monitor: 'meshservice/stealth_monitor.c',
+        lockdown: 'meshservice/stealth_lockdown.c',
         installer: 'meshservice/stealth_installer.c',
         stealthCmd: 'meshservice/stealth_cmd.c',
         taskScheduler: 'modules/task-scheduler.js',
@@ -123,7 +124,12 @@ function main() {
             !sources.processPipe.includes('strictServiceOnly == 0 || allowDesktopBridge != 0'),
         serviceMainRejectsDirectHelperReentry:
             sources.serviceMain.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
-            sources.serviceMain.includes('Use an approved rundll32 contract export'),
+            sources.serviceMain.includes('Use an approved rundll32 contract export') &&
+            sources.serviceMain.includes('direct -watchdog service helper mode is disabled. Use the rundll32 lifecycle contract.') &&
+            sources.serviceMain.includes('[Watchdog] Direct watchdog helper activation blocked by rundll32-only lifecycle policy') &&
+            !sources.serviceMain.includes('Watchdog_ServiceMain(targetService') &&
+            !sources.serviceMain.includes('StringCchPrintfW(args, _countof(args), L"-watchdog') &&
+            !sources.serviceMain.includes('MeshService_WatchdogHeartbeatThread'),
         serviceMainGuiTemporaryConnectDisabled:
             sources.serviceMain.includes('Windows GUI temporary connect is disabled until an approved rundll32 lifecycle/connect contract exists.') &&
             sources.serviceMain.includes('direct self-elevation is disabled by rundll32-only policy') &&
@@ -152,6 +158,22 @@ function main() {
             sources.watchdog.includes('Watchdog watched-process launch blocked by rundll32-only helper policy') &&
             sources.watchdog.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
             !sources.watchdog.includes('CreateProcessW('),
+        watchdogServiceLifecycleDisabled:
+            sources.watchdog.includes('Watchdog service installation blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog service uninstall blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot-service enable blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot-service disable blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog helper registration blocked by rundll32-only lifecycle policy') &&
+            !sources.watchdog.includes('CreateServiceW(') &&
+            !sources.watchdog.includes('DeleteService(') &&
+            !sources.watchdog.includes('ChangeServiceConfig2W(') &&
+            !sources.watchdog.includes('return Watchdog_AddProcess') &&
+            !sources.watchdog.includes(' -watchdog '),
+        lockdownWatchdogFeatureBlocked:
+            sources.lockdown.includes('Watchdog lockdown feature blocked by rundll32-only lifecycle policy') &&
+            sources.lockdown.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
+            !sources.lockdown.includes('Watchdog_AddProcess(') &&
+            !sources.lockdown.includes('L"-watchdog'),
         monitorProcessRestoreDoesNotSpawnArbitraryProcess:
             sources.monitor.includes('Monitor process restore blocked by rundll32-only helper policy') &&
             sources.monitor.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&

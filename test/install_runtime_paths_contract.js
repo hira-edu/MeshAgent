@@ -1,5 +1,7 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const childProcess = require('child_process');
 
 function parseArgs(argv) {
     const args = {};
@@ -42,6 +44,51 @@ function assert(condition, message) {
 
 function readRepoFile(repoRoot, relativePath) {
     return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
+}
+
+function findPython(repoRoot) {
+    const candidates = ['python3', 'python'];
+    for (const candidate of candidates) {
+        const result = childProcess.spawnSync(candidate, ['--version'], {
+            cwd: repoRoot,
+            encoding: 'utf8'
+        });
+        if (result.status === 0) {
+            return candidate;
+        }
+    }
+    throw new Error('python3 or python is required to generate branding assets for this contract');
+}
+
+function generateBrandingHeader(repoRoot, brandingPath, evidenceDir) {
+    const outputDir = evidenceDir ?
+        path.join(evidenceDir, 'generated') :
+        fs.mkdtempSync(path.join(os.tmpdir(), 'meshagent-branding-'));
+    const outputHeader = path.join(outputDir, 'meshagent_branding.h');
+    const generatorPath = path.join(repoRoot, 'tools', 'generate_branding_assets.py');
+    const python = findPython(repoRoot);
+
+    ensureDir(outputDir);
+    const result = childProcess.spawnSync(python, [
+        generatorPath,
+        '--repo-root',
+        repoRoot,
+        '--config',
+        brandingPath,
+        '--output-header',
+        outputHeader
+    ], {
+        cwd: repoRoot,
+        encoding: 'utf8'
+    });
+
+    assert(result.status === 0, `branding generator failed with status ${result.status}: stdout=${result.stdout || ''} stderr=${result.stderr || ''}`);
+    assert(fs.existsSync(outputHeader), 'branding generator did not write the requested output header');
+    return {
+        path: outputHeader,
+        stdout: result.stdout || '',
+        stderr: result.stderr || ''
+    };
 }
 
 function normalizeWindowsPath(value) {
@@ -92,7 +139,8 @@ function main() {
     assert(runtimeDirLeaf.length > 0, 'active install root must have a leaf directory');
     assert(logsDir.toLowerCase() === `${installRoot}\\logs`.toLowerCase(), 'active log path must be installRoot\\logs');
 
-    const generatedBranding = readRepoFile(repoRoot, 'meshcore/generated/meshagent_branding.h');
+    const generatedHeader = generateBrandingHeader(repoRoot, brandingPath, evidenceDir);
+    const generatedBranding = fs.readFileSync(generatedHeader.path, 'utf8');
     const generatedInstallRoot = installRoot.replace(/\\/g, '/');
     const generatedLogsDir = logsDir.replace(/\\/g, '/');
     assert(generatedBranding.includes(`#define MESH_AGENT_INSTALL_ROOT TEXT("${generatedInstallRoot}")`), 'generated branding install root does not match active branding JSON');
@@ -153,6 +201,7 @@ function main() {
         success: true,
         activeBranding: {
             brandingPath,
+            generatedHeaderPath: generatedHeader.path,
             installRoot,
             logsDir,
             serviceDllName,
@@ -180,6 +229,7 @@ function main() {
             `LOGS_DIR=${logsDir}`,
             `SERVICE_DLL=${installRoot}\\${serviceDllName}`,
             `LIFECYCLE_STATE_DIR=${report.activeBranding.lifecycleStateDir}`,
+            `GENERATED_HEADER=${generatedHeader.path}`,
             'GUI_DIRECT_SELF_LAUNCH_STAGING=false',
             'INSTALL_ROOT_IU_ACE_INHERITS=false',
             'SECURE_DIRECTORY_DEFAULT_DACL_FALLBACK=false'

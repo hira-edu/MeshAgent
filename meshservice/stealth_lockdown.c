@@ -29,6 +29,10 @@
 #include <strsafe.h>
 #include <stdlib.h>
 
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
+
 /* State file format version */
 #define STATE_FILE_VERSION 1
 
@@ -1087,25 +1091,9 @@ static BOOL ApplyServiceProtection(void)
 
 static BOOL ApplyWatchdog(void)
 {
-    WatchdogConfig config = { 0 };
-    config.checkIntervalMs = g_Lockdown.config.watchdogIntervalMs;
-    config.restartDelayMs = 1000;
-    config.maxRestartAttempts = 10;
-    config.useJobObject = TRUE;
-    config.hidden = TRUE;
-
-    if (Watchdog_Start(&config)) {
-        if (g_Lockdown.config.serviceExePath[0]) {
-            WCHAR args[128] = {0};
-            if (g_Lockdown.config.serviceName[0]) {
-                StringCchPrintfW(args, _countof(args), L"-watchdog \"%s\"", g_Lockdown.config.serviceName);
-            }
-            Watchdog_AddProcess(g_Lockdown.config.serviceExePath,
-                                (args[0] != L'\0') ? args : NULL,
-                                NULL);
-        }
-        return TRUE;
-    }
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    LogEvent(LOCKDOWN_EVENT_ERROR, LOCKDOWN_FEATURE_WATCHDOG,
+             L"Watchdog lockdown feature blocked by rundll32-only lifecycle policy");
     return FALSE;
 }
 

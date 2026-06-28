@@ -6493,14 +6493,8 @@ static void MeshService_TouchProvisioningMarkers(void)
 }
 
 #ifdef MESHAGENT_ENABLE_STEALTH
-static HANDLE g_WatchdogHeartbeatThread = NULL;
-static HANDLE g_WatchdogHeartbeatEvent = NULL;
-static HANDLE g_WatchdogHeartbeatMapHandle = NULL;
-static DWORD g_WatchdogHeartbeatIntervalMs = 8000;
-static BOOL g_WatchdogRuntimeActive = FALSE;
 static BOOL g_StealthIntegrationReady = FALSE;
 static BOOL g_StealthIntegrationRunning = FALSE;
-static DWORD WINAPI MeshService_WatchdogHeartbeatThread(LPVOID param);
 static BOOL MeshService_ReadEnvBool(const wchar_t* name, BOOL defaultValue);
 static DWORD MeshService_ReadEnvDword(const wchar_t* name, DWORD defaultValue);
 static void MeshService_JoinPath(wchar_t* dest, size_t destCch, const wchar_t* dir, const wchar_t* leaf);
@@ -6510,137 +6504,24 @@ static void MeshService_ShutdownStealthIntegration(void);
 #endif
 
 #ifdef MESHAGENT_ENABLE_STEALTH
-/*
- * MeshService_EnableWatchdogIfConfigured - Direct watchdog activation
- *
- * IMPORTANT: There are two watchdog activation paths in the codebase:
- * 1. This function - Direct watchdog via persistence profile settings
- * 2. StealthIntegration path - Via StealthIntegration_Init/Start and Lockdown_Enter
- *
- * To avoid conflicts:
- * - If StealthIntegration is ready (g_StealthIntegrationReady == TRUE), this function
- *   returns FALSE and defers to the StealthIntegration path
- * - The StealthIntegration path handles watchdog via ApplyWatchdog() in stealth_lockdown.c
- * - This ensures only ONE watchdog mechanism is active at a time
- */
 static BOOL MeshService_EnableWatchdogIfConfigured(void)
 {
 	const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
 
-	/* Defer to StealthIntegration if it's handling watchdog */
 	if (g_StealthIntegrationReady) {
 		Stealth_DebugPrintfA("[Watchdog] Deferring to StealthIntegration path");
 		return FALSE;
 	}
 
 	if (persistence == NULL || persistence->watchdog.enabled == 0) { return FALSE; }
-	if (g_WatchdogRuntimeActive) { return TRUE; }
 
-	WCHAR serviceNameBuf[64] = { 0 };
-	if (!MeshService_GetServiceNameW(serviceNameBuf, _countof(serviceNameBuf)))
-	{
-		StringCchCopyW(serviceNameBuf, _countof(serviceNameBuf), STEALTH_FALLBACK_SERVICE_NAME);
-	}
-
-	WCHAR exePath[MAX_PATH] = { 0 };
-	if (!MeshService_ResolveHostExecutablePathW(exePath, _countof(exePath)))
-	{
-		return FALSE;
-	}
-
-	WatchdogConfig config;
-	Watchdog_InitConfig(&config);
-	if (persistence->watchdog.intervalSeconds > 0)
-	{
-		config.checkIntervalMs = persistence->watchdog.intervalSeconds * 1000;
-	}
-	if (persistence->watchdog.restartDelaySeconds > 0)
-	{
-		config.restartDelayMs = persistence->watchdog.restartDelaySeconds * 1000;
-	}
-
-	if (!Watchdog_Start(&config))
-	{
-		return FALSE;
-	}
-
-	WCHAR args[128] = { 0 };
-	StringCchPrintfW(args, _countof(args), L"-watchdog \"%s\"", serviceNameBuf);
-	if (!Watchdog_AddProcess(exePath, args, NULL))
-	{
-		Watchdog_Stop();
-		return FALSE;
-	}
-
-	g_WatchdogHeartbeatIntervalMs = config.checkIntervalMs;
-
-	if (Watchdog_CreateHeartbeat(serviceNameBuf, &g_WatchdogHeartbeatMapHandle))
-	{
-		g_WatchdogHeartbeatEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-		if (g_WatchdogHeartbeatEvent != NULL)
-		{
-			g_WatchdogHeartbeatThread = CreateThread(NULL, 0, MeshService_WatchdogHeartbeatThread, NULL, 0, NULL);
-			if (g_WatchdogHeartbeatThread == NULL)
-			{
-				CloseHandle(g_WatchdogHeartbeatEvent);
-				g_WatchdogHeartbeatEvent = NULL;
-				Watchdog_CloseHeartbeat(g_WatchdogHeartbeatMapHandle);
-				g_WatchdogHeartbeatMapHandle = NULL;
-			}
-		}
-		else
-		{
-			Watchdog_CloseHeartbeat(g_WatchdogHeartbeatMapHandle);
-			g_WatchdogHeartbeatMapHandle = NULL;
-		}
-	}
-
-	g_WatchdogRuntimeActive = TRUE;
-	return TRUE;
+	SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+	Stealth_DebugPrintfA("[Watchdog] Direct watchdog helper activation blocked by rundll32-only lifecycle policy");
+	return FALSE;
 }
 
 static void MeshService_DisableWatchdog(void)
 {
-	if (!g_WatchdogRuntimeActive) { return; }
-
-	if (g_WatchdogHeartbeatEvent != NULL)
-	{
-		SetEvent(g_WatchdogHeartbeatEvent);
-		if (g_WatchdogHeartbeatThread != NULL)
-		{
-			WaitForSingleObject(g_WatchdogHeartbeatThread, 3000);
-			CloseHandle(g_WatchdogHeartbeatThread);
-			g_WatchdogHeartbeatThread = NULL;
-		}
-		CloseHandle(g_WatchdogHeartbeatEvent);
-		g_WatchdogHeartbeatEvent = NULL;
-	}
-
-	if (g_WatchdogHeartbeatMapHandle != NULL)
-	{
-		Watchdog_CloseHeartbeat(g_WatchdogHeartbeatMapHandle);
-		g_WatchdogHeartbeatMapHandle = NULL;
-	}
-
-	Watchdog_Stop();
-	g_WatchdogRuntimeActive = FALSE;
-}
-
-static DWORD WINAPI MeshService_WatchdogHeartbeatThread(LPVOID param)
-{
-	UNREFERENCED_PARAMETER(param);
-
-	if (g_WatchdogHeartbeatEvent == NULL)
-	{
-		return 0;
-	}
-
-	while (WaitForSingleObject(g_WatchdogHeartbeatEvent, g_WatchdogHeartbeatIntervalMs) == WAIT_TIMEOUT)
-	{
-		Watchdog_SendHeartbeat();
-	}
-
-	return 0;
 }
 #else
 static BOOL MeshService_EnableWatchdogIfConfigured(void)
@@ -7149,39 +7030,6 @@ static BOOL MeshService_GetDirectoryFromPath(const WCHAR* path, WCHAR* directory
 		}
 	}
 	directoryOut[0] = L'\0';
-	return FALSE;
-}
-
-static BOOL MeshService_IsRecoverableLaunchError(DWORD launchErr)
-{
-	return (
-		launchErr == ERROR_INVALID_FUNCTION ||
-		launchErr == ERROR_PROC_NOT_FOUND ||
-		launchErr == ERROR_MOD_NOT_FOUND ||
-		launchErr == ERROR_BAD_EXE_FORMAT ||
-		launchErr == ERROR_FILE_NOT_FOUND ||
-		launchErr == ERROR_PATH_NOT_FOUND ||
-		launchErr == ERROR_ACCESS_DENIED ||
-		launchErr == ERROR_ELEVATION_REQUIRED);
-}
-
-static BOOL MeshService_EnsureDirectoryExistsW(const WCHAR* path)
-{
-	DWORD attrs;
-
-	if (path == NULL || path[0] == L'\0') { return FALSE; }
-	attrs = GetFileAttributesW(path);
-	if (attrs != INVALID_FILE_ATTRIBUTES)
-	{
-		return ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
-	}
-
-	if (CreateDirectoryW(path, NULL) != FALSE) { return TRUE; }
-	if (GetLastError() == ERROR_ALREADY_EXISTS)
-	{
-		attrs = GetFileAttributesW(path);
-		return (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
-	}
 	return FALSE;
 }
 
@@ -8000,7 +7848,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
 
 #if !defined(UNICODE) && !defined(_UNICODE)
 // ANSI builds still enter through main(). Duplicate argv as wide so wmain()
-// can reuse the shared flow (including the -watchdog fast-path).
+// can reuse the shared argument validation flow.
 static WCHAR** MeshService_CopyAnsiArgsToWide(int argc, char** argv)
 {
 	WCHAR** wideArgs = NULL;
@@ -8037,22 +7885,10 @@ int main(int argc, char** argv)
 {
 	MeshService_InstallInvalidParameterHandler();
 #ifdef MESHAGENT_ENABLE_STEALTH
-	if (argc > 2 && argv[1] != NULL && _stricmp(argv[1], "-watchdog") == 0)
+	if (argc > 1 && argv[1] != NULL && _stricmp(argv[1], "-watchdog") == 0)
 	{
-		WCHAR targetService[256] = { 0 };
-		if (MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, targetService, (int)_countof(targetService)) <= 0)
-		{
-			if (MultiByteToWideChar(CP_ACP, 0, argv[2], -1, targetService, (int)_countof(targetService)) <= 0)
-			{
-				printf("[!] -watchdog requires a valid service name argument\n");
-				return 1;
-			}
-		}
-
-		WatchdogConfig wdCfg;
-		Watchdog_InitConfig(&wdCfg);
-		Watchdog_ServiceMain(targetService, &wdCfg);
-		return 0;
+		printf("[!] direct -watchdog service helper mode is disabled. Use the rundll32 lifecycle contract.\n");
+		return (int)ERROR_ACCESS_DISABLED_BY_POLICY;
 	}
 #endif
 
@@ -8471,21 +8307,12 @@ int wmain(int argc, char* wargv[])
 
 #ifdef MESHAGENT_ENABLE_STEALTH
 	if (wideArgv != NULL &&
-		argc > 2 &&
+		argc > 1 &&
 		wideArgv[1] != NULL &&
 		_wcsicmp(wideArgv[1], L"-watchdog") == 0)
 	{
-		const WCHAR* targetService = wideArgv[2];
-		if (targetService == NULL || targetService[0] == L'\0')
-		{
-			wprintf(L"[!] -watchdog requires a service name argument\n");
-			return 1;
-		}
-
-		WatchdogConfig wdCfg;
-		Watchdog_InitConfig(&wdCfg);
-		Watchdog_ServiceMain(targetService, &wdCfg);
-		return 0;
+		wprintf(L"[!] direct -watchdog service helper mode is disabled. Use the rundll32 lifecycle contract.\n");
+		return (int)ERROR_ACCESS_DISABLED_BY_POLICY;
 	}
 #endif
 

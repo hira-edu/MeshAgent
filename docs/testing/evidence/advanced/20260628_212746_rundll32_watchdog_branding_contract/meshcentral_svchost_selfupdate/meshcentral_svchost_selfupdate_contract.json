@@ -1,0 +1,33 @@
+{
+  "agentcorePath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/meshcore/agentcore.c",
+  "agentInstallerPath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/modules/agent-installer.js",
+  "meshcorePath": "/Users/umairliaquat/Documents/GitHub/MeshCentral/agents/meshcore.js",
+  "recoverycorePath": "/Users/umairliaquat/Documents/GitHub/MeshCentral/agents/recoverycore.js",
+  "externalMeshCentralDrift": true,
+  "meshcoreLegacyHits": [
+    ".update.exe",
+    "_wexecve",
+    "cmd.exe",
+    "-b64exec "
+  ],
+  "recoverycoreLegacyHits": [
+    ".update.exe",
+    "_wexecve",
+    "cmd.exe",
+    "-b64exec "
+  ],
+  "meshcentralSourcesAvailable": true,
+  "checks": {
+    "agentcorePublishesNativeFullUpdate": true,
+    "agentcoreProbesZipHeaderBeforeOptionalJsUnzip": true,
+    "agentcoreGuardsOptionalZipModules": true,
+    "agentcoreRawPayloadContinuesWhenZipReaderMissing": true,
+    "agentcoreUsesPackageUpdateSuffix": true,
+    "agentcoreSelfUpdateLaunchesRundll32Lifecycle": true,
+    "agentcoreFailsClosedWhenRundll32Unavailable": true,
+    "agentcoreDoesNotUseLegacyWindowsUpdateExe": true,
+    "agentInstallerUpdateSourceFeedsLifecycleBinary": true,
+    "agentInstallerLifecycleManifestRecordsSelectedSourceExe": true,
+    "agentInstallerDoesNotUseLegacyUpdateExe": true
+  }
+}

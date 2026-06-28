@@ -2,6 +2,39 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 
+function parseArgs(argv) {
+    const args = {};
+    for (let i = 2; i < argv.length; ++i) {
+        const token = argv[i];
+        if (!token.startsWith('--')) {
+            throw new Error(`Unexpected argument: ${token}`);
+        }
+        const key = token.substring(2);
+        const value = argv[i + 1];
+        if (value == null || value.startsWith('--')) {
+            args[key] = true;
+        } else {
+            args[key] = value;
+            i += 1;
+        }
+    }
+    return args;
+}
+
+function ensureDir(dirPath) {
+    fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function writeJson(filePath, value) {
+    ensureDir(path.dirname(filePath));
+    fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function writeText(filePath, value) {
+    ensureDir(path.dirname(filePath));
+    fs.writeFileSync(filePath, value, 'utf8');
+}
+
 function assert(condition, message) {
     if (!condition) {
         throw new Error(message);
@@ -9,6 +42,8 @@ function assert(condition, message) {
 }
 
 function main() {
+    const args = parseArgs(process.argv);
+    const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const modulePath = path.resolve('modules', 'win-deskutils.js');
     const polyfillsPath = path.resolve('microscript', 'ILibDuktape_Polyfills.c');
     const meshcorePath = path.resolve('..', 'MeshCentral', 'agents', 'meshcore.js');
@@ -60,12 +95,24 @@ function main() {
         assert(passed, `${name} failed`);
     }
 
-    process.stdout.write(JSON.stringify({
+    const report = {
+        generatedUtc: new Date().toISOString(),
         modulePath,
         polyfillsPath,
         meshcorePath,
         checks
-    }, null, 2) + '\n');
+    };
+
+    if (evidenceDir) {
+        writeJson(path.join(evidenceDir, 'win_deskutils_idle_contract.json'), report);
+        writeText(path.join(evidenceDir, 'summary.txt'), [
+            `GENERATED_UTC=${report.generatedUtc}`,
+            'SUCCESS=true',
+            `CHECKS=${Object.entries(checks).map(([name, passed]) => `${name}:${passed}`).join(',')}`
+        ].join('\n') + '\n');
+    } else {
+        process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+    }
 }
 
 main();
