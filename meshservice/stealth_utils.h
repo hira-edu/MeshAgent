@@ -16,6 +16,9 @@ void Stealth_DebugLastErrorW(const wchar_t* context);
 #define STEALTH_SHA256_STRING_LENGTH   (UTIL_SHA256_HASHSIZE * 2)
 BOOL Stealth_ComputeFileSha256W(const wchar_t* path, wchar_t* hexOut, size_t hexOutLen);
 
+/* Resolve the native system svchost.exe path through GetSystemDirectoryW. */
+BOOL Stealth_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize);
+
 /* Dynamic path resolution for service data directory.
  * Uses SHGetKnownFolderPath(FOLDERID_ProgramData) to get ProgramData path,
  * then appends the service/application name subdirectory.

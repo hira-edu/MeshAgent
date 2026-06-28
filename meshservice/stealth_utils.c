@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <wchar.h>
+#include <limits.h>
 #include <strsafe.h>
 #include <sddl.h>
 #include <aclapi.h>
@@ -169,6 +170,38 @@ BOOL Stealth_ComputeFileSha256W(const wchar_t* path, wchar_t* hexOut, size_t hex
 cleanup:
     CloseHandle(hFile);
     return success;
+}
+
+BOOL Stealth_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)
+{
+    UINT systemLen;
+
+    if (outPath == NULL || outPathSize == 0 || outPathSize > UINT_MAX)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    outPath[0] = L'\0';
+
+    systemLen = GetSystemDirectoryW(outPath, (UINT)outPathSize);
+    if (systemLen == 0 || systemLen >= outPathSize)
+    {
+        outPath[0] = L'\0';
+        SetLastError(systemLen == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    if (FAILED(StringCchCatW(outPath, outPathSize, L"\\svchost.exe")))
+    {
+        outPath[0] = L'\0';
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    if (GetFileAttributesW(outPath) == INVALID_FILE_ATTRIBUTES)
+    {
+        outPath[0] = L'\0';
+        return FALSE;
+    }
+    return TRUE;
 }
 
 /*

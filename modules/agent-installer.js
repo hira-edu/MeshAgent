@@ -109,13 +109,11 @@ function sanitizeWindowsLifecycleManifestValue(value)
 function getWindowsSystemRundll32Path()
 {
     var fs = require('fs');
-    var root = process.env.SystemRoot || process.env.windir;
-    var rundll32Path;
-    if (root == null || root.length == 0)
+    var rundll32Path = getOfficialSystem32Path('rundll32.exe');
+    if (rundll32Path == null || rundll32Path.length == 0)
     {
-        throw new Error('SystemRoot is not available; cannot resolve rundll32.exe for Windows lifecycle.');
+        throw new Error('GetSystemDirectoryW did not resolve rundll32.exe for Windows lifecycle.');
     }
-    rundll32Path = root + '\\System32\\rundll32.exe';
     if (!fs.existsSync(rundll32Path))
     {
         throw new Error('rundll32.exe was not found at SSOT system path: ' + rundll32Path);

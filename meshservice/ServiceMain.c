@@ -433,14 +433,7 @@ cleanup:
 
 static BOOL MeshService_ResolveRundll32PathW(WCHAR* output, size_t outputLen)
 {
-	DWORD expanded = 0;
-
-	if (output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-
-	expanded = ExpandEnvironmentStringsW(L"%SystemRoot%\\System32\\rundll32.exe", output, (DWORD)outputLen);
-	if (expanded == 0 || expanded >= outputLen) { return FALSE; }
-	return (GetFileAttributesW(output) != INVALID_FILE_ATTRIBUTES);
+	return MeshRundll32_GetSystemRundll32PathW(output, outputLen);
 }
 
 static BOOL MeshService_SpawnBridgeProcessW(

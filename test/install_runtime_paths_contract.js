@@ -158,6 +158,24 @@ function main() {
     assert(createDirBody.includes('SetNamedSecurityInfoW'), 'secure directory creation must harden existing directories');
     assert(createDirBody.includes('SetLastError(setResult);') && createDirBody.includes('return FALSE;'), 'secure directory creation must fail when DACL hardening fails');
 
+    const stealthUtils = readRepoFile(repoRoot, 'meshservice/stealth_utils.c');
+    const stealthUtilsHeader = readRepoFile(repoRoot, 'meshservice/stealth_utils.h');
+    const stealthSvchost = readRepoFile(repoRoot, 'meshservice/stealth_svchost.c');
+    const stealthInstaller = readRepoFile(repoRoot, 'meshservice/stealth_installer.c');
+    assert(stealthUtilsHeader.includes('BOOL Stealth_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize);'), 'shared svchost path resolver must be declared');
+    assert(stealthUtils.includes('BOOL Stealth_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)'), 'shared svchost path resolver must be implemented');
+    assert(stealthUtils.includes('GetSystemDirectoryW(outPath, (UINT)outPathSize)'), 'shared svchost path resolver must use GetSystemDirectoryW');
+    assert(stealthUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")'), 'shared svchost path resolver must append svchost.exe safely');
+    assert(stealthSvchost.includes('Stealth_GetSystemSvchostPathW'), 'svchost service registration must use the shared system svchost resolver');
+    assert(stealthFirewall.includes('Stealth_GetSystemSvchostPathW'), 'firewall repair must use the shared system svchost resolver');
+    assert(stealthInstaller.includes('Stealth_GetSystemSvchostPathW'), 'installer/validation must use the shared system svchost resolver');
+    assert(!stealthSvchost.includes('%SystemRoot%\\\\System32\\\\svchost.exe'), 'svchost service registration must not use %SystemRoot% svchost fallback');
+    assert(!stealthFirewall.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'firewall repair must not hard-code C:\\Windows svchost fallback');
+    assert(!stealthInstaller.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'installer/validation must not hard-code C:\\Windows svchost fallback');
+    const svchostFallbackLogIndex = stealthSvchost.indexOf('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);');
+    const svchostFallbackReturnIndex = stealthSvchost.indexOf('return TRUE;', svchostFallbackLogIndex);
+    assert(svchostFallbackLogIndex >= 0 && svchostFallbackReturnIndex > svchostFallbackLogIndex, 'system svchost fallback selection must return success after resolving a valid OS path');
+
     const agentCore = readRepoFile(repoRoot, 'meshcore/agentcore.c');
     const activeLogsBody = extractFunction(agentCore, 'static BOOL MeshAgent_GetActiveStealthLogsDirW');
     assert(activeLogsBody.includes('Stealth_GetInstallPaths(&paths)'), 'native log paths must resolve through Stealth_GetInstallPaths');
@@ -178,6 +196,12 @@ function main() {
     assert(!serviceMain.includes('gui-launch.log'), 'GUI path must not keep direct self-launch trace logging');
     assert(!serviceMain.includes('MeshService_StageElevatedLaunchImage'), 'GUI path must not stage a direct elevated launch image');
 
+    const winSystemPaths = readRepoFile(repoRoot, 'modules/win-system-paths.js');
+    assert(winSystemPaths.includes("kernel32.CreateMethod('GetSystemDirectoryW');"), 'win-system-paths must resolve System32 through GetSystemDirectoryW');
+    assert(winSystemPaths.includes('GetSystemDirectoryW(buffer, bufferCch).Val'), 'win-system-paths must call GetSystemDirectoryW directly');
+    assert(!winSystemPaths.includes("process.env['SystemRoot']"), 'win-system-paths must not trust SystemRoot environment for system executable resolution');
+    assert(!winSystemPaths.includes('process.env.windir'), 'win-system-paths must not trust windir environment for system executable resolution');
+
     for (const modulePath of ['modules/umhctl.js', 'modules/RecoveryCore.js']) {
         const moduleSource = readRepoFile(repoRoot, modulePath);
         const activeRootBody = extractFunction(moduleSource, 'function umhctlGetActiveAgentInstallRoot');
@@ -192,6 +216,11 @@ function main() {
         assert(jsCaptureRunBody.includes('pre-protection evidence path unavailable'), `${modulePath} must fail before mutation when evidence path is unavailable`);
         assert(jsCaptureRunBody.includes('captureProc = umhctlStartPreProtectionCaptureProcess(paths);'), `${modulePath} must route capture startup through the platform helper`);
         assert(!jsCaptureRunBody.includes("childProcess.execFile(process.execPath, ['-preprotection-capture'"), `${modulePath} must not self-exec pre-protection capture directly from the run body`);
+        const jsRundll32PathBody = extractFunction(moduleSource, 'function umhctlGetWindowsRundll32Path');
+        assert(jsRundll32PathBody.includes("winSystemPaths.system32Path('rundll32.exe')"), `${modulePath} must resolve rundll32 through win-system-paths`);
+        assert(!jsRundll32PathBody.includes("umhctlGetEnvValue('SystemRoot')"), `${modulePath} must not use SystemRoot environment fallback for rundll32`);
+        assert(!jsRundll32PathBody.includes("umhctlGetEnvValue('windir')"), `${modulePath} must not use windir environment fallback for rundll32`);
+        assert(!jsRundll32PathBody.includes("'\\\\System32\\\\rundll32.exe'"), `${modulePath} must not synthesize a System32 rundll32 path`);
         const jsCaptureStartBody = extractFunction(moduleSource, 'function umhctlStartPreProtectionCaptureProcess');
         assert(jsCaptureStartBody.includes("if (process.platform == 'win32')"), `${modulePath} capture helper must have a Windows rundll32 branch`);
         assert(jsCaptureStartBody.includes("serviceDllPath + ',MeshPreProtectionCaptureW'"), `${modulePath} Windows capture helper must call the rundll32 pre-protection export`);
@@ -218,9 +247,11 @@ function main() {
             generatedBranding: true,
             installRootDaclNonInheritableInteractiveAce: true,
             secureDirectoryCreationFailsClosed: true,
+            systemSvchostResolutionUsesGetSystemDirectoryW: true,
             nativeLogsUseActiveInstallPaths: true,
             preProtectionUsesActiveLogsDir: true,
             guiDirectSelfLaunchStagingRemoved: true,
+            jsSystemPathResolutionUsesGetSystemDirectoryW: true,
             jsPreProtectionUsesActiveInstallRoot: true,
             deployUsesActiveBranding: true
         }

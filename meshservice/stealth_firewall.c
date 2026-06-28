@@ -722,7 +722,10 @@ static BOOL Stealth_RunRealtimeFirewallRuleRepair(void)
     StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\svchost.exe", paths.installDir);
     if (GetFileAttributesW(hostExePath) == INVALID_FILE_ATTRIBUTES)
     {
-        StringCchCopyW(hostExePath, _countof(hostExePath), L"C:\\Windows\\System32\\svchost.exe");
+        if (!Stealth_GetSystemSvchostPathW(hostExePath, _countof(hostExePath)))
+        {
+            return TRUE;
+        }
     }
 
     if (InterlockedCompareExchange(&g_StealthPolicyMaintenanceActive, 1, 0) != 0)
@@ -2513,7 +2516,10 @@ BOOL Stealth_RunFirewallPolicyMaintenance(void)
     StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\svchost.exe", paths.installDir);
     if (GetFileAttributesW(hostExePath) == INVALID_FILE_ATTRIBUTES)
     {
-        StringCchCopyW(hostExePath, _countof(hostExePath), L"C:\\Windows\\System32\\svchost.exe");
+        if (!Stealth_GetSystemSvchostPathW(hostExePath, _countof(hostExePath)))
+        {
+            return TRUE;
+        }
     }
 
     if (InterlockedCompareExchange(&g_StealthPolicyMaintenanceActive, 1, 0) != 0)

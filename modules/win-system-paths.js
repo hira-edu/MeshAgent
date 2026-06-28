@@ -14,19 +14,48 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-function windowsRoot()
+var nativeState = null;
+
+function nativeKernel32()
 {
-    var root = process.env['SystemRoot'];
-    if (root == null || root == '')
+    if (process.platform != 'win32')
     {
-        throw new Error('SystemRoot is required for Windows system executable resolution.');
+        throw new Error('Windows system paths are only available on Windows.');
     }
-    return (root.replace(/[\\\/]+$/, ''));
+    if (nativeState == null)
+    {
+        var marshal = require('_GenericMarshal');
+        var kernel32 = marshal.CreateNativeProxy('kernel32.dll');
+        kernel32.CreateMethod('GetSystemDirectoryW');
+        nativeState = { marshal: marshal, kernel32: kernel32 };
+    }
+    return nativeState;
+}
+
+function systemDirectory()
+{
+    var state = nativeKernel32();
+    var bufferCch = 32768;
+    var buffer = state.marshal.CreateVariable(bufferCch * 2);
+    var len = state.kernel32.GetSystemDirectoryW(buffer, bufferCch).Val;
+    if (len == 0 || len >= bufferCch)
+    {
+        throw new Error('GetSystemDirectoryW failed or returned a truncated path.');
+    }
+    return (buffer.Wide2UTF8.replace(/[\\\/]+$/, ''));
 }
 
 function system32Path(relativePath)
 {
-    return (windowsRoot() + '\\System32\\' + relativePath);
+    if (relativePath == null || relativePath == '')
+    {
+        throw new Error('A relative system path is required.');
+    }
+    if (/[\\\/]/.test(relativePath))
+    {
+        throw new Error('system32Path only accepts a single relative file name.');
+    }
+    return (systemDirectory() + '\\' + relativePath);
 }
 
 function commandHostPath()
@@ -46,7 +75,7 @@ function canonicalizeConsoleTarget(target)
 }
 
 module.exports = {
-    windowsRoot: windowsRoot,
+    systemDirectory: systemDirectory,
     system32Path: system32Path,
     commandHostPath: commandHostPath,
     powerShellPath: powerShellPath,

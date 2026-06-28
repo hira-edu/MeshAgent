@@ -2,6 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
+const { getSystemRundll32Path } = require('./lib/rundll32_lifecycle');
 
 function parseArgs(argv) {
     const args = {};
@@ -67,8 +68,7 @@ function resolveSystemRundll32Path(args) {
     if (args.rundll32) {
         return path.resolve(args.rundll32);
     }
-    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
-    return path.win32.join(systemRoot, 'System32', 'rundll32.exe');
+    return getSystemRundll32Path();
 }
 
 function resolveKvmProbeDllPath(exePath, args) {

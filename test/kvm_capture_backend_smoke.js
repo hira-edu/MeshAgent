@@ -3,6 +3,7 @@ const os = require('os');
 const path = require('path');
 const net = require('net');
 const childProcess = require('child_process');
+const { getSystemRundll32Path } = require('./lib/rundll32_lifecycle');
 
 const PACKET_TYPES = {
     0: 'nop',
@@ -171,8 +172,7 @@ async function main() {
     const scenario = SCENARIOS[scenarioName];
     const holdMs = args['hold-ms'] == null ? 500 : Number(args['hold-ms']);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
-    const rundll32Path = path.join(systemRoot, 'System32', 'rundll32.exe');
+    const rundll32Path = getSystemRundll32Path();
     const dllPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
     const logPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'svchost-debug.log');
     const tracePath = path.join(os.tmpdir(), 'meshagent_tile_trace.log');

@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const net = require('net');
 const childProcess = require('child_process');
+const { getSystemRundll32Path } = require('./lib/rundll32_lifecycle');
 
 const PACKET_TYPES = {
     0: 'nop',
@@ -114,8 +115,7 @@ function parsePacketStream(buffer, packets) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
-    const rundll32Path = path.join(systemRoot, 'System32', 'rundll32.exe');
+    const rundll32Path = getSystemRundll32Path();
     const dllPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
     const logPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'svchost-debug.log');
     const controlPipeName = `\\\\.\\pipe\\MeshKvm_${process.pid}_${Date.now()}_in`;

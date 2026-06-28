@@ -1172,10 +1172,7 @@ function umhctlGetWindowsRundll32Path()
         var systemRundll32 = winSystemPaths.system32Path('rundll32.exe');
         if (systemRundll32 != null && ('' + systemRundll32).length > 0) { return '' + systemRundll32; }
     } catch (e) { }
-
-    var root = umhctlGetEnvValue('SystemRoot') || umhctlGetEnvValue('windir');
-    if (root == null) { return null; }
-    return umhctlNormalizeFilePath(root.replace(/[\\\/]+$/, '') + '\\System32\\rundll32.exe');
+    return null;
 }
 
 function umhctlBuildExecFileArgs(exePath, args)

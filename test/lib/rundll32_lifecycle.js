@@ -28,11 +28,11 @@ function actionFromSwitch(value) {
 }
 
 function getSystemRundll32Path() {
-    const root = process.env.SystemRoot || process.env.windir;
+    const root = process.env.SystemRoot;
     if (!root) {
         throw new Error('SystemRoot is not available; cannot resolve rundll32.exe');
     }
-    const rundll32Path = path.join(root, 'System32', 'rundll32.exe');
+    const rundll32Path = path.win32.join(root.replace(/[\\\/]+$/, ''), 'System32', 'rundll32.exe');
     if (!fs.existsSync(rundll32Path)) {
         throw new Error(`rundll32.exe not found at ${rundll32Path}`);
     }
@@ -230,6 +230,7 @@ function runLifecycleCommand(targetExe, args, options = {}) {
 module.exports = {
     isLifecycleSwitch,
     commandFromLifecycleArgs,
+    getSystemRundll32Path,
     runLifecycleCommand,
     resolveSourceDll,
     resolveInstalledServiceDll

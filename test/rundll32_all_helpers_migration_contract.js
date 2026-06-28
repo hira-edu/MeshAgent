@@ -93,6 +93,9 @@ function main() {
         stealthHeader: 'meshservice/stealth.h',
         watchdog: 'meshservice/stealth_watchdog.c',
         stealthIntegration: 'meshservice/stealth_integration.c',
+        stealthUtils: 'meshservice/stealth_utils.c',
+        stealthSvchost: 'meshservice/stealth_svchost.c',
+        stealthFirewall: 'meshservice/stealth_firewall.c',
         monitor: 'meshservice/stealth_monitor.c',
         lockdown: 'meshservice/stealth_lockdown.c',
         stealthPersistence: 'meshservice/stealth_persistence.c',
@@ -122,6 +125,16 @@ function main() {
         agentInstaller: 'modules/agent-installer.js',
         umhctl: 'modules/umhctl.js',
         recoveryCore: 'modules/RecoveryCore.js',
+        winSystemPaths: 'modules/win-system-paths.js',
+        rundll32LifecycleHelper: 'test/lib/rundll32_lifecycle.js',
+        kvmBridgeSessionChangeRuntime: 'test/kvm_bridge_session_change_runtime.js',
+        kvmTraceProbe: 'test/kvm_trace_probe.js',
+        kvmTraceProbe2: 'test/kvm_trace_probe2.js',
+        kvmTraceProbeImmed: 'test/kvm_trace_probe_immed.js',
+        kvmTraceProbePoll: 'test/kvm_trace_probe_poll.js',
+        kvmTraceProbeKeepalive: 'test/kvm_trace_probe_keepalive.js',
+        rundll32BridgeSmoke: 'test/rundll32_bridge_smoke.js',
+        kvmCaptureBackendSmoke: 'test/kvm_capture_backend_smoke.js',
         polyfills: 'microscript/ILibDuktape_Polyfills.c'
     };
     const retiredHelperFiles = {
@@ -172,6 +185,17 @@ function main() {
         dispatcher: embeddedModuleSource(sources.polyfills, 'win-dispatcher'),
         processManager: embeddedModuleSource(sources.polyfills, 'process-manager')
     };
+    const runtimeRundll32ProbeSources = [
+        sources.kvmRuntimeHelpers,
+        sources.kvmBridgeSessionChangeRuntime,
+        sources.kvmTraceProbe,
+        sources.kvmTraceProbe2,
+        sources.kvmTraceProbeImmed,
+        sources.kvmTraceProbePoll,
+        sources.kvmTraceProbeKeepalive,
+        sources.rundll32BridgeSmoke,
+        sources.kvmCaptureBackendSmoke
+    ];
 
     const forbiddenWindowsHelperTokens = [
         'powershell.exe',
@@ -283,10 +307,13 @@ function main() {
                 source.includes("if (process.platform == 'win32')") &&
                 source.includes('function umhctlGetInstalledAgentServiceDllPath') &&
                 source.includes("SYSTEM\\\\CurrentControlSet\\\\Services\\\\' + serviceName + '\\\\Parameters', 'ServiceDll'") &&
+                source.includes("winSystemPaths.system32Path('rundll32.exe')") &&
                 source.includes("return childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshPreProtectionCaptureW', paths.capturePath]);") &&
                 source.includes('captureProc = umhctlStartPreProtectionCaptureProcess(paths);') &&
                 source.includes("return childProcess.execFile(process.execPath, ['-preprotection-capture', '--capture-path=' + paths.capturePath]);") &&
-                !source.includes("captureProc = childProcess.execFile(process.execPath, ['-preprotection-capture'")),
+                !source.includes("captureProc = childProcess.execFile(process.execPath, ['-preprotection-capture'") &&
+                !source.includes("umhctlGetEnvValue('SystemRoot')") &&
+                !source.includes("umhctlGetEnvValue('windir')")),
         preProtectionCaptureDirectWindowsEntryBlocked:
             sources.serviceMain.includes('direct -preprotection-capture is disabled. Use rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>.') &&
             sources.serviceMain.includes('rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>') &&
@@ -353,6 +380,46 @@ function main() {
             !serviceMainSections.kvmProbeHostDispatcher.includes('L"-kvm-uac-consent-trigger"') &&
             !serviceMainSections.kvmProbeHostDispatcher.includes('L"-kvm-uac-consent-target"') &&
             countOccurrences(sources.serviceMain, 'return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);') >= 9,
+        serviceMainUsesSharedExactSystemRundll32Resolver:
+            sources.serviceMain.includes('static BOOL MeshService_ResolveRundll32PathW(WCHAR* output, size_t outputLen)') &&
+            sources.serviceMain.includes('return MeshRundll32_GetSystemRundll32PathW(output, outputLen);') &&
+            !sources.serviceMain.includes('ExpandEnvironmentStringsW(L"%SystemRoot%\\\\System32\\\\rundll32.exe"') &&
+            !sources.serviceMain.includes('%SystemRoot%\\\\System32\\\\rundll32.exe'),
+        jsSystemRundll32ResolutionUsesNativeSystemDirectory:
+            sources.winSystemPaths.includes("kernel32.CreateMethod('GetSystemDirectoryW');") &&
+            sources.winSystemPaths.includes('GetSystemDirectoryW(buffer, bufferCch).Val') &&
+            sources.winSystemPaths.includes('len == 0 || len >= bufferCch') &&
+            sources.winSystemPaths.includes('system32Path only accepts a single relative file name') &&
+            !sources.winSystemPaths.includes("process.env['SystemRoot']") &&
+            !sources.winSystemPaths.includes('process.env.SystemRoot') &&
+            !sources.winSystemPaths.includes('process.env.windir') &&
+            !sources.agentInstaller.includes('process.env.SystemRoot || process.env.windir') &&
+            sources.agentInstaller.includes("rundll32Path = getOfficialSystem32Path('rundll32.exe');") &&
+            [sources.umhctl, sources.recoveryCore].every((source) => !source.includes("root.replace(/[\\\\\\/]+$/, '') + '\\\\System32\\\\rundll32.exe'")),
+        runtimeRundll32TestsUseSharedExactResolver:
+            sources.rundll32LifecycleHelper.includes('function getSystemRundll32Path()') &&
+            sources.rundll32LifecycleHelper.includes('const root = process.env.SystemRoot;') &&
+            sources.rundll32LifecycleHelper.includes("path.win32.join(root.replace(/[\\\\\\/]+$/, ''), 'System32', 'rundll32.exe')") &&
+            sources.rundll32LifecycleHelper.includes('getSystemRundll32Path,') &&
+            !sources.rundll32LifecycleHelper.includes('process.env.SystemRoot || process.env.windir') &&
+            runtimeRundll32ProbeSources.every((source) => source.includes('getSystemRundll32Path')) &&
+            runtimeRundll32ProbeSources.every((source) =>
+                !source.includes("process.env.SystemRoot || 'C:\\\\Windows'") &&
+                !source.includes('process.env.SystemRoot || "C:\\\\Windows"') &&
+                !source.includes("path.join(systemRoot, 'System32', 'rundll32.exe')") &&
+                !source.includes("path.win32.join(systemRoot, 'System32', 'rundll32.exe')")),
+        nativeSystemSvchostResolutionUsesSystemDirectory:
+            sources.stealthUtils.includes('BOOL Stealth_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)') &&
+            sources.stealthUtils.includes('systemLen = GetSystemDirectoryW(outPath, (UINT)outPathSize);') &&
+            sources.stealthUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")') &&
+            sources.stealthUtils.includes('GetFileAttributesW(outPath) == INVALID_FILE_ATTRIBUTES') &&
+            [sources.installer, sources.stealthFirewall, sources.stealthSvchost].every((source) =>
+                source.includes('Stealth_GetSystemSvchostPathW') &&
+                !source.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"') &&
+                !source.includes('L"%SystemRoot%\\\\System32\\\\svchost.exe"')) &&
+            sources.stealthSvchost.indexOf('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);') >= 0 &&
+            sources.stealthSvchost.indexOf('return TRUE;', sources.stealthSvchost.indexOf('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);')) >
+                sources.stealthSvchost.indexOf('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage fallback to %ls", exePathOut);'),
         serviceMainGenericTokenSpawnBlocked:
             !sources.serviceMain.includes('static BOOL MeshService_ResolveHostExecutablePathW') &&
             serviceMainSections.spawnExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&

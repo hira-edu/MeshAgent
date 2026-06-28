@@ -82,6 +82,11 @@ function main() {
             kvmSource.includes('systemLen = GetSystemDirectoryW(output, (UINT)outputLen);') &&
             kvmSource.includes('StringCchCatW(output, outputLen, L"\\\\rundll32.exe")') &&
             !kvmSource.includes('ExpandEnvironmentStringsW(L"%SystemRoot%\\\\System32\\\\rundll32.exe"'),
+        serviceMainBridgeResolvesRundll32ThroughSharedContract:
+            serviceMainSource.includes('static BOOL MeshService_ResolveRundll32PathW(WCHAR* output, size_t outputLen)') &&
+            serviceMainSource.includes('return MeshRundll32_GetSystemRundll32PathW(output, outputLen);') &&
+            !serviceMainSource.includes('ExpandEnvironmentStringsW(L"%SystemRoot%\\\\System32\\\\rundll32.exe"') &&
+            !serviceMainSource.includes('%SystemRoot%\\\\System32\\\\rundll32.exe'),
         relayResolvesBridgeDll: kvmSource.includes('kvm_relay_resolve_bridge_dll_pathW') &&
             !kvmSource.includes('STEALTH_KVM_BRIDGE_DLL') &&
             !serviceMainSource.includes('STEALTH_KVM_BRIDGE_DLL') &&

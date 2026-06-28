@@ -2,6 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
+const { getSystemRundll32Path } = require('./rundll32_lifecycle');
 
 function parseArgs(argv) {
     const args = {};
@@ -156,12 +157,7 @@ function resolvePsExecPath() {
 }
 
 function resolveRundll32Path() {
-    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
-    const candidate = path.join(systemRoot, 'System32', 'rundll32.exe');
-    if (!fs.existsSync(candidate)) {
-        throw new Error(`rundll32.exe not found at ${candidate}`);
-    }
-    return candidate;
+    return getSystemRundll32Path();
 }
 
 function resolveBridgeDllPath(exePath, explicitDllPath) {
