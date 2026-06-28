@@ -55,68 +55,7 @@ catch (ex)
 //
 function sessionDispatch(tsid, parent, method, args)
 {
-    //
-    // Check to see if the process owner of the current processor is root
-    //
-    var sid = undefined;
-    var stype = require('user-sessions').getProcessOwnerName(process.pid).tsid == 0 ? 1 : 0;
-    /*
-        The following is the list of possible values for stype.
-        If the current process owner is root, we set the stype to user,
-        because we cannot set/get any properties from this user, we
-        must switch to a user session.. Default behavior for stype(1)
-        is that it will context switch to the logged in user. If
-        this is not intended, then an actual user TSID must be specified, using
-        ILibProcessPipe_SpawnTypes_SPECIFIED_USER and the actual TSID
-        ------------------------------------------------------------------------
-        ILibProcessPipe_SpawnTypes_DEFAULT = 0,
-        ILibProcessPipe_SpawnTypes_USER = 1,
-        ILibProcessPipe_SpawnTypes_WINLOGON = 2,
-        ILibProcessPipe_SpawnTypes_TERM = 3,
-        ILibProcessPipe_SpawnTypes_DETACHED = 4,
-        ILibProcessPipe_SpawnTypes_SPECIFIED_USER = 5,
-        ILibProcessPipe_SpawnTypes_POSIX_DETACHED = 0x8000
-        ------------------------------------------------------------------------
-    */
-    if (stype == 1)
-    {
-        if (tsid != null)
-        {
-            stype = 5;                          // ILibProcessPipe_SpawnTypes_SPECIFIED_USER
-            sid = tsid;                         // Use the caller-selected TSID.
-        }
-        else if (tsid == null && require('MeshAgent')._tsid != null)
-        {
-            stype = 5;                          // ILibProcessPipe_SpawnTypes_SPECIFIED_USER
-            sid = require('MeshAgent')._tsid;   // If this is set, it was set via user selection UI
-        }
-        else
-        {
-            sid = tsid;                         // Set the SID to be whatever was passed in
-        }
-    }
-
-    // Spawn a child process in the appropriate user session, and relay the response back via stdout
-    var childEnv = {};
-    for (var envName in process.env) { childEnv[envName] = process.env[envName]; }
-    childEnv.win_deskutils = getJSModule('win-deskutils');
-
-    var prog = "try { addModule('win-deskutils', process.env['win_deskutils']);} catch (x) { } var x;try{x=require('win-deskutils').dispatch(" + JSON.stringify(parent) + ", " + JSON.stringify(method) + ", " + JSON.stringify(args) + ");console.log(x);}catch(z){console.log(z);process.exit(1);}process.exit(0);";
-    var child = require('child_process').execFile(process.execPath, [process.execPath.split('\\').pop(), '-b64exec', Buffer.from(prog).toString('base64')], { type: stype, uid: sid, env: childEnv });
-
-    child.stdout.str = '';
-    child.stdout.on('data', function (c) { this.str += c.toString(); });
-    child.stderr.on('data', function (c) { });
-    child.on('exit', function (c) { this.exitCode = c; });
-    child.waitExit();
-    if (child.exitCode == 0)
-    {
-        return (child.stdout.str.trim()); // If the return code was 0, then relay the response from stdout
-    }
-    else
-    {
-        throw (child.stdout.str.trim()); // If the return code was nonzero, then the stdout response is the exception that should be bubbled
-    }
+    throw ('Windows desktop utility session dispatch is disabled until an approved rundll32 contract export exists.');
 }
 
 function resolvedPromise(value)

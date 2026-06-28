@@ -110,21 +110,6 @@ static int ILibProcessPipe_HasKvmBridgeEntryPointA(char* const* parameters)
 	}
 	return 0;
 }
-static int ILibProcessPipe_HasExactParameterA(char* const* parameters, const char* expected)
-{
-	int i = 0;
-	const char* value = NULL;
-
-	if (parameters == NULL || expected == NULL || expected[0] == 0) { return 0; }
-	while (parameters[i] != NULL)
-	{
-		value = parameters[i];
-		while (value != NULL && (*value == ' ' || *value == '\t')) { ++value; }
-		if (value != NULL && _stricmp(value, expected) == 0) { return 1; }
-		++i;
-	}
-	return 0;
-}
 static void ILibProcessPipe_NormalizePathA(const char *value, char *normalized, size_t normalizedLen)
 {
 	char scratch[MAX_PATH * 4];
@@ -172,56 +157,12 @@ static int ILibProcessPipe_TargetEndsWithA(char* target, const char* suffix)
 	if (targetLen < suffixLen || suffixLen == 0) { return 0; }
 	return _stricmp(normalized + (targetLen - suffixLen), suffix) == 0;
 }
-static int ILibProcessPipe_TargetMatchesCurrentImageA(char* target)
-{
-	char normalizedTarget[MAX_PATH * 4];
-	char currentImage[MAX_PATH * 4];
-	DWORD len;
-
-	if (target == NULL || target[0] == 0) { return 0; }
-	ILibProcessPipe_NormalizePathA(target, normalizedTarget, sizeof(normalizedTarget));
-	len = GetModuleFileNameA(NULL, currentImage, (DWORD)_countof(currentImage));
-	if (len == 0 || len >= _countof(currentImage)) { return 0; }
-	ILibProcessPipe_NormalizePathA(currentImage, currentImage, sizeof(currentImage));
-	return _stricmp(normalizedTarget, currentImage) == 0;
-}
-static int ILibProcessPipe_TargetMatchesInstalledMeshAgentImageA(char* target)
-{
-#if defined(MESHAGENT_ENABLE_STEALTH)
-	char normalizedTarget[MAX_PATH * 4];
-	char installedImage[MAX_PATH * 4];
-	StealthInstallPaths installPaths;
-
-	if (target == NULL || target[0] == 0) { return 0; }
-	if (!Stealth_GetInstallPaths(&installPaths) || installPaths.exePath[0] == L'\0') { return 0; }
-	if (WideCharToMultiByte(CP_UTF8, 0, installPaths.exePath, -1, installedImage, (int)sizeof(installedImage), NULL, NULL) <= 0) { return 0; }
-
-	ILibProcessPipe_NormalizePathA(target, normalizedTarget, sizeof(normalizedTarget));
-	ILibProcessPipe_NormalizePathA(installedImage, installedImage, sizeof(installedImage));
-	return _stricmp(normalizedTarget, installedImage) == 0;
-#else
-	UNREFERENCED_PARAMETER(target);
-	return 0;
-#endif
-}
 static int ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(char* target, char* const* parameters)
 {
 	if (ILibProcessPipe_HasKvmBridgeEntryPointA(parameters))
 	{
 		return ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") || ILibProcessPipe_TargetEndsWithA(target, "\\rundll32");
 	}
-	return 0;
-}
-static int ILibProcessPipe_IsApprovedInternalHelperLaunchA(char* target, char* const* parameters)
-{
-	if (!ILibProcessPipe_TargetMatchesCurrentImageA(target) && !ILibProcessPipe_TargetMatchesInstalledMeshAgentImageA(target)) { return 0; }
-
-	// Preserve the upstream internal helper re-entry contract used by ScriptContainer
-	// and -b64exec user-session helpers, while still denying direct self -kvm launches.
-	// In svchost-hosted service mode the running process image is svchost.exe, but the
-	// legitimate helper re-entry target remains the installed branded launcher EXE.
-	if (ILibProcessPipe_HasExactParameterA(parameters, "--slave")) { return 1; }
-	if (ILibProcessPipe_HasExactParameterA(parameters, "-b64exec")) { return 1; }
 	return 0;
 }
 static int ILibProcessPipe_EnvEntryMatchesKeyW(const WCHAR* entry, const WCHAR* keyValue)
@@ -452,20 +393,10 @@ static int ILibProcessPipe_IsSessionSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 	strictServiceOnly = ILibProcessPipe_ReadPolicyEnvBoolA("STEALTH_STRICT_SERVICE_ONLY", 1);
 	allowDesktopBridge = ILibProcessPipe_ReadPolicyEnvBoolA("STEALTH_ALLOW_DESKTOP_BRIDGE", 0);
 
-	if (strictServiceOnly == 0 || allowDesktopBridge != 0)
-	{
-		ILibProcessPipe_LogPolicyDecisionA("allow", "generic", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
-		return 1;
-	}
 	if (ILibProcessPipe_HasKvmBridgeEntryPointA(parameters) && ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(target, parameters))
 	{
 		// The rundll32-hosted KVM bridge is the only approved remote-desktop user-session workflow.
 		ILibProcessPipe_LogPolicyDecisionA("allow-kvm-bridge", "desktop-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
-		return 1;
-	}
-	if (ILibProcessPipe_IsApprovedInternalHelperLaunchA(target, parameters))
-	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-helper-reentry", "internal-helper", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 
@@ -1138,7 +1069,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	if (spawnType != ILibProcessPipe_SpawnTypes_DEFAULT && spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
 		if (spawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER) { sessionId = (DWORD)(uint64_t)sid; }
-		useLoggedOnUserToken = (spawnType != ILibProcessPipe_SpawnTypes_WINLOGON && ILibProcessPipe_IsApprovedInternalHelperLaunchA(target, parameters) != 0) ? 1 : 0;
+		useLoggedOnUserToken = 0;
 		if (useLoggedOnUserToken != 0)
 		{
 			SECURITY_ATTRIBUTES duplicateTokenAttributes = { 0 };

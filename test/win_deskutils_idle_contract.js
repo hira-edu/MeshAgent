@@ -45,9 +45,11 @@ function main() {
             moduleSource.includes("if (seconds < 0) { try { seconds = idle_getCurrentSessionSeconds(); } catch (ex4) { } }"),
         sessionDispatchDoesNotPolluteStdout:
             !moduleSource.includes("console.log('stype: ' + stype);"),
-        sessionDispatchEmbedsWinDeskutilsForChild:
-            moduleSource.includes("childEnv.win_deskutils = getJSModule('win-deskutils');") &&
-            moduleSource.includes("addModule('win-deskutils', process.env['win_deskutils'])"),
+        sessionDispatchDeniesChildProcessBridge:
+            moduleSource.includes('Windows desktop utility session dispatch is disabled until an approved rundll32 contract export exists.') &&
+            !moduleSource.includes("childEnv.win_deskutils = getJSModule('win-deskutils');") &&
+            !moduleSource.includes("addModule('win-deskutils', process.env['win_deskutils'])") &&
+            !moduleSource.includes("'-b64exec'"),
         nativeRuntimeEmbedsWinDeskutils:
             polyfillsSource.includes("addCompressedModule('win-deskutils'"),
         embeddedWinDeskutilsMatchesSource:

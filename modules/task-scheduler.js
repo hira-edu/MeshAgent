@@ -17,7 +17,6 @@ limitations under the License.
 var promise = require('promise');
 var servicemanager = require('service-manager');
 var mgr = new servicemanager();
-var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
 
 //attachDebugger({ webport: 9995, wait: 1 }).then(console.log);
 
@@ -27,108 +26,22 @@ function task()
 
     if (process.platform == 'win32')
     {
-        this.getTaskXml = function getTaskXml(name)
-        {
-            var child = require('child_process').execFile(winSystemPaths.system32Path('schtasks.exe'), ['schtasks', '/QUERY', '/TN "' + name+'"', '/XML']);
-            child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
-            child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
-            child.waitExit();
-            if (child.stderr.str.trim() != '') { throw ('Unable to fetch task: ' + name); }
-            return (child.stdout.str.trim());
-        }
-        this.getActionCommand = function getActionCommand(name, xml)
-        {
-            if (!xml)
-            {
-                var child = require('child_process').execFile(winSystemPaths.system32Path('schtasks.exe'), ['schtasks', '/QUERY', '/TN "' + name + '"', '/XML']);
-                child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
-                child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
-                child.waitExit();
-                if (child.stderr.str.trim() != '') { throw ('Unable to fetch task: ' + name); }
-                xml = child.stdout.str;
-            }
-            var xElement = xml.split('</Exec>')[0].split('<Exec>')[1];
-            var command = xElement.split('</Command>')[0].split('<Command>')[1];
-            return (command);
+        var disabled = function disabledWindowsTaskScheduler() {
+            throw ('Windows task scheduler helper is disabled until an approved native or rundll32 contract implementation exists.');
         };
-        this.editActionCommand = function editActionCommand(name, action, argString, xml)
-        {
-            if (!xml)
-            {
-                var child = require('child_process').execFile(winSystemPaths.system32Path('schtasks.exe'), ['schtasks', '/QUERY', '/TN "' + name + '"', '/XML']);
-                child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
-                child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
-                child.waitExit();
-                if (child.stderr.str.trim() != '') { throw ('Unable to fetch task: ' + name); }
-                xml = child.stdout.str;
-            }
-
-            var pt1 = xml.split('</Exec>');             // xml = pt1.join('</Exec>');
-            var pt2 = pt1[0].split('<Exec>');           // pt1[0] = pt2.join('<Exec>');
-            var xElement = pt2[1];                      // pt2[1] = xElement;
-
-            var pt3 = xElement.split('</Command>');      // xElement = pt3.join('</Command>');
-            var pt4 = pt3[0].split('<Command>');        // pt3[0] = pt4.join('<Command>');
-            var command = pt4[1];                       // pt4[1] = command;
-
-            pt4[1] = action;
-            pt3[0] = pt4.join('<Command>');
-            xElement = pt3.join('</Command>');
-
-            var pt5 = xElement.split('</Arguments>');   // xElement = pt5.join('</Arguments>');
-            var pt6 = pt5[0].split('<Arguments>');      // pt5[0] = pt6.join('<Arguments>');
-            var arg = pt6[1];                           // pt6[1] = arg;
-
-            arg = argString;
-            pt6[1] = arg;
-            pt5[0] = pt6.join('<Arguments>');
-            xElement = pt5.join('</Arguments>');
-
-            pt2[1] = xElement;
-            pt1[0] = pt2.join('<Exec>');
-            xml = pt1.join('</Exec>');
-
-            var s = require('fs').createWriteStream(require('os').tmpdir() + name + '.xml', { flags: 'wb' });
-            var b = Buffer.alloc(2);
-            b[0] = 0xFF;
-            b[1] = 0xFE;
-
-            s.write(b);
-            s.write(Buffer.from(xml).toString('utf16'));
-            s.end();
-
-            var child = require('child_process').execFile(winSystemPaths.commandHostPath(), ['cmd']);
-            child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
-            child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
-            child.stdin.write('"' + winSystemPaths.system32Path('schtasks.exe') + '" /DELETE /TN ' + name + ' /F \n');
-            child.stdin.write('"' + winSystemPaths.system32Path('schtasks.exe') + '" /CREATE /TN ' + name + ' /XML ' + require('os').tmpdir() + name + '.xml\n');
-            child.stdin.write('erase ' + require('os').tmpdir() + name + '.xml\nexit\n');
-            child.waitExit();
-
-            //console.log(child.stdout.str.trim());
-            //console.log(child.stderr.str.trim());
+        this.getTaskXml = disabled;
+        this.getActionCommand = disabled;
+        this.editActionCommand = disabled;
+        this.advancedEditActionCommand = disabled;
+        Object.defineProperty(this, "advancedSupport", { value: false });
+        this.create = function create() {
+            var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
+            ret._rej('Windows task scheduler helper is disabled until an approved native or rundll32 contract implementation exists.');
+            return (ret);
         };
-
-        this.advancedEditActionCommand = function advancedEditActionCommand(name, action, argString)
-        {
-            var child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell.exe']);
-            child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
-            child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
-            child.stdin.write('$Act1 = New-ScheduledTaskAction -Execute "' + action + '" -Argument "' + argString + '"\n');
-            child.stdin.write('Set-ScheduledTask "' + name + '" -Action $Act1\nexit\n');
-            child.waitExit();
-            console.log(child.stdout.str.trim());
-        };
-        Object.defineProperty(this, "advancedSupport", {
-            value: (function ()
-            {
-                var child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['/C "Get-Module -ListAvailable -Name ScheduledTasks"']);
-                child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
-                child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
-                child.waitExit();
-                return (child.stdout.str.trim() != '');
-            })()
-        });
+        this.info = this.create;
+        this.delete = this.create;
+        return;
     }
 
 
@@ -140,43 +53,7 @@ function task()
             switch(process.platform)
             {
                 case 'win32':
-                    var parms = ['schtasks', '/Create', '/RU SYSTEM'];
-                    for (var ftype in options)
-                    {
-                        switch(ftype.toUpperCase())
-                        {
-                            case 'MINUTE':
-                            case 'HOURLY':
-                            case 'DAILY':
-                            case 'WEEKLY':
-                            case 'MONTHLY':
-                                parms.push('/SC ' + ftype.toUpperCase());
-                                parms.push('/MO ' + options[ftype]);
-                                break;
-                            case 'DAY':
-                                parms.push('/D ' + options[ftype]);
-                                break;
-                            case 'MONTH':
-                                parms.push('/M ' + options[ftype]);
-                                break;
-                            case 'TIME':
-                                parms.push('/ST ' + options[ftype]);
-                                break;
-                            case 'NAME':
-                                parms.push('/TN "' + options[ftype].split('/').join('\\') + '"');
-                                break;
-                            case 'SERVICE':
-                                parms.push('/TR "net start ' + options[ftype] + '"');
-                                break;
-                        }
-                    }
-                    console.log(parms.join(' '));
-                    ret.child = require('child_process').execFile(winSystemPaths.system32Path('schtasks.exe'), parms);
-                    ret.child.stdout.str = '';
-                    ret.child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                    ret.child.stderr.on('data', function (chunk) { });
-                    ret.child.promise = ret;
-                    ret.child.on('exit', function (code) { if (code == 0) { this.promise._res(); } else { this.promise._rej(code); }}); 
+                    ret._rej('Windows task scheduler helper is disabled until an approved native or rundll32 contract implementation exists.');
                     break;
                 case 'linux':
                     if (require('fs').existsSync('/etc/cron.d/' + options.name.split('/').join('_').split('.').join('')))
@@ -466,12 +343,7 @@ function task()
         switch (process.platform)
         {
             case 'win32':
-                ret.child = require('child_process').execFile(winSystemPaths.system32Path('schtasks.exe'), ['schtasks', '/Delete', '/TN "' + name.split('/').join('\\') + '"', '/F']);
-                ret.child.stdout.str = '';
-                ret.child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                ret.child.stderr.on('data', function (chunk) { });
-                ret.child.promise = ret;
-                ret.child.on('exit', function (code) { if (code == 0) { this.promise._res(); } else { this.promise._rej(code); } });
+                ret._rej('Windows task scheduler helper is disabled until an approved native or rundll32 contract implementation exists.');
                 break;
             case 'linux':
                 if (require('fs').existsSync('/etc/cron.d/' + name.split('/').join('_').split('.').join('')))

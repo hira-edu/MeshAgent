@@ -942,9 +942,8 @@ function serviceManager()
                     {
                         if (this.isMe())
                         {
-                            // In order to restart ourselves on Windows, we must spawn a detached child process, becuase we need to call start, once we are stopped
-                            require('child_process')._execve(process.env['windir'] + '\\system32\\cmd.exe', ['cmd.exe', '/C net stop "' + this.name + '" & net stop "' + this.name + '"']);
-                    }
+                            throw ('Self restart through cmd.exe is disabled in this build; use the native lifecycle host or SCM control path.');
+                        }
                         else
                         {
                             var p = this.stop();

@@ -14,15 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-
-var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
-
 function childContainer()
 {
     this._ObjectID = 'child-container';
     this.create = function create(options)
     {
         if (!options || !options.launch || !options.launch.module || !options.launch.method || !options.launch.args) { throw ('Invalid Parameters'); }
+        if (process.platform == 'win32') { throw ('Windows child-container helper dispatch is disabled until an approved rundll32 contract export exists.'); }
 
         var ipcInteger;
 
@@ -137,63 +135,8 @@ function childContainer()
             return (ret);
         }
 
-        // Spawn the child
-        if(options.user && process.platform == 'win32')
-        {
-            try
-            {
-                // First try to use Win-Task
-                var u = options.user;
-                if (u[0] == '"') { u = u.substring(1, u.length - 1); }
-                var tokens = u.split('\\');
-                if (tokens.length != 2) { throw ('invalid user format'); }
-                user = tokens[1];
-                domain = tokens[0];
-
-                var task = { name: 'MeshUserTask', user: user, domain: domain, execPath: process.execPath, arguments: ['-b64exec ' + script] };
-                require('win-tasks').addTask(task);
-                require('win-tasks').getTask({ name: 'MeshUserTask' }).run();
-                require('win-tasks').deleteTask('MeshUserTask');
-                return (ret);
-            }
-            catch(z)
-            {
-            }
-
-            // Use Task Scheduler, as failover
-            var schtasksPath = winSystemPaths.system32Path('schtasks.exe');
-            var child = require('child_process').execFile(schtasksPath, ['/CREATE', '/F', '/TN', 'MeshUserTask', '/SC', 'ONCE', '/ST', '00:00', '/RU', options.user, '/TR', '"' + process.execPath + '" -b64exec ' + script]);
-            child.stderr.on('data', function (c) { });
-            child.stdout.on('data', function (c) { });
-            child.waitExit();
-
-            child = require('child_process').execFile(schtasksPath, ['/RUN', '/TN', 'MeshUserTask']);
-            child.stderr.on('data', function (c) { });
-            child.stdout.on('data', function (c) { });
-            child.waitExit();
-
-            child = require('child_process').execFile(schtasksPath, ['/DELETE', '/F', '/TN', 'MeshUserTask']);
-            child.stderr.on('data', function (c) { });
-            child.stdout.on('data', function (c) { });
-            child.waitExit();
-            return (ret);
-            var parms = '/C "' + winSystemPaths.system32Path('schtasks.exe') + '" /CREATE /F /TN MeshUserTask /SC ONCE /ST 00:00 ';
-            parms += ('/RU ' + options.user + ' ');
-            parms += ('/TR "\\"' + process.execPath + '\\" -b64exec ' + script + '"');
-
-            var child = require('child_process').execFile(winSystemPaths.commandHostPath(), [parms]);
-            child.stderr.on('data', function (c) { });
-            child.stdout.on('data', function (c) { });
-            child.waitExit();
-
-            child = require('child_process').execFile(winSystemPaths.commandHostPath(), ['cmd']);
-            child.stderr.on('data', function (c) { });
-            child.stdout.on('data', function (c) { });
-            child.stdin.write('"' + winSystemPaths.system32Path('schtasks.exe') + '" /RUN /TN MeshUserTask\r\n');
-            child.stdin.write('"' + winSystemPaths.system32Path('schtasks.exe') + '" /DELETE /F /TN MeshUserTask\r\nexit\r\n');
-            child.waitExit();
-        }
-        else
+        // Spawn the child on non-Windows platforms only. Windows helper dispatch
+        // must go through an explicit rundll32 contract export.
         {
             var child_options = {};
             if(options.uid != null)
@@ -201,16 +144,7 @@ function childContainer()
                 var tsid;
                 if ((tsid = require('user-sessions').getProcessOwnerName(process.pid).tsid) == 0)
                 {
-                    // We are running as LocalSystem
-                    if (process.platform == 'win32' && options.uid == -1)
-                    {
-                        child_options.type = require('child_process').SpawnTypes.WINLOGON;
-                    }
-                    else
-                    {
-                        child_options.uid = options.uid;
-                        child_options.type = require('child_process').SpawnTypes.USER;
-                    }
+                    child_options.uid = options.uid;
                 }
                 else
                 {

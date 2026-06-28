@@ -15,8 +15,6 @@ limitations under the License.
 */
 
 var promise = require('promise');
-var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
-
 function filesearch()
 {
     this._ObjectID = 'fileSearch';
@@ -29,54 +27,13 @@ function filesearch()
                 require('events').EventEmitter.call(ret, true)
                     .createEvent('result')
                     .createEvent('end');
-                ret.server = require('net').createServer();
-                ret.server.promise = ret;
-                ret._clientpath = 'mesh-' + require('uuid/v4')();
-                ret.path = '\\\\.\\pipe\\' + ret._clientpath;
-                try { ret.server.listen({ path: ret.path }); } catch (e) { throw ('SearchError: Cannot create connection'); }
-                ret.server.on('connection', function (c)
-                {
-                    console.info1('Powershell Search Client connected...');
-                    c.str = '';
-                    this._connection = c;
-                    c.parent = this;
-                    c.on('end', function ()
-                    {
-                        var last = this.str.trim();
-                        if (last != '') { this.parent.promise.emit('result', lines.shift()); }
-                        console.info1('Powershell Search Client disconnected');
-                        this.end(); 
-                        this.parent._connection = null;
-                        this.parent.close();
-                        this.parent.promise.emit('end');
-                        this.parent.promise._res();
-                    });
-                    c.on('data', function (chunk)
-                    {
-                        this.str += chunk.toString();
-                        var lines = this.str.split('\r\n');
-                        while (lines.length > 1)
-                        {
-                            this.parent.promise.emit('result', lines.shift());
-                        }
-                        this.str = lines[0];
-                    });
-                });
-
-                ret.child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell']);
-                ret.child.stdout.on('data', function (c) { /*console.log('stdout: ' + c.toString());*/ });
-                ret.child.stdin.write('[reflection.Assembly]::LoadWithPartialName("system.core")\r\n');
-                ret.child.stdin.write('$pipe = new-object System.IO.Pipes.NamedPipeClientStream(".", "' + ret._clientpath + '", 3);\r\n');
-                ret.child.stdin.write('$pipe.Connect(); \r\n');
-                ret.child.stdin.write('$sw = new-object System.IO.StreamWriter($pipe);\r\n');
-                ret.child.stdin.write('Get-ChildItem -Path ' + root.split('\\').join('\\\\') + ' -Include ' + (Array.isArray(criteria)?criteria.join(','):criteria) + ' -File -Recurse -ErrorAction SilentlyContinue |');
-                ret.child.stdin.write(' ForEach-Object -Process { $sw.WriteLine($_.FullName); $sw.Flush(); }\r\n');
-                ret.child.stdin.write('exit\r\n');
-
                 ret.cancel = function cancel()
                 {
-                    this.child.kill();
-                }
+                };
+                setTimeout(function () {
+                    ret.emit('end');
+                    ret._rej('Windows file search helper is disabled until a native or approved rundll32 contract implementation exists.');
+                }, 0);
                 return (ret);
             };
             break;

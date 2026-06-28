@@ -643,58 +643,7 @@ function create(title, caption, username, options)
 
     // Need to dispatch to user session to display dialog
     var ret = new promise(promise.defaultInit);
-    ret._qmsg = [];
-    ret._childready = false;
-    ret.options = { launch: { module: 'win-dialog', method: '_child', args: [] }, uid: options.uid };
-
-    ret._ipc = require('child-container').create(ret.options);
-    ret._ipc.master = ret;
-    ret._ipc.once('exit', function () { console.info1('user consent child exited'); });
-    ret._ipc.on('ready', function ()
-    {
-        this.master._childready = true;
-        this.descriptorMetadata = 'win-dialog';
-        this.message({ command: 'dialog', title: title, caption: caption, username: username, options: options });
-        while(this.master._qmsg.length>0)
-        {
-            this.message({ command: 'appendMessage', message: this.master._qmsg.shift() });
-        }
-    });
-    ret._ipc.on('message', function (msg)
-    {
-        try
-        {
-            switch (msg.command)
-            {
-                case 'ok':
-                    this.master.resolve(msg.always);
-                    break;
-                case 'log':
-                    console.log(msg.text);
-                    break;
-                default:
-                    break;
-            }
-        }
-        catch (ff)
-        {
-        }
-    });
-    ret.close = function close()
-    {
-        this._ipc.exit();
-    }
-    ret.addMessage = function addMessage(msg)
-    {
-        if(this._childready)
-        {
-            this._ipc.message({ command: 'appendMessage', message: msg });
-        }
-        else
-        {
-            this._qmsg.push(msg);
-        }
-    }
+    ret.reject('Windows dialog helper dispatch is disabled until an approved rundll32 contract export exists.');
     return (ret);
 }
 
@@ -746,37 +695,7 @@ function getScaledImage(b64, width, height, background)
 
     return (null);
 }
-function _child()
-{
-    global.master = require('child-container');
-    global.master.on('message', function (msg)
-    {
-        switch (msg.command)
-        {
-            case 'dialog':
-                global.dialogPromise = createLocal(msg.title, msg.caption, msg.username, msg.options);
-                global.dialogPromise.then(function (always)
-                {
-                    global.master.message({ command: 'ok' });
-                }, function (msg)
-                {
-                    global.master.message({ command: 'ok' });
-                }).finally(function (msg)
-                {
-                    process._exit();
-                });
-                break;
-            case 'appendMessage':
-                if (global.dialogPromise)
-                {
-                    global.dialogPromise.addMessage(msg.message);
-                }
-                break;
-        }
-    });
-}
-
 module.exports =
     {
-        create: create, _child: _child
+        create: create
     };

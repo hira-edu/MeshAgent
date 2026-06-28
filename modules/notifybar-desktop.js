@@ -215,20 +215,10 @@ function windows_notifybar_system(title, tsid, options)
 {
     var ret = {};
     if (!options) { options = {}; }
-
-    var script = Buffer.from("require('notifybar-desktop').DefaultPinned=" + require('notifybar-desktop').DefaultPinned + ";require('notifybar-desktop').MaxWidth=" + require('notifybar-desktop').MaxWidth + ";require('notifybar-desktop')('" + title + "', " + JSON.stringify(options) + ").on('close', function(){process._exit();});require('DescriptorEvents').addDescriptor(require('util-descriptors').getProcessHandle(" + process.pid + ")).on('signaled', function(){process._exit();});").toString('base64');
-
     require('events').EventEmitter.call(ret, true)
         .createEvent('close')
-        .addMethod('close', function close() { this.child.kill(); });
-
-    ret.child = require('child_process').execFile(process.execPath, [process.execPath.split('\\').pop(), '-b64exec', script], { type: 1, uid: tsid });
-    ret.child.descriptorMetadata = 'notifybar-desktop';
-    ret.child.parent = ret;
-    ret.child.stdout.on('data', function (c) { });
-    ret.child.stderr.on('data', function (c) { });
-    ret.child.on('exit', function (code) { this.parent.emit('close', code); });
-
+        .addMethod('close', function close() { this.emit('close', 'DISABLED'); });
+    setTimeout(function () { ret.emit('close', 'Windows notifybar helper dispatch is disabled until an approved rundll32 contract export exists.'); }, 0);
     return (ret);
 }
 

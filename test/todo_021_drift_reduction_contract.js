@@ -82,16 +82,18 @@ function main() {
             !processPipeSource.includes('MESHAGENT_SELF_SPAWN_PATH'),
         processPipeRestrictsBridgeToRundll32Export: processPipeSource.includes('ILibProcessPipe_IsApprovedDesktopBridgeLaunchA') &&
             processPipeSource.includes('allow-kvm-bridge') &&
-            processPipeSource.includes('KvmSessionBridgeW'),
-        processPipePreservesInternalHelperReentry:
-            processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
-            processPipeSource.includes('allow-helper-reentry') &&
-            processPipeSource.includes('ILibProcessPipe_TargetMatchesInstalledMeshAgentImageA') &&
-            processPipeSource.includes('Stealth_GetInstallPaths(&installPaths)') &&
-            processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "--slave")') &&
-            processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "-b64exec")'),
+            processPipeSource.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A'),
+        processPipeDeniesInternalHelperReentry:
+            !processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
+            !processPipeSource.includes('allow-helper-reentry') &&
+            !processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "--slave")') &&
+            !processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "-b64exec")') &&
+            processPipeSource.includes('blocked-user-session'),
+        processPipeDoesNotAllowGenericUserSessionByEnv:
+            !processPipeSource.includes('ILibProcessPipe_LogPolicyDecisionA("allow", "generic"') &&
+            !processPipeSource.includes('strictServiceOnly == 0 || allowDesktopBridge != 0'),
         helperMonitorRequiresApprovedBridgeCommand: watchdogSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand') &&
-            watchdogSource.includes('KvmSessionBridgeW') &&
+            watchdogSource.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W') &&
             watchdogSource.includes('\\rundll32.exe'),
         helperMonitorLogsApprovedBridgePolicy: watchdogSource.includes('Helper_LogPolicyDecision(L"allow-kvm-bridge"') &&
             watchdogSource.includes('Helper_LogPolicyDecision(L"deny"'),
@@ -100,6 +102,8 @@ function main() {
         serviceMainRejectsDirectKvmExeModes: serviceMainSource.includes('direct KVM slave execution is disabled') &&
             serviceMainSource.includes('MeshService_IsRunningUnderRundll32()') &&
             serviceMainSource.includes('kvm_server_mainloop((void*)parm);'),
+        serviceMainRejectsDirectHelperReentry: serviceMainSource.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
+            serviceMainSource.includes('Use an approved rundll32 contract export'),
         integrationRejectsOutOfContractHelperMonitor: integrationSource.includes('Helper monitor rejected: configuration is outside the retained rundll32 desktop-bridge contract') &&
             integrationSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand('),
         agentcoreDoesNotPublishAuthorizedSelfSpawnPath: !agentcoreSource.includes('MESHAGENT_SELF_SPAWN_PATH'),

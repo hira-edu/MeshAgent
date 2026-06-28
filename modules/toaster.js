@@ -21,7 +21,6 @@ limitations under the License.
 
 
 var promise = require('promise');
-var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
 
 if (process.platform == 'linux' || process.platform == 'darwin' || process.platform == 'freebsd')
 {
@@ -68,67 +67,7 @@ function Toaster()
         {
             case 'win32':
                 {
-                    //
-                    // For Windows, we will use powershell to display the toast. We tried using Shell Notify Icon, but ran into stability issues with it.
-                    // The Powershell interface for it seemed much more reliable
-                    //
-
-                    var cid;
-                    retVal.options = { env: { _title: title, _caption: caption } };   // We are putting these values into the environment, becuase Powershell has an issue with passing UTF8 values otherwise
-                    for (var c1e in process.env)
-                    {
-                        retVal.options.env[c1e] = process.env[c1e];
-                    }
-                    try
-                    {
-                        retVal.options.uid = tsid == null ? require('user-sessions').consoleUid() : tsid;
-                        if (retVal.options.uid == (cid = require('user-sessions').getProcessOwnerName(process.pid).tsid))
-                        {
-                            delete retVal.options.uid;
-                        }
-                        else
-                        {
-                            if(tsid != null && cid != 0)
-                            {
-                                retVal._rej('Insufficient permission to display toast as uid: ' + tsid);
-                                return (retVal);
-                            }
-                            retVal.options.type = require('child_process').SpawnTypes.USER;
-                        }
-                    }
-                    catch (ee)
-                    {
-                        retVal._rej('Cannot display user notification when a user is not logged in');
-                        return (retVal);
-                    }
-
-                    // Spawn a powershell process so we can setup everything to display the toast
-                    retVal.child = require('child_process').execFile(winSystemPaths.powerShellPath(), ['powershell', '-noprofile', '-nologo', '-command', '-'], retVal.options);
-                    retVal.child.descriptorMetadata = 'toaster';
-                    retVal.child.toast = retVal;
-                    retVal.child.stdout.stdin = retVal.child.stdin;
-                    retVal.child.stderr.stdin = retVal.child.stdin;
-                    retVal.child.stdout.on('data', function (c) { if (c.toString().includes('<DISMISSED>')) { this.stdin.write('exit\n'); } }); // When the toast is dismissed, exit the process
-                    retVal.child.stderr.once('data', function (c) { this.stdin.write('$objBalloon.dispose();exit\n'); });
-                    retVal.child.stdin.write('[System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms")\r\n');  // Init
-                    retVal.child.stdin.write('$objBalloon = New-Object System.Windows.Forms.NotifyIcon\r\n');                   // Create the NotifyIcon object
-                    retVal.child.stdin.write('$objBalloon.Icon = [System.Drawing.SystemIcons]::Information\r\n');               // Set the icon type
-                    retVal.child.stdin.write('$objBalloon.Visible = $True\r\n');
-                    retVal.child.stdin.write('Register-ObjectEvent -InputObject $objBalloon -EventName BalloonTipClosed -Action { $objBalloon.dispose();Write-Host "<`DISMISSED`>" }') // Set an event handler for when the toast is dismissed
-                    retVal.child.stdin.write('$objBalloon.ShowBalloonTip(10000, $env:_title, $env:_caption, 0)\r\n');           // Show the toast
-                    retVal.child.timeout = setTimeout(function (c)
-                    {
-                        // Set a timeout to cleanup after 10 seconds. This will cause the process to cleanup if the user doesn't interact with the toast
-                        c.timeout = null;
-                        c.stdin.write('$objBalloon.dispose();exit\n');
-                    }, 10000, retVal.child);
-                    retVal.child.on('exit', function ()
-                    {
-                        // Handler that is called when the powershell process has exited
-                        if (this.timeout != null) { clearTimeout(this.timeout); }
-                        this.toast._res('DISMISSED');
-                    });
-                    
+                    retVal._rej('Windows toast helper is disabled until an approved native or rundll32 contract implementation exists.');
                     return (retVal);
                 }
                 break;

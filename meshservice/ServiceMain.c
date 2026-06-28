@@ -8988,9 +8988,6 @@ static int MeshService_IsManagedConsoleOperation(int argc, char **argv)
 		if (strcasecmp(argv[i], "-resetnodeid") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-updaterversion") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-import") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-exec") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-b64exec") == 0) { return 1; }
-		if (strcasecmp(argv[i], "--slave") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-preprotection-capture") == 0 || strcasecmp(argv[i], "--preprotection-capture") == 0) { return 1; }
 		if (strcasecmp(argv[i], "--selftest") == 0 || strncasecmp(argv[i], "--selftest=", 11) == 0) { return 1; }
 	}
@@ -9706,6 +9703,15 @@ int wmain(int argc, char* wargv[])
 		integratedJavaScript = ILibString_Copy("require('code-utils').shrink();process.exit();", 0);
 		integragedJavaScriptLen = (int)strnlen_s(integratedJavaScript, sizeof(ILibScratchPad));
 	}
+
+#if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+	if (MeshService_HasArg(argc, argv, "-exec") || MeshService_HasArg(argc, argv, "-b64exec") || MeshService_HasArg(argc, argv, "--slave"))
+	{
+		fprintf(stderr, "MeshAgent: direct -exec/-b64exec/--slave helper re-entry is disabled in this build. Use an approved rundll32 contract export.\r\n");
+		wmain_free(argv);
+		return ERROR_NOT_SUPPORTED;
+	}
+#endif
 
 	if (argc > 2 && strcmp(argv[1], "-exec") == 0 && integragedJavaScriptLen == 0)
 	{

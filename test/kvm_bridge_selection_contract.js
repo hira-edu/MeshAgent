@@ -56,13 +56,15 @@ function main() {
         policyAllowsBridgeEntryPoint: processPipeSource.includes('allow-kvm-bridge') &&
             processPipeSource.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
             rundll32ContractSource.includes('#define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"'),
-        policyAllowsInternalHelperReentry:
-            processPipeSource.includes('allow-helper-reentry') &&
-            processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
-            processPipeSource.includes('ILibProcessPipe_TargetMatchesInstalledMeshAgentImageA') &&
-            processPipeSource.includes('Stealth_GetInstallPaths(&installPaths)') &&
-            processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "--slave")') &&
-            processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "-b64exec")'),
+        policyDeniesInternalHelperReentry:
+            !processPipeSource.includes('allow-helper-reentry') &&
+            !processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
+            !processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "--slave")') &&
+            !processPipeSource.includes('ILibProcessPipe_HasExactParameterA(parameters, "-b64exec")') &&
+            processPipeSource.includes('blocked-user-session'),
+        policyDoesNotAllowGenericUserSessionByEnv:
+            !processPipeSource.includes('ILibProcessPipe_LogPolicyDecisionA("allow", "generic"') &&
+            !processPipeSource.includes('strictServiceOnly == 0 || allowDesktopBridge != 0'),
         policyBlocksStandaloneAgentSelfSpawnInUserSessions:
             !processPipeSource.includes('allow-agent-self') &&
             !processPipeSource.includes('ILibProcessPipe_IsApprovedAgentSelfSpawnLaunchA') &&
@@ -98,6 +100,8 @@ function main() {
         serviceMainRejectsDirectKvmExeModes: serviceMainSource.includes('direct KVM slave execution is disabled') &&
             serviceMainSource.includes('MeshService_IsRunningUnderRundll32()') &&
             serviceMainSource.includes('kvm_server_mainloop((void*)parm);'),
+        serviceMainRejectsDirectHelperReentry: serviceMainSource.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
+            serviceMainSource.includes('Use an approved rundll32 contract export'),
         probesDoNotForceBridgePreference: !serviceMainSource.includes('SetEnvironmentVariableW(L"STEALTH_KVM_PREFER_BRIDGE", L"1");')
     };
 

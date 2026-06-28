@@ -9294,7 +9294,16 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 	}
 #endif
 
-	if ((paramLen == 1 && strcmp(param[0], "--slave") == 0) || (paramLen == 2 && strcmp(param[1], "--slave") == 0)) { MeshAgent_Slave(agentHost); return 0; }
+	if ((paramLen == 1 && strcmp(param[0], "--slave") == 0) || (paramLen == 2 && strcmp(param[1], "--slave") == 0))
+	{
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+		fprintf(stderr, "MeshAgent: direct --slave helper re-entry is disabled in this build. Use an approved rundll32 contract export.\r\n");
+		return 1;
+#else
+		MeshAgent_Slave(agentHost);
+		return 0;
+#endif
+	}
 #ifndef __APPLE__
 	if (paramLen == 2 && strcmp(param[1], "--netinfo") == 0) { char* data; int len = MeshInfo_GetSystemInformation(&data); if (len > 0) { printf("%s\r\n", data); free(data); } return 0; }
 #endif

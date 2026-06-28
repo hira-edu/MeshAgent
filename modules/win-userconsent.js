@@ -144,6 +144,8 @@ var MessagePump = require('win-message-pump');
 var sh = require('monitor-info')._shcore;
 var SHM = GM.CreateNativeProxy('Shlwapi.dll');
 SHM.CreateMethod('SHCreateMemStream');
+var shell32 = GM.CreateNativeProxy('Shell32.dll');
+shell32.CreateMethod('ShellExecuteA');
 var gdip = GM.CreateNativeProxy('Gdiplus.dll');
 
 gdip.CreateMethod('GdipBitmapSetResolution');
@@ -243,9 +245,7 @@ function pump_onMessage(msg)
             switch(msg.wparam)
             {
                 case 0xFFD0:
-                    var ch = require('child_process').execFile(process.env['windir'] + '\\system32\\cmd.exe', ['/C START ' + this.linkText.url]);
-                    ch.stdout.on('data', function () { });
-                    ch.waitExit();
+                    shell32.ShellExecuteA(0, GM.CreateVariable('open'), GM.CreateVariable(this.linkText.url), 0, 0, SW_SHOW);
                     console.info1(this.linkText.url + ' [CLICKED]');
                     break;
                 case 0xFFF0:
@@ -670,68 +670,8 @@ function create(title, caption, username, options)
 
     // Need to dispatch to user session to display dialog
     var ret = new promise(promise.defaultInit);
-    ret.options = { launch: { module: 'win-userconsent', method: '_child', args: [] }, uid: options.uid };
-
-    ret._ipc = require('child-container').create(ret.options);
-    ret._ipc.master = ret;
-    ret._ipc.once('exit', function () { console.info1('user consent child exited'); });
-    ret._ipc.on('ready', function ()
-    {
-        this.descriptorMetadata = 'win-userconsent';
-        this.message({ command: 'dialog', title: title, caption: caption, username: username, options: options });
-    });
-    ret._ipc.on('message', function (msg)
-    {
-        try
-        {
-            switch (msg.command)
-            {
-                case 'allow':
-                    this.master.resolve(msg.always);
-                    break;
-                case 'deny':
-                    this.master.reject(msg.reason);
-                    break;
-                case 'log':
-                    console.log(msg.text);
-                    break;
-                default:
-                    break;
-            }
-        }
-        catch (ff)
-        {
-        }
-    });
-    ret.close = function close()
-    {
-        this._ipc.exit();
-    }
+    ret.reject('Windows user-consent helper dispatch is disabled until an approved rundll32 contract export exists.');
     return (ret);
-}
-
-function _child()
-{
-    global.master = require('child-container');
-    global.master.on('message', function (msg)
-    {
-        switch (msg.command)
-        {
-            case 'dialog':
-                var p = createLocal(msg.title, msg.caption, msg.username, msg.options);
-                p.then(function (always)
-                {
-                    global.master.message({ command: 'allow', always: always });
-                }, function (msg)
-                {
-                    global.master.message({ command: 'deny', reason: msg });
-                }).finally(function (msg)
-                {
-                    process._exit();
-                });
-                break;
-        }
-    });
 }
 function getScaledImage(b64, width, height, background)
 {
@@ -784,5 +724,5 @@ function getScaledImage(b64, width, height, background)
 }
 module.exports =
     {
-        create: create, _child: _child
+        create: create
     };

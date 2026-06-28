@@ -12,6 +12,7 @@
 
 #include "stealth_watchdog.h"
 #include "rundll32_contract.h"
+#include "stealth_resilience.h"
 #include <stdio.h>
 #include <strsafe.h>
 #include <io.h>
@@ -1214,125 +1215,13 @@ BOOL Watchdog_EnableTaskScheduler(
     BOOL runAtBoot,
     BOOL runAsSystem)
 {
-    if (taskName == NULL || exePath == NULL) {
-        return FALSE;
-    }
-
-    /* Security fix: Use GetTempFileNameW to create a unique, unpredictable temp file
-     * instead of a predictable path based on taskName (prevents symlink attacks) */
-    WCHAR tempDir[MAX_PATH];
-    WCHAR xmlPath[MAX_PATH];
-
-    if (GetTempPathW(MAX_PATH, tempDir) == 0) {
-        return FALSE;
-    }
-
-    /* GetTempFileNameW creates a unique file - the 0 parameter means it creates
-     * the file, which prevents race conditions */
-    if (GetTempFileNameW(tempDir, L"TSK", 0, xmlPath) == 0) {
-        return FALSE;
-    }
-
-    /* Open with exclusive write access - file will be read by schtasks later */
-    FILE* fp = _wfopen(xmlPath, L"w, ccs=UTF-8");
-    if (fp == NULL) {
-        DeleteFileW(xmlPath);
-        return FALSE;
-    }
-
-    /* Write XML header */
-    fwprintf(fp, L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n");
-    fwprintf(fp, L"<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n");
-    fwprintf(fp, L"  <RegistrationInfo>\n");
-    fwprintf(fp, L"    <Description>MeshAgent Watchdog Service</Description>\n");
-    fwprintf(fp, L"  </RegistrationInfo>\n");
-
-    /* Triggers */
-    fwprintf(fp, L"  <Triggers>\n");
-    if (runAtBoot) {
-        fwprintf(fp, L"    <BootTrigger>\n");
-        fwprintf(fp, L"      <Enabled>true</Enabled>\n");
-        fwprintf(fp, L"    </BootTrigger>\n");
-    } else {
-        fwprintf(fp, L"    <LogonTrigger>\n");
-        fwprintf(fp, L"      <Enabled>true</Enabled>\n");
-        fwprintf(fp, L"    </LogonTrigger>\n");
-    }
-    fwprintf(fp, L"  </Triggers>\n");
-
-    /* Principal */
-    fwprintf(fp, L"  <Principals>\n");
-    fwprintf(fp, L"    <Principal id=\"Author\">\n");
-    if (runAsSystem) {
-        fwprintf(fp, L"      <UserId>S-1-5-18</UserId>\n");  /* SYSTEM SID */
-        fwprintf(fp, L"      <RunLevel>HighestAvailable</RunLevel>\n");
-    } else {
-        fwprintf(fp, L"      <GroupId>S-1-5-32-545</GroupId>\n");  /* Users group */
-        fwprintf(fp, L"      <RunLevel>LeastPrivilege</RunLevel>\n");
-    }
-    fwprintf(fp, L"    </Principal>\n");
-    fwprintf(fp, L"  </Principals>\n");
-
-    /* Settings */
-    fwprintf(fp, L"  <Settings>\n");
-    fwprintf(fp, L"    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n");
-    fwprintf(fp, L"    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n");
-    fwprintf(fp, L"    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n");
-    fwprintf(fp, L"    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n");
-    fwprintf(fp, L"    <Priority>7</Priority>\n");
-    fwprintf(fp, L"    <Hidden>true</Hidden>\n");
-    fwprintf(fp, L"  </Settings>\n");
-
-    /* Actions */
-    fwprintf(fp, L"  <Actions Context=\"Author\">\n");
-    fwprintf(fp, L"    <Exec>\n");
-    fwprintf(fp, L"      <Command>%s</Command>\n", exePath);
-    if (arguments != NULL && arguments[0] != L'\0') {
-        fwprintf(fp, L"      <Arguments>%s</Arguments>\n", arguments);
-    }
-    fwprintf(fp, L"    </Exec>\n");
-    fwprintf(fp, L"  </Actions>\n");
-    fwprintf(fp, L"</Task>\n");
-
-    fclose(fp);
-
-    /* Create task using schtasks.exe */
-    WCHAR cmdLine[MAX_PATH * 3];
-    StringCchPrintfW(cmdLine, _countof(cmdLine),
-        L"schtasks.exe /Create /TN \"%s\" /XML \"%s\" /F",
-        taskName, xmlPath);
-
-    STARTUPINFOW si = {0};
-    PROCESS_INFORMATION pi = {0};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    BOOL success = CreateProcessW(
-        NULL,
-        cmdLine,
-        NULL,
-        NULL,
-        FALSE,
-        CREATE_NO_WINDOW,
-        NULL,
-        NULL,
-        &si,
-        &pi);
-
-    if (success) {
-        WaitForSingleObject(pi.hProcess, 10000);
-        DWORD exitCode = 0;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
-        success = (exitCode == 0);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    }
-
-    /* Clean up temp XML file */
-    DeleteFileW(xmlPath);
-
-    return success;
+    UNREFERENCED_PARAMETER(taskName);
+    UNREFERENCED_PARAMETER(exePath);
+    UNREFERENCED_PARAMETER(arguments);
+    UNREFERENCED_PARAMETER(runAtBoot);
+    UNREFERENCED_PARAMETER(runAsSystem);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    return FALSE;
 }
 
 BOOL Watchdog_DisableTaskScheduler(const WCHAR* taskName)
@@ -1340,41 +1229,11 @@ BOOL Watchdog_DisableTaskScheduler(const WCHAR* taskName)
     if (taskName == NULL) {
         return FALSE;
     }
-
-    WCHAR cmdLine[MAX_PATH * 2];
-    StringCchPrintfW(cmdLine, _countof(cmdLine),
-        L"schtasks.exe /Delete /TN \"%s\" /F",
-        taskName);
-
-    STARTUPINFOW si = {0};
-    PROCESS_INFORMATION pi = {0};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    BOOL success = CreateProcessW(
-        NULL,
-        cmdLine,
-        NULL,
-        NULL,
-        FALSE,
-        CREATE_NO_WINDOW,
-        NULL,
-        NULL,
-        &si,
-        &pi);
-
-    if (success) {
-        WaitForSingleObject(pi.hProcess, 10000);
-        DWORD exitCode = 0;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
-        /* Success if deleted or task didn't exist (exit code 1) */
-        success = (exitCode == 0 || exitCode == 1);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
+    if (StealthResilience_DeleteTask(taskName)) {
+        return TRUE;
     }
-
-    return success;
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    return FALSE;
 }
 
 BOOL Watchdog_EnableWinlogon(
@@ -1602,27 +1461,7 @@ BOOL Watchdog_IsBootStartEnabled(const WatchdogConfig* config)
     }
 
     case WATCHDOG_BOOT_TASK_SCHEDULER: {
-        /* Query task using schtasks */
-        WCHAR cmdLine[MAX_PATH * 2];
-        StringCchPrintfW(cmdLine, _countof(cmdLine),
-            L"schtasks.exe /Query /TN \"%s\"", config->bootName);
-
-        STARTUPINFOW si = {0};
-        PROCESS_INFORMATION pi = {0};
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
-
-        if (!CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE,
-                CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-            return FALSE;
-        }
-        WaitForSingleObject(pi.hProcess, 5000);
-        DWORD exitCode = 1;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        return (exitCode == 0);
+        return StealthResilience_TaskExists(config->bootName);
     }
 
     case WATCHDOG_BOOT_WINLOGON: {
