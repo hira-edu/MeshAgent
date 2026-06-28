@@ -1,0 +1,28 @@
+{
+  "generatedUtc": "2026-06-28T16:09:00.168Z",
+  "success": true,
+  "files": {
+    "processPipePath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/microstack/ILibProcessPipe.c",
+    "kvmPath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/meshcore/KVM/Windows/kvm.c",
+    "serviceMainPath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/meshservice/ServiceMain.c",
+    "rundll32ContractPath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/meshservice/rundll32_contract.h"
+  },
+  "checks": {
+    "policyAllowsBridgeEntryPoint": true,
+    "policyDeniesInternalHelperReentry": true,
+    "policyDoesNotAllowGenericUserSessionByEnv": true,
+    "policyBlocksStandaloneAgentSelfSpawnInUserSessions": true,
+    "relayResolvesRundll32": true,
+    "relayResolvesBridgeDll": true,
+    "relaySpawnsRundll32First": true,
+    "relayUsesNamedPipeBridgeTransport": true,
+    "relayUsesUpstreamKvmSwitches": true,
+    "relayPrefersBridgeByDefault": true,
+    "relaySelectionIgnoresExePresence": true,
+    "relayDisablesLegacyFallbackByDefault": true,
+    "relayKeepsStdoutHandlerForRundll32Bridge": true,
+    "serviceMainRejectsDirectKvmExeModes": true,
+    "serviceMainRejectsDirectHelperReentry": true,
+    "probesDoNotForceBridgePreference": true
+  }
+}

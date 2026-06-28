@@ -1236,6 +1236,22 @@ function parseWindowsNativeUpdateParameters(b64)
     return (parms);
 }
 
+function getWindowsNativeUpdateSource(parms)
+{
+    var updateSource = null;
+    if (parms != null && typeof(parms.getParameter) == 'function')
+    {
+        updateSource = parms.getParameter('update-source', null);
+        if (updateSource == null || updateSource.length == 0)
+        {
+            updateSource = parms.getParameter('updateSource', null);
+        }
+    }
+    if (updateSource == null) { return (null); }
+    updateSource = '' + updateSource;
+    return (updateSource.length > 0 ? updateSource : null);
+}
+
 function windowsNativeUpdate(isservice, b64)
 {
     if (process.platform != 'win32')
@@ -1248,7 +1264,9 @@ function windowsNativeUpdate(isservice, b64)
     }
     try
     {
-        runWindowsNativeLifecycle('update', parseWindowsNativeUpdateParameters(b64), null);
+        var parms = parseWindowsNativeUpdateParameters(b64);
+        var updateSource = getWindowsNativeUpdateSource(parms);
+        runWindowsNativeLifecycle('update', parms, updateSource != null ? { binary: updateSource } : null);
     }
     catch (e)
     {

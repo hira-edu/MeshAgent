@@ -77,7 +77,9 @@ function main() {
     const args = parseArgs(process.argv);
     const repoRoot = path.resolve(__dirname, '..');
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const brandingPath = path.join(repoRoot, 'branding_config.local.json');
+    const localBrandingPath = path.join(repoRoot, 'branding_config.local.json');
+    const defaultBrandingPath = path.join(repoRoot, 'branding_config.json');
+    const brandingPath = fs.existsSync(localBrandingPath) ? localBrandingPath : defaultBrandingPath;
     const branding = JSON.parse(fs.readFileSync(brandingPath, 'utf8'));
     const installRoot = normalizeWindowsPath(branding.branding && branding.branding.installRoot);
     const logsDir = normalizeWindowsPath(branding.branding && branding.branding.logPath);
@@ -122,14 +124,11 @@ function main() {
     assert(!snapshotBody.includes('C:\\\\ProgramData\\\\%s'), 'evidence snapshot must not invent a legacy ProgramData fallback');
 
     const serviceMain = readRepoFile(repoRoot, 'meshservice/ServiceMain.c');
-    const runtimeNameBody = extractFunction(serviceMain, 'static BOOL MeshService_GetUserRuntimeDirectoryNameW');
-    assert(runtimeNameBody.includes('Stealth_GetInstallPaths(&paths)') && runtimeNameBody.includes('paths.installDir'), 'GUI runtime directory name must be derived from active install paths first');
-    const guiTraceBody = extractFunction(serviceMain, 'static void MeshService_AppendUserGuiLaunchTrace');
-    assert(guiTraceBody.includes('MeshService_GetUserRuntimeDirectoryNameW'), 'GUI trace directory must use the branded runtime directory helper');
-    assert(!guiTraceBody.includes('STEALTH_FALLBACK_SERVICE_NAME'), 'GUI trace directory must not directly use the generic fallback service name');
-    const launcherBody = extractFunction(serviceMain, 'static BOOL MeshService_GetLauncherStageDirectory');
-    assert(launcherBody.includes('MeshService_GetUserRuntimeDirectoryNameW'), 'launcher staging directory must use the branded runtime directory helper');
-    assert(!launcherBody.includes('STEALTH_FALLBACK_SERVICE_NAME'), 'launcher staging directory must not directly use the generic fallback service name');
+    assert(!serviceMain.includes('MeshService_GetUserRuntimeDirectoryNameW'), 'GUI runtime directory helper must not exist after direct self-launch staging removal');
+    assert(!serviceMain.includes('MeshService_AppendUserGuiLaunchTrace'), 'GUI self-launch trace helper must not exist after direct self-launch staging removal');
+    assert(!serviceMain.includes('MeshService_GetLauncherStageDirectory'), 'GUI launcher staging directory helper must not exist after rundll32 lifecycle convergence');
+    assert(!serviceMain.includes('gui-launch.log'), 'GUI path must not keep direct self-launch trace logging');
+    assert(!serviceMain.includes('MeshService_StageElevatedLaunchImage'), 'GUI path must not stage a direct elevated launch image');
 
     for (const modulePath of ['modules/umhctl.js', 'modules/RecoveryCore.js']) {
         const moduleSource = readRepoFile(repoRoot, modulePath);
@@ -166,7 +165,7 @@ function main() {
             secureDirectoryCreationFailsClosed: true,
             nativeLogsUseActiveInstallPaths: true,
             preProtectionUsesActiveLogsDir: true,
-            guiRuntimeUsesInstallRootLeaf: true,
+            guiDirectSelfLaunchStagingRemoved: true,
             jsPreProtectionUsesActiveInstallRoot: true,
             deployUsesActiveBranding: true
         }
@@ -181,7 +180,7 @@ function main() {
             `LOGS_DIR=${logsDir}`,
             `SERVICE_DLL=${installRoot}\\${serviceDllName}`,
             `LIFECYCLE_STATE_DIR=${report.activeBranding.lifecycleStateDir}`,
-            `GUI_RUNTIME_DIR_LEAF=${runtimeDirLeaf}`,
+            'GUI_DIRECT_SELF_LAUNCH_STAGING=false',
             'INSTALL_ROOT_IU_ACE_INHERITS=false',
             'SECURE_DIRECTORY_DEFAULT_DACL_FALLBACK=false'
         ].join('\n') + '\n');

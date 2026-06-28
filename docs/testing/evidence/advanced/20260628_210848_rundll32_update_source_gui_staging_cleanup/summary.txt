@@ -1,0 +1,35 @@
+GENERATED_UTC=2026-06-28T16:08:48Z
+SUCCESS=true
+SCOPE=Rundll32-only follow-up for native update-source handoff and removal of remaining direct GUI self-launch staging helpers.
+
+CODE_CHANGES=
+- Windows native update now extracts --update-source/updateSource from the update parameters and uses it as the lifecycle manifest SourceExe input when launching MeshLifecycleHostW.
+- ServiceMain no longer retains the direct GUI elevated-launch staging/logging helpers: staged launcher path construction, LocalAppData gui-launch.log tracing, shell-runas mode labels, self-image logging, GUI launch argument rewriting, and GUI wait-pump process launching.
+- Static contracts now assert the GUI staging helpers stay absent and that update-source feeds the rundll32 lifecycle manifest target binary.
+- The MeshCentral svchost self-update contract now checks only the retained MeshAgent rundll32 lifecycle path locally and reports external MeshCentral legacy-token drift separately instead of treating missing/legacy sister-repo files as this repo's contract authority.
+
+PASSED_CONTRACTS=
+- node --check modules/agent-installer.js
+- node --check test/rundll32_all_helpers_migration_contract.js
+- node --check test/install_runtime_paths_contract.js
+- node --check test/meshcentral_svchost_selfupdate_contract.js
+- node test/rundll32_all_helpers_migration_contract.js
+- node test/meshcentral_svchost_selfupdate_contract.js
+- node test/gui_launcher_cleanup_contract.js
+- node test/kvm_bridge_selection_contract.js
+- node test/todo_021_drift_reduction_contract.js
+- node test/kvm_bridge_pipe_contract.js
+
+EVIDENCE_FILES=
+- rundll32_all_helpers/rundll32_all_helpers_migration_contract.json
+- meshcentral_svchost_selfupdate/meshcentral_svchost_selfupdate_contract.json
+- gui_launcher_cleanup/gui_launcher_cleanup_contract.json
+- kvm_bridge_selection/kvm_bridge_selection_contract.json
+- todo_021_drift_reduction/todo_021_drift_reduction_contract.json
+- kvm_bridge_pipe/kvm_bridge_pipe_contract.json
+
+BLOCKED_CHECKS=
+- msbuild meshservice/MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m -> zsh:1: command not found: msbuild
+- node test/install_runtime_paths_contract.js -> ENOENT branding_config.local.json; local branding/generated header prerequisites remain absent on this host.
+
+STATUS=Static rundll32 lifecycle cleanup passed targeted contracts. TODO-027 remains IN_PROGRESS because required Windows build/release gates cannot be completed on this macOS host.
