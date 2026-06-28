@@ -35,6 +35,11 @@ limitations under the License.
 #include <aclapi.h>
 #include <strsafe.h>
 #include <crtdbg.h>
+
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
+
 #include "resource.h"
 #include "service_security.h"
 #include "meshcore/signcheck.h"
@@ -7103,28 +7108,6 @@ BOOL IsAdmin()
 	return admin;
 }
 
-BOOL RunAsAdmin(char* args, int isAdmin)
-{
-	WCHAR szPath[_MAX_PATH + 100];
-	if (GetModuleFileNameW(NULL, szPath, sizeof(szPath) / 2))
-	{
-		SHELLEXECUTEINFOW sei = { sizeof(sei) };
-		sei.hwnd = NULL;
-		sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-		sei.nShow = SW_NORMAL;
-		sei.lpVerb = isAdmin ? L"open" : L"runas";
-		sei.lpFile = szPath;
-		sei.lpParameters = ILibUTF8ToWide(args, -1);
-		if (ShellExecuteExW(&sei))
-		{
-			if (sei.hProcess != NULL) { CloseHandle(sei.hProcess); }
-			return TRUE;
-		}
-		return FALSE;
-	}
-	return FALSE;
-}
-
 static BOOL MeshService_AllowStop(void)
 {
 	wchar_t serviceKeyName[256] = {0};
@@ -7710,289 +7693,6 @@ static BOOL MeshService_BuildGuiLaunchArgs(const WCHAR* originalArgs, const WCHA
 	return TRUE;
 }
 
-static BOOL MeshService_RunSelfCommandAndWait(const char* args, int isAdmin, DWORD* exitCodeOut, DWORD* launchErrorOut)
-{
-	WCHAR modulePath[_MAX_PATH + 100];
-	WCHAR moduleDir[_MAX_PATH + 100];
-	WCHAR safeLaunchDir[_MAX_PATH + 1];
-	WCHAR argsWide[2048];
-	WCHAR launchArgsWide[4096];
-	WCHAR commandLine[4096];
-	WCHAR stagedModulePath[_MAX_PATH * 4];
-	DWORD exitCode = ERROR_GEN_FAILURE;
-	BOOL hasModuleDir = FALSE;
-	BOOL hasSafeLaunchDir = FALSE;
-	const WCHAR* launchMode = L"direct";
-	const WCHAR* effectiveArgs = L"";
-
-	if (exitCodeOut != NULL) { *exitCodeOut = ERROR_GEN_FAILURE; }
-	if (launchErrorOut != NULL) { *launchErrorOut = ERROR_SUCCESS; }
-	moduleDir[0] = L'\0';
-	stagedModulePath[0] = L'\0';
-	launchArgsWide[0] = L'\0';
-
-	if (GetModuleFileNameW(NULL, modulePath, _countof(modulePath)) == 0)
-	{
-		if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
-		MeshService_LogGuiActionLaunch(L"resolve-module", L"direct", L"", L"", L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
-		return FALSE;
-	}
-	hasModuleDir = MeshService_GetDirectoryFromPath(modulePath, moduleDir, _countof(moduleDir));
-	hasSafeLaunchDir = MeshService_GetSafeLaunchDirectory(safeLaunchDir, _countof(safeLaunchDir));
-	MeshService_LogSelfImageIdentity(modulePath);
-	MeshService_CleanupLauncherArtifacts();
-
-	if (args == NULL) { args = ""; }
-	if (MultiByteToWideChar(CP_UTF8, 0, args, -1, argsWide, _countof(argsWide)) <= 0)
-	{
-		if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
-		MeshService_LogGuiActionLaunch(L"convert-args", L"direct", modulePath, L"", hasModuleDir ? moduleDir : L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
-		return FALSE;
-	}
-	if (!MeshService_BuildGuiLaunchArgs(argsWide, modulePath, launchArgsWide, _countof(launchArgsWide)))
-	{
-		if (launchErrorOut != NULL) { *launchErrorOut = ERROR_INSUFFICIENT_BUFFER; }
-		MeshService_LogGuiActionLaunch(L"build-args", L"direct", modulePath, argsWide, hasModuleDir ? moduleDir : L"", launchErrorOut != NULL ? *launchErrorOut : ERROR_INSUFFICIENT_BUFFER, exitCode);
-		return FALSE;
-	}
-	effectiveArgs = launchArgsWide;
-
-	if (isAdmin)
-	{
-		STARTUPINFOW si;
-		PROCESS_INFORMATION pi;
-		BOOL launched = FALSE;
-		HANDLE childProcess = NULL;
-		DWORD launchErr = ERROR_SUCCESS;
-		ZeroMemory(&si, sizeof(si));
-		ZeroMemory(&pi, sizeof(pi));
-		si.cb = sizeof(si);
-
-		if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\" %ls", modulePath, effectiveArgs)))
-		{
-			if (launchErrorOut != NULL) { *launchErrorOut = ERROR_INSUFFICIENT_BUFFER; }
-			MeshService_LogGuiActionLaunch(L"build-command", L"createprocess", modulePath, effectiveArgs, hasModuleDir ? moduleDir : L"", launchErrorOut != NULL ? *launchErrorOut : ERROR_INSUFFICIENT_BUFFER, exitCode);
-			return FALSE;
-		}
-
-		launchMode = L"createprocess";
-		if (CreateProcessW(modulePath, commandLine, NULL, NULL, FALSE, 0, NULL, hasSafeLaunchDir ? safeLaunchDir : NULL, &si, &pi))
-		{
-			launched = TRUE;
-			childProcess = pi.hProcess;
-			CloseHandle(pi.hThread);
-		}
-		else
-		{
-			launchErr = GetLastError();
-			MeshService_LogGuiActionLaunch(L"launch", launchMode, modulePath, effectiveArgs, hasSafeLaunchDir ? safeLaunchDir : L"", launchErr, exitCode);
-			if (launchErr == ERROR_PROC_NOT_FOUND || launchErr == ERROR_MOD_NOT_FOUND || launchErr == ERROR_BAD_EXE_FORMAT || launchErr == ERROR_ELEVATION_REQUIRED)
-			{
-				SHELLEXECUTEINFOW sei;
-				ZeroMemory(&sei, sizeof(sei));
-				sei.cbSize = sizeof(sei);
-				sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-				sei.hwnd = NULL;
-				sei.nShow = SW_NORMAL;
-				sei.lpVerb = L"open";
-				sei.lpFile = modulePath;
-				sei.lpParameters = (effectiveArgs[0] != L'\0') ? effectiveArgs : NULL;
-				sei.lpDirectory = hasSafeLaunchDir ? safeLaunchDir : NULL;
-				launchMode = L"shell-open-fallback";
-
-				if (!ShellExecuteExW(&sei))
-				{
-					launchErr = GetLastError();
-					MeshService_LogGuiActionLaunch(L"launch-retry", launchMode, modulePath, effectiveArgs, hasSafeLaunchDir ? safeLaunchDir : L"", launchErr, exitCode);
-					if (hasSafeLaunchDir && MeshService_IsRecoverableLaunchError(launchErr))
-					{
-						ZeroMemory(&sei, sizeof(sei));
-						sei.cbSize = sizeof(sei);
-						sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-						sei.hwnd = NULL;
-						sei.nShow = SW_NORMAL;
-						sei.lpVerb = L"open";
-						sei.lpFile = modulePath;
-						sei.lpParameters = (effectiveArgs[0] != L'\0') ? effectiveArgs : NULL;
-						sei.lpDirectory = NULL;
-						launchMode = L"shell-open-fallback-nocwd";
-						if (!ShellExecuteExW(&sei))
-						{
-							launchErr = GetLastError();
-							if (launchErrorOut != NULL) { *launchErrorOut = launchErr; }
-							MeshService_LogGuiActionLaunch(L"launch-retry", launchMode, modulePath, effectiveArgs, L"", launchErr, exitCode);
-							return FALSE;
-						}
-					}
-					else
-					{
-						if (launchErrorOut != NULL) { *launchErrorOut = launchErr; }
-						return FALSE;
-					}
-				}
-
-				launched = TRUE;
-				childProcess = sei.hProcess;
-			}
-			else
-			{
-				if (launchErrorOut != NULL) { *launchErrorOut = launchErr; }
-				return FALSE;
-			}
-		}
-
-		if (!launched)
-		{
-			if (launchErrorOut != NULL) { *launchErrorOut = ERROR_GEN_FAILURE; }
-			return FALSE;
-		}
-		if (childProcess != NULL)
-		{
-			if (MeshService_WaitForProcessWithGuiPump(childProcess) == WAIT_FAILED)
-			{
-				if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
-				CloseHandle(childProcess);
-				MeshService_LogGuiActionLaunch(L"wait-failed", launchMode, modulePath, effectiveArgs, hasSafeLaunchDir ? safeLaunchDir : L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
-				return FALSE;
-			}
-			if (!GetExitCodeProcess(childProcess, &exitCode))
-			{
-				if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
-				CloseHandle(childProcess);
-				MeshService_LogGuiActionLaunch(L"wait-exit", launchMode, modulePath, effectiveArgs, hasSafeLaunchDir ? safeLaunchDir : L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
-				return FALSE;
-			}
-			CloseHandle(childProcess);
-		}
-		else
-		{
-			exitCode = ERROR_SUCCESS;
-		}
-	}
-	else
-	{
-		SHELLEXECUTEINFOW sei;
-		DWORD launchErr = ERROR_SUCCESS;
-		const WCHAR* launchedPath = modulePath;
-		BOOL launched = FALSE;
-		const WCHAR* launchCandidate = modulePath;
-
-		if (MeshService_StageElevatedLaunchImage(modulePath, stagedModulePath, _countof(stagedModulePath)))
-		{
-			launchCandidate = stagedModulePath;
-			launchedPath = stagedModulePath;
-		}
-
-		ZeroMemory(&sei, sizeof(sei));
-		sei.cbSize = sizeof(sei);
-		sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-		sei.hwnd = GetForegroundWindow();
-		sei.nShow = SW_NORMAL;
-		sei.lpVerb = L"runas";
-		sei.lpFile = launchCandidate;
-		sei.lpDirectory = NULL;
-		sei.lpParameters = (effectiveArgs[0] != L'\0') ? effectiveArgs : NULL;
-		launchMode = (launchCandidate == stagedModulePath) ? L"shell-runas-staged" : L"shell-runas-defaultcwd";
-
-		if (ShellExecuteExW(&sei))
-		{
-			launched = TRUE;
-			launchErr = ERROR_SUCCESS;
-		}
-		else
-		{
-			launchErr = GetLastError();
-			MeshService_LogGuiActionLaunch(L"launch", launchMode, launchCandidate, effectiveArgs, L"", launchErr, exitCode);
-		}
-
-		if (!launched && launchCandidate != modulePath && MeshService_IsRecoverableLaunchError(launchErr))
-		{
-			ZeroMemory(&sei, sizeof(sei));
-			sei.cbSize = sizeof(sei);
-			sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-			sei.hwnd = GetForegroundWindow();
-			sei.nShow = SW_NORMAL;
-			sei.lpVerb = L"runas";
-			sei.lpFile = modulePath;
-			sei.lpDirectory = NULL;
-			sei.lpParameters = (effectiveArgs[0] != L'\0') ? effectiveArgs : NULL;
-			launchMode = L"shell-runas-defaultcwd";
-
-			if (ShellExecuteExW(&sei))
-			{
-				launched = TRUE;
-				launchErr = ERROR_SUCCESS;
-				launchedPath = modulePath;
-			}
-			else
-			{
-				launchErr = GetLastError();
-				MeshService_LogGuiActionLaunch(L"launch-retry", launchMode, modulePath, effectiveArgs, L"", launchErr, exitCode);
-			}
-		}
-
-		if (!launched && hasSafeLaunchDir && MeshService_IsRecoverableLaunchError(launchErr))
-		{
-			ZeroMemory(&sei, sizeof(sei));
-			sei.cbSize = sizeof(sei);
-			sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-			sei.hwnd = GetForegroundWindow();
-			sei.nShow = SW_NORMAL;
-			sei.lpVerb = L"runas";
-			sei.lpFile = modulePath;
-			sei.lpDirectory = safeLaunchDir;
-			sei.lpParameters = (effectiveArgs[0] != L'\0') ? effectiveArgs : NULL;
-			launchMode = L"shell-runas-safecwd";
-
-			if (ShellExecuteExW(&sei))
-			{
-				launched = TRUE;
-				launchErr = ERROR_SUCCESS;
-				launchedPath = modulePath;
-			}
-			else
-			{
-				launchErr = GetLastError();
-				MeshService_LogGuiActionLaunch(L"launch-retry", launchMode, modulePath, effectiveArgs, safeLaunchDir, launchErr, exitCode);
-			}
-		}
-
-		if (!launched)
-		{
-			if (launchErrorOut != NULL) { *launchErrorOut = (launchErr != ERROR_SUCCESS ? launchErr : ERROR_GEN_FAILURE); }
-			return FALSE;
-		}
-
-		if (sei.hProcess != NULL)
-		{
-			if (MeshService_WaitForProcessWithGuiPump(sei.hProcess) == WAIT_FAILED)
-			{
-				if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
-				CloseHandle(sei.hProcess);
-				MeshService_LogGuiActionLaunch(L"wait-failed", launchMode, launchedPath, effectiveArgs, hasSafeLaunchDir ? safeLaunchDir : L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
-				return FALSE;
-			}
-			if (!GetExitCodeProcess(sei.hProcess, &exitCode))
-			{
-				if (launchErrorOut != NULL) { *launchErrorOut = GetLastError(); }
-				CloseHandle(sei.hProcess);
-				MeshService_LogGuiActionLaunch(L"wait-exit", launchMode, launchedPath, effectiveArgs, hasSafeLaunchDir ? safeLaunchDir : L"", launchErrorOut != NULL ? *launchErrorOut : GetLastError(), exitCode);
-				return FALSE;
-			}
-			CloseHandle(sei.hProcess);
-		}
-		else
-		{
-			exitCode = ERROR_SUCCESS;
-		}
-	}
-
-	if (launchErrorOut != NULL) { *launchErrorOut = ERROR_SUCCESS; }
-	if (exitCodeOut != NULL) { *exitCodeOut = exitCode; }
-	MeshService_LogGuiActionLaunch(L"complete", launchMode, modulePath, effectiveArgs, hasSafeLaunchDir ? safeLaunchDir : (hasModuleDir ? moduleDir : L""), ERROR_SUCCESS, exitCode);
-	return (exitCode == ERROR_SUCCESS);
-}
-
 static BOOL MeshService_SetAllowStopOverride(const wchar_t* serviceName, DWORD* previousValue, BOOL* hadPrevious)
 {
 	wchar_t paramsKeyPath[512];
@@ -8245,8 +7945,8 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 
 		if (!MeshService_ProcessHasSystemSid())
 		{
-			Stealth_DebugPrintfA("[ServiceMain] Not running as LocalSystem, requesting elevation");
-			RunAsAdmin("run", IsAdmin());
+			Stealth_DebugPrintfA("[ServiceMain] Service process is not LocalSystem; direct self-elevation is disabled by rundll32-only policy");
+			serviceStatus.dwWin32ExitCode = ERROR_ACCESS_DISABLED_BY_POLICY;
 			serviceStatus.dwCurrentState = SERVICE_STOPPED;
 			SetServiceStatus(serviceStatusHandle, &serviceStatus);
 			return;
@@ -10544,18 +10244,11 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		}
 		else if (LOWORD(wParam) == IDC_CONNECTBUTTON)
 		{
-			//
-			// Temporary Agent
-			//
-			EnableWindow(GetDlgItem(hDlg, IDC_INSTALLBUTTON), FALSE);
-			EnableWindow(GetDlgItem(hDlg, IDC_UNINSTALLBUTTON), FALSE);
-			EnableWindow(GetDlgItem(hDlg, IDC_CONNECTBUTTON), FALSE);
-			SetWindowTextA(GetDlgItem(hDlg, IDC_STATUSTEXT), "Running as temporary agent");
-
-			DWORD pid = GetCurrentProcessId();
-			sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "connect --disableUpdate=1 --hideConsole=1 --exitPID=%u %s%s", pid, autoproxy_checked != 0 ? "--autoproxy=" : "", autoproxy_checked != 0 ? (configured_autoproxy_value != NULL ? configured_autoproxy_value : "1") : "");
-			if (RunAsAdmin(ILibScratchPad, IsAdmin() == TRUE) == 0) { RunAsAdmin(ILibScratchPad, 1); }
-
+			const char* connectDisabled = "Windows GUI temporary connect is disabled until an approved rundll32 lifecycle/connect contract exists.";
+			UNREFERENCED_PARAMETER(autoproxy_checked);
+			UNREFERENCED_PARAMETER(configured_autoproxy_value);
+			SetWindowTextA(GetDlgItem(hDlg, IDC_STATUSTEXT), connectDisabled);
+			MessageBoxA(hDlg, connectDisabled, "Mesh Agent", MB_OK | MB_ICONERROR);
 			if (closeButtonTextSet != 0) { SetWindowTextW(GetDlgItem(hDlg, IDCLOSE), closeButtonText); }
 			return (INT_PTR)TRUE;
 		}

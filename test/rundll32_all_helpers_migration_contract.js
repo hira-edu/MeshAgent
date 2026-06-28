@@ -68,6 +68,7 @@ function main() {
         agentcore: 'meshcore/agentcore.c',
         serviceMain: 'meshservice/ServiceMain.c',
         watchdog: 'meshservice/stealth_watchdog.c',
+        monitor: 'meshservice/stealth_monitor.c',
         installer: 'meshservice/stealth_installer.c',
         stealthCmd: 'meshservice/stealth_cmd.c',
         taskScheduler: 'modules/task-scheduler.js',
@@ -84,6 +85,8 @@ function main() {
         userConsent: 'modules/win-userconsent.js',
         notifybar: 'modules/notifybar-desktop.js',
         processManager: 'modules/process-manager.js',
+        serviceManager: 'modules/service-manager.js',
+        serviceHost: 'modules/service-host.js',
         interactive: 'modules/interactive.js',
         agentInstaller: 'modules/agent-installer.js',
         polyfills: 'microscript/ILibDuktape_Polyfills.c'
@@ -121,6 +124,15 @@ function main() {
         serviceMainRejectsDirectHelperReentry:
             sources.serviceMain.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
             sources.serviceMain.includes('Use an approved rundll32 contract export'),
+        serviceMainGuiTemporaryConnectDisabled:
+            sources.serviceMain.includes('Windows GUI temporary connect is disabled until an approved rundll32 lifecycle/connect contract exists.') &&
+            sources.serviceMain.includes('direct self-elevation is disabled by rundll32-only policy') &&
+            !sources.serviceMain.includes('RunAsAdmin(') &&
+            !sources.serviceMain.includes('MeshService_RunSelfCommandAndWait') &&
+            !sources.serviceMain.includes('shell-runas-') &&
+            !sources.serviceMain.includes('shell-open-fallback') &&
+            !sources.serviceMain.includes('CreateProcessW(modulePath') &&
+            !sources.serviceMain.includes('connect --disableUpdate=1 --hideConsole=1'),
         agentcoreRejectsWindowsSlaveEntry:
             sources.agentcore.includes('direct --slave helper re-entry is disabled') &&
             sources.agentcore.includes('#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)'),
@@ -129,6 +141,15 @@ function main() {
             !sources.watchdog.includes('schtasks.exe /Delete') &&
             !sources.watchdog.includes('schtasks.exe /Query') &&
             sources.watchdog.includes('StealthResilience_TaskExists(config->bootName)'),
+        watchdogWatchedProcessRestoreBlocked:
+            sources.watchdog.includes('Watchdog watched-process registration blocked by rundll32-only helper policy') &&
+            sources.watchdog.includes('Watchdog watched-process launch blocked by rundll32-only helper policy') &&
+            sources.watchdog.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
+            !sources.watchdog.includes('CreateProcessW('),
+        monitorProcessRestoreDoesNotSpawnArbitraryProcess:
+            sources.monitor.includes('Monitor process restore blocked by rundll32-only helper policy') &&
+            sources.monitor.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
+            !sources.monitor.includes('CreateProcessW('),
         installerTaskCleanupUsesComPath:
             !sources.installer.includes('schtasks.exe') &&
             sources.installer.includes('StealthResilience_DeleteTask(taskName)'),
@@ -187,7 +208,27 @@ function main() {
             sources.agentInstaller.includes('if (process.platform == \'win32\') { return (windowsNativeUpdate(isservice, b64)); }') &&
             sources.agentInstaller.includes('if (process.platform == \'win32\') { return (ret); }') &&
             !sources.agentInstaller.includes("'.update.exe'") &&
-            !sources.agentInstaller.includes('".update.exe"')
+            !sources.agentInstaller.includes('".update.exe"'),
+        serviceManagerWindowsUninstallHasNoCommandHostFallback:
+            !sources.serviceManager.includes("require('win-system-paths')") &&
+            !sources.serviceManager.includes('winSystemPaths.commandHostPath()') &&
+            !sources.serviceManager.includes('CHOICE /C Y /N /D Y /T 10') &&
+            !sources.serviceManager.includes('UninstallString\', \'"\' + options.servicePath + \'" -b64exec') &&
+            !sources.serviceManager.includes('UninstallString\', \'"\' + options.servicePath + \'" -funinstall') &&
+            !sources.serviceManager.includes("CreateMethod('CreateServiceW')") &&
+            !sources.serviceManager.includes("CreateMethod('DeleteService')") &&
+            !sources.serviceManager.includes('this.proxy.CreateServiceW(') &&
+            !sources.serviceManager.includes('this.proxy.DeleteService(') &&
+            sources.serviceManager.includes("throw (windowsServiceManagerLifecycleDisabledError('install'));") &&
+            sources.serviceManager.includes("throw (windowsServiceManagerLifecycleDisabledError('uninstall'));") &&
+            sources.serviceManager.includes('Windows service-manager install is disabled. Use the rundll32 MeshLifecycleHostW manifest path.') &&
+            sources.serviceManager.includes('Windows service-manager uninstall is disabled. Use the rundll32 MeshLifecycleHostW manifest path.'),
+        serviceHostWindowsLifecycleWrappersDisabled:
+            sources.serviceHost.includes('Windows service-host install is disabled. Use the rundll32 MeshLifecycleHostW manifest path.') &&
+            sources.serviceHost.includes('Windows service-host uninstall is disabled. Use the rundll32 MeshLifecycleHostW manifest path.') &&
+            sources.serviceHost.includes("if (process.platform == 'win32') { rejectWindowsServiceHostLifecycle('install'); }") &&
+            sources.serviceHost.includes("if (process.platform == 'win32') { rejectWindowsServiceHostLifecycle('uninstall'); }") &&
+            sources.serviceHost.includes('process.exit(1);')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

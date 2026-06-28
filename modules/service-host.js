@@ -39,6 +39,25 @@ var SESSION_CHANGE_TYPE =
 var NO_ERROR = 0;
 
 var serviceManager = require('service-manager');
+var WINDOWS_SERVICE_HOST_INSTALL_DISABLED = 'Windows service-host install is disabled. Use the rundll32 MeshLifecycleHostW manifest path.';
+var WINDOWS_SERVICE_HOST_UNINSTALL_DISABLED = 'Windows service-host uninstall is disabled. Use the rundll32 MeshLifecycleHostW manifest path.';
+
+function rejectWindowsServiceHostLifecycle(operation)
+{
+    switch (operation)
+    {
+        case 'install':
+            console.log(WINDOWS_SERVICE_HOST_INSTALL_DISABLED);
+            break;
+        case 'uninstall':
+            console.log(WINDOWS_SERVICE_HOST_UNINSTALL_DISABLED);
+            break;
+        default:
+            console.log('Windows service-host lifecycle operation is disabled. Use the rundll32 MeshLifecycleHostW manifest path.');
+            break;
+    }
+    process.exit(1);
+}
 
 function serviceHost(serviceName)
 {
@@ -185,6 +204,7 @@ function serviceHost(serviceName)
             switch(process.argv[i])
             {
                 case '-install':
+                    if (process.platform == 'win32') { rejectWindowsServiceHostLifecycle('install'); }
                     if (!this._svcManager) { this._svcManager = new serviceManager(); }
                     try
                     {
@@ -193,13 +213,14 @@ function serviceHost(serviceName)
                     catch(e)
                     {
                         console.log(e);
-                        process.exit();
+                        process.exit(1);
                     }
 
                     console.log(this._ServiceOptions.name + ' installed');
                     process.exit();
                     break;
                 case '-uninstall':
+                    if (process.platform == 'win32') { rejectWindowsServiceHostLifecycle('uninstall'); }
                     if (!this._svcManager) { this._svcManager = new serviceManager(); }
                     try
                     {
@@ -208,7 +229,7 @@ function serviceHost(serviceName)
                     catch(e)
                     {
                         console.log(e);
-                        process.exit();
+                        process.exit(1);
                     }
 
                     console.log(this._ServiceOptions.name + ' uninstalled');

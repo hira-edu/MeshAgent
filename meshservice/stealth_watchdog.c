@@ -20,6 +20,10 @@
 
 #pragma comment(lib, "advapi32.lib")
 
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
+
 /* Maximum processes to watch */
 #define MAX_WATCHED_PROCESSES 16
 
@@ -355,115 +359,21 @@ static int Watchdog_FindProcessIndexLocked(const WatchdogProcessKey* key)
     return -1;
 }
 
-/* Sanitize command-line arguments to prevent injection */
-static BOOL Watchdog_SanitizeArguments(const WCHAR* input, WCHAR* output, size_t outputSize)
-{
-    if (output == NULL || outputSize == 0) {
-        return FALSE;
-    }
-
-    output[0] = L'\0';
-
-    if (input == NULL || input[0] == L'\0') {
-        return TRUE; /* Empty is valid */
-    }
-
-    /* Check for dangerous characters that could enable command injection */
-    static const WCHAR* dangerousChars = L"|&;<>`$";
-    for (const WCHAR* p = input; *p != L'\0'; p++) {
-        if (wcschr(dangerousChars, *p) != NULL) {
-            /* Found dangerous character - reject */
-            return FALSE;
-        }
-    }
-
-    /* Check for dangerous command patterns */
-    static const WCHAR* dangerousPatterns[] = {
-        L"cmd.exe", L"cmd /c", L"powershell", L"wscript", L"cscript",
-        L"../", L"..\\", L"%COMSPEC%", L"%SystemRoot%",
-        NULL
-    };
-
-    WCHAR lowerInput[512];
-    StringCchCopyW(lowerInput, _countof(lowerInput), input);
-    _wcslwr_s(lowerInput, _countof(lowerInput));
-
-    for (int i = 0; dangerousPatterns[i] != NULL; i++) {
-        WCHAR lowerPattern[64];
-        StringCchCopyW(lowerPattern, _countof(lowerPattern), dangerousPatterns[i]);
-        _wcslwr_s(lowerPattern, _countof(lowerPattern));
-
-        if (wcsstr(lowerInput, lowerPattern) != NULL) {
-            return FALSE; /* Dangerous pattern found */
-        }
-    }
-
-    StringCchCopyW(output, outputSize, input);
-    return TRUE;
-}
-
 BOOL Watchdog_AddProcess(
     const WCHAR* exePath,
     const WCHAR* arguments,
     const WCHAR* workingDir)
 {
+    UNREFERENCED_PARAMETER(arguments);
+    UNREFERENCED_PARAMETER(workingDir);
+
     if (exePath == NULL || exePath[0] == L'\0') {
         return FALSE;
     }
 
-    WatchdogProcessKey key;
-    Watchdog_BuildProcessKey(&key, exePath, arguments);
-    if (key.exePath[0] == L'\0') {
-        return FALSE;
-    }
-
-    /* Sanitize arguments to prevent command injection */
-    WCHAR sanitizedArgs[512] = {0};
-    if (!Watchdog_SanitizeArguments(key.arguments, sanitizedArgs, _countof(sanitizedArgs))) {
-        return FALSE; /* Arguments contain dangerous content */
-    }
-
-    if (!AcquireWatchLock()) {
-        return FALSE;
-    }
-
-    /* Check if already watching */
-    if (Watchdog_FindProcessIndexLocked(&key) >= 0) {
-        ReleaseWatchLock();
-        return TRUE; /* Already watching */
-    }
-
-    /* Check capacity */
-    if (g_WatchedCount >= MAX_WATCHED_PROCESSES) {
-        ReleaseWatchLock();
-        return FALSE;
-    }
-
-    /* Add new entry */
-    WatchedProcess* wp = &g_WatchedProcesses[g_WatchedCount];
-    ZeroMemory(wp, sizeof(WatchedProcess));
-
-    StringCchCopyW(wp->exePath, MAX_PATH, key.exePath);
-    if (sanitizedArgs[0] != L'\0') {
-        StringCchCopyW(wp->arguments, 512, sanitizedArgs);
-    }
-    if (workingDir != NULL && workingDir[0] != L'\0') {
-        WCHAR normalizedDir[MAX_PATH];
-        if (Watchdog_NormalizePath(workingDir, normalizedDir, _countof(normalizedDir))) {
-            StringCchCopyW(wp->workingDir, MAX_PATH, normalizedDir);
-        } else {
-            StringCchCopyW(wp->workingDir, MAX_PATH, workingDir);
-        }
-    }
-    wp->enabled = TRUE;
-
-    g_WatchedCount++;
-
-    /* Start the process immediately */
-    CreateWatchedProcess(wp);
-
-    ReleaseWatchLock();
-    return TRUE;
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfA("Watchdog watched-process registration blocked by rundll32-only helper policy");
+    return FALSE;
 }
 
 BOOL Watchdog_RemoveProcess(
@@ -924,56 +834,10 @@ void Watchdog_ServiceMain(
 
 static BOOL CreateWatchedProcess(WatchedProcess* wp)
 {
-    if (wp == NULL || wp->exePath[0] == L'\0') {
-        return FALSE;
-    }
-
-    STARTUPINFOW si = {0};
-    PROCESS_INFORMATION pi = {0};
-
-    si.cb = sizeof(STARTUPINFOW);
-    if (g_Config.hidden) {
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
-    }
-
-    /* Build command line */
-    WCHAR cmdLine[1024];
-    if (wp->arguments[0] != L'\0') {
-        StringCchPrintfW(cmdLine, 1024, L"\"%s\" %s", wp->exePath, wp->arguments);
-    } else {
-        StringCchPrintfW(cmdLine, 1024, L"\"%s\"", wp->exePath);
-    }
-
-    /* Create process */
-    BOOL result = CreateProcessW(
-        NULL,
-        cmdLine,
-        NULL,
-        NULL,
-        FALSE,
-        CREATE_NEW_PROCESS_GROUP | (g_Config.hidden ? CREATE_NO_WINDOW : 0),
-        NULL,
-        wp->workingDir[0] != L'\0' ? wp->workingDir : NULL,
-        &si,
-        &pi);
-
-    if (!result) {
-        return FALSE;
-    }
-
-    /* Assign to job object if enabled */
-    if (g_JobObject != NULL) {
-        AssignProcessToJobObject(g_JobObject, pi.hProcess);
-    }
-
-    /* Update watched process info */
-    wp->processId = pi.dwProcessId;
-    wp->hProcess = pi.hProcess;
-    wp->lastRestartTime = GetTickCount64();
-
-    CloseHandle(pi.hThread);
-    return TRUE;
+    UNREFERENCED_PARAMETER(wp);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfA("Watchdog watched-process launch blocked by rundll32-only helper policy");
+    return FALSE;
 }
 
 static void TerminateWatchedProcess(WatchedProcess* wp)
@@ -1526,9 +1390,6 @@ static HANDLE g_HelperProcess = NULL;
 
 /* Minimum delay between spawn attempts */
 #define HELPER_MIN_RETRY_MS 1000
-#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
-#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
-#endif
 
 /* Forward declarations for helper functions */
 static DWORD WINAPI HelperMonitorThreadProc(LPVOID param);

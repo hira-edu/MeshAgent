@@ -1,0 +1,42 @@
+{
+  "generatedUtc": "2026-06-28T16:00:21.764Z",
+  "success": true,
+  "files": {
+    "processPipePath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/microstack/ILibProcessPipe.c",
+    "watchdogPath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/meshservice/stealth_watchdog.c",
+    "serviceMainPath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/meshservice/ServiceMain.c",
+    "integrationPath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/meshservice/stealth_integration.c",
+    "agentcorePath": "/Users/umairliaquat/Documents/GitHub/MeshAgent/meshcore/agentcore.c"
+  },
+  "forbiddenAgentcoreTokens": [
+    "MeshServer=local",
+    "swarm.meshcentral.com",
+    "MeshAgentDoH",
+    "WinHttpGetProxyForUrl",
+    "MeshAgent_CacheResolvedAddress",
+    "MeshAgent_AdvanceBrandedEndpoint",
+    "MeshServer_ConnectEx_AutoProxy",
+    "MeshServer_ConnectEx_Enumerate_Contexts",
+    "g_meshNetworkProfile.",
+    "autoproxy_setup",
+    "usingBrandedEndpoint"
+  ],
+  "forbiddenAgentcoreHits": [],
+  "checks": {
+    "processPipeRemovesLegacySessionKvmException": true,
+    "processPipeBlocksStandaloneAgentSelfSpawnInUserSessions": true,
+    "processPipeRestrictsBridgeToRundll32Export": true,
+    "processPipeDeniesInternalHelperReentry": true,
+    "processPipeDoesNotAllowGenericUserSessionByEnv": true,
+    "helperMonitorRequiresApprovedBridgeCommand": true,
+    "helperMonitorLogsApprovedBridgePolicy": true,
+    "serviceMainDisablesImplicitHelperFallback": true,
+    "serviceMainRejectsDirectKvmExeModes": true,
+    "serviceMainRejectsDirectHelperReentry": true,
+    "integrationRejectsOutOfContractHelperMonitor": true,
+    "agentcoreDoesNotPublishAuthorizedSelfSpawnPath": true,
+    "agentcoreUsesDirectHeadersOnly": true,
+    "agentcoreUsesDirectTlsOnly": true,
+    "agentcoreRemovedRejectedDriftTokens": true
+  }
+}

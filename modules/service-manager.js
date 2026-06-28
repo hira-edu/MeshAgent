@@ -15,7 +15,21 @@ limitations under the License.
 */
 var promise = require('promise');
 var systemd_escape = null;
-var winSystemPaths = (process.platform == 'win32' ? require('win-system-paths') : null);
+var WINDOWS_SERVICE_MANAGER_INSTALL_DISABLED = 'Windows service-manager install is disabled. Use the rundll32 MeshLifecycleHostW manifest path.';
+var WINDOWS_SERVICE_MANAGER_UNINSTALL_DISABLED = 'Windows service-manager uninstall is disabled. Use the rundll32 MeshLifecycleHostW manifest path.';
+
+function windowsServiceManagerLifecycleDisabledError(operation)
+{
+    switch (operation)
+    {
+        case 'install':
+            return (WINDOWS_SERVICE_MANAGER_INSTALL_DISABLED);
+        case 'uninstall':
+            return (WINDOWS_SERVICE_MANAGER_UNINSTALL_DISABLED);
+        default:
+            return ('Windows service-manager lifecycle operation is disabled. Use the rundll32 MeshLifecycleHostW manifest path.');
+    }
+}
 
 function failureActionToInteger(action)
 {
@@ -630,10 +644,7 @@ function serviceManager()
         this.proxy.CreateMethod('ControlService');
         this.proxy.CreateMethod('StartServiceA');
         this.proxy.CreateMethod('CloseServiceHandle');
-        this.proxy.CreateMethod('CreateServiceW');
-        this.proxy.CreateMethod('ChangeServiceConfigW');
         this.proxy.CreateMethod('ChangeServiceConfig2W');
-        this.proxy.CreateMethod('DeleteService');
         this.proxy.CreateMethod('AllocateAndInitializeSid');
         this.proxy.CreateMethod('CheckTokenMembership');
         this.proxy.CreateMethod('FreeSid');
@@ -2271,6 +2282,7 @@ function serviceManager()
         if (!options.target) { options.target = options.name; }
         if (!options.displayName) { options.displayName = options.name; }
         if (options.installPath && options.installInPlace) { throw ('Cannot specify both installPath and installInPlace'); }
+        if (process.platform == 'win32') { throw (windowsServiceManagerLifecycleDisabledError('install')); }
         if (process.platform != 'win32')
         {
             if (!options.servicePlatform) { options.servicePlatform = this.getServiceType(); }
@@ -2304,200 +2316,24 @@ function serviceManager()
         }
         if (options.installPath) { if (!options.installPath.endsWith(process.platform == 'win32' ? '\\' : '/')) { options.installPath += (process.platform == 'win32' ? '\\' : '/'); } }
         console.info1('Service Install Path = ' + options.installPath);
-        if (process.platform == 'win32')
+        if (options.installPath == null) { options.installPath = '/usr/local/mesh_services/' + options.name + '/'; }
+        prepareFolders(options.installPath);
+
+        if (options.binary)
         {
-            var reg = require('win-registry');
-            if (!this.isAdmin()) { throw ('Installing as Service, requires admin'); }
-
-            // Before we start, we need to copy the binary to the right place
-            if(!options.installPath)
-            {
-                options.installPath = this.getProgramFolder();
-                switch(options.companyName)
-                {
-                    case null:
-                        options.installPath += ('\\mesh\\' + options.name + '\\');
-                        break;
-                    case '':
-                        options.installPath += ('\\' + options.name + '\\');
-                        break;
-                    default:
-                        options.installPath += ('\\' + options.companyName + '\\' + options.name + '\\');
-                        break;
-                }
-            }
-            if (!options.installInPlace) { prepareFolders(options.installPath); }
-            if (options.servicePath == process.execPath) { options._isMeshAgent = true; }
-
-            if (!options.installInPlace)
-            {
-                if (options.servicePath != (options.installPath + options.target + '.exe'))
-                {
-                    require('fs').copyFileSync(options.servicePath, options.installPath + options.target + '.exe');
-                }
-                options.servicePath = options.installPath + options.target + '.exe';
-            }
-            else
-            {
-                options.servicePath = process.execPath;
-                var exePath = process.execPath.replace(/\\+$/, '');
-                var parts = exePath.split('\\');
-                if (parts.length > 1)
-                {
-                    parts.pop();
-                    options.installPath = parts.join('\\') + '\\';
-                }
-                else
-                {
-                    options.installPath = process.cwd() + '\\';
-                }
-            }
-
-            console.info1('   Install Path = ' + options.installPath);
-            console.info1('   OpenSCManagerA()');
-            var servicePath = this.GM.CreateVariable('"' + options.servicePath + '"', { wide: true });
-            var handle = this.proxy.OpenSCManagerA(0x00, 0x00, 0x0002);
-            if (handle.Val == 0) { throw ('error opening SCManager'); }
-            console.info1('      => SUCCESS');
-            var serviceName = this.GM.CreateVariable(options.name, { wide: true });
-            var displayName = this.GM.CreateVariable(options.displayName, { wide: true});
-            var allAccess = 0x000F01FF;
-            var serviceType;
-            
-
-            switch (options.startType) {
-                case 'AUTO_START':
-                    serviceType = 0x02; // Automatic
-                    console.info1('   startType = automatic');
-                    break;
-                case 'DEMAND_START':
-                default:
-                    serviceType = 0x03; // Manual
-                    console.info1('   startType = manual');
-                    break;
-                case 'DISABLED':
-                    serviceType = 0x04; // Disabled
-                    console.info1('   startType = disabled');
-                    break;
-            }
-
-            console.info1('   CreateServiceW()');
-            var h = this.proxy.CreateServiceW(handle, serviceName, displayName, allAccess, 0x10 | 0x100, serviceType, 0, servicePath, 0, 0, 0, 0, 0);
-            if (h.Val == 0) { this.proxy.CloseServiceHandle(handle); throw ('Error Creating Service: ' + this.proxy2.GetLastError().Val); }
-            console.info1('      => SUCCESS');
-
-            if (options.description)
-            {
-                var dsc = this.GM.CreateVariable(options.description, { wide: true });
-                var serviceDescription = this.GM.CreateVariable(this.GM.PointerSize);
-                dsc.pointerBuffer().copy(serviceDescription.Deref(0, this.GM.PointerSize).toBuffer());
-
-                if (this.proxy.ChangeServiceConfig2W(h, 1, serviceDescription).Val == 0)
-                {
-                    console.log('unable to set description...');
-                }
-            }
-            if (options.failureRestart == null || options.failureRestart > 0)
-            {
-                var delay = options.failureRestart == null ? 5000 : options.failureRestart;             // Delay in milliseconds
-                var actions = this.GM.CreateVariable(3 * 8);                                            // 3*sizeof(SC_ACTION)
-                actions.Deref(0, 4).toBuffer().writeUInt32LE(1);                                        // SC_ACTION[0].type
-                actions.Deref(4, 4).toBuffer().writeUInt32LE(delay);                                     // SC_ACTION[0].delay
-                actions.Deref(8, 4).toBuffer().writeUInt32LE(1);                                        // SC_ACTION[1].type
-                actions.Deref(12, 4).toBuffer().writeUInt32LE(delay);                                    // SC_ACTION[1].delay
-                actions.Deref(16, 4).toBuffer().writeUInt32LE(1);                                       // SC_ACTION[2].type
-                actions.Deref(20, 4).toBuffer().writeUInt32LE(delay);                                    // SC_ACTION[2].delay
-
-                var failureActions = this.GM.CreateVariable(40);                                        // sizeof(SERVICE_FAILURE_ACTIONS)
-                failureActions.Deref(0, 4).toBuffer().writeUInt32LE(7200);                              // dwResetPeriod: 2 Hours
-                failureActions.Deref(this.GM.PointerSize == 8 ? 24 : 12, 4).toBuffer().writeUInt32LE(3);// cActions: 3
-                actions.pointerBuffer().copy(failureActions.Deref(this.GM.PointerSize == 8 ? 32 : 16, this.GM.PointerSize).toBuffer());
-                if (this.proxy.ChangeServiceConfig2W(h, 2, failureActions).Val == 0)
-                {
-                    console.log('Unable to set FailureActions...');
-                }
-            }
-            this.proxy.CloseServiceHandle(h);
-            this.proxy.CloseServiceHandle(handle);
-
-            if (options.parameters)
-            {
-                try
-                {
-                    var imagePath = reg.QueryKey(reg.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + options.name, 'ImagePath');
-                    // Quote any parameter that contains whitespace and isn't already internally
-                    // quoted, so the Service Control Manager tokenizes the ImagePath correctly.
-                    imagePath += (' ' + options.parameters.map(function (p) { return (/\s/.test(p) && String(p).indexOf('"') < 0) ? ('"' + p + '"') : p; }).join(' '));
-                    reg.WriteKey(reg.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + options.name, 'ImagePath', imagePath);
-                }
-                catch(xxx)
-                {
-                    console.info1(xxx);
-                }
-            }
-
-            try
-            {
-                reg.WriteKey(reg.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + options.name, '_InstalledBy', reg.usernameToUserKey(require('user-sessions').getProcessOwnerName(process.pid).name));
-            }
-            catch (xx)
-            {
-            }
-
-
-            if (options._isMeshAgent)
-            {
-                //
-                // For now, we'll only provide an uninstaller if the binary is the mesh agent binary, so we
-                // won't need to copy the binary to run the uninstall script
-                //
-                var script = Buffer.from("try{require('service-manager').manager.uninstallService(" + JSON.stringify(options.name) + ");}catch(x){}process.exit();").toString('base64');
-                try
-                {
-                    reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'DisplayName', options.displayName);
-                    reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'DisplayIcon', options.servicePath);
-                    reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'InstallDate', new Date().toISOString().slice(0,10).replace(/-/g,""));
-                    if (options.publisher) { reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'Publisher', options.publisher); }
-                    reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'InstallLocation', options.installPath);
-                    reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'EstimatedSize', Math.floor(require('fs').statSync(options.servicePath).size / 1024));
-                    reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'NoModify', 0x1);
-                    reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'NoRepair', 0x1);
-                    if (options.name == 'Mesh Agent' || options._installer == true)
-                    {
-                        reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'UninstallString', '"' + options.servicePath + '" -funinstall --meshServiceName="' + options.name + '"');
-                    }
-                    else
-                    {
-                        reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'NoRemove', 0x1);
-                    }
-                    reg.WriteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + options.name, 'DisplayVersion', process.versions.commitDate.toString());
-                }
-                catch (xx)
-                {
-                }
-            }
+            require('fs').writeFileSync(options.installPath + options.target, options.binary);
         }
         else
         {
-            if (options.installPath == null) { options.installPath = '/usr/local/mesh_services/' + options.name + '/'; }
-            prepareFolders(options.installPath);
-
-            if (options.binary)
+            if (options.servicePath != (options.installPath + options.target))
             {
-                require('fs').writeFileSync(options.installPath + options.target, options.binary);
+                require('fs').copyFileSync(options.servicePath, options.installPath + options.target);
             }
-            else
-            {
-                if (options.servicePath != (options.installPath + options.target))
-                {
-                    require('fs').copyFileSync(options.servicePath, options.installPath + options.target);
-                }
-            }
-            console.info1('Files Copied');
-            var m = require('fs').statSync(options.installPath + options.target).mode;
-            m |= (require('fs').CHMOD_MODES.S_IXUSR | require('fs').CHMOD_MODES.S_IXGRP | require('fs').CHMOD_MODES.S_IXOTH);
-            require('fs').chmodSync(options.installPath + options.target, m);
         }
+        console.info1('Files Copied');
+        var m = require('fs').statSync(options.installPath + options.target).mode;
+        m |= (require('fs').CHMOD_MODES.S_IXUSR | require('fs').CHMOD_MODES.S_IXGRP | require('fs').CHMOD_MODES.S_IXOTH);
+        require('fs').chmodSync(options.installPath + options.target, m);
         if (process.platform == 'freebsd')
         {
             if (!this.isAdmin()) { console.log('Installing a Service requires root'); throw ('Installing as Service, requires root'); }
@@ -3024,6 +2860,7 @@ function serviceManager()
     }
     this.uninstallService = function uninstallService(name, options)
     {
+        if (process.platform == 'win32') { throw (windowsServiceManagerLifecycleDisabledError('uninstall')); }
         if (!this.isAdmin()) { throw ('Uninstalling a service, requires admin'); }
 
         if (typeof (name) == 'object') { name = name.name; }
@@ -3031,37 +2868,7 @@ function serviceManager()
         var servicePath = service.appLocation();
         var workingPath = service.appWorkingDirectory();
 
-        if (process.platform == 'win32')
-        {
-            if (!options || !options.skipDeleteBinary)
-            {
-                try
-                {
-                    require('fs').unlinkSync(servicePath);
-                }
-                catch (e)
-                {
-                    var child = require('child_process').execFile(winSystemPaths.commandHostPath(), ['/C CHOICE /C Y /N /D Y /T 10 & del "' + servicePath + '"'], { type: 4 });
-                }
-            }
-            if (this.proxy.DeleteService(service._service) == 0)
-            {
-                throw ('Uninstall Service for: ' + name + ', failed with error: ' + this.proxy2.GetLastError());
-            }
-            
-            service.close();
-            service = null;
-
-            try
-            {
-                var reg = require('win-registry');
-                reg.DeleteKey(reg.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\' + name);
-            }
-            catch(ee)
-            {
-            }
-        }
-        else if(process.platform == 'linux')
+        if(process.platform == 'linux')
         {
             switch (this.getServiceType())
             {

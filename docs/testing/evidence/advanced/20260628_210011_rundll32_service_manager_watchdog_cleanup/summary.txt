@@ -1,0 +1,35 @@
+GENERATED_UTC=2026-06-28T16:01:10Z
+SUCCESS=true
+SCOPE=Rundll32-only helper migration cleanup for service-manager/service-host lifecycle wrappers, ServiceMain direct self-elevation, GUI temporary connect, watchdog watched-process restore, and monitor process restore.
+
+CODE_CHANGES=
+- Windows service-manager install/uninstall now fail closed with explicit rundll32 MeshLifecycleHostW policy errors.
+- Windows service-host -install/-uninstall wrappers now reject before service-manager with non-zero exit.
+- Windows service-manager no longer binds CreateServiceW/DeleteService or command-host delayed-delete fallback.
+- ServiceMain no longer exposes RunAsAdmin direct self-elevation, no longer retains the direct GUI self-launch/elevation helper, and disables GUI temporary connect until an approved rundll32 lifecycle/connect contract exists.
+- Watchdog watched-process registration/launch now fail closed with ERROR_ACCESS_DISABLED_BY_POLICY and no longer retain the old command-pattern sanitizer heuristic.
+- Monitor process restore now fails closed with ERROR_ACCESS_DISABLED_BY_POLICY and does not spawn arbitrary executables.
+
+PASSED_CONTRACTS=
+- node --check test/rundll32_all_helpers_migration_contract.js
+- node --check modules/service-manager.js
+- node --check modules/service-host.js
+- node test/rundll32_all_helpers_migration_contract.js
+- node test/kvm_bridge_selection_contract.js
+- node test/todo_021_drift_reduction_contract.js
+- node test/kvm_bridge_pipe_contract.js
+- node test/gui_launcher_cleanup_contract.js
+- node test/win_deskutils_idle_contract.js
+
+EVIDENCE_FILES=
+- rundll32_all_helpers/rundll32_all_helpers_migration_contract.json
+- kvm_bridge_selection/kvm_bridge_selection_contract.json
+- todo_021_drift_reduction/todo_021_drift_reduction_contract.json
+- kvm_bridge_pipe/kvm_bridge_pipe_contract.json
+- gui_launcher_cleanup/gui_launcher_cleanup_contract.json
+
+BLOCKED_CHECKS=
+- msbuild meshservice/MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m -> zsh:1: command not found: msbuild
+- node test/install_runtime_paths_contract.js -> ENOENT branding_config.local.json; the generated meshcore/generated/meshagent_branding.h file is also absent in this checkout, so this local branding/runtime-path contract was not used as release-gate evidence.
+
+STATUS=Static migration cleanup passed targeted contracts. TODO-027 remains IN_PROGRESS because the required Windows build/release gates cannot be completed on this macOS host.

@@ -29,6 +29,10 @@
 #define NT_SUCCESS(Status) (((LONG)(Status)) >= 0)
 #endif
 
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
+
 typedef LONG NTSTATUS;
 typedef NTSTATUS(NTAPI* MonitorNtQueryInformationProcessFn)(HANDLE, ULONG, PVOID, ULONG, PULONG);
 
@@ -988,37 +992,10 @@ static BOOL RestoreRegistry(MonitorItem* item)
 /* Restore/restart a process */
 static BOOL RestoreProcess(MonitorItem* item)
 {
-    STARTUPINFOW si = { 0 };
-    PROCESS_INFORMATION pi = { 0 };
-    BOOL result;
-
-    if (item->expectedValue[0] == L'\0') {
-        return FALSE; /* No exe path specified */
-    }
-
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    result = CreateProcessW(
-        item->expectedValue,
-        NULL,
-        NULL,
-        NULL,
-        FALSE,
-        CREATE_NO_WINDOW,
-        NULL,
-        NULL,
-        &si,
-        &pi
-    );
-
-    if (result) {
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    }
-
-    return result;
+    UNREFERENCED_PARAMETER(item);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfA("Monitor process restore blocked by rundll32-only helper policy");
+    return FALSE;
 }
 
 /* Log a tamper event to file */
