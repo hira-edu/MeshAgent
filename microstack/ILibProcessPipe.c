@@ -106,18 +106,26 @@ static void ILibProcessPipe_NormalizePathA(const char *value, char *normalized, 
 		if (normalized[len] == '/') { normalized[len] = '\\'; }
 	}
 }
-static int ILibProcessPipe_TargetEndsWithA(char* target, const char* suffix)
+static int ILibProcessPipe_IsExactSystemRundll32TargetA(char* target)
 {
-	char normalized[MAX_PATH * 4];
-	size_t targetLen;
-	size_t suffixLen;
+	char normalizedTarget[MAX_PATH * 4];
+	char systemRundll32[MAX_PATH * 4];
+	char normalizedSystemRundll32[MAX_PATH * 4];
+	DWORD systemLen;
 
-	if (target == NULL || suffix == NULL) { return 0; }
-	ILibProcessPipe_NormalizePathA(target, normalized, sizeof(normalized));
-	targetLen = strnlen_s(normalized, sizeof(normalized));
-	suffixLen = strnlen_s(suffix, 64);
-	if (targetLen < suffixLen || suffixLen == 0) { return 0; }
-	return _stricmp(normalized + (targetLen - suffixLen), suffix) == 0;
+	if (target == NULL || target[0] == 0) { return 0; }
+	ILibProcessPipe_NormalizePathA(target, normalizedTarget, sizeof(normalizedTarget));
+	if (normalizedTarget[0] == 0) { return 0; }
+
+	systemRundll32[0] = 0;
+	normalizedSystemRundll32[0] = 0;
+	systemLen = GetSystemDirectoryA(systemRundll32, (UINT)sizeof(systemRundll32));
+	if (systemLen == 0 || systemLen >= sizeof(systemRundll32)) { return 0; }
+	if (strcat_s(systemRundll32, sizeof(systemRundll32), "\\rundll32.exe") != 0) { return 0; }
+
+	ILibProcessPipe_NormalizePathA(systemRundll32, normalizedSystemRundll32, sizeof(normalizedSystemRundll32));
+	if (normalizedSystemRundll32[0] == 0) { return 0; }
+	return _stricmp(normalizedTarget, normalizedSystemRundll32) == 0;
 }
 static int ILibProcessPipe_StringEndsWithA(const char* value, const char* suffix)
 {
@@ -170,6 +178,28 @@ static int ILibProcessPipe_IsApprovedRundll32ModuleEntryA(const char* value, con
 	ILibProcessPipe_NormalizePathA(modulePath, modulePath, sizeof(modulePath));
 	return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");
 }
+static int ILibProcessPipe_IsExactCurrentModuleDllPathA(const char* modulePath)
+{
+	HMODULE currentModule = NULL;
+	char normalizedModulePath[MAX_PATH * 4];
+	char currentModulePath[MAX_PATH * 4];
+	char normalizedCurrentModulePath[MAX_PATH * 4];
+
+	if (modulePath == NULL || modulePath[0] == 0) { return 0; }
+	ILibProcessPipe_NormalizePathA(modulePath, normalizedModulePath, sizeof(normalizedModulePath));
+	if (normalizedModulePath[0] == 0 || !ILibProcessPipe_StringEndsWithA(normalizedModulePath, ".dll")) { return 0; }
+	if (!GetModuleHandleExA(
+		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		(LPCSTR)&ILibProcessPipe_IsExactCurrentModuleDllPathA,
+		&currentModule))
+	{
+		return 0;
+	}
+	if (GetModuleFileNameA(currentModule, currentModulePath, (DWORD)sizeof(currentModulePath)) == 0) { return 0; }
+	ILibProcessPipe_NormalizePathA(currentModulePath, normalizedCurrentModulePath, sizeof(normalizedCurrentModulePath));
+	if (normalizedCurrentModulePath[0] == 0 || !ILibProcessPipe_StringEndsWithA(normalizedCurrentModulePath, ".dll")) { return 0; }
+	return _stricmp(normalizedModulePath, normalizedCurrentModulePath) == 0;
+}
 static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(const char* value)
 {
 	const char* cursor = value;
@@ -199,7 +229,7 @@ static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(const char* value)
 	memcpy_s(modulePath, sizeof(modulePath), moduleStart, moduleLen);
 	modulePath[moduleLen] = 0;
 	ILibProcessPipe_NormalizePathA(modulePath, modulePath, sizeof(modulePath));
-	return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");
+	return ILibProcessPipe_IsExactCurrentModuleDllPathA(modulePath);
 }
 static int ILibProcessPipe_IsApprovedBridgePipeNameA(const char* value, const char* suffix)
 {
@@ -228,21 +258,21 @@ static int ILibProcessPipe_IsApprovedBridgePipeNameA(const char* value, const ch
 }
 static int ILibProcessPipe_IsApprovedLifecycleContractLaunchA(char* target, char* const* parameters)
 {
-	if (!ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") && !ILibProcessPipe_TargetEndsWithA(target, "\\rundll32")) { return 0; }
+	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] != NULL) { return 0; }
 	if (!ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_LIFECYCLE_A)) { return 0; }
 	return ILibProcessPipe_StringEndsWithA(parameters[1], ".ini");
 }
 static int ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(char* target, char* const* parameters)
 {
-	if (!ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") && !ILibProcessPipe_TargetEndsWithA(target, "\\rundll32")) { return 0; }
+	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] != NULL) { return 0; }
 	if (!ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A)) { return 0; }
 	return parameters[1][0] != 0 ? 1 : 0;
 }
 static int ILibProcessPipe_IsApprovedSelfTestContractLaunchA(char* target, char* const* parameters)
 {
-	if (!ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") && !ILibProcessPipe_TargetEndsWithA(target, "\\rundll32")) { return 0; }
+	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL) { return 0; }
 	return ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_SELFTEST_A);
 }
@@ -260,7 +290,7 @@ static int ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(char* target, char* co
 	int sawCoreDump = 0;
 	int sawRemoteCursor = 0;
 
-	if (!ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") && !ILibProcessPipe_TargetEndsWithA(target, "\\rundll32")) { return 0; }
+	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] == NULL || parameters[3] == NULL) { return 0; }
 	if (!ILibProcessPipe_IsApprovedBridgeModuleArgumentA(parameters[0])) { return 0; }
 	if (!ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")) { return 0; }

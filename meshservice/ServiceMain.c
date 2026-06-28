@@ -2455,32 +2455,46 @@ static int MeshService_RunKvmSecureDesktopProbeCommand(void)
 	BOOL debugPrivilegeEnabled = FALSE;
 	BOOL success = FALSE;
 	char* childJson = NULL;
+	HRESULT formatHr = S_OK;
 
 	ZeroMemory(&childProcess, sizeof(childProcess));
 
 	if (ExpandEnvironmentStringsW(L"%PUBLIC%\\Documents\\MeshAgent\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
 	{
-		GetTempPathW((DWORD)_countof(tempPath), tempPath);
+		if (GetTempPathW((DWORD)_countof(tempPath), tempPath) == 0 || tempPath[0] == L'\0')
+		{
+			StringCchCopyW(tempPath, _countof(tempPath), L".\\");
+		}
 	}
 	else
 	{
 		CreateDirectoryW(tempPath, NULL);
 	}
-	StringCchPrintfW(childReport, _countof(childReport), L"%lsMeshSecureDesktopProbe_%lu_child.json", tempPath, GetCurrentProcessId());
-	DeleteFileW(childReport);
+	formatHr = StringCchPrintfW(childReport, _countof(childReport), L"%lsMeshSecureDesktopProbe_%lu_child.json", tempPath, GetCurrentProcessId());
+	if (FAILED(formatHr))
+	{
+		childSpawnError = ERROR_INSUFFICIENT_BUFFER;
+	}
+	else
+	{
+		DeleteFileW(childReport);
+	}
 
 	debugPrivilegeEnabled = MeshService_EnableNamedPrivilegeW(L"SeDebugPrivilege");
 
-	systemTokenReady = MeshService_OpenPrimarySystemTokenForSession(sessionId, &systemToken, &systemTokenError);
-	if (systemTokenReady)
+	if (SUCCEEDED(formatHr))
 	{
-		if (FAILED(StringCchPrintfW(childArgs, _countof(childArgs), L"-kvm-secure-desktop-probe-child \"%ls\" %u", childReport, 20000)))
+		systemTokenReady = MeshService_OpenPrimarySystemTokenForSession(sessionId, &systemToken, &systemTokenError);
+		if (systemTokenReady)
 		{
-			childSpawnError = ERROR_INSUFFICIENT_BUFFER;
-		}
-		else
-		{
-			childSpawned = MeshService_SpawnKvmProbeHostWithTokenW(systemToken, childArgs, L"winsta0\\default", FALSE, &childProcess, &childSpawnError);
+			if (FAILED(StringCchPrintfW(childArgs, _countof(childArgs), L"-kvm-secure-desktop-probe-child \"%ls\" %u", childReport, 20000)))
+			{
+				childSpawnError = ERROR_INSUFFICIENT_BUFFER;
+			}
+			else
+			{
+				childSpawned = MeshService_SpawnKvmProbeHostWithTokenW(systemToken, childArgs, L"winsta0\\default", FALSE, &childProcess, &childSpawnError);
+			}
 		}
 	}
 	if (childSpawned)
@@ -8613,11 +8627,11 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-uac-consent-trigger") == 0)
 	{
-		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
+		return MeshService_RunKvmUacConsentTriggerCommand(NULL, 0, NULL);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-uac-consent-target") == 0)
 	{
-		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
+		return MeshService_RunKvmUacConsentTargetCommand(0, NULL);
 	}
 #endif
 

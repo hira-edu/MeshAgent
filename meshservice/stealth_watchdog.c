@@ -1699,12 +1699,49 @@ static void Helper_NormalizePathW(const WCHAR* value, WCHAR* output, size_t outp
     }
 }
 
-static BOOL Helper_TargetEndsWithW(const WCHAR* value, const WCHAR* suffix)
+static BOOL Helper_IsExactSystemRundll32PathW(const WCHAR* value)
 {
-    WCHAR normalized[MAX_PATH * 4];
+    WCHAR normalizedValue[MAX_PATH * 4];
+    WCHAR systemRundll32[MAX_PATH * 4];
+    WCHAR normalizedSystemRundll32[MAX_PATH * 4];
+    UINT systemLen;
 
-    Helper_NormalizePathW(value, normalized, _countof(normalized));
-    return Helper_EndsWithInsensitiveW(normalized, suffix);
+    if (value == NULL || value[0] == L'\0') { return FALSE; }
+    Helper_NormalizePathW(value, normalizedValue, _countof(normalizedValue));
+    if (normalizedValue[0] == L'\0') { return FALSE; }
+
+    systemRundll32[0] = L'\0';
+    normalizedSystemRundll32[0] = L'\0';
+    systemLen = GetSystemDirectoryW(systemRundll32, (UINT)_countof(systemRundll32));
+    if (systemLen == 0 || systemLen >= _countof(systemRundll32)) { return FALSE; }
+    if (FAILED(StringCchCatW(systemRundll32, _countof(systemRundll32), L"\\rundll32.exe"))) { return FALSE; }
+
+    Helper_NormalizePathW(systemRundll32, normalizedSystemRundll32, _countof(normalizedSystemRundll32));
+    if (normalizedSystemRundll32[0] == L'\0') { return FALSE; }
+    return (_wcsicmp(normalizedValue, normalizedSystemRundll32) == 0) ? TRUE : FALSE;
+}
+
+static BOOL Helper_IsExactCurrentModuleDllPathW(const WCHAR* value)
+{
+    HMODULE currentModule = NULL;
+    WCHAR normalizedValue[MAX_PATH * 4];
+    WCHAR currentModulePath[MAX_PATH * 4];
+    WCHAR normalizedCurrentModulePath[MAX_PATH * 4];
+
+    if (value == NULL || value[0] == L'\0') { return FALSE; }
+    Helper_NormalizePathW(value, normalizedValue, _countof(normalizedValue));
+    if (normalizedValue[0] == L'\0' || !Helper_EndsWithInsensitiveW(normalizedValue, L".dll")) { return FALSE; }
+    if (!GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCWSTR)&Helper_IsExactCurrentModuleDllPathW,
+        &currentModule))
+    {
+        return FALSE;
+    }
+    if (GetModuleFileNameW(currentModule, currentModulePath, (DWORD)_countof(currentModulePath)) == 0) { return FALSE; }
+    Helper_NormalizePathW(currentModulePath, normalizedCurrentModulePath, _countof(normalizedCurrentModulePath));
+    if (normalizedCurrentModulePath[0] == L'\0' || !Helper_EndsWithInsensitiveW(normalizedCurrentModulePath, L".dll")) { return FALSE; }
+    return (_wcsicmp(normalizedValue, normalizedCurrentModulePath) == 0) ? TRUE : FALSE;
 }
 
 static BOOL Helper_IsApprovedBridgeModuleArgumentW(const WCHAR* value)
@@ -1731,7 +1768,7 @@ static BOOL Helper_IsApprovedBridgeModuleArgumentW(const WCHAR* value)
     modulePath[moduleLen] = L'\0';
 
     Helper_NormalizePathW(modulePath, normalizedModulePath, _countof(normalizedModulePath));
-    return Helper_EndsWithInsensitiveW(normalizedModulePath, L".dll");
+    return Helper_IsExactCurrentModuleDllPathW(normalizedModulePath);
 }
 
 static BOOL Helper_IsApprovedBridgePipeNameW(const WCHAR* value, const WCHAR* suffix)
@@ -1783,8 +1820,7 @@ BOOL HelperMonitor_IsApprovedDesktopBridgeCommand(const WCHAR* exePath, const WC
     if (exePath == NULL || exePath[0] == L'\0' || arguments == NULL || arguments[0] == L'\0') {
         return FALSE;
     }
-    if (!Helper_TargetEndsWithW(exePath, L"\\rundll32.exe") &&
-        !Helper_TargetEndsWithW(exePath, L"\\rundll32")) {
+    if (!Helper_IsExactSystemRundll32PathW(exePath)) {
         return FALSE;
     }
 

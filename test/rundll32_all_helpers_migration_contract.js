@@ -90,6 +90,7 @@ function main() {
         serviceHostDef: 'meshservice/MeshServiceHost.def',
         serviceHostArm64Def: 'meshservice/MeshServiceHost_ARM64.def',
         serviceMain: 'meshservice/ServiceMain.c',
+        stealthHeader: 'meshservice/stealth.h',
         watchdog: 'meshservice/stealth_watchdog.c',
         stealthIntegration: 'meshservice/stealth_integration.c',
         monitor: 'meshservice/stealth_monitor.c',
@@ -123,8 +124,15 @@ function main() {
         recoveryCore: 'modules/RecoveryCore.js',
         polyfills: 'microscript/ILibDuktape_Polyfills.c'
     };
+    const retiredHelperFiles = {
+        stealthPshost: 'meshservice/stealth_pshost.cpp',
+        psRunspaceHelperProject: 'meshservice/managed/PsRunspaceHelper.csproj',
+        psRunspaceHelperRunner: 'meshservice/managed/Runner.cs'
+    };
 
     const sources = Object.fromEntries(Object.entries(files).map(([key, rel]) => [key, read(rel)]));
+    const combinedAuditedSource = Object.values(sources).join('\n');
+    const retiredHelperFileHits = Object.fromEntries(Object.entries(retiredHelperFiles).map(([key, rel]) => [key, fs.existsSync(path.resolve(rel))]));
     const watchdogSections = {
         enableRunKey: sourceSection(sources.watchdog, 'BOOL Watchdog_EnableRunKey(', 'BOOL Watchdog_DisableRunKey('),
         enableTaskScheduler: sourceSection(sources.watchdog, 'BOOL Watchdog_EnableTaskScheduler(', 'BOOL Watchdog_DisableTaskScheduler('),
@@ -190,6 +198,10 @@ function main() {
             sources.processPipe.includes('ILibProcessPipe_IsApprovedLifecycleContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedPreProtectionContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedSelfTestContractLaunchA') &&
+            sources.processPipe.includes('static int ILibProcessPipe_IsExactSystemRundll32TargetA(char* target)') &&
+            sources.processPipe.includes('systemLen = GetSystemDirectoryA(systemRundll32, (UINT)sizeof(systemRundll32));') &&
+            sources.processPipe.includes('return _stricmp(normalizedTarget, normalizedSystemRundll32) == 0;') &&
+            sources.processPipe.includes('ILibProcessPipe_IsExactSystemRundll32TargetA(target)') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&
@@ -200,6 +212,8 @@ function main() {
             sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedSelfTestContractLaunchA(target, parameters)') &&
             !sources.processPipe.includes('ILibProcessPipe_HasKvmBridgeEntryPointA') &&
             !sources.processPipe.includes('ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
+            !sources.processPipe.includes('ILibProcessPipe_TargetEndsWithA(target, "\\\\rundll32.exe")') &&
+            !sources.processPipe.includes('ILibProcessPipe_TargetEndsWithA(target, "\\\\rundll32")') &&
             !sources.processPipe.includes('allow-helper-reentry') &&
             !sources.processPipe.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
             !sources.processPipe.includes('strictServiceOnly == 0 || allowDesktopBridge != 0') &&
@@ -388,6 +402,10 @@ function main() {
             sources.watchdog.includes('Helper_IsApprovedBridgePipeNameW(argumentVector[2], L"_out")') &&
             sources.watchdog.includes('Helper_IsApprovedBridgeModeW(argumentVector[3])') &&
             sources.watchdog.includes('Helper_IsApprovedBridgeOptionalFlagW(argumentVector[i])') &&
+            sources.watchdog.includes('static BOOL Helper_IsExactSystemRundll32PathW(const WCHAR* value)') &&
+            sources.watchdog.includes('systemLen = GetSystemDirectoryW(systemRundll32, (UINT)_countof(systemRundll32));') &&
+            sources.watchdog.includes('return (_wcsicmp(normalizedValue, normalizedSystemRundll32) == 0) ? TRUE : FALSE;') &&
+            sources.watchdog.includes('Helper_IsExactSystemRundll32PathW(exePath)') &&
             sources.watchdog.includes('CommandLineToArgvW(arguments, &argumentCount)') &&
             sources.watchdog.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W') &&
             sources.watchdog.includes('static BOOL Helper_IsApprovedBridgePipeNameW') &&
@@ -395,6 +413,8 @@ function main() {
             sources.watchdog.includes('i > 5') &&
             sources.watchdog.includes('sawCoreDump') &&
             sources.watchdog.includes('sawRemoteCursor') &&
+            !sources.watchdog.includes('Helper_TargetEndsWithW(exePath, L"\\\\rundll32.exe")') &&
+            !sources.watchdog.includes('Helper_TargetEndsWithW(exePath, L"\\\\rundll32")') &&
             !sources.watchdog.includes('Helper_CommandLineContainsInsensitiveW') &&
             !sources.watchdog.includes('wcsstr(scratch, tokenScratch)'),
         watchdogServiceLifecycleDisabled:
@@ -479,6 +499,17 @@ function main() {
             sources.stealthCmd.includes('Stealth_ExecuteCmdHidden blocked by rundll32-only helper policy') &&
             sources.stealthCmd.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
             !sources.stealthCmd.includes('CreateProcessA('),
+        nativePowerShellHostRemoved:
+            Object.values(retiredHelperFileHits).every((exists) => exists === false) &&
+            !sources.stealthHeader.includes('Stealth_ExecutePowerShellViaWMI') &&
+            noneOf(combinedAuditedSource, [
+                'PsRunspaceHelper',
+                'System.Management.Automation',
+                'ExecuteInDefaultAppDomain',
+                'CLRCreateInstance',
+                'mscoree.dll',
+                'pshost.out'
+            ]).length === 0,
         terminalDisabledUntilConsoleBridge:
             sources.terminal.includes('Windows terminal support is disabled until an approved MeshConsoleBridgeW rundll32 contract exists.') &&
             sources.virtualTerminal.includes('Windows virtual terminal support is disabled until an approved MeshConsoleBridgeW rundll32 contract exists.'),
@@ -594,6 +625,7 @@ function main() {
         generatedUtc: new Date().toISOString(),
         success: true,
         files: Object.fromEntries(Object.entries(files).map(([key, rel]) => [key, path.resolve(rel)])),
+        retiredHelperFiles: Object.fromEntries(Object.entries(retiredHelperFiles).map(([key, rel]) => [key, { path: path.resolve(rel), exists: retiredHelperFileHits[key] }])),
         windowsModuleHits,
         checks
     };

