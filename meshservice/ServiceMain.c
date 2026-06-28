@@ -2070,169 +2070,34 @@ static BOOL MeshService_OpenElevatedPrimaryTokenForSession(DWORD sessionId, HAND
 
 static BOOL MeshService_SpawnExecutableWithTokenW(HANDLE token, const WCHAR* executablePath, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
 {
-	STARTUPINFOW startupInfo;
-	WCHAR commandLine[4096] = { 0 };
-	BOOL ok = FALSE;
-	DWORD createFlags = CREATE_NO_WINDOW;
-
-	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
-	if (token == NULL || processInfo == NULL)
-	{
-		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
-		return FALSE;
-	}
-	ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION));
-	if (executablePath == NULL || executablePath[0] == L'\0')
-	{
-		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
-		return FALSE;
-	}
-	if (arguments != NULL && arguments[0] != L'\0')
-	{
-		if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\" %ls", executablePath, arguments)))
-		{
-			if (errorOut != NULL) { *errorOut = ERROR_INSUFFICIENT_BUFFER; }
-			return FALSE;
-		}
-	}
-	else
-	{
-		if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\"", executablePath)))
-		{
-			if (errorOut != NULL) { *errorOut = ERROR_INSUFFICIENT_BUFFER; }
-			return FALSE;
-		}
-	}
-
-	ZeroMemory(&startupInfo, sizeof(startupInfo));
-	startupInfo.cb = sizeof(startupInfo);
-	startupInfo.lpDesktop = (LPWSTR)((desktop != NULL && desktop[0] != L'\0') ? desktop : L"winsta0\\default");
-
-	ok = CreateProcessAsUserW(token, executablePath, commandLine, NULL, NULL, FALSE, createFlags, NULL, NULL, &startupInfo, processInfo);
-	if (!ok)
-	{
-		ok = CreateProcessWithTokenW(token, LOGON_WITH_PROFILE, executablePath, commandLine, createFlags, NULL, NULL, &startupInfo, processInfo);
-	}
-	if (!ok && errorOut != NULL) { *errorOut = GetLastError(); }
-	return ok;
+	UNREFERENCED_PARAMETER(token);
+	UNREFERENCED_PARAMETER(executablePath);
+	UNREFERENCED_PARAMETER(arguments);
+	UNREFERENCED_PARAMETER(desktop);
+	if (processInfo != NULL) { ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION)); }
+	if (errorOut != NULL) { *errorOut = ERROR_ACCESS_DISABLED_BY_POLICY; }
+	return FALSE;
 }
 
 static BOOL MeshService_SpawnVisibleExecutableWithTokenW(HANDLE token, const WCHAR* executablePath, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
 {
-	STARTUPINFOW startupInfo;
-	WCHAR commandLine[4096] = { 0 };
-	BOOL ok = FALSE;
-	DWORD createFlags = CREATE_NEW_CONSOLE;
-
-	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
-	if (token == NULL || processInfo == NULL)
-	{
-		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
-		return FALSE;
-	}
-	ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION));
-	if (executablePath == NULL || executablePath[0] == L'\0')
-	{
-		if (errorOut != NULL) { *errorOut = ERROR_INVALID_PARAMETER; }
-		return FALSE;
-	}
-	if (arguments != NULL && arguments[0] != L'\0')
-	{
-		if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\" %ls", executablePath, arguments)))
-		{
-			if (errorOut != NULL) { *errorOut = ERROR_INSUFFICIENT_BUFFER; }
-			return FALSE;
-		}
-	}
-	else
-	{
-		if (FAILED(StringCchPrintfW(commandLine, _countof(commandLine), L"\"%ls\"", executablePath)))
-		{
-			if (errorOut != NULL) { *errorOut = ERROR_INSUFFICIENT_BUFFER; }
-			return FALSE;
-		}
-	}
-
-	ZeroMemory(&startupInfo, sizeof(startupInfo));
-	startupInfo.cb = sizeof(startupInfo);
-	startupInfo.lpDesktop = (LPWSTR)((desktop != NULL && desktop[0] != L'\0') ? desktop : L"winsta0\\default");
-	startupInfo.dwFlags = STARTF_USESHOWWINDOW;
-	startupInfo.wShowWindow = SW_SHOWNORMAL;
-
-	ok = CreateProcessAsUserW(token, executablePath, commandLine, NULL, NULL, FALSE, createFlags, NULL, NULL, &startupInfo, processInfo);
-	if (!ok)
-	{
-		ok = CreateProcessWithTokenW(token, LOGON_WITH_PROFILE, executablePath, commandLine, createFlags, NULL, NULL, &startupInfo, processInfo);
-	}
-	if (!ok && errorOut != NULL) { *errorOut = GetLastError(); }
-	return ok;
-}
-
-static BOOL MeshService_ResolveHostExecutablePathW(WCHAR* outputPath, size_t outputCount)
-{
-	if (outputPath == NULL || outputCount == 0) { return FALSE; }
-	outputPath[0] = L'\0';
-
-#if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
-	{
-		WCHAR currentProcessPath[MAX_PATH] = { 0 };
-		const WCHAR* currentProcessName = NULL;
-
-		if (GetModuleFileNameW(NULL, currentProcessPath, (DWORD)_countof(currentProcessPath)) > 0)
-		{
-			currentProcessName = wcsrchr(currentProcessPath, L'\\');
-			currentProcessName = (currentProcessName != NULL) ? (currentProcessName + 1) : currentProcessPath;
-			if (currentProcessName != NULL && _wcsicmp(currentProcessName, L"svchost.exe") != 0)
-			{
-				return SUCCEEDED(StringCchCopyW(outputPath, outputCount, currentProcessPath));
-			}
-		}
-	}
-
-	// In svchost mode, GetModuleFileNameW(NULL) returns svchost.exe. 
-	// We need to resolve the branded agent binary (e.g. diaghost.exe) instead.
-	HMODULE hMod = NULL;
-	WCHAR modulePath[MAX_PATH] = { 0 };
-	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&MeshService_ResolveHostExecutablePathW, &hMod) &&
-		GetModuleFileNameW(hMod, modulePath, _countof(modulePath)) > 0)
-	{
-		wchar_t* lastSlash = wcsrchr(modulePath, L'\\');
-		if (lastSlash != NULL)
-		{
-			*lastSlash = L'\0';
-			wchar_t brandedName[MAX_PATH] = { 0 };
-			MeshService_CopyBrandingTextToWide(MeshService_GetBinaryNameText(), brandedName, _countof(brandedName));
-			if (brandedName[0] == L'\0') { StringCchCopyW(brandedName, _countof(brandedName), STEALTH_FALLBACK_EXE_NAME); }
-
-			wchar_t candidate[MAX_PATH] = { 0 };
-			if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\%ls", modulePath, brandedName)) &&
-				GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
-			{
-				StringCchCopyW(outputPath, outputCount, candidate);
-				return TRUE;
-			}
-			
-		}
-	}
-	
-	// If we are in stealth build but cannot find the agent binary, DO NOT return svchost.exe
-	// as it will cause a fork bomb when used with the watchdog.
+	UNREFERENCED_PARAMETER(token);
+	UNREFERENCED_PARAMETER(executablePath);
+	UNREFERENCED_PARAMETER(arguments);
+	UNREFERENCED_PARAMETER(desktop);
+	if (processInfo != NULL) { ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION)); }
+	if (errorOut != NULL) { *errorOut = ERROR_ACCESS_DISABLED_BY_POLICY; }
 	return FALSE;
-#else
-	return GetModuleFileNameW(NULL, outputPath, (DWORD)outputCount) != 0;
-#endif
 }
 
 static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
 {
-	WCHAR exePath[MAX_PATH * 2] = { 0 };
-
-	if (!MeshService_ResolveHostExecutablePathW(exePath, _countof(exePath)))
-	{
-		if (errorOut != NULL) { *errorOut = GetLastError(); }
-		return FALSE;
-	}
-	return MeshService_SpawnExecutableWithTokenW(token, exePath, arguments, desktop, processInfo, errorOut);
+	UNREFERENCED_PARAMETER(token);
+	UNREFERENCED_PARAMETER(arguments);
+	UNREFERENCED_PARAMETER(desktop);
+	if (processInfo != NULL) { ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION)); }
+	if (errorOut != NULL) { *errorOut = ERROR_ACCESS_DISABLED_BY_POLICY; }
+	return FALSE;
 }
 
 static BOOL MeshService_TerminateProcessesByNameInSessionW(const WCHAR* processName, DWORD sessionId, DWORD* terminatedCountOut)
@@ -2427,223 +2292,31 @@ static int MeshService_RunKvmUacConsentTargetCommand(DWORD sleepMs, const WCHAR*
 
 static int MeshService_RunKvmUacConsentTriggerCommand(const WCHAR* reportPath, DWORD timeoutMs)
 {
-	SHELLEXECUTEINFOW executeInfo;
-	WCHAR exePath[MAX_PATH * 2] = { 0 };
-	WCHAR parameters[256] = { 0 };
 	FILE* file = NULL;
 	errno_t fileErr = 0;
-	BOOL ok = FALSE;
-	DWORD error = ERROR_SUCCESS;
-	DWORD exitCode = STILL_ACTIVE;
-	DWORD childPid = 0;
-	ULONGLONG startedTick = GetTickCount64();
-	ULONGLONG elapsedMs = 0;
 
-	GetModuleFileNameW(NULL, exePath, (DWORD)_countof(exePath));
-	StringCchPrintfW(parameters, _countof(parameters), L"-kvm-uac-consent-target %lu", (unsigned long)((timeoutMs == 0) ? 15000 : timeoutMs));
-
-	ZeroMemory(&executeInfo, sizeof(executeInfo));
-	executeInfo.cbSize = sizeof(executeInfo);
-	executeInfo.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-	executeInfo.lpVerb = L"runas";
-	executeInfo.lpFile = exePath;
-	executeInfo.lpParameters = parameters;
-	executeInfo.nShow = SW_HIDE;
-
-	ok = ShellExecuteExW(&executeInfo);
-	error = ok ? ERROR_SUCCESS : GetLastError();
-	if (ok && executeInfo.hProcess != NULL)
-	{
-		childPid = GetProcessId(executeInfo.hProcess);
-		WaitForSingleObject(executeInfo.hProcess, timeoutMs == 0 ? 15000 : timeoutMs);
-		GetExitCodeProcess(executeInfo.hProcess, &exitCode);
-		CloseHandle(executeInfo.hProcess);
-	}
-	elapsedMs = GetTickCount64() - startedTick;
+	UNREFERENCED_PARAMETER(timeoutMs);
 
 	if (reportPath != NULL && reportPath[0] != L'\0')
 	{
 		fileErr = _wfopen_s(&file, reportPath, L"wb");
 		if (fileErr == 0 && file != NULL)
 		{
-			fprintf(file, "{\"success\":%s,", ok ? "true" : "false");
-			fprintf(file, "\"error\":%lu,", (unsigned long)error);
-			fprintf(file, "\"childPid\":%lu,", (unsigned long)childPid);
-			fprintf(file, "\"exitCode\":%lu,", (unsigned long)exitCode);
-			fprintf(file, "\"elapsedMs\":%llu}\n", (unsigned long long)elapsedMs);
+			fprintf(file, "{\"success\":false,\"error\":%lu,\"reason\":\"uac-consent-trigger-disabled-by-rundll32-only-policy\"}\n", (unsigned long)ERROR_ACCESS_DISABLED_BY_POLICY);
 			fclose(file);
 		}
 	}
-	return ok ? 0 : 1;
+	return 1;
 }
 
 static int MeshService_RunKvmSecureDesktopProbeCommand(void)
 {
-	WCHAR childReport[MAX_PATH] = { 0 };
-	WCHAR uacReport[MAX_PATH] = { 0 };
-	WCHAR uacTargetReport[MAX_PATH] = { 0 };
-	WCHAR uacScript[MAX_PATH] = { 0 };
-	WCHAR tempPath[MAX_PATH] = { 0 };
-	WCHAR childArgs[512] = { 0 };
-	WCHAR uacArgs[512] = { 0 };
-	WCHAR exePath[MAX_PATH * 2] = { 0 };
-	WCHAR wscriptPath[MAX_PATH] = { 0 };
-	HANDLE systemToken = NULL;
-	HANDLE linkedToken = NULL;
-	PROCESS_INFORMATION childProcess;
-	PROCESS_INFORMATION uacProcess;
 	DWORD sessionId = MeshService_GetCurrentSessionId();
-	DWORD childSpawnError = ERROR_SUCCESS;
-	DWORD uacSpawnError = ERROR_SUCCESS;
-	DWORD systemTokenError = ERROR_SUCCESS;
-	DWORD linkedTokenError = ERROR_SUCCESS;
-	DWORD childExitCode = STILL_ACTIVE;
-	DWORD uacExitCode = STILL_ACTIVE;
-	DWORD consentKillCount = 0;
-	BOOL childSpawned = FALSE;
-	BOOL uacSpawned = FALSE;
-	BOOL systemTokenReady = FALSE;
-	BOOL linkedTokenReady = FALSE;
-	BOOL success = FALSE;
-	char* childJson = NULL;
-	char* uacJson = NULL;
-	char* uacTargetJson = NULL;
-	char* uacScriptUtf8 = NULL;
-
-	ZeroMemory(&childProcess, sizeof(childProcess));
-	ZeroMemory(&uacProcess, sizeof(uacProcess));
-
-	if (ExpandEnvironmentStringsW(L"%PUBLIC%\\Documents\\MeshAgent\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
-	{
-		GetTempPathW((DWORD)_countof(tempPath), tempPath);
-	}
-	else
-	{
-		CreateDirectoryW(tempPath, NULL);
-	}
-	StringCchPrintfW(childReport, _countof(childReport), L"%lsMeshSecureDesktopProbe_%lu_child.json", tempPath, GetCurrentProcessId());
-	StringCchPrintfW(uacReport, _countof(uacReport), L"%lsMeshSecureDesktopProbe_%lu_uac.json", tempPath, GetCurrentProcessId());
-	StringCchPrintfW(uacTargetReport, _countof(uacTargetReport), L"%lsMeshSecureDesktopProbe_%lu_uac_target.json", tempPath, GetCurrentProcessId());
-	StringCchPrintfW(uacScript, _countof(uacScript), L"%lsMeshSecureDesktopProbe_%lu_uac.vbs", tempPath, GetCurrentProcessId());
-	DeleteFileW(childReport);
-	DeleteFileW(uacReport);
-	DeleteFileW(uacTargetReport);
-	DeleteFileW(uacScript);
-
-	MeshService_EnableNamedPrivilegeW(L"SeDebugPrivilege");
-
-	systemTokenReady = MeshService_OpenPrimarySystemTokenForSession(sessionId, &systemToken, &systemTokenError);
-	if (systemTokenReady)
-	{
-		StringCchPrintfW(childArgs, _countof(childArgs), L"-kvm-secure-desktop-probe-child \"%ls\" %u", childReport, 20000);
-		childSpawned = MeshService_SpawnProcessWithTokenW(systemToken, childArgs, L"winsta0\\default", &childProcess, &childSpawnError);
-	}
-	if (childSpawned)
-	{
-		Sleep(1500);
-	}
-	linkedTokenReady = MeshService_GetLinkedPrimaryToken(sessionId, &linkedToken, &linkedTokenError);
-	if (linkedTokenReady)
-	{
-		if (MeshService_ProcessHasSystemSid())
-		{
-			GetModuleFileNameW(NULL, exePath, (DWORD)_countof(exePath));
-			ExpandEnvironmentStringsW(L"%SystemRoot%\\System32\\wscript.exe", wscriptPath, (DWORD)_countof(wscriptPath));
-			uacScriptUtf8 = (char*)malloc(4096);
-			if (uacScriptUtf8 != NULL)
-			{
-				int written = sprintf_s(
-					uacScriptUtf8,
-					4096,
-					"On Error Resume Next\r\n"
-					"Set shell = CreateObject(\"Shell.Application\")\r\n"
-					"Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n"
-					"shell.ShellExecute \"%S\", \"-kvm-uac-consent-target 15000 \"\"%S\"\"\", \"\", \"runas\", 1\r\n"
-					"errNum = Err.Number\r\n"
-					"Set file = fso.CreateTextFile(\"%S\", True)\r\n"
-					"file.Write \"{\"\"errorNumber\"\":\"\r\n"
-					"file.Write CStr(errNum)\r\n"
-					"file.Write \"}\"\r\n"
-					"file.Close\r\n"
-					"WScript.Quit errNum\r\n",
-					exePath,
-					uacTargetReport,
-					uacReport);
-				if (written > 0 && MeshService_WriteUtf8TextFileW(uacScript, uacScriptUtf8))
-				{
-					StringCchPrintfW(uacArgs, _countof(uacArgs), L"//B //NoLogo \"%ls\"", uacScript);
-					uacSpawned = MeshService_SpawnExecutableWithTokenW(linkedToken, wscriptPath, uacArgs, L"winsta0\\default", &uacProcess, &uacSpawnError);
-				}
-				else
-				{
-					uacSpawnError = ERROR_WRITE_FAULT;
-				}
-			}
-			else
-			{
-				uacSpawnError = ERROR_OUTOFMEMORY;
-			}
-		}
-		else
-		{
-			StringCchPrintfW(uacArgs, _countof(uacArgs), L"-kvm-uac-consent-trigger \"%ls\" %u", uacReport, 15000);
-			uacSpawned = MeshService_SpawnProcessWithTokenW(linkedToken, uacArgs, L"winsta0\\default", &uacProcess, &uacSpawnError);
-		}
-	}
-
-	if (childSpawned)
-	{
-		WaitForSingleObject(childProcess.hProcess, 30000);
-		GetExitCodeProcess(childProcess.hProcess, &childExitCode);
-	}
-	MeshService_TerminateProcessesByNameInSessionW(L"consent.exe", sessionId, &consentKillCount);
-	if (uacSpawned)
-	{
-		WaitForSingleObject(uacProcess.hProcess, 10000);
-		GetExitCodeProcess(uacProcess.hProcess, &uacExitCode);
-	}
-
-	childJson = MeshService_ReadUtf8TextFileW(childReport);
-	uacJson = MeshService_ReadUtf8TextFileW(uacReport);
-	uacTargetJson = MeshService_ReadUtf8TextFileW(uacTargetReport);
-	success = (childSpawned &&
-		childExitCode == 0 &&
-		childJson != NULL &&
-		strstr(childJson, "\"success\":true") != NULL);
-
-	printf("{\"success\":%s,", success ? "true" : "false");
-	printf("\"sessionId\":%lu,", (unsigned long)sessionId);
-	printf("\"systemTokenReady\":%s,", systemTokenReady ? "true" : "false");
-	printf("\"linkedTokenReady\":%s,", linkedTokenReady ? "true" : "false");
-	printf("\"childSpawned\":%s,", childSpawned ? "true" : "false");
-	printf("\"uacSpawned\":%s,", uacSpawned ? "true" : "false");
-	printf("\"systemTokenError\":%lu,", (unsigned long)systemTokenError);
-	printf("\"linkedTokenError\":%lu,", (unsigned long)linkedTokenError);
-	printf("\"childSpawnError\":%lu,", (unsigned long)childSpawnError);
-	printf("\"uacSpawnError\":%lu,", (unsigned long)uacSpawnError);
-	printf("\"childExitCode\":%lu,", (unsigned long)childExitCode);
-	printf("\"uacExitCode\":%lu,", (unsigned long)uacExitCode);
-	printf("\"consentKillCount\":%lu,", (unsigned long)consentKillCount);
-	printf("\"probe\":%s,", childJson != NULL ? childJson : "null");
-	printf("\"uac\":%s,", uacJson != NULL ? uacJson : "null");
-	printf("\"uacTarget\":%s}\n", uacTargetJson != NULL ? uacTargetJson : "null");
+	printf("{\"success\":false,\"sessionId\":%lu,\"error\":%lu,\"reason\":\"secure-desktop-uac-probe-disabled-by-rundll32-only-policy\"}\n",
+		(unsigned long)sessionId,
+		(unsigned long)ERROR_ACCESS_DISABLED_BY_POLICY);
 	fflush(stdout);
-
-	if (childProcess.hThread != NULL) { CloseHandle(childProcess.hThread); }
-	if (childProcess.hProcess != NULL) { CloseHandle(childProcess.hProcess); }
-	if (uacProcess.hThread != NULL) { CloseHandle(uacProcess.hThread); }
-	if (uacProcess.hProcess != NULL) { CloseHandle(uacProcess.hProcess); }
-	if (systemToken != NULL) { CloseHandle(systemToken); }
-	if (linkedToken != NULL) { CloseHandle(linkedToken); }
-	if (childJson != NULL) { free(childJson); }
-	if (uacJson != NULL) { free(uacJson); }
-	if (uacTargetJson != NULL) { free(uacTargetJson); }
-	if (uacScriptUtf8 != NULL) { free(uacScriptUtf8); }
-	DeleteFileW(childReport);
-	DeleteFileW(uacReport);
-	DeleteFileW(uacTargetReport);
-	DeleteFileW(uacScript);
-	return success ? 0 : 1;
+	return 1;
 }
 
 typedef struct MeshServiceFindWindowContext

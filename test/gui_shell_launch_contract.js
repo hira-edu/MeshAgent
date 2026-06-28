@@ -65,13 +65,18 @@ function main() {
             noGuiShellLaunchRetryHeuristic:
                 !source.includes('launchErr == ERROR_INVALID_FUNCTION') &&
                 !source.includes('MeshService_IsRecoverableLaunchError'),
-            shellExecuteOnlyInUacConsentTrigger:
-                shellExecuteMatches.length === 1 &&
-                shellExecuteMatches[0] >= uacConsentTriggerStart &&
-                shellExecuteMatches[0] < uacConsentTriggerEnd,
-            suppressesShellUiOnUacConsentTrigger: uacConsentTriggerSection.includes('SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI'),
-            closesUacConsentTriggerProcessHandle: uacConsentTriggerSection.includes('if (ok && executeInfo.hProcess != NULL)') &&
+            shellExecuteRemovedOrOnlyInUacConsentTrigger:
+                shellExecuteMatches.length === 0 ||
+                (shellExecuteMatches.length === 1 &&
+                    shellExecuteMatches[0] >= uacConsentTriggerStart &&
+                    shellExecuteMatches[0] < uacConsentTriggerEnd),
+            suppressesShellUiOnUacConsentTrigger:
+                shellExecuteMatches.length === 0 ||
+                uacConsentTriggerSection.includes('SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI'),
+            closesUacConsentTriggerProcessHandle: shellExecuteMatches.length === 0 ||
+                (uacConsentTriggerSection.includes('if (ok && executeInfo.hProcess != NULL)') &&
                 uacConsentTriggerSection.includes('CloseHandle(executeInfo.hProcess);')
+                )
         },
         shellExecuteOccurrenceCount: shellExecuteMatches.length
     };

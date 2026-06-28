@@ -123,6 +123,11 @@ function main() {
         enableBootStart: sourceSection(sources.watchdog, 'BOOL Watchdog_EnableBootStart(', 'BOOL Watchdog_DisableBootStart('),
         isBootStartEnabled: sourceSection(sources.watchdog, 'BOOL Watchdog_IsBootStartEnabled(', '/* ================================================================')
     };
+    const serviceMainSections = {
+        spawnExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnExecutableWithTokenW(', 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW('),
+        spawnVisibleExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW(', 'static BOOL MeshService_SpawnProcessWithTokenW('),
+        spawnProcessWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnProcessWithTokenW(', 'static BOOL MeshService_TerminateProcessesByNameInSessionW(')
+    };
     const embedded = {
         dispatcher: embeddedModuleSource(sources.polyfills, 'win-dispatcher'),
         processManager: embeddedModuleSource(sources.polyfills, 'process-manager')
@@ -249,6 +254,19 @@ function main() {
             !sources.agentcore.includes('CreateProcessW(NULL, cmdLine') &&
             !sources.agentcore.includes('selfTestBinary') &&
             !sources.agentcore.includes('selfTestExe'),
+        serviceMainGenericTokenSpawnBlocked:
+            !sources.serviceMain.includes('static BOOL MeshService_ResolveHostExecutablePathW') &&
+            serviceMainSections.spawnExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
+            serviceMainSections.spawnExecutableWithToken.includes('UNREFERENCED_PARAMETER(executablePath);') &&
+            serviceMainSections.spawnVisibleExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
+            serviceMainSections.spawnVisibleExecutableWithToken.includes('UNREFERENCED_PARAMETER(executablePath);') &&
+            serviceMainSections.spawnProcessWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
+            serviceMainSections.spawnProcessWithToken.includes('UNREFERENCED_PARAMETER(arguments);') &&
+            !serviceMainSections.spawnExecutableWithToken.includes('CreateProcessAsUserW(') &&
+            !serviceMainSections.spawnExecutableWithToken.includes('CreateProcessWithTokenW(') &&
+            !serviceMainSections.spawnVisibleExecutableWithToken.includes('CreateProcessAsUserW(') &&
+            !serviceMainSections.spawnVisibleExecutableWithToken.includes('CreateProcessWithTokenW(') &&
+            !serviceMainSections.spawnProcessWithToken.includes('MeshService_ResolveHostExecutablePathW('),
         watchdogDoesNotShellOutToTaskScheduler:
             !sources.watchdog.includes('schtasks.exe /Create') &&
             !sources.watchdog.includes('schtasks.exe /Delete') &&
