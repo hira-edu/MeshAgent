@@ -190,6 +190,12 @@ function main() {
         assert(!jsPreProtectionBody.includes("'MeshAgent'"), `${modulePath} pre-protection path must not use MeshAgent fallback`);
         const jsCaptureRunBody = extractFunction(moduleSource, 'function umhctlRunPreProtectionCapture');
         assert(jsCaptureRunBody.includes('pre-protection evidence path unavailable'), `${modulePath} must fail before mutation when evidence path is unavailable`);
+        assert(jsCaptureRunBody.includes('captureProc = umhctlStartPreProtectionCaptureProcess(paths);'), `${modulePath} must route capture startup through the platform helper`);
+        assert(!jsCaptureRunBody.includes("childProcess.execFile(process.execPath, ['-preprotection-capture'"), `${modulePath} must not self-exec pre-protection capture directly from the run body`);
+        const jsCaptureStartBody = extractFunction(moduleSource, 'function umhctlStartPreProtectionCaptureProcess');
+        assert(jsCaptureStartBody.includes("if (process.platform == 'win32')"), `${modulePath} capture helper must have a Windows rundll32 branch`);
+        assert(jsCaptureStartBody.includes("serviceDllPath + ',MeshPreProtectionCaptureW'"), `${modulePath} Windows capture helper must call the rundll32 pre-protection export`);
+        assert(jsCaptureStartBody.includes("return childProcess.execFile(process.execPath, ['-preprotection-capture', '--capture-path=' + paths.capturePath]);"), `${modulePath} non-Windows capture helper must retain the native validation path`);
     }
 
     const deploy = readRepoFile(repoRoot, 'deploy.py');

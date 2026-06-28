@@ -8,6 +8,9 @@
 #include "stealth.h"
 #include "svchost_payload.h"
 
+BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
+int MeshService_RunSelfTestHostW(const wchar_t* arguments);
+
 #define MESH_LIFECYCLE_SECTION_W L"Lifecycle"
 #define MESH_LIFECYCLE_KEY_ACTION_W L"Action"
 #define MESH_LIFECYCLE_KEY_SOURCE_EXE_W L"SourceExe"
@@ -154,6 +157,7 @@ static BOOL MeshRundll32_GetEntryTailW(const wchar_t* entryName, const wchar_t* 
         if (entryPoint != NULL)
         {
             entryPoint += wcslen(entryName);
+            if (*entryPoint == L'"') { ++entryPoint; }
             while (*entryPoint == L' ' || *entryPoint == L'\t' || *entryPoint == L',') { ++entryPoint; }
             return SUCCEEDED(StringCchCopyW(tail, tailCch, entryPoint)) ? TRUE : FALSE;
         }
@@ -757,6 +761,85 @@ BOOL MeshRundll32_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parent
     return TRUE;
 }
 
+BOOL MeshRundll32_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeoutMs, DWORD* exitCodeOut)
+{
+    wchar_t rundll32Path[MAX_PATH] = {0};
+    wchar_t hostDllPath[MAX_PATH * 4] = {0};
+    wchar_t commandLine[32768] = {0};
+    PROCESS_INFORMATION pi;
+    STARTUPINFOW si;
+    DWORD waitResult = WAIT_OBJECT_0;
+    DWORD exitCode = ERROR_GEN_FAILURE;
+    BOOL ok = FALSE;
+
+    if (exitCodeOut != NULL) { *exitCodeOut = ERROR_GEN_FAILURE; }
+    if (arguments == NULL || arguments[0] == L'\0')
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (timeoutMs == 0) { timeoutMs = INFINITE; }
+
+    ZeroMemory(&pi, sizeof(pi));
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+
+    if (!MeshRundll32_GetSystemRundll32PathW(rundll32Path, _countof(rundll32Path)) ||
+        !MeshRundll32_GetInstalledLifecycleHostDllW(hostDllPath, _countof(hostDllPath)))
+    {
+        Stealth_LogInstallEvent(L"[SELFTEST_HOST] Unable to resolve rundll32 self-test host (error=%lu)", GetLastError());
+        return FALSE;
+    }
+
+    if (FAILED(StringCchPrintfW(
+            commandLine,
+            _countof(commandLine),
+            L"\"%ls\" \"%ls\",%ls %ls",
+            rundll32Path,
+            hostDllPath,
+            MESH_RUNDLL32_ENTRY_SELFTEST_W,
+            arguments)))
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    Stealth_LogInstallEvent(L"[SELFTEST_HOST] Launching rundll32 self-test host dll=%ls", hostDllPath);
+    if (!CreateProcessW(rundll32Path, commandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+    {
+        Stealth_LogInstallEvent(L"[SELFTEST_HOST] CreateProcessW failed (error=%lu)", GetLastError());
+        return FALSE;
+    }
+
+    waitResult = WaitForSingleObject(pi.hProcess, timeoutMs);
+    if (waitResult != WAIT_OBJECT_0)
+    {
+        Stealth_LogInstallEvent(L"[SELFTEST_HOST] Wait failed/timed out (wait=%lu error=%lu)", waitResult, GetLastError());
+        if (waitResult == WAIT_TIMEOUT) { TerminateProcess(pi.hProcess, ERROR_TIMEOUT); }
+        ok = FALSE;
+    }
+    else
+    {
+        ok = TRUE;
+    }
+
+    if (!GetExitCodeProcess(pi.hProcess, &exitCode))
+    {
+        exitCode = GetLastError();
+        ok = FALSE;
+    }
+    if (exitCodeOut != NULL) { *exitCodeOut = exitCode; }
+    if (exitCode != ERROR_SUCCESS)
+    {
+        ok = FALSE;
+        Stealth_LogInstallEvent(L"[SELFTEST_HOST] self-test host exited with %lu", exitCode);
+    }
+
+    if (pi.hThread != NULL) { CloseHandle(pi.hThread); }
+    if (pi.hProcess != NULL) { CloseHandle(pi.hProcess); }
+    return ok;
+}
+
 static DWORD MeshRundll32_DeleteLauncherAfterParentExitW(const wchar_t* targetPath, DWORD parentPid, DWORD timeoutMs)
 {
     HANDLE parentProcess = NULL;
@@ -906,4 +989,61 @@ void CALLBACK MeshLauncherCleanupW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLi
         (unsigned long)parentPid,
         (unsigned long)result);
     ExitProcess(result);
+}
+
+void CALLBACK MeshPreProtectionCaptureW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
+{
+    wchar_t tail[MAX_PATH * 6] = {0};
+    wchar_t capturePath[MAX_PATH * 4] = {0};
+    BOOL ok = FALSE;
+
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(hinstDLL);
+    UNREFERENCED_PARAMETER(nCmdShow);
+
+    Stealth_EnsureLoggingDefaults();
+    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_W, lpCmdLine, tail, _countof(tail)) ||
+        !MeshRundll32_CopyFirstTokenW(tail, capturePath, _countof(capturePath)))
+    {
+        DWORD error = GetLastError();
+        Stealth_LogInstallEvent(L"[PREPROTECTION_CAPTURE] Missing capture path (error=%lu)", error);
+        printf("{\"ok\":false,\"error\":\"capture-path-missing\",\"win32_error\":%lu}\n", (unsigned long)error);
+        ExitProcess(ERROR_INVALID_PARAMETER);
+    }
+
+    Stealth_LogInstallEvent(L"[PREPROTECTION_CAPTURE] Starting capture path=%ls", capturePath);
+    ok = MeshAgent_RunPreProtectionCaptureValidationW(capturePath);
+    Stealth_LogInstallEvent(L"[PREPROTECTION_CAPTURE] Completed status=%ls path=%ls", ok ? L"success" : L"failed", capturePath);
+    ExitProcess(ok ? ERROR_SUCCESS : ERROR_GEN_FAILURE);
+}
+
+void CALLBACK MeshSelfTestHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
+{
+    wchar_t tail[32768] = {0};
+    const wchar_t* arguments = tail;
+    int exitCode = ERROR_GEN_FAILURE;
+
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(hinstDLL);
+    UNREFERENCED_PARAMETER(nCmdShow);
+
+    Stealth_EnsureLoggingDefaults();
+    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_SELFTEST_W, lpCmdLine, tail, _countof(tail)))
+    {
+        DWORD error = GetLastError();
+        Stealth_LogInstallEvent(L"[SELFTEST_HOST] Missing self-test arguments (error=%lu)", error);
+        ExitProcess(ERROR_INVALID_PARAMETER);
+    }
+
+    while (*arguments == L' ' || *arguments == L'\t') { ++arguments; }
+    if (*arguments == L'\0')
+    {
+        Stealth_LogInstallEvent(L"[SELFTEST_HOST] Empty self-test arguments");
+        ExitProcess(ERROR_INVALID_PARAMETER);
+    }
+
+    Stealth_LogInstallEvent(L"[SELFTEST_HOST] Starting self-test");
+    exitCode = MeshService_RunSelfTestHostW(arguments);
+    Stealth_LogInstallEvent(L"[SELFTEST_HOST] Completed exit=%d", exitCode);
+    ExitProcess((DWORD)exitCode);
 }

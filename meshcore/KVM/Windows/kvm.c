@@ -1339,7 +1339,6 @@ static BOOL kvm_relay_resolve_rundll32_pathW(WCHAR* output, size_t outputLen)
 
 static BOOL kvm_relay_resolve_bridge_dll_pathW(char *exePath, WCHAR* output, size_t outputLen)
 {
-	WCHAR envPath[MAX_PATH * 4] = { 0 };
 	WCHAR modulePath[MAX_PATH * 4] = { 0 };
 	WCHAR exePathW[MAX_PATH * 4] = { 0 };
 	WCHAR dirPath[MAX_PATH * 4] = { 0 };
@@ -1349,18 +1348,11 @@ static BOOL kvm_relay_resolve_bridge_dll_pathW(char *exePath, WCHAR* output, siz
 	WCHAR brandedDllName[MAX_PATH] = { 0 };
 	WCHAR candidate[MAX_PATH * 4] = { 0 };
 	HMODULE module = NULL;
-	DWORD len = 0;
 	WCHAR* lastSlash = NULL;
 	WCHAR* ext = NULL;
 
 	if (output == NULL || outputLen == 0) { return FALSE; }
 	output[0] = L'\0';
-
-	len = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", envPath, (DWORD)_countof(envPath));
-	if (len > 0 && len < _countof(envPath) && GetFileAttributesW(envPath) != INVALID_FILE_ATTRIBUTES)
-	{
-		return SUCCEEDED(StringCchCopyW(output, outputLen, envPath));
-	}
 
 	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&kvm_relay_resolve_bridge_dll_pathW, &module) &&
 		GetModuleFileNameW(module, modulePath, (DWORD)_countof(modulePath)) > 0 &&
@@ -3837,8 +3829,8 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 	char traceLoopA[8] = { 0 };
 	char traceTileA[8] = { 0 };
 	char traceServiceWritesA[8] = { 0 };
-	char* bridgeParms0[] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm0", NULL, NULL, NULL };
-	char* bridgeParms1[] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm1", NULL, NULL, NULL };
+	char* bridgeParms0[8] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm0", NULL, NULL, NULL, NULL };
+	char* bridgeParms1[8] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm1", NULL, NULL, NULL, NULL };
 	char* bridgeEnvVars[13] = { NULL };
 	WCHAR rundll32PathW[MAX_PATH * 4] = { 0 };
 	WCHAR dllPathW[MAX_PATH * 4] = { 0 };
@@ -3847,6 +3839,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 	int desiredPause = (paused != 0 ? 1 : 0);
 	int usedBridgePath = 0;
 	int bridgeEnvPairCount = 0;
+	int bridgeOptionalArgCount = 4;
 	ULONGLONG bridgeConnectStartTickMs = 0;
 	DWORD bridgeLaunchAttemptCount = 0;
 	LONG restartSessionGeneration = kvm_relay_get_session_change_generation(ctx);
@@ -3927,11 +3920,17 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 		bridgeEnvPairCount = kvm_relay_append_bridge_env_passthrough(bridgeEnvVars, bridgeEnvPairCount, 6, "STEALTH_KVM_TRACE_LOOP", traceLoopA, sizeof(traceLoopA));
 		bridgeEnvPairCount = kvm_relay_append_bridge_env_passthrough(bridgeEnvVars, bridgeEnvPairCount, 6, "STEALTH_KVM_TRACE_TILE", traceTileA, sizeof(traceTileA));
 		bridgeEnvPairCount = kvm_relay_append_bridge_env_passthrough(bridgeEnvVars, bridgeEnvPairCount, 6, "STEALTH_KVM_TRACE_SERVICE_WRITES", traceServiceWritesA, sizeof(traceServiceWritesA));
-		if (g_ILibCrashDump_path != NULL) { bridgeParms0[3] = "-coredump"; bridgeParms1[3] = "-coredump"; }
+		if (g_ILibCrashDump_path != NULL)
+		{
+			bridgeParms0[bridgeOptionalArgCount] = "-coredump";
+			bridgeParms1[bridgeOptionalArgCount] = "-coredump";
+			++bridgeOptionalArgCount;
+		}
 		if (gRemoteMouseRenderDefault != 0)
 		{
-			if (bridgeParms0[3] == NULL) { bridgeParms0[3] = "-remotecursor"; } else { bridgeParms0[4] = "-remotecursor"; }
-			if (bridgeParms1[3] == NULL) { bridgeParms1[3] = "-remotecursor"; } else { bridgeParms1[4] = "-remotecursor"; }
+			bridgeParms0[bridgeOptionalArgCount] = "-remotecursor";
+			bridgeParms1[bridgeOptionalArgCount] = "-remotecursor";
+			++bridgeOptionalArgCount;
 		}
 
 		gChildProcess = NULL;

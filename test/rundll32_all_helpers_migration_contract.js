@@ -49,6 +49,18 @@ function noneOf(source, tokens) {
     return tokens.filter((token) => source.includes(token));
 }
 
+function sourceSection(source, startToken, endToken) {
+    const start = source.indexOf(startToken);
+    if (start < 0) {
+        throw new Error(`Missing source section start: ${startToken}`);
+    }
+    const end = endToken ? source.indexOf(endToken, start + startToken.length) : -1;
+    if (end < 0) {
+        return source.substring(start);
+    }
+    return source.substring(start, end);
+}
+
 function embeddedModuleSource(polyfillsSource, moduleName) {
     const escapedName = moduleName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const re = new RegExp("addCompressedModule\\('" + escapedName + "', Buffer\\.from\\('([^']+)', 'base64'\\)");
@@ -66,6 +78,13 @@ function main() {
     const files = {
         processPipe: 'microstack/ILibProcessPipe.c',
         agentcore: 'meshcore/agentcore.c',
+        meshReset: 'meshreset/main.c',
+        kvm: 'meshcore/KVM/Windows/kvm.c',
+        kvmRuntimeHelpers: 'test/lib/kvm_runtime_helpers.js',
+        rundll32Contract: 'meshservice/rundll32_contract.h',
+        rundll32ContractImpl: 'meshservice/rundll32_contract.c',
+        serviceHostDef: 'meshservice/MeshServiceHost.def',
+        serviceHostArm64Def: 'meshservice/MeshServiceHost_ARM64.def',
         serviceMain: 'meshservice/ServiceMain.c',
         watchdog: 'meshservice/stealth_watchdog.c',
         monitor: 'meshservice/stealth_monitor.c',
@@ -84,16 +103,26 @@ function main() {
         deskutils: 'modules/win-deskutils.js',
         dialog: 'modules/win-dialog.js',
         userConsent: 'modules/win-userconsent.js',
+        winBcd: 'modules/win-bcd.js',
         notifybar: 'modules/notifybar-desktop.js',
         processManager: 'modules/process-manager.js',
         serviceManager: 'modules/service-manager.js',
         serviceHost: 'modules/service-host.js',
         interactive: 'modules/interactive.js',
         agentInstaller: 'modules/agent-installer.js',
+        umhctl: 'modules/umhctl.js',
+        recoveryCore: 'modules/RecoveryCore.js',
         polyfills: 'microscript/ILibDuktape_Polyfills.c'
     };
 
     const sources = Object.fromEntries(Object.entries(files).map(([key, rel]) => [key, read(rel)]));
+    const watchdogSections = {
+        enableRunKey: sourceSection(sources.watchdog, 'BOOL Watchdog_EnableRunKey(', 'BOOL Watchdog_DisableRunKey('),
+        enableTaskScheduler: sourceSection(sources.watchdog, 'BOOL Watchdog_EnableTaskScheduler(', 'BOOL Watchdog_DisableTaskScheduler('),
+        enableWinlogon: sourceSection(sources.watchdog, 'BOOL Watchdog_EnableWinlogon(', 'BOOL Watchdog_DisableWinlogon('),
+        enableBootStart: sourceSection(sources.watchdog, 'BOOL Watchdog_EnableBootStart(', 'BOOL Watchdog_DisableBootStart('),
+        isBootStartEnabled: sourceSection(sources.watchdog, 'BOOL Watchdog_IsBootStartEnabled(', '/* ================================================================')
+    };
     const embedded = {
         dispatcher: embeddedModuleSource(sources.polyfills, 'win-dispatcher'),
         processManager: embeddedModuleSource(sources.polyfills, 'process-manager')
@@ -118,10 +147,20 @@ function main() {
         processPipeOnlyAllowsKvmRundll32Bridge:
             sources.processPipe.includes('allow-kvm-bridge') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModuleArgumentA') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&
             sources.processPipe.includes('blocked-user-session') &&
+            !sources.processPipe.includes('ILibProcessPipe_HasKvmBridgeEntryPointA') &&
+            !sources.processPipe.includes('ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
             !sources.processPipe.includes('allow-helper-reentry') &&
             !sources.processPipe.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
-            !sources.processPipe.includes('strictServiceOnly == 0 || allowDesktopBridge != 0'),
+            !sources.processPipe.includes('strictServiceOnly == 0 || allowDesktopBridge != 0') &&
+            !sources.agentcore.includes('STEALTH_KVM_BRIDGE_DLL') &&
+            !sources.kvm.includes('STEALTH_KVM_BRIDGE_DLL') &&
+            !sources.serviceMain.includes('STEALTH_KVM_BRIDGE_DLL') &&
+            !sources.kvmRuntimeHelpers.includes('STEALTH_KVM_BRIDGE_DLL'),
         serviceMainRejectsDirectHelperReentry:
             sources.serviceMain.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
             sources.serviceMain.includes('Use an approved rundll32 contract export') &&
@@ -148,11 +187,98 @@ function main() {
         agentcoreRejectsWindowsSlaveEntry:
             sources.agentcore.includes('direct --slave helper re-entry is disabled') &&
             sources.agentcore.includes('#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)'),
+        meshResetLegacyLifecycleDisabled:
+            sources.meshReset.includes('MeshReset is disabled by the rundll32-only runtime contract') &&
+            sources.meshReset.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
+            !sources.meshReset.includes('taskkill') &&
+            !sources.meshReset.includes('system(') &&
+            !sources.meshReset.includes('TerminateProcess(') &&
+            !sources.meshReset.includes('DeleteService(') &&
+            !sources.meshReset.includes('StartService(') &&
+            !sources.meshReset.includes('ControlService(') &&
+            !sources.meshReset.includes('RegDeleteKey') &&
+            !sources.meshReset.includes('SHFileOperation'),
+        preProtectionCaptureUsesRundll32Export:
+            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_W') &&
+            sources.rundll32Contract.includes('void CALLBACK MeshPreProtectionCaptureW') &&
+            sources.rundll32ContractImpl.includes("if (*entryPoint == L'\"') { ++entryPoint; }") &&
+            sources.rundll32ContractImpl.includes('void CALLBACK MeshPreProtectionCaptureW') &&
+            sources.rundll32ContractImpl.includes('MeshAgent_RunPreProtectionCaptureValidationW(capturePath)') &&
+            sources.serviceHostDef.includes('MeshPreProtectionCaptureW') &&
+            sources.serviceHostArm64Def.includes('MeshPreProtectionCaptureW') &&
+            sources.agentcore.includes('BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath)') &&
+            !sources.agentcore.includes('static BOOL MeshAgent_RunPreProtectionCaptureValidationW'),
+        preProtectionCaptureWindowsSelfExecRemoved:
+            [sources.umhctl, sources.recoveryCore].every((source) =>
+                source.includes('function umhctlStartPreProtectionCaptureProcess') &&
+                source.includes("if (process.platform == 'win32')") &&
+                source.includes('function umhctlGetInstalledAgentServiceDllPath') &&
+                source.includes("SYSTEM\\\\CurrentControlSet\\\\Services\\\\' + serviceName + '\\\\Parameters', 'ServiceDll'") &&
+                source.includes("return childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshPreProtectionCaptureW', paths.capturePath]);") &&
+                source.includes('captureProc = umhctlStartPreProtectionCaptureProcess(paths);') &&
+                source.includes("return childProcess.execFile(process.execPath, ['-preprotection-capture', '--capture-path=' + paths.capturePath]);") &&
+                !source.includes("captureProc = childProcess.execFile(process.execPath, ['-preprotection-capture'")),
+        preProtectionCaptureDirectWindowsEntryBlocked:
+            sources.serviceMain.includes('direct -preprotection-capture is disabled. Use rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>.') &&
+            sources.serviceMain.includes('rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>') &&
+            !sources.serviceMain.includes('strcasecmp(argv[i], "-preprotection-capture")') &&
+            !sources.serviceMain.includes('strcasecmp(argv[1], "-preprotection-capture") == 0 ||') &&
+            sources.agentcore.includes('direct-pre-protection-capture-disabled') &&
+            sources.agentcore.includes('Use rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>') &&
+            !sources.agentcore.includes('exit(MeshAgent_RunPreProtectionCaptureValidationW(capturePathPtr)') &&
+            !sources.agentcore.includes('ILibUTF8ToWideEx(preProtectionCapturePath'),
+        nativeRegressionSelfTestUsesRundll32Export:
+            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_SELFTEST_W') &&
+            sources.rundll32Contract.includes('BOOL MeshRundll32_LaunchSelfTestHostW') &&
+            sources.rundll32Contract.includes('void CALLBACK MeshSelfTestHostW') &&
+            sources.rundll32ContractImpl.includes('BOOL MeshRundll32_LaunchSelfTestHostW') &&
+            sources.rundll32ContractImpl.includes('MESH_RUNDLL32_ENTRY_SELFTEST_W') &&
+            sources.rundll32ContractImpl.includes('MeshService_RunSelfTestHostW(arguments)') &&
+            sources.serviceHostDef.includes('MeshSelfTestHostW') &&
+            sources.serviceHostArm64Def.includes('MeshSelfTestHostW') &&
+            sources.serviceMain.includes('int MeshService_RunSelfTestHostW(const wchar_t* arguments)') &&
+            sources.serviceMain.includes('direct --selftest is disabled. Use rundll32.exe <ServiceDll>,MeshSelfTestHostW <self-test-args>.') &&
+            sources.serviceMain.includes('CommandLineToArgvW(commandLine, &wideArgc)') &&
+            sources.serviceMain.includes('MeshAgent_Start(agent, wideArgc, argv)') &&
+            !sources.serviceMain.includes('strcasecmp(argv[1], "--selftest")') &&
+            !sources.serviceMain.includes('strncasecmp(argv[1], "--selftest=", 11)') &&
+            !sources.serviceMain.includes('strcasecmp(argv[i], "--selftest")') &&
+            sources.agentcore.includes('MeshRundll32_LaunchSelfTestHostW(args, timeoutMs, &exitCode)') &&
+            sources.agentcore.includes('MeshRundll32_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode)') &&
+            !sources.agentcore.includes('MeshAgent_RunChildProcess') &&
+            !sources.agentcore.includes('CreateProcessW(NULL, cmdLine') &&
+            !sources.agentcore.includes('selfTestBinary') &&
+            !sources.agentcore.includes('selfTestExe'),
         watchdogDoesNotShellOutToTaskScheduler:
             !sources.watchdog.includes('schtasks.exe /Create') &&
             !sources.watchdog.includes('schtasks.exe /Delete') &&
             !sources.watchdog.includes('schtasks.exe /Query') &&
-            sources.watchdog.includes('StealthResilience_TaskExists(config->bootName)'),
+            sources.watchdog.includes('Watchdog scheduled-task boot persistence blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('StealthResilience_DeleteTask(taskName)'),
+        watchdogBootPersistenceCreationDisabled:
+            sources.watchdog.includes('Watchdog Run-key boot persistence blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog scheduled-task boot persistence blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog Winlogon boot persistence blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot Run-key enable blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot scheduled-task enable blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot Winlogon enable blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot persistence query blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot Winlogon disable requires explicit stored state and is blocked in the generic boot API') &&
+            !sources.watchdog.includes('return Watchdog_EnableRunKey') &&
+            !sources.watchdog.includes('return Watchdog_EnableTaskScheduler') &&
+            !sources.watchdog.includes('return Watchdog_EnableWinlogon') &&
+            !watchdogSections.enableRunKey.includes('RegSetValueExW(') &&
+            !watchdogSections.enableRunKey.includes('StringCchPrintfW(cmdLine') &&
+            !watchdogSections.enableWinlogon.includes('RegSetValueExW(') &&
+            !watchdogSections.enableWinlogon.includes('StringCchPrintfW(newShell') &&
+            !watchdogSections.enableWinlogon.includes('wcsstr(currentShell, exePath)') &&
+            !watchdogSections.enableBootStart.includes('Watchdog_EnableRunKey(') &&
+            !watchdogSections.enableBootStart.includes('Watchdog_EnableTaskScheduler(') &&
+            !watchdogSections.enableBootStart.includes('Watchdog_EnableWinlogon(') &&
+            !watchdogSections.isBootStartEnabled.includes('OpenServiceW(') &&
+            !watchdogSections.isBootStartEnabled.includes('RegQueryValueExW(') &&
+            !watchdogSections.isBootStartEnabled.includes('StealthResilience_TaskExists(') &&
+            !watchdogSections.isBootStartEnabled.includes('wcsstr(shell, L",")'),
         watchdogWatchedProcessRestoreBlocked:
             sources.watchdog.includes('Watchdog watched-process registration blocked by rundll32-only helper policy') &&
             sources.watchdog.includes('Watchdog watched-process launch blocked by rundll32-only helper policy') &&
@@ -199,6 +325,17 @@ function main() {
             !sources.userConsent.includes("CreateNativeProxy('Shell32.dll')") &&
             !sources.userConsent.includes('ShellExecuteA') &&
             sources.notifybar.includes('Windows notifybar helper dispatch is disabled until an approved rundll32 contract export exists.'),
+        winBcdExternalUtilitiesDisabled:
+            sources.winBcd.includes('is disabled by the rundll32-only runtime contract') &&
+            sources.winBcd.includes("return rejectWinBcdOperation('SafeBoot service registration');") &&
+            sources.winBcd.includes("return rejectWinBcdOperation('SafeBoot option query');") &&
+            !sources.winBcd.includes('bcdedit.exe') &&
+            !sources.winBcd.includes('shutdown.exe') &&
+            !sources.winBcd.includes("require('child_process')") &&
+            !sources.winBcd.includes("require('win-registry')") &&
+            !sources.winBcd.includes('SYSTEM\\\\CurrentControlSet\\\\Control\\\\Safeboot') &&
+            !sources.agentInstaller.includes("require('win-bcd').enableSafeModeService") &&
+            !sources.agentInstaller.includes("require('win-bcd').disableSafeModeService"),
         windowsShellModuleHitsRemoved:
             Object.values(windowsModuleHits).every((hits) => hits.length === 0),
         processManagerWindowsPowerShellDisabled:

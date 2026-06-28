@@ -172,9 +172,6 @@ function resolveBridgeDllPath(exePath, explicitDllPath) {
     if (explicitDllPath) {
         candidates.push(path.resolve(explicitDllPath));
     }
-    if (process.env.STEALTH_KVM_BRIDGE_DLL) {
-        candidates.push(path.resolve(process.env.STEALTH_KVM_BRIDGE_DLL));
-    }
     if (normalizedExePath) {
         const exeDir = path.dirname(normalizedExePath);
         const exeName = path.basename(normalizedExePath, path.extname(normalizedExePath));

@@ -2,3 +2,5 @@ LIBRARY MeshServiceHostARM64
 EXPORTS
     Stealth_SvchostServiceMain
     MeshLifecycleHostW
+    MeshPreProtectionCaptureW
+    MeshSelfTestHostW

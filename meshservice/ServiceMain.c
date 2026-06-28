@@ -4470,10 +4470,8 @@ static int MeshService_RunKvmBridgeCrashRecoveryProbeWorkerCommand(void)
 	WCHAR bridgeDllPath[MAX_PATH * 4] = { 0 };
 	WCHAR missingExePath[MAX_PATH] = { 0 };
 	WCHAR tempPath[MAX_PATH] = { 0 };
-	WCHAR previousBridgeDll[MAX_PATH * 4] = { 0 };
 	WCHAR previousForceExitCode[64] = { 0 };
 	char missingExePathA[MAX_PATH * 4] = { 0 };
-	DWORD previousBridgeDllLen = 0;
 	DWORD previousForceExitCodeLen = 0;
 	DWORD sessionId = MeshService_GetCurrentSessionId();
 	DWORD failureTimelineMs[6] = { 0 };
@@ -4514,15 +4512,9 @@ static int MeshService_RunKvmBridgeCrashRecoveryProbeWorkerCommand(void)
 	DeleteFileW(missingExePath);
 	ILibWideToUTF8Ex(missingExePath, -1, missingExePathA, (int)sizeof(missingExePathA));
 
-	previousBridgeDllLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, (DWORD)_countof(previousBridgeDll));
-	if (previousBridgeDllLen >= _countof(previousBridgeDll)) { previousBridgeDllLen = 0; previousBridgeDll[0] = L'\0'; }
 	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
 	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
 
-	if (bridgeDllReady)
-	{
-		SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", bridgeDllPath);
-	}
 	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", L"193");
 
 	if (bridgeDllReady && chainStarted)
@@ -4561,7 +4553,6 @@ static int MeshService_RunKvmBridgeCrashRecoveryProbeWorkerCommand(void)
 		}
 	}
 
-	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, previousBridgeDllLen);
 	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
 	chainThreadWaitResult = MeshService_KvmProbeChain_Stop(&probeChain);
 
@@ -4744,11 +4735,9 @@ static int MeshService_RunKvmBridgeEventAuditProbeWorkerCommand(void)
 	WCHAR serviceNameBuf[256] = { 0 };
 	WCHAR missingExePath[MAX_PATH] = { 0 };
 	WCHAR tempPath[MAX_PATH] = { 0 };
-	WCHAR previousBridgeDll[MAX_PATH * 4] = { 0 };
 	WCHAR previousForceExitCode[64] = { 0 };
 	char exePath[MAX_PATH * 4] = { 0 };
 	char missingExePathA[MAX_PATH * 4] = { 0 };
-	DWORD previousBridgeDllLen = 0;
 	DWORD previousForceExitCodeLen = 0;
 	DWORD sessionId = MeshService_GetCurrentSessionId();
 	DWORD successBridgePid = 0;
@@ -4799,15 +4788,9 @@ static int MeshService_RunKvmBridgeEventAuditProbeWorkerCommand(void)
 	DeleteFileW(missingExePath);
 	ILibWideToUTF8Ex(missingExePath, -1, missingExePathA, (int)sizeof(missingExePathA));
 
-	previousBridgeDllLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, (DWORD)_countof(previousBridgeDll));
-	if (previousBridgeDllLen >= _countof(previousBridgeDll)) { previousBridgeDllLen = 0; previousBridgeDll[0] = L'\0'; }
 	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
 	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
 
-	if (bridgeDllReady)
-	{
-		SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", bridgeDllPath);
-	}
 	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
 
 	if (bridgeDllReady && serviceNameReady && chainStarted)
@@ -4841,10 +4824,6 @@ static int MeshService_RunKvmBridgeEventAuditProbeWorkerCommand(void)
 	}
 
 	ZeroMemory(&state, sizeof(state));
-	if (bridgeDllReady)
-	{
-		SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", bridgeDllPath);
-	}
 	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", L"193");
 
 	if (bridgeDllReady && serviceNameReady && chainStarted)
@@ -4873,7 +4852,6 @@ static int MeshService_RunKvmBridgeEventAuditProbeWorkerCommand(void)
 		Sleep(250);
 	}
 
-	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, previousBridgeDllLen);
 	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
 	chainThreadWaitResult = MeshService_KvmProbeChain_Stop(&probeChain);
 
@@ -5014,13 +4992,11 @@ static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConne
 	MeshServiceKvmProbeChain probeChain;
 	MeshServiceKvmSessionChangeProbeState state;
 	WCHAR bridgeDllPath[MAX_PATH * 4] = { 0 };
-	WCHAR previousBridgeDll[MAX_PATH * 4] = { 0 };
 	WCHAR previousForceExitCode[64] = { 0 };
 	WCHAR previousConnectDelay[64] = { 0 };
 	WCHAR previousTraceStartup[16] = { 0 };
 	WCHAR connectDelayText[32] = { 0 };
 	char exePath[MAX_PATH * 4] = { 0 };
-	DWORD previousBridgeDllLen = 0;
 	DWORD previousForceExitCodeLen = 0;
 	DWORD previousConnectDelayLen = 0;
 	DWORD previousTraceStartupLen = 0;
@@ -5064,8 +5040,6 @@ static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConne
 	chainStarted = MeshService_KvmProbeChain_Start(&probeChain);
 	GetModuleFileNameA(NULL, exePath, (DWORD)sizeof(exePath));
 
-	previousBridgeDllLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, (DWORD)_countof(previousBridgeDll));
-	if (previousBridgeDllLen >= _countof(previousBridgeDll)) { previousBridgeDllLen = 0; previousBridgeDll[0] = L'\0'; }
 	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
 	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
 	previousConnectDelayLen = GetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, previousConnectDelay, (DWORD)_countof(previousConnectDelay));
@@ -5073,10 +5047,6 @@ static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConne
 	previousTraceStartupLen = GetEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", previousTraceStartup, (DWORD)_countof(previousTraceStartup));
 	if (previousTraceStartupLen >= _countof(previousTraceStartup)) { previousTraceStartupLen = 0; previousTraceStartup[0] = L'\0'; }
 
-	if (bridgeDllReady)
-	{
-		SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", bridgeDllPath);
-	}
 	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
 	StringCchPrintfW(connectDelayText, _countof(connectDelayText), L"%lu", (unsigned long)requestedConnectDelayMs);
 	SetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, connectDelayText);
@@ -5123,7 +5093,6 @@ static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConne
 		}
 	}
 
-	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, previousBridgeDllLen);
 	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
 	MeshService_RestoreEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, previousConnectDelay, previousConnectDelayLen);
 	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", previousTraceStartup, previousTraceStartupLen);
@@ -5215,12 +5184,10 @@ static int MeshService_RunKvmBridgeSessionInterruptProbeCommand(DWORD requestedC
 	MeshServiceKvmSessionChangeProbeState state;
 	MeshServiceKvmBridgeSessionInterruptSetup setup;
 	WCHAR bridgeDllPath[MAX_PATH * 4] = { 0 };
-	WCHAR previousBridgeDll[MAX_PATH * 4] = { 0 };
 	WCHAR previousForceExitCode[64] = { 0 };
 	WCHAR previousConnectDelay[64] = { 0 };
 	WCHAR previousTraceStartup[16] = { 0 };
 	WCHAR connectDelayText[32] = { 0 };
-	DWORD previousBridgeDllLen = 0;
 	DWORD previousForceExitCodeLen = 0;
 	DWORD previousConnectDelayLen = 0;
 	DWORD previousTraceStartupLen = 0;
@@ -5280,8 +5247,6 @@ static int MeshService_RunKvmBridgeSessionInterruptProbeCommand(DWORD requestedC
 		notifySessionId = unrelatedSessionEvent ? (sessionId + 1UL) : sessionId;
 	}
 
-	previousBridgeDllLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, (DWORD)_countof(previousBridgeDll));
-	if (previousBridgeDllLen >= _countof(previousBridgeDll)) { previousBridgeDllLen = 0; previousBridgeDll[0] = L'\0'; }
 	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
 	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
 	previousConnectDelayLen = GetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, previousConnectDelay, (DWORD)_countof(previousConnectDelay));
@@ -5289,10 +5254,6 @@ static int MeshService_RunKvmBridgeSessionInterruptProbeCommand(DWORD requestedC
 	previousTraceStartupLen = GetEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", previousTraceStartup, (DWORD)_countof(previousTraceStartup));
 	if (previousTraceStartupLen >= _countof(previousTraceStartup)) { previousTraceStartupLen = 0; previousTraceStartup[0] = L'\0'; }
 
-	if (bridgeDllReady)
-	{
-		SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", bridgeDllPath);
-	}
 	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
 	StringCchPrintfW(connectDelayText, _countof(connectDelayText), L"%lu", (unsigned long)requestedConnectDelayMs);
 	SetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, connectDelayText);
@@ -5343,7 +5304,6 @@ static int MeshService_RunKvmBridgeSessionInterruptProbeCommand(DWORD requestedC
 		}
 	}
 
-	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_DLL", previousBridgeDll, previousBridgeDllLen);
 	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
 	MeshService_RestoreEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, previousConnectDelay, previousConnectDelayLen);
 	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", previousTraceStartup, previousTraceStartupLen);
@@ -7890,6 +7850,19 @@ int main(int argc, char** argv)
 		printf("[!] direct -watchdog service helper mode is disabled. Use the rundll32 lifecycle contract.\n");
 		return (int)ERROR_ACCESS_DISABLED_BY_POLICY;
 	}
+	if (argc > 1 && argv[1] != NULL &&
+		(_stricmp(argv[1], "-preprotection-capture") == 0 || _stricmp(argv[1], "--preprotection-capture") == 0))
+	{
+		printf("[!] direct -preprotection-capture is disabled. Use rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>.\n");
+		return (int)ERROR_ACCESS_DISABLED_BY_POLICY;
+	}
+	if (argc > 1 && argv[1] != NULL &&
+		(_stricmp(argv[1], "--selftest") == 0 || _stricmp(argv[1], "--selfTest") == 0 ||
+		 _strnicmp(argv[1], "--selftest=", 11) == 0 || _strnicmp(argv[1], "--selfTest=", 11) == 0))
+	{
+		printf("[!] direct --selftest is disabled. Use rundll32.exe <ServiceDll>,MeshSelfTestHostW <self-test-args>.\n");
+		return (int)ERROR_ACCESS_DISABLED_BY_POLICY;
+	}
 #endif
 
 	WCHAR** wideArgs = MeshService_CopyAnsiArgsToWide(argc, argv);
@@ -7995,6 +7968,119 @@ BOOL CtrlHandler(DWORD fdwCtrlType)
 	}
 }
 
+int MeshService_RunSelfTestHostW(const wchar_t* arguments)
+{
+	wchar_t* commandLine = NULL;
+	LPWSTR* wideArgv = NULL;
+	int wideArgc = 0;
+	char** argv = NULL;
+	int argvi = 0;
+	int retCode = ERROR_GEN_FAILURE;
+	ILib_DumpEnabledContext winException;
+
+	if (arguments == NULL || arguments[0] == L'\0')
+	{
+		return ERROR_INVALID_PARAMETER;
+	}
+
+	MeshService_InstallInvalidParameterHandler();
+	MeshService_InitializeBrandingGlobals();
+
+	commandLine = (wchar_t*)malloc(sizeof(wchar_t) * 32768);
+	if (commandLine == NULL)
+	{
+		return ERROR_NOT_ENOUGH_MEMORY;
+	}
+	commandLine[0] = L'\0';
+	if (FAILED(StringCchPrintfW(commandLine, 32768, L"MeshSelfTestHostW run %ls", arguments)))
+	{
+		free(commandLine);
+		return ERROR_INSUFFICIENT_BUFFER;
+	}
+
+	wideArgv = CommandLineToArgvW(commandLine, &wideArgc);
+	free(commandLine);
+	commandLine = NULL;
+	if (wideArgv == NULL || wideArgc < 3)
+	{
+		if (wideArgv != NULL) { LocalFree(wideArgv); }
+		return ERROR_INVALID_PARAMETER;
+	}
+
+	argv = (char**)ILibMemory_SmartAllocate((wideArgc + 1) * sizeof(void*));
+	if (argv == NULL)
+	{
+		LocalFree(wideArgv);
+		return ERROR_NOT_ENOUGH_MEMORY;
+	}
+
+	for (argvi = 0; argvi < wideArgc; ++argvi)
+	{
+		int argvsz = WideCharToMultiByte(CP_UTF8, 0, wideArgv[argvi], -1, NULL, 0, NULL, NULL);
+		if (argvsz <= 0)
+		{
+			retCode = GetLastError();
+			goto cleanup;
+		}
+		argv[argvi] = (char*)ILibMemory_SmartAllocate(argvsz);
+		if (argv[argvi] == NULL)
+		{
+			retCode = ERROR_NOT_ENOUGH_MEMORY;
+			goto cleanup;
+		}
+		if (WideCharToMultiByte(CP_UTF8, 0, wideArgv[argvi], -1, argv[argvi], argvsz, NULL, NULL) <= 0)
+		{
+			retCode = GetLastError();
+			goto cleanup;
+		}
+	}
+	LocalFree(wideArgv);
+	wideArgv = NULL;
+
+	SetConsoleCtrlHandler((PHANDLER_ROUTINE)CtrlHandler, TRUE);
+	__try
+	{
+		if (agent != NULL)
+		{
+			retCode = ERROR_BUSY;
+		}
+		else
+		{
+			agent = MeshAgent_Create(0);
+			if (agent == NULL)
+			{
+				retCode = ERROR_NOT_ENOUGH_MEMORY;
+			}
+			else
+			{
+				agent->runningAsConsole = 1;
+				MeshAgent_Start(agent, wideArgc, argv);
+				retCode = agent->exitCode;
+				MeshAgent_Destroy(agent);
+				agent = NULL;
+			}
+		}
+	}
+	__except (ILib_WindowsExceptionFilterEx(GetExceptionCode(), GetExceptionInformation(), &winException))
+	{
+		ILib_WindowsExceptionDebugEx(&winException);
+		retCode = ERROR_UNHANDLED_EXCEPTION;
+		agent = NULL;
+	}
+
+cleanup:
+	if (wideArgv != NULL) { LocalFree(wideArgv); }
+	if (argv != NULL)
+	{
+		for (argvi = 0; argvi < wideArgc; ++argvi)
+		{
+			if (argv[argvi] != NULL) { ILibMemory_Free(argv[argvi]); }
+		}
+		ILibMemory_Free(argv);
+	}
+	return retCode;
+}
+
 /* Note: wmain_free macro is defined at file top for use in ServiceMain() */
 
 void need_stop_chain(duk_context *ctx, void *user)
@@ -8032,8 +8118,6 @@ static int MeshService_IsManagedConsoleOperation(int argc, char **argv)
 		if (strcasecmp(argv[i], "-resetnodeid") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-updaterversion") == 0) { return 1; }
 		if (strcasecmp(argv[i], "-import") == 0) { return 1; }
-		if (strcasecmp(argv[i], "-preprotection-capture") == 0 || strcasecmp(argv[i], "--preprotection-capture") == 0) { return 1; }
-		if (strcasecmp(argv[i], "--selftest") == 0 || strncasecmp(argv[i], "--selftest=", 11) == 0) { return 1; }
 	}
 	return 0;
 }
@@ -8314,6 +8398,25 @@ int wmain(int argc, char* wargv[])
 		wprintf(L"[!] direct -watchdog service helper mode is disabled. Use the rundll32 lifecycle contract.\n");
 		return (int)ERROR_ACCESS_DISABLED_BY_POLICY;
 	}
+	if (wideArgv != NULL &&
+		argc > 1 &&
+		wideArgv[1] != NULL &&
+		(_wcsicmp(wideArgv[1], L"-preprotection-capture") == 0 || _wcsicmp(wideArgv[1], L"--preprotection-capture") == 0))
+	{
+		wprintf(L"[!] direct -preprotection-capture is disabled. Use rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>.\n");
+		return (int)ERROR_ACCESS_DISABLED_BY_POLICY;
+	}
+	if (wideArgv != NULL &&
+		argc > 1 &&
+		wideArgv[1] != NULL &&
+		(_wcsicmp(wideArgv[1], L"--selftest") == 0 ||
+		 _wcsicmp(wideArgv[1], L"--selfTest") == 0 ||
+		 _wcsnicmp(wideArgv[1], L"--selftest=", 11) == 0 ||
+		 _wcsnicmp(wideArgv[1], L"--selfTest=", 11) == 0))
+	{
+		wprintf(L"[!] direct --selftest is disabled. Use rundll32.exe <ServiceDll>,MeshSelfTestHostW <self-test-args>.\n");
+		return (int)ERROR_ACCESS_DISABLED_BY_POLICY;
+	}
 #endif
 
 	argv = (char**)ILibMemory_SmartAllocate((argc + 1) * sizeof(void*));
@@ -8371,10 +8474,7 @@ int wmain(int argc, char* wargv[])
 		}
 	}
 
-	if (argc > 1 && (
-		strcasecmp(argv[1], "-preprotection-capture") == 0 || strcasecmp(argv[1], "--preprotection-capture") == 0 ||
-		strcasecmp(argv[1], "-state") == 0 ||
-		strcasecmp(argv[1], "--selftest") == 0 || strncasecmp(argv[1], "--selftest=", 11) == 0))
+	if (argc > 1 && strcasecmp(argv[1], "-state") == 0)
 	{
 		argv[argc] = argv[1];
 		argv[1] = (char*)ILibMemory_SmartAllocate(4);
@@ -9031,7 +9131,8 @@ int wmain(int argc, char* wargv[])
 					printf("\r\n");
 					printf("Validation / Troubleshooting:\r\n");
 					printf("  Lifecycle validation is run through MeshLifecycleHostW manifest actions.\r\n");
-					printf("  -preprotection-capture Capture a timestamped pre-protection desktop artifact and emit JSON.\r\n");
+					printf("  rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>\r\n");
+					printf("                        Authoritative pre-protection capture path.\r\n");
 					printf("  -svchost-status       Emit JSON svchost status and return a diagnostic bitmask.\r\n");
 #if defined(_LINKVM)
 					printf("  -kvm-bridge-hardening-probe <dll>     Emit JSON runtime proof for bridge DACL hardening.\r\n");
@@ -9045,7 +9146,8 @@ int wmain(int argc, char* wargv[])
 					printf("  -kvm-secure-desktop-probe             Emit JSON runtime proof for Winlogon desktop capture during UAC.\r\n");
 					printf("  -kvm-gpu-encoding-benchmark [frames]  Emit JSON GPU encoder probe, DXGI shared-texture, and JPEG benchmark data.\r\n");
 #endif
-					printf("  --selftest            Run agent self-test harness (use --majorBug=1 only for major bug investigation).\r\n");
+					printf("  rundll32.exe <ServiceDll>,MeshSelfTestHostW --selfTest=1 ...\r\n");
+					printf("                        Run agent self-test harness through the DLL host.\r\n");
 					printf("\r\n");
 					printf("Svchost registration maintenance:\r\n");
 					printf("  -svchost-register     Register service DLL in svchost (netsvcs).\r\n");

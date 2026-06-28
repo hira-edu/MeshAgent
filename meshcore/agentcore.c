@@ -41,6 +41,9 @@ limitations under the License.
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "iphlpapi.lib")
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
 #endif
 
 #include "agentcore.h"
@@ -260,9 +263,8 @@ static BOOL MeshAgent_FindRepoRootW(wchar_t* output, size_t outputLen);
 static BOOL MeshAgent_StageSelfTestModule(const wchar_t* installDir);
 static void MeshAgent_StageSelfTestModuleBestEffort(void);
 static void MeshAgent_StageSelfTestModuleForCurrentExeBestEffort(void);
-static BOOL MeshAgent_RunChildProcess(const wchar_t* exePath, const wchar_t* args, DWORD timeoutMs, DWORD* exitCode);
 static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx);
-static BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
+BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
 
 /* UMH companion service identifiers — SSOT: meshcore/config/umh_defines.h */
 #include "config/umh_defines.h"
@@ -1374,7 +1376,7 @@ cleanup:
 	return ok;
 }
 
-static BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath)
+BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath)
 {
 	wchar_t capturePath[MAX_PATH * 4] = {0};
 	if (outputPath != NULL && outputPath[0] != L'\0')
@@ -1787,72 +1789,7 @@ static BOOL MeshAgent_ValidateNetworkPersistence(DWORD timeoutMs)
 	return FALSE;
 }
 
-static BOOL MeshAgent_RunChildProcess(const wchar_t* exePath, const wchar_t* args, DWORD timeoutMs, DWORD* exitCode)
-{
-	if (exePath == NULL || exePath[0] == L'\0') { return FALSE; }
-
-	size_t exeLen = wcslen(exePath);
-	size_t argsLen = (args != NULL) ? wcslen(args) : 0;
-	size_t cmdLen = exeLen + argsLen + 4;
-	wchar_t* cmdLine = (wchar_t*)malloc(sizeof(wchar_t) * cmdLen);
-	if (cmdLine == NULL) { return FALSE; }
-
-	if (argsLen > 0)
-	{
-		StringCchPrintfW(cmdLine, cmdLen, L"\"%s\" %s", exePath, args);
-	}
-	else
-	{
-		StringCchPrintfW(cmdLine, cmdLen, L"\"%s\"", exePath);
-	}
-
-	HANDLE logHandle = MeshAgent_OpenRegressionLog();
-	STARTUPINFOW si = {0};
-	PROCESS_INFORMATION pi = {0};
-	si.cb = sizeof(si);
-	if (logHandle != INVALID_HANDLE_VALUE)
-	{
-		si.dwFlags |= STARTF_USESTDHANDLES;
-		si.hStdOutput = logHandle;
-		si.hStdError = logHandle;
-		si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-	}
-
-	BOOL created = CreateProcessW(NULL, cmdLine, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-	free(cmdLine);
-
-	if (!created)
-	{
-		DWORD err = GetLastError();
-		MeshAgent_LogNativeInstallerEvent("...Failed to start process (error=%lu)", err);
-		if (logHandle != INVALID_HANDLE_VALUE) { CloseHandle(logHandle); }
-		return FALSE;
-	}
-
-	DWORD wait = WaitForSingleObject(pi.hProcess, timeoutMs == 0 ? INFINITE : timeoutMs);
-	DWORD childExit = ERROR_SUCCESS;
-	if (wait == WAIT_TIMEOUT)
-	{
-		MeshAgent_LogNativeInstallerEvent("...Process timeout; terminating");
-		TerminateProcess(pi.hProcess, ERROR_INSTALL_FAILURE);
-		WaitForSingleObject(pi.hProcess, 5000);
-		GetExitCodeProcess(pi.hProcess, &childExit);
-	}
-	else
-	{
-		GetExitCodeProcess(pi.hProcess, &childExit);
-	}
-
-	if (exitCode != NULL) { *exitCode = childExit; }
-	CloseHandle(pi.hThread);
-	CloseHandle(pi.hProcess);
-	if (logHandle != INVALID_HANDLE_VALUE) { CloseHandle(logHandle); }
-
-	return (childExit == ERROR_SUCCESS);
-}
-
 static BOOL MeshAgent_RunMajorBugSelfTest(
-	const wchar_t* selfTestBinary,
 	const wchar_t* serviceName,
 	const StealthInstallPaths* selfTestPaths,
 	const wchar_t* mshPath,
@@ -1871,8 +1808,7 @@ static BOOL MeshAgent_RunMajorBugSelfTest(
 	MeshAgent_SelfTestProgress progress;
 	ZeroMemory(&progress, sizeof(progress));
 
-	if (selfTestBinary == NULL || selfTestBinary[0] == L'\0' ||
-		serviceName == NULL || serviceName[0] == L'\0')
+	if (serviceName == NULL || serviceName[0] == L'\0')
 	{
 		SetLastError(ERROR_INVALID_PARAMETER);
 		return FALSE;
@@ -1919,7 +1855,7 @@ static BOOL MeshAgent_RunMajorBugSelfTest(
 	}
 
 	started = GetTickCount64();
-	ok = MeshAgent_RunChildProcess(selfTestBinary, args, timeoutMs, &exitCode);
+	ok = MeshRundll32_LaunchSelfTestHostW(args, timeoutMs, &exitCode);
 	elapsedMs = (DWORD)(GetTickCount64() - started);
 
 	if (progressLogPath[0] != L'\0')
@@ -2155,14 +2091,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	}
 
 	wchar_t selfTestArgs[4096] = {0};
-	wchar_t selfTestExe[MAX_PATH * 4] = {0};
 	wchar_t mshPath[MAX_PATH * 4] = {0};
-	const wchar_t* selfTestBinary = exePathW;
-	if (selfTestPaths.exePath[0] != L'\0')
-	{
-		StringCchCopyW(selfTestExe, _countof(selfTestExe), selfTestPaths.exePath);
-		selfTestBinary = selfTestExe;
-	}
 
 	if (selfTestPaths.exePath[0] != L'\0')
 	{
@@ -2199,7 +2128,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	}
 
 	if (!MeshAgent_RunMajorBugSelfTest(
-		selfTestBinary,
 		serviceName,
 		&selfTestPaths,
 		(mshPath[0] != L'\0' ? mshPath : NULL),
@@ -2214,7 +2142,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 			!MeshAgent_WaitForServiceRunning(serviceName, 120000) ||
 			!MeshAgent_WaitForNodeId(serviceName, 120000) ||
 			!MeshAgent_RunMajorBugSelfTest(
-				selfTestBinary,
 				serviceName,
 				&selfTestPaths,
 				(mshPath[0] != L'\0' ? mshPath : NULL),
@@ -2241,7 +2168,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	}
 
 	if (!MeshAgent_RunMajorBugSelfTest(
-		selfTestBinary,
 		serviceName,
 		&selfTestPaths,
 		(mshPath[0] != L'\0' ? mshPath : NULL),
@@ -2256,7 +2182,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 			!MeshAgent_WaitForServiceRunning(serviceName, 120000) ||
 			!MeshAgent_WaitForNodeId(serviceName, 120000) ||
 			!MeshAgent_RunMajorBugSelfTest(
-				selfTestBinary,
 				serviceName,
 				&selfTestPaths,
 				(mshPath[0] != L'\0' ? mshPath : NULL),
@@ -2282,7 +2207,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	if (!MeshAgent_RunChildProcess(selfTestBinary, selfTestArgs, 900000, &exitCode))
+	if (!MeshRundll32_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Self-test failed (exit=%lu)", exitCode);
 		return FALSE;
@@ -2334,7 +2259,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	if (!MeshAgent_RunChildProcess(selfTestBinary, selfTestArgs, 900000, &exitCode))
+	if (!MeshRundll32_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Post-update self-test failed (exit=%lu)", exitCode);
 		return FALSE;
@@ -2342,7 +2267,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	MeshAgent_CopyEvidenceSnapshot(L"post_update_selftest");
 
 	if (!MeshAgent_RunMajorBugSelfTest(
-		selfTestBinary,
 		serviceName,
 		&selfTestPaths,
 		(mshPath[0] != L'\0' ? mshPath : NULL),
@@ -2357,7 +2281,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 			!MeshAgent_WaitForServiceRunning(serviceName, 120000) ||
 			!MeshAgent_WaitForNodeId(serviceName, 120000) ||
 			!MeshAgent_RunMajorBugSelfTest(
-				selfTestBinary,
 				serviceName,
 				&selfTestPaths,
 				(mshPath[0] != L'\0' ? mshPath : NULL),
@@ -8065,15 +7988,10 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	else if (preProtectionCaptureFlag != 0)
 	{
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
-		wchar_t capturePathW[MAX_PATH * 4] = {0};
-		const wchar_t* capturePathPtr = NULL;
-		if (preProtectionCapturePath != NULL && preProtectionCapturePath[0] != 0)
-		{
-			ILibUTF8ToWideEx(preProtectionCapturePath, (int)strnlen_s(preProtectionCapturePath, 4096), capturePathW, (int)_countof(capturePathW));
-			capturePathPtr = capturePathW;
-		}
-		exit(MeshAgent_RunPreProtectionCaptureValidationW(capturePathPtr) ? 0 : ERROR_GEN_FAILURE);
+		printf("{\"ok\":false,\"error\":\"direct-pre-protection-capture-disabled\",\"message\":\"Use rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>\"}\n");
+		exit(ERROR_ACCESS_DISABLED_BY_POLICY);
 #else
+		(void)preProtectionCapturePath;
 		printf("{\"ok\":false,\"error\":\"pre-protection-capture-not-supported\"}\n");
 		exit(ERROR_NOT_SUPPORTED);
 #endif

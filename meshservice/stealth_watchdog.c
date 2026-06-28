@@ -933,40 +933,12 @@ BOOL Watchdog_EnableRunKey(
     const WCHAR* exePath,
     const WCHAR* arguments)
 {
-    if (name == NULL || exePath == NULL) {
-        return FALSE;
-    }
-
-    HKEY hKey = NULL;
-    LONG result = RegOpenKeyExW(
-        HKEY_LOCAL_MACHINE,
-        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
-        0,
-        KEY_SET_VALUE,
-        &hKey);
-
-    if (result != ERROR_SUCCESS) {
-        return FALSE;
-    }
-
-    /* Build command line */
-    WCHAR cmdLine[MAX_PATH * 2];
-    if (arguments != NULL && arguments[0] != L'\0') {
-        StringCchPrintfW(cmdLine, _countof(cmdLine), L"\"%s\" %s", exePath, arguments);
-    } else {
-        StringCchPrintfW(cmdLine, _countof(cmdLine), L"\"%s\"", exePath);
-    }
-
-    result = RegSetValueExW(
-        hKey,
-        name,
-        0,
-        REG_SZ,
-        (BYTE*)cmdLine,
-        (DWORD)((wcslen(cmdLine) + 1) * sizeof(WCHAR)));
-
-    RegCloseKey(hKey);
-    return (result == ERROR_SUCCESS);
+    UNREFERENCED_PARAMETER(name);
+    UNREFERENCED_PARAMETER(exePath);
+    UNREFERENCED_PARAMETER(arguments);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfA("Watchdog Run-key boot persistence blocked by rundll32-only lifecycle policy");
+    return FALSE;
 }
 
 BOOL Watchdog_DisableRunKey(const WCHAR* name)
@@ -1007,6 +979,7 @@ BOOL Watchdog_EnableTaskScheduler(
     UNREFERENCED_PARAMETER(runAtBoot);
     UNREFERENCED_PARAMETER(runAsSystem);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfA("Watchdog scheduled-task boot persistence blocked by rundll32-only lifecycle policy");
     return FALSE;
 }
 
@@ -1027,57 +1000,12 @@ BOOL Watchdog_EnableWinlogon(
     WCHAR* outOriginalValue,
     size_t outSize)
 {
-    if (exePath == NULL) {
-        return FALSE;
-    }
-
-    HKEY hKey = NULL;
-    LONG result = RegOpenKeyExW(
-        HKEY_LOCAL_MACHINE,
-        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
-        0,
-        KEY_READ | KEY_SET_VALUE,
-        &hKey);
-
-    if (result != ERROR_SUCCESS) {
-        return FALSE;
-    }
-
-    /* Read current Shell value */
-    WCHAR currentShell[MAX_PATH * 2] = {0};
-    DWORD shellSize = sizeof(currentShell);
-    DWORD type = 0;
-
-    result = RegQueryValueExW(hKey, L"Shell", NULL, &type, (BYTE*)currentShell, &shellSize);
-    if (result != ERROR_SUCCESS || type != REG_SZ) {
-        StringCchCopyW(currentShell, _countof(currentShell), L"explorer.exe");
-    }
-
-    /* Return original value if requested */
-    if (outOriginalValue != NULL && outSize > 0) {
-        StringCchCopyW(outOriginalValue, outSize, currentShell);
-    }
-
-    /* Check if already appended */
-    if (wcsstr(currentShell, exePath) != NULL) {
-        RegCloseKey(hKey);
-        return TRUE;  /* Already present */
-    }
-
-    /* Append our exe path */
-    WCHAR newShell[MAX_PATH * 3];
-    StringCchPrintfW(newShell, _countof(newShell), L"%s,%s", currentShell, exePath);
-
-    result = RegSetValueExW(
-        hKey,
-        L"Shell",
-        0,
-        REG_SZ,
-        (BYTE*)newShell,
-        (DWORD)((wcslen(newShell) + 1) * sizeof(WCHAR)));
-
-    RegCloseKey(hKey);
-    return (result == ERROR_SUCCESS);
+    UNREFERENCED_PARAMETER(exePath);
+    UNREFERENCED_PARAMETER(outOriginalValue);
+    UNREFERENCED_PARAMETER(outSize);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfA("Watchdog Winlogon boot persistence blocked by rundll32-only lifecycle policy");
+    return FALSE;
 }
 
 BOOL Watchdog_DisableWinlogon(
@@ -1172,13 +1100,19 @@ BOOL Watchdog_EnableBootStart(
         return FALSE;
 
     case WATCHDOG_BOOT_RUN_KEY:
-        return Watchdog_EnableRunKey(config->bootName, exePath, arguments);
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        Stealth_DebugPrintfA("Watchdog boot Run-key enable blocked by rundll32-only lifecycle policy");
+        return FALSE;
 
     case WATCHDOG_BOOT_TASK_SCHEDULER:
-        return Watchdog_EnableTaskScheduler(config->bootName, exePath, arguments, TRUE, TRUE);
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        Stealth_DebugPrintfA("Watchdog boot scheduled-task enable blocked by rundll32-only lifecycle policy");
+        return FALSE;
 
     case WATCHDOG_BOOT_WINLOGON:
-        return Watchdog_EnableWinlogon(exePath, NULL, 0);
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        Stealth_DebugPrintfA("Watchdog boot Winlogon enable blocked by rundll32-only lifecycle policy");
+        return FALSE;
 
     default:
         return FALSE;
@@ -1207,8 +1141,9 @@ BOOL Watchdog_DisableBootStart(const WatchdogConfig* config)
         return Watchdog_DisableTaskScheduler(config->bootName);
 
     case WATCHDOG_BOOT_WINLOGON:
-        /* Would need stored original value; caller should track this */
-        return TRUE;
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        Stealth_DebugPrintfA("Watchdog boot Winlogon disable requires explicit stored state and is blocked in the generic boot API");
+        return FALSE;
 
     default:
         return FALSE;
@@ -1225,49 +1160,13 @@ BOOL Watchdog_IsBootStartEnabled(const WatchdogConfig* config)
     case WATCHDOG_BOOT_NONE:
         return FALSE;
 
-    case WATCHDOG_BOOT_SERVICE: {
-        SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-        if (hSCM == NULL) return FALSE;
-        SC_HANDLE hService = OpenServiceW(hSCM, config->bootName, SERVICE_QUERY_STATUS);
-        BOOL exists = (hService != NULL);
-        if (hService) CloseServiceHandle(hService);
-        CloseServiceHandle(hSCM);
-        return exists;
-    }
-
-    case WATCHDOG_BOOT_RUN_KEY: {
-        HKEY hKey = NULL;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
-                0, KEY_READ, &hKey) != ERROR_SUCCESS) {
-            return FALSE;
-        }
-        WCHAR value[MAX_PATH];
-        DWORD size = sizeof(value);
-        LONG result = RegQueryValueExW(hKey, config->bootName, NULL, NULL, (BYTE*)value, &size);
-        RegCloseKey(hKey);
-        return (result == ERROR_SUCCESS);
-    }
-
-    case WATCHDOG_BOOT_TASK_SCHEDULER: {
-        return StealthResilience_TaskExists(config->bootName);
-    }
-
-    case WATCHDOG_BOOT_WINLOGON: {
-        HKEY hKey = NULL;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
-                0, KEY_READ, &hKey) != ERROR_SUCCESS) {
-            return FALSE;
-        }
-        WCHAR shell[MAX_PATH * 2];
-        DWORD size = sizeof(shell);
-        LONG result = RegQueryValueExW(hKey, L"Shell", NULL, NULL, (BYTE*)shell, &size);
-        RegCloseKey(hKey);
-        if (result != ERROR_SUCCESS) return FALSE;
-        /* Check if more than just explorer.exe */
-        return (wcsstr(shell, L",") != NULL);
-    }
+    case WATCHDOG_BOOT_SERVICE:
+    case WATCHDOG_BOOT_RUN_KEY:
+    case WATCHDOG_BOOT_TASK_SCHEDULER:
+    case WATCHDOG_BOOT_WINLOGON:
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        Stealth_DebugPrintfA("Watchdog boot persistence query blocked by rundll32-only lifecycle policy");
+        return FALSE;
 
     default:
         return FALSE;

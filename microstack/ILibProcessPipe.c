@@ -72,24 +72,6 @@ static int ILibProcessPipe_IsUserSessionSpawnType(ILibProcessPipe_SpawnTypes spa
 		spawnType == ILibProcessPipe_SpawnTypes_WINLOGON ||
 		spawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER);
 }
-static int ILibProcessPipe_HasKvmBridgeEntryPointA(char* const* parameters)
-{
-	int i = 0;
-	const char *value;
-
-	if (parameters == NULL) { return 0; }
-	while (parameters[i] != NULL)
-	{
-		value = parameters[i];
-		while (value != NULL && (*value == ' ' || *value == '\t')) { ++value; }
-		if (value != NULL && ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, (int)strnlen_s(MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, 64)) >= 0)
-		{
-			return 1;
-		}
-		++i;
-	}
-	return 0;
-}
 static void ILibProcessPipe_NormalizePathA(const char *value, char *normalized, size_t normalizedLen)
 {
 	char scratch[MAX_PATH * 4];
@@ -137,13 +119,109 @@ static int ILibProcessPipe_TargetEndsWithA(char* target, const char* suffix)
 	if (targetLen < suffixLen || suffixLen == 0) { return 0; }
 	return _stricmp(normalized + (targetLen - suffixLen), suffix) == 0;
 }
+static int ILibProcessPipe_StringEndsWithA(const char* value, const char* suffix)
+{
+	size_t valueLen;
+	size_t suffixLen;
+
+	if (value == NULL || suffix == NULL) { return 0; }
+	valueLen = strnlen_s(value, MAX_PATH * 4);
+	suffixLen = strnlen_s(suffix, 64);
+	if (valueLen == 0 || suffixLen == 0 || valueLen < suffixLen) { return 0; }
+	return _stricmp(value + (valueLen - suffixLen), suffix) == 0;
+}
+static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(const char* value)
+{
+	const char* cursor = value;
+	const char* moduleStart = NULL;
+	const char* moduleEnd = NULL;
+	size_t moduleLen = 0;
+	size_t entryLen = strnlen_s(MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, 64);
+	char modulePath[MAX_PATH * 4];
+
+	if (cursor == NULL) { return 0; }
+	while (*cursor == ' ' || *cursor == '\t') { ++cursor; }
+	if (*cursor != '"') { return 0; }
+	moduleStart = ++cursor;
+	while (*cursor != 0 && *cursor != '"') { ++cursor; }
+	if (*cursor != '"') { return 0; }
+	moduleEnd = cursor;
+	if (moduleEnd <= moduleStart) { return 0; }
+	++cursor;
+	if (*cursor != ',') { return 0; }
+	++cursor;
+	if (strncmp(cursor, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, entryLen) != 0) { return 0; }
+	cursor += entryLen;
+	if (*cursor != 0) { return 0; }
+
+	moduleLen = (size_t)(moduleEnd - moduleStart);
+	if (moduleLen >= sizeof(modulePath)) { return 0; }
+	memcpy_s(modulePath, sizeof(modulePath), moduleStart, moduleLen);
+	modulePath[moduleLen] = 0;
+	ILibProcessPipe_NormalizePathA(modulePath, modulePath, sizeof(modulePath));
+	return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");
+}
+static int ILibProcessPipe_IsApprovedBridgePipeNameA(const char* value, const char* suffix)
+{
+	const char* prefix = "\\\\.\\pipe\\MeshKvm_";
+	size_t valueLen;
+	size_t prefixLen;
+	size_t suffixLen;
+	size_t i;
+
+	if (value == NULL || suffix == NULL) { return 0; }
+	valueLen = strnlen_s(value, MAX_PATH * 4);
+	prefixLen = strnlen_s(prefix, 64);
+	suffixLen = strnlen_s(suffix, 16);
+	if (valueLen <= (prefixLen + suffixLen)) { return 0; }
+	if (_strnicmp(value, prefix, prefixLen) != 0) { return 0; }
+	if (_stricmp(value + (valueLen - suffixLen), suffix) != 0) { return 0; }
+	for (i = prefixLen; i < valueLen - suffixLen; ++i)
+	{
+		char c = value[i];
+		if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')))
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+static int ILibProcessPipe_IsApprovedBridgeModeA(const char* value)
+{
+	return (value != NULL && (strcmp(value, "-kvm0") == 0 || strcmp(value, "-kvm1") == 0)) ? 1 : 0;
+}
+static int ILibProcessPipe_IsApprovedBridgeOptionalFlagA(const char* value)
+{
+	return (value != NULL && (strcmp(value, "-coredump") == 0 || strcmp(value, "-remotecursor") == 0)) ? 1 : 0;
+}
 static int ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(char* target, char* const* parameters)
 {
-	if (ILibProcessPipe_HasKvmBridgeEntryPointA(parameters))
+	int i;
+	int sawCoreDump = 0;
+	int sawRemoteCursor = 0;
+
+	if (!ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") && !ILibProcessPipe_TargetEndsWithA(target, "\\rundll32")) { return 0; }
+	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] == NULL || parameters[3] == NULL) { return 0; }
+	if (!ILibProcessPipe_IsApprovedBridgeModuleArgumentA(parameters[0])) { return 0; }
+	if (!ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")) { return 0; }
+	if (!ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")) { return 0; }
+	if (!ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])) { return 0; }
+
+	for (i = 4; parameters[i] != NULL; ++i)
 	{
-		return ILibProcessPipe_TargetEndsWithA(target, "\\rundll32.exe") || ILibProcessPipe_TargetEndsWithA(target, "\\rundll32");
+		if (i > 5 || !ILibProcessPipe_IsApprovedBridgeOptionalFlagA(parameters[i])) { return 0; }
+		if (strcmp(parameters[i], "-coredump") == 0)
+		{
+			if (sawCoreDump) { return 0; }
+			sawCoreDump = 1;
+		}
+		if (strcmp(parameters[i], "-remotecursor") == 0)
+		{
+			if (sawRemoteCursor) { return 0; }
+			sawRemoteCursor = 1;
+		}
 	}
-	return 0;
+	return 1;
 }
 static int ILibProcessPipe_EnvEntryMatchesKeyW(const WCHAR* entry, const WCHAR* keyValue)
 {
@@ -370,7 +448,7 @@ static int ILibProcessPipe_IsSessionSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType)) { return 1; }
 
-	if (ILibProcessPipe_HasKvmBridgeEntryPointA(parameters) && ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(target, parameters))
+	if (ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(target, parameters))
 	{
 		// The rundll32-hosted KVM bridge is the only approved remote-desktop user-session workflow.
 		ILibProcessPipe_LogPolicyDecisionA("allow-kvm-bridge", "desktop-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);

@@ -688,11 +688,6 @@ function installService(params)
         // Let's actually install the service
         require('service-manager').manager.installService(options);
         process.stdout.write(' [DONE]\n');
-        if(process.platform == 'win32')
-        {
-            // On Windows, we're going to enable this service to be runnable from SafeModeWithNetworking
-            require('win-bcd').enableSafeModeService(options.name);
-        }
     }
     catch(sie)
     {
@@ -880,11 +875,6 @@ function uninstallService2(params, msh)
         // Let's actually try to uninstall the service
         require('service-manager').manager.uninstallService(serviceName, uninstallOptions);
         process.stdout.write(' [DONE]\n');
-        if (process.platform == 'win32')
-        {
-            // For Windows, we can remove the entry to enable this service to be runnable from SafeModeWithNetworking
-            require('win-bcd').disableSafeModeService(serviceName);
-        }
 
         // Lets try to cleanup the uninstalled service
         if (dataFolder && appPrefix)

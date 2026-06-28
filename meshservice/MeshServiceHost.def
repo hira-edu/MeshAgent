@@ -3,3 +3,5 @@ EXPORTS
     KvmSessionBridgeW
     MeshLifecycleHostW
     MeshLauncherCleanupW
+    MeshPreProtectionCaptureW
+    MeshSelfTestHostW

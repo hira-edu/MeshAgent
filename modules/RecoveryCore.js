@@ -1108,6 +1108,76 @@ function umhctlNormalizeExecutablePath(raw)
     return (s.length > 0) ? s : null;
 }
 
+function umhctlNormalizeFilePath(raw)
+{
+    if (typeof raw != 'string') { return null; }
+    var s = raw.trim();
+    if (s.length == 0) { return null; }
+    if (s.charAt(0) == '"' && s.charAt(s.length - 1) == '"') { s = s.substring(1, s.length - 1); }
+    return (s.length > 0) ? s : null;
+}
+
+function umhctlExpandWindowsEnvironmentStrings(raw)
+{
+    if (raw == null) { return null; }
+    return ('' + raw).replace(/%([^%]+)%/g, function (match, name) {
+        return process.env[name] || process.env[name.toUpperCase()] || process.env[name.toLowerCase()] || match;
+    });
+}
+
+function umhctlGetActiveAgentServiceName()
+{
+    var explicitName = umhctlGetEnvValue('MESH_AGENT_SERVICE_NAME') ||
+        umhctlGetEnvValue('MESH_SERVICE_NAME') ||
+        umhctlGetEnvValue('MESHCENTRAL_SERVICE_NAME');
+    if (explicitName != null) { return explicitName; }
+    try
+    {
+        var agentNodeId = require('_agentNodeId');
+        if (agentNodeId != null && typeof agentNodeId.serviceName == 'function')
+        {
+            var serviceName = agentNodeId.serviceName();
+            if (serviceName != null && ('' + serviceName).length > 0) { return '' + serviceName; }
+        }
+    } catch (e) { }
+    return null;
+}
+
+function umhctlGetInstalledAgentServiceDllPath()
+{
+    var explicitDll = umhctlNormalizeFilePath(
+        umhctlExpandWindowsEnvironmentStrings(
+            umhctlGetEnvValue('MESH_AGENT_SERVICE_DLL_PATH') ||
+            umhctlGetEnvValue('MESH_AGENT_SERVICE_DLL')));
+    if (explicitDll != null) { return explicitDll; }
+    if (process.platform != 'win32') { return null; }
+
+    var serviceName = umhctlGetActiveAgentServiceName();
+    if (serviceName == null || serviceName.length == 0) { return null; }
+    try
+    {
+        var registry = require('win-registry');
+        var raw = registry.QueryKey(registry.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName + '\\Parameters', 'ServiceDll');
+        return umhctlNormalizeFilePath(umhctlExpandWindowsEnvironmentStrings(raw));
+    } catch (e) { }
+    return null;
+}
+
+function umhctlGetWindowsRundll32Path()
+{
+    if (process.platform != 'win32') { return null; }
+    try
+    {
+        var winSystemPaths = require('win-system-paths');
+        var systemRundll32 = winSystemPaths.system32Path('rundll32.exe');
+        if (systemRundll32 != null && ('' + systemRundll32).length > 0) { return '' + systemRundll32; }
+    } catch (e) { }
+
+    var root = umhctlGetEnvValue('SystemRoot') || umhctlGetEnvValue('windir');
+    if (root == null) { return null; }
+    return umhctlNormalizeFilePath(root.replace(/[\\\/]+$/, '') + '\\System32\\rundll32.exe');
+}
+
 function umhctlBuildExecFileArgs(exePath, args)
 {
     var argv = [];
@@ -2280,6 +2350,21 @@ function umhctlPersistPreProtectionManifest(paths, controlReq, captureResult)
     }
 }
 
+function umhctlStartPreProtectionCaptureProcess(paths)
+{
+    if (process.platform == 'win32')
+    {
+        var rundll32Path = umhctlGetWindowsRundll32Path();
+        var serviceDllPath = umhctlGetInstalledAgentServiceDllPath();
+        if (rundll32Path == null || serviceDllPath == null)
+        {
+            throw new Error('Windows pre-protection capture requires rundll32.exe and the installed service ServiceDll');
+        }
+        return childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshPreProtectionCaptureW', paths.capturePath]);
+    }
+    return childProcess.execFile(process.execPath, ['-preprotection-capture', '--capture-path=' + paths.capturePath]);
+}
+
 function umhctlRunPreProtectionCapture(controlReq, sessionid, callback)
 {
     if (typeof callback != 'function') { return; }
@@ -2322,7 +2407,7 @@ function umhctlRunPreProtectionCapture(controlReq, sessionid, callback)
 
     try
     {
-        captureProc = childProcess.execFile(process.execPath, ['-preprotection-capture', '--capture-path=' + paths.capturePath]);
+        captureProc = umhctlStartPreProtectionCaptureProcess(paths);
     }
     catch (e)
     {

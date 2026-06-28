@@ -47,15 +47,23 @@ function main() {
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
     const rundll32ContractPath = path.resolve('meshservice', 'rundll32_contract.h');
+    const kvmRuntimeHelpersPath = path.resolve('test', 'lib', 'kvm_runtime_helpers.js');
     const processPipeSource = fs.readFileSync(processPipePath, 'utf8');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const serviceMainSource = fs.readFileSync(serviceMainPath, 'utf8');
     const rundll32ContractSource = fs.readFileSync(rundll32ContractPath, 'utf8');
+    const kvmRuntimeHelpersSource = fs.readFileSync(kvmRuntimeHelpersPath, 'utf8');
 
     const checks = {
         policyAllowsBridgeEntryPoint: processPipeSource.includes('allow-kvm-bridge') &&
             processPipeSource.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
-            rundll32ContractSource.includes('#define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"'),
+            rundll32ContractSource.includes('#define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"') &&
+            processPipeSource.includes('ILibProcessPipe_IsApprovedBridgeModuleArgumentA') &&
+            processPipeSource.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")') &&
+            processPipeSource.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")') &&
+            processPipeSource.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&
+            !processPipeSource.includes('ILibProcessPipe_HasKvmBridgeEntryPointA') &&
+            !processPipeSource.includes('ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A'),
         policyDeniesInternalHelperReentry:
             !processPipeSource.includes('allow-helper-reentry') &&
             !processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
@@ -70,12 +78,18 @@ function main() {
             !processPipeSource.includes('ILibProcessPipe_IsApprovedAgentSelfSpawnLaunchA') &&
             !processPipeSource.includes('MESHAGENT_SELF_SPAWN_PATH'),
         relayResolvesRundll32: kvmSource.includes('kvm_relay_resolve_rundll32_pathW'),
-        relayResolvesBridgeDll: kvmSource.includes('kvm_relay_resolve_bridge_dll_pathW'),
+        relayResolvesBridgeDll: kvmSource.includes('kvm_relay_resolve_bridge_dll_pathW') &&
+            !kvmSource.includes('STEALTH_KVM_BRIDGE_DLL') &&
+            !serviceMainSource.includes('STEALTH_KVM_BRIDGE_DLL') &&
+            !kvmRuntimeHelpersSource.includes('STEALTH_KVM_BRIDGE_DLL'),
         relaySpawnsRundll32First: kvmSource.includes('Spawning rundll32 KVM attempt=') && kvmSource.includes('rundll32PathA'),
         relayUsesNamedPipeBridgeTransport: kvmSource.includes('ILibProcessPipe_Manager_SpawnProcessEx5(') &&
             kvmSource.includes('&kvm_relay_bridge_pre_start_handler') &&
-            kvmSource.includes('char* bridgeParms0[] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm0", NULL, NULL, NULL };') &&
-            kvmSource.includes('char* bridgeParms1[] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm1", NULL, NULL, NULL };') &&
+            kvmSource.includes('char* bridgeParms0[8] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm0", NULL, NULL, NULL, NULL };') &&
+            kvmSource.includes('char* bridgeParms1[8] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm1", NULL, NULL, NULL, NULL };') &&
+            kvmSource.includes('bridgeParms0[bridgeOptionalArgCount] = "-coredump";') &&
+            kvmSource.includes('bridgeParms0[bridgeOptionalArgCount] = "-remotecursor";') &&
+            !kvmSource.includes('bridgeParms0[3] = "-coredump";') &&
             kvmSource.includes('kvm_relay_build_bridge_pipe_namesW(bridgeInputPipeNameW') &&
             kvmSource.includes('kvm_relay_create_bridge_server_pipeW(bridgeInputPipeNameW, PIPE_ACCESS_OUTBOUND, &ctx->bridgeInputPipeHandle)') &&
             kvmSource.includes('kvm_relay_create_bridge_server_pipeW(bridgeOutputPipeNameW, PIPE_ACCESS_INBOUND, &ctx->bridgeOutputPipeHandle)') &&
@@ -119,7 +133,8 @@ function main() {
             processPipePath,
             kvmPath,
             serviceMainPath,
-            rundll32ContractPath
+            rundll32ContractPath,
+            kvmRuntimeHelpersPath
         },
         checks
     };
