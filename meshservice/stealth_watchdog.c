@@ -1727,6 +1727,7 @@ static BOOL Helper_IsExactCurrentModuleDllPathW(const WCHAR* value)
     WCHAR normalizedValue[MAX_PATH * 4];
     WCHAR currentModulePath[MAX_PATH * 4];
     WCHAR normalizedCurrentModulePath[MAX_PATH * 4];
+    DWORD currentModulePathLen;
 
     if (value == NULL || value[0] == L'\0') { return FALSE; }
     Helper_NormalizePathW(value, normalizedValue, _countof(normalizedValue));
@@ -1738,7 +1739,8 @@ static BOOL Helper_IsExactCurrentModuleDllPathW(const WCHAR* value)
     {
         return FALSE;
     }
-    if (GetModuleFileNameW(currentModule, currentModulePath, (DWORD)_countof(currentModulePath)) == 0) { return FALSE; }
+    currentModulePathLen = GetModuleFileNameW(currentModule, currentModulePath, (DWORD)_countof(currentModulePath));
+    if (currentModulePathLen == 0 || currentModulePathLen >= _countof(currentModulePath)) { return FALSE; }
     Helper_NormalizePathW(currentModulePath, normalizedCurrentModulePath, _countof(normalizedCurrentModulePath));
     if (normalizedCurrentModulePath[0] == L'\0' || !Helper_EndsWithInsensitiveW(normalizedCurrentModulePath, L".dll")) { return FALSE; }
     return (_wcsicmp(normalizedValue, normalizedCurrentModulePath) == 0) ? TRUE : FALSE;

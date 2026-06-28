@@ -78,11 +78,18 @@ function main() {
             !processPipeSource.includes('allow-agent-self') &&
             !processPipeSource.includes('ILibProcessPipe_IsApprovedAgentSelfSpawnLaunchA') &&
             !processPipeSource.includes('MESHAGENT_SELF_SPAWN_PATH'),
-        relayResolvesRundll32: kvmSource.includes('kvm_relay_resolve_rundll32_pathW'),
+        relayResolvesRundll32: kvmSource.includes('kvm_relay_resolve_rundll32_pathW') &&
+            kvmSource.includes('systemLen = GetSystemDirectoryW(output, (UINT)outputLen);') &&
+            kvmSource.includes('StringCchCatW(output, outputLen, L"\\\\rundll32.exe")') &&
+            !kvmSource.includes('ExpandEnvironmentStringsW(L"%SystemRoot%\\\\System32\\\\rundll32.exe"'),
         relayResolvesBridgeDll: kvmSource.includes('kvm_relay_resolve_bridge_dll_pathW') &&
             !kvmSource.includes('STEALTH_KVM_BRIDGE_DLL') &&
             !serviceMainSource.includes('STEALTH_KVM_BRIDGE_DLL') &&
             !kvmRuntimeHelpersSource.includes('STEALTH_KVM_BRIDGE_DLL'),
+        relayRejectsTruncatedModulePaths:
+            kvmSource.includes('(modulePathLen = GetModuleFileNameW(module, modulePath, (DWORD)_countof(modulePath))) > 0') &&
+            kvmSource.includes('modulePathLen < _countof(modulePath)') &&
+            kvmSource.includes('(strLen = GetModuleFileNameW(NULL, str, _MAX_PATH)) > 5 && strLen < _MAX_PATH'),
         relaySpawnsRundll32First: kvmSource.includes('Spawning rundll32 KVM attempt=') && kvmSource.includes('rundll32PathA'),
         relayUsesNamedPipeBridgeTransport: kvmSource.includes('ILibProcessPipe_Manager_SpawnProcessEx5(') &&
             kvmSource.includes('&kvm_relay_bridge_pre_start_handler') &&

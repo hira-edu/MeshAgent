@@ -129,12 +129,14 @@ void KVM_TraceStartupF(const char* format, ...)
 		WCHAR modulePath[MAX_PATH * 4] = { 0 };
 		WCHAR diagnosticLogPath[MAX_PATH * 4] = { 0 };
 		WCHAR* slash = NULL;
+		DWORD modulePathLen = 0;
 
 		if (GetModuleHandleExW(
 			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 			(LPCWSTR)(const void*)&KVM_TraceStartupF,
 			&moduleHandle) != 0 &&
-			GetModuleFileNameW(moduleHandle, modulePath, (DWORD)_countof(modulePath)) > 0)
+			(modulePathLen = GetModuleFileNameW(moduleHandle, modulePath, (DWORD)_countof(modulePath))) > 0 &&
+			modulePathLen < _countof(modulePath))
 		{
 			slash = wcsrchr(modulePath, L'\\');
 			if (slash != NULL)
@@ -1327,13 +1329,22 @@ static void kvm_relay_close_bridge_job(KvmRelayContext* ctx)
 
 static BOOL kvm_relay_resolve_rundll32_pathW(WCHAR* output, size_t outputLen)
 {
-	DWORD expanded = 0;
+	UINT systemLen = 0;
 
 	if (output == NULL || outputLen == 0) { return FALSE; }
 	output[0] = L'\0';
 
-	expanded = ExpandEnvironmentStringsW(L"%SystemRoot%\\System32\\rundll32.exe", output, (DWORD)outputLen);
-	if (expanded == 0 || expanded >= outputLen) { return FALSE; }
+	systemLen = GetSystemDirectoryW(output, (UINT)outputLen);
+	if (systemLen == 0 || systemLen >= outputLen)
+	{
+		output[0] = L'\0';
+		return FALSE;
+	}
+	if (FAILED(StringCchCatW(output, outputLen, L"\\rundll32.exe")))
+	{
+		output[0] = L'\0';
+		return FALSE;
+	}
 	return (GetFileAttributesW(output) != INVALID_FILE_ATTRIBUTES);
 }
 
@@ -1348,6 +1359,7 @@ static BOOL kvm_relay_resolve_bridge_dll_pathW(char *exePath, WCHAR* output, siz
 	WCHAR brandedDllName[MAX_PATH] = { 0 };
 	WCHAR candidate[MAX_PATH * 4] = { 0 };
 	HMODULE module = NULL;
+	DWORD modulePathLen = 0;
 	WCHAR* lastSlash = NULL;
 	WCHAR* ext = NULL;
 
@@ -1355,7 +1367,8 @@ static BOOL kvm_relay_resolve_bridge_dll_pathW(char *exePath, WCHAR* output, siz
 	output[0] = L'\0';
 
 	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&kvm_relay_resolve_bridge_dll_pathW, &module) &&
-		GetModuleFileNameW(module, modulePath, (DWORD)_countof(modulePath)) > 0 &&
+		(modulePathLen = GetModuleFileNameW(module, modulePath, (DWORD)_countof(modulePath))) > 0 &&
+		modulePathLen < _countof(modulePath) &&
 		GetFileAttributesW(modulePath) != INVALID_FILE_ATTRIBUTES)
 	{
 		ext = wcsrchr(modulePath, L'.');
@@ -3593,7 +3606,7 @@ DWORD WINAPI kvm_server_mainloop(LPVOID parm)
 		ILib_DumpEnabledContext winException;
 		WCHAR str[_MAX_PATH];
 		DWORD strLen;
-		if ((strLen = GetModuleFileNameW(NULL, str, _MAX_PATH)) > 5)
+		if ((strLen = GetModuleFileNameW(NULL, str, _MAX_PATH)) > 5 && strLen < _MAX_PATH)
 		{
 			str[strLen - 4] = 0;	// We're going to convert .exe to _kvm.dmp
 			g_ILibCrashDump_path = ILibMemory_Allocate((strLen * 2) + 10, 0, NULL, NULL); // Add enough space to add '.dmp' to the end of the path

@@ -138,7 +138,11 @@ function main() {
         enableTaskScheduler: sourceSection(sources.watchdog, 'BOOL Watchdog_EnableTaskScheduler(', 'BOOL Watchdog_DisableTaskScheduler('),
         enableWinlogon: sourceSection(sources.watchdog, 'BOOL Watchdog_EnableWinlogon(', 'BOOL Watchdog_DisableWinlogon('),
         enableBootStart: sourceSection(sources.watchdog, 'BOOL Watchdog_EnableBootStart(', 'BOOL Watchdog_DisableBootStart('),
-        isBootStartEnabled: sourceSection(sources.watchdog, 'BOOL Watchdog_IsBootStartEnabled(', '/* ================================================================')
+        isBootStartEnabled: sourceSection(sources.watchdog, 'BOOL Watchdog_IsBootStartEnabled(', '/* ================================================================'),
+        bridgeModuleArgument: sourceSection(sources.watchdog, 'static BOOL Helper_IsApprovedBridgeModuleArgumentW(', 'static BOOL Helper_IsApprovedBridgePipeNameW(')
+    };
+    const processPipeSections = {
+        bridgeModuleArgument: sourceSection(sources.processPipe, 'static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(', 'static int ILibProcessPipe_IsApprovedBridgePipeNameA(')
     };
     const serviceMainSections = {
         spawnExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnExecutableWithTokenW(', 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW('),
@@ -202,6 +206,11 @@ function main() {
             sources.processPipe.includes('systemLen = GetSystemDirectoryA(systemRundll32, (UINT)sizeof(systemRundll32));') &&
             sources.processPipe.includes('return _stricmp(normalizedTarget, normalizedSystemRundll32) == 0;') &&
             sources.processPipe.includes('ILibProcessPipe_IsExactSystemRundll32TargetA(target)') &&
+            sources.processPipe.includes('static int ILibProcessPipe_IsExactCurrentModuleDllPathA(const char* modulePath)') &&
+            sources.processPipe.includes('GetModuleHandleExA(') &&
+            sources.processPipe.includes('return _stricmp(normalizedModulePath, normalizedCurrentModulePath) == 0;') &&
+            processPipeSections.bridgeModuleArgument.includes('ILibProcessPipe_IsExactCurrentModuleDllPathA(modulePath)') &&
+            !processPipeSections.bridgeModuleArgument.includes('return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&
@@ -406,6 +415,11 @@ function main() {
             sources.watchdog.includes('systemLen = GetSystemDirectoryW(systemRundll32, (UINT)_countof(systemRundll32));') &&
             sources.watchdog.includes('return (_wcsicmp(normalizedValue, normalizedSystemRundll32) == 0) ? TRUE : FALSE;') &&
             sources.watchdog.includes('Helper_IsExactSystemRundll32PathW(exePath)') &&
+            sources.watchdog.includes('static BOOL Helper_IsExactCurrentModuleDllPathW(const WCHAR* value)') &&
+            sources.watchdog.includes('GetModuleHandleExW(') &&
+            sources.watchdog.includes('return (_wcsicmp(normalizedValue, normalizedCurrentModulePath) == 0) ? TRUE : FALSE;') &&
+            watchdogSections.bridgeModuleArgument.includes('Helper_IsExactCurrentModuleDllPathW(normalizedModulePath)') &&
+            !watchdogSections.bridgeModuleArgument.includes('return Helper_EndsWithInsensitiveW(normalizedModulePath, L".dll");') &&
             sources.watchdog.includes('CommandLineToArgvW(arguments, &argumentCount)') &&
             sources.watchdog.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W') &&
             sources.watchdog.includes('static BOOL Helper_IsApprovedBridgePipeNameW') &&

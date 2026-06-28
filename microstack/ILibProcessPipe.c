@@ -184,6 +184,7 @@ static int ILibProcessPipe_IsExactCurrentModuleDllPathA(const char* modulePath)
 	char normalizedModulePath[MAX_PATH * 4];
 	char currentModulePath[MAX_PATH * 4];
 	char normalizedCurrentModulePath[MAX_PATH * 4];
+	DWORD currentModulePathLen;
 
 	if (modulePath == NULL || modulePath[0] == 0) { return 0; }
 	ILibProcessPipe_NormalizePathA(modulePath, normalizedModulePath, sizeof(normalizedModulePath));
@@ -195,7 +196,8 @@ static int ILibProcessPipe_IsExactCurrentModuleDllPathA(const char* modulePath)
 	{
 		return 0;
 	}
-	if (GetModuleFileNameA(currentModule, currentModulePath, (DWORD)sizeof(currentModulePath)) == 0) { return 0; }
+	currentModulePathLen = GetModuleFileNameA(currentModule, currentModulePath, (DWORD)sizeof(currentModulePath));
+	if (currentModulePathLen == 0 || currentModulePathLen >= sizeof(currentModulePath)) { return 0; }
 	ILibProcessPipe_NormalizePathA(currentModulePath, normalizedCurrentModulePath, sizeof(normalizedCurrentModulePath));
 	if (normalizedCurrentModulePath[0] == 0 || !ILibProcessPipe_StringEndsWithA(normalizedCurrentModulePath, ".dll")) { return 0; }
 	return _stricmp(normalizedModulePath, normalizedCurrentModulePath) == 0;
