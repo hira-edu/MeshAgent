@@ -160,7 +160,9 @@ function main() {
     };
     const processPipeSections = {
         bridgeModuleArgument: sourceSection(sources.processPipe, 'static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(', 'static int ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA('),
-        consoleModuleArgument: sourceSection(sources.processPipe, 'static int ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(', 'static int ILibProcessPipe_IsApprovedBridgePipeNameA(')
+        consoleModuleArgument: sourceSection(sources.processPipe, 'static int ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(', 'static int ILibProcessPipe_IsApprovedBridgePipeNameA('),
+        commandLineFormatting: sourceSection(sources.processPipe, 'static int ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(', 'static int ILibProcessPipe_IsApprovedBridgeModeA('),
+        spawnProcessWindows: sourceSection(sources.processPipe, 'ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx5(', '#else\n\tpid_t pid;')
     };
     const serviceMainSections = {
         spawnExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnExecutableWithTokenW(', 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW('),
@@ -270,6 +272,11 @@ function main() {
             !processPipeSections.bridgeModuleArgument.includes('return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");') &&
             processPipeSections.consoleModuleArgument.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A)') &&
             !processPipeSections.consoleModuleArgument.includes('return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");') &&
+            processPipeSections.commandLineFormatting.includes('ILibProcessPipe_FormatKnownRundll32ModuleEntryForCommandLineA') &&
+            processPipeSections.commandLineFormatting.includes('"\\"%s\\",%s"') &&
+            processPipeSections.commandLineFormatting.includes('ILibProcessPipe_AppendQuotedCommandLineArgumentA') &&
+            processPipeSections.spawnProcessWindows.includes('ILibProcessPipe_AppendWindowsCommandLineArgumentA(target, parameters, i, parms, sz, &offset)') &&
+            !processPipeSections.spawnProcessWindows.includes('"%s%s", (i == 0) ? "" : " ", parameters[i]') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[1], "_in")') &&
@@ -752,6 +759,9 @@ function main() {
             sources.terminal.includes('StartAsUser') &&
             sources.terminal.includes('StartPowerShellAsUser') &&
             sources.terminal.includes('write: function write(chunk, encoding, flush)') &&
+            sources.terminal.includes('this.inputServer.listen(this.inputPipeName);\n    this.outputServer.listen(this.outputPipeName);\n    try { self.launchBridge(); }') &&
+            !sources.terminal.includes('this.inputServer.listen(this.inputPipeName, function onInputListening()') &&
+            !sources.terminal.includes('function onOutputListening()') &&
             sources.terminal.includes("var SHELL_COMMAND = 'cmd';") &&
             sources.terminal.includes("var SHELL_AUTOMATION = 'powershell';") &&
             !sources.terminal.includes('Windows terminal support is disabled until') &&

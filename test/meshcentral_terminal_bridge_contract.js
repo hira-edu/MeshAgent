@@ -56,6 +56,10 @@ function checkTerminalModule(source) {
             source.includes('Windows terminal bridge did not connect within'),
         reportsPolicyDeny:
             source.includes('Windows terminal bridge launch was denied by process policy.'),
+        launchesBridgeAfterPipeHandlesAreCreated:
+            source.includes('this.inputServer.listen(this.inputPipeName);\n    this.outputServer.listen(this.outputPipeName);\n    try { self.launchBridge(); }') &&
+            !source.includes('this.inputServer.listen(this.inputPipeName, function onInputListening()') &&
+            !source.includes('function onOutputListening()'),
         exposesClosedState:
             source.includes('stream.isBridgeClosed = function isBridgeClosed()') &&
             source.includes('stream._meshTerminalClosed = false') &&

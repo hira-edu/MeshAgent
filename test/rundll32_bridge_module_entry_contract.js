@@ -36,6 +36,16 @@ const consoleModule = sourceSection(
     'static int ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(',
     'static int ILibProcessPipe_IsApprovedBridgePipeNameA('
 );
+const commandLineFormatting = sourceSection(
+    processPipe,
+    'static int ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(',
+    'static int ILibProcessPipe_IsApprovedBridgeModeA('
+);
+const processSpawn = sourceSection(
+    processPipe,
+    'ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx5(',
+    '#else\n\tpid_t pid;'
+);
 
 assert(parser.includes("if (*cursor == '\"')"), 'rundll32 module parser must accept the quoted module form');
 assert(parser.includes("while (*cursor != 0 && *cursor != ',')"), 'rundll32 module parser must accept the unquoted module form up to the export comma');
@@ -50,12 +60,20 @@ assert(consoleModule.includes('ILibProcessPipe_TryParseRundll32ModuleEntryA(valu
 assert(consoleModule.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A)'), 'console bridge validator must keep exact DLL file-identity enforcement');
 assert(!consoleModule.includes("if (*cursor != '\"')"), 'console bridge validator must not reject the valid unquoted rundll32 module form');
 
+assert(commandLineFormatting.includes('ILibProcessPipe_FormatKnownRundll32ModuleEntryForCommandLineA'), 'process pipe must use a shared rundll32 module-entry command-line formatter');
+assert(commandLineFormatting.includes('"\\"%s\\",%s"'), 'rundll32 command-line formatter must emit "<dll>",Export instead of quoting the comma/export as part of the DLL path');
+assert(commandLineFormatting.includes('ILibProcessPipe_AppendQuotedCommandLineArgumentA'), 'process pipe must quote ordinary Windows argv arguments safely');
+assert(commandLineFormatting.includes('ILibProcessPipe_AppendWindowsCommandLineArgumentA'), 'process pipe must route argv serialization through the Windows-safe appender');
+assert(processSpawn.includes('ILibProcessPipe_AppendWindowsCommandLineArgumentA(target, parameters, i, parms, sz, &offset)'), 'spawn process must not flatten argv with a raw whitespace join');
+assert(!processSpawn.includes('"%s%s", (i == 0) ? "" : " ", parameters[i]'), 'spawn process must not use the historical raw whitespace argv join');
+
 console.log(JSON.stringify({
     success: true,
     checked: [
         'quoted rundll32 module form',
         'unquoted rundll32 module form',
         'exact export',
-        'exact bridge DLL file identity'
+        'exact bridge DLL file identity',
+        'rundll32 command-line module-entry serialization'
     ]
 }, null, 2));

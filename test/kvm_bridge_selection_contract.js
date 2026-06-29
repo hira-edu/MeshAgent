@@ -64,8 +64,9 @@ function main() {
             rundll32ContractSource.includes('#define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"') &&
             rundll32ContractSource.includes('void CALLBACK KvmSessionBridgeW') &&
             processPipeSource.includes('ILibProcessPipe_IsApprovedBridgeModuleArgumentA') &&
-            processPipeSource.includes('&ILibProcessPipe_IsExactBridgeModuleDllPathA') &&
-            processPipeSource.includes('GetProcAddress(bridgeModule, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A)') &&
+            processPipeSource.includes('ILibProcessPipe_TryParseRundll32ModuleEntryA(value, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
+            processPipeSource.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A)') &&
+            processPipeSource.includes('GetProcAddress(bridgeModule, expectedEntry)') &&
             processPipeSource.includes('GetFileInformationByHandle(requestedHandle, &requestedInfo)') &&
             processPipeSource.includes('requestedInfo.nFileIndexLow == bridgeInfo.nFileIndexLow') &&
             !processPipeSource.includes('return _stricmp(normalizedModulePath, normalizedBridgeModulePath) == 0;') &&

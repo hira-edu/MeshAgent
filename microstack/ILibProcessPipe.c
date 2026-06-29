@@ -418,6 +418,106 @@ static int ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(char* target, char* co
 	ILibProcessPipe_SetBridgePolicyRejectReasonA("ok-console");
 	return 1;
 }
+static int ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(const char* value, const char* expectedEntry, char* output, size_t outputLen)
+{
+	char modulePath[MAX_PATH * 4];
+
+	if (value == NULL || expectedEntry == NULL || output == NULL || outputLen == 0) { return 0; }
+	output[0] = 0;
+	if (!ILibProcessPipe_TryParseRundll32ModuleEntryA(value, expectedEntry, modulePath, sizeof(modulePath), "cmdline-module")) { return 0; }
+	if (strchr(modulePath, '"') != NULL || strchr(expectedEntry, '"') != NULL) { return 0; }
+	return (sprintf_s(output, outputLen, "\"%s\",%s", modulePath, expectedEntry) > 0) ? 1 : 0;
+}
+static int ILibProcessPipe_FormatKnownRundll32ModuleEntryForCommandLineA(const char* value, char* output, size_t outputLen)
+{
+	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_LIFECYCLE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_SELFTEST_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_KVM_PROBE_A, output, outputLen)) { return 1; }
+	return 0;
+}
+static int ILibProcessPipe_AppendRawCommandLineArgumentA(char* output, size_t outputLen, size_t* offset, const char* value)
+{
+	int written = 0;
+
+	if (output == NULL || outputLen == 0 || offset == NULL || value == NULL) { return 0; }
+	if (*offset >= outputLen) { return 0; }
+	written = sprintf_s(output + *offset, outputLen - *offset, "%s%s", (*offset == 0) ? "" : " ", value);
+	if (written <= 0) { return 0; }
+	*offset += (size_t)written;
+	return 1;
+}
+static int ILibProcessPipe_AppendQuotedCommandLineArgumentA(char* output, size_t outputLen, size_t* offset, const char* value)
+{
+	const char* cursor = (value != NULL) ? value : "";
+	size_t backslashes = 0;
+
+	if (output == NULL || outputLen == 0 || offset == NULL) { return 0; }
+	if (*offset >= outputLen) { return 0; }
+	if (*offset > 0)
+	{
+		if (*offset + 1 >= outputLen) { return 0; }
+		output[(*offset)++] = ' ';
+	}
+	if (*offset + 1 >= outputLen) { return 0; }
+	output[(*offset)++] = '"';
+	for (; *cursor != 0; ++cursor)
+	{
+		if (*cursor == '\\')
+		{
+			++backslashes;
+			continue;
+		}
+		if (*cursor == '"')
+		{
+			while (backslashes-- > 0)
+			{
+				if (*offset + 1 >= outputLen) { return 0; }
+				output[(*offset)++] = '\\';
+				if (*offset + 1 >= outputLen) { return 0; }
+				output[(*offset)++] = '\\';
+			}
+			if (*offset + 2 >= outputLen) { return 0; }
+			output[(*offset)++] = '\\';
+			output[(*offset)++] = '"';
+			backslashes = 0;
+			continue;
+		}
+		while (backslashes-- > 0)
+		{
+			if (*offset + 1 >= outputLen) { return 0; }
+			output[(*offset)++] = '\\';
+		}
+		if (*offset + 1 >= outputLen) { return 0; }
+		output[(*offset)++] = *cursor;
+		backslashes = 0;
+	}
+	while (backslashes-- > 0)
+	{
+		if (*offset + 2 >= outputLen) { return 0; }
+		output[(*offset)++] = '\\';
+		output[(*offset)++] = '\\';
+	}
+	if (*offset + 2 >= outputLen) { return 0; }
+	output[(*offset)++] = '"';
+	output[*offset] = 0;
+	return 1;
+}
+static int ILibProcessPipe_AppendWindowsCommandLineArgumentA(char* target, char* const* parameters, int parameterIndex, char* output, size_t outputLen, size_t* offset)
+{
+	char rundll32ModuleEntry[MAX_PATH * 4 + 128];
+
+	if (parameters == NULL || parameters[parameterIndex] == NULL) { return 0; }
+	if (parameterIndex == 0 &&
+		ILibProcessPipe_IsExactSystemRundll32TargetA(target) &&
+		ILibProcessPipe_FormatKnownRundll32ModuleEntryForCommandLineA(parameters[0], rundll32ModuleEntry, sizeof(rundll32ModuleEntry)))
+	{
+		return ILibProcessPipe_AppendRawCommandLineArgumentA(output, outputLen, offset, rundll32ModuleEntry);
+	}
+	return ILibProcessPipe_AppendQuotedCommandLineArgumentA(output, outputLen, offset, parameters[parameterIndex]);
+}
 static int ILibProcessPipe_IsApprovedBridgeModeA(const char* value)
 {
 	return (value != NULL && (strcmp(value, "-kvm0") == 0 || strcmp(value, "-kvm1") == 0)) ? 1 : 0;
@@ -1395,28 +1495,35 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 			processEnvironment = tokenEnvironment;
 		}
 	}
-	if (parameters != NULL && parameters[0] != NULL && parameters[1] == NULL)
+	if (parameters != NULL && parameters[0] != NULL)
 	{
-		parms = parameters[0];
-	}
-	else if (parameters != NULL && parameters[0] != NULL && parameters[1] != NULL)
-	{
-		int len = 0;
 		int i = 0;
-		int sz = 0;
+		size_t sz = 1;
+		size_t offset = 0;
 
 		while (parameters[i] != NULL)
 		{
-			sz += ((int)strnlen_s(parameters[i++], sizeof(ILibScratchPad2)) + 1);
+			sz += (strnlen_s(parameters[i], 32768) * 2) + 8;
+			++i;
 		}
-		sz += (i - 1); // Need to make room for delimiter characters
 		parms = (char*)malloc(sz);
-		i = 0; len = 0;
+		if (parms == NULL)
+		{
+			SetLastError(ERROR_OUTOFMEMORY);
+			return(NULL);
+		}
+		parms[0] = 0;
+		i = 0;
 		allocParms = 1;
 
 		while (parameters[i] != NULL)
 		{
-			len += sprintf_s(parms + len, sz - len, "%s%s", (i == 0) ? "" : " ", parameters[i]);
+			if (!ILibProcessPipe_AppendWindowsCommandLineArgumentA(target, parameters, i, parms, sz, &offset))
+			{
+				free(parms);
+				SetLastError(ERROR_INSUFFICIENT_BUFFER);
+				return(NULL);
+			}
 			++i;
 		}
 	}

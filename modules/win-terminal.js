@@ -95,6 +95,7 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId)
     this.startTimer = null;
     this.closeEmitted = false;
     this.pendingWrites = [];
+    this.bridgeLaunched = false;
 
     stream = new duplex({
         write: function write(chunk, encoding, flush) {
@@ -205,6 +206,8 @@ ConsoleBridgeTerminal.prototype.launchBridge = function launchBridge()
     var serviceDllPath = resolveInstalledServiceDllPath();
     var args = [serviceDllPath + ',MeshConsoleBridgeW', this.inputPipeName, this.outputPipeName, this.shellName, '' + this.cols, '' + this.rows];
     var self = this;
+    if (this.bridgeLaunched) { return; }
+    this.bridgeLaunched = true;
     if (this.targetSessionId != null) { args.push('tsid=' + this.targetSessionId); }
     this.child = childProcess.execFile(rundll32Path, args);
     if (this.child == null) {
@@ -245,11 +248,9 @@ ConsoleBridgeTerminal.prototype.start = function start()
     });
     this.inputServer.on('error', function onServerError(error) { self.fail(error); });
     this.outputServer.on('error', function onServerError(error) { self.fail(error); });
-    this.inputServer.listen(this.inputPipeName, function onInputListening() {
-        self.outputServer.listen(self.outputPipeName, function onOutputListening() {
-            try { self.launchBridge(); } catch (ex) { self.fail(ex); }
-        });
-    });
+    this.inputServer.listen(this.inputPipeName);
+    this.outputServer.listen(this.outputPipeName);
+    try { self.launchBridge(); } catch (ex) { self.fail(ex); }
 };
 
 ConsoleBridgeTerminal.prototype.closeBridge = function closeBridge()

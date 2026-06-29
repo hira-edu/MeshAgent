@@ -294,6 +294,12 @@ static void kvm_write_scaling_factor(volatile LONG* scalingFactor, int scaling)
 #ifndef KVM_PENDING_PROBE_INPUTLOCK
 #define KVM_PENDING_PROBE_INPUTLOCK	0x04
 #endif
+#ifndef KVM_REFRESH_PROBE_TIMEOUT_MS
+#define KVM_REFRESH_PROBE_TIMEOUT_MS (KVM_BRIDGE_CONNECT_TIMEOUT_MS * 2)
+#endif
+#ifndef KVM_BRIDGE_FAILURE_STAGE_EXIT
+#define KVM_BRIDGE_FAILURE_STAGE_EXIT 7
+#endif
 #define KVM_SESSION_START_TOKEN_RETRY_DELAY_MS 500
 #define KVM_SESSION_START_TOKEN_RETRY_MAX 20
 
@@ -391,6 +397,8 @@ static int kvm_session_id_is_valid(DWORD sessionId);
 static int kvm_session_id_has_user_token(DWORD sessionId);
 static int kvm_session_id_exists(DWORD sessionId);
 static void kvm_schedule_retry_timer_delay(DWORD delayMs);
+static void kvm_update_runtime_state(int childPresent, int transportActive);
+static void kvm_record_spawn_failure(DWORD error, DWORD stage, DWORD spawnType);
 
 static void kvm_relay_ensure_registry_lock()
 {
@@ -779,10 +787,17 @@ static unsigned int kvm_bridge_debug_probe_mask_for_input(char* buffer, size_t b
 
 static void kvm_bridge_debug_arm_pending_probe(unsigned int probeMask)
 {
+	LONG previousMask;
+
 	if (probeMask == 0) { return; }
-	if (InterlockedOr(&gKvmPendingProbeMask, (LONG)probeMask) == 0)
+	previousMask = InterlockedOr(&gKvmPendingProbeMask, (LONG)probeMask);
+	if (previousMask == 0)
 	{
 		gKvmPendingProbeSinceTickMs = GetTickCount64();
+	}
+	if ((probeMask & KVM_PENDING_PROBE_REFRESH) != 0 && (previousMask & KVM_PENDING_PROBE_REFRESH) == 0)
+	{
+		kvm_schedule_retry_timer_delay(KVM_REFRESH_PROBE_TIMEOUT_MS);
 	}
 }
 
@@ -855,6 +870,48 @@ static void kvm_bridge_debug_note_input(char* buffer, size_t bufferLen)
 			(unsigned int)packetType,
 			(unsigned long long)bufferLen);
 	}
+}
+
+static int kvm_relay_refresh_probe_timed_out(ULONGLONG now, ULONGLONG* ageMsOut)
+{
+	LONG pendingMask = InterlockedCompareExchange(&gKvmPendingProbeMask, 0, 0);
+	ULONGLONG ageMs = 0;
+
+	if (ageMsOut != NULL) { *ageMsOut = 0; }
+	if ((pendingMask & KVM_PENDING_PROBE_REFRESH) == 0) { return 0; }
+	if (gKvmPendingProbeSinceTickMs == 0) { return 1; }
+	ageMs = now - gKvmPendingProbeSinceTickMs;
+	if (ageMsOut != NULL) { *ageMsOut = ageMs; }
+	return ageMs > KVM_REFRESH_PROBE_TIMEOUT_MS ? 1 : 0;
+}
+
+static int kvm_relay_handle_refresh_probe_timeout(KvmRelayContext* ctx, const char* source)
+{
+	ULONGLONG ageMs = 0;
+	DWORD childPid = 0;
+
+	if (ctx == NULL || gChildProcess == NULL || g_shutdown != 0 || gKvmRestartSuppressed != 0) { return 0; }
+	if (!kvm_relay_refresh_probe_timed_out(GetTickCount64(), &ageMs)) { return 0; }
+
+	childPid = ILibProcessPipe_Process_GetPID(gChildProcess);
+	if (childPid == 0 && g_slavekvm != 0) { childPid = (DWORD)g_slavekvm; }
+	kvm_trace_startupf("refresh probe timed out after %llu ms; terminating stale rundll32 bridge pid=%u source=%s",
+		(unsigned long long)ageMs,
+		(unsigned int)childPid,
+		source != NULL ? source : "(unknown)");
+	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+		"KVM [Master]: refresh probe timed out after %llu ms; respawning rundll32 KVM bridge (pid=%u, source=%s)",
+		(unsigned long long)ageMs,
+		(unsigned int)childPid,
+		source != NULL ? source : "(unknown)");
+
+	kvm_record_spawn_failure(ERROR_TIMEOUT, KVM_BRIDGE_FAILURE_STAGE_EXIT, (DWORD)gProcessSpawnType);
+	InterlockedAnd(&gKvmPendingProbeMask, (LONG)(~KVM_PENDING_PROBE_REFRESH));
+	if (InterlockedCompareExchange(&gKvmPendingProbeMask, 0, 0) == 0) { gKvmPendingProbeSinceTickMs = 0; }
+	gKvmChildExitSignaled = 1;
+	kvm_update_runtime_state(0, 0);
+	ILibProcessPipe_Process_SoftKill(gChildProcess);
+	return 1;
 }
 
 static unsigned int kvm_bridge_debug_probe_mask_for_output(unsigned short packetType)
@@ -1048,7 +1105,9 @@ typedef struct KvmBridgeHardeningResult
 #define KVM_BRIDGE_FAILURE_STAGE_DACL		4
 #define KVM_BRIDGE_FAILURE_STAGE_JOB_CREATE	5
 #define KVM_BRIDGE_FAILURE_STAGE_JOB_ASSIGN	6
+#ifndef KVM_BRIDGE_FAILURE_STAGE_EXIT
 #define KVM_BRIDGE_FAILURE_STAGE_EXIT		7
+#endif
 #define KVM_BRIDGE_FAILURE_STAGE_RESUME		8
 
 static void kvm_bridge_hardening_result_close_job(KvmBridgeHardeningResult* result)
@@ -1857,12 +1916,18 @@ static void kvm_retry_timer_callback(void* object)
 	KvmRelayContext* ctx = (KvmRelayContext*)object;
 	int destroyContext = 0;
 	int pendingStartHandled = 0;
+	int staleRefreshHandled = 0;
 
 	kvm_relay_lock();
 	kvm_relay_activate_context(ctx);
 	gKvmRetryScheduled = 0;
 	pendingStartHandled = kvm_retry_pending_unqueryable_start(ctx);
-	if (pendingStartHandled == 0 && g_shutdown == 0 && gKvmRestartSuppressed == 0 && gKvmPipeMgr != NULL && gKvmWriteHandler != NULL)
+	if (pendingStartHandled == 0)
+	{
+		staleRefreshHandled = kvm_relay_handle_refresh_probe_timeout(ctx, "timer");
+	}
+	if (pendingStartHandled == 0 && staleRefreshHandled == 0 && g_shutdown == 0 && gKvmRestartSuppressed == 0 &&
+		gChildProcess == NULL && gKvmPipeMgr != NULL && gKvmWriteHandler != NULL)
 	{
 		kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);
 	}
@@ -3158,6 +3223,11 @@ int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, vo
 	if (buf != NULL && len >= 4)
 	{
 		kvm_bridge_debug_note_input(buf, (size_t)len);
+		if (kvm_relay_handle_refresh_probe_timeout(ctx, "input") != 0)
+		{
+			consumed = 0;
+			goto finish;
+		}
 	}
 
 	if (gChildProcess != NULL)
