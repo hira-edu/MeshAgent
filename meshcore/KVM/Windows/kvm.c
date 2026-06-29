@@ -208,12 +208,15 @@ HANDLE kvmthread = NULL;
 int g_shutdown = 999;
 int g_pause = 0;
 int g_remotepause = 1;
+static HANDLE gKvmRemoteResumeEvent = NULL;
+static INIT_ONCE gKvmTileInfoLockOnce = INIT_ONCE_STATIC_INIT;
+static CRITICAL_SECTION gKvmTileInfoLock;
+static LONG gKvmTileInfoGeneration = 0;
 int g_restartcount = 0;
 struct tileInfo_t **tileInfo = NULL;
 int g_slavekvm = 0;
 static ILibProcessPipe_Process gChildProcess;
 int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHandler writeHandler, void *reserved);
-static LONG gKvmForcedPrimaryFailoverConsumed = 0;
 static LONG gKvmForceDefaultDesktop = 0;
 static void* gKvmDebugReserved = NULL;
 static void* gKvmPipeMgr = NULL;
@@ -1951,12 +1954,6 @@ static BOOL kvm_bind_current_process_to_interactive_window_station(DWORD* errorO
 	return ok;
 }
 
-static int kvm_should_force_primary_failover(void)
-{
-	if (kvm_read_env_bool("STEALTH_KVM_FORCE_PRIMARY_FAILOVER", 0) == 0) { return 0; }
-	return (InterlockedCompareExchange(&gKvmForcedPrimaryFailoverConsumed, 1, 0) == 0) ? 1 : 0;
-}
-
 static int kvm_should_prefer_bridge(char* exePath)
 {
 	UNREFERENCED_PARAMETER(exePath);
@@ -2145,58 +2142,6 @@ static void kvm_bridge_report_outcome_event(const WCHAR* outcome, WORD eventType
 }
 #endif
 
-static void kvm_add_spawn_candidate(ILibProcessPipe_SpawnTypes* list, int* count, ILibProcessPipe_SpawnTypes value)
-{
-	int i;
-	if (list == NULL || count == NULL) { return; }
-	for (i = 0; i < *count; ++i)
-	{
-		if (list[i] == value) { return; }
-	}
-	if (*count < 4)
-	{
-		list[*count] = value;
-		*count = *count + 1;
-	}
-}
-
-static int kvm_build_ramas_candidates(ILibProcessPipe_SpawnTypes primaryType, int hasSpecifiedUserSession, ILibProcessPipe_SpawnTypes* candidates, size_t candidateCapacity)
-{
-	ILibProcessPipe_SpawnTypes ordered[4];
-	int startIndex = 0;
-	int count = 0;
-	size_t offset = 0;
-
-	if (candidates == NULL || candidateCapacity == 0) { return 0; }
-
-	ordered[0] = ILibProcessPipe_SpawnTypes_SPECIFIED_USER;
-	ordered[1] = ILibProcessPipe_SpawnTypes_WINLOGON;
-	ordered[2] = ILibProcessPipe_SpawnTypes_USER;
-	ordered[3] = ILibProcessPipe_SpawnTypes_WINLOGON;
-
-	switch (primaryType)
-	{
-	case ILibProcessPipe_SpawnTypes_WINLOGON:
-		startIndex = 1;
-		break;
-	case ILibProcessPipe_SpawnTypes_USER:
-		startIndex = 2;
-		break;
-	case ILibProcessPipe_SpawnTypes_SPECIFIED_USER:
-	default:
-		startIndex = 0;
-		break;
-	}
-
-	for (offset = 0; offset < _countof(ordered) && count < (int)candidateCapacity; ++offset)
-	{
-		ILibProcessPipe_SpawnTypes attemptType = ordered[(startIndex + (int)offset) % _countof(ordered)];
-		if (attemptType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER && hasSpecifiedUserSession == 0) { continue; }
-		kvm_add_spawn_candidate(candidates, &count, attemptType);
-	}
-	return count;
-}
-
 HANDLE hStdOut = INVALID_HANDLE_VALUE;
 HANDLE hStdIn = INVALID_HANDLE_VALUE;
 int ThreadRunning = 0;
@@ -2328,6 +2273,293 @@ BOOL CALLBACK DisplayInfoEnumProc_Info(HMONITOR hMonitor, HDC hdcMonitor, LPRECT
 	buffer[offset+4] = (unsigned short)htons((unsigned short)(h));						// HEIGHT
 	return(TRUE);
 }
+
+static int kvm_server_configure_remote_resume_event(void)
+{
+	if (gKvmRemoteResumeEvent == NULL)
+	{
+		gKvmRemoteResumeEvent = CreateEvent(NULL, TRUE, g_remotepause == 0 ? TRUE : FALSE, NULL);
+		if (gKvmRemoteResumeEvent == NULL)
+		{
+			kvm_trace_startupf("KVM startup: CreateEvent(remote resume) failed error=%lu", (unsigned long)GetLastError());
+			return 0;
+		}
+		return 1;
+	}
+	if (g_remotepause != 0)
+	{
+		if (!ResetEvent(gKvmRemoteResumeEvent))
+		{
+			kvm_trace_startupf("KVM startup: ResetEvent(remote resume) failed error=%lu", (unsigned long)GetLastError());
+			return 0;
+		}
+	}
+	else if (!SetEvent(gKvmRemoteResumeEvent))
+	{
+		kvm_trace_startupf("KVM startup: SetEvent(remote resume) failed error=%lu", (unsigned long)GetLastError());
+		return 0;
+	}
+	return 1;
+}
+
+static void kvm_server_set_remote_pause_state(int pause)
+{
+	g_remotepause = pause != 0 ? 1 : 0;
+	if (gKvmRemoteResumeEvent != NULL)
+	{
+		if (g_remotepause != 0)
+		{
+			if (!ResetEvent(gKvmRemoteResumeEvent))
+			{
+				kvm_trace_startupf("KVM input: ResetEvent(remote resume) failed error=%lu", (unsigned long)GetLastError());
+			}
+		}
+		else if (!SetEvent(gKvmRemoteResumeEvent))
+		{
+			kvm_trace_startupf("KVM input: SetEvent(remote resume) failed error=%lu", (unsigned long)GetLastError());
+		}
+	}
+}
+
+static void kvm_server_signal_remote_resume_waiters(void)
+{
+	if (gKvmRemoteResumeEvent != NULL && !SetEvent(gKvmRemoteResumeEvent))
+	{
+		kvm_trace_startupf("KVM shutdown: SetEvent(remote resume) failed error=%lu", (unsigned long)GetLastError());
+	}
+}
+
+static int kvm_server_wait_for_remote_resume(const char* stage)
+{
+	DWORD waitResult = WAIT_FAILED;
+
+	while (!g_shutdown && g_remotepause != 0)
+	{
+		if (gKvmRemoteResumeEvent == NULL && !kvm_server_configure_remote_resume_event())
+		{
+			g_shutdown = 1;
+			return 0;
+		}
+		waitResult = WaitForSingleObjectEx(gKvmRemoteResumeEvent, INFINITE, TRUE);
+		if (waitResult == WAIT_OBJECT_0 || g_remotepause == 0 || g_shutdown)
+		{
+			break;
+		}
+		if (waitResult == WAIT_IO_COMPLETION)
+		{
+			continue;
+		}
+		kvm_trace_startupf("KVM startup: remote resume wait failed stage=%s result=%lu error=%lu",
+			stage != NULL ? stage : "unknown",
+			(unsigned long)waitResult,
+			(unsigned long)GetLastError());
+		g_shutdown = 1;
+		return 0;
+	}
+	return g_shutdown == 0;
+}
+
+static ILibTransport_DoneState kvm_server_write_packet_checked(ILibKVM_WriteHandler writeHandler, char* buffer, int bufferLen, void *reserved, const char* stage)
+{
+	ILibTransport_DoneState writeState;
+	unsigned short packetType = 0;
+
+	if (buffer != NULL && bufferLen >= 2)
+	{
+		packetType = (unsigned short)ntohs(((unsigned short*)buffer)[0]);
+	}
+	if (writeHandler == NULL || buffer == NULL || bufferLen <= 0)
+	{
+		kvm_trace_startupf("KVM output: invalid write request stage=%s type=%u len=%d handler=%p buffer=%p",
+			stage != NULL ? stage : "unknown",
+			(unsigned int)packetType,
+			bufferLen,
+			writeHandler,
+			buffer);
+		g_shutdown = 1;
+		return ILibTransport_DoneState_ERROR;
+	}
+
+	writeState = writeHandler(buffer, bufferLen, reserved);
+	switch (writeState)
+	{
+	case ILibTransport_DoneState_COMPLETE:
+		break;
+	case ILibTransport_DoneState_INCOMPLETE:
+		g_pause = 1;
+		kvm_trace_startupf("KVM output: backpressure stage=%s type=%u len=%d",
+			stage != NULL ? stage : "unknown",
+			(unsigned int)packetType,
+			bufferLen);
+		break;
+	case ILibTransport_DoneState_ERROR:
+	default:
+		g_shutdown = 1;
+		kvm_trace_startupf("KVM output: write failed stage=%s type=%u len=%d state=%d",
+			stage != NULL ? stage : "unknown",
+			(unsigned int)packetType,
+			bufferLen,
+			(int)writeState);
+		break;
+	}
+	return writeState;
+}
+
+static BOOL CALLBACK kvm_server_initialize_tile_info_lock(PINIT_ONCE InitOnce, PVOID Parameter, PVOID *Context)
+{
+	UNREFERENCED_PARAMETER(InitOnce);
+	UNREFERENCED_PARAMETER(Parameter);
+	UNREFERENCED_PARAMETER(Context);
+	return InitializeCriticalSectionEx(&gKvmTileInfoLock, 4000, 0);
+}
+
+static int kvm_server_enter_tile_info_lock(const char* stage)
+{
+	if (!InitOnceExecuteOnce(&gKvmTileInfoLockOnce, kvm_server_initialize_tile_info_lock, NULL, NULL))
+	{
+		kvm_trace_startupf("KVM tile state: lock initialization failed stage=%s error=%lu",
+			stage != NULL ? stage : "unknown",
+			(unsigned long)GetLastError());
+		g_shutdown = 1;
+		return 0;
+	}
+	EnterCriticalSection(&gKvmTileInfoLock);
+	return 1;
+}
+
+static void kvm_server_leave_tile_info_lock(void)
+{
+	LeaveCriticalSection(&gKvmTileInfoLock);
+}
+
+static void kvm_server_free_tile_info(struct tileInfo_t **info, int rowCount)
+{
+	int row;
+
+	if (info == NULL) { return; }
+	for (row = 0; row < rowCount; ++row)
+	{
+		free(info[row]);
+	}
+	free(info);
+}
+
+static struct tileInfo_t **kvm_server_allocate_tile_info(int rowCount, int colCount, const char* stage)
+{
+	struct tileInfo_t **newTileInfo = NULL;
+	size_t rows = (size_t)rowCount;
+	size_t cols = (size_t)colCount;
+	int row, col;
+
+	if (rowCount <= 0 || colCount <= 0)
+	{
+		kvm_trace_startupf("KVM tile state: invalid geometry stage=%s rows=%d cols=%d",
+			stage != NULL ? stage : "unknown",
+			rowCount,
+			colCount);
+		return NULL;
+	}
+	if (rows > ((size_t)-1) / sizeof(struct tileInfo_t*) || cols > ((size_t)-1) / sizeof(struct tileInfo_t))
+	{
+		kvm_trace_startupf("KVM tile state: allocation size overflow stage=%s rows=%d cols=%d",
+			stage != NULL ? stage : "unknown",
+			rowCount,
+			colCount);
+		return NULL;
+	}
+
+	newTileInfo = (struct tileInfo_t**)calloc(rows, sizeof(struct tileInfo_t*));
+	if (newTileInfo == NULL)
+	{
+		kvm_trace_startupf("KVM tile state: row allocation failed stage=%s rows=%d cols=%d",
+			stage != NULL ? stage : "unknown",
+			rowCount,
+			colCount);
+		return NULL;
+	}
+	for (row = 0; row < rowCount; ++row)
+	{
+		newTileInfo[row] = (struct tileInfo_t*)calloc(cols, sizeof(struct tileInfo_t));
+		if (newTileInfo[row] == NULL)
+		{
+			kvm_trace_startupf("KVM tile state: column allocation failed stage=%s row=%d rows=%d cols=%d",
+				stage != NULL ? stage : "unknown",
+				row,
+				rowCount,
+				colCount);
+			kvm_server_free_tile_info(newTileInfo, rowCount);
+			return NULL;
+		}
+		for (col = 0; col < colCount; ++col)
+		{
+			newTileInfo[row][col].crc = 0xFF;
+			newTileInfo[row][col].flags = 0;
+		}
+	}
+	return newTileInfo;
+}
+
+static int kvm_server_ensure_tile_info_locked(const char* stage)
+{
+	int row;
+
+	if (TILE_HEIGHT_COUNT <= 0 || TILE_WIDTH_COUNT <= 0)
+	{
+		kvm_trace_startupf("KVM tile state: unavailable geometry stage=%s rows=%d cols=%d",
+			stage != NULL ? stage : "unknown",
+			TILE_HEIGHT_COUNT,
+			TILE_WIDTH_COUNT);
+		g_shutdown = 1;
+		return 0;
+	}
+	if (tileInfo == NULL)
+	{
+		tileInfo = kvm_server_allocate_tile_info(TILE_HEIGHT_COUNT, TILE_WIDTH_COUNT, stage);
+		if (tileInfo == NULL)
+		{
+			g_shutdown = 1;
+			return 0;
+		}
+		kvm_trace_startupf("KVM tile state: allocated missing tile table stage=%s rows=%d cols=%d",
+			stage != NULL ? stage : "unknown",
+			TILE_HEIGHT_COUNT,
+			TILE_WIDTH_COUNT);
+	}
+	for (row = 0; row < TILE_HEIGHT_COUNT; ++row)
+	{
+		if (tileInfo[row] == NULL)
+		{
+			kvm_trace_startupf("KVM tile state: corrupt tile row stage=%s row=%d rows=%d cols=%d",
+				stage != NULL ? stage : "unknown",
+				row,
+				TILE_HEIGHT_COUNT,
+				TILE_WIDTH_COUNT);
+			g_shutdown = 1;
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int kvm_server_reset_tile_info_locked(const char* stage, int resetCrc, char flagValue)
+{
+	int row, col;
+
+	if (!kvm_server_ensure_tile_info_locked(stage)) { return 0; }
+	for (row = 0; row < TILE_HEIGHT_COUNT; ++row)
+	{
+		for (col = 0; col < TILE_WIDTH_COUNT; ++col)
+		{
+			if (resetCrc != 0)
+			{
+				tileInfo[row][col].crc = 0xFF;
+			}
+			tileInfo[row][col].flags = flagValue;
+		}
+	}
+	return 1;
+}
+
 void kvm_send_display_list(ILibKVM_WriteHandler writeHandler, void *reserved)
 {
 	int i;
@@ -2338,7 +2570,7 @@ void kvm_send_display_list(ILibKVM_WriteHandler writeHandler, void *reserved)
 	if (EnumDisplayMonitors(NULL, NULL, DisplayInfoEnumProc_Info, (LPARAM)dwData))
 	{
 		((unsigned short*)dwData)[3] = (unsigned short)htons((((unsigned short*)dwData)[0]) * 10 + 4);	// Length
-		writeHandler(dwData+4, (((unsigned short*)dwData)[0]) * 10 + 4, reserved);
+		if (kvm_server_write_packet_checked(writeHandler, dwData + 4, (((unsigned short*)dwData)[0]) * 10 + 4, reserved, "display-info") == ILibTransport_DoneState_ERROR) return;
 	}
 
 	// Not looked at the number of screens yet
@@ -2354,7 +2586,7 @@ void kvm_send_display_list(ILibKVM_WriteHandler writeHandler, void *reserved)
 		((unsigned short*)buffer)[2] = (unsigned short)htons((unsigned short)(0));						// Screen Count
 		((unsigned short*)buffer)[3] = (unsigned short)htons((unsigned short)(0));						// Selected Screen
 
-		writeHandler(buffer, 8, reserved);
+		kvm_server_write_packet_checked(writeHandler, buffer, 8, reserved, "display-list");
 	}
 	else
 	{
@@ -2372,12 +2604,13 @@ void kvm_send_display_list(ILibKVM_WriteHandler writeHandler, void *reserved)
 			((unsigned short*)buffer)[4 + i] = (unsigned short)htons((unsigned short)(SCREEN_SEL));		// Selected Screen
 		}
 
-		writeHandler(buffer, (10 + (2 * SCREEN_COUNT)), reserved);
+		kvm_server_write_packet_checked(writeHandler, buffer, (10 + (2 * SCREEN_COUNT)), reserved, "display-list");
 	}
 }
 
 void kvm_server_SetResolution();
 int kvm_server_currentDesktopname = 0;
+int gKvmDesktopCaptureReady = 1;
 static void kvm_server_prime_startup_geometry_if_needed()
 {
 	if (SCREEN_WIDTH > 0 && SCREEN_HEIGHT > 0) { return; }
@@ -2429,6 +2662,7 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 	int desktopSwitchEvent = KVM_ConsumeDesktopSwitchEvent();
 	int desktopNameChanged = 0;
 	int explicitWinlogon = 0;
+	int desktopAccessReady = 1;
 	DWORD windowStationError = ERROR_SUCCESS;
 
 	// KVMDEBUG("CheckDesktopSwitch", checkres);
@@ -2468,6 +2702,10 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 			}
 		}
 	}
+	if (desktop == NULL)
+	{
+		desktopAccessReady = 0;
+	}
 
 	if (desktop != NULL && GetUserObjectInformationA(desktop, UOI_NAME, targetName, 63, 0))
 	{
@@ -2496,11 +2734,13 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 		kvm_trace_startupf("KVM startup: SetThreadDesktop failed error=%lu desktop=%p", GetLastError(), desktop);
 		if (CloseDesktop(desktop) == 0) { KVMDEBUG("CloseDesktop1 Error", 0); }
 		desktop = desktop2;
+		desktopAccessReady = 0;
 	}
 	else
 	{
 		desktop = desktop2;
 	}
+	gKvmDesktopCaptureReady = desktopAccessReady;
 
 	// Check desktop name switch
 	if (GetUserObjectInformationA(desktop, UOI_NAME, name, 63, 0))
@@ -2776,7 +3016,6 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 		}
 	case MNG_KVM_REFRESH: // Refresh
 		{
-			int row, col;
 			char buffer[8];
 			if (size != 4) break;
 
@@ -2785,24 +3024,26 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 			((unsigned short*)buffer)[2] = (unsigned short)htons((unsigned short)SCALED_WIDTH);		// X position
 			((unsigned short*)buffer)[3] = (unsigned short)htons((unsigned short)SCALED_HEIGHT);	// Y position
 
-			writeHandler((char*)buffer, 8, reserved);
+			if (kvm_server_write_packet_checked(writeHandler, (char*)buffer, 8, reserved, "refresh-resolution") == ILibTransport_DoneState_ERROR) break;
 
 			// Send the list of available displays
 			kvm_send_display_list(writeHandler, reserved);
 
 			// Reset all tile information
-			if (tileInfo == NULL) {
-				if ((tileInfo = (struct tileInfo_t **) malloc(TILE_HEIGHT_COUNT * sizeof(struct tileInfo_t *))) == NULL) ILIBCRITICALEXIT(254);
-				for (row = 0; row < TILE_HEIGHT_COUNT; row++) { if ((tileInfo[row] = (struct tileInfo_t *)malloc(TILE_WIDTH_COUNT * sizeof(struct tileInfo_t))) == NULL) ILIBCRITICALEXIT(254); }
+			if (!kvm_server_enter_tile_info_lock("refresh")) { break; }
+			if (!kvm_server_reset_tile_info_locked("refresh", 1, 0))
+			{
+				kvm_server_leave_tile_info_lock();
+				break;
 			}
-			for (row = 0; row < TILE_HEIGHT_COUNT; row++) { for (col = 0; col < TILE_WIDTH_COUNT; col++) { tileInfo[row][col].crc = 0xFF; tileInfo[row][col].flags = 0; } }
+			kvm_server_leave_tile_info_lock();
 
 			break;
 		}
 	case MNG_KVM_PAUSE: // Pause
 		{
 			if (size != 5) break;
-			g_remotepause = block[4];
+			kvm_server_set_remote_pause_state(block[4]);
 			ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: Remote %s requested", g_remotepause != 0 ? "pause" : "resume");
 			break;
 		}
@@ -2810,6 +3051,7 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 		{
 			ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: Received disconnect request");
 			g_shutdown = 1;
+			kvm_server_signal_remote_resume_waiters();
 			break;
 		}
 	case MNG_KVM_FRAME_RATE_TIMER:
@@ -3065,7 +3307,16 @@ void kvm_pause(int pause, void *reserved)
 void kvm_server_SetResolution(ILibKVM_WriteHandler writeHandler, void *reserved)
 {
 	char buffer[8];
-	int row, col;
+	int scaling;
+	long long scaledWidth64;
+	long long scaledHeight64;
+	int newScaledWidth;
+	int newScaledHeight;
+	int newTileWidthCount;
+	int newTileHeightCount;
+	int oldTileHeightCount;
+	struct tileInfo_t **newTileInfo = NULL;
+	struct tileInfo_t **oldTileInfo = NULL;
 
 	KVMDEBUG("kvm_server_SetResolution", 0);
 	kvm_server_ensure_tile_geometry();
@@ -3080,35 +3331,60 @@ void kvm_server_SetResolution(ILibKVM_WriteHandler writeHandler, void *reserved)
 		return;
 	}
 
-	// Free the tileInfo before you manipulate the TILE_HEIGHT_COUNT
-	if (tileInfo != NULL) { for (row = 0; row < TILE_HEIGHT_COUNT; row++) { free(tileInfo[row]); } free(tileInfo); tileInfo = NULL; }
-
 	// Setup scaling
+	scaling = kvm_read_scaling_factor(&SCALING_FACTOR_NEW);
+	scaledWidth64 = ((long long)SCREEN_WIDTH * (long long)scaling) / 1024LL;
+	scaledHeight64 = ((long long)SCREEN_HEIGHT * (long long)scaling) / 1024LL;
+	if (scaledWidth64 <= 0 || scaledHeight64 <= 0 || scaledWidth64 > 65535LL || scaledHeight64 > 65535LL)
 	{
-		int scaling = kvm_read_scaling_factor(&SCALING_FACTOR_NEW);
-		kvm_write_scaling_factor(&SCALING_FACTOR, scaling);
-		SCALED_WIDTH = (SCREEN_WIDTH * scaling) / 1024;
-		SCALED_HEIGHT = (SCREEN_HEIGHT * scaling) / 1024;
+		kvm_trace_startupf("KVM startup: SetResolution computed invalid scaled geometry screen=%dx%d scale=%d scaled=%lldx%lld",
+			SCREEN_WIDTH,
+			SCREEN_HEIGHT,
+			scaling,
+			scaledWidth64,
+			scaledHeight64);
+		g_shutdown = 1;
+		return;
 	}
+	newScaledWidth = (int)scaledWidth64;
+	newScaledHeight = (int)scaledHeight64;
 
 	// Compute the tile count
-	TILE_WIDTH_COUNT = SCALED_WIDTH / TILE_WIDTH;
-	TILE_HEIGHT_COUNT = SCALED_HEIGHT / TILE_HEIGHT;
-	if (SCALED_WIDTH % TILE_WIDTH) TILE_WIDTH_COUNT++;
-	if (SCALED_HEIGHT % TILE_HEIGHT) TILE_HEIGHT_COUNT++;
+	newTileWidthCount = newScaledWidth / TILE_WIDTH;
+	newTileHeightCount = newScaledHeight / TILE_HEIGHT;
+	if (newScaledWidth % TILE_WIDTH) newTileWidthCount++;
+	if (newScaledHeight % TILE_HEIGHT) newTileHeightCount++;
+
+	newTileInfo = kvm_server_allocate_tile_info(newTileHeightCount, newTileWidthCount, "resolution");
+	if (newTileInfo == NULL)
+	{
+		g_shutdown = 1;
+		return;
+	}
+
+	if (!kvm_server_enter_tile_info_lock("resolution"))
+	{
+		kvm_server_free_tile_info(newTileInfo, newTileHeightCount);
+		return;
+	}
+	oldTileInfo = tileInfo;
+	oldTileHeightCount = TILE_HEIGHT_COUNT;
+	kvm_write_scaling_factor(&SCALING_FACTOR, scaling);
+	SCALED_WIDTH = newScaledWidth;
+	SCALED_HEIGHT = newScaledHeight;
+	TILE_WIDTH_COUNT = newTileWidthCount;
+	TILE_HEIGHT_COUNT = newTileHeightCount;
+	tileInfo = newTileInfo;
+	InterlockedIncrement(&gKvmTileInfoGeneration);
+	kvm_server_leave_tile_info_lock();
+	kvm_server_free_tile_info(oldTileInfo, oldTileHeightCount);
 
 	((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_SCREEN);	// Write the type
 	((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)8);				// Write the size
-	((unsigned short*)buffer)[2] = (unsigned short)htons((unsigned short)SCALED_WIDTH);		// X position
-	((unsigned short*)buffer)[3] = (unsigned short)htons((unsigned short)SCALED_HEIGHT);	// Y position
+	((unsigned short*)buffer)[2] = (unsigned short)htons((unsigned short)newScaledWidth);	// X position
+	((unsigned short*)buffer)[3] = (unsigned short)htons((unsigned short)newScaledHeight);	// Y position
 
-	writeHandler((char*)buffer, 8, reserved);
-
-	if ((tileInfo = (struct tileInfo_t **)malloc(TILE_HEIGHT_COUNT * sizeof(struct tileInfo_t *))) == NULL) ILIBCRITICALEXIT(254);
-	for (row = 0; row < TILE_HEIGHT_COUNT; row++) {
-		if ((tileInfo[row] = (struct tileInfo_t *)malloc(TILE_WIDTH_COUNT * sizeof(struct tileInfo_t))) == NULL) ILIBCRITICALEXIT(254);
-	}
-	for (row = 0; row < TILE_HEIGHT_COUNT; row++) { for (col = 0; col < TILE_WIDTH_COUNT; col++) { tileInfo[row][col].crc = 0xFF; tileInfo[row][col].flags = 0; } }
+	kvm_server_write_packet_checked(writeHandler, (char*)buffer, 8, reserved, "resolution");
 }
 
 #define BUFSIZE 65535
@@ -3143,7 +3419,10 @@ DWORD WINAPI kvm_mainloopinput_ex(LPVOID Param)
 		{ 
 			ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: fSuccess/%d  cbBytesRead/%d  g_shutdown/%d", fSuccess, cbBytesRead, g_shutdown);
 			kvm_trace_startupf("KVM input loop: ReadFile exit fSuccess=%d cbBytesRead=%lu shutdown=%d error=%lu", fSuccess, (unsigned long)cbBytesRead, g_shutdown, (unsigned long)GetLastError());
-			KVMDEBUG("ReadFile() failed", 0); /*ILIBMESSAGE("KVMBREAK-K1\r\n");*/ g_shutdown = 1; break; 
+			KVMDEBUG("ReadFile() failed", 0); /*ILIBMESSAGE("KVMBREAK-K1\r\n");*/
+			g_shutdown = 1;
+			kvm_server_signal_remote_resume_waiters();
+			break;
 		}
 		len += (int)cbBytesRead;
 		ptr2 = 0;
@@ -3207,6 +3486,7 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	long long desktopsize;
 	BITMAPINFO bmpInfo;
 	int row, col;
+	LONG captureTileGeneration = 0;
 	ILibKVM_WriteHandler writeHandler = (ILibKVM_WriteHandler)((void**)parm)[0];
 	void *reserved = ((void**)parm)[1];
 	char *tmoBuffer;
@@ -3234,9 +3514,14 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	ThreadRunning = 1;
 	g_shutdown = 0;
 
-	g_pause = 0;
-	g_remotepause = ((int*)&(((void**)parm)[2]))[0];
-	kvm_trace_startupf("kvm_server_mainloop_ex step3 remotepause=%d", g_remotepause);
+		g_pause = 0;
+		g_remotepause = ((int*)&(((void**)parm)[2]))[0];
+		if (!kvm_server_configure_remote_resume_event())
+		{
+			g_shutdown = 1;
+			goto cleanup;
+		}
+		kvm_trace_startupf("kvm_server_mainloop_ex step3 remotepause=%d", g_remotepause);
 
 	KVMDEBUG("kvm_server_mainloop / start1", (int)GetCurrentThreadId());
 
@@ -3335,16 +3620,24 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 #endif
 
 	// Set all CRCs to 0xFF
-	for (row = 0; row < TILE_HEIGHT_COUNT; row++) {
-		for (col = 0; col < TILE_WIDTH_COUNT; col++) {
-			tileInfo[row][col].crc = 0xFF;
-		}
+	if (!kvm_server_enter_tile_info_lock("startup-crc"))
+	{
+		goto cleanup;
 	}
+	if (!kvm_server_reset_tile_info_locked("startup-crc", 1, 0))
+	{
+		kvm_server_leave_tile_info_lock();
+		goto cleanup;
+	}
+	kvm_server_leave_tile_info_lock();
 
 	// Send the list of displays
 	kvm_send_display_list(writeHandler, reserved);
+	if (!kvm_server_wait_for_remote_resume("startup-output"))
+	{
+		goto cleanup;
+	}
 
-	Sleep(100); // Pausing here seems to fix connection issues, especially with WebRTC. TODO: Investigate why.
 	KVMDEBUG("kvm_server_mainloop / start3", (int)GetCurrentThreadId());
 
 	// Loop and send only when a tile changes.
@@ -3352,17 +3645,6 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	{
 		KVMDEBUG("kvm_server_mainloop / loop1", (int)GetCurrentThreadId());
 
-		// Reset all the flags to TILE_TODO
-		for (row = 0; row < TILE_HEIGHT_COUNT; row++) 
-		{
-			for (col = 0; col < TILE_WIDTH_COUNT; col++) 
-			{
-				tileInfo[row][col].flags = (char)TILE_TODO;
-#ifdef KVM_ALL_TILES
-				tileInfo[row][col].crc = 0xFF;
-#endif
-			}
-		}
 		CheckDesktopSwitch(1, writeHandler, reserved);
 		if (g_shutdown) break;
 
@@ -3455,6 +3737,7 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 				kvm_read_scaling_factor(&SCALING_FACTOR),
 				kvmConsoleMode);
 		}
+		captureTileGeneration = InterlockedCompareExchange(&gKvmTileInfoGeneration, 0, 0);
 		if (get_desktop_buffer(&desktop, &desktopsize, mouseMove) == 1 || desktop == NULL)
 		{
 			ULONGLONG now = GetTickCount64();
@@ -3495,6 +3778,29 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 			{
 				kvm_trace_startupf("KVM loop: get_desktop_buffer success desktop=%p size=%lld", desktop, desktopsize);
 			}
+			if (!kvm_server_enter_tile_info_lock("frame-scan"))
+			{
+				if (desktop) { free(desktop); desktop = NULL; }
+				break;
+			}
+			if (captureTileGeneration != InterlockedCompareExchange(&gKvmTileInfoGeneration, 0, 0))
+			{
+				kvm_server_leave_tile_info_lock();
+				if (desktop) { free(desktop); desktop = NULL; }
+				desktop = NULL;
+				desktopsize = 0;
+				continue;
+			}
+#ifdef KVM_ALL_TILES
+			if (!kvm_server_reset_tile_info_locked("frame-scan", 1, (char)TILE_TODO))
+#else
+			if (!kvm_server_reset_tile_info_locked("frame-scan", 0, (char)TILE_TODO))
+#endif
+			{
+				kvm_server_leave_tile_info_lock();
+				if (desktop) { free(desktop); desktop = NULL; }
+				break;
+			}
 			bmpInfo = get_bmp_info(TILE_WIDTH, TILE_HEIGHT);
 			for (row = 0; row < TILE_HEIGHT_COUNT; row++) {
 				for (col = 0; col < TILE_WIDTH_COUNT; col++) {
@@ -3518,24 +3824,17 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 					if (buf && !g_shutdown)
 					{
 						KVMDEBUG2("Writing JPEG: %llu bytes", tilesize);
-						switch (writeHandler((char*)buf, (int)tilesize, reserved))
+						if (kvm_server_write_packet_checked(writeHandler, (char*)buf, (int)tilesize, reserved, "picture") == ILibTransport_DoneState_ERROR)
 						{
-							case ILibTransport_DoneState_INCOMPLETE:
-								g_pause = 1;
-								ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_2, "Agent KVM: KVM PAUSE");
-								KVMDEBUG2("JPEG WRITE resulted in PAUSE");
-								break;
-							case ILibTransport_DoneState_ERROR:
-								g_shutdown = 1; 
-								height = SCALED_HEIGHT; 
-								width = SCALED_WIDTH; 
-								KVMDEBUG2("JPEG WRITE resulted in ERROR");
-								break;
+							height = SCALED_HEIGHT;
+							width = SCALED_WIDTH;
+							KVMDEBUG2("JPEG WRITE resulted in ERROR");
 						}
 						free(buf);
 					}
 				}
 			}
+			kvm_server_leave_tile_info_lock();
 			
 			KVMDEBUG("kvm_server_mainloop / loop2", (int)GetCurrentThreadId());
 
@@ -3555,10 +3854,13 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	KVMDEBUG("kvm_server_mainloop / end2", (int)GetCurrentThreadId());
 
 cleanup:
-	if (tileInfo != NULL) {
-		for (row = 0; row < TILE_HEIGHT_COUNT; row++) free(tileInfo[row]);
-		free(tileInfo);
+	if (kvm_server_enter_tile_info_lock("cleanup"))
+	{
+		struct tileInfo_t **cleanupTileInfo = tileInfo;
+		int cleanupTileHeightCount = TILE_HEIGHT_COUNT;
 		tileInfo = NULL;
+		kvm_server_leave_tile_info_lock();
+		kvm_server_free_tile_info(cleanupTileInfo, cleanupTileHeightCount);
 	}
 	KVMDEBUG("kvm_server_mainloop / end1", (int)GetCurrentThreadId());
 	if (gdiplusAttempted != 0)
@@ -3862,7 +4164,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 	++gKvmSpawnAttemptCount;
 	gKvmLastBridgeAvailable = 0;
 	gKvmLastUsedBridge = 0;
-	gKvmLastFallbackUsed = 1;
+	gKvmLastFallbackUsed = 0;
 	gKvmLastBridgeFailureSpawnType = (DWORD)gProcessSpawnType;
 	gKvmLastLaunchAttemptCount = 0;
 	gKvmLastSuccessfulSpawnType = 0;
@@ -3891,22 +4193,31 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 
 	// If we are re-launching the child process, wait a bit. The computer may be switching desktop, etc.
 	if (paused == 0) Sleep(500);
-	if (gProcessSpawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER && gProcessTSID < 0) { gProcessSpawnType = ILibProcessPipe_SpawnTypes_USER; }
 	{
 		ILibProcessPipe_SpawnTypes primaryType = gProcessSpawnType;
-		ILibProcessPipe_SpawnTypes candidates[4];
+		ILibProcessPipe_SpawnTypes candidates[1];
 		int candidateCount = 0;
 		int attempt = 0;
 		int preferBridge = 0;
 		int bridgeAvailable = 0;
-		int forcePrimaryFailover = kvm_should_force_primary_failover();
-		int forcePrimaryConsumed = 0;
 		DWORD lastError = ERROR_GEN_FAILURE;
 		ILibProcessPipe_SpawnTypes successfulType = primaryType;
 
 		preferBridge = kvm_should_prefer_bridge(exePath);
-		candidateCount = kvm_build_ramas_candidates(primaryType, gProcessTSID >= 0 ? 1 : 0, candidates, _countof(candidates));
-		if (candidateCount <= 0) { kvm_add_spawn_candidate(candidates, &candidateCount, primaryType); }
+		if (primaryType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER && gProcessTSID < 0)
+		{
+			gKvmLastUsedBridge = 0;
+			gKvmLastFallbackUsed = 0;
+			gKvmLastBridgeFailureError = ERROR_INVALID_PARAMETER;
+			gKvmLastBridgeFailureStage = 0;
+			gKvmLastBridgeFailureSpawnType = (DWORD)primaryType;
+			kvm_update_runtime_state(0, 0);
+			ILibMemory_Free(user);
+			SetLastError(ERROR_INVALID_PARAMETER);
+			return 0;
+		}
+		candidates[0] = primaryType;
+		candidateCount = 1;
 
 		{
 			int checkCtx = (ctx != NULL) ? 1 : 0;
@@ -3953,6 +4264,12 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			{
 				ILibProcessPipe_SpawnTypes attemptType = candidates[attempt];
 				KvmBridgeHardeningResult hardeningResult;
+				char policyDecision[64] = { 0 };
+				char policyClass[64] = { 0 };
+				char policyBridgeReason[64] = { 0 };
+				DWORD policyError = ERROR_SUCCESS;
+				DWORD policySpawnType = 0;
+				unsigned long long policyCommandHash = 0;
 				BOOL connectAbortedBySessionChange = FALSE;
 				memset(&hardeningResult, 0, sizeof(hardeningResult));
 				bridgeLaunchAttemptCount = (DWORD)(attempt + 1);
@@ -3967,16 +4284,6 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 						candidateCount,
 						gProcessTSID);
 					break;
-				}
-
-				if (forcePrimaryFailover && forcePrimaryConsumed == 0)
-				{
-					forcePrimaryConsumed = 1;
-					lastError = ERROR_RETRY;
-					SetLastError(lastError);
-					ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-						"KVM [Master]: Forced primary spawn failure simulation enabled, engaging RAMAS fallback");
-					continue;
 				}
 
 				if (!kvm_relay_build_bridge_pipe_namesW(bridgeInputPipeNameW, _countof(bridgeInputPipeNameW), bridgeOutputPipeNameW, _countof(bridgeOutputPipeNameW)) ||
@@ -4031,6 +4338,31 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 				{
 					lastError = GetLastError();
 					if (lastError == ERROR_SUCCESS) { lastError = ERROR_GEN_FAILURE; }
+					(void)ILibProcessPipe_GetLastWindowsSpawnPolicyBridgeReasonA(policyBridgeReason, sizeof(policyBridgeReason));
+					if (ILibProcessPipe_GetLastWindowsSpawnPolicyDecisionA(policyDecision, sizeof(policyDecision), policyClass, sizeof(policyClass), &policyError, &policySpawnType, &policyCommandHash))
+					{
+						kvm_trace_startupf("bridge spawn policy audit decision=%s class=%s bridgeReason=%s policyError=%u policySpawnType=%u cmdHash=%016llX apiError=%u attempt=%d type=%d",
+							policyDecision,
+							policyClass,
+							policyBridgeReason,
+							policyError,
+							policySpawnType,
+							policyCommandHash,
+							lastError,
+							attempt + 1,
+							(int)attemptType);
+						ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+							"KVM [Master]: rundll32 bridge spawn policy audit (decision=%s, class=%s, bridgeReason=%s, policyError=%u, policySpawnType=%u, cmdHash=%016llX, apiError=%u, spawnType=%d, tsid=%d)",
+							policyDecision,
+							policyClass,
+							policyBridgeReason,
+							policyError,
+							policySpawnType,
+							policyCommandHash,
+							lastError,
+							(int)attemptType,
+							gProcessTSID);
+					}
 					if (hardeningResult.stage == 0 && hardeningResult.processProtected && hardeningResult.assignedToJobObject)
 					{
 						hardeningResult.stage = KVM_BRIDGE_FAILURE_STAGE_RESUME;
@@ -4130,7 +4462,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 							gProcessTSID);
 						break;
 					}
-					kvm_trace_startupf("Attempt %d/%d FAILED - trying next spawn type", attempt+1, candidateCount);
+					kvm_trace_startupf("strict rundll32 bridge attempt failed at stdin connect; no spawn-type fallback is permitted");
 					continue;
 				}
 				kvm_trace_startupf("bridge stdin pipe connected successfully after %llu ms", (unsigned long long)(GetTickCount64() - bridgeConnectStartTickMs));
@@ -4162,7 +4494,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 							gProcessTSID);
 						break;
 					}
-					kvm_trace_startupf("Attempt %d/%d FAILED - trying next spawn type", attempt+1, candidateCount);
+					kvm_trace_startupf("strict rundll32 bridge attempt failed at stdout connect; no spawn-type fallback is permitted");
 					continue;
 				}
 				kvm_trace_startupf("bridge stdout pipe connected successfully after %llu ms", (unsigned long long)(GetTickCount64() - bridgeConnectStartTickMs));
@@ -4208,13 +4540,6 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 #ifdef _WINSERVICE
 				kvm_bridge_report_outcome_event(L"SUCCESS", EVENTLOG_INFORMATION_TYPE, ILibProcessPipe_Process_GetPID(gChildProcess), 0, exePath, attemptType);
 #endif
-				if (attempt > 0)
-				{
-					ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-						"KVM [Master]: rundll32 RAMAS fallback activated after %d failed attempt(s), spawnType=%s",
-						attempt,
-						kvm_spawn_type_to_string(attemptType));
-				}
 				ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
 					"KVM [Master]: rundll32 KVM launched (attempt=%d/%d, spawnType=%s, tsid=%d)",
 					attempt + 1,

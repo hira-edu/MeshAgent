@@ -126,10 +126,13 @@ extern int wmain(int argc, char* wargv[]);
 extern DWORD WINAPI kvm_server_mainloop(LPVOID Param);
 extern int g_shutdown;
 extern int kvmConsoleMode;
+extern int gRemoteMouseRenderDefault;
 extern int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHandler, void* reserved);
 typedef HRESULT(__stdcall* StealthDpiAwarenessFunc)(int);
 #define STEALTH_PROCESS_PER_MONITOR_DPI_AWARE 2
 static LONG g_KvmBridgeTraceCounter = 0;
+#define KVM_BRIDGE_MAINLOOP_WAIT_SLICE_MS 100UL
+#define KVM_BRIDGE_SHUTDOWN_GRACE_MS 3000UL
 
 typedef struct StealthKvmBridgeContext
 {
@@ -388,11 +391,37 @@ static DWORD WINAPI Stealth_KvmBridgeInputThread(LPVOID user)
     while (!g_shutdown)
     {
         DWORD read = 0;
-        BOOL ok = ReadFile(inputHandle, packetBuffer + len, (DWORD)(sizeof(packetBuffer) - len), &read, NULL);
-        if (!ok || read == 0)
+        DWORD bytesAvailable = 0;
+
+        if (len >= (int)sizeof(packetBuffer))
+        {
+            ctx->readError = ERROR_INSUFFICIENT_BUFFER;
+            g_shutdown = 1;
+            break;
+        }
+
+        if (!PeekNamedPipe(inputHandle, NULL, 0, NULL, &bytesAvailable, NULL))
         {
             ctx->readError = GetLastError();
             if (ctx->readError == ERROR_SUCCESS) { ctx->readError = ERROR_BROKEN_PIPE; }
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW input pipe closed (peekError=%lu)", ctx->readError);
+            g_shutdown = 1;
+            break;
+        }
+        if (bytesAvailable == 0)
+        {
+            Sleep(KVM_BRIDGE_MAINLOOP_WAIT_SLICE_MS);
+            continue;
+        }
+        if (bytesAvailable > (DWORD)(sizeof(packetBuffer) - len))
+        {
+            bytesAvailable = (DWORD)(sizeof(packetBuffer) - len);
+        }
+        if (!ReadFile(inputHandle, packetBuffer + len, bytesAvailable, &read, NULL) || read == 0)
+        {
+            ctx->readError = GetLastError();
+            if (ctx->readError == ERROR_SUCCESS) { ctx->readError = ERROR_BROKEN_PIPE; }
+            Stealth_SvchostLogLine(L"KvmSessionBridgeW input pipe closed (error=%lu read=%lu)", ctx->readError, read);
             g_shutdown = 1;
             break;
         }
@@ -445,10 +474,45 @@ static DWORD WINAPI Stealth_KvmBridgeInputThread(LPVOID user)
 
 static DWORD WINAPI Stealth_KvmBridgeMainloopThread(LPVOID user)
 {
-    StealthKvmBridgeLaunchContext* ctx = (StealthKvmBridgeLaunchContext*)user;
+    void** mainloopParam = (void**)user;
 
-    if (ctx == NULL || ctx->argc < 2) { return ERROR_INVALID_PARAMETER; }
-    return (DWORD)wmain(ctx->argc, (char**)ctx->argv);
+    if (mainloopParam == NULL) { return ERROR_INVALID_PARAMETER; }
+    kvmConsoleMode = 1;
+    return kvm_server_mainloop(mainloopParam);
+}
+
+static void Stealth_KvmBridgeCancelTransportIo(StealthKvmBridgeContext* ctx, HANDLE bridgeStdIn, HANDLE bridgeStdOut)
+{
+    if (bridgeStdIn != NULL && bridgeStdIn != INVALID_HANDLE_VALUE) { CancelIoEx(bridgeStdIn, NULL); }
+    if (bridgeStdOut != NULL && bridgeStdOut != INVALID_HANDLE_VALUE) { CancelIoEx(bridgeStdOut, NULL); }
+    if (ctx == NULL) { return; }
+    if (ctx->controlPipeHandle != NULL && ctx->controlPipeHandle != INVALID_HANDLE_VALUE) { CancelIoEx(ctx->controlPipeHandle, NULL); }
+    if (ctx->dataPipeHandle != NULL && ctx->dataPipeHandle != INVALID_HANDLE_VALUE) { CancelIoEx(ctx->dataPipeHandle, NULL); }
+}
+
+static BOOL Stealth_KvmBridgePipeDisconnected(HANDLE pipeHandle, DWORD* errorOut)
+{
+    DWORD state = 0;
+    DWORD currentInstances = 0;
+    DWORD errorCode = ERROR_SUCCESS;
+
+    if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+    if (pipeHandle == NULL || pipeHandle == INVALID_HANDLE_VALUE)
+    {
+        if (errorOut != NULL) { *errorOut = ERROR_INVALID_HANDLE; }
+        return TRUE;
+    }
+    if (GetNamedPipeHandleStateW(pipeHandle, &state, &currentInstances, NULL, NULL, NULL, 0))
+    {
+        return FALSE;
+    }
+    errorCode = GetLastError();
+    if (errorOut != NULL) { *errorOut = errorCode; }
+    return (errorCode == ERROR_BROKEN_PIPE ||
+        errorCode == ERROR_PIPE_NOT_CONNECTED ||
+        errorCode == ERROR_NO_DATA ||
+        errorCode == ERROR_INVALID_HANDLE ||
+        errorCode == ERROR_OPERATION_ABORTED) ? TRUE : FALSE;
 }
 
 void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
@@ -461,12 +525,15 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     HANDLE mainloopThread = NULL;
     HANDLE bridgeStdIn = NULL;
     HANDLE bridgeStdOut = NULL;
+    void **mainloopParam = NULL;
     StealthKvmBridgeContext ctx;
     StealthKvmBridgeLaunchContext launchCtx;
     DWORD connectDelayLen = 0;
     DWORD connectDelayMs = 0;
     DWORD forceExitCodeLen = 0;
     DWORD forcedExitCode = 0;
+    int pauseMode = 1;
+    int coreDumpMode = 0;
     BOOL useNamedPipeBridge = FALSE;
     int pipeCount = 0;
     ULONGLONG bridgeStartTickMs = GetTickCount64();
@@ -500,6 +567,12 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     }
 
     Stealth_KvmBridgeBuildLaunchContextW(lpCmdLine, &launchCtx);
+    pauseMode = Stealth_KvmBridgeHasTokenW(lpCmdLine, L"-kvm0") ? 0 : 1;
+    coreDumpMode = Stealth_KvmBridgeHasTokenW(lpCmdLine, L"-coredump") ? 1 : 0;
+    if (Stealth_KvmBridgeHasTokenW(lpCmdLine, L"-remotecursor"))
+    {
+        gRemoteMouseRenderDefault = 1;
+    }
     pipeCount = Stealth_KvmBridgeExtractPipeNamesW(lpCmdLine, controlPipeName, _countof(controlPipeName), dataPipeName, _countof(dataPipeName));
     useNamedPipeBridge = (pipeCount == 2 && Stealth_KvmBridgeLooksLikePipeNameW(controlPipeName) && Stealth_KvmBridgeLooksLikePipeNameW(dataPipeName));
 
@@ -577,23 +650,30 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
 
     g_shutdown = 0;
 
-    // The wmain -kvm1 path creates its own kvm_mainloopinput thread that reads
-    // from hStdIn (which KvmSessionBridgeW set to the control pipe at line 533).
-    // That internal thread handles all command input from the parent and calls
-    // kvm_server_inputdata with kvm_serviceWriteSink (which writes responses to
-    // stdout = the data pipe).
-    //
-    // We do NOT create a second Stealth_KvmBridgeInputThread here.  Having two
-    // threads read from the same control pipe causes a dual-reader race that
-    // splits commands randomly and corrupts the unsynchronised globals in
-    // kvm_server_inputdata (tileInfo, SCALING_FACTOR_NEW, g_remotepause, etc.).
+    // KvmSessionBridgeW owns the single control-pipe reader.  The mainloop is
+    // forced into console-input mode so it does not create kvm_mainloopinput;
+    // this keeps all pipe-close detection and command parsing in one place.
     Stealth_SvchostLogLine(L"KvmSessionBridgeW launching mainloop argc=%d argv0=[%ls] argv1=[%ls] useNamedPipe=%d", launchCtx.argc, launchCtx.argv[0] ? launchCtx.argv[0] : L"(null)", launchCtx.argv[1] ? launchCtx.argv[1] : L"(null)", useNamedPipeBridge ? 1 : 0);
-    mainloopThread = CreateThread(NULL, 0, Stealth_KvmBridgeMainloopThread, &launchCtx, 0, NULL);
+    Stealth_KvmBridgeEnableDpiAwareness();
+    mainloopParam = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, NULL, NULL);
+    if (mainloopParam == NULL)
+    {
+        Stealth_SvchostLogLine(L"KvmSessionBridgeW mainloop parameter allocation failed");
+        goto cleanup;
+    }
+    mainloopParam[0] = Stealth_KvmBridgeWriteSink;
+    mainloopParam[1] = &ctx;
+    ((int*)&(mainloopParam[2]))[0] = pauseMode;
+    ((int*)&(mainloopParam[3]))[0] = coreDumpMode;
+    mainloopThread = CreateThread(NULL, 0, Stealth_KvmBridgeMainloopThread, mainloopParam, 0, NULL);
     if (mainloopThread == NULL)
     {
         Stealth_SvchostLogLine(L"KvmSessionBridgeW mainloop CreateThread failed (error=%lu)", GetLastError());
+        free(mainloopParam);
+        mainloopParam = NULL;
         goto cleanup;
     }
+    mainloopParam = NULL;
     if (forcedExitCode != 0)
     {
         // Crash-recovery probes must complete the bridge handshake first so the
@@ -603,11 +683,67 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
         ExitProcess(forcedExitCode);
     }
 
-    WaitForSingleObject(mainloopThread, INFINITE);
     {
+        DWORD waitResult = WAIT_TIMEOUT;
         DWORD exitCode = 0;
-        GetExitCodeThread(mainloopThread, &exitCode);
-        Stealth_SvchostLogLine(L"KvmSessionBridgeW mainloop exited (threadExitCode=%lu readError=%lu writeError=%lu)", exitCode, ctx.readError, ctx.writeError);
+        ULONGLONG shutdownObservedTickMs = 0;
+        DWORD pipeStateError = ERROR_SUCCESS;
+
+        for (;;)
+        {
+            waitResult = WaitForSingleObject(mainloopThread, KVM_BRIDGE_MAINLOOP_WAIT_SLICE_MS);
+            if (waitResult == WAIT_OBJECT_0)
+            {
+                GetExitCodeThread(mainloopThread, &exitCode);
+                Stealth_SvchostLogLine(L"KvmSessionBridgeW mainloop exited (threadExitCode=%lu readError=%lu writeError=%lu)", exitCode, ctx.readError, ctx.writeError);
+                break;
+            }
+            if (waitResult != WAIT_TIMEOUT)
+            {
+                Stealth_SvchostLogLine(L"KvmSessionBridgeW mainloop wait failed (result=%lu error=%lu)", waitResult, GetLastError());
+                break;
+            }
+            if (inputThread == NULL && ctx.firstOutputLogged != 0 && g_shutdown == 0)
+            {
+                inputThread = CreateThread(NULL, 0, Stealth_KvmBridgeInputThread, &ctx, 0, NULL);
+                if (inputThread == NULL)
+                {
+                    ctx.readError = GetLastError();
+                    Stealth_SvchostLogLine(L"KvmSessionBridgeW input thread CreateThread failed (error=%lu)", ctx.readError);
+                    g_shutdown = 1;
+                }
+                else
+                {
+                    Stealth_SvchostLogLine(L"KvmSessionBridgeW input thread started after first output");
+                }
+            }
+            if (g_shutdown == 0 && inputThread != NULL && Stealth_KvmBridgePipeDisconnected(ctx.controlPipeHandle, &pipeStateError))
+            {
+                ctx.readError = pipeStateError;
+                Stealth_SvchostLogLine(L"KvmSessionBridgeW control pipe disconnected (error=%lu)", pipeStateError);
+                g_shutdown = 1;
+            }
+            if (g_shutdown == 0 && Stealth_KvmBridgePipeDisconnected(ctx.dataPipeHandle, &pipeStateError))
+            {
+                ctx.writeError = pipeStateError;
+                Stealth_SvchostLogLine(L"KvmSessionBridgeW data pipe disconnected (error=%lu)", pipeStateError);
+                g_shutdown = 1;
+            }
+            if (g_shutdown != 0)
+            {
+                if (shutdownObservedTickMs == 0)
+                {
+                    shutdownObservedTickMs = GetTickCount64();
+                    Stealth_SvchostLogLine(L"KvmSessionBridgeW observed shutdown; cancelling bridge transport I/O");
+                    Stealth_KvmBridgeCancelTransportIo(&ctx, bridgeStdIn, bridgeStdOut);
+                }
+                else if ((GetTickCount64() - shutdownObservedTickMs) >= KVM_BRIDGE_SHUTDOWN_GRACE_MS)
+                {
+                    Stealth_SvchostLogLine(L"KvmSessionBridgeW mainloop shutdown timed out after %lu ms; exiting helper process", (DWORD)KVM_BRIDGE_SHUTDOWN_GRACE_MS);
+                    ExitProcess(ERROR_OPERATION_ABORTED);
+                }
+            }
+        }
     }
 
 cleanup:

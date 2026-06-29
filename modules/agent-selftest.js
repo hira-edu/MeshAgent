@@ -97,8 +97,6 @@ var consoleCommandTimeoutMs = 12000;
 var tunnelConnectTimeoutMs = 10000;
 var coreInfoTimeoutMs = 20000;
 var progressLogPath = null;
-var sessionTunnelSupported = true;
-var simulateRamasFallback = false;
 
 function toBool(val)
 {
@@ -138,115 +136,6 @@ function armTransferTimeout(ret, timeoutMessage)
         try { if (r.connection) { r.connection.end(); } } catch (e) { }
         r._rej(timeoutMessage);
     }, fileTransferTimeoutMs, ret);
-}
-
-function sessionCapabilityProbe(tester, label)
-{
-    var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-    var probeLabel = label || 'Session capability';
-
-    function evaluateLocal()
-    {
-        var info = { hasKVM: 0, hasDesktopFunc: false, streamOpen: false, streamError: null };
-        try
-        {
-            var m = require('MeshAgent');
-            info.hasKVM = m.hasKVM;
-            info.hasDesktopFunc = (typeof m.GetRemoteDesktopStream === 'function');
-            if (info.hasDesktopFunc)
-            {
-                try
-                {
-                    var s = m.GetRemoteDesktopStream();
-                    if (s) { info.streamOpen = true; try { s.end(); } catch (_e) { } }
-                }
-                catch (sx)
-                {
-                    info.streamError = '' + sx;
-                }
-            }
-        }
-        catch (e)
-        {
-            info.streamError = '' + e;
-        }
-        return (info);
-    }
-
-    function checkInfo(info, modePrefix)
-    {
-        var hasKvm = parseInt(info.hasKVM, 10);
-        if (isNaN(hasKvm)) { hasKvm = (info.hasKVM ? 1 : 0); }
-        var ok = (hasKvm != 0);
-        if (ok)
-        {
-            traceProgress(probeLabel + ' fallback OK (' + modePrefix + ') hasKVM=' + hasKvm + ', streamApi=' + (info.hasDesktopFunc === true ? 'YES' : 'NO'));
-            console.log('      -> ' + probeLabel + ' fallback...........[OK] ' + modePrefix + ' hasKVM=' + hasKvm + ', streamApi=' + (info.hasDesktopFunc === true ? 'YES' : 'NO'));
-            ret._res();
-            return (true);
-        }
-        return (false);
-    }
-
-    if (tester == null || typeof tester.agentQueryValue !== 'function')
-    {
-        var localOnly = evaluateLocal();
-        if (!checkInfo(localOnly, '[LOCAL]'))
-        {
-            traceProgress(probeLabel + ' fallback FAILED (query path unavailable)');
-            ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] query path unavailable');
-        }
-        return (ret);
-    }
-
-    var expr = "(function(){try{var m=require('MeshAgent');var i={hasKVM:m.hasKVM,hasDesktopFunc:(typeof m.GetRemoteDesktopStream==='function'),streamOpen:false,streamError:null};if(i.hasDesktopFunc){try{var s=m.GetRemoteDesktopStream();if(s){i.streamOpen=true;try{s.end();}catch(_e){}}}catch(ex){i.streamError=''+ex;}}return JSON.stringify(i);}catch(e){return JSON.stringify({hasKVM:0,hasDesktopFunc:false,streamOpen:false,streamError:''+e});}})()";
-    var p = tester.agentQueryValue(expr);
-    p.then(function (value)
-    {
-        var info = null;
-        try
-        {
-            info = JSON.parse((value || '').toString());
-        }
-        catch (parseError)
-        {
-            info = null;
-        }
-
-        if (info == null)
-        {
-            var localInfo = evaluateLocal();
-            if (!checkInfo(localInfo, '[LOCAL]'))
-            {
-                traceProgress(probeLabel + ' fallback FAILED (parse error)');
-                ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] parse error');
-            }
-            return;
-        }
-
-        if (checkInfo(info, '[REMOTE]'))
-        {
-            return;
-        }
-        var localFallback = evaluateLocal();
-        if (!checkInfo(localFallback, '[LOCAL]'))
-        {
-            var remoteHasKvm = parseInt(info.hasKVM, 10);
-            if (isNaN(remoteHasKvm)) { remoteHasKvm = (info.hasKVM ? 1 : 0); }
-            traceProgress(probeLabel + ' fallback FAILED hasKVM=' + remoteHasKvm + ', streamError=' + (info.streamError || 'none'));
-            ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] hasKVM=' + remoteHasKvm + ', streamError=' + (info.streamError || 'none'));
-        }
-    }).catch(function (e)
-    {
-        var localCatch = evaluateLocal();
-        if (!checkInfo(localCatch, '[LOCAL]'))
-        {
-            traceProgress(probeLabel + ' fallback FAILED: ' + e);
-            ret._rej('      -> ' + probeLabel + ' fallback...........[FAILED] ' + e);
-        }
-    });
-
-    return (ret);
 }
 
 function agentConnect(test, ipcPath)
@@ -525,20 +414,10 @@ function start()
     requireSessionConsent = toBool(process.argv.getParameter('requireConsent', false));
     strictCoreDump = toBool(process.argv.getParameter('strictCoreDump', false));
     skipCoreDumpTest = toBool(process.argv.getParameter('skipCoreDump', false));
-    simulateRamasFallback = toBool(process.argv.getParameter('ramasFallback', false));
     if (runSessionChecks && !localmode)
     {
         // Service restart is already covered in full regression; major-bug session mode focuses on session-path diagnostics.
         skipServiceRestart = true;
-    }
-    if (runSessionChecks && simulateRamasFallback)
-    {
-        sessionTunnelSupported = false;
-        // RAMAS fallback simulation intentionally disables tunnel-driven crash/dump probing.
-        skipCoreDumpTest = true;
-        console.log('   => RAMAS Fallback Simulation...........[ENABLED]');
-        traceProgress('RAMAS fallback simulation enabled');
-        traceProgress('RAMAS fallback simulation forcing core dump test skip');
     }
     if (debugmode)
     {
@@ -1222,12 +1101,6 @@ function testCoreDump()
                     }
                 }).catch(function (pidErr)
                 {
-                    if (runSessionChecks && !localmode && sessionTunnelSupported === false)
-                    {
-                        console.log('      -> Core restart probe...............[SKIPPED] transport-limited');
-                        ret._res();
-                        return;
-                    }
                     ret._rej('      -> Unable to verify restart PID.....[FAILED] ' + pidErr);
                 });
             }
@@ -1236,12 +1109,6 @@ function testCoreDump()
                 ret._rej('      -> ERROR............................[FAILED] ' + z);
             }
         };
-
-        if (sessionTunnelSupported === false)
-        {
-            runPlainDump();
-            return;
-        }
 
         if (process.platform == 'linux' || process.platform == 'freebsd')
         {
@@ -1310,18 +1177,11 @@ function testCoreDump()
             c.write('2'); // Request KVM
         }).catch(function (e)
         {
-            sessionTunnelSupported = false;
-            runPlainDump();
+            ret._rej('      -> KVM tunnel for core dump.........[FAILED] ' + e);
         });
 
     }).catch(function (e)
     {
-        if (runSessionChecks && !localmode && sessionTunnelSupported === false)
-        {
-            console.log('      -> Mesh Core Dump verification.......[SKIPPED] transport-limited');
-            ret._res();
-            return;
-        }
         ret._rej('      -> Unable to query agent PID........[FAILED] ' + e);
     });
 
@@ -1331,12 +1191,6 @@ function testFileUpload()
 {
     console.log('   => File Transfer Test (Upload)');
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-    if (runSessionChecks && !localmode && sessionTunnelSupported === false)
-    {
-        console.log('      -> Tunnel transport unavailable.....[SKIPPED]');
-        ret._res();
-        return (ret);
-    }
     ret.tester = this;
     ret.tunnel = this.createTunnel(0x1FF, 0x00);
     ret.tunnel.then(function (c)
@@ -1417,12 +1271,6 @@ function testFileDownload()
 {
     console.log('   => File Transfer Test (Download)');
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-    if (runSessionChecks && !localmode && sessionTunnelSupported === false)
-    {
-        console.log('      -> Tunnel transport unavailable.....[SKIPPED]');
-        ret._res();
-        return (ret);
-    }
     ret.tester = this;
 
     // Start download test, so we can verify the data
@@ -1537,21 +1385,6 @@ function testKVM()
 {
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
     ret.tester = this;
-    if (runSessionChecks && !localmode && sessionTunnelSupported === false)
-    {
-        console.log('   => KVM Test............................[TUNNEL FALLBACK]');
-        traceProgress('KVM fallback path entered');
-        sessionCapabilityProbe(this, 'KVM').then(function ()
-        {
-            traceProgress('KVM fallback path success');
-            ret._res();
-        }).catch(function (e)
-        {
-            traceProgress('KVM fallback path failure: ' + e);
-            ret._rej(e);
-        });
-        return (ret);
-    }
 
     if (!localmode)
     {
@@ -1710,22 +1543,6 @@ function testTerminal(terminalMode)
             r.timeoutTriggered = true;
             try { if (r.connection) { r.connection.end(); } } catch (e) { }
             if (r.completed === true) { return; }
-            if (runSessionChecks && !localmode)
-            {
-                sessionTunnelSupported = false;
-                sessionCapabilityProbe(r.parent, 'Terminal').then(function ()
-                {
-                    if (r.completed === true) { return; }
-                    r.completed = true;
-                    r._res();
-                }).catch(function (probeError)
-                {
-                    if (r.completed === true) { return; }
-                    r.completed = true;
-                    r._rej('      -> Result...........................[TIMEOUT] ' + probeError);
-                });
-                return;
-            }
             r.completed = true;
             r._rej('      -> Result...........................[TIMEOUT]');
         }, 7000, c.ret);
@@ -1776,18 +1593,6 @@ function testTerminal(terminalMode)
         c.write(c.ret.mode);
     }).catch(function (e)
     {
-        if (runSessionChecks && !localmode && e == 'timeout')
-        {
-            sessionTunnelSupported = false;
-            sessionCapabilityProbe(ret.parent, 'Terminal').then(function ()
-            {
-                ret._res();
-            }).catch(function (probeError)
-            {
-                ret._rej('      -> Tunnel...........................[FAILED] ' + probeError);
-            });
-            return;
-        }
         ret._rej('      -> Tunnel...........................[FAILED] ' + e);
     });
 

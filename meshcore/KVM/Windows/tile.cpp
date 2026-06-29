@@ -127,6 +127,9 @@ extern volatile LONG SCALING_FACTOR;
 extern volatile LONG SCALING_FACTOR_NEW;
 extern int FRAME_RATE_TIMER;
 extern tileInfo_t **tileInfo;
+extern int g_shutdown;
+extern int gKvmDesktopCaptureReady;
+void KVM_TraceStartupF(const char* format, ...);
 }
 
 // Used with setting up a GDI+ session.
@@ -1984,43 +1987,66 @@ int get_desktop_buffer(void **buffer, long long *bufferSize, long* mouseMove)
 {
 	*buffer = NULL;
 	*bufferSize = 0;
+	if (g_shutdown) { return 1; }
+	if (!gKvmDesktopCaptureReady)
+	{
+		KVM_TraceStartupF("KVM capture: target desktop is not accessible; skipping capture backends");
+		return 1;
+	}
 
 	if (gCaptureBackendOverride == 2)
 	{
+		KVM_TraceStartupF("KVM capture: trying WGC forced");
 		if (tile_try_capture_wgc(buffer, bufferSize, "wgc:forced") != 0)
 		{
+			KVM_TraceStartupF("KVM capture: WGC forced succeeded size=%lld", *bufferSize);
 			return 0;
 		}
+		if (g_shutdown) { return 1; }
+		KVM_TraceStartupF("KVM capture: trying DXGI after forced WGC failure");
 		if (tile_try_capture_dxgi(buffer, bufferSize) != 0)
 		{
+			KVM_TraceStartupF("KVM capture: DXGI after forced WGC failure succeeded size=%lld", *bufferSize);
 			return 0;
 		}
+		if (g_shutdown) { return 1; }
+		KVM_TraceStartupF("KVM capture: trying GDI after forced WGC/DXGI failure");
 		return get_desktop_buffer_gdi(buffer, bufferSize, mouseMove);
 	}
 
+	KVM_TraceStartupF("KVM capture: trying DXGI");
 	if (tile_try_capture_dxgi(buffer, bufferSize) != 0)
 	{
 		// DXGI succeeded — clear any stale WGC backoff so it's ready as fallback
 		gWgcCapture.retryDelayMs = 0;
 		gWgcCapture.nextRetryTick = 0;
 		gGdiEscalationFailures = 0;
+		KVM_TraceStartupF("KVM capture: DXGI succeeded size=%lld", *bufferSize);
 		return 0;
 	}
+	if (g_shutdown) { return 1; }
 
 	if (gCaptureBackendOverride != 1 && tile_dxgi_reason_allows_wgc_fallback() != 0)
 	{
+		KVM_TraceStartupF("KVM capture: trying WGC fallback");
 		if (tile_try_capture_wgc(buffer, bufferSize, "wgc:auto-fallback") != 0)
 		{
 			gGdiEscalationFailures = 0;
+			KVM_TraceStartupF("KVM capture: WGC fallback succeeded size=%lld", *bufferSize);
 			return 0;
 		}
 	}
+	if (g_shutdown) { return 1; }
 
+	KVM_TraceStartupF("KVM capture: trying GDI");
 	if (get_desktop_buffer_gdi(buffer, bufferSize, mouseMove) == 0)
 	{
 		gGdiEscalationFailures = 0;
+		KVM_TraceStartupF("KVM capture: GDI succeeded size=%lld", *bufferSize);
 		return 0;
 	}
+	if (g_shutdown) { return 1; }
+	KVM_TraceStartupF("KVM capture: GDI failed override=%d failures=%d", gCaptureBackendOverride, gGdiEscalationFailures + 1);
 
 	// GDI failed.  If DXGI/WGC were skipped because of a GDI-forced override,
 	// escalate to them after a few consecutive GDI failures.  Creating the
@@ -2041,25 +2067,35 @@ int get_desktop_buffer(void **buffer, long long *bufferSize, long* mouseMove)
 			int savedOverride = gCaptureBackendOverride;
 			gCaptureBackendOverride = -1;
 
+			KVM_TraceStartupF("KVM capture: trying DXGI escalation after GDI failures");
 			if (tile_try_capture_dxgi(buffer, bufferSize) != 0)
 			{
 				gCaptureBackendOverride = savedOverride;
 				tile_set_capture_backend(KvmCaptureBackend_DXGI, "dxgi:gdi-escalation");
+				KVM_TraceStartupF("KVM capture: DXGI escalation succeeded size=%lld", *bufferSize);
 				return 0;
+			}
+			if (g_shutdown)
+			{
+				gCaptureBackendOverride = savedOverride;
+				return 1;
 			}
 
 			// DXGI didn't produce a frame but its initialization may have
 			// primed the adapter.  Retry GDI once before giving up.
 			gCaptureBackendOverride = savedOverride;
+			KVM_TraceStartupF("KVM capture: retrying GDI after DXGI escalation");
 			if (get_desktop_buffer_gdi(buffer, bufferSize, mouseMove) == 0)
 			{
 				tile_set_capture_backend(KvmCaptureBackend_GDI, "gdi:post-escalation");
 				gGdiEscalationFailures = 0;
+				KVM_TraceStartupF("KVM capture: post-escalation GDI succeeded size=%lld", *bufferSize);
 				return 0;
 			}
 		}
 	}
 
+	KVM_TraceStartupF("KVM capture: all backends failed");
 	return 1;
 }
 

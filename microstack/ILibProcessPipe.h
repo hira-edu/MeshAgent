@@ -54,6 +54,8 @@ typedef enum ILibProcessPipe_Pipe_ReaderHandleType
 	ILibProcessPipe_Pipe_ReaderHandleType_Overlapped = 1		//!< Use Overlapped I/O
 }ILibProcessPipe_Pipe_ReaderHandleType;
 HANDLE ILibProcessPipe_Manager_GetWorkerThread(ILibProcessPipe_Manager mgr);
+int ILibProcessPipe_GetLastWindowsSpawnPolicyDecisionA(char* decision, size_t decisionLen, char* policyClass, size_t policyClassLen, DWORD* errorOut, DWORD* spawnTypeOut, unsigned long long* commandHashOut);
+int ILibProcessPipe_GetLastWindowsSpawnPolicyBridgeReasonA(char* reason, size_t reasonLen);
 #endif
 
 ILibTransport_DoneState ILibProcessPipe_Pipe_Write(ILibProcessPipe_Pipe writePipe, char* buffer, int bufferLen, ILibTransport_MemoryOwnership ownership);

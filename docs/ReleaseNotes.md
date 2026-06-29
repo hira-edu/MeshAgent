@@ -26,7 +26,7 @@
 - Updated systemd escaping in linux installer
 - Fixed WebRTC DataChannel interop with Chromium/Edge
 - Fixed issues with UTF8 and Zenity
-- Fixed resetnodeid, checkfirewall, clearfirewall, and setfirewall switches on Windows.
+- Fixed resetnodeid; retired direct Windows firewall helper switches in favor of native lifecycle/firewall policy.
 - Updated Product Version on windows to include Commit Date
 - Added workaround for Self-signed certificates bug with Chromium v75+
 - Added autoproxy support
@@ -69,4 +69,3 @@
 - Quickly/Repeatedly calling a dispatcher on windows, can cause the service to crash/restart if an overlapping dispatcher is created without cleaning up the existing instance.
 - Garbage Collection (Finalization) of some objects can be delayed when there is a circular loop in the referencing. These objects only get finalized with a mark-and-sweep. The biggest culprit is anonymous functions, where the runtime automatically will reference locally scoped objects by the anonymous function object
 - Not all the code-paths in meshcore.js has been analyzed so it is possible that some agent functions may still leak memory
-

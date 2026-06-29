@@ -40,6 +40,10 @@ function assert(condition, message) {
     }
 }
 
+function readSource(filePath) {
+    return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
@@ -48,17 +52,23 @@ function main() {
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
     const rundll32ContractPath = path.resolve('meshservice', 'rundll32_contract.h');
     const kvmRuntimeHelpersPath = path.resolve('test', 'lib', 'kvm_runtime_helpers.js');
-    const processPipeSource = fs.readFileSync(processPipePath, 'utf8');
-    const kvmSource = fs.readFileSync(kvmPath, 'utf8');
-    const serviceMainSource = fs.readFileSync(serviceMainPath, 'utf8');
-    const rundll32ContractSource = fs.readFileSync(rundll32ContractPath, 'utf8');
-    const kvmRuntimeHelpersSource = fs.readFileSync(kvmRuntimeHelpersPath, 'utf8');
+    const processPipeSource = readSource(processPipePath);
+    const kvmSource = readSource(kvmPath);
+    const serviceMainSource = readSource(serviceMainPath);
+    const rundll32ContractSource = readSource(rundll32ContractPath);
+    const kvmRuntimeHelpersSource = readSource(kvmRuntimeHelpersPath);
 
     const checks = {
         policyAllowsBridgeEntryPoint: processPipeSource.includes('allow-kvm-bridge') &&
             processPipeSource.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
             rundll32ContractSource.includes('#define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"') &&
+            rundll32ContractSource.includes('void CALLBACK KvmSessionBridgeW') &&
             processPipeSource.includes('ILibProcessPipe_IsApprovedBridgeModuleArgumentA') &&
+            processPipeSource.includes('&ILibProcessPipe_IsExactBridgeModuleDllPathA') &&
+            processPipeSource.includes('GetProcAddress(bridgeModule, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A)') &&
+            processPipeSource.includes('GetFileInformationByHandle(requestedHandle, &requestedInfo)') &&
+            processPipeSource.includes('requestedInfo.nFileIndexLow == bridgeInfo.nFileIndexLow') &&
+            !processPipeSource.includes('return _stricmp(normalizedModulePath, normalizedBridgeModulePath) == 0;') &&
             processPipeSource.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")') &&
             processPipeSource.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")') &&
             processPipeSource.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&

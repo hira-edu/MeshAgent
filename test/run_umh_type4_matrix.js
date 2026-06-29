@@ -69,17 +69,17 @@ function main() {
 
     const desktopInjectTargetSet = renderPlan('injectTargetSet', contract.getOperation('injectTargetSet').sampleInput);
     const mobileInjectTargetSet = renderPlan('injectTargetSet', contract.getOperation('injectTargetSet').sampleInput);
-    const desktopIpc = renderPlan('ipcBypass', contract.getOperation('ipcBypass').sampleInput);
-    const mobileIpc = renderPlan('ipcBypass', contract.getOperation('ipcBypass').sampleInput);
+    const desktopHookControl = renderPlan('hookControl', contract.getOperation('hookControl').sampleInput);
+    const mobileHookControl = renderPlan('hookControl', contract.getOperation('hookControl').sampleInput);
 
     const report = {
         generatedUtc: new Date().toISOString(),
         success: JSON.stringify(desktopInjectTargetSet) === JSON.stringify(mobileInjectTargetSet)
-            && JSON.stringify(desktopIpc) === JSON.stringify(mobileIpc),
+            && JSON.stringify(desktopHookControl) === JSON.stringify(mobileHookControl),
         matrixCount: matrix.length,
         desktopMobileParity: {
             injectTargetSet: JSON.stringify(desktopInjectTargetSet) === JSON.stringify(mobileInjectTargetSet),
-            ipcBypass: JSON.stringify(desktopIpc) === JSON.stringify(mobileIpc)
+            hookControl: JSON.stringify(desktopHookControl) === JSON.stringify(mobileHookControl)
         },
         matrix
     };
@@ -91,7 +91,7 @@ function main() {
             `SUCCESS=${report.success}`,
             `MATRIX_COUNT=${report.matrixCount}`,
             `DESKTOP_MOBILE_PARITY_INJECTTARGETSET=${report.desktopMobileParity.injectTargetSet}`,
-            `DESKTOP_MOBILE_PARITY_IPCBYPASS=${report.desktopMobileParity.ipcBypass}`
+            `DESKTOP_MOBILE_PARITY_HOOKCONTROL=${report.desktopMobileParity.hookControl}`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

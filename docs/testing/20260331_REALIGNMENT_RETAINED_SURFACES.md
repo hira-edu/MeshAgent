@@ -45,7 +45,7 @@ The following remain allowed only as thin wrappers with no independent lifecycle
 
 The following are retained only as internal helpers or are slated for removal from operator-facing flows:
 
-- `-svchost-register` and `-svchost-unregister` remain low-level service registration helpers, not alternative install/update flows
+- direct svchost registration switches are blocked; svchost registration is owned by the `MeshLifecycleHostW` lifecycle flow
 - legacy `-install` / `-uninstall` stay blocked on Windows svchost builds
 - direct lifecycle mutation in `ServiceMain.c` outside the native installer surface is not accepted as authoritative behavior
 - JavaScript `fullInstall` / `fullUninstall` logic is non-authoritative on Windows svchost builds

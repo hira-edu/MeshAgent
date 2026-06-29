@@ -273,10 +273,14 @@ async function main() {
         const startupIndex = logLines.findIndex((line) => line.includes(startupLine));
         const runLogLines = startupIndex >= 0 ? logLines.slice(startupIndex) : logLines.slice(-200);
         report.logTail = runLogLines.slice(-80);
-        assert(startupIndex >= 0, 'bridge log missing exact input/output startup line');
-        assert(runLogLines.every((line) => line.includes('WaitNamedPipeW failed') === false), 'bridge log contains WaitNamedPipe failure');
-        assert(runLogLines.some((line) => line.includes('KvmSessionBridgeW mainloop exited') || line.includes('KvmSessionBridgeW exiting normally')), 'bridge log missing graceful exit line');
-    }
+		assert(startupIndex >= 0, 'bridge log missing exact input/output startup line');
+		assert(runLogLines.every((line) => line.includes('WaitNamedPipeW failed') === false), 'bridge log contains WaitNamedPipe failure');
+		assert(runLogLines.every((line) => line.includes('KvmSessionBridgeW mainloop shutdown timed out after') === false), 'bridge log used timeout-based helper exit');
+		assert(runLogLines.some((line) =>
+			line.includes('KvmSessionBridgeW mainloop exited') ||
+			line.includes('KvmSessionBridgeW exiting normally')),
+			'bridge log missing controlled exit line');
+	}
     report.success = true;
 
     if (evidenceDir) {

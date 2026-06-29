@@ -44,39 +44,54 @@ function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
+    const agentcorePath = path.resolve('meshcore', 'agentcore.c');
+    const agentSelfTestPath = path.resolve('modules', 'agent-selftest.js');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
+    const agentcoreSource = fs.readFileSync(agentcorePath, 'utf8');
+    const agentSelfTestSource = fs.readFileSync(agentSelfTestPath, 'utf8');
 
     const checks = {
-        hasRamasCandidateBuilder: kvmSource.includes('static int kvm_build_ramas_candidates'),
-        ordersSpecifiedUserFirst: kvmSource.includes('ordered[0] = ILibProcessPipe_SpawnTypes_SPECIFIED_USER;'),
-        ordersFirstWinlogonSecond: kvmSource.includes('ordered[1] = ILibProcessPipe_SpawnTypes_WINLOGON;'),
-        ordersUserThird: kvmSource.includes('ordered[2] = ILibProcessPipe_SpawnTypes_USER;'),
-        ordersSecondWinlogonFourth: kvmSource.includes('ordered[3] = ILibProcessPipe_SpawnTypes_WINLOGON;'),
-        rotatesFromWinlogon: kvmSource.includes('case ILibProcessPipe_SpawnTypes_WINLOGON:') && kvmSource.includes('startIndex = 1;'),
-        rotatesFromUser: kvmSource.includes('case ILibProcessPipe_SpawnTypes_USER:') && kvmSource.includes('startIndex = 2;'),
-        usesCandidateBuilderAtRestart: kvmSource.includes('candidateCount = kvm_build_ramas_candidates(primaryType, gProcessTSID >= 0 ? 1 : 0, candidates, _countof(candidates));'),
-        bridgePrimaryUsesConfiguredCandidateOrder:
-            kvmSource.includes('ILibProcessPipe_SpawnTypes primaryType = gProcessSpawnType;') &&
-            !kvmSource.includes('if (bridgeAvailable && primaryType != ILibProcessPipe_SpawnTypes_WINLOGON)') &&
-            !kvmSource.includes('primaryType = ILibProcessPipe_SpawnTypes_WINLOGON;'),
+        removesRamasCandidateBuilder: !kvmSource.includes('static int kvm_build_ramas_candidates'),
+        removesRamasForcedFailover: !kvmSource.includes('STEALTH_KVM_FORCE_PRIMARY_FAILOVER') && !kvmSource.includes('kvm_should_force_primary_failover'),
+        removesRamasSelfTestSimulation:
+            !agentcoreSource.includes('ramasFallback') &&
+            !agentcoreSource.includes('RAMAS fallback') &&
+            !agentSelfTestSource.includes('ramasFallback') &&
+            !agentSelfTestSource.includes('RAMAS fallback'),
+        removesSelfTestTunnelFallbackProbe:
+            !agentSelfTestSource.includes('sessionCapabilityProbe') &&
+            !agentSelfTestSource.includes('sessionTunnelSupported') &&
+            !agentSelfTestSource.includes('TUNNEL FALLBACK') &&
+            !agentSelfTestSource.includes('Tunnel transport unavailable.....[SKIPPED]') &&
+            agentSelfTestSource.includes('KVM tunnel for core dump.........[FAILED]'),
+        usesSingleConfiguredSpawnCandidate:
+            kvmSource.includes('ILibProcessPipe_SpawnTypes candidates[1];') &&
+            kvmSource.includes('candidates[0] = primaryType;') &&
+            kvmSource.includes('candidateCount = 1;'),
+        rejectsInvalidSpecifiedUserWithoutFallback:
+            kvmSource.includes('primaryType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER && gProcessTSID < 0') &&
+            kvmSource.includes('gKvmLastBridgeFailureError = ERROR_INVALID_PARAMETER;'),
         bridgeRetainsActualSuccessfulSpawnType: kvmSource.includes('gProcessSpawnType = successfulType;'),
         usesGuidPipeNames: kvmSource.includes('CoCreateGuid(&guid)') && kvmSource.includes('StringFromGUID2(&guid, guidText'),
         logsAttemptSessionAndPipe: kvmSource.includes('Spawning rundll32 KVM attempt=%d/%d as %s tsid=%d mode=%s transport=named-pipe input=%s output=%s'),
         logsConnectedAttemptResult: kvmSource.includes('rundll32 KVM launched (attempt=%d/%d, spawnType=%s, tsid=%d)'),
         logsFailedAttemptResult:
             kvmSource.includes('bridge stdin connect failed (error=%u, elapsedMs=%llu, timeoutMs=%u, spawnType=%d, tsid=%d)') &&
-            kvmSource.includes('bridge stdout connect failed (error=%u, elapsedMs=%llu, timeoutMs=%u, spawnType=%d, tsid=%d)')
+            kvmSource.includes('bridge stdout connect failed (error=%u, elapsedMs=%llu, timeoutMs=%u, spawnType=%d, tsid=%d)'),
+        fallbackTelemetryDefaultsFalse: kvmSource.includes('gKvmLastFallbackUsed = 0;')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
-        assert(passed, `ramas contract failed: ${name}`);
+        assert(passed, `strict rundll32 bridge contract failed: ${name}`);
     }
 
     const report = {
         generatedUtc: new Date().toISOString(),
         success: true,
         files: {
-            kvmPath
+            kvmPath,
+            agentcorePath,
+            agentSelfTestPath
         },
         checks
     };

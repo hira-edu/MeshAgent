@@ -43,7 +43,7 @@ function assert(condition, message) {
 }
 
 function readRepoFile(repoRoot, relativePath) {
-    return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
+    return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8').replace(/\r\n?/g, '\n');
 }
 
 function findPython(repoRoot) {
@@ -200,7 +200,7 @@ function main() {
     assert(!defaultInstallRootBody.includes('GetWindowsDirectoryW'), 'default install root must not synthesize ProgramData from Windows directory');
     assert(!defaultInstallRootBody.includes('C:\\\\ProgramData'), 'default install root must not use literal C:\\ProgramData fallback');
     assert(!stealthInstaller.includes('MeshInstaller_GetProgramDataRoot'), 'installer must not keep a secondary ProgramData fallback helper');
-    const defaultLogPathBody = extractFunction(stealthInstaller, 'static void Stealth_ResolveDefaultLogPath(void)\n{');
+    const defaultLogPathBody = extractFunction(stealthInstaller, 'static void Stealth_ResolveDefaultLogPath');
     assert(defaultLogPathBody.includes('SetLastError(ERROR_PATH_NOT_FOUND);'), 'default log path must fail closed when active install paths are unavailable');
     assert(!defaultLogPathBody.includes('C:\\\\ProgramData'), 'default log path must not use literal C:\\ProgramData fallback');
     assert(!defaultLogPathBody.includes('fallbackLogDir'), 'default log path must not create fallback log directories');
@@ -247,7 +247,7 @@ function main() {
     assert(!serviceMain.includes('MeshService_GetLauncherStageDirectory'), 'GUI launcher staging directory helper must not exist after rundll32 lifecycle convergence');
     assert(!serviceMain.includes('gui-launch.log'), 'GUI path must not keep direct self-launch trace logging');
     assert(!serviceMain.includes('MeshService_StageElevatedLaunchImage'), 'GUI path must not stage a direct elevated launch image');
-    const integrationConfigBody = extractFunction(serviceMain, 'static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)\n{');
+    const integrationConfigBody = extractFunction(serviceMain, 'static BOOL MeshService_BuildIntegrationConfig');
     assert(integrationConfigBody.includes('!Stealth_GetInstallPaths(&paths)') && integrationConfigBody.includes("paths.installDir[0] == L'\\0'"), 'stealth integration config must require active install paths');
     assert(integrationConfigBody.includes('return FALSE;'), 'stealth integration config must fail when active paths are unavailable');
 

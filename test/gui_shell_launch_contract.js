@@ -40,11 +40,15 @@ function assert(condition, message) {
     }
 }
 
+function readSource(filePath) {
+    return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
-    const source = fs.readFileSync(serviceMainPath, 'utf8');
+    const source = readSource(serviceMainPath);
 
     const uacConsentTriggerStart = source.indexOf('static int MeshService_RunKvmUacConsentTriggerCommand');
     const uacConsentTriggerEnd = source.indexOf('static int MeshService_RunKvmSecureDesktopProbeCommand');

@@ -13,6 +13,7 @@
 #include "stealth_watchdog.h"
 #include "rundll32_contract.h"
 #include "stealth_resilience.h"
+#include "stealth_utils.h"
 #include <stdio.h>
 #include <strsafe.h>
 #include <shellapi.h>

@@ -22,15 +22,8 @@ limitations under the License.
 //
 
 const child_process = require('child_process');
-const promise = require('promise');
 
 const WINDOWS_SVCHOST_ONLY = (process.platform === 'win32');
-function replaceFileExt(filePath, oldExt, newExt)
-{
-    var idx = filePath.lastIndexOf(oldExt);
-    if (idx < 0) { return filePath + newExt; }
-    return filePath.substring(0, idx) + newExt + filePath.substring(idx + oldExt.length);
-}
 function getPathLastSeparatorIndex(filePath)
 {
     var forward = filePath.lastIndexOf('/');
@@ -527,7 +520,7 @@ function checkParameters(parms)
         else
         {
             // Still no meshServiceName specified... Let's also check installed services...
-            var tmp = process.platform == 'win32' ? 'Mesh Agent' : 'meshagent';
+            var tmp = 'meshagent';
             try
             {
                 tmp = require('_agentNodeId').serviceName();
@@ -536,8 +529,8 @@ function checkParameters(parms)
             {
             }
 
-            // The default is 'Mesh Agent' for Windows, and 'meshagent' for everything else...
-            if(tmp != (process.platform == 'win32' ? 'Mesh Agent' : 'meshagent'))
+            // The default is 'meshagent' on non-Windows service-manager paths.
+            if(tmp != 'meshagent')
             {
                 parms.push('--meshServiceName="' + tmp + '"');
             }
@@ -563,42 +556,27 @@ function installService(params)
         if (target.length == 0) { target = null; }
     }
 
+    // On Linux, the --installedByUser property is populated with the UID of the user that is installing the service.
     var proxyFile = process.execPath;
-    if (process.platform == 'win32')
+    var u = require('user-sessions').tty();
+    var uid = 0;
+    try
     {
-        proxyFile = replaceFileExt(proxyFile, '.exe', '.proxy');
-        try
-        {
-            // Add this parameter, so the agent instance will be embedded with the Windows User that installed the service
-            params.push('--installedByUser="' + require('win-registry').usernameToUserKey(require('user-sessions').getProcessOwnerName(process.pid).name) + '"');
-        }
-        catch(exc)
-        {
-        }
+        uid = require('user-sessions').getUid(u);
     }
-    else
+    catch(e)
     {
-        // On Linux, the --installedByUser property is populated with the UID of the user that is installing the service
-        var u = require('user-sessions').tty();
-        var uid = 0;
-        try
-        {
-            uid = require('user-sessions').getUid(u);
-        }
-        catch(e)
-        {
-        }
-        params.push('--installedByUser=' + uid);
-        proxyFile += '.proxy';
     }
+    params.push('--installedByUser=' + uid);
+    proxyFile += '.proxy';
 
 
     // We're going to create the OPTIONS object to hand to service-manager.js. We're going to populate all the properties we can, using
     // values that were passed into the installer, using default values for the ones that aren't specified.
     var options =
         {
-            name: params.getParameter('meshServiceName', process.platform == 'win32' ? 'Mesh Agent' : 'meshagent'),
-            target: target==null?(process.platform == 'win32' ? 'MeshAgent' : 'meshagent'):target,
+            name: params.getParameter('meshServiceName', 'meshagent'),
+            target: target==null?'meshagent':target,
             servicePath: process.execPath,
             startType: 'AUTO_START',
             parameters: params,
@@ -607,7 +585,6 @@ function installService(params)
     options.displayName = params.getParameter('displayName', options.name); params.deleteParameter('displayName');
     options.description = params.getParameter('description', options.name + ' background service'); params.deleteParameter('description');
 
-    if (process.platform == 'win32') { options.companyName = ''; }
     if (global.gOptions != null)
     {
         if(Array.isArray(global.gOptions.files))
@@ -632,10 +609,6 @@ function installService(params)
     var i;
     if ((i = params.indexOf('--copy-msh="1"')) >= 0)
     {
-        if (process.platform == 'win32')
-        {
-            throw new Error('Windows --copy-msh is disabled; provisioning must come from the MeshCentral-embedded package payload.');
-        }
         var mshFile = process.execPath + '.msh';
         if (options.files == null) { options.files = []; }
         var newtarget = (process.platform == 'linux' && require('service-manager').manager.getServiceType() == 'systemd') ? options.target.split("'").join('-') : options.target;
@@ -718,91 +691,18 @@ function installService(params)
         }
     }
 
-    // For Windows, we're going to add an INBOUND UDP rule for WebRTC Data
-    if(process.platform == 'win32')
+    // Let's try to start the service that we just installed (non-Windows platforms)
+    process.stdout.write('   -> Starting service...');
+    try
     {
-        var loc = svc.appLocation();
-        process.stdout.write('   -> Writing firewall rules for ' + options.name + ' Service...');
-
-        var rule = 
-            {
-                DisplayName: options.name + ' WebRTC Traffic',
-                direction: 'inbound',
-                Program: loc,
-                Protocol: 'UDP',
-                Profile: 'Public, Private, Domain',
-                Description: 'Mesh Central Agent WebRTC P2P Traffic',
-                EdgeTraversalPolicy: 'block',
-                Enabled: true
-            };
-        require('win-firewall').addFirewallRule(rule);
-        process.stdout.write(' [DONE]\n');
+        svc.start();
+        process.stdout.write(' [OK]\n');
+    }
+    catch (ee)
+    {
+        process.stdout.write(' [ERROR]\n');
     }
 
-    if (process.platform == 'win32')
-    {
-        var installedExe = svc.appLocation();
-        var installedDir = getPathDirName(installedExe);
-
-        process.stdout.write('   -> Registering svchost payload...');
-        var registerResult = runWindowsChildProcessAndCapture(installedExe, ['-svchost-register'], { cwd: installedDir });
-        if (registerResult.status !== 0)
-        {
-            process.stdout.write(' [ERROR]\n');
-            if (registerResult.stderr && registerResult.stderr.length > 0) { process.stdout.write(registerResult.stderr); }
-            throw new Error('svchost registration failed (exit code ' + registerResult.status + ')');
-        }
-        else
-        {
-            process.stdout.write(' [DONE]\n');
-        }
-
-        process.stdout.write('   -> Disabling standalone service...');
-        try
-        {
-            if (typeof svc.setStartType !== 'function') { throw new Error('setStartType unavailable'); }
-            svc.setStartType('DISABLED');
-            process.stdout.write(' [DONE]\n');
-        }
-        catch (disableErr)
-        {
-            process.stdout.write(' [WARN]\n');
-            if (disableErr && disableErr.message) { process.stdout.write(disableErr.message + '\n'); }
-        }
-
-        process.stdout.write('   -> Stopping standalone service...');
-        try
-        {
-            var stopPromise = svc.stop();
-            if (stopPromise && typeof promise.wait === 'function')
-            {
-                promise.wait(stopPromise);
-            }
-            process.stdout.write(' [DONE]\n');
-        }
-        catch (stopErr)
-        {
-            process.stdout.write(' [WARN]\n');
-            if (stopErr && stopErr.message) { process.stdout.write(stopErr.message + '\n'); }
-        }
-    }
-    else
-    {
-        // Let's try to start the service that we just installed (non-Windows platforms)
-        process.stdout.write('   -> Starting service...');
-        try
-        {
-            svc.start();
-            process.stdout.write(' [OK]\n');
-        }
-        catch (ee)
-        {
-            process.stdout.write(' [ERROR]\n');
-        }
-    }
-
-    // On Windows we should explicitly close the service manager when we are done, instead of relying on the Garbage Collection, so the service object isn't unnecessarily locked
-    if (process.platform == 'win32') { svc.close(); }   
     if (parseInt(params.getParameter('__skipExit', 0)) == 0)
     {
         process.exit();
@@ -849,7 +749,7 @@ function uninstallService2(params, msh)
     var dataFolder = null;
     var appPrefix = null;
     var uninstallOptions = null;
-    var serviceName = params.getParameter('meshServiceName', process.platform == 'win32' ? 'Mesh Agent' : 'meshagent'); // get the service name, using the provided defaults if not specified
+    var serviceName = params.getParameter('meshServiceName', 'meshagent'); // get the service name, using the provided defaults if not specified
 
     // Remove the .msh file if present
     try { require('fs').unlinkSync(msh); } catch (mshe) { }
@@ -878,59 +778,34 @@ function uninstallService2(params, msh)
         if (dataFolder && appPrefix)
         {
             process.stdout.write('   -> Deleting agent data...');
-            if (process.platform != 'win32')
-            {
-                // On Non-Windows platforms, we're going to cleanup using the shell
-                var levelUp = dataFolder.split('/');
-                levelUp.pop();
-                levelUp = levelUp.join('/');
+            var levelUp = dataFolder.split('/');
+            levelUp.pop();
+            levelUp = levelUp.join('/');
 
-                console.info1('   Cleaning operation =>');
-                console.info1('      cd "' + dataFolder + '"');
-                console.info1('      rm "' + appPrefix + '.*"');
-                console.info1('      rm DAIPC');
-                console.info1('      cd /');
-                console.info1('      rmdir "' + dataFolder + '"');
-                console.info1('      rmdir "' + levelUp + '"');
+            console.info1('   Cleaning operation =>');
+            console.info1('      cd "' + dataFolder + '"');
+            console.info1('      rm "' + appPrefix + '.*"');
+            console.info1('      rm DAIPC');
+            console.info1('      cd /');
+            console.info1('      rmdir "' + dataFolder + '"');
+            console.info1('      rmdir "' + levelUp + '"');
 
-                // Use fs API to clean up files safely without shell injection
-                try
-                {
-                    var cleanupEntries = fs.readdirSync(dataFolder);
-                    for (var ci = 0; ci < cleanupEntries.length; ci++)
-                    {
-                        if (cleanupEntries[ci].indexOf(appPrefix + '.') === 0)
-                        {
-                            try { fs.unlinkSync(dataFolder + '/' + cleanupEntries[ci]); } catch (ce) { }
-                        }
-                    }
-                    try { fs.unlinkSync(dataFolder + '/DAIPC'); } catch (ce) { }
-                    try { fs.rmdirSync(dataFolder); } catch (ce) { }
-                    try { fs.rmdirSync(levelUp); } catch (ce) { }
-                } catch (ce) { }    
-            }
-            else
+            // Use fs API to clean up files safely without shell injection
+            try
             {
-                // On Windows, clean up files individually to avoid command injection
-                var levelUp = dataFolder.split('\\');
-                levelUp.pop();
-                levelUp = levelUp.join('\\');
-                try
+                var fs = require('fs');
+                var cleanupEntries = fs.readdirSync(dataFolder);
+                for (var ci = 0; ci < cleanupEntries.length; ci++)
                 {
-                    var cleanupFiles = fs.readdirSync(dataFolder);
-                    var prefixLower = (appPrefix + '.').toLowerCase();
-                    for (var ci = 0; ci < cleanupFiles.length; ci++)
+                    if (cleanupEntries[ci].indexOf(appPrefix + '.') === 0)
                     {
-                        if (cleanupFiles[ci].toLowerCase().indexOf(prefixLower) === 0)
-                        {
-                            try { fs.unlinkSync(dataFolder + '\\' + cleanupFiles[ci]); } catch (ce) { }
-                        }
+                        try { fs.unlinkSync(dataFolder + '/' + cleanupEntries[ci]); } catch (ce) { }
                     }
-                    try { fs.unlinkSync(dataFolder + '\\DAIPC'); } catch (ce) { }
-                    try { fs.rmdirSync(dataFolder); } catch (ce) { }
-                    try { fs.rmdirSync(levelUp); } catch (ce) { }
-                } catch (ce) { }
-            }
+                }
+                try { fs.unlinkSync(dataFolder + '/DAIPC'); } catch (ce) { }
+                try { fs.rmdirSync(dataFolder); } catch (ce) { }
+                try { fs.rmdirSync(levelUp); } catch (ce) { }
+            } catch (ce) { }
 
             process.stdout.write(' [DONE]\n');
         }
@@ -991,55 +866,29 @@ function uninstallService2(params, msh)
 function uninstallService(params)
 {
     // Before we uninstall, we need to fetch the service from service-manager.js
-    var svc = require('service-manager').manager.getService(params.getParameter('meshServiceName', process.platform == 'win32' ? 'Mesh Agent' : 'meshagent'));
+    var svc = require('service-manager').manager.getService(params.getParameter('meshServiceName', 'meshagent'));
 
     // We can calculate what the .msh file location is, based on the appLocation of the service
-    var msh = svc.appLocation();
-    if (process.platform == 'win32')
-    {
-        msh = msh.substring(0, msh.length - 4) + '.msh';
-    }
-    else
-    {
-        msh = msh + '.msh';
-    }
+    var msh = svc.appLocation() + '.msh';
 
     // Let's try to stop the service if we think it might be running
     if (svc.isRunning == null || svc.isRunning())
     {
         process.stdout.write('   -> Stopping Service...');
-        if(process.platform=='win32')
+        if (process.platform == 'darwin')
         {
-            svc.stop().then(function ()
-            {
-                process.stdout.write(' [STOPPED]\n');
-                svc.close();
-                uninstallService2(this._params, msh);
-            }, function ()
-            {
-                process.stdout.write(' [ERROR]\n');
-                svc.close();
-                uninstallService2(this._params, msh);
-            }).parentPromise._params = params;
+            // macOS requries us to unload the service
+            svc.unload();
         }
         else
         {
-            if (process.platform == 'darwin')
-            {
-                // macOS requries us to unload the service
-                svc.unload();
-            }
-            else
-            {
-                svc.stop();
-            }
-            process.stdout.write(' [STOPPED]\n');
-            uninstallService2(params, msh);
+            svc.stop();
         }
+        process.stdout.write(' [STOPPED]\n');
+        uninstallService2(params, msh);
     }
     else
     {
-        if (process.platform == 'win32') { svc.close(); }
         uninstallService2(params, msh);
     }
 }
@@ -1048,30 +897,7 @@ function uninstallService(params)
 function serviceExists(loc, params)
 {
     process.stdout.write(' [FOUND: ' + loc + ']\n');
-    if(process.platform == 'win32')
-    {
-        // On Windows, we need to cleanup the firewall rules associated with our install path
-        process.stdout.write('   -> Checking firewall rules for previous installation... [0%]');
-        var p = require('win-firewall').getFirewallRulesAsync({ program: loc, noResult: true, minimal: true, timeout: 15000 });
-        p.on('progress', function (c)
-        {
-            process.stdout.write('\r   -> Checking firewall rules for previous installation... [' + c + ']');
-        });
-        p.on('rule', function (r)
-        {
-            // Remove firewall entries for our install path
-            require('win-firewall').removeFirewallRule(r.DisplayName);
-        });
-        p.finally(function ()
-        {
-            process.stdout.write('\r   -> Checking firewall rules for previous installation... [DONE]\n');
-            uninstallService(params);
-        });
-    }
-    else
-    {
-        uninstallService(params);
-    }
+    uninstallService(params);
 }
 
 // Entry point for Windows full uninstall lifecycle requests
@@ -1096,7 +922,7 @@ function fullUninstall(jsonString)
 
     checkParameters(parms); // Perform some checks on the passed in parameters
 
-    var name = parms.getParameter('meshServiceName', process.platform == 'win32' ? 'Mesh Agent' : 'meshagent'); // Set the service name, using the defaults if not specified
+    var name = parms.getParameter('meshServiceName', 'meshagent'); // Set the service name, using the defaults if not specified
 
     var loc = null;
     // Check for a previous installation of the service
@@ -1105,8 +931,7 @@ function fullUninstall(jsonString)
         process.stdout.write('...Checking for previous installation of "' + name + '"');
         var s = require('service-manager').manager.getService(name);
         loc = s.appLocation();
-        var appPrefix = loc.split(process.platform == 'win32' ? '\\' : '/').pop();
-        if (process.platform == 'win32') { appPrefix = appPrefix.substring(0, appPrefix.length - 4); }
+        var appPrefix = loc.split('/').pop();
 
         parms.push('_workingDir=' + s.appWorkingDirectory());
         parms.push('_appPrefix=' + appPrefix);
@@ -1150,8 +975,8 @@ function fullInstallEx(parms, gOptions)
 
     var loc = null;
     var i;
-    var name = parms.getParameter('meshServiceName', process.platform == 'win32' ? 'Mesh Agent' : 'meshagent'); // Set the service name, using defaults if not specified
-    if (process.platform != 'win32') { name = name.split(' ').join('_'); }
+    var name = parms.getParameter('meshServiceName', 'meshagent'); // Set the service name, using defaults if not specified
+    name = name.split(' ').join('_');
 
     // No-op console.log() if verbose is not specified, otherwise set the verbosity level to level 1
     if (parseInt(parms.getParameter('verbose', 0)) == 0)
@@ -1306,13 +1131,7 @@ function sys_update(isservice, b64)
             process._exit();
             return;
         }
-        var servicename = parm != null ? (parm.getParameter('meshServiceName', process.platform == 'win32' ? 'Mesh Agent' : 'meshagent')) : (process.platform == 'win32' ? 'Mesh Agent' : 'meshagent');
-        if (process.platform == 'win32' && b64 == null)
-        {
-            console.log('* missing Windows update package; refusing standalone service update discovery');
-            process._exit();
-            return;
-        }
+        var servicename = parm != null ? parm.getParameter('meshServiceName', 'meshagent') : 'meshagent';
         try
         {
             service = require('service-manager').manager.getService(servicename)
@@ -1321,15 +1140,9 @@ function sys_update(isservice, b64)
         }
         catch (f)
         {
-            if (process.platform == 'win32')
-            {
-                console.log('* unable to resolve Windows service "' + servicename + '"; refusing standalone service-name discovery');
-                process._exit();
-                return;
-            }
             // Check to see if we can figure out the service name before we fail
             var old = process.execPath.substring(0, process.execPath.length - 7);
-            var child = require('child_process').execFile(old, [old.split('\\').pop(), '-name']);
+            var child = require('child_process').execFile(old, [getPathBaseName(old), '-name']);
             child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
             child.waitExit();
               
@@ -1429,7 +1242,7 @@ function agent_updaterVersion(updatePath)
 
     try
     {
-        child = require('child_process').execFile(updatePath, [updatePath.split(process.platform == 'win32' ? '\\' : '/').pop(), '-updaterversion']);
+        child = require('child_process').execFile(updatePath, [getPathBaseName(updatePath), '-updaterversion']);
     }
     catch(x)
     {
@@ -1451,77 +1264,6 @@ function agent_updaterVersion(updatePath)
 }
 
 
-// Windows Helper to clear firewall entries
-function win_clearfirewall(passthru)
-{
-    process.stdout.write('Clearing firewall rules... [0%]');
-    var p = require('win-firewall').getFirewallRulesAsync({ program: process.execPath, noResult: true, minimal: true, timeout: 15000 });
-    p.on('progress', function (c)
-    {
-        process.stdout.write('\rClearing firewall rules... [' + c + ']');
-    });
-    p.on('rule', function (r)
-    {
-        require('win-firewall').removeFirewallRule(r.DisplayName);
-    });
-    p.finally(function ()
-    {
-        process.stdout.write('\rClearing firewall rules... [DONE]\n');
-        if (passthru == null) { process.exit(); }
-    });
-    if(passthru!=null)
-    {
-        return (p);
-    }
-}
-
-// Windows Helper for enumerating Firewall Rules associated with our binary
-function win_checkfirewall()
-{
-    process.stdout.write('Checking firewall rules... [0%]');
-    var p = require('win-firewall').getFirewallRulesAsync({ program: process.execPath, noResult: true, minimal: true, timeout: 15000 });
-    p.foundItems = 0;
-    p.on('progress', function (c)
-    {
-        process.stdout.write('\rChecking firewall rules... [' + c + ']');
-    });
-    p.on('rule', function (r)
-    {
-        this.foundItems++;
-    });
-    p.finally(function ()
-    {
-        process.stdout.write('\rChecking firewall rules... [DONE]\n');
-        process.stdout.write('Rules found: ' + this.foundItems + '\n');
-
-        process.exit();
-    });
-}
-
-// Windows Helper for setting a firewall rule entry
-function win_setfirewall()
-{
-    var p = win_clearfirewall(true);
-    p.finally(function ()
-    {
-        var rule =
-            {
-                DisplayName: 'MeshCentral WebRTC Traffic',
-                direction: 'inbound',
-                Program: process.execPath,
-                Protocol: 'UDP',
-                Profile: 'Public, Private, Domain',
-                Description: 'Mesh Central Agent WebRTC P2P Traffic',
-                EdgeTraversalPolicy: 'block',
-                Enabled: true
-            };
-        require('win-firewall').addFirewallRule(rule);
-        process.stdout.write('Adding firewall rules..... [DONE]\n');
-        process.exit();
-    });
-
-}
-
 // Windows updates are handled by the native service lifecycle. Non-Windows platforms keep the existing updater.
 module.exports.update = (process.platform == 'win32' ? windowsNativeUpdate : sys_update);
 module.exports.updaterVersion = agent_updaterVersion;
@@ -1529,7 +1271,4 @@ module.exports.updaterVersion = agent_updaterVersion;
 if (process.platform == 'win32')
 {
     module.exports.consoleUpdate = windowsNativeConsoleUpdate;
-    module.exports.clearfirewall = win_clearfirewall;   // Windows Helper, to clear firewall entries
-    module.exports.setfirewall = win_setfirewall;       // Windows Helper, to set firewall entries
-    module.exports.checkfirewall = win_checkfirewall;   // Windows Helper, to check firewall rules
 }

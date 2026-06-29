@@ -41,6 +41,10 @@ function assert(condition, message) {
     }
 }
 
+function readSource(filePath) {
+    return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
@@ -48,9 +52,9 @@ function main() {
     const polyfillsPath = path.resolve('microscript', 'ILibDuktape_Polyfills.c');
     const meshcorePath = path.resolve('..', 'MeshCentral', 'agents', 'meshcore.js');
 
-    const moduleSource = fs.readFileSync(modulePath, 'utf8');
-    const polyfillsSource = fs.readFileSync(polyfillsPath, 'utf8');
-    const meshcoreSource = fs.existsSync(meshcorePath) ? fs.readFileSync(meshcorePath, 'utf8') : '';
+    const moduleSource = readSource(modulePath);
+    const polyfillsSource = readSource(polyfillsPath);
+    const meshcoreSource = fs.existsSync(meshcorePath) ? readSource(meshcorePath) : '';
     const embeddedMatch = polyfillsSource.match(/addCompressedModule\('win-deskutils', Buffer\.from\('([^']+)', 'base64'\)\);/);
     const embeddedSource = embeddedMatch ? zlib.inflateSync(Buffer.from(embeddedMatch[1], 'base64')).toString('utf8') : '';
 

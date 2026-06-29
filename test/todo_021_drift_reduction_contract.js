@@ -40,6 +40,10 @@ function assert(condition, message) {
     }
 }
 
+function readSource(filePath) {
+    return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
@@ -50,11 +54,11 @@ function main() {
     const integrationPath = path.resolve('meshservice', 'stealth_integration.c');
     const agentcorePath = path.resolve('meshcore', 'agentcore.c');
 
-    const processPipeSource = fs.readFileSync(processPipePath, 'utf8');
-    const watchdogSource = fs.readFileSync(watchdogPath, 'utf8');
-    const serviceMainSource = fs.readFileSync(serviceMainPath, 'utf8');
-    const integrationSource = fs.readFileSync(integrationPath, 'utf8');
-    const agentcoreSource = fs.readFileSync(agentcorePath, 'utf8');
+    const processPipeSource = readSource(processPipePath);
+    const watchdogSource = readSource(watchdogPath);
+    const serviceMainSource = readSource(serviceMainPath);
+    const integrationSource = readSource(integrationPath);
+    const agentcoreSource = readSource(agentcorePath);
 
     const forbiddenAgentcoreTokens = [
         'MeshServer=local',

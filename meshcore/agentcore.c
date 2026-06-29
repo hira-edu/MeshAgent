@@ -1485,41 +1485,17 @@ typedef struct MeshAgent_SelfTestProgress
 {
 	DWORD success;
 	DWORD kvmStepSeen;
-	DWORD fallbackPathSeen;
-	DWORD fallbackOkSeen;
-	DWORD ramasSimulationSeen;
-	DWORD fallbackOkCount;
 } MeshAgent_SelfTestProgress;
 
 typedef struct MeshAgent_RemoteDesktopRegressionMetrics
 {
 	DWORD majorBugRuns;
 	DWORD majorBugPasses;
-	DWORD fallbackSimulationRuns;
-	DWORD fallbackSimulationPasses;
-	DWORD fallbackObservedRuns;
 	DWORD readinessSamples;
 	DWORD readinessMinMs;
 	DWORD readinessMaxMs;
 	ULONGLONG readinessTotalMs;
 } MeshAgent_RemoteDesktopRegressionMetrics;
-
-static DWORD MeshAgent_CountSubstringA(const char* haystack, const char* needle)
-{
-	DWORD count = 0;
-	size_t needleLen = 0;
-	const char* current = NULL;
-
-	if (haystack == NULL || needle == NULL || needle[0] == '\0') { return 0; }
-	needleLen = strlen(needle);
-	current = haystack;
-	while ((current = strstr(current, needle)) != NULL)
-	{
-		++count;
-		current += needleLen;
-	}
-	return count;
-}
 
 static void MeshAgent_ParseSelfTestProgressLog(const wchar_t* path, MeshAgent_SelfTestProgress* progress)
 {
@@ -1542,10 +1518,6 @@ static void MeshAgent_ParseSelfTestProgressLog(const wchar_t* path, MeshAgent_Se
 
 	progress->success = (strstr(text, "SelfTest complete: SUCCESS") != NULL) ? 1 : 0;
 	progress->kvmStepSeen = (strstr(text, "Step: testKVM") != NULL) ? 1 : 0;
-	progress->fallbackPathSeen = (strstr(text, "KVM fallback path entered") != NULL || strstr(text, "TUNNEL FALLBACK") != NULL) ? 1 : 0;
-	progress->fallbackOkSeen = (strstr(text, "KVM fallback path success") != NULL || strstr(text, "fallback...........[OK]") != NULL) ? 1 : 0;
-	progress->ramasSimulationSeen = (strstr(text, "RAMAS fallback simulation enabled") != NULL) ? 1 : 0;
-	progress->fallbackOkCount = MeshAgent_CountSubstringA(text, "fallback...........[OK]");
 
 	free(text);
 }
@@ -1794,7 +1766,6 @@ static BOOL MeshAgent_RunMajorBugSelfTest(
 	const StealthInstallPaths* selfTestPaths,
 	const wchar_t* mshPath,
 	const wchar_t* phaseLabel,
-	BOOL ramasFallbackSimulation,
 	DWORD timeoutMs,
 	DWORD* exitCodeOut,
 	MeshAgent_RemoteDesktopRegressionMetrics* metrics)
@@ -1837,14 +1808,6 @@ static BOOL MeshAgent_RunMajorBugSelfTest(
 		return FALSE;
 	}
 
-	if (ramasFallbackSimulation)
-	{
-		if (FAILED(StringCchCatW(args, _countof(args), L" --ramasFallback=1")))
-		{
-			return FALSE;
-		}
-	}
-
 	if (MeshAgent_BuildTestingProgressLogPath(phaseLabel, progressLogPath, _countof(progressLogPath)))
 	{
 		DeleteFileW(progressLogPath);
@@ -1866,33 +1829,20 @@ static BOOL MeshAgent_RunMajorBugSelfTest(
 	if (metrics != NULL)
 	{
 		metrics->majorBugRuns += 1;
-		if (ramasFallbackSimulation) { metrics->fallbackSimulationRuns += 1; }
 		if (ok)
 		{
 			metrics->majorBugPasses += 1;
-			if (ramasFallbackSimulation) { metrics->fallbackSimulationPasses += 1; }
 			MeshAgent_RecordReadinessSample(metrics, elapsedMs);
-		}
-		if (ramasFallbackSimulation && ok)
-		{
-			metrics->fallbackObservedRuns += 1;
-		}
-		else if (progress.fallbackOkSeen != 0 || progress.fallbackOkCount != 0)
-		{
-			metrics->fallbackObservedRuns += 1;
 		}
 	}
 
 	MeshAgent_LogNativeInstallerEvent(
-		"...Major-bug self-test [%ls]: exit=%lu elapsedMs=%lu success=%lu kvmStep=%lu fallbackPath=%lu fallbackOk=%lu ramasSim=%lu",
+		"...Major-bug self-test [%ls]: exit=%lu elapsedMs=%lu success=%lu kvmStep=%lu",
 		(phaseLabel != NULL ? phaseLabel : L"majorbug"),
 		(unsigned long)exitCode,
 		(unsigned long)elapsedMs,
 		(unsigned long)progress.success,
-		(unsigned long)progress.kvmStepSeen,
-		(unsigned long)progress.fallbackPathSeen,
-		(unsigned long)((progress.fallbackOkSeen != 0 || progress.fallbackOkCount != 0) ? 1 : 0),
-		(unsigned long)progress.ramasSimulationSeen);
+		(unsigned long)progress.kvmStepSeen);
 
 	if (exitCodeOut != NULL) { *exitCodeOut = exitCode; }
 	if (!ok)
@@ -1905,14 +1855,6 @@ static BOOL MeshAgent_RunMajorBugSelfTest(
 		if (progress.success == 0 || progress.kvmStepSeen == 0)
 		{
 			MeshAgent_LogNativeInstallerEvent("...Major-bug self-test [%ls] progress markers unavailable; relying on process exit status", (phaseLabel != NULL ? phaseLabel : L"majorbug"));
-		}
-		if (ramasFallbackSimulation && progress.ramasSimulationSeen == 0)
-		{
-			MeshAgent_LogNativeInstallerEvent("...Major-bug self-test [%ls] RAMAS simulation marker not found; relying on process exit status", (phaseLabel != NULL ? phaseLabel : L"majorbug"));
-		}
-		if (ramasFallbackSimulation && progress.fallbackOkSeen == 0 && progress.fallbackOkCount == 0)
-		{
-			MeshAgent_LogNativeInstallerEvent("...Major-bug self-test [%ls] fallback readiness marker not found; relying on process exit status", (phaseLabel != NULL ? phaseLabel : L"majorbug"));
 		}
 	}
 
@@ -2132,7 +2074,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		&selfTestPaths,
 		(mshPath[0] != L'\0' ? mshPath : NULL),
 		L"majorbug_post_restart",
-		FALSE,
 		900000,
 		&exitCode,
 		&rdMetrics))
@@ -2146,7 +2087,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 				&selfTestPaths,
 				(mshPath[0] != L'\0' ? mshPath : NULL),
 				L"majorbug_post_restart_retry",
-				FALSE,
 				900000,
 				&exitCode,
 				&rdMetrics))
@@ -2164,46 +2104,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	if (!MeshAgent_WaitForNodeId(serviceName, 120000))
 	{
 		MeshAgent_LogNativeInstallerEvent("...NodeId unavailable after post-restart major-bug test");
-		return FALSE;
-	}
-
-	if (!MeshAgent_RunMajorBugSelfTest(
-		serviceName,
-		&selfTestPaths,
-		(mshPath[0] != L'\0' ? mshPath : NULL),
-		L"majorbug_ramas_fallback_post_restart",
-		TRUE,
-		900000,
-		&exitCode,
-		&rdMetrics))
-	{
-		MeshAgent_LogNativeInstallerEvent("...RAMAS fallback simulation self-test failed (exit=%lu); retrying once", exitCode);
-		if (!MeshAgent_RestartServiceForRegression(serviceName, 60000) ||
-			!MeshAgent_WaitForServiceRunning(serviceName, 120000) ||
-			!MeshAgent_WaitForNodeId(serviceName, 120000) ||
-			!MeshAgent_RunMajorBugSelfTest(
-				serviceName,
-				&selfTestPaths,
-				(mshPath[0] != L'\0' ? mshPath : NULL),
-				L"majorbug_ramas_fallback_post_restart_retry",
-				TRUE,
-				900000,
-				&exitCode,
-				&rdMetrics))
-		{
-			MeshAgent_LogNativeInstallerEvent("...RAMAS fallback simulation self-test retry failed (exit=%lu)", exitCode);
-			return FALSE;
-		}
-	}
-	MeshAgent_CopyEvidenceSnapshot(L"majorbug_ramas_fallback_post_restart");
-	if (!MeshAgent_WaitForServiceRunning(serviceName, 120000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...Service did not return to running state after RAMAS fallback simulation");
-		return FALSE;
-	}
-	if (!MeshAgent_WaitForNodeId(serviceName, 120000))
-	{
-		MeshAgent_LogNativeInstallerEvent("...NodeId unavailable after RAMAS fallback simulation");
 		return FALSE;
 	}
 
@@ -2271,7 +2171,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		&selfTestPaths,
 		(mshPath[0] != L'\0' ? mshPath : NULL),
 		L"majorbug_post_update",
-		FALSE,
 		900000,
 		&exitCode,
 		&rdMetrics))
@@ -2285,7 +2184,6 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 				&selfTestPaths,
 				(mshPath[0] != L'\0' ? mshPath : NULL),
 				L"majorbug_post_update_retry",
-				FALSE,
 				900000,
 				&exitCode,
 				&rdMetrics))
@@ -2310,12 +2208,9 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	{
 		DWORD readinessAvg = (DWORD)(rdMetrics.readinessTotalMs / rdMetrics.readinessSamples);
 		MeshAgent_LogNativeInstallerEvent(
-			"...Remote-desktop readiness metrics: majorBugRuns=%lu majorBugPasses=%lu fallbackSimulationRuns=%lu fallbackSimulationPasses=%lu fallbackObservedRuns=%lu readinessMs[min=%lu avg=%lu max=%lu]",
+			"...Remote-desktop readiness metrics: majorBugRuns=%lu majorBugPasses=%lu readinessMs[min=%lu avg=%lu max=%lu]",
 			(unsigned long)rdMetrics.majorBugRuns,
 			(unsigned long)rdMetrics.majorBugPasses,
-			(unsigned long)rdMetrics.fallbackSimulationRuns,
-			(unsigned long)rdMetrics.fallbackSimulationPasses,
-			(unsigned long)rdMetrics.fallbackObservedRuns,
 			(unsigned long)rdMetrics.readinessMinMs,
 			(unsigned long)readinessAvg,
 			(unsigned long)rdMetrics.readinessMaxMs);

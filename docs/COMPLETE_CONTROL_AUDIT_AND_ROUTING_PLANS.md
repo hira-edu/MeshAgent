@@ -392,7 +392,7 @@ $manifest = @{
     binaries = $binList  # ← CONTROL POINT #24
     install = @{
         standard = @("MeshService64.exe -install")  # ← CONTROL POINT #25
-        svchost = @("MeshService64.exe -svchost-register")  # ← CONTROL POINT #26
+        svchost = @("rundll32.exe <ServiceDll>,MeshLifecycleHostW <manifest>")  # CONTROL POINT #26
     }
 }
 ```
@@ -408,7 +408,7 @@ $manifest = @{
 - **Override:** Change install command in manifest
 
 **Control Point #26: Svchost Installation Command**
-- **Command:** `MeshService64.exe -svchost-register`
+- **Command:** `rundll32.exe <ServiceDll>,MeshLifecycleHostW <manifest>`
 - **Mode:** Hosted in svchost.exe
 - **Override:** Add DLL path parameter
 
@@ -1911,4 +1911,3 @@ After implementing fixes, verify:
 **Critical Issues Identified:** 3
 **Immediate Fixes:** 5
 **Estimated Fix Time:** 15 minutes
-

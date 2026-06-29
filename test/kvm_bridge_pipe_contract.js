@@ -40,13 +40,21 @@ function assert(condition, message) {
     }
 }
 
+function readSource(filePath) {
+    return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
-    const bridgePath = path.resolve('meshservice', 'stealth_svchost.c');
-    const kvmSource = fs.readFileSync(kvmPath, 'utf8');
-    const bridgeSource = fs.readFileSync(bridgePath, 'utf8');
+	const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
+	const tilePath = path.resolve('meshcore', 'KVM', 'Windows', 'tile.cpp');
+	const bridgePath = path.resolve('meshservice', 'stealth_svchost.c');
+	const smokePath = path.resolve('test', 'rundll32_bridge_smoke.js');
+	const kvmSource = readSource(kvmPath);
+	const tileSource = readSource(tilePath);
+	const bridgeSource = readSource(bridgePath);
+	const smokeSource = readSource(smokePath);
 
     const checks = {
         masterBuildsGuidPipeBaseName: kvmSource.includes('\\\\\\\\.\\\\pipe\\\\MeshKvm_%ls'),
@@ -70,7 +78,48 @@ function main() {
             kvmSource.includes('kvm_relay_write_bridge_input(ctx, buf, len)') &&
             kvmSource.includes('kvm_relay_write_bridge_input(ctx, packet->buffer, packet->bufferLen)'),
         masterWritesPausePacketsToPipe: kvmSource.includes('static BOOL kvm_relay_write_bridge_pause(KvmRelayContext* ctx, int pause)') && kvmSource.includes('MNG_KVM_PAUSE') && kvmSource.includes('kvm_relay_write_bridge_pause(ctx, normalizedPause)'),
-        masterWaitsAndAttachesPipeInLiveSpawnPath: kvmSource.includes('!kvm_relay_build_bridge_pipe_namesW(bridgeInputPipeNameW') &&
+        slaveStartupPacketsHonorWriteBackpressure:
+            kvmSource.includes('static ILibTransport_DoneState kvm_server_write_packet_checked(') &&
+            kvmSource.includes('static int kvm_server_wait_for_remote_resume(') &&
+            kvmSource.includes('kvm_server_write_packet_checked(writeHandler, (char*)buffer, 8, reserved, "resolution")') &&
+            kvmSource.includes('kvm_server_write_packet_checked(writeHandler, (char*)buffer, 8, reserved, "refresh-resolution")') &&
+            kvmSource.includes('kvm_server_write_packet_checked(writeHandler, dwData + 4') &&
+            kvmSource.includes('kvm_server_write_packet_checked(writeHandler, (char*)buf, (int)tilesize, reserved, "picture")') &&
+            kvmSource.includes('kvm_server_wait_for_remote_resume("startup-output")') &&
+            kvmSource.includes('kvm_server_set_remote_pause_state(block[4])') &&
+            kvmSource.includes('g_pause = 1;') &&
+            kvmSource.includes('ILibTransport_DoneState_ERROR') &&
+            !kvmSource.includes('Pausing here seems to fix connection issues') &&
+            !kvmSource.includes('Sleep(100); // Pausing here'),
+		slaveSerializesSharedTileState:
+			kvmSource.includes('static INIT_ONCE gKvmTileInfoLockOnce = INIT_ONCE_STATIC_INIT;') &&
+            kvmSource.includes('static CRITICAL_SECTION gKvmTileInfoLock;') &&
+            kvmSource.includes('static LONG gKvmTileInfoGeneration = 0;') &&
+            kvmSource.includes('InitOnceExecuteOnce(&gKvmTileInfoLockOnce, kvm_server_initialize_tile_info_lock, NULL, NULL)') &&
+            kvmSource.includes('static struct tileInfo_t **kvm_server_allocate_tile_info(') &&
+            kvmSource.includes('static int kvm_server_reset_tile_info_locked(') &&
+            kvmSource.includes('oldTileInfo = tileInfo;') &&
+            kvmSource.includes('tileInfo = newTileInfo;') &&
+            kvmSource.includes('InterlockedIncrement(&gKvmTileInfoGeneration);') &&
+            kvmSource.includes('captureTileGeneration = InterlockedCompareExchange(&gKvmTileInfoGeneration, 0, 0);') &&
+            kvmSource.includes('kvm_server_reset_tile_info_locked("startup-crc", 1, 0)') &&
+            kvmSource.includes('kvm_server_reset_tile_info_locked("refresh", 1, 0)') &&
+            kvmSource.includes('kvm_server_reset_tile_info_locked("frame-scan"') &&
+			kvmSource.includes('kvm_server_free_tile_info(cleanupTileInfo, cleanupTileHeightCount)') &&
+			!kvmSource.includes('ILIBCRITICALEXIT(254)'),
+		slaveSkipsCaptureWhenDesktopUnavailable:
+			kvmSource.includes('int gKvmDesktopCaptureReady = 1;') &&
+			kvmSource.includes('int desktopAccessReady = 1;') &&
+			kvmSource.includes('desktopAccessReady = 0;') &&
+			kvmSource.includes('gKvmDesktopCaptureReady = desktopAccessReady;') &&
+			tileSource.includes('extern int gKvmDesktopCaptureReady;') &&
+			tileSource.includes('if (!gKvmDesktopCaptureReady)') &&
+			tileSource.includes('KVM capture: target desktop is not accessible; skipping capture backends'),
+		runtimeSmokeRejectsTimeoutExit:
+			smokeSource.includes('bridge log used timeout-based helper exit') &&
+			smokeSource.includes("line.includes('KvmSessionBridgeW mainloop exited') ||") &&
+			!smokeSource.includes("line.includes('KvmSessionBridgeW mainloop shutdown timed out after')),\n\t\t\t'bridge log missing controlled exit line'"),
+		masterWaitsAndAttachesPipeInLiveSpawnPath: kvmSource.includes('!kvm_relay_build_bridge_pipe_namesW(bridgeInputPipeNameW') &&
             kvmSource.includes('!kvm_relay_create_bridge_server_pipeW(bridgeInputPipeNameW, PIPE_ACCESS_OUTBOUND, &ctx->bridgeInputPipeHandle)') &&
             kvmSource.includes('!kvm_relay_create_bridge_server_pipeW(bridgeOutputPipeNameW, PIPE_ACCESS_INBOUND, &ctx->bridgeOutputPipeHandle)') &&
             kvmSource.includes('!kvm_relay_wait_for_bridge_client(ctx, ctx->bridgeInputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, restartSessionGeneration, &lastError, &connectAbortedBySessionChange)') &&
@@ -86,6 +135,20 @@ function main() {
             !bridgeSource.includes('useLegacySinglePipeBridge') &&
             !bridgeSource.includes('CreateFileW(controlPipeName, GENERIC_READ | GENERIC_WRITE'),
         slaveRedirectsPipeToStdHandles: bridgeSource.includes('SetStdHandle(STD_INPUT_HANDLE, bridgeStdIn)') && bridgeSource.includes('SetStdHandle(STD_OUTPUT_HANDLE, bridgeStdOut)')
+            && bridgeSource.includes('kvmConsoleMode = 1;')
+            && bridgeSource.includes('return kvm_server_mainloop(mainloopParam);')
+            && bridgeSource.includes('mainloopParam[0] = Stealth_KvmBridgeWriteSink;')
+            && bridgeSource.includes('mainloopParam[1] = &ctx;')
+            && bridgeSource.includes('Stealth_KvmBridgeInputThread')
+            && bridgeSource.includes('inputThread == NULL && ctx.firstOutputLogged != 0 && g_shutdown == 0')
+            && bridgeSource.includes('KvmSessionBridgeW input thread started after first output')
+            && bridgeSource.includes('KvmSessionBridgeW input pipe closed')
+            && bridgeSource.includes('PeekNamedPipe(inputHandle')
+            && bridgeSource.includes('static BOOL Stealth_KvmBridgePipeDisconnected(')
+            && bridgeSource.includes('GetNamedPipeHandleStateW(pipeHandle')
+            && bridgeSource.includes('KvmSessionBridgeW control pipe disconnected')
+            && bridgeSource.includes('KvmSessionBridgeW data pipe disconnected')
+            && !bridgeSource.includes('We do NOT create a second Stealth_KvmBridgeInputThread')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
@@ -95,10 +158,12 @@ function main() {
     const report = {
         generatedUtc: new Date().toISOString(),
         success: true,
-        files: {
-            kvmPath,
-            bridgePath
-        },
+		files: {
+			kvmPath,
+			tilePath,
+			smokePath,
+			bridgePath
+		},
         checks
     };
 

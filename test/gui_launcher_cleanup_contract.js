@@ -40,6 +40,10 @@ function assert(condition, message) {
     }
 }
 
+function readSource(filePath) {
+    return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
@@ -49,12 +53,12 @@ function main() {
     const defPath = path.resolve('meshservice', 'MeshServiceHost.def');
     const installerPath = path.resolve('meshservice', 'stealth_installer.c');
     const guiHarnessPath = path.resolve('test', 'gui_button_race_harness', 'Program.cs');
-    const serviceMain = fs.readFileSync(serviceMainPath, 'utf8');
-    const contract = fs.readFileSync(contractPath, 'utf8');
-    const header = fs.readFileSync(headerPath, 'utf8');
-    const def = fs.readFileSync(defPath, 'utf8');
-    const installer = fs.readFileSync(installerPath, 'utf8');
-    const guiHarness = fs.readFileSync(guiHarnessPath, 'utf8');
+    const serviceMain = readSource(serviceMainPath);
+    const contract = readSource(contractPath);
+    const header = readSource(headerPath);
+    const def = readSource(defPath);
+    const installer = readSource(installerPath);
+    const guiHarness = readSource(guiHarnessPath);
 
     const checks = {
         exportsCleanupEntrypoint:

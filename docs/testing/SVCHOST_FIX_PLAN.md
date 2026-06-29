@@ -41,7 +41,7 @@
 
 ## Current Gaps / Follow-Up
 1. **PowerShell deploy transcript** - ✅ Completed 2025-10-23 via elevated helper; see `docs/testing/evidence/deploy_run.log` for the full transcript.
-2. **Native C++ registration** – `MeshService-2022.exe -svchost-register` now bypasses the ACL creation failure, but a full end-to-end run is still outstanding (requires elevated interactive session to observe console output).
+2. **Native C++ registration** – direct executable registration has been retired; registration must be exercised through the `MeshLifecycleHostW` lifecycle host with elevated end-to-end evidence.
 3. **Automated update workflow** – No scripted validation yet of manifest rotation / staged swap tooling; manual safe-swap evidence exists but automated test pending.
 
 ## Evidence Inventory
@@ -56,5 +56,4 @@
 
 ## Artifacts
 - `docs/testing/artifacts/svchost-deploy-20251023.zip` – generated bundle (ignored by Git); attach the file as a GitHub release asset for downstream auditors.
-
 

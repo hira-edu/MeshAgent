@@ -22,9 +22,10 @@ function createMeshAgentStub() {
     };
 }
 
-function loadRecoveryCoreVm() {
+function loadRecoveryCoreVm(options) {
     const code = fs.readFileSync(RECOVERYCORE_PATH, 'utf8');
     const meshAgentStub = createMeshAgentStub();
+    const moduleStubs = (options != null && typeof options.moduleStubs === 'object' && options.moduleStubs != null) ? options.moduleStubs : {};
 
     function mirrorUmhctlOverrides(sandbox, umhSandbox) {
         [
@@ -50,6 +51,7 @@ function loadRecoveryCoreVm() {
         setInterval,
         clearInterval,
         require(moduleName) {
+            if (Object.prototype.hasOwnProperty.call(moduleStubs, moduleName)) { return moduleStubs[moduleName]; }
             if (moduleName === 'MeshAgent') { return meshAgentStub; }
             if (moduleName === 'umhctl') {
                 if (sandbox.__umhctlModule != null) {

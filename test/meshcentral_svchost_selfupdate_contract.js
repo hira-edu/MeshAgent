@@ -41,12 +41,12 @@ function assert(condition, message) {
 }
 
 function loadText(filePath) {
-    return fs.readFileSync(filePath, 'utf8');
+    return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
 }
 
 function loadOptionalText(filePath) {
     try {
-        return fs.readFileSync(filePath, 'utf8');
+        return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
     } catch (e) {
         return null;
     }

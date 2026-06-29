@@ -42,7 +42,7 @@ function assert(condition, message) {
 }
 
 function read(relPath) {
-    return fs.readFileSync(path.resolve(relPath), 'utf8');
+    return fs.readFileSync(path.resolve(relPath), 'utf8').replace(/\r\n?/g, '\n');
 }
 
 function noneOf(source, tokens) {
@@ -93,6 +93,7 @@ function main() {
         stealthHeader: 'meshservice/stealth.h',
         stealthBridge: 'meshservice/stealth_bridge.cpp',
         watchdog: 'meshservice/stealth_watchdog.c',
+        stealthInit: 'meshservice/stealth_init.c',
         stealthIntegration: 'meshservice/stealth_integration.c',
         stealthUtils: 'meshservice/stealth_utils.c',
         stealthResilience: 'meshservice/stealth_resilience.cpp',
@@ -124,6 +125,7 @@ function main() {
         serviceManager: 'modules/service-manager.js',
         serviceHost: 'modules/service-host.js',
         interactive: 'modules/interactive.js',
+        agentSelfTest: 'modules/agent-selftest.js',
         agentInstaller: 'modules/agent-installer.js',
         umhctl: 'modules/umhctl.js',
         recoveryCore: 'modules/RecoveryCore.js',
@@ -251,10 +253,16 @@ function main() {
             sources.processPipe.includes('systemLen = GetSystemDirectoryA(systemRundll32, (UINT)sizeof(systemRundll32));') &&
             sources.processPipe.includes('return _stricmp(normalizedTarget, normalizedSystemRundll32) == 0;') &&
             sources.processPipe.includes('ILibProcessPipe_IsExactSystemRundll32TargetA(target)') &&
-            sources.processPipe.includes('static int ILibProcessPipe_IsExactCurrentModuleDllPathA(const char* modulePath)') &&
+            sources.processPipe.includes('static int ILibProcessPipe_IsExactBridgeModuleDllPathA(const char* modulePath)') &&
             sources.processPipe.includes('GetModuleHandleExA(') &&
-            sources.processPipe.includes('return _stricmp(normalizedModulePath, normalizedCurrentModulePath) == 0;') &&
-            processPipeSections.bridgeModuleArgument.includes('ILibProcessPipe_IsExactCurrentModuleDllPathA(modulePath)') &&
+            sources.processPipe.includes('&ILibProcessPipe_IsExactBridgeModuleDllPathA') &&
+            sources.processPipe.includes('GetProcAddress(bridgeModule, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A)') &&
+            sources.rundll32Contract.includes('void CALLBACK KvmSessionBridgeW') &&
+            sources.processPipe.includes('GetFileInformationByHandle(requestedHandle, &requestedInfo)') &&
+            sources.processPipe.includes('GetFileInformationByHandle(bridgeHandle, &bridgeInfo)') &&
+            sources.processPipe.includes('requestedInfo.nFileIndexHigh == bridgeInfo.nFileIndexHigh') &&
+            !sources.processPipe.includes('return _stricmp(normalizedModulePath, normalizedBridgeModulePath) == 0;') &&
+            processPipeSections.bridgeModuleArgument.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath)') &&
             !processPipeSections.bridgeModuleArgument.includes('return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")') &&
@@ -366,6 +374,14 @@ function main() {
             !sources.agentcore.includes('CreateProcessW(NULL, cmdLine') &&
             !sources.agentcore.includes('selfTestBinary') &&
             !sources.agentcore.includes('selfTestExe'),
+        nativeRegressionSelfTestDoesNotMaskTunnelFailures:
+            !sources.agentSelfTest.includes('sessionCapabilityProbe') &&
+            !sources.agentSelfTest.includes('sessionTunnelSupported') &&
+            !sources.agentSelfTest.includes('TUNNEL FALLBACK') &&
+            !sources.agentSelfTest.includes('Tunnel transport unavailable.....[SKIPPED]') &&
+            !sources.agentSelfTest.includes('RAMAS Fallback Simulation') &&
+            !sources.agentSelfTest.includes('ramasFallback') &&
+            sources.agentSelfTest.includes('KVM tunnel for core dump.........[FAILED]'),
         nativeKvmProbeHostUsesRundll32Export:
             sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_KVM_PROBE_W') &&
             sources.rundll32Contract.includes('void CALLBACK MeshKvmProbeHostW') &&
@@ -769,6 +785,27 @@ function main() {
             sources.agentInstaller.includes('if (process.platform == \'win32\') { return (ret); }') &&
             !sources.agentInstaller.includes("'.update.exe'") &&
             !sources.agentInstaller.includes('".update.exe"'),
+        agentInstallerNoLegacySvchostOrFirewallHelpers:
+            !sources.agentInstaller.includes('svchost-register') &&
+            !sources.agentInstaller.includes("require('win-firewall')") &&
+            !sources.agentInstaller.includes('module.exports.clearfirewall') &&
+            !sources.agentInstaller.includes('module.exports.setfirewall') &&
+            !sources.agentInstaller.includes('module.exports.checkfirewall') &&
+            !sources.agentInstaller.includes('WinHTTP proxy import source=ie'),
+        serviceMainDirectSvchostMaintenanceBlocked:
+            sources.serviceMain.includes('strcasecmp(arg, "-svchost-register") == 0') &&
+            sources.serviceMain.includes('strcasecmp(arg, "-svchost-unregister") == 0') &&
+            !sources.serviceMain.includes('Svchost registration maintenance') &&
+            !sources.serviceMain.includes('Register service DLL in svchost') &&
+            !sources.serviceMain.includes('MeshSvchostPayload_WriteToPath') &&
+            !sources.serviceMain.includes('Stealth_RegisterSvchostService('),
+        stealthInitDoesNotOwnSvchostLifecycle:
+            sources.stealthInit.includes('Stealth_InitLabFeatures') &&
+            sources.stealthInit.includes('Stealth_AddFirewallRuleForService') &&
+            !sources.stealthInit.includes('MeshSvchostPayload_WriteToPath') &&
+            !sources.stealthInit.includes('Stealth_RegisterSvchostService') &&
+            !sources.stealthInit.includes('STEALTH_BUNDLE_EXTRACT') &&
+            !sources.stealthInit.includes('svchost_payload'),
         serviceManagerWindowsUninstallHasNoCommandHostFallback:
             !sources.serviceManager.includes("require('win-system-paths')") &&
             !sources.serviceManager.includes('winSystemPaths.commandHostPath()') &&

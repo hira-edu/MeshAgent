@@ -58,10 +58,63 @@ function runCommand(file, args) {
     return result;
 }
 
-function formatTaskTime(date) {
+function formatTaskStartBoundary(date) {
+    const year = String(date.getFullYear()).padStart(4, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
     const hours = String(date.getHours()).padStart(2, '0');
     const minutes = String(date.getMinutes()).padStart(2, '0');
-    return `${hours}:${minutes}`;
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+}
+
+function xmlEscape(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function buildSystemScheduledTaskXml(rundll32Path, rundll32Arguments, startBoundary) {
+    return [
+        '<?xml version="1.0" encoding="UTF-16"?>',
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
+        '  <RegistrationInfo>',
+        `    <Date>${xmlEscape(startBoundary)}</Date>`,
+        '    <Author>MeshAgentRuntimeProbe</Author>',
+        '  </RegistrationInfo>',
+        '  <Principals>',
+        '    <Principal id="Author">',
+        '      <UserId>S-1-5-18</UserId>',
+        '    </Principal>',
+        '  </Principals>',
+        '  <Settings>',
+        '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
+        '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>',
+        '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>',
+        '    <IdleSettings>',
+        '      <Duration>PT10M</Duration>',
+        '      <WaitTimeout>PT1H</WaitTimeout>',
+        '      <StopOnIdleEnd>false</StopOnIdleEnd>',
+        '      <RestartOnIdle>false</RestartOnIdle>',
+        '    </IdleSettings>',
+        '  </Settings>',
+        '  <Triggers>',
+        '    <TimeTrigger>',
+        `      <StartBoundary>${xmlEscape(startBoundary)}</StartBoundary>`,
+        '    </TimeTrigger>',
+        '  </Triggers>',
+        '  <Actions Context="Author">',
+        '    <Exec>',
+        `      <Command>${xmlEscape(rundll32Path)}</Command>`,
+        `      <Arguments>${xmlEscape(rundll32Arguments)}</Arguments>`,
+        '    </Exec>',
+        '  </Actions>',
+        '</Task>',
+        ''
+    ].join('\r\n');
 }
 
 function resolveSystemRundll32Path(args) {
@@ -116,16 +169,18 @@ async function waitForReadableFile(filePath, timeoutMs) {
 async function runSystemProbe(rundll32Path, dllPath, mode) {
     const taskName = `MeshAgentKvmSessionProbe_${mode}_${process.pid}_${Date.now()}`;
     const reportPath = path.join(os.tmpdir(), `${taskName}.json`);
-    const scheduleTime = formatTaskTime(new Date(Date.now() + 60000));
+    const taskXmlPath = path.join(os.tmpdir(), `${taskName}.xml`);
+    const startBoundary = formatTaskStartBoundary(new Date(Date.now() + 60000));
     const modeArgs = mode === 'auto' ? ' --auto-selected-tsid' : '';
-    const commandLine = `"${rundll32Path}" "${dllPath}",MeshKvmProbeHostW -kvm-bridge-session-change-probe-child "${reportPath}"${modeArgs}`;
+    const rundll32Arguments = `"${dllPath}",MeshKvmProbeHostW -kvm-bridge-session-change-probe-child "${reportPath}"${modeArgs}`;
+    const commandLine = `"${rundll32Path}" ${rundll32Arguments}`;
+    const taskXml = buildSystemScheduledTaskXml(rundll32Path, rundll32Arguments, startBoundary);
+
+    fs.writeFileSync(taskXmlPath, Buffer.from(`\ufeff${taskXml}`, 'utf16le'));
     const create = runCommand('schtasks', [
         '/Create',
         '/TN', taskName,
-        '/RU', 'SYSTEM',
-        '/SC', 'ONCE',
-        '/ST', scheduleTime,
-        '/TR', commandLine,
+        '/XML', taskXmlPath,
         '/F'
     ]);
     if (create.status !== 0) {
@@ -141,6 +196,8 @@ async function runSystemProbe(rundll32Path, dllPath, mode) {
         return {
             taskName,
             reportPath,
+            taskXmlPath,
+            taskXml,
             commandLine,
             create,
             run,
@@ -148,6 +205,7 @@ async function runSystemProbe(rundll32Path, dllPath, mode) {
         };
     } finally {
         runCommand('schtasks', ['/Delete', '/TN', taskName, '/F']);
+        try { fs.unlinkSync(taskXmlPath); } catch (error) { if (error.code !== 'ENOENT') { throw error; } }
     }
 }
 
@@ -261,6 +319,7 @@ async function main() {
             explicit: {
                 taskName: explicitProbe.systemProbe.taskName,
                 taskReportPath: explicitProbe.systemProbe.reportPath,
+                taskXmlPath: explicitProbe.systemProbe.taskXmlPath,
                 taskCommandLine: explicitProbe.systemProbe.commandLine,
                 createTaskStdout: explicitProbe.systemProbe.create.stdout || '',
                 createTaskStderr: explicitProbe.systemProbe.create.stderr || '',
@@ -271,6 +330,7 @@ async function main() {
             auto: {
                 taskName: autoProbe.systemProbe.taskName,
                 taskReportPath: autoProbe.systemProbe.reportPath,
+                taskXmlPath: autoProbe.systemProbe.taskXmlPath,
                 taskCommandLine: autoProbe.systemProbe.commandLine,
                 createTaskStdout: autoProbe.systemProbe.create.stdout || '',
                 createTaskStderr: autoProbe.systemProbe.create.stderr || '',
@@ -290,6 +350,8 @@ async function main() {
         writeJson(path.join(evidenceDir, 'kvm_bridge_session_change_runtime.json'), report);
         writeText(path.join(evidenceDir, 'explicit_probe.json'), explicitProbe.systemProbe.reportContent.trim() + '\n');
         writeText(path.join(evidenceDir, 'auto_probe.json'), autoProbe.systemProbe.reportContent.trim() + '\n');
+        writeText(path.join(evidenceDir, 'explicit_task.xml'), explicitProbe.systemProbe.taskXml);
+        writeText(path.join(evidenceDir, 'auto_task.xml'), autoProbe.systemProbe.taskXml);
         writeText(path.join(evidenceDir, 'explicit-schtasks-create-stdout.txt'), report.probes.explicit.createTaskStdout);
         writeText(path.join(evidenceDir, 'explicit-schtasks-create-stderr.txt'), report.probes.explicit.createTaskStderr);
         writeText(path.join(evidenceDir, 'explicit-schtasks-run-stdout.txt'), report.probes.explicit.runTaskStdout);
