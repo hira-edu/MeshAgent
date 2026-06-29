@@ -27,9 +27,17 @@ function assert(condition, message) {
 }
 
 function extractFunction(source, signature) {
-    const start = source.indexOf(signature);
+    let start = source.indexOf(signature);
+    let bodyStart = -1;
+    while (start >= 0) {
+        bodyStart = source.indexOf('{', start);
+        const prototypeEnd = source.indexOf(';', start);
+        if (bodyStart >= 0 && (prototypeEnd < 0 || bodyStart < prototypeEnd)) {
+            break;
+        }
+        start = source.indexOf(signature, start + signature.length);
+    }
     assert(start >= 0, `${signature} not found`);
-    const bodyStart = source.indexOf('{', start);
     assert(bodyStart >= 0, `${signature} body start not found`);
     let depth = 0;
     for (let i = bodyStart; i < source.length; ++i) {
@@ -55,7 +63,7 @@ function main() {
     const collector = extractFunction(source, 'static size_t Stealth_CollectConflictingServiceAliases(');
     const cleanup = extractFunction(source, 'static size_t Stealth_CleanupConflictingServiceAliases(');
     const artifactCleanup = extractFunction(source, 'static void Stealth_RemoveRetiredBridgePayloadArtifactsByPath(');
-    const moduleTermination = extractFunction(source, 'static void Stealth_TerminateProcessesByLoadedModulePath(const wchar_t* modulePath)\n{');
+    const moduleTermination = extractFunction(source, 'static void Stealth_TerminateProcessesByLoadedModulePath(const wchar_t* modulePath)');
     const installFlow = extractFunction(source, 'static BOOL Stealth_ApplyInstallFlow(');
     const uninstallFlow = extractFunction(source, 'static BOOL Stealth_ApplyUninstallFlow(void)');
     const updateFlow = extractFunction(source, 'static BOOL Stealth_ApplyUpdateFlow(');

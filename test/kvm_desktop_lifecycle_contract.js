@@ -95,7 +95,7 @@ function main() {
     const setResolutionEnsureIndex = setResolutionBody.indexOf('kvm_server_ensure_tile_geometry();');
     const setResolutionPrimeIndex = setResolutionBody.indexOf('kvm_server_prime_startup_geometry_if_needed();');
     const setResolutionInvalidGeometryIndex = setResolutionBody.indexOf('if (SCREEN_WIDTH <= 0 || SCREEN_HEIGHT <= 0)');
-    const setResolutionTileCountIndex = setResolutionBody.indexOf('TILE_WIDTH_COUNT = SCALED_WIDTH / TILE_WIDTH;');
+    const setResolutionTileCountIndex = setResolutionBody.indexOf('newTileWidthCount = newScaledWidth / TILE_WIDTH;');
 
     const checks = {
         kvmTileDefaultsAreSharedConstants:

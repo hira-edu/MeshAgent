@@ -53,9 +53,10 @@ function main() {
         rewritesTokenSessionId: processPipeSource.includes('SetTokenInformation(userToken, (TOKEN_INFORMATION_CLASS)TokenSessionId'),
         usesSpecifiedSessionId: processPipeSource.includes('if (spawnType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER) { sessionId = (DWORD)(uint64_t)sid; }'),
         desktopBridgeKeepsServiceToken:
-            processPipeSource.includes('useLoggedOnUserToken = 0;') &&
-            !processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA(target, parameters)') &&
-            !processPipeSource.includes('useLoggedOnUserToken = (spawnType != ILibProcessPipe_SpawnTypes_WINLOGON'),
+            processPipeSource.includes('procHandle = GetCurrentProcess();') &&
+            processPipeSource.includes('OpenProcessToken(procHandle, TOKEN_DUPLICATE | TOKEN_QUERY, &token)') &&
+            !processPipeSource.includes('WTSQueryUserToken(') &&
+            !processPipeSource.includes('useLoggedOnUserToken'),
         assignsDesktopBySpawnType: processPipeSource.includes('info.lpDesktop = (spawnType == ILibProcessPipe_SpawnTypes_WINLOGON) ? L"Winsta0\\\\Winlogon" : L"winsta0\\\\default";'),
         loadsUserenvDynamically: processPipeSource.includes('LoadLibraryExW(L"userenv.dll"'),
         createsTokenEnvironmentBlock: processPipeSource.includes('ILibProcessPipe_TryCreateEnvironmentBlock(userToken, &tokenEnvironment'),

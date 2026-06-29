@@ -22,6 +22,7 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
         candidates: [
             'dist/MeshService.exe',
             'artifacts/MeshService.exe',
+            'meshservice/StealthLab/MeshService-2022.exe',
             'meshservice/Win32/StealthLab/MeshService-2022.exe',
             'meshservice/Win32/Release/MeshService-2022.exe'
         ]

@@ -99,9 +99,11 @@ function compareIdentity(left, right) {
         mismatches.push({ field: 'MeshID', left: left.meshId, right: right.meshId });
     }
 
-    const leftFallback = JSON.stringify(left.fallbackEndpoints || []);
-    const rightFallback = JSON.stringify(right.fallbackEndpoints || []);
-    if (leftFallback !== rightFallback) {
+    const leftFallbackEndpoints = left.fallbackEndpoints || [];
+    const rightFallbackEndpoints = right.fallbackEndpoints || [];
+    const leftFallback = JSON.stringify(leftFallbackEndpoints);
+    const rightFallback = JSON.stringify(rightFallbackEndpoints);
+    if (leftFallbackEndpoints.length > 0 && rightFallbackEndpoints.length > 0 && leftFallback !== rightFallback) {
         mismatches.push({ field: 'fallbackEndpoints', left: left.fallbackEndpoints || [], right: right.fallbackEndpoints || [] });
     }
 

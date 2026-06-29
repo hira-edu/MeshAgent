@@ -105,7 +105,7 @@ function main() {
             kvmSource.includes('if (!kvm_relay_flush_cached_control_packets(ctx))'),
         slaveWaitsOnLocalPauseOnly: kvmSource.includes('while (!g_shutdown && g_pause != 0)') &&
             !kvmSource.includes('while (!g_shutdown && (g_pause != 0 || g_remotepause != 0))'),
-        slaveRecordsRemotePauseRequests: kvmSource.includes('g_remotepause = block[4];') &&
+        slaveRecordsRemotePauseRequests: kvmSource.includes('kvm_server_set_remote_pause_state(block[4]);') &&
             kvmSource.includes('"KVM [SLAVE]: Remote %s requested"'),
         bridgeWriteSinkFailsOnBrokenPipe: bridgeSource.includes('outputHandle = (ctx->stdOutHandle != NULL && ctx->stdOutHandle != INVALID_HANDLE_VALUE) ? ctx->stdOutHandle : ctx->dataPipeHandle;') &&
             bridgeSource.includes('if (!WriteFile(outputHandle, buffer, (DWORD)bufferLen, &written, NULL))') &&
