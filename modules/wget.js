@@ -30,37 +30,10 @@ var writable = require('stream').Writable;
 function wget(remoteUri, localFilePath, wgetoptions)
 {
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-    var agentConnected = false;
     require('events').EventEmitter.call(ret, true)
         .createEvent('bytes')
         .createEvent('abort')
         .addMethod('abort', function () { this._request.abort(); });
-
-    try
-    {
-        agentConnected = require('MeshAgent').isControlChannelConnected;
-    }
-    catch (e)
-    {
-    }
-
-    // We only need to check proxy settings if the agent is not connected, because when the agent
-    // connects, it automatically configures the proxy for JavaScript.
-    if (!agentConnected)
-    {
-        if (process.platform == 'win32')
-        {
-            var reg = require('win-registry');
-            if (reg.QueryKey(reg.HKEY.CurrentUser, 'Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', 'ProxyEnable') == 1)
-            {
-                var proxyUri = reg.QueryKey(reg.HKEY.CurrentUser, 'Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings', 'ProxyServer');
-                var options = require('http').parseUri('http://' + proxyUri);
-
-                console.log('proxy => ' + proxyUri);
-                require('global-tunnel').initialize(options);
-            }
-        }
-    }
 
     var reqOptions = require('http').parseUri(remoteUri);
     if (wgetoptions)

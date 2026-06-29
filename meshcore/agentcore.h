@@ -47,16 +47,6 @@ typedef char JS_ENGINE_CONTEXT[16];
 
 #define ILibDuktape_MeshAgent_LoggedOnUsers	"\xFF_MeshAgent_LoggedOnUsers"
 
-#ifndef MESH_PROXY_CANDIDATE_MAX
-#define MESH_PROXY_CANDIDATE_MAX 8
-#endif
-#ifndef MESH_PROXY_URI_MAX
-#define MESH_PROXY_URI_MAX 1024
-#endif
-#ifndef MESH_PROXY_SOURCE_MAX
-#define MESH_PROXY_SOURCE_MAX 32
-#endif
-
 typedef enum MeshAgent_Posix_PlatformTypes
 {
 	MeshAgent_Posix_PlatformTypes_UNKNOWN = 0,
@@ -188,16 +178,6 @@ typedef struct MeshAgentHostContainer
 	ILibSimpleDataStore masterDb;
 	int configPathUsesCWD;
 	ILibWebClient_StateObject volatile controlChannel;  // High Fix #7: Volatile for concurrent access
-	struct sockaddr_in6* proxyServer;
-	char proxyCandidates[MESH_PROXY_CANDIDATE_MAX][MESH_PROXY_URI_MAX];
-	char proxyCandidateSources[MESH_PROXY_CANDIDATE_MAX][MESH_PROXY_SOURCE_MAX];
-	char activeProxyUri[MESH_PROXY_URI_MAX];
-	char activeProxySource[MESH_PROXY_SOURCE_MAX];
-	int proxyCandidateCount;
-	int proxyFallbackIndex;
-	int activeProxyCandidateIndex;
-	int proxyAttemptEstablished;
-	volatile int proxyFailed;  // Mark volatile for thread safety
 	void * volatile controlChannelRequest;  // High Fix #3: Volatile for proper cleanup tracking
 
 #ifdef WIN32
@@ -217,9 +197,6 @@ typedef struct MeshAgentHostContainer
 	char serverip[1024];
 	AgentIdentifiers agentID;
 	int serverIndex;
-	int brandedFallbackIndex;
-	int usingBrandedEndpoint;
-	int triedNoProxy_Index;
 	int retryTime;
 	MeshAgentHost_BatteryInfo batteryState;
 	char meshId[UTIL_SHA384_HASHSIZE];
@@ -281,7 +258,6 @@ typedef struct MeshAgentHostContainer
 	long consoleText_timeStamp;
 	int consoleText_counter;
 	int consoleText_maxRate;
-	int autoproxy_status;
 #if defined(_WINSERVICE)
 	int runningAsConsole;
 #endif
@@ -313,7 +289,7 @@ noUpdateCoreModule:			If set, will prevent the agent from taking a new meshcore 
 enableILibRemoteLogging:	Integer value specifying the port number to enable Web Logging. Disabled otherwise
 fakeUpdate:					If set, the agent fakes a self-update to the same version once per binary (does NOT disable future updates)
 forceUpdate:				If set, forces one self-update per binary on next start (no longer permanently disables updates)
-ignoreProxyFile:			If set, will cause the agent to ignore any proxy settings
+ignoreProxyFile:			If set, will cause the agent to ignore a sibling .proxy file
 logUpdate:					If set, will cause the agent to log self-update status
 jsDebugPort:				Specify a JS Debugger Port
 maxLogSize:					Specifies the maximum size of the error log file. 
@@ -324,7 +300,7 @@ remoteMouseRender:			If set, will always render the remote mouse cursor for KVM
 showModuleNames:			If set, will display the name of modules when they are loaded for the first time
 skipmaccheck:				If set, the agent will not change NodeID on local mac address changes.
 slaveKvmLog:				[Linux] If set, will enable logging inside the Child KVM Process.
-WebProxy:					Manually specify proxy configuration
+WebProxy:					Explicit proxy configuration. Ambient proxy discovery is not used.
 *
 *
 */

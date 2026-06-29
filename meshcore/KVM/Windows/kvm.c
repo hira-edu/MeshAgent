@@ -285,9 +285,15 @@ static void kvm_write_scaling_factor(volatile LONG* scalingFactor, int scaling)
 	InterlockedExchange(scalingFactor, KVM_NormalizeScalingFactor(scaling));
 }
 
+#ifndef KVM_PENDING_PROBE_REFRESH
 #define KVM_PENDING_PROBE_REFRESH	0x01
+#endif
+#ifndef KVM_PENDING_PROBE_DISPLAYS
 #define KVM_PENDING_PROBE_DISPLAYS	0x02
+#endif
+#ifndef KVM_PENDING_PROBE_INPUTLOCK
 #define KVM_PENDING_PROBE_INPUTLOCK	0x04
+#endif
 #define KVM_SESSION_START_TOKEN_RETRY_DELAY_MS 500
 #define KVM_SESSION_START_TOKEN_RETRY_MAX 20
 
@@ -855,7 +861,7 @@ static unsigned int kvm_bridge_debug_probe_mask_for_output(unsigned short packet
 {
 	switch (packetType)
 	{
-	case MNG_KVM_SCREEN:
+	case MNG_KVM_PICTURE:
 		return KVM_PENDING_PROBE_REFRESH;
 	case MNG_KVM_GET_DISPLAYS:
 		return KVM_PENDING_PROBE_DISPLAYS;

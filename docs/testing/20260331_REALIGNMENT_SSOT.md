@@ -173,13 +173,10 @@ There may not be a silent race where protection state is applied first and captu
 
 ### Remote-desktop Session 1 boundary
 
-- The Session 1 bridge must use `rundll32.exe` as the host process, loading the agent's KVM payload DLL (built as `StealthLab_DLL` -> `MeshService-2022.dll`) via `rundll32.exe <path>\MeshService-2022.dll,KvmEntryPoint`. Direct self-exe KVM invocation (`agent->exePath` with `-kvm0`/`-kvm1` flags) is outside the retained contract and must be rejected outside the internal `rundll32`-hosted bridge.
+- The Session 1 bridge must use `rundll32.exe` as the host process, loading the agent's KVM payload DLL (built as `StealthLab_DLL` -> `MeshService-2022.dll`) via `rundll32.exe <path>\MeshService-2022.dll,KvmSessionBridgeW`. Direct self-exe KVM invocation (`agent->exePath` with `-kvm0`/`-kvm1` flags) is outside the retained contract and must be rejected outside the internal `rundll32`-hosted bridge.
 - **Why rundll32**: Microsoft-signed trusted binary, already allowlisted by AppLocker/SRP/WDAC, avoids AV/EDR flagging of custom executables in user sessions, leverages the existing DLL build target (`StealthLab_DLL`).
-- Two token acquisition strategies exist and must be consolidated into the rundll32 bridge:
-  - **ILibProcessPipe** (current upstream): duplicates the service's own SYSTEM token, sets `TokenSessionId` to the target session. Child runs as SYSTEM in the user session. More powerful for capture/input (bypasses UIPI entirely).
-  - **stealth_watchdog** (current helper monitor): uses `WTSQueryUserToken` to get the user's token, then `DuplicateTokenEx` with minimum required access rights. Child runs as the user. More secure but may hit UIPI if user is non-elevated.
-  - **Recommended for rundll32 bridge**: SYSTEM token approach (Approach B) for KVM/capture/input, since the helper needs SYSTEM IL to inject input into elevated windows and capture the secure desktop.
-- The RAMAS (Resilient Adaptive Multi-Attempt Spawn) cascade must be adapted for rundll32: `SPECIFIED_USER` -> `WINLOGON` -> `USER` -> `WINLOGON` fallback with token strategy selection per attempt.
+- The bridge token strategy is singular: duplicate the service's own SYSTEM token with minimum required rights, set `TokenSessionId` to the configured target session, and run the child as SYSTEM in that user session. User-token spawning is not an approved KVM bridge strategy.
+- The historical RAMAS multi-attempt cascade is retired. KVM bridge launch uses one configured rundll32 policy decision, records the exact decision/class/error/spawn type/bridge reason/command hash, and fails closed when that decision is denied.
 - Desktop targeting: `Winsta0\Winlogon` for secure desktop (WINLOGON spawn type), `winsta0\default` for normal desktop.
 - `CreateProcessAsUser` call: `rundll32.exe` as the application, DLL path + entry point as command line, `CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW`, proper `CreateEnvironmentBlock` for user profile. KVM bridge launches that need DACL/job hardening must create the process suspended and resume it only after hardening succeeds.
 - Process DACL protection (`Stealth_ProtectProcessByHandle`) must be applied to the spawned rundll32 process through the original creation handle before the helper thread runs, to prevent user/lockdown-software termination.

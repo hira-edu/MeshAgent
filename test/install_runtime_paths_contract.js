@@ -184,6 +184,12 @@ function main() {
     assert(!stealthSvchost.includes('%SystemRoot%\\\\System32\\\\svchost.exe'), 'svchost service registration must not use %SystemRoot% svchost fallback');
     assert(!stealthFirewall.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'firewall repair must not hard-code C:\\Windows svchost fallback');
     assert(!stealthInstaller.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'installer/validation must not hard-code C:\\Windows svchost fallback');
+    assert(!stealthFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)'), 'firewall repair must not prefer an installed-root svchost host');
+    assert(!stealthInstaller.includes('const wchar_t* hostToExcept = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
+        !stealthInstaller.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
+        !stealthInstaller.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(svchostPath'),
+        'installer firewall provisioning and validation must not select an installed-root svchost host');
+    assert(stealthInstaller.includes('Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);'), 'update/uninstall quiesce must target the exact installed ServiceDll module rather than a guessed host copy');
     const selectSvchostBody = extractFunction(stealthSvchost, 'static BOOL Stealth_SelectSvchostImage');
     const registerSvchostBody = extractFunction(stealthSvchost, 'BOOL Stealth_RegisterSvchostService');
     assert(selectSvchostBody.includes('UNREFERENCED_PARAMETER(dllPath);'), 'svchost image selection must not inspect or copy from the installed DLL directory');
@@ -312,7 +318,8 @@ function main() {
         const jsCaptureStartBody = extractFunction(moduleSource, 'function umhctlStartPreProtectionCaptureProcess');
         assert(jsCaptureStartBody.includes("if (process.platform == 'win32')"), `${modulePath} capture helper must have a Windows rundll32 branch`);
         assert(jsCaptureStartBody.includes("serviceDllPath + ',MeshPreProtectionCaptureW'"), `${modulePath} Windows capture helper must call the rundll32 pre-protection export`);
-        assert(jsCaptureStartBody.includes("return childProcess.execFile(process.execPath, ['-preprotection-capture', '--capture-path=' + paths.capturePath]);"), `${modulePath} non-Windows capture helper must retain the native validation path`);
+        assert(jsCaptureStartBody.includes('Pre-protection capture requires the Windows rundll32 MeshPreProtectionCaptureW contract'), `${modulePath} non-Windows capture helper must fail closed without a rundll32 contract`);
+        assert(!jsCaptureStartBody.includes("childProcess.execFile(process.execPath, ['-preprotection-capture'"), `${modulePath} capture helper must not self-exec the pre-protection capture validator`);
     }
 
     const deploy = readRepoFile(repoRoot, 'deploy.py');

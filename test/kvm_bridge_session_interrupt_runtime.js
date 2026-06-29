@@ -4,7 +4,8 @@ const {
     assert,
     parseArgs,
     readJsonText,
-    runSystemProbeWithPsExec,
+    resolveBridgeDllPath,
+    runSystemRundll32ProbeTask,
     writeJson,
     writeText
 } = require('./lib/kvm_runtime_helpers');
@@ -22,12 +23,16 @@ async function runInterruptProbe(options) {
     } = options;
     const masterLogStartOffset = fs.existsSync(masterLogPath) ? fs.statSync(masterLogPath).size : 0;
     const bridgeLogStartOffset = fs.existsSync(bridgeLogPath) ? fs.statSync(bridgeLogPath).size : 0;
-    const modeArg = unrelatedSessionEvent ? ' --unrelated-session' : '';
-    const systemProbe = await runSystemProbeWithPsExec(
-        exePath,
-        `-kvm-bridge-session-interrupt-probe ${connectDelayMs} ${interruptAfterMs}${modeArg}`,
+    const extraArgs = [String(connectDelayMs), String(interruptAfterMs)];
+    if (unrelatedSessionEvent) {
+        extraArgs.push('--unrelated-session');
+    }
+    const systemProbe = await runSystemRundll32ProbeTask(
+        dllPath,
+        '-kvm-bridge-session-interrupt-probe-child',
         {
             prefix: `meshagent_kvm_session_interrupt_${label}_${process.pid}_${Date.now()}`,
+            extraArgs,
             timeoutMs: 180000
         });
     const json = readJsonText(`kvm-bridge-session-interrupt-probe-${label}`, systemProbe.reportContent);
@@ -41,12 +46,15 @@ async function runInterruptProbe(options) {
         bridgeLogPath,
         connectDelayMs,
         interruptAfterMs,
-        psexecPath: systemProbe.psexecPath,
+        rundll32Path: systemProbe.rundll32Path,
+        taskName: systemProbe.taskName,
         taskReportPath: systemProbe.reportPath,
-        taskScriptPath: systemProbe.scriptPath,
-        psexecExitCode: systemProbe.psexec.status,
-        psexecStdout: systemProbe.psexec.stdout || '',
-        psexecStderr: systemProbe.psexec.stderr || '',
+        taskXmlPath: systemProbe.taskXmlPath,
+        taskCommandLine: systemProbe.commandLine,
+        createTaskStdout: systemProbe.create.stdout || '',
+        createTaskStderr: systemProbe.create.stderr || '',
+        runTaskStdout: systemProbe.run.stdout || '',
+        runTaskStderr: systemProbe.run.stderr || '',
         probe: json
     };
 
@@ -121,15 +129,14 @@ async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
-    const dllPath = args.dll ? path.resolve(args.dll) : path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
-    const masterLogPath = args['master-log'] ? path.resolve(args['master-log']) : path.resolve(path.dirname(exePath), 'svchost-debug.log');
+    const dllPath = resolveBridgeDllPath(exePath, args.dll);
+    const masterLogPath = args['master-log'] ? path.resolve(args['master-log']) : path.resolve(path.dirname(dllPath), 'svchost-debug.log');
     const bridgeLogPath = args['bridge-log'] ? path.resolve(args['bridge-log']) : path.resolve(path.dirname(dllPath), 'svchost-debug.log');
     const connectDelayMs = Number.parseInt(String(args['connect-delay-ms'] || '4000'), 10);
     const interruptAfterMs = Number.parseInt(String(args['interrupt-after-ms'] || '500'), 10);
 
     assert(Number.isFinite(connectDelayMs) && connectDelayMs >= 1000, `invalid connect delay ${args['connect-delay-ms']}`);
     assert(Number.isFinite(interruptAfterMs) && interruptAfterMs >= 100, `invalid interrupt delay ${args['interrupt-after-ms']}`);
-    assert(fs.existsSync(exePath), `probe executable missing at ${exePath}`);
     assert(fs.existsSync(dllPath), `bridge DLL missing at ${dllPath}`);
 
     const related = await runInterruptProbe({
@@ -173,8 +180,11 @@ async function main() {
         for (const item of [related, unrelated]) {
             const label = item.report.label;
             writeText(path.join(evidenceDir, `${label}-probe.json`), `${item.systemProbe.reportContent.trim()}\n`);
-            writeText(path.join(evidenceDir, `${label}-psexec-stdout.txt`), item.report.psexecStdout);
-            writeText(path.join(evidenceDir, `${label}-psexec-stderr.txt`), item.report.psexecStderr);
+            writeText(path.join(evidenceDir, `${label}-task.xml`), item.systemProbe.taskXml);
+            writeText(path.join(evidenceDir, `${label}-schtasks-create-stdout.txt`), item.report.createTaskStdout);
+            writeText(path.join(evidenceDir, `${label}-schtasks-create-stderr.txt`), item.report.createTaskStderr);
+            writeText(path.join(evidenceDir, `${label}-schtasks-run-stdout.txt`), item.report.runTaskStdout);
+            writeText(path.join(evidenceDir, `${label}-schtasks-run-stderr.txt`), item.report.runTaskStderr);
             if (Array.isArray(item.report.masterLogTail)) {
                 writeText(path.join(evidenceDir, `${label}-master-svchost-debug-tail.txt`), `${item.report.masterLogTail.join('\n')}\n`);
             }
@@ -191,6 +201,8 @@ async function main() {
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
+            `RUNDLL32_PATH=${related.report.rundll32Path}`,
+            `DLL_PATH=${report.dllPath}`,
             `CONNECT_DELAY_MS=${connectDelayMs}`,
             `INTERRUPT_AFTER_MS=${interruptAfterMs}`,
             `RELATED_SETUP_MS=${related.report.probe.setupMs}`,

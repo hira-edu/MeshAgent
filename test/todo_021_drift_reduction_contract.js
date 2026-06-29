@@ -51,14 +51,28 @@ function main() {
     const processPipePath = path.resolve('microstack', 'ILibProcessPipe.c');
     const watchdogPath = path.resolve('meshservice', 'stealth_watchdog.c');
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
+    const resourcePath = path.resolve('meshservice', 'resource.h');
     const integrationPath = path.resolve('meshservice', 'stealth_integration.c');
     const agentcorePath = path.resolve('meshcore', 'agentcore.c');
+    const agentcoreHeaderPath = path.resolve('meshcore', 'agentcore.h');
+    const proxyHelperPath = path.resolve('modules', 'proxy-helper.js');
+    const wgetPath = path.resolve('modules', 'wget.js');
+    const configGuidePath = path.resolve('STEALTHLAB_CONFIG_GUIDE.md');
+    const regressionMatrixPath = path.resolve('docs', 'testing', '20260331_REALIGNMENT_REGRESSION_MATRIX.md');
+    const todoMatrixPath = path.resolve('docs', 'testing', '20260331_REALIGNMENT_TODO_MATRIX.md');
 
     const processPipeSource = readSource(processPipePath);
     const watchdogSource = readSource(watchdogPath);
     const serviceMainSource = readSource(serviceMainPath);
+    const resourceSource = readSource(resourcePath);
     const integrationSource = readSource(integrationPath);
     const agentcoreSource = readSource(agentcorePath);
+    const agentcoreHeaderSource = readSource(agentcoreHeaderPath);
+    const proxyHelperSource = readSource(proxyHelperPath);
+    const wgetSource = readSource(wgetPath);
+    const configGuideSource = readSource(configGuidePath);
+    const regressionMatrixSource = readSource(regressionMatrixPath);
+    const todoMatrixSource = readSource(todoMatrixPath);
 
     const forbiddenAgentcoreTokens = [
         'MeshServer=local',
@@ -75,6 +89,33 @@ function main() {
     ];
 
     const forbiddenAgentcoreHits = forbiddenAgentcoreTokens.filter((token) => agentcoreSource.includes(token));
+    const forbiddenProxyDiscoveryTokens = [
+        'WinHttpGetProxyForUrl',
+        'netsh winhttp import proxy source=ie',
+        'ProxyEnable',
+        'ProxyServer',
+        'ProxyOverride',
+        'HKEY_USERS',
+        'win-registry',
+        'wpad',
+        'WPAD',
+        'autoproxy',
+        'gsettings',
+        '/etc/environment',
+        '/etc/yum.conf',
+        '/etc/apt',
+        '/etc/sysconfig',
+        'default gateway'
+    ];
+    const proxyDiscoverySurface = [
+        agentcoreSource,
+        agentcoreHeaderSource,
+        proxyHelperSource,
+        wgetSource,
+        serviceMainSource,
+        resourceSource
+    ].join('\n');
+    const forbiddenProxyDiscoveryHits = forbiddenProxyDiscoveryTokens.filter((token) => proxyDiscoverySurface.includes(token));
 
     const checks = {
         processPipeRemovesLegacySessionKvmException:
@@ -138,7 +179,31 @@ function main() {
             agentcoreSource.includes('MeshAgent_AddUserAgentHeader(req, NULL);'),
         agentcoreUsesDirectTlsOnly: agentcoreSource.includes('ILibWebClient_Request_SetSNI(reqToken, host,') &&
             agentcoreSource.includes('ILibWebClient_Request_SetALPN(reqToken, NULL);'),
-        agentcoreRemovedRejectedDriftTokens: forbiddenAgentcoreHits.length === 0
+        agentcoreRemovedRejectedDriftTokens: forbiddenAgentcoreHits.length === 0,
+        proxyPolicyRejectsAmbientDiscovery: forbiddenProxyDiscoveryHits.length === 0,
+        proxyHelperRequiresExplicitWebProxy: proxyHelperSource.includes("getMshValue('WebProxy')") &&
+            proxyHelperSource.includes("throw ('No explicit proxy')") &&
+            proxyHelperSource.includes("Explicit WebProxy must include a port") &&
+            proxyHelperSource.includes('return false;'),
+        wgetDoesNotReadUserProxyRegistry: !wgetSource.includes('Internet Settings') &&
+            !wgetSource.includes('global-tunnel') &&
+            !wgetSource.includes('win-registry'),
+        agentcoreReadsOnlyExplicitProxy: agentcoreSource.includes('ILibSimpleDataStore_GetEx(agent->masterDb, "WebProxy", 8, inBuffer') &&
+            !agentcoreSource.includes("require('proxy-helper').getProxy();") &&
+            !agentcoreHeaderSource.includes('proxyCandidate') &&
+            !agentcoreHeaderSource.includes('proxyFallback') &&
+            !agentcoreHeaderSource.includes('usingBrandedEndpoint'),
+        guiRemovesRetiredAutoProxyControl: !serviceMainSource.includes('IDC_AUTOPROXY') &&
+            !serviceMainSource.includes('autoproxy') &&
+            !resourceSource.includes('IDC_AUTOPROXY') &&
+            !resourceSource.includes('Auto Proxy'),
+        activeDocsRejectProxyFallback: regressionMatrixSource.includes('| Explicit proxy policy |') &&
+            todoMatrixSource.includes('| P3 | P2 | REJECTED | TODO-059 | Reject heuristic proxy fallback chain') &&
+            configGuideSource.includes('ambient proxy discovery is not used') &&
+            !configGuideSource.includes('auto-helper') &&
+            !configGuideSource.includes('autoproxy=1') &&
+            !todoMatrixSource.includes('blocked proxy/WPAD') &&
+            !todoMatrixSource.includes('proxy-WPAD')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
@@ -152,11 +217,20 @@ function main() {
             processPipePath,
             watchdogPath,
             serviceMainPath,
+            resourcePath,
             integrationPath,
-            agentcorePath
+            agentcorePath,
+            agentcoreHeaderPath,
+            proxyHelperPath,
+            wgetPath,
+            configGuidePath,
+            regressionMatrixPath,
+            todoMatrixPath
         },
         forbiddenAgentcoreTokens,
         forbiddenAgentcoreHits,
+        forbiddenProxyDiscoveryTokens,
+        forbiddenProxyDiscoveryHits,
         checks
     };
 
@@ -166,7 +240,8 @@ function main() {
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
             `CHECKS=${Object.entries(checks).map(([name, passed]) => `${name}:${passed}`).join(',')}`,
-            `FORBIDDEN_AGENTCORE_HITS=${forbiddenAgentcoreHits.join(',') || '(none)'}`
+            `FORBIDDEN_AGENTCORE_HITS=${forbiddenAgentcoreHits.join(',') || '(none)'}`,
+            `FORBIDDEN_PROXY_DISCOVERY_HITS=${forbiddenProxyDiscoveryHits.join(',') || '(none)'}`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

@@ -554,6 +554,11 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
             evidenceDir: path.join(phaseDir, 'svchost_selfupdate_contract')
         },
         {
+            name: 'meshcentral-terminal-bridge-contract',
+            script: path.join(REPO_ROOT, 'test', 'meshcentral_terminal_bridge_contract.js'),
+            evidenceDir: path.join(phaseDir, 'terminal_bridge_contract')
+        },
+        {
             name: 'rundll32-bridge-smoke',
             script: path.join(REPO_ROOT, 'test', 'rundll32_bridge_smoke.js'),
             evidenceDir: path.join(phaseDir, 'bridge_smoke')
@@ -601,6 +606,7 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
         `MULTIPLEX_CONTRACT=${path.join(phaseDir, 'multiplex_contract', 'summary.txt')}`,
         `LOCATION_GUARD_CONTRACT=${path.join(phaseDir, 'location_guard_contract', 'summary.txt')}`,
         `SVCHOST_SELFUPDATE_CONTRACT=${path.join(phaseDir, 'svchost_selfupdate_contract', 'summary.txt')}`,
+        `TERMINAL_BRIDGE_CONTRACT=${path.join(phaseDir, 'terminal_bridge_contract', 'summary.txt')}`,
         `BRIDGE_SMOKE=${path.join(phaseDir, 'bridge_smoke', 'summary.txt')}`,
         `INITIAL_FRAME_RUNTIME=${path.join(phaseDir, 'kvm_initial_frame_runtime', 'summary.txt')}`,
         `SYSTEM_PICTURE_RUNTIME=${path.join(phaseDir, 'kvm_system_picture_runtime', 'summary.txt')}`

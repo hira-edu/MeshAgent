@@ -161,48 +161,6 @@ extern char __agentExecPath[];
 
 int gRemoteMouseRenderDefault = 0;
 
-static void MeshAgent_ClearActiveProxyAttempt(MeshAgentHostContainer *agent)
-{
-	if (agent == NULL) { return; }
-	agent->activeProxyUri[0] = 0;
-	agent->activeProxySource[0] = 0;
-	agent->activeProxyCandidateIndex = -1;
-	agent->proxyAttemptEstablished = 0;
-}
-
-static void MeshAgent_ClearGlobalTunnelProxy(MeshAgentHostContainer *agent)
-{
-	if (agent == NULL) { return; }
-	agent->proxyServer = NULL;
-	if (agent->meshCoreCtx == NULL) { return; }
-
-	int stackTop = duk_get_top(agent->meshCoreCtx);
-	if (duk_peval_string(agent->meshCoreCtx, "require('global-tunnel');") == 0)
-	{
-		duk_get_prop_string(agent->meshCoreCtx, -1, "end");
-		duk_swap_top(agent->meshCoreCtx, -2);
-		if (duk_pcall_method(agent->meshCoreCtx, 0) != 0) { duk_pop(agent->meshCoreCtx); }
-	}
-	duk_set_top(agent->meshCoreCtx, stackTop);
-}
-
-static void MeshAgent_RecordProxyAttemptFailure(MeshAgentHostContainer *agent, const char *reason)
-{
-	(void)reason;
-	if (agent == NULL) { return; }
-	agent->proxyFailed = 1;
-	MeshAgent_ClearGlobalTunnelProxy(agent);
-	MeshAgent_ClearActiveProxyAttempt(agent);
-}
-
-static void MeshAgent_RecordProxyAttemptSuccess(MeshAgentHostContainer *agent)
-{
-	if (agent == NULL) { return; }
-	agent->proxyFailed = 0;
-	agent->proxyFallbackIndex = 0;
-	MeshAgent_ClearActiveProxyAttempt(agent);
-}
-
 static int MeshAgent_IsIpLiteral(const char *host)
 {
 	struct in_addr addr4;
@@ -2648,21 +2606,15 @@ void MeshAgent_sendConsoleText(duk_context *ctx, char *format, ...)
 
 int MeshAgent_GetSystemProxy(MeshAgentHostContainer *agent, char *inBuffer, size_t inBufferLen)
 {
-	duk_size_t bufferLen = 0;
-	if (duk_peval_string(agent->meshCoreCtx, "require('proxy-helper').getProxy();") == 0)	// [string]
+	int proxyLen;
+	if (agent == NULL || agent->masterDb == NULL || inBuffer == NULL || inBufferLen == 0) { return 0; }
+	proxyLen = ILibSimpleDataStore_GetEx(agent->masterDb, "WebProxy", 8, inBuffer, (int)inBufferLen);
+	if (proxyLen <= 0 || (size_t)proxyLen >= inBufferLen)
 	{
-		char *buffer = (char*)duk_get_lstring(agent->meshCoreCtx, -1, &bufferLen);
-		if (bufferLen <= inBufferLen)
-		{
-			memcpy_s(inBuffer, inBufferLen, buffer, bufferLen);
-		}
-		else
-		{
-			bufferLen = 0;
-		}
+		inBuffer[0] = 0;
+		return 0;
 	}
-	duk_pop(agent->meshCoreCtx);															// ...
-	return((int)bufferLen);
+	return proxyLen;
 }
 #ifdef _POSIX
 size_t MeshAgent_Linux_ReadMemFile(char *path, char **buffer)
@@ -3516,6 +3468,10 @@ static MeshAgentHostContainer* ILibDuktape_MeshAgent_ResolveRemoteDesktopAgent(d
 }
 
 #if defined(_LINKVM)
+#if defined(WIN32) && defined(_WINSERVICE)
+#define REMOTE_DESKTOP_REFRESH_PROBE_TIMEOUT_MS (KVM_BRIDGE_CONNECT_TIMEOUT_MS * 2)
+#endif
+
 static int ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(RemoteDesktop_Ptrs *ptrs)
 {
 	if (ptrs == NULL || !ILibMemory_CanaryOK(ptrs) || ptrs->stream == NULL || ptrs->ctx == NULL) { return 0; }
@@ -3523,8 +3479,23 @@ static int ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(RemoteDesktop_
 #if defined(WIN32) && defined(_WINSERVICE)
 	if (ptrs->agent != NULL && ptrs->agent->runningAsConsole == 0 && ptrs->agent->pipeManager != NULL)
 	{
-		if (kvm_bridge_debug_get_child_present_for_reserved(ptrs) == 0) { return 0; }
-		if (kvm_bridge_debug_get_transport_active_for_reserved(ptrs) == 0) { return 0; }
+		KvmBridgeDebugSnapshot snapshot;
+		ULONGLONG now;
+		if (!kvm_bridge_debug_get_snapshot_for_reserved(ptrs, &snapshot)) { return 0; }
+		if (snapshot.childPresent == 0 || snapshot.transportActive == 0) { return 0; }
+		now = GetTickCount64();
+		if (snapshot.sessionStartTickMs != 0 &&
+			snapshot.lastScreenTickMs == 0 &&
+			(now - snapshot.sessionStartTickMs) > REMOTE_DESKTOP_REFRESH_PROBE_TIMEOUT_MS)
+		{
+			return 0;
+		}
+		if ((snapshot.pendingProbeMask & KVM_PENDING_PROBE_REFRESH) != 0 &&
+			(snapshot.pendingProbeSinceTickMs == 0 ||
+				(now - snapshot.pendingProbeSinceTickMs) > REMOTE_DESKTOP_REFRESH_PROBE_TIMEOUT_MS))
+		{
+			return 0;
+		}
 	}
 #endif
 	return 1;
@@ -4848,23 +4819,6 @@ duk_context* ScriptEngine_Stop(MeshAgentHostContainer *agent, char *contextGUID)
 	ILibDuktape_SetNativeUncaughtExceptionHandler(agent->meshCoreCtx, settings->nExeptionHandler, settings->nExceptionUserObject);
 	if (g_displayFinalizerMessages) { printf("\n\n==> Stopping JavaScript Engine\n"); }
 
-	if (agent->proxyServer != NULL)
-	{
-		ILibDuktape_globalTunnel_data *globalTunnel = ILibDuktape_GetNewGlobalTunnel(agent->meshCoreCtx);
-		if (globalTunnel != NULL)
-		{
-			memcpy_s(&(globalTunnel->proxyServer), sizeof(struct sockaddr_in6), agent->proxyServer, sizeof(struct sockaddr_in6));
-		}
-		else
-		{
-			MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: global tunnel unavailable for proxy propagation");
-		}
-	}
-	else
-	{
-		MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: no proxy server present");
-	}
-
 	ILibDuktape_ScriptContainer_FreeSettings(settings);
 	MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: exit ctx=%p", agent->meshCoreCtx);
 	return(agent->meshCoreCtx);
@@ -5073,7 +5027,6 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 // Called when the connection of the mesh server is fully authenticated
 void MeshServer_ServerAuthenticated(ILibWebClient_StateObject WebStateObject, MeshAgentHostContainer *agent) {
 	int len = 0;
-	MeshAgent_RecordProxyAttemptSuccess(agent);
 
 	// Send the mesh agent tag to the server
 	// We send the tag information independently of the meshcore because we could use this to select what meshcore to use on the server.
@@ -6274,8 +6227,6 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 	agent->controlChannel = NULL;
 	agent->serverAuthState = 0;
 	agent->serverConnectionState = 0;
-	MeshAgent_ClearGlobalTunnelProxy(agent);
-	MeshAgent_ClearActiveProxyAttempt(agent);
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): serverConnectionState reset to 0 before reconnect (descriptor=%d)", descriptorValue);
 	ILibWebClient_Disconnect(timedOutChannel);
 	MeshServer_Connect(agent);
@@ -6431,7 +6382,6 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 
 			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
 			agent->controlChannel = WebStateObject; // Set the agent MeshCentral server control channel
-			agent->proxyAttemptEstablished = 1;
 			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost | ILibRemoteLogging_Modules_ConsolePrint, ILibRemoteLogging_Flags_VerbosityLevel_1, "Control Channel Idle Timeout = %d seconds", agent->controlChannel_idleTimeout_seconds);
 			ILibWebClient_SetTimeout(WebStateObject, agent->controlChannel_idleTimeout_seconds, MeshServer_ControlChannel_IdleTimeout, agent);
 			ILibWebClient_WebSocket_SetPingPongHandler(WebStateObject, MeshServer_ControlChannel_PingSink, MeshServer_ControlChannel_PongSink, agent);
@@ -6544,8 +6494,6 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 				if (isActiveControlChannel != 0) { agent->controlChannel = NULL; } // Set the agent MeshCentral server control channel
 				ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
 				agent->serverConnectionState = 0;
-				MeshAgent_ClearGlobalTunnelProxy(agent);
-				MeshAgent_ClearActiveProxyAttempt(agent);
 				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: serverConnectionState reset to 0 (disconnected authoritative=%d trackedRequest=%d preCleared=%d)", isAuthoritativeDisconnect, isTrackedControlChannelRequest, isPreClearedEstablishedChannel);
 			}
 			else
@@ -6596,15 +6544,12 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 		ILibRemoteLogging_printf(ILibChainGetLogger(ILibWebClient_GetChainFromWebStateObject(WebStateObject)), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent Host Container: Mesh Server Connection Error (%d), trying again later.", descriptorValue);
 		printf("Mesh Server Connection Error [%d]\n", descriptorValue);
 
-		MeshAgent_RecordProxyAttemptFailure(agent, "connect-error");
 		if (isTrackedControlChannelRequest != 0 || agent->controlChannel == WebStateObject || (agent->controlChannel == NULL && agent->controlChannelRequest == NULL && requestState != NULL && requestState->established != 0 && requestState->webStateObject == WebStateObject))
 		{
 			if (agent->controlChannel == WebStateObject) { agent->controlChannel = NULL; }
 			agent->serverAuthState = 0;
 			agent->serverConnectionState = 0;
 			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
-			MeshAgent_ClearGlobalTunnelProxy(agent);
-			MeshAgent_ClearActiveProxyAttempt(agent);
 			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: header=NULL reset serverConnectionState to 0 before retry (trackedRequest=%d descriptor=%d)", isTrackedControlChannelRequest, descriptorValue);
 		}
 		if (agent->logUpdate != 0) 
@@ -6641,7 +6586,6 @@ void MeshServer_ConnectEx_NetworkError(void *j)
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx_NetworkError: Network Timeout (request=%p)", request);
 	if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Network Timeout Occurred..."); }
 	agent->serverConnectionState = 0; // We are cancelling connection request
-	MeshAgent_RecordProxyAttemptFailure(agent, "timeout");
 
 	printf("Network Timeout occurred...\n");
 
@@ -6690,8 +6634,6 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	if (agent->serverConnectionState != 0) { return; }
 	if (ILibIsChainBeingDestroyed(agent->chain) != 0) { return; }
 
-	MeshAgent_ClearGlobalTunnelProxy(agent);
-	MeshAgent_ClearActiveProxyAttempt(agent);
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: entry state=%d", agent->serverConnectionState);
 
 	len = ILibSimpleDataStore_Get(agent->masterDb, "MeshServer", ILibScratchPad2, sizeof(ILibScratchPad2));
@@ -7413,7 +7355,6 @@ MeshAgentHostContainer* MeshAgent_Create(MeshCommand_AuthInfo_CapabilitiesMask c
 
 	MeshAgentHostContainer* retVal = (MeshAgentHostContainer*)ILibMemory_Allocate(sizeof(MeshAgentHostContainer), 0, NULL, NULL);
 	retVal->selfTestLaunched = 0;
-	retVal->activeProxyCandidateIndex = -1;
 #ifdef WIN32
 	SYSTEM_POWER_STATUS stats;
 

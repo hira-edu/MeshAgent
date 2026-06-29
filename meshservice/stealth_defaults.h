@@ -21,7 +21,8 @@
 #define STEALTH_SECURE_DIR_DACL_SDDL         L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 #define STEALTH_INSTALL_ROOT_DACL_SDDL       L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;IU)"
 #define STEALTH_HOST_EXE_DACL_SDDL           L"D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;IU)"
-// BUGFIX: DLL needs same ACL as EXE to allow rundll32 USER spawn type to load it
+// DLL must be readable/executable by the target interactive session so the
+// SYSTEM-token rundll32 bridge can load it after TokenSessionId reassignment.
 #define STEALTH_SVCHOST_DLL_DACL_SDDL        L"D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;IU)"
 
 /*

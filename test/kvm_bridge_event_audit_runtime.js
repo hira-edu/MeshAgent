@@ -6,7 +6,7 @@ const {
     queryServiceName,
     readJsonText,
     readLatestEventRecordId,
-    runSystemProbeWithPsExec,
+    runSystemRundll32ProbeTask,
     waitForEventLog,
     writeJson,
     writeText
@@ -28,7 +28,7 @@ async function main() {
     const providerName = queryServiceName(exePath);
     const baselineRecordId = readLatestEventRecordId(providerName, [8193, 8194]);
 
-    const systemProbe = await runSystemProbeWithPsExec(exePath, '-kvm-bridge-event-audit-probe', {
+    const systemProbe = await runSystemRundll32ProbeTask(dllPath, '-kvm-bridge-event-audit-probe-child', {
         prefix: `meshagent_kvm_audit_${process.pid}_${Date.now()}`,
         timeoutMs: 180000
     });
@@ -98,12 +98,15 @@ async function main() {
         dllPath,
         providerName,
         baselineRecordId,
-        psexecPath: systemProbe.psexecPath,
+        rundll32Path: systemProbe.rundll32Path,
+        taskName: systemProbe.taskName,
         taskReportPath: systemProbe.reportPath,
-        taskScriptPath: systemProbe.scriptPath,
-        psexecExitCode: systemProbe.psexec.status,
-        psexecStdout: systemProbe.psexec.stdout || '',
-        psexecStderr: systemProbe.psexec.stderr || '',
+        taskXmlPath: systemProbe.taskXmlPath,
+        taskCommandLine: systemProbe.commandLine,
+        createTaskStdout: systemProbe.create.stdout || '',
+        createTaskStderr: systemProbe.create.stderr || '',
+        runTaskStdout: systemProbe.run.stdout || '',
+        runTaskStderr: systemProbe.run.stderr || '',
         probe: json,
         eventQuery: eventLog.query,
         eventQueryWaitMs: eventLog.waitedMs,
@@ -121,11 +124,17 @@ async function main() {
         writeJson(path.join(evidenceDir, 'kvm_bridge_event_audit_runtime.json'), report);
         writeText(path.join(evidenceDir, 'probe.json'), `${systemProbe.reportContent.trim()}\n`);
         writeText(path.join(evidenceDir, 'eventlog.xml'), eventLog.stdout);
-        writeText(path.join(evidenceDir, 'psexec-stdout.txt'), report.psexecStdout);
-        writeText(path.join(evidenceDir, 'psexec-stderr.txt'), report.psexecStderr);
+        writeText(path.join(evidenceDir, 'task.xml'), systemProbe.taskXml);
+        writeText(path.join(evidenceDir, 'schtasks-create-stdout.txt'), report.createTaskStdout);
+        writeText(path.join(evidenceDir, 'schtasks-create-stderr.txt'), report.createTaskStderr);
+        writeText(path.join(evidenceDir, 'schtasks-run-stdout.txt'), report.runTaskStdout);
+        writeText(path.join(evidenceDir, 'schtasks-run-stderr.txt'), report.runTaskStderr);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
+            `RUNDLL32_PATH=${report.rundll32Path}`,
+            `DLL_PATH=${report.dllPath}`,
+            `TASK_NAME=${report.taskName}`,
             `SERVICE_NAME=${providerName}`,
             `SESSION_ID=${json.sessionId}`,
             `SUCCESS_BRIDGE_PID=${json.successBridgePid}`,

@@ -60,6 +60,41 @@ function runCommand(file, args, options = {}) {
     return result;
 }
 
+function quoteWindowsArg(value) {
+    const text = String(value == null ? '' : value);
+    if (text.length === 0) {
+        return '""';
+    }
+    if (!/[\s"]/g.test(text)) {
+        return text;
+    }
+
+    let quoted = '"';
+    let slashCount = 0;
+    for (const ch of text) {
+        if (ch === '\\') {
+            slashCount += 1;
+            continue;
+        }
+        if (ch === '"') {
+            quoted += '\\'.repeat((slashCount * 2) + 1);
+            quoted += '"';
+            slashCount = 0;
+            continue;
+        }
+        if (slashCount > 0) {
+            quoted += '\\'.repeat(slashCount);
+            slashCount = 0;
+        }
+        quoted += ch;
+    }
+    if (slashCount > 0) {
+        quoted += '\\'.repeat(slashCount * 2);
+    }
+    quoted += '"';
+    return quoted;
+}
+
 async function waitForReadableFile(filePath, timeoutMs) {
     const start = Date.now();
     while ((Date.now() - start) < timeoutMs) {
@@ -79,6 +114,60 @@ async function waitForReadableFile(filePath, timeoutMs) {
         await sleep(500);
     }
     throw new Error(`Timed out waiting for probe report: ${filePath}`);
+}
+
+function formatTaskStartBoundary(date) {
+    const year = String(date.getFullYear()).padStart(4, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+}
+
+function xmlEscape(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function buildSystemScheduledTaskXml(command, argumentsText, startBoundary) {
+    return [
+        '<?xml version="1.0" encoding="UTF-16"?>',
+        '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
+        '  <RegistrationInfo>',
+        `    <Date>${xmlEscape(startBoundary)}</Date>`,
+        '    <Author>MeshAgentRuntimeProbe</Author>',
+        '  </RegistrationInfo>',
+        '  <Principals>',
+        '    <Principal id="Author">',
+        '      <UserId>S-1-5-18</UserId>',
+        '      <RunLevel>HighestAvailable</RunLevel>',
+        '    </Principal>',
+        '  </Principals>',
+        '  <Settings>',
+        '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
+        '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>',
+        '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>',
+        '  </Settings>',
+        '  <Triggers>',
+        '    <TimeTrigger>',
+        `      <StartBoundary>${xmlEscape(startBoundary)}</StartBoundary>`,
+        '    </TimeTrigger>',
+        '  </Triggers>',
+        '  <Actions Context="Author">',
+        '    <Exec>',
+        `      <Command>${xmlEscape(command)}</Command>`,
+        `      <Arguments>${xmlEscape(argumentsText)}</Arguments>`,
+        '    </Exec>',
+        '  </Actions>',
+        '</Task>',
+        ''
+    ].join('\r\n');
 }
 
 function readJsonText(label, text) {
@@ -122,38 +211,6 @@ function queryServiceName(exePath) {
         throw new Error(`Service name probe returned an empty value for ${exePath}`);
     }
     return serviceName;
-}
-
-function resolvePsExecPath() {
-    const candidates = [];
-    if (process.env.PSEXEC_PATH) {
-        candidates.push(process.env.PSEXEC_PATH);
-    }
-    if (process.env.LOCALAPPDATA) {
-        candidates.push(path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links', 'PsExec.exe'));
-    }
-    if (process.env.USERPROFILE) {
-        candidates.push(path.join(process.env.USERPROFILE, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Links', 'PsExec.exe'));
-    }
-
-    for (const candidate of candidates) {
-        if (candidate && fs.existsSync(candidate)) {
-            return path.resolve(candidate);
-        }
-    }
-
-    const whereResult = runCommand('where.exe', ['PsExec.exe'], { timeoutMs: 15000 });
-    if (whereResult.status === 0) {
-        const first = String(whereResult.stdout || '')
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .find((line) => line.length > 0);
-        if (first) {
-            return first;
-        }
-    }
-
-    throw new Error('PsExec.exe not found. Set PSEXEC_PATH or install PsExec into PATH/WinGet Links.');
 }
 
 function resolveRundll32Path() {
@@ -209,35 +266,101 @@ function buildKvmPacket(type, payload) {
     return packet;
 }
 
-function buildSystemProbeScript(scriptPath, exePath, probeArgument, reportPath) {
-    const lines = [
-        '@echo off',
-        `"${exePath}" ${probeArgument} > "${reportPath}" 2>&1`
-    ];
-    fs.writeFileSync(scriptPath, `${lines.join('\r\n')}\r\n`, 'ascii');
+async function runSystemScheduledTask(commandPath, commandArgs = [], options = {}) {
+    const prefix = options.prefix || `meshagent_kvm_probe_${process.pid}_${Date.now()}`;
+    const taskName = options.taskName || prefix;
+    const taskXmlPath = options.taskXmlPath || path.join(os.tmpdir(), `${prefix}.xml`);
+    const timeoutMs = options.timeoutMs || 180000;
+    const startBoundary = formatTaskStartBoundary(new Date(Date.now() + 60000));
+    const args = Array.isArray(commandArgs) ? commandArgs : [];
+    const argumentsText = args.map(quoteWindowsArg).join(' ');
+    const taskXml = buildSystemScheduledTaskXml(commandPath, argumentsText, startBoundary);
+    const reportPath = options.reportPath ? path.resolve(options.reportPath) : null;
+
+    fs.writeFileSync(taskXmlPath, Buffer.from(`\ufeff${taskXml}`, 'utf16le'));
+    const create = runCommand('schtasks', ['/Create', '/TN', taskName, '/XML', taskXmlPath, '/F'], {
+        timeoutMs: 30000
+    });
+    if (create.status !== 0) {
+        throw new Error(`Failed to create scheduled task\nstdout:\n${create.stdout}\nstderr:\n${create.stderr}`);
+    }
+
+    try {
+        const run = runCommand('schtasks', ['/Run', '/TN', taskName], {
+            timeoutMs: 30000
+        });
+        if (run.status !== 0) {
+            throw new Error(`Failed to run scheduled task\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+        }
+
+        const reportContent = reportPath ? await waitForReadableFile(reportPath, timeoutMs) : null;
+        return {
+            commandPath,
+            commandArgs: args,
+            taskName,
+            taskXmlPath,
+            taskXml,
+            reportPath,
+            reportContent,
+            commandLine: `${quoteWindowsArg(commandPath)}${argumentsText ? ` ${argumentsText}` : ''}`,
+            create,
+            run
+        };
+    } finally {
+        runCommand('schtasks', ['/Delete', '/TN', taskName, '/F'], { timeoutMs: 30000 });
+        try { fs.unlinkSync(taskXmlPath); } catch (error) { if (error.code !== 'ENOENT') { throw error; } }
+    }
 }
 
-async function runSystemProbeWithPsExec(exePath, probeArgument, options = {}) {
+async function runSystemRundll32ProbeTask(dllPath, probeCommand, options = {}) {
     const prefix = options.prefix || `meshagent_kvm_probe_${process.pid}_${Date.now()}`;
-    const psexecPath = options.psexecPath || resolvePsExecPath();
-    const scriptPath = options.scriptPath || path.join(os.tmpdir(), `${prefix}.cmd`);
+    const rundll32Path = options.rundll32Path || resolveRundll32Path();
+    const taskName = options.taskName || prefix;
+    const taskXmlPath = options.taskXmlPath || path.join(os.tmpdir(), `${prefix}.xml`);
     const reportPath = options.reportPath || path.join(os.tmpdir(), `${prefix}.json`);
     const timeoutMs = options.timeoutMs || 180000;
+    const startBoundary = formatTaskStartBoundary(new Date(Date.now() + 60000));
+    const extraArgs = Array.isArray(options.extraArgs) ? options.extraArgs : [];
+    const rundll32Arguments = [
+        `${quoteWindowsArg(dllPath)},MeshKvmProbeHostW`,
+        quoteWindowsArg(probeCommand),
+        quoteWindowsArg(reportPath),
+        ...extraArgs.map(quoteWindowsArg)
+    ].join(' ');
+    const taskXml = buildSystemScheduledTaskXml(rundll32Path, rundll32Arguments, startBoundary);
 
-    buildSystemProbeScript(scriptPath, exePath, probeArgument, reportPath);
-    const psexec = runCommand(psexecPath, ['-accepteula', '-nobanner', '-s', scriptPath], {
-        timeoutMs,
-        cwd: path.dirname(exePath)
+    fs.writeFileSync(taskXmlPath, Buffer.from(`\ufeff${taskXml}`, 'utf16le'));
+    const create = runCommand('schtasks', ['/Create', '/TN', taskName, '/XML', taskXmlPath, '/F'], {
+        timeoutMs: 30000
     });
-    const reportContent = await waitForReadableFile(reportPath, timeoutMs);
+    if (create.status !== 0) {
+        throw new Error(`Failed to create scheduled task\nstdout:\n${create.stdout}\nstderr:\n${create.stderr}`);
+    }
 
-    return {
-        psexecPath,
-        scriptPath,
-        reportPath,
-        reportContent,
-        psexec
-    };
+    try {
+        const run = runCommand('schtasks', ['/Run', '/TN', taskName], {
+            timeoutMs: 30000
+        });
+        if (run.status !== 0) {
+            throw new Error(`Failed to run scheduled task\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
+        }
+        const reportContent = await waitForReadableFile(reportPath, timeoutMs);
+        return {
+            rundll32Path,
+            dllPath,
+            taskName,
+            taskXmlPath,
+            taskXml,
+            reportPath,
+            reportContent,
+            commandLine: `"${rundll32Path}" ${rundll32Arguments}`,
+            create,
+            run
+        };
+    } finally {
+        runCommand('schtasks', ['/Delete', '/TN', taskName, '/F'], { timeoutMs: 30000 });
+        try { fs.unlinkSync(taskXmlPath); } catch (error) { if (error.code !== 'ENOENT') { throw error; } }
+    }
 }
 
 function decodeXmlText(value) {
@@ -366,10 +489,10 @@ module.exports = {
     readJsonText,
     readLatestEventRecordId,
     resolveBridgeDllPath,
-    resolvePsExecPath,
     resolveRundll32Path,
     runCommand,
-    runSystemProbeWithPsExec,
+    runSystemScheduledTask,
+    runSystemRundll32ProbeTask,
     sleep,
     waitForEventLog,
     waitForReadableFile,

@@ -159,7 +159,8 @@ function main() {
         bridgeModuleArgument: sourceSection(sources.watchdog, 'static BOOL Helper_IsApprovedBridgeModuleArgumentW(', 'static BOOL Helper_IsApprovedBridgePipeNameW(')
     };
     const processPipeSections = {
-        bridgeModuleArgument: sourceSection(sources.processPipe, 'static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(', 'static int ILibProcessPipe_IsApprovedBridgePipeNameA(')
+        bridgeModuleArgument: sourceSection(sources.processPipe, 'static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(', 'static int ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA('),
+        consoleModuleArgument: sourceSection(sources.processPipe, 'static int ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(', 'static int ILibProcessPipe_IsApprovedBridgePipeNameA(')
     };
     const serviceMainSections = {
         spawnExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnExecutableWithTokenW(', 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW('),
@@ -241,11 +242,14 @@ function main() {
             sources.processPipe.includes('allow-rundll32-lifecycle') &&
             sources.processPipe.includes('allow-rundll32-preprotection') &&
             sources.processPipe.includes('allow-rundll32-selftest') &&
+            sources.processPipe.includes('allow-rundll32-console') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
+            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_LIFECYCLE_A') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_SELFTEST_A') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModuleArgumentA') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedLifecycleContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedPreProtectionContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedSelfTestContractLaunchA') &&
@@ -253,25 +257,33 @@ function main() {
             sources.processPipe.includes('systemLen = GetSystemDirectoryA(systemRundll32, (UINT)sizeof(systemRundll32));') &&
             sources.processPipe.includes('return _stricmp(normalizedTarget, normalizedSystemRundll32) == 0;') &&
             sources.processPipe.includes('ILibProcessPipe_IsExactSystemRundll32TargetA(target)') &&
-            sources.processPipe.includes('static int ILibProcessPipe_IsExactBridgeModuleDllPathA(const char* modulePath)') &&
+            sources.processPipe.includes('static int ILibProcessPipe_IsExactBridgeModuleDllPathA(const char* modulePath, const char* expectedEntry)') &&
             sources.processPipe.includes('GetModuleHandleExA(') &&
             sources.processPipe.includes('&ILibProcessPipe_IsExactBridgeModuleDllPathA') &&
-            sources.processPipe.includes('GetProcAddress(bridgeModule, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A)') &&
+            sources.processPipe.includes('GetProcAddress(bridgeModule, expectedEntry)') &&
             sources.rundll32Contract.includes('void CALLBACK KvmSessionBridgeW') &&
             sources.processPipe.includes('GetFileInformationByHandle(requestedHandle, &requestedInfo)') &&
             sources.processPipe.includes('GetFileInformationByHandle(bridgeHandle, &bridgeInfo)') &&
             sources.processPipe.includes('requestedInfo.nFileIndexHigh == bridgeInfo.nFileIndexHigh') &&
             !sources.processPipe.includes('return _stricmp(normalizedModulePath, normalizedBridgeModulePath) == 0;') &&
-            processPipeSections.bridgeModuleArgument.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath)') &&
+            processPipeSections.bridgeModuleArgument.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A)') &&
             !processPipeSections.bridgeModuleArgument.includes('return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");') &&
+            processPipeSections.consoleModuleArgument.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A)') &&
+            !processPipeSections.consoleModuleArgument.includes('return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[1], "_in")') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[2], "_out")') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeShellA(parameters[3])') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[4], 20, 300)') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&
             sources.processPipe.includes('blocked-windows-spawn') &&
             sources.processPipe.includes('ILibProcessPipe_IsWindowsSpawnAllowed(spawnType, target, parameters)') &&
             sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedLifecycleContractLaunchA(target, parameters)') &&
             sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(target, parameters)') &&
             sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedSelfTestContractLaunchA(target, parameters)') &&
+            sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters)') &&
             !sources.processPipe.includes('ILibProcessPipe_HasKvmBridgeEntryPointA') &&
             !sources.processPipe.includes('ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
             !sources.processPipe.includes('ILibProcessPipe_TargetEndsWithA(target, "\\\\rundll32.exe")') &&
@@ -339,7 +351,8 @@ function main() {
                 source.includes("winSystemPaths.system32Path('rundll32.exe')") &&
                 source.includes("return childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshPreProtectionCaptureW', paths.capturePath]);") &&
                 source.includes('captureProc = umhctlStartPreProtectionCaptureProcess(paths);') &&
-                source.includes("return childProcess.execFile(process.execPath, ['-preprotection-capture', '--capture-path=' + paths.capturePath]);") &&
+                source.includes('Pre-protection capture requires the Windows rundll32 MeshPreProtectionCaptureW contract') &&
+                !source.includes("childProcess.execFile(process.execPath, ['-preprotection-capture'") &&
                 !source.includes("captureProc = childProcess.execFile(process.execPath, ['-preprotection-capture'") &&
                 !source.includes("umhctlGetEnvValue('SystemRoot')") &&
                 !source.includes("umhctlGetEnvValue('windir')")),
@@ -454,6 +467,11 @@ function main() {
                 source.includes('Stealth_GetSystemSvchostPathW') &&
                 !source.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"') &&
                 !source.includes('L"%SystemRoot%\\\\System32\\\\svchost.exe"')) &&
+            !sources.stealthFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)') &&
+            !sources.installer.includes('const wchar_t* hostToExcept = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
+            !sources.installer.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
+            !sources.installer.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(svchostPath') &&
+            sources.installer.includes('Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);') &&
             sources.stealthSvchost.includes('UNREFERENCED_PARAMETER(dllPath);') &&
             sources.stealthSvchost.includes('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage resolved system svchost.exe: %ls", exePathOut);') &&
             sources.stealthSvchost.includes('return FALSE;') &&
@@ -462,6 +480,22 @@ function main() {
             !sources.stealthSvchost.includes('WinSxS') &&
             !sources.stealthSvchost.includes('CopyFileW(') &&
             !sources.stealthSvchost.includes('GetWindowsDirectoryW(windowsDir'),
+        consoleBridgeSurfaceApproved:
+            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_W') &&
+            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A') &&
+            sources.rundll32Contract.includes('void CALLBACK MeshConsoleBridgeW') &&
+            sources.rundll32ContractImpl.includes('void CALLBACK MeshConsoleBridgeW') &&
+            sources.rundll32ContractImpl.includes('CreatePseudoConsole') &&
+            sources.rundll32ContractImpl.includes('PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE') &&
+            sources.rundll32ContractImpl.includes('STARTF_USESTDHANDLES') &&
+            sources.rundll32ContractImpl.includes('CreateProcessAsUserW(userToken, NULL, commandLine') &&
+            sources.rundll32ContractImpl.includes('CreateProcessW(NULL, commandLine') &&
+            sources.rundll32ContractImpl.includes('MESH_CONSOLE_BRIDGE_PIPE_PREFIX_W') &&
+            sources.serviceHostDef.includes('MeshConsoleBridgeW') &&
+            sources.serviceHostArm64Def.includes('MeshConsoleBridgeW') &&
+            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridge') &&
+            sources.processPipe.includes('allow-rundll32-console'),
         serviceMainGenericTokenSpawnBlocked:
             !sources.serviceMain.includes('static BOOL MeshService_ResolveHostExecutablePathW') &&
             serviceMainSections.spawnExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
@@ -708,9 +742,28 @@ function main() {
                 'mscoree.dll',
                 'pshost.out'
             ]).length === 0,
-        terminalDisabledUntilConsoleBridge:
-            sources.terminal.includes('Windows terminal support is disabled until an approved MeshConsoleBridgeW rundll32 contract exists.') &&
-            sources.virtualTerminal.includes('Windows virtual terminal support is disabled until an approved MeshConsoleBridgeW rundll32 contract exists.'),
+        terminalUsesConsoleBridge:
+            sources.terminal.includes("require('win-system-paths').system32Path('rundll32.exe')") &&
+            sources.terminal.includes('MeshConsoleBridge_') &&
+            sources.terminal.includes("serviceDllPath + ',MeshConsoleBridgeW'") &&
+            !sources.terminal.includes('",MeshConsoleBridgeW') &&
+            sources.terminal.includes('childProcess.execFile(rundll32Path, args)') &&
+            sources.terminal.includes('resolveInstalledServiceDllPath') &&
+            sources.terminal.includes('StartAsUser') &&
+            sources.terminal.includes('StartPowerShellAsUser') &&
+            sources.terminal.includes('write: function write(chunk, encoding, flush)') &&
+            sources.terminal.includes("var SHELL_COMMAND = 'cmd';") &&
+            sources.terminal.includes("var SHELL_AUTOMATION = 'powershell';") &&
+            !sources.terminal.includes('Windows terminal support is disabled until') &&
+            !sources.terminal.includes('disabledWindowsTerminal') &&
+            !sources.terminal.includes('commandHostPath()') &&
+            !sources.terminal.includes('powerShellPath()') &&
+            !sources.terminal.includes("['cmd']") &&
+            !sources.terminal.includes("['powershell") &&
+            sources.virtualTerminal.includes("module.exports = require('win-terminal');") &&
+            sources.virtualTerminal.includes('MeshConsoleBridgeW') &&
+            !sources.virtualTerminal.includes('Windows virtual terminal support is disabled until') &&
+            !sources.virtualTerminal.includes('failVirtualTerminal'),
         dispatcherAndChildContainerDisabled:
             sources.dispatcher.includes('Windows dispatcher helper launch is disabled until an approved rundll32 contract export exists.') &&
             sources.childContainer.includes("process.platform == 'win32'") &&

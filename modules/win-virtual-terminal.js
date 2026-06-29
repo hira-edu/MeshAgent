@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Intel Corporation
+Copyright 2019-2026 Open Source Mesh Agent Project
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,31 +14,5 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-function vt() {
-    this._ObjectID = 'win-virtual-terminal';
-    this.supported = false;
-}
-
-vt.prototype._fail = function _fail() {
-    throw ('Windows virtual terminal support is disabled until an approved MeshConsoleBridgeW rundll32 contract exists.');
-};
-
-vt.prototype.Create = function Create() {
-    return (this._fail());
-};
-
-vt.prototype.PowerShellCapable = function PowerShellCapable() {
-    return (false);
-};
-
-vt.prototype.Start = function Start() {
-    return (this._fail());
-};
-
-vt.prototype.StartPowerShell = function StartPowerShell() {
-    return (this._fail());
-};
-
-if (process.platform == 'win32') {
-    module.exports = new vt();
-}
+// Windows virtual-terminal I/O is hosted by rundll32.exe <ServiceDll>,MeshConsoleBridgeW.
+module.exports = require('win-terminal');

@@ -37,13 +37,11 @@
 #define IDC_STATIC_LINE                 1024
 #define IDC_DETAILSBUTTON               1031
 #define IDC_CHECK1                      1032
-#define IDC_AUTOPROXY_CHECK             1032
 #define IDS_BRANDING_MESH_ID            40010
 #define IDS_BRANDING_SERVER_ID          40011
 #define IDS_BRANDING_SERVICE_NAME       40012
 #define IDS_BRANDING_SERVICE_FILE       40013
 #define IDS_BRANDING_SERVICE_DISPLAY    40014
-#define IDC_AUTOPROXY_STATIC            1034
 
 // Next default values for new objects
 // 

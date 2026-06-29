@@ -1,30 +1,25 @@
-// Probe #3: runs the collector via PsExec as SYSTEM, same as kvm_system_picture_runtime.js
+// Probe #3: runs the collector as SYSTEM through Task Scheduler, matching kvm_system_picture_runtime.js.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const cp = require('child_process');
 
 const {
     resolveBridgeDllPath,
-    resolvePsExecPath,
     resolveRundll32Path,
-    waitForReadableFile
+    runSystemScheduledTask
 } = require('./lib/kvm_runtime_helpers');
 
 const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
 const dllPath = resolveBridgeDllPath(exePath);
 const rundll32Path = resolveRundll32Path();
-const psexecPath = resolvePsExecPath();
 
 console.log('EXE=' + exePath);
 console.log('DLL=' + dllPath);
-console.log('PSEXEC=' + psexecPath);
 console.log('RUNDLL32=' + rundll32Path);
 
 // Write the collector as a standalone script
 const collectorPath = path.join(os.tmpdir(), `kvm_system_trace_collector_${process.pid}.js`);
 const reportPath = path.join(os.tmpdir(), `kvm_system_trace_report_${process.pid}.json`);
-const launcherPath = path.join(os.tmpdir(), `kvm_system_trace_launcher_${process.pid}.cmd`);
 
 const collectorCode = `
 const fs = require('fs');
@@ -140,25 +135,29 @@ setTimeout(() => { clearInterval(tickInterval); flush('timeout'); process.exit(0
 `;
 
 fs.writeFileSync(collectorPath, collectorCode, 'ascii');
-fs.writeFileSync(launcherPath, `@echo off\r\n"${process.execPath}" "${collectorPath}" "${rundll32Path}" "${dllPath}" "${reportPath}"\r\n`, 'ascii');
 
 console.log('COLLECTOR=' + collectorPath);
 console.log('REPORT=' + reportPath);
-console.log('LAUNCHER=' + launcherPath);
 console.log('');
 
-// Run via PsExec as SYSTEM
-const psexec = cp.spawnSync(psexecPath, ['-accepteula', '-nobanner', '-s', launcherPath], {
-    windowsHide: true,
-    encoding: 'utf8',
-    timeout: 30000
-});
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-console.log('PSEXEC_STATUS=' + psexec.status);
-if (psexec.stderr) console.log('PSEXEC_STDERR=' + psexec.stderr.slice(0, 500));
+async function main() {
+    const systemTask = await runSystemScheduledTask(process.execPath, [collectorPath, rundll32Path, dllPath, reportPath], {
+        prefix: `meshagent_kvm_system_trace_${process.pid}_${Date.now()}`,
+        reportPath,
+        timeoutMs: 30000
+    });
 
-// Wait a moment for file to be flushed
-setTimeout(async () => {
+    console.log('TASK_NAME=' + systemTask.taskName);
+    console.log('TASK_COMMAND=' + systemTask.commandLine);
+    if (systemTask.create.stderr) console.log('SCHTASKS_CREATE_STDERR=' + systemTask.create.stderr.slice(0, 500));
+    if (systemTask.run.stderr) console.log('SCHTASKS_RUN_STDERR=' + systemTask.run.stderr.slice(0, 500));
+
+    await sleep(22000);
+
     try {
         const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
         const pics = report.packets.filter(p => p.type === 3 || p.type === 27);
@@ -190,5 +189,9 @@ setTimeout(async () => {
             console.log('Raw: ' + fs.readFileSync(reportPath, 'utf8').slice(0, 2000));
         }
     }
-    process.exit(0);
-}, 2000);
+}
+
+main().catch((error) => {
+    console.error(error && error.stack ? error.stack : String(error));
+    process.exit(1);
+});

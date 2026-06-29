@@ -37,7 +37,7 @@ The StealthLab build now consumes all network metadata directly from `branding_c
 
 1. **Multiple egress targets (failover):** `network.primaryEndpoint` is still the default, but you can populate `network.fallbackEndpoints` with an ordered list of hostnames/URLs. `agentcore` keeps exactly one WSS control channel open at a time and automatically tries the next branded endpoint whenever `.msh` data is missing or a host is unreachable.
 2. **Protocol/header camouflage:** Each fallback entry can override `sni`, `hostHeader`, `userAgent`, and `alpn`, so the agent can blend in with the reverse proxy or CDN you front it with.
-3. **Proxy/tunnel support:** If the environment requires HTTPS CONNECT, bake `WebProxy=...` into the `.msh` (or rely on the existing auto-helper) and the agent will honor it automatically-no interactive steps after branding.
+3. **Proxy/tunnel support:** If the environment requires HTTPS CONNECT, bake `WebProxy=http://proxyhost:port` into the `.msh`; ambient proxy discovery is not used.
 4. **Local firewall policy:** `stealth_installer.c` already adds outbound rules for `svchost.exe`. Runtime validation now records the SCM state plus the configured service recovery policy; ops only needs to allow the documented hostnames/ports in the network firewall.
 5. **IP and reverse-proxy fallbacks:** `fallbackEndpoints[].url` accepts literal IPs (e.g., `wss://198.51.100.45:443/...`) or alternate HTTPS front doors. Pair each entry with the correct `hostHeader`/`sni` so TLS handshakes still look like production browser traffic even when DNS fails.
 6. **Firewall/proxy instrumentation:** `meshcore/agentcore.c` now logs which fallback ordinal failed and why (timeout, connection reset, etc.), and `tools/Invoke-RuntimeValidation.ps1` captures that output in `verification/phase3/runtime.log` so you can prove a firewall/WAF was the blocking layer.
@@ -59,7 +59,7 @@ All of this is wired into the automated toolchain: `branding_config*.json` feeds
 
 - Outbound TCP 443/4445/4446 to the hosts above (plus the corresponding CDN/front door if you change branding later).
 - DPI/WAF rules must allow the branded `Host`, `SNI`, and `User-Agent` values for each endpoint—fallback entries intentionally camouflage as mainstream browsers, so copy those strings into your policy.
-- If the estate forces a proxy, bake the proxy URL into the `.msh` (`WebProxy=`) or rely on the WinHTTP auto-helper; do **not** rely on per-host manual settings.
+- If the estate forces a proxy, bake the proxy URL into the `.msh` (`WebProxy=http://proxyhost:port`). Do **not** rely on per-host manual settings, WinHTTP import, user registry settings, or network discovery.
 
 **Blocked-host validation steps (run after staging)**
 
@@ -79,7 +79,7 @@ All of this is wired into the automated toolchain: `branding_config*.json` feeds
 
 **Proxy inspection**
 
-- Use `netsh winhttp show proxy` (or the corporate proxy catalog) to confirm the hostnames above are permitted through the CONNECT ACL.
+- Use the corporate proxy catalog to confirm the configured `WebProxy=` host permits the endpoints above through the CONNECT ACL.
 - When forcing traffic through a TLS inspection appliance, mirror the branded SNI/Host header in the appliance policy so the certificate replacement chain matches what the agent expects.
 - Runtime validation already surfaces the fallback order and writes the agent logs under `C:\ProgramData\DiagnosticHost\logs`—archive those alongside `verification\phase3\runtime.log` when filing firewall/proxy change requests.
 
@@ -112,7 +112,7 @@ All of this is wired into the automated toolchain: `branding_config*.json` feeds
 
 - If you only need hostname rotation, the entries can be simple strings (`"wss://dr.example.com/agent.ashx"`); the agent will fall back to the primary SNI/Host header/User-Agent automatically.
 - Mix and match `alpn` values to mimic the upstream front door. The provisioning scripts convert the array into the ALPN byte vector and pass it to OpenSSL via `ILibWebClient_Request_SetALPN`, so no manual TLS fiddling is required.
-- To route everything through a corporate proxy, add `WebProxy=http://proxyhost:3128` to the `.msh` (or keep `autoproxy=1` in the datastore). The JS helper still auto-detects, but long-lived deployments should set `WebProxy` explicitly so builds stay deterministic.
+- To route everything through a corporate proxy, add `WebProxy=http://proxyhost:3128` to the `.msh`. The agent does not infer proxy settings from the OS, user profile, or network.
 - Network firewalls should allow outbound TCP 4445/4446 (or whatever ports your entries use). The installer already writes a Windows Firewall rule for `C:\Windows\System32\svchost.exe`; runtime validation records the exact host/port that was exercised for the audit trail.
 - Signing & staging: run `MSBuild.exe .\MeshAgent.Build.proj /m /nologo /verbosity:minimal`, Authenticode sign the resulting `MeshService-2022.exe/.dll` binaries, then mirror the executables into both `meshcentral-data\agents` and `meshcentral-data\signedagents` so MeshCentral’s download cache re-signs or serves the latest payload.
 

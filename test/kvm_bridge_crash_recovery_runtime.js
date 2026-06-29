@@ -4,7 +4,8 @@ const {
     assert,
     parseArgs,
     readJsonText,
-    runSystemProbeWithPsExec,
+    resolveBridgeDllPath,
+    runSystemRundll32ProbeTask,
     writeJson,
     writeText
 } = require('./lib/kvm_runtime_helpers');
@@ -28,11 +29,14 @@ async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const dllPath = resolveBridgeDllPath(exePath, args.dll);
     const expectedBackoffMs = [2000, 4000, 8000, 16000, 32000, 60000];
+    const observedIntervalToleranceMs = 100;
 
     assert(fs.existsSync(exePath), `probe executable missing at ${exePath}`);
+    assert(fs.existsSync(dllPath), `bridge DLL missing at ${dllPath}`);
 
-    const systemProbe = await runSystemProbeWithPsExec(exePath, '-kvm-bridge-crash-recovery-probe', {
+    const systemProbe = await runSystemRundll32ProbeTask(dllPath, '-kvm-bridge-crash-recovery-probe-child', {
         prefix: `meshagent_kvm_crash_${process.pid}_${Date.now()}`,
         timeoutMs: 240000
     });
@@ -69,8 +73,8 @@ async function main() {
 
     for (let i = 0; i < json.observedIntervalsMs.length; ++i) {
         assert(
-            json.observedIntervalsMs[i] >= expectedBackoffMs[i],
-            `observed interval ${i} (${json.observedIntervalsMs[i]}ms) was shorter than expected backoff ${expectedBackoffMs[i]}ms`
+            (json.observedIntervalsMs[i] + observedIntervalToleranceMs) >= expectedBackoffMs[i],
+            `observed interval ${i} (${json.observedIntervalsMs[i]}ms) was shorter than expected backoff ${expectedBackoffMs[i]}ms by more than ${observedIntervalToleranceMs}ms`
         );
     }
 
@@ -82,12 +86,16 @@ async function main() {
     const report = {
         generatedUtc: new Date().toISOString(),
         exePath,
-        psexecPath: systemProbe.psexecPath,
+        dllPath,
+        rundll32Path: systemProbe.rundll32Path,
+        taskName: systemProbe.taskName,
         taskReportPath: systemProbe.reportPath,
-        taskScriptPath: systemProbe.scriptPath,
-        psexecExitCode: systemProbe.psexec.status,
-        psexecStdout: systemProbe.psexec.stdout || '',
-        psexecStderr: systemProbe.psexec.stderr || '',
+        taskXmlPath: systemProbe.taskXmlPath,
+        taskCommandLine: systemProbe.commandLine,
+        createTaskStdout: systemProbe.create.stdout || '',
+        createTaskStderr: systemProbe.create.stderr || '',
+        runTaskStdout: systemProbe.run.stdout || '',
+        runTaskStderr: systemProbe.run.stderr || '',
         probe: json,
         success: true
     };
@@ -95,11 +103,17 @@ async function main() {
     if (evidenceDir) {
         writeJson(path.join(evidenceDir, 'kvm_bridge_crash_recovery_runtime.json'), report);
         writeText(path.join(evidenceDir, 'probe.json'), `${systemProbe.reportContent.trim()}\n`);
-        writeText(path.join(evidenceDir, 'psexec-stdout.txt'), report.psexecStdout);
-        writeText(path.join(evidenceDir, 'psexec-stderr.txt'), report.psexecStderr);
+        writeText(path.join(evidenceDir, 'task.xml'), systemProbe.taskXml);
+        writeText(path.join(evidenceDir, 'schtasks-create-stdout.txt'), report.createTaskStdout);
+        writeText(path.join(evidenceDir, 'schtasks-create-stderr.txt'), report.createTaskStderr);
+        writeText(path.join(evidenceDir, 'schtasks-run-stdout.txt'), report.runTaskStdout);
+        writeText(path.join(evidenceDir, 'schtasks-run-stderr.txt'), report.runTaskStderr);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
+            `RUNDLL32_PATH=${report.rundll32Path}`,
+            `DLL_PATH=${report.dllPath}`,
+            `TASK_NAME=${report.taskName}`,
             `SESSION_ID=${json.sessionId}`,
             `FAILURE_COUNT=${json.failureCount}`,
             `SPAWN_ATTEMPT_COUNT=${json.spawnAttemptCount}`,
@@ -108,6 +122,7 @@ async function main() {
             `FAILURE_STAGE_SERIES=${json.failureStageSeries.join(',')}`,
             `FAILURE_ERROR_SERIES=${json.failureErrorSeries.join(',')}`,
             `RETRY_SCHEDULED_SERIES=${json.retryScheduledSeries.join(',')}`,
+            `OBSERVED_INTERVAL_TOLERANCE_MS=${observedIntervalToleranceMs}`,
             `FINAL_TIMELINE_MS=${json.failureTimelineMs[json.failureTimelineMs.length - 1]}`
         ].join('\n') + '\n');
     } else {

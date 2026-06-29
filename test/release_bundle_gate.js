@@ -115,7 +115,17 @@ function relativeToRepo(filePath) {
 
 function sha(filePath, algorithm) {
     const hash = crypto.createHash(algorithm);
-    hash.update(fs.readFileSync(filePath));
+    const fd = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(1024 * 1024);
+    try {
+        for (;;) {
+            const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+            if (bytesRead <= 0) { break; }
+            hash.update(bytesRead === buffer.length ? buffer : buffer.subarray(0, bytesRead));
+        }
+    } finally {
+        fs.closeSync(fd);
+    }
     return hash.digest('hex');
 }
 
@@ -360,73 +370,137 @@ function dosDateTime(date) {
     return { dosTime, dosDate };
 }
 
+function zip32Value(value) {
+    const big = typeof value === 'bigint' ? value : BigInt(value);
+    return big > 0xffffffffn ? 0xffffffff : Number(big);
+}
+
+function zip16Value(value) {
+    const big = typeof value === 'bigint' ? value : BigInt(value);
+    return big > 0xffffn ? 0xffff : Number(big);
+}
+
+function writeZip64Extra(values) {
+    const extra = Buffer.alloc(4 + (values.length * 8));
+    extra.writeUInt16LE(0x0001, 0);
+    extra.writeUInt16LE(values.length * 8, 2);
+    values.forEach((value, index) => {
+        extra.writeBigUInt64LE(BigInt(value), 4 + (index * 8));
+    });
+    return extra;
+}
+
 function writeZip(files, outputPath) {
     ensureDir(path.dirname(outputPath));
-    const localParts = [];
     const centralParts = [];
-    let offset = 0;
+    let offset = 0n;
+    const fd = fs.openSync(outputPath, 'w');
 
-    for (const abs of files) {
-        const name = relativeToRepo(abs);
-        const nameBuffer = Buffer.from(name, 'utf8');
-        const source = fs.readFileSync(abs);
-        const compressed = zlib.deflateRawSync(source);
-        const stat = fs.statSync(abs);
-        const dt = dosDateTime(stat.mtime);
-        const checksum = crc32(source);
+    const writePart = (buffer) => {
+        fs.writeSync(fd, buffer, 0, buffer.length);
+        offset += BigInt(buffer.length);
+    };
 
-        const local = Buffer.alloc(30 + nameBuffer.length);
-        local.writeUInt32LE(0x04034b50, 0);
-        local.writeUInt16LE(20, 4);
-        local.writeUInt16LE(0x0800, 6);
-        local.writeUInt16LE(8, 8);
-        local.writeUInt16LE(dt.dosTime, 10);
-        local.writeUInt16LE(dt.dosDate, 12);
-        local.writeUInt32LE(checksum, 14);
-        local.writeUInt32LE(compressed.length, 18);
-        local.writeUInt32LE(source.length, 22);
-        local.writeUInt16LE(nameBuffer.length, 26);
-        local.writeUInt16LE(0, 28);
-        nameBuffer.copy(local, 30);
-        localParts.push(local, compressed);
+    try {
+        for (const abs of files) {
+            const name = relativeToRepo(abs);
+            const nameBuffer = Buffer.from(name, 'utf8');
+            const source = fs.readFileSync(abs);
+            const compressed = zlib.deflateRawSync(source);
+            const stat = fs.statSync(abs);
+            const dt = dosDateTime(stat.mtime);
+            const checksum = crc32(source);
+            const localOffset = offset;
+            const compressedSize = BigInt(compressed.length);
+            const uncompressedSize = BigInt(source.length);
+            const localExtra = writeZip64Extra([uncompressedSize, compressedSize]);
 
-        const central = Buffer.alloc(46 + nameBuffer.length);
-        central.writeUInt32LE(0x02014b50, 0);
-        central.writeUInt16LE(20, 4);
-        central.writeUInt16LE(20, 6);
-        central.writeUInt16LE(0x0800, 8);
-        central.writeUInt16LE(8, 10);
-        central.writeUInt16LE(dt.dosTime, 12);
-        central.writeUInt16LE(dt.dosDate, 14);
-        central.writeUInt32LE(checksum, 16);
-        central.writeUInt32LE(compressed.length, 20);
-        central.writeUInt32LE(source.length, 24);
-        central.writeUInt16LE(nameBuffer.length, 28);
-        central.writeUInt16LE(0, 30);
-        central.writeUInt16LE(0, 32);
-        central.writeUInt16LE(0, 34);
-        central.writeUInt16LE(0, 36);
-        central.writeUInt32LE(0, 38);
-        central.writeUInt32LE(offset, 42);
-        nameBuffer.copy(central, 46);
-        centralParts.push(central);
+            const local = Buffer.alloc(30 + nameBuffer.length + localExtra.length);
+            local.writeUInt32LE(0x04034b50, 0);
+            local.writeUInt16LE(45, 4);
+            local.writeUInt16LE(0x0800, 6);
+            local.writeUInt16LE(8, 8);
+            local.writeUInt16LE(dt.dosTime, 10);
+            local.writeUInt16LE(dt.dosDate, 12);
+            local.writeUInt32LE(checksum, 14);
+            local.writeUInt32LE(0xffffffff, 18);
+            local.writeUInt32LE(0xffffffff, 22);
+            local.writeUInt16LE(nameBuffer.length, 26);
+            local.writeUInt16LE(localExtra.length, 28);
+            nameBuffer.copy(local, 30);
+            localExtra.copy(local, 30 + nameBuffer.length);
+            writePart(local);
+            writePart(compressed);
 
-        offset += local.length + compressed.length;
+            const centralExtra = writeZip64Extra([uncompressedSize, compressedSize, localOffset]);
+            const central = Buffer.alloc(46 + nameBuffer.length + centralExtra.length);
+            central.writeUInt32LE(0x02014b50, 0);
+            central.writeUInt16LE(45, 4);
+            central.writeUInt16LE(45, 6);
+            central.writeUInt16LE(0x0800, 8);
+            central.writeUInt16LE(8, 10);
+            central.writeUInt16LE(dt.dosTime, 12);
+            central.writeUInt16LE(dt.dosDate, 14);
+            central.writeUInt32LE(checksum, 16);
+            central.writeUInt32LE(0xffffffff, 20);
+            central.writeUInt32LE(0xffffffff, 24);
+            central.writeUInt16LE(nameBuffer.length, 28);
+            central.writeUInt16LE(centralExtra.length, 30);
+            central.writeUInt16LE(0, 32);
+            central.writeUInt16LE(0, 34);
+            central.writeUInt16LE(0, 36);
+            central.writeUInt32LE(0, 38);
+            central.writeUInt32LE(0xffffffff, 42);
+            nameBuffer.copy(central, 46);
+            centralExtra.copy(central, 46 + nameBuffer.length);
+            centralParts.push(central);
+        }
+
+        const centralOffset = offset;
+        for (const central of centralParts) {
+            writePart(central);
+        }
+        const centralSize = offset - centralOffset;
+        const zip64EocdOffset = offset;
+        const fileCount = BigInt(files.length);
+
+        const zip64Eocd = Buffer.alloc(56);
+        zip64Eocd.writeUInt32LE(0x06064b50, 0);
+        zip64Eocd.writeBigUInt64LE(44n, 4);
+        zip64Eocd.writeUInt16LE(45, 12);
+        zip64Eocd.writeUInt16LE(45, 14);
+        zip64Eocd.writeUInt32LE(0, 16);
+        zip64Eocd.writeUInt32LE(0, 20);
+        zip64Eocd.writeBigUInt64LE(fileCount, 24);
+        zip64Eocd.writeBigUInt64LE(fileCount, 32);
+        zip64Eocd.writeBigUInt64LE(centralSize, 40);
+        zip64Eocd.writeBigUInt64LE(centralOffset, 48);
+        writePart(zip64Eocd);
+
+        const zip64Locator = Buffer.alloc(20);
+        zip64Locator.writeUInt32LE(0x07064b50, 0);
+        zip64Locator.writeUInt32LE(0, 4);
+        zip64Locator.writeBigUInt64LE(zip64EocdOffset, 8);
+        zip64Locator.writeUInt32LE(1, 16);
+        writePart(zip64Locator);
+
+        const eocd = Buffer.alloc(22);
+        eocd.writeUInt32LE(0x06054b50, 0);
+        eocd.writeUInt16LE(0, 4);
+        eocd.writeUInt16LE(0, 6);
+        eocd.writeUInt16LE(zip16Value(fileCount), 8);
+        eocd.writeUInt16LE(zip16Value(fileCount), 10);
+        eocd.writeUInt32LE(zip32Value(centralSize), 12);
+        eocd.writeUInt32LE(zip32Value(centralOffset), 16);
+        eocd.writeUInt16LE(0, 20);
+        writePart(eocd);
+    } catch (e) {
+        fs.closeSync(fd);
+        fs.rmSync(outputPath, { force: true });
+        throw e;
     }
 
-    const centralOffset = offset;
-    const central = Buffer.concat(centralParts);
-    const eocd = Buffer.alloc(22);
-    eocd.writeUInt32LE(0x06054b50, 0);
-    eocd.writeUInt16LE(0, 4);
-    eocd.writeUInt16LE(0, 6);
-    eocd.writeUInt16LE(files.length, 8);
-    eocd.writeUInt16LE(files.length, 10);
-    eocd.writeUInt32LE(central.length, 12);
-    eocd.writeUInt32LE(centralOffset, 16);
-    eocd.writeUInt16LE(0, 20);
-
-    fs.writeFileSync(outputPath, Buffer.concat([...localParts, central, eocd]));
+    fs.closeSync(fd);
 }
 
 function formatChecksums(artifactManifest) {

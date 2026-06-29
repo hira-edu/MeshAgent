@@ -4,8 +4,9 @@ const {
     assert,
     parseArgs,
     readJsonText,
+    resolveBridgeDllPath,
     runCommand,
-    runSystemProbeWithPsExec,
+    runSystemRundll32ProbeTask,
     writeJson,
     writeText
 } = require('./lib/kvm_runtime_helpers');
@@ -75,9 +76,10 @@ function chooseSessions(sessions) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const dllPath = resolveBridgeDllPath(exePath, args.dll);
 
-    assert(fs.existsSync(exePath), `probe executable missing at ${exePath}`);
+    assert(fs.existsSync(dllPath), `bridge DLL missing at ${dllPath}`);
 
     const qwinsta = runCommand('qwinsta', [], {
         timeoutMs: 15000
@@ -87,12 +89,14 @@ async function main() {
     const topology = chooseSessions(parseQwinsta(qwinsta.stdout || ''));
     assert(topology.primary != null, 'unable to identify a primary interactive session from qwinsta');
 
-    const probeArgument = topology.alternate
-        ? `-kvm-multi-session-probe ${topology.primary.id} ${topology.alternate.id}`
-        : `-kvm-multi-session-probe ${topology.primary.id}`;
+    const extraArgs = [String(topology.primary.id)];
+    if (topology.alternate) {
+        extraArgs.push(String(topology.alternate.id));
+    }
 
-    const systemProbe = await runSystemProbeWithPsExec(exePath, probeArgument, {
+    const systemProbe = await runSystemRundll32ProbeTask(dllPath, '-kvm-multi-session-probe-child', {
         prefix: `meshagent_kvm_multisession_${process.pid}_${Date.now()}`,
+        extraArgs,
         timeoutMs: 180000
     });
     const json = readJsonText('kvm-multi-session-probe', systemProbe.reportContent);
@@ -133,19 +137,24 @@ async function main() {
     const report = {
         generatedUtc: new Date().toISOString(),
         exePath,
-        probeArgument,
+        dllPath,
+        probeCommand: '-kvm-multi-session-probe-child',
+        probeArguments: extraArgs,
         qwinstaStdout: qwinsta.stdout || '',
         qwinstaStderr: qwinsta.stderr || '',
         parsedSessions: topology.sessions,
         primarySession: topology.primary,
         alternateSession: topology.alternate,
         distinctSessionRuntime,
-        psexecPath: systemProbe.psexecPath,
+        rundll32Path: systemProbe.rundll32Path,
+        taskName: systemProbe.taskName,
         taskReportPath: systemProbe.reportPath,
-        taskScriptPath: systemProbe.scriptPath,
-        psexecExitCode: systemProbe.psexec.status,
-        psexecStdout: systemProbe.psexec.stdout || '',
-        psexecStderr: systemProbe.psexec.stderr || '',
+        taskXmlPath: systemProbe.taskXmlPath,
+        taskCommandLine: systemProbe.commandLine,
+        createTaskStdout: systemProbe.create.stdout || '',
+        createTaskStderr: systemProbe.create.stderr || '',
+        runTaskStdout: systemProbe.run.stdout || '',
+        runTaskStderr: systemProbe.run.stderr || '',
         probe: json,
         success: true
     };
@@ -154,11 +163,17 @@ async function main() {
         writeJson(path.join(evidenceDir, 'kvm_multi_session_runtime.json'), report);
         writeText(path.join(evidenceDir, 'probe.json'), `${systemProbe.reportContent.trim()}\n`);
         writeText(path.join(evidenceDir, 'qwinsta.txt'), report.qwinstaStdout);
-        writeText(path.join(evidenceDir, 'psexec-stdout.txt'), report.psexecStdout);
-        writeText(path.join(evidenceDir, 'psexec-stderr.txt'), report.psexecStderr);
+        writeText(path.join(evidenceDir, 'task.xml'), systemProbe.taskXml);
+        writeText(path.join(evidenceDir, 'schtasks-create-stdout.txt'), report.createTaskStdout);
+        writeText(path.join(evidenceDir, 'schtasks-create-stderr.txt'), report.createTaskStderr);
+        writeText(path.join(evidenceDir, 'schtasks-run-stdout.txt'), report.runTaskStdout);
+        writeText(path.join(evidenceDir, 'schtasks-run-stderr.txt'), report.runTaskStderr);
         writeText(path.join(evidenceDir, 'runtime-summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
+            `RUNDLL32_PATH=${report.rundll32Path}`,
+            `DLL_PATH=${report.dllPath}`,
+            `TASK_NAME=${report.taskName}`,
             `PRIMARY_SESSION_ID=${topology.primary.id}`,
             `SECONDARY_REQUESTED_TSID=${json.secondaryRequestedTsid}`,
             `RELAY1_PID=${json.relay1Pid}`,

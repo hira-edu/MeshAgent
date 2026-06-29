@@ -59,6 +59,7 @@ MESHCENTRAL_BASE = "/opt/meshcentral"
 DATA_AGENTS = f"{MESHCENTRAL_BASE}/meshcentral-data/agents"
 SIGNED_AGENTS = f"{MESHCENTRAL_BASE}/meshcentral-data/signedagents"
 MODULE_AGENTS = f"{MESHCENTRAL_BASE}/node_modules/meshcentral/agents"
+DATA_ROOT = f"{MESHCENTRAL_BASE}/meshcentral-data"
 CONFIG_FILE = f"{MESHCENTRAL_BASE}/meshcentral-data/config.json"
 STAGING_DIR = f"{MESHCENTRAL_BASE}/staging"
 BACKUP_DIR = f"{MESHCENTRAL_BASE}/backups"
@@ -77,6 +78,14 @@ PUBLISH_ROLE_BACKUP_DIRS = {
     "module": "moduleagents",
 }
 HASHAGENTS_MANIFEST_ROLES = ("module", "signed")
+CORE_PUBLISH_ROLE_DIRS = {
+    "data-core": DATA_ROOT,
+    "module-core": MODULE_AGENTS,
+}
+CORE_PUBLISH_ROLE_BACKUP_DIRS = {
+    "data-core": "datacore",
+    "module-core": "modulecore",
+}
 
 # Local build artifacts to deploy
 LOCAL_REPO = Path(__file__).parent.resolve()
@@ -181,6 +190,49 @@ ARTIFACTS = {
         "local_path": "../UserModeHook/build-fresh/bin/Release/MasterService.exe",
         "remote_filename": "MasterService.exe",
         "publish_targets": (),
+    },
+}
+
+CORE_ARTIFACTS = {
+    "meshcore.js": {
+        "local_path": "../MeshCentral/agents/meshcore.js",
+        "remote_relative_path": "meshcore.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "meshcore.min.js": {
+        "local_path": "../MeshCentral/agents/meshcore.min.js",
+        "remote_relative_path": "meshcore.min.js",
+        "publish_targets": ("module-core",),
+    },
+    "modules_meshcore/win-terminal.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore/win-terminal.js",
+        "remote_relative_path": "modules_meshcore/win-terminal.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "modules_meshcore/win-virtual-terminal.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore/win-virtual-terminal.js",
+        "remote_relative_path": "modules_meshcore/win-virtual-terminal.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "modules_meshcore_min/win-terminal.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore_min/win-terminal.js",
+        "remote_relative_path": "modules_meshcore_min/win-terminal.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "modules_meshcore_min/win-terminal.min.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore_min/win-terminal.min.js",
+        "remote_relative_path": "modules_meshcore_min/win-terminal.min.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "modules_meshcore_min/win-virtual-terminal.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore_min/win-virtual-terminal.js",
+        "remote_relative_path": "modules_meshcore_min/win-virtual-terminal.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "modules_meshcore_min/win-virtual-terminal.min.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore_min/win-virtual-terminal.min.js",
+        "remote_relative_path": "modules_meshcore_min/win-virtual-terminal.min.js",
+        "publish_targets": ("data-core", "module-core"),
     },
 }
 
@@ -617,10 +669,31 @@ def get_publish_path(role, filename):
     return f"{PUBLISH_ROLE_DIRS[role]}/{filename}"
 
 
+def get_core_publish_path(role, relative_path):
+    """Return the remote MeshCentral core/module publish path for a role."""
+    return f"{CORE_PUBLISH_ROLE_DIRS[role]}/{relative_path}"
+
+
+def remote_dirname(path):
+    """Return a POSIX dirname for remote paths."""
+    return path.rsplit("/", 1)[0] if "/" in path else "."
+
+
+def get_staging_filename(entry):
+    """Return the flat staging filename for an artifact entry."""
+    return entry.get("staging_filename") or entry.get("remote_filename")
+
+
 def get_backup_path(backup_root, role, filename=None):
     """Return the backup location for a publish role and optional filename."""
     base = f"{backup_root}/{PUBLISH_ROLE_BACKUP_DIRS[role]}"
     return f"{base}/{filename}" if filename else base
+
+
+def get_core_backup_path(backup_root, role, relative_path=None):
+    """Return the backup location for a MeshCentral core/module file."""
+    base = f"{backup_root}/{CORE_PUBLISH_ROLE_BACKUP_DIRS[role]}"
+    return f"{base}/{relative_path}" if relative_path else base
 
 
 def build_local_artifact_entries():
@@ -643,9 +716,37 @@ def build_local_artifact_entries():
     return entries
 
 
+def build_local_core_artifact_entries():
+    """Collect local MeshCentral core/module metadata for deployment."""
+    entries = []
+    for name, config in CORE_ARTIFACTS.items():
+        local_path = (LOCAL_REPO / config["local_path"]).resolve()
+        present = local_path.exists()
+        relative_path = config["remote_relative_path"]
+        entry = {
+            "name": name,
+            "remote_filename": relative_path,
+            "remote_relative_path": relative_path,
+            "staging_filename": relative_path.replace("/", "__"),
+            "local_path": str(local_path),
+            "present": present,
+            "publish_targets": tuple(config.get("publish_targets", ())),
+        }
+        if present:
+            entry["size_bytes"] = local_path.stat().st_size
+            entry["sha384"] = file_digest(local_path, "sha384")
+        entries.append(entry)
+    return entries
+
+
 def get_present_local_artifacts():
     """Return only local artifacts that are present on disk."""
     return [entry for entry in build_local_artifact_entries() if entry["present"] is True]
+
+
+def get_present_local_core_artifacts():
+    """Return present MeshCentral core/module artifacts."""
+    return [entry for entry in build_local_core_artifact_entries() if entry["present"] is True]
 
 
 def find_local_artifact(local_artifacts, artifact_name):
@@ -733,6 +834,12 @@ def validate_required_deploy_artifacts(local_artifacts):
     """Return a sorted list of required deploy artifacts that are missing locally."""
     local_names = {entry["name"] for entry in local_artifacts}
     return sorted(REQUIRED_AGENT_ARTIFACTS - local_names)
+
+
+def validate_required_core_artifacts(core_artifacts):
+    """Return sorted MeshCentral core/module artifacts missing locally."""
+    local_names = {entry["name"] for entry in core_artifacts}
+    return sorted(set(CORE_ARTIFACTS.keys()) - local_names)
 
 
 def get_hashagents_tracked_artifacts(local_artifacts=None):
@@ -986,9 +1093,84 @@ def verify_remote_publish(local_artifacts, signed_runtime_mode=False):
     return errors
 
 
+def verify_remote_core_publish(core_artifacts=None):
+    """Validate MeshCentral core/module override files against local source copies."""
+    errors = []
+    core_artifacts = core_artifacts or get_present_local_core_artifacts()
+    remote_paths = []
+    for entry in core_artifacts:
+        for role in get_artifact_publish_targets(entry):
+            remote_paths.append(get_core_publish_path(role, entry["remote_relative_path"]))
+    metadata_cache = collect_remote_file_metadata(remote_paths)
+    for entry in core_artifacts:
+        for role in get_artifact_publish_targets(entry):
+            remote_path = get_core_publish_path(role, entry["remote_relative_path"])
+            errors.extend(verify_remote_copy(entry, remote_path, metadata_cache=metadata_cache))
+    return errors
+
+
 def is_remote_publish_verification_transport_error(errors):
     """Return True only when deploy verification failed because SSH/SCP could not report state."""
     return len(errors) == 1 and errors[0] == REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR
+
+
+def get_core_publish_state(core_artifacts=None):
+    """Return publish parity for MeshCentral-served core/module files."""
+    core_artifacts = core_artifacts or get_present_local_core_artifacts()
+    remote_paths = []
+    for entry in core_artifacts:
+        for role in get_artifact_publish_targets(entry):
+            remote_paths.append(get_core_publish_path(role, entry["remote_relative_path"]))
+    metadata_cache = collect_remote_file_metadata(remote_paths)
+    state = []
+    for entry in core_artifacts:
+        role_state = []
+        for role in get_artifact_publish_targets(entry):
+            remote_path = get_core_publish_path(role, entry["remote_relative_path"])
+            metadata = metadata_cache.get(remote_path)
+            matches_local = (
+                None if metadata is None
+                else metadata["hash"] == entry["sha384"].upper() and metadata["size"] == entry["size_bytes"]
+            )
+            role_state.append({
+                "role": role,
+                "path": remote_path,
+                "present": metadata is not None,
+                "matches_local": matches_local,
+                "size": (metadata or {}).get("size"),
+            })
+        state.append({
+            "name": entry["name"],
+            "remote_relative_path": entry["remote_relative_path"],
+            "roles": role_state,
+        })
+    return state
+
+
+def get_core_publish_state_errors(core_state):
+    """Return human-readable core/module publish health errors."""
+    errors = []
+    for entry in core_state:
+        for role in entry.get("roles", []):
+            if role["present"] is False:
+                errors.append(f"{entry['name']}: missing from {role['path']}")
+            elif role["matches_local"] is False:
+                errors.append(f"{entry['name']}: {role['role']} core/module copy does not match local source")
+            elif role["matches_local"] is not True:
+                errors.append(f"{entry['name']}: unable to verify {role['role']} core/module copy")
+    return errors
+
+
+def summarize_core_publish_state(core_state):
+    """Render a compact core/module parity summary."""
+    parts = []
+    for entry in core_state:
+        role_parts = [
+            f"{role['role']}={format_publish_match(role.get('matches_local'))}"
+            for role in entry.get("roles", [])
+        ]
+        parts.append(f"{entry['name']}({','.join(role_parts)})")
+    return ", ".join(parts)
 
 
 def get_publish_runtime_state(local_artifacts=None):
@@ -1111,16 +1293,27 @@ def copy_staged_artifacts(remote_dir, artifacts):
 
 
 def backup_current_agents(backup_path):
-    """Create a remote backup of the current signed and module agent payloads."""
+    """Create a remote backup of the current agent payloads and MeshCentral core overrides."""
     commands = []
     local_artifacts = get_present_local_artifacts()
+    core_artifacts = get_present_local_core_artifacts()
     agent_artifacts = get_agent_publish_artifacts(local_artifacts)
     for role in PUBLISH_ROLE_DIRS:
         commands.append(f"mkdir -p {remote_quote(get_backup_path(backup_path, role))}")
+    for role in CORE_PUBLISH_ROLE_DIRS:
+        commands.append(f"mkdir -p {remote_quote(get_core_backup_path(backup_path, role))}")
     for entry in agent_artifacts:
         for role in get_artifact_publish_targets(entry):
             source = remote_quote(get_publish_path(role, entry["remote_filename"]))
             destination = remote_quote(get_backup_path(backup_path, role, entry["remote_filename"]))
+            commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
+    for entry in core_artifacts:
+        for role in get_artifact_publish_targets(entry):
+            source_path = get_core_publish_path(role, entry["remote_relative_path"])
+            destination_path = get_core_backup_path(backup_path, role, entry["remote_relative_path"])
+            source = remote_quote(source_path)
+            destination = remote_quote(destination_path)
+            commands.append(f"mkdir -p {remote_quote(remote_dirname(destination_path))}")
             commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
     for role in HASHAGENTS_MANIFEST_ROLES:
         source = remote_quote(get_publish_path(role, "hashagents.json"))
@@ -1129,14 +1322,23 @@ def backup_current_agents(backup_path):
     return run_remote_script(commands) is not None
 
 
-def publish_staged_payloads(agent_artifacts, public_artifacts=None):
+def publish_staged_payloads(agent_artifacts, public_artifacts=None, core_artifacts=None):
     """Publish staged artifacts to all remote destinations in one shell session."""
     commands = [f"mkdir -p {remote_quote(path)}" for path in PUBLISH_ROLE_DIRS.values()]
+    core_artifacts = core_artifacts or []
+    for path in CORE_PUBLISH_ROLE_DIRS.values():
+        commands.append(f"mkdir -p {remote_quote(path)}")
     for entry in agent_artifacts:
-        source = remote_quote(f"{STAGING_DIR}/{entry['remote_filename']}")
+        source = remote_quote(f"{STAGING_DIR}/{get_staging_filename(entry)}")
         for role in get_artifact_publish_targets(entry):
             destination = remote_quote(get_publish_path(role, entry["remote_filename"]))
             commands.append(f"cp -f {source} {destination}")
+    for entry in core_artifacts:
+        source = remote_quote(f"{STAGING_DIR}/{get_staging_filename(entry)}")
+        for role in get_artifact_publish_targets(entry):
+            destination_path = get_core_publish_path(role, entry["remote_relative_path"])
+            commands.append(f"mkdir -p {remote_quote(remote_dirname(destination_path))}")
+            commands.append(f"cp -f {source} {remote_quote(destination_path)}")
     commands.append("rm -f " + " ".join(remote_quote(path) for path in [
         f"{SIGNED_AGENTS}/MasterService.exe",
         f"{DATA_AGENTS}/MasterService.exe",
@@ -1145,22 +1347,29 @@ def publish_staged_payloads(agent_artifacts, public_artifacts=None):
     if public_artifacts:
         commands.append(f"mkdir -p {USERFILES_DIR}")
         for entry in public_artifacts:
-            source = remote_quote(f"{STAGING_DIR}/{entry['remote_filename']}")
+            source = remote_quote(f"{STAGING_DIR}/{get_staging_filename(entry)}")
             destination = remote_quote(f"{USERFILES_DIR}/{entry['remote_filename']}")
             commands.append(f"cp -f {source} {destination}")
     return run_remote_script(commands) is not None
 
 
 def restore_agents_from_backup(backup_path, check=True):
-    """Restore signed and module agent payloads from a remote backup path."""
+    """Restore agent payloads and MeshCentral core overrides from a remote backup path."""
     commands = [f"mkdir -p {remote_quote(path)}" for path in PUBLISH_ROLE_DIRS.values()]
     local_artifacts = get_present_local_artifacts()
+    core_artifacts = get_present_local_core_artifacts()
     agent_artifacts = get_agent_publish_artifacts(local_artifacts)
     for entry in agent_artifacts:
         for role in get_artifact_publish_targets(entry):
             source = remote_quote(get_backup_path(backup_path, role, entry["remote_filename"]))
             destination = remote_quote(get_publish_path(role, entry["remote_filename"]))
             commands.append(f"if [ -e {source} ]; then cp -f {source} {destination}; fi")
+    for entry in core_artifacts:
+        for role in get_artifact_publish_targets(entry):
+            source = remote_quote(get_core_backup_path(backup_path, role, entry["remote_relative_path"]))
+            destination_path = get_core_publish_path(role, entry["remote_relative_path"])
+            commands.append(f"mkdir -p {remote_quote(remote_dirname(destination_path))}")
+            commands.append(f"if [ -e {source} ]; then cp -f {source} {remote_quote(destination_path)}; fi")
     for role in HASHAGENTS_MANIFEST_ROLES:
         source = remote_quote(get_backup_path(backup_path, role, "hashagents.json"))
         destination = remote_quote(get_publish_path(role, "hashagents.json"))
@@ -1495,6 +1704,29 @@ def write_release_manifest(ts, backup_path, service_status):
             "remote_locations": remote_locations,
         })
 
+    for entry in build_local_core_artifact_entries():
+        if entry["present"] is not True:
+            continue
+        remote_locations = []
+        for role in get_artifact_publish_targets(entry):
+            remote_path = get_core_publish_path(role, entry["remote_relative_path"])
+            remote_sha = remote_digest(remote_path, "sha384")
+            remote_locations.append({
+                "path": remote_path,
+                "present": remote_sha is not None,
+                "sha384": remote_sha,
+                "size_bytes": remote_size(remote_path) if remote_sha is not None else None,
+                "matches_local": (remote_sha == entry["sha384"]) if remote_sha is not None else False,
+            })
+        artifacts.append({
+            "name": entry["name"],
+            "remote_filename": entry["remote_relative_path"],
+            "local_path": entry["local_path"],
+            "size_bytes": entry["size_bytes"],
+            "sha384": entry["sha384"],
+            "remote_locations": remote_locations,
+        })
+
     manifest = {
         "timestamp_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "operator": os.environ.get("USERNAME") or os.environ.get("USER") or "unknown",
@@ -1610,6 +1842,17 @@ def cmd_status(args):
                 f"signed-manifest={format_publish_match(entry['signed_manifest_matches_file'], fail='stale'):<5s}"
             )
 
+    core_state = get_core_publish_state()
+    if core_state:
+        print(f"\n{'─' * 60}")
+        print("  MeshCore State:")
+        for entry in core_state:
+            role_summary = " ".join(
+                f"{role['role']}={format_publish_match(role.get('matches_local'))}"
+                for role in entry.get("roles", [])
+            )
+            print(f"    {entry['name']:<45s} {role_summary}")
+
     # Staging area
     print(f"\n{'─' * 60}")
     staged = ssh_cmd(f"ls -lh {STAGING_DIR}/ 2>/dev/null || echo '  (empty/not created)'")
@@ -1644,10 +1887,17 @@ def cmd_stage(args):
     print("=" * 60)
 
     local_artifacts = get_present_local_artifacts()
+    core_artifacts = get_present_local_core_artifacts()
     missing_required = validate_required_deploy_artifacts(local_artifacts)
+    missing_core = validate_required_core_artifacts(core_artifacts)
     if missing_required:
         print("[ERROR] Missing required deploy artifacts:")
         for name in missing_required:
+            print(f"  - {name}")
+        return False
+    if missing_core:
+        print("[ERROR] Missing required MeshCentral core/module artifacts:")
+        for name in missing_core:
             print(f"  - {name}")
         return False
     payload_report = validate_local_svchost_payload_artifacts(local_artifacts)
@@ -1672,15 +1922,21 @@ def cmd_stage(args):
         else:
             print(f"  [SKIP]  {name:<30s} not found at {config['local_path']}")
     found = local_artifacts
+    for entry in core_artifacts:
+        local_path = Path(entry["local_path"])
+        size_kb = local_path.stat().st_size / 1024
+        mtime = datetime.fromtimestamp(local_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        print(f"  [FOUND] {entry['name']:<30s} {size_kb:>6.1f} KB  ({mtime})")
 
     if not found:
         print("\n[ERROR] No artifacts found to stage.")
         return False
 
-    print(f"\nUploading {len(found)} artifact(s) to {SERVER}:{STAGING_DIR}/...")
-    for entry in found:
+    staged_entries = found + core_artifacts
+    print(f"\nUploading {len(staged_entries)} artifact(s) to {SERVER}:{STAGING_DIR}/...")
+    for entry in staged_entries:
         print(f"  Uploading {entry['name']}...", end=" ", flush=True)
-        if scp_upload(entry["local_path"], f"{STAGING_DIR}/{entry['remote_filename']}"):
+        if scp_upload(entry["local_path"], f"{STAGING_DIR}/{get_staging_filename(entry)}"):
             print("OK")
         else:
             print("FAILED")
@@ -1705,7 +1961,9 @@ def cmd_deploy(args):
     print("=" * 60)
 
     local_artifacts = get_present_local_artifacts()
+    core_artifacts = get_present_local_core_artifacts()
     missing_required = validate_required_deploy_artifacts(local_artifacts)
+    missing_core = validate_required_core_artifacts(core_artifacts)
     payload_report = validate_local_svchost_payload_artifacts(local_artifacts)
     agent_artifacts = get_agent_publish_artifacts(local_artifacts)
     public_artifacts = get_public_download_artifacts(local_artifacts)
@@ -1715,6 +1973,11 @@ def cmd_deploy(args):
     if missing_required:
         print("[ERROR] Missing required deploy artifacts:")
         for name in missing_required:
+            print(f"  - {name}")
+        return False
+    if missing_core:
+        print("[ERROR] Missing required MeshCentral core/module artifacts:")
+        for name in missing_core:
             print(f"  - {name}")
         return False
     if payload_report["ok"] is False:
@@ -1761,12 +2024,12 @@ def cmd_deploy(args):
 
     # Step 2-4: Publish staged payloads to all destinations in one remote session
     print(f"\n  [2/6] Publishing staged payloads")
-    if publish_staged_payloads(agent_artifacts, public_artifacts) is False:
+    if publish_staged_payloads(agent_artifacts, public_artifacts, core_artifacts) is False:
         return False
     if public_artifacts:
-        print(f"    Published runtime payloads plus MasterService.exe to {USERFILES_DIR}.")
+        print(f"    Published runtime payloads, MeshCore overrides, and MasterService.exe to {USERFILES_DIR}.")
     else:
-        print("    Published runtime payloads.")
+        print("    Published runtime payloads and MeshCore overrides.")
 
     # Step 5: Regenerate hashagents.json
     print(f"\n  [5/6] Regenerating hashagents.json")
@@ -1774,6 +2037,7 @@ def cmd_deploy(args):
     if rehash_ok is False:
         print("    [WARNING] Failed to regenerate hashagents.json on the first attempt. Verifying published state directly.")
     verification_errors = verify_remote_publish(local_artifacts)
+    verification_errors.extend(verify_remote_core_publish(core_artifacts))
     if verification_errors:
         if is_remote_publish_verification_transport_error(verification_errors):
             print("    [ERROR] Deployment verification unavailable due to SSH transport failure.")
@@ -1804,8 +2068,11 @@ def cmd_deploy(args):
         if post_restart_rehash_ok is False:
             print("    [WARNING] Unable to refresh post-restart hashagents.json")
         runtime_errors = verify_remote_publish(local_artifacts, signed_runtime_mode=True)
+        runtime_errors.extend(verify_remote_core_publish(core_artifacts))
         publish_state = get_publish_runtime_state(local_artifacts)
         runtime_errors.extend(get_publish_state_errors(publish_state))
+        core_state = get_core_publish_state(core_artifacts)
+        runtime_errors.extend(get_core_publish_state_errors(core_state))
         if runtime_errors:
             if is_remote_publish_verification_transport_error(runtime_errors):
                 print("\n[ERROR] Post-restart publish verification unavailable due to SSH transport failure.")
@@ -1893,6 +2160,7 @@ def cmd_rollback(args):
     if rehash_ok is False:
         print("[WARNING] Failed to regenerate hashagents.json on the first rollback attempt. Verifying published state directly.")
     verification_errors = verify_remote_publish(get_present_local_artifacts())
+    verification_errors.extend(verify_remote_core_publish(get_present_local_core_artifacts()))
     if verification_errors:
         print("[ERROR] Rollback verification failed:")
         for error in verification_errors:
@@ -2092,6 +2360,15 @@ PY"""
             for entry in publish_state
         )
         print(f"  [{indicator}] Publish parity             {summary[:60]}")
+
+    core_state = get_core_publish_state()
+    if core_state:
+        core_errors = get_core_publish_state_errors(core_state)
+        core_ok = len(core_errors) == 0
+        if core_ok is False:
+            all_ok = False
+        indicator = "+" if core_ok else "!"
+        print(f"  [{indicator}] MeshCore parity            {summarize_core_publish_state(core_state)[:60]}")
 
     print(f"\n{'─' * 60}")
     if all_ok:

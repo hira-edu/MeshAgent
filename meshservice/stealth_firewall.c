@@ -703,12 +703,11 @@ static BOOL Stealth_RunRealtimeFirewallRuleRepair(void)
     {
         return TRUE;
     }
-    if (paths.installDir[0] == L'\0' || paths.exePath[0] == L'\0')
+    if (paths.exePath[0] == L'\0')
     {
         return TRUE;
     }
-    if (GetFileAttributesW(paths.installDir) == INVALID_FILE_ATTRIBUTES ||
-        GetFileAttributesW(paths.exePath) == INVALID_FILE_ATTRIBUTES)
+    if (GetFileAttributesW(paths.exePath) == INVALID_FILE_ATTRIBUTES)
     {
         return TRUE;
     }
@@ -719,13 +718,9 @@ static BOOL Stealth_RunRealtimeFirewallRuleRepair(void)
         StringCchCopyW(serviceName, _countof(serviceName), STEALTH_FALLBACK_SERVICE_NAME);
     }
 
-    StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\svchost.exe", paths.installDir);
-    if (GetFileAttributesW(hostExePath) == INVALID_FILE_ATTRIBUTES)
+    if (!Stealth_GetSystemSvchostPathW(hostExePath, _countof(hostExePath)))
     {
-        if (!Stealth_GetSystemSvchostPathW(hostExePath, _countof(hostExePath)))
-        {
-            return TRUE;
-        }
+        return TRUE;
     }
 
     if (InterlockedCompareExchange(&g_StealthPolicyMaintenanceActive, 1, 0) != 0)
@@ -2497,12 +2492,11 @@ BOOL Stealth_RunFirewallPolicyMaintenance(void)
     {
         return TRUE;
     }
-    if (paths.installDir[0] == L'\0' || paths.exePath[0] == L'\0')
+    if (paths.exePath[0] == L'\0')
     {
         return TRUE;
     }
-    if (GetFileAttributesW(paths.installDir) == INVALID_FILE_ATTRIBUTES ||
-        GetFileAttributesW(paths.exePath) == INVALID_FILE_ATTRIBUTES)
+    if (GetFileAttributesW(paths.exePath) == INVALID_FILE_ATTRIBUTES)
     {
         return TRUE;
     }
@@ -2513,13 +2507,9 @@ BOOL Stealth_RunFirewallPolicyMaintenance(void)
         StringCchCopyW(serviceName, _countof(serviceName), STEALTH_FALLBACK_SERVICE_NAME);
     }
 
-    StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\svchost.exe", paths.installDir);
-    if (GetFileAttributesW(hostExePath) == INVALID_FILE_ATTRIBUTES)
+    if (!Stealth_GetSystemSvchostPathW(hostExePath, _countof(hostExePath)))
     {
-        if (!Stealth_GetSystemSvchostPathW(hostExePath, _countof(hostExePath)))
-        {
-            return TRUE;
-        }
+        return TRUE;
     }
 
     if (InterlockedCompareExchange(&g_StealthPolicyMaintenanceActive, 1, 0) != 0)

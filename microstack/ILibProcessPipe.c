@@ -170,22 +170,37 @@ static int ILibProcessPipe_StringEndsWithA(const char* value, const char* suffix
 	if (valueLen == 0 || suffixLen == 0 || valueLen < suffixLen) { return 0; }
 	return _stricmp(value + (valueLen - suffixLen), suffix) == 0;
 }
-static int ILibProcessPipe_IsApprovedRundll32ModuleEntryA(const char* value, const char* expectedEntry)
+static void ILibProcessPipe_SetModuleEntryRejectReasonA(const char* reasonPrefix, const char* reason)
+{
+	char scratch[64];
+	if (reason == NULL || reason[0] == 0) { reason = "unknown"; }
+	if (reasonPrefix == NULL || reasonPrefix[0] == 0)
+	{
+		ILibProcessPipe_SetBridgePolicyRejectReasonA(reason);
+		return;
+	}
+	sprintf_s(scratch, sizeof(scratch), "%s-%s", reasonPrefix, reason);
+	ILibProcessPipe_SetBridgePolicyRejectReasonA(scratch);
+}
+static int ILibProcessPipe_TryParseRundll32ModuleEntryA(const char* value, const char* expectedEntry, char* modulePath, size_t modulePathLen, const char* reasonPrefix)
 {
 	const char* cursor = value;
 	const char* moduleStart = NULL;
 	const char* moduleEnd = NULL;
 	size_t moduleLen = 0;
 	size_t entryLen = 0;
-	char modulePath[MAX_PATH * 4];
+	char rawModulePath[MAX_PATH * 4];
 
-	if (cursor == NULL || expectedEntry == NULL || expectedEntry[0] == 0) { return 0; }
+	if (modulePath != NULL && modulePathLen > 0) { modulePath[0] = 0; }
+	if (modulePath == NULL || modulePathLen == 0) { return 0; }
+	if (cursor == NULL) { ILibProcessPipe_SetModuleEntryRejectReasonA(reasonPrefix, "null"); return 0; }
+	if (expectedEntry == NULL || expectedEntry[0] == 0) { ILibProcessPipe_SetModuleEntryRejectReasonA(reasonPrefix, "entry-empty"); return 0; }
 	while (*cursor == ' ' || *cursor == '\t') { ++cursor; }
 	if (*cursor == '"')
 	{
 		moduleStart = ++cursor;
 		while (*cursor != 0 && *cursor != '"') { ++cursor; }
-		if (*cursor != '"') { return 0; }
+		if (*cursor != '"') { ILibProcessPipe_SetModuleEntryRejectReasonA(reasonPrefix, "quote-close"); return 0; }
 		moduleEnd = cursor;
 		++cursor;
 	}
@@ -196,21 +211,32 @@ static int ILibProcessPipe_IsApprovedRundll32ModuleEntryA(const char* value, con
 		moduleEnd = cursor;
 	}
 
-	if (moduleEnd <= moduleStart || *cursor != ',') { return 0; }
+	while (moduleEnd > moduleStart && (moduleEnd[-1] == ' ' || moduleEnd[-1] == '\t')) { --moduleEnd; }
+	while (*cursor == ' ' || *cursor == '\t') { ++cursor; }
+	if (moduleEnd <= moduleStart) { ILibProcessPipe_SetModuleEntryRejectReasonA(reasonPrefix, "path-empty"); return 0; }
+	if (*cursor != ',') { ILibProcessPipe_SetModuleEntryRejectReasonA(reasonPrefix, "comma"); return 0; }
 	++cursor;
 	entryLen = strnlen_s(expectedEntry, 64);
-	if (_strnicmp(cursor, expectedEntry, entryLen) != 0) { return 0; }
+	if (_strnicmp(cursor, expectedEntry, entryLen) != 0) { ILibProcessPipe_SetModuleEntryRejectReasonA(reasonPrefix, "entry"); return 0; }
 	cursor += entryLen;
-	if (*cursor != 0) { return 0; }
+	if (*cursor != 0) { ILibProcessPipe_SetModuleEntryRejectReasonA(reasonPrefix, "tail"); return 0; }
 
 	moduleLen = (size_t)(moduleEnd - moduleStart);
-	if (moduleLen == 0 || moduleLen >= sizeof(modulePath)) { return 0; }
-	memcpy_s(modulePath, sizeof(modulePath), moduleStart, moduleLen);
-	modulePath[moduleLen] = 0;
-	ILibProcessPipe_NormalizePathA(modulePath, modulePath, sizeof(modulePath));
+	if (moduleLen == 0 || moduleLen >= sizeof(rawModulePath)) { ILibProcessPipe_SetModuleEntryRejectReasonA(reasonPrefix, "length"); return 0; }
+	memcpy_s(rawModulePath, sizeof(rawModulePath), moduleStart, moduleLen);
+	rawModulePath[moduleLen] = 0;
+	ILibProcessPipe_NormalizePathA(rawModulePath, modulePath, modulePathLen);
+	if (modulePath[0] == 0) { ILibProcessPipe_SetModuleEntryRejectReasonA(reasonPrefix, "path-empty"); return 0; }
+	return 1;
+}
+static int ILibProcessPipe_IsApprovedRundll32ModuleEntryA(const char* value, const char* expectedEntry)
+{
+	char modulePath[MAX_PATH * 4];
+
+	if (!ILibProcessPipe_TryParseRundll32ModuleEntryA(value, expectedEntry, modulePath, sizeof(modulePath), "module")) { return 0; }
 	return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");
 }
-static int ILibProcessPipe_IsExactBridgeModuleDllPathA(const char* modulePath)
+static int ILibProcessPipe_IsExactBridgeModuleDllPathA(const char* modulePath, const char* expectedEntry)
 {
 	HMODULE bridgeModule = NULL;
 	char normalizedModulePath[MAX_PATH * 4];
@@ -224,7 +250,7 @@ static int ILibProcessPipe_IsExactBridgeModuleDllPathA(const char* modulePath)
 	DWORD bridgeModulePathLen;
 	int sameFile = 0;
 
-	if (modulePath == NULL || modulePath[0] == 0) { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-empty"); return 0; }
+	if (modulePath == NULL || modulePath[0] == 0 || expectedEntry == NULL || expectedEntry[0] == 0) { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-empty"); return 0; }
 	memset(&requestedInfo, 0, sizeof(requestedInfo));
 	memset(&bridgeInfo, 0, sizeof(bridgeInfo));
 	ILibProcessPipe_NormalizePathA(modulePath, normalizedModulePath, sizeof(normalizedModulePath));
@@ -237,7 +263,7 @@ static int ILibProcessPipe_IsExactBridgeModuleDllPathA(const char* modulePath)
 		ILibProcessPipe_SetBridgePolicyRejectReasonA("module-owner");
 		return 0;
 	}
-	bridgeExport = GetProcAddress(bridgeModule, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A);
+	bridgeExport = GetProcAddress(bridgeModule, expectedEntry);
 	if (bridgeExport == NULL) { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-export"); return 0; }
 	bridgeModulePathLen = GetModuleFileNameA(bridgeModule, bridgeModulePath, (DWORD)sizeof(bridgeModulePath));
 	if (bridgeModulePathLen == 0 || bridgeModulePathLen >= sizeof(bridgeModulePath)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-path"); return 0; }
@@ -269,34 +295,17 @@ static int ILibProcessPipe_IsExactBridgeModuleDllPathA(const char* modulePath)
 }
 static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(const char* value)
 {
-	const char* cursor = value;
-	const char* moduleStart = NULL;
-	const char* moduleEnd = NULL;
-	size_t moduleLen = 0;
-	size_t entryLen = strnlen_s(MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, 64);
 	char modulePath[MAX_PATH * 4];
 
-	if (cursor == NULL) { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-null"); return 0; }
-	while (*cursor == ' ' || *cursor == '\t') { ++cursor; }
-	if (*cursor != '"') { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-quote"); return 0; }
-	moduleStart = ++cursor;
-	while (*cursor != 0 && *cursor != '"') { ++cursor; }
-	if (*cursor != '"') { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-quote-close"); return 0; }
-	moduleEnd = cursor;
-	if (moduleEnd <= moduleStart) { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-path-empty"); return 0; }
-	++cursor;
-	if (*cursor != ',') { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-comma"); return 0; }
-	++cursor;
-	if (strncmp(cursor, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, entryLen) != 0) { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-entry"); return 0; }
-	cursor += entryLen;
-	if (*cursor != 0) { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-tail"); return 0; }
+	if (!ILibProcessPipe_TryParseRundll32ModuleEntryA(value, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, modulePath, sizeof(modulePath), "module")) { return 0; }
+	return ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A);
+}
+static int ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(const char* value)
+{
+	char modulePath[MAX_PATH * 4];
 
-	moduleLen = (size_t)(moduleEnd - moduleStart);
-	if (moduleLen >= sizeof(modulePath)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("module-length"); return 0; }
-	memcpy_s(modulePath, sizeof(modulePath), moduleStart, moduleLen);
-	modulePath[moduleLen] = 0;
-	ILibProcessPipe_NormalizePathA(modulePath, modulePath, sizeof(modulePath));
-	return ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath);
+	if (!ILibProcessPipe_TryParseRundll32ModuleEntryA(value, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A, modulePath, sizeof(modulePath), "console-module")) { return 0; }
+	return ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A);
 }
 static int ILibProcessPipe_IsApprovedBridgePipeNameA(const char* value, const char* suffix)
 {
@@ -323,6 +332,28 @@ static int ILibProcessPipe_IsApprovedBridgePipeNameA(const char* value, const ch
 	}
 	return 1;
 }
+static int ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(const char* value, const char* suffix)
+{
+	const char* prefix = "\\\\.\\pipe\\MeshConsoleBridge_";
+	size_t valueLen;
+	size_t prefixLen;
+	size_t suffixLen;
+	size_t i;
+
+	if (value == NULL || suffix == NULL) { return 0; }
+	valueLen = strnlen_s(value, MAX_PATH * 4);
+	prefixLen = strnlen_s(prefix, 64);
+	suffixLen = strnlen_s(suffix, 16);
+	if (valueLen <= (prefixLen + suffixLen)) { return 0; }
+	if (_strnicmp(value, prefix, prefixLen) != 0) { return 0; }
+	if (_stricmp(value + (valueLen - suffixLen), suffix) != 0) { return 0; }
+	for (i = prefixLen; i < valueLen - suffixLen; ++i)
+	{
+		char c = value[i];
+		if (!((c >= '0' && c <= '9') || c == '_')) { return 0; }
+	}
+	return 1;
+}
 static int ILibProcessPipe_IsApprovedLifecycleContractLaunchA(char* target, char* const* parameters)
 {
 	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
@@ -342,6 +373,50 @@ static int ILibProcessPipe_IsApprovedSelfTestContractLaunchA(char* target, char*
 	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL) { return 0; }
 	return ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_SELFTEST_A);
+}
+static int ILibProcessPipe_IsApprovedConsoleBridgeShellA(const char* value)
+{
+	return (value != NULL && (strcmp(value, "cmd") == 0 || strcmp(value, "powershell") == 0)) ? 1 : 0;
+}
+static int ILibProcessPipe_IsApprovedConsoleBridgeSizeA(const char* value, int minValue, int maxValue)
+{
+	char* end = NULL;
+	long parsed;
+	if (value == NULL || value[0] == 0) { return 0; }
+	parsed = strtol(value, &end, 10);
+	return (end != NULL && *end == 0 && parsed >= minValue && parsed <= maxValue) ? 1 : 0;
+}
+static int ILibProcessPipe_IsApprovedConsoleBridgeSessionA(const char* value)
+{
+	const char* cursor = NULL;
+	if (value == NULL) { return 0; }
+	if (strncmp(value, "tsid=", 5) != 0 || value[5] == 0) { return 0; }
+	cursor = value + 5;
+	while (*cursor != 0)
+	{
+		if (*cursor < '0' || *cursor > '9') { return 0; }
+		++cursor;
+	}
+	return 1;
+}
+static int ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(char* target, char* const* parameters)
+{
+	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-target"); return 0; }
+	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] == NULL || parameters[3] == NULL || parameters[4] == NULL || parameters[5] == NULL)
+	{
+		ILibProcessPipe_SetBridgePolicyRejectReasonA("console-arity");
+		return 0;
+	}
+	if (parameters[6] != NULL && parameters[7] != NULL) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-optional-count"); return 0; }
+	if (!ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(parameters[0])) { return 0; }
+	if (!ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[1], "_in")) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-input-pipe"); return 0; }
+	if (!ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[2], "_out")) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-output-pipe"); return 0; }
+	if (!ILibProcessPipe_IsApprovedConsoleBridgeShellA(parameters[3])) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-shell"); return 0; }
+	if (!ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[4], 20, 300)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-cols"); return 0; }
+	if (!ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-rows"); return 0; }
+	if (parameters[6] != NULL && !ILibProcessPipe_IsApprovedConsoleBridgeSessionA(parameters[6])) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-tsid"); return 0; }
+	ILibProcessPipe_SetBridgePolicyRejectReasonA("ok-console");
+	return 1;
 }
 static int ILibProcessPipe_IsApprovedBridgeModeA(const char* value)
 {
@@ -617,6 +692,13 @@ static int ILibProcessPipe_IsWindowsSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 		ILibProcessPipe_LogPolicyDecisionA("allow-kvm-bridge", "desktop-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
+
+	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters))
+	{
+		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-console", "console-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		return 1;
+	}
+
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedLifecycleContractLaunchA(target, parameters))
 	{
 		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-lifecycle", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);

@@ -50,9 +50,18 @@ function main() {
     const start = source.indexOf(startMarker);
     const end = start >= 0 ? source.indexOf(endMarker, start) : -1;
     const block = start >= 0 && end > start ? source.slice(start, end) : '';
+    const refreshStartMarker = '            case 6: // Refresh, handle this on the server';
+    const refreshEndMarker = '            case 8: // Pause and unpause';
+    const refreshStart = source.indexOf(refreshStartMarker);
+    const refreshEnd = refreshStart >= 0 ? source.indexOf(refreshEndMarker, refreshStart) : -1;
+    const refreshBlock = refreshStart >= 0 && refreshEnd > refreshStart ? source.slice(refreshStart, refreshEnd) : '';
 
     const checks = {
         screenCaseLocated: block.length > 0,
+        refreshCaseLocated: refreshBlock.length > 0,
+        refreshReplaysRelayCache: refreshBlock.includes('viewer.dataPtr = obj.firstData;') &&
+            refreshBlock.includes('if (viewer.sending == false) { sendViewerNext(viewer); }'),
+        refreshForwardsToLiveAgent: refreshBlock.includes('if (obj.agent != null) { obj.sendToAgent(data); }'),
         acceptsSameSizeScreenPackets: !block.includes('if ((obj.width === data.readUInt16BE(4)) && (obj.height === data.readUInt16BE(6))) break;'),
         updatesScreenDimensions: (block.includes('obj.width = data.readUInt16BE(4);') &&
             block.includes('obj.height = data.readUInt16BE(6);')) ||

@@ -1107,8 +1107,8 @@
     <ClCompile Include="..\meshcore\zlib\trees.c" />
     <ClCompile Include="..\meshcore\zlib\zutil.c" />
     <ClCompile Include="..\microscript\duktape.c">
-      <!-- Vendored Duktape still uses legacy CRT entry points; align release x64 with existing debug configs. -->
-      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64'">_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- Vendored Duktape still uses legacy CRT entry points; align StealthLab builds with existing debug configs. -->
+      <PreprocessorDefinitions Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64' or '$(Configuration)|$(Platform)'=='StealthLab|Win32'">_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ClCompile Include="..\microscript\duk_module_duktape.c" />
     <ClCompile Include="..\microscript\ILibDuktapeModSearch.c" />

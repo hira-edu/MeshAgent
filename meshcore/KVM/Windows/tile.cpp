@@ -171,6 +171,7 @@ typedef struct DxgiCaptureState
 	int screenWidth;
 	int screenHeight;
 	int retryDelayMs;
+	int idleFramePolls;
 	ULONGLONG nextRetryTick;
 	unsigned char* lastFrame;
 	size_t lastFrameSize;
@@ -221,6 +222,7 @@ static const int TILE_CAPTURE_RETRY_MAX_DELAY_MS = 3000;
 static const UINT TILE_DXGI_INITIAL_FRAME_WAIT_MS = 16;
 static const UINT TILE_DXGI_RETRY_FRAME_WAIT_MS = 33;
 static const int TILE_DXGI_FRAME_READY_ATTEMPTS = 4;
+static const int TILE_DXGI_IDLE_RESET_THRESHOLD = 4;
 static const DWORD TILE_WGC_FRAME_WAIT_TIMEOUT_MS = 250;
 static const int TILE_WGC_IDLE_RESET_THRESHOLD = 4;
 static const UINT TILE_DXGI_ONESHOT_FRAME_WAIT_MS = 500;
@@ -381,6 +383,7 @@ static void tile_dxgi_release_runtime(int clearCache)
 	gDxgiCapture.screenWidth = 0;
 	gDxgiCapture.screenHeight = 0;
 	gDxgiCapture.duplicatePath[0] = 0;
+	gDxgiCapture.idleFramePolls = 0;
 	if (clearCache && gDxgiCapture.lastFrame != NULL)
 	{
 		free(gDxgiCapture.lastFrame);
@@ -389,13 +392,18 @@ static void tile_dxgi_release_runtime(int clearCache)
 	}
 }
 
-static void tile_dxgi_schedule_retry(const char* reason)
+static void tile_dxgi_schedule_retry_ex(const char* reason, int clearCache)
 {
 	int delay = tile_capture_next_retry_delay_ms(gDxgiCapture.retryDelayMs);
 	gDxgiCapture.nextRetryTick = GetTickCount64() + (ULONGLONG)delay;
 	gDxgiCapture.retryDelayMs = delay < TILE_CAPTURE_RETRY_MAX_DELAY_MS ? (delay * 2) : TILE_CAPTURE_RETRY_MAX_DELAY_MS;
-	tile_dxgi_release_runtime(0);
+	tile_dxgi_release_runtime(clearCache);
 	tile_set_capture_backend(KvmCaptureBackend_GDI, reason);
+}
+
+static void tile_dxgi_schedule_retry(const char* reason)
+{
+	tile_dxgi_schedule_retry_ex(reason, 0);
 }
 
 static int tile_wgc_ensure_apartment()
@@ -468,13 +476,18 @@ static void tile_wgc_release_runtime(int clearCache)
 	}
 }
 
-static void tile_wgc_schedule_retry(const char* reason)
+static void tile_wgc_schedule_retry_ex(const char* reason, int clearCache)
 {
 	int delay = tile_capture_next_retry_delay_ms(gWgcCapture.retryDelayMs);
 	gWgcCapture.nextRetryTick = GetTickCount64() + (ULONGLONG)delay;
 	gWgcCapture.retryDelayMs = delay < TILE_CAPTURE_RETRY_MAX_DELAY_MS ? (delay * 2) : TILE_CAPTURE_RETRY_MAX_DELAY_MS;
-	tile_wgc_release_runtime(0);
+	tile_wgc_release_runtime(clearCache);
 	tile_set_capture_backend(KvmCaptureBackend_GDI, reason);
+}
+
+static void tile_wgc_schedule_retry(const char* reason)
+{
+	tile_wgc_schedule_retry_ex(reason, 0);
 }
 
 static int tile_wgc_copy_cached_frame(void** buffer, long long* bufferSize);
@@ -484,7 +497,7 @@ static int tile_wgc_handle_idle_frame(void** buffer, long long* bufferSize, cons
 	++gWgcCapture.idleFramePolls;
 	if (gWgcCapture.idleFramePolls >= TILE_WGC_IDLE_RESET_THRESHOLD)
 	{
-		tile_wgc_schedule_retry(gdiReason);
+		tile_wgc_schedule_retry_ex(gdiReason, 1);
 		return 0;
 	}
 	if (tile_wgc_copy_cached_frame(buffer, bufferSize) != 0)
@@ -954,6 +967,7 @@ static int tile_dxgi_initialize()
 	gDxgiCapture.screenHeight = SCREEN_HEIGHT;
 	gDxgiCapture.retryDelayMs = TILE_CAPTURE_RETRY_INITIAL_DELAY_MS;
 	gDxgiCapture.nextRetryTick = 0;
+	gDxgiCapture.idleFramePolls = 0;
 
 	hr = tile_dxgi_create_staging_texture(gDxgiCapture.sourceWidth, gDxgiCapture.sourceHeight);
 	if (FAILED(hr))
@@ -975,6 +989,23 @@ static int tile_dxgi_copy_cached_frame(void** buffer, long long* bufferSize)
 	*bufferSize = (long long)gDxgiCapture.lastFrameSize;
 	PIXEL_SIZE = 4;
 	return 1;
+}
+
+static int tile_dxgi_handle_idle_frame(void** buffer, long long* bufferSize, const char* gdiReason, const char* cachedReason)
+{
+	++gDxgiCapture.idleFramePolls;
+	if (gDxgiCapture.idleFramePolls >= TILE_DXGI_IDLE_RESET_THRESHOLD)
+	{
+		tile_dxgi_schedule_retry_ex(gdiReason, 1);
+		return 0;
+	}
+	if (tile_dxgi_copy_cached_frame(buffer, bufferSize) != 0)
+	{
+		tile_set_capture_backend(KvmCaptureBackend_DXGI, cachedReason != NULL ? cachedReason : "dxgi:cached");
+		return 1;
+	}
+	tile_set_capture_backend(KvmCaptureBackend_GDI, gdiReason);
+	return 0;
 }
 
 static void tile_dxgi_cache_frame(const void* buffer, size_t bufferSize)
@@ -1027,13 +1058,7 @@ static int tile_dxgi_capture_frame(void** buffer, long long* bufferSize)
 		}
 		if (hr == DXGI_ERROR_WAIT_TIMEOUT)
 		{
-			if (tile_dxgi_copy_cached_frame(buffer, bufferSize) != 0)
-			{
-				tile_set_capture_backend(KvmCaptureBackend_DXGI, "dxgi:cached");
-				return 1;
-			}
-			tile_set_capture_backend(KvmCaptureBackend_GDI, "gdi:dxgi-timeout");
-			return 0;
+			return tile_dxgi_handle_idle_frame(buffer, bufferSize, "gdi:dxgi-timeout", "dxgi:cached-timeout");
 		}
 		if (FAILED(hr))
 		{
@@ -1058,19 +1083,7 @@ static int tile_dxgi_capture_frame(void** buffer, long long* bufferSize)
 	}
 	if (desktopResource == NULL || frameInfo.LastPresentTime.QuadPart == 0)
 	{
-		// No real desktop frame yet — this is a startup transient, not a true
-		// failure.  Following the Sunshine / FreeRDP pattern: keep the DXGI
-		// device and duplication alive so that (a) the next attempt can succeed
-		// without a full re-init, and (b) the D3D11 device continues to prime
-		// the display adapter for GDI fallback capture on session-0 desktops.
-		// Return a cached frame if available, otherwise fall through to GDI.
-		if (tile_dxgi_copy_cached_frame(buffer, bufferSize) != 0)
-		{
-			tile_set_capture_backend(KvmCaptureBackend_DXGI, "dxgi:cached-no-present");
-			return 1;
-		}
-		tile_set_capture_backend(KvmCaptureBackend_GDI, "gdi:dxgi-no-present");
-		return 0;
+		return tile_dxgi_handle_idle_frame(buffer, bufferSize, "gdi:dxgi-no-present", "dxgi:cached-no-present");
 	}
 
 	hr = desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&desktopTexture);
@@ -1145,6 +1158,7 @@ static int tile_dxgi_capture_frame(void** buffer, long long* bufferSize)
 	PIXEL_SIZE = 4;
 	gDxgiCapture.retryDelayMs = TILE_CAPTURE_RETRY_INITIAL_DELAY_MS;
 	gDxgiCapture.nextRetryTick = 0;
+	gDxgiCapture.idleFramePolls = 0;
 	tile_set_capture_backend(KvmCaptureBackend_DXGI, gDxgiCapture.duplicatePath);
 	return 1;
 }

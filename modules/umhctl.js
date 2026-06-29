@@ -2322,7 +2322,7 @@ function umhctlStartPreProtectionCaptureProcess(paths)
         }
         return childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshPreProtectionCaptureW', paths.capturePath]);
     }
-    return childProcess.execFile(process.execPath, ['-preprotection-capture', '--capture-path=' + paths.capturePath]);
+    throw new Error('Pre-protection capture requires the Windows rundll32 MeshPreProtectionCaptureW contract');
 }
 
 function umhctlRunPreProtectionCapture(controlReq, sessionid, callback)

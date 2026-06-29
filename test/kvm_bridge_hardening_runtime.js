@@ -2,6 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const net = require('net');
 const childProcess = require('child_process');
+const {
+    resolveRundll32Path
+} = require('./lib/kvm_runtime_helpers');
 
 function parseArgs(argv) {
     const args = {};
@@ -91,16 +94,16 @@ async function waitForCondition(predicate, timeoutMs, intervalMs, description) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
     const dllPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
+    const rundll32Path = resolveRundll32Path();
 
-    assert(fs.existsSync(exePath), `probe executable missing at ${exePath}`);
     assert(fs.existsSync(dllPath), `bridge DLL missing at ${dllPath}`);
+    assert(fs.existsSync(rundll32Path), `rundll32.exe missing at ${rundll32Path}`);
 
     const report = {
         generatedUtc: new Date().toISOString(),
-        exePath,
         dllPath,
+        rundll32Path,
         probe: null,
         controller: null,
         controllerConnectionMs: null,
@@ -111,7 +114,7 @@ async function main() {
     };
     let attachClose = null;
 
-    const probe = runCommandJson(exePath, ['-kvm-bridge-hardening-probe', dllPath]);
+    const probe = runCommandJson(rundll32Path, [`${dllPath},MeshKvmProbeHostW`, '-kvm-bridge-hardening-probe-child', dllPath]);
     report.probe = probe.json;
     assert(probe.status === 0, `hardening probe exited with code ${probe.status}`);
     assert(probe.json.success === true, 'hardening probe reported failure');
@@ -161,7 +164,7 @@ async function main() {
         dataServer.listen(dataPipeName, resolve);
     });
 
-    const controller = childProcess.spawn(exePath, ['-kvm-bridge-job-controller', dllPath, controlPipeName, dataPipeName], {
+    const controller = childProcess.spawn(rundll32Path, [`${dllPath},MeshKvmProbeHostW`, '-kvm-bridge-job-controller', dllPath, controlPipeName, dataPipeName], {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe']
     });

@@ -22,6 +22,9 @@ typedef ILibTransport_DoneState(*ILibKVM_WriteHandler)(char *buffer, int bufferL
 #define KVM_BRIDGE_CONNECT_TIMEOUT_MS 5000
 #define KVM_BRIDGE_CONNECT_DELAY_ENV_A "STEALTH_KVM_BRIDGE_CONNECT_DELAY_MS"
 #define KVM_BRIDGE_CONNECT_DELAY_ENV_W L"STEALTH_KVM_BRIDGE_CONNECT_DELAY_MS"
+#define KVM_PENDING_PROBE_REFRESH 0x01
+#define KVM_PENDING_PROBE_DISPLAYS 0x02
+#define KVM_PENDING_PROBE_INPUTLOCK 0x04
 
 int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, void *reserved);
 void kvm_pause(int pause, void *reserved);

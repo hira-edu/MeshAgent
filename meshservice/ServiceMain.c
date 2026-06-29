@@ -2137,11 +2137,54 @@ static BOOL MeshService_IsAllowedKvmProbeHostCommandW(const WCHAR* arguments)
 	{
 		allowed = (argc == 2 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]));
 	}
+	else if (_wcsicmp(argv[0], L"-kvm-bridge-connect-delay-probe-child") == 0)
+	{
+		allowed = (argc == 3 &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
+			MeshService_IsUnsignedDecimalKvmProbeArgumentW(argv[2]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-bridge-session-interrupt-probe-child") == 0)
+	{
+		allowed = (argc == 4 &&
+				MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
+				MeshService_IsUnsignedDecimalKvmProbeArgumentW(argv[2]) &&
+				MeshService_IsUnsignedDecimalKvmProbeArgumentW(argv[3])) ||
+			(argc == 5 &&
+				MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
+				MeshService_IsUnsignedDecimalKvmProbeArgumentW(argv[2]) &&
+				MeshService_IsUnsignedDecimalKvmProbeArgumentW(argv[3]) &&
+				_wcsicmp(argv[4], L"--unrelated-session") == 0);
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-multi-session-probe-child") == 0)
+	{
+		allowed = (argc == 3 &&
+				MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
+				MeshService_IsUnsignedDecimalKvmProbeArgumentW(argv[2])) ||
+			(argc == 4 &&
+				MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
+				MeshService_IsUnsignedDecimalKvmProbeArgumentW(argv[2]) &&
+				MeshService_IsUnsignedDecimalKvmProbeArgumentW(argv[3]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-bridge-hardening-probe-child") == 0)
+	{
+		allowed = (argc == 2 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-bridge-job-controller") == 0)
+	{
+		allowed = (argc == 4 &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[2]) &&
+			MeshService_IsNonEmptyKvmProbeArgumentW(argv[3]));
+	}
 	else if (_wcsicmp(argv[0], L"-kvm-secure-desktop-probe-child") == 0)
 	{
 		allowed = (argc == 3 &&
 			MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]) &&
 			MeshService_IsUnsignedDecimalKvmProbeArgumentW(argv[2]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-elevated-input-probe") == 0)
+	{
+		allowed = (argc == 2 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]));
 	}
 	else if (_wcsicmp(argv[0], L"-kvm-elevated-input-probe-child") == 0)
 	{
@@ -2156,6 +2199,10 @@ static BOOL MeshService_IsAllowedKvmProbeHostCommandW(const WCHAR* arguments)
 			MeshService_IsNonEmptyKvmProbeArgumentW(argv[4]));
 	}
 	else if (_wcsicmp(argv[0], L"-kvm-blockinput-probe-child") == 0)
+	{
+		allowed = (argc == 2 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]));
+	}
+	else if (_wcsicmp(argv[0], L"-kvm-blockinput-probe") == 0)
 	{
 		allowed = (argc == 2 && MeshService_IsNonEmptyKvmProbeArgumentW(argv[1]));
 	}
@@ -3516,8 +3563,10 @@ static int MeshService_RunKvmElevatedInputProbeChildCommand(const WCHAR* reportP
 	return MeshService_RunKvmElevatedInputProbeWorkerCommand();
 }
 
-static int MeshService_RunKvmElevatedInputProbeCommand(void)
+static int MeshService_RunKvmElevatedInputProbeCommand(const WCHAR* outputReportPath)
 {
+	FILE* redirectedStdout = NULL;
+	errno_t redirectError = 0;
 	WCHAR tempPath[MAX_PATH] = { 0 };
 	WCHAR reportPath[MAX_PATH] = { 0 };
 	WCHAR arguments[512] = { 0 };
@@ -3531,9 +3580,13 @@ static int MeshService_RunKvmElevatedInputProbeCommand(void)
 	BOOL childSpawned = FALSE;
 	char* childJson = NULL;
 
-	if (MeshService_ProcessHasSystemSid())
+	if (outputReportPath != NULL && outputReportPath[0] != L'\0')
 	{
-		return MeshService_RunKvmElevatedInputProbeWorkerCommand();
+		redirectError = _wfreopen_s(&redirectedStdout, outputReportPath, L"wb", stdout);
+		if (redirectError != 0 || redirectedStdout == NULL)
+		{
+			return 1;
+		}
 	}
 
 	ZeroMemory(&childProcess, sizeof(childProcess));
@@ -3660,9 +3713,11 @@ static int MeshService_RunKvmBlockInputHolderCommand(const WCHAR* readyPath, con
 
 	success =
 		windowStationBound &&
-		desktopBound &&
 		blockInputEnabled &&
-		sameThreadSendInputSucceeded;
+		sameThreadSendInputSucceeded &&
+		readySignaled &&
+		releaseRequested &&
+		releaseCallSucceeded;
 
 	sprintf_s(
 		reportJson,
@@ -4132,8 +4187,10 @@ static int MeshService_RunKvmBlockInputProbeChildCommand(const WCHAR* reportPath
 	return MeshService_RunKvmBlockInputProbeWorkerCommand();
 }
 
-static int MeshService_RunKvmBlockInputProbeCommand(void)
+static int MeshService_RunKvmBlockInputProbeCommand(const WCHAR* outputReportPath)
 {
+	FILE* redirectedStdout = NULL;
+	errno_t redirectError = 0;
 	WCHAR tempPath[MAX_PATH] = { 0 };
 	WCHAR reportPath[MAX_PATH] = { 0 };
 	WCHAR arguments[512] = { 0 };
@@ -4147,9 +4204,13 @@ static int MeshService_RunKvmBlockInputProbeCommand(void)
 	BOOL childSpawned = FALSE;
 	char* childJson = NULL;
 
-	if (MeshService_ProcessHasSystemSid())
+	if (outputReportPath != NULL && outputReportPath[0] != L'\0')
 	{
-		return MeshService_RunKvmBlockInputProbeWorkerCommand();
+		redirectError = _wfreopen_s(&redirectedStdout, outputReportPath, L"wb", stdout);
+		if (redirectError != 0 || redirectedStdout == NULL)
+		{
+			return 1;
+		}
 	}
 
 	ZeroMemory(&childProcess, sizeof(childProcess));
@@ -4280,11 +4341,25 @@ static BOOL MeshService_GetCurrentBuildBridgeDllPathW(WCHAR* output, size_t outp
 	WCHAR baseName[MAX_PATH] = { 0 };
 	WCHAR nameNoExt[MAX_PATH] = { 0 };
 	WCHAR candidate[MAX_PATH * 4] = { 0 };
+	HMODULE module = NULL;
+	DWORD modulePathLen = 0;
 	WCHAR* lastSlash = NULL;
 	WCHAR* ext = NULL;
 
 	if (output == NULL || outputLen == 0) { return FALSE; }
 	output[0] = L'\0';
+
+	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&MeshService_GetCurrentBuildBridgeDllPathW, &module) &&
+		(modulePathLen = GetModuleFileNameW(module, modulePath, (DWORD)_countof(modulePath))) > 0 &&
+		modulePathLen < _countof(modulePath) &&
+		GetFileAttributesW(modulePath) != INVALID_FILE_ATTRIBUTES)
+	{
+		ext = wcsrchr(modulePath, L'.');
+		if (ext != NULL && _wcsicmp(ext, L".dll") == 0)
+		{
+			return SUCCEEDED(StringCchCopyW(output, outputLen, modulePath));
+		}
+	}
 
 	if (GetModuleFileNameW(NULL, modulePath, (DWORD)_countof(modulePath)) == 0) { return FALSE; }
 	if (FAILED(StringCchCopyW(dirPath, _countof(dirPath), modulePath))) { return FALSE; }
@@ -5034,6 +5109,22 @@ static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConne
 	return success ? 0 : 1;
 }
 
+static int MeshService_RunKvmBridgeConnectDelayProbeChildCommand(const WCHAR* reportPath, DWORD requestedConnectDelayMs)
+{
+	FILE* redirectedStdout = NULL;
+	errno_t redirectError = 0;
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		redirectError = _wfreopen_s(&redirectedStdout, reportPath, L"wb", stdout);
+		if (redirectError != 0 || redirectedStdout == NULL)
+		{
+			return 1;
+		}
+	}
+	return MeshService_RunKvmBridgeConnectDelayProbeCommand(requestedConnectDelayMs);
+}
+
 typedef struct MeshServiceKvmBridgeSessionInterruptSetup
 {
 	MeshServiceKvmProbeChain* probeChain;
@@ -5270,6 +5361,22 @@ static int MeshService_RunKvmBridgeSessionInterruptProbeCommand(DWORD requestedC
 	return success ? 0 : 1;
 }
 
+static int MeshService_RunKvmBridgeSessionInterruptProbeChildCommand(const WCHAR* reportPath, DWORD requestedConnectDelayMs, DWORD interruptAfterMs, BOOL unrelatedSessionEvent)
+{
+	FILE* redirectedStdout = NULL;
+	errno_t redirectError = 0;
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		redirectError = _wfreopen_s(&redirectedStdout, reportPath, L"wb", stdout);
+		if (redirectError != 0 || redirectedStdout == NULL)
+		{
+			return 1;
+		}
+	}
+	return MeshService_RunKvmBridgeSessionInterruptProbeCommand(requestedConnectDelayMs, interruptAfterMs, unrelatedSessionEvent);
+}
+
 static int MeshService_RunKvmMultiSessionProbeCommand(DWORD primarySessionId, int secondaryTsid)
 {
 	MeshServiceKvmProbeChain probeChain;
@@ -5497,6 +5604,22 @@ static int MeshService_RunKvmMultiSessionProbeCommand(DWORD primarySessionId, in
 	fflush(stdout);
 
 	return success ? 0 : 1;
+}
+
+static int MeshService_RunKvmMultiSessionProbeChildCommand(const WCHAR* reportPath, DWORD primarySessionId, int secondaryTsid)
+{
+	FILE* redirectedStdout = NULL;
+	errno_t redirectError = 0;
+
+	if (reportPath != NULL && reportPath[0] != L'\0')
+	{
+		redirectError = _wfreopen_s(&redirectedStdout, reportPath, L"wb", stdout);
+		if (redirectError != 0 || redirectedStdout == NULL)
+		{
+			return 1;
+		}
+	}
+	return MeshService_RunKvmMultiSessionProbeCommand(primarySessionId, secondaryTsid);
 }
 #endif
 
@@ -7803,11 +7926,49 @@ int MeshService_RunKvmProbeHostW(const wchar_t* arguments)
 		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
 		retCode = MeshService_RunKvmBridgeEventAuditProbeChildCommand(reportPath);
 	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-bridge-connect-delay-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		DWORD connectDelayMs = (wideArgc > 3) ? (DWORD)wcstoul(wideArgv[3], NULL, 10) : 2000UL;
+		retCode = MeshService_RunKvmBridgeConnectDelayProbeChildCommand(reportPath, connectDelayMs);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-bridge-session-interrupt-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		DWORD connectDelayMs = (wideArgc > 3) ? (DWORD)wcstoul(wideArgv[3], NULL, 10) : 4000UL;
+		DWORD interruptAfterMs = (wideArgc > 4) ? (DWORD)wcstoul(wideArgv[4], NULL, 10) : 500UL;
+		BOOL unrelatedSessionEvent = (wideArgc > 5 && wideArgv[5] != NULL && _wcsicmp(wideArgv[5], L"--unrelated-session") == 0);
+		retCode = MeshService_RunKvmBridgeSessionInterruptProbeChildCommand(reportPath, connectDelayMs, interruptAfterMs, unrelatedSessionEvent);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-multi-session-probe-child") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		DWORD primarySessionId = (wideArgc > 3) ? (DWORD)wcstoul(wideArgv[3], NULL, 10) : MeshService_GetCurrentSessionId();
+		int secondaryTsid = (wideArgc > 4) ? (int)wcstol(wideArgv[4], NULL, 10) : -1;
+		retCode = MeshService_RunKvmMultiSessionProbeChildCommand(reportPath, primarySessionId, secondaryTsid);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-bridge-hardening-probe-child") == 0)
+	{
+		const WCHAR* dllPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		retCode = MeshService_RunKvmBridgeHardeningProbeCommand(dllPath);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-bridge-job-controller") == 0)
+	{
+		const WCHAR* dllPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		const WCHAR* inputPipeName = (wideArgc > 3) ? wideArgv[3] : NULL;
+		const WCHAR* outputPipeName = (wideArgc > 4) ? wideArgv[4] : NULL;
+		retCode = MeshService_RunKvmBridgeJobControllerCommand(dllPath, inputPipeName, outputPipeName);
+	}
 	else if (_wcsicmp(wideArgv[1], L"-kvm-secure-desktop-probe-child") == 0)
 	{
 		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
 		DWORD timeoutMs = (wideArgc > 3) ? (DWORD)wcstoul(wideArgv[3], NULL, 10) : 20000;
 		retCode = MeshService_RunKvmSecureDesktopProbeChildCommand(reportPath, timeoutMs);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-elevated-input-probe") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		retCode = MeshService_RunKvmElevatedInputProbeCommand(reportPath);
 	}
 	else if (_wcsicmp(wideArgv[1], L"-kvm-elevated-input-probe-child") == 0)
 	{
@@ -7826,6 +7987,11 @@ int MeshService_RunKvmProbeHostW(const wchar_t* arguments)
 	{
 		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
 		retCode = MeshService_RunKvmBlockInputProbeChildCommand(reportPath);
+	}
+	else if (_wcsicmp(wideArgv[1], L"-kvm-blockinput-probe") == 0)
+	{
+		const WCHAR* reportPath = (wideArgc > 2) ? wideArgv[2] : NULL;
+		retCode = MeshService_RunKvmBlockInputProbeCommand(reportPath);
 	}
 	else if (_wcsicmp(wideArgv[1], L"-kvm-blockinput-target") == 0)
 	{
@@ -8393,19 +8559,15 @@ int wmain(int argc, char* wargv[])
 #if defined(_LINKVM)
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-hardening-probe") == 0)
 	{
-		const WCHAR* dllPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		return MeshService_RunKvmBridgeHardeningProbeCommand(dllPath);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-job-controller") == 0)
 	{
-		const WCHAR* dllPath = (wideArgv != NULL && argc > 2) ? wideArgv[2] : NULL;
-		const WCHAR* inputPipeName = (wideArgv != NULL && argc > 3) ? wideArgv[3] : NULL;
-		const WCHAR* outputPipeName = (wideArgv != NULL && argc > 4) ? wideArgv[4] : NULL;
-		return MeshService_RunKvmBridgeJobControllerCommand(dllPath, inputPipeName, outputPipeName);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-session-change-probe") == 0)
 	{
-		return MeshService_RunKvmBridgeSessionChangeProbeCommand();
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-session-change-probe-child") == 0)
 	{
@@ -8413,7 +8575,7 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-crash-recovery-probe") == 0)
 	{
-		return MeshService_RunKvmBridgeCrashRecoveryProbeCommand();
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-crash-recovery-probe-child") == 0)
 	{
@@ -8421,25 +8583,19 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-event-audit-probe") == 0)
 	{
-		return MeshService_RunKvmBridgeEventAuditProbeCommand();
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-connect-delay-probe") == 0)
 	{
-		DWORD connectDelayMs = (argc > 2) ? (DWORD)strtoul(argv[2], NULL, 10) : 2000UL;
-		return MeshService_RunKvmBridgeConnectDelayProbeCommand(connectDelayMs);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-session-interrupt-probe") == 0)
 	{
-		DWORD connectDelayMs = (argc > 2) ? (DWORD)strtoul(argv[2], NULL, 10) : 4000UL;
-		DWORD interruptAfterMs = (argc > 3) ? (DWORD)strtoul(argv[3], NULL, 10) : 500UL;
-		BOOL unrelatedSessionEvent = (argc > 4 && strcasecmp(argv[4], "--unrelated-session") == 0);
-		return MeshService_RunKvmBridgeSessionInterruptProbeCommand(connectDelayMs, interruptAfterMs, unrelatedSessionEvent);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-multi-session-probe") == 0)
 	{
-		DWORD primarySessionId = (argc > 2) ? (DWORD)strtoul(argv[2], NULL, 10) : MeshService_GetCurrentSessionId();
-		int secondaryTsid = (argc > 3) ? (int)strtol(argv[3], NULL, 10) : -1;
-		return MeshService_RunKvmMultiSessionProbeCommand(primarySessionId, secondaryTsid);
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-event-audit-probe-child") == 0)
 	{
@@ -8447,7 +8603,7 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-secure-desktop-probe") == 0)
 	{
-		return MeshService_RunKvmSecureDesktopProbeCommand();
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-gpu-encoding-benchmark") == 0)
 	{
@@ -8456,7 +8612,7 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-elevated-input-probe") == 0)
 	{
-		return MeshService_RunKvmElevatedInputProbeCommand();
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-elevated-input-probe-child") == 0)
 	{
@@ -8472,7 +8628,7 @@ int wmain(int argc, char* wargv[])
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-blockinput-probe") == 0)
 	{
-		return MeshService_RunKvmBlockInputProbeCommand();
+		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-blockinput-probe-child") == 0)
 	{
@@ -8894,15 +9050,8 @@ int wmain(int argc, char* wargv[])
 					printf("                        Authoritative pre-protection capture path.\r\n");
 					printf("  -svchost-status       Emit JSON svchost status and return a diagnostic bitmask.\r\n");
 #if defined(_LINKVM)
-					printf("  -kvm-bridge-hardening-probe <dll>     Emit JSON runtime proof for bridge DACL hardening.\r\n");
-					printf("  -kvm-bridge-job-controller <dll> <inputPipe> <outputPipe> Internal helper for bridge job-teardown validation.\r\n");
-					printf("  -kvm-bridge-session-change-probe      Emit JSON runtime proof for bridge lock/unlock and reconnect continuity.\r\n");
-					printf("  -kvm-bridge-crash-recovery-probe      Emit JSON runtime proof for bridge early-exit recovery backoff.\r\n");
-					printf("  -kvm-bridge-event-audit-probe         Emit JSON runtime proof for bridge Event Log auditing.\r\n");
-					printf("  -kvm-multi-session-probe [primary] [secondary] Emit JSON runtime proof for concurrent per-context bridge helpers.\r\n");
-					printf("  -kvm-elevated-input-probe             Emit JSON runtime proof for SYSTEM bridge input into an elevated console window.\r\n");
-					printf("  -kvm-blockinput-probe                 Emit JSON runtime proof for same-thread SendInput plus SYSTEM BlockInput(FALSE) override.\r\n");
-					printf("  -kvm-secure-desktop-probe             Emit JSON runtime proof for Winlogon desktop capture during UAC.\r\n");
+					printf("  rundll32.exe <ServiceDll>,MeshKvmProbeHostW <probe-child> ...\r\n");
+					printf("                        Authoritative KVM runtime probe host path.\r\n");
 					printf("  -kvm-gpu-encoding-benchmark [frames]  Emit JSON GPU encoder probe, DXGI shared-texture, and JPEG benchmark data.\r\n");
 #endif
 					printf("  rundll32.exe <ServiceDll>,MeshSelfTestHostW --selfTest=1 ...\r\n");
@@ -9026,9 +9175,6 @@ int wmain(int argc, char* wargv[])
 	return 0;
 }
 
-
-int autoproxy_checked = 0;
-char *configured_autoproxy_value = NULL;
 
 #ifndef _MINCORE
 COLORREF gBKCOLOR = RGB(0, 0, 0);
@@ -9266,9 +9412,6 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 			displayName = Duktape_GetStringPropertyValue(ctx, -1, "displayName", NULL);
 			meshServiceName = Duktape_GetStringPropertyValue(ctx, -1, "meshServiceName", NULL);
 
-			configured_autoproxy_value = Duktape_GetStringPropertyValue(g_dialogCtx, -1, "autoproxy", NULL);
-			autoproxy_checked = configured_autoproxy_value != NULL;
-
 			// Set text in the dialog box
 			if (installFlags != NULL) { installFlagsInt = ILib_atoi2_int32(installFlags, 255); }
 			if (strnlen_s(meshid, 255) > 50) { meshid += 2; meshid[42] = 0; }
@@ -9383,9 +9526,6 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 			{
 				lifecycleAction = MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL;
 			}
-			UNREFERENCED_PARAMETER(autoproxy_checked);
-			UNREFERENCED_PARAMETER(configured_autoproxy_value);
-
 			if (GetModuleFileNameW(NULL, modulePath, (DWORD)_countof(modulePath)) == 0)
 			{
 				launchError = GetLastError();
@@ -9450,8 +9590,6 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		else if (LOWORD(wParam) == IDC_CONNECTBUTTON)
 		{
 			const char* connectDisabled = "Windows GUI temporary connect is disabled until an approved rundll32 lifecycle/connect contract exists.";
-			UNREFERENCED_PARAMETER(autoproxy_checked);
-			UNREFERENCED_PARAMETER(configured_autoproxy_value);
 			SetWindowTextA(GetDlgItem(hDlg, IDC_STATUSTEXT), connectDisabled);
 			MessageBoxA(hDlg, connectDisabled, "Mesh Agent", MB_OK | MB_ICONERROR);
 			if (closeButtonTextSet != 0) { SetWindowTextW(GetDlgItem(hDlg, IDCLOSE), closeButtonText); }
@@ -9468,14 +9606,13 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 // Message handler for details dialog box.
 INT_PTR CALLBACK DialogHandler2(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
-	char *fileName = NULL, *meshname = NULL, *meshid = NULL, *serverid = NULL, *serverurl = NULL, *installFlags = NULL, *mshfile = NULL, *autoproxy = NULL;
+	char *fileName = NULL, *meshname = NULL, *meshid = NULL, *serverid = NULL, *serverurl = NULL, *installFlags = NULL, *mshfile = NULL;
 	char *displayName = NULL, *meshServiceName = NULL;
 	int hiddenButtons = 0; // Flags: 1 if "Connect" is hidden, 2 if "Uninstall" is hidden, 4 is "Install is hidden"
 	UNREFERENCED_PARAMETER(lParam);
 	switch (message)
 	{
 		case WM_CLOSE:
-			autoproxy_checked = IsDlgButtonChecked(hDlg, IDC_AUTOPROXY_CHECK);
 			break;
 	case WM_CTLCOLORDLG: {
 		// Set the background of the dialog box to blue
@@ -9486,13 +9623,6 @@ INT_PTR CALLBACK DialogHandler2(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 	}
 	case WM_CTLCOLORSTATIC: 
 	{
-		if (GetDlgCtrlID((HWND)lParam) == IDC_AUTOPROXY_CHECK)
-		{
-			HBRUSH h=CreateSolidBrush(gBKCOLOR);
-			SetBkColor((HDC)wParam, gBKCOLOR);
-			SetTextColor((HDC)wParam, gFGCOLOR);
-			return((INT_PTR)h);
-		}
 		// Set the left text to white over transparent
 		SetBkMode((HDC)wParam, TRANSPARENT);
 		SetTextColor((HDC)wParam, gFGCOLOR);
@@ -9501,13 +9631,6 @@ INT_PTR CALLBACK DialogHandler2(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 	}
 	case WM_CTLCOLORBTN:
 	{
-		DWORD ID = GetDlgCtrlID((HWND)lParam);
-		if(ID == IDC_AUTOPROXY_CHECK)
-		{
-			SetBkMode((HDC)wParam, TRANSPARENT);
-			SetTextColor((HDC)wParam, gFGCOLOR);
-			return (INT_PTR)GetStockObject(NULL_BRUSH);
-		}
 		break;
 	}
 	case WM_INITDIALOG:
@@ -9532,13 +9655,7 @@ INT_PTR CALLBACK DialogHandler2(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 			serverurl = Duktape_GetStringPropertyValue(g_dialogCtx, -1, "MeshServer", NULL);
 			displayName = Duktape_GetStringPropertyValue(g_dialogCtx, -1, "displayName", NULL);
 			meshServiceName = Duktape_GetStringPropertyValue(g_dialogCtx, -1, "meshServiceName", "Mesh Agent");
-			autoproxy = Duktape_GetStringPropertyValue(g_dialogCtx, -1, "autoproxy", NULL);
 			char *bkcolor = Duktape_GetStringPropertyValue(g_dialogCtx, -1, "bkcolor", "0,0,0");
-
-			if (autoproxy != NULL || autoproxy_checked != 0)
-			{
-				CheckDlgButton(hDlg, IDC_AUTOPROXY_CHECK, BST_CHECKED);
-			}
 
 			// Set text in the dialog box
 			if (strnlen_s(meshid, 255) > 50) { meshid += 2; meshid[42] = 0; }
@@ -9654,8 +9771,6 @@ INT_PTR CALLBACK DialogHandler2(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 	{
 		if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCLOSE || LOWORD(wParam) == IDCANCEL)
 		{
-			autoproxy_checked = IsDlgButtonChecked(hDlg, IDC_AUTOPROXY_CHECK);
-
 			EndDialog(hDlg, LOWORD(wParam));
 			return (INT_PTR)TRUE;
 		}

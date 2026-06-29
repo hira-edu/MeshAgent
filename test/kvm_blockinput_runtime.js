@@ -1,117 +1,38 @@
 const fs = require('fs');
 const path = require('path');
-const childProcess = require('child_process');
-
-function parseArgs(argv) {
-    const args = {};
-    for (let i = 2; i < argv.length; ++i) {
-        const token = argv[i];
-        if (!token.startsWith('--')) {
-            throw new Error(`Unexpected argument: ${token}`);
-        }
-        const key = token.substring(2);
-        const value = argv[i + 1];
-        if (value == null || value.startsWith('--')) {
-            args[key] = true;
-        } else {
-            args[key] = value;
-            i += 1;
-        }
-    }
-    return args;
-}
+const {
+    assert,
+    parseArgs,
+    readJsonText,
+    resolveBridgeDllPath,
+    runSystemRundll32ProbeTask,
+    writeJson,
+    writeText
+} = require('./lib/kvm_runtime_helpers');
 
 function ensureDir(dirPath) {
     fs.mkdirSync(dirPath, { recursive: true });
-}
-
-function writeJson(filePath, value) {
-    ensureDir(path.dirname(filePath));
-    fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
-}
-
-function writeText(filePath, value) {
-    ensureDir(path.dirname(filePath));
-    fs.writeFileSync(filePath, value, 'utf8');
-}
-
-function removeIfExists(filePath) {
-    try {
-        fs.unlinkSync(filePath);
-    } catch (error) {
-        if (!error || error.code !== 'ENOENT') {
-            throw error;
-        }
-    }
-}
-
-function assert(condition, message) {
-    if (!condition) {
-        throw new Error(message);
-    }
-}
-
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForFile(filePath, timeoutMs, intervalMs) {
-    const start = Date.now();
-    while ((Date.now() - start) < timeoutMs) {
-        if (fs.existsSync(filePath) && fs.statSync(filePath).size > 0) {
-            return;
-        }
-        await sleep(intervalMs);
-    }
-    throw new Error(`Timed out waiting for file: ${filePath}`);
-}
-
-function execFileText(exePath, args) {
-    return childProcess.spawnSync(exePath, args, {
-        windowsHide: true,
-        encoding: 'utf8'
-    });
 }
 
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const dllPath = resolveBridgeDllPath(exePath, args.dll);
     const outputDir = evidenceDir || path.resolve('tmp', `kvm-blockinput-${Date.now()}`);
     const probeStdoutPath = path.join(outputDir, 'probe_stdout.json');
-    const probeStderrPath = path.join(outputDir, 'probe_stderr.txt');
-    const taskQueryPath = path.join(outputDir, 'task_query.txt');
-    const cmdPath = path.join(outputDir, 'run_probe.cmd');
-    const taskName = `MeshAgentKvmBlockInput_${Date.now()}`;
-    const taskDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' });
 
     assert(fs.existsSync(exePath), `probe executable missing at ${exePath}`);
+    assert(fs.existsSync(dllPath), `bridge DLL missing at ${dllPath}`);
     ensureDir(outputDir);
-    removeIfExists(probeStdoutPath);
-    removeIfExists(probeStderrPath);
-    removeIfExists(taskQueryPath);
 
-    fs.writeFileSync(cmdPath, `@echo off\r\n"${exePath}" -kvm-blockinput-probe > "${probeStdoutPath}" 2> "${probeStderrPath}"\r\n`, 'ascii');
-
-    let taskQuery = '';
-    try {
-        execFileText('schtasks', ['/Create', '/TN', taskName, '/SC', 'ONCE', '/SD', taskDate, '/ST', '23:59', '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/TR', cmdPath, '/F']);
-        execFileText('schtasks', ['/Run', '/TN', taskName]);
-        await waitForFile(probeStdoutPath, 120000, 1000);
-        taskQuery = (execFileText('schtasks', ['/Query', '/TN', taskName, '/V', '/FO', 'LIST']).stdout || '').trim();
-        writeText(taskQueryPath, taskQuery + '\n');
-    } finally {
-        execFileText('schtasks', ['/Delete', '/TN', taskName, '/F']);
-    }
-
-    const stdout = fs.existsSync(probeStdoutPath) ? fs.readFileSync(probeStdoutPath, 'utf8') : '';
-    const stderr = fs.existsSync(probeStderrPath) ? fs.readFileSync(probeStderrPath, 'utf8') : '';
-    let json = null;
-    try {
-        json = JSON.parse(stdout.trim());
-    } catch (error) {
-        throw new Error(`Failed to parse probe JSON\nstdout:\n${stdout}\nstderr:\n${stderr}\nparse error: ${error.message}`);
-    }
+    const systemProbe = await runSystemRundll32ProbeTask(dllPath, '-kvm-blockinput-probe', {
+        prefix: `MeshAgentKvmBlockInput_${Date.now()}`,
+        reportPath: probeStdoutPath,
+        timeoutMs: 120000
+    });
+    const stdout = systemProbe.reportContent;
+    const json = readJsonText('kvm-blockinput-probe', stdout);
 
     assert(json.success === true, 'probe reported failure');
     assert(json.bridgeUsed === true, 'rundll32 bridge was not used');
@@ -135,18 +56,33 @@ async function main() {
         generatedUtc: new Date().toISOString(),
         success: true,
         exePath,
-        taskName,
-        taskQuery,
+        dllPath,
+        rundll32Path: systemProbe.rundll32Path,
+        taskName: systemProbe.taskName,
+        taskReportPath: systemProbe.reportPath,
+        taskXmlPath: systemProbe.taskXmlPath,
+        taskCommandLine: systemProbe.commandLine,
+        createTaskStdout: systemProbe.create.stdout || '',
+        createTaskStderr: systemProbe.create.stderr || '',
+        runTaskStdout: systemProbe.run.stdout || '',
+        runTaskStderr: systemProbe.run.stderr || '',
         probe: json
     };
 
     if (evidenceDir) {
         writeJson(path.join(evidenceDir, 'kvm_blockinput_runtime.json'), report);
         writeText(path.join(evidenceDir, 'probe_stdout.json'), stdout.trim() + '\n');
-        writeText(path.join(evidenceDir, 'probe_stderr.txt'), stderr);
+        writeText(path.join(evidenceDir, 'task.xml'), systemProbe.taskXml);
+        writeText(path.join(evidenceDir, 'schtasks-create-stdout.txt'), report.createTaskStdout);
+        writeText(path.join(evidenceDir, 'schtasks-create-stderr.txt'), report.createTaskStderr);
+        writeText(path.join(evidenceDir, 'schtasks-run-stdout.txt'), report.runTaskStdout);
+        writeText(path.join(evidenceDir, 'schtasks-run-stderr.txt'), report.runTaskStderr);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
+            `RUNDLL32_PATH=${report.rundll32Path}`,
+            `DLL_PATH=${report.dllPath}`,
+            `TASK_NAME=${report.taskName}`,
             `BRIDGE_PID=${json.bridgePid}`,
             `BRIDGE_INTEGRITY_RID=${json.bridgeIntegrityRid}`,
             `TARGET_PID=${json.targetPid}`,
