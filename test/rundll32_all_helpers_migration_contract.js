@@ -292,7 +292,8 @@ function main() {
             sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedLifecycleContractLaunchA(target, parameters)') &&
             sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(target, parameters)') &&
             sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedSelfTestContractLaunchA(target, parameters)') &&
-            sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters)') &&
+            sources.processPipe.includes('if (ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters))') &&
+            !sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters)') &&
             !sources.processPipe.includes('ILibProcessPipe_HasKvmBridgeEntryPointA') &&
             !sources.processPipe.includes('ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
             !sources.processPipe.includes('ILibProcessPipe_TargetEndsWithA(target, "\\\\rundll32.exe")') &&
@@ -769,10 +770,13 @@ function main() {
             sources.terminal.includes("if (typeof(chunk) == 'string') { return ({ payload: chunk, length: chunk.length }); }") &&
             sources.terminal.includes('try { data = Buffer.from(chunk); }') &&
             sources.terminal.includes('return ({ payload: data, length: data.length });') &&
-            sources.terminal.includes("text != null && text.length > 0 && text != '[object Object]'") &&
+            sources.terminal.includes("textValue != null && textValue.length > 0 && textValue != '[object Object]'") &&
+            sources.terminal.includes('return ({ payload: textValue, length: textValue.length });') &&
             sources.terminal.includes('write: function write(chunk, flush)') &&
             sources.terminal.includes('return (self.writeInput(chunk, flush));') &&
             sources.terminal.includes('var input = chunkToInputData(chunk);') &&
+            sources.terminal.includes("fallbackText = '' + chunk.toString();") &&
+            sources.terminal.includes('input = { payload: fallbackText, length: fallbackText.length };') &&
             sources.terminal.includes('this.pendingWrites.push({ chunk: input.payload, flush: flush });') &&
             sources.terminal.includes('this.inputSocket.write(input.payload);') &&
             sources.terminal.includes('this.stream._meshTerminalLastWriteBytes = input.length;') &&
@@ -782,8 +786,12 @@ function main() {
             sources.terminal.includes('this.inputServer.listen(this.inputPipeName);\n    this.outputServer.listen(this.outputPipeName);\n    try { self.launchBridge(); }') &&
             !sources.terminal.includes('this.inputServer.listen(this.inputPipeName, function onInputListening()') &&
             !sources.terminal.includes('function onOutputListening()') &&
-            sources.terminal.includes('BRIDGE_LAUNCH_MAX_ATTEMPTS = 2') &&
-            sources.terminal.includes('setTimeout(function retryLaunchBridge() { self.launchBridge(); }, BRIDGE_LAUNCH_RETRY_DELAY_MS)') &&
+            !sources.terminal.includes('BRIDGE_LAUNCH_MAX_ATTEMPTS') &&
+            !sources.terminal.includes('retryLaunchBridge') &&
+            !sources.terminal.includes('BRIDGE_LAUNCH_RETRY_DELAY_MS') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_CreateShellProcessWithRetryW') &&
+            sources.rundll32ContractImpl.includes('Shell spawn recovered inside same rundll32') &&
+            sources.rundll32ContractImpl.includes('Falling back to bridge token inside same rundll32 after session spawn denial') &&
             sources.terminal.includes("if (stream.createEvent) { stream.createEvent('ready'); }") &&
             sources.terminal.includes('stream.isBridgeReady = function isBridgeReady()') &&
             sources.terminal.includes('stream._meshTerminalBridgeLaunched = false') &&
@@ -800,6 +808,10 @@ function main() {
             sources.meshcentralCore.includes('function sendRunCommandToTerminal()') &&
             sources.meshcentralCore.includes('var runCommandSent = false') &&
             sources.meshcentralCore.includes('mesh.cmdchild._meshRunCommandSent = true') &&
+            sources.meshcentralCore.includes("var runCommandDoneMarker = '\\x1eMESH_RUN_COMMAND_DONE_'") &&
+            sources.meshcentralCore.includes("[Console]::WriteLine([char]30 + \\'") &&
+            sources.meshcentralCore.includes('if (markerIndex < 0) { markerIndex = replydata.indexOf(runCommandDoneMarkerBody); }') &&
+            sources.meshcentralCore.includes('if ((replydata.indexOf(runCommandDoneMarker) >= 0) || (replydata.indexOf(runCommandDoneMarkerBody) >= 0)) { completeRunCommand(); }') &&
             sources.meshcentralCore.includes('function getRunCommandBridgeState()') &&
             sources.meshcentralCore.includes('getRunCommandBridgeState()') &&
             sources.meshcentralCore.includes("writes=' + mesh.cmdchild._meshTerminalWriteCount") &&

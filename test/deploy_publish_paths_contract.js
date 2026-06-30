@@ -78,7 +78,11 @@ const requiredSnippets = [
     'Published files were not rolled back because no content mismatch was verified.',
     'Data Agents ({DATA_AGENTS})',
     'missing from {DATA_AGENTS}',
-    '"data_agents_dir": DATA_AGENTS'
+    '"data_agents_dir": DATA_AGENTS',
+    '"module-root": f"{MESHCENTRAL_BASE}/node_modules/meshcentral"',
+    '"meshagent.js": {',
+    '"local_path": "../MeshCentral/node_modules/meshcentral/meshagent.js"',
+    '"publish_targets": ("module-root",)'
 ];
 
 for (const snippet of requiredSnippets) {
@@ -102,6 +106,10 @@ assert(publishSnapshotBody.includes('return None'), 'collect_remote_publish_snap
 const verifyPublishBody = extractFunction('verify_remote_publish');
 assert(!verifyPublishBody.includes('verify_remote_embedded_svchost_payload('), 'verify_remote_publish must not SCP-download EXEs for redundant embedded checks');
 assert(verifyPublishBody.includes('return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]'), 'verify_remote_publish must report transport failure explicitly');
+
+const activateUpdateBody = extractFunction('activate_remote_pending_update');
+assert(activateUpdateBody.includes("'RequireConfig=0'"), 'manual pending update activation must allow binary-only MeshCentral packages for older agents');
+assert(!activateUpdateBody.includes("'RequireConfig=1'"), 'manual pending update activation must not force package-embedded provisioning');
 
 const report = {
     generatedUtc: new Date().toISOString(),

@@ -119,6 +119,10 @@ static void MeshAgent_ControlChannelDebugLog(MeshAgentHostContainer *agent, cons
 
 #ifdef WIN32
 #define MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX ".update.pkg"
+#define MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY "UpdateActivationTargetHash"
+#define MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY "UpdateActivationFailureHash"
+#define MESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS 600000
+#define MESHAGENT_UPDATE_HASH_HEX_LENGTH (UTIL_SHA384_HASHSIZE * 2)
 #endif
 
 static void MeshAgent_AddHostHeader(ILibHTTPPacket *req, const char* overrideHost, const char* host, unsigned short port, int useDefaultPort)
@@ -5146,6 +5150,91 @@ static void MeshServer_MarkForceFakeUpdateConsumed(MeshAgentHostContainer *agent
 	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> force/fake trigger consumed; future updates remain enabled"); }
 }
 
+#ifdef WIN32
+static int MeshAgent_UpdateHashHexIsValid(const char *value, int valueLen)
+{
+	int i;
+	if (value == NULL || valueLen != MESHAGENT_UPDATE_HASH_HEX_LENGTH) { return 0; }
+	for (i = 0; i < valueLen; ++i)
+	{
+		if (!((value[i] >= '0' && value[i] <= '9') ||
+			(value[i] >= 'a' && value[i] <= 'f') ||
+			(value[i] >= 'A' && value[i] <= 'F')))
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int MeshAgent_ReadUpdateHashKey(ILibSimpleDataStore db, const char *key, char *hashOut, char *hexOut, size_t hexOutLen)
+{
+	char value[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 4];
+	int valueLen;
+	if (db == NULL || key == NULL || key[0] == 0) { return 0; }
+	valueLen = ILibSimpleDataStore_Get(db, (char*)key, value, sizeof(value));
+	if (valueLen <= 0) { return 0; }
+	while (valueLen > 0 && (value[valueLen - 1] == 0 || value[valueLen - 1] == '\r' || value[valueLen - 1] == '\n' || value[valueLen - 1] == ' ' || value[valueLen - 1] == '\t')) { --valueLen; }
+	if (!MeshAgent_UpdateHashHexIsValid(value, valueLen))
+	{
+		ILibSimpleDataStore_Delete(db, (char*)key);
+		return 0;
+	}
+	value[valueLen] = 0;
+	if (hashOut != NULL && util_hexToBuf(value, (size_t)valueLen, hashOut) != UTIL_SHA384_HASHSIZE) { return 0; }
+	if (hexOut != NULL && hexOutLen > 0)
+	{
+		if (hexOutLen <= (size_t)valueLen) { return 0; }
+		memcpy_s(hexOut, hexOutLen, value, (size_t)valueLen + 1);
+	}
+	return 1;
+}
+
+static void MeshAgent_WriteUpdateHashKey(ILibSimpleDataStore db, const char *key, const char *hash)
+{
+	char value[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 1];
+	if (db == NULL || key == NULL || key[0] == 0 || hash == NULL) { return; }
+	util_tohex((char*)hash, UTIL_SHA384_HASHSIZE, value);
+	ILibSimpleDataStore_PutEx(db, (char*)key, strnlen_s(key, 128), value, MESHAGENT_UPDATE_HASH_HEX_LENGTH);
+}
+
+static void MeshAgent_ClearUpdateHashKey(ILibSimpleDataStore db, const char *key)
+{
+	if (db == NULL || key == NULL || key[0] == 0) { return; }
+	ILibSimpleDataStore_Delete(db, (char*)key);
+}
+
+static int MeshAgent_ReadUpdateActivationTargetHash(ILibSimpleDataStore db, char *hashOut)
+{
+	return MeshAgent_ReadUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY, hashOut, NULL, 0);
+}
+
+static void MeshAgent_RecordUpdateActivationTargetHash(ILibSimpleDataStore db, const char *hash)
+{
+	MeshAgent_WriteUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY, hash);
+}
+
+static void MeshAgent_ClearUpdateActivationTargetHash(ILibSimpleDataStore db)
+{
+	MeshAgent_ClearUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY);
+}
+
+static int MeshAgent_ReadUpdateActivationFailureHash(ILibSimpleDataStore db, char *hashOut)
+{
+	return MeshAgent_ReadUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY, hashOut, NULL, 0);
+}
+
+static void MeshAgent_RecordUpdateActivationFailureHash(ILibSimpleDataStore db, const char *hash)
+{
+	MeshAgent_WriteUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY, hash);
+}
+
+static void MeshAgent_ClearUpdateActivationFailureHash(ILibSimpleDataStore db)
+{
+	MeshAgent_ClearUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY);
+}
+#endif
+
 void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 {
 #ifndef WIN32
@@ -5190,8 +5279,16 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 	{
 		WCHAR w_updatefile[4096] = { 0 };
 		char *updatefile = MeshAgent_MakeAbsolutePathEx(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX, 0);
+		char updateActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
+		int haveUpdateActivationHash = 0;
 
 		ILibUTF8ToWideEx(updatefile, (int)strnlen_s(updatefile, 4096), w_updatefile, 4096);
+		haveUpdateActivationHash = MeshAgent_ReadUpdateActivationTargetHash(agent->masterDb, updateActivationHash);
+		if (haveUpdateActivationHash == 0 && GenerateSHA384FileHash(updatefile, updateActivationHash) == 0)
+		{
+			MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, updateActivationHash);
+			haveUpdateActivationHash = 1;
+		}
 
 #if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
 		// Launch the downloaded update through the rundll32 lifecycle host.
@@ -5205,20 +5302,27 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 				NULL,
 				NULL,
 				FALSE,
-				FALSE,
-				0,
+				TRUE,
+				MESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS,
 				&lifecycleExitCode))
 		{
-			ILIBLOGMESSAGEX("SelfUpdate -> Rundll32 lifecycle update activation started (%ls)", w_updatefile);
+			MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
+			MeshAgent_ClearUpdateActivationFailureHash(agent->masterDb);
+			ILIBLOGMESSAGEX("SelfUpdate -> Rundll32 lifecycle update activation completed (exit %lu, %ls)", lifecycleExitCode, w_updatefile);
 		}
 		else
 		{
-			ILIBLOGMESSAGEX("SelfUpdate -> FAILED to launch rundll32 lifecycle update activation (exit %lu, error %lu)", lifecycleExitCode, GetLastError());
+			DWORD activationError = GetLastError();
+			if (haveUpdateActivationHash != 0) { MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, updateActivationHash); }
+			MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
+			ILIBLOGMESSAGEX("SelfUpdate -> FAILED rundll32 lifecycle update activation (exit %lu, error %lu); keeping current agent online", lifecycleExitCode, activationError);
 			util_deletefile(updatefile); // Fail closed: drop the staged payload so a failed activation does not leave it behind
 			return;
 		}
 #else
 		UNREFERENCED_PARAMETER(w_updatefile);
+		if (haveUpdateActivationHash != 0) { MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, updateActivationHash); }
+		MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
 		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires rundll32/svchost mode; legacy command-shell update path disabled.");
 		util_deletefile(updatefile); // Fail closed: this build cannot apply the staged update, so do not leave it on disk
 		return;
@@ -5968,7 +6072,20 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			else
 			{
 				// Update when necessary
+#ifdef WIN32
+				char failedActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
+				if (MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash))
+				{
+					memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), failedActivationHash, UTIL_SHA384_HASHSIZE);
+					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> holding failed update package hash to prevent same-package activation loop"); }
+				}
+				else
+				{
+					memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE);// SHA384 hash of the agent executable
+				}
+#else
 				memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE);// SHA384 hash of the agent executable
+#endif
 			}
 
 			// Send the self hash back to the server
@@ -6003,6 +6120,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			{
 				// Indicates the start of the agent update transfer
 				if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Starting download..."); }
+#ifdef WIN32
+				MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
+#endif
 				util_deletefile(updateFilePath);
 			} else if (cmdLen == sizeof(MeshCommand_BinaryPacket_CoreModule)) 
 			{
@@ -6013,6 +6133,21 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					//printf("UPDATE: End OK\r\n");
 					int updateTop = duk_get_top(agent->meshCoreCtx);
 					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Download Complete... Hash verified"); }
+#ifdef WIN32
+					{
+						char failedActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
+						if (agent->forceUpdate == 0 && agent->fakeUpdate == 0 &&
+							MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash) &&
+							memcmp(failedActivationHash, cm->coreModuleHash, UTIL_SHA384_HASHSIZE) == 0)
+						{
+							if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Same update package previously failed activation; suppressing repeat activation"); }
+							util_deletefile(updateFilePath);
+							break;
+						}
+						MeshAgent_ClearUpdateActivationFailureHash(agent->masterDb);
+						MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, cm->coreModuleHash);
+					}
+#endif
 					{
 						static const char agentUpdateDownloadedAck[] = "{\"action\":\"agentupdatedownloaded\"}";
 						ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_TEXT, (char*)agentUpdateDownloadedAck, (int)(sizeof(agentUpdateDownloadedAck) - 1), ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);

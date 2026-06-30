@@ -68,6 +68,11 @@ function main() {
         'static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream',
         'duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop'
     );
+    const feedDataBlock = extractSpan(
+        kvmSource,
+        'int kvm_relay_feeddata',
+        'static int kvm_relay_select_session_id'
+    );
     const probeOutputBlock = extractSpan(
         kvmSource,
         'static unsigned int kvm_bridge_debug_probe_mask_for_output',
@@ -107,10 +112,24 @@ function main() {
             kvmSource.includes('#define KVM_REFRESH_PROBE_TIMEOUT_MS (KVM_BRIDGE_CONNECT_TIMEOUT_MS * 2)') &&
             kvmSource.includes('static int kvm_relay_handle_refresh_probe_timeout(KvmRelayContext* ctx, const char* source)') &&
             kvmSource.includes('respawning rundll32 KVM bridge') &&
+            kvmSource.includes('kvm_relay_cache_refresh_probe_for_respawn(ctx);') &&
             kvmSource.includes('ILibProcessPipe_Process_SoftKill(gChildProcess);') &&
             kvmSource.includes('kvm_schedule_retry_timer_delay(KVM_REFRESH_PROBE_TIMEOUT_MS);') &&
             kvmSource.includes('gChildProcess == NULL && gKvmPipeMgr != NULL') &&
             kvmSource.includes('kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);'),
+        kvmServiceFeeddataRespawnsSameRundll32Bridge:
+            kvmSource.includes('static int kvm_relay_prepare_bridge_respawn_from_input') &&
+            kvmSource.includes('service-mode KVM input routed to rundll32 bridge respawn') &&
+            feedDataBlock.includes('kvm_relay_prepare_bridge_respawn_from_input(ctx, buf, len, "write-failed", writeError)') &&
+            feedDataBlock.includes('kvm_relay_prepare_bridge_respawn_from_input(ctx, buf, len, "no-child", ERROR_SUCCESS)') &&
+            feedDataBlock.includes('ctx != NULL && gKvmPipeMgr != NULL && gKvmExePath != NULL && gKvmWriteHandler != NULL') &&
+            feedDataBlock.indexOf('kvm_relay_prepare_bridge_respawn_from_input(ctx, buf, len, "no-child", ERROR_SUCCESS)') <
+                feedDataBlock.indexOf('while ((len2 = kvm_server_inputdata'),
+        kvmReplayCachesOperatorRefreshForRespawn:
+            kvmSource.includes('static void kvm_relay_cache_refresh_probe_for_respawn(KvmRelayContext* ctx)') &&
+            kvmSource.includes('MNG_KVM_REFRESH') &&
+            kvmSource.includes('kvm_relay_input_is_replayable_after_respawn') &&
+            kvmSource.includes('kvm_relay_cache_control_packet(ctx, buffer, bufferLen)'),
         agentcoreHasNoWatchdogState: !agentcore.includes('REMOTE_DESKTOP_WATCHDOG_STARTUP_TIMEOUT_MS') &&
             !agentcore.includes('watchdogSessionStartTickMs') &&
             !agentcore.includes('watchdogRequiredScreenTickMs') &&

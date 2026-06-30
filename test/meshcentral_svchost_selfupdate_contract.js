@@ -68,20 +68,43 @@ function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const agentcorePath = path.resolve('meshcore', 'agentcore.c');
     const agentInstallerPath = path.resolve('modules', 'agent-installer.js');
+    const stealthInstallerPath = path.resolve('meshservice', 'stealth_installer.c');
     const meshcorePath = path.resolve('..', 'MeshCentral', 'agents', 'meshcore.js');
+    const meshcoreMinPath = path.resolve('..', 'MeshCentral', 'agents', 'meshcore.min.js');
+    const meshcentralDataMeshcorePath = path.resolve('..', 'MeshCentral', 'meshcentral-data', 'meshcore.js');
     const recoverycorePath = path.resolve('..', 'MeshCentral', 'agents', 'recoverycore.js');
 
     const agentcoreSource = loadText(agentcorePath);
     const agentInstallerSource = loadText(agentInstallerPath);
+    const stealthInstallerSource = loadText(stealthInstallerPath);
     const meshcoreSource = loadOptionalText(meshcorePath);
+    const meshcoreMinSource = loadOptionalText(meshcoreMinPath);
+    const meshcentralDataMeshcoreSource = loadOptionalText(meshcentralDataMeshcorePath);
     const recoverycoreSource = loadOptionalText(recoverycorePath);
 
-    const meshcentralLegacyTokens = ['.update.exe', '_wexecve', 'cmd.exe', '-b64exec ', '-fullupdate'];
+    const meshcentralLegacyTokens = ['.update.exe', '_wexecve', '-b64exec ', '-fullupdate', 'windows_getNativeUpdateActivationPath', 'windows_tryNativeFullUpdate', 'windows_execve'];
     const meshcoreLegacyHits = findTokens(meshcoreSource, meshcentralLegacyTokens);
+    const meshcoreMinLegacyHits = findTokens(meshcoreMinSource, meshcentralLegacyTokens);
+    const meshcentralDataMeshcoreLegacyHits = findTokens(meshcentralDataMeshcoreSource, meshcentralLegacyTokens);
     const recoverycoreLegacyHits = findTokens(recoverycoreSource, meshcentralLegacyTokens);
-    const externalMeshCentralDrift = meshcoreLegacyHits.length > 0 || recoverycoreLegacyHits.length > 0;
+    const externalMeshCentralDrift = meshcoreLegacyHits.length > 0 ||
+        meshcoreMinLegacyHits.length > 0 ||
+        meshcentralDataMeshcoreLegacyHits.length > 0 ||
+        recoverycoreLegacyHits.length > 0;
 
     const checks = {
+        meshcentralSourcesAvailableNoLegacyUpdater: meshcoreSource != null &&
+            meshcoreMinSource != null &&
+            meshcentralDataMeshcoreSource != null &&
+            recoverycoreSource != null &&
+            meshcoreLegacyHits.length === 0 &&
+            meshcoreMinLegacyHits.length === 0 &&
+            meshcentralDataMeshcoreLegacyHits.length === 0 &&
+            recoverycoreLegacyHits.length === 0 &&
+            meshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
+            meshcoreMinSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
+            meshcentralDataMeshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
+            recoverycoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'),
         agentcorePublishesNativeFullUpdate: agentcoreSource.includes('"nativeFullUpdate"'),
         agentcoreProbesZipHeaderBeforeOptionalJsUnzip: agentcoreSource.includes('static int MeshServer_UpdateFileLooksZip(char *updateFilePath)') &&
             agentcoreSource.includes('MeshServer_UpdateFileLooksZip(updateFilePath)'),
@@ -96,6 +119,17 @@ function main() {
             agentcoreSource.includes('MeshRundll32_LaunchLifecycleHostW(') &&
             agentcoreSource.includes('MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE') &&
             agentcoreSource.includes('w_updatefile'),
+        agentcoreWaitsForRundll32LifecycleResult: agentcoreSource.includes('#define MESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS 600000') &&
+            agentcoreSource.includes('MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY "UpdateActivationTargetHash"') &&
+            agentcoreSource.includes('MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY "UpdateActivationFailureHash"') &&
+            agentcoreSource.includes('TRUE,\n\t\t\t\tMESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS') &&
+            agentcoreSource.includes('SelfUpdate -> Rundll32 lifecycle update activation completed') &&
+            agentcoreSource.includes('SelfUpdate -> FAILED rundll32 lifecycle update activation') &&
+            agentcoreSource.includes('keeping current agent online'),
+        agentcoreHoldsFailedPackageHash: agentcoreSource.includes('MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, cm->coreModuleHash)') &&
+            agentcoreSource.includes('MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash)') &&
+            agentcoreSource.includes('SelfUpdate -> holding failed update package hash to prevent same-package activation loop') &&
+            agentcoreSource.includes('SelfUpdate -> Same update package previously failed activation; suppressing repeat activation'),
         agentcoreFailsClosedWhenRundll32Unavailable: agentcoreSource.includes('SelfUpdate -> Windows lifecycle update requires rundll32/svchost mode; legacy command-shell update path disabled.') &&
             agentcoreSource.includes('util_deletefile(updatefile); // Fail closed'),
         agentcoreDoesNotUseLegacyWindowsUpdateExe: !agentcoreSource.includes('.update.exe') &&
@@ -109,7 +143,12 @@ function main() {
             agentInstallerSource.includes('sanitizeWindowsLifecycleManifestValue(targetBinary)') &&
             agentInstallerSource.includes('findWindowsLifecycleServiceDll(targetBinary, actionName, parms, cleanupPaths)'),
         agentInstallerDoesNotUseLegacyUpdateExe: !agentInstallerSource.includes("'.update.exe'") &&
-            !agentInstallerSource.includes('".update.exe"')
+            !agentInstallerSource.includes('".update.exe"'),
+        stealthInstallerPromotesFailedActivationHold: stealthInstallerSource.includes('STEALTH_UPDATE_ACTIVATION_TARGET_KEY "UpdateActivationTargetHash"') &&
+            stealthInstallerSource.includes('STEALTH_UPDATE_ACTIVATION_FAILURE_KEY "UpdateActivationFailureHash"') &&
+            stealthInstallerSource.includes('Stealth_RecordUpdateActivationFailureHold(&paths);') &&
+            stealthInstallerSource.includes('Stealth_ClearUpdateActivationHolds(&paths, L"[UPDATE]");') &&
+            stealthInstallerSource.includes('Recorded failed update activation package hash hold')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
@@ -119,12 +158,17 @@ function main() {
     const report = {
         agentcorePath,
         agentInstallerPath,
+        stealthInstallerPath,
         meshcorePath,
+        meshcoreMinPath,
+        meshcentralDataMeshcorePath,
         recoverycorePath,
         externalMeshCentralDrift,
         meshcoreLegacyHits,
+        meshcoreMinLegacyHits,
+        meshcentralDataMeshcoreLegacyHits,
         recoverycoreLegacyHits,
-        meshcentralSourcesAvailable: meshcoreSource != null && recoverycoreSource != null,
+        meshcentralSourcesAvailable: meshcoreSource != null && meshcoreMinSource != null && meshcentralDataMeshcoreSource != null && recoverycoreSource != null,
         checks
     };
 
@@ -133,11 +177,16 @@ function main() {
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `AGENTCORE_PATH=${agentcorePath}`,
             `AGENT_INSTALLER_PATH=${agentInstallerPath}`,
+            `STEALTH_INSTALLER_PATH=${stealthInstallerPath}`,
             `MESHCORE_PATH=${meshcorePath}`,
+            `MESHCORE_MIN_PATH=${meshcoreMinPath}`,
+            `MESHCENTRAL_DATA_MESHCORE_PATH=${meshcentralDataMeshcorePath}`,
             `RECOVERYCORE_PATH=${recoverycorePath}`,
             'SUCCESS=true',
             `EXTERNAL_MESHCENTRAL_DRIFT=${externalMeshCentralDrift}`,
             `MESHCORE_LEGACY_HITS=${formatTokenList(meshcoreLegacyHits)}`,
+            `MESHCORE_MIN_LEGACY_HITS=${formatTokenList(meshcoreMinLegacyHits)}`,
+            `MESHCENTRAL_DATA_MESHCORE_LEGACY_HITS=${formatTokenList(meshcentralDataMeshcoreLegacyHits)}`,
             `RECOVERYCORE_LEGACY_HITS=${formatTokenList(recoverycoreLegacyHits)}`,
             `CHECKS=${Object.entries(checks).map(([name, passed]) => `${name}:${passed}`).join(',')}`
         ].join('\n') + '\n');

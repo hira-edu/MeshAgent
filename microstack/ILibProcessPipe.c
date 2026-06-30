@@ -793,7 +793,7 @@ static int ILibProcessPipe_IsWindowsSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 		return 1;
 	}
 
-	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters))
+	if (ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters))
 	{
 		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-console", "console-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;

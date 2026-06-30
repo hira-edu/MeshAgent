@@ -22,8 +22,6 @@ var bridgeCounter = 0;
 var SHELL_COMMAND = 'powershell';
 var SHELL_AUTOMATION = 'powershell';
 var BRIDGE_CONNECT_TIMEOUT_MS = 15000;
-var BRIDGE_LAUNCH_MAX_ATTEMPTS = 2;
-var BRIDGE_LAUNCH_RETRY_DELAY_MS = 250;
 
 function expandEnvironmentStrings(value)
 {
@@ -78,13 +76,15 @@ function chunkToInputData(chunk)
 {
     var data = null;
     var text = null;
+    var textValue = null;
     if (chunk == null) { return ({ payload: '', length: 0 }); }
     if (typeof(chunk) == 'string') { return ({ payload: chunk, length: chunk.length }); }
     try { if (Buffer.isBuffer && Buffer.isBuffer(chunk)) { data = Buffer.from(chunk); return ({ payload: data, length: data.length }); } } catch (ex0) { }
     try { data = Buffer.from(chunk); } catch (ex1) { data = null; }
     if (data != null && data.length > 0) { return ({ payload: data, length: data.length }); }
     try { text = chunk.toString ? chunk.toString() : ('' + chunk); } catch (ex2) { text = null; }
-    if (text != null && text.length > 0 && text != '[object Object]') { return ({ payload: text, length: text.length }); }
+    try { textValue = (text != null ? ('' + text) : null); } catch (ex3) { textValue = null; }
+    if (textValue != null && textValue.length > 0 && textValue != '[object Object]') { return ({ payload: textValue, length: textValue.length }); }
     return ({ payload: (data != null ? data : ''), length: (data != null ? data.length : 0) });
 }
 
@@ -228,9 +228,15 @@ ConsoleBridgeTerminal.prototype.flushPendingWrites = function flushPendingWrites
 ConsoleBridgeTerminal.prototype.writeInput = function writeInput(chunk, flush)
 {
     var input = chunkToInputData(chunk);
+    var fallbackText = null;
     try { this.stream._meshTerminalLastChunkType = typeof(chunk); } catch (ex0) { }
     try { this.stream._meshTerminalLastChunkLength = (chunk != null && chunk.length != null) ? chunk.length : -1; } catch (ex1) { this.stream._meshTerminalLastChunkLength = -1; }
     try { this.stream._meshTerminalLastChunkTextLength = (chunk != null && chunk.toString) ? chunk.toString().length : -1; } catch (ex2) { this.stream._meshTerminalLastChunkTextLength = -1; }
+    if (input.length == 0 && this.stream._meshTerminalLastChunkTextLength > 0)
+    {
+        try { fallbackText = '' + chunk.toString(); } catch (ex3) { fallbackText = null; }
+        if (fallbackText != null && fallbackText.length > 0 && fallbackText != '[object Object]') { input = { payload: fallbackText, length: fallbackText.length }; }
+    }
     if (this.closed)
     {
         if (flush) { flush(); }
@@ -281,12 +287,6 @@ ConsoleBridgeTerminal.prototype.launchBridge = function launchBridge()
         self.stream._meshTerminalChildPid = 0;
         if (self.readyEmitted == false && self.closed == false && self.ended == false)
         {
-            if (self.bridgeLaunchAttempts < BRIDGE_LAUNCH_MAX_ATTEMPTS)
-            {
-                self.stream._meshTerminalLastError = 'rundll32-exited-before-connect';
-                try { setTimeout(function retryLaunchBridge() { self.launchBridge(); }, BRIDGE_LAUNCH_RETRY_DELAY_MS); } catch (ex) { self.fail(ex); }
-                return;
-            }
             self.fail(new Error('Windows terminal bridge exited before pipe connection through MeshConsoleBridgeW.'));
             return;
         }
@@ -295,12 +295,6 @@ ConsoleBridgeTerminal.prototype.launchBridge = function launchBridge()
     this.child.on('error', function onError(error) {
         self.child = null;
         self.stream._meshTerminalChildPid = 0;
-        if (self.readyEmitted == false && self.closed == false && self.ended == false && self.bridgeLaunchAttempts < BRIDGE_LAUNCH_MAX_ATTEMPTS)
-        {
-            try { self.stream._meshTerminalLastError = error.toString(); } catch (ex0) { }
-            try { setTimeout(function retryLaunchBridge() { self.launchBridge(); }, BRIDGE_LAUNCH_RETRY_DELAY_MS); } catch (ex) { self.fail(ex); }
-            return;
-        }
         self.fail(error);
     });
 };

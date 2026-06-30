@@ -396,6 +396,9 @@ static void kvm_relay_handle_session_change_for_context(
 static int kvm_session_id_is_valid(DWORD sessionId);
 static int kvm_session_id_has_user_token(DWORD sessionId);
 static int kvm_session_id_exists(DWORD sessionId);
+static BOOL kvm_relay_cache_control_packet(KvmRelayContext* ctx, char* buffer, int bufferLen);
+static void kvm_relay_cache_refresh_probe_for_respawn(KvmRelayContext* ctx);
+static int kvm_relay_prepare_bridge_respawn_from_input(KvmRelayContext* ctx, char* buffer, int bufferLen, const char* reason, DWORD errorCode);
 static void kvm_schedule_retry_timer_delay(DWORD delayMs);
 static void kvm_update_runtime_state(int childPresent, int transportActive);
 static void kvm_record_spawn_failure(DWORD error, DWORD stage, DWORD spawnType);
@@ -906,6 +909,7 @@ static int kvm_relay_handle_refresh_probe_timeout(KvmRelayContext* ctx, const ch
 		source != NULL ? source : "(unknown)");
 
 	kvm_record_spawn_failure(ERROR_TIMEOUT, KVM_BRIDGE_FAILURE_STAGE_EXIT, (DWORD)gProcessSpawnType);
+	kvm_relay_cache_refresh_probe_for_respawn(ctx);
 	InterlockedAnd(&gKvmPendingProbeMask, (LONG)(~KVM_PENDING_PROBE_REFRESH));
 	if (InterlockedCompareExchange(&gKvmPendingProbeMask, 0, 0) == 0) { gKvmPendingProbeSinceTickMs = 0; }
 	gKvmChildExitSignaled = 1;
@@ -1014,6 +1018,90 @@ static BOOL kvm_relay_cache_control_packet(KvmRelayContext* ctx, char* buffer, i
 	ILibQueue_EnQueue(ctx->cachedControlPackets, packet);
 	LeaveCriticalSection(&ctx->cacheLock);
 	return TRUE;
+}
+
+static int kvm_relay_input_is_replayable_after_respawn(char* buffer, int bufferLen)
+{
+	unsigned short packetType;
+
+	if (buffer == NULL || bufferLen < 4) { return 0; }
+	packetType = kvm_relay_effective_packet_type(buffer, (size_t)bufferLen);
+	switch (packetType)
+	{
+	case MNG_KVM_REFRESH:
+	case MNG_KVM_GET_DISPLAYS:
+	case MNG_KVM_SET_DISPLAY:
+	case MNG_KVM_COMPRESSION:
+	case MNG_KVM_FRAME_RATE_TIMER:
+	case MNG_KVM_INPUT_LOCK:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static void kvm_relay_cache_refresh_probe_for_respawn(KvmRelayContext* ctx)
+{
+	char refreshPacket[4];
+
+	if (ctx == NULL) { return; }
+	((unsigned short*)refreshPacket)[0] = (unsigned short)htons((unsigned short)MNG_KVM_REFRESH);
+	((unsigned short*)refreshPacket)[1] = (unsigned short)htons((unsigned short)4);
+	if (!kvm_relay_cache_control_packet(ctx, refreshPacket, (int)sizeof(refreshPacket)))
+	{
+		kvm_trace_startupf("refresh probe timeout could not cache refresh for rundll32 bridge respawn");
+	}
+}
+
+static int kvm_relay_prepare_bridge_respawn_from_input(KvmRelayContext* ctx, char* buffer, int bufferLen, const char* reason, DWORD errorCode)
+{
+	int cachedInput = 0;
+
+	if (ctx == NULL || g_shutdown != 0 || gKvmRestartSuppressed != 0 || gKvmPipeMgr == NULL || gKvmExePath == NULL || gKvmWriteHandler == NULL)
+	{
+		return 0;
+	}
+
+	if (buffer != NULL && bufferLen > 0 && kvm_relay_input_is_replayable_after_respawn(buffer, bufferLen))
+	{
+		cachedInput = kvm_relay_cache_control_packet(ctx, buffer, bufferLen) ? 1 : 0;
+		if (cachedInput == 0)
+		{
+			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+				"KVM [Master]: Failed to cache input for rundll32 bridge respawn reason=%s type=%u len=%d",
+				reason != NULL ? reason : "(unknown)",
+				(unsigned int)kvm_relay_effective_packet_type(buffer, (size_t)bufferLen),
+				bufferLen);
+		}
+	}
+
+	if (errorCode != ERROR_SUCCESS)
+	{
+		kvm_record_spawn_failure(errorCode, KVM_BRIDGE_FAILURE_STAGE_EXIT, (DWORD)gProcessSpawnType);
+	}
+
+	kvm_trace_startupf("service-mode KVM input routed to rundll32 bridge respawn reason=%s childPresent=%d cachedInput=%d",
+		reason != NULL ? reason : "(unknown)",
+		gChildProcess != NULL ? 1 : 0,
+		cachedInput);
+	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+		"KVM [Master]: Service-mode KVM input routed to rundll32 bridge respawn (reason=%s, cachedInput=%d)",
+		reason != NULL ? reason : "(unknown)",
+		cachedInput);
+
+	if (gChildProcess != NULL)
+	{
+		InterlockedExchange(&ctx->bridgeTransportAttached, 0);
+		InterlockedExchange(&ctx->bridgeClientConnected, 0);
+		ctx->transportActive = 0;
+		gKvmTransportActive = 0;
+		gKvmChildExitSignaled = 1;
+		kvm_update_runtime_state(0, 0);
+		ILibProcessPipe_Process_SoftKill(gChildProcess);
+		return 1;
+	}
+
+	return kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);
 }
 
 static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int bufferLen)
@@ -3241,7 +3329,12 @@ int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, vo
 		{
 			if (InterlockedCompareExchange(&ctx->bridgeTransportAttached, 0, 0) != 0)
 			{
-				if (!kvm_relay_write_bridge_input(ctx, buf, len)) { consumed = 0; goto finish; }
+				if (!kvm_relay_write_bridge_input(ctx, buf, len))
+				{
+					DWORD writeError = GetLastError();
+					consumed = kvm_relay_prepare_bridge_respawn_from_input(ctx, buf, len, "write-failed", writeError) ? len : 0;
+					goto finish;
+				}
 			}
 			else if (!kvm_relay_cache_control_packet(ctx, buf, len))
 			{
@@ -3261,6 +3354,13 @@ int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, vo
 	{
 		int len2 = 0;
 		int ptr = 0;
+#ifdef _WINSERVICE
+		if (ctx != NULL && gKvmPipeMgr != NULL && gKvmExePath != NULL && gKvmWriteHandler != NULL)
+		{
+			consumed = kvm_relay_prepare_bridge_respawn_from_input(ctx, buf, len, "no-child", ERROR_SUCCESS) ? len : 0;
+			goto finish;
+		}
+#endif
 		//while ((len2 = kvm_server_inputdata(buf + ptr, len - ptr, kvm_relay_feeddata_ex, (void*[]) {writeHandler, reserved})) != 0) { ptr += len2; }
 		while ((len2 = kvm_server_inputdata(buf + ptr, len - ptr, writeHandler, reserved)) != 0) { ptr += len2; }
 		consumed = ptr;

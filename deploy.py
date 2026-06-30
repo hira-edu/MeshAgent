@@ -81,10 +81,12 @@ HASHAGENTS_MANIFEST_ROLES = ("module", "signed")
 CORE_PUBLISH_ROLE_DIRS = {
     "data-core": DATA_ROOT,
     "module-core": MODULE_AGENTS,
+    "module-root": f"{MESHCENTRAL_BASE}/node_modules/meshcentral",
 }
 CORE_PUBLISH_ROLE_BACKUP_DIRS = {
     "data-core": "datacore",
     "module-core": "modulecore",
+    "module-root": "moduleroot",
 }
 
 # Local build artifacts to deploy
@@ -194,6 +196,11 @@ ARTIFACTS = {
 }
 
 CORE_ARTIFACTS = {
+    "meshagent.js": {
+        "local_path": "../MeshCentral/node_modules/meshcentral/meshagent.js",
+        "remote_relative_path": "meshagent.js",
+        "publish_targets": ("module-root",),
+    },
     "meshcore.js": {
         "local_path": "../MeshCentral/agents/meshcore.js",
         "remote_relative_path": "meshcore.js",
@@ -254,7 +261,8 @@ REQUIRED_AGENT_ARTIFACTS = {
     "WinDiagnosticHost.msh",
 }
 WINDOWS_INSTALL_ROOT = os.environ.get("MESHCENTRAL_INSTALL_ROOT", WINDOWS_BRANDING_DEFAULTS["install_root"])
-WINDOWS_UPDATE_PACKAGE_SUFFIX = ".update.pkg"
+WINDOWS_UPDATE_PACKAGE_SUFFIXES = (".update.exe", ".update.pkg")
+WINDOWS_UPDATE_PACKAGE_SUFFIX = WINDOWS_UPDATE_PACKAGE_SUFFIXES[0]
 WINDOWS_LIFECYCLE_DLL = os.environ.get("MESHCENTRAL_LIFECYCLE_DLL", WINDOWS_BRANDING_DEFAULTS["service_dll_path"])
 WINDOWS_LIFECYCLE_STATE_DIR = os.environ.get("MESHCENTRAL_LIFECYCLE_STATE_DIR", WINDOWS_BRANDING_DEFAULTS["lifecycle_state_dir"])
 REMOTE_COMMAND_RETRIES = int(os.environ.get("MESHCENTRAL_SSH_RETRIES", "3"))
@@ -1102,6 +1110,8 @@ def verify_remote_core_publish(core_artifacts=None):
         for role in get_artifact_publish_targets(entry):
             remote_paths.append(get_core_publish_path(role, entry["remote_relative_path"]))
     metadata_cache = collect_remote_file_metadata(remote_paths)
+    if remote_paths and not metadata_cache:
+        return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]
     for entry in core_artifacts:
         for role in get_artifact_publish_targets(entry):
             remote_path = get_core_publish_path(role, entry["remote_relative_path"])
@@ -1111,7 +1121,9 @@ def verify_remote_core_publish(core_artifacts=None):
 
 def is_remote_publish_verification_transport_error(errors):
     """Return True only when deploy verification failed because SSH/SCP could not report state."""
-    return len(errors) == 1 and errors[0] == REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR
+    return len(errors) > 0 and all(
+        error == REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR for error in errors
+    )
 
 
 def get_core_publish_state(core_artifacts=None):
@@ -1425,21 +1437,45 @@ def run_local_command(command, cwd, timeout=120):
 def run_meshctrl(action_args, login_user, login_key_file, timeout=180):
     """Run meshctrl and return the completed process object."""
     meshctrl = LOCAL_MESHCENTRAL_REPO / "meshctrl.js"
-    if meshctrl.exists() is False:
-        raise RuntimeError(f"MeshCentral CLI not found at {meshctrl}")
+    if meshctrl.exists():
+        cmd = [
+            "node",
+            str(meshctrl),
+            *action_args,
+            "--url",
+            MESHCENTRAL_CONTROL_URL,
+            "--loginuser",
+            login_user,
+            "--loginkeyfile",
+            login_key_file,
+        ]
+        return run_local_command(cmd, LOCAL_MESHCENTRAL_REPO, timeout=timeout)
 
-    cmd = [
-        "node",
-        str(meshctrl),
-        *action_args,
-        "--url",
-        MESHCENTRAL_CONTROL_URL,
-        "--loginuser",
-        login_user,
-        "--loginkeyfile",
-        login_key_file,
-    ]
-    return run_local_command(cmd, LOCAL_MESHCENTRAL_REPO, timeout=timeout)
+    remote_key_file = f"/tmp/meshcentral-loginkey-{os.getpid()}-{int(time.time() * 1000)}.hex"
+    if scp_upload(Path(login_key_file), remote_key_file) is False:
+        raise RuntimeError(f"MeshCentral CLI not found at {meshctrl}, and login key upload failed for remote meshctrl fallback")
+    try:
+        remote_meshctrl = "/opt/meshcentral/node_modules/meshcentral/meshctrl.js"
+        remote_args = [
+            "node",
+            remote_meshctrl,
+            *action_args,
+            "--url",
+            MESHCENTRAL_CONTROL_URL,
+            "--loginuser",
+            login_user,
+            "--loginkeyfile",
+            remote_key_file,
+        ]
+        remote_command = " ".join(shlex.quote(str(arg)) for arg in remote_args)
+        result, timeout_error = run_remote_process(build_remote_cmd("ssh") + [get_remote_target(), remote_command], timeout=timeout)
+        if timeout_error is not None:
+            return subprocess.CompletedProcess(remote_args, 124, "", str(timeout_error))
+        if result is None:
+            return subprocess.CompletedProcess(remote_args, 1, "", "remote meshctrl failed without a result")
+        return result
+    finally:
+        ssh_cmd(f"rm -f {remote_quote(remote_key_file)}", check=False)
 
 
 def run_meshctrl_json(action_args, login_user, login_key_file, timeout=180):
@@ -1466,27 +1502,100 @@ def send_update_agents(nodeids, login_user, login_key_file, timeout=90):
     helper = LOCAL_REPO / "tools" / "meshcentral_update_agents.js"
     if helper.exists() is False:
         raise RuntimeError(f"Update helper not found at {helper}")
+    local_meshcentral_deps_ready = (
+        (LOCAL_MESHCENTRAL_REPO / "node_modules" / "minimist").exists() and
+        (LOCAL_MESHCENTRAL_REPO / "node_modules" / "ws").exists()
+    )
 
     fd, nodeids_file = tempfile.mkstemp(prefix="meshcentral-nodeids-", suffix=".json")
     os.close(fd)
     try:
         Path(nodeids_file).write_text(json.dumps(nodeids), encoding="utf-8")
-        cmd = [
-            "node",
-            str(helper),
-            "--url",
-            MESHCENTRAL_CONTROL_URL,
-            "--loginuser",
-            login_user,
-            "--loginkeyfile",
-            login_key_file,
-            "--nodeids-file",
-            nodeids_file,
-        ]
-        result = run_local_command(cmd, LOCAL_REPO, timeout=timeout)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "update helper failed")
-        return json.loads(result.stdout)
+        if local_meshcentral_deps_ready:
+            cmd = [
+                "node",
+                str(helper),
+                "--url",
+                MESHCENTRAL_CONTROL_URL,
+                "--loginuser",
+                login_user,
+                "--loginkeyfile",
+                login_key_file,
+                "--nodeids-file",
+                nodeids_file,
+            ]
+            result = run_local_command(cmd, LOCAL_REPO, timeout=timeout)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "update helper failed")
+            return json.loads(result.stdout)
+
+        remote_key_file = f"/tmp/meshcentral-loginkey-{os.getpid()}-{int(time.time() * 1000)}.hex"
+        remote_nodeids_file = f"/tmp/meshcentral-nodeids-{os.getpid()}-{int(time.time() * 1000)}.json"
+        if scp_upload(Path(login_key_file), remote_key_file) is False or scp_upload(Path(nodeids_file), remote_nodeids_file) is False:
+            raise RuntimeError("update helper remote fallback failed to upload input files")
+        try:
+            remote_script = f"""cd /opt/meshcentral/node_modules/meshcentral && node - <<'NODE'
+const crypto = require('crypto');
+const fs = require('fs');
+const WebSocket = require('ws');
+
+function normalizeUrl(rawUrl) {{
+    let url = (rawUrl || '').trim();
+    if (url.endsWith('/')) {{ url = url.slice(0, -1); }}
+    if (url.endsWith('/control.ashx') === false) {{ url += '/control.ashx'; }}
+    return url;
+}}
+
+function encodeCookie(payload, key) {{
+    payload.time = Math.floor(Date.now() / 1000);
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key.slice(0, 32), iv);
+    const crypted = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
+    return Buffer.concat([iv, cipher.getAuthTag(), crypted]).toString('base64').replace(/\\+/g, '@').replace(/\\//g, '$');
+}}
+
+const nodeids = JSON.parse(fs.readFileSync({json.dumps(remote_nodeids_file)}, 'utf8'));
+const keyHex = fs.readFileSync({json.dumps(remote_key_file)}, 'utf8').replace(/\\s+/g, '');
+const loginKey = Buffer.from(keyHex, 'hex');
+const loginUser = {json.dumps(login_user)};
+const url = normalizeUrl({json.dumps(MESHCENTRAL_CONTROL_URL)});
+const authCookie = encodeCookie({{ userid: `user//${{loginUser}}`, domainid: '' }}, loginKey);
+const ws = new WebSocket(`${{url}}${{url.includes('?') ? '&' : '?'}}auth=${{authCookie}}`);
+let completed = false;
+
+function finish(code, payload) {{
+    if (completed) {{ return; }}
+    completed = true;
+    if (payload) {{ console.log(JSON.stringify(payload)); }}
+    try {{ ws.close(); }} catch (ex) {{ }}
+    setTimeout(() => process.exit(code), 50);
+}}
+
+ws.on('open', function onOpen() {{
+    ws.send(JSON.stringify({{ action: 'updateAgents', nodeids, responseid: 'meshagent-update' }}));
+    setTimeout(() => finish(0, {{ ok: true, count: nodeids.length }}), 500);
+}});
+ws.on('message', function onMessage(data) {{
+    let msg = null;
+    try {{ msg = JSON.parse(data); }} catch (ex) {{ return; }}
+    if (msg && msg.action === 'close' && msg.cause === 'noauth') {{
+        finish(1, {{ ok: false, error: msg.msg || 'noauth' }});
+    }}
+}});
+ws.on('error', function onError(err) {{ finish(1, {{ ok: false, error: err.message || 'websocket error' }}); }});
+ws.on('close', function onClose() {{
+    if (completed === false) {{ finish(1, {{ ok: false, error: 'control channel closed before updateAgents completed' }}); }}
+}});
+NODE"""
+            result, timeout_error = run_remote_process(build_remote_cmd("ssh") + [get_remote_target(), remote_script], timeout=timeout)
+            if timeout_error is not None:
+                raise RuntimeError(f"remote update helper timed out: {timeout_error}")
+            if result is None or result.returncode != 0:
+                detail = "" if result is None else (result.stderr.strip() or result.stdout.strip())
+                raise RuntimeError(detail or "remote update helper failed")
+            return json.loads(result.stdout)
+        finally:
+            ssh_cmd(f"rm -f {remote_quote(remote_key_file)} {remote_quote(remote_nodeids_file)}", check=False)
     finally:
         try:
             os.unlink(nodeids_file)
@@ -1494,9 +1603,12 @@ def send_update_agents(nodeids, login_user, login_key_file, timeout=90):
             pass
 
 
-def get_online_agent_nodes(login_user, login_key_file):
+def get_online_agent_nodes(login_user, login_key_file, device_filter=None):
     """Return online MeshAgent-backed nodes from MeshCentral."""
-    devices = run_meshctrl_json(["listdevices", "--json"], login_user, login_key_file, timeout=240)
+    action_args = ["listdevices", "--json"]
+    if device_filter:
+        action_args.extend(["--filter", device_filter])
+    devices = run_meshctrl_json(action_args, login_user, login_key_file, timeout=240)
     if isinstance(devices, list) is False:
         raise RuntimeError("MeshCentral listdevices output is not a JSON array.")
     online_nodes = []
@@ -1520,11 +1632,20 @@ def batched(items, batch_size):
         yield items[index:index + batch_size]
 
 
+def strip_terminal_control_sequences(value):
+    """Remove terminal control sequences from MeshCtrl interactive command output."""
+    value = re.sub(r"\x1b\][^\x07]*(?:\x07|\x1b\\)", "", value)
+    value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
+    return value.replace("\x08", "")
+
+
 def extract_pending_update_paths(command_output):
     """Parse remote runcommand output and return staged Windows update paths."""
     paths = []
+    seen = set()
+    suffix_pattern = "|".join(re.escape(suffix) for suffix in WINDOWS_UPDATE_PACKAGE_SUFFIXES)
     for raw_line in command_output.splitlines():
-        line = raw_line.strip()
+        line = strip_terminal_control_sequences(raw_line).strip()
         if not line:
             continue
         lower = line.lower()
@@ -1532,24 +1653,43 @@ def extract_pending_update_paths(command_output):
             continue
         if line.startswith("(c) Microsoft Corporation"):
             continue
-        if re.match(r"^[A-Za-z]:\\", line) or line.startswith("Directory of ") or line.startswith("Volume "):
+        if line.startswith("Directory of ") or line.startswith("Volume "):
             continue
-        if line.lower().endswith(WINDOWS_UPDATE_PACKAGE_SUFFIX):
-            if ":" not in line:
-                line = f"{WINDOWS_INSTALL_ROOT}\\{line}"
-            paths.append(line)
+        path_match = re.search(rf"([A-Za-z]:\\[^<>\r\n]*?(?:{suffix_pattern}))", line, re.IGNORECASE)
+        if path_match:
+            candidate = path_match.group(1)
+        elif line.lower().endswith(WINDOWS_UPDATE_PACKAGE_SUFFIXES):
+            candidate = f"{WINDOWS_INSTALL_ROOT}\\{line}" if ":" not in line else line
+        else:
+            continue
+        if ">" in candidate or "$" in candidate or "'" in candidate:
+            continue
+        key = candidate.lower()
+        if key not in seen:
+            seen.add(key)
+            paths.append(candidate)
     return paths
 
 
 def get_node_pending_updates(nodeid, login_user, login_key_file):
     """Return staged pending update payload paths on a remote Windows node."""
+    filters = ",".join(f"'{suffix}'" for suffix in WINDOWS_UPDATE_PACKAGE_SUFFIXES)
+    command = (
+        f"$filters = @({filters}); "
+        f"$root = '{WINDOWS_INSTALL_ROOT}'; "
+        "foreach ($filter in $filters) { "
+        "Get-ChildItem -LiteralPath $root -Filter ('*' + $filter) -File -Force "
+        "-ErrorAction SilentlyContinue | ForEach-Object { $_.FullName } "
+        "}"
+    )
     output = run_meshctrl_text(
         [
             "runcommand",
             "--id",
             nodeid,
             "--run",
-            f'dir /b "{WINDOWS_INSTALL_ROOT}\\*{WINDOWS_UPDATE_PACKAGE_SUFFIX}" 2>nul',
+            command,
+            "--powershell",
             "--reply",
         ],
         login_user,
@@ -1561,7 +1701,7 @@ def get_node_pending_updates(nodeid, login_user, login_key_file):
 
 def derive_update_install_paths(update_path):
     """Return the single staged update payload plus the installed rundll32 host DLL."""
-    if update_path.lower().endswith(WINDOWS_UPDATE_PACKAGE_SUFFIX) is False:
+    if update_path.lower().endswith(WINDOWS_UPDATE_PACKAGE_SUFFIXES) is False:
         raise ValueError(f"Unexpected update path: {update_path}")
     if not WINDOWS_LIFECYCLE_DLL:
         raise ValueError("Installed ServiceDll path is required for activating updates; set MESHCENTRAL_LIFECYCLE_DLL or active branding installRoot/serviceDllName")
@@ -1575,13 +1715,10 @@ def parse_keyed_probe_output(command_output):
     """Parse KEY=VALUE lines from remote runcommand output."""
     parsed = {}
     for raw_line in command_output.splitlines():
-        line = raw_line.strip()
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip().upper()
-        value = value.strip()
-        if key:
+        line = strip_terminal_control_sequences(raw_line).strip()
+        for key, value in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)=([^\s;]+)", line):
+            key = key.strip().upper()
+            value = value.strip()
             parsed[key] = value
     return parsed
 
@@ -1594,7 +1731,7 @@ def probe_remote_update_activation_inputs(nodeid, update_path, login_user, login
         "HOSTDLL": paths["host_dll_path"],
     }
     commands = [
-        f'if exist "{remote_path}" (echo {label}=1) else (echo {label}=0)'
+        f"if (Test-Path -LiteralPath '{remote_path}') {{ '{label}=1' }} else {{ '{label}=0' }}"
         for label, remote_path in checks.items()
     ]
     output = run_meshctrl_text(
@@ -1603,7 +1740,8 @@ def probe_remote_update_activation_inputs(nodeid, update_path, login_user, login
             "--id",
             nodeid,
             "--run",
-            "cmd /Q /D /C " + " & ".join(commands),
+            "; ".join(commands),
+            "--powershell",
             "--reply",
         ],
         login_user,
@@ -1622,11 +1760,11 @@ def activate_remote_pending_update(nodeid, update_path, login_user, login_key_fi
     paths = derive_update_install_paths(update_path)
     manifest_path = f"{WINDOWS_LIFECYCLE_STATE_DIR}\\deploy-activate.ini"
     command = (
-        'cmd /Q /D /C '
-        f'mkdir "{WINDOWS_LIFECYCLE_STATE_DIR}" 2>nul & '
-        f'(echo [Lifecycle]&echo Action=update&echo SourceExe={paths["update_path"]}&'
-        f'echo RequireConfig=1) > "{manifest_path}" & '
-        f'"%SystemRoot%\\System32\\rundll32.exe" "{paths["host_dll_path"]},MeshLifecycleHostW" "{manifest_path}"'
+        "$ErrorActionPreference = 'Stop'; "
+        f"New-Item -ItemType Directory -Force -Path '{WINDOWS_LIFECYCLE_STATE_DIR}' | Out-Null; "
+        f"@('[Lifecycle]', 'Action=update', 'SourceExe={paths['update_path']}', 'RequireConfig=0') "
+        f"| Set-Content -LiteralPath '{manifest_path}' -Encoding ASCII; "
+        f"& \"$env:SystemRoot\\System32\\rundll32.exe\" \"{paths['host_dll_path']},MeshLifecycleHostW\" \"{manifest_path}\""
     )
     result = run_meshctrl(
         [
@@ -1635,6 +1773,7 @@ def activate_remote_pending_update(nodeid, update_path, login_user, login_key_fi
             nodeid,
             "--run",
             command,
+            "--powershell",
         ],
         login_user,
         login_key_file,
@@ -1645,13 +1784,25 @@ def activate_remote_pending_update(nodeid, update_path, login_user, login_key_fi
     return paths
 
 
-def watch_reconnects(pending, baseline_agct, login_user, login_key_file, wait_seconds, poll_seconds, phase_label):
+def watch_reconnects(
+    pending,
+    baseline_agct,
+    login_user,
+    login_key_file,
+    wait_seconds,
+    poll_seconds,
+    phase_label,
+    device_filter=None,
+):
     """Watch pending nodes for reconnects and return the set that reconnected during the window."""
     deadline = time.time() + wait_seconds
     reconnected = set()
     while pending and time.time() < deadline:
         time.sleep(min(poll_seconds, max(1, int(deadline - time.time()))))
-        current_nodes = {node["_id"]: node for node in get_online_agent_nodes(login_user, login_key_file)}
+        current_nodes = {
+            node["_id"]: node
+            for node in get_online_agent_nodes(login_user, login_key_file, device_filter)
+        }
         for nodeid in list(pending):
             current = current_nodes.get(nodeid)
             current_agct = int(current.get("agct") or 0) if current else 0
@@ -2041,6 +2192,8 @@ def cmd_stage(args):
     # Verify uploads
     print("\nVerifying staged files...")
     verify = ssh_cmd(f"ls -lh {STAGING_DIR}/")
+    if verify is None:
+        return False
     if verify:
         for line in verify.split("\n"):
             if not line.startswith("total"):
@@ -2476,6 +2629,46 @@ PY"""
     print()
 
 
+def cmd_repair_hashagents(args):
+    """Regenerate remote hashagents.json manifests without restarting MeshCentral."""
+    print("=" * 60)
+    print("  Repair hashagents.json")
+    print("=" * 60)
+
+    targets = None
+    if args.signed_only:
+        targets = [SIGNED_AGENTS]
+
+    if refresh_remote_hashagents(targets=targets) is False:
+        print("[ERROR] Failed to regenerate hashagents.json.")
+        return False
+
+    baseline_artifacts, baseline_core_artifacts, baseline_label = get_publish_baseline_from_latest_manifest()
+    publish_state = get_publish_runtime_state(baseline_artifacts)
+    publish_errors = get_publish_state_errors(publish_state)
+    core_state = get_core_publish_state(baseline_core_artifacts)
+    core_errors = get_core_publish_state_errors(core_state)
+
+    print(f"\n  Baseline: {baseline_label}")
+    for entry in publish_state:
+        print(
+            f"    {entry['filename']:<30s} "
+            f"data={format_publish_match(entry['data_matches_local']):<5s} "
+            f"module={format_publish_match(entry['module_matches_local']):<5s} "
+            f"module-manifest={format_publish_match(entry['module_manifest_matches_file'], fail='stale'):<5s} "
+            f"signed-manifest={format_publish_match(entry['signed_manifest_matches_file'], fail='stale'):<5s}"
+        )
+
+    if publish_errors or core_errors:
+        print("\n[ERROR] Publish verification still reports issues:")
+        for error in publish_errors + core_errors:
+            print(f"  - {error}")
+        return False
+
+    print("\n[SUCCESS] hashagents.json is aligned with the current remote files.")
+    return True
+
+
 def cmd_update_online(args):
     """Manually trigger agent updates for all currently-online MeshAgent nodes."""
     batch_size = max(1, args.batch_size or 50)
@@ -2490,7 +2683,7 @@ def cmd_update_online(args):
 
     login_key_file = create_temp_login_key_file()
     try:
-        online_nodes = get_online_agent_nodes(login_user, login_key_file)
+        online_nodes = get_online_agent_nodes(login_user, login_key_file, args.filter)
         if args.limit is not None:
             online_nodes = online_nodes[:args.limit]
 
@@ -2533,6 +2726,7 @@ def cmd_update_online(args):
             wait_seconds,
             poll_seconds,
             "Initial watch",
+            args.filter,
         )
 
         activation_attempts = {}
@@ -2582,6 +2776,7 @@ def cmd_update_online(args):
                     activation_wait_seconds,
                     poll_seconds,
                     "Activation watch",
+                    args.filter,
                 )
                 reconnected.update(reconnected_after_activation)
 
@@ -2674,8 +2869,12 @@ def main():
 
     sub.add_parser("health", help="Post-deploy health check")
 
+    repair_p = sub.add_parser("repair-hashagents", help="Regenerate remote hashagents.json without restarting MeshCentral")
+    repair_p.add_argument("--signed-only", action="store_true", help="Only refresh meshcentral-data/signedagents/hashagents.json")
+
     update_p = sub.add_parser("update-online", help="Trigger manual updates for currently-online agents")
     update_p.add_argument("--login-user", default=MESHCENTRAL_CONTROL_USER, help="MeshCentral admin username")
+    update_p.add_argument("--filter", default=None, help="MeshCentral device filter string for targeted update runs")
     update_p.add_argument("--limit", type=int, default=None, help="Limit number of online agents to update")
     update_p.add_argument("--batch-size", type=int, default=50, help="Number of node IDs per updateAgents request")
     update_p.add_argument("--wait-seconds", type=int, default=90, help="How long to watch for reconnects after submission")
@@ -2701,6 +2900,7 @@ def main():
         "config": cmd_config,
         "logs": cmd_logs,
         "health": cmd_health,
+        "repair-hashagents": cmd_repair_hashagents,
         "update-online": cmd_update_online,
         "ssh": cmd_ssh,
     }

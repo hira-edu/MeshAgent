@@ -60,10 +60,11 @@ function checkTerminalModule(source) {
             source.includes('Windows terminal bridge did not connect within'),
         reportsPolicyDeny:
             source.includes('Windows terminal bridge launch was denied by process policy.'),
-        retryUsesSameRundll32Bridge:
-            source.includes('BRIDGE_LAUNCH_MAX_ATTEMPTS = 2') &&
-            source.includes('setTimeout(function retryLaunchBridge() { self.launchBridge(); }, BRIDGE_LAUNCH_RETRY_DELAY_MS)') &&
+        retryStaysInsideNativeRundll32Bridge:
             source.includes("serviceDllPath + ',MeshConsoleBridgeW'") &&
+            !source.includes('BRIDGE_LAUNCH_MAX_ATTEMPTS') &&
+            !source.includes('retryLaunchBridge') &&
+            !source.includes('BRIDGE_LAUNCH_RETRY_DELAY_MS') &&
             !source.includes('commandHostPath()') &&
             !source.includes('powerShellPath()'),
         usesDuktapeDuplexWriteContract:
@@ -71,11 +72,13 @@ function checkTerminalModule(source) {
             source.includes("if (typeof(chunk) == 'string') { return ({ payload: chunk, length: chunk.length }); }") &&
             source.includes('try { data = Buffer.from(chunk); }') &&
             source.includes('return ({ payload: data, length: data.length });') &&
-            source.includes("text != null && text.length > 0 && text != '[object Object]'") &&
-            source.includes('return ({ payload: text, length: text.length });') &&
+            source.includes("textValue != null && textValue.length > 0 && textValue != '[object Object]'") &&
+            source.includes('return ({ payload: textValue, length: textValue.length });') &&
             source.includes('write: function write(chunk, flush)') &&
             source.includes('return (self.writeInput(chunk, flush));') &&
             source.includes('var input = chunkToInputData(chunk);') &&
+            source.includes("fallbackText = '' + chunk.toString();") &&
+            source.includes('input = { payload: fallbackText, length: fallbackText.length };') &&
             source.includes('this.pendingWrites.push({ chunk: input.payload, flush: flush });') &&
             source.includes('this.inputSocket.write(input.payload);') &&
             source.includes('this.stream._meshTerminalLastWriteBytes = input.length;') &&
@@ -127,6 +130,10 @@ function checkMeshCore(source) {
             source.includes('function sendRunCommandToTerminal()') &&
             source.includes('var runCommandSent = false') &&
             source.includes('mesh.cmdchild._meshRunCommandSent = true') &&
+            source.includes("var runCommandDoneMarker = '\\x1eMESH_RUN_COMMAND_DONE_'") &&
+            source.includes("[Console]::WriteLine([char]30 + \\'") &&
+            source.includes('if (markerIndex < 0) { markerIndex = replydata.indexOf(runCommandDoneMarkerBody); }') &&
+            source.includes('if ((replydata.indexOf(runCommandDoneMarker) >= 0) || (replydata.indexOf(runCommandDoneMarkerBody) >= 0)) { completeRunCommand(); }') &&
             source.includes('function getRunCommandBridgeState()') &&
             source.includes('getRunCommandBridgeState()') &&
             source.includes("writes=' + mesh.cmdchild._meshTerminalWriteCount") &&
@@ -151,23 +158,45 @@ function checkMeshCore(source) {
     };
 }
 
+function checkProcessPipePolicy(source) {
+    return {
+        consoleBridgeAllowedForAnySpawnType:
+            source.includes('if (ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters))') &&
+            !source.includes('if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters))'),
+        consoleBridgeStillExactRundll32Contract:
+            source.includes('static int ILibProcessPipe_IsApprovedConsoleBridgeLaunchA') &&
+            source.includes('ILibProcessPipe_IsExactSystemRundll32TargetA(target)') &&
+            source.includes('ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(parameters[0])') &&
+            source.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[1], "_in")') &&
+            source.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[2], "_out")') &&
+            source.includes('ILibProcessPipe_IsApprovedConsoleBridgeShellA(parameters[3])') &&
+            source.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[4], 20, 300)') &&
+            source.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)')
+    };
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const terminalPaths = [
         'modules/win-terminal.js',
+        '../MeshCentral/meshcentral-data/modules_meshcore/win-terminal.js',
+        '../MeshCentral/meshcentral-data/modules_meshcore_min/win-terminal.js',
+        '../MeshCentral/meshcentral-data/modules_meshcore_min/win-terminal.min.js',
         '../MeshCentral/agents/modules_meshcore/win-terminal.js',
         '../MeshCentral/agents/modules_meshcore_min/win-terminal.js',
         '../MeshCentral/agents/modules_meshcore_min/win-terminal.min.js'
     ];
     const corePaths = [
+        '../MeshCentral/meshcentral-data/meshcore.js',
         '../MeshCentral/agents/meshcore.js',
         '../MeshCentral/agents/meshcore.min.js'
     ];
 
     const report = {
         terminalModules: {},
-        meshCores: {}
+        meshCores: {},
+        processPipePolicy: {}
     };
 
     for (const terminalPath of terminalPaths) {
@@ -186,12 +215,18 @@ function main() {
         }
     }
 
+    report.processPipePolicy = checkProcessPipePolicy(read('microstack/ILibProcessPipe.c'));
+    for (const [name, passed] of Object.entries(report.processPipePolicy)) {
+        assert(passed, `microstack/ILibProcessPipe.c: ${name} failed`);
+    }
+
     if (evidenceDir) {
         writeJson(path.join(evidenceDir, 'meshcentral_terminal_bridge_contract.json'), report);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             'SUCCESS=true',
             `TERMINAL_MODULES=${terminalPaths.length}`,
-            `MESHCORES=${corePaths.length}`
+            `MESHCORES=${corePaths.length}`,
+            `PROCESS_PIPE_POLICY=${Object.entries(report.processPipePolicy).map(([name, passed]) => `${name}:${passed}`).join(',')}`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

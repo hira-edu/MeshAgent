@@ -24,8 +24,9 @@
     <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\update_rc_version.py&quot; &quot;$(MSBuildProjectDirectory)\..\microscript\ILibDuktape_Commit.h&quot; &quot;$(MSBuildProjectDirectory)\MeshService.rc&quot;" />
   </Target>
 
-  <Target Name="EnsureStealthLabPayloadBeforeBuild" BeforeTargets="PreBuildEvent" Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64'">
+  <Target Name="EnsureStealthLabPayloadBeforeBuild" BeforeTargets="ResourceCompile" Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64'">
     <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_svchost_payload.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --dll &quot;$(MSBuildProjectDirectory)\x64\StealthLab_DLL\MeshService-2022.dll&quot;" />
+    <Delete Files="$(IntDir)Bundle_Resources.res" TreatErrorsAsWarnings="true" />
   </Target>
 
   <Target Name="RefreshStealthLabPayloadAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|x64'">

