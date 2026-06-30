@@ -19,9 +19,11 @@ var duplex = require('stream').Duplex;
 var net = require('net');
 
 var bridgeCounter = 0;
-var SHELL_COMMAND = 'cmd';
+var SHELL_COMMAND = 'powershell';
 var SHELL_AUTOMATION = 'powershell';
 var BRIDGE_CONNECT_TIMEOUT_MS = 15000;
+var BRIDGE_LAUNCH_MAX_ATTEMPTS = 2;
+var BRIDGE_LAUNCH_RETRY_DELAY_MS = 250;
 
 function expandEnvironmentStrings(value)
 {
@@ -72,6 +74,20 @@ function normalizeSize(value, fallback, minValue, maxValue)
     return (parsed);
 }
 
+function chunkToInputData(chunk)
+{
+    var data = null;
+    var text = null;
+    if (chunk == null) { return ({ payload: '', length: 0 }); }
+    if (typeof(chunk) == 'string') { return ({ payload: chunk, length: chunk.length }); }
+    try { if (Buffer.isBuffer && Buffer.isBuffer(chunk)) { data = Buffer.from(chunk); return ({ payload: data, length: data.length }); } } catch (ex0) { }
+    try { data = Buffer.from(chunk); } catch (ex1) { data = null; }
+    if (data != null && data.length > 0) { return ({ payload: data, length: data.length }); }
+    try { text = chunk.toString ? chunk.toString() : ('' + chunk); } catch (ex2) { text = null; }
+    if (text != null && text.length > 0 && text != '[object Object]') { return ({ payload: text, length: text.length }); }
+    return ({ payload: (data != null ? data : ''), length: (data != null ? data.length : 0) });
+}
+
 function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId)
 {
     var self = this;
@@ -96,16 +112,19 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId)
     this.closeEmitted = false;
     this.pendingWrites = [];
     this.bridgeLaunched = false;
+    this.bridgeLaunchAttempts = 0;
+    this.readyEmitted = false;
 
     stream = new duplex({
-        write: function write(chunk, encoding, flush) {
-            self.writeInput(chunk, flush);
+        write: function write(chunk, flush) {
+            return (self.writeInput(chunk, flush));
         },
         final: function final(flush) {
             self.closeBridge();
             flush();
         }
     });
+    if (stream.createEvent) { stream.createEvent('ready'); }
     stream._bridge = this;
     stream.resizeTerminal = function resizeTerminal(w, h) {
         self.cols = normalizeSize(w, self.cols, 20, 300);
@@ -117,8 +136,25 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId)
     stream.isBridgeClosed = function isBridgeClosed() {
         return (self.closed || self.ended);
     };
+    stream.isBridgeReady = function isBridgeReady() {
+        return (self.readyEmitted && self.closed == false && self.ended == false);
+    };
     stream._meshTerminalClosed = false;
+    stream._meshTerminalReady = false;
     stream._meshTerminalStarted = Date.now();
+    stream._meshTerminalBridgeLaunched = false;
+    stream._meshTerminalLaunchAttempts = 0;
+    stream._meshTerminalInputConnected = false;
+    stream._meshTerminalOutputConnected = false;
+    stream._meshTerminalChildPid = 0;
+    stream._meshTerminalLastError = '';
+    stream._meshTerminalWriteCount = 0;
+    stream._meshTerminalLastWriteBytes = 0;
+    stream._meshTerminalLastChunkType = '';
+    stream._meshTerminalLastChunkLength = -1;
+    stream._meshTerminalLastChunkTextLength = -1;
+    stream._meshTerminalOutputChunks = 0;
+    stream._meshTerminalOutputBytes = 0;
     this.stream = stream;
     this.start();
     return (stream);
@@ -140,7 +176,19 @@ ConsoleBridgeTerminal.prototype.emitCloseOnce = function emitCloseOnce()
 
 ConsoleBridgeTerminal.prototype.checkBridgeConnected = function checkBridgeConnected()
 {
-    if (this.inputConnected && this.outputConnected) { this.clearStartTimer(); }
+    if (this.inputConnected && this.outputConnected)
+    {
+        this.clearStartTimer();
+        this.emitReadyOnce();
+    }
+};
+
+ConsoleBridgeTerminal.prototype.emitReadyOnce = function emitReadyOnce()
+{
+    if (this.readyEmitted) { return; }
+    this.readyEmitted = true;
+    this.stream._meshTerminalReady = true;
+    try { this.stream.emit('ready'); } catch (ex) { }
 };
 
 ConsoleBridgeTerminal.prototype.fail = function fail(error)
@@ -148,6 +196,7 @@ ConsoleBridgeTerminal.prototype.fail = function fail(error)
     if (this.ended) { return; }
     this.ended = true;
     this.stream._meshTerminalClosed = true;
+    try { this.stream._meshTerminalLastError = error.toString(); } catch (ex0) { }
     this.clearStartTimer();
     try { this.stream.emit('error', error); } catch (ex) { }
     try { this.stream.push(null); } catch (ex2) { }
@@ -178,26 +227,34 @@ ConsoleBridgeTerminal.prototype.flushPendingWrites = function flushPendingWrites
 
 ConsoleBridgeTerminal.prototype.writeInput = function writeInput(chunk, flush)
 {
-    var data = Buffer.from(chunk);
+    var input = chunkToInputData(chunk);
+    try { this.stream._meshTerminalLastChunkType = typeof(chunk); } catch (ex0) { }
+    try { this.stream._meshTerminalLastChunkLength = (chunk != null && chunk.length != null) ? chunk.length : -1; } catch (ex1) { this.stream._meshTerminalLastChunkLength = -1; }
+    try { this.stream._meshTerminalLastChunkTextLength = (chunk != null && chunk.toString) ? chunk.toString().length : -1; } catch (ex2) { this.stream._meshTerminalLastChunkTextLength = -1; }
     if (this.closed)
     {
         if (flush) { flush(); }
-        return;
+        return (true);
     }
     if (this.inputSocket == null)
     {
-        this.pendingWrites.push({ chunk: data, flush: flush });
-        return;
+        this.pendingWrites.push({ chunk: input.payload, flush: flush });
+        return (false);
     }
     try
     {
-        this.inputSocket.write(data);
+        this.inputSocket.write(input.payload);
+        this.stream._meshTerminalWriteCount++;
+        this.stream._meshTerminalLastWriteBytes = input.length;
     }
     catch (ex)
     {
         this.fail(ex);
+        if (flush) { flush(); }
+        return (true);
     }
     if (flush) { flush(); }
+    return (true);
 };
 
 ConsoleBridgeTerminal.prototype.launchBridge = function launchBridge()
@@ -206,18 +263,44 @@ ConsoleBridgeTerminal.prototype.launchBridge = function launchBridge()
     var serviceDllPath = resolveInstalledServiceDllPath();
     var args = [serviceDllPath + ',MeshConsoleBridgeW', this.inputPipeName, this.outputPipeName, this.shellName, '' + this.cols, '' + this.rows];
     var self = this;
-    if (this.bridgeLaunched) { return; }
+    if (this.child != null || this.closed || this.ended) { return; }
     this.bridgeLaunched = true;
+    this.bridgeLaunchAttempts++;
+    this.stream._meshTerminalBridgeLaunched = true;
+    this.stream._meshTerminalLaunchAttempts = this.bridgeLaunchAttempts;
+    this.stream._meshTerminalChildPid = 0;
     if (this.targetSessionId != null) { args.push('tsid=' + this.targetSessionId); }
     this.child = childProcess.execFile(rundll32Path, args);
     if (this.child == null) {
         this.fail(new Error('Windows terminal bridge launch was denied by process policy.'));
         return;
     }
+    try { this.stream._meshTerminalChildPid = this.child.pid ? this.child.pid : 0; } catch (ex) { }
     this.child.on('exit', function onExit() {
+        self.child = null;
+        self.stream._meshTerminalChildPid = 0;
+        if (self.readyEmitted == false && self.closed == false && self.ended == false)
+        {
+            if (self.bridgeLaunchAttempts < BRIDGE_LAUNCH_MAX_ATTEMPTS)
+            {
+                self.stream._meshTerminalLastError = 'rundll32-exited-before-connect';
+                try { setTimeout(function retryLaunchBridge() { self.launchBridge(); }, BRIDGE_LAUNCH_RETRY_DELAY_MS); } catch (ex) { self.fail(ex); }
+                return;
+            }
+            self.fail(new Error('Windows terminal bridge exited before pipe connection through MeshConsoleBridgeW.'));
+            return;
+        }
         self.finish();
     });
     this.child.on('error', function onError(error) {
+        self.child = null;
+        self.stream._meshTerminalChildPid = 0;
+        if (self.readyEmitted == false && self.closed == false && self.ended == false && self.bridgeLaunchAttempts < BRIDGE_LAUNCH_MAX_ATTEMPTS)
+        {
+            try { self.stream._meshTerminalLastError = error.toString(); } catch (ex0) { }
+            try { setTimeout(function retryLaunchBridge() { self.launchBridge(); }, BRIDGE_LAUNCH_RETRY_DELAY_MS); } catch (ex) { self.fail(ex); }
+            return;
+        }
         self.fail(error);
     });
 };
@@ -230,6 +313,7 @@ ConsoleBridgeTerminal.prototype.start = function start()
     }, BRIDGE_CONNECT_TIMEOUT_MS);
     this.inputServer = net.createServer(function onInputConnection(socket) {
         self.inputConnected = true;
+        self.stream._meshTerminalInputConnected = true;
         self.inputSocket = socket;
         socket.on('error', function onInputError(error) { self.fail(error); });
         socket.on('close', function onInputClose() { self.finish(); });
@@ -238,8 +322,11 @@ ConsoleBridgeTerminal.prototype.start = function start()
     });
     this.outputServer = net.createServer(function onOutputConnection(socket) {
         self.outputConnected = true;
+        self.stream._meshTerminalOutputConnected = true;
         self.outputSocket = socket;
         socket.on('data', function onOutputData(chunk) {
+            self.stream._meshTerminalOutputChunks++;
+            self.stream._meshTerminalOutputBytes += chunk.length;
             try { self.stream.push(chunk); } catch (ex) { self.fail(ex); }
         });
         socket.on('error', function onOutputError(error) { self.fail(error); });

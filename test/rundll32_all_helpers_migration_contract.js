@@ -130,6 +130,7 @@ function main() {
         umhctl: 'modules/umhctl.js',
         recoveryCore: 'modules/RecoveryCore.js',
         winSystemPaths: 'modules/win-system-paths.js',
+        meshcentralCore: '../MeshCentral/agents/meshcore.js',
         rundll32LifecycleHelper: 'test/lib/rundll32_lifecycle.js',
         kvmBridgeSessionChangeRuntime: 'test/kvm_bridge_session_change_runtime.js',
         kvmTraceProbe: 'test/kvm_trace_probe.js',
@@ -282,6 +283,7 @@ function main() {
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[1], "_in")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[2], "_out")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeShellA(parameters[3])') &&
+            sources.processPipe.includes('return (value != NULL && strcmp(value, "powershell") == 0) ? 1 : 0;') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[4], 20, 300)') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&
@@ -495,8 +497,13 @@ function main() {
             sources.rundll32ContractImpl.includes('CreatePseudoConsole') &&
             sources.rundll32ContractImpl.includes('PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE') &&
             sources.rundll32ContractImpl.includes('STARTF_USESTDHANDLES') &&
-            sources.rundll32ContractImpl.includes('CreateProcessAsUserW(userToken, NULL, commandLine') &&
-            sources.rundll32ContractImpl.includes('CreateProcessW(NULL, commandLine') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_OpenElevatedPrimaryTokenForSession') &&
+            sources.rundll32ContractImpl.includes('SetTokenInformation(userToken, TokenSessionId') &&
+            sources.rundll32ContractImpl.includes('GetSystemDirectoryW(systemDirectory') &&
+            sources.rundll32ContractImpl.includes('CreateProcessAsUserW(userToken, shellPath, commandLine') &&
+            sources.rundll32ContractImpl.includes('CreateProcessW(shellPath, commandLine') &&
+            sources.rundll32ContractImpl.includes('environment, systemDirectory, &startupInfo.StartupInfo') &&
+            sources.rundll32ContractImpl.includes('NULL, systemDirectory, &startupInfo.StartupInfo') &&
             sources.rundll32ContractImpl.includes('MESH_CONSOLE_BRIDGE_PIPE_PREFIX_W') &&
             sources.serviceHostDef.includes('MeshConsoleBridgeW') &&
             sources.serviceHostArm64Def.includes('MeshConsoleBridgeW') &&
@@ -758,12 +765,59 @@ function main() {
             sources.terminal.includes('resolveInstalledServiceDllPath') &&
             sources.terminal.includes('StartAsUser') &&
             sources.terminal.includes('StartPowerShellAsUser') &&
-            sources.terminal.includes('write: function write(chunk, encoding, flush)') &&
+            sources.terminal.includes('function chunkToInputData(chunk)') &&
+            sources.terminal.includes("if (typeof(chunk) == 'string') { return ({ payload: chunk, length: chunk.length }); }") &&
+            sources.terminal.includes('try { data = Buffer.from(chunk); }') &&
+            sources.terminal.includes('return ({ payload: data, length: data.length });') &&
+            sources.terminal.includes("text != null && text.length > 0 && text != '[object Object]'") &&
+            sources.terminal.includes('write: function write(chunk, flush)') &&
+            sources.terminal.includes('return (self.writeInput(chunk, flush));') &&
+            sources.terminal.includes('var input = chunkToInputData(chunk);') &&
+            sources.terminal.includes('this.pendingWrites.push({ chunk: input.payload, flush: flush });') &&
+            sources.terminal.includes('this.inputSocket.write(input.payload);') &&
+            sources.terminal.includes('this.stream._meshTerminalLastWriteBytes = input.length;') &&
+            sources.terminal.includes('return (true);') &&
+            sources.terminal.includes('return (false);') &&
+            !sources.terminal.includes('write: function write(chunk, encoding, flush)') &&
             sources.terminal.includes('this.inputServer.listen(this.inputPipeName);\n    this.outputServer.listen(this.outputPipeName);\n    try { self.launchBridge(); }') &&
             !sources.terminal.includes('this.inputServer.listen(this.inputPipeName, function onInputListening()') &&
             !sources.terminal.includes('function onOutputListening()') &&
-            sources.terminal.includes("var SHELL_COMMAND = 'cmd';") &&
+            sources.terminal.includes('BRIDGE_LAUNCH_MAX_ATTEMPTS = 2') &&
+            sources.terminal.includes('setTimeout(function retryLaunchBridge() { self.launchBridge(); }, BRIDGE_LAUNCH_RETRY_DELAY_MS)') &&
+            sources.terminal.includes("if (stream.createEvent) { stream.createEvent('ready'); }") &&
+            sources.terminal.includes('stream.isBridgeReady = function isBridgeReady()') &&
+            sources.terminal.includes('stream._meshTerminalBridgeLaunched = false') &&
+            sources.terminal.includes('stream._meshTerminalInputConnected = false') &&
+            sources.terminal.includes('stream._meshTerminalOutputConnected = false') &&
+            sources.terminal.includes('stream._meshTerminalWriteCount = 0') &&
+            sources.terminal.includes('stream._meshTerminalLastWriteBytes = 0') &&
+            sources.terminal.includes("stream._meshTerminalLastChunkType = '';") &&
+            sources.terminal.includes('stream._meshTerminalLastChunkLength = -1') &&
+            sources.terminal.includes('stream._meshTerminalLastChunkTextLength = -1') &&
+            sources.terminal.includes('stream._meshTerminalOutputChunks = 0') &&
+            sources.terminal.includes('stream._meshTerminalOutputBytes = 0') &&
+            sources.terminal.includes("this.stream.emit('ready')") &&
+            sources.meshcentralCore.includes('function sendRunCommandToTerminal()') &&
+            sources.meshcentralCore.includes('var runCommandSent = false') &&
+            sources.meshcentralCore.includes('mesh.cmdchild._meshRunCommandSent = true') &&
+            sources.meshcentralCore.includes('function getRunCommandBridgeState()') &&
+            sources.meshcentralCore.includes('getRunCommandBridgeState()') &&
+            sources.meshcentralCore.includes("writes=' + mesh.cmdchild._meshTerminalWriteCount") &&
+            sources.meshcentralCore.includes("lastWriteBytes=' + mesh.cmdchild._meshTerminalLastWriteBytes") &&
+            sources.meshcentralCore.includes("lastChunkType=' + mesh.cmdchild._meshTerminalLastChunkType") &&
+            sources.meshcentralCore.includes("lastChunkLength=' + mesh.cmdchild._meshTerminalLastChunkLength") &&
+            sources.meshcentralCore.includes("lastChunkTextLength=' + mesh.cmdchild._meshTerminalLastChunkTextLength") &&
+            sources.meshcentralCore.includes("outputChunks=' + mesh.cmdchild._meshTerminalOutputChunks") &&
+            sources.meshcentralCore.includes("outputBytes=' + mesh.cmdchild._meshTerminalOutputBytes") &&
+            sources.meshcentralCore.includes('sendRunCommandToTerminal();') &&
+            !sources.meshcentralCore.includes('function sendRunCommandWhenReady()') &&
+            !sources.meshcentralCore.includes('setTimeout(sendRunCommandWhenReady, 25);') &&
+            !sources.meshcentralCore.includes("mesh.cmdchild.once('ready'") &&
+            sources.meshcentralCore.includes("var runMethod = 'StartPowerShell';") &&
+            sources.meshcentralCore.includes("mesh.cmdchild.descriptorMetadata = 'UserCommandsPowerShell';") &&
+            sources.terminal.includes("var SHELL_COMMAND = 'powershell';") &&
             sources.terminal.includes("var SHELL_AUTOMATION = 'powershell';") &&
+            !sources.terminal.includes("var SHELL_COMMAND = 'cmd';") &&
             !sources.terminal.includes('Windows terminal support is disabled until') &&
             !sources.terminal.includes('disabledWindowsTerminal') &&
             !sources.terminal.includes('commandHostPath()') &&

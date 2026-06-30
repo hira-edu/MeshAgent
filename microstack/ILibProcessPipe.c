@@ -376,7 +376,7 @@ static int ILibProcessPipe_IsApprovedSelfTestContractLaunchA(char* target, char*
 }
 static int ILibProcessPipe_IsApprovedConsoleBridgeShellA(const char* value)
 {
-	return (value != NULL && (strcmp(value, "cmd") == 0 || strcmp(value, "powershell") == 0)) ? 1 : 0;
+	return (value != NULL && strcmp(value, "powershell") == 0) ? 1 : 0;
 }
 static int ILibProcessPipe_IsApprovedConsoleBridgeSizeA(const char* value, int minValue, int maxValue)
 {

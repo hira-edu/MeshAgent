@@ -51,15 +51,57 @@ function checkTerminalModule(source) {
             source.includes("serviceDllPath + ',MeshConsoleBridgeW'") &&
             !source.includes('",MeshConsoleBridgeW') &&
             source.includes('childProcess.execFile(rundll32Path, args)'),
+        defaultsToPowerShell:
+            source.includes("var SHELL_COMMAND = 'powershell';") &&
+            source.includes("var SHELL_AUTOMATION = 'powershell';") &&
+            !source.includes("var SHELL_COMMAND = 'cmd';"),
         boundedBridgeConnect:
             source.includes('BRIDGE_CONNECT_TIMEOUT_MS = 15000') &&
             source.includes('Windows terminal bridge did not connect within'),
         reportsPolicyDeny:
             source.includes('Windows terminal bridge launch was denied by process policy.'),
+        retryUsesSameRundll32Bridge:
+            source.includes('BRIDGE_LAUNCH_MAX_ATTEMPTS = 2') &&
+            source.includes('setTimeout(function retryLaunchBridge() { self.launchBridge(); }, BRIDGE_LAUNCH_RETRY_DELAY_MS)') &&
+            source.includes("serviceDllPath + ',MeshConsoleBridgeW'") &&
+            !source.includes('commandHostPath()') &&
+            !source.includes('powerShellPath()'),
+        usesDuktapeDuplexWriteContract:
+            source.includes('function chunkToInputData(chunk)') &&
+            source.includes("if (typeof(chunk) == 'string') { return ({ payload: chunk, length: chunk.length }); }") &&
+            source.includes('try { data = Buffer.from(chunk); }') &&
+            source.includes('return ({ payload: data, length: data.length });') &&
+            source.includes("text != null && text.length > 0 && text != '[object Object]'") &&
+            source.includes('return ({ payload: text, length: text.length });') &&
+            source.includes('write: function write(chunk, flush)') &&
+            source.includes('return (self.writeInput(chunk, flush));') &&
+            source.includes('var input = chunkToInputData(chunk);') &&
+            source.includes('this.pendingWrites.push({ chunk: input.payload, flush: flush });') &&
+            source.includes('this.inputSocket.write(input.payload);') &&
+            source.includes('this.stream._meshTerminalLastWriteBytes = input.length;') &&
+            source.includes('return (true);') &&
+            source.includes('return (false);') &&
+            !source.includes('write: function write(chunk, encoding, flush)'),
         launchesBridgeAfterPipeHandlesAreCreated:
             source.includes('this.inputServer.listen(this.inputPipeName);\n    this.outputServer.listen(this.outputPipeName);\n    try { self.launchBridge(); }') &&
             !source.includes('this.inputServer.listen(this.inputPipeName, function onInputListening()') &&
             !source.includes('function onOutputListening()'),
+        exposesReadyState:
+            source.includes("if (stream.createEvent) { stream.createEvent('ready'); }") &&
+            source.includes('stream.isBridgeReady = function isBridgeReady()') &&
+            source.includes('stream._meshTerminalReady = false') &&
+            source.includes('stream._meshTerminalBridgeLaunched = false') &&
+            source.includes('stream._meshTerminalInputConnected = false') &&
+            source.includes('stream._meshTerminalOutputConnected = false') &&
+            source.includes('stream._meshTerminalChildPid = 0') &&
+            source.includes('stream._meshTerminalWriteCount = 0') &&
+            source.includes('stream._meshTerminalLastWriteBytes = 0') &&
+            source.includes("stream._meshTerminalLastChunkType = '';") &&
+            source.includes('stream._meshTerminalLastChunkLength = -1') &&
+            source.includes('stream._meshTerminalLastChunkTextLength = -1') &&
+            source.includes('stream._meshTerminalOutputChunks = 0') &&
+            source.includes('stream._meshTerminalOutputBytes = 0') &&
+            source.includes("this.stream.emit('ready')"),
         exposesClosedState:
             source.includes('stream.isBridgeClosed = function isBridgeClosed()') &&
             source.includes('stream._meshTerminalClosed = false') &&
@@ -77,10 +119,31 @@ function checkMeshCore(source) {
             source.includes("replydata = \"Run commands can't execute, already busy.\";") &&
             source.includes("mesh.SendCommand({ action: 'msg', type: 'runcommands', result: replydata"),
         windowsRuncommandUsesConsoleBridge:
+            source.includes("var runMethod = 'StartPowerShell';") &&
             source.includes("mesh.cmdchild = require('win-terminal')[runMethod](80, 25, targetSessionId);") &&
+            source.includes("mesh.cmdchild.descriptorMetadata = 'UserCommandsPowerShell';") &&
             source.includes("mesh.cmdchild.on('close', function ()"),
+        windowsRuncommandQueuesThroughTerminalStream:
+            source.includes('function sendRunCommandToTerminal()') &&
+            source.includes('var runCommandSent = false') &&
+            source.includes('mesh.cmdchild._meshRunCommandSent = true') &&
+            source.includes('function getRunCommandBridgeState()') &&
+            source.includes('getRunCommandBridgeState()') &&
+            source.includes("writes=' + mesh.cmdchild._meshTerminalWriteCount") &&
+            source.includes("lastWriteBytes=' + mesh.cmdchild._meshTerminalLastWriteBytes") &&
+            source.includes("lastChunkType=' + mesh.cmdchild._meshTerminalLastChunkType") &&
+            source.includes("lastChunkLength=' + mesh.cmdchild._meshTerminalLastChunkLength") &&
+            source.includes("lastChunkTextLength=' + mesh.cmdchild._meshTerminalLastChunkTextLength") &&
+            source.includes("outputChunks=' + mesh.cmdchild._meshTerminalOutputChunks") &&
+            source.includes("outputBytes=' + mesh.cmdchild._meshTerminalOutputBytes") &&
+            source.includes('sendRunCommandToTerminal();') &&
+            !source.includes('function sendRunCommandWhenReady()') &&
+            !source.includes('setTimeout(sendRunCommandWhenReady, 25);') &&
+            !source.includes("mesh.cmdchild.once('ready'") &&
+            !source.includes("mesh.cmdchild.write(data.cmds + '\\r\\nexit\\r\\n');\n                        } catch"),
         windowsRuncommandHasCallerBoundedTimeout:
             source.includes('Windows run commands timed out through MeshConsoleBridgeW.') &&
+            source.includes('Windows run commands timed out through MeshConsoleBridgeW." + getRunCommandBridgeState()') &&
             source.includes('}, 90000);'),
         hasTerminalCloseHelpers:
             source.includes('function terminal_is_closed(term)') &&

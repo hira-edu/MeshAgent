@@ -989,8 +989,8 @@ static BOOL MeshConsoleBridge_ParseUnsignedTokenW(const wchar_t* value, DWORD mi
 static BOOL MeshConsoleBridge_ResolveShellW(const wchar_t* shellName, wchar_t* shellPath, size_t shellPathCch, wchar_t* commandLine, size_t commandLineCch)
 {
     DWORD systemDirLen = 0;
-    const wchar_t* shellSuffix = NULL;
-    const wchar_t* shellArgs = L"";
+    const wchar_t* shellSuffix = L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+    const wchar_t* shellArgs = L" -NoLogo -NoProfile";
     if (shellName == NULL || shellPath == NULL || shellPathCch == 0 || commandLine == NULL || commandLineCch == 0)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
@@ -998,16 +998,7 @@ static BOOL MeshConsoleBridge_ResolveShellW(const wchar_t* shellName, wchar_t* s
     }
     shellPath[0] = L'\0';
     commandLine[0] = L'\0';
-    if (_wcsicmp(shellName, L"cmd") == 0)
-    {
-        shellSuffix = L"\\cmd.exe";
-    }
-    else if (_wcsicmp(shellName, L"powershell") == 0)
-    {
-        shellSuffix = L"\\WindowsPowerShell\\v1.0\\powershell.exe";
-        shellArgs = L" -NoLogo -NoProfile";
-    }
-    else
+    if (_wcsicmp(shellName, L"powershell") != 0)
     {
         SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
         return FALSE;
@@ -1083,17 +1074,22 @@ static HANDLE MeshConsoleBridge_OpenPipeClientW(const wchar_t* pipeName, DWORD d
     }
 }
 
-static BOOL MeshConsoleBridge_OpenPrimaryTokenForSession(DWORD sessionId, HANDLE* userTokenOut)
+static BOOL MeshConsoleBridge_OpenElevatedPrimaryTokenForSession(DWORD sessionId, HANDLE* userTokenOut)
 {
-    HANDLE impersonationToken = NULL;
+    HANDLE currentToken = NULL;
     HANDLE userToken = NULL;
     BOOL ok = FALSE;
     if (userTokenOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     *userTokenOut = NULL;
-    if (!WTSQueryUserToken(sessionId, &impersonationToken)) { return FALSE; }
-    ok = DuplicateTokenEx(impersonationToken, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, NULL, SecurityImpersonation, TokenPrimary, &userToken);
-    CloseHandle(impersonationToken);
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, &currentToken)) { return FALSE; }
+    ok = DuplicateTokenEx(currentToken, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, NULL, SecurityImpersonation, TokenPrimary, &userToken);
+    CloseHandle(currentToken);
     if (!ok) { return FALSE; }
+    if (!SetTokenInformation(userToken, TokenSessionId, &sessionId, sizeof(sessionId)))
+    {
+        CloseHandle(userToken);
+        return FALSE;
+    }
     *userTokenOut = userToken;
     return TRUE;
 }
@@ -1141,6 +1137,8 @@ static BOOL MeshConsoleBridge_CreateShellProcessW(HANDLE pseudoConsole, const wc
     HMODULE userEnvModule = NULL;
     MeshConsoleBridge_DestroyEnvironmentBlockFn destroyEnvironmentFn = NULL;
     DWORD creationFlags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+    wchar_t systemDirectory[MAX_PATH] = { 0 };
+    DWORD systemDirectoryLen = 0;
     BOOL ok = FALSE;
     DWORD lastError = ERROR_SUCCESS;
     if (pseudoConsole == NULL || shellPath == NULL || shellPath[0] == L'\0' || commandLine == NULL || commandLine[0] == L'\0' || processInfo == NULL)
@@ -1172,9 +1170,18 @@ static BOOL MeshConsoleBridge_CreateShellProcessW(HANDLE pseudoConsole, const wc
         SetLastError(lastError);
         return FALSE;
     }
+    systemDirectoryLen = GetSystemDirectoryW(systemDirectory, (UINT)_countof(systemDirectory));
+    if (systemDirectoryLen == 0 || systemDirectoryLen >= _countof(systemDirectory))
+    {
+        lastError = (GetLastError() == ERROR_SUCCESS) ? ERROR_INSUFFICIENT_BUFFER : GetLastError();
+        DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
+        HeapFree(GetProcessHeap(), 0, startupInfo.lpAttributeList);
+        SetLastError(lastError);
+        return FALSE;
+    }
     if (targetSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION)
     {
-        if (!MeshConsoleBridge_OpenPrimaryTokenForSession(targetSessionId, &userToken))
+        if (!MeshConsoleBridge_OpenElevatedPrimaryTokenForSession(targetSessionId, &userToken))
         {
             lastError = GetLastError();
             DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
@@ -1187,11 +1194,11 @@ static BOOL MeshConsoleBridge_CreateShellProcessW(HANDLE pseudoConsole, const wc
             Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] CreateEnvironmentBlock failed session=%lu error=%lu; using default environment", (unsigned long)targetSessionId, (unsigned long)GetLastError());
             environment = NULL;
         }
-        ok = CreateProcessAsUserW(userToken, NULL, commandLine, NULL, NULL, FALSE, creationFlags, environment, NULL, &startupInfo.StartupInfo, processInfo);
+        ok = CreateProcessAsUserW(userToken, shellPath, commandLine, NULL, NULL, FALSE, creationFlags, environment, systemDirectory, &startupInfo.StartupInfo, processInfo);
     }
     else
     {
-        ok = CreateProcessW(NULL, commandLine, NULL, NULL, FALSE, creationFlags, NULL, NULL, &startupInfo.StartupInfo, processInfo);
+        ok = CreateProcessW(shellPath, commandLine, NULL, NULL, FALSE, creationFlags, NULL, systemDirectory, &startupInfo.StartupInfo, processInfo);
     }
     lastError = ok ? ERROR_SUCCESS : GetLastError();
     if (environment != NULL && destroyEnvironmentFn != NULL) { destroyEnvironmentFn(environment); }

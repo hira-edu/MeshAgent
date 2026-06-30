@@ -1663,12 +1663,14 @@ def watch_reconnects(pending, baseline_agct, login_user, login_key_file, wait_se
     return reconnected
 
 
-def write_release_manifest(ts, backup_path, service_status):
+def write_release_manifest(ts, backup_path, service_status, local_artifacts=None, core_artifacts=None):
     """Write a local release manifest with repo SHAs and deployed artifact hashes."""
     MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+    local_artifacts = local_artifacts if local_artifacts is not None else build_local_artifact_entries()
+    core_artifacts = core_artifacts if core_artifacts is not None else build_local_core_artifact_entries()
 
     artifacts = []
-    for entry in build_local_artifact_entries():
+    for entry in local_artifacts:
         if entry["present"] is not True:
             continue
 
@@ -1699,12 +1701,13 @@ def write_release_manifest(ts, backup_path, service_status):
             "name": entry["name"],
             "remote_filename": entry["remote_filename"],
             "local_path": entry["local_path"],
+            "publish_targets": list(get_artifact_publish_targets(entry)),
             "size_bytes": entry["size_bytes"],
             "sha384": entry["sha384"],
             "remote_locations": remote_locations,
         })
 
-    for entry in build_local_core_artifact_entries():
+    for entry in core_artifacts:
         if entry["present"] is not True:
             continue
         remote_locations = []
@@ -1721,7 +1724,9 @@ def write_release_manifest(ts, backup_path, service_status):
         artifacts.append({
             "name": entry["name"],
             "remote_filename": entry["remote_relative_path"],
+            "remote_relative_path": entry["remote_relative_path"],
             "local_path": entry["local_path"],
+            "publish_targets": list(get_artifact_publish_targets(entry)),
             "size_bytes": entry["size_bytes"],
             "sha384": entry["sha384"],
             "remote_locations": remote_locations,
@@ -1768,6 +1773,95 @@ def write_release_manifest(ts, backup_path, service_status):
         json.dump(manifest, f, indent=2)
         f.write("\n")
     return manifest_path
+
+
+def get_latest_release_manifest_path():
+    """Return the newest local release manifest, if one exists."""
+    try:
+        manifests = [path for path in MANIFEST_DIR.glob("release-manifest-*.json") if path.is_file()]
+    except OSError:
+        return None
+    if not manifests:
+        return None
+    return max(manifests, key=lambda path: path.stat().st_mtime)
+
+
+def load_release_manifest(path):
+    """Load a release manifest JSON file."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        return loaded if isinstance(loaded, dict) else None
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def get_manifest_expected_metadata(item):
+    """Return the deployed baseline hash/size recorded for a manifest artifact."""
+    remote_locations = item.get("remote_locations", [])
+    if isinstance(remote_locations, list):
+        for location in remote_locations:
+            if not isinstance(location, dict):
+                continue
+            remote_path = str(location.get("path", ""))
+            remote_sha = location.get("sha384")
+            if location.get("present") is not True or not remote_sha:
+                continue
+            if "/signedagents/" in remote_path:
+                continue
+            return str(remote_sha).lower(), location.get("size_bytes")
+    return str(item.get("sha384", "")).lower(), item.get("size_bytes")
+
+
+def build_publish_baseline_from_manifest(manifest):
+    """Build deploy verification entries from a captured release manifest."""
+    if not isinstance(manifest, dict):
+        return [], []
+    agent_entries = []
+    core_entries = []
+    for item in manifest.get("artifacts", []):
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        expected_sha384, expected_size = get_manifest_expected_metadata(item)
+        if name in ARTIFACTS:
+            config = ARTIFACTS[name]
+            agent_entries.append({
+                "name": name,
+                "remote_filename": item.get("remote_filename") or config["remote_filename"],
+                "local_path": item.get("local_path", ""),
+                "present": True,
+                "size_bytes": expected_size,
+                "sha384": expected_sha384,
+                "publish_targets": tuple(item.get("publish_targets") or config.get("publish_targets", ())),
+            })
+        elif name in CORE_ARTIFACTS:
+            config = CORE_ARTIFACTS[name]
+            relative_path = item.get("remote_relative_path") or item.get("remote_filename") or config["remote_relative_path"]
+            core_entries.append({
+                "name": name,
+                "remote_filename": relative_path,
+                "remote_relative_path": relative_path,
+                "staging_filename": relative_path.replace("/", "__"),
+                "local_path": item.get("local_path", ""),
+                "present": True,
+                "size_bytes": expected_size,
+                "sha384": expected_sha384,
+                "publish_targets": tuple(item.get("publish_targets") or config.get("publish_targets", ())),
+            })
+    return agent_entries, core_entries
+
+
+def get_publish_baseline_from_latest_manifest():
+    """Return release-manifest baseline entries and a user-facing label."""
+    manifest_path = get_latest_release_manifest_path()
+    if manifest_path is None:
+        return None, None, "local workspace"
+    manifest = load_release_manifest(manifest_path)
+    agent_entries, core_entries = build_publish_baseline_from_manifest(manifest)
+    if agent_entries or core_entries:
+        return agent_entries, core_entries, f"release manifest {manifest_path.name}"
+    return None, None, "local workspace"
 
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
@@ -1828,10 +1922,12 @@ def cmd_status(args):
                 size, date, name = parts[4], " ".join(parts[5:8]), parts[-1].split("/")[-1]
                 print(f"    {name:<30s} {size:>8s}  {date}")
 
-    publish_state = get_publish_runtime_state()
+    baseline_artifacts, baseline_core_artifacts, baseline_label = get_publish_baseline_from_latest_manifest()
+
+    publish_state = get_publish_runtime_state(baseline_artifacts)
     if publish_state:
         print(f"\n{'─' * 60}")
-        print("  Publish State:")
+        print(f"  Publish State ({baseline_label}):")
         for entry in publish_state:
             print(
                 f"    {entry['filename']:<30s} "
@@ -1842,10 +1938,10 @@ def cmd_status(args):
                 f"signed-manifest={format_publish_match(entry['signed_manifest_matches_file'], fail='stale'):<5s}"
             )
 
-    core_state = get_core_publish_state()
+    core_state = get_core_publish_state(baseline_core_artifacts)
     if core_state:
         print(f"\n{'─' * 60}")
-        print("  MeshCore State:")
+        print(f"  MeshCore State ({baseline_label}):")
         for entry in core_state:
             role_summary = " ".join(
                 f"{role['role']}={format_publish_match(role.get('matches_local'))}"
@@ -2096,7 +2192,7 @@ def cmd_deploy(args):
 
     manifest_path = None
     try:
-        manifest_path = write_release_manifest(ts, backup_path, status)
+        manifest_path = write_release_manifest(ts, backup_path, status, local_artifacts, core_artifacts)
         print(f"  Release manifest written: {manifest_path}")
     except Exception as ex:
         print(f"  [WARNING] Failed to write release manifest: {ex}")
@@ -2348,7 +2444,9 @@ PY"""
         indicator = "+" if status == "OK" else "!"
         print(f"  [{indicator}] {label:<25s} {(result or '')[:60]}")
 
-    publish_state = get_publish_runtime_state()
+    baseline_artifacts, baseline_core_artifacts, baseline_label = get_publish_baseline_from_latest_manifest()
+
+    publish_state = get_publish_runtime_state(baseline_artifacts)
     if publish_state:
         publish_errors = get_publish_state_errors(publish_state)
         publish_ok = len(publish_errors) == 0
@@ -2359,16 +2457,16 @@ PY"""
             f"{entry['filename']}={entry.get('signed_relation', entry.get('runtime_source', 'n/a'))}/module-{format_publish_match(entry['module_matches_local'])}"
             for entry in publish_state
         )
-        print(f"  [{indicator}] Publish parity             {summary[:60]}")
+        print(f"  [{indicator}] Publish parity             {baseline_label}: {summary[:60]}")
 
-    core_state = get_core_publish_state()
+    core_state = get_core_publish_state(baseline_core_artifacts)
     if core_state:
         core_errors = get_core_publish_state_errors(core_state)
         core_ok = len(core_errors) == 0
         if core_ok is False:
             all_ok = False
         indicator = "+" if core_ok else "!"
-        print(f"  [{indicator}] MeshCore parity            {summarize_core_publish_state(core_state)[:60]}")
+        print(f"  [{indicator}] MeshCore parity            {baseline_label}: {summarize_core_publish_state(core_state)[:60]}")
 
     print(f"\n{'─' * 60}")
     if all_ok:
