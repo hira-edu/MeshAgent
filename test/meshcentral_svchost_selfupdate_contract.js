@@ -63,6 +63,28 @@ function formatTokenList(tokens) {
     return tokens.length > 0 ? tokens.map((token) => JSON.stringify(token)).join(',') : 'none';
 }
 
+function windowsUpdaterFailsClosedBeforeDirectReplacement(source) {
+    if (source == null) {
+        return false;
+    }
+    const updateStart = source.indexOf('function agentUpdate_Start(updateurl, updateoptions)');
+    const body = updateStart >= 0 ? source.substring(updateStart) : source;
+    const topGuard = body.indexOf("if (process.platform == 'win32')");
+    const httpsStart = body.indexOf("require('https').get(options)");
+    const platformGuard = body.indexOf("process.platform != 'freebsd' && process.platform != 'linux'");
+    const directUnlink = body.indexOf("require('fs').unlinkSync(process.execPath)");
+    const directCopy = body.indexOf("require('fs').copyFileSync(process.cwd() + agentfilename + '.update', process.execPath)");
+    const postGuardUpdateBlock = platformGuard >= 0 && directCopy > platformGuard ? body.substring(platformGuard, directCopy + 512) : '';
+
+    return topGuard >= 0 &&
+        httpsStart > topGuard &&
+        platformGuard >= 0 &&
+        directUnlink > platformGuard &&
+        directCopy > platformGuard &&
+        !postGuardUpdateBlock.includes("require('service-manager').manager.getService(name)") &&
+        body.includes('Self Update disabled for this platform; native service lifecycle is required.');
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
@@ -105,6 +127,10 @@ function main() {
             meshcoreMinSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
             meshcentralDataMeshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
             recoverycoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'),
+        meshcentralJavaScriptUpdaterCannotTouchWindowsProcessImage: windowsUpdaterFailsClosedBeforeDirectReplacement(meshcoreSource) &&
+            windowsUpdaterFailsClosedBeforeDirectReplacement(meshcoreMinSource) &&
+            windowsUpdaterFailsClosedBeforeDirectReplacement(meshcentralDataMeshcoreSource) &&
+            windowsUpdaterFailsClosedBeforeDirectReplacement(recoverycoreSource),
         agentcorePublishesNativeFullUpdate: agentcoreSource.includes('"nativeFullUpdate"'),
         agentcoreProbesZipHeaderBeforeOptionalJsUnzip: agentcoreSource.includes('static int MeshServer_UpdateFileLooksZip(char *updateFilePath)') &&
             agentcoreSource.includes('MeshServer_UpdateFileLooksZip(updateFilePath)'),

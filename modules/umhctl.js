@@ -873,15 +873,37 @@ function umhctlProgramDataRoot()
 {
     try
     {
-        if (process.platform == 'win32') { return require('win-system-paths').programDataDirectory(); }
-    } catch (e0) { return null; }
-    return null;
+        if (process.platform == 'win32')
+        {
+            var knownFolder = require('win-system-paths').programDataDirectory();
+            var normalizedKnownFolder = umhctlNormalizeExecutablePath('' + knownFolder);
+            if (normalizedKnownFolder != null && /[\\\/]programdata$/i.test(normalizedKnownFolder)) { return normalizedKnownFolder.replace(/[\\\/]+$/, ''); }
+        }
+    } catch (e0) { }
+
+    try
+    {
+        var registry = require('win-registry');
+        var commonAppData = registry.QueryKey(registry.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders', 'Common AppData');
+        var normalizedCommonAppData = umhctlNormalizeExecutablePath('' + commonAppData);
+        if (normalizedCommonAppData != null && normalizedCommonAppData.length > 0) { return normalizedCommonAppData.replace(/[\\\/]+$/, ''); }
+    } catch (e1) { }
+
+    if (process && process.env && typeof process.env.ProgramData == 'string' && process.env.ProgramData.length > 0)
+    {
+        var normalizedProgramData = umhctlNormalizeExecutablePath(process.env.ProgramData);
+        if (normalizedProgramData != null && /[\\\/]programdata$/i.test(normalizedProgramData)) { return normalizedProgramData.replace(/[\\\/]+$/, ''); }
+    }
+    if (process && process.env && typeof process.env.SystemDrive == 'string' && /^[a-z]:$/i.test(process.env.SystemDrive))
+    {
+        return process.env.SystemDrive + '\\ProgramData';
+    }
+    return 'C:\\ProgramData';
 }
 
 function umhctlInstallContractPath()
 {
     var programData = umhctlProgramDataRoot();
-    if (programData == null) { return null; }
     return programData.replace(/[\\\/]+$/, '') + '\\UserModeHook\\install_contract.json';
 }
 

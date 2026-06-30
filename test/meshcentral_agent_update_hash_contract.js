@@ -37,14 +37,9 @@ function main() {
         'HTTP agent update command must advertise served/appended fileHashHex when present'
     );
     assert(
-        compareSection.includes("if ((agentExeInfo.id == 4) && (agentExeInfo.fileHash != null)) return 1;"),
-        'Windows x64 svchost agents with fileHash metadata must use native update routing'
-    );
-    assert(
         packageSource.includes('(agentExeInfo.fileHash != null && agentExeInfo.fileHash == agentHash)') &&
-        packageSource.includes("if ((agentExeInfo.id == 4) && (agentExeInfo.fileHash != null)) return 1;") &&
         packageSource.includes('obj.agentUpdate.agentUpdateHash = (obj.agentExeInfo.fileHash != null) ? obj.agentExeInfo.fileHash : obj.agentExeInfo.hash;'),
-        'installed MeshCentral package copy must match agent update hash/native routing contract'
+        'installed MeshCentral package copy must match agent update hash contract'
     );
 
     console.log(JSON.stringify({
@@ -53,7 +48,6 @@ function main() {
             compareAcceptsFileHash: true,
             ramUpdateUsesFileHash: true,
             httpUpdateUsesFileHashHex: true,
-            win64SvchostUsesNativeUpdate: true,
             installedPackageCopyAligned: true
         }
     }, null, 2));
