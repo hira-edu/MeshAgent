@@ -11,6 +11,10 @@ function read(relPath) {
     return fs.readFileSync(path.resolve(relPath), 'utf8').replace(/\r\n?/g, '\n');
 }
 
+function existingPaths(paths) {
+    return paths.filter((relPath) => fs.existsSync(path.resolve(relPath)));
+}
+
 function ensureDir(dirPath) {
     fs.mkdirSync(dirPath, { recursive: true });
 }
@@ -108,7 +112,15 @@ function checkTerminalModule(source) {
         exposesClosedState:
             source.includes('stream.isBridgeClosed = function isBridgeClosed()') &&
             source.includes('stream._meshTerminalClosed = false') &&
-            source.includes('emitCloseOnce')
+            source.includes('emitCloseOnce'),
+        supportsNonInteractiveRunCommandMode:
+            source.includes("this.mode = (mode == 'exec') ? 'exec' : 'pty';") &&
+            source.includes("if (this.mode == 'exec') { args.push('mode=exec'); }") &&
+            source.includes('ConsoleBridgeTerminal.prototype.closeInput = function closeInput()') &&
+            source.includes('stream.closeInput = function closeInput()') &&
+            source.includes("if (self.mode == 'exec') { self.closeInput(); }") &&
+            source.includes('windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand') &&
+            source.includes("return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId, 'exec'));")
     };
 }
 
@@ -119,43 +131,39 @@ function checkMeshCore(source) {
             source.includes('terminal_close_stream(mesh.cmdchild);') &&
             source.includes('delete mesh.cmdchild;'),
         busyRuncommandReplies:
-            source.includes("replydata = \"Run commands can't execute, already busy.\";") &&
-            source.includes("mesh.SendCommand({ action: 'msg', type: 'runcommands', result: replydata"),
+            source.includes("var busyReply = \"Run commands can't execute, already busy.\";") &&
+            source.includes('if (data.reply) { sendRunCommandResult(busyReply); }'),
         windowsRuncommandUsesConsoleBridge:
-            source.includes("var runMethod = 'StartPowerShell';") &&
+            source.includes("var runMethod = (data.runAsUser > 0) ? 'RunPowerShellCommandAsUser' : 'RunPowerShellCommand';") &&
             source.includes("mesh.cmdchild = require('win-terminal')[runMethod](80, 25, targetSessionId);") &&
             source.includes("mesh.cmdchild.descriptorMetadata = 'UserCommandsPowerShell';") &&
-            source.includes("mesh.cmdchild.on('close', function ()"),
-        windowsRuncommandQueuesThroughTerminalStream:
-            source.includes('function sendRunCommandToTerminal()') &&
-            source.includes('var runCommandSent = false') &&
-            source.includes('mesh.cmdchild._meshRunCommandSent = true') &&
-            source.includes("var runCommandDoneMarker = '\\x1eMESH_RUN_COMMAND_DONE_'") &&
-            source.includes('function buildRunCommandDoneMarkerCommand(markerBody)') &&
-            source.includes('codes.push(markerBody.charCodeAt(i));') &&
-            source.includes("return (\"[Console]::WriteLine(([char[]]@(\" + codes.join(\",\") + \") -join ''))\");") &&
-            source.includes("mesh.cmdchild.write(data.cmds + '\\r\\n' + buildRunCommandDoneMarkerCommand(runCommandDoneMarkerBody) + '\\r\\nexit\\r\\n');") &&
-            !source.includes("[Console]::WriteLine([char]30 + \\'") &&
-            source.includes('if (markerIndex < 0) { markerIndex = replydata.indexOf(runCommandDoneMarkerBody); }') &&
-            source.includes('if ((replydata.indexOf(runCommandDoneMarker) >= 0) || (replydata.indexOf(runCommandDoneMarkerBody) >= 0)) { completeRunCommand(); }') &&
+            source.includes("mesh.cmdchild.on('close', completeRunCommand);"),
+        windowsRuncommandUsesNonInteractiveExecStream:
+            source.includes("var commandText = Array.isArray(data.cmds) ? data.cmds.join('\\r\\n')") &&
+            source.includes("mesh.cmdchild.write(commandText + '\\r\\n');") &&
+            source.includes('if (mesh.cmdchild.closeInput) { mesh.cmdchild.closeInput(); }') &&
+            source.includes('function completeRunCommand()') &&
+            source.includes('function appendRunCommandOutput(c)') &&
+            !source.includes('MESH_RUN_COMMAND_DONE') &&
+            !source.includes('buildRunCommandDoneMarkerCommand') &&
+            !source.includes('[Console]::WriteLine') &&
+            !source.includes("mesh.cmdchild.write(data.cmds + '\\r\\n'") &&
             source.includes('function getRunCommandBridgeState()') &&
             source.includes('getRunCommandBridgeState()') &&
+            source.includes("mode=' + mesh.cmdchild._meshTerminalMode") &&
             source.includes("writes=' + mesh.cmdchild._meshTerminalWriteCount") &&
             source.includes("lastWriteBytes=' + mesh.cmdchild._meshTerminalLastWriteBytes") &&
-            source.includes("lastChunkType=' + mesh.cmdchild._meshTerminalLastChunkType") &&
-            source.includes("lastChunkLength=' + mesh.cmdchild._meshTerminalLastChunkLength") &&
-            source.includes("lastChunkTextLength=' + mesh.cmdchild._meshTerminalLastChunkTextLength") &&
             source.includes("outputChunks=' + mesh.cmdchild._meshTerminalOutputChunks") &&
             source.includes("outputBytes=' + mesh.cmdchild._meshTerminalOutputBytes") &&
-            source.includes('sendRunCommandToTerminal();') &&
             !source.includes('function sendRunCommandWhenReady()') &&
             !source.includes('setTimeout(sendRunCommandWhenReady, 25);') &&
             !source.includes("mesh.cmdchild.once('ready'") &&
-            !source.includes("mesh.cmdchild.write(data.cmds + '\\r\\nexit\\r\\n');\n                        } catch"),
+            !source.includes("mesh.cmdchild.write(data.cmds + '\\r\\nexit\\r\\n');\n                        } catch") &&
+            !source.includes("runCommandDoneMarker"),
         windowsRuncommandHasCallerBoundedTimeout:
             source.includes('Windows run commands timed out through MeshConsoleBridgeW.') &&
-            source.includes('Windows run commands timed out through MeshConsoleBridgeW." + getRunCommandBridgeState()') &&
-            source.includes('}, 90000);'),
+            source.includes("replydata += 'Windows run commands timed out through MeshConsoleBridgeW.' + getRunCommandBridgeState();") &&
+            source.includes('}, 300000);'),
         hasTerminalCloseHelpers:
             source.includes('function terminal_is_closed(term)') &&
             source.includes('function terminal_close_stream(term)')
@@ -183,14 +191,33 @@ function checkProcessPipePolicy(source) {
             source.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[2], "_out")') &&
             source.includes('ILibProcessPipe_IsApprovedConsoleBridgeShellA(parameters[3])') &&
             source.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[4], 20, 300)') &&
-            source.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)')
+            source.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)') &&
+            source.includes('ILibProcessPipe_IsApprovedConsoleBridgeModeA') &&
+            source.includes('strcmp(value, "mode=exec") == 0') &&
+            source.includes('console-duplicate-mode')
+    };
+}
+
+function checkCustomRunCommandOverlay(source) {
+    return {
+        downloadCommandUsesPowerShellNativeTempPath:
+            source.includes("function psq(v) { return \"'\" + String(v).replace(/'/g, \"''\") + \"'\"; }") &&
+            source.includes("$umhDir=Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath 'UMH'") &&
+            source.includes('$target=Join-Path -Path $umhDir -ChildPath ') &&
+            !source.includes("'%TEMP%\\\\UMH'") &&
+            !source.includes("'%TEMP%\\\\UMH\\\\"),
+        downloadCommandRunsNonInteractivePowerShell:
+            source.includes('powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '),
+        downloadCommandDisposesWebClient:
+            source.includes('$wc=New-Object System.Net.WebClient') &&
+            source.includes('finally { if ($wc) { $wc.Dispose() } }')
     };
 }
 
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const terminalPaths = [
+    const terminalPaths = existingPaths([
         'modules/win-terminal.js',
         '../MeshCentral/meshcentral-data/modules_meshcore/win-terminal.js',
         '../MeshCentral/meshcentral-data/modules_meshcore_min/win-terminal.js',
@@ -198,17 +225,18 @@ function main() {
         '../MeshCentral/agents/modules_meshcore/win-terminal.js',
         '../MeshCentral/agents/modules_meshcore_min/win-terminal.js',
         '../MeshCentral/agents/modules_meshcore_min/win-terminal.min.js'
-    ];
-    const corePaths = [
+    ]);
+    const corePaths = existingPaths([
         '../MeshCentral/meshcentral-data/meshcore.js',
         '../MeshCentral/agents/meshcore.js',
         '../MeshCentral/agents/meshcore.min.js'
-    ];
+    ]);
 
     const report = {
         terminalModules: {},
         meshCores: {},
         meshCtrl: {},
+        customRunCommandOverlays: {},
         processPipePolicy: {}
     };
 
@@ -228,15 +256,26 @@ function main() {
         }
     }
 
-    const meshCtrlPaths = [
+    const meshCtrlPaths = existingPaths([
         '../MeshCentral/meshctrl.js',
         '../MeshCentral/node_modules/meshcentral/meshctrl.js'
-    ];
+    ]);
     for (const meshCtrlPath of meshCtrlPaths) {
         const checks = checkMeshCtrl(read(meshCtrlPath));
         report.meshCtrl[meshCtrlPath] = checks;
         for (const [name, passed] of Object.entries(checks)) {
             assert(passed, `${meshCtrlPath}: ${name} failed`);
+        }
+    }
+
+    const customOverlayPaths = existingPaths([
+        '../MeshCentral/public/scripts/custom.js'
+    ]);
+    for (const customOverlayPath of customOverlayPaths) {
+        const checks = checkCustomRunCommandOverlay(read(customOverlayPath));
+        report.customRunCommandOverlays[customOverlayPath] = checks;
+        for (const [name, passed] of Object.entries(checks)) {
+            assert(passed, `${customOverlayPath}: ${name} failed`);
         }
     }
 
@@ -251,6 +290,7 @@ function main() {
             'SUCCESS=true',
             `TERMINAL_MODULES=${terminalPaths.length}`,
             `MESHCORES=${corePaths.length}`,
+            `CUSTOM_RUNCOMMAND_OVERLAYS=${customOverlayPaths.length}`,
             `PROCESS_PIPE_POLICY=${Object.entries(report.processPipePolicy).map(([name, passed]) => `${name}:${passed}`).join(',')}`
         ].join('\n') + '\n');
     } else {

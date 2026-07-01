@@ -7273,8 +7273,15 @@ int RunService(int argc, char* argv[])
 int GetServiceState(LPCSTR servicename)
 {
 	int r = 0;
-	SC_HANDLE serviceControlManager = OpenSCManager(0, 0, SC_MANAGER_CONNECT);
+	SC_HANDLE serviceControlManager = NULL;
 
+	if (servicename == NULL || servicename[0] == 0)
+	{
+		SetLastError(ERROR_INVALID_NAME);
+		return 0;
+	}
+
+	serviceControlManager = OpenSCManager(0, 0, SC_MANAGER_CONNECT);
 	if (serviceControlManager)
 	{
 		SC_HANDLE service = OpenService(serviceControlManager, servicename, SERVICE_QUERY_STATUS);
@@ -7284,14 +7291,30 @@ int GetServiceState(LPCSTR servicename)
 			if (QueryServiceStatus(service, &serviceStatusEx))
 			{
 				r = serviceStatusEx.dwCurrentState;
+				SetLastError(ERROR_SUCCESS);
+			}
+			else
+			{
+				DWORD queryError = GetLastError();
+				SetLastError(queryError);
 			}
 			CloseServiceHandle(service);
 		}
 		else
 		{
-			r = 100;
+			DWORD openError = GetLastError();
+			if (openError == ERROR_SERVICE_DOES_NOT_EXIST)
+			{
+				r = 100;
+			}
+			SetLastError(openError);
 		}
 		CloseServiceHandle(serviceControlManager);
+	}
+	else
+	{
+		DWORD scmError = GetLastError();
+		SetLastError(scmError);
 	}
 	return r;
 }
@@ -9240,6 +9263,21 @@ WCHAR *Dialog_GetTranslation(void *ctx, char *property)
 
 WCHAR closeButtonText[255] = { 0 };
 int closeButtonTextSet = 0;
+static char g_dialogServiceName[256] = { 0 };
+
+static const char* MeshService_GetDialogServiceNameA(void)
+{
+	if (g_dialogServiceName[0] != 0) { return g_dialogServiceName; }
+	return (serviceFile != NULL && serviceFile[0] != 0) ? serviceFile : "MeshAgent";
+}
+
+static MeshRundll32LifecycleAction MeshService_GetGuiInstallButtonLifecycleAction(void)
+{
+	int serviceState = GetServiceState(MeshService_GetDialogServiceNameA());
+	return (serviceState == 100) ?
+		MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL :
+		MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE;
+}
 
 HBITMAP GetScaledImage(char *raw, size_t rawLen, int w, int h)
 {
@@ -9330,6 +9368,7 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		duk_context *ctx = g_dialogCtx;
 		char *lang = g_dialogLanguage;
 
+		g_dialogServiceName[0] = 0;
 
 		if (duk_has_prop_string(ctx, -1, lang))
 		{
@@ -9411,6 +9450,13 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 			serverurl = Duktape_GetStringPropertyValue(ctx, -1, "MeshServer", NULL);
 			displayName = Duktape_GetStringPropertyValue(ctx, -1, "displayName", NULL);
 			meshServiceName = Duktape_GetStringPropertyValue(ctx, -1, "meshServiceName", NULL);
+			if (meshServiceName != NULL && meshServiceName[0] != 0)
+			{
+				if (FAILED(StringCchCopyA(g_dialogServiceName, _countof(g_dialogServiceName), meshServiceName)))
+				{
+					g_dialogServiceName[0] = 0;
+				}
+			}
 
 			// Set text in the dialog box
 			if (installFlags != NULL) { installFlagsInt = ILib_atoi2_int32(installFlags, 255); }
@@ -9452,7 +9498,7 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		}
 
 		// Get the current service running state
-		int r = GetServiceState(meshServiceName != NULL ? meshServiceName : serviceFile);
+		int r = GetServiceState(MeshService_GetDialogServiceNameA());
 		SetWindowTextW(GetDlgItem(hDlg, IDC_INSTALLBUTTON), update_buttontext);
 
 		switch (r)
@@ -9460,7 +9506,6 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		case SERVICE_RUNNING:
 			SetWindowTextW(GetDlgItem(hDlg, IDC_STATUSTEXT), state_running);
 			break;
-		case 0:
 		case 100: // Not installed
 			SetWindowTextW(GetDlgItem(hDlg, IDC_STATUSTEXT), state_notinstalled);
 			SetWindowTextW(GetDlgItem(hDlg, IDC_INSTALLBUTTON), install_buttontext);
@@ -9520,7 +9565,7 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 
 			if (LOWORD(wParam) == IDC_INSTALLBUTTON)
 			{
-				lifecycleAction = MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL;
+				lifecycleAction = MeshService_GetGuiInstallButtonLifecycleAction();
 			}
 			else
 			{
@@ -9533,9 +9578,15 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 			}
 			else
 			{
+				Stealth_LogInstallEvent(
+					L"[GUI] action=start lifecycle=%ls source=%ls",
+					MeshRundll32_LifecycleActionNameW(lifecycleAction),
+					(lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL ||
+					 lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE) ? modulePath : L"(none)");
 				result = MeshRundll32_LaunchLifecycleHostW(
 					lifecycleAction,
-					(lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL) ? modulePath : NULL,
+					(lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL ||
+					 lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE) ? modulePath : NULL,
 					NULL,
 					NULL,
 					NULL,
@@ -9544,6 +9595,13 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 					600000,
 					&actionExitCode);
 				launchError = result ? ERROR_SUCCESS : GetLastError();
+				Stealth_LogInstallEvent(
+					L"[GUI] action=complete lifecycle=%ls source=%ls launchError=%lu exitCode=%lu",
+					MeshRundll32_LifecycleActionNameW(lifecycleAction),
+					(lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL ||
+					 lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE) ? modulePath : L"(none)",
+					launchError,
+					actionExitCode);
 			}
 
 			if (result)
@@ -9559,7 +9617,13 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 			}
 			else
 			{
-				StringCchCopyW(actionName, _countof(actionName), LOWORD(wParam) == IDC_INSTALLBUTTON ? L"Install/Update" : L"Uninstall");
+				if (FAILED(StringCchCopyW(actionName, _countof(actionName),
+					(lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE) ? L"Update" :
+					(lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL) ? L"Install" :
+					L"Uninstall")))
+				{
+					StringCchCopyW(actionName, _countof(actionName), L"Lifecycle action");
+				}
 				if (launchError == ERROR_CANCELLED)
 				{
 					StringCchPrintfW(errorMessage, _countof(errorMessage), L"%ls was cancelled (UAC prompt declined or unavailable).", actionName);
@@ -9720,7 +9784,6 @@ INT_PTR CALLBACK DialogHandler2(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 				case SERVICE_RUNNING:
 					SetWindowTextW(GetDlgItem(hDlg, IDC_STATUSTEXT), state_running);
 					break;
-				case 0:
 				case 100: // Not installed
 					SetWindowTextW(GetDlgItem(hDlg, IDC_STATUSTEXT), state_notinstalled);
 					break;

@@ -88,12 +88,13 @@ function chunkToInputData(chunk)
     return ({ payload: (data != null ? data : ''), length: (data != null ? data.length : 0) });
 }
 
-function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId)
+function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId, mode)
 {
     var self = this;
     var stream = null;
 
     this.shellName = shellName;
+    this.mode = (mode == 'exec') ? 'exec' : 'pty';
     this.cols = normalizeSize(cols, 80, 20, 300);
     this.rows = normalizeSize(rows, 25, 10, 100);
     this.targetSessionId = ((typeof(targetSessionId) == 'number') && targetSessionId >= 0) ? parseInt(targetSessionId) : null;
@@ -114,13 +115,16 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId)
     this.bridgeLaunched = false;
     this.bridgeLaunchAttempts = 0;
     this.readyEmitted = false;
+    this.inputEnded = false;
+    this.endInputWhenConnected = false;
 
     stream = new duplex({
         write: function write(chunk, flush) {
             return (self.writeInput(chunk, flush));
         },
         final: function final(flush) {
-            self.closeBridge();
+            if (self.mode == 'exec') { self.closeInput(); }
+            else { self.closeBridge(); }
             flush();
         }
     });
@@ -132,6 +136,9 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId)
     };
     stream.closeBridge = function closeBridge() {
         self.closeBridge();
+    };
+    stream.closeInput = function closeInput() {
+        self.closeInput();
     };
     stream.isBridgeClosed = function isBridgeClosed() {
         return (self.closed || self.ended);
@@ -148,6 +155,7 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId)
     stream._meshTerminalOutputConnected = false;
     stream._meshTerminalChildPid = 0;
     stream._meshTerminalLastError = '';
+    stream._meshTerminalMode = this.mode;
     stream._meshTerminalWriteCount = 0;
     stream._meshTerminalLastWriteBytes = 0;
     stream._meshTerminalLastChunkType = '';
@@ -223,6 +231,17 @@ ConsoleBridgeTerminal.prototype.flushPendingWrites = function flushPendingWrites
         item = this.pendingWrites.shift();
         this.writeInput(item.chunk, item.flush);
     }
+    if (this.endInputWhenConnected) { this.closeInput(); }
+};
+
+ConsoleBridgeTerminal.prototype.closeInput = function closeInput()
+{
+    this.endInputWhenConnected = true;
+    if (this.inputEnded) { return; }
+    if (this.inputSocket == null) { return; }
+    this.inputEnded = true;
+    this.endInputWhenConnected = false;
+    try { this.inputSocket.end(); } catch (ex) { this.fail(ex); }
 };
 
 ConsoleBridgeTerminal.prototype.writeInput = function writeInput(chunk, flush)
@@ -237,7 +256,7 @@ ConsoleBridgeTerminal.prototype.writeInput = function writeInput(chunk, flush)
         try { fallbackText = '' + chunk.toString(); } catch (ex3) { fallbackText = null; }
         if (fallbackText != null && fallbackText.length > 0 && fallbackText != '[object Object]') { input = { payload: fallbackText, length: fallbackText.length }; }
     }
-    if (this.closed)
+    if (this.closed || this.inputEnded)
     {
         if (flush) { flush(); }
         return (true);
@@ -276,6 +295,7 @@ ConsoleBridgeTerminal.prototype.launchBridge = function launchBridge()
     this.stream._meshTerminalLaunchAttempts = this.bridgeLaunchAttempts;
     this.stream._meshTerminalChildPid = 0;
     if (this.targetSessionId != null) { args.push('tsid=' + this.targetSessionId); }
+    if (this.mode == 'exec') { args.push('mode=exec'); }
     this.child = childProcess.execFile(rundll32Path, args);
     if (this.child == null) {
         this.fail(new Error('Windows terminal bridge launch was denied by process policy.'));
@@ -310,7 +330,10 @@ ConsoleBridgeTerminal.prototype.start = function start()
         self.stream._meshTerminalInputConnected = true;
         self.inputSocket = socket;
         socket.on('error', function onInputError(error) { self.fail(error); });
-        socket.on('close', function onInputClose() { self.finish(); });
+        socket.on('close', function onInputClose() {
+            self.inputSocket = null;
+            if (self.mode != 'exec') { self.finish(); }
+        });
         self.checkBridgeConnected();
         self.flushPendingWrites();
     });
@@ -402,6 +425,17 @@ windowsTerminal.prototype.StartPowerShell = function StartPowerShell(cols, rows,
 windowsTerminal.prototype.StartPowerShellAsUser = function StartPowerShellAsUser(cols, rows, targetSessionId)
 {
     return (this.StartPowerShell(cols, rows, targetSessionId));
+};
+
+windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand(cols, rows, targetSessionId)
+{
+    if (process.platform != 'win32') { throw new Error('Windows run commands are only available on Windows.'); }
+    return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId, 'exec'));
+};
+
+windowsTerminal.prototype.RunPowerShellCommandAsUser = function RunPowerShellCommandAsUser(cols, rows, targetSessionId)
+{
+    return (this.RunPowerShellCommand(cols, rows, targetSessionId));
 };
 
 module.exports = new windowsTerminal();

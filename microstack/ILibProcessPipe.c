@@ -395,33 +395,58 @@ static int ILibProcessPipe_IsApprovedConsoleBridgeSizeA(const char* value, int m
 }
 static int ILibProcessPipe_IsApprovedConsoleBridgeSessionA(const char* value)
 {
-	const char* cursor = NULL;
-	if (value == NULL) { return 0; }
-	if (strncmp(value, "tsid=", 5) != 0 || value[5] == 0) { return 0; }
+    const char* cursor = NULL;
+    if (value == NULL) { return 0; }
+    if (strncmp(value, "tsid=", 5) != 0 || value[5] == 0) { return 0; }
 	cursor = value + 5;
 	while (*cursor != 0)
 	{
 		if (*cursor < '0' || *cursor > '9') { return 0; }
 		++cursor;
-	}
-	return 1;
+    }
+    return 1;
+}
+static int ILibProcessPipe_IsApprovedConsoleBridgeModeA(const char* value)
+{
+	return (value != NULL && strcmp(value, "mode=exec") == 0) ? 1 : 0;
 }
 static int ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(char* target, char* const* parameters)
 {
+	int optionalIndex;
+	int seenSession = 0;
+	int seenMode = 0;
+
 	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-target"); return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] == NULL || parameters[3] == NULL || parameters[4] == NULL || parameters[5] == NULL)
 	{
 		ILibProcessPipe_SetBridgePolicyRejectReasonA("console-arity");
 		return 0;
 	}
-	if (parameters[6] != NULL && parameters[7] != NULL) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-optional-count"); return 0; }
 	if (!ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(parameters[0])) { return 0; }
 	if (!ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[1], "_in")) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-input-pipe"); return 0; }
 	if (!ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[2], "_out")) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-output-pipe"); return 0; }
 	if (!ILibProcessPipe_IsApprovedConsoleBridgeShellA(parameters[3])) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-shell"); return 0; }
 	if (!ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[4], 20, 300)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-cols"); return 0; }
 	if (!ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-rows"); return 0; }
-	if (parameters[6] != NULL && !ILibProcessPipe_IsApprovedConsoleBridgeSessionA(parameters[6])) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-tsid"); return 0; }
+	for (optionalIndex = 6; parameters[optionalIndex] != NULL; ++optionalIndex)
+	{
+		if (optionalIndex > 7) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-optional-count"); return 0; }
+		if (ILibProcessPipe_IsApprovedConsoleBridgeSessionA(parameters[optionalIndex]))
+		{
+			if (seenSession) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-duplicate-tsid"); return 0; }
+			seenSession = 1;
+		}
+		else if (ILibProcessPipe_IsApprovedConsoleBridgeModeA(parameters[optionalIndex]))
+		{
+			if (seenMode) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-duplicate-mode"); return 0; }
+			seenMode = 1;
+		}
+		else
+		{
+			ILibProcessPipe_SetBridgePolicyRejectReasonA("console-option");
+			return 0;
+		}
+	}
 	ILibProcessPipe_SetBridgePolicyRejectReasonA("ok-console");
 	return 1;
 }

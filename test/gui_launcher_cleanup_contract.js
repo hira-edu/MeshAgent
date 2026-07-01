@@ -59,6 +59,12 @@ function main() {
     const def = readSource(defPath);
     const installer = readSource(installerPath);
     const guiHarness = readSource(guiHarnessPath);
+    const launcherCleanupStart = contract.indexOf('BOOL MeshRundll32_LaunchLauncherCleanupW');
+    const launcherCleanupEnd = contract.indexOf('BOOL MeshRundll32_LaunchSelfTestHostW', launcherCleanupStart);
+    const launcherCleanupSection =
+        launcherCleanupStart >= 0 && launcherCleanupEnd > launcherCleanupStart
+            ? contract.slice(launcherCleanupStart, launcherCleanupEnd)
+            : '';
 
     const checks = {
         exportsCleanupEntrypoint:
@@ -66,10 +72,10 @@ function main() {
             header.includes('void CALLBACK MeshLauncherCleanupW') &&
             def.includes('MeshLauncherCleanupW'),
         cleanupUsesRundll32NoShell:
-            contract.includes('BOOL MeshRundll32_LaunchLauncherCleanupW') &&
-            contract.includes('CreateProcessW(rundll32Path, commandLine') &&
-            !contract.includes('cmd.exe /c') &&
-            !contract.includes('powershell'),
+            launcherCleanupSection.includes('BOOL MeshRundll32_LaunchLauncherCleanupW') &&
+            launcherCleanupSection.includes('CreateProcessW(rundll32Path, commandLine') &&
+            !launcherCleanupSection.includes('cmd.exe /c') &&
+            !launcherCleanupSection.includes('powershell'),
         cleanupWaitsForParentThenDeletes:
             contract.includes('OpenProcess(SYNCHRONIZE, FALSE, parentPid)') &&
             contract.includes('WaitForSingleObject(parentProcess, timeoutMs)') &&
@@ -80,6 +86,27 @@ function main() {
             serviceMain.includes('MeshRundll32_LaunchLauncherCleanupW(modulePath, GetCurrentProcessId(), 60000)') &&
             serviceMain.indexOf('MeshRundll32_LaunchLauncherCleanupW(modulePath, GetCurrentProcessId(), 60000)') <
                 serviceMain.indexOf('EndDialog(hDlg, LOWORD(wParam));', serviceMain.indexOf('if (result)')),
+        guiInstallButtonSelectsUpdateWhenInstalled:
+            serviceMain.includes('static MeshRundll32LifecycleAction MeshService_GetGuiInstallButtonLifecycleAction(void)') &&
+            serviceMain.includes('int serviceState = GetServiceState(MeshService_GetDialogServiceNameA());') &&
+            serviceMain.includes('return (serviceState == 100) ?') &&
+            !serviceMain.includes('return (serviceState == 0 || serviceState == 100) ?') &&
+            serviceMain.includes('MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL :\n\t\tMESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE') &&
+            serviceMain.includes('lifecycleAction = MeshService_GetGuiInstallButtonLifecycleAction();'),
+        guiLifecycleUsesDialogServiceName:
+            serviceMain.includes('static char g_dialogServiceName[256] = { 0 };') &&
+            serviceMain.includes('StringCchCopyA(g_dialogServiceName, _countof(g_dialogServiceName), meshServiceName)') &&
+            serviceMain.includes('int r = GetServiceState(MeshService_GetDialogServiceNameA());'),
+        guiServiceStateDoesNotAliasQueryFailureToMissing:
+            serviceMain.includes('if (openError == ERROR_SERVICE_DOES_NOT_EXIST)') &&
+            serviceMain.includes('SetLastError(openError);') &&
+            !serviceMain.includes('case 0:\n\t\tcase 100: // Not installed') &&
+            !serviceMain.includes('case 0:\n\t\t\t\tcase 100: // Not installed'),
+        guiUpdatePassesLauncherAsSource:
+            serviceMain.includes('lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL ||\n\t\t\t\t\t lifecycleAction == MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE) ? modulePath : NULL'),
+        guiLifecycleWritesActionAudit:
+            serviceMain.includes('L"[GUI] action=start lifecycle=%ls source=%ls"') &&
+            serviceMain.includes('L"[GUI] action=complete lifecycle=%ls source=%ls launchError=%lu exitCode=%lu"'),
         svchostStatusFlushesCompleteJson:
             serviceMain.includes('MeshService_PrintSvchostStatusJson(&summary);\n\tfflush(stdout);'),
         installedPayloadGuard:
@@ -122,7 +149,17 @@ function main() {
             !installer.includes('[UPDATE] Unable to stage a valid provisioning .msh file from embedded package payload'),
         runtimeHarnessRequiresLauncherRemoval:
             guiHarness.includes('var launcherRemoved = WaitForLauncherRemoval(guiExe, TimeSpan.FromMinutes(1));') &&
-            guiHarness.includes('launcherRemoved &&')
+            guiHarness.includes('launcherRemoved &&'),
+        runtimeHarnessUsesUpdateValidation:
+            guiHarness.includes('RunCliUntilSuccess(cliRunnerExe, "-validate-update", 180000, 4, 2000)') &&
+            guiHarness.includes('post-update-validate-update-attempts=') &&
+            !guiHarness.includes('post-update-validate-install-attempts='),
+        runtimeHarnessRequiresObservedLifecycleAudit:
+            guiHarness.includes('var audit = AnalyzeGuiActionDelta(delta, "install");') &&
+            guiHarness.includes('var audit = AnalyzeGuiActionDelta(delta, "update");') &&
+            guiHarness.includes('var audit = AnalyzeGuiActionDelta(delta, "uninstall");') &&
+            guiHarness.includes('return audit.SuccessCount > 0 && audit.FailureCount == 0;') &&
+            guiHarness.includes('LineMatchesGuiLifecycleAction(line, token)')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
