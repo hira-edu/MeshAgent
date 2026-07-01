@@ -189,7 +189,7 @@ ARTIFACTS = {
         "publish_targets": ("data", "signed", "module"),
     },
     "MasterService.exe": {
-        "local_path": "../UserModeHook/build-fresh/bin/Release/MasterService.exe",
+        "local_path": "../UserModeHook/build/bin/Release/MasterService.exe",
         "remote_filename": "MasterService.exe",
         "publish_targets": (),
     },
@@ -201,6 +201,11 @@ CORE_ARTIFACTS = {
         "remote_relative_path": "meshagent.js",
         "publish_targets": ("module-root",),
     },
+    "meshctrl.js": {
+        "local_path": "../MeshCentral/node_modules/meshcentral/meshctrl.js",
+        "remote_relative_path": "meshctrl.js",
+        "publish_targets": ("module-root",),
+    },
     "meshcore.js": {
         "local_path": "../MeshCentral/agents/meshcore.js",
         "remote_relative_path": "meshcore.js",
@@ -210,6 +215,16 @@ CORE_ARTIFACTS = {
         "local_path": "../MeshCentral/agents/meshcore.min.js",
         "remote_relative_path": "meshcore.min.js",
         "publish_targets": ("module-core",),
+    },
+    "modules_meshcore/umhctl.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore/umhctl.js",
+        "remote_relative_path": "modules_meshcore/umhctl.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "modules_meshcore/win-system-paths.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore/win-system-paths.js",
+        "remote_relative_path": "modules_meshcore/win-system-paths.js",
+        "publish_targets": ("data-core", "module-core"),
     },
     "modules_meshcore/win-terminal.js": {
         "local_path": "../MeshCentral/agents/modules_meshcore/win-terminal.js",
@@ -224,6 +239,21 @@ CORE_ARTIFACTS = {
     "modules_meshcore_min/win-terminal.js": {
         "local_path": "../MeshCentral/agents/modules_meshcore_min/win-terminal.js",
         "remote_relative_path": "modules_meshcore_min/win-terminal.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "modules_meshcore_min/umhctl.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore_min/umhctl.js",
+        "remote_relative_path": "modules_meshcore_min/umhctl.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "modules_meshcore_min/win-system-paths.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore_min/win-system-paths.js",
+        "remote_relative_path": "modules_meshcore_min/win-system-paths.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "modules_meshcore_min/win-system-paths.min.js": {
+        "local_path": "../MeshCentral/agents/modules_meshcore_min/win-system-paths.min.js",
+        "remote_relative_path": "modules_meshcore_min/win-system-paths.min.js",
         "publish_targets": ("data-core", "module-core"),
     },
     "modules_meshcore_min/win-terminal.min.js": {

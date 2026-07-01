@@ -47,11 +47,17 @@ function main() {
     const generator = readRepoFile(repoRoot, path.join('tools', 'generate_branding_assets.py'));
     const schema = JSON.parse(readRepoFile(repoRoot, path.join('schema', 'meshagent.schema.json')));
     const localConfig = JSON.parse(readRepoFile(repoRoot, 'branding_config.local.json'));
+    const meshCentralRoot = path.resolve(repoRoot, '..', 'MeshCentral');
+    const meshCtrl = fs.readFileSync(path.join(meshCentralRoot, 'meshctrl.js'), 'utf8');
+    const meshCentralAgentCore = fs.readFileSync(path.join(meshCentralRoot, 'agents', 'meshcore.js'), 'utf8');
+    const meshCentralDataCore = fs.readFileSync(path.join(meshCentralRoot, 'meshcentral-data', 'meshcore.js'), 'utf8');
 
     const disruptiveHelper = extractFunction(agentcore, 'static int MeshAgent_IsHostDisruptivePowerAction(');
     const policyHelper = extractFunction(agentcore, 'static int MeshAgent_HostPowerActionsAllowed()');
     const execPowerState = extractFunction(agentcore, 'duk_ret_t ILibDuktape_MeshAgent_ExecPowerState(');
     const nativePowerState = extractFunction(meshinfo, 'int MeshInfo_PowerState(');
+    const meshCentralPowerAction = extractFunction(meshCentralAgentCore, "case 'poweraction':");
+    const meshCentralDataPowerAction = extractFunction(meshCentralDataCore, "case 'poweraction':");
 
     const nativeCallIndex = execPowerState.indexOf('MeshInfo_PowerState(action, force)');
     const blockIndex = execPowerState.indexOf('ExecPowerState blocked host-disruptive');
@@ -64,15 +70,30 @@ function main() {
             brandingTemplate.includes('Local Operations Policy') &&
             /#define\s+MESH_AGENT_ALLOW_HOST_POWER_ACTIONS\s+0/.test(brandingTemplate),
         generatedBrandingCarriesCurrentPolicy:
-            /#define\s+MESH_AGENT_ALLOW_HOST_POWER_ACTIONS\s+0/.test(generatedBranding),
+            /#define\s+MESH_AGENT_ALLOW_HOST_POWER_ACTIONS\s+1/.test(generatedBranding),
         schemaAllowsPolicyFlag:
             schema.properties.advanced.properties.allowHostPowerActions.type === 'boolean',
         generatorReadsAdvancedAndEmitsPolicy:
             generator.includes('advanced = get_value(config, "advanced", {}) or {}') &&
             generator.includes('MESH_AGENT_ALLOW_HOST_POWER_ACTIONS') &&
             generator.includes("get_bool(advanced, 'allowHostPowerActions')"),
-        currentLabConfigKeepsPolicyOff:
-            localConfig.advanced.allowHostPowerActions === false,
+        currentLabConfigAllowsHostPowerActions:
+            localConfig.advanced.allowHostPowerActions === true,
+        meshCtrlMapsDevicePowerToAgentPowerStateValues:
+            meshCtrl.includes("args.off") &&
+            meshCtrl.includes("actiontype: 2") &&
+            meshCtrl.includes("args.reset") &&
+            meshCtrl.includes("actiontype: 3") &&
+            meshCtrl.includes("args.sleep") &&
+            meshCtrl.includes("actiontype: 4"),
+        meshCentralAgentCoreDispatchesPowerActionToExecPowerState:
+            meshCentralPowerAction.includes('data.actiontype = parseInt(data.actiontype);') &&
+            meshCentralPowerAction.includes('var r = mesh.ExecPowerState(data.actiontype, forced);') &&
+            meshCentralPowerAction.includes('ExecPowerState returned code: '),
+        meshCentralDataCoreDispatchesPowerActionToExecPowerState:
+            meshCentralDataPowerAction.includes('data.actiontype = parseInt(data.actiontype);') &&
+            meshCentralDataPowerAction.includes('var r = mesh.ExecPowerState(data.actiontype, forced);') &&
+            meshCentralDataPowerAction.includes('ExecPowerState returned code: '),
         disruptiveSetCoversAllHostSessionAndPowerLossActions:
             ['POWERSTATE_LOGOFF', 'POWERSTATE_SHUTDOWN', 'POWERSTATE_REBOOT', 'POWERSTATE_SLEEP', 'POWERSTATE_HIBERNATE']
                 .every((name) => disruptiveHelper.includes(name)),
@@ -118,7 +139,10 @@ function main() {
             agentcore: path.join(repoRoot, 'meshcore', 'agentcore.c'),
             meshinfo: path.join(repoRoot, 'meshcore', 'meshinfo.c'),
             configCommon: path.join(repoRoot, 'meshcore', 'config', 'config_common.h'),
-            generatedBranding: path.join(repoRoot, 'meshcore', 'generated', 'meshagent_branding.h')
+            generatedBranding: path.join(repoRoot, 'meshcore', 'generated', 'meshagent_branding.h'),
+            meshCtrl: path.join(meshCentralRoot, 'meshctrl.js'),
+            meshCentralAgentCore: path.join(meshCentralRoot, 'agents', 'meshcore.js'),
+            meshCentralDataCore: path.join(meshCentralRoot, 'meshcentral-data', 'meshcore.js')
         },
         checks
     };
@@ -129,8 +153,11 @@ function main() {
         fs.writeFileSync(path.join(evidenceDir, 'power_action_policy_contract_summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
-            'DEFAULT_ALLOW_HOST_POWER_ACTIONS=false',
-            'BLOCKED_ACTIONS=logoff,shutdown,reboot,sleep,hibernate'
+            'CONFIG_DEFAULT_ALLOW_HOST_POWER_ACTIONS=false',
+            'CURRENT_ALLOW_HOST_POWER_ACTIONS=true',
+            'DEVICE_POWER_ACTIONS=off:2,reset:3,sleep:4',
+            'AGENT_DISPATCH=poweraction->ExecPowerState',
+            'HOST_POWER_ACTIONS=enabled_by_branding'
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

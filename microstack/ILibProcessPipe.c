@@ -361,6 +361,13 @@ static int ILibProcessPipe_IsApprovedLifecycleContractLaunchA(char* target, char
 	if (!ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_LIFECYCLE_A)) { return 0; }
 	return ILibProcessPipe_StringEndsWithA(parameters[1], ".ini");
 }
+static int ILibProcessPipe_IsApprovedUmhHostContractLaunchA(char* target, char* const* parameters)
+{
+	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
+	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] != NULL) { return 0; }
+	if (!ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_UMH_HOST_A)) { return 0; }
+	return ILibProcessPipe_StringEndsWithA(parameters[1], ".ini");
+}
 static int ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(char* target, char* const* parameters)
 {
 	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
@@ -433,6 +440,7 @@ static int ILibProcessPipe_FormatKnownRundll32ModuleEntryForCommandLineA(const c
 	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_LIFECYCLE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_UMH_HOST_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_SELFTEST_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_KVM_PROBE_A, output, outputLen)) { return 1; }
@@ -802,6 +810,11 @@ static int ILibProcessPipe_IsWindowsSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedLifecycleContractLaunchA(target, parameters))
 	{
 		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-lifecycle", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		return 1;
+	}
+	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedUmhHostContractLaunchA(target, parameters))
+	{
+		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-umh-host", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(target, parameters))

@@ -881,29 +881,13 @@ function umhctlProgramDataRoot()
         }
     } catch (e0) { }
 
-    try
-    {
-        var registry = require('win-registry');
-        var commonAppData = registry.QueryKey(registry.HKEY.LocalMachine, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders', 'Common AppData');
-        var normalizedCommonAppData = umhctlNormalizeExecutablePath('' + commonAppData);
-        if (normalizedCommonAppData != null && normalizedCommonAppData.length > 0) { return normalizedCommonAppData.replace(/[\\\/]+$/, ''); }
-    } catch (e1) { }
-
-    if (process && process.env && typeof process.env.ProgramData == 'string' && process.env.ProgramData.length > 0)
-    {
-        var normalizedProgramData = umhctlNormalizeExecutablePath(process.env.ProgramData);
-        if (normalizedProgramData != null && /[\\\/]programdata$/i.test(normalizedProgramData)) { return normalizedProgramData.replace(/[\\\/]+$/, ''); }
-    }
-    if (process && process.env && typeof process.env.SystemDrive == 'string' && /^[a-z]:$/i.test(process.env.SystemDrive))
-    {
-        return process.env.SystemDrive + '\\ProgramData';
-    }
-    return 'C:\\ProgramData';
+    return null;
 }
 
 function umhctlInstallContractPath()
 {
     var programData = umhctlProgramDataRoot();
+    if (programData == null) { return null; }
     return programData.replace(/[\\\/]+$/, '') + '\\UserModeHook\\install_contract.json';
 }
 
@@ -1180,6 +1164,85 @@ function umhctlBuildExecFileArgs(exePath, args)
     if (!Array.isArray(args)) { return argv; }
     for (var i = 0; i < args.length; ++i) { argv.push('' + args[i]); }
     return argv;
+}
+
+function umhctlSanitizeManifestValue(value)
+{
+    return ('' + value).replace(/[\r\n"]/g, ' ');
+}
+
+function umhctlWriteUmhHostManifest(msExePath, commandArgs, timeoutMs)
+{
+    var tempDir = umhctlGetEnvValue('TEMP') || umhctlGetEnvValue('TMP');
+    var randomPart = Math.floor(Math.random() * 0xFFFFFFFF).toString(16);
+    var manifestPath, args, lines, i;
+    if (process.platform != 'win32') { return null; }
+    if (tempDir == null) { throw new Error('TEMP/TMP is unavailable; cannot write MeshUmhHostW manifest.'); }
+    tempDir = ('' + tempDir).replace(/[\\\/]+$/, '');
+    args = umhctlBuildExecFileArgs(msExePath, commandArgs);
+    manifestPath = tempDir + '\\mesh-umh-' + process.pid + '-' + Date.now() + '-' + randomPart + '.ini';
+    lines = [
+        '[UMH]',
+        'ExePath=' + umhctlSanitizeManifestValue(msExePath),
+        'ArgCount=' + args.length,
+        'TimeoutMs=' + (timeoutMs || 120000)
+    ];
+    for (i = 0; i < args.length; ++i)
+    {
+        lines.push('Arg' + i + '=' + umhctlSanitizeManifestValue(args[i]));
+    }
+    lines.push('');
+    fs.writeFileSync(manifestPath, lines.join('\r\n'));
+    return manifestPath;
+}
+
+function umhctlDeleteFileQuietly(path)
+{
+    try { if (path != null) { fs.unlinkSync(path); } } catch (e) { }
+}
+
+function umhctlStartMasterServiceProcess(msExePath, commandArgs, timeoutMs)
+{
+    if (process.platform != 'win32')
+    {
+        return childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, commandArgs));
+    }
+
+    var rundll32Path = umhctlGetWindowsRundll32Path();
+    var serviceDllPath = umhctlGetInstalledAgentServiceDllPath();
+    var manifestPath = null;
+    var proc = null;
+    var cleaned = false;
+    var cleanup = function ()
+    {
+        if (cleaned) { return; }
+        cleaned = true;
+        umhctlDeleteFileQuietly(manifestPath);
+    };
+
+    if (rundll32Path == null) { throw new Error('Windows rundll32 path unavailable for MeshUmhHostW.'); }
+    if (serviceDllPath == null) { throw new Error('installed agent ServiceDll unavailable for MeshUmhHostW.'); }
+    try
+    {
+        if (!fs.existsSync(serviceDllPath)) { throw new Error('installed agent ServiceDll not found at ' + serviceDllPath); }
+    } catch (e) {
+        if (e.message && e.message.indexOf('installed agent ServiceDll not found') == 0) { throw e; }
+        throw new Error('installed agent ServiceDll cannot be inspected at ' + serviceDllPath + ': ' + e.toString());
+    }
+
+    manifestPath = umhctlWriteUmhHostManifest(msExePath, commandArgs, timeoutMs);
+    try
+    {
+        proc = childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshUmhHostW', manifestPath]);
+        proc._umhHostManifestPath = manifestPath;
+    } catch (e) {
+        cleanup();
+        throw e;
+    }
+    try { proc.on('exit', cleanup); } catch (e) { }
+    try { proc.on('close', cleanup); } catch (e) { }
+    try { proc.on('error', cleanup); } catch (e) { }
+    return proc;
 }
 
 function umhctlAttachProcessCompletion(proc, handler)
@@ -2728,7 +2791,7 @@ function umhctlRunMasterServiceStatus(msExePath, sessionid)
     }
     try
     {
-        var statusProc = childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['--status', '--output', 'json']));
+        var statusProc = umhctlStartMasterServiceProcess(msExePath, ['--status', '--output', 'json'], 120000);
         var statusDone = false;
         var statusTimer = setTimeout(function ()
         {
@@ -3079,7 +3142,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                     try
                     {
                         sendConsoleText('umhctl: running --install ...', sessionid);
-                        var instProc = childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['--install', '--silent', '--output', 'json', '--require-install-contract']));
+                        var instProc = umhctlStartMasterServiceProcess(msExePath, ['--install', '--silent', '--output', 'json', '--require-install-contract'], 90000);
                         var instProcDone = false;
                         var finalizeInstallBinary = function (success, installOutput)
                         {
@@ -3271,7 +3334,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                         sendConsoleText('umhctl: stopping existing MasterService before upgrade ...', sessionid);
                         try
                         {
-                            var quitProc = childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['--quit', '--silent', '--wait', '--timeout', '120', '--output', 'json']));
+                            var quitProc = umhctlStartMasterServiceProcess(msExePath, ['--quit', '--silent', '--wait', '--timeout', '120', '--output', 'json'], 180000);
                             var quitDone = false;
                             var quitTimer = setTimeout(function ()
                             {
@@ -3385,7 +3448,7 @@ function umhctlHandleUninstall(sessionid, agentDir, msExePath)
     sendConsoleText('umhctl: stopping service ...', sessionid);
     try
     {
-        var quitProc = childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['--quit', '--silent', '--wait', '--timeout', '120', '--output', 'json']));
+        var quitProc = umhctlStartMasterServiceProcess(msExePath, ['--quit', '--silent', '--wait', '--timeout', '120', '--output', 'json'], 180000);
         var quitDone = false;
         var quitTimer = setTimeout(function ()
         {
@@ -3431,7 +3494,7 @@ function umhctlHandleUninstall(sessionid, agentDir, msExePath)
             {
                 umhctlSetLifecyclePhase('uninstall', 'running uninstall command');
                 sendConsoleText('umhctl: uninstalling ...', sessionid);
-                var uninstProc = childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['--uninstall', '--silent', '--wait', '--timeout', '120', '--output', 'json']));
+                var uninstProc = umhctlStartMasterServiceProcess(msExePath, ['--uninstall', '--silent', '--wait', '--timeout', '120', '--output', 'json'], 240000);
                 var uninstDone = false;
                 var uninstTimer = setTimeout(function ()
                 {

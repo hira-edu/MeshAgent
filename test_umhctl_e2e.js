@@ -81,37 +81,37 @@ function runExecFileArgChecks(results, sandbox) {
 }
 
 function runInstallContractPathChecks(results, sandbox) {
-    const originalProgramData = process.env.ProgramData;
-    const originalSystemDrive = process.env.SystemDrive;
     const originalRequire = sandbox.require;
     try {
         sandbox.require = function (moduleName) {
-            if (moduleName === 'win-registry') { throw new Error('registry unavailable in unit fallback path'); }
+            if (moduleName === 'win-system-paths') { throw new Error('known folder unavailable in unit fail-closed path'); }
             return originalRequire(moduleName);
         };
+        const unavailablePath = sandbox.umhctlInstallContractPath();
+        assert(unavailablePath === null, 'install contract path must fail closed when ProgramData known-folder resolution is unavailable');
 
-        process.env.ProgramData = 'C:\\ProgramData\\MeshAgent';
-        process.env.SystemDrive = 'C:';
+        sandbox.require = function (moduleName) {
+            if (moduleName === 'win-system-paths') { return { programDataDirectory: () => 'C:\\ProgramData' }; }
+            return originalRequire(moduleName);
+        };
         const contractPath = sandbox.umhctlInstallContractPath();
         assert(contractPath === 'C:\\ProgramData\\UserModeHook\\install_contract.json',
-            'install contract path must use common ProgramData, not the MeshAgent-owned subdirectory');
+            'install contract path must use the ProgramData known-folder root');
 
-        process.env.ProgramData = 'D:\\ProgramData';
-        process.env.SystemDrive = 'C:';
+        sandbox.require = function (moduleName) {
+            if (moduleName === 'win-system-paths') { return { programDataDirectory: () => 'D:\\ProgramData' }; }
+            return originalRequire(moduleName);
+        };
         const redirectedPath = sandbox.umhctlInstallContractPath();
         assert(redirectedPath === 'D:\\ProgramData\\UserModeHook\\install_contract.json',
-            'install contract path should keep an already-common ProgramData root');
+            'install contract path should keep the exact ProgramData known-folder root');
     } finally {
         sandbox.require = originalRequire;
-        if (originalProgramData == null) { delete process.env.ProgramData; } else { process.env.ProgramData = originalProgramData; }
-        if (originalSystemDrive == null) { delete process.env.SystemDrive; } else { process.env.SystemDrive = originalSystemDrive; }
     }
-    results.push({ name: 'install-contract-common-programdata-path', ok: true });
+    results.push({ name: 'install-contract-known-folder-path', ok: true });
 }
 
 function runInstallContractWriteSignatureChecks(results, sandbox) {
-    const originalProgramData = process.env.ProgramData;
-    const originalSystemDrive = process.env.SystemDrive;
     const originalRequire = sandbox.require;
     const originalWriteFileSync = sandbox.fs.writeFileSync;
     const tmpRoot = path.join(__dirname, 'test_tmp', 'umh_contract_signature');
@@ -120,7 +120,7 @@ function runInstallContractWriteSignatureChecks(results, sandbox) {
     try {
         fs.rmSync(tmpRoot, { recursive: true, force: true });
         sandbox.require = function (moduleName) {
-            if (moduleName === 'win-registry') { throw new Error('registry unavailable in unit fallback path'); }
+            if (moduleName === 'win-system-paths') { return { programDataDirectory: () => programDataRoot }; }
             return originalRequire(moduleName);
         };
         sandbox.fs.writeFileSync = function (filePath, data) {
@@ -130,8 +130,6 @@ function runInstallContractWriteSignatureChecks(results, sandbox) {
             return originalWriteFileSync.call(this, filePath, data);
         };
 
-        process.env.ProgramData = programDataRoot;
-        process.env.SystemDrive = 'C:';
         const digest = 'a'.repeat(96);
         const result = sandbox.umhctlWriteInstallContractAtomic(
             'standard',
@@ -149,8 +147,6 @@ function runInstallContractWriteSignatureChecks(results, sandbox) {
     } finally {
         sandbox.fs.writeFileSync = originalWriteFileSync;
         sandbox.require = originalRequire;
-        if (originalProgramData == null) { delete process.env.ProgramData; } else { process.env.ProgramData = originalProgramData; }
-        if (originalSystemDrive == null) { delete process.env.SystemDrive; } else { process.env.SystemDrive = originalSystemDrive; }
         fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
 
@@ -385,11 +381,6 @@ function runHeaderContractChecks(results, sandbox) {
     assert(methodPolicy.ok === true, 'methodPolicy should resolve runtime-control headers');
     assert(methodPolicy.headers['x-umh-target-tag'] === 'runtime', 'methodPolicy must not derive pid target headers');
     assert(methodPolicy.headers['x-umh-method-key'] === 'runtime-control', 'methodPolicy must use runtime-control method header');
-
-    const listTargets = sandbox.umhctlResolveControlHeaders({ op: 'ipcBypass', action: 'list-targets' }, 'header-contract-session');
-    assert(listTargets.ok === true, 'ipcBypass list-targets should resolve headers');
-    assert(listTargets.headers['x-umh-target-tag'] === 'runtime', 'ipcBypass list-targets must use runtime target header');
-    assert(listTargets.headers['x-umh-method-key'] === 'ipc-bypass', 'ipcBypass list-targets must use ipc-bypass method header');
 
     results.push({ name: 'control-header-hard-fail', ok: true });
 }

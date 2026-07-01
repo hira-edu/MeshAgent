@@ -266,6 +266,23 @@ function main() {
     assert(!winSystemPaths.includes("process.env['SystemRoot']"), 'win-system-paths must not trust SystemRoot environment for system executable resolution');
     assert(!winSystemPaths.includes('process.env.windir'), 'win-system-paths must not trust windir environment for system executable resolution');
 
+    const meshCentralRoot = path.resolve(repoRoot, '..', 'MeshCentral');
+    if (fs.existsSync(meshCentralRoot)) {
+        [
+            'agents/modules_meshcore/win-system-paths.js',
+            'agents/modules_meshcore_min/win-system-paths.js',
+            'agents/modules_meshcore_min/win-system-paths.min.js'
+        ].forEach((relativePath) => {
+            const deployedWinSystemPaths = fs.readFileSync(path.join(meshCentralRoot, relativePath), 'utf8').replace(/\r\n?/g, '\n');
+            assert(deployedWinSystemPaths.includes("shell32.CreateMethod('SHGetKnownFolderPath');"), `${relativePath} must expose known-folder resolution`);
+            assert(deployedWinSystemPaths.includes('function programDataDirectory()'), `${relativePath} must expose ProgramData known-folder resolution`);
+            assert(deployedWinSystemPaths.includes("'{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}'"), `${relativePath} must use FOLDERID_ProgramData`);
+            assert(!deployedWinSystemPaths.includes("process.env['SystemRoot']"), `${relativePath} must not trust SystemRoot environment fallback`);
+            assert(!deployedWinSystemPaths.includes('process.env.windir'), `${relativePath} must not trust windir environment fallback`);
+            assert(!deployedWinSystemPaths.includes("return (system32Path('cmd.exe'));"), `${relativePath} must not re-enable command-host path helpers`);
+        });
+    }
+
     for (const modulePath of ['modules/umhctl.js', 'modules/RecoveryCore.js']) {
         const moduleSource = readRepoFile(repoRoot, modulePath);
         const activeRootBody = extractFunction(moduleSource, 'function umhctlGetActiveAgentInstallRoot');
@@ -315,6 +332,13 @@ function main() {
         assert(jsUninstallHandlerBody.includes('if (msExePath == null)'), `${modulePath} uninstall handler must reject unavailable MasterService paths`);
         const jsCommandHandlerBody = extractFunction(moduleSource, 'function umhctlHandleCommand');
         assert(jsCommandHandlerBody.includes('if (msPaths.error != null'), `${modulePath} command handler must surface MasterService path resolution errors`);
+        const jsExecArgsBody = extractFunction(moduleSource, 'function umhctlBuildExecFileArgs');
+        assert(!jsExecArgsBody.includes(".split('\\\\').pop()") && jsExecArgsBody.includes("argv.push('' + args[i])"), `${modulePath} execFile args must not prepend the executable basename`);
+        const jsUmhHostBody = extractFunction(moduleSource, 'function umhctlStartMasterServiceProcess');
+        assert(jsUmhHostBody.includes('umhctlGetWindowsRundll32Path()'), `${modulePath} Windows UMH commands must resolve rundll32 through the approved helper`);
+        assert(jsUmhHostBody.includes('umhctlGetInstalledAgentServiceDllPath()'), `${modulePath} Windows UMH commands must run through the installed ServiceDll`);
+        assert(jsUmhHostBody.includes("serviceDllPath + ',MeshUmhHostW'"), `${modulePath} Windows UMH commands must route through MeshUmhHostW`);
+        assert(!moduleSource.includes("childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['"), `${modulePath} must not directly spawn MasterService.exe from Windows UMH command handlers`);
         const jsCaptureStartBody = extractFunction(moduleSource, 'function umhctlStartPreProtectionCaptureProcess');
         assert(jsCaptureStartBody.includes("if (process.platform == 'win32')"), `${modulePath} capture helper must have a Windows rundll32 branch`);
         assert(jsCaptureStartBody.includes("serviceDllPath + ',MeshPreProtectionCaptureW'"), `${modulePath} Windows capture helper must call the rundll32 pre-protection export`);
@@ -325,6 +349,15 @@ function main() {
     const deploy = readRepoFile(repoRoot, 'deploy.py');
     assert(!deploy.includes('r"C:\\ProgramData\\MeshAgent"'), 'deploy must not default to the legacy MeshAgent install root');
     assert(!deploy.includes('r"C:\\ProgramData\\DiagnosticHost"'), 'deploy must not hard-code the DiagnosticHost install root');
+    assert(deploy.includes('"local_path": "../UserModeHook/build/bin/Release/MasterService.exe"'), 'deploy must publish MasterService.exe from the current UserModeHook build output');
+    assert(!deploy.includes('../UserModeHook/build-fresh/bin/Release/MasterService.exe'), 'deploy must not use the stale UserModeHook build-fresh MasterService path');
+
+    const processPipe = readRepoFile(repoRoot, 'microstack/ILibProcessPipe.c');
+    const rundll32Contract = readRepoFile(repoRoot, 'meshservice/rundll32_contract.c');
+    const rundll32Header = readRepoFile(repoRoot, 'meshservice/rundll32_contract.h');
+    assert(processPipe.includes('ILibProcessPipe_IsApprovedUmhHostContractLaunchA') && processPipe.includes('allow-rundll32-umh-host'), 'process policy must explicitly allow the MeshUmhHostW rundll32 contract');
+    assert(rundll32Header.includes('MESH_RUNDLL32_ENTRY_UMH_HOST_W') && rundll32Contract.includes('void CALLBACK MeshUmhHostW'), 'MeshUmhHostW must be declared and implemented as a rundll32 export');
+    assert(rundll32Contract.includes('MeshUmhHost_ArgsAreApproved') && rundll32Contract.includes('_wcsicmp(baseName, L"MasterService.exe")'), 'MeshUmhHostW must validate the MasterService path and exact UMH command shapes');
 
     const report = {
         generatedUtc: new Date().toISOString(),

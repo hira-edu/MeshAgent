@@ -1,17 +1,18 @@
 # MeshAgent UMH Control Deployment Ledger
 
-Last Updated: 2026-04-19
+Last Updated: 2026-07-01
 Owner: Codex + User
 Status: Active ledger for MeshAgent-side UMH operator deployment assumptions and live validation conditions
 
-## 2026-04-19 VPS Move / Pending MasterService Republish
+## 2026-07-01 Live UMH Publication / MasterService Republish
 
 - operator-designated replacement MeshCentral VPS IP: `74.208.52.191`
-- current local `MasterService.exe` publish candidate: `C:\Users\Workstation\Documents\GitHub\UserModeHook\build-fresh\bin\Release\MasterService.exe`
-- current local candidate size: `17749504`
-- current local candidate SHA256: `2324961d0d5ca5df82d43118524f39ae3d3752804bf5757729c2fb526e5ffeb3`
-- deployment status: blocked pending SSH reachability; direct SSH to `74.208.52.191:22` timed out on April 19, 2026
-- consequence: the live published hash recorded below remains the last verified VPS value until the new host accepts SSH and the publish step succeeds
+- current local `MasterService.exe` publish candidate: `C:\Users\Workstation\Documents\GitHub\UserModeHook\build\bin\Release\MasterService.exe`
+- current local candidate size: `19848192`
+- current local candidate SHA384: `1985cdfa65cbdb6f46f138a01ad79e4008930da01a4998ed29a438e6f431b171e1957499af4a36474bfe7a46896c585a`
+- current local candidate SHA256: `75a7fc3581318f8bc5cb1969f440b2abbda7c70cb9646d404616b32f05671e8a`
+- deployment status: SSH and HTTPS publication are reachable on July 1, 2026
+- consequence: `deploy.py` and the dedicated UMH publish script must both publish from the same `build\bin\Release` candidate
 
 ## Scope
 
@@ -24,6 +25,7 @@ This ledger records the MeshAgent-side assumptions that must remain aligned with
 | control pipe and service identity constants | `meshcore/config/umh_defines.h` |
 | shared operator implementation | `modules/umhctl.js` |
 | recovery-core console host | `modules/RecoveryCore.js` |
+| Windows UMH process host | `meshservice/rundll32_contract.c` / `MeshUmhHostW` |
 | VM harness for shared module loading | `test/lib/recoverycore_vm.js` |
 | contract test library | `test/lib/umh_operator_contract.js` |
 | parity and behavior tests | `test_umhctl_e2e.js` |
@@ -102,7 +104,7 @@ Current live MeshCentral publication relevant to the MeshAgent operator layer:
 - `/opt/meshcentral/node_modules/meshcentral/agents/meshcore_diagnostic.js` -> `87c55517a3b50966508d9be03135633d67c40be708b6f9114ceebc764bde3845`
 - `/opt/meshcentral/node_modules/meshcentral/agents/tinycore.js` -> `396e05d2c3559c0740ded904b96da32f6af36f3f80925316fcf3819dd67c674b`
 - all four live publication copies of `umhctl.js` currently hash to `2ce2353fbd72214b0951e6487e39d80bd84c8559e4b821809c24e6c267e37322`
-- the live published `MasterService.exe` currently hashes to `2fa49647a68116ff89e10058f5c67b847989a74d5adea6c72c6a967f4db51482`
+- the live published `MasterService.exe` currently hashes to SHA384 `1985cdfa65cbdb6f46f138a01ad79e4008930da01a4998ed29a438e6f431b171e1957499af4a36474bfe7a46896c585a` and SHA256 `75a7fc3581318f8bc5cb1969f440b2abbda7c70cb9646d404616b32f05671e8a`
 
 Publication note:
 

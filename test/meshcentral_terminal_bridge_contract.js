@@ -131,7 +131,11 @@ function checkMeshCore(source) {
             source.includes('var runCommandSent = false') &&
             source.includes('mesh.cmdchild._meshRunCommandSent = true') &&
             source.includes("var runCommandDoneMarker = '\\x1eMESH_RUN_COMMAND_DONE_'") &&
-            source.includes("[Console]::WriteLine([char]30 + \\'") &&
+            source.includes('function buildRunCommandDoneMarkerCommand(markerBody)') &&
+            source.includes('codes.push(markerBody.charCodeAt(i));') &&
+            source.includes("return (\"[Console]::WriteLine(([char[]]@(\" + codes.join(\",\") + \") -join ''))\");") &&
+            source.includes("mesh.cmdchild.write(data.cmds + '\\r\\n' + buildRunCommandDoneMarkerCommand(runCommandDoneMarkerBody) + '\\r\\nexit\\r\\n');") &&
+            !source.includes("[Console]::WriteLine([char]30 + \\'") &&
             source.includes('if (markerIndex < 0) { markerIndex = replydata.indexOf(runCommandDoneMarkerBody); }') &&
             source.includes('if ((replydata.indexOf(runCommandDoneMarker) >= 0) || (replydata.indexOf(runCommandDoneMarkerBody) >= 0)) { completeRunCommand(); }') &&
             source.includes('function getRunCommandBridgeState()') &&
@@ -155,6 +159,14 @@ function checkMeshCore(source) {
         hasTerminalCloseHelpers:
             source.includes('function terminal_is_closed(term)') &&
             source.includes('function terminal_close_stream(term)')
+    };
+}
+
+function checkMeshCtrl(source) {
+    return {
+        runCommandDefaultUsesShellType:
+            source.includes("type: ((args.powershell) ? 2 : 1)") &&
+            !source.includes("type: ((args.powershell) ? 2 : 0)")
     };
 }
 
@@ -196,6 +208,7 @@ function main() {
     const report = {
         terminalModules: {},
         meshCores: {},
+        meshCtrl: {},
         processPipePolicy: {}
     };
 
@@ -212,6 +225,18 @@ function main() {
         report.meshCores[corePath] = checks;
         for (const [name, passed] of Object.entries(checks)) {
             assert(passed, `${corePath}: ${name} failed`);
+        }
+    }
+
+    const meshCtrlPaths = [
+        '../MeshCentral/meshctrl.js',
+        '../MeshCentral/node_modules/meshcentral/meshctrl.js'
+    ];
+    for (const meshCtrlPath of meshCtrlPaths) {
+        const checks = checkMeshCtrl(read(meshCtrlPath));
+        report.meshCtrl[meshCtrlPath] = checks;
+        for (const [name, passed] of Object.entries(checks)) {
+            assert(passed, `${meshCtrlPath}: ${name} failed`);
         }
     }
 

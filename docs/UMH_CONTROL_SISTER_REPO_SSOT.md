@@ -112,7 +112,8 @@ The current shared implementation also carries mandatory runtime-compatibility g
 
 - timer handles may exist without Node's `unref()` method, so `umhctl` must guard `unref` calls
 - child-process completion must tolerate runtimes that only support one of `exit` or `close`
-- `execFile` argument vectors must not prepend the executable basename
+- Windows UMH service commands must not spawn `MasterService.exe` directly from the agent; they must run through `rundll32.exe <ServiceDll>,MeshUmhHostW <manifest>`
+- non-Windows/direct `execFile` argument vectors must not prepend the executable basename
 
 These are contract-level runtime requirements, not optional workarounds.
 
@@ -124,13 +125,14 @@ As of 2026-04-14:
 - live requested node `Sal` was offline during validation
 - representative live validation used `DESKTOP-TONBSMQ` on core lineage `Apr 9 2026, 3220172809`
 
-## 2026-04-19 VPS Move / Pending MasterService Republish
+## 2026-07-01 Live UMH Publication / MasterService Republish
 
-- operator-designated replacement MeshCentral VPS IP: `74.208.52.191`
-- current local `MasterService.exe` publish candidate: `C:\Users\Workstation\Documents\GitHub\UserModeHook\build-fresh\bin\Release\MasterService.exe`
-- current local candidate size: `17749504`
-- current local candidate SHA256: `2324961d0d5ca5df82d43118524f39ae3d3752804bf5757729c2fb526e5ffeb3`
-- direct SSH to `74.208.52.191:22` timed out on April 19, 2026, so the live publication state above remains the last verified VPS-backed state until the new host accepts SSH
+- active MeshCentral VPS IP: `74.208.52.191`
+- current local `MasterService.exe` publish candidate: `C:\Users\Workstation\Documents\GitHub\UserModeHook\build\bin\Release\MasterService.exe`
+- current local candidate size: `19848192`
+- current local candidate SHA384: `1985cdfa65cbdb6f46f138a01ad79e4008930da01a4998ed29a438e6f431b171e1957499af4a36474bfe7a46896c585a`
+- current local candidate SHA256: `75a7fc3581318f8bc5cb1969f440b2abbda7c70cb9646d404616b32f05671e8a`
+- HTTPS publication currently serves the same SHA384 from `https://high.support/userfiles/hsadmin/MasterService.exe?download=1`
 
 ## Required Sync Rules
 
@@ -145,6 +147,7 @@ If this repo changes any of the following:
 - control pipe name
 - service name or UMH binary name
 - runtime compatibility behavior for timers, child-process completion, or exec-file invocation
+- the `MeshUmhHostW` rundll32 host contract used by Windows UMH lifecycle commands
 
 then the same change tranche must also update:
 

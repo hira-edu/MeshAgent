@@ -54,6 +54,24 @@ int MeshService_RunKvmProbeHostW(const wchar_t* arguments);
 #define MESH_LIFECYCLE_KEY_DESCRIPTION_W L"Description"
 #define MESH_LIFECYCLE_KEY_REQUIRE_CONFIG_W L"RequireConfig"
 
+#define MESH_UMH_SECTION_W L"UMH"
+#define MESH_UMH_KEY_EXE_PATH_W L"ExePath"
+#define MESH_UMH_KEY_ARG_COUNT_W L"ArgCount"
+#define MESH_UMH_KEY_TIMEOUT_MS_W L"TimeoutMs"
+#define MESH_UMH_MAX_ARGS 8
+#define MESH_UMH_MAX_ARG_CCH 128
+#define MESH_UMH_DEFAULT_TIMEOUT_MS 120000UL
+#define MESH_UMH_MAX_TIMEOUT_MS 600000UL
+
+typedef struct MeshUmhHostManifest
+{
+    wchar_t manifestPath[MAX_PATH * 4];
+    wchar_t exePath[MAX_PATH * 4];
+    wchar_t args[MESH_UMH_MAX_ARGS][MESH_UMH_MAX_ARG_CCH];
+    DWORD argCount;
+    DWORD timeoutMs;
+} MeshUmhHostManifest;
+
 static BOOL MeshRundll32_FileExistsW(const wchar_t* path)
 {
     DWORD attrs = INVALID_FILE_ATTRIBUTES;
@@ -221,6 +239,309 @@ static BOOL MeshRundll32_WriteManifestStringW(const wchar_t* manifestPath, const
 {
     if (value == NULL || value[0] == L'\0') { return TRUE; }
     return WritePrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, keyName, value, manifestPath);
+}
+
+static BOOL MeshUmhHost_ValueIsSafeW(const wchar_t* value)
+{
+    if (value == NULL || value[0] == L'\0') { return FALSE; }
+    return (wcschr(value, L'"') == NULL &&
+            wcschr(value, L'\r') == NULL &&
+            wcschr(value, L'\n') == NULL) ? TRUE : FALSE;
+}
+
+static BOOL MeshUmhHost_IsAbsolutePathW(const wchar_t* path)
+{
+    if (!MeshUmhHost_ValueIsSafeW(path)) { return FALSE; }
+    if (((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) &&
+        path[1] == L':' &&
+        (path[2] == L'\\' || path[2] == L'/'))
+    {
+        return TRUE;
+    }
+    return (path[0] == L'\\' && path[1] == L'\\' && path[2] != L'\0') ? TRUE : FALSE;
+}
+
+static const wchar_t* MeshUmhHost_BaseNameW(const wchar_t* path)
+{
+    const wchar_t* slash = NULL;
+    const wchar_t* backslash = NULL;
+    if (path == NULL) { return NULL; }
+    slash = wcsrchr(path, L'/');
+    backslash = wcsrchr(path, L'\\');
+    if (slash == NULL && backslash == NULL) { return path; }
+    if (slash == NULL) { return backslash + 1; }
+    if (backslash == NULL) { return slash + 1; }
+    return (slash > backslash) ? (slash + 1) : (backslash + 1);
+}
+
+static BOOL MeshUmhHost_IsApprovedMasterServicePathW(const wchar_t* path)
+{
+    const wchar_t* baseName = MeshUmhHost_BaseNameW(path);
+    if (!MeshUmhHost_IsAbsolutePathW(path)) { SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY); return FALSE; }
+    if (baseName == NULL || _wcsicmp(baseName, L"MasterService.exe") != 0) { SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY); return FALSE; }
+    if (!MeshRundll32_FileExistsW(path)) { SetLastError(ERROR_FILE_NOT_FOUND); return FALSE; }
+    return TRUE;
+}
+
+static BOOL MeshUmhHost_ArgEquals(const MeshUmhHostManifest* manifest, DWORD index, const wchar_t* expected)
+{
+    if (manifest == NULL || expected == NULL || index >= manifest->argCount || index >= MESH_UMH_MAX_ARGS) { return FALSE; }
+    return (_wcsicmp(manifest->args[index], expected) == 0) ? TRUE : FALSE;
+}
+
+static BOOL MeshUmhHost_ArgsAreApproved(const MeshUmhHostManifest* manifest)
+{
+    if (manifest == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    if (manifest->argCount == 3 &&
+        MeshUmhHost_ArgEquals(manifest, 0, L"--status") &&
+        MeshUmhHost_ArgEquals(manifest, 1, L"--output") &&
+        MeshUmhHost_ArgEquals(manifest, 2, L"json"))
+    {
+        return TRUE;
+    }
+    if (manifest->argCount == 5 &&
+        MeshUmhHost_ArgEquals(manifest, 0, L"--install") &&
+        MeshUmhHost_ArgEquals(manifest, 1, L"--silent") &&
+        MeshUmhHost_ArgEquals(manifest, 2, L"--output") &&
+        MeshUmhHost_ArgEquals(manifest, 3, L"json") &&
+        MeshUmhHost_ArgEquals(manifest, 4, L"--require-install-contract"))
+    {
+        return TRUE;
+    }
+    if (manifest->argCount == 7 &&
+        (MeshUmhHost_ArgEquals(manifest, 0, L"--quit") || MeshUmhHost_ArgEquals(manifest, 0, L"--uninstall")) &&
+        MeshUmhHost_ArgEquals(manifest, 1, L"--silent") &&
+        MeshUmhHost_ArgEquals(manifest, 2, L"--wait") &&
+        MeshUmhHost_ArgEquals(manifest, 3, L"--timeout") &&
+        MeshUmhHost_ArgEquals(manifest, 4, L"120") &&
+        MeshUmhHost_ArgEquals(manifest, 5, L"--output") &&
+        MeshUmhHost_ArgEquals(manifest, 6, L"json"))
+    {
+        return TRUE;
+    }
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    return FALSE;
+}
+
+static BOOL MeshUmhHost_ReadManifestW(const wchar_t* manifestPath, MeshUmhHostManifest* manifestOut)
+{
+    wchar_t countText[32] = {0};
+    wchar_t key[32] = {0};
+    DWORD read = 0;
+    wchar_t* end = NULL;
+    unsigned long parsedCount = 0;
+    unsigned long parsedTimeout = 0;
+    DWORD i = 0;
+
+    if (manifestPath == NULL || manifestPath[0] == L'\0' || manifestOut == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!MeshRundll32_FileExistsW(manifestPath))
+    {
+        SetLastError(ERROR_FILE_NOT_FOUND);
+        return FALSE;
+    }
+
+    ZeroMemory(manifestOut, sizeof(*manifestOut));
+    if (FAILED(StringCchCopyW(manifestOut->manifestPath, _countof(manifestOut->manifestPath), manifestPath)))
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    read = GetPrivateProfileStringW(MESH_UMH_SECTION_W, MESH_UMH_KEY_EXE_PATH_W, L"", manifestOut->exePath, (DWORD)_countof(manifestOut->exePath), manifestPath);
+    if (read == 0 || !MeshUmhHost_IsApprovedMasterServicePathW(manifestOut->exePath)) { return FALSE; }
+
+    read = GetPrivateProfileStringW(MESH_UMH_SECTION_W, MESH_UMH_KEY_ARG_COUNT_W, L"", countText, (DWORD)_countof(countText), manifestPath);
+    if (read == 0) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
+    parsedCount = wcstoul(countText, &end, 10);
+    if (end == NULL || *end != L'\0' || parsedCount > MESH_UMH_MAX_ARGS)
+    {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    manifestOut->argCount = (DWORD)parsedCount;
+    for (i = 0; i < manifestOut->argCount; ++i)
+    {
+        if (FAILED(StringCchPrintfW(key, _countof(key), L"Arg%lu", (unsigned long)i)))
+        {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+        read = GetPrivateProfileStringW(MESH_UMH_SECTION_W, key, L"", manifestOut->args[i], (DWORD)_countof(manifestOut->args[i]), manifestPath);
+        if (read == 0 || !MeshUmhHost_ValueIsSafeW(manifestOut->args[i]))
+        {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+    }
+    if (!MeshUmhHost_ArgsAreApproved(manifestOut)) { return FALSE; }
+
+    read = GetPrivateProfileStringW(MESH_UMH_SECTION_W, MESH_UMH_KEY_TIMEOUT_MS_W, L"", countText, (DWORD)_countof(countText), manifestPath);
+    if (read == 0)
+    {
+        manifestOut->timeoutMs = MESH_UMH_DEFAULT_TIMEOUT_MS;
+    }
+    else
+    {
+        parsedTimeout = wcstoul(countText, &end, 10);
+        if (end == NULL || *end != L'\0' || parsedTimeout < 1000UL || parsedTimeout > MESH_UMH_MAX_TIMEOUT_MS)
+        {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+        manifestOut->timeoutMs = (DWORD)parsedTimeout;
+    }
+    return TRUE;
+}
+
+static BOOL MeshUmhHost_GetWorkingDirectoryW(const wchar_t* exePath, wchar_t* workDir, size_t workDirCch)
+{
+    wchar_t* slash = NULL;
+    wchar_t* backslash = NULL;
+    wchar_t* cut = NULL;
+    if (exePath == NULL || workDir == NULL || workDirCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    if (FAILED(StringCchCopyW(workDir, workDirCch, exePath))) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
+    slash = wcsrchr(workDir, L'/');
+    backslash = wcsrchr(workDir, L'\\');
+    if (slash == NULL) { cut = backslash; }
+    else if (backslash == NULL) { cut = slash; }
+    else { cut = (slash > backslash) ? slash : backslash; }
+    if (cut == NULL || cut == workDir) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    *cut = L'\0';
+    return TRUE;
+}
+
+static BOOL MeshUmhHost_AppendQuotedCommandLineArgumentW(wchar_t* output, size_t outputCch, size_t* offset, const wchar_t* value)
+{
+    if (output == NULL || outputCch == 0 || offset == NULL || !MeshUmhHost_ValueIsSafeW(value))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (*offset > 0)
+    {
+        if (*offset + 1 >= outputCch) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
+        output[(*offset)++] = L' ';
+        output[*offset] = L'\0';
+    }
+    if (FAILED(StringCchPrintfW(output + *offset, outputCch - *offset, L"\"%ls\"", value)))
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    *offset += wcslen(output + *offset);
+    return TRUE;
+}
+
+static BOOL MeshUmhHost_BuildCommandLineW(const MeshUmhHostManifest* manifest, wchar_t* commandLine, size_t commandLineCch)
+{
+    DWORD i = 0;
+    size_t offset = 0;
+    if (manifest == NULL || commandLine == NULL || commandLineCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    commandLine[0] = L'\0';
+    if (!MeshUmhHost_AppendQuotedCommandLineArgumentW(commandLine, commandLineCch, &offset, manifest->exePath)) { return FALSE; }
+    for (i = 0; i < manifest->argCount; ++i)
+    {
+        if (!MeshUmhHost_AppendQuotedCommandLineArgumentW(commandLine, commandLineCch, &offset, manifest->args[i])) { return FALSE; }
+    }
+    return TRUE;
+}
+
+static void MeshUmhHost_WriteStderrW(const wchar_t* message, DWORD errorCode)
+{
+    fwprintf(stderr, L"MeshUmhHostW: %ls (error=%lu)\r\n", message != NULL ? message : L"failed", (unsigned long)errorCode);
+    fflush(stderr);
+}
+
+static DWORD MeshUmhHost_RunManifestCommandW(const MeshUmhHostManifest* manifest)
+{
+    STARTUPINFOW startupInfo;
+    PROCESS_INFORMATION processInfo;
+    wchar_t commandLine[MAX_PATH * 8] = {0};
+    wchar_t workingDirectory[MAX_PATH * 4] = {0};
+    HANDLE job = NULL;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo;
+    DWORD waitResult = WAIT_FAILED;
+    DWORD exitCode = ERROR_GEN_FAILURE;
+
+    if (manifest == NULL) { return ERROR_INVALID_PARAMETER; }
+    ZeroMemory(&startupInfo, sizeof(startupInfo));
+    ZeroMemory(&processInfo, sizeof(processInfo));
+    ZeroMemory(&jobInfo, sizeof(jobInfo));
+    startupInfo.cb = sizeof(startupInfo);
+    startupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    startupInfo.wShowWindow = SW_HIDE;
+    startupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+
+    if (!MeshUmhHost_BuildCommandLineW(manifest, commandLine, _countof(commandLine)) ||
+        !MeshUmhHost_GetWorkingDirectoryW(manifest->exePath, workingDirectory, _countof(workingDirectory)))
+    {
+        exitCode = GetLastError();
+        MeshUmhHost_WriteStderrW(L"failed to build command line", exitCode);
+        return exitCode;
+    }
+
+    job = CreateJobObjectW(NULL, NULL);
+    if (job != NULL)
+    {
+        jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jobInfo, sizeof(jobInfo)))
+        {
+            CloseHandle(job);
+            job = NULL;
+        }
+    }
+
+    if (!CreateProcessW(
+        manifest->exePath,
+        commandLine,
+        NULL,
+        NULL,
+        TRUE,
+        CREATE_NO_WINDOW,
+        NULL,
+        workingDirectory,
+        &startupInfo,
+        &processInfo))
+    {
+        exitCode = GetLastError();
+        MeshUmhHost_WriteStderrW(L"CreateProcessW failed for MasterService.exe", exitCode);
+        if (job != NULL) { CloseHandle(job); }
+        return exitCode;
+    }
+
+    if (job != NULL && !AssignProcessToJobObject(job, processInfo.hProcess))
+    {
+        CloseHandle(job);
+        job = NULL;
+    }
+
+    waitResult = WaitForSingleObject(processInfo.hProcess, manifest->timeoutMs);
+    if (waitResult == WAIT_TIMEOUT)
+    {
+        TerminateProcess(processInfo.hProcess, ERROR_TIMEOUT);
+        exitCode = ERROR_TIMEOUT;
+        MeshUmhHost_WriteStderrW(L"MasterService.exe timed out", exitCode);
+    }
+    else if (waitResult == WAIT_OBJECT_0)
+    {
+        if (!GetExitCodeProcess(processInfo.hProcess, &exitCode)) { exitCode = GetLastError(); }
+    }
+    else
+    {
+        exitCode = GetLastError();
+        TerminateProcess(processInfo.hProcess, exitCode);
+        MeshUmhHost_WriteStderrW(L"wait failed for MasterService.exe", exitCode);
+    }
+
+    if (processInfo.hThread != NULL) { CloseHandle(processInfo.hThread); }
+    if (processInfo.hProcess != NULL) { CloseHandle(processInfo.hProcess); }
+    if (job != NULL) { CloseHandle(job); }
+    return exitCode;
 }
 
 static BOOL MeshRundll32_CreateDirectoryIfMissingW(const wchar_t* path)
@@ -1414,6 +1735,49 @@ cleanup:
     if (processInfo.hProcess != NULL) { CloseHandle(processInfo.hProcess); }
     if (pseudoConsole != NULL && conptyApi.ClosePseudoConsoleFn != NULL) { conptyApi.ClosePseudoConsoleFn(pseudoConsole); }
     return exitCode;
+}
+
+void CALLBACK MeshUmhHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
+{
+    wchar_t tail[MAX_PATH * 6] = {0};
+    wchar_t manifestPath[MAX_PATH * 4] = {0};
+    MeshUmhHostManifest manifest;
+    DWORD exitCode = ERROR_GEN_FAILURE;
+
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(hinstDLL);
+    UNREFERENCED_PARAMETER(nCmdShow);
+
+    ZeroMemory(&manifest, sizeof(manifest));
+
+    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_UMH_HOST_W, lpCmdLine, tail, _countof(tail)) ||
+        !MeshRundll32_CopyFirstTokenW(tail, manifestPath, _countof(manifestPath)))
+    {
+        exitCode = GetLastError();
+        if (exitCode == ERROR_SUCCESS) { exitCode = ERROR_INVALID_PARAMETER; }
+        MeshUmhHost_WriteStderrW(L"missing UMH manifest path", exitCode);
+        ExitProcess(exitCode);
+    }
+
+    if (!MeshUmhHost_ReadManifestW(manifestPath, &manifest))
+    {
+        exitCode = GetLastError();
+        if (exitCode == ERROR_SUCCESS) { exitCode = ERROR_INVALID_DATA; }
+        MeshUmhHost_WriteStderrW(L"failed to read or validate UMH manifest", exitCode);
+        ExitProcess(exitCode);
+    }
+
+    Stealth_EnsureLoggingDefaults();
+    Stealth_LogInstallEvent(L"[UMH_HOST] Starting exe=%ls arg0=%ls manifest=%ls",
+        manifest.exePath,
+        manifest.argCount > 0 ? manifest.args[0] : L"(none)",
+        manifest.manifestPath);
+    exitCode = MeshUmhHost_RunManifestCommandW(&manifest);
+    Stealth_LogInstallEvent(L"[UMH_HOST] Completed exe=%ls arg0=%ls exit=%lu",
+        manifest.exePath,
+        manifest.argCount > 0 ? manifest.args[0] : L"(none)",
+        (unsigned long)exitCode);
+    ExitProcess(exitCode);
 }
 
 void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)

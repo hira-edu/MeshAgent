@@ -60,6 +60,8 @@ const requiredSnippets = [
     '"MeshService64.msh": {',
     '"MeshService.msh": {',
     '"WinDiagnosticHost.msh": {',
+    '"MasterService.exe": {',
+    '"local_path": "../UserModeHook/build/bin/Release/MasterService.exe"',
     '"publish_targets": ("data", "signed", "module")',
     '"publish_targets": ("data",)',
     'WINDOWS_BRANDING_DEFAULTS = load_windows_branding_defaults()',
@@ -82,7 +84,25 @@ const requiredSnippets = [
     '"module-root": f"{MESHCENTRAL_BASE}/node_modules/meshcentral"',
     '"meshagent.js": {',
     '"local_path": "../MeshCentral/node_modules/meshcentral/meshagent.js"',
-    '"publish_targets": ("module-root",)'
+    '"publish_targets": ("module-root",)',
+    '"meshctrl.js": {',
+    '"local_path": "../MeshCentral/node_modules/meshcentral/meshctrl.js"',
+    '"remote_relative_path": "meshctrl.js"',
+    '"modules_meshcore/umhctl.js": {',
+    '"local_path": "../MeshCentral/agents/modules_meshcore/umhctl.js"',
+    '"remote_relative_path": "modules_meshcore/umhctl.js"',
+    '"modules_meshcore/win-system-paths.js": {',
+    '"local_path": "../MeshCentral/agents/modules_meshcore/win-system-paths.js"',
+    '"remote_relative_path": "modules_meshcore/win-system-paths.js"',
+    '"modules_meshcore_min/umhctl.js": {',
+    '"local_path": "../MeshCentral/agents/modules_meshcore_min/umhctl.js"',
+    '"remote_relative_path": "modules_meshcore_min/umhctl.js"',
+    '"modules_meshcore_min/win-system-paths.js": {',
+    '"local_path": "../MeshCentral/agents/modules_meshcore_min/win-system-paths.js"',
+    '"remote_relative_path": "modules_meshcore_min/win-system-paths.js"',
+    '"modules_meshcore_min/win-system-paths.min.js": {',
+    '"local_path": "../MeshCentral/agents/modules_meshcore_min/win-system-paths.min.js"',
+    '"remote_relative_path": "modules_meshcore_min/win-system-paths.min.js"'
 ];
 
 for (const snippet of requiredSnippets) {
@@ -93,6 +113,7 @@ assert(!source.includes('r"C:\\ProgramData\\MeshAgent"'), 'deploy.py must not de
 assert(!source.includes('r"%ProgramData%\\MeshAgent\\state\\rundll32-lifecycle"'), 'deploy.py must not default lifecycle state to the legacy MeshAgent install root');
 assert(!source.includes('LOCAL_REPO / "branding_config.json"'), 'deploy.py must not fall back to the generic branding template for production install paths');
 assert(!source.includes('r"C:\\ProgramData\\DiagnosticHost"'), 'deploy.py must not hard-code the DiagnosticHost install root as a fallback');
+assert(!source.includes('../UserModeHook/build-fresh/bin/Release/MasterService.exe'), 'deploy.py must not publish MasterService.exe from the stale build-fresh path');
 
 for (const functionName of ['collect_remote_file_metadata', 'collect_remote_publish_snapshot']) {
     const body = extractFunction(functionName);
@@ -131,7 +152,8 @@ if (evidenceDir) {
         `DEPLOY_PATH=${deployPath}`,
         'WINDOWS_INSTALL_ROOT_DEFAULT_SOURCE=branding_config.local.json',
         'LEGACY_MESHAGENT_REMOTE_UPDATE_DEFAULT=false',
-        'GENERIC_TEMPLATE_INSTALL_PATH_FALLBACK=false'
+        'GENERIC_TEMPLATE_INSTALL_PATH_FALLBACK=false',
+        'MESHCTRL_MODULE_ROOT_PUBLISH=true'
     ].join('\n') + '\n');
 } else {
     process.stdout.write(JSON.stringify(report, null, 2) + '\n');

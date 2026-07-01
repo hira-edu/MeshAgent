@@ -63,7 +63,7 @@ Migration note (2026-04-19):
 | Agent policy x64 | `meshservice/x64/StealthLab/MeshService-2022.msh` | `MeshService64.msh` |
 | Agent policy x86 | `meshservice/StealthLab/MeshService-2022.msh` | `MeshService.msh` |
 | Shared provisioning policy | `WinDiagnosticHost.msh` | `WinDiagnosticHost.msh` |
-| UMH public payload | `../UserModeHook/build-fresh/bin/Release/MasterService.exe` | `MasterService.exe` |
+| UMH public payload | `../UserModeHook/build/bin/Release/MasterService.exe` | `MasterService.exe` |
 
 **Important:** The Visual Studio build output is named `MeshService-2022.exe`. During staging/deploy it is **renamed** to `MeshService64.exe` to match the filename MeshCentral expects when serving agents to endpoints.
 
@@ -214,7 +214,7 @@ Operator-surface authority note:
 
 ### How It Works
 
-1. `deploy.py stage` uploads `MasterService.exe` (from `../UserModeHook/build-fresh/bin/Release/`) to the server staging area
+1. `deploy.py stage` uploads `MasterService.exe` (from `../UserModeHook/build/bin/Release/`) to the server staging area
 2. `deploy.py deploy` publishes it to the public userfiles directory
 3. Agents download it on-demand via `umhctl install --url ...`
 4. Native MeshAgent `-fullinstall`, `-fullupdate`, `-fulluninstall`, GUI install/update, and server auto-update do not stage or manage `MasterService.exe`
@@ -232,7 +232,7 @@ The MeshAgent shared operator module `modules/umhctl.js` is consumed by `modules
 | `umhctl install --url <url>` | Downloads from a custom URL instead of server |
 | `umhctl uninstall` | Stops and uninstalls `AdvancedHookService` |
 | `umhctl status` | Sends `{"op":"status"}` to UMH control pipe |
-| `umhctl status --service` | Runs `MasterService.exe --status --output json` |
+| `umhctl status --service` | Runs `MasterService.exe --status --output json` through the approved `rundll32.exe <ServiceDll>,MeshUmhHostW <manifest>` contract |
 | `umhctl listProcesses` | Sends `{"op":"listProcesses"}` to control pipe |
 | `umhctl getFlowContract` / `getCapabilities` | Sends control-contract and capability queries to the control pipe |
 | `umhctl getPolicy` / `getConfig` | Sends read-only policy/config queries to the control pipe |

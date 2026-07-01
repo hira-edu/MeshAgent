@@ -809,7 +809,11 @@ function main() {
             sources.meshcentralCore.includes('var runCommandSent = false') &&
             sources.meshcentralCore.includes('mesh.cmdchild._meshRunCommandSent = true') &&
             sources.meshcentralCore.includes("var runCommandDoneMarker = '\\x1eMESH_RUN_COMMAND_DONE_'") &&
-            sources.meshcentralCore.includes("[Console]::WriteLine([char]30 + \\'") &&
+            sources.meshcentralCore.includes('function buildRunCommandDoneMarkerCommand(markerBody)') &&
+            sources.meshcentralCore.includes('codes.push(markerBody.charCodeAt(i));') &&
+            sources.meshcentralCore.includes("return (\"[Console]::WriteLine(([char[]]@(\" + codes.join(\",\") + \") -join ''))\");") &&
+            sources.meshcentralCore.includes("mesh.cmdchild.write(data.cmds + '\\r\\n' + buildRunCommandDoneMarkerCommand(runCommandDoneMarkerBody) + '\\r\\nexit\\r\\n');") &&
+            !sources.meshcentralCore.includes("[Console]::WriteLine([char]30 + \\'") &&
             sources.meshcentralCore.includes('if (markerIndex < 0) { markerIndex = replydata.indexOf(runCommandDoneMarkerBody); }') &&
             sources.meshcentralCore.includes('if ((replydata.indexOf(runCommandDoneMarker) >= 0) || (replydata.indexOf(runCommandDoneMarkerBody) >= 0)) { completeRunCommand(); }') &&
             sources.meshcentralCore.includes('function getRunCommandBridgeState()') &&
