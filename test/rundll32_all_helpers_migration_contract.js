@@ -284,6 +284,8 @@ function main() {
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[2], "_out")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeShellA(parameters[3])') &&
             sources.processPipe.includes('return (value != NULL && strcmp(value, "powershell") == 0) ? 1 : 0;') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeModeA') &&
+            sources.processPipe.includes('strcmp(value, "mode=exec") == 0') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[4], 20, 300)') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&
@@ -792,6 +794,12 @@ function main() {
             sources.rundll32ContractImpl.includes('MeshConsoleBridge_CreateShellProcessWithRetryW') &&
             sources.rundll32ContractImpl.includes('Shell spawn recovered inside same rundll32') &&
             sources.rundll32ContractImpl.includes('Falling back to bridge token inside same rundll32 after session spawn denial') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunExecW') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_CreateRedirectedShellProcessWithRetryW') &&
+            sources.rundll32ContractImpl.includes('CreateProcessAsUserW(userToken, shellPath, commandLine, NULL, NULL, TRUE') &&
+            sources.rundll32ContractImpl.includes('CreateProcessW(shellPath, commandLine, NULL, NULL, TRUE') &&
+            sources.rundll32ContractImpl.includes(' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -') &&
+            sources.rundll32ContractImpl.includes('_wcsicmp(optionText, L"mode=exec") == 0') &&
             sources.terminal.includes("if (stream.createEvent) { stream.createEvent('ready'); }") &&
             sources.terminal.includes('stream.isBridgeReady = function isBridgeReady()') &&
             sources.terminal.includes('stream._meshTerminalBridgeLaunched = false') &&
@@ -805,31 +813,28 @@ function main() {
             sources.terminal.includes('stream._meshTerminalOutputChunks = 0') &&
             sources.terminal.includes('stream._meshTerminalOutputBytes = 0') &&
             sources.terminal.includes("this.stream.emit('ready')") &&
-            sources.meshcentralCore.includes('function sendRunCommandToTerminal()') &&
-            sources.meshcentralCore.includes('var runCommandSent = false') &&
-            sources.meshcentralCore.includes('mesh.cmdchild._meshRunCommandSent = true') &&
-            sources.meshcentralCore.includes("var runCommandDoneMarker = '\\x1eMESH_RUN_COMMAND_DONE_'") &&
-            sources.meshcentralCore.includes('function buildRunCommandDoneMarkerCommand(markerBody)') &&
-            sources.meshcentralCore.includes('codes.push(markerBody.charCodeAt(i));') &&
-            sources.meshcentralCore.includes("return (\"[Console]::WriteLine(([char[]]@(\" + codes.join(\",\") + \") -join ''))\");") &&
-            sources.meshcentralCore.includes("mesh.cmdchild.write(data.cmds + '\\r\\n' + buildRunCommandDoneMarkerCommand(runCommandDoneMarkerBody) + '\\r\\nexit\\r\\n');") &&
-            !sources.meshcentralCore.includes("[Console]::WriteLine([char]30 + \\'") &&
-            sources.meshcentralCore.includes('if (markerIndex < 0) { markerIndex = replydata.indexOf(runCommandDoneMarkerBody); }') &&
-            sources.meshcentralCore.includes('if ((replydata.indexOf(runCommandDoneMarker) >= 0) || (replydata.indexOf(runCommandDoneMarkerBody) >= 0)) { completeRunCommand(); }') &&
+            sources.terminal.includes("this.mode = (mode == 'exec') ? 'exec' : 'pty';") &&
+            sources.terminal.includes("if (this.mode == 'exec') { args.push('mode=exec'); }") &&
+            sources.terminal.includes('ConsoleBridgeTerminal.prototype.closeInput = function closeInput()') &&
+            sources.terminal.includes('windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand') &&
+            sources.meshcentralCore.includes("var runMethod = (data.runAsUser > 0) ? 'RunPowerShellCommandAsUser' : 'RunPowerShellCommand';") &&
+            sources.meshcentralCore.includes("mesh.cmdchild.write(commandText + '\\r\\n');") &&
+            sources.meshcentralCore.includes('if (mesh.cmdchild.closeInput) { mesh.cmdchild.closeInput(); }') &&
+            sources.meshcentralCore.includes('function completeRunCommand()') &&
+            sources.meshcentralCore.includes('function appendRunCommandOutput(c)') &&
+            !sources.meshcentralCore.includes('MESH_RUN_COMMAND_DONE') &&
+            !sources.meshcentralCore.includes('buildRunCommandDoneMarkerCommand') &&
+            !sources.meshcentralCore.includes('[Console]::WriteLine') &&
             sources.meshcentralCore.includes('function getRunCommandBridgeState()') &&
             sources.meshcentralCore.includes('getRunCommandBridgeState()') &&
+            sources.meshcentralCore.includes("mode=' + mesh.cmdchild._meshTerminalMode") &&
             sources.meshcentralCore.includes("writes=' + mesh.cmdchild._meshTerminalWriteCount") &&
             sources.meshcentralCore.includes("lastWriteBytes=' + mesh.cmdchild._meshTerminalLastWriteBytes") &&
-            sources.meshcentralCore.includes("lastChunkType=' + mesh.cmdchild._meshTerminalLastChunkType") &&
-            sources.meshcentralCore.includes("lastChunkLength=' + mesh.cmdchild._meshTerminalLastChunkLength") &&
-            sources.meshcentralCore.includes("lastChunkTextLength=' + mesh.cmdchild._meshTerminalLastChunkTextLength") &&
             sources.meshcentralCore.includes("outputChunks=' + mesh.cmdchild._meshTerminalOutputChunks") &&
             sources.meshcentralCore.includes("outputBytes=' + mesh.cmdchild._meshTerminalOutputBytes") &&
-            sources.meshcentralCore.includes('sendRunCommandToTerminal();') &&
             !sources.meshcentralCore.includes('function sendRunCommandWhenReady()') &&
             !sources.meshcentralCore.includes('setTimeout(sendRunCommandWhenReady, 25);') &&
             !sources.meshcentralCore.includes("mesh.cmdchild.once('ready'") &&
-            sources.meshcentralCore.includes("var runMethod = 'StartPowerShell';") &&
             sources.meshcentralCore.includes("mesh.cmdchild.descriptorMetadata = 'UserCommandsPowerShell';") &&
             sources.terminal.includes("var SHELL_COMMAND = 'powershell';") &&
             sources.terminal.includes("var SHELL_AUTOMATION = 'powershell';") &&

@@ -27,7 +27,6 @@ var stageRoot = Path.Combine(options.EvidenceDir, "stage");
 Directory.CreateDirectory(stageRoot);
 
 var guiLogPath = options.GuiLogPath;
-var guiLogOffset = File.Exists(guiLogPath) ? new FileInfo(guiLogPath).Length : 0L;
 var results = new List<ScenarioResult>();
 var exitCode = 1;
 var fatalMessage = string.Empty;
@@ -146,7 +145,7 @@ ScenarioResult TestInstallFlow()
 {
     EnsureUninstalled("install_flow");
     var guiExe = PrepareGuiStage("install_flow");
-    var startOffset = guiLogOffset;
+    var logOffsets = CaptureLifecycleLogOffsets();
 
     using var session = LaunchDialog(guiExe);
     using var watch = StartUnexpectedDialogWatch(session.Process.Id, session.DialogHandle, "install_flow");
@@ -158,9 +157,11 @@ ScenarioResult TestInstallFlow()
     var svchostStatus = RunCli(cliRunnerExe, "-svchost-status", 180000);
     var installedExe = ResolveInstalledAgentExeFromStatus(svchostStatus);
     var installNodeId = WaitForNodeIdConvergence("install_flow", installedExe);
-    var delta = ReadGuiLogDelta(startOffset);
-    var audit = AnalyzeGuiActionDelta(delta, "-fullinstall");
-    var auditHealthy = audit.FailureCount == 0;
+    var delta = ReadLifecycleLogDelta(logOffsets);
+    var audit = AnalyzeGuiActionDelta(delta, "install");
+    var auditHealthy = IsGuiAuditHealthy(audit);
+    var sourceDllAudit = AnalyzeGuiSourceDllAudit(audit, guiExe);
+    var sourceDllAuditHealthy = IsGuiSourceDllAuditHealthy(sourceDllAudit);
 
     var result = new ScenarioResult("install_flow")
     {
@@ -170,6 +171,7 @@ ScenarioResult TestInstallFlow()
             launcherRemoved &&
             !string.IsNullOrWhiteSpace(installNodeId.RegistryNodeId) &&
             auditHealthy &&
+            sourceDllAuditHealthy &&
             !watch.HasUnexpectedDialogs
     };
     AddUnexpectedDialogNotes(result, watch);
@@ -185,8 +187,10 @@ ScenarioResult TestInstallFlow()
         $"gui-action-records={audit.RecordCount}",
         $"gui-action-successes={audit.SuccessCount}",
         $"gui-action-failures={audit.FailureCount}",
+        $"gui-source-dll-expected={sourceDllAudit.ExpectedSourceDll ?? "(none)"}",
+        $"gui-source-dll-audit-healthy={sourceDllAuditHealthy}",
         $"gui-action-lines={Trim(string.Join(" || ", audit.Lines))}",
-        $"gui-log={Trim(delta)}");
+        $"lifecycle-log={Trim(delta)}");
 }
 
 ScenarioResult TestInstalledIdle()
@@ -224,7 +228,7 @@ ScenarioResult TestUpdateFlow()
     var installedExeBefore = ResolveInstalledAgentExe();
     var beforeNodeId = WaitForNodeIdConvergence("update_flow_before", installedExeBefore).RegistryNodeId;
     var guiExe = PrepareGuiStage("update_flow");
-    var startOffset = guiLogOffset;
+    var logOffsets = CaptureLifecycleLogOffsets();
 
     using var session = LaunchDialog(guiExe);
     using var watch = StartUnexpectedDialogWatch(session.Process.Id, session.DialogHandle, "update_flow");
@@ -232,13 +236,15 @@ ScenarioResult TestUpdateFlow()
     CompleteSessionAfterAction(session, watch, TimeSpan.FromMinutes(10));
 
     var launcherRemoved = WaitForLauncherRemoval(guiExe, TimeSpan.FromMinutes(1));
-    var validateUpdate = RunCliUntilSuccess(cliRunnerExe, "-validate-install", 180000, 4, 2000);
+    var validateUpdate = RunCliUntilSuccess(cliRunnerExe, "-validate-update", 180000, 4, 2000);
     var svchostStatus = RunCli(cliRunnerExe, "-svchost-status", 180000);
     var installedExeAfter = ResolveInstalledAgentExeFromStatus(svchostStatus);
     var afterNodeId = WaitForNodeIdConvergence("update_flow_after", installedExeAfter).RegistryNodeId;
-    var delta = ReadGuiLogDelta(startOffset);
-    var audit = AnalyzeGuiActionDelta(delta, "-fullupdate", "-fullinstall");
-    var auditHealthy = audit.FailureCount == 0;
+    var delta = ReadLifecycleLogDelta(logOffsets);
+    var audit = AnalyzeGuiActionDelta(delta, "update");
+    var auditHealthy = IsGuiAuditHealthy(audit);
+    var sourceDllAudit = AnalyzeGuiSourceDllAudit(audit, guiExe);
+    var sourceDllAuditHealthy = IsGuiSourceDllAuditHealthy(sourceDllAudit);
 
     var result = new ScenarioResult("update_flow")
     {
@@ -249,6 +255,7 @@ ScenarioResult TestUpdateFlow()
             !string.IsNullOrWhiteSpace(beforeNodeId) &&
             string.Equals(beforeNodeId, afterNodeId, StringComparison.Ordinal) &&
             auditHealthy &&
+            sourceDllAuditHealthy &&
             !watch.HasUnexpectedDialogs
     };
     AddUnexpectedDialogNotes(result, watch);
@@ -258,22 +265,24 @@ ScenarioResult TestUpdateFlow()
         $"node-before={beforeNodeId}",
         $"node-after={afterNodeId}",
         DescribeCommandResult(validateUpdate.Command),
-        $"post-update-validate-install-attempts={validateUpdate.Attempts}",
+        $"post-update-validate-update-attempts={validateUpdate.Attempts}",
         DescribeCommandResult(svchostStatus),
         $"launcher-removed={launcherRemoved}",
         $"gui-audit-healthy={auditHealthy}",
         $"gui-action-records={audit.RecordCount}",
         $"gui-action-successes={audit.SuccessCount}",
         $"gui-action-failures={audit.FailureCount}",
+        $"gui-source-dll-expected={sourceDllAudit.ExpectedSourceDll ?? "(none)"}",
+        $"gui-source-dll-audit-healthy={sourceDllAuditHealthy}",
         $"gui-action-lines={Trim(string.Join(" || ", audit.Lines))}",
-        $"gui-log={Trim(delta)}");
+        $"lifecycle-log={Trim(delta)}");
 }
 
 ScenarioResult TestUninstallFlow()
 {
     EnsureInstalled("uninstall_flow");
     var guiExe = PrepareGuiStage("uninstall_flow");
-    var startOffset = guiLogOffset;
+    var logOffsets = CaptureLifecycleLogOffsets();
 
     using var session = LaunchDialog(guiExe);
     using var watch = StartUnexpectedDialogWatch(session.Process.Id, session.DialogHandle, "uninstall_flow");
@@ -281,9 +290,9 @@ ScenarioResult TestUninstallFlow()
     CompleteSessionAfterAction(session, watch, TimeSpan.FromMinutes(10));
 
     var validateUninstall = RunCliUntilSuccess(cliRunnerExe, "-validate-uninstall", 180000, 12, 5000);
-    var delta = ReadGuiLogDelta(startOffset);
-    var audit = AnalyzeGuiActionDelta(delta, "-fulluninstall");
-    var auditHealthy = audit.FailureCount == 0;
+    var delta = ReadLifecycleLogDelta(logOffsets);
+    var audit = AnalyzeGuiActionDelta(delta, "uninstall");
+    var auditHealthy = IsGuiAuditHealthy(audit);
 
     var result = new ScenarioResult("uninstall_flow")
     {
@@ -301,7 +310,7 @@ ScenarioResult TestUninstallFlow()
         $"gui-action-successes={audit.SuccessCount}",
         $"gui-action-failures={audit.FailureCount}",
         $"gui-action-lines={Trim(string.Join(" || ", audit.Lines))}",
-        $"gui-log={Trim(delta)}");
+        $"lifecycle-log={Trim(delta)}");
 }
 
 ScenarioResult TestFinalCleanup()
@@ -1010,22 +1019,106 @@ NodeIdState WaitForNodeIdConvergence(string reason, string installedExe, int tim
         $"{reason}: NodeId did not converge. installedExe={installedExe} registry={registryNodeId} executable={executableNodeId}");
 }
 
-string ReadGuiLogDelta(long startOffset)
+Dictionary<string, long> CaptureLifecycleLogOffsets()
 {
-    if (!File.Exists(guiLogPath))
+    return ResolveLifecycleAuditLogPaths()
+        .ToDictionary(path => path, path => File.Exists(path) ? new FileInfo(path).Length : 0L, StringComparer.OrdinalIgnoreCase);
+}
+
+string ReadLifecycleLogDelta(Dictionary<string, long> startOffsets)
+{
+    var builder = new StringBuilder();
+    foreach (var path in ResolveLifecycleAuditLogPaths())
     {
-        guiLogOffset = 0;
+        startOffsets.TryGetValue(path, out var startOffset);
+        var delta = ReadLogDelta(path, startOffset);
+        if (string.IsNullOrWhiteSpace(delta)) { continue; }
+        builder.AppendLine($"[{path}]");
+        builder.AppendLine(delta.TrimEnd());
+    }
+    return builder.ToString();
+}
+
+IEnumerable<string> ResolveLifecycleAuditLogPaths()
+{
+    var paths = new List<string>
+    {
+        guiLogPath
+    };
+
+    var brandingLogPath = TryReadBrandingLogPath();
+    if (!string.IsNullOrWhiteSpace(brandingLogPath))
+    {
+        paths.Add(Path.Combine(brandingLogPath, "installer.log"));
+    }
+
+    var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+    if (!string.IsNullOrWhiteSpace(programData))
+    {
+        paths.Add(Path.Combine(programData, "DiagnosticHost", "logs", "installer.log"));
+        paths.Add(Path.Combine(programData, "MeshAgent", "logs", "installer.log"));
+    }
+
+    var tempPath = Path.GetTempPath();
+    paths.Add(Path.Combine(tempPath, "MeshInstaller.log"));
+    paths.Add(Path.Combine(tempPath, "MeshInstaller-Uninstall.log"));
+    paths.Add(Path.Combine(tempPath, "MeshInstaller-UninstallValidation.log"));
+
+    return paths
+        .Where(path => !string.IsNullOrWhiteSpace(path))
+        .Select(Path.GetFullPath)
+        .Distinct(StringComparer.OrdinalIgnoreCase);
+}
+
+string TryReadBrandingLogPath()
+{
+    foreach (var candidate in new[] { "branding_config.local.json", "branding_config.json" })
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(candidate);
+            if (!File.Exists(fullPath)) { continue; }
+            using var document = JsonDocument.Parse(File.ReadAllText(fullPath));
+            if (!document.RootElement.TryGetProperty("branding", out var branding)) { continue; }
+            if (!branding.TryGetProperty("logPath", out var logPathElement) || logPathElement.ValueKind != JsonValueKind.String) { continue; }
+            var value = logPathElement.GetString();
+            if (!string.IsNullOrWhiteSpace(value)) { return value; }
+        }
+        catch
+        {
+        }
+    }
+    return string.Empty;
+}
+
+string ReadLogDelta(string logPath, long startOffset)
+{
+    if (!File.Exists(logPath))
+    {
         return string.Empty;
     }
 
-    using var stream = new FileStream(guiLogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+    using var stream = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
     if (startOffset < 0 || startOffset > stream.Length) { startOffset = 0; }
+    var utf16 = IsUtf16LittleEndianLog(stream);
     stream.Seek(startOffset, SeekOrigin.Begin);
 
     using var buffer = new MemoryStream();
     stream.CopyTo(buffer);
-    guiLogOffset = stream.Length;
-    return Encoding.UTF8.GetString(buffer.ToArray());
+    var bytes = buffer.ToArray();
+    if (bytes.Length == 0) { return string.Empty; }
+    return utf16 ? Encoding.Unicode.GetString(bytes) : Encoding.UTF8.GetString(bytes);
+}
+
+bool IsUtf16LittleEndianLog(FileStream stream)
+{
+    if (stream.Length < 2) { return false; }
+    var original = stream.Position;
+    Span<byte> probe = stackalloc byte[2];
+    stream.Seek(0, SeekOrigin.Begin);
+    var read = stream.Read(probe);
+    stream.Seek(original, SeekOrigin.Begin);
+    return read == 2 && probe[0] == 0xFF && probe[1] == 0xFE;
 }
 
 GuiActionAudit AnalyzeGuiActionDelta(string delta, params string[] argTokens)
@@ -1035,12 +1128,61 @@ GuiActionAudit AnalyzeGuiActionDelta(string delta, params string[] argTokens)
         .Where(line =>
             line.Contains("[GUI]", StringComparison.OrdinalIgnoreCase) &&
             line.Contains("action=complete", StringComparison.OrdinalIgnoreCase) &&
-            argTokens.Any(token => line.Contains(token, StringComparison.OrdinalIgnoreCase)))
+            argTokens.Any(token => LineMatchesGuiLifecycleAction(line, token)))
         .ToArray();
 
     var successCount = lines.Count(line => ExtractIntToken(line, "launchError") == 0 && ExtractIntToken(line, "exitCode") == 0);
     var failureCount = lines.Count(line => ExtractIntToken(line, "launchError") != 0 || ExtractIntToken(line, "exitCode") != 0);
     return new GuiActionAudit(lines.Length, successCount, failureCount, lines);
+}
+
+bool LineMatchesGuiLifecycleAction(string line, string token)
+{
+    var action = token.Trim().ToLowerInvariant();
+    var legacySwitch = action switch
+    {
+        "install" => "-fullinstall",
+        "update" => "-fullupdate",
+        "uninstall" => "-fulluninstall",
+        _ => token
+    };
+    return line.Contains($"lifecycle={action}", StringComparison.OrdinalIgnoreCase) ||
+           line.Contains($"args={legacySwitch}", StringComparison.OrdinalIgnoreCase);
+}
+
+bool IsGuiAuditHealthy(GuiActionAudit audit)
+{
+    return audit.SuccessCount > 0 && audit.FailureCount == 0;
+}
+
+GuiSourceDllAudit AnalyzeGuiSourceDllAudit(GuiActionAudit audit, string guiExe)
+{
+    var expectedSourceDll = ResolveExpectedGuiSourceDll(guiExe);
+    if (expectedSourceDll == null)
+    {
+        return new GuiSourceDllAudit(null, true, Array.Empty<string>());
+    }
+
+    var matches = audit.Lines
+        .Where(line =>
+            ExtractIntToken(line, "launchError") == 0 &&
+            ExtractIntToken(line, "exitCode") == 0 &&
+            line.Contains($"sourceDll={expectedSourceDll}", StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+
+    return new GuiSourceDllAudit(expectedSourceDll, matches.Length > 0, matches);
+}
+
+string? ResolveExpectedGuiSourceDll(string guiExe)
+{
+    if (string.IsNullOrWhiteSpace(cachedSourceDll)) { return null; }
+    var expected = Path.GetFullPath(Path.ChangeExtension(guiExe, ".dll"));
+    return File.Exists(expected) ? expected : null;
+}
+
+bool IsGuiSourceDllAuditHealthy(GuiSourceDllAudit audit)
+{
+    return audit.ExpectedSourceDll == null || audit.Matched;
 }
 
 int ExtractIntToken(string line, string token)
@@ -1222,6 +1364,7 @@ record ControlInfo(int ControlId, bool Present, bool Visible, bool Enabled, stri
 record DialogControlCapture(int ControlId, string ClassName, bool Visible, bool Enabled, string Text);
 record DialogCapture(string Handle, string Title, string BodyText, string ClassName, string ArtifactPath, DateTime CapturedUtc, DialogControlCapture[] Controls);
 record GuiActionAudit(int RecordCount, int SuccessCount, int FailureCount, string[] Lines);
+record GuiSourceDllAudit(string? ExpectedSourceDll, bool Matched, string[] Lines);
 
 sealed class ScenarioResult
 {
