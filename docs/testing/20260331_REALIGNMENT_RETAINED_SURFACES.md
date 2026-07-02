@@ -86,7 +86,7 @@ The retained operator surface is the UMH command contract explicitly named by th
 - pipe-backed informational ops: `listProcesses`, `getFlowContract`, `getCapabilities`, `getPolicy`, `getConfig`, `uiSnapshot`
 - mutation ops: `inject`, `injectAll`, `telemetry`, `repair`, `setFlags`, `disable`, `disableAll`, `setPolicy`, `setConfig`
 - target-scoped ops: `profileProcess`, `getInjectionState`, `registerProtectedPid`, `unregisterProtectedPid`, `injectTargetSet`, `clearTargetScope`
-- bypass ops: `lockdownBypass`, `examsoftBypass`, `ipcBypass`
+- legacy compatibility ops: `lockdownBypass`, `examsoftBypass`, `ipcBypass`
 
 The authoritative harness sources are:
 

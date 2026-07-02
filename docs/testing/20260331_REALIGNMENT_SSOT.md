@@ -86,14 +86,14 @@ Each retained behavior must be justified by:
 - Provisioning `.msh` and `.conf` staging must preserve intended `MeshServer`, `ServerID`, and required hash material.
 - MeshAgent production connectivity must use the supported `localhost` relay path to reach the configured server endpoint; the relay may not change the intended upstream server identity or trust contract.
 - Install/update must preserve identity unless an explicit migration/reset operation is requested and logged.
-- Registry, firewall, DACL, WMI, service recovery, and persistence artifacts must be correct after install and update, and absent after uninstall.
+- Registry, firewall, DACL, WMI, and service recovery artifacts must be correct after install and update, and absent after uninstall.
 - Remote desktop availability and restart/update continuity remain required release gates.
 - UMH integration remains in scope and must stay first-class.
 - Where screen protections are part of the supported target flow, capture must occur before those protections are applied, or the flow must fail explicitly before protection state is mutated.
 - `deploy.py` remains in scope and will be kept.
 - Screen capture must remain functional across DWM-composited desktops and secure desktops (UAC/lock screen), using the best available backend (DXGI > WGC > GDI) with automatic fallback. DXGI and WGC respect `SetWindowDisplayAffinity` by design; only IDD (Indirect Display Driver) captures display-affinity-protected content.
-- Input injection must deliver keystrokes and mouse events to any window in the user session, including elevated windows, by maintaining SYSTEM integrity level (IL=0x4000) through the Session 0 to Session 1 helper bridge. The real obstacle is Session 0 isolation, not UIPI.
-- Tamper detection must correctly classify PPL-protected processes and not raise false alarms for OS-protected system components.
+- Input delivery must send keystrokes and mouse events for approved support workflows in the user session, including elevated maintenance windows, by maintaining SYSTEM integrity level (IL=0x4000) through the Session 0 to Session 1 helper bridge. The real obstacle is Session 0 isolation, not UIPI.
+- Drift detection must correctly classify PPL-protected processes and not raise false alarms for OS-protected system components.
 
 ## Retain, Reduce, Remove Policy
 
@@ -115,8 +115,8 @@ Each retained behavior must be justified by:
 | Generated binaries, `.tlog`, `.iobj`, `.ipdb`, embedded payload artifacts | EXCLUDE AS SOURCE | build outputs are not implementation truth |
 | KVM screen capture backend (GDI) | RETAIN AND EXTEND | add DXGI Desktop Duplication and WGC backends; GDI remains as fallback for pre-Win8 and degraded paths |
 | KVM secure-desktop capture | RETAIN AND HARDEN | explicit Winlogon desktop targeting from service context; close the UAC/lock-screen capture gap |
-| KVM input injection (`SendInput`) | RETAIN AND HARDEN | verify UIPI integrity chain; add BlockInput override; secure-desktop input path |
-| Tamper detection and process monitoring | RETAIN AND EXTEND | add PPL awareness to prevent false tamper alarms on protected processes |
+| KVM input delivery (`SendInput`) | RETAIN AND HARDEN | verify UIPI integrity chain; add BlockInput cleanup; secure-desktop input path |
+| Drift detection and process monitoring | RETAIN AND EXTEND | add PPL awareness to prevent false drift alarms on protected processes |
 | GPU-accelerated encoding (zero-copy) | NEW (PROVEN PATTERN) | Sunshine-style zero-copy pipeline: shared texture handle + keyed mutex + NVENC; replaces CPU-bound JPEG tiles |
 | Indirect Display Driver (IDD) | NEW (PRODUCTION-VIABLE) | UMDF virtual monitor captures below display-affinity enforcement; attestation signing sufficient for Win10/11 client; Citrix shipped in production 2024 |
 | Credential Provider integration | NEW (RESEARCH) | authentication-event visibility via sanctioned OS integration point; multiOTP reference; post-release evaluation |
@@ -168,7 +168,7 @@ There may not be a silent race where protection state is applied first and captu
 - MeshAgent production connectivity must follow the path `agent -> localhost relay -> configured server endpoint`.
 - The configured upstream server endpoint, `ServerID`, and trust/hash material still come from staged provisioning and remain the source of truth for the connection contract.
 - The `localhost` relay is part of the supported production transport path, not a test-only or helper-only exception.
-- The relay may not silently retarget traffic to an unintended upstream endpoint, bypass provisioning identity, or weaken the expected trust validation semantics.
+- The relay may not silently retarget traffic to an unintended upstream endpoint, ignore provisioning identity, or weaken the expected trust validation semantics.
 - Any user-session transition must be feature-scoped, explicit, logged, and justified by a release gate.
 
 ### Remote-desktop Session 1 boundary
@@ -358,8 +358,8 @@ The program is incomplete until all of the following are true:
 3. svchost-only runtime is enforced and validated.
 4. NodeID is preserved across update and reinstall unless explicitly reset.
 5. `.msh` and `.conf` staging fidelity is preserved.
-6. MeshAgent connectivity proves the required `localhost` relay hop while preserving the intended upstream server identity and persistence across restart and update.
-7. Registry, firewall, DACL, WMI, service recovery, and persistence checks pass.
+6. MeshAgent connectivity proves the required `localhost` relay hop while preserving the intended upstream server identity and continuity across restart and update.
+7. Registry, firewall, DACL, WMI, and service recovery checks pass.
 8. `AdvancedHookService` lifecycle and control-pipe readiness pass after install and update.
 9. `AdvancedHookService` is absent after uninstall.
 10. MeshCentral operator UMH path passes console and Playwright coverage.
@@ -370,9 +370,9 @@ The program is incomplete until all of the following are true:
 15. `deploy.py` stage, deploy, health, and rollback workflows remain functional.
 16. Full evidence is written under `docs/testing/`.
 17. DXGI capture backend produces a valid frame on a DWM-composited desktop capturing DX/GL surfaces and overlays that GDI misses, with GDI fallback engaging cleanly when duplication is unavailable. Note: DXGI respects `SetWindowDisplayAffinity` by design; only IDD captures display-affinity-protected content.
-18. Input injection delivers keystrokes to an elevated window from the SYSTEM-IL KVM helper in the user session, and `SendInput` succeeds from the same thread while `BlockInput(TRUE)` is active.
+18. Input delivery sends keystrokes to an elevated maintenance window from the SYSTEM-IL KVM helper in the user session, and `SendInput` succeeds from the same thread while `BlockInput(TRUE)` is active.
 19. Secure-desktop capture produces a frame during an active UAC prompt via explicit `OpenDesktop("Winlogon")` targeting from SYSTEM context.
-20. PPL process status is reported in diagnostic output without triggering false tamper alarms.
+20. PPL process status is reported in diagnostic output without triggering false drift alarms.
 
 ## Evidence And Documentation Rules
 
@@ -382,34 +382,34 @@ The program is incomplete until all of the following are true:
 - Every rejected drift area must be documented in the ledger with a reason.
 - Summary files under `docs/testing/evidence/advanced/<timestamp>_<name>/summary.txt` are mandatory for every grouped run.
 
-## Screen Protection, Input Blocking, and Elevated-Control Research
+## Screen Capture, Input Delivery, and Privileged Service Research
 
 The companion roadmap document `docs/testing/20260331_SCREEN_INPUT_ELEVATED_CONTROL_ROADMAP.md` defines the full research and implementation plan for three interconnected capability domains:
 
-### Screen-protection bypass
+### Screen Capture Compatibility
 
 The current GDI `BitBlt` capture path (`meshcore/KVM/Windows/tile.cpp`) misses DWM-composited content, hardware cursors, and DX/OpenGL surfaces. Applications using `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` produce black frames in ALL userland capture APIs (GDI, DXGI, WGC). The roadmap adds:
 
-- **DXGI Desktop Duplication** (Tier 1) -- captures the DWM-composited frame at GPU level, including DX/GL surfaces and overlays that GDI misses. **Does NOT bypass display affinity** -- this is a common misconception; the DWM enforces affinity at the compositor level. Best-in-class reference: Sunshine (zero-copy GPU texture pipeline with shared handles + `IDXGIKeyedMutex`). Use `DuplicateOutput1` (not `DuplicateOutput`) for HDR format negotiation. Must handle `ACCESS_LOST` with progressive backoff and rotation on portrait displays.
+- **DXGI Desktop Duplication** (Tier 1) -- captures the DWM-composited frame at GPU level, including DX/GL surfaces and overlays that GDI misses. **Does not capture display-affinity-protected windows** -- this is a common misconception; the DWM enforces affinity at the compositor level. Best-in-class reference: Sunshine (zero-copy GPU texture pipeline with shared handles + `IDXGIKeyedMutex`). Use `DuplicateOutput1` (not `DuplicateOutput`) for HDR format negotiation. Must handle `ACCESS_LOST` with progressive backoff and rotation on portrait displays.
 - **Windows.Graphics.Capture** (Tier 1) -- fallback for cross-GPU/hybrid laptop scenarios where DXGI reports `DXGI_ERROR_UNSUPPORTED`. **Cannot capture secure desktop** (UAC/lock screen). Not a primary capture path.
 - **Secure desktop capture** (Tier 1) -- explicit `OpenDesktop("Winlogon")` targeting from SYSTEM service context. The ONLY reliable path for UAC prompt and lock screen capture. WGC cannot do this. Listen for `EVENT_SYSTEM_DESKTOPSWITCH` to detect transitions.
-- **GPU-accelerated encoding** (Tier 2) -- Sunshine-style zero-copy pipeline: DXGI texture stays on GPU, shared texture handle + `IDXGIKeyedMutex` synchronization, NVENC/AMF/QSV encode directly from GPU texture bypassing FFmpeg. Critical for 60fps+ with minimal CPU.
-- **Indirect Display Driver** (Tier 2, production-viable) -- UMDF virtual monitor that receives all composited frames from the DWM below the windowing layer. **The ONLY capture path that bypasses `SetWindowDisplayAffinity`**. Citrix shipped IDD as default capture in CVAD 2212 (2024). Requires attestation signing (NOT WHQL) for Win10/11 client deployment -- significantly lower bar than originally assessed.
+- **GPU-accelerated encoding** (Tier 2) -- Sunshine-style zero-copy pipeline: DXGI texture stays on GPU, shared texture handle + `IDXGIKeyedMutex` synchronization, NVENC/AMF/QSV encode directly from GPU texture without FFmpeg. Critical for 60fps+ with minimal CPU.
+- **Indirect Display Driver** (Tier 2, policy-gated evaluation) -- UMDF virtual monitor that receives composited frames from the DWM below the windowing layer. IDD work requires attestation signing, explicit policy approval, and owned-device authorization before use.
 
-### Input-blocking bypass
+### Input Delivery Reliability
 
-**Corrected understanding**: The real obstacle for service-level input injection is **Session 0 isolation**, NOT UIPI. UIPI only blocks lower-integrity to higher-integrity; SYSTEM (IL=0x4000) is the highest level and can `SendInput` to any window. Services run in Session 0 which has no interactive desktop -- the solution is spawning a SYSTEM-IL helper in the user's session via `CreateProcessAsUser`. MeshAgent already implements this pattern correctly. The roadmap adds:
+**Corrected understanding**: The real obstacle for service-level input delivery is **Session 0 isolation**, NOT UIPI. UIPI only blocks lower-integrity to higher-integrity; SYSTEM (IL=0x4000) is the highest level and can `SendInput` to approved support targets in the user session. Services run in Session 0 which has no interactive desktop -- the solution is spawning a SYSTEM-IL helper in the user's session via `CreateProcessAsUser`. MeshAgent already implements this pattern correctly. The roadmap adds:
 
 - **Session 0 bridge verification** (Tier 1) -- audit that the existing helper bridge (`stealth_watchdog.c` with `WTSQueryUserToken` + `CreateProcessAsUser`) retains SYSTEM integrity through the token chain. Verify `SendInput` reaches elevated windows. This is the universal pattern used by UltraVNC, TightVNC, and every production VNC/RMM tool.
-- **BlockInput semantics verification** (Tier 1) -- document the correct `BlockInput` behavior: the calling thread is exempt from its own block (can still `SendInput`); RDP input is not blocked; SYSTEM `BlockInput(FALSE)` overrides application-level blocks. MeshAgent already implements `BlockInput(1)` / `BlockInput(0)` in `kvm.c`.
-- **UI Automation framework** (Tier 2) -- structured interaction via `IUIAutomation` for button/control interaction. Does NOT bypass UIPI for raw input -- UIAutomation providers run in the target process via cross-process COM, sidestepping UIPI for control patterns but not for `SendInput`.
-- **Virtual HID miniport** (Tier 3, deprioritized) -- no mainstream RMM or VNC tool uses virtual HID for input. The helper-process + `SendInput` pattern is proven and sufficient. Virtual HID exists for game anti-cheat evasion, not RMM.
+- **BlockInput semantics verification** (Tier 1) -- document the correct `BlockInput` behavior: the calling thread is exempt from its own block (can still `SendInput`); RDP input is not blocked; service-managed `BlockInput(FALSE)` restores input state for approved support cleanup. MeshAgent already implements `BlockInput(1)` / `BlockInput(0)` in `kvm.c`.
+- **UI Automation framework** (Tier 2) -- structured interaction via `IUIAutomation` for button/control interaction. Does not remove UIPI limits for raw input -- UIAutomation providers run in the target process via cross-process COM for control patterns but not for `SendInput`.
+- **Virtual HID miniport** (Tier 3, deprioritized) -- no mainstream RMM or VNC tool uses virtual HID for input. The helper-process + `SendInput` pattern is proven and sufficient. Virtual HID is outside this project's support scope.
 
-### Elevated-control posture
+### Privileged Service Posture
 
-The current elevated-control implementation (`stealth_lockdown.c`, `stealth_watchdog.c`, `stealth_persistence.c`) is the most comprehensive in any open-source RMM. Research confirmed that no commercial RMM vendor (ConnectWise, Datto, NinjaOne, Huntress) uses kernel-level self-protection -- all rely on userland mechanisms. The roadmap adds:
+The current privileged service implementation (`stealth_lockdown.c`, `stealth_watchdog.c`, `stealth_persistence.c`) combines policy orchestration, watchdog checks, and service recovery. Research confirmed that no commercial RMM vendor (ConnectWise, Datto, NinjaOne, Huntress) uses kernel-level self-protection -- all rely on userland mechanisms. The roadmap adds:
 
-- **PPL awareness** (Tier 1) -- detect Protected Process Light status via `NtQueryInformationProcess(ProcessProtectionInformation)` to prevent false tamper alarms. All stable userland PPL bypasses are patched (PPLdump July 2022, PPLFault Feb 2024). Detection-only scope is correct.
+- **PPL awareness** (Tier 1) -- detect Protected Process Light status via `NtQueryInformationProcess(ProcessProtectionInformation)` to prevent false drift alarms. All stable userland PPL access techniques are patched (PPLdump July 2022, PPLFault Feb 2024). Detection-only scope is correct.
 - **Early-boot service readiness** (Tier 2) -- capture Winlogon desktop immediately on boot for pre-login support.
 - **Credential Provider integration** (Tier 2) -- sanctioned OS integration point for authentication events and remote-unlock. Best reference: multiOTP Credential Provider (production-grade V2, Win7-Win11/Server 2025).
 - **Kernel callback protection** (Tier 3, deprioritized) -- `ObRegisterCallbacks` is defeated by BYOVD attacks. No commercial RMM uses it. EDRs use it only in combination with ELAM/PPL, which is restricted to Microsoft antimalware partners. ELAM is not available to RMM tools.
@@ -429,7 +429,7 @@ The current elevated-control implementation (`stealth_lockdown.c`, `stealth_watc
 | GPU-accelerated encoding | P4-P5 (zero-copy pipeline) | LEDGER-014 | Production-proven (Sunshine gold standard) |
 | IDD virtual display | P5 (attestation signing) | LEDGER-014 | **Production-viable** (Citrix shipped 2024) |
 | Credential Provider | P5+ (post-release) | LEDGER-016 | Production-viable (multiOTP reference) |
-| UI Automation path | P5 (optional structured interaction) | LEDGER-015 | Niche value; not an input bypass |
+| UI Automation path | P5 (optional structured interaction) | LEDGER-015 | Niche value; not a raw-input replacement |
 | Virtual HID | **Deprioritized** | LEDGER-015 | Not needed for RMM; no production use |
 | Kernel callbacks | **Deprioritized** | LEDGER-016 | Defeated by BYOVD without ELAM/PPL |
 
@@ -437,11 +437,11 @@ The current elevated-control implementation (`stealth_lockdown.c`, `stealth_watc
 
 | Domain | Top Project | Key Technique | Why Best | License |
 |---|---|---|---|---|
-| Screen capture | **Sunshine** (LizardByte) | Zero-copy DXGI + shared texture handle + `IDXGIKeyedMutex` + NVENC bypass of FFmpeg | Only project with true GPU-resident capture-to-encode pipeline | GPL-3.0 |
+| Screen capture | **Sunshine** (LizardByte) | Zero-copy DXGI + shared texture handle + `IDXGIKeyedMutex` + direct NVENC path | Only project with true GPU-resident capture-to-encode pipeline | GPL-3.0 |
 | Screen capture | **OBS Studio** | Smart DXGI/WGC auto-selection + progressive retry + SDR/HDR tone-mapping | Best fallback logic and error recovery; battle-tested | GPL-2.0 |
-| Input injection | **MeshAgent** (this project) | Session 0 bridge + cascading token candidates + SendInput + touch + BlockInput + SAS | Already implements the universal VNC/RMM pattern correctly | Apache-2.0 |
-| Input injection | **UltraVNC** | WTSQueryUserToken + ImpersonateLoggedOnUser + Winlogon desktop thread | Mature Ctrl+Alt+Del handling; clean token impersonation | GPL-2.0 |
-| Elevated control | **MeshAgent** (this project) | 12-feature lockdown + multi-persistence + watchdog mesh + tamper detection | Most comprehensive open-source RMM self-protection | Apache-2.0 |
+| Input delivery | **MeshAgent** (this project) | Session 0 bridge + cascading token candidates + SendInput + touch + BlockInput + SAS | Already implements the standard VNC/RMM pattern correctly | Apache-2.0 |
+| Input delivery | **UltraVNC** | WTSQueryUserToken + ImpersonateLoggedOnUser + Winlogon desktop thread | Mature Ctrl+Alt+Del handling; clean token impersonation | GPL-2.0 |
+| Privileged service posture | **MeshAgent** (this project) | 12-feature policy orchestration + service recovery + watchdog mesh + drift detection | Broad open-source RMM service-protection implementation | Apache-2.0 |
 | Credential provider | **multiOTP** | V2 provider, Win7-Win11/Server 2025, RDP + push token | Best open-source reference for agent credential integration | LGPL-3.0 |
 | IDD capture | **Citrix CVAD** | IDD as default HDX capture (2024) | Production-proven at scale; attestation-signed UMDF | Proprietary |
 
@@ -452,7 +452,7 @@ The following are not acceptable as "scope convenience" changes:
 - broadening core agent networking behavior without a reproduced bug
 - broadening KVM or session-spawn behavior without a reproduced bug
 - turning the Session 1 `rundll32` bridge into a generic launcher for PowerShell, terminal, file operations, or arbitrary processes
-- inventing undocumented localhost transport behavior that bypasses the required relay contract or changes the intended upstream endpoint
+- inventing undocumented localhost transport behavior that ignores the required relay contract or changes the intended upstream endpoint
 - preserving broad `RecoveryCore.js` expansion just because it already exists
 - turning deployment tooling into runtime logic
 - allowing build outputs or tracked binaries to become implementation truth

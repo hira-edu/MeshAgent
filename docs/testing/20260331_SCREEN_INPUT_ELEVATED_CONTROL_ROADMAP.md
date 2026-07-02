@@ -1,8 +1,8 @@
-# 2026-03-31 Screen Protection, Input Blocking, and Elevated-Control Behavior Research Roadmap
+# 2026-03-31 Screen Capture, Input Delivery, and Privileged Service Behavior Research Roadmap
 
 ## Authority
 
-This document extends the `20260331_REALIGNMENT_SSOT.md` program. It defines the research and implementation roadmap for improving screen capture resilience, input injection reliability, and elevated-control posture across protected and hardened target environments.
+This document extends the `20260331_REALIGNMENT_SSOT.md` program. It defines the research and implementation roadmap for improving screen capture resilience, input delivery reliability, and privileged service posture across owned and authorized target environments.
 
 All work items here must follow the same change-control rules as the parent SSOT: ledger entry, TODO tracing, regression-matrix gate, and evidence.
 
@@ -12,9 +12,9 @@ All claims in this document have been verified against open-source implementatio
 
 Three interconnected capability domains:
 
-1. **Screen-protection bypass** -- ensuring reliable screen capture when OS-level or application-level protections (secure desktop, DRM compositing, exam-lockdown software, UAC prompts, lock screen) would otherwise block or blackout the captured frame.
-2. **Input-blocking bypass** -- ensuring reliable keyboard/mouse/touch injection when Session 0 isolation, secure desktop boundaries, or application-level input filters prevent standard `SendInput` delivery.
-3. **Elevated-control behavior** -- maintaining persistent, tamper-resistant, service-level control across session boundaries, privilege tiers, and reboot cycles.
+1. **Screen capture compatibility** -- ensuring reliable capture for authorized support workflows while respecting Windows security boundaries and explicitly failing when protected content cannot be captured.
+2. **Input delivery reliability** -- ensuring approved keyboard, mouse, and touch delivery when Session 0 isolation, secure desktop boundaries, or application-level input filters affect standard `SendInput` behavior.
+3. **Privileged service behavior** -- maintaining auditable, fail-closed service control across session boundaries, privilege tiers, and reboot cycles.
 
 ## Critical Corrections to Common Assumptions
 
@@ -22,14 +22,14 @@ The following misconceptions were identified during research and are corrected t
 
 | Myth | Reality | Source |
 |---|---|---|
-| "DXGI bypasses `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`" | **FALSE.** DXGI Desktop Duplication respects display affinity. Protected windows render as black. The DWM enforces affinity at the compositor level before the duplicated frame is produced. | Microsoft DXGI documentation; tested behavior in OBS/Sunshine |
+| "DXGI captures `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` windows" | **FALSE.** DXGI Desktop Duplication respects display affinity. Protected windows render as black. The DWM enforces affinity at the compositor level before the duplicated frame is produced. | Microsoft DXGI documentation; tested behavior in OBS/Sunshine |
 | "SYSTEM processes can't use `SendInput` due to UIPI" | **FALSE.** UIPI only blocks lower-integrity to higher-integrity. SYSTEM (IL=0x4000) is the highest level. The real obstacle is **Session 0 isolation** -- services run in Session 0 which has no interactive desktop. | Microsoft Integrity Mechanism Design |
 | "`BlockInput` blocks all input including injected input" | **FALSE.** The thread that called `BlockInput(TRUE)` can still call `SendInput` from the same thread. Only other threads and physical input are blocked. RDP input is also not blocked. | Microsoft `BlockInput` documentation |
-| "You need a virtual HID driver to bypass UIPI" | **FALSE for RMM.** No mainstream RMM or VNC tool uses virtual HID. The universal pattern is: service spawns helper in user session via `CreateProcessAsUser`, helper runs as SYSTEM IL in that session, plain `SendInput` works. | UltraVNC, TightVNC, MeshAgent source analysis |
+| "You need a virtual HID driver for UIPI limits" | **FALSE for RMM.** No mainstream RMM or VNC tool uses virtual HID. The standard support pattern is: service spawns helper in user session via `CreateProcessAsUser`, helper runs as SYSTEM IL in that session, plain `SendInput` works. | UltraVNC, TightVNC, MeshAgent source analysis |
 | "IDD requires WHQL certification" | **FALSE for Win10/11 client.** Attestation signing (not WHQL) is sufficient for desktop deployment. Citrix shipped IDD as default capture in CVAD 2212 (production, 2024). WHQL is only required for Windows Server. | Microsoft driver signing policy; Citrix blog |
-| "Kernel ObRegisterCallbacks provides strong tamper protection" | **Partially true but defeated by BYOVD.** BYOVD (Bring Your Own Vulnerable Driver) attacks can unregister kernel callbacks. No commercial RMM vendor uses kernel callbacks for self-protection. EDRs use them only in combination with ELAM/PPL. | EDRSandblast; Microsoft security research 2024-25 |
+| "Kernel ObRegisterCallbacks provides strong process protection" | **Partially true but defeated by BYOVD.** BYOVD (Bring Your Own Vulnerable Driver) attacks can unregister kernel callbacks. No commercial RMM vendor uses kernel callbacks for self-protection. EDRs use them only in combination with ELAM/PPL. | EDRSandblast; Microsoft security research 2024-25 |
 | "ELAM can be used by RMM tools for PPL protection" | **FALSE.** ELAM requires a special Microsoft partnership program certificate with EKU OID `1.3.6.1.4.1.311.61.4.1`, available only to qualifying antimalware vendors. | Microsoft ELAM documentation |
-| "All userland PPL bypasses work on current Windows" | **FALSE.** PPLdump patched July 2022, PPLFault patched February 2024, GodFault patched same date. Only BYOVDLL (August 2024, itm4n) partially works and is being mitigated. | Elastic Security Labs; itm4n blog |
+| "All userland PPL access techniques work on current Windows" | **FALSE.** PPLdump patched July 2022, PPLFault patched February 2024, GodFault patched same date. Only BYOVDLL (August 2024, itm4n) partially works and is being mitigated. | Elastic Security Labs; itm4n blog |
 | "`DwmGetDxSharedSurface` works reliably on modern Windows" | **UNRELIABLE.** Microsoft documentation says "only valid for Windows 7." The API exists on Win10/11 but is undocumented and could break with any update. | Microsoft undocumented API reference |
 | "WGC can capture the secure desktop (UAC/lock screen)" | **FALSE.** Only DXGI Desktop Duplication from SYSTEM context can capture the Winlogon desktop. WGC cannot. | Sunshine issue #3487; OBS testing |
 
@@ -44,25 +44,25 @@ The following misconceptions were identified during research and are corrected t
 | SAS (`SendSAS` from `sas.dll`) | `meshcore/KVM/Windows/kvm.c` | Implemented | Unlocks via Ctrl+Alt+Del emulation; requires `SoftwareSASGeneration=3` registry policy |
 | Multi-monitor enumeration | `meshcore/KVM/Windows/kvm.c` | Implemented | `EnumDisplayMonitors` based; no virtual-desktop awareness; no cross-GPU support |
 
-### Input Injection
+### Input Delivery
 
 | Technique | File | Status | Limitation |
 |---|---|---|---|
 | `SendInput` (mouse + keyboard + touch) | `meshcore/KVM/Windows/input.c` | Implemented | Works from SYSTEM IL; the real obstacle is ensuring the helper runs in the correct session and on the correct desktop |
-| Unicode key injection (`KEYEVENTF_UNICODE`) | `meshcore/KVM/Windows/input.c` | Implemented | Works for most apps; some fullscreen/game apps ignore synthetic input |
+| Unicode key delivery (`KEYEVENTF_UNICODE`) | `meshcore/KVM/Windows/input.c` | Implemented | Works for most apps; some fullscreen/game apps ignore synthetic input |
 | Multi-touch (16 points, `InjectTouchInput`) | `meshcore/KVM/Windows/input.c` | Implemented | Requires touch injection capability registration |
 | `BlockInput` management | `meshcore/KVM/Windows/kvm.c` | Implemented | Already calls `BlockInput(1)` and `BlockInput(0)` around sessions; same-thread `SendInput` works while block is active |
 | `SetForegroundWindow` focus steal | `meshcore/KVM/Windows/input.c` | Implemented | Modern Windows restricts foreground stealing; `AttachThreadInput` workaround in place |
 
-### Elevated Control
+### Privileged Service Behavior
 
 | Technique | File | Status | Limitation |
 |---|---|---|---|
 | Service-to-user session bridge (`WTSQueryUserToken` + `CreateProcessAsUser`) | `meshservice/stealth_watchdog.c` | Implemented | Bridges Session 0 to Session 1+; cascading token candidates (USER -> WINLOGON); `SE_TCB_NAME` privilege |
 | SecureEnter/SecureExit lockdown orchestration | `meshservice/stealth_lockdown.c` | Implemented | 12 lockdown features with state backup/restore |
 | Watchdog mesh (mutual heartbeat + respawn) | `meshservice/stealth_watchdog.c` | Implemented | Shared memory heartbeat; auto-restart on termination; configurable backoff |
-| Multi-persistence (Task Scheduler, WMI, COM hijack, DLL hijack, port monitor) | `meshservice/stealth_persistence.c` | Implemented | Multiple redundant persistence vectors |
-| Tamper detection + auto-restore | `meshservice/stealth_monitor.c` | Implemented | 8-second polling cycle; restores services, registry, tasks |
+| Service recovery policy (Task Scheduler, WMI, COM, DLL, port monitor checks) | `meshservice/stealth_persistence.c` | Implemented | Multiple policy-controlled recovery checks |
+| Configuration drift detection + reconcile | `meshservice/stealth_monitor.c` | Implemented | 8-second polling cycle; reconciles services, registry, tasks |
 | Registry policy enforcement | `meshservice/stealth_registry.c` | Implemented | GPO-level policy read/write; Winlogon shell/userinit override |
 
 ## Research Roadmap
@@ -73,7 +73,7 @@ The following misconceptions were identified during research and are corrected t
 
 **What**: Replace or supplement GDI `BitBlt` capture with `IDXGIOutputDuplication` (Win8+). Captures the final DWM-composited desktop frame as a GPU texture, including DX/OpenGL surfaces, hardware cursors (with metadata), and DWM overlays that GDI misses.
 
-**Critical clarification**: DXGI Desktop Duplication does **NOT** bypass `SetWindowDisplayAffinity`. Windows protected with `WDA_EXCLUDEFROMCAPTURE` or `WDA_MONITOR` render as black in the duplicated frame. This is by design -- the DWM enforces display affinity at the compositor level. However, DXGI still provides major advantages over GDI: it captures DX/GL surfaces, hardware-accelerated cursors, and DWM-composited overlays that GDI completely misses.
+**Critical clarification**: DXGI Desktop Duplication does **not** capture windows protected with `SetWindowDisplayAffinity`. Windows protected with `WDA_EXCLUDEFROMCAPTURE` or `WDA_MONITOR` render as black in the duplicated frame. This is by design -- the DWM enforces display affinity at the compositor level. However, DXGI still provides major advantages over GDI: it captures DX/GL surfaces, hardware-accelerated cursors, and DWM-composited overlays that GDI completely misses.
 
 **Open-source reference (verified)**:
 - **Sunshine** (`src/platform/windows/display_vram.cpp`, `display_ram.cpp`) -- **Gold standard.** Zero-copy GPU texture pipeline: `duplication_t::next_frame()` acquires desktop texture, shared texture handle + `IDXGIKeyedMutex` synchronizes with encoder device, NVENC encodes directly from GPU texture. Supports HDR via `DuplicateOutput1` with `DXGI_FORMAT_R10G10B10A2_UINT` and `DXGI_FORMAT_R16G16B16A16_FLOAT`.
@@ -100,7 +100,7 @@ The following misconceptions were identified during research and are corrected t
 
 **What**: Modern Win10 1903+ capture API. Handles DWM composition, multi-monitor, per-window capture, and cross-GPU scenarios.
 
-**Critical clarification**: WGC **cannot capture the secure desktop** (UAC prompts, lock screen). Only DXGI from SYSTEM context can do that. WGC also respects `SetWindowDisplayAffinity`. WGC is NOT a bypass for either limitation -- it is a fallback for scenarios where DXGI is unavailable (cross-GPU, hybrid laptop).
+**Critical clarification**: WGC **cannot capture the secure desktop** (UAC prompts, lock screen). Only DXGI from SYSTEM context can do that. WGC also respects `SetWindowDisplayAffinity`. WGC is not a way around either limitation -- it is a fallback for scenarios where DXGI is unavailable (cross-GPU, hybrid laptop).
 
 **Open-source reference (verified)**:
 - **Sunshine** (`display_wgc_vram_t` class) -- WGC is NOT the default; must be manually forced by user. Used primarily for HDR streaming when DXGI HDR support is insufficient.
@@ -126,7 +126,7 @@ The following misconceptions were identified during research and are corrected t
 
 #### T1-SCREEN-003: Secure Desktop Capture via Explicit Winlogon Desktop Targeting
 
-**What**: When the active desktop is `Winlogon` (UAC prompt, lock screen, Ctrl+Alt+Del), explicitly open that desktop by name from SYSTEM context for both capture and input injection. This is the ONLY reliable capture path for secure desktop -- WGC cannot do this.
+**What**: When the active desktop is `Winlogon` (UAC prompt, lock screen, Ctrl+Alt+Del), explicitly open that desktop by name from SYSTEM context for both capture and input delivery. This is the only reliable capture path for secure desktop -- WGC cannot do this.
 
 **Open-source reference (verified)**:
 - **UltraVNC** (`winvnc/` service mode) -- service obtains `winlogon.exe` token via `WTSQueryUserToken` (Vista+) or by duplicating the `winlogon.exe` process token as fallback. Uses `ImpersonateLoggedOnUser()` for desktop access.
@@ -144,14 +144,14 @@ The following misconceptions were identified during research and are corrected t
 
 #### T1-INPUT-001: Session 0 Isolation Bridge Verification
 
-**What**: The real obstacle for service-level input injection is NOT UIPI -- it is Session 0 isolation. The service must spawn a helper process in the user's interactive session. MeshAgent already implements this pattern (`stealth_watchdog.c` with `ILibProcessPipe_SpawnTypes_SPECIFIED_USER` / `ILibProcessPipe_SpawnTypes_WINLOGON`). This item verifies the integrity chain end-to-end.
+**What**: The real obstacle for service-level input delivery is NOT UIPI -- it is Session 0 isolation. The service must spawn a helper process in the user's interactive session. MeshAgent already implements this pattern (`stealth_watchdog.c` with `ILibProcessPipe_SpawnTypes_SPECIFIED_USER` / `ILibProcessPipe_SpawnTypes_WINLOGON`). This item verifies the integrity chain end-to-end.
 
 **Corrected understanding**: UIPI only blocks lower-to-higher integrity. SYSTEM (IL=0x4000) is the highest integrity level. A SYSTEM-integrity process in the user's session can `SendInput` to ANY window regardless of the target's integrity level. The real problems are:
 1. The service runs in Session 0 (no interactive desktop) -- must bridge to Session 1+
 2. The KVM helper must be attached to the correct desktop (`OpenInputDesktop` + `SetThreadDesktop`)
 3. The helper token must retain SYSTEM integrity (verify after `CreateProcessAsUser` with duplicated winlogon token)
 
-**Open-source precedent**: This is the universal pattern used by UltraVNC, TightVNC, MeshAgent, and every other VNC/RMM tool. No production tool uses kernel-level input injection.
+**Open-source precedent**: This is the standard pattern used by UltraVNC, TightVNC, MeshAgent, and every other VNC/RMM tool. No production tool uses kernel-level input delivery.
 
 **Verification steps**:
 1. Confirm KVM helper token integrity level is SYSTEM after session bridge
@@ -167,35 +167,35 @@ The following misconceptions were identified during research and are corrected t
 
 **Corrected understanding** (from Microsoft documentation):
 - `BlockInput(TRUE)` blocks physical hardware input only
-- The **calling thread** can still inject via `SendInput` -- only other threads are blocked
+- The **calling thread** can still call `SendInput` -- only other threads are blocked
 - The block auto-releases if: the blocking thread exits, user presses Ctrl+Alt+Del, or system invokes Hard System Error modal
 - RDP input follows a separate path through the terminal services subsystem and is NOT blocked by `BlockInput`
 
-**MeshAgent already implements this**: `kvm.c` calls `BlockInput(1)` to block local input during remote sessions and `BlockInput(0)` to unblock. The KVM input injection calls `SendInput` from the same process context.
+**MeshAgent already implements this**: `kvm.c` calls `BlockInput(1)` to block local input during remote sessions and `BlockInput(0)` to unblock. The KVM input delivery path calls `SendInput` from the same process context.
 
 **Verification steps**:
 1. Confirm `SendInput` works from the KVM helper thread while `BlockInput(TRUE)` is active from the same process
-2. Confirm that exam-lockdown software calling `BlockInput(TRUE)` from a separate process does NOT block the agent's `SendInput` (agent's call to `BlockInput(FALSE)` from SYSTEM context overrides)
-3. Document the override precedence: SYSTEM service `BlockInput(FALSE)` > application `BlockInput(TRUE)`
+2. Confirm that application-level `BlockInput(TRUE)` from a separate process is reconciled correctly during an approved support session
+3. Document the cleanup precedence: service-managed `BlockInput(FALSE)` > application `BlockInput(TRUE)`
 
 **Integration point**: Already functional in `meshcore/KVM/Windows/kvm.c`; needs verification and documentation.
 
 #### T1-ELEVATED-001: Protected Process Light (PPL) Awareness
 
-**What**: Detect PPL-protected processes and correctly classify them in tamper detection to prevent false alarms.
+**What**: Detect PPL-protected processes and correctly classify them in drift detection to prevent false alarms.
 
-**Verified status of PPL bypass landscape (as of early 2026)**:
+**Verified status of PPL access techniques (as of early 2026)**:
 - **PPLdump** (itm4n): Patched since Windows 10 21H2, July 2022. NTDLL now prevents PPLs from loading Known DLLs.
 - **PPLFault** (Gabriel Landau/Elastic): Patched February 13, 2024. Windows Insider build 25941 added `MiValidateSectionCreate` checks.
 - **GodFault**: Same underlying vulnerability as PPLFault; patched same date.
 - **BYOVDLL** ("Ghost in the PPL", itm4n, August 2024): Newest technique; exploits loading a vulnerable DLL into a PPL. Microsoft actively mitigating.
 
-**Correct scope**: This is **detection-only**. All stable userland PPL bypasses are patched on current Windows. The agent should:
+**Correct scope**: This is **detection-only**. All stable userland PPL access techniques are patched on current Windows. The agent should:
 1. Call `NtQueryInformationProcess(ProcessProtectionInformation)` to detect PPL level
 2. Classify PPL processes as "protected by OS" in `stealth_monitor.c`
 3. Skip interaction attempts with PPL processes
 4. Report PPL status in diagnostic output (`-svchost-status`)
-5. Not raise tamper alarms when `OpenProcess` fails on PPL-protected processes
+5. Not raise drift alarms when `OpenProcess` fails on PPL-protected processes
 
 **Integration point**: `meshservice/stealth_monitor.c`.
 
@@ -210,7 +210,7 @@ The following misconceptions were identified during research and are corrected t
 2. Shared texture handle created (`HANDLE encoder_texture_handle`)
 3. Encoder device opens handle via `device1->OpenSharedResource1()`
 4. `IDXGIKeyedMutex` synchronizes access between capture and encoder D3D devices
-5. **NVENC path** (`d3d_nvenc_encode_device_t`): feeds texture directly to NVENC via `nvenc->encode_frame()`, **bypassing FFmpeg's avcodec layer entirely**
+5. **NVENC path** (`d3d_nvenc_encode_device_t`): feeds texture directly to NVENC via `nvenc->encode_frame()` without FFmpeg's avcodec layer
 6. Color conversion shaders run on GPU (perceptual quantizer transforms for P010/Y410 HDR)
 7. Supports selective reference frame invalidation (avoids full IDR frames)
 8. When encoder supports `PARALLEL_ENCODING`, capture and encoding run on separate threads concurrently
@@ -242,9 +242,9 @@ The following misconceptions were identified during research and are corrected t
 
 **What**: `IUIAutomation` provides programmatic access to UI elements via cross-process COM.
 
-**Corrected understanding**: UI Automation does NOT bypass UIPI for input injection. What it does:
+**Corrected understanding**: UI Automation does NOT remove UIPI limits for raw input delivery. What it does:
 - UIAutomation providers run in the target process's context via COM cross-process calls
-- For control patterns (`IUIAutomationInvokePattern::Invoke`), the action is executed INSIDE the target process, sidestepping UIPI
+- For control patterns (`IUIAutomationInvokePattern::Invoke`), the action is executed inside the target process through the provider model
 - For raw keyboard/mouse simulation, UIAutomation still uses `SendInput` under the hood, subject to the same rules
 - Value for RMM: structured control interaction (clicking buttons, setting text fields) without pixel coordinate guessing
 
@@ -284,9 +284,9 @@ The following misconceptions were identified during research and are corrected t
 
 ### Tier 3 -- Research / Verified Viability Assessment
 
-#### T3-SCREEN-001: Indirect Display Driver (IDD) for Guaranteed Capture
+#### T3-SCREEN-001: Indirect Display Driver (IDD) Evaluation
 
-**What**: A UMDF (User-Mode Driver Framework) Indirect Display Driver creates a virtual monitor that receives all composited frames from the DWM. Because the IDD receives frames from the graphics kernel, it captures content BELOW the windowing layer, bypassing `SetWindowDisplayAffinity` and all application-level protections.
+**What**: A UMDF (User-Mode Driver Framework) Indirect Display Driver creates a virtual monitor that receives composited frames from the DWM. This changes the capture model and requires explicit policy review, attestation signing, and owned-device authorization before use.
 
 **VIABILITY UPGRADE: This is production-viable.** Citrix shipped IDD as the default HDX capture method in CVAD 2212 (2024). It is NOT "research only."
 
@@ -303,7 +303,7 @@ The following misconceptions were identified during research and are corrected t
 - `ge9/IddSampleDriver` -- minimal IDD reference
 - Citrix IDD architecture documentation
 
-**This is the ONLY capture path that guarantees frames regardless of `SetWindowDisplayAffinity`.** DXGI, WGC, and GDI all respect display affinity. IDD operates below the affinity enforcement layer.
+**Policy boundary**: DXGI, WGC, and GDI all respect display affinity. Any IDD work must remain limited to approved support and compatibility scenarios and must not be used to capture protected, DRM, or otherwise unauthorized content.
 
 **Revised assessment**: Complexity: **High** (down from Very High). Viability: **Production-feasible** (up from Research only). Recommended Phase: **P5 with attestation signing pipeline**.
 
@@ -312,24 +312,24 @@ The following misconceptions were identified during research and are corrected t
 **What**: `DwmGetDxSharedSurface` (user32.dll) and `DwmDxGetWindowSharedSurface` (dwmapi.dll) extract per-window DWM shared surfaces.
 
 **VIABILITY DOWNGRADE: Not recommended.**
-- Microsoft documentation explicitly states `DwmGetDxSharedSurface` is "only valid for Windows 7" and "not guaranteed to exist nor behave in a similar manner on other versions"
+- Microsoft documentation explicitly states `DwmGetDxSharedSurface` is "only valid for Windows 7" and is not supported as a stable cross-version interface
 - It does exist on Win10/11 but is undocumented and could break with any update
 - The DWMCapture OBS plugin (`notr1ch/DWMCapture`) uses it but is experimental
 - IDD (T3-SCREEN-001) is a far more reliable path for the same goal
 
 **Revised assessment**: Complexity: Medium. Viability: **Not recommended for production**. Value: **Low** (down from Medium). Recommended: **Deprioritize in favor of IDD**.
 
-#### T3-INPUT-001: Virtual HID Miniport for Physical-Level Input Injection
+#### T3-INPUT-001: Virtual HID Miniport Assessment
 
-**What**: A virtual HID miniport driver injects input at the hardware abstraction level.
+**What**: A virtual HID miniport driver delivers input at the hardware abstraction level.
 
 **VIABILITY ASSESSMENT: Not needed for RMM.**
 
 Verified findings:
-- **No mainstream RMM or VNC tool uses virtual HID for input injection.** All use the helper-process-in-user-session + plain `SendInput` pattern.
-- Virtual HID drivers exist for **game anti-cheat evasion** (MouClassInputInjection, IbInputSimulator), not RMM.
-- ViGEm is for virtual gamepad emulation, not keyboard/mouse injection.
-- The only benefit of virtual HID is that injected events lack the `LLMHF_INJECTED` flag -- this matters for anti-cheat, not for RMM.
+- **No mainstream RMM or VNC tool uses virtual HID for remote support input delivery.** All use the helper-process-in-user-session + plain `SendInput` pattern.
+- Virtual HID drivers are commonly discussed for game input-filter circumvention, which is outside this project's scope.
+- ViGEm is for virtual gamepad emulation, not keyboard/mouse delivery.
+- The only relevant distinction is that virtual HID events lack the `LLMHF_INJECTED` flag; this is not needed for RMM.
 - Requires EV-signed kernel driver (Windows 10+) for production, adding significant complexity for zero practical benefit.
 
 **Revised assessment**: Value: **Low for RMM** (down from Very High). Recommended: **Deprioritize.** The helper process + `SendInput` pattern is sufficient and proven.
@@ -362,31 +362,31 @@ Verified findings:
 
 | Rank | Project | Language | Key Strength | Verified Detail | License |
 |---|---|---|---|---|---|
-| 1 | **Sunshine** (LizardByte) | C++ | Zero-copy DXGI+NVENC, HDR, shared texture handles + keyed mutex | Only project with true GPU-resident capture-to-encode pipeline; bypasses FFmpeg for NVENC | GPL-3.0 |
+| 1 | **Sunshine** (LizardByte) | C++ | Zero-copy DXGI+NVENC, HDR, shared texture handles + keyed mutex | Only project with true GPU-resident capture-to-encode pipeline; uses direct NVENC path | GPL-3.0 |
 | 2 | **OBS Studio** | C | Production-grade multi-source, smart DXGI/WGC selection, SDR/HDR tone-mapping | Best fallback logic; 3-second progressive retry; battle-tested error recovery | GPL-2.0 |
 | 3 | **RustDesk** | Rust | DXGI+WGC dual backend, cross-platform | **No zero-copy** -- reads back to CPU memory; ~37fps limit with software codecs; had DXGI memory leaks | AGPL-3.0 |
 | 4 | **UltraVNC** | C++ | Mature service-mode Winlogon desktop capture | Token impersonation pattern for secure desktop; legacy mirror driver support | GPL-2.0 |
 | 5 | **TightVNC** | C++ | Clean component-based service architecture | Redesigned in 2.0; good reference for service/helper separation | GPL-2.0 |
 
-### Input Injection
+### Input Delivery
 
 | Rank | Project | Language | Key Strength | Verified Detail | License |
 |---|---|---|---|---|---|
 | 1 | **MeshAgent** (this project) | C | Full helper-process bridge + SendInput + touch + BlockInput + SAS | Already implements the universal pattern correctly; cascading token candidates | Apache-2.0 |
-| 2 | **UltraVNC** | C++ | WTSQueryUserToken + ImpersonateLoggedOnUser + desktop switching | Mature service-mode injection with Ctrl+Alt+Del via Winlogon desktop thread | GPL-2.0 |
+| 2 | **UltraVNC** | C++ | WTSQueryUserToken + ImpersonateLoggedOnUser + desktop switching | Mature service-mode input delivery with Ctrl+Alt+Del via Winlogon desktop thread | GPL-2.0 |
 | 3 | **TightVNC** | C++ | Component-based service/helper separation | Clean architecture for delegation | GPL-2.0 |
-| 4 | **FreeRDP** | C | Comprehensive RDP input channel | Fundamentally different architecture (RDP session host, not VNC injection); not directly comparable | Apache-2.0 |
+| 4 | **FreeRDP** | C | Comprehensive RDP input channel | Fundamentally different architecture (RDP session host, not VNC helper input); not directly comparable | Apache-2.0 |
 
-Note: **ViGEm removed from ranking** -- it is a virtual gamepad driver for gaming, not used by any RMM tool for keyboard/mouse injection.
+Note: **ViGEm removed from ranking** -- it is a virtual gamepad driver for gaming, not used by any RMM tool for keyboard/mouse delivery.
 
-### Elevated Control / Persistence
+### Service Reliability And Drift Detection
 
 | Rank | Project | Language | Key Strength | Verified Detail | License |
 |---|---|---|---|---|---|
-| 1 | **MeshAgent** (this project) | C | Multi-persistence, watchdog mesh, lockdown orchestration, tamper detection | Most comprehensive open-source implementation; 12 lockdown features | Apache-2.0 |
+| 1 | **MeshAgent** (this project) | C | Service recovery, watchdog mesh, policy orchestration, drift detection | Broad open-source implementation; 12 policy features | Apache-2.0 |
 | 2 | **UltraVNC** | C++ | Service-mode elevation, secure desktop bridging | Solid but limited to VNC-specific concerns | GPL-2.0 |
 | 3 | **osquery** | C++ | System state detection and monitoring | Strong query/detection but no active protection | Apache-2.0/GPL-2.0 |
-| 4 | **Velociraptor** | Go | Forensic-grade VQL query engine | **Known LPE vulnerability**: `BUILTIN\Users` gets `WRITE_DAC` on install dir. No watchdog, no anti-tamper. | AGPL-3.0 |
+| 4 | **Velociraptor** | Go | Forensic-grade VQL query engine | **Known LPE vulnerability**: `BUILTIN\Users` gets `WRITE_DAC` on install dir. No watchdog or service recovery policy. | AGPL-3.0 |
 
 Note: **Velociraptor downranked** from #3 due to verified privilege escalation vulnerability (Synacktiv advisory).
 
@@ -404,7 +404,7 @@ Note: **Velociraptor downranked** from #3 due to verified privilege escalation v
 | T2-ELEVATED-001 | T2 | Early-Boot Service | Low | Medium | Standard service config | P3 |
 | T2-ELEVATED-002 | T2 | Credential Provider | Medium-High | High | multiOTP reference; production-viable | P5+ |
 | T2-SCREEN-002 | T2 | Virtual Desktop Awareness | Low | Low | Metadata only | P4 |
-| T2-INPUT-001 | T2 | UI Automation | Medium | Low | Not an input bypass; niche use | P5 (optional) |
+| T2-INPUT-001 | T2 | UI Automation | Medium | Low | Not a raw-input replacement; niche use | P5 (optional) |
 | T3-SCREEN-001 | T3 | IDD Virtual Display | **High** (revised down) | **Very High** | **Production-viable** (Citrix shipped it) | P5 |
 | T3-SCREEN-002 | T3 | DWM Shared Surface | Medium | **Low** (revised down) | **Not recommended** | Deprioritized |
 | T3-INPUT-001 | T3 | Virtual HID Driver | Very High | **Low** (revised down) | **Not needed for RMM** | Deprioritized |
@@ -417,7 +417,7 @@ Based on verified security research (Microsoft, Elastic, Arctic Wolf, ReliaQuest
 ### Attack Categories by Frequency
 
 1. **Credential compromise / RMM abuse of trust** (most common): Attackers install legitimate RMM agents (AnyDesk, ScreenConnect, Atera) as persistence. 51+ RMM solutions identified as attack vectors; 32 observed in a single quarter. 59.4% of ransomware cases began with external remote access.
-2. **BYOVD** (most effective against protected agents): Attackers load a legitimately signed but vulnerable kernel driver to kill security/RMM processes from kernel mode. Bypasses ALL userland AND kernel protections including ObRegisterCallbacks.
+2. **BYOVD** (most effective against protected agents): Attackers load a legitimately signed but vulnerable kernel driver to kill security/RMM processes from kernel mode. This can defeat many userland and kernel protections including ObRegisterCallbacks.
 3. **BYOI** (Bring Your Own Installer): Interrupt the agent's own upgrade mid-process to leave it in a non-running state.
 4. **Zero-day exploit of RMM platform**: CVE-2025-11492/CVE-2025-11493 (ConnectWise Automate AiTM RCE), SimpleHelp vulnerabilities (CISA advisory), BeyondTrust Remote Support zero-days.
 
@@ -448,14 +448,14 @@ Based on public documentation from ConnectWise, Datto, NinjaOne, and Huntress:
 This roadmap feeds into the realignment program as follows:
 
 - **LEDGER-008** (Session 1 bridge) -- T1-SCREEN-003, T1-INPUT-001 refine the existing bridge for secure desktop
-- **LEDGER-013** (Pre-protection capture) -- T1-SCREEN-001 provides DXGI capture; T3-SCREEN-001 (IDD) is the only path that guarantees capture of display-affinity-protected content
+- **LEDGER-013** (Pre-protection capture) -- T1-SCREEN-001 provides DXGI capture; T3-SCREEN-001 (IDD) is tracked only as a signed-driver evaluation that requires separate policy approval
 - New ledger entries (LEDGER-014, LEDGER-015, LEDGER-016) cover net-new capability
 
 ### New Ledger Entries
 
-- **LEDGER-014**: DXGI/WGC/IDD capture backend -- add hardware-composited capture alongside existing GDI path; IDD is the only path bypassing display affinity
-- **LEDGER-015**: Input injection verification -- audit existing Session 0 bridge and BlockInput management; verify SYSTEM IL is retained through helper chain
-- **LEDGER-016**: Elevated-control posture -- PPL awareness, early-boot readiness, credential provider research, service ACL hardening
+- **LEDGER-014**: DXGI/WGC/IDD capture backend -- add hardware-composited capture alongside existing GDI path; IDD remains a separately approved signed-driver evaluation
+- **LEDGER-015**: Input delivery verification -- audit existing Session 0 bridge and BlockInput management; verify SYSTEM IL is retained through helper chain
+- **LEDGER-016**: Privileged service posture -- PPL awareness, early-boot readiness, credential provider research, service ACL hardening
 
 ### New TODO Entries
 
@@ -463,10 +463,10 @@ This roadmap feeds into the realignment program as follows:
 - **TODO-033**: Implement WGC capture backend for cross-GPU fallback on Win10 1903+
 - **TODO-034**: Harden secure-desktop capture with explicit `OpenDesktop("Winlogon")` targeting and `EVENT_SYSTEM_DESKTOPSWITCH` listening
 - **TODO-035**: Audit and verify Session 0 bridge: confirm SYSTEM IL retention through helper chain, confirm `SendInput` reaches elevated windows
-- **TODO-036**: Verify `BlockInput` semantics: same-thread exemption, SYSTEM override of application blocks
-- **TODO-037**: Add PPL detection via `NtQueryInformationProcess(ProcessProtectionInformation)` to diagnostics and tamper detection
+- **TODO-036**: Verify `BlockInput` semantics: same-thread exemption and service-managed cleanup of application blocks
+- **TODO-037**: Add PPL detection via `NtQueryInformationProcess(ProcessProtectionInformation)` to diagnostics and drift detection
 - **TODO-038**: GPU-accelerated encoding spike: implement Sunshine-style zero-copy pipeline (shared texture handle + keyed mutex + NVENC)
-- **TODO-039**: Implement IDD virtual display driver with attestation signing for guaranteed display-affinity-bypassing capture
+- **TODO-039**: Evaluate IDD virtual display driver with attestation signing under the approved-driver policy
 
 ### New Regression Matrix Rows
 
@@ -474,13 +474,13 @@ This roadmap feeds into the realignment program as follows:
 - DXGI fallback: GDI engages cleanly on pre-Win8, RDP, or when DXGI reports `DXGI_ERROR_UNSUPPORTED`
 - Secure desktop capture: frame captured during active UAC prompt via explicit Winlogon desktop targeting from SYSTEM context
 - Input on elevated window: keystroke delivered to an elevated `cmd.exe` from SYSTEM-IL KVM helper in user session
-- BlockInput override: `SendInput` succeeds from same thread while `BlockInput(TRUE)` active; SYSTEM `BlockInput(FALSE)` overrides application block
-- PPL diagnostic accuracy: PPL processes reported in diagnostics without false tamper alarms
-- Display-affinity-protected capture (IDD only): frame captured from `WDA_EXCLUDEFROMCAPTURE` window via IDD (DXGI/WGC/GDI all render this as black)
+- BlockInput cleanup: `SendInput` succeeds from same thread while `BlockInput(TRUE)` active; service-managed `BlockInput(FALSE)` restores input state for approved sessions
+- PPL diagnostic accuracy: PPL processes reported in diagnostics without false drift alarms
+- Display-affinity handling: DXGI/WGC/GDI render `WDA_EXCLUDEFROMCAPTURE` windows as black; any IDD evaluation requires separate approved-driver policy
 
 ### Corrected Regression Matrix Rows (from prior version)
 
-**REMOVED**: "DXGI capture produces a valid frame including a `WDA_EXCLUDEFROMCAPTURE` window" -- this is FALSE. DXGI respects display affinity. Only IDD can capture display-affinity-protected content. The DXGI regression test should verify DX overlay capture (content GDI misses), not display-affinity bypass.
+**REMOVED**: "DXGI capture produces a valid frame including a `WDA_EXCLUDEFROMCAPTURE` window" -- this is FALSE. DXGI respects display affinity. The DXGI regression test should verify DX overlay capture (content GDI misses), not protected-content capture.
 
 ## Sources
 

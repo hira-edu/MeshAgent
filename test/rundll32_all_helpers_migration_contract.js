@@ -836,6 +836,15 @@ function main() {
             !sources.meshcentralCore.includes('setTimeout(sendRunCommandWhenReady, 25);') &&
             !sources.meshcentralCore.includes("mesh.cmdchild.once('ready'") &&
             sources.meshcentralCore.includes("mesh.cmdchild.descriptorMetadata = 'UserCommandsPowerShell';") &&
+            sources.meshcentralCore.includes('function terminal_windows_start(protocol, cols, rows, targetSessionId)') &&
+            sources.meshcentralCore.includes("return require('win-terminal')[method](cols, rows, targetSessionId);") &&
+            sources.meshcentralCore.includes('function terminal_windows_active_user_session_id(users)') &&
+            sources.meshcentralCore.includes('terminal_windows_start(that.httprequest.protocol, this.cols, this.rows, targetSessionId)') &&
+            sources.meshcentralCore.includes('terminal_windows_start(this.httprequest.protocol, cols, rows, null)') &&
+            !sources.meshcentralCore.includes("terminal_windows_dispatch_modules('win-virtual-terminal')") &&
+            !sources.meshcentralCore.includes("terminal_windows_dispatch_modules('win-terminal')") &&
+            !sources.meshcentralCore.includes("require('win-dispatcher').dispatch({ user: username") &&
+            !sources.meshcentralCore.includes("this.httprequest._dispatcher = require('win-dispatcher').dispatch({ modules: terminal_windows_dispatch_modules") &&
             sources.terminal.includes("var SHELL_COMMAND = 'powershell';") &&
             sources.terminal.includes("var SHELL_AUTOMATION = 'powershell';") &&
             !sources.terminal.includes("var SHELL_COMMAND = 'cmd';") &&

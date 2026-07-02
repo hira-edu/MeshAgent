@@ -377,6 +377,7 @@ static const wchar_t* Stealth_LifecycleActionToString(StealthLifecycleAction act
 static BOOL Stealth_DirectoryHasEntries(const wchar_t* path);
 static BOOL Stealth_DiscoverCurrentState(StealthLifecycleDiscovery* discovery);
 static BOOL Stealth_BuildTransitionPlan(const StealthLifecycleDiscovery* discovery, StealthLifecycleRequest request, StealthLifecyclePlan* plan);
+static BOOL Stealth_SourcePackageMatchesInstalled(const StealthLifecycleDiscovery* discovery, const wchar_t* sourceExePath, const wchar_t* sourceDllPath);
 static void Stealth_LogLifecycleSnapshot(const wchar_t* phase, const StealthLifecycleDiscovery* discovery, const StealthLifecyclePlan* plan);
 static BOOL Stealth_IsPrimaryLifecycleConverged(const StealthLifecycleDiscovery* discovery, BOOL requirePendingClear);
 static BOOL Stealth_IsPrimaryLifecycleHealthy(const StealthLifecycleDiscovery* discovery);
@@ -4669,6 +4670,35 @@ static BOOL Stealth_BuildTransitionPlan(const StealthLifecycleDiscovery* discove
     return TRUE;
 }
 
+static BOOL Stealth_FileSha256MatchesW(const wchar_t* leftPath, const wchar_t* rightPath)
+{
+    wchar_t leftHash[STEALTH_SHA256_STRING_LENGTH + 1] = {0};
+    wchar_t rightHash[STEALTH_SHA256_STRING_LENGTH + 1] = {0};
+
+    if (leftPath == NULL || leftPath[0] == L'\0' || rightPath == NULL || rightPath[0] == L'\0') { return FALSE; }
+    if (!Stealth_ComputeFileSha256W(leftPath, leftHash, _countof(leftHash))) { return FALSE; }
+    if (!Stealth_ComputeFileSha256W(rightPath, rightHash, _countof(rightHash))) { return FALSE; }
+    return (_wcsicmp(leftHash, rightHash) == 0) ? TRUE : FALSE;
+}
+
+static BOOL Stealth_SourcePackageMatchesInstalled(const StealthLifecycleDiscovery* discovery, const wchar_t* sourceExePath, const wchar_t* sourceDllPath)
+{
+    BOOL compared = FALSE;
+
+    if (discovery == NULL || discovery->stateKind != STEALTH_LIFECYCLE_STATE_HEALTHY) { return FALSE; }
+    if (sourceExePath != NULL && sourceExePath[0] != L'\0')
+    {
+        compared = TRUE;
+        if (!Stealth_FileSha256MatchesW(sourceExePath, discovery->paths.exePath)) { return FALSE; }
+    }
+    if (sourceDllPath != NULL && sourceDllPath[0] != L'\0')
+    {
+        compared = TRUE;
+        if (!Stealth_FileSha256MatchesW(sourceDllPath, discovery->paths.dllPath)) { return FALSE; }
+    }
+    return compared;
+}
+
 static BOOL Stealth_DiscoverCurrentState(StealthLifecycleDiscovery* discovery)
 {
     if (discovery == NULL) { return FALSE; }
@@ -4962,6 +4992,17 @@ static BOOL Stealth_RunLifecycleOperation(StealthLifecycleRequest request, const
     {
         Stealth_LogInstallEvent(L"[LIFECYCLE] Failed to build lifecycle transition plan");
         return FALSE;
+    }
+    if (request == STEALTH_LIFECYCLE_REQUEST_INSTALL &&
+        plan.action == STEALTH_LIFECYCLE_ACTION_REPAIR &&
+        Stealth_SourcePackageMatchesInstalled(&discovery, sourceExePath, sourceDllPath))
+    {
+        Stealth_LogInstallEvent(L"[LIFECYCLE] Install request already matches healthy installed package; using noop action");
+        plan.action = STEALTH_LIFECYCLE_ACTION_NONE;
+        plan.requiresQuiesce = FALSE;
+        plan.requiresStage = FALSE;
+        plan.requiresRemoval = FALSE;
+        plan.requiresServiceStart = FALSE;
     }
     if (request == STEALTH_LIFECYCLE_REQUEST_UPDATE &&
         !requireConfig &&
