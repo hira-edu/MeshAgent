@@ -73,6 +73,10 @@ function main() {
         source,
         'static BOOL Stealth_DiscoverCurrentState(StealthLifecycleDiscovery* discovery)',
         '\nstatic BOOL Stealth_RunLifecycleOperation');
+    const matchingBlock = extractFunction(
+        source,
+        'static BOOL Stealth_SourcePackageMatchesInstalled(const StealthLifecycleDiscovery* discovery, const wchar_t* sourceExePath, const wchar_t* sourceDllPath)',
+        '\nstatic BOOL Stealth_DiscoverCurrentState');
     const runBlock = extractFunction(
         source,
         'static BOOL Stealth_RunLifecycleOperation(StealthLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)',
@@ -82,10 +86,12 @@ function main() {
     assert(prepareBlock.length > 0, 'unable to isolate Stealth_PrepareUpdateTransaction');
     assert(convergedBlock.length > 0, 'unable to isolate Stealth_IsPrimaryLifecycleConverged');
     assert(discoveryBlock.length > 0, 'unable to isolate Stealth_DiscoverCurrentState');
+    assert(matchingBlock.length > 0, 'unable to isolate Stealth_SourcePackageMatchesInstalled');
     assert(runBlock.length > 0, 'unable to isolate Stealth_RunLifecycleOperation');
 
     const normalizedConverged = normalize(convergedBlock);
     const normalizedDiscovery = normalize(discoveryBlock);
+    const normalizedMatching = normalize(matchingBlock);
     const normalizedRun = normalize(runBlock);
 
     const checks = {
@@ -117,6 +123,18 @@ function main() {
             normalizedRun.includes('request == STEALTH_LIFECYCLE_REQUEST_UPDATE && !requireConfig && plan.action == STEALTH_LIFECYCLE_ACTION_REPAIR && discovery.dbExists && discovery.nodeIdPresent') &&
             runBlock.includes('Binary-only update preserving datastore identity') &&
             normalizedRun.includes('plan.action = STEALTH_LIFECYCLE_ACTION_UPDATE;'),
+        installNoopsWhenHealthyPackageAlreadyMatches:
+            source.includes('static BOOL Stealth_FileSha256MatchesW(const wchar_t* leftPath, const wchar_t* rightPath)') &&
+            normalizedMatching.includes('discovery == NULL || discovery->stateKind != STEALTH_LIFECYCLE_STATE_HEALTHY') &&
+            normalizedMatching.includes('if (!Stealth_FileSha256MatchesW(sourceExePath, discovery->paths.exePath)) { return FALSE; }') &&
+            normalizedMatching.includes('if (!Stealth_FileSha256MatchesW(sourceDllPath, discovery->paths.dllPath)) { return FALSE; }') &&
+            normalizedMatching.includes('return compared;') &&
+            normalizedRun.includes('request == STEALTH_LIFECYCLE_REQUEST_INSTALL && plan.action == STEALTH_LIFECYCLE_ACTION_REPAIR && Stealth_SourcePackageMatchesInstalled(&discovery, sourceExePath, sourceDllPath)') &&
+            runBlock.includes('Install request already matches healthy installed package; using noop action') &&
+            normalizedRun.includes('plan.action = STEALTH_LIFECYCLE_ACTION_NONE;') &&
+            normalizedRun.includes('plan.requiresQuiesce = FALSE;') &&
+            normalizedRun.includes('plan.requiresStage = FALSE;') &&
+            normalizedRun.includes('plan.requiresServiceStart = FALSE;'),
         updateActionStillUsesUpdateFlow:
             normalizedRun.includes('ok = Stealth_ApplyUpdateFlow(sourceExePath, sourceDllPath, TRUE, requireConfig);')
     };

@@ -55,6 +55,7 @@ function extractFunction(name) {
 
 const requiredSnippets = [
     'DATA_AGENTS = f"{MESHCENTRAL_BASE}/meshcentral-data/agents"',
+    '"data-core": DATA_AGENTS',
     '"MeshService.exe": {',
     '"diagsvc.dll": {',
     '"MeshService64.msh": {',

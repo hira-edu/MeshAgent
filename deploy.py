@@ -26,7 +26,12 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import UTC, datetime
+import zipfile
+try:
+    from datetime import UTC, datetime
+except ImportError:
+    from datetime import datetime, timezone
+    UTC = timezone.utc
 from pathlib import Path
 
 # Fix Windows console encoding
@@ -79,14 +84,18 @@ PUBLISH_ROLE_BACKUP_DIRS = {
 }
 HASHAGENTS_MANIFEST_ROLES = ("module", "signed")
 CORE_PUBLISH_ROLE_DIRS = {
-    "data-core": DATA_ROOT,
+    "data-core": DATA_AGENTS,
     "module-core": MODULE_AGENTS,
     "module-root": f"{MESHCENTRAL_BASE}/node_modules/meshcentral",
+    "module-public": f"{MESHCENTRAL_BASE}/node_modules/meshcentral/public",
+    "web-public": f"{MESHCENTRAL_BASE}/meshcentral-web/public",
 }
 CORE_PUBLISH_ROLE_BACKUP_DIRS = {
     "data-core": "datacore",
     "module-core": "modulecore",
     "module-root": "moduleroot",
+    "module-public": "modulepublic",
+    "web-public": "webpublic",
 }
 
 # Local build artifacts to deploy
@@ -271,6 +280,11 @@ CORE_ARTIFACTS = {
         "remote_relative_path": "modules_meshcore_min/win-virtual-terminal.min.js",
         "publish_targets": ("data-core", "module-core"),
     },
+    "public/scripts/custom.js": {
+        "local_path": "../MeshCentral/public/scripts/custom.js",
+        "remote_relative_path": "scripts/custom.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
 }
 
 # Additional deploy target for MasterService (public userfiles for agent download)
@@ -297,6 +311,7 @@ WINDOWS_LIFECYCLE_DLL = os.environ.get("MESHCENTRAL_LIFECYCLE_DLL", WINDOWS_BRAN
 WINDOWS_LIFECYCLE_STATE_DIR = os.environ.get("MESHCENTRAL_LIFECYCLE_STATE_DIR", WINDOWS_BRANDING_DEFAULTS["lifecycle_state_dir"])
 REMOTE_COMMAND_RETRIES = int(os.environ.get("MESHCENTRAL_SSH_RETRIES", "3"))
 REMOTE_RETRY_DELAY_SECONDS = float(os.environ.get("MESHCENTRAL_SSH_RETRY_DELAY", "2"))
+REMOTE_COMMAND_TIMEOUT_SECONDS = int(os.environ.get("MESHCENTRAL_REMOTE_COMMAND_TIMEOUT", "180"))
 RETRYABLE_REMOTE_ERROR_SNIPPETS = (
     "connection timed out",
     "timed out",
@@ -343,14 +358,34 @@ def run_remote_process(full_cmd, timeout):
     last_timeout = None
     attempts = max(1, REMOTE_COMMAND_RETRIES)
     for attempt in range(1, attempts + 1):
+        stdout_path = None
+        stderr_path = None
         try:
-            result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=timeout)
+            with tempfile.NamedTemporaryFile(delete=False) as stdout_file:
+                stdout_path = Path(stdout_file.name)
+            with tempfile.NamedTemporaryFile(delete=False) as stderr_file:
+                stderr_path = Path(stderr_file.name)
+            with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_handle, stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_handle:
+                completed = subprocess.run(full_cmd, stdout=stdout_handle, stderr=stderr_handle, stdin=subprocess.DEVNULL, timeout=timeout)
+            result = subprocess.CompletedProcess(
+                completed.args,
+                completed.returncode,
+                stdout_path.read_text(encoding="utf-8", errors="replace"),
+                stderr_path.read_text(encoding="utf-8", errors="replace"),
+            )
         except subprocess.TimeoutExpired as ex:
             last_timeout = ex
             if attempt < attempts:
                 time.sleep(REMOTE_RETRY_DELAY_SECONDS * attempt)
                 continue
             return None, ex
+        finally:
+            for temp_output in (stdout_path, stderr_path):
+                if temp_output is not None:
+                    try:
+                        temp_output.unlink()
+                    except OSError:
+                        pass
         last_result = result
         if should_retry_remote_result(result) and attempt < attempts:
             time.sleep(REMOTE_RETRY_DELAY_SECONDS * attempt)
@@ -373,10 +408,10 @@ def get_remote_target():
     return f"{USER}@{SSH_HOST}" if USER else SSH_HOST
 
 
-def ssh_cmd(command, capture=True, check=True):
+def ssh_cmd(command, capture=True, check=True, timeout=None):
     """Execute a command on the remote server via SSH."""
     full_cmd = build_remote_cmd("ssh") + [get_remote_target(), command]
-    result, timeout_error = run_remote_process(full_cmd, timeout=60)
+    result, timeout_error = run_remote_process(full_cmd, timeout=timeout or REMOTE_COMMAND_TIMEOUT_SECONDS)
     if timeout_error is not None:
         if check:
             print("[ERROR] Remote command timed out:")
@@ -2198,7 +2233,11 @@ def cmd_stage(args):
             print(f"  [FOUND] {name:<30s} {size_mb:>6.1f} MB  ({mtime})")
         else:
             print(f"  [SKIP]  {name:<30s} not found at {config['local_path']}")
-    found = local_artifacts
+    agent_artifacts = get_agent_publish_artifacts(local_artifacts)
+    public_artifacts = get_public_download_artifacts(local_artifacts)
+    found = agent_artifacts + public_artifacts
+    if any(entry["name"] == "MasterService.exe" for entry in local_artifacts) and not public_artifacts:
+        print("  [SKIP]  MasterService.exe public userfiles target not configured; not staging this artifact.")
     for entry in core_artifacts:
         local_path = Path(entry["local_path"])
         size_kb = local_path.stat().st_size / 1024
@@ -2210,14 +2249,58 @@ def cmd_stage(args):
         return False
 
     staged_entries = found + core_artifacts
-    print(f"\nUploading {len(staged_entries)} artifact(s) to {SERVER}:{STAGING_DIR}/...")
-    for entry in staged_entries:
-        print(f"  Uploading {entry['name']}...", end=" ", flush=True)
-        if scp_upload(entry["local_path"], f"{STAGING_DIR}/{get_staging_filename(entry)}"):
-            print("OK")
-        else:
+    remote_bundle = f"{STAGING_DIR}/.meshagent-stage-{os.getpid()}-{int(time.time() * 1000)}.zip"
+    local_bundle = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="meshagent-stage-", suffix=".zip", delete=False) as bundle_file:
+            local_bundle = Path(bundle_file.name)
+        with zipfile.ZipFile(local_bundle, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for entry in staged_entries:
+                bundle.write(entry["local_path"], arcname=get_staging_filename(entry))
+
+        print(f"\nUploading {len(staged_entries)} artifact(s) as one staging bundle to {SERVER}:{STAGING_DIR}/...")
+        if scp_upload(local_bundle, remote_bundle) is False:
             print("FAILED")
             return False
+
+        payload = {
+            "bundle": remote_bundle,
+            "staging": STAGING_DIR,
+            "members": [get_staging_filename(entry) for entry in staged_entries],
+        }
+        remote_script = f"""python3 - <<'PY'
+import json
+import pathlib
+import shutil
+import zipfile
+
+payload = json.loads({json.dumps(json.dumps(payload))})
+bundle_path = pathlib.Path(payload["bundle"])
+staging_dir = pathlib.Path(payload["staging"])
+staging_dir.mkdir(parents=True, exist_ok=True)
+with zipfile.ZipFile(bundle_path, "r") as bundle:
+    names = set(bundle.namelist())
+    missing = [member for member in payload["members"] if member not in names]
+    if missing:
+        raise SystemExit("staging bundle missing members: " + ", ".join(missing))
+    for member in payload["members"]:
+        target = staging_dir / member
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with bundle.open(member, "r") as source, target.open("wb") as destination:
+            shutil.copyfileobj(source, destination)
+try:
+    bundle_path.unlink()
+except FileNotFoundError:
+    pass
+PY"""
+        if ssh_cmd(remote_script) is None:
+            return False
+    finally:
+        if local_bundle is not None:
+            try:
+                local_bundle.unlink()
+            except OSError:
+                pass
 
     # Verify uploads
     print("\nVerifying staged files...")

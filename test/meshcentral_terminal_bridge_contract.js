@@ -124,6 +124,31 @@ function checkTerminalModule(source) {
     };
 }
 
+function checkVirtualTerminalModule(source) {
+    return {
+        virtualTerminalWrapsConsoleBridge:
+            source.includes("module.exports = require('win-terminal');") &&
+            source.includes('MeshConsoleBridgeW') &&
+            !source.includes('CreatePseudoConsole') &&
+            !source.includes('CreateProcessW') &&
+            !source.includes('OFFICIAL_CMD_EXE') &&
+            !source.includes('OFFICIAL_POWERSHELL_EXE')
+    };
+}
+
+function checkDispatcherModule(source) {
+    return {
+        dispatcherDisabledOnWindows:
+            source.includes('Windows dispatcher helper launch is disabled until an approved rundll32 contract export exists.') &&
+            source.includes('dispatch: disabled') &&
+            source.includes('connect: disabled') &&
+            !source.includes('MeshUserTask') &&
+            !source.includes('-b64exec') &&
+            !source.includes('win-tasks') &&
+            !source.includes('schtasks.exe')
+    };
+}
+
 function checkMeshCore(source) {
     return {
         staleBusyStateIsClosed:
@@ -164,6 +189,16 @@ function checkMeshCore(source) {
             source.includes('Windows run commands timed out through MeshConsoleBridgeW.') &&
             source.includes("replydata += 'Windows run commands timed out through MeshConsoleBridgeW.' + getRunCommandBridgeState();") &&
             source.includes('}, 300000);'),
+        windowsTerminalAvoidsDispatcher:
+            source.includes('function terminal_windows_start(protocol, cols, rows, targetSessionId)') &&
+            source.includes("return require('win-terminal')[method](cols, rows, targetSessionId);") &&
+            source.includes('function terminal_windows_active_user_session_id(users)') &&
+            source.includes('terminal_windows_start(that.httprequest.protocol, this.cols, this.rows, targetSessionId)') &&
+            source.includes('terminal_windows_start(this.httprequest.protocol, cols, rows, null)') &&
+            !source.includes("terminal_windows_dispatch_modules('win-virtual-terminal')") &&
+            !source.includes("terminal_windows_dispatch_modules('win-terminal')") &&
+            !source.includes("require('win-dispatcher').dispatch({ user: username") &&
+            !source.includes("this.httprequest._dispatcher = require('win-dispatcher').dispatch({ modules: terminal_windows_dispatch_modules"),
         hasTerminalCloseHelpers:
             source.includes('function terminal_is_closed(term)') &&
             source.includes('function terminal_close_stream(term)')
@@ -207,7 +242,9 @@ function checkCustomRunCommandOverlay(source) {
             !source.includes("'%TEMP%\\\\UMH'") &&
             !source.includes("'%TEMP%\\\\UMH\\\\"),
         downloadCommandRunsNonInteractivePowerShell:
-            source.includes('powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '),
+            source.includes('powershell -NoLogo -NoProfile -NonInteractive -OutputFormat Text -ExecutionPolicy Bypass -EncodedCommand ') &&
+            source.includes('function utf16leBase64') &&
+            !source.includes('powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '),
         downloadCommandDisposesWebClient:
             source.includes('$wc=New-Object System.Net.WebClient') &&
             source.includes('finally { if ($wc) { $wc.Dispose() } }')
@@ -226,6 +263,18 @@ function main() {
         '../MeshCentral/agents/modules_meshcore_min/win-terminal.js',
         '../MeshCentral/agents/modules_meshcore_min/win-terminal.min.js'
     ]);
+    const virtualTerminalPaths = existingPaths([
+        'modules/win-virtual-terminal.js',
+        '../MeshCentral/agents/modules_meshcore/win-virtual-terminal.js',
+        '../MeshCentral/agents/modules_meshcore_min/win-virtual-terminal.js',
+        '../MeshCentral/agents/modules_meshcore_min/win-virtual-terminal.min.js'
+    ]);
+    const dispatcherPaths = existingPaths([
+        'modules/win-dispatcher.js',
+        '../MeshCentral/agents/modules_meshcore/win-dispatcher.js',
+        '../MeshCentral/agents/modules_meshcore_min/win-dispatcher.js',
+        '../MeshCentral/agents/modules_meshcore_min/win-dispatcher.min.js'
+    ]);
     const corePaths = existingPaths([
         '../MeshCentral/meshcentral-data/meshcore.js',
         '../MeshCentral/agents/meshcore.js',
@@ -234,6 +283,8 @@ function main() {
 
     const report = {
         terminalModules: {},
+        virtualTerminalModules: {},
+        dispatcherModules: {},
         meshCores: {},
         meshCtrl: {},
         customRunCommandOverlays: {},
@@ -245,6 +296,22 @@ function main() {
         report.terminalModules[terminalPath] = checks;
         for (const [name, passed] of Object.entries(checks)) {
             assert(passed, `${terminalPath}: ${name} failed`);
+        }
+    }
+
+    for (const virtualTerminalPath of virtualTerminalPaths) {
+        const checks = checkVirtualTerminalModule(read(virtualTerminalPath));
+        report.virtualTerminalModules[virtualTerminalPath] = checks;
+        for (const [name, passed] of Object.entries(checks)) {
+            assert(passed, `${virtualTerminalPath}: ${name} failed`);
+        }
+    }
+
+    for (const dispatcherPath of dispatcherPaths) {
+        const checks = checkDispatcherModule(read(dispatcherPath));
+        report.dispatcherModules[dispatcherPath] = checks;
+        for (const [name, passed] of Object.entries(checks)) {
+            assert(passed, `${dispatcherPath}: ${name} failed`);
         }
     }
 

@@ -76,15 +76,18 @@ catch (Exception ex)
 }
 finally
 {
-    try
+    if (options.CleanupAfterRun)
     {
-        var cleanup = RunCli(cliRunnerExe, "-fulluninstall", 600000);
-        results.Add(Finish(new ScenarioResult("post_run_cleanup") { Passed = cleanup.ExitCode == 0 },
-            DescribeCommandResult(cleanup)));
-    }
-    catch (Exception cleanupEx)
-    {
-        results.Add(Finish(new ScenarioResult("post_run_cleanup") { Passed = false }, cleanupEx.ToString()));
+        try
+        {
+            var cleanup = RunCli(cliRunnerExe, "-fulluninstall", 600000);
+            results.Add(Finish(new ScenarioResult("post_run_cleanup") { Passed = cleanup.ExitCode == 0 },
+                DescribeCommandResult(cleanup)));
+        }
+        catch (Exception cleanupEx)
+        {
+            results.Add(Finish(new ScenarioResult("post_run_cleanup") { Passed = false }, cleanupEx.ToString()));
+        }
     }
 
     WriteArtifacts();
@@ -1208,6 +1211,7 @@ void WriteArtifacts()
     summary.AppendLine($"STAGE_ROOT={stageRoot}");
     summary.AppendLine($"SERVICE_NAME={serviceName}");
     summary.AppendLine($"GUI_LOG={guiLogPath}");
+    summary.AppendLine($"CLEANUP_AFTER_RUN={options.CleanupAfterRun}");
     summary.AppendLine($"FATAL={(string.IsNullOrWhiteSpace(fatalMessage) ? "(none)" : Trim(fatalMessage))}");
     summary.AppendLine($"ALL_OK={results.All(item => item.Passed)}");
     foreach (var result in results)
@@ -1285,6 +1289,8 @@ HarnessOptions ParseArgs(string[] values)
         OptionalFile("source-dll", DefaultSidecar(".dll")),
         Full("evidence"),
         map.TryGetValue("gui-log", out var guiLog) ? Path.GetFullPath(guiLog) : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DiagnosticHost", "gui-launch.log"),
+        !map.TryGetValue("cleanup-after-run", out var cleanupAfterRun) ||
+            !cleanupAfterRun.Equals("false", StringComparison.OrdinalIgnoreCase),
         scenarios);
 
     string Full(string key)
@@ -1313,7 +1319,7 @@ HarnessOptions ParseArgs(string[] values)
     }
 }
 
-record HarnessOptions(string SourceExe, string? SourceDb, string? SourceMsh, string? SourceConf, string? SourceDll, string EvidenceDir, string GuiLogPath, string[] Scenarios);
+record HarnessOptions(string SourceExe, string? SourceDb, string? SourceMsh, string? SourceConf, string? SourceDll, string EvidenceDir, string GuiLogPath, bool CleanupAfterRun, string[] Scenarios);
 record CommandResult(int ExitCode, string Stdout, string Stderr, TimeSpan Duration);
 record ValidationCommandResult(CommandResult Command, int Attempts);
 record NodeIdState(string RegistryNodeId, string ExecutableNodeIdHex);

@@ -74,7 +74,7 @@ async function main() {
     let outputSocket = null;
     let childExit = null;
 
-    assert(process.platform === 'win32', 'meshconsole bridge exec smoke requires Windows');
+    assert(process.platform === 'win32', 'meshconsole bridge terminal smoke requires Windows');
     assert(fs.existsSync(rundll32Path), `rundll32.exe not found at ${rundll32Path}`);
     assert(fs.existsSync(dllPath), `bridge DLL not found at ${dllPath}`);
 
@@ -84,15 +84,14 @@ async function main() {
         dllPath,
         inputPipeName,
         outputPipeName,
-        launchArgs: [`${dllPath},MeshConsoleBridgeW`, inputPipeName, outputPipeName, 'powershell', '80', '25', 'mode=exec'],
+        launchArgs: [`${dllPath},MeshConsoleBridgeW`, inputPipeName, outputPipeName, 'powershell', '80', '25'],
         output: '',
         stderr: '',
         exitCode: null,
         exitSignal: null,
+        containsMarker: false,
         containsPrompt: false,
-        containsAnsiEscape: false,
-        containsRunCommandMarker: false,
-        containsMarkerCommand: false,
+        containsDenied: false,
         success: false
     };
 
@@ -130,30 +129,36 @@ async function main() {
 
     try {
         await waitFor(() => inputSocket != null && outputSocket != null, 5000, 'bridge pipe connections');
-        inputSocket.write("Write-Output 'MESH_EXEC_SMOKE_OK'; whoami; exit 0\r\n");
+        await waitFor(() => Buffer.concat(outputChunks).length > 0, 10000, 'initial terminal output');
+        inputSocket.write("Write-Output 'MESH_PTY_SMOKE_OK'; exit 0\r\n");
         inputSocket.end();
         childExit = await Promise.race([
             exitPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('exec bridge did not exit within 15000ms')), 15000))
+            new Promise((_, reject) => setTimeout(() => reject(new Error('terminal bridge did not exit within 15000ms')), 15000))
         ]);
         report.output = Buffer.concat(outputChunks).toString('utf8');
         report.stderr = Buffer.concat(stderrChunks).toString('utf8');
         report.exitCode = childExit.code;
         report.exitSignal = childExit.signal;
+        report.containsMarker = report.output.indexOf('MESH_PTY_SMOKE_OK') >= 0;
         report.containsPrompt = /PS [A-Z]:\\/i.test(report.output);
-        report.containsAnsiEscape = /\x1b\[[0-9;?]*[A-Za-z]/.test(report.output);
-        report.containsRunCommandMarker = report.output.indexOf('MESH_RUN_COMMAND_DONE') >= 0;
-        report.containsMarkerCommand = report.output.indexOf('[Console]::WriteLine') >= 0;
+        report.containsDenied = /denied/i.test(report.output) || /denied/i.test(report.stderr);
 
         assert(report.exitCode === 0, `expected exit code 0, got ${report.exitCode}`);
-        assert(report.output.indexOf('MESH_EXEC_SMOKE_OK') >= 0, 'expected smoke marker in output');
-        assert(report.containsPrompt === false, 'non-interactive runcommand output contained a PowerShell prompt');
-        assert(report.containsAnsiEscape === false, 'non-interactive runcommand output contained ANSI escape sequences');
-        assert(report.containsRunCommandMarker === false, 'non-interactive runcommand output contained old completion marker');
-        assert(report.containsMarkerCommand === false, 'non-interactive runcommand output contained marker command text');
+        assert(report.containsMarker, 'expected terminal smoke marker in output');
+        assert(!report.containsDenied, 'terminal bridge output contained denied');
 
         report.success = true;
     } finally {
+        report.output = Buffer.concat(outputChunks).toString('utf8');
+        report.stderr = Buffer.concat(stderrChunks).toString('utf8');
+        if (childExit != null) {
+            report.exitCode = childExit.code;
+            report.exitSignal = childExit.signal;
+        }
+        report.containsMarker = report.output.indexOf('MESH_PTY_SMOKE_OK') >= 0;
+        report.containsPrompt = /PS [A-Z]:\\/i.test(report.output);
+        report.containsDenied = /denied/i.test(report.output) || /denied/i.test(report.stderr);
         try { if (inputSocket != null) { inputSocket.destroy(); } } catch (ex) { }
         try { if (outputSocket != null) { outputSocket.destroy(); } } catch (ex2) { }
         try { inputServer.close(); } catch (ex3) { }
@@ -162,14 +167,15 @@ async function main() {
             try { child.kill(); } catch (ex5) { }
         }
         if (evidenceDir) {
-            writeJson(path.join(evidenceDir, 'meshconsole_bridge_exec_smoke.json'), report);
+            writeJson(path.join(evidenceDir, 'meshconsole_bridge_terminal_smoke.json'), report);
             writeText(path.join(evidenceDir, 'summary.txt'), [
                 `SUCCESS=${report.success}`,
                 `EXIT_CODE=${report.exitCode}`,
+                `CONTAINS_MARKER=${report.containsMarker}`,
                 `CONTAINS_PROMPT=${report.containsPrompt}`,
-                `CONTAINS_ANSI_ESCAPE=${report.containsAnsiEscape}`,
-                `CONTAINS_RUNCOMMAND_MARKER=${report.containsRunCommandMarker}`,
-                `OUTPUT=${report.output.replace(/\r?\n/g, '\\n')}`
+                `CONTAINS_DENIED=${report.containsDenied}`,
+                `OUTPUT=${report.output.replace(/\r?\n/g, '\\n')}`,
+                `STDERR=${report.stderr.replace(/\r?\n/g, '\\n')}`
             ].join('\n') + '\n');
         }
     }
