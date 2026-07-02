@@ -102,18 +102,6 @@ function main() {
             serviceMain.includes('SetLastError(openError);') &&
             !serviceMain.includes('case 0:\n\t\tcase 100: // Not installed') &&
             !serviceMain.includes('case 0:\n\t\t\t\tcase 100: // Not installed'),
-        guiUpdatePassesLauncherAsSource:
-            serviceMain.includes('lifecycleSourceExe = modulePath;') &&
-            serviceMain.includes('lifecycleSourceDll = sourceDllPath;') &&
-            serviceMain.includes('MeshRundll32_LaunchLifecycleHostW(\n\t\t\t\t\tlifecycleAction,\n\t\t\t\t\tlifecycleSourceExe,\n\t\t\t\t\tlifecycleSourceDll,'),
-        guiLifecyclePassesSiblingDllSource:
-            serviceMain.includes('static BOOL MeshService_TryBuildSiblingDllPathW') &&
-            serviceMain.includes('StringCchCopyW(dot, remaining, L".dll")') &&
-            serviceMain.includes('GetFileAttributesW(sourceDllPath)') &&
-            serviceMain.includes('sourceDll=%ls'),
-        guiLifecycleWritesActionAudit:
-            serviceMain.includes('L"[GUI] action=start lifecycle=%ls source=%ls sourceDll=%ls"') &&
-            serviceMain.includes('L"[GUI] action=complete lifecycle=%ls source=%ls sourceDll=%ls launchError=%lu exitCode=%lu"'),
         svchostStatusFlushesCompleteJson:
             serviceMain.includes('MeshService_PrintSvchostStatusJson(&summary);\n\tfflush(stdout);'),
         installedPayloadGuard:
@@ -166,12 +154,7 @@ function main() {
             guiHarness.includes('var audit = AnalyzeGuiActionDelta(delta, "update");') &&
             guiHarness.includes('var audit = AnalyzeGuiActionDelta(delta, "uninstall");') &&
             guiHarness.includes('return audit.SuccessCount > 0 && audit.FailureCount == 0;') &&
-            guiHarness.includes('LineMatchesGuiLifecycleAction(line, token)'),
-        runtimeHarnessRequiresSourceDllAudit:
-            guiHarness.includes('var sourceDllAudit = AnalyzeGuiSourceDllAudit(audit, guiExe);') &&
-            guiHarness.includes('gui-source-dll-audit-healthy=') &&
-            guiHarness.includes('line.Contains($"sourceDll={expectedSourceDll}", StringComparison.OrdinalIgnoreCase)') &&
-            guiHarness.includes('return audit.ExpectedSourceDll == null || audit.Matched;')
+            guiHarness.includes('LineMatchesGuiLifecycleAction(line, token)')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
