@@ -140,6 +140,9 @@ const COLOR_BACKGROUND = 1;
 var promise = require('promise');
 var GM = require('_GenericMarshal');
 var MessagePump = require('win-message-pump');
+var childProcess = require('child_process');
+var fs = require('fs');
+var net = require('net');
 
 var sh = require('monitor-info')._shcore;
 var SHM = GM.CreateNativeProxy('Shlwapi.dll');
@@ -634,6 +637,282 @@ function createLocal(title, caption, username, options)
     return (ret);
 }
 
+var userConsentBridgeCounter = 0;
+
+function expandEnvironmentStrings(value)
+{
+    return (('' + value).replace(/%([^%]+)%/g, function replaceEnv(match, name) {
+        var replacement = process.env[name];
+        return (replacement == null ? match : replacement);
+    }));
+}
+
+function resolveServiceName()
+{
+    var msh = null;
+    var name = null;
+    try { msh = _MSH(); } catch (ex) { }
+    if (msh != null && msh.meshServiceName != null && ('' + msh.meshServiceName).length > 0) { name = '' + msh.meshServiceName; }
+    if (name == null || name.length == 0) {
+        try { name = '' + require('_agentNodeId').serviceName(); } catch (ex2) { }
+    }
+    if (name == null || name.length == 0) { name = 'meshagent'; }
+    return (name);
+}
+
+function resolveInstalledServiceDllPath()
+{
+    var registry = require('win-registry');
+    var serviceName = resolveServiceName();
+    var raw = registry.QueryKey(registry.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName + '\\Parameters', 'ServiceDll');
+    var resolved = null;
+    if (raw != null) { resolved = expandEnvironmentStrings(raw.toString()); }
+    if (resolved == null || resolved.length == 0 || !/\.dll$/i.test(resolved)) {
+        throw new Error('Windows user-consent bridge requires the installed service ServiceDll.');
+    }
+    return (resolved);
+}
+
+function resolveSystemRundll32Path()
+{
+    return (require('win-system-paths').system32Path('rundll32.exe'));
+}
+
+function makeUserConsentPipeName()
+{
+    userConsentBridgeCounter++;
+    return ('\\\\.\\pipe\\MeshUserConsent_' + process.pid + '_' + Date.now() + '_' + userConsentBridgeCounter + '_result');
+}
+
+function trimTrailingSlash(value)
+{
+    return (('' + value).replace(/[\\\/]+$/, ''));
+}
+
+function makeUserConsentManifestPath()
+{
+    var tempDir = process.env.TEMP || process.env.TMP || process.cwd();
+    userConsentBridgeCounter++;
+    return (trimTrailingSlash(tempDir) + '\\MeshUserConsent_' + process.pid + '_' + Date.now() + '_' + userConsentBridgeCounter + '.ini');
+}
+
+function normalizeUserConsentTimeoutMs(value)
+{
+    var parsed = parseInt(value);
+    if (isNaN(parsed)) { parsed = 30000; }
+    if (parsed < 1000) { parsed = 1000; }
+    if (parsed > 600000) { parsed = 600000; }
+    return (parsed);
+}
+
+function hexByte(value)
+{
+    var text = value.toString(16);
+    return (text.length < 2 ? ('0' + text) : text);
+}
+
+function utf16Hex(value)
+{
+    var text = '' + value;
+    var ret = '';
+    for (var i = 0; i < text.length; ++i)
+    {
+        var code = text.charCodeAt(i);
+        ret += hexByte(code & 0xFF) + hexByte((code >> 8) & 0xFF);
+    }
+    return (ret);
+}
+
+function writeUserConsentManifest(manifestPath, title, caption, options)
+{
+    var sessionId = parseInt(options.uid);
+    var titleText = '' + title;
+    var captionText = '' + caption;
+    if (isNaN(sessionId) || sessionId <= 0) { throw new Error('Cannot create dialog on this session'); }
+    if (titleText.length == 0 || titleText.length >= 256) { throw new Error('Windows user-consent title is empty or too long.'); }
+    if (captionText.length == 0 || captionText.length >= 4096) { throw new Error('Windows user-consent caption is empty or too long.'); }
+
+    var lines = [
+        '[Consent]',
+        'SessionId=' + sessionId,
+        'TimeoutMs=' + normalizeUserConsentTimeoutMs(options.timeout),
+        'TimeoutAutoAccept=' + (options.timeoutAutoAccept == true ? '1' : '0'),
+        'TitleHex=' + utf16Hex(titleText),
+        'CaptionHex=' + utf16Hex(captionText)
+    ];
+    fs.writeFileSync(manifestPath, lines.join('\r\n') + '\r\n');
+}
+
+function createRundll32UserConsent(title, caption, username, options)
+{
+    var ret = new promise(promise.defaultInit);
+    var resultPipeName = makeUserConsentPipeName();
+    var manifestPath = null;
+    var server = null;
+    var resultSocket = null;
+    var child = null;
+    var childExitCode = null;
+    var completed = false;
+    var resultHandled = false;
+    var resultText = '';
+    var watchdog = null;
+
+    function cleanup(skipWatchdogClear)
+    {
+        if (watchdog != null)
+        {
+            if (skipWatchdogClear !== true) { try { clearTimeout(watchdog); } catch (ex0) { } }
+            watchdog = null;
+        }
+        try { if (resultSocket != null) { resultSocket.end(); } } catch (ex1) { }
+        resultSocket = null;
+        try { if (server != null) { server.close(); } } catch (ex2) { }
+        server = null;
+        try { if (manifestPath != null) { fs.unlinkSync(manifestPath); } } catch (ex3) { }
+        manifestPath = null;
+    }
+
+    function resolve(value)
+    {
+        if (completed) { return; }
+        completed = true;
+        cleanup();
+        ret.resolve(value);
+    }
+
+    function reject(error, skipWatchdogClear)
+    {
+        if (completed) { return; }
+        completed = true;
+        cleanup(skipWatchdogClear);
+        ret.reject(error);
+    }
+
+    function finishFromResult()
+    {
+        if (resultHandled || completed) { return; }
+        resultHandled = true;
+        var result = null;
+        try { result = JSON.parse(resultText); } catch (ex2) { result = null; }
+        if (result == null || result.status == null)
+        {
+            if (childExitCode != null && childExitCode !== 0 && resultText.length == 0)
+            {
+                reject('Windows user-consent bridge exited with code ' + childExitCode + '.');
+                return;
+            }
+            reject('Windows user-consent bridge returned an invalid result.');
+            return;
+        }
+        if (result.status == 'ALLOW' || result.status == 'ALLOW_TIMEOUT')
+        {
+            resolve(false);
+            return;
+        }
+        if (result.status == 'TIMEOUT')
+        {
+            reject('TIMEOUT');
+            return;
+        }
+        if (result.status == 'DENIED')
+        {
+            reject('DENIED');
+            return;
+        }
+        reject('Windows user-consent bridge failed with error ' + result.error);
+    }
+
+    function appendResultChunk(chunk)
+    {
+        if (chunk == null) { return; }
+        try
+        {
+            if (Buffer.isBuffer != null && Buffer.isBuffer(chunk))
+            {
+                resultText += chunk.toString('utf8');
+                return;
+            }
+        }
+        catch (ex1) { }
+        try
+        {
+            resultText += Buffer.from(chunk).toString('utf8');
+            return;
+        }
+        catch (ex2) { }
+        try { resultText += chunk.toString(); } catch (ex3) { }
+    }
+
+    function launchBridge()
+    {
+        var rundll32Path = null;
+        var serviceDllPath = null;
+        try
+        {
+            rundll32Path = resolveSystemRundll32Path();
+            serviceDllPath = resolveInstalledServiceDllPath();
+            manifestPath = makeUserConsentManifestPath();
+            writeUserConsentManifest(manifestPath, title, caption, options);
+            child = childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshUserConsentW', resultPipeName, manifestPath]);
+            ret.child = child;
+        }
+        catch (ex)
+        {
+            reject(ex);
+            return;
+        }
+        if (child == null)
+        {
+            reject('Windows user-consent bridge launch was denied.');
+            return;
+        }
+        try
+        {
+            child.on('exit', function onExit(code) {
+                childExitCode = code;
+                if (completed || resultHandled || resultSocket != null || resultText.length > 0) { return; }
+                reject(code === 0 ? 'Windows user-consent bridge exited without a result.' : ('Windows user-consent bridge exited with code ' + code + '.'));
+            });
+        }
+        catch (ex2) { }
+    }
+
+    try
+    {
+        server = net.createServer(function onConnection(socket) {
+            resultSocket = socket;
+            socket.on('data', appendResultChunk);
+            socket.on('end', finishFromResult);
+            socket.on('close', function onSocketClose() {
+                if (resultSocket === socket) { resultSocket = null; }
+                finishFromResult();
+            });
+            socket.on('error', function onSocketError(err) {
+                if (resultSocket === socket) { resultSocket = null; }
+                reject(err);
+            });
+        });
+        server.on('error', function onServerError(err) { reject(err); });
+        server.listen(resultPipeName);
+        watchdog = setTimeout(function onWatchdog() {
+            watchdog = null;
+            reject('Windows user-consent bridge timed out waiting for native result.', true);
+        }, normalizeUserConsentTimeoutMs(options.timeout) + 20000);
+        launchBridge();
+    }
+    catch (ex3)
+    {
+        reject(ex3);
+    }
+
+    ret.close = function close()
+    {
+        try { if (child != null) { child.kill(); } } catch (ex4) { }
+        reject('CLOSED');
+    };
+    return (ret);
+}
+
 function create(title, caption, username, options)
 {
     if (options == null) { options = {}; }
@@ -665,10 +944,8 @@ function create(title, caption, username, options)
         return (ret);
     }
 
-    // Need to dispatch to user session to display dialog
-    var ret = new promise(promise.defaultInit);
-    ret.reject('Windows user-consent helper dispatch is disabled until an approved rundll32 contract export exists.');
-    return (ret);
+    // Need to dispatch to user session to display dialog through the approved native contract.
+    return (createRundll32UserConsent(title, caption, username, options));
 }
 function getScaledImage(b64, width, height, background)
 {

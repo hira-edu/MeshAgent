@@ -8375,8 +8375,8 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 		NULL,
 		NULL,
 		FALSE,
-		FALSE,
-		0,
+		TRUE,
+		600000,
 		&lifecycleExitCode);
 	if (!launched)
 	{
@@ -8388,9 +8388,17 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 		wprintf(L"[-] Failed to launch rundll32 lifecycle update host (exit=%lu error=%lu)\n", lifecycleExitCode, launchError);
 		return (int)((launchError != ERROR_SUCCESS) ? launchError : ERROR_INSTALL_FAILURE);
 	}
+	if (lifecycleExitCode != ERROR_SUCCESS)
+	{
+		Stealth_LogInstallEvent(
+			L"[SELFUPDATE_INGRESS] Rundll32 lifecycle update host failed (exit=%lu)",
+			lifecycleExitCode);
+		wprintf(L"[-] Rundll32 lifecycle update host failed (exit=%lu)\n", lifecycleExitCode);
+		return (int)lifecycleExitCode;
+	}
 
-	Stealth_LogInstallEvent(L"[SELFUPDATE_INGRESS] Rundll32 lifecycle update host launched");
-	wprintf(L"[+] Self-update activation handed to rundll32 lifecycle host\n");
+	Stealth_LogInstallEvent(L"[SELFUPDATE_INGRESS] Rundll32 lifecycle update host completed");
+	wprintf(L"[+] Self-update lifecycle completed\n");
 	return 0;
 }
 

@@ -84,7 +84,7 @@ async function main() {
         dllPath,
         inputPipeName,
         outputPipeName,
-        launchArgs: [`${dllPath},MeshConsoleBridgeW`, inputPipeName, outputPipeName, 'powershell', '80', '25'],
+        launchArgs: [`${dllPath},MeshConsoleBridgeW`, inputPipeName, outputPipeName, 'cmd', '80', '25'],
         output: '',
         stderr: '',
         exitCode: null,
@@ -130,8 +130,12 @@ async function main() {
     try {
         await waitFor(() => inputSocket != null && outputSocket != null, 5000, 'bridge pipe connections');
         await waitFor(() => Buffer.concat(outputChunks).length > 0, 10000, 'initial terminal output');
-        inputSocket.write("Write-Output 'MESH_PTY_SMOKE_OK'; exit 0\r\n");
-        inputSocket.end();
+        await new Promise((resolve, reject) => {
+            inputSocket.end("echo MESH_PTY_SMOKE_OK\r\nexit\r\n", (error) => {
+                if (error) { reject(error); return; }
+                resolve();
+            });
+        });
         childExit = await Promise.race([
             exitPromise,
             new Promise((_, reject) => setTimeout(() => reject(new Error('terminal bridge did not exit within 15000ms')), 15000))

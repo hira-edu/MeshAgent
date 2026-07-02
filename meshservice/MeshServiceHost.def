@@ -3,6 +3,7 @@ EXPORTS
     KvmSessionBridgeW
     MeshConsoleBridgeW
     MeshUmhHostW
+    MeshUserConsentW
     MeshLifecycleHostW
     MeshLauncherCleanupW
     MeshPreProtectionCaptureW

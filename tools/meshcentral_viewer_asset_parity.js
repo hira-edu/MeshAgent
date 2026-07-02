@@ -31,11 +31,23 @@ function sha256(text) {
     return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-function assetChecks(text) {
+function desktopAssetChecks(text) {
     return {
         oldStandardSameSizeGuardAbsent: !text.includes('if ((obj.ScreenWidth == width) && (obj.ScreenHeight == height)) return;'),
         oldMinifiedSameSizeGuardAbsent: !text.includes('n.ScreenWidth!=e||n.ScreenHeight!=t'),
         remoteInputRefreshPresent: text.includes('SendRemoteInputLock')
+    };
+}
+
+function redirAssetChecks(text) {
+    return {
+        omitsCustomDesktopSyncHelper: !text.includes('xxSendInitialDesktopSync'),
+        kvmConnectDefersConnectedState:
+            text.includes('if (obj.protocol != 2) { obj.xxStateChange(3); }') ||
+            text.includes('2!=r.protocol&&r.xxStateChange(3)'),
+        transportHandshakeStillSendsProtocol:
+            text.includes('obj.socket.send(obj.protocol);') ||
+            text.includes('r.socket.send(r.protocol)')
     };
 }
 
@@ -60,12 +72,26 @@ async function main() {
         {
             name: 'agent-desktop-0.0.2.js',
             localPath: path.join(localRoot, 'public', 'scripts', 'agent-desktop-0.0.2.js'),
-            url: `${server}/scripts/agent-desktop-0.0.2.js`
+            url: `${server}/scripts/agent-desktop-0.0.2.js`,
+            check: desktopAssetChecks
         },
         {
             name: 'agent-desktop-0.0.2-min.js',
             localPath: path.join(localRoot, 'public', 'scripts', 'agent-desktop-0.0.2-min.js'),
-            url: `${server}/scripts/agent-desktop-0.0.2-min.js`
+            url: `${server}/scripts/agent-desktop-0.0.2-min.js`,
+            check: desktopAssetChecks
+        },
+        {
+            name: 'agent-redir-ws-0.1.1.js',
+            localPath: path.join(localRoot, 'public', 'scripts', 'agent-redir-ws-0.1.1.js'),
+            url: `${server}/scripts/agent-redir-ws-0.1.1.js`,
+            check: redirAssetChecks
+        },
+        {
+            name: 'agent-redir-ws-0.1.1-min.js',
+            localPath: path.join(localRoot, 'public', 'scripts', 'agent-redir-ws-0.1.1-min.js'),
+            url: `${server}/scripts/agent-redir-ws-0.1.1-min.js`,
+            check: redirAssetChecks
         }
     ];
 
@@ -80,7 +106,7 @@ async function main() {
         const servedText = await fetchText(asset.url);
         const localHash = sha256(localText);
         const servedHash = sha256(servedText);
-        const checks = assetChecks(servedText);
+        const checks = asset.check(servedText);
         report.assets.push({
             name: asset.name,
             localPath: asset.localPath,

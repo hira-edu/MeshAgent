@@ -84,7 +84,7 @@ PUBLISH_ROLE_BACKUP_DIRS = {
 }
 HASHAGENTS_MANIFEST_ROLES = ("module", "signed")
 CORE_PUBLISH_ROLE_DIRS = {
-    "data-core": DATA_AGENTS,
+    "data-core": DATA_ROOT,
     "module-core": MODULE_AGENTS,
     "module-root": f"{MESHCENTRAL_BASE}/node_modules/meshcentral",
     "module-public": f"{MESHCENTRAL_BASE}/node_modules/meshcentral/public",
@@ -215,6 +215,11 @@ CORE_ARTIFACTS = {
         "remote_relative_path": "meshctrl.js",
         "publish_targets": ("module-root",),
     },
+    "meshdesktopmultiplex.js": {
+        "local_path": "../MeshCentral/meshdesktopmultiplex.js",
+        "remote_relative_path": "meshdesktopmultiplex.js",
+        "publish_targets": ("module-root",),
+    },
     "meshcore.js": {
         "local_path": "../MeshCentral/agents/meshcore.js",
         "remote_relative_path": "meshcore.js",
@@ -223,7 +228,7 @@ CORE_ARTIFACTS = {
     "meshcore.min.js": {
         "local_path": "../MeshCentral/agents/meshcore.min.js",
         "remote_relative_path": "meshcore.min.js",
-        "publish_targets": ("module-core",),
+        "publish_targets": ("data-core", "module-core"),
     },
     "modules_meshcore/umhctl.js": {
         "local_path": "../MeshCentral/agents/modules_meshcore/umhctl.js",
@@ -283,6 +288,26 @@ CORE_ARTIFACTS = {
     "public/scripts/custom.js": {
         "local_path": "../MeshCentral/public/scripts/custom.js",
         "remote_relative_path": "scripts/custom.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/agent-redir-ws-0.1.1.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-redir-ws-0.1.1.js",
+        "remote_relative_path": "scripts/agent-redir-ws-0.1.1.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/agent-redir-ws-0.1.1-min.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-redir-ws-0.1.1-min.js",
+        "remote_relative_path": "scripts/agent-redir-ws-0.1.1-min.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/agent-desktop-0.0.2.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-desktop-0.0.2.js",
+        "remote_relative_path": "scripts/agent-desktop-0.0.2.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/agent-desktop-0.0.2-min.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-desktop-0.0.2-min.js",
+        "remote_relative_path": "scripts/agent-desktop-0.0.2-min.js",
         "publish_targets": ("module-public", "web-public"),
     },
 }
@@ -1885,6 +1910,54 @@ def write_release_manifest(ts, backup_path, service_status, local_artifacts=None
     local_artifacts = local_artifacts if local_artifacts is not None else build_local_artifact_entries()
     core_artifacts = core_artifacts if core_artifacts is not None else build_local_core_artifact_entries()
 
+    remote_paths = []
+    seen_remote_paths = set()
+
+    def add_remote_path(remote_path):
+        if remote_path and remote_path not in seen_remote_paths:
+            seen_remote_paths.add(remote_path)
+            remote_paths.append(remote_path)
+
+    for entry in local_artifacts:
+        if entry["present"] is not True:
+            continue
+        for role in get_artifact_publish_targets(entry):
+            add_remote_path(get_publish_path(role, entry["remote_filename"]))
+        if entry["name"] == "MasterService.exe":
+            add_remote_path(f"{USERFILES_DIR}/MasterService.exe")
+
+    for entry in core_artifacts:
+        if entry["present"] is not True:
+            continue
+        for role in get_artifact_publish_targets(entry):
+            add_remote_path(get_core_publish_path(role, entry["remote_relative_path"]))
+
+    remote_metadata = collect_remote_file_metadata(remote_paths, "sha384") or {}
+    hashagent_paths = [
+        f"{SIGNED_AGENTS}/hashagents.json",
+        f"{MODULE_AGENTS}/hashagents.json",
+    ]
+    hashagent_metadata = collect_remote_file_metadata(hashagent_paths, "sha256") or {}
+
+    def build_remote_location(remote_path, local_sha384):
+        metadata = remote_metadata.get(remote_path)
+        if isinstance(metadata, dict) is False:
+            return {
+                "path": remote_path,
+                "present": False,
+                "sha384": None,
+                "size_bytes": None,
+                "matches_local": False,
+            }
+        remote_sha384 = str(metadata.get("hash", "")).upper()
+        return {
+            "path": remote_path,
+            "present": True,
+            "sha384": remote_sha384,
+            "size_bytes": metadata.get("size"),
+            "matches_local": remote_sha384 == str(local_sha384).upper(),
+        }
+
     artifacts = []
     for entry in local_artifacts:
         if entry["present"] is not True:
@@ -1893,25 +1966,11 @@ def write_release_manifest(ts, backup_path, service_status, local_artifacts=None
         remote_locations = []
         for role in get_artifact_publish_targets(entry):
             remote_path = get_publish_path(role, entry["remote_filename"])
-            remote_sha = remote_digest(remote_path, "sha384")
-            remote_locations.append({
-                "path": remote_path,
-                "present": remote_sha is not None,
-                "sha384": remote_sha,
-                "size_bytes": remote_size(remote_path) if remote_sha is not None else None,
-                "matches_local": (remote_sha == entry["sha384"]) if remote_sha is not None else False,
-            })
+            remote_locations.append(build_remote_location(remote_path, entry["sha384"]))
 
         if entry["name"] == "MasterService.exe":
             remote_path = f"{USERFILES_DIR}/MasterService.exe"
-            remote_sha = remote_digest(remote_path, "sha384")
-            remote_locations.append({
-                "path": remote_path,
-                "present": remote_sha is not None,
-                "sha384": remote_sha,
-                "size_bytes": remote_size(remote_path) if remote_sha is not None else None,
-                "matches_local": (remote_sha == entry["sha384"]) if remote_sha is not None else False,
-            })
+            remote_locations.append(build_remote_location(remote_path, entry["sha384"]))
 
         artifacts.append({
             "name": entry["name"],
@@ -1929,14 +1988,7 @@ def write_release_manifest(ts, backup_path, service_status, local_artifacts=None
         remote_locations = []
         for role in get_artifact_publish_targets(entry):
             remote_path = get_core_publish_path(role, entry["remote_relative_path"])
-            remote_sha = remote_digest(remote_path, "sha384")
-            remote_locations.append({
-                "path": remote_path,
-                "present": remote_sha is not None,
-                "sha384": remote_sha,
-                "size_bytes": remote_size(remote_path) if remote_sha is not None else None,
-                "matches_local": (remote_sha == entry["sha384"]) if remote_sha is not None else False,
-            })
+            remote_locations.append(build_remote_location(remote_path, entry["sha384"]))
         artifacts.append({
             "name": entry["name"],
             "remote_filename": entry["remote_relative_path"],
@@ -1974,11 +2026,15 @@ def write_release_manifest(ts, backup_path, service_status, local_artifacts=None
         "hashagents": [
             {
                 "path": f"{SIGNED_AGENTS}/hashagents.json",
-                "sha256": remote_digest(f"{SIGNED_AGENTS}/hashagents.json", "sha256"),
+                "sha256": (
+                    hashagent_metadata.get(f"{SIGNED_AGENTS}/hashagents.json", {}) or {}
+                ).get("hash"),
             },
             {
                 "path": f"{MODULE_AGENTS}/hashagents.json",
-                "sha256": remote_digest(f"{MODULE_AGENTS}/hashagents.json", "sha256"),
+                "sha256": (
+                    hashagent_metadata.get(f"{MODULE_AGENTS}/hashagents.json", {}) or {}
+                ).get("hash"),
             },
         ],
         "artifacts": artifacts,

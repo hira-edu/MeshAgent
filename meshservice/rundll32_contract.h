@@ -12,6 +12,7 @@ extern "C" {
 #define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W     L"KvmSessionBridgeW"
 #define MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_W L"MeshConsoleBridgeW"
 #define MESH_RUNDLL32_ENTRY_UMH_HOST_W       L"MeshUmhHostW"
+#define MESH_RUNDLL32_ENTRY_USER_CONSENT_W   L"MeshUserConsentW"
 #define MESH_RUNDLL32_ENTRY_LAUNCHER_CLEANUP_W L"MeshLauncherCleanupW"
 #define MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_W L"MeshPreProtectionCaptureW"
 #define MESH_RUNDLL32_ENTRY_SELFTEST_W    L"MeshSelfTestHostW"
@@ -20,6 +21,7 @@ extern "C" {
 #define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"
 #define MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A "MeshConsoleBridgeW"
 #define MESH_RUNDLL32_ENTRY_UMH_HOST_A       "MeshUmhHostW"
+#define MESH_RUNDLL32_ENTRY_USER_CONSENT_A   "MeshUserConsentW"
 #define MESH_RUNDLL32_ENTRY_LAUNCHER_CLEANUP_A "MeshLauncherCleanupW"
 #define MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A "MeshPreProtectionCaptureW"
 #define MESH_RUNDLL32_ENTRY_SELFTEST_A    "MeshSelfTestHostW"
@@ -89,6 +91,7 @@ void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
 void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshConsoleBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshUmhHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
+void CALLBACK MeshUserConsentW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshLauncherCleanupW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshPreProtectionCaptureW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshSelfTestHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);

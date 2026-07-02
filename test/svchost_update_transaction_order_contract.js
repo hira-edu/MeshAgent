@@ -41,6 +41,7 @@ function extractFunction(source, signature) {
 
 function main() {
     const installer = read('meshservice/stealth_installer.c');
+    const updateFlow = extractFunction(installer, 'static BOOL Stealth_ApplyUpdateFlow(');
     const commit = extractFunction(installer, 'static BOOL Stealth_CommitUpdateTransaction(');
     const rollback = extractFunction(installer, 'static BOOL Stealth_RollbackUpdateTransaction(');
 
@@ -69,6 +70,24 @@ function main() {
         installer.includes('Stealth_ClearUpdateActivationHolds(&paths, L"[UPDATE]");'),
         'update transaction must clear activation holds on success and promote the target hold on failure'
     );
+    assert(
+        !updateFlow.includes('Stealth_SetServiceStartType(serviceKeyName, SERVICE_DISABLED)') &&
+        !updateFlow.includes('disabledStartType'),
+        'update flow must not disable the service start type before old-image teardown'
+    );
+    assert(
+        updateFlow.includes('Stealth_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)'),
+        'update flow must repair/keep service auto-start while quiescing and in cleanup'
+    );
+    assert(
+        updateFlow.indexOf('Stealth_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)') <
+            updateFlow.indexOf('Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE)'),
+        'update flow must ensure auto-start before stopping the old service process'
+    );
+    assert(
+        updateFlow.includes('Failed to restore service auto-start during cleanup'),
+        'update cleanup must log and fail closed if service auto-start restoration fails'
+    );
 
     console.log(JSON.stringify({
         success: true,
@@ -76,7 +95,10 @@ function main() {
             serviceDllCommittedBeforeExe: true,
             serviceDllValidatedBeforeExe: true,
             serviceDllRolledBackBeforeExe: true,
-            updateActivationHoldConvergesWithTransaction: true
+            updateActivationHoldConvergesWithTransaction: true,
+            updateDoesNotDisableServiceStartType: true,
+            updateRepairsAutoStartBeforeStop: true,
+            updateRestoresAutoStartDuringCleanup: true
         }
     }, null, 2));
 }
