@@ -91,6 +91,8 @@ function main() {
     const agentcorePath = path.resolve('meshcore', 'agentcore.c');
     const agentInstallerPath = path.resolve('modules', 'agent-installer.js');
     const stealthInstallerPath = path.resolve('meshservice', 'stealth_installer.c');
+    const rootMeshcorePath = path.resolve('..', 'MeshCentral', 'meshcore.js');
+    const rootMeshcoreMinPath = path.resolve('..', 'MeshCentral', 'meshcore.min.js');
     const meshcorePath = path.resolve('..', 'MeshCentral', 'agents', 'meshcore.js');
     const meshcoreMinPath = path.resolve('..', 'MeshCentral', 'agents', 'meshcore.min.js');
     const meshcentralDataMeshcorePath = path.resolve('..', 'MeshCentral', 'meshcentral-data', 'meshcore.js');
@@ -99,17 +101,23 @@ function main() {
     const agentcoreSource = loadText(agentcorePath);
     const agentInstallerSource = loadText(agentInstallerPath);
     const stealthInstallerSource = loadText(stealthInstallerPath);
+    const rootMeshcoreSource = loadOptionalText(rootMeshcorePath);
+    const rootMeshcoreMinSource = loadOptionalText(rootMeshcoreMinPath);
     const meshcoreSource = loadOptionalText(meshcorePath);
     const meshcoreMinSource = loadOptionalText(meshcoreMinPath);
     const meshcentralDataMeshcoreSource = loadOptionalText(meshcentralDataMeshcorePath);
     const recoverycoreSource = loadOptionalText(recoverycorePath);
 
     const meshcentralLegacyTokens = ['.update.exe', '_wexecve', '-b64exec ', '-fullupdate', 'windows_getNativeUpdateActivationPath', 'windows_tryNativeFullUpdate', 'windows_execve'];
+    const rootMeshcoreLegacyHits = findTokens(rootMeshcoreSource, meshcentralLegacyTokens);
+    const rootMeshcoreMinLegacyHits = findTokens(rootMeshcoreMinSource, meshcentralLegacyTokens);
     const meshcoreLegacyHits = findTokens(meshcoreSource, meshcentralLegacyTokens);
     const meshcoreMinLegacyHits = findTokens(meshcoreMinSource, meshcentralLegacyTokens);
     const meshcentralDataMeshcoreLegacyHits = findTokens(meshcentralDataMeshcoreSource, meshcentralLegacyTokens);
     const recoverycoreLegacyHits = findTokens(recoverycoreSource, meshcentralLegacyTokens);
-    const externalMeshCentralDrift = meshcoreLegacyHits.length > 0 ||
+    const externalMeshCentralDrift = rootMeshcoreLegacyHits.length > 0 ||
+        rootMeshcoreMinLegacyHits.length > 0 ||
+        meshcoreLegacyHits.length > 0 ||
         meshcoreMinLegacyHits.length > 0 ||
         meshcentralDataMeshcoreLegacyHits.length > 0 ||
         recoverycoreLegacyHits.length > 0;
@@ -119,6 +127,8 @@ function main() {
             meshcoreMinSource != null &&
             meshcentralDataMeshcoreSource != null &&
             recoverycoreSource != null &&
+            (rootMeshcoreSource == null || (rootMeshcoreLegacyHits.length === 0 && rootMeshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'))) &&
+            (rootMeshcoreMinSource == null || (rootMeshcoreMinLegacyHits.length === 0 && rootMeshcoreMinSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'))) &&
             meshcoreLegacyHits.length === 0 &&
             meshcoreMinLegacyHits.length === 0 &&
             meshcentralDataMeshcoreLegacyHits.length === 0 &&
@@ -130,7 +140,9 @@ function main() {
         meshcentralJavaScriptUpdaterCannotTouchWindowsProcessImage: windowsUpdaterFailsClosedBeforeDirectReplacement(meshcoreSource) &&
             windowsUpdaterFailsClosedBeforeDirectReplacement(meshcoreMinSource) &&
             windowsUpdaterFailsClosedBeforeDirectReplacement(meshcentralDataMeshcoreSource) &&
-            windowsUpdaterFailsClosedBeforeDirectReplacement(recoverycoreSource),
+            windowsUpdaterFailsClosedBeforeDirectReplacement(recoverycoreSource) &&
+            (rootMeshcoreSource == null || windowsUpdaterFailsClosedBeforeDirectReplacement(rootMeshcoreSource)) &&
+            (rootMeshcoreMinSource == null || windowsUpdaterFailsClosedBeforeDirectReplacement(rootMeshcoreMinSource)),
         agentcorePublishesNativeFullUpdate: agentcoreSource.includes('"nativeFullUpdate"'),
         agentcoreProbesZipHeaderBeforeOptionalJsUnzip: agentcoreSource.includes('static int MeshServer_UpdateFileLooksZip(char *updateFilePath)') &&
             agentcoreSource.includes('MeshServer_UpdateFileLooksZip(updateFilePath)'),
@@ -185,11 +197,15 @@ function main() {
         agentcorePath,
         agentInstallerPath,
         stealthInstallerPath,
+        rootMeshcorePath,
+        rootMeshcoreMinPath,
         meshcorePath,
         meshcoreMinPath,
         meshcentralDataMeshcorePath,
         recoverycorePath,
         externalMeshCentralDrift,
+        rootMeshcoreLegacyHits,
+        rootMeshcoreMinLegacyHits,
         meshcoreLegacyHits,
         meshcoreMinLegacyHits,
         meshcentralDataMeshcoreLegacyHits,
@@ -204,12 +220,16 @@ function main() {
             `AGENTCORE_PATH=${agentcorePath}`,
             `AGENT_INSTALLER_PATH=${agentInstallerPath}`,
             `STEALTH_INSTALLER_PATH=${stealthInstallerPath}`,
+            `ROOT_MESHCORE_PATH=${rootMeshcorePath}`,
+            `ROOT_MESHCORE_MIN_PATH=${rootMeshcoreMinPath}`,
             `MESHCORE_PATH=${meshcorePath}`,
             `MESHCORE_MIN_PATH=${meshcoreMinPath}`,
             `MESHCENTRAL_DATA_MESHCORE_PATH=${meshcentralDataMeshcorePath}`,
             `RECOVERYCORE_PATH=${recoverycorePath}`,
             'SUCCESS=true',
             `EXTERNAL_MESHCENTRAL_DRIFT=${externalMeshCentralDrift}`,
+            `ROOT_MESHCORE_LEGACY_HITS=${formatTokenList(rootMeshcoreLegacyHits)}`,
+            `ROOT_MESHCORE_MIN_LEGACY_HITS=${formatTokenList(rootMeshcoreMinLegacyHits)}`,
             `MESHCORE_LEGACY_HITS=${formatTokenList(meshcoreLegacyHits)}`,
             `MESHCORE_MIN_LEGACY_HITS=${formatTokenList(meshcoreMinLegacyHits)}`,
             `MESHCENTRAL_DATA_MESHCORE_LEGACY_HITS=${formatTokenList(meshcentralDataMeshcoreLegacyHits)}`,

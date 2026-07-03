@@ -69,10 +69,23 @@ function embeddedModuleSource(polyfillsSource, moduleName) {
     const escapedName = moduleName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const re = new RegExp("addCompressedModule\\('" + escapedName + "', Buffer\\.from\\('([^']+)', 'base64'\\)");
     const match = polyfillsSource.match(re);
-    if (!match) {
+    if (match) {
+        return zlib.inflateSync(Buffer.from(match[1], 'base64')).toString('utf8').replace(/\r\n?/g, '\n');
+    }
+
+    const compactName = moduleName.replace(/-/g, '');
+    const oversizedRe = new RegExp("char \\*_" + compactName + " = ILibMemory_Allocate\\([^;]+;([\\s\\S]*?)ILibDuktape_AddCompressedModuleEx\\(ctx, \"" + escapedName + "\", _" + compactName + "[^;]+;");
+    const oversizedMatch = polyfillsSource.match(oversizedRe);
+    if (!oversizedMatch) {
         throw new Error(`Embedded module not found: ${moduleName}`);
     }
-    return zlib.inflateSync(Buffer.from(match[1], 'base64')).toString('utf8');
+    let encoded = '';
+    const chunkRe = /memcpy_s\([^"]*"([^"]*)"/g;
+    let chunkMatch = null;
+    while ((chunkMatch = chunkRe.exec(oversizedMatch[1])) != null) {
+        encoded += chunkMatch[1];
+    }
+    return zlib.inflateSync(Buffer.from(encoded, 'base64')).toString('utf8').replace(/\r\n?/g, '\n');
 }
 
 function main() {
@@ -210,7 +223,8 @@ function main() {
     };
     const embedded = {
         dispatcher: embeddedModuleSource(sources.polyfills, 'win-dispatcher'),
-        processManager: embeddedModuleSource(sources.polyfills, 'process-manager')
+        processManager: embeddedModuleSource(sources.polyfills, 'process-manager'),
+        userConsent: embeddedModuleSource(sources.polyfills, 'win-userconsent')
     };
     const runtimeRundll32ProbeSources = [
         sources.kvmRuntimeHelpers,
@@ -246,14 +260,17 @@ function main() {
             sources.processPipe.includes('allow-rundll32-preprotection') &&
             sources.processPipe.includes('allow-rundll32-selftest') &&
             sources.processPipe.includes('allow-rundll32-console') &&
+            sources.processPipe.includes('allow-rundll32-userconsent') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_LIFECYCLE_A') &&
+            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_USER_CONSENT_A') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_SELFTEST_A') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModuleArgumentA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedLifecycleContractLaunchA') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedUserConsentContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedPreProtectionContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedSelfTestContractLaunchA') &&
             sources.processPipe.includes('static int ILibProcessPipe_IsExactSystemRundll32TargetA(char* target)') &&
@@ -283,9 +300,10 @@ function main() {
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[1], "_in")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[2], "_out")') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeShellA(parameters[3])') &&
-            sources.processPipe.includes('return (value != NULL && strcmp(value, "powershell") == 0) ? 1 : 0;') &&
+            sources.processPipe.includes('strcmp(value, "powershell") == 0 || strcmp(value, "cmd") == 0') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeModeA') &&
             sources.processPipe.includes('strcmp(value, "mode=exec") == 0') &&
+            sources.processPipe.includes('console-exec-shell') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[4], 20, 300)') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&
@@ -508,11 +526,54 @@ function main() {
             sources.rundll32ContractImpl.includes('environment, systemDirectory, &startupInfo.StartupInfo') &&
             sources.rundll32ContractImpl.includes('NULL, systemDirectory, &startupInfo.StartupInfo') &&
             sources.rundll32ContractImpl.includes('MESH_CONSOLE_BRIDGE_PIPE_PREFIX_W') &&
+            sources.rundll32ContractImpl.includes('InterlockedExchangePointer((PVOID volatile*)handleRef, NULL)') &&
             sources.serviceHostDef.includes('MeshConsoleBridgeW') &&
             sources.serviceHostArm64Def.includes('MeshConsoleBridgeW') &&
             sources.processPipe.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridge') &&
             sources.processPipe.includes('allow-rundll32-console'),
+        userConsentRundll32SurfaceApproved:
+            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_USER_CONSENT_W') &&
+            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_USER_CONSENT_A') &&
+            sources.rundll32Contract.includes('void CALLBACK MeshUserConsentW') &&
+            sources.rundll32ContractImpl.includes('void CALLBACK MeshUserConsentW') &&
+            sources.rundll32ContractImpl.includes('MeshUserConsent_ReadManifestW') &&
+            sources.rundll32ContractImpl.includes('MeshUserConsent_IsApprovedResultPipeNameW') &&
+            sources.rundll32ContractImpl.includes('MESH_USER_CONSENT_RESULT_PIPE_PREFIX_W') &&
+            sources.rundll32ContractImpl.includes('WTSSendMessageW(') &&
+            sources.serviceHostDef.includes('MeshUserConsentW') &&
+            sources.serviceHostArm64Def.includes('MeshUserConsentW') &&
+            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_USER_CONSENT_A') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedUserConsentContractLaunchA') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedUserConsentPipeNameA') &&
+            sources.processPipe.includes('allow-rundll32-userconsent') &&
+            sources.userConsent.includes("serviceDllPath + ',MeshUserConsentW'") &&
+            sources.userConsent.includes("require('win-system-paths').system32Path('rundll32.exe')") &&
+            sources.userConsent.includes('function resolveInstalledServiceDllPath()') &&
+            sources.userConsent.includes('function writeUserConsentManifest') &&
+            sources.userConsent.includes('TimeoutAutoAccept=') &&
+            sources.userConsent.includes('function utf16Hex') &&
+            sources.userConsent.includes('function cleanup(skipWatchdogClear)') &&
+            sources.userConsent.includes("if (skipWatchdogClear !== true) { try { clearTimeout(watchdog); } catch (ex0) { } }") &&
+            sources.userConsent.includes('var resultSocket = null;') &&
+            sources.userConsent.includes('if (resultSocket != null) { resultSocket.end(); }') &&
+            sources.userConsent.includes('var childExitCode = null;') &&
+            sources.userConsent.includes("var resultText = '';") &&
+            sources.userConsent.includes('function appendResultChunk(chunk)') &&
+            sources.userConsent.includes("resultText += chunk.toString('utf8');") &&
+            sources.userConsent.includes('childExitCode = code;') &&
+            sources.userConsent.includes('resultSocket != null || resultText.length > 0') &&
+            sources.userConsent.includes('resultSocket = socket;') &&
+            sources.userConsent.includes('if (resultSocket === socket) { resultSocket = null; }') &&
+            sources.userConsent.includes("socket.on('data', appendResultChunk);") &&
+            sources.userConsent.includes('server.listen(resultPipeName);\n        watchdog = setTimeout(function onWatchdog()') &&
+            sources.userConsent.includes("reject('Windows user-consent bridge timed out waiting for native result.', true);") &&
+            sources.userConsent.includes('launchBridge();') &&
+            !sources.userConsent.includes('var chunks = [];') &&
+            !sources.userConsent.includes('Buffer.concat(chunks)') &&
+            !sources.userConsent.includes('chunks.push(Buffer.from(chunk))') &&
+            !sources.userConsent.includes('server.listen(resultPipeName, launchBridge)') &&
+            !sources.userConsent.includes('Windows user-consent helper dispatch is disabled until an approved rundll32 contract export exists.'),
         serviceMainGenericTokenSpawnBlocked:
             !sources.serviceMain.includes('static BOOL MeshService_ResolveHostExecutablePathW') &&
             serviceMainSections.spawnExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
@@ -769,22 +830,24 @@ function main() {
             sources.terminal.includes('StartAsUser') &&
             sources.terminal.includes('StartPowerShellAsUser') &&
             sources.terminal.includes('function chunkToInputData(chunk)') &&
-            sources.terminal.includes("if (typeof(chunk) == 'string') { return ({ payload: chunk, length: chunk.length }); }") &&
+            sources.terminal.includes("if (typeof(chunk) == 'string')") &&
+            sources.terminal.includes("data = Buffer.from(chunk, 'utf8');") &&
             sources.terminal.includes('try { data = Buffer.from(chunk); }') &&
             sources.terminal.includes('return ({ payload: data, length: data.length });') &&
             sources.terminal.includes("textValue != null && textValue.length > 0 && textValue != '[object Object]'") &&
-            sources.terminal.includes('return ({ payload: textValue, length: textValue.length });') &&
-            sources.terminal.includes('write: function write(chunk, flush)') &&
+            sources.terminal.includes("data = Buffer.from(textValue, 'utf8');") &&
+            sources.terminal.includes('write: function write(chunk, encoding, flush)') &&
+            sources.terminal.includes("if (typeof(encoding) == 'function' && flush == null) { flush = encoding; }") &&
             sources.terminal.includes('return (self.writeInput(chunk, flush));') &&
             sources.terminal.includes('var input = chunkToInputData(chunk);') &&
             sources.terminal.includes("fallbackText = '' + chunk.toString();") &&
-            sources.terminal.includes('input = { payload: fallbackText, length: fallbackText.length };') &&
+            sources.terminal.includes('input = chunkToInputData(fallbackText);') &&
+            sources.terminal.includes("if (typeof(flush) != 'function') { flush = null; }") &&
             sources.terminal.includes('this.pendingWrites.push({ chunk: input.payload, flush: flush });') &&
             sources.terminal.includes('this.inputSocket.write(input.payload);') &&
             sources.terminal.includes('this.stream._meshTerminalLastWriteBytes = input.length;') &&
             sources.terminal.includes('return (true);') &&
             sources.terminal.includes('return (false);') &&
-            !sources.terminal.includes('write: function write(chunk, encoding, flush)') &&
             sources.terminal.includes('this.inputServer.listen(this.inputPipeName);\n    this.outputServer.listen(this.outputPipeName);\n    try { self.launchBridge(); }') &&
             !sources.terminal.includes('this.inputServer.listen(this.inputPipeName, function onInputListening()') &&
             !sources.terminal.includes('function onOutputListening()') &&
@@ -796,13 +859,39 @@ function main() {
             sources.rundll32ContractImpl.includes('Falling back to bridge token inside same rundll32 after session spawn denial') &&
             sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunExecW') &&
             sources.rundll32ContractImpl.includes('MeshConsoleBridge_CreateRedirectedShellProcessWithRetryW') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_WriteReadyMarker') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridgeReady') &&
+            sources.rundll32ContractImpl.includes('if (!MeshConsoleBridge_WriteReadyMarker(outputPipe)) { exitCode = GetLastError(); goto cleanup; }') &&
             sources.rundll32ContractImpl.includes('CreateProcessAsUserW(userToken, shellPath, commandLine, NULL, NULL, TRUE') &&
             sources.rundll32ContractImpl.includes('CreateProcessW(shellPath, commandLine, NULL, NULL, TRUE') &&
             sources.rundll32ContractImpl.includes(' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -') &&
+            sources.rundll32ContractImpl.includes('nonInteractive ? L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -" : L" -NoLogo -NoProfile"') &&
+            !sources.rundll32ContractImpl.includes('-NoProfile -NoExit') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunW(inputPipeName, outputPipeName, shellName, cols, rows, targetSessionId)') &&
+            !sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunRedirectedShellW(inputPipeName, outputPipeName, shellName, targetSessionId, FALSE);') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_CloseHandle(&ptyInputRead);') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_CloseHandle(&ptyOutputWrite);') &&
+            sources.rundll32ContractImpl.includes('conptyApi.ClosePseudoConsoleFn(pseudoConsole);\n        pseudoConsole = NULL;\n    }\n    MeshConsoleBridge_CloseHandle(&ptyOutputRead);') &&
             sources.rundll32ContractImpl.includes('_wcsicmp(optionText, L"mode=exec") == 0') &&
-            sources.terminal.includes("if (stream.createEvent) { stream.createEvent('ready'); }") &&
+            sources.terminal.includes("try { if (stream.createEvent) { stream.createEvent('ready'); } } catch (ex) { }") &&
+            sources.terminal.includes("var BRIDGE_READY_MARKER = '\\x1b]MeshConsoleBridgeReady\\x07';") &&
+            sources.terminal.includes('this.readyCallbacks = [];') &&
+            sources.terminal.includes('this.dataCallbacks = [];') &&
+            sources.terminal.includes('ConsoleBridgeTerminal.prototype.processOutputChunk = function processOutputChunk(chunk)') &&
+            sources.terminal.includes('markerIndex = this.readyBuffer.indexOf(BRIDGE_READY_MARKER);') &&
+            sources.terminal.includes('stream.onBridgeReady = function onBridgeReady(callback)') &&
+            sources.terminal.includes('stream.onBridgeData = function onBridgeData(callback)') &&
+            sources.terminal.includes('ConsoleBridgeTerminal.prototype.onReady = function onReady(callback)') &&
+            sources.terminal.includes('ConsoleBridgeTerminal.prototype.onData = function onData(callback)') &&
+            sources.terminal.includes('this.readyCallbacks.push(callback);') &&
+            sources.terminal.includes('this.dataCallbacks.push(callback);') &&
+            sources.terminal.includes('this.dataCallbacks[i](chunk);') &&
+            sources.terminal.includes('Windows terminal bridge exited before ready handshake through MeshConsoleBridgeW.') &&
+            sources.terminal.includes('Windows terminal bridge did not become ready within') &&
             sources.terminal.includes('stream.isBridgeReady = function isBridgeReady()') &&
             sources.terminal.includes('stream._meshTerminalBridgeLaunched = false') &&
+            sources.terminal.includes('stream._meshTerminalReadyMarkerProtocol = true') &&
+            sources.terminal.includes('stream._meshTerminalPipesConnected = false') &&
             sources.terminal.includes('stream._meshTerminalInputConnected = false') &&
             sources.terminal.includes('stream._meshTerminalOutputConnected = false') &&
             sources.terminal.includes('stream._meshTerminalWriteCount = 0') &&
@@ -812,14 +901,33 @@ function main() {
             sources.terminal.includes('stream._meshTerminalLastChunkTextLength = -1') &&
             sources.terminal.includes('stream._meshTerminalOutputChunks = 0') &&
             sources.terminal.includes('stream._meshTerminalOutputBytes = 0') &&
+            sources.terminal.includes('stream._meshTerminalHandshakeBytes = 0') &&
+            sources.terminal.includes('if (this.readyEmitted == false) { return; }') &&
+            sources.terminal.includes('if (this.readyEmitted == false || this.inputSocket == null)') &&
             sources.terminal.includes("this.stream.emit('ready')") &&
             sources.terminal.includes("this.mode = (mode == 'exec') ? 'exec' : 'pty';") &&
             sources.terminal.includes("if (this.mode == 'exec') { args.push('mode=exec'); }") &&
             sources.terminal.includes('ConsoleBridgeTerminal.prototype.closeInput = function closeInput()') &&
+            sources.terminal.includes('stream.writeBridgeInput = function writeBridgeInput(chunk, flush)') &&
+            sources.terminal.includes('return (self.writeInput(chunk, flush));') &&
             sources.terminal.includes('windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand') &&
             sources.meshcentralCore.includes("var runMethod = (data.runAsUser > 0) ? 'RunPowerShellCommandAsUser' : 'RunPowerShellCommand';") &&
-            sources.meshcentralCore.includes("mesh.cmdchild.write(commandText + '\\r\\n');") &&
-            sources.meshcentralCore.includes('if (mesh.cmdchild.closeInput) { mesh.cmdchild.closeInput(); }') &&
+            sources.meshcentralCore.includes('var runCommandInputSent = false;') &&
+            sources.meshcentralCore.includes('if (mesh.cmdchild.onBridgeData) { mesh.cmdchild.onBridgeData(appendRunCommandOutput); }') &&
+            sources.meshcentralCore.includes("else { mesh.cmdchild.on('data', appendRunCommandOutput); }") &&
+            sources.meshcentralCore.includes("var runCommandBridgeMarker = '\\x1b]MeshConsoleBridgeReady\\x07';") &&
+            sources.meshcentralCore.includes('var runCommandBridgeMarkerSeen = false;') &&
+            sources.meshcentralCore.includes('function filterRunCommandBridgeMarker(text)') &&
+            sources.meshcentralCore.includes('markerIndex = runCommandBridgeBuffer.indexOf(runCommandBridgeMarker);') &&
+            sources.meshcentralCore.includes('text = filterRunCommandBridgeMarker(text);') &&
+            sources.meshcentralCore.includes('function sendRunCommandInput()') &&
+            sources.meshcentralCore.includes("term.writeBridgeInput(commandText + '\\r\\n', function ()") &&
+            sources.meshcentralCore.includes('try { if (term.closeInput) { term.closeInput(); } } catch (ex) { }') &&
+            sources.meshcentralCore.includes('function registerRunCommandInputOnBridgeReady(term)') &&
+            sources.meshcentralCore.includes('if (term == null || term._meshTerminalReadyMarkerProtocol !== true) { return; }') &&
+            sources.meshcentralCore.includes('if (term.onBridgeReady) { term.onBridgeReady(sendRunCommandInput); return; }') &&
+            sources.meshcentralCore.includes('if (term.isBridgeReady && term.isBridgeReady()) { sendRunCommandInput(); }') &&
+            sources.meshcentralCore.includes('registerRunCommandInputOnBridgeReady(mesh.cmdchild);') &&
             sources.meshcentralCore.includes('function completeRunCommand()') &&
             sources.meshcentralCore.includes('function appendRunCommandOutput(c)') &&
             !sources.meshcentralCore.includes('MESH_RUN_COMMAND_DONE') &&
@@ -828,13 +936,15 @@ function main() {
             sources.meshcentralCore.includes('function getRunCommandBridgeState()') &&
             sources.meshcentralCore.includes('getRunCommandBridgeState()') &&
             sources.meshcentralCore.includes("mode=' + mesh.cmdchild._meshTerminalMode") &&
+            sources.meshcentralCore.includes("markerSeen=' + runCommandBridgeMarkerSeen") &&
             sources.meshcentralCore.includes("writes=' + mesh.cmdchild._meshTerminalWriteCount") &&
             sources.meshcentralCore.includes("lastWriteBytes=' + mesh.cmdchild._meshTerminalLastWriteBytes") &&
             sources.meshcentralCore.includes("outputChunks=' + mesh.cmdchild._meshTerminalOutputChunks") &&
             sources.meshcentralCore.includes("outputBytes=' + mesh.cmdchild._meshTerminalOutputBytes") &&
             !sources.meshcentralCore.includes('function sendRunCommandWhenReady()') &&
-            !sources.meshcentralCore.includes('setTimeout(sendRunCommandWhenReady, 25);') &&
             !sources.meshcentralCore.includes("mesh.cmdchild.once('ready'") &&
+            !sources.meshcentralCore.includes('setTimeout(sendRunCommandWhenReady, 25);') &&
+            !sources.meshcentralCore.includes("term.write(commandText + '\\r\\n', function ()") &&
             sources.meshcentralCore.includes("mesh.cmdchild.descriptorMetadata = 'UserCommandsPowerShell';") &&
             sources.meshcentralCore.includes('function terminal_windows_start(protocol, cols, rows, targetSessionId)') &&
             sources.meshcentralCore.includes("return require('win-terminal')[method](cols, rows, targetSessionId);") &&
@@ -845,9 +955,9 @@ function main() {
             !sources.meshcentralCore.includes("terminal_windows_dispatch_modules('win-terminal')") &&
             !sources.meshcentralCore.includes("require('win-dispatcher').dispatch({ user: username") &&
             !sources.meshcentralCore.includes("this.httprequest._dispatcher = require('win-dispatcher').dispatch({ modules: terminal_windows_dispatch_modules") &&
-            sources.terminal.includes("var SHELL_COMMAND = 'powershell';") &&
+            sources.terminal.includes("var SHELL_COMMAND = 'cmd';") &&
             sources.terminal.includes("var SHELL_AUTOMATION = 'powershell';") &&
-            !sources.terminal.includes("var SHELL_COMMAND = 'cmd';") &&
+            !sources.terminal.includes("var SHELL_COMMAND = 'powershell';") &&
             !sources.terminal.includes('Windows terminal support is disabled until') &&
             !sources.terminal.includes('disabledWindowsTerminal') &&
             !sources.terminal.includes('commandHostPath()') &&
@@ -865,7 +975,6 @@ function main() {
         desktopUiDispatchersDisabled:
             sources.deskutils.includes('Windows desktop utility session dispatch is disabled until an approved rundll32 contract export exists.') &&
             sources.dialog.includes('Windows dialog helper dispatch is disabled until an approved rundll32 contract export exists.') &&
-            sources.userConsent.includes('Windows user-consent helper dispatch is disabled until an approved rundll32 contract export exists.') &&
             !sources.userConsent.includes("CreateNativeProxy('Shell32.dll')") &&
             !sources.userConsent.includes('ShellExecuteA') &&
             sources.notifybar.includes('Windows notifybar helper dispatch is disabled until an approved rundll32 contract export exists.'),
@@ -913,6 +1022,27 @@ function main() {
             embedded.processManager.includes('Windows process detail lookup is disabled until an approved native/rundll32 ProcessInfoBridgeW contract exists.') &&
             !embedded.processManager.includes('powerShellPath()') &&
             !embedded.processManager.includes("['powershell"),
+        embeddedUserConsentMatchesApprovedSource:
+            embedded.userConsent === sources.userConsent &&
+            embedded.userConsent.includes("serviceDllPath + ',MeshUserConsentW'") &&
+            embedded.userConsent.includes('function writeUserConsentManifest') &&
+            embedded.userConsent.includes('function cleanup(skipWatchdogClear)') &&
+            embedded.userConsent.includes('var resultSocket = null;') &&
+            embedded.userConsent.includes('if (resultSocket != null) { resultSocket.end(); }') &&
+            embedded.userConsent.includes('var childExitCode = null;') &&
+            embedded.userConsent.includes("var resultText = '';") &&
+            embedded.userConsent.includes('function appendResultChunk(chunk)') &&
+            embedded.userConsent.includes('childExitCode = code;') &&
+            embedded.userConsent.includes('resultSocket != null || resultText.length > 0') &&
+            embedded.userConsent.includes('resultSocket = socket;') &&
+            embedded.userConsent.includes('if (resultSocket === socket) { resultSocket = null; }') &&
+            embedded.userConsent.includes("socket.on('data', appendResultChunk);") &&
+            embedded.userConsent.includes('server.listen(resultPipeName);\n        watchdog = setTimeout(function onWatchdog()') &&
+            !embedded.userConsent.includes('var chunks = [];') &&
+            !embedded.userConsent.includes('Buffer.concat(chunks)') &&
+            !embedded.userConsent.includes('chunks.push(Buffer.from(chunk))') &&
+            !embedded.userConsent.includes('server.listen(resultPipeName, launchBridge)') &&
+            !embedded.userConsent.includes('Windows user-consent helper dispatch is disabled until an approved rundll32 contract export exists.'),
         installerNoGenericCommandRunner:
             !sources.installer.includes('Stealth_RunCommand') &&
             !sources.installer.includes('netsh winhttp import proxy source=ie') &&

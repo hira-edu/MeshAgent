@@ -7,8 +7,9 @@ const source = fs.readFileSync(installerPath, 'utf8');
 
 const checks = {
     helperDefined: source.includes('static BOOL Stealth_WaitForUpdateTargetQuiesced('),
-    helperSweepsHostProcess: source.includes("Stealth_TerminateProcessesByPath(hostExePath);"),
+    helperSweepsLoadedServiceDll: source.includes('Stealth_TerminateProcessesByLoadedModulePath(paths->dllPath);'),
     helperSweepsAgentProcess: source.includes('Stealth_TerminateProcessesByPath(paths->exePath);'),
+    helperDoesNotKillSharedSvchostByPath: !source.includes('Stealth_TerminateProcessesByPath(hostExePath);'),
     helperOpensExclusiveHandle: source.includes('CreateFileW(targetPath, DELETE | GENERIC_WRITE, 0, NULL, OPEN_EXISTING'),
     commitQuiescesExe: source.includes('Stealth_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE]")'),
     commitQuiescesDll: source.includes('Stealth_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE]")'),

@@ -55,7 +55,8 @@ function extractFunction(name) {
 
 const requiredSnippets = [
     'DATA_AGENTS = f"{MESHCENTRAL_BASE}/meshcentral-data/agents"',
-    '"data-core": DATA_AGENTS',
+    'DATA_ROOT = f"{MESHCENTRAL_BASE}/meshcentral-data"',
+    '"data-core": DATA_ROOT',
     '"MeshService.exe": {',
     '"diagsvc.dll": {',
     '"MeshService64.msh": {',
@@ -89,6 +90,13 @@ const requiredSnippets = [
     '"meshctrl.js": {',
     '"local_path": "../MeshCentral/node_modules/meshcentral/meshctrl.js"',
     '"remote_relative_path": "meshctrl.js"',
+    '"meshdesktopmultiplex.js": {',
+    '"local_path": "../MeshCentral/meshdesktopmultiplex.js"',
+    '"remote_relative_path": "meshdesktopmultiplex.js"',
+    '"meshcore.min.js": {',
+    '"local_path": "../MeshCentral/agents/meshcore.min.js"',
+    '"remote_relative_path": "meshcore.min.js"',
+    '"publish_targets": ("data-core", "module-core")',
     '"modules_meshcore/umhctl.js": {',
     '"local_path": "../MeshCentral/agents/modules_meshcore/umhctl.js"',
     '"remote_relative_path": "modules_meshcore/umhctl.js"',
@@ -103,7 +111,20 @@ const requiredSnippets = [
     '"remote_relative_path": "modules_meshcore_min/win-system-paths.js"',
     '"modules_meshcore_min/win-system-paths.min.js": {',
     '"local_path": "../MeshCentral/agents/modules_meshcore_min/win-system-paths.min.js"',
-    '"remote_relative_path": "modules_meshcore_min/win-system-paths.min.js"'
+    '"remote_relative_path": "modules_meshcore_min/win-system-paths.min.js"',
+    '"public/scripts/agent-redir-ws-0.1.1.js": {',
+    '"local_path": "../MeshCentral/public/scripts/agent-redir-ws-0.1.1.js"',
+    '"remote_relative_path": "scripts/agent-redir-ws-0.1.1.js"',
+    '"public/scripts/agent-redir-ws-0.1.1-min.js": {',
+    '"local_path": "../MeshCentral/public/scripts/agent-redir-ws-0.1.1-min.js"',
+    '"remote_relative_path": "scripts/agent-redir-ws-0.1.1-min.js"',
+    '"public/scripts/agent-desktop-0.0.2.js": {',
+    '"local_path": "../MeshCentral/public/scripts/agent-desktop-0.0.2.js"',
+    '"remote_relative_path": "scripts/agent-desktop-0.0.2.js"',
+    '"public/scripts/agent-desktop-0.0.2-min.js": {',
+    '"local_path": "../MeshCentral/public/scripts/agent-desktop-0.0.2-min.js"',
+    '"remote_relative_path": "scripts/agent-desktop-0.0.2-min.js"',
+    '"publish_targets": ("module-public", "web-public")'
 ];
 
 for (const snippet of requiredSnippets) {
