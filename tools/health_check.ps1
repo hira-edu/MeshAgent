@@ -52,6 +52,42 @@ function Resolve-Branding {
     }
 }
 
+function Resolve-ServiceDllPath {
+    param([string]$Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
+    $parametersPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name\Parameters"
+    try {
+        $parameters = Get-ItemProperty -LiteralPath $parametersPath -Name ServiceDll -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    if (-not $parameters.ServiceDll) { return $null }
+    return [Environment]::ExpandEnvironmentVariables([string]$parameters.ServiceDll)
+}
+
+function Resolve-ServiceExecutablePath {
+    param([string]$PathName)
+
+    if ([string]::IsNullOrWhiteSpace($PathName)) { return $null }
+    $candidate = $PathName.Trim()
+    if ($candidate.StartsWith('"')) {
+        $endQuote = $candidate.IndexOf('"', 1)
+        if ($endQuote -gt 1) {
+            $candidate = $candidate.Substring(1, $endQuote - 1)
+        }
+    } else {
+        $exeIndex = $candidate.ToLowerInvariant().IndexOf('.exe')
+        if ($exeIndex -ge 0) {
+            $candidate = $candidate.Substring(0, $exeIndex + 4)
+        }
+    }
+    if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+        return $candidate
+    }
+    return $null
+}
+
 $branding = Resolve-Branding
 
 if (-not $ServiceName -and $branding) {
@@ -77,9 +113,12 @@ if ($ServiceName) {
 }
 
 if (-not $InstallPath -and $service) {
-    if ($service.PathName) {
-        $binaryCandidate = $service.PathName.Trim('"')
-        if (Test-Path $binaryCandidate) {
+    $serviceDllPath = Resolve-ServiceDllPath -Name $ServiceName
+    if ($serviceDllPath -and (Test-Path -LiteralPath $serviceDllPath)) {
+        $InstallPath = Split-Path -Path $serviceDllPath -Parent
+    } elseif ($service.PathName) {
+        $binaryCandidate = Resolve-ServiceExecutablePath -PathName $service.PathName
+        if ($binaryCandidate) {
             $InstallPath = Split-Path -Path $binaryCandidate -Parent
         }
     }
@@ -96,9 +135,20 @@ elseif (-not (Test-Path $InstallPath)) {
 
 $binaryPath = $null
 if ($InstallPath) {
-    $binaryPath = Join-Path $InstallPath "MeshService64.exe"
-    if (-not (Test-Path $binaryPath)) {
-        $binaryPath = Join-Path $InstallPath "MeshService.exe"
+    $binaryNames = New-Object System.Collections.Generic.List[string]
+    if ($branding -and $branding.branding.binaryName) {
+        $binaryNames.Add([string]$branding.branding.binaryName)
+    }
+    $binaryNames.Add("MeshService64.exe")
+    $binaryNames.Add("MeshService.exe")
+
+    foreach ($binaryName in ($binaryNames | Select-Object -Unique)) {
+        if ([string]::IsNullOrWhiteSpace($binaryName)) { continue }
+        $candidate = Join-Path $InstallPath $binaryName
+        if (Test-Path $candidate) {
+            $binaryPath = $candidate
+            break
+        }
     }
 } elseif ($service -and $service.PathName) {
     $candidate = $service.PathName.Trim('"')
@@ -108,7 +158,7 @@ if ($InstallPath) {
 }
 
 if (-not $binaryPath -or -not (Test-Path $binaryPath)) {
-    Add-Result -Name "Primary Binary" -Status "Fail" -Message "MeshService binary not located. Provide -InstallPath if non-standard."
+    Add-Result -Name "Primary Binary" -Status "Fail" -Message "Service binary not located. Provide -InstallPath if non-standard."
 } else {
     Add-Result -Name "Primary Binary" -Status "Pass" -Message ("Binary located at {0}" -f $binaryPath)
 
@@ -154,8 +204,13 @@ if (-not $binaryPath -or -not (Test-Path $binaryPath)) {
                     Add-Result -Name "Digital Signature" -Status "Fail" -Message ("Signer {0} not allowlisted." -f $thumbprint)
                 }
             } else {
-                $status = $enforcementEnabled ? 'Fail' : 'Warning'
-                $message = $enforcementEnabled ? "Binary is unsigned while signing enforcement is enabled." : "Binary is unsigned (signing enforcement disabled)."
+                if ($enforcementEnabled) {
+                    $status = 'Fail'
+                    $message = "Binary is unsigned while signing enforcement is enabled."
+                } else {
+                    $status = 'Warning'
+                    $message = "Binary is unsigned (signing enforcement disabled)."
+                }
                 Add-Result -Name "Digital Signature" -Status $status -Message $message
             }
         } catch {
@@ -177,9 +232,9 @@ if ($InstallPath) {
         Add-Result -Name "Recent Log Activity" -Status "Warning" -Message "No log files discovered in the install directory."
     }
 }
-$passed  = ($results | Where-Object { $_.Status -eq 'Pass' }).Count
-$failed  = ($results | Where-Object { $_.Status -eq 'Fail' }).Count
-$warning = ($results | Where-Object { $_.Status -eq 'Warning' }).Count
+$passed  = @($results | Where-Object { $_.Status -eq 'Pass' }).Count
+$failed  = @($results | Where-Object { $_.Status -eq 'Fail' }).Count
+$warning = @($results | Where-Object { $_.Status -eq 'Warning' }).Count
 $total   = $results.Count
 
 if (-not $Quiet) {

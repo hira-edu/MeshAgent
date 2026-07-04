@@ -164,6 +164,10 @@ function main() {
         relayRestartsSuppressedHelperOnConnect: kvmSource.includes('gKvmRestartSuppressed = 0;') &&
             kvmSource.includes('if (gChildProcess == NULL && g_shutdown == 0 && gKvmPipeMgr != NULL && gKvmExePath != NULL && gKvmWriteHandler != NULL)') &&
             kvmSource.includes('kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);'),
+        relayRestartBranchIsServiceOnly:
+            sessionChangeBody.includes('#ifdef _WINSERVICE') &&
+            sessionChangeBody.includes('kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);') &&
+            sessionChangeBody.includes('#endif'),
         relayRebindsToNewSession: kvmSource.includes('gProcessTSID = (int)sessionId;') &&
             kvmSource.includes('gKvmProcessSessionId = sessionId;'),
         relayPreservesExplicitVsAutoSelectedTsid:

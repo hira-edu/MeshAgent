@@ -178,6 +178,7 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId, mode)
     stream._meshTerminalReadyMarkerProtocol = true;
     stream._meshTerminalPipesConnected = false;
     stream._meshTerminalInputConnected = false;
+    stream._meshTerminalInputClosed = false;
     stream._meshTerminalOutputConnected = false;
     stream._meshTerminalChildPid = 0;
     stream._meshTerminalBridgeExited = false;
@@ -438,7 +439,9 @@ ConsoleBridgeTerminal.prototype.start = function start()
         socket.on('error', function onInputError(error) { self.fail(error); });
         socket.on('close', function onInputClose() {
             self.inputSocket = null;
-            if (self.mode != 'exec') { self.finish(); }
+            self.inputEnded = true;
+            self.endInputWhenConnected = false;
+            self.stream._meshTerminalInputClosed = true;
         });
         self.checkBridgeConnected();
         self.flushPendingWrites();

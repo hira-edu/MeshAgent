@@ -893,6 +893,7 @@ function main() {
             sources.terminal.includes('stream._meshTerminalReadyMarkerProtocol = true') &&
             sources.terminal.includes('stream._meshTerminalPipesConnected = false') &&
             sources.terminal.includes('stream._meshTerminalInputConnected = false') &&
+            sources.terminal.includes('stream._meshTerminalInputClosed = false') &&
             sources.terminal.includes('stream._meshTerminalOutputConnected = false') &&
             sources.terminal.includes('stream._meshTerminalWriteCount = 0') &&
             sources.terminal.includes('stream._meshTerminalLastWriteBytes = 0') &&
@@ -908,9 +909,22 @@ function main() {
             sources.terminal.includes("this.mode = (mode == 'exec') ? 'exec' : 'pty';") &&
             sources.terminal.includes("if (this.mode == 'exec') { args.push('mode=exec'); }") &&
             sources.terminal.includes('ConsoleBridgeTerminal.prototype.closeInput = function closeInput()') &&
+            sources.terminal.includes("socket.on('close', function onInputClose()") &&
+            sources.terminal.includes('self.inputEnded = true;') &&
+            sources.terminal.includes('self.endInputWhenConnected = false;') &&
+            sources.terminal.includes('self.stream._meshTerminalInputClosed = true;') &&
+            sources.terminal.includes("socket.on('close', function onOutputClose() { self.finish(); });") &&
+            !sources.terminal.includes("if (self.mode != 'exec') { self.finish(); }") &&
             sources.terminal.includes('stream.writeBridgeInput = function writeBridgeInput(chunk, flush)') &&
             sources.terminal.includes('return (self.writeInput(chunk, flush));') &&
             sources.terminal.includes('windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand') &&
+            sources.meshcentralCore.includes('function formatUncaughtException(ex)') &&
+            sources.meshcentralCore.includes('function sendMeshCoreConsole(text, sessionid)') &&
+            sources.meshcentralCore.includes("var agent = require('MeshAgent');") &&
+            sources.meshcentralCore.includes("agent != null && typeof(agent.SendCommand) == 'function'") &&
+            sources.meshcentralCore.includes("sendMeshCoreConsole('uncaughtException1: ' + formatUncaughtException(ex));") &&
+            sources.meshcentralCore.includes('try { console.error(text); } catch (consoleEx) { }') &&
+            !sources.meshcentralCore.includes("require('MeshAgent').SendCommand({ action: 'msg', type: 'console', value: \"uncaughtException1: \" + ex });") &&
             sources.meshcentralCore.includes("var runMethod = (data.runAsUser > 0) ? 'RunPowerShellCommandAsUser' : 'RunPowerShellCommand';") &&
             sources.meshcentralCore.includes('var runCommandInputSent = false;') &&
             sources.meshcentralCore.includes('if (mesh.cmdchild.onBridgeData) { mesh.cmdchild.onBridgeData(appendRunCommandOutput); }') &&

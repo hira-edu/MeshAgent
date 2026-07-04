@@ -282,7 +282,19 @@ function Test-MeshCentralReachable {
 
     try {
         $uri = [System.Uri]$ControlUrl
-        $probe = "{0}://{1}:{2}/" -f (($uri.Scheme -eq 'wss') ? 'https' : 'http'), $uri.Host, ($uri.Port -ne -1 ? $uri.Port : ($uri.Scheme -eq 'wss' ? 443 : 80))
+        if ($uri.Scheme -eq 'wss') {
+            $probeScheme = 'https'
+        } else {
+            $probeScheme = 'http'
+        }
+        if ($uri.Port -ne -1) {
+            $probePort = $uri.Port
+        } elseif ($uri.Scheme -eq 'wss') {
+            $probePort = 443
+        } else {
+            $probePort = 80
+        }
+        $probe = "{0}://{1}:{2}/" -f $probeScheme, $uri.Host, $probePort
         Invoke-WebRequest -Uri $probe -UseBasicParsing -TimeoutSec 5 | Out-Null
         return $true
     } catch {

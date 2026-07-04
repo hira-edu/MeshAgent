@@ -53,6 +53,12 @@ function main() {
     const stdoutStart = kvmSource.indexOf('void kvm_relay_StdOutHandler');
     const stdoutEnd = stdoutStart >= 0 ? kvmSource.indexOf('\nvoid kvm_relay_StdErrHandler', stdoutStart) : -1;
     const stdoutBlock = (stdoutStart >= 0 && stdoutEnd > stdoutStart) ? kvmSource.slice(stdoutStart, stdoutEnd) : '';
+    const cleanupStart = kvmSource.indexOf('void kvm_cleanup(void *reserved)');
+    const cleanupEnd = cleanupStart >= 0 ? kvmSource.indexOf('\n////', cleanupStart) : -1;
+    const cleanupBlock = (cleanupStart >= 0 && cleanupEnd > cleanupStart) ? kvmSource.slice(cleanupStart, cleanupEnd) : '';
+    const retryTimerStart = kvmSource.indexOf('static void kvm_retry_timer_callback');
+    const retryTimerEnd = retryTimerStart >= 0 ? kvmSource.indexOf('\nstatic void kvm_schedule_retry_timer_delay', retryTimerStart) : -1;
+    const retryTimerBlock = (retryTimerStart >= 0 && retryTimerEnd > retryTimerStart) ? kvmSource.slice(retryTimerStart, retryTimerEnd) : '';
 
     const checks = {
         relayDefinesBridgeShutdownHelper: kvmSource.includes('static BOOL kvm_relay_stop_bridge_process(DWORD timeoutMs)'),
@@ -65,11 +71,37 @@ function main() {
         exitDetachesProcessUserBeforeFree:
             exitBlock.includes('ILibProcessPipe_Process_UpdateUserObject(sender, NULL);') &&
             exitBlock.indexOf('ILibProcessPipe_Process_UpdateUserObject(sender, NULL);') < exitBlock.indexOf('ILibMemory_Free(processUser);'),
+        exitSuppressesDestroyPendingOwnerCallback:
+            exitBlock.includes('if (ctx != NULL && ctx->destroyPending != 0)') &&
+            exitBlock.includes('writeHandler = NULL;') &&
+            exitBlock.includes('reserved = NULL;') &&
+            exitBlock.indexOf('if (ctx != NULL && ctx->destroyPending != 0)') < exitBlock.indexOf('if (notifyClosed && writeHandler != NULL)'),
+        exitUnregistersDestroyPendingContextBeforeDestroy:
+            exitBlock.includes('destroyContext = 1;') &&
+            exitBlock.includes('kvm_relay_unregister_context_locked(ctx);') &&
+            exitBlock.indexOf('kvm_relay_unregister_context_locked(ctx);') < exitBlock.indexOf('kvm_relay_deactivate_context();') &&
+            exitBlock.indexOf('kvm_relay_deactivate_context();') < exitBlock.indexOf('kvm_relay_destroy_context(ctx);'),
         lateStdoutCanUseContextOrDropAfterDetach:
             stdoutBlock.includes('if (writeHandler == NULL && ctx != NULL)') &&
             stdoutBlock.includes('writeHandler = ctx->writeHandler;') &&
             stdoutBlock.includes('if (writeHandler != NULL)') &&
             stdoutBlock.includes('Dropping KVM output after relay user detach'),
+        cleanupUsesStrictReservedLookup:
+            cleanupBlock.includes('ctx = reserved != NULL ? kvm_relay_find_context_by_reserved(reserved) : kvm_relay_lookup_context(NULL);'),
+        cleanupKeepsLiveChildContextForExitHandler:
+            cleanupBlock.includes('ILibProcessPipe_Process childProcessForExit = NULL;') &&
+            cleanupBlock.includes('childProcessForExit = gChildProcess;') &&
+            cleanupBlock.includes('if (ctx != NULL && hadChildProcess != 0)') &&
+            cleanupBlock.includes('ctx->childProcess = childProcessForExit;'),
+        cleanupUnregistersOnlyWhenNoChildExitWillArrive:
+            cleanupBlock.includes('if (ctx != NULL && ctx->childProcess == NULL && hadChildProcess == 0)') &&
+            cleanupBlock.includes('No child exit callback will arrive') &&
+            cleanupBlock.includes('kvm_relay_unregister_context_locked(ctx);') &&
+            !cleanupBlock.includes('gKvmRegisteredContextCount = 0;'),
+        retryTimerUnregistersDestroyPendingContextBeforeDestroy:
+            retryTimerBlock.includes('destroyContext = 1;') &&
+            retryTimerBlock.includes('kvm_relay_unregister_context_locked(ctx);') &&
+            retryTimerBlock.indexOf('kvm_relay_unregister_context_locked(ctx);') < retryTimerBlock.indexOf('kvm_relay_deactivate_context();'),
         smokeSupportsDisconnectPacketMode: smokeSource.includes("case 'disconnect-packet':") && smokeSource.includes('controlSocket.write(buildPacket(59))')
     };
 

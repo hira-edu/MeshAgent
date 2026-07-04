@@ -1055,6 +1055,14 @@ static void kvm_relay_cache_refresh_probe_for_respawn(KvmRelayContext* ctx)
 
 static int kvm_relay_prepare_bridge_respawn_from_input(KvmRelayContext* ctx, char* buffer, int bufferLen, const char* reason, DWORD errorCode)
 {
+#ifndef _WINSERVICE
+	UNREFERENCED_PARAMETER(ctx);
+	UNREFERENCED_PARAMETER(buffer);
+	UNREFERENCED_PARAMETER(bufferLen);
+	UNREFERENCED_PARAMETER(reason);
+	UNREFERENCED_PARAMETER(errorCode);
+	return 0;
+#else
 	int cachedInput = 0;
 
 	if (ctx == NULL || g_shutdown != 0 || gKvmRestartSuppressed != 0 || gKvmPipeMgr == NULL || gKvmExePath == NULL || gKvmWriteHandler == NULL)
@@ -1102,6 +1110,7 @@ static int kvm_relay_prepare_bridge_respawn_from_input(KvmRelayContext* ctx, cha
 	}
 
 	return kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);
+#endif
 }
 
 static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int bufferLen)
@@ -2017,12 +2026,15 @@ static void kvm_retry_timer_callback(void* object)
 	if (pendingStartHandled == 0 && staleRefreshHandled == 0 && g_shutdown == 0 && gKvmRestartSuppressed == 0 &&
 		gChildProcess == NULL && gKvmPipeMgr != NULL && gKvmWriteHandler != NULL)
 	{
+#ifdef _WINSERVICE
 		kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);
+#endif
 	}
 	kvm_relay_capture_context(ctx);
 	if (ctx != NULL && ctx->destroyPending != 0 && ctx->childProcess == NULL && ctx->retryScheduled == 0)
 	{
 		destroyContext = 1;
+		kvm_relay_unregister_context_locked(ctx);
 	}
 	kvm_relay_deactivate_context();
 	kvm_relay_unlock();
@@ -4145,6 +4157,11 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	gChildProcess = NULL;
 	gKvmChildExitSignaled = 1;
 	kvm_update_runtime_state(0, 0);
+	if (ctx != NULL && ctx->destroyPending != 0)
+	{
+		writeHandler = NULL;
+		reserved = NULL;
+	}
 
 	if (gKvmRestartSuppressed != 0 || g_shutdown != 0)
 	{
@@ -4194,6 +4211,7 @@ cleanup:
 	if (ctx != NULL && ctx->destroyPending != 0 && ctx->childProcess == NULL && ctx->retryScheduled == 0)
 	{
 		destroyContext = 1;
+		kvm_relay_unregister_context_locked(ctx);
 	}
 	kvm_relay_deactivate_context();
 	kvm_relay_unlock();
@@ -5045,14 +5063,14 @@ void kvm_relay_query_input_lock(ILibKVM_WriteHandler writeHandler, void *reserve
 void kvm_cleanup(void *reserved)
 {
 	KvmRelayContext* ctx = NULL;
+	ILibProcessPipe_Process childProcessForExit = NULL;
 	int destroyNow = 0;
 	int hadChildProcess = 0;
 	//ILIBMESSAGE("KVMBREAK-CLEAN\r\n");
 	kvm_relay_lock();
-	ctx = kvm_relay_lookup_context(reserved);
+	ctx = reserved != NULL ? kvm_relay_find_context_by_reserved(reserved) : kvm_relay_lookup_context(NULL);
 	if (ctx != NULL)
 	{
-		kvm_relay_unregister_context_locked(ctx);
 		ctx->destroyPending = 1;
 	}
 	kvm_relay_activate_context(ctx);
@@ -5073,13 +5091,13 @@ void kvm_cleanup(void *reserved)
 			ILibLifeTime_Remove(timer, ctx != NULL ? (void*)ctx : (void*)&gKvmRetryTimerToken);
 		}
 	}
-	gKvmRegisteredContextCount = 0;
 	gKvmDebugReserved = NULL;
 	gKvmPipeMgr = NULL;
 	gKvmExePath = NULL;
 	gKvmWriteHandler = NULL;
 	kvm_update_runtime_state(0, 0);
 	hadChildProcess = (gChildProcess != NULL);
+	childProcessForExit = gChildProcess;
 	if (gChildProcess != NULL) 
 	{ 
 		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM.c/kvm_cleanup: Attempting graceful child shutdown");
@@ -5105,11 +5123,14 @@ void kvm_cleanup(void *reserved)
 		kvm_relay_reset_cached_control_state(ctx);
 	}
 	kvm_relay_capture_context(ctx);
+	if (ctx != NULL && hadChildProcess != 0)
+	{
+		ctx->childProcess = childProcessForExit;
+	}
 	if (ctx != NULL && ctx->childProcess == NULL && hadChildProcess == 0)
 	{
-		// If cleanup had to kill a live child, the process exit handler still owns the final
-		// teardown for this context. Freeing it here races that exit callback and leaves it with
-		// a dangling ctx pointer.
+		kvm_relay_unregister_context_locked(ctx);
+		// No child exit callback will arrive, so cleanup owns final teardown.
 		destroyNow = 1;
 	}
 	kvm_relay_deactivate_context();
@@ -5447,10 +5468,12 @@ static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DW
 			kvm_update_runtime_state(0, 0);
 			ILibProcessPipe_Process_SoftKill(gChildProcess);
 		}
+#ifdef _WINSERVICE
 		else if (gChildProcess == NULL && g_shutdown == 0 && gKvmPipeMgr != NULL && gKvmExePath != NULL && gKvmWriteHandler != NULL)
 		{
 			kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);
 		}
+#endif
 		break;
 	default:
 		break;

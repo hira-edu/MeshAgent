@@ -129,6 +129,7 @@ function checkTerminalModule(source) {
             source.includes('stream._meshTerminalReadyMarkerProtocol = true') &&
             source.includes('stream._meshTerminalPipesConnected = false') &&
             source.includes('stream._meshTerminalInputConnected = false') &&
+            source.includes('stream._meshTerminalInputClosed = false') &&
             source.includes('stream._meshTerminalOutputConnected = false') &&
             source.includes('stream._meshTerminalChildPid = 0') &&
             source.includes('stream._meshTerminalBridgeExited = false') &&
@@ -147,6 +148,14 @@ function checkTerminalModule(source) {
             source.includes('stream.isBridgeClosed = function isBridgeClosed()') &&
             source.includes('stream._meshTerminalClosed = false') &&
             source.includes('emitCloseOnce'),
+        inputPipeCloseDoesNotCloseTerminal:
+            source.includes("socket.on('close', function onInputClose()") &&
+            source.includes('self.inputSocket = null;') &&
+            source.includes('self.inputEnded = true;') &&
+            source.includes('self.endInputWhenConnected = false;') &&
+            source.includes('self.stream._meshTerminalInputClosed = true;') &&
+            source.includes("socket.on('close', function onOutputClose() { self.finish(); });") &&
+            !source.includes("if (self.mode != 'exec') { self.finish(); }"),
         supportsNonInteractiveRunCommandMode:
             source.includes("this.mode = (mode == 'exec') ? 'exec' : 'pty';") &&
             source.includes("if (this.mode == 'exec') { args.push('mode=exec'); }") &&
@@ -193,6 +202,14 @@ function checkMeshCore(source) {
     const fileConsentSection = sourceBetween(source, "currentTranslation['fileConsent']", 'files_consentpromise_resolved');
 
     return {
+        uncaughtExceptionHandlerIsFailClosed:
+            source.includes('function formatUncaughtException(ex)') &&
+            source.includes('function sendMeshCoreConsole(text, sessionid)') &&
+            source.includes("var agent = require('MeshAgent');") &&
+            source.includes("agent != null && typeof(agent.SendCommand) == 'function'") &&
+            source.includes("sendMeshCoreConsole('uncaughtException1: ' + formatUncaughtException(ex));") &&
+            source.includes('try { console.error(text); } catch (consoleEx) { }') &&
+            !source.includes("require('MeshAgent').SendCommand({ action: 'msg', type: 'console', value: \"uncaughtException1: \" + ex });"),
         staleBusyStateIsClosed:
             source.includes('if (terminal_is_closed(mesh.cmdchild))') &&
             source.includes('terminal_close_stream(mesh.cmdchild);') &&
