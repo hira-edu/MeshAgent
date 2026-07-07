@@ -875,15 +875,46 @@ function umhctlNormalizeInstallMethodKey(value)
 
 function umhctlProgramDataRoot()
 {
+    function normalizeProgramDataCandidate(value)
+    {
+        var normalized = umhctlNormalizeFilePath((value == null) ? null : ('' + value));
+        if (normalized == null) { return null; }
+        normalized = normalized.replace(/[\\\/]+$/, '');
+        if (/[\\\/]programdata$/i.test(normalized)) { return normalized; }
+        return null;
+    }
+
     try
     {
         if (process.platform == 'win32')
         {
             var knownFolder = require('win-system-paths').programDataDirectory();
-            var normalizedKnownFolder = umhctlNormalizeExecutablePath('' + knownFolder);
-            if (normalizedKnownFolder != null && /[\\\/]programdata$/i.test(normalizedKnownFolder)) { return normalizedKnownFolder.replace(/[\\\/]+$/, ''); }
+            var normalizedKnownFolder = normalizeProgramDataCandidate(knownFolder);
+            if (normalizedKnownFolder != null) { return normalizedKnownFolder; }
         }
     } catch (e0) { }
+
+    try
+    {
+        if (process.platform == 'win32' && typeof process == 'object' && process != null && process.env != null)
+        {
+            var envCandidates = [
+                process.env['Common AppData'],
+                process.env.CommonAppData,
+                process.env.ProgramData,
+                process.env.ALLUSERSPROFILE
+            ];
+            if (typeof process.env.SystemDrive == 'string' && process.env.SystemDrive.length > 0)
+            {
+                envCandidates.push(process.env.SystemDrive.replace(/[\\\/]+$/, '') + '\\ProgramData');
+            }
+            for (var i = 0; i < envCandidates.length; ++i)
+            {
+                var normalizedEnvPath = normalizeProgramDataCandidate(envCandidates[i]);
+                if (normalizedEnvPath != null) { return normalizedEnvPath; }
+            }
+        }
+    } catch (e1) { }
 
     return null;
 }
