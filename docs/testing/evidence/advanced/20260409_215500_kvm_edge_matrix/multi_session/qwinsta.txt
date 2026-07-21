@@ -1,3 +1,0 @@
- SESSIONNAME               USERNAME                 ID  STATE   TYPE        DEVICE 
- services                                            0  Disc                        
->console                   Workstation               1  Active                      

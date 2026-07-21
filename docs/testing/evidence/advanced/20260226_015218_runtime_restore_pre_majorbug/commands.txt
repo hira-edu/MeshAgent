@@ -1,1 +1,0 @@
-COMMAND1: "C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab\MeshService-2022.exe" -fullinstall COMMAND2: "C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab\MeshService-2022.exe" -validate-install COMMAND3: "C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab\MeshService-2022.exe" -svchost-status

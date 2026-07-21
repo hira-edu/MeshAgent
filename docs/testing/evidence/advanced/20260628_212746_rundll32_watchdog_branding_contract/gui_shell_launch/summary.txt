@@ -1,4 +1,0 @@
-GENERATED_UTC=2026-06-28T16:28:55.030Z
-SUCCESS=true
-SHELL_EXECUTE_OCCURRENCES=1
-CHECKS=guiRunAsShellFallbackRemoved:true,noGuiShellLaunchRetryHeuristic:true,shellExecuteOnlyInUacConsentTrigger:true,suppressesShellUiOnUacConsentTrigger:true,closesUacConsentTriggerProcessHandle:true

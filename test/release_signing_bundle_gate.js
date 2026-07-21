@@ -145,8 +145,8 @@ function main() {
     const releaseDir = path.join(stagingRoot, 'release');
     const reportsDir = path.join(stagingRoot, 'reports');
     const evidenceDir = path.join(stagingRoot, 'evidence');
-    const artifactsDir = path.join(repoRoot, 'docs', 'testing', 'artifacts');
-    const bundlePath = path.join(artifactsDir, `${args.timestamp}_realignment_bundle.zip`);
+    const artifactsDir = path.join(repoRoot, 'dist', 'release');
+    const bundlePath = path.join(artifactsDir, `${args.timestamp}_release_bundle.zip`);
 
     if (fs.existsSync(stagingRoot)) {
         fs.rmSync(stagingRoot, { recursive: true, force: true });
@@ -227,10 +227,12 @@ function main() {
     fs.writeFileSync(path.join(releaseDir, 'checksums.txt'), `${checksums.join('\n')}\n`);
 
     const reports = [
-        'docs/testing/20260331_REALIGNMENT_TODO_MATRIX.md',
-        'docs/testing/20260331_REALIGNMENT_REGRESSION_MATRIX.md',
-        'docs/testing/20260507_DIAGNOSTICHOST_KVM_AUDIT_REMEDIATION.md',
+        'docs/README.md',
+        'docs/CONFIGURATION.md',
+        'docs/DEPLOYMENT.md',
         'docs/files/meshagent_release_checklist.md',
+        'docs/UMH_CONTROL_SISTER_REPO_SSOT.md',
+        'docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md',
     ];
     for (const report of reports) {
         const source = path.join(repoRoot, report);

@@ -281,7 +281,7 @@
             controlOp: 'getConfig',
             fields: [],
             sampleInput: {},
-            sampleResponse: { ok: true, data: '{"profile":"lab","capture":"dxgi"}' }
+            sampleResponse: { ok: true, data: '{"profile":"lab","capture":"gdi"}' }
         },
         uiSnapshot: {
             id: 'uiSnapshot',
@@ -452,7 +452,7 @@
             fields: [
                 { name: 'content', flag: '--content', type: 'text', required: true }
             ],
-            sampleInput: { content: '{"capture":"dxgi"}' },
+            sampleInput: { content: '{"capture":"gdi"}' },
             sampleResponse: { ok: true, data: { config: 'updated' } }
         },
         clearTargetScope: {

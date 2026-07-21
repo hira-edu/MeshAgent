@@ -131,7 +131,7 @@ python deploy.py ssh "command"   # Run arbitrary remote command
 7. Regenerates `hashagents.json` for the module and signed publish directories from the actual remote files
 8. Restarts `meshcentral` systemd service
 9. Re-runs post-restart publish verification so `meshcentral-data/agents/` and `node_modules/meshcentral/agents/` still match the local build while `signedagents/` remains self-consistent if MeshCentral repacks/signs the EXEs
-10. Writes local release manifest with repo SHAs + artifact hashes under `docs/testing/artifacts/`
+10. Writes a local release manifest with repo SHAs and artifact hashes under `artifacts/deployment/`
 11. Cleans staging area
 
 ### 2. Direct SSH (Ad-Hoc)
@@ -327,7 +327,7 @@ These replace the previous 62+ PowerShell download-and-run buttons with simple a
 ### Overview
 
 MeshCentral v1.1.56 is installed via npm at `/opt/meshcentral/node_modules/meshcentral/`.
-As of the 2026-04-13 realignment, the local `MeshCentral` repo is treated as a mirror of the live VPS module tree plus selected live overrides, not as an authoritative source checkout with guaranteed local-only deployment tooling.
+The local `MeshCentral` repo is treated as a mirror of the live VPS module tree plus selected live overrides, not as an authoritative source checkout with guaranteed local-only deployment tooling.
 
 ### MeshCentral Local Repo
 

@@ -440,9 +440,7 @@ microscript/ILibDuktape_Commit.h
 *.backup
 *~
 
-# Generated validation evidence and release artifacts
-docs/testing/evidence/
-docs/testing/artifacts/
+# Generated validation scratch paths
 test/msbuild_tmp/
 test/rundll32_*/
 rundll32-lifecycle/

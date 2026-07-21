@@ -1,9 +1,0 @@
-AGENTCORE_PATH=/Users/umairliaquat/Documents/GitHub/MeshAgent/meshcore/agentcore.c
-AGENT_INSTALLER_PATH=/Users/umairliaquat/Documents/GitHub/MeshAgent/modules/agent-installer.js
-MESHCORE_PATH=/Users/umairliaquat/Documents/GitHub/MeshCentral/agents/meshcore.js
-RECOVERYCORE_PATH=/Users/umairliaquat/Documents/GitHub/MeshCentral/agents/recoverycore.js
-SUCCESS=true
-EXTERNAL_MESHCENTRAL_DRIFT=true
-MESHCORE_LEGACY_HITS=".update.exe","_wexecve","cmd.exe","-b64exec "
-RECOVERYCORE_LEGACY_HITS=".update.exe","_wexecve","cmd.exe","-b64exec "
-CHECKS=agentcorePublishesNativeFullUpdate:true,agentcoreProbesZipHeaderBeforeOptionalJsUnzip:true,agentcoreGuardsOptionalZipModules:true,agentcoreRawPayloadContinuesWhenZipReaderMissing:true,agentcoreUsesPackageUpdateSuffix:true,agentcoreSelfUpdateLaunchesRundll32Lifecycle:true,agentcoreFailsClosedWhenRundll32Unavailable:true,agentcoreDoesNotUseLegacyWindowsUpdateExe:true,agentInstallerUpdateSourceFeedsLifecycleBinary:true,agentInstallerLifecycleManifestRecordsSelectedSourceExe:true,agentInstallerDoesNotUseLegacyUpdateExe:true

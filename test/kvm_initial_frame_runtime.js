@@ -127,9 +127,6 @@ function captureFirstFrame(exePath, dllPath, backend, outDir) {
         let childExited = false;
 
         const env = { ...process.env };
-        if (backend != null) {
-            env.STEALTH_KVM_CAPTURE_BACKEND = backend;
-        }
 
         const finish = (error, payload) => {
             if (settled) { return; }
@@ -260,7 +257,7 @@ async function main() {
         : path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
     const dllPath = resolveBridgeDllPath(exePath, args.dll ? path.resolve(args.dll) : null);
     const minBrightness = Number(args['min-brightness'] || '5');
-    const scenarios = ['auto', 'gdi', 'dxgi', 'wgc'];
+    const scenarios = ['gdi'];
 
     assert(fs.existsSync(exePath), `KVM executable missing: ${exePath}`);
     assert(fs.existsSync(dllPath), `KVM bridge DLL missing: ${dllPath}`);

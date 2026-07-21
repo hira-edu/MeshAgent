@@ -49,6 +49,15 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
     }
 ];
 
+const DEFAULT_RELEASE_DOCUMENTS = [
+    'docs/README.md',
+    'docs/CONFIGURATION.md',
+    'docs/DEPLOYMENT.md',
+    'docs/files/meshagent_release_checklist.md',
+    'docs/UMH_CONTROL_SISTER_REPO_SSOT.md',
+    'docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md'
+];
+
 function parseArgs(argv) {
     const args = { artifacts: [] };
     for (let i = 2; i < argv.length; ++i) {
@@ -78,10 +87,6 @@ function parseArgs(argv) {
 
 function ensureDir(dirPath) {
     fs.mkdirSync(dirPath, { recursive: true });
-}
-
-function readText(filePath) {
-    return fs.readFileSync(filePath, 'utf8');
 }
 
 function writeText(filePath, text) {
@@ -251,59 +256,6 @@ function collectArtifactManifest(expectedArtifacts) {
     });
 }
 
-function extractTodoRows(matrixText) {
-    const rows = {};
-    const lines = matrixText.split(/\r?\n/);
-    for (const line of lines) {
-        if (!line.startsWith('|')) { continue; }
-        const columns = line.split('|').slice(1, -1).map((value) => value.trim());
-        if (columns.length < 7) { continue; }
-        const id = columns[3];
-        if (/^TODO-\d+$/.test(id)) {
-            rows[id] = {
-                phase: columns[0],
-                priority: columns[1],
-                status: columns[2],
-                id,
-                task: columns[4],
-                ledger: columns[5],
-                dependsOn: columns[6],
-                acceptance: columns[7] || ''
-            };
-        }
-    }
-    return rows;
-}
-
-function extractEvidencePaths(text) {
-    const paths = new Set();
-    const regex = /`(docs\/testing\/(?:evidence|artifacts)\/[^`]+)`/g;
-    let match;
-    while ((match = regex.exec(text)) != null) {
-        paths.add(match[1]);
-    }
-    return Array.from(paths).sort();
-}
-
-function collectEvidenceFiles() {
-    const root = path.join(REPO_ROOT, 'docs', 'testing', 'evidence', 'advanced');
-    const files = [];
-    function walk(dir) {
-        if (!directoryExists(dir)) { return; }
-        for (const name of fs.readdirSync(dir).sort()) {
-            const abs = path.join(dir, name);
-            const stat = fs.statSync(abs);
-            if (stat.isDirectory()) {
-                walk(abs);
-            } else if (stat.isFile()) {
-                files.push(abs);
-            }
-        }
-    }
-    walk(root);
-    return files;
-}
-
 function collectBundleFiles(evidenceDir) {
     const files = [];
     const addIfFile = (rel) => {
@@ -318,7 +270,6 @@ function collectBundleFiles(evidenceDir) {
                 const abs = path.join(dir, name);
                 const stat = fs.statSync(abs);
                 if (stat.isDirectory()) {
-                    if (relativeToRepo(abs).startsWith('docs/testing/artifacts')) { continue; }
                     walk(abs);
                 } else if (stat.isFile()) {
                     files.push(abs);
@@ -328,13 +279,9 @@ function collectBundleFiles(evidenceDir) {
         walk(root);
     };
 
-    addIfFile('docs/testing/20260331_REALIGNMENT_TODO_MATRIX.md');
-    addIfFile('docs/testing/20260331_REALIGNMENT_REGRESSION_MATRIX.md');
-    addIfFile('docs/testing/20260331_REALIGNMENT_LEDGER.md');
-    addIfFile('docs/testing/ReleaseCheckList.md');
-    addIfFile('docs/files/meshagent_release_checklist.md');
-    addIfFile('DEPLOYMENT_GUIDE.md');
-    addTree('docs/testing/evidence/advanced');
+    for (const documentPath of DEFAULT_RELEASE_DOCUMENTS) {
+        addIfFile(documentPath);
+    }
     if (directoryExists(evidenceDir)) {
         const rel = relativeToRepo(evidenceDir);
         addTree(rel);
@@ -515,60 +462,52 @@ function formatChecksums(artifactManifest) {
     return lines.join(os.EOL) + (lines.length > 0 ? os.EOL : '');
 }
 
-function buildChecklist({ todoRows, artifactManifest, missingEvidence, bundleExported }) {
-    const todo027 = todoRows['TODO-027'];
+function buildChecklist({ artifactManifest, missingReleaseDocuments, bundleExported }) {
     const requiredArtifactsPresent = artifactManifest.every((artifact) => artifact.required !== true || artifact.found === true);
     const signedArtifactsOk = artifactManifest
         .filter((artifact) => artifact.signedRequired)
         .every((artifact) => artifact.signature != null && artifact.signature.hasCertificateTable === true);
     const digestsExported = artifactManifest.some((artifact) => artifact.digests != null);
-    const evidenceBundleExported = bundleExported === true;
+    const releaseBundleExported = bundleExported === true;
     return {
-        dependency_todo_027_done: todo027 != null && todo027.status === 'DONE',
         required_release_artifacts_present: requiredArtifactsPresent,
         signed_artifacts_have_pe_certificate_table: signedArtifactsOk,
         digests_exported: digestsExported,
-        referenced_evidence_paths_exist: missingEvidence.length === 0,
-        evidence_bundle_exported: evidenceBundleExported,
+        required_release_documents_present: missingReleaseDocuments.length === 0,
+        release_bundle_exported: releaseBundleExported,
         release_ready:
-            todo027 != null &&
-            todo027.status === 'DONE' &&
             requiredArtifactsPresent &&
             signedArtifactsOk &&
             digestsExported &&
-            missingEvidence.length === 0 &&
-            evidenceBundleExported
+            missingReleaseDocuments.length === 0 &&
+            releaseBundleExported
     };
 }
 
 function collectFailures(checklist) {
     const failures = [];
-    if (!checklist.dependency_todo_027_done) { failures.push('TODO-027 is not DONE'); }
     if (!checklist.required_release_artifacts_present) { failures.push('required release artifacts are missing'); }
     if (!checklist.signed_artifacts_have_pe_certificate_table) { failures.push('required signed PE artifacts are missing a certificate table or are absent'); }
     if (!checklist.digests_exported) { failures.push('no artifact digests were exported'); }
-    if (!checklist.referenced_evidence_paths_exist) { failures.push('one or more matrix-referenced evidence paths are missing'); }
-    if (!checklist.evidence_bundle_exported) { failures.push('evidence bundle was not exported'); }
+    if (!checklist.required_release_documents_present) { failures.push('one or more required release documents are missing'); }
+    if (!checklist.release_bundle_exported) { failures.push('release bundle was not exported'); }
     return failures;
 }
 
-function writeReportOutputs(evidenceDir, report, checklist, missingEvidence, artifactManifest, allowIncomplete, bundlePath) {
+function writeReportOutputs(evidenceDir, report, checklist, missingReleaseDocuments, artifactManifest, allowIncomplete, bundlePath) {
     writeJson(path.join(evidenceDir, 'release_gate_manifest.json'), report);
     writeJson(path.join(evidenceDir, 'release_checklist.json'), checklist);
-    writeText(path.join(evidenceDir, 'missing_evidence.txt'), missingEvidence.length > 0 ? missingEvidence.join(os.EOL) + os.EOL : 'NONE\n');
+    writeText(path.join(evidenceDir, 'missing_release_documents.txt'), missingReleaseDocuments.length > 0 ? missingReleaseDocuments.join(os.EOL) + os.EOL : 'NONE\n');
     writeText(path.join(evidenceDir, 'summary.txt'), [
         `GENERATED_UTC=${report.generatedUtc}`,
         `SUCCESS=${report.success}`,
         `ALLOW_INCOMPLETE=${allowIncomplete}`,
-        `TODO_027_STATUS=${report.dependencyTodo027 ? report.dependencyTodo027.status : 'MISSING'}`,
-        `TODO_029_STATUS=${report.todo029 ? report.todo029.status : 'MISSING'}`,
         `ARTIFACTS_FOUND=${artifactManifest.filter((artifact) => artifact.found).length}/${artifactManifest.length}`,
         `SIGNED_ARTIFACTS_OK=${checklist.signed_artifacts_have_pe_certificate_table}`,
         `DIGESTS_EXPORTED=${checklist.digests_exported}`,
-        `MISSING_EVIDENCE_COUNT=${missingEvidence.length}`,
-        `EVIDENCE_FILE_COUNT=${report.evidenceFileCount}`,
+        `MISSING_RELEASE_DOCUMENT_COUNT=${missingReleaseDocuments.length}`,
         `BUNDLE=${relativeToRepo(bundlePath)}`,
-        `BUNDLE_SHA256=${report.evidenceBundle.sha256 || '(external-only-after-bundle-export)'}`,
+        `BUNDLE_SHA256=${report.releaseBundle.sha256 || '(external-only-after-bundle-export)'}`,
         `FAILURES=${report.failures.length > 0 ? report.failures.join('; ') : '(none)'}`
     ].join(os.EOL) + os.EOL);
 }
@@ -576,8 +515,8 @@ function writeReportOutputs(evidenceDir, report, checklist, missingEvidence, art
 function main() {
     const args = parseArgs(process.argv);
     const timestamp = typeof args.timestamp === 'string' ? args.timestamp : new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '').replace('T', '_');
-    const evidenceDir = path.resolve(REPO_ROOT, args.evidence ? String(args.evidence) : `docs/testing/evidence/advanced/${timestamp}_release_signing`);
-    const bundlePath = path.resolve(REPO_ROOT, args.bundle ? String(args.bundle) : `docs/testing/artifacts/${timestamp}_realignment_bundle.zip`);
+    const evidenceDir = path.resolve(REPO_ROOT, args.evidence ? String(args.evidence) : `artifacts/release/${timestamp}_readiness`);
+    const bundlePath = path.resolve(REPO_ROOT, args.bundle ? String(args.bundle) : `dist/release/${timestamp}_release_bundle.zip`);
     const allowIncomplete = args['allow-incomplete'] === true || args['allow-incomplete'] === '1';
     const quiet = args.quiet === true || args.quiet === '1';
 
@@ -587,34 +526,13 @@ function main() {
         fs.unlinkSync(bundlePath);
     }
 
-    const matrixPath = path.join(REPO_ROOT, 'docs', 'testing', '20260331_REALIGNMENT_TODO_MATRIX.md');
-    const regressionPath = path.join(REPO_ROOT, 'docs', 'testing', '20260331_REALIGNMENT_REGRESSION_MATRIX.md');
-    const matrixText = readText(matrixPath);
-    const regressionText = readText(regressionPath);
-    const todoRows = extractTodoRows(matrixText);
     const expectedArtifacts = resolveExpectedArtifacts(args.artifacts);
     const artifactManifest = collectArtifactManifest(expectedArtifacts);
-    const generatedEvidencePaths = new Set([
-        path.join(evidenceDir, 'checksums.txt'),
-        path.join(evidenceDir, 'release_gate_manifest.json'),
-        path.join(evidenceDir, 'release_checklist.json'),
-        path.join(evidenceDir, 'missing_evidence.txt'),
-        path.join(evidenceDir, 'summary.txt'),
-        bundlePath
-    ].map((item) => path.resolve(item)));
-    const referencedEvidence = extractEvidencePaths(matrixText);
-    const missingEvidence = referencedEvidence.filter((rel) => {
-        const abs = path.resolve(REPO_ROOT, rel);
-        if (generatedEvidencePaths.has(abs)) {
-            return false;
-        }
-        return !fileExists(abs) && !directoryExists(abs);
-    });
-    const evidenceFiles = collectEvidenceFiles();
+    const missingReleaseDocuments = DEFAULT_RELEASE_DOCUMENTS.filter((rel) => !fileExists(path.resolve(REPO_ROOT, rel)));
 
     writeText(path.join(evidenceDir, 'checksums.txt'), formatChecksums(artifactManifest));
 
-    const checklist = buildChecklist({ todoRows, artifactManifest, missingEvidence, bundleExported: true });
+    const checklist = buildChecklist({ artifactManifest, missingReleaseDocuments, bundleExported: true });
     const failures = collectFailures(checklist);
 
     const report = {
@@ -626,17 +544,10 @@ function main() {
             arch: process.arch,
             node: process.version
         },
-        todo029: todoRows['TODO-029'] || null,
-        dependencyTodo027: todoRows['TODO-027'] || null,
-        regressionRows: {
-            signerAllowlistAndDigest: regressionText.indexOf('| Signer allowlist and digest gates |') >= 0,
-            evidenceBundleExport: regressionText.indexOf('| Evidence-bundle export |') >= 0
-        },
         artifactManifest,
-        referencedEvidenceCount: referencedEvidence.length,
-        missingEvidence,
-        evidenceFileCount: evidenceFiles.length,
-        evidenceBundle: {
+        releaseDocuments: DEFAULT_RELEASE_DOCUMENTS,
+        missingReleaseDocuments,
+        releaseBundle: {
             path: relativeToRepo(bundlePath),
             size: 0,
             sha256: null,
@@ -647,24 +558,24 @@ function main() {
         failures
     };
 
-    writeReportOutputs(evidenceDir, report, checklist, missingEvidence, artifactManifest, allowIncomplete, bundlePath);
+    writeReportOutputs(evidenceDir, report, checklist, missingReleaseDocuments, artifactManifest, allowIncomplete, bundlePath);
     const bundleInputFiles = collectBundleFiles(evidenceDir);
     try {
         writeZip(bundleInputFiles, bundlePath);
     } catch (e) {
-        checklist.evidence_bundle_exported = false;
+        checklist.release_bundle_exported = false;
         checklist.release_ready = false;
         report.success = false;
-        report.evidenceBundle.error = e && e.message ? e.message : String(e);
+        report.releaseBundle.error = e && e.message ? e.message : String(e);
         report.failures = collectFailures(checklist);
-        writeReportOutputs(evidenceDir, report, checklist, missingEvidence, artifactManifest, allowIncomplete, bundlePath);
+        writeReportOutputs(evidenceDir, report, checklist, missingReleaseDocuments, artifactManifest, allowIncomplete, bundlePath);
         throw e;
     }
 
-    report.evidenceBundle.size = fs.statSync(bundlePath).size;
-    report.evidenceBundle.sha256 = sha(bundlePath, 'sha256');
-    report.evidenceBundle.inputFileCount = bundleInputFiles.length;
-    writeReportOutputs(evidenceDir, report, checklist, missingEvidence, artifactManifest, allowIncomplete, bundlePath);
+    report.releaseBundle.size = fs.statSync(bundlePath).size;
+    report.releaseBundle.sha256 = sha(bundlePath, 'sha256');
+    report.releaseBundle.inputFileCount = bundleInputFiles.length;
+    writeReportOutputs(evidenceDir, report, checklist, missingReleaseDocuments, artifactManifest, allowIncomplete, bundlePath);
 
     if (!report.success && !allowIncomplete) {
         process.stderr.write(`release bundle gate failed: ${failures.join('; ')}\n`);

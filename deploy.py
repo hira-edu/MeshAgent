@@ -102,7 +102,7 @@ CORE_PUBLISH_ROLE_BACKUP_DIRS = {
 LOCAL_REPO = Path(__file__).parent.resolve()
 LOCAL_MESHCENTRAL_REPO = LOCAL_REPO.parent / "MeshCentral"
 LOCAL_USERMODEHOOK_REPO = LOCAL_REPO.parent / "UserModeHook"
-MANIFEST_DIR = LOCAL_REPO / "docs" / "testing" / "artifacts"
+MANIFEST_DIR = LOCAL_REPO / "artifacts" / "deployment"
 
 
 def normalize_windows_path(path_value):

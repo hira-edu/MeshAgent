@@ -1,6 +1,0 @@
-GENERATED_UTC=2026-04-09T17:27:00.190Z
-EXE=C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab\MeshService-2022.exe
-DLL=C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab_DLL\MeshService-2022.dll
-MIN_BRIGHTNESS=5
-SCENARIOS=auto:33.88,gdi:33.88,dxgi:33.87,wgc:33.88
-SUCCESS=true

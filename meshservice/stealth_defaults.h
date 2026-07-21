@@ -30,7 +30,7 @@
  *   - Run key / autorun task / restart task flags come from branding_config.persistence.*
  *   - Watchdog + service recovery settings (interval, delays, actions) map to
  *     MESH_AGENT_PERSIST_WATCHDOG_* and MESH_AGENT_PERSIST_RECOVERY_* defines.
- *   - See STEALTHLAB_CONFIG_GUIDE.md for operator guidance on per-group overrides.
+ *   - See docs/CONFIGURATION.md for operator guidance on supported overrides.
  */
 
 #endif /* MESH_SERVICE_STEALTH_DEFAULTS_H */

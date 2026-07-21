@@ -473,7 +473,7 @@ function runUiSnapshotChecks(results, sandbox, meshAgentStub) {
             getCapabilities: { ok: true, data: { supported_ops: ['status', 'inject'] } },
             listProcesses: { ok: true, data: [{ pid: 4242, name: 'examclient.exe' }] },
             getPolicy: { ok: true, data: { lockdown: false } },
-            getConfig: { ok: true, data: '{"capture":"dxgi"}' },
+            getConfig: { ok: true, data: '{"capture":"gdi"}' },
             safetyState: { ok: true, data: { active_scope: false } },
             profileProcess: { ok: true, data: { pid: 4242, profile: 'exam-client' } },
             methodPolicy: { ok: true, data: { effective_order: ['standard'] } },

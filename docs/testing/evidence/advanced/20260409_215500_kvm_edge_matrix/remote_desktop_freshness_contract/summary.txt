@@ -1,5 +1,0 @@
-KVM_HEADER_PATH=C:\Users\Workstation\Documents\GitHub\MeshAgent\meshcore\KVM\Windows\kvm.h
-KVM_SOURCE_PATH=C:\Users\Workstation\Documents\GitHub\MeshAgent\meshcore\KVM\Windows\kvm.c
-AGENTCORE_PATH=C:\Users\Workstation\Documents\GitHub\MeshAgent\meshcore\agentcore.c
-SUCCESS=true
-CHECKS=headerExportsSnapshot:true,headerExportsResyncHelpers:true,headerExportsSnapshotGetter:true,kvmTracksPendingProbes:true,kvmTracksInputOutputTicks:true,kvmExportsSnapshotGetter:true,agentcoreHasNoWatchdogState:true,agentcoreHasNoWatchdogHelpers:true,agentcoreCachedStreamReuseIsPassive:true,agentcoreInitialSetupUsesDirectRelay:true,agentcoreHasNoSetupFailureCallback:true

@@ -8,7 +8,8 @@ This document is the retained source of truth for the MeshCentral-facing UMH ope
 - the `modules/RecoveryCore.js` request builder and result renderer
 - the desktop and mobile operator fixtures and Playwright coverage
 
-It exists to close the contract gap called out by `TODO-018` and to give `TODO-024` one machine-checkable surface definition.
+It provides one machine-checkable surface definition for the raw console,
+recovery core, and desktop/mobile operator fixtures.
 
 ## Invariants
 
@@ -89,7 +90,7 @@ If the user does not choose an action for one of these command families, the can
 The retained default flow contract is:
 
 - protocol: `umh-control`
-- contract version: `2026-03-07`
+- contract version: `2026-03-05`
 - flow profile: `report-driven-lockdown-v1`
 - required headers:
   - `x-umh-contract-version`

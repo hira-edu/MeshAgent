@@ -1,2 +1,0 @@
-EXIT_CODE=0
-RUN_DIR=docs/testing/evidence/advanced/20260226_042341_fullregression_post_restart_fix

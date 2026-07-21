@@ -1,2 +1,0 @@
-@echo off
-"C:\Users\Workstation\Documents\GitHub\MeshAgent\meshservice\x64\StealthLab\MeshService-2022.exe" -kvm-blockinput-probe > "C:\Users\Workstation\Documents\GitHub\MeshAgent\docs\testing\evidence\advanced\20260409_215500_kvm_edge_matrix\block_input\probe_stdout.json" 2> "C:\Users\Workstation\Documents\GitHub\MeshAgent\docs\testing\evidence\advanced\20260409_215500_kvm_edge_matrix\block_input\probe_stderr.txt"

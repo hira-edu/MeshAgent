@@ -1,4 +1,0 @@
-INSTALL_EXIT=0
-VALIDATE_EXIT=0
-SVCHOST_STATUS_EXIT=0
-RUN_DIR=docs/testing/evidence/advanced/20260226_015218_runtime_restore_pre_majorbug

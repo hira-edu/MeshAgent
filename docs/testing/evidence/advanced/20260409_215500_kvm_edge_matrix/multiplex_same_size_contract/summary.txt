@@ -1,3 +1,0 @@
-MULTIPLEX_PATH=C:\Users\Workstation\Documents\GitHub\MeshCentral\meshdesktopmultiplex.js
-SUCCESS=true
-CHECKS=screenCaseLocated:true,acceptsSameSizeScreenPackets:true,updatesScreenDimensions:true,resetsImageCache:true,reanchorsStreamAtScreenPacket:true,replaysResetToExistingViewers:true

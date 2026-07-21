@@ -114,7 +114,7 @@ function main() {
 			kvmSource.includes('gKvmDesktopCaptureReady = desktopAccessReady;') &&
 			tileSource.includes('extern int gKvmDesktopCaptureReady;') &&
 			tileSource.includes('if (!gKvmDesktopCaptureReady)') &&
-			tileSource.includes('KVM capture: target desktop is not accessible; skipping capture backends'),
+			tileSource.includes('KVM capture: target desktop is not accessible; skipping GDI capture'),
 		runtimeSmokeRejectsTimeoutExit:
 			smokeSource.includes('bridge log used timeout-based helper exit') &&
 			smokeSource.includes("line.includes('KvmSessionBridgeW mainloop exited') ||") &&

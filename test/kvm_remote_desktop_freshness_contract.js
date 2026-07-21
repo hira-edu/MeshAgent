@@ -78,17 +78,6 @@ function main() {
         'static unsigned int kvm_bridge_debug_probe_mask_for_output',
         'static void kvm_bridge_debug_note_output'
     );
-    const dxgiCaptureBlock = extractSpan(
-        tileSource,
-        'static int tile_dxgi_capture_frame',
-        'static int tile_wgc_initialize'
-    );
-    const wgcIdleBlock = extractSpan(
-        tileSource,
-        'static int tile_wgc_handle_idle_frame',
-        'static int tile_dxgi_target_changed'
-    );
-
     const checks = {
         headerExportsSnapshot: kvmHeader.includes('typedef struct KvmBridgeDebugSnapshot'),
         headerExportsResyncHelpers: kvmHeader.includes('void kvm_relay_request_display_list') && kvmHeader.includes('void kvm_relay_query_input_lock'),
@@ -152,15 +141,11 @@ function main() {
             agentcore.includes('REMOTE_DESKTOP_REFRESH_PROBE_TIMEOUT_MS') &&
             agentcore.includes('static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(duk_context *ctx, RemoteDesktop_Ptrs *ptrs)') &&
             agentcore.includes('ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(ctx, ptrs);'),
-        dxgiCachedFramesAreBounded:
-            tileSource.includes('static const int TILE_DXGI_IDLE_RESET_THRESHOLD = 4;') &&
-            tileSource.includes('static int tile_dxgi_handle_idle_frame') &&
-            tileSource.includes('tile_dxgi_schedule_retry_ex(gdiReason, 1);') &&
-            dxgiCaptureBlock.includes('return tile_dxgi_handle_idle_frame(buffer, bufferSize, "gdi:dxgi-timeout", "dxgi:cached-timeout");') &&
-            dxgiCaptureBlock.includes('return tile_dxgi_handle_idle_frame(buffer, bufferSize, "gdi:dxgi-no-present", "dxgi:cached-no-present");') &&
-            dxgiCaptureBlock.includes('gDxgiCapture.idleFramePolls = 0;'),
-        wgcIdleResetClearsCachedFrame:
-            wgcIdleBlock.includes('tile_wgc_schedule_retry_ex(gdiReason, 1);'),
+        gdiCaptureIsTheSingleBackend:
+            tileSource.includes('return get_desktop_buffer_gdi(buffer, bufferSize, mouseMove);') &&
+            tileSource.includes('const char* get_capture_backend_name()') &&
+            tileSource.includes('return "gdi";') &&
+            tileSource.includes('return "gdi:only";'),
         kvmPipeBreakClearsTransportActive: kvmSource.includes('static void kvm_relay_bridge_pipe_broken_handler') &&
             kvmSource.includes('ctx->transportActive = 0;') &&
             kvmSource.includes('gKvmTransportActive = 0;'),

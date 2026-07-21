@@ -1,7 +1,7 @@
 /*
  * stealth_lockdown.c - SecureEnter/SecureExit orchestration implementation
  *
- * Implements W2 and W4 requirements from service.md:
+ * Implements the configured Windows service lockdown policy:
  * - SecureEnter/SecureExit commands with IPC integration
  * - Registry policy module for Winlogon, GPO, Explorer restrictions
  * - State persistence to state.json

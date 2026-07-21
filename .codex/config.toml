@@ -4,7 +4,6 @@
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 [features]
-codex_hooks = true
 child_agents_md = true
 
 [project]

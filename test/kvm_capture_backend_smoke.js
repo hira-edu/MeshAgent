@@ -1,5 +1,4 @@
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const net = require('net');
 const childProcess = require('child_process');
@@ -17,38 +16,9 @@ const PACKET_TYPES = {
 };
 
 const SCENARIOS = {
-    dxgi: {
-        env: {},
-        predicate: (trace) => /capture backend=dxgi reason=dxgi:/i.test(trace)
-    },
-    dxgi_to_wgc: {
-        env: {
-            STEALTH_KVM_CAPTURE_BACKEND: 'auto',
-            STEALTH_KVM_DXGI_SIMULATE_UNSUPPORTED: '1'
-        },
-        predicate: (trace) => /capture backend=wgc reason=wgc:/i.test(trace)
-    },
-    fallback: {
-        env: {
-            STEALTH_KVM_CAPTURE_BACKEND: 'auto',
-            STEALTH_KVM_DXGI_SIMULATE_UNSUPPORTED: '1',
-            STEALTH_KVM_WGC_SIMULATE_UNAVAILABLE: '1'
-        },
-        predicate: (trace) => /capture backend=gdi reason=gdi:wgc-simulated-unavailable/i.test(trace)
-    },
-    wgc_to_dxgi: {
-        env: {
-            STEALTH_KVM_CAPTURE_BACKEND: 'wgc',
-            STEALTH_KVM_WGC_SIMULATE_UNAVAILABLE: '1'
-        },
-        predicate: (trace) => /capture backend=dxgi reason=dxgi:/i.test(trace)
-    },
-    access_lost: {
-        env: {
-            STEALTH_KVM_CAPTURE_BACKEND: 'dxgi',
-            STEALTH_KVM_DXGI_SIMULATE_ACCESS_LOST_ONCE: '1'
-        },
-        predicate: (trace) => /capture backend=gdi reason=gdi:dxgi-access-lost/i.test(trace)
+    gdi: {
+        env: { STEALTH_KVM_TRACE_STARTUP: '1' },
+        predicate: (trace) => /capture backend=gdi reason=gdi:only/i.test(trace)
     }
 };
 
@@ -168,14 +138,13 @@ function collectBackendTransitions(traceText) {
 
 async function main() {
     const args = parseArgs(process.argv);
-    const scenarioName = String(args.scenario || 'dxgi');
+    const scenarioName = String(args.scenario || 'gdi');
     const scenario = SCENARIOS[scenarioName];
     const holdMs = args['hold-ms'] == null ? 500 : Number(args['hold-ms']);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const rundll32Path = getSystemRundll32Path();
     const dllPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
     const logPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'svchost-debug.log');
-    const tracePath = path.join(os.tmpdir(), 'meshagent_tile_trace.log');
     const controlPipeName = `\\\\.\\pipe\\MeshKvmBackend_${process.pid}_${Date.now()}_in`;
     const dataPipeName = `\\\\.\\pipe\\MeshKvmBackend_${process.pid}_${Date.now()}_out`;
     const packets = [];
@@ -192,19 +161,16 @@ async function main() {
     assert(fs.existsSync(rundll32Path), `rundll32.exe not found at ${rundll32Path}`);
     assert(fs.existsSync(dllPath), `bridge DLL not found at ${dllPath}`);
 
-    try { fs.unlinkSync(tracePath); } catch (error) { if (error.code !== 'ENOENT') { throw error; } }
-
     const report = {
         generatedUtc: new Date().toISOString(),
         scenario: scenarioName,
         rundll32Path,
         dllPath,
         logPath,
-        tracePath,
         controlPipeName,
         dataPipeName,
         launchArgs: [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName, '-kvm1'],
-        env: { ...scenario.env, STEALTH_KVM_TRACE_TILE: '1' },
+        env: scenario.env,
         holdMs,
         packets,
         backendTransitions: [],
@@ -240,12 +206,12 @@ async function main() {
 
     const child = childProcess.spawn(rundll32Path, [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName, '-kvm1'], {
         windowsHide: true,
-        env: { ...process.env, STEALTH_KVM_TRACE_TILE: '1', ...scenario.env },
+        env: { ...process.env, ...scenario.env },
         stdio: ['ignore', 'pipe', 'pipe']
     });
 
     const getTraceText = () => {
-        return [stdoutText, stderrText, readTextIfExists(tracePath), readTextIfExists(logPath)]
+        return [stdoutText, stderrText, readTextIfExists(logPath)]
             .filter((value) => value && value.length > 0)
             .join('\n');
     };
@@ -303,7 +269,6 @@ async function main() {
     report.exitSignal = exitResult.signal;
     report.backendTransitions = collectBackendTransitions(getTraceText());
     report.logTail = readTextIfExists(logPath).split(/\r?\n/).filter(Boolean).slice(-40);
-    report.traceTail = readTextIfExists(tracePath).split(/\r?\n/).filter(Boolean).slice(-40);
 
     assert(report.backendTransitions.length > 0, 'No capture backend transitions were logged');
     assert(scenario.predicate(getTraceText()), `Scenario ${scenarioName} predicate did not match final trace`);

@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-/* Monitor check interval (default 8 seconds per service.md spec) */
+/* Monitor check interval (default 8 seconds). */
 #define MONITOR_DEFAULT_INTERVAL_MS 8000
 
 /* Monitor status codes */

@@ -1,2 +1,0 @@
-Connecting to local system...Starting PSEXESVC service on local system...Copying authentication key to DESKTOP-IA7S68A...Connecting with PsExec service on DESKTOP-IA7S68A...Starting C:\Users\WORKST~1\AppData\Local\Temp\meshagent_kvm_crash_30228_1775755544206.cmd on DESKTOP-IA7S68A...
-C:\Users\WORKST~1\AppData\Local\Temp\meshagent_kvm_crash_30228_1775755544206.cmd exited on DESKTOP-IA7S68A with error code 0.

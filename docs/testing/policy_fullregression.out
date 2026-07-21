@@ -1,8 +1,0 @@
-=== Native Regression Start ===
-...Restarting service for regression validation
-...Service PID changed: 20088 -> 5744
-...Network persistence validation: waiting for control channel
-...Network persistence validation: control channel active
-...Waiting for core module (15000/900000 ms, currentLen=0)
-...Waiting for core module (30000/900000 ms, currentLen=0)
-=== Native Regression Complete ===

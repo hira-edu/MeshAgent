@@ -8636,11 +8636,6 @@ int wmain(int argc, char* wargv[])
 	{
 		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
 	}
-	if (argc > 1 && strcasecmp(argv[1], "-kvm-gpu-encoding-benchmark") == 0)
-	{
-		int frames = (argc > 2) ? (int)strtol(argv[2], NULL, 10) : 5;
-		return kvm_gpu_encoding_benchmark_command(frames);
-	}
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-elevated-input-probe") == 0)
 	{
 		return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);
@@ -9083,7 +9078,6 @@ int wmain(int argc, char* wargv[])
 #if defined(_LINKVM)
 					printf("  rundll32.exe <ServiceDll>,MeshKvmProbeHostW <probe-child> ...\r\n");
 					printf("                        Authoritative KVM runtime probe host path.\r\n");
-					printf("  -kvm-gpu-encoding-benchmark [frames]  Emit JSON GPU encoder probe, DXGI shared-texture, and JPEG benchmark data.\r\n");
 #endif
 					printf("  rundll32.exe <ServiceDll>,MeshSelfTestHostW --selfTest=1 ...\r\n");
 					printf("                        Run agent self-test harness through the DLL host.\r\n");

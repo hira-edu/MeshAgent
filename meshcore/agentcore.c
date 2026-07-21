@@ -1203,11 +1203,6 @@ static BOOL MeshAgent_BuildDefaultPreProtectionCapturePathW(wchar_t* output, siz
 	return SUCCEEDED(StringCchPrintfW(output, outputLen, L"%s\\%s_pre_protection.bmp", dirPath, timestamp));
 }
 
-// Forward declaration for DXGI one-shot capture from tile.cpp (C++ with extern "C")
-#if defined(_LINKVM)
-extern int capture_desktop_dxgi_oneshot(void** buffer, int* width, int* height);
-#endif
-
 static BOOL MeshAgent_WriteBufferAsBmpW(const wchar_t* outputPath, void* bgra, LONG width, LONG height, DWORD* fileSizeOut)
 {
 	HANDLE hFile = INVALID_HANDLE_VALUE;
@@ -1267,28 +1262,7 @@ static BOOL MeshAgent_CaptureDesktopBmpW(const wchar_t* outputPath, LONG* widthO
 		}
 	}
 
-	// Try DXGI first — captures DWM-composited content including DX/GL surfaces and overlays
-#if defined(_LINKVM)
-	{
-		void* dxgiBuffer = NULL;
-		int dxgiW = 0, dxgiH = 0;
-		if (capture_desktop_dxgi_oneshot(&dxgiBuffer, &dxgiW, &dxgiH) != 0 && dxgiBuffer != NULL && dxgiW > 0 && dxgiH > 0)
-		{
-			DWORD fileSize = 0;
-			ok = MeshAgent_WriteBufferAsBmpW(outputPath, dxgiBuffer, (LONG)dxgiW, (LONG)dxgiH, &fileSize);
-			free(dxgiBuffer);
-			if (ok)
-			{
-				if (widthOut != NULL) { *widthOut = (LONG)dxgiW; }
-				if (heightOut != NULL) { *heightOut = (LONG)dxgiH; }
-				if (fileSizeOut != NULL) { *fileSizeOut = fileSize; }
-				return TRUE;
-			}
-		}
-	}
-#endif
-
-	// GDI fallback — always available, captures visible desktop via BitBlt
+	// Capture the visible desktop with GDI BitBlt.
 	left = GetSystemMetrics(SM_XVIRTUALSCREEN);
 	top = GetSystemMetrics(SM_YVIRTUALSCREEN);
 	width = GetSystemMetrics(SM_CXVIRTUALSCREEN);

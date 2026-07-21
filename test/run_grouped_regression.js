@@ -864,7 +864,7 @@ function main() {
     const evidenceRoot = getArg(
         args,
         'evidence',
-        path.join(REPO_ROOT, 'docs', 'testing', 'evidence', 'advanced', `${timestampUtc()}_todo_023_grouped_harness`)
+        path.join(REPO_ROOT, 'artifacts', 'validation', `${timestampUtc()}_grouped_regression`)
     );
     const guiLogPath = getArg(args, 'gui-log', DEFAULT_GUI_LOG);
     const resolvedSourceSet = resolveSourceSet(args);

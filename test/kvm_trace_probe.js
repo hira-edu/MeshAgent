@@ -109,8 +109,7 @@ server.listen(pipeName, () => {
 
     const env = Object.assign({}, process.env, {
         STEALTH_KVM_TRACE_STARTUP: '1',
-        STEALTH_KVM_TRACE_LOOP: '1',
-        STEALTH_KVM_TRACE_TILE: '1'
+        STEALTH_KVM_TRACE_LOOP: '1'
     });
 
     child = cp.spawn(rundll32, [`${dllPath},KvmSessionBridgeW`, pipeName], {

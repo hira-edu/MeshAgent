@@ -50,12 +50,6 @@ void switch_to_desktop_context();
 const char* get_capture_backend_name();
 const char* get_capture_backend_reason();
 
-// One-shot DXGI capture for pre-protection evidence. Returns a malloc'd BGRA buffer
-// with the primary monitor contents. Falls back to 0 (caller should use GDI).
-// width/height are output parameters. Caller must free(*buffer) on success.
-int capture_desktop_dxgi_oneshot(void** buffer, int* width, int* height);
-int kvm_gpu_encoding_benchmark_command(int frames);
-
 #if defined(_cplus_plus) || defined(__cplusplus) || defined(_cplusplus)
 }
 #endif

@@ -1,9 +1,0 @@
-{
-  "multiplexPath": "C:\\Users\\Workstation\\Documents\\GitHub\\MeshCentral\\meshdesktopmultiplex.js",
-  "checks": {
-    "sendToAgentLocated": true,
-    "queueBacklogUsesLength": true,
-    "marksSendingBeforeSend": true,
-    "fixesAgentOutTrafficAccounting": true
-  }
-}
