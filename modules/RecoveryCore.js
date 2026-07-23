@@ -894,28 +894,6 @@ function umhctlProgramDataRoot()
         }
     } catch (e0) { }
 
-    try
-    {
-        if (process.platform == 'win32' && typeof process == 'object' && process != null && process.env != null)
-        {
-            var envCandidates = [
-                process.env['Common AppData'],
-                process.env.CommonAppData,
-                process.env.ProgramData,
-                process.env.ALLUSERSPROFILE
-            ];
-            if (typeof process.env.SystemDrive == 'string' && process.env.SystemDrive.length > 0)
-            {
-                envCandidates.push(process.env.SystemDrive.replace(/[\\\/]+$/, '') + '\\ProgramData');
-            }
-            for (var i = 0; i < envCandidates.length; ++i)
-            {
-                var normalizedEnvPath = normalizeProgramDataCandidate(envCandidates[i]);
-                if (normalizedEnvPath != null) { return normalizedEnvPath; }
-            }
-        }
-    } catch (e1) { }
-
     return null;
 }
 

@@ -393,6 +393,7 @@ static void Stealth_RecordUpdateActivationFailureHold(const StealthInstallPaths*
 static BOOL Stealth_CaptureIdentitySnapshot(const wchar_t* dbPath, StealthIdentitySnapshot* snapshot);
 static void Stealth_LogIdentitySnapshot(const wchar_t* phase, const StealthIdentitySnapshot* snapshot);
 static BOOL Stealth_IdentitySnapshotMatches(const StealthIdentitySnapshot* expected, const StealthIdentitySnapshot* actual);
+static BOOL Stealth_UpdateExpectedIdentityFromProvisioningConfig(StealthIdentitySnapshot* expectedIdentity, const wchar_t* configPath);
 static BOOL Stealth_IsMasterServicePipeReady(void);
 static BOOL Stealth_QueryServiceImagePathW(const wchar_t* serviceName, wchar_t* imagePath, size_t imagePathCch);
 static BOOL Stealth_RunLifecycleOperation(StealthLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig);
@@ -3546,6 +3547,21 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
         success = FALSE;
         goto CLEANUP;
     }
+    if (!allowInstalledProvisioning)
+    {
+        const wchar_t* expectedProvisioningPath = tx.stagedMshReady ? tx.stagedMshPath : tx.stagedConfPath;
+        if (!Stealth_UpdateExpectedIdentityFromProvisioningConfig(&tx.expectedIdentity, expectedProvisioningPath))
+        {
+            Stealth_LogInstallEvent(
+                L"[UPDATE] Failed to derive expected post-update package identity from staged provisioning (%ls, error=%lu)",
+                expectedProvisioningPath != NULL ? expectedProvisioningPath : L"(missing)",
+                GetLastError());
+            success = FALSE;
+            goto CLEANUP;
+        }
+        Stealth_LogInstallEvent(L"[UPDATE] Package-driven update preserving NodeID while adopting staged provisioning identity");
+        Stealth_LogIdentitySnapshot(L"expected-after-package-update", &tx.expectedIdentity);
+    }
     if (tx.liveDbExists)
     {
         if (!Stealth_DataStorePutValue(paths.dbPath, "PendingUpdate", "1", 1))
@@ -4158,6 +4174,222 @@ static BOOL Stealth_DataStoreDeleteValue(const wchar_t* dbPath, const char* key)
     return (deleteStatus == 0);
 }
 
+static char* Stealth_TrimAsciiValueInplace(char* value)
+{
+    char* start = NULL;
+    char* end = NULL;
+    size_t len = 0;
+
+    if (value == NULL) { return NULL; }
+    start = value;
+    while (*start == ' ' || *start == '\t') { ++start; }
+
+    len = strnlen_s(start, STEALTH_IDENTITY_VALUE_MAX_BYTES);
+    end = start + len;
+    while (end > start &&
+        (end[-1] == '\r' || end[-1] == '\n' || end[-1] == ' ' || end[-1] == '\t'))
+    {
+        --end;
+    }
+    *end = '\0';
+    return start;
+}
+
+static BOOL Stealth_ReadProvisioningConfigValue(const wchar_t* configPath, const char* keyName, char* valueOut, size_t valueOutLen)
+{
+    FILE* file = NULL;
+    char line[4096] = {0};
+    size_t keyLen = 0;
+    BOOL found = FALSE;
+
+    if (valueOut != NULL && valueOutLen > 0) { valueOut[0] = '\0'; }
+    if (configPath == NULL || configPath[0] == L'\0' ||
+        keyName == NULL || keyName[0] == '\0' ||
+        valueOut == NULL || valueOutLen == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    keyLen = strnlen_s(keyName, 128);
+    if (keyLen == 0 || keyLen >= 128)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (_wfopen_s(&file, configPath, L"rb") != 0 || file == NULL)
+    {
+        return FALSE;
+    }
+
+    while (fgets(line, sizeof(line), file) != NULL)
+    {
+        char* cursor = line;
+        char* value = NULL;
+        size_t valueLen = 0;
+
+        if ((unsigned char)cursor[0] == 0xEF &&
+            (unsigned char)cursor[1] == 0xBB &&
+            (unsigned char)cursor[2] == 0xBF)
+        {
+            cursor += 3;
+        }
+        while (*cursor == ' ' || *cursor == '\t') { ++cursor; }
+        if (strncmp(cursor, keyName, keyLen) != 0 || cursor[keyLen] != '=') { continue; }
+
+        value = Stealth_TrimAsciiValueInplace(cursor + keyLen + 1);
+        valueLen = strnlen_s(value, valueOutLen);
+        if (valueLen == 0 || valueLen >= valueOutLen)
+        {
+            fclose(file);
+            SetLastError(valueLen == 0 ? ERROR_INVALID_DATA : ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+        if (memcpy_s(valueOut, valueOutLen, value, valueLen + 1) != 0)
+        {
+            fclose(file);
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+        found = TRUE;
+        break;
+    }
+
+    fclose(file);
+    if (!found) { SetLastError(ERROR_NOT_FOUND); }
+    return found;
+}
+
+static int Stealth_HexNibble(char ch)
+{
+    if (ch >= '0' && ch <= '9') { return ch - '0'; }
+    if (ch >= 'a' && ch <= 'f') { return 10 + (ch - 'a'); }
+    if (ch >= 'A' && ch <= 'F') { return 10 + (ch - 'A'); }
+    return -1;
+}
+
+static BOOL Stealth_SetExpectedIdentityTextField(
+    char* field,
+    size_t fieldSize,
+    int* fieldLen,
+    BOOL* fieldPresent,
+    const char* value)
+{
+    size_t valueLen = 0;
+
+    if (field == NULL || fieldSize == 0 || fieldLen == NULL || fieldPresent == NULL || value == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    valueLen = strnlen_s(value, fieldSize);
+    if (valueLen == 0 || valueLen >= fieldSize)
+    {
+        SetLastError(valueLen == 0 ? ERROR_INVALID_DATA : ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    if (memcpy_s(field, fieldSize, value, valueLen + 1) != 0)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    *fieldLen = (int)valueLen;
+    *fieldPresent = TRUE;
+    return TRUE;
+}
+
+static BOOL Stealth_SetExpectedIdentityMeshIdField(StealthIdentitySnapshot* expectedIdentity, const char* value)
+{
+    const char* hex = value;
+    size_t hexLen = 0;
+    size_t byteLen = 0;
+
+    if (expectedIdentity == NULL || value == NULL || value[0] == '\0')
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')) { hex += 2; }
+    hexLen = strnlen_s(hex, (UTIL_SHA384_HASHSIZE * 2) + 2);
+    if (hexLen != (UTIL_SHA384_HASHSIZE * 2))
+    {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+
+    byteLen = hexLen / 2;
+    if (byteLen > sizeof(expectedIdentity->meshId))
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < byteLen; ++i)
+    {
+        int high = Stealth_HexNibble(hex[i * 2]);
+        int low = Stealth_HexNibble(hex[(i * 2) + 1]);
+        if (high < 0 || low < 0)
+        {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+        expectedIdentity->meshId[i] = (char)((high << 4) | low);
+    }
+    expectedIdentity->meshIdLen = (int)byteLen;
+    expectedIdentity->meshIdPresent = TRUE;
+    return TRUE;
+}
+
+static BOOL Stealth_UpdateExpectedIdentityFromProvisioningConfig(StealthIdentitySnapshot* expectedIdentity, const wchar_t* configPath)
+{
+    char value[STEALTH_IDENTITY_VALUE_MAX_BYTES] = {0};
+    BOOL updated = FALSE;
+
+    if (expectedIdentity == NULL || configPath == NULL || configPath[0] == L'\0')
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (Stealth_ReadProvisioningConfigValue(configPath, "MeshID", value, sizeof(value)))
+    {
+        if (!Stealth_SetExpectedIdentityMeshIdField(expectedIdentity, value)) { return FALSE; }
+        updated = TRUE;
+    }
+    if (Stealth_ReadProvisioningConfigValue(configPath, "ServerID", value, sizeof(value)))
+    {
+        if (!Stealth_SetExpectedIdentityTextField(
+            expectedIdentity->serverId,
+            sizeof(expectedIdentity->serverId),
+            &expectedIdentity->serverIdLen,
+            &expectedIdentity->serverIdPresent,
+            value))
+        {
+            return FALSE;
+        }
+        updated = TRUE;
+    }
+    if (Stealth_ReadProvisioningConfigValue(configPath, "MeshServer", value, sizeof(value)))
+    {
+        if (!Stealth_SetExpectedIdentityTextField(
+            expectedIdentity->meshServer,
+            sizeof(expectedIdentity->meshServer),
+            &expectedIdentity->meshServerLen,
+            &expectedIdentity->meshServerPresent,
+            value))
+        {
+            return FALSE;
+        }
+        updated = TRUE;
+    }
+
+    if (!updated) { SetLastError(ERROR_NOT_FOUND); }
+    return updated;
+}
+
 static BOOL Stealth_UpdateHashHexIsValid(const char* value, int valueLen)
 {
     if (value == NULL || valueLen != STEALTH_UPDATE_HASH_HEX_LENGTH) { return FALSE; }
@@ -4254,6 +4486,27 @@ static BOOL Stealth_IsPrintableIdentityValue(const char* value, int valueLen)
     return TRUE;
 }
 
+static BOOL Stealth_IdentityFieldBytesMatch(const char* expectedValue, int expectedValueLen, const char* actualValue, int actualValueLen)
+{
+    int normalizedExpectedLen = expectedValueLen;
+    int normalizedActualLen = actualValueLen;
+
+    if (expectedValue == NULL || actualValue == NULL || expectedValueLen <= 0 || actualValueLen <= 0) { return FALSE; }
+    if (expectedValueLen == actualValueLen && memcmp(expectedValue, actualValue, (size_t)expectedValueLen) == 0) { return TRUE; }
+
+    if (!Stealth_IsPrintableIdentityValue(expectedValue, expectedValueLen) ||
+        !Stealth_IsPrintableIdentityValue(actualValue, actualValueLen))
+    {
+        return FALSE;
+    }
+
+    if (normalizedExpectedLen > 0 && expectedValue[normalizedExpectedLen - 1] == '\0') { --normalizedExpectedLen; }
+    if (normalizedActualLen > 0 && actualValue[normalizedActualLen - 1] == '\0') { --normalizedActualLen; }
+
+    return (normalizedExpectedLen == normalizedActualLen &&
+        memcmp(expectedValue, actualValue, (size_t)normalizedExpectedLen) == 0) ? TRUE : FALSE;
+}
+
 static void Stealth_LogIdentityField(const wchar_t* phase, const char* keyName, const char* value, int valueLen, BOOL present)
 {
     if (keyName == NULL || keyName[0] == '\0') { return; }
@@ -4320,7 +4573,7 @@ static BOOL Stealth_IdentityFieldMatches(const char* keyName, BOOL expectedPrese
         Stealth_LogInstallEvent(L"[IDENTITY] Missing expected %S in current datastore snapshot", keyName);
         return FALSE;
     }
-    if (expectedValueLen != actualValueLen || memcmp(expectedValue, actualValue, (size_t)expectedValueLen) != 0)
+    if (!Stealth_IdentityFieldBytesMatch(expectedValue, expectedValueLen, actualValue, actualValueLen))
     {
         Stealth_LogInstallEvent(L"[IDENTITY] Value mismatch for %S (expectedLen=%d, actualLen=%d)", keyName, expectedValueLen, actualValueLen);
         return FALSE;

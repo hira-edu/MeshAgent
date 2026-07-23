@@ -100,6 +100,20 @@ function main() {
             installedProvisioningBlock.includes('Stealth_DataStoreValueExists(paths->dbPath, "NodeID", NULL, 0, NULL)'),
         prepareRecordsInstalledDatastoreIdentity:
             prepareBlock.includes('installedDbIdentityPresent = Stealth_DataStoreValueExists(paths->dbPath, "NodeID", NULL, 0, NULL);'),
+        packageDrivenUpdateAdoptsStagedProvisioningIdentity:
+            source.includes('static BOOL Stealth_UpdateExpectedIdentityFromProvisioningConfig(StealthIdentitySnapshot* expectedIdentity, const wchar_t* configPath)') &&
+            source.includes('if (!allowInstalledProvisioning)') &&
+            source.includes('Stealth_UpdateExpectedIdentityFromProvisioningConfig(&tx.expectedIdentity, expectedProvisioningPath)') &&
+            source.includes('Package-driven update preserving NodeID while adopting staged provisioning identity'),
+        packageMeshIdExpectedAsBinarySha384:
+            source.includes('static BOOL Stealth_SetExpectedIdentityMeshIdField(StealthIdentitySnapshot* expectedIdentity, const char* value)') &&
+            source.includes('hexLen != (UTIL_SHA384_HASHSIZE * 2)') &&
+            source.includes('expectedIdentity->meshId[i] = (char)((high << 4) | low);'),
+        printableIdentityComparisonAllowsTrailingNulOnly:
+            source.includes('static BOOL Stealth_IdentityFieldBytesMatch(') &&
+            source.includes('Stealth_IsPrintableIdentityValue(expectedValue, expectedValueLen)') &&
+            source.includes("expectedValue[normalizedExpectedLen - 1] == '\\0'") &&
+            source.includes("actualValue[normalizedActualLen - 1] == '\\0'"),
         prepareAllowsMissingConfWithDatastoreIdentity:
             prepareBlock.includes('Binary-only update retaining datastore identity without installed provisioning .conf') &&
             prepareBlock.includes('if (!installedDbIdentityPresent)') &&
