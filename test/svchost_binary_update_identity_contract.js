@@ -55,7 +55,9 @@ function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const installerPath = path.resolve('meshservice', 'stealth_installer.c');
+    const agentCorePath = path.resolve('meshcore', 'agentcore.c');
     const source = fs.readFileSync(installerPath, 'utf8');
+    const agentCoreSource = fs.readFileSync(agentCorePath, 'utf8');
 
     const installedProvisioningBlock = extractFunction(
         source,
@@ -65,6 +67,26 @@ function main() {
         source,
         'static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL allowInstalledProvisioning, StealthUpdateTransaction* tx)',
         '\nstatic BOOL Stealth_BackupUpdateTransaction');
+    const backupBlock = extractFunction(
+        source,
+        'static BOOL Stealth_BackupUpdateTransaction(const StealthInstallPaths* paths, StealthUpdateTransaction* tx)',
+        '\nstatic BOOL Stealth_CommitUpdateTransaction');
+    const finalizeBlock = extractFunction(
+        source,
+        'static BOOL Stealth_FinalizeUpdateTransaction(const StealthInstallPaths* paths, StealthUpdateTransaction* tx)',
+        '\nstatic BOOL Stealth_PrepareUpdateTransaction');
+    const dataStoreDeleteBlock = extractFunction(
+        source,
+        'static BOOL Stealth_DataStoreDeleteValue(const wchar_t* dbPath, const char* key)',
+        '\nstatic BOOL Stealth_LoadProvisioningIdentity');
+    const deriveIdentityBlock = extractFunction(
+        source,
+        'static BOOL Stealth_DerivePostUpdateIdentity(const StealthUpdateTransaction* tx, const wchar_t* configPath, StealthIdentitySnapshot* postUpdateIdentity)',
+        '\nstatic BOOL Stealth_ReadUpdateActivationTargetHash');
+    const loadProvisioningIdentityBlock = extractFunction(
+        source,
+        'static BOOL Stealth_LoadProvisioningIdentity(const wchar_t* configPath, const wchar_t* workingDbPath, const StealthIdentitySnapshot* preservedIdentity, BOOL enforcePreservedNodeId, StealthIdentitySnapshot* provisioningIdentity)',
+        '\nstatic BOOL Stealth_DerivePostUpdateIdentity');
     const convergedBlock = extractFunction(
         source,
         'static BOOL Stealth_IsPrimaryLifecycleConverged(const StealthLifecycleDiscovery* discovery, BOOL requirePendingClear)',
@@ -81,13 +103,33 @@ function main() {
         source,
         'static BOOL Stealth_RunLifecycleOperation(StealthLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)',
         '\nBOOL Stealth_PerformCompleteInstallation');
+    const sharedImporterBlock = extractFunction(
+        agentCoreSource,
+        'int MeshAgent_ImportSettingsToDataStore(ILibSimpleDataStore dataStore, char* fileName)',
+        '\nint importSettings');
+    const importSettingsBlock = extractFunction(
+        agentCoreSource,
+        'int importSettings(MeshAgentHostContainer *agent, char* fileName)',
+        '\nvoid agentDumpKeysSink');
+    const meshIdNormalizerBlock = extractFunction(
+        agentCoreSource,
+        'int MeshAgent_NormalizeMeshIdDataStoreValue(ILibSimpleDataStore dataStore, char* meshIdOut, size_t meshIdOutLen, int* storedValueLenOut)',
+        '\nint MeshAgent_ImportSettingsToDataStore');
 
     assert(installedProvisioningBlock.length > 0, 'unable to isolate Stealth_InstalledProvisioningHealthy');
     assert(prepareBlock.length > 0, 'unable to isolate Stealth_PrepareUpdateTransaction');
+    assert(backupBlock.length > 0, 'unable to isolate Stealth_BackupUpdateTransaction');
+    assert(finalizeBlock.length > 0, 'unable to isolate Stealth_FinalizeUpdateTransaction');
+    assert(dataStoreDeleteBlock.length > 0, 'unable to isolate Stealth_DataStoreDeleteValue');
+    assert(deriveIdentityBlock.length > 0, 'unable to isolate Stealth_DerivePostUpdateIdentity');
+    assert(loadProvisioningIdentityBlock.length > 0, 'unable to isolate Stealth_LoadProvisioningIdentity');
     assert(convergedBlock.length > 0, 'unable to isolate Stealth_IsPrimaryLifecycleConverged');
     assert(discoveryBlock.length > 0, 'unable to isolate Stealth_DiscoverCurrentState');
     assert(matchingBlock.length > 0, 'unable to isolate Stealth_SourcePackageMatchesInstalled');
     assert(runBlock.length > 0, 'unable to isolate Stealth_RunLifecycleOperation');
+    assert(sharedImporterBlock.length > 0, 'unable to isolate MeshAgent_ImportSettingsToDataStore');
+    assert(importSettingsBlock.length > 0, 'unable to isolate importSettings');
+    assert(meshIdNormalizerBlock.length > 0, 'unable to isolate MeshAgent_NormalizeMeshIdDataStoreValue');
 
     const normalizedConverged = normalize(convergedBlock);
     const normalizedDiscovery = normalize(discoveryBlock);
@@ -100,15 +142,52 @@ function main() {
             installedProvisioningBlock.includes('Stealth_DataStoreValueExists(paths->dbPath, "NodeID", NULL, 0, NULL)'),
         prepareRecordsInstalledDatastoreIdentity:
             prepareBlock.includes('installedDbIdentityPresent = Stealth_DataStoreValueExists(paths->dbPath, "NodeID", NULL, 0, NULL);'),
-        packageDrivenUpdateAdoptsStagedProvisioningIdentity:
-            source.includes('static BOOL Stealth_UpdateExpectedIdentityFromProvisioningConfig(StealthIdentitySnapshot* expectedIdentity, const wchar_t* configPath)') &&
-            source.includes('if (!allowInstalledProvisioning)') &&
-            source.includes('Stealth_UpdateExpectedIdentityFromProvisioningConfig(&tx.expectedIdentity, expectedProvisioningPath)') &&
-            source.includes('Package-driven update preserving NodeID while adopting staged provisioning identity'),
-        packageMeshIdExpectedAsBinarySha384:
-            source.includes('static BOOL Stealth_SetExpectedIdentityMeshIdField(StealthIdentitySnapshot* expectedIdentity, const char* value)') &&
-            source.includes('hexLen != (UTIL_SHA384_HASHSIZE * 2)') &&
-            source.includes('expectedIdentity->meshId[i] = (char)((high << 4) | low);'),
+        dataStoreDeleteWrapperMatchesDeleteSuccessSemantics:
+            dataStoreDeleteBlock.includes('const int deleteStatus = ILibSimpleDataStore_DeleteEx(') &&
+            dataStoreDeleteBlock.includes('return (deleteStatus != 0);') &&
+            !dataStoreDeleteBlock.includes('return (deleteStatus == 0);') &&
+            finalizeBlock.includes('Stealth_DataStoreDeleteValue(paths->dbPath, "PendingUpdate")'),
+        runtimeAndUpdatePreflightShareProvisioningImporter:
+            importSettingsBlock.includes('return MeshAgent_ImportSettingsToDataStore(agent->masterDb, fileName);') &&
+            loadProvisioningIdentityBlock.includes('MeshAgent_ImportSettingsToDataStore(store, configPathUtf8)') &&
+            !source.includes('Stealth_ReadProvisioningConfigValue') &&
+            !source.includes('Stealth_SetExpectedIdentityMeshIdField'),
+        sharedImporterRetainsLastAssignmentAndDeletionSemantics:
+            sharedImporterBlock.includes('while (f != NULL)') &&
+            sharedImporterBlock.includes('f = f->NextResult;') &&
+            sharedImporterBlock.includes('ILibSimpleDataStore_DeleteEx(dataStore, key, keyLen);') &&
+            !sharedImporterBlock.includes('BOOL found'),
+        sharedImporterDoesNotUseGlobalScratchForHexValues:
+            sharedImporterBlock.includes('char *binaryValue = (char*)malloc(binaryLen > 0 ? binaryLen : 1);') &&
+            sharedImporterBlock.includes('free(binaryValue);') &&
+            !sharedImporterBlock.includes('ILibScratchPad2'),
+        runtimeAndUpdatePreflightShareMeshIdNormalization:
+            agentCoreSource.includes('meshIdLen = MeshAgent_NormalizeMeshIdDataStoreValue(agent->masterDb') &&
+            loadProvisioningIdentityBlock.includes('MeshAgent_NormalizeMeshIdDataStoreValue(store, normalizedMeshId') &&
+            meshIdNormalizerBlock.includes('storedValueLen == 32 || storedValueLen == 48') &&
+            meshIdNormalizerBlock.includes("(storedValue[1] != 'x' && storedValue[1] != 'X')") &&
+            meshIdNormalizerBlock.includes('meshIdLen != 32 && meshIdLen != 48'),
+        postUpdateIdentityUsesFileBackedImporterWithPreservedNodeId:
+            source.includes('wchar_t expectedDbPath[MAX_PATH];') &&
+            loadProvisioningIdentityBlock.includes('ILibSimpleDataStore_CreateEx2(workingDbPathUtf8, 0, 0)') &&
+            loadProvisioningIdentityBlock.includes('ILibSimpleDataStore_PutEx(') &&
+            loadProvisioningIdentityBlock.includes('Stealth_CaptureIdentitySnapshotFromDataStore(store, provisioningIdentity)') &&
+            deriveIdentityBlock.includes('&tx->rollbackIdentity'),
+        rollbackAndPostUpdateSnapshotsStaySeparate:
+            source.includes('StealthIdentitySnapshot rollbackIdentity;') &&
+            source.includes('StealthIdentitySnapshot postUpdateIdentity;') &&
+            backupBlock.includes('Stealth_CaptureIdentitySnapshot(paths->dbPath, &tx->rollbackIdentity)') &&
+            source.includes('Stealth_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity, 30000)') &&
+            source.includes('Stealth_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000)') &&
+            !source.includes('StealthIdentitySnapshot expectedIdentity;'),
+        stagedProvisioningCannotReplaceNodeId:
+            loadProvisioningIdentityBlock.includes('preservedIdentity->nodeIdPresent != provisioningIdentity->nodeIdPresent') &&
+            loadProvisioningIdentityBlock.includes('Staged provisioning rejected because it changes the installed NodeID'),
+        requiredKeyValidationUsesEffectiveImportedValues:
+            source.includes('valid = Stealth_LoadProvisioningIdentity(') &&
+            !source.includes('strstr(buf, "MeshServer=")') &&
+            !source.includes('strstr(buf, "ServerID=")') &&
+            !source.includes('strstr(buf, "MeshID=")'),
         printableIdentityComparisonAllowsTrailingNulOnly:
             source.includes('static BOOL Stealth_IdentityFieldBytesMatch(') &&
             source.includes('Stealth_IsPrintableIdentityValue(expectedValue, expectedValueLen)') &&
@@ -161,6 +240,7 @@ function main() {
         generatedUtc: new Date().toISOString(),
         success: true,
         installerPath,
+        agentCorePath,
         checks
     };
 

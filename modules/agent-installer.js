@@ -118,7 +118,6 @@ function assertWindowsLifecycleActionName(actionName)
     switch (actionName)
     {
         case 'install':
-        case 'update':
         case 'uninstall':
         case 'validate-install':
         case 'validate-update':
@@ -298,7 +297,7 @@ function isWindowsInstalledLifecycleAction(actionName)
 }
 function isWindowsPackageLifecycleAction(actionName)
 {
-    return (actionName == 'install' || actionName == 'update' || actionName == 'validate-package');
+    return (actionName == 'install' || actionName == 'validate-package');
 }
 function findWindowsLifecycleServiceDll(targetBinary, actionName, parms, cleanupPaths)
 {
@@ -1065,6 +1064,45 @@ function getWindowsNativeUpdateSource(parms)
     return (updateSource.length > 0 ? updateSource : null);
 }
 
+function getWindowsNativeUpdateDll(parms)
+{
+    var updateDll = null;
+    if (parms != null && typeof(parms.getParameter) == 'function')
+    {
+        updateDll = parms.getParameter('update-dll', null);
+        if (updateDll == null || updateDll.length == 0)
+        {
+            updateDll = parms.getParameter('updateDll', null);
+        }
+    }
+    if (updateDll == null) { return (null); }
+    updateDll = '' + updateDll;
+    return (updateDll.length > 0 ? updateDll : null);
+}
+
+function runWindowsNativeUpdateActivation(parms)
+{
+    var updateSource = getWindowsNativeUpdateSource(parms);
+    var updateDll = getWindowsNativeUpdateDll(parms);
+    var skipExit = parseInt(parms.getParameter('__skipExit', 0)) != 0;
+    var meshAgent;
+
+    if (updateSource == null)
+    {
+        throw new Error('Native Windows update requires an explicit staged package path.');
+    }
+    meshAgent = require('MeshAgent');
+    if (meshAgent.nativeFullUpdate !== true || typeof meshAgent.activateNativeUpdate != 'function')
+    {
+        throw new Error('Native Windows update activation is unavailable in this agent runtime.');
+    }
+    if (meshAgent.activateNativeUpdate(updateSource, updateDll) !== true)
+    {
+        throw new Error('Native Windows update activation did not accept the staged package.');
+    }
+    if (!skipExit) { process.exit(0); }
+}
+
 function windowsNativeUpdate(isservice, b64)
 {
     if (process.platform != 'win32')
@@ -1078,8 +1116,7 @@ function windowsNativeUpdate(isservice, b64)
     try
     {
         var parms = parseWindowsNativeUpdateParameters(b64);
-        var updateSource = getWindowsNativeUpdateSource(parms);
-        runWindowsNativeLifecycle('update', parms, updateSource != null ? { binary: updateSource } : null);
+        runWindowsNativeUpdateActivation(parms);
     }
     catch (e)
     {

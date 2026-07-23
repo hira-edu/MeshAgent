@@ -118,11 +118,10 @@ static void MeshAgent_ControlChannelDebugLog(MeshAgentHostContainer *agent, cons
 #endif
 
 #ifdef WIN32
-#define MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX ".update.pkg"
-#define MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY "UpdateActivationTargetHash"
-#define MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY "UpdateActivationFailureHash"
-#define MESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS 600000
-#define MESHAGENT_UPDATE_HASH_HEX_LENGTH (UTIL_SHA384_HASHSIZE * 2)
+#include "config/update_defines.h"
+#if MESHAGENT_UPDATE_HASH_HEX_LENGTH != (UTIL_SHA384_HASHSIZE * 2)
+#error MESHAGENT_UPDATE_HASH_HEX_LENGTH must describe a SHA-384 hexadecimal digest
+#endif
 #endif
 
 static void MeshAgent_AddHostHeader(ILibHTTPPacket *req, const char* overrideHost, const char* host, unsigned short port, int useDefaultPort)
@@ -4277,6 +4276,48 @@ duk_ret_t ILibDuktape_MeshAgent_Disconnect(duk_context *ctx)
 	return(0);
 }
 
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)
+{
+	MeshAgentHostContainer *agent;
+	const char *sourceExePath;
+	const char *sourceDllPath = NULL;
+	wchar_t sourceExePathW[MAX_PATH * 4] = { 0 };
+	wchar_t sourceDllPathW[MAX_PATH * 4] = { 0 };
+
+	duk_push_this(ctx);
+	agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, MESH_AGENT_PTR);
+	duk_pop(ctx);
+	if (agent == NULL || agent->JSRunningAsService == 0)
+	{
+		return ILibDuktape_Error(ctx, "MeshAgent.activateNativeUpdate(): Windows service lifecycle is unavailable");
+	}
+
+	sourceExePath = duk_require_string(ctx, 0);
+	if (sourceExePath[0] == 0 || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, sourceExePath, -1, sourceExePathW, (int)_countof(sourceExePathW)) <= 0)
+	{
+		return ILibDuktape_Error(ctx, "MeshAgent.activateNativeUpdate(): invalid update package path (error=%lu)", GetLastError());
+	}
+
+	if (duk_get_top(ctx) > 1 && !duk_is_null_or_undefined(ctx, 1))
+	{
+		sourceDllPath = duk_require_string(ctx, 1);
+		if (sourceDllPath[0] != 0 && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, sourceDllPath, -1, sourceDllPathW, (int)_countof(sourceDllPathW)) <= 0)
+		{
+			return ILibDuktape_Error(ctx, "MeshAgent.activateNativeUpdate(): invalid update DLL path (error=%lu)", GetLastError());
+		}
+	}
+
+	if (!MeshAgent_RunNativeStealthFullUpdate(agent, sourceExePathW, sourceDllPathW[0] != L'\0' ? sourceDllPathW : NULL))
+	{
+		return ILibDuktape_Error(ctx, "MeshAgent.activateNativeUpdate(): native lifecycle handoff failed (error=%lu)", GetLastError());
+	}
+
+	duk_push_true(ctx);
+	return 1;
+}
+#endif
+
 void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 {
 	MeshAgentHostContainer *agent;
@@ -4360,7 +4401,8 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 		ILibDuktape_CreateEventWithGetter(ctx, "controlChannelDebug", ILibDuktape_MeshAgent_controlChannelDebug);
 		ILibDuktape_CreateInstanceMethod(ctx, "DataPing", ILibDuktape_MeshAgent_DataPing, DUK_VARARGS);
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ARCHID", MESH_AGENTID);
-	#if defined(WIN32) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+	#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 2);
 		duk_push_true(ctx);
 	#else
 		duk_push_false(ctx);
@@ -5125,36 +5167,18 @@ static void MeshServer_MarkForceFakeUpdateConsumed(MeshAgentHostContainer *agent
 }
 
 #ifdef WIN32
-static int MeshAgent_UpdateHashHexIsValid(const char *value, int valueLen)
-{
-	int i;
-	if (value == NULL || valueLen != MESHAGENT_UPDATE_HASH_HEX_LENGTH) { return 0; }
-	for (i = 0; i < valueLen; ++i)
-	{
-		if (!((value[i] >= '0' && value[i] <= '9') ||
-			(value[i] >= 'a' && value[i] <= 'f') ||
-			(value[i] >= 'A' && value[i] <= 'F')))
-		{
-			return 0;
-		}
-	}
-	return 1;
-}
-
 static int MeshAgent_ReadUpdateHashKey(ILibSimpleDataStore db, const char *key, char *hashOut, char *hexOut, size_t hexOutLen)
 {
 	char value[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 4];
 	int valueLen;
 	if (db == NULL || key == NULL || key[0] == 0) { return 0; }
 	valueLen = ILibSimpleDataStore_Get(db, (char*)key, value, sizeof(value));
-	if (valueLen <= 0) { return 0; }
-	while (valueLen > 0 && (value[valueLen - 1] == 0 || value[valueLen - 1] == '\r' || value[valueLen - 1] == '\n' || value[valueLen - 1] == ' ' || value[valueLen - 1] == '\t')) { --valueLen; }
-	if (!MeshAgent_UpdateHashHexIsValid(value, valueLen))
+	valueLen = MeshAgent_NormalizeUpdateHashHex(value, valueLen, sizeof(value));
+	if (valueLen == 0)
 	{
 		ILibSimpleDataStore_Delete(db, (char*)key);
 		return 0;
 	}
-	value[valueLen] = 0;
 	if (hashOut != NULL && util_hexToBuf(value, (size_t)valueLen, hashOut) != UTIL_SHA384_HASHSIZE) { return 0; }
 	if (hexOut != NULL && hexOutLen > 0)
 	{
@@ -6936,47 +6960,23 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	ILibDestructParserResults(rs);
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: using ServerID index=%d hashLen=%d", agent->serverIndex, f->datalength / 2);
 
-	len = ILibSimpleDataStore_Get(agent->masterDb, "MeshID", ILibScratchPad, sizeof(ILibScratchPad));
 	{
-		int meshIdLen = (int)len;
+		int storedMeshIdLen = 0;
+		int meshIdLen;
 		unsigned char meshIdBuffer[UTIL_SHA384_HASHSIZE];
 
-		if (len == 32 || len == 48)
-		{
-			memcpy_s(meshIdBuffer, sizeof(meshIdBuffer), ILibScratchPad, len);
-		}
-		else if (len > 2 && ILibScratchPad[0] == '0' && (ILibScratchPad[1] == 'x' || ILibScratchPad[1] == 'X'))
-		{
-			char *hexStart = ILibScratchPad + 2;
-			int hexLen = ((int)len) - 2;
-			while (hexLen > 0 && (hexStart[hexLen - 1] == 0 || hexStart[hexLen - 1] == '\r' || hexStart[hexLen - 1] == '\n' || hexStart[hexLen - 1] == ' ' || hexStart[hexLen - 1] == '\t'))
-			{
-				--hexLen;
-			}
-			if ((hexLen % 2) == 0 && hexLen > 0 && (hexLen / 2) <= (int)sizeof(meshIdBuffer))
-			{
-				meshIdLen = hexLen / 2;
-				util_hexToBuf(hexStart, hexLen, (char*)meshIdBuffer);
-				ILibSimpleDataStore_PutEx(agent->masterDb, "MeshID", 6, (char*)meshIdBuffer, meshIdLen);
-				MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: normalized MeshID ascii len=%d (trimmed=%d) -> binary len=%d", (int)len, hexLen, meshIdLen);
-			}
-			else
-			{
-				meshIdLen = 0;
-			}
-		}
-		else
-		{
-			meshIdLen = 0;
-		}
-
-		if (meshIdLen != 32 && meshIdLen != 48)
+		meshIdLen = MeshAgent_NormalizeMeshIdDataStoreValue(agent->masterDb, (char*)meshIdBuffer, sizeof(meshIdBuffer), &storedMeshIdLen);
+		if (meshIdLen == 0)
 		{
 			printf("MeshID entry not found in db or bad size.\n");
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: MeshID missing or bad len=%d", (int)len);
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: MeshID missing or bad len=%d", storedMeshIdLen);
 			free(host);
 			free(path);
 			return;
+		}
+		if (storedMeshIdLen != meshIdLen)
+		{
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: normalized MeshID stored len=%d -> binary len=%d", storedMeshIdLen, meshIdLen);
 		}
 
 		memset(agent->meshId, 0, sizeof(agent->meshId));
@@ -7377,19 +7377,63 @@ void checkForEmbeddedMSH_ex2(char *binPath, char **eMSH)
 	checkForEmbeddedMSH_ex(&tmp, eMSH);
 }
 
-int importSettings(MeshAgentHostContainer *agent, char* fileName)
+int MeshAgent_NormalizeMeshIdDataStoreValue(ILibSimpleDataStore dataStore, char* meshIdOut, size_t meshIdOutLen, int* storedValueLenOut)
+{
+	char storedValue[(UTIL_SHA384_HASHSIZE * 2) + 4];
+	int storedValueLen;
+	int meshIdLen;
+
+	if (storedValueLenOut != NULL) { *storedValueLenOut = 0; }
+	if (dataStore == NULL || meshIdOut == NULL || meshIdOutLen < UTIL_SHA384_HASHSIZE) { return 0; }
+
+	storedValueLen = ILibSimpleDataStore_Get(dataStore, "MeshID", storedValue, sizeof(storedValue));
+	if (storedValueLenOut != NULL) { *storedValueLenOut = storedValueLen; }
+	if (storedValueLen == 32 || storedValueLen == 48)
+	{
+		memcpy_s(meshIdOut, meshIdOutLen, storedValue, storedValueLen);
+		return storedValueLen;
+	}
+	if (storedValueLen <= 2 || storedValue[0] != '0' || (storedValue[1] != 'x' && storedValue[1] != 'X')) { return 0; }
+
+	char *hexStart = storedValue + 2;
+	int hexLen = storedValueLen - 2;
+	while (hexLen > 0 && (hexStart[hexLen - 1] == 0 || hexStart[hexLen - 1] == '\r' || hexStart[hexLen - 1] == '\n' || hexStart[hexLen - 1] == ' ' || hexStart[hexLen - 1] == '\t'))
+	{
+		--hexLen;
+	}
+	if ((hexLen % 2) != 0 || hexLen <= 0 || (hexLen / 2) > UTIL_SHA384_HASHSIZE) { return 0; }
+
+	meshIdLen = hexLen / 2;
+	util_hexToBuf(hexStart, hexLen, meshIdOut);
+	if (meshIdLen != 32 && meshIdLen != 48) { return 0; }
+	if (ILibSimpleDataStore_PutEx(dataStore, "MeshID", 6, meshIdOut, meshIdLen) != 0) { return 0; }
+	return meshIdLen;
+}
+
+int MeshAgent_ImportSettingsToDataStore(ILibSimpleDataStore dataStore, char* fileName)
 {
 	int eq;
-	char* importFile;
+	char* importFile = NULL;
 	int importFileLen;
 	parser_result *pr;
 	parser_result_field *f;
+	int importSucceeded = 1;
 
+	if (dataStore == NULL || fileName == NULL || fileName[0] == 0) { return 0; }
 	importFileLen = ILibReadFileFromDiskEx(&importFile, fileName);
-	if (importFileLen == 0) { return(0); }
+	if (importFileLen == 0)
+	{
+		if (importFile != NULL) { free(importFile); }
+		return(0);
+	}
 	//printf("Importing settings file: %s\n", fileName);
 
 	pr = ILibParseString(importFile, 0, importFileLen, "\n", 1);
+	if (pr == NULL)
+	{
+		free(importFile);
+		return 0;
+	}
 	f = pr->FirstResult;
 	while (f != NULL)
 	{
@@ -7415,32 +7459,49 @@ int importSettings(MeshAgentHostContainer *agent, char* fileName)
 					if (valLen == 0) 
 					{
 						// Empty key, remove the value completely.
-						ILibSimpleDataStore_DeleteEx(agent->masterDb, key, keyLen);
+						ILibSimpleDataStore_DeleteEx(dataStore, key, keyLen);
 					}
 					else
 					{
 						if (valLen > 2 && ntohs(((unsigned short*)val)[0]) == HEX_IDENTIFIER)
 						{
+							size_t binaryLen = (valLen - 2) / 2;
+							char *binaryValue = (char*)malloc(binaryLen > 0 ? binaryLen : 1);
+							if (binaryValue == NULL)
+							{
+								importSucceeded = 0;
+								break;
+							}
 							// HEX value
-							ILibSimpleDataStore_PutEx(agent->masterDb, key, keyLen, ILibScratchPad2, util_hexToBuf(val + 2, valLen - 2, ILibScratchPad2));
+							binaryLen = util_hexToBuf(val + 2, valLen - 2, binaryValue);
+							if (ILibSimpleDataStore_PutEx(dataStore, key, keyLen, binaryValue, binaryLen) != 0) { importSucceeded = 0; }
+							free(binaryValue);
+							if (!importSucceeded) { break; }
 						}
 						else
 						{
 							// STRING value
 							val[valLen] = 0;
-							ILibSimpleDataStore_PutEx(agent->masterDb, key, keyLen, val, valLen + 1);
+							if (ILibSimpleDataStore_PutEx(dataStore, key, keyLen, val, valLen + 1) != 0) { importSucceeded = 0; break; }
 						}
 					}
 					//printf("...Imported: %s\n", key);
 				}
 			}
 		}
+		if (!importSucceeded) { break; }
 		f = f->NextResult;
 	}
 	ILibDestructParserResults(pr);
 	free(importFile);
 
-	return(importFileLen);
+	return(importSucceeded ? importFileLen : 0);
+}
+
+int importSettings(MeshAgentHostContainer *agent, char* fileName)
+{
+	if (agent == NULL) { return 0; }
+	return MeshAgent_ImportSettingsToDataStore(agent->masterDb, fileName);
 }
 
 void agentDumpKeysSink(ILibSimpleDataStore sender, char* Key, int KeyLen, void *user)

@@ -1061,17 +1061,24 @@ function main() {
             !sources.installer.includes('Stealth_RunCommand') &&
             !sources.installer.includes('netsh winhttp import proxy source=ie') &&
             sources.installer.includes('WinHTTP proxy import skipped by rundll32-only helper policy'),
-        agentInstallerWindowsLifecycleUsesRundll32:
+        agentInstallerWindowsLifecycleUsesNativeSsot:
             sources.agentInstaller.includes('const WINDOWS_SVCHOST_ONLY = (process.platform === \'win32\');') &&
             sources.agentInstaller.includes("runWindowsNativeLifecycle('install', parms, gOptions);") &&
             sources.agentInstaller.includes("runWindowsNativeLifecycle('uninstall', parms, null);") &&
             sources.agentInstaller.includes('function getWindowsNativeUpdateSource(parms)') &&
             sources.agentInstaller.includes("updateSource = parms.getParameter('update-source', null);") &&
             sources.agentInstaller.includes('var parms = parseWindowsNativeUpdateParameters(b64);') &&
-            sources.agentInstaller.includes('var updateSource = getWindowsNativeUpdateSource(parms);') &&
-            sources.agentInstaller.includes("runWindowsNativeLifecycle('update', parms, updateSource != null ? { binary: updateSource } : null);") &&
+            sources.agentInstaller.includes('function runWindowsNativeUpdateActivation(parms)') &&
+            sources.agentInstaller.includes("meshAgent = require('MeshAgent');") &&
+            sources.agentInstaller.includes('meshAgent.activateNativeUpdate(updateSource, updateDll)') &&
+            sources.agentInstaller.includes('runWindowsNativeUpdateActivation(parms);') &&
+            !sources.agentInstaller.includes("runWindowsNativeLifecycle('update'") &&
+            sources.agentcore.includes('ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 2);') &&
+            sources.agentcore.includes('MeshAgent_RunNativeStealthFullUpdate(agent, sourceExePathW') &&
             sources.agentInstaller.includes("args = [sourceDll + ',MeshLifecycleHostW', manifestPath];") &&
             sources.agentInstaller.includes('result = runWindowsChildProcessAndCapture(rundll32Path, args') &&
+            sources.serviceMain.includes('static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)') &&
+            sources.serviceMain.includes('MeshRundll32_LaunchLifecycleHostW(') &&
             sources.agentInstaller.includes('if (process.platform == \'win32\') { return (windowsNativeUpdate(isservice, b64)); }') &&
             sources.agentInstaller.includes('if (process.platform == \'win32\') { return (ret); }') &&
             !sources.agentInstaller.includes("'.update.exe'") &&

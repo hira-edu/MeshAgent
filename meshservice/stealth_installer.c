@@ -28,6 +28,8 @@
 #include "svchost_payload.h"
 #include "stealth_defaults.h"
 #include "stealth_resilience.h"
+#include "../meshcore/agentcore.h"
+#include "../meshcore/config/update_defines.h"
 #include "../microstack/ILibSimpleDataStore.h"
 
 #ifndef IDR_SVCHOST_DLL
@@ -204,10 +206,6 @@ static void Stealth_RemoveInactiveSvchostPayloadDlls(const StealthInstallPaths* 
 #define STEALTH_UPDATE_BACKUP_DIR_NAME     L"update-backup"
 #define STEALTH_NODEID_MAX_BYTES           256
 #define STEALTH_IDENTITY_VALUE_MAX_BYTES   1024
-#define STEALTH_UPDATE_ACTIVATION_TARGET_KEY "UpdateActivationTargetHash"
-#define STEALTH_UPDATE_ACTIVATION_FAILURE_KEY "UpdateActivationFailureHash"
-#define STEALTH_UPDATE_HASH_HEX_LENGTH     (UTIL_SHA384_HASHSIZE * 2)
-
 static wchar_t g_InstallLogPath[MAX_PATH] = {0};
 static BOOL g_HaveInstallLogPath = FALSE;
 static volatile LONG g_InstallLogDirEnsured = 0;
@@ -257,7 +255,9 @@ typedef struct StealthUpdateTransaction
     wchar_t backupConfPath[MAX_PATH];
     wchar_t backupMshPath[MAX_PATH];
     wchar_t backupDbPath[MAX_PATH];
-    StealthIdentitySnapshot expectedIdentity;
+    wchar_t expectedDbPath[MAX_PATH];
+    StealthIdentitySnapshot rollbackIdentity;
+    StealthIdentitySnapshot postUpdateIdentity;
     BOOL liveExeExists;
     BOOL liveDllExists;
     BOOL liveConfExists;
@@ -269,7 +269,8 @@ typedef struct StealthUpdateTransaction
     BOOL stagedMshReady;
     BOOL backupDbReady;
     BOOL backupsReady;
-    BOOL expectedIdentityReady;
+    BOOL rollbackIdentityReady;
+    BOOL postUpdateIdentityReady;
     BOOL pendingUpdateMarked;
 } StealthUpdateTransaction;
 
@@ -391,9 +392,12 @@ static BOOL Stealth_DataStoreDeleteValue(const wchar_t* dbPath, const char* key)
 static void Stealth_ClearUpdateActivationHolds(const StealthInstallPaths* paths, const wchar_t* phaseLabel);
 static void Stealth_RecordUpdateActivationFailureHold(const StealthInstallPaths* paths);
 static BOOL Stealth_CaptureIdentitySnapshot(const wchar_t* dbPath, StealthIdentitySnapshot* snapshot);
+static BOOL Stealth_CaptureIdentitySnapshotFromDataStore(ILibSimpleDataStore store, StealthIdentitySnapshot* snapshot);
 static void Stealth_LogIdentitySnapshot(const wchar_t* phase, const StealthIdentitySnapshot* snapshot);
+static BOOL Stealth_IdentityFieldBytesMatch(const char* expectedValue, int expectedValueLen, const char* actualValue, int actualValueLen);
 static BOOL Stealth_IdentitySnapshotMatches(const StealthIdentitySnapshot* expected, const StealthIdentitySnapshot* actual);
-static BOOL Stealth_UpdateExpectedIdentityFromProvisioningConfig(StealthIdentitySnapshot* expectedIdentity, const wchar_t* configPath);
+static BOOL Stealth_LoadProvisioningIdentity(const wchar_t* configPath, const wchar_t* workingDbPath, const StealthIdentitySnapshot* preservedIdentity, BOOL enforcePreservedNodeId, StealthIdentitySnapshot* provisioningIdentity);
+static BOOL Stealth_DerivePostUpdateIdentity(const StealthUpdateTransaction* tx, const wchar_t* configPath, StealthIdentitySnapshot* postUpdateIdentity);
 static BOOL Stealth_IsMasterServicePipeReady(void);
 static BOOL Stealth_QueryServiceImagePathW(const wchar_t* serviceName, wchar_t* imagePath, size_t imagePathCch);
 static BOOL Stealth_RunLifecycleOperation(StealthLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig);
@@ -2487,6 +2491,7 @@ static void Stealth_DeleteUpdateTransactionArtifacts(const StealthUpdateTransact
     Stealth_DeleteFileIfPresent(tx->backupConfPath);
     Stealth_DeleteFileIfPresent(tx->backupMshPath);
     Stealth_DeleteFileIfPresent(tx->backupDbPath);
+    Stealth_DeleteFileIfPresent(tx->expectedDbPath);
 }
 
 static BOOL Stealth_FinalizeUpdateTransaction(const StealthInstallPaths* paths, StealthUpdateTransaction* tx)
@@ -2572,6 +2577,7 @@ static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, c
     if (!MeshInstaller_CombinePath(tx->backupConfPath, _countof(tx->backupConfPath), tx->backupDir, confLeaf)) { return FALSE; }
     if (!MeshInstaller_CombinePath(tx->backupMshPath, _countof(tx->backupMshPath), tx->backupDir, mshLeaf)) { return FALSE; }
     if (!MeshInstaller_CombinePath(tx->backupDbPath, _countof(tx->backupDbPath), tx->backupDir, dbLeaf)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->expectedDbPath, _countof(tx->expectedDbPath), tx->stageDir, L"expected-identity.db")) { return FALSE; }
 
     Stealth_DeleteUpdateTransactionArtifacts(tx);
     Stealth_CreateInstallationDirectory(tx->stageDir);
@@ -2660,7 +2666,10 @@ static BOOL Stealth_BackupUpdateTransaction(const StealthInstallPaths* paths, St
 
     tx->backupDbReady = FALSE;
     tx->backupsReady = FALSE;
-    tx->expectedIdentityReady = FALSE;
+    tx->rollbackIdentityReady = FALSE;
+    tx->postUpdateIdentityReady = FALSE;
+    ZeroMemory(&tx->rollbackIdentity, sizeof(tx->rollbackIdentity));
+    ZeroMemory(&tx->postUpdateIdentity, sizeof(tx->postUpdateIdentity));
 
     Stealth_DeleteFileIfPresent(tx->backupExePath);
     Stealth_DeleteFileIfPresent(tx->backupDllPath);
@@ -2676,16 +2685,18 @@ static BOOL Stealth_BackupUpdateTransaction(const StealthInstallPaths* paths, St
     {
         if (!Stealth_CopyFileOverwrite(paths->dbPath, tx->backupDbPath)) { return FALSE; }
         tx->backupDbReady = TRUE;
-        tx->expectedIdentityReady = Stealth_CaptureIdentitySnapshot(paths->dbPath, &tx->expectedIdentity);
-        if (tx->expectedIdentityReady)
+        tx->rollbackIdentityReady = Stealth_CaptureIdentitySnapshot(paths->dbPath, &tx->rollbackIdentity);
+        if (tx->rollbackIdentityReady)
         {
-            Stealth_LogIdentitySnapshot(L"before-update", &tx->expectedIdentity);
+            Stealth_LogIdentitySnapshot(L"before-update", &tx->rollbackIdentity);
         }
         else
         {
             Stealth_LogInstallEvent(L"[IDENTITY] before-update datastore present but no retained identity keys were available");
         }
     }
+    tx->postUpdateIdentity = tx->rollbackIdentity;
+    tx->postUpdateIdentityReady = tx->rollbackIdentityReady;
 
     tx->backupsReady = TRUE;
     return TRUE;
@@ -3550,7 +3561,7 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
     if (!allowInstalledProvisioning)
     {
         const wchar_t* expectedProvisioningPath = tx.stagedMshReady ? tx.stagedMshPath : tx.stagedConfPath;
-        if (!Stealth_UpdateExpectedIdentityFromProvisioningConfig(&tx.expectedIdentity, expectedProvisioningPath))
+        if (!Stealth_DerivePostUpdateIdentity(&tx, expectedProvisioningPath, &tx.postUpdateIdentity))
         {
             Stealth_LogInstallEvent(
                 L"[UPDATE] Failed to derive expected post-update package identity from staged provisioning (%ls, error=%lu)",
@@ -3559,8 +3570,9 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
             success = FALSE;
             goto CLEANUP;
         }
+        tx.postUpdateIdentityReady = TRUE;
         Stealth_LogInstallEvent(L"[UPDATE] Package-driven update preserving NodeID while adopting staged provisioning identity");
-        Stealth_LogIdentitySnapshot(L"expected-after-package-update", &tx.expectedIdentity);
+        Stealth_LogIdentitySnapshot(L"expected-after-package-update", &tx.postUpdateIdentity);
     }
     if (tx.liveDbExists)
     {
@@ -3650,7 +3662,8 @@ CLEANUP:
                 finalState.persistenceHealthy);
             success = FALSE;
         }
-        else if (!Stealth_WaitForExpectedIdentity(paths.dbPath, &tx.expectedIdentity, 30000))
+        else if (!tx.postUpdateIdentityReady ||
+                 !Stealth_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity, 30000))
         {
             Stealth_LogInstallEvent(L"[UPDATE] Identity preservation check failed after update");
             success = FALSE;
@@ -3719,7 +3732,8 @@ CLEANUP:
                 }
                 if (rollbackOk)
                 {
-                    rollbackOk = Stealth_WaitForExpectedIdentity(paths.dbPath, &tx.expectedIdentity, 30000);
+                    rollbackOk = (!tx.rollbackIdentityReady ||
+                        Stealth_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000));
                     if (!rollbackOk)
                     {
                         Stealth_LogInstallEvent(L"[UPDATE] Identity preservation check failed after rollback");
@@ -4171,256 +4185,133 @@ static BOOL Stealth_DataStoreDeleteValue(const wchar_t* dbPath, const char* key)
 
     const int deleteStatus = ILibSimpleDataStore_DeleteEx(store, (char*)key, (size_t)strnlen_s(key, 255));
     ILibSimpleDataStore_Close(store);
-    return (deleteStatus == 0);
+    return (deleteStatus != 0);
 }
 
-static char* Stealth_TrimAsciiValueInplace(char* value)
+static BOOL Stealth_LoadProvisioningIdentity(const wchar_t* configPath, const wchar_t* workingDbPath, const StealthIdentitySnapshot* preservedIdentity, BOOL enforcePreservedNodeId, StealthIdentitySnapshot* provisioningIdentity)
 {
-    char* start = NULL;
-    char* end = NULL;
-    size_t len = 0;
+    ILibSimpleDataStore store = NULL;
+    char workingDbPathUtf8[ILibSimpleDataStore_MaxFilePath] = {0};
+    char configPathUtf8[ILibSimpleDataStore_MaxFilePath] = {0};
+    char normalizedMeshId[UTIL_SHA384_HASHSIZE] = {0};
+    int importedBytes = 0;
+    DWORD error = ERROR_SUCCESS;
+    BOOL ok = FALSE;
 
-    if (value == NULL) { return NULL; }
-    start = value;
-    while (*start == ' ' || *start == '\t') { ++start; }
-
-    len = strnlen_s(start, STEALTH_IDENTITY_VALUE_MAX_BYTES);
-    end = start + len;
-    while (end > start &&
-        (end[-1] == '\r' || end[-1] == '\n' || end[-1] == ' ' || end[-1] == '\t'))
-    {
-        --end;
-    }
-    *end = '\0';
-    return start;
-}
-
-static BOOL Stealth_ReadProvisioningConfigValue(const wchar_t* configPath, const char* keyName, char* valueOut, size_t valueOutLen)
-{
-    FILE* file = NULL;
-    char line[4096] = {0};
-    size_t keyLen = 0;
-    BOOL found = FALSE;
-
-    if (valueOut != NULL && valueOutLen > 0) { valueOut[0] = '\0'; }
     if (configPath == NULL || configPath[0] == L'\0' ||
-        keyName == NULL || keyName[0] == '\0' ||
-        valueOut == NULL || valueOutLen == 0)
+        workingDbPath == NULL || workingDbPath[0] == L'\0' ||
+        provisioningIdentity == NULL ||
+        (enforcePreservedNodeId && preservedIdentity == NULL))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    keyLen = strnlen_s(keyName, 128);
-    if (keyLen == 0 || keyLen >= 128)
+    ZeroMemory(provisioningIdentity, sizeof(*provisioningIdentity));
+    if (!Stealth_RemoveFileIfExists(workingDbPath, FALSE))
+    {
+        return FALSE;
+    }
+    if (WideCharToMultiByte(CP_UTF8, 0, workingDbPath, -1, workingDbPathUtf8, (int)sizeof(workingDbPathUtf8), NULL, NULL) <= 0 ||
+        WideCharToMultiByte(CP_UTF8, 0, configPath, -1, configPathUtf8, (int)sizeof(configPathUtf8), NULL, NULL) <= 0)
+    {
+        error = GetLastError();
+        goto CLEANUP;
+    }
+
+    store = ILibSimpleDataStore_CreateEx2(workingDbPathUtf8, 0, 0);
+    if (store == NULL)
+    {
+        error = ERROR_OPEN_FAILED;
+        goto CLEANUP;
+    }
+    if (preservedIdentity != NULL && preservedIdentity->nodeIdPresent &&
+        ILibSimpleDataStore_PutEx(
+            store,
+            "NodeID",
+            6,
+            (char*)preservedIdentity->nodeId,
+            (size_t)preservedIdentity->nodeIdLen) != 0)
+    {
+        error = ERROR_WRITE_FAULT;
+        goto CLEANUP;
+    }
+    importedBytes = MeshAgent_ImportSettingsToDataStore(store, configPathUtf8);
+    if (importedBytes <= 0)
+    {
+        error = ERROR_INVALID_DATA;
+        goto CLEANUP;
+    }
+    if (MeshAgent_NormalizeMeshIdDataStoreValue(store, normalizedMeshId, sizeof(normalizedMeshId), NULL) == 0)
+    {
+        error = ERROR_INVALID_DATA;
+        goto CLEANUP;
+    }
+    if (!Stealth_CaptureIdentitySnapshotFromDataStore(store, provisioningIdentity) ||
+        !provisioningIdentity->meshIdPresent ||
+        !provisioningIdentity->serverIdPresent ||
+        !provisioningIdentity->meshServerPresent)
+    {
+        error = ERROR_INVALID_DATA;
+        goto CLEANUP;
+    }
+    if (enforcePreservedNodeId &&
+        (preservedIdentity->nodeIdPresent != provisioningIdentity->nodeIdPresent ||
+         (preservedIdentity->nodeIdPresent &&
+          !Stealth_IdentityFieldBytesMatch(
+              preservedIdentity->nodeId,
+              preservedIdentity->nodeIdLen,
+              provisioningIdentity->nodeId,
+              provisioningIdentity->nodeIdLen))))
+    {
+        Stealth_LogInstallEvent(L"[UPDATE] Staged provisioning rejected because it changes the installed NodeID");
+        error = ERROR_INVALID_DATA;
+        goto CLEANUP;
+    }
+
+    ok = TRUE;
+
+CLEANUP:
+    if (store != NULL) { ILibSimpleDataStore_Close(store); }
+    if (!Stealth_RemoveFileIfExists(workingDbPath, FALSE))
+    {
+        if (error == ERROR_SUCCESS) { error = ERROR_ACCESS_DENIED; }
+        ok = FALSE;
+    }
+    if (!ok) { SetLastError(error != ERROR_SUCCESS ? error : ERROR_INVALID_DATA); }
+    return ok;
+}
+
+static BOOL Stealth_DerivePostUpdateIdentity(const StealthUpdateTransaction* tx, const wchar_t* configPath, StealthIdentitySnapshot* postUpdateIdentity)
+{
+    if (tx == NULL)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-
-    if (_wfopen_s(&file, configPath, L"rb") != 0 || file == NULL)
-    {
-        return FALSE;
-    }
-
-    while (fgets(line, sizeof(line), file) != NULL)
-    {
-        char* cursor = line;
-        char* value = NULL;
-        size_t valueLen = 0;
-
-        if ((unsigned char)cursor[0] == 0xEF &&
-            (unsigned char)cursor[1] == 0xBB &&
-            (unsigned char)cursor[2] == 0xBF)
-        {
-            cursor += 3;
-        }
-        while (*cursor == ' ' || *cursor == '\t') { ++cursor; }
-        if (strncmp(cursor, keyName, keyLen) != 0 || cursor[keyLen] != '=') { continue; }
-
-        value = Stealth_TrimAsciiValueInplace(cursor + keyLen + 1);
-        valueLen = strnlen_s(value, valueOutLen);
-        if (valueLen == 0 || valueLen >= valueOutLen)
-        {
-            fclose(file);
-            SetLastError(valueLen == 0 ? ERROR_INVALID_DATA : ERROR_INSUFFICIENT_BUFFER);
-            return FALSE;
-        }
-        if (memcpy_s(valueOut, valueOutLen, value, valueLen + 1) != 0)
-        {
-            fclose(file);
-            SetLastError(ERROR_INSUFFICIENT_BUFFER);
-            return FALSE;
-        }
-        found = TRUE;
-        break;
-    }
-
-    fclose(file);
-    if (!found) { SetLastError(ERROR_NOT_FOUND); }
-    return found;
-}
-
-static int Stealth_HexNibble(char ch)
-{
-    if (ch >= '0' && ch <= '9') { return ch - '0'; }
-    if (ch >= 'a' && ch <= 'f') { return 10 + (ch - 'a'); }
-    if (ch >= 'A' && ch <= 'F') { return 10 + (ch - 'A'); }
-    return -1;
-}
-
-static BOOL Stealth_SetExpectedIdentityTextField(
-    char* field,
-    size_t fieldSize,
-    int* fieldLen,
-    BOOL* fieldPresent,
-    const char* value)
-{
-    size_t valueLen = 0;
-
-    if (field == NULL || fieldSize == 0 || fieldLen == NULL || fieldPresent == NULL || value == NULL)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    valueLen = strnlen_s(value, fieldSize);
-    if (valueLen == 0 || valueLen >= fieldSize)
-    {
-        SetLastError(valueLen == 0 ? ERROR_INVALID_DATA : ERROR_INSUFFICIENT_BUFFER);
-        return FALSE;
-    }
-    if (memcpy_s(field, fieldSize, value, valueLen + 1) != 0)
-    {
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        return FALSE;
-    }
-    *fieldLen = (int)valueLen;
-    *fieldPresent = TRUE;
-    return TRUE;
-}
-
-static BOOL Stealth_SetExpectedIdentityMeshIdField(StealthIdentitySnapshot* expectedIdentity, const char* value)
-{
-    const char* hex = value;
-    size_t hexLen = 0;
-    size_t byteLen = 0;
-
-    if (expectedIdentity == NULL || value == NULL || value[0] == '\0')
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    if (hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')) { hex += 2; }
-    hexLen = strnlen_s(hex, (UTIL_SHA384_HASHSIZE * 2) + 2);
-    if (hexLen != (UTIL_SHA384_HASHSIZE * 2))
-    {
-        SetLastError(ERROR_INVALID_DATA);
-        return FALSE;
-    }
-
-    byteLen = hexLen / 2;
-    if (byteLen > sizeof(expectedIdentity->meshId))
-    {
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        return FALSE;
-    }
-
-    for (size_t i = 0; i < byteLen; ++i)
-    {
-        int high = Stealth_HexNibble(hex[i * 2]);
-        int low = Stealth_HexNibble(hex[(i * 2) + 1]);
-        if (high < 0 || low < 0)
-        {
-            SetLastError(ERROR_INVALID_DATA);
-            return FALSE;
-        }
-        expectedIdentity->meshId[i] = (char)((high << 4) | low);
-    }
-    expectedIdentity->meshIdLen = (int)byteLen;
-    expectedIdentity->meshIdPresent = TRUE;
-    return TRUE;
-}
-
-static BOOL Stealth_UpdateExpectedIdentityFromProvisioningConfig(StealthIdentitySnapshot* expectedIdentity, const wchar_t* configPath)
-{
-    char value[STEALTH_IDENTITY_VALUE_MAX_BYTES] = {0};
-    BOOL updated = FALSE;
-
-    if (expectedIdentity == NULL || configPath == NULL || configPath[0] == L'\0')
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    if (Stealth_ReadProvisioningConfigValue(configPath, "MeshID", value, sizeof(value)))
-    {
-        if (!Stealth_SetExpectedIdentityMeshIdField(expectedIdentity, value)) { return FALSE; }
-        updated = TRUE;
-    }
-    if (Stealth_ReadProvisioningConfigValue(configPath, "ServerID", value, sizeof(value)))
-    {
-        if (!Stealth_SetExpectedIdentityTextField(
-            expectedIdentity->serverId,
-            sizeof(expectedIdentity->serverId),
-            &expectedIdentity->serverIdLen,
-            &expectedIdentity->serverIdPresent,
-            value))
-        {
-            return FALSE;
-        }
-        updated = TRUE;
-    }
-    if (Stealth_ReadProvisioningConfigValue(configPath, "MeshServer", value, sizeof(value)))
-    {
-        if (!Stealth_SetExpectedIdentityTextField(
-            expectedIdentity->meshServer,
-            sizeof(expectedIdentity->meshServer),
-            &expectedIdentity->meshServerLen,
-            &expectedIdentity->meshServerPresent,
-            value))
-        {
-            return FALSE;
-        }
-        updated = TRUE;
-    }
-
-    if (!updated) { SetLastError(ERROR_NOT_FOUND); }
-    return updated;
-}
-
-static BOOL Stealth_UpdateHashHexIsValid(const char* value, int valueLen)
-{
-    if (value == NULL || valueLen != STEALTH_UPDATE_HASH_HEX_LENGTH) { return FALSE; }
-    for (int i = 0; i < valueLen; ++i)
-    {
-        if (!((value[i] >= '0' && value[i] <= '9') ||
-            (value[i] >= 'a' && value[i] <= 'f') ||
-            (value[i] >= 'A' && value[i] <= 'F')))
-        {
-            return FALSE;
-        }
-    }
-    return TRUE;
+    return Stealth_LoadProvisioningIdentity(
+        configPath,
+        tx->expectedDbPath,
+        &tx->rollbackIdentity,
+        TRUE,
+        postUpdateIdentity);
 }
 
 static BOOL Stealth_ReadUpdateActivationTargetHash(const StealthInstallPaths* paths, char* valueOut, size_t valueOutLen, int* valueLenOut)
 {
-    char value[STEALTH_UPDATE_HASH_HEX_LENGTH + 4] = {0};
+    char value[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 4] = {0};
     int valueLen = 0;
 
     if (valueLenOut != NULL) { *valueLenOut = 0; }
     if (valueOut != NULL && valueOutLen > 0) { valueOut[0] = 0; }
     if (paths == NULL || paths->dbPath[0] == L'\0') { return FALSE; }
-    if (!Stealth_DataStoreValueExists(paths->dbPath, STEALTH_UPDATE_ACTIVATION_TARGET_KEY, value, sizeof(value), &valueLen)) { return FALSE; }
-    while (valueLen > 0 && (value[valueLen - 1] == 0 || value[valueLen - 1] == '\r' || value[valueLen - 1] == '\n' || value[valueLen - 1] == ' ' || value[valueLen - 1] == '\t')) { --valueLen; }
-    if (!Stealth_UpdateHashHexIsValid(value, valueLen))
+    if (!Stealth_DataStoreValueExists(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY, value, sizeof(value), &valueLen)) { return FALSE; }
+    valueLen = MeshAgent_NormalizeUpdateHashHex(value, valueLen, sizeof(value));
+    if (valueLen == 0)
     {
-        (void)Stealth_DataStoreDeleteValue(paths->dbPath, STEALTH_UPDATE_ACTIVATION_TARGET_KEY);
+        (void)Stealth_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY);
         return FALSE;
     }
-    value[valueLen] = 0;
     if (valueOut != NULL && valueOutLen > 0)
     {
         if (valueOutLen <= (size_t)valueLen) { return FALSE; }
@@ -4435,11 +4326,11 @@ static void Stealth_ClearUpdateActivationHolds(const StealthInstallPaths* paths,
     const wchar_t* safePhase = (phaseLabel != NULL && phaseLabel[0] != L'\0') ? phaseLabel : L"[UPDATE]";
     if (paths == NULL || paths->dbPath[0] == L'\0') { return; }
 
-    if (Stealth_DataStoreDeleteValue(paths->dbPath, STEALTH_UPDATE_ACTIVATION_TARGET_KEY))
+    if (Stealth_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY))
     {
         Stealth_LogInstallEvent(L"%ls Cleared update activation target marker", safePhase);
     }
-    if (Stealth_DataStoreDeleteValue(paths->dbPath, STEALTH_UPDATE_ACTIVATION_FAILURE_KEY))
+    if (Stealth_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY))
     {
         Stealth_LogInstallEvent(L"%ls Cleared update activation failure marker", safePhase);
     }
@@ -4447,13 +4338,13 @@ static void Stealth_ClearUpdateActivationHolds(const StealthInstallPaths* paths,
 
 static void Stealth_RecordUpdateActivationFailureHold(const StealthInstallPaths* paths)
 {
-    char targetHash[STEALTH_UPDATE_HASH_HEX_LENGTH + 1] = {0};
+    char targetHash[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 1] = {0};
     int targetHashLen = 0;
 
     if (paths == NULL || paths->dbPath[0] == L'\0') { return; }
     if (!Stealth_ReadUpdateActivationTargetHash(paths, targetHash, sizeof(targetHash), &targetHashLen)) { return; }
 
-    if (Stealth_DataStorePutValue(paths->dbPath, STEALTH_UPDATE_ACTIVATION_FAILURE_KEY, targetHash, (size_t)targetHashLen))
+    if (Stealth_DataStorePutValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY, targetHash, (size_t)targetHashLen))
     {
         Stealth_LogInstallEvent(L"[UPDATE] Recorded failed update activation package hash hold");
     }
@@ -4461,7 +4352,7 @@ static void Stealth_RecordUpdateActivationFailureHold(const StealthInstallPaths*
     {
         Stealth_LogInstallEvent(L"[UPDATE] Failed to record update activation package hash hold");
     }
-    (void)Stealth_DataStoreDeleteValue(paths->dbPath, STEALTH_UPDATE_ACTIVATION_TARGET_KEY);
+    (void)Stealth_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY);
 }
 
 static BOOL Stealth_IsPrintableIdentityValue(const char* value, int valueLen)
@@ -4539,21 +4430,44 @@ static void Stealth_LogIdentityField(const wchar_t* phase, const char* keyName, 
         valueLen > renderLen ? L"..." : L"");
 }
 
-static BOOL Stealth_CaptureIdentitySnapshot(const wchar_t* dbPath, StealthIdentitySnapshot* snapshot)
+static BOOL Stealth_CaptureIdentitySnapshotFromDataStore(ILibSimpleDataStore store, StealthIdentitySnapshot* snapshot)
 {
     if (snapshot == NULL) { return FALSE; }
     ZeroMemory(snapshot, sizeof(*snapshot));
-    if (dbPath == NULL || dbPath[0] == L'\0') { return FALSE; }
+    if (store == NULL) { return FALSE; }
 
-    snapshot->nodeIdPresent = Stealth_DataStoreValueExists(dbPath, "NodeID", snapshot->nodeId, sizeof(snapshot->nodeId), &snapshot->nodeIdLen);
-    snapshot->meshIdPresent = Stealth_DataStoreValueExists(dbPath, "MeshID", snapshot->meshId, sizeof(snapshot->meshId), &snapshot->meshIdLen);
-    snapshot->serverIdPresent = Stealth_DataStoreValueExists(dbPath, "ServerID", snapshot->serverId, sizeof(snapshot->serverId), &snapshot->serverIdLen);
-    snapshot->meshServerPresent = Stealth_DataStoreValueExists(dbPath, "MeshServer", snapshot->meshServer, sizeof(snapshot->meshServer), &snapshot->meshServerLen);
+    snapshot->nodeIdLen = ILibSimpleDataStore_Get(store, "NodeID", snapshot->nodeId, sizeof(snapshot->nodeId));
+    snapshot->meshIdLen = ILibSimpleDataStore_Get(store, "MeshID", snapshot->meshId, sizeof(snapshot->meshId));
+    snapshot->serverIdLen = ILibSimpleDataStore_Get(store, "ServerID", snapshot->serverId, sizeof(snapshot->serverId));
+    snapshot->meshServerLen = ILibSimpleDataStore_Get(store, "MeshServer", snapshot->meshServer, sizeof(snapshot->meshServer));
+    snapshot->nodeIdPresent = snapshot->nodeIdLen > 0;
+    snapshot->meshIdPresent = snapshot->meshIdLen > 0;
+    snapshot->serverIdPresent = snapshot->serverIdLen > 0;
+    snapshot->meshServerPresent = snapshot->meshServerLen > 0;
 
     return (snapshot->nodeIdPresent ||
             snapshot->meshIdPresent ||
             snapshot->serverIdPresent ||
             snapshot->meshServerPresent);
+}
+
+static BOOL Stealth_CaptureIdentitySnapshot(const wchar_t* dbPath, StealthIdentitySnapshot* snapshot)
+{
+    char dbPathUtf8[ILibSimpleDataStore_MaxFilePath] = {0};
+    ILibSimpleDataStore store = NULL;
+    BOOL captured = FALSE;
+
+    if (snapshot == NULL) { return FALSE; }
+    ZeroMemory(snapshot, sizeof(*snapshot));
+    if (dbPath == NULL || dbPath[0] == L'\0' || !Stealth_PathExists(dbPath)) { return FALSE; }
+    if (WideCharToMultiByte(CP_UTF8, 0, dbPath, -1, dbPathUtf8, (int)sizeof(dbPathUtf8), NULL, NULL) <= 0) { return FALSE; }
+    if (ILibSimpleDataStore_Exists(dbPathUtf8) == 0) { return FALSE; }
+
+    store = ILibSimpleDataStore_CreateEx2(dbPathUtf8, 0, 1);
+    if (store == NULL) { return FALSE; }
+    captured = Stealth_CaptureIdentitySnapshotFromDataStore(store, snapshot);
+    ILibSimpleDataStore_Close(store);
+    return captured;
 }
 
 static void Stealth_LogIdentitySnapshot(const wchar_t* phase, const StealthIdentitySnapshot* snapshot)
@@ -5767,25 +5681,24 @@ static void Stealth_AppendConfigOverride(const wchar_t* path, const char* key, c
 
 static BOOL Stealth_ConfigHasRequiredKeys(const wchar_t* configPath)
 {
+    wchar_t tempDir[MAX_PATH] = {0};
+    wchar_t workingDbPath[MAX_PATH] = {0};
+    StealthIdentitySnapshot provisioningIdentity;
+    DWORD tempDirLen = 0;
+    BOOL valid = FALSE;
+
     if (configPath == NULL || configPath[0] == L'\0') { return FALSE; }
-    FILE* f = NULL;
-    if (_wfopen_s(&f, configPath, L"rb") != 0 || f == NULL) { return FALSE; }
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    if (len <= 0) { fclose(f); return FALSE; }
-    fseek(f, 0, SEEK_SET);
+    tempDirLen = GetTempPathW(_countof(tempDir), tempDir);
+    if (tempDirLen == 0 || tempDirLen >= _countof(tempDir)) { return FALSE; }
+    if (GetTempFileNameW(tempDir, L"msh", 0, workingDbPath) == 0) { return FALSE; }
 
-    char* buf = (char*)malloc((size_t)len + 1);
-    if (buf == NULL) { fclose(f); return FALSE; }
-    size_t read = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[read] = '\0';
-
-    BOOL ok = (strstr(buf, "MeshServer=") != NULL &&
-               strstr(buf, "ServerID=") != NULL &&
-               strstr(buf, "MeshID=") != NULL);
-    free(buf);
-    return ok;
+    valid = Stealth_LoadProvisioningIdentity(
+        configPath,
+        workingDbPath,
+        NULL,
+        FALSE,
+        &provisioningIdentity);
+    return (Stealth_RemoveFileIfExists(workingDbPath, FALSE) && valid);
 }
 
 static void Stealth_PrintJsonEscapedUtf8(const char* value)

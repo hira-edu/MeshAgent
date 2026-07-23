@@ -265,6 +265,8 @@ typedef struct MeshAgentHostContainer
 
 MeshAgentHostContainer* MeshAgent_Create(MeshCommand_AuthInfo_CapabilitiesMask capabilities);
 void MeshAgent_Destroy(MeshAgentHostContainer* agent);
+int MeshAgent_ImportSettingsToDataStore(ILibSimpleDataStore dataStore, char* fileName);
+int MeshAgent_NormalizeMeshIdDataStoreValue(ILibSimpleDataStore dataStore, char* meshIdOut, size_t meshIdOutLen, int* storedValueLenOut);
 
 int MeshAgent_Start(MeshAgentHostContainer *agent, int argc, char **argv);
 void MeshAgent_Stop(MeshAgentHostContainer *agent);
