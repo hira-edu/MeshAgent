@@ -59,53 +59,44 @@ function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const installerPath = path.resolve('meshservice', 'stealth_installer.c');
     const source = fs.readFileSync(installerPath, 'utf8');
-    const retiredMatcher = extractFunction(source, 'static BOOL Stealth_ServiceUsesRetiredBridgePayload(');
     const collector = extractFunction(source, 'static size_t Stealth_CollectConflictingServiceAliases(');
     const cleanup = extractFunction(source, 'static size_t Stealth_CleanupConflictingServiceAliases(');
-    const artifactCleanup = extractFunction(source, 'static void Stealth_RemoveRetiredBridgePayloadArtifactsByPath(');
     const moduleTermination = extractFunction(source, 'static void Stealth_TerminateProcessesByLoadedModulePath(const wchar_t* modulePath)');
     const installFlow = extractFunction(source, 'static BOOL Stealth_ApplyInstallFlow(');
     const uninstallFlow = extractFunction(source, 'static BOOL Stealth_ApplyUninstallFlow(void)');
     const updateFlow = extractFunction(source, 'static BOOL Stealth_ApplyUpdateFlow(');
 
     const checks = {
-        recordsExactRetiredAudioAlias:
-            source.includes('STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_NAME = L"Audio"') &&
-            source.includes('STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_DLL = L"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\GameExplorer\\\\Remote.hlp"') &&
-            source.includes('STEALTH_RETIRED_AUDIO_ALIAS_TIME_CONFIG = L"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\GameExplorer\\\\TimeConfig.ini"'),
-        retiredAliasRequiresExactServiceName:
-            retiredMatcher.includes('_wcsicmp(serviceName, STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_NAME) != 0') &&
-            retiredMatcher.includes('return FALSE;'),
-        retiredAliasRequiresExactServiceDll:
-            retiredMatcher.includes('Stealth_ResolveServiceDllPath(serviceName, localDllPath') &&
-            retiredMatcher.includes('_wcsicmp(localDllPath, STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_DLL) != 0'),
+        removesRetiredAudioAliasConstants:
+            !source.includes('STEALTH_RETIRED_AUDIO_ALIAS') &&
+            !source.includes('L"Audio"') &&
+            !source.includes('Remote.hlp') &&
+            !source.includes('TimeConfig.ini'),
+        removesRetiredAudioAliasMatcher:
+            !source.includes('Stealth_ServiceUsesRetiredBridgePayload('),
+        removesRetiredAudioPayloadCleanupHooks:
+            !source.includes('Stealth_RemoveRetiredBridgePayloadArtifacts') &&
+            !source.includes('Stealth_CleanupRetiredBridgePayloadArtifacts'),
         collectorKeepsInstallRootAliasCleanup:
             collector.includes('Stealth_ServiceUsesInstallRootPayload(paths, serviceName, serviceDll') &&
-            collector.includes('Stealth_RecordServiceAlias(aliases, aliasCapacity, count, serviceName, serviceDll, FALSE);'),
-        collectorAddsRetiredBridgeAliasCleanup:
-            collector.includes('Stealth_ServiceUsesRetiredBridgePayload(serviceName, serviceDll') &&
-            collector.includes('Stealth_RecordServiceAlias(aliases, aliasCapacity, count, serviceName, serviceDll, TRUE);'),
-        retiredAliasCleanupStopsAndUnregistersBeforePayloadRemoval:
+            collector.includes('Stealth_RecordServiceAlias(aliases, aliasCapacity, count, serviceName, serviceDll);') &&
+            !collector.includes('Stealth_ServiceUsesRetiredBridgePayload'),
+        aliasCleanupStopsAndUnregistersInstallRootAliases:
             cleanup.indexOf('Stealth_StopServiceAndWait(aliases[i].serviceName') <
             cleanup.indexOf('Stealth_UnregisterSvchostService(aliases[i].serviceName') &&
             cleanup.indexOf('Stealth_UnregisterSvchostService(aliases[i].serviceName') <
-            cleanup.indexOf('Stealth_RemoveRetiredBridgePayloadArtifacts(&aliases[i]);'),
-        retiredPayloadRemovalIsExactPathOnly:
-            artifactCleanup.includes("serviceDll == NULL || serviceDll[0] == L'\\0'") &&
-            artifactCleanup.includes('Stealth_TerminateProcessesByLoadedModulePath(serviceDll);') &&
-            artifactCleanup.includes('Stealth_RemoveFileIfExistsWithTimeout(serviceDll, 60000, TRUE)') &&
-            artifactCleanup.includes('_wcsicmp(serviceDll, STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_DLL) == 0') &&
-            artifactCleanup.includes('Stealth_RemoveFileIfExistsWithTimeout(STEALTH_RETIRED_AUDIO_ALIAS_TIME_CONFIG, 60000, TRUE)'),
-        retiredProcessTerminationUsesLoadedModulePath:
+            cleanup.indexOf('Stealth_RemoveFirewallRuleForService(aliases[i].serviceName') &&
+            !cleanup.includes('Stealth_RemoveRetiredBridgePayloadArtifacts'),
+        processTerminationStillUsesLoadedModulePathForOwnedDllCleanup:
             moduleTermination.includes('Stealth_ProcessHasLoadedModulePath(pid, modulePath)') &&
             moduleTermination.includes('OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid)') &&
             moduleTermination.includes('TerminateProcess(processHandle, 0)') &&
             !moduleTermination.includes('CommandLine') &&
             !moduleTermination.includes('rundll32.exe'),
-        lifecycleFlowsCleanRegisteredAndOrphanRetiredBridgeArtifacts:
-            installFlow.includes('Stealth_CleanupRetiredBridgePayloadArtifacts();') &&
-            uninstallFlow.includes('Stealth_CleanupRetiredBridgePayloadArtifacts();') &&
-            updateFlow.includes('Stealth_CleanupRetiredBridgePayloadArtifacts();'),
+        lifecycleFlowsDoNotCleanRetiredAudioArtifacts:
+            !installFlow.includes('Stealth_CleanupRetiredBridgePayloadArtifacts') &&
+            !uninstallFlow.includes('Stealth_CleanupRetiredBridgePayloadArtifacts') &&
+            !updateFlow.includes('Stealth_CleanupRetiredBridgePayloadArtifacts'),
         uninstallValidationUsesSameAliasCollector:
             source.includes('summary.serviceAliasesRemoved = (Stealth_CollectConflictingServiceAliases(&paths, NULL, NULL, 0) == 0);')
     };
@@ -127,9 +118,8 @@ function main() {
         fs.writeFileSync(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
-            'RETIRED_ALIAS_SERVICE=Audio',
-            'RETIRED_ALIAS_DLL=C:\\ProgramData\\Microsoft\\Windows\\GameExplorer\\Remote.hlp',
-            'MATCHING_MODE=exact-service-and-exact-dll'
+            'RETIRED_AUDIO_ALIAS_CLEANUP=removed',
+            'INSTALL_ROOT_ALIAS_CLEANUP=preserved'
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

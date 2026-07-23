@@ -591,12 +591,7 @@ typedef struct StealthServiceAliasRecord
     wchar_t serviceName[256];
     wchar_t serviceDisplayName[256];
     wchar_t serviceDll[MAX_PATH * 4];
-    BOOL removeServiceDllAfterStop;
 } StealthServiceAliasRecord;
-
-static const wchar_t* STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_NAME = L"Audio";
-static const wchar_t* STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_DLL = L"C:\\ProgramData\\Microsoft\\Windows\\GameExplorer\\Remote.hlp";
-static const wchar_t* STEALTH_RETIRED_AUDIO_ALIAS_TIME_CONFIG = L"C:\\ProgramData\\Microsoft\\Windows\\GameExplorer\\TimeConfig.ini";
 
 static void Stealth_TrimTrailingSeparatorsInplace(wchar_t* value)
 {
@@ -734,76 +729,18 @@ static BOOL Stealth_ServiceUsesInstallRootPayload(
     return FALSE;
 }
 
-static BOOL Stealth_ServiceUsesRetiredBridgePayload(
-    const wchar_t* serviceName,
-    wchar_t* resolvedServiceDll,
-    size_t resolvedServiceDllCch)
-{
-    wchar_t localDllPath[MAX_PATH * 4] = {0};
-
-    if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
-    if (_wcsicmp(serviceName, STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_NAME) != 0) { return FALSE; }
-
-    if (!Stealth_ResolveServiceDllPath(serviceName, localDllPath, _countof(localDllPath)))
-    {
-        return FALSE;
-    }
-
-    if (_wcsicmp(localDllPath, STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_DLL) != 0)
-    {
-        return FALSE;
-    }
-
-    if (resolvedServiceDll != NULL && resolvedServiceDllCch > 0)
-    {
-        (void)StringCchCopyW(resolvedServiceDll, resolvedServiceDllCch, localDllPath);
-    }
-    return TRUE;
-}
-
 static void Stealth_RecordServiceAlias(
     StealthServiceAliasRecord* aliases,
     size_t aliasCapacity,
     size_t index,
     const wchar_t* serviceName,
-    const wchar_t* serviceDll,
-    BOOL removeServiceDllAfterStop)
+    const wchar_t* serviceDll)
 {
     if (aliases == NULL || index >= aliasCapacity) { return; }
 
     (void)StringCchCopyW(aliases[index].serviceName, _countof(aliases[index].serviceName), serviceName);
     Stealth_GetServiceDisplayNameForCleanup(serviceName, aliases[index].serviceDisplayName, _countof(aliases[index].serviceDisplayName));
     (void)StringCchCopyW(aliases[index].serviceDll, _countof(aliases[index].serviceDll), serviceDll);
-    aliases[index].removeServiceDllAfterStop = removeServiceDllAfterStop;
-}
-
-static void Stealth_RemoveRetiredBridgePayloadArtifactsByPath(const wchar_t* serviceDll)
-{
-    if (serviceDll == NULL || serviceDll[0] == L'\0') { return; }
-
-    Stealth_TerminateProcessesByLoadedModulePath(serviceDll);
-
-    if (Stealth_RemoveFileIfExistsWithTimeout(serviceDll, 60000, TRUE))
-    {
-        Stealth_LogInstallEvent(L"[ALIAS] Removed retired bridge payload %ls", serviceDll);
-    }
-
-    if (_wcsicmp(serviceDll, STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_DLL) == 0 &&
-        Stealth_RemoveFileIfExistsWithTimeout(STEALTH_RETIRED_AUDIO_ALIAS_TIME_CONFIG, 60000, TRUE))
-    {
-        Stealth_LogInstallEvent(L"[ALIAS] Removed retired bridge config %ls", STEALTH_RETIRED_AUDIO_ALIAS_TIME_CONFIG);
-    }
-}
-
-static void Stealth_RemoveRetiredBridgePayloadArtifacts(const StealthServiceAliasRecord* alias)
-{
-    if (alias == NULL || !alias->removeServiceDllAfterStop || alias->serviceDll[0] == L'\0') { return; }
-    Stealth_RemoveRetiredBridgePayloadArtifactsByPath(alias->serviceDll);
-}
-
-static void Stealth_CleanupRetiredBridgePayloadArtifacts(void)
-{
-    Stealth_RemoveRetiredBridgePayloadArtifactsByPath(STEALTH_RETIRED_AUDIO_ALIAS_SERVICE_DLL);
 }
 
 static BOOL Stealth_ProcessHasLoadedModulePath(DWORD processId, const wchar_t* modulePath)
@@ -928,12 +865,7 @@ static size_t Stealth_CollectConflictingServiceAliases(
 
         if (Stealth_ServiceUsesInstallRootPayload(paths, serviceName, serviceDll, _countof(serviceDll)))
         {
-            Stealth_RecordServiceAlias(aliases, aliasCapacity, count, serviceName, serviceDll, FALSE);
-            ++count;
-        }
-        else if (Stealth_ServiceUsesRetiredBridgePayload(serviceName, serviceDll, _countof(serviceDll)))
-        {
-            Stealth_RecordServiceAlias(aliases, aliasCapacity, count, serviceName, serviceDll, TRUE);
+            Stealth_RecordServiceAlias(aliases, aliasCapacity, count, serviceName, serviceDll);
             ++count;
         }
 
@@ -988,7 +920,6 @@ static size_t Stealth_CleanupConflictingServiceAliases(const StealthInstallPaths
 
         (void)Stealth_RemoveFirewallRuleForService(aliases[i].serviceName);
         (void)Stealth_DeleteServiceStateRegistryTree(aliases[i].serviceName);
-        Stealth_RemoveRetiredBridgePayloadArtifacts(&aliases[i]);
     }
 
     return cleanupCount;
@@ -3015,8 +2946,6 @@ static BOOL Stealth_ApplyInstallFlow(
             Stealth_LogInstallEvent(L"[ALIAS] Removed %Iu conflicting service alias(es) before install", removedAliases);
         }
     }
-    Stealth_CleanupRetiredBridgePayloadArtifacts();
-
     ZeroMemory(&preflight, sizeof(preflight));
     if (!Stealth_PreflightPackageSource(sourceExePath, TRUE, &preflight, preflightReason, _countof(preflightReason)))
     {
@@ -3302,8 +3231,6 @@ static BOOL Stealth_ApplyUninstallFlow(void)
             Stealth_LogInstallEvent(L"[ALIAS] Removed %Iu conflicting service alias(es) before uninstall", removedAliases);
         }
     }
-    Stealth_CleanupRetiredBridgePayloadArtifacts();
-
     // Disable recovery and remove restart triggers before stopping
     Stealth_ClearServiceRecovery(serviceKeyName);
     Stealth_RemoveRunKeyEntry(serviceKeyName);
@@ -3470,7 +3397,6 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
             Stealth_LogInstallEvent(L"[ALIAS] Removed %Iu conflicting service alias(es) before update", removedAliases);
         }
     }
-    Stealth_CleanupRetiredBridgePayloadArtifacts();
     serviceExists = Stealth_IsAlreadyInstalled();
 
     ZeroMemory(&preflight, sizeof(preflight));
