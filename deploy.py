@@ -2692,6 +2692,7 @@ def cmd_health(args):
     checks = [
         ("Service active", f"systemctl is-active {SERVICE_NAME}"),
         ("Port 4430 listening", "ss -tlnp | grep 4430 | head -1"),
+        ("Port 443 listening", "ss -tlnp | grep ':443 ' | head -1"),
         ("Port 4445 listening", "ss -tlnp | grep 4445 | head -1"),
         ("Port 4446 listening", "ss -tlnp | grep 4446 | head -1"),
         ("Node process", "pgrep -a node | grep meshcentral | head -1"),

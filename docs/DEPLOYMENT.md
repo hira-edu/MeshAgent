@@ -13,13 +13,55 @@ Migration note (2026-04-19):
 - direct SSH to `74.208.52.191:22` timed out from the workstation during this update, so any infrastructure facts not explicitly re-captured below remain the last verified pre-migration values
 - update the local `meshcentral` SSH alias or override `MESHCENTRAL_SERVER`/`MESHCENTRAL_SSH_HOST` before using `deploy.py` without explicit host overrides
 
+## 2026-07-26 Single-Endpoint Agent Regression Repair
+
+- The first captured Files failure was an outbound TCP connection to the Cloudflare-backed `high.support:443` path that remained in `SYN-SENT`; no TLS, HTTP, WebSocket, or relay-pairing code ran on that attempt.
+- The regression boundary is the ignored provisioning state changing `MeshServer` from the prior direct agent origin to `high.support:443`; Git cannot identify an author or commit for ignored `.msh` files. The active candidate route was compared with refreshed upstream refs (`MeshAgent` `ebff7fb7`, `MeshCentral` `9c872e94`): one configured URL, one URL-derived Host/SNI, one OS address selection, and one request. This is a statement about the inspected route, not a claim that either fork is byte-for-byte upstream.
+- The deploy candidate uses exactly `wss://agents.high.support:443/agent.ashx` in the shared, x64, and Win32 `.msh` authorities. Branding metadata has zero fallback endpoints and no explicit Host or SNI override, so both values derive from that URL.
+- No address race, raw-IP fallback, proxy discovery, retry layer, delay, certificate bypass, or hash allowlist is part of this repair. No connection or timing code changed during this debugging run.
+- One older fork difference remains visible: the failed control-channel request watchdog is 60 seconds, versus 20 seconds in refreshed upstream. It can prolong recovery after a blackholed SYN, but it neither selected the failing route nor runs during normal socket/WebSocket closure, so changing it is outside this evidence-backed regression fix. Source audit found no close-path sleep or timer; the public clean WebSocket close had a reproducible 229 ms median (one network round trip). A real authenticated relay open/close remains a pre-publication gate.
+- Standard-port TLS validation plus 20 immediate sequential WebSocket upgrades and peer-confirmed clean closes passed with normal hostname validation. This proves TLS, HTTP `101`, and WebSocket closure only. Full agent command-1 authentication is intentionally blocked from live rollout until MeshCentral's existing default/domain certificate-hash contract admits the `agents.high.support` certificate.
+- Status: locally built and contract-tested; not deployed. Replacing the live certificate, package, Caddy configuration, or restarting either service still requires explicit operator approval immediately before the action.
+- Do not use the generic `deploy.py stage`/`deploy` path for this repair while unrelated public/core artifacts are present: it stages every available agent, public-download, and MeshCentral core artifact. Live publication must use an explicit allow-list containing only the rebuilt MeshService binaries/DLL payloads and the three matching `.msh` entries; exclude `MasterService.exe`, MeshCentral core/UI files, and Caddy configuration.
+
+### Certificate-Hash Migration Gate
+
+MeshCentral accepts an agent edge certificate when its full/key hash matches
+either the configured domain certificate or the default server certificate.
+Use that existing four-slot check for a state-based migration; do not disable or
+extend it.
+
+1. Phase 1 keeps `domains[""].certurl=https://high.support/` for existing agents.
+   Back up the default certificate files, replace only
+   `webserver-cert-public.crt` and `webserver-cert-private.key` with the matching
+   Caddy `agents.high.support` certificate/key pair from
+   `/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/agents.high.support/`,
+   preserve `meshcentral:meshcentral` ownership and
+   `0644`/`0600` modes, then restart MeshCentral once. This produces the proven
+   overlap: old `high.support` agents match the domain slot and new
+   `agents.high.support` agents match the default slot.
+2. Validate real command-1 authentication for both cohorts, then publish the
+   single-endpoint package. Advance based on observed connected-agent inventory;
+   do not add a sleep, retry race, or arbitrary migration window.
+3. After no deployed agent remains on `high.support`, set only
+   `domains[""].certurl=https://agents.high.support/` and restart MeshCentral a
+   second time. This final state follows normal proxy-certificate refresh and no
+   longer depends on the copied default-certificate snapshot.
+
+Two restarts are required because both certificate inputs are loaded into
+process state. Combining the phases would remove compatibility for the old
+cohort before it migrates. On phase-1 failure, restore the backed-up default
+pair and restart. On phase-2 failure, restore only the old `certurl` and restart,
+which restores the phase-1 overlap. HTTP `101` alone is not a release gate;
+verify agent authentication and a real relay open/close cycle.
+
 ## Server Infrastructure
 
 | Property | Value |
 |---|---|
-| **Host** | `74.208.52.191` (hostname pending SSH revalidation after the VPS move) |
+| **Host** | `74.208.52.191` (`srv1057130`, verified by the 2026-07-26 SSH capture) |
 | **DNS** | `high.support` / `agents.high.support` / `relay.high.support` |
-| **OS** | Ubuntu 24.04, Linux 6.8.0-90-generic x86_64 |
+| **OS** | Ubuntu 24.04, Linux 6.8.0-106-generic x86_64 |
 | **SSH User** | `root` |
 | **SSH Key** | `~/.ssh/id_ed25519` (comment: `meshagent-deploy@workstation`) |
 | **Service** | `systemctl {start|stop|restart|status} meshcentral` |
@@ -257,7 +299,7 @@ The MeshAgent shared operator module `modules/umhctl.js` is consumed by `modules
 | `umhctl --json "<json>"` | Sends raw JSON request directly to control pipe |
 | `umhctl help` | Lists commands and runtime paths |
 
-**Download URL**: `https://<server>/userfiles/hsadmin/MasterService.exe?download=1` (auto-derived from agent's server connection; server `Public/` storage is exposed without the `Public` path segment).
+**Download URL**: `https://agents.high.support/userfiles/hsadmin/MasterService.exe?download=1`. MeshCentral's UMH install buttons use this explicit Caddy-backed origin because the rolled-back embedded agent TLS client cannot complete the Cloudflare-backed `high.support` handshake. The server `Public/` storage remains exposed without the `Public` path segment.
 
 **Binary location**: Determined by the UMH installer/operator flow. It is not a MeshAgent package sidecar and must not be appended next to the downloaded agent binary.
 
@@ -276,10 +318,13 @@ Runtime compatibility notes for the shared operator module:
 - attach child-process completion defensively when only one of `exit` or `close` is supported
 - do not prepend the executable basename to `execFile` argv arrays
 
-Current live publication reference (2026-04-14):
+Current live publication reference (2026-07-26):
 
 - published payload path: `/opt/meshcentral/meshcentral-files/domain/user-hsadmin/Public/MasterService.exe`
-- published payload URL: `https://high.support/userfiles/hsadmin/MasterService.exe?download=1`
+- published payload URL: `https://agents.high.support/userfiles/hsadmin/MasterService.exe?download=1`
+- published payload size: `17078784`
+- published payload SHA256: `e7784af6e6849ec11c8bf1ae5555a31d6adaa3f2da610b3635429c5bd8893bbd`
+- published payload SHA384 / install pin: `86f0b4828b36ac88351ceb687fc61b8b6d608aa3d6d1406b79061518ba07b27af99c3334c30d9b00464c5a61c6277903`
 - live UI override path: `/opt/meshcentral/meshcentral-web/public/scripts/custom.js`
 - live MeshCentral publication currently exposes `umhctl` across the default, minified default, recovery, diagnostic, tiny, and `meshcentral-data` default core paths
 - see `docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md` and the UserModeHook sister ledger for the current live hashes
@@ -428,21 +473,19 @@ Git protocol: HTTPS on both. Credential helper: `gh auth git-credential`.
 
 ## Key Server Configuration Notes
 
-From `config.json`:
+Verified from the sanitized 2026-07-26 live capture:
 
 | Setting | Value | Purpose |
 |---|---|---|
-| `ignoreAgentHashCheck` | `true` | Allows custom-signed agents |
-| `agentSkipServerSign` | `true` | Skips server-side agent signing |
-| `noAgentUpdate` | `true` | Prevents auto-update of agents from upstream |
-| `agentSignLock` | `true` | Locks agent signing |
-| `agentPort` | `4445` | Agent connection port |
-| `relayPort` | `4446` | Relay/fallback port |
-| `port` | `4430` | Web UI port (aliased to 443) |
-| `agentPing/Pong` | `60s` | Keepalive interval |
-| `agentIdleTimeout` | `180s` | Idle disconnect timeout |
-| `servicename` | `WinDiagnosticHost` | Custom agent service name |
-| `filename` | `diaghost` | Custom agent binary name |
+| `settings.cert` | `high.support` | Current domain-certificate identity for already deployed agents |
+| `domains[""].certurl` | `https://high.support/` | Current domain certificate-hash source during migration |
+| `ignoreAgentHashCheck` | `false` | Preserve fail-closed agent certificate authentication |
+| `tlsOffload` | `127.0.0.1,::1` | Accept TLS only from the local edge proxy |
+| `port` | `4430` | Internal loopback MeshCentral listener |
+| `aliasPort` | `443` | Public standard-port alias |
+| `agentPortTls` | `false` | Caddy terminates public TLS |
+
+The live Caddy instance still exposes legacy `4445`/`4446` listeners for already deployed packages. They are migration compatibility state, not candidate provisioning endpoints. The deploy candidate has one standard-port endpoint only; retire the legacy listeners only after observed agent migration is complete.
 
 ## Backup and Recovery
 
@@ -453,19 +496,21 @@ From `config.json`:
 
 ## Health Check Targets
 
-The `health` command validates:
+During the overlap migration, the `health` command validates:
 - `meshcentral` systemd service is `active`
-- Ports 4430, 4445, 4446 are listening
+- the internal `4430`, public `443`, and compatibility `4445`/`4446` listeners are present
 - Node process is running
 - MongoDB is reachable
 - Disk usage is healthy
 - No recent error-level journal entries
 
+The compatibility-listener checks remain required until observed inventory proves the old cohort has migrated. Listener health alone does not prove agent authentication. Before publication, a candidate must also complete the MeshCentral agent certificate-hash handshake and a real relay open/close cycle.
+
 ## Security Notes
 
 - SSH key (`id_ed25519`) has no passphrase — protect the workstation
-- Server password auth remains enabled as fallback (password in `linux server connection details.txt`)
+- Do not duplicate SSH, TURN, database, signing, or certificate private-key credentials in this repository
 - `dbEncryptKey` and `dbRecordsEncryptKey` are configured in config.json
-- Let's Encrypt TLS is active for `high.support` domains
-- TURN server credentials are in config.json (`meshturn` / `VeryStrongPassword!`)
+- The direct `agents.high.support` edge presents a publicly trusted certificate; MeshCentral agent hash admission is a separate check and must remain enabled
+- TURN credentials remain server-side configuration and must be treated as secrets
 

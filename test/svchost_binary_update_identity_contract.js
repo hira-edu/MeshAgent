@@ -161,12 +161,19 @@ function main() {
             sharedImporterBlock.includes('char *binaryValue = (char*)malloc(binaryLen > 0 ? binaryLen : 1);') &&
             sharedImporterBlock.includes('free(binaryValue);') &&
             !sharedImporterBlock.includes('ILibScratchPad2'),
+        sharedImporterRejectsMalformedMeshIdBeforeDecode:
+            agentCoreSource.includes('static int MeshAgent_HexStringIsValid(const char* value, size_t valueLen)') &&
+            sharedImporterBlock.includes('keyLen == 6 && strncmp("MeshID", key, 6) == 0') &&
+            sharedImporterBlock.includes('(hexLen != 64 && hexLen != 96)') &&
+            sharedImporterBlock.includes('!MeshAgent_HexStringIsValid(val + 2, hexLen)') &&
+            sharedImporterBlock.indexOf('!MeshAgent_HexStringIsValid(val + 2, hexLen)') < sharedImporterBlock.indexOf('util_hexToBuf(val + 2'),
         runtimeAndUpdatePreflightShareMeshIdNormalization:
             agentCoreSource.includes('meshIdLen = MeshAgent_NormalizeMeshIdDataStoreValue(agent->masterDb') &&
             loadProvisioningIdentityBlock.includes('MeshAgent_NormalizeMeshIdDataStoreValue(store, normalizedMeshId') &&
             meshIdNormalizerBlock.includes('storedValueLen == 32 || storedValueLen == 48') &&
             meshIdNormalizerBlock.includes("(storedValue[1] != 'x' && storedValue[1] != 'X')") &&
-            meshIdNormalizerBlock.includes('meshIdLen != 32 && meshIdLen != 48'),
+            meshIdNormalizerBlock.includes('(hexLen != 64 && hexLen != 96)') &&
+            meshIdNormalizerBlock.includes('!MeshAgent_HexStringIsValid(hexStart, (size_t)hexLen)'),
         postUpdateIdentityUsesFileBackedImporterWithPreservedNodeId:
             source.includes('wchar_t expectedDbPath[MAX_PATH];') &&
             loadProvisioningIdentityBlock.includes('ILibSimpleDataStore_CreateEx2(workingDbPathUtf8, 0, 0)') &&

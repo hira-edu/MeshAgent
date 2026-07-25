@@ -1085,18 +1085,22 @@ function runWindowsNativeUpdateActivation(parms)
     var updateSource = getWindowsNativeUpdateSource(parms);
     var updateDll = getWindowsNativeUpdateDll(parms);
     var skipExit = parseInt(parms.getParameter('__skipExit', 0)) != 0;
+    var displayName, description;
     var meshAgent;
 
     if (updateSource == null)
     {
         throw new Error('Native Windows update requires an explicit staged package path.');
     }
+    prepareWindowsNativeLifecycleParameters(parms);
+    displayName = parms.getParameter('displayName', null);
+    description = parms.getParameter('description', null);
     meshAgent = require('MeshAgent');
     if (meshAgent.nativeFullUpdate !== true || typeof meshAgent.activateNativeUpdate != 'function')
     {
         throw new Error('Native Windows update activation is unavailable in this agent runtime.');
     }
-    if (meshAgent.activateNativeUpdate(updateSource, updateDll) !== true)
+    if (meshAgent.activateNativeUpdate(updateSource, updateDll, displayName, description) !== true)
     {
         throw new Error('Native Windows update activation did not accept the staged package.');
     }

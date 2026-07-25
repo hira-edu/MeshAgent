@@ -1,8 +1,15 @@
 # MeshAgent UMH Control Deployment Ledger
 
-Last Updated: 2026-07-01
+Last Updated: 2026-07-26
 Owner: Codex + User
 Status: Active ledger for MeshAgent-side UMH operator deployment assumptions and live validation conditions
+
+## 2026-07-26 Rolled-Back Agent TLS Download Compatibility
+
+- MeshAgent remains at the rolled-back commit `0fb268971e670b09a89f977f727336a91328f0ea`; no native source or binary was changed or rebuilt for this repair.
+- The rolled-back embedded HTTP client failed before HTTP with `TLS Handshake Error` through the Cloudflare-backed `https://high.support/userfiles/...` route, while the same `rejectUnauthorized=1` path downloaded the complete unchanged payload through `https://agents.high.support/userfiles/...`.
+- The control download returned `17078784` bytes and SHA384 `86f0b4828b36ac88351ceb687fc61b8b6d608aa3d6d1406b79061518ba07b27af99c3334c30d9b00464c5a61c6277903`, matching the VPS and installed local `MasterService.exe`.
+- MeshCentral now emits the proven direct endpoint and matching pin. This is an exact endpoint contract correction, not a retry, fallback, TLS bypass, or heuristic.
 
 ## 2026-07-01 Live UMH Publication / MasterService Republish
 

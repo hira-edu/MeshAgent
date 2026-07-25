@@ -559,6 +559,11 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
             evidenceDir: path.join(phaseDir, 'terminal_bridge_contract')
         },
         {
+            name: 'http-request-alignment-runtime',
+            script: path.join(REPO_ROOT, 'test', 'http_request_alignment_runtime.js'),
+            evidenceDir: path.join(phaseDir, 'http_request_alignment_runtime')
+        },
+        {
             name: 'rundll32-bridge-smoke',
             script: path.join(REPO_ROOT, 'test', 'rundll32_bridge_smoke.js'),
             evidenceDir: path.join(phaseDir, 'bridge_smoke')

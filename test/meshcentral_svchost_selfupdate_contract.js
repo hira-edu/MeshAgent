@@ -225,7 +225,8 @@ function main() {
             jsWindowsUpdate.includes('runWindowsNativeUpdateActivation(parms);') &&
             !jsWindowsUpdate.includes('runWindowsNativeLifecycle') &&
             jsUpdateActivation.includes("meshAgent = require('MeshAgent');") &&
-            jsUpdateActivation.includes('meshAgent.activateNativeUpdate(updateSource, updateDll)') &&
+            jsUpdateActivation.includes('prepareWindowsNativeLifecycleParameters(parms);') &&
+            jsUpdateActivation.includes('meshAgent.activateNativeUpdate(updateSource, updateDll, displayName, description)') &&
             !jsUpdateActivation.includes('runWindowsChildProcessAndCapture') &&
             !jsUpdateActivation.includes("'-fullupdate'"),
         agentInstallerHasNoDirectUpdateManifestPath:

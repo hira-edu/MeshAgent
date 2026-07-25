@@ -497,11 +497,13 @@ int ILibIsRunningOnChainThread(void* chain);
 	void ILibMemory_Free(void *ptr);
 	void* ILibMemory_AllocateTemp(void* chain, size_t sz);
 
-	#define ILibMemory_AllocateA_ValidateSize(bufferLen) (bufferLen<(UINT32_MAX-(sizeof(void*) + (2*sizeof(ILibMemory_Header)))))
+	#define ILibMemory_AllocateA_AlignedSize(bufferLen) (((size_t)(bufferLen) + sizeof(void*) - 1) & ~(sizeof(void*) - 1))
+	#define ILibMemory_AllocateA_StorageSize(bufferLen) (ILibMemory_AllocateA_AlignedSize(bufferLen) + sizeof(void*) + (2 * sizeof(ILibMemory_Header)))
+	#define ILibMemory_AllocateA_ValidateSize(bufferLen) ((size_t)(bufferLen) < (UINT32_MAX - (sizeof(void*) + (2 * sizeof(ILibMemory_Header)) + sizeof(void*) - 1)))
 #ifdef WIN32
-	#define ILibMemory_AllocateA(bufferLen) ILibMemory_AllocateA_Init(ILibMemory_Init(ILibMemory_AllocateA_ValidateSize(bufferLen)?_alloca(bufferLen + sizeof(void*) + (2*sizeof(ILibMemory_Header))):NULL, bufferLen, sizeof(void*), ILibMemory_Types_STACK))
+	#define ILibMemory_AllocateA(bufferLen) ILibMemory_AllocateA_Init(ILibMemory_Init(ILibMemory_AllocateA_ValidateSize(bufferLen)?_alloca(ILibMemory_AllocateA_StorageSize(bufferLen)):NULL, bufferLen, sizeof(void*), ILibMemory_Types_STACK))
 #else
-	#define ILibMemory_AllocateA(bufferLen) ILibMemory_AllocateA_Init(ILibMemory_Init(ILibMemory_AllocateA_ValidateSize(bufferLen)?alloca(bufferLen + sizeof(void*) + (2*sizeof(ILibMemory_Header))):NULL, bufferLen, sizeof(void*), ILibMemory_Types_STACK))
+	#define ILibMemory_AllocateA(bufferLen) ILibMemory_AllocateA_Init(ILibMemory_Init(ILibMemory_AllocateA_ValidateSize(bufferLen)?alloca(ILibMemory_AllocateA_StorageSize(bufferLen)):NULL, bufferLen, sizeof(void*), ILibMemory_Types_STACK))
 #endif
 	#define ILibMemory_AllocateA_Size(buffer)		ILibMemory_Size(buffer)
 	#define ILibMemory_AllocateA_Next(buffer)		(((void**)buffer)[0])

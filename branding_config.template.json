@@ -22,15 +22,7 @@
   },
   "network": {
     "primaryEndpoint": "wss://REPLACE_WITH_SERVER:443/agent.ashx",
-    "fallbackEndpoints": [
-      {
-        "url": "wss://REPLACE_WITH_FALLBACK_1:443/agent.ashx",
-        "sni": "REPLACE_WITH_SNI",
-        "hostHeader": "REPLACE_WITH_HOST_HEADER",
-        "userAgent": null,
-        "alpn": ["http/1.1"]
-      }
-    ],
+    "fallbackEndpoints": [],
     "sni": null,
     "hostHeader": null,
     "alpn": ["http/1.1"],

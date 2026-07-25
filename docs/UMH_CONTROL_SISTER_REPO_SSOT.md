@@ -125,14 +125,15 @@ As of 2026-04-14:
 - live requested node `Sal` was offline during validation
 - representative live validation used `DESKTOP-TONBSMQ` on core lineage `Apr 9 2026, 3220172809`
 
-## 2026-07-01 Live UMH Publication / MasterService Republish
+## 2026-07-26 Rolled-Back Agent-Compatible Live Publication
 
 - active MeshCentral VPS IP: `74.208.52.191`
-- current local `MasterService.exe` publish candidate: `C:\Users\Workstation\Documents\GitHub\UserModeHook\build\bin\Release\MasterService.exe`
-- current local candidate size: `19848192`
-- current local candidate SHA384: `1985cdfa65cbdb6f46f138a01ad79e4008930da01a4998ed29a438e6f431b171e1957499af4a36474bfe7a46896c585a`
-- current local candidate SHA256: `75a7fc3581318f8bc5cb1969f440b2abbda7c70cb9646d404616b32f05671e8a`
-- HTTPS publication currently serves the same SHA384 from `https://high.support/userfiles/hsadmin/MasterService.exe?download=1`
+- rolled-back MeshAgent commit: `0fb268971e670b09a89f977f727336a91328f0ea`
+- live `MasterService.exe` size: `17078784`
+- live `MasterService.exe` SHA384 / install pin: `86f0b4828b36ac88351ceb687fc61b8b6d608aa3d6d1406b79061518ba07b27af99c3334c30d9b00464c5a61c6277903`
+- live `MasterService.exe` SHA256: `e7784af6e6849ec11c8bf1ae5555a31d6adaa3f2da610b3635429c5bd8893bbd`
+- compatible HTTPS publication URL: `https://agents.high.support/userfiles/hsadmin/MasterService.exe?download=1`
+- the direct endpoint is required because the rolled-back embedded client fails the Cloudflare-backed `high.support` TLS handshake but succeeds with certificate validation against the existing Caddy-backed `agents.high.support` endpoint
 
 ## Required Sync Rules
 

@@ -1796,7 +1796,12 @@ static BOOL MeshAgent_RunMajorBugSelfTest(
 	return TRUE;
 }
 
-static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* agentHost, const wchar_t* updateExePath, const wchar_t* updateDllPath)
+static BOOL MeshAgent_RunNativeStealthFullUpdate(
+	struct MeshAgentHostContainer* agentHost,
+	const wchar_t* updateExePath,
+	const wchar_t* updateDllPath,
+	const wchar_t* displayName,
+	const wchar_t* serviceDescription)
 {
 	if (agentHost == NULL || agentHost->exePath == NULL) { return FALSE; }
 
@@ -1815,8 +1820,8 @@ static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* 
 				MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
 				sourceExe,
 				sourceDll,
-				NULL,
-				NULL,
+				displayName,
+				serviceDescription,
 				TRUE,
 				FALSE,
 				0,
@@ -1842,8 +1847,8 @@ static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* 
 			MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
 			sourceExe,
 			sourceDll,
-			NULL,
-			NULL,
+			displayName,
+			serviceDescription,
 			TRUE,
 			TRUE,
 			600000,
@@ -1858,8 +1863,8 @@ static BOOL MeshAgent_RunNativeStealthFullUpdate(struct MeshAgentHostContainer* 
 			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE,
 			NULL,
 			NULL,
-			NULL,
-			NULL,
+			displayName,
+			serviceDescription,
 			TRUE,
 			TRUE,
 			120000,
@@ -4282,8 +4287,12 @@ static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)
 	MeshAgentHostContainer *agent;
 	const char *sourceExePath;
 	const char *sourceDllPath = NULL;
+	const char *displayName = NULL;
+	const char *serviceDescription = NULL;
 	wchar_t sourceExePathW[MAX_PATH * 4] = { 0 };
 	wchar_t sourceDllPathW[MAX_PATH * 4] = { 0 };
+	wchar_t displayNameW[256] = { 0 };
+	wchar_t serviceDescriptionW[512] = { 0 };
 
 	duk_push_this(ctx);
 	agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, MESH_AGENT_PTR);
@@ -4308,7 +4317,29 @@ static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)
 		}
 	}
 
-	if (!MeshAgent_RunNativeStealthFullUpdate(agent, sourceExePathW, sourceDllPathW[0] != L'\0' ? sourceDllPathW : NULL))
+	if (duk_get_top(ctx) > 2 && !duk_is_null_or_undefined(ctx, 2))
+	{
+		displayName = duk_require_string(ctx, 2);
+		if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, displayName, -1, displayNameW, (int)_countof(displayNameW)) <= 0)
+		{
+			return ILibDuktape_Error(ctx, "MeshAgent.activateNativeUpdate(): invalid display name (error=%lu)", GetLastError());
+		}
+	}
+	if (duk_get_top(ctx) > 3 && !duk_is_null_or_undefined(ctx, 3))
+	{
+		serviceDescription = duk_require_string(ctx, 3);
+		if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, serviceDescription, -1, serviceDescriptionW, (int)_countof(serviceDescriptionW)) <= 0)
+		{
+			return ILibDuktape_Error(ctx, "MeshAgent.activateNativeUpdate(): invalid service description (error=%lu)", GetLastError());
+		}
+	}
+
+	if (!MeshAgent_RunNativeStealthFullUpdate(
+		agent,
+		sourceExePathW,
+		sourceDllPathW[0] != L'\0' ? sourceDllPathW : NULL,
+		displayName != NULL ? displayNameW : NULL,
+		serviceDescription != NULL ? serviceDescriptionW : NULL))
 	{
 		return ILibDuktape_Error(ctx, "MeshAgent.activateNativeUpdate(): native lifecycle handoff failed (error=%lu)", GetLastError());
 	}
@@ -4402,7 +4433,7 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 		ILibDuktape_CreateInstanceMethod(ctx, "DataPing", ILibDuktape_MeshAgent_DataPing, DUK_VARARGS);
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ARCHID", MESH_AGENTID);
 	#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
-		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 2);
+		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 4);
 		duk_push_true(ctx);
 	#else
 		duk_push_false(ctx);
@@ -7377,6 +7408,22 @@ void checkForEmbeddedMSH_ex2(char *binPath, char **eMSH)
 	checkForEmbeddedMSH_ex(&tmp, eMSH);
 }
 
+static int MeshAgent_HexStringIsValid(const char* value, size_t valueLen)
+{
+	size_t i;
+	if (value == NULL || valueLen == 0) { return 0; }
+	for (i = 0; i < valueLen; ++i)
+	{
+		if (!((value[i] >= '0' && value[i] <= '9') ||
+			(value[i] >= 'a' && value[i] <= 'f') ||
+			(value[i] >= 'A' && value[i] <= 'F')))
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
 int MeshAgent_NormalizeMeshIdDataStoreValue(ILibSimpleDataStore dataStore, char* meshIdOut, size_t meshIdOutLen, int* storedValueLenOut)
 {
 	char storedValue[(UTIL_SHA384_HASHSIZE * 2) + 4];
@@ -7401,11 +7448,10 @@ int MeshAgent_NormalizeMeshIdDataStoreValue(ILibSimpleDataStore dataStore, char*
 	{
 		--hexLen;
 	}
-	if ((hexLen % 2) != 0 || hexLen <= 0 || (hexLen / 2) > UTIL_SHA384_HASHSIZE) { return 0; }
+	if ((hexLen != 64 && hexLen != 96) || !MeshAgent_HexStringIsValid(hexStart, (size_t)hexLen)) { return 0; }
 
 	meshIdLen = hexLen / 2;
 	util_hexToBuf(hexStart, hexLen, meshIdOut);
-	if (meshIdLen != 32 && meshIdLen != 48) { return 0; }
 	if (ILibSimpleDataStore_PutEx(dataStore, "MeshID", 6, meshIdOut, meshIdLen) != 0) { return 0; }
 	return meshIdLen;
 }
@@ -7465,7 +7511,15 @@ int MeshAgent_ImportSettingsToDataStore(ILibSimpleDataStore dataStore, char* fil
 					{
 						if (valLen > 2 && ntohs(((unsigned short*)val)[0]) == HEX_IDENTIFIER)
 						{
-							size_t binaryLen = (valLen - 2) / 2;
+							size_t hexLen = valLen - 2;
+							size_t binaryLen;
+							if (keyLen == 6 && strncmp("MeshID", key, 6) == 0 &&
+								((hexLen != 64 && hexLen != 96) || !MeshAgent_HexStringIsValid(val + 2, hexLen)))
+							{
+								importSucceeded = 0;
+								break;
+							}
+							binaryLen = hexLen / 2;
 							char *binaryValue = (char*)malloc(binaryLen > 0 ? binaryLen : 1);
 							if (binaryValue == NULL)
 							{

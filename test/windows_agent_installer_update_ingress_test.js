@@ -25,24 +25,44 @@ function extractFunction(source, signature) {
 }
 
 function makeParameters(values) {
-    return {
+    const parameters = {
+        length: 0,
         getParameter(name, defaultValue) {
             return Object.prototype.hasOwnProperty.call(values, name) ? values[name] : defaultValue;
+        },
+        push(value) {
+            const match = /^--([^=]+)=(.*)$/.exec(value);
+            if (match != null) {
+                let parameterValue = match[2];
+                if (parameterValue.startsWith('"') && parameterValue.endsWith('"')) {
+                    parameterValue = parameterValue.substring(1, parameterValue.length - 1);
+                }
+                values[match[1]] = parameterValue;
+            }
+            this[this.length++] = value;
         }
+    };
+    return parameters;
+}
+
+function makeMsh(values) {
+    return function () {
+        return values;
     };
 }
 
-function createContext(nativeResult) {
+function createContext(nativeResult, mshValues) {
     const calls = { native: [], exits: [] };
     const meshAgent = {
         nativeFullUpdate: true,
-        activateNativeUpdate(updateSource, updateDll) {
-            calls.native.push({ updateSource, updateDll });
+        activateNativeUpdate(updateSource, updateDll, displayName, description) {
+            calls.native.push({ updateSource, updateDll, displayName, description });
             return nativeResult;
         }
     };
     const context = {
         calls,
+        _MSH: makeMsh(mshValues || {}),
         require(name) {
             if (name === 'MeshAgent') { return meshAgent; }
             throw new Error(`unexpected module: ${name}`);
@@ -59,12 +79,17 @@ function main() {
     const sourcePath = path.resolve('modules', 'agent-installer.js');
     const source = fs.readFileSync(sourcePath, 'utf8').replace(/\r\n?/g, '\n');
     const functionSource = [
+        extractFunction(source, 'function hasWindowsUnsupportedStandaloneParameter(parms)'),
+        extractFunction(source, 'function prepareWindowsNativeLifecycleParameters(parms)'),
         extractFunction(source, 'function getWindowsNativeUpdateSource(parms)'),
         extractFunction(source, 'function getWindowsNativeUpdateDll(parms)'),
         extractFunction(source, 'function runWindowsNativeUpdateActivation(parms)')
     ].join('\n');
 
-    const successContext = createContext(true);
+    const successContext = createContext(true, {
+        displayName: 'Server Supplied Agent',
+        description: 'Server supplied runtime description'
+    });
     vm.runInContext(functionSource, successContext);
     successContext.runWindowsNativeUpdateActivation(makeParameters({
         'update-source': 'C:\\ProgramData\\DiagnosticHost\\DiagnosticHost.update.pkg',
@@ -76,7 +101,23 @@ function main() {
     const invocation = successContext.calls.native[0];
     assert(invocation.updateSource === 'C:\\ProgramData\\DiagnosticHost\\DiagnosticHost.update.pkg', 'update package path must be forwarded exactly');
     assert(invocation.updateDll === 'C:\\ProgramData\\DiagnosticHost\\staged\\diagsvc.dll', 'explicit update DLL path must be forwarded exactly');
+    assert(invocation.displayName === 'Server Supplied Agent', 'runtime .msh displayName must be forwarded exactly');
+    assert(invocation.description === 'Server supplied runtime description', 'runtime .msh description must be forwarded exactly');
     assert(successContext.calls.exits.length === 0, '__skipExit must keep the calling JS context alive');
+
+    const explicitBrandingContext = createContext(true, {
+        displayName: 'Package Branding',
+        description: 'Package description'
+    });
+    vm.runInContext(functionSource, explicitBrandingContext);
+    explicitBrandingContext.runWindowsNativeUpdateActivation(makeParameters({
+        'update-source': 'C:\\staged\\agent.pkg',
+        displayName: 'Explicit Runtime Branding',
+        description: 'Explicit runtime description',
+        __skipExit: '1'
+    }));
+    assert(explicitBrandingContext.calls.native[0].displayName === 'Explicit Runtime Branding', 'explicit runtime displayName must override .msh branding');
+    assert(explicitBrandingContext.calls.native[0].description === 'Explicit runtime description', 'explicit runtime description must override .msh branding');
 
     const failureContext = createContext(false);
     vm.runInContext(functionSource, failureContext);
@@ -92,6 +133,8 @@ function main() {
     assert(failure != null, 'rejected native activation must throw');
     assert(failureContext.calls.native.length === 1, 'rejected activation must not retry');
     assert(failureContext.calls.native[0].updateDll == null, 'missing optional DLL must remain absent');
+    assert(failureContext.calls.native[0].displayName == null, 'missing runtime displayName must remain absent');
+    assert(failureContext.calls.native[0].description == null, 'missing runtime description must remain absent');
 
     const missingSourceContext = createContext(true);
     vm.runInContext(functionSource, missingSourceContext);
@@ -110,6 +153,9 @@ function main() {
         checks: {
             nativeActivationInvokedOnce: true,
             exactPackageAndDllForwarding: true,
+            dynamicMshBrandingForwarded: true,
+            explicitBrandingPrecedencePreserved: true,
+            absentBrandingRemainsAbsent: true,
             skipExitPreserved: true,
             rejectedActivationDoesNotRetry: true,
             noInventedOptionalDll: true,

@@ -13,7 +13,6 @@ Features:
 - SNI override
 - Proxy support
 
-Author: Generated with Claude Code
 """
 
 import json

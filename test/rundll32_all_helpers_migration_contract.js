@@ -1070,11 +1070,13 @@ function main() {
             sources.agentInstaller.includes('var parms = parseWindowsNativeUpdateParameters(b64);') &&
             sources.agentInstaller.includes('function runWindowsNativeUpdateActivation(parms)') &&
             sources.agentInstaller.includes("meshAgent = require('MeshAgent');") &&
-            sources.agentInstaller.includes('meshAgent.activateNativeUpdate(updateSource, updateDll)') &&
+            sources.agentInstaller.includes('prepareWindowsNativeLifecycleParameters(parms);') &&
+            sources.agentInstaller.includes('meshAgent.activateNativeUpdate(updateSource, updateDll, displayName, description)') &&
             sources.agentInstaller.includes('runWindowsNativeUpdateActivation(parms);') &&
             !sources.agentInstaller.includes("runWindowsNativeLifecycle('update'") &&
-            sources.agentcore.includes('ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 2);') &&
-            sources.agentcore.includes('MeshAgent_RunNativeStealthFullUpdate(agent, sourceExePathW') &&
+            sources.agentcore.includes('ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 4);') &&
+            sources.agentcore.includes('MeshAgent_RunNativeStealthFullUpdate(') &&
+            sources.agentcore.includes('displayName != NULL ? displayNameW : NULL') &&
             sources.agentInstaller.includes("args = [sourceDll + ',MeshLifecycleHostW', manifestPath];") &&
             sources.agentInstaller.includes('result = runWindowsChildProcessAndCapture(rundll32Path, args') &&
             sources.serviceMain.includes('static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)') &&

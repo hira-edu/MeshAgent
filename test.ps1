@@ -55,8 +55,6 @@
     .\test.ps1 -Verbose
     Run all tests with detailed output
 
-.NOTES
-    Author: Generated with Claude Code
 #>
 
 [CmdletBinding()]
