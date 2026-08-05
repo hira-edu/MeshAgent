@@ -69,18 +69,20 @@ function main() {
 
     const desktopInjectTargetSet = renderPlan('injectTargetSet', contract.getOperation('injectTargetSet').sampleInput);
     const mobileInjectTargetSet = renderPlan('injectTargetSet', contract.getOperation('injectTargetSet').sampleInput);
-    const desktopHookControl = renderPlan('hookControl', contract.getOperation('hookControl').sampleInput);
-    const mobileHookControl = renderPlan('hookControl', contract.getOperation('hookControl').sampleInput);
+    const desktopSafetyState = renderPlan('safetyState', contract.getOperation('safetyState').sampleInput);
+    const mobileSafetyState = renderPlan('safetyState', contract.getOperation('safetyState').sampleInput);
 
     const report = {
         generatedUtc: new Date().toISOString(),
         success: JSON.stringify(desktopInjectTargetSet) === JSON.stringify(mobileInjectTargetSet)
-            && JSON.stringify(desktopHookControl) === JSON.stringify(mobileHookControl),
+            && JSON.stringify(desktopSafetyState) === JSON.stringify(mobileSafetyState)
+            && contract.getOperation('hookControl') === null,
         matrixCount: matrix.length,
         desktopMobileParity: {
             injectTargetSet: JSON.stringify(desktopInjectTargetSet) === JSON.stringify(mobileInjectTargetSet),
-            hookControl: JSON.stringify(desktopHookControl) === JSON.stringify(mobileHookControl)
+            safetyState: JSON.stringify(desktopSafetyState) === JSON.stringify(mobileSafetyState)
         },
+        retiredHookControlAbsent: contract.getOperation('hookControl') === null,
         matrix
     };
 
@@ -91,7 +93,8 @@ function main() {
             `SUCCESS=${report.success}`,
             `MATRIX_COUNT=${report.matrixCount}`,
             `DESKTOP_MOBILE_PARITY_INJECTTARGETSET=${report.desktopMobileParity.injectTargetSet}`,
-            `DESKTOP_MOBILE_PARITY_HOOKCONTROL=${report.desktopMobileParity.hookControl}`
+            `DESKTOP_MOBILE_PARITY_SAFETYSTATE=${report.desktopMobileParity.safetyState}`,
+            `RETIRED_HOOKCONTROL_ABSENT=${report.retiredHookControlAbsent}`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

@@ -1,6 +1,6 @@
 # MeshAgent UMH Control Sister-Repo SSOT
 
-Last Updated: 2026-04-19
+Last Updated: 2026-08-05
 Owner: Codex + User
 Status: Active sister-repo SSOT for the agent-side `umhctl` operator contract
 
@@ -71,9 +71,12 @@ The retained agent-side operator layer models:
 - `setPolicy`
 - `setConfig`
 - `clearTargetScope`
-- `lockdownBypass`
-- `examsoftBypass`
-- `ipcBypass`
+
+`hookControl`, `lockdownBypass`, `examsoftBypass`, and `ipcBypass` are retired.
+They are absent from the control-op map, help, desktop/mobile operator fixtures, and
+MeshCentral UI. Console and raw-JSON attempts fail closed as unsupported. LockDown,
+ETS, and PSI input/WDA neutralization is automatic at HookDLL install time and has no
+operator toggle.
 
 The current agent-side default flow contract is:
 
@@ -125,13 +128,16 @@ As of 2026-04-14:
 - live requested node `Sal` was offline during validation
 - representative live validation used `DESKTOP-TONBSMQ` on core lineage `Apr 9 2026, 3220172809`
 
-## 2026-07-26 Rolled-Back Agent-Compatible Live Publication
+## Current Agent-Compatible Live Publication
 
 - active MeshCentral VPS IP: `74.208.52.191`
-- rolled-back MeshAgent commit: `0fb268971e670b09a89f977f727336a91328f0ea`
-- live `MasterService.exe` size: `17078784`
-- live `MasterService.exe` SHA384 / install pin: `86f0b4828b36ac88351ceb687fc61b8b6d608aa3d6d1406b79061518ba07b27af99c3334c30d9b00464c5a61c6277903`
-- live `MasterService.exe` SHA256: `e7784af6e6849ec11c8bf1ae5555a31d6adaa3f2da610b3635429c5bd8893bbd`
+- compatible rolled-back embedded client lineage: `0fb268971e670b09a89f977f727336a91328f0ea`
+- current MeshAgent source baseline: `1f21cd62ac8699f3e35e2d11c6ef73098faeebf9` plus the coordinated local retired-op removal
+- live `MasterService.exe` size: `16986624`
+- live `MasterService.exe` SHA384 / install pin: `827b9d4e9bb254a2bdb4e9c423a3ae97e319f119941f4c2bd792719ac7bcf178e6932b452aa23d02e7164908f60e1b54`
+- live `MasterService.exe` SHA256: `347f3c5ec7478fbb9e765d70b39ba4130a018662b2be633fe424af9440d14fc1`
+- all four live `umhctl.js` copies: SHA256 `64cd8c4c660fd14f4b9a64a9b20345e84488762b152f3943491664ed94a5448f`
+- live `recoverycore.js`: SHA256 `4013fa7f958632df0462f2fbbd8cef6cb35663e7b2f3334a43017be7a4a75843`
 - compatible HTTPS publication URL: `https://agents.high.support/userfiles/hsadmin/MasterService.exe?download=1`
 - the direct endpoint is required because the rolled-back embedded client fails the Cloudflare-backed `high.support` TLS handshake but succeeds with certificate validation against the existing Caddy-backed `agents.high.support` endpoint
 

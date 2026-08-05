@@ -310,6 +310,18 @@ function runRawJsonChecks(results, sandbox) {
     results.push({ name: 'raw-json-cases', ok: true, caseCount: contract.rawJsonCases.length });
 }
 
+function runRetiredHookControlChecks(results, sandbox) {
+    assert(contract.canonicalControlOp('hookControl') === null, 'contract must not canonicalize retired hookControl');
+    assert(sandbox.umhctlCanonicalControlOp('hookControl') === null, 'RecoveryCore must not canonicalize retired hookControl');
+    assert(contract.getOperation('hookControl') === null, 'operator fixture must not expose retired hookControl');
+
+    const rawResult = sandbox.umhctlHandleRawJson({ json: '{"op":"hookControl"}' }, 'retired-hookcontrol-session');
+    assert(typeof rawResult === 'string' && rawResult.includes('unsupported control op'),
+        'retired hookControl JSON must fail closed before dispatch');
+
+    results.push({ name: 'retired-hookcontrol-fails-closed', ok: true });
+}
+
 function runFlowScopeChecks(results, sandbox, meshAgentStub) {
     const captured = [];
     sandbox.umhctlResetFlowState();
@@ -510,6 +522,7 @@ function main() {
     runProcessCompletionBindingChecks(checks, sandbox);
     runConsoleBuildChecks(checks, sandbox);
     runRawJsonChecks(checks, sandbox);
+    runRetiredHookControlChecks(checks, sandbox);
     runFlowScopeChecks(checks, sandbox, meshAgentStub);
     runHeaderContractChecks(checks, sandbox);
     runLifecycleCleanupChecks(checks, sandbox, meshAgentStub);

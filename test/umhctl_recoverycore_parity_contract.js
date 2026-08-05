@@ -105,6 +105,14 @@ function main() {
             !recoveryCore.includes('completeUninstall(true);\n        });\n    };'),
         umhctlDoesNotReportForcedRemovalAsClean: !umhctl.includes("sendConsoleText('umhctl: resolved binary missing at ' + msExePath + ', removing service registration via fallback.', sessionid);") &&
             !umhctl.includes('completeUninstall(true);\n        });\n    };'),
+        recoveryCoreOmitsRetiredHookControl: !recoveryCore.toLowerCase().includes('hookcontrol') &&
+            !recoveryCore.toLowerCase().includes('hook-control'),
+        umhctlOmitsRetiredHookControl: !umhctl.toLowerCase().includes('hookcontrol') &&
+            !umhctl.toLowerCase().includes('hook-control'),
+        operatorContractOmitsRetiredHookControl: !operatorContract.toLowerCase().includes('hookcontrol') &&
+            !operatorContract.toLowerCase().includes('hook-control'),
+        recoveryCoreRejectsRetiredHookControl: sandbox.umhctlCanonicalControlOp('hookControl') === null &&
+            sandbox.umhctlHandleRawJson({ json: '{"op":"hookControl"}' }, 'retired-hookcontrol-session').includes('unsupported control op'),
         operatorContractAdvertisesSetWindowsHookExInstallMethod: operatorContract.includes('standard|setwindowshookex|manualmap|reflective') &&
             operatorContract.includes("methodKey: 'setwindowshookex'"),
         recoveryCoreRejectsSuccessFalseJson: sandbox.umhctlMasterServiceCommandSucceeded(0, '{"success":false,"message":"native failed"}') === false,

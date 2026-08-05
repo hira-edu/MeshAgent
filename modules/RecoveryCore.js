@@ -96,8 +96,7 @@ var umhctlControlOpMap = {
     safetystate: 'safetyState',
     securityboundary: 'securityBoundary',
     injecttargetset: 'injectTargetSet',
-    cleartargetscope: 'clearTargetScope',
-    hookcontrol: 'hookControl'
+    cleartargetscope: 'clearTargetScope'
 };
 var umhctlPidRequiredOps = {
     inject: 1,
@@ -118,8 +117,7 @@ var umhctlStateChangingOps = {
     injecttargetset: 1,
     cleartargetscope: 1,
     methodpolicy: 1,
-    safetystate: 1,
-    hookcontrol: 1
+    safetystate: 1
 };
 var umhctlFlowScopedOps = { injecttargetset: 1, injectall: 1, cleartargetscope: 1 };
 var umhctlRuntimeControlOps = {
@@ -149,9 +147,7 @@ var umhctlDefaultFlowContract = {
     ]
 };
 var umhctlDefaultClientId = 'meshagent-umhctl';
-var umhctlActionAllowedByOp = {
-    hookcontrol: { status: 'status', disable: 'disable', enable: 'enable' }
-};
+var umhctlActionAllowedByOp = {};
 var umhctlLifecycleOp = null;
 var umhctlLifecycleState = null;
 
@@ -171,7 +167,7 @@ function umhctlCanonicalControlOp(op)
 {
     var key = umhctlNormalizeControlOp(op);
     if (key == null) { return null; }
-    return umhctlControlOpMap[key];
+    return umhctlControlOpMap[key] || null;
 }
 
 function umhctlIsControlOp(op)
@@ -430,7 +426,6 @@ function umhctlCanonicalMethodHeaderKey(raw)
     if (typeof raw != 'string') { return null; }
     var trimmed = raw.trim();
     if (trimmed.length == 0) { return null; }
-    if (umhctlNormalizeControlOp(trimmed) == 'hookcontrol') { return 'hook-control'; }
     var colon = trimmed.indexOf(':');
     if (colon > 0) { trimmed = trimmed.substring(0, colon); }
     var token = umhctlSanitizeHeaderToken(trimmed);
@@ -552,7 +547,6 @@ function umhctlDeriveMethodKey(controlReq, opKey, existingHeaders, flowContext)
         return existingHeaders['x-umh-method-key'].trim();
     }
     if (typeof controlReq.methodKey == 'string' && controlReq.methodKey.trim().length > 0) { return controlReq.methodKey.trim(); }
-    if (opKey == 'hookcontrol') { return 'hook-control'; }
     if (umhctlRuntimeControlOps[opKey] === 1) { return 'runtime-control'; }
     if (typeof controlReq.method == 'string' && controlReq.method.trim().length > 0)
     {
@@ -2292,21 +2286,6 @@ function umhctlEnsureFlowContract(sessionid, callback)
     });
 }
 
-function umhctlRequiresPreProtectionCapture(controlReq)
-{
-    var opKey;
-    var action;
-    var domain;
-
-    if (controlReq == null || typeof controlReq != 'object') { return false; }
-    opKey = umhctlNormalizeControlOp(controlReq.op);
-    if (opKey !== 'hookcontrol') { return false; }
-
-    action = umhctlNormalizeAction(controlReq.action || 'status');
-    domain = umhctlNormalizeAction(controlReq.domain || '');
-    return (action === 'enable' && domain === 'screen');
-}
-
 function umhctlSanitizeCaptureToken(value)
 {
     if (typeof value != 'string' || value.length == 0) { return 'na'; }
@@ -2426,11 +2405,6 @@ function umhctlStartPreProtectionCaptureProcess(paths)
 function umhctlRunPreProtectionCapture(controlReq, sessionid, callback)
 {
     if (typeof callback != 'function') { return; }
-    if (!umhctlRequiresPreProtectionCapture(controlReq))
-    {
-        callback(null, null);
-        return;
-    }
 
     var paths = null;
     try
@@ -2536,31 +2510,6 @@ function umhctlSendPreparedControlRequest(controlReq, sessionid)
                 }
             });
         };
-
-        if (umhctlRequiresPreProtectionCapture(controlReq))
-        {
-            sendConsoleText('umhctl: capturing pre-protection evidence before ' + controlReq.op + ' ' + (controlReq.action || 'status') + ' ...', sessionid);
-            umhctlRunPreProtectionCapture(controlReq, sessionid, function (captureErr, captureMeta) {
-                if (captureErr != null)
-                {
-                    sendConsoleText('umhctl: pre-protection capture failed: ' + captureErr + '. Protection state not changed.', sessionid);
-                    return;
-                }
-                if (captureMeta != null)
-                {
-                    if (typeof captureMeta.capturePath == 'string' && captureMeta.capturePath.length > 0)
-                    {
-                        sendConsoleText('umhctl: pre-protection capture saved to ' + captureMeta.capturePath, sessionid);
-                    }
-                    if (typeof captureMeta.manifestPath == 'string' && captureMeta.manifestPath.length > 0)
-                    {
-                        sendConsoleText('umhctl: pre-protection manifest saved to ' + captureMeta.manifestPath, sessionid);
-                    }
-                }
-                dispatchRequest();
-            });
-            return;
-        }
 
         dispatchRequest();
     };
@@ -2862,8 +2811,6 @@ function umhctlBuildHelp(agentDir, msExePath)
         + '  umhctl setPolicy --policy <json>\r\n'
         + '  umhctl setConfig --content <json-or-text>\r\n'
         + '  umhctl clearTargetScope\r\n\r\n'
-        + 'Hook Control:\r\n'
-        + '  umhctl hookControl --target <target-tag> --domain <screen|input|all> --action <status|enable|disable>\r\n\r\n'
         + 'Raw JSON:\r\n'
         + '  umhctl --json \'{"op":"status"}\'\r\n\r\n'
         + 'Headers (auto-filled for state-changing ops; override with flags below):\r\n'
@@ -3676,52 +3623,6 @@ function umhctlBuildControlRequest(subcmdOp, args)
     if (opKey == 'setconfig' && (typeof controlReq.content != 'string' || controlReq.content.length == 0))
     {
         return { response: 'umhctl setConfig requires --content <json-or-text>.' };
-    }
-
-    if (opKey == 'hookcontrol')
-    {
-        if (controlReq.method != null)
-        {
-            return { response: 'umhctl hookControl does not accept --method; method is fixed by x-umh-method-key=hook-control.' };
-        }
-        if (typeof controlReq.target != 'string' || controlReq.target.trim().length == 0)
-        {
-            return { response: 'umhctl hookControl requires --target <target-tag>.' };
-        }
-        if (typeof controlReq.domain != 'string' || controlReq.domain.trim().length == 0)
-        {
-            return { response: 'umhctl hookControl requires --domain <screen|input|all>.' };
-        }
-        var hookControlDomain = umhctlNormalizeAction(controlReq.domain);
-        if (hookControlDomain != 'screen' && hookControlDomain != 'input' && hookControlDomain != 'all')
-        {
-            return { response: 'umhctl: invalid --domain value for hookControl: ' + controlReq.domain };
-        }
-        controlReq.domain = hookControlDomain;
-        if (controlReq.domain == 'all' && controlReq.action == 'enable')
-        {
-            return { response: 'umhctl: hookControl domain all only supports status or disable.' };
-        }
-
-        var hookControlTarget = umhctlCanonicalTargetTag(controlReq.target) || controlReq.target.trim();
-        if (headers['x-umh-target-tag'] != null && ('' + headers['x-umh-target-tag']).trim().length > 0)
-        {
-            var headerTarget = umhctlCanonicalTargetTag('' + headers['x-umh-target-tag']) || ('' + headers['x-umh-target-tag']).trim();
-            if (headerTarget != hookControlTarget)
-            {
-                return { response: 'umhctl hookControl --target conflicts with --target-tag.' };
-            }
-        }
-        if (headers['x-umh-method-key'] != null && ('' + headers['x-umh-method-key']).trim().length > 0 &&
-            ('' + headers['x-umh-method-key']).trim().toLowerCase() != 'hook-control')
-        {
-            return { response: 'umhctl hookControl requires --method-key hook-control when --method-key is supplied.' };
-        }
-        headers['x-umh-target-tag'] = hookControlTarget;
-        headers['x-umh-method-key'] = 'hook-control';
-        hasHeaders = true;
-        controlReq.headers = headers;
-        delete controlReq.target;
     }
 
     return { controlReq: controlReq };

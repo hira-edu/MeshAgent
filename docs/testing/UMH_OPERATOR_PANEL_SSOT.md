@@ -21,7 +21,7 @@ recovery core, and desktop/mobile operator fixtures.
    - lifecycle text output
    - control-pipe JSON output
    - `uiSnapshot` JSON output
-6. Protected-screen mutations may not dispatch until pre-protection capture evidence has been written locally.
+6. Retired operator controls must fail closed before a request is dispatched.
 
 ## Retained Command Families
 
@@ -41,8 +41,11 @@ recovery core, and desktop/mobile operator fixtures.
 - `getPolicy`
 - `getConfig`
 - `uiSnapshot`
-- `getInjectionState`
 - `profileProcess`
+- `methodPolicy`
+- `safetyState`
+- `hookProfile`
+- `securityBoundary`
 
 ### Mutation
 
@@ -51,23 +54,9 @@ recovery core, and desktop/mobile operator fixtures.
 - `injectAll`
 - `telemetry`
 - `repair`
-- `setFlags`
-- `disable`
-- `disableAll`
 - `setPolicy`
 - `setConfig`
 - `clearTargetScope`
-
-### Target Registration
-
-- `registerProtectedPid`
-- `unregisterProtectedPid`
-
-### Bypass
-
-- `ipcBypass`
-- `lockdownBypass`
-- `examsoftBypass`
 
 ## Raw Console And UI Parity Rules
 
@@ -77,13 +66,9 @@ The canonical pipe-backed op names are the values emitted by `umhctlCanonicalCon
 
 ### Canonical actions
 
-The only retained action maps are:
-
-- `ipcBypass`: `list-targets`, `status`, `disable`, `enable`
-- `lockdownBypass`: `status`, `apply`, `apply-harness`, `revert`, `revert-harness`
-- `examsoftBypass`: `status`, `secure-enter`, `secure-exit`
-
-If the user does not choose an action for one of these command families, the canonical default is `status`.
+No retained command family has a secondary action map. `hookControl`,
+`ipcBypass`, `lockdownBypass`, and `examsoftBypass` are retired and must be
+rejected as unsupported before dispatch.
 
 ### Flow headers
 
@@ -107,24 +92,6 @@ Desktop and mobile panels must preserve the same request-header semantics as the
 3. `injectAll` and `clearTargetScope` reuse the same scoped headers
 4. explicit header overrides from the operator are allowed and must survive unchanged
 
-## Protected-Screen Sequencing
-
-The retained protected-screen mutation set is:
-
-- `lockdownBypass --action apply`
-- `lockdownBypass --action apply-harness`
-- `examsoftBypass --action secure-enter`
-
-For these actions only, the retained operator path must execute this order:
-
-1. resolve canonical headers and target identity
-2. run the native pre-protection capture probe
-3. persist the capture artifact and a JSON manifest locally
-4. emit the capture paths back to the operator console
-5. only then dispatch the state-changing UMH request
-
-If the native capture probe fails, the operator path must emit an explicit failure and the protection mutation may not be dispatched.
-
 ## Result Rendering Contract
 
 ### Lifecycle text output
@@ -146,10 +113,12 @@ The following command families render the returned control payload as formatted 
 - `getCapabilities`
 - `getPolicy`
 - `getConfig`
-- `getInjectionState`
 - `profileProcess`
+- `methodPolicy`
+- `safetyState`
+- `hookProfile`
+- `securityBoundary`
 - all mutation operations
-- all bypass operations
 
 ### `uiSnapshot`
 
@@ -161,8 +130,10 @@ The following command families render the returned control payload as formatted 
 - `processes`
 - `policy`
 - `config`
-- `injection_state` when `pid` is present
-- `process_profile` when `pid` is present
+- `safety_state`
+- `process_profile`
+- `method_policy`
+- `security_boundary`
 
 ## Surface Grouping
 
@@ -171,8 +142,6 @@ Desktop and mobile surfaces must expose the same operation set with the same inp
 1. lifecycle
 2. query
 3. mutation
-4. target registration
-5. bypass
 
 The retained fixtures and tests for this contract are:
 

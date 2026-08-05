@@ -294,10 +294,13 @@ The MeshAgent shared operator module `modules/umhctl.js` is consumed by `modules
 | `umhctl injectTargetSet --pids <csv> [--run-id <id>] [--target-tag <tag>] [--method-key <key>]` | Sets the active target scope in the control pipe |
 | `umhctl clearTargetScope` | Clears the active target scope |
 | `umhctl setPolicy` / `setConfig` | Sends the retained write-policy/config operations to the control pipe |
-| `umhctl lockdownBypass` / `examsoftBypass` | Sends bypass operations to control pipe |
-| `umhctl ipcBypass` | Sends IPC bypass operations to the control pipe |
 | `umhctl --json "<json>"` | Sends raw JSON request directly to control pipe |
 | `umhctl help` | Lists commands and runtime paths |
+
+Retired operator commands `hookControl`, `lockdownBypass`, `examsoftBypass`, and
+`ipcBypass` are not canonicalized or dispatched. Console and raw-JSON requests for
+them fail closed as unsupported. Input and WDA neutralization for the applicable
+targets is automatic at HookDLL install time.
 
 **Download URL**: `https://agents.high.support/userfiles/hsadmin/MasterService.exe?download=1`. MeshCentral's UMH install buttons use this explicit Caddy-backed origin because the rolled-back embedded agent TLS client cannot complete the Cloudflare-backed `high.support` handshake. The server `Public/` storage remains exposed without the `Public` path segment.
 
@@ -318,13 +321,15 @@ Runtime compatibility notes for the shared operator module:
 - attach child-process completion defensively when only one of `exit` or `close` is supported
 - do not prepend the executable basename to `execFile` argv arrays
 
-Current live publication reference (2026-07-26):
+Current live publication reference (2026-08-05):
 
 - published payload path: `/opt/meshcentral/meshcentral-files/domain/user-hsadmin/Public/MasterService.exe`
 - published payload URL: `https://agents.high.support/userfiles/hsadmin/MasterService.exe?download=1`
-- published payload size: `17078784`
-- published payload SHA256: `e7784af6e6849ec11c8bf1ae5555a31d6adaa3f2da610b3635429c5bd8893bbd`
-- published payload SHA384 / install pin: `86f0b4828b36ac88351ceb687fc61b8b6d608aa3d6d1406b79061518ba07b27af99c3334c30d9b00464c5a61c6277903`
+- published payload size: `16986624`
+- published payload SHA256: `347f3c5ec7478fbb9e765d70b39ba4130a018662b2be633fe424af9440d14fc1`
+- published payload SHA384 / install pin: `827b9d4e9bb254a2bdb4e9c423a3ae97e319f119941f4c2bd792719ac7bcf178e6932b452aa23d02e7164908f60e1b54`
+- all four live `umhctl.js` copies: SHA256 `64cd8c4c660fd14f4b9a64a9b20345e84488762b152f3943491664ed94a5448f`
+- live `recoverycore.js`: SHA256 `4013fa7f958632df0462f2fbbd8cef6cb35663e7b2f3334a43017be7a4a75843`
 - live UI override path: `/opt/meshcentral/meshcentral-web/public/scripts/custom.js`
 - live MeshCentral publication currently exposes `umhctl` across the default, minified default, recovery, diagnostic, tiny, and `meshcentral-data` default core paths
 - see `docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md` and the UserModeHook sister ledger for the current live hashes
@@ -350,9 +355,6 @@ The curated live UI subset also exposes retained query/mutation buttons for:
 - `inject`
 - `injectAll`
 - `clearTargetScope`
-- `lockdownBypass`
-- `examsoftBypass`
-- `ipcBypass`
 
 These replace the previous 62+ PowerShell download-and-run buttons with simple agent console commands.
 

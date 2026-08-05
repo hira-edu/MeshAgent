@@ -26,8 +26,7 @@
         safetystate: 'safetyState',
         securityboundary: 'securityBoundary',
         injecttargetset: 'injectTargetSet',
-        cleartargetscope: 'clearTargetScope',
-        hookcontrol: 'hookControl'
+        cleartargetscope: 'clearTargetScope'
     };
 
     var pidRequiredOps = {
@@ -50,8 +49,7 @@
         injecttargetset: 1,
         cleartargetscope: 1,
         methodpolicy: 1,
-        safetystate: 1,
-        hookcontrol: 1
+        safetystate: 1
     };
 
     var flowScopedOps = { injecttargetset: 1, injectall: 1, cleartargetscope: 1 };
@@ -70,9 +68,7 @@
         ]
     };
 
-    var actionAllowedByOp = {
-        hookcontrol: { status: 'status', disable: 'disable', enable: 'enable' }
-    };
+    var actionAllowedByOp = {};
 
     var protectedScreenActions = {};
 
@@ -100,8 +96,7 @@
         'repair',
         'setPolicy',
         'setConfig',
-        'clearTargetScope',
-        'hookControl'
+        'clearTargetScope'
     ];
 
     function cloneValue(value) {
@@ -261,7 +256,7 @@
             controlOp: 'getCapabilities',
             fields: [],
             sampleInput: {},
-            sampleResponse: { ok: true, data: { supported_ops: ['status', 'inject', 'hookControl'] } }
+            sampleResponse: { ok: true, data: { supported_ops: ['status', 'inject'] } }
         },
         getPolicy: {
             id: 'getPolicy',
@@ -464,34 +459,6 @@
             fields: [],
             sampleInput: {},
             sampleResponse: { ok: true, data: { cleared: true } }
-        },
-        hookControl: {
-            id: 'hookControl',
-            category: 'hook-control',
-            command: 'hookControl',
-            renderMode: 'control-json',
-            controlOp: 'hookControl',
-            fields: [
-                { name: 'target', flag: '--target', type: 'text', required: true },
-                { name: 'domain', flag: '--domain', type: 'select', options: ['screen', 'input', 'all'], required: true },
-                { name: 'action', flag: '--action', type: 'select', options: ['status', 'enable', 'disable'] }
-            ],
-            sampleInput: { target: 'lockdown_browser', domain: 'screen', action: 'enable' },
-            sampleResponse: {
-                ok: true,
-                target: 'LockDown',
-                domain: 'screen',
-                action: 'enable',
-                detail: 'screen_visible=1 screen_wda_none_verified=1 screen_dwm_capturable_required=1 screen_dwm_capturable_verified=1 screen_wca_capturable_required=1 screen_wca_capturable_verified=1',
-                semantic: {
-                    screen_visible: true,
-                    screen_wda_none_verified: true,
-                    screen_dwm_capturable_required: true,
-                    screen_dwm_capturable_verified: true,
-                    screen_wca_capturable_required: true,
-                    screen_wca_capturable_verified: true
-                }
-            }
         }
     };
 
@@ -502,8 +469,7 @@
             groups: [
                 { id: 'lifecycle', label: 'Lifecycle', operations: ['install', 'uninstall', 'serviceStatus', 'verify'] },
                 { id: 'query', label: 'Query', operations: ['status', 'listProcesses', 'getFlowContract', 'getCapabilities', 'getPolicy', 'getConfig', 'uiSnapshot', 'profileProcess', 'methodPolicy', 'safetyState', 'hookProfile', 'securityBoundary'] },
-                { id: 'mutation', label: 'Mutation', operations: ['inject', 'injectTargetSet', 'injectAll', 'telemetry', 'repair', 'setPolicy', 'setConfig', 'clearTargetScope'] },
-                { id: 'hook-control', label: 'Hook Control', operations: ['hookControl'] }
+                { id: 'mutation', label: 'Mutation', operations: ['inject', 'injectTargetSet', 'injectAll', 'telemetry', 'repair', 'setPolicy', 'setConfig', 'clearTargetScope'] }
             ]
         },
         mobile: {
@@ -512,8 +478,7 @@
             groups: [
                 { id: 'lifecycle', label: 'Lifecycle', operations: ['install', 'uninstall', 'serviceStatus', 'verify'] },
                 { id: 'query', label: 'Query', operations: ['status', 'listProcesses', 'getFlowContract', 'getCapabilities', 'getPolicy', 'getConfig', 'uiSnapshot', 'profileProcess', 'methodPolicy', 'safetyState', 'hookProfile', 'securityBoundary'] },
-                { id: 'mutation', label: 'Mutation', operations: ['inject', 'injectTargetSet', 'injectAll', 'telemetry', 'repair', 'setPolicy', 'setConfig', 'clearTargetScope'] },
-                { id: 'hook-control', label: 'Hook Control', operations: ['hookControl'] }
+                { id: 'mutation', label: 'Mutation', operations: ['inject', 'injectTargetSet', 'injectAll', 'telemetry', 'repair', 'setPolicy', 'setConfig', 'clearTargetScope'] }
             ]
         }
     };
@@ -541,8 +506,6 @@
         '  umhctl setPolicy --policy <json>',
         '  umhctl setConfig --content <json-or-text>',
         '  umhctl clearTargetScope',
-        'Hook Control:',
-        '  umhctl hookControl --target <target-tag> --domain <screen|input|all> --action <status|enable|disable>',
         'Raw JSON:',
         '  umhctl --json \'{"op":"status"}\''
     ];
@@ -555,16 +518,13 @@
         { name: 'method-policy', op: 'methodPolicy', args: { pid: 4242 }, expected: { op: 'methodPolicy', pid: 4242 } },
         { name: 'hook-profile', op: 'hookProfile', args: { target: 'lockdown_browser', exe: 'LockDownBrowser.exe' }, expected: { op: 'hookProfile', target: 'lockdown_browser', exe: 'LockDownBrowser.exe' } },
         { name: 'security-boundary', op: 'securityBoundary', args: { pid: 4242 }, expected: { op: 'securityBoundary', pid: 4242 } },
-        { name: 'inject-target-set', op: 'injectTargetSet', args: { pids: '101,202', 'run-id': 'run-lab-100', 'target-tag': 'lockdown_browser', 'method-key': 'standard' }, expected: { op: 'injectTargetSet', target_pids: [101, 202], headers: { 'x-umh-run-id': 'run-lab-100', 'x-umh-target-tag': 'lockdown_browser', 'x-umh-method-key': 'standard' } } },
-        { name: 'hook-control-screen-enable', op: 'hookControl', args: { action: 'enable', target: 'lockdown_browser', domain: 'screen' }, expected: { op: 'hookControl', action: 'enable', domain: 'screen', headers: { 'x-umh-target-tag': 'lockdown_browser', 'x-umh-method-key': 'hook-control' } } },
-        { name: 'hook-control-all-disable', op: 'hookControl', args: { action: 'disable', target: 'lockdown_browser', domain: 'all' }, expected: { op: 'hookControl', action: 'disable', domain: 'all', headers: { 'x-umh-target-tag': 'lockdown_browser', 'x-umh-method-key': 'hook-control' } } }
+        { name: 'inject-target-set', op: 'injectTargetSet', args: { pids: '101,202', 'run-id': 'run-lab-100', 'target-tag': 'lockdown_browser', 'method-key': 'standard' }, expected: { op: 'injectTargetSet', target_pids: [101, 202], headers: { 'x-umh-run-id': 'run-lab-100', 'x-umh-target-tag': 'lockdown_browser', 'x-umh-method-key': 'standard' } } }
     ];
 
     var rawJsonCases = [
         { name: 'get-policy', payload: { op: 'getPolicy' }, expected: { op: 'getPolicy' } },
         { name: 'inject-json', payload: { op: 'inject', pid: 5151, method: 'load-library', technique: 'remote-thread' }, expected: { op: 'inject', pid: 5151, method: 'load-library', technique: 'remote-thread' } },
-        { name: 'method-policy-json', payload: { op: 'methodPolicy', pid: 5151 }, expected: { op: 'methodPolicy', pid: 5151 } },
-        { name: 'hook-control-json', payload: { op: 'hookControl', target: 'lockdown_browser', domain: 'input', action: 'enable' }, expected: { op: 'hookControl', target: 'lockdown_browser', domain: 'input', action: 'enable' } }
+        { name: 'method-policy-json', payload: { op: 'methodPolicy', pid: 5151 }, expected: { op: 'methodPolicy', pid: 5151 } }
     ];
 
     function buildControlRequest(op, options) {
@@ -629,26 +589,6 @@
         }
         if (opKey === 'setpolicy' && (typeof controlReq.policy !== 'string' || controlReq.policy.trim().length === 0)) { throw new Error('setPolicy requires policy'); }
         if (opKey === 'setconfig' && (typeof controlReq.content !== 'string' || controlReq.content.length === 0)) { throw new Error('setConfig requires content'); }
-        if (opKey === 'hookcontrol') {
-            if (controlReq.method != null) { throw new Error('hookControl rejects body method fields'); }
-            if (typeof controlReq.target !== 'string' || controlReq.target.trim().length === 0) { throw new Error('hookControl requires target'); }
-            if (typeof controlReq.domain !== 'string' || controlReq.domain.trim().length === 0) { throw new Error('hookControl requires domain'); }
-            var hookDomain = normalizeToken(controlReq.domain);
-            if (hookDomain !== 'screen' && hookDomain !== 'input' && hookDomain !== 'all') { throw new Error('hookControl invalid domain'); }
-            controlReq.domain = hookDomain;
-            if (controlReq.domain === 'all' && controlReq.action === 'enable') { throw new Error('hookControl all.enable is not supported'); }
-            if (controlReq.headers && controlReq.headers['x-umh-target-tag'] && controlReq.headers['x-umh-target-tag'] !== controlReq.target) {
-                throw new Error('hookControl target/header mismatch');
-            }
-            if (controlReq.headers && controlReq.headers['x-umh-method-key'] && controlReq.headers['x-umh-method-key'] !== 'hook-control') {
-                throw new Error('hookControl method-key must be hook-control');
-            }
-            controlReq.headers = controlReq.headers || {};
-            controlReq.headers['x-umh-target-tag'] = controlReq.target;
-            controlReq.headers['x-umh-method-key'] = 'hook-control';
-            delete controlReq.target;
-        }
-
         return controlReq;
     }
 
