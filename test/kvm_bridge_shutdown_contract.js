@@ -54,7 +54,7 @@ function main() {
     const stdoutEnd = stdoutStart >= 0 ? kvmSource.indexOf('\nvoid kvm_relay_StdErrHandler', stdoutStart) : -1;
     const stdoutBlock = (stdoutStart >= 0 && stdoutEnd > stdoutStart) ? kvmSource.slice(stdoutStart, stdoutEnd) : '';
     const cleanupStart = kvmSource.indexOf('void kvm_cleanup(void *reserved)');
-    const cleanupEnd = cleanupStart >= 0 ? kvmSource.indexOf('\n////', cleanupStart) : -1;
+    const cleanupEnd = cleanupStart >= 0 ? kvmSource.indexOf('\nconst char* kvm_get_current_desktop_name()', cleanupStart) : -1;
     const cleanupBlock = (cleanupStart >= 0 && cleanupEnd > cleanupStart) ? kvmSource.slice(cleanupStart, cleanupEnd) : '';
     const retryTimerStart = kvmSource.indexOf('static void kvm_retry_timer_callback');
     const retryTimerEnd = retryTimerStart >= 0 ? kvmSource.indexOf('\nstatic void kvm_schedule_retry_timer_delay', retryTimerStart) : -1;

@@ -55,6 +55,244 @@ pair and restart. On phase-2 failure, restore only the old `certurl` and restart
 which restores the phase-1 overlap. HTTP `101` alone is not a release gate;
 verify agent authentication and a real relay open/close cycle.
 
+## Desktop multiplexer repair boundary
+
+Current state, September 8 at 12:49:50 UTC (Windows clock): the server relay
+corrections below and Umair's native canary are active and validated. Umair is
+the only endpoint selected for this native deployment. `WinDiagnosticHost`
+remained Running as PID 13936, started at 12:29:58 UTC, with no subsequent
+service-failure events. Its installed binary SHA-256 values are:
+
+- `diaghost.exe`: `204b22948b311e80a5fc4484b586af7df27b8bf3ba617b7cd08f7bc887b8f347`
+- `diagsvc.dll`: `caa63f1fdebf189da901540388efd3da00d5ad10b16d6dfa19268a1f05b17f80`
+
+The sustained checkpoint records 939.053 seconds of uninterrupted primary
+traffic, 40,156,441 bytes delivered and 15 matched heartbeat rounds on both
+the viewer and agent transports. The primary ultimately ran 956.998 seconds
+and received 41,033,471 bytes before its deliberate UI disconnect. Five
+secondary reconnects received fresh
+desktop images while the primary remained connected. A subsequent fresh
+viewer pair each received over 4 MB and completed a heartbeat round. There
+was no native fatal capture or stream gap; the collector reported zero kernel
+packet drops. Native `validate-update` passed. The debugger, process monitor,
+relay collector and two diagnostic tabs were closed. An unrelated viewer was
+preserved, so the fresh pair does not prove complete shared-capture teardown.
+This is bounded live validation, not an attribution of every historical freeze.
+
+Umair retains an explicit native update hold. The first successful activation
+at 12:18:57 UTC was replaced by the server's older package through normal
+automatic update. The final binary-only transaction began at 12:29:26 UTC and
+completed successfully in 33.038 seconds after the hold was configured.
+The previously absent bare datastore key is now `disableUpdate=1`, imported
+from the installed `diaghost.msh` and `diaghost.conf`; the native
+`require('MeshAgent').updatesEnabled` property was verified false. Both config
+files retain their original bytes plus an audit comment and the setting.
+The server's published package and all other devices were left unchanged.
+Releasing this hold while that older package is still published will replace
+the repaired binaries again. This holds the installed native binary; it is
+not an exact-version pin or a hold on meshcore updates.
+
+The console `dbset` attempt used the script namespace `0/disableUpdate` and
+did not control native updates; that ineffective key was removed. Its return
+value of zero alone also does not prove a durable datastore write. Do not use
+console `dbset`/delete as the native hold or restoration procedure. To restore
+the originally absent setting, arrange the intended package distribution first,
+then restore the original config contents with a temporary empty
+`disableUpdate=` line for an authorized native lifecycle start to import and
+delete the bare key. Remove the temporary line afterward, verify both config
+hashes match their backups, verify the bare key is absent and verify
+`updatesEnabled` is true. Simply omitting the setting from config does not
+delete its persisted value. This restoration has not been performed; the hold
+remains active. Configuration backups are in `native-canary-config-before-hold`,
+with hashes in `native-canary-config-hold.json`; original and server-restored
+binary backups are separate. These paths are under the ignored evidence root
+`artifacts/validation/desktop-stall-20260908/`, alongside the immutable package
+manifest, sustained checkpoint, final state and native validation reports.
+
+Relay timestamps use the VPS clock; activation, process and SCM timestamps use
+Windows. A read-only comparison at 12:45 UTC bounded the VPS clock 14.143–17.341
+seconds ahead of Windows. Use same-source durations for the trace; reported
+cross-host timestamps below are not synchronized causal-delay measurements.
+
+The desktop multiplexer must reevaluate agent read backpressure when a viewer
+joins or leaves. If every viewer is overloaded, the agent socket pauses; a
+healthy viewer must release that pause unless a recording write is pending.
+Removing the only healthy viewer must restore backpressure. In particular,
+joining during startup or a screen reset cannot depend on the new viewer first
+entering and leaving image overflow: the image cache can contain only the screen
+size packet at that point.
+
+Agent disconnection must close a snapshot of the viewer array. Each viewer's
+close method synchronously removes it from the original array; iterating that
+mutating array skips viewers and leaves them connected to a disposed image
+cache. The existing close, permission and audit paths remain in use.
+
+The relay caller must honor `addPeer()` rejecting a duplicate agent. Closing
+that rejected relay prevents an unregistered socket and its timers from
+remaining attached to the shared session; existing members remain connected.
+
+The September 8 inspection found the live server module differs from the local
+MeshCentral source, including older refresh and image-cache handling. Publish
+only an explicitly reviewed delta against the current live module, with a
+pre-publication SHA-256 check and an exact rollback copy. Do not replace the
+whole live module with the local checkout or publish agent binaries as part of
+this server repair. Following operator authorization, the flow-control delta
+was activated on September 8 at 08:35:27 UTC. A subsequent live two-viewer check
+exposed the disconnect defect, which also reproduced against the original
+source. The viewer snapshot fix was activated at 08:50:13 UTC. Relay tracing
+then confirmed that rejected duplicate agent sockets remained open. The final
+delta, including explicit rejection cleanup, was activated at 09:10:12 UTC.
+The two-line input queue correction was activated at 11:12:59 UTC after
+reproducing both the missing in-flight flag and the incorrect queue-length
+comparison. Four MeshCentral restarts occurred during this investigation.
+The active module SHA-256 is
+`66baaf88c5b75c344fc3c8eaf36bb6bd9ac8c82063627b4a5c91613d1b28b395`.
+The previous three-fix module is preserved in
+`/opt/meshcentral/backups/desktop-flow-20260908_111259`.
+Input writes now allow one outstanding send, queue subsequent commands in
+order, and pause viewers when that queue exceeds ten entries. All nine
+behavioral cases and the real-socket test passed against the active module as
+the service user with the server's actual nested `ws` dependency.
+The exact previous module and activation metadata are preserved in
+`/opt/meshcentral/backups/desktop-flow-20260908_083527`. To roll back this change,
+restore that directory's `meshdesktopmultiplex.js` to the live module path with
+the recorded original owner and mode (`root:root 0644`), then restart MeshCentral.
+The intermediate flow-control-only version is separately preserved in
+`/opt/meshcentral/backups/desktop-flow-20260908_085013`.
+The intermediate flow-control and viewer-snapshot version is preserved in
+`/opt/meshcentral/backups/desktop-flow-20260908_091012`.
+The candidate remains in `/opt/meshcentral/staging/desktop-stall-20260908/`.
+Service startup, authenticated admin reload, agent reconnection, and the
+loopback regression using the live server's nested `ws` dependency passed.
+Rohit was offline during diagnosis, so its historical freeze cannot be
+attributed conclusively. The operator selected Umair alone for live validation;
+Rohit's availability is not a deployment or completion prerequisite.
+
+The later Umair run retained the original agent tunnel through a third viewer's
+join/leave and two controlled secondary reconnects. Passive relay metadata
+showed over 30 MB of continuing traffic and six successful 60-second ping/pong
+exchanges; browser checks exceeded seven minutes. Earlier three-to-four-minute
+closures, including one on the final module, did not occur during that trace,
+but the later session also closed after 480 seconds once the short trace ended.
+An extended trace then captured the native service fatal exit at 09:57:03 UTC,
+followed by the agent-side TCP close at 09:57:55 and closure of both viewers.
+More than 96 MB and repeated successful heartbeats preceded this failure.
+That pre-canary run failed; the final held-canary result is recorded above.
+Keepalive, cookie and proxy configuration were not changed.
+
+Subsequent Windows SCM event 7031 records and the service-owned `diaghost.log`
+identify six native agent fatal exits during these checks. Duktape reports
+`uncaught: 'invalid base value'` through
+`ILibDuktape_ScriptContainer_Engine_fatal` (`exit(254)`), followed by the existing
+10-second service recovery. The invalid access required a stack/reproduction
+before a crash fix or rollout.
+A standard elevated debugger inventory succeeded. The first request to attach
+a fatal-exit breakpoint was canceled at Windows elevation. The elevated
+continuation on September 8 at 10:45 UTC successfully attached to the running
+`WinDiagnosticHost` service and armed the fatal-handler breakpoint with matching
+private symbols. At 10:55:46 UTC the breakpoint captured the fatal caller and a
+minidump, then detached. The stack runs from
+`NonIsolatedWorker_ProcessAsSlave` through `Process_UncaughtExceptionEx` and
+`EventEmitter_GetEmitter` to `duk_has_prop`. The minimal worker heap had been
+published before its INIT command returned through the parent's event loop.
+An early script error therefore reached error reporting before the `process`
+object existed. A local runtime reproduction produces the same fatal message
+and exit 254; execution after `ready` reports the original error normally.
+
+The local startup fix queues INIT before publishing the worker and retains
+commands arriving before publication in FIFO order. Permissions are assigned
+before thread creation; their values and enforcement are unchanged. Exit and
+send use the same startup queue, and commands after heap destruction are
+discarded through the existing nonce/lifetime checks. The nine-case startup
+runtime test covers early/immediate execution, syntax errors, ordered messages,
+early exit, post-exit calls and denied modules. The original binary passes only
+the `ready` control; all nine pass with the fixed console and full-package
+console. No fatal-error suppression or retry was added.
+The DLL and full x64/Win32 package builds passed. The packaged console also
+passed 61 capture connections, and the packaged DLL passed the first-frame
+test and embedded-payload parity check. These fixes are included in the
+validated Umair canary recorded above.
+
+The live agent reports commit `0fb268971e670b09a89f977f727336a91328f0ea`,
+compiled July 26. Its installed executable embeds
+`wss://high.support:443/agent.ashx`, whereas the current checkout's build profile
+uses a different endpoint. The September 8 native canary is therefore built
+from that deployed commit with the two fixes above and the already-committed
+`ILibParsers.h` stack-allocation alignment correction. The latter is required
+by a separate reproduced HTTP request stack overwrite: the old allocator
+reserved unaligned storage while `ILibMemory_Init` writes the rounded size.
+The debugger reports `_RTC_AllocaFailure` from
+`ILibDuktape_HttpStream_http_ConvertOptionToSend`; the existing eight-path HTTP
+alignment test fails before the header correction and passes afterward.
+This does not attribute every previously malformed live packet to that defect.
+
+The exact canary passes all nine worker startup cases, eight HTTP request
+lengths, 61 capture connections, DLL first-frame capture and embedded DLL
+parity. Its DLL and full x64/Win32 builds pass. Stage only its paired binaries
+for the existing binary-only update transaction, which validates and retains
+installed provisioning and NodeID. Do not use the broad publisher or the
+current-checkout package for this canary. The initial elevation request was
+canceled at 11:43:14 UTC. Following renewed operator authorization, the
+elevated task completed read-only package preflight at 12:00:12 UTC, with
+service PID 33116 unchanged. That older package was superseded by the additional
+proven lifecycle corrections below. Only the revised immutable package was
+used for the final activation and sustained validation recorded above.
+
+Additional worker lifecycle testing reproduced a second native crash in the
+original binary: an exit listener released its last container reference and
+native event dispatch subsequently read the freed master buffer. The debugger
+captured command 128 in `NonIsolatedWorker_ProcessAsMaster` and `duk_pop` using
+the freed-memory value `feeefeeefeeefeee`. Dispatch now holds a stack reference
+to the container until all native accesses finish, using a saved context for
+the final pop. Immediate and ready/error/data callback release checks pass.
+
+With the crash isolated, 45 worker lifecycles exposed three leaked Windows
+handles per worker: the caller's worker-thread handle, the chain's separately
+opened thread handle and its watchdog event. The owning finalizer and chain
+cleanup now release them. Cleanup joins the watchdog before freeing the chain
+it reads. API failures remain explicit. Handle counts at 5/25/45 completed
+workers changed from 202/262/322 to 187/187/187; all 45 threads finish normally.
+The revised canary adds `ILibParsers.c` as its fourth native-file delta from the
+deployed revision. DLL/full-package builds, nine startup cases, 13 additional
+startup/concurrency cases, lifecycle cleanup, HTTP alignment, 61 capture
+connections, DLL first-frame capture and embedded-payload parity pass on x64.
+The startup, concurrency and lifecycle cases also pass on Win32, with handle
+counts 205/205/205 after warmup. The current-checkout build mirror separately
+passes its DLL/full builds, startup/lifecycle, HTTP and capture checks; it is
+not the deployment candidate because its unrelated module/endpoint changes
+are outside this repair.
+These runtime findings are independently proved defects; they do not establish
+that every historical Rohit freeze had the same cause. Native activation was
+owned by the coordinated elevated task, which verified the frozen
+`native-canary-lifecycle-package` handoff (EXE SHA-256 prefix `204b2294`, DLL
+prefix `caa63f1f`). It performed elevated preflight, the Umair update, local
+debugger and sustained two-viewer validation. The source task retained
+source/tests/docs ownership and verified the final evidence before recording
+the current state above. The source and package stayed frozen during this run.
+
+The isolated console capture path exposed a separate, reproduced deadlock:
+the capture thread waited for output while holding the tile-state lock, while
+the chain thread handling a new pipe's refresh waited for that lock. The chain
+could therefore never run the output completion that resumes capture.
+`kvm.c` now waits for transport output before acquiring the tile lock and ends
+the current scan when output pauses. Unsent tiles are reconsidered on the next
+frame under the existing tile-state lock and generation checks. Refresh,
+resolution changes and transport backpressure retain their existing contracts.
+This native change is included in the validated Umair canary. Its console
+reproduction does not establish the cause of the separate Duktape fatal exit.
+Use `test/kvm_capture_reconnect_runtime.js` against both the original and rebuilt
+console binaries on an authorized interactive desktop before publishing it.
+
+The same inspection confirmed nightly archives were failing while traversing
+`/opt/meshcentral/backups/meshagent-only-20260722_203928-d6ccd3ab`. That directory
+now remains owned by root, with group `meshcentral` and mode `0750` instead of
+`root:root 0700`; its descendants were already readable. Archiving the affected
+tree as the service user succeeded. This validates the permission repair, not
+completion of a scheduled full backup. Preserve service-account read/traverse
+access on deployment snapshots included in automatic backups; do not make them
+world-readable. To undo this permission change, restore this directory alone
+to `root:root 0700`.
+
 ## Server Infrastructure
 
 | Property | Value |

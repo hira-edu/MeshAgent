@@ -3914,6 +3914,9 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 			}
 		}
 
+		// A refresh runs on the chain thread and takes the tile lock. Wait for
+		// transport output before taking that lock so the chain can also resume us.
+		while (!g_shutdown && g_pause != 0) { Sleep(50); }
 		if (g_shutdown) { break; }
 
 		// Scan the desktop
@@ -3990,14 +3993,12 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 				break;
 			}
 			bmpInfo = get_bmp_info(TILE_WIDTH, TILE_HEIGHT);
-			for (row = 0; row < TILE_HEIGHT_COUNT; row++) {
-				for (col = 0; col < TILE_WIDTH_COUNT; col++) {
+			// A queued write can pause capture midway through the scan. Release the
+			// tile lock immediately; unsent tiles are reconsidered on the next frame.
+			for (row = 0; !g_shutdown && g_pause == 0 && row < TILE_HEIGHT_COUNT; row++) {
+				for (col = 0; !g_shutdown && g_pause == 0 && col < TILE_WIDTH_COUNT; col++) {
 					height = TILE_HEIGHT * row;
 					width = TILE_WIDTH * col;
-
-					// Match the upstream contract: transport pause is enforced by the
-					// parent reader, not by stalling the capture loop on remote pause state.
-					while (!g_shutdown && g_pause != 0) { Sleep(50); }
 
 					if (g_shutdown || kvm_read_scaling_factor(&SCALING_FACTOR) != kvm_read_scaling_factor(&SCALING_FACTOR_NEW)) { height = SCALED_HEIGHT; width = SCALED_WIDTH; break; }
 					

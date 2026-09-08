@@ -4007,6 +4007,7 @@ void ILibChain_PartialStart(void *Chain)
 	chain->ChainThreadID = GetCurrentThreadId();
 	chain->ChainProcessHandle = GetCurrentProcess();
 	chain->MicrostackThreadHandle = OpenThread(THREAD_ALL_ACCESS, FALSE, chain->ChainThreadID);
+	if (chain->MicrostackThreadHandle == NULL) { ILIBCRITICALERREXIT(254); }
 	chain->auxSelectHandles = ILibLinkedList_CreateEx(sizeof(ILibChain_WaitHandleInfo));
 #else
 	chain->ChainThreadID = pthread_self();
@@ -4016,6 +4017,7 @@ void ILibChain_PartialStart(void *Chain)
 #if defined(ILibChain_WATCHDOG_TIMEOUT)
 #ifdef WIN32
 	chain->WatchDogTerminator = CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (chain->WatchDogTerminator == NULL) { ILIBCRITICALERREXIT(254); }
 #else
 	if (pipe(chain->WatchDogTerminator) == 0)
 	{
@@ -4276,7 +4278,11 @@ ILibExportMethod void ILibStartChain(void *Chain)
 	if (chain->WatchDogThread != NULL)
 	{
 #ifdef WIN32
-		SetEvent(chain->WatchDogTerminator);
+		if (!SetEvent(chain->WatchDogTerminator)) { ILIBCRITICALERREXIT(254); }
+		// The watchdog reads the chain. Join it before releasing either resource.
+		if (WaitForSingleObject(chain->WatchDogThread, INFINITE) != WAIT_OBJECT_0) { ILIBCRITICALERREXIT(254); }
+		if (!CloseHandle(chain->WatchDogThread)) { ILIBCRITICALERREXIT(254); }
+		chain->WatchDogThread = NULL;
 #else
 		if (write(chain->WatchDogTerminator[1], " ", 1)) {}
 #endif
@@ -4390,6 +4396,18 @@ ILibExportMethod void ILibStartChain(void *Chain)
 #endif
 
 #ifdef WIN32
+	if (chain->MicrostackThreadHandle != NULL)
+	{
+		if (!CloseHandle(chain->MicrostackThreadHandle)) { ILIBCRITICALERREXIT(254); }
+		chain->MicrostackThreadHandle = NULL;
+	}
+#if defined(ILibChain_WATCHDOG_TIMEOUT)
+	if (chain->WatchDogTerminator != NULL)
+	{
+		if (!CloseHandle(chain->WatchDogTerminator)) { ILIBCRITICALERREXIT(254); }
+		chain->WatchDogTerminator = NULL;
+	}
+#endif
 	WSACleanup();
 #endif
 	if (ILibChainLock_RefCounter == 1)

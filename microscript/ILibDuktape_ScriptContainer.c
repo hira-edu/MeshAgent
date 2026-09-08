@@ -200,6 +200,7 @@ typedef enum SCRIPT_ENGINE_COMMAND
 
 
 typedef struct ILibDuktape_ScriptContainer_Slave ILibDuktape_ScriptContainer_Slave;
+typedef struct ILibDuktape_ScriptContainer_NonIsolated_Command ILibDuktape_ScriptContainer_NonIsolated_Command;
 
 typedef struct ILibDuktape_ScriptContainer_Master
 {
@@ -213,6 +214,8 @@ typedef struct ILibDuktape_ScriptContainer_Master
 	uintptr_t PeerCTXNonce;
 	ILibDuktape_ScriptContainer_Slave *PeerSlave;
 	ILibSpinLock PeerLock;
+	int PeerPublished;
+	ILibDuktape_ScriptContainer_NonIsolated_Command *PendingHead, *PendingTail;
 	unsigned int ChildSecurityFlags;
 }ILibDuktape_ScriptContainer_Master;
 
@@ -227,11 +230,12 @@ struct ILibDuktape_ScriptContainer_Slave
 };
 
 
-typedef struct ILibDuktape_ScriptContainer_NonIsolated_Command
+struct ILibDuktape_ScriptContainer_NonIsolated_Command
 {
 	union { ILibDuktape_ScriptContainer_Master * master; ILibDuktape_ScriptContainer_Slave *slave; }container;
+	ILibDuktape_ScriptContainer_NonIsolated_Command *next;
 	char json[];
-}ILibDuktape_ScriptContainer_NonIsolated_Command;
+};
 
 void ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave(void *chain, void *user);
 void ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsMaster(void *chain, void *user);
@@ -245,6 +249,17 @@ static void ILibDuktape_ScriptContainer_SetPeerState(ILibDuktape_ScriptContainer
 	master->PeerCTX = peerCtx;
 	master->PeerCTXNonce = peerCtx == NULL ? 0 : duk_ctx_nonce(peerCtx);
 	master->PeerSlave = peerSlave;
+	master->PeerPublished = 1;
+	// Startup commands were accepted before the worker published its queue.
+	// Its INIT is already queued; preserve the caller's order behind it.
+	while (master->PendingHead != NULL)
+	{
+		ILibDuktape_ScriptContainer_NonIsolated_Command *cmd = master->PendingHead;
+		master->PendingHead = cmd->next;
+		cmd->container.slave = peerSlave;
+		Duktape_RunOnEventLoopEx(peerChain, master->PeerCTXNonce, peerCtx, ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave, cmd, 1);
+	}
+	master->PendingTail = NULL;
 	ILibSpinLock_UnLock(&(master->PeerLock));
 }
 
@@ -274,6 +289,14 @@ static int ILibDuktape_ScriptContainer_DispatchToPeer(ILibDuktape_ScriptContaine
 	{
 		cmd->container.slave = master->PeerSlave;
 		Duktape_RunOnEventLoopEx(master->PeerChain, master->PeerCTXNonce, master->PeerCTX, ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave, cmd, 1);
+		dispatched = 1;
+	}
+	else if (!master->PeerPublished && master->PeerThread != NULL)
+	{
+		cmd->next = NULL;
+		if (master->PendingTail != NULL) { master->PendingTail->next = cmd; }
+		else { master->PendingHead = cmd; }
+		master->PendingTail = cmd;
 		dispatched = 1;
 	}
 	ILibSpinLock_UnLock(&(master->PeerLock));
@@ -3527,7 +3550,7 @@ duk_ret_t ILibDuktape_ScriptContainer_Exit(duk_context *ctx)
 	duk_push_this(ctx);
 	duk_get_prop_string(ctx, -1, ILibDuktape_ScriptContainer_MasterPtr);
 	master = (ILibDuktape_ScriptContainer_Master*)Duktape_GetBuffer(ctx, -1, NULL);
-	if (master->PeerChain != NULL)
+	if (master->PeerThread != NULL)
 	{
 		char json[] = "{\"command\": \"128\"}";
 		ILibDuktape_ScriptContainer_NonIsolated_Command *cmd = ILibMemory_Allocate(sizeof(json) + sizeof(ILibDuktape_ScriptContainer_NonIsolated_Command), 0, NULL, NULL);
@@ -3591,7 +3614,7 @@ duk_ret_t ILibDuktape_ScriptContainer_ExecuteString(duk_context *ctx)
 	master = (ILibDuktape_ScriptContainer_Master*)Duktape_GetBuffer(ctx, -1, NULL);		// [container][buffer]
 
 
-	if (master->PeerChain != NULL)
+	if (master->PeerThread != NULL)
 	{
 		char json[] = "{\"command\": \"2\", \"base64\": \"\"}";
 		char *payload;
@@ -3823,7 +3846,7 @@ duk_ret_t ILibDuktape_ScriptContainer_Finalizer(duk_context *ctx)
 	}
 	else
 	{
-		if (master->PeerChain != NULL)
+		if (master->PeerThread != NULL)
 		{
 			char json[] = "{\"command\": \"128\", \"noResponse\": \"1\"}";
 			ILibDuktape_ScriptContainer_NonIsolated_Command *cmd = ILibMemory_Allocate(sizeof(json) + sizeof(ILibDuktape_ScriptContainer_NonIsolated_Command), 0, NULL, NULL);
@@ -3831,7 +3854,12 @@ duk_ret_t ILibDuktape_ScriptContainer_Finalizer(duk_context *ctx)
 			ILibDuktape_ScriptContainer_DispatchToPeer(master, cmd);
 		}
 #ifdef WIN32
-		if (master->PeerThread != NULL) { WaitForSingleObject(master->PeerThread, INFINITE); }
+		if (master->PeerThread != NULL)
+		{
+			if (WaitForSingleObject(master->PeerThread, INFINITE) != WAIT_OBJECT_0) { ILIBCRITICALERREXIT(254); }
+			if (!CloseHandle(master->PeerThread)) { ILIBCRITICALERREXIT(254); }
+			master->PeerThread = NULL;
+		}
 #endif
 	}
 
@@ -3866,7 +3894,7 @@ duk_ret_t ILibDuktape_ScriptContainer_SendToSlave(duk_context *ctx)
 
 		ILibProcessPipe_Process_WriteStdIn(master->child, payload, len + 4, ILibTransport_MemoryOwnership_USER);
 	}
-	else if(master->PeerChain != NULL)
+	else if(master->PeerThread != NULL)
 	{
 		duk_size_t payloadLen;
 		char *payload = (char*)duk_get_lstring(ctx, -1, &payloadLen);
@@ -3907,6 +3935,10 @@ void ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsMaster(void *chain, 
 	ILibDuktape_ScriptContainer_NonIsolated_Command *cmd = (ILibDuktape_ScriptContainer_NonIsolated_Command*)user;
 	ILibDuktape_ScriptContainer_Master *master = cmd->container.master;
 	if (master->ctx == NULL) { free(cmd); return; }
+	duk_context *ctx = master->ctx;
+	// A listener may release its last reference to the container. Keep it alive
+	// until native dispatch has finished using its master buffer and emitter.
+	duk_push_heapptr(ctx, master->emitter->object);
 
 	int id;
 	duk_push_string(master->ctx, cmd->json);		// [string]
@@ -3915,15 +3947,6 @@ void ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsMaster(void *chain, 
 
 	switch ((id = Duktape_GetIntPropertyValue(master->ctx, -1, "command", -1)))
 	{
-		case 0:																// Ready
-		{
-			// Call INIT first
-			char json[] = "{\"command\": \"1\"}";
-			ILibDuktape_ScriptContainer_NonIsolated_Command* initCmd = (ILibDuktape_ScriptContainer_NonIsolated_Command*)ILibMemory_Allocate(sizeof(json) + sizeof(ILibDuktape_ScriptContainer_NonIsolated_Command), 0, NULL, NULL);
-			memcpy_s(initCmd->json, sizeof(json), json, sizeof(json));
-			ILibDuktape_ScriptContainer_DispatchToPeer(master, initCmd);
-			break;
-		}
 		case 1:
 		{
 			// Emit Ready Event
@@ -3967,7 +3990,7 @@ void ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsMaster(void *chain, 
 			break;
 	}
 
-	duk_pop(master->ctx);							// ...
+	duk_pop_2(ctx);								// ... (json and retained container)
 
 }
 
@@ -4064,13 +4087,12 @@ void ILibDuktape_ScriptContainer_NonIsolatedWorker(void *arg)
 {
 	ILibDuktape_ScriptContainer_Master *master = (ILibDuktape_ScriptContainer_Master*)arg;
 	ILibDuktape_ScriptContainer_Slave *slave = ILibMemory_AllocateA(sizeof(ILibDuktape_ScriptContainer_Slave));
-	char json[] = "{\"command\": \"0\"}";
+	char json[] = "{\"command\": \"1\"}";
 
 	slave->chain = ILibCreateChainEx(2 * sizeof(void*));
 	((void**)ILibMemory_GetExtraMemory(slave->chain, ILibMemory_CHAIN_CONTAINERSIZE))[0] = master;
 	((void**)ILibMemory_GetExtraMemory(slave->chain, ILibMemory_CHAIN_CONTAINERSIZE))[1] = slave;
 	slave->ctx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngine_minimal();
-	ILibDuktape_ScriptContainer_SetPeerState(master, slave->chain, slave->ctx, slave);
 
 	duk_push_heap_stash(slave->ctx);
 	duk_push_pointer(slave->ctx, slave);
@@ -4080,9 +4102,12 @@ void ILibDuktape_ScriptContainer_NonIsolatedWorker(void *arg)
 	duk_pop(slave->ctx);
 
 	ILibDuktape_ScriptContainer_NonIsolated_Command* cmd = (ILibDuktape_ScriptContainer_NonIsolated_Command*)ILibMemory_Allocate(sizeof(json) + sizeof(ILibDuktape_ScriptContainer_NonIsolated_Command), 0, NULL, NULL);
-	cmd->container.master = master;
+	cmd->container.slave = slave;
 	memcpy_s(cmd->json, sizeof(json), json, sizeof(json));
-	Duktape_RunOnEventLoopEx(master->chain, duk_ctx_nonce(master->ctx), master->ctx, ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsMaster, cmd, 1);
+	// Queue initialization before publishing the peer, so early commands cannot
+	// execute in the minimal heap while the master's ready callback is pending.
+	Duktape_RunOnEventLoopEx(slave->chain, duk_ctx_nonce(slave->ctx), slave->ctx, ILibDuktape_ScriptContainer_NonIsolatedWorker_ProcessAsSlave, cmd, 1);
+	ILibDuktape_ScriptContainer_SetPeerState(master, slave->chain, slave->ctx, slave);
 	ILibChain_DisableWatchDog(slave->chain);
 	ILibStartChain(slave->chain);
 
@@ -4256,8 +4281,9 @@ duk_ret_t ILibDuktape_ScriptContainer_Create(duk_context *ctx)
 		duk_push_false(ctx);
 		duk_put_prop_string(ctx, -2, ILibDuktape_ScriptContainer_ProcessIsolated);
 		ILibDuktape_EventEmitter_CreateEventEx(master->emitter, "ready");
-		master->PeerThread = ILibSpawnNormalThread(ILibDuktape_ScriptContainer_NonIsolatedWorker, master);
 		master->ChildSecurityFlags = Duktape_GetIntPropertyValue(ctx, 0, "permissions", 0);
+		master->PeerThread = ILibSpawnNormalThread(ILibDuktape_ScriptContainer_NonIsolatedWorker, master);
+		if (master->PeerThread == NULL) { return(ILibDuktape_Error(ctx, "ScriptContainer.Create(): Error starting worker thread")); }
 		
 		duk_push_fixed_buffer(ctx, sizeof(void*));									// [container][buffer]
 		((void**)Duktape_GetBuffer(ctx, -1, NULL))[0] = master->PeerThread;

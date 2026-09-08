@@ -23,6 +23,30 @@ node .\test\provisioning-ssot-check.js `
 Choose contracts for the files changed; do not claim the whole suite passed
 when only a subset was run.
 
+Desktop multiplexing has executable regressions in addition to source checks:
+
+```powershell
+node .\test\meshcentral_multiplex_flow_control_runtime.js
+node .\test\meshcentral_multiplex_socket_runtime.js
+node .\test\meshcentral_desktop_reconnect_runtime.js
+```
+
+The first two accept an optional multiplexer source path. The flow-control
+test also verifies that queued input sends pause viewers and drain once in
+order. The socket test also
+accepts a package path for resolving the server's `ws` dependency. They run
+without a production session: the flow-control test controls send completions,
+and the socket test uses a loopback listener. Coverage includes the empty image
+cache after a screen reset, an existing picture cache, slow-viewer reconnects,
+removal of the fastest viewer, pending recording writes, duplicate membership
+changes, agent disconnection with multiple viewers and synchronous close
+callbacks, closure of rejected duplicate agent sockets, and rejection of invalid
+relay cookies. The socket adapter accepts
+both `ws` 7 and 8 message signatures. On the VPS, use
+`/opt/meshcentral/node_modules/express-ws/package.json` as its dependency path
+to exercise the actual HTTP server's nested `ws` version. Use the original
+deployed source as the failing control when local and live versions differ.
+
 ## Native and runtime probes
 
 `*_runtime.js`, runtime PowerShell probes, and bridge smoke tests require the
@@ -37,6 +61,56 @@ Run them only on an approved test endpoint. Many accept:
 ```
 
 Use an ignored path such as `artifacts/validation/<run>/<test>`.
+
+`kvm_capture_reconnect_runtime.js` exercises native capture with one persistent
+loopback viewer and repeated clean/abrupt secondary disconnects. It requires
+Windows, the sibling MeshCentral `ws` dependency, and an accessible interactive
+test desktop. It sends compression and capture-resume commands only, discards
+image data, and never connects to the production server. A 25-second watchdog
+terminates only the test process it created. It fails on missing pictures,
+stalled native timers, native errors, or an unsuccessful exit. A UAC/secure
+desktop can deny capture and must not be counted as a passing image test.
+
+```powershell
+node .\test\kvm_capture_reconnect_runtime.js `
+  .\meshconsole\Release\MeshConsole64.exe `
+  .\artifacts\validation\capture-reconnect
+```
+
+Run the original binary as a failing control and a rebuilt binary for the
+fix. The test does not validate the out-of-process service bridge or identify
+unrelated service fatal exits.
+
+`scriptcontainer_startup_runtime.js` runs disposable native console processes
+without remote connections or service changes. It tests commands submitted
+before `ready`, immediately after creation, and after exit; ordered messages;
+script/syntax error delivery; startup exit; and worker permission enforcement.
+The deliberately occupied parent event loop exposes initialization ordering.
+Its watchdog terminates only its own test child. Keep the returned native
+timer handles reachable in fixtures: unreferenced timers can be finalized.
+
+```powershell
+node .\test\scriptcontainer_startup_runtime.js `
+  .\meshconsole\Release\MeshConsole64.exe `
+  .\artifacts\validation\scriptcontainer-startup
+```
+
+Run against the original and rebuilt binaries. This local test does not replace
+sustained validation of a deployed service with multiple desktop viewers.
+
+`scriptcontainer_lifecycle_runtime.js` additionally drops the last reference
+immediately and inside ready/error/data callbacks, then runs 45 worker
+create/exit/collection cycles in one owned process. It requires exactly one
+ready and exit per cycle and compares Windows handle/thread counts after
+warmup. The baseline crashes when an exit listener releases the parent; with
+that lifetime defect isolated, it leaks three handles per worker. The test
+rejects this cumulative leak while allowing small runtime count variation.
+
+```powershell
+node .\test\scriptcontainer_lifecycle_runtime.js `
+  .\meshconsole\Release\MeshConsole64.exe `
+  .\artifacts\validation\scriptcontainer-lifecycle
+```
 
 ## Grouped regression
 
