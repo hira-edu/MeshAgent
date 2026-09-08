@@ -31,6 +31,18 @@ downloads match byte for byte. The native `getSHA384FileHash` result agrees with
 the server's source-agent hash for both architectures and for Umair's installed
 x64 EXE, including the runtime random-policy footer normalization.
 
+Supplemental read-only checks at 13:40:38–13:41:51 UTC (Windows clock) fetched
+group-specific downloads for both architectures in Umair's group and the
+existing published group. All four returned HTTP 200 with the expected group
+and server identity, `wss://high.support:443/agent.ashx`, no NodeID or update hold,
+an exact canonical EXE prefix and a valid big-endian policy-length/GUID trailer.
+Independent data-only extraction from both EXEs in all three publish roots,
+including the derived signed copies, found the exact DLL in RCDATA type 10,
+resource 101. These results are in ignored `group-download-audit/` JSON reports.
+The PE32 wrapper embeds an x64 (`0x8664`) service DLL; Win32 wrapper/console
+coverage does not establish native 32-bit Windows service support. No binary,
+configuration or service change was made for these supplemental checks.
+
 | Published artifact | SHA-256 |
 | --- | --- |
 | x64 source `MeshService64.exe` / Umair `diaghost.exe` | `204b22948b311e80a5fc4484b586af7df27b8bf3ba617b7cd08f7bc887b8f347` |
@@ -825,4 +837,3 @@ The compatibility-listener checks remain required until observed inventory prove
 - `dbEncryptKey` and `dbRecordsEncryptKey` are configured in config.json
 - The direct `agents.high.support` edge presents a publicly trusted certificate; MeshCentral agent hash admission is a separate check and must remain enabled
 - TURN credentials remain server-side configuration and must be treated as secrets
-
