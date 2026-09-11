@@ -56,6 +56,20 @@ The executable, sidecar `.msh`, database identity, service DLL, and embedded
 DLL payload must belong to the same build/package set. Deployment validation
 rejects mismatched package identities.
 
+For `StealthLab` service EXEs, both direct project builds and the package
+orchestrator copy the selected manifest to `$(TargetDir)$(TargetName).msh`.
+A missing manifest fails the build before compilation. Every successful build
+refreshes the sidecar, including when the selected manifest is older than an
+existing sidecar. This prevents a previous deployment's endpoint from surviving
+a rebuild. The shared manifest and branding URL must describe the intended
+deployment; matching local files alone does not prove server admission.
+
+MSBuild produces raw EXEs and sidecars; it does not append a group enrollment
+policy to the EXE. MeshCentral appends that policy to group-specific downloads.
+Use `--package-msh` for raw build validation and `--package-exe` for a downloaded
+EXE containing a policy. Requested files that are missing or whose embedded
+policy cannot be extracted fail the provisioning check.
+
 ## Generated outputs
 
 The build invokes `tools/generate_branding_assets.py` and related MSBuild

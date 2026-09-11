@@ -13,11 +13,114 @@ Migration note (2026-04-19):
 - direct SSH to `74.208.52.191:22` timed out from the workstation during this update, so any infrastructure facts not explicitly re-captured below remain the last verified pre-migration values
 - update the local `meshcentral` SSH alias or override `MESHCENTRAL_SERVER`/`MESHCENTRAL_SSH_HOST` before using `deploy.py` without explicit host overrides
 
-## September 8 desktop release — published
+## Agent certificate admission and local packages
 
-The authorized release is active on VPS `74.208.52.191`. Publication finished
-at 13:15:47.888853 UTC on the VPS clock. MeshCentral is active/running as
-PID 95340 with `NRestarts=0`. This publication added one coordinated service
+The published agent endpoint is `wss://high.support:443/agent.ashx`, and the
+default-domain certificate source is `https://high.support/`. Current local
+`WinDiagnosticHost.msh` and branding inputs use that same endpoint. The July
+`agents.high.support:443` candidate described below is historical and is not
+the current build or publish target. A publicly trusted TLS certificate on
+that different endpoint does not make its hash admissible to MeshCentral.
+
+`MeshAgent.MSBuild.targets` copies the selected provisioning manifest to both
+service EXE sidecars after a successful build and rejects a missing input.
+Previously the manifest property was passed but never consumed, leaving old
+sidecars in otherwise fresh package output. Do not repair generated sidecars
+by hand; change the selected authority and rebuild the package.
+
+Before publication, validate each sidecar against branding/shared provisioning
+and check fresh certificate admission using the actual sidecar:
+
+```powershell
+node .\test\meshcentral_certificate_admission_runtime.js `
+  --msh .\meshservice\x64\StealthLab\MeshService-2022.msh `
+  --evidence .\artifacts\validation\certificate-admission-x64
+```
+
+Repeat for `meshservice/StealthLab/MeshService-2022.msh`. The probe verifies
+normal TLS trust/hostname validation, command-1 hash admission, the policy's
+`ServerID`, and the signed server proof. It sends no agent identity or enrollment
+request. HTTP `101` alone is insufficient; a timeout requires correlated server
+logs before attributing it to a certificate mismatch. The probe uses the sister
+repository's installed `ws` package, with an explicit
+`--meshcentral-package <package.json>` override when needed.
+
+MeshCentral's `BadWebCertificate` statistic counts rejected handshakes since
+process start, including deliberate negative probes. It is not the number of
+currently disconnected enrolled devices. Diagnose the timestamp, reported hash,
+and source connection before changing a certificate or package. Keep
+`ignoreAgentHashCheck=false`; neither certificate rotation nor bypassing the
+hash check is a remedy for stale package provisioning.
+
+## September 12 provisioning release — published
+
+The current package was published to VPS `74.208.52.191` at
+2026-09-11 20:08:22 UTC (September 12 in the workstation timezone). The
+operator authorized publication and restart. MeshCentral 1.2.5 restarted at
+20:08:12 UTC; systemd reports active/running, MainPID 156438 and NRestarts 0.
+The previous process exited, and the new child owns the HTTP listener.
+
+This release fixes manifest propagation in the build and false successful
+provisioning validation. The ignored local manifest and branding URL were
+aligned with the already-published `high.support` authority. The native source
+tree matches the September 8 frozen package except for the MSBuild targets;
+this rebuild does not introduce a native connection or certificate algorithm
+change. The required x64 DLL build and full package build passed. Eight
+manifest-copy cases and four provisioning-validation cases passed, as did the
+embedded-payload and publish-path contracts.
+
+Publication used an explicit 20-file package set and two regenerated hash
+manifests, with verified backups and automatic rollback on activation failure.
+All nine published sidecars retain their pre-release bytes. Server code,
+configuration, web/agent identity certificate files, and Caddy configuration
+retain their pre-release hashes. The September 8 release also did not execute
+the historical July certificate migration.
+
+| Current source artifact | SHA-256 |
+| --- | --- |
+| x64 `MeshService64.exe` | `b5f5c3a3177c490eae853a04790edaafaea28751d9cdb6d864c62d7bf0a6b28d` |
+| Win32 `MeshService.exe` | `e712561774eb7b393356e1eb68c71fe5ce91f83f2a3ff96b7f45bc1e9066cabc` |
+| DLL payload and published DLL aliases | `05e89bec999fbd5f145c2decf3d50c4384420a15ede49232f04f75c337c3589a` |
+
+Both public group downloads contain the exact source EXE prefix, expected
+enrollment policy and embedded DLL. Derived signed EXEs pass signature and
+native-section/payload checks. Native normalized hashes of both runtime
+downloads match their source agents. Fresh server authentication from both
+public policies passed after restart. Umair's installed agent automatically
+updated through the existing lifecycle: its normalized EXE hash matches the
+released x64 source, its DLL matches the table, and WinDiagnosticHost is running.
+
+The pre-restart BadWebCertificate total of three consisted of one unidentified
+rejection at 16:34:55 UTC and two deliberate diagnostic requests against the
+old local endpoint at 19:48:32 and 19:51:29 UTC. These are not three identified
+enrolled devices. The first connection was rejected before authenticated node
+identity; its cause remains unproven. No further rejection appears in the
+post-restart journal through 20:21:53 UTC. Restart resets this in-memory counter;
+that reset is not evidence of endpoint repair.
+
+The 20:18:20 UTC server snapshot has 15 connected agents versus 18 before
+restart. The 20:21:50 audit confirms 15 of those 18 reconnected, plus one other
+device. LAPTOP-Q6KDE5LA, LIONEL-PC-17 and DESKTOP-SQQBT1P have not reconnected
+as of the 20:21:50 UTC
+audit; no certificate rejection identifies them. Their recovery is not yet
+verified and requires endpoint availability/access. The baseline excludes
+power records before the previous global server-start event.
+
+Release staging is `/opt/meshcentral/staging/certificate-release-20260912/`.
+Exact rollback bytes and metadata are recorded in
+`/opt/meshcentral/backups/certificate-release-20260911_200811/activation.json`.
+Restore its recorded targets and matching manifests, then restart MeshCentral
+if a rollback is required. Ignored evidence is under
+`artifacts/validation/certificate-deploy-20260912/`, including `activation.json`,
+`public-download-verification.json`, `native-download-hashes.json`,
+`installed-native-hash.json`, admission reports and `remaining-node-audit.json`.
+Root-cause reproductions are in `certificate-admission-20260912/` alongside it.
+
+## September 8 desktop release — previous release
+
+This historical release was published on VPS `74.208.52.191`. Publication
+finished at 13:15:47.888853 UTC on the VPS clock. At that time MeshCentral was
+active/running as PID 95340 with `NRestarts=0`. It added one coordinated service
 stop/start after the four earlier server-fix restarts. The installed server
 remains MeshCentral 1.2.5 with the validated relay delta; its complete older
 local npm checkout was not used as a production replacement.
@@ -299,8 +402,9 @@ validated Umair canary recorded above.
 
 The live agent reports commit `0fb268971e670b09a89f977f727336a91328f0ea`,
 compiled July 26. Its installed executable embeds
-`wss://high.support:443/agent.ashx`, whereas the current checkout's build profile
-uses a different endpoint. The September 8 native canary is therefore built
+`wss://high.support:443/agent.ashx`, whereas the checkout's build profile at the
+time used a different endpoint. Current local provisioning is aligned with
+the published endpoint as described above. The September 8 native canary was built
 from that deployed commit with the two fixes above and the already-committed
 `ILibParsers.h` stack-allocation alignment correction. The latter is required
 by a separate reproduced HTTP request stack overwrite: the old allocator

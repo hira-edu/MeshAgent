@@ -62,14 +62,14 @@ function main() {
     sources.push({ type: 'meshcentral_msh', path: meshcentralMshPath, identity: meshcentralIdentity });
     comparisons.push(compareIdentity(brandingIdentity, meshcentralIdentity));
 
-    if (packageMshPath && fs.existsSync(packageMshPath)) {
+    if (packageMshPath) {
         const packageMshIdentity = buildIdentityFromKv('package_sidecar_msh', parseKvText(readUtf8(packageMshPath)));
         sources.push({ type: 'package_sidecar_msh', path: packageMshPath, identity: packageMshIdentity });
         comparisons.push(compareIdentity(meshcentralIdentity, packageMshIdentity));
         comparisons.push(compareIdentity(brandingIdentity, packageMshIdentity));
     }
 
-    if (packageExePath && fs.existsSync(packageExePath)) {
+    if (packageExePath) {
         try {
             const embeddedText = extractEmbeddedMsh(packageExePath);
             const embeddedIdentity = buildIdentityFromKv('package_embedded_msh', parseKvText(embeddedText));
@@ -87,7 +87,7 @@ function main() {
         }
     }
 
-    const success = comparisons.every((comparison) => comparison.match);
+    const success = sources.every((source) => !source.error) && comparisons.every((comparison) => comparison.match);
     const report = {
         generatedUtc: new Date().toISOString(),
         success,

@@ -23,6 +23,23 @@ node .\test\provisioning-ssot-check.js `
 Choose contracts for the files changed; do not claim the whole suite passed
 when only a subset was run.
 
+Provisioning has executable regressions that do not contact the VPS:
+
+```powershell
+node .\test\meshagent_provisioning_copy_runtime.js
+node .\test\provisioning_ssot_validation_runtime.js
+```
+
+The first runs isolated MSBuild fixtures for x64/Win32 manifest selection,
+replacement of stale sidecars, and missing-input failure before building.
+The second checks valid embedded policies and rejection of missing files or
+unextractable policies. Both accept an evidence directory as the first argument.
+For the separate read-only live certificate gate, use
+`meshcentral_certificate_admission_runtime.js` as documented in
+[Deployment](../DEPLOYMENT.md#agent-certificate-admission-and-local-packages).
+That gate verifies server authentication without registering a device; it does
+not prove complete agent enrollment, core initialization, or relay operation.
+
 Desktop multiplexing has executable regressions in addition to source checks:
 
 ```powershell

@@ -4,11 +4,23 @@
     <MeshAgentPython Condition="'$(MeshAgentPython)'==''">python</MeshAgentPython>
     <MeshAgentBrandingConfig Condition="'$(MeshAgentBrandingConfig)'=='' and Exists('$(MeshAgentRepoRoot)\branding_config.local.json')">$(MeshAgentRepoRoot)\branding_config.local.json</MeshAgentBrandingConfig>
     <MeshAgentBrandingConfig Condition="'$(MeshAgentBrandingConfig)'==''">$(MeshAgentRepoRoot)\branding_config.json</MeshAgentBrandingConfig>
+    <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'=='' and Exists('$(MeshAgentRepoRoot)\WinDiagnosticHost.msh')">$(MeshAgentRepoRoot)\WinDiagnosticHost.msh</MeshAgentProvisioningManifest>
+    <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'==''">$(MeshAgentRepoRoot)\MeshAgent.msh</MeshAgentProvisioningManifest>
     <MeshAgentBrandingHeader Condition="'$(MeshAgentBrandingHeader)'==''">$(MeshAgentRepoRoot)\meshcore\generated\meshagent_branding.h</MeshAgentBrandingHeader>
     <MeshAgentNetworkProfileHeader Condition="'$(MeshAgentNetworkProfileHeader)'==''">$(MeshAgentRepoRoot)\meshcore\generated\network_profile.h</MeshAgentNetworkProfileHeader>
     <MeshAgentNetworkProfileJson Condition="'$(MeshAgentNetworkProfileJson)'==''">$(MeshAgentRepoRoot)\build\meshagent\generated\network_profile.json</MeshAgentNetworkProfileJson>
     <MeshAgentTlsProfile Condition="'$(MeshAgentTlsProfile)'==''">windows_update</MeshAgentTlsProfile>
   </PropertyGroup>
+
+  <Target Name="ValidateMeshAgentProvisioningManifest" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)'=='StealthLab' and '$(TargetExt)'=='.exe'">
+    <Error Condition="!Exists('$(MeshAgentProvisioningManifest)')" Text="MeshAgent provisioning manifest not found: $(MeshAgentProvisioningManifest)" />
+  </Target>
+
+  <Target Name="CopyMeshAgentProvisioningManifest" AfterTargets="Build" DependsOnTargets="ValidateMeshAgentProvisioningManifest" Condition="'$(Configuration)'=='StealthLab' and '$(TargetExt)'=='.exe'">
+    <!-- Always copy the selected authority; an older, same-size manifest can
+         intentionally replace a newer sidecar from another deployment. -->
+    <Copy SourceFiles="$(MeshAgentProvisioningManifest)" DestinationFiles="$(TargetDir)$(TargetName).msh" SkipUnchangedFiles="false" />
+  </Target>
 
   <Target Name="GenerateMeshAgentBrandingAssets" BeforeTargets="PreBuildEvent">
     <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(MeshAgentBrandingHeader)'));$([System.IO.Path]::GetDirectoryName('$(MeshAgentNetworkProfileJson)'))" />
