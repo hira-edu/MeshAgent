@@ -352,7 +352,7 @@ function runFlowScopeChecks(results, sandbox, meshAgentStub) {
     sandbox.umhctlSendPreparedControlRequest(contract.buildControlRequest('injectTargetSet', {
         pids: '3001,3002',
         runId: 'run-lab-200',
-        targetTag: 'lockdown_browser',
+        targetTag: 'lab_browser',
         methodKey: 'standard'
     }), 'flow-session');
     sandbox.umhctlSendPreparedControlRequest(contract.buildControlRequest('injectAll', {}), 'flow-session');
@@ -363,7 +363,7 @@ function runFlowScopeChecks(results, sandbox, meshAgentStub) {
     assert(requestOps.length === 3, 'unexpected number of dispatched flow-scope requests');
     assert(requestOps[0].request.headers['x-umh-run-id'] === 'run-lab-200', 'injectTargetSet lost run-id header');
     assert(requestOps[1].request.headers['x-umh-run-id'] === 'run-lab-200', 'injectAll did not reuse scoped run-id');
-    assert(requestOps[1].request.headers['x-umh-target-tag'] === 'lockdown_browser', 'injectAll did not reuse scoped target-tag');
+    assert(requestOps[1].request.headers['x-umh-target-tag'] === 'lab_browser', 'injectAll did not reuse scoped target-tag');
     assert(requestOps[2].request.headers['x-umh-run-id'] === 'run-lab-200', 'clearTargetScope did not reuse scoped run-id');
 
     const consoleMessages = getConsoleMessages(meshAgentStub);
@@ -381,12 +381,12 @@ function runHeaderContractChecks(results, sandbox) {
     const pidOnlyInject = sandbox.umhctlResolveControlHeaders({ op: 'inject', pid: 123 }, 'header-contract-session');
     assert(pidOnlyInject.ok === false && /report-backed --target-tag/.test(pidOnlyInject.error), 'pid-only inject must fail closed before native dispatch');
 
-    const explicitInject = sandbox.umhctlResolveControlHeaders({ op: 'inject', pid: 123, target_tag: 'LockDown_Browser', method: 'standard' }, 'header-contract-session');
+    const explicitInject = sandbox.umhctlResolveControlHeaders({ op: 'inject', pid: 123, target_tag: 'lab_browser', method: 'standard' }, 'header-contract-session');
     assert(explicitInject.ok === true, 'explicit target/method inject should resolve headers');
-    assert(explicitInject.headers['x-umh-target-tag'] === 'lockdown_browser', 'explicit inject lost target header');
+    assert(explicitInject.headers['x-umh-target-tag'] === 'lab_browser', 'explicit inject lost target header');
     assert(explicitInject.headers['x-umh-method-key'] === 'standard', 'explicit inject lost method header');
 
-    const defaultMethodInject = sandbox.umhctlResolveControlHeaders({ op: 'inject', pid: 123, target_tag: 'LockDown_Browser', method: 'default' }, 'header-contract-session');
+    const defaultMethodInject = sandbox.umhctlResolveControlHeaders({ op: 'inject', pid: 123, target_tag: 'lab_browser', method: 'default' }, 'header-contract-session');
     assert(defaultMethodInject.ok === false && /auto\/default/.test(defaultMethodInject.error), 'default injection method must fail closed');
 
     const methodPolicy = sandbox.umhctlResolveControlHeaders({ op: 'methodPolicy', pid: 123 }, 'header-contract-session');
@@ -483,11 +483,11 @@ function runUiSnapshotChecks(results, sandbox, meshAgentStub) {
                 }
             },
             getCapabilities: { ok: true, data: { supported_ops: ['status', 'inject'] } },
-            listProcesses: { ok: true, data: [{ pid: 4242, name: 'examclient.exe' }] },
-            getPolicy: { ok: true, data: { lockdown: false } },
+            listProcesses: { ok: true, data: [{ pid: 4242, name: 'labclient.exe' }] },
+            getPolicy: { ok: true, data: { restrictedMode: false } },
             getConfig: { ok: true, data: '{"capture":"gdi"}' },
             safetyState: { ok: true, data: { active_scope: false } },
-            profileProcess: { ok: true, data: { pid: 4242, profile: 'exam-client' } },
+            profileProcess: { ok: true, data: { pid: 4242, profile: 'lab-client' } },
             methodPolicy: { ok: true, data: { effective_order: ['standard'] } },
             securityBoundary: { ok: true, data: { role: 'browser-main' } }
         };

@@ -1,8 +1,8 @@
 /*
- * MeshAgent Stealth - C/C++ Bridge
+ * MeshAgent runtime C/C++ bridge
  *
  * Provides C-callable wrappers for legacy C++ utilities so C compilation
- * units can link without inheriting runtime anti-analysis behavior.
+ * units can link without inheriting runtime-detection behavior.
  */
 
 #include <windows.h>

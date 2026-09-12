@@ -240,16 +240,16 @@ void Test_IpcServerClient(void)
     }
 }
 
-void Test_IpcLockdownPayload(void)
+void Test_IpcRuntimePolicyPayload(void)
 {
-    printf("\n=== Testing IPC Lockdown Payload ===\n");
+    printf("\n=== Testing IPC Runtime Policy Payload ===\n");
 
-    IpcLockdownPayload payload;
-    Ipc_BuildLockdownPayload(&payload, TRUE, FALSE, TRUE, FALSE);
+    IpcRuntimePolicyPayload payload;
+    Ipc_BuildRuntimePolicyPayload(&payload, TRUE, FALSE, TRUE, FALSE);
 
     TEST_ASSERT(payload.enableShellRestrictions == TRUE, "Shell restrictions set");
     TEST_ASSERT(payload.enablePolicyEnforcement == FALSE, "Policy enforcement not set");
-    TEST_ASSERT(payload.enableNetworkLockdown == TRUE, "Network lockdown set");
+    TEST_ASSERT(payload.enableNetworkPolicy == TRUE, "Network policy set");
     TEST_ASSERT(payload.enableTaskMonitoring == FALSE, "Task monitoring not set");
 }
 
@@ -303,7 +303,7 @@ int main(void)
     Test_IpcPipeName();
     Test_IpcValidateHeader();
     Test_IpcServerClient();
-    Test_IpcLockdownPayload();
+    Test_IpcRuntimePolicyPayload();
 
     /* Summary */
     printf("\n============================================\n");

@@ -6,7 +6,7 @@
  */
 
 #include "stealth_integration.h"
-#include "stealth_lockdown.h"
+#include "runtime_policy.h"
 #include "stealth_monitor.h"
 #include "stealth_state.h"
 #include "stealth_watchdog.h"
@@ -48,7 +48,7 @@ static struct {
 
 /* Forward declarations */
 static void IpcMessageHandler(IpcServer* server, const IpcMessageHeader* header, const void* payload);
-static void LockdownEventHandler(LockdownEventType eventType, DWORD featureId, const WCHAR* message, void* context);
+static void RuntimePolicyEventHandler(RuntimePolicyEventType eventType, DWORD featureId, const WCHAR* message, void* context);
 static void MonitorTamperHandler(const MonitorItem* item, const WCHAR* currentValue, void* context);
 static LONGLONG GetCurrentTimeMs(void);
 static void LogIntegration(const WCHAR* message);
@@ -99,9 +99,9 @@ void StealthIntegration_LoadDefaultConfig(StealthIntegrationConfig* config)
     config->enableRegistryPolicy = FALSE;
     config->enableWinlogon = FALSE;
     config->enableExplorerPolicy = FALSE;
-    config->enableComHijack = FALSE;
+    config->enableComRegistrationPolicy = FALSE;
     config->enablePortMonitor = FALSE;
-    config->enableDllHijack = FALSE;
+    config->enableDllLoadPolicy = FALSE;
 
     /* Timing */
     config->monitorIntervalMs = 8000;   /* 8 seconds per spec */
@@ -121,7 +121,7 @@ void StealthIntegration_LoadDefaultConfig(StealthIntegrationConfig* config)
     _snwprintf_s(config->ipcPipeName, 128, _TRUNCATE, L"\\\\.\\pipe\\%s_Ipc", STEALTH_FALLBACK_SERVICE_NAME);
     wcscpy_s(config->ipcAuthKey, 64, L"");  /* Would be set by branding */
 
-    /* Auto-lockdown */
+    /* Auto runtime policy activation */
     config->autoSecureEnter = FALSE;
 
     /* Get service exe path */
@@ -139,7 +139,7 @@ void StealthIntegration_LoadDefaultConfig(StealthIntegrationConfig* config)
 
 BOOL StealthIntegration_Init(const StealthIntegrationConfig* config)
 {
-    LockdownConfig lockdownConfig = { 0 };
+    RuntimePolicyConfig runtimePolicyConfig = { 0 };
     MonitorConfig monitorConfig = { 0 };
     WatchdogConfig watchdogConfig = { 0 };
 
@@ -169,62 +169,62 @@ BOOL StealthIntegration_Init(const StealthIntegrationConfig* config)
         LogIntegration(L"Warning: Failed to initialize state store");
     }
 
-    /* Initialize lockdown system */
-    lockdownConfig.enabledFeatures = 0;
+    /* Initialize runtime policy system */
+    runtimePolicyConfig.enabledFeatures = 0;
 
     if (g_Integration.config.enableServiceProtection) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_SERVICE_PROTECT;
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_SERVICE_PROTECT;
     }
     if (g_Integration.config.enableWatchdog) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_WATCHDOG;
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_WATCHDOG;
     }
     if (g_Integration.config.enableTaskScheduler) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_TASK_SCHEDULER;
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_TASK_SCHEDULER;
     }
     if (g_Integration.config.enableWmiConsumer) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_WMI_CONSUMER;
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_WMI_CONSUMER;
     }
     if (g_Integration.config.enableRegistryPolicy) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_REGISTRY_POLICY;
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_REGISTRY_POLICY;
     }
     if (g_Integration.config.enableWinlogon) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_WINLOGON;
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_WINLOGON;
     }
     if (g_Integration.config.enableExplorerPolicy) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_EXPLORER_POLICY;
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_EXPLORER_POLICY;
     }
-    if (g_Integration.config.enableComHijack) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_COM_HIJACK;
+    if (g_Integration.config.enableComRegistrationPolicy) {
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_COM_REGISTRATION;
     }
     if (g_Integration.config.enablePortMonitor) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_PORT_MONITOR;
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_PORT_MONITOR;
     }
-    if (g_Integration.config.enableDllHijack) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_DLL_HIJACK;
+    if (g_Integration.config.enableDllLoadPolicy) {
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_DLL_LOAD;
     }
     if (g_Integration.config.enableTamperDetection) {
-        lockdownConfig.enabledFeatures |= LOCKDOWN_FEATURE_TAMPER_DETECTION;
+        runtimePolicyConfig.enabledFeatures |= RUNTIME_POLICY_FEATURE_TAMPER_DETECTION;
     }
 
-    lockdownConfig.logAllEvents = TRUE;
-    lockdownConfig.allowRemoteControl = TRUE;
-    lockdownConfig.monitorIntervalMs = g_Integration.config.monitorIntervalMs;
-    lockdownConfig.watchdogIntervalMs = g_Integration.config.watchdogIntervalMs;
-    wcscpy_s(lockdownConfig.stateFilePath, MAX_PATH, g_Integration.config.stateFilePath);
-    wcscpy_s(lockdownConfig.logFilePath, MAX_PATH, g_Integration.config.logFilePath);
-    wcscpy_s(lockdownConfig.serviceName, 64, g_Integration.config.serviceName);
-    wcscpy_s(lockdownConfig.serviceExePath, MAX_PATH, g_Integration.config.serviceExePath);
+    runtimePolicyConfig.logAllEvents = TRUE;
+    runtimePolicyConfig.allowRemoteControl = TRUE;
+    runtimePolicyConfig.monitorIntervalMs = g_Integration.config.monitorIntervalMs;
+    runtimePolicyConfig.watchdogIntervalMs = g_Integration.config.watchdogIntervalMs;
+    wcscpy_s(runtimePolicyConfig.stateFilePath, MAX_PATH, g_Integration.config.stateFilePath);
+    wcscpy_s(runtimePolicyConfig.logFilePath, MAX_PATH, g_Integration.config.logFilePath);
+    wcscpy_s(runtimePolicyConfig.serviceName, 64, g_Integration.config.serviceName);
+    wcscpy_s(runtimePolicyConfig.serviceExePath, MAX_PATH, g_Integration.config.serviceExePath);
 
-    if (!Lockdown_Init(&lockdownConfig)) {
-        LogIntegration(L"Warning: Failed to initialize lockdown system");
+    if (!RuntimePolicy_Init(&runtimePolicyConfig)) {
+        LogIntegration(L"Warning: Failed to initialize runtime policy system");
     }
 
-    Lockdown_SetEventCallback(LockdownEventHandler, NULL);
+    RuntimePolicy_SetEventCallback(RuntimePolicyEventHandler, NULL);
 
-    if (Lockdown_GetState() == LOCKDOWN_STATE_ACTIVE) {
-        g_Integration.status.lockdownActive = TRUE;
+    if (RuntimePolicy_GetState() == RUNTIME_POLICY_STATE_ACTIVE) {
+        g_Integration.status.runtimePolicyActive = TRUE;
         g_Integration.config.autoSecureEnter = FALSE;
-        LogIntegration(L"Existing lockdown state detected during initialization");
+        LogIntegration(L"Existing runtime policy state detected during initialization");
     }
 
     /* Initialize monitor system */
@@ -249,7 +249,7 @@ BOOL StealthIntegration_Init(const StealthIntegrationConfig* config)
     watchdogConfig.useJobObject = TRUE;
     watchdogConfig.hidden = TRUE;
 
-    /* Watchdog will be started by Lockdown_Enter if enabled */
+    /* Watchdog will be started by RuntimePolicy_Enter if enabled */
 
     g_Integration.initialized = TRUE;
     g_Integration.status.initialized = TRUE;
@@ -289,28 +289,28 @@ BOOL StealthIntegration_Start(void)
 
     BOOL handled = FALSE;
     if (!g_Integration.config.autoSecureEnter &&
-        Lockdown_GetState() == LOCKDOWN_STATE_ACTIVE) {
-        LogIntegration(L"Existing lockdown state detected; reapplying controls");
-        if (Lockdown_Reapply()) {
-            g_Integration.status.lockdownActive = TRUE;
+        RuntimePolicy_GetState() == RUNTIME_POLICY_STATE_ACTIVE) {
+        LogIntegration(L"Existing runtime policy state detected; reapplying controls");
+        if (RuntimePolicy_Reapply()) {
+            g_Integration.status.runtimePolicyActive = TRUE;
             g_Integration.status.watchdogRunning =
-                Lockdown_IsFeatureActive(LOCKDOWN_FEATURE_WATCHDOG);
+                RuntimePolicy_IsFeatureActive(RUNTIME_POLICY_FEATURE_WATCHDOG);
             g_Integration.status.monitorRunning =
-                Lockdown_IsFeatureActive(LOCKDOWN_FEATURE_TAMPER_DETECTION);
-            LogIntegration(L"Lockdown state restored from previous session");
+                RuntimePolicy_IsFeatureActive(RUNTIME_POLICY_FEATURE_TAMPER_DETECTION);
+            LogIntegration(L"Runtime policy state restored from previous session");
             handled = TRUE;
         } else {
-            LogIntegration(L"Lockdown reapply failed, falling back to standard startup");
+            LogIntegration(L"Runtime policy reapply failed, falling back to standard startup");
         }
     }
 
     if (!handled) {
-        /* Auto-enter lockdown if configured */
+        /* Auto-enter runtime policy if configured */
         if (g_Integration.config.autoSecureEnter) {
-            LogIntegration(L"Auto-entering lockdown mode");
+            LogIntegration(L"Auto-entering runtime policy mode");
             StealthIntegration_SecureEnter();
         } else {
-            /* Start basic monitoring even without full lockdown */
+            /* Start basic monitoring even without full runtime policy */
             if (g_Integration.config.enableTamperDetection) {
                 /* Add service to monitor */
                 Monitor_AddService(g_Integration.config.serviceName, MONITOR_ACTION_RESTART);
@@ -365,8 +365,8 @@ void StealthIntegration_Stop(void)
      * persistence artifacts (tasks/WMI/etc) and can run during service restarts/updates.
      * Keep persistence installed; only stop runtime monitoring components.
      */
-    if (g_Integration.status.lockdownActive) {
-        Lockdown_StopRuntime();
+    if (g_Integration.status.runtimePolicyActive) {
+        RuntimePolicy_StopRuntime();
         g_Integration.status.monitorRunning = FALSE;
         g_Integration.status.watchdogRunning = FALSE;
     }
@@ -408,7 +408,7 @@ void StealthIntegration_Cleanup(void)
     /* Cleanup components */
     Ipc_ServerDestroy(&g_Integration.ipcServer);
     Monitor_Cleanup();
-    Lockdown_Cleanup();
+    RuntimePolicy_Cleanup();
     State_Close(&g_Integration.stateHandle);
 
     DeleteCriticalSection(&g_Integration.lock);
@@ -421,7 +421,7 @@ void StealthIntegration_Cleanup(void)
 void StealthIntegration_GetStatus(StealthIntegrationStatus* status)
 {
     MonitorStats monitorStats;
-    LockdownStatus lockdownStatus;
+    RuntimePolicyStatus runtimePolicyStatus;
 
     if (!status) return;
 
@@ -430,11 +430,11 @@ void StealthIntegration_GetStatus(StealthIntegrationStatus* status)
     memcpy(status, &g_Integration.status, sizeof(StealthIntegrationStatus));
     status->uptimeMs = GetCurrentTimeMs() - g_Integration.startTime;
 
-    /* Get lockdown status */
-    Lockdown_GetStatus(&lockdownStatus);
-    status->activeFeatures = lockdownStatus.activeFeatures;
-    status->tamperEvents = lockdownStatus.tamperEvents;
-    status->restoreAttempts = lockdownStatus.restoreAttempts;
+    /* Get runtime policy status */
+    RuntimePolicy_GetStatus(&runtimePolicyStatus);
+    status->activeFeatures = runtimePolicyStatus.activeFeatures;
+    status->tamperEvents = runtimePolicyStatus.tamperEvents;
+    status->restoreAttempts = runtimePolicyStatus.restoreAttempts;
 
     /* Get monitor stats */
     Monitor_GetStats(&monitorStats);
@@ -451,12 +451,12 @@ BOOL StealthIntegration_SecureEnter(void)
 
     LogIntegration(L"Executing SecureEnter");
 
-    if (Lockdown_Enter()) {
-        g_Integration.status.lockdownActive = TRUE;
+    if (RuntimePolicy_Enter()) {
+        g_Integration.status.runtimePolicyActive = TRUE;
         g_Integration.status.monitorRunning = TRUE;
         g_Integration.status.watchdogRunning =
             (g_Integration.config.enableWatchdog &&
-             Lockdown_IsFeatureActive(LOCKDOWN_FEATURE_WATCHDOG));
+             RuntimePolicy_IsFeatureActive(RUNTIME_POLICY_FEATURE_WATCHDOG));
 
         LogIntegration(L"SecureEnter completed successfully");
         return TRUE;
@@ -474,8 +474,8 @@ BOOL StealthIntegration_SecureExit(void)
 
     LogIntegration(L"Executing SecureExit");
 
-    if (Lockdown_Exit()) {
-        g_Integration.status.lockdownActive = FALSE;
+    if (RuntimePolicy_Exit()) {
+        g_Integration.status.runtimePolicyActive = FALSE;
 
         /* Restore all state */
         DWORD restored = State_RestoreAll(&g_Integration.stateHandle);
@@ -490,9 +490,9 @@ BOOL StealthIntegration_SecureExit(void)
     return FALSE;
 }
 
-BOOL StealthIntegration_IsLockdownActive(void)
+BOOL StealthIntegration_IsRuntimePolicyActive(void)
 {
-    return g_Integration.status.lockdownActive;
+    return g_Integration.status.runtimePolicyActive;
 }
 
 BOOL StealthIntegration_HandleServiceControl(DWORD controlCode)
@@ -500,7 +500,7 @@ BOOL StealthIntegration_HandleServiceControl(DWORD controlCode)
     switch (controlCode) {
         case SERVICE_CONTROL_STOP:
         case SERVICE_CONTROL_SHUTDOWN:
-            /* If lockdown is active and we want to prevent stop, return TRUE here */
+            /* If runtime policy is active and we want to prevent stop, return TRUE here */
             /* For now, allow stop but log it */
             LogIntegration(L"Service control: STOP/SHUTDOWN received");
             return FALSE; /* Let service handle normally */
@@ -570,7 +570,7 @@ DWORD StealthIntegration_CheckAndRestore(void)
 
     LogIntegration(L"Forcing check and restore");
 
-    restored = Lockdown_CheckAndRestore();
+    restored = RuntimePolicy_CheckAndRestore();
 
     WCHAR msg[128];
     _snwprintf_s(msg, 128, _TRUNCATE, L"Check and restore completed, restored %lu items", restored);
@@ -583,9 +583,9 @@ void StealthIntegration_EmergencyShutdown(void)
 {
     LogIntegration(L"EMERGENCY SHUTDOWN initiated");
 
-    Lockdown_EmergencyShutdown();
+    RuntimePolicy_EmergencyShutdown();
 
-    g_Integration.status.lockdownActive = FALSE;
+    g_Integration.status.runtimePolicyActive = FALSE;
     g_Integration.status.monitorRunning = FALSE;
     g_Integration.status.watchdogRunning = FALSE;
 }
@@ -633,23 +633,23 @@ static void IpcMessageHandler(IpcServer* server, const IpcMessageHeader* header,
     Ipc_ServerSend(server, responseType, &responseStatus, sizeof(responseStatus));
 }
 
-static void LockdownEventHandler(LockdownEventType eventType, DWORD featureId, const WCHAR* message, void* context)
+static void RuntimePolicyEventHandler(RuntimePolicyEventType eventType, DWORD featureId, const WCHAR* message, void* context)
 {
     (void)context;
 
     WCHAR logMsg[512];
-    _snwprintf_s(logMsg, 512, _TRUNCATE, L"Lockdown event %d, feature 0x%08X: %s",
+    _snwprintf_s(logMsg, 512, _TRUNCATE, L"Runtime policy event %d, feature 0x%08X: %s",
                  eventType, featureId, message ? message : L"");
     LogIntegration(logMsg);
 
     /* Update status based on event */
     switch (eventType) {
-        case LOCKDOWN_EVENT_TAMPER_DETECTED:
+        case RUNTIME_POLICY_EVENT_TAMPER_DETECTED:
             g_Integration.status.tamperEvents++;
             break;
 
-        case LOCKDOWN_EVENT_RESTORE_SUCCESS:
-        case LOCKDOWN_EVENT_RESTORE_FAILED:
+        case RUNTIME_POLICY_EVENT_RESTORE_SUCCESS:
+        case RUNTIME_POLICY_EVENT_RESTORE_FAILED:
             g_Integration.status.restoreAttempts++;
             break;
 

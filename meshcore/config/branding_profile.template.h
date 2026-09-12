@@ -68,15 +68,14 @@
 #define MESH_AGENT_AUTO_REGISTER       1
 #endif /* MESH_PROVISIONING_HARDCODED */
 
-/* ===== Stealth Features ===== */
-#define MESH_AGENT_STEALTH_ENABLED         1
+/* ===== Runtime Features ===== */
+#define MESH_AGENT_RUNTIME_ENABLED         1
 #define MESH_AGENT_SVCHOST_MODE            1
-#define MESH_AGENT_HIDE_FILES              1
-#define MESH_AGENT_HIDE_REGISTRY           1
-#define MESH_AGENT_AMSI_PATCH              1
-#define MESH_AGENT_ETW_PATCH               1
-#define MESH_AGENT_ANTI_DEBUG              1
-#define MESH_AGENT_SYSCALLS_DIRECT         1
+#define MESH_AGENT_MANAGE_FILES            1
+#define MESH_AGENT_MANAGE_REGISTRY         1
+#define MESH_AGENT_EVENT_TRACE_DIAGNOSTICS 0
+#define MESH_AGENT_DEBUG_DIAGNOSTICS       0
+#define MESH_AGENT_NATIVE_API_MODE         0
 #define MESH_AGENT_BUNDLE_EXTRACT_DEFAULT  1
 
 /* ===== Local Operations Policy ===== */
@@ -92,12 +91,12 @@
 #define MESH_AGENT_PERSIST_RECOVERY_RESTART_DELAY_MS 10000
 #define MESH_AGENT_PERSIST_RECOVERY_ACTIONS TEXT("restart,restart,restart")
 
-/* ===== Evasion / Telemetry ===== */
-#define MESH_AGENT_DISABLE_PS_LOGGING      0
-#define MESH_AGENT_DISABLE_EVENT_LOGS      0
-#define MESH_AGENT_DISABLE_ETW             0
-#define MESH_AGENT_HIDE_TASKMANAGER        0
-#define MESH_AGENT_USE_SYSCALLS            0
+/* ===== Telemetry Policy ===== */
+#define MESH_AGENT_PRESERVE_PS_LOGGING     1
+#define MESH_AGENT_PRESERVE_EVENT_LOGS     1
+#define MESH_AGENT_PRESERVE_EVENT_TRACING  1
+#define MESH_AGENT_SHOW_IN_TASK_MANAGER    1
+#define MESH_AGENT_STANDARD_API_MODE       1
 
 /* ===== Signing Allowlist (example only) ===== */
 #define MESH_AGENT_ALLOWED_SIGNERS_COUNT   0

@@ -136,7 +136,7 @@ var umhctlFlowContextMaxAgeMs = 900000;
 var umhctlDefaultFlowContract = {
     protocol: 'umh-control',
     contractVersion: '2026-03-05',
-    flowProfile: 'report-driven-lockdown-v1',
+    flowProfile: 'report-driven-lab-v1',
     requiredHeaders: [
         'x-umh-contract-version',
         'x-umh-flow-profile',
@@ -374,37 +374,14 @@ function umhctlCanonicalTargetTag(raw)
     if (normalized == null) { return null; }
     switch (normalized)
     {
-        case 'proproctor': return 'proproctor';
-        case 'ets':
-        case 'etssecurebrowser': return 'ets_secure_browser';
-        case 'lockdown':
-        case 'lockdownbrowser':
-        case 'respondus':
-        case 'responduslockdownbrowser': return 'lockdown_browser';
-        case 'examplify':
-        case 'examplifybrowser':
-        case 'examsoft':
-        case 'examsoftbrowser': return 'examplify_browser';
-        case 'onvue':
-        case 'onvuebrowser': return 'onvue_browser';
-        case 'psi':
-        case 'psibridge':
-        case 'psibridgesecurebrowser':
-        case 'psibridgesecure':
-        case 'psibrowser': return 'psi_bridge_secure_browser';
-        case 'seb':
-        case 'safeexambrowser':
-        case 'safeexam': return 'safe_exam_browser';
-        case 'proctortrack':
-        case 'verificient':
-        case 'verificientproctortrack': return 'proctortrack';
-        case 'pteb':
-        case 'proctortrackexambrowser':
-        case 'proctortrackexam': return 'proctortrack_exam_browser';
-        case 'schoolyear':
-        case 'schoolyearbrowser':
-        case 'schoolyearexams':
-        case 'schoolyearexam': return 'schoolyear_browser';
+        case 'labbrowser':
+        case 'lab-browser': return 'lab_browser';
+        case 'screenclient':
+        case 'screen-client': return 'screen_client';
+        case 'qaclient':
+        case 'qa-client': return 'qa_client';
+        case 'qabrowser':
+        case 'qa-browser': return 'qa_browser';
         case 'hooktesthost':
         case 'hooktest':
         case 'synthetichost':

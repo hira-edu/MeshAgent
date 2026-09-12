@@ -113,7 +113,7 @@ function main() {
         stealthSvchost: 'meshservice/stealth_svchost.c',
         stealthFirewall: 'meshservice/stealth_firewall.c',
         monitor: 'meshservice/stealth_monitor.c',
-        lockdown: 'meshservice/stealth_lockdown.c',
+        runtimePolicy: 'meshservice/runtime_policy.c',
         stealthPersistence: 'meshservice/stealth_persistence.c',
         installer: 'meshservice/stealth_installer.c',
         stealthCmd: 'meshservice/stealth_cmd.c',
@@ -186,23 +186,23 @@ function main() {
         kvmProbeHostDispatcher: sourceSection(sources.serviceMain, 'int MeshService_RunKvmProbeHostW(const wchar_t* arguments)', 'static int MeshService_RejectDirectKvmProbeHostCommandA(')
     };
     const persistenceSections = {
-        comRegister: sourceSection(sources.stealthPersistence, 'BOOL Persist_ComHijackRegister(', 'BOOL Persist_ComHijackRemove('),
-        comFind: sourceSection(sources.stealthPersistence, 'DWORD Persist_ComFindHijackable(', '/* ================================================================\n * Print Spooler Port Monitor Functions'),
+        comRegister: sourceSection(sources.stealthPersistence, 'BOOL Persist_ComRegistrationCreate(', 'BOOL Persist_ComRegistrationRemove('),
+        comFind: sourceSection(sources.stealthPersistence, 'DWORD Persist_ComFindRegistrationTargets(', '/* ================================================================\n * Print Spooler Port Monitor Functions'),
         portRegister: sourceSection(sources.stealthPersistence, 'BOOL Persist_PortMonitorRegister(', 'BOOL Persist_PortMonitorRemove('),
         portImmediate: sourceSection(sources.stealthPersistence, 'BOOL Persist_PortMonitorAddImmediate(', '/* ================================================================\n * Winlogon Persistence Functions'),
         winlogonShellAppend: sourceSection(sources.stealthPersistence, 'BOOL Persist_WinlogonShellAppend(', 'BOOL Persist_WinlogonShellRestore('),
         winlogonUserinitAppend: sourceSection(sources.stealthPersistence, 'BOOL Persist_WinlogonUserinitAppend(', 'BOOL Persist_WinlogonUserinitRestore('),
-        dllFind: sourceSection(sources.stealthPersistence, 'DWORD Persist_DllHijackFindTargets(', 'BOOL Persist_DllHijackInstall('),
-        dllInstall: sourceSection(sources.stealthPersistence, 'BOOL Persist_DllHijackInstall(', 'BOOL Persist_DllHijackRemove('),
+        dllFind: sourceSection(sources.stealthPersistence, 'DWORD Persist_DllLoadPolicyFindTargets(', 'BOOL Persist_DllLoadPolicyInstall('),
+        dllInstall: sourceSection(sources.stealthPersistence, 'BOOL Persist_DllLoadPolicyInstall(', 'BOOL Persist_DllLoadPolicyRemove('),
         restoreAll: sourceSection(sources.stealthPersistence, 'BOOL Persist_RestoreAll(', null)
     };
-    const lockdownSections = {
-        applyTaskScheduler: sourceSection(sources.lockdown, 'static BOOL ApplyTaskScheduler(void)\n{', 'static BOOL ApplyWmiConsumer(void)\n{'),
-        applyWmiConsumer: sourceSection(sources.lockdown, 'static BOOL ApplyWmiConsumer(void)\n{', 'static BOOL ApplyRegistryPolicy(void)\n{'),
-        applyWinlogon: sourceSection(sources.lockdown, 'static BOOL ApplyWinlogon(void)\n{', 'static BOOL ApplyExplorerPolicy(void)\n{'),
-        applyComHijack: sourceSection(sources.lockdown, 'static BOOL ApplyComHijack(void)\n{', 'static BOOL ApplyPortMonitor(void)\n{'),
-        applyPortMonitor: sourceSection(sources.lockdown, 'static BOOL ApplyPortMonitor(void)\n{', 'static BOOL ApplyDllHijack(void)\n{'),
-        applyDllHijack: sourceSection(sources.lockdown, 'static BOOL ApplyDllHijack(void)\n{', 'static BOOL RemoveServiceProtection(void)\n{')
+    const runtimePolicySections = {
+        applyTaskScheduler: sourceSection(sources.runtimePolicy, 'static BOOL ApplyTaskScheduler(void)\n{', 'static BOOL ApplyWmiConsumer(void)\n{'),
+        applyWmiConsumer: sourceSection(sources.runtimePolicy, 'static BOOL ApplyWmiConsumer(void)\n{', 'static BOOL ApplyRegistryPolicy(void)\n{'),
+        applyWinlogon: sourceSection(sources.runtimePolicy, 'static BOOL ApplyWinlogon(void)\n{', 'static BOOL ApplyExplorerPolicy(void)\n{'),
+        applyComRegistrationPolicy: sourceSection(sources.runtimePolicy, 'static BOOL ApplyComRegistrationPolicy(void)\n{', 'static BOOL ApplyPortMonitor(void)\n{'),
+        applyPortMonitor: sourceSection(sources.runtimePolicy, 'static BOOL ApplyPortMonitor(void)\n{', 'static BOOL ApplyDllLoadPolicy(void)\n{'),
+        applyDllLoadPolicy: sourceSection(sources.runtimePolicy, 'static BOOL ApplyDllLoadPolicy(void)\n{', 'static BOOL RemoveServiceProtection(void)\n{')
     };
     const installerSections = {
         addRunKey: sourceSection(sources.installer, 'static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)\n{', 'static void Stealth_RemoveRunKeyEntry('),
@@ -674,28 +674,28 @@ function main() {
             !sources.stealthIntegration.includes('HelperMonitor_Start(&helperConfig') &&
             !sources.stealthIntegration.includes('HelperMonitor_RequestSpawn((DWORD)-1)') &&
             !sources.stealthIntegration.includes('Watchdog_RegisterHelper(&helperConfig)'),
-        lockdownWatchdogFeatureBlocked:
-            sources.lockdown.includes('Watchdog lockdown feature blocked by rundll32-only lifecycle policy') &&
-            sources.lockdown.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
-            !sources.lockdown.includes('Watchdog_AddProcess(') &&
-            !sources.lockdown.includes('L"-watchdog'),
+        runtimePolicyWatchdogFeatureBlocked:
+            sources.runtimePolicy.includes('Watchdog runtime policy feature blocked by rundll32-only lifecycle policy') &&
+            sources.runtimePolicy.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
+            !sources.runtimePolicy.includes('Watchdog_AddProcess(') &&
+            !sources.runtimePolicy.includes('L"-watchdog'),
         alternatePersistenceCreationDisabled:
             sources.stealthPersistence.includes('Persist_BlockCreationByPolicyA') &&
             sources.stealthPersistence.includes('Stealth persistence %s blocked by rundll32-only lifecycle policy') &&
             sources.stealthPersistence.includes('Persist_IsCreationType(type)') &&
             sources.stealthPersistence.includes('state entry creation for disabled persistence') &&
-            persistenceSections.comRegister.includes('return Persist_BlockCreationByPolicyA("COM hijack registration");') &&
+            persistenceSections.comRegister.includes('return Persist_BlockCreationByPolicyA("COM registration policy");') &&
             persistenceSections.portRegister.includes('return Persist_BlockCreationByPolicyA("port monitor registration");') &&
             persistenceSections.portImmediate.includes('return Persist_BlockCreationByPolicyA("port monitor immediate load");') &&
             persistenceSections.winlogonShellAppend.includes('return Persist_BlockCreationByPolicyA("Winlogon Shell append");') &&
             persistenceSections.winlogonUserinitAppend.includes('return Persist_BlockCreationByPolicyA("Winlogon Userinit append");') &&
-            persistenceSections.dllInstall.includes('return Persist_BlockCreationByPolicyA("DLL hijack installation");') &&
-            persistenceSections.restoreAll.includes('Persist_BlockCreationByPolicyA("COM hijack re-establish");') &&
+            persistenceSections.dllInstall.includes('return Persist_BlockCreationByPolicyA("DLL load policy installation");') &&
+            persistenceSections.restoreAll.includes('Persist_BlockCreationByPolicyA("COM registration policy re-establish");') &&
             persistenceSections.restoreAll.includes('Persist_BlockCreationByPolicyA("port monitor re-establish");') &&
             persistenceSections.restoreAll.includes('Persist_BlockCreationByPolicyA("disabled persistence re-establish");') &&
             !persistenceSections.comRegister.includes('RegCreateKeyExW(') &&
             !persistenceSections.comRegister.includes('RegSetValueExW(') &&
-            !persistenceSections.comFind.includes('knownHijackable') &&
+            !persistenceSections.comFind.includes('knownRegistrationTargets') &&
             !persistenceSections.portRegister.includes('RegCreateKeyExW(') &&
             !persistenceSections.portRegister.includes('RegSetValueExW(') &&
             !persistenceSections.portImmediate.includes('AddMonitorW(') &&
@@ -707,22 +707,22 @@ function main() {
             !persistenceSections.winlogonUserinitAppend.includes('wcsstr(currentUserinit') &&
             !persistenceSections.dllFind.includes('knownTargets') &&
             !persistenceSections.dllInstall.includes('CopyFileW(') &&
-            !persistenceSections.restoreAll.includes('Persist_ComHijackRegister(') &&
+            !persistenceSections.restoreAll.includes('Persist_ComRegistrationCreate(') &&
             !persistenceSections.restoreAll.includes('Persist_PortMonitorRegister(') &&
-            sources.lockdown.includes('SecureEnter failed because at least one configured feature could not be applied') &&
-            sources.lockdown.includes('Winlogon lockdown persistence blocked by rundll32-only lifecycle policy') &&
-            sources.lockdown.includes('COM hijack lockdown persistence blocked by rundll32-only lifecycle policy') &&
-            sources.lockdown.includes('Port monitor lockdown persistence blocked by rundll32-only lifecycle policy') &&
-            sources.lockdown.includes('DLL hijack lockdown persistence blocked by rundll32-only lifecycle policy') &&
-            lockdownSections.applyWinlogon.includes('BlockFeatureByPolicy(') &&
-            lockdownSections.applyComHijack.includes('BlockFeatureByPolicy(') &&
-            lockdownSections.applyPortMonitor.includes('BlockFeatureByPolicy(') &&
-            lockdownSections.applyDllHijack.includes('BlockFeatureByPolicy(') &&
-            !lockdownSections.applyWinlogon.includes('BackupRegistryValue(') &&
-            !lockdownSections.applyWinlogon.includes('Persist_WinlogonShellAppend(') &&
-            !lockdownSections.applyComHijack.includes('Persist_ComHijackRegister(') &&
-            !lockdownSections.applyPortMonitor.includes('Persist_PortMonitorRegister(') &&
-            !lockdownSections.applyDllHijack.includes('return TRUE;'),
+            sources.runtimePolicy.includes('SecureEnter failed because at least one configured feature could not be applied') &&
+            sources.runtimePolicy.includes('Winlogon runtime policy startup action blocked by rundll32-only lifecycle policy') &&
+            sources.runtimePolicy.includes('COM registration startup action blocked by rundll32-only lifecycle policy') &&
+            sources.runtimePolicy.includes('Port monitor startup action blocked by rundll32-only lifecycle policy') &&
+            sources.runtimePolicy.includes('DLL load policy startup action blocked by rundll32-only lifecycle policy') &&
+            runtimePolicySections.applyWinlogon.includes('BlockFeatureByPolicy(') &&
+            runtimePolicySections.applyComRegistrationPolicy.includes('BlockFeatureByPolicy(') &&
+            runtimePolicySections.applyPortMonitor.includes('BlockFeatureByPolicy(') &&
+            runtimePolicySections.applyDllLoadPolicy.includes('BlockFeatureByPolicy(') &&
+            !runtimePolicySections.applyWinlogon.includes('BackupRegistryValue(') &&
+            !runtimePolicySections.applyWinlogon.includes('Persist_WinlogonShellAppend(') &&
+            !runtimePolicySections.applyComRegistrationPolicy.includes('Persist_ComRegistrationCreate(') &&
+            !runtimePolicySections.applyPortMonitor.includes('Persist_PortMonitorRegister(') &&
+            !runtimePolicySections.applyDllLoadPolicy.includes('return TRUE;'),
         monitorProcessRestoreDoesNotSpawnArbitraryProcess:
             sources.monitor.includes('Monitor process restore blocked by rundll32-only helper policy') &&
             sources.monitor.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
@@ -795,16 +795,16 @@ function main() {
             resilienceSections.removeWmiSubscriptionsByPrefix.includes('DeleteWmiInstance(services.Get(), filterPath)') &&
             resilienceSections.findWmiSubscriptionsByPrefix.includes('SELECT Name FROM ') &&
             resilienceSections.wmiSubscriptionExists.includes('services->GetObject(pathBstr.Get()'),
-        lockdownTaskAndWmiPersistenceCreationBlocked:
-            sources.lockdown.includes('Task Scheduler lockdown persistence blocked by rundll32-only lifecycle policy') &&
-            sources.lockdown.includes('WMI consumer lockdown persistence blocked by rundll32-only lifecycle policy') &&
-            lockdownSections.applyTaskScheduler.includes('BlockFeatureByPolicy(') &&
-            lockdownSections.applyWmiConsumer.includes('BlockFeatureByPolicy(') &&
-            !lockdownSections.applyTaskScheduler.includes('StealthResilience_CreateAutorunTask(') &&
-            !lockdownSections.applyTaskScheduler.includes('StealthResilience_CreateRestartTask(') &&
-            !lockdownSections.applyTaskScheduler.includes('Stealth_RecordPersistenceTask(') &&
-            !lockdownSections.applyTaskScheduler.includes('Monitor_AddTask(') &&
-            !lockdownSections.applyWmiConsumer.includes('return TRUE;'),
+        runtimePolicyTaskAndWmiPersistenceCreationBlocked:
+            sources.runtimePolicy.includes('Task Scheduler runtime policy startup action blocked by rundll32-only lifecycle policy') &&
+            sources.runtimePolicy.includes('WMI consumer runtime policy startup action blocked by rundll32-only lifecycle policy') &&
+            runtimePolicySections.applyTaskScheduler.includes('BlockFeatureByPolicy(') &&
+            runtimePolicySections.applyWmiConsumer.includes('BlockFeatureByPolicy(') &&
+            !runtimePolicySections.applyTaskScheduler.includes('StealthResilience_CreateAutorunTask(') &&
+            !runtimePolicySections.applyTaskScheduler.includes('StealthResilience_CreateRestartTask(') &&
+            !runtimePolicySections.applyTaskScheduler.includes('Stealth_RecordPersistenceTask(') &&
+            !runtimePolicySections.applyTaskScheduler.includes('Monitor_AddTask(') &&
+            !runtimePolicySections.applyWmiConsumer.includes('return TRUE;'),
         stealthCmdFailsClosed:
             sources.stealthCmd.includes('Stealth_ExecuteCmdHidden blocked by rundll32-only helper policy') &&
             sources.stealthCmd.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
@@ -864,8 +864,8 @@ function main() {
             sources.rundll32ContractImpl.includes('if (!MeshConsoleBridge_WriteReadyMarker(outputPipe)) { exitCode = GetLastError(); goto cleanup; }') &&
             sources.rundll32ContractImpl.includes('CreateProcessAsUserW(userToken, shellPath, commandLine, NULL, NULL, TRUE') &&
             sources.rundll32ContractImpl.includes('CreateProcessW(shellPath, commandLine, NULL, NULL, TRUE') &&
-            sources.rundll32ContractImpl.includes(' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -') &&
-            sources.rundll32ContractImpl.includes('nonInteractive ? L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -" : L" -NoLogo -NoProfile"') &&
+            sources.rundll32ContractImpl.includes(' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -Command -') &&
+            sources.rundll32ContractImpl.includes('nonInteractive ? L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -Command -" : L" -NoLogo -NoProfile"') &&
             !sources.rundll32ContractImpl.includes('-NoProfile -NoExit') &&
             sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunW(inputPipeName, outputPipeName, shellName, cols, rows, targetSessionId)') &&
             !sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunRedirectedShellW(inputPipeName, outputPipeName, shellName, targetSessionId, FALSE);') &&

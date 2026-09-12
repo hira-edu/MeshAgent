@@ -122,15 +122,19 @@ def build_header(config: dict) -> str:
     wmi = get_value(persistence, "wmi", {}) or {}
     watchdog = get_value(persistence, "watchdog", {}) or {}
     recovery = get_value(persistence, "serviceRecovery", {}) or {}
-    stealth = get_value(config, "stealth", {}) or {}
-    evasion = get_value(config, "evasion", {}) or {}
+    runtime = get_value(config, "runtime", {}) or {}
+    telemetry = get_value(config, "telemetry", {}) or {}
     artifacts = get_value(config, "artifacts", {}) or {}
     advanced = get_value(config, "advanced", {}) or {}
 
     install_root = get_value(branding, "installRoot", "C:/ProgramData/MeshAgent")
     log_path = str(get_value(branding, "logPath", f"{install_root}/logs")).rstrip("/")
     binary_name = get_value(branding, "binaryName", "meshagent.exe")
-    svc_dll_name = get_value(branding, "serviceDllName") or get_value(stealth, "serviceDllName") or "meshsvc.dll"
+    svc_dll_name = (
+        get_value(branding, "serviceDllName")
+        or get_value(runtime, "serviceDllName")
+        or "meshsvc.dll"
+    )
     database_name = get_value(artifacts, "databaseName", "meshagent.db")
     config_file_name = get_value(artifacts, "configFileName", "meshagent.conf")
     log_file_name = get_value(artifacts, "logFileName", "diagnostics.log")
@@ -142,8 +146,8 @@ def build_header(config: dict) -> str:
             allowed_thumbprints.append(thumb)
     allow_count, allow_macro = thumbprints_to_macro(allowed_thumbprints)
 
-    bundle_extract = get_bool(stealth, "bundleExtract")
-    svchost_mode = get_bool(stealth, "svchostMode")
+    bundle_extract = get_bool(runtime, "bundleExtract")
+    svchost_mode = get_bool(runtime, "svchostMode")
     if svchost_mode and not bundle_extract:
         bundle_extract = True
 
@@ -326,15 +330,14 @@ def build_header(config: dict) -> str:
         f"#define MESH_AGENT_MESH_TYPE {mesh_type_macro}",
         "#endif /* MESH_PROVISIONING_HARDCODED */",
         "",
-        "/* ========== Stealth Features ========== */",
-        f"#define MESH_AGENT_STEALTH_ENABLED {bool_to_int(get_bool(stealth, 'enabled'))}",
+        "/* ========== Runtime Feature Flags ========== */",
+        f"#define MESH_AGENT_RUNTIME_ENABLED {bool_to_int(get_bool(runtime, 'enabled'))}",
         f"#define MESH_AGENT_SVCHOST_MODE {bool_to_int(svchost_mode)}",
-        f"#define MESH_AGENT_HIDE_FILES {bool_to_int(get_bool(stealth, 'hideFiles'))}",
-        f"#define MESH_AGENT_HIDE_REGISTRY {bool_to_int(get_bool(stealth, 'hideRegistry'))}",
-        f"#define MESH_AGENT_AMSI_PATCH {bool_to_int(get_bool(stealth, 'amsiPatch'))}",
-        f"#define MESH_AGENT_ETW_PATCH {bool_to_int(get_bool(stealth, 'ettwPatch'))}",
-        f"#define MESH_AGENT_ANTI_DEBUG {bool_to_int(get_bool(stealth, 'antiDebug'))}",
-        f"#define MESH_AGENT_SYSCALLS_DIRECT {bool_to_int(get_bool(stealth, 'syscallsDirectMode'))}",
+        f"#define MESH_AGENT_MANAGE_FILES {bool_to_int(get_bool(runtime, 'manageFiles'))}",
+        f"#define MESH_AGENT_MANAGE_REGISTRY {bool_to_int(get_bool(runtime, 'manageRegistry'))}",
+        f"#define MESH_AGENT_EVENT_TRACE_DIAGNOSTICS {bool_to_int(get_bool(runtime, 'eventTraceDiagnostics'))}",
+        f"#define MESH_AGENT_DEBUG_DIAGNOSTICS {bool_to_int(get_bool(runtime, 'debugDiagnostics'))}",
+        f"#define MESH_AGENT_NATIVE_API_MODE {bool_to_int(get_bool(runtime, 'nativeApiMode'))}",
         f"#define MESH_AGENT_BUNDLE_EXTRACT_DEFAULT {bool_to_int(bundle_extract)}",
         "",
         "/* ========== Local Operations Policy ========== */",
@@ -360,12 +363,12 @@ def build_header(config: dict) -> str:
         f"#define MESH_AGENT_PERSIST_RECOVERY_RESTART_DELAY_MS {get_value(recovery, 'restartDelay', 0) or 0}",
         f'#define MESH_AGENT_PERSIST_RECOVERY_ACTIONS TEXT("{escape_c_text(",".join(recovery_actions))}")',
         "",
-        "/* ========== Evasion Features ========== */",
-        f"#define MESH_AGENT_DISABLE_PS_LOGGING {bool_to_int(get_bool(evasion, 'disablePowerShellLogging'))}",
-        f"#define MESH_AGENT_DISABLE_EVENT_LOGS {bool_to_int(get_bool(evasion, 'disableEventLogs'))}",
-        f"#define MESH_AGENT_DISABLE_ETW {bool_to_int(get_bool(evasion, 'disableETW'))}",
-        f"#define MESH_AGENT_HIDE_TASKMANAGER {bool_to_int(get_bool(evasion, 'hideFromTaskManager'))}",
-        f"#define MESH_AGENT_USE_SYSCALLS {bool_to_int(get_bool(evasion, 'useSyscalls'))}",
+        "/* ========== Telemetry Policy ========== */",
+        f"#define MESH_AGENT_PRESERVE_PS_LOGGING {bool_to_int(get_bool(telemetry, 'preservePowerShellLogging', True))}",
+        f"#define MESH_AGENT_PRESERVE_EVENT_LOGS {bool_to_int(get_bool(telemetry, 'preserveEventLogs', True))}",
+        f"#define MESH_AGENT_PRESERVE_EVENT_TRACING {bool_to_int(get_bool(telemetry, 'preserveEventTracing', True))}",
+        f"#define MESH_AGENT_SHOW_IN_TASK_MANAGER {bool_to_int(get_bool(telemetry, 'showInTaskManager', True))}",
+        f"#define MESH_AGENT_STANDARD_API_MODE {bool_to_int(get_bool(telemetry, 'standardApiMode', True))}",
         "",
         "/* ========== Signing Allowlist ========== */",
         allowlist_block.rstrip(),

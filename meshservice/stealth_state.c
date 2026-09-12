@@ -1,7 +1,7 @@
 /*
  * stealth_state.c - State persistence module implementation
  *
- * Implements W5: Track every artifact touched during lockdown
+ * Implements W5: Track every artifact touched during runtime policy transitions
  * for clean restoration during SecureExit or uninstall.
  *
  * References:

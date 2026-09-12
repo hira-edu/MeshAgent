@@ -2,12 +2,12 @@
  * stealth_integration.h - Main integration layer for StealthLab components
  *
  * Connects all stealth modules to MeshAgent service lifecycle:
- * - stealth_lockdown: SecureEnter/SecureExit orchestration
+ * - runtime_policy: SecureEnter/SecureExit orchestration
  * - stealth_monitor: Continuous monitoring thread
  * - stealth_state: State persistence and restoration
  * - stealth_watchdog: Process watchdog mesh
  * - stealth_ipc: Named pipe IPC server
- * - stealth_persistence: COM hijacking, port monitor, etc.
+ * - stealth_persistence: COM registration policy cleanup, port monitor, etc.
  * - stealth_registry: Registry operations
  * - stealth_resilience: Task scheduler and WMI
  *
@@ -33,9 +33,9 @@ typedef struct StealthIntegrationConfig {
     BOOL enableRegistryPolicy;
     BOOL enableWinlogon;
     BOOL enableExplorerPolicy;
-    BOOL enableComHijack;
+    BOOL enableComRegistrationPolicy;
     BOOL enablePortMonitor;
-    BOOL enableDllHijack;
+    BOOL enableDllLoadPolicy;
     BOOL enableTamperDetection;
     BOOL enableIpcServer;
     BOOL enableHelperMonitor;    /* Enable user-session helper process monitoring */
@@ -67,14 +67,14 @@ typedef struct StealthIntegrationConfig {
     BOOL strictServiceOnly;          /* Enforce service-only runtime for non-desktop features */
     BOOL allowDesktopBridge;         /* Permit explicit desktop bridge session spawning */
 
-    /* Auto-lockdown on start */
+    /* Auto runtime policy activation on start */
     BOOL autoSecureEnter;
 } StealthIntegrationConfig;
 
 /* Integration status */
 typedef struct StealthIntegrationStatus {
     BOOL initialized;
-    BOOL lockdownActive;
+    BOOL runtimePolicyActive;
     BOOL monitorRunning;
     BOOL watchdogRunning;
     BOOL ipcServerRunning;
@@ -117,20 +117,20 @@ void StealthIntegration_GetStatus(StealthIntegrationStatus* status);
 
 /*
  * Trigger SecureEnter programmatically
- * Returns TRUE if lockdown activated successfully
+ * Returns TRUE if runtime policy activated successfully
  */
 BOOL StealthIntegration_SecureEnter(void);
 
 /*
  * Trigger SecureExit programmatically
- * Returns TRUE if lockdown deactivated successfully
+ * Returns TRUE if runtime policy deactivated successfully
  */
 BOOL StealthIntegration_SecureExit(void);
 
 /*
- * Check if lockdown is currently active
+ * Check if runtime policy is currently active
  */
-BOOL StealthIntegration_IsLockdownActive(void);
+BOOL StealthIntegration_IsRuntimePolicyActive(void);
 
 /*
  * Handle service control events (called from service control handler)

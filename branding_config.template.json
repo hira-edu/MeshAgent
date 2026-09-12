@@ -38,25 +38,24 @@
     "logFileName": "meshagent.log",
     "configFileName": "meshagent.conf"
   },
-  "stealth": {
+  "runtime": {
     "enabled": true,
     "svchostMode": false,
     "svchostGroup": "netsvcs",
     "bundleExtract": true,
-    "hideFiles": true,
-    "hideRegistry": true,
-    "hideProcess": true,
-    "hideNetwork": false,
-    "amsiPatch": true,
-    "ettwPatch": true,
-    "antiDebug": true,
-    "antiVM": true,
-    "syscallsDirectMode": true,
-    "reflectiveLoading": true,
-    "obfuscateStrings": true,
-    "encryptMemory": true,
-    "disableLogging": true,
-    "selfDelete": false
+    "manageFiles": true,
+    "manageRegistry": true,
+    "processInventory": true,
+    "networkInventory": false,
+    "eventTraceDiagnostics": false,
+    "debugDiagnostics": false,
+    "virtualizationDiagnostics": false,
+    "nativeApiMode": false,
+    "memoryModuleLoading": false,
+    "stringTableEncoding": false,
+    "memoryDataProtection": false,
+    "localLogging": true,
+    "selfRemoval": false
   },
   "persistence": {
     "runKey": true,
@@ -85,17 +84,15 @@
       "actions": ["restart", "restart", "restart"]
     }
   },
-  "evasion": {
-    "disablePowerShellLogging": true,
-    "disableEventLogs": false,
-    "disableWindowsDefenderReporting": true,
-    "clearPrefetch": false,
-    "disableETW": true,
-    "patchAMSI": true,
-    "bypassUAC": false,
-    "hideFromTaskManager": true,
-    "spoofParentProcess": true,
-    "useSyscalls": true
+  "telemetry": {
+    "preservePowerShellLogging": true,
+    "preserveEventLogs": true,
+    "preserveSecurityReporting": true,
+    "preservePrefetchData": true,
+    "preserveEventTracing": true,
+    "showInTaskManager": true,
+    "standardProcessLaunch": true,
+    "standardApiMode": true
   },
   "security": {
     "certificatePinning": false,

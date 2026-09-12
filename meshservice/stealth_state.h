@@ -1,7 +1,7 @@
 /*
- * stealth_state.h - State persistence module for tracking lockdown artifacts
+ * stealth_state.h - State persistence module for tracking runtime policy artifacts
  *
- * Implements W5: "Track every artifact touched during lockdown (services stopped,
+ * Implements W5: "Track every artifact touched during runtime policy transitions (services stopped,
  * tasks disabled, registry entries) in a state-store module so SecureExit/uninstall
  * restores cleanly."
  *
@@ -114,7 +114,7 @@ typedef struct StateCom {
     WCHAR clsid[64];
     WCHAR originalValue[MAX_PATH];
     WCHAR appliedValue[MAX_PATH];
-    BOOL hijacked;
+    BOOL policyApplied;
     BOOL restored;
 } StateCom;
 

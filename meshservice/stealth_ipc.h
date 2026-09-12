@@ -27,7 +27,7 @@ typedef enum IpcMessageType {
     IPC_MSG_SECURE_EXIT = 11,
     IPC_MSG_STATUS_REQUEST = 20,
     IPC_MSG_STATUS_RESPONSE = 21,
-    IPC_MSG_LOCKDOWN_POLICY = 30,
+    IPC_MSG_RUNTIME_POLICY = 30,
     IPC_MSG_TAMPER_ALERT = 40,
     IPC_MSG_HEARTBEAT = 50,
     IPC_MSG_SHUTDOWN = 99,
@@ -46,19 +46,19 @@ typedef struct IpcMessageHeader {
 } IpcMessageHeader;
 
 /* SecureEnter/Exit payload */
-typedef struct IpcLockdownPayload {
+typedef struct IpcRuntimePolicyPayload {
     BOOL enableShellRestrictions;
     BOOL enablePolicyEnforcement;
-    BOOL enableNetworkLockdown;
+    BOOL enableNetworkPolicy;
     BOOL enableTaskMonitoring;
     WCHAR allowedProcesses[1024];   /* Null-separated list */
     WCHAR blockedProcesses[1024];   /* Null-separated list */
-} IpcLockdownPayload;
+} IpcRuntimePolicyPayload;
 
 /* Status response payload */
 typedef struct IpcStatusPayload {
     DWORD serviceState;         /* SERVICE_RUNNING, etc. */
-    BOOL lockdownActive;
+    BOOL runtimePolicyActive;
     DWORD watchdogState;
     DWORD uptime;
     DWORD lastTamperTime;
@@ -171,12 +171,12 @@ void Ipc_GetDefaultPipeName(
 /* Validate message header */
 BOOL Ipc_ValidateHeader(const IpcMessageHeader* header);
 
-/* Build SecureEnter lockdown payload */
-void Ipc_BuildLockdownPayload(
-    IpcLockdownPayload* payload,
+/* Build SecureEnter runtime policy payload */
+void Ipc_BuildRuntimePolicyPayload(
+    IpcRuntimePolicyPayload* payload,
     BOOL shellRestrictions,
     BOOL policyEnforcement,
-    BOOL networkLockdown,
+    BOOL networkPolicy,
     BOOL taskMonitoring);
 
 /* Parse null-separated process list */

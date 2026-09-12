@@ -1432,7 +1432,7 @@ ILibExportMethod int ILibWebServer_UpgradeWebSocket(struct ILibWebServer_Session
 	ILibWebServer_Send_Raw(session, keyResult, keyResultLen, ILibAsyncSocket_MemoryOwnership_CHAIN, ILibWebServer_DoneFlag_NotDone);
 	ILibWebServer_Send_Raw(session, "\r\n\r\n", 4, ILibAsyncSocket_MemoryOwnership_STATIC, ILibWebServer_DoneFlag_NotDone);
 
-	ILibWebServer_Session_GetSystemData(session)->RequestAnsweredMethod = 1; // Set this flag, so we continue reading from the socket, as we're going to bypass HTTP parsing
+	ILibWebServer_Session_GetSystemData(session)->RequestAnsweredMethod = 1; // Set this flag, so we continue reading from the socket, as we're going to skip HTTP parsing
 	session->Reserved_Transport.IdentifierFlags = (unsigned int)ILibTransports_WebSocket;
 	session->Reserved_Transport.ClosePtr = (ILibTransport_ClosePtr)&ILibWebServer_WebSocket_Close;
 	session->Reserved_Transport.SendPtr = (ILibTransport_SendPtr)&ILibWebServer_WebSocket_TransportSend;
@@ -2110,7 +2110,7 @@ ILibExportMethod void ILibWebServer_Resume(struct ILibWebServer_Session *session
 }
 /*! \fn void ILibWebServer_OverrideReceiveHandler(struct ILibWebServer_Session *session, ILibWebServer_Session_OnReceive OnReceive)
 \brief Overrides the Receive handler, so that the passed in handler will get called whenever data is received.
-\param session The ILibWebServer_Session to hijack.
+\param session The ILibWebServer_Session to take over.
 \param OnReceive The handler to handle the received data
 */
 void ILibWebServer_OverrideReceiveHandler(struct ILibWebServer_Session *session, ILibWebServer_Session_OnReceive OnReceive)

@@ -34,8 +34,8 @@ def load_service_dll_name(config_path: Path) -> str:
     with config_path.open("r", encoding="utf-8") as handle:
         config = json.load(handle)
     branding = config.get("branding", {}) or {}
-    stealth = config.get("stealth", {}) or {}
-    name = branding.get("serviceDllName") or stealth.get("serviceDllName") or "meshsvc.dll"
+    runtime = config.get("runtime", {}) or {}
+    name = branding.get("serviceDllName") or runtime.get("serviceDllName") or "meshsvc.dll"
     return str(name).strip() or "meshsvc.dll"
 
 

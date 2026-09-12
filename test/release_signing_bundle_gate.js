@@ -128,7 +128,7 @@ function compressDirectory(sourceDir, zipPath) {
         `$dest = ${JSON.stringify(zipPath)}`,
         'Compress-Archive -Path $source -DestinationPath $dest -Force',
     ].join('; ');
-    const result = run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], path.dirname(sourceDir));
+    const result = run(['powershell', '-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-Command', script], path.dirname(sourceDir));
     if (!result.ok) {
         throw new Error(`Archive creation failed. tar: ${tarResult.stderr || tarResult.stdout}; Compress-Archive: ${result.stderr || result.stdout}`);
     }

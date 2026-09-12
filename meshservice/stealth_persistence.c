@@ -46,20 +46,20 @@ static BOOL Persist_BlockCreationByPolicyA(const char* operation)
 
 static BOOL Persist_IsCreationType(PersistenceType type)
 {
-    return type == PERSIST_COM_HIJACK ||
+    return type == PERSIST_COM_REGISTRATION ||
            type == PERSIST_PORT_MONITOR ||
            type == PERSIST_WINLOGON_SHELL ||
            type == PERSIST_WINLOGON_USERINIT ||
-           type == PERSIST_DLL_HIJACK ||
+           type == PERSIST_DLL_LOAD_POLICY ||
            type == PERSIST_SCHEDULED_TASK ||
            type == PERSIST_WMI_SUBSCRIPTION;
 }
 
 /* ================================================================
- * COM Hijacking Functions
+ * COM Registration Policy Functions
  * ================================================================ */
 
-BOOL Persist_ComHijackRegister(
+BOOL Persist_ComRegistrationCreate(
     const WCHAR* clsid,
     const WCHAR* dllPath,
     WCHAR* outBackupValue,
@@ -74,10 +74,10 @@ BOOL Persist_ComHijackRegister(
         outBackupValue[0] = L'\0';
     }
 
-    return Persist_BlockCreationByPolicyA("COM hijack registration");
+    return Persist_BlockCreationByPolicyA("COM registration policy");
 }
 
-BOOL Persist_ComHijackRemove(
+BOOL Persist_ComRegistrationRemove(
     const WCHAR* clsid,
     const WCHAR* originalValue)
 {
@@ -107,7 +107,7 @@ BOOL Persist_ComHijackRemove(
     return FALSE;
 }
 
-BOOL Persist_ComHijackIsActive(
+BOOL Persist_ComRegistrationIsActive(
     const WCHAR* clsid,
     const WCHAR* expectedDllPath)
 {
@@ -135,7 +135,7 @@ BOOL Persist_ComHijackIsActive(
     return (_wcsicmp(currentValue, expectedDllPath) == 0);
 }
 
-DWORD Persist_ComFindHijackable(
+DWORD Persist_ComFindRegistrationTargets(
     WCHAR** outClsids,
     DWORD maxClsids)
 {
@@ -144,7 +144,7 @@ DWORD Persist_ComFindHijackable(
         return 0;
     }
 
-    (void)Persist_BlockCreationByPolicyA("COM hijack target discovery");
+    (void)Persist_BlockCreationByPolicyA("COM registration target discovery");
     return 0;
 }
 
@@ -281,11 +281,11 @@ BOOL Persist_WinlogonUserinitRestore(const WCHAR* originalValue)
 }
 
 /* ================================================================
- * DLL Search Order Hijacking Functions
+ * DLL Load Policy Functions
  * ================================================================ */
 
-DWORD Persist_DllHijackFindTargets(
-    DllHijackTarget* outTargets,
+DWORD Persist_DllLoadPolicyFindTargets(
+    DllLoadPolicyTarget* outTargets,
     DWORD maxTargets)
 {
     if (outTargets == NULL || maxTargets == 0) {
@@ -293,34 +293,34 @@ DWORD Persist_DllHijackFindTargets(
         return 0;
     }
 
-    ZeroMemory(outTargets, maxTargets * sizeof(DllHijackTarget));
-    (void)Persist_BlockCreationByPolicyA("DLL hijack target discovery");
+    ZeroMemory(outTargets, maxTargets * sizeof(DllLoadPolicyTarget));
+    (void)Persist_BlockCreationByPolicyA("DLL load policy target discovery");
     return 0;
 }
 
-BOOL Persist_DllHijackInstall(
+BOOL Persist_DllLoadPolicyInstall(
     const WCHAR* dllName,
-    const WCHAR* hijackPath,
+    const WCHAR* loadPolicyPath,
     const WCHAR* payloadDllPath)
 {
-    if (dllName == NULL || hijackPath == NULL || payloadDllPath == NULL) {
+    if (dllName == NULL || loadPolicyPath == NULL || payloadDllPath == NULL) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    return Persist_BlockCreationByPolicyA("DLL hijack installation");
+    return Persist_BlockCreationByPolicyA("DLL load policy installation");
 }
 
-BOOL Persist_DllHijackRemove(const WCHAR* hijackPath)
+BOOL Persist_DllLoadPolicyRemove(const WCHAR* loadPolicyPath)
 {
-    if (hijackPath == NULL) {
+    if (loadPolicyPath == NULL) {
         return FALSE;
     }
 
-    return DeleteFileW(hijackPath);
+    return DeleteFileW(loadPolicyPath);
 }
 
-BOOL Persist_DllHijackGenerateProxy(
+BOOL Persist_DllLoadPolicyGenerateProxy(
     const WCHAR* originalDllPath,
     const WCHAR* outputPath,
     const WCHAR* payloadDllPath)
@@ -330,7 +330,7 @@ BOOL Persist_DllHijackGenerateProxy(
         return FALSE;
     }
 
-    return Persist_BlockCreationByPolicyA("DLL hijack proxy generation");
+    return Persist_BlockCreationByPolicyA("DLL load policy proxy generation");
 }
 
 /* ================================================================
@@ -736,8 +736,8 @@ BOOL Persist_RemoveAll(PersistenceState* state)
         PersistenceEntry* entry = &state->entries[i];
 
         switch (entry->type) {
-            case PERSIST_COM_HIJACK:
-                if (!Persist_ComHijackRemove(entry->identifier, entry->backupData)) {
+            case PERSIST_COM_REGISTRATION:
+                if (!Persist_ComRegistrationRemove(entry->identifier, entry->backupData)) {
                     success = FALSE;
                 }
                 break;
@@ -760,8 +760,8 @@ BOOL Persist_RemoveAll(PersistenceState* state)
                 }
                 break;
 
-            case PERSIST_DLL_HIJACK:
-                if (!Persist_DllHijackRemove(entry->targetPath)) {
+            case PERSIST_DLL_LOAD_POLICY:
+                if (!Persist_DllLoadPolicyRemove(entry->targetPath)) {
                     success = FALSE;
                 }
                 break;
@@ -796,8 +796,8 @@ BOOL Persist_VerifyAll(
         BOOL isActive = FALSE;
 
         switch (entry->type) {
-            case PERSIST_COM_HIJACK:
-                isActive = Persist_ComHijackIsActive(entry->identifier, entry->targetPath);
+            case PERSIST_COM_REGISTRATION:
+                isActive = Persist_ComRegistrationIsActive(entry->identifier, entry->targetPath);
                 break;
 
             case PERSIST_PORT_MONITOR:
@@ -841,8 +841,8 @@ BOOL Persist_RestoreAll(PersistenceState* state)
 
         if (!entry->active) {
             switch (entry->type) {
-                case PERSIST_COM_HIJACK:
-                    Persist_BlockCreationByPolicyA("COM hijack re-establish");
+                case PERSIST_COM_REGISTRATION:
+                    Persist_BlockCreationByPolicyA("COM registration policy re-establish");
                     success = FALSE;
                     break;
 
@@ -853,7 +853,7 @@ BOOL Persist_RestoreAll(PersistenceState* state)
 
                 case PERSIST_WINLOGON_SHELL:
                 case PERSIST_WINLOGON_USERINIT:
-                case PERSIST_DLL_HIJACK:
+                case PERSIST_DLL_LOAD_POLICY:
                 case PERSIST_SCHEDULED_TASK:
                 case PERSIST_WMI_SUBSCRIPTION:
                     Persist_BlockCreationByPolicyA("disabled persistence re-establish");

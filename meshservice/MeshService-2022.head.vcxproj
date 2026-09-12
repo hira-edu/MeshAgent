@@ -1155,10 +1155,9 @@
     <ClCompile Include="stealth_registry.c" />
     <ClCompile Include="stealth_persistence.c" />
     <ClCompile Include="stealth_monitor.c" />
-    <ClCompile Include="stealth_lockdown.c" />
+    <ClCompile Include="runtime_policy.c" />
     <ClCompile Include="stealth_state.c" />
     <ClCompile Include="stealth_integration.c" />
-    <ClCompile Include="syscalls.c" />
     <ClCompile Include="stealth_reflective.c" />
     <ClCompile Include="stealth_init.c" />
     <ClCompile Include="stealth_utils.c" />
@@ -1233,16 +1232,10 @@
     <ClInclude Include="stealth_registry.h" />
     <ClInclude Include="stealth_persistence.h" />
     <ClInclude Include="stealth_monitor.h" />
-    <ClInclude Include="stealth_lockdown.h" />
+    <ClInclude Include="runtime_policy.h" />
     <ClInclude Include="stealth_state.h" />
     <ClInclude Include="stealth_integration.h" />
     <ClInclude Include="stealth_utils.h" />
-    <ClInclude Include="syscalls.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <MASM Include="syscalls-asm.x64.asm">
-      <ExcludedFromBuild Condition="'$(Platform)'!='x64' and '$(Platform)'!='ARM64'">true</ExcludedFromBuild>
-    </MASM>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="$(ProjectDir)MeshAgent.MSBuild.targets" Condition="Exists('$(ProjectDir)MeshAgent.MSBuild.targets')" />

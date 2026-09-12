@@ -1728,7 +1728,7 @@ static BOOL MeshConsoleBridge_ResolveShellW(const wchar_t* shellName, BOOL nonIn
     if (_wcsicmp(shellName, L"powershell") == 0)
     {
         shellSuffix = L"\\WindowsPowerShell\\v1.0\\powershell.exe";
-        shellArgs = nonInteractive ? L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -" : L" -NoLogo -NoProfile";
+        shellArgs = nonInteractive ? L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -Command -" : L" -NoLogo -NoProfile";
     }
     else if (_wcsicmp(shellName, L"cmd") == 0 && !nonInteractive)
     {

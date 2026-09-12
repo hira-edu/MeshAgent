@@ -222,7 +222,7 @@ async function main() {
 
     await sleep(2000);
 
-    const animation = childProcess.spawnSync('powershell', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', animationPath], {
+    const animation = childProcess.spawnSync('powershell', ['-NoProfile', '-STA', '-ExecutionPolicy', 'RemoteSigned', '-File', animationPath], {
         windowsHide: true,
         encoding: 'utf8',
         timeout: 30000

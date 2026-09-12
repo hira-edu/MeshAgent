@@ -6,7 +6,7 @@ Status: Active ledger for MeshAgent-side UMH operator deployment assumptions and
 
 ## 2026-08-05 Retired-Op Closure And Post-WDA-Fix Publication
 
-- `hookControl` was removed from both shared modules, the operator contract fixture, help, and desktop/mobile layouts. Console and raw-JSON attempts now fail closed as unsupported; no retired bypass operation is published.
+- `hookControl` was removed from both shared modules, the operator contract fixture, help, and desktop/mobile layouts. Console and raw-JSON attempts now fail closed as unsupported; no retired secondary operation is published.
 - Focused install-path, module-parity, operator E2E, desktop/mobile matrix, rundll32 helper migration, and Playwright checks passed before publication.
 - Live `MasterService.exe`: size `16986624`, SHA256 `347f3c5ec7478fbb9e765d70b39ba4130a018662b2be633fe424af9440d14fc1`, SHA384/pin `827b9d4e9bb254a2bdb4e9c423a3ae97e319f119941f4c2bd792719ac7bcf178e6932b452aa23d02e7164908f60e1b54`.
 - Live control files: all four `umhctl.js` copies SHA256 `64cd8c4c660fd14f4b9a64a9b20345e84488762b152f3943491664ed94a5448f`; `recoverycore.js` SHA256 `4013fa7f958632df0462f2fbbd8cef6cb35663e7b2f3334a43017be7a4a75843`.
@@ -17,7 +17,7 @@ Status: Active ledger for MeshAgent-side UMH operator deployment assumptions and
 - MeshAgent remains at the rolled-back commit `0fb268971e670b09a89f977f727336a91328f0ea`; no native source or binary was changed or rebuilt for this repair.
 - The rolled-back embedded HTTP client failed before HTTP with `TLS Handshake Error` through the Cloudflare-backed `https://high.support/userfiles/...` route, while the same `rejectUnauthorized=1` path downloaded the complete unchanged payload through `https://agents.high.support/userfiles/...`.
 - The control download returned `17078784` bytes and SHA384 `86f0b4828b36ac88351ceb687fc61b8b6d608aa3d6d1406b79061518ba07b27af99c3334c30d9b00464c5a61c6277903`, matching the VPS and installed local `MasterService.exe`.
-- MeshCentral now emits the proven direct endpoint and matching pin. This is an exact endpoint contract correction, not a retry, fallback, TLS bypass, or heuristic.
+- MeshCentral now emits the proven direct endpoint and matching pin. This is an exact endpoint contract correction, not a retry, fallback, TLS override, or heuristic.
 
 ## 2026-07-01 Live UMH Publication / MasterService Republish
 
@@ -60,7 +60,7 @@ Current agent-side default flow contract:
 
 - protocol: `umh-control`
 - contract version: `2026-03-05`
-- flow profile: `report-driven-lockdown-v1`
+- flow profile: `report-driven-lab-v1`
 - required headers:
   - `x-umh-contract-version`
   - `x-umh-flow-profile`

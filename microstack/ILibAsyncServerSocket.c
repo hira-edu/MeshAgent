@@ -509,7 +509,7 @@ void ILibAsyncServerSocket_ResumeListeningSink(void *chain, void* user)
 #endif
 
 #if defined(WIN32)
-	// On Windows. Lets make sure no one else can bind to this addr/port. This stops socket hijacking (not a problem on Linux).
+	// On Windows. Lets make sure no one else can bind to this addr/port. This prevents socket takeover (not a problem on Linux).
 	if (setsockopt(m->ListenSocket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char*)&ra, sizeof(int)) != 0) ILIBCRITICALERREXIT(253);
 #else
 	// On Linux. Setting the re-use on a TCP socket allows reuse of the socket even in timeout state. Allows for fast stop/start (Not a problem on Windows).
@@ -675,7 +675,7 @@ ILibAsyncServerSocket_ServerModule ILibCreateAsyncServerSocketModuleWithMemoryEx
 #endif
 
 #if defined(WIN32)
-	// On Windows. Lets make sure no one else can bind to this addr/port. This stops socket hijacking (not a problem on Linux).
+	// On Windows. Lets make sure no one else can bind to this addr/port. This prevents socket takeover (not a problem on Linux).
 	if (setsockopt(RetVal->ListenSocket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char*)&ra, sizeof(int)) != 0) ILIBCRITICALERREXIT(253);
 #else
 	// On Linux. Setting the re-use on a TCP socket allows reuse of the socket even in timeout state. Allows for fast stop/start (Not a problem on Windows).

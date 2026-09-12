@@ -18,11 +18,11 @@ extern "C" {
 
 /* Persistence mechanism types */
 typedef enum PersistenceType {
-    PERSIST_COM_HIJACK = 1,
+    PERSIST_COM_REGISTRATION = 1,
     PERSIST_PORT_MONITOR = 2,
     PERSIST_WINLOGON_SHELL = 3,
     PERSIST_WINLOGON_USERINIT = 4,
-    PERSIST_DLL_HIJACK = 5,
+    PERSIST_DLL_LOAD_POLICY = 5,
     PERSIST_SCHEDULED_TASK = 6,
     PERSIST_WMI_SUBSCRIPTION = 7
 } PersistenceType;
@@ -37,33 +37,33 @@ typedef struct PersistenceEntry {
 } PersistenceEntry;
 
 /* ================================================================
- * COM Hijacking Functions
+ * COM Registration Policy Functions
  * ================================================================ */
 
-/* Well-known hijackable CLSIDs */
+/* Well-known COM registration CLSIDs */
 #define CLSID_MMDEVICE_ENUMERATOR L"{BCDE0395-E52F-467C-8E3D-C4579291692E}"
 #define CLSID_SHELL_FOLDER L"{D969A300-E7FF-11D0-A93B-00A0C90F2719}"
 #define CLSID_CONTEXT_MENU L"{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}"
 
-/* Retired COM hijack creation path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
-BOOL Persist_ComHijackRegister(
+/* Retired COM registration policy creation path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
+BOOL Persist_ComRegistrationCreate(
     const WCHAR* clsid,
     const WCHAR* dllPath,
     WCHAR* outBackupValue,
     size_t backupValueCch);
 
-/* Remove COM hijack and restore original */
-BOOL Persist_ComHijackRemove(
+/* Remove COM registration policy and restore original */
+BOOL Persist_ComRegistrationRemove(
     const WCHAR* clsid,
     const WCHAR* originalValue);
 
-/* Check if CLSID is currently hijacked by us */
-BOOL Persist_ComHijackIsActive(
+/* Check if CLSID is currently registered by this module */
+BOOL Persist_ComRegistrationIsActive(
     const WCHAR* clsid,
     const WCHAR* expectedDllPath);
 
-/* Retired COM hijack discovery path: returns no targets */
-DWORD Persist_ComFindHijackable(
+/* Retired COM registration policy discovery path: returns no targets */
+DWORD Persist_ComFindRegistrationTargets(
     WCHAR** outClsids,
     DWORD maxClsids);
 
@@ -110,32 +110,32 @@ BOOL Persist_WinlogonUserinitAppend(
 BOOL Persist_WinlogonUserinitRestore(const WCHAR* originalValue);
 
 /* ================================================================
- * DLL Search Order Hijacking Functions
+ * DLL Load Policy Functions
  * ================================================================ */
 
-/* Known DLL hijack targets */
-typedef struct DllHijackTarget {
+/* Known DLL load policy targets */
+typedef struct DllLoadPolicyTarget {
     WCHAR dllName[64];          /* e.g., "version.dll" */
     WCHAR targetExe[MAX_PATH];  /* Process that loads it */
-    WCHAR hijackPath[MAX_PATH]; /* Where to place hijack DLL */
-} DllHijackTarget;
+    WCHAR loadPolicyPath[MAX_PATH]; /* Managed DLL path */
+} DllLoadPolicyTarget;
 
-/* Retired DLL hijack discovery path: returns no targets */
-DWORD Persist_DllHijackFindTargets(
-    DllHijackTarget* outTargets,
+/* Retired DLL load policy discovery path: returns no targets */
+DWORD Persist_DllLoadPolicyFindTargets(
+    DllLoadPolicyTarget* outTargets,
     DWORD maxTargets);
 
-/* Retired DLL hijack install path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
-BOOL Persist_DllHijackInstall(
+/* Retired DLL load policy install path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
+BOOL Persist_DllLoadPolicyInstall(
     const WCHAR* dllName,
-    const WCHAR* hijackPath,
+    const WCHAR* loadPolicyPath,
     const WCHAR* payloadDllPath);
 
-/* Remove hijack DLL */
-BOOL Persist_DllHijackRemove(const WCHAR* hijackPath);
+/* Remove load-policy DLL */
+BOOL Persist_DllLoadPolicyRemove(const WCHAR* loadPolicyPath);
 
 /* Retired proxy generation path: fails with ERROR_ACCESS_DISABLED_BY_POLICY */
-BOOL Persist_DllHijackGenerateProxy(
+BOOL Persist_DllLoadPolicyGenerateProxy(
     const WCHAR* originalDllPath,
     const WCHAR* outputPath,
     const WCHAR* payloadDllPath);

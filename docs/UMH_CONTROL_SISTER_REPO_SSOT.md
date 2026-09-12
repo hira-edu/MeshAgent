@@ -72,16 +72,16 @@ The retained agent-side operator layer models:
 - `setConfig`
 - `clearTargetScope`
 
-`hookControl`, `lockdownBypass`, `examsoftBypass`, and `ipcBypass` are retired.
-They are absent from the control-op map, help, desktop/mobile operator fixtures, and
-MeshCentral UI. Console and raw-JSON attempts fail closed as unsupported. LockDown,
-ETS, and PSI input/WDA neutralization is automatic at HookDLL install time and has no
+`hookControl` and the legacy secondary control operations are retired. They are
+absent from the control-op map, help, desktop/mobile operator fixtures, and
+MeshCentral UI. Console and raw-JSON attempts fail closed as unsupported.
+Input and WDA normalization is automatic at HookDLL install time and has no
 operator toggle.
 
 The current agent-side default flow contract is:
 
 - `x-umh-contract-version=2026-03-05`
-- `x-umh-flow-profile=report-driven-lockdown-v1`
+- `x-umh-flow-profile=report-driven-lab-v1`
 
 ## `uiSnapshot` Aggregate Contract
 

@@ -355,7 +355,7 @@ function checkNativeConsoleBridge(source) {
             dispatchSection.includes('MeshConsoleBridge_RunW(inputPipeName, outputPipeName, shellName, cols, rows, targetSessionId)') &&
             !dispatchSection.includes('MeshConsoleBridge_RunRedirectedShellW(inputPipeName, outputPipeName, shellName, targetSessionId, FALSE);'),
         interactiveTerminalsDoNotForceNoExit:
-            source.includes('nonInteractive ? L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -" : L" -NoLogo -NoProfile"') &&
+            source.includes('nonInteractive ? L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -Command -" : L" -NoLogo -NoProfile"') &&
             source.includes('_wcsicmp(shellName, L"cmd") == 0 && !nonInteractive') &&
             source.includes('shellSuffix = L"\\\\cmd.exe";') &&
             !source.includes('-NoProfile -NoExit'),
@@ -380,9 +380,9 @@ function checkCustomRunCommandOverlay(source) {
             !source.includes("'%TEMP%\\\\UMH'") &&
             !source.includes("'%TEMP%\\\\UMH\\\\"),
         downloadCommandRunsNonInteractivePowerShell:
-            source.includes('powershell -NoLogo -NoProfile -NonInteractive -OutputFormat Text -ExecutionPolicy Bypass -EncodedCommand ') &&
+            source.includes('powershell -NoLogo -NoProfile -NonInteractive -OutputFormat Text -ExecutionPolicy RemoteSigned -EncodedCommand ') &&
             source.includes('function utf16leBase64') &&
-            !source.includes('powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '),
+            !source.includes('powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -Command '),
         downloadCommandDisposesWebClient:
             source.includes('$wc=New-Object System.Net.WebClient') &&
             source.includes('finally { if ($wc) { $wc.Dispose() } }')

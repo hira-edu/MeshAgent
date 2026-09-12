@@ -66,9 +66,9 @@ The canonical pipe-backed op names are the values emitted by `umhctlCanonicalCon
 
 ### Canonical actions
 
-No retained command family has a secondary action map. `hookControl`,
-`ipcBypass`, `lockdownBypass`, and `examsoftBypass` are retired and must be
-rejected as unsupported before dispatch.
+No retained command family has a secondary action map. `hookControl` and the
+legacy secondary control operations are retired and must be rejected as
+unsupported before dispatch.
 
 ### Flow headers
 
@@ -76,7 +76,7 @@ The retained default flow contract is:
 
 - protocol: `umh-control`
 - contract version: `2026-03-05`
-- flow profile: `report-driven-lockdown-v1`
+- flow profile: `report-driven-lab-v1`
 - required headers:
   - `x-umh-contract-version`
   - `x-umh-flow-profile`

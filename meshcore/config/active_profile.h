@@ -24,9 +24,9 @@ MESHCONFIG_INLINE const mesh_network_profile_t* MeshConfig_GetNetwork(void)
     return MeshConfig_GetActiveGroup()->network;
 }
 
-MESHCONFIG_INLINE const mesh_stealth_profile_t* MeshConfig_GetStealth(void)
+MESHCONFIG_INLINE const mesh_runtime_profile_t* MeshConfig_GetRuntime(void)
 {
-    return MeshConfig_GetActiveGroup()->stealth;
+    return MeshConfig_GetActiveGroup()->runtime;
 }
 
 MESHCONFIG_INLINE const mesh_persistence_profile_t* MeshConfig_GetPersistence(void)

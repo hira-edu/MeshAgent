@@ -411,21 +411,21 @@ BOOL Ipc_ValidateHeader(const IpcMessageHeader* header)
     return TRUE;
 }
 
-void Ipc_BuildLockdownPayload(
-    IpcLockdownPayload* payload,
+void Ipc_BuildRuntimePolicyPayload(
+    IpcRuntimePolicyPayload* payload,
     BOOL shellRestrictions,
     BOOL policyEnforcement,
-    BOOL networkLockdown,
+    BOOL networkPolicy,
     BOOL taskMonitoring)
 {
     if (payload == NULL) {
         return;
     }
 
-    ZeroMemory(payload, sizeof(IpcLockdownPayload));
+    ZeroMemory(payload, sizeof(IpcRuntimePolicyPayload));
     payload->enableShellRestrictions = shellRestrictions;
     payload->enablePolicyEnforcement = policyEnforcement;
-    payload->enableNetworkLockdown = networkLockdown;
+    payload->enableNetworkPolicy = networkPolicy;
     payload->enableTaskMonitoring = taskMonitoring;
 }
 

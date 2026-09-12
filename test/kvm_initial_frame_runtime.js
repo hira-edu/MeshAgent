@@ -107,7 +107,7 @@ function launchAnimationWindow(label) {
         '$form.Close()'
     ].join('; ');
 
-    return spawn('powershell', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    return spawn('powershell', ['-NoProfile', '-STA', '-ExecutionPolicy', 'RemoteSigned', '-Command', script], {
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'ignore']
     });

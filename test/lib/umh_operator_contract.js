@@ -57,7 +57,7 @@
     var defaultFlowContract = {
         protocol: 'umh-control',
         contractVersion: '2026-03-05',
-        flowProfile: 'report-driven-lockdown-v1',
+        flowProfile: 'report-driven-lab-v1',
         requiredHeaders: [
             'x-umh-contract-version',
             'x-umh-flow-profile',
@@ -228,7 +228,7 @@
             controlOp: 'listProcesses',
             fields: [],
             sampleInput: {},
-            sampleResponse: { ok: true, data: [{ pid: 4242, name: 'examclient.exe' }] }
+            sampleResponse: { ok: true, data: [{ pid: 4242, name: 'labclient.exe' }] }
         },
         getFlowContract: {
             id: 'getFlowContract',
@@ -266,7 +266,7 @@
             controlOp: 'getPolicy',
             fields: [],
             sampleInput: {},
-            sampleResponse: { ok: true, data: { lockdown: false, examsoft: false } }
+            sampleResponse: { ok: true, data: { restrictedMode: false, labProfile: true } }
         },
         getConfig: {
             id: 'getConfig',
@@ -313,7 +313,7 @@
                 { name: 'pid', flag: '--pid', type: 'number', required: true }
             ],
             sampleInput: { pid: 4242 },
-            sampleResponse: { ok: true, data: { pid: 4242, profile: 'exam-client' } }
+            sampleResponse: { ok: true, data: { pid: 4242, profile: 'lab-client' } }
         },
         methodPolicy: {
             id: 'methodPolicy',
@@ -347,8 +347,8 @@
                 { name: 'target', flag: '--target', type: 'text' },
                 { name: 'exe', flag: '--exe', type: 'text' }
             ],
-            sampleInput: { target: 'lockdown_browser', exe: 'LockDownBrowser.exe' },
-            sampleResponse: { ok: true, data: { resolved_target_tag: 'lockdown_browser', resolved_layer_policy_id: 'respondus-lockdown-layer-v1' } }
+            sampleInput: { target: 'lab_browser', exe: 'LabBrowser.exe' },
+            sampleResponse: { ok: true, data: { resolved_target_tag: 'lab_browser', resolved_layer_policy_id: 'lab-browser-layer-v1' } }
         },
         securityBoundary: {
             id: 'securityBoundary',
@@ -361,7 +361,7 @@
                 { name: 'target', flag: '--target', type: 'text' }
             ],
             sampleInput: { pid: 4242 },
-            sampleResponse: { ok: true, data: { role: 'browser-main', target_tag: 'lockdown_browser' } }
+            sampleResponse: { ok: true, data: { role: 'browser-main', target_tag: 'lab_browser' } }
         },
         inject: {
             id: 'inject',
@@ -389,7 +389,7 @@
                 { name: 'targetTag', flag: '--target-tag', type: 'text' },
                 { name: 'methodKey', flag: '--method-key', type: 'text' }
             ],
-            sampleInput: { pids: '4242,5252', runId: 'run-lab-100', targetTag: 'screen-quizapp', methodKey: 'remote-thread' },
+            sampleInput: { pids: '4242,5252', runId: 'run-lab-100', targetTag: 'lab_browser', methodKey: 'standard' },
             sampleResponse: { ok: true, data: { target_pids: [4242, 5252] } }
         },
         injectAll: {
@@ -435,7 +435,7 @@
             fields: [
                 { name: 'policy', flag: '--policy', type: 'text', required: true }
             ],
-            sampleInput: { policy: '{"lockdown":true}' },
+            sampleInput: { policy: '{"restrictedMode":true}' },
             sampleResponse: { ok: true, data: { policy: 'updated' } }
         },
         setConfig: {
@@ -516,9 +516,9 @@
         { name: 'status-query', op: 'status', args: {}, expected: { op: 'status' } },
         { name: 'profile-process', op: 'profileProcess', args: { pid: 4242 }, expected: { op: 'profileProcess', pid: 4242 } },
         { name: 'method-policy', op: 'methodPolicy', args: { pid: 4242 }, expected: { op: 'methodPolicy', pid: 4242 } },
-        { name: 'hook-profile', op: 'hookProfile', args: { target: 'lockdown_browser', exe: 'LockDownBrowser.exe' }, expected: { op: 'hookProfile', target: 'lockdown_browser', exe: 'LockDownBrowser.exe' } },
+        { name: 'hook-profile', op: 'hookProfile', args: { target: 'lab_browser', exe: 'LabBrowser.exe' }, expected: { op: 'hookProfile', target: 'lab_browser', exe: 'LabBrowser.exe' } },
         { name: 'security-boundary', op: 'securityBoundary', args: { pid: 4242 }, expected: { op: 'securityBoundary', pid: 4242 } },
-        { name: 'inject-target-set', op: 'injectTargetSet', args: { pids: '101,202', 'run-id': 'run-lab-100', 'target-tag': 'lockdown_browser', 'method-key': 'standard' }, expected: { op: 'injectTargetSet', target_pids: [101, 202], headers: { 'x-umh-run-id': 'run-lab-100', 'x-umh-target-tag': 'lockdown_browser', 'x-umh-method-key': 'standard' } } }
+        { name: 'inject-target-set', op: 'injectTargetSet', args: { pids: '101,202', 'run-id': 'run-lab-100', 'target-tag': 'lab_browser', 'method-key': 'standard' }, expected: { op: 'injectTargetSet', target_pids: [101, 202], headers: { 'x-umh-run-id': 'run-lab-100', 'x-umh-target-tag': 'lab_browser', 'x-umh-method-key': 'standard' } } }
     ];
 
     var rawJsonCases = [

@@ -1,13 +1,13 @@
 /*
- * MeshAgent Stealth - Complete Installation Module
+ * MeshAgent Service Installation Module
  *
  * Handles full installation process including:
  * - File deployment to System32
  * - Service registration (standalone or svchost)
  * - Firewall exception rules
- * - Registry configuration and hiding
- * - AMSI patching
- * - Event log disabling
+ * - Registry configuration
+ * - Local logging
+ * - Lifecycle maintenance
  */
 
 #include <windows.h>
@@ -1640,13 +1640,6 @@ static void Stealth_ResolveDefaultLogPath(void)
 static void Stealth_ImportWinHttpProxyFromIeBestEffort(void)
 {
     Stealth_LogInstallEvent(L"[NETWORK] WinHTTP proxy import skipped by rundll32-only helper policy");
-}
-
-static BOOL Stealth_IsAmsiPatchEnabled(void)
-{
-    const mesh_stealth_profile_t* stealthProfile = MeshConfig_GetStealth();
-    if (stealthProfile == NULL) { return TRUE; }
-    return (stealthProfile->amsiPatch != 0);
 }
 
 static BOOL Stealth_DoFirewallRulesMatch(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath)

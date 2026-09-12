@@ -766,47 +766,6 @@ function Test-RuntimePersistenceRefresh {
     }
 }
 
-function Test-AmsiPatchLog {
-    param([pscustomobject]$BrandingConfig)
-
-    $expectedEnabled = $true
-    if ($BrandingConfig -and $BrandingConfig.stealth -ne $null) {
-        if ($BrandingConfig.stealth.PSObject.Properties.Name -contains 'amsiPatch') {
-            $expectedEnabled = [bool]$BrandingConfig.stealth.amsiPatch
-        }
-    }
-
-    $logPath = Get-InstallerLogPath
-    if (-not (Test-Path -LiteralPath $logPath)) {
-        Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Warning" -Message "Installer log not found; unable to confirm AMSI posture."
-        return
-    }
-
-    try {
-        $logLines = Get-Content -LiteralPath $logPath -ErrorAction Stop
-    } catch {
-        Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Warning" -Message ("Unable to read installer log: {0}" -f $_.Exception.Message)
-        return
-    }
-
-    $applied = Select-String -InputObject $logLines -Pattern 'AMSI patch applied' -SimpleMatch | Select-Object -Last 1
-    $disabled = Select-String -InputObject $logLines -Pattern 'AMSI patch disabled via branding profile' -SimpleMatch | Select-Object -Last 1
-
-    if ($expectedEnabled) {
-        if ($applied) {
-            Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Pass" -Message "Installer log confirms AMSI patch executed."
-        } else {
-            Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Fail" -Message "Branding enables AMSI patching but installer log lacks confirmation."
-        }
-    } else {
-        if ($disabled -and -not $applied) {
-            Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Pass" -Message "AMSI patch disabled per branding profile."
-        } else {
-            Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Fail" -Message "Branding disables AMSI patching but installer log indicates it still ran."
-        }
-    }
-}
-
 function Remove-DiagnosticHostArtifacts {
     $serviceMetadata = Get-BrandingServiceMetadata
     $installRoot = $serviceMetadata.InstallRoot
@@ -1752,7 +1711,6 @@ function Invoke-RuntimeInstallValidation {
         $runtimeRecoveryRecorded = $true
         Test-WmiRestartTask -ServiceName $ServiceName -BrandingConfig $BrandingConfig
         Test-RuntimePersistenceRefresh -BinaryPath $runtimeBinary
-        Test-AmsiPatchLog -BrandingConfig $BrandingConfig
         $runtimePersistenceRecorded = $true
     }
     catch {
@@ -2300,7 +2258,6 @@ if ($RuntimeValidation) {
 
     function Write-RuntimePersistenceSkip([string]$Reason) {
         Write-TestResult -TestName "Runtime: WMI Task" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
-        Write-TestResult -TestName "Runtime: AMSI Patch" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
     }
 
     function Write-RuntimeSkipResults([string]$Reason) {

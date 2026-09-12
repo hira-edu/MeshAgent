@@ -2,7 +2,7 @@
  * Stealth Registry Module
  *
  * Registry wrapper with state persistence for backup/restore during
- * SecureEnter/SecureExit lockdown transitions.
+ * SecureEnter/SecureExit runtime policy transitions.
  *
  * Ported from:
  * - GiovanniDicanio/WinReg (MIT) - High-level C++ wrapper for Windows Registry
