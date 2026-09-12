@@ -1250,19 +1250,45 @@ BOOL MeshRundll32_WriteLifecycleManifestW(
     BOOL requireConfig)
 {
     const wchar_t* actionName = MeshRundll32_LifecycleActionNameW(action);
+    const WORD unicodeBom = 0xFEFF;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    DWORD written = 0;
+    DWORD error = ERROR_SUCCESS;
     if (manifestPath == NULL || manifestPath[0] == L'\0' || action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNKNOWN)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    DeleteFileW(manifestPath);
-    if (!WritePrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_ACTION_W, actionName, manifestPath)) { return FALSE; }
-    if (!MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_SOURCE_EXE_W, sourceExePath)) { return FALSE; }
-    if (!MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_SOURCE_DLL_W, sourceDllPath)) { return FALSE; }
-    if (!MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_DISPLAY_NAME_W, displayName)) { return FALSE; }
-    if (!MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_DESCRIPTION_W, serviceDescription)) { return FALSE; }
-    if (!WritePrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_REQUIRE_CONFIG_W, requireConfig ? L"1" : L"0", manifestPath)) { return FALSE; }
+    // The W profile APIs still create ANSI files unless a Unicode BOM already
+    // exists. Initialize UTF-16 before writing paths so no ACP conversion occurs.
+    file = CreateFileW(manifestPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) { return FALSE; }
+    if (!WriteFile(file, &unicodeBom, sizeof(unicodeBom), &written, NULL)) { error = GetLastError(); }
+    else if (written != sizeof(unicodeBom)) { error = ERROR_WRITE_FAULT; }
+    if (!CloseHandle(file) && error == ERROR_SUCCESS) { error = GetLastError(); }
+    if (error != ERROR_SUCCESS) { goto failed; }
+
+    if (!WritePrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_ACTION_W, actionName, manifestPath) ||
+        !MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_SOURCE_EXE_W, sourceExePath) ||
+        !MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_SOURCE_DLL_W, sourceDllPath) ||
+        !MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_DISPLAY_NAME_W, displayName) ||
+        !MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_DESCRIPTION_W, serviceDescription) ||
+        !WritePrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_REQUIRE_CONFIG_W, requireConfig ? L"1" : L"0", manifestPath))
+    {
+        error = GetLastError();
+        goto failed;
+    }
     return TRUE;
+
+failed:
+    if (!DeleteFileW(manifestPath))
+    {
+        // Preserve the write failure even when the partial file cannot be removed.
+        DWORD cleanupError = GetLastError();
+        if (error == ERROR_SUCCESS) { error = cleanupError; }
+    }
+    SetLastError(error != ERROR_SUCCESS ? error : ERROR_WRITE_FAULT);
+    return FALSE;
 }
 
 BOOL MeshRundll32_GetSystemRundll32PathW(wchar_t* rundll32Path, size_t rundll32PathCch)
@@ -1306,6 +1332,7 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
     STARTUPINFOW si;
     DWORD waitResult = WAIT_OBJECT_0;
     DWORD exitCode = STILL_ACTIVE;
+    DWORD error = ERROR_SUCCESS;
     BOOL ok = FALSE;
 
     if (exitCodeOut != NULL) { *exitCodeOut = ERROR_GEN_FAILURE; }
@@ -1327,7 +1354,9 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
             MeshRundll32_PrepareTempManifestPathW(manifestPath, _countof(manifestPath)) :
             MeshRundll32_PrepareManifestPathW(manifestPath, _countof(manifestPath))))
     {
-        return FALSE;
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) { error = ERROR_GEN_FAILURE; }
+        goto cleanup;
     }
 
     if (!MeshRundll32_WriteLifecycleManifestW(
@@ -1339,6 +1368,8 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
             serviceDescription,
             requireConfig))
     {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) { error = ERROR_WRITE_FAULT; }
         goto cleanup;
     }
 
@@ -1351,7 +1382,7 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
             MESH_RUNDLL32_ENTRY_LIFECYCLE_W,
             manifestPath)))
     {
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        error = ERROR_INSUFFICIENT_BUFFER;
         goto cleanup;
     }
 
@@ -1362,7 +1393,8 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
 
     if (!CreateProcessW(rundll32Path, commandLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
     {
-        Stealth_LogInstallEvent(L"[RUNDLL32_CONTRACT] CreateProcessW failed for lifecycle host (error=%lu)", GetLastError());
+        error = GetLastError();
+        Stealth_LogInstallEvent(L"[RUNDLL32_CONTRACT] CreateProcessW failed for lifecycle host (error=%lu)", error);
         goto cleanup;
     }
 
@@ -1372,13 +1404,19 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
         waitResult = WaitForSingleObject(pi.hProcess, timeoutMs);
         if (waitResult != WAIT_OBJECT_0)
         {
-            Stealth_LogInstallEvent(L"[RUNDLL32_CONTRACT] lifecycle host wait failed/timed out (wait=%lu error=%lu)", waitResult, GetLastError());
+            error = (waitResult == WAIT_TIMEOUT) ? ERROR_TIMEOUT :
+                (waitResult == WAIT_FAILED) ? GetLastError() : ERROR_GEN_FAILURE;
+            Stealth_LogInstallEvent(L"[RUNDLL32_CONTRACT] lifecycle host wait failed/timed out (wait=%lu error=%lu)", waitResult, error);
             ok = FALSE;
-            if (waitResult == WAIT_TIMEOUT) { TerminateProcess(pi.hProcess, ERROR_TIMEOUT); }
+            if (waitResult == WAIT_TIMEOUT && !TerminateProcess(pi.hProcess, ERROR_TIMEOUT))
+            {
+                Stealth_LogInstallEvent(L"[RUNDLL32_CONTRACT] Timed-out lifecycle host termination failed (error=%lu)", GetLastError());
+            }
         }
         if (!GetExitCodeProcess(pi.hProcess, &exitCode))
         {
             exitCode = GetLastError();
+            if (error == ERROR_SUCCESS) { error = exitCode; }
             ok = FALSE;
         }
         if (exitCodeOut != NULL) { *exitCodeOut = exitCode; }
@@ -1396,10 +1434,34 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
     }
 
 cleanup:
-    if (pi.hThread != NULL) { CloseHandle(pi.hThread); }
-    if (pi.hProcess != NULL) { CloseHandle(pi.hProcess); }
-    if (waitForExit && manifestPath[0] != L'\0') { DeleteFileW(manifestPath); }
-    if (waitForExit && deleteHostDllOnExit && hostDllPath[0] != L'\0') { DeleteFileW(hostDllPath); }
+    if (pi.hThread != NULL && !CloseHandle(pi.hThread))
+    {
+        Stealth_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle thread handle close failed (error=%lu)", GetLastError());
+    }
+    if (pi.hProcess != NULL && !CloseHandle(pi.hProcess))
+    {
+        Stealth_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle process handle close failed (error=%lu)", GetLastError());
+    }
+    if (waitForExit && manifestPath[0] != L'\0' && !DeleteFileW(manifestPath))
+    {
+        DWORD cleanupError = GetLastError();
+        if (cleanupError != ERROR_FILE_NOT_FOUND)
+        {
+            Stealth_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle manifest cleanup failed (error=%lu)", cleanupError);
+        }
+    }
+    if (waitForExit && deleteHostDllOnExit && hostDllPath[0] != L'\0' && !DeleteFileW(hostDllPath))
+    {
+        DWORD cleanupError = GetLastError();
+        if (cleanupError != ERROR_FILE_NOT_FOUND)
+        {
+            Stealth_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle DLL cleanup failed (error=%lu)", cleanupError);
+        }
+    }
+    // A completed child failure is reported through exitCodeOut. Only launch,
+    // manifest and wait/query API failures populate GetLastError. Never let
+    // logging or cleanup relabel an install failure as "failed to launch".
+    SetLastError(error);
     return ok;
 }
 
@@ -2757,7 +2819,12 @@ void CALLBACK MeshPreProtectionCaptureW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lp
     }
 
     Stealth_LogInstallEvent(L"[PREPROTECTION_CAPTURE] Starting capture path=%ls", capturePath);
+    #if defined(MESHAGENT_ENABLE_STEALTH)
     ok = MeshAgent_RunPreProtectionCaptureValidationW(capturePath);
+#else
+    (void)capturePath;
+    ok = FALSE;
+#endif
     Stealth_LogInstallEvent(L"[PREPROTECTION_CAPTURE] Completed status=%ls path=%ls", ok ? L"success" : L"failed", capturePath);
     ExitProcess(ok ? ERROR_SUCCESS : ERROR_GEN_FAILURE);
 }

@@ -599,7 +599,7 @@ CommandResult RunLifecycle(string cliExe, string action, int timeoutMs)
         "Description=",
         "RequireConfig=1",
         string.Empty
-    }, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+    }, Encoding.Unicode);
 
     var rundll32Path = Path.Combine(Environment.SystemDirectory, "rundll32.exe");
     using var process = new Process

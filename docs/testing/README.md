@@ -66,6 +66,56 @@ deployed source as the failing control when local and live versions differ.
 
 ## Native and runtime probes
 
+Update regressions exercise the native decoder and every server transfer block:
+
+```powershell
+python .\test\compressed_update_runtime.py --evidence .\artifacts\validation\compressed-update
+python .\test\native_update_hash_runtime.py `
+  --package .\meshservice\x64\StealthLab\MeshService-2022.exe `
+  --package .\meshservice\StealthLab\MeshService-2022.exe `
+  --evidence .\artifacts\validation\native-update-hash
+```
+
+The decoder probe covers exact 16 KiB output boundaries, streaming ZIP data
+descriptors, and paused output; `--zip <file>` repeats a captured payload.
+The transfer probe uses the built native hash function on actual packages and
+appended random-policy fixtures, then executes production sender callbacks
+through all ACKs. It checks all transferred bytes, final receiver hash, task
+completion and descriptor cleanup across raw/ZIP, RAM/disk and capability
+combinations. `--server-source <meshagent.js>` tests a frozen deployment copy.
+Neither probe enrolls or installs an agent. A live rollout also needs an
+installed EXE/DLL hash check and observed core recovery; first-block delivery,
+HTTP downloads and source-pattern checks do not establish update completion.
+
+Lifecycle manifest regressions use real Windows profile APIs without installing:
+
+```powershell
+python .\test\lifecycle_manifest_runtime.py --evidence .\artifacts\validation\lifecycle-native
+python .\test\lifecycle_manifest_writers_runtime.py --evidence .\artifacts\validation\lifecycle-writers
+```
+
+The first compiles the production writer/reader and launcher into x64 and Win32
+fixtures. It covers new/rewritten ASCII, Chinese, Arabic and surrogate-pair
+paths, missing/locked/read-only destinations, and preservation of API errors
+and child status when logging/cleanup changes `GetLastError`. The second runs
+the actual JavaScript writer under Node and the built native MeshConsole,
+the test helper, and only the deployment command's manifest-writing prefix.
+Windows reads the resulting files and checks every Unicode field.
+
+For the built DLL and an actual policy-bearing download, run read-only package
+preflight from Unicode folders (repeat `--package` for both architectures):
+
+```powershell
+python .\test\lifecycle_unicode_package_runtime.py `
+  --package <downloaded-agent.exe> `
+  --dll .\meshservice\x64\StealthLab_DLL\MeshService-2022.dll `
+  --manifest-fixture .\artifacts\validation\lifecycle-native\x64\manifest-test.exe `
+  --evidence .\artifacts\validation\lifecycle-package
+```
+
+This invokes `validate-package` only. Passing does not claim an interactive
+UAC installation succeeded on a different PC.
+
 `*_runtime.js`, runtime PowerShell probes, and bridge smoke tests require the
 matching built executable/DLL. Session, service, secure-desktop, input, and
 install/update/uninstall tests may require an elevated Windows shell and an
@@ -157,6 +207,20 @@ The contract shared by the fixtures, raw console, and recovery core is
 
 ## Release checks
 
+- Validate embedded Windows elevation manifests in both built service EXEs and
+  again in fresh server downloads. This data-only check runs no installer code:
+
+  ```powershell
+  python .\test\package_elevation_runtime.py `
+    .\meshservice\StealthLab\MeshService-2022.exe `
+    .\meshservice\x64\StealthLab\MeshService-2022.exe `
+    --evidence .\artifacts\validation\package-elevation
+  ```
+
+  Both must request `requireAdministrator` with `uiAccess=false`. The previous
+  Win32 download reproduces the failure with `asInvoker`; the x64 control passes.
+  This checks the shipped loader contract, not a completed UAC interaction or
+  a fresh installation on a separate endpoint.
 - `test/release_signing_bundle_gate.js` stages the release set and reports PE
   signing state and digests.
 - `test/release_bundle_gate.js` verifies the expected package, current release

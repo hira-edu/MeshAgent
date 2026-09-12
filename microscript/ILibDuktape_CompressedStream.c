@@ -63,19 +63,25 @@ void ILibDuktape_deCompressor_Resume(ILibDuktape_DuplexStream *sender, void *use
 	char *inbuffer = (char*)Duktape_GetBufferProperty(cs->ctx, -1, ILibDuktape_CompressorStream_ResumeBuffer);
 	if (inbuffer == NULL)
 	{
+		duk_pop(cs->ctx);
 		ILibDuktape_DuplexStream_Ready(cs->ds);
 		return;
 	}
 	char buffer[16384];
 	size_t avail = 0;
 	int res = 0;
+	int inflateResult = Z_OK;
 	cs->Z.avail_in = (uint32_t)ILibMemory_Size(inbuffer);
 	cs->Z.next_in = (Bytef*)inbuffer;
 	do
 	{
 		cs->Z.avail_out = sizeof(buffer);
 		cs->Z.next_out = (Bytef*)buffer;
-		if ((res = inflate(&(cs->Z), Z_NO_FLUSH)) != Z_OK && res != Z_STREAM_END)
+		inflateResult = inflate(&(cs->Z), Z_NO_FLUSH);
+		// An exact output-buffer boundary can consume the last input byte.
+		// The next drain then returns Z_BUF_ERROR until more input arrives.
+		if (inflateResult == Z_BUF_ERROR && cs->Z.avail_in == 0) { break; }
+		if (inflateResult != Z_OK && inflateResult != Z_STREAM_END)
 		{
 			// ERROR
 			ILibDuktape_DuplexStream_WriteEnd(cs->ds);
@@ -93,8 +99,9 @@ void ILibDuktape_deCompressor_Resume(ILibDuktape_DuplexStream *sender, void *use
 				if (cs->Z.avail_in > 0)
 				{
 					char *tmp = (char*)Duktape_PushBuffer(cs->ctx, cs->Z.avail_in);				// [stream][buffer]
-					duk_put_prop_string(cs->ctx, -2, ILibDuktape_CompressorStream_ResumeBuffer);// [stream]
 					memcpy_s(tmp, ILibMemory_Size(tmp), cs->Z.next_in, ILibMemory_Size(tmp));
+					// Copy before replacing the property releases the old input buffer.
+					duk_put_prop_string(cs->ctx, -2, ILibDuktape_CompressorStream_ResumeBuffer);// [stream]
 				}
 				else
 				{
@@ -103,7 +110,7 @@ void ILibDuktape_deCompressor_Resume(ILibDuktape_DuplexStream *sender, void *use
 				break;
 			}
 		}
-	} while (cs->Z.avail_out == 0);
+	} while (cs->Z.avail_out == 0 && inflateResult != Z_STREAM_END);
 	if (res == 0) { duk_del_prop_string(cs->ctx, -1, ILibDuktape_CompressorStream_ResumeBuffer); }
 	duk_pop(cs->ctx);																			// ...
 	if (res == 0)
@@ -236,6 +243,7 @@ ILibTransport_DoneState ILibDuktape_deCompressor_Write(ILibDuktape_DuplexStream 
 	char tmp[16384];
 	size_t avail;
 	int ret = 0;
+	int inflateResult = Z_OK;
 	cs->Z.avail_in = bufferLen;
 	cs->Z.next_in = (Bytef*)buffer;
 
@@ -243,7 +251,9 @@ ILibTransport_DoneState ILibDuktape_deCompressor_Write(ILibDuktape_DuplexStream 
 	{
 		cs->Z.avail_out = sizeof(tmp);
 		cs->Z.next_out = (Bytef*)tmp;
-		if ((ret = inflate(&(cs->Z), Z_NO_FLUSH)) != Z_OK && ret != Z_STREAM_END)
+		inflateResult = inflate(&(cs->Z), Z_NO_FLUSH);
+		if (inflateResult == Z_BUF_ERROR && cs->Z.avail_in == 0) { break; }
+		if (inflateResult != Z_OK && inflateResult != Z_STREAM_END)
 		{
 			return(ILibTransport_DoneState_ERROR);
 		}
@@ -270,7 +280,7 @@ ILibTransport_DoneState ILibDuktape_deCompressor_Write(ILibDuktape_DuplexStream 
 				break;
 			}
 		}
-	} while (cs->Z.avail_out == 0);
+	} while (cs->Z.avail_out == 0 && inflateResult != Z_STREAM_END);
 
 	if (ret == 0)
 	{

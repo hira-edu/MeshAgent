@@ -7597,7 +7597,7 @@ MeshAgentHostContainer* MeshAgent_Create(MeshCommand_AuthInfo_CapabilitiesMask c
 	retVal->version = MESH_AGENT_VERSION;
 	retVal->chain = ILibCreateChainEx(3 * sizeof(void*));
 	retVal->pipeManager = ILibProcessPipe_Manager_Create(retVal->chain);
-	retVal->capabilities = capabilities | MeshCommand_AuthInfo_CapabilitiesMask_CONSOLE | MeshCommand_AuthInfo_CapabilitiesMask_JAVASCRIPT | MeshCommand_AuthInfo_CapabilitiesMask_COMPRESSION;
+	retVal->capabilities = capabilities | MeshCommand_AuthInfo_CapabilitiesMask_CONSOLE | MeshCommand_AuthInfo_CapabilitiesMask_JAVASCRIPT | MeshCommand_AuthInfo_CapabilitiesMask_COMPRESSION | MeshCommand_AuthInfo_CapabilitiesMask_STREAMING_COMPRESSION;
 	
 #ifdef WIN32
 	// This is only supported on Windows 8 and above

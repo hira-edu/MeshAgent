@@ -74,6 +74,8 @@ BOOL MeshRundll32_WriteLifecycleManifestW(
     const wchar_t* serviceDescription,
     BOOL requireConfig);
 BOOL MeshRundll32_GetSystemRundll32PathW(wchar_t* rundll32Path, size_t rundll32PathCch);
+// FALSE with GetLastError()==ERROR_SUCCESS means a completed child failed;
+// exitCodeOut contains its result. Nonzero GetLastError identifies an API failure.
 BOOL MeshRundll32_LaunchLifecycleHostW(
     MeshRundll32LifecycleAction action,
     const wchar_t* sourceExePath,

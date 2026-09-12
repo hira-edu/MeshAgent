@@ -29,8 +29,8 @@ function main() {
         'agent binary compare must accept served/appended fileHash'
     );
     assert(
-        ramUpdateSection.includes('obj.agentUpdate.agentUpdateHash = (obj.agentExeInfo.fileHash != null) ? obj.agentExeInfo.fileHash : obj.agentExeInfo.hash;'),
-        'RAM binary update must end with served/appended fileHash when present'
+        ramUpdateSection.includes('obj.agentUpdate.agentUpdateHash = obj.agentExeInfo.hash;'),
+        'Native RAM update must end with the normalized executable hash'
     );
     assert(
         source.includes('if (obj.agentExeInfo.fileHash != null) { cmd.hash = obj.agentExeInfo.fileHashHex; } else { cmd.hash = obj.agentExeInfo.hashhex; }'),
@@ -38,7 +38,7 @@ function main() {
     );
     assert(
         packageSource.includes('(agentExeInfo.fileHash != null && agentExeInfo.fileHash == agentHash)') &&
-        packageSource.includes('obj.agentUpdate.agentUpdateHash = (obj.agentExeInfo.fileHash != null) ? obj.agentExeInfo.fileHash : obj.agentExeInfo.hash;'),
+        packageSource.includes('obj.agentUpdate.agentUpdateHash = obj.agentExeInfo.hash;'),
         'installed MeshCentral package copy must match agent update hash contract'
     );
 
@@ -46,7 +46,7 @@ function main() {
         success: true,
         checks: {
             compareAcceptsFileHash: true,
-            ramUpdateUsesFileHash: true,
+            ramUpdateUsesNativeNormalizedHash: true,
             httpUpdateUsesFileHashHex: true,
             installedPackageCopyAligned: true
         }

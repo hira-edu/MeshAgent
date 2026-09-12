@@ -128,7 +128,7 @@ function writeManifest(manifestPath, fields) {
         `RequireConfig=${fields.requireConfig ? '1' : '0'}`,
         ''
     ];
-    fs.writeFileSync(manifestPath, lines.join('\r\n'), 'utf8');
+    fs.writeFileSync(manifestPath, '\ufeff' + lines.join('\r\n'), 'utf16le');
 }
 
 function commandFromLifecycleArgs(targetExe, args, options = {}) {

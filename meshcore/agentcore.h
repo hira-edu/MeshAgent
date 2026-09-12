@@ -69,7 +69,9 @@ typedef enum MeshCommand_AuthInfo_CapabilitiesMask
 	MeshCommand_AuthInfo_CapabilitiesMask_TEMPORARY = 0x20,
 	MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY = 0x40,
 	MeshCommand_AuthInfo_CapabilitiesMask_RESERVED = 0x80,
-	MeshCommand_AuthInfo_CapabilitiesMask_COMPRESSION = 0x100
+	MeshCommand_AuthInfo_CapabilitiesMask_COMPRESSION = 0x100,
+	// Streaming ZIP updates handle exhausted-input/output boundaries correctly.
+	MeshCommand_AuthInfo_CapabilitiesMask_STREAMING_COMPRESSION = 0x200
 }MeshCommand_AuthInfo_CapabilitiesMask;
 
 typedef enum AgentIdentifiers

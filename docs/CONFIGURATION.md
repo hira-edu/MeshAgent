@@ -70,6 +70,56 @@ Use `--package-msh` for raw build validation and `--package-exe` for a downloade
 EXE containing a policy. Requested files that are missing or whose embedded
 policy cannot be extracted fail the provisioning check.
 
+## Windows installer elevation
+
+Both `StealthLab` service EXEs embed `requestedExecutionLevel=requireAdministrator`
+with `uiAccess=false`. Installation needs administrative service-manager and
+installation-directory access. A normal non-elevated interactive launch uses
+Windows consent/administrator credentials before either architecture starts;
+cancellation leaves the installer unstarted. Already-elevated callers retain
+their existing privileges. This is the standard Windows manifest boundary.
+
+The Win32 project previously omitted this setting and inherited `asInvoker`.
+Its lifecycle launcher inherits the caller's token, so a normal desktop launch
+could reach protected staging/service operations and fail with error 5. The
+x64 project already required administrator privileges. Check the manifest in
+the actual downloaded EXE when diagnosing this distinction. An x64 access-denied
+report still requires the failing operation and endpoint logs; it is not
+explained by the Win32 manifest defect or by a MeshCentral certificate counter.
+
+## Windows lifecycle manifest encoding and errors
+
+Every lifecycle INI writer uses UTF-16LE with a BOM. `WritePrivateProfileStringW`
+otherwise creates an ANSI file, even though its arguments are wide strings.
+On an incompatible code page, a source path such as `OneDrive\桌面\agent.exe`
+becomes `OneDrive\??\agent.exe`; the elevated host then fails package preflight.
+The native writer initializes the BOM before writing fields. The JavaScript
+installer (including its embedded copy), deployment helper, and test harnesses
+use the same encoding. Existing ASCII manifests remain readable.
+
+`MeshRundll32_LaunchLifecycleHostW` preserves API failures before logging and
+cleanup. A completed child that fails returns `FALSE` with `GetLastError()==0`
+and its actual status in `exitCodeOut`. The GUI therefore reports an install
+failure with the child status instead of an unrelated last-error value from
+cleanup. Genuine launch/write/wait failures retain their Windows error code.
+
+## Native update transport
+
+Native command 13 verifies `GenerateSHA384FileHash`: Windows EXEs normalize PE
+checksum/signature fields and appended provisioning; ZIP files use their full
+byte hash. Raw native transfers must end with MeshCentral's `agentExeInfo.hash`,
+and compressed transfers with `zhash`. `fileHash` is the complete HTTP download
+hash used by the JavaScript HTTP updater and cannot substitute for the native
+EXE hash. The two download mechanisms have different verification contracts.
+
+Capability `0x100` retains its existing compression meaning. Native streaming
+ZIP updates additionally require `0x200`, advertised by the corrected decoder.
+Older agents receive raw native updates so they can install that decoder.
+The stream accepts exhausted-input `Z_BUF_ERROR` as needing more input, keeps
+zlib status separate from output backpressure, and retains input ownership
+until deferred output has resumed. Once updated, an agent can receive ZIP
+updates again. Hash verification remains mandatory for both formats.
+
 ## Generated outputs
 
 The build invokes `tools/generate_branding_assets.py` and related MSBuild

@@ -1853,7 +1853,7 @@ def activate_remote_pending_update(nodeid, update_path, login_user, login_key_fi
         "$ErrorActionPreference = 'Stop'; "
         f"New-Item -ItemType Directory -Force -Path '{WINDOWS_LIFECYCLE_STATE_DIR}' | Out-Null; "
         f"@('[Lifecycle]', 'Action=update', 'SourceExe={paths['update_path']}', 'RequireConfig=0') "
-        f"| Set-Content -LiteralPath '{manifest_path}' -Encoding ASCII; "
+        f"| Set-Content -LiteralPath '{manifest_path}' -Encoding Unicode; "
         f"& \"$env:SystemRoot\\System32\\rundll32.exe\" \"{paths['host_dll_path']},MeshLifecycleHostW\" \"{manifest_path}\""
     )
     result = run_meshctrl(

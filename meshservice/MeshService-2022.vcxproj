@@ -864,6 +864,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <TargetMachine>MachineX86</TargetMachine>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(ProjectDir)dpiaware.manifest %(AdditionalManifestFiles)</AdditionalManifestFiles>

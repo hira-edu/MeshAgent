@@ -324,7 +324,7 @@ function writeWindowsLifecycleManifest(actionName, targetBinary, sourceDll, parm
 {
     var fs = require('fs');
     var tempDir = process.env.TEMP || process.env.TMP;
-    var manifestPath, lines;
+    var manifestPath, lines, text, bytes, i;
     if (tempDir == null || tempDir.length == 0)
     {
         throw new Error('TEMP is not available; cannot write Windows lifecycle manifest.');
@@ -340,7 +340,12 @@ function writeWindowsLifecycleManifest(actionName, targetBinary, sourceDll, parm
         'RequireConfig=1',
         ''
     ];
-    fs.writeFileSync(manifestPath, lines.join('\r\n'));
+    // Windows profile APIs require a UTF-16 BOM; UTF-8 is read as the ANSI code page.
+    // Encode code units explicitly because the agent's Buffer lacks utf16le support.
+    text = '\ufeff' + lines.join('\r\n');
+    bytes = Buffer.alloc(text.length * 2);
+    for (i = 0; i < text.length; ++i) { bytes.writeUInt16LE(text.charCodeAt(i), i * 2); }
+    fs.writeFileSync(manifestPath, bytes);
     return (manifestPath);
 }
 function runWindowsNativeLifecycle(actionName, parms, gOptions)
