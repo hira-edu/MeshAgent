@@ -157,7 +157,7 @@ function main() {
     assert(generatedBranding.includes(`#define MESH_AGENT_SVCHOST_DLL TEXT("${serviceDllName}")`), 'generated branding service DLL does not match active branding JSON');
 
     const stealthDefaults = readRepoFile(repoRoot, 'meshservice/stealth_defaults.h');
-    assert(stealthDefaults.includes('STEALTH_INSTALL_ROOT_DACL_SDDL       L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;IU)"'), 'install-root DACL must give Interactive Users a non-inheritable direct root ACE');
+    assert(stealthDefaults.includes('STEALTH_INSTALL_ROOT_DACL_SDDL       L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;IU)(A;;0x1200a9;;;AU)"'), 'install-root DACL must give Interactive and Authenticated Users non-inheritable read/execute access');
     assert(!stealthDefaults.includes('(A;OI;0x1200a9;;;IU)'), 'install-root Interactive Users ACE must not inherit to child files');
 
     const stealthFirewall = readRepoFile(repoRoot, 'meshservice/stealth_firewall.c');
@@ -374,6 +374,7 @@ function main() {
         checked: {
             generatedBranding: true,
             installRootDaclNonInheritableInteractiveAce: true,
+            installRootDaclNonInheritableAuthenticatedAce: true,
             secureDirectoryCreationFailsClosed: true,
             systemSvchostResolutionUsesGetSystemDirectoryW: true,
             programDataKnownFolderOnly: true,

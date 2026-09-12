@@ -66,6 +66,19 @@ deployed source as the failing control when local and live versions differ.
 
 ## Native and runtime probes
 
+Directory ACL defaults have a data-only Windows Authz regression:
+
+```powershell
+python .\test\directory_acl_runtime.py --evidence .\artifacts\validation\directory-acl
+```
+
+It compiles x64 and Win32 fixtures against the production ACL header and checks
+read, write, execute, and inheritance scope for SYSTEM, administrators, and
+unprivileged principals. Data directories intentionally grant Authenticated
+Users inheritable read/execute access; the separate root and helper descriptors
+retain scoped read/execute access. Unprivileged write access must remain denied.
+It launches no agent and changes no host permissions.
+
 Update regressions exercise the native decoder and every server transfer block:
 
 ```powershell
@@ -180,6 +193,17 @@ node .\test\scriptcontainer_lifecycle_runtime.js `
 ```
 
 ## Grouped regression
+
+Cleanup reporting has an isolated regression that substitutes all service
+operations and compiles only a C# result-reporting fixture:
+
+```powershell
+node .\test\regression_cleanup_reporting_runtime.js .\artifacts\validation\cleanup-reporting
+```
+
+It checks that cleanup command failures and exceptions fail the run, preserve
+earlier phase failures, and produce a failing GUI exit code. It does not run
+the GUI or install an agent.
 
 `test/run_grouped_regression.js` combines package preflight, embedded-runtime
 self-tests, MeshCentral contract checks, native lifecycle, and the GUI harness.

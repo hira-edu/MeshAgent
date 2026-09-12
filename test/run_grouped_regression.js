@@ -973,24 +973,33 @@ function main() {
     } finally {
         if (cleanupRunner) {
             const cleanupDir = path.join(evidenceRoot, 'cleanup');
-            ensureDir(cleanupDir);
+            try {
+                ensureDir(cleanupDir);
+                const uninstall = runCommand('cleanup-uninstall', cleanupRunner.exe, ['-fulluninstall'], {
+                    cwd: path.dirname(cleanupRunner.exe),
+                    timeoutMs: 600000
+                });
+                writeCommandArtifacts(cleanupDir, 'cleanup-uninstall', uninstall);
 
-            const uninstall = runCommand('cleanup-uninstall', cleanupRunner.exe, ['-fulluninstall'], {
-                cwd: path.dirname(cleanupRunner.exe),
-                timeoutMs: 600000
-            });
-            writeCommandArtifacts(cleanupDir, 'cleanup-uninstall', uninstall);
+                const validate = runCommand('cleanup-validate-uninstall', cleanupRunner.exe, ['-validate-uninstall'], {
+                    cwd: path.dirname(cleanupRunner.exe),
+                    timeoutMs: 180000
+                });
+                writeCommandArtifacts(cleanupDir, 'cleanup-validate-uninstall', validate);
 
-            const validate = runCommand('cleanup-validate-uninstall', cleanupRunner.exe, ['-validate-uninstall'], {
-                cwd: path.dirname(cleanupRunner.exe),
-                timeoutMs: 180000
-            });
-            writeCommandArtifacts(cleanupDir, 'cleanup-validate-uninstall', validate);
-
-            writeJson(path.join(cleanupDir, 'cleanup.json'), {
-                uninstall,
-                validate
-            });
+                writeJson(path.join(cleanupDir, 'cleanup.json'), { uninstall, validate });
+                const cleanupFailures = [];
+                for (const [record, label] of [[uninstall, 'final cleanup uninstall'], [validate, 'final cleanup validation']]) {
+                    try { ensureSuccess(record, label); }
+                    catch (error) { cleanupFailures.push(error.message || String(error)); }
+                }
+                if (cleanupFailures.length > 0) { throw new Error(cleanupFailures.join('\n')); }
+            } catch (error) {
+                const cleanupError = error.stack || error.message || String(error);
+                const earlierError = pendingError ? `${pendingError.stack || pendingError.message || String(pendingError)}\n\n` : '';
+                pendingError = new Error(`${earlierError}Final cleanup failed:\n${cleanupError}`);
+                writeText(path.join(evidenceRoot, 'fatal.txt'), pendingError.stack || pendingError.message);
+            }
         }
 
         const allOk = pendingError == null && phaseResults.every((phase) => phase.passed);

@@ -93,7 +93,7 @@ finally
     WriteArtifacts();
 }
 
-return exitCode;
+return exitCode == 0 && results.Count > 0 && results.All(r => r.Passed) ? 0 : 1;
 
 bool IsProcessElevated()
 {
@@ -1253,7 +1253,7 @@ void WriteArtifacts()
     summary.AppendLine($"GUI_LOG={guiLogPath}");
     summary.AppendLine($"CLEANUP_AFTER_RUN={options.CleanupAfterRun}");
     summary.AppendLine($"FATAL={(string.IsNullOrWhiteSpace(fatalMessage) ? "(none)" : Trim(fatalMessage))}");
-    summary.AppendLine($"ALL_OK={results.All(item => item.Passed)}");
+    summary.AppendLine($"ALL_OK={exitCode == 0 && results.Count > 0 && results.All(item => item.Passed)}");
     foreach (var result in results)
     {
         summary.AppendLine($"SCENARIO={result.Name}");
