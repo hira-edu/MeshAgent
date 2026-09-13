@@ -231,6 +231,27 @@ The contract shared by the fixtures, raw console, and recovery core is
 
 ## Release checks
 
+Run the deployment transport and release-policy contracts directly before a
+publish. The transport probe fault-injects SSH authentication, configuration,
+timeout, and application failures and requires every nonzero exit to fail
+closed, including rollback paths invoked with diagnostics suppressed.
+
+```powershell
+python .\test\deploy_transport_health_runtime.py
+node .\test\release_bundle_policy_contract.js
+```
+
+The native process-token contract is a standalone, side-effect-free C fixture.
+Compile and execute it from both x64 and x86 Visual Studio developer shells:
+
+```powershell
+cl /nologo /W4 /WX /I .\meshservice `
+  .\test\process_token_contract_native.c `
+  /Fe:.\artifacts\validation\process_token_contract_native.exe `
+  /link Advapi32.lib Wtsapi32.lib
+.\artifacts\validation\process_token_contract_native.exe
+```
+
 - Validate embedded Windows elevation manifests in both built service EXEs and
   again in fresh server downloads. This data-only check runs no installer code:
 

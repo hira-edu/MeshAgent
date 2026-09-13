@@ -477,18 +477,17 @@ def ssh_cmd(command, capture=True, check=True, timeout=None):
             print("[ERROR] Remote command failed without a result:")
             print(f"  CMD: {command}")
         return None
-    if should_retry_remote_result(result):
+    if result.returncode != 0:
         if check:
-            print(f"[ERROR] Remote transport failed (exit {result.returncode}):")
+            failure_kind = (
+                "Remote transport failed"
+                if should_retry_remote_result(result)
+                else "Remote command failed"
+            )
+            print(f"[ERROR] {failure_kind} (exit {result.returncode}):")
             print(f"  CMD: {command}")
             if result.stderr:
                 print(f"  STDERR: {result.stderr.strip()}")
-        return None
-    if check and result.returncode != 0:
-        print(f"[ERROR] Remote command failed (exit {result.returncode}):")
-        print(f"  CMD: {command}")
-        if result.stderr:
-            print(f"  STDERR: {result.stderr.strip()}")
         return None
     return result.stdout.strip() if capture else result
 
@@ -2600,8 +2599,12 @@ def cmd_deploy(args):
         for error in verification_errors:
             print(f"      - {error}")
         print("    Restoring backup before restart.")
-        restore_agents_from_backup(backup_path, check=False)
-        refresh_remote_hashagents()
+        if restore_agents_from_backup(backup_path, check=False) is False:
+            print("    [ERROR] Backup restoration failed; hash refresh and restart were not attempted.")
+            return False
+        if refresh_remote_hashagents() is False:
+            print("    [ERROR] Backup was restored, but hashagents.json refresh failed; restart was not attempted.")
+            return False
         return False
     print("    Done.")
 
@@ -2634,9 +2637,14 @@ def cmd_deploy(args):
             for error in runtime_errors:
                 print(f"  - {error}")
             print("  Restoring backup and restarting MeshCentral.")
-            restore_agents_from_backup(backup_path, check=False)
-            refresh_remote_hashagents()
-            ssh_cmd(f"systemctl restart {SERVICE_NAME}", check=False)
+            if restore_agents_from_backup(backup_path, check=False) is False:
+                print("  [ERROR] Backup restoration failed; hash refresh and recovery restart were not attempted.")
+                return False
+            if refresh_remote_hashagents() is False:
+                print("  [ERROR] Backup was restored, but hashagents.json refresh failed; recovery restart was not attempted.")
+                return False
+            if ssh_cmd(f"systemctl restart {SERVICE_NAME}", check=False) is None:
+                print("  [ERROR] Backup and manifests were restored, but the recovery restart command failed.")
             return False
         print("\n[SUCCESS] Deployment complete!")
     else:

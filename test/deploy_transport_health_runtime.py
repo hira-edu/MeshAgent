@@ -28,12 +28,32 @@ LABELS = [
 
 
 def run_health(raw_health):
-    deploy.ssh_cmd = lambda *args, **kwargs: raw_health
-    deploy.get_publish_baseline_from_latest_manifest = lambda: ([], [], "fixture")
-    deploy.get_publish_runtime_state = lambda unused: []
-    deploy.get_core_publish_state = lambda unused: []
-    with contextlib.redirect_stdout(io.StringIO()):
-        return deploy.cmd_health(None)
+    original_ssh_cmd = deploy.ssh_cmd
+    original_baseline = deploy.get_publish_baseline_from_latest_manifest
+    original_runtime_state = deploy.get_publish_runtime_state
+    original_core_state = deploy.get_core_publish_state
+    try:
+        deploy.ssh_cmd = lambda *args, **kwargs: raw_health
+        deploy.get_publish_baseline_from_latest_manifest = lambda: ([], [], "fixture")
+        deploy.get_publish_runtime_state = lambda unused: []
+        deploy.get_core_publish_state = lambda unused: []
+        with contextlib.redirect_stdout(io.StringIO()):
+            return deploy.cmd_health(None)
+    finally:
+        deploy.ssh_cmd = original_ssh_cmd
+        deploy.get_publish_baseline_from_latest_manifest = original_baseline
+        deploy.get_publish_runtime_state = original_runtime_state
+        deploy.get_core_publish_state = original_core_state
+
+
+def run_ssh_cmd_with_result(result, check):
+    original_runner = deploy.run_remote_process
+    try:
+        deploy.run_remote_process = lambda *args, **kwargs: (result, None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return deploy.ssh_cmd("fixture", check=check)
+    finally:
+        deploy.run_remote_process = original_runner
 
 
 def main():
@@ -56,6 +76,34 @@ def main():
     assert deploy.should_retry_remote_result(completed([], 255, "", "Permission denied (publickey).")) is False
     assert deploy.should_retry_remote_result(completed([], 255, "", "Bad configuration option: fixture")) is False
     assert deploy.should_retry_remote_result(completed([], 1, "application timed out", "")) is False
+
+    failed_results = [
+        completed([], 255, "misleading-output", "Permission denied (publickey)."),
+        completed([], 255, "misleading-output", "Bad configuration option: fixture"),
+        completed([], 255, "misleading-output", "unknown ssh failure"),
+        completed([], 255, "misleading-output", "Connection timed out"),
+        completed([], 1, "misleading-output", "application failure"),
+    ]
+    for failed_result in failed_results:
+        assert run_ssh_cmd_with_result(failed_result, check=True) is None
+        assert run_ssh_cmd_with_result(failed_result, check=False) is None
+    assert run_ssh_cmd_with_result(completed([], 0, "", ""), check=False) == ""
+    assert run_ssh_cmd_with_result(completed([], 0, " fixture-output \n", ""), check=False) == "fixture-output"
+
+    deploy_source = (ROOT / "deploy.py").read_text(encoding="utf-8")
+    assert deploy_source.count("if restore_agents_from_backup(backup_path, check=False) is False:") == 2
+    assert deploy_source.count("if refresh_remote_hashagents() is False:") >= 2
+    assert "if ssh_cmd(f\"systemctl restart {SERVICE_NAME}\", check=False) is None:" in deploy_source
+
+    original_runner = deploy.run_remote_process
+    try:
+        deploy.run_remote_process = lambda *args, **kwargs: (failed_results[0], None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert deploy.refresh_remote_hashagents() is False
+            assert deploy.restore_agents_from_backup("/fixture", check=False) is False
+            assert deploy.cmd_ssh(type("Args", (), {"command": ["false"]})()) is False
+    finally:
+        deploy.run_remote_process = original_runner
 
     assert deploy.read_nonnegative_finite_env_float("MESHCENTRAL_TEST_UNSET_DELAY", 0) == 0
     for invalid in ("-1", "nan", "inf", "-inf", "bad", ""):
@@ -84,6 +132,20 @@ def main():
         stdout.write("fixture-output")
         return completed(command, 0)
 
+    call_count = 0
+
+    def authentication_failure(command, stdout, stderr, stdin, timeout):
+        nonlocal call_count
+        call_count += 1
+        stderr.write("Permission denied (publickey).")
+        return completed(command, 255)
+
+    def transient_failure(command, stdout, stderr, stdin, timeout):
+        nonlocal call_count
+        call_count += 1
+        stderr.write("Connection timed out")
+        return completed(command, 255)
+
     try:
         deploy.subprocess.run = successful_remote
         deploy.time.sleep = sleeps.append
@@ -94,6 +156,25 @@ def main():
         assert paced_result.returncode == 0
         assert paced_result.stdout == "fixture-output"
         assert sleeps == [7]
+
+        deploy.REMOTE_COMMAND_RETRIES = 3
+        deploy.REMOTE_SUCCESS_DELAY_SECONDS = 0
+        sleeps.clear()
+        call_count = 0
+        deploy.subprocess.run = authentication_failure
+        auth_result, auth_timeout = deploy.run_remote_process(["ssh", "fixture"], timeout=1)
+        assert auth_timeout is None
+        assert auth_result.returncode == 255
+        assert call_count == 1
+        assert sleeps == []
+
+        call_count = 0
+        deploy.subprocess.run = transient_failure
+        transient_result, transient_timeout = deploy.run_remote_process(["ssh", "fixture"], timeout=1)
+        assert transient_timeout is None
+        assert transient_result.returncode == 255
+        assert call_count == 3
+        assert sleeps == [deploy.REMOTE_RETRY_DELAY_SECONDS, deploy.REMOTE_RETRY_DELAY_SECONDS * 2]
     finally:
         deploy.subprocess.run = original_run
         deploy.time.sleep = original_sleep
@@ -127,7 +208,7 @@ def main():
         deploy.get_core_publish_state = original_core_state
         deploy.ssh_cmd = original_ssh_cmd
 
-    print("PASS health, retry, pacing, and transport-state controls=21")
+    print("PASS health, retry, pacing, recovery, command-result, and transport-state controls=45")
     return 0
 
 
