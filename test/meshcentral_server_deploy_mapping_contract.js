@@ -53,10 +53,12 @@ function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const meshcentralRoot = path.resolve('..', 'MeshCentral');
     const deployPath = path.resolve('..', 'MeshCentral', 'deploy-server.py');
+    const meshagentDeployPath = path.resolve('deploy.py');
     const deploymentDocPath = path.resolve('docs', 'DEPLOYMENT.md');
     const requiredEntries = [
         'meshdesktopmultiplex.js',
         'meshagent.js',
+        'meshctrl.js',
         'public/scripts/agent-redir-ws-0.1.1.js',
         'public/scripts/agent-redir-ws-0.1.1-min.js',
         'public/scripts/agent-desktop-0.0.2.js',
@@ -64,7 +66,14 @@ function main() {
     ];
 
     let mode = 'deploy-server-file-map';
-    let checks = {};
+    let checks = {
+        meshagentDeployExists: fs.existsSync(meshagentDeployPath)
+    };
+    const meshagentDeploy = checks.meshagentDeployExists ? fs.readFileSync(meshagentDeployPath, 'utf8') : '';
+    checks.meshagentUsesTrackedMeshagent = meshagentDeploy.includes('"local_path": "../MeshCentral/meshagent.js"');
+    checks.meshagentUsesTrackedMeshctrl = meshagentDeploy.includes('"local_path": "../MeshCentral/meshctrl.js"');
+    checks.meshagentRejectsIgnoredNpmSources = !meshagentDeploy.includes('../MeshCentral/node_modules/meshcentral/meshagent.js') &&
+        !meshagentDeploy.includes('../MeshCentral/node_modules/meshcentral/meshctrl.js');
     if (fs.existsSync(deployPath)) {
         const source = fs.readFileSync(deployPath, 'utf8');
         const fileMap = extractFileMapBlock(source);
@@ -76,7 +85,8 @@ function main() {
     } else {
         mode = 'live-mirror';
         const deploymentDoc = fs.existsSync(deploymentDocPath) ? fs.readFileSync(deploymentDocPath, 'utf8') : '';
-        checks.deployServerAbsenceDocumented = deploymentDoc.includes('treated as a mirror of the live VPS module tree');
+        checks.trackedReleaseAuthorityDocumented = deploymentDoc.includes('local release authorities') &&
+            deploymentDoc.includes('must not be selected as deployment sources');
         for (const entry of requiredEntries) {
             checks[`mirrorHas:${entry}`] = fs.existsSync(path.join(meshcentralRoot, entry));
         }

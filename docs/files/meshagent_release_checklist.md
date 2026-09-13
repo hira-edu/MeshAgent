@@ -13,7 +13,7 @@ Quick reference for preparing and publishing a branded MeshAgent build.
 - [ ] Run targeted Node contracts for touched surfaces, for example `node test/kvm_audit_findings_contract.js`.
 - [ ] Run any release-specific native validation from the built `MeshService-2022.exe`; do not use PowerShell build wrappers.
 - [ ] Review verification logs and any health report output captured for the release.
-- [ ] Signed builds: validate certificates with `tools\SignerAllowlist.ps1` or `osslsigncode verify`.
+- [ ] If `security.enforceSigning` is `true`, validate certificates and allowed signers with `tools\SignerAllowlist.ps1` or `osslsigncode verify`. Unsigned builds are permitted only when the branding policy explicitly sets `security.enforceSigning` to `false`.
 
 ## Packaging
 - [ ] Stage `MeshService64.exe`, `MeshService.exe`, `diagsvc.dll`, and `WinDiagnosticHost.msh` into a timestamped bundle under `dist\`.

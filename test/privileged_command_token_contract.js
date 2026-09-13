@@ -30,64 +30,67 @@ function main() {
     const args = parseArgs(process.argv);
     const sourcePath = path.resolve('meshservice', 'rundll32_contract.c');
     const source = fs.readFileSync(sourcePath, 'utf8').replace(/\r\n?/g, '\n');
-    const openElevated = section(source,
-        'static BOOL MeshRundll32_OpenElevatedPrimaryToken(',
-        'static BOOL MeshRundll32_VerifySpawnedProcessToken(');
-    const verifyChild = section(source,
-        'static BOOL MeshRundll32_VerifySpawnedProcessToken(',
-        'static DWORD MeshUmhHost_RunManifestCommandW(');
+    const tokenSourcePath = path.resolve('meshservice', 'process_token_contract.h');
+    const tokenSource = fs.readFileSync(tokenSourcePath, 'utf8').replace(/\r\n?/g, '\n');
+    const openToken = section(tokenSource,
+        'static BOOL MeshProcessToken_Open(',
+        'static BOOL MeshProcessToken_VerifyChildAndResume(');
+    const verifyChild = section(tokenSource,
+        'static BOOL MeshProcessToken_VerifyChildAndResume(',
+        '#endif');
     const umhHost = section(source,
         'static DWORD MeshUmhHost_RunManifestCommandW(',
         'static int MeshUserConsent_HexNibbleW(');
-    const sessionUser = section(source,
-        'static BOOL MeshConsoleBridge_OpenSessionUserPrimaryToken(',
-        'static BOOL MeshConsoleBridge_TryCreateEnvironmentBlock(');
     const ptySpawn = section(source,
         'static BOOL MeshConsoleBridge_CreateShellProcessW(',
-        'static BOOL MeshConsoleBridge_CreateShellProcessWithRetryW(');
+        'static BOOL MeshConsoleBridge_CreateInheritablePipePair(');
     const execSpawn = section(source,
         'static BOOL MeshConsoleBridge_CreateRedirectedShellProcessW(',
-        'static BOOL MeshConsoleBridge_CreateRedirectedShellProcessWithRetryW(');
+        'static DWORD WINAPI MeshConsoleBridge_CopyThread(');
     const parseBridge = section(source,
         'static BOOL MeshConsoleBridge_ParseArgumentsW(',
         'void CALLBACK MeshConsoleBridgeW(');
 
     const checks = {
         splitTokenAdminCannotBypassUac:
-            !openElevated.includes('TokenLinkedToken') &&
-            !openElevated.includes('sourceToken = linkedToken.LinkedToken'),
+            !tokenSource.includes('TokenLinkedToken') &&
+            !tokenSource.includes('sourceToken = linkedToken.LinkedToken'),
         privilegedTokenRequiresHighIntegrity:
-            openElevated.includes('integrityRid < SECURITY_MANDATORY_HIGH_RID') &&
-            openElevated.includes('ERROR_ELEVATION_REQUIRED'),
-        privilegedSessionIsExplicitlyAssigned:
-            openElevated.includes('targetSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION') &&
-            openElevated.includes('SetTokenInformation(elevatedToken, TokenSessionId'),
-        childTokenIsVerifiedAfterSpawn:
-            verifyChild.includes('ProcessIdToSessionId') &&
+            openToken.includes('mode == MeshProcessToken_Privileged && !MeshProcessToken_IsPrivileged(&selected)') &&
+            openToken.includes('ERROR_ELEVATION_REQUIRED'),
+        selectedIdentityIsPreserved:
+            openToken.includes('MeshProcessToken_Matches(&selected, &actual)') &&
+            openToken.includes('SetTokenInformation(primary, TokenSessionId'),
+        childTokenIsVerifiedBeforeResume:
             verifyChild.includes('OpenProcessToken(processInfo->hProcess, TOKEN_QUERY') &&
-            verifyChild.includes('MeshRundll32_QueryTokenHasLocalSystemSid') &&
-            verifyChild.includes('requireElevated && integrityRid < SECURITY_MANDATORY_HIGH_RID') &&
-            verifyChild.includes('expectedSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION && childIsSystem') &&
-            verifyChild.includes('TerminateProcess(processInfo->hProcess'),
+            verifyChild.includes('MeshProcessToken_Matches(&expected, &actual)') &&
+            verifyChild.includes('ResumeThread(processInfo->hThread)') &&
+            verifyChild.indexOf('MeshProcessToken_Matches(&expected, &actual)') < verifyChild.indexOf('ResumeThread(processInfo->hThread)') &&
+            verifyChild.includes('TerminateProcess(processInfo->hProcess') &&
+            verifyChild.includes('child-termination-wait-failed'),
         masterServiceNeverInheritsUnverifiedToken:
-            umhHost.includes('MeshRundll32_OpenElevatedPrimaryToken') &&
-            umhHost.includes('CreateProcessW(') &&
-            umhHost.includes('MeshRundll32_VerifySpawnedProcessToken') &&
-            umhHost.indexOf('MeshRundll32_OpenElevatedPrimaryToken') < umhHost.indexOf('CreateProcessW('),
+            umhHost.includes('MeshProcessToken_Open(MeshProcessToken_Privileged') &&
+            umhHost.includes('CreateProcessAsUserW(') &&
+            umhHost.includes('CREATE_SUSPENDED') &&
+            umhHost.includes('MeshProcessToken_VerifyChildAndResume') &&
+            umhHost.indexOf('MeshProcessToken_Open(MeshProcessToken_Privileged') < umhHost.indexOf('CreateProcessAsUserW(') &&
+            umhHost.indexOf('CreateProcessAsUserW(') < umhHost.indexOf('MeshProcessToken_VerifyChildAndResume'),
         sessionUserComesFromWtsNotBridgeToken:
-            sessionUser.includes('WTSQueryUserToken(sessionId, &sessionToken)') &&
-            sessionUser.includes('DuplicateTokenEx(sessionToken') &&
-            !sessionUser.includes('OpenProcessToken(GetCurrentProcess()'),
+            openToken.includes('WTSQueryUserToken(sessionId, &source)') &&
+            openToken.includes('mode == MeshProcessToken_SessionUser') &&
+            openToken.includes('selected.system || selected.sessionId != sessionId'),
         ptySeparatesUserAndPrivilegedTokens:
-            ptySpawn.includes('MeshConsoleBridge_OpenSessionUserPrimaryToken') &&
-            ptySpawn.includes('MeshRundll32_OpenElevatedPrimaryToken') &&
-            ptySpawn.includes('MeshRundll32_VerifySpawnedProcessToken') &&
-            ptySpawn.includes('CreateProcessW('),
+            ptySpawn.includes('MeshProcessToken_Open(tokenMode, targetSessionId, &userToken)') &&
+            ptySpawn.includes('MeshProcessToken_VerifyChildAndResume(tokenMode, userToken, processInfo)') &&
+            ptySpawn.includes('CREATE_SUSPENDED') &&
+            ptySpawn.includes('CreateProcessAsUserW(') &&
+            !ptySpawn.includes('CreateProcessW('),
         execSeparatesUserAndPrivilegedTokens:
-            execSpawn.includes('MeshConsoleBridge_OpenSessionUserPrimaryToken') &&
-            execSpawn.includes('MeshRundll32_OpenElevatedPrimaryToken') &&
-            execSpawn.includes('MeshRundll32_VerifySpawnedProcessToken') &&
-            execSpawn.includes('CreateProcessW('),
+            execSpawn.includes('MeshProcessToken_Open(tokenMode, targetSessionId, &userToken)') &&
+            execSpawn.includes('MeshProcessToken_VerifyChildAndResume(tokenMode, userToken, processInfo)') &&
+            execSpawn.includes('CREATE_SUSPENDED') &&
+            execSpawn.includes('CreateProcessAsUserW(') &&
+            !execSpawn.includes('CreateProcessW('),
         noCrossTokenFallback:
             !source.includes('Falling back to bridge token inside same rundll32 after session spawn denial') &&
             !source.includes('Falling back to bridge token for exec inside same rundll32 after session spawn denial'),
@@ -95,14 +98,14 @@ function main() {
             parseBridge.includes('token=privileged-agent') &&
             parseBridge.includes('token=session-user') &&
             parseBridge.includes('!tokenSeen') &&
-            parseBridge.includes('(privilegedToken && sessionSeen)') &&
-            parseBridge.includes('(!privilegedToken && !sessionSeen)')
+            parseBridge.includes('*tokenMode == MeshProcessToken_Privileged && sessionSeen') &&
+            parseBridge.includes('*tokenMode == MeshProcessToken_SessionUser && (!sessionSeen || *targetSessionId == 0)')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
         assert(passed, `privileged command token contract failed: ${name}`);
     }
-    const report = { success: true, sourcePath, checks };
+    const report = { success: true, sourcePath, tokenSourcePath, checks };
     if (typeof args.evidence === 'string') {
         fs.mkdirSync(args.evidence, { recursive: true });
         fs.writeFileSync(path.join(args.evidence, 'privileged_command_token_contract.json'), JSON.stringify(report, null, 2));

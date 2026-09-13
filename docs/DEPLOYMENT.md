@@ -11,7 +11,7 @@ Related operational SSOT:
 Migration note (2026-04-19):
 - operator-designated replacement VPS IP is `74.208.52.191`
 - direct SSH to `74.208.52.191:22` timed out from the workstation during this update, so any infrastructure facts not explicitly re-captured below remain the last verified pre-migration values
-- update the local `meshcentral` SSH alias or override `MESHCENTRAL_SERVER`/`MESHCENTRAL_SSH_HOST` before using `deploy.py` without explicit host overrides
+- `MESHCENTRAL_SERVER` records the expected deployment server for validation, display, and manifests; SSH uses `MESHCENTRAL_SSH_HOST` (default `meshcentral`) and `MESHCENTRAL_SSH_CONFIG` when set. Update the alias or set the SSH variables explicitly when the route changes.
 
 ## 2026-07-26 Single-Endpoint Agent Regression Repair
 
@@ -383,12 +383,12 @@ These replace the previous 62+ PowerShell download-and-run buttons with simple a
 
 ### Overview
 
-MeshCentral v1.1.56 is installed via npm at `/opt/meshcentral/node_modules/meshcentral/`.
-The local `MeshCentral` repo is treated as a mirror of the live VPS module tree plus selected live overrides, not as an authoritative source checkout with guaranteed local-only deployment tooling.
+MeshCentral is installed via npm at `/opt/meshcentral/node_modules/meshcentral/`.
+The tracked files in the sibling `MeshCentral` repository are the local release authorities for every path declared in `deploy.py` `CORE_ARTIFACTS`. Ignored files under the local `MeshCentral/node_modules/` installation are dependency/runtime copies and must not be selected as deployment sources.
 
 ### MeshCentral Local Repo
 
-The MeshCentral repo at `C:\Users\Workstation\Documents\GitHub\MeshCentral` is now a live mirror workspace for the deployed VPS state. See:
+The MeshCentral repo at `C:\Users\Workstation\Documents\GitHub\MeshCentral` supplies the reviewed server and agent-core files deployed by the MeshAgent repository's `deploy.py`. See:
 
 - `C:\Users\Workstation\Documents\GitHub\MeshCentral\docs\UMH_CONTROL_SISTER_REPO_SSOT.md`
 - `C:\Users\Workstation\Documents\GitHub\MeshCentral\docs\UMH_CONTROL_DEPLOYMENT_LEDGER.md`
@@ -406,80 +406,51 @@ The MeshCentral repo at `C:\Users\Workstation\Documents\GitHub\MeshCentral` is n
 | `views/agentinvite.handlebars` | `/opt/meshcentral/node_modules/meshcentral/views/agentinvite.handlebars` |
 | `meshdevicefile.js` | `/opt/meshcentral/node_modules/meshcentral/meshdevicefile.js` |
 | `meshagent.js` | `/opt/meshcentral/node_modules/meshcentral/meshagent.js` |
+| `meshctrl.js` | `/opt/meshcentral/node_modules/meshcentral/meshctrl.js` |
 | `meshdesktopmultiplex.js` | `/opt/meshcentral/node_modules/meshcentral/meshdesktopmultiplex.js` |
 | `meshcentral-data/config.json` | `/opt/meshcentral/meshcentral-data/config.json` |
 
-To track a new file: add an entry to `FILE_MAP` in `deploy-server.py`, then `deploy-server.py pull`.
+To deploy a new tracked file, add an explicit source, remote-relative path, and publish role to `CORE_ARTIFACTS` in `deploy.py`, then extend the deployment mapping contract.
 
-### deploy-server.py Commands
+### MeshCentral Deployment Commands
 
-Run from `C:\Users\Workstation\Documents\GitHub\MeshCentral`:
+Run from `C:\Users\Workstation\Documents\GitHub\MeshAgent` after setting `MESHCENTRAL_SERVER`:
 
 ```bash
-python deploy-server.py status               # Server version, service, tracked files
-python deploy-server.py pull                  # Pull all tracked files from server to local
-python deploy-server.py diff                  # Compare local vs server (hash + unified diff)
-python deploy-server.py push                  # Push all changed files (backup + restart)
-python deploy-server.py push --file <key>     # Push specific file only
-python deploy-server.py push --dry-run        # Preview what would be pushed
-python deploy-server.py update                # npm update meshcentral (backup + reapply customizations)
-python deploy-server.py rollback              # Restore from server-backups/
-python deploy-server.py config                # View config.json
-python deploy-server.py config edit           # Edit config locally then push
-python deploy-server.py logs 100              # Tail service journal
-python deploy-server.py health                # Full health check
-python deploy-server.py ssh "command"         # Run arbitrary remote command
-python deploy-server.py vscode                # Open VS Code Remote-SSH to /opt/meshcentral
+python deploy.py status               # Service, agent, and publication state
+python deploy.py stage                # Upload the full reviewed release set
+python deploy.py deploy               # Backup, publish, verify, and restart
+python deploy.py rollback             # Restore a deployment backup
+python deploy.py logs 100             # Tail service journal
+python deploy.py health               # Full health check
 ```
+
+`deploy.py stage` writes a release manifest containing the selected source name, flat staging name, byte length, and SHA-384 digest. The server verifies every uploaded file against that manifest. `deploy.py deploy` repeats the manifest and byte verification against the current local release selection before it creates a backup or copies any production file; a missing, stale, altered, or differently sourced staging set fails closed.
+
+When the SSH endpoint enforces a new-connection admission window, set
+`MESHCENTRAL_SSH_SUCCESS_DELAY` to a finite nonnegative number of seconds. The
+default is `0`; a nonzero value paces successful SSH and SCP operations without
+changing retries, command timeouts, integrity checks, rollback decisions, or
+health gates. Use the smallest value justified by observed connection-admission
+behavior and keep `MESHCENTRAL_SSH_RETRIES=1` while diagnosing that boundary.
 
 ### Server Code Workflows
 
-**Edit a view or module:**
+**Edit a server module or agent-core override:**
 ```
-1. python deploy-server.py pull           # Get latest from server
-2. Edit files in meshcentral-server/      # Make changes locally (or in VS Code)
-3. python deploy-server.py diff           # Review changes
-4. python deploy-server.py push           # Backup, push, restart
-5. python deploy-server.py health         # Verify
-```
-
-**npm update MeshCentral:**
-```
-1. python deploy-server.py update         # Backs up, stops, npm update, reapplies customizations, starts
-2. python deploy-server.py health         # Verify
-3. python deploy-server.py pull           # Pull any new stock files you may want to track
-```
-
-**Edit directly on server via VS Code:**
-```
-1. python deploy-server.py vscode         # Opens VS Code Remote-SSH to /opt/meshcentral
-2. Edit files directly on server
-3. Restart: ssh meshcentral "systemctl restart meshcentral"
-4. python deploy-server.py pull           # Sync changes back to local working copy
+1. Pull and review the MeshCentral repository.
+2. Edit the tracked source file and run its focused contracts.
+3. Run python deploy.py stage from the MeshAgent repository.
+4. Inspect the staged file list and digest-manifest result.
+5. Run python deploy.py deploy, then python deploy.py health.
 ```
 
 ### Server Backups (Code)
 
-- Stored at `/opt/meshcentral/server-backups/YYYYMMDD_HHMMSS/`
-- Created automatically before every `push` and `update`
-- npm update backups prefixed with `npm-update-`
-- Config edits create timestamped `.bak` files alongside `config.json`
-
-### VS Code Remote-SSH
-
-- Extension installed: `ms-vscode-remote.remote-ssh`
-- SSH config alias `meshcentral` in `~/.ssh/config`
-- Launch: `python deploy-server.py vscode` or `code --remote ssh-remote+meshcentral /opt/meshcentral`
-- Edit server files directly with full IntelliSense, terminal, and git
-
-### GitHub CLI
-
-| Location | Account | Status |
-|---|---|---|
-| **Local (Windows)** | `hira-edu` | Authenticated via `gh auth login --web` |
-| **Server (Linux)** | `hira-edu` | Authenticated, git credential helper configured |
-
-Git protocol: HTTPS on both. Credential helper: `gh auth git-credential`.
+- Stored at `/opt/meshcentral/backups/YYYYMMDD_HHMMSS/`.
+- Created automatically by `deploy.py deploy` before publication.
+- Include each configured agent and MeshCentral core publish role plus `hashagents.json`.
+- Use `python deploy.py rollback` to select and restore a deployment backup.
 
 ## Key Server Configuration Notes
 

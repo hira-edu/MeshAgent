@@ -98,6 +98,30 @@ function writeJson(filePath, value) {
     writeText(filePath, JSON.stringify(value, null, 2) + '\n');
 }
 
+function readJson(filePath) {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function parseSigningPolicy(branding, source) {
+    if (branding == null || typeof branding !== 'object' || Array.isArray(branding)) {
+        throw new Error(`Invalid branding document: ${source}`);
+    }
+    if (branding.security == null || typeof branding.security !== 'object' || Array.isArray(branding.security)) {
+        throw new Error(`Missing branding security policy: ${source}`);
+    }
+    if (typeof branding.security.enforceSigning !== 'boolean') {
+        throw new Error(`branding security.enforceSigning must be a boolean: ${source}`);
+    }
+    return {
+        source,
+        enforceSigning: branding.security.enforceSigning
+    };
+}
+
+function loadSigningPolicy(brandingPath) {
+    return parseSigningPolicy(readJson(brandingPath), relativeToRepo(brandingPath));
+}
+
 function fileExists(filePath) {
     try {
         return fs.statSync(filePath).isFile();
@@ -229,12 +253,17 @@ function resolveExpectedArtifacts(extraArtifacts) {
     return records;
 }
 
-function collectArtifactManifest(expectedArtifacts) {
+function signingRequiredForArtifact(item, enforceSigning) {
+    return item.signed === true && enforceSigning === true;
+}
+
+function collectArtifactManifest(expectedArtifacts, enforceSigning) {
     return expectedArtifacts.map((item) => {
         const record = {
             id: item.id,
             required: item.required === true,
-            signedRequired: item.signed === true,
+            peArtifact: item.signed === true,
+            signedRequired: signingRequiredForArtifact(item, enforceSigning),
             found: item.path != null,
             path: item.path ? relativeToRepo(item.path) : null,
             candidates: item.candidates,
@@ -464,6 +493,9 @@ function formatChecksums(artifactManifest) {
 
 function buildChecklist({ artifactManifest, missingReleaseDocuments, bundleExported }) {
     const requiredArtifactsPresent = artifactManifest.every((artifact) => artifact.required !== true || artifact.found === true);
+    const peArtifactsValid = artifactManifest
+        .filter((artifact) => artifact.peArtifact && artifact.found)
+        .every((artifact) => artifact.signature != null && artifact.signature.isPe === true);
     const signedArtifactsOk = artifactManifest
         .filter((artifact) => artifact.signedRequired)
         .every((artifact) => artifact.signature != null && artifact.signature.hasCertificateTable === true);
@@ -471,12 +503,14 @@ function buildChecklist({ artifactManifest, missingReleaseDocuments, bundleExpor
     const releaseBundleExported = bundleExported === true;
     return {
         required_release_artifacts_present: requiredArtifactsPresent,
+        pe_artifacts_valid: peArtifactsValid,
         signed_artifacts_have_pe_certificate_table: signedArtifactsOk,
         digests_exported: digestsExported,
         required_release_documents_present: missingReleaseDocuments.length === 0,
         release_bundle_exported: releaseBundleExported,
         release_ready:
             requiredArtifactsPresent &&
+            peArtifactsValid &&
             signedArtifactsOk &&
             digestsExported &&
             missingReleaseDocuments.length === 0 &&
@@ -487,6 +521,7 @@ function buildChecklist({ artifactManifest, missingReleaseDocuments, bundleExpor
 function collectFailures(checklist) {
     const failures = [];
     if (!checklist.required_release_artifacts_present) { failures.push('required release artifacts are missing'); }
+    if (!checklist.pe_artifacts_valid) { failures.push('one or more declared PE artifacts are malformed or not PE files'); }
     if (!checklist.signed_artifacts_have_pe_certificate_table) { failures.push('required signed PE artifacts are missing a certificate table or are absent'); }
     if (!checklist.digests_exported) { failures.push('no artifact digests were exported'); }
     if (!checklist.required_release_documents_present) { failures.push('one or more required release documents are missing'); }
@@ -502,7 +537,9 @@ function writeReportOutputs(evidenceDir, report, checklist, missingReleaseDocume
         `GENERATED_UTC=${report.generatedUtc}`,
         `SUCCESS=${report.success}`,
         `ALLOW_INCOMPLETE=${allowIncomplete}`,
+        `SIGNING_ENFORCEMENT=${report.signingPolicy.enforceSigning}`,
         `ARTIFACTS_FOUND=${artifactManifest.filter((artifact) => artifact.found).length}/${artifactManifest.length}`,
+        `PE_ARTIFACTS_VALID=${checklist.pe_artifacts_valid}`,
         `SIGNED_ARTIFACTS_OK=${checklist.signed_artifacts_have_pe_certificate_table}`,
         `DIGESTS_EXPORTED=${checklist.digests_exported}`,
         `MISSING_RELEASE_DOCUMENT_COUNT=${missingReleaseDocuments.length}`,
@@ -519,6 +556,8 @@ function main() {
     const bundlePath = path.resolve(REPO_ROOT, args.bundle ? String(args.bundle) : `dist/release/${timestamp}_release_bundle.zip`);
     const allowIncomplete = args['allow-incomplete'] === true || args['allow-incomplete'] === '1';
     const quiet = args.quiet === true || args.quiet === '1';
+    const brandingPath = path.resolve(REPO_ROOT, args.branding ? String(args.branding) : 'branding_config.local.json');
+    const signingPolicy = loadSigningPolicy(brandingPath);
 
     ensureDir(evidenceDir);
     ensureDir(path.dirname(bundlePath));
@@ -527,7 +566,7 @@ function main() {
     }
 
     const expectedArtifacts = resolveExpectedArtifacts(args.artifacts);
-    const artifactManifest = collectArtifactManifest(expectedArtifacts);
+    const artifactManifest = collectArtifactManifest(expectedArtifacts, signingPolicy.enforceSigning);
     const missingReleaseDocuments = DEFAULT_RELEASE_DOCUMENTS.filter((rel) => !fileExists(path.resolve(REPO_ROOT, rel)));
 
     writeText(path.join(evidenceDir, 'checksums.txt'), formatChecksums(artifactManifest));
@@ -544,6 +583,7 @@ function main() {
             arch: process.arch,
             node: process.version
         },
+        signingPolicy,
         artifactManifest,
         releaseDocuments: DEFAULT_RELEASE_DOCUMENTS,
         missingReleaseDocuments,
@@ -586,4 +626,13 @@ function main() {
     }
 }
 
-main();
+if (require.main === module) {
+    main();
+}
+
+module.exports = {
+    buildChecklist,
+    collectFailures,
+    parseSigningPolicy,
+    signingRequiredForArtifact
+};

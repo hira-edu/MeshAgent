@@ -158,7 +158,10 @@ function checkTerminalModule(source) {
             !source.includes("if (self.mode != 'exec') { self.finish(); }"),
         supportsNonInteractiveRunCommandMode:
             source.includes("this.mode = (mode == 'exec') ? 'exec' : 'pty';") &&
-            source.includes("this.tokenMode = (this.targetSessionId == null) ? 'privileged-agent' : 'session-user';") &&
+            source.includes("this.tokenMode = tokenMode || ((this.targetSessionId == null) ? 'privileged-agent' : 'session-user');") &&
+            source.includes("this.tokenMode != 'privileged-agent' && this.tokenMode != 'session-user'") &&
+            source.includes("this.tokenMode == 'privileged-agent' && this.targetSessionId != null") &&
+            source.includes("this.tokenMode == 'session-user' && (this.targetSessionId == null || this.targetSessionId == 0)") &&
             source.includes('stream._meshTerminalTokenMode = this.tokenMode;') &&
             source.includes("args.push('token=' + this.tokenMode);") &&
             source.includes("if (this.mode == 'exec') { args.push('mode=exec'); }") &&
@@ -172,6 +175,8 @@ function checkTerminalModule(source) {
             source.includes('read: function read(size)') &&
             source.includes('windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand') &&
             source.includes("return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId, 'exec'));") &&
+            source.includes("return (new ConsoleBridgeTerminal(SHELL_COMMAND, cols, rows, targetSessionId, 'pty', 'session-user'));") &&
+            source.includes("return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId, 'exec', 'session-user'));") &&
             !source.includes('return (this.RunPowerShellCommand(cols, rows, targetSessionId));') &&
             !source.includes('return (this.StartPowerShell(cols, rows, targetSessionId));') &&
             !source.includes('return (this.Start(cols, rows, targetSessionId));')
@@ -224,7 +229,7 @@ function checkMeshCore(source) {
             source.includes("var busyReply = \"Run commands can't execute, already busy.\";") &&
             source.includes('if (data.reply) { sendRunCommandResult(busyReply); }'),
         windowsRuncommandUsesConsoleBridge:
-            source.includes("var runMethod = (data.runAsUser > 0) ? 'RunPowerShellCommandAsUser' : 'RunPowerShellCommand';") &&
+            source.includes("var runMethod = (data.runAsUser > 0 && targetSessionId != null) ? 'RunPowerShellCommandAsUser' : 'RunPowerShellCommand';") &&
             source.includes("mesh.cmdchild = require('win-terminal')[runMethod](80, 25, targetSessionId);") &&
             source.includes("mesh.cmdchild.descriptorMetadata = 'UserCommandsPowerShell';") &&
             source.includes("mesh.cmdchild.on('close', completeRunCommand);") &&
@@ -364,8 +369,8 @@ function checkNativeConsoleBridge(source) {
 
     return {
         interactiveTerminalsUseConpty:
-            dispatchSection.includes('MeshConsoleBridge_RunExecW(inputPipeName, outputPipeName, shellName, targetSessionId)') &&
-            dispatchSection.includes('MeshConsoleBridge_RunW(inputPipeName, outputPipeName, shellName, cols, rows, targetSessionId)') &&
+            dispatchSection.includes('MeshConsoleBridge_RunExecW(inputPipeName, outputPipeName, shellName, targetSessionId, tokenMode)') &&
+            dispatchSection.includes('MeshConsoleBridge_RunW(inputPipeName, outputPipeName, shellName, cols, rows, targetSessionId, tokenMode)') &&
             !dispatchSection.includes('MeshConsoleBridge_RunRedirectedShellW(inputPipeName, outputPipeName, shellName, targetSessionId, FALSE);'),
         interactiveTerminalsDoNotForceNoExit:
             source.includes('nonInteractive ? L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -Command -" : L" -NoLogo -NoProfile"') &&
@@ -374,7 +379,7 @@ function checkNativeConsoleBridge(source) {
             !source.includes('-NoProfile -NoExit'),
         conptyHostClosesPtySideHandlesAfterProcessStart:
             ptySection.includes('conptyApi.CreatePseudoConsoleFn(consoleSize, ptyInputRead, ptyOutputWrite, 0, &pseudoConsole)') &&
-            ptySection.includes('MeshConsoleBridge_CreateShellProcessWithRetryW(pseudoConsole, shellPath, commandLine, targetSessionId, &processInfo)') &&
+            ptySection.includes('MeshConsoleBridge_CreateShellProcessW(pseudoConsole, shellPath, commandLine, targetSessionId, tokenMode, &processInfo)') &&
             ptySection.includes('MeshConsoleBridge_CloseHandle(&ptyInputRead);') &&
             ptySection.includes('MeshConsoleBridge_CloseHandle(&ptyOutputWrite);'),
         conptyCloseDrainsFinalOutputBeforePipeTeardown:

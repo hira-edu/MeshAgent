@@ -246,9 +246,11 @@ The contract shared by the fixtures, raw console, and recovery core is
   This checks the shipped loader contract, not a completed UAC interaction or
   a fresh installation on a separate endpoint.
 - `test/release_signing_bundle_gate.js` stages the release set and reports PE
-  signing state and digests.
+  signing state and digests according to `security.enforceSigning` in the active
+  branding configuration.
 - `test/release_bundle_gate.js` verifies the expected package, current release
-  documents, signing state, checksums, and archive generation.
+  documents, the same branding-controlled signing requirement, PE validity,
+  checksums, and archive generation.
 - [Release checklist](../files/meshagent_release_checklist.md) covers the
   operator steps around those gates.
 

@@ -97,7 +97,7 @@ function chunkToInputData(chunk)
     return ({ payload: (data != null ? data : ''), length: (data != null ? data.length : 0) });
 }
 
-function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId, mode)
+function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId, mode, tokenMode)
 {
     var self = this;
     var stream = null;
@@ -107,7 +107,15 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId, mode)
     this.cols = normalizeSize(cols, 80, 20, 300);
     this.rows = normalizeSize(rows, 25, 10, 100);
     this.targetSessionId = ((typeof(targetSessionId) == 'number') && targetSessionId >= 0) ? parseInt(targetSessionId) : null;
-    this.tokenMode = (this.targetSessionId == null) ? 'privileged-agent' : 'session-user';
+    this.tokenMode = tokenMode || ((this.targetSessionId == null) ? 'privileged-agent' : 'session-user');
+    if (this.tokenMode != 'privileged-agent' && this.tokenMode != 'session-user') { throw new Error('Invalid terminal token mode.'); }
+    if (targetSessionId != null && (typeof(targetSessionId) != 'number' || !isFinite(targetSessionId) ||
+        Math.floor(targetSessionId) != targetSessionId || targetSessionId < 0 || targetSessionId >= 0xFFFFFFFF))
+    { throw new Error('Invalid terminal session ID.'); }
+    if (this.tokenMode == 'privileged-agent' && this.targetSessionId != null)
+    { throw new Error('Privileged-agent terminal cannot target a user session.'); }
+    if (this.tokenMode == 'session-user' && (this.targetSessionId == null || this.targetSessionId == 0))
+    { throw new Error('Session-user terminal requires an explicit interactive session.'); }
     this.inputPipeName = makePipeName('_in');
     this.outputPipeName = makePipeName('_out');
     this.inputServer = null;
@@ -516,7 +524,7 @@ windowsTerminal.prototype.Start = function Start(cols, rows, targetSessionId)
 windowsTerminal.prototype.StartAsUser = function StartAsUser(cols, rows, targetSessionId)
 {
     if (process.platform != 'win32') { throw new Error('Windows terminal bridge is only available on Windows.'); }
-    return (new ConsoleBridgeTerminal(SHELL_COMMAND, cols, rows, targetSessionId));
+    return (new ConsoleBridgeTerminal(SHELL_COMMAND, cols, rows, targetSessionId, 'pty', 'session-user'));
 };
 
 windowsTerminal.prototype.StartEx = function StartEx(cols, rows, target)
@@ -536,7 +544,7 @@ windowsTerminal.prototype.StartPowerShell = function StartPowerShell(cols, rows,
 windowsTerminal.prototype.StartPowerShellAsUser = function StartPowerShellAsUser(cols, rows, targetSessionId)
 {
     if (process.platform != 'win32') { throw new Error('Windows terminal bridge is only available on Windows.'); }
-    return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId));
+    return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId, 'pty', 'session-user'));
 };
 
 windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand(cols, rows, targetSessionId)
@@ -548,7 +556,7 @@ windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand(c
 windowsTerminal.prototype.RunPowerShellCommandAsUser = function RunPowerShellCommandAsUser(cols, rows, targetSessionId)
 {
     if (process.platform != 'win32') { throw new Error('Windows run commands are only available on Windows.'); }
-    return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId, 'exec'));
+    return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId, 'exec', 'session-user'));
 };
 
 module.exports = new windowsTerminal();

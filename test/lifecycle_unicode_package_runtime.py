@@ -24,11 +24,16 @@ def main():
     kernel.WritePrivateProfileStringW.restype = ctypes.c_int
     rows = []
     for index, package in enumerate(args.package):
+        package = package.resolve()
+        package_sidecar = package.with_suffix(".msh")
         for label, folder in [("chinese", "\u684c\u9762"), ("mixed", "\u684c\u9762-\u0627\u0644\u0645\u0643\u062a\u0628-\U0001f4c1")]:
             case = evidence / (str(index) + "-" + label)
             source = case / "OneDrive" / folder / "meshagent64-Devices (8).exe"
             source.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(package, source)
+            source_sidecar = source.with_suffix(".msh")
+            if package_sidecar.is_file():
+                shutil.copyfile(package_sidecar, source_sidecar)
             manifest = case / "manifest.ini"
             # Use the compiled production writer, not a Python serialization substitute.
             result = subprocess.run([str(args.manifest_fixture.resolve()), str(manifest), str(source), "Unicode package validation"],
@@ -56,8 +61,9 @@ def main():
                 except ValueError:
                     pass
             ok = result.returncode == 0 and any(report.get("success") is True for report in reports)
-            rows.append({"package": str(package.resolve()), "source": str(source), "exitCode": result.returncode,
-                         "reports": reports, "ok": ok})
+            rows.append({"package": str(package), "packageSidecar": str(package_sidecar) if package_sidecar.is_file() else None,
+                         "source": str(source), "sourceSidecar": str(source_sidecar) if source_sidecar.is_file() else None,
+                         "exitCode": result.returncode, "reports": reports, "ok": ok})
             print(("PASS " if ok else "FAIL ") + package.name + " " + label)
     report = {"ok": all(row["ok"] for row in rows), "action": "validate-package", "installerExecuted": False, "rows": rows}
     (evidence / "results.json").write_text(json.dumps(report, indent=2), encoding="utf-8")

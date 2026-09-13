@@ -85,10 +85,10 @@ const requiredSnippets = [
     '"data_agents_dir": DATA_AGENTS',
     '"module-root": f"{MESHCENTRAL_BASE}/node_modules/meshcentral"',
     '"meshagent.js": {',
-    '"local_path": "../MeshCentral/node_modules/meshcentral/meshagent.js"',
+    '"local_path": "../MeshCentral/meshagent.js"',
     '"publish_targets": ("module-root",)',
     '"meshctrl.js": {',
-    '"local_path": "../MeshCentral/node_modules/meshcentral/meshctrl.js"',
+    '"local_path": "../MeshCentral/meshctrl.js"',
     '"remote_relative_path": "meshctrl.js"',
     '"meshdesktopmultiplex.js": {',
     '"local_path": "../MeshCentral/meshdesktopmultiplex.js"',
@@ -124,7 +124,21 @@ const requiredSnippets = [
     '"public/scripts/agent-desktop-0.0.2-min.js": {',
     '"local_path": "../MeshCentral/public/scripts/agent-desktop-0.0.2-min.js"',
     '"remote_relative_path": "scripts/agent-desktop-0.0.2-min.js"',
-    '"publish_targets": ("module-public", "web-public")'
+    '"publish_targets": ("module-public", "web-public")',
+    'STAGING_MANIFEST_FILENAME = ".meshagent-stage-manifest.json"',
+    'STAGING_MANIFEST_SCHEMA = 1',
+    'def build_stage_manifest_artifacts(entries):',
+    'def verify_remote_staged_artifacts(entries):',
+    'bundle.writestr(STAGING_MANIFEST_FILENAME',
+    'Staged release failed digest-bound verification.',
+    'Deploy aborted before backup.',
+    'NON_RETRYABLE_REMOTE_ERROR_SNIPPETS = (',
+    'if result.returncode != 255:',
+    "ok = proc.returncode == 0 and text == 'active'",
+    "int(percentages[0][:-1]) < 90",
+    "label == 'Recent errors'",
+    'health result unavailable or invalid',
+    'return all_ok'
 ];
 
 for (const snippet of requiredSnippets) {
@@ -136,6 +150,35 @@ assert(!source.includes('r"%ProgramData%\\MeshAgent\\state\\rundll32-lifecycle"'
 assert(!source.includes('LOCAL_REPO / "branding_config.json"'), 'deploy.py must not fall back to the generic branding template for production install paths');
 assert(!source.includes('r"C:\\ProgramData\\DiagnosticHost"'), 'deploy.py must not hard-code the DiagnosticHost install root as a fallback');
 assert(!source.includes('../UserModeHook/build-fresh/bin/Release/MasterService.exe'), 'deploy.py must not publish MasterService.exe from the stale build-fresh path');
+assert(!source.includes('../MeshCentral/node_modules/meshcentral/meshagent.js'), 'deploy.py must not source meshagent.js from the ignored npm install');
+assert(!source.includes('../MeshCentral/node_modules/meshcentral/meshctrl.js'), 'deploy.py must not source meshctrl.js from the ignored npm install');
+
+const stagedVerificationBody = extractFunction('verify_remote_staged_artifacts');
+for (const requirement of ['manifest.get("artifacts") != payload["artifacts"]', 'path.stat().st_size', 'hashlib.sha384()', 'digest.hexdigest()']) {
+    assert(stagedVerificationBody.includes(requirement), `staging verification missing: ${requirement}`);
+}
+
+const stageBody = extractFunction('cmd_stage');
+assert(stageBody.includes('verify_remote_staged_artifacts(staged_entries)'), 'stage must verify its digest-bound remote payload');
+
+const deployBody = extractFunction('cmd_deploy');
+const preBackupVerification = deployBody.indexOf('verify_remote_staged_artifacts(staged_entries)');
+const backupCall = deployBody.indexOf('backup_current_agents(backup_path)');
+assert(preBackupVerification >= 0 && backupCall > preBackupVerification, 'deploy must verify staged bytes before backup and publication');
+
+const retryBody = extractFunction('should_retry_remote_result');
+assert(!retryBody.includes('result.stdout'), 'retry classification must not replay remote commands based on application stdout');
+assert(retryBody.includes('NON_RETRYABLE_REMOTE_ERROR_SNIPPETS'), 'retry classification must reject authentication and configuration failures');
+
+const remoteProcessBody = extractFunction('run_remote_process');
+assert(source.includes('REMOTE_SUCCESS_DELAY_SECONDS = read_nonnegative_finite_env_float("MESHCENTRAL_SSH_SUCCESS_DELAY", 0)'), 'SSH success pacing must be opt-in and validated');
+assert(remoteProcessBody.includes('result.returncode == 0 and REMOTE_SUCCESS_DELAY_SECONDS > 0'), 'success pacing must apply only after a successful remote operation');
+assert(remoteProcessBody.includes('time.sleep(REMOTE_SUCCESS_DELAY_SECONDS)'), 'successful SSH/SCP operations must honor configured pacing');
+
+const healthBody = extractFunction('cmd_health');
+assert(healthBody.includes('raw_health = ssh_cmd(remote_script)'), 'health transport failures must remain visible');
+assert(!healthBody.includes('raw_health = ssh_cmd(remote_script, check=False)'), 'health must not suppress transport diagnostics');
+assert(healthBody.includes('loaded_labels == expected_labels'), 'health must reject incomplete or reordered remote results');
 
 for (const functionName of ['collect_remote_file_metadata', 'collect_remote_publish_snapshot']) {
     const body = extractFunction(functionName);
@@ -145,6 +188,13 @@ for (const functionName of ['collect_remote_file_metadata', 'collect_remote_publ
 const publishSnapshotBody = extractFunction('collect_remote_publish_snapshot');
 assert(publishSnapshotBody.includes('if raw is None:'), 'collect_remote_publish_snapshot must distinguish SSH transport failure');
 assert(publishSnapshotBody.includes('return None'), 'collect_remote_publish_snapshot must return None on unavailable transport');
+
+const publishStateBody = extractFunction('get_publish_runtime_state');
+assert(publishStateBody.includes('if snapshot is None:'), 'publish state must preserve unavailable transport distinctly');
+assert(!publishStateBody.includes('or {"files": {}, "manifests": {}}'), 'publish state must not coerce unavailable transport into missing files');
+
+const coreStateBody = extractFunction('get_core_publish_state');
+assert(coreStateBody.includes('if remote_paths and metadata_cache is None:'), 'core state must preserve unavailable transport distinctly');
 
 const verifyPublishBody = extractFunction('verify_remote_publish');
 assert(!verifyPublishBody.includes('verify_remote_embedded_svchost_payload('), 'verify_remote_publish must not SCP-download EXEs for redundant embedded checks');

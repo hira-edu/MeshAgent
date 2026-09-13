@@ -19,6 +19,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -69,6 +70,8 @@ CONFIG_FILE = f"{MESHCENTRAL_BASE}/meshcentral-data/config.json"
 STAGING_DIR = f"{MESHCENTRAL_BASE}/staging"
 BACKUP_DIR = f"{MESHCENTRAL_BASE}/backups"
 SERVICE_NAME = "meshcentral"
+STAGING_MANIFEST_FILENAME = ".meshagent-stage-manifest.json"
+STAGING_MANIFEST_SCHEMA = 1
 SVCHOST_EMBEDDED_RESOURCE_ID = 101
 SVCHOST_EMBEDDED_RESOURCE_TYPE = 10
 
@@ -206,12 +209,12 @@ ARTIFACTS = {
 
 CORE_ARTIFACTS = {
     "meshagent.js": {
-        "local_path": "../MeshCentral/node_modules/meshcentral/meshagent.js",
+        "local_path": "../MeshCentral/meshagent.js",
         "remote_relative_path": "meshagent.js",
         "publish_targets": ("module-root",),
     },
     "meshctrl.js": {
-        "local_path": "../MeshCentral/node_modules/meshcentral/meshctrl.js",
+        "local_path": "../MeshCentral/meshctrl.js",
         "remote_relative_path": "meshctrl.js",
         "publish_targets": ("module-root",),
     },
@@ -334,20 +337,45 @@ WINDOWS_UPDATE_PACKAGE_SUFFIXES = (".update.exe", ".update.pkg")
 WINDOWS_UPDATE_PACKAGE_SUFFIX = WINDOWS_UPDATE_PACKAGE_SUFFIXES[0]
 WINDOWS_LIFECYCLE_DLL = os.environ.get("MESHCENTRAL_LIFECYCLE_DLL", WINDOWS_BRANDING_DEFAULTS["service_dll_path"])
 WINDOWS_LIFECYCLE_STATE_DIR = os.environ.get("MESHCENTRAL_LIFECYCLE_STATE_DIR", WINDOWS_BRANDING_DEFAULTS["lifecycle_state_dir"])
+
+
+def read_nonnegative_finite_env_float(name, default):
+    """Read a finite nonnegative float before any remote operation can begin."""
+    raw_value = os.environ.get(name, str(default))
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{name} must be a finite nonnegative number") from exc
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError(f"{name} must be a finite nonnegative number")
+    return value
+
+
 REMOTE_COMMAND_RETRIES = int(os.environ.get("MESHCENTRAL_SSH_RETRIES", "3"))
 REMOTE_RETRY_DELAY_SECONDS = float(os.environ.get("MESHCENTRAL_SSH_RETRY_DELAY", "2"))
+REMOTE_SUCCESS_DELAY_SECONDS = read_nonnegative_finite_env_float("MESHCENTRAL_SSH_SUCCESS_DELAY", 0)
 REMOTE_COMMAND_TIMEOUT_SECONDS = int(os.environ.get("MESHCENTRAL_REMOTE_COMMAND_TIMEOUT", "180"))
 RETRYABLE_REMOTE_ERROR_SNIPPETS = (
     "connection timed out",
-    "timed out",
     "banner exchange",
     "connection reset",
     "connection closed",
+    "connection refused",
     "reset by peer",
     "broken pipe",
     "i/o timeout",
+    "network is unreachable",
+    "no route to host",
     "proxy error",
     "kex_exchange_identification",
+)
+NON_RETRYABLE_REMOTE_ERROR_SNIPPETS = (
+    "permission denied",
+    "bad configuration option",
+    "could not resolve hostname",
+    "hostname contains invalid characters",
+    "identity file",
+    "host key verification failed",
 )
 REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR = "Remote publish verification unavailable: SSH transport failed"
 
@@ -370,11 +398,11 @@ def should_retry_remote_result(result):
     if result.returncode == 0:
         return False
     stderr = (result.stderr or "").lower()
-    stdout = (result.stdout or "").lower()
-    combined = f"{stderr}\n{stdout}"
-    if result.returncode == 255:
-        return True
-    return any(snippet in combined for snippet in RETRYABLE_REMOTE_ERROR_SNIPPETS)
+    if any(snippet in stderr for snippet in NON_RETRYABLE_REMOTE_ERROR_SNIPPETS):
+        return False
+    if result.returncode != 255:
+        return False
+    return any(snippet in stderr for snippet in RETRYABLE_REMOTE_ERROR_SNIPPETS)
 
 
 def run_remote_process(full_cmd, timeout):
@@ -415,6 +443,8 @@ def run_remote_process(full_cmd, timeout):
         if should_retry_remote_result(result) and attempt < attempts:
             time.sleep(REMOTE_RETRY_DELAY_SECONDS * attempt)
             continue
+        if result.returncode == 0 and REMOTE_SUCCESS_DELAY_SECONDS > 0:
+            time.sleep(REMOTE_SUCCESS_DELAY_SECONDS)
         return result, None
     return last_result, last_timeout
 
@@ -634,14 +664,24 @@ for raw_path in paths:
 print(json.dumps(results))
 PY"""
     raw = ssh_cmd(remote_script, check=False)
-    if raw:
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict) and parsed:
-            return parsed
-    return {}
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or set(parsed) != set(unique_paths):
+        return None
+    for metadata in parsed.values():
+        if metadata is None:
+            continue
+        if (
+            not isinstance(metadata, dict)
+            or not isinstance(metadata.get("hash"), str)
+            or not isinstance(metadata.get("size"), int)
+        ):
+            return None
+    return parsed
 
 
 def collect_remote_publish_snapshot(agent_artifacts, public_artifacts=None, algorithm="sha384"):
@@ -780,6 +820,80 @@ def remote_dirname(path):
 def get_staging_filename(entry):
     """Return the flat staging filename for an artifact entry."""
     return entry.get("staging_filename") or entry.get("remote_filename")
+
+
+def build_stage_manifest_artifacts(entries):
+    """Return the immutable artifact descriptors bound to a staged release."""
+    artifacts = []
+    staging_names = set()
+    for entry in entries:
+        staging_filename = get_staging_filename(entry)
+        if not staging_filename or Path(staging_filename).name != staging_filename:
+            raise RuntimeError(f"Invalid flat staging filename: {staging_filename!r}")
+        if staging_filename in staging_names:
+            raise RuntimeError(f"Duplicate staging filename: {staging_filename}")
+        staging_names.add(staging_filename)
+        artifacts.append({
+            "name": entry["name"],
+            "staging_filename": staging_filename,
+            "size_bytes": entry["size_bytes"],
+            "sha384": entry["sha384"],
+        })
+    return artifacts
+
+
+def build_stage_manifest(entries):
+    """Build the digest-bound manifest stored beside a staged release."""
+    return {
+        "schema": STAGING_MANIFEST_SCHEMA,
+        "created_utc": datetime.now(UTC).isoformat(),
+        "artifacts": build_stage_manifest_artifacts(entries),
+    }
+
+
+def verify_remote_staged_artifacts(entries):
+    """Verify the staged manifest and bytes against the current local release selection."""
+    payload = {
+        "staging": STAGING_DIR,
+        "manifest_name": STAGING_MANIFEST_FILENAME,
+        "schema": STAGING_MANIFEST_SCHEMA,
+        "artifacts": build_stage_manifest_artifacts(entries),
+    }
+    remote_script = f"""python3 - <<'PY'
+import hashlib
+import json
+import pathlib
+
+payload = json.loads({json.dumps(json.dumps(payload))})
+staging_dir = pathlib.Path(payload["staging"])
+manifest_path = staging_dir / payload["manifest_name"]
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+    raise SystemExit("invalid or missing staging manifest: " + str(exc))
+if manifest.get("schema") != payload["schema"]:
+    raise SystemExit("staging manifest schema mismatch")
+if manifest.get("artifacts") != payload["artifacts"]:
+    raise SystemExit("staging manifest does not match current local release selection")
+for artifact in payload["artifacts"]:
+    path = staging_dir / artifact["staging_filename"]
+    if not path.is_file():
+        raise SystemExit("missing staged artifact: " + artifact["staging_filename"])
+    if path.stat().st_size != artifact["size_bytes"]:
+        raise SystemExit("staged artifact size mismatch: " + artifact["staging_filename"])
+    digest = hashlib.sha384()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != artifact["sha384"]:
+        raise SystemExit("staged artifact digest mismatch: " + artifact["staging_filename"])
+print("verified=" + str(len(payload["artifacts"])))
+PY"""
+    result = ssh_cmd(remote_script)
+    if result is None:
+        return False
+    print(f"  [OK] Digest-bound staging manifest verified ({len(payload['artifacts'])} artifacts).")
+    return True
 
 
 def get_backup_path(backup_root, role, filename=None):
@@ -1200,7 +1314,7 @@ def verify_remote_core_publish(core_artifacts=None):
         for role in get_artifact_publish_targets(entry):
             remote_paths.append(get_core_publish_path(role, entry["remote_relative_path"]))
     metadata_cache = collect_remote_file_metadata(remote_paths)
-    if remote_paths and not metadata_cache:
+    if remote_paths and metadata_cache is None:
         return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]
     for entry in core_artifacts:
         for role in get_artifact_publish_targets(entry):
@@ -1224,6 +1338,8 @@ def get_core_publish_state(core_artifacts=None):
         for role in get_artifact_publish_targets(entry):
             remote_paths.append(get_core_publish_path(role, entry["remote_relative_path"]))
     metadata_cache = collect_remote_file_metadata(remote_paths)
+    if remote_paths and metadata_cache is None:
+        return None
     state = []
     for entry in core_artifacts:
         role_state = []
@@ -1251,6 +1367,8 @@ def get_core_publish_state(core_artifacts=None):
 
 def get_core_publish_state_errors(core_state):
     """Return human-readable core/module publish health errors."""
+    if core_state is None:
+        return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]
     errors = []
     for entry in core_state:
         for role in entry.get("roles", []):
@@ -1265,6 +1383,8 @@ def get_core_publish_state_errors(core_state):
 
 def summarize_core_publish_state(core_state):
     """Render a compact core/module parity summary."""
+    if core_state is None:
+        return "unavailable"
     parts = []
     for entry in core_state:
         role_parts = [
@@ -1281,16 +1401,16 @@ def get_publish_runtime_state(local_artifacts=None):
     local_by_filename = {
         entry["remote_filename"]: entry for entry in get_hashagents_tracked_artifacts(local_artifacts)
     }
-    module_manifest = load_remote_json(f"{MODULE_AGENTS}/hashagents.json")
-    signed_manifest = load_remote_json(f"{SIGNED_AGENTS}/hashagents.json")
     tracked_artifacts = [
         {"remote_filename": filename, "publish_targets": ("data", "signed", "module")}
         for filename in sorted(HASHAGENTS_TRACKED_FILENAMES)
     ]
-    snapshot = collect_remote_publish_snapshot(tracked_artifacts, []) or {"files": {}, "manifests": {}}
+    snapshot = collect_remote_publish_snapshot(tracked_artifacts, [])
+    if snapshot is None:
+        return None
     metadata_cache = snapshot.get("files", {})
-    module_manifest = parse_snapshot_manifest(snapshot, f"{MODULE_AGENTS}/hashagents.json") or module_manifest
-    signed_manifest = parse_snapshot_manifest(snapshot, f"{SIGNED_AGENTS}/hashagents.json") or signed_manifest
+    module_manifest = parse_snapshot_manifest(snapshot, f"{MODULE_AGENTS}/hashagents.json")
+    signed_manifest = parse_snapshot_manifest(snapshot, f"{SIGNED_AGENTS}/hashagents.json")
     state = []
     for filename in sorted(HASHAGENTS_TRACKED_FILENAMES):
         local_entry = local_by_filename.get(filename)
@@ -1347,6 +1467,8 @@ def get_publish_runtime_state(local_artifacts=None):
 
 def get_publish_state_errors(publish_state):
     """Return human-readable publish health errors for tracked agent binaries."""
+    if publish_state is None:
+        return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]
     errors = []
     for entry in publish_state:
         if entry["data_present"] is False:
@@ -2305,6 +2427,7 @@ def cmd_stage(args):
         return False
 
     staged_entries = found + core_artifacts
+    stage_manifest = build_stage_manifest(staged_entries)
     remote_bundle = f"{STAGING_DIR}/.meshagent-stage-{os.getpid()}-{int(time.time() * 1000)}.zip"
     local_bundle = None
     try:
@@ -2313,6 +2436,7 @@ def cmd_stage(args):
         with zipfile.ZipFile(local_bundle, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
             for entry in staged_entries:
                 bundle.write(entry["local_path"], arcname=get_staging_filename(entry))
+            bundle.writestr(STAGING_MANIFEST_FILENAME, json.dumps(stage_manifest, indent=2) + "\n")
 
         print(f"\nUploading {len(staged_entries)} artifact(s) as one staging bundle to {SERVER}:{STAGING_DIR}/...")
         if scp_upload(local_bundle, remote_bundle) is False:
@@ -2322,7 +2446,7 @@ def cmd_stage(args):
         payload = {
             "bundle": remote_bundle,
             "staging": STAGING_DIR,
-            "members": [get_staging_filename(entry) for entry in staged_entries],
+            "members": [get_staging_filename(entry) for entry in staged_entries] + [STAGING_MANIFEST_FILENAME],
         }
         remote_script = f"""python3 - <<'PY'
 import json
@@ -2358,7 +2482,12 @@ PY"""
             except OSError:
                 pass
 
-    # Verify uploads
+    # Verify the manifest and every staged byte before accepting the upload.
+    if verify_remote_staged_artifacts(staged_entries) is False:
+        print("[ERROR] Staged release failed digest-bound verification.")
+        return False
+
+    # Display uploads
     print("\nVerifying staged files...")
     verify = ssh_cmd(f"ls -lh {STAGING_DIR}/")
     if verify is None:
@@ -2405,6 +2534,11 @@ def cmd_deploy(args):
         return False
     if not agent_artifacts:
         print("[ERROR] No agent artifacts are available for deployment.")
+        return False
+
+    staged_entries = agent_artifacts + public_artifacts + core_artifacts
+    if verify_remote_staged_artifacts(staged_entries) is False:
+        print("[ERROR] Staged release does not match the current local release selection. Deploy aborted before backup.")
         return False
 
     # Check staging has files
@@ -2520,7 +2654,7 @@ def cmd_deploy(args):
         print(f"  [WARNING] Failed to write release manifest: {ex}")
 
     # Clean staging
-    ssh_cmd(f"rm -rf {STAGING_DIR}/*")
+    ssh_cmd(f"find {remote_quote(STAGING_DIR)} -mindepth 1 -maxdepth 1 -type f -delete")
     print(f"  Staging area cleaned.")
 
     return True
@@ -2735,7 +2869,17 @@ for label, command in checks:
     else:
         proc = subprocess.run(command, shell=True, capture_output=True, text=True)
         text = (proc.stdout or proc.stderr or '').strip()
-        ok = bool(text) and ('not found' not in text.lower())
+        lowered = text.lower()
+        rejected = any(marker in lowered for marker in ('not found', 'permission denied', 'failed', 'error'))
+        if label == 'Service active':
+            ok = proc.returncode == 0 and text == 'active'
+        elif label == 'Disk usage':
+            percentages = [part for part in text.split() if part.endswith('%') and part[:-1].isdigit()]
+            ok = proc.returncode == 0 and len(percentages) == 1 and int(percentages[0][:-1]) < 90
+        elif label == 'Recent errors':
+            ok = proc.returncode == 0 and (not text or text == '(none)' or '-- no entries --' in lowered)
+        else:
+            ok = proc.returncode == 0 and bool(text) and not rejected
     first_line = text.splitlines()[0] if text else ''
     results.append({{
         'label': label,
@@ -2744,19 +2888,28 @@ for label, command in checks:
     }})
 print(json.dumps(results))
 PY"""
-    raw_health = ssh_cmd(remote_script, check=False)
+    raw_health = ssh_cmd(remote_script)
     parsed_health = []
+    health_result_valid = False
     if raw_health:
         try:
             loaded = json.loads(raw_health)
-            if isinstance(loaded, list):
+            expected_labels = [label for label, _ in checks]
+            loaded_labels = [entry.get("label") for entry in loaded] if isinstance(loaded, list) and all(isinstance(entry, dict) for entry in loaded) else []
+            if (
+                isinstance(loaded, list)
+                and len(loaded) == len(checks)
+                and loaded_labels == expected_labels
+                and all(isinstance(entry.get("ok"), bool) for entry in loaded)
+            ):
                 parsed_health = loaded
+                health_result_valid = True
         except json.JSONDecodeError:
             parsed_health = []
 
-    all_ok = True
-    if not parsed_health:
-        parsed_health = [{"label": label, "result": "", "ok": False} for label, _ in checks]
+    all_ok = health_result_valid
+    if health_result_valid is False:
+        parsed_health = [{"label": label, "result": "health result unavailable or invalid", "ok": False} for label, _ in checks]
 
     for entry in parsed_health:
         label = entry.get("label", "")
@@ -2770,20 +2923,20 @@ PY"""
     baseline_artifacts, baseline_core_artifacts, baseline_label = get_publish_baseline_from_latest_manifest()
 
     publish_state = get_publish_runtime_state(baseline_artifacts)
-    if publish_state:
+    if baseline_artifacts:
         publish_errors = get_publish_state_errors(publish_state)
         publish_ok = len(publish_errors) == 0
         if publish_ok is False:
             all_ok = False
         indicator = "+" if publish_ok else "!"
-        summary = ", ".join(
+        summary = "unavailable" if publish_state is None else ", ".join(
             f"{entry['filename']}={entry.get('signed_relation', entry.get('runtime_source', 'n/a'))}/module-{format_publish_match(entry['module_matches_local'])}"
             for entry in publish_state
         )
         print(f"  [{indicator}] Publish parity             {baseline_label}: {summary[:60]}")
 
     core_state = get_core_publish_state(baseline_core_artifacts)
-    if core_state:
+    if baseline_core_artifacts:
         core_errors = get_core_publish_state_errors(core_state)
         core_ok = len(core_errors) == 0
         if core_ok is False:
@@ -2797,6 +2950,7 @@ PY"""
     else:
         print("  Some checks returned warnings. Review above.")
     print()
+    return all_ok
 
 
 def cmd_repair_hashagents(args):
@@ -2820,7 +2974,7 @@ def cmd_repair_hashagents(args):
     core_errors = get_core_publish_state_errors(core_state)
 
     print(f"\n  Baseline: {baseline_label}")
-    for entry in publish_state:
+    for entry in publish_state or []:
         print(
             f"    {entry['filename']:<30s} "
             f"data={format_publish_match(entry['data_matches_local']):<5s} "
