@@ -303,6 +303,12 @@ function main() {
             sources.processPipe.includes('strcmp(value, "powershell") == 0 || strcmp(value, "cmd") == 0') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeModeA') &&
             sources.processPipe.includes('strcmp(value, "mode=exec") == 0') &&
+            sources.processPipe.includes('ILibProcessPipe_ConsoleBridgeTokenModeA') &&
+            sources.processPipe.includes('token=privileged-agent') &&
+            sources.processPipe.includes('token=session-user') &&
+            sources.processPipe.includes('console-token-missing') &&
+            sources.processPipe.includes('console-privileged-tsid') &&
+            sources.processPipe.includes('console-user-tsid') &&
             sources.processPipe.includes('console-exec-shell') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[4], 20, 300)') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)') &&
@@ -518,13 +524,17 @@ function main() {
             sources.rundll32ContractImpl.includes('CreatePseudoConsole') &&
             sources.rundll32ContractImpl.includes('PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE') &&
             sources.rundll32ContractImpl.includes('STARTF_USESTDHANDLES') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridge_OpenElevatedPrimaryTokenForSession') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_OpenSessionUserPrimaryToken') &&
+            sources.rundll32ContractImpl.includes('WTSQueryUserToken(sessionId, &sessionToken)') &&
+            sources.rundll32ContractImpl.includes('MeshRundll32_OpenElevatedPrimaryToken') &&
+            sources.rundll32ContractImpl.includes('MeshRundll32_VerifySpawnedProcessToken') &&
             sources.rundll32ContractImpl.includes('SetTokenInformation(userToken, TokenSessionId') &&
             sources.rundll32ContractImpl.includes('GetSystemDirectoryW(systemDirectory') &&
             sources.rundll32ContractImpl.includes('CreateProcessAsUserW(userToken, shellPath, commandLine') &&
-            sources.rundll32ContractImpl.includes('CreateProcessW(shellPath, commandLine') &&
             sources.rundll32ContractImpl.includes('environment, systemDirectory, &startupInfo.StartupInfo') &&
             sources.rundll32ContractImpl.includes('NULL, systemDirectory, &startupInfo.StartupInfo') &&
+            !sources.rundll32ContractImpl.includes('Falling back to bridge token inside same rundll32 after session spawn denial') &&
+            !sources.rundll32ContractImpl.includes('Falling back to bridge token for exec inside same rundll32 after session spawn denial') &&
             sources.rundll32ContractImpl.includes('MESH_CONSOLE_BRIDGE_PIPE_PREFIX_W') &&
             sources.rundll32ContractImpl.includes('InterlockedExchangePointer((PVOID volatile*)handleRef, NULL)') &&
             sources.serviceHostDef.includes('MeshConsoleBridgeW') &&
@@ -856,7 +866,11 @@ function main() {
             !sources.terminal.includes('BRIDGE_LAUNCH_RETRY_DELAY_MS') &&
             sources.rundll32ContractImpl.includes('MeshConsoleBridge_CreateShellProcessWithRetryW') &&
             sources.rundll32ContractImpl.includes('Shell spawn recovered inside same rundll32') &&
-            sources.rundll32ContractImpl.includes('Falling back to bridge token inside same rundll32 after session spawn denial') &&
+            !sources.rundll32ContractImpl.includes('Falling back to bridge token inside same rundll32 after session spawn denial') &&
+            !sources.rundll32ContractImpl.includes('Falling back to bridge token for exec inside same rundll32 after session spawn denial') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_OpenSessionUserPrimaryToken') &&
+            sources.rundll32ContractImpl.includes('MeshRundll32_OpenElevatedPrimaryToken') &&
+            sources.rundll32ContractImpl.includes('MeshRundll32_VerifySpawnedProcessToken') &&
             sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunExecW') &&
             sources.rundll32ContractImpl.includes('MeshConsoleBridge_CreateRedirectedShellProcessWithRetryW') &&
             sources.rundll32ContractImpl.includes('MeshConsoleBridge_WriteReadyMarker') &&
@@ -908,6 +922,7 @@ function main() {
             sources.terminal.includes("this.stream.emit('ready')") &&
             sources.terminal.includes("this.mode = (mode == 'exec') ? 'exec' : 'pty';") &&
             sources.terminal.includes("if (this.mode == 'exec') { args.push('mode=exec'); }") &&
+            sources.terminal.includes("args.push('token=' + this.tokenMode);") &&
             sources.terminal.includes('ConsoleBridgeTerminal.prototype.closeInput = function closeInput()') &&
             sources.terminal.includes("socket.on('close', function onInputClose()") &&
             sources.terminal.includes('self.inputEnded = true;') &&
@@ -950,6 +965,7 @@ function main() {
             sources.meshcentralCore.includes('function getRunCommandBridgeState()') &&
             sources.meshcentralCore.includes('getRunCommandBridgeState()') &&
             sources.meshcentralCore.includes("mode=' + mesh.cmdchild._meshTerminalMode") &&
+            sources.meshcentralCore.includes("tokenMode=' + mesh.cmdchild._meshTerminalTokenMode") &&
             sources.meshcentralCore.includes("markerSeen=' + runCommandBridgeMarkerSeen") &&
             sources.meshcentralCore.includes("writes=' + mesh.cmdchild._meshTerminalWriteCount") &&
             sources.meshcentralCore.includes("lastWriteBytes=' + mesh.cmdchild._meshTerminalLastWriteBytes") &&

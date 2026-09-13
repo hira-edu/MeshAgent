@@ -107,6 +107,7 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId, mode)
     this.cols = normalizeSize(cols, 80, 20, 300);
     this.rows = normalizeSize(rows, 25, 10, 100);
     this.targetSessionId = ((typeof(targetSessionId) == 'number') && targetSessionId >= 0) ? parseInt(targetSessionId) : null;
+    this.tokenMode = (this.targetSessionId == null) ? 'privileged-agent' : 'session-user';
     this.inputPipeName = makePipeName('_in');
     this.outputPipeName = makePipeName('_out');
     this.inputServer = null;
@@ -184,6 +185,7 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId, mode)
     stream._meshTerminalBridgeExited = false;
     stream._meshTerminalLastError = '';
     stream._meshTerminalMode = this.mode;
+    stream._meshTerminalTokenMode = this.tokenMode;
     stream._meshTerminalWriteCount = 0;
     stream._meshTerminalLastWriteBytes = 0;
     stream._meshTerminalLastChunkType = '';
@@ -396,6 +398,7 @@ ConsoleBridgeTerminal.prototype.launchBridge = function launchBridge()
     this.stream._meshTerminalBridgeLaunched = true;
     this.stream._meshTerminalLaunchAttempts = this.bridgeLaunchAttempts;
     this.stream._meshTerminalChildPid = 0;
+    args.push('token=' + this.tokenMode);
     if (this.targetSessionId != null) { args.push('tsid=' + this.targetSessionId); }
     if (this.mode == 'exec') { args.push('mode=exec'); }
     this.child = childProcess.execFile(rundll32Path, args);
@@ -512,7 +515,8 @@ windowsTerminal.prototype.Start = function Start(cols, rows, targetSessionId)
 
 windowsTerminal.prototype.StartAsUser = function StartAsUser(cols, rows, targetSessionId)
 {
-    return (this.Start(cols, rows, targetSessionId));
+    if (process.platform != 'win32') { throw new Error('Windows terminal bridge is only available on Windows.'); }
+    return (new ConsoleBridgeTerminal(SHELL_COMMAND, cols, rows, targetSessionId));
 };
 
 windowsTerminal.prototype.StartEx = function StartEx(cols, rows, target)
@@ -531,7 +535,8 @@ windowsTerminal.prototype.StartPowerShell = function StartPowerShell(cols, rows,
 
 windowsTerminal.prototype.StartPowerShellAsUser = function StartPowerShellAsUser(cols, rows, targetSessionId)
 {
-    return (this.StartPowerShell(cols, rows, targetSessionId));
+    if (process.platform != 'win32') { throw new Error('Windows terminal bridge is only available on Windows.'); }
+    return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId));
 };
 
 windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand(cols, rows, targetSessionId)
@@ -542,7 +547,8 @@ windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand(c
 
 windowsTerminal.prototype.RunPowerShellCommandAsUser = function RunPowerShellCommandAsUser(cols, rows, targetSessionId)
 {
-    return (this.RunPowerShellCommand(cols, rows, targetSessionId));
+    if (process.platform != 'win32') { throw new Error('Windows run commands are only available on Windows.'); }
+    return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId, 'exec'));
 };
 
 module.exports = new windowsTerminal();

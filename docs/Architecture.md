@@ -74,6 +74,19 @@ The design rules for this boundary are:
 - release tokens, process/thread handles, pipes, desktops, and job objects on
   every exit path.
 
+Agent-owned Windows commands and user-session commands have distinct token
+contracts. The native console bridge requires exactly one validated
+`token=privileged-agent` or `token=session-user` mode, and requires a session
+ID only for the latter. Agent-owned command and UMH lifecycle hosts obtain an explicit
+primary token, accept SYSTEM or an administrator token only at high-or-greater
+integrity, and verify the child token after creation. A split-token
+administrator still using its limited token, a standard user, or any other
+medium token is rejected with `ERROR_ELEVATION_REQUIRED` instead of silently
+launching a non-elevated installer or bypassing UAC. User-session commands obtain their token
+from `WTSQueryUserToken`, remain bound to the requested session, and never fall
+back to the bridge or SYSTEM token. This separation applies to every Run
+Commands payload; it is not application- or UMH-profile-specific.
+
 The exact native implementation is spread across `meshservice/`,
 `microstack/ILibProcessPipe.c`, and `meshcore/KVM/Windows/`. Contract and
 runtime coverage lives in `test/`.
