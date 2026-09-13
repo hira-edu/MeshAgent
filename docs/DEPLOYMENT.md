@@ -343,6 +343,14 @@ The `custom.js` script (deployed to MeshCentral) adds preset buttons to the Run 
 - **UMH Uninstall** — sends `umhctl uninstall`
 - **UMH Help** — sends `umhctl help`
 
+The Inject32 and RServ audio presets are PowerShell Run Commands owned by the
+agent token (`runAsUser=0`). The native console bridge now admits those and all
+other agent-owned commands only with an explicit SYSTEM/high-integrity token
+and verifies the child after creation. Selecting a user-session run mode uses
+the WTS user token and is not a valid way to elevate an installer. A
+medium-token elevation error is therefore a failed token contract, not an
+installer-specific retry condition.
+
 The curated live UI subset also exposes retained query/mutation buttons for:
 
 - `listProcesses`
@@ -515,4 +523,3 @@ The compatibility-listener checks remain required until observed inventory prove
 - `dbEncryptKey` and `dbRecordsEncryptKey` are configured in config.json
 - The direct `agents.high.support` edge presents a publicly trusted certificate; MeshCentral agent hash admission is a separate check and must remain enabled
 - TURN credentials remain server-side configuration and must be treated as secrets
-

@@ -559,6 +559,11 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
             evidenceDir: path.join(phaseDir, 'terminal_bridge_contract')
         },
         {
+            name: 'privileged-command-token-contract',
+            script: path.join(REPO_ROOT, 'test', 'privileged_command_token_contract.js'),
+            evidenceDir: path.join(phaseDir, 'privileged_command_token_contract')
+        },
+        {
             name: 'http-request-alignment-runtime',
             script: path.join(REPO_ROOT, 'test', 'http_request_alignment_runtime.js'),
             evidenceDir: path.join(phaseDir, 'http_request_alignment_runtime')
@@ -612,6 +617,7 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
         `LOCATION_GUARD_CONTRACT=${path.join(phaseDir, 'location_guard_contract', 'summary.txt')}`,
         `SVCHOST_SELFUPDATE_CONTRACT=${path.join(phaseDir, 'svchost_selfupdate_contract', 'summary.txt')}`,
         `TERMINAL_BRIDGE_CONTRACT=${path.join(phaseDir, 'terminal_bridge_contract', 'summary.txt')}`,
+        `PRIVILEGED_COMMAND_TOKEN_CONTRACT=${path.join(phaseDir, 'privileged_command_token_contract', 'summary.txt')}`,
         `BRIDGE_SMOKE=${path.join(phaseDir, 'bridge_smoke', 'summary.txt')}`,
         `INITIAL_FRAME_RUNTIME=${path.join(phaseDir, 'kvm_initial_frame_runtime', 'summary.txt')}`,
         `SYSTEM_PICTURE_RUNTIME=${path.join(phaseDir, 'kvm_system_picture_runtime', 'summary.txt')}`

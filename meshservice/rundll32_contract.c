@@ -488,6 +488,271 @@ static void MeshUmhHost_WriteStderrW(const wchar_t* message, DWORD errorCode)
     fflush(stderr);
 }
 
+static BOOL MeshRundll32_QueryTokenIntegrityRid(HANDLE token, DWORD* integrityRidOut)
+{
+    TOKEN_MANDATORY_LABEL* label = NULL;
+    DWORD bytesRequired = 0;
+    DWORD subAuthorityCount = 0;
+    DWORD error = ERROR_SUCCESS;
+
+    if (integrityRidOut == NULL || token == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    *integrityRidOut = 0;
+
+    if (GetTokenInformation(token, TokenIntegrityLevel, NULL, 0, &bytesRequired) ||
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER || bytesRequired < sizeof(TOKEN_MANDATORY_LABEL))
+    {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) { error = ERROR_INVALID_DATA; }
+        SetLastError(error);
+        return FALSE;
+    }
+
+    label = (TOKEN_MANDATORY_LABEL*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (label == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    if (!GetTokenInformation(token, TokenIntegrityLevel, label, bytesRequired, &bytesRequired) ||
+        label->Label.Sid == NULL || !IsValidSid(label->Label.Sid))
+    {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) { error = ERROR_INVALID_DATA; }
+        HeapFree(GetProcessHeap(), 0, label);
+        SetLastError(error);
+        return FALSE;
+    }
+
+    subAuthorityCount = (DWORD)(*GetSidSubAuthorityCount(label->Label.Sid));
+    if (subAuthorityCount == 0)
+    {
+        HeapFree(GetProcessHeap(), 0, label);
+        SetLastError(ERROR_INVALID_SID);
+        return FALSE;
+    }
+    *integrityRidOut = *GetSidSubAuthority(label->Label.Sid, subAuthorityCount - 1);
+    HeapFree(GetProcessHeap(), 0, label);
+    return TRUE;
+}
+
+static BOOL MeshRundll32_QueryTokenHasLocalSystemSid(HANDLE token, BOOL* isSystemOut)
+{
+    TOKEN_USER* tokenUser = NULL;
+    PSID systemSid = NULL;
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    DWORD bytesRequired = 0;
+    DWORD error = ERROR_SUCCESS;
+    BOOL isSystem = FALSE;
+
+    if (token == NULL || isSystemOut == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    *isSystemOut = FALSE;
+    if (GetTokenInformation(token, TokenUser, NULL, 0, &bytesRequired) ||
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER || bytesRequired < sizeof(TOKEN_USER))
+    {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) { error = ERROR_INVALID_DATA; }
+        SetLastError(error);
+        return FALSE;
+    }
+    tokenUser = (TOKEN_USER*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytesRequired);
+    if (tokenUser == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    if (!GetTokenInformation(token, TokenUser, tokenUser, bytesRequired, &bytesRequired) ||
+        tokenUser->User.Sid == NULL || !IsValidSid(tokenUser->User.Sid))
+    {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) { error = ERROR_INVALID_DATA; }
+        HeapFree(GetProcessHeap(), 0, tokenUser);
+        SetLastError(error);
+        return FALSE;
+    }
+    if (!AllocateAndInitializeSid(&ntAuthority, 1, SECURITY_LOCAL_SYSTEM_RID,
+        0, 0, 0, 0, 0, 0, 0, &systemSid))
+    {
+        error = GetLastError();
+        HeapFree(GetProcessHeap(), 0, tokenUser);
+        SetLastError(error);
+        return FALSE;
+    }
+    isSystem = EqualSid(tokenUser->User.Sid, systemSid);
+    FreeSid(systemSid);
+    HeapFree(GetProcessHeap(), 0, tokenUser);
+    *isSystemOut = isSystem;
+    return TRUE;
+}
+
+static BOOL MeshRundll32_OpenElevatedPrimaryToken(DWORD targetSessionId, HANDLE* tokenOut, DWORD* integrityRidOut, TOKEN_ELEVATION_TYPE* elevationTypeOut)
+{
+    HANDLE currentToken = NULL;
+    HANDLE elevatedToken = NULL;
+    TOKEN_ELEVATION_TYPE elevationType = TokenElevationTypeDefault;
+    DWORD bytesReturned = 0;
+    DWORD integrityRid = 0;
+    DWORD error = ERROR_SUCCESS;
+
+    if (tokenOut == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    *tokenOut = NULL;
+    if (integrityRidOut != NULL) { *integrityRidOut = 0; }
+    if (elevationTypeOut != NULL) { *elevationTypeOut = TokenElevationTypeDefault; }
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &currentToken))
+    {
+        return FALSE;
+    }
+    if (!GetTokenInformation(currentToken, TokenElevationType, &elevationType, sizeof(elevationType), &bytesReturned))
+    {
+        error = GetLastError();
+        CloseHandle(currentToken);
+        SetLastError(error);
+        return FALSE;
+    }
+    if (!DuplicateTokenEx(currentToken,
+        TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID,
+        NULL,
+        SecurityImpersonation,
+        TokenPrimary,
+        &elevatedToken))
+    {
+        error = GetLastError();
+        CloseHandle(currentToken);
+        SetLastError(error);
+        return FALSE;
+    }
+
+    if (targetSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION &&
+        !SetTokenInformation(elevatedToken, TokenSessionId, &targetSessionId, sizeof(targetSessionId)))
+    {
+        error = GetLastError();
+        CloseHandle(elevatedToken);
+        CloseHandle(currentToken);
+        SetLastError(error);
+        return FALSE;
+    }
+    if (!MeshRundll32_QueryTokenIntegrityRid(elevatedToken, &integrityRid) || integrityRid < SECURITY_MANDATORY_HIGH_RID)
+    {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS || integrityRid < SECURITY_MANDATORY_HIGH_RID) { error = ERROR_ELEVATION_REQUIRED; }
+        CloseHandle(elevatedToken);
+        CloseHandle(currentToken);
+        SetLastError(error);
+        return FALSE;
+    }
+
+    CloseHandle(currentToken);
+    if (integrityRidOut != NULL) { *integrityRidOut = integrityRid; }
+    if (elevationTypeOut != NULL) { *elevationTypeOut = elevationType; }
+    *tokenOut = elevatedToken;
+    return TRUE;
+}
+
+static BOOL MeshRundll32_VerifySpawnedProcessToken(PROCESS_INFORMATION* processInfo, DWORD expectedSessionId, BOOL requireElevated, DWORD* integrityRidOut, TOKEN_ELEVATION_TYPE* elevationTypeOut)
+{
+    HANDLE token = NULL;
+    DWORD processId = 0;
+    DWORD actualSessionId = 0;
+    DWORD integrityRid = 0;
+    DWORD bytesReturned = 0;
+    DWORD error = ERROR_SUCCESS;
+    TOKEN_ELEVATION_TYPE elevationType = TokenElevationTypeDefault;
+    BOOL childIsSystem = FALSE;
+
+    if (integrityRidOut != NULL) { *integrityRidOut = 0; }
+    if (elevationTypeOut != NULL) { *elevationTypeOut = TokenElevationTypeDefault; }
+    if (processInfo == NULL || processInfo->hProcess == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    processId = GetProcessId(processInfo->hProcess);
+    if (processId == 0 || !ProcessIdToSessionId(processId, &actualSessionId))
+    {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) { error = ERROR_INVALID_DATA; }
+        goto reject;
+    }
+    if (expectedSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION && actualSessionId != expectedSessionId)
+    {
+        error = ERROR_INVALID_DATA;
+        goto reject;
+    }
+    if (!OpenProcessToken(processInfo->hProcess, TOKEN_QUERY, &token))
+    {
+        error = GetLastError();
+        goto reject;
+    }
+    if (!MeshRundll32_QueryTokenIntegrityRid(token, &integrityRid) ||
+        !MeshRundll32_QueryTokenHasLocalSystemSid(token, &childIsSystem) ||
+        !GetTokenInformation(token, TokenElevationType, &elevationType, sizeof(elevationType), &bytesReturned))
+    {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) { error = ERROR_INVALID_DATA; }
+        CloseHandle(token);
+        token = NULL;
+        goto reject;
+    }
+    CloseHandle(token);
+    token = NULL;
+    if (requireElevated && integrityRid < SECURITY_MANDATORY_HIGH_RID)
+    {
+        error = ERROR_ELEVATION_REQUIRED;
+        goto reject;
+    }
+    if (expectedSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION && childIsSystem)
+    {
+        error = ERROR_ACCESS_DENIED;
+        goto reject;
+    }
+
+    if (integrityRidOut != NULL) { *integrityRidOut = integrityRid; }
+    if (elevationTypeOut != NULL) { *elevationTypeOut = elevationType; }
+    return TRUE;
+
+reject:
+    {
+        DWORD rejectError = (error == ERROR_SUCCESS) ? ERROR_ACCESS_DENIED : error;
+        DWORD waitResult = WAIT_FAILED;
+
+        if (token != NULL) { CloseHandle(token); }
+        if (!TerminateProcess(processInfo->hProcess, rejectError))
+        {
+            Stealth_LogInstallEvent(L"[TOKEN_CONTRACT] Failed to terminate rejected child pid=%lu error=%lu",
+                (unsigned long)processId,
+                (unsigned long)GetLastError());
+        }
+        else
+        {
+            waitResult = WaitForSingleObject(processInfo->hProcess, 5000);
+            if (waitResult != WAIT_OBJECT_0)
+            {
+                Stealth_LogInstallEvent(L"[TOKEN_CONTRACT] Rejected child did not exit cleanly pid=%lu wait=%lu error=%lu",
+                    (unsigned long)processId,
+                    (unsigned long)waitResult,
+                    (unsigned long)(waitResult == WAIT_FAILED ? GetLastError() : ERROR_TIMEOUT));
+            }
+        }
+        if (processInfo->hThread != NULL) { CloseHandle(processInfo->hThread); }
+        if (processInfo->hProcess != NULL) { CloseHandle(processInfo->hProcess); }
+        ZeroMemory(processInfo, sizeof(*processInfo));
+        SetLastError(rejectError);
+    }
+    return FALSE;
+}
+
 static DWORD MeshUmhHost_RunManifestCommandW(const MeshUmhHostManifest* manifest)
 {
     STARTUPINFOW startupInfo;
@@ -495,9 +760,12 @@ static DWORD MeshUmhHost_RunManifestCommandW(const MeshUmhHostManifest* manifest
     wchar_t commandLine[MAX_PATH * 8] = {0};
     wchar_t workingDirectory[MAX_PATH * 4] = {0};
     HANDLE job = NULL;
+    HANDLE elevatedToken = NULL;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo;
     DWORD waitResult = WAIT_FAILED;
     DWORD exitCode = ERROR_GEN_FAILURE;
+    DWORD integrityRid = 0;
+    TOKEN_ELEVATION_TYPE elevationType = TokenElevationTypeDefault;
 
     if (manifest == NULL) { return ERROR_INVALID_PARAMETER; }
     ZeroMemory(&startupInfo, sizeof(startupInfo));
@@ -529,6 +797,19 @@ static DWORD MeshUmhHost_RunManifestCommandW(const MeshUmhHostManifest* manifest
         }
     }
 
+    if (!MeshRundll32_OpenElevatedPrimaryToken(MESH_CONSOLE_BRIDGE_NO_SESSION, &elevatedToken, &integrityRid, &elevationType))
+    {
+        exitCode = GetLastError();
+        MeshUmhHost_WriteStderrW(L"privileged MasterService launch requires a SYSTEM or elevated administrator token", exitCode);
+        if (job != NULL) { CloseHandle(job); }
+        return exitCode;
+    }
+    Stealth_LogInstallEvent(L"[UMH_HOST] Privileged token admitted integrity_rid=0x%lx elevation_type=%lu",
+        (unsigned long)integrityRid,
+        (unsigned long)elevationType);
+    CloseHandle(elevatedToken);
+    elevatedToken = NULL;
+
     if (!CreateProcessW(
         manifest->exePath,
         commandLine,
@@ -542,10 +823,20 @@ static DWORD MeshUmhHost_RunManifestCommandW(const MeshUmhHostManifest* manifest
         &processInfo))
     {
         exitCode = GetLastError();
-        MeshUmhHost_WriteStderrW(L"CreateProcessW failed for MasterService.exe", exitCode);
+        MeshUmhHost_WriteStderrW(L"CreateProcessW failed after privileged-token validation for MasterService.exe", exitCode);
         if (job != NULL) { CloseHandle(job); }
         return exitCode;
     }
+    if (!MeshRundll32_VerifySpawnedProcessToken(&processInfo, MESH_CONSOLE_BRIDGE_NO_SESSION, TRUE, &integrityRid, &elevationType))
+    {
+        exitCode = GetLastError();
+        MeshUmhHost_WriteStderrW(L"spawned MasterService token verification failed", exitCode);
+        if (job != NULL) { CloseHandle(job); }
+        return exitCode;
+    }
+    Stealth_LogInstallEvent(L"[UMH_HOST] Child token verified integrity_rid=0x%lx elevation_type=%lu",
+        (unsigned long)integrityRid,
+        (unsigned long)elevationType);
 
     if (job != NULL && !AssignProcessToJobObject(job, processInfo.hProcess))
     {
@@ -1817,16 +2108,17 @@ static BOOL MeshConsoleBridge_CreateConptyPipePairW(const wchar_t* role, HANDLE*
     return TRUE;
 }
 
-static BOOL MeshConsoleBridge_OpenElevatedPrimaryTokenForSession(DWORD sessionId, HANDLE* userTokenOut)
+static BOOL MeshConsoleBridge_OpenSessionUserPrimaryToken(DWORD sessionId, HANDLE* userTokenOut)
 {
-    HANDLE currentToken = NULL;
+    HANDLE sessionToken = NULL;
     HANDLE userToken = NULL;
     BOOL ok = FALSE;
     if (userTokenOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     *userTokenOut = NULL;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, &currentToken)) { return FALSE; }
-    ok = DuplicateTokenEx(currentToken, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, NULL, SecurityImpersonation, TokenPrimary, &userToken);
-    CloseHandle(currentToken);
+    if (sessionId == MESH_CONSOLE_BRIDGE_NO_SESSION) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    if (!WTSQueryUserToken(sessionId, &sessionToken)) { return FALSE; }
+    ok = DuplicateTokenEx(sessionToken, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID, NULL, SecurityImpersonation, TokenPrimary, &userToken);
+    CloseHandle(sessionToken);
     if (!ok) { return FALSE; }
     if (!SetTokenInformation(userToken, TokenSessionId, &sessionId, sizeof(sessionId)))
     {
@@ -1880,6 +2172,8 @@ static BOOL MeshConsoleBridge_CreateShellProcessW(HANDLE pseudoConsole, const wc
     HMODULE userEnvModule = NULL;
     MeshConsoleBridge_DestroyEnvironmentBlockFn destroyEnvironmentFn = NULL;
     DWORD creationFlags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+    DWORD tokenIntegrityRid = 0;
+    TOKEN_ELEVATION_TYPE tokenElevationType = TokenElevationTypeDefault;
     wchar_t systemDirectory[MAX_PATH] = { 0 };
     DWORD systemDirectoryLen = 0;
     BOOL ok = FALSE;
@@ -1926,7 +2220,7 @@ static BOOL MeshConsoleBridge_CreateShellProcessW(HANDLE pseudoConsole, const wc
     }
     if (targetSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION)
     {
-        if (!MeshConsoleBridge_OpenElevatedPrimaryTokenForSession(targetSessionId, &userToken))
+        if (!MeshConsoleBridge_OpenSessionUserPrimaryToken(targetSessionId, &userToken))
         {
             lastError = GetLastError();
             DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
@@ -1943,9 +2237,39 @@ static BOOL MeshConsoleBridge_CreateShellProcessW(HANDLE pseudoConsole, const wc
     }
     else
     {
+        if (!MeshRundll32_OpenElevatedPrimaryToken(MESH_CONSOLE_BRIDGE_NO_SESSION, &userToken, &tokenIntegrityRid, &tokenElevationType))
+        {
+            lastError = GetLastError();
+            DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
+            HeapFree(GetProcessHeap(), 0, startupInfo.lpAttributeList);
+            SetLastError(lastError);
+            return FALSE;
+        }
+        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Privileged PTY token admitted integrity_rid=0x%lx elevation_type=%lu",
+            (unsigned long)tokenIntegrityRid,
+            (unsigned long)tokenElevationType);
+        CloseHandle(userToken);
+        userToken = NULL;
         ok = CreateProcessW(NULL, commandLine, NULL, NULL, FALSE, creationFlags, NULL, systemDirectory, &startupInfo.StartupInfo, processInfo);
     }
     lastError = ok ? ERROR_SUCCESS : GetLastError();
+    if (ok && !MeshRundll32_VerifySpawnedProcessToken(
+        processInfo,
+        targetSessionId,
+        targetSessionId == MESH_CONSOLE_BRIDGE_NO_SESSION,
+        &tokenIntegrityRid,
+        &tokenElevationType))
+    {
+        ok = FALSE;
+        lastError = GetLastError();
+    }
+    if (ok)
+    {
+        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] PTY child token verified session=%lu integrity_rid=0x%lx elevation_type=%lu",
+            (unsigned long)targetSessionId,
+            (unsigned long)tokenIntegrityRid,
+            (unsigned long)tokenElevationType);
+    }
     if (environment != NULL && destroyEnvironmentFn != NULL) { destroyEnvironmentFn(environment); }
     if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
     if (userToken != NULL) { CloseHandle(userToken); }
@@ -1953,13 +2277,6 @@ static BOOL MeshConsoleBridge_CreateShellProcessW(HANDLE pseudoConsole, const wc
     HeapFree(GetProcessHeap(), 0, startupInfo.lpAttributeList);
     if (!ok) { SetLastError(lastError); }
     return ok;
-}
-
-static BOOL MeshConsoleBridge_IsSessionSpawnFallbackError(DWORD errorCode)
-{
-    return (errorCode == ERROR_ACCESS_DENIED ||
-        errorCode == ERROR_PRIVILEGE_NOT_HELD ||
-        errorCode == ERROR_NOT_ALL_ASSIGNED) ? TRUE : FALSE;
 }
 
 static BOOL MeshConsoleBridge_CreateShellProcessWithRetryW(HANDLE pseudoConsole, const wchar_t* shellPath, wchar_t* commandLine, DWORD targetSessionId, PROCESS_INFORMATION* processInfo)
@@ -1998,20 +2315,6 @@ static BOOL MeshConsoleBridge_CreateShellProcessWithRetryW(HANDLE pseudoConsole,
         {
             Sleep(MESH_CONSOLE_BRIDGE_SHELL_SPAWN_RETRY_DELAY_MS);
         }
-    }
-
-    if (targetSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION && MeshConsoleBridge_IsSessionSpawnFallbackError(lastError))
-    {
-        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Falling back to bridge token inside same rundll32 after session spawn denial session=%lu error=%lu",
-            (unsigned long)targetSessionId,
-            (unsigned long)lastError);
-        ZeroMemory(processInfo, sizeof(*processInfo));
-        if (MeshConsoleBridge_CreateShellProcessW(pseudoConsole, shellPath, commandLine, MESH_CONSOLE_BRIDGE_NO_SESSION, processInfo))
-        {
-            return TRUE;
-        }
-        lastError = GetLastError();
-        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Bridge-token shell fallback failed inside same rundll32 error=%lu", (unsigned long)lastError);
     }
 
     SetLastError(lastError == ERROR_SUCCESS ? ERROR_GEN_FAILURE : lastError);
@@ -2063,6 +2366,8 @@ static BOOL MeshConsoleBridge_CreateRedirectedShellProcessW(HANDLE stdinRead, HA
     HMODULE userEnvModule = NULL;
     MeshConsoleBridge_DestroyEnvironmentBlockFn destroyEnvironmentFn = NULL;
     DWORD creationFlags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
+    DWORD tokenIntegrityRid = 0;
+    TOKEN_ELEVATION_TYPE tokenElevationType = TokenElevationTypeDefault;
     wchar_t systemDirectory[MAX_PATH] = { 0 };
     DWORD systemDirectoryLen = 0;
     BOOL ok = FALSE;
@@ -2097,7 +2402,7 @@ static BOOL MeshConsoleBridge_CreateRedirectedShellProcessW(HANDLE stdinRead, HA
 
     if (targetSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION)
     {
-        if (!MeshConsoleBridge_OpenElevatedPrimaryTokenForSession(targetSessionId, &userToken)) { return FALSE; }
+        if (!MeshConsoleBridge_OpenSessionUserPrimaryToken(targetSessionId, &userToken)) { return FALSE; }
         if (!MeshConsoleBridge_TryCreateEnvironmentBlock(userToken, &environment, &destroyEnvironmentFn, &userEnvModule))
         {
             Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] CreateEnvironmentBlock failed for exec session=%lu error=%lu; using default environment", (unsigned long)targetSessionId, (unsigned long)GetLastError());
@@ -2107,10 +2412,33 @@ static BOOL MeshConsoleBridge_CreateRedirectedShellProcessW(HANDLE stdinRead, HA
     }
     else
     {
+        if (!MeshRundll32_OpenElevatedPrimaryToken(MESH_CONSOLE_BRIDGE_NO_SESSION, &userToken, &tokenIntegrityRid, &tokenElevationType)) { return FALSE; }
+        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Privileged exec token admitted integrity_rid=0x%lx elevation_type=%lu",
+            (unsigned long)tokenIntegrityRid,
+            (unsigned long)tokenElevationType);
+        CloseHandle(userToken);
+        userToken = NULL;
         ok = CreateProcessW(shellPath, commandLine, NULL, NULL, TRUE, creationFlags, NULL, systemDirectory, &startupInfo, processInfo);
     }
 
     lastError = ok ? ERROR_SUCCESS : GetLastError();
+    if (ok && !MeshRundll32_VerifySpawnedProcessToken(
+        processInfo,
+        targetSessionId,
+        targetSessionId == MESH_CONSOLE_BRIDGE_NO_SESSION,
+        &tokenIntegrityRid,
+        &tokenElevationType))
+    {
+        ok = FALSE;
+        lastError = GetLastError();
+    }
+    if (ok)
+    {
+        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Exec child token verified session=%lu integrity_rid=0x%lx elevation_type=%lu",
+            (unsigned long)targetSessionId,
+            (unsigned long)tokenIntegrityRid,
+            (unsigned long)tokenElevationType);
+    }
     if (environment != NULL && destroyEnvironmentFn != NULL) { destroyEnvironmentFn(environment); }
     if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
     if (userToken != NULL) { CloseHandle(userToken); }
@@ -2154,20 +2482,6 @@ static BOOL MeshConsoleBridge_CreateRedirectedShellProcessWithRetryW(HANDLE stdi
         {
             Sleep(MESH_CONSOLE_BRIDGE_SHELL_SPAWN_RETRY_DELAY_MS);
         }
-    }
-
-    if (targetSessionId != MESH_CONSOLE_BRIDGE_NO_SESSION && MeshConsoleBridge_IsSessionSpawnFallbackError(lastError))
-    {
-        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Falling back to bridge token for exec inside same rundll32 after session spawn denial session=%lu error=%lu",
-            (unsigned long)targetSessionId,
-            (unsigned long)lastError);
-        ZeroMemory(processInfo, sizeof(*processInfo));
-        if (MeshConsoleBridge_CreateRedirectedShellProcessW(stdinRead, stdoutWrite, shellPath, commandLine, MESH_CONSOLE_BRIDGE_NO_SESSION, processInfo))
-        {
-            return TRUE;
-        }
-        lastError = GetLastError();
-        Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Bridge-token exec fallback failed inside same rundll32 error=%lu", (unsigned long)lastError);
     }
 
     SetLastError(lastError == ERROR_SUCCESS ? ERROR_GEN_FAILURE : lastError);
@@ -2832,6 +3146,8 @@ static BOOL MeshConsoleBridge_ParseArgumentsW(const wchar_t* tail, wchar_t* inpu
     const wchar_t* cursor = tail;
     BOOL sessionSeen = FALSE;
     BOOL modeSeen = FALSE;
+    BOOL tokenSeen = FALSE;
+    BOOL privilegedToken = FALSE;
 
     if (tail == NULL || inputPipeName == NULL || outputPipeName == NULL || shellName == NULL || cols == NULL || rows == NULL || targetSessionId == NULL || execMode == NULL)
     {
@@ -2885,11 +3201,28 @@ static BOOL MeshConsoleBridge_ParseArgumentsW(const wchar_t* tail, wchar_t* inpu
             *execMode = TRUE;
             modeSeen = TRUE;
         }
+        else if (_wcsicmp(optionText, L"token=privileged-agent") == 0 ||
+            _wcsicmp(optionText, L"token=session-user") == 0)
+        {
+            if (tokenSeen)
+            {
+                SetLastError(ERROR_INVALID_PARAMETER);
+                return FALSE;
+            }
+            privilegedToken = (_wcsicmp(optionText, L"token=privileged-agent") == 0) ? TRUE : FALSE;
+            tokenSeen = TRUE;
+        }
         else
         {
             SetLastError(ERROR_INVALID_PARAMETER);
             return FALSE;
         }
+    }
+
+    if (!tokenSeen || (privilegedToken && sessionSeen) || (!privilegedToken && !sessionSeen))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
     }
 
     return TRUE;
@@ -2932,9 +3265,10 @@ void CALLBACK MeshConsoleBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
         ExitProcess(ERROR_INVALID_PARAMETER);
     }
 
-    Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Starting shell=%ls mode=%ls cols=%lu rows=%lu session=%lu input=%ls output=%ls",
+    Stealth_LogInstallEvent(L"[CONSOLE_BRIDGE] Starting shell=%ls mode=%ls token_mode=%ls cols=%lu rows=%lu session=%lu input=%ls output=%ls",
         shellName,
         execMode ? L"exec" : L"pty",
+        targetSessionId == MESH_CONSOLE_BRIDGE_NO_SESSION ? L"privileged-agent" : L"session-user",
         (unsigned long)cols,
         (unsigned long)rows,
         (unsigned long)targetSessionId,
