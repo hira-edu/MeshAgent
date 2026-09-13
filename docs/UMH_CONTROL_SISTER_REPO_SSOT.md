@@ -116,6 +116,22 @@ The current shared implementation also carries mandatory runtime-compatibility g
 - timer handles may exist without Node's `unref()` method, so `umhctl` must guard `unref` calls
 - child-process completion must tolerate runtimes that only support one of `exit` or `close`
 - Windows UMH service commands must not spawn `MasterService.exe` directly from the agent; they must run through `rundll32.exe <ServiceDll>,MeshUmhHostW <manifest>`
+- The UMH host and agent-owned Run Commands host must resolve and validate an
+  explicit SYSTEM/high-integrity primary token before launch, then verify the
+  created child's integrity and session. They must not rely on inheritance from
+  an assumed-elevated bridge process.
+- The console bridge contract requires exactly one explicit mode:
+  `token=privileged-agent` without `tsid`, or `token=session-user` with an exact
+  `tsid`. Missing, duplicate, or contradictory mode/session arguments are
+  rejected by both the process policy and native parser.
+- A split-token administrator still using its limited token, a standard user,
+  or any other medium-integrity caller must fail with an explicit elevation
+  error. The bridge must not activate `TokenLinkedToken`, bypass UAC, or
+  continue as if installation succeeded.
+- User-session Run Commands use the WTS session-user token and must never fall
+  back to a bridge/SYSTEM token. Token ownership is generic across all
+  payloads, including MasterService, Inject32, and RServ audio; it is not an
+  OnVUE-specific rule.
 - non-Windows/direct `execFile` argument vectors must not prepend the executable basename
 
 These are contract-level runtime requirements, not optional workarounds.

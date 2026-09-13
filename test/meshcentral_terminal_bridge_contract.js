@@ -158,6 +158,9 @@ function checkTerminalModule(source) {
             !source.includes("if (self.mode != 'exec') { self.finish(); }"),
         supportsNonInteractiveRunCommandMode:
             source.includes("this.mode = (mode == 'exec') ? 'exec' : 'pty';") &&
+            source.includes("this.tokenMode = (this.targetSessionId == null) ? 'privileged-agent' : 'session-user';") &&
+            source.includes('stream._meshTerminalTokenMode = this.tokenMode;') &&
+            source.includes("args.push('token=' + this.tokenMode);") &&
             source.includes("if (this.mode == 'exec') { args.push('mode=exec'); }") &&
             source.includes('ConsoleBridgeTerminal.prototype.closeInput = function closeInput()') &&
             source.includes('stream.closeInput = function closeInput()') &&
@@ -168,7 +171,10 @@ function checkTerminalModule(source) {
             source.includes("if (self.mode == 'exec' && self.outputSocket != null)") &&
             source.includes('read: function read(size)') &&
             source.includes('windowsTerminal.prototype.RunPowerShellCommand = function RunPowerShellCommand') &&
-            source.includes("return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId, 'exec'));")
+            source.includes("return (new ConsoleBridgeTerminal(SHELL_AUTOMATION, cols, rows, targetSessionId, 'exec'));") &&
+            !source.includes('return (this.RunPowerShellCommand(cols, rows, targetSessionId));') &&
+            !source.includes('return (this.StartPowerShell(cols, rows, targetSessionId));') &&
+            !source.includes('return (this.Start(cols, rows, targetSessionId));')
     };
 }
 
@@ -249,6 +255,7 @@ function checkMeshCore(source) {
             source.includes('function getRunCommandBridgeState()') &&
             source.includes('getRunCommandBridgeState()') &&
             source.includes("mode=' + mesh.cmdchild._meshTerminalMode") &&
+            source.includes("tokenMode=' + mesh.cmdchild._meshTerminalTokenMode") &&
             source.includes("markerSeen=' + runCommandBridgeMarkerSeen") &&
             source.includes("writes=' + mesh.cmdchild._meshTerminalWriteCount") &&
             source.includes("lastWriteBytes=' + mesh.cmdchild._meshTerminalLastWriteBytes") &&
@@ -319,6 +326,12 @@ function checkProcessPipePolicy(source) {
             source.includes('ILibProcessPipe_IsApprovedConsoleBridgeSizeA(parameters[5], 10, 100)') &&
             source.includes('ILibProcessPipe_IsApprovedConsoleBridgeModeA') &&
             source.includes('strcmp(value, "mode=exec") == 0') &&
+            source.includes('ILibProcessPipe_ConsoleBridgeTokenModeA') &&
+            source.includes('token=privileged-agent') &&
+            source.includes('token=session-user') &&
+            source.includes('console-token-missing') &&
+            source.includes('console-privileged-tsid') &&
+            source.includes('console-user-tsid') &&
             source.includes('console-exec-shell') &&
             source.includes('console-duplicate-mode')
     };

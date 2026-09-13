@@ -84,7 +84,7 @@ async function main() {
         dllPath,
         inputPipeName,
         outputPipeName,
-        launchArgs: [`${dllPath},MeshConsoleBridgeW`, inputPipeName, outputPipeName, 'powershell', '80', '25', 'mode=exec'],
+        launchArgs: [`${dllPath},MeshConsoleBridgeW`, inputPipeName, outputPipeName, 'powershell', '80', '25', 'token=privileged-agent', 'mode=exec'],
         output: '',
         stderr: '',
         exitCode: null,
