@@ -75,8 +75,9 @@ The retained agent-side operator layer models:
 `hookControl` and the legacy secondary control operations are retired. They are
 absent from the control-op map, help, desktop/mobile operator fixtures, and
 MeshCentral UI. Console and raw-JSON attempts fail closed as unsupported.
-Input and WDA normalization is automatic at HookDLL install time and has no
-operator toggle.
+The HookDLL applies its configured input and Window Display Affinity changes
+automatically only to applicable authorized test targets; there is no operator
+toggle.
 
 The current agent-side default flow contract is:
 
@@ -126,12 +127,12 @@ The current shared implementation also carries mandatory runtime-compatibility g
   rejected by both the process policy and native parser.
 - A split-token administrator still using its limited token, a standard user,
   or any other medium-integrity caller must fail with an explicit elevation
-  error. The bridge must not activate `TokenLinkedToken`, bypass UAC, or
-  continue as if installation succeeded.
+  error. The bridge must not activate `TokenLinkedToken`, continue without the
+  required elevated token, or continue as if installation succeeded.
 - User-session Run Commands use the WTS session-user token and must never fall
   back to a bridge/SYSTEM token. Token ownership is generic across all
   payloads, including MasterService, Inject32, and RServ audio; it is not an
-  OnVUE-specific rule.
+  application-specific rule.
 - non-Windows/direct `execFile` argument vectors must not prepend the executable basename
 
 These are contract-level runtime requirements, not optional workarounds.

@@ -1,8 +1,8 @@
 /*
  * MeshAgent runtime compatibility declarations
  *
- * SECURITY NOTE: These techniques are for authorized defensive security research only.
- * Unauthorized use may violate computer fraud and abuse laws.
+ * SECURITY NOTE: Use these compatibility helpers only on systems the operator
+ * owns or is expressly permitted to administer.
  *
  * BUILD SAFETY:
  * Legacy runtime helpers are retained only as compatibility shims for

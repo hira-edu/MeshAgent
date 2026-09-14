@@ -310,7 +310,7 @@ int ILibDuktape_readableStream_WriteDataEx(ILibDuktape_readableStream *stream, i
 		return(stream->paused);
 	}
 
-	if (stream->bypassValue == 0 || stream->bypassValue != streamReserved)
+	if (stream->dataTypeSkipValue == 0 || stream->dataTypeSkipValue != streamReserved)
 	{
 		ILibSpinLock_Lock(&(stream->pipeLock));
 		stream->pipeInProgress = 1;
@@ -705,7 +705,7 @@ duk_ret_t ILibDuktape_readableStream_pipe(duk_context *ctx)
 	}
 	if (nargs > 1 && duk_is_object(ctx, 1))
 	{
-		rstream->bypassValue = Duktape_GetIntPropertyValue(ctx, 1, "dataTypeSkip", 0);
+		rstream->dataTypeSkipValue = Duktape_GetIntPropertyValue(ctx, 1, "dataTypeSkip", 0);
 		rstream->noPropagateEnd = Duktape_GetBooleanProperty(ctx, 1, "end", 1) == 0 ? 1 : 0;
 	}
 	ILibSpinLock_UnLock(&(rstream->pipeLock));

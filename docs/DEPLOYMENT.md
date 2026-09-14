@@ -18,7 +18,7 @@ Migration note (2026-04-19):
 - The first captured Files failure was an outbound TCP connection to the Cloudflare-backed `high.support:443` path that remained in `SYN-SENT`; no TLS, HTTP, WebSocket, or relay-pairing code ran on that attempt.
 - The regression boundary is the ignored provisioning state changing `MeshServer` from the prior direct agent origin to `high.support:443`; Git cannot identify an author or commit for ignored `.msh` files. The active candidate route was compared with refreshed upstream refs (`MeshAgent` `ebff7fb7`, `MeshCentral` `9c872e94`): one configured URL, one URL-derived Host/SNI, one OS address selection, and one request. This is a statement about the inspected route, not a claim that either fork is byte-for-byte upstream.
 - The deploy candidate uses exactly `wss://agents.high.support:443/agent.ashx` in the shared, x64, and Win32 `.msh` authorities. Branding metadata has zero fallback endpoints and no explicit Host or SNI override, so both values derive from that URL.
-- No address race, raw-IP fallback, proxy discovery, retry layer, delay, certificate bypass, or hash allowlist is part of this repair. No connection or timing code changed during this debugging run.
+- No address race, raw-IP fallback, proxy discovery, retry layer, delay, disabled certificate validation, or hash allowlist is part of this repair. No connection or timing code changed during this debugging run.
 - One older fork difference remains visible: the failed control-channel request watchdog is 60 seconds, versus 20 seconds in refreshed upstream. It can prolong recovery after a blackholed SYN, but it neither selected the failing route nor runs during normal socket/WebSocket closure, so changing it is outside this evidence-backed regression fix. Source audit found no close-path sleep or timer; the public clean WebSocket close had a reproducible 229 ms median (one network round trip). A real authenticated relay open/close remains a pre-publication gate.
 - Standard-port TLS validation plus 20 immediate sequential WebSocket upgrades and peer-confirmed clean closes passed with normal hostname validation. This proves TLS, HTTP `101`, and WebSocket closure only. Full agent command-1 authentication is intentionally blocked from live rollout until MeshCentral's existing default/domain certificate-hash contract admits the `agents.high.support` certificate.
 - Status: locally built and contract-tested; not deployed. Replacing the live certificate, package, Caddy configuration, or restarting either service still requires explicit operator approval immediately before the action.
@@ -297,10 +297,10 @@ The MeshAgent shared operator module `modules/umhctl.js` is consumed by `modules
 | `umhctl --json "<json>"` | Sends raw JSON request directly to control pipe |
 | `umhctl help` | Lists commands and runtime paths |
 
-Retired operator commands `hookControl`, `lockdownBypass`, `examsoftBypass`, and
-`ipcBypass` are not canonicalized or dispatched. Console and raw-JSON requests for
-them fail closed as unsupported. Input and WDA neutralization for the applicable
-targets is automatic at HookDLL install time.
+Retired secondary operator aliases are not canonicalized or dispatched. Console
+and raw-JSON requests for them fail closed as unsupported. The HookDLL applies
+its configured input and Window Display Affinity changes automatically only to
+applicable authorized test targets; there is no operator toggle.
 
 **Download URL**: `https://agents.high.support/userfiles/hsadmin/MasterService.exe?download=1`. MeshCentral's UMH install buttons use this explicit Caddy-backed origin because the rolled-back embedded agent TLS client cannot complete the Cloudflare-backed `high.support` handshake. The server `Public/` storage remains exposed without the `Public` path segment.
 

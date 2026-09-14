@@ -453,8 +453,8 @@ jobs:
           ### Features:
           - Embedded svchost payload (header-based)
           -  Automatic DLL extraction when  `STEALTH_BUNDLE_EXTRACT=1` 
-          - Runs inside svchost.exe for maximum stealth
-          - All StealthLab anti-analysis features enabled
+          - Runs as a service DLL in the configured svchost group
+          - Runtime behavior follows the checked-in branding and policy settings
 
           ### Installation:
           1. Download MeshService64.exe (or MeshService.exe for 32-bit)
@@ -565,4 +565,3 @@ jobs:
             verification/ci/runtime.log
           if-no-files-found: error
           retention-days: 30
-

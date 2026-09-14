@@ -52,7 +52,7 @@ function main() {
         'void CALLBACK MeshConsoleBridgeW(');
 
     const checks = {
-        splitTokenAdminCannotBypassUac:
+        splitTokenAdminRequiresConsent:
             !tokenSource.includes('TokenLinkedToken') &&
             !tokenSource.includes('sourceToken = linkedToken.LinkedToken'),
         privilegedTokenRequiresHighIntegrity:

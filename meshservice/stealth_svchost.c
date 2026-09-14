@@ -1,8 +1,9 @@
 /*
- * MeshAgent Stealth - Svchost.exe Hosting Implementation
+ * MeshAgent Svchost.exe Hosting Implementation
  *
- * Allows MeshAgent to run as a DLL inside svchost.exe instead of standalone process.
- * This provides maximum stealth as the service blends with legitimate Windows services.
+ * Hosts MeshAgent as a service DLL in a configured Windows svchost group instead
+ * of a standalone process. The selected host mode remains visible in service
+ * metadata and operator logs.
  */
 
 #include <windows.h>

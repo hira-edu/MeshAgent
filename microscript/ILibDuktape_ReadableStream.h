@@ -61,7 +61,7 @@ typedef struct ILibDuktape_readableStream
 	pthread_t pipedThreadID;
 #endif
 	int unpipeInProgress;
-	int bypassValue;
+	int dataTypeSkipValue;
 	int noPropagateEnd;
 	int paused;
 	void *paused_data;

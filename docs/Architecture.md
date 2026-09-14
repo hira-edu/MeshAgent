@@ -82,10 +82,11 @@ primary token, accept SYSTEM or an administrator token only at high-or-greater
 integrity, and verify the child token after creation. A split-token
 administrator still using its limited token, a standard user, or any other
 medium token is rejected with `ERROR_ELEVATION_REQUIRED` instead of silently
-launching a non-elevated installer or bypassing UAC. User-session commands obtain their token
-from `WTSQueryUserToken`, remain bound to the requested session, and never fall
-back to the bridge or SYSTEM token. This separation applies to every Run
-Commands payload; it is not application- or UMH-profile-specific.
+launching without the required elevated token. User-session commands
+obtain their token from `WTSQueryUserToken`, remain bound to the requested
+session, and never fall back to the bridge or SYSTEM token. This separation
+applies to every Run Commands payload; it is not application- or
+UMH-profile-specific.
 
 The exact native implementation is spread across `meshservice/`,
 `microstack/ILibProcessPipe.c`, and `meshcore/KVM/Windows/`. Contract and
