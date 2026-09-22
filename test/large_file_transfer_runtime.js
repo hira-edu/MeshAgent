@@ -35,6 +35,7 @@ function createAgentScript(inputPath, expectedBytes) {
         "stream.on('data',function(chunk){total+=chunk.length;});",
         "stream.on('error',function(e){clearInterval(timer);finish(23,'LARGE_FILE_RUNTIME_FAIL read='+e);});",
         "stream.on('end',function(){clearInterval(timer);if(total!==expectedBytes||ticks<1){finish(24,'LARGE_FILE_RUNTIME_FAIL bytes='+total+' ticks='+ticks);return;}readOk=true;check();});",
+        "stream.resume();",
         "setTimeout(function(){finish(25,'LARGE_FILE_RUNTIME_FAIL timeout fragment='+fragmentOk+' limit='+limitOk+' read='+readOk+' bytes='+total+' ticks='+ticks);},30000);",
         "check();"
     ].join('');

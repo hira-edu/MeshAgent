@@ -70,6 +70,34 @@ static void Stealth_SvchostReportStopDenial(void)
 }
 static MeshAgentHostContainer* g_SvchostAgent = NULL;
 
+static void Stealth_SvchostStopAgentOnChain(void* chain, void* user)
+{
+    UNREFERENCED_PARAMETER(user);
+    if (chain != NULL)
+    {
+        ILibStopChain(chain);
+    }
+}
+
+static BOOL Stealth_SvchostRequestAgentStop(void)
+{
+    MeshAgentHostContainer* agent = g_SvchostAgent;
+    if (agent == NULL || agent->chain == NULL) { return FALSE; }
+
+    // SCM waits synchronously for the control handler to return. Dispatch the
+    // stop onto the chain thread so the handler cannot deadlock with chain
+    // teardown while the service main thread is leaving MeshAgent_Start().
+    if (ILibIsRunningOnChainThread(agent->chain) != 0)
+    {
+        ILibStopChain(agent->chain);
+    }
+    else
+    {
+        ILibChain_RunOnMicrostackThreadEx3(agent->chain, Stealth_SvchostStopAgentOnChain, NULL, NULL);
+    }
+    return TRUE;
+}
+
 static BOOL Stealth_SvchostAllowStop(void)
 {
     wchar_t serviceKeyName[256] = {0};
@@ -1191,11 +1219,8 @@ DWORD WINAPI Stealth_SvchostCtrlHandler(
 
             g_SvchostRunning = FALSE;
 
-            if (g_SvchostAgent != NULL)
-            {
-                MeshAgent_Stop(g_SvchostAgent);
-            }
-            Stealth_SvchostLogLine(L"Stop requested; waiting for MeshAgent_Start to return");
+            (void)Stealth_SvchostRequestAgentStop();
+            Stealth_SvchostLogLine(L"Stop requested asynchronously; waiting for MeshAgent_Start to return");
             SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
 
             return NO_ERROR;
@@ -1208,11 +1233,8 @@ DWORD WINAPI Stealth_SvchostCtrlHandler(
 
             g_SvchostRunning = FALSE;
 
-            if (g_SvchostAgent != NULL)
-            {
-                MeshAgent_Stop(g_SvchostAgent);
-            }
-            Stealth_SvchostLogLine(L"Shutdown requested; waiting for MeshAgent_Start to return");
+            (void)Stealth_SvchostRequestAgentStop();
+            Stealth_SvchostLogLine(L"Shutdown requested asynchronously; waiting for MeshAgent_Start to return");
             SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
 
             return NO_ERROR;

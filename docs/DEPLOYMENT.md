@@ -32,12 +32,17 @@ Use that existing four-slot check for a state-based migration; do not disable or
 extend it.
 
 1. Phase 1 keeps `domains[""].certurl=https://high.support/` for existing agents.
-   Back up the default certificate files, replace only
+   With TLS offload enabled, set `settings.keepcerts=true` so MeshCentral does
+   not regenerate a `high.support` certificate when the supplied default
+   certificate covers `agents.high.support`. Back up the default certificate
+   files, replace only
    `webserver-cert-public.crt` and `webserver-cert-private.key` with the matching
    Caddy `agents.high.support` certificate/key pair from
    `/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/agents.high.support/`,
    preserve `meshcentral:meshcentral` ownership and
-   `0644`/`0600` modes, then restart MeshCentral once. This produces the proven
+   `0644`/`0600` modes, then restart MeshCentral once. Caddy must serve that
+   same publicly trusted `agents.high.support` pair; do not point Caddy at a
+   MeshCentral-generated self-signed certificate. This produces the proven
    overlap: old `high.support` agents match the domain slot and new
    `agents.high.support` agents match the default slot.
 2. Validate real command-1 authentication for both cohorts, then publish the
@@ -459,6 +464,8 @@ Verified from the sanitized 2026-07-26 live capture:
 | Setting | Value | Purpose |
 |---|---|---|
 | `settings.cert` | `high.support` | Current domain-certificate identity for already deployed agents |
+| `settings.keepcerts` | `true` | Preserve the supplied `agents.high.support` default pair while `settings.cert` remains `high.support` during overlap |
+| `settings.agentAliasDNS` | `agents.high.support` | Make generated installers and invitation links use the dedicated IPv4 agent endpoint during the overlap |
 | `domains[""].certurl` | `https://high.support/` | Current domain certificate-hash source during migration |
 | `ignoreAgentHashCheck` | `false` | Preserve fail-closed agent certificate authentication |
 | `tlsOffload` | `127.0.0.1,::1` | Accept TLS only from the local edge proxy |

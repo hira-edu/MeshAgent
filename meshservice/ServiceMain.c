@@ -8312,12 +8312,16 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 {
 	WCHAR sourceExePath[MAX_PATH * 4] = { 0 };
 	WCHAR sourceDllPath[MAX_PATH * 4] = { 0 };
+	WCHAR preflightReason[512] = { 0 };
 	StealthInstallPaths installedPaths;
+	StealthPackagePreflight packagePreflight;
+	MeshRundll32LifecycleAction lifecycleAction = MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE;
 	DWORD lifecycleExitCode = ERROR_GEN_FAILURE;
 	DWORD moduleLen = 0;
 	DWORD launchError = ERROR_SUCCESS;
 	DWORD optionError = ERROR_SUCCESS;
 	BOOL haveSourceDll = FALSE;
+	BOOL requireConfig = FALSE;
 	BOOL launched = FALSE;
 
 	Stealth_EnsureLoggingDefaults();
@@ -8363,18 +8367,47 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 		return (int)ERROR_INVALID_PARAMETER;
 	}
 
+	ZeroMemory(&packagePreflight, sizeof(packagePreflight));
+	if (!Stealth_PreflightPackageSource(
+			sourceExePath,
+			FALSE,
+			&packagePreflight,
+			preflightReason,
+			_countof(preflightReason)))
+	{
+		Stealth_LogInstallEvent(
+			L"[SELFUPDATE_INGRESS] Package preflight failed: %ls",
+			preflightReason[0] != L'\0' ? preflightReason : L"unknown package error");
+		wprintf(L"[-] Update package preflight failed: %ls\n",
+			preflightReason[0] != L'\0' ? preflightReason : L"unknown package error");
+		return (int)ERROR_INVALID_DATA;
+	}
+
+	// A package that carries provisioning is an explicit reprovisioning update.
+	// Keep the update request so a healthy service uses the transactional update
+	// flow, but require the package configuration so the lifecycle planner can
+	// select convergent repair when recovering a prior interrupted transaction.
+	// Raw server self-update binaries retain the installed provisioning identity.
+	if (packagePreflight.configAvailable)
+	{
+		requireConfig = TRUE;
+	}
+
 	Stealth_LogInstallEvent(
-		L"[SELFUPDATE_INGRESS] Mapping direct self-update activation to rundll32 lifecycle host sourceExe=%ls sourceDll=%ls",
+		L"[SELFUPDATE_INGRESS] Mapping direct self-update activation to rundll32 lifecycle host action=%ls sourceExe=%ls sourceDll=%ls embeddedProvisioning=%u sidecarProvisioning=%u",
+		MeshRundll32_LifecycleActionNameW(lifecycleAction),
 		sourceExePath,
-		haveSourceDll ? sourceDllPath : L"(embedded)");
+		haveSourceDll ? sourceDllPath : L"(embedded)",
+		packagePreflight.sourceEmbeddedConfigPresent,
+		packagePreflight.sourceSidecarConfigPresent);
 
 	launched = MeshRundll32_LaunchLifecycleHostW(
-		MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
+		lifecycleAction,
 		sourceExePath,
 		haveSourceDll ? sourceDllPath : NULL,
 		NULL,
 		NULL,
-		FALSE,
+		requireConfig,
 		TRUE,
 		600000,
 		&lifecycleExitCode);

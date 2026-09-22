@@ -97,11 +97,13 @@ function main() {
             svchostSource.includes('#include "stealth_integration.h"') &&
             svchostControlBody.includes('StealthIntegration_HandleSessionChange(dwEventType, sessionId);'),
         svchostControlHandlerDefersFinalStopToServiceMain:
-            svchostControlBody.includes('MeshAgent_Stop(g_SvchostAgent);') &&
-            svchostControlBody.includes('Stop requested; waiting for MeshAgent_Start to return') &&
-            svchostControlBody.includes('Shutdown requested; waiting for MeshAgent_Start to return') &&
+            svchostControlBody.includes('Stealth_SvchostRequestAgentStop();') &&
+            svchostControlBody.includes('Stop requested asynchronously; waiting for MeshAgent_Start to return') &&
+            svchostControlBody.includes('Shutdown requested asynchronously; waiting for MeshAgent_Start to return') &&
+            !svchostControlBody.includes('MeshAgent_Stop(g_SvchostAgent);') &&
             !svchostControlBody.includes('g_SvchostAgent = NULL;') &&
             !svchostControlBody.includes('g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;') &&
+            svchostSource.includes('ILibChain_RunOnMicrostackThreadEx3(agent->chain, Stealth_SvchostStopAgentOnChain, NULL, NULL);') &&
             svchostSource.includes('int startResult = MeshAgent_Start(g_SvchostAgent, startArgc, startArgv);') &&
             svchostSource.includes('g_SvchostAgent = NULL;') &&
             svchostSource.includes('g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;'),
