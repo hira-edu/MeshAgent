@@ -108,6 +108,10 @@ function zippedObject(table)
     {
         return (this._table[name].crc);
     };
+    this.size = function size(name)
+    {
+        return (this._table[name].uncompressedSize);
+    };
     this.getStream = function getStream(name)
     {
         var info = this._table[name];
@@ -190,6 +194,11 @@ function zippedObject(table)
         ret._readSink = function _readSink(err, bytesRead, buffer)
         {
             console.info2('read ' + bytesRead + ' bytes [ERR: ' + err + ']', _readSink.self._bytesLeft);
+            if ((err != null && err != 0) || (bytesRead <= 0 && _readSink.self._bytesLeft > 0))
+            {
+                _readSink.self.emit('error', err || 'Unexpected end of ZIP entry');
+                return;
+            }
             _readSink.self._bytesLeft -= bytesRead;
             _readSink.self.write(buffer.slice(0, bytesRead), function ()
             {
@@ -212,6 +221,11 @@ function zippedObject(table)
         ret._readSink.self = ret;
         ret._localHeaderSink = function _localHeaderSink(err, bytesRead, buffer)
         {
+            if ((err != null && err != 0) || bytesRead < 30 || buffer.readUInt32LE(0) != LFR)
+            {
+                _localHeaderSink.self.emit('error', err || 'Invalid ZIP local header');
+                return;
+            }
             console.info1(buffer.readUInt32LE(0) == LFR);
             console.info1('General Purpose Flag: ' + buffer.readUInt16LE(6));
             console.info1('Compression Method: ' + buffer.readUInt16LE(8));
@@ -221,11 +235,17 @@ function zippedObject(table)
 
             console.info1('Requesting to read: ' + (_localHeaderSink.self._bytesLeft > 4096 ? 4096 : _localHeaderSink.self._bytesLeft) + ' bytes');
 
+            var dataPosition = _localHeaderSink.self._info.offset + 30 + buffer.readUInt16LE(26) + buffer.readUInt16LE(28);
+            if (dataPosition + _localHeaderSink.self._info.compressedSize > _localHeaderSink.self._info.archiveLength)
+            {
+                _localHeaderSink.self.emit('error', 'ZIP entry extends beyond archive');
+                return;
+            }
             require('fs').read(_localHeaderSink.self._info.fd,
                 {
                     buffer: _localHeaderSink.self._buffer,
                     length: _localHeaderSink.self._bytesLeft > 4096 ? 4096 : _localHeaderSink.self._bytesLeft,
-                    position: _localHeaderSink.self._info.offset + 30 + buffer.readUInt16LE(26) + buffer.readUInt16LE(28)
+                    position: dataPosition
                 }, _localHeaderSink.self._readSink);
         };
         ret._localHeaderSink.self = ret;
@@ -367,15 +387,31 @@ function read(path)
         ret._len = path.length;
         ret._fd = { _ObjectID: 'fs.bufferDescriptor', buffer: path, position: 0 };
     }
+    ret._settled = false;
+    ret._fail = function _fail(reason)
+    {
+        if (this._settled) { return; }
+        this._settled = true;
+        if (typeof this._fd == 'number') { try { require('fs').closeSync(this._fd); } catch (ignored) { } }
+        this._rej(reason);
+    };
     ret._cdr = function _cdr(err, bytesRead, buffer)
     {
         var table = {};
+        if ((err != null && err != 0) || bytesRead != buffer.length)
+        {
+            _cdr.self._fail(err || 'Unexpected end of ZIP central directory');
+            return;
+        }
+        buffer = buffer.slice(0, bytesRead);
         while (buffer.length > 0)
         {
-            if (buffer.readUInt32LE() != CDR) { _cdr.self._rej('Parse Error'); return; }
+            if (buffer.length < 46 || buffer.readUInt32LE() != CDR) { _cdr.self._fail('Parse Error'); return; }
             var nameLength = buffer.readUInt16LE(28);
             var efLength = buffer.readUInt16LE(30);
             var comLength = buffer.readUInt16LE(32);
+            var recordLength = 46 + nameLength + efLength + comLength;
+            if (recordLength > buffer.length) { _cdr.self._fail('Truncated ZIP central directory record'); return; }
             var name = buffer.slice(46, 46 + nameLength).toString();
             var namebuf = buffer.slice(46, 46 + nameLength);
             var efs = (buffer.readUInt16LE(8) & 2048) == 2048;
@@ -404,25 +440,34 @@ function read(path)
                         uncompressedSize: buffer.readUInt32LE(24),
                         offset: buffer.readUInt32LE(42),
                         fd: _cdr.self._fd,
+                        archiveLength: _cdr.self._len,
                         compression: buffer.readUInt16LE(10),
                         crc: buffer.readUInt32LE(16)
                     };
             }
-            buffer = buffer.slice(46 + nameLength + efLength + comLength);
+            buffer = buffer.slice(recordLength);
         }
 
+        _cdr.self._settled = true;
         _cdr.self._res(new zippedObject(table));
     };
     ret._eocdr = function _eocdr(err, bytesRead, buffer)
     {
         var record;
         var i;
-
-        for (i = 20; i < buffer.length; ++i)
+        if ((err != null && err != 0) || bytesRead < 22)
         {
-            if ((record = buffer.slice(buffer.length - i)).readUInt32LE() == EOCDR)
+            _eocdr.self._fail(err || 'ZIP end-of-central-directory record is missing');
+            return;
+        }
+        buffer = buffer.slice(0, bytesRead);
+
+        for (i = buffer.length - 22; i >= 0; --i)
+        {
+            if ((record = buffer.slice(i)).readUInt32LE() == EOCDR)
             {
-                console.info1('Found Start of ECD Record ' + i + ' bytes from end of file');
+                if ((22 + record.readUInt16LE(20)) > record.length) { continue; }
+                console.info1('Found Start of ECD Record ' + (buffer.length - i) + ' bytes from end of file');
                 console.info1('-------------------------');
                 console.info1('  Disk #: ' + record.readUInt16LE(4));
                 console.info1('  Number of Central Directory Records on this disc: ' + record.readUInt16LE(8));
@@ -430,15 +475,23 @@ function read(path)
                 console.info1('  Size of Central Directory: ' + record.readUInt32LE(12) + ' bytes');
                 console.info1('  Central Directory Records should be at offset: ' + record.readUInt32LE(16));
 
-                require('fs').read(_eocdr.self._fd, { buffer: Buffer.alloc(record.readUInt32LE(12)), position: record.readUInt32LE(16) }, _eocdr.self._cdr);
-                break;
+                var centralDirectorySize = record.readUInt32LE(12);
+                var centralDirectoryOffset = record.readUInt32LE(16);
+                if (centralDirectorySize == 0 || centralDirectoryOffset + centralDirectorySize > _eocdr.self._len)
+                {
+                    _eocdr.self._fail('Invalid ZIP central directory bounds');
+                    return;
+                }
+                require('fs').read(_eocdr.self._fd, { buffer: Buffer.alloc(centralDirectorySize), position: centralDirectoryOffset }, _eocdr.self._cdr);
+                return;
             }
         }
-
+        _eocdr.self._fail('ZIP end-of-central-directory record is missing');
     };
     ret._cdr.self = ret;
     ret._eocdr.self = ret;
-    require('fs').read(ret._fd, { buffer: Buffer.alloc(100), position: ret._len - 100 }, ret._eocdr);
+    var tailLength = ret._len > 65557 ? 65557 : ret._len;
+    require('fs').read(ret._fd, { buffer: Buffer.alloc(tailLength), position: ret._len - tailLength }, ret._eocdr);
     return(ret);
 }
 

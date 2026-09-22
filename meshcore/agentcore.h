@@ -207,6 +207,7 @@ typedef struct MeshAgentHostContainer
 	int forceUpdate;
 	int logUpdate;
 	int fakeUpdate;
+	int serverSupportsUpdateFailureStatus;
 	int controlChannelDebug;
 	void *coreTimeout;
 	char lastFailedCoreHash[UTIL_SHA384_HASHSIZE]; // C7: last core that failed verify/execute this session (in-memory, cleared on success)

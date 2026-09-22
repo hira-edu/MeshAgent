@@ -101,14 +101,14 @@ function windowsUpdaterFailsClosedBeforeDirectReplacement(source) {
     const platformGuard = body.indexOf("process.platform != 'freebsd' && process.platform != 'linux'");
     const directUnlink = body.indexOf("require('fs').unlinkSync(process.execPath)");
     const directCopy = body.indexOf("require('fs').copyFileSync(process.cwd() + agentfilename + '.update', process.execPath)");
-    const postGuardUpdateBlock = platformGuard >= 0 && directCopy > platformGuard ? body.substring(platformGuard, directCopy + 512) : '';
+    const atomicRename = body.indexOf('renameSync(stagedUpdatePath, process.execPath)');
 
     return topGuard >= 0 &&
         httpsStart > topGuard &&
         platformGuard >= 0 &&
-        directUnlink > platformGuard &&
-        directCopy > platformGuard &&
-        !postGuardUpdateBlock.includes("require('service-manager').manager.getService(name)") &&
+        directUnlink < 0 &&
+        directCopy < 0 &&
+        atomicRename > platformGuard &&
         body.includes('Self Update disabled for this platform; native service lifecycle is required.');
 }
 
@@ -166,21 +166,20 @@ function main() {
     const checks = {
         meshcentralSourcesAvailableNoLegacyUpdater: meshcoreSource != null &&
             meshcoreMinSource != null &&
-            meshcentralDataMeshcoreSource != null &&
             recoverycoreSource != null &&
             (rootMeshcoreSource == null || (rootMeshcoreLegacyHits.length === 0 && rootMeshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'))) &&
             (rootMeshcoreMinSource == null || (rootMeshcoreMinLegacyHits.length === 0 && rootMeshcoreMinSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'))) &&
             meshcoreLegacyHits.length === 0 &&
             meshcoreMinLegacyHits.length === 0 &&
-            meshcentralDataMeshcoreLegacyHits.length === 0 &&
+            (meshcentralDataMeshcoreSource == null || meshcentralDataMeshcoreLegacyHits.length === 0) &&
             recoverycoreLegacyHits.length === 0 &&
             meshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
             meshcoreMinSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
-            meshcentralDataMeshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.') &&
+            (meshcentralDataMeshcoreSource == null || meshcentralDataMeshcoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.')) &&
             recoverycoreSource.includes('Windows JavaScript self-update is disabled; native binary update is handled by the agent control channel.'),
         meshcentralJavaScriptUpdaterCannotTouchWindowsProcessImage: windowsUpdaterFailsClosedBeforeDirectReplacement(meshcoreSource) &&
             windowsUpdaterFailsClosedBeforeDirectReplacement(meshcoreMinSource) &&
-            windowsUpdaterFailsClosedBeforeDirectReplacement(meshcentralDataMeshcoreSource) &&
+            (meshcentralDataMeshcoreSource == null || windowsUpdaterFailsClosedBeforeDirectReplacement(meshcentralDataMeshcoreSource)) &&
             windowsUpdaterFailsClosedBeforeDirectReplacement(recoverycoreSource) &&
             (rootMeshcoreSource == null || windowsUpdaterFailsClosedBeforeDirectReplacement(rootMeshcoreSource)) &&
             (rootMeshcoreMinSource == null || windowsUpdaterFailsClosedBeforeDirectReplacement(rootMeshcoreMinSource)),
@@ -214,7 +213,8 @@ function main() {
             agentcoreSource.includes('keeping current agent online'),
         agentcoreHoldsFailedPackageHash: agentcoreSource.includes('MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, cm->coreModuleHash)') &&
             agentcoreSource.includes('MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash)') &&
-            agentcoreSource.includes('SelfUpdate -> holding failed update package hash to prevent same-package activation loop') &&
+            agentcoreSource.includes('SelfUpdate -> reporting failed update package hash separately from installed identity') &&
+            agentcoreSource.includes('agentupdatefailure') &&
             agentcoreSource.includes('SelfUpdate -> Same update package previously failed activation; suppressing repeat activation'),
         agentcoreFailsClosedWhenRundll32Unavailable: agentcoreSource.includes('SelfUpdate -> Windows lifecycle update requires rundll32/svchost mode; legacy command-shell update path disabled.') &&
             agentcoreSource.includes('util_deletefile(updatefile); // Fail closed'),

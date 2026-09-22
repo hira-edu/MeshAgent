@@ -11,9 +11,13 @@ function read(relPath) {
     return fs.readFileSync(path.resolve(relPath), 'utf8').replace(/\r\n?/g, '\n');
 }
 
+function readOptional(relPath) {
+    try { return read(relPath); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
 function main() {
     const source = read('../MeshCentral/meshagent.js');
-    const packageSource = read('../MeshCentral/node_modules/meshcentral/meshagent.js');
+    const packageSource = readOptional('../MeshCentral/node_modules/meshcentral/meshagent.js');
     const compareStart = source.indexOf('function compareAgentBinaryHash(agentExeInfo, agentHash)');
     assert(compareStart >= 0, 'compareAgentBinaryHash is missing');
     const compareEnd = source.indexOf('// Request that the core dump file', compareStart);
@@ -37,8 +41,8 @@ function main() {
         'HTTP agent update command must advertise served/appended fileHashHex when present'
     );
     assert(
-        packageSource.includes('(agentExeInfo.fileHash != null && agentExeInfo.fileHash == agentHash)') &&
-        packageSource.includes('obj.agentUpdate.agentUpdateHash = obj.agentExeInfo.hash;'),
+        packageSource == null || (packageSource.includes('(agentExeInfo.fileHash != null && agentExeInfo.fileHash == agentHash)') &&
+        packageSource.includes('obj.agentUpdate.agentUpdateHash = obj.agentExeInfo.hash;')),
         'installed MeshCentral package copy must match agent update hash contract'
     );
 
@@ -48,7 +52,8 @@ function main() {
             compareAcceptsFileHash: true,
             ramUpdateUsesNativeNormalizedHash: true,
             httpUpdateUsesFileHashHex: true,
-            installedPackageCopyAligned: true
+            installedPackageCopyAligned: packageSource != null,
+            installedPackageCopyPresent: packageSource != null
         }
     }, null, 2));
 }

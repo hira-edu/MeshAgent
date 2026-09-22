@@ -124,6 +124,7 @@ typedef struct ILibDuktape_fs_writeStreamData
 	FILE *fPtr;							// FILE* handle
 	int fd;								// descriptor
 	int autoClose;
+	int writeError;						// sticky short-write/flush failure
 	ILibDuktape_WritableStream *stream;
 }ILibDuktape_fs_writeStreamData;
 
@@ -270,9 +271,9 @@ duk_ret_t ILibDuktape_fs_closeSync(duk_context *ctx)
 	if (fd < 65535)
 	{
 #ifdef WIN32
-		_close(fd);
+		if (_close(fd) != 0) { return(ILibDuktape_Error(ctx, "FS close error")); }
 #else
-		close(fd);
+		if (close(fd) != 0) { return(ILibDuktape_Error(ctx, "FS close error")); }
 #endif
 		return(0);
 	}
@@ -291,7 +292,7 @@ duk_ret_t ILibDuktape_fs_closeSync(duk_context *ctx)
 		duk_del_prop_string(ctx, -2, key);
 		if (f != NULL)
 		{
-			fclose(f);
+			if (fclose(f) != 0) { return(ILibDuktape_Error(ctx, "FS close/flush error")); }
 		}
 	}
 	else
@@ -1014,6 +1015,10 @@ duk_ret_t ILibDuktape_fs_writeSync(duk_context *ctx)
 	{
 		if (nargs > 4) { fseek(f, duk_require_int(ctx, 4), SEEK_SET); printf("Write: Seeking to %d\n", duk_require_int(ctx, 4)); }
 		bytesWritten = (int)fwrite(buffer, 1, length, f);
+		if (bytesWritten != (int)length)
+		{
+			return(ILibDuktape_Error(ctx, "FS short write: wrote %d of %u bytes", bytesWritten, (unsigned int)length));
+		}
 		duk_push_int(ctx, bytesWritten);
 		return 1;
 	}
@@ -1044,9 +1049,13 @@ ILibTransport_DoneState ILibDuktape_fs_writeStream_writeHandler(struct ILibDukta
 	if (data->fPtr != NULL)
 	{
 		bytesWritten = (int)fwrite(buffer, 1, bufferLen, data->fPtr);
-		if (bytesWritten > 0)
+		if (bytesWritten == bufferLen)
 		{
 			retVal = ILibTransport_DoneState_COMPLETE;
+		}
+		else
+		{
+			data->writeError = 1;
 		}
 	}
 	return retVal;
@@ -1056,6 +1065,7 @@ ILibTransport_DoneState ILibDuktape_fs_writeStream_writeHandler(struct ILibDukta
 void ILibDuktape_fs_writeStream_endHandler(struct ILibDuktape_WritableStream *stream, void *user)
 {
 	ILibDuktape_fs_writeStreamData *data = (ILibDuktape_fs_writeStreamData*)user;
+	int streamError = data->writeError;
 	sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "%d", data->fd);
 
 	// If AutoClose is specified, then when the stream is ended, we will close the descriptor
@@ -1063,19 +1073,24 @@ void ILibDuktape_fs_writeStream_endHandler(struct ILibDuktape_WritableStream *st
 	{
 		if (ILibduktape_fs_CloseFD(data->ctx, data->fsObject, data->fd) != 0)
 		{
-			ILibDuktape_Process_UncaughtExceptionEx(data->ctx, "fs.writeStream.end(): Error closing FD: %d", data->fd);
+			streamError = 1;
 		}
 		data->fd = 0;
 		data->fPtr = NULL;
 	}
 
 
-	// Call the 'close' event on the WriteStream
+	// Native pipes call WriteSink directly, so surface sticky write errors here.
+	// Emit close only after every write and the final flush/close succeeded.
 	duk_push_heapptr(data->ctx, data->WriteStreamObject);	// [this]
 	duk_get_prop_string(data->ctx, -1, "emit");				// [this][emit]
 	duk_swap_top(data->ctx, -2);							// [emit][this]
-	duk_push_string(data->ctx, "close");					// [emit][this][close]
-	if (duk_pcall_method(data->ctx, 1) != 0) { ILibDuktape_Process_UncaughtException(data->ctx); }
+	duk_push_string(data->ctx, streamError ? "error" : "close");	// [emit][this][event]
+	if (streamError)
+	{
+		duk_push_error_object(data->ctx, DUK_ERR_ERROR, "fs.writeStream: short write or close/flush failure");
+	}
+	if (duk_pcall_method(data->ctx, streamError ? 2 : 1) != 0) { ILibDuktape_Process_UncaughtException(data->ctx); }
 	duk_pop(data->ctx);										// ...
 }
 
@@ -2551,11 +2566,13 @@ void ILibDuktape_fs_PUSH(duk_context *ctx, void *chain)
 							var buffer = this.readFileSync(src, {flags: 'rb'});\
 							this.writeFileSync(dest, buffer, {flags: 'wb'});\
 						};\
-						exports.writeFileSync = function writeFileSync(dest, data, options)\
+					exports.writeFileSync = function writeFileSync(dest, data, options)\
 						{\
 							var fd = this.openSync(dest, options?options.flags:'wb');\
-							this.writeSync(fd, data);\
-							this.closeSync(fd);\
+							var writeError = null;\
+							try { this.writeSync(fd, data); } catch (e) { writeError = e; }\
+							try { this.closeSync(fd); } catch (e) { if (writeError == null) { writeError = e; } }\
+							if (writeError != null) { throw writeError; }\
 							if(options && options.mode != null && process.platform != 'win32') { this.chmodSync(dest, options.mode);}\
 						};\
 						exports.CHMOD_MODES = {S_IRUSR: 0o400, S_IWUSR: 0o200, S_IXUSR: 0o100, S_IRGRP: 0o40, S_IWGRP: 0o20, S_IXGRP: 0o10, S_IROTH: 0o4, S_IWOTH: 0o2, S_IXOTH: 0o1};\

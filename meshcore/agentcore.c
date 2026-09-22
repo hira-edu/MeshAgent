@@ -5264,6 +5264,16 @@ static void MeshAgent_ClearUpdateActivationFailureHash(ILibSimpleDataStore db)
 }
 #endif
 
+static void MeshServer_ReportUpdateFailure(MeshAgentHostContainer *agent)
+{
+	static char updateFailed[] = "{\"action\":\"agentupdatefailed\"}";
+	if (agent == NULL || agent->controlChannel == NULL) { return; }
+	MeshServer_SendJSON(agent, agent->controlChannel, updateFailed, (int)(sizeof(updateFailed) - 1));
+	// New servers restore the core immediately from the status above. Reconnect is
+	// the compatibility fallback only for older servers that ignore the JSON action.
+	if (!agent->serverSupportsUpdateFailureStatus) { ILibWebClient_Disconnect(agent->controlChannel); }
+}
+
 void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 {
 #ifndef WIN32
@@ -5297,13 +5307,20 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 
 #ifdef WIN32
 	if (agent->JSRunningAsService == 0)
-	{
-		// Windows Console Mode updater
-		if (duk_peval_string(agent->meshCoreCtx, "require('agent-installer').consoleUpdate();") != 0)
 		{
-			printf("%s", duk_safe_to_string(agent->meshCoreCtx, -1));
+			// Windows console/tray binaries have no safe replacement lifecycle. Keep the
+			// current process online and discard the staged package instead of stopping
+			// the chain after consoleUpdate() rejects the operation.
+			if (duk_peval_string(agent->meshCoreCtx, "require('agent-installer').consoleUpdate();") != 0)
+			{
+				printf("%s", duk_safe_to_string(agent->meshCoreCtx, -1));
+			}
+			duk_pop(agent->meshCoreCtx);
+			util_deletefile(MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX));
+			if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Windows console update rejected; keeping current agent online"); }
+			MeshServer_ReportUpdateFailure(agent);
+			return;
 		}
-	}
 	else
 	{
 		WCHAR w_updatefile[4096] = { 0 };
@@ -5346,6 +5363,7 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 			MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
 			ILIBLOGMESSAGEX("SelfUpdate -> FAILED rundll32 lifecycle update activation (exit %lu, error %lu); keeping current agent online", lifecycleExitCode, activationError);
 			util_deletefile(updatefile); // Fail closed: drop the staged payload so a failed activation does not leave it behind
+			MeshServer_ReportUpdateFailure(agent);
 			return;
 		}
 #else
@@ -5354,6 +5372,7 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 		MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
 		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires rundll32/svchost mode; legacy command-shell update path disabled.");
 		util_deletefile(updatefile); // Fail closed: this build cannot apply the staged update, so do not leave it on disk
+		MeshServer_ReportUpdateFailure(agent);
 		return;
 #endif
 	}
@@ -5431,6 +5450,7 @@ duk_ret_t MeshServer_selfupdate_unzip_error(duk_context *ctx)
 #endif
 		util_deletefile(updateFilePath);
 	}
+	MeshServer_ReportUpdateFailure(agent);
 	return(0);
 }
 
@@ -5761,6 +5781,10 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 							duk_pcall_method(agent->meshCoreCtx, 0); duk_pop_2(agent->meshCoreCtx);					// [agent][pingarray]
 						}
 						duk_pop_2(agent->meshCoreCtx);																// ...
+					}
+					else if (strcmp(action, "agentupdatefailurecapability") == 0)
+					{
+						agent->serverSupportsUpdateFailureStatus = 1;
 					}
 				}
 			}
@@ -6101,19 +6125,32 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			else
 			{
 				// Update when necessary
+				memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE);// Report the executable that is actually running to capable servers.
 #ifdef WIN32
 				char failedActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
+				char failedActivationHashHex[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 1] = { 0 };
 				if (MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash))
 				{
-					memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), failedActivationHash, UTIL_SHA384_HASHSIZE);
-					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> holding failed update package hash to prevent same-package activation loop"); }
+					if (agent->serverSupportsUpdateFailureStatus)
+					{
+						int jsonLen;
+						util_tohex(failedActivationHash, UTIL_SHA384_HASHSIZE, failedActivationHashHex);
+						jsonLen = sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "{\"action\":\"agentupdatefailure\",\"hash\":\"%s\"}", failedActivationHashHex);
+						if (jsonLen > 0) { MeshServer_SendJSON(agent, WebStateObject, ILibScratchPad, jsonLen); }
+						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> reporting failed update package hash separately from installed identity"); }
+					}
+					else
+					{
+						// Legacy servers do not understand the separate failure frame.
+						// Preserve their historical same-package suppression behavior.
+						memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), failedActivationHash, UTIL_SHA384_HASHSIZE);
+					}
 				}
-				else
+				else if (agent->serverSupportsUpdateFailureStatus)
 				{
-					memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE);// SHA384 hash of the agent executable
+					static const char noFailedUpdate[] = "{\"action\":\"agentupdatefailure\"}";
+					MeshServer_SendJSON(agent, WebStateObject, (char*)noFailedUpdate, (int)(sizeof(noFailedUpdate) - 1));
 				}
-#else
-				memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE);// SHA384 hash of the agent executable
 #endif
 			}
 
@@ -6171,6 +6208,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						{
 							if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Same update package previously failed activation; suppressing repeat activation"); }
 							util_deletefile(updateFilePath);
+							MeshServer_ReportUpdateFailure(agent);
 							break;
 						}
 						MeshAgent_ClearUpdateActivationFailureHash(agent->masterDb);
@@ -6216,6 +6254,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 								}
 								duk_set_top(agent->meshCoreCtx, updateTop);
 								util_deletefile(updateFilePath);
+								MeshServer_ReportUpdateFailure(agent);
 								break;
 							}
 							duk_prepare_method_call(agent->meshCoreCtx, -1, "start");			// [helper][start][this]
@@ -6225,7 +6264,11 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 								duk_prepare_method_call(agent->meshCoreCtx, -1, "then");		// [helper][promise][then][this]
 								duk_push_c_function(agent->meshCoreCtx, MeshServer_selfupdate_unzip_complete, DUK_VARARGS);//..][res]
 								duk_push_c_function(agent->meshCoreCtx, MeshServer_selfupdate_unzip_error, DUK_VARARGS);//[this][res][rej]
-								duk_pcall_method(agent->meshCoreCtx, 2);
+								if (duk_pcall_method(agent->meshCoreCtx, 2) != 0)
+								{
+									util_deletefile(updateFilePath);
+									MeshServer_ReportUpdateFailure(agent);
+								}
 							}
 							else
 							{
@@ -6234,6 +6277,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 									sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "SelfUpdate -> Error Unzipping: %s", duk_safe_to_string(agent->meshCoreCtx, -1));
 									ILIBLOGMESSSAGE(ILibScratchPad);
 								}
+								util_deletefile(updateFilePath);
+								MeshServer_ReportUpdateFailure(agent);
 							}
 							duk_set_top(agent->meshCoreCtx, updateTop);							// ...
 							break; // Break out here, and continue when finished unzipping (or in the case of error, abort)
@@ -6249,6 +6294,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 							{
 								duk_set_top(agent->meshCoreCtx, updateTop);
 								util_deletefile(updateFilePath);
+								MeshServer_ReportUpdateFailure(agent);
 								break;
 							}
 						}
@@ -6262,6 +6308,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						}
 						duk_set_top(agent->meshCoreCtx, updateTop);
 						util_deletefile(updateFilePath);
+						MeshServer_ReportUpdateFailure(agent);
 						break;
 					}
 					else if (agent->logUpdate != 0)
@@ -6277,6 +6324,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					// Hash check failed, delete the file and do nothing. On next server reconnect, we will try again.
 					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Download Complete... Hash FAILED, aborting update..."); }
 					util_deletefile(updateFilePath);
+					MeshServer_ReportUpdateFailure(agent);
 				}
 			}
 
@@ -6318,6 +6366,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					// Update Failed, so update the server with an agent message explaining what happened, then abort the update by not sending an ACK
 					duk_eval_string_noresult(agent->meshCoreCtx, "require('MeshAgent').SendCommand({ action: 'sessions', type : 'msg', value : { 1: { msg: 'Self-Update FAILED. Write Error while writing update block', icon: 3 } } });");
 				}
+				util_deletefile(updateFilePath);
+				MeshServer_ReportUpdateFailure(agent);
 			}
 			break;
 		}
@@ -7225,9 +7275,15 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	ILibSimpleDataStore_ConfigSizeLimit(agent->masterDb, ILibSimpleDataStore_GetInt(agent->masterDb, "dbWarningSizeThreshold", 0), MeshServer_DbWarning, agent);
 	// C9: update flags read by VALUE (so a stored "0" means disabled=false), not by stored length.
 	agent->disableUpdate = (agent->JSRunningAsService != 0 && agent->JSRunningWithAdmin == 0) || MeshAgent_DbGetBoolean(agent->masterDb, "disableUpdate") || (agent->JSRunningAsService == 0 && ((agent->capabilities & MeshCommand_AuthInfo_CapabilitiesMask_TEMPORARY) == MeshCommand_AuthInfo_CapabilitiesMask_TEMPORARY));
+#ifdef WIN32
+	// Windows console/tray replacement is intentionally unsupported. Advertise
+	// updates as disabled instead of accepting a package that cannot be applied.
+	if (agent->JSRunningAsService == 0) { agent->disableUpdate = 1; }
+#endif
 	agent->forceUpdate = MeshAgent_DbGetBoolean(agent->masterDb, "forceUpdate");
 	agent->logUpdate = ILibSimpleDataStore_Get(agent->masterDb, "logUpdate", NULL, 0); // intentionally legacy length-semantics
 	agent->fakeUpdate = MeshAgent_DbGetBoolean(agent->masterDb, "fakeUpdate");
+	agent->serverSupportsUpdateFailureStatus = 0;
 	agent->controlChannelDebug = ILibSimpleDataStore_Get(agent->masterDb, "controlChannelDebug", NULL, 0);
 	ILibDuktape_HECI_Debug = (ILibSimpleDataStore_Get(agent->masterDb, "heciDebug", NULL, 0) != 0);
 	agent->timerLogging = ILibSimpleDataStore_Get(agent->masterDb, "timerLogging", NULL, 0);

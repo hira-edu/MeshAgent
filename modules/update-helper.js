@@ -24,27 +24,56 @@ function start(updatePath)
     ret._readpromise.then(function _updatehelper(zipped)
     {
         var p = new promise(function (res, rej) { this._res = res; this._rej = rej; });
+        p.failed = false;
+        p.fail = function fail(e)
+        {
+            if (this.failed) { return; }
+            this.failed = true;
+            try { zipped.close(); } catch (ignored) { }
+            try { require('fs').unlinkSync(updatePath + '_unzipped'); } catch (ignored) { }
+            this._rej(e);
+        };
         if (zipped.files.length != 1)
         {
-            p._rej('Unexpected contents in zip file');
-            zipped.close();
+            p.fail('Unexpected contents in zip file');
         }
         else
         {
+            var entryName = zipped.files[0];
             try
             {
                 p.dest = require('fs').createWriteStream(updatePath + '_unzipped', { flags: 'wb' });
             }
             catch (e)
             {
-                zipped.close();
-                p._rej(e);
+                p.fail(e);
                 return (p);
             }
             p.dest.prom = p;
             p.dest.zipped = zipped;
-            p.dest.on('close', function () { this.zipped.close(); this.prom._res(); });
-            zipped.getStream(zipped.files[0]).pipe(p.dest);
+            p.dest.entryName = entryName;
+            p.dest.on('error', function (e) { this.prom.fail(e); });
+            p.dest.on('close', function ()
+            {
+                if (this.prom.failed) { try { require('fs').unlinkSync(updatePath + '_unzipped'); } catch (ignored) { } return; }
+                var actualSize = -1;
+                try { actualSize = require('fs').statSync(updatePath + '_unzipped').size; } catch (e) { this.prom.fail(e); return; }
+                if (actualSize != this.zipped.size(this.entryName))
+                {
+                    this.prom.fail('Extracted update size mismatch');
+                    return;
+                }
+                if (this.prom.source.crc != this.zipped.crc(this.entryName))
+                {
+                    this.prom.fail('Extracted update CRC mismatch');
+                    return;
+                }
+                this.zipped.close();
+                this.prom._res();
+            });
+            p.source = zipped.getStream(entryName);
+            p.source.on('error', function (e) { p.fail(e); try { p.dest.end(); } catch (ignored) { } });
+            p.source.pipe(p.dest);
         }
         return (p);
     })

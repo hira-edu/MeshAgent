@@ -389,8 +389,8 @@ static BOOL Stealth_WaitForPrimaryLifecycleOperational(DWORD timeoutMs, StealthL
 static BOOL Stealth_DataStoreValueExists(const wchar_t* dbPath, const char* key, char* buffer, size_t bufferLen, int* valueLenOut);
 static BOOL Stealth_DataStorePutValue(const wchar_t* dbPath, const char* key, const char* value, size_t valueLen);
 static BOOL Stealth_DataStoreDeleteValue(const wchar_t* dbPath, const char* key);
-static void Stealth_ClearUpdateActivationHolds(const StealthInstallPaths* paths, const wchar_t* phaseLabel);
-static void Stealth_RecordUpdateActivationFailureHold(const StealthInstallPaths* paths);
+static BOOL Stealth_ClearUpdateActivationHolds(const StealthInstallPaths* paths, const wchar_t* phaseLabel);
+static BOOL Stealth_RecordUpdateActivationFailureHold(const StealthInstallPaths* paths);
 static BOOL Stealth_CaptureIdentitySnapshot(const wchar_t* dbPath, StealthIdentitySnapshot* snapshot);
 static BOOL Stealth_CaptureIdentitySnapshotFromDataStore(ILibSimpleDataStore store, StealthIdentitySnapshot* snapshot);
 static void Stealth_LogIdentitySnapshot(const wchar_t* phase, const StealthIdentitySnapshot* snapshot);
@@ -2518,13 +2518,23 @@ static BOOL Stealth_FinalizeUpdateTransaction(const StealthInstallPaths* paths, 
         Stealth_LogInstallEvent(L"[UPDATE] Failed to remove staged update directory (%ls)", tx->stageDir);
         ok = FALSE;
     }
+    return ok;
+}
+
+static BOOL Stealth_DiscardUpdateBackup(StealthUpdateTransaction* tx)
+{
+    if (tx == NULL) { return FALSE; }
+    if (!tx->backupsReady)
+    {
+        return TRUE;
+    }
     if (!Stealth_RemoveDirectoryTree(tx->backupDir, TRUE))
     {
-        Stealth_LogInstallEvent(L"[UPDATE] Failed to remove update backup directory (%ls)", tx->backupDir);
-        ok = FALSE;
+        Stealth_LogInstallEvent(L"[WARN] [UPDATE] Failed to remove update backup directory (%ls); preserving remaining rollback material", tx->backupDir);
+        return FALSE;
     }
-
-    return ok;
+    tx->backupsReady = FALSE;
+    return TRUE;
 }
 
 static BOOL Stealth_PrepareUpdateTransaction(const StealthInstallPaths* paths, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL allowInstalledProvisioning, StealthUpdateTransaction* tx)
@@ -3370,6 +3380,8 @@ static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t*
     BOOL success = TRUE;
     BOOL restartService = TRUE;
     BOOL serviceExists = FALSE;
+    BOOL rollbackCompleted = FALSE;
+    BOOL failureHoldRecorded = FALSE;
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
     wchar_t liveMshPath[MAX_PATH] = {0};
@@ -3631,6 +3643,17 @@ CLEANUP:
         success = FALSE;
     }
 
+    // The service owns the datastore with a non-shareable writer once started.
+    // Clear successful-activation markers while the service is still stopped.
+    if (success)
+    {
+        (void)Stealth_ClearUpdateActivationHolds(&paths, L"[UPDATE]");
+        if (!Stealth_FinalizeUpdateTransaction(&paths, &tx))
+        {
+            Stealth_LogInstallEvent(L"[WARN] [UPDATE] Transaction cleanup incomplete before service restart; retaining rollback capability");
+        }
+    }
+
     if (restartService)
     {
         if (!Stealth_StartSvchostServiceAndWait(serviceKeyName, paths.dllPath, 30000, TRUE))
@@ -3661,15 +3684,10 @@ CLEANUP:
             Stealth_LogInstallEvent(L"[UPDATE] Identity preservation check failed after update");
             success = FALSE;
         }
-        else if (!Stealth_FinalizeUpdateTransaction(&paths, &tx))
-        {
-            Stealth_LogInstallEvent(L"[UPDATE] Failed to finalize update transaction cleanup");
-            success = FALSE;
-        }
-        else if (!Stealth_WaitForPrimaryLifecycleHealthy(30000, &finalState))
+        else if (!Stealth_WaitForPrimaryLifecycleOperational(30000, &finalState))
         {
             Stealth_LogInstallEvent(
-                L"[UPDATE] Post-update discovery did not converge to healthy state after transaction cleanup (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
+                L"[UPDATE] Post-update primary lifecycle stopped being operational after transaction cleanup (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
                 Stealth_LifecycleStateToString(finalState.stateKind),
                 finalState.pendingUpdate,
                 finalState.updateStageArtifactsPresent,
@@ -3681,6 +3699,21 @@ CLEANUP:
         else
         {
             StealthIdentitySnapshot finalIdentity;
+            // Commit point: primary runtime and identity are valid and transactional
+            // cleanup succeeded. From here on, backup/degraded companion cleanup is
+            // best effort and must never trigger rollback from deleted material.
+            (void)Stealth_DiscardUpdateBackup(&tx);
+            if (!Stealth_WaitForPrimaryLifecycleHealthy(30000, &finalState))
+            {
+                Stealth_LogInstallEvent(
+                    L"[WARN] [UPDATE] Primary agent is operational but final companion cleanup remains degraded (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
+                    Stealth_LifecycleStateToString(finalState.stateKind),
+                    finalState.pendingUpdate,
+                    finalState.updateStageArtifactsPresent,
+                    finalState.updateBackupArtifactsPresent,
+                    finalState.firewallHealthy,
+                    finalState.persistenceHealthy);
+            }
             if (finalState.stateKind != STEALTH_LIFECYCLE_STATE_HEALTHY)
             {
                 Stealth_LogInstallEvent(L"[UPDATE] Primary agent converged but companion state remains degraded (%ls)",
@@ -3704,6 +3737,16 @@ CLEANUP:
             Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);
             Stealth_TerminateProcessesByPath(paths.exePath);
             rollbackOk = Stealth_RollbackUpdateTransaction(&paths, serviceKeyName, &tx);
+            if (rollbackOk)
+            {
+                // Promote the target to a failure hold before restarting the old
+                // service, otherwise its writable datastore handle blocks this write.
+                failureHoldRecorded = Stealth_RecordUpdateActivationFailureHold(&paths);
+                if (!Stealth_FinalizeUpdateTransaction(&paths, &tx))
+                {
+                    Stealth_LogInstallEvent(L"[WARN] [UPDATE] Rollback cleanup incomplete before service restart");
+                }
+            }
             if (rollbackOk && restartService)
             {
                 rollbackOk = Stealth_StartSvchostServiceAndWait(serviceKeyName, paths.dllPath, 30000, TRUE);
@@ -3734,19 +3777,11 @@ CLEANUP:
                 }
                 if (rollbackOk)
                 {
-                    rollbackOk = Stealth_FinalizeUpdateTransaction(&paths, &tx);
-                    if (!rollbackOk)
-                    {
-                        Stealth_LogInstallEvent(L"[UPDATE] Failed to finalize rollback transaction cleanup");
-                    }
-                }
-                if (rollbackOk)
-                {
-                    rollbackOk = Stealth_WaitForPrimaryLifecycleHealthy(30000, &rollbackState);
-                    if (!rollbackOk)
+                    (void)Stealth_DiscardUpdateBackup(&tx);
+                    if (!Stealth_WaitForPrimaryLifecycleHealthy(30000, &rollbackState))
                     {
                         Stealth_LogInstallEvent(
-                            L"[UPDATE] Rollback discovery did not converge to healthy state after transaction cleanup (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
+                            L"[WARN] [UPDATE] Rollback restored the primary agent but companion cleanup remains degraded (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
                             Stealth_LifecycleStateToString(rollbackState.stateKind),
                             rollbackState.pendingUpdate,
                             rollbackState.updateStageArtifactsPresent,
@@ -3769,20 +3804,31 @@ CLEANUP:
                     }
                 }
             }
+            rollbackCompleted = rollbackOk;
             Stealth_LogInstallEvent(L"[UPDATE] Rollback %ls for %ls", rollbackOk ? L"completed" : L"failed", serviceKeyName);
         }
     }
 
-    Stealth_DeleteUpdateTransactionArtifacts(&tx);
-
     if (success)
     {
-        Stealth_ClearUpdateActivationHolds(&paths, L"[UPDATE]");
+        // Safe after the commit point; this is a best-effort sweep only.
+        Stealth_DeleteUpdateTransactionArtifacts(&tx);
         Stealth_LogInstallEvent(L"[UPDATE] Update completed for %ls", serviceKeyName);
     }
     else
     {
-        Stealth_RecordUpdateActivationFailureHold(&paths);
+        if (!failureHoldRecorded && !Stealth_RecordUpdateActivationFailureHold(&paths))
+        {
+            Stealth_LogInstallEvent(L"[WARN] [UPDATE] Unable to persist failed package hold");
+        }
+        if (rollbackCompleted || !tx.backupsReady)
+        {
+            Stealth_DeleteUpdateTransactionArtifacts(&tx);
+        }
+        else
+        {
+            Stealth_LogInstallEvent(L"[UPDATE] Preserving transaction artifacts after failed rollback (%ls)", tx.backupDir);
+        }
         Stealth_LogInstallEvent(L"[UPDATE] Update failed for %ls", serviceKeyName);
     }
     return success;
@@ -4314,38 +4360,58 @@ static BOOL Stealth_ReadUpdateActivationTargetHash(const StealthInstallPaths* pa
     return TRUE;
 }
 
-static void Stealth_ClearUpdateActivationHolds(const StealthInstallPaths* paths, const wchar_t* phaseLabel)
+static BOOL Stealth_ClearUpdateActivationHolds(const StealthInstallPaths* paths, const wchar_t* phaseLabel)
 {
     const wchar_t* safePhase = (phaseLabel != NULL && phaseLabel[0] != L'\0') ? phaseLabel : L"[UPDATE]";
-    if (paths == NULL || paths->dbPath[0] == L'\0') { return; }
+    BOOL ok = TRUE;
+    if (paths == NULL || paths->dbPath[0] == L'\0') { return FALSE; }
 
-    if (Stealth_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY))
+    if (Stealth_DataStoreValueExists(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY, NULL, 0, NULL))
     {
-        Stealth_LogInstallEvent(L"%ls Cleared update activation target marker", safePhase);
+        if (Stealth_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY))
+        {
+            Stealth_LogInstallEvent(L"%ls Cleared update activation target marker", safePhase);
+        }
+        else
+        {
+            Stealth_LogInstallEvent(L"%ls Failed to clear update activation target marker", safePhase);
+            ok = FALSE;
+        }
     }
-    if (Stealth_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY))
+    if (Stealth_DataStoreValueExists(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY, NULL, 0, NULL))
     {
-        Stealth_LogInstallEvent(L"%ls Cleared update activation failure marker", safePhase);
+        if (Stealth_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY))
+        {
+            Stealth_LogInstallEvent(L"%ls Cleared update activation failure marker", safePhase);
+        }
+        else
+        {
+            Stealth_LogInstallEvent(L"%ls Failed to clear update activation failure marker", safePhase);
+            ok = FALSE;
+        }
     }
+    return ok;
 }
 
-static void Stealth_RecordUpdateActivationFailureHold(const StealthInstallPaths* paths)
+static BOOL Stealth_RecordUpdateActivationFailureHold(const StealthInstallPaths* paths)
 {
     char targetHash[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 1] = {0};
     int targetHashLen = 0;
 
-    if (paths == NULL || paths->dbPath[0] == L'\0') { return; }
-    if (!Stealth_ReadUpdateActivationTargetHash(paths, targetHash, sizeof(targetHash), &targetHashLen)) { return; }
+    if (paths == NULL || paths->dbPath[0] == L'\0') { return FALSE; }
+    if (!Stealth_ReadUpdateActivationTargetHash(paths, targetHash, sizeof(targetHash), &targetHashLen)) { return FALSE; }
 
     if (Stealth_DataStorePutValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY, targetHash, (size_t)targetHashLen))
     {
         Stealth_LogInstallEvent(L"[UPDATE] Recorded failed update activation package hash hold");
+        (void)Stealth_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY);
+        return TRUE;
     }
     else
     {
         Stealth_LogInstallEvent(L"[UPDATE] Failed to record update activation package hash hold");
     }
-    (void)Stealth_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY);
+    return FALSE;
 }
 
 static BOOL Stealth_IsPrintableIdentityValue(const char* value, int valueLen)
@@ -4638,6 +4704,7 @@ static BOOL Stealth_IsPrimaryLifecycleConverged(const StealthLifecycleDiscovery*
                                     discovery->dllDaclValid &&
                                     identityHealthy);
     const BOOL serviceHealthy = (discovery->serviceExists &&
+                                 discovery->serviceRunning &&
                                  discovery->serviceKeyExists &&
                                  discovery->serviceTypeValid &&
                                  discovery->serviceStartValid &&
