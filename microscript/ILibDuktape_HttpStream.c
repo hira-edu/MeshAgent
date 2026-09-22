@@ -90,6 +90,9 @@ void ILibDuktape_RemoveObjFromTable(duk_context *ctx, duk_idx_t tableIdx, char *
 #define ILibDuktape_WS2CR					"\xFF_WS2ClientRequest"
 #define ILibDuktape_WSDEC2WS				"\xFF_WSDEC2WS"
 
+#define ILIBDUKTAPE_WEBSOCKET_FRAGMENT_INITIAL_SIZE 4096
+#define ILIBDUKTAPE_WEBSOCKET_FRAGMENT_MAX_SIZE (16 * 1024 * 1024)
+
 extern void ILibWebServer_Digest_ParseAuthenticationHeader(void* table, char* value, int valueLen);
 extern int *ILibWebClient_WCDO_ServerFlag(ILibWebClient_StateObject j);
 void ILibDuktape_HttpStream_ServerResponse_PUSH(duk_context *ctx, void* writeStream, ILibHTTPPacket *header, void *httpStream);
@@ -209,6 +212,63 @@ static int ILibDuktape_httpStream_webSocket_HasDecodedWritable(ILibDuktape_WebSo
 		state->decodedStream != NULL &&
 		ILibMemory_CanaryOK(state->decodedStream) &&
 		state->decodedStream->writableStream != NULL;
+}
+
+static void ILibDuktape_httpStream_webSocket_CloseInputTransport(ILibDuktape_WebSocket_State *state)
+{
+	if (!ILibMemory_CanaryOK(state)) { return; }
+	state->closed = 1;
+	if (ILibDuktape_httpStream_webSocket_HasDecodedWritable(state))
+	{
+		ILibDuktape_DuplexStream_WriteEnd(state->decodedStream);
+	}
+	if (ILibMemory_CanaryOK(state) &&
+		ILibDuktape_httpStream_webSocket_HasLiveContext(state) &&
+		ILibDuktape_httpStream_webSocket_HasEncodedWritable(state) &&
+		ILibIsRunningOnChainThread(state->chain) != 0 &&
+		state->encodedStream->writableStream->pipedReadable != NULL)
+	{
+		duk_context *ctx = state->ctx;
+		duk_push_heapptr(ctx, state->encodedStream->writableStream->pipedReadable);	// [stream]
+		duk_get_prop_string(ctx, -1, "end");										// [stream][end]
+		duk_swap_top(ctx, -2);													// [end][this]
+		if (duk_pcall_method(ctx, 0) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "http.webSocketStream.write(): Error Dispatching 'end' "); }
+		duk_pop(ctx);														// ...
+	}
+}
+
+static int ILibDuktape_httpStream_webSocket_EnsureFragmentCapacity(ILibDuktape_WebSocket_State *state, int additionalBytes)
+{
+	int requiredSize;
+	int newSize;
+	char *newBuffer;
+
+	if (state == NULL || additionalBytes < 0 || state->WebSocketFragmentIndex < 0 || state->WebSocketFragmentMaxBufferSize <= 0) { return 0; }
+	if (additionalBytes > (state->WebSocketFragmentMaxBufferSize - state->WebSocketFragmentIndex)) { return 0; }
+	requiredSize = state->WebSocketFragmentIndex + additionalBytes;
+	if (requiredSize <= state->WebSocketFragmentBufferSize) { return 1; }
+
+	newSize = state->WebSocketFragmentBufferSize;
+	if (newSize <= 0)
+	{
+		newSize = state->WebSocketFragmentMaxBufferSize < ILIBDUKTAPE_WEBSOCKET_FRAGMENT_INITIAL_SIZE ? state->WebSocketFragmentMaxBufferSize : ILIBDUKTAPE_WEBSOCKET_FRAGMENT_INITIAL_SIZE;
+	}
+	while (newSize < requiredSize)
+	{
+		if (newSize > (state->WebSocketFragmentMaxBufferSize / 2))
+		{
+			newSize = state->WebSocketFragmentMaxBufferSize;
+			break;
+		}
+		newSize *= 2;
+	}
+	if (newSize < requiredSize) { return 0; }
+
+	newBuffer = (char*)realloc(state->WebSocketFragmentBuffer, (size_t)newSize);
+	if (newBuffer == NULL) { return 0; }
+	state->WebSocketFragmentBuffer = newBuffer;
+	state->WebSocketFragmentBufferSize = newSize;
+	return 1;
 }
 
 typedef struct ILibDuktape_Http_Server
@@ -4367,7 +4427,7 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_EncodedWriteSink(ILibDu
 	unsigned char RSV1;
 	ILibDuktape_WebSocket_State *state = (ILibDuktape_WebSocket_State*)user;
 
-	if (!ILibMemory_CanaryOK(state)) { return(ILibTransport_DoneState_ERROR); }
+	if (!ILibMemory_CanaryOK(state) || state->closed != 0) { return(ILibTransport_DoneState_ERROR); }
 
 	if (bufferLen < 2) 
 	{ 
@@ -4418,7 +4478,7 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_EncodedWriteSink(ILibDu
 		}
 	}
 
-	if (bufferLen < (i + plen + ((unsigned char)(hdr & WEBSOCKET_MASK) != 0 ? 4 : 0)))
+	if (plen > (bufferLen - i - (((unsigned char)(hdr & WEBSOCKET_MASK) != 0) ? 4 : 0)))
 	{
 		return(ILibDuktape_httpStream_webSocket_EncodedWriteSink_DispatchUnshift(stream, buffer, bufferLen)); // Don't have the entire packet
 	}
@@ -4506,12 +4566,19 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_EncodedWriteSink(ILibDu
 		}
 		else
 		{
-			if (state->WebSocketFragmentIndex + plen >= state->WebSocketFragmentBufferSize)
+			if (ILibDuktape_httpStream_webSocket_EnsureFragmentCapacity(state, plen) == 0)
 			{
-				// Need to grow the buffer
-				if (state->WebSocketFragmentBufferSize == 0) { state->WebSocketFragmentBufferSize = 4096; }
-				state->WebSocketFragmentBufferSize = state->WebSocketFragmentBufferSize * 2;
-				if ((state->WebSocketFragmentBuffer = (char*)realloc(state->WebSocketFragmentBuffer, state->WebSocketFragmentBufferSize)) == NULL) { ILIBCRITICALEXIT(254); } // MS Static Analyser erroneously reports that this leaks the original memory block
+				char msg[] = "WebSocket fragmented message exceeds the reassembly limit";
+				Duktape_Console_Log(state->ctx, state->chain, ILibDuktape_LogType_Error, msg, sizeof(msg) - 1);
+				state->WebSocketFragmentIndex = 0;
+				if (state->WebSocketFragmentBuffer != NULL)
+				{
+					free(state->WebSocketFragmentBuffer);
+					state->WebSocketFragmentBuffer = NULL;
+					state->WebSocketFragmentBufferSize = 0;
+				}
+				ILibDuktape_httpStream_webSocket_CloseInputTransport(state);
+				return(ILibTransport_DoneState_ERROR);
 			}
 
 			memcpy_s(state->WebSocketFragmentBuffer + state->WebSocketFragmentIndex, state->WebSocketFragmentBufferSize - state->WebSocketFragmentIndex, buffer + i, plen);
@@ -4530,17 +4597,7 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_EncodedWriteSink(ILibDu
 		switch (OPCODE)
 		{
 		case WEBSOCKET_OPCODE_CLOSE:
-			state->closed = 1;
-			ILibDuktape_DuplexStream_WriteEnd(state->decodedStream);
-			if (ILibMemory_CanaryOK(state) && ILibIsRunningOnChainThread(state->chain) != 0 && state->encodedStream->writableStream->pipedReadable != NULL)
-			{
-				duk_context *ctx = state->ctx;
-				duk_push_heapptr(state->ctx, state->encodedStream->writableStream->pipedReadable);	// [stream]
-				duk_get_prop_string(state->ctx, -1, "end");											// [stream][end]
-				duk_swap_top(state->ctx, -2);														// [end][this]
-				if (duk_pcall_method(state->ctx, 0) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "http.webSocketStream.write(): Error Dispatching 'end' "); }
-				duk_pop(ctx);																// ...
-			}
+			ILibDuktape_httpStream_webSocket_CloseInputTransport(state);
 			break;
 		case WEBSOCKET_OPCODE_PING:
 			if (ILibIsRunningOnChainThread(state->chain) != 0)
@@ -4797,6 +4854,13 @@ duk_ret_t ILibDuktape_httpStream_webSocketStream_finalizer(duk_context *ctx)
 		duk_push_heapptr(ctx, state->encodedStream->writableStream->obj);				// [unpipe][this][ws]
 		duk_call_method(ctx, 1); duk_pop(ctx);											// ...
 	}
+	if (state->WebSocketFragmentBuffer != NULL)
+	{
+		free(state->WebSocketFragmentBuffer);
+		state->WebSocketFragmentBuffer = NULL;
+		state->WebSocketFragmentBufferSize = 0;
+		state->WebSocketFragmentIndex = 0;
+	}
 
 	return(0);
 }
@@ -5047,8 +5111,11 @@ duk_ret_t ILibDuktape_httpStream_webSocketStream_new(duk_context *ctx)
 	state->ctx = ctx;
 	state->ObjectPtr = duk_get_heapptr(ctx, -1);
 	state->chain = Duktape_GetChain(ctx);
+	state->WebSocketFragmentMaxBufferSize = ILIBDUKTAPE_WEBSOCKET_FRAGMENT_MAX_SIZE;
 	if (narg > 1 && duk_is_object(ctx, 1))
 	{
+		int requestedFragmentMax = Duktape_GetIntPropertyValue(ctx, 1, "maxFragmentBufferSize", state->WebSocketFragmentMaxBufferSize);
+		if (requestedFragmentMax >= ILIBDUKTAPE_WEBSOCKET_FRAGMENT_INITIAL_SIZE && requestedFragmentMax <= ILIBDUKTAPE_WEBSOCKET_FRAGMENT_MAX_SIZE) { state->WebSocketFragmentMaxBufferSize = requestedFragmentMax; }
 		state->permessageDeflate = Duktape_GetIntPropertyValue(ctx, 1, "perMessageDeflate", 0);
 		state->minimumThreshold = Duktape_GetIntPropertyValue(ctx, 1, "minimumThreshold", 64);
 		state->maxSkipCount = Duktape_GetIntPropertyValue(ctx, 1, "maxSkipCount", 128);

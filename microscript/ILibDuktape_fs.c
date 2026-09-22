@@ -62,6 +62,7 @@ limitations under the License.
 #define FS_READSTREAM		"\xFF_ReadStream"
 #define FS_READSTREAM_2FS	"\xFF_ReadStream2FS"
 #define FS_READSTREAM_BUFFERSIZE	4096
+#define FS_READSTREAM_MAX_BYTES_PER_TURN (256 * 1024)
 #define FS_STAT_METHOD_RETVAL		"\xFF_RetVal"
 #define FS_WATCHER_DATA_PTR			"\xFF_FSWatcherPtr"
 #define FS_WATCHER_2_FS				"\xFF_FSWatcher2FS"
@@ -142,6 +143,7 @@ typedef struct ILibDuktape_fs_readStreamData
 	int bytesLeft;							// Number of bytes left
 	int readLoopActive;						// Event Dispatch thread is actively reading
 	int unshiftedBytes;						// Number of bytes to mark as unread
+	void *readImmediate;						// Cooperative continuation, rooted until it runs
 	char buffer[FS_READSTREAM_BUFFERSIZE];
 }ILibDuktape_fs_readStreamData;
 
@@ -1196,15 +1198,50 @@ void ILibDuktape_fs_readStream_Pause(struct ILibDuktape_readableStream *sender, 
 	sender->paused = 1;
 }
 
+static void ILibDuktape_fs_readStream_Resume(struct ILibDuktape_readableStream *sender, void *user);
+
+static void ILibDuktape_fs_readStream_ResumeLater(duk_context *ctx, void **args, int argsLen)
+{
+	ILibDuktape_fs_readStreamData *data = argsLen > 0 ? (ILibDuktape_fs_readStreamData*)args[0] : NULL;
+	ILibDuktape_readableStream *sender = argsLen > 1 ? (ILibDuktape_readableStream*)args[1] : NULL;
+
+	if (ILibMemory_CanaryOK(data))
+	{
+		data->readImmediate = NULL;
+		if (ILibMemory_CanaryOK(sender) && sender->paused == 0 && data->readLoopActive == 0)
+		{
+			ILibDuktape_fs_readStream_Resume(sender, data);
+		}
+	}
+
+	duk_push_this(ctx);
+	duk_del_prop_string(ctx, -1, "self");
+	duk_pop(ctx);
+}
+
+static void ILibDuktape_fs_readStream_ScheduleResume(ILibDuktape_fs_readStreamData *data, ILibDuktape_readableStream *sender)
+{
+	if (data->readImmediate != NULL || data->ctx == NULL || data->ReadStreamObject == NULL) { return; }
+	data->readImmediate = ILibDuktape_Immediate(data->ctx, (void*[]) { data, sender, NULL }, 2, ILibDuktape_fs_readStream_ResumeLater);
+	if (data->readImmediate != NULL)
+	{
+		duk_push_heapptr(data->ctx, data->readImmediate);
+		duk_push_heapptr(data->ctx, data->ReadStreamObject);
+		duk_put_prop_string(data->ctx, -2, "self");
+		duk_pop(data->ctx);
+	}
+}
+
 //
 // The stream.resume() contains the main processing loop.
 //
-void ILibDuktape_fs_readStream_Resume(struct ILibDuktape_readableStream *sender, void *user)
+static void ILibDuktape_fs_readStream_Resume(struct ILibDuktape_readableStream *sender, void *user)
 {
 	if (!ILibMemory_CanaryOK(user)) { return; }
 
 	ILibDuktape_fs_readStreamData *data = (ILibDuktape_fs_readStreamData*)user;
 	int bytesToRead;
+	int bytesReadThisTurn = 0;
 
 	// If this is set, it means this thread is trying to re-enter this processing loop
 	if (data->readLoopActive != 0) { return; }
@@ -1213,11 +1250,12 @@ void ILibDuktape_fs_readStream_Resume(struct ILibDuktape_readableStream *sender,
 
 	if (data->bytesRead == -1) { data->bytesRead = 1; }
 	data->unshiftedBytes = 0;
-	while (sender->paused == 0 && data->bytesRead > 0 && (data->bytesLeft < 0 || data->bytesLeft > 0))
+	while (sender->paused == 0 && data->bytesRead > 0 && (data->bytesLeft < 0 || data->bytesLeft > 0) && bytesReadThisTurn < FS_READSTREAM_MAX_BYTES_PER_TURN)
 	{
 		// The main read processing loop. we'll read as much as we can until we can't read anymore
 		bytesToRead = data->bytesLeft < 0 ? (int)sizeof(data->buffer) : (data->bytesLeft > ((int)sizeof(data->buffer) - data->unshiftedBytes) ? (int)sizeof(data->buffer) - data->unshiftedBytes : data->bytesLeft);
 		data->bytesRead = (int)fread(data->buffer + data->unshiftedBytes, 1, bytesToRead, data->fPtr);
+		bytesReadThisTurn += data->bytesRead;
 		if (data->bytesRead > 0)
 		{
 			if (data->bytesLeft > 0) { data->bytesLeft -= data->bytesRead; }
@@ -1258,6 +1296,10 @@ void ILibDuktape_fs_readStream_Resume(struct ILibDuktape_readableStream *sender,
 		}
 	}
 	data->readLoopActive = 0;
+	if (sender->paused == 0 && data->bytesRead > 0 && (data->bytesLeft < 0 || data->bytesLeft > 0))
+	{
+		ILibDuktape_fs_readStream_ScheduleResume(data, sender);
+	}
 }
 
 // Destructor called by Garbage Collector

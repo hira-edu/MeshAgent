@@ -14,6 +14,9 @@ node .\test\health_check_branding_contract.js
 node .\test\drift_reduction_contract.js
 node .\test\kvm_bridge_pipe_contract.js
 node .\test\update_quiesce_contract.js
+node .\test\websocket_state_lifecycle_contract.js
+node .\test\large_file_transfer_contract.js
+node .\test\file_execution_actions_contract.js
 node .\test\provisioning-ssot-check.js `
   --evidence .\artifacts\validation\provisioning `
   --branding-json .\branding_config.local.json `
@@ -65,6 +68,21 @@ to exercise the actual HTTP server's nested `ws` version. Use the original
 deployed source as the failing control when local and live versions differ.
 
 ## Native and runtime probes
+
+Large Files-session regressions have a built-runtime probe for fragmented
+WebSocket reassembly and event-loop fairness while reading a sparse file:
+
+```powershell
+node .\test\large_file_transfer_runtime.js `
+  --runner .\meshconsole\Release\MeshConsole64.exe `
+  --size-mb 64 `
+  --evidence .\artifacts\validation\large-file-transfer
+```
+
+The probe is local and does not connect to a server or install an agent. It
+requires a runner rebuilt from the current native sources. The accompanying
+static contracts cover transfer cleanup in the normal, minified, and recovery
+cores and permission-safe Files actions for Windows executables.
 
 Directory ACL defaults have a data-only Windows Authz regression:
 
