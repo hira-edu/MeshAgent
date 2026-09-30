@@ -91,7 +91,7 @@ function main() {
     const consumeOutput = extractFunction(kvm, 'static void kvm_relay_consume_output_buffer(KvmRelayContext* ctx, char *buffer, size_t bufferLen, size_t* bytesConsumed)');
     const createPipe = extractFunction(kvm, 'static BOOL kvm_relay_create_bridge_server_pipeW(const WCHAR* pipeName, DWORD pipeOpenMode, HANDLE* pipeOut)');
     const verifyClient = extractFunction(kvm, 'static BOOL kvm_relay_verify_bridge_client(HANDLE pipeHandle, DWORD expectedPid, DWORD* errorOut)');
-    const waitClient = extractFunction(kvm, 'static BOOL kvm_relay_wait_for_bridge_client(KvmRelayContext* ctx, HANDLE bridgePipeHandle, DWORD timeoutMs, LONG expectedSessionGeneration, DWORD* errorOut, BOOL* sessionChangedOut)');
+    const destroy = extractFunction(kvm, 'static void kvm_relay_destroy_context(KvmRelayContext* ctx)');
     const attach = extractFunction(kvm, 'static BOOL kvm_relay_attach_bridge_transport(KvmRelayContext* ctx, HANDLE inputPipeHandle, HANDLE outputPipeHandle)');
     const spawnSuccess = extractFunction(kvm, 'static void kvm_record_spawn_success(void *reserved, void *pipeMgr, char *exePath, ILibKVM_WriteHandler writeHandler)');
     const healthy = extractFunction(kvm, 'static void kvm_record_healthy_output(void)');
@@ -116,7 +116,7 @@ function main() {
 
     const checks = {
         registryLockInitializedOnce:
-            ensureLock.includes('InitOnceExecuteOnce(&gKvmRelayContextLockOnce, kvm_relay_initialize_locks, NULL, NULL);') &&
+            ensureLock.includes('InitOnceExecuteOnce(&gKvmRelayLocksOnce, kvm_relay_initialize_locks, NULL, NULL);') &&
             !kvm.includes('gKvmRelayContextLockInitialized'),
         reservedLookupNeverFallsBackToAnotherSession:
             lookup.includes('return kvm_relay_get_registered_context(reserved);') &&
@@ -149,9 +149,9 @@ function main() {
             cleanup.includes('if (destroyNow && kvm_relay_context_is_active_in_outer_frame(ctx))') &&
             cleanup.includes('ILibLifeTime_AddEx(ILibGetBaseTimer(gILibChain), ctx, 0, &kvm_retry_timer_callback, NULL);'),
         bridgeInputWritesAreBounded:
-            writeInput.includes('WaitForSingleObject(overlapped.hEvent, KVM_BRIDGE_WRITE_TIMEOUT_MS) == WAIT_OBJECT_0') &&
+            writeInput.includes('waitResult = WaitForSingleObject(overlapped.hEvent, KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS);') &&
             writeInput.includes('CancelIoEx(ctx->bridgeInputPipeHandle, &overlapped);') &&
-            writeInput.includes('errorCode = ERROR_TIMEOUT;') &&
+            writeInput.includes('kvm_relay_abandon_stalled_bridge(ctx);') &&
             countOccurrences(writeInput, 'GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, TRUE)') === 1,
         failedLaunchesFreeUnattachedHelpers:
             !restart.includes('ILibProcessPipe_Process_SoftKill(gChildProcess);') &&
@@ -161,6 +161,7 @@ function main() {
             createPipe.includes('PIPE_REJECT_REMOTE_CLIENTS') &&
             verifyClient.includes('GetNamedPipeClientProcessId(pipeHandle, &clientPid)') &&
             verifyClient.includes('(DWORD)clientPid != expectedPid') &&
+            !restart.includes('ILibProcessPipe_Process_SoftKill(gChildProcess);') &&
             restart.includes('kvm_relay_verify_bridge_client(ctx->bridgeInputPipeHandle, ILibProcessPipe_Process_GetPID(gChildProcess), &lastError)') &&
             restart.includes('kvm_relay_verify_bridge_client(ctx->bridgeOutputPipeHandle, ILibProcessPipe_Process_GetPID(gChildProcess), &lastError)'),
         outputFramingIsValidated:
@@ -205,12 +206,13 @@ function main() {
         refreshProbeWindowStartsAtAttach:
             attach.includes('gKvmPendingProbeSinceTickMs = GetTickCount64();') &&
             kvm.includes('if (gKvmChildExitSignaled != 0) { return 0; }'),
-        sessionPreSignalCannotTouchFreedContext:
-            waitClient.includes('kvm_relay_publish_blocking_wait(ctx);') &&
-            waitClient.includes('kvm_relay_publish_blocking_wait(NULL);') &&
-            notify.includes('EnterCriticalSection(&gKvmSessionSignalLock);') &&
-            notify.includes('preSignaledContext = gKvmBlockingWaitContext;') &&
-            !notify.includes('preSignaledContext = gKvmActiveContext;'),
+        sessionChangeSignalsUnderSignalLockAndDispatchesOnChain:
+            notify.includes('kvm_relay_signal_lock();') &&
+            notify.includes('kvm_relay_signal_unlock();') &&
+            !notify.includes('kvm_relay_lock();') &&
+            !notify.includes('gKvmActiveContext') &&
+            notify.includes('ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);') &&
+            destroy.includes('kvm_relay_signal_lock();'),
         sessionLockKeepsHelperOnLockScreen:
             sessionChange.includes('if (eventType == WTS_SESSION_LOCK)') &&
             sessionChange.includes('session lock keeps KVM helper attached') &&

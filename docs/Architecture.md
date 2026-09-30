@@ -102,16 +102,19 @@ runtime coverage lives in `test/`.
 
 Each remote desktop session owns one relay context in
 `meshcore/KVM/Windows/kvm.c`, keyed by the caller's `reserved` pointer. The
-relay lock serializes every entry point (chain callbacks, the service control
-thread's session-change notifications, and probe threads). Session state is
+relay lock serializes every entry point. Session-change notifications from the
+service control thread never take it: they signal registered contexts under a
+short signal lock (which context destruction also takes) and queue the rest of
+the handling to the chain thread. Session state is
 mirrored into globals only while a context is activated; activation nests, so
 a stream callback that re-enters `kvm_pause()` or `kvm_cleanup()` keeps the
 outer frame's state. A call that names an unregistered session is dropped; it
 never falls back to another session's context.
 
 The helper is `rundll32.exe <bundle dll>,KvmSessionBridgeW`, connected over two
-directional named pipes. The service accepts only local clients and verifies
-that each pipe client is the process it spawned. A helper that fails before
+directional named pipes. The pipes admit only SYSTEM and the service account,
+reject remote clients, and accept a client only if it is the process the
+service spawned. A helper that fails before
 attaching is terminated and its process object freed. Relay writes to the helper
 are bounded; a timed-out, broken, or badly framed helper is replaced
 through the exit/restart path. While no helper is attached, only replayable

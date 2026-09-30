@@ -44,6 +44,26 @@ function readSource(filePath) {
     return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
 }
 
+function extractFunction(source, signature) {
+    const start = source.indexOf(signature);
+    assert(start >= 0, `${signature} not found`);
+    const bodyStart = source.indexOf('{', start);
+    assert(bodyStart >= 0, `${signature} body start not found`);
+    let depth = 0;
+    for (let i = bodyStart; i < source.length; ++i) {
+        const ch = source[i];
+        if (ch === '{') {
+            depth += 1;
+        } else if (ch === '}') {
+            depth -= 1;
+            if (depth === 0) {
+                return source.slice(start, i + 1);
+            }
+        }
+    }
+    throw new Error(`${signature} body end not found`);
+}
+
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
@@ -55,14 +75,43 @@ function main() {
 	const tileSource = readSource(tilePath);
 	const bridgeSource = readSource(bridgePath);
 	const smokeSource = readSource(smokePath);
+	const pipeSddlBody = extractFunction(kvmSource, 'static BOOL kvm_relay_build_bridge_pipe_sddlW(WCHAR* sddl, size_t sddlLen)');
+	const pipeCreateBody = extractFunction(kvmSource, 'static BOOL kvm_relay_create_bridge_server_pipeW(const WCHAR* pipeName, DWORD pipeOpenMode, HANDLE* pipeOut)');
+	const verifyClientBody = extractFunction(kvmSource, 'static BOOL kvm_relay_verify_bridge_client(HANDLE pipeHandle, DWORD expectedPid, DWORD* errorOut)');
+	const writeInputBody = extractFunction(kvmSource, 'static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int bufferLen)\n{');
+	const abandonStalledBody = extractFunction(kvmSource, 'static void kvm_relay_abandon_stalled_bridge(KvmRelayContext* ctx)');
 
     const checks = {
         masterBuildsGuidPipeBaseName: kvmSource.includes('\\\\\\\\.\\\\pipe\\\\MeshKvm_%ls'),
         masterBuildsInputAndOutputPipeNames: kvmSource.includes('kvm_relay_build_bridge_pipe_namesW') &&
             kvmSource.includes('L"%ls_in"') &&
             kvmSource.includes('L"%ls_out"'),
-        masterUsesRestrictedPipeDacl: kvmSource.includes('KVM_BRIDGE_PIPE_DACL_SDDL = L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)(A;;GA;;;SU)"') &&
-            kvmSource.includes('ConvertStringSecurityDescriptorToSecurityDescriptorW(KVM_BRIDGE_PIPE_DACL_SDDL'),
+        masterRestrictsPipeDaclToServiceAccount: kvmSource.includes('#define KVM_BRIDGE_PIPE_DACL_SDDL L"D:P(A;;GA;;;SY)"') &&
+            pipeSddlBody.includes('OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)') &&
+            pipeSddlBody.includes('GetTokenInformation(token, TokenUser, &tokenUser') &&
+            pipeSddlBody.includes('IsWellKnownSid(tokenUser.user.User.Sid, WinLocalSystemSid)') &&
+            pipeSddlBody.includes('ConvertSidToStringSidW(tokenUser.user.User.Sid, &sidText)') &&
+            pipeCreateBody.includes('kvm_relay_build_bridge_pipe_sddlW(pipeDaclSddl, _countof(pipeDaclSddl))') &&
+            pipeCreateBody.includes('ConvertStringSecurityDescriptorToSecurityDescriptorW(pipeDaclSddl') &&
+            !kvmSource.includes(';;;IU)') &&
+            !kvmSource.includes(';;;SU)'),
+        masterPipesAreLocalAndFirstInstance: pipeCreateBody.includes('pipeOpenMode | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE') &&
+            pipeCreateBody.includes('PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS'),
+        masterVerifiesPipeClientIsLaunchedHelper: verifyClientBody.includes('GetNamedPipeClientProcessId(pipeHandle, &clientPid)') &&
+            verifyClientBody.includes('(DWORD)clientPid != expectedPid') &&
+            verifyClientBody.includes('errorCode = ERROR_ACCESS_DENIED;') &&
+            kvmSource.includes('!kvm_relay_verify_bridge_client(ctx->bridgeInputPipeHandle, ILibProcessPipe_Process_GetPID(gChildProcess), &lastError)') &&
+            kvmSource.includes('!kvm_relay_verify_bridge_client(ctx->bridgeOutputPipeHandle, ILibProcessPipe_Process_GetPID(gChildProcess), &lastError)') &&
+            kvmSource.indexOf('!kvm_relay_verify_bridge_client(ctx->bridgeInputPipeHandle') < kvmSource.indexOf('!kvm_relay_attach_bridge_transport(ctx, ctx->bridgeInputPipeHandle, ctx->bridgeOutputPipeHandle)') &&
+            kvmSource.indexOf('!kvm_relay_verify_bridge_client(ctx->bridgeOutputPipeHandle') < kvmSource.indexOf('!kvm_relay_attach_bridge_transport(ctx, ctx->bridgeInputPipeHandle, ctx->bridgeOutputPipeHandle)'),
+        masterBoundsBridgeInputWrites: kvmSource.includes('#define KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS 2000') &&
+            writeInputBody.includes('WaitForSingleObject(overlapped.hEvent, KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS)') &&
+            writeInputBody.includes('CancelIoEx(ctx->bridgeInputPipeHandle, &overlapped)') &&
+            writeInputBody.indexOf('CancelIoEx(ctx->bridgeInputPipeHandle, &overlapped)') < writeInputBody.indexOf('GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, TRUE)') &&
+            writeInputBody.includes('GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, FALSE)') &&
+            writeInputBody.includes('kvm_relay_abandon_stalled_bridge(ctx);'),
+        masterTerminatesStalledHelper: abandonStalledBody.includes('InterlockedExchange(&ctx->bridgeTransportAttached, 0);') &&
+            abandonStalledBody.includes('ILibProcessPipe_Process_SoftKill(childProcess);'),
         masterCreatesDirectionalOverlappedPipes: kvmSource.includes('static BOOL kvm_relay_create_bridge_server_pipeW(const WCHAR* pipeName, DWORD pipeOpenMode, HANDLE* pipeOut)') &&
             kvmSource.includes('pipeOpenMode | FILE_FLAG_OVERLAPPED') &&
             kvmSource.includes('kvm_relay_create_bridge_server_pipeW(bridgeInputPipeNameW, PIPE_ACCESS_OUTBOUND, &ctx->bridgeInputPipeHandle)') &&

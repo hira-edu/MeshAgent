@@ -74,6 +74,8 @@ function main() {
     const relaySetupBody = extractFunction(kvmSource, 'int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int tsid)');
     const sessionChangeBody = extractFunction(kvmSource, 'static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)');
     const sessionNotifyBody = extractFunction(kvmSource, 'void kvm_notify_session_change(DWORD eventType, DWORD sessionId)');
+    const sessionDispatchBody = extractFunction(kvmSource, 'static void kvm_relay_dispatch_session_change_on_chain(void* chain, void* user)');
+    const destroyContextBody = extractFunction(kvmSource, 'static void kvm_relay_destroy_context(KvmRelayContext* ctx)');
     const sessionClassifierBody = extractFunction(kvmSource, 'static int kvm_relay_session_change_affects_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId, int queryUserToken, int* ignoreReasonOut)');
     const signalRelevantBody = extractFunction(kvmSource, 'static int kvm_relay_signal_session_change_if_relevant(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)');
     const retryTimerBody = extractFunction(kvmSource, 'static void kvm_retry_timer_callback(void* object)');
@@ -108,20 +110,43 @@ function main() {
             svchostSource.includes('g_ServiceHostAgent = NULL;') &&
             svchostSource.includes('g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;'),
         relayDefinesSessionChangeDispatcher: kvmSource.includes('static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)'),
-        relayDispatchesSessionChangesPerContext: kvmSource.includes('kvm_relay_handle_session_change_for_context(snapshot[i], eventType, sessionId);'),
+        relayDispatchesSessionChangesPerContext:
+            sessionDispatchBody.includes('kvm_relay_lock();') &&
+            sessionDispatchBody.includes('snapshot[i] = gKvmRelayContexts[i];') &&
+            sessionDispatchBody.includes('kvm_relay_handle_session_change_for_context(snapshot[i], request->eventType, request->sessionId);') &&
+            sessionDispatchBody.includes('kvm_relay_unlock();') &&
+            sessionDispatchBody.includes('free(request);'),
         relaySignalsOnlyRelevantSessionContexts:
-            sessionNotifyBody.includes('kvm_relay_signal_session_change_if_relevant(snapshot[i], eventType, sessionId)') &&
-            sessionNotifyBody.includes('preSignaled = kvm_relay_signal_session_change_if_relevant(preSignaledContext, eventType, sessionId);') &&
+            sessionNotifyBody.includes('(void)kvm_relay_signal_session_change_if_relevant(ctx, eventType, sessionId);') &&
             !sessionNotifyBody.includes('(void)kvm_relay_signal_session_change(eventType, sessionId);'),
-        relayPreSignalsRelevantActiveContextBeforeBlockingOnRelayLock:
-            sessionNotifyBody.includes('TryEnterCriticalSection(&gKvmRelayContextLock)') &&
-            sessionNotifyBody.indexOf('preSignaled = kvm_relay_signal_session_change_if_relevant(preSignaledContext, eventType, sessionId);') <
-                sessionNotifyBody.indexOf('kvm_relay_lock();'),
+        // The service control handler must return promptly and must not touch a context it cannot keep alive.
+        relayNotifyNeverTakesRelayLockOrReadsActiveContext:
+            sessionNotifyBody.includes('kvm_relay_signal_lock();') &&
+            sessionNotifyBody.includes('kvm_relay_signal_unlock();') &&
+            !sessionNotifyBody.includes('kvm_relay_lock();') &&
+            !sessionNotifyBody.includes('TryEnterCriticalSection') &&
+            !sessionNotifyBody.includes('gKvmActiveContext') &&
+            !sessionNotifyBody.includes('kvm_relay_handle_session_change_for_context(') &&
+            !sessionNotifyBody.includes('kvm_relay_restart('),
+        relayNotifySignalsBeforeQueueingToChain:
+            sessionNotifyBody.includes('ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);') &&
+            sessionNotifyBody.indexOf('kvm_relay_signal_unlock();') <
+                sessionNotifyBody.indexOf('ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);'),
+        relayDestroyWaitsForInFlightSessionSignal:
+            destroyContextBody.indexOf('kvm_relay_signal_lock();') >= 0 &&
+            destroyContextBody.indexOf('ctx->sessionChangeEvent = NULL;') > destroyContextBody.indexOf('kvm_relay_signal_lock();') &&
+            destroyContextBody.indexOf('kvm_relay_signal_unlock();') > destroyContextBody.indexOf('ctx->sessionChangeEvent = NULL;') &&
+            destroyContextBody.indexOf('CloseHandle(sessionChangeEvent);') > destroyContextBody.indexOf('kvm_relay_signal_unlock();') &&
+            destroyContextBody.indexOf('ILibMemory_Free(ctx);') > destroyContextBody.indexOf('kvm_relay_signal_unlock();'),
+        relayLocksInitializeOnce:
+            kvmSource.includes('static INIT_ONCE gKvmRelayLocksOnce = INIT_ONCE_STATIC_INIT;') &&
+            kvmSource.includes('InitOnceExecuteOnce(&gKvmRelayLocksOnce, kvm_relay_initialize_locks, NULL, NULL);') &&
+            kvmSource.includes('InitializeCriticalSection(&gKvmRelaySignalLock);'),
         relayDefinesSessionChangeCancelEpoch:
             kvmSource.includes('HANDLE sessionChangeEvent;') &&
             kvmSource.includes('LONG sessionChangeGeneration;') &&
             kvmSource.includes('ctx->sessionChangeEvent = CreateEventW(NULL, TRUE, FALSE, NULL);') &&
-            kvmSource.includes('CloseHandle(ctx->sessionChangeEvent);') &&
+            destroyContextBody.includes('CloseHandle(sessionChangeEvent);') &&
             kvmSource.includes('static LONG kvm_relay_signal_session_change(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)'),
         relaySessionChangeWaitArmPreventsLostSignal:
             armFirstGenerationCheck >= 0 &&
