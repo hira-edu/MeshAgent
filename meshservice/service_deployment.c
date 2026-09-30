@@ -105,6 +105,8 @@ static BOOL MeshInstaller_CombinePath(wchar_t* dest, size_t destLen, const wchar
 static void ServiceDeploy_UpdatePersistenceStatePath(const wchar_t* installRoot);
 
 // Forward declarations for persistence helpers
+struct ServiceUpdateTransaction;
+struct ServiceIdentitySnapshot;
 static void ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
 static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting);
 static void ServiceDeploy_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting);
@@ -2910,6 +2912,9 @@ static BOOL ServiceDeploy_ClearPendingUpdateArtifacts(const ServiceInstallPaths*
 // Complete Installation Function
 // ================================================================
 
+static BOOL ServiceDeploy_ApplyUpdateFlow(
+    const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig);
+
 static BOOL ServiceDeploy_ApplyInstallFlow(
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
@@ -2974,6 +2979,19 @@ static BOOL ServiceDeploy_ApplyInstallFlow(
     {
         ServiceDeploy_LogInstallEvent(L"[INSTALL] Package preflight failed: invalid svchost DLL source (%ls)", sourceDllPath);
         return FALSE;
+    }
+
+    // The update transaction can restore this supported binding as well as its files.
+    // Legacy service migrations retain their existing installation path: the transaction
+    // does not snapshot arbitrary SCM accounts, image paths or service Parameters.
+    ServiceLifecycleDiscovery incumbent;
+    if (ServiceDeploy_DiscoverCurrentState(&incumbent) && incumbent.serviceExists &&
+        incumbent.serviceTypeValid && incumbent.serviceImageValid && incumbent.serviceGroupValid &&
+        incumbent.serviceAccountValid && incumbent.serviceDllValid && incumbent.dllExists &&
+        incumbent.serviceMainValid && incumbent.serviceUnloadValid)
+    {
+        ServiceDeploy_LogInstallEvent(L"[INSTALL] Existing svchost service detected; using rollback-capable update transaction");
+        return ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, TRUE, TRUE);
     }
 
     ServiceDeploy_ImportWinHttpProxyFromIeBestEffort();
@@ -3378,6 +3396,7 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     BOOL success = TRUE;
     BOOL restartService = TRUE;
     BOOL serviceExists = FALSE;
+    BOOL serviceWasRunning = FALSE;
     BOOL rollbackCompleted = FALSE;
     BOOL failureHoldRecorded = FALSE;
     wchar_t serviceKeyName[256] = {0};
@@ -3413,6 +3432,7 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         }
     }
     serviceExists = ServiceDeploy_IsAlreadyInstalled();
+    serviceWasRunning = serviceExists && ServiceDeploy_ServiceIsRunning(serviceKeyName);
 
     ZeroMemory(&preflight, sizeof(preflight));
     if (!ServiceDeploy_PreflightPackageSource(sourceExePath, FALSE, &preflight, preflightReason, _countof(preflightReason)))
@@ -3488,8 +3508,9 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     {
         if (!ServiceDeploy_QueryServiceStartType(serviceKeyName, &originalStartType))
         {
-            ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Unable to query service start type before update (%ls, error=%lu)", serviceKeyName, GetLastError());
-            originalStartType = SERVICE_AUTO_START;
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] Unable to retain service start type; aborting before quiesce (%ls, error=%lu)", serviceKeyName, GetLastError());
+            ServiceDeploy_DeleteUpdateTransactionArtifacts(&tx);
+            return FALSE;
         }
         if (originalStartType != SERVICE_AUTO_START)
         {
@@ -3652,7 +3673,8 @@ CLEANUP:
         }
     }
 
-    if (restartService)
+    // Never start a partially committed package; the failure path restores the incumbent first.
+    if (success && restartService)
     {
         if (!ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, paths.dllPath, 30000, TRUE))
         {
@@ -3727,6 +3749,19 @@ CLEANUP:
     if (!success)
     {
         BOOL canRollback = tx.backupsReady;
+        if (!canRollback && serviceExists)
+        {
+            // Backup failed before any live file or datastore commit. There is nothing to
+            // roll back, but quiescing the incumbent must not leave a running agent stopped.
+            if (serviceWasRunning && !ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, paths.dllPath, 30000, FALSE))
+            {
+                ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to restart unchanged incumbent after pre-commit failure (%ls)", serviceKeyName);
+            }
+            if (!ServiceDeploy_SetServiceStartType(serviceKeyName, originalStartType))
+            {
+                ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Failed to restore original service start type (%ls, error=%lu)", serviceKeyName, GetLastError());
+            }
+        }
         if (canRollback)
         {
             BOOL rollbackOk = FALSE;
@@ -3745,11 +3780,18 @@ CLEANUP:
                     ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Rollback cleanup incomplete before service restart");
                 }
             }
-            if (rollbackOk && restartService)
+            if (rollbackOk && serviceWasRunning)
             {
-                rollbackOk = ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, paths.dllPath, 30000, TRUE);
+                rollbackOk = ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, paths.dllPath, 30000, FALSE);
             }
-            if (rollbackOk)
+            if (rollbackOk && !serviceWasRunning)
+            {
+                // A stopped incumbent stays stopped; RUNNING convergence is not a rollback gate.
+                rollbackOk = (!tx.rollbackIdentityReady ||
+                    ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000));
+                if (rollbackOk) { (void)ServiceDeploy_DiscardUpdateBackup(&tx); }
+            }
+            else if (rollbackOk)
             {
                 ServiceLifecycleDiscovery rollbackState;
                 rollbackOk = ServiceDeploy_WaitForPrimaryLifecycleOperational(30000, &rollbackState);
@@ -3804,6 +3846,10 @@ CLEANUP:
             }
             rollbackCompleted = rollbackOk;
             ServiceDeploy_LogInstallEvent(L"[UPDATE] Rollback %ls for %ls", rollbackOk ? L"completed" : L"failed", serviceKeyName);
+            if (serviceExists && !ServiceDeploy_SetServiceStartType(serviceKeyName, originalStartType))
+            {
+                ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Failed to restore original service start type after rollback (%ls, error=%lu)", serviceKeyName, GetLastError());
+            }
         }
     }
 

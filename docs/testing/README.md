@@ -71,6 +71,25 @@ deployed source as the failing control when local and live versions differ.
 
 ## Native and runtime probes
 
+Portable native failure tests compile the production functions with controlled
+Windows API boundaries. They require a local C compiler; the pipe, console-host,
+and authentication fixtures also use AddressSanitizer and UndefinedBehaviorSanitizer:
+
+```text
+node test/kvm_session_dispatch_native.js
+python3 test/process_pipe_lifetime_runtime.py
+python3 test/host_cleanup_runtime.py
+python3 test/agentcore_auth_failure_runtime.py
+python3 test/service_update_recovery_native.py
+```
+
+These cover notification allocation failure, pipe callback lifetime and pending
+reads, console cleanup under backpressure, authentication rejection and service
+exit reporting, and update/repair rollback ordering. They launch no agent or
+service. Passing them does not establish Windows overlapped-I/O, ConPTY, SCM,
+filesystem rollback, or desktop-session integration; those still require the
+matching Windows build and approved runtime host.
+
 Large Files-session regressions have a built-runtime probe for fragmented
 WebSocket reassembly and event-loop fairness while reading a sparse file:
 
