@@ -33,8 +33,8 @@ function run(name, platform, selection, missing = false) {
     fs.writeFileSync(project, `<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <MeshAgentRepoRoot>${xml(dir)}</MeshAgentRepoRoot>
-    <MeshAgentSkipStealthLabDllDependencyBuild>1</MeshAgentSkipStealthLabDllDependencyBuild>
-    <Configuration>StealthLab</Configuration><Platform>${platform}</Platform>
+    <MeshAgentSkipMeshServiceBundleDependencyBuild>1</MeshAgentSkipMeshServiceBundleDependencyBuild>
+    <Configuration>MeshServiceRuntime</Configuration><Platform>${platform}</Platform>
     <TargetDir>${xml(dir + path.sep)}</TargetDir><TargetName>MeshService-Test</TargetName><TargetExt>.exe</TargetExt>
     ${selection === 'override' ? '<MeshAgentProvisioningManifest>' + xml(source) + '</MeshAgentProvisioningManifest>' : ''}
   </PropertyGroup>

@@ -161,17 +161,17 @@ WINDOWS_BRANDING_DEFAULTS = load_windows_branding_defaults()
 ARTIFACTS = {
     # "friendly name": {"local_path": ..., "remote_filename": ..., "publish_targets": (...)}
     "MeshService64.exe": {
-        "local_path": "meshservice/x64/StealthLab/MeshService-2022.exe",
+        "local_path": "meshservice/x64/MeshServiceRuntime/MeshService-2022.exe",
         "remote_filename": "MeshService64.exe",
         "publish_targets": ("data", "signed", "module"),
     },
     "MeshService.exe": {
-        "local_path": "meshservice/StealthLab/MeshService-2022.exe",
+        "local_path": "meshservice/MeshServiceRuntime/MeshService-2022.exe",
         "remote_filename": "MeshService.exe",
         "publish_targets": ("data", "signed", "module"),
     },
     "MeshService64.dll": {
-        "local_path": "meshservice/x64/StealthLab_DLL/MeshService-2022.dll",
+        "local_path": "meshservice/x64/MeshServiceBundle/MeshService-2022.dll",
         "remote_filename": "MeshService64.dll",
         "publish_targets": ("signed", "module"),
     },
@@ -181,17 +181,17 @@ ARTIFACTS = {
         "publish_targets": ("signed", "module"),
     },
     "diagsvc.dll": {
-        "local_path": "meshservice/x64/StealthLab_DLL/MeshService-2022.dll",
+        "local_path": "meshservice/x64/MeshServiceBundle/MeshService-2022.dll",
         "remote_filename": "diagsvc.dll",
         "publish_targets": ("data",),
     },
     "MeshService64.msh": {
-        "local_path": "meshservice/x64/StealthLab/MeshService-2022.msh",
+        "local_path": "meshservice/x64/MeshServiceRuntime/MeshService-2022.msh",
         "remote_filename": "MeshService64.msh",
         "publish_targets": ("data", "signed", "module"),
     },
     "MeshService.msh": {
-        "local_path": "meshservice/StealthLab/MeshService-2022.msh",
+        "local_path": "meshservice/MeshServiceRuntime/MeshService-2022.msh",
         "remote_filename": "MeshService.msh",
         "publish_targets": ("data", "signed", "module"),
     },

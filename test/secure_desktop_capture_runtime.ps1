@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 if ($WaitSeconds -lt 1) { throw 'WaitSeconds must be at least 1.' }
 if ($SampleIntervalSeconds -lt 1) { throw 'SampleIntervalSeconds must be at least 1.' }
 
-$exe = Join-Path $RepoRoot 'meshservice\\x64\\StealthLab\\MeshService-2022.exe'
+$exe = Join-Path $RepoRoot 'meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw "Missing executable: $exe" }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null

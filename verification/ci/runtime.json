@@ -1,6 +1,6 @@
 {
   "generatedUtc": "2025-10-26T19:55:29.2478266Z",
-  "binaryPath": "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab",
+  "binaryPath": "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime",
   "summary": {
     "total": 36,
     "passed": 34,
@@ -10,13 +10,13 @@
   },
   "tests": [
     {
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.exe",
       "Status": "Pass",
       "Name": "x64 Binary Exists",
       "Details": "Size: 5.78 MB"
     },
     {
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.exe",
       "Status": "Pass",
       "Name": "x86 Binary Exists",
       "Details": "Size: 5.78 MB"
@@ -42,7 +42,7 @@
     {
       "Message": "Trimmed SHA256 14B198BBE0647F108A48D9CCBEA94B502425D0701F12A200A10D15D65B9AFA7B",
       "Status": "Pass",
-      "Name": "MeshCentral Binary Matches StealthLab",
+      "Name": "MeshCentral Binary Matches MeshServiceRuntime",
       "Details": ""
     },
     {
@@ -130,13 +130,13 @@
       "Details": ""
     },
     {
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.msh",
       "Status": "Pass",
       "Name": "Provisioning manifest staged (MeshService-2022.exe)",
       "Details": ""
     },
     {
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.msh",
       "Status": "Pass",
       "Name": "Provisioning manifest staged (MeshService-2022.exe)",
       "Details": ""

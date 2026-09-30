@@ -40,7 +40,7 @@ function assert(condition, message) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const dllPath = path.resolve(args.dll || path.join('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll'));
+    const dllPath = path.resolve(args.dll || path.join('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll'));
     const wrapperPath = path.resolve(args.wrapper || path.join('modules', 'win-terminal.js'));
     const systemRoot = process.env.SystemRoot || 'C:\\Windows';
     const originalLoad = Module._load;

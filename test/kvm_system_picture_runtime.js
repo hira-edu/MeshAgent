@@ -202,7 +202,7 @@ function createAnimationScript(scriptPath) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveBridgeDllPath(exePath, args.dll ? path.resolve(args.dll) : null);
     const rundll32Path = resolveRundll32Path();
     const collectorPath = path.join(os.tmpdir(), `kvm_system_picture_${process.pid}_${Date.now()}.js`);

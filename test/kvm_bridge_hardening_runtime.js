@@ -94,7 +94,7 @@ async function waitForCondition(predicate, timeoutMs, intervalMs, description) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const dllPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
+    const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
     const rundll32Path = resolveRundll32Path();
 
     assert(fs.existsSync(dllPath), `bridge DLL missing at ${dllPath}`);

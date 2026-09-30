@@ -1,6 +1,6 @@
 {
   "generatedUtc": "2025-10-27T11:14:19.0699798Z",
-  "binaryPath": "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab",
+  "binaryPath": "C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime",
   "summary": {
     "total": 36,
     "passed": 32,
@@ -12,13 +12,13 @@
     {
       "Details": "Size: 5.77 MB",
       "Name": "x64 Binary Exists",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.exe",
       "Status": "Pass"
     },
     {
       "Details": "Size: 5.77 MB",
       "Name": "x86 Binary Exists",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.exe",
       "Status": "Pass"
     },
     {
@@ -120,19 +120,19 @@
     {
       "Details": "",
       "Name": "Provisioning manifest staged (MeshService-2022.exe)",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.msh",
       "Status": "Pass"
     },
     {
       "Details": "",
       "Name": "Provisioning manifest staged (MeshService-2022.exe)",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.msh",
       "Status": "Pass"
     },
     {
       "Details": "",
       "Name": "Binaries embed ServerID",
-      "Message": "Expected value not found. Checked: C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe; C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe; C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab_DLL\\MeshService-2022.dll",
+      "Message": "Expected value not found. Checked: C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.exe; C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.exe; C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceBundle\\MeshService-2022.dll",
       "Status": "Warning"
     },
     {

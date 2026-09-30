@@ -15,13 +15,13 @@ FIXTURE = r'''
 #include <sddl.h>
 #include <authz.h>
 #include <stdio.h>
-#include "stealth_defaults.h"
+#include "service_defaults.h"
 
 int main(void)
 {
     const wchar_t* descriptors[] = {
-        L"O:SYG:SY" STEALTH_SECURE_DIR_DACL_SDDL, L"O:SYG:SY" STEALTH_INSTALL_ROOT_DACL_SDDL,
-        L"O:SYG:SY" STEALTH_HOST_EXE_DACL_SDDL, L"O:SYG:SY" STEALTH_SVCHOST_DLL_DACL_SDDL
+        L"O:SYG:SY" SERVICE_SECURE_DIR_DACL_SDDL, L"O:SYG:SY" SERVICE_INSTALL_ROOT_DACL_SDDL,
+        L"O:SYG:SY" SERVICE_HOST_EXE_DACL_SDDL, L"O:SYG:SY" SERVICE_DLL_DACL_SDDL
     };
     const char* names[] = { "data-directory", "install-root", "host-exe", "service-dll" };
     const wchar_t* principals[] = { L"S-1-5-18", L"S-1-5-32-544", L"S-1-5-11", L"S-1-5-4", L"S-1-5-32-545", L"S-1-1-0" };
@@ -111,13 +111,13 @@ PROJECT = r'''<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.co
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", required=True, type=pathlib.Path)
-    parser.add_argument("--header", type=pathlib.Path, default=ROOT / "meshservice/stealth_defaults.h")
+    parser.add_argument("--header", type=pathlib.Path, default=ROOT / "meshservice/service_defaults.h")
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.error("Windows and MSBuild C++ tools are required")
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(args.header, evidence / "stealth_defaults.h")
+    shutil.copyfile(args.header, evidence / "service_defaults.h")
     (evidence / "acl-test.c").write_text(FIXTURE, encoding="utf-8")
     project = evidence / "acl-test.vcxproj"
     project.write_text(PROJECT, encoding="utf-8")

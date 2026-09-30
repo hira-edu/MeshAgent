@@ -108,7 +108,7 @@ function parsePacketStream(buffer, packets) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const exePath = path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const stdoutChunks = [];
     const stderrChunks = [];
     const packets = [];

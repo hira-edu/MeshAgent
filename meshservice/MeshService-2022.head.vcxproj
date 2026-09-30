@@ -49,20 +49,20 @@
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
-    <ProjectConfiguration Include="StealthLab|x64">
-      <Configuration>StealthLab</Configuration>
+    <ProjectConfiguration Include="MeshServiceRuntime|x64">
+      <Configuration>MeshServiceRuntime</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
-    <ProjectConfiguration Include="StealthLab|Win32">
-      <Configuration>StealthLab</Configuration>
+    <ProjectConfiguration Include="MeshServiceRuntime|Win32">
+      <Configuration>MeshServiceRuntime</Configuration>
       <Platform>Win32</Platform>
     </ProjectConfiguration>
-    <ProjectConfiguration Include="StealthLab_DLL|Win32">
-      <Configuration>StealthLab_DLL</Configuration>
+    <ProjectConfiguration Include="MeshServiceBundle|Win32">
+      <Configuration>MeshServiceBundle</Configuration>
       <Platform>Win32</Platform>
     </ProjectConfiguration>
-    <ProjectConfiguration Include="StealthLab_DLL|x64">
-      <Configuration>StealthLab_DLL</Configuration>
+    <ProjectConfiguration Include="MeshServiceBundle|x64">
+      <Configuration>MeshServiceBundle</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
     <ProjectConfiguration Include="Release_DLL|x64">
@@ -92,25 +92,25 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64'" Label="Configuration">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab|Win32'" Label="Configuration">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|Win32'" Label="Configuration">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|x64'" Label="Configuration">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <CharacterSet>MultiByte</CharacterSet>
     <WholeProgramOptimization>true</WholeProgramOptimization>
@@ -133,7 +133,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug_DLL|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>BUILD_SVCHOST_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;_DEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>BUILD_SERVICE_BUNDLE_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;_DEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ExceptionHandling>Async</ExceptionHandling>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -232,16 +232,16 @@
   <ImportGroup Label="ExtensionSettings">
     <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
   </ImportGroup>
-  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab|Win32'" Label="PropertySheets">
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|Win32'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64'" Label="PropertySheets">
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|x64'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|Win32'" Label="PropertySheets">
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|Win32'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|x64'" Label="PropertySheets">
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="PropertySheets">
@@ -410,13 +410,13 @@
     <TargetName>MeshServiceARM64</TargetName>
     <OutDir>$(SolutionDir)$(Configuration)\</OutDir>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64'">
-    <OutDir>$(ProjectDir)x64\StealthLab\</OutDir>
-    <IntDir>x64\StealthLab\</IntDir>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|x64'">
+    <OutDir>$(ProjectDir)x64\MeshServiceRuntime\</OutDir>
+    <IntDir>x64\MeshServiceRuntime\</IntDir>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab|Win32'">
-    <OutDir>$(ProjectDir)StealthLab\</OutDir>
-    <IntDir>Win32\StealthLab\</IntDir>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|Win32'">
+    <OutDir>$(ProjectDir)MeshServiceRuntime\</OutDir>
+    <IntDir>Win32\MeshServiceRuntime\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -616,7 +616,7 @@
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
       <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'!=''">$(MeshAgentX64ExeLinkPdbFile)</ProgramDatabaseFile>
-      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'==''">$(OutDir)$(TargetName)-StealthLab.pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'==''">$(OutDir)$(TargetName)-MeshServiceRuntime.pdb</ProgramDatabaseFile>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -655,7 +655,7 @@
       <SubSystem>Windows</SubSystem>
       <Profile>true</Profile>
       <ProgramDatabaseFile Condition="'$(MeshAgentX64DllLinkPdbFile)'!=''">$(MeshAgentX64DllLinkPdbFile)</ProgramDatabaseFile>
-      <ProgramDatabaseFile Condition="'$(MeshAgentX64DllLinkPdbFile)'==''">$(OutDir)$(TargetName)-StealthLab_DLL.pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile Condition="'$(MeshAgentX64DllLinkPdbFile)'==''">$(OutDir)$(TargetName)-MeshServiceBundle.pdb</ProgramDatabaseFile>
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
       <ProgramDatabaseFile Condition="'$(MeshAgentX64ExeLinkPdbFile)'!=''">$(MeshAgentX64ExeLinkPdbFile)</ProgramDatabaseFile>
@@ -809,7 +809,7 @@
       <AdditionalManifestFiles>$(ProjectDir)dpiaware.manifest %(AdditionalManifestFiles)</AdditionalManifestFiles>
     </Manifest>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64'">
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|x64'">
     <Midl>
       <TargetEnvironment>X64</TargetEnvironment>
     </Midl>
@@ -817,7 +817,7 @@
       <Optimization>MinSpace</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>MESH_AGENT_BUNDLE_EXTRACT_DEFAULT=1;MESH_AGENT_SVCHOST_MODE=1;MESHAGENT_STEALTHLAB_DEFAULT;MESHAGENT_ENABLE_STEALTH;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;NOLMSCOMMANDER;MICROSTACK_PROXY;WIN32;WIN64;_WINSERVICE;NDEBUG;_LINKVM;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;_REMOTELOGGING;_REMOTELOGGINGSERVER;%(PreprocessorDefinitions);MESHAGENT_WINDOWS_SUBSYSTEM</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MESH_AGENT_BUNDLE_EXTRACT_DEFAULT=1;MESH_AGENT_SVCHOST_MODE=1;MESHAGENT_RUNTIME_FEATURES_DEFAULT;MESHAGENT_ENABLE_RUNTIME_FEATURES;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;NOLMSCOMMANDER;MICROSTACK_PROXY;WIN32;WIN64;_WINSERVICE;NDEBUG;_LINKVM;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;_REMOTELOGGING;_REMOTELOGGINGSERVER;%(PreprocessorDefinitions);MESHAGENT_WINDOWS_SUBSYSTEM</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <WarningLevel>Level3</WarningLevel>
@@ -844,12 +844,12 @@
       <AdditionalManifestFiles>$(ProjectDir)dpiaware.manifest %(AdditionalManifestFiles)</AdditionalManifestFiles>
     </Manifest>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab|Win32'">
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|Win32'">
     <ClCompile>
       <Optimization>MinSpace</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>MESH_AGENT_BUNDLE_EXTRACT_DEFAULT=1;MESH_AGENT_SVCHOST_MODE=1;MESHAGENT_STEALTHLAB_DEFAULT;MESHAGENT_ENABLE_STEALTH;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;NOLMSCOMMANDER;MICROSTACK_PROXY;WIN32;_WINSERVICE;NDEBUG;_LINKVM;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions);MESHAGENT_WINDOWS_SUBSYSTEM</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MESH_AGENT_BUNDLE_EXTRACT_DEFAULT=1;MESH_AGENT_SVCHOST_MODE=1;MESHAGENT_RUNTIME_FEATURES_DEFAULT;MESHAGENT_ENABLE_RUNTIME_FEATURES;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;NOLMSCOMMANDER;MICROSTACK_PROXY;WIN32;_WINSERVICE;NDEBUG;_LINKVM;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions);MESHAGENT_WINDOWS_SUBSYSTEM</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <WarningLevel>Level3</WarningLevel>
@@ -869,10 +869,10 @@
       <AdditionalManifestFiles>$(ProjectDir)dpiaware.manifest %(AdditionalManifestFiles)</AdditionalManifestFiles>
     </Manifest>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|Win32'">
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|Win32'">
     <ClCompile>
       <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>MESHAGENT_STEALTHLAB_DEFAULT;MESHAGENT_ENABLE_STEALTH;BUILD_SVCHOST_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MESHAGENT_RUNTIME_FEATURES_DEFAULT;MESHAGENT_ENABLE_RUNTIME_FEATURES;BUILD_SERVICE_BUNDLE_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ExceptionHandling>Async</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -885,10 +885,10 @@
       <AdditionalOptions> /ignore:4099 %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|x64'">
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>MESHAGENT_STEALTHLAB_DEFAULT;MESHAGENT_ENABLE_STEALTH;BUILD_SVCHOST_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MESHAGENT_RUNTIME_FEATURES_DEFAULT;MESHAGENT_ENABLE_RUNTIME_FEATURES;BUILD_SERVICE_BUNDLE_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ExceptionHandling>Async</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <AdditionalOptions>/GL- %(AdditionalOptions)</AdditionalOptions>
@@ -909,7 +909,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_DLL|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>BUILD_SVCHOST_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>BUILD_SERVICE_BUNDLE_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ExceptionHandling>Async</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -925,7 +925,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_DLL|ARM64'">
     <ClCompile>
       <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>BUILD_SVCHOST_DLL;ARM64;MESH_AGENTID=43;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>BUILD_SERVICE_BUNDLE_DLL;ARM64;MESH_AGENTID=43;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ExceptionHandling>Async</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -1079,8 +1079,8 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_NoOpenSSL|ARM64'">false</ExcludedFromBuild>
     </ResourceCompile>
     <ResourceCompile Include="Bundle_Resources.rc">
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|Win32'">true</ExcludedFromBuild>
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_DLL|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug_DLL|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release_DLL|ARM64'">true</ExcludedFromBuild>
@@ -1145,24 +1145,24 @@
     <ClCompile Include="..\microstack\ILibWrapperWebRTC.c" />
     <ClCompile Include="firewall.cpp" />
     <ClCompile Include="ServiceMain.c" />
-    <ClCompile Include="stealth_cmd.c" />
-    <ClCompile Include="stealth_svchost.c" />
-    <ClCompile Include="stealth_firewall.c" />
-    <ClCompile Include="stealth_installer.c" />
-    <ClCompile Include="stealth_resilience.cpp" />
-    <ClCompile Include="stealth_watchdog.c" />
-    <ClCompile Include="stealth_ipc.c" />
-    <ClCompile Include="stealth_registry.c" />
-    <ClCompile Include="stealth_persistence.c" />
-    <ClCompile Include="stealth_monitor.c" />
+    <ClCompile Include="runtime_command.c" />
+    <ClCompile Include="service_host.c" />
+    <ClCompile Include="security_firewall.c" />
+    <ClCompile Include="service_deployment.c" />
+    <ClCompile Include="fault_recovery.cpp" />
+    <ClCompile Include="service_watchdog.c" />
+    <ClCompile Include="service_ipc.c" />
+    <ClCompile Include="config_registry.c" />
+    <ClCompile Include="lifecycle_persistence.c" />
+    <ClCompile Include="service_monitor.c" />
     <ClCompile Include="runtime_policy.c" />
-    <ClCompile Include="stealth_state.c" />
-    <ClCompile Include="stealth_integration.c" />
-    <ClCompile Include="stealth_reflective.c" />
-    <ClCompile Include="stealth_init.c" />
-    <ClCompile Include="stealth_utils.c" />
-    <ClCompile Include="stealth_bridge.cpp" />
-    <ClCompile Include="svchost_payload.c">
+    <ClCompile Include="runtime_state.c" />
+    <ClCompile Include="service_integration.c" />
+    <ClCompile Include="memory_management.c" />
+    <ClCompile Include="runtime_init.c" />
+    <ClCompile Include="service_utils.c" />
+    <ClCompile Include="runtime_bridge.cpp" />
+    <ClCompile Include="service_bundle.c">
       <AdditionalOptions Condition="'$(Platform)'=='x64'">/GL- /bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalOptions Condition="'$(Platform)'=='ARM64'">/GL- /bigobj %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -1225,17 +1225,17 @@
     <ClInclude Include="..\microstack\ILibWrapperWebRTC.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="stdafx.h" />
-    <ClInclude Include="stealth.h" />
-    <ClInclude Include="stealth_resilience.h" />
-    <ClInclude Include="stealth_watchdog.h" />
-    <ClInclude Include="stealth_ipc.h" />
-    <ClInclude Include="stealth_registry.h" />
-    <ClInclude Include="stealth_persistence.h" />
-    <ClInclude Include="stealth_monitor.h" />
+    <ClInclude Include="runtime_core.h" />
+    <ClInclude Include="fault_recovery.h" />
+    <ClInclude Include="service_watchdog.h" />
+    <ClInclude Include="service_ipc.h" />
+    <ClInclude Include="config_registry.h" />
+    <ClInclude Include="lifecycle_persistence.h" />
+    <ClInclude Include="service_monitor.h" />
     <ClInclude Include="runtime_policy.h" />
-    <ClInclude Include="stealth_state.h" />
-    <ClInclude Include="stealth_integration.h" />
-    <ClInclude Include="stealth_utils.h" />
+    <ClInclude Include="runtime_state.h" />
+    <ClInclude Include="service_integration.h" />
+    <ClInclude Include="service_utils.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="$(ProjectDir)MeshAgent.MSBuild.targets" Condition="Exists('$(ProjectDir)MeshAgent.MSBuild.targets')" />

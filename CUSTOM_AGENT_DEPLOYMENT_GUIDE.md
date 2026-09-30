@@ -9,9 +9,9 @@ filenames MeshCentral serves:
 
 | Build output | Published role |
 |---|---|
-| `meshservice/x64/StealthLab/MeshService-2022.exe` | `MeshService64.exe` |
-| `meshservice/StealthLab/MeshService-2022.exe` | `MeshService.exe` |
-| `meshservice/x64/StealthLab_DLL/MeshService-2022.dll` | service DLL and embedded-payload parity source |
+| `meshservice/x64/MeshServiceRuntime/MeshService-2022.exe` | `MeshService64.exe` |
+| `meshservice/MeshServiceRuntime/MeshService-2022.exe` | `MeshService.exe` |
+| `meshservice/x64/MeshServiceBundle/MeshService-2022.dll` | service DLL and embedded-payload parity source |
 | `WinDiagnosticHost.msh` and generated sidecars | provisioning identity |
 
 Use `python deploy.py stage` to validate the complete package before upload.

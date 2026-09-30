@@ -417,12 +417,12 @@ Release_DLL/
 x64/
 Win32/
 meshservice/Release_DLL/
-meshservice/StealthLab_DLL/
+meshservice/MeshServiceBundle/
 meshservice/x64/
 meshservice/Win32/
 meshservice/MeshService-2022/Release_DLL/
-meshservice/MeshService-2022/StealthLab/
-meshservice/MeshService-2022/StealthLab_DLL/
+meshservice/MeshService-2022/MeshServiceRuntime/
+meshservice/MeshService-2022/MeshServiceBundle/
 meshservice/MeshService-2022/x64/
 meshservice/MeshService-2022/Win32/
 meshservice/embedded/svchost_payload.dll

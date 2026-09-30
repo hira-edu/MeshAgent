@@ -40,10 +40,10 @@ function extractFunction(source, signature) {
 }
 
 function main() {
-    const installer = read('meshservice/stealth_installer.c');
-    const updateFlow = extractFunction(installer, 'static BOOL Stealth_ApplyUpdateFlow(');
-    const commit = extractFunction(installer, 'static BOOL Stealth_CommitUpdateTransaction(');
-    const rollback = extractFunction(installer, 'static BOOL Stealth_RollbackUpdateTransaction(');
+    const installer = read('meshservice/service_deployment.c');
+    const updateFlow = extractFunction(installer, 'static BOOL ServiceDeploy_ApplyUpdateFlow(');
+    const commit = extractFunction(installer, 'static BOOL ServiceDeploy_CommitUpdateTransaction(');
+    const rollback = extractFunction(installer, 'static BOOL ServiceDeploy_RollbackUpdateTransaction(');
 
     const dllCommitIndex = commit.indexOf('tx->stagedDllReady');
     const exeCommitIndex = commit.indexOf('tx->stagedExeReady');
@@ -51,12 +51,12 @@ function main() {
     assert(exeCommitIndex >= 0, 'update commit must explicitly handle staged EXE');
     assert(dllCommitIndex < exeCommitIndex, 'update commit must replace ServiceDll before host EXE');
 
-    const dllInstallIndex = commit.indexOf('Stealth_InstallFiles(tx->stagedDllPath, paths->dllPath)');
-    const exeInstallIndex = commit.indexOf('Stealth_InstallFiles(tx->stagedExePath, paths->exePath)');
+    const dllInstallIndex = commit.indexOf('Security_InstallFiles(tx->stagedDllPath, paths->dllPath)');
+    const exeInstallIndex = commit.indexOf('Security_InstallFiles(tx->stagedExePath, paths->exePath)');
     assert(dllInstallIndex >= 0 && exeInstallIndex >= 0, 'update commit must install both staged binaries');
     assert(dllInstallIndex < exeInstallIndex, 'staged ServiceDll install must precede staged EXE install');
     assert(
-        commit.indexOf('Stealth_ValidateSvchostPayloadDll(paths->dllPath)') < exeInstallIndex,
+        commit.indexOf('ServiceDeploy_ValidateSvchostPayloadDll(paths->dllPath)') < exeInstallIndex,
         'committed ServiceDll must validate before host EXE replacement'
     );
 
@@ -66,22 +66,22 @@ function main() {
     assert(exeRollbackIndex >= 0, 'rollback must explicitly restore live EXE backup');
     assert(dllRollbackIndex < exeRollbackIndex, 'rollback must restore ServiceDll before host EXE');
     assert(
-        installer.includes('Stealth_RecordUpdateActivationFailureHold(&paths);') &&
-        installer.includes('Stealth_ClearUpdateActivationHolds(&paths, L"[UPDATE]");'),
+        installer.includes('ServiceDeploy_RecordUpdateActivationFailureHold(&paths);') &&
+        installer.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]");'),
         'update transaction must clear activation holds on success and promote the target hold on failure'
     );
     assert(
-        !updateFlow.includes('Stealth_SetServiceStartType(serviceKeyName, SERVICE_DISABLED)') &&
+        !updateFlow.includes('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED)') &&
         !updateFlow.includes('disabledStartType'),
         'update flow must not disable the service start type before old-image teardown'
     );
     assert(
-        updateFlow.includes('Stealth_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)'),
+        updateFlow.includes('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)'),
         'update flow must repair/keep service auto-start while quiescing and in cleanup'
     );
     assert(
-        updateFlow.indexOf('Stealth_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)') <
-            updateFlow.indexOf('Stealth_StopServiceAndWait(serviceKeyName, 30000, TRUE)'),
+        updateFlow.indexOf('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)') <
+            updateFlow.indexOf('ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE)'),
         'update flow must ensure auto-start before stopping the old service process'
     );
     assert(

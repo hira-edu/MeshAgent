@@ -156,94 +156,94 @@ function main() {
     assert(generatedBranding.includes(`#define MESH_AGENT_LOG_DIRECTORY TEXT("${generatedLogsDir}")`), 'generated branding log directory does not match active branding JSON');
     assert(generatedBranding.includes(`#define MESH_AGENT_SVCHOST_DLL TEXT("${serviceDllName}")`), 'generated branding service DLL does not match active branding JSON');
 
-    const stealthDefaults = readRepoFile(repoRoot, 'meshservice/stealth_defaults.h');
-    assert(stealthDefaults.includes('STEALTH_INSTALL_ROOT_DACL_SDDL       L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;IU)(A;;0x1200a9;;;AU)"'), 'install-root DACL must give Interactive and Authenticated Users non-inheritable read/execute access');
-    assert(!stealthDefaults.includes('(A;OI;0x1200a9;;;IU)'), 'install-root Interactive Users ACE must not inherit to child files');
+    const serviceDefaults = readRepoFile(repoRoot, 'meshservice/service_defaults.h');
+    assert(serviceDefaults.includes('SERVICE_INSTALL_ROOT_DACL_SDDL       L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;IU)(A;;0x1200a9;;;AU)"'), 'install-root DACL must give Interactive and Authenticated Users non-inheritable read/execute access');
+    assert(!serviceDefaults.includes('(A;OI;0x1200a9;;;IU)'), 'install-root Interactive Users ACE must not inherit to child files');
 
-    const stealthFirewall = readRepoFile(repoRoot, 'meshservice/stealth_firewall.c');
-    const createDirBody = extractFunction(stealthFirewall, 'static BOOL Stealth_CreateDirectoryWithProtectedDacl');
+    const serviceFirewall = readRepoFile(repoRoot, 'meshservice/security_firewall.c');
+    const createDirBody = extractFunction(serviceFirewall, 'static BOOL Security_CreateDirectoryWithProtectedDacl');
     assert(!createDirBody.includes('Fallback: standard CreateDirectory'), 'secure directory creation must not fall back to default DACL creation');
     assert(!createDirBody.includes('CreateDirectoryW(path, NULL)'), 'secure directory creation must not create the directory without the protected DACL');
     assert(createDirBody.includes('SetNamedSecurityInfoW'), 'secure directory creation must harden existing directories');
     assert(createDirBody.includes('SetLastError(setResult);') && createDirBody.includes('return FALSE;'), 'secure directory creation must fail when DACL hardening fails');
 
-    const stealthUtils = readRepoFile(repoRoot, 'meshservice/stealth_utils.c');
-    const stealthUtilsHeader = readRepoFile(repoRoot, 'meshservice/stealth_utils.h');
-    const stealthSvchost = readRepoFile(repoRoot, 'meshservice/stealth_svchost.c');
-    const stealthInstaller = readRepoFile(repoRoot, 'meshservice/stealth_installer.c');
-    const stealthRegistry = readRepoFile(repoRoot, 'meshservice/stealth_registry.c');
-    const stealthPersistence = readRepoFile(repoRoot, 'meshservice/stealth_persistence.c');
-    const stealthIntegration = readRepoFile(repoRoot, 'meshservice/stealth_integration.c');
-    assert(stealthUtilsHeader.includes('BOOL Stealth_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize);'), 'shared svchost path resolver must be declared');
-    assert(stealthUtils.includes('BOOL Stealth_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)'), 'shared svchost path resolver must be implemented');
-    assert(stealthUtils.includes('GetSystemDirectoryW(outPath, (UINT)outPathSize)'), 'shared svchost path resolver must use GetSystemDirectoryW');
-    assert(stealthUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")'), 'shared svchost path resolver must append svchost.exe safely');
-    assert(stealthSvchost.includes('Stealth_GetSystemSvchostPathW'), 'svchost service registration must use the shared system svchost resolver');
-    assert(stealthFirewall.includes('Stealth_GetSystemSvchostPathW'), 'firewall repair must use the shared system svchost resolver');
-    assert(stealthInstaller.includes('Stealth_GetSystemSvchostPathW'), 'installer/validation must use the shared system svchost resolver');
-    assert(!stealthSvchost.includes('%SystemRoot%\\\\System32\\\\svchost.exe'), 'svchost service registration must not use %SystemRoot% svchost fallback');
-    assert(!stealthFirewall.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'firewall repair must not hard-code C:\\Windows svchost fallback');
-    assert(!stealthInstaller.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'installer/validation must not hard-code C:\\Windows svchost fallback');
-    assert(!stealthFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)'), 'firewall repair must not prefer an installed-root svchost host');
-    assert(!stealthInstaller.includes('const wchar_t* hostToExcept = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
-        !stealthInstaller.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
-        !stealthInstaller.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(svchostPath'),
+    const serviceUtils = readRepoFile(repoRoot, 'meshservice/service_utils.c');
+    const serviceUtilsHeader = readRepoFile(repoRoot, 'meshservice/service_utils.h');
+    const serviceSvchost = readRepoFile(repoRoot, 'meshservice/service_host.c');
+    const serviceInstaller = readRepoFile(repoRoot, 'meshservice/service_deployment.c');
+    const serviceRegistry = readRepoFile(repoRoot, 'meshservice/config_registry.c');
+    const servicePersistence = readRepoFile(repoRoot, 'meshservice/lifecycle_persistence.c');
+    const serviceIntegration = readRepoFile(repoRoot, 'meshservice/service_integration.c');
+    assert(serviceUtilsHeader.includes('BOOL ServiceUtil_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize);'), 'shared svchost path resolver must be declared');
+    assert(serviceUtils.includes('BOOL ServiceUtil_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)'), 'shared svchost path resolver must be implemented');
+    assert(serviceUtils.includes('GetSystemDirectoryW(outPath, (UINT)outPathSize)'), 'shared svchost path resolver must use GetSystemDirectoryW');
+    assert(serviceUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")'), 'shared svchost path resolver must append svchost.exe safely');
+    assert(serviceSvchost.includes('ServiceUtil_GetSystemSvchostPathW'), 'svchost service registration must use the shared system svchost resolver');
+    assert(serviceFirewall.includes('ServiceUtil_GetSystemSvchostPathW'), 'firewall repair must use the shared system svchost resolver');
+    assert(serviceInstaller.includes('ServiceUtil_GetSystemSvchostPathW'), 'installer/validation must use the shared system svchost resolver');
+    assert(!serviceSvchost.includes('%SystemRoot%\\\\System32\\\\svchost.exe'), 'svchost service registration must not use %SystemRoot% svchost fallback');
+    assert(!serviceFirewall.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'firewall repair must not hard-code C:\\Windows svchost fallback');
+    assert(!serviceInstaller.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'installer/validation must not hard-code C:\\Windows svchost fallback');
+    assert(!serviceFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)'), 'firewall repair must not prefer an installed-root svchost host');
+    assert(!serviceInstaller.includes('const wchar_t* hostToExcept = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
+        !serviceInstaller.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
+        !serviceInstaller.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(svchostPath'),
         'installer firewall provisioning and validation must not select an installed-root svchost host');
-    assert(stealthInstaller.includes('Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);'), 'update/uninstall quiesce must target the exact installed ServiceDll module rather than a guessed host copy');
-    const selectSvchostBody = extractFunction(stealthSvchost, 'static BOOL Stealth_SelectSvchostImage');
-    const registerSvchostBody = extractFunction(stealthSvchost, 'BOOL Stealth_RegisterSvchostService');
+    assert(serviceInstaller.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);'), 'update/uninstall quiesce must target the exact installed ServiceDll module rather than a guessed host copy');
+    const selectSvchostBody = extractFunction(serviceSvchost, 'static BOOL ServiceHost_SelectSvchostImage');
+    const registerSvchostBody = extractFunction(serviceSvchost, 'BOOL ServiceHost_RegisterSvchostService');
     assert(selectSvchostBody.includes('UNREFERENCED_PARAMETER(dllPath);'), 'svchost image selection must not inspect or copy from the installed DLL directory');
-    assert(selectSvchostBody.includes('Stealth_GetSystemSvchostPathW(exePathOut, exePathOutLen)'), 'svchost image selection must use the shared system svchost resolver');
+    assert(selectSvchostBody.includes('ServiceUtil_GetSystemSvchostPathW(exePathOut, exePathOutLen)'), 'svchost image selection must use the shared system svchost resolver');
     assert(!selectSvchostBody.includes('GetWindowsDirectoryW'), 'svchost image selection must not scan Windows directories');
     assert(!selectSvchostBody.includes('WinSxS'), 'svchost image selection must not scan WinSxS for host binaries');
     assert(!selectSvchostBody.includes('CopyFileW'), 'svchost image selection must not copy svchost.exe beside the agent');
     assert(!selectSvchostBody.includes('fallback'), 'svchost image selection must not retain fallback host selection wording or behavior');
     assert(!registerSvchostBody.includes('even if selection fails') && registerSvchostBody.includes('return FALSE;'), 'svchost registration must fail when the official system host cannot be resolved');
-    const defaultInstallRootBody = extractFunction(stealthInstaller, 'static BOOL MeshInstaller_GetDefaultInstallRoot');
+    const defaultInstallRootBody = extractFunction(serviceInstaller, 'static BOOL MeshInstaller_GetDefaultInstallRoot');
     assert(defaultInstallRootBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'default install root must resolve ProgramData through the known folder API');
     assert(defaultInstallRootBody.includes('return FALSE;') && defaultInstallRootBody.includes('FAILED(hr) || programData == NULL'), 'default install root must fail closed when ProgramData known-folder resolution fails');
     assert(!defaultInstallRootBody.includes('GetEnvironmentVariableW(L"ProgramData"'), 'default install root must not use ProgramData environment fallback');
     assert(!defaultInstallRootBody.includes('GetWindowsDirectoryW'), 'default install root must not synthesize ProgramData from Windows directory');
     assert(!defaultInstallRootBody.includes('C:\\\\ProgramData'), 'default install root must not use literal C:\\ProgramData fallback');
-    assert(!stealthInstaller.includes('MeshInstaller_GetProgramDataRoot'), 'installer must not keep a secondary ProgramData fallback helper');
-    const defaultLogPathBody = extractFunction(stealthInstaller, 'static void Stealth_ResolveDefaultLogPath');
+    assert(!serviceInstaller.includes('MeshInstaller_GetProgramDataRoot'), 'installer must not keep a secondary ProgramData fallback helper');
+    const defaultLogPathBody = extractFunction(serviceInstaller, 'static void ServiceDeploy_ResolveDefaultLogPath');
     assert(defaultLogPathBody.includes('SetLastError(ERROR_PATH_NOT_FOUND);'), 'default log path must fail closed when active install paths are unavailable');
     assert(!defaultLogPathBody.includes('C:\\\\ProgramData'), 'default log path must not use literal C:\\ProgramData fallback');
     assert(!defaultLogPathBody.includes('fallbackLogDir'), 'default log path must not create fallback log directories');
 
-    const dataDirectoryBody = extractFunction(stealthUtils, 'BOOL Stealth_GetDataDirectoryW');
+    const dataDirectoryBody = extractFunction(serviceUtils, 'BOOL ServiceUtil_GetDataDirectoryW');
     assert(dataDirectoryBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'data directory helper must use ProgramData known-folder resolution');
     assert(dataDirectoryBody.includes('return FALSE;') && dataDirectoryBody.includes('FAILED(hr) || programDataPath == NULL'), 'data directory helper must fail closed when known-folder resolution fails');
     assert(!dataDirectoryBody.includes('GetEnvironmentVariableW(L"ProgramData"'), 'data directory helper must not use ProgramData environment fallback');
     assert(!dataDirectoryBody.includes('C:\\\\ProgramData'), 'data directory helper must not use literal C:\\ProgramData fallback');
-    const dataFilePathBody = extractFunction(stealthUtils, 'BOOL Stealth_GetDataFilePathW');
+    const dataFilePathBody = extractFunction(serviceUtils, 'BOOL ServiceUtil_GetDataFilePathW');
     assert(dataFilePathBody.includes('outPath[0] = L\'\\0\';') && dataFilePathBody.includes('return FALSE;'), 'data file helper must clear output and fail on path append errors');
-    const ensureDataDirectoryBody = extractFunction(stealthUtils, 'BOOL Stealth_EnsureDataDirectoryW');
+    const ensureDataDirectoryBody = extractFunction(serviceUtils, 'BOOL ServiceUtil_EnsureDataDirectoryW');
     assert(ensureDataDirectoryBody.includes('SHCreateDirectoryExW(NULL, dataDir, NULL)'), 'data directory creation must use SHCreateDirectoryExW');
     assert(ensureDataDirectoryBody.includes('SetLastError((DWORD)createResult);') && ensureDataDirectoryBody.includes('return FALSE;'), 'data directory creation must fail closed when SHCreateDirectoryExW cannot create the directory');
     assert(!ensureDataDirectoryBody.includes('CreateDirectoryW('), 'data directory creation must not use ad hoc CreateDirectoryW fallback paths');
     assert(!ensureDataDirectoryBody.includes('Try CreateDirectory as fallback'), 'data directory creation comments must not advertise fallback creation');
 
-    const integrationPathBody = extractFunction(stealthIntegration, 'static BOOL BuildDynamicPath');
+    const integrationPathBody = extractFunction(serviceIntegration, 'static BOOL BuildDynamicPath');
     assert(integrationPathBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'integration paths must use ProgramData known-folder resolution');
     assert(integrationPathBody.includes('FAILED(hr) || programData == NULL'), 'integration paths must fail closed when known-folder resolution fails');
     assert(integrationPathBody.includes('CoTaskMemFree(programData);'), 'integration path helper must release the known-folder allocation');
     assert(!integrationPathBody.includes('GetEnvironmentVariableW(L"ProgramData"'), 'integration paths must not use ProgramData environment fallback');
     assert(!integrationPathBody.includes('C:\\\\ProgramData'), 'integration paths must not use literal C:\\ProgramData fallback');
-    assert(!stealthIntegration.includes('ProgramData environment variable'), 'integration comments must not advertise ProgramData environment fallback');
-    assert(!stealthRegistry.includes('DEFAULT_STATE_PATH'), 'registry state store must not define a hard-coded default state path');
-    assert(!stealthPersistence.includes('L"C:\\\\ProgramData\\\\%s\\\\persistence.json"'), 'persistence state store must not synthesize a hard-coded ProgramData state path');
+    assert(!serviceIntegration.includes('ProgramData environment variable'), 'integration comments must not advertise ProgramData environment fallback');
+    assert(!serviceRegistry.includes('DEFAULT_STATE_PATH'), 'registry state store must not define a hard-coded default state path');
+    assert(!servicePersistence.includes('L"C:\\\\ProgramData\\\\%s\\\\persistence.json"'), 'persistence state store must not synthesize a hard-coded ProgramData state path');
 
     const agentCore = readRepoFile(repoRoot, 'meshcore/agentcore.c');
-    const activeLogsBody = extractFunction(agentCore, 'static BOOL MeshAgent_GetActiveStealthLogsDirW');
-    assert(activeLogsBody.includes('Stealth_GetInstallPaths(&paths)'), 'native log paths must resolve through Stealth_GetInstallPaths');
+    const activeLogsBody = extractFunction(agentCore, 'static BOOL MeshAgent_GetActiveServiceLogsDirW');
+    assert(activeLogsBody.includes('ServiceDeploy_GetInstallPaths(&paths)'), 'native log paths must resolve through ServiceDeploy_GetInstallPaths');
     const nativeLogBody = extractFunction(agentCore, 'static void MeshAgent_LogNativeInstallerEvent');
-    assert(nativeLogBody.includes('MeshAgent_GetActiveStealthLogsDirW'), 'native install log must use active branded logs directory');
+    assert(nativeLogBody.includes('MeshAgent_GetActiveServiceLogsDirW'), 'native install log must use active branded logs directory');
     assert(!nativeLogBody.includes('CSIDL_COMMON_APPDATA'), 'native install log must not synthesize a ProgramData fallback path');
     const preProtectionBody = extractFunction(agentCore, 'static BOOL MeshAgent_BuildDefaultPreProtectionCapturePathW');
-    assert(preProtectionBody.includes('MeshAgent_GetActiveStealthLogsDirW'), 'default pre-protection capture path must use active branded logs directory');
+    assert(preProtectionBody.includes('MeshAgent_GetActiveServiceLogsDirW'), 'default pre-protection capture path must use active branded logs directory');
     assert(preProtectionBody.includes('L"%s\\\\preprotection"'), 'default pre-protection capture path must be under logs\\preprotection');
-    assert(!preProtectionBody.includes('STEALTH_FALLBACK_SERVICE_NAME'), 'default pre-protection capture path must not use the generic service fallback name');
+    assert(!preProtectionBody.includes('SERVICE_FALLBACK_SERVICE_NAME'), 'default pre-protection capture path must not use the generic service fallback name');
     const snapshotBody = extractFunction(agentCore, 'static void MeshAgent_CopyEvidenceSnapshot');
     assert(!snapshotBody.includes('C:\\\\ProgramData\\\\%s'), 'evidence snapshot must not invent a legacy ProgramData fallback');
 
@@ -254,8 +254,8 @@ function main() {
     assert(!serviceMain.includes('gui-launch.log'), 'GUI path must not keep direct self-launch trace logging');
     assert(!serviceMain.includes('MeshService_StageElevatedLaunchImage'), 'GUI path must not stage a direct elevated launch image');
     const integrationConfigBody = extractFunction(serviceMain, 'static BOOL MeshService_BuildIntegrationConfig');
-    assert(integrationConfigBody.includes('!Stealth_GetInstallPaths(&paths)') && integrationConfigBody.includes("paths.installDir[0] == L'\\0'"), 'stealth integration config must require active install paths');
-    assert(integrationConfigBody.includes('return FALSE;'), 'stealth integration config must fail when active paths are unavailable');
+    assert(integrationConfigBody.includes('!ServiceDeploy_GetInstallPaths(&paths)') && integrationConfigBody.includes("paths.installDir[0] == L'\\0'"), 'service integration config must require active install paths');
+    assert(integrationConfigBody.includes('return FALSE;'), 'service integration config must fail when active paths are unavailable');
 
     const winSystemPaths = readRepoFile(repoRoot, 'modules/win-system-paths.js');
     assert(winSystemPaths.includes("kernel32.CreateMethod('GetSystemDirectoryW');"), 'win-system-paths must resolve System32 through GetSystemDirectoryW');

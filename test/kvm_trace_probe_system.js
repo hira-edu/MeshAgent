@@ -9,7 +9,7 @@ const {
     runSystemScheduledTask
 } = require('./lib/kvm_runtime_helpers');
 
-const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+const exePath = path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
 const dllPath = resolveBridgeDllPath(exePath);
 const rundll32Path = resolveRundll32Path();
 
@@ -111,8 +111,8 @@ server.listen(pipeName, () => {
     startTime = Date.now();
     timeline.push({ t: 0, event: 'pipe-listening' });
     const env = Object.assign({}, process.env, {
-        STEALTH_KVM_TRACE_STARTUP: '1',
-        STEALTH_KVM_TRACE_LOOP: '1'
+        KVM_TRACE_STARTUP: '1',
+        KVM_TRACE_LOOP: '1'
     });
     child = cp.spawn(rundll32, [dll + ',KvmSessionBridgeW', pipeName], {
         stdio: ['ignore', 'pipe', 'pipe'],

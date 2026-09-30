@@ -17,7 +17,7 @@ const PACKET_TYPES = {
 
 const SCENARIOS = {
     gdi: {
-        env: { STEALTH_KVM_TRACE_STARTUP: '1' },
+        env: { KVM_TRACE_STARTUP: '1' },
         predicate: (trace) => /capture backend=gdi reason=gdi:only/i.test(trace)
     }
 };
@@ -143,8 +143,8 @@ async function main() {
     const holdMs = args['hold-ms'] == null ? 500 : Number(args['hold-ms']);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const rundll32Path = getSystemRundll32Path();
-    const dllPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
-    const logPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'svchost-debug.log');
+    const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
+    const logPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'svchost-debug.log');
     const controlPipeName = `\\\\.\\pipe\\MeshKvmBackend_${process.pid}_${Date.now()}_in`;
     const dataPipeName = `\\\\.\\pipe\\MeshKvmBackend_${process.pid}_${Date.now()}_out`;
     const packets = [];

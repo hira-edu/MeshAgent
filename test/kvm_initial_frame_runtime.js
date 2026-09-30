@@ -254,7 +254,7 @@ async function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const exePath = args.exe
         ? path.resolve(args.exe)
-        : path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+        : path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveBridgeDllPath(exePath, args.dll ? path.resolve(args.dll) : null);
     const minBrightness = Number(args['min-brightness'] || '5');
     const scenarios = ['gdi'];

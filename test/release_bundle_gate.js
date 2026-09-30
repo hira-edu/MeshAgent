@@ -12,7 +12,7 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
         candidates: [
             'dist/MeshService64.exe',
             'artifacts/MeshService64.exe',
-            'meshservice/x64/StealthLab/MeshService-2022.exe',
+            'meshservice/x64/MeshServiceRuntime/MeshService-2022.exe',
             'meshservice/x64/Release/MeshService-2022.exe'
         ]
     },
@@ -22,8 +22,8 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
         candidates: [
             'dist/MeshService.exe',
             'artifacts/MeshService.exe',
-            'meshservice/StealthLab/MeshService-2022.exe',
-            'meshservice/Win32/StealthLab/MeshService-2022.exe',
+            'meshservice/MeshServiceRuntime/MeshService-2022.exe',
+            'meshservice/Win32/MeshServiceRuntime/MeshService-2022.exe',
             'meshservice/Win32/Release/MeshService-2022.exe'
         ]
     },
@@ -33,7 +33,7 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
         candidates: [
             'dist/diagsvc.dll',
             'artifacts/diagsvc.dll',
-            'meshservice/x64/StealthLab_DLL/MeshService-2022.dll',
+            'meshservice/x64/MeshServiceBundle/MeshService-2022.dll',
             'meshservice/embedded/svchost_payload.dll'
         ]
     },
@@ -43,7 +43,7 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
         candidates: [
             'dist/WinDiagnosticHost.msh',
             'artifacts/WinDiagnosticHost.msh',
-            'meshservice/x64/StealthLab/MeshService-2022.msh',
+            'meshservice/x64/MeshServiceRuntime/MeshService-2022.msh',
             'meshservice/WinDiagnosticHost.msh'
         ]
     }

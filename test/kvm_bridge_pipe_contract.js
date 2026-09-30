@@ -49,7 +49,7 @@ function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
 	const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
 	const tilePath = path.resolve('meshcore', 'KVM', 'Windows', 'tile.cpp');
-	const bridgePath = path.resolve('meshservice', 'stealth_svchost.c');
+	const bridgePath = path.resolve('meshservice', 'service_host.c');
 	const smokePath = path.resolve('test', 'rundll32_bridge_smoke.js');
 	const kvmSource = readSource(kvmPath);
 	const tileSource = readSource(tilePath);
@@ -126,7 +126,7 @@ function main() {
             kvmSource.includes('!kvm_relay_wait_for_bridge_client(ctx, ctx->bridgeOutputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, restartSessionGeneration, &lastError, &connectAbortedBySessionChange)') &&
             kvmSource.includes('InterlockedExchange(&ctx->childUsesBridge, 1);') &&
             kvmSource.includes('!kvm_relay_attach_bridge_transport(ctx, ctx->bridgeInputPipeHandle, ctx->bridgeOutputPipeHandle)'),
-        slaveParsesPipeArguments: bridgeSource.includes('static int Stealth_KvmBridgeExtractPipeNamesW(') &&
+        slaveParsesPipeArguments: bridgeSource.includes('static int KvmBridge_ExtractPipeNamesW(') &&
             bridgeSource.includes('_wcsnicmp(tokenBuffer, L"\\\\\\\\.\\\\pipe\\\\", 9) != 0') &&
             bridgeSource.includes('destination = (pipeCount == 0) ? controlPipeName : dataPipeName;'),
         slaveConnectsDirectionalPipes: bridgeSource.includes('CreateFileW(controlPipeName, GENERIC_READ') &&
@@ -137,18 +137,18 @@ function main() {
         slaveRedirectsPipeToStdHandles: bridgeSource.includes('SetStdHandle(STD_INPUT_HANDLE, bridgeStdIn)') && bridgeSource.includes('SetStdHandle(STD_OUTPUT_HANDLE, bridgeStdOut)')
             && bridgeSource.includes('kvmConsoleMode = 1;')
             && bridgeSource.includes('return kvm_server_mainloop(mainloopParam);')
-            && bridgeSource.includes('mainloopParam[0] = Stealth_KvmBridgeWriteSink;')
+            && bridgeSource.includes('mainloopParam[0] = KvmBridge_WriteSink;')
             && bridgeSource.includes('mainloopParam[1] = &ctx;')
-            && bridgeSource.includes('Stealth_KvmBridgeInputThread')
+            && bridgeSource.includes('KvmBridge_InputThread')
             && bridgeSource.includes('inputThread == NULL && ctx.firstOutputLogged != 0 && g_shutdown == 0')
             && bridgeSource.includes('KvmSessionBridgeW input thread started after first output')
             && bridgeSource.includes('KvmSessionBridgeW input pipe closed')
             && bridgeSource.includes('PeekNamedPipe(inputHandle')
-            && bridgeSource.includes('static BOOL Stealth_KvmBridgePipeDisconnected(')
+            && bridgeSource.includes('static BOOL KvmBridge_PipeDisconnected(')
             && bridgeSource.includes('GetNamedPipeHandleStateW(pipeHandle')
             && bridgeSource.includes('KvmSessionBridgeW control pipe disconnected')
             && bridgeSource.includes('KvmSessionBridgeW data pipe disconnected')
-            && !bridgeSource.includes('We do NOT create a second Stealth_KvmBridgeInputThread')
+            && !bridgeSource.includes('We do NOT create a second KvmBridge_InputThread')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

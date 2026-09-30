@@ -65,7 +65,7 @@ async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const rundll32Path = getSystemRundll32Path();
-    const dllPath = path.resolve(args.dll || path.join('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll'));
+    const dllPath = path.resolve(args.dll || path.join('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll'));
     const inputPipeName = `\\\\.\\pipe\\MeshConsoleBridge_${process.pid}_${Date.now()}_in`;
     const outputPipeName = `\\\\.\\pipe\\MeshConsoleBridge_${process.pid}_${Date.now()}_out`;
     const outputChunks = [];

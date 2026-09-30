@@ -1,6 +1,6 @@
 {
   "generatedUtc": "2025-10-25T19:52:40.3911046Z",
-  "binaryPath": "meshservice\\x64\\StealthLab",
+  "binaryPath": "meshservice\\x64\\MeshServiceRuntime",
   "summary": {
     "total": 32,
     "passed": 30,
@@ -12,13 +12,13 @@
     {
       "Name": "x64 Binary Exists",
       "Status": "Pass",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.exe",
       "Details": "Size: 5.75 MB"
     },
     {
       "Name": "x86 Binary Exists",
       "Status": "Pass",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.exe",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.exe",
       "Details": "Size: 5.75 MB"
     },
     {
@@ -114,13 +114,13 @@
     {
       "Name": "Provisioning manifest staged (MeshService-2022.exe)",
       "Status": "Pass",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.msh",
       "Details": ""
     },
     {
       "Name": "Provisioning manifest staged (MeshService-2022.exe)",
       "Status": "Pass",
-      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\StealthLab\\MeshService-2022.msh",
+      "Message": "Found at C:\\Users\\Workstation\\Documents\\GitHub\\MeshAgent\\meshservice\\x64\\MeshServiceRuntime\\MeshService-2022.msh",
       "Details": ""
     },
     {

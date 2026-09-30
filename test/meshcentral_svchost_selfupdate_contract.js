@@ -120,7 +120,7 @@ function main() {
     const agentInstallerPath = path.resolve('modules', 'agent-installer.js');
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
     const rundll32ContractPath = path.resolve('meshservice', 'rundll32_contract.c');
-    const stealthInstallerPath = path.resolve('meshservice', 'stealth_installer.c');
+    const serviceInstallerPath = path.resolve('meshservice', 'service_deployment.c');
     const rootMeshcorePath = path.resolve('..', 'MeshCentral', 'meshcore.js');
     const rootMeshcoreMinPath = path.resolve('..', 'MeshCentral', 'meshcore.min.js');
     const meshcorePath = path.resolve('..', 'MeshCentral', 'agents', 'meshcore.js');
@@ -133,7 +133,7 @@ function main() {
     const agentInstallerSource = loadText(agentInstallerPath);
     const serviceMainSource = loadText(serviceMainPath);
     const rundll32ContractSource = loadText(rundll32ContractPath);
-    const stealthInstallerSource = loadText(stealthInstallerPath);
+    const serviceInstallerSource = loadText(serviceInstallerPath);
     const rootMeshcoreSource = loadOptionalText(rootMeshcorePath);
     const rootMeshcoreMinSource = loadOptionalText(rootMeshcoreMinPath);
     const meshcoreSource = loadOptionalText(meshcorePath);
@@ -147,7 +147,7 @@ function main() {
     const jsPackageLifecycleActions = extractFunction(agentInstallerSource, 'function isWindowsPackageLifecycleAction(actionName)');
     const nativeUpdateIngress = extractFunction(serviceMainSource, 'static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)');
     const lifecycleHost = extractFunction(rundll32ContractSource, 'void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)');
-    const lifecycleDispatcher = extractFunction(stealthInstallerSource, 'static BOOL Stealth_RunLifecycleOperation(StealthLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)');
+    const lifecycleDispatcher = extractFunction(serviceInstallerSource, 'static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)');
 
     const meshcentralLegacyTokens = ['.update.exe', '_wexecve', '-b64exec ', '-fullupdate', 'windows_getNativeUpdateActivationPath', 'windows_tryNativeFullUpdate', 'windows_execve'];
     const rootMeshcoreLegacyHits = findTokens(rootMeshcoreSource, meshcentralLegacyTokens);
@@ -199,9 +199,9 @@ function main() {
             updateContractSource.includes('#define MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY  "UpdateActivationFailureHash"') &&
             updateContractSource.includes('#define MESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS   600000') &&
             agentcoreSource.includes('#include "config/update_defines.h"') &&
-            stealthInstallerSource.includes('#include "../meshcore/config/update_defines.h"') &&
+            serviceInstallerSource.includes('#include "../meshcore/config/update_defines.h"') &&
             !agentcoreSource.includes('#define MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX') &&
-            !stealthInstallerSource.includes('#define STEALTH_UPDATE_ACTIVATION_TARGET_KEY'),
+            !serviceInstallerSource.includes('#define SERVICE_UPDATE_ACTIVATION_TARGET_KEY'),
         agentcoreSelfUpdateLaunchesRundll32Lifecycle: agentcoreSource.includes('SelfUpdate -> Svchost mode: launching rundll32 lifecycle update activation') &&
             agentcoreSource.includes('MeshRundll32_LaunchLifecycleHostW(') &&
             agentcoreSource.includes('MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE') &&
@@ -236,17 +236,17 @@ function main() {
             !agentInstallerSource.includes('".update.exe"'),
         nativeUpdateIngressesConvergeOnSharedLauncher:
             agentcoreSelfUpdate.includes('MeshRundll32_LaunchLifecycleHostW(') &&
-            nativeJsUpdateActivation.includes('MeshAgent_RunNativeStealthFullUpdate(') &&
+            nativeJsUpdateActivation.includes('MeshAgent_RunNativeServiceFullUpdate(') &&
             nativeUpdateIngress.includes('MeshRundll32_LaunchLifecycleHostW(') &&
-            lifecycleHost.includes('Stealth_RunLifecycleHostOperation('),
+            lifecycleHost.includes('ServiceDeploy_RunLifecycleHostOperation('),
         oneNativeUpdateTransactionExecutor:
-            (stealthInstallerSource.match(/static BOOL Stealth_ApplyUpdateFlow\([^;{]*\)\s*\{/g) || []).length === 1 &&
-            lifecycleDispatcher.includes('ok = Stealth_ApplyUpdateFlow(sourceExePath, sourceDllPath, TRUE, requireConfig);'),
-        stealthInstallerPromotesFailedActivationHold: stealthInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY') &&
-            stealthInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY') &&
-            stealthInstallerSource.includes('Stealth_RecordUpdateActivationFailureHold(&paths);') &&
-            stealthInstallerSource.includes('Stealth_ClearUpdateActivationHolds(&paths, L"[UPDATE]");') &&
-            stealthInstallerSource.includes('Recorded failed update activation package hash hold')
+            (serviceInstallerSource.match(/static BOOL ServiceDeploy_ApplyUpdateFlow\([^;{]*\)\s*\{/g) || []).length === 1 &&
+            lifecycleDispatcher.includes('ok = ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, TRUE, requireConfig);'),
+        serviceInstallerPromotesFailedActivationHold: serviceInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY') &&
+            serviceInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY') &&
+            serviceInstallerSource.includes('ServiceDeploy_RecordUpdateActivationFailureHold(&paths);') &&
+            serviceInstallerSource.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]");') &&
+            serviceInstallerSource.includes('Recorded failed update activation package hash hold')
     };
 
     for (const [name, passed] of Object.entries(checks)) {
@@ -259,7 +259,7 @@ function main() {
         agentInstallerPath,
         serviceMainPath,
         rundll32ContractPath,
-        stealthInstallerPath,
+        serviceInstallerPath,
         rootMeshcorePath,
         rootMeshcoreMinPath,
         meshcorePath,
@@ -282,7 +282,7 @@ function main() {
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `AGENTCORE_PATH=${agentcorePath}`,
             `AGENT_INSTALLER_PATH=${agentInstallerPath}`,
-            `STEALTH_INSTALLER_PATH=${stealthInstallerPath}`,
+            `SERVICE_INSTALLER_PATH=${serviceInstallerPath}`,
             `ROOT_MESHCORE_PATH=${rootMeshcorePath}`,
             `ROOT_MESHCORE_MIN_PATH=${rootMeshcoreMinPath}`,
             `MESHCORE_PATH=${meshcorePath}`,

@@ -44,15 +44,15 @@ function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
-    const watchdogPath = path.resolve('meshservice', 'stealth_watchdog.c');
-    const watchdogHeaderPath = path.resolve('meshservice', 'stealth_watchdog.h');
+    const watchdogPath = path.resolve('meshservice', 'service_watchdog.c');
+    const watchdogHeaderPath = path.resolve('meshservice', 'service_watchdog.h');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const watchdogSource = fs.readFileSync(watchdogPath, 'utf8');
     const watchdogHeaderSource = fs.readFileSync(watchdogHeaderPath, 'utf8');
 
     const checks = {
         hasBridgeHardeningHelper: kvmSource.includes('static BOOL kvm_relay_harden_bridge_process'),
-        protectsBridgeProcessHandle: kvmSource.includes('Stealth_ProtectProcessByHandle(childProcessHandle)'),
+        protectsBridgeProcessHandle: kvmSource.includes('ServiceUtil_ProtectProcessByHandle(childProcessHandle)'),
         createsScopedKillOnCloseJobObject: kvmSource.includes('Watchdog_CreateKillOnCloseJobObject()'),
         assignsBridgeToJobObject: kvmSource.includes('AssignProcessToJobObject(jobObject, childProcessHandle)'),
         usesPreStartHardeningCallback: kvmSource.includes('kvm_relay_bridge_pre_start_handler') &&

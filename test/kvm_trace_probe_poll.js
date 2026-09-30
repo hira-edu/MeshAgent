@@ -8,7 +8,7 @@ const { getSystemRundll32Path } = require('./lib/rundll32_lifecycle');
 
 const dllPath = process.argv[2]
     ? path.resolve(process.argv[2])
-    : path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
+    : path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
 const rundll32 = getSystemRundll32Path();
 
 if (!fs.existsSync(dllPath)) { console.error('DLL not found: ' + dllPath); process.exit(1); }
@@ -77,8 +77,8 @@ server.listen(pipeName, () => {
     startTime = Date.now();
 
     const env = Object.assign({}, process.env, {
-        STEALTH_KVM_TRACE_STARTUP: '1',
-        STEALTH_KVM_TRACE_LOOP: '1'
+        KVM_TRACE_STARTUP: '1',
+        KVM_TRACE_LOOP: '1'
     });
 
     const child = cp.spawn(rundll32, [`${dllPath},KvmSessionBridgeW`, pipeName], {

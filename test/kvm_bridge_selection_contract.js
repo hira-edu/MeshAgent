@@ -99,9 +99,9 @@ function main() {
             !serviceMainSource.includes('ExpandEnvironmentStringsW(L"%SystemRoot%\\\\System32\\\\rundll32.exe"') &&
             !serviceMainSource.includes('%SystemRoot%\\\\System32\\\\rundll32.exe'),
         relayResolvesBridgeDll: kvmSource.includes('kvm_relay_resolve_bridge_dll_pathW') &&
-            !kvmSource.includes('STEALTH_KVM_BRIDGE_DLL') &&
-            !serviceMainSource.includes('STEALTH_KVM_BRIDGE_DLL') &&
-            !kvmRuntimeHelpersSource.includes('STEALTH_KVM_BRIDGE_DLL'),
+            !kvmSource.includes('KVM_BRIDGE_DLL') &&
+            !serviceMainSource.includes('KVM_BRIDGE_DLL') &&
+            !kvmRuntimeHelpersSource.includes('KVM_BRIDGE_DLL'),
         relayRejectsTruncatedModulePaths:
             kvmSource.includes('(modulePathLen = GetModuleFileNameW(module, modulePath, (DWORD)_countof(modulePath))) > 0') &&
             kvmSource.includes('modulePathLen < _countof(modulePath)') &&
@@ -130,7 +130,7 @@ function main() {
         relayPrefersBridgeByDefault: kvmSource.includes('static int kvm_should_prefer_bridge(char* exePath)') &&
             kvmSource.includes('return 1;'),
         relaySelectionIgnoresExePresence: !kvmSource.includes('kvm_legacy_helper_available('),
-        relayDisablesLegacyFallbackByDefault: !kvmSource.includes('STEALTH_KVM_ALLOW_LEGACY_FALLBACK') &&
+        relayDisablesLegacyFallbackByDefault: !kvmSource.includes('SERVICE_KVM_ALLOW_LEGACY_FALLBACK') &&
             !kvmSource.includes('Falling back to legacy self-exe KVM spawn') &&
             kvmSource.includes('rundll32 KVM path required; legacy self-exe fallback is disabled'),
         relayKeepsStdoutHandlerForRundll32Bridge: kvmSource.includes('&kvm_relay_StdOutHandler') &&
@@ -143,7 +143,7 @@ function main() {
             serviceMainSource.includes('Use an approved rundll32 contract export') &&
             !serviceMainSource.includes('ILibBase64Decode((unsigned char *)argv[2]') &&
             !serviceMainSource.includes('ILibString_Copy(argv[2], 0)'),
-        probesDoNotForceBridgePreference: !serviceMainSource.includes('SetEnvironmentVariableW(L"STEALTH_KVM_PREFER_BRIDGE", L"1");')
+        probesDoNotForceBridgePreference: !serviceMainSource.includes('SetEnvironmentVariableW(L"SERVICE_KVM_PREFER_BRIDGE", L"1");')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

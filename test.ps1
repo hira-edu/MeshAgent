@@ -501,9 +501,9 @@ function Invoke-MeshCentralDownloadValidation {
         if ($hashesMatch) {
             $message = $normalizedMessage
             if (-not $message) { $message = ("Trimmed SHA256 {0}" -f $trimmedHashUpper) }
-            Write-TestResult -TestName "MeshCentral Binary Matches StealthLab" -Status "Pass" -Message $message
+            Write-TestResult -TestName "MeshCentral Binary Matches MeshServiceRuntime" -Status "Pass" -Message $message
         } else {
-            Write-TestResult -TestName "MeshCentral Binary Matches StealthLab" -Status "Fail" -Message ("Expected SHA256 {0}, download trimmed SHA256 {1}" -f $referenceHash, $trimmedHashUpper)
+            Write-TestResult -TestName "MeshCentral Binary Matches MeshServiceRuntime" -Status "Fail" -Message ("Expected SHA256 {0}, download trimmed SHA256 {1}" -f $referenceHash, $trimmedHashUpper)
         }
 
         $embeddedBytes = New-Object byte[] $embeddedLength
@@ -537,7 +537,7 @@ function Invoke-MeshCentralDownloadValidation {
             Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Warning" -Message "Local meshagent.msh missing; skipped comparison."
         }
     } catch {
-        Write-TestResult -TestName "MeshCentral Binary Matches StealthLab" -Status "Warning" -Message ("MeshCentral comparison failed: {0}" -f $_.Exception.Message)
+        Write-TestResult -TestName "MeshCentral Binary Matches MeshServiceRuntime" -Status "Warning" -Message ("MeshCentral comparison failed: {0}" -f $_.Exception.Message)
         Write-TestResult -TestName "MeshCentral Embedded MSH Matches Local" -Status "Warning" -Message "Skipped due to comparison failure."
     }
 }
@@ -1330,7 +1330,7 @@ function Ensure-EmbeddedPayloadResource {
         throw "Embedded svchost payload resource missing at $resourcePath"
     }
 
-    $metadataPath = Join-Path $repoRoot "meshcore\embedded\generated\svchost_payload.json"
+    $metadataPath = Join-Path $repoRoot "meshcore\embedded\generated\service_bundle.json"
     if (Test-Path -LiteralPath $metadataPath) {
         $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json -ErrorAction Stop
         if ($metadata -and $metadata.sha256) {
@@ -1947,7 +1947,7 @@ Write-Host "-------------------------------------------" -ForegroundColor Cyan
 $x64BinaryCandidates = @(
     Join-Path $BinaryPath "MeshService64.exe"
     Join-Path $BinaryPath "MeshService-2022.exe"
-    Join-Path $repoRoot "meshservice\x64\StealthLab\MeshService-2022.exe"
+    Join-Path $repoRoot "meshservice\x64\MeshServiceRuntime\MeshService-2022.exe"
 )
 $x64Binary = Resolve-BinaryPath -Candidates $x64BinaryCandidates
 $x64Size = $null
@@ -1955,7 +1955,7 @@ $x64Size = $null
 $x86BinaryCandidates = @(
     Join-Path $BinaryPath "MeshService.exe"
     Join-Path $BinaryPath "MeshService-2022.exe"
-    Join-Path $repoRoot "meshservice\StealthLab\MeshService-2022.exe"
+    Join-Path $repoRoot "meshservice\MeshServiceRuntime\MeshService-2022.exe"
 )
 $x86Binary = Resolve-BinaryPath -Candidates $x86BinaryCandidates
 $x86Size = $null
@@ -2217,7 +2217,7 @@ if ($brandingConfig) {
     $diagsvcCandidates = @(
         Join-Path $BinaryPath $serviceMetadata.ServiceDllName
         Join-Path $BinaryPath "MeshService-2022.dll"
-        Join-Path $repoRoot "meshservice\x64\StealthLab_DLL\MeshService-2022.dll"
+        Join-Path $repoRoot "meshservice\x64\MeshServiceBundle\MeshService-2022.dll"
     )
     $diagsvcBinary = Resolve-BinaryPath -Candidates $diagsvcCandidates
     if ($diagsvcBinary) { $binarySet += $diagsvcBinary }

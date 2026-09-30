@@ -45,7 +45,7 @@ function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const agentcorePath = path.resolve('meshcore', 'agentcore.c');
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
-    const bridgePath = path.resolve('meshservice', 'stealth_svchost.c');
+    const bridgePath = path.resolve('meshservice', 'service_host.c');
     const agentcoreSource = fs.readFileSync(agentcorePath, 'utf8');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const bridgeSource = fs.readFileSync(bridgePath, 'utf8');
@@ -115,7 +115,7 @@ function main() {
             bridgeSource.includes('ctx->writeError = ERROR_WRITE_FAULT;') &&
             bridgeSource.includes('return ILibTransport_DoneState_ERROR;') &&
             bridgeSource.includes('return ILibTransport_DoneState_COMPLETE;'),
-        bridgeChildPreservesUpstreamPauseModeSelection: bridgeSource.includes('if (Stealth_KvmBridgeHasTokenW(cmdLine, L"-kvm0"))') &&
+        bridgeChildPreservesUpstreamPauseModeSelection: bridgeSource.includes('if (KvmBridge_HasTokenW(cmdLine, L"-kvm0"))') &&
             bridgeSource.includes('StringCchCopyW(ctx->arg1, _countof(ctx->arg1), L"-kvm0");') &&
             bridgeSource.includes('StringCchCopyW(ctx->arg1, _countof(ctx->arg1), L"-kvm1");')
     };

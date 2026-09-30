@@ -55,15 +55,15 @@ service executable, and the Win32 service executable. Primary outputs are:
 
 | Artifact | Output |
 |---|---|
-| x64 service DLL | `meshservice/x64/StealthLab_DLL/MeshService-2022.dll` |
-| x64 service executable | `meshservice/x64/StealthLab/MeshService-2022.exe` |
-| Win32 service executable | `meshservice/StealthLab/MeshService-2022.exe` |
+| x64 service DLL | `meshservice/x64/MeshServiceBundle/MeshService-2022.dll` |
+| x64 service executable | `meshservice/x64/MeshServiceRuntime/MeshService-2022.exe` |
+| Win32 service executable | `meshservice/MeshServiceRuntime/MeshService-2022.exe` |
 | x64 console | `meshconsole/Release/MeshConsole64.exe` |
 
 For a DLL-only validation build:
 
 ```powershell
-msbuild .\meshservice\MeshService-2022.vcxproj /p:Configuration=StealthLab_DLL /p:Platform=x64 /m
+msbuild .\meshservice\MeshService-2022.vcxproj /p:Configuration=MeshServiceBundle /p:Platform=x64 /m
 ```
 
 Configuration precedence and generated files are documented in
@@ -112,7 +112,7 @@ explicit operator approval.
 The active Windows artifact workflow is
 `.github/workflows/build-release.yml`; CodeQL is defined in
 `.github/workflows/codeql-analysis.yml`. See
-[GitHub Actions](GITHUB_ACTIONS_STEALTHLAB.md) for triggers and artifact names.
+[GitHub Actions](GITHUB_ACTIONS_SERVICE_BUILD.md) for triggers and artifact names.
 
 ## Documentation policy
 

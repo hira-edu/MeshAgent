@@ -5,7 +5,7 @@
 #include <vector>
 
 // Resource identifiers
-#define IDR_SVCHOST_DLL     101
+#define IDR_SERVICE_BUNDLE_DLL     101
 #define IDR_PROVISIONING    102
 
 struct InstallOptions

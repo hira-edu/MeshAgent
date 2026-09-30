@@ -66,7 +66,7 @@ function main() {
     const kvmHeaderPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.h');
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
-    const svchostPath = path.resolve('meshservice', 'stealth_svchost.c');
+    const svchostPath = path.resolve('meshservice', 'service_host.c');
     const kvmHeaderSource = fs.readFileSync(kvmHeaderPath, 'utf8');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const serviceMainSource = fs.readFileSync(serviceMainPath, 'utf8');
@@ -79,7 +79,7 @@ function main() {
     const retryTimerBody = extractFunction(kvmSource, 'static void kvm_retry_timer_callback(void* object)');
     const sessionArmBody = extractFunction(kvmSource, 'static int kvm_relay_arm_session_change_wait(KvmRelayContext* ctx, LONG expectedGeneration, HANDLE* eventOut, DWORD* errorOut)');
     const pipeWaitBody = extractFunction(kvmSource, 'static BOOL kvm_relay_wait_for_bridge_client(KvmRelayContext* ctx, HANDLE bridgePipeHandle, DWORD timeoutMs, LONG expectedSessionGeneration, DWORD* errorOut, BOOL* sessionChangedOut)');
-    const svchostControlBody = extractFunction(svchostSource, 'DWORD WINAPI Stealth_SvchostCtrlHandler(');
+    const svchostControlBody = extractFunction(svchostSource, 'DWORD WINAPI ServiceHost_SvchostCtrlHandler(');
     const armFirstGenerationCheck = sessionArmBody.indexOf('if (kvm_relay_session_generation_changed(ctx, expectedGeneration))');
     const armResetEvent = sessionArmBody.indexOf('ResetEvent(eventHandle);');
     const armSecondGenerationCheck = sessionArmBody.indexOf('if (kvm_relay_session_generation_changed(ctx, expectedGeneration))', armResetEvent);
@@ -91,19 +91,19 @@ function main() {
             svchostControlBody.includes('case SERVICE_CONTROL_SESSIONCHANGE:') &&
             svchostControlBody.includes('WTSSESSION_NOTIFICATION* sessionNotification = (WTSSESSION_NOTIFICATION*)lpEventData;') &&
             svchostControlBody.includes('sessionId = sessionNotification->dwSessionId;') &&
-            svchostControlBody.includes('Stealth_DebugPrintfA("[svchost] Forwarding KVM session change event=%lu session=%lu"') &&
+            svchostControlBody.includes('ServiceUtil_DebugPrintfA("[svchost] Forwarding KVM session change event=%lu session=%lu"') &&
             svchostControlBody.includes('kvm_notify_session_change(dwEventType, sessionId);'),
-        svchostMirrorsStealthSessionChangeForwarding:
-            svchostSource.includes('#include "stealth_integration.h"') &&
-            svchostControlBody.includes('StealthIntegration_HandleSessionChange(dwEventType, sessionId);'),
+        svchostMirrorsServiceSessionChangeForwarding:
+            svchostSource.includes('#include "service_integration.h"') &&
+            svchostControlBody.includes('ServiceIntegration_HandleSessionChange(dwEventType, sessionId);'),
         svchostControlHandlerDefersFinalStopToServiceMain:
-            svchostControlBody.includes('Stealth_SvchostRequestAgentStop();') &&
+            svchostControlBody.includes('ServiceHost_SvchostRequestAgentStop();') &&
             svchostControlBody.includes('Stop requested asynchronously; waiting for MeshAgent_Start to return') &&
             svchostControlBody.includes('Shutdown requested asynchronously; waiting for MeshAgent_Start to return') &&
             !svchostControlBody.includes('MeshAgent_Stop(g_SvchostAgent);') &&
             !svchostControlBody.includes('g_SvchostAgent = NULL;') &&
             !svchostControlBody.includes('g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;') &&
-            svchostSource.includes('ILibChain_RunOnMicrostackThreadEx3(agent->chain, Stealth_SvchostStopAgentOnChain, NULL, NULL);') &&
+            svchostSource.includes('ILibChain_RunOnMicrostackThreadEx3(agent->chain, ServiceHost_SvchostStopAgentOnChain, NULL, NULL);') &&
             svchostSource.includes('int startResult = MeshAgent_Start(g_SvchostAgent, startArgc, startArgv);') &&
             svchostSource.includes('g_SvchostAgent = NULL;') &&
             svchostSource.includes('g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;'),
@@ -216,8 +216,8 @@ function main() {
         relayCoversRemoteConnectAndDisconnect:
             sessionChangeBody.includes('case WTS_REMOTE_CONNECT:') &&
             sessionChangeBody.includes('case WTS_REMOTE_DISCONNECT:') &&
-            serviceMainSource.includes('Stealth_DebugPrintfA("[ServiceMain] Forwarding KVM session change event=%lu session=%lu"') &&
-            svchostControlBody.includes('Stealth_DebugPrintfA("[svchost] Forwarding KVM session change event=%lu session=%lu"'),
+            serviceMainSource.includes('ServiceUtil_DebugPrintfA("[ServiceMain] Forwarding KVM session change event=%lu session=%lu"') &&
+            svchostControlBody.includes('ServiceUtil_DebugPrintfA("[svchost] Forwarding KVM session change event=%lu session=%lu"'),
         relayRebindsLiveOldChildThroughExistingExitLifecycle:
             sessionChangeBody.includes('if (rebindToNewSession && gChildProcess != NULL)') &&
             sessionChangeBody.includes('ILibProcessPipe_Process_SoftKill(gChildProcess);') &&

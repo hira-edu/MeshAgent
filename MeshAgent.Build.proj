@@ -11,37 +11,37 @@
     <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'==''">$(RepoRoot)MeshAgent.msh</MeshAgentProvisioningManifest>
     <MeshAgentTlsProfile Condition="'$(MeshAgentTlsProfile)'==''">windows_update</MeshAgentTlsProfile>
     <CommonBuildProperties>MeshAgentPython=$(MeshAgentPython);MeshAgentBrandingConfig=$(MeshAgentBrandingConfig);MeshAgentProvisioningManifest=$(MeshAgentProvisioningManifest);MeshAgentTlsProfile=$(MeshAgentTlsProfile)</CommonBuildProperties>
-    <StealthLabDllBuildProperties>$(CommonBuildProperties);Configuration=StealthLab_DLL;Platform=x64;MeshAgentX64DllLinkPdbFile=$(RepoRoot)meshservice\x64\StealthLab_DLL\MeshService-2022-StealthLab_DLL-buildproj-$(BuildInvocationId).pdb</StealthLabDllBuildProperties>
-    <StealthLabX64BuildProperties>$(CommonBuildProperties);Configuration=StealthLab;Platform=x64;MeshAgentSkipStealthLabDllDependencyBuild=1;MeshAgentX64ExeLinkPdbFile=$(RepoRoot)meshservice\x64\StealthLab\MeshService-2022-StealthLab-buildproj-$(BuildInvocationId).pdb</StealthLabX64BuildProperties>
+    <MeshServiceBundleBuildProperties>$(CommonBuildProperties);Configuration=MeshServiceBundle;Platform=x64;MeshAgentX64DllLinkPdbFile=$(RepoRoot)meshservice\x64\MeshServiceBundle\MeshService-2022-MeshServiceBundle-buildproj-$(BuildInvocationId).pdb</MeshServiceBundleBuildProperties>
+    <MeshServiceRuntimeBuildProperties>$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=x64;MeshAgentSkipMeshServiceBundleDependencyBuild=1;MeshAgentX64ExeLinkPdbFile=$(RepoRoot)meshservice\x64\MeshServiceRuntime\MeshService-2022-MeshServiceRuntime-buildproj-$(BuildInvocationId).pdb</MeshServiceRuntimeBuildProperties>
   </PropertyGroup>
 
-  <Target Name="BuildStealthLabDll">
-    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(StealthLabDllBuildProperties)" />
+  <Target Name="BuildMeshServiceBundle">
+    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(MeshServiceBundleBuildProperties)" />
   </Target>
 
-  <Target Name="BuildMeshConsoleX64" DependsOnTargets="BuildStealthLabDll">
+  <Target Name="BuildMeshConsoleX64" DependsOnTargets="BuildMeshServiceBundle">
     <MSBuild Projects="$(ConsoleProject)" Targets="Build" Properties="$(CommonBuildProperties);Configuration=Release;Platform=x64" />
   </Target>
 
-  <Target Name="BuildStealthLabX64" DependsOnTargets="BuildMeshConsoleX64">
-    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(StealthLabX64BuildProperties)" />
+  <Target Name="BuildMeshServiceRuntimeX64" DependsOnTargets="BuildMeshConsoleX64">
+    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(MeshServiceRuntimeBuildProperties)" />
   </Target>
 
-  <Target Name="BuildStealthLabWin32" DependsOnTargets="BuildStealthLabX64">
-    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(CommonBuildProperties);Configuration=StealthLab;Platform=Win32" />
+  <Target Name="BuildMeshServiceRuntimeWin32" DependsOnTargets="BuildMeshServiceRuntimeX64">
+    <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=Win32" />
   </Target>
 
-  <Target Name="Build" DependsOnTargets="BuildStealthLabWin32" />
+  <Target Name="Build" DependsOnTargets="BuildMeshServiceRuntimeWin32" />
 
   <Target Name="Clean">
     <ItemGroup>
-      <GeneratedBuildProjPdbs Include="$(RepoRoot)meshservice\x64\StealthLab_DLL\MeshService-2022-StealthLab_DLL-buildproj-*.pdb" />
-      <GeneratedBuildProjPdbs Include="$(RepoRoot)meshservice\x64\StealthLab\MeshService-2022-StealthLab-buildproj-*.pdb" />
+      <GeneratedBuildProjPdbs Include="$(RepoRoot)meshservice\x64\MeshServiceBundle\MeshService-2022-MeshServiceBundle-buildproj-*.pdb" />
+      <GeneratedBuildProjPdbs Include="$(RepoRoot)meshservice\x64\MeshServiceRuntime\MeshService-2022-MeshServiceRuntime-buildproj-*.pdb" />
     </ItemGroup>
     <Delete Files="@(GeneratedBuildProjPdbs)" TreatErrorsAsWarnings="true" />
     <MSBuild Projects="$(ConsoleProject)" Targets="Clean" Properties="$(CommonBuildProperties);Configuration=Release;Platform=x64" />
-    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(StealthLabX64BuildProperties)" />
-    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(StealthLabDllBuildProperties)" />
-    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(CommonBuildProperties);Configuration=StealthLab;Platform=Win32" />
+    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(MeshServiceRuntimeBuildProperties)" />
+    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(MeshServiceBundleBuildProperties)" />
+    <MSBuild Projects="$(ServiceProject)" Targets="Clean" Properties="$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=Win32" />
   </Target>
 </Project>

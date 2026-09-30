@@ -51,7 +51,7 @@ function main() {
     const contractPath = path.resolve('meshservice', 'rundll32_contract.c');
     const headerPath = path.resolve('meshservice', 'rundll32_contract.h');
     const defPath = path.resolve('meshservice', 'MeshServiceHost.def');
-    const installerPath = path.resolve('meshservice', 'stealth_installer.c');
+    const installerPath = path.resolve('meshservice', 'service_deployment.c');
     const guiHarnessPath = path.resolve('test', 'gui_button_race_harness', 'Program.cs');
     const serviceMain = readSource(serviceMainPath);
     const contract = readSource(contractPath);
@@ -119,25 +119,25 @@ function main() {
         uninstallValidationUsesTempHostArtifacts:
             contract.includes('MeshRundll32_PrepareTempManifestPathW') &&
             contract.includes('MeshAgent-rundll32-lifecycle') &&
-            contract.includes('Stealth_SetInstallerLogPathToTemp(L"MeshInstaller-UninstallValidation.log")'),
+            contract.includes('ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-UninstallValidation.log")'),
         uninstallLifecycleDoesNotLoadInstalledDll:
             contract.includes('action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL') &&
             contract.includes('MeshRundll32_PrepareTempHostDllPathW(hostDllPath, hostDllPathCch)') &&
-            contract.includes('Stealth_StageSvchostDllForLifecycleHost(sourceExePath, uninstallSourceDll, hostDllPath)') &&
+            contract.includes('ServiceDeploy_StageSvchostDllForLifecycleHost(sourceExePath, uninstallSourceDll, hostDllPath)') &&
             !contract.includes('action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL ||\n         action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL'),
         uninstallRemovesOrphanedInstallDirectories:
-            installer.includes('discovery->stateKind == STEALTH_LIFECYCLE_STATE_CLEAN &&') &&
+            installer.includes('discovery->stateKind == SERVICE_LIFECYCLE_STATE_CLEAN &&') &&
             installer.includes('!discovery->installRootExists &&') &&
             installer.includes('!discovery->logsDirExists') &&
-            installer.includes('STEALTH_LIFECYCLE_ACTION_UNINSTALL'),
+            installer.includes('SERVICE_LIFECYCLE_ACTION_UNINSTALL'),
         provisioningAcceptsValidatedSidecarMsh:
             installer.includes('sourceSidecarConfigPresent') &&
-            installer.includes('Stealth_BuildSiblingPathWithExtension(sourceExePath, L".msh"') &&
-            installer.includes('Stealth_CopyFileOverwrite(sidecarPath, destPath)') &&
+            installer.includes('ServiceDeploy_BuildSiblingPathWithExtension(sourceExePath, L".msh"') &&
+            installer.includes('ServiceDeploy_CopyFileOverwrite(sidecarPath, destPath)') &&
             installer.includes('target->configAvailable = (target->sourceEmbeddedConfigPresent || target->sourceSidecarConfigPresent)'),
         updateStagesPackageProvisioningThroughSidecarFallback:
-            installer.includes('Stealth_EnsureConfigFile(sourceExePath, tx->stagedConfPath)') &&
-            installer.includes('Stealth_EnsureMshFile(sourceExePath, tx->stagedMshPath)') &&
+            installer.includes('ServiceDeploy_EnsureConfigFile(sourceExePath, tx->stagedConfPath)') &&
+            installer.includes('ServiceDeploy_EnsureMshFile(sourceExePath, tx->stagedMshPath)') &&
             installer.includes('[UPDATE] Unable to stage a valid provisioning .conf file from package payload') &&
             installer.includes('[UPDATE] Unable to stage a valid provisioning .msh file from package payload') &&
             !installer.includes('[UPDATE] Unable to stage a valid provisioning .conf file from embedded package payload') &&

@@ -7,7 +7,7 @@ const { getSystemRundll32Path } = require('./lib/rundll32_lifecycle');
 
 const dllPath = process.argv[2]
     ? path.resolve(process.argv[2])
-    : path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
+    : path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
 const rundll32 = getSystemRundll32Path();
 const reportPath = path.join(os.tmpdir(), `kvm_trace_probe_${process.pid}_${Date.now()}.json`);
 
@@ -108,8 +108,8 @@ server.listen(pipeName, () => {
     timeline.push({ t: 0, event: 'pipe-listening' });
 
     const env = Object.assign({}, process.env, {
-        STEALTH_KVM_TRACE_STARTUP: '1',
-        STEALTH_KVM_TRACE_LOOP: '1'
+        KVM_TRACE_STARTUP: '1',
+        KVM_TRACE_LOOP: '1'
     });
 
     child = cp.spawn(rundll32, [`${dllPath},KvmSessionBridgeW`, pipeName], {

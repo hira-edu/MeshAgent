@@ -136,7 +136,7 @@ function resolveKvmProbeDllPath(exePath, args) {
         path.join(exeDir, 'diagsvc.dll'),
         path.join(exeDir, 'svchost_payload.dll'),
         path.join(exeDir, `${baseName}.dll`),
-        path.join(parentDir, 'StealthLab_DLL', `${baseName}.dll`)
+        path.join(parentDir, 'MeshServiceBundle', `${baseName}.dll`)
     ];
     const found = candidates.find((candidate) => fs.existsSync(candidate));
     if (!found) {
@@ -297,7 +297,7 @@ async function runAndParseProbe(rundll32Path, dllPath, mode) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveKvmProbeDllPath(exePath, args);
     const rundll32Path = resolveSystemRundll32Path(args);
     const logPath = args.log ? path.resolve(args.log) : path.join(path.dirname(exePath), 'svchost-debug.log');

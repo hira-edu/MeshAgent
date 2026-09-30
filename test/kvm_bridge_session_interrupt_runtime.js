@@ -128,7 +128,7 @@ async function runInterruptProbe(options) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveBridgeDllPath(exePath, args.dll);
     const masterLogPath = args['master-log'] ? path.resolve(args['master-log']) : path.resolve(path.dirname(dllPath), 'svchost-debug.log');
     const bridgeLogPath = args['bridge-log'] ? path.resolve(args['bridge-log']) : path.resolve(path.dirname(dllPath), 'svchost-debug.log');

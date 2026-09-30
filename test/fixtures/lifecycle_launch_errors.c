@@ -51,8 +51,8 @@ static void TestLogPath(const wchar_t* path) { UNREFERENCED_PARAMETER(path); }
 #define MeshRundll32_PrepareManifestPathW TestPath
 #define MeshRundll32_PrepareTempManifestPathW TestPath
 #define MeshRundll32_WriteLifecycleManifestW TestWrite
-#define Stealth_SetInstallerLogPathToTemp TestLogPath
-#define Stealth_LogInstallEvent TestLog
+#define ServiceDeploy_SetInstallerLogPathToTemp TestLogPath
+#define ServiceDeploy_LogInstallEvent TestLog
 #define CreateProcessW TestCreate
 #define WaitForSingleObject TestWait
 #define GetExitCodeProcess TestExit
@@ -65,8 +65,8 @@ static void TestLogPath(const wchar_t* path) { UNREFERENCED_PARAMETER(path); }
 #undef MeshRundll32_PrepareManifestPathW
 #undef MeshRundll32_PrepareTempManifestPathW
 #undef MeshRundll32_WriteLifecycleManifestW
-#undef Stealth_SetInstallerLogPathToTemp
-#undef Stealth_LogInstallEvent
+#undef ServiceDeploy_SetInstallerLogPathToTemp
+#undef ServiceDeploy_LogInstallEvent
 #undef CreateProcessW
 #undef WaitForSingleObject
 #undef GetExitCodeProcess

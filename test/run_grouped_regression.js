@@ -11,8 +11,8 @@ const {
 const lifecycleRunner = require('./lib/rundll32_lifecycle');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
-const DEFAULT_SOURCE_EXE = path.join(REPO_ROOT, 'meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
-const DEFAULT_SOURCE_DLL = path.join(REPO_ROOT, 'meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
+const DEFAULT_SOURCE_EXE = path.join(REPO_ROOT, 'meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
+const DEFAULT_SOURCE_DLL = path.join(REPO_ROOT, 'meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
 const HARNESS_PROJECT = path.join(REPO_ROOT, 'test', 'gui_button_race_harness', 'GuiButtonRaceHarness.csproj');
 const HARNESS_DLL = path.join(REPO_ROOT, 'test', 'gui_button_race_harness', 'bin', 'Release', 'net10.0-windows', 'GuiButtonRaceHarness.dll');
 const DEFAULT_GUI_LOG = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'DiagnosticHost', 'gui-launch.log');

@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const childProcess = require('child_process');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
-const DEFAULT_SOURCE_EXE = path.join(REPO_ROOT, 'meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+const DEFAULT_SOURCE_EXE = path.join(REPO_ROOT, 'meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
 
 function parseArgs(argv) {
     const args = {};

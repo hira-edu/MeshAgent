@@ -52,7 +52,7 @@ function main() {
 
     const checks = {
         removesRamasCandidateBuilder: !kvmSource.includes('static int kvm_build_ramas_candidates'),
-        removesRamasForcedFailover: !kvmSource.includes('STEALTH_KVM_FORCE_PRIMARY_FAILOVER') && !kvmSource.includes('kvm_should_force_primary_failover'),
+        removesRamasForcedFailover: !kvmSource.includes('SERVICE_KVM_FORCE_PRIMARY_FAILOVER') && !kvmSource.includes('kvm_should_force_primary_failover'),
         removesRamasSelfTestSimulation:
             !agentcoreSource.includes('ramasFallback') &&
             !agentcoreSource.includes('RAMAS fallback') &&

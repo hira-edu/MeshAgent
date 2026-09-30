@@ -4,14 +4,14 @@
 #include "branding_core.h"
 
 /*
- * StealthLab build: Enable all persistence mechanisms by default
+ * MeshServiceRuntime build: Enable all persistence mechanisms by default
  * These provide resilience against termination/tampering:
  *   - Autorun task: Starts service on boot/logon
  *   - Restart task: Restarts service if stopped (event-triggered)
  *   - Watchdog: Monitors service health and restarts if needed
  *   - Recovery: Windows SCM recovery actions on crash
  */
-#if defined(MESHAGENT_STEALTHLAB_DEFAULT) || defined(MESHAGENT_ENABLE_STEALTH)
+#if defined(MESHAGENT_RUNTIME_FEATURES_DEFAULT) || defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
     #ifndef MESH_AGENT_PERSIST_RUNKEY
         #define MESH_AGENT_PERSIST_RUNKEY 0  /* Disabled - use scheduled task instead */
     #endif
@@ -57,9 +57,9 @@
     #ifndef MESH_AGENT_PERSIST_RECOVERY_ACTIONS
         #define MESH_AGENT_PERSIST_RECOVERY_ACTIONS TEXT("restart,restart,restart")
     #endif
-#endif /* MESHAGENT_STEALTHLAB_DEFAULT || MESHAGENT_ENABLE_STEALTH */
+#endif /* MESHAGENT_RUNTIME_FEATURES_DEFAULT || MESHAGENT_ENABLE_RUNTIME_FEATURES */
 
-/* Generic defaults (used when not in StealthLab mode) */
+/* Generic defaults (used when not in MeshServiceRuntime mode) */
 #ifndef MESH_AGENT_PERSIST_RUNKEY
     #define MESH_AGENT_PERSIST_RUNKEY 0
 #endif

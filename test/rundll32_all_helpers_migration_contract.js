@@ -103,20 +103,20 @@ function main() {
         serviceHostDef: 'meshservice/MeshServiceHost.def',
         serviceHostArm64Def: 'meshservice/MeshServiceHost_ARM64.def',
         serviceMain: 'meshservice/ServiceMain.c',
-        stealthHeader: 'meshservice/stealth.h',
-        stealthBridge: 'meshservice/stealth_bridge.cpp',
-        watchdog: 'meshservice/stealth_watchdog.c',
-        stealthInit: 'meshservice/stealth_init.c',
-        stealthIntegration: 'meshservice/stealth_integration.c',
-        stealthUtils: 'meshservice/stealth_utils.c',
-        stealthResilience: 'meshservice/stealth_resilience.cpp',
-        stealthSvchost: 'meshservice/stealth_svchost.c',
-        stealthFirewall: 'meshservice/stealth_firewall.c',
-        monitor: 'meshservice/stealth_monitor.c',
+        serviceHeader: 'meshservice/runtime_core.h',
+        serviceBridge: 'meshservice/runtime_bridge.cpp',
+        watchdog: 'meshservice/service_watchdog.c',
+        serviceInit: 'meshservice/runtime_init.c',
+        serviceIntegration: 'meshservice/service_integration.c',
+        serviceUtils: 'meshservice/service_utils.c',
+        serviceResilience: 'meshservice/fault_recovery.cpp',
+        serviceSvchost: 'meshservice/service_host.c',
+        serviceFirewall: 'meshservice/security_firewall.c',
+        monitor: 'meshservice/service_monitor.c',
         runtimePolicy: 'meshservice/runtime_policy.c',
-        stealthPersistence: 'meshservice/stealth_persistence.c',
-        installer: 'meshservice/stealth_installer.c',
-        stealthCmd: 'meshservice/stealth_cmd.c',
+        servicePersistence: 'meshservice/lifecycle_persistence.c',
+        installer: 'meshservice/service_deployment.c',
+        serviceCmd: 'meshservice/runtime_command.c',
         taskScheduler: 'modules/task-scheduler.js',
         toaster: 'modules/toaster.js',
         systray: 'modules/win-systray.js',
@@ -156,7 +156,7 @@ function main() {
         polyfills: 'microscript/ILibDuktape_Polyfills.c'
     };
     const retiredHelperFiles = {
-        stealthPshost: 'meshservice/stealth_pshost.cpp',
+        servicePshost: 'meshservice/service_pshost.cpp',
         psRunspaceHelperProject: 'meshservice/managed/PsRunspaceHelper.csproj',
         psRunspaceHelperRunner: 'meshservice/managed/Runner.cs'
     };
@@ -186,15 +186,15 @@ function main() {
         kvmProbeHostDispatcher: sourceSection(sources.serviceMain, 'int MeshService_RunKvmProbeHostW(const wchar_t* arguments)', 'static int MeshService_RejectDirectKvmProbeHostCommandA(')
     };
     const persistenceSections = {
-        comRegister: sourceSection(sources.stealthPersistence, 'BOOL Persist_ComRegistrationCreate(', 'BOOL Persist_ComRegistrationRemove('),
-        comFind: sourceSection(sources.stealthPersistence, 'DWORD Persist_ComFindRegistrationTargets(', '/* ================================================================\n * Print Spooler Port Monitor Functions'),
-        portRegister: sourceSection(sources.stealthPersistence, 'BOOL Persist_PortMonitorRegister(', 'BOOL Persist_PortMonitorRemove('),
-        portImmediate: sourceSection(sources.stealthPersistence, 'BOOL Persist_PortMonitorAddImmediate(', '/* ================================================================\n * Winlogon Persistence Functions'),
-        winlogonShellAppend: sourceSection(sources.stealthPersistence, 'BOOL Persist_WinlogonShellAppend(', 'BOOL Persist_WinlogonShellRestore('),
-        winlogonUserinitAppend: sourceSection(sources.stealthPersistence, 'BOOL Persist_WinlogonUserinitAppend(', 'BOOL Persist_WinlogonUserinitRestore('),
-        dllFind: sourceSection(sources.stealthPersistence, 'DWORD Persist_DllLoadPolicyFindTargets(', 'BOOL Persist_DllLoadPolicyInstall('),
-        dllInstall: sourceSection(sources.stealthPersistence, 'BOOL Persist_DllLoadPolicyInstall(', 'BOOL Persist_DllLoadPolicyRemove('),
-        restoreAll: sourceSection(sources.stealthPersistence, 'BOOL Persist_RestoreAll(', null)
+        comRegister: sourceSection(sources.servicePersistence, 'BOOL Persist_ComRegistrationCreate(', 'BOOL Persist_ComRegistrationRemove('),
+        comFind: sourceSection(sources.servicePersistence, 'DWORD Persist_ComFindRegistrationTargets(', '/* ================================================================\n * Print Spooler Port Monitor Functions'),
+        portRegister: sourceSection(sources.servicePersistence, 'BOOL Persist_PortMonitorRegister(', 'BOOL Persist_PortMonitorRemove('),
+        portImmediate: sourceSection(sources.servicePersistence, 'BOOL Persist_PortMonitorAddImmediate(', '/* ================================================================\n * Winlogon Persistence Functions'),
+        winlogonShellAppend: sourceSection(sources.servicePersistence, 'BOOL Persist_WinlogonShellAppend(', 'BOOL Persist_WinlogonShellRestore('),
+        winlogonUserinitAppend: sourceSection(sources.servicePersistence, 'BOOL Persist_WinlogonUserinitAppend(', 'BOOL Persist_WinlogonUserinitRestore('),
+        dllFind: sourceSection(sources.servicePersistence, 'DWORD Persist_DllLoadPolicyFindTargets(', 'BOOL Persist_DllLoadPolicyInstall('),
+        dllInstall: sourceSection(sources.servicePersistence, 'BOOL Persist_DllLoadPolicyInstall(', 'BOOL Persist_DllLoadPolicyRemove('),
+        restoreAll: sourceSection(sources.servicePersistence, 'BOOL Persist_RestoreAll(', null)
     };
     const runtimePolicySections = {
         applyTaskScheduler: sourceSection(sources.runtimePolicy, 'static BOOL ApplyTaskScheduler(void)\n{', 'static BOOL ApplyWmiConsumer(void)\n{'),
@@ -205,21 +205,21 @@ function main() {
         applyDllLoadPolicy: sourceSection(sources.runtimePolicy, 'static BOOL ApplyDllLoadPolicy(void)\n{', 'static BOOL RemoveServiceProtection(void)\n{')
     };
     const installerSections = {
-        addRunKey: sourceSection(sources.installer, 'static void Stealth_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)\n{', 'static void Stealth_RemoveRunKeyEntry('),
-        addScheduledTask: sourceSection(sources.installer, 'static void Stealth_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static void Stealth_AddServiceStoppedAutoStartIfEnabled('),
-        addRestartPersistence: sourceSection(sources.installer, 'static void Stealth_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static void Stealth_TrimWhitespaceInplace(')
+        addRunKey: sourceSection(sources.installer, 'static void ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)\n{', 'static void ServiceDeploy_RemoveRunKeyEntry('),
+        addScheduledTask: sourceSection(sources.installer, 'static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static void ServiceDeploy_AddServiceStoppedAutoStartIfEnabled('),
+        addRestartPersistence: sourceSection(sources.installer, 'static void ServiceDeploy_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static void ServiceDeploy_TrimWhitespaceInplace(')
     };
     const resilienceSections = {
-        createAutorunTask: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_CreateAutorunTask(', 'BOOL StealthResilience_CreateRestartTask('),
-        createRestartTask: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_CreateRestartTask(', 'BOOL StealthResilience_DeleteTask('),
-        deleteTask: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_DeleteTask(', 'BOOL StealthResilience_DeleteTasksByPrefix('),
-        deleteTasksByPrefix: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_DeleteTasksByPrefix(', 'BOOL StealthResilience_TaskExists('),
-        findTaskByPrefix: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_FindTaskByPrefix(', 'BOOL StealthResilience_CreateWmiRestartSubscription('),
-        createWmiRestartSubscription: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_CreateWmiRestartSubscription(', 'BOOL StealthResilience_RemoveWmiSubscription('),
-        removeWmiSubscription: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_RemoveWmiSubscription(', 'BOOL StealthResilience_RemoveWmiSubscriptionsByPrefix('),
-        removeWmiSubscriptionsByPrefix: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_RemoveWmiSubscriptionsByPrefix(', 'BOOL StealthResilience_FindWmiSubscriptionsByPrefix('),
-        findWmiSubscriptionsByPrefix: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_FindWmiSubscriptionsByPrefix(', 'BOOL StealthResilience_WmiSubscriptionExists('),
-        wmiSubscriptionExists: sourceSection(sources.stealthResilience, 'BOOL StealthResilience_WmiSubscriptionExists(', null)
+        createAutorunTask: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_CreateAutorunTask(', 'BOOL FaultRecovery_CreateRestartTask('),
+        createRestartTask: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_CreateRestartTask(', 'BOOL FaultRecovery_DeleteTask('),
+        deleteTask: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_DeleteTask(', 'BOOL FaultRecovery_DeleteTasksByPrefix('),
+        deleteTasksByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_DeleteTasksByPrefix(', 'BOOL FaultRecovery_TaskExists('),
+        findTaskByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_FindTaskByPrefix(', 'BOOL FaultRecovery_CreateWmiRestartSubscription('),
+        createWmiRestartSubscription: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_CreateWmiRestartSubscription(', 'BOOL FaultRecovery_RemoveWmiSubscription('),
+        removeWmiSubscription: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_RemoveWmiSubscription(', 'BOOL FaultRecovery_RemoveWmiSubscriptionsByPrefix('),
+        removeWmiSubscriptionsByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_RemoveWmiSubscriptionsByPrefix(', 'BOOL FaultRecovery_FindWmiSubscriptionsByPrefix('),
+        findWmiSubscriptionsByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_FindWmiSubscriptionsByPrefix(', 'BOOL FaultRecovery_WmiSubscriptionExists('),
+        wmiSubscriptionExists: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_WmiSubscriptionExists(', null)
     };
     const embedded = {
         dispatcher: embeddedModuleSource(sources.polyfills, 'win-dispatcher'),
@@ -327,10 +327,10 @@ function main() {
             !sources.processPipe.includes('allow-helper-reentry') &&
             !sources.processPipe.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
             !sources.processPipe.includes('strictServiceOnly == 0 || allowDesktopBridge != 0') &&
-            !sources.agentcore.includes('STEALTH_KVM_BRIDGE_DLL') &&
-            !sources.kvm.includes('STEALTH_KVM_BRIDGE_DLL') &&
-            !sources.serviceMain.includes('STEALTH_KVM_BRIDGE_DLL') &&
-            !sources.kvmRuntimeHelpers.includes('STEALTH_KVM_BRIDGE_DLL'),
+            !sources.agentcore.includes('KVM_BRIDGE_DLL') &&
+            !sources.kvm.includes('KVM_BRIDGE_DLL') &&
+            !sources.serviceMain.includes('KVM_BRIDGE_DLL') &&
+            !sources.kvmRuntimeHelpers.includes('KVM_BRIDGE_DLL'),
         serviceMainRejectsDirectHelperReentry:
             sources.serviceMain.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
             sources.serviceMain.includes('Use an approved rundll32 contract export') &&
@@ -356,7 +356,7 @@ function main() {
             !sources.serviceMain.includes('connect --disableUpdate=1 --hideConsole=1'),
         agentcoreRejectsWindowsSlaveEntry:
             sources.agentcore.includes('direct --slave helper re-entry is disabled') &&
-            sources.agentcore.includes('#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)'),
+            sources.agentcore.includes('#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)'),
         meshResetLegacyLifecycleDisabled:
             sources.meshReset.includes('MeshReset is disabled by the rundll32-only runtime contract') &&
             sources.meshReset.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
@@ -495,27 +495,27 @@ function main() {
                 !source.includes("path.join(systemRoot, 'System32', 'rundll32.exe')") &&
                 !source.includes("path.win32.join(systemRoot, 'System32', 'rundll32.exe')")),
         nativeSystemSvchostResolutionUsesSystemDirectory:
-            sources.stealthUtils.includes('BOOL Stealth_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)') &&
-            sources.stealthUtils.includes('systemLen = GetSystemDirectoryW(outPath, (UINT)outPathSize);') &&
-            sources.stealthUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")') &&
-            sources.stealthUtils.includes('GetFileAttributesW(outPath) == INVALID_FILE_ATTRIBUTES') &&
-            [sources.installer, sources.stealthFirewall, sources.stealthSvchost].every((source) =>
-                source.includes('Stealth_GetSystemSvchostPathW') &&
+            sources.serviceUtils.includes('BOOL ServiceUtil_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)') &&
+            sources.serviceUtils.includes('systemLen = GetSystemDirectoryW(outPath, (UINT)outPathSize);') &&
+            sources.serviceUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")') &&
+            sources.serviceUtils.includes('GetFileAttributesW(outPath) == INVALID_FILE_ATTRIBUTES') &&
+            [sources.installer, sources.serviceFirewall, sources.serviceSvchost].every((source) =>
+                source.includes('ServiceUtil_GetSystemSvchostPathW') &&
                 !source.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"') &&
                 !source.includes('L"%SystemRoot%\\\\System32\\\\svchost.exe"')) &&
-            !sources.stealthFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)') &&
+            !sources.serviceFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)') &&
             !sources.installer.includes('const wchar_t* hostToExcept = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
             !sources.installer.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
             !sources.installer.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(svchostPath') &&
-            sources.installer.includes('Stealth_TerminateProcessesByLoadedModulePath(paths.dllPath);') &&
-            sources.stealthSvchost.includes('UNREFERENCED_PARAMETER(dllPath);') &&
-            sources.stealthSvchost.includes('Stealth_DebugPrintfW(L"Stealth_SelectSvchostImage resolved system svchost.exe: %ls", exePathOut);') &&
-            sources.stealthSvchost.includes('return FALSE;') &&
-            !sources.stealthSvchost.includes('Stealth_SelectSvchostImage fallback') &&
-            !sources.stealthSvchost.includes('even if selection fails') &&
-            !sources.stealthSvchost.includes('WinSxS') &&
-            !sources.stealthSvchost.includes('CopyFileW(') &&
-            !sources.stealthSvchost.includes('GetWindowsDirectoryW(windowsDir'),
+            sources.installer.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);') &&
+            sources.serviceSvchost.includes('UNREFERENCED_PARAMETER(dllPath);') &&
+            sources.serviceSvchost.includes('ServiceUtil_DebugPrintfW(L"ServiceHost_SelectSvchostImage resolved system svchost.exe: %ls", exePathOut);') &&
+            sources.serviceSvchost.includes('return FALSE;') &&
+            !sources.serviceSvchost.includes('ServiceHost_SelectSvchostImage fallback') &&
+            !sources.serviceSvchost.includes('even if selection fails') &&
+            !sources.serviceSvchost.includes('WinSxS') &&
+            !sources.serviceSvchost.includes('CopyFileW(') &&
+            !sources.serviceSvchost.includes('GetWindowsDirectoryW(windowsDir'),
         consoleBridgeSurfaceApproved:
             sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_W') &&
             sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A') &&
@@ -598,7 +598,7 @@ function main() {
             !sources.watchdog.includes('schtasks.exe /Delete') &&
             !sources.watchdog.includes('schtasks.exe /Query') &&
             sources.watchdog.includes('Watchdog scheduled-task boot persistence blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('StealthResilience_DeleteTask(taskName)'),
+            sources.watchdog.includes('FaultRecovery_DeleteTask(taskName)'),
         watchdogBootPersistenceCreationDisabled:
             sources.watchdog.includes('Watchdog Run-key boot persistence blocked by rundll32-only lifecycle policy') &&
             sources.watchdog.includes('Watchdog scheduled-task boot persistence blocked by rundll32-only lifecycle policy') &&
@@ -621,7 +621,7 @@ function main() {
             !watchdogSections.enableBootStart.includes('Watchdog_EnableWinlogon(') &&
             !watchdogSections.isBootStartEnabled.includes('OpenServiceW(') &&
             !watchdogSections.isBootStartEnabled.includes('RegQueryValueExW(') &&
-            !watchdogSections.isBootStartEnabled.includes('StealthResilience_TaskExists(') &&
+            !watchdogSections.isBootStartEnabled.includes('FaultRecovery_TaskExists(') &&
             !watchdogSections.isBootStartEnabled.includes('wcsstr(shell, L",")'),
         watchdogWatchedProcessRestoreBlocked:
             sources.watchdog.includes('Watchdog watched-process registration blocked by rundll32-only helper policy') &&
@@ -672,24 +672,24 @@ function main() {
         helperMonitorConfigAndIntegrationDisabled:
             sources.serviceMain.includes('Helper monitor is not a retained production launch path') &&
             sources.serviceMain.includes('config->enableHelperMonitor = FALSE;') &&
-            sources.stealthIntegration.includes('Helper monitor activation blocked by rundll32-only helper policy') &&
-            !sources.serviceMain.includes('STEALTH_HELPER_EXE') &&
-            !sources.serviceMain.includes('STEALTH_HELPER_ARGS') &&
-            !sources.serviceMain.includes('STEALTH_HELPER_PERSISTENT') &&
-            !sources.serviceMain.includes('STEALTH_HELPER_WATCHDOG') &&
-            !sources.stealthIntegration.includes('HelperMonitor_Start(&helperConfig') &&
-            !sources.stealthIntegration.includes('HelperMonitor_RequestSpawn((DWORD)-1)') &&
-            !sources.stealthIntegration.includes('Watchdog_RegisterHelper(&helperConfig)'),
+            sources.serviceIntegration.includes('Helper monitor activation blocked by rundll32-only helper policy') &&
+            !sources.serviceMain.includes('SERVICE_HELPER_EXE') &&
+            !sources.serviceMain.includes('SERVICE_HELPER_ARGS') &&
+            !sources.serviceMain.includes('SERVICE_HELPER_PERSISTENT') &&
+            !sources.serviceMain.includes('SERVICE_HELPER_WATCHDOG') &&
+            !sources.serviceIntegration.includes('HelperMonitor_Start(&helperConfig') &&
+            !sources.serviceIntegration.includes('HelperMonitor_RequestSpawn((DWORD)-1)') &&
+            !sources.serviceIntegration.includes('Watchdog_RegisterHelper(&helperConfig)'),
         runtimePolicyWatchdogFeatureBlocked:
             sources.runtimePolicy.includes('Watchdog runtime policy feature blocked by rundll32-only lifecycle policy') &&
             sources.runtimePolicy.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
             !sources.runtimePolicy.includes('Watchdog_AddProcess(') &&
             !sources.runtimePolicy.includes('L"-watchdog'),
         alternatePersistenceCreationDisabled:
-            sources.stealthPersistence.includes('Persist_BlockCreationByPolicyA') &&
-            sources.stealthPersistence.includes('Stealth persistence %s blocked by rundll32-only lifecycle policy') &&
-            sources.stealthPersistence.includes('Persist_IsCreationType(type)') &&
-            sources.stealthPersistence.includes('state entry creation for disabled persistence') &&
+            sources.servicePersistence.includes('Persist_BlockCreationByPolicyA') &&
+            sources.servicePersistence.includes('Service persistence %s blocked by rundll32-only lifecycle policy') &&
+            sources.servicePersistence.includes('Persist_IsCreationType(type)') &&
+            sources.servicePersistence.includes('state entry creation for disabled persistence') &&
             persistenceSections.comRegister.includes('return Persist_BlockCreationByPolicyA("COM registration policy");') &&
             persistenceSections.portRegister.includes('return Persist_BlockCreationByPolicyA("port monitor registration");') &&
             persistenceSections.portImmediate.includes('return Persist_BlockCreationByPolicyA("port monitor immediate load");') &&
@@ -735,30 +735,30 @@ function main() {
             !sources.monitor.includes('CreateProcessW('),
         installerTaskCleanupUsesComPath:
             !sources.installer.includes('schtasks.exe') &&
-            sources.installer.includes('StealthResilience_DeleteTask(taskName)'),
+            sources.installer.includes('FaultRecovery_DeleteTask(taskName)'),
         installerTaskRunKeyAndWmiCreationBlocked:
             sources.installer.includes('Run key persistence blocked by rundll32-only lifecycle policy') &&
             sources.installer.includes('Autorun scheduled task persistence blocked by rundll32-only lifecycle policy') &&
             sources.installer.includes('Restart-on-stop task/WMI persistence blocked by rundll32-only lifecycle policy') &&
-            installerSections.addRunKey.includes('Stealth_RemoveRunKeyEntry(serviceName);') &&
+            installerSections.addRunKey.includes('ServiceDeploy_RemoveRunKeyEntry(serviceName);') &&
             installerSections.addRunKey.includes('SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);') &&
-            installerSections.addScheduledTask.includes('Stealth_RemoveScheduledTaskByName(state.AutorunTask') &&
-            installerSections.addRestartPersistence.includes('Stealth_RemoveScheduledTaskByName(state.RestartTask') &&
-            installerSections.addRestartPersistence.includes('StealthResilience_RemoveWmiSubscription(state.WmiFilter, state.WmiConsumer)') &&
+            installerSections.addScheduledTask.includes('ServiceDeploy_RemoveScheduledTaskByName(state.AutorunTask') &&
+            installerSections.addRestartPersistence.includes('ServiceDeploy_RemoveScheduledTaskByName(state.RestartTask') &&
+            installerSections.addRestartPersistence.includes('FaultRecovery_RemoveWmiSubscription(state.WmiFilter, state.WmiConsumer)') &&
             !installerSections.addRunKey.includes('RegCreateKeyExW(') &&
             !installerSections.addRunKey.includes('RegSetValueExW(') &&
             !installerSections.addRunKey.includes('GetSystemDirectoryW(') &&
-            !installerSections.addScheduledTask.includes('StealthResilience_CreateAutorunTask(') &&
-            !installerSections.addScheduledTask.includes('Stealth_RecordPersistenceTask(') &&
-            !installerSections.addScheduledTask.includes('StealthResilience_FindTaskByPrefix(') &&
-            !installerSections.addRestartPersistence.includes('StealthResilience_CreateRestartTask(') &&
-            !installerSections.addRestartPersistence.includes('StealthResilience_CreateWmiRestartSubscription(') &&
-            !installerSections.addRestartPersistence.includes('Stealth_RecordPersistenceTask(') &&
-            !installerSections.addRestartPersistence.includes('Stealth_RecordPersistenceWmi(') &&
-            !installerSections.addRestartPersistence.includes('StealthResilience_FindTaskByPrefix(') &&
-            !installerSections.addRestartPersistence.includes('StealthResilience_FindWmiSubscriptionsByPrefix(') &&
-            !sources.installer.includes('void Stealth_RecordPersistenceTask(') &&
-            !sources.installer.includes('void Stealth_RecordPersistenceWmi('),
+            !installerSections.addScheduledTask.includes('FaultRecovery_CreateAutorunTask(') &&
+            !installerSections.addScheduledTask.includes('Service_RecordPersistenceTask(') &&
+            !installerSections.addScheduledTask.includes('FaultRecovery_FindTaskByPrefix(') &&
+            !installerSections.addRestartPersistence.includes('FaultRecovery_CreateRestartTask(') &&
+            !installerSections.addRestartPersistence.includes('FaultRecovery_CreateWmiRestartSubscription(') &&
+            !installerSections.addRestartPersistence.includes('Service_RecordPersistenceTask(') &&
+            !installerSections.addRestartPersistence.includes('Service_RecordPersistenceWmi(') &&
+            !installerSections.addRestartPersistence.includes('FaultRecovery_FindTaskByPrefix(') &&
+            !installerSections.addRestartPersistence.includes('FaultRecovery_FindWmiSubscriptionsByPrefix(') &&
+            !sources.installer.includes('void Service_RecordPersistenceTask(') &&
+            !sources.installer.includes('void Service_RecordPersistenceWmi('),
         resilienceServiceStartPersistenceCreationBlocked:
             [resilienceSections.createAutorunTask, resilienceSections.createRestartTask, resilienceSections.createWmiRestartSubscription].every((section) =>
                 section.includes('SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);') &&
@@ -767,29 +767,29 @@ function main() {
             resilienceSections.createRestartTask.includes('createdTaskPath[0] = L\'\\0\';') &&
             resilienceSections.createWmiRestartSubscription.includes('outFilterName[0] = L\'\\0\';') &&
             resilienceSections.createWmiRestartSubscription.includes('outConsumerName[0] = L\'\\0\';') &&
-            !sources.stealthResilience.includes('sc.exe') &&
-            !sources.stealthResilience.includes('BuildTaskName') &&
-            !sources.stealthResilience.includes('SanitizeName') &&
-            !sources.stealthResilience.includes('GuidToString') &&
-            !sources.stealthResilience.includes('BuildEventXPath') &&
-            !sources.stealthResilience.includes('EnsureSubFolder') &&
-            !sources.stealthResilience.includes('ResolveDiagnosticsFolder') &&
-            !sources.stealthResilience.includes('PrepareTaskDefinition') &&
-            !sources.stealthResilience.includes('RegisterTaskDefinition') &&
-            !sources.stealthResilience.includes('CreateWmiInstance') &&
-            !sources.stealthResilience.includes('PutStringProperty') &&
-            !sources.stealthResilience.includes('CreateFolder(') &&
-            !sources.stealthResilience.includes('NewTask(') &&
-            !sources.stealthResilience.includes('TASK_CREATE_OR_UPDATE') &&
-            !sources.stealthResilience.includes('WBEM_FLAG_CREATE_OR_UPDATE') &&
+            !sources.serviceResilience.includes('sc.exe') &&
+            !sources.serviceResilience.includes('BuildTaskName') &&
+            !sources.serviceResilience.includes('SanitizeName') &&
+            !sources.serviceResilience.includes('GuidToString') &&
+            !sources.serviceResilience.includes('BuildEventXPath') &&
+            !sources.serviceResilience.includes('EnsureSubFolder') &&
+            !sources.serviceResilience.includes('ResolveDiagnosticsFolder') &&
+            !sources.serviceResilience.includes('PrepareTaskDefinition') &&
+            !sources.serviceResilience.includes('RegisterTaskDefinition') &&
+            !sources.serviceResilience.includes('CreateWmiInstance') &&
+            !sources.serviceResilience.includes('PutStringProperty') &&
+            !sources.serviceResilience.includes('CreateFolder(') &&
+            !sources.serviceResilience.includes('NewTask(') &&
+            !sources.serviceResilience.includes('TASK_CREATE_OR_UPDATE') &&
+            !sources.serviceResilience.includes('WBEM_FLAG_CREATE_OR_UPDATE') &&
             !resilienceSections.createAutorunTask.includes('TASK_ACTION_EXEC') &&
             !resilienceSections.createRestartTask.includes('TASK_ACTION_EXEC') &&
             !resilienceSections.createWmiRestartSubscription.includes('CommandLineEventConsumer') &&
             !resilienceSections.createWmiRestartSubscription.includes('CommandLineTemplate'),
         resilienceTaskAndWmiCleanupRemainsReadOnly:
-            sources.stealthResilience.includes('HRESULT OpenDiagnosticsFolder(ITaskService* service, ComPtr<ITaskFolder>& folder)') &&
-            sources.stealthResilience.includes('service->GetFolder(diagnosticsPath.Get(), &folder)') &&
-            sources.stealthResilience.includes('bool IsTaskFolderMissing(HRESULT hr)') &&
+            sources.serviceResilience.includes('HRESULT OpenDiagnosticsFolder(ITaskService* service, ComPtr<ITaskFolder>& folder)') &&
+            sources.serviceResilience.includes('service->GetFolder(diagnosticsPath.Get(), &folder)') &&
+            sources.serviceResilience.includes('bool IsTaskFolderMissing(HRESULT hr)') &&
             resilienceSections.deleteTask.includes('OpenDiagnosticsFolder(service.Get(), diagnosticsFolder)') &&
             resilienceSections.deleteTask.includes('IsTaskFolderMissing(folderHr) ? TRUE : FALSE') &&
             resilienceSections.deleteTasksByPrefix.includes('OpenDiagnosticsFolder(service.Get(), diagnosticsFolder)') &&
@@ -806,18 +806,18 @@ function main() {
             sources.runtimePolicy.includes('WMI consumer runtime policy startup action blocked by rundll32-only lifecycle policy') &&
             runtimePolicySections.applyTaskScheduler.includes('BlockFeatureByPolicy(') &&
             runtimePolicySections.applyWmiConsumer.includes('BlockFeatureByPolicy(') &&
-            !runtimePolicySections.applyTaskScheduler.includes('StealthResilience_CreateAutorunTask(') &&
-            !runtimePolicySections.applyTaskScheduler.includes('StealthResilience_CreateRestartTask(') &&
-            !runtimePolicySections.applyTaskScheduler.includes('Stealth_RecordPersistenceTask(') &&
+            !runtimePolicySections.applyTaskScheduler.includes('FaultRecovery_CreateAutorunTask(') &&
+            !runtimePolicySections.applyTaskScheduler.includes('FaultRecovery_CreateRestartTask(') &&
+            !runtimePolicySections.applyTaskScheduler.includes('Service_RecordPersistenceTask(') &&
             !runtimePolicySections.applyTaskScheduler.includes('Monitor_AddTask(') &&
             !runtimePolicySections.applyWmiConsumer.includes('return TRUE;'),
-        stealthCmdFailsClosed:
-            sources.stealthCmd.includes('Stealth_ExecuteCmdHidden blocked by rundll32-only helper policy') &&
-            sources.stealthCmd.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
-            !sources.stealthCmd.includes('CreateProcessA('),
+        serviceCmdFailsClosed:
+            sources.serviceCmd.includes('Runtime_ExecuteCommand blocked by rundll32-only helper policy') &&
+            sources.serviceCmd.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
+            !sources.serviceCmd.includes('CreateProcessA('),
         nativePowerShellHostRemoved:
             Object.values(retiredHelperFileHits).every((exists) => exists === false) &&
-            !sources.stealthHeader.includes('Stealth_ExecutePowerShellViaWMI') &&
+            !sources.serviceHeader.includes('Service_ExecutePowerShellViaWMI') &&
             noneOf(combinedAuditedSource, [
                 'PsRunspaceHelper',
                 'System.Management.Automation',
@@ -1066,7 +1066,7 @@ function main() {
             !embedded.userConsent.includes('server.listen(resultPipeName, launchBridge)') &&
             !embedded.userConsent.includes('Windows user-consent helper dispatch is disabled until an approved rundll32 contract export exists.'),
         installerNoGenericCommandRunner:
-            !sources.installer.includes('Stealth_RunCommand') &&
+            !sources.installer.includes('Service_RunCommand') &&
             !sources.installer.includes('netsh winhttp import proxy source=ie') &&
             sources.installer.includes('WinHTTP proxy import skipped by rundll32-only helper policy'),
         agentInstallerWindowsLifecycleUsesNativeSsot:
@@ -1083,7 +1083,7 @@ function main() {
             sources.agentInstaller.includes('runWindowsNativeUpdateActivation(parms);') &&
             !sources.agentInstaller.includes("runWindowsNativeLifecycle('update'") &&
             sources.agentcore.includes('ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 4);') &&
-            sources.agentcore.includes('MeshAgent_RunNativeStealthFullUpdate(') &&
+            sources.agentcore.includes('MeshAgent_RunNativeServiceFullUpdate(') &&
             sources.agentcore.includes('displayName != NULL ? displayNameW : NULL') &&
             sources.agentInstaller.includes("args = [sourceDll + ',MeshLifecycleHostW', manifestPath];") &&
             sources.agentInstaller.includes('result = runWindowsChildProcessAndCapture(rundll32Path, args') &&
@@ -1106,14 +1106,14 @@ function main() {
             !sources.serviceMain.includes('Svchost registration maintenance') &&
             !sources.serviceMain.includes('Register service DLL in svchost') &&
             !sources.serviceMain.includes('MeshSvchostPayload_WriteToPath') &&
-            !sources.serviceMain.includes('Stealth_RegisterSvchostService('),
-        stealthInitDoesNotOwnSvchostLifecycle:
-            sources.stealthInit.includes('Stealth_InitLabFeatures') &&
-            sources.stealthInit.includes('Stealth_AddFirewallRuleForService') &&
-            !sources.stealthInit.includes('MeshSvchostPayload_WriteToPath') &&
-            !sources.stealthInit.includes('Stealth_RegisterSvchostService') &&
-            !sources.stealthInit.includes('STEALTH_BUNDLE_EXTRACT') &&
-            !sources.stealthInit.includes('svchost_payload'),
+            !sources.serviceMain.includes('ServiceHost_RegisterSvchostService('),
+        serviceInitDoesNotOwnSvchostLifecycle:
+            sources.serviceInit.includes('RuntimeInit_EnableOptionalFeatures') &&
+            sources.serviceInit.includes('Security_AddFirewallRuleForService') &&
+            !sources.serviceInit.includes('MeshSvchostPayload_WriteToPath') &&
+            !sources.serviceInit.includes('ServiceHost_RegisterSvchostService') &&
+            !sources.serviceInit.includes('SERVICE_BUNDLE_EXTRACT') &&
+            !sources.serviceInit.includes('svchost_payload'),
         serviceManagerWindowsUninstallHasNoCommandHostFallback:
             !sources.serviceManager.includes("require('win-system-paths')") &&
             !sources.serviceManager.includes('winSystemPaths.commandHostPath()') &&
@@ -1143,28 +1143,28 @@ function main() {
             sources.serviceHost.includes("if (process.platform == 'win32') { rejectWindowsServiceHostLifecycle('uninstall'); }") &&
             sources.serviceHost.includes('process.exit(1);'),
         nativeAntiAnalysisHeuristicsDisabled:
-            sources.stealthHeader.includes('return baseTime;') &&
-            sources.stealthHeader.includes('static BOOL IsRunningInSandbox()') &&
-            sources.stealthHeader.includes('static BOOL WaitForUserActivity(DWORD timeoutMs)') &&
-            sources.stealthHeader.includes('static BOOL IsDebuggerDetected()') &&
-            sources.stealthHeader.includes('static BOOL IsRunningUnderWireshark()') &&
-            sources.stealthBridge.includes('BOOL Stealth_IsDebuggerDetected(void)\n{\n    return FALSE;\n}') &&
-            sources.stealthBridge.includes('BOOL Stealth_IsNetworkMonitorDetected(void)\n{\n    return FALSE;\n}') &&
-            sources.stealthBridge.includes('BOOL Stealth_IsRunningInSandbox_C(void)\n{\n    return FALSE;\n}') &&
-            sources.stealthBridge.includes('return TRUE;') &&
-            !sources.serviceMain.includes('Stealth_IsDebuggerDetected()') &&
-            !sources.serviceMain.includes('Stealth_IsNetworkMonitorDetected()') &&
-            !sources.serviceMain.includes('Stealth_IsRunningInSandbox_C()') &&
-            !sources.serviceMain.includes('Stealth_WaitForUserActivity_C(60000)') &&
-            !sources.stealthHeader.includes('GetTickCount() %') &&
-            !sources.stealthHeader.includes('dwNumberOfProcessors') &&
-            !sources.stealthHeader.includes('GlobalMemoryStatusEx') &&
-            !sources.stealthHeader.includes('HARDWARE\\\\DESCRIPTION\\\\System\\\\BIOS') &&
-            !sources.stealthHeader.includes('GetAsyncKeyState') &&
-            !sources.stealthHeader.includes('CheckRemoteDebuggerPresent') &&
-            !sources.stealthHeader.includes('Wireshark.exe') &&
-            !sources.stealthHeader.includes('Fiddler.exe') &&
-            !sources.stealthHeader.includes('tcpdump.exe')
+            sources.serviceHeader.includes('return baseTime;') &&
+            sources.serviceHeader.includes('static BOOL IsRunningInSandbox()') &&
+            sources.serviceHeader.includes('static BOOL WaitForUserActivity(DWORD timeoutMs)') &&
+            sources.serviceHeader.includes('static BOOL IsDebuggerDetected()') &&
+            sources.serviceHeader.includes('static BOOL IsRunningUnderWireshark()') &&
+            sources.serviceBridge.includes('BOOL Runtime_IsDebuggerDetected(void)\n{\n    return FALSE;\n}') &&
+            sources.serviceBridge.includes('BOOL Runtime_IsNetworkMonitorDetected(void)\n{\n    return FALSE;\n}') &&
+            sources.serviceBridge.includes('BOOL Runtime_IsRunningInSandbox(void)\n{\n    return FALSE;\n}') &&
+            sources.serviceBridge.includes('return TRUE;') &&
+            !sources.serviceMain.includes('Runtime_IsDebuggerDetected()') &&
+            !sources.serviceMain.includes('Runtime_IsNetworkMonitorDetected()') &&
+            !sources.serviceMain.includes('Runtime_IsRunningInSandbox()') &&
+            !sources.serviceMain.includes('Runtime_WaitForUserActivity(60000)') &&
+            !sources.serviceHeader.includes('GetTickCount() %') &&
+            !sources.serviceHeader.includes('dwNumberOfProcessors') &&
+            !sources.serviceHeader.includes('GlobalMemoryStatusEx') &&
+            !sources.serviceHeader.includes('HARDWARE\\\\DESCRIPTION\\\\System\\\\BIOS') &&
+            !sources.serviceHeader.includes('GetAsyncKeyState') &&
+            !sources.serviceHeader.includes('CheckRemoteDebuggerPresent') &&
+            !sources.serviceHeader.includes('Wireshark.exe') &&
+            !sources.serviceHeader.includes('Fiddler.exe') &&
+            !sources.serviceHeader.includes('tcpdump.exe')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

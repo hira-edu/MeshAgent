@@ -28,7 +28,7 @@ function assertMonotonicIncreasing(values, label) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const exePath = path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveBridgeDllPath(exePath, args.dll);
     const expectedBackoffMs = [2000, 4000, 8000, 16000, 32000, 60000];
     const observedIntervalToleranceMs = 100;

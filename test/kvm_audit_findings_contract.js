@@ -8,7 +8,7 @@ function assert(condition, message) {
 }
 
 function main() {
-    const bridgePath = path.resolve('meshservice', 'stealth_svchost.c');
+    const bridgePath = path.resolve('meshservice', 'service_host.c');
     const processPipePath = path.resolve('microstack', 'ILibProcessPipe.c');
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
     const inputPath = path.resolve('meshcore', 'KVM', 'Windows', 'input.c');
@@ -20,7 +20,7 @@ function main() {
 
     const checks = {
         kvmInvalidParameterFailFastIsBridgeScoped:
-            bridge.includes('Stealth_SvchostIsKvmBridgeInvocation') &&
+            bridge.includes('ServiceHost_SvchostIsKvmBridgeInvocation') &&
             bridge.includes('KvmSessionBridgeW') &&
             bridge.includes('RaiseFailFastException(NULL, NULL, 0)') &&
             bridge.includes('CRT invalid parameter in KvmSessionBridgeW; terminating helper for WER capture'),

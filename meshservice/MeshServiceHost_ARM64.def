@@ -1,6 +1,6 @@
 LIBRARY MeshServiceHostARM64
 EXPORTS
-    Stealth_SvchostServiceMain
+    ServiceHost_SvchostServiceMain
     KvmSessionBridgeW
     MeshConsoleBridgeW
     MeshUmhHostW

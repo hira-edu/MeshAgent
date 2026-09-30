@@ -31,8 +31,8 @@ limitations under the License.
 #include "microstack/ILibProcessPipe.h"
 #include "microstack/ILibRemoteLogging.h"
 #include "meshservice/rundll32_contract.h"
-#include "meshservice/stealth_utils.h"
-#include "meshservice/stealth_watchdog.h"
+#include "meshservice/service_utils.h"
+#include "meshservice/service_watchdog.h"
 #include "../../../meshservice/branding_util.h"
 #include <WtsApi32.h>
 #include <Objbase.h>
@@ -105,7 +105,7 @@ void KVM_TraceStartupF(const char* format, ...)
 	DWORD written = 0;
 
 	if (format == NULL) { return; }
-	if (GetEnvironmentVariableA("STEALTH_KVM_TRACE_STARTUP", enabledValue, (DWORD)sizeof(enabledValue)) == 0) { return; }
+	if (GetEnvironmentVariableA("KVM_TRACE_STARTUP", enabledValue, (DWORD)sizeof(enabledValue)) == 0) { return; }
 	va_start(args, format);
 	len = vsnprintf_s(buffer, sizeof(buffer), _TRUNCATE, format, args);
 	va_end(args);
@@ -1181,12 +1181,25 @@ static BOOL kvm_relay_stop_bridge_process(DWORD timeoutMs)
 	if (waitResult == WAIT_OBJECT_0) { return TRUE; }
 
 	kvm_trace_startupf("Bridge helper did not exit gracefully waitResult=%lu; terminating", (unsigned long)waitResult);
+	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: Bridge helper did not exit gracefully waitResult=%lu; terminating process", (unsigned long)waitResult);
 	if (!TerminateProcess(childProcessHandle, 0))
 	{
-		kvm_trace_startupf("TerminateProcess bridge helper failed error=%lu", (unsigned long)GetLastError());
+		DWORD terminateError = GetLastError();
+		kvm_trace_startupf("TerminateProcess bridge helper failed error=%lu", (unsigned long)terminateError);
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: TerminateProcess failed error=%lu", (unsigned long)terminateError);
 		return FALSE;
 	}
-	return (WaitForSingleObject(childProcessHandle, 1000) == WAIT_OBJECT_0);
+	if (WaitForSingleObject(childProcessHandle, 1000) == WAIT_OBJECT_0)
+	{
+		DWORD exitCode = 0;
+		if (GetExitCodeProcess(childProcessHandle, &exitCode))
+		{
+			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: Bridge helper terminated forcefully exitCode=%lu", (unsigned long)exitCode);
+		}
+		return TRUE;
+	}
+	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: Bridge helper failed to terminate within timeout");
+	return FALSE;
 }
 
 typedef struct KvmBridgeHardeningResult
@@ -1235,7 +1248,7 @@ static BOOL kvm_relay_harden_bridge_process_handle(HANDLE childProcessHandle, DW
 		return FALSE;
 	}
 
-	if (!Stealth_ProtectProcessByHandle(childProcessHandle))
+	if (!ServiceUtil_ProtectProcessByHandle(childProcessHandle))
 	{
 		lastError = GetLastError();
 		if (lastError == ERROR_SUCCESS) { lastError = ERROR_ACCESS_DENIED; }
@@ -1372,8 +1385,18 @@ static void kvm_relay_bridge_pipe_broken_handler(ILibProcessPipe_Pipe sender)
 	kvm_relay_activate_context(ctx);
 	if (ctx != NULL)
 	{
-		InterlockedExchange(&ctx->bridgeTransportAttached, 0);
-		InterlockedExchange(&ctx->bridgeClientConnected, 0);
+		LONG wasAttached = InterlockedExchange(&ctx->bridgeTransportAttached, 0);
+		LONG wasConnected = InterlockedExchange(&ctx->bridgeClientConnected, 0);
+		if (wasAttached != 0 || wasConnected != 0)
+		{
+			// Log once per attached->broken transition on the main channel. The child's exit code
+			// (if the child actually exited) is reported separately by kvm_relay_ExitHandler.
+			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+				"Agent KVM: Bridge pipe broken (childPid=%d childPresent=%d transportAttached=%ld clientConnected=%ld restartSuppressed=%d shutdown=%d restartCount=%d)",
+				ctx->childPid, ctx->childProcess != NULL ? 1 : 0, (long)wasAttached, (long)wasConnected, gKvmRestartSuppressed, g_shutdown, g_restartcount);
+			kvm_trace_startupf("bridge pipe broken childPid=%d childPresent=%d transportAttached=%ld clientConnected=%ld restartSuppressed=%d shutdown=%d restartCount=%d",
+				ctx->childPid, ctx->childProcess != NULL ? 1 : 0, (long)wasAttached, (long)wasConnected, gKvmRestartSuppressed, g_shutdown, g_restartcount);
+		}
 		ctx->transportActive = 0;
 		gKvmTransportActive = 0;
 		kvm_relay_capture_context(ctx);
@@ -1601,7 +1624,7 @@ static BOOL kvm_relay_resolve_bridge_dll_pathW(char *exePath, WCHAR* output, siz
 							{
 								ext = wcsrchr(nameNoExt, L'.');
 								if (ext != NULL) { *ext = L'\0'; }
-								if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\StealthLab_DLL\\%ls.dll", parentDir, nameNoExt)) &&
+								if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\MeshServiceBundle\\%ls.dll", parentDir, nameNoExt)) &&
 									GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
 								{
 									return SUCCEEDED(StringCchCopyW(output, outputLen, candidate));
@@ -3920,7 +3943,7 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 		if (g_shutdown) { break; }
 
 		// Scan the desktop
-		if (kvm_read_env_bool("STEALTH_KVM_TRACE_LOOP", 0) != 0 && InterlockedIncrement(&gKvmLoopTraceCounter) <= 64)
+		if (kvm_read_env_bool("KVM_TRACE_LOOP", 0) != 0 && InterlockedIncrement(&gKvmLoopTraceCounter) <= 64)
 		{
 			kvm_trace_startupf("KVM loop: before get_desktop_buffer pause=%d remotePause=%d scale=%d backendThread=%d",
 				g_pause,
@@ -3936,7 +3959,7 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 			desktopsize = 0;
 			if (captureFailureCount == 0) { captureFailureStartTick = now; }
 			++captureFailureCount;
-			if (kvm_read_env_bool("STEALTH_KVM_TRACE_LOOP", 0) != 0 && g_shutdown == 0)
+			if (kvm_read_env_bool("KVM_TRACE_LOOP", 0) != 0 && g_shutdown == 0)
 			{
 				kvm_trace_startupf("KVM loop: get_desktop_buffer returned empty/null desktop=%p size=%lld", desktop, desktopsize);
 			}
@@ -3965,7 +3988,7 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 		{
 			captureFailureCount = 0;
 			captureFailureStartTick = 0;
-			if (kvm_read_env_bool("STEALTH_KVM_TRACE_LOOP", 0) != 0 && InterlockedCompareExchange(&gKvmLoopTraceCounter, 0, 0) <= 64)
+			if (kvm_read_env_bool("KVM_TRACE_LOOP", 0) != 0 && InterlockedCompareExchange(&gKvmLoopTraceCounter, 0, 0) <= 64)
 			{
 				kvm_trace_startupf("KVM loop: get_desktop_buffer success desktop=%p size=%lld", desktop, desktopsize);
 			}
@@ -4150,8 +4173,8 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 		g_slavekvm = (int)childPid;
 		if (ctx != NULL) { ctx->childPid = (int)childPid; }
 	}
-	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) [EXITED]", (unsigned int)childPid);
-	kvm_trace_startupf("bridge child exit pid=%u exitCode=%d restartSuppressed=%d shutdown=%d restartCount=%d", (unsigned int)childPid, exitCode, gKvmRestartSuppressed, g_shutdown, g_restartcount);
+	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) [EXITED] exitCode=%d (0x%08X) restartSuppressed=%d shutdown=%d restartCount=%d", (unsigned int)childPid, exitCode, (unsigned int)exitCode, gKvmRestartSuppressed, g_shutdown, g_restartcount);
+	kvm_trace_startupf("bridge child exit pid=%u exitCode=%d (0x%08X) restartSuppressed=%d shutdown=%d restartCount=%d", (unsigned int)childPid, exitCode, (unsigned int)exitCode, gKvmRestartSuppressed, g_shutdown, g_restartcount);
 	UNREFERENCED_PARAMETER(sender);
 	kvm_relay_close_bridge_transport(ctx);
 	kvm_relay_close_bridge_job(ctx);
@@ -4166,7 +4189,7 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 
 	if (gKvmRestartSuppressed != 0 || g_shutdown != 0)
 	{
-		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: restart suppressed=%d shutdown=%d", gKvmRestartSuppressed, g_shutdown);
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) exitCode=%d (0x%08X) not restarted: restartSuppressed=%d shutdown=%d restartCount=%d", (unsigned int)childPid, exitCode, (unsigned int)exitCode, gKvmRestartSuppressed, g_shutdown, g_restartcount);
 		notifyClosed = 1;
 		goto cleanup;
 	}
@@ -4179,7 +4202,7 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 		kvm_bridge_report_outcome_event(
 			exitCode == ERROR_BAD_EXE_FORMAT ? L"DLL_LOAD_FAILURE" : L"EXIT_FAILURE",
 			EVENTLOG_ERROR_TYPE,
-			ILibProcessPipe_Process_GetPID(sender),
+			childPid,
 			(DWORD)exitCode,
 			exePath,
 			(ILibProcessPipe_SpawnTypes)(gKvmLastSuccessfulSpawnType != 0 ? gKvmLastSuccessfulSpawnType : (DWORD)gProcessSpawnType));
@@ -4199,11 +4222,12 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 		UNREFERENCED_PARAMETER(exePath);
 		UNREFERENCED_PARAMETER(writeHandler);
 		UNREFERENCED_PARAMETER(reserved);
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) exitCode=%d (0x%08X), scheduling restart (restartCount=%d/4)", (unsigned int)childPid, exitCode, (unsigned int)exitCode, g_restartcount);
 		kvm_schedule_retry_timer();
 	}
 	else
 	{
-		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: g_restartcount = %d, aborting", g_restartcount);
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) exitCode=%d (0x%08X), restart limit reached (restartCount=%d/4), aborting and notifying viewer", (unsigned int)childPid, exitCode, (unsigned int)exitCode, g_restartcount);
 		notifyClosed = 1;
 	}
 
@@ -4427,16 +4451,16 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			}
 		}
 		gKvmLastBridgeAvailable = bridgeAvailable;
-		if (GetEnvironmentVariableA("STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE", forceExitCodeA, (DWORD)sizeof(forceExitCodeA)) > 0)
+		if (GetEnvironmentVariableA("KVM_BRIDGE_FORCE_EXIT_CODE", forceExitCodeA, (DWORD)sizeof(forceExitCodeA)) > 0)
 		{
-			bridgeEnvVars[bridgeEnvPairCount * 2] = "STEALTH_KVM_BRIDGE_FORCE_EXIT_CODE";
+			bridgeEnvVars[bridgeEnvPairCount * 2] = "KVM_BRIDGE_FORCE_EXIT_CODE";
 			bridgeEnvVars[(bridgeEnvPairCount * 2) + 1] = forceExitCodeA;
 			++bridgeEnvPairCount;
 		}
 		bridgeEnvPairCount = kvm_relay_append_bridge_env_passthrough(bridgeEnvVars, bridgeEnvPairCount, 5, KVM_BRIDGE_CONNECT_DELAY_ENV_A, connectDelayA, sizeof(connectDelayA));
-		bridgeEnvPairCount = kvm_relay_append_bridge_env_passthrough(bridgeEnvVars, bridgeEnvPairCount, 5, "STEALTH_KVM_TRACE_STARTUP", traceStartupA, sizeof(traceStartupA));
-		bridgeEnvPairCount = kvm_relay_append_bridge_env_passthrough(bridgeEnvVars, bridgeEnvPairCount, 5, "STEALTH_KVM_TRACE_LOOP", traceLoopA, sizeof(traceLoopA));
-		bridgeEnvPairCount = kvm_relay_append_bridge_env_passthrough(bridgeEnvVars, bridgeEnvPairCount, 5, "STEALTH_KVM_TRACE_SERVICE_WRITES", traceServiceWritesA, sizeof(traceServiceWritesA));
+		bridgeEnvPairCount = kvm_relay_append_bridge_env_passthrough(bridgeEnvVars, bridgeEnvPairCount, 5, "KVM_TRACE_STARTUP", traceStartupA, sizeof(traceStartupA));
+		bridgeEnvPairCount = kvm_relay_append_bridge_env_passthrough(bridgeEnvVars, bridgeEnvPairCount, 5, "KVM_TRACE_LOOP", traceLoopA, sizeof(traceLoopA));
+		bridgeEnvPairCount = kvm_relay_append_bridge_env_passthrough(bridgeEnvVars, bridgeEnvPairCount, 5, "KVM_TRACE_SERVICE_WRITES", traceServiceWritesA, sizeof(traceServiceWritesA));
 		if (g_ILibCrashDump_path != NULL)
 		{
 			bridgeParms0[bridgeOptionalArgCount] = "-coredump";
@@ -5097,12 +5121,13 @@ void kvm_cleanup(void *reserved)
 	kvm_update_runtime_state(0, 0);
 	hadChildProcess = (gChildProcess != NULL);
 	childProcessForExit = gChildProcess;
-	if (gChildProcess != NULL) 
-	{ 
-		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM.c/kvm_cleanup: Attempting graceful child shutdown");
+	if (gChildProcess != NULL)
+	{
+		DWORD childPid = ILibProcessPipe_Process_GetPID(gChildProcess);
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: kvm_cleanup: Attempting graceful child shutdown (pid=%u)", (unsigned int)childPid);
 		if (!kvm_relay_stop_bridge_process(5000))
 		{
-			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM.c/kvm_cleanup: Attempting to kill child process");
+			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: kvm_cleanup: Graceful shutdown failed, attempting to kill child process (pid=%u)", (unsigned int)childPid);
 			ILibProcessPipe_Process_SoftKill(gChildProcess);
 		}
 		gChildProcess = NULL;
@@ -5110,7 +5135,7 @@ void kvm_cleanup(void *reserved)
 	}
 	else
 	{
-		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM.c/kvm_cleanup: gChildProcess = NULL");
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: kvm_cleanup: No child process to terminate");
 	}
 	if (ctx != NULL)
 	{

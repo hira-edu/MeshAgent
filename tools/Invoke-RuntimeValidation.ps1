@@ -7,11 +7,11 @@
 .DESCRIPTION
     This helper enforces elevation, locates `meshctrl.js`, resolves the Mesh ID from
     `branding_config.local.json`, and then shells into test.ps1 with all of the required MeshCentral
-    parameters. Use it from CI (or locally) after staging the StealthLab build so runtime evidence
+    parameters. Use it from CI (or locally) after staging the MeshServiceRuntime build so runtime evidence
     is captured automatically under `verification/phase3/runtime.json`.
 
 .PARAMETER BinaryPath
-    Root directory that contains MeshService-2022.exe (default: meshservice\x64\StealthLab).
+    Root directory that contains MeshService-2022.exe (default: meshservice\x64\MeshServiceRuntime).
 
 .PARAMETER MeshCentralRepo
     Path to the local MeshCentral checkout that hosts `meshctrl.js` and meshcentral-data (default: ..\MeshCentral).
@@ -39,12 +39,12 @@
 
 .PARAMETER SkipMeshCentralPreflight
     Skips the MeshCentral cache refresh/parity check. By default the helper restarts MeshCentral, clears cached meshagent downloads,
-    and verifies that `meshcentral-data\agents\MeshService64.exe` matches the local StealthLab build before running tests.
+    and verifies that `meshcentral-data\agents\MeshService64.exe` matches the local MeshServiceRuntime build before running tests.
 
 #>
 [CmdletBinding()]
 param(
-    [string]$BinaryPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'meshservice\x64\StealthLab'),
+    [string]$BinaryPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'meshservice\x64\MeshServiceRuntime'),
     [string]$MeshCentralRepo = (Join-Path (Split-Path $PSScriptRoot -Parent) '..\MeshCentral'),
     [string]$MeshCtrlPath,
     [string]$MeshCentralControlUrl = 'ws://127.0.0.1:3000',
@@ -197,7 +197,7 @@ function Invoke-MeshCentralPreflight {
 
     $localBinary = Join-Path $BinaryRoot 'MeshService-2022.exe'
     if (-not (Test-Path -LiteralPath $localBinary)) {
-        throw "Local StealthLab binary missing at $localBinary"
+        throw "Local MeshServiceRuntime binary missing at $localBinary"
     }
 
     $serverBinary = Join-Path $dataPath 'agents\MeshService64.exe'

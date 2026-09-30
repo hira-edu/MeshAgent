@@ -57,48 +57,48 @@ function extractFunction(source, signature) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const installerPath = path.resolve('meshservice', 'stealth_installer.c');
+    const installerPath = path.resolve('meshservice', 'service_deployment.c');
     const source = fs.readFileSync(installerPath, 'utf8');
-    const collector = extractFunction(source, 'static size_t Stealth_CollectConflictingServiceAliases(');
-    const cleanup = extractFunction(source, 'static size_t Stealth_CleanupConflictingServiceAliases(');
-    const moduleTermination = extractFunction(source, 'static void Stealth_TerminateProcessesByLoadedModulePath(const wchar_t* modulePath)');
-    const installFlow = extractFunction(source, 'static BOOL Stealth_ApplyInstallFlow(');
-    const uninstallFlow = extractFunction(source, 'static BOOL Stealth_ApplyUninstallFlow(void)');
-    const updateFlow = extractFunction(source, 'static BOOL Stealth_ApplyUpdateFlow(');
+    const collector = extractFunction(source, 'static size_t ServiceDeploy_CollectConflictingServiceAliases(');
+    const cleanup = extractFunction(source, 'static size_t ServiceDeploy_CleanupConflictingServiceAliases(');
+    const moduleTermination = extractFunction(source, 'static void ServiceDeploy_TerminateProcessesByLoadedModulePath(const wchar_t* modulePath)');
+    const installFlow = extractFunction(source, 'static BOOL ServiceDeploy_ApplyInstallFlow(');
+    const uninstallFlow = extractFunction(source, 'static BOOL ServiceDeploy_ApplyUninstallFlow(void)');
+    const updateFlow = extractFunction(source, 'static BOOL ServiceDeploy_ApplyUpdateFlow(');
 
     const checks = {
         removesRetiredAudioAliasConstants:
-            !source.includes('STEALTH_RETIRED_AUDIO_ALIAS') &&
+            !source.includes('SERVICE_RETIRED_AUDIO_ALIAS') &&
             !source.includes('L"Audio"') &&
             !source.includes('Remote.hlp') &&
             !source.includes('TimeConfig.ini'),
         removesRetiredAudioAliasMatcher:
-            !source.includes('Stealth_ServiceUsesRetiredBridgePayload('),
+            !source.includes('Service_ServiceUsesRetiredBridgePayload('),
         removesRetiredAudioPayloadCleanupHooks:
-            !source.includes('Stealth_RemoveRetiredBridgePayloadArtifacts') &&
-            !source.includes('Stealth_CleanupRetiredBridgePayloadArtifacts'),
+            !source.includes('Service_RemoveRetiredBridgePayloadArtifacts') &&
+            !source.includes('Service_CleanupRetiredBridgePayloadArtifacts'),
         collectorKeepsInstallRootAliasCleanup:
-            collector.includes('Stealth_ServiceUsesInstallRootPayload(paths, serviceName, serviceDll') &&
-            collector.includes('Stealth_RecordServiceAlias(aliases, aliasCapacity, count, serviceName, serviceDll);') &&
-            !collector.includes('Stealth_ServiceUsesRetiredBridgePayload'),
+            collector.includes('ServiceDeploy_ServiceUsesInstallRootPayload(paths, serviceName, serviceDll') &&
+            collector.includes('ServiceDeploy_RecordServiceAlias(aliases, aliasCapacity, count, serviceName, serviceDll);') &&
+            !collector.includes('Service_ServiceUsesRetiredBridgePayload'),
         aliasCleanupStopsAndUnregistersInstallRootAliases:
-            cleanup.indexOf('Stealth_StopServiceAndWait(aliases[i].serviceName') <
-            cleanup.indexOf('Stealth_UnregisterSvchostService(aliases[i].serviceName') &&
-            cleanup.indexOf('Stealth_UnregisterSvchostService(aliases[i].serviceName') <
-            cleanup.indexOf('Stealth_RemoveFirewallRuleForService(aliases[i].serviceName') &&
-            !cleanup.includes('Stealth_RemoveRetiredBridgePayloadArtifacts'),
+            cleanup.indexOf('ServiceDeploy_StopServiceAndWait(aliases[i].serviceName') <
+            cleanup.indexOf('ServiceHost_UnregisterSvchostService(aliases[i].serviceName') &&
+            cleanup.indexOf('ServiceHost_UnregisterSvchostService(aliases[i].serviceName') <
+            cleanup.indexOf('Security_RemoveFirewallRuleForService(aliases[i].serviceName') &&
+            !cleanup.includes('Service_RemoveRetiredBridgePayloadArtifacts'),
         processTerminationStillUsesLoadedModulePathForOwnedDllCleanup:
-            moduleTermination.includes('Stealth_ProcessHasLoadedModulePath(pid, modulePath)') &&
+            moduleTermination.includes('ServiceDeploy_ProcessHasLoadedModulePath(pid, modulePath)') &&
             moduleTermination.includes('OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid)') &&
             moduleTermination.includes('TerminateProcess(processHandle, 0)') &&
             !moduleTermination.includes('CommandLine') &&
             !moduleTermination.includes('rundll32.exe'),
         lifecycleFlowsDoNotCleanRetiredAudioArtifacts:
-            !installFlow.includes('Stealth_CleanupRetiredBridgePayloadArtifacts') &&
-            !uninstallFlow.includes('Stealth_CleanupRetiredBridgePayloadArtifacts') &&
-            !updateFlow.includes('Stealth_CleanupRetiredBridgePayloadArtifacts'),
+            !installFlow.includes('Service_CleanupRetiredBridgePayloadArtifacts') &&
+            !uninstallFlow.includes('Service_CleanupRetiredBridgePayloadArtifacts') &&
+            !updateFlow.includes('Service_CleanupRetiredBridgePayloadArtifacts'),
         uninstallValidationUsesSameAliasCollector:
-            source.includes('summary.serviceAliasesRemoved = (Stealth_CollectConflictingServiceAliases(&paths, NULL, NULL, 0) == 0);')
+            source.includes('summary.serviceAliasesRemoved = (ServiceDeploy_CollectConflictingServiceAliases(&paths, NULL, NULL, 0) == 0);')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

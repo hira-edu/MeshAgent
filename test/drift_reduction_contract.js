@@ -49,10 +49,10 @@ function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
 
     const processPipePath = path.resolve('microstack', 'ILibProcessPipe.c');
-    const watchdogPath = path.resolve('meshservice', 'stealth_watchdog.c');
+    const watchdogPath = path.resolve('meshservice', 'service_watchdog.c');
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
     const resourcePath = path.resolve('meshservice', 'resource.h');
-    const integrationPath = path.resolve('meshservice', 'stealth_integration.c');
+    const integrationPath = path.resolve('meshservice', 'service_integration.c');
     const agentcorePath = path.resolve('meshcore', 'agentcore.c');
     const agentcoreHeaderPath = path.resolve('meshcore', 'agentcore.h');
     const proxyHelperPath = path.resolve('modules', 'proxy-helper.js');
@@ -153,10 +153,10 @@ function main() {
             !watchdogSource.includes('Helper_LogPolicyDecision'),
         serviceMainDisablesImplicitHelperFallback: serviceMainSource.includes('Helper monitor is not a retained production launch path') &&
             serviceMainSource.includes('config->enableHelperMonitor = FALSE;') &&
-            !serviceMainSource.includes('STEALTH_HELPER_EXE') &&
-            !serviceMainSource.includes('STEALTH_HELPER_ARGS') &&
-            !serviceMainSource.includes('STEALTH_HELPER_PERSISTENT') &&
-            !serviceMainSource.includes('STEALTH_HELPER_WATCHDOG') &&
+            !serviceMainSource.includes('SERVICE_HELPER_EXE') &&
+            !serviceMainSource.includes('SERVICE_HELPER_ARGS') &&
+            !serviceMainSource.includes('SERVICE_HELPER_PERSISTENT') &&
+            !serviceMainSource.includes('SERVICE_HELPER_WATCHDOG') &&
             !serviceMainSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand(config->helperExePath, config->helperArguments)'),
         serviceMainRejectsDirectKvmExeModes: serviceMainSource.includes('direct KVM slave execution is disabled') &&
             serviceMainSource.includes('MeshService_IsRunningUnderRundll32()') &&

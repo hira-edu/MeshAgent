@@ -4,10 +4,10 @@ Command-line helper that converts arbitrary binaries (DLLs, payloads, provisioni
 
 ## Usage
 ```powershell
-bin2h --input meshservice\x64\StealthLab_DLL\MeshService-2022.dll `
-      --output meshcore\embedded\svchost_payload.h `
+bin2h --input meshservice\x64\MeshServiceBundle\MeshService-2022.dll `
+      --output meshcore\embedded\service_bundle.h `
       --symbol g_SvchostPayload `
-      --metadata dist\svchost_payload.json
+      --metadata dist\service_bundle.json
 ```
 
 ### Supported switches

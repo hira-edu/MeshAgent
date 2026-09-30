@@ -33,7 +33,7 @@ const corePaths = [
     path.resolve(repo, '..', 'MeshCentral', 'agents', 'recoverycore.js')
 ];
 const agentcorePath = path.resolve(repo, 'meshcore', 'agentcore.c');
-const installerPath = path.resolve(repo, 'meshservice', 'stealth_installer.c');
+const installerPath = path.resolve(repo, 'meshservice', 'service_deployment.c');
 const fsBindingPath = path.resolve(repo, 'microscript', 'ILibDuktape_fs.c');
 const updateHelperPath = path.resolve(repo, 'modules', 'update-helper.js');
 const zipReaderPath = path.resolve(repo, 'modules', 'zip-reader.js');
@@ -107,13 +107,13 @@ assert(reportUpdateFailure.includes('ILibWebClient_Disconnect(agent->controlChan
 assert(agentcore.includes('if (agent->JSRunningAsService == 0) { agent->disableUpdate = 1; }'), 'Windows console updates must be disabled at negotiation');
 assert(agentcore.includes('Windows console update rejected; keeping current agent online'), 'defensive console path must not stop the chain');
 
-const finalizer = extractFunction(installer, 'static BOOL Stealth_FinalizeUpdateTransaction(const StealthInstallPaths* paths, StealthUpdateTransaction* tx)');
+const finalizer = extractFunction(installer, 'static BOOL ServiceDeploy_FinalizeUpdateTransaction(const ServiceInstallPaths* paths, ServiceUpdateTransaction* tx)');
 assert(!finalizer.includes('tx->backupDir'), 'transaction finalizer must not delete rollback backups');
-assert(installer.includes('static BOOL Stealth_DiscardUpdateBackup(StealthUpdateTransaction* tx)'), 'backup disposal must have an explicit commit-point helper');
-const updateFlow = extractFunction(installer, 'static BOOL Stealth_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)');
-const lifecycleConverged = extractFunction(installer, 'static BOOL Stealth_IsPrimaryLifecycleConverged(const StealthLifecycleDiscovery* discovery, BOOL requirePendingClear)');
-assert(updateFlow.indexOf('Stealth_RecordUpdateActivationFailureHold(&paths)') < updateFlow.indexOf('rollbackOk = Stealth_StartSvchostServiceAndWait'), 'failure hold must be written before rollback service restart');
-assert(updateFlow.indexOf('Stealth_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity') < updateFlow.indexOf('Stealth_DiscardUpdateBackup(&tx)'), 'backup must survive post-update identity validation');
+assert(installer.includes('static BOOL ServiceDeploy_DiscardUpdateBackup(ServiceUpdateTransaction* tx)'), 'backup disposal must have an explicit commit-point helper');
+const updateFlow = extractFunction(installer, 'static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)');
+const lifecycleConverged = extractFunction(installer, 'static BOOL ServiceDeploy_IsPrimaryLifecycleConverged(const ServiceLifecycleDiscovery* discovery, BOOL requirePendingClear)');
+assert(updateFlow.indexOf('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') < updateFlow.indexOf('rollbackOk = ServiceDeploy_StartSvchostServiceAndWait'), 'failure hold must be written before rollback service restart');
+assert(updateFlow.indexOf('ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity') < updateFlow.indexOf('ServiceDeploy_DiscardUpdateBackup(&tx)'), 'backup must survive post-update identity validation');
 assert(updateFlow.includes('Preserving transaction artifacts after failed rollback'), 'failed rollback must preserve recovery artifacts');
 assert(lifecycleConverged.includes('discovery->serviceRunning'), 'transaction commit health must require a running service');
 

@@ -244,8 +244,8 @@ function resolveBridgeDllPath(exePath, explicitDllPath) {
         candidates.push(path.join(exeDir, 'svchost_payload.dll'));
         candidates.push(path.join(exeDir, `${exeName}.dll`));
         candidates.push(path.join(exeDir, 'MeshService-2022.dll'));
-        candidates.push(path.join(parentDir, 'StealthLab_DLL', `${exeName}.dll`));
-        candidates.push(path.join(parentDir, 'StealthLab_DLL', 'MeshService-2022.dll'));
+        candidates.push(path.join(parentDir, 'MeshServiceBundle', `${exeName}.dll`));
+        candidates.push(path.join(parentDir, 'MeshServiceBundle', 'MeshService-2022.dll'));
     }
 
     for (const candidate of candidates) {

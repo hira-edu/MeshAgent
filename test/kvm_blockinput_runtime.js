@@ -17,7 +17,7 @@ function ensureDir(dirPath) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
+    const exePath = path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveBridgeDllPath(exePath, args.dll);
     const outputDir = evidenceDir || path.resolve('tmp', `kvm-blockinput-${Date.now()}`);
     const probeStdoutPath = path.join(outputDir, 'probe_stdout.json');

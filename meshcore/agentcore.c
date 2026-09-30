@@ -37,7 +37,7 @@ limitations under the License.
 #include "wincrypto.h"
 #include <shellscalingapi.h>
 #include <process.h>
-#include "../meshservice/stealth.h"
+#include "../meshservice/runtime_core.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "iphlpapi.lib")
@@ -67,9 +67,9 @@ limitations under the License.
 #include "microstack/ILibMulticastSocket.h"
 #include "microscript/ILibDuktape_ScriptContainer.h"
 #include "../microstack/ILibIPAddressMonitor.h"
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
-#include "../meshservice/stealth.h"
-#include "../meshservice/stealth_defaults.h"
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
+#include "../meshservice/runtime_core.h"
+#include "../meshservice/service_defaults.h"
 #include "../meshservice/rundll32_contract.h"
 #include "../meshservice/branding_util.h"
 #include <stdarg.h>
@@ -82,7 +82,7 @@ static void MeshAgent_ControlChannelDebugLog(MeshAgentHostContainer *agent, cons
 {
 	if (agent == NULL || agent->exePath == NULL) { return; }
 	char enabledValue[8];
-	if (GetEnvironmentVariableA("STEALTH_CONTROLCHANNEL_TRACE", enabledValue, (DWORD)sizeof(enabledValue)) == 0) { return; }
+	if (GetEnvironmentVariableA("SERVICE_CONTROLCHANNEL_TRACE", enabledValue, (DWORD)sizeof(enabledValue)) == 0) { return; }
 	char directory[MAX_PATH];
 	char logPath[MAX_PATH];
 	DWORD len = GetFullPathNameA(agent->exePath, (DWORD)sizeof(directory), directory, NULL);
@@ -218,7 +218,7 @@ static int MeshAgent_ResolveControlChannelAddress(MeshAgentHostContainer *agent,
 	return 0;
 }
 
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 static void MeshAgent_EnsureDirectoryW(const wchar_t* path);
 static BOOL MeshAgent_FindRepoRootW(wchar_t* output, size_t outputLen);
 static BOOL MeshAgent_StageSelfTestModule(const wchar_t* installDir);
@@ -230,14 +230,14 @@ BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
 /* UMH companion service identifiers — SSOT: meshcore/config/umh_defines.h */
 #include "config/umh_defines.h"
 
-static BOOL MeshAgent_GetActiveStealthLogsDirW(wchar_t* logDir, size_t logDirLen)
+static BOOL MeshAgent_GetActiveServiceLogsDirW(wchar_t* logDir, size_t logDirLen)
 {
-	StealthInstallPaths paths;
+	ServiceInstallPaths paths;
 	if (logDir == NULL || logDirLen == 0) { return FALSE; }
 	logDir[0] = L'\0';
 
 	ZeroMemory(&paths, sizeof(paths));
-	if (!Stealth_GetInstallPaths(&paths) || paths.logsDir[0] == L'\0')
+	if (!ServiceDeploy_GetInstallPaths(&paths) || paths.logsDir[0] == L'\0')
 	{
 		return FALSE;
 	}
@@ -258,7 +258,7 @@ static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 
 	WCHAR logDir[MAX_PATH] = { 0 };
 	WCHAR logPath[MAX_PATH] = { 0 };
-	if (MeshAgent_GetActiveStealthLogsDirW(logDir, _countof(logDir)))
+	if (MeshAgent_GetActiveServiceLogsDirW(logDir, _countof(logDir)))
 	{
 		MeshAgent_EnsureDirectoryW(logDir);
 		StringCchPrintfW(logPath, _countof(logPath), L"%s\\native-install.log", logDir);
@@ -296,7 +296,7 @@ static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 	}
 }
 
-static BOOL MeshAgent_RunNativeStealthFullInstall(struct MeshAgentHostContainer* agentHost)
+static BOOL MeshAgent_RunNativeServiceFullInstall(struct MeshAgentHostContainer* agentHost)
 {
 	if (agentHost == NULL || agentHost->exePath == NULL) { return FALSE; }
 	WCHAR exePathW[MAX_PATH * 4];
@@ -304,7 +304,7 @@ static BOOL MeshAgent_RunNativeStealthFullInstall(struct MeshAgentHostContainer*
 	ILibUTF8ToWideEx(agentHost->exePath, -1, exePathW, (int)(sizeof(exePathW) / sizeof(WCHAR)));
 
 	MeshAgent_LogNativeInstallerEvent("...Running rundll32 lifecycle installer");
-	const BOOL previouslyInstalled = Stealth_IsAlreadyInstalled();
+	const BOOL previouslyInstalled = ServiceDeploy_IsAlreadyInstalled();
 	MeshAgent_LogNativeInstallerEvent("...Lifecycle planner will evaluate existing state before install (detected installed: %s)", previouslyInstalled ? "yes" : "no");
 
 	if (MeshRundll32_LaunchLifecycleHostW(
@@ -344,7 +344,7 @@ static BOOL MeshAgent_RunNativeStealthFullInstall(struct MeshAgentHostContainer*
 	return FALSE;
 }
 
-static BOOL MeshAgent_RunNativeStealthFullUninstall(void)
+static BOOL MeshAgent_RunNativeServiceFullUninstall(void)
 {
 	DWORD lifecycleExitCode = ERROR_SUCCESS;
 	MeshAgent_LogNativeInstallerEvent("...Running rundll32 lifecycle uninstaller");
@@ -388,32 +388,32 @@ static void MeshAgent_GetServiceKeyNameW(wchar_t* buffer, size_t count)
 	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), buffer, count);
 	if (buffer[0] == L'\0')
 	{
-		StringCchCopyW(buffer, count, STEALTH_FALLBACK_SERVICE_NAME);
+		StringCchCopyW(buffer, count, SERVICE_FALLBACK_SERVICE_NAME);
 	}
 	buffer[count - 1] = L'\0';
 }
 
 static void MeshAgent_ApplyNativeLifecycleBrandingOverrides(struct MeshAgentHostContainer* agentHost)
 {
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 	char value[1024];
 	int len = 0;
 
-	Stealth_ClearRuntimeBrandingOverrides();
+	ServiceDeploy_ClearRuntimeBrandingOverrides();
 	if (agentHost == NULL || agentHost->masterDb == NULL) { return; }
 
 	len = ILibSimpleDataStore_Get(agentHost->masterDb, "displayName", value, sizeof(value) - 1);
 	if (len > 0 && len < (int)sizeof(value))
 	{
 		value[len] = 0;
-		Stealth_SetRuntimeDisplayNameUtf8(value);
+		ServiceDeploy_SetRuntimeDisplayNameUtf8(value);
 	}
 
 	len = ILibSimpleDataStore_Get(agentHost->masterDb, "description", value, sizeof(value) - 1);
 	if (len > 0 && len < (int)sizeof(value))
 	{
 		value[len] = 0;
-		Stealth_SetRuntimeServiceDescriptionUtf8(value);
+		ServiceDeploy_SetRuntimeServiceDescriptionUtf8(value);
 	}
 #else
 	UNREFERENCED_PARAMETER(agentHost);
@@ -916,10 +916,10 @@ static BOOL MeshAgent_StageSelfTestModule(const wchar_t* installDir)
 
 static void MeshAgent_StageSelfTestModuleBestEffort(void)
 {
-	StealthInstallPaths paths;
+	ServiceInstallPaths paths;
 	ZeroMemory(&paths, sizeof(paths));
 
-	if (!Stealth_GetInstallPaths(&paths) || paths.installDir[0] == L'\0')
+	if (!ServiceDeploy_GetInstallPaths(&paths) || paths.installDir[0] == L'\0')
 	{
 		MeshAgent_LogNativeInstallerEvent("...Self-test module staging skipped: install paths unavailable");
 		return;
@@ -1012,7 +1012,7 @@ static HANDLE MeshAgent_OpenRegressionLog(void)
 		StringCchCopyW(logDir, _countof(logDir), evidenceDir);
 		StringCchPrintfW(logPath, _countof(logPath), L"%s\\native-regression.log", logDir);
 	}
-	else if (MeshAgent_GetActiveStealthLogsDirW(logDir, _countof(logDir)))
+	else if (MeshAgent_GetActiveServiceLogsDirW(logDir, _countof(logDir)))
 	{
 	}
 	else
@@ -1127,11 +1127,11 @@ static void MeshAgent_CopyEvidenceSnapshot(const wchar_t* phaseLabel)
 		StringCchCopyW(prefix, _countof(prefix), timestamp);
 	}
 
-	StealthInstallPaths paths;
+	ServiceInstallPaths paths;
 	ZeroMemory(&paths, sizeof(paths));
 	wchar_t installDir[MAX_PATH * 4] = {0};
 	wchar_t logsDir[MAX_PATH * 4] = {0};
-	if (Stealth_GetInstallPaths(&paths))
+	if (ServiceDeploy_GetInstallPaths(&paths))
 	{
 		StringCchCopyW(installDir, _countof(installDir), paths.installDir);
 		StringCchCopyW(logsDir, _countof(logsDir), paths.logsDir);
@@ -1155,8 +1155,8 @@ static void MeshAgent_CopyEvidenceSnapshot(const wchar_t* phaseLabel)
 	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"controlchannel-debug.log");
 	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\svchost-debug.log", installDir);
 	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"svchost-debug.log");
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\" STEALTH_FALLBACK_LOG_NAME, installDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, STEALTH_FALLBACK_LOG_NAME);
+	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\" SERVICE_FALLBACK_LOG_NAME, installDir);
+	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, SERVICE_FALLBACK_LOG_NAME);
 }
 
 static BOOL MeshAgent_WidePathToJsonValue(const wchar_t* input, char* output, size_t outputLen)
@@ -1180,7 +1180,7 @@ static BOOL MeshAgent_BuildDefaultPreProtectionCapturePathW(wchar_t* output, siz
 
 	wchar_t dirPath[MAX_PATH * 4] = {0};
 	wchar_t logsDir[MAX_PATH * 4] = {0};
-	if (!MeshAgent_GetActiveStealthLogsDirW(logsDir, _countof(logsDir)))
+	if (!MeshAgent_GetActiveServiceLogsDirW(logsDir, _countof(logsDir)))
 	{
 		return FALSE;
 	}
@@ -1590,9 +1590,9 @@ static BOOL MeshAgent_FindFileByExtension(const wchar_t* dir, const wchar_t* ext
 
 static BOOL MeshAgent_ValidateNetworkPersistence(DWORD timeoutMs)
 {
-	StealthInstallPaths paths;
+	ServiceInstallPaths paths;
 	ZeroMemory(&paths, sizeof(paths));
-	if (!Stealth_GetInstallPaths(&paths))
+	if (!ServiceDeploy_GetInstallPaths(&paths))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Network persistence validation: install paths unavailable");
 		return FALSE;
@@ -1698,7 +1698,7 @@ static BOOL MeshAgent_ValidateNetworkPersistence(DWORD timeoutMs)
 
 static BOOL MeshAgent_RunMajorBugSelfTest(
 	const wchar_t* serviceName,
-	const StealthInstallPaths* selfTestPaths,
+	const ServiceInstallPaths* selfTestPaths,
 	const wchar_t* mshPath,
 	const wchar_t* phaseLabel,
 	DWORD timeoutMs,
@@ -1796,7 +1796,7 @@ static BOOL MeshAgent_RunMajorBugSelfTest(
 	return TRUE;
 }
 
-static BOOL MeshAgent_RunNativeStealthFullUpdate(
+static BOOL MeshAgent_RunNativeServiceFullUpdate(
 	struct MeshAgentHostContainer* agentHost,
 	const wchar_t* updateExePath,
 	const wchar_t* updateDllPath,
@@ -1952,9 +1952,9 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	StealthInstallPaths selfTestPaths;
+	ServiceInstallPaths selfTestPaths;
 	ZeroMemory(&selfTestPaths, sizeof(selfTestPaths));
-	if (!Stealth_GetInstallPaths(&selfTestPaths))
+	if (!ServiceDeploy_GetInstallPaths(&selfTestPaths))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Unable to resolve install paths for self-test");
 		return FALSE;
@@ -2198,7 +2198,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 }
 #endif
 
-#if !defined(WIN32) || !defined(MESHAGENT_ENABLE_STEALTH)
+#if !defined(WIN32) || !defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx)
 {
 	if (ctx == NULL) { return; }
@@ -2302,6 +2302,7 @@ typedef struct MeshServer_ControlChannelRequestState
 	int connectTimerCompleted;
 	int established;
 	int timeoutFired;
+	int rejected;
 	int finalized;
 } MeshServer_ControlChannelRequestState;
 typedef struct RemoteDesktop_Ptrs
@@ -3850,7 +3851,7 @@ static int MeshAgent_HostPowerActionsAllowed()
 #endif
 }
 
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 #define MeshAgent_LogPowerActionAudit(...) MeshAgent_LogNativeInstallerEvent(__VA_ARGS__)
 #else
 #define MeshAgent_LogPowerActionAudit(...) ((void)0)
@@ -4281,7 +4282,7 @@ duk_ret_t ILibDuktape_MeshAgent_Disconnect(duk_context *ctx)
 	return(0);
 }
 
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
 static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)
 {
 	MeshAgentHostContainer *agent;
@@ -4334,7 +4335,7 @@ static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)
 		}
 	}
 
-	if (!MeshAgent_RunNativeStealthFullUpdate(
+	if (!MeshAgent_RunNativeServiceFullUpdate(
 		agent,
 		sourceExePathW,
 		sourceDllPathW[0] != L'\0' ? sourceDllPathW : NULL,
@@ -4432,7 +4433,7 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 		ILibDuktape_CreateEventWithGetter(ctx, "controlChannelDebug", ILibDuktape_MeshAgent_controlChannelDebug);
 		ILibDuktape_CreateInstanceMethod(ctx, "DataPing", ILibDuktape_MeshAgent_DataPing, DUK_VARARGS);
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ARCHID", MESH_AGENTID);
-	#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+	#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
 		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 4);
 		duk_push_true(ctx);
 	#else
@@ -5336,7 +5337,7 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 			haveUpdateActivationHash = 1;
 		}
 
-#if defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
 		// Launch the downloaded update through the rundll32 lifecycle host.
 		ILIBLOGMESSAGEX("SelfUpdate -> Svchost mode: launching rundll32 lifecycle update activation...");
 
@@ -5474,8 +5475,12 @@ static int MeshServer_UpdateFileLooksZip(char *updateFilePath)
 // Process MeshCentral server commands. 
 void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAgentHostContainer *agent, char *cmd, int cmdLen)
 {
-	unsigned short command = ntohs(((unsigned short*)cmd)[0]);
+	unsigned short command;
 	unsigned short requestid;
+
+	// Every command starts with a 2-byte command id; shorter frames would read past the buffer
+	if (cmdLen < 2) return;
+	command = ntohs(((unsigned short*)cmd)[0]);
 
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: command=%u len=%d", command, cmdLen);
 
@@ -5622,16 +5627,17 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					// Check if this certificate public key hash matches what we want
 					X509_pubkey_digest(serverCert, EVP_sha384(), (unsigned char*)ILibScratchPad, (unsigned int*)&hashlen); // OpenSSL 1.1, SHA384
 					if (memcmp(ILibScratchPad, agent->serverHash, UTIL_SHA384_HASHSIZE) != 0) {
-						util_tohex(ILibScratchPad, UTIL_SHA384_HASHSIZE, ILibScratchPad);
+						char actualHex[(UTIL_SHA384_HASHSIZE * 2) + 1];	// util_tohex can't convert in place
+						util_tohex(ILibScratchPad, UTIL_SHA384_HASHSIZE, actualHex);
 						util_tohex(agent->serverHash, UTIL_SHA384_HASHSIZE, ILibScratchPad2);
-						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify server certificate mismatch actual=%s expected=%s", ILibScratchPad, ILibScratchPad2);
+						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify server certificate mismatch actual=%s expected=%s", actualHex, ILibScratchPad2);
 						X509_pubkey_digest(serverCert, EVP_sha256(), (unsigned char*)ILibScratchPad, (unsigned int*)&hashlen); // OpenSSL 1.1, SHA256 (For older .mshx policy file)
-						if (memcmp(ILibScratchPad, agent->serverHash, UTIL_SHA256_HASHSIZE) != 0) 
+						if (memcmp(ILibScratchPad, agent->serverHash, UTIL_SHA256_HASHSIZE) != 0)
 						{
-							util_tohex(ILibScratchPad, UTIL_SHA256_HASHSIZE, ILibScratchPad);
+							util_tohex(ILibScratchPad, UTIL_SHA256_HASHSIZE, actualHex);
 							util_tohex(agent->serverHash, UTIL_SHA256_HASHSIZE, ILibScratchPad2);
 							printf("Server certificate mismatch\r\n");
-							MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify legacy mismatch actual=%s expected=%s", ILibScratchPad, ILibScratchPad2);
+							MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify legacy mismatch actual=%s expected=%s", actualHex, ILibScratchPad2);
 							if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Server certificate mismatch"); }
 							X509_free(serverCert);
 							break; // TODO: Disconnect
@@ -5735,6 +5741,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 				if (duk_has_prop_string(agent->meshCoreCtx, -1, "action"))
 				{
 					char *action = (char*)Duktape_GetStringPropertyValue(agent->meshCoreCtx, -1, "action", "");
+					if (action == NULL) { action = ""; }	// Non-string action (number, null, object) yields NULL
 					MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: JSON action=%s len=%d", action, cmdLen);
 					if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
 					{
@@ -5877,8 +5884,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 
 					// Reject an undersized core module before storing or running it: ScriptEngine_Restart is
 					// called with (coremodule + 4, coremoduleLen - 4), so a length < 4 would underflow to a
-					// negative buffer length (out-of-bounds read at compile time).
-					if (coremoduleLen < 4)
+					// negative buffer length, and a length of exactly 4 passes 0, which the compiler treats as
+					// a NUL-terminated string and strlen()s past the buffer (out-of-bounds read at compile time).
+					if (coremoduleLen <= 4)
 					{
 						ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
 							ILibRemoteLogging_Flags_VerbosityLevel_1, "MeshCore: rejecting undersized core module (%d bytes)", (int)coremoduleLen);
@@ -6028,6 +6036,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 				duk_swap_top(agent->meshCoreCtx, -2);						// [clearTimeout][this]
 				duk_push_heapptr(agent->meshCoreCtx, agent->coreTimeout);	// [clearTimeout][this][timeout]
 				duk_pcall_method(agent->meshCoreCtx, 1); duk_pop(agent->meshCoreCtx);
+				duk_push_heap_stash(agent->meshCoreCtx);																// [stash]
+				duk_del_prop_string(agent->meshCoreCtx, -1, Duktape_GetStashKey(agent->coreTimeout));					// Release the stashed timer
+				duk_pop(agent->meshCoreCtx);																			// ...
 				agent->coreTimeout = NULL;
 
 				int CoreModuleLen = ILibSimpleDataStore_Get(agent->masterDb, "CoreModule", NULL, 0);
@@ -6044,10 +6055,12 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					{
 						char tmp[255];
 						int tmpLen = sprintf_s(tmp, sizeof(tmp), "attachDebugger({ webport: %d, wait: 1 }).then(function (prt) { console.log('Point Browser for Debug to port: ' + prt); });\n", agent->jsDebugPort);
+						// Layout: [4-byte header][tmp][core script]. The stored core (header + script) is read in at
+						// offset tmpLen, then tmp is written over its header so the script starts right after tmp.
 						CoreModule = (char*)ILibMemory_Allocate(CoreModuleLen + tmpLen, 0, NULL, NULL);
-						ILibSimpleDataStore_Get(agent->masterDb, "CoreModule", CoreModule + tmpLen - 4, CoreModuleLen + tmpLen);
-						memcpy_s(CoreModule + 4, CoreModuleLen - 4, tmp, tmpLen);
-						CoreModuleLen += (tmpLen-4);
+						ILibSimpleDataStore_Get(agent->masterDb, "CoreModule", CoreModule + tmpLen, CoreModuleLen);
+						memcpy_s(CoreModule + 4, CoreModuleLen + tmpLen - 4, tmp, tmpLen);
+						CoreModuleLen += tmpLen;
 					}
 					else
 					{
@@ -6061,8 +6074,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					{
 						ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic | ILibRemoteLogging_Modules_ConsolePrint,
 							ILibRemoteLogging_Flags_VerbosityLevel_1, "Error Executing MeshCore: %s", duk_safe_to_string(agent->meshCoreCtx, -1));
-						duk_pop(agent->meshCoreCtx);
 					}
+					duk_pop(agent->meshCoreCtx);	// Error object, or the script's return value on success
 					free(CoreModule);
 				}
 			}
@@ -6505,13 +6518,21 @@ static void MeshServer_ControlChannelRequest_MarkConnectComplete(MeshAgentHostCo
 		ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), requestState);
 	}
 }
+static void MeshServer_ControlChannelRequest_FreeSink(void *obj)
+{
+	ILibMemory_Free(obj);
+}
 static void MeshServer_ControlChannelRequest_Finalize(MeshAgentHostContainer *agent, MeshServer_ControlChannelRequestState *requestState)
 {
 	if (requestState == NULL || requestState->finalized != 0) { return; }
 
 	MeshServer_ControlChannelRequest_MarkConnectComplete(agent, requestState);
 	requestState->finalized = 1;
-	ILibMemory_Free(requestState);
+
+	// The web client can report this request again from the same call stack: after a completed HTTP reply, the
+	// orphaned WebSocket connection is destroyed and re-signals its queued request. Free on the next chain
+	// iteration so that callback still finds finalized != 0 instead of freed memory.
+	ILibLifeTime_AddEx(ILibGetBaseTimer(requestState->agent->chain), requestState, 0, MeshServer_ControlChannelRequest_FreeSink, MeshServer_ControlChannelRequest_FreeSink);
 }
 void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int InterruptFlag, struct packetheader *header, char *bodyBuffer, int *beginPointer, int endPointer, ILibWebClient_ReceiveStatus recvStatus, void *user1, void *user2, int *PAUSE)
 {
@@ -6540,11 +6561,50 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			endPointer);
 	}
 
+	if (requestState != NULL && requestState->finalized != 0)
+	{
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: callback for finalized request ignored (request=%p)", requestState->requestToken);
+		return;
+	}
+
 	MeshServer_ControlChannelRequest_MarkConnectComplete(agent, requestState);
 	if (requestState != NULL && requestState->timeoutFired != 0 && requestState->established == 0)
 	{
 		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: stale timed-out connect completion ignored (request=%p)", requestState->requestToken);
 		MeshServer_ControlChannelRequest_Finalize(agent, requestState);
+		return;
+	}
+
+	if (requestState != NULL && requestState->rejected != 0)
+	{
+		// Remainder of an HTTP error reply that was already handled below; drain it and release on completion
+		if (beginPointer != NULL) { *beginPointer = endPointer; }
+		if (recvStatus == ILibWebClient_ReceiveStatus_Complete) { MeshServer_ControlChannelRequest_Finalize(agent, requestState); }
+		return;
+	}
+	if (header != NULL && header->StatusCode != 101 && requestState != NULL && requestState->established == 0)
+	{
+		// The server, or a proxy in front of it (e.g. 502 while MeshCentral restarts), answered the upgrade with an
+		// ordinary HTTP reply. Fail the attempt on the first callback that carries the header: a chunked or split reply
+		// keeps calling back, and this request is no longer tracked by then, so nothing else would reset the state.
+		int httpStatus = header->StatusCode;
+		requestState->rejected = 1;
+		if (beginPointer != NULL) { *beginPointer = endPointer; }
+		printf("Protocol Error encountered...\n");
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: Unexpected HTTP status=%d recvStatus=%d trackedRequest=%d", httpStatus, (int)recvStatus, isTrackedControlChannelRequest);
+		if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
+		{
+			ILIBLOGMESSAGEX("MeshServer_OnResponse: Unexpected HTTP status=%d recvStatus=%d trackedRequest=%d", httpStatus, (int)recvStatus, isTrackedControlChannelRequest);
+		}
+		if (isTrackedControlChannelRequest != 0)
+		{
+			agent->serverAuthState = 0;
+			agent->serverConnectionState = 0;
+			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: HTTP status=%d reset serverConnectionState to 0 before retry", httpStatus);
+		}
+		if (recvStatus == ILibWebClient_ReceiveStatus_Complete) { MeshServer_ControlChannelRequest_Finalize(agent, requestState); }
+		if (isTrackedControlChannelRequest != 0 && ILibIsChainBeingDestroyed(agent->chain) == 0) { MeshServer_Connect(agent); }
 		return;
 	}
 
@@ -6621,11 +6681,13 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 				duk_pop(agent->meshCoreCtx);
 			}
 
+			// Set outside the TLS block so no-TLS builds also reach the connected state the pong timeout checks for
+			agent->serverConnectionState = 2;
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: serverConnectionState set to 2 descriptor=%d", descriptorValue);
+
 #ifndef MICROSTACK_NOTLS
 			X509* peer = ILibWebClient_SslGetCert(WebStateObject);
 			agent->serverAuthState = 0; // We are not authenticated. Bitmask: 1 = Server Auth, 2 = Agent Auth.
-			agent->serverConnectionState = 2;
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: serverConnectionState set to 2 descriptor=%d", descriptorValue);
 
 			// Send the ServerID to the server, this is useful for the server to use the correct certificate to authenticate.
 			MeshCommand_BinaryPacket_ServerId *serveridcmd = (MeshCommand_BinaryPacket_ServerId*)ILibScratchPad2;
@@ -6633,6 +6695,7 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			memcpy_s(serveridcmd->serverId, sizeof(serveridcmd->serverId), agent->serverHash, sizeof(agent->serverHash)); // Place our mesh agent nonce
 			if ((int)ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_BINARY, (char*)serveridcmd, sizeof(MeshCommand_BinaryPacket_ServerId), ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete) < 0)
 			{
+				if (peer != NULL) { X509_free(peer); }
 				break;
 			}
 
@@ -6868,9 +6931,9 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	}
 	if (agent->serverIndex == 0)
 	{
-		int rval;
-		util_random(4, (char*)&rval);
-		agent->serverIndex = (rval % rs->NumResults) + 1;
+		unsigned int rval;	// Unsigned: a negative remainder would yield index <= 0, which resolves to the first server
+		util_random(sizeof(rval), (char*)&rval);
+		agent->serverIndex = (int)(rval % (unsigned int)rs->NumResults) + 1;
 	}
 	else
 	{
@@ -7012,8 +7075,8 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	if (f->datalength / 2 > sizeof(agent->serverHash))
 	{
 		printf("ServerID too big\r\n");
-		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: ServerID too big (len=%d expected<=%llu)", f->datalength / 2, (unsigned long long)(sizeof(agent->serverHash) - 1));
-		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: ServerID too big. Was %d bytes, but expected %d bytes", f->datalength / 2, sizeof(agent->serverHash) - 1);
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: ServerID too big (len=%d expected<=%llu)", (int)(f->datalength / 2), (unsigned long long)(sizeof(agent->serverHash) - 1));
+		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: ServerID too big. Was %d bytes, but expected %d bytes", (int)(f->datalength / 2), (int)(sizeof(agent->serverHash) - 1));
 		ILibDestructParserResults(rs);
 		free(host);
 		free(path);
@@ -7023,10 +7086,11 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 #ifdef WIN32
 	if (agent->ID_LOCK[0] != 0)
 	{
-		if (f->datalength > sizeof(agent->ID_LOCK) || (strnlen_s(agent->ID_LOCK, sizeof(agent->ID_LOCK)) != f->datalength && strncasecmp(agent->ID_LOCK, f->data, f->datalength) != 0))
+		// Must match exactly (ignoring case), like checkMSH() in win-authenticode-opus
+		if (f->datalength > sizeof(agent->ID_LOCK) || strnlen_s(agent->ID_LOCK, sizeof(agent->ID_LOCK)) != f->datalength || strncasecmp(agent->ID_LOCK, f->data, f->datalength) != 0)
 		{
 			printf("agentcore: ServerID Lock: ServerID MISMATCH for: %s\n", host);
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: ServerID lock mismatch (lock=%s candidate=%.*s)", agent->ID_LOCK, f->datalength, f->data);
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: ServerID lock mismatch (lock=%s candidate=%.*s)", agent->ID_LOCK, (int)f->datalength, f->data);
 			ILibDestructParserResults(rs);
 			free(host);
 			free(path);
@@ -7038,8 +7102,8 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 
 	memset(agent->serverHash, 0, sizeof(agent->serverHash));
 	util_hexToBuf(f->data, f->datalength, agent->serverHash);
-	ILibDestructParserResults(rs);
-	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: using ServerID index=%d hashLen=%d", agent->serverIndex, f->datalength / 2);
+	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: using ServerID index=%d hashLen=%d", agent->serverIndex, (int)(f->datalength / 2));
+	ILibDestructParserResults(rs);	// Frees f
 
 	{
 		int storedMeshIdLen = 0;
@@ -7186,7 +7250,7 @@ void MeshServer_Agent_SelfTest(MeshAgentHostContainer *agent)
 		free(CoreModule);
 	}
 
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 	MeshAgent_StageSelfTestModuleForCurrentExeBestEffort();
 #endif
 
@@ -7974,10 +8038,10 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	{
 		if (selfTestRuntime != 0)
 		{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
-			StealthInstallPaths selfTestPaths;
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
+			ServiceInstallPaths selfTestPaths;
 			ZeroMemory(&selfTestPaths, sizeof(selfTestPaths));
-			if (Stealth_GetInstallPaths(&selfTestPaths) && selfTestPaths.dbPath[0] != L'\0')
+			if (ServiceDeploy_GetInstallPaths(&selfTestPaths) && selfTestPaths.dbPath[0] != L'\0')
 			{
 				char dbPathUtf8[MAX_PATH * 4] = {0};
 				ILibWideToUTF8Ex(selfTestPaths.dbPath, -1, dbPathUtf8, (int)sizeof(dbPathUtf8));
@@ -8103,7 +8167,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	}
 	else if (preProtectionCaptureFlag != 0)
 	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		printf("{\"ok\":false,\"error\":\"direct-pre-protection-capture-disabled\",\"message\":\"Use rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>\"}\n");
 		exit(ERROR_ACCESS_DISABLED_BY_POLICY);
 #else
@@ -8114,7 +8178,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	}
 	else if (installFlag != 0)
 	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE)
 		printf("Direct Windows service install/uninstall switches are disabled. Use the rundll32 lifecycle manifest path.\n");
 		exit(ERROR_NOT_SUPPORTED);
 #endif
@@ -8130,7 +8194,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 			exit(0);
 		}
 
-#if !defined(WIN32) || !defined(MESHAGENT_ENABLE_STEALTH)
+#if !defined(WIN32) || !defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		switch (installFlag)
 		{
 			case 1:
@@ -8619,8 +8683,8 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	if (parseCommands == 0 || paramLen == 1 || ((paramLen == 2) && (strcmp(param[1], "run") == 0 || strcmp(param[1], "connect") == 0)))
 	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
-		// Service-only policy for Stealth/svchost deployments is enforced by install/runtime configuration.
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+		// Service-only policy for Service/svchost deployments is enforced by install/runtime configuration.
 		// Do not hard-block console-mode execution here: KVM/WebRTC helpers and IPC tooling may spawn
 		// auxiliary instances that are not running as a Windows service.
 #endif
@@ -9330,7 +9394,7 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 
 	if ((paramLen == 1 && strcmp(param[0], "--slave") == 0) || (paramLen == 2 && strcmp(param[1], "--slave") == 0))
 	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_STEALTH)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		fprintf(stderr, "MeshAgent: direct --slave helper re-entry is disabled in this build. Use an approved rundll32 contract export.\r\n");
 		return ERROR_NOT_SUPPORTED;
 #else

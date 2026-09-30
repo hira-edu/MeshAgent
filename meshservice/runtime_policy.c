@@ -14,16 +14,16 @@
  */
 
 #include "runtime_policy.h"
-#include "stealth.h"
+#include "runtime_core.h"
 #include "branding_util.h"
-#include "stealth_monitor.h"
-#include "stealth_registry.h"
-#include "stealth_watchdog.h"
-#include "stealth_persistence.h"
-#include "stealth_resilience.h"
-#include "stealth_ipc.h"
-#include "stealth_utils.h"
-#include "stealth_defaults.h"
+#include "service_monitor.h"
+#include "config_registry.h"
+#include "service_watchdog.h"
+#include "lifecycle_persistence.h"
+#include "fault_recovery.h"
+#include "service_ipc.h"
+#include "service_utils.h"
+#include "service_defaults.h"
 #include <stdio.h>
 #include <time.h>
 #include <strsafe.h>
@@ -118,10 +118,10 @@ BOOL RuntimePolicy_Init(const RuntimePolicyConfig* config)
         g_RuntimePolicy.config.watchdogIntervalMs = 5000;
 
         /* Use dynamic path resolution via utility functions */
-        wcscpy_s(g_RuntimePolicy.config.serviceName, 64, STEALTH_FALLBACK_SERVICE_NAME);
-        Stealth_GetDataFilePathW(g_RuntimePolicy.config.serviceName, L"state.json",
+        wcscpy_s(g_RuntimePolicy.config.serviceName, 64, SERVICE_FALLBACK_SERVICE_NAME);
+        ServiceUtil_GetDataFilePathW(g_RuntimePolicy.config.serviceName, L"state.json",
                                   g_RuntimePolicy.config.stateFilePath, MAX_PATH);
-        Stealth_GetDataFilePathW(g_RuntimePolicy.config.serviceName, L"runtime-policy.log",
+        ServiceUtil_GetDataFilePathW(g_RuntimePolicy.config.serviceName, L"runtime-policy.log",
                                   g_RuntimePolicy.config.logFilePath, MAX_PATH);
     }
 
@@ -1125,7 +1125,7 @@ static BOOL BlockFeatureByPolicy(DWORD featureId, const WCHAR* message)
 
 static BOOL ApplyServiceProtection(void)
 {
-    /* Would call Stealth_ProtectServiceFromTermination from stealth_installer.c */
+    /* Would call ServiceUtil_ProtectServiceFromTermination from service_deployment.c */
     /* For now, add service to monitor */
     Monitor_AddService(g_RuntimePolicy.config.serviceName, MONITOR_ACTION_RESTART);
     return TRUE;
@@ -1217,20 +1217,20 @@ static BOOL RemoveWatchdog(void)
 
 static BOOL RemoveTaskScheduler(void)
 {
-    /* Get service name from config, fall back to stealth_defaults.h */
+    /* Get service name from config, fall back to service_defaults.h */
     const WCHAR* serviceName = g_RuntimePolicy.config.serviceName[0]
         ? g_RuntimePolicy.config.serviceName
-        : STEALTH_FALLBACK_SERVICE_NAME;
+        : SERVICE_FALLBACK_SERVICE_NAME;
 
     DWORD removed = 0;
 
     /* Delete tasks matching current service prefix */
-    StealthResilience_DeleteTasksByPrefix(STEALTH_FALLBACK_SERVICE_NAME, L"Autorun", &removed);
-    StealthResilience_DeleteTasksByPrefix(STEALTH_FALLBACK_SERVICE_NAME, L"RestartOnStop", &removed);
+    FaultRecovery_DeleteTasksByPrefix(SERVICE_FALLBACK_SERVICE_NAME, L"Autorun", &removed);
+    FaultRecovery_DeleteTasksByPrefix(SERVICE_FALLBACK_SERVICE_NAME, L"RestartOnStop", &removed);
 
     /* Also try with config-provided service name */
-    StealthResilience_DeleteTasksByPrefix(serviceName, L"Autorun", &removed);
-    StealthResilience_DeleteTasksByPrefix(serviceName, L"RestartOnStop", &removed);
+    FaultRecovery_DeleteTasksByPrefix(serviceName, L"Autorun", &removed);
+    FaultRecovery_DeleteTasksByPrefix(serviceName, L"RestartOnStop", &removed);
 
     return TRUE;
 }

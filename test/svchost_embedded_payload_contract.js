@@ -68,8 +68,8 @@ function extractEmbeddedPayload(exePath) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const exePath = path.resolve('meshservice', 'x64', 'StealthLab', 'MeshService-2022.exe');
-    const dllPath = path.resolve('meshservice', 'x64', 'StealthLab_DLL', 'MeshService-2022.dll');
+    const exePath = path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
+    const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
 
     assert(fs.existsSync(exePath), `missing x64 agent package: ${exePath}`);
     assert(fs.existsSync(dllPath), `missing x64 svchost DLL: ${dllPath}`);
