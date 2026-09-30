@@ -11,6 +11,11 @@ MeshAgent's Windows package build consumes two independent inputs:
 Local credentials and environment-specific identities must stay in ignored
 files.
 
+Branding remains required even when lifecycle helpers run through `rundll32`:
+the installer uses the product identity and paths, and `deploy.py` derives the
+default installed service-DLL and lifecycle-state paths from the active
+branding configuration when it performs remote native update activation.
+
 ## Branding selection
 
 `MeshAgent.Build.proj` and the project targets use this precedence:

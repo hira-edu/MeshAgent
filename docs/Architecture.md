@@ -64,6 +64,12 @@ launched through bounded `rundll32.exe <dll>,<export>` contracts. The service
 creates the IPC endpoints, selects the target session, starts the approved
 host, monitors it, and cleans up on shutdown.
 
+The normal package entry point is the `MeshServiceRuntime` executable.
+`rundll32.exe` hosts approved exported lifecycle and helper operations; it does
+not replace the primary agent executable. The service bundle DLL also supports
+the Windows shared-process service registration, which uses the real system
+`svchost.exe` image.
+
 The design rules for this boundary are:
 
 - validate the DLL path, export, pipe names, arguments, target session, and

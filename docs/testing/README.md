@@ -39,7 +39,7 @@ The second checks valid embedded policies and rejection of missing files or
 unextractable policies. Both accept an evidence directory as the first argument.
 For the separate read-only live certificate gate, use
 `meshcentral_certificate_admission_runtime.js` as documented in
-[Deployment](../DEPLOYMENT.md#agent-certificate-admission-and-local-packages).
+[Deployment](../DEPLOYMENT.md#agent-server-identity-check).
 That gate verifies server authentication without registering a device; it does
 not prove complete agent enrollment, core initialization, or relay operation.
 
@@ -297,7 +297,6 @@ Release output belongs under ignored `artifacts/` or `dist/` paths.
 
 ## Detailed references
 
-- [Self-update harness](SelfUpdate.md)
 - [Embedded JavaScript unit-test harness](UnitTests.md)
 - [Advanced Windows debug toolchain](ADVANCED_DEBUG_TOOLCHAIN.md)
 

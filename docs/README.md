@@ -26,9 +26,8 @@ the documentation tree.
 These files are retained because they define active ownership and deployment
 contracts shared with MeshCentral and UserModeHook.
 
-## Upstream technical references
+## Technical references
 
-- [Self-update behavior and test harness](testing/SelfUpdate.md)
 - [Embedded JavaScript unit-test harness](testing/UnitTests.md)
 - `files/ILib*.md` for selected Microstack APIs
 
