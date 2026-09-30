@@ -913,6 +913,8 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 	DWORD activePid = 0;
 	DWORD initialPid = 0;
 	DWORD unlockPid = 0;
+	DWORD initialExpectedSpawnType = 0;
+	DWORD sessionExpectedSpawnType = 0;
 	DWORD reconnectPid = 0;
 	DWORD validRebindOldSessionId = 0;
 	DWORD validRebindPid = 0;
@@ -1071,6 +1073,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 		if (initialSpawned)
 		{
 			activePid = initialPid;
+			// The relay launches into its target session; outside the console session that is a
+			// session-specific launch rather than a Winlogon-desktop one.
+			initialExpectedSpawnType = kvm_bridge_debug_get_expected_spawn_type((int)kvm_bridge_debug_get_process_session_id());
 			initialPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &initialPacketMs);
 			if (initialPacketsReady)
 			{
@@ -1091,6 +1096,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 		}
 	}
 
+	sessionExpectedSpawnType = kvm_bridge_debug_get_expected_spawn_type((int)sessionId);
 	if (initialPacketsReady && autoSelectedTsid)
 	{
 		unrelatedStopSessionId = sessionId + 10000;
@@ -1300,10 +1306,10 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 			validRebindBridgeUsed &&
 			!validRebindFallbackUsed &&
 			validRebindLaunchAttemptCount == 1 &&
-			validRebindSuccessfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
+			validRebindSuccessfulSpawnType == sessionExpectedSpawnType &&
 			validRebindSuccessfulSpawnAttemptOrdinal == 1)) &&
 		initialLaunchAttemptCount == 1 &&
-		initialSuccessfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
+		initialSuccessfulSpawnType == initialExpectedSpawnType &&
 		initialSuccessfulSpawnAttemptOrdinal == 1 &&
 		lockKeptHelper &&
 		postLockChildPresent &&
@@ -1320,7 +1326,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 		unlockPacketsReady &&
 		unlockPicturesReady &&
 		postUnlockLaunchAttemptCount == 1 &&
-		postUnlockSuccessfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
+		postUnlockSuccessfulSpawnType == (autoSelectedTsid ? sessionExpectedSpawnType : initialExpectedSpawnType) &&
 		postUnlockSuccessfulSpawnAttemptOrdinal == 1 &&
 		disconnectStopped &&
 		disconnectStopMs <= 2000 &&
@@ -1328,7 +1334,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 		reconnectRespawned &&
 		reconnectRespawnMs <= 2000 &&
 		reconnectLaunchAttemptCount == 1 &&
-		reconnectSuccessfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
+		reconnectSuccessfulSpawnType == sessionExpectedSpawnType &&
 		reconnectSuccessfulSpawnAttemptOrdinal == 1 &&
 		reconnectPacketsReady &&
 		reconnectPicturesReady &&
@@ -1388,6 +1394,8 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 	printf("\"validRebindSuccessfulSpawnType\":%lu,", (unsigned long)validRebindSuccessfulSpawnType);
 	printf("\"validRebindSuccessfulSpawnAttemptOrdinal\":%lu,", (unsigned long)validRebindSuccessfulSpawnAttemptOrdinal);
 	printf("\"initialPid\":%lu,", (unsigned long)initialPid);
+	printf("\"initialExpectedSpawnType\":%lu,", (unsigned long)initialExpectedSpawnType);
+	printf("\"sessionExpectedSpawnType\":%lu,", (unsigned long)sessionExpectedSpawnType);
 	printf("\"unlockPid\":%lu,", (unsigned long)unlockPid);
 	printf("\"reconnectPid\":%lu,", (unsigned long)reconnectPid);
 	printf("\"initialSpawnMs\":%lu,", (unsigned long)initialSpawnMs);
@@ -5069,7 +5077,7 @@ static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConne
 		bridgeUsed &&
 		!fallbackUsed &&
 		launchAttemptCount == 1 &&
-		successfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
+		successfulSpawnType == kvm_bridge_debug_get_expected_spawn_type((int)sessionId) &&
 		successfulSpawnAttemptOrdinal == 1 &&
 		transportActiveAfterPacket &&
 		(failureCount == 0) &&
@@ -5080,7 +5088,7 @@ static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConne
 	printf("{\"success\":%s,\"phase\":\"kvm-bridge-connect-delay-probe\",\"sessionId\":%lu,\"requestedConnectDelayMs\":%lu,"
 		"\"bridgeDllReady\":%s,\"chainStarted\":%s,\"relayStarted\":%s,\"relaySetupMs\":%lu,\"bridgeSpawned\":%s,\"bridgePid\":%lu,"
 		"\"bridgePacketsReady\":%s,\"bridgePacketMs\":%lu,\"bridgeUsed\":%s,\"fallbackUsed\":%s,\"transportActiveAfterPacket\":%s,"
-		"\"launchAttemptCount\":%lu,\"successfulSpawnType\":%lu,\"successfulSpawnAttemptOrdinal\":%lu,"
+		"\"launchAttemptCount\":%lu,\"successfulSpawnType\":%lu,\"expectedSpawnType\":%lu,\"successfulSpawnAttemptOrdinal\":%lu,"
 		"\"failureCount\":%lu,\"failureStage\":%lu,\"failureError\":%lu,\"cleanupExited\":%s,\"cleanupExitMs\":%lu,"
 		"\"screenPackets\":%ld,\"displayListPackets\":%ld,\"displayInfoPackets\":%ld,\"cursorPackets\":%ld,\"picturePackets\":%ld,\"jumboPackets\":%ld,"
 		"\"chainThreadWaitResult\":%lu}\n",
@@ -5100,6 +5108,7 @@ static int MeshService_RunKvmBridgeConnectDelayProbeCommand(DWORD requestedConne
 		transportActiveAfterPacket ? "true" : "false",
 		(unsigned long)launchAttemptCount,
 		(unsigned long)successfulSpawnType,
+		(unsigned long)kvm_bridge_debug_get_expected_spawn_type((int)sessionId),
 		(unsigned long)successfulSpawnAttemptOrdinal,
 		(unsigned long)failureCount,
 		(unsigned long)failureStage,
@@ -5315,7 +5324,9 @@ static int MeshService_RunKvmBridgeSessionInterruptProbeCommand(DWORD requestedC
 			setupThreadStarted &&
 			setupThreadFinished &&
 			setupThreadExitCode == 0 &&
-			!setup.relayStarted &&
+			// The relay context stays attached (so the viewer's stream is not orphaned) while the
+			// interrupted launch leaves no helper running.
+			setup.relayStarted &&
 			setup.setupMs < requestedConnectDelayMs &&
 			notifyMs < requestedConnectDelayMs &&
 			launchAttemptCount == 1 &&

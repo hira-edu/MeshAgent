@@ -78,6 +78,7 @@ DWORD kvm_bridge_debug_get_last_bridge_failure_stage(void);
 DWORD kvm_bridge_debug_get_last_bridge_failure_spawn_type(void);
 DWORD kvm_bridge_debug_get_last_launch_attempt_count(void);
 DWORD kvm_bridge_debug_get_last_successful_spawn_type(void);
+DWORD kvm_bridge_debug_get_expected_spawn_type(int targetTsid);
 DWORD kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal(void);
 DWORD kvm_bridge_debug_get_consecutive_failures(void);
 DWORD kvm_bridge_debug_get_last_backoff_delay_ms(void);

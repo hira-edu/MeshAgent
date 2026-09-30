@@ -112,7 +112,9 @@ outer frame's state. A call that names an unregistered session is dropped; it
 never falls back to another session's context.
 
 The helper is `rundll32.exe <bundle dll>,KvmSessionBridgeW`, connected over two
-directional named pipes. The pipes admit only SYSTEM and the service account,
+directional named pipes. It is launched into the relay's target session: on
+the Winlogon desktop when that is the console session, and as a
+session-specific launch otherwise (for example an RDP session). The pipes admit only SYSTEM and the service account,
 reject remote clients, and accept a client only if it is the process the
 service spawned. A helper that fails before
 attaching is terminated and its process object freed. Relay writes to the helper
@@ -126,16 +128,24 @@ A workstation lock leaves the helper running: it follows the input desktop
 onto the Winlogon lock screen, so the viewer keeps seeing the session, and it
 exits cleanly to be relaunched there if an in-place switch fails. Console or
 remote disconnect and logoff stop the helper and suppress restarts until the
-session connects or logs on again.
+session connects or logs on again; the viewer stays attached meanwhile. Only a
+viewer disconnect (relay shutdown) ends the viewer's stream.
 
-Restarts share one per-context timer that keeps the earliest deadline:
-exponential backoff (capped at 60 s) after failed launches or failed exits, a
-refresh-probe watchdog, and session-start token retries. Input never bypasses a
-pending backoff. After four restarts without output the viewer stream is
-closed. Consecutive-failure backoff resets once a helper has streamed for
-twice the connect timeout. Inside the helper, the control pipe is read with a
-blocking overlapped read, and any shutdown also releases the capture loop's
-startup resume wait.
+While a viewer is attached the relay never gives up on its helper: there is no
+restart limit, every helper exit is followed by a relaunch, and every failed
+launch (including the first one in `kvm_relay_setup`, which keeps the context)
+schedules another attempt. Restarts share one per-context timer that keeps the
+earliest deadline: exponential backoff (2 s doubling, capped at 60 s), a
+refresh-probe watchdog, and session-start token retries. A helper exit counts
+as a failed start when the relay did not request it and it was non-zero or came
+within twice the connect timeout of launch, so a helper that exits right after
+its first frame cannot relaunch in a tight loop. Backoff resets once a helper
+has run for twice the connect timeout. Input never bypasses a pending backoff.
+The refresh probe is not timed while the viewer is paused for backpressure,
+since a paused helper stops sending pictures. Inside the helper, the control
+pipe is read with a blocking overlapped read, any shutdown also releases the
+capture loop's startup resume wait, and refusals and transport errors exit
+with their own code instead of 0, so the relay logs the reason and backs off.
 
 ## Configuration and identity
 

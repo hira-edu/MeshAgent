@@ -75,7 +75,7 @@ function main() {
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
     const kvmHeaderPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.h');
     const bridgePath = path.resolve('meshservice', 'service_host.c');
-    const kvm = fs.readFileSync(kvmPath, 'utf8');
+    const kvm = fs.readFileSync(kvmPath, 'utf8').replace(/\r\n?/g, '\n');
     const kvmHeader = fs.readFileSync(kvmHeaderPath, 'utf8');
     const bridge = fs.readFileSync(bridgePath, 'utf8');
 
@@ -97,7 +97,9 @@ function main() {
     const healthy = extractFunction(kvm, 'static void kvm_record_healthy_output(void)');
     const retryTimer = extractFunction(kvm, 'static void kvm_retry_timer_callback(void* object)');
     const scheduleDelay = extractFunction(kvm, 'static void kvm_schedule_retry_timer_delay(DWORD delayMs)');
-    const scheduleBackoff = extractFunction(kvm, 'static void kvm_schedule_retry_timer(void)');
+    const scheduleBackoff = extractFunction(kvm, 'static void kvm_schedule_retry_timer_at_least(DWORD minimumDelayMs)');
+    const probeTimeout = extractFunction(kvm, 'static int kvm_relay_handle_refresh_probe_timeout(KvmRelayContext* ctx, const char* source)');
+    const setPauseState = extractFunction(kvm, 'static BOOL kvm_relay_set_bridge_pause_state(KvmRelayContext* ctx, int normalizedPause, int forcePacket)');
     const restartAfterFailure = extractFunction(kvm, 'static void kvm_relay_schedule_restart_after_failure(DWORD restartError, const char* source)');
     const feeddata = extractFunction(kvm, 'int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, void *reserved)');
     const pause = extractFunction(kvm, 'void kvm_pause(int pause, void *reserved)');
@@ -108,7 +110,7 @@ function main() {
     const cleanup = extractFunction(kvm, 'void kvm_cleanup(void *reserved)');
     const sessionChange = extractFunction(kvm, 'static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)');
     const notify = extractFunction(kvm, 'void kvm_notify_session_change(DWORD eventType, DWORD sessionId)');
-    const signalRelevant = extractFunction(kvm, 'static int kvm_relay_signal_session_change_if_relevant(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)');
+    const abortLaunch = extractFunction(kvm, 'static int kvm_relay_session_change_aborts_launch(const KvmRelayContext* ctx, DWORD eventType, DWORD sessionId, int startSessionUsable)');
     const snapshot = extractFunction(kvm, 'int kvm_bridge_debug_get_snapshot_for_reserved(void *reserved, KvmBridgeDebugSnapshot* snapshotOut)');
     const requestShutdown = extractFunction(kvm, 'void kvm_server_request_shutdown(void)');
     const inputThread = extractFunction(bridge, 'static DWORD WINAPI KvmBridge_InputThread(LPVOID user)');
@@ -182,16 +184,28 @@ function main() {
             scheduleDelay.includes('if (gKvmRetryScheduled != 0 && gKvmRetryDueTickMs != 0 && gKvmRetryDueTickMs <= dueTickMs)') &&
             scheduleBackoff.includes('gKvmRestartNotBeforeTickMs = GetTickCount64() + (ULONGLONG)backoffDelayMs;') &&
             retryTimer.includes('if (gKvmRestartNotBeforeTickMs > now)') &&
-            retryTimer.includes('kvm_schedule_retry_timer_delay(ageMs < KVM_REFRESH_PROBE_TIMEOUT_MS'),
-        failedRestartsBackOffAndEventuallyCloseViewer:
+            retryTimer.includes('kvm_schedule_retry_timer_delay(ageMs + KVM_REFRESH_PROBE_RECHECK_FLOOR_MS < KVM_REFRESH_PROBE_TIMEOUT_MS ?'),
+        // A paused viewer has told the helper to stop sending pictures: the refresh probe is not timed
+        // while paused, restarts its window on resume, and never re-arms below a floor (no spin).
+        refreshProbeIgnoresPausedViewer:
+            probeTimeout.includes('if (InterlockedCompareExchange(&ctx->bridgeProtocolPauseState, 0, 0) != 0) { return 0; }') &&
+            retryTimer.includes('InterlockedCompareExchange(&ctx->bridgeProtocolPauseState, 0, 0) == 0') &&
+            retryTimer.includes('KVM_REFRESH_PROBE_RECHECK_FLOOR_MS);') &&
+            setPauseState.includes('if (previousState != 0 && normalizedPause == 0 && ctx == gKvmActiveContext') &&
+            setPauseState.includes('gKvmPendingProbeSinceTickMs = GetTickCount64();'),
+        // While a viewer is attached a failed launch is never final and the relay never gives up:
+        // there is no restart limit and the viewer is not closed.
+        failedRestartsBackOffAndKeepRetrying:
             restartAfterFailure.includes('if (restartError == ERROR_OPERATION_ABORTED) { return; }') &&
             restartAfterFailure.includes('++g_restartcount;') &&
-            restartAfterFailure.includes('kvm_schedule_retry_timer();') &&
+            restartAfterFailure.includes('kvm_schedule_retry_timer_at_least(KVM_BRIDGE_MIN_RETRY_DELAY_MS);') &&
             retryTimer.includes('kvm_relay_schedule_restart_after_failure(GetLastError(), "timer");') &&
             sessionChange.includes('kvm_relay_schedule_restart_after_failure(GetLastError(), "session-change");') &&
             respawn.includes('kvm_relay_schedule_restart_after_failure(GetLastError(), "input");') &&
-            retryTimer.includes('else if (g_restartcount >= KVM_RESTART_LIMIT)') &&
-            retryTimer.indexOf('kvm_relay_unlock();') < retryTimer.indexOf('closeWriteHandler(NULL, 0, closeReserved);'),
+            setup.includes('kvm_relay_schedule_restart_after_failure(GetLastError(), "setup");') &&
+            !kvm.includes('KVM_RESTART_LIMIT') &&
+            !retryTimer.includes('closeWriteHandler') &&
+            !respawn.includes('restart limit reached'),
         inputRespawnRespectsPendingBackoff:
             respawn.includes('if (gKvmRetryScheduled != 0 && gKvmRestartNotBeforeTickMs > GetTickCount64())') &&
             respawn.includes('service-mode KVM input respawn deferred to pending backoff'),
@@ -201,8 +215,10 @@ function main() {
         exitHandlerIgnoresSupersededHelperAndIntentionalKills:
             exitHandler.includes('bridge child exit ignored for superseded helper') &&
             exitHandler.includes('intentionalExit = (gKvmChildExitSignaled != 0);') &&
-            exitHandler.includes('if (exitCode != 0 && intentionalExit == 0)') &&
-            exitHandler.includes('if (g_restartcount < KVM_RESTART_LIMIT)'),
+            exitHandler.includes('if (intentionalExit == 0 && (exitCode != 0 || uptimeMs < KVM_BRIDGE_HEALTHY_RESET_MS))') &&
+            exitHandler.includes('if (uptimeMs >= KVM_BRIDGE_HEALTHY_RESET_MS)') &&
+            // Only a shut-down relay ends the viewer's stream; logoff or disconnect keeps it attached.
+            exitHandler.includes('notifyClosed = (g_shutdown != 0) ? 1 : 0;'),
         refreshProbeWindowStartsAtAttach:
             attach.includes('gKvmPendingProbeSinceTickMs = GetTickCount64();') &&
             kvm.includes('if (gKvmChildExitSignaled != 0) { return 0; }'),
@@ -218,15 +234,29 @@ function main() {
             sessionChange.includes('session lock keeps KVM helper attached') &&
             !sessionChange.includes('case WTS_SESSION_LOCK:') &&
             sessionChange.indexOf('if (eventType == WTS_SESSION_LOCK)') < sessionChange.indexOf('gKvmRestartSuppressed = 1;') &&
-            signalRelevant.includes('if (eventType == WTS_SESSION_LOCK) { return 0; }') &&
+            abortLaunch.includes('if (ctx == NULL || eventType == WTS_SESSION_LOCK) { return 0; }') &&
             sessionChange.includes('else if (gChildProcess != NULL && gKvmChildExitSignaled == 0)') &&
             kvm.includes('OpenDesktopW(L"Winlogon"'),
-        failedSetupRemovesPendingTimerBeforeDestroy:
-            setup.indexOf('ILibLifeTime_Remove(ILibGetBaseTimer(gILibChain), ctx);') >= 0 &&
-            setup.indexOf('ILibLifeTime_Remove(ILibGetBaseTimer(gILibChain), ctx);') < setup.lastIndexOf('kvm_relay_destroy_context(ctx);'),
+        // A failed first launch keeps the context registered and retries instead of orphaning the
+        // viewer's stream; destroy still removes any timer keyed by the context.
+        failedSetupKeepsContextAndRetries:
+            setup.includes('g_shutdown = 0;') &&
+            setup.includes('kvm_relay_schedule_restart_after_failure(GetLastError(), "setup");') &&
+            !setup.includes('kvm_relay_unregister_context_locked(ctx);\n\t\t\tif (gILibChain != NULL') &&
+            destroy.includes('if (timer != NULL) { ILibLifeTime_Remove(timer, ctx); }'),
         snapshotReadsUnderRelayLock:
             snapshot.indexOf('kvm_relay_lock();') < snapshot.indexOf('ctx = kvm_relay_find_context_by_reserved(reserved);') &&
             countOccurrences(snapshot, 'kvm_relay_unlock();') === 2,
+        // Refusals and transport errors exit with their own codes so the relay logs the reason and backs
+        // off; the code is the shutdown's cause, captured before cancelling I/O adds its own errors.
+        helperExitsWithFailureCodes:
+            bridgeEntry.includes('ExitProcess(ERROR_INVALID_PARAMETER);') &&
+            bridgeEntry.includes('bridgeExitCode = KvmBridge_ErrorOr(GetLastError(), ERROR_PIPE_NOT_CONNECTED);') &&
+            bridgeEntry.indexOf('bridgeExitCode = (ctx.readError != ERROR_SUCCESS) ? ctx.readError : ctx.writeError;') <
+                bridgeEntry.indexOf('KvmBridge_CancelTransportIo(&ctx, bridgeStdIn, bridgeStdOut);') &&
+            bridgeEntry.includes('ExitProcess(bridgeExitCode);'),
+        rejectedPipeClientsReachEventLog:
+            countOccurrences(kvm, 'kvm_bridge_report_outcome_event(L"CLIENT_REJECTED"') === 2,
         helperShutdownWakesStartupResumeWait:
             kvmHeader.includes('void kvm_server_request_shutdown(void);') &&
             requestShutdown.includes('g_shutdown = 1;') &&

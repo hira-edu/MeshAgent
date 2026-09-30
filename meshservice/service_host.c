@@ -558,6 +558,11 @@ static BOOL KvmBridge_PipeDisconnected(HANDLE pipeHandle, DWORD* errorOut)
         errorCode == ERROR_OPERATION_ABORTED) ? TRUE : FALSE;
 }
 
+static DWORD KvmBridge_ErrorOr(DWORD errorCode, DWORD fallback)
+{
+    return (errorCode != ERROR_SUCCESS) ? errorCode : fallback;
+}
+
 void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
 {
     wchar_t controlPipeName[MAX_PATH * 4] = {0};
@@ -580,6 +585,9 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     BOOL useNamedPipeBridge = FALSE;
     int pipeCount = 0;
     ULONGLONG bridgeStartTickMs = GetTickCount64();
+    // Non-zero when the helper ends because of a failure. The parent logs the exit code and applies
+    // its restart backoff, so each refusal and transport error gets its own code instead of 0.
+    DWORD bridgeExitCode = ERROR_SUCCESS;
 
     UNREFERENCED_PARAMETER(hwnd);
     UNREFERENCED_PARAMETER(nCmdShow);
@@ -622,7 +630,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     if (!useNamedPipeBridge)
     {
         ServiceHost_LogLine(L"KvmSessionBridgeW rejected unsupported transport contract (pipeCount=%d)", pipeCount);
-        return;
+        ExitProcess(ERROR_INVALID_PARAMETER);
     }
 
     ServiceHost_LogLine(L"KvmSessionBridgeW starting (input=%ls output=%ls)", controlPipeName, dataPipeName);
@@ -648,13 +656,15 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     }
     if (useNamedPipeBridge && !WaitNamedPipeW(controlPipeName, KVM_BRIDGE_CONNECT_TIMEOUT_MS))
     {
-        ServiceHost_LogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
-        return;
+        bridgeExitCode = KvmBridge_ErrorOr(GetLastError(), ERROR_PIPE_NOT_CONNECTED);
+        ServiceHost_LogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", bridgeExitCode, controlPipeName);
+        ExitProcess(bridgeExitCode);
     }
     if (useNamedPipeBridge && !WaitNamedPipeW(dataPipeName, KVM_BRIDGE_CONNECT_TIMEOUT_MS))
     {
-        ServiceHost_LogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
-        return;
+        bridgeExitCode = KvmBridge_ErrorOr(GetLastError(), ERROR_PIPE_NOT_CONNECTED);
+        ServiceHost_LogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", bridgeExitCode, dataPipeName);
+        ExitProcess(bridgeExitCode);
     }
 
     if (useNamedPipeBridge)
@@ -662,25 +672,29 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
         ctx.controlPipeHandle = CreateFileW(controlPipeName, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
         if (ctx.controlPipeHandle == INVALID_HANDLE_VALUE)
         {
-            ServiceHost_LogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
+            bridgeExitCode = KvmBridge_ErrorOr(GetLastError(), ERROR_PIPE_NOT_CONNECTED);
+            ServiceHost_LogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", bridgeExitCode, controlPipeName);
             goto cleanup;
         }
         ServiceHost_LogLine(L"KvmSessionBridgeW control pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
         ctx.dataPipeHandle = CreateFileW(dataPipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (ctx.dataPipeHandle == INVALID_HANDLE_VALUE)
         {
-            ServiceHost_LogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
+            bridgeExitCode = KvmBridge_ErrorOr(GetLastError(), ERROR_PIPE_NOT_CONNECTED);
+            ServiceHost_LogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", bridgeExitCode, dataPipeName);
             goto cleanup;
         }
         ServiceHost_LogLine(L"KvmSessionBridgeW data pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
         if (!DuplicateHandle(GetCurrentProcess(), ctx.controlPipeHandle, GetCurrentProcess(), &bridgeStdIn, 0, FALSE, DUPLICATE_SAME_ACCESS))
         {
-            ServiceHost_LogLine(L"KvmSessionBridgeW DuplicateHandle(stdin) failed (error=%lu)", GetLastError());
+            bridgeExitCode = KvmBridge_ErrorOr(GetLastError(), ERROR_INVALID_HANDLE);
+            ServiceHost_LogLine(L"KvmSessionBridgeW DuplicateHandle(stdin) failed (error=%lu)", bridgeExitCode);
             goto cleanup;
         }
         if (!DuplicateHandle(GetCurrentProcess(), ctx.dataPipeHandle, GetCurrentProcess(), &bridgeStdOut, 0, FALSE, DUPLICATE_SAME_ACCESS))
         {
-            ServiceHost_LogLine(L"KvmSessionBridgeW DuplicateHandle(stdout) failed (error=%lu)", GetLastError());
+            bridgeExitCode = KvmBridge_ErrorOr(GetLastError(), ERROR_INVALID_HANDLE);
+            ServiceHost_LogLine(L"KvmSessionBridgeW DuplicateHandle(stdout) failed (error=%lu)", bridgeExitCode);
             goto cleanup;
         }
         ctx.stdInHandle = bridgeStdIn;
@@ -701,6 +715,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     mainloopParam = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, NULL, NULL);
     if (mainloopParam == NULL)
     {
+        bridgeExitCode = ERROR_NOT_ENOUGH_MEMORY;
         ServiceHost_LogLine(L"KvmSessionBridgeW mainloop parameter allocation failed");
         goto cleanup;
     }
@@ -711,7 +726,8 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     mainloopThread = CreateThread(NULL, 0, KvmBridge_MainloopThread, mainloopParam, 0, NULL);
     if (mainloopThread == NULL)
     {
-        ServiceHost_LogLine(L"KvmSessionBridgeW mainloop CreateThread failed (error=%lu)", GetLastError());
+        bridgeExitCode = KvmBridge_ErrorOr(GetLastError(), ERROR_NOT_ENOUGH_MEMORY);
+        ServiceHost_LogLine(L"KvmSessionBridgeW mainloop CreateThread failed (error=%lu)", bridgeExitCode);
         free(mainloopParam);
         mainloopParam = NULL;
         goto cleanup;
@@ -739,6 +755,10 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
             {
                 GetExitCodeThread(mainloopThread, &exitCode);
                 ServiceHost_LogLine(L"KvmSessionBridgeW mainloop exited (threadExitCode=%lu readError=%lu writeError=%lu)", exitCode, ctx.readError, ctx.writeError);
+                if (shutdownObservedTickMs == 0)
+                {
+                    bridgeExitCode = (ctx.readError != ERROR_SUCCESS) ? ctx.readError : ctx.writeError;
+                }
                 break;
             }
             if (waitResult != WAIT_TIMEOUT)
@@ -777,7 +797,9 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
                 if (shutdownObservedTickMs == 0)
                 {
                     shutdownObservedTickMs = GetTickCount64();
-                    ServiceHost_LogLine(L"KvmSessionBridgeW observed shutdown; cancelling bridge transport I/O");
+                    // Errors after this point come from cancelling I/O below, not from the cause.
+                    bridgeExitCode = (ctx.readError != ERROR_SUCCESS) ? ctx.readError : ctx.writeError;
+                    ServiceHost_LogLine(L"KvmSessionBridgeW observed shutdown (cause=%lu); cancelling bridge transport I/O", bridgeExitCode);
                     // Whatever set g_shutdown, also release a mainloop parked in
                     // its startup resume wait so it exits within the grace period.
                     kvm_server_request_shutdown();
@@ -825,6 +847,11 @@ cleanup:
     }
     if (bridgeStdOut != NULL) { CloseHandle(bridgeStdOut); }
     if (bridgeStdIn != NULL) { CloseHandle(bridgeStdIn); }
+    if (bridgeExitCode != ERROR_SUCCESS)
+    {
+        ServiceHost_LogLine(L"KvmSessionBridgeW exiting with code %lu", bridgeExitCode);
+        ExitProcess(bridgeExitCode);
+    }
 }
 #endif
 

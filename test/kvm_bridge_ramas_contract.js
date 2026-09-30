@@ -66,12 +66,21 @@ function main() {
             agentSelfTestSource.includes('KVM tunnel for core dump.........[FAILED]'),
         usesSingleConfiguredSpawnCandidate:
             kvmSource.includes('ILibProcessPipe_SpawnTypes candidates[1];') &&
-            kvmSource.includes('candidates[0] = primaryType;') &&
+            kvmSource.includes('candidates[0] = kvm_relay_effective_spawn_type(primaryType, gProcessTSID);') &&
             kvmSource.includes('candidateCount = 1;'),
+        // A WINLOGON launch always lands in the console session, so a relay that targets another
+        // session launches into that session instead.
+        launchesIntoTargetSession:
+            kvmSource.includes('static ILibProcessPipe_SpawnTypes kvm_relay_effective_spawn_type(ILibProcessPipe_SpawnTypes primaryType, int targetTsid)') &&
+            kvmSource.includes('(DWORD)targetTsid != WTSGetActiveConsoleSessionId()') &&
+            kvmSource.includes('return ILibProcessPipe_SpawnTypes_SPECIFIED_USER;'),
         rejectsInvalidSpecifiedUserWithoutFallback:
             kvmSource.includes('primaryType == ILibProcessPipe_SpawnTypes_SPECIFIED_USER && gProcessTSID < 0') &&
             kvmSource.includes('gKvmLastBridgeFailureError = ERROR_INVALID_PARAMETER;'),
-        bridgeRetainsActualSuccessfulSpawnType: kvmSource.includes('gProcessSpawnType = successfulType;'),
+        // The base type is kept so each launch derives its session-specific type again; the type that
+        // actually launched is still recorded for diagnostics.
+        bridgeKeepsBaseSpawnTypeAndRecordsActual: kvmSource.includes('gProcessSpawnType = primaryType;') &&
+            kvmSource.includes('gKvmLastSuccessfulSpawnType = (DWORD)successfulType;'),
         usesGuidPipeNames: kvmSource.includes('CoCreateGuid(&guid)') && kvmSource.includes('StringFromGUID2(&guid, guidText'),
         logsAttemptSessionAndPipe: kvmSource.includes('Spawning rundll32 KVM attempt=%d/%d as %s tsid=%d mode=%s transport=named-pipe input=%s output=%s'),
         logsConnectedAttemptResult: kvmSource.includes('rundll32 KVM launched (attempt=%d/%d, spawnType=%s, tsid=%d)'),

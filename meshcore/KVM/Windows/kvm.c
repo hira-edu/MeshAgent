@@ -309,7 +309,16 @@ static void kvm_write_scaling_factor(volatile LONG* scalingFactor, int scaling)
 #endif
 #define KVM_SESSION_START_TOKEN_RETRY_DELAY_MS 500
 #define KVM_SESSION_START_TOKEN_RETRY_MAX 20
-#define KVM_RESTART_LIMIT 4
+// While a viewer is attached the relay never gives up on its helper: every exit or failed launch is
+// followed by a retry with backoff, and g_restartcount only counts restarts for diagnostics.
+// Floor for retrying a launch that failed without recording a failure (for example an early
+// parameter check), so a repeating failure can never spin the chain thread.
+#ifndef KVM_BRIDGE_MIN_RETRY_DELAY_MS
+#define KVM_BRIDGE_MIN_RETRY_DELAY_MS 1000
+#endif
+#ifndef KVM_REFRESH_PROBE_RECHECK_FLOOR_MS
+#define KVM_REFRESH_PROBE_RECHECK_FLOOR_MS 250
+#endif
 // Largest JUMBO payload accepted from the helper. Real frames are a few MB at
 // most; anything larger is a corrupt length that would grow the read buffer.
 #define KVM_BRIDGE_MAX_JUMBO_PAYLOAD (64U * 1024U * 1024U)
@@ -475,6 +484,38 @@ static void kvm_relay_signal_unlock()
 	LeaveCriticalSection(&gKvmRelaySignalLock);
 }
 
+#ifdef _WINSERVICE
+// The chain that runs queued session-change work. Guarded by gKvmRelaySignalLock and cleared by the
+// chain's destroy hook, which fires before the chain's timer and memory are released.
+static void* gKvmDispatchChain = NULL;
+
+static void kvm_relay_dispatch_chain_destroyed(void* chain, void* user)
+{
+	UNREFERENCED_PARAMETER(user);
+	kvm_relay_signal_lock();
+	if (gKvmDispatchChain == chain) { gKvmDispatchChain = NULL; }
+	kvm_relay_signal_unlock();
+}
+
+static void kvm_relay_bind_dispatch_chain(void* chain)
+{
+	int hookChain = 0;
+
+	if (chain == NULL) { return; }
+	kvm_relay_signal_lock();
+	if (gKvmDispatchChain != chain)
+	{
+		gKvmDispatchChain = chain;
+		hookChain = 1;
+	}
+	kvm_relay_signal_unlock();
+	if (hookChain)
+	{
+		ILibChain_OnDestroyEvent_AddHandler(chain, kvm_relay_dispatch_chain_destroyed, NULL);
+	}
+}
+#endif
+
 static void kvm_relay_lock()
 {
 	kvm_relay_ensure_registry_lock();
@@ -586,6 +627,12 @@ static void kvm_relay_destroy_context(KvmRelayContext* ctx)
 	sessionChangeEvent = ctx->sessionChangeEvent;
 	ctx->sessionChangeEvent = NULL;
 	kvm_relay_signal_unlock();
+	if (gILibChain != NULL)
+	{
+		// The retry timer is keyed by ctx; never let it fire on a released context.
+		void* timer = ILibGetBaseTimer(gILibChain);
+		if (timer != NULL) { ILibLifeTime_Remove(timer, ctx); }
+	}
 	kvm_relay_close_bridge_transport(ctx);
 	kvm_relay_close_bridge_job(ctx);
 	if (InterlockedCompareExchange(&ctx->cacheInitialized, 0, 0) != 0)
@@ -618,7 +665,9 @@ static BOOL kvm_relay_register_context_locked(KvmRelayContext* ctx)
 	{
 		if (gKvmRelayContexts[i] == NULL)
 		{
-			gKvmRelayContexts[i] = ctx;
+			// Interlocked so the service control thread, which reads slots under the signal lock
+			// only, sees a fully initialized context (plain stores are not ordered on ARM64).
+			InterlockedExchangePointer((PVOID volatile*)&gKvmRelayContexts[i], ctx);
 			kvm_relay_refresh_registered_context_count_locked();
 			return TRUE;
 		}
@@ -634,7 +683,7 @@ static void kvm_relay_unregister_context_locked(KvmRelayContext* ctx)
 	{
 		if (gKvmRelayContexts[i] == ctx)
 		{
-			gKvmRelayContexts[i] = NULL;
+			InterlockedExchangePointer((PVOID volatile*)&gKvmRelayContexts[i], NULL);
 			break;
 		}
 	}
@@ -1029,6 +1078,9 @@ static int kvm_relay_handle_refresh_probe_timeout(KvmRelayContext* ctx, const ch
 	// A helper that is already being replaced cannot answer the probe; the
 	// replacement gets a fresh probe window when its transport attaches.
 	if (gKvmChildExitSignaled != 0) { return 0; }
+	// A paused viewer (network backpressure) has told the helper to stop sending pictures, so an
+	// unanswered refresh is expected; the probe window restarts when the viewer resumes.
+	if (InterlockedCompareExchange(&ctx->bridgeProtocolPauseState, 0, 0) != 0) { return 0; }
 	if (!kvm_relay_refresh_probe_timed_out(GetTickCount64(), &ageMs)) { return 0; }
 
 	childPid = ILibProcessPipe_Process_GetPID(gChildProcess);
@@ -1254,11 +1306,6 @@ static int kvm_relay_prepare_bridge_respawn_from_input(KvmRelayContext* ctx, cha
 		return 1;
 	}
 
-	if (g_restartcount >= KVM_RESTART_LIMIT)
-	{
-		kvm_trace_startupf("service-mode KVM input respawn skipped: restart limit reached restartCount=%d", g_restartcount);
-		return 0;
-	}
 	if (gKvmRetryScheduled != 0 && gKvmRestartNotBeforeTickMs > GetTickCount64())
 	{
 		// A backoff restart is pending. Spawning inline here would bypass the
@@ -1550,6 +1597,14 @@ static BOOL kvm_relay_set_bridge_pause_state(KvmRelayContext* ctx, int normalize
 	if (ctx == NULL) { return FALSE; }
 	normalizedPause = normalizedPause != 0 ? 1 : 0;
 	previousState = InterlockedExchange(&ctx->bridgeProtocolPauseState, normalizedPause);
+	if (previousState != 0 && normalizedPause == 0 && ctx == gKvmActiveContext &&
+		(InterlockedCompareExchange(&gKvmPendingProbeMask, 0, 0) & KVM_PENDING_PROBE_REFRESH) != 0)
+	{
+		// The probe is not timed while the viewer is paused; give a refresh that was pending
+		// during the pause a full window from the moment the viewer resumed.
+		gKvmPendingProbeSinceTickMs = GetTickCount64();
+		kvm_schedule_retry_timer_delay(KVM_REFRESH_PROBE_TIMEOUT_MS + 1);
+	}
 
 	if (ctx->bridgeReadPipe != NULL)
 	{
@@ -2396,9 +2451,6 @@ static void kvm_retry_timer_callback(void* object)
 	int destroyContext = 0;
 	int pendingStartHandled = 0;
 	int staleRefreshHandled = 0;
-	int notifyClosed = 0;
-	ILibKVM_WriteHandler closeWriteHandler = NULL;
-	void* closeReserved = NULL;
 	ULONGLONG now = 0;
 
 	kvm_relay_lock();
@@ -2433,19 +2485,6 @@ static void kvm_retry_timer_callback(void* object)
 		{
 			kvm_schedule_retry_timer_delay((DWORD)(gKvmRestartNotBeforeTickMs - now));
 		}
-		else if (g_restartcount >= KVM_RESTART_LIMIT)
-		{
-			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-				"Agent KVM: rundll32 KVM bridge restart limit reached (restartCount=%d/%d, lastError=%u), notifying viewer",
-				g_restartcount, KVM_RESTART_LIMIT, (unsigned int)gKvmLastBridgeFailureError);
-			gKvmRestartSuppressed = 1;
-			if (ctx != NULL && ctx->destroyPending == 0)
-			{
-				notifyClosed = 1;
-				closeWriteHandler = gKvmWriteHandler;
-				closeReserved = gKvmDebugReserved;
-			}
-		}
 		else
 		{
 			int restarted = 0;
@@ -2459,14 +2498,19 @@ static void kvm_retry_timer_callback(void* object)
 #endif
 	}
 	if (staleRefreshHandled == 0 && gChildProcess != NULL && g_shutdown == 0 && gKvmRestartSuppressed == 0 && gKvmChildExitSignaled == 0 &&
+		ctx != NULL && InterlockedCompareExchange(&ctx->bridgeProtocolPauseState, 0, 0) == 0 &&
 		(InterlockedCompareExchange(&gKvmPendingProbeMask, 0, 0) & KVM_PENDING_PROBE_REFRESH) != 0)
 	{
 		// An earlier deadline pre-empted the refresh-probe watchdog; re-arm it
-		// for the time the probe still has left.
+		// for the time the probe still has left. A paused viewer is not timed
+		// (resuming restarts the probe window), and the floor keeps an overdue
+		// probe from re-arming at ~0 ms and spinning the chain thread.
 		ULONGLONG ageMs = 0;
 		now = GetTickCount64();
 		ageMs = (gKvmPendingProbeSinceTickMs != 0 && now > gKvmPendingProbeSinceTickMs) ? (now - gKvmPendingProbeSinceTickMs) : 0;
-		kvm_schedule_retry_timer_delay(ageMs < KVM_REFRESH_PROBE_TIMEOUT_MS ? (DWORD)(KVM_REFRESH_PROBE_TIMEOUT_MS - ageMs) + 1 : 1);
+		kvm_schedule_retry_timer_delay(ageMs + KVM_REFRESH_PROBE_RECHECK_FLOOR_MS < KVM_REFRESH_PROBE_TIMEOUT_MS ?
+			(DWORD)(KVM_REFRESH_PROBE_TIMEOUT_MS - ageMs) + 1 :
+			KVM_REFRESH_PROBE_RECHECK_FLOOR_MS);
 	}
 	kvm_relay_capture_context(ctx);
 	if (ctx != NULL && ctx->destroyPending != 0 && ctx->childProcess == NULL && ctx->retryScheduled == 0 && ctx->awaitingChildExit == 0)
@@ -2476,10 +2520,6 @@ static void kvm_retry_timer_callback(void* object)
 	}
 	kvm_relay_deactivate_context();
 	kvm_relay_unlock();
-	if (notifyClosed && closeWriteHandler != NULL)
-	{
-		closeWriteHandler(NULL, 0, closeReserved);
-	}
 	if (destroyContext)
 	{
 		kvm_relay_destroy_context(ctx);
@@ -2510,15 +2550,23 @@ static void kvm_schedule_retry_timer_delay(DWORD delayMs)
 	ILibLifeTime_AddEx(timer, ctx, (int)delayMs, &kvm_retry_timer_callback, NULL);
 }
 
-static void kvm_schedule_retry_timer(void)
+static void kvm_schedule_retry_timer_at_least(DWORD minimumDelayMs)
 {
 	DWORD backoffDelayMs = kvm_calculate_backoff_delay_ms();
 
+	if (backoffDelayMs < minimumDelayMs) { backoffDelayMs = minimumDelayMs; }
 	gKvmLastBackoffDelayMs = backoffDelayMs;
 	gKvmRestartNotBeforeTickMs = GetTickCount64() + (ULONGLONG)backoffDelayMs;
 	kvm_schedule_retry_timer_delay(backoffDelayMs);
 }
 
+static void kvm_schedule_retry_timer(void)
+{
+	kvm_schedule_retry_timer_at_least(0);
+}
+
+// A failed launch is never final while the viewer is attached: schedule the next attempt with
+// backoff (and at least KVM_BRIDGE_MIN_RETRY_DELAY_MS, since not every failure path records one).
 static void kvm_relay_schedule_restart_after_failure(DWORD restartError, const char* source)
 {
 	// A launch aborted by a session change is resumed by that session
@@ -2526,12 +2574,18 @@ static void kvm_relay_schedule_restart_after_failure(DWORD restartError, const c
 	if (restartError == ERROR_OPERATION_ABORTED) { return; }
 	if (g_shutdown != 0 || gKvmRestartSuppressed != 0 || gKvmPipeMgr == NULL || gKvmWriteHandler == NULL) { return; }
 	++g_restartcount;
-	kvm_schedule_retry_timer();
-	kvm_trace_startupf("bridge restart failed source=%s error=%lu restartCount=%d/%d backoffMs=%lu",
+	kvm_schedule_retry_timer_at_least(KVM_BRIDGE_MIN_RETRY_DELAY_MS);
+	kvm_trace_startupf("bridge restart failed source=%s error=%lu restartCount=%d backoffMs=%lu",
 		source != NULL ? source : "(unknown)",
 		(unsigned long)restartError,
 		g_restartcount,
-		KVM_RESTART_LIMIT,
+		(unsigned long)gKvmLastBackoffDelayMs);
+	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+		"KVM [Master]: bridge helper launch failed (source=%s, error=%lu, stage=%lu, consecutiveFailures=%lu); retrying in %lu ms",
+		source != NULL ? source : "(unknown)",
+		(unsigned long)restartError,
+		(unsigned long)gKvmLastBridgeFailureStage,
+		(unsigned long)gKvmConsecutiveFailures,
 		(unsigned long)gKvmLastBackoffDelayMs);
 }
 
@@ -4637,6 +4691,26 @@ DWORD WINAPI kvm_server_mainloop(LPVOID parm)
 	return(ret);
 }
 
+// A WINLOGON spawn always lands in the session attached to the physical console and is refused when
+// none is attached. When the relay targets another valid session (for example an RDP session), launch
+// into that session instead so the helper captures the session the viewer asked for.
+static ILibProcessPipe_SpawnTypes kvm_relay_effective_spawn_type(ILibProcessPipe_SpawnTypes primaryType, int targetTsid)
+{
+	if (primaryType == ILibProcessPipe_SpawnTypes_WINLOGON &&
+		targetTsid >= 0 &&
+		kvm_session_id_is_valid((DWORD)targetTsid) &&
+		(DWORD)targetTsid != WTSGetActiveConsoleSessionId())
+	{
+		return ILibProcessPipe_SpawnTypes_SPECIFIED_USER;
+	}
+	return primaryType;
+}
+
+DWORD kvm_bridge_debug_get_expected_spawn_type(int targetTsid)
+{
+	return (DWORD)kvm_relay_effective_spawn_type(ILibProcessPipe_SpawnTypes_WINLOGON, targetTsid);
+}
+
 #ifdef _WINSERVICE
 void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* user)
 {
@@ -4646,10 +4720,10 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	void *reserved = processUser != NULL ? processUser->reserved : NULL;
 	void *pipeMgr = processUser != NULL ? processUser->pipeMgr : NULL;
 	char *exePath = processUser != NULL ? processUser->exePath : NULL;
-	DWORD backoffDelayMs = 0;
 	int notifyClosed = 0;
 	int destroyContext = 0;
 	int intentionalExit = 0;
+	ULONGLONG uptimeMs = 0;
 	DWORD childPid = ILibProcessPipe_Process_GetPID(sender);
 
 	if (processUser != NULL)
@@ -4673,6 +4747,7 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	// childExitSignaled is set before every relay-initiated kill; such exits
 	// were already accounted for by the code that requested them.
 	intentionalExit = (gKvmChildExitSignaled != 0);
+	uptimeMs = (gKvmSessionStartTickMs != 0) ? (GetTickCount64() - gKvmSessionStartTickMs) : 0;
 	if (childPid == 0 && ctx != NULL && ctx->childPid != 0) { childPid = (DWORD)ctx->childPid; }
 	if (childPid == 0 && g_slavekvm != 0) { childPid = (DWORD)g_slavekvm; }
 	if (childPid != 0)
@@ -4697,46 +4772,43 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	if (gKvmRestartSuppressed != 0 || g_shutdown != 0)
 	{
 		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) exitCode=%d (0x%08X) not restarted: restartSuppressed=%d shutdown=%d restartCount=%d", (unsigned int)childPid, exitCode, (unsigned int)exitCode, gKvmRestartSuppressed, g_shutdown, g_restartcount);
-		notifyClosed = 1;
+		// Only a shut-down relay ends the viewer's stream. A session stop (logoff or disconnect)
+		// keeps the viewer attached; the next session start event respawns the helper.
+		notifyClosed = (g_shutdown != 0) ? 1 : 0;
 		goto cleanup;
 	}
 
+	// While the viewer is attached there is no restart limit: every exit is followed by a respawn,
+	// delayed by a backoff that grows only with failed starts. A helper that stayed up for
+	// KVM_BRIDGE_HEALTHY_RESET_MS was healthy, so its exit starts the backoff over; one that exits
+	// sooner, even with code 0 (for example right after its first frame), counts as a failed start
+	// so it cannot respawn in a tight loop.
 	++g_restartcount;
-	if (exitCode != 0 && intentionalExit == 0)
+	if (uptimeMs >= KVM_BRIDGE_HEALTHY_RESET_MS)
 	{
-		kvm_record_spawn_failure((DWORD)exitCode, 7, (DWORD)gProcessSpawnType);
+		kvm_record_healthy_output();
+		g_restartcount = 1;
+	}
+	if (intentionalExit == 0 && (exitCode != 0 || uptimeMs < KVM_BRIDGE_HEALTHY_RESET_MS))
+	{
+		kvm_record_spawn_failure(exitCode != 0 ? (DWORD)exitCode : ERROR_GEN_FAILURE, 7, (DWORD)gProcessSpawnType);
 #ifdef _WINSERVICE
-		kvm_bridge_report_outcome_event(
-			exitCode == ERROR_BAD_EXE_FORMAT ? L"DLL_LOAD_FAILURE" : L"EXIT_FAILURE",
-			EVENTLOG_ERROR_TYPE,
-			childPid,
-			(DWORD)exitCode,
-			exePath,
-			(ILibProcessPipe_SpawnTypes)(gKvmLastSuccessfulSpawnType != 0 ? gKvmLastSuccessfulSpawnType : (DWORD)gProcessSpawnType));
+		if (exitCode != 0)
+		{
+			kvm_bridge_report_outcome_event(
+				exitCode == ERROR_BAD_EXE_FORMAT ? L"DLL_LOAD_FAILURE" : L"EXIT_FAILURE",
+				EVENTLOG_ERROR_TYPE,
+				childPid,
+				(DWORD)exitCode,
+				exePath,
+				(ILibProcessPipe_SpawnTypes)(gKvmLastSuccessfulSpawnType != 0 ? gKvmLastSuccessfulSpawnType : (DWORD)gProcessSpawnType));
+		}
 #endif
 	}
-
-	// Upstream behavior: restart on ANY exit (including code 0) as long as
-	// g_shutdown == 0 and g_restartcount < 4.  Desktop switches cause the child
-	// to exit cleanly, and the master must restart it on the new desktop.
-	// The g_shutdown flag (set by kvm_cleanup on user disconnect) and
-	// gKvmRestartSuppressed prevent unwanted restarts.
-
-	if (g_restartcount < KVM_RESTART_LIMIT)
-	{
-		UNREFERENCED_PARAMETER(backoffDelayMs);
-		UNREFERENCED_PARAMETER(pipeMgr);
-		UNREFERENCED_PARAMETER(exePath);
-		UNREFERENCED_PARAMETER(writeHandler);
-		UNREFERENCED_PARAMETER(reserved);
-		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) exitCode=%d (0x%08X), scheduling restart (restartCount=%d/4)", (unsigned int)childPid, exitCode, (unsigned int)exitCode, g_restartcount);
-		kvm_schedule_retry_timer();
-	}
-	else
-	{
-		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) exitCode=%d (0x%08X), restart limit reached (restartCount=%d/4), aborting and notifying viewer", (unsigned int)childPid, exitCode, (unsigned int)exitCode, g_restartcount);
-		notifyClosed = 1;
-	}
+	UNREFERENCED_PARAMETER(pipeMgr);
+	UNREFERENCED_PARAMETER(exePath);
+	kvm_schedule_retry_timer();
+	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) exitCode=%d (0x%08X) uptimeMs=%llu intentional=%d, scheduling restart in %lu ms (restartCount=%d, consecutiveFailures=%lu)", (unsigned int)childPid, exitCode, (unsigned int)exitCode, (unsigned long long)uptimeMs, intentionalExit, (unsigned long)gKvmLastBackoffDelayMs, g_restartcount, (unsigned long)gKvmConsecutiveFailures);
 
 cleanup:
 	kvm_relay_capture_context(ctx);
@@ -4956,7 +5028,11 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			SetLastError(ERROR_INVALID_PARAMETER);
 			return 0;
 		}
-		candidates[0] = primaryType;
+		candidates[0] = kvm_relay_effective_spawn_type(primaryType, gProcessTSID);
+		if (candidates[0] != primaryType)
+		{
+			kvm_trace_startupf("bridge spawn targets session %d, which is not the console session; using spawnType=%d", gProcessTSID, (int)candidates[0]);
+		}
 		candidateCount = 1;
 
 		{
@@ -5214,6 +5290,9 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
 						"KVM [Master]: bridge stdin client rejected (error=%u, helperPid=%u, spawnType=%d, tsid=%d)",
 						lastError, (unsigned int)ILibProcessPipe_Process_GetPID(gChildProcess), (int)attemptType, gProcessTSID);
+#ifdef _WINSERVICE
+					kvm_bridge_report_outcome_event(L"CLIENT_REJECTED", EVENTLOG_ERROR_TYPE, ILibProcessPipe_Process_GetPID(gChildProcess), lastError, exePath, attemptType);
+#endif
 					ILibProcessPipe_Process_HardKill(gChildProcess);
 					gChildProcess = NULL;
 					kvm_relay_close_bridge_transport(ctx);
@@ -5259,6 +5338,9 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
 						"KVM [Master]: bridge stdout client rejected (error=%u, helperPid=%u, spawnType=%d, tsid=%d)",
 						lastError, (unsigned int)ILibProcessPipe_Process_GetPID(gChildProcess), (int)attemptType, gProcessTSID);
+#ifdef _WINSERVICE
+					kvm_bridge_report_outcome_event(L"CLIENT_REJECTED", EVENTLOG_ERROR_TYPE, ILibProcessPipe_Process_GetPID(gChildProcess), lastError, exePath, attemptType);
+#endif
 					ILibProcessPipe_Process_HardKill(gChildProcess);
 					gChildProcess = NULL;
 					kvm_relay_close_bridge_transport(ctx);
@@ -5349,7 +5431,10 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			return 0;
 		}
 
-		gProcessSpawnType = successfulType;
+		// Keep the base spawn type: the session-specific type is derived again for every launch, so a
+		// later rebind to the console session goes back to a Winlogon-desktop launch.
+		gProcessSpawnType = primaryType;
+		UNREFERENCED_PARAMETER(successfulType);
 	}
 
 	g_slavekvm = ILibProcessPipe_Process_GetPID(gChildProcess);
@@ -5450,6 +5535,14 @@ static int kvm_session_id_has_user_token(DWORD sessionId)
 #define KVM_SESSION_CHANGE_IGNORE_UNRELATED_STOP        4
 #define KVM_SESSION_CHANGE_IGNORE_UNQUERYABLE_START     5
 
+static int kvm_relay_session_matches_context(const KvmRelayContext* ctx, DWORD sessionId)
+{
+	return (!kvm_session_id_is_valid(sessionId) ||
+		ctx->processSessionId == sessionId ||
+		(ctx->processTSID >= 0 && (DWORD)ctx->processTSID == sessionId) ||
+		(ctx->processSessionId == 0 && ctx->processTSID < 0));
+}
+
 static int kvm_relay_session_change_affects_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId, int queryUserToken, int* ignoreReasonOut)
 {
 	int validSessionId = kvm_session_id_is_valid(sessionId);
@@ -5471,10 +5564,7 @@ static int kvm_relay_session_change_affects_context(KvmRelayContext* ctx, DWORD 
 	}
 
 	explicitTsid = (ctx->processTSIDExplicit != 0);
-	sessionMatches = (!validSessionId ||
-		ctx->processSessionId == sessionId ||
-		(ctx->processTSID >= 0 && (DWORD)ctx->processTSID == sessionId) ||
-		(ctx->processSessionId == 0 && ctx->processTSID < 0));
+	sessionMatches = kvm_relay_session_matches_context(ctx, sessionId);
 	if (explicitTsid && !sessionMatches)
 	{
 		if (ignoreReasonOut != NULL) { *ignoreReasonOut = KVM_SESSION_CHANGE_IGNORE_EXPLICIT_MISMATCH; }
@@ -5493,22 +5583,23 @@ static int kvm_relay_session_change_affects_context(KvmRelayContext* ctx, DWORD 
 	return 1;
 }
 
-static int kvm_relay_signal_session_change_if_relevant(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)
+// Decides on the service control thread whether a session event must abort a bridge launch that is
+// waiting for its pipes. It reads only context fields: the caller resolves whether the event's
+// session is usable (a WTS round trip) before taking the signal lock. Only a stop of the context's
+// session, or a start that moves an auto-selected context to another session, makes the launch
+// pointless; a lock never does. The chain-side dispatcher applies the full policy afterwards.
+static int kvm_relay_session_change_aborts_launch(const KvmRelayContext* ctx, DWORD eventType, DWORD sessionId, int startSessionUsable)
 {
-	int ignoreReason = KVM_SESSION_CHANGE_IGNORE_NONE;
+	int sessionMatches = 0;
 
-	// A lock does not change which session or display the helper serves, so
-	// it must not abort a launch that is waiting for its pipe clients.
-	if (eventType == WTS_SESSION_LOCK) { return 0; }
-
-	if (!kvm_relay_session_change_affects_context(ctx, eventType, sessionId, 1, &ignoreReason))
+	if (ctx == NULL || eventType == WTS_SESSION_LOCK) { return 0; }
+	sessionMatches = kvm_relay_session_matches_context(ctx, sessionId);
+	if (kvm_session_event_is_stop(eventType)) { return sessionMatches; }
+	if (kvm_session_event_is_start(eventType))
 	{
-		if (ignoreReason != KVM_SESSION_CHANGE_IGNORE_UNQUERYABLE_START || !kvm_session_id_exists(sessionId))
-		{
-			return 0;
-		}
+		return (ctx->processTSIDExplicit == 0 && kvm_session_id_is_valid(sessionId) && !sessionMatches && startSessionUsable) ? 1 : 0;
 	}
-	return (kvm_relay_signal_session_change(ctx, eventType, sessionId) != 0) ? 1 : 0;
+	return 0;
 }
 
 // Setup the KVM session. Return 1 if ok, 0 if it could not be setup.
@@ -5522,8 +5613,9 @@ int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler wr
 	{
 #ifdef _WINSERVICE
 		KvmRelayContext* ctx = NULL;
-		int started = 0;
 
+		// Session-change events are queued to the chain that runs this relay's timers.
+		kvm_relay_bind_dispatch_chain(gILibChain);
 		kvm_relay_lock();
 		ctx = kvm_relay_get_registered_context(reserved);
 		if (ctx != NULL)
@@ -5578,24 +5670,20 @@ int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler wr
 			kvm_relay_reset_cached_control_state(ctx);
 		}
 		g_pause = 1;
+		// The viewer is attached from here on. If the first launch fails, the context stays
+		// registered and a backoff retry is scheduled, so the viewer's stream is never left
+		// without a relay behind it (a launch aborted by a session change is resumed by that
+		// change's own handler).
+		g_shutdown = 0;
 		KVMDEBUG("kvm_relay_setup() session starting", 0);
-		started = kvm_relay_restart(1, processPipeMgr, exePath, writeHandler, reserved);
-		kvm_relay_capture_context(ctx);
-		if (!started)
+		if (!kvm_relay_restart(1, processPipeMgr, exePath, writeHandler, reserved))
 		{
-			kvm_relay_unregister_context_locked(ctx);
-			if (gILibChain != NULL && ILibGetBaseTimer(gILibChain) != NULL)
-			{
-				ILibLifeTime_Remove(ILibGetBaseTimer(gILibChain), ctx);
-			}
-			kvm_relay_deactivate_context();
-			kvm_relay_unlock();
-			kvm_relay_destroy_context(ctx);
-			return 0;
+			kvm_relay_schedule_restart_after_failure(GetLastError(), "setup");
 		}
+		kvm_relay_capture_context(ctx);
 		kvm_relay_deactivate_context();
 		kvm_relay_unlock();
-		return started;
+		return 1;
 #else
 		return(0);
 #endif
@@ -5960,9 +6048,24 @@ void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
 {
 #ifdef _WINSERVICE
 	KvmSessionChangeRequest* request = NULL;
-	void* chain = gILibChain;
+	void* chain = NULL;
 	int registeredContexts = 0;
+	int startSessionUsable = 0;
+	int queued = 0;
 	int i = 0;
+
+	// WTS queries are RPCs. Make them before taking the signal lock, which context teardown on the
+	// chain thread also takes.
+	if (kvm_session_event_is_start(eventType) && kvm_session_id_is_valid(sessionId))
+	{
+		startSessionUsable = kvm_session_id_exists(sessionId);
+	}
+	request = (KvmSessionChangeRequest*)malloc(sizeof(KvmSessionChangeRequest));
+	if (request != NULL)
+	{
+		request->eventType = eventType;
+		request->sessionId = sessionId;
+	}
 
 	kvm_relay_signal_lock();
 	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
@@ -5972,32 +6075,35 @@ void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
 		if (ctx != NULL)
 		{
 			++registeredContexts;
-			(void)kvm_relay_signal_session_change_if_relevant(ctx, eventType, sessionId);
+			if (kvm_relay_session_change_aborts_launch(ctx, eventType, sessionId, startSessionUsable))
+			{
+				(void)kvm_relay_signal_session_change(ctx, eventType, sessionId);
+			}
 		}
+	}
+	// Queue while still holding the signal lock: the chain's destroy hook clears gKvmDispatchChain
+	// under this lock before the chain's timer is torn down, so the chain cannot go away mid-call.
+	chain = gKvmDispatchChain;
+	if (registeredContexts != 0 && chain != NULL && request != NULL)
+	{
+		// Free on shutdown: if the chain stops before this runs, the request is released with free().
+		ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);
+		queued = 1;
 	}
 	kvm_relay_signal_unlock();
 
-	if (registeredContexts == 0) { return; }
-	if (chain == NULL)
+	if (!queued)
 	{
-		kvm_trace_startupf("session change dropped because no chain is available event=%u session=%u",
-			(unsigned int)eventType,
-			(unsigned int)sessionId);
-		return;
+		if (registeredContexts != 0)
+		{
+			kvm_trace_startupf("session change dropped (chain=%p request=%p) event=%u session=%u",
+				chain,
+				request,
+				(unsigned int)eventType,
+				(unsigned int)sessionId);
+		}
+		free(request);
 	}
-
-	request = (KvmSessionChangeRequest*)malloc(sizeof(KvmSessionChangeRequest));
-	if (request == NULL)
-	{
-		kvm_trace_startupf("session change dropped because the dispatch request could not be allocated event=%u session=%u",
-			(unsigned int)eventType,
-			(unsigned int)sessionId);
-		return;
-	}
-	request->eventType = eventType;
-	request->sessionId = sessionId;
-	// Free on shutdown: if the chain stops before this runs, the request is released with free().
-	ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);
 #else
 	UNREFERENCED_PARAMETER(eventType);
 	UNREFERENCED_PARAMETER(sessionId);

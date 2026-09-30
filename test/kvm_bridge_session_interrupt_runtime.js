@@ -84,7 +84,8 @@ async function runInterruptProbe(options) {
         assert(json.bridgePacketsReady === true, 'unrelated session event produced no KVM packets');
         assert(json.cleanupExited === true, 'unrelated session event cleanup did not stop the helper');
     } else {
-        assert(json.relayStarted === false, 'related interrupted relay unexpectedly reported success');
+        // The relay stays attached after an interrupted launch; the helper must not be running.
+        assert(json.relayStarted === true, 'related interrupted relay did not keep its context attached');
         assert(json.setupMs < connectDelayMs, `related setup was not interrupted before connect delay elapsed (${json.setupMs}ms)`);
         assert(json.notifyMs < connectDelayMs, `related session notification was blocked until stale connect timeout (${json.notifyMs}ms)`);
         assert(json.failureError === 995, `related unexpected interrupted failure error ${json.failureError}`);

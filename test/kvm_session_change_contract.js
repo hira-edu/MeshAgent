@@ -68,7 +68,7 @@ function main() {
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
     const svchostPath = path.resolve('meshservice', 'service_host.c');
     const kvmHeaderSource = fs.readFileSync(kvmHeaderPath, 'utf8');
-    const kvmSource = fs.readFileSync(kvmPath, 'utf8');
+    const kvmSource = fs.readFileSync(kvmPath, 'utf8').replace(/\r\n?/g, '\n');
     const serviceMainSource = fs.readFileSync(serviceMainPath, 'utf8');
     const svchostSource = fs.readFileSync(svchostPath, 'utf8');
     const relaySetupBody = extractFunction(kvmSource, 'int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int tsid)');
@@ -77,7 +77,11 @@ function main() {
     const sessionDispatchBody = extractFunction(kvmSource, 'static void kvm_relay_dispatch_session_change_on_chain(void* chain, void* user)');
     const destroyContextBody = extractFunction(kvmSource, 'static void kvm_relay_destroy_context(KvmRelayContext* ctx)');
     const sessionClassifierBody = extractFunction(kvmSource, 'static int kvm_relay_session_change_affects_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId, int queryUserToken, int* ignoreReasonOut)');
-    const signalRelevantBody = extractFunction(kvmSource, 'static int kvm_relay_signal_session_change_if_relevant(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)');
+    const abortLaunchBody = extractFunction(kvmSource, 'static int kvm_relay_session_change_aborts_launch(const KvmRelayContext* ctx, DWORD eventType, DWORD sessionId, int startSessionUsable)');
+    const sessionMatchBody = extractFunction(kvmSource, 'static int kvm_relay_session_matches_context(const KvmRelayContext* ctx, DWORD sessionId)');
+    const exitHandlerBody = extractFunction(kvmSource, 'void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* user)');
+    const bindChainBody = extractFunction(kvmSource, 'static void kvm_relay_bind_dispatch_chain(void* chain)');
+    const chainDestroyedBody = extractFunction(kvmSource, 'static void kvm_relay_dispatch_chain_destroyed(void* chain, void* user)');
     const retryTimerBody = extractFunction(kvmSource, 'static void kvm_retry_timer_callback(void* object)');
     const sessionArmBody = extractFunction(kvmSource, 'static int kvm_relay_arm_session_change_wait(KvmRelayContext* ctx, LONG expectedGeneration, HANDLE* eventOut, DWORD* errorOut)');
     const pipeWaitBody = extractFunction(kvmSource, 'static BOOL kvm_relay_wait_for_bridge_client(KvmRelayContext* ctx, HANDLE bridgePipeHandle, DWORD timeoutMs, LONG expectedSessionGeneration, DWORD* errorOut, BOOL* sessionChangedOut)');
@@ -116,9 +120,14 @@ function main() {
             sessionDispatchBody.includes('kvm_relay_handle_session_change_for_context(snapshot[i], request->eventType, request->sessionId);') &&
             sessionDispatchBody.includes('kvm_relay_unlock();') &&
             sessionDispatchBody.includes('free(request);'),
-        relaySignalsOnlyRelevantSessionContexts:
-            sessionNotifyBody.includes('(void)kvm_relay_signal_session_change_if_relevant(ctx, eventType, sessionId);') &&
-            !sessionNotifyBody.includes('(void)kvm_relay_signal_session_change(eventType, sessionId);'),
+        // Only an event that makes an in-flight launch pointless aborts it: a stop of the context's
+        // session, or a start that moves an auto-selected context to another session. A lock never does.
+        relaySignalsOnlyLaunchInvalidatingEvents:
+            sessionNotifyBody.includes('if (kvm_relay_session_change_aborts_launch(ctx, eventType, sessionId, startSessionUsable))') &&
+            sessionNotifyBody.includes('(void)kvm_relay_signal_session_change(ctx, eventType, sessionId);') &&
+            abortLaunchBody.includes('if (ctx == NULL || eventType == WTS_SESSION_LOCK) { return 0; }') &&
+            abortLaunchBody.includes('if (kvm_session_event_is_stop(eventType)) { return sessionMatches; }') &&
+            abortLaunchBody.includes('return (ctx->processTSIDExplicit == 0 && kvm_session_id_is_valid(sessionId) && !sessionMatches && startSessionUsable) ? 1 : 0;'),
         // The service control handler must return promptly and must not touch a context it cannot keep alive.
         relayNotifyNeverTakesRelayLockOrReadsActiveContext:
             sessionNotifyBody.includes('kvm_relay_signal_lock();') &&
@@ -128,10 +137,41 @@ function main() {
             !sessionNotifyBody.includes('gKvmActiveContext') &&
             !sessionNotifyBody.includes('kvm_relay_handle_session_change_for_context(') &&
             !sessionNotifyBody.includes('kvm_relay_restart('),
-        relayNotifySignalsBeforeQueueingToChain:
-            sessionNotifyBody.includes('ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);') &&
-            sessionNotifyBody.indexOf('kvm_relay_signal_unlock();') <
-                sessionNotifyBody.indexOf('ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);'),
+        // WTS RPCs run before the signal lock; the chain is read and used under it, so its destroy
+        // hook cannot release it mid-queue.
+        relayNotifyQueuesUnderSignalLockAfterRpcs:
+            sessionNotifyBody.includes('startSessionUsable = kvm_session_id_exists(sessionId);') &&
+            sessionNotifyBody.indexOf('startSessionUsable = kvm_session_id_exists(sessionId);') < sessionNotifyBody.indexOf('kvm_relay_signal_lock();') &&
+            sessionNotifyBody.includes('chain = gKvmDispatchChain;') &&
+            sessionNotifyBody.indexOf('kvm_relay_signal_lock();') < sessionNotifyBody.indexOf('ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);') &&
+            sessionNotifyBody.indexOf('ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);') < sessionNotifyBody.indexOf('kvm_relay_signal_unlock();') &&
+            !sessionNotifyBody.includes('gILibChain'),
+        relayDispatchChainClearedOnChainDestroy:
+            bindChainBody.includes('ILibChain_OnDestroyEvent_AddHandler(chain, kvm_relay_dispatch_chain_destroyed, NULL);') &&
+            chainDestroyedBody.includes('kvm_relay_signal_lock();') &&
+            chainDestroyedBody.includes('if (gKvmDispatchChain == chain) { gKvmDispatchChain = NULL; }') &&
+            relaySetupBody.includes('kvm_relay_bind_dispatch_chain(gILibChain);'),
+        relayRegistryStoresAreInterlocked:
+            kvmSource.includes('InterlockedExchangePointer((PVOID volatile*)&gKvmRelayContexts[i], ctx);') &&
+            kvmSource.includes('InterlockedExchangePointer((PVOID volatile*)&gKvmRelayContexts[i], NULL);'),
+        relayDestroyRemovesContextTimer:
+            destroyContextBody.includes('if (timer != NULL) { ILibLifeTime_Remove(timer, ctx); }'),
+        // A failed first launch keeps the context and retries, so the viewer's stream is never orphaned.
+        relayFailedSetupKeepsContextAndRetries:
+            relaySetupBody.includes('g_shutdown = 0;') &&
+            relaySetupBody.includes('kvm_relay_schedule_restart_after_failure(GetLastError(), "setup");') &&
+            !relaySetupBody.includes('kvm_relay_destroy_context(ctx);\n\t\t\treturn 0;\n\t\t}\n\t\tkvm_relay_deactivate_context();'),
+        // Only a shut-down relay ends the viewer's stream; a session stop keeps the viewer attached.
+        relaySessionStopKeepsViewerAttached:
+            exitHandlerBody.includes('notifyClosed = (g_shutdown != 0) ? 1 : 0;') &&
+            !exitHandlerBody.includes('restart limit reached'),
+        // No restart limit while the viewer is attached; short-lived exits back off, a stable run resets.
+        relayRestartsWithoutLimitAndBacksOffShortLivedExits:
+            exitHandlerBody.includes('if (uptimeMs >= KVM_BRIDGE_HEALTHY_RESET_MS)') &&
+            exitHandlerBody.includes('if (intentionalExit == 0 && (exitCode != 0 || uptimeMs < KVM_BRIDGE_HEALTHY_RESET_MS))') &&
+            exitHandlerBody.includes('kvm_schedule_retry_timer();') &&
+            !kvmSource.includes('KVM_RESTART_LIMIT') &&
+            !retryTimerBody.includes('closeWriteHandler'),
         relayDestroyWaitsForInFlightSessionSignal:
             destroyContextBody.indexOf('kvm_relay_signal_lock();') >= 0 &&
             destroyContextBody.indexOf('ctx->sessionChangeEvent = NULL;') > destroyContextBody.indexOf('kvm_relay_signal_lock();') &&
@@ -171,8 +211,9 @@ function main() {
             !kvmSource.includes('static LONG gKvmSessionChangeGeneration = 0;') &&
             !kvmSource.includes('static HANDLE gKvmSessionChangeEvent = NULL;'),
         relaySessionMatchDoesNotWildcardKnownTsid:
-            sessionClassifierBody.includes('(ctx->processSessionId == 0 && ctx->processTSID < 0)') &&
-            !sessionClassifierBody.includes('ctx->processSessionId == 0 ||') &&
+            sessionMatchBody.includes('(ctx->processSessionId == 0 && ctx->processTSID < 0)') &&
+            !sessionMatchBody.includes('ctx->processSessionId == 0 ||') &&
+            sessionClassifierBody.includes('sessionMatches = kvm_relay_session_matches_context(ctx, sessionId);') &&
             kvmSource.includes('ctx->processSessionId = gKvmProcessSessionId;'),
         relayDrainsCancelledPipeConnect:
             kvmSource.includes('static void kvm_relay_cancel_bridge_pipe_connect(HANDLE pipeHandle, OVERLAPPED* overlapped)') &&
@@ -226,9 +267,8 @@ function main() {
             sessionChangeBody.includes('gKvmPendingUnqueryableStartEvent = eventType;') &&
             sessionChangeBody.includes('gKvmPendingUnqueryableStartSessionId = sessionId;') &&
             sessionChangeBody.includes('session start queued for token retry') &&
-            signalRelevantBody.includes('KVM_SESSION_CHANGE_IGNORE_UNQUERYABLE_START') &&
-            signalRelevantBody.includes('kvm_session_id_exists(sessionId)') &&
-            signalRelevantBody.includes('kvm_relay_signal_session_change(ctx, eventType, sessionId)') &&
+            sessionNotifyBody.includes('startSessionUsable = kvm_session_id_exists(sessionId);') &&
+            abortLaunchBody.includes('startSessionUsable') &&
             retryTimerBody.includes('kvm_retry_pending_unqueryable_start(ctx)') &&
             kvmSource.includes('kvm_relay_handle_session_change_for_context(ctx, eventType, sessionId);'),
         relayAutoSelectedTsidDoesNotPinLiveOldChildOnValidStart:

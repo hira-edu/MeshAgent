@@ -244,14 +244,14 @@ function validateProbeJson(json, expectedAutoSelected) {
         assert(json.validRebindBridgeUsed === true, 'auto-selected relay did not use the bridge path after valid rebind');
         assert(json.validRebindFallbackUsed === false, 'auto-selected relay used legacy fallback after valid rebind');
         assert(json.validRebindLaunchAttemptCount === 1, `auto-selected valid rebind needed fallback attempts (${json.validRebindLaunchAttemptCount})`);
-        assert(json.validRebindSuccessfulSpawnType === 2, `auto-selected valid rebind used unexpected spawn type ${json.validRebindSuccessfulSpawnType}`);
+        assert(json.validRebindSuccessfulSpawnType === json.sessionExpectedSpawnType, `auto-selected valid rebind used unexpected spawn type ${json.validRebindSuccessfulSpawnType} (expected ${json.sessionExpectedSpawnType})`);
         assert(json.validRebindSuccessfulSpawnAttemptOrdinal === 1, `auto-selected valid rebind succeeded on attempt ${json.validRebindSuccessfulSpawnAttemptOrdinal}`);
     }
     assert(json.initialBridgeAvailable === true, `${label} bridge DLL path was not resolved`);
     assert(json.initialBridgeUsed === true, `${label} rundll32 bridge path was not used`);
     assert(json.initialFallbackUsed === false, `${label} legacy fallback was used unexpectedly`);
     assert(json.initialLaunchAttemptCount === 1, `${label} initial bridge needed fallback attempts (${json.initialLaunchAttemptCount})`);
-    assert(json.initialSuccessfulSpawnType === 2, `${label} initial bridge used unexpected spawn type ${json.initialSuccessfulSpawnType}`);
+    assert(json.initialSuccessfulSpawnType === json.initialExpectedSpawnType, `${label} initial bridge used unexpected spawn type ${json.initialSuccessfulSpawnType} (expected ${json.initialExpectedSpawnType})`);
     assert(json.initialSuccessfulSpawnAttemptOrdinal === 1, `${label} initial bridge succeeded on attempt ${json.initialSuccessfulSpawnAttemptOrdinal}`);
     assert(json.initialTransportActive === true, `${label} bridge transport never became active`);
     assert(json.lockKeptHelper === true, `${label} lock event stopped the helper; the viewer must keep seeing the lock screen`);
@@ -270,7 +270,8 @@ function validateProbeJson(json, expectedAutoSelected) {
     assert(json.postUnlockBridgeUsed === true, `${label} bridge path was not restored after unlock`);
     assert(json.postUnlockFallbackUsed === false, `${label} unlock restarted on legacy fallback unexpectedly`);
     assert(json.postUnlockLaunchAttemptCount === 1, `${label} unlock restart needed fallback attempts (${json.postUnlockLaunchAttemptCount})`);
-    assert(json.postUnlockSuccessfulSpawnType === 2, `${label} unlock restart used unexpected spawn type ${json.postUnlockSuccessfulSpawnType}`);
+    const expectedUnlockSpawnType = expectedAutoSelected ? json.sessionExpectedSpawnType : json.initialExpectedSpawnType;
+    assert(json.postUnlockSuccessfulSpawnType === expectedUnlockSpawnType, `${label} helper used unexpected spawn type ${json.postUnlockSuccessfulSpawnType} (expected ${expectedUnlockSpawnType})`);
     assert(json.postUnlockSuccessfulSpawnAttemptOrdinal === 1, `${label} unlock restart succeeded on attempt ${json.postUnlockSuccessfulSpawnAttemptOrdinal}`);
     assert(json.disconnectStopped === true, `${label} console disconnect did not stop the helper`);
     assert(json.disconnectStopMs <= 2000, `${label} console disconnect stop exceeded 2000ms (${json.disconnectStopMs}ms)`);
@@ -278,7 +279,7 @@ function validateProbeJson(json, expectedAutoSelected) {
     assert(json.reconnectRespawned === true, `${label} console connect did not respawn the helper`);
     assert(json.reconnectRespawnMs <= 2000, `${label} console connect respawn exceeded 2000ms (${json.reconnectRespawnMs}ms)`);
     assert(json.reconnectLaunchAttemptCount === 1, `${label} reconnect restart needed fallback attempts (${json.reconnectLaunchAttemptCount})`);
-    assert(json.reconnectSuccessfulSpawnType === 2, `${label} reconnect restart used unexpected spawn type ${json.reconnectSuccessfulSpawnType}`);
+    assert(json.reconnectSuccessfulSpawnType === json.sessionExpectedSpawnType, `${label} reconnect restart used unexpected spawn type ${json.reconnectSuccessfulSpawnType} (expected ${json.sessionExpectedSpawnType})`);
     assert(json.reconnectSuccessfulSpawnAttemptOrdinal === 1, `${label} reconnect restart succeeded on attempt ${json.reconnectSuccessfulSpawnAttemptOrdinal}`);
     assert(json.cleanupExited === true, `${label} cleanup did not stop the final helper`);
     assert(json.cleanupExitMs <= 5000, `${label} cleanup exit exceeded 5000ms (${json.cleanupExitMs}ms)`);
