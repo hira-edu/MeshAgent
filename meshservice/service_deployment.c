@@ -5361,7 +5361,7 @@ static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath,
     }
 
     ServiceDeploy_DeleteFileIfPresent(destPath);
-    if (!MeshServiceHostPayload_WriteToPath(destPath))
+    if (!ServiceBundle_WriteToPath(destPath))
     {
         ServiceDeploy_LogInstallEvent(L"Failed to stage embedded runtime payload to %ls (error=%lu)", destPath, GetLastError());
         return FALSE;

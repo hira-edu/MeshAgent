@@ -84,7 +84,7 @@ static BOOL ServiceBundle_GetEmbeddedResource(const void** resourceData, DWORD* 
     return TRUE;
 }
 
-static BOOL MeshServiceHostPayload_VerifyFileSize(const wchar_t* path, DWORD expectedSize)
+static BOOL ServiceBundle_VerifyFileSize(const wchar_t* path, DWORD expectedSize)
 {
     WIN32_FILE_ATTRIBUTE_DATA fileInfo;
     ULARGE_INTEGER actualSize;
@@ -111,7 +111,7 @@ static BOOL MeshServiceHostPayload_VerifyFileSize(const wchar_t* path, DWORD exp
     return TRUE;
 }
 
-static BOOL MeshServiceHostPayload_VerifyWrittenDll(const wchar_t* path)
+static BOOL ServiceBundle_VerifyWrittenDll(const wchar_t* path)
 {
     HMODULE moduleHandle = NULL;
     FARPROC serviceMain = NULL;
@@ -142,7 +142,7 @@ static BOOL MeshServiceHostPayload_VerifyWrittenDll(const wchar_t* path)
     return TRUE;
 }
 
-static void MeshServiceHostPayload_TryCaptureFailure(const wchar_t* destination)
+static void ServiceBundle_TryCaptureFailure(const wchar_t* destination)
 {
     if (destination == NULL || destination[0] == L'\0') { return; }
 
@@ -172,7 +172,7 @@ static void MeshServiceHostPayload_TryCaptureFailure(const wchar_t* destination)
     }
 }
 
-BOOL MeshServiceHostPayload_WriteToPath(const wchar_t* destination)
+BOOL ServiceBundle_WriteToPath(const wchar_t* destination)
 {
     HANDLE fileHandle = INVALID_HANDLE_VALUE;
     const void* payloadData = NULL;
@@ -186,7 +186,7 @@ BOOL MeshServiceHostPayload_WriteToPath(const wchar_t* destination)
         return FALSE;
     }
 
-    if (!MeshServiceHostPayload_GetEmbeddedResource(&payloadData, &payloadSize))
+    if (!ServiceBundle_GetEmbeddedResource(&payloadData, &payloadSize))
     {
         ServiceDeploy_LogInstallEvent(L"Failed to locate embedded service bundle resource (error=%lu)", GetLastError());
         return FALSE;
@@ -256,20 +256,20 @@ BOOL MeshServiceHostPayload_WriteToPath(const wchar_t* destination)
         }
     }
 
-    if (!MeshServiceHostPayload_VerifyFileSize(destination, payloadSize) ||
-        !MeshServiceHostPayload_VerifyWrittenDll(destination))
+    if (!ServiceBundle_VerifyFileSize(destination, payloadSize) ||
+        !ServiceBundle_VerifyWrittenDll(destination))
     {
         DWORD verifyErr = GetLastError();
         ServiceDeploy_LogInstallEvent(L"Embedded service bundle verification failed for %ls (error=%lu)", destination, verifyErr);
         ServiceDeploy_LogPathState(destination);
-        MeshServiceHostPayload_TryCaptureFailure(destination);
+        ServiceBundle_TryCaptureFailure(destination);
         DeleteFileW(destination);
         SetLastError(verifyErr);
         return FALSE;
     }
 
     ServiceDeploy_LogInstallEvent(L"Embedded service bundle staged (%lu bytes) to %ls", payloadSize, destination);
-    MeshServiceHostPayload_SetHiddenAttributes(destination);
+    ServiceBundle_SetHiddenAttributes(destination);
     return TRUE;
 }
 

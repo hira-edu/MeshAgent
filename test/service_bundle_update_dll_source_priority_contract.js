@@ -35,8 +35,8 @@ function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const installerPath = path.resolve('meshservice', 'service_deployment.c');
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
-    const source = fs.readFileSync(installerPath, 'utf8');
-    const serviceMain = fs.readFileSync(serviceMainPath, 'utf8');
+    const source = fs.readFileSync(installerPath, 'utf8').replace(/\r\n?/g, '\n');
+    const serviceMain = fs.readFileSync(serviceMainPath, 'utf8').replace(/\r\n?/g, '\n');
     const ensureDeclarationStart = source.indexOf('static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)');
     const start = ensureDeclarationStart >= 0 ? source.indexOf('static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)', ensureDeclarationStart + 1) : -1;
     const end = start >= 0 ? source.indexOf('\nstatic BOOL ServiceDeploy_EnsureConfigFile', start) : -1;

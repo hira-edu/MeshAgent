@@ -1,5 +1,6 @@
 /* Fault injection around the production launcher. No child process or service runs. */
 static int testMode;
+static wchar_t MeshRuntimeHost_TempLifecycleDir[MAX_PATH * 4] = {0};
 static BOOL TestPath(wchar_t* path, size_t count) { return SUCCEEDED(StringCchCopyW(path, count, L"fixture")); }
 static BOOL TestPrepare(MeshRuntimeHostLifecycleAction action, const wchar_t* exe, const wchar_t* dll,
     wchar_t* path, size_t count, BOOL* remove)

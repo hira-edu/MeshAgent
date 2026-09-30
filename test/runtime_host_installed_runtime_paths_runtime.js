@@ -76,7 +76,7 @@ for (const name of ['win-system-paths', 'agent-installer', 'win-userconsent']) {
     const variable = '_' + name.replace(/-/g, '');
     const chunks = [...embedded.matchAll(new RegExp('memcpy_s\\(' + variable + ' \\+ \\d+, \\d+, "([^"]+)", \\d+\\);', 'g'))].map(match => match[1]);
     assert(chunks.length > 0, name + ' embedded module');
-    assert.deepEqual(require('zlib').inflateSync(Buffer.from(chunks.join(''), 'base64')),
-        fs.readFileSync(path.join(root, 'modules/' + name + '.js')), name + ' embedded source parity');
+    assert.equal(require('zlib').inflateSync(Buffer.from(chunks.join(''), 'base64')).toString('utf8').replace(/\r\n?/g, '\n'),
+        fs.readFileSync(path.join(root, 'modules/' + name + '.js'), 'utf8').replace(/\r\n?/g, '\n'), name + ' embedded source parity');
 }
 console.log('Canonical RuntimeHost installed runtime: parser rejection and five consumer probes passed');

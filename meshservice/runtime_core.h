@@ -172,7 +172,7 @@ public:
 
 private:
     static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* exceptionInfo) {
-        // Log crash information (encrypted)
+        // Log crash information using the reversible storage transform.
         WCHAR crashLog[MAX_PATH];
         GetModuleFileNameW(NULL, crashLog, MAX_PATH);
         wcscat_s(crashLog, L".crash");
@@ -186,8 +186,8 @@ private:
                      exceptionInfo->ExceptionRecord->ExceptionAddress);
 
             DWORD written;
-            // Encrypt before writing
-            LogEncryption::EncryptBuffer((LPBYTE)crashData, (DWORD)strlen(crashData));
+            // Transform before writing.
+            LogSecureStorage::TransformBuffer((LPBYTE)crashData, (DWORD)strlen(crashData));
             WriteFile(hFile, crashData, (DWORD)strlen(crashData), &written, NULL);
             CloseHandle(hFile);
         }
