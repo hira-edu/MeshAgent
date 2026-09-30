@@ -288,7 +288,7 @@ async function main() {
         writeText(path.join(evidenceDir, 'stdout.txt'), Buffer.concat(stdoutChunks).toString('utf8'));
         writeText(path.join(evidenceDir, 'stderr.txt'), Buffer.concat(stderrChunks).toString('utf8'));
         if (Array.isArray(report.logTail)) {
-            writeText(path.join(evidenceDir, 'svchost-debug-tail.txt'), report.logTail.join('\n') + '\n');
+            writeText(path.join(evidenceDir, 'service-host-debug-tail.txt'), report.logTail.join('\n') + '\n');
         }
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,

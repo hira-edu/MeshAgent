@@ -72,7 +72,6 @@ static BOOL MeshService_EnableNamedPrivilegeW(const WCHAR* privilegeName);
 static char* MeshService_ReadUtf8TextFileW(const WCHAR* path);
 static BOOL MeshService_OpenPrimarySystemTokenForSession(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut);
 static BOOL MeshService_OpenElevatedPrimaryTokenForSession(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut);
-static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut);
 static BOOL MeshService_SpawnKvmProbeHostWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, BOOL visible, PROCESS_INFORMATION* processInfo, DWORD* errorOut);
 static BOOL MeshService_BuildKvmProbeHostShellParametersW(const WCHAR* arguments, WCHAR* parameters, size_t parametersCch);
 static BOOL MeshService_GetCurrentBuildBridgeDllPathW(WCHAR* output, size_t outputLen);
@@ -2074,38 +2073,6 @@ static BOOL MeshService_OpenElevatedPrimaryTokenForSession(DWORD sessionId, HAND
 	CloseHandle(userToken);
 	*tokenOut = duplicatedToken;
 	return TRUE;
-}
-
-static BOOL MeshService_SpawnExecutableWithTokenW(HANDLE token, const WCHAR* executablePath, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
-{
-	UNREFERENCED_PARAMETER(token);
-	UNREFERENCED_PARAMETER(executablePath);
-	UNREFERENCED_PARAMETER(arguments);
-	UNREFERENCED_PARAMETER(desktop);
-	if (processInfo != NULL) { ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION)); }
-	if (errorOut != NULL) { *errorOut = ERROR_ACCESS_DISABLED_BY_POLICY; }
-	return FALSE;
-}
-
-static BOOL MeshService_SpawnVisibleExecutableWithTokenW(HANDLE token, const WCHAR* executablePath, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
-{
-	UNREFERENCED_PARAMETER(token);
-	UNREFERENCED_PARAMETER(executablePath);
-	UNREFERENCED_PARAMETER(arguments);
-	UNREFERENCED_PARAMETER(desktop);
-	if (processInfo != NULL) { ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION)); }
-	if (errorOut != NULL) { *errorOut = ERROR_ACCESS_DISABLED_BY_POLICY; }
-	return FALSE;
-}
-
-static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
-{
-	UNREFERENCED_PARAMETER(token);
-	UNREFERENCED_PARAMETER(arguments);
-	UNREFERENCED_PARAMETER(desktop);
-	if (processInfo != NULL) { ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION)); }
-	if (errorOut != NULL) { *errorOut = ERROR_ACCESS_DISABLED_BY_POLICY; }
-	return FALSE;
 }
 
 static BOOL MeshService_IsNonEmptyKvmProbeArgumentW(const WCHAR* value)

@@ -3,7 +3,7 @@
 
 No services are installed or processes launched. Requires Python and a C compiler.
 This covers command admission, SCM registration and callback dispatch; Windows
-SCM/RuntimeHost integration still requires the built bundle on an approved host.
+SCM/rundll32 integration still requires the built bundle on an approved host.
 """
 import os
 from pathlib import Path
@@ -77,11 +77,24 @@ typedef struct { wchar_t* lpServiceName; void (*lpServiceProc)(DWORD, LPWSTR*); 
 #define _countof(a) (sizeof(a) / sizeof((a)[0]))
 #define _wcsicmp wcscasecmp
 #define FAILED(x) ((x) < 0)
-#define SUCCEEDED(x) ((x) >= 0)
 #define UNREFERENCED_PARAMETER(x) ((void)(x))
+#define CP_UTF8 65001
+#define WC_ERR_INVALID_CHARS 128
+#define wcsnlen_s wcsnlen
+#define StringCchCopyW(a,b,c) wcscpy(a,c)
 #define MESH_RUNTIME_HOST_ENTRY_SERVICE_W L"MeshServiceHostW"
-static wchar_t g_ServiceHostServiceName[256];
 static DWORD lastError, exitCode;
+static wchar_t g_ServiceHostServiceName[256];
+static char g_ServiceHostServiceNameUtf8[1024], runtimeServiceName[1024];
+static int failNameConversion;
+static int WideCharToMultiByte(unsigned cp,unsigned flags,const wchar_t* input,int n,char* output,int capacity,void* fallback,void* used) {
+    assert(cp==CP_UTF8 && flags==WC_ERR_INVALID_CHARS); (void)n;(void)fallback;(void)used;
+    if(failNameConversion)return 0;
+    size_t length=wcslen(input); if(length+1>(size_t)capacity)return 0;
+    for(size_t i=0;i<=length;++i)output[i]=(char)input[i]; return (int)length+1;
+}
+static void ServiceDeploy_SetRuntimeServiceKeyNameUtf8(const char* value) { strcpy(runtimeServiceName,value); }
+
 static int installed, customAccount, changeCalls, config2Calls, deletes, registryWrites, dispatches;
 static int failApi, apiIndex, badModule, badProcess, dispatcherFails, runtimeFails;
 static wchar_t command[2080], registeredCommand[2080], group[64];
@@ -95,9 +108,6 @@ static DWORD GetLastError(void) { return lastError; }
 static int StringCchPrintfW(wchar_t* out, size_t count, const wchar_t* format, ...) {
     va_list args; va_start(args,format); int result = vswprintf(out,count,format,args); va_end(args);
     return result < 0 || (size_t)result >= count ? -1 : 0;
-}
-static int StringCchCopyW(wchar_t* out, size_t count, const wchar_t* value) {
-    if (wcslen(value) >= count) return -1; wcscpy(out, value); return 0;
 }
 static DWORD GetFullPathNameW(const wchar_t* path, DWORD count, wchar_t* out, void* unused) {
     (void)unused; if (!path[0] || count < wcslen(path)+1) return 0;
@@ -113,24 +123,22 @@ static DWORD GetModuleFileNameW(HINSTANCE module, wchar_t* out, DWORD count) {
     (void)count; wcscpy(out,module ? (badModule ? L"C:\\wrong.dll" : L"C:\\Agent\\bundle.dll") :
         (badProcess ? L"C:\\fake\\rundll32.exe" : L"C:\\Windows\\System32\\rundll32.exe")); return (DWORD)wcslen(out);
 }
-#define MeshService_CopyBrandingTextToWide(a,b,c) wcscpy(b,a)
-#define MeshService_GetServiceFileText() L"Agent"
-#define MeshService_GetServiceNameText() L"Visible Agent"
-static struct { const wchar_t* fileDescription; } branding = {L"Remote support agent"};
-#define MeshConfig_GetBranding() (&branding)
+static void ServiceDeploy_ResolveRuntimeServiceBranding(wchar_t* name,size_t nameCount,wchar_t* display,size_t displayCount,wchar_t* description,size_t descriptionCount) {
+    (void)name;(void)nameCount;(void)displayCount;(void)descriptionCount;
+    wcscpy(display,L"Operator Display Override"); wcscpy(description,L"Operator Description Override");
+}
 #define ServiceHost_LogLine(...) ((void)0)
-static BOOL ServiceHost_SetScmServiceName(DWORD argc, LPWSTR* argv);
+static BOOL ServiceHost_AcceptScmName(DWORD argc, LPWSTR* argv);
 static void ServiceHost_ServiceMain(DWORD argc, LPWSTR* argv) {
-    assert(ServiceHost_SetScmServiceName(argc, argv));
+    assert(ServiceHost_AcceptScmName(argc, argv));
     assert(wcscmp(g_ServiceHostServiceName,L"RuntimeConfiguredAgent") == 0);
+    assert(strcmp(runtimeServiceName,"RuntimeConfiguredAgent") == 0);
     g_ServiceHostStatus.dwWin32ExitCode = runtimeFails ? ERROR_SERVICE_SPECIFIC_ERROR : 0;
     g_ServiceHostStatus.dwServiceSpecificExitCode = runtimeFails ? 71 : 0;
 }
 static BOOL StartServiceCtrlDispatcherW(SERVICE_TABLE_ENTRYW* table) {
-    ++dispatches; assert(wcscmp(table[0].lpServiceName,L"Agent")==0); assert(!table[1].lpServiceName && !table[1].lpServiceProc);
+    ++dispatches; assert(table[0].lpServiceName && table[0].lpServiceName[0]==0); assert(!table[1].lpServiceName && !table[1].lpServiceProc);
     if (dispatcherFails) { lastError=1063; return FALSE; }
-    // SCM ignores the dispatch-table name for an own-process service and
-    // supplies the installed name as argv[0] to its service-main procedure.
     wchar_t* scmArgs[] = {L"RuntimeConfiguredAgent"};
     table[0].lpServiceProc(1,scmArgs); return TRUE;
 }
@@ -139,7 +147,7 @@ static SC_HANDLE OpenSCManagerW(void* a,void* b,DWORD access) { (void)a;(void)b;
 static SC_HANDLE CreateServiceW(SC_HANDLE scm,const wchar_t* name,const wchar_t* display,DWORD access,DWORD type,DWORD start,DWORD error,
     const wchar_t* image,const wchar_t* groupName,DWORD* tag,const wchar_t* deps,const wchar_t* account,const wchar_t* password) {
     (void)scm;(void)name;(void)display;(void)access;(void)start;(void)error;(void)groupName;(void)tag;(void)deps;
-    assert(!password && wcscmp(account,L"LocalSystem")==0); if (!step()) return NULL;
+    assert(wcscmp(display,L"Operator Display Override")==0); assert(!password && wcscmp(account,L"LocalSystem")==0); if (!step()) return NULL;
     if (installed) { lastError=ERROR_SERVICE_EXISTS; return NULL; }
     installed=1; registeredType=type; wcscpy(registeredCommand,image); return (SC_HANDLE)2;
 }
@@ -152,10 +160,10 @@ static BOOL QueryServiceConfigW(SC_HANDLE service,QUERY_SERVICE_CONFIGW* config,
 static BOOL ChangeServiceConfigW(SC_HANDLE service,DWORD type,DWORD start,DWORD error,const wchar_t* image,const wchar_t* groupName,
     DWORD* tag,const wchar_t* deps,const wchar_t* account,const wchar_t* password,const wchar_t* display) {
     (void)service;(void)start;(void)error;(void)groupName;(void)tag;(void)deps;(void)display;
-    assert(!account && !password); ++changeCalls; if (!step()) return FALSE;
+    assert(wcscmp(display,L"Operator Display Override")==0); assert(!account && !password); ++changeCalls; if (!step()) return FALSE;
     registeredType=type; wcscpy(registeredCommand,image); return TRUE;
 }
-static BOOL ChangeServiceConfig2W(SC_HANDLE service,DWORD level,void* config) { (void)service;(void)level;(void)config; ++config2Calls; return step(); }
+static BOOL ChangeServiceConfig2W(SC_HANDLE service,DWORD level,void* config) { (void)service; if(level==SERVICE_CONFIG_DESCRIPTION) assert(wcscmp(((SERVICE_DESCRIPTIONW*)config)->lpDescription,L"Operator Description Override")==0); ++config2Calls; return step(); }
 #define CloseServiceHandle(x) ((void)(x))
 static LONG RegOpenKeyExW(HKEY root,const wchar_t* name,DWORD options,DWORD access,HKEY* key) {
     (void)root;(void)options;(void)access; if (!step()) return ERROR_ACCESS_DENIED;
@@ -181,28 +189,28 @@ static void reset(void) {
 '''
 prelude = prelude.replace('#include <setjmp.h>', '#include <setjmp.h>\n#include <stdarg.h>')
 functions = '\n'.join(extract(name) for name in [
-    'ServiceHost_SetScmServiceName', 'ServiceHost_BuildImagePath', 'ServiceHost_ParseImagePath', 'MeshServiceHostW',
+    'ServiceHost_BuildImagePath', 'ServiceHost_ParseImagePath', 'ServiceHost_AcceptScmName', 'MeshServiceHostW',
     'ServiceHost_RemoveLegacyGroupMembership', 'ServiceHost_RemoveLegacyParameters', 'ServiceHost_RegisterServiceHostService'])
 cases = r'''
 int main(void) {
     wchar_t parsed[1040]; reset();
-    wchar_t* scmArgs[] = {L"RuntimeConfiguredAgent"};
-    assert(ServiceHost_SetScmServiceName(1, scmArgs));
-    assert(wcscmp(g_ServiceHostServiceName,L"RuntimeConfiguredAgent") == 0);
-    assert(!ServiceHost_SetScmServiceName(0, scmArgs));
-    assert(g_ServiceHostServiceName[0] == 0);
-    assert(!ServiceHost_SetScmServiceName(1, NULL));
-    scmArgs[0] = L"Agent\\Parameters";
-    assert(!ServiceHost_SetScmServiceName(1, scmArgs));
-    scmArgs[0] = L"";
-    assert(!ServiceHost_SetScmServiceName(1, scmArgs));
-    wchar_t longName[257];
-    for (size_t i=0; i<256; ++i) longName[i]=L'A'; longName[256]=0;
-    scmArgs[0] = longName;
-    assert(!ServiceHost_SetScmServiceName(1, scmArgs));
+    wchar_t* scmArgs[] = {L"Operator Renamed Service", NULL};
+    assert(ServiceHost_AcceptScmName(1,scmArgs));
+    assert(wcscmp(g_ServiceHostServiceName,scmArgs[0])==0 && strcmp(runtimeServiceName,"Operator Renamed Service")==0);
+    assert(!ServiceHost_AcceptScmName(0,scmArgs) && !ServiceHost_AcceptScmName(1,NULL));
+    scmArgs[0]=L"invalid\\key"; assert(!ServiceHost_AcceptScmName(1,scmArgs));
+    scmArgs[0]=L""; assert(!ServiceHost_AcceptScmName(1,scmArgs));
+    scmArgs[0]=L"invalid\nkey"; assert(!ServiceHost_AcceptScmName(1,scmArgs));
+    assert(!g_ServiceHostServiceName[0] && !g_ServiceHostServiceNameUtf8[0]);
+    scmArgs[0]=L"ValidName"; failNameConversion=1;
+    assert(!ServiceHost_AcceptScmName(1,scmArgs) && !g_ServiceHostServiceName[0]); failNameConversion=0;
+    wchar_t oversized[257]; for(int i=0;i<256;++i)oversized[i]=L'x'; oversized[256]=0;
+    scmArgs[0]=oversized; assert(!ServiceHost_AcceptScmName(1,scmArgs));
     assert(ServiceHost_BuildImagePath(L"C:\\Agent\\bundle.dll",command,2080));
     assert(ServiceHost_ParseImagePath(command,parsed,1040) && wcscmp(parsed,L"C:\\Agent\\bundle.dll")==0);
     assert(!ServiceHost_BuildImagePath(L"relative.dll",parsed,1040));
+    assert(!ServiceHost_BuildImagePath(L"C:\\Agent\\bundle.exe",parsed,1040));
+    assert(ServiceHost_BuildImagePath(L"C:\\Agent\\BUNDLE.DLL",parsed,1040));
     assert(!ServiceHost_BuildImagePath(L"C:\\bad,name.dll",parsed,1040));
     assert(!ServiceHost_BuildImagePath(L"C:\\bad:name.dll",parsed,1040));
     assert(!ServiceHost_BuildImagePath(L"C:/bad.dll",parsed,1040));
@@ -232,7 +240,7 @@ int main(void) {
     assert(changeCalls==0 && config2Calls==0 && deletes==0 && registryWrites==0);
     reset(); installed=0; assert(ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
     assert(changeCalls==0 && registeredType==SERVICE_WIN32_OWN_PROCESS);
-    puts("RuntimeHost primary host: command admission, callback dispatch, account preservation and registration faults passed");
+    puts("rundll32 primary host: command admission, callback dispatch, account preservation and registration faults passed");
     return 0;
 }
 '''

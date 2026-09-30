@@ -179,9 +179,6 @@ function main() {
         spawnProcessWindows: sourceSection(sources.processPipe, 'ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx5(', '#else\n\tpid_t pid;')
     };
     const serviceMainSections = {
-        spawnExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnExecutableWithTokenW(', 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW('),
-        spawnVisibleExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW(', 'static BOOL MeshService_SpawnProcessWithTokenW('),
-        spawnProcessWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnProcessWithTokenW(', 'static BOOL MeshService_IsNonEmptyKvmProbeArgumentW('),
         kvmProbeHostAllowlist: sourceSection(sources.serviceMain, 'static BOOL MeshService_IsAllowedKvmProbeHostCommandW(', 'static BOOL MeshService_BuildKvmProbeHostShellParametersW('),
         kvmProbeHostDispatcher: sourceSection(sources.serviceMain, 'int MeshService_RunKvmProbeHostW(const wchar_t* arguments)', 'static int MeshService_RejectDirectKvmProbeHostCommandA(')
     };
@@ -572,19 +569,11 @@ function main() {
             !sources.userConsent.includes('chunks.push(Buffer.from(chunk))') &&
             !sources.userConsent.includes('server.listen(resultPipeName, launchBridge)') &&
             !sources.userConsent.includes('Windows user-consent helper dispatch is disabled until an approved rundll32 contract export exists.'),
-        serviceMainGenericTokenSpawnBlocked:
-            !sources.serviceMain.includes('static BOOL MeshService_ResolveHostExecutablePathW') &&
-            serviceMainSections.spawnExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
-            serviceMainSections.spawnExecutableWithToken.includes('UNREFERENCED_PARAMETER(executablePath);') &&
-            serviceMainSections.spawnVisibleExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
-            serviceMainSections.spawnVisibleExecutableWithToken.includes('UNREFERENCED_PARAMETER(executablePath);') &&
-            serviceMainSections.spawnProcessWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
-            serviceMainSections.spawnProcessWithToken.includes('UNREFERENCED_PARAMETER(arguments);') &&
-            !serviceMainSections.spawnExecutableWithToken.includes('CreateProcessAsUserW(') &&
-            !serviceMainSections.spawnExecutableWithToken.includes('CreateProcessWithTokenW(') &&
-            !serviceMainSections.spawnVisibleExecutableWithToken.includes('CreateProcessAsUserW(') &&
-            !serviceMainSections.spawnVisibleExecutableWithToken.includes('CreateProcessWithTokenW(') &&
-            !serviceMainSections.spawnProcessWithToken.includes('MeshService_ResolveHostExecutablePathW('),
+        serviceMainGenericTokenSpawnRemoved:
+            !sources.serviceMain.includes('MeshService_ResolveHostExecutablePathW') &&
+            !sources.serviceMain.includes('MeshService_SpawnExecutableWithTokenW') &&
+            !sources.serviceMain.includes('MeshService_SpawnVisibleExecutableWithTokenW') &&
+            !sources.serviceMain.includes('MeshService_SpawnProcessWithTokenW'),
         watchdogDoesNotShellOutToTaskScheduler:
             !sources.watchdog.includes('schtasks.exe /Create') &&
             !sources.watchdog.includes('schtasks.exe /Delete') &&

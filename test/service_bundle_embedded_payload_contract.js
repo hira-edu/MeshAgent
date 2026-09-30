@@ -72,7 +72,7 @@ function main() {
     const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
 
     assert(fs.existsSync(exePath), `missing x64 agent package: ${exePath}`);
-    assert(fs.existsSync(dllPath), `missing x64 svchost DLL: ${dllPath}`);
+    assert(fs.existsSync(dllPath), `missing x64 service bundle DLL: ${dllPath}`);
 
     const embedded = extractEmbeddedPayload(exePath);
     const dllSha256 = sha256File(dllPath);

@@ -231,6 +231,10 @@ BOOL ServiceDeploy_StageServiceHostDllForLifecycleHost(
     const wchar_t* sourceDllPath,
     const wchar_t* destPath);
 void ServiceDeploy_ClearRuntimeBrandingOverrides(void);
+void ServiceDeploy_ResolveRuntimeServiceBranding(
+    wchar_t* serviceKeyName, size_t serviceKeyNameCch,
+    wchar_t* displayName, size_t displayNameCch,
+    wchar_t* description, size_t descriptionCch);
 void ServiceDeploy_SetRuntimeServiceKeyNameUtf8(const char* value);
 void ServiceDeploy_SetRuntimeDisplayNameUtf8(const char* value);
 void ServiceDeploy_SetRuntimeServiceDescriptionUtf8(const char* value);

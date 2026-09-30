@@ -370,7 +370,7 @@ async function main() {
         writeText(path.join(evidenceDir, 'auto-schtasks-run-stdout.txt'), report.probes.auto.runTaskStdout);
         writeText(path.join(evidenceDir, 'auto-schtasks-run-stderr.txt'), report.probes.auto.runTaskStderr);
         if (Array.isArray(report.logTail)) {
-            writeText(path.join(evidenceDir, 'svchost-debug-tail.txt'), report.logTail.join('\n') + '\n');
+            writeText(path.join(evidenceDir, 'service-host-debug-tail.txt'), report.logTail.join('\n') + '\n');
         }
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,

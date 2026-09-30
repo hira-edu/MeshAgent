@@ -45,6 +45,7 @@ typedef intptr_t HKEY; typedef intptr_t SC_HANDLE; typedef int LONG; typedef uns
 #define SERVICE_CHANGE_CONFIG 4
 #define SERVICE_START 8
 #define SERVICE_DEMAND_START 3
+#define SERVICE_NO_CHANGE 0xffffffffUL
 #define wcslen wide_len
 static wchar_t* wide_chr(const wchar_t* p,wchar_t c){for(;;++p){if(*p==c)return (wchar_t*)p;if(!*p)return NULL;}}
 #define wcschr wide_chr
@@ -68,8 +69,8 @@ static DWORD changedStart,changedType;static int clearActions,clearDescription,v
 static BOOL step(void){return !failAt||++ops!=failAt;}
 static LONG RegOpenKeyExW(HKEY key,const wchar_t* path,DWORD unused,DWORD access,HKEY* out){(void)key;(void)unused;(void)access;if(!step())return 5;if(wide_chr(path,L'S')&&path[0]=='S'&&path[1]=='O'&&groupOpenError)return groupOpenError;*out=2;return ERROR_SUCCESS;}
 static LONG RegQueryValueExW(HKEY key,const wchar_t* name,void* unused,DWORD* type,BYTE* data,DWORD* size){(void)key;(void)name;(void)unused;if(!step())return 5;if(!groupPresent)return ERROR_FILE_NOT_FOUND;*type=groupType;if(!data){*size=groupSize;return ERROR_SUCCESS;}assert(*size>=groupSize);memcpy(data,group,groupSize);*size=groupSize;return ERROR_SUCCESS;}
-static LONG RegSetValueExW(HKEY key,const wchar_t* name,DWORD unused,DWORD type,const BYTE* data,DWORD size){(void)key;(void)unused;if(!step())return 5;++regWrites;if(!_wcsicmp(name,L"netsvcs")){assert(size<=sizeof(group));memcpy(group,data,size);groupSize=size;groupType=type;groupPresent=1;}else{if(key==3){assert(serviceChanges==0);++parameterWrites;}else{assert(extraChanges==5);++valuesAfterExtras;}}return ERROR_SUCCESS;}
-static LONG RegDeleteValueW(HKEY key,const wchar_t* name){(void)key;(void)name;if(!step())return 5;if(key==3){assert(serviceChanges==0);++parameterWrites;}else{assert(extraChanges==5);++valuesAfterExtras;}return ERROR_FILE_NOT_FOUND;}
+static LONG RegSetValueExW(HKEY key,const wchar_t* name,DWORD unused,DWORD type,const BYTE* data,DWORD size){(void)key;(void)unused;if(!step())return 5;++regWrites;if(!_wcsicmp(name,L"netsvcs")){assert(size<=sizeof(group));memcpy(group,data,size);groupSize=size;groupType=type;groupPresent=1;}else{if(key==3){assert(serviceChanges==0);++parameterWrites;}else{assert(extraChanges==3);++valuesAfterExtras;}}return ERROR_SUCCESS;}
+static LONG RegDeleteValueW(HKEY key,const wchar_t* name){(void)key;(void)name;if(!step())return 5;if(key==3){assert(serviceChanges==0);++parameterWrites;}else{assert(extraChanges==3);++valuesAfterExtras;}return ERROR_FILE_NOT_FOUND;}
 static LONG RegCloseKey(HKEY key){(void)key;return ERROR_SUCCESS;}
 static LONG RegCreateKeyExW(HKEY key,const wchar_t* path,DWORD a,void* b,DWORD c,DWORD d,void* e,HKEY* out,void* f){(void)key;(void)path;(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;if(!step())return 5;*out=3;return ERROR_SUCCESS;}
 static LONG RegQueryInfoKeyW(HKEY key,void* a,void* b,void* c,DWORD* subs,void* d,void* e,DWORD* values,void* f,void* g,void* h,void* i){(void)key;(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;if(!step())return 5;*subs=*values=0;return ERROR_SUCCESS;}
@@ -77,9 +78,10 @@ static LONG RegDeleteKeyW(HKEY key,const wchar_t* name){(void)key;(void)name;if(
 static SC_HANDLE OpenSCManagerW(void* a,void* b,DWORD access){(void)a;(void)b;(void)access;return step()?1:0;}
 static SC_HANDLE OpenServiceW(SC_HANDLE scm,const wchar_t* name,DWORD access){(void)scm;(void)name;(void)access;return step()?2:0;}
 static BOOL CloseServiceHandle(SC_HANDLE h){(void)h;return TRUE;}
-static BOOL ChangeServiceConfigW(SC_HANDLE h,DWORD type,DWORD start,DWORD error,const wchar_t* image,const wchar_t* groupName,void* tag,const wchar_t* deps,const wchar_t* account,const wchar_t* pass,const wchar_t* display){(void)h;(void)error;(void)image;(void)display;assert(!groupName&&!tag&&!deps&&!account&&!pass);if(!step())return FALSE;assert(parameterWrites==5);changedStart=start;changedType=type;++serviceChanges;return TRUE;}
+static BOOL ChangeServiceConfigW(SC_HANDLE h,DWORD type,DWORD start,DWORD error,const wchar_t* image,const wchar_t* groupName,void* tag,const wchar_t* deps,const wchar_t* account,const wchar_t* pass,const wchar_t* display){(void)h;(void)error;(void)image;(void)display;assert(!groupName&&!tag&&!deps&&!account&&!pass);if(!step())return FALSE;assert(parameterWrites==5);if(type==SERVICE_NO_CHANGE){assert(extraChanges==5);}else{assert(start==SERVICE_DISABLED);}changedStart=start;if(type!=SERVICE_NO_CHANGE)changedType=type;++serviceChanges;return TRUE;}
 static BOOL ChangeServiceConfig2W(SC_HANDLE h,DWORD level,void* data){(void)h;if(!step())return FALSE;++extraChanges;if(level==SERVICE_CONFIG_DESCRIPTION)clearDescription=((SERVICE_DESCRIPTIONW*)data)->lpDescription&&!*(((SERVICE_DESCRIPTIONW*)data)->lpDescription);if(level==SERVICE_CONFIG_FAILURE_ACTIONS){SERVICE_FAILURE_ACTIONSW* a=data;if(a->cActions&&a->lpsaActions[0].Type==SC_ACTION_REBOOT)assert(privilegeEnabled);clearActions=a->lpCommand&&!*a->lpCommand&&a->lpRebootMsg&&!*a->lpRebootMsg&&a->lpsaActions&&a->cActions==0;}return TRUE;}
 static UINT GetSystemDirectoryW(wchar_t* out,UINT cap){const wchar_t* p=L"C:\\Windows\\System32";assert(cap>wide_len(p));memcpy(out,p,(wide_len(p)+1)*2);return (UINT)wide_len(p);}
+static DWORD ExpandEnvironmentStringsW(const wchar_t* source,wchar_t* out,DWORD cap){DWORD n=(DWORD)wide_len(source)+1;if(n<=cap)memcpy(out,source,n*2);return n;}
 static BOOL ServiceHost_ParseImagePath(const wchar_t* command,wchar_t* dll,size_t cap){const wchar_t* path=L"C:\\Agent\\agent.dll";const wchar_t* expected=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",MeshServiceHostW";if(_wcsicmp(command,expected))return FALSE;assert(cap>wide_len(path));memcpy(dll,path,(wide_len(path)+1)*2);return TRUE;}
 '''
 cases = r'''
@@ -105,9 +107,17 @@ int main(void){
     config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.lpBinaryPathName=L"C:\\Malware\\svchost.exe -k netsvcs";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.dwServiceType=1;assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    ServiceBindingSnapshot owner={0};owner.config=&config;config.dwServiceType=SERVICE_WIN32_SHARE_PROCESS;
+    const wchar_t* knownDll=L"C:\\Agent\\agent.dll";const wchar_t* knownEntry=L"ServiceHost_ServiceMain";
+    owner.values[9]=(ServiceBindingValue){(BYTE*)knownDll,(DWORD)((wide_len(knownDll)+1)*2),REG_SZ,TRUE};
+    owner.values[10]=(ServiceBindingValue){(BYTE*)knownEntry,(DWORD)((wide_len(knownEntry)+1)*2),REG_SZ,TRUE};
+    assert(ServiceBinding_SharedPayloadSupported(&owner,knownDll));assert(!ServiceBinding_SharedPayloadSupported(&owner,L"C:\\Other\\agent.dll"));
+    owner.values[10].present=FALSE;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));owner.values[10].present=TRUE;
+    owner.values[9].size-=2;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));
+    config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;assert(ServiceBinding_SharedPayloadSupported(&owner,knownDll));
     ServiceBindingSnapshot* s=calloc(1,sizeof(*s));s->config=calloc(1,sizeof(*s->config));s->config->dwServiceType=SERVICE_WIN32_SHARE_PROCESS;s->config->dwStartType=SERVICE_DISABLED;s->running=TRUE;s->groupMember=TRUE;
     for(size_t i=0;i<5;++i)s->extra[i]=calloc(1,128);
-    set_group(L"Other\0",7);reset_restore();assert(ServiceBinding_Restore(L"Agent",s));assert(serviceChanges==1&&changedType==SERVICE_WIN32_SHARE_PROCESS&&changedStart==SERVICE_DEMAND_START&&clearActions&&clearDescription&&valuesAfterExtras==8&&parameterWrites==5&&deletedParameters==1);
+    set_group(L"Other\0",7);reset_restore();assert(ServiceBinding_Restore(L"Agent",s));assert(serviceChanges==2&&changedType==SERVICE_WIN32_SHARE_PROCESS&&changedStart==SERVICE_DEMAND_START&&clearActions&&clearDescription&&valuesAfterExtras==8&&parameterWrites==5&&deletedParameters==1);
     int operationCount=ops; /* Every mutation/query boundary must fail closed. */
     for(int failure=1;failure<=operationCount;++failure){set_group(L"Other\0",7);reset_restore();failAt=failure;assert(!ServiceBinding_Restore(L"Agent",s));}
     /* Reboot action restoration acquires and restores the shutdown privilege. */
@@ -117,7 +127,7 @@ int main(void){
     ServiceBinding_Free(s);puts("service binding transaction: owned image selection, membership restoration, exact value ordering, disabled running state and failure propagation passed");return 0;
 }
 '''
-functions = '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_ImageSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_Restore'])
+functions = '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_ImageSupported', 'ServiceBinding_SharedPayloadSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_ApplyExtra', 'ServiceBinding_Restore'])
 with tempfile.TemporaryDirectory(prefix='mesh-service-binding-') as tmp:
     src, exe = Path(tmp) / 'binding.c', Path(tmp) / 'binding'
     src.write_text(prelude + prefix + mocks + functions + cases)

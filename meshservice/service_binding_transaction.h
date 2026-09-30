@@ -164,6 +164,31 @@ static BOOL ServiceBinding_ImageSupported(const QUERY_SERVICE_CONFIGW* config,
         !_wcsicmp(image, L"\"%SystemRoot%\\System32\\svchost.exe\" -k netsvcs");
 }
 
+static BOOL ServiceBinding_SharedPayloadSupported(const ServiceBindingSnapshot* snapshot, const wchar_t* installedDll)
+{
+    const ServiceBindingValue* dll = &snapshot->values[9];
+    const ServiceBindingValue* entry = &snapshot->values[10];
+    const wchar_t* dllText;
+    wchar_t expanded[MAX_PATH];
+    DWORD count;
+    if (snapshot->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS) { return TRUE; }
+    if (!dll->present || (dll->type != REG_SZ && dll->type != REG_EXPAND_SZ) ||
+        !dll->data || dll->size < sizeof(wchar_t) || dll->size % sizeof(wchar_t)) { return FALSE; }
+    dllText = (const wchar_t*)dll->data;
+    if (dllText[dll->size / sizeof(wchar_t) - 1] ||
+        (wcslen(dllText) + 1) * sizeof(wchar_t) != dll->size) { return FALSE; }
+    if (!entry->present || entry->type != REG_SZ || !entry->data ||
+        entry->size != sizeof(L"ServiceHost_ServiceMain") ||
+        memcmp(entry->data, L"ServiceHost_ServiceMain", entry->size)) { return FALSE; }
+    if (dll->type == REG_EXPAND_SZ)
+    {
+        count = ExpandEnvironmentStringsW(dllText, expanded, _countof(expanded));
+        if (!count || count > _countof(expanded)) { return FALSE; }
+        dllText = expanded;
+    }
+    return !_wcsicmp(dllText, installedDll);
+}
+
 /* Reboot recovery policies require a privilege even when merely restoring
  * their configuration. Probe it before accepting a checkpoint, and restore the
  * token's previous privilege state after every attempt. */
@@ -245,20 +270,7 @@ static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* name, const
         HKEY target = i < SERVICE_BINDING_PARAMETER_FIRST ? key : parameters;
         if (target && !ServiceBinding_ReadValue(target, ServiceBinding_ValueNames[i], &snapshot->values[i])) { goto done; }
     }
-    if (snapshot->config->dwServiceType == SERVICE_WIN32_SHARE_PROCESS)
-    {
-        /* A generic svchost command does not establish ownership. Require its
-         * ServiceDll to resolve to this installation before any SCM mutation. */
-        const ServiceBindingValue* dll = &snapshot->values[SERVICE_BINDING_PARAMETER_FIRST];
-        wchar_t expanded[MAX_PATH];
-        DWORD length;
-        if (!dll->present || (dll->type != REG_SZ && dll->type != REG_EXPAND_SZ) ||
-            dll->size < sizeof(wchar_t) || dll->size % sizeof(wchar_t) ||
-            ((const wchar_t*)dll->data)[dll->size / sizeof(wchar_t) - 1] != L'\0' ||
-            (wcslen((const wchar_t*)dll->data) + 1) * sizeof(wchar_t) != dll->size) { goto done; }
-        length = ExpandEnvironmentStringsW((const wchar_t*)dll->data, expanded, _countof(expanded));
-        if (!length || length > _countof(expanded) || _wcsicmp(expanded, installedDll)) { goto done; }
-    }
+    if (!ServiceBinding_SharedPayloadSupported(snapshot, installedDll)) { goto done; }
     if (!ServiceBinding_Group(name, FALSE, &snapshot->groupMember)) { goto done; }
     {
         HANDLE privilegeToken = NULL;
@@ -274,6 +286,28 @@ done:
     if (scm) { CloseServiceHandle(scm); }
     if (!ok) { ServiceBinding_Free(snapshot); snapshot = NULL; }
     return snapshot;
+}
+
+static BOOL ServiceBinding_ApplyExtra(SC_HANDLE service, size_t index, BYTE* extra)
+{
+    DWORD level = ServiceBinding_ConfigLevels[index];
+    /* NULL strings/actions mean unchanged to SCM, not clear. */
+    if (level == SERVICE_CONFIG_FAILURE_ACTIONS)
+    {
+        SERVICE_FAILURE_ACTIONSW actions = *(SERVICE_FAILURE_ACTIONSW*)extra;
+        SC_ACTION empty = {0};
+        if (!actions.lpCommand) { actions.lpCommand = L""; }
+        if (!actions.lpRebootMsg) { actions.lpRebootMsg = L""; }
+        if (!actions.lpsaActions) { actions.lpsaActions = &empty; }
+        return ChangeServiceConfig2W(service, level, &actions);
+    }
+    if (level == SERVICE_CONFIG_DESCRIPTION)
+    {
+        SERVICE_DESCRIPTIONW description = *(SERVICE_DESCRIPTIONW*)extra;
+        if (!description.lpDescription) { description.lpDescription = L""; }
+        return ChangeServiceConfig2W(service, level, &description);
+    }
+    return ChangeServiceConfig2W(service, level, extra);
 }
 
 static BOOL ServiceBinding_Restore(const wchar_t* name, const ServiceBindingSnapshot* snapshot)
@@ -304,37 +338,20 @@ static BOOL ServiceBinding_Restore(const wchar_t* name, const ServiceBindingSnap
         HKEY target = i < SERVICE_BINDING_PARAMETER_FIRST ? key : parameters;
         LONG result;
         /* Keep SCM's temporary start permission consistent until restart. */
-        if (i == 1 && snapshot->running && config->dwStartType == SERVICE_DISABLED) { continue; }
+        if (i == 1) { continue; }
         result = value->present ? RegSetValueExW(target, ServiceBinding_ValueNames[i], 0, value->type, value->data, value->size) :
             RegDeleteValueW(target, ServiceBinding_ValueNames[i]);
         if (result != ERROR_SUCCESS && !(result == ERROR_FILE_NOT_FOUND && !value->present)) { goto done; }
     }
-    /* Temporarily enable a disabled incumbent so its former running state can
-     * be restored. The caller reapplies the original start type after startup. */
+    /* Keep launches disabled until binding and recovery restoration finish. */
     if (!ChangeServiceConfigW(service, config->dwServiceType,
-        snapshot->running && config->dwStartType == SERVICE_DISABLED ? SERVICE_DEMAND_START : config->dwStartType,
+        SERVICE_DISABLED,
         config->dwErrorControl, config->lpBinaryPathName, NULL, NULL, NULL,
         NULL, NULL, config->lpDisplayName)) { goto done; }
     for (i = 0; i < _countof(snapshot->extra); ++i)
     {
-        BYTE* extra = snapshot->extra[i];
-        /* NULL strings/actions mean 'unchanged', not 'clear', to SCM. */
-        if (ServiceBinding_ConfigLevels[i] == SERVICE_CONFIG_FAILURE_ACTIONS)
-        {
-            SERVICE_FAILURE_ACTIONSW actions = *(SERVICE_FAILURE_ACTIONSW*)extra;
-            SC_ACTION empty = {0};
-            if (!actions.lpCommand) { actions.lpCommand = L""; }
-            if (!actions.lpRebootMsg) { actions.lpRebootMsg = L""; }
-            if (!actions.lpsaActions) { actions.lpsaActions = &empty; }
-            if (!ChangeServiceConfig2W(service, ServiceBinding_ConfigLevels[i], &actions)) { goto done; }
-        }
-        else if (ServiceBinding_ConfigLevels[i] == SERVICE_CONFIG_DESCRIPTION)
-        {
-            SERVICE_DESCRIPTIONW description = *(SERVICE_DESCRIPTIONW*)extra;
-            if (!description.lpDescription) { description.lpDescription = L""; }
-            if (!ChangeServiceConfig2W(service, ServiceBinding_ConfigLevels[i], &description)) { goto done; }
-        }
-        else if (!ChangeServiceConfig2W(service, ServiceBinding_ConfigLevels[i], extra)) { goto done; }
+        if (i == 1 || i == 2) { continue; }
+        if (!ServiceBinding_ApplyExtra(service, i, snapshot->extra[i])) { goto done; }
     }
     for (i = 0; i < SERVICE_BINDING_PARAMETER_FIRST; ++i)
     {
@@ -342,7 +359,7 @@ static BOOL ServiceBinding_Restore(const wchar_t* name, const ServiceBindingSnap
         HKEY target = i < SERVICE_BINDING_PARAMETER_FIRST ? key : parameters;
         LONG result;
         /* Keep SCM's temporary start permission consistent until restart. */
-        if (i == 1 && snapshot->running && config->dwStartType == SERVICE_DISABLED) { continue; }
+        if (i == 1) { continue; }
         result = value->present ? RegSetValueExW(target, ServiceBinding_ValueNames[i], 0, value->type, value->data, value->size) :
             RegDeleteValueW(target, ServiceBinding_ValueNames[i]);
         if (result != ERROR_SUCCESS && !(result == ERROR_FILE_NOT_FOUND && !value->present)) { goto done; }
@@ -359,6 +376,17 @@ static BOOL ServiceBinding_Restore(const wchar_t* name, const ServiceBindingSnap
     {
         BOOL member = snapshot->groupMember;
         if (!ServiceBinding_Group(name, TRUE, &member)) { goto done; }
+    }
+    if (!ServiceBinding_ApplyExtra(service, 1, snapshot->extra[1]) ||
+        !ServiceBinding_ApplyExtra(service, 2, snapshot->extra[2])) { goto done; }
+    if (!ChangeServiceConfigW(service, SERVICE_NO_CHANGE,
+        snapshot->running && config->dwStartType == SERVICE_DISABLED ? SERVICE_DEMAND_START : config->dwStartType,
+        SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, NULL, NULL, NULL)) { goto done; }
+    if (!(snapshot->running && config->dwStartType == SERVICE_DISABLED))
+    {
+        const ServiceBindingValue* value = &snapshot->values[1];
+        LONG result = value->present ? RegSetValueExW(key, L"Start", 0, value->type, value->data, value->size) : RegDeleteValueW(key, L"Start");
+        if (result != ERROR_SUCCESS && !(result == ERROR_FILE_NOT_FOUND && !value->present)) { goto done; }
     }
     ok = TRUE;
 done:

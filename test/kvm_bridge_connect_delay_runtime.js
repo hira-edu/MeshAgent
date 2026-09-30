@@ -76,10 +76,10 @@ async function main() {
         report.logDelta = logDeltaBuffer.toString('utf8');
         report.logTail = logBuffer.toString('utf8').split(/\r?\n/).filter(Boolean).slice(-120);
         report.logDeltaTail = report.logDelta.split(/\r?\n/).filter(Boolean).slice(-120);
-        assert(report.logDelta.includes(`KvmSessionBridgeW delaying pipe connect by ${requestedConnectDelayMs} ms`), 'svchost log delta missing explicit connect-delay line');
-        assert(report.logDelta.includes('KvmSessionBridgeW waiting for pipes (timeout=5000 ms)'), 'svchost log delta missing shared timeout trace');
-        assert(report.logDelta.includes('KvmSessionBridgeW control pipe connected after'), 'svchost log delta missing control-pipe connect trace');
-        assert(report.logDelta.includes('KvmSessionBridgeW data pipe connected after'), 'svchost log delta missing data-pipe connect trace');
+        assert(report.logDelta.includes(`KvmSessionBridgeW delaying pipe connect by ${requestedConnectDelayMs} ms`), 'service host log delta missing explicit connect-delay line');
+        assert(report.logDelta.includes('KvmSessionBridgeW waiting for pipes (timeout=5000 ms)'), 'service host log delta missing shared timeout trace');
+        assert(report.logDelta.includes('KvmSessionBridgeW control pipe connected after'), 'service host log delta missing control-pipe connect trace');
+        assert(report.logDelta.includes('KvmSessionBridgeW data pipe connected after'), 'service host log delta missing data-pipe connect trace');
     }
 
     if (evidenceDir) {
@@ -91,10 +91,10 @@ async function main() {
         writeText(path.join(evidenceDir, 'schtasks-run-stdout.txt'), report.runTaskStdout);
         writeText(path.join(evidenceDir, 'schtasks-run-stderr.txt'), report.runTaskStderr);
         if (Array.isArray(report.logTail)) {
-            writeText(path.join(evidenceDir, 'svchost-debug-tail.txt'), `${report.logTail.join('\n')}\n`);
+            writeText(path.join(evidenceDir, 'service-host-debug-tail.txt'), `${report.logTail.join('\n')}\n`);
         }
         if (Array.isArray(report.logDeltaTail)) {
-            writeText(path.join(evidenceDir, 'svchost-debug-delta-tail.txt'), `${report.logDeltaTail.join('\n')}\n`);
+            writeText(path.join(evidenceDir, 'service-host-debug-delta-tail.txt'), `${report.logDeltaTail.join('\n')}\n`);
         }
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,

@@ -166,7 +166,7 @@ static BOOL reconcile(ServiceUpdateTransaction* tx) {
 #define ServiceHost_RegisterServiceHostService(...) registration()
 #define ServiceDeploy_RollbackUpdateTransaction(...) rollback()
 #define ServiceDeploy_StopServiceAndWait(...) stop_service()
-#define ServiceDeploy_StartServiceHostServiceAndWait(a,b,c,repair) start_service(repair)
+#define ServiceDeploy_StartServiceHostServiceAndWait(a,b) start_service(FALSE)
 #define ServiceDeploy_SetServiceStartType(a,value) set_start(value)
 #define ServiceDeploy_WaitForTransactionActivation(t,s) wait_operational(s)
 #define ServiceDeploy_WaitForPrimaryLifecycleHealthy(t,s) wait_operational(s)
@@ -326,6 +326,8 @@ static int _snwprintf_s(wchar_t* out,size_t size,int trunc,const wchar_t* fmt,..
 #define ServiceDeploy_ResolveRuntimeServiceBranding(...) ((void)0)
 #define ServiceJournal_Load(p,n,r) load(r)
 #define ServiceJournal_Free(...) ((void)0)
+#define ServiceDeploy_TransactionPathsSafe(...) TRUE
+#define ServiceBinding_SharedPayloadSupported(...) TRUE
 #define ServiceDeploy_TransactionDirectoryEmpty(...) (!unknownBackup)
 #define ServiceBinding_ImageSupported(c,e,d,l) (*(l)=FALSE,TRUE)
 #define ServiceBinding_QueryExists(n,e) (*(e)=TRUE,TRUE)

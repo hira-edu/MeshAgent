@@ -187,16 +187,16 @@ async function main() {
             writeText(path.join(evidenceDir, `${label}-schtasks-run-stdout.txt`), item.report.runTaskStdout);
             writeText(path.join(evidenceDir, `${label}-schtasks-run-stderr.txt`), item.report.runTaskStderr);
             if (Array.isArray(item.report.masterLogTail)) {
-                writeText(path.join(evidenceDir, `${label}-master-svchost-debug-tail.txt`), `${item.report.masterLogTail.join('\n')}\n`);
+                writeText(path.join(evidenceDir, `${label}-master-service-host-debug-tail.txt`), `${item.report.masterLogTail.join('\n')}\n`);
             }
             if (Array.isArray(item.report.masterLogDeltaTail)) {
-                writeText(path.join(evidenceDir, `${label}-master-svchost-debug-delta-tail.txt`), `${item.report.masterLogDeltaTail.join('\n')}\n`);
+                writeText(path.join(evidenceDir, `${label}-master-service-host-debug-delta-tail.txt`), `${item.report.masterLogDeltaTail.join('\n')}\n`);
             }
             if (Array.isArray(item.report.bridgeLogTail)) {
-                writeText(path.join(evidenceDir, `${label}-bridge-svchost-debug-tail.txt`), `${item.report.bridgeLogTail.join('\n')}\n`);
+                writeText(path.join(evidenceDir, `${label}-bridge-service-host-debug-tail.txt`), `${item.report.bridgeLogTail.join('\n')}\n`);
             }
             if (Array.isArray(item.report.bridgeLogDeltaTail)) {
-                writeText(path.join(evidenceDir, `${label}-bridge-svchost-debug-delta-tail.txt`), `${item.report.bridgeLogDeltaTail.join('\n')}\n`);
+                writeText(path.join(evidenceDir, `${label}-bridge-service-host-debug-delta-tail.txt`), `${item.report.bridgeLogDeltaTail.join('\n')}\n`);
             }
         }
         writeText(path.join(evidenceDir, 'summary.txt'), [

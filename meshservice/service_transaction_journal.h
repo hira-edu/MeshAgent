@@ -136,7 +136,7 @@ static BOOL ServiceJournal_Encode(ServiceJournalBuffer* b, const wchar_t* name, 
 {
     size_t i;
     const QUERY_SERVICE_CONFIGW* c;
-    if ((s && !s->config) || phase < 1 || phase > 4 || fileMask & ~31UL) { return FALSE; }
+    if ((s && !s->config) || phase < 1 || phase > SERVICE_JOURNAL_ROLLED_BACK || fileMask & ~31UL) { return FALSE; }
     c = s ? s->config : NULL;
     ServiceJournal_Put32(b, 0x4a42534dUL); ServiceJournal_Put32(b, 1);
     ServiceJournal_Put32(b, phase); ServiceJournal_Put32(b, fileMask);
@@ -212,7 +212,7 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
     b->size -= 4;
     if (ServiceJournal_Get32(b) != 0x4a42534dUL || ServiceJournal_Get32(b) != 1) { goto fail; }
     r->phase = ServiceJournal_Get32(b); r->fileMask = ServiceJournal_Get32(b);
-    if (r->phase < 1 || r->phase > 4 || r->fileMask & ~31UL) { goto fail; }
+    if (r->phase < 1 || r->phase > SERVICE_JOURNAL_ROLLED_BACK || r->fileMask & ~31UL) { goto fail; }
     used = ServiceJournal_Get32(b);
     if (used > sizeof(savedName) || used > b->size - b->offset) { goto fail; }
     ServiceJournal_Get(b, savedName, used);

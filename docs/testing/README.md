@@ -84,6 +84,7 @@ python3 test/service_update_recovery_native.py
 python3 test/runtime_host_service_host_native.py
 python3 test/service_binding_transaction_native.py
 python3 test/service_transaction_journal_native.py
+python3 test/service_transaction_recovery_native.py
 node test/runtime_host_installed_runtime_paths_runtime.js
 ```
 
@@ -91,8 +92,8 @@ These cover notification allocation failure, pipe callback lifetime and pending
 reads, console cleanup under backpressure, authentication rejection and service
 exit reporting, update/repair rollback ordering, primary RuntimeHost command admission,
 SCM registration failures, original-binding restoration, and durable checkpoint
-corruption and write failures. They launch no agent or
-service. Passing them does not establish Windows overlapped-I/O, ConPTY, SCM,
+corruption, write failures, and interrupted-transaction recovery. They launch no
+agent or service. Passing them does not establish Windows overlapped-I/O, ConPTY, SCM,
 filesystem rollback, or desktop-session integration; those still require the
 matching Windows build and approved runtime host.
 

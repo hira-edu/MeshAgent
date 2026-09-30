@@ -115,11 +115,13 @@ A failed activation restores the checkpoint; a fresh installation instead remove
 what it created. The original service model is rollback data only, never an
 alternate target runtime.
 
-A versioned checkpoint records preparation, completed backups, and transaction
-completion in the protected installation state directory. The next lifecycle
-operation recovers an interrupted transaction before planning new work. It
-preserves unreadable checkpoints or unrecognized rollback artifacts and fails
-without overwriting them. Successful migration removes obsolete host registration
+A versioned checkpoint records preparation, completed backups, commit, or
+completed rollback in the protected installation state directory. The next
+lifecycle operation recovers an interrupted transaction before planning new
+work. It preserves unreadable checkpoints or unrecognized rollback artifacts
+and fails without overwriting them. After durable commit, interrupted policy
+reconciliation is retried against the new runtime; it never rolls back from
+partly removed backups. Successful migration removes obsolete host registration
 and owned aliases; it does not create a compatibility service.
 
 For architecture, branding inputs, and generated paths, see

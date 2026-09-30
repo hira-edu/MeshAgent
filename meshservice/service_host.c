@@ -42,27 +42,13 @@ static void MeshAgent_Run(MeshAgentHostContainer* agent)
 static SERVICE_STATUS_HANDLE g_ServiceHostStatusHandle = NULL;
 static SERVICE_STATUS g_ServiceHostStatus = {0};
 static BOOL g_ServiceHostRunning = FALSE;
-// SCM supplies the installed key name even when runtime branding differs from
-// the build defaults. Use that identity for controls and the agent runtime.
 static wchar_t g_ServiceHostServiceName[256] = {0};
-
-static BOOL ServiceHost_SetScmServiceName(DWORD argc, LPWSTR* argv)
-{
-    g_ServiceHostServiceName[0] = L'\0';
-    if (argc == 0 || argv == NULL || argv[0] == NULL || argv[0][0] == L'\0' ||
-        wcslen(argv[0]) >= _countof(g_ServiceHostServiceName) ||
-        wcschr(argv[0], L'\\') != NULL || wcschr(argv[0], L'/') != NULL)
-    {
-        SetLastError(ERROR_INVALID_NAME);
-        return FALSE;
-    }
-    return SUCCEEDED(StringCchCopyW(g_ServiceHostServiceName, _countof(g_ServiceHostServiceName), argv[0]));
-}
+static char g_ServiceHostServiceNameUtf8[1024] = {0};
 
 static void ServiceHost_ReportStopDenial(void)
 {
     wchar_t logName[256] = {0};
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), logName, _countof(logName));
+    StringCchCopyW(logName, _countof(logName), g_ServiceHostServiceName);
     if (logName[0] == L'\0')
     {
         StringCchCopyW(logName, _countof(logName), SERVICE_FALLBACK_SERVICE_NAME);
@@ -116,12 +102,13 @@ static BOOL ServiceHost_RequestAgentStop(void)
 
 static BOOL ServiceHost_AllowStop(void)
 {
-    // AllowStop is stored under the actual SCM service key, not display branding.
-    if (g_ServiceHostServiceName[0] == L'\0') { return FALSE; }
+    // SCM's actual key is authoritative even when the installed service was renamed.
+    const wchar_t* serviceKeyName = g_ServiceHostServiceName;
+    if (!serviceKeyName[0]) { return FALSE; }
 
     wchar_t paramsKeyPath[512];
     _snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
-                 L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", g_ServiceHostServiceName);
+                 L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceKeyName);
 
     DWORD value = 0;
     DWORD cb = sizeof(value);
@@ -998,11 +985,6 @@ static BOOL ServiceHost_IsKvmBridgeInvocation(void)
     return ServiceHost_WideContains(GetCommandLineW(), MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_W);
 }
 
-static BOOL ServiceHost_IsLifecycleHostInvocation(void)
-{
-    return ServiceHost_WideContains(GetCommandLineW(), MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_W);
-}
-
 static void ServiceHost_InvalidParameterHandler(
     const wchar_t* expression,
     const wchar_t* function,
@@ -1130,7 +1112,6 @@ static void ServiceHost_InitializePaths(HINSTANCE moduleHandle)
         wchar_t helperPath[MAX_PATH] = { 0 };
         wchar_t brandedName[MAX_PATH] = { 0 };
         BOOL helperExists = FALSE;
-        BOOL lifecycleHostInvocation = ServiceHost_IsLifecycleHostInvocation();
 
         MeshService_CopyBrandingTextToWide(MeshService_GetBinaryNameText(), brandedName, _countof(brandedName));
         if (brandedName[0] == L'\0')
@@ -1139,11 +1120,7 @@ static void ServiceHost_InitializePaths(HINSTANCE moduleHandle)
         }
         ServiceHost_LogLine(L"branding binary name resolved: %ls", brandedName[0] != L'\0' ? brandedName : L"(empty)");
 
-        if (lifecycleHostInvocation)
-        {
-            ServiceHost_LogLine(L"lifecycle host invocation; helper resolution skipped");
-        }
-        else if (g_ServiceHostInstallDir[0] != L'\0')
+        if (g_ServiceHostInstallDir[0] != L'\0')
         {
             wchar_t candidate[MAX_PATH] = { 0 };
 
@@ -1346,12 +1323,35 @@ DWORD WINAPI ServiceHost_CtrlHandler(
     }
 }
 
+static BOOL ServiceHost_AcceptScmName(DWORD argc, LPWSTR* argv)
+{
+    size_t length;
+    g_ServiceHostServiceName[0] = L'\0';
+    g_ServiceHostServiceNameUtf8[0] = '\0';
+    if (!argc || !argv || !argv[0]) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    length = wcsnlen_s(argv[0], _countof(g_ServiceHostServiceName));
+    if (!length || length >= _countof(g_ServiceHostServiceName)) { SetLastError(ERROR_INVALID_NAME); return FALSE; }
+    for (size_t i = 0; i < length; ++i)
+    {
+        if (argv[0][i] < L' ' || argv[0][i] == L'\\' || argv[0][i] == L'/')
+        {
+            SetLastError(ERROR_INVALID_NAME);
+            return FALSE;
+        }
+    }
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, argv[0], -1,
+        g_ServiceHostServiceNameUtf8, sizeof(g_ServiceHostServiceNameUtf8), NULL, NULL)) { return FALSE; }
+    StringCchCopyW(g_ServiceHostServiceName, _countof(g_ServiceHostServiceName), argv[0]);
+    ServiceDeploy_SetRuntimeServiceKeyNameUtf8(g_ServiceHostServiceNameUtf8);
+    return TRUE;
+}
+
 /**
  * Private SCM entry point dispatched by MeshServiceHostW.
  */
 static VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
 {
-    if (!ServiceHost_SetScmServiceName(dwArgc, lpszArgv))
+    if (!ServiceHost_AcceptScmName(dwArgc, lpszArgv))
     {
         g_ServiceHostStatus.dwWin32ExitCode = GetLastError();
         return;
@@ -1412,13 +1412,9 @@ static VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
         ServiceHost_LogLine(L"agent exePath set to %hs", g_ServiceHostExeUtf8);
     }
 
+    g_ServiceHostAgent->meshServiceName = ILibString_Copy(g_ServiceHostServiceNameUtf8, 0);
+    ServiceHost_LogLine(L"SCM service name set to %hs", g_ServiceHostAgent->meshServiceName);
     mesh_branding_text_t serviceDisplayText = MeshService_GetServiceNameText();
-    char utf8Name[sizeof(g_ServiceHostServiceName) * 2] = {0};
-    if (WideCharToMultiByte(CP_UTF8, 0, g_ServiceHostServiceName, -1, utf8Name, (int)sizeof(utf8Name), NULL, NULL) > 0)
-    {
-        g_ServiceHostAgent->meshServiceName = ILibString_Copy(utf8Name, 0);
-        ServiceHost_LogLine(L"service name set to %hs", g_ServiceHostAgent->meshServiceName);
-    }
 #if defined(UNICODE) || defined(_UNICODE)
     if (serviceDisplayText != NULL)
     {
@@ -1580,7 +1576,6 @@ BOOL ServiceHost_ParseImagePath(const wchar_t* command, wchar_t* dllPath, size_t
 
 void CALLBACK MeshServiceHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
 {
-    wchar_t serviceName[256] = {0};
     wchar_t configuredDll[MAX_PATH * 4] = {0};
     wchar_t loadedDll[MAX_PATH * 4] = {0};
     wchar_t process[MAX_PATH * 4] = {0};
@@ -1598,9 +1593,9 @@ void CALLBACK MeshServiceHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, 
     length = GetModuleFileNameW(NULL, process, _countof(process));
     if (!length || length >= _countof(process) ||
         !MeshRuntimeHost_GetSystemHostPathW(systemHost, _countof(systemHost)) || _wcsicmp(process, systemHost) != 0) { goto done; }
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceName, _countof(serviceName));
-    if (!serviceName[0]) { goto done; }
-    table[0].lpServiceName = serviceName;
+    // SCM ignores this entry name for OWN_PROCESS services and supplies the
+    // actual installed key as ServiceMain argv[0].
+    table[0].lpServiceName = L"";
     table[0].lpServiceProc = ServiceHost_ServiceMain;
     if (!StartServiceCtrlDispatcherW(table)) { exitCode = GetLastError(); goto done; }
     exitCode = g_ServiceHostStatus.dwWin32ExitCode == ERROR_SERVICE_SPECIFIC_ERROR ?
@@ -1678,8 +1673,7 @@ BOOL ServiceHost_RegisterServiceHostService(const wchar_t* serviceName, const wc
     BOOL ok = FALSE;
     DWORD error = ERROR_SUCCESS;
     if (!serviceName || !serviceName[0] || !ServiceHost_BuildImagePath(dllPath, command, _countof(command))) { return FALSE; }
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), displayName, _countof(displayName));
-    MeshService_CopyBrandingTextToWide(MeshConfig_GetBranding()->fileDescription, description, _countof(description));
+    ServiceDeploy_ResolveRuntimeServiceBranding(NULL, 0, displayName, _countof(displayName), description, _countof(description));
     scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
     if (!scm) { goto done; }
     service = CreateServiceW(scm, serviceName, displayName[0] ? displayName : serviceName,
