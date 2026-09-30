@@ -896,6 +896,8 @@ function createRundll32UserConsent(title, caption, username, options)
         server.listen(resultPipeName);
         watchdog = setTimeout(function onWatchdog() {
             watchdog = null;
+            // Do not leave the SYSTEM helper running after the prompt was abandoned.
+            try { if (child != null) { child.kill(); } } catch (exWatchdog) { }
             reject('Windows user-consent bridge timed out waiting for native result.', true);
         }, normalizeUserConsentTimeoutMs(options.timeout) + 20000);
         launchBridge();
