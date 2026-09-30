@@ -108,6 +108,7 @@ function main() {
     const cleanup = extractFunction(kvm, 'void kvm_cleanup(void *reserved)');
     const sessionChange = extractFunction(kvm, 'static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)');
     const notify = extractFunction(kvm, 'void kvm_notify_session_change(DWORD eventType, DWORD sessionId)');
+    const signalRelevant = extractFunction(kvm, 'static int kvm_relay_signal_session_change_if_relevant(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)');
     const snapshot = extractFunction(kvm, 'int kvm_bridge_debug_get_snapshot_for_reserved(void *reserved, KvmBridgeDebugSnapshot* snapshotOut)');
     const requestShutdown = extractFunction(kvm, 'void kvm_server_request_shutdown(void)');
     const inputThread = extractFunction(bridge, 'static DWORD WINAPI KvmBridge_InputThread(LPVOID user)');
@@ -210,6 +211,14 @@ function main() {
             notify.includes('EnterCriticalSection(&gKvmSessionSignalLock);') &&
             notify.includes('preSignaledContext = gKvmBlockingWaitContext;') &&
             !notify.includes('preSignaledContext = gKvmActiveContext;'),
+        sessionLockKeepsHelperOnLockScreen:
+            sessionChange.includes('if (eventType == WTS_SESSION_LOCK)') &&
+            sessionChange.includes('session lock keeps KVM helper attached') &&
+            !sessionChange.includes('case WTS_SESSION_LOCK:') &&
+            sessionChange.indexOf('if (eventType == WTS_SESSION_LOCK)') < sessionChange.indexOf('gKvmRestartSuppressed = 1;') &&
+            signalRelevant.includes('if (eventType == WTS_SESSION_LOCK) { return 0; }') &&
+            sessionChange.includes('else if (gChildProcess != NULL && gKvmChildExitSignaled == 0)') &&
+            kvm.includes('OpenDesktopW(L"Winlogon"'),
         failedSetupRemovesPendingTimerBeforeDestroy:
             setup.indexOf('ILibLifeTime_Remove(ILibGetBaseTimer(gILibChain), ctx);') >= 0 &&
             setup.indexOf('ILibLifeTime_Remove(ILibGetBaseTimer(gILibChain), ctx);') < setup.lastIndexOf('kvm_relay_destroy_context(ctx);'),

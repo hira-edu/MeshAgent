@@ -119,6 +119,12 @@ control packets (refresh, display, compression, frame-rate, input-lock) are
 queued, up to a fixed limit; mouse and keyboard input is dropped rather than
 replayed later.
 
+A workstation lock leaves the helper running: it follows the input desktop
+onto the Winlogon lock screen, so the viewer keeps seeing the session, and it
+exits cleanly to be relaunched there if an in-place switch fails. Console or
+remote disconnect and logoff stop the helper and suppress restarts until the
+session connects or logs on again.
+
 Restarts share one per-context timer that keeps the earliest deadline:
 exponential backoff (capped at 60 s) after failed launches or failed exits, a
 refresh-probe watchdog, and session-start token retries. Input never bypasses a

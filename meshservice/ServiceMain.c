@@ -923,8 +923,7 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 	DWORD validRebindRespawnMs = 0;
 	DWORD validRebindPacketMs = 0;
 	DWORD validRebindPictureMs = 0;
-	DWORD lockStopMs = 0;
-	DWORD unlockRespawnMs = 0;
+	DWORD lockPacketMs = 0;
 	DWORD unlockPacketMs = 0;
 	DWORD unlockPictureMs = 0;
 	DWORD disconnectStopMs = 0;
@@ -964,9 +963,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 	BOOL initialSpawned = FALSE;
 	BOOL initialPacketsReady = FALSE;
 	BOOL initialPicturesReady = FALSE;
-	BOOL lockStopped = FALSE;
-	BOOL helperAbsentDuringLock = FALSE;
-	BOOL unlockRespawned = FALSE;
+	BOOL lockKeptHelper = FALSE;
+	BOOL lockPacketsReady = FALSE;
+	BOOL unlockKeptHelper = FALSE;
 	BOOL unlockPacketsReady = FALSE;
 	BOOL unlockPicturesReady = FALSE;
 	BOOL disconnectStopped = FALSE;
@@ -1173,28 +1172,30 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 
 	if (initialPacketsReady)
 	{
+		// A lock keeps the helper attached so the viewer can see the lock
+		// screen; it must neither exit nor be marked for restart.
+		DWORD lockExitMs = 0;
 		kvm_notify_session_change(WTS_SESSION_LOCK, sessionId);
-		lockStopped = MeshService_WaitForProcessExitById(activePid, 5000, &lockStopMs);
-		if (lockStopped)
+		lockKeptHelper = !MeshService_WaitForProcessExitById(activePid, 1500, &lockExitMs) &&
+			(DWORD)g_slavekvm == activePid;
+		postLockChildPresent = (kvm_bridge_debug_get_child_present() != 0);
+		postLockChildExitSignaled = (kvm_bridge_debug_is_child_exit_signaled() != 0);
+		postLockRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
+		postLockPendingRestart = (kvm_bridge_debug_peek_pending_session_restart(&postLockPendingEvent, &postLockPendingSessionId) != 0);
+		postLockTransportActive = (kvm_bridge_debug_get_transport_active() != 0);
+		if (lockKeptHelper)
 		{
-			Sleep(500);
-			postLockChildPresent = (kvm_bridge_debug_get_child_present() != 0);
-			postLockChildExitSignaled = (kvm_bridge_debug_is_child_exit_signaled() != 0);
-			postLockRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
-			postLockPendingRestart = (kvm_bridge_debug_peek_pending_session_restart(&postLockPendingEvent, &postLockPendingSessionId) != 0);
-			postLockTransportActive = (kvm_bridge_debug_get_transport_active() != 0);
-			helperAbsentDuringLock = !MeshService_IsProcessAliveById(activePid);
-			if (g_slavekvm > 0 && (DWORD)g_slavekvm != activePid && MeshService_IsProcessAliveById((DWORD)g_slavekvm))
-			{
-				helperAbsentDuringLock = FALSE;
-			}
+			lockPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &lockPacketMs);
 		}
 	}
 
-	if (helperAbsentDuringLock)
+	if (lockPacketsReady)
 	{
+		DWORD unlockExitMs = 0;
 		kvm_notify_session_change(WTS_SESSION_UNLOCK, sessionId);
-		unlockRespawned = MeshService_WaitForBridgePidChange(activePid, 5000, &unlockRespawnMs, &unlockPid);
+		unlockKeptHelper = !MeshService_WaitForProcessExitById(activePid, 1000, &unlockExitMs) &&
+			(DWORD)g_slavekvm == activePid;
+		unlockPid = (g_slavekvm > 0) ? (DWORD)g_slavekvm : 0;
 		postUnlockChildPresent = (kvm_bridge_debug_get_child_present() != 0);
 		postUnlockChildExitSignaled = (kvm_bridge_debug_is_child_exit_signaled() != 0);
 		postUnlockRestartSuppressed = (kvm_bridge_debug_get_restart_suppressed() != 0);
@@ -1210,9 +1211,8 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 		postUnlockLaunchAttemptCount = kvm_bridge_debug_get_last_launch_attempt_count();
 		postUnlockSuccessfulSpawnType = kvm_bridge_debug_get_last_successful_spawn_type();
 		postUnlockSuccessfulSpawnAttemptOrdinal = kvm_bridge_debug_get_last_successful_spawn_attempt_ordinal();
-		if (unlockRespawned)
+		if (unlockKeptHelper)
 		{
-			activePid = unlockPid;
 			unlockPacketsReady = MeshService_RequestKvmRelayRefreshAndWait(&state, 5000, &unlockPacketMs);
 			if (unlockPacketsReady)
 			{
@@ -1305,11 +1305,18 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 		initialLaunchAttemptCount == 1 &&
 		initialSuccessfulSpawnType == (DWORD)ILibProcessPipe_SpawnTypes_WINLOGON &&
 		initialSuccessfulSpawnAttemptOrdinal == 1 &&
-		lockStopped &&
-		lockStopMs <= 2000 &&
-		helperAbsentDuringLock &&
-		unlockRespawned &&
-		unlockRespawnMs <= 2000 &&
+		lockKeptHelper &&
+		postLockChildPresent &&
+		!postLockChildExitSignaled &&
+		!postLockRestartSuppressed &&
+		!postLockPendingRestart &&
+		postLockTransportActive &&
+		lockPacketsReady &&
+		unlockKeptHelper &&
+		postUnlockChildPresent &&
+		!postUnlockRestartSuppressed &&
+		!postUnlockPendingRestart &&
+		postUnlockTransportActive &&
 		unlockPacketsReady &&
 		unlockPicturesReady &&
 		postUnlockLaunchAttemptCount == 1 &&
@@ -1386,9 +1393,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 	printf("\"initialSpawnMs\":%lu,", (unsigned long)initialSpawnMs);
 	printf("\"initialPacketMs\":%lu,", (unsigned long)initialPacketMs);
 	printf("\"initialPictureMs\":%lu,", (unsigned long)initialPictureMs);
-	printf("\"lockStopped\":%s,", lockStopped ? "true" : "false");
-	printf("\"lockStopMs\":%lu,", (unsigned long)lockStopMs);
-	printf("\"helperAbsentDuringLock\":%s,", helperAbsentDuringLock ? "true" : "false");
+	printf("\"lockKeptHelper\":%s,", lockKeptHelper ? "true" : "false");
+	printf("\"lockPacketsReady\":%s,", lockPacketsReady ? "true" : "false");
+	printf("\"lockPacketMs\":%lu,", (unsigned long)lockPacketMs);
 	printf("\"postLockChildPresent\":%s,", postLockChildPresent ? "true" : "false");
 	printf("\"postLockChildExitSignaled\":%s,", postLockChildExitSignaled ? "true" : "false");
 	printf("\"postLockRestartSuppressed\":%s,", postLockRestartSuppressed ? "true" : "false");
@@ -1396,8 +1403,9 @@ static int MeshService_RunKvmBridgeSessionChangeProbeWorkerCommand(BOOL autoSele
 	printf("\"postLockPendingEvent\":%lu,", (unsigned long)postLockPendingEvent);
 	printf("\"postLockPendingSessionId\":%lu,", (unsigned long)postLockPendingSessionId);
 	printf("\"postLockTransportActive\":%s,", postLockTransportActive ? "true" : "false");
-	printf("\"unlockRespawned\":%s,", unlockRespawned ? "true" : "false");
-	printf("\"unlockRespawnMs\":%lu,", (unsigned long)unlockRespawnMs);
+	printf("\"unlockKeptHelper\":%s,", unlockKeptHelper ? "true" : "false");
+	printf("\"unlockPacketsReady\":%s,", unlockPacketsReady ? "true" : "false");
+	printf("\"unlockPicturesReady\":%s,", unlockPicturesReady ? "true" : "false");
 	printf("\"unlockPacketMs\":%lu,", (unsigned long)unlockPacketMs);
 	printf("\"unlockPictureMs\":%lu,", (unsigned long)unlockPictureMs);
 	printf("\"postUnlockChildPresent\":%s,", postUnlockChildPresent ? "true" : "false");

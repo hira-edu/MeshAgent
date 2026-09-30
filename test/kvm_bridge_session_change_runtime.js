@@ -254,11 +254,19 @@ function validateProbeJson(json, expectedAutoSelected) {
     assert(json.initialSuccessfulSpawnType === 2, `${label} initial bridge used unexpected spawn type ${json.initialSuccessfulSpawnType}`);
     assert(json.initialSuccessfulSpawnAttemptOrdinal === 1, `${label} initial bridge succeeded on attempt ${json.initialSuccessfulSpawnAttemptOrdinal}`);
     assert(json.initialTransportActive === true, `${label} bridge transport never became active`);
-    assert(json.lockStopped === true, `${label} lock event did not stop the helper`);
-    assert(json.lockStopMs <= 2000, `${label} lock stop exceeded 2000ms (${json.lockStopMs}ms)`);
-    assert(json.helperAbsentDuringLock === true, `${label} helper remained present during lock`);
-    assert(json.unlockRespawned === true, `${label} unlock event did not respawn the helper`);
-    assert(json.unlockRespawnMs <= 2000, `${label} unlock respawn exceeded 2000ms (${json.unlockRespawnMs}ms)`);
+    assert(json.lockKeptHelper === true, `${label} lock event stopped the helper; the viewer must keep seeing the lock screen`);
+    assert(json.postLockChildPresent === true, `${label} relay lost its helper during lock`);
+    assert(json.postLockChildExitSignaled === false, `${label} lock event signalled a helper exit`);
+    assert(json.postLockRestartSuppressed === false, `${label} lock event suppressed helper restarts`);
+    assert(json.postLockPendingRestart === false, `${label} lock event left a pending restart`);
+    assert(json.postLockTransportActive === true, `${label} bridge transport was inactive during lock`);
+    assert(json.lockPacketsReady === true, `${label} refresh during lock produced no KVM packets`);
+    assert(json.unlockKeptHelper === true, `${label} unlock event replaced the helper that stayed attached through lock`);
+    assert(json.postUnlockChildPresent === true, `${label} relay lost its helper after unlock`);
+    assert(json.postUnlockRestartSuppressed === false, `${label} relay remained restart-suppressed after unlock`);
+    assert(json.postUnlockPendingRestart === false, `${label} unlock left a pending restart`);
+    assert(json.postUnlockTransportActive === true, `${label} bridge transport was inactive after unlock`);
+    assert(json.unlockPacketsReady === true, `${label} refresh after unlock produced no KVM packets`);
     assert(json.postUnlockBridgeUsed === true, `${label} bridge path was not restored after unlock`);
     assert(json.postUnlockFallbackUsed === false, `${label} unlock restarted on legacy fallback unexpectedly`);
     assert(json.postUnlockLaunchAttemptCount === 1, `${label} unlock restart needed fallback attempts (${json.postUnlockLaunchAttemptCount})`);
@@ -275,7 +283,7 @@ function validateProbeJson(json, expectedAutoSelected) {
     assert(json.cleanupExited === true, `${label} cleanup did not stop the final helper`);
     assert(json.cleanupExitMs <= 5000, `${label} cleanup exit exceeded 5000ms (${json.cleanupExitMs}ms)`);
     assert(json.initialPid > 0, `${label} invalid initial pid ${json.initialPid}`);
-    assert(json.unlockPid > 0 && json.unlockPid !== json.initialPid, `${label} unlock pid was not a new helper (${json.unlockPid})`);
+    assert(json.unlockPid > 0, `${label} invalid helper pid after unlock (${json.unlockPid})`);
     assert(json.reconnectPid > 0 && json.reconnectPid !== json.unlockPid, `${label} reconnect pid was not a new helper (${json.reconnectPid})`);
     assert((json.screenPackets + json.displayListPackets + json.displayInfoPackets + json.cursorPackets) > 0, `${label} probe did not observe any KVM packets`);
 }
@@ -374,8 +382,8 @@ async function main() {
             `EXPLICIT_INITIAL_PID=${explicitProbe.json.initialPid}`,
             `EXPLICIT_UNLOCK_PID=${explicitProbe.json.unlockPid}`,
             `EXPLICIT_RECONNECT_PID=${explicitProbe.json.reconnectPid}`,
-            `EXPLICIT_LOCK_STOP_MS=${explicitProbe.json.lockStopMs}`,
-            `EXPLICIT_UNLOCK_RESPAWN_MS=${explicitProbe.json.unlockRespawnMs}`,
+            `EXPLICIT_LOCK_KEPT_HELPER=${explicitProbe.json.lockKeptHelper}`,
+            `EXPLICIT_LOCK_PACKET_MS=${explicitProbe.json.lockPacketMs}`,
             `EXPLICIT_DISCONNECT_STOP_MS=${explicitProbe.json.disconnectStopMs}`,
             `EXPLICIT_RECONNECT_RESPAWN_MS=${explicitProbe.json.reconnectRespawnMs}`,
             `AUTO_TASK_NAME=${report.probes.auto.taskName}`,
@@ -396,8 +404,8 @@ async function main() {
             `AUTO_INITIAL_PID=${autoProbe.json.initialPid}`,
             `AUTO_UNLOCK_PID=${autoProbe.json.unlockPid}`,
             `AUTO_RECONNECT_PID=${autoProbe.json.reconnectPid}`,
-            `AUTO_LOCK_STOP_MS=${autoProbe.json.lockStopMs}`,
-            `AUTO_UNLOCK_RESPAWN_MS=${autoProbe.json.unlockRespawnMs}`,
+            `AUTO_LOCK_KEPT_HELPER=${autoProbe.json.lockKeptHelper}`,
+            `AUTO_LOCK_PACKET_MS=${autoProbe.json.lockPacketMs}`,
             `AUTO_DISCONNECT_STOP_MS=${autoProbe.json.disconnectStopMs}`,
             `AUTO_RECONNECT_RESPAWN_MS=${autoProbe.json.reconnectRespawnMs}`,
             `TOTAL_PACKETS=${explicitProbe.json.screenPackets + explicitProbe.json.displayListPackets + explicitProbe.json.displayInfoPackets + explicitProbe.json.cursorPackets + autoProbe.json.screenPackets + autoProbe.json.displayListPackets + autoProbe.json.displayInfoPackets + autoProbe.json.cursorPackets}`

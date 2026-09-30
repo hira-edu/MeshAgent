@@ -5402,6 +5402,10 @@ static int kvm_relay_signal_session_change_if_relevant(KvmRelayContext* ctx, DWO
 {
 	int ignoreReason = KVM_SESSION_CHANGE_IGNORE_NONE;
 
+	// A lock does not change which session or display the helper serves, so
+	// it must not abort a launch that is waiting for its pipe clients.
+	if (eventType == WTS_SESSION_LOCK) { return 0; }
+
 	if (!kvm_relay_session_change_affects_context(ctx, eventType, sessionId, 1, &ignoreReason))
 	{
 		if (ignoreReason != KVM_SESSION_CHANGE_IGNORE_UNQUERYABLE_START || !kvm_session_id_exists(sessionId))
@@ -5738,12 +5742,25 @@ static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DW
 	}
 
 	kvm_relay_activate_context(ctx);
+	if (eventType == WTS_SESSION_LOCK)
+	{
+		// Locking keeps the session and its display. The helper follows the
+		// input desktop onto the lock screen (CheckDesktopSwitch opens the
+		// Winlogon desktop), or exits cleanly and is restarted there, so the
+		// viewer keeps seeing the session instead of a frozen frame.
+		kvm_trace_startupf("session lock keeps KVM helper attached event=%u session=%u childPid=%d",
+			(unsigned int)eventType,
+			(unsigned int)sessionId,
+			ctx->childPid);
+		kvm_relay_capture_context(ctx);
+		kvm_relay_deactivate_context();
+		return;
+	}
 	gKvmPendingSessionRestartEvent = eventType;
 	gKvmPendingSessionRestartSessionId = sessionId;
 
 	switch (eventType)
 	{
-	case WTS_SESSION_LOCK:
 	case WTS_CONSOLE_DISCONNECT:
 	case WTS_REMOTE_DISCONNECT:
 	case WTS_SESSION_LOGOFF:
@@ -5785,6 +5802,14 @@ static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DW
 			gKvmChildExitSignaled = 1;
 			kvm_update_runtime_state(0, 0);
 			ILibProcessPipe_Process_SoftKill(gChildProcess);
+		}
+		else if (gChildProcess != NULL && gKvmChildExitSignaled == 0)
+		{
+			// The helper kept running (for example across a lock); nothing
+			// has to be restarted for this event. An exiting helper keeps the
+			// reason until its replacement starts.
+			gKvmPendingSessionRestartEvent = 0;
+			gKvmPendingSessionRestartSessionId = 0;
 		}
 #ifdef _WINSERVICE
 		else if (gChildProcess == NULL && g_shutdown == 0 && gKvmPipeMgr != NULL && gKvmExePath != NULL && gKvmWriteHandler != NULL)
