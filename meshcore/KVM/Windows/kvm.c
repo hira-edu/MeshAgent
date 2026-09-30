@@ -297,6 +297,11 @@ static void kvm_write_scaling_factor(volatile LONG* scalingFactor, int scaling)
 #ifndef KVM_REFRESH_PROBE_TIMEOUT_MS
 #define KVM_REFRESH_PROBE_TIMEOUT_MS (KVM_BRIDGE_CONNECT_TIMEOUT_MS * 2)
 #endif
+// A bridge input write only pends once the helper has left the 1 MB pipe buffer unread, so a
+// write still pending after this long means the helper has stopped draining its input.
+#ifndef KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS
+#define KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS 2000
+#endif
 #ifndef KVM_BRIDGE_FAILURE_STAGE_EXIT
 #define KVM_BRIDGE_FAILURE_STAGE_EXIT 7
 #endif
@@ -374,8 +379,18 @@ typedef struct KvmRelayContext
 #define KVM_MAX_RELAY_CONTEXTS 16
 static KvmRelayContext* gKvmRelayContexts[KVM_MAX_RELAY_CONTEXTS] = { 0 };
 static CRITICAL_SECTION gKvmRelayContextLock;
-static LONG gKvmRelayContextLockInitialized = 0;
+// Short-hold lock for the service control thread. It only guards reading gKvmRelayContexts and
+// signaling a context's session-change event; kvm_relay_destroy_context takes it before releasing
+// a context, so a context seen under this lock stays alive until the lock is released.
+static CRITICAL_SECTION gKvmRelaySignalLock;
+static INIT_ONCE gKvmRelayLocksOnce = INIT_ONCE_STATIC_INIT;
 static KvmRelayContext* gKvmActiveContext = NULL;
+
+typedef struct KvmSessionChangeRequest
+{
+	DWORD eventType;
+	DWORD sessionId;
+}KvmSessionChangeRequest;
 
 typedef struct KvmRelayProcessUser
 {
@@ -403,12 +418,31 @@ static void kvm_schedule_retry_timer_delay(DWORD delayMs);
 static void kvm_update_runtime_state(int childPresent, int transportActive);
 static void kvm_record_spawn_failure(DWORD error, DWORD stage, DWORD spawnType);
 
+static BOOL CALLBACK kvm_relay_initialize_locks(PINIT_ONCE initOnce, PVOID parameter, PVOID* context)
+{
+	UNREFERENCED_PARAMETER(initOnce);
+	UNREFERENCED_PARAMETER(parameter);
+	UNREFERENCED_PARAMETER(context);
+	InitializeCriticalSection(&gKvmRelayContextLock);
+	InitializeCriticalSection(&gKvmRelaySignalLock);
+	return TRUE;
+}
+
 static void kvm_relay_ensure_registry_lock()
 {
-	if (InterlockedCompareExchange(&gKvmRelayContextLockInitialized, 1, 0) == 0)
-	{
-		InitializeCriticalSection(&gKvmRelayContextLock);
-	}
+	// The service control thread can be the first caller, racing the chain thread.
+	InitOnceExecuteOnce(&gKvmRelayLocksOnce, kvm_relay_initialize_locks, NULL, NULL);
+}
+
+static void kvm_relay_signal_lock()
+{
+	kvm_relay_ensure_registry_lock();
+	EnterCriticalSection(&gKvmRelaySignalLock);
+}
+
+static void kvm_relay_signal_unlock()
+{
+	LeaveCriticalSection(&gKvmRelaySignalLock);
 }
 
 static void kvm_relay_lock()
@@ -513,8 +547,15 @@ static KvmRelayContext* kvm_relay_allocate_context()
 static void kvm_relay_destroy_context(KvmRelayContext* ctx)
 {
 	KvmRelayCachedControlPacket* packet = NULL;
+	HANDLE sessionChangeEvent = NULL;
 
 	if (ctx == NULL) { return; }
+	// Callers unregister ctx before destroying it. Taking the signal lock here waits out any
+	// kvm_notify_session_change() that found ctx in the registry before it was unregistered.
+	kvm_relay_signal_lock();
+	sessionChangeEvent = ctx->sessionChangeEvent;
+	ctx->sessionChangeEvent = NULL;
+	kvm_relay_signal_unlock();
 	kvm_relay_close_bridge_transport(ctx);
 	kvm_relay_close_bridge_job(ctx);
 	if (InterlockedCompareExchange(&ctx->cacheInitialized, 0, 0) != 0)
@@ -532,10 +573,9 @@ static void kvm_relay_destroy_context(KvmRelayContext* ctx)
 		}
 		DeleteCriticalSection(&ctx->cacheLock);
 	}
-	if (ctx->sessionChangeEvent != NULL)
+	if (sessionChangeEvent != NULL)
 	{
-		CloseHandle(ctx->sessionChangeEvent);
-		ctx->sessionChangeEvent = NULL;
+		CloseHandle(sessionChangeEvent);
 	}
 	ILibMemory_Free(ctx);
 }
@@ -1113,12 +1153,42 @@ static int kvm_relay_prepare_bridge_respawn_from_input(KvmRelayContext* ctx, cha
 #endif
 }
 
+// The helper stopped draining its input pipe. Detach the transport so later input is not written
+// (and cannot stall again), then terminate the helper; its exit handler applies the restart policy.
+static void kvm_relay_abandon_stalled_bridge(KvmRelayContext* ctx)
+{
+	int isActive = (ctx == gKvmActiveContext);
+	ILibProcessPipe_Process childProcess = isActive ? gChildProcess : ctx->childProcess;
+
+	InterlockedExchange(&ctx->bridgeTransportAttached, 0);
+	InterlockedExchange(&ctx->bridgeClientConnected, 0);
+	ctx->transportActive = 0;
+	if (isActive)
+	{
+		gKvmTransportActive = 0;
+		if (childProcess != NULL)
+		{
+			gKvmChildExitSignaled = 1;
+			kvm_update_runtime_state(0, 0);
+		}
+	}
+	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+		"KVM [Master]: bridge helper stopped reading input for %lu ms; terminating it (pid=%d)",
+		(unsigned long)KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS,
+		ctx->childPid);
+	if (childProcess != NULL)
+	{
+		ILibProcessPipe_Process_SoftKill(childProcess);
+	}
+}
+
 static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int bufferLen)
 {
 	OVERLAPPED overlapped;
 	DWORD bytesWritten = 0;
 	BOOL result = FALSE;
 	DWORD errorCode = ERROR_SUCCESS;
+	DWORD waitResult = WAIT_FAILED;
 
 	if (ctx == NULL || ctx->bridgeInputPipeHandle == NULL || ctx->bridgeInputPipeHandle == INVALID_HANDLE_VALUE || buffer == NULL || bufferLen <= 0) { return FALSE; }
 
@@ -1136,8 +1206,34 @@ static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int
 		errorCode = GetLastError();
 		if (errorCode == ERROR_IO_PENDING)
 		{
-			result = GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, TRUE);
-			if (!result) { errorCode = GetLastError(); }
+			// This runs on the chain thread under the relay lock, so it must not wait indefinitely.
+			waitResult = WaitForSingleObject(overlapped.hEvent, KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS);
+			if (waitResult == WAIT_OBJECT_0)
+			{
+				result = GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, FALSE);
+				if (!result) { errorCode = GetLastError(); }
+			}
+			else
+			{
+				// Cancel the write, then wait for the cancellation to finish so the I/O cannot
+				// complete into this stack frame. A write that completed first still counts.
+				errorCode = (waitResult == WAIT_TIMEOUT) ? ERROR_TIMEOUT : GetLastError();
+				CancelIoEx(ctx->bridgeInputPipeHandle, &overlapped);
+				result = GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, TRUE);
+				if (!result)
+				{
+					DWORD cancelError = GetLastError();
+					if (cancelError != ERROR_OPERATION_ABORTED) { errorCode = cancelError; }
+					kvm_trace_startupf("bridge input write abandoned after %lu ms error=%lu len=%d",
+						(unsigned long)KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS,
+						(unsigned long)errorCode,
+						bufferLen);
+					if (errorCode == ERROR_TIMEOUT)
+					{
+						kvm_relay_abandon_stalled_bridge(ctx);
+					}
+				}
+			}
 		}
 	}
 
@@ -1691,13 +1787,52 @@ static int kvm_relay_append_bridge_env_passthrough(char** envvars, int pairCount
 	return pairCount + 1;
 }
 
+// The bridge helper is spawned with a duplicate of this process's own token (moved into the target
+// session), so it runs as the same account as the service. Only SYSTEM and that account may open the
+// pipes; interactive users must not be able to read viewer input or inject screen output.
+#define KVM_BRIDGE_PIPE_DACL_SDDL L"D:P(A;;GA;;;SY)"
+#ifndef PIPE_REJECT_REMOTE_CLIENTS
+#define PIPE_REJECT_REMOTE_CLIENTS 0x00000008
+#endif
+
+static BOOL kvm_relay_build_bridge_pipe_sddlW(WCHAR* sddl, size_t sddlLen)
+{
+	HANDLE token = NULL;
+	DWORD returned = 0;
+	LPWSTR sidText = NULL;
+	BOOL ok = FALSE;
+	union
+	{
+		TOKEN_USER user;
+		BYTE buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+	} tokenUser;
+
+	if (sddl == NULL || sddlLen == 0) { return FALSE; }
+	sddl[0] = L'\0';
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) { return FALSE; }
+	if (GetTokenInformation(token, TokenUser, &tokenUser, (DWORD)sizeof(tokenUser), &returned))
+	{
+		if (IsWellKnownSid(tokenUser.user.User.Sid, WinLocalSystemSid))
+		{
+			ok = SUCCEEDED(StringCchCopyW(sddl, sddlLen, KVM_BRIDGE_PIPE_DACL_SDDL));
+		}
+		else if (ConvertSidToStringSidW(tokenUser.user.User.Sid, &sidText))
+		{
+			ok = SUCCEEDED(StringCchPrintfW(sddl, sddlLen, L"%ls(A;;GA;;;%ls)", KVM_BRIDGE_PIPE_DACL_SDDL, sidText));
+			LocalFree(sidText);
+		}
+	}
+	CloseHandle(token);
+	return ok;
+}
+
 static BOOL kvm_relay_create_bridge_server_pipeW(const WCHAR* pipeName, DWORD pipeOpenMode, HANDLE* pipeOut)
 {
 	PSECURITY_DESCRIPTOR securityDescriptor = NULL;
 	SECURITY_ATTRIBUTES securityAttributes;
 	HANDLE pipeHandle = INVALID_HANDLE_VALUE;
 	DWORD pipeBufferSize = 1024 * 1024;
-	static const WCHAR* KVM_BRIDGE_PIPE_DACL_SDDL = L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)(A;;GA;;;SU)";
+	WCHAR pipeDaclSddl[256] = { 0 };
 
 	if (pipeOut == NULL || pipeName == NULL || pipeName[0] == L'\0') { return FALSE; }
 	*pipeOut = INVALID_HANDLE_VALUE;
@@ -1706,19 +1841,19 @@ static BOOL kvm_relay_create_bridge_server_pipeW(const WCHAR* pipeName, DWORD pi
 	securityAttributes.nLength = sizeof(securityAttributes);
 	securityAttributes.bInheritHandle = FALSE;
 
-	// The bridge helper is intentionally spawned with the logged-on session token
-	// for USER/SPECIFIED_USER launch modes, so the pipe ACL must admit interactive
-	// users in addition to SYSTEM/Administrators.
-	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(KVM_BRIDGE_PIPE_DACL_SDDL, SDDL_REVISION_1, &securityDescriptor, NULL))
+	if (!kvm_relay_build_bridge_pipe_sddlW(pipeDaclSddl, _countof(pipeDaclSddl)) ||
+		!ConvertStringSecurityDescriptorToSecurityDescriptorW(pipeDaclSddl, SDDL_REVISION_1, &securityDescriptor, NULL))
 	{
 		return FALSE;
 	}
 
 	securityAttributes.lpSecurityDescriptor = securityDescriptor;
+	// FILE_FLAG_FIRST_PIPE_INSTANCE fails creation if another process already owns this name, and
+	// PIPE_REJECT_REMOTE_CLIENTS keeps the pipe local-only.
 	pipeHandle = CreateNamedPipeW(
 		pipeName,
-		pipeOpenMode | FILE_FLAG_OVERLAPPED,
-		PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+		pipeOpenMode | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+		PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
 		1,
 		pipeBufferSize,
 		pipeBufferSize,
@@ -1840,6 +1975,39 @@ cleanup:
 	CloseHandle(overlapped.hEvent);
 	if (!ok && errorOut != NULL) { *errorOut = errorCode; }
 	return ok;
+}
+
+// Each bridge pipe allows a single instance, so whoever connects first owns it. Nothing is written to
+// or read from a pipe until its client is confirmed to be the helper process this relay launched.
+static BOOL kvm_relay_verify_bridge_client(HANDLE pipeHandle, DWORD expectedPid, DWORD* errorOut)
+{
+	ULONG clientPid = 0;
+	DWORD errorCode = ERROR_SUCCESS;
+
+	if (errorOut != NULL) { *errorOut = ERROR_SUCCESS; }
+	if (expectedPid == 0)
+	{
+		errorCode = ERROR_INVALID_PARAMETER;
+	}
+	else if (!GetNamedPipeClientProcessId(pipeHandle, &clientPid))
+	{
+		errorCode = GetLastError();
+		if (errorCode == ERROR_SUCCESS) { errorCode = ERROR_ACCESS_DENIED; }
+	}
+	else if ((DWORD)clientPid != expectedPid)
+	{
+		errorCode = ERROR_ACCESS_DENIED;
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+			"KVM [Master]: bridge pipe client pid=%lu is not the launched helper pid=%lu; rejecting",
+			(unsigned long)clientPid,
+			(unsigned long)expectedPid);
+	}
+	if (errorCode != ERROR_SUCCESS)
+	{
+		if (errorOut != NULL) { *errorOut = errorCode; }
+		return FALSE;
+	}
+	return TRUE;
 }
 
 static BOOL kvm_relay_attach_bridge_transport(KvmRelayContext* ctx, HANDLE inputPipeHandle, HANDLE outputPipeHandle)
@@ -4683,6 +4851,15 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					continue;
 				}
 				kvm_trace_startupf("bridge stdin pipe connected successfully after %llu ms", (unsigned long long)(GetTickCount64() - bridgeConnectStartTickMs));
+				if (!kvm_relay_verify_bridge_client(ctx->bridgeInputPipeHandle, ILibProcessPipe_Process_GetPID(gChildProcess), &lastError))
+				{
+					kvm_trace_startupf("bridge stdin client rejected error=%u attempt=%d type=%d", lastError, attempt + 1, (int)attemptType);
+					ILibProcessPipe_Process_SoftKill(gChildProcess);
+					gChildProcess = NULL;
+					kvm_relay_close_bridge_transport(ctx);
+					kvm_relay_close_bridge_job(ctx);
+					continue;
+				}
 
 				connectAbortedBySessionChange = FALSE;
 				if (!kvm_relay_wait_for_bridge_client(ctx, ctx->bridgeOutputPipeHandle, KVM_BRIDGE_CONNECT_TIMEOUT_MS, restartSessionGeneration, &lastError, &connectAbortedBySessionChange))
@@ -4715,6 +4892,15 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					continue;
 				}
 				kvm_trace_startupf("bridge stdout pipe connected successfully after %llu ms", (unsigned long long)(GetTickCount64() - bridgeConnectStartTickMs));
+				if (!kvm_relay_verify_bridge_client(ctx->bridgeOutputPipeHandle, ILibProcessPipe_Process_GetPID(gChildProcess), &lastError))
+				{
+					kvm_trace_startupf("bridge stdout client rejected error=%u attempt=%d type=%d", lastError, attempt + 1, (int)attemptType);
+					ILibProcessPipe_Process_SoftKill(gChildProcess);
+					gChildProcess = NULL;
+					kvm_relay_close_bridge_transport(ctx);
+					kvm_relay_close_bridge_job(ctx);
+					continue;
+				}
 				if (kvm_relay_session_generation_changed(ctx, restartSessionGeneration))
 				{
 					lastError = ERROR_OPERATION_ABORTED;
@@ -5312,59 +5498,79 @@ static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DW
 	kvm_relay_deactivate_context();
 }
 
-void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
-{
 #ifdef _WINSERVICE
+// Runs on the chain thread, which owns context lifetime, so the full handler may take the relay lock
+// and restart helpers there without stalling the service control handler.
+static void kvm_relay_dispatch_session_change_on_chain(void* chain, void* user)
+{
+	KvmSessionChangeRequest* request = (KvmSessionChangeRequest*)user;
 	KvmRelayContext* snapshot[KVM_MAX_RELAY_CONTEXTS] = { 0 };
-	KvmRelayContext* preSignaledContext = NULL;
 	int i = 0;
-	int preSignaled = 0;
 
-	kvm_relay_ensure_registry_lock();
-	if (TryEnterCriticalSection(&gKvmRelayContextLock))
-	{
-		for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
-		{
-			snapshot[i] = gKvmRelayContexts[i];
-			if (snapshot[i] != NULL)
-			{
-				(void)kvm_relay_signal_session_change_if_relevant(snapshot[i], eventType, sessionId);
-			}
-		}
-		for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
-		{
-			if (snapshot[i] != NULL)
-			{
-				// Equivalent retained dispatch contract:
-				// kvm_relay_handle_session_change_for_context(snapshot[i], request->eventType, request->sessionId);
-				kvm_relay_handle_session_change_for_context(snapshot[i], eventType, sessionId);
-			}
-		}
-		kvm_relay_unlock();
-		return;
-	}
+	UNREFERENCED_PARAMETER(chain);
+	if (request == NULL) { return; }
 
-	preSignaledContext = gKvmActiveContext;
-	preSignaled = kvm_relay_signal_session_change_if_relevant(preSignaledContext, eventType, sessionId);
 	kvm_relay_lock();
 	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
 	{
 		snapshot[i] = gKvmRelayContexts[i];
-		if (snapshot[i] != NULL && (preSignaled == 0 || snapshot[i] != preSignaledContext))
-		{
-			(void)kvm_relay_signal_session_change_if_relevant(snapshot[i], eventType, sessionId);
-		}
 	}
 	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
 	{
 		if (snapshot[i] != NULL)
 		{
-			// Equivalent retained dispatch contract:
-			// kvm_relay_handle_session_change_for_context(snapshot[i], request->eventType, request->sessionId);
-			kvm_relay_handle_session_change_for_context(snapshot[i], eventType, sessionId);
+			kvm_relay_handle_session_change_for_context(snapshot[i], request->eventType, request->sessionId);
 		}
 	}
 	kvm_relay_unlock();
+	free(request);
+}
+#endif
+
+// Called from the service control handler, which must return promptly. This never takes the relay
+// lock: it wakes any bridge launch waiting on a relevant context, then queues the rest to the chain.
+void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
+{
+#ifdef _WINSERVICE
+	KvmSessionChangeRequest* request = NULL;
+	void* chain = gILibChain;
+	int registeredContexts = 0;
+	int i = 0;
+
+	kvm_relay_signal_lock();
+	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
+	{
+		// Registry slots are written under the relay lock; read each slot once, atomically.
+		KvmRelayContext* ctx = (KvmRelayContext*)InterlockedCompareExchangePointer((PVOID volatile*)&gKvmRelayContexts[i], NULL, NULL);
+		if (ctx != NULL)
+		{
+			++registeredContexts;
+			(void)kvm_relay_signal_session_change_if_relevant(ctx, eventType, sessionId);
+		}
+	}
+	kvm_relay_signal_unlock();
+
+	if (registeredContexts == 0) { return; }
+	if (chain == NULL)
+	{
+		kvm_trace_startupf("session change dropped because no chain is available event=%u session=%u",
+			(unsigned int)eventType,
+			(unsigned int)sessionId);
+		return;
+	}
+
+	request = (KvmSessionChangeRequest*)malloc(sizeof(KvmSessionChangeRequest));
+	if (request == NULL)
+	{
+		kvm_trace_startupf("session change dropped because the dispatch request could not be allocated event=%u session=%u",
+			(unsigned int)eventType,
+			(unsigned int)sessionId);
+		return;
+	}
+	request->eventType = eventType;
+	request->sessionId = sessionId;
+	// Free on shutdown: if the chain stops before this runs, the request is released with free().
+	ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);
 #else
 	UNREFERENCED_PARAMETER(eventType);
 	UNREFERENCED_PARAMETER(sessionId);
