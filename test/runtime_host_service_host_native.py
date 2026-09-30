@@ -37,8 +37,9 @@ typedef int BOOL;
 typedef uint32_t DWORD;
 typedef unsigned char BYTE;
 typedef long LONG;
-typedef void *HKEY, *SC_HANDLE, *HWND, *HINSTANCE;
+typedef void *HKEY, *SC_HANDLE, *HWND, *HINSTANCE, *HMODULE;
 typedef wchar_t* LPWSTR;
+typedef const wchar_t* LPCWSTR;
 typedef struct { DWORD dwServiceType, dwStartType; wchar_t* lpServiceStartName; } QUERY_SERVICE_CONFIGW;
 typedef struct { DWORD dwServiceSidType; } SERVICE_SID_INFO;
 typedef struct { wchar_t* lpDescription; } SERVICE_DESCRIPTIONW;
@@ -75,11 +76,15 @@ typedef struct { wchar_t* lpServiceName; void (*lpServiceProc)(DWORD, LPWSTR*); 
 #define REG_MULTI_SZ 7
 #define HKEY_LOCAL_MACHINE ((HKEY)1)
 #define _countof(a) (sizeof(a) / sizeof((a)[0]))
+#ifndef _WIN32
 #define _wcsicmp wcscasecmp
+#endif
 #define FAILED(x) ((x) < 0)
 #define UNREFERENCED_PARAMETER(x) ((void)(x))
 #define CP_UTF8 65001
 #define WC_ERR_INVALID_CHARS 128
+#define GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS 4
+#define GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT 2
 #define wcsnlen_s wcsnlen
 #define StringCchCopyW(a,b,c) wcscpy(a,c)
 #define MESH_RUNTIME_HOST_ENTRY_SERVICE_W L"MeshServiceHostW"
@@ -96,7 +101,7 @@ static int WideCharToMultiByte(unsigned cp,unsigned flags,const wchar_t* input,i
 static void ServiceDeploy_SetRuntimeServiceKeyNameUtf8(const char* value) { strcpy(runtimeServiceName,value); }
 
 static int installed, customAccount, changeCalls, config2Calls, deletes, registryWrites, dispatches;
-static int failApi, apiIndex, badModule, badProcess, dispatcherFails, runtimeFails;
+static int failApi, apiIndex, badModule, badProcess, dispatcherFails, runtimeFails, moduleLookupFails;
 static wchar_t command[2080], registeredCommand[2080], group[64];
 static DWORD groupBytes;
 static DWORD registeredType;
@@ -119,8 +124,13 @@ static BOOL MeshRuntimeHost_GetSystemHostPathW(wchar_t* out, size_t count) {
     if (count <= wcslen(value)) return FALSE; wcscpy(out,value); return TRUE;
 }
 static const wchar_t* GetCommandLineW(void) { return command; }
+static BOOL GetModuleHandleExW(DWORD flags, const wchar_t* address, HMODULE* module) {
+    assert(flags == (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT));
+    assert(address && module); if(moduleLookupFails)return FALSE; *module=(HMODULE)2; return TRUE;
+}
 static DWORD GetModuleFileNameW(HINSTANCE module, wchar_t* out, DWORD count) {
-    (void)count; wcscpy(out,module ? (badModule ? L"C:\\wrong.dll" : L"C:\\Agent\\bundle.dll") :
+    // rundll32 supplies its executable instance as the callback argument.
+    (void)count; wcscpy(out,module == (HMODULE)2 ? (badModule ? L"C:\\wrong.dll" : L"C:\\Agent\\bundle.dll") :
         (badProcess ? L"C:\\fake\\rundll32.exe" : L"C:\\Windows\\System32\\rundll32.exe")); return (DWORD)wcslen(out);
 }
 static void ServiceDeploy_ResolveRuntimeServiceBranding(wchar_t* name,size_t nameCount,wchar_t* display,size_t displayCount,wchar_t* description,size_t descriptionCount) {
@@ -183,7 +193,7 @@ static LONG RegSetValueExW(HKEY key,const wchar_t* name,DWORD reserved,DWORD typ
 #define RegCloseKey(x) ((void)(x))
 static void reset(void) {
     installed=1; customAccount=changeCalls=config2Calls=deletes=registryWrites=dispatches=0;
-    failApi=apiIndex=badModule=badProcess=dispatcherFails=runtimeFails=0; registeredType=32; registeredCommand[0]=0;
+    failApi=apiIndex=badModule=badProcess=dispatcherFails=runtimeFails=moduleLookupFails=0; registeredType=32; registeredCommand[0]=0;
     static const wchar_t members[]=L"Other\0Agent\0Third\0"; memcpy(group,members,sizeof(members)); groupBytes=sizeof(members);
 }
 '''
@@ -222,12 +232,13 @@ int main(void) {
     assert(!ServiceHost_ParseImagePath(L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\bundle.dll\",MeshLifecycleHostW",parsed,1040));
     wcscat(command,L" extra"); assert(!ServiceHost_ParseImagePath(command,parsed,1040));
     ServiceHost_BuildImagePath(L"C:\\Agent\\bundle.dll",command,2080);
-    for (int mode=0;mode<5;++mode) {
-        reset(); badModule=mode==1; badProcess=mode==2; dispatcherFails=mode==3; runtimeFails=mode==4;
+    for (int mode=0;mode<6;++mode) {
+        reset(); badModule=mode==1; badProcess=mode==2; dispatcherFails=mode==3; runtimeFails=mode==4; moduleLookupFails=mode==5;
         if (!setjmp(exitJump)) MeshServiceHostW(NULL,(HINSTANCE)1,L"untrusted ANSI bytes",0);
         assert(exitCode==(mode==0?0:mode==3?1063:mode==4?71:ERROR_INVALID_PARAMETER));
-        assert(dispatches==(mode==1||mode==2?0:1));
+        assert(dispatches==(mode==1||mode==2||mode==5?0:1));
     }
+    moduleLookupFails=0;
     reset(); assert(ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
     int boundaries=apiIndex; assert(changeCalls==1 && registeredType==SERVICE_WIN32_OWN_PROCESS && deletes==3 && registryWrites==1);
     assert(ServiceHost_ParseImagePath(registeredCommand,parsed,1040));

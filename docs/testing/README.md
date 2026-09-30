@@ -97,6 +97,20 @@ agent or service. Passing them does not establish Windows overlapped-I/O, ConPTY
 filesystem rollback, or desktop-session integration; those still require the
 matching Windows build and approved runtime host.
 
+Primary RuntimeHost callback admission has a Windows probe that compiles the
+production `MeshServiceHostW` into a fixture DLL and runs it under the real
+`rundll32.exe`, with the SCM dispatcher replaced by a marker file. It requires
+MSBuild C++ tools on `PATH` and installs no service:
+
+```powershell
+python .\test\runtime_host_callback_module_runtime.py `
+  --evidence .\artifacts\validation\runtime-host-callback-module
+```
+
+It verifies that the canonical command reaches dispatch and that an extra
+argument is rejected, which depends on resolving the loaded module from the
+callback address rather than the `hinstDLL` argument rundll32 supplies.
+
 Large Files-session regressions have a built-runtime probe for fragmented
 WebSocket reassembly and event-loop fairness while reading a sparse file:
 

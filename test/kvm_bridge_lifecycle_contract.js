@@ -117,6 +117,9 @@ function main() {
     const bridgeEntry = extractFunction(bridge, 'void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)');
 
     const checks = {
+        callbackInstanceDoesNotSelectHelperModule:
+            bridgeEntry.includes('ServiceHost_InitializePaths(NULL);') &&
+            !bridgeEntry.includes('ServiceHost_InitializePaths(hinstDLL)'),
         registryLockInitializedOnce:
             ensureLock.includes('InitOnceExecuteOnce(&gKvmRelayLocksOnce, kvm_relay_initialize_locks, NULL, NULL);') &&
             !kvm.includes('gKvmRelayContextLockInitialized'),

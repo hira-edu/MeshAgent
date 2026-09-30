@@ -1867,9 +1867,10 @@ static void ServiceDeploy_RecordServiceDllHash(const wchar_t* serviceName, const
     _snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceName);
 
     HKEY hParams = NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, KEY_WRITE, &hParams) != ERROR_SUCCESS)
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, NULL, 0,
+        KEY_SET_VALUE, NULL, &hParams, NULL) != ERROR_SUCCESS)
     {
-        ServiceDeploy_LogInstallEvent(L"Failed to open service parameters for hash update (%ls)", serviceName);
+        ServiceDeploy_LogInstallEvent(L"Failed to open or create service parameters for hash update (%ls)", serviceName);
         return;
     }
 
@@ -2503,11 +2504,21 @@ static BOOL ServiceDeploy_ReconcileCommittedTransaction(const ServiceInstallPath
     ServiceUtil_ProtectServiceFromTermination(name);
     Security_CreateInstallRootDirectory(paths->installDir);
     Security_CreateInstallationDirectory(paths->logsDir);
-    if (!ServiceDeploy_CleanupConflictingServiceAliases(paths, name)) { ok = FALSE; }
+    // This returns the number of aliases removed; zero is the healthy case.
+    // The final lifecycle health check verifies that no aliases remain.
+    (void)ServiceDeploy_CleanupConflictingServiceAliases(paths, name);
     if (!MeshRuntimeHost_GetSystemHostPathW(hostPath, _countof(hostPath)) ||
         !ServiceDeploy_RefreshFirewallRulesWithRetry(name, hostPath, paths->exePath)) { ok = FALSE; }
+    // A committed backup remains until this function removes it, so the
+    // pre-cleanup gate must allow that one pending artifact.
     if (!ServiceDeploy_StartServiceHostServiceAndWait(name, 30000) ||
-        !ServiceDeploy_WaitForPrimaryLifecycleHealthy(30000, &state)) { ok = FALSE; }
+        !ServiceDeploy_WaitForPrimaryLifecycleOperational(30000, &state)) { ok = FALSE; }
+    if (ok && (state.updateStageArtifactsPresent ||
+        ServiceDeploy_DataStoreValueExists(paths->dbPath, "PendingUpdate", NULL, 0, NULL)))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Committed transaction still has staged files or PendingUpdate marker");
+        ok = FALSE;
+    }
     if (!ok) { ServiceDeploy_LogInstallEvent(L"[UPDATE] Committed transaction retained for reconciliation (%ls)", tx->journalPath); return FALSE; }
     return ServiceDeploy_DeleteUpdateTransactionArtifacts(tx);
 }
@@ -7259,7 +7270,9 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
     DWORD lastStopAttempt = 0;
     BOOL loggedStopFailure = FALSE;
 
-    if (forceTerminate && canStop)
+    // The service rejects a STOP unless AllowStop is already set. Enable it
+    // before the first control even when process termination is not permitted.
+    if (canStop)
     {
         if (ServiceDeploy_SetServiceAllowStop(serviceName, TRUE))
         {

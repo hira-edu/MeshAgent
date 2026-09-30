@@ -587,13 +587,15 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     DWORD bridgeExitCode = ERROR_SUCCESS;
 
     UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(hinstDLL);
     UNREFERENCED_PARAMETER(nCmdShow);
 
     ZeroMemory(&ctx, sizeof(ctx));
     ctx.controlPipeHandle = INVALID_HANDLE_VALUE;
     ctx.dataPipeHandle = INVALID_HANDLE_VALUE;
 
-    ServiceHost_InitializePaths(hinstDLL);
+    // rundll32 supplies its own executable instance, not this DLL's handle.
+    ServiceHost_InitializePaths(NULL);
 
     // rundll32.exe's lpCmdLine parameter is unreliable for W-suffix entry points
     // in cross-session spawns — it passes the ANSI PEB command line bytes as-is,
@@ -1580,15 +1582,19 @@ void CALLBACK MeshServiceHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, 
     wchar_t loadedDll[MAX_PATH * 4] = {0};
     wchar_t process[MAX_PATH * 4] = {0};
     wchar_t systemHost[MAX_PATH * 4] = {0};
+    HMODULE loadedModule = NULL;
     SERVICE_TABLE_ENTRYW table[2] = {0};
     DWORD length, exitCode = ERROR_INVALID_PARAMETER;
     UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(hinstDLL);
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nCmdShow);
     /* W-suffix rundll32 callbacks must parse the authoritative Unicode command
      * line, not lpCmdLine (which can carry ANSI bytes on some Windows paths). */
-    if (!hinstDLL || !ServiceHost_ParseImagePath(GetCommandLineW(), configuredDll, _countof(configuredDll))) { goto done; }
-    length = GetModuleFileNameW(hinstDLL, loadedDll, _countof(loadedDll));
+    if (!ServiceHost_ParseImagePath(GetCommandLineW(), configuredDll, _countof(configuredDll)) ||
+        !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR)&MeshServiceHostW, &loadedModule)) { goto done; }
+    length = GetModuleFileNameW(loadedModule, loadedDll, _countof(loadedDll));
     if (!length || length >= _countof(loadedDll) || _wcsicmp(loadedDll, configuredDll) != 0) { goto done; }
     length = GetModuleFileNameW(NULL, process, _countof(process));
     if (!length || length >= _countof(process) ||
