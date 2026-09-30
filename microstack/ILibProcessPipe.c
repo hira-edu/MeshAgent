@@ -1361,8 +1361,9 @@ static void ILibProcessPipe_FreePipe_Finalize(ILibProcessPipe_PipeObject *pipeOb
 	}
 	ILibMemory_Free(pipeObject);
 }
-void ILibProcessPipe_FreePipe(ILibProcessPipe_PipeObject *pipeObject)
+void ILibProcessPipe_FreePipe(ILibProcessPipe_Pipe pipe)
 {
+	ILibProcessPipe_PipeObject *pipeObject = (ILibProcessPipe_PipeObject*)pipe;
 	if (!ILibMemory_CanaryOK(pipeObject)) { return; }
 #ifdef WIN32
 	if (InterlockedCompareExchange(&pipeObject->closeRequested, 1, 0) == 0)
@@ -1482,9 +1483,11 @@ void ILibProcessPipe_Process_Destroy(ILibProcessPipe_Process_Object *p)
 	if (!ILibMemory_CanaryOK(p)) { return; }
 
 	if (p->exiting != 0) { return; }
-	if (p->stdIn != NULL) { ILibProcessPipe_FreePipe(p->stdIn); }
-	if (p->stdOut != NULL) { ILibProcessPipe_FreePipe(p->stdOut); }
-	if (p->stdErr != NULL) { ILibProcessPipe_FreePipe(p->stdErr); }
+	// Pending read completions can keep a pipe alive after its process is freed.
+	// Detach the back-reference before asking the pipe to close.
+	if (p->stdIn != NULL) { p->stdIn->mProcess = NULL; ILibProcessPipe_FreePipe(p->stdIn); }
+	if (p->stdOut != NULL) { p->stdOut->mProcess = NULL; ILibProcessPipe_FreePipe(p->stdOut); }
+	if (p->stdErr != NULL) { p->stdErr->mProcess = NULL; ILibProcessPipe_FreePipe(p->stdErr); }
 	if (p->metadata != NULL) { ILibMemory_Free(p->metadata); }
 #ifdef WIN32
 	if (p->hProcess != NULL) { CloseHandle(p->hProcess); }
@@ -2407,14 +2410,29 @@ BOOL ILibProcessPipe_Process_Pipe_ReadExHandler(void *chain, HANDLE h, ILibWaitH
 static BOOL ILibProcessPipe_Process_Pipe_ReadExHandler_Dispatch(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, char *buffer, DWORD bytesRead, void* user);
 static void ILibProcessPipe_Pipe_Resume_Continue(ILibProcessPipe_PipeObject *p)
 {
+	void *chain;
 	if (p == NULL || !ILibMemory_CanaryOK(p) || p->manager == NULL) { return; }
 	if (ILibProcessPipe_GetStateLong(&p->closeRequested) != 0 || p->PAUSED != 0) { return; }
+	// An outstanding read owns the OVERLAPPED and buffer. Its completion will
+	// observe PAUSED == 0; resuming it now would issue a second read into both.
+	if (ILibProcessPipe_GetStateLong(&p->activeReadCallbacks) != 0) { return; }
+	chain = p->manager->ChainLink.ParentChain;
 
-	ILibProcessPipe_Process_Pipe_ReadExHandler(p->manager->ChainLink.ParentChain, p->mPipe_ReadEnd, ILibWaitHandle_ErrorStatus_NONE, NULL, 0, p);
+	// Buffered output can synchronously close the pipe through a user callback.
+	// Pin this frame just like an ordinary read completion until its last access.
+	InterlockedIncrement(&p->activeReadCallbacks);
+	ILibProcessPipe_Process_Pipe_ReadExHandler(chain, p->mPipe_ReadEnd, ILibWaitHandle_ErrorStatus_NONE, NULL, 0, p);
 	if (p->mProcess != NULL && p->mProcess->hProcess_needAdd != 0 && p->mProcess->disabled == 0)
 	{
 		p->mProcess->hProcess_needAdd = 0;
 		ILibChain_AddWaitHandle(p->manager->ChainLink.ParentChain, p->mProcess->hProcess, -1, ILibProcessPipe_Process_OnExit, p->mProcess);
+	}
+	if (InterlockedDecrement(&p->activeReadCallbacks) == 0 &&
+		ILibProcessPipe_GetStateLong(&p->closeRequested) != 0 &&
+		ILibProcessPipe_GetStateLong(&p->activeWriteHandler) == 0 &&
+		ILibProcessPipe_GetStateLong(&p->resumePending) == 0)
+	{
+		ILibProcessPipe_FreePipe_TryFinalizeOnChain(chain, p);
 	}
 }
 static void ILibProcessPipe_Pipe_Resume_OnChain(void *chain, void *user)

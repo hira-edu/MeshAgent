@@ -6072,6 +6072,7 @@ void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
 	}
 
 	kvm_relay_signal_lock();
+	chain = gKvmDispatchChain;
 	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
 	{
 		// Registry slots are written under the relay lock; read each slot once, atomically.
@@ -6079,15 +6080,19 @@ void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
 		if (ctx != NULL)
 		{
 			++registeredContexts;
-			if (kvm_relay_session_change_aborts_launch(ctx, eventType, sessionId, startSessionUsable))
+			// An aborted launch relies on the queued handler to stop or restart the relay.
+			// If dispatch is unavailable, drop the notification without orphaning that launch.
+			if (request != NULL && chain != NULL)
 			{
-				(void)kvm_relay_signal_session_change(ctx, eventType, sessionId);
+				if (kvm_relay_session_change_aborts_launch(ctx, eventType, sessionId, startSessionUsable))
+				{
+					(void)kvm_relay_signal_session_change(ctx, eventType, sessionId);
+				}
 			}
 		}
 	}
 	// Queue while still holding the signal lock: the chain's destroy hook clears gKvmDispatchChain
 	// under this lock before the chain's timer is torn down, so the chain cannot go away mid-call.
-	chain = gKvmDispatchChain;
 	if (registeredContexts != 0 && chain != NULL && request != NULL)
 	{
 		// Free on shutdown: if the chain stops before this runs, the request is released with free().
