@@ -123,7 +123,9 @@ function main() {
         // Only an event that makes an in-flight launch pointless aborts it: a stop of the context's
         // session, or a start that moves an auto-selected context to another session. A lock never does.
         relaySignalsOnlyLaunchInvalidatingEvents:
-            sessionNotifyBody.includes('if (kvm_relay_session_change_aborts_launch(ctx, eventType, sessionId, startSessionUsable))') &&
+            sessionNotifyBody.includes('if (canQueue && kvm_relay_session_change_aborts_launch(ctx, eventType, sessionId, startSessionUsable))') &&
+            sessionNotifyBody.includes('canQueue = (chain != NULL && request != NULL) ? 1 : 0;') &&
+            sessionNotifyBody.indexOf('canQueue = (chain != NULL && request != NULL) ? 1 : 0;') < sessionNotifyBody.indexOf('kvm_relay_signal_session_change(ctx, eventType, sessionId);') &&
             sessionNotifyBody.includes('(void)kvm_relay_signal_session_change(ctx, eventType, sessionId);') &&
             abortLaunchBody.includes('if (ctx == NULL || eventType == WTS_SESSION_LOCK) { return 0; }') &&
             abortLaunchBody.includes('if (kvm_session_event_is_stop(eventType)) { return sessionMatches; }') &&

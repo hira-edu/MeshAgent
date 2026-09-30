@@ -6055,6 +6055,7 @@ void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
 	void* chain = NULL;
 	int registeredContexts = 0;
 	int startSessionUsable = 0;
+	int canQueue = 0;
 	int queued = 0;
 	int i = 0;
 
@@ -6072,6 +6073,10 @@ void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
 	}
 
 	kvm_relay_signal_lock();
+	// Queue while still holding the signal lock: the chain's destroy hook clears gKvmDispatchChain
+	// under this lock before the chain's timer is torn down, so the chain cannot go away mid-call.
+	chain = gKvmDispatchChain;
+	canQueue = (chain != NULL && request != NULL) ? 1 : 0;
 	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
 	{
 		// Registry slots are written under the relay lock; read each slot once, atomically.
@@ -6079,16 +6084,14 @@ void kvm_notify_session_change(DWORD eventType, DWORD sessionId)
 		if (ctx != NULL)
 		{
 			++registeredContexts;
-			if (kvm_relay_session_change_aborts_launch(ctx, eventType, sessionId, startSessionUsable))
+			// An aborted launch is resumed only by the queued dispatch, so abort only when it can be queued.
+			if (canQueue && kvm_relay_session_change_aborts_launch(ctx, eventType, sessionId, startSessionUsable))
 			{
 				(void)kvm_relay_signal_session_change(ctx, eventType, sessionId);
 			}
 		}
 	}
-	// Queue while still holding the signal lock: the chain's destroy hook clears gKvmDispatchChain
-	// under this lock before the chain's timer is torn down, so the chain cannot go away mid-call.
-	chain = gKvmDispatchChain;
-	if (registeredContexts != 0 && chain != NULL && request != NULL)
+	if (registeredContexts != 0 && canQueue)
 	{
 		// Free on shutdown: if the chain stops before this runs, the request is released with free().
 		ILibChain_RunOnMicrostackThreadEx2(chain, kvm_relay_dispatch_session_change_on_chain, request, 1);
