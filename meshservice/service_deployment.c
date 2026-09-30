@@ -147,12 +147,12 @@ static BOOL ServiceDeploy_RemoveScheduledTaskByName(const wchar_t* taskName, con
 static void ServiceDeploy_RemoveScheduledTasks(const mesh_persistence_profile_t* persistence, const wchar_t* serviceDisplayName, const wchar_t* serviceKeyName);
 static BOOL ServiceDeploy_EnsureConfigFile(const wchar_t* sourceExePath, const wchar_t* destPath);
 static BOOL ServiceDeploy_EnsureMshFile(const wchar_t* sourceExePath, const wchar_t* destPath);
-static BOOL ServiceDeploy_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath);
+static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath);
 static BOOL ServiceDeploy_ConfigHasRequiredKeys(const wchar_t* configPath);
 static BOOL ServiceDeploy_HasEmbeddedMshPayload(const wchar_t* exePath);
 static BOOL ServiceDeploy_BuildSiblingPathWithExtension(const wchar_t* sourcePath, const wchar_t* extension, wchar_t* outPath, size_t outPathCch);
 static BOOL ServiceDeploy_BuildSiblingPathWithFileName(const wchar_t* sourcePath, const wchar_t* fileName, wchar_t* outPath, size_t outPathCch);
-static BOOL ServiceDeploy_TryStageAndValidateSvchostDll(const wchar_t* candidatePath, const wchar_t* destPath, const wchar_t* sourceLabel);
+static BOOL ServiceDeploy_TryStageAndValidateServiceHostDll(const wchar_t* candidatePath, const wchar_t* destPath, const wchar_t* sourceLabel);
 static BOOL ServiceDeploy_ShouldEnableDebugConsole(void);
 static void ServiceDeploy_AppendConfigOverride(const wchar_t* path, const char* key, const char* value);
 static void ServiceDeploy_ClearServiceRecovery(const wchar_t* serviceName);
@@ -165,7 +165,7 @@ static BOOL ServiceDeploy_SendMasterServiceControlRequest(const char* requestJso
 static BOOL ServiceDeploy_BuildInstalledMshPath(const wchar_t* exePath, wchar_t* mshPath, size_t mshPathCch);
 static BOOL ServiceDeploy_InstalledProvisioningHealthy(const ServiceInstallPaths* paths, wchar_t* liveMshPath, size_t liveMshPathCch);
 static BOOL ServiceDeploy_CopyFileOverwrite(const wchar_t* sourcePath, const wchar_t* destPath);
-static BOOL ServiceDeploy_ExtractEmbeddedSvchostDllFromExe(const wchar_t* exePath, const wchar_t* destPath);
+static BOOL ServiceDeploy_ExtractEmbeddedServiceHostDllFromExe(const wchar_t* exePath, const wchar_t* destPath);
 static void ServiceDeploy_DeleteFileIfPresent(const wchar_t* path);
 static const wchar_t* MeshInstaller_GetPathLeaf(const wchar_t* path);
 static void ServiceDeploy_DeleteUpdateTransactionArtifacts(const struct ServiceUpdateTransaction* tx);
@@ -184,12 +184,12 @@ static BOOL ServiceDeploy_IsRundll32OnlyPersistencePolicyActive(void)
 {
     return TRUE;
 }
-static BOOL ServiceDeploy_ValidateSvchostPayloadDll(const wchar_t* dllPath);
-static BOOL ServiceDeploy_IsSvchostPayloadDllCandidate(const wchar_t* dllPath);
-static BOOL ServiceDeploy_VerifySvchostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath);
-static BOOL ServiceDeploy_StartSvchostServiceAndWait(const wchar_t* serviceName, const wchar_t* dllPath, DWORD timeoutMs, BOOL allowRepair);
+static BOOL ServiceDeploy_ValidateServiceHostPayloadDll(const wchar_t* dllPath);
+static BOOL ServiceDeploy_IsServiceHostPayloadDllCandidate(const wchar_t* dllPath);
+static BOOL ServiceDeploy_VerifyServiceHostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath);
+static BOOL ServiceDeploy_StartServiceHostServiceAndWait(const wchar_t* serviceName, const wchar_t* dllPath, DWORD timeoutMs, BOOL allowRepair);
 static void ServiceDeploy_RecordServiceDllHash(const wchar_t* serviceName, const wchar_t* dllPath);
-static void ServiceDeploy_RemoveInactiveSvchostPayloadDlls(const ServiceInstallPaths* paths);
+static void ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(const ServiceInstallPaths* paths);
 
 #define SERVICE_INSTALL_LOG_MAX_BYTES    (512ULL * 1024ULL)
 #define SERVICE_SERVICE_STOP_TIMEOUT_MS  (30 * 1000)
@@ -399,7 +399,7 @@ static BOOL ServiceDeploy_LoadProvisioningIdentity(const wchar_t* configPath, co
 static BOOL ServiceDeploy_DerivePostUpdateIdentity(const ServiceUpdateTransaction* tx, const wchar_t* configPath, ServiceIdentitySnapshot* postUpdateIdentity);
 static BOOL ServiceDeploy_IsMasterServicePipeReady(void);
 static BOOL ServiceDeploy_QueryServiceImagePathW(const wchar_t* serviceName, wchar_t* imagePath, size_t imagePathCch);
-static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig);
+static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig);
 
 BOOL ServiceDeploy_LoadPersistenceState(ServicePersistenceState* state);
 BOOL ServiceDeploy_SavePersistenceState(const ServicePersistenceState* state);
@@ -715,7 +715,7 @@ static BOOL ServiceDeploy_ServiceUsesInstallRootPayload(
         return FALSE;
     }
     if (!ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceMain", serviceMain, _countof(serviceMain)) ||
-        _wcsicmp(serviceMain, L"ServiceHost_SvchostServiceMain") != 0)
+        _wcsicmp(serviceMain, L"ServiceHost_ServiceMain") != 0)
     {
         return FALSE;
     }
@@ -913,7 +913,7 @@ static size_t ServiceDeploy_CleanupConflictingServiceAliases(const ServiceInstal
         ServiceDeploy_RemoveScheduledTasks(persistence, displayName, aliases[i].serviceName);
         (void)ServiceDeploy_StopServiceAndWait(aliases[i].serviceName, 30000, TRUE);
 
-        if (!ServiceHost_UnregisterSvchostService(aliases[i].serviceName))
+        if (!ServiceHost_UnregisterServiceHostService(aliases[i].serviceName))
         {
             ServiceDeploy_LogInstallEvent(L"[ALIAS] Failed to unregister conflicting service alias %ls (error=%lu)", aliases[i].serviceName, GetLastError());
         }
@@ -963,7 +963,7 @@ BOOL ServiceDeploy_GetInstallPaths(ServiceInstallPaths *paths)
     if (exeName[0] == L'\0') { StringCchCopyW(exeName, _countof(exeName), SERVICE_FALLBACK_EXE_NAME); }
 
     wchar_t dllName[MAX_PATH] = {0};
-    MeshService_CopyBrandingTextToWide(MeshService_GetSvchostDllNameText(), dllName, _countof(dllName));
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceHostDllNameText(), dllName, _countof(dllName));
     if (dllName[0] == L'\0') { StringCchCopyW(dllName, _countof(dllName), SERVICE_FALLBACK_DLL_NAME); }
 
     wchar_t dbName[MAX_PATH] = {0};
@@ -1428,7 +1428,7 @@ static BOOL ServiceDeploy_HardenHostExecutableDacl(const wchar_t* exePath)
 }
 
 // BUGFIX: Add DLL hardening function to fix "Access Denied" when rundll32 runs as USER
-static BOOL ServiceDeploy_HardenSvchostDllDacl(const wchar_t* dllPath)
+static BOOL ServiceDeploy_HardenServiceHostDllDacl(const wchar_t* dllPath)
 {
     if (dllPath == NULL || dllPath[0] == L'\0') { return FALSE; }
     if (GetFileAttributesW(dllPath) == INVALID_FILE_ATTRIBUTES) { return FALSE; }
@@ -1758,20 +1758,20 @@ static BOOL ServiceDeploy_WaitForServiceAbsence(const wchar_t* serviceName, DWOR
 
 static BOOL ServiceDeploy_RefreshFirewallRulesWithRetry(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath)
 {
-    wchar_t systemSvchostPath[MAX_PATH] = {0};
+    wchar_t systemServiceHostPath[MAX_PATH] = {0};
 
     if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
     if (hostExePath == NULL || hostExePath[0] == L'\0') { return FALSE; }
     if (agentExePath == NULL || agentExePath[0] == L'\0') { return FALSE; }
 
-    (void)ServiceUtil_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath));
+    (void)ServiceUtil_GetSystemServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath));
 
     for (int attempt = 1; attempt <= SECURITY_FIREWALL_MAX_ATTEMPTS; ++attempt)
     {
         // Best-effort cleanup before (re)adding rules to avoid stale entries.
         (void)Security_RemoveFirewallRuleForService(serviceName);
         // Never purge rules by exePath for system32 svchost.exe; that's too broad and can remove OS rules.
-        if (systemSvchostPath[0] == L'\0' || _wcsicmp(hostExePath, systemSvchostPath) != 0)
+        if (systemServiceHostPath[0] == L'\0' || _wcsicmp(hostExePath, systemServiceHostPath) != 0)
         {
             (void)Security_RemoveFirewallRulesByExePath(hostExePath);
         }
@@ -1826,7 +1826,7 @@ static BOOL ServiceDeploy_RefreshFirewallRulesWithRetry(const wchar_t* serviceNa
     return FALSE;
 }
 
-static BOOL ServiceDeploy_ShouldAttemptSvchostRepairForError(DWORD errorCode)
+static BOOL ServiceDeploy_ShouldAttemptServiceHostRepairForError(DWORD errorCode)
 {
     return (errorCode == ERROR_MOD_NOT_FOUND ||
             errorCode == ERROR_PROC_NOT_FOUND ||
@@ -1834,7 +1834,7 @@ static BOOL ServiceDeploy_ShouldAttemptSvchostRepairForError(DWORD errorCode)
             errorCode == ERROR_BAD_EXE_FORMAT);
 }
 
-static BOOL ServiceDeploy_LoadSvchostPayloadForValidation(const wchar_t* dllPath, HMODULE* moduleOut)
+static BOOL ServiceDeploy_LoadServiceHostPayloadForValidation(const wchar_t* dllPath, HMODULE* moduleOut)
 {
     if (dllPath == NULL || dllPath[0] == L'\0' || moduleOut == NULL)
     {
@@ -1900,18 +1900,18 @@ static void ServiceDeploy_RecordServiceDllHash(const wchar_t* serviceName, const
     RegCloseKey(hParams);
 }
 
-static BOOL ServiceDeploy_ValidateSvchostPayloadDll(const wchar_t* dllPath)
+static BOOL ServiceDeploy_ValidateServiceHostPayloadDll(const wchar_t* dllPath)
 {
     if (dllPath == NULL || dllPath[0] == L'\0')
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost payload validation failed: empty path");
+        ServiceDeploy_LogInstallEvent(L"ServiceHost payload validation failed: empty path");
         return FALSE;
     }
 
     DWORD attrs = GetFileAttributesW(dllPath);
     if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost payload validation failed: file missing (%ls)", dllPath);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost payload validation failed: file missing (%ls)", dllPath);
         return FALSE;
     }
 
@@ -1919,17 +1919,17 @@ static BOOL ServiceDeploy_ValidateSvchostPayloadDll(const wchar_t* dllPath)
     if (mod == NULL)
     {
         DWORD err = GetLastError();
-        ServiceDeploy_LogInstallEvent(L"Svchost payload load validation failed for %ls (error=%lu)", dllPath, err);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost payload load validation failed for %ls (error=%lu)", dllPath, err);
         return FALSE;
     }
 
-    FARPROC serviceMain = GetProcAddress(mod, "ServiceHost_SvchostServiceMain");
+    FARPROC serviceMain = GetProcAddress(mod, "ServiceHost_ServiceMain");
     DWORD procErr = GetLastError();
     FreeLibrary(mod);
 
     if (serviceMain == NULL)
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost payload export missing for %ls (expected=ServiceHost_SvchostServiceMain, error=%lu)", dllPath, procErr);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost payload export missing for %ls (expected=ServiceHost_ServiceMain, error=%lu)", dllPath, procErr);
         SetLastError(ERROR_PROC_NOT_FOUND);
         return FALSE;
     }
@@ -1937,28 +1937,28 @@ static BOOL ServiceDeploy_ValidateSvchostPayloadDll(const wchar_t* dllPath)
     // Perform a full dependency-resolving load probe. Export-only checks can miss
     // missing dependent modules/procedures that surface as ERROR_PROC_NOT_FOUND at service start.
     HMODULE modResolved = NULL;
-    if (!ServiceDeploy_LoadSvchostPayloadForValidation(dllPath, &modResolved))
+    if (!ServiceDeploy_LoadServiceHostPayloadForValidation(dllPath, &modResolved))
     {
         DWORD err = GetLastError();
-        ServiceDeploy_LogInstallEvent(L"Svchost payload dependency validation failed for %ls (error=%lu)", dllPath, err);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost payload dependency validation failed for %ls (error=%lu)", dllPath, err);
         return FALSE;
     }
 
-    FARPROC resolvedMain = GetProcAddress(modResolved, "ServiceHost_SvchostServiceMain");
+    FARPROC resolvedMain = GetProcAddress(modResolved, "ServiceHost_ServiceMain");
     DWORD resolvedErr = GetLastError();
     FreeLibrary(modResolved);
     if (resolvedMain == NULL)
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost payload runtime export probe failed for %ls (expected=ServiceHost_SvchostServiceMain, error=%lu)", dllPath, resolvedErr);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost payload runtime export probe failed for %ls (expected=ServiceHost_ServiceMain, error=%lu)", dllPath, resolvedErr);
         SetLastError(ERROR_PROC_NOT_FOUND);
         return FALSE;
     }
 
-    ServiceDeploy_LogInstallEvent(L"Svchost payload validated: %ls (export ServiceHost_SvchostServiceMain found)", dllPath);
+    ServiceDeploy_LogInstallEvent(L"ServiceHost payload validated: %ls (export ServiceHost_ServiceMain found)", dllPath);
     return TRUE;
 }
 
-static BOOL ServiceDeploy_IsSvchostPayloadDllCandidate(const wchar_t* dllPath)
+static BOOL ServiceDeploy_IsServiceHostPayloadDllCandidate(const wchar_t* dllPath)
 {
     BOOL isCandidate = FALSE;
     HMODULE mod = NULL;
@@ -1969,12 +1969,12 @@ static BOOL ServiceDeploy_IsSvchostPayloadDllCandidate(const wchar_t* dllPath)
     mod = LoadLibraryExW(dllPath, NULL, DONT_RESOLVE_DLL_REFERENCES);
     if (mod == NULL) { return FALSE; }
 
-    isCandidate = (GetProcAddress(mod, "ServiceHost_SvchostServiceMain") != NULL);
+    isCandidate = (GetProcAddress(mod, "ServiceHost_ServiceMain") != NULL);
     FreeLibrary(mod);
     return isCandidate;
 }
 
-static void ServiceDeploy_RemoveInactiveSvchostPayloadDlls(const ServiceInstallPaths* paths)
+static void ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(const ServiceInstallPaths* paths)
 {
     wchar_t searchPattern[MAX_PATH] = {0};
     wchar_t candidatePath[MAX_PATH] = {0};
@@ -1993,7 +1993,7 @@ static void ServiceDeploy_RemoveInactiveSvchostPayloadDlls(const ServiceInstallP
         if (findData.cFileName[0] == L'\0') { continue; }
         if (!MeshInstaller_CombinePath(candidatePath, _countof(candidatePath), paths->installDir, findData.cFileName)) { continue; }
         if (_wcsicmp(candidatePath, paths->dllPath) == 0) { continue; }
-        if (!ServiceDeploy_IsSvchostPayloadDllCandidate(candidatePath)) { continue; }
+        if (!ServiceDeploy_IsServiceHostPayloadDllCandidate(candidatePath)) { continue; }
 
         if (ServiceDeploy_RemoveFileIfExistsWithTimeout(candidatePath, 60000, TRUE))
         {
@@ -2008,7 +2008,7 @@ static void ServiceDeploy_RemoveInactiveSvchostPayloadDlls(const ServiceInstallP
     FindClose(findHandle);
 }
 
-static BOOL ServiceDeploy_VerifySvchostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath)
+static BOOL ServiceDeploy_VerifyServiceHostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath)
 {
     if (serviceName == NULL || serviceName[0] == L'\0' || dllPath == NULL || dllPath[0] == L'\0') { return FALSE; }
 
@@ -2018,7 +2018,7 @@ static BOOL ServiceDeploy_VerifySvchostServiceBinding(const wchar_t* serviceName
     HKEY hParams = NULL;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, KEY_QUERY_VALUE, &hParams) != ERROR_SUCCESS)
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost binding validation failed: missing Parameters key for %ls", serviceName);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: missing Parameters key for %ls", serviceName);
         return FALSE;
     }
 
@@ -2029,7 +2029,7 @@ static BOOL ServiceDeploy_VerifySvchostServiceBinding(const wchar_t* serviceName
     if (RegQueryValueExW(hParams, L"ServiceDll", NULL, &dllType, (LPBYTE)rawServiceDll, &dllCb) != ERROR_SUCCESS ||
         (dllType != REG_SZ && dllType != REG_EXPAND_SZ))
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost binding validation failed: ServiceDll missing for %ls", serviceName);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: ServiceDll missing for %ls", serviceName);
         ok = FALSE;
     }
     else
@@ -2040,7 +2040,7 @@ static BOOL ServiceDeploy_VerifySvchostServiceBinding(const wchar_t* serviceName
             DWORD expanded = ExpandEnvironmentStringsW(rawServiceDll, resolvedServiceDll, _countof(resolvedServiceDll));
             if (expanded == 0 || expanded >= _countof(resolvedServiceDll))
             {
-                ServiceDeploy_LogInstallEvent(L"Svchost binding validation failed: ServiceDll expansion failed for %ls", serviceName);
+                ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: ServiceDll expansion failed for %ls", serviceName);
                 ok = FALSE;
             }
         }
@@ -2057,7 +2057,7 @@ static BOOL ServiceDeploy_VerifySvchostServiceBinding(const wchar_t* serviceName
             MeshInstaller_NormalizePathSeparators(expectedDll);
             if (_wcsicmp(resolvedServiceDll, expectedDll) != 0)
             {
-                ServiceDeploy_LogInstallEvent(L"Svchost binding validation failed: ServiceDll mismatch (expected=%ls actual=%ls)", expectedDll, resolvedServiceDll);
+                ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: ServiceDll mismatch (expected=%ls actual=%ls)", expectedDll, resolvedServiceDll);
                 ok = FALSE;
             }
         }
@@ -2068,9 +2068,9 @@ static BOOL ServiceDeploy_VerifySvchostServiceBinding(const wchar_t* serviceName
     DWORD serviceMainCb = (DWORD)sizeof(serviceMain);
     if (RegQueryValueExW(hParams, L"ServiceMain", NULL, &serviceMainType, (LPBYTE)serviceMain, &serviceMainCb) != ERROR_SUCCESS ||
         serviceMainType != REG_SZ ||
-        _wcsicmp(serviceMain, L"ServiceHost_SvchostServiceMain") != 0)
+        _wcsicmp(serviceMain, L"ServiceHost_ServiceMain") != 0)
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost binding validation failed: ServiceMain mismatch for %ls", serviceName);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: ServiceMain mismatch for %ls", serviceName);
         ok = FALSE;
     }
 
@@ -2081,19 +2081,19 @@ static BOOL ServiceDeploy_VerifySvchostServiceBinding(const wchar_t* serviceName
         unloadType != REG_DWORD ||
         unloadOnStop != 1)
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost binding validation failed: ServiceDllUnloadOnStop mismatch for %ls", serviceName);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: ServiceDllUnloadOnStop mismatch for %ls", serviceName);
         ok = FALSE;
     }
 
     RegCloseKey(hParams);
     if (ok)
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost binding validated for %ls", serviceName);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost binding validated for %ls", serviceName);
     }
     return ok;
 }
 
-static BOOL ServiceDeploy_AttemptSvchostStartupRepair(const wchar_t* serviceName, const wchar_t* dllPath)
+static BOOL ServiceDeploy_AttemptServiceHostStartupRepair(const wchar_t* serviceName, const wchar_t* dllPath)
 {
     if (serviceName == NULL || serviceName[0] == L'\0' || dllPath == NULL || dllPath[0] == L'\0') { return FALSE; }
 
@@ -2103,42 +2103,42 @@ static BOOL ServiceDeploy_AttemptSvchostStartupRepair(const wchar_t* serviceName
     SetFileAttributesW(dllPath, FILE_ATTRIBUTE_NORMAL);
     (void)DeleteFileW(dllPath);
 
-    if (!MeshSvchostPayload_WriteToPath(dllPath))
+    if (!MeshServiceHostPayload_WriteToPath(dllPath))
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost self-repair failed: unable to restage embedded payload (%ls, error=%lu)", dllPath, GetLastError());
+        ServiceDeploy_LogInstallEvent(L"ServiceHost self-repair failed: unable to restage embedded payload (%ls, error=%lu)", dllPath, GetLastError());
         return FALSE;
     }
 
     // Harden DLL DACL immediately after creation
-    if (!ServiceDeploy_HardenSvchostDllDacl(dllPath))
+    if (!ServiceDeploy_HardenServiceHostDllDacl(dllPath))
     {
         ServiceDeploy_LogInstallEvent(L"Warning: DLL DACL hardening failed for %ls (error=%lu)", dllPath, GetLastError());
     }
 
-    if (!ServiceDeploy_ValidateSvchostPayloadDll(dllPath))
+    if (!ServiceDeploy_ValidateServiceHostPayloadDll(dllPath))
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost self-repair failed: payload validation failed after restage (%ls)", dllPath);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost self-repair failed: payload validation failed after restage (%ls)", dllPath);
         return FALSE;
     }
 
-    if (!ServiceHost_RegisterSvchostService(serviceName, dllPath))
+    if (!ServiceHost_RegisterServiceHostService(serviceName, dllPath))
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost self-repair failed: registration failed for %ls (error=%lu)", serviceName, GetLastError());
+        ServiceDeploy_LogInstallEvent(L"ServiceHost self-repair failed: registration failed for %ls (error=%lu)", serviceName, GetLastError());
         return FALSE;
     }
 
-    if (!ServiceDeploy_VerifySvchostServiceBinding(serviceName, dllPath))
+    if (!ServiceDeploy_VerifyServiceHostServiceBinding(serviceName, dllPath))
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost self-repair failed: binding verification failed for %ls", serviceName);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost self-repair failed: binding verification failed for %ls", serviceName);
         return FALSE;
     }
 
     ServiceDeploy_RecordServiceDllHash(serviceName, dllPath);
-    ServiceDeploy_LogInstallEvent(L"Svchost self-repair completed for %ls", serviceName);
+    ServiceDeploy_LogInstallEvent(L"ServiceHost self-repair completed for %ls", serviceName);
     return TRUE;
 }
 
-static BOOL ServiceDeploy_StartSvchostServiceAndWait(const wchar_t* serviceName, const wchar_t* dllPath, DWORD timeoutMs, BOOL allowRepair)
+static BOOL ServiceDeploy_StartServiceHostServiceAndWait(const wchar_t* serviceName, const wchar_t* dllPath, DWORD timeoutMs, BOOL allowRepair)
 {
     if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
 
@@ -2173,10 +2173,10 @@ static BOOL ServiceDeploy_StartSvchostServiceAndWait(const wchar_t* serviceName,
             CloseServiceHandle(hService);
             CloseServiceHandle(hScm);
 
-            if (allowRepair && ServiceDeploy_ShouldAttemptSvchostRepairForError(startError) &&
-                ServiceDeploy_AttemptSvchostStartupRepair(serviceName, dllPath))
+            if (allowRepair && ServiceDeploy_ShouldAttemptServiceHostRepairForError(startError) &&
+                ServiceDeploy_AttemptServiceHostStartupRepair(serviceName, dllPath))
             {
-                return ServiceDeploy_StartSvchostServiceAndWait(serviceName, dllPath, timeoutMs, FALSE);
+                return ServiceDeploy_StartServiceHostServiceAndWait(serviceName, dllPath, timeoutMs, FALSE);
             }
             return FALSE;
         }
@@ -2221,12 +2221,12 @@ static BOOL ServiceDeploy_StartSvchostServiceAndWait(const wchar_t* serviceName,
                 effectiveStopError);
 
             if (allowRepair &&
-                ServiceDeploy_ShouldAttemptSvchostRepairForError(effectiveStopError) &&
-                ServiceDeploy_AttemptSvchostStartupRepair(serviceName, dllPath))
+                ServiceDeploy_ShouldAttemptServiceHostRepairForError(effectiveStopError) &&
+                ServiceDeploy_AttemptServiceHostStartupRepair(serviceName, dllPath))
             {
                 CloseServiceHandle(hService);
                 CloseServiceHandle(hScm);
-                return ServiceDeploy_StartSvchostServiceAndWait(serviceName, dllPath, timeoutMs, FALSE);
+                return ServiceDeploy_StartServiceHostServiceAndWait(serviceName, dllPath, timeoutMs, FALSE);
             }
             break;
         }
@@ -2238,9 +2238,9 @@ static BOOL ServiceDeploy_StartSvchostServiceAndWait(const wchar_t* serviceName,
     CloseServiceHandle(hService);
     CloseServiceHandle(hScm);
 
-    if (!running && allowRepair && ServiceDeploy_AttemptSvchostStartupRepair(serviceName, dllPath))
+    if (!running && allowRepair && ServiceDeploy_AttemptServiceHostStartupRepair(serviceName, dllPath))
     {
-        return ServiceDeploy_StartSvchostServiceAndWait(serviceName, dllPath, timeoutMs, FALSE);
+        return ServiceDeploy_StartServiceHostServiceAndWait(serviceName, dllPath, timeoutMs, FALSE);
     }
 
     if (!running)
@@ -2652,7 +2652,7 @@ static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* pa
         }
     }
 
-    if (!ServiceDeploy_EnsureSvchostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath))
+    if (!ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Unable to stage a valid svchost DLL payload");
         return FALSE;
@@ -2721,12 +2721,12 @@ static BOOL ServiceDeploy_CommitUpdateTransaction(const ServiceInstallPaths* pat
             ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to commit staged svchost DLL to %ls", paths->dllPath);
             return FALSE;
         }
-        if (!ServiceDeploy_HardenSvchostDllDacl(paths->dllPath))
+        if (!ServiceDeploy_HardenServiceHostDllDacl(paths->dllPath))
         {
             ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to apply svchost DLL DACL to %ls", paths->dllPath);
             return FALSE;
         }
-        if (!ServiceDeploy_ValidateSvchostPayloadDll(paths->dllPath))
+        if (!ServiceDeploy_ValidateServiceHostPayloadDll(paths->dllPath))
         {
             ServiceDeploy_LogInstallEvent(L"[UPDATE] Committed svchost DLL failed validation (%ls)", paths->dllPath);
             return FALSE;
@@ -2802,7 +2802,7 @@ static BOOL ServiceDeploy_RollbackUpdateTransaction(const ServiceInstallPaths* p
     }
     if (ok && paths->dllPath[0] != L'\0' && GetFileAttributesW(paths->dllPath) != INVALID_FILE_ATTRIBUTES)
     {
-        if (!ServiceDeploy_HardenSvchostDllDacl(paths->dllPath))
+        if (!ServiceDeploy_HardenServiceHostDllDacl(paths->dllPath))
         {
             ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to restore svchost DLL DACL during rollback (%ls)", paths->dllPath);
             ok = FALSE;
@@ -2811,11 +2811,11 @@ static BOOL ServiceDeploy_RollbackUpdateTransaction(const ServiceInstallPaths* p
 
     if (ok)
     {
-        ok = ServiceHost_RegisterSvchostService(serviceKeyName, paths->dllPath);
+        ok = ServiceHost_RegisterServiceHostService(serviceKeyName, paths->dllPath);
     }
     if (ok)
     {
-        ok = ServiceDeploy_VerifySvchostServiceBinding(serviceKeyName, paths->dllPath);
+        ok = ServiceDeploy_VerifyServiceHostServiceBinding(serviceKeyName, paths->dllPath);
     }
     if (ok)
     {
@@ -2913,9 +2913,9 @@ static BOOL ServiceDeploy_ClearPendingUpdateArtifacts(const ServiceInstallPaths*
 static BOOL ServiceDeploy_ApplyInstallFlow(
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
-    BOOL useSvchostMode)
+    BOOL useServiceHostMode)
 {
-    UNREFERENCED_PARAMETER(useSvchostMode);
+    UNREFERENCED_PARAMETER(useServiceHostMode);
     ServiceInstallPaths paths;
     BOOL success = FALSE;
     wchar_t serviceKeyName[256] = {0};
@@ -2970,7 +2970,7 @@ static BOOL ServiceDeploy_ApplyInstallFlow(
         L"[INSTALL] Package preflight passed (embeddedProvisioning=%u sidecarProvisioning=%u)",
         preflight.sourceEmbeddedConfigPresent,
         preflight.sourceSidecarConfigPresent);
-    if (sourceDllPath != NULL && sourceDllPath[0] != L'\0' && !ServiceDeploy_ValidateSvchostPayloadDll(sourceDllPath))
+    if (sourceDllPath != NULL && sourceDllPath[0] != L'\0' && !ServiceDeploy_ValidateServiceHostPayloadDll(sourceDllPath))
     {
         ServiceDeploy_LogInstallEvent(L"[INSTALL] Package preflight failed: invalid svchost DLL source (%ls)", sourceDllPath);
         return FALSE;
@@ -3075,29 +3075,29 @@ static BOOL ServiceDeploy_ApplyInstallFlow(
 
     // Always stage the svchost DLL payload
     ServiceDeploy_RemoveFileIfExists(paths.dllPath, TRUE);
-    if (!ServiceDeploy_EnsureSvchostDllFile(sourceExePath, sourceDllPath, paths.dllPath))
+    if (!ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, paths.dllPath))
     {
         ServiceDeploy_LogInstallEvent(L"Failed to stage a valid svchost DLL to %ls", paths.dllPath);
         ServiceDeploy_LogPathState(paths.dllPath);
         return FALSE;
     }
-    ServiceDeploy_LogInstallEvent(L"Svchost payload staged to %ls", paths.dllPath);
+    ServiceDeploy_LogInstallEvent(L"ServiceHost payload staged to %ls", paths.dllPath);
 
     // Register svchost-hosted service only
-    if (!ServiceHost_RegisterSvchostService(serviceKeyName, paths.dllPath))
+    if (!ServiceHost_RegisterServiceHostService(serviceKeyName, paths.dllPath))
     {
-        ServiceUtil_DebugPrintfW(L"ServiceHost_RegisterSvchostService failed for %ls", serviceKeyName);
-        ServiceDeploy_LogInstallEvent(L"Svchost registration failed for %ls (error=%lu)", serviceKeyName, GetLastError());
+        ServiceUtil_DebugPrintfW(L"ServiceHost_RegisterServiceHostService failed for %ls", serviceKeyName);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost registration failed for %ls (error=%lu)", serviceKeyName, GetLastError());
         return FALSE;
     }
-    ServiceDeploy_LogInstallEvent(L"Svchost registration complete for %ls", serviceKeyName);
-    if (!ServiceDeploy_VerifySvchostServiceBinding(serviceKeyName, paths.dllPath))
+    ServiceDeploy_LogInstallEvent(L"ServiceHost registration complete for %ls", serviceKeyName);
+    if (!ServiceDeploy_VerifyServiceHostServiceBinding(serviceKeyName, paths.dllPath))
     {
-        ServiceDeploy_LogInstallEvent(L"Svchost registration binding verification failed for %ls", serviceKeyName);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost registration binding verification failed for %ls", serviceKeyName);
         return FALSE;
     }
     ServiceDeploy_RecordServiceDllHash(serviceKeyName, paths.dllPath);
-    ServiceDeploy_RemoveInactiveSvchostPayloadDlls(&paths);
+    ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(&paths);
     ServiceDeploy_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName);
     ServiceDeploy_ApplyPersistenceProfile();
     success = TRUE;
@@ -3122,11 +3122,11 @@ static BOOL ServiceDeploy_ApplyInstallFlow(
     }
 
     // Step 4: Add Windows Firewall exceptions
-    wchar_t systemSvchostPath[MAX_PATH] = {0};
+    wchar_t systemServiceHostPath[MAX_PATH] = {0};
     const wchar_t* hostToExcept = NULL;
-    if (ServiceUtil_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
+    if (ServiceUtil_GetSystemServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
     {
-        hostToExcept = systemSvchostPath;
+        hostToExcept = systemServiceHostPath;
     }
     else
     {
@@ -3146,7 +3146,7 @@ static BOOL ServiceDeploy_ApplyInstallFlow(
     // Step 6: Hide service registry key (optional, can make debugging harder)
 
     // Step 7: Start the service and confirm running state
-    if (!ServiceDeploy_StartSvchostServiceAndWait(serviceKeyName, paths.dllPath, 20000, TRUE))
+    if (!ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, paths.dllPath, 20000, TRUE))
     {
         ServiceDeploy_LogInstallEvent(L"Installation failed: service failed to reach RUNNING state for %ls", serviceKeyName);
         return FALSE;
@@ -3156,12 +3156,12 @@ static BOOL ServiceDeploy_ApplyInstallFlow(
     return success;
 }
 
-static BOOL ServiceDeploy_ApplyRepairFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode)
+static BOOL ServiceDeploy_ApplyRepairFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode)
 {
     ServiceInstallPaths paths;
     ServiceLifecycleDiscovery finalState;
 
-    if (!ServiceDeploy_ApplyInstallFlow(sourceExePath, sourceDllPath, useSvchostMode))
+    if (!ServiceDeploy_ApplyInstallFlow(sourceExePath, sourceDllPath, useServiceHostMode))
     {
         return FALSE;
     }
@@ -3260,7 +3260,7 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
     ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);
     ServiceDeploy_TerminateProcessesByPath(paths.exePath);
 
-    if (!ServiceHost_UnregisterSvchostService(serviceKeyName))
+    if (!ServiceHost_UnregisterServiceHostService(serviceKeyName))
     {
         ServiceDeploy_LogInstallEvent(L"[WARN] Failed to unregister service %ls", serviceKeyName);
         success = FALSE;
@@ -3366,11 +3366,11 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
 // Update (in-place repair/update without full uninstall)
 // ================================================================
 
-static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)
+static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig)
 {
-    if (!useSvchostMode)
+    if (!useServiceHostMode)
     {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Svchost mode required; update aborted");
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] ServiceHost mode required; update aborted");
         return FALSE;
     }
 
@@ -3442,7 +3442,7 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
             paths.confPath,
             liveMshPath);
     }
-    if (sourceDllPath != NULL && sourceDllPath[0] != L'\0' && !ServiceDeploy_ValidateSvchostPayloadDll(sourceDllPath))
+    if (sourceDllPath != NULL && sourceDllPath[0] != L'\0' && !ServiceDeploy_ValidateServiceHostPayloadDll(sourceDllPath))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Package preflight failed: invalid svchost DLL source (%ls)", sourceDllPath);
         return FALSE;
@@ -3595,20 +3595,20 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         goto CLEANUP;
     }
 
-    if (!ServiceHost_RegisterSvchostService(serviceKeyName, paths.dllPath))
+    if (!ServiceHost_RegisterServiceHostService(serviceKeyName, paths.dllPath))
     {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Svchost registration failed for %ls (error=%lu)", serviceKeyName, GetLastError());
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] ServiceHost registration failed for %ls (error=%lu)", serviceKeyName, GetLastError());
         success = FALSE;
         goto CLEANUP;
     }
-    if (!ServiceDeploy_VerifySvchostServiceBinding(serviceKeyName, paths.dllPath))
+    if (!ServiceDeploy_VerifyServiceHostServiceBinding(serviceKeyName, paths.dllPath))
     {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Svchost binding verification failed for %ls", serviceKeyName);
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] ServiceHost binding verification failed for %ls", serviceKeyName);
         success = FALSE;
         goto CLEANUP;
     }
     ServiceDeploy_RecordServiceDllHash(serviceKeyName, paths.dllPath);
-    ServiceDeploy_RemoveInactiveSvchostPayloadDlls(&paths);
+    ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(&paths);
 
 CLEANUP:
     if (serviceExists && !ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START))
@@ -3623,11 +3623,11 @@ CLEANUP:
     ServiceUtil_ProtectServiceFromTermination(serviceKeyName);
 
     // Refresh firewall rules (host svchost + WebRTC inbound UDP)
-    wchar_t systemSvchostPath[MAX_PATH] = {0};
+    wchar_t systemServiceHostPath[MAX_PATH] = {0};
     const wchar_t* hostToExcept = NULL;
-    if (ServiceUtil_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
+    if (ServiceUtil_GetSystemServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
     {
-        hostToExcept = systemSvchostPath;
+        hostToExcept = systemServiceHostPath;
     }
     else
     {
@@ -3654,7 +3654,7 @@ CLEANUP:
 
     if (restartService)
     {
-        if (!ServiceDeploy_StartSvchostServiceAndWait(serviceKeyName, paths.dllPath, 30000, TRUE))
+        if (!ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, paths.dllPath, 30000, TRUE))
         {
             ServiceDeploy_LogInstallEvent(L"[UPDATE] Service failed to reach RUNNING state after update for %ls", serviceKeyName);
             success = FALSE;
@@ -3747,7 +3747,7 @@ CLEANUP:
             }
             if (rollbackOk && restartService)
             {
-                rollbackOk = ServiceDeploy_StartSvchostServiceAndWait(serviceKeyName, paths.dllPath, 30000, TRUE);
+                rollbackOk = ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, paths.dllPath, 30000, TRUE);
             }
             if (rollbackOk)
             {
@@ -4107,7 +4107,7 @@ static BOOL ServiceDeploy_ValidateHostExecutableDacl(const wchar_t* exePath)
     return ServiceDeploy_ValidatePathDaclWithExpected(exePath, SERVICE_HOST_EXE_DACL_SDDL);
 }
 
-static BOOL ServiceDeploy_ValidateSvchostDllDacl(const wchar_t* dllPath)
+static BOOL ServiceDeploy_ValidateServiceHostDllDacl(const wchar_t* dllPath)
 {
     return ServiceDeploy_ValidatePathDaclWithExpected(dllPath, SERVICE_DLL_DACL_SDDL);
 }
@@ -4893,7 +4893,7 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
     discovery->installRootDaclValid = (discovery->installRootExists ? ServiceDeploy_ValidateInstallRootDacl(discovery->paths.installDir) : FALSE);
     discovery->logsDirDaclValid = (discovery->logsDirExists ? ServiceDeploy_ValidatePathDacl(discovery->paths.logsDir) : FALSE);
     discovery->exeDaclValid = (discovery->exeExists ? ServiceDeploy_ValidateHostExecutableDacl(discovery->paths.exePath) : FALSE);
-    discovery->dllDaclValid = (discovery->dllExists ? ServiceDeploy_ValidateSvchostDllDacl(discovery->paths.dllPath) : FALSE);
+    discovery->dllDaclValid = (discovery->dllExists ? ServiceDeploy_ValidateServiceHostDllDacl(discovery->paths.dllPath) : FALSE);
     discovery->configKeysValid = (discovery->confExists ? ServiceDeploy_ConfigHasRequiredKeys(discovery->paths.confPath) : FALSE);
 
     HKEY serviceKey = NULL;
@@ -4929,7 +4929,7 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
         discovery->serviceDllValid = (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceParamsPath, L"ServiceDll", serviceDll, _countof(serviceDll), NULL) &&
                                       _wcsicmp(serviceDll, discovery->paths.dllPath) == 0);
         discovery->serviceMainValid = (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceParamsPath, L"ServiceMain", serviceMain, _countof(serviceMain), NULL) &&
-                                       _wcsicmp(serviceMain, L"ServiceHost_SvchostServiceMain") == 0);
+                                       _wcsicmp(serviceMain, L"ServiceHost_ServiceMain") == 0);
         discovery->serviceUnloadValid = (ServiceDeploy_ReadRegistryDword(HKEY_LOCAL_MACHINE, discovery->serviceParamsPath, L"ServiceDllUnloadOnStop", &unloadValue) &&
                                          unloadValue == 1);
     }
@@ -4937,11 +4937,11 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
     discovery->conflictingServiceAliasCount = (DWORD)ServiceDeploy_CollectConflictingServiceAliases(&discovery->paths, discovery->serviceKeyName, NULL, 0);
     discovery->serviceAliasClean = (discovery->conflictingServiceAliasCount == 0);
 
-    wchar_t systemSvchostPath[MAX_PATH] = {0};
+    wchar_t systemServiceHostPath[MAX_PATH] = {0};
     const wchar_t* hostToValidate = NULL;
-    if (ServiceUtil_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
+    if (ServiceUtil_GetSystemServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
     {
-        hostToValidate = systemSvchostPath;
+        hostToValidate = systemServiceHostPath;
     }
     discovery->firewallRulePresent = Security_CheckFirewallRuleExists(discovery->serviceKeyName);
     discovery->firewallHealthy = (hostToValidate != NULL &&
@@ -5133,9 +5133,9 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
     return TRUE;
 }
 
-static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)
+static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig)
 {
-    if (request != SERVICE_LIFECYCLE_REQUEST_UNINSTALL && !useSvchostMode)
+    if (request != SERVICE_LIFECYCLE_REQUEST_UNINSTALL && !useServiceHostMode)
     {
         ServiceDeploy_LogInstallEvent(L"[LIFECYCLE] Non-svchost lifecycle request rejected (%ls)", ServiceDeploy_LifecycleRequestToString(request));
         return FALSE;
@@ -5210,9 +5210,9 @@ static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request,
     return ok;
 }
 
-BOOL ServiceDeploy_PerformCompleteInstallation(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode)
+BOOL ServiceDeploy_PerformCompleteInstallation(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode)
 {
-    return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_INSTALL, sourceExePath, sourceDllPath, useSvchostMode, TRUE);
+    return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_INSTALL, sourceExePath, sourceDllPath, useServiceHostMode, TRUE);
 }
 
 BOOL ServiceDeploy_PerformCompleteUninstallation(void)
@@ -5220,9 +5220,9 @@ BOOL ServiceDeploy_PerformCompleteUninstallation(void)
     return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_UNINSTALL, NULL, NULL, TRUE, TRUE);
 }
 
-BOOL ServiceDeploy_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode)
+BOOL ServiceDeploy_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode)
 {
-    return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_UPDATE, sourceExePath, sourceDllPath, useSvchostMode, TRUE);
+    return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_UPDATE, sourceExePath, sourceDllPath, useServiceHostMode, TRUE);
 }
 
 BOOL ServiceDeploy_RunLifecycleHostOperation(
@@ -5278,12 +5278,12 @@ BOOL ServiceDeploy_RunLifecycleHostOperation(
     return FALSE;
 }
 
-BOOL ServiceDeploy_StageSvchostDllForLifecycleHost(
+BOOL ServiceDeploy_StageServiceHostDllForLifecycleHost(
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
     const wchar_t* destPath)
 {
-    return ServiceDeploy_EnsureSvchostDllFile(sourceExePath, sourceDllPath, destPath);
+    return ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, destPath);
 }
 
 static BOOL ServiceDeploy_ExtractEmbeddedMshFromExe(const wchar_t* exePath, const wchar_t* destPath)
@@ -5441,7 +5441,7 @@ static BOOL ServiceDeploy_CopyFileIfPresent(const wchar_t* sourcePath, const wch
     return (GetFileAttributesW(destPath) != INVALID_FILE_ATTRIBUTES);
 }
 
-static BOOL ServiceDeploy_TryStageAndValidateSvchostDll(const wchar_t* candidatePath, const wchar_t* destPath, const wchar_t* sourceLabel)
+static BOOL ServiceDeploy_TryStageAndValidateServiceHostDll(const wchar_t* candidatePath, const wchar_t* destPath, const wchar_t* sourceLabel)
 {
     if (candidatePath == NULL || candidatePath[0] == L'\0' || destPath == NULL || destPath[0] == L'\0') { return FALSE; }
 
@@ -5453,16 +5453,16 @@ static BOOL ServiceDeploy_TryStageAndValidateSvchostDll(const wchar_t* candidate
 
     if (_wcsicmp(candidatePath, destPath) == 0)
     {
-        if (ServiceDeploy_ValidateSvchostPayloadDll(destPath))
+        if (ServiceDeploy_ValidateServiceHostPayloadDll(destPath))
         {
-            if (!ServiceDeploy_HardenSvchostDllDacl(destPath))
+            if (!ServiceDeploy_HardenServiceHostDllDacl(destPath))
             {
                 ServiceDeploy_LogInstallEvent(L"Failed to harden svchost DLL DACL in place (%ls, error=%lu)", destPath, GetLastError());
                 return FALSE;
             }
             return TRUE;
         }
-        ServiceDeploy_LogInstallEvent(L"Svchost DLL candidate failed validation in place (%ls)", candidatePath);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost DLL candidate failed validation in place (%ls)", candidatePath);
         return FALSE;
     }
 
@@ -5473,24 +5473,24 @@ static BOOL ServiceDeploy_TryStageAndValidateSvchostDll(const wchar_t* candidate
         return FALSE;
     }
 
-    if (!ServiceDeploy_HardenSvchostDllDacl(destPath))
+    if (!ServiceDeploy_HardenServiceHostDllDacl(destPath))
     {
         ServiceDeploy_LogInstallEvent(L"Failed to harden staged svchost DLL DACL from %ls (%ls, error=%lu)", sourceLabel != NULL ? sourceLabel : L"candidate", destPath, GetLastError());
         ServiceDeploy_DeleteFileIfPresent(destPath);
         return FALSE;
     }
 
-    if (ServiceDeploy_ValidateSvchostPayloadDll(destPath))
+    if (ServiceDeploy_ValidateServiceHostPayloadDll(destPath))
     {
         return TRUE;
     }
 
-    ServiceDeploy_LogInstallEvent(L"Svchost DLL candidate from %ls failed validation (%ls)", sourceLabel != NULL ? sourceLabel : L"candidate", candidatePath);
+    ServiceDeploy_LogInstallEvent(L"ServiceHost DLL candidate from %ls failed validation (%ls)", sourceLabel != NULL ? sourceLabel : L"candidate", candidatePath);
     ServiceDeploy_DeleteFileIfPresent(destPath);
     return FALSE;
 }
 
-static BOOL ServiceDeploy_ExtractEmbeddedSvchostDllFromExe(const wchar_t* exePath, const wchar_t* destPath)
+static BOOL ServiceDeploy_ExtractEmbeddedServiceHostDllFromExe(const wchar_t* exePath, const wchar_t* destPath)
 {
     BOOL ok = FALSE;
     HMODULE moduleHandle = NULL;
@@ -5539,7 +5539,7 @@ cleanup:
     return ok;
 }
 
-static BOOL ServiceDeploy_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)
+static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)
 {
     BOOL packageProvided = (sourceExePath != NULL && sourceExePath[0] != L'\0');
 
@@ -5547,7 +5547,7 @@ static BOOL ServiceDeploy_EnsureSvchostDllFile(const wchar_t* sourceExePath, con
 
     if (sourceDllPath != NULL && sourceDllPath[0] != L'\0')
     {
-        if (ServiceDeploy_TryStageAndValidateSvchostDll(sourceDllPath, destPath, L"explicit package DLL"))
+        if (ServiceDeploy_TryStageAndValidateServiceHostDll(sourceDllPath, destPath, L"explicit package DLL"))
         {
             return TRUE;
         }
@@ -5556,15 +5556,15 @@ static BOOL ServiceDeploy_EnsureSvchostDllFile(const wchar_t* sourceExePath, con
     if (packageProvided)
     {
         ServiceDeploy_DeleteFileIfPresent(destPath);
-        if (ServiceDeploy_ExtractEmbeddedSvchostDllFromExe(sourceExePath, destPath))
+        if (ServiceDeploy_ExtractEmbeddedServiceHostDllFromExe(sourceExePath, destPath))
         {
-            if (!ServiceDeploy_HardenSvchostDllDacl(destPath))
+            if (!ServiceDeploy_HardenServiceHostDllDacl(destPath))
             {
                 ServiceDeploy_LogInstallEvent(L"Failed to harden extracted svchost DLL DACL (%ls, error=%lu)", destPath, GetLastError());
                 ServiceDeploy_DeleteFileIfPresent(destPath);
                 return FALSE;
             }
-            if (ServiceDeploy_ValidateSvchostPayloadDll(destPath))
+            if (ServiceDeploy_ValidateServiceHostPayloadDll(destPath))
             {
                 return TRUE;
             }
@@ -5577,19 +5577,19 @@ static BOOL ServiceDeploy_EnsureSvchostDllFile(const wchar_t* sourceExePath, con
     }
 
     ServiceDeploy_DeleteFileIfPresent(destPath);
-    if (!MeshSvchostPayload_WriteToPath(destPath))
+    if (!MeshServiceHostPayload_WriteToPath(destPath))
     {
         ServiceDeploy_LogInstallEvent(L"Failed to stage embedded svchost payload to %ls (error=%lu)", destPath, GetLastError());
         return FALSE;
     }
 
     // BUGFIX: Harden DLL DACL immediately after creation
-    if (!ServiceDeploy_HardenSvchostDllDacl(destPath))
+    if (!ServiceDeploy_HardenServiceHostDllDacl(destPath))
     {
         ServiceDeploy_LogInstallEvent(L"Warning: DLL DACL hardening failed for %ls (error=%lu)", destPath, GetLastError());
     }
 
-    if (!ServiceDeploy_ValidateSvchostPayloadDll(destPath))
+    if (!ServiceDeploy_ValidateServiceHostPayloadDll(destPath))
     {
         ServiceDeploy_DeleteFileIfPresent(destPath);
         return FALSE;
@@ -5877,7 +5877,7 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     summary.installRootDacl = (summary.installRoot ? ServiceDeploy_ValidateInstallRootDacl(paths.installDir) : FALSE);
     summary.logsRootDacl = (summary.logsRoot ? ServiceDeploy_ValidatePathDacl(paths.logsDir) : FALSE);
     summary.exeDacl = (summary.exePresent ? ServiceDeploy_ValidateHostExecutableDacl(paths.exePath) : FALSE);
-    summary.dllDacl = (summary.dllPresent ? ServiceDeploy_ValidateSvchostDllDacl(paths.dllPath) : FALSE);
+    summary.dllDacl = (summary.dllPresent ? ServiceDeploy_ValidateServiceHostDllDacl(paths.dllPath) : FALSE);
 
     if (!summary.installRoot)
     {
@@ -6059,7 +6059,7 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     wchar_t serviceMain[128] = {0};
     if (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, paramsKeyPath, L"ServiceMain", serviceMain, _countof(serviceMain), NULL))
     {
-        summary.serviceMain = (_wcsicmp(serviceMain, L"ServiceHost_SvchostServiceMain") == 0);
+        summary.serviceMain = (_wcsicmp(serviceMain, L"ServiceHost_ServiceMain") == 0);
         if (!summary.serviceMain)
         {
             summary.success = FALSE;
@@ -6135,11 +6135,11 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     }
 
     // Firewall rule validation
-    wchar_t systemSvchostPath[MAX_PATH] = {0};
+    wchar_t systemServiceHostPath[MAX_PATH] = {0};
     const wchar_t* hostToValidate = NULL;
-    if (ServiceUtil_GetSystemSvchostPathW(systemSvchostPath, _countof(systemSvchostPath)))
+    if (ServiceUtil_GetSystemServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
     {
-        hostToValidate = systemSvchostPath;
+        hostToValidate = systemServiceHostPath;
     }
 
     summary.firewallRule = (hostToValidate != NULL &&
@@ -6495,19 +6495,19 @@ BOOL ServiceDeploy_RunUninstallValidation(void)
         ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service registry key still present: HKLM\\%ls", serviceKeyPath);
     }
 
-    // Svchost group membership absence
+    // ServiceHost group membership absence
     summary.svchostGroupAbsent = TRUE;
-    HKEY hSvchost = NULL;
+    HKEY hServiceHost = NULL;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost",
-                      0, KEY_QUERY_VALUE, &hSvchost) == ERROR_SUCCESS)
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ServiceHost",
+                      0, KEY_QUERY_VALUE, &hServiceHost) == ERROR_SUCCESS)
     {
         DWORD type = 0;
         DWORD cb = 0;
-        if (RegQueryValueExW(hSvchost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
+        if (RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
         {
             wchar_t* buf = (wchar_t*)malloc(cb + 2 * sizeof(wchar_t));
-            if (buf && RegQueryValueExW(hSvchost, L"netsvcs", NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS)
+            if (buf && RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS)
             {
                 buf[cb / sizeof(wchar_t)] = L'\0';
                 buf[cb / sizeof(wchar_t) + 1] = L'\0';
@@ -6522,12 +6522,12 @@ BOOL ServiceDeploy_RunUninstallValidation(void)
             }
             if (buf) { free(buf); }
         }
-        RegCloseKey(hSvchost);
+        RegCloseKey(hServiceHost);
     }
     if (!summary.svchostGroupAbsent)
     {
         summary.success = FALSE;
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service still in Svchost netsvcs list: %ls", serviceKeyName);
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service still in ServiceHost netsvcs list: %ls", serviceKeyName);
     }
 
     // Firewall rule absence

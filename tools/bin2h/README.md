@@ -6,7 +6,7 @@ Command-line helper that converts arbitrary binaries (DLLs, payloads, provisioni
 ```powershell
 bin2h --input meshservice\x64\MeshServiceBundle\MeshService-2022.dll `
       --output meshcore\embedded\service_bundle.h `
-      --symbol g_SvchostPayload `
+      --symbol g_ServiceHostPayload `
       --metadata dist\service_bundle.json
 ```
 
@@ -26,9 +26,9 @@ bin2h --input meshservice\x64\MeshServiceBundle\MeshService-2022.dll `
 The generated header always emits metadata helpers:
 
 ```c
-static const uint8_t g_SvchostPayload[] = { /* ... */ };   // omitted when --metadata-only is used
-static const size_t  g_SvchostPayload_SIZE   = sizeof(g_SvchostPayload); // or literal size with --metadata-only
-static const char    g_SvchostPayload_SHA256[] = "fd34...c446";
+static const uint8_t g_ServiceHostPayload[] = { /* ... */ };   // omitted when --metadata-only is used
+static const size_t  g_ServiceHostPayload_SIZE   = sizeof(g_ServiceHostPayload); // or literal size with --metadata-only
+static const char    g_ServiceHostPayload_SHA256[] = "fd34...c446";
 ```
 
 When `--metadata` is supplied, bin2h also writes a JSON manifest containing the canonical input/output paths, SHA-256 digest, guard name, byte-line setting, optional namespace, and ISO-8601 timestamps for both the source DLL and the header generation event. Downstream tooling (build/test/packaging) consumes this manifest to validate that the embedded payload matches the last compiled DLL.

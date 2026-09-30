@@ -192,19 +192,19 @@
     {
       "Message": "Service 'MeshAgent' registered (Status: Stopped)",
       "Status": "Pass",
-      "Name": "Runtime: Svchost Register",
+      "Name": "Runtime: ServiceHost Register",
       "Details": ""
     },
     {
       "Message": "svchost status command succeeded",
       "Status": "Pass",
-      "Name": "Runtime: Svchost Status",
+      "Name": "Runtime: ServiceHost Status",
       "Details": ""
     },
     {
       "Message": "Service 'MeshAgent' removed",
       "Status": "Pass",
-      "Name": "Runtime: Svchost Unregister",
+      "Name": "Runtime: ServiceHost Unregister",
       "Details": ""
     },
     {

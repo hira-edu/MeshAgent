@@ -147,7 +147,7 @@ function main() {
     const jsPackageLifecycleActions = extractFunction(agentInstallerSource, 'function isWindowsPackageLifecycleAction(actionName)');
     const nativeUpdateIngress = extractFunction(serviceMainSource, 'static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)');
     const lifecycleHost = extractFunction(rundll32ContractSource, 'void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)');
-    const lifecycleDispatcher = extractFunction(serviceInstallerSource, 'static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)');
+    const lifecycleDispatcher = extractFunction(serviceInstallerSource, 'static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig)');
 
     const meshcentralLegacyTokens = ['.update.exe', '_wexecve', '-b64exec ', '-fullupdate', 'windows_getNativeUpdateActivationPath', 'windows_tryNativeFullUpdate', 'windows_execve'];
     const rootMeshcoreLegacyHits = findTokens(rootMeshcoreSource, meshcentralLegacyTokens);
@@ -202,7 +202,7 @@ function main() {
             serviceInstallerSource.includes('#include "../meshcore/config/update_defines.h"') &&
             !agentcoreSource.includes('#define MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX') &&
             !serviceInstallerSource.includes('#define SERVICE_UPDATE_ACTIVATION_TARGET_KEY'),
-        agentcoreSelfUpdateLaunchesRundll32Lifecycle: agentcoreSource.includes('SelfUpdate -> Svchost mode: launching rundll32 lifecycle update activation') &&
+        agentcoreSelfUpdateLaunchesRundll32Lifecycle: agentcoreSource.includes('SelfUpdate -> ServiceHost mode: launching rundll32 lifecycle update activation') &&
             agentcoreSource.includes('MeshRundll32_LaunchLifecycleHostW(') &&
             agentcoreSource.includes('MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE') &&
             agentcoreSource.includes('w_updatefile'),
@@ -278,7 +278,7 @@ function main() {
     };
 
     if (evidenceDir) {
-        writeJson(path.join(evidenceDir, 'meshcentral_svchost_selfupdate_contract.json'), report);
+        writeJson(path.join(evidenceDir, 'meshcentral_service_host_selfupdate_contract.json'), report);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `AGENTCORE_PATH=${agentcorePath}`,
             `AGENT_INSTALLER_PATH=${agentInstallerPath}`,

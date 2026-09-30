@@ -4282,7 +4282,7 @@ duk_ret_t ILibDuktape_MeshAgent_Disconnect(duk_context *ctx)
 	return(0);
 }
 
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
 static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)
 {
 	MeshAgentHostContainer *agent;
@@ -4433,7 +4433,7 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 		ILibDuktape_CreateEventWithGetter(ctx, "controlChannelDebug", ILibDuktape_MeshAgent_controlChannelDebug);
 		ILibDuktape_CreateInstanceMethod(ctx, "DataPing", ILibDuktape_MeshAgent_DataPing, DUK_VARARGS);
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ARCHID", MESH_AGENTID);
-	#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+	#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
 		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 4);
 		duk_push_true(ctx);
 	#else
@@ -5337,9 +5337,9 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 			haveUpdateActivationHash = 1;
 		}
 
-#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
 		// Launch the downloaded update through the rundll32 lifecycle host.
-		ILIBLOGMESSAGEX("SelfUpdate -> Svchost mode: launching rundll32 lifecycle update activation...");
+		ILIBLOGMESSAGEX("SelfUpdate -> ServiceHost mode: launching rundll32 lifecycle update activation...");
 
 		DWORD lifecycleExitCode = ERROR_SUCCESS;
 		if (MeshRundll32_LaunchLifecycleHostW(
@@ -6175,7 +6175,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		case MeshCommand_AgentUpdate:
 		{
 			if (agent->disableUpdate != 0) { break; }	 // Ignore if updates are disabled
-#if defined(WIN32) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+#if defined(WIN32) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
 			// In svchost mode, check if an update is already pending reboot
 			{
 				char pendingBuf[8] = {0};
@@ -8066,7 +8066,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		}
 	}
 
-#if defined(WIN32) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+#if defined(WIN32) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
 	// Clear the PendingUpdate marker after startup - this means either the update was applied on reboot
 	// or the marker is stale. Either way, allow new updates to be processed.
 	if (agentHost->masterDb != NULL)
@@ -8178,7 +8178,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	}
 	else if (installFlag != 0)
 	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE)
 		printf("Direct Windows service install/uninstall switches are disabled. Use the rundll32 lifecycle manifest path.\n");
 		exit(ERROR_NOT_SUPPORTED);
 #endif
@@ -8683,7 +8683,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	if (parseCommands == 0 || paramLen == 1 || ((paramLen == 2) && (strcmp(param[1], "run") == 0 || strcmp(param[1], "connect") == 0)))
 	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
 		// Service-only policy for Service/svchost deployments is enforced by install/runtime configuration.
 		// Do not hard-block console-mode execution here: KVM/WebRTC helpers and IPC tooling may spawn
 		// auxiliary instances that are not running as a Windows service.

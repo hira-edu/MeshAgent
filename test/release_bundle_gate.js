@@ -34,7 +34,7 @@ const DEFAULT_EXPECTED_ARTIFACTS = [
             'dist/diagsvc.dll',
             'artifacts/diagsvc.dll',
             'meshservice/x64/MeshServiceBundle/MeshService-2022.dll',
-            'meshservice/embedded/svchost_payload.dll'
+            'meshservice/embedded/service_bundle.dll'
         ]
     },
     {

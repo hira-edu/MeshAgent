@@ -1078,7 +1078,7 @@ static BOOL MeshRundll32_PrepareLifecycleHostDllW(
         {
             return FALSE;
         }
-        if (!ServiceDeploy_StageSvchostDllForLifecycleHost(sourceExePath, uninstallSourceDll, hostDllPath))
+        if (!ServiceDeploy_StageServiceHostDllForLifecycleHost(sourceExePath, uninstallSourceDll, hostDllPath))
         {
             return FALSE;
         }
@@ -1100,7 +1100,7 @@ static BOOL MeshRundll32_PrepareLifecycleHostDllW(
         return FALSE;
     }
 
-    if (!ServiceDeploy_StageSvchostDllForLifecycleHost(sourceExePath, sourceDllPath, hostDllPath))
+    if (!ServiceDeploy_StageServiceHostDllForLifecycleHost(sourceExePath, sourceDllPath, hostDllPath))
     {
         return FALSE;
     }

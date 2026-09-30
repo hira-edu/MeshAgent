@@ -23,7 +23,7 @@ limitations under the License.
 
 const child_process = require('child_process');
 
-const WINDOWS_SVCHOST_ONLY = (process.platform === 'win32');
+const WINDOWS_SERVICE_HOST_ONLY = (process.platform === 'win32');
 function getPathLastSeparatorIndex(filePath)
 {
     var forward = filePath.lastIndexOf('/');
@@ -49,7 +49,7 @@ function getPathDirName(filePath)
 }
 function assertWindowsStandaloneDisabled(operation)
 {
-    if (WINDOWS_SVCHOST_ONLY)
+    if (WINDOWS_SERVICE_HOST_ONLY)
     {
         throw new Error('Unsupported Windows ' + operation + ' path is disabled. Use the rundll32 MeshLifecycleHostW manifest path.');
     }
@@ -909,7 +909,7 @@ function fullUninstall(jsonString)
 {
     var parms;
     try { parms = JSON.parse(jsonString); } catch (e) { process.stdout.write('ERROR: invalid JSON for fullUninstall: ' + e.message + '\n'); return; }
-    if (WINDOWS_SVCHOST_ONLY)
+    if (WINDOWS_SERVICE_HOST_ONLY)
     {
         runWindowsNativeLifecycle('uninstall', parms, null);
         return;
@@ -956,7 +956,7 @@ function fullInstall(jsonString, gOptions)
 {
     var parms;
     try { parms = JSON.parse(jsonString); } catch (e) { process.stdout.write('ERROR: invalid JSON for fullInstall: ' + e.message + '\n'); return; }
-    if (WINDOWS_SVCHOST_ONLY)
+    if (WINDOWS_SERVICE_HOST_ONLY)
     {
         runWindowsNativeLifecycle('install', parms, gOptions);
         return;
@@ -967,7 +967,7 @@ function fullInstall(jsonString, gOptions)
 // Entry point for Windows full install lifecycle requests, using JSON object
 function fullInstallEx(parms, gOptions)
 {
-    if (WINDOWS_SVCHOST_ONLY)
+    if (WINDOWS_SERVICE_HOST_ONLY)
     {
         runWindowsNativeLifecycle('install', parms, gOptions);
         return;

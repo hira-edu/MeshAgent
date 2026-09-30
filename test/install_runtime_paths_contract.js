@@ -154,10 +154,10 @@ function main() {
     const generatedLogsDir = logsDir.replace(/\\/g, '/');
     assert(generatedBranding.includes(`#define MESH_AGENT_INSTALL_ROOT TEXT("${generatedInstallRoot}")`), 'generated branding install root does not match active branding JSON');
     assert(generatedBranding.includes(`#define MESH_AGENT_LOG_DIRECTORY TEXT("${generatedLogsDir}")`), 'generated branding log directory does not match active branding JSON');
-    assert(generatedBranding.includes(`#define MESH_AGENT_SVCHOST_DLL TEXT("${serviceDllName}")`), 'generated branding service DLL does not match active branding JSON');
+    assert(generatedBranding.includes(`#define MESH_AGENT_SERVICE_HOST_DLL TEXT("${serviceDllName}")`), 'generated branding service DLL does not match active branding JSON');
 
     const serviceDefaults = readRepoFile(repoRoot, 'meshservice/service_defaults.h');
-    assert(serviceDefaults.includes('SERVICE_INSTALL_ROOT_DACL_SDDL       L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;IU)(A;;0x1200a9;;;AU)"'), 'install-root DACL must give Interactive and Authenticated Users non-inheritable read/execute access');
+    assert(serviceDefaults.includes('SERVICE_INSTALL_ROOT_DACL_SDDL     L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;IU)(A;;0x1200a9;;;AU)"'), 'install-root DACL must give Interactive and Authenticated Users non-inheritable read/execute access');
     assert(!serviceDefaults.includes('(A;OI;0x1200a9;;;IU)'), 'install-root Interactive Users ACE must not inherit to child files');
 
     const serviceFirewall = readRepoFile(repoRoot, 'meshservice/security_firewall.c');
@@ -169,19 +169,19 @@ function main() {
 
     const serviceUtils = readRepoFile(repoRoot, 'meshservice/service_utils.c');
     const serviceUtilsHeader = readRepoFile(repoRoot, 'meshservice/service_utils.h');
-    const serviceSvchost = readRepoFile(repoRoot, 'meshservice/service_host.c');
+    const serviceServiceHost = readRepoFile(repoRoot, 'meshservice/service_host.c');
     const serviceInstaller = readRepoFile(repoRoot, 'meshservice/service_deployment.c');
     const serviceRegistry = readRepoFile(repoRoot, 'meshservice/config_registry.c');
     const servicePersistence = readRepoFile(repoRoot, 'meshservice/lifecycle_persistence.c');
     const serviceIntegration = readRepoFile(repoRoot, 'meshservice/service_integration.c');
-    assert(serviceUtilsHeader.includes('BOOL ServiceUtil_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize);'), 'shared svchost path resolver must be declared');
-    assert(serviceUtils.includes('BOOL ServiceUtil_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)'), 'shared svchost path resolver must be implemented');
+    assert(serviceUtilsHeader.includes('BOOL ServiceUtil_GetSystemServiceHostPathW(wchar_t* outPath, size_t outPathSize);'), 'shared svchost path resolver must be declared');
+    assert(serviceUtils.includes('BOOL ServiceUtil_GetSystemServiceHostPathW(wchar_t* outPath, size_t outPathSize)'), 'shared svchost path resolver must be implemented');
     assert(serviceUtils.includes('GetSystemDirectoryW(outPath, (UINT)outPathSize)'), 'shared svchost path resolver must use GetSystemDirectoryW');
     assert(serviceUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")'), 'shared svchost path resolver must append svchost.exe safely');
-    assert(serviceSvchost.includes('ServiceUtil_GetSystemSvchostPathW'), 'svchost service registration must use the shared system svchost resolver');
-    assert(serviceFirewall.includes('ServiceUtil_GetSystemSvchostPathW'), 'firewall repair must use the shared system svchost resolver');
-    assert(serviceInstaller.includes('ServiceUtil_GetSystemSvchostPathW'), 'installer/validation must use the shared system svchost resolver');
-    assert(!serviceSvchost.includes('%SystemRoot%\\\\System32\\\\svchost.exe'), 'svchost service registration must not use %SystemRoot% svchost fallback');
+    assert(serviceServiceHost.includes('ServiceUtil_GetSystemServiceHostPathW'), 'svchost service registration must use the shared system svchost resolver');
+    assert(serviceFirewall.includes('ServiceUtil_GetSystemServiceHostPathW'), 'firewall repair must use the shared system svchost resolver');
+    assert(serviceInstaller.includes('ServiceUtil_GetSystemServiceHostPathW'), 'installer/validation must use the shared system svchost resolver');
+    assert(!serviceServiceHost.includes('%SystemRoot%\\\\System32\\\\svchost.exe'), 'svchost service registration must not use %SystemRoot% svchost fallback');
     assert(!serviceFirewall.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'firewall repair must not hard-code C:\\Windows svchost fallback');
     assert(!serviceInstaller.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'installer/validation must not hard-code C:\\Windows svchost fallback');
     assert(!serviceFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)'), 'firewall repair must not prefer an installed-root svchost host');
@@ -190,15 +190,15 @@ function main() {
         !serviceInstaller.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(svchostPath'),
         'installer firewall provisioning and validation must not select an installed-root svchost host');
     assert(serviceInstaller.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);'), 'update/uninstall quiesce must target the exact installed ServiceDll module rather than a guessed host copy');
-    const selectSvchostBody = extractFunction(serviceSvchost, 'static BOOL ServiceHost_SelectSvchostImage');
-    const registerSvchostBody = extractFunction(serviceSvchost, 'BOOL ServiceHost_RegisterSvchostService');
-    assert(selectSvchostBody.includes('UNREFERENCED_PARAMETER(dllPath);'), 'svchost image selection must not inspect or copy from the installed DLL directory');
-    assert(selectSvchostBody.includes('ServiceUtil_GetSystemSvchostPathW(exePathOut, exePathOutLen)'), 'svchost image selection must use the shared system svchost resolver');
-    assert(!selectSvchostBody.includes('GetWindowsDirectoryW'), 'svchost image selection must not scan Windows directories');
-    assert(!selectSvchostBody.includes('WinSxS'), 'svchost image selection must not scan WinSxS for host binaries');
-    assert(!selectSvchostBody.includes('CopyFileW'), 'svchost image selection must not copy svchost.exe beside the agent');
-    assert(!selectSvchostBody.includes('fallback'), 'svchost image selection must not retain fallback host selection wording or behavior');
-    assert(!registerSvchostBody.includes('even if selection fails') && registerSvchostBody.includes('return FALSE;'), 'svchost registration must fail when the official system host cannot be resolved');
+    const selectServiceHostBody = extractFunction(serviceServiceHost, 'static BOOL ServiceHost_SelectServiceHostImage');
+    const registerServiceHostBody = extractFunction(serviceServiceHost, 'BOOL ServiceHost_RegisterServiceHostService');
+    assert(selectServiceHostBody.includes('UNREFERENCED_PARAMETER(dllPath);'), 'svchost image selection must not inspect or copy from the installed DLL directory');
+    assert(selectServiceHostBody.includes('ServiceUtil_GetSystemServiceHostPathW(exePathOut, exePathOutLen)'), 'svchost image selection must use the shared system svchost resolver');
+    assert(!selectServiceHostBody.includes('GetWindowsDirectoryW'), 'svchost image selection must not scan Windows directories');
+    assert(!selectServiceHostBody.includes('WinSxS'), 'svchost image selection must not scan WinSxS for host binaries');
+    assert(!selectServiceHostBody.includes('CopyFileW'), 'svchost image selection must not copy svchost.exe beside the agent');
+    assert(!selectServiceHostBody.includes('fallback'), 'svchost image selection must not retain fallback host selection wording or behavior');
+    assert(!registerServiceHostBody.includes('even if selection fails') && registerServiceHostBody.includes('return FALSE;'), 'svchost registration must fail when the official system host cannot be resolved');
     const defaultInstallRootBody = extractFunction(serviceInstaller, 'static BOOL MeshInstaller_GetDefaultInstallRoot');
     assert(defaultInstallRootBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'default install root must resolve ProgramData through the known folder API');
     assert(defaultInstallRootBody.includes('return FALSE;') && defaultInstallRootBody.includes('FAILED(hr) || programData == NULL'), 'default install root must fail closed when ProgramData known-folder resolution fails');
@@ -376,7 +376,7 @@ function main() {
             installRootDaclNonInheritableInteractiveAce: true,
             installRootDaclNonInheritableAuthenticatedAce: true,
             secureDirectoryCreationFailsClosed: true,
-            systemSvchostResolutionUsesGetSystemDirectoryW: true,
+            systemServiceHostResolutionUsesGetSystemDirectoryW: true,
             programDataKnownFolderOnly: true,
             masterServicePathsFailClosed: true,
             nativeLogsUseActiveInstallPaths: true,

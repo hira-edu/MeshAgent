@@ -360,7 +360,7 @@ $testArgs = @{
     MeshCtrlPath          = $meshCtrlResolved
     ReportPath            = $ReportPath
 }
-$testArgs['SvchostOnly'] = $true
+$testArgs['ServiceHostOnly'] = $true
 
 Write-Host "[RuntimeValidation] Launching test.ps1 with MeshCentral download verification..." -ForegroundColor Cyan
 if ($LogPath) {

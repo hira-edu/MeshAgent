@@ -101,7 +101,7 @@ function main() {
         '\nstatic BOOL ServiceDeploy_DiscoverCurrentState');
     const runBlock = extractFunction(
         source,
-        'static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)',
+        'static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig)',
         '\nBOOL ServiceDeploy_PerformCompleteInstallation');
     const sharedImporterBlock = extractFunction(
         agentCoreSource,
@@ -253,7 +253,7 @@ function main() {
 
     if (evidenceDir) {
         ensureDir(evidenceDir);
-        fs.writeFileSync(path.join(evidenceDir, 'svchost_binary_update_identity_contract.json'), JSON.stringify(report, null, 2));
+        fs.writeFileSync(path.join(evidenceDir, 'service_bundle_binary_update_identity_contract.json'), JSON.stringify(report, null, 2));
         fs.writeFileSync(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',

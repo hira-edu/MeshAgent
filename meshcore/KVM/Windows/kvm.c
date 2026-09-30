@@ -1570,7 +1570,7 @@ static BOOL kvm_relay_resolve_bridge_dll_pathW(char *exePath, WCHAR* output, siz
 		MultiByteToWideChar(CP_UTF8, 0, exePath, -1, exePathW, (int)_countof(exePathW)) > 0 &&
 		GetFileAttributesW(exePathW) != INVALID_FILE_ATTRIBUTES)
 	{
-		MeshService_CopyBrandingTextToWide(MeshService_GetSvchostDllNameText(), brandedDllName, _countof(brandedDllName));
+		MeshService_CopyBrandingTextToWide(MeshService_GetServiceHostDllNameText(), brandedDllName, _countof(brandedDllName));
 		if (brandedDllName[0] != L'\0')
 		{
 			if (SUCCEEDED(StringCchCopyW(dirPath, _countof(dirPath), exePathW)))

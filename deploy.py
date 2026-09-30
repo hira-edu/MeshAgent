@@ -72,8 +72,8 @@ BACKUP_DIR = f"{MESHCENTRAL_BASE}/backups"
 SERVICE_NAME = "meshcentral"
 STAGING_MANIFEST_FILENAME = ".meshagent-stage-manifest.json"
 STAGING_MANIFEST_SCHEMA = 1
-SVCHOST_EMBEDDED_RESOURCE_ID = 101
-SVCHOST_EMBEDDED_RESOURCE_TYPE = 10
+SERVICE_HOST_EMBEDDED_RESOURCE_ID = 101
+SERVICE_HOST_EMBEDDED_RESOURCE_TYPE = 10
 
 PUBLISH_ROLE_DIRS = {
     "data": DATA_AGENTS,
@@ -175,9 +175,9 @@ ARTIFACTS = {
         "remote_filename": "MeshService64.dll",
         "publish_targets": ("signed", "module"),
     },
-    "svchost_payload.dll": {
-        "local_path": "meshservice/embedded/svchost_payload.dll",
-        "remote_filename": "svchost_payload.dll",
+    "service_bundle.dll": {
+        "local_path": "meshservice/embedded/service_bundle.dll",
+        "remote_filename": "service_bundle.dll",
         "publish_targets": ("signed", "module"),
     },
     "diagsvc.dll": {
@@ -326,7 +326,7 @@ REQUIRED_AGENT_ARTIFACTS = {
     "MeshService64.exe",
     "MeshService.exe",
     "MeshService64.dll",
-    "svchost_payload.dll",
+    "service_bundle.dll",
     "diagsvc.dll",
     "MeshService64.msh",
     "MeshService.msh",
@@ -557,7 +557,7 @@ def remote_size(path):
     return None
 
 
-def extract_embedded_svchost_payload(exe_path):
+def extract_embedded_service_bundle(exe_path):
     """Extract the embedded svchost DLL RCDATA payload from a Windows executable."""
     if os.name != "nt":
         raise RuntimeError("Embedded svchost payload extraction is only supported on Windows")
@@ -598,8 +598,8 @@ def extract_embedded_svchost_payload(exe_path):
     try:
         resource = find_resource(
             module,
-            ctypes.cast(ctypes.c_void_p(SVCHOST_EMBEDDED_RESOURCE_ID), wintypes.LPCWSTR),
-            ctypes.cast(ctypes.c_void_p(SVCHOST_EMBEDDED_RESOURCE_TYPE), wintypes.LPCWSTR),
+            ctypes.cast(ctypes.c_void_p(SERVICE_HOST_EMBEDDED_RESOURCE_ID), wintypes.LPCWSTR),
+            ctypes.cast(ctypes.c_void_p(SERVICE_HOST_EMBEDDED_RESOURCE_TYPE), wintypes.LPCWSTR),
         )
         if not resource:
             raise OSError(ctypes.get_last_error(), f"FindResourceW failed for {exe_path}")
@@ -968,7 +968,7 @@ def find_local_artifact(local_artifacts, artifact_name):
     return None
 
 
-def validate_local_svchost_payload_artifacts(local_artifacts):
+def validate_local_service_bundle_artifacts(local_artifacts):
     """Verify the standalone EXE embeds the same svchost DLL bytes that are published beside it."""
     report = {
         "ok": False,
@@ -977,13 +977,13 @@ def validate_local_svchost_payload_artifacts(local_artifacts):
     }
     exe_entry = find_local_artifact(local_artifacts, "MeshService64.exe")
     dll_entry = find_local_artifact(local_artifacts, "MeshService64.dll")
-    payload_entry = find_local_artifact(local_artifacts, "svchost_payload.dll")
+    payload_entry = find_local_artifact(local_artifacts, "service_bundle.dll")
 
     missing = [
         name for name, entry in (
             ("MeshService64.exe", exe_entry),
             ("MeshService64.dll", dll_entry),
-            ("svchost_payload.dll", payload_entry),
+            ("service_bundle.dll", payload_entry),
         )
         if entry is None
     ]
@@ -1002,21 +1002,21 @@ def validate_local_svchost_payload_artifacts(local_artifacts):
 
     if dll_sha256 != payload_sha256:
         report["errors"].append(
-            "Local MeshService64.dll does not match meshservice/embedded/svchost_payload.dll"
+            "Local MeshService64.dll does not match meshservice/embedded/service_bundle.dll"
         )
 
     try:
-        embedded_payload = extract_embedded_svchost_payload(exe_path)
+        embedded_payload = extract_embedded_service_bundle(exe_path)
         embedded_sha256 = hashlib.sha256(embedded_payload).hexdigest().upper()
-        report["artifacts"]["exe"]["embedded_svchost_sha256"] = embedded_sha256
-        report["artifacts"]["exe"]["embedded_svchost_size"] = len(embedded_payload)
+        report["artifacts"]["exe"]["embedded_service_bundle_sha256"] = embedded_sha256
+        report["artifacts"]["exe"]["embedded_service_bundle_size"] = len(embedded_payload)
         if embedded_sha256 != dll_sha256:
             report["errors"].append(
                 "MeshService64.exe embeds a svchost payload that does not match MeshService64.dll"
             )
         if embedded_sha256 != payload_sha256:
             report["errors"].append(
-                "MeshService64.exe embeds a svchost payload that does not match svchost_payload.dll"
+                "MeshService64.exe embeds a svchost payload that does not match service_bundle.dll"
             )
     except Exception as exc:
         report["errors"].append(f"Failed to extract embedded svchost payload from {exe_path}: {exc}")
@@ -1235,7 +1235,7 @@ def verify_remote_copy(entry, remote_path, metadata_cache=None):
     return errors
 
 
-def verify_remote_embedded_svchost_payload(remote_path, expected_sha256):
+def verify_remote_embedded_service_bundle(remote_path, expected_sha256):
     """Download a remote Windows EXE and verify its embedded svchost payload."""
     errors = []
     fd, temp_path = tempfile.mkstemp(prefix="meshagent-remote-", suffix=Path(remote_path).suffix or ".bin")
@@ -1244,7 +1244,7 @@ def verify_remote_embedded_svchost_payload(remote_path, expected_sha256):
     try:
         if scp_download(remote_path, temp_file) is False:
             return [f"Unable to download remote artifact for embedded svchost verification: {remote_path}"]
-        embedded_payload = extract_embedded_svchost_payload(temp_file)
+        embedded_payload = extract_embedded_service_bundle(temp_file)
         embedded_sha256 = hashlib.sha256(embedded_payload).hexdigest().upper()
         if embedded_sha256 != expected_sha256:
             errors.append(
@@ -2389,7 +2389,7 @@ def cmd_stage(args):
         for name in missing_core:
             print(f"  - {name}")
         return False
-    payload_report = validate_local_svchost_payload_artifacts(local_artifacts)
+    payload_report = validate_local_service_bundle_artifacts(local_artifacts)
     if payload_report["ok"] is False:
         print("[ERROR] Local svchost payload contract failed:")
         for error in payload_report["errors"]:
@@ -2510,7 +2510,7 @@ def cmd_deploy(args):
     core_artifacts = get_present_local_core_artifacts()
     missing_required = validate_required_deploy_artifacts(local_artifacts)
     missing_core = validate_required_core_artifacts(core_artifacts)
-    payload_report = validate_local_svchost_payload_artifacts(local_artifacts)
+    payload_report = validate_local_service_bundle_artifacts(local_artifacts)
     agent_artifacts = get_agent_publish_artifacts(local_artifacts)
     public_artifacts = get_public_download_artifacts(local_artifacts)
     if not local_artifacts:

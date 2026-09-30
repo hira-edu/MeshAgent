@@ -94,7 +94,7 @@ function resolveSourceDll(sourceExe, explicitSourceDll, repoRoot) {
         explicitSourceDll,
         sourceExe ? replaceExtension(sourceExe, '.dll') : null,
         path.join(repoRoot, 'meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll'),
-        path.join(repoRoot, 'meshservice', 'embedded', 'svchost_payload.dll')
+        path.join(repoRoot, 'meshservice', 'embedded', 'service_bundle.dll')
     ];
     return candidates.find(fileExists) || null;
 }

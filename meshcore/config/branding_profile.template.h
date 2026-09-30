@@ -24,7 +24,7 @@
 #define MESH_AGENT_INSTALL_ROOT         TEXT("C:/ProgramData/MeshAgent")
 #define MESH_AGENT_LOG_DIRECTORY        TEXT("C:/ProgramData/MeshAgent/logs")
 #define MESH_AGENT_BINARY_NAME          TEXT("meshagent.exe")
-#define MESH_AGENT_SVCHOST_DLL          TEXT("meshsvc.dll")
+#define MESH_AGENT_SERVICE_HOST_DLL          TEXT("meshsvc.dll")
 #define MESH_AGENT_ARTIFACT_DB          TEXT("meshagent.db")
 #define MESH_AGENT_ARTIFACT_CONFIG      TEXT("meshagent.conf")
 #define MESH_AGENT_ARTIFACT_LOG         TEXT("meshagent.log")
@@ -70,7 +70,7 @@
 
 /* ===== Runtime Features ===== */
 #define MESH_AGENT_RUNTIME_ENABLED         1
-#define MESH_AGENT_SVCHOST_MODE            1
+#define MESH_AGENT_SERVICE_HOST_MODE            1
 #define MESH_AGENT_MANAGE_FILES            1
 #define MESH_AGENT_MANAGE_REGISTRY         1
 #define MESH_AGENT_EVENT_TRACE_DIAGNOSTICS 0

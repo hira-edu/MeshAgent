@@ -172,7 +172,7 @@ cleanup:
     return success;
 }
 
-BOOL ServiceUtil_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)
+BOOL ServiceUtil_GetSystemServiceHostPathW(wchar_t* outPath, size_t outPathSize)
 {
     UINT systemLen;
 

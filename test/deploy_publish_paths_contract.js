@@ -197,7 +197,7 @@ const coreStateBody = extractFunction('get_core_publish_state');
 assert(coreStateBody.includes('if remote_paths and metadata_cache is None:'), 'core state must preserve unavailable transport distinctly');
 
 const verifyPublishBody = extractFunction('verify_remote_publish');
-assert(!verifyPublishBody.includes('verify_remote_embedded_svchost_payload('), 'verify_remote_publish must not SCP-download EXEs for redundant embedded checks');
+assert(!verifyPublishBody.includes('verify_remote_embedded_service_bundle('), 'verify_remote_publish must not SCP-download EXEs for redundant embedded checks');
 assert(verifyPublishBody.includes('return [REMOTE_PUBLISH_VERIFICATION_TRANSPORT_ERROR]'), 'verify_remote_publish must report transport failure explicitly');
 
 const activateUpdateBody = extractFunction('activate_remote_pending_update');

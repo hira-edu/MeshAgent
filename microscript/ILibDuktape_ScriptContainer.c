@@ -4135,8 +4135,8 @@ duk_ret_t ILibDuktape_ScriptContainer_Create(duk_context *ctx)
 	// Default processIsolation to 0 for svchost mode. The processIsolation=0 race condition
 	// (NULL dereference in master->child) was fixed in commit 9ac1df52 by removing the forced override,
 	// but that reintroduced the diaghost.exe spawn dependency. For svchost mode, we MUST disable it.
-#ifdef MESH_AGENT_SVCHOST_MODE
-	int processIsolation = 0;  // Svchost mode: NO separate process (diaghost.exe doesn't exist)
+#ifdef MESH_AGENT_SERVICE_HOST_MODE
+	int processIsolation = 0;  // ServiceHost mode: NO separate process (diaghost.exe doesn't exist)
 #else
 	int processIsolation = 1;  // Standalone mode: spawn child process for isolation
 #endif
@@ -4153,8 +4153,8 @@ duk_ret_t ILibDuktape_ScriptContainer_Create(duk_context *ctx)
 			sessionId = (void*)(ILibPtrCAST)(uint64_t)Duktape_GetIntPropertyValue(ctx, 0, "sessionId", 0);
 		}
 	}
-#ifdef MESH_AGENT_SVCHOST_MODE
-	// Svchost mode has no standalone --slave image. Keep ScriptContainer in-process
+#ifdef MESH_AGENT_SERVICE_HOST_MODE
+	// ServiceHost mode has no standalone --slave image. Keep ScriptContainer in-process
 	// and rely on the dedicated session-helper paths for cross-session execution.
 	processIsolation = 0;
 #endif

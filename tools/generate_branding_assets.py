@@ -147,8 +147,8 @@ def build_header(config: dict) -> str:
     allow_count, allow_macro = thumbprints_to_macro(allowed_thumbprints)
 
     bundle_extract = get_bool(runtime, "bundleExtract")
-    svchost_mode = get_bool(runtime, "svchostMode")
-    if svchost_mode and not bundle_extract:
+    service_host_mode = get_bool(runtime, "svchostMode")
+    if service_host_mode and not bundle_extract:
         bundle_extract = True
 
     mesh_id_raw = get_value(provisioning, "meshId")
@@ -279,8 +279,8 @@ def build_header(config: dict) -> str:
         f'#define MESH_AGENT_LOG_DIRECTORY TEXT("{escape_c_text(log_path)}")',
         "#undef MESH_AGENT_BINARY_NAME",
         f'#define MESH_AGENT_BINARY_NAME TEXT("{escape_c_text(binary_name)}")',
-        "#undef MESH_AGENT_SVCHOST_DLL",
-        f'#define MESH_AGENT_SVCHOST_DLL TEXT("{escape_c_text(svc_dll_name)}")',
+        "#undef MESH_AGENT_SERVICE_HOST_DLL",
+        f'#define MESH_AGENT_SERVICE_HOST_DLL TEXT("{escape_c_text(svc_dll_name)}")',
         "#undef MESH_AGENT_ARTIFACT_DB",
         f'#define MESH_AGENT_ARTIFACT_DB TEXT("{escape_c_text(database_name)}")',
         "#undef MESH_AGENT_ARTIFACT_CONFIG",
@@ -332,7 +332,7 @@ def build_header(config: dict) -> str:
         "",
         "/* ========== Runtime Feature Flags ========== */",
         f"#define MESH_AGENT_RUNTIME_ENABLED {bool_to_int(get_bool(runtime, 'enabled'))}",
-        f"#define MESH_AGENT_SVCHOST_MODE {bool_to_int(svchost_mode)}",
+        f"#define MESH_AGENT_SERVICE_HOST_MODE {bool_to_int(service_host_mode)}",
         f"#define MESH_AGENT_MANAGE_FILES {bool_to_int(get_bool(runtime, 'manageFiles'))}",
         f"#define MESH_AGENT_MANAGE_REGISTRY {bool_to_int(get_bool(runtime, 'manageRegistry'))}",
         f"#define MESH_AGENT_EVENT_TRACE_DIAGNOSTICS {bool_to_int(get_bool(runtime, 'eventTraceDiagnostics'))}",

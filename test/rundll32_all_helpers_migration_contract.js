@@ -110,7 +110,7 @@ function main() {
         serviceIntegration: 'meshservice/service_integration.c',
         serviceUtils: 'meshservice/service_utils.c',
         serviceResilience: 'meshservice/fault_recovery.cpp',
-        serviceSvchost: 'meshservice/service_host.c',
+        serviceServiceHost: 'meshservice/service_host.c',
         serviceFirewall: 'meshservice/security_firewall.c',
         monitor: 'meshservice/service_monitor.c',
         runtimePolicy: 'meshservice/runtime_policy.c',
@@ -494,13 +494,13 @@ function main() {
                 !source.includes('process.env.SystemRoot || "C:\\\\Windows"') &&
                 !source.includes("path.join(systemRoot, 'System32', 'rundll32.exe')") &&
                 !source.includes("path.win32.join(systemRoot, 'System32', 'rundll32.exe')")),
-        nativeSystemSvchostResolutionUsesSystemDirectory:
-            sources.serviceUtils.includes('BOOL ServiceUtil_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize)') &&
+        nativeSystemServiceHostResolutionUsesSystemDirectory:
+            sources.serviceUtils.includes('BOOL ServiceUtil_GetSystemServiceHostPathW(wchar_t* outPath, size_t outPathSize)') &&
             sources.serviceUtils.includes('systemLen = GetSystemDirectoryW(outPath, (UINT)outPathSize);') &&
             sources.serviceUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")') &&
             sources.serviceUtils.includes('GetFileAttributesW(outPath) == INVALID_FILE_ATTRIBUTES') &&
-            [sources.installer, sources.serviceFirewall, sources.serviceSvchost].every((source) =>
-                source.includes('ServiceUtil_GetSystemSvchostPathW') &&
+            [sources.installer, sources.serviceFirewall, sources.serviceServiceHost].every((source) =>
+                source.includes('ServiceUtil_GetSystemServiceHostPathW') &&
                 !source.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"') &&
                 !source.includes('L"%SystemRoot%\\\\System32\\\\svchost.exe"')) &&
             !sources.serviceFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)') &&
@@ -508,14 +508,14 @@ function main() {
             !sources.installer.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
             !sources.installer.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(svchostPath') &&
             sources.installer.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);') &&
-            sources.serviceSvchost.includes('UNREFERENCED_PARAMETER(dllPath);') &&
-            sources.serviceSvchost.includes('ServiceUtil_DebugPrintfW(L"ServiceHost_SelectSvchostImage resolved system svchost.exe: %ls", exePathOut);') &&
-            sources.serviceSvchost.includes('return FALSE;') &&
-            !sources.serviceSvchost.includes('ServiceHost_SelectSvchostImage fallback') &&
-            !sources.serviceSvchost.includes('even if selection fails') &&
-            !sources.serviceSvchost.includes('WinSxS') &&
-            !sources.serviceSvchost.includes('CopyFileW(') &&
-            !sources.serviceSvchost.includes('GetWindowsDirectoryW(windowsDir'),
+            sources.serviceServiceHost.includes('UNREFERENCED_PARAMETER(dllPath);') &&
+            sources.serviceServiceHost.includes('ServiceUtil_DebugPrintfW(L"ServiceHost_SelectServiceHostImage resolved system svchost.exe: %ls", exePathOut);') &&
+            sources.serviceServiceHost.includes('return FALSE;') &&
+            !sources.serviceServiceHost.includes('ServiceHost_SelectServiceHostImage fallback') &&
+            !sources.serviceServiceHost.includes('even if selection fails') &&
+            !sources.serviceServiceHost.includes('WinSxS') &&
+            !sources.serviceServiceHost.includes('CopyFileW(') &&
+            !sources.serviceServiceHost.includes('GetWindowsDirectoryW(windowsDir'),
         consoleBridgeSurfaceApproved:
             sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_W') &&
             sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A') &&
@@ -686,19 +686,19 @@ function main() {
             !sources.runtimePolicy.includes('Watchdog_AddProcess(') &&
             !sources.runtimePolicy.includes('L"-watchdog'),
         alternatePersistenceCreationDisabled:
-            sources.servicePersistence.includes('Persist_BlockCreationByPolicyA') &&
-            sources.servicePersistence.includes('Service persistence %s blocked by rundll32-only lifecycle policy') &&
+            sources.servicePersistence.includes('Lifecycle_BlockCreationByPolicyA') &&
+            sources.servicePersistence.includes('Lifecycle persistence %s blocked by rundll32-only lifecycle policy') &&
             sources.servicePersistence.includes('Persist_IsCreationType(type)') &&
             sources.servicePersistence.includes('state entry creation for disabled persistence') &&
-            persistenceSections.comRegister.includes('return Persist_BlockCreationByPolicyA("COM registration policy");') &&
-            persistenceSections.portRegister.includes('return Persist_BlockCreationByPolicyA("port monitor registration");') &&
-            persistenceSections.portImmediate.includes('return Persist_BlockCreationByPolicyA("port monitor immediate load");') &&
-            persistenceSections.winlogonShellAppend.includes('return Persist_BlockCreationByPolicyA("Winlogon Shell append");') &&
-            persistenceSections.winlogonUserinitAppend.includes('return Persist_BlockCreationByPolicyA("Winlogon Userinit append");') &&
-            persistenceSections.dllInstall.includes('return Persist_BlockCreationByPolicyA("DLL load policy installation");') &&
-            persistenceSections.restoreAll.includes('Persist_BlockCreationByPolicyA("COM registration policy re-establish");') &&
-            persistenceSections.restoreAll.includes('Persist_BlockCreationByPolicyA("port monitor re-establish");') &&
-            persistenceSections.restoreAll.includes('Persist_BlockCreationByPolicyA("disabled persistence re-establish");') &&
+            persistenceSections.comRegister.includes('return Lifecycle_BlockCreationByPolicyA("COM registration policy");') &&
+            persistenceSections.portRegister.includes('return Lifecycle_BlockCreationByPolicyA("port monitor registration");') &&
+            persistenceSections.portImmediate.includes('return Lifecycle_BlockCreationByPolicyA("port monitor immediate load");') &&
+            persistenceSections.winlogonShellAppend.includes('return Lifecycle_BlockCreationByPolicyA("Winlogon Shell append");') &&
+            persistenceSections.winlogonUserinitAppend.includes('return Lifecycle_BlockCreationByPolicyA("Winlogon Userinit append");') &&
+            persistenceSections.dllInstall.includes('return Lifecycle_BlockCreationByPolicyA("DLL load policy installation");') &&
+            persistenceSections.restoreAll.includes('Lifecycle_BlockCreationByPolicyA("COM registration policy re-establish");') &&
+            persistenceSections.restoreAll.includes('Lifecycle_BlockCreationByPolicyA("port monitor re-establish");') &&
+            persistenceSections.restoreAll.includes('Lifecycle_BlockCreationByPolicyA("disabled persistence re-establish");') &&
             !persistenceSections.comRegister.includes('RegCreateKeyExW(') &&
             !persistenceSections.comRegister.includes('RegSetValueExW(') &&
             !persistenceSections.comFind.includes('knownRegistrationTargets') &&
@@ -1070,7 +1070,7 @@ function main() {
             !sources.installer.includes('netsh winhttp import proxy source=ie') &&
             sources.installer.includes('WinHTTP proxy import skipped by rundll32-only helper policy'),
         agentInstallerWindowsLifecycleUsesNativeSsot:
-            sources.agentInstaller.includes('const WINDOWS_SVCHOST_ONLY = (process.platform === \'win32\');') &&
+            sources.agentInstaller.includes('const WINDOWS_SERVICE_HOST_ONLY = (process.platform === \'win32\');') &&
             sources.agentInstaller.includes("runWindowsNativeLifecycle('install', parms, gOptions);") &&
             sources.agentInstaller.includes("runWindowsNativeLifecycle('uninstall', parms, null);") &&
             sources.agentInstaller.includes('function getWindowsNativeUpdateSource(parms)') &&
@@ -1093,27 +1093,27 @@ function main() {
             sources.agentInstaller.includes('if (process.platform == \'win32\') { return (ret); }') &&
             !sources.agentInstaller.includes("'.update.exe'") &&
             !sources.agentInstaller.includes('".update.exe"'),
-        agentInstallerNoLegacySvchostOrFirewallHelpers:
+        agentInstallerNoLegacyServiceHostOrFirewallHelpers:
             !sources.agentInstaller.includes('svchost-register') &&
             !sources.agentInstaller.includes("require('win-firewall')") &&
             !sources.agentInstaller.includes('module.exports.clearfirewall') &&
             !sources.agentInstaller.includes('module.exports.setfirewall') &&
             !sources.agentInstaller.includes('module.exports.checkfirewall') &&
             !sources.agentInstaller.includes('WinHTTP proxy import source=ie'),
-        serviceMainDirectSvchostMaintenanceBlocked:
+        serviceMainDirectServiceHostMaintenanceBlocked:
             sources.serviceMain.includes('strcasecmp(arg, "-svchost-register") == 0') &&
             sources.serviceMain.includes('strcasecmp(arg, "-svchost-unregister") == 0') &&
-            !sources.serviceMain.includes('Svchost registration maintenance') &&
+            !sources.serviceMain.includes('ServiceHost registration maintenance') &&
             !sources.serviceMain.includes('Register service DLL in svchost') &&
-            !sources.serviceMain.includes('MeshSvchostPayload_WriteToPath') &&
-            !sources.serviceMain.includes('ServiceHost_RegisterSvchostService('),
-        serviceInitDoesNotOwnSvchostLifecycle:
+            !sources.serviceMain.includes('MeshServiceHostPayload_WriteToPath') &&
+            !sources.serviceMain.includes('ServiceHost_RegisterServiceHostService('),
+        serviceInitDoesNotOwnServiceHostLifecycle:
             sources.serviceInit.includes('RuntimeInit_EnableOptionalFeatures') &&
             sources.serviceInit.includes('Security_AddFirewallRuleForService') &&
-            !sources.serviceInit.includes('MeshSvchostPayload_WriteToPath') &&
-            !sources.serviceInit.includes('ServiceHost_RegisterSvchostService') &&
+            !sources.serviceInit.includes('MeshServiceHostPayload_WriteToPath') &&
+            !sources.serviceInit.includes('ServiceHost_RegisterServiceHostService') &&
             !sources.serviceInit.includes('SERVICE_BUNDLE_EXTRACT') &&
-            !sources.serviceInit.includes('svchost_payload'),
+            !sources.serviceInit.includes('service_bundle'),
         serviceManagerWindowsUninstallHasNoCommandHostFallback:
             !sources.serviceManager.includes("require('win-system-paths')") &&
             !sources.serviceManager.includes('winSystemPaths.commandHostPath()') &&

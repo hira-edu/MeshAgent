@@ -83,8 +83,8 @@ function main() {
             !collector.includes('Service_ServiceUsesRetiredBridgePayload'),
         aliasCleanupStopsAndUnregistersInstallRootAliases:
             cleanup.indexOf('ServiceDeploy_StopServiceAndWait(aliases[i].serviceName') <
-            cleanup.indexOf('ServiceHost_UnregisterSvchostService(aliases[i].serviceName') &&
-            cleanup.indexOf('ServiceHost_UnregisterSvchostService(aliases[i].serviceName') <
+            cleanup.indexOf('ServiceHost_UnregisterServiceHostService(aliases[i].serviceName') &&
+            cleanup.indexOf('ServiceHost_UnregisterServiceHostService(aliases[i].serviceName') <
             cleanup.indexOf('Security_RemoveFirewallRuleForService(aliases[i].serviceName') &&
             !cleanup.includes('Service_RemoveRetiredBridgePayloadArtifacts'),
         processTerminationStillUsesLoadedModulePathForOwnedDllCleanup:

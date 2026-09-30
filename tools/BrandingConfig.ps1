@@ -24,7 +24,7 @@ function Get-BrandingOptionalValue {
     return $null
 }
 
-function Get-BrandingSvchostDllName {
+function Get-BrandingServiceHostDllName {
     param(
         [Parameter()]
         [object]$Config,

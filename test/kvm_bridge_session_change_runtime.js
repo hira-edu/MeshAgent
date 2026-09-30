@@ -134,7 +134,7 @@ function resolveKvmProbeDllPath(exePath, args) {
     const baseName = path.basename(exePath, path.extname(exePath));
     const candidates = [
         path.join(exeDir, 'diagsvc.dll'),
-        path.join(exeDir, 'svchost_payload.dll'),
+        path.join(exeDir, 'service_bundle.dll'),
         path.join(exeDir, `${baseName}.dll`),
         path.join(parentDir, 'MeshServiceBundle', `${baseName}.dll`)
     ];

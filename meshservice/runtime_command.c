@@ -76,7 +76,7 @@ BOOL Runtime_LoadRemoteModuleCompat(DWORD processId, const wchar_t* dllPath)
 /**
  * Check if currently running inside svchost.exe
  */
-BOOL Runtime_IsRunningSvchost(void)
+BOOL Runtime_IsRunningServiceHost(void)
 {
     WCHAR exePath[MAX_PATH] = {0};
 

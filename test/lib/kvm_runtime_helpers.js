@@ -232,7 +232,7 @@ function resolveBridgeDllPath(exePath, explicitDllPath) {
         const brandingHeaderPath = path.resolve('meshcore', 'config', 'branding_profile.local.h');
         if (fs.existsSync(brandingHeaderPath)) {
             const brandingHeader = fs.readFileSync(brandingHeaderPath, 'utf8');
-            const match = brandingHeader.match(/MESH_AGENT_SVCHOST_DLL\s+TEXT\(\"([^\"]+)\"\)/);
+            const match = brandingHeader.match(/MESH_AGENT_SERVICE_HOST_DLL\s+TEXT\(\"([^\"]+)\"\)/);
             if (match) {
                 brandedDllName = match[1];
             }
@@ -241,7 +241,7 @@ function resolveBridgeDllPath(exePath, explicitDllPath) {
         if (brandedDllName) {
             candidates.push(path.join(exeDir, brandedDllName));
         }
-        candidates.push(path.join(exeDir, 'svchost_payload.dll'));
+        candidates.push(path.join(exeDir, 'service_bundle.dll'));
         candidates.push(path.join(exeDir, `${exeName}.dll`));
         candidates.push(path.join(exeDir, 'MeshService-2022.dll'));
         candidates.push(path.join(parentDir, 'MeshServiceBundle', `${exeName}.dll`));

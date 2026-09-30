@@ -17,7 +17,7 @@ void ServiceUtil_DebugLastErrorW(const wchar_t* context);
 BOOL ServiceUtil_ComputeFileSha256W(const wchar_t* path, wchar_t* hexOut, size_t hexOutLen);
 
 /* Resolve the native system svchost.exe path through GetSystemDirectoryW. */
-BOOL ServiceUtil_GetSystemSvchostPathW(wchar_t* outPath, size_t outPathSize);
+BOOL ServiceUtil_GetSystemServiceHostPathW(wchar_t* outPath, size_t outPathSize);
 
 /* Dynamic path resolution for service data directory.
  * Uses SHGetKnownFolderPath(FOLDERID_ProgramData) to get ProgramData path,

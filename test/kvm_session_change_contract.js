@@ -79,7 +79,7 @@ function main() {
     const retryTimerBody = extractFunction(kvmSource, 'static void kvm_retry_timer_callback(void* object)');
     const sessionArmBody = extractFunction(kvmSource, 'static int kvm_relay_arm_session_change_wait(KvmRelayContext* ctx, LONG expectedGeneration, HANDLE* eventOut, DWORD* errorOut)');
     const pipeWaitBody = extractFunction(kvmSource, 'static BOOL kvm_relay_wait_for_bridge_client(KvmRelayContext* ctx, HANDLE bridgePipeHandle, DWORD timeoutMs, LONG expectedSessionGeneration, DWORD* errorOut, BOOL* sessionChangedOut)');
-    const svchostControlBody = extractFunction(svchostSource, 'DWORD WINAPI ServiceHost_SvchostCtrlHandler(');
+    const svchostControlBody = extractFunction(svchostSource, 'DWORD WINAPI ServiceHost_CtrlHandler(');
     const armFirstGenerationCheck = sessionArmBody.indexOf('if (kvm_relay_session_generation_changed(ctx, expectedGeneration))');
     const armResetEvent = sessionArmBody.indexOf('ResetEvent(eventHandle);');
     const armSecondGenerationCheck = sessionArmBody.indexOf('if (kvm_relay_session_generation_changed(ctx, expectedGeneration))', armResetEvent);
@@ -97,16 +97,16 @@ function main() {
             svchostSource.includes('#include "service_integration.h"') &&
             svchostControlBody.includes('ServiceIntegration_HandleSessionChange(dwEventType, sessionId);'),
         svchostControlHandlerDefersFinalStopToServiceMain:
-            svchostControlBody.includes('ServiceHost_SvchostRequestAgentStop();') &&
+            svchostControlBody.includes('ServiceHost_RequestAgentStop();') &&
             svchostControlBody.includes('Stop requested asynchronously; waiting for MeshAgent_Start to return') &&
             svchostControlBody.includes('Shutdown requested asynchronously; waiting for MeshAgent_Start to return') &&
-            !svchostControlBody.includes('MeshAgent_Stop(g_SvchostAgent);') &&
-            !svchostControlBody.includes('g_SvchostAgent = NULL;') &&
-            !svchostControlBody.includes('g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;') &&
-            svchostSource.includes('ILibChain_RunOnMicrostackThreadEx3(agent->chain, ServiceHost_SvchostStopAgentOnChain, NULL, NULL);') &&
-            svchostSource.includes('int startResult = MeshAgent_Start(g_SvchostAgent, startArgc, startArgv);') &&
-            svchostSource.includes('g_SvchostAgent = NULL;') &&
-            svchostSource.includes('g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;'),
+            !svchostControlBody.includes('MeshAgent_Stop(g_ServiceHostAgent);') &&
+            !svchostControlBody.includes('g_ServiceHostAgent = NULL;') &&
+            !svchostControlBody.includes('g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;') &&
+            svchostSource.includes('ILibChain_RunOnMicrostackThreadEx3(agent->chain, ServiceHost_StopAgentOnChain, NULL, NULL);') &&
+            svchostSource.includes('int startResult = MeshAgent_Start(g_ServiceHostAgent, startArgc, startArgv);') &&
+            svchostSource.includes('g_ServiceHostAgent = NULL;') &&
+            svchostSource.includes('g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;'),
         relayDefinesSessionChangeDispatcher: kvmSource.includes('static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)'),
         relayDispatchesSessionChangesPerContext: kvmSource.includes('kvm_relay_handle_session_change_for_context(snapshot[i], eventType, sessionId);'),
         relaySignalsOnlyRelevantSessionContexts:

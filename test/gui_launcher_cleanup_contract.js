@@ -103,7 +103,7 @@ function main() {
             !serviceMain.includes('case 0:\n\t\tcase 100: // Not installed') &&
             !serviceMain.includes('case 0:\n\t\t\t\tcase 100: // Not installed'),
         svchostStatusFlushesCompleteJson:
-            serviceMain.includes('MeshService_PrintSvchostStatusJson(&summary);\n\tfflush(stdout);'),
+            serviceMain.includes('MeshService_PrintServiceHostStatusJson(&summary);\n\tfflush(stdout);'),
         installedPayloadGuard:
             serviceMain.includes('static BOOL MeshService_ShouldCleanupLauncherAfterLifecycle') &&
             serviceMain.includes('_wcsicmp(modulePath, paths.exePath) == 0') &&
@@ -123,7 +123,7 @@ function main() {
         uninstallLifecycleDoesNotLoadInstalledDll:
             contract.includes('action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL') &&
             contract.includes('MeshRundll32_PrepareTempHostDllPathW(hostDllPath, hostDllPathCch)') &&
-            contract.includes('ServiceDeploy_StageSvchostDllForLifecycleHost(sourceExePath, uninstallSourceDll, hostDllPath)') &&
+            contract.includes('ServiceDeploy_StageServiceHostDllForLifecycleHost(sourceExePath, uninstallSourceDll, hostDllPath)') &&
             !contract.includes('action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL ||\n         action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL'),
         uninstallRemovesOrphanedInstallDirectories:
             installer.includes('discovery->stateKind == SERVICE_LIFECYCLE_STATE_CLEAN &&') &&

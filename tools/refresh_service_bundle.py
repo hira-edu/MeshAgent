@@ -58,7 +58,7 @@ def refresh_payload(repo_root: Path, dll_path: Path, config_path: Path) -> None:
     header_path = generated_dir / "service_bundle.h"
     metadata_path = generated_dir / "service_bundle.json"
     embedded_dir = repo_root / "meshservice" / "embedded"
-    embedded_dll_path = embedded_dir / "svchost_payload.dll"
+    embedded_dll_path = embedded_dir / "service_bundle.dll"
     installer_dir = repo_root / "meshservice" / "installer" / "payload"
     installer_dll_path = installer_dir / installer_dll_name
 

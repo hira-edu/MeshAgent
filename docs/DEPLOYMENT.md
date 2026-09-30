@@ -104,9 +104,9 @@ verify agent authentication and a real relay open/close cycle.
 |---|---|---|
 | Standalone EXE x64 | `meshservice/x64/MeshServiceRuntime/MeshService-2022.exe` | **`MeshService64.exe`** |
 | Standalone EXE x86 | `meshservice/MeshServiceRuntime/MeshService-2022.exe` | `MeshService.exe` |
-| Svchost DLL publish sidecar | `meshservice/x64/MeshServiceBundle/MeshService-2022.dll` | `MeshService64.dll` |
+| ServiceHost DLL publish sidecar | `meshservice/x64/MeshServiceBundle/MeshService-2022.dll` | `MeshService64.dll` |
 | Runtime svchost DLL | `meshservice/x64/MeshServiceBundle/MeshService-2022.dll` | `diagsvc.dll` |
-| Embedded Payload | `meshservice/embedded/svchost_payload.dll` | `svchost_payload.dll` |
+| Embedded Payload | `meshservice/embedded/service_bundle.dll` | `service_bundle.dll` |
 | Agent policy x64 | `meshservice/x64/MeshServiceRuntime/MeshService-2022.msh` | `MeshService64.msh` |
 | Agent policy x86 | `meshservice/MeshServiceRuntime/MeshService-2022.msh` | `MeshService.msh` |
 | Shared provisioning policy | `WinDiagnosticHost.msh` | `WinDiagnosticHost.msh` |
@@ -218,14 +218,14 @@ scp -i ~/.ssh/id_ed25519 root@74.208.52.191:/opt/meshcentral/meshcentral-data/co
 
 Build contract:
 - `MeshAgent.Build.proj` is the supported entrypoint because it serializes `MeshServiceBundle|x64` before `MeshServiceRuntime|x64` and `MeshServiceRuntime|Win32`.
-- Direct `MeshServiceRuntime|x64` project builds now force the `MeshServiceBundle|x64` prerequisite before the EXE build refreshes `meshservice/embedded/svchost_payload.dll`.
+- Direct `MeshServiceRuntime|x64` project builds now force the `MeshServiceBundle|x64` prerequisite before the EXE build refreshes `meshservice/embedded/service_bundle.dll`.
 - Do not run separate x64 DLL and x64 EXE project builds in parallel against the same tree; use `MeshAgent.Build.proj` for full package output.
 - Do not add or use PowerShell build wrappers. Build orchestration lives in MSBuild; Python generators are invoked only through MSBuild targets or explicit pre-build validation.
 - Generated Visual Studio output directories (`meshservice/x64`, `meshservice/Win32`, `meshservice/MeshService-2022/x64`, root `x64`, and embedded svchost payload outputs) are excluded from implementation truth and should not be committed.
 
 Publish contract for MeshAgent packages:
-- `deploy.py stage` must prove the full package set is present before upload: `MeshService64.exe`, `MeshService.exe`, `MeshService64.dll`, `svchost_payload.dll`, `diagsvc.dll`, `MeshService64.msh`, `MeshService.msh`, and `WinDiagnosticHost.msh`.
-- `deploy.py stage` must prove local payload parity before upload: the repo `MeshService64.dll`, `meshservice/embedded/svchost_payload.dll`, and the embedded svchost RCDATA payload inside `MeshService64.exe` must all hash-identically.
+- `deploy.py stage` must prove the full package set is present before upload: `MeshService64.exe`, `MeshService.exe`, `MeshService64.dll`, `service_bundle.dll`, `diagsvc.dll`, `MeshService64.msh`, `MeshService.msh`, and `WinDiagnosticHost.msh`.
+- `deploy.py stage` must prove local payload parity before upload: the repo `MeshService64.dll`, `meshservice/embedded/service_bundle.dll`, and the embedded svchost RCDATA payload inside `MeshService64.exe` must all hash-identically.
 - After `deploy.py deploy`, verify the embedded svchost payload inside the remote `meshcentral-data/agents/MeshService64.exe`, `node_modules/meshcentral/agents/MeshService64.exe`, and `meshcentral-data/signedagents/MeshService64.exe`.
 - A `signedagents` EXE may have a different raw file size or digest than the local EXE because MeshCentral repacks it, but its embedded svchost payload must still match the repo DLL exactly.
 - When validating live package identity, distinguish the generic agent URL from a real group download. `https://high.support/meshagents?id=4` is the generic Windows x64 service package and will not prove group-specific identity. Use the portal-generated Office download link or `https://high.support/meshagents?id=4&meshid=<group-meshid>` when checking `-name`, embedded `.msh` identity, or install behavior for a specific group.

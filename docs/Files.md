@@ -65,7 +65,7 @@ The following are ignored and must not be treated as source:
 
 - `artifacts/`, `build/`, `dist/`, `out/`
 - top-level and project `x64/`, `Win32/`, `Release/`, and intermediate folders
-- `meshservice/embedded/svchost_payload.dll`
+- `meshservice/embedded/service_bundle.dll`
 - `meshcore/generated/` build outputs
 - `branding_config.local.json`, `.env`, logs, dumps, traces, and archives
 

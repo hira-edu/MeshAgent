@@ -425,7 +425,7 @@ meshservice/MeshService-2022/MeshServiceRuntime/
 meshservice/MeshService-2022/MeshServiceBundle/
 meshservice/MeshService-2022/x64/
 meshservice/MeshService-2022/Win32/
-meshservice/embedded/svchost_payload.dll
+meshservice/embedded/service_bundle.dll
 microscript/ILibDuktape_Commit.h
 *.iobj
 *.ipdb

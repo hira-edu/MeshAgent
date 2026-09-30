@@ -37,8 +37,8 @@ function main() {
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
     const source = fs.readFileSync(installerPath, 'utf8');
     const serviceMain = fs.readFileSync(serviceMainPath, 'utf8');
-    const ensureDeclarationStart = source.indexOf('static BOOL ServiceDeploy_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)');
-    const start = ensureDeclarationStart >= 0 ? source.indexOf('static BOOL ServiceDeploy_EnsureSvchostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)', ensureDeclarationStart + 1) : -1;
+    const ensureDeclarationStart = source.indexOf('static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)');
+    const start = ensureDeclarationStart >= 0 ? source.indexOf('static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, const wchar_t* destPath)', ensureDeclarationStart + 1) : -1;
     const end = start >= 0 ? source.indexOf('\nstatic BOOL ServiceDeploy_EnsureConfigFile', start) : -1;
     const block = (start >= 0 && end > start) ? source.slice(start, end) : '';
     const updateDeclarationStart = source.indexOf('static BOOL ServiceDeploy_PrepareUpdateTransaction(');
@@ -53,13 +53,13 @@ function main() {
     const lifecycleEnd = lifecycleStart >= 0 ? source.indexOf('\nBOOL ServiceDeploy_PerformCompleteInstallation', lifecycleStart) : -1;
     const lifecycleBlock = (lifecycleStart >= 0 && lifecycleEnd > lifecycleStart) ? source.slice(lifecycleStart, lifecycleEnd) : '';
 
-    assert(block.length > 0, 'unable to isolate ServiceDeploy_EnsureSvchostDllFile');
+    assert(block.length > 0, 'unable to isolate ServiceDeploy_EnsureServiceHostDllFile');
     assert(updateBlock.length > 0, 'unable to isolate ServiceDeploy_PrepareUpdateTransaction');
     assert(ingressBlock.length > 0, 'unable to isolate MeshService_RunSelfUpdateIngress');
     assert(lifecycleBlock.length > 0, 'unable to isolate ServiceDeploy_RunLifecycleOperation');
 
-    const explicitIndex = block.indexOf('ServiceDeploy_TryStageAndValidateSvchostDll(sourceDllPath, destPath, L"explicit package DLL")');
-    const embeddedIndex = block.indexOf('ServiceDeploy_ExtractEmbeddedSvchostDllFromExe(sourceExePath, destPath)');
+    const explicitIndex = block.indexOf('ServiceDeploy_TryStageAndValidateServiceHostDll(sourceDllPath, destPath, L"explicit package DLL")');
+    const embeddedIndex = block.indexOf('ServiceDeploy_ExtractEmbeddedServiceHostDllFromExe(sourceExePath, destPath)');
 
     assert(explicitIndex >= 0, 'missing explicit package DLL stage');
     assert(embeddedIndex >= 0, 'missing embedded DLL extraction stage');
@@ -70,7 +70,7 @@ function main() {
     assert(!block.includes('ServiceDeploy_BuildSiblingPathWithFileName'), 'lifecycle staging must not infer DLL paths by sibling file name');
     assert(explicitIndex < embeddedIndex, 'explicit DLL stage must remain before embedded payload extraction');
     const normalizedUpdateBlock = updateBlock.replace(/\s+/g, ' ');
-    assert(normalizedUpdateBlock.includes('ServiceDeploy_EnsureSvchostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath)'), 'update transaction must preserve explicit lifecycle sourceDllPath');
+    assert(normalizedUpdateBlock.includes('ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath)'), 'update transaction must preserve explicit lifecycle sourceDllPath');
     assert(!updateBlock.includes('UNREFERENCED_PARAMETER(sourceDllPath)'), 'update transaction must not ignore sourceDllPath');
     assert(ingressBlock.includes('MeshService_PathsReferToSameFileW(sourceExePath, installedPaths.exePath)'), 'self-update ingress must compare source package against installed executable');
     assert(ingressBlock.includes('Refusing installed executable as update package source'), 'self-update ingress must reject installed executable as package source');
@@ -100,7 +100,7 @@ function main() {
             noFallbackSiblingDiscovery: !block.includes('package sibling fallback DLL'),
             noSiblingExtensionInference: !block.includes('ServiceDeploy_BuildSiblingPathWithExtension'),
             noSiblingFileNameInference: !block.includes('ServiceDeploy_BuildSiblingPathWithFileName'),
-            updateUsesExplicitSourceDll: normalizedUpdateBlock.includes('ServiceDeploy_EnsureSvchostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath)'),
+            updateUsesExplicitSourceDll: normalizedUpdateBlock.includes('ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath)'),
             updateDoesNotIgnoreSourceDll: !updateBlock.includes('UNREFERENCED_PARAMETER(sourceDllPath)'),
             selfUpdateRejectsInstalledSource: ingressBlock.includes('MeshService_PathsReferToSameFileW(sourceExePath, installedPaths.exePath)') &&
                 ingressBlock.includes('Refusing installed executable as update package source'),
@@ -118,7 +118,7 @@ function main() {
 
     if (evidenceDir) {
         ensureDir(evidenceDir);
-        fs.writeFileSync(path.join(evidenceDir, 'svchost_update_dll_source_priority_contract.json'), JSON.stringify(report, null, 2));
+        fs.writeFileSync(path.join(evidenceDir, 'service_bundle_update_dll_source_priority_contract.json'), JSON.stringify(report, null, 2));
         fs.writeFileSync(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',

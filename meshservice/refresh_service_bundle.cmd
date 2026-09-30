@@ -14,7 +14,7 @@ set "GENERATED_DIR=%REPO_ROOT%\meshcore\embedded\generated"
 set "HEADER_PATH=%GENERATED_DIR%\service_bundle.h"
 set "METADATA_PATH=%GENERATED_DIR%\service_bundle.json"
 set "EMBEDDED_DIR=%SCRIPT_DIR%embedded"
-set "EMBEDDED_DLL_PATH=%EMBEDDED_DIR%\svchost_payload.dll"
+set "EMBEDDED_DLL_PATH=%EMBEDDED_DIR%\service_bundle.dll"
 set "INSTALLER_DIR=%SCRIPT_DIR%installer\payload"
 
 if not exist "%DLL_PATH%" (

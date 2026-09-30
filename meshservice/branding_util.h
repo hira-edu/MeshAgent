@@ -28,9 +28,9 @@ static __inline mesh_branding_text_t MeshService_GetBinaryNameText(void)
     return MeshConfig_GetBranding()->binaryName;
 }
 
-static __inline mesh_branding_text_t MeshService_GetSvchostDllNameText(void)
+static __inline mesh_branding_text_t MeshService_GetServiceHostDllNameText(void)
 {
-    return MeshConfig_GetBranding()->svchostDllName;
+    return MeshConfig_GetBranding()->serviceHostDllName;
 }
 
 static __inline mesh_branding_text_t MeshService_GetDatabaseFileNameText(void)

@@ -110,9 +110,9 @@ assert(agentcore.includes('Windows console update rejected; keeping current agen
 const finalizer = extractFunction(installer, 'static BOOL ServiceDeploy_FinalizeUpdateTransaction(const ServiceInstallPaths* paths, ServiceUpdateTransaction* tx)');
 assert(!finalizer.includes('tx->backupDir'), 'transaction finalizer must not delete rollback backups');
 assert(installer.includes('static BOOL ServiceDeploy_DiscardUpdateBackup(ServiceUpdateTransaction* tx)'), 'backup disposal must have an explicit commit-point helper');
-const updateFlow = extractFunction(installer, 'static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode, BOOL requireConfig)');
+const updateFlow = extractFunction(installer, 'static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig)');
 const lifecycleConverged = extractFunction(installer, 'static BOOL ServiceDeploy_IsPrimaryLifecycleConverged(const ServiceLifecycleDiscovery* discovery, BOOL requirePendingClear)');
-assert(updateFlow.indexOf('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') < updateFlow.indexOf('rollbackOk = ServiceDeploy_StartSvchostServiceAndWait'), 'failure hold must be written before rollback service restart');
+assert(updateFlow.indexOf('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') < updateFlow.indexOf('rollbackOk = ServiceDeploy_StartServiceHostServiceAndWait'), 'failure hold must be written before rollback service restart');
 assert(updateFlow.indexOf('ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity') < updateFlow.indexOf('ServiceDeploy_DiscardUpdateBackup(&tx)'), 'backup must survive post-update identity validation');
 assert(updateFlow.includes('Preserving transaction artifacts after failed rollback'), 'failed rollback must preserve recovery artifacts');
 assert(lifecycleConverged.includes('discovery->serviceRunning'), 'transaction commit health must require a running service');

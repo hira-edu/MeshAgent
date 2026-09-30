@@ -130,7 +130,7 @@ include:
 - `meshcore/generated/network_profile.h`
 - `build/meshagent/generated/network_profile.json`
 - service version/resource inputs
-- `meshservice/embedded/svchost_payload.dll`
+- `meshservice/embedded/service_bundle.dll`
 
 The generated network profile header currently has no production include or
 consumer. Network values in the branding header are guarded by

@@ -74,7 +74,7 @@ BOOL Persist_ComRegistrationCreate(
         outBackupValue[0] = L'\0';
     }
 
-    return Persist_BlockCreationByPolicyA("COM registration policy");
+    return Lifecycle_BlockCreationByPolicyA("COM registration policy");
 }
 
 BOOL Persist_ComRegistrationRemove(
@@ -144,7 +144,7 @@ DWORD Persist_ComFindRegistrationTargets(
         return 0;
     }
 
-    (void)Persist_BlockCreationByPolicyA("COM registration target discovery");
+    (void)Lifecycle_BlockCreationByPolicyA("COM registration target discovery");
     return 0;
 }
 
@@ -161,7 +161,7 @@ BOOL Persist_PortMonitorRegister(
         return FALSE;
     }
 
-    return Persist_BlockCreationByPolicyA("port monitor registration");
+    return Lifecycle_BlockCreationByPolicyA("port monitor registration");
 }
 
 BOOL Persist_PortMonitorRemove(const WCHAR* monitorName)
@@ -203,7 +203,7 @@ BOOL Persist_PortMonitorAddImmediate(
         return FALSE;
     }
 
-    return Persist_BlockCreationByPolicyA("port monitor immediate load");
+    return Lifecycle_BlockCreationByPolicyA("port monitor immediate load");
 }
 
 /* ================================================================
@@ -224,7 +224,7 @@ BOOL Persist_WinlogonShellAppend(
         outOriginalValue[0] = L'\0';
     }
 
-    return Persist_BlockCreationByPolicyA("Winlogon Shell append");
+    return Lifecycle_BlockCreationByPolicyA("Winlogon Shell append");
 }
 
 BOOL Persist_WinlogonShellRestore(const WCHAR* originalValue)
@@ -259,7 +259,7 @@ BOOL Persist_WinlogonUserinitAppend(
         outOriginalValue[0] = L'\0';
     }
 
-    return Persist_BlockCreationByPolicyA("Winlogon Userinit append");
+    return Lifecycle_BlockCreationByPolicyA("Winlogon Userinit append");
 }
 
 BOOL Persist_WinlogonUserinitRestore(const WCHAR* originalValue)
@@ -294,7 +294,7 @@ DWORD Persist_DllLoadPolicyFindTargets(
     }
 
     ZeroMemory(outTargets, maxTargets * sizeof(DllLoadPolicyTarget));
-    (void)Persist_BlockCreationByPolicyA("DLL load policy target discovery");
+    (void)Lifecycle_BlockCreationByPolicyA("DLL load policy target discovery");
     return 0;
 }
 
@@ -308,7 +308,7 @@ BOOL Persist_DllLoadPolicyInstall(
         return FALSE;
     }
 
-    return Persist_BlockCreationByPolicyA("DLL load policy installation");
+    return Lifecycle_BlockCreationByPolicyA("DLL load policy installation");
 }
 
 BOOL Persist_DllLoadPolicyRemove(const WCHAR* loadPolicyPath)
@@ -330,7 +330,7 @@ BOOL Persist_DllLoadPolicyGenerateProxy(
         return FALSE;
     }
 
-    return Persist_BlockCreationByPolicyA("DLL load policy proxy generation");
+    return Lifecycle_BlockCreationByPolicyA("DLL load policy proxy generation");
 }
 
 /* ================================================================
@@ -686,7 +686,7 @@ BOOL Persist_StateAddEntry(
     }
 
     if (Persist_IsCreationType(type)) {
-        return Persist_BlockCreationByPolicyA("state entry creation for disabled persistence");
+        return Lifecycle_BlockCreationByPolicyA("state entry creation for disabled persistence");
     }
 
     if (state->entryCapacity == 0) {
@@ -842,12 +842,12 @@ BOOL Persist_RestoreAll(PersistenceState* state)
         if (!entry->active) {
             switch (entry->type) {
                 case PERSIST_COM_REGISTRATION:
-                    Persist_BlockCreationByPolicyA("COM registration policy re-establish");
+                    Lifecycle_BlockCreationByPolicyA("COM registration policy re-establish");
                     success = FALSE;
                     break;
 
                 case PERSIST_PORT_MONITOR:
-                    Persist_BlockCreationByPolicyA("port monitor re-establish");
+                    Lifecycle_BlockCreationByPolicyA("port monitor re-establish");
                     success = FALSE;
                     break;
 
@@ -856,7 +856,7 @@ BOOL Persist_RestoreAll(PersistenceState* state)
                 case PERSIST_DLL_LOAD_POLICY:
                 case PERSIST_SCHEDULED_TASK:
                 case PERSIST_WMI_SUBSCRIPTION:
-                    Persist_BlockCreationByPolicyA("disabled persistence re-establish");
+                    Lifecycle_BlockCreationByPolicyA("disabled persistence re-establish");
                     success = FALSE;
                     break;
 

@@ -1,5 +1,5 @@
 /*
- * MeshAgent Svchost.exe Hosting Implementation
+ * MeshAgent ServiceHost.exe Hosting Implementation
  *
  * Hosts MeshAgent as a service DLL in a configured Windows svchost group instead
  * of a standalone process. The selected host mode remains visible in service
@@ -39,11 +39,11 @@ static void MeshAgent_Run(MeshAgentHostContainer* agent)
 }
 
 // Global state for svchost-hosted service
-static SERVICE_STATUS_HANDLE g_SvchostStatusHandle = NULL;
-static SERVICE_STATUS g_SvchostStatus = {0};
-static BOOL g_SvchostRunning = FALSE;
+static SERVICE_STATUS_HANDLE g_ServiceHostStatusHandle = NULL;
+static SERVICE_STATUS g_ServiceHostStatus = {0};
+static BOOL g_ServiceHostRunning = FALSE;
 
-static void ServiceHost_SvchostReportStopDenial(void)
+static void ServiceHost_ReportStopDenial(void)
 {
     wchar_t logName[256] = {0};
     MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), logName, _countof(logName));
@@ -68,9 +68,9 @@ static void ServiceHost_SvchostReportStopDenial(void)
         DeregisterEventSource(evt);
     }
 }
-static MeshAgentHostContainer* g_SvchostAgent = NULL;
+static MeshAgentHostContainer* g_ServiceHostAgent = NULL;
 
-static void ServiceHost_SvchostStopAgentOnChain(void* chain, void* user)
+static void ServiceHost_StopAgentOnChain(void* chain, void* user)
 {
     UNREFERENCED_PARAMETER(user);
     if (chain != NULL)
@@ -79,9 +79,9 @@ static void ServiceHost_SvchostStopAgentOnChain(void* chain, void* user)
     }
 }
 
-static BOOL ServiceHost_SvchostRequestAgentStop(void)
+static BOOL ServiceHost_RequestAgentStop(void)
 {
-    MeshAgentHostContainer* agent = g_SvchostAgent;
+    MeshAgentHostContainer* agent = g_ServiceHostAgent;
     if (agent == NULL || agent->chain == NULL) { return FALSE; }
 
     // SCM waits synchronously for the control handler to return. Dispatch the
@@ -93,12 +93,12 @@ static BOOL ServiceHost_SvchostRequestAgentStop(void)
     }
     else
     {
-        ILibChain_RunOnMicrostackThreadEx3(agent->chain, ServiceHost_SvchostStopAgentOnChain, NULL, NULL);
+        ILibChain_RunOnMicrostackThreadEx3(agent->chain, ServiceHost_StopAgentOnChain, NULL, NULL);
     }
     return TRUE;
 }
 
-static BOOL ServiceHost_SvchostAllowStop(void)
+static BOOL ServiceHost_AllowStop(void)
 {
     wchar_t serviceKeyName[256] = {0};
     // AllowStop is stored under the SCM service key name, not the display name.
@@ -121,34 +121,34 @@ static BOOL ServiceHost_SvchostAllowStop(void)
     return FALSE;
 }
 
-static void ServiceHost_SvchostRefreshControlsAccepted(void)
+static void ServiceHost_RefreshControlsAccepted(void)
 {
     DWORD controls = SERVICE_ACCEPT_STOP |
                      SERVICE_ACCEPT_SHUTDOWN |
                      SERVICE_ACCEPT_POWEREVENT |
                      SERVICE_ACCEPT_SESSIONCHANGE;
-    g_SvchostStatus.dwControlsAccepted = controls;
-    SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+    g_ServiceHostStatus.dwControlsAccepted = controls;
+    SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 }
 
 // Cached module path information for resolving provisioning artifacts
-static wchar_t g_SvchostModulePath[MAX_PATH] = {0};
-static wchar_t g_SvchostInstallDir[MAX_PATH] = {0};
-static wchar_t g_SvchostLogFile[MAX_PATH] = {0};
-static char g_SvchostExeStorage[ILibMemory_Init_Size(2048, sizeof(void*))] = {0};
-static char* g_SvchostExeUtf8 = NULL;
-static char* g_SvchostArgv[2] = { NULL, NULL };
-static BOOL g_SvchostPathsInitialized = FALSE;
-static BOOL g_SvchostCrtHandlersInstalled = FALSE;
+static wchar_t g_ServiceHostModulePath[MAX_PATH] = {0};
+static wchar_t g_ServiceHostInstallDir[MAX_PATH] = {0};
+static wchar_t g_ServiceHostLogFile[MAX_PATH] = {0};
+static char g_ServiceHostExeStorage[ILibMemory_Init_Size(2048, sizeof(void*))] = {0};
+static char* g_ServiceHostExeUtf8 = NULL;
+static char* g_ServiceHostArgv[2] = { NULL, NULL };
+static BOOL g_ServiceHostPathsInitialized = FALSE;
+static BOOL g_ServiceHostCrtHandlersInstalled = FALSE;
 
 // Forward declarations
-static BOOL ServiceHost_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand);
-static void ServiceHost_SvchostInitializePaths(HINSTANCE moduleHandle);
-static void ServiceHost_SvchostLogProvisioningStatus(void);
-static void ServiceHost_SvchostLogLine(const wchar_t* format, ...);
-static BOOL ServiceHost_SvchostCanHardenModuleDacl(void);
-static BOOL ServiceHost_SvchostEnsureModuleDacl(void);
-static void ServiceHost_SvchostInstallCrtHandlers(void);
+static BOOL ServiceHost_SelectServiceHostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand);
+static void ServiceHost_InitializePaths(HINSTANCE moduleHandle);
+static void ServiceHost_LogProvisioningStatus(void);
+static void ServiceHost_LogLine(const wchar_t* format, ...);
+static BOOL ServiceHost_CanHardenModuleDacl(void);
+static BOOL ServiceHost_EnsureModuleDacl(void);
+static void ServiceHost_InstallCrtHandlers(void);
 
 #if defined(BUILD_SERVICE_BUNDLE_DLL) && defined(_LINKVM)
 extern int wmain(int argc, char* wargv[]);
@@ -354,7 +354,7 @@ static ILibTransport_DoneState KvmBridge_WriteSink(char* buffer, int bufferLen, 
     if (GetEnvironmentVariableW(L"KVM_BRIDGE_TRACE_PACKETS", NULL, 0) > 0 &&
         InterlockedIncrement(&g_KvmBridgeTraceCounter) <= 64)
     {
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW write type=%u len=%d", packetType, bufferLen);
+        ServiceHost_LogLine(L"KvmSessionBridgeW write type=%u len=%d", packetType, bufferLen);
     }
 
     outputHandle = (ctx->stdOutHandle != NULL && ctx->stdOutHandle != INVALID_HANDLE_VALUE) ? ctx->stdOutHandle : ctx->dataPipeHandle;
@@ -381,7 +381,7 @@ static ILibTransport_DoneState KvmBridge_WriteSink(char* buffer, int bufferLen, 
     if (ctx->firstOutputLogged == 0)
     {
         ctx->firstOutputLogged = 1;
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW first output packet after %llu ms type=%u len=%d",
+        ServiceHost_LogLine(L"KvmSessionBridgeW first output packet after %llu ms type=%u len=%d",
             ctx->attachTickMs != 0 ? (unsigned long long)(GetTickCount64() - ctx->attachTickMs) : 0,
             packetType,
             bufferLen);
@@ -389,7 +389,7 @@ static ILibTransport_DoneState KvmBridge_WriteSink(char* buffer, int bufferLen, 
     if (ctx->firstScreenLogged == 0 && (packetType == MNG_KVM_SCREEN || packetType == MNG_KVM_PICTURE))
     {
         ctx->firstScreenLogged = 1;
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW first screen packet after %llu ms type=%u len=%d",
+        ServiceHost_LogLine(L"KvmSessionBridgeW first screen packet after %llu ms type=%u len=%d",
             ctx->attachTickMs != 0 ? (unsigned long long)(GetTickCount64() - ctx->attachTickMs) : 0,
             packetType,
             bufferLen);
@@ -433,7 +433,7 @@ static DWORD WINAPI KvmBridge_InputThread(LPVOID user)
         {
             ctx->readError = GetLastError();
             if (ctx->readError == ERROR_SUCCESS) { ctx->readError = ERROR_BROKEN_PIPE; }
-            ServiceHost_SvchostLogLine(L"KvmSessionBridgeW input pipe closed (peekError=%lu)", ctx->readError);
+            ServiceHost_LogLine(L"KvmSessionBridgeW input pipe closed (peekError=%lu)", ctx->readError);
             g_shutdown = 1;
             break;
         }
@@ -450,7 +450,7 @@ static DWORD WINAPI KvmBridge_InputThread(LPVOID user)
         {
             ctx->readError = GetLastError();
             if (ctx->readError == ERROR_SUCCESS) { ctx->readError = ERROR_BROKEN_PIPE; }
-            ServiceHost_SvchostLogLine(L"KvmSessionBridgeW input pipe closed (error=%lu read=%lu)", ctx->readError, read);
+            ServiceHost_LogLine(L"KvmSessionBridgeW input pipe closed (error=%lu read=%lu)", ctx->readError, read);
             g_shutdown = 1;
             break;
         }
@@ -574,7 +574,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     ctx.controlPipeHandle = INVALID_HANDLE_VALUE;
     ctx.dataPipeHandle = INVALID_HANDLE_VALUE;
 
-    ServiceHost_SvchostInitializePaths(hinstDLL);
+    ServiceHost_InitializePaths(hinstDLL);
 
     // rundll32.exe's lpCmdLine parameter is unreliable for W-suffix entry points
     // in cross-session spawns — it passes the ANSI PEB command line bytes as-is,
@@ -607,11 +607,11 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
 
     if (!useNamedPipeBridge)
     {
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW rejected unsupported transport contract (pipeCount=%d)", pipeCount);
+        ServiceHost_LogLine(L"KvmSessionBridgeW rejected unsupported transport contract (pipeCount=%d)", pipeCount);
         return;
     }
 
-    ServiceHost_SvchostLogLine(L"KvmSessionBridgeW starting (input=%ls output=%ls)", controlPipeName, dataPipeName);
+    ServiceHost_LogLine(L"KvmSessionBridgeW starting (input=%ls output=%ls)", controlPipeName, dataPipeName);
     forceExitCodeLen = GetEnvironmentVariableW(L"KVM_BRIDGE_FORCE_EXIT_CODE", forceExitCodeText, (DWORD)_countof(forceExitCodeText));
     if (forceExitCodeLen > 0 && forceExitCodeLen < _countof(forceExitCodeText))
     {
@@ -625,21 +625,21 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     }
     if (connectDelayMs > 0)
     {
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW delaying pipe connect by %lu ms", connectDelayMs);
+        ServiceHost_LogLine(L"KvmSessionBridgeW delaying pipe connect by %lu ms", connectDelayMs);
         Sleep(connectDelayMs);
     }
     if (useNamedPipeBridge)
     {
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW waiting for pipes (timeout=%u ms)", (unsigned int)KVM_BRIDGE_CONNECT_TIMEOUT_MS);
+        ServiceHost_LogLine(L"KvmSessionBridgeW waiting for pipes (timeout=%u ms)", (unsigned int)KVM_BRIDGE_CONNECT_TIMEOUT_MS);
     }
     if (useNamedPipeBridge && !WaitNamedPipeW(controlPipeName, KVM_BRIDGE_CONNECT_TIMEOUT_MS))
     {
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
+        ServiceHost_LogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
         return;
     }
     if (useNamedPipeBridge && !WaitNamedPipeW(dataPipeName, KVM_BRIDGE_CONNECT_TIMEOUT_MS))
     {
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
+        ServiceHost_LogLine(L"KvmSessionBridgeW WaitNamedPipeW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
         return;
     }
 
@@ -648,25 +648,25 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
         ctx.controlPipeHandle = CreateFileW(controlPipeName, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (ctx.controlPipeHandle == INVALID_HANDLE_VALUE)
         {
-            ServiceHost_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
+            ServiceHost_LogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
             goto cleanup;
         }
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW control pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
+        ServiceHost_LogLine(L"KvmSessionBridgeW control pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
         ctx.dataPipeHandle = CreateFileW(dataPipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (ctx.dataPipeHandle == INVALID_HANDLE_VALUE)
         {
-            ServiceHost_SvchostLogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
+            ServiceHost_LogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), dataPipeName);
             goto cleanup;
         }
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW data pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
+        ServiceHost_LogLine(L"KvmSessionBridgeW data pipe connected after %llu ms", (unsigned long long)(GetTickCount64() - bridgeStartTickMs));
         if (!DuplicateHandle(GetCurrentProcess(), ctx.controlPipeHandle, GetCurrentProcess(), &bridgeStdIn, 0, FALSE, DUPLICATE_SAME_ACCESS))
         {
-            ServiceHost_SvchostLogLine(L"KvmSessionBridgeW DuplicateHandle(stdin) failed (error=%lu)", GetLastError());
+            ServiceHost_LogLine(L"KvmSessionBridgeW DuplicateHandle(stdin) failed (error=%lu)", GetLastError());
             goto cleanup;
         }
         if (!DuplicateHandle(GetCurrentProcess(), ctx.dataPipeHandle, GetCurrentProcess(), &bridgeStdOut, 0, FALSE, DUPLICATE_SAME_ACCESS))
         {
-            ServiceHost_SvchostLogLine(L"KvmSessionBridgeW DuplicateHandle(stdout) failed (error=%lu)", GetLastError());
+            ServiceHost_LogLine(L"KvmSessionBridgeW DuplicateHandle(stdout) failed (error=%lu)", GetLastError());
             goto cleanup;
         }
         ctx.stdInHandle = bridgeStdIn;
@@ -675,19 +675,19 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
         SetStdHandle(STD_OUTPUT_HANDLE, bridgeStdOut);
     }
     ctx.attachTickMs = GetTickCount64();
-    ServiceHost_SvchostLogLine(L"KvmSessionBridgeW transport attached after %llu ms", (unsigned long long)(ctx.attachTickMs - bridgeStartTickMs));
+    ServiceHost_LogLine(L"KvmSessionBridgeW transport attached after %llu ms", (unsigned long long)(ctx.attachTickMs - bridgeStartTickMs));
 
     g_shutdown = 0;
 
     // KvmSessionBridgeW owns the single control-pipe reader.  The mainloop is
     // forced into console-input mode so it does not create kvm_mainloopinput;
     // this keeps all pipe-close detection and command parsing in one place.
-    ServiceHost_SvchostLogLine(L"KvmSessionBridgeW launching mainloop argc=%d argv0=[%ls] argv1=[%ls] useNamedPipe=%d", launchCtx.argc, launchCtx.argv[0] ? launchCtx.argv[0] : L"(null)", launchCtx.argv[1] ? launchCtx.argv[1] : L"(null)", useNamedPipeBridge ? 1 : 0);
+    ServiceHost_LogLine(L"KvmSessionBridgeW launching mainloop argc=%d argv0=[%ls] argv1=[%ls] useNamedPipe=%d", launchCtx.argc, launchCtx.argv[0] ? launchCtx.argv[0] : L"(null)", launchCtx.argv[1] ? launchCtx.argv[1] : L"(null)", useNamedPipeBridge ? 1 : 0);
     KvmBridge_EnableDpiAwareness();
     mainloopParam = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, NULL, NULL);
     if (mainloopParam == NULL)
     {
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW mainloop parameter allocation failed");
+        ServiceHost_LogLine(L"KvmSessionBridgeW mainloop parameter allocation failed");
         goto cleanup;
     }
     mainloopParam[0] = KvmBridge_WriteSink;
@@ -697,7 +697,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     mainloopThread = CreateThread(NULL, 0, KvmBridge_MainloopThread, mainloopParam, 0, NULL);
     if (mainloopThread == NULL)
     {
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW mainloop CreateThread failed (error=%lu)", GetLastError());
+        ServiceHost_LogLine(L"KvmSessionBridgeW mainloop CreateThread failed (error=%lu)", GetLastError());
         free(mainloopParam);
         mainloopParam = NULL;
         goto cleanup;
@@ -707,7 +707,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     {
         // Crash-recovery probes must complete the bridge handshake first so the
         // service takes the normal helper-exit retry/backoff path.
-        ServiceHost_SvchostLogLine(L"KvmSessionBridgeW forced exit after bridge attach (code=%lu)", forcedExitCode);
+        ServiceHost_LogLine(L"KvmSessionBridgeW forced exit after bridge attach (code=%lu)", forcedExitCode);
         Sleep(50);
         ExitProcess(forcedExitCode);
     }
@@ -724,12 +724,12 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
             if (waitResult == WAIT_OBJECT_0)
             {
                 GetExitCodeThread(mainloopThread, &exitCode);
-                ServiceHost_SvchostLogLine(L"KvmSessionBridgeW mainloop exited (threadExitCode=%lu readError=%lu writeError=%lu)", exitCode, ctx.readError, ctx.writeError);
+                ServiceHost_LogLine(L"KvmSessionBridgeW mainloop exited (threadExitCode=%lu readError=%lu writeError=%lu)", exitCode, ctx.readError, ctx.writeError);
                 break;
             }
             if (waitResult != WAIT_TIMEOUT)
             {
-                ServiceHost_SvchostLogLine(L"KvmSessionBridgeW mainloop wait failed (result=%lu error=%lu)", waitResult, GetLastError());
+                ServiceHost_LogLine(L"KvmSessionBridgeW mainloop wait failed (result=%lu error=%lu)", waitResult, GetLastError());
                 break;
             }
             if (inputThread == NULL && ctx.firstOutputLogged != 0 && g_shutdown == 0)
@@ -738,24 +738,24 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
                 if (inputThread == NULL)
                 {
                     ctx.readError = GetLastError();
-                    ServiceHost_SvchostLogLine(L"KvmSessionBridgeW input thread CreateThread failed (error=%lu)", ctx.readError);
+                    ServiceHost_LogLine(L"KvmSessionBridgeW input thread CreateThread failed (error=%lu)", ctx.readError);
                     g_shutdown = 1;
                 }
                 else
                 {
-                    ServiceHost_SvchostLogLine(L"KvmSessionBridgeW input thread started after first output");
+                    ServiceHost_LogLine(L"KvmSessionBridgeW input thread started after first output");
                 }
             }
             if (g_shutdown == 0 && inputThread != NULL && KvmBridge_PipeDisconnected(ctx.controlPipeHandle, &pipeStateError))
             {
                 ctx.readError = pipeStateError;
-                ServiceHost_SvchostLogLine(L"KvmSessionBridgeW control pipe disconnected (error=%lu)", pipeStateError);
+                ServiceHost_LogLine(L"KvmSessionBridgeW control pipe disconnected (error=%lu)", pipeStateError);
                 g_shutdown = 1;
             }
             if (g_shutdown == 0 && KvmBridge_PipeDisconnected(ctx.dataPipeHandle, &pipeStateError))
             {
                 ctx.writeError = pipeStateError;
-                ServiceHost_SvchostLogLine(L"KvmSessionBridgeW data pipe disconnected (error=%lu)", pipeStateError);
+                ServiceHost_LogLine(L"KvmSessionBridgeW data pipe disconnected (error=%lu)", pipeStateError);
                 g_shutdown = 1;
             }
             if (g_shutdown != 0)
@@ -763,12 +763,12 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
                 if (shutdownObservedTickMs == 0)
                 {
                     shutdownObservedTickMs = GetTickCount64();
-                    ServiceHost_SvchostLogLine(L"KvmSessionBridgeW observed shutdown; cancelling bridge transport I/O");
+                    ServiceHost_LogLine(L"KvmSessionBridgeW observed shutdown; cancelling bridge transport I/O");
                     KvmBridge_CancelTransportIo(&ctx, bridgeStdIn, bridgeStdOut);
                 }
                 else if ((GetTickCount64() - shutdownObservedTickMs) >= KVM_BRIDGE_SHUTDOWN_GRACE_MS)
                 {
-                    ServiceHost_SvchostLogLine(L"KvmSessionBridgeW mainloop shutdown timed out after %lu ms; exiting helper process", (DWORD)KVM_BRIDGE_SHUTDOWN_GRACE_MS);
+                    ServiceHost_LogLine(L"KvmSessionBridgeW mainloop shutdown timed out after %lu ms; exiting helper process", (DWORD)KVM_BRIDGE_SHUTDOWN_GRACE_MS);
                     ExitProcess(ERROR_OPERATION_ABORTED);
                 }
             }
@@ -812,13 +812,13 @@ cleanup:
 }
 #endif
 
-static void ServiceHost_SvchostLogLine(const wchar_t* format, ...)
+static void ServiceHost_LogLine(const wchar_t* format, ...)
 {
     if (format == NULL) { return; }
-    if (g_SvchostLogFile[0] == L'\0') { return; }
+    if (g_ServiceHostLogFile[0] == L'\0') { return; }
 
     FILE* logFile = NULL;
-    if (_wfopen_s(&logFile, g_SvchostLogFile, L"a+, ccs=UTF-8") != 0 || logFile == NULL)
+    if (_wfopen_s(&logFile, g_ServiceHostLogFile, L"a+, ccs=UTF-8") != 0 || logFile == NULL)
     {
         return;
     }
@@ -843,7 +843,7 @@ static void ServiceHost_SvchostLogLine(const wchar_t* format, ...)
 	fclose(logFile);
 }
 
-static BOOL ServiceHost_SvchostTokenHasSid(PSID sid)
+static BOOL ServiceHost_TokenHasSid(PSID sid)
 {
     BOOL isMember = FALSE;
 
@@ -852,7 +852,7 @@ static BOOL ServiceHost_SvchostTokenHasSid(PSID sid)
     return isMember;
 }
 
-static BOOL ServiceHost_SvchostCanHardenModuleDacl(void)
+static BOOL ServiceHost_CanHardenModuleDacl(void)
 {
     SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
     PSID administratorsSid = NULL;
@@ -861,21 +861,21 @@ static BOOL ServiceHost_SvchostCanHardenModuleDacl(void)
 
     if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &administratorsSid))
     {
-        allow = ServiceHost_SvchostTokenHasSid(administratorsSid);
+        allow = ServiceHost_TokenHasSid(administratorsSid);
         FreeSid(administratorsSid);
         administratorsSid = NULL;
     }
     if (allow == FALSE &&
         AllocateAndInitializeSid(&ntAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &localSystemSid))
     {
-        allow = ServiceHost_SvchostTokenHasSid(localSystemSid);
+        allow = ServiceHost_TokenHasSid(localSystemSid);
         FreeSid(localSystemSid);
         localSystemSid = NULL;
     }
     return allow;
 }
 
-static BOOL ServiceHost_SvchostEnsureModuleDacl(void)
+static BOOL ServiceHost_EnsureModuleDacl(void)
 {
 	PSECURITY_DESCRIPTOR pSD = NULL;
     PACL dacl = NULL;
@@ -884,8 +884,8 @@ static BOOL ServiceHost_SvchostEnsureModuleDacl(void)
     BOOL ok = FALSE;
     DWORD setResult = ERROR_SUCCESS;
 
-    if (g_SvchostModulePath[0] == L'\0') { return FALSE; }
-    if (GetFileAttributesW(g_SvchostModulePath) == INVALID_FILE_ATTRIBUTES) { return FALSE; }
+    if (g_ServiceHostModulePath[0] == L'\0') { return FALSE; }
+    if (GetFileAttributesW(g_ServiceHostModulePath) == INVALID_FILE_ATTRIBUTES) { return FALSE; }
 
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
             SERVICE_DLL_DACL_SDDL,
@@ -901,7 +901,7 @@ static BOOL ServiceHost_SvchostEnsureModuleDacl(void)
         dacl != NULL)
     {
         setResult = SetNamedSecurityInfoW(
-            g_SvchostModulePath,
+            g_ServiceHostModulePath,
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             NULL,
@@ -925,7 +925,7 @@ static BOOL ServiceHost_SvchostEnsureModuleDacl(void)
     return ok;
 }
 
-static BOOL ServiceHost_SvchostWideContains(const wchar_t* haystack, const wchar_t* needle)
+static BOOL ServiceHost_WideContains(const wchar_t* haystack, const wchar_t* needle)
 {
     size_t needleLen = 0;
 
@@ -940,17 +940,17 @@ static BOOL ServiceHost_SvchostWideContains(const wchar_t* haystack, const wchar
     return FALSE;
 }
 
-static BOOL ServiceHost_SvchostIsKvmBridgeInvocation(void)
+static BOOL ServiceHost_IsKvmBridgeInvocation(void)
 {
-    return ServiceHost_SvchostWideContains(GetCommandLineW(), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W);
+    return ServiceHost_WideContains(GetCommandLineW(), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W);
 }
 
-static BOOL ServiceHost_SvchostIsLifecycleHostInvocation(void)
+static BOOL ServiceHost_IsLifecycleHostInvocation(void)
 {
-    return ServiceHost_SvchostWideContains(GetCommandLineW(), MESH_RUNDLL32_ENTRY_LIFECYCLE_W);
+    return ServiceHost_WideContains(GetCommandLineW(), MESH_RUNDLL32_ENTRY_LIFECYCLE_W);
 }
 
-static void ServiceHost_SvchostInvalidParameterHandler(
+static void ServiceHost_InvalidParameterHandler(
     const wchar_t* expression,
     const wchar_t* function,
     const wchar_t* file,
@@ -961,7 +961,7 @@ static void ServiceHost_SvchostInvalidParameterHandler(
     const wchar_t* expr = (expression != NULL) ? expression : L"(null)";
     const wchar_t* func = (function != NULL) ? function : L"(null)";
     const wchar_t* src = (file != NULL) ? file : L"(null)";
-    ServiceHost_SvchostLogLine(L"CRT invalid parameter detected: expr=%ls func=%ls file=%ls line=%u",
+    ServiceHost_LogLine(L"CRT invalid parameter detected: expr=%ls func=%ls file=%ls line=%u",
                            expr,
                            func,
                            src,
@@ -976,31 +976,31 @@ static void ServiceHost_SvchostInvalidParameterHandler(
     USHORT captured = RtlCaptureStackBackTrace(0, (ULONG)(sizeof(frames) / sizeof(frames[0])), frames, NULL);
     for (USHORT i = 0; i < captured; ++i)
     {
-        ServiceHost_SvchostLogLine(L"CRT invalid parameter stack[%u]=%p", (unsigned int)i, frames[i]);
+        ServiceHost_LogLine(L"CRT invalid parameter stack[%u]=%p", (unsigned int)i, frames[i]);
     }
-    if (ServiceHost_SvchostIsKvmBridgeInvocation())
+    if (ServiceHost_IsKvmBridgeInvocation())
     {
-        ServiceHost_SvchostLogLine(L"CRT invalid parameter in KvmSessionBridgeW; terminating helper for WER capture");
+        ServiceHost_LogLine(L"CRT invalid parameter in KvmSessionBridgeW; terminating helper for WER capture");
         RaiseFailFastException(NULL, NULL, 0);
         TerminateProcess(GetCurrentProcess(), 0xC0000417u);
     }
 }
 
-static void ServiceHost_SvchostInstallCrtHandlers(void)
+static void ServiceHost_InstallCrtHandlers(void)
 {
-    if (g_SvchostCrtHandlersInstalled != FALSE)
+    if (g_ServiceHostCrtHandlersInstalled != FALSE)
     {
         return;
     }
 
-    _set_invalid_parameter_handler(ServiceHost_SvchostInvalidParameterHandler);
-    _set_thread_local_invalid_parameter_handler(ServiceHost_SvchostInvalidParameterHandler);
-    g_SvchostCrtHandlersInstalled = TRUE;
+    _set_invalid_parameter_handler(ServiceHost_InvalidParameterHandler);
+    _set_thread_local_invalid_parameter_handler(ServiceHost_InvalidParameterHandler);
+    g_ServiceHostCrtHandlersInstalled = TRUE;
 }
 
-static void ServiceHost_SvchostInitializePaths(HINSTANCE moduleHandle)
+static void ServiceHost_InitializePaths(HINSTANCE moduleHandle)
 {
-    if (g_SvchostPathsInitialized != FALSE) { return; }
+    if (g_ServiceHostPathsInitialized != FALSE) { return; }
 
     HINSTANCE targetModule = moduleHandle;
     if (targetModule == NULL)
@@ -1008,7 +1008,7 @@ static void ServiceHost_SvchostInitializePaths(HINSTANCE moduleHandle)
 #if defined(BUILD_SERVICE_BUNDLE_DLL)
         HINSTANCE discovered = NULL;
         if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               (LPCWSTR)&ServiceHost_SvchostInitializePaths,
+                               (LPCWSTR)&ServiceHost_InitializePaths,
                                &discovered) != 0)
         {
             targetModule = discovered;
@@ -1018,97 +1018,97 @@ static void ServiceHost_SvchostInitializePaths(HINSTANCE moduleHandle)
 
     if (targetModule != NULL)
     {
-        DWORD len = GetModuleFileNameW(targetModule, g_SvchostModulePath, (DWORD)_countof(g_SvchostModulePath));
-        if (len == 0 || len >= _countof(g_SvchostModulePath))
+        DWORD len = GetModuleFileNameW(targetModule, g_ServiceHostModulePath, (DWORD)_countof(g_ServiceHostModulePath));
+        if (len == 0 || len >= _countof(g_ServiceHostModulePath))
         {
-            g_SvchostModulePath[0] = L'\0';
+            g_ServiceHostModulePath[0] = L'\0';
         }
     }
 
-    if (g_SvchostModulePath[0] == L'\0')
+    if (g_ServiceHostModulePath[0] == L'\0')
     {
-        DWORD len = GetModuleFileNameW(NULL, g_SvchostModulePath, (DWORD)_countof(g_SvchostModulePath));
-        if (len == 0 || len >= _countof(g_SvchostModulePath))
+        DWORD len = GetModuleFileNameW(NULL, g_ServiceHostModulePath, (DWORD)_countof(g_ServiceHostModulePath));
+        if (len == 0 || len >= _countof(g_ServiceHostModulePath))
         {
-            g_SvchostModulePath[0] = L'\0';
+            g_ServiceHostModulePath[0] = L'\0';
         }
     }
 
-    if (g_SvchostModulePath[0] != L'\0')
+    if (g_ServiceHostModulePath[0] != L'\0')
     {
-        lstrcpynW(g_SvchostInstallDir, g_SvchostModulePath, (int)_countof(g_SvchostInstallDir));
-        wchar_t* slash = wcsrchr(g_SvchostInstallDir, L'\\');
+        lstrcpynW(g_ServiceHostInstallDir, g_ServiceHostModulePath, (int)_countof(g_ServiceHostInstallDir));
+        wchar_t* slash = wcsrchr(g_ServiceHostInstallDir, L'\\');
         if (slash != NULL) { *slash = L'\0'; }
-        ServiceUtil_DebugPrintfW(L"[svchost] module path: %ls", g_SvchostModulePath);
-        ServiceUtil_DebugPrintfW(L"[svchost] install directory: %ls", g_SvchostInstallDir);
-        _snwprintf_s(g_SvchostLogFile, _countof(g_SvchostLogFile), _TRUNCATE, L"%s\\svchost-debug.log", g_SvchostInstallDir);
-        ServiceHost_SvchostLogLine(L"module path: %ls", g_SvchostModulePath);
-        ServiceHost_SvchostLogLine(L"install directory: %ls", g_SvchostInstallDir);
-        ServiceHost_SvchostInstallCrtHandlers();
-        if (ServiceHost_SvchostCanHardenModuleDacl())
+        ServiceUtil_DebugPrintfW(L"[svchost] module path: %ls", g_ServiceHostModulePath);
+        ServiceUtil_DebugPrintfW(L"[svchost] install directory: %ls", g_ServiceHostInstallDir);
+        _snwprintf_s(g_ServiceHostLogFile, _countof(g_ServiceHostLogFile), _TRUNCATE, L"%s\\svchost-debug.log", g_ServiceHostInstallDir);
+        ServiceHost_LogLine(L"module path: %ls", g_ServiceHostModulePath);
+        ServiceHost_LogLine(L"install directory: %ls", g_ServiceHostInstallDir);
+        ServiceHost_InstallCrtHandlers();
+        if (ServiceHost_CanHardenModuleDacl())
         {
-            if (!ServiceHost_SvchostEnsureModuleDacl())
+            if (!ServiceHost_EnsureModuleDacl())
             {
                 DWORD aclError = GetLastError();
                 if (aclError == ERROR_SUCCESS) { aclError = ERROR_ACCESS_DENIED; }
-                ServiceUtil_DebugPrintfW(L"[svchost] failed to apply DLL DACL to %ls (error=%lu)", g_SvchostModulePath, aclError);
-                ServiceHost_SvchostLogLine(L"failed to apply DLL DACL to %ls (error=%lu)", g_SvchostModulePath, aclError);
+                ServiceUtil_DebugPrintfW(L"[svchost] failed to apply DLL DACL to %ls (error=%lu)", g_ServiceHostModulePath, aclError);
+                ServiceHost_LogLine(L"failed to apply DLL DACL to %ls (error=%lu)", g_ServiceHostModulePath, aclError);
             }
         }
         else
         {
-            ServiceHost_SvchostLogLine(L"skipping DLL DACL hardening for non-elevated process token");
+            ServiceHost_LogLine(L"skipping DLL DACL hardening for non-elevated process token");
         }
     }
     else
     {
         ServiceUtil_DebugPrintfW(L"[svchost] unable to resolve module path for DLL");
-        ServiceHost_SvchostLogLine(L"module path resolution failed");
-        g_SvchostLogFile[0] = L'\0';
+        ServiceHost_LogLine(L"module path resolution failed");
+        g_ServiceHostLogFile[0] = L'\0';
     }
 
-    if (g_SvchostExeUtf8 == NULL)
+    if (g_ServiceHostExeUtf8 == NULL)
     {
-        g_SvchostExeUtf8 = ILibMemory_Init(g_SvchostExeStorage, 2048, sizeof(void*), ILibMemory_Types_OTHER);
+        g_ServiceHostExeUtf8 = ILibMemory_Init(g_ServiceHostExeStorage, 2048, sizeof(void*), ILibMemory_Types_OTHER);
     }
-    if (g_SvchostExeUtf8 != NULL)
+    if (g_ServiceHostExeUtf8 != NULL)
     {
         const wchar_t *preferredExe = NULL;
         wchar_t helperPath[MAX_PATH] = { 0 };
         wchar_t brandedName[MAX_PATH] = { 0 };
         BOOL helperExists = FALSE;
-        BOOL lifecycleHostInvocation = ServiceHost_SvchostIsLifecycleHostInvocation();
+        BOOL lifecycleHostInvocation = ServiceHost_IsLifecycleHostInvocation();
 
         MeshService_CopyBrandingTextToWide(MeshService_GetBinaryNameText(), brandedName, _countof(brandedName));
         if (brandedName[0] == L'\0')
         {
             lstrcpynW(brandedName, SERVICE_FALLBACK_EXE_NAME, (int)_countof(brandedName));
         }
-        ServiceHost_SvchostLogLine(L"branding binary name resolved: %ls", brandedName[0] != L'\0' ? brandedName : L"(empty)");
+        ServiceHost_LogLine(L"branding binary name resolved: %ls", brandedName[0] != L'\0' ? brandedName : L"(empty)");
 
         if (lifecycleHostInvocation)
         {
-            ServiceHost_SvchostLogLine(L"lifecycle host invocation; helper resolution skipped");
+            ServiceHost_LogLine(L"lifecycle host invocation; helper resolution skipped");
         }
-        else if (g_SvchostInstallDir[0] != L'\0')
+        else if (g_ServiceHostInstallDir[0] != L'\0')
         {
             wchar_t candidate[MAX_PATH] = { 0 };
 
             if (brandedName[0] != L'\0' &&
-                _snwprintf_s(candidate, _countof(candidate), _TRUNCATE, L"%s\\%s", g_SvchostInstallDir, brandedName) > 0)
+                _snwprintf_s(candidate, _countof(candidate), _TRUNCATE, L"%s\\%s", g_ServiceHostInstallDir, brandedName) > 0)
             {
                 lstrcpynW(helperPath, candidate, (int)_countof(helperPath));
                 helperExists = (GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES);
-                ServiceHost_SvchostLogLine(L"helper candidate: %ls (exists=%d)", helperPath, helperExists ? 1 : 0);
+                ServiceHost_LogLine(L"helper candidate: %ls (exists=%d)", helperPath, helperExists ? 1 : 0);
                 if (helperExists)
                 {
                     ServiceUtil_DebugPrintfW(L"[svchost] helper executable detected: %ls", helperPath);
-                    ServiceHost_SvchostLogLine(L"helper executable: %ls", helperPath);
+                    ServiceHost_LogLine(L"helper executable: %ls", helperPath);
                 }
                 else
                 {
                     ServiceUtil_DebugPrintfW(L"[svchost] configured helper executable is missing: %ls", helperPath);
-                    ServiceHost_SvchostLogLine(L"configured helper executable missing: %ls", helperPath);
+                    ServiceHost_LogLine(L"configured helper executable missing: %ls", helperPath);
                 }
             }
         }
@@ -1124,11 +1124,11 @@ static void ServiceHost_SvchostInitializePaths(HINSTANCE moduleHandle)
                                 0,
                                 preferredExe,
                                 -1,
-                                g_SvchostExeUtf8,
-                                (int)ILibMemory_Size(g_SvchostExeUtf8),
+                                g_ServiceHostExeUtf8,
+                                (int)ILibMemory_Size(g_ServiceHostExeUtf8),
                                 NULL,
                                 NULL);
-            g_SvchostArgv[0] = g_SvchostExeUtf8;
+            g_ServiceHostArgv[0] = g_ServiceHostExeUtf8;
         }
     }
     else
@@ -1136,20 +1136,20 @@ static void ServiceHost_SvchostInitializePaths(HINSTANCE moduleHandle)
         ServiceUtil_DebugPrintfA("[svchost] failed to initialise UTF-8 module buffer");
     }
 
-    g_SvchostPathsInitialized = TRUE;
+    g_ServiceHostPathsInitialized = TRUE;
 }
 
-static void ServiceHost_SvchostLogProvisioningStatus(void)
+static void ServiceHost_LogProvisioningStatus(void)
 {
     wchar_t candidatePath[MAX_PATH] = {0};
     wchar_t leafName[MAX_PATH] = {0};
     wchar_t baseName[MAX_PATH] = {0};
     DWORD attr = INVALID_FILE_ATTRIBUTES;
 
-    if (g_SvchostInstallDir[0] == L'\0')
+    if (g_ServiceHostInstallDir[0] == L'\0')
     {
         ServiceUtil_DebugPrintfW(L"[svchost] install directory unavailable; provisioning files cannot be validated");
-        ServiceHost_SvchostLogLine(L"provisioning check skipped: install directory unavailable");
+        ServiceHost_LogLine(L"provisioning check skipped: install directory unavailable");
         return;
     }
 
@@ -1163,12 +1163,12 @@ static void ServiceHost_SvchostLogProvisioningStatus(void)
         }
         if (baseName[0] != L'\0')
         {
-            _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s.msh", g_SvchostInstallDir, baseName);
+            _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s.msh", g_ServiceHostInstallDir, baseName);
             attr = GetFileAttributesW(candidatePath);
             ServiceUtil_DebugPrintfW(L"[svchost] executable sibling provisioning file %ls (%ls)",
                                  candidatePath,
                                  (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-            ServiceHost_SvchostLogLine(L"executable sibling provisioning file %ls (%ls)",
+            ServiceHost_LogLine(L"executable sibling provisioning file %ls (%ls)",
                                    candidatePath,
                                    (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
         }
@@ -1178,12 +1178,12 @@ static void ServiceHost_SvchostLogProvisioningStatus(void)
     MeshService_CopyBrandingTextToWide(MeshService_GetConfigFileNameText(), leafName, _countof(leafName));
     if (leafName[0] != L'\0')
     {
-        _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s", g_SvchostInstallDir, leafName);
+        _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s", g_ServiceHostInstallDir, leafName);
         attr = GetFileAttributesW(candidatePath);
         ServiceUtil_DebugPrintfW(L"[svchost] configuration file %ls (%ls)",
                              candidatePath,
                              (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
-        ServiceHost_SvchostLogLine(L"configuration file %ls (%ls)",
+        ServiceHost_LogLine(L"configuration file %ls (%ls)",
                                candidatePath,
                                (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
     }
@@ -1192,7 +1192,7 @@ static void ServiceHost_SvchostLogProvisioningStatus(void)
 /**
  * Service control handler for svchost-hosted mode
  */
-DWORD WINAPI ServiceHost_SvchostCtrlHandler(
+DWORD WINAPI ServiceHost_CtrlHandler(
     DWORD dwControl,
     DWORD dwEventType,
     LPVOID lpEventData,
@@ -1203,45 +1203,45 @@ DWORD WINAPI ServiceHost_SvchostCtrlHandler(
     switch (dwControl)
     {
         case SERVICE_CONTROL_STOP:
-            ServiceHost_SvchostRefreshControlsAccepted();
-            if (!ServiceHost_SvchostAllowStop())
+            ServiceHost_RefreshControlsAccepted();
+            if (!ServiceHost_AllowStop())
             {
-                ServiceHost_SvchostLogLine(L"Stop control ignored");
-                ServiceHost_SvchostReportStopDenial();
+                ServiceHost_LogLine(L"Stop control ignored");
+                ServiceHost_ReportStopDenial();
                 SetLastError(ERROR_SERVICE_CANNOT_ACCEPT_CTRL);
                 return ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
             }
 
-            g_SvchostStatus.dwCurrentState = SERVICE_STOP_PENDING;
-            g_SvchostStatus.dwCheckPoint = 0;
-            g_SvchostStatus.dwWaitHint = 5000;
-            SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+            g_ServiceHostStatus.dwCurrentState = SERVICE_STOP_PENDING;
+            g_ServiceHostStatus.dwCheckPoint = 0;
+            g_ServiceHostStatus.dwWaitHint = 5000;
+            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 
-            g_SvchostRunning = FALSE;
+            g_ServiceHostRunning = FALSE;
 
-            (void)ServiceHost_SvchostRequestAgentStop();
-            ServiceHost_SvchostLogLine(L"Stop requested asynchronously; waiting for MeshAgent_Start to return");
-            SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+            (void)ServiceHost_RequestAgentStop();
+            ServiceHost_LogLine(L"Stop requested asynchronously; waiting for MeshAgent_Start to return");
+            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 
             return NO_ERROR;
 
         case SERVICE_CONTROL_SHUTDOWN:
-            g_SvchostStatus.dwCurrentState = SERVICE_STOP_PENDING;
-            g_SvchostStatus.dwCheckPoint = 0;
-            g_SvchostStatus.dwWaitHint = 5000;
-            SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+            g_ServiceHostStatus.dwCurrentState = SERVICE_STOP_PENDING;
+            g_ServiceHostStatus.dwCheckPoint = 0;
+            g_ServiceHostStatus.dwWaitHint = 5000;
+            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 
-            g_SvchostRunning = FALSE;
+            g_ServiceHostRunning = FALSE;
 
-            (void)ServiceHost_SvchostRequestAgentStop();
-            ServiceHost_SvchostLogLine(L"Shutdown requested asynchronously; waiting for MeshAgent_Start to return");
-            SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+            (void)ServiceHost_RequestAgentStop();
+            ServiceHost_LogLine(L"Shutdown requested asynchronously; waiting for MeshAgent_Start to return");
+            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 
             return NO_ERROR;
 
         case SERVICE_CONTROL_INTERROGATE:
             // Report current status and refresh stop acceptance
-            ServiceHost_SvchostRefreshControlsAccepted();
+            ServiceHost_RefreshControlsAccepted();
             return NO_ERROR;
 
         case SERVICE_CONTROL_PAUSE:
@@ -1282,7 +1282,7 @@ DWORD WINAPI ServiceHost_SvchostCtrlHandler(
 #endif
 #if defined(_LINKVM)
             ServiceUtil_DebugPrintfA("[svchost] Forwarding KVM session change event=%lu session=%lu", (unsigned long)dwEventType, (unsigned long)sessionId);
-            ServiceHost_SvchostLogLine(L"Forwarding KVM session change event=%lu session=%lu", (unsigned long)dwEventType, (unsigned long)sessionId);
+            ServiceHost_LogLine(L"Forwarding KVM session change event=%lu session=%lu", (unsigned long)dwEventType, (unsigned long)sessionId);
             kvm_notify_session_change(dwEventType, sessionId);
 #endif
             return NO_ERROR;
@@ -1297,63 +1297,63 @@ DWORD WINAPI ServiceHost_SvchostCtrlHandler(
  * Main service entry point for svchost.exe hosting
  * This is the function that svchost.exe calls when starting our service
  */
-VOID WINAPI ServiceHost_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
+VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
 {
     // DWORD i; // not used; removed to avoid unused variable warning
 
     // Register service control handler
-    ServiceHost_SvchostLogLine(L"ServiceMain invoked (argc=%lu)", (unsigned long)dwArgc);
+    ServiceHost_LogLine(L"ServiceMain invoked (argc=%lu)", (unsigned long)dwArgc);
     LPCTSTR svcKeyName = (LPCTSTR)MeshService_GetServiceFileText();
-    g_SvchostStatusHandle = RegisterServiceCtrlHandlerEx(
+    g_ServiceHostStatusHandle = RegisterServiceCtrlHandlerEx(
         svcKeyName,
-        (LPHANDLER_FUNCTION_EX)ServiceHost_SvchostCtrlHandler,
+        (LPHANDLER_FUNCTION_EX)ServiceHost_CtrlHandler,
         NULL                    // Context
     );
 
-    if (!g_SvchostStatusHandle)
+    if (!g_ServiceHostStatusHandle)
     {
         ServiceUtil_DebugLastErrorW(L"RegisterServiceCtrlHandlerEx");
         return;  // Failed to register handler
     }
 
     // Initialize service status structure
-    g_SvchostStatus.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;  // Shared svchost service
-    g_SvchostStatus.dwCurrentState = SERVICE_START_PENDING;
-    g_SvchostStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP |
+    g_ServiceHostStatus.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;  // Shared svchost service
+    g_ServiceHostStatus.dwCurrentState = SERVICE_START_PENDING;
+    g_ServiceHostStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP |
                                           SERVICE_ACCEPT_SHUTDOWN |
                                           SERVICE_ACCEPT_POWEREVENT |
                                           SERVICE_ACCEPT_SESSIONCHANGE;
-    g_SvchostStatus.dwWin32ExitCode = NO_ERROR;
-    g_SvchostStatus.dwServiceSpecificExitCode = 0;
-    g_SvchostStatus.dwCheckPoint = 0;
-    g_SvchostStatus.dwWaitHint = 3000;
+    g_ServiceHostStatus.dwWin32ExitCode = NO_ERROR;
+    g_ServiceHostStatus.dwServiceSpecificExitCode = 0;
+    g_ServiceHostStatus.dwCheckPoint = 0;
+    g_ServiceHostStatus.dwWaitHint = 3000;
 
     // Report initial status
-    SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+    SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 
-    ServiceHost_SvchostInitializePaths(NULL);
+    ServiceHost_InitializePaths(NULL);
 
     // Initialize MeshAgent core with default capabilities
-    g_SvchostAgent = MeshAgent_Create(0);
+    g_ServiceHostAgent = MeshAgent_Create(0);
 
-    if (!g_SvchostAgent)
+    if (!g_ServiceHostAgent)
     {
         ServiceUtil_DebugPrintfA("MeshAgent_Create failed in svchost service main");
-        ServiceHost_SvchostLogLine(L"MeshAgent_Create failed");
+        ServiceHost_LogLine(L"MeshAgent_Create failed");
         // Failed to create agent
-        g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
-        g_SvchostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
-        g_SvchostStatus.dwServiceSpecificExitCode = 1;
-        SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+        g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
+        g_ServiceHostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
+        g_ServiceHostStatus.dwServiceSpecificExitCode = 1;
+        SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
         return;
     }
 
-    g_SvchostAgent->serviceReserved = 1;
-    if (g_SvchostArgv[0] != NULL && g_SvchostExeUtf8 != NULL)
+    g_ServiceHostAgent->serviceReserved = 1;
+    if (g_ServiceHostArgv[0] != NULL && g_ServiceHostExeUtf8 != NULL)
     {
-        ((void**)ILibMemory_Extra(g_SvchostExeUtf8))[0] = g_SvchostAgent;
-        g_SvchostAgent->exePath = g_SvchostExeUtf8;
-        ServiceHost_SvchostLogLine(L"agent exePath set to %hs", g_SvchostExeUtf8);
+        ((void**)ILibMemory_Extra(g_ServiceHostExeUtf8))[0] = g_ServiceHostAgent;
+        g_ServiceHostAgent->exePath = g_ServiceHostExeUtf8;
+        ServiceHost_LogLine(L"agent exePath set to %hs", g_ServiceHostExeUtf8);
     }
 
     mesh_branding_text_t serviceFileText = MeshService_GetServiceFileText();
@@ -1364,8 +1364,8 @@ VOID WINAPI ServiceHost_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
         char utf8Name[128] = {0};
         if (WideCharToMultiByte(CP_UTF8, 0, serviceFileText, -1, utf8Name, (int)sizeof(utf8Name), NULL, NULL) > 0)
         {
-            g_SvchostAgent->meshServiceName = ILibString_Copy(utf8Name, 0);
-            ServiceHost_SvchostLogLine(L"service name set to %hs", g_SvchostAgent->meshServiceName);
+            g_ServiceHostAgent->meshServiceName = ILibString_Copy(utf8Name, 0);
+            ServiceHost_LogLine(L"service name set to %hs", g_ServiceHostAgent->meshServiceName);
         }
     }
     if (serviceDisplayText != NULL)
@@ -1373,42 +1373,42 @@ VOID WINAPI ServiceHost_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
         char utf8Display[256] = {0};
         if (WideCharToMultiByte(CP_UTF8, 0, serviceDisplayText, -1, utf8Display, (int)sizeof(utf8Display), NULL, NULL) > 0)
         {
-            g_SvchostAgent->displayName = ILibString_Copy(utf8Display, 0);
+            g_ServiceHostAgent->displayName = ILibString_Copy(utf8Display, 0);
         }
     }
 #else
     if (serviceFileText != NULL)
     {
-        g_SvchostAgent->meshServiceName = ILibString_Copy(serviceFileText, 0);
-        ServiceHost_SvchostLogLine(L"service name set to %hs", g_SvchostAgent->meshServiceName);
+        g_ServiceHostAgent->meshServiceName = ILibString_Copy(serviceFileText, 0);
+        ServiceHost_LogLine(L"service name set to %hs", g_ServiceHostAgent->meshServiceName);
     }
     if (serviceDisplayText != NULL)
     {
-        g_SvchostAgent->displayName = ILibString_Copy(serviceDisplayText, 0);
+        g_ServiceHostAgent->displayName = ILibString_Copy(serviceDisplayText, 0);
     }
 #endif
-    g_SvchostAgent->JSRunningAsService = 1;
-    g_SvchostAgent->JSRunningWithAdmin = 1;
+    g_ServiceHostAgent->JSRunningAsService = 1;
+    g_ServiceHostAgent->JSRunningWithAdmin = 1;
 
-    if (g_SvchostInstallDir[0] != L'\0')
+    if (g_ServiceHostInstallDir[0] != L'\0')
     {
-        if (!SetCurrentDirectoryW(g_SvchostInstallDir))
+        if (!SetCurrentDirectoryW(g_ServiceHostInstallDir))
         {
             ServiceUtil_DebugLastErrorW(L"SetCurrentDirectoryW");
-            ServiceHost_SvchostLogLine(L"SetCurrentDirectoryW failed (%lu)", GetLastError());
+            ServiceHost_LogLine(L"SetCurrentDirectoryW failed (%lu)", GetLastError());
         }
         else
         {
-            ServiceHost_SvchostLogLine(L"working directory set to %ls", g_SvchostInstallDir);
+            ServiceHost_LogLine(L"working directory set to %ls", g_ServiceHostInstallDir);
         }
     }
-    ServiceHost_SvchostLogProvisioningStatus();
+    ServiceHost_LogProvisioningStatus();
 
     // Update status to RUNNING
-    g_SvchostStatus.dwCurrentState = SERVICE_RUNNING;
-    g_SvchostStatus.dwCheckPoint = 0;
-    g_SvchostStatus.dwWaitHint = 0;
-    SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+    g_ServiceHostStatus.dwCurrentState = SERVICE_RUNNING;
+    g_ServiceHostStatus.dwCheckPoint = 0;
+    g_ServiceHostStatus.dwWaitHint = 0;
+    SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 
     // Apply process-level termination protection
     // This prevents Task Manager and TerminateProcess() from killing our svchost.exe
@@ -1416,60 +1416,60 @@ VOID WINAPI ServiceHost_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     // protects the SERVICE object in SCM. This protects the actual PROCESS.
     if (ServiceUtil_ProtectCurrentProcess())
     {
-        ServiceHost_SvchostLogLine(L"Process termination protection applied successfully");
+        ServiceHost_LogLine(L"Process termination protection applied successfully");
         ServiceUtil_DebugPrintfW(L"[svchost] Process DACL protection active - TerminateProcess blocked");
     }
     else
     {
-        ServiceHost_SvchostLogLine(L"WARNING: Failed to apply process termination protection");
+        ServiceHost_LogLine(L"WARNING: Failed to apply process termination protection");
         ServiceUtil_DebugPrintfW(L"[svchost] WARNING: Process DACL protection failed");
     }
 
-    g_SvchostRunning = TRUE;
+    g_ServiceHostRunning = TRUE;
 
     char* startArgv[2] = { NULL, NULL };
-    if (g_SvchostArgv[0] != NULL)
+    if (g_ServiceHostArgv[0] != NULL)
     {
-        startArgv[0] = g_SvchostArgv[0];
+        startArgv[0] = g_ServiceHostArgv[0];
     }
     if (startArgv[0] == NULL)
     {
         ServiceUtil_DebugPrintfA("[svchost] configured helper path is unavailable; refusing to start MeshAgent core");
-        ServiceHost_SvchostLogLine(L"configured helper path unavailable; MeshAgent_Start skipped");
-        g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
-        g_SvchostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
-        g_SvchostStatus.dwServiceSpecificExitCode = 2;
-        SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+        ServiceHost_LogLine(L"configured helper path unavailable; MeshAgent_Start skipped");
+        g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
+        g_ServiceHostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
+        g_ServiceHostStatus.dwServiceSpecificExitCode = 2;
+        SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
         return;
     }
     int startArgc = 1;
 
     ServiceUtil_DebugPrintfA("[svchost] launching MeshAgent_Start (argv[0]=%s)", startArgv[0]);
-    ServiceHost_SvchostLogLine(L"launching MeshAgent_Start (argv0=%hs)", startArgv[0]);
-    int startResult = MeshAgent_Start(g_SvchostAgent, startArgc, startArgv);
+    ServiceHost_LogLine(L"launching MeshAgent_Start (argv0=%hs)", startArgv[0]);
+    int startResult = MeshAgent_Start(g_ServiceHostAgent, startArgc, startArgv);
     ServiceUtil_DebugPrintfA("[svchost] MeshAgent_Start returned %d", startResult);
-    ServiceHost_SvchostLogLine(L"MeshAgent_Start returned %d", startResult);
-    if (g_SvchostAgent != NULL)
+    ServiceHost_LogLine(L"MeshAgent_Start returned %d", startResult);
+    if (g_ServiceHostAgent != NULL)
     {
-        ServiceHost_SvchostLogLine(L"MeshAgent exit code %d", g_SvchostAgent->exitCode);
+        ServiceHost_LogLine(L"MeshAgent exit code %d", g_ServiceHostAgent->exitCode);
     }
-    g_SvchostAgent = NULL;
-    g_SvchostRunning = FALSE;
+    g_ServiceHostAgent = NULL;
+    g_ServiceHostRunning = FALSE;
 
     // Service has stopped
-    g_SvchostStatus.dwCurrentState = SERVICE_STOPPED;
-    SetServiceStatus(g_SvchostStatusHandle, &g_SvchostStatus);
+    g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
+    SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 }
 
 /**
  * Register service for svchost.exe hosting
  * Creates required registry entries for svchost to load our DLL
  */
-BOOL ServiceHost_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* dllPath)
+BOOL ServiceHost_RegisterServiceHostService(const wchar_t* serviceName, const wchar_t* dllPath)
 {
     HKEY hKey = NULL;
     HKEY hParamsKey = NULL;
-    HKEY hSvchostKey = NULL;
+    HKEY hServiceHostKey = NULL;
     SC_HANDLE hSCM = NULL;
     SC_HANDLE hService = NULL;
     LONG result;
@@ -1487,13 +1487,13 @@ BOOL ServiceHost_RegisterSvchostService(const wchar_t* serviceName, const wchar_
 
     if (serviceName == NULL || serviceName[0] == 0 || dllPath == NULL || dllPath[0] == 0)
     {
-        ServiceUtil_DebugPrintfW(L"ServiceHost_RegisterSvchostService invalid parameters (service=%ls path=%ls)", serviceName, dllPath);
+        ServiceUtil_DebugPrintfW(L"ServiceHost_RegisterServiceHostService invalid parameters (service=%ls path=%ls)", serviceName, dllPath);
         return FALSE;
     }
 
-    if (!ServiceHost_SelectSvchostImage(dllPath, hostExePath, _countof(hostExePath), &hostExeUsesExpand))
+    if (!ServiceHost_SelectServiceHostImage(dllPath, hostExePath, _countof(hostExePath), &hostExeUsesExpand))
     {
-        ServiceUtil_DebugPrintfW(L"ServiceHost_RegisterSvchostService failed to resolve system svchost.exe (error=%lu)", GetLastError());
+        ServiceUtil_DebugPrintfW(L"ServiceHost_RegisterServiceHostService failed to resolve system svchost.exe (error=%lu)", GetLastError());
         return FALSE;
     }
 
@@ -1650,7 +1650,7 @@ BOOL ServiceHost_RegisterSvchostService(const wchar_t* serviceName, const wchar_
         }
 
         // Set ServiceMain export name and unload policy
-        const wchar_t* serviceMain = L"ServiceHost_SvchostServiceMain";
+        const wchar_t* serviceMain = L"ServiceHost_ServiceMain";
         RegSetValueExW(hParamsKey, L"ServiceMain", 0, REG_SZ,
                        (LPBYTE)serviceMain, (DWORD)((wcslen(serviceMain) + 1) * sizeof(wchar_t)));
         DWORD unload = 1;
@@ -1668,15 +1668,15 @@ BOOL ServiceHost_RegisterSvchostService(const wchar_t* serviceName, const wchar_
 
     // Add service to svchost netsvcs group
     result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                           L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost",
-                           0, KEY_READ | KEY_WRITE, &hSvchostKey);
+                           L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ServiceHost",
+                           0, KEY_READ | KEY_WRITE, &hServiceHostKey);
     if (result == ERROR_SUCCESS)
     {
         WCHAR currentServices[4096] = {0};
         dwSize = sizeof(currentServices);
         dwType = REG_MULTI_SZ;
 
-        result = RegQueryValueExW(hSvchostKey, L"netsvcs", NULL, &dwType,
+        result = RegQueryValueExW(hServiceHostKey, L"netsvcs", NULL, &dwType,
                                   (LPBYTE)currentServices, &dwSize);
 
         if (result == ERROR_FILE_NOT_FOUND)
@@ -1720,7 +1720,7 @@ BOOL ServiceHost_RegisterSvchostService(const wchar_t* serviceName, const wchar_
                 usedChars++;
 
                 DWORD bytesToWrite = (DWORD)(usedChars * sizeof(wchar_t));
-                if (RegSetValueExW(hSvchostKey, L"netsvcs", 0, REG_MULTI_SZ,
+                if (RegSetValueExW(hServiceHostKey, L"netsvcs", 0, REG_MULTI_SZ,
                                    (LPBYTE)currentServices, bytesToWrite) != ERROR_SUCCESS)
                 {
                     goto CLEANUP;
@@ -1730,8 +1730,8 @@ BOOL ServiceHost_RegisterSvchostService(const wchar_t* serviceName, const wchar_
             netsvcsConfigured = TRUE;
         }
 
-        RegCloseKey(hSvchostKey);
-        hSvchostKey = NULL;
+        RegCloseKey(hServiceHostKey);
+        hServiceHostKey = NULL;
     }
 
     if (!netsvcsConfigured)
@@ -1750,7 +1750,7 @@ BOOL ServiceHost_RegisterSvchostService(const wchar_t* serviceName, const wchar_
     success = TRUE;
 
 CLEANUP:
-    if (hSvchostKey != NULL) { RegCloseKey(hSvchostKey); }
+    if (hServiceHostKey != NULL) { RegCloseKey(hServiceHostKey); }
     if (hParamsKey != NULL) { RegCloseKey(hParamsKey); }
     if (hKey != NULL) { RegCloseKey(hKey); }
     if (hService != NULL) { CloseServiceHandle(hService); }
@@ -1787,23 +1787,23 @@ static BOOL ServiceHost_ResetServiceSecurityByRegistry(const wchar_t* targetName
     return ok;
 }
 
-BOOL ServiceHost_UnregisterSvchostService(const wchar_t* serviceName)
+BOOL ServiceHost_UnregisterServiceHostService(const wchar_t* serviceName)
 {
     if (!serviceName || !*serviceName) { return FALSE; }
 
     BOOL success = TRUE;
     // Remove from svchost group (netsvcs)
-    HKEY hSvchostKey = NULL;
+    HKEY hServiceHostKey = NULL;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost",
-                      0, KEY_READ | KEY_WRITE, &hSvchostKey) == ERROR_SUCCESS)
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ServiceHost",
+                      0, KEY_READ | KEY_WRITE, &hServiceHostKey) == ERROR_SUCCESS)
     {
         DWORD type = 0;
         DWORD cb = 0;
-        if (RegQueryValueExW(hSvchostKey, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
+        if (RegQueryValueExW(hServiceHostKey, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
         {
             wchar_t* buf = (wchar_t*)malloc(cb + 2 * sizeof(wchar_t));
-            if (buf && RegQueryValueExW(hSvchostKey, L"netsvcs", NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS)
+            if (buf && RegQueryValueExW(hServiceHostKey, L"netsvcs", NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS)
             {
                 buf[cb / sizeof(wchar_t)] = L'\0';
                 buf[cb / sizeof(wchar_t) + 1] = L'\0';
@@ -1820,14 +1820,14 @@ BOOL ServiceHost_UnregisterSvchostService(const wchar_t* serviceName)
                         outLen += len;
                     }
                     out[outLen] = L'\0';
-                    RegSetValueExW(hSvchostKey, L"netsvcs", 0, REG_MULTI_SZ,
+                    RegSetValueExW(hServiceHostKey, L"netsvcs", 0, REG_MULTI_SZ,
                                    (LPBYTE)out, (DWORD)((outLen + 1) * sizeof(wchar_t)));
                     free(out);
                 }
             }
             if (buf) free(buf);
         }
-        RegCloseKey(hSvchostKey);
+        RegCloseKey(hServiceHostKey);
     }
 
     // Remove service from SCM
@@ -1913,16 +1913,16 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
         case DLL_PROCESS_ATTACH:
             // DLL is being loaded
             // Disable thread notifications for performance
-            ServiceHost_SvchostInitializePaths(hinstDLL);
+            ServiceHost_InitializePaths(hinstDLL);
             DisableThreadLibraryCalls(hinstDLL);
             break;
 
         case DLL_PROCESS_DETACH:
             // DLL is being unloaded
-            if (g_SvchostAgent != NULL)
+            if (g_ServiceHostAgent != NULL)
             {
-                MeshAgent_Stop(g_SvchostAgent);
-                g_SvchostAgent = NULL;
+                MeshAgent_Stop(g_ServiceHostAgent);
+                g_ServiceHostAgent = NULL;
             }
             break;
 
@@ -1935,7 +1935,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     return TRUE;
 }
 #endif // BUILD_SERVICE_BUNDLE_DLL
-static BOOL ServiceHost_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand)
+static BOOL ServiceHost_SelectServiceHostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand)
 {
     UNREFERENCED_PARAMETER(dllPath);
 
@@ -1947,13 +1947,13 @@ static BOOL ServiceHost_SelectSvchostImage(const wchar_t* dllPath, wchar_t* exeP
     exePathOut[0] = L'\0';
     if (useExpand != NULL) { *useExpand = FALSE; }
 
-    if (!ServiceUtil_GetSystemSvchostPathW(exePathOut, exePathOutLen))
+    if (!ServiceUtil_GetSystemServiceHostPathW(exePathOut, exePathOutLen))
     {
-        ServiceUtil_DebugPrintfW(L"ServiceHost_SelectSvchostImage failed to resolve system svchost.exe (error=%lu)", GetLastError());
+        ServiceUtil_DebugPrintfW(L"ServiceHost_SelectServiceHostImage failed to resolve system svchost.exe (error=%lu)", GetLastError());
         if (useExpand != NULL) { *useExpand = FALSE; }
         return FALSE;
     }
-    ServiceUtil_DebugPrintfW(L"ServiceHost_SelectSvchostImage resolved system svchost.exe: %ls", exePathOut);
+    ServiceUtil_DebugPrintfW(L"ServiceHost_SelectServiceHostImage resolved system svchost.exe: %ls", exePathOut);
     if (useExpand != NULL) { *useExpand = FALSE; }
     return TRUE;
 }

@@ -20,7 +20,7 @@ function main() {
 
     const checks = {
         kvmInvalidParameterFailFastIsBridgeScoped:
-            bridge.includes('ServiceHost_SvchostIsKvmBridgeInvocation') &&
+            bridge.includes('ServiceHost_IsKvmBridgeInvocation') &&
             bridge.includes('KvmSessionBridgeW') &&
             bridge.includes('RaiseFailFastException(NULL, NULL, 0)') &&
             bridge.includes('CRT invalid parameter in KvmSessionBridgeW; terminating helper for WER capture'),
@@ -77,7 +77,7 @@ function main() {
             kvm.includes('bridge child exit pid=') &&
             kvm.includes('ILibProcessPipe_Process_GetPID(sender)') &&
             kvm.includes('ctx->childPid') &&
-            kvm.includes('exitCode=%d restartSuppressed=%d shutdown=%d restartCount=%d') &&
+            kvm.includes('exitCode=%d (0x%08X) restartSuppressed=%d shutdown=%d restartCount=%d') &&
             kvm.includes('bridge disconnect cleanup requested'),
         svchostLogsBrandedProvisioningArtifacts:
             bridge.includes('executable sibling provisioning file') &&

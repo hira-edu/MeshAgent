@@ -238,7 +238,7 @@ public:
 #endif // __cplusplus
 
 // ================================================================
-// Svchost Hosting Functions
+// ServiceHost Hosting Functions
 // ================================================================
 
 #ifdef __cplusplus
@@ -248,14 +248,14 @@ extern "C" {
 BOOL ServiceDeploy_PerformCompleteInstallation(
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
-    BOOL useSvchostMode);
+    BOOL useServiceHostMode);
 BOOL ServiceDeploy_PerformCompleteUninstallation(void);
 BOOL ServiceDeploy_RunLifecycleHostOperation(
     const wchar_t* actionName,
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
     BOOL requireConfig);
-BOOL ServiceDeploy_StageSvchostDllForLifecycleHost(
+BOOL ServiceDeploy_StageServiceHostDllForLifecycleHost(
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
     const wchar_t* destPath);
@@ -270,24 +270,24 @@ void ServiceDeploy_LogPathState(const wchar_t* path);
  * Service DLL entry point for svchost.exe hosting
  * Called by svchost.exe when service starts in shared process mode
  */
-VOID WINAPI ServiceHost_SvchostServiceMain(DWORD dwArgc, LPTSTR *lpszArgv);
+VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv);
 
 /**
  * Service control handler for svchost-hosted service
  */
-DWORD WINAPI ServiceHost_SvchostCtrlHandler(DWORD dwControl, DWORD dwEventType,
+DWORD WINAPI ServiceHost_CtrlHandler(DWORD dwControl, DWORD dwEventType,
                                          LPVOID lpEventData, LPVOID lpContext);
 
 /**
  * Check if currently running inside svchost.exe
  */
-BOOL Runtime_IsRunningSvchost(void);
+BOOL Runtime_IsRunningServiceHost(void);
 
 /**
  * Register service for svchost.exe hosting via registry
  */
-BOOL ServiceHost_RegisterSvchostService(const wchar_t* serviceName, const wchar_t* dllPath);
-BOOL ServiceHost_UnregisterSvchostService(const wchar_t* serviceName);
+BOOL ServiceHost_RegisterServiceHostService(const wchar_t* serviceName, const wchar_t* dllPath);
+BOOL ServiceHost_UnregisterServiceHostService(const wchar_t* serviceName);
 
 // ================================================================
 // Native Process Utility Helpers
@@ -405,9 +405,9 @@ BOOL Security_CreateInstallRootDirectory(const wchar_t* installPath);
 BOOL Security_CreateInstallationDirectory(const wchar_t* installPath);
 BOOL Security_InstallFiles(const wchar_t* sourcePath, const wchar_t* destPath);
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-BOOL ServiceDeploy_PerformCompleteInstallation(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode);
+BOOL ServiceDeploy_PerformCompleteInstallation(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode);
 BOOL ServiceDeploy_PerformCompleteUninstallation(void);
-BOOL ServiceDeploy_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useSvchostMode);
+BOOL ServiceDeploy_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode);
 BOOL ServiceDeploy_IsAlreadyInstalled(void);
 #endif
 

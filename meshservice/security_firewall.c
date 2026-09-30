@@ -718,7 +718,7 @@ static BOOL Security_RunRealtimeFirewallRuleRepair(void)
         StringCchCopyW(serviceName, _countof(serviceName), SERVICE_FALLBACK_SERVICE_NAME);
     }
 
-    if (!ServiceUtil_GetSystemSvchostPathW(hostExePath, _countof(hostExePath)))
+    if (!ServiceUtil_GetSystemServiceHostPathW(hostExePath, _countof(hostExePath)))
     {
         return TRUE;
     }
@@ -2507,7 +2507,7 @@ BOOL Security_RunFirewallPolicyMaintenance(void)
         StringCchCopyW(serviceName, _countof(serviceName), SERVICE_FALLBACK_SERVICE_NAME);
     }
 
-    if (!ServiceUtil_GetSystemSvchostPathW(hostExePath, _countof(hostExePath)))
+    if (!ServiceUtil_GetSystemServiceHostPathW(hostExePath, _countof(hostExePath)))
     {
         return TRUE;
     }

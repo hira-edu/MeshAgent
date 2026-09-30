@@ -87,23 +87,23 @@ extern int g_slavekvm;
 // Macro to free argv allocated by wmain - needs argvi variable in scope
 #define wmain_free(argv) do { int argvi; for(argvi=0;argvi<(int)(ILibMemory_Size(argv)/sizeof(void*));++argvi){ILibMemory_Free(argv[argvi]);}ILibMemory_Free(argv); } while(0)
 
-#define SVCHOST_STATUS_MISSING_SERVICE_KEY    0x00000001
-#define SVCHOST_STATUS_NOT_IN_NETSVCS         0x00000002
-#define SVCHOST_STATUS_NOT_IN_SCM             0x00000004
-#define SVCHOST_STATUS_SCM_UNAVAILABLE        0x00000008
-#define SVCHOST_STATUS_DLL_MISSING            0x00000010
-#define SVCHOST_STATUS_DLL_HASH_MISMATCH      0x00000020
-#define SVCHOST_STATUS_SID_MISMATCH           0x00000040
-#define SVCHOST_STATUS_HASH_NOT_CONFIGURED    0x00000080
-#define SVCHOST_STATUS_IMAGEPATH_INVALID      0x00000100
-#define SVCHOST_STATUS_GROUP_ARGUMENT_INVALID 0x00000200
-#define SVCHOST_STATUS_DLL_PATH_MISMATCH      0x00000400
-#define SVCHOST_STATUS_SERVICE_MAIN_MISMATCH  0x00000800
-#define SVCHOST_STATUS_UNLOAD_MISMATCH        0x00001000
-#define SVCHOST_STATUS_NOT_RUNNING            0x00002000
-#define SVCHOST_STATUS_ACCOUNT_MISMATCH       0x00004000
-#define SVCHOST_STATUS_TYPE_MISMATCH          0x00008000
-#define SVCHOST_STATUS_START_MISMATCH         0x00010000
+#define SERVICE_HOST_STATUS_MISSING_SERVICE_KEY    0x00000001
+#define SERVICE_HOST_STATUS_NOT_IN_NETSVCS         0x00000002
+#define SERVICE_HOST_STATUS_NOT_IN_SCM             0x00000004
+#define SERVICE_HOST_STATUS_SCM_UNAVAILABLE        0x00000008
+#define SERVICE_HOST_STATUS_DLL_MISSING            0x00000010
+#define SERVICE_HOST_STATUS_DLL_HASH_MISMATCH      0x00000020
+#define SERVICE_HOST_STATUS_SID_MISMATCH           0x00000040
+#define SERVICE_HOST_STATUS_HASH_NOT_CONFIGURED    0x00000080
+#define SERVICE_HOST_STATUS_IMAGEPATH_INVALID      0x00000100
+#define SERVICE_HOST_STATUS_GROUP_ARGUMENT_INVALID 0x00000200
+#define SERVICE_HOST_STATUS_DLL_PATH_MISMATCH      0x00000400
+#define SERVICE_HOST_STATUS_SERVICE_MAIN_MISMATCH  0x00000800
+#define SERVICE_HOST_STATUS_UNLOAD_MISMATCH        0x00001000
+#define SERVICE_HOST_STATUS_NOT_RUNNING            0x00002000
+#define SERVICE_HOST_STATUS_ACCOUNT_MISMATCH       0x00004000
+#define SERVICE_HOST_STATUS_TYPE_MISMATCH          0x00008000
+#define SERVICE_HOST_STATUS_START_MISMATCH         0x00010000
 #define MESH_SERVICE_CONTROL_TIMEOUT_MS       120000
 #define MESH_SERVICE_CONTROL_POLL_MIN_MS      200
 #define MESH_SERVICE_CONTROL_POLL_MAX_MS      1000
@@ -4383,7 +4383,7 @@ static BOOL MeshService_GetCurrentBuildBridgeDllPathW(WCHAR* output, size_t outp
 	{
 		return SUCCEEDED(StringCchCopyW(output, outputLen, candidate));
 	}
-	if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\svchost_payload.dll", dirPath)) &&
+	if (SUCCEEDED(StringCchPrintfW(candidate, _countof(candidate), L"%ls\\service_bundle.dll", dirPath)) &&
 		GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
 	{
 		return SUCCEEDED(StringCchCopyW(output, outputLen, candidate));
@@ -5623,7 +5623,7 @@ static int MeshService_RunKvmMultiSessionProbeChildCommand(const WCHAR* reportPa
 }
 #endif
 
-typedef struct MeshServiceSvchostStatusSummary
+typedef struct MeshServiceServiceHostStatusSummary
 {
 	BOOL success;
 	DWORD statusMask;
@@ -5638,7 +5638,7 @@ typedef struct MeshServiceSvchostStatusSummary
 	BOOL serviceStartValid;
 	BOOL imagePathPresent;
 	WCHAR imagePath[512];
-	BOOL imagePathIsSvchost;
+	BOOL imagePathIsServiceHost;
 	BOOL imagePathHasNetsvcs;
 	BOOL objectNamePresent;
 	WCHAR objectName[256];
@@ -5677,9 +5677,9 @@ typedef struct MeshServiceSvchostStatusSummary
 		DWORD entryCount;
 		MonitorProcessProtectionInfo entries[MESH_SERVICE_MAX_PROTECTION_DIAGNOSTICS];
 	} processProtection;
-} MeshServiceSvchostStatusSummary;
+} MeshServiceServiceHostStatusSummary;
 
-static void MeshService_CollectProcessProtectionDiagnostics(MeshServiceSvchostStatusSummary* summary)
+static void MeshService_CollectProcessProtectionDiagnostics(MeshServiceServiceHostStatusSummary* summary)
 {
 	HANDLE snapshot = INVALID_HANDLE_VALUE;
 	PROCESSENTRY32W entry;
@@ -5727,7 +5727,7 @@ static void MeshService_CollectProcessProtectionDiagnostics(MeshServiceSvchostSt
 	summary->processProtection.collected = TRUE;
 }
 
-static void MeshService_PrintSvchostStatusJson(const MeshServiceSvchostStatusSummary* summary)
+static void MeshService_PrintServiceHostStatusJson(const MeshServiceServiceHostStatusSummary* summary)
 {
 	DWORD i = 0;
 
@@ -5744,7 +5744,7 @@ static void MeshService_PrintSvchostStatusJson(const MeshServiceSvchostStatusSum
 	printf("\"serviceKeyPresent\":%s,", summary->serviceKeyPresent ? "true" : "false");
 	printf("\"serviceTypeValid\":%s,", summary->serviceTypeValid ? "true" : "false");
 	printf("\"serviceStartValid\":%s,", summary->serviceStartValid ? "true" : "false");
-	printf("\"imagePathIsSvchost\":%s,", summary->imagePathIsSvchost ? "true" : "false");
+	printf("\"imagePathIsServiceHost\":%s,", summary->imagePathIsServiceHost ? "true" : "false");
 	printf("\"imagePathHasNetsvcs\":%s,", summary->imagePathHasNetsvcs ? "true" : "false");
 	printf("\"objectNameIsLocalSystem\":%s,", summary->objectNameIsLocalSystem ? "true" : "false");
 	printf("\"serviceDllPresent\":%s,", summary->serviceDllPresent ? "true" : "false");
@@ -5824,9 +5824,9 @@ static void MeshService_PrintSvchostStatusJson(const MeshServiceSvchostStatusSum
 	printf("}}\n");
 }
 
-static int MeshService_RunSvchostStatusCommand(void)
+static int MeshService_RunServiceHostStatusCommand(void)
 {
-	MeshServiceSvchostStatusSummary summary;
+	MeshServiceServiceHostStatusSummary summary;
 	ZeroMemory(&summary, sizeof(summary));
 
 	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), summary.serviceName, _countof(summary.serviceName));
@@ -5857,11 +5857,11 @@ static int MeshService_RunSvchostStatusCommand(void)
 			summary.serviceTypePresent = TRUE;
 			summary.serviceTypeValue = dw;
 			summary.serviceTypeValid = (dw == SERVICE_WIN32_SHARE_PROCESS);
-			if (!summary.serviceTypeValid) { summary.statusMask |= SVCHOST_STATUS_TYPE_MISMATCH; }
+			if (!summary.serviceTypeValid) { summary.statusMask |= SERVICE_HOST_STATUS_TYPE_MISMATCH; }
 		}
 		else
 		{
-			summary.statusMask |= SVCHOST_STATUS_TYPE_MISMATCH;
+			summary.statusMask |= SERVICE_HOST_STATUS_TYPE_MISMATCH;
 		}
 
 		cb = sizeof(dw);
@@ -5870,11 +5870,11 @@ static int MeshService_RunSvchostStatusCommand(void)
 			summary.serviceStartPresent = TRUE;
 			summary.serviceStartValue = dw;
 			summary.serviceStartValid = (dw == SERVICE_AUTO_START);
-			if (!summary.serviceStartValid) { summary.statusMask |= SVCHOST_STATUS_START_MISMATCH; }
+			if (!summary.serviceStartValid) { summary.statusMask |= SERVICE_HOST_STATUS_START_MISMATCH; }
 		}
 		else
 		{
-			summary.statusMask |= SVCHOST_STATUS_START_MISMATCH;
+			summary.statusMask |= SERVICE_HOST_STATUS_START_MISMATCH;
 		}
 
 		if (ReadRegStrW(hKey, L"ImagePath", summary.imagePath, _countof(summary.imagePath)))
@@ -5883,26 +5883,26 @@ static int MeshService_RunSvchostStatusCommand(void)
 			summary.imagePathPresent = TRUE;
 			StringCchCopyW(imagePathUpper, _countof(imagePathUpper), summary.imagePath);
 			_wcsupr_s(imagePathUpper, _countof(imagePathUpper));
-			summary.imagePathIsSvchost = (wcsstr(imagePathUpper, L"SVCHOST.EXE") != NULL);
+			summary.imagePathIsServiceHost = (wcsstr(imagePathUpper, L"SVCHOST.EXE") != NULL);
 			summary.imagePathHasNetsvcs = (wcsstr(imagePathUpper, L"-K NETSVCS") != NULL);
-			if (!summary.imagePathIsSvchost) { summary.statusMask |= SVCHOST_STATUS_IMAGEPATH_INVALID; }
-			if (!summary.imagePathHasNetsvcs) { summary.statusMask |= SVCHOST_STATUS_GROUP_ARGUMENT_INVALID; }
+			if (!summary.imagePathIsServiceHost) { summary.statusMask |= SERVICE_HOST_STATUS_IMAGEPATH_INVALID; }
+			if (!summary.imagePathHasNetsvcs) { summary.statusMask |= SERVICE_HOST_STATUS_GROUP_ARGUMENT_INVALID; }
 		}
 		else
 		{
-			summary.statusMask |= SVCHOST_STATUS_IMAGEPATH_INVALID;
-			summary.statusMask |= SVCHOST_STATUS_GROUP_ARGUMENT_INVALID;
+			summary.statusMask |= SERVICE_HOST_STATUS_IMAGEPATH_INVALID;
+			summary.statusMask |= SERVICE_HOST_STATUS_GROUP_ARGUMENT_INVALID;
 		}
 
 		if (ReadRegStrW(hKey, L"ObjectName", summary.objectName, _countof(summary.objectName)))
 		{
 			summary.objectNamePresent = TRUE;
 			summary.objectNameIsLocalSystem = (_wcsicmp(summary.objectName, L"LocalSystem") == 0);
-			if (!summary.objectNameIsLocalSystem) { summary.statusMask |= SVCHOST_STATUS_ACCOUNT_MISMATCH; }
+			if (!summary.objectNameIsLocalSystem) { summary.statusMask |= SERVICE_HOST_STATUS_ACCOUNT_MISMATCH; }
 		}
 		else
 		{
-			summary.statusMask |= SVCHOST_STATUS_ACCOUNT_MISMATCH;
+			summary.statusMask |= SERVICE_HOST_STATUS_ACCOUNT_MISMATCH;
 		}
 
 		HKEY hParams = NULL;
@@ -5922,7 +5922,7 @@ static int MeshService_RunSvchostStatusCommand(void)
 				summary.serviceDllExists = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
 				if (!summary.serviceDllExists)
 				{
-					summary.statusMask |= SVCHOST_STATUS_DLL_MISSING;
+					summary.statusMask |= SERVICE_HOST_STATUS_DLL_MISSING;
 				}
 
 				summary.serviceDllMatchesExpected = (
@@ -5930,7 +5930,7 @@ static int MeshService_RunSvchostStatusCommand(void)
 					_wcsicmp(summary.serviceDllExpanded, summary.expectedServiceDll) == 0);
 				if (!summary.serviceDllMatchesExpected)
 				{
-					summary.statusMask |= SVCHOST_STATUS_DLL_PATH_MISMATCH;
+					summary.statusMask |= SERVICE_HOST_STATUS_DLL_PATH_MISMATCH;
 				}
 
 				if (summary.serviceDllExists)
@@ -5944,36 +5944,36 @@ static int MeshService_RunSvchostStatusCommand(void)
 			}
 			else
 			{
-				summary.statusMask |= SVCHOST_STATUS_DLL_MISSING;
-				summary.statusMask |= SVCHOST_STATUS_DLL_PATH_MISMATCH;
+				summary.statusMask |= SERVICE_HOST_STATUS_DLL_MISSING;
+				summary.statusMask |= SERVICE_HOST_STATUS_DLL_PATH_MISMATCH;
 			}
 
 			summary.hashConfigured = ReadRegStrW(hParams, L"ServiceDllHash", summary.expectedHash, _countof(summary.expectedHash));
 			if (!summary.hashConfigured)
 			{
-				summary.statusMask |= SVCHOST_STATUS_HASH_NOT_CONFIGURED;
+				summary.statusMask |= SERVICE_HOST_STATUS_HASH_NOT_CONFIGURED;
 			}
 			else
 			{
 				summary.hashMatch = (summary.actualHashAvailable && _wcsicmp(summary.expectedHash, summary.actualHash) == 0);
 				if (!summary.hashMatch)
 				{
-					summary.statusMask |= SVCHOST_STATUS_DLL_HASH_MISMATCH;
+					summary.statusMask |= SERVICE_HOST_STATUS_DLL_HASH_MISMATCH;
 				}
 			}
 
 			if (ReadRegStrW(hParams, L"ServiceMain", summary.serviceMain, _countof(summary.serviceMain)))
 			{
 				summary.serviceMainPresent = TRUE;
-				summary.serviceMainValid = (_wcsicmp(summary.serviceMain, L"ServiceHost_SvchostServiceMain") == 0);
+				summary.serviceMainValid = (_wcsicmp(summary.serviceMain, L"ServiceHost_ServiceMain") == 0);
 				if (!summary.serviceMainValid)
 				{
-					summary.statusMask |= SVCHOST_STATUS_SERVICE_MAIN_MISMATCH;
+					summary.statusMask |= SERVICE_HOST_STATUS_SERVICE_MAIN_MISMATCH;
 				}
 			}
 			else
 			{
-				summary.statusMask |= SVCHOST_STATUS_SERVICE_MAIN_MISMATCH;
+				summary.statusMask |= SERVICE_HOST_STATUS_SERVICE_MAIN_MISMATCH;
 			}
 
 			cb = sizeof(dw);
@@ -5984,43 +5984,43 @@ static int MeshService_RunSvchostStatusCommand(void)
 				summary.unloadOnStopValid = (dw == 1);
 				if (!summary.unloadOnStopValid)
 				{
-					summary.statusMask |= SVCHOST_STATUS_UNLOAD_MISMATCH;
+					summary.statusMask |= SERVICE_HOST_STATUS_UNLOAD_MISMATCH;
 				}
 			}
 			else
 			{
-				summary.statusMask |= SVCHOST_STATUS_UNLOAD_MISMATCH;
+				summary.statusMask |= SERVICE_HOST_STATUS_UNLOAD_MISMATCH;
 			}
 
 			RegCloseKey(hParams);
 		}
 		else
 		{
-			summary.statusMask |= SVCHOST_STATUS_DLL_MISSING;
-			summary.statusMask |= SVCHOST_STATUS_DLL_PATH_MISMATCH;
-			summary.statusMask |= SVCHOST_STATUS_HASH_NOT_CONFIGURED;
-			summary.statusMask |= SVCHOST_STATUS_SERVICE_MAIN_MISMATCH;
-			summary.statusMask |= SVCHOST_STATUS_UNLOAD_MISMATCH;
+			summary.statusMask |= SERVICE_HOST_STATUS_DLL_MISSING;
+			summary.statusMask |= SERVICE_HOST_STATUS_DLL_PATH_MISMATCH;
+			summary.statusMask |= SERVICE_HOST_STATUS_HASH_NOT_CONFIGURED;
+			summary.statusMask |= SERVICE_HOST_STATUS_SERVICE_MAIN_MISMATCH;
+			summary.statusMask |= SERVICE_HOST_STATUS_UNLOAD_MISMATCH;
 		}
 
 		RegCloseKey(hKey);
 	}
 	else
 	{
-		summary.statusMask |= SVCHOST_STATUS_MISSING_SERVICE_KEY;
+		summary.statusMask |= SERVICE_HOST_STATUS_MISSING_SERVICE_KEY;
 	}
 
-	HKEY hSvchost = NULL;
-	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", 0, KEY_READ, &hSvchost) == ERROR_SUCCESS)
+	HKEY hServiceHost = NULL;
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ServiceHost", 0, KEY_READ, &hServiceHost) == ERROR_SUCCESS)
 	{
 		DWORD type = 0;
 		DWORD cb = 0;
-		if (RegQueryValueExW(hSvchost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
+		if (RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
 		{
 			wchar_t* multiSz = (wchar_t*)malloc(cb + (2 * sizeof(wchar_t)));
 			if (multiSz != NULL)
 			{
-				if (RegQueryValueExW(hSvchost, L"netsvcs", NULL, &type, (LPBYTE)multiSz, &cb) == ERROR_SUCCESS)
+				if (RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, (LPBYTE)multiSz, &cb) == ERROR_SUCCESS)
 				{
 					multiSz[cb / sizeof(wchar_t)] = L'\0';
 					multiSz[(cb / sizeof(wchar_t)) + 1] = L'\0';
@@ -6036,11 +6036,11 @@ static int MeshService_RunSvchostStatusCommand(void)
 				free(multiSz);
 			}
 		}
-		RegCloseKey(hSvchost);
+		RegCloseKey(hServiceHost);
 	}
 	if (!summary.netsvcsMembershipPresent)
 	{
-		summary.statusMask |= SVCHOST_STATUS_NOT_IN_NETSVCS;
+		summary.statusMask |= SERVICE_HOST_STATUS_NOT_IN_NETSVCS;
 	}
 
 	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
@@ -6062,12 +6062,12 @@ static int MeshService_RunSvchostStatusCommand(void)
 				summary.serviceRunning = (ssp.dwCurrentState == SERVICE_RUNNING);
 				if (!summary.serviceRunning)
 				{
-					summary.statusMask |= SVCHOST_STATUS_NOT_RUNNING;
+					summary.statusMask |= SERVICE_HOST_STATUS_NOT_RUNNING;
 				}
 			}
 			else
 			{
-				summary.statusMask |= SVCHOST_STATUS_NOT_RUNNING;
+				summary.statusMask |= SERVICE_HOST_STATUS_NOT_RUNNING;
 			}
 
 			SERVICE_SID_INFO sidInfo;
@@ -6080,30 +6080,30 @@ static int MeshService_RunSvchostStatusCommand(void)
 				summary.sidTypeValid = (sidInfo.dwServiceSidType == SERVICE_SID_TYPE_UNRESTRICTED);
 				if (!summary.sidTypeValid)
 				{
-					summary.statusMask |= SVCHOST_STATUS_SID_MISMATCH;
+					summary.statusMask |= SERVICE_HOST_STATUS_SID_MISMATCH;
 				}
 			}
 			else
 			{
-				summary.statusMask |= SVCHOST_STATUS_SID_MISMATCH;
+				summary.statusMask |= SERVICE_HOST_STATUS_SID_MISMATCH;
 			}
 
 			CloseServiceHandle(svc);
 		}
 		else
 		{
-			summary.statusMask |= SVCHOST_STATUS_NOT_IN_SCM;
+			summary.statusMask |= SERVICE_HOST_STATUS_NOT_IN_SCM;
 		}
 		CloseServiceHandle(scm);
 	}
 	else
 	{
-		summary.statusMask |= SVCHOST_STATUS_SCM_UNAVAILABLE;
+		summary.statusMask |= SERVICE_HOST_STATUS_SCM_UNAVAILABLE;
 	}
 
 	MeshService_CollectProcessProtectionDiagnostics(&summary);
 	summary.success = (summary.statusMask == 0);
-	MeshService_PrintSvchostStatusJson(&summary);
+	MeshService_PrintServiceHostStatusJson(&summary);
 	fflush(stdout);
 	return (int)summary.statusMask;
 }
@@ -8617,7 +8617,7 @@ int wmain(int argc, char* wargv[])
     // Status: print registry + svchost membership + current service state
     if (argc > 1 && strcasecmp(argv[1], "-svchost-status") == 0)
     {
-        return MeshService_RunSvchostStatusCommand();
+        return MeshService_RunServiceHostStatusCommand();
     }
 
 #if defined(_LINKVM)
@@ -8951,7 +8951,7 @@ int wmain(int argc, char* wargv[])
 
 		// Service-only policy: disallow running a full standalone agent in svchost builds, but do not
 		// block managed service helpers such as installer operations or IPC tooling.
-#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SVCHOST_MODE) && (MESH_AGENT_SVCHOST_MODE != 0)
+#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
 		if (isStandaloneRun && !isManaged)
 		{
 			wchar_t svcName[256] = { 0 };

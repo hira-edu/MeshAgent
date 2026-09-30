@@ -18,7 +18,7 @@ typedef struct mesh_runtime_profile_s
 static const mesh_runtime_profile_t g_meshRuntimeProfile =
 {
     MESH_AGENT_RUNTIME_ENABLED,
-    MESH_AGENT_SVCHOST_MODE,
+    MESH_AGENT_SERVICE_HOST_MODE,
     MESH_AGENT_MANAGE_FILES,
     MESH_AGENT_MANAGE_REGISTRY,
     MESH_AGENT_EVENT_TRACE_DIAGNOSTICS,

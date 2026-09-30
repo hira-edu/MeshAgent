@@ -50,7 +50,7 @@ function extractEmbeddedPayload(exePath) {
     const script = [
         'import hashlib, json, pathlib, sys',
         'import deploy',
-        'payload = deploy.extract_embedded_svchost_payload(pathlib.Path(sys.argv[1]))',
+        'payload = deploy.extract_embedded_service_bundle(pathlib.Path(sys.argv[1]))',
         'print(json.dumps({"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest().upper()}))'
     ].join('\n');
     const result = childProcess.spawnSync('python', ['-c', script, exePath], {
@@ -100,7 +100,7 @@ function main() {
     };
 
     if (evidenceDir) {
-        writeJson(path.join(evidenceDir, 'svchost_embedded_payload_contract.json'), report);
+        writeJson(path.join(evidenceDir, 'service_bundle_embedded_payload_contract.json'), report);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             `EXE=${exePath}`,

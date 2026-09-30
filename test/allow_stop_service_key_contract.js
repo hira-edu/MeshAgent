@@ -40,7 +40,7 @@ function verifyUsesServiceKey(sourcePath, functionName) {
 function main() {
     const repoRoot = path.resolve(__dirname, '..');
     verifyUsesServiceKey(path.join(repoRoot, 'meshservice', 'ServiceMain.c'), 'MeshService_AllowStop');
-    verifyUsesServiceKey(path.join(repoRoot, 'meshservice', 'service_host.c'), 'ServiceHost_SvchostAllowStop');
+    verifyUsesServiceKey(path.join(repoRoot, 'meshservice', 'service_host.c'), 'ServiceHost_AllowStop');
     process.stdout.write(JSON.stringify({ success: true }, null, 2) + '\n');
 }
 

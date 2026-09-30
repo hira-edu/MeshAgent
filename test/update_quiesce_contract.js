@@ -9,7 +9,7 @@ const checks = {
     helperDefined: source.includes('static BOOL ServiceDeploy_WaitForUpdateTargetQuiesced('),
     helperSweepsLoadedServiceDll: source.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths->dllPath);'),
     helperSweepsAgentProcess: source.includes('ServiceDeploy_TerminateProcessesByPath(paths->exePath);'),
-    helperDoesNotKillSharedSvchostByPath: !source.includes('ServiceDeploy_TerminateProcessesByPath(hostExePath);'),
+    helperDoesNotKillSharedServiceHostByPath: !source.includes('ServiceDeploy_TerminateProcessesByPath(hostExePath);'),
     helperOpensExclusiveHandle: source.includes('CreateFileW(targetPath, DELETE | GENERIC_WRITE, 0, NULL, OPEN_EXISTING'),
     commitQuiescesExe: source.includes('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE]")'),
     commitQuiescesDll: source.includes('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE]")'),

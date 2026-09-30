@@ -43,7 +43,7 @@
 .PARAMETER MeshCtrlPath
     Optional explicit path to meshctrl.js (defaults to ..\MeshCentral\meshctrl.js).
 
-.PARAMETER SvchostOnly
+.PARAMETER ServiceHostOnly
     When combined with -RuntimeValidation, skips the legacy install/uninstall tests and only exercises
     the svchost register/status/unregister flow. Ignored unless -RuntimeValidation is specified.
 
@@ -72,7 +72,7 @@ param(
 [switch]$RuntimeValidation,
 
 [Parameter()]
-[switch]$SvchostOnly,
+[switch]$ServiceHostOnly,
 
 [Parameter()]
 [string]$MeshCentralAgentUrl,
@@ -97,8 +97,8 @@ param(
 )
 
 # Validate parameter combinations early
-if ($SvchostOnly -and -not $RuntimeValidation) {
-    throw "-SvchostOnly requires -RuntimeValidation."
+if ($ServiceHostOnly -and -not $RuntimeValidation) {
+    throw "-ServiceHostOnly requires -RuntimeValidation."
 }
 
 # Set default binary path
@@ -836,7 +836,7 @@ function Get-BrandingServiceMetadata {
     }
 
     if ($brandingConfig) {
-        $resolvedServiceDll = Get-BrandingSvchostDllName -Config $brandingConfig
+        $resolvedServiceDll = Get-BrandingServiceHostDllName -Config $brandingConfig
         if (-not [string]::IsNullOrWhiteSpace($resolvedServiceDll)) {
             $serviceDllName = $resolvedServiceDll
         }
@@ -1325,7 +1325,7 @@ $script:EmbeddedPayloadVerified = $false
 
 function Ensure-EmbeddedPayloadResource {
     if ($script:EmbeddedPayloadVerified) { return }
-    $resourcePath = Join-Path $repoRoot "meshservice\embedded\svchost_payload.dll"
+    $resourcePath = Join-Path $repoRoot "meshservice\embedded\service_bundle.dll"
     if (-not (Test-Path -LiteralPath $resourcePath)) {
         throw "Embedded svchost payload resource missing at $resourcePath"
     }
@@ -1761,22 +1761,22 @@ function Invoke-RuntimeInstallValidation {
     }
 }
 
-function Invoke-RuntimeSvchostValidation {
+function Invoke-RuntimeServiceHostValidation {
     param(
         [Parameter(Mandatory = $true)][string]$BinaryPath,
         [Parameter(Mandatory = $true)][string]$ServiceName
     )
 
     if (-not (Test-Path -LiteralPath $BinaryPath)) {
-        Write-TestResult -TestName "Runtime: Svchost Register" -Status "Warning" -Message "Binary not found at $BinaryPath"
+        Write-TestResult -TestName "Runtime: ServiceHost Register" -Status "Warning" -Message "Binary not found at $BinaryPath"
         return
     }
 
     Ensure-BinaryProvisioningManifest -BinaryPath $BinaryPath -Quiet | Out-Null
     $message = "Direct executable svchost registration validation is retired. Run install, update, and uninstall through the MeshLifecycleHostW rundll32 lifecycle host."
-    Write-TestResult -TestName "Runtime: Svchost Register" -Status "Warning" -Message $message
-    Write-TestResult -TestName "Runtime: Svchost Status" -Status "Warning" -Message $message
-    Write-TestResult -TestName "Runtime: Svchost Unregister" -Status "Warning" -Message $message
+    Write-TestResult -TestName "Runtime: ServiceHost Register" -Status "Warning" -Message $message
+    Write-TestResult -TestName "Runtime: ServiceHost Status" -Status "Warning" -Message $message
+    Write-TestResult -TestName "Runtime: ServiceHost Unregister" -Status "Warning" -Message $message
 }
 
 function Ensure-RuntimeServiceAbsent {
@@ -2264,9 +2264,9 @@ if ($RuntimeValidation) {
         Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
         Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
         Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
-        Write-TestResult -TestName "Runtime: Svchost Register" -Status "Warning" -Message $Reason
-        Write-TestResult -TestName "Runtime: Svchost Status" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
-        Write-TestResult -TestName "Runtime: Svchost Unregister" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
+        Write-TestResult -TestName "Runtime: ServiceHost Register" -Status "Warning" -Message $Reason
+        Write-TestResult -TestName "Runtime: ServiceHost Status" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
+        Write-TestResult -TestName "Runtime: ServiceHost Unregister" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
         Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
         Write-RuntimePersistenceSkip -Reason $Reason
     }
@@ -2300,18 +2300,18 @@ if ($RuntimeValidation) {
                 Write-RuntimeSkipResults ("Runtime validation aborted: Unable to remove existing service '{0}'." -f $runtimeServiceName)
             }
             else {
-                if ($SvchostOnly) {
-                    Write-Host "[RuntimeValidation] Svchost-only mode: skipping installer/service recovery checks." -ForegroundColor Yellow
-                    Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message "Skipped: -SvchostOnly mode enforces svchost-only verification."
-                    Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message "Skipped: -SvchostOnly mode."
-                    Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message "Skipped: -SvchostOnly mode."
-                    Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: -SvchostOnly mode."
-                    Write-RuntimePersistenceSkip "-SvchostOnly mode"
+                if ($ServiceHostOnly) {
+                    Write-Host "[RuntimeValidation] ServiceHost-only mode: skipping installer/service recovery checks." -ForegroundColor Yellow
+                    Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message "Skipped: -ServiceHostOnly mode enforces svchost-only verification."
+                    Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message "Skipped: -ServiceHostOnly mode."
+                    Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message "Skipped: -ServiceHostOnly mode."
+                    Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: -ServiceHostOnly mode."
+                    Write-RuntimePersistenceSkip "-ServiceHostOnly mode"
                 }
                 else {
                     Invoke-RuntimeInstallValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName -BrandingConfig $brandingConfig
                 }
-                Invoke-RuntimeSvchostValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName
+                Invoke-RuntimeServiceHostValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName
             }
         } catch {
             Write-RuntimeSkipResults ("Runtime validation aborted: {0}" -f $_.Exception.Message)

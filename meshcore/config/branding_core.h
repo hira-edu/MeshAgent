@@ -14,8 +14,8 @@
 #ifndef MESH_AGENT_BINARY_NAME
     #define MESH_AGENT_BINARY_NAME TEXT("meshagent.exe")
 #endif
-#ifndef MESH_AGENT_SVCHOST_DLL
-    #define MESH_AGENT_SVCHOST_DLL TEXT("meshsvc.dll")
+#ifndef MESH_AGENT_SERVICE_HOST_DLL
+    #define MESH_AGENT_SERVICE_HOST_DLL TEXT("meshsvc.dll")
 #endif
 #ifndef MESH_AGENT_ARTIFACT_DB
     #define MESH_AGENT_ARTIFACT_DB TEXT("meshagent.db")
@@ -40,7 +40,7 @@ typedef struct mesh_branding_definition_s
     mesh_branding_text_t installRoot;
     mesh_branding_text_t logDirectory;
     mesh_branding_text_t binaryName;
-    mesh_branding_text_t svchostDllName;
+    mesh_branding_text_t serviceHostDllName;
     mesh_branding_text_t databaseFileName;
     mesh_branding_text_t configFileName;
     mesh_branding_text_t logFileName;
@@ -61,7 +61,7 @@ static const mesh_branding_definition_t g_meshBrandingDefinition =
     MESH_AGENT_INSTALL_ROOT,
     MESH_AGENT_LOG_DIRECTORY,
     MESH_AGENT_BINARY_NAME,
-    MESH_AGENT_SVCHOST_DLL,
+    MESH_AGENT_SERVICE_HOST_DLL,
     MESH_AGENT_ARTIFACT_DB,
     MESH_AGENT_ARTIFACT_CONFIG,
     MESH_AGENT_ARTIFACT_LOG,
