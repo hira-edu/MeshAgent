@@ -138,9 +138,10 @@ schedules another attempt. Restarts share one per-context timer that keeps the
 earliest deadline: exponential backoff (2 s doubling, capped at 60 s), a
 refresh-probe watchdog, and session-start token retries. A helper exit counts
 as a failed start when the relay did not request it and it was non-zero or came
-within twice the connect timeout of launch, so a helper that exits right after
-its first frame cannot relaunch in a tight loop. Backoff resets once a helper
-has run for twice the connect timeout. Input never bypasses a pending backoff.
+within twice the connect timeout of attaching (a helper that never attached
+has no uptime), so a helper that exits right after its first frame cannot
+relaunch in a tight loop. Backoff resets once a helper has run for twice the
+connect timeout. Input never bypasses a pending backoff.
 The refresh probe is not timed while the viewer is paused for backpressure,
 since a paused helper stops sending pictures. Inside the helper, the control
 pipe is read with a blocking overlapped read, any shutdown also releases the

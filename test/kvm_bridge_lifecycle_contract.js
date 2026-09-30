@@ -219,6 +219,12 @@ function main() {
             exitHandler.includes('if (uptimeMs >= KVM_BRIDGE_HEALTHY_RESET_MS)') &&
             // Only a shut-down relay ends the viewer's stream; logoff or disconnect keeps it attached.
             exitHandler.includes('notifyClosed = (g_shutdown != 0) ? 1 : 0;'),
+        // Uptime counts from this launch's attach: a helper that dies before attaching must not
+        // inherit the previous helper's start and look healthy, which would clear the backoff.
+        helperUptimeCountsFromThisLaunch:
+            exitHandler.includes('uptimeMs = (gKvmSessionStartTickMs != 0) ? (GetTickCount64() - gKvmSessionStartTickMs) : 0;') &&
+            /\+\+gKvmSpawnAttemptCount;[\s\S]*?gKvmSessionStartTickMs = 0;[\s\S]*?user->ctx = ctx;/.test(restart) &&
+            spawnSuccess.includes('gKvmSessionStartTickMs = GetTickCount64();'),
         refreshProbeWindowStartsAtAttach:
             attach.includes('gKvmPendingProbeSinceTickMs = GetTickCount64();') &&
             kvm.includes('if (gKvmChildExitSignaled != 0) { return 0; }'),

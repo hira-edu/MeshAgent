@@ -4974,6 +4974,10 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 	if (user == NULL) { return 0; }
 	memset(user, 0, sizeof(KvmRelayProcessUser));
 	++gKvmSpawnAttemptCount;
+	// Uptime is measured from this launch's attach (kvm_record_spawn_success). Without the reset, a
+	// helper that fails before attaching would inherit the previous helper's start and its exit would
+	// look healthy, clearing the backoff.
+	gKvmSessionStartTickMs = 0;
 	gKvmLastBridgeAvailable = 0;
 	gKvmLastUsedBridge = 0;
 	gKvmLastFallbackUsed = 0;
