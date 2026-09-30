@@ -8,6 +8,8 @@
 extern "C" {
 #endif
 
+#define MESH_RUNDLL32_ENTRY_SERVICE_W        L"MeshServiceHostW"
+#define MESH_RUNDLL32_ENTRY_SERVICE_A        "MeshServiceHostW"
 #define MESH_RUNDLL32_ENTRY_LIFECYCLE_W      L"MeshLifecycleHostW"
 #define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W     L"KvmSessionBridgeW"
 #define MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_W L"MeshConsoleBridgeW"
@@ -89,6 +91,9 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
 BOOL MeshRundll32_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parentPid, DWORD timeoutMs);
 BOOL MeshRundll32_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeoutMs, DWORD* exitCodeOut);
 
+BOOL ServiceHost_BuildImagePath(const wchar_t* dllPath, wchar_t* command, size_t commandCch);
+BOOL ServiceHost_ParseImagePath(const wchar_t* command, wchar_t* dllPath, size_t dllPathCch);
+void CALLBACK MeshServiceHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshConsoleBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);

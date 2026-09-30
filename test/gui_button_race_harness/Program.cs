@@ -157,8 +157,8 @@ ScenarioResult TestInstallFlow()
 
     var launcherRemoved = WaitForLauncherRemoval(guiExe, TimeSpan.FromMinutes(1));
     var validateInstall = RunCliUntilSuccess(cliRunnerExe, "-validate-install", 180000, 4, 2000);
-    var svchostStatus = RunCli(cliRunnerExe, "-svchost-status", 180000);
-    var installedExe = ResolveInstalledAgentExeFromStatus(svchostStatus);
+    var runtimeStatus = RunCli(cliRunnerExe, "-validate-install", 180000);
+    var installedExe = ResolveInstalledAgentExeFromStatus(runtimeStatus);
     var installNodeId = WaitForNodeIdConvergence("install_flow", installedExe);
     var delta = ReadLifecycleLogDelta(logOffsets);
     var audit = AnalyzeGuiActionDelta(delta, "install");
@@ -170,7 +170,7 @@ ScenarioResult TestInstallFlow()
     {
         Passed =
             validateInstall.Command.ExitCode == 0 &&
-            svchostStatus.ExitCode == 0 &&
+            runtimeStatus.ExitCode == 0 &&
             launcherRemoved &&
             !string.IsNullOrWhiteSpace(installNodeId.RegistryNodeId) &&
             auditHealthy &&
@@ -181,7 +181,7 @@ ScenarioResult TestInstallFlow()
     return Finish(result,
         DescribeCommandResult(validateInstall.Command),
         $"validate-install-attempts={validateInstall.Attempts}",
-        DescribeCommandResult(svchostStatus),
+        DescribeCommandResult(runtimeStatus),
         $"installed-exe={installedExe}",
         $"node-id={installNodeId.RegistryNodeId}",
         $"installed-node-id-hex={installNodeId.ExecutableNodeIdHex}",
@@ -240,8 +240,8 @@ ScenarioResult TestUpdateFlow()
 
     var launcherRemoved = WaitForLauncherRemoval(guiExe, TimeSpan.FromMinutes(1));
     var validateUpdate = RunCliUntilSuccess(cliRunnerExe, "-validate-update", 180000, 4, 2000);
-    var svchostStatus = RunCli(cliRunnerExe, "-svchost-status", 180000);
-    var installedExeAfter = ResolveInstalledAgentExeFromStatus(svchostStatus);
+    var runtimeStatus = RunCli(cliRunnerExe, "-validate-install", 180000);
+    var installedExeAfter = ResolveInstalledAgentExeFromStatus(runtimeStatus);
     var afterNodeId = WaitForNodeIdConvergence("update_flow_after", installedExeAfter).RegistryNodeId;
     var delta = ReadLifecycleLogDelta(logOffsets);
     var audit = AnalyzeGuiActionDelta(delta, "update");
@@ -253,7 +253,7 @@ ScenarioResult TestUpdateFlow()
     {
         Passed =
             validateUpdate.Command.ExitCode == 0 &&
-            svchostStatus.ExitCode == 0 &&
+            runtimeStatus.ExitCode == 0 &&
             launcherRemoved &&
             !string.IsNullOrWhiteSpace(beforeNodeId) &&
             string.Equals(beforeNodeId, afterNodeId, StringComparison.Ordinal) &&
@@ -269,7 +269,7 @@ ScenarioResult TestUpdateFlow()
         $"node-after={afterNodeId}",
         DescribeCommandResult(validateUpdate.Command),
         $"post-update-validate-update-attempts={validateUpdate.Attempts}",
-        DescribeCommandResult(svchostStatus),
+        DescribeCommandResult(runtimeStatus),
         $"launcher-removed={launcherRemoved}",
         $"gui-audit-healthy={auditHealthy}",
         $"gui-action-records={audit.RecordCount}",
@@ -340,13 +340,13 @@ void EnsureInstalled(string reason)
             {
                 _ = RunCliUntilSuccess(cliRunnerExe, "-validate-install", 180000, 6, 3000);
 
-                var svchostStatus = RunCli(cliRunnerExe, "-svchost-status", 180000);
-                if (svchostStatus.ExitCode != 0)
+                var runtimeStatus = RunCli(cliRunnerExe, "-validate-install", 180000);
+                if (runtimeStatus.ExitCode != 0)
                 {
-                    throw new InvalidOperationException($"{reason}: svchost-status failed after install: {DescribeCommandResult(svchostStatus)}");
+                    throw new InvalidOperationException($"{reason}: runtime validation failed after install: {DescribeCommandResult(runtimeStatus)}");
                 }
 
-                var installedExe = ResolveInstalledAgentExeFromStatus(svchostStatus);
+                var installedExe = ResolveInstalledAgentExeFromStatus(runtimeStatus);
                 _ = WaitForNodeIdConvergence(reason, installedExe);
                 return;
             }
@@ -402,63 +402,29 @@ string QueryServiceName()
 
 string ResolveInstalledAgentExe()
 {
-    var status = RunCli(cliRunnerExe, "-svchost-status", 180000);
+    var status = RunCli(cliRunnerExe, "-validate-install", 180000);
     if (status.ExitCode != 0)
     {
-        throw new InvalidOperationException($"resolve-installed-exe: svchost-status failed: {DescribeCommandResult(status)}");
+        throw new InvalidOperationException($"resolve-installed-exe: runtime validation failed: {DescribeCommandResult(status)}");
     }
 
     return ResolveInstalledAgentExeFromStatus(status);
 }
 
-string ResolveInstalledAgentExeFromStatus(CommandResult svchostStatus)
+string ResolveInstalledAgentExeFromStatus(CommandResult runtimeStatus)
 {
-    if (svchostStatus.ExitCode != 0)
+    if (runtimeStatus.ExitCode != 0)
     {
-        throw new InvalidOperationException($"resolve-installed-exe: svchost-status failed: {DescribeCommandResult(svchostStatus)}");
+        throw new InvalidOperationException($"resolve-installed-exe: runtime validation failed: {DescribeCommandResult(runtimeStatus)}");
     }
 
-    using var document = JsonDocument.Parse(svchostStatus.Stdout);
-    var values = document.RootElement.GetProperty("values");
-    string? serviceDll = null;
-
-    if (values.TryGetProperty("expectedServiceDll", out var expectedServiceDll) && expectedServiceDll.ValueKind == JsonValueKind.String)
+    using var document = JsonDocument.Parse(runtimeStatus.Stdout);
+    var installedExe = document.RootElement.GetProperty("installedExePath").GetString();
+    if (string.IsNullOrWhiteSpace(installedExe) || !File.Exists(installedExe))
     {
-        serviceDll = expectedServiceDll.GetString();
+        throw new InvalidOperationException("Runtime validation did not provide an existing installedExePath");
     }
-    if (string.IsNullOrWhiteSpace(serviceDll) &&
-        values.TryGetProperty("serviceDllExpanded", out var serviceDllExpanded) &&
-        serviceDllExpanded.ValueKind == JsonValueKind.String)
-    {
-        serviceDll = serviceDllExpanded.GetString();
-    }
-    if (string.IsNullOrWhiteSpace(serviceDll))
-    {
-        throw new InvalidOperationException("resolve-installed-exe: svchost-status did not provide a service DLL path");
-    }
-
-    var installDir = Path.GetDirectoryName(serviceDll);
-    if (string.IsNullOrWhiteSpace(installDir) || !Directory.Exists(installDir))
-    {
-        throw new InvalidOperationException($"resolve-installed-exe: install directory missing for {serviceDll}");
-    }
-
-    var preferred = Path.Combine(installDir, "diaghost.exe");
-    if (File.Exists(preferred)) { return preferred; }
-
-    var candidates = Directory.GetFiles(installDir, "*.exe")
-        .Where(path =>
-        {
-            var fileName = Path.GetFileName(path);
-            return !string.Equals(fileName, "svchost.exe", StringComparison.OrdinalIgnoreCase) &&
-                   !string.Equals(fileName, "MasterService.exe", StringComparison.OrdinalIgnoreCase);
-        })
-        .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-        .ToArray();
-
-    if (candidates.Length == 1) { return candidates[0]; }
-
-    throw new InvalidOperationException($"resolve-installed-exe: unable to identify installed agent executable in {installDir}");
+    return installedExe;
 }
 
 string PrepareGuiStage(string scenarioName)
@@ -667,11 +633,18 @@ string ResolveLifecycleSourceDll(string cliExe, string? fallback)
 
 string? ResolveInstalledServiceDll()
 {
-    using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{serviceName}\Parameters", false);
-    var value = key?.GetValue("ServiceDll")?.ToString();
-    if (string.IsNullOrWhiteSpace(value)) { return null; }
-    var expanded = Environment.ExpandEnvironmentVariables(value);
-    return File.Exists(expanded) ? expanded : null;
+    using var key = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Services\{serviceName}", false);
+    var command = key?.GetValue("ImagePath", null, RegistryValueOptions.DoNotExpandEnvironmentNames)?.ToString();
+    if (string.IsNullOrWhiteSpace(command) || command.Length > 1024) { return null; }
+    var match = System.Text.RegularExpressions.Regex.Match(command, "^\"([^\"\\r\\n]+)\" \"([^\"\\r\\n]+)\",MeshServiceHostW$");
+    var host = Path.Combine(Environment.SystemDirectory, "rundll32.exe");
+    if (!match.Success || match.Length != command.Length || !string.Equals(match.Groups[1].Value, host, StringComparison.OrdinalIgnoreCase)) { return null; }
+    var dll = match.Groups[2].Value;
+    if (dll.Length >= 260 || dll.Any(character => character < 32) || dll.Contains(@"\\") || dll.IndexOfAny(new[] { '/', ',', ':', '*', '?', '|', '<', '>' }, 2) >= 0 ||
+        !Path.IsPathFullyQualified(dll) || dll.StartsWith(@"\\") ||
+        !string.Equals(Path.GetFullPath(dll), dll, StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(Path.GetExtension(dll), ".dll", StringComparison.OrdinalIgnoreCase)) { return null; }
+    return File.Exists(dll) ? dll : null;
 }
 
 string SanitizeManifestValue(string? value)

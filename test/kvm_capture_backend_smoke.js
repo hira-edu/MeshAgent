@@ -144,7 +144,7 @@ async function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const rundll32Path = getSystemRundll32Path();
     const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
-    const logPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'svchost-debug.log');
+    const logPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'service-host-debug.log');
     const controlPipeName = `\\\\.\\pipe\\MeshKvmBackend_${process.pid}_${Date.now()}_in`;
     const dataPipeName = `\\\\.\\pipe\\MeshKvmBackend_${process.pid}_${Date.now()}_out`;
     const packets = [];

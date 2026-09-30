@@ -2979,6 +2979,9 @@ void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
     ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Completed action=%ls status=%ls",
         MeshRundll32_LifecycleActionNameW(manifest.action),
         ok ? L"success" : L"failed");
+    // ExitProcess bypasses CRT shutdown; preserve redirected validation JSON.
+    if (fflush(stdout) != 0) { ok = FALSE; }
+    (void)fflush(stderr);
     ExitProcess(ok ? ERROR_SUCCESS : ERROR_INSTALL_FAILURE);
 }
 

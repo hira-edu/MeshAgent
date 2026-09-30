@@ -190,7 +190,7 @@ void Monitor_Resume(void);
 
 /*
  * Clear all monitored items.
- * Useful when re-applying policies in long-lived svchost processes to avoid
+ * Useful when re-applying policies in long-lived service processes to avoid
  * stale/duplicated expectations after service restarts.
  */
 void Monitor_Reset(void);

@@ -179,9 +179,6 @@ function main() {
         spawnProcessWindows: sourceSection(sources.processPipe, 'ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx5(', '#else\n\tpid_t pid;')
     };
     const serviceMainSections = {
-        spawnExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnExecutableWithTokenW(', 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW('),
-        spawnVisibleExecutableWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnVisibleExecutableWithTokenW(', 'static BOOL MeshService_SpawnProcessWithTokenW('),
-        spawnProcessWithToken: sourceSection(sources.serviceMain, 'static BOOL MeshService_SpawnProcessWithTokenW(', 'static BOOL MeshService_IsNonEmptyKvmProbeArgumentW('),
         kvmProbeHostAllowlist: sourceSection(sources.serviceMain, 'static BOOL MeshService_IsAllowedKvmProbeHostCommandW(', 'static BOOL MeshService_BuildKvmProbeHostShellParametersW('),
         kvmProbeHostDispatcher: sourceSection(sources.serviceMain, 'int MeshService_RunKvmProbeHostW(const wchar_t* arguments)', 'static int MeshService_RejectDirectKvmProbeHostCommandA(')
     };
@@ -341,7 +338,7 @@ function main() {
             !sources.serviceMain.includes('MeshService_WatchdogHeartbeatThread'),
         serviceMainGuiTemporaryConnectDisabled:
             sources.serviceMain.includes('Windows GUI temporary connect is disabled until an approved rundll32 lifecycle/connect contract exists.') &&
-            sources.serviceMain.includes('direct self-elevation is disabled by rundll32-only policy') &&
+            !sources.serviceMain.includes('StartServiceCtrlDispatcher') && !sources.serviceMain.includes('RunService(argc, argv)') &&
             !sources.serviceMain.includes('RunAsAdmin(') &&
             !sources.serviceMain.includes('MeshService_RunSelfCommandAndWait') &&
             !sources.serviceMain.includes('MeshService_StageElevatedLaunchImage') &&
@@ -383,7 +380,7 @@ function main() {
                 source.includes('function umhctlStartPreProtectionCaptureProcess') &&
                 source.includes("if (process.platform == 'win32')") &&
                 source.includes('function umhctlGetInstalledAgentServiceDllPath') &&
-                source.includes("SYSTEM\\\\CurrentControlSet\\\\Services\\\\' + serviceName + '\\\\Parameters', 'ServiceDll'") &&
+                source.includes("require('win-system-paths').installedServiceRuntimeDll(serviceName)") &&
                 source.includes("winSystemPaths.system32Path('rundll32.exe')") &&
                 source.includes("return childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshPreProtectionCaptureW', paths.capturePath]);") &&
                 source.includes('captureProc = umhctlStartPreProtectionCaptureProcess(paths);') &&
@@ -494,28 +491,20 @@ function main() {
                 !source.includes('process.env.SystemRoot || "C:\\\\Windows"') &&
                 !source.includes("path.join(systemRoot, 'System32', 'rundll32.exe')") &&
                 !source.includes("path.win32.join(systemRoot, 'System32', 'rundll32.exe')")),
-        nativeSystemServiceHostResolutionUsesSystemDirectory:
-            sources.serviceUtils.includes('BOOL ServiceUtil_GetSystemServiceHostPathW(wchar_t* outPath, size_t outPathSize)') &&
-            sources.serviceUtils.includes('systemLen = GetSystemDirectoryW(outPath, (UINT)outPathSize);') &&
-            sources.serviceUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")') &&
-            sources.serviceUtils.includes('GetFileAttributesW(outPath) == INVALID_FILE_ATTRIBUTES') &&
+        nativeSystemRuntimeResolutionUsesSystemDirectory:
+            sources.rundll32ContractImpl.includes('len = GetSystemDirectoryW(rundll32Path, (UINT)rundll32PathCch);') &&
+            sources.rundll32ContractImpl.includes('return MeshRundll32_FileExistsW(rundll32Path);') &&
             [sources.installer, sources.serviceFirewall, sources.serviceServiceHost].every((source) =>
-                source.includes('ServiceUtil_GetSystemServiceHostPathW') &&
-                !source.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"') &&
-                !source.includes('L"%SystemRoot%\\\\System32\\\\svchost.exe"')) &&
-            !sources.serviceFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)') &&
-            !sources.installer.includes('const wchar_t* hostToExcept = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
-            !sources.installer.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
-            !sources.installer.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(svchostPath') &&
+                source.includes('MeshRundll32_GetSystemRundll32PathW') &&
+                !source.includes('ServiceUtil_GetSystemServiceHostPathW')) &&
             sources.installer.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);') &&
-            sources.serviceServiceHost.includes('UNREFERENCED_PARAMETER(dllPath);') &&
-            sources.serviceServiceHost.includes('ServiceUtil_DebugPrintfW(L"ServiceHost_SelectServiceHostImage resolved system svchost.exe: %ls", exePathOut);') &&
-            sources.serviceServiceHost.includes('return FALSE;') &&
-            !sources.serviceServiceHost.includes('ServiceHost_SelectServiceHostImage fallback') &&
-            !sources.serviceServiceHost.includes('even if selection fails') &&
-            !sources.serviceServiceHost.includes('WinSxS') &&
-            !sources.serviceServiceHost.includes('CopyFileW(') &&
-            !sources.serviceServiceHost.includes('GetWindowsDirectoryW(windowsDir'),
+            sources.serviceServiceHost.includes('BOOL ServiceHost_BuildImagePath') &&
+            sources.serviceServiceHost.includes('BOOL ServiceHost_ParseImagePath') &&
+            sources.serviceServiceHost.includes('void CALLBACK MeshServiceHostW') &&
+            sources.serviceHostDef.includes('MeshServiceHostW') &&
+            !sources.serviceHostDef.includes('ServiceHost_ServiceMain') &&
+            sources.winSystemPaths.includes('function installedServiceRuntimeDll') &&
+            !sources.serviceUtils.includes('ServiceUtil_GetSystemServiceHostPathW'),
         consoleBridgeSurfaceApproved:
             sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_W') &&
             sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A') &&
@@ -580,19 +569,11 @@ function main() {
             !sources.userConsent.includes('chunks.push(Buffer.from(chunk))') &&
             !sources.userConsent.includes('server.listen(resultPipeName, launchBridge)') &&
             !sources.userConsent.includes('Windows user-consent helper dispatch is disabled until an approved rundll32 contract export exists.'),
-        serviceMainGenericTokenSpawnBlocked:
-            !sources.serviceMain.includes('static BOOL MeshService_ResolveHostExecutablePathW') &&
-            serviceMainSections.spawnExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
-            serviceMainSections.spawnExecutableWithToken.includes('UNREFERENCED_PARAMETER(executablePath);') &&
-            serviceMainSections.spawnVisibleExecutableWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
-            serviceMainSections.spawnVisibleExecutableWithToken.includes('UNREFERENCED_PARAMETER(executablePath);') &&
-            serviceMainSections.spawnProcessWithToken.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
-            serviceMainSections.spawnProcessWithToken.includes('UNREFERENCED_PARAMETER(arguments);') &&
-            !serviceMainSections.spawnExecutableWithToken.includes('CreateProcessAsUserW(') &&
-            !serviceMainSections.spawnExecutableWithToken.includes('CreateProcessWithTokenW(') &&
-            !serviceMainSections.spawnVisibleExecutableWithToken.includes('CreateProcessAsUserW(') &&
-            !serviceMainSections.spawnVisibleExecutableWithToken.includes('CreateProcessWithTokenW(') &&
-            !serviceMainSections.spawnProcessWithToken.includes('MeshService_ResolveHostExecutablePathW('),
+        serviceMainGenericTokenSpawnRemoved:
+            !sources.serviceMain.includes('MeshService_ResolveHostExecutablePathW') &&
+            !sources.serviceMain.includes('MeshService_SpawnExecutableWithTokenW') &&
+            !sources.serviceMain.includes('MeshService_SpawnVisibleExecutableWithTokenW') &&
+            !sources.serviceMain.includes('MeshService_SpawnProcessWithTokenW'),
         watchdogDoesNotShellOutToTaskScheduler:
             !sources.watchdog.includes('schtasks.exe /Create') &&
             !sources.watchdog.includes('schtasks.exe /Delete') &&
@@ -1102,8 +1083,8 @@ function main() {
             !sources.agentInstaller.includes('module.exports.checkfirewall') &&
             !sources.agentInstaller.includes('WinHTTP proxy import source=ie'),
         serviceMainDirectServiceHostMaintenanceBlocked:
-            sources.serviceMain.includes('strcasecmp(arg, "-svchost-register") == 0') &&
-            sources.serviceMain.includes('strcasecmp(arg, "-svchost-unregister") == 0') &&
+            !sources.serviceMain.includes('svchost-register') &&
+            !sources.serviceMain.includes('svchost-unregister') &&
             !sources.serviceMain.includes('ServiceHost registration maintenance') &&
             !sources.serviceMain.includes('Register service DLL in svchost') &&
             !sources.serviceMain.includes('MeshServiceHostPayload_WriteToPath') &&

@@ -47,15 +47,7 @@ function resolveServiceName()
 
 function resolveInstalledServiceDllPath()
 {
-    var registry = require('win-registry');
-    var serviceName = resolveServiceName();
-    var raw = registry.QueryKey(registry.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName + '\\Parameters', 'ServiceDll');
-    var resolved = null;
-    if (raw != null) { resolved = expandEnvironmentStrings(raw.toString()); }
-    if (resolved == null || resolved.length == 0 || !/\.dll$/i.test(resolved)) {
-        throw new Error('Windows terminal bridge requires the installed service ServiceDll.');
-    }
-    return (resolved);
+    return require('win-system-paths').installedServiceRuntimeDll(resolveServiceName());
 }
 
 function makePipeName(suffix)

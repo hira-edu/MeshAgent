@@ -117,7 +117,7 @@ async function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const rundll32Path = getSystemRundll32Path();
     const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
-    const logPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'svchost-debug.log');
+    const logPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'service-host-debug.log');
     const controlPipeName = `\\\\.\\pipe\\MeshKvm_${process.pid}_${Date.now()}_in`;
     const dataPipeName = `\\\\.\\pipe\\MeshKvm_${process.pid}_${Date.now()}_out`;
     const shutdownMode = String(args.shutdown || 'pipe-close').toLowerCase();
@@ -288,7 +288,7 @@ async function main() {
         writeText(path.join(evidenceDir, 'stdout.txt'), Buffer.concat(stdoutChunks).toString('utf8'));
         writeText(path.join(evidenceDir, 'stderr.txt'), Buffer.concat(stderrChunks).toString('utf8'));
         if (Array.isArray(report.logTail)) {
-            writeText(path.join(evidenceDir, 'svchost-debug-tail.txt'), report.logTail.join('\n') + '\n');
+            writeText(path.join(evidenceDir, 'service-host-debug-tail.txt'), report.logTail.join('\n') + '\n');
         }
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,

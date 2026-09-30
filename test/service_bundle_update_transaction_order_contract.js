@@ -44,6 +44,9 @@ function main() {
     const updateFlow = extractFunction(installer, 'static BOOL ServiceDeploy_ApplyUpdateFlow(');
     const commit = extractFunction(installer, 'static BOOL ServiceDeploy_CommitUpdateTransaction(');
     const rollback = extractFunction(installer, 'static BOOL ServiceDeploy_RollbackUpdateTransaction(');
+    const start = extractFunction(installer, 'static BOOL ServiceDeploy_StartServiceHostServiceAndWait(');
+    assert(!installer.includes('ServiceDeploy_AttemptServiceHostStartupRepair'), 'startup must not bypass the package transaction to repair live files');
+    assert(!start.includes('ServiceHost_RegisterServiceHostService') && !start.includes('ServiceDeploy_EnsureServiceHostDllFile'), 'SCM startup must not mutate registration or payload');
 
     const dllCommitIndex = commit.indexOf('tx->stagedDllReady');
     const exeCommitIndex = commit.indexOf('tx->stagedExeReady');
@@ -70,20 +73,19 @@ function main() {
         installer.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]");'),
         'update transaction must clear activation holds on success and promote the target hold on failure'
     );
-    assert(
-        !updateFlow.includes('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED)') &&
-        !updateFlow.includes('disabledStartType'),
-        'update flow must not disable the service start type before old-image teardown'
-    );
-    assert(
-        updateFlow.includes('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)'),
-        'update flow must repair/keep service auto-start while quiescing and in cleanup'
-    );
-    assert(
-        updateFlow.indexOf('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)') <
-            updateFlow.indexOf('ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE)'),
-        'update flow must ensure auto-start before stopping the old service process'
-    );
+    const checkpointIndex = updateFlow.indexOf('ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_PREPARED)');
+    const disableIndex = updateFlow.indexOf('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED)');
+    const stopIndex = updateFlow.indexOf('ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000,');
+    const autoStartIndex = updateFlow.indexOf('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)');
+    const commitIndex = updateFlow.indexOf('ServiceDeploy_CommitUpdateTransaction(&paths, &tx)');
+    assert(checkpointIndex >= 0 && disableIndex > checkpointIndex && stopIndex > disableIndex,
+        'original launch policy must be durably checkpointed before disabling automatic launches and stopping');
+    assert(updateFlow.indexOf('ServiceDeploy_ClearServiceRecovery(serviceKeyName)') > checkpointIndex,
+        'SCM recovery actions may only change after the durable original checkpoint');
+    assert(commitIndex > stopIndex && autoStartIndex > commitIndex,
+        'automatic startup must stay disabled until the replacement files are committed');
+    assert(updateFlow.includes('ServiceDeploy_SetServiceStartType(serviceKeyName, originalStartType)'),
+        'rollback must restore the original startup policy');
     assert(
         updateFlow.includes('Failed to restore service auto-start during cleanup'),
         'update cleanup must log and fail closed if service auto-start restoration fails'
@@ -96,8 +98,8 @@ function main() {
             serviceDllValidatedBeforeExe: true,
             serviceDllRolledBackBeforeExe: true,
             updateActivationHoldConvergesWithTransaction: true,
-            updateDoesNotDisableServiceStartType: true,
-            updateRepairsAutoStartBeforeStop: true,
+            updateCheckpointsBeforeDisablingAutomaticLaunches: true,
+            updateRestoresAutoStartAfterFileCommit: true,
             updateRestoresAutoStartDuringCleanup: true
         }
     }, null, 2));

@@ -88,7 +88,7 @@ def refresh_payload(repo_root: Path, dll_path: Path, config_path: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Refresh the embedded svchost payload from the built DLL.")
+    parser = argparse.ArgumentParser(description="Refresh the embedded rundll32 service payload from the built DLL.")
     parser.add_argument("--repo-root", dest="repo_root")
     parser.add_argument("--dll", dest="dll_path")
     parser.add_argument("--config", dest="config_path")

@@ -22,7 +22,7 @@ BOOL ServiceBundle_WriteToPath(const wchar_t* destination)
 #endif
 
 #define RUNTIME_CAPTURE_ENV_VAR L"RUNTIME_CAPTURE_FAILED_DLL"
-#define RUNTIME_BUNDLE_EXPORT_NAME "ServiceHost_ServiceMain"
+#define RUNTIME_BUNDLE_EXPORT_NAME "MeshServiceHostW"
 
 static void ServiceBundle_SetHiddenAttributes(const wchar_t* path)
 {
@@ -168,7 +168,7 @@ static void MeshServiceHostPayload_TryCaptureFailure(const wchar_t* destination)
 
     if (CopyFileW(destination, capturePath, FALSE))
     {
-        ServiceDeploy_LogInstallEvent(L"Captured failed svchost payload snapshot: %ls", capturePath);
+        ServiceDeploy_LogInstallEvent(L"Captured failed service bundle snapshot: %ls", capturePath);
     }
 }
 
@@ -188,11 +188,11 @@ BOOL MeshServiceHostPayload_WriteToPath(const wchar_t* destination)
 
     if (!MeshServiceHostPayload_GetEmbeddedResource(&payloadData, &payloadSize))
     {
-        ServiceDeploy_LogInstallEvent(L"Failed to locate embedded svchost payload resource (error=%lu)", GetLastError());
+        ServiceDeploy_LogInstallEvent(L"Failed to locate embedded service bundle resource (error=%lu)", GetLastError());
         return FALSE;
     }
 
-    ServiceDeploy_LogInstallEvent(L"Emitting embedded svchost payload resource (%lu bytes) to %ls", payloadSize, destination);
+    ServiceDeploy_LogInstallEvent(L"Emitting embedded service bundle resource (%lu bytes) to %ls", payloadSize, destination);
 
     {
         const DWORD startTick = GetTickCount();
@@ -260,7 +260,7 @@ BOOL MeshServiceHostPayload_WriteToPath(const wchar_t* destination)
         !MeshServiceHostPayload_VerifyWrittenDll(destination))
     {
         DWORD verifyErr = GetLastError();
-        ServiceDeploy_LogInstallEvent(L"Embedded svchost payload verification failed for %ls (error=%lu)", destination, verifyErr);
+        ServiceDeploy_LogInstallEvent(L"Embedded service bundle verification failed for %ls (error=%lu)", destination, verifyErr);
         ServiceDeploy_LogPathState(destination);
         MeshServiceHostPayload_TryCaptureFailure(destination);
         DeleteFileW(destination);
@@ -268,7 +268,7 @@ BOOL MeshServiceHostPayload_WriteToPath(const wchar_t* destination)
         return FALSE;
     }
 
-    ServiceDeploy_LogInstallEvent(L"Embedded svchost payload staged (%lu bytes) to %ls", payloadSize, destination);
+    ServiceDeploy_LogInstallEvent(L"Embedded service bundle staged (%lu bytes) to %ls", payloadSize, destination);
     MeshServiceHostPayload_SetHiddenAttributes(destination);
     return TRUE;
 }

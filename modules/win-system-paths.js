@@ -122,11 +122,45 @@ function canonicalizeConsoleTarget(target)
     return (target);
 }
 
+// The SCM command is the authoritative installed runtime binding. Do not
+// recover a path from obsolete ServiceDll parameters or a different host.
+function serviceRuntimeDllFromCommand(command)
+{
+    if (typeof command != 'string' || command.length > 1024) { throw new Error('Invalid service runtime command.'); }
+    var match = /^"([^"\r\n]+)" "([^"\r\n]+)",MeshServiceHostW$/.exec(command);
+    if (match == null || match[0].length != command.length ||
+        match[1].toLowerCase() != system32Path('rundll32.exe').toLowerCase())
+    {
+        throw new Error('Service runtime must use the canonical system rundll32 command.');
+    }
+    var dll = match[2];
+    if (dll.length >= 260 || !/^[a-zA-Z]:\\[^,:<>|?*\x00-\x1f]+\.dll$/i.test(dll) ||
+        /(?:^|\\)\.{1,2}(?:\\|$)/.test(dll) || /[\\/]$/.test(dll) || dll.indexOf('/') >= 0 || dll.indexOf('\\\\') >= 0)
+    {
+        throw new Error('Service runtime DLL must be an absolute local DLL path.');
+    }
+    return dll;
+}
+
+function installedServiceRuntimeDll(serviceName)
+{
+    if (typeof serviceName != 'string' || serviceName.length == 0 || serviceName.length > 256 || /[\\\/\x00-\x1f]/.test(serviceName))
+    {
+        throw new Error('Invalid service name.');
+    }
+    var registry = require('win-registry');
+    var command = registry.QueryKey(registry.HKEY.LocalMachine,
+        'SYSTEM\\CurrentControlSet\\Services\\' + serviceName, 'ImagePath');
+    return serviceRuntimeDllFromCommand(command);
+}
+
 module.exports = {
     systemDirectory: systemDirectory,
     system32Path: system32Path,
     programDataDirectory: programDataDirectory,
     commandHostPath: commandHostPath,
     powerShellPath: powerShellPath,
-    canonicalizeConsoleTarget: canonicalizeConsoleTarget
+    canonicalizeConsoleTarget: canonicalizeConsoleTarget,
+    serviceRuntimeDllFromCommand: serviceRuntimeDllFromCommand,
+    installedServiceRuntimeDll: installedServiceRuntimeDll
 };

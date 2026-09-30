@@ -146,7 +146,7 @@ void KVM_TraceStartupF(const char* format, ...)
 				int prefixLen;
 
 				*(slash + 1) = L'\0';
-				if (SUCCEEDED(StringCchPrintfW(diagnosticLogPath, _countof(diagnosticLogPath), L"%ls%ls", modulePath, L"svchost-debug.log")))
+				if (SUCCEEDED(StringCchPrintfW(diagnosticLogPath, _countof(diagnosticLogPath), L"%ls%ls", modulePath, L"service-host-debug.log")))
 				{
 					fileHandle = CreateFileW(diagnosticLogPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 					if (fileHandle != NULL && fileHandle != INVALID_HANDLE_VALUE)

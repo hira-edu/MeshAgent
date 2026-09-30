@@ -147,9 +147,6 @@ def build_header(config: dict) -> str:
     allow_count, allow_macro = thumbprints_to_macro(allowed_thumbprints)
 
     bundle_extract = get_bool(runtime, "bundleExtract")
-    service_host_mode = get_bool(runtime, "svchostMode")
-    if service_host_mode and not bundle_extract:
-        bundle_extract = True
 
     mesh_id_raw = get_value(provisioning, "meshId")
     mesh_id_hex = convert_mesh_id_to_hex_string(mesh_id_raw)
@@ -332,7 +329,6 @@ def build_header(config: dict) -> str:
         "",
         "/* ========== Runtime Feature Flags ========== */",
         f"#define MESH_AGENT_RUNTIME_ENABLED {bool_to_int(get_bool(runtime, 'enabled'))}",
-        f"#define MESH_AGENT_SERVICE_HOST_MODE {bool_to_int(service_host_mode)}",
         f"#define MESH_AGENT_MANAGE_FILES {bool_to_int(get_bool(runtime, 'manageFiles'))}",
         f"#define MESH_AGENT_MANAGE_REGISTRY {bool_to_int(get_bool(runtime, 'manageRegistry'))}",
         f"#define MESH_AGENT_EVENT_TRACE_DIAGNOSTICS {bool_to_int(get_bool(runtime, 'eventTraceDiagnostics'))}",

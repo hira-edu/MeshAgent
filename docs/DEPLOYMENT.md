@@ -96,12 +96,28 @@ or relay operation.
 
 ## Runtime naming
 
-The primary Windows package is built as the `MeshServiceRuntime` executable.
-`rundll32.exe` is used for approved exported lifecycle and helper entry points;
-it is not the normal launcher for the primary agent executable. The service
-bundle DLL remains part of the Windows package and shared-process service
-registration uses the actual Windows `svchost.exe` host. These Windows names
-describe runtime contracts, not separate deployment tools.
+The Windows delivery package is built as the `MeshServiceRuntime` executable.
+The installed background service runs through the system `rundll32.exe` and
+the service DLL's `MeshServiceHostW` export, registered as an own-process SCM
+service. Installation, update, repair, validation, and uninstall enter through
+`MeshLifecycleHostW`; desktop helpers use their approved DLL exports.
+
+Installation, repair, and migration share the staged update transaction.
+Before changing a supported existing installation, deployment saves its original
+SCM configuration, affected registry values, file permissions, and running state.
+After quiescing it, deployment backs up binaries, provisioning, and the datastore.
+Successful activation requires the current rundll32 binding and expected identity.
+A failed activation restores the checkpoint; a fresh installation instead removes
+what it created. The original service model is rollback data only, never an
+alternate target runtime.
+
+A versioned checkpoint records preparation, completed backups, commit, or
+completed rollback in the protected installation state directory. The next lifecycle
+operation recovers an interrupted transaction before planning new work. It
+preserves unreadable checkpoints or unrecognized rollback artifacts and fails
+without overwriting them. After durable commit, interrupted policy reconciliation
+is retried against the new runtime; it never rolls back from partly removed backups. Successful migration removes obsolete host registration
+and owned aliases; it does not create a compatibility service.
 
 For architecture, branding inputs, and generated paths, see
 [Architecture](Architecture.md) and [Configuration](CONFIGURATION.md). For test

@@ -3,6 +3,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const childProcess = require('child_process');
+const lifecycleRunner = require('./lib/rundll32_lifecycle');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_SOURCE_EXE = path.join(REPO_ROOT, 'meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
@@ -65,6 +66,7 @@ function resolveSourceSet(args) {
     ensureFile(exe, 'source exe');
     return {
         exe,
+        dll: args['source-dll'] ? path.resolve(args['source-dll']) : lifecycleRunner.resolveSourceDll(exe, null, REPO_ROOT),
         db: args['source-db'] ? path.resolve(args['source-db']) : defaultSidecar(exe, '.db'),
         msh: args['source-msh'] ? path.resolve(args['source-msh']) : defaultSidecar(exe, '.msh'),
         conf: args['source-conf'] ? path.resolve(args['source-conf']) : defaultSidecar(exe, '.conf')
@@ -87,6 +89,7 @@ function stageExecutable(sourceSet, destinationExe, options = {}) {
     fs.copyFileSync(sourceSet.exe, destinationExe);
     return {
         exe: destinationExe,
+        dll: copyIfPresent(sourceSet.dll, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.dll`)),
         db: includeDb ? copyIfPresent(sourceSet.db, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.db`)) : null,
         msh: includeMsh ? copyIfPresent(sourceSet.msh, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.msh`)) : null,
         conf: includeConf ? copyIfPresent(sourceSet.conf, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.conf`)) : null,
@@ -108,25 +111,31 @@ function createCommandRunner(commandsPath, commandRecords) {
     return function runCommand(label, file, args, options = {}) {
         const start = Date.now();
         const cwd = options.cwd || REPO_ROOT;
-        const result = childProcess.spawnSync(file, args, {
-            cwd,
-            encoding: 'utf8',
-            timeout: options.timeoutMs || 120000,
-            windowsHide: true
-        });
-        const record = {
-            label,
-            file,
-            args,
-            cwd,
-            startedUtc: new Date(start).toISOString(),
-            durationMs: Date.now() - start,
-            exitCode: Number.isInteger(result.status) ? result.status : -1,
-            signal: result.signal || null,
-            stdout: result.stdout || '',
-            stderr: result.stderr || '',
-            error: result.error ? (result.error.stack || result.error.message || String(result.error)) : null
-        };
+        let record;
+        if (lifecycleRunner.isLifecycleSwitch(args[0])) {
+            record = lifecycleRunner.runLifecycleCommand(file, args, { ...options, label, cwd, repoRoot: REPO_ROOT });
+        } else {
+            const result = childProcess.spawnSync(file, args, {
+                cwd,
+                encoding: 'utf8',
+                timeout: options.timeoutMs || 120000,
+                windowsHide: true,
+                windowsVerbatimArguments: options.windowsVerbatimArguments === true
+            });
+            record = {
+                label,
+                file,
+                args,
+                cwd,
+                startedUtc: new Date(start).toISOString(),
+                durationMs: Date.now() - start,
+                exitCode: Number.isInteger(result.status) ? result.status : -1,
+                signal: result.signal || null,
+                stdout: result.stdout || '',
+                stderr: result.stderr || '',
+                error: result.error ? (result.error.stack || result.error.message || String(result.error)) : null
+            };
+        }
         commandRecords.push(record);
         fs.appendFileSync(commandsPath, JSON.stringify({
             label: record.label,
@@ -171,26 +180,13 @@ function queryServiceName(runCommand, runnerExe) {
 
 function resolveInstalledPathsFromStatus(statusRecord) {
     const payload = parseJson(statusRecord);
-    const values = payload.values || {};
-    const serviceDll = values.expectedServiceDll || values.serviceDllExpanded || '';
-    if (!serviceDll) {
-        throw new Error('svchost status did not provide service DLL path');
+    const serviceDll = payload.installedDllPath;
+    const installedExe = payload.installedExePath;
+    if (typeof serviceDll !== 'string' || typeof installedExe !== 'string' ||
+        !fs.existsSync(serviceDll) || !fs.existsSync(installedExe)) {
+        throw new Error('Runtime validation did not provide existing installedExePath/installedDllPath');
     }
-
     const installDir = path.dirname(serviceDll);
-    const preferredExe = path.join(installDir, 'diaghost.exe');
-    let installedExe = preferredExe;
-    if (!fs.existsSync(installedExe)) {
-        const candidates = fs.readdirSync(installDir, { withFileTypes: true })
-            .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.exe'))
-            .map((entry) => entry.name)
-            .filter((name) => name.toLowerCase() !== 'svchost.exe' && name.toLowerCase() !== 'masterservice.exe')
-            .sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' }));
-        if (candidates.length !== 1) {
-            throw new Error(`Unable to resolve installed agent executable in ${installDir}`);
-        }
-        installedExe = path.join(installDir, candidates[0]);
-    }
 
     return {
         installDir,
@@ -232,15 +228,7 @@ function stopService(runCommand, serviceName) {
     if (record.exitCode !== 0 && !/service has not been started/i.test(record.stdout) && !/does not exist/i.test(record.stdout + record.stderr)) {
         throw new Error(`stop service failed: ${trimText(record.stdout)} ${trimText(record.stderr)}`);
     }
-    waitForServiceState(runCommand, serviceName, 'STOPPED', 30000);
-}
-
-function killPid(pid) {
-    if (!pid || pid <= 0) { return; }
-    childProcess.spawnSync('taskkill', ['/PID', String(pid), '/F', '/T'], {
-        windowsHide: true,
-        encoding: 'utf8'
-    });
+    assert(waitForServiceState(runCommand, serviceName, 'STOPPED', 30000), 'service did not stop before partial-state mutation');
 }
 
 function removeFileIfPresent(filePath) {
@@ -254,9 +242,7 @@ function ensurePartialArtifacts(installedPaths, scenarioDir) {
     removeFileIfPresent(installedPaths.installedMsh);
 
     ensureDir(installedPaths.stageDir);
-    ensureDir(installedPaths.backupDir);
     writeText(path.join(installedPaths.stageDir, 'stale-stage.txt'), `stale-stage ${new Date().toISOString()}\n`);
-    writeText(path.join(installedPaths.backupDir, 'stale-backup.txt'), `stale-backup ${new Date().toISOString()}\n`);
     writeText(path.join(scenarioDir, 'mutation.txt'), [
         `CONF_REMOVED=${!fs.existsSync(installedPaths.installedConf)}`,
         `MSH_REMOVED=${!fs.existsSync(installedPaths.installedMsh)}`,
@@ -265,26 +251,44 @@ function ensurePartialArtifacts(installedPaths, scenarioDir) {
     ].join('\n') + '\n');
 }
 
-function corruptServiceDll(runCommand, serviceName) {
-    const key = `HKLM\\SYSTEM\\CurrentControlSet\\Services\\${serviceName}\\Parameters`;
-    const bogusPath = 'C:\\Broken\\missing-diagsvc.dll';
-    const record = runCommand('corrupt-service-dll', 'reg', ['add', key, '/v', 'ServiceDll', '/t', 'REG_EXPAND_SZ', '/d', bogusPath, '/f'], {
-        timeoutMs: 30000
-    });
-    ensureSuccess(record, 'corrupt service dll');
-    return bogusPath;
+function readServiceImage(runCommand, serviceName) {
+    const record = runCommand('query-service-image', 'reg', ['query', `HKLM\\SYSTEM\\CurrentControlSet\\Services\\${serviceName}`, '/v', 'ImagePath']);
+    ensureSuccess(record, 'read original service ImagePath');
+    const match = /ImagePath\s+(REG_SZ|REG_EXPAND_SZ)\s+([^\r\n]+)/i.exec(record.stdout);
+    if (!match) { throw new Error('Unable to retain original ImagePath type and value'); }
+    return { type: match[1], value: match[2].trim() };
 }
 
-function spawnStrayLockProcess(installedExe) {
-    const child = childProcess.spawn(installedExe, ['run'], {
-        cwd: path.dirname(installedExe),
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true
-    });
-    child.unref();
-    sleepMs(1500);
-    return child.pid;
+function assertRejectedUnknownState(runCommand, serviceName, installedPaths, runnerExe, scenarioDir) {
+    const image = readServiceImage(runCommand, serviceName);
+    const files = [installedPaths.installedExe, installedPaths.installedDll, installedPaths.installedConf, installedPaths.installedMsh, installedPaths.installedExe.replace(/\.exe$/i, '.db')];
+    const hashes = files.map(file => fs.existsSync(file) ? hashFile(file) : null);
+    const reject = label => {
+        const result = runCommand(label, runnerExe, ['-fullinstall'], { timeoutMs: 600000 });
+        writeCommandArtifacts(scenarioDir, label, result);
+        assert(!result.error && result.exitCode !== 0, `${label}: ambiguous state must fail closed`);
+        files.forEach((file, index) => assert((fs.existsSync(file) ? hashFile(file) : null) === hashes[index], `${label}: incumbent file changed: ${file}`));
+        assert(waitForServiceState(runCommand, serviceName, 'STOPPED', 5000), `${label}: stopped incumbent was started`);
+    };
+    const bogus = `"${lifecycleRunner.getSystemRundll32Path()}" "C:\\Broken\\missing.dll",MeshServiceHostW`;
+    ensureSuccess(runCommand('corrupt-service-image', 'sc', ['config', serviceName, 'binPath=', bogus]), 'corrupt ImagePath');
+    try {
+        reject('reject-unknown-image');
+        assert(readServiceImage(runCommand, serviceName).value === bogus, 'rejected install rewrote unknown ImagePath');
+    } finally {
+        ensureSuccess(runCommand('restore-service-image-scm', 'sc', ['config', serviceName, 'binPath=', image.value]), 'restore original SCM ImagePath');
+        ensureSuccess(runCommand('restore-service-image-type', 'reg', ['add', `HKLM\\SYSTEM\\CurrentControlSet\\Services\\${serviceName}`, '/v', 'ImagePath', '/t', image.type, '/d', image.value, '/f']), 'restore original ImagePath metadata');
+    }
+    const sentinel = path.join(installedPaths.backupDir, 'fixture-retained-backup.txt');
+    ensureDir(installedPaths.backupDir);
+    fs.writeFileSync(sentinel, 'operator recovery evidence', { flag: 'wx' });
+    try {
+        reject('reject-unrecognized-backup');
+        assert(fs.readFileSync(sentinel, 'utf8') === 'operator recovery evidence', 'rejected install destroyed retained evidence');
+    } finally {
+        fs.unlinkSync(sentinel); // Only this fixture's own evidence is removed.
+        if (fs.readdirSync(installedPaths.backupDir).length === 0) { fs.rmdirSync(installedPaths.backupDir); }
+    }
 }
 
 function assert(condition, message) {
@@ -293,19 +297,15 @@ function assert(condition, message) {
     }
 }
 
-function mutatePartialState(runCommand, serviceName, installedPaths, scenarioDir) {
+function mutatePartialState(runCommand, serviceName, installedPaths, scenarioDir, runnerExe) {
     stopService(runCommand, serviceName);
-    const strayPid = spawnStrayLockProcess(installedPaths.installedExe);
-    const bogusServiceDll = corruptServiceDll(runCommand, serviceName);
+    assertRejectedUnknownState(runCommand, serviceName, installedPaths, runnerExe, scenarioDir);
     ensurePartialArtifacts(installedPaths, scenarioDir);
-    writeJson(path.join(scenarioDir, 'partial_state.json'), {
-        generatedUtc: new Date().toISOString(),
-        serviceName,
-        bogusServiceDll,
-        strayPid,
-        installedPaths
-    });
-    return { strayPid, bogusServiceDll };
+    ensureSuccess(runCommand('disable-service-start', 'sc', ['config', serviceName, 'start=', 'disabled']), 'disable service start');
+    ensureSuccess(runCommand('invalidate-service-hash', 'reg', ['add', `HKLM\\SYSTEM\\CurrentControlSet\\Services\\${serviceName}\\Parameters`, '/v', 'ServiceDllHash', '/t', 'REG_SZ', '/d', 'invalid-fixture-hash', '/f']), 'invalidate DLL hash');
+    const mutation = { generatedUtc: new Date().toISOString(), serviceName, installedPaths, rejectedUnknownImage: true, retainedBackupPreserved: true };
+    writeJson(path.join(scenarioDir, 'partial_state.json'), mutation);
+    return mutation;
 }
 
 function validateRecoveredState(validationRecord, installedPaths, label) {
@@ -315,7 +315,7 @@ function validateRecoveredState(validationRecord, installedPaths, label) {
     assert(fs.existsSync(installedPaths.installedConf), `${label}: conf sidecar was not restored`);
     assert(fs.existsSync(installedPaths.installedMsh), `${label}: msh sidecar was not restored`);
     assert(!fs.existsSync(path.join(installedPaths.stageDir, 'stale-stage.txt')), `${label}: stale update-stage artifact was not removed`);
-    assert(!fs.existsSync(path.join(installedPaths.backupDir, 'stale-backup.txt')), `${label}: stale update-backup artifact was not removed`);
+    assert(!fs.existsSync(path.join(installedPaths.backupDir, 'fixture-retained-backup.txt')), `${label}: fixture recovery sentinel unexpectedly remains`);
 }
 
 function main() {
@@ -372,31 +372,27 @@ function main() {
     writeCommandArtifacts(evidenceRoot, 'initial-validate-install', validateInstall);
     ensureSuccess(validateInstall, 'initial validate-install');
 
-    const initialStatus = runCommand('initial-svchost-status', runner.exe, ['-svchost-status'], {
+    const initialStatus = runCommand('initial-runtime-status', runner.exe, ['-validate-install'], {
         cwd: path.dirname(runner.exe),
         timeoutMs: 180000
     });
-    writeCommandArtifacts(evidenceRoot, 'initial-svchost-status', initialStatus);
-    ensureSuccess(initialStatus, 'initial svchost status');
+    writeCommandArtifacts(evidenceRoot, 'initial-runtime-status', initialStatus);
+    ensureSuccess(initialStatus, 'initial runtime validation');
 
     let installedPaths = resolveInstalledPathsFromStatus(initialStatus);
     summary.initialInstalledPaths = installedPaths;
 
     const updateMutationDir = path.join(evidenceRoot, 'update-partial-state');
     ensureDir(updateMutationDir);
-    const updateMutation = mutatePartialState(runCommand, summary.serviceName, installedPaths, updateMutationDir);
+    const updateMutation = mutatePartialState(runCommand, summary.serviceName, installedPaths, updateMutationDir, runner.exe);
     summary.updateMutation = updateMutation;
 
-    try {
-        const fullUpdate = runCommand('partial-state-update', runner.exe, ['-fullupdate', `--update-source=${updateSource.exe}`], {
-            cwd: path.dirname(runner.exe),
-            timeoutMs: 600000
-        });
-        writeCommandArtifacts(evidenceRoot, 'partial-state-update', fullUpdate);
-        ensureSuccess(fullUpdate, 'update over partial state');
-    } finally {
-        killPid(updateMutation.strayPid);
-    }
+    const fullUpdate = runCommand('partial-state-update', runner.exe, ['-fullupdate', `--update-source=${updateSource.exe}`], {
+        cwd: path.dirname(runner.exe),
+        timeoutMs: 600000
+    });
+    writeCommandArtifacts(evidenceRoot, 'partial-state-update', fullUpdate);
+    ensureSuccess(fullUpdate, 'update over partial state');
 
     const validateUpdate = runCommand('validate-update', runner.exe, ['-validate-update'], {
         cwd: path.dirname(runner.exe),
@@ -405,30 +401,26 @@ function main() {
     writeCommandArtifacts(evidenceRoot, 'validate-update', validateUpdate);
     validateRecoveredState(validateUpdate, installedPaths, 'validate-update');
 
-    const updateStatus = runCommand('post-update-svchost-status', runner.exe, ['-svchost-status'], {
+    const updateStatus = runCommand('post-update-runtime-status', runner.exe, ['-validate-install'], {
         cwd: path.dirname(runner.exe),
         timeoutMs: 180000
     });
-    writeCommandArtifacts(evidenceRoot, 'post-update-svchost-status', updateStatus);
-    ensureSuccess(updateStatus, 'post-update svchost status');
+    writeCommandArtifacts(evidenceRoot, 'post-update-runtime-status', updateStatus);
+    ensureSuccess(updateStatus, 'post-update runtime validation');
     installedPaths = resolveInstalledPathsFromStatus(updateStatus);
     summary.postUpdateInstalledPaths = installedPaths;
 
     const repairMutationDir = path.join(evidenceRoot, 'repair-partial-state');
     ensureDir(repairMutationDir);
-    const repairMutation = mutatePartialState(runCommand, summary.serviceName, installedPaths, repairMutationDir);
+    const repairMutation = mutatePartialState(runCommand, summary.serviceName, installedPaths, repairMutationDir, runner.exe);
     summary.repairMutation = repairMutation;
 
-    try {
-        const repairInstall = runCommand('partial-state-repair-install', runner.exe, ['-fullinstall'], {
-            cwd: path.dirname(runner.exe),
-            timeoutMs: 600000
-        });
-        writeCommandArtifacts(evidenceRoot, 'partial-state-repair-install', repairInstall);
-        ensureSuccess(repairInstall, 'repair install over partial state');
-    } finally {
-        killPid(repairMutation.strayPid);
-    }
+    const repairInstall = runCommand('partial-state-repair-install', runner.exe, ['-fullinstall'], {
+        cwd: path.dirname(runner.exe),
+        timeoutMs: 600000
+    });
+    writeCommandArtifacts(evidenceRoot, 'partial-state-repair-install', repairInstall);
+    ensureSuccess(repairInstall, 'repair install over partial state');
 
     const validateRepair = runCommand('validate-repair-install', runner.exe, ['-validate-install'], {
         cwd: path.dirname(runner.exe),

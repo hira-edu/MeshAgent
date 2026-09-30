@@ -309,7 +309,7 @@ async function main() {
     const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveKvmProbeDllPath(exePath, args);
     const rundll32Path = resolveSystemRundll32Path(args);
-    const logPath = args.log ? path.resolve(args.log) : path.join(path.dirname(exePath), 'svchost-debug.log');
+    const logPath = args.log ? path.resolve(args.log) : path.join(path.dirname(exePath), 'service-host-debug.log');
 
     assert(fs.existsSync(exePath), `probe executable missing at ${exePath}`);
     assert(fs.existsSync(dllPath), `probe DLL missing at ${dllPath}`);
@@ -370,7 +370,7 @@ async function main() {
         writeText(path.join(evidenceDir, 'auto-schtasks-run-stdout.txt'), report.probes.auto.runTaskStdout);
         writeText(path.join(evidenceDir, 'auto-schtasks-run-stderr.txt'), report.probes.auto.runTaskStderr);
         if (Array.isArray(report.logTail)) {
-            writeText(path.join(evidenceDir, 'svchost-debug-tail.txt'), report.logTail.join('\n') + '\n');
+            writeText(path.join(evidenceDir, 'service-host-debug-tail.txt'), report.logTail.join('\n') + '\n');
         }
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,

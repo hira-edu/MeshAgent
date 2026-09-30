@@ -1153,8 +1153,8 @@ static void MeshAgent_CopyEvidenceSnapshot(const wchar_t* phaseLabel)
 
 	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\controlchannel-debug.log", installDir);
 	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"controlchannel-debug.log");
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\svchost-debug.log", installDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"svchost-debug.log");
+	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\service-host-debug.log", installDir);
+	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"service-host-debug.log");
 	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\" SERVICE_FALLBACK_LOG_NAME, installDir);
 	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, SERVICE_FALLBACK_LOG_NAME);
 }
@@ -4282,7 +4282,7 @@ duk_ret_t ILibDuktape_MeshAgent_Disconnect(duk_context *ctx)
 	return(0);
 }
 
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)
 {
 	MeshAgentHostContainer *agent;
@@ -4433,7 +4433,7 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 		ILibDuktape_CreateEventWithGetter(ctx, "controlChannelDebug", ILibDuktape_MeshAgent_controlChannelDebug);
 		ILibDuktape_CreateInstanceMethod(ctx, "DataPing", ILibDuktape_MeshAgent_DataPing, DUK_VARARGS);
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ARCHID", MESH_AGENTID);
-	#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
+	#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 4);
 		duk_push_true(ctx);
 	#else
@@ -5337,9 +5337,9 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 			haveUpdateActivationHash = 1;
 		}
 
-#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
+#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		// Launch the downloaded update through the rundll32 lifecycle host.
-		ILIBLOGMESSAGEX("SelfUpdate -> ServiceHost mode: launching rundll32 lifecycle update activation...");
+		ILIBLOGMESSAGEX("SelfUpdate -> Launching rundll32 lifecycle update activation...");
 
 		DWORD lifecycleExitCode = ERROR_SUCCESS;
 		if (MeshRundll32_LaunchLifecycleHostW(
@@ -5371,7 +5371,7 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 		(void)w_updatefile;
 		if (haveUpdateActivationHash != 0) { MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, updateActivationHash); }
 		MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
-		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires rundll32/svchost mode; legacy command-shell update path disabled.");
+		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires the rundll32 lifecycle runtime; legacy command-shell update path disabled.");
 		util_deletefile(updatefile); // Fail closed: this build cannot apply the staged update, so do not leave it on disk
 		MeshServer_ReportUpdateFailure(agent);
 		return;
@@ -6194,8 +6194,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		case MeshCommand_AgentUpdate:
 		{
 			if (agent->disableUpdate != 0) { break; }	 // Ignore if updates are disabled
-#if defined(WIN32) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
-			// In svchost mode, check if an update is already pending reboot
+#if defined(WIN32)
+			// In the DLL runtime, check if an update is already pending reboot
 			{
 				char pendingBuf[8] = {0};
 				int pendingLen = ILibSimpleDataStore_Get(agent->masterDb, "PendingUpdate", pendingBuf, sizeof(pendingBuf));
@@ -8093,7 +8093,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		}
 	}
 
-#if defined(WIN32) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
+#if defined(WIN32)
 	// Clear the PendingUpdate marker after startup - this means either the update was applied on reboot
 	// or the marker is stale. Either way, allow new updates to be processed.
 	if (agentHost->masterDb != NULL)
@@ -8205,7 +8205,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	}
 	else if (installFlag != 0)
 	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		printf("Direct Windows service install/uninstall switches are disabled. Use the rundll32 lifecycle manifest path.\n");
 		exit(ERROR_NOT_SUPPORTED);
 #endif
@@ -8335,12 +8335,19 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	duk_context *tmpCtx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, NULL, agentHost->exePath, NULL, NULL, NULL);
 	duk_peval_string_noresult(tmpCtx, "require('linux-pathfix')();");
 	int msnlen;
-	char *tmpString;
 
 	agentHost->platformType = MeshAgent_Posix_PlatformTypes_UNKNOWN;
 	agentHost->JSRunningAsService = 0;
 	agentHost->JSRunningWithAdmin = 0;
 
+#ifdef WIN32
+	if (agentHost->serviceReserved != 0 && agentHost->meshServiceName != NULL && agentHost->meshServiceName[0] != 0)
+	{
+		// SCM supplied the running service key; stored branding cannot rename it.
+		MeshAgent_ControlChannelDebugLog(agentHost, "ServiceName supplied by SCM [%s]", agentHost->meshServiceName);
+	}
+	else
+#endif
 	if ((msnlen = ILibSimpleDataStore_Get(agentHost->masterDb, "meshServiceName", NULL, 0)) != 0)
 	{
 		if (agentHost->meshServiceName != NULL) { ILibMemory_Free(agentHost->meshServiceName); agentHost->meshServiceName = NULL; }
@@ -8382,55 +8389,35 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		agentHost->displayName = ILibString_Copy("MeshCentral", 0);
 	}
 
-	duk_push_sprintf(tmpCtx, "require('service-manager').manager.getService('%s').isMe();", agentHost->meshServiceName);
-	tmpString = (char*)duk_get_string(tmpCtx, -1);
-
 	if (duk_peval_string(tmpCtx, "(function foo() { var f = require('service-manager').manager.getServiceType(); switch(f){case 'procd': return(7); case 'windows': return(10); case 'launchd': return(3); case 'freebsd': return(5); case 'systemd': return(1); case 'init': return(2); case 'upstart': return(4); default: return(0);}})()") == 0)
 	{
 		agentHost->platformType = (MeshAgent_Posix_PlatformTypes)duk_get_int(tmpCtx, -1);
 	}
-	if (duk_peval_string(tmpCtx, tmpString) == 0)
+#ifdef WIN32
+	if (agentHost->serviceReserved != 0)
 	{
-		agentHost->JSRunningAsService = duk_get_boolean(tmpCtx, -1);
+		agentHost->JSRunningAsService = 1;
+	}
+	else
+#endif
+	if (duk_peval_string(tmpCtx, "(function(name) { return require('service-manager').manager.getService(name).isMe(); })") == 0)
+	{
+		duk_push_string(tmpCtx, agentHost->meshServiceName);
+		if (duk_pcall(tmpCtx, 1) == 0) { agentHost->JSRunningAsService = duk_get_boolean(tmpCtx, -1); }
 	}
 	if (duk_peval_string(tmpCtx, "require('user-sessions').isRoot();") == 0)
 	{
 		agentHost->JSRunningWithAdmin = duk_get_boolean(tmpCtx, -1);
 	}
 
-	if (agentHost->JSRunningAsService == 0 && agentHost->serviceReserved != 0)
-	{
-		// We are definitely running as a service, but the check failed. We must be configured with the wrong service name
-
-#ifdef WIN32
-		// First, let's enumerate 'LocalMachine/SOFTWARE/Open Source' to see if we can find the correct service name
-		if (duk_peval_string(tmpCtx, "require('util-service-check')()") == 0)
-		{
-			if (!duk_is_null_or_undefined(tmpCtx, -1))
-			{
-				duk_size_t actualnameLen;
-				char *actualname = (char*)duk_safe_to_lstring(tmpCtx, -1, &actualnameLen);
-				ILIBLOGMESSAGEX("Service Name Conflict: Configured [%s] but is actually [%s]", agentHost->meshServiceName, actualname);
-
-				ILibMemory_Free(agentHost->meshServiceName);
-				agentHost->meshServiceName = ILibMemory_SmartAllocate(actualnameLen + 1);
-				memcpy_s(agentHost->meshServiceName, ILibMemory_Size(agentHost->meshServiceName), actualname, actualnameLen);
-				agentHost->meshServiceName[actualnameLen] = 0;
-				MeshAgent_ControlChannelDebugLog(agentHost, "ServiceName resolved via util-service-check [%s]", agentHost->meshServiceName);
-				agentHost->JSRunningAsService = 1;
-
-				if (agentHost->masterDb != NULL && ILibSimpleDataStore_IsCacheOnly(agentHost->masterDb) == 0)
-				{
-					ILibSimpleDataStore_PutEx(agentHost->masterDb, "meshServiceName", (int)strlen("meshServiceName"), agentHost->meshServiceName, (int)actualnameLen + 1);
-					MeshAgent_ControlChannelDebugLog(agentHost, "Updated meshServiceName in datastore to [%s]", agentHost->meshServiceName);
-				}
-			}
-		}
-#endif
-	}
 #if defined(_WINSERVICE)
-	duk_push_sprintf(tmpCtx, "require('_agentNodeId').checkResetNodeId('%s');", agentHost->meshServiceName);
-	if (duk_peval(tmpCtx) == 0)
+	duk_int_t resetCheck = duk_peval_string(tmpCtx, "(function(name) { return require('_agentNodeId').checkResetNodeId(name); })");
+	if (resetCheck == 0)
+	{
+		duk_push_string(tmpCtx, agentHost->meshServiceName);
+		resetCheck = duk_pcall(tmpCtx, 1);
+	}
+	if (resetCheck == 0)
 	{
 		if (duk_is_boolean(tmpCtx, -1) && duk_get_boolean(tmpCtx, -1) != 0)
 		{
@@ -8710,10 +8697,13 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	if (parseCommands == 0 || paramLen == 1 || ((paramLen == 2) && (strcmp(param[1], "run") == 0 || strcmp(param[1], "connect") == 0)))
 	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
-		// Service-only policy for Service/svchost deployments is enforced by install/runtime configuration.
-		// Do not hard-block console-mode execution here: KVM/WebRTC helpers and IPC tooling may spawn
-		// auxiliary instances that are not running as a Windows service.
+#ifdef WIN32
+		if (agentHost->serviceReserved == 0)
+		{
+			fprintf(stderr, "Windows agent connections require the rundll32 SCM runtime.\n");
+			agentHost->exitCode = ERROR_NOT_SUPPORTED;
+			return 0;
+		}
 #endif
 #ifdef WIN32
 		char* filePath = MeshAgent_MakeAbsolutePath(agentHost->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX);

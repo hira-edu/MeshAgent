@@ -158,15 +158,9 @@ function getWindowsLifecycleServiceName(parms)
 function readWindowsInstalledServiceDllPath(parms)
 {
     var serviceName = getWindowsLifecycleServiceName(parms);
-    var reg, rawPath;
     if (serviceName == null || serviceName.length == 0) { return (null); }
-    try
-    {
-        reg = require('win-registry');
-        rawPath = reg.QueryKey(reg.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName + '\\Parameters', 'ServiceDll');
-    }
+    try { return require('win-system-paths').installedServiceRuntimeDll(serviceName); }
     catch (e) { return (null); }
-    return (expandWindowsEnvironmentStrings(rawPath));
 }
 function readPeUInt16(fd, offset)
 {

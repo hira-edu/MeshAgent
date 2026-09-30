@@ -10,11 +10,13 @@ const checks = {
     helperSweepsLoadedServiceDll: source.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths->dllPath);'),
     helperSweepsAgentProcess: source.includes('ServiceDeploy_TerminateProcessesByPath(paths->exePath);'),
     helperDoesNotKillSharedServiceHostByPath: !source.includes('ServiceDeploy_TerminateProcessesByPath(hostExePath);'),
+    sharedSnapshotSkipsDllProcessSweep: /if \(\(!tx->originalBinding \|\| tx->originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS\) && paths->dllPath\[0\][^\n]+\)\s*\{\s*ServiceDeploy_TerminateProcessesByLoadedModulePath\(paths->dllPath\);/.test(source),
+    sharedSnapshotSkipsExeProcessSweep: /if \(\(!tx->originalBinding \|\| tx->originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS\) && paths->exePath\[0\][^\n]+\)\s*\{\s*ServiceDeploy_TerminateProcessesByPath\(paths->exePath\);/.test(source),
     helperOpensExclusiveHandle: source.includes('CreateFileW(targetPath, DELETE | GENERIC_WRITE, 0, NULL, OPEN_EXISTING'),
-    commitQuiescesExe: source.includes('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE]")'),
-    commitQuiescesDll: source.includes('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE]")'),
-    rollbackQuiescesExe: source.includes('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE][ROLLBACK]")'),
-    rollbackQuiescesDll: source.includes('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE][ROLLBACK]")')
+    commitQuiescesExe: source.includes('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, tx, paths->exePath, 60000, L"[UPDATE]")'),
+    commitQuiescesDll: source.includes('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, tx, paths->dllPath, 60000, L"[UPDATE]")'),
+    rollbackQuiescesExe: source.includes('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, tx, paths->exePath, 60000, L"[UPDATE][ROLLBACK]")'),
+    rollbackQuiescesDll: source.includes('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, tx, paths->dllPath, 60000, L"[UPDATE][ROLLBACK]")')
 };
 
 const success = Object.values(checks).every(Boolean);

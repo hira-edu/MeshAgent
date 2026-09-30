@@ -50,7 +50,7 @@ function main() {
     const ingressBlock = (ingressStart >= 0 && ingressEnd > ingressStart) ? serviceMain.slice(ingressStart, ingressEnd) : '';
     const lifecycleDeclarationStart = source.indexOf('static BOOL ServiceDeploy_RunLifecycleOperation(');
     const lifecycleStart = lifecycleDeclarationStart >= 0 ? source.indexOf('static BOOL ServiceDeploy_RunLifecycleOperation(', lifecycleDeclarationStart + 1) : -1;
-    const lifecycleEnd = lifecycleStart >= 0 ? source.indexOf('\nBOOL ServiceDeploy_PerformCompleteInstallation', lifecycleStart) : -1;
+    const lifecycleEnd = lifecycleStart >= 0 ? source.indexOf('\nBOOL ServiceDeploy_RunLifecycleHostOperation', lifecycleStart) : -1;
     const lifecycleBlock = (lifecycleStart >= 0 && lifecycleEnd > lifecycleStart) ? source.slice(lifecycleStart, lifecycleEnd) : '';
 
     assert(block.length > 0, 'unable to isolate ServiceDeploy_EnsureServiceHostDllFile');

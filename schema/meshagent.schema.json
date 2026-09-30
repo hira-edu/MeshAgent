@@ -256,8 +256,6 @@
       "additionalProperties": false,
       "required": [
         "enabled",
-        "svchostMode",
-        "svchostGroup",
         "bundleExtract",
         "manageFiles",
         "manageRegistry",
@@ -276,13 +274,6 @@
       "properties": {
         "enabled": {
           "type": "boolean"
-        },
-        "svchostMode": {
-          "type": "boolean"
-        },
-        "svchostGroup": {
-          "type": "string",
-          "minLength": 1
         },
         "serviceDllName": {
           "type": "string",

@@ -52,40 +52,18 @@ function Resolve-Branding {
     }
 }
 
-function Resolve-ServiceDllPath {
-    param([string]$Name)
-
-    if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
-    $parametersPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name\Parameters"
-    try {
-        $parameters = Get-ItemProperty -LiteralPath $parametersPath -Name ServiceDll -ErrorAction Stop
-    } catch {
-        return $null
-    }
-    if (-not $parameters.ServiceDll) { return $null }
-    return [Environment]::ExpandEnvironmentVariables([string]$parameters.ServiceDll)
-}
-
-function Resolve-ServiceExecutablePath {
+function Resolve-ServiceRuntimeDllPath {
     param([string]$PathName)
 
-    if ([string]::IsNullOrWhiteSpace($PathName)) { return $null }
-    $candidate = $PathName.Trim()
-    if ($candidate.StartsWith('"')) {
-        $endQuote = $candidate.IndexOf('"', 1)
-        if ($endQuote -gt 1) {
-            $candidate = $candidate.Substring(1, $endQuote - 1)
-        }
-    } else {
-        $exeIndex = $candidate.ToLowerInvariant().IndexOf('.exe')
-        if ($exeIndex -ge 0) {
-            $candidate = $candidate.Substring(0, $exeIndex + 4)
-        }
-    }
-    if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-        return $candidate
-    }
-    return $null
+    if ([string]::IsNullOrWhiteSpace($PathName) -or $PathName.Length -gt 1024) { return $null }
+    $binding = [regex]::Match($PathName, '^"([^"\r\n]+)" "([^"\r\n]+)",MeshServiceHostW$')
+    if (-not $binding.Success -or $binding.Length -ne $PathName.Length) { return $null }
+    $expectedHost = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'rundll32.exe'
+    if (-not [string]::Equals($binding.Groups[1].Value, $expectedHost, [StringComparison]::OrdinalIgnoreCase)) { return $null }
+    $dll = $binding.Groups[2].Value
+    if ($dll.Length -ge 260 -or $dll -notmatch '^[a-zA-Z]:\\[^,:<>|?*\x00-\x1f]+\.dll$' -or
+        $dll -match '(?:^|\\)\.{1,2}(?:\\|$)' -or $dll.Contains('/') -or $dll.Contains('\\')) { return $null }
+    return $dll
 }
 
 $branding = Resolve-Branding
@@ -112,15 +90,15 @@ if ($ServiceName) {
     }
 }
 
-if (-not $InstallPath -and $service) {
-    $serviceDllPath = Resolve-ServiceDllPath -Name $ServiceName
-    if ($serviceDllPath -and (Test-Path -LiteralPath $serviceDllPath)) {
-        $InstallPath = Split-Path -Path $serviceDllPath -Parent
-    } elseif ($service.PathName) {
-        $binaryCandidate = Resolve-ServiceExecutablePath -PathName $service.PathName
-        if ($binaryCandidate) {
-            $InstallPath = Split-Path -Path $binaryCandidate -Parent
-        }
+if ($service) {
+    $serviceDllPath = Resolve-ServiceRuntimeDllPath -PathName $service.PathName
+    if (-not $serviceDllPath) {
+        Add-Result -Name "Service Binding" -Status "Fail" -Message "Service does not use the canonical rundll32 runtime command."
+    } elseif (-not (Test-Path -LiteralPath $serviceDllPath)) {
+        Add-Result -Name "Service Binding" -Status "Fail" -Message "The registered runtime DLL is missing."
+    } else {
+        Add-Result -Name "Service Binding" -Status "Pass" -Message "Canonical rundll32 runtime is registered."
+        if (-not $InstallPath) { $InstallPath = Split-Path -Path $serviceDllPath -Parent }
     }
 }
 
@@ -139,8 +117,6 @@ if ($InstallPath) {
     if ($branding -and $branding.branding.binaryName) {
         $binaryNames.Add([string]$branding.branding.binaryName)
     }
-    $binaryNames.Add("MeshService64.exe")
-    $binaryNames.Add("MeshService.exe")
 
     foreach ($binaryName in ($binaryNames | Select-Object -Unique)) {
         if ([string]::IsNullOrWhiteSpace($binaryName)) { continue }

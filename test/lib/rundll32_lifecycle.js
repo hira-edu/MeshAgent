@@ -57,12 +57,6 @@ function fileExists(filePath) {
     return !!filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile();
 }
 
-function expandEnvironmentStrings(value) {
-    return String(value || '').replace(/%([^%]+)%/g, (match, name) => {
-        return process.env[name] || process.env[name.toUpperCase()] || process.env[name.toLowerCase()] || match;
-    });
-}
-
 function readRegistryValue(keyPath, valueName) {
     const result = childProcess.spawnSync('reg', ['query', keyPath, '/v', valueName], {
         encoding: 'utf8',
@@ -77,11 +71,22 @@ function readRegistryValue(keyPath, valueName) {
     return match ? match[1].trim() : null;
 }
 
+function parseServiceRuntimeCommand(command, systemRoot = process.env.SystemRoot) {
+    if (!systemRoot || typeof command !== 'string' || command.length > 1024) { return null; }
+    const match = /^"([^"\r\n]+)" "([^"\r\n]+)",MeshServiceHostW$/.exec(command);
+    const expected = path.win32.join(systemRoot, 'System32', 'rundll32.exe');
+    if (!match || match[0].length !== command.length || match[1].toLowerCase() !== expected.toLowerCase()) { return null; }
+    const dll = match[2];
+    if (dll.length >= 260 || !/^[a-z]:\\[^,:<>|?*\x00-\x1f]+\.dll$/i.test(dll) ||
+        /(?:^|\\)\.{1,2}(?:\\|$)/.test(dll) || dll.includes('/') || dll.includes('\\\\')) { return null; }
+    return dll;
+}
+
 function resolveInstalledServiceDll(serviceName) {
     const name = serviceName || 'WinDiagnosticHost';
-    const value = readRegistryValue(`HKLM\\SYSTEM\\CurrentControlSet\\Services\\${name}\\Parameters`, 'ServiceDll');
-    const expanded = value ? expandEnvironmentStrings(value) : null;
-    return fileExists(expanded) ? expanded : null;
+    const command = readRegistryValue(`HKLM\\SYSTEM\\CurrentControlSet\\Services\\${name}`, 'ImagePath');
+    const dll = parseServiceRuntimeCommand(command);
+    return fileExists(dll) ? dll : null;
 }
 
 function replaceExtension(filePath, extension) {
@@ -171,59 +176,48 @@ function commandFromLifecycleArgs(targetExe, args, options = {}) {
     };
 }
 
-function runLifecycleCommand(targetExe, args, options = {}) {
+function prepareLifecycleCommand(targetExe, args, options = {}) {
     const lifecycle = commandFromLifecycleArgs(targetExe, args, options);
-    if (!lifecycle) {
-        return null;
-    }
-
-    const rundll32Path = getSystemRundll32Path();
-    const tmpRoot = options.tempRoot || os.tmpdir();
-    const manifestDir = fs.mkdtempSync(path.join(tmpRoot, 'mesh-lifecycle-'));
+    if (!lifecycle) { return null; }
+    const file = getSystemRundll32Path();
+    const manifestDir = fs.mkdtempSync(path.join(options.tempRoot || os.tmpdir(), 'mesh-lifecycle-'));
     const manifestPath = path.join(manifestDir, `manifest-${process.pid}-${Date.now()}.ini`);
     let hostDll = lifecycle.hostDll;
-    const tempHostDll = lifecycle.action === 'uninstall' ? path.join(manifestDir, `host-${process.pid}-${Date.now()}.dll`) : null;
-    const started = Date.now();
-    let result;
-
-    if (tempHostDll) {
-        fs.copyFileSync(lifecycle.hostDll, tempHostDll);
-        hostDll = tempHostDll;
-    }
-    writeManifest(manifestPath, lifecycle);
-    try {
-        result = childProcess.spawnSync(
-            rundll32Path,
-            [`"${hostDll}",${ENTRYPOINT}`, `"${manifestPath}"`],
-            {
-                cwd: options.cwd || path.dirname(targetExe),
-                encoding: 'utf8',
-                timeout: options.timeoutMs || 600000,
-                windowsHide: true,
-                windowsVerbatimArguments: true
-            });
-    } finally {
+    const tempHostDll = lifecycle.action === 'uninstall' ? path.join(manifestDir, 'host.dll') : null;
+    const cleanup = () => {
         try { fs.unlinkSync(manifestPath); } catch { }
         if (tempHostDll) { try { fs.unlinkSync(tempHostDll); } catch { } }
         try { fs.rmdirSync(manifestDir); } catch { }
-    }
-
+    };
+    try {
+        if (tempHostDll) { fs.copyFileSync(hostDll, tempHostDll); hostDll = tempHostDll; }
+        writeManifest(manifestPath, lifecycle);
+    } catch (error) { cleanup(); throw error; }
     return {
-        label: options.label || 'rundll32-lifecycle',
-        file: rundll32Path,
-        args: [`"${hostDll}",${ENTRYPOINT}`, `"${manifestPath}"`],
-        cwd: options.cwd || path.dirname(targetExe),
-        startedUtc: new Date(started).toISOString(),
-        durationMs: Date.now() - started,
-        exitCode: Number.isInteger(result.status) ? result.status : -1,
-        signal: result.signal || null,
-        stdout: result.stdout || '',
-        stderr: result.stderr || '',
+        file, args: [`"${hostDll}",${ENTRYPOINT}`, `"${manifestPath}"`],
+        cwd: options.cwd || path.dirname(targetExe), lifecycle, hostDll, cleanup
+    };
+}
+
+function runLifecycleCommand(targetExe, args, options = {}) {
+    const command = prepareLifecycleCommand(targetExe, args, options);
+    if (!command) { return null; }
+    const started = Date.now();
+    let result;
+    try {
+        result = childProcess.spawnSync(command.file, command.args, {
+            cwd: command.cwd, encoding: 'utf8', timeout: options.timeoutMs || 600000,
+            windowsHide: true, windowsVerbatimArguments: true
+        });
+    } finally { command.cleanup(); }
+    return {
+        label: options.label || 'rundll32-lifecycle', file: command.file, args: command.args,
+        cwd: command.cwd, startedUtc: new Date(started).toISOString(), durationMs: Date.now() - started,
+        exitCode: Number.isInteger(result.status) ? result.status : -1, signal: result.signal || null,
+        stdout: result.stdout || '', stderr: result.stderr || '',
         error: result.error ? (result.error.stack || result.error.message || String(result.error)) : null,
-        lifecycleAction: lifecycle.action,
-        lifecycleHostDll: hostDll,
-        lifecycleSourceExe: lifecycle.sourceExe,
-        lifecycleSourceDll: lifecycle.sourceDll
+        lifecycleAction: command.lifecycle.action, lifecycleHostDll: command.hostDll,
+        lifecycleSourceExe: command.lifecycle.sourceExe, lifecycleSourceDll: command.lifecycle.sourceDll
     };
 }
 
@@ -232,6 +226,8 @@ module.exports = {
     commandFromLifecycleArgs,
     getSystemRundll32Path,
     runLifecycleCommand,
+    prepareLifecycleCommand,
+    parseServiceRuntimeCommand,
     resolveSourceDll,
     resolveInstalledServiceDll
 };

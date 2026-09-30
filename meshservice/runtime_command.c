@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "runtime_core.h"
+#include "rundll32_contract.h"
 #include "service_utils.h"
 
 BOOL Runtime_ExecuteCommand(const char* command, char* output, size_t outputSize)
@@ -73,30 +74,16 @@ BOOL Runtime_LoadRemoteModuleCompat(DWORD processId, const wchar_t* dllPath)
     return FALSE;
 }
 
-/**
- * Check if currently running inside svchost.exe
- */
+/* Only the primary approved callback is the service runtime. Other rundll32
+ * helpers share the executable name but must not acquire service semantics. */
 BOOL Runtime_IsRunningServiceHost(void)
 {
-    WCHAR exePath[MAX_PATH] = {0};
-
-    // Get the path of the current process
-    if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0)
-    {
-        return FALSE;
-    }
-
-    // Extract just the filename
-    WCHAR* exeName = wcsrchr(exePath, L'\\');
-    if (!exeName)
-    {
-        exeName = exePath;
-    }
-    else
-    {
-        exeName++;  // Skip the backslash
-    }
-
-    // Check if we're running as svchost.exe
-    return (_wcsicmp(exeName, L"svchost.exe") == 0);
+    wchar_t executable[MAX_PATH * 4] = {0};
+    wchar_t systemHost[MAX_PATH * 4] = {0};
+    wchar_t serviceDll[MAX_PATH * 4] = {0};
+    DWORD length = GetModuleFileNameW(NULL, executable, _countof(executable));
+    return length > 0 && length < _countof(executable) &&
+        MeshRundll32_GetSystemRundll32PathW(systemHost, _countof(systemHost)) &&
+        _wcsicmp(executable, systemHost) == 0 &&
+        ServiceHost_ParseImagePath(GetCommandLineW(), serviceDll, _countof(serviceDll));
 }

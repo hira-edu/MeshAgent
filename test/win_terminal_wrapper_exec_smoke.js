@@ -57,7 +57,10 @@ async function main() {
             };
         }
         if (request === 'win-system-paths') {
-            return { system32Path: function system32Path(fileName) { return path.join(systemRoot, 'System32', fileName); } };
+            return {
+                system32Path: function system32Path(fileName) { return path.join(systemRoot, 'System32', fileName); },
+                installedServiceRuntimeDll: function installedServiceRuntimeDll() { return dllPath; }
+            };
         }
         return originalLoad.apply(this, arguments);
     };

@@ -102,8 +102,10 @@ function main() {
             serviceMain.includes('SetLastError(openError);') &&
             !serviceMain.includes('case 0:\n\t\tcase 100: // Not installed') &&
             !serviceMain.includes('case 0:\n\t\t\t\tcase 100: // Not installed'),
-        svchostStatusFlushesCompleteJson:
-            serviceMain.includes('MeshService_PrintServiceHostStatusJson(&summary);\n\tfflush(stdout);'),
+        lifecycleValidationFlushesCompleteJson:
+            !serviceMain.includes('MeshService_PrintServiceHostStatusJson(') &&
+            /fflush\(stdout\)[\s\S]*?ExitProcess\(ok \? ERROR_SUCCESS : ERROR_INSTALL_FAILURE\)/.test(
+                contract.slice(contract.indexOf('void CALLBACK MeshLifecycleHostW('), contract.indexOf('void CALLBACK MeshLauncherCleanupW('))),
         installedPayloadGuard:
             serviceMain.includes('static BOOL MeshService_ShouldCleanupLauncherAfterLifecycle') &&
             serviceMain.includes('_wcsicmp(modulePath, paths.exePath) == 0') &&

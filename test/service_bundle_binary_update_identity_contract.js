@@ -101,8 +101,8 @@ function main() {
         '\nstatic BOOL ServiceDeploy_DiscoverCurrentState');
     const runBlock = extractFunction(
         source,
-        'static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig)',
-        '\nBOOL ServiceDeploy_PerformCompleteInstallation');
+        'static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig)',
+        '\nBOOL ServiceDeploy_RunLifecycleHostOperation');
     const sharedImporterBlock = extractFunction(
         agentCoreSource,
         'int MeshAgent_ImportSettingsToDataStore(ILibSimpleDataStore dataStore, char* fileName)',
@@ -236,7 +236,7 @@ function main() {
             normalizedRun.includes('plan.requiresStage = FALSE;') &&
             normalizedRun.includes('plan.requiresServiceStart = FALSE;'),
         updateActionStillUsesUpdateFlow:
-            normalizedRun.includes('ok = ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, TRUE, requireConfig);')
+            normalizedRun.includes('ok = ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, requireConfig);')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

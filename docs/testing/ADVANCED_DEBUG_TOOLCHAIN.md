@@ -54,11 +54,11 @@ Use a dedicated dump directory:
 ```powershell
 $dumpDir = Join-Path $runDir 'dumps'
 New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
-procdump.exe -accepteula -ma -e -w svchost.exe $dumpDir
+procdump.exe -accepteula -ma -e -w rundll32.exe $dumpDir
 procdump.exe -accepteula -ma -h -w MeshService-2022.exe $dumpDir
 ```
 
-Scope an `svchost.exe` capture to the affected service/PID as soon as the PID
+Scope a `rundll32.exe` capture to the affected service/PID as soon as the PID
 is known; a global host capture can collect unrelated system data.
 
 ## Network capture

@@ -11,7 +11,7 @@ MeshAgent's Windows package build consumes two independent inputs:
 Local credentials and environment-specific identities must stay in ignored
 files.
 
-Branding remains required even when lifecycle helpers run through `rundll32`:
+Branding is required for the `rundll32` service and lifecycle hosts:
 the installer uses the product identity and paths, and `deploy.py` derives the
 default installed service-DLL and lifecycle-state paths from the active
 branding configuration when it performs remote native update activation.
@@ -43,7 +43,7 @@ The schema is `schema/meshagent.schema.json`. Major sections are:
 | `security` | Certificate validation, signing enforcement, and signer allow-list |
 | `provisioning` | Mesh name/type, mesh ID, server ID, URL, and install flags |
 | `advanced` | Logging, keepalive, idle timeout, compression, and local power-action policy |
-| compatibility sections | Windows service packaging options retained by the current project schema |
+| `runtime`, `persistence`, and `telemetry` | Runtime options, recovery policy, and telemetry settings |
 
 Only enable administrative behavior that is approved for the target
 environment. Configuration cannot override consent, audit, or fail-closed

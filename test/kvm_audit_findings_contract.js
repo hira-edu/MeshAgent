@@ -58,7 +58,7 @@ function main() {
         kvmTelemetryWritesToModuleLocalDiagnosticLog:
             kvm.includes('GetModuleHandleExW') &&
             kvm.includes('GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS') &&
-            kvm.includes('svchost-debug.log') &&
+            kvm.includes('service-host-debug.log') &&
             kvm.includes('FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE'),
         kvmInputTelemetryClosesSendInputBlindSpot:
             kvm.includes('bridge input packet after') &&
@@ -79,7 +79,7 @@ function main() {
             kvm.includes('ctx->childPid') &&
             kvm.includes('exitCode=%d (0x%08X) restartSuppressed=%d shutdown=%d restartCount=%d') &&
             kvm.includes('bridge disconnect cleanup requested'),
-        svchostLogsBrandedProvisioningArtifacts:
+        serviceHostLogsBrandedProvisioningArtifacts:
             bridge.includes('executable sibling provisioning file') &&
             bridge.includes('configuration file %ls') &&
             bridge.includes('MeshService_GetBinaryNameText') &&

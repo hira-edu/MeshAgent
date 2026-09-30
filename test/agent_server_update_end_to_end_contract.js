@@ -109,12 +109,17 @@ assert(agentcore.includes('Windows console update rejected; keeping current agen
 
 const finalizer = extractFunction(installer, 'static BOOL ServiceDeploy_FinalizeUpdateTransaction(const ServiceInstallPaths* paths, ServiceUpdateTransaction* tx)');
 assert(!finalizer.includes('tx->backupDir'), 'transaction finalizer must not delete rollback backups');
-assert(installer.includes('static BOOL ServiceDeploy_DiscardUpdateBackup(ServiceUpdateTransaction* tx)'), 'backup disposal must have an explicit commit-point helper');
-const updateFlow = extractFunction(installer, 'static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig)');
+const resolveTransaction = extractFunction(installer, 'static BOOL ServiceDeploy_ResolveUpdateTransaction(ServiceUpdateTransaction* tx, const wchar_t* name, DWORD phase)');
+const checkpointWrite = resolveTransaction.indexOf('ServiceDeploy_WriteTransactionPhase(tx, name, phase)');
+const backupDisposal = resolveTransaction.indexOf('ServiceDeploy_DeleteUpdateTransactionArtifacts(tx)');
+assert(checkpointWrite >= 0 && backupDisposal > checkpointWrite, 'durable resolution must precede backup disposal');
+const updateFlow = extractFunction(installer, 'static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig)');
 const lifecycleConverged = extractFunction(installer, 'static BOOL ServiceDeploy_IsPrimaryLifecycleConverged(const ServiceLifecycleDiscovery* discovery, BOOL requirePendingClear)');
 assert(updateFlow.indexOf('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') < updateFlow.indexOf('rollbackOk = ServiceDeploy_StartServiceHostServiceAndWait'), 'failure hold must be written before rollback service restart');
-assert(updateFlow.indexOf('ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity') < updateFlow.indexOf('ServiceDeploy_DiscardUpdateBackup(&tx)'), 'backup must survive post-update identity validation');
-assert(updateFlow.includes('Preserving transaction artifacts after failed rollback'), 'failed rollback must preserve recovery artifacts');
+const targetIdentity = updateFlow.indexOf('ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity');
+const durableCommit = updateFlow.indexOf('ServiceDeploy_ResolveUpdateTransaction(&tx, serviceKeyName, SERVICE_JOURNAL_COMMITTED)');
+assert(targetIdentity >= 0 && durableCommit > targetIdentity, 'backup must survive post-update identity validation');
+assert(/if \(rollbackCompleted\)\s*\{\s*ServiceDeploy_DeleteUpdateTransactionArtifacts\(&tx\);/.test(updateFlow), 'failed rollback must not delete recovery artifacts');
 assert(lifecycleConverged.includes('discovery->serviceRunning'), 'transaction commit health must require a running service');
 
 assert(fsBinding.includes('bytesWritten != (int)length'), 'writeSync must reject short writes');

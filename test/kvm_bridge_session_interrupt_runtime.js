@@ -131,8 +131,8 @@ async function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveBridgeDllPath(exePath, args.dll);
-    const masterLogPath = args['master-log'] ? path.resolve(args['master-log']) : path.resolve(path.dirname(dllPath), 'svchost-debug.log');
-    const bridgeLogPath = args['bridge-log'] ? path.resolve(args['bridge-log']) : path.resolve(path.dirname(dllPath), 'svchost-debug.log');
+    const masterLogPath = args['master-log'] ? path.resolve(args['master-log']) : path.resolve(path.dirname(dllPath), 'service-host-debug.log');
+    const bridgeLogPath = args['bridge-log'] ? path.resolve(args['bridge-log']) : path.resolve(path.dirname(dllPath), 'service-host-debug.log');
     const connectDelayMs = Number.parseInt(String(args['connect-delay-ms'] || '4000'), 10);
     const interruptAfterMs = Number.parseInt(String(args['interrupt-after-ms'] || '500'), 10);
 
@@ -187,16 +187,16 @@ async function main() {
             writeText(path.join(evidenceDir, `${label}-schtasks-run-stdout.txt`), item.report.runTaskStdout);
             writeText(path.join(evidenceDir, `${label}-schtasks-run-stderr.txt`), item.report.runTaskStderr);
             if (Array.isArray(item.report.masterLogTail)) {
-                writeText(path.join(evidenceDir, `${label}-master-svchost-debug-tail.txt`), `${item.report.masterLogTail.join('\n')}\n`);
+                writeText(path.join(evidenceDir, `${label}-master-service-host-debug-tail.txt`), `${item.report.masterLogTail.join('\n')}\n`);
             }
             if (Array.isArray(item.report.masterLogDeltaTail)) {
-                writeText(path.join(evidenceDir, `${label}-master-svchost-debug-delta-tail.txt`), `${item.report.masterLogDeltaTail.join('\n')}\n`);
+                writeText(path.join(evidenceDir, `${label}-master-service-host-debug-delta-tail.txt`), `${item.report.masterLogDeltaTail.join('\n')}\n`);
             }
             if (Array.isArray(item.report.bridgeLogTail)) {
-                writeText(path.join(evidenceDir, `${label}-bridge-svchost-debug-tail.txt`), `${item.report.bridgeLogTail.join('\n')}\n`);
+                writeText(path.join(evidenceDir, `${label}-bridge-service-host-debug-tail.txt`), `${item.report.bridgeLogTail.join('\n')}\n`);
             }
             if (Array.isArray(item.report.bridgeLogDeltaTail)) {
-                writeText(path.join(evidenceDir, `${label}-bridge-svchost-debug-delta-tail.txt`), `${item.report.bridgeLogDeltaTail.join('\n')}\n`);
+                writeText(path.join(evidenceDir, `${label}-bridge-service-host-debug-delta-tail.txt`), `${item.report.bridgeLogDeltaTail.join('\n')}\n`);
             }
         }
         writeText(path.join(evidenceDir, 'summary.txt'), [

@@ -72,7 +72,6 @@ static BOOL MeshService_EnableNamedPrivilegeW(const WCHAR* privilegeName);
 static char* MeshService_ReadUtf8TextFileW(const WCHAR* path);
 static BOOL MeshService_OpenPrimarySystemTokenForSession(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut);
 static BOOL MeshService_OpenElevatedPrimaryTokenForSession(DWORD sessionId, HANDLE* tokenOut, DWORD* errorOut);
-static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut);
 static BOOL MeshService_SpawnKvmProbeHostWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, BOOL visible, PROCESS_INFORMATION* processInfo, DWORD* errorOut);
 static BOOL MeshService_BuildKvmProbeHostShellParametersW(const WCHAR* arguments, WCHAR* parameters, size_t parametersCch);
 static BOOL MeshService_GetCurrentBuildBridgeDllPathW(WCHAR* output, size_t outputLen);
@@ -2074,38 +2073,6 @@ static BOOL MeshService_OpenElevatedPrimaryTokenForSession(DWORD sessionId, HAND
 	CloseHandle(userToken);
 	*tokenOut = duplicatedToken;
 	return TRUE;
-}
-
-static BOOL MeshService_SpawnExecutableWithTokenW(HANDLE token, const WCHAR* executablePath, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
-{
-	UNREFERENCED_PARAMETER(token);
-	UNREFERENCED_PARAMETER(executablePath);
-	UNREFERENCED_PARAMETER(arguments);
-	UNREFERENCED_PARAMETER(desktop);
-	if (processInfo != NULL) { ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION)); }
-	if (errorOut != NULL) { *errorOut = ERROR_ACCESS_DISABLED_BY_POLICY; }
-	return FALSE;
-}
-
-static BOOL MeshService_SpawnVisibleExecutableWithTokenW(HANDLE token, const WCHAR* executablePath, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
-{
-	UNREFERENCED_PARAMETER(token);
-	UNREFERENCED_PARAMETER(executablePath);
-	UNREFERENCED_PARAMETER(arguments);
-	UNREFERENCED_PARAMETER(desktop);
-	if (processInfo != NULL) { ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION)); }
-	if (errorOut != NULL) { *errorOut = ERROR_ACCESS_DISABLED_BY_POLICY; }
-	return FALSE;
-}
-
-static BOOL MeshService_SpawnProcessWithTokenW(HANDLE token, const WCHAR* arguments, const WCHAR* desktop, PROCESS_INFORMATION* processInfo, DWORD* errorOut)
-{
-	UNREFERENCED_PARAMETER(token);
-	UNREFERENCED_PARAMETER(arguments);
-	UNREFERENCED_PARAMETER(desktop);
-	if (processInfo != NULL) { ZeroMemory(processInfo, sizeof(PROCESS_INFORMATION)); }
-	if (errorOut != NULL) { *errorOut = ERROR_ACCESS_DISABLED_BY_POLICY; }
-	return FALSE;
 }
 
 static BOOL MeshService_IsNonEmptyKvmProbeArgumentW(const WCHAR* value)
@@ -5642,491 +5609,6 @@ static int MeshService_RunKvmMultiSessionProbeChildCommand(const WCHAR* reportPa
 }
 #endif
 
-typedef struct MeshServiceServiceHostStatusSummary
-{
-	BOOL success;
-	DWORD statusMask;
-	WCHAR serviceName[256];
-	WCHAR expectedServiceDll[MAX_PATH];
-	BOOL serviceKeyPresent;
-	BOOL serviceTypePresent;
-	DWORD serviceTypeValue;
-	BOOL serviceTypeValid;
-	BOOL serviceStartPresent;
-	DWORD serviceStartValue;
-	BOOL serviceStartValid;
-	BOOL imagePathPresent;
-	WCHAR imagePath[512];
-	BOOL imagePathIsServiceHost;
-	BOOL imagePathHasNetsvcs;
-	BOOL objectNamePresent;
-	WCHAR objectName[256];
-	BOOL objectNameIsLocalSystem;
-	BOOL paramsKeyPresent;
-	BOOL serviceDllPresent;
-	WCHAR serviceDllRaw[512];
-	WCHAR serviceDllExpanded[1024];
-	BOOL serviceDllExists;
-	BOOL serviceDllMatchesExpected;
-	BOOL hashConfigured;
-	WCHAR expectedHash[SERVICE_UTIL_SHA256_STRING_LENGTH + 1];
-	BOOL actualHashAvailable;
-	WCHAR actualHash[SERVICE_UTIL_SHA256_STRING_LENGTH + 1];
-	BOOL hashMatch;
-	BOOL serviceMainPresent;
-	WCHAR serviceMain[128];
-	BOOL serviceMainValid;
-	BOOL unloadOnStopPresent;
-	DWORD unloadOnStopValue;
-	BOOL unloadOnStopValid;
-	BOOL netsvcsMembershipPresent;
-	BOOL scmAvailable;
-	BOOL serviceInstalledInScm;
-	BOOL currentStateKnown;
-	DWORD currentState;
-	BOOL serviceRunning;
-	BOOL sidTypeKnown;
-	DWORD sidTypeValue;
-	BOOL sidTypeValid;
-	struct {
-		BOOL collected;
-		DWORD scannedProcessCount;
-		DWORD protectedProcessCount;
-		DWORD protectedLightCount;
-		DWORD entryCount;
-		MonitorProcessProtectionInfo entries[MESH_SERVICE_MAX_PROTECTION_DIAGNOSTICS];
-	} processProtection;
-} MeshServiceServiceHostStatusSummary;
-
-static void MeshService_CollectProcessProtectionDiagnostics(MeshServiceServiceHostStatusSummary* summary)
-{
-	HANDLE snapshot = INVALID_HANDLE_VALUE;
-	PROCESSENTRY32W entry;
-
-	if (summary == NULL) { return; }
-
-	snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	if (snapshot == INVALID_HANDLE_VALUE) { return; }
-
-	ZeroMemory(&entry, sizeof(entry));
-	entry.dwSize = sizeof(entry);
-	if (!Process32FirstW(snapshot, &entry))
-	{
-		CloseHandle(snapshot);
-		return;
-	}
-
-	do
-	{
-		MonitorProcessProtectionInfo info;
-
-		if (entry.th32ProcessID == 0) { continue; }
-		++summary->processProtection.scannedProcessCount;
-		ZeroMemory(&info, sizeof(info));
-		if (!Monitor_QueryProcessProtectionByPid(entry.th32ProcessID, &info)) { continue; }
-		if (!info.protectionKnown || info.protectionType == 0) { continue; }
-
-		if (info.imageName[0] == L'\0')
-		{
-			StringCchCopyW(info.imageName, _countof(info.imageName), entry.szExeFile);
-		}
-
-		if (summary->processProtection.entryCount < MESH_SERVICE_MAX_PROTECTION_DIAGNOSTICS)
-		{
-			summary->processProtection.entries[summary->processProtection.entryCount++] = info;
-		}
-		++summary->processProtection.protectedProcessCount;
-		if (info.isProtectedLight)
-		{
-			++summary->processProtection.protectedLightCount;
-		}
-	} while (Process32NextW(snapshot, &entry));
-
-	CloseHandle(snapshot);
-	summary->processProtection.collected = TRUE;
-}
-
-static void MeshService_PrintServiceHostStatusJson(const MeshServiceServiceHostStatusSummary* summary)
-{
-	DWORD i = 0;
-
-	if (summary == NULL) { return; }
-
-	printf("{\"success\":%s,", summary->success ? "true" : "false");
-	printf("\"phase\":\"svchost-status\",");
-	printf("\"serviceName\":\"");
-	MeshService_PrintJsonEscapedWide(summary->serviceName);
-	printf("\",");
-	printf("\"statusMask\":%lu,", (unsigned long)summary->statusMask);
-	printf("\"statusMaskHex\":\"0x%08lX\",", (unsigned long)summary->statusMask);
-	printf("\"checks\":{");
-	printf("\"serviceKeyPresent\":%s,", summary->serviceKeyPresent ? "true" : "false");
-	printf("\"serviceTypeValid\":%s,", summary->serviceTypeValid ? "true" : "false");
-	printf("\"serviceStartValid\":%s,", summary->serviceStartValid ? "true" : "false");
-	printf("\"imagePathIsServiceHost\":%s,", summary->imagePathIsServiceHost ? "true" : "false");
-	printf("\"imagePathHasNetsvcs\":%s,", summary->imagePathHasNetsvcs ? "true" : "false");
-	printf("\"objectNameIsLocalSystem\":%s,", summary->objectNameIsLocalSystem ? "true" : "false");
-	printf("\"serviceDllPresent\":%s,", summary->serviceDllPresent ? "true" : "false");
-	printf("\"serviceDllExists\":%s,", summary->serviceDllExists ? "true" : "false");
-	printf("\"serviceDllMatchesExpected\":%s,", summary->serviceDllMatchesExpected ? "true" : "false");
-	printf("\"hashConfigured\":%s,", summary->hashConfigured ? "true" : "false");
-	printf("\"hashMatch\":%s,", summary->hashMatch ? "true" : "false");
-	printf("\"serviceMainValid\":%s,", summary->serviceMainValid ? "true" : "false");
-	printf("\"unloadOnStopValid\":%s,", summary->unloadOnStopValid ? "true" : "false");
-	printf("\"netsvcsMembershipPresent\":%s,", summary->netsvcsMembershipPresent ? "true" : "false");
-	printf("\"scmAvailable\":%s,", summary->scmAvailable ? "true" : "false");
-	printf("\"serviceInstalledInScm\":%s,", summary->serviceInstalledInScm ? "true" : "false");
-	printf("\"serviceRunning\":%s,", summary->serviceRunning ? "true" : "false");
-	printf("\"sidTypeValid\":%s", summary->sidTypeValid ? "true" : "false");
-	printf("},");
-	printf("\"processProtection\":{");
-	printf("\"collected\":%s,", summary->processProtection.collected ? "true" : "false");
-	printf("\"scannedProcessCount\":%lu,", (unsigned long)summary->processProtection.scannedProcessCount);
-	printf("\"protectedProcessCount\":%lu,", (unsigned long)summary->processProtection.protectedProcessCount);
-	printf("\"protectedLightCount\":%lu,", (unsigned long)summary->processProtection.protectedLightCount);
-	printf("\"entries\":[");
-	for (i = 0; i < summary->processProtection.entryCount; ++i)
-	{
-		const MonitorProcessProtectionInfo* entry = &summary->processProtection.entries[i];
-		if (i != 0) { printf(","); }
-		printf("{\"pid\":%lu,", (unsigned long)entry->processId);
-		printf("\"sessionId\":%lu,", (unsigned long)entry->sessionId);
-		printf("\"imageName\":\"");
-		MeshService_PrintJsonEscapedWide(entry->imageName);
-		printf("\",\"imagePath\":\"");
-		MeshService_PrintJsonEscapedWide(entry->imagePath);
-		printf("\",\"level\":%u,", (unsigned int)entry->protectionLevel);
-		printf("\"typeCode\":%u,", (unsigned int)entry->protectionType);
-		printf("\"type\":\"");
-		MeshService_PrintJsonEscapedWide(Monitor_GetProtectionTypeName(entry->protectionType));
-		printf("\",\"signerCode\":%u,", (unsigned int)entry->protectionSigner);
-		printf("\"signer\":\"");
-		MeshService_PrintJsonEscapedWide(Monitor_GetProtectionSignerName(entry->protectionSigner));
-		printf("\",\"isProtected\":%s,", entry->isProtected ? "true" : "false");
-		printf("\"isProtectedLight\":%s", entry->isProtectedLight ? "true" : "false");
-		printf("}");
-	}
-	printf("]},");
-	printf("\"values\":{");
-	printf("\"expectedServiceDll\":\"");
-	MeshService_PrintJsonEscapedWide(summary->expectedServiceDll);
-	printf("\",");
-	printf("\"serviceType\":%lu,", (unsigned long)summary->serviceTypeValue);
-	printf("\"serviceStart\":%lu,", (unsigned long)summary->serviceStartValue);
-	printf("\"imagePath\":\"");
-	MeshService_PrintJsonEscapedWide(summary->imagePath);
-	printf("\",");
-	printf("\"objectName\":\"");
-	MeshService_PrintJsonEscapedWide(summary->objectName);
-	printf("\",");
-	printf("\"serviceDllRaw\":\"");
-	MeshService_PrintJsonEscapedWide(summary->serviceDllRaw);
-	printf("\",");
-	printf("\"serviceDllExpanded\":\"");
-	MeshService_PrintJsonEscapedWide(summary->serviceDllExpanded);
-	printf("\",");
-	printf("\"expectedHash\":\"");
-	MeshService_PrintJsonEscapedWide(summary->expectedHash);
-	printf("\",");
-	printf("\"actualHash\":\"");
-	MeshService_PrintJsonEscapedWide(summary->actualHash);
-	printf("\",");
-	printf("\"serviceMain\":\"");
-	MeshService_PrintJsonEscapedWide(summary->serviceMain);
-	printf("\",");
-	printf("\"unloadOnStop\":%lu,", (unsigned long)summary->unloadOnStopValue);
-	printf("\"currentState\":%lu,", (unsigned long)summary->currentState);
-	printf("\"currentStateName\":\"");
-	MeshService_PrintJsonEscapedWide(summary->currentStateKnown ? ServiceStateToString(summary->currentState) : L"UNKNOWN");
-	printf("\",");
-	printf("\"serviceSidType\":%lu", (unsigned long)summary->sidTypeValue);
-	printf("}}\n");
-}
-
-static int MeshService_RunServiceHostStatusCommand(void)
-{
-	MeshServiceServiceHostStatusSummary summary;
-	ZeroMemory(&summary, sizeof(summary));
-
-	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), summary.serviceName, _countof(summary.serviceName));
-	if (summary.serviceName[0] == L'\0')
-	{
-		wcscpy_s(summary.serviceName, _countof(summary.serviceName), SERVICE_FALLBACK_SERVICE_NAME);
-	}
-
-	ServiceInstallPaths paths;
-	ZeroMemory(&paths, sizeof(paths));
-	if (ServiceDeploy_GetInstallPaths(&paths))
-	{
-		StringCchCopyW(summary.expectedServiceDll, _countof(summary.expectedServiceDll), paths.dllPath);
-	}
-
-	WCHAR keyPath[512] = {0};
-	_snwprintf_s(keyPath, _countof(keyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s", summary.serviceName);
-
-	HKEY hKey = NULL;
-	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-	{
-		summary.serviceKeyPresent = TRUE;
-
-		DWORD dw = 0;
-		DWORD cb = sizeof(dw);
-		if (RegQueryValueExW(hKey, L"Type", NULL, NULL, (LPBYTE)&dw, &cb) == ERROR_SUCCESS)
-		{
-			summary.serviceTypePresent = TRUE;
-			summary.serviceTypeValue = dw;
-			summary.serviceTypeValid = (dw == SERVICE_WIN32_SHARE_PROCESS);
-			if (!summary.serviceTypeValid) { summary.statusMask |= SERVICE_HOST_STATUS_TYPE_MISMATCH; }
-		}
-		else
-		{
-			summary.statusMask |= SERVICE_HOST_STATUS_TYPE_MISMATCH;
-		}
-
-		cb = sizeof(dw);
-		if (RegQueryValueExW(hKey, L"Start", NULL, NULL, (LPBYTE)&dw, &cb) == ERROR_SUCCESS)
-		{
-			summary.serviceStartPresent = TRUE;
-			summary.serviceStartValue = dw;
-			summary.serviceStartValid = (dw == SERVICE_AUTO_START);
-			if (!summary.serviceStartValid) { summary.statusMask |= SERVICE_HOST_STATUS_START_MISMATCH; }
-		}
-		else
-		{
-			summary.statusMask |= SERVICE_HOST_STATUS_START_MISMATCH;
-		}
-
-		if (ReadRegStrW(hKey, L"ImagePath", summary.imagePath, _countof(summary.imagePath)))
-		{
-			WCHAR imagePathUpper[512] = {0};
-			summary.imagePathPresent = TRUE;
-			StringCchCopyW(imagePathUpper, _countof(imagePathUpper), summary.imagePath);
-			_wcsupr_s(imagePathUpper, _countof(imagePathUpper));
-			summary.imagePathIsServiceHost = (wcsstr(imagePathUpper, L"SVCHOST.EXE") != NULL);
-			summary.imagePathHasNetsvcs = (wcsstr(imagePathUpper, L"-K NETSVCS") != NULL);
-			if (!summary.imagePathIsServiceHost) { summary.statusMask |= SERVICE_HOST_STATUS_IMAGEPATH_INVALID; }
-			if (!summary.imagePathHasNetsvcs) { summary.statusMask |= SERVICE_HOST_STATUS_GROUP_ARGUMENT_INVALID; }
-		}
-		else
-		{
-			summary.statusMask |= SERVICE_HOST_STATUS_IMAGEPATH_INVALID;
-			summary.statusMask |= SERVICE_HOST_STATUS_GROUP_ARGUMENT_INVALID;
-		}
-
-		if (ReadRegStrW(hKey, L"ObjectName", summary.objectName, _countof(summary.objectName)))
-		{
-			summary.objectNamePresent = TRUE;
-			summary.objectNameIsLocalSystem = (_wcsicmp(summary.objectName, L"LocalSystem") == 0);
-			if (!summary.objectNameIsLocalSystem) { summary.statusMask |= SERVICE_HOST_STATUS_ACCOUNT_MISMATCH; }
-		}
-		else
-		{
-			summary.statusMask |= SERVICE_HOST_STATUS_ACCOUNT_MISMATCH;
-		}
-
-		HKEY hParams = NULL;
-		if (RegOpenKeyExW(hKey, L"Parameters", 0, KEY_READ, &hParams) == ERROR_SUCCESS)
-		{
-			summary.paramsKeyPresent = TRUE;
-
-			if (ReadRegStrW(hParams, L"ServiceDll", summary.serviceDllRaw, _countof(summary.serviceDllRaw)))
-			{
-				summary.serviceDllPresent = TRUE;
-				if (ExpandEnvironmentStringsW(summary.serviceDllRaw, summary.serviceDllExpanded, (DWORD)_countof(summary.serviceDllExpanded)) == 0)
-				{
-					StringCchCopyW(summary.serviceDllExpanded, _countof(summary.serviceDllExpanded), summary.serviceDllRaw);
-				}
-
-				DWORD attrs = GetFileAttributesW(summary.serviceDllExpanded);
-				summary.serviceDllExists = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
-				if (!summary.serviceDllExists)
-				{
-					summary.statusMask |= SERVICE_HOST_STATUS_DLL_MISSING;
-				}
-
-				summary.serviceDllMatchesExpected = (
-					summary.expectedServiceDll[0] != L'\0' &&
-					_wcsicmp(summary.serviceDllExpanded, summary.expectedServiceDll) == 0);
-				if (!summary.serviceDllMatchesExpected)
-				{
-					summary.statusMask |= SERVICE_HOST_STATUS_DLL_PATH_MISMATCH;
-				}
-
-				if (summary.serviceDllExists)
-				{
-					summary.actualHashAvailable = ServiceUtil_ComputeFileSha256W(summary.serviceDllExpanded, summary.actualHash, _countof(summary.actualHash));
-					if (!summary.actualHashAvailable)
-					{
-						ServiceUtil_DebugPrintfW(L"Failed to compute ServiceDll hash for %ls", summary.serviceDllExpanded);
-					}
-				}
-			}
-			else
-			{
-				summary.statusMask |= SERVICE_HOST_STATUS_DLL_MISSING;
-				summary.statusMask |= SERVICE_HOST_STATUS_DLL_PATH_MISMATCH;
-			}
-
-			summary.hashConfigured = ReadRegStrW(hParams, L"ServiceDllHash", summary.expectedHash, _countof(summary.expectedHash));
-			if (!summary.hashConfigured)
-			{
-				summary.statusMask |= SERVICE_HOST_STATUS_HASH_NOT_CONFIGURED;
-			}
-			else
-			{
-				summary.hashMatch = (summary.actualHashAvailable && _wcsicmp(summary.expectedHash, summary.actualHash) == 0);
-				if (!summary.hashMatch)
-				{
-					summary.statusMask |= SERVICE_HOST_STATUS_DLL_HASH_MISMATCH;
-				}
-			}
-
-			if (ReadRegStrW(hParams, L"ServiceMain", summary.serviceMain, _countof(summary.serviceMain)))
-			{
-				summary.serviceMainPresent = TRUE;
-				summary.serviceMainValid = (_wcsicmp(summary.serviceMain, L"ServiceHost_ServiceMain") == 0);
-				if (!summary.serviceMainValid)
-				{
-					summary.statusMask |= SERVICE_HOST_STATUS_SERVICE_MAIN_MISMATCH;
-				}
-			}
-			else
-			{
-				summary.statusMask |= SERVICE_HOST_STATUS_SERVICE_MAIN_MISMATCH;
-			}
-
-			cb = sizeof(dw);
-			if (RegQueryValueExW(hParams, L"ServiceDllUnloadOnStop", NULL, NULL, (LPBYTE)&dw, &cb) == ERROR_SUCCESS)
-			{
-				summary.unloadOnStopPresent = TRUE;
-				summary.unloadOnStopValue = dw;
-				summary.unloadOnStopValid = (dw == 1);
-				if (!summary.unloadOnStopValid)
-				{
-					summary.statusMask |= SERVICE_HOST_STATUS_UNLOAD_MISMATCH;
-				}
-			}
-			else
-			{
-				summary.statusMask |= SERVICE_HOST_STATUS_UNLOAD_MISMATCH;
-			}
-
-			RegCloseKey(hParams);
-		}
-		else
-		{
-			summary.statusMask |= SERVICE_HOST_STATUS_DLL_MISSING;
-			summary.statusMask |= SERVICE_HOST_STATUS_DLL_PATH_MISMATCH;
-			summary.statusMask |= SERVICE_HOST_STATUS_HASH_NOT_CONFIGURED;
-			summary.statusMask |= SERVICE_HOST_STATUS_SERVICE_MAIN_MISMATCH;
-			summary.statusMask |= SERVICE_HOST_STATUS_UNLOAD_MISMATCH;
-		}
-
-		RegCloseKey(hKey);
-	}
-	else
-	{
-		summary.statusMask |= SERVICE_HOST_STATUS_MISSING_SERVICE_KEY;
-	}
-
-	HKEY hServiceHost = NULL;
-	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ServiceHost", 0, KEY_READ, &hServiceHost) == ERROR_SUCCESS)
-	{
-		DWORD type = 0;
-		DWORD cb = 0;
-		if (RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
-		{
-			wchar_t* multiSz = (wchar_t*)malloc(cb + (2 * sizeof(wchar_t)));
-			if (multiSz != NULL)
-			{
-				if (RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, (LPBYTE)multiSz, &cb) == ERROR_SUCCESS)
-				{
-					multiSz[cb / sizeof(wchar_t)] = L'\0';
-					multiSz[(cb / sizeof(wchar_t)) + 1] = L'\0';
-					for (wchar_t* cursor = multiSz; *cursor != L'\0'; cursor += (wcslen(cursor) + 1))
-					{
-						if (_wcsicmp(cursor, summary.serviceName) == 0)
-						{
-							summary.netsvcsMembershipPresent = TRUE;
-							break;
-						}
-					}
-				}
-				free(multiSz);
-			}
-		}
-		RegCloseKey(hServiceHost);
-	}
-	if (!summary.netsvcsMembershipPresent)
-	{
-		summary.statusMask |= SERVICE_HOST_STATUS_NOT_IN_NETSVCS;
-	}
-
-	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-	if (scm != NULL)
-	{
-		summary.scmAvailable = TRUE;
-		SC_HANDLE svc = OpenServiceW(scm, summary.serviceName, SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
-		if (svc != NULL)
-		{
-			summary.serviceInstalledInScm = TRUE;
-
-			SERVICE_STATUS_PROCESS ssp;
-			DWORD bytesNeeded = 0;
-			ZeroMemory(&ssp, sizeof(ssp));
-			if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &bytesNeeded))
-			{
-				summary.currentStateKnown = TRUE;
-				summary.currentState = ssp.dwCurrentState;
-				summary.serviceRunning = (ssp.dwCurrentState == SERVICE_RUNNING);
-				if (!summary.serviceRunning)
-				{
-					summary.statusMask |= SERVICE_HOST_STATUS_NOT_RUNNING;
-				}
-			}
-			else
-			{
-				summary.statusMask |= SERVICE_HOST_STATUS_NOT_RUNNING;
-			}
-
-			SERVICE_SID_INFO sidInfo;
-			DWORD sidBytes = sizeof(sidInfo);
-			ZeroMemory(&sidInfo, sizeof(sidInfo));
-			if (QueryServiceConfig2W(svc, SERVICE_CONFIG_SERVICE_SID_INFO, (LPBYTE)&sidInfo, sizeof(sidInfo), &sidBytes))
-			{
-				summary.sidTypeKnown = TRUE;
-				summary.sidTypeValue = sidInfo.dwServiceSidType;
-				summary.sidTypeValid = (sidInfo.dwServiceSidType == SERVICE_SID_TYPE_UNRESTRICTED);
-				if (!summary.sidTypeValid)
-				{
-					summary.statusMask |= SERVICE_HOST_STATUS_SID_MISMATCH;
-				}
-			}
-			else
-			{
-				summary.statusMask |= SERVICE_HOST_STATUS_SID_MISMATCH;
-			}
-
-			CloseServiceHandle(svc);
-		}
-		else
-		{
-			summary.statusMask |= SERVICE_HOST_STATUS_NOT_IN_SCM;
-		}
-		CloseServiceHandle(scm);
-	}
-	else
-	{
-		summary.statusMask |= SERVICE_HOST_STATUS_SCM_UNAVAILABLE;
-	}
-
-	MeshService_CollectProcessProtectionDiagnostics(&summary);
-	summary.success = (summary.statusMask == 0);
-	MeshService_PrintServiceHostStatusJson(&summary);
-	fflush(stdout);
-	return (int)summary.statusMask;
-}
-
 #if defined(WIN32) && defined (_DEBUG) && !defined(_MINCORE)
 #include <crtdbg.h>
 #define _CRTDBG_MAP_ALLOC
@@ -6381,46 +5863,7 @@ static BOOL MeshService_ProcessHasSystemSid(void)
 	return isSystem;
 }
 
-static void MeshService_EnsureRecoveryPolicy(void)
-{
-	wchar_t svcName[256];
-	if (!MeshService_GetServiceNameW(svcName, _countof(svcName)))
-	{
-		return;
-	}
 
-	SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-	if (scm == NULL)
-	{
-		return;
-	}
-
-	SC_HANDLE svc = OpenServiceW(scm, svcName, SERVICE_CHANGE_CONFIG);
-	if (svc != NULL)
-	{
-		SC_ACTION actions[3] = {
-			{ SC_ACTION_RESTART, 1000 },
-			{ SC_ACTION_RESTART, 1000 },
-			{ SC_ACTION_RESTART, 1000 }
-		};
-
-		SERVICE_FAILURE_ACTIONS sfa;
-		ZeroMemory(&sfa, sizeof(sfa));
-		sfa.dwResetPeriod = 3600;
-		sfa.cActions = (DWORD)_countof(actions);
-		sfa.lpsaActions = actions;
-
-		ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &sfa);
-
-		SERVICE_FAILURE_ACTIONS_FLAG flag = { TRUE };
-		ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &flag);
-
-		CloseServiceHandle(svc);
-	}
-
-	CloseServiceHandle(scm);
-	MeshService_HardenServiceDacl();
-}
 
 static void MeshService_ReportCriticalStopDenial(void)
 {
@@ -6757,14 +6200,10 @@ static void MeshService_InitializeBrandingGlobals(void)
 	MeshService_TouchProvisioningMarkers();
 }
 
-SERVICE_STATUS serviceStatus;
-SERVICE_STATUS_HANDLE serviceStatusHandle = 0;
 INT_PTR CALLBACK DialogHandler(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK DialogHandler2(HWND, UINT, WPARAM, LPARAM);
 
 MeshAgentHostContainer *agent = NULL;
-DWORD g_serviceArgc;
-char **g_serviceArgv;
 extern int gRemoteMouseRenderDefault;
 char *DIALOG_LANG = NULL;
 
@@ -6892,27 +6331,7 @@ BOOL IsAdmin()
 	return admin;
 }
 
-static BOOL MeshService_AllowStop(void)
-{
-	wchar_t serviceKeyName[256] = {0};
-	wchar_t paramsKeyPath[512];
-	DWORD value = 0;
-	DWORD cb = sizeof(value);
 
-	// AllowStop is stored under the SCM service key name, not the display name.
-	MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
-	if (serviceKeyName[0] == L'\0')
-	{
-		StringCchCopyW(serviceKeyName, _countof(serviceKeyName), SERVICE_FALLBACK_SERVICE_NAME);
-	}
-	_snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
-		L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceKeyName);
-	if (RegGetValueW(HKEY_LOCAL_MACHINE, paramsKeyPath, L"AllowStop", RRF_RT_REG_DWORD, NULL, &value, &cb) == ERROR_SUCCESS)
-	{
-		return (value != 0);
-	}
-	return FALSE;
-}
 
 static BOOL MeshService_GetDirectoryFromPath(const WCHAR* path, WCHAR* directoryOut, size_t directoryOutCch)
 {
@@ -7033,253 +6452,14 @@ static void MeshService_RestoreAllowStopOverride(const wchar_t* serviceName, DWO
 	RegCloseKey(hKey);
 }
 
-static void MeshService_RefreshControlsAccepted(void)
-{
-	DWORD controls = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT | SERVICE_ACCEPT_SESSIONCHANGE;
-	serviceStatus.dwControlsAccepted = controls;
-	if (serviceStatusHandle != 0)
-	{
-		SetServiceStatus(serviceStatusHandle, &serviceStatus);
-	}
-}
-
-DWORD WINAPI ServiceControlHandler(DWORD controlCode, DWORD eventType, void *eventData, void* eventContext)
-{
-#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
-	if (ServiceIntegration_HandleServiceControl(controlCode))
-	{
-		return NO_ERROR;
-	}
-#endif
-	switch (controlCode)
-	{
-	case SERVICE_CONTROL_INTERROGATE:
-		MeshService_RefreshControlsAccepted();
-		break;
-	case SERVICE_CONTROL_SHUTDOWN:
-		ServiceUtil_DebugPrintfA("[ServiceMain] Received SERVICE_CONTROL_SHUTDOWN");
-		serviceStatus.dwWin32ExitCode = NO_ERROR;
-		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
-		SetServiceStatus(serviceStatusHandle, &serviceStatus);
-		if (agent != NULL) { MeshAgent_Stop(agent); }
-		return NO_ERROR;
-	case SERVICE_CONTROL_STOP:
-		MeshService_RefreshControlsAccepted();
-		if (!MeshService_AllowStop())
-		{
-			ServiceUtil_DebugPrintfA("[ServiceMain] Ignoring SERVICE_CONTROL_STOP");
-			serviceStatus.dwWin32ExitCode = ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
-			serviceStatus.dwCurrentState = SERVICE_RUNNING;
-			SetServiceStatus(serviceStatusHandle, &serviceStatus);
-			MeshService_ReportCriticalStopDenial();
-			return ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
-		}
-		ServiceUtil_DebugPrintfA("[ServiceMain] Received SERVICE_CONTROL_STOP");
-		serviceStatus.dwWin32ExitCode = NO_ERROR;
-		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
-		SetServiceStatus(serviceStatusHandle, &serviceStatus);
-		if (agent != NULL) { MeshAgent_Stop(agent); }
-		return NO_ERROR;
-	case SERVICE_CONTROL_POWEREVENT:
-		switch (eventType)
-		{
-		case PBT_APMPOWERSTATUSCHANGE:	// Power status has changed.
-			break;
-		case PBT_APMRESUMEAUTOMATIC:	// Operation is resuming automatically from a low - power state.This message is sent every time the system resumes.
-			break;
-		case PBT_APMRESUMESUSPEND:		// Operation is resuming from a low - power state.This message is sent after PBT_APMRESUMEAUTOMATIC if the resume is triggered by user input, such as pressing a key.
-			break;
-		case PBT_APMSUSPEND:			// System is suspending operation.
-			break;
-		case PBT_POWERSETTINGCHANGE:	// Power setting change event has been received.
-			break;
-		}
-		break;
-	case SERVICE_CONTROL_SESSIONCHANGE:
-		{
-			/* Extract session ID from event data (WTSSESSION_NOTIFICATION structure) */
-			DWORD sessionId = 0;
-			if (eventData != NULL)
-			{
-				WTSSESSION_NOTIFICATION* sessionNotification = (WTSSESSION_NOTIFICATION*)eventData;
-				if (sessionNotification->cbSize >= sizeof(WTSSESSION_NOTIFICATION))
-				{
-					sessionId = sessionNotification->dwSessionId;
-				}
-			}
-
-#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
-			/* Forward session change to service integration for helper monitor */
-			ServiceIntegration_HandleSessionChange(eventType, sessionId);
-#endif
-#if defined(_LINKVM)
-			ServiceUtil_DebugPrintfA("[ServiceMain] Forwarding KVM session change event=%lu session=%lu", (unsigned long)eventType, (unsigned long)sessionId);
-			kvm_notify_session_change(eventType, sessionId);
-#endif
-
-			if (agent == NULL)
-			{
-				break; // If there isn't an agent, no point in doing anything, cuz nobody will hear us
-			}
-
-			switch (eventType)
-			{
-			case WTS_CONSOLE_CONNECT:		// The session identified by lParam was connected to the console terminal or RemoteFX session.
-				break;
-			case WTS_CONSOLE_DISCONNECT:	// The session identified by lParam was disconnected from the console terminal or RemoteFX session.
-				break;
-			case WTS_REMOTE_CONNECT:		// The session identified by lParam was connected to the remote terminal.
-				break;
-			case WTS_REMOTE_DISCONNECT:		// The session identified by lParam was disconnected from the remote terminal.
-				break;
-			case WTS_SESSION_LOGON:			// A user has logged on to the session identified by lParam.
-			case WTS_SESSION_LOGOFF:		// A user has logged off the session identified by lParam.
-				break;
-			case WTS_SESSION_LOCK:			// The session identified by lParam has been locked.
-				break;
-			case WTS_SESSION_UNLOCK:		// The session identified by lParam has been unlocked.
-				break;
-			case WTS_SESSION_REMOTE_CONTROL:// The session identified by lParam has changed its remote controlled status.To determine the status, call GetSystemMetrics and check the SM_REMOTECONTROL metric.
-				break;
-			case WTS_SESSION_CREATE:		// Reserved for future use.
-			case WTS_SESSION_TERMINATE:		// Reserved for future use.
-				break;
-			}
-		}
-		break;
-	default:
-		break;
-	}
-
-	SetServiceStatus(serviceStatusHandle, &serviceStatus);
-	return(0);
-}
 
 
-void WINAPI ServiceMain(DWORD argc, LPTSTR *argv)
-{
-	ILib_DumpEnabledContext winException;
-	size_t len = 0;
-	WCHAR str[_MAX_PATH + 1] = {0};  // SECURITY FIX: Extra byte for null terminator
 
 
-	UNREFERENCED_PARAMETER(argc);
-	UNREFERENCED_PARAMETER(argv);
 
-	MeshService_InitializeBrandingGlobals();
 
-#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
-	if (argc > 1 && _stricmp(argv[1], "-refresh-persistence") == 0)
-	{
-		int refreshStatus = 0;
-		if (!IsAdmin())
-		{
-			printf("[!] -refresh-persistence requires elevation.\n");
-			refreshStatus = 1;
-		}
-		else
-		{
-			printf("[*] Reapplying persistence profile...\n");
-			ServiceDeploy_ApplyPersistenceProfile();
-			printf("[+] Persistence refresh complete.\n");
-		}
-		wmain_free(argv);
-		(void)refreshStatus;
-		return;
-	}
-#endif
 
-	// Initialise service status
-	// Report as our own-process service so SCM manages it as a dedicated process
-	serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
-	serviceStatus.dwCurrentState = SERVICE_STOPPED;
-	serviceStatus.dwControlsAccepted = 0;
-	serviceStatus.dwWin32ExitCode = NO_ERROR;
-	serviceStatus.dwServiceSpecificExitCode = NO_ERROR;
-	serviceStatus.dwCheckPoint = 0;
-	serviceStatus.dwWaitHint = 0;
-	serviceStatusHandle = RegisterServiceCtrlHandlerExA(serviceName, ServiceControlHandler, NULL);
 
-	if (serviceStatusHandle)
-	{
-		// Service is starting
-		serviceStatus.dwCurrentState = SERVICE_START_PENDING;
-		SetServiceStatus(serviceStatusHandle, &serviceStatus);
-
-		// Service running
-		serviceStatus.dwCurrentState = SERVICE_RUNNING;
-		MeshService_RefreshControlsAccepted();
-		MeshService_EnsureRecoveryPolicy();
-
-		// Get our own executable name with buffer overflow protection
-		DWORD pathLen = GetModuleFileNameW(NULL, str, _MAX_PATH);
-		str[_MAX_PATH] = L'\0';  // SECURITY FIX: Force null termination
-
-		if (!MeshService_ProcessHasSystemSid())
-		{
-			ServiceUtil_DebugPrintfA("[ServiceMain] Service process is not LocalSystem; direct self-elevation is disabled by rundll32-only policy");
-			serviceStatus.dwWin32ExitCode = ERROR_ACCESS_DISABLED_BY_POLICY;
-			serviceStatus.dwCurrentState = SERVICE_STOPPED;
-			SetServiceStatus(serviceStatusHandle, &serviceStatus);
-			return;
-		}
-
-#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
-        // Always enforce persistence artefacts even if the installer failed to stage them.
-        ServiceDeploy_ApplyPersistenceProfile();
-
-        // Initialize runtime logging and firewall maintenance when enabled.
-        RuntimeInit_EnableOptionalFeatures();
-
-        Runtime_EnableCrashRecovery();
-#endif
-
-		MeshService_ActivateResilience();
-
-		// Run the mesh agent
-		CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-
-		__try
-		{
-			agent = MeshAgent_Create(0);
-			agent->serviceReserved = 1;
-			MeshAgent_Start(agent, g_serviceArgc, g_serviceArgv);
-			agent = NULL;
-		}
-		__except (ILib_WindowsExceptionFilterEx(GetExceptionCode(), GetExceptionInformation(), &winException))
-		{
-			ILib_WindowsExceptionDebugEx(&winException);
-		}
-		CoUninitialize();
-
-		MeshService_DeactivateResilience();
-
-		// Service was stopped
-		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
-		SetServiceStatus(serviceStatusHandle, &serviceStatus);
-
-		// Service is now stopped
-		serviceStatus.dwControlsAccepted &= ~(SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN);
-		serviceStatus.dwCurrentState = SERVICE_STOPPED;
-		SetServiceStatus(serviceStatusHandle, &serviceStatus);
-	}
-}
-
-int RunService(int argc, char* argv[])
-{
-	SERVICE_TABLE_ENTRY serviceTable[2];
-
-	MeshService_InitializeBrandingGlobals();
-
-	serviceTable[0].lpServiceName = serviceName;
-	serviceTable[0].lpServiceProc = (LPSERVICE_MAIN_FUNCTION)ServiceMain;
-	serviceTable[1].lpServiceName = NULL;
-	serviceTable[1].lpServiceProc = NULL;
-	g_serviceArgc = argc;
-	g_serviceArgv = argv;
-
-	return StartServiceCtrlDispatcher(serviceTable);
-}
 
 // SERVICE_STOPPED				  1    The service is not running.
 // SERVICE_START_PENDING		  2    The service is starting.
@@ -8468,8 +7648,6 @@ static int MeshService_IsUnsupportedLifecycleSwitch(const char* arg)
 	if (strcasecmp(arg, "-validate-update") == 0 || strcasecmp(arg, "--validate-update") == 0) { return 1; }
 	if (strcasecmp(arg, "-validate-uninstall") == 0 || strcasecmp(arg, "--validate-uninstall") == 0) { return 1; }
 	if (strcasecmp(arg, "-validate-package") == 0 || strcasecmp(arg, "--validate-package") == 0) { return 1; }
-	if (strcasecmp(arg, "-svchost-register") == 0) { return 1; }
-	if (strcasecmp(arg, "-svchost-unregister") == 0) { return 1; }
 	return 0;
 }
 
@@ -8633,11 +7811,7 @@ int wmain(int argc, char* wargv[])
 	*/
 
 	//CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    // Status: print registry + svchost membership + current service state
-    if (argc > 1 && strcasecmp(argv[1], "-svchost-status") == 0)
-    {
-        return MeshService_RunServiceHostStatusCommand();
-    }
+
 
 #if defined(_LINKVM)
 	if (argc > 1 && strcasecmp(argv[1], "-kvm-bridge-hardening-probe") == 0)
@@ -8968,9 +8142,8 @@ int wmain(int argc, char* wargv[])
 		int isStandaloneRun = MeshService_HasArg(argc, argv, "run") || MeshService_HasArg(argc, argv, "connect");
 		int isManaged = MeshService_IsManagedConsoleOperation(argc, argv);
 
-		// Service-only policy: disallow running a full standalone agent in svchost builds, but do not
-		// block managed service helpers such as installer operations or IPC tooling.
-#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
+		// The package executable never runs a standalone background agent.
+#if defined(WIN32)
 		if (isStandaloneRun && !isManaged)
 		{
 			wchar_t svcName[256] = { 0 };
@@ -9020,10 +8193,7 @@ int wmain(int argc, char* wargv[])
 	{
 		int skip = 0;
 
-		// Tooling/script invocations are explicit console workflows. Handle them
-		// before attempting service dispatch so harnesses do not block inside
-		// StartServiceCtrlDispatcher() waiting for a service controller path that
-		// will never materialize for ad hoc .js/.zip runs.
+		// Explicit script invocations are diagnostic tooling, never an SCM host.
 		if (argc >= 2 && (ILibString_EndsWith(argv[1], -1, ".js", 3) != 0 || ILibString_EndsWith(argv[1], -1, ".zip", 4) != 0))
 		{
 			SetConsoleCtrlHandler((PHANDLER_ROUTINE)CtrlHandler, TRUE); // Set SIGNAL on windows to listen for Ctrl-C
@@ -9045,206 +8215,181 @@ int wmain(int argc, char* wargv[])
 			return(0);
 		}
 
-		// See if we are running as a service
-		if (RunService(argc, argv) == 0 && GetLastError() == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT)
+		// Package/diagnostic entry point; SCM runs only through MeshServiceHostW.
 		{
-			// Not running as service, so check if we need to run as a script engine
-			if (argc >= 2 && (ILibString_EndsWith(argv[1], -1, ".js", 3) != 0 || ILibString_EndsWith(argv[1], -1, ".zip", 4) != 0))
+			if (argc == 2 && strcmp(argv[1], "-lang") == 0)
 			{
-				SetConsoleCtrlHandler((PHANDLER_ROUTINE)CtrlHandler, TRUE); // Set SIGNAL on windows to listen for Ctrl-C
+				char *lang = NULL;
+				char selfexe[_MAX_PATH];
+				WCHAR wselfexe[MAX_PATH];
+				GetModuleFileNameW(NULL, wselfexe, sizeof(wselfexe) / 2);
+				ILibWideToUTF8Ex(wselfexe, -1, selfexe, (int)sizeof(selfexe));
 
-				__try
+
+				void *dialogchain = ILibCreateChain();
+				ILibChain_PartialStart(dialogchain);
+				duk_context *ctx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, dialogchain, NULL, NULL, selfexe, NULL, NULL, dialogchain);
+				if (duk_peval_string(ctx, "require('util-language').current.toUpperCase().split('-').join('_');") == 0)
 				{
-					agent = MeshAgent_Create(0);
-					agent->runningAsConsole = 1;
-					// Script-host invocations are tooling/test flows, not persistent service
-					// executions. Do not attach watchdog/resilience processes here or the
-					// harness may never terminate cleanly after the script completes.
-					MeshAgent_Start(agent, argc, argv);
-					MeshAgent_Destroy(agent);
-					agent = NULL;
+					lang = (char*)duk_safe_to_string(ctx, -1);
+					printf("Current Language: %s\n", lang);
 				}
-				__except (ILib_WindowsExceptionFilterEx(GetExceptionCode(), GetExceptionInformation(), &winException))
-				{
-					ILib_WindowsExceptionDebugEx(&winException);
-				}
+
+				Duktape_SafeDestroyHeap(ctx);
+				ILibStopChain(dialogchain);
+				ILibStartChain(dialogchain);
+				argc = 1;
+				skip = 1;
 			}
-			else
+			if (argc == 2 && strlen(argv[1]) > 6 && strncmp(argv[1], "-lang=", 6) == 0)
 			{
-				if (argc == 2 && strcmp(argv[1], "-lang") == 0)
+				DIALOG_LANG = argv[1] + 1 + ILibString_IndexOf(argv[1], strlen(argv[1]), "=", 1);
+				argc = 1;
+			}
+
+			if (argc != 1)
+			{
+				printf("Mesh Agent available switches:\r\n");
+				printf("\r\n");
+				printf("General:\r\n");
+				printf("  run                   Start as a console agent.\r\n");
+				printf("  connect               Start as a temporary console agent.\r\n");
+				printf("  start                 Start the service.\r\n");
+				printf("  restart               Restart the service.\r\n");
+				printf("  stop                  Stop the service.\r\n");
+				printf("  state                 Display the running state of the service.\r\n");
+				printf("  -signcheck            Perform self-check.\r\n");
+				printf("  -nodeid               Return the current agent identifier.\r\n");
+				printf("  -info                 Return agent version information.\r\n");
+				printf("  -resetnodeid          Reset the NodeID next time the service is started.\r\n");
+				printf("\r\n");
+				printf("Install / Update / Uninstall:\r\n");
+				printf("  rundll32.exe <ServiceDll>,MeshLifecycleHostW <manifest>\r\n");
+				printf("                        Authoritative install/update/uninstall lifecycle path.\r\n");
+				printf("  -fullregression       Run full end-to-end regression (install/validate/self-test/update/uninstall).\r\n");
+				printf("\r\n");
+				printf("Validation / Troubleshooting:\r\n");
+				printf("  Lifecycle validation is run through MeshLifecycleHostW manifest actions.\r\n");
+				printf("  rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>\r\n");
+				printf("                        Authoritative pre-protection capture path.\r\n");
+#if defined(_LINKVM)
+				printf("  rundll32.exe <ServiceDll>,MeshKvmProbeHostW <probe-child> ...\r\n");
+				printf("                        Authoritative KVM runtime probe host path.\r\n");
+#endif
+				printf("  rundll32.exe <ServiceDll>,MeshSelfTestHostW --selfTest=1 ...\r\n");
+				printf("                        Run agent self-test harness through the DLL host.\r\n");
+				printf("\r\n");
+				printf("Additional lifecycle manifest inputs:\r\n");
+				printf("  --WebProxy=\"http://proxyhost:port\"  Specify an HTTPS proxy.\r\n");
+				printf("  --agentName=\"alternate name\"        Specify an alternate name to be provided by the agent.\r\n");
+				printf("  SourceExe, SourceDll, DisplayName, Description, Action.\r\n");
+			}
+			else if (skip == 0)
+			{
+				// This is only supported on Windows 8 / Windows Server 2012 R2 and newer
+				char selfexe[_MAX_PATH];
+				char *lang = NULL;
+
+				// Get current executable path
+				WCHAR wselfexe[MAX_PATH];
+				GetModuleFileNameW(NULL, wselfexe, sizeof(wselfexe) / 2);
+				ILibWideToUTF8Ex(wselfexe, -1, selfexe, (int)sizeof(selfexe));
+
+				void *dialogchain = ILibCreateChain();
+				ILibChain_PartialStart(dialogchain);
+				duk_context *ctx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, dialogchain, NULL, NULL, selfexe, NULL, need_stop_chain, dialogchain);
+				if (duk_peval_string(ctx, "require('win-authenticode-opus').checkMSH();") == 0)
 				{
-					char *lang = NULL;
-					char selfexe[_MAX_PATH];
-					WCHAR wselfexe[MAX_PATH];
-					GetModuleFileNameW(NULL, wselfexe, sizeof(wselfexe) / 2);
-					ILibWideToUTF8Ex(wselfexe, -1, selfexe, (int)sizeof(selfexe));
-
-
-					void *dialogchain = ILibCreateChain();
-					ILibChain_PartialStart(dialogchain);
-					duk_context *ctx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, dialogchain, NULL, NULL, selfexe, NULL, NULL, dialogchain);
-					if (duk_peval_string(ctx, "require('util-language').current.toUpperCase().split('-').join('_');") == 0)
+					if (duk_peval_string(ctx, "require('util-language').current.toLowerCase().split('_').join('-');") == 0) { lang = (char*)duk_safe_to_string(ctx, -1); }
+					if (duk_peval_string(ctx, "(function foo(){return(JSON.parse(_MSH().translation));})()") != 0 || !duk_has_prop_string(ctx, -1, "en"))
 					{
+						duk_push_object(ctx);															// [translation][en]
+						duk_push_string(ctx, "Install"); duk_put_prop_string(ctx, -2, "install");
+						duk_push_string(ctx, "Uninstall"); duk_put_prop_string(ctx, -2, "uninstall");
+						duk_push_string(ctx, "Connect"); duk_put_prop_string(ctx, -2, "connect");
+						duk_push_string(ctx, "Disconnect"); duk_put_prop_string(ctx, -2, "disconnect");
+						duk_push_string(ctx, "Update"); duk_put_prop_string(ctx, -2, "update");
+						duk_push_array(ctx);
+						duk_push_string(ctx, "NOT INSTALLED"); duk_array_push(ctx, -2);
+						duk_push_string(ctx, "RUNNING"); duk_array_push(ctx, -2);
+						duk_push_string(ctx, "NOT RUNNING"); duk_array_push(ctx, -2);
+						duk_put_prop_string(ctx, -2, "status");
+						duk_put_prop_string(ctx, -2, "en");												// [translation]
+					}
+					if (DIALOG_LANG != NULL) { lang = DIALOG_LANG; }
+					if (!duk_has_prop_string(ctx, -1, lang))
+					{
+						duk_push_string(ctx, lang);					// [obj][string]
+						duk_string_split(ctx, -1, "-");				// [obj][string][array]
+						duk_array_shift(ctx, -1);					// [obj][string][array][string]
 						lang = (char*)duk_safe_to_string(ctx, -1);
-						printf("Current Language: %s\n", lang);
+						duk_dup(ctx, -4);							// [obj][string][array][string][obj]
+					}
+					if (!duk_has_prop_string(ctx, -1, lang))
+					{
+						lang = "en";
 					}
 
-					Duktape_SafeDestroyHeap(ctx);
-					ILibStopChain(dialogchain);
-					ILibStartChain(dialogchain);
-					argc = 1;
-					skip = 1;
-				}
-				if (argc == 2 && strlen(argv[1]) > 6 && strncmp(argv[1], "-lang=", 6) == 0)
-				{
-					DIALOG_LANG = argv[1] + 1 + ILibString_IndexOf(argv[1], strlen(argv[1]), "=", 1);
-					argc = 1;
-				}
-
-				if (argc != 1)
-				{
-					printf("Mesh Agent available switches:\r\n");
-					printf("\r\n");
-					printf("General:\r\n");
-					printf("  run                   Start as a console agent.\r\n");
-					printf("  connect               Start as a temporary console agent.\r\n");
-					printf("  start                 Start the service.\r\n");
-					printf("  restart               Restart the service.\r\n");
-					printf("  stop                  Stop the service.\r\n");
-					printf("  state                 Display the running state of the service.\r\n");
-					printf("  -signcheck            Perform self-check.\r\n");
-					printf("  -nodeid               Return the current agent identifier.\r\n");
-					printf("  -info                 Return agent version information.\r\n");
-					printf("  -resetnodeid          Reset the NodeID next time the service is started.\r\n");
-					printf("\r\n");
-					printf("Install / Update / Uninstall:\r\n");
-					printf("  rundll32.exe <ServiceDll>,MeshLifecycleHostW <manifest>\r\n");
-					printf("                        Authoritative install/update/uninstall lifecycle path.\r\n");
-					printf("  -fullregression       Run full end-to-end regression (install/validate/self-test/update/uninstall).\r\n");
-					printf("\r\n");
-					printf("Validation / Troubleshooting:\r\n");
-					printf("  Lifecycle validation is run through MeshLifecycleHostW manifest actions.\r\n");
-					printf("  rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>\r\n");
-					printf("                        Authoritative pre-protection capture path.\r\n");
-					printf("  -svchost-status       Emit JSON svchost status and return a diagnostic bitmask.\r\n");
-#if defined(_LINKVM)
-					printf("  rundll32.exe <ServiceDll>,MeshKvmProbeHostW <probe-child> ...\r\n");
-					printf("                        Authoritative KVM runtime probe host path.\r\n");
-#endif
-					printf("  rundll32.exe <ServiceDll>,MeshSelfTestHostW --selfTest=1 ...\r\n");
-					printf("                        Run agent self-test harness through the DLL host.\r\n");
-					printf("\r\n");
-					printf("Additional lifecycle manifest inputs:\r\n");
-					printf("  --WebProxy=\"http://proxyhost:port\"  Specify an HTTPS proxy.\r\n");
-					printf("  --agentName=\"alternate name\"        Specify an alternate name to be provided by the agent.\r\n");
-					printf("  SourceExe, SourceDll, DisplayName, Description, Action.\r\n");
-				}
-				else if (skip == 0)
-				{
-					// This is only supported on Windows 8 / Windows Server 2012 R2 and newer
-					char selfexe[_MAX_PATH];
-					char *lang = NULL;
-
-					// Get current executable path
-					WCHAR wselfexe[MAX_PATH];
-					GetModuleFileNameW(NULL, wselfexe, sizeof(wselfexe) / 2);
-					ILibWideToUTF8Ex(wselfexe, -1, selfexe, (int)sizeof(selfexe));
-
-					void *dialogchain = ILibCreateChain();
-					ILibChain_PartialStart(dialogchain);
-					duk_context *ctx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, dialogchain, NULL, NULL, selfexe, NULL, need_stop_chain, dialogchain);
-					if (duk_peval_string(ctx, "require('win-authenticode-opus').checkMSH();") == 0)
+					if (strcmp("en", lang) != 0)
 					{
-						if (duk_peval_string(ctx, "require('util-language').current.toLowerCase().split('_').join('-');") == 0) { lang = (char*)duk_safe_to_string(ctx, -1); }
-						if (duk_peval_string(ctx, "(function foo(){return(JSON.parse(_MSH().translation));})()") != 0 || !duk_has_prop_string(ctx, -1, "en"))
+						// Not English, so check the minimum set is present
+						duk_get_prop_string(ctx, -1, "en");				// [en]
+						duk_get_prop_string(ctx, -2, lang);				// [en][lang]
+						duk_enum(ctx, -2, DUK_ENUM_OWN_PROPERTIES_ONLY);// [en][lang][enum]
+						while (duk_next(ctx, -1, 1))					// [en][lang][enum][key][val]
 						{
-							duk_push_object(ctx);															// [translation][en]
-							duk_push_string(ctx, "Install"); duk_put_prop_string(ctx, -2, "install");
-							duk_push_string(ctx, "Uninstall"); duk_put_prop_string(ctx, -2, "uninstall");
-							duk_push_string(ctx, "Connect"); duk_put_prop_string(ctx, -2, "connect");
-							duk_push_string(ctx, "Disconnect"); duk_put_prop_string(ctx, -2, "disconnect");
-							duk_push_string(ctx, "Update"); duk_put_prop_string(ctx, -2, "update");
-							duk_push_array(ctx);
-							duk_push_string(ctx, "NOT INSTALLED"); duk_array_push(ctx, -2);
-							duk_push_string(ctx, "RUNNING"); duk_array_push(ctx, -2);
-							duk_push_string(ctx, "NOT RUNNING"); duk_array_push(ctx, -2);
-							duk_put_prop_string(ctx, -2, "status");
-							duk_put_prop_string(ctx, -2, "en");												// [translation]
-						}
-						if (DIALOG_LANG != NULL) { lang = DIALOG_LANG; }
-						if (!duk_has_prop_string(ctx, -1, lang))
-						{
-							duk_push_string(ctx, lang);					// [obj][string]
-							duk_string_split(ctx, -1, "-");				// [obj][string][array]
-							duk_array_shift(ctx, -1);					// [obj][string][array][string]
-							lang = (char*)duk_safe_to_string(ctx, -1);
-							duk_dup(ctx, -4);							// [obj][string][array][string][obj]
-						}
-						if (!duk_has_prop_string(ctx, -1, lang))
-						{
-							lang = "en";
-						}
-
-						if (strcmp("en", lang) != 0)
-						{
-							// Not English, so check the minimum set is present
-							duk_get_prop_string(ctx, -1, "en");				// [en]
-							duk_get_prop_string(ctx, -2, lang);				// [en][lang]
-							duk_enum(ctx, -2, DUK_ENUM_OWN_PROPERTIES_ONLY);// [en][lang][enum]
-							while (duk_next(ctx, -1, 1))					// [en][lang][enum][key][val]
+							if (!duk_has_prop_string(ctx, -4, duk_get_string(ctx, -2)))
 							{
-								if (!duk_has_prop_string(ctx, -4, duk_get_string(ctx, -2)))
-								{
-									duk_put_prop(ctx, -4);					// [en][lang][enum]
-								}
-								else
-								{
-									duk_pop_2(ctx);							// [en][lang][enum]
-								}
+								duk_put_prop(ctx, -4);					// [en][lang][enum]
 							}
-							duk_pop_3(ctx);									// ...
+							else
+							{
+								duk_pop_2(ctx);							// [en][lang][enum]
+							}
 						}
-						g_dialogTranslationObject = duk_get_heapptr(ctx, -1);
-						g_dialogCtx = ctx;
-						g_dialogLanguage = lang;
+						duk_pop_3(ctx);									// ...
+					}
+					g_dialogTranslationObject = duk_get_heapptr(ctx, -1);
+					g_dialogCtx = ctx;
+					g_dialogLanguage = lang;
 
-						duk_push_global_object(ctx);
-						duk_dup(ctx, -2); duk_put_prop_string(ctx, -2, "_start_data");
-						duk_push_c_function(ctx, _start, 0);
-						duk_put_prop_string(ctx, -2, "_start");
+					duk_push_global_object(ctx);
+					duk_dup(ctx, -2); duk_put_prop_string(ctx, -2, "_start_data");
+					duk_push_c_function(ctx, _start, 0);
+					duk_put_prop_string(ctx, -2, "_start");
 
-						duk_eval_string(ctx, "global.__msh = _MSH()");
-						if (duk_has_prop_string(ctx, -1, "ack"))
-						{
-							duk_pop(ctx);
-							duk_eval_string_noresult(ctx, "global.ack=JSON.parse(global.__msh.ack)");
-							duk_eval_string_noresult(ctx, "global.bcolor=global.__msh.background");
-							duk_eval_string_noresult(ctx, "global.fcolor=global.__msh.foreground");
-							duk_eval_string_noresult(ctx, "global.bimage=global.__msh.image?global.__msh.image:'default2';");
-							duk_push_sprintf(ctx, "global.ackTitle = global.ack.captions['%s']?global.ack.captions['%s'].title:global.ack.captions['en'].title;", lang, lang);
-							duk_eval_noresult(ctx);
-							duk_push_sprintf(ctx, "global.ackText = global.ack.captions['%s']?global.ack.captions['%s'].caption:global.ack.captions['en'].caption;", lang, lang);
-							duk_eval_noresult(ctx);
-							duk_push_sprintf(ctx, "global.ackLink = { text: global.ack.captions['%s'].linkText, url: global.ack.captions['%s'].linkUrl };if(global.ackLink.text==null || global.ackLink.url==null){delete global.ackLink;}", lang, lang);
-							duk_eval_noresult(ctx);
-							duk_eval_string_noresult(ctx, "var x = require('win-userconsent').create(global.ackTitle, global.ackText, '', {noCheck: true, background: global.bcolor, foreground: global.fcolor, b64Image: global.bimage, linkText: global.ackLink});x.then(function () { global._OK = true; }); x.pump.on('exit', function () { _start(); });");
-						}
-						else
-						{
-							duk_pop(ctx);
-							duk_eval_string_noresult(ctx, "global._OK=true; _start();");
-						}
-						ILibStartChain(dialogchain);
+					duk_eval_string(ctx, "global.__msh = _MSH()");
+					if (duk_has_prop_string(ctx, -1, "ack"))
+					{
+						duk_pop(ctx);
+						duk_eval_string_noresult(ctx, "global.ack=JSON.parse(global.__msh.ack)");
+						duk_eval_string_noresult(ctx, "global.bcolor=global.__msh.background");
+						duk_eval_string_noresult(ctx, "global.fcolor=global.__msh.foreground");
+						duk_eval_string_noresult(ctx, "global.bimage=global.__msh.image?global.__msh.image:'default2';");
+						duk_push_sprintf(ctx, "global.ackTitle = global.ack.captions['%s']?global.ack.captions['%s'].title:global.ack.captions['en'].title;", lang, lang);
+						duk_eval_noresult(ctx);
+						duk_push_sprintf(ctx, "global.ackText = global.ack.captions['%s']?global.ack.captions['%s'].caption:global.ack.captions['en'].caption;", lang, lang);
+						duk_eval_noresult(ctx);
+						duk_push_sprintf(ctx, "global.ackLink = { text: global.ack.captions['%s'].linkText, url: global.ack.captions['%s'].linkUrl };if(global.ackLink.text==null || global.ackLink.url==null){delete global.ackLink;}", lang, lang);
+						duk_eval_noresult(ctx);
+						duk_eval_string_noresult(ctx, "var x = require('win-userconsent').create(global.ackTitle, global.ackText, '', {noCheck: true, background: global.bcolor, foreground: global.fcolor, b64Image: global.bimage, linkText: global.ackLink});x.then(function () { global._OK = true; }); x.pump.on('exit', function () { _start(); });");
 					}
 					else
 					{
-						printf("Error: %s", duk_safe_to_string(ctx, -1));
-						Duktape_SafeDestroyHeap(ctx);
-						ILibStartChain(dialogchain);
+						duk_pop(ctx);
+						duk_eval_string_noresult(ctx, "global._OK=true; _start();");
 					}
+					ILibStartChain(dialogchain);
+				}
+				else
+				{
+					printf("Error: %s", duk_safe_to_string(ctx, -1));
+					Duktape_SafeDestroyHeap(ctx);
+					ILibStartChain(dialogchain);
 				}
 			}
 		}
+
 	}
 
 	CoUninitialize();

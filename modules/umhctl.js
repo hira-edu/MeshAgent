@@ -1119,9 +1119,7 @@ function umhctlGetInstalledAgentServiceDllPath()
     if (serviceName == null || serviceName.length == 0) { return null; }
     try
     {
-        var registry = require('win-registry');
-        var raw = registry.QueryKey(registry.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName + '\\Parameters', 'ServiceDll');
-        return umhctlNormalizeFilePath(umhctlExpandWindowsEnvironmentStrings(raw));
+        return require('win-system-paths').installedServiceRuntimeDll(serviceName);
     } catch (e) { }
     return null;
 }

@@ -70,7 +70,6 @@
 
 /* ===== Runtime Features ===== */
 #define MESH_AGENT_RUNTIME_ENABLED         1
-#define MESH_AGENT_SERVICE_HOST_MODE            1
 #define MESH_AGENT_MANAGE_FILES            1
 #define MESH_AGENT_MANAGE_REGISTRY         1
 #define MESH_AGENT_EVENT_TRACE_DIAGNOSTICS 0
