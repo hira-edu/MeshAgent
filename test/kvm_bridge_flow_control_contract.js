@@ -50,7 +50,7 @@ function main() {
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const bridgeSource = fs.readFileSync(bridgePath, 'utf8');
     const closeBridgeStart = kvmSource.indexOf('static void kvm_relay_close_bridge_transport(KvmRelayContext* ctx)');
-    const closeBridgeEnd = closeBridgeStart >= 0 ? kvmSource.indexOf('\nstatic BOOL kvm_relay_resolve_rundll32_pathW', closeBridgeStart) : -1;
+    const closeBridgeEnd = closeBridgeStart >= 0 ? kvmSource.indexOf('\nstatic BOOL kvm_relay_resolve_runtime_host_pathW', closeBridgeStart) : -1;
     const closeBridgeBlock = (closeBridgeStart >= 0 && closeBridgeEnd > closeBridgeStart) ? kvmSource.slice(closeBridgeStart, closeBridgeEnd) : '';
     const chainWriteStart = agentcoreSource.indexOf('void ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain');
     const chainWriteEnd = chainWriteStart >= 0 ? agentcoreSource.indexOf('\nvoid KVM_WriteLog', chainWriteStart) : -1;

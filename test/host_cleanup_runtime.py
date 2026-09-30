@@ -29,7 +29,7 @@ def function(source, name):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', type=pathlib.Path, default=ROOT / 'meshservice/rundll32_contract.c')
+    parser.add_argument('--source', type=pathlib.Path, default=ROOT / 'meshservice/runtime_host_contract.c')
     args = parser.parse_args()
     source = args.source.read_text()
     close_start = source.index('typedef struct MeshConsoleBridgeCloseContext')
@@ -37,7 +37,7 @@ def main():
     helpers = function(source, 'MeshConsoleBridge_StopCopyThread') + '\n' + source[close_start:close_end]
     redirect = function(source, 'MeshConsoleBridge_RunRedirectedShellW').split('\ncleanup:', 1)[1]
     conpty = function(source, 'MeshConsoleBridge_RunW').split('\ncleanup:', 1)[1]
-    lifecycle = function(source, 'MeshRundll32_LaunchLifecycleHostW').split('\ncleanup:', 1)[1]
+    lifecycle = function(source, 'MeshRuntimeHost_LaunchLifecycleHostW').split('\ncleanup:', 1)[1]
     prefix = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -66,7 +66,7 @@ typedef void (*MeshConsoleBridge_ClosePseudoConsoleFn)(HANDLE);
 static int stopped[16], closed[16], blocked, createFailed, closeCalled, closeWaits, deleted, removed;
 static ULONGLONG ticks;
 static volatile LONG* outputStop;
-static wchar_t MeshRundll32_TempLifecycleDir[16] = L"temp";
+static wchar_t MeshRuntimeHost_TempLifecycleDir[16] = L"temp";
 static void ServiceDeploy_LogInstallEvent(const wchar_t* fmt, ...) { (void)fmt; }
 static DWORD GetLastError(void) { return 5; }
 static void SetLastError(DWORD e) { (void)e; }
@@ -112,7 +112,7 @@ static BOOL RemoveDirectoryW(const wchar_t* p) { (void)p; ++removed; return TRUE
 static void reset(void) {
     for (int i=0; i<16; ++i) { stopped[i]=closed[i]=0; }
     ticks=0; blocked=createFailed=closeCalled=closeWaits=deleted=removed=0;
-    MeshRundll32_TempLifecycleDir[0]=L't';
+    MeshRuntimeHost_TempLifecycleDir[0]=L't';
 }
 '''
     common = r'''

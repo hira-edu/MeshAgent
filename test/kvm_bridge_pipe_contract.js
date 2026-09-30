@@ -70,7 +70,7 @@ function main() {
 	const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
 	const tilePath = path.resolve('meshcore', 'KVM', 'Windows', 'tile.cpp');
 	const bridgePath = path.resolve('meshservice', 'service_host.c');
-	const smokePath = path.resolve('test', 'rundll32_bridge_smoke.js');
+	const smokePath = path.resolve('test', 'runtime_host_bridge_smoke.js');
 	const kvmSource = readSource(kvmPath);
 	const tileSource = readSource(tilePath);
 	const bridgeSource = readSource(bridgePath);

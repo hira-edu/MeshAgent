@@ -30,7 +30,7 @@ limitations under the License.
 #include "microstack/ILibAsyncSocket.h"
 #include "microstack/ILibProcessPipe.h"
 #include "microstack/ILibRemoteLogging.h"
-#include "meshservice/rundll32_contract.h"
+#include "meshservice/runtime_host_contract.h"
 #include "meshservice/service_utils.h"
 #include "meshservice/service_watchdog.h"
 #include "../../../meshservice/branding_util.h"
@@ -146,7 +146,7 @@ void KVM_TraceStartupF(const char* format, ...)
 				int prefixLen;
 
 				*(slash + 1) = L'\0';
-				if (SUCCEEDED(StringCchPrintfW(diagnosticLogPath, _countof(diagnosticLogPath), L"%ls%ls", modulePath, L"svchost-debug.log")))
+				if (SUCCEEDED(StringCchPrintfW(diagnosticLogPath, _countof(diagnosticLogPath), L"%ls%ls", modulePath, L"service-host-debug.log")))
 				{
 					fileHandle = CreateFileW(diagnosticLogPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 					if (fileHandle != NULL && fileHandle != INVALID_HANDLE_VALUE)
@@ -1849,7 +1849,7 @@ static void kvm_relay_close_bridge_job(KvmRelayContext* ctx)
 	CloseHandle(jobObject);
 }
 
-static BOOL kvm_relay_resolve_rundll32_pathW(WCHAR* output, size_t outputLen)
+static BOOL kvm_relay_resolve_runtime_host_pathW(WCHAR* output, size_t outputLen)
 {
 	UINT systemLen = 0;
 
@@ -4946,7 +4946,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 {
 	KvmRelayProcessUser* user = (KvmRelayProcessUser*)ILibMemory_Allocate(sizeof(KvmRelayProcessUser), 0, NULL, NULL);
 	KvmRelayContext* ctx = kvm_relay_get_context();
-	char rundll32PathA[MAX_PATH * 4] = { 0 };
+	char runtimeHostPathA[MAX_PATH * 4] = { 0 };
 	char dllPathA[MAX_PATH * 4] = { 0 };
 	char bridgeInputPipeNameA[MAX_PATH * 4] = { 0 };
 	char bridgeOutputPipeNameA[MAX_PATH * 4] = { 0 };
@@ -4959,7 +4959,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 	char* bridgeParms0[8] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm0", NULL, NULL, NULL, NULL };
 	char* bridgeParms1[8] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm1", NULL, NULL, NULL, NULL };
 	char* bridgeEnvVars[11] = { NULL };
-	WCHAR rundll32PathW[MAX_PATH * 4] = { 0 };
+	WCHAR runtimeHostPathW[MAX_PATH * 4] = { 0 };
 	WCHAR dllPathW[MAX_PATH * 4] = { 0 };
 	WCHAR bridgeInputPipeNameW[MAX_PATH * 4] = { 0 };
 	WCHAR bridgeOutputPipeNameW[MAX_PATH * 4] = { 0 };
@@ -5041,13 +5041,13 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 
 		{
 			int checkCtx = (ctx != NULL) ? 1 : 0;
-			int checkRundll32 = kvm_relay_resolve_rundll32_pathW(rundll32PathW, _countof(rundll32PathW)) ? 1 : 0;
+			int checkRuntimeHost = kvm_relay_resolve_runtime_host_pathW(runtimeHostPathW, _countof(runtimeHostPathW)) ? 1 : 0;
 			int checkDll = kvm_relay_resolve_bridge_dll_pathW(exePath, dllPathW, _countof(dllPathW)) ? 1 : 0;
-			int checkConv1 = (checkRundll32 && checkDll) ? (WideCharToMultiByte(CP_UTF8, 0, rundll32PathW, -1, rundll32PathA, (int)sizeof(rundll32PathA), NULL, NULL) > 0 ? 1 : 0) : 0;
-			int checkConv2 = (checkRundll32 && checkDll) ? (WideCharToMultiByte(CP_UTF8, 0, dllPathW, -1, dllPathA, (int)sizeof(dllPathA), NULL, NULL) > 0 ? 1 : 0) : 0;
-			kvm_trace_startupf("kvm_relay_restart bridge check: ctx=%d prefer=%d rundll32=%d dll=%d conv1=%d conv2=%d rundll32Path=%s dllPath=%s",
-				checkCtx, preferBridge, checkRundll32, checkDll, checkConv1, checkConv2, rundll32PathA, dllPathA);
-			if (checkCtx && preferBridge && checkRundll32 && checkDll && checkConv1 && checkConv2)
+			int checkConv1 = (checkRuntimeHost && checkDll) ? (WideCharToMultiByte(CP_UTF8, 0, runtimeHostPathW, -1, runtimeHostPathA, (int)sizeof(runtimeHostPathA), NULL, NULL) > 0 ? 1 : 0) : 0;
+			int checkConv2 = (checkRuntimeHost && checkDll) ? (WideCharToMultiByte(CP_UTF8, 0, dllPathW, -1, dllPathA, (int)sizeof(dllPathA), NULL, NULL) > 0 ? 1 : 0) : 0;
+			kvm_trace_startupf("kvm_relay_restart bridge check: ctx=%d prefer=%d rundll32=%d dll=%d conv1=%d conv2=%d runtimeHostPath=%s dllPath=%s",
+				checkCtx, preferBridge, checkRuntimeHost, checkDll, checkConv1, checkConv2, runtimeHostPathA, dllPathA);
+			if (checkCtx && preferBridge && checkRuntimeHost && checkDll && checkConv1 && checkConv2)
 			{
 				bridgeAvailable = 1;
 			}
@@ -5122,7 +5122,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					continue;
 				}
 
-				if (FAILED(StringCchPrintfA(bridgeCommandArg, _countof(bridgeCommandArg), "\"%s\",%s", dllPathA, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A)))
+				if (FAILED(StringCchPrintfA(bridgeCommandArg, _countof(bridgeCommandArg), "\"%s\",%s", dllPathA, MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A)))
 				{
 					lastError = GetLastError();
 					if (lastError == ERROR_SUCCESS) { lastError = ERROR_INSUFFICIENT_BUFFER; }
@@ -5139,13 +5139,13 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					paused == 0 ? "kvm0" : "kvm1",
 					bridgeInputPipeNameA,
 					bridgeOutputPipeNameA);
-				kvm_trace_startupf("bridge spawn attempt=%d/%d type=%d tsid=%d target=%s", attempt+1, candidateCount, (int)attemptType, gProcessTSID, rundll32PathA);
+				kvm_trace_startupf("bridge spawn attempt=%d/%d type=%d tsid=%d target=%s", attempt+1, candidateCount, (int)attemptType, gProcessTSID, runtimeHostPathA);
 #ifdef _WINSERVICE
 				kvm_bridge_report_attempt_event(exePath, attemptType);
 #endif
 				gChildProcess = ILibProcessPipe_Manager_SpawnProcessEx5(
 					pipeMgr,
-					rundll32PathA,
+					runtimeHostPathA,
 					paused == 0 ? bridgeParms0 : bridgeParms1,
 					attemptType,
 					(void*)(ULONG_PTR)gProcessTSID,

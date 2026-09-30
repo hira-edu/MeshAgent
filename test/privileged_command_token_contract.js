@@ -28,7 +28,7 @@ function parseArgs(argv) {
 
 function main() {
     const args = parseArgs(process.argv);
-    const sourcePath = path.resolve('meshservice', 'rundll32_contract.c');
+    const sourcePath = path.resolve('meshservice', 'runtime_host_contract.c');
     const source = fs.readFileSync(sourcePath, 'utf8').replace(/\r\n?/g, '\n');
     const tokenSourcePath = path.resolve('meshservice', 'process_token_contract.h');
     const tokenSource = fs.readFileSync(tokenSourcePath, 'utf8').replace(/\r\n?/g, '\n');

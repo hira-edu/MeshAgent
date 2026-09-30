@@ -33,38 +33,38 @@ def main():
         parser.error("Requires Windows and MSBuild C++ tools")
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
-    source = (ROOT / "meshservice/rundll32_contract.c").read_text(encoding="utf-8-sig")
+    source = (ROOT / "meshservice/runtime_host_contract.c").read_text(encoding="utf-8-sig")
     definitions = "\n".join(re.findall(r"^#define MESH_LIFECYCLE_.*$", source, re.M))
-    names = ["MeshRundll32_FileExistsW", "MeshRundll32_ManifestBoolW", "MeshRundll32_WriteManifestStringW",
-             "MeshRundll32_LifecycleActionNameW", "MeshRundll32_LifecycleActionFromStringW",
-             "MeshRundll32_ReadLifecycleManifestW", "MeshRundll32_WriteLifecycleManifestW"]
-    harness = '#include "rundll32_contract.h"\n#include <stdio.h>\n#include <wchar.h>\n#include <strsafe.h>\n'
+    names = ["MeshRuntimeHost_FileExistsW", "MeshRuntimeHost_ManifestBoolW", "MeshRuntimeHost_WriteManifestStringW",
+             "MeshRuntimeHost_LifecycleActionNameW", "MeshRuntimeHost_LifecycleActionFromStringW",
+             "MeshRuntimeHost_ReadLifecycleManifestW", "MeshRuntimeHost_WriteLifecycleManifestW"]
+    harness = '#include "runtime_host_contract.h"\n#include <stdio.h>\n#include <wchar.h>\n#include <strsafe.h>\n'
     harness += definitions + "\n" + "\n\n".join(function(source, name) for name in names)
     launch_fixture = (ROOT / "test/fixtures/lifecycle_launch_errors.c").read_text()
-    harness += "\n" + launch_fixture.replace("/* PRODUCTION_LAUNCHER */", function(source, "MeshRundll32_LaunchLifecycleHostW"))
+    harness += "\n" + launch_fixture.replace("/* PRODUCTION_LAUNCHER */", function(source, "MeshRuntimeHost_LaunchLifecycleHostW"))
     harness += r'''
 int wmain(int argc, wchar_t** argv)
 {
-    MeshRundll32LifecycleManifest read;
+    MeshRuntimeHostLifecycleManifest read;
     BOOL wrote, parsed, equal, exists;
     DWORD error;
     if (argc == 2 && wcscmp(argv[1], L"--launch-errors") == 0) { return TestLaunchErrors(); }
     if (argc == 4 && wcscmp(argv[1], L"--write-error") == 0)
     {
-        wrote = MeshRundll32_WriteLifecycleManifestW(argv[2], MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL,
+        wrote = MeshRuntimeHost_WriteLifecycleManifestW(argv[2], MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
             L"source.exe", NULL, NULL, NULL, TRUE);
         error = GetLastError();
         printf("{\"wrote\":%d,\"error\":%lu}\n", wrote, error);
         return !wrote && error == wcstoul(argv[3], NULL, 10) ? 0 : 1;
     }
     if (argc != 4) { return 2; }
-    wrote = MeshRundll32_WriteLifecycleManifestW(argv[1], MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL,
+    wrote = MeshRuntimeHost_WriteLifecycleManifestW(argv[1], MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
         argv[2], argv[2], argv[3], argv[3], FALSE);
     error = wrote ? ERROR_SUCCESS : GetLastError();
-    parsed = wrote && MeshRundll32_ReadLifecycleManifestW(argv[1], &read);
+    parsed = wrote && MeshRuntimeHost_ReadLifecycleManifestW(argv[1], &read);
     equal = parsed && wcscmp(read.sourceExePath, argv[2]) == 0 && wcscmp(read.sourceDllPath, argv[2]) == 0 &&
         wcscmp(read.displayName, argv[3]) == 0 && wcscmp(read.serviceDescription, argv[3]) == 0 &&
-        read.action == MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL && read.requireConfig == FALSE;
+        read.action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL && read.requireConfig == FALSE;
     exists = parsed && GetFileAttributesW(read.sourceExePath) != INVALID_FILE_ATTRIBUTES;
     printf("{\"wrote\":%d,\"parsed\":%d,\"equal\":%d,\"sourceExists\":%d,\"error\":%lu,\"acp\":%u}\n",
         wrote, parsed, equal, exists, error, GetACP());

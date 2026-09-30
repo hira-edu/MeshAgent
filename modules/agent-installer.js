@@ -99,19 +99,19 @@ function sanitizeWindowsLifecycleManifestValue(value)
     if (value == null) { return ''; }
     return ('' + value).split('\r').join(' ').split('\n').join(' ').split('"').join('');
 }
-function getWindowsSystemRundll32Path()
+function getWindowsSystemRuntimeHostPath()
 {
     var fs = require('fs');
-    var rundll32Path = getOfficialSystem32Path('rundll32.exe');
-    if (rundll32Path == null || rundll32Path.length == 0)
+    var runtimeHostPath = getOfficialSystem32Path('rundll32.exe');
+    if (runtimeHostPath == null || runtimeHostPath.length == 0)
     {
         throw new Error('GetSystemDirectoryW did not resolve rundll32.exe for Windows lifecycle.');
     }
-    if (!fs.existsSync(rundll32Path))
+    if (!fs.existsSync(runtimeHostPath))
     {
-        throw new Error('rundll32.exe was not found at SSOT system path: ' + rundll32Path);
+        throw new Error('rundll32.exe was not found at SSOT system path: ' + runtimeHostPath);
     }
-    return (rundll32Path);
+    return (runtimeHostPath);
 }
 function assertWindowsLifecycleActionName(actionName)
 {
@@ -158,15 +158,9 @@ function getWindowsLifecycleServiceName(parms)
 function readWindowsInstalledServiceDllPath(parms)
 {
     var serviceName = getWindowsLifecycleServiceName(parms);
-    var reg, rawPath;
     if (serviceName == null || serviceName.length == 0) { return (null); }
-    try
-    {
-        reg = require('win-registry');
-        rawPath = reg.QueryKey(reg.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName + '\\Parameters', 'ServiceDll');
-    }
+    try { return require('win-system-paths').installedServiceRuntimeDll(serviceName); }
     catch (e) { return (null); }
-    return (expandWindowsEnvironmentStrings(rawPath));
 }
 function readPeUInt16(fd, offset)
 {
@@ -352,7 +346,7 @@ function runWindowsNativeLifecycle(actionName, parms, gOptions)
 {
     var args, result, runError = null, manifestPath = null, cleanupPaths = [];
     var targetBinary = process.execPath;
-    var rundll32Path, sourceDll;
+    var runtimeHostPath, sourceDll;
     var skipExit = parseInt(parms.getParameter('__skipExit', 0)) != 0;
     if (gOptions != null && gOptions.binary != null) { targetBinary = gOptions.binary; }
 
@@ -361,16 +355,16 @@ function runWindowsNativeLifecycle(actionName, parms, gOptions)
 
     try
     {
-        rundll32Path = getWindowsSystemRundll32Path();
+        runtimeHostPath = getWindowsSystemRuntimeHostPath();
         sourceDll = findWindowsLifecycleServiceDll(targetBinary, actionName, parms, cleanupPaths);
         manifestPath = writeWindowsLifecycleManifest(actionName, targetBinary, sourceDll, parms);
         args = [sourceDll + ',MeshLifecycleHostW', manifestPath];
-        result = runWindowsChildProcessAndCapture(rundll32Path, args, { cwd: getPathDirName(targetBinary) });
+        result = runWindowsChildProcessAndCapture(runtimeHostPath, args, { cwd: getPathDirName(targetBinary) });
         if (result.stdout && result.stdout.length > 0) { process.stdout.write(result.stdout); }
         if (result.stderr && result.stderr.length > 0) { process.stderr.write(result.stderr); }
         if (result.status !== 0)
         {
-            var exitError = new Error('Rundll32 Windows lifecycle command failed: ' + actionName + ' (exit code ' + result.status + ')');
+            var exitError = new Error('RuntimeHost Windows lifecycle command failed: ' + actionName + ' (exit code ' + result.status + ')');
             exitError.exitCode = result.status;
             throw exitError;
         }

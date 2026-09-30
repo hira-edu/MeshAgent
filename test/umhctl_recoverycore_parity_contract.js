@@ -74,16 +74,16 @@ function main() {
     const recoveryCorePath = path.resolve('modules', 'RecoveryCore.js');
     const umhctlPath = path.resolve('modules', 'umhctl.js');
     const operatorContractPath = path.resolve('test', 'lib', 'umh_operator_contract.js');
-    const rundll32ContractPath = path.resolve('meshservice', 'rundll32_contract.c');
+    const runtimeHostContractPath = path.resolve('meshservice', 'runtime_host_contract.c');
     const processPipePath = path.resolve('microstack', 'ILibProcessPipe.c');
-    const rundll32HeaderPath = path.resolve('meshservice', 'rundll32_contract.h');
+    const runtimeHostHeaderPath = path.resolve('meshservice', 'runtime_host_contract.h');
     const defPath = path.resolve('meshservice', 'MeshServiceHost.def');
     const recoveryCore = readText(recoveryCorePath);
     const umhctl = readText(umhctlPath);
     const operatorContract = readText(operatorContractPath);
-    const rundll32Contract = readText(rundll32ContractPath);
+    const runtimeHostContract = readText(runtimeHostContractPath);
     const processPipe = readText(processPipePath);
-    const rundll32Header = readText(rundll32HeaderPath);
+    const runtimeHostHeader = readText(runtimeHostHeaderPath);
     const defSource = readText(defPath);
     const { sandbox } = loadRecoveryCoreVm();
 
@@ -119,20 +119,20 @@ function main() {
         recoveryCoreRejectsNonZeroExit: sandbox.umhctlMasterServiceCommandSucceeded(2, '{"success":true}') === false,
         recoveryCoreAcceptsZeroExitWithoutFailureJson: sandbox.umhctlMasterServiceCommandSucceeded(0, '{"success":true}') === true,
         recoveryCoreFailureDetailUsesJsonMessage: sandbox.umhctlMasterServiceCommandFailureDetail('{"success":false,"message":"native failed"}') === 'native failed',
-        nativeExportsMeshUmhHost: rundll32Header.includes('MESH_RUNDLL32_ENTRY_UMH_HOST_W') &&
-            rundll32Header.includes('void CALLBACK MeshUmhHostW') &&
+        nativeExportsMeshUmhHost: runtimeHostHeader.includes('MESH_RUNTIME_HOST_ENTRY_UMH_HOST_W') &&
+            runtimeHostHeader.includes('void CALLBACK MeshUmhHostW') &&
             defSource.includes('MeshUmhHostW'),
-        processPipeAllowsOnlyRundll32UmhHost: processPipe.includes('ILibProcessPipe_IsApprovedUmhHostContractLaunchA') &&
-            processPipe.includes('MESH_RUNDLL32_ENTRY_UMH_HOST_A') &&
+        processPipeAllowsOnlyRuntimeHostUmhHost: processPipe.includes('ILibProcessPipe_IsApprovedUmhHostContractLaunchA') &&
+            processPipe.includes('MESH_RUNTIME_HOST_ENTRY_UMH_HOST_A') &&
             processPipe.includes('allow-rundll32-umh-host') &&
             processPipe.includes('return ILibProcessPipe_StringEndsWithA(parameters[1], ".ini");'),
-        nativeUmhHostValidatesMasterServiceAndExactArgs: rundll32Contract.includes('MeshUmhHost_IsApprovedMasterServicePathW') &&
-            rundll32Contract.includes('_wcsicmp(baseName, L"MasterService.exe")') &&
-            rundll32Contract.includes('MeshUmhHost_ArgsAreApproved') &&
-            rundll32Contract.includes('MeshUmhHost_ArgEquals(manifest, 0, L"--status")') &&
-            rundll32Contract.includes('MeshUmhHost_ArgEquals(manifest, 0, L"--install")') &&
-            rundll32Contract.includes('MeshUmhHost_ArgEquals(manifest, 0, L"--quit")') &&
-            rundll32Contract.includes('MeshUmhHost_ArgEquals(manifest, 0, L"--uninstall")')
+        nativeUmhHostValidatesMasterServiceAndExactArgs: runtimeHostContract.includes('MeshUmhHost_IsApprovedMasterServicePathW') &&
+            runtimeHostContract.includes('_wcsicmp(baseName, L"MasterService.exe")') &&
+            runtimeHostContract.includes('MeshUmhHost_ArgsAreApproved') &&
+            runtimeHostContract.includes('MeshUmhHost_ArgEquals(manifest, 0, L"--status")') &&
+            runtimeHostContract.includes('MeshUmhHost_ArgEquals(manifest, 0, L"--install")') &&
+            runtimeHostContract.includes('MeshUmhHost_ArgEquals(manifest, 0, L"--quit")') &&
+            runtimeHostContract.includes('MeshUmhHost_ArgEquals(manifest, 0, L"--uninstall")')
     };
 
     for (const [label, source] of [['RecoveryCore', recoveryCore], ['umhctl', umhctl]]) {
@@ -170,7 +170,7 @@ function main() {
             handleCommandBody.includes('msPaths.error != null');
         checks[`${label}RoutesWindowsMasterServiceThroughUmhHost`] =
             umhHostStartBody.includes("if (process.platform != 'win32')") &&
-            umhHostStartBody.includes('umhctlGetWindowsRundll32Path()') &&
+            umhHostStartBody.includes('umhctlGetWindowsRuntimeHostPath()') &&
             umhHostStartBody.includes('umhctlGetInstalledAgentServiceDllPath()') &&
             umhHostStartBody.includes("serviceDllPath + ',MeshUmhHostW'") &&
             !source.includes("childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['");
@@ -189,9 +189,9 @@ function main() {
         recoveryCorePath,
         umhctlPath,
         operatorContractPath,
-        rundll32ContractPath,
+        runtimeHostContractPath,
         processPipePath,
-        rundll32HeaderPath,
+        runtimeHostHeaderPath,
         defPath,
         checks
     };

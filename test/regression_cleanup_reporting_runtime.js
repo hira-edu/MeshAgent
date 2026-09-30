@@ -18,7 +18,7 @@ function groupedCase(name, options) {
     const sandbox = {
         __dirname, process: { platform: 'win32', env: {}, argv: [] }, Buffer, console,
         require(module) {
-            if (module === './lib/provisioning_identity' || module === './lib/rundll32_lifecycle') { return {}; }
+            if (module === './lib/provisioning_identity' || module === './lib/runtime_host_lifecycle') { return {}; }
             if (module === 'child_process') { return { spawnSync() { throw Error('Unexpected product process launch'); } }; }
             if (module === 'fs') { return {}; }
             assert(['crypto', 'os', 'path'].includes(module), `Unexpected dependency ${module}`);

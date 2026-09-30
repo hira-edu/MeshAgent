@@ -6,7 +6,7 @@ const {
     assert,
     parseArgs,
     resolveBridgeDllPath,
-    resolveRundll32Path,
+    resolveRuntimeHostPath,
     runSystemScheduledTask,
     waitForReadableFile,
     writeJson,
@@ -47,7 +47,7 @@ function createCollectorScript(scriptPath) {
         "const fs = require('fs');",
         "const cp = require('child_process');",
         "const net = require('net');",
-        "const rundll32 = process.argv[2];",
+        "const runtimeHost = process.argv[2];",
         "const dll = process.argv[3];",
         "const reportPath = process.argv[4];",
         "function pkt(type, payload) {",
@@ -92,7 +92,7 @@ function createCollectorScript(scriptPath) {
         "}",
         "function flush(tag) {",
         "    fs.writeFileSync(reportPath, JSON.stringify({",
-        "        rundll32,",
+        "        runtimeHost,",
         "        dll,",
         "        controlPipeName,",
         "        dataPipeName,",
@@ -143,12 +143,12 @@ function createCollectorScript(scriptPath) {
         "});",
         "controlServer.listen(controlPipeName, () => {",
         "    dataServer.listen(dataPipeName, () => {",
-        "        child = cp.spawn(rundll32, [`${dll},KvmSessionBridgeW`, controlPipeName, dataPipeName], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: process.env });",
+        "        child = cp.spawn(runtimeHost, [`${dll},KvmSessionBridgeW`, controlPipeName, dataPipeName], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: process.env });",
         "    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); flush('stdout'); });",
         "    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); flush('stderr'); });",
         "    child.on('exit', (code, signal) => {",
         "        fs.writeFileSync(reportPath, JSON.stringify({",
-        "            rundll32,",
+        "            runtimeHost,",
         "            dll,",
         "            controlPipeName,",
         "            dataPipeName,",
@@ -204,7 +204,7 @@ async function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveBridgeDllPath(exePath, args.dll ? path.resolve(args.dll) : null);
-    const rundll32Path = resolveRundll32Path();
+    const runtimeHostPath = resolveRuntimeHostPath();
     const collectorPath = path.join(os.tmpdir(), `kvm_system_picture_${process.pid}_${Date.now()}.js`);
     const reportPath = path.join(os.tmpdir(), `kvm_system_picture_${process.pid}_${Date.now()}.json`);
     const animationPath = path.join(os.tmpdir(), `kvm_system_picture_${process.pid}_${Date.now()}.ps1`);
@@ -214,7 +214,7 @@ async function main() {
     createCollectorScript(collectorPath);
     createAnimationScript(animationPath);
 
-    const systemTask = await runSystemScheduledTask(process.execPath, [collectorPath, rundll32Path, dllPath, reportPath], {
+    const systemTask = await runSystemScheduledTask(process.execPath, [collectorPath, runtimeHostPath, dllPath, reportPath], {
         prefix: `meshagent_kvm_system_picture_${process.pid}_${Date.now()}`,
         reportPath,
         timeoutMs: 60000
@@ -248,7 +248,7 @@ async function main() {
         `GENERATED_UTC=${new Date().toISOString()}`,
         `SOURCE_EXE=${exePath}`,
         `DLL=${dllPath}`,
-        `RUNDLL32=${rundll32Path}`,
+        `RUNTIME_HOST=${runtimeHostPath}`,
         `SYSTEM_TASK=${systemTask.taskName}`,
         `PICTURE_PACKETS=${pictureCount}`,
         `JUMBO_PACKETS=${jumboCount}`,
@@ -261,7 +261,7 @@ async function main() {
         writeJson(path.join(evidenceDir, 'kvm_system_picture_runtime.json'), {
             generatedUtc: new Date().toISOString(),
             exePath,
-            rundll32Path,
+            runtimeHostPath,
             systemTaskName: systemTask.taskName,
             systemTaskCommandLine: systemTask.commandLine,
             systemTaskCreateStdout: systemTask.create.stdout || '',
@@ -285,7 +285,7 @@ async function main() {
     } else {
         process.stdout.write(JSON.stringify({
             exePath,
-            rundll32Path,
+            runtimeHostPath,
             systemTaskName: systemTask.taskName,
             report
         }, null, 2) + '\n');

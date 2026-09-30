@@ -33,13 +33,15 @@ function extractFunctionBody(source, functionName) {
 function verifyUsesServiceKey(sourcePath, functionName) {
     const source = fs.readFileSync(sourcePath, 'utf8');
     const body = extractFunctionBody(source, functionName);
-    assert(body.includes('MeshService_GetServiceFileText()'), `${functionName} must use MeshService_GetServiceFileText()`);
+    assert(body.includes('g_ServiceHostServiceName'), `${functionName} must use the SCM-provided service key`);
+    assert(source.includes('ServiceHost_SetScmServiceName(dwArgc, lpszArgv)'), 'SCM name must be populated from service-main arguments');
     assert(!body.includes('MeshService_GetServiceNameText()'), `${functionName} must not use MeshService_GetServiceNameText()`);
 }
 
 function main() {
     const repoRoot = path.resolve(__dirname, '..');
-    verifyUsesServiceKey(path.join(repoRoot, 'meshservice', 'ServiceMain.c'), 'MeshService_AllowStop');
+    const deliveryExe = fs.readFileSync(path.join(repoRoot, 'meshservice', 'ServiceMain.c'), 'utf8');
+    assert(!deliveryExe.includes('MeshService_AllowStop'), 'delivery EXE must not expose a second SCM stop handler');
     verifyUsesServiceKey(path.join(repoRoot, 'meshservice', 'service_host.c'), 'ServiceHost_AllowStop');
     process.stdout.write(JSON.stringify({ success: true }, null, 2) + '\n');
 }

@@ -1,5 +1,5 @@
 EXPORTS
-    ServiceHost_ServiceMain
+    MeshServiceHostW
     KvmSessionBridgeW
     MeshConsoleBridgeW
     MeshUmhHostW

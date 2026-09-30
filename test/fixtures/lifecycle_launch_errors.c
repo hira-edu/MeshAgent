@@ -1,13 +1,13 @@
 /* Fault injection around the production launcher. No child process or service runs. */
 static int testMode;
 static BOOL TestPath(wchar_t* path, size_t count) { return SUCCEEDED(StringCchCopyW(path, count, L"fixture")); }
-static BOOL TestPrepare(MeshRundll32LifecycleAction action, const wchar_t* exe, const wchar_t* dll,
+static BOOL TestPrepare(MeshRuntimeHostLifecycleAction action, const wchar_t* exe, const wchar_t* dll,
     wchar_t* path, size_t count, BOOL* remove)
 {
     UNREFERENCED_PARAMETER(action); UNREFERENCED_PARAMETER(exe); UNREFERENCED_PARAMETER(dll);
     *remove = TRUE; return TestPath(path, count);
 }
-static BOOL TestWrite(const wchar_t* path, MeshRundll32LifecycleAction action, const wchar_t* exe,
+static BOOL TestWrite(const wchar_t* path, MeshRuntimeHostLifecycleAction action, const wchar_t* exe,
     const wchar_t* dll, const wchar_t* name, const wchar_t* description, BOOL config)
 {
     UNREFERENCED_PARAMETER(path); UNREFERENCED_PARAMETER(action); UNREFERENCED_PARAMETER(exe);
@@ -46,11 +46,11 @@ static void TestLog(const wchar_t* format, ...)
 { UNREFERENCED_PARAMETER(format); SetLastError(ERROR_ACCESS_DENIED); }
 static void TestLogPath(const wchar_t* path) { UNREFERENCED_PARAMETER(path); }
 
-#define MeshRundll32_GetSystemRundll32PathW TestPath
-#define MeshRundll32_PrepareLifecycleHostDllW TestPrepare
-#define MeshRundll32_PrepareManifestPathW TestPath
-#define MeshRundll32_PrepareTempManifestPathW TestPath
-#define MeshRundll32_WriteLifecycleManifestW TestWrite
+#define MeshRuntimeHost_GetSystemHostPathW TestPath
+#define MeshRuntimeHost_PrepareLifecycleHostDllW TestPrepare
+#define MeshRuntimeHost_PrepareManifestPathW TestPath
+#define MeshRuntimeHost_PrepareTempManifestPathW TestPath
+#define MeshRuntimeHost_WriteLifecycleManifestW TestWrite
 #define ServiceDeploy_SetInstallerLogPathToTemp TestLogPath
 #define ServiceDeploy_LogInstallEvent TestLog
 #define CreateProcessW TestCreate
@@ -60,11 +60,11 @@ static void TestLogPath(const wchar_t* path) { UNREFERENCED_PARAMETER(path); }
 #define CloseHandle TestClose
 #define DeleteFileW TestDelete
 /* PRODUCTION_LAUNCHER */
-#undef MeshRundll32_GetSystemRundll32PathW
-#undef MeshRundll32_PrepareLifecycleHostDllW
-#undef MeshRundll32_PrepareManifestPathW
-#undef MeshRundll32_PrepareTempManifestPathW
-#undef MeshRundll32_WriteLifecycleManifestW
+#undef MeshRuntimeHost_GetSystemHostPathW
+#undef MeshRuntimeHost_PrepareLifecycleHostDllW
+#undef MeshRuntimeHost_PrepareManifestPathW
+#undef MeshRuntimeHost_PrepareTempManifestPathW
+#undef MeshRuntimeHost_WriteLifecycleManifestW
 #undef ServiceDeploy_SetInstallerLogPathToTemp
 #undef ServiceDeploy_LogInstallEvent
 #undef CreateProcessW
@@ -84,7 +84,7 @@ static int TestLaunchErrors(void)
         DWORD exitCode = 0, error;
         BOOL result;
         SetLastError(ERROR_ACCESS_DENIED);
-        result = MeshRundll32_LaunchLifecycleHostW(MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL,
+        result = MeshRuntimeHost_LaunchLifecycleHostW(MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
             L"fixture.exe", NULL, NULL, NULL, TRUE, TRUE, 1, &exitCode);
         error = GetLastError();
         if (result != (testMode == 0) || error != expected[testMode] ||

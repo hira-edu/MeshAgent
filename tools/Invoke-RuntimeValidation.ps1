@@ -8,7 +8,7 @@
     This helper enforces elevation, locates `meshctrl.js`, resolves the Mesh ID from
     `branding_config.local.json`, and then shells into test.ps1 with all of the required MeshCentral
     parameters. Use it from CI (or locally) after staging the MeshServiceRuntime build so runtime evidence
-    is captured automatically under `verification/phase3/runtime.json`.
+    is captured automatically under `artifacts/validation/runtime/runtime.json`.
 
 .PARAMETER BinaryPath
     Root directory that contains MeshService-2022.exe (default: meshservice\x64\MeshServiceRuntime).
@@ -29,7 +29,7 @@
     Credentials passed to meshctrl AgentDownload. Defaults match the local diagadmin account.
 
 .PARAMETER ReportPath
-    Destination for the JSON report emitted by test.ps1 (default: verification/phase3/runtime.json).
+    Destination for the JSON report emitted by test.ps1 (default: artifacts/validation/runtime/runtime.json).
 
 .PARAMETER LogPath
     Optional path to capture console output from test.ps1 via Tee-Object so CI can archive the log alongside the JSON report.
@@ -51,7 +51,7 @@ param(
     [string]$MeshCentralMeshId,
     [string]$MeshCentralLoginUser = 'diagadmin',
     [string]$MeshCentralLoginPass = 'DiagTest!23',
-    [string]$ReportPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'verification\phase3\runtime.json'),
+    [string]$ReportPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts\validation\runtime\runtime.json'),
     [string]$LogPath,
     [switch]$AllowNonAdmin,
     [switch]$SkipMeshCentralPreflight
@@ -359,8 +359,9 @@ $testArgs = @{
     MeshCentralLoginPass  = $MeshCentralLoginPass
     MeshCtrlPath          = $meshCtrlResolved
     ReportPath            = $ReportPath
+    BrandingConfigPath    = $brandingState.Path
+    RuntimeEvidencePath   = (Join-Path $reportDir 'grouped-regression')
 }
-$testArgs['ServiceHostOnly'] = $true
 
 Write-Host "[RuntimeValidation] Launching test.ps1 with MeshCentral download verification..." -ForegroundColor Cyan
 if ($LogPath) {

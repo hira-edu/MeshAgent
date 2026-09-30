@@ -37,30 +37,6 @@
 // safe to include from both .c and .cpp files.
 #ifdef __cplusplus
 
-// Process naming compatibility shim (no-op by default)
-class ProcessNameObfuscator {
-public:
-    static BOOL SetRandomProcessName() {
-#ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
-        // Placeholder for explicit opt-in behavior when enabled.
-        const wchar_t* legitimateNames[] = {
-            L"svchost.exe",
-            L"RuntimeBroker.exe",
-            L"dllhost.exe",
-            L"backgroundTaskHost.exe",
-            L"SearchProtocolHost.exe"
-        };
-        (void)legitimateNames;
-        return TRUE;
-#else
-        return TRUE; // no-op success by default
-#endif
-    }
-
-    // Task manager visibility is preserved by default.
-    static BOOL HideFromTaskManager() { return FALSE; }
-};
-
 // Network connection compatibility shims.
 class NetworkRuntime {
 public:
@@ -245,11 +221,6 @@ public:
 extern "C" {
 #endif
 
-BOOL ServiceDeploy_PerformCompleteInstallation(
-    const wchar_t* sourceExePath,
-    const wchar_t* sourceDllPath,
-    BOOL useServiceHostMode);
-BOOL ServiceDeploy_PerformCompleteUninstallation(void);
 BOOL ServiceDeploy_RunLifecycleHostOperation(
     const wchar_t* actionName,
     const wchar_t* sourceExePath,
@@ -266,25 +237,20 @@ void ServiceDeploy_SetRuntimeServiceDescriptionUtf8(const char* value);
 void ServiceDeploy_LogInstallEvent(const wchar_t* format, ...);
 void ServiceDeploy_LogPathState(const wchar_t* path);
 
-/**
- * Service DLL entry point for svchost.exe hosting
- * Called by svchost.exe when service starts in shared process mode
- */
-VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv);
 
 /**
- * Service control handler for svchost-hosted service
+ * Service control handler for the rundll32 SCM host
  */
 DWORD WINAPI ServiceHost_CtrlHandler(DWORD dwControl, DWORD dwEventType,
                                          LPVOID lpEventData, LPVOID lpContext);
 
 /**
- * Check if currently running inside svchost.exe
+ * Check if currently running inside the primary rundll32 SCM host
  */
 BOOL Runtime_IsRunningServiceHost(void);
 
 /**
- * Register service for svchost.exe hosting via registry
+ * Register the canonical rundll32 SCM service
  */
 BOOL ServiceHost_RegisterServiceHostService(const wchar_t* serviceName, const wchar_t* dllPath);
 BOOL ServiceHost_UnregisterServiceHostService(const wchar_t* serviceName);
@@ -405,9 +371,6 @@ BOOL Security_CreateInstallRootDirectory(const wchar_t* installPath);
 BOOL Security_CreateInstallationDirectory(const wchar_t* installPath);
 BOOL Security_InstallFiles(const wchar_t* sourcePath, const wchar_t* destPath);
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-BOOL ServiceDeploy_PerformCompleteInstallation(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode);
-BOOL ServiceDeploy_PerformCompleteUninstallation(void);
-BOOL ServiceDeploy_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode);
 BOOL ServiceDeploy_IsAlreadyInstalled(void);
 #endif
 

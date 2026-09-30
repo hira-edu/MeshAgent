@@ -119,7 +119,7 @@ function main() {
     const updateContractPath = path.resolve('meshcore', 'config', 'update_defines.h');
     const agentInstallerPath = path.resolve('modules', 'agent-installer.js');
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
-    const rundll32ContractPath = path.resolve('meshservice', 'rundll32_contract.c');
+    const runtimeHostContractPath = path.resolve('meshservice', 'runtime_host_contract.c');
     const serviceInstallerPath = path.resolve('meshservice', 'service_deployment.c');
     const rootMeshcorePath = path.resolve('..', 'MeshCentral', 'meshcore.js');
     const rootMeshcoreMinPath = path.resolve('..', 'MeshCentral', 'meshcore.min.js');
@@ -132,7 +132,7 @@ function main() {
     const updateContractSource = loadText(updateContractPath);
     const agentInstallerSource = loadText(agentInstallerPath);
     const serviceMainSource = loadText(serviceMainPath);
-    const rundll32ContractSource = loadText(rundll32ContractPath);
+    const runtimeHostContractSource = loadText(runtimeHostContractPath);
     const serviceInstallerSource = loadText(serviceInstallerPath);
     const rootMeshcoreSource = loadOptionalText(rootMeshcorePath);
     const rootMeshcoreMinSource = loadOptionalText(rootMeshcoreMinPath);
@@ -146,8 +146,8 @@ function main() {
     const jsWindowsUpdate = extractFunction(agentInstallerSource, 'function windowsNativeUpdate(isservice, b64)');
     const jsPackageLifecycleActions = extractFunction(agentInstallerSource, 'function isWindowsPackageLifecycleAction(actionName)');
     const nativeUpdateIngress = extractFunction(serviceMainSource, 'static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)');
-    const lifecycleHost = extractFunction(rundll32ContractSource, 'void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)');
-    const lifecycleDispatcher = extractFunction(serviceInstallerSource, 'static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig)');
+    const lifecycleHost = extractFunction(runtimeHostContractSource, 'void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)');
+    const lifecycleDispatcher = extractFunction(serviceInstallerSource, 'static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig)');
 
     const meshcentralLegacyTokens = ['.update.exe', '_wexecve', '-b64exec ', '-fullupdate', 'windows_getNativeUpdateActivationPath', 'windows_tryNativeFullUpdate', 'windows_execve'];
     const rootMeshcoreLegacyHits = findTokens(rootMeshcoreSource, meshcentralLegacyTokens);
@@ -202,13 +202,13 @@ function main() {
             serviceInstallerSource.includes('#include "../meshcore/config/update_defines.h"') &&
             !agentcoreSource.includes('#define MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX') &&
             !serviceInstallerSource.includes('#define SERVICE_UPDATE_ACTIVATION_TARGET_KEY'),
-        agentcoreSelfUpdateLaunchesRundll32Lifecycle: agentcoreSource.includes('SelfUpdate -> ServiceHost mode: launching rundll32 lifecycle update activation') &&
-            agentcoreSource.includes('MeshRundll32_LaunchLifecycleHostW(') &&
-            agentcoreSource.includes('MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE') &&
+        agentcoreSelfUpdateLaunchesRuntimeHostLifecycle: agentcoreSource.includes('SelfUpdate -> Launching rundll32 lifecycle update activation') &&
+            agentcoreSource.includes('MeshRuntimeHost_LaunchLifecycleHostW(') &&
+            agentcoreSource.includes('MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE') &&
             agentcoreSource.includes('w_updatefile'),
-        agentcoreWaitsForRundll32LifecycleResult: updateContractSource.includes('#define MESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS   600000') &&
+        agentcoreWaitsForRuntimeHostLifecycleResult: updateContractSource.includes('#define MESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS   600000') &&
             agentcoreSource.includes('TRUE,\n\t\t\t\tMESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS') &&
-            agentcoreSource.includes('SelfUpdate -> Rundll32 lifecycle update activation completed') &&
+            agentcoreSource.includes('SelfUpdate -> RuntimeHost lifecycle update activation completed') &&
             agentcoreSource.includes('SelfUpdate -> FAILED rundll32 lifecycle update activation') &&
             agentcoreSource.includes('keeping current agent online'),
         agentcoreHoldsFailedPackageHash: agentcoreSource.includes('MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, cm->coreModuleHash)') &&
@@ -216,7 +216,7 @@ function main() {
             agentcoreSource.includes('SelfUpdate -> reporting failed update package hash separately from installed identity') &&
             agentcoreSource.includes('agentupdatefailure') &&
             agentcoreSource.includes('SelfUpdate -> Same update package previously failed activation; suppressing repeat activation'),
-        agentcoreFailsClosedWhenRundll32Unavailable: agentcoreSource.includes('SelfUpdate -> Windows lifecycle update requires rundll32/svchost mode; legacy command-shell update path disabled.') &&
+        agentcoreFailsClosedWhenRuntimeHostUnavailable: agentcoreSource.includes('SelfUpdate -> Windows lifecycle update requires the rundll32 lifecycle runtime; legacy command-shell update path disabled.') &&
             agentcoreSource.includes('util_deletefile(updatefile); // Fail closed'),
         agentcoreDoesNotUseLegacyWindowsUpdateExe: !agentcoreSource.includes('.update.exe') &&
             !agentcoreSource.includes('_wexecve') &&
@@ -235,17 +235,17 @@ function main() {
         agentInstallerDoesNotUseLegacyUpdateExe: !agentInstallerSource.includes("'.update.exe'") &&
             !agentInstallerSource.includes('".update.exe"'),
         nativeUpdateIngressesConvergeOnSharedLauncher:
-            agentcoreSelfUpdate.includes('MeshRundll32_LaunchLifecycleHostW(') &&
+            agentcoreSelfUpdate.includes('MeshRuntimeHost_LaunchLifecycleHostW(') &&
             nativeJsUpdateActivation.includes('MeshAgent_RunNativeServiceFullUpdate(') &&
-            nativeUpdateIngress.includes('MeshRundll32_LaunchLifecycleHostW(') &&
+            nativeUpdateIngress.includes('MeshRuntimeHost_LaunchLifecycleHostW(') &&
             lifecycleHost.includes('ServiceDeploy_RunLifecycleHostOperation('),
         oneNativeUpdateTransactionExecutor:
             (serviceInstallerSource.match(/static BOOL ServiceDeploy_ApplyUpdateFlow\([^;{]*\)\s*\{/g) || []).length === 1 &&
-            lifecycleDispatcher.includes('ok = ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, TRUE, requireConfig);'),
+            lifecycleDispatcher.includes('ok = ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, requireConfig);'),
         serviceInstallerPromotesFailedActivationHold: serviceInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY') &&
             serviceInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY') &&
-            serviceInstallerSource.includes('ServiceDeploy_RecordUpdateActivationFailureHold(&paths);') &&
-            serviceInstallerSource.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]");') &&
+            serviceInstallerSource.includes('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') &&
+            serviceInstallerSource.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]")') &&
             serviceInstallerSource.includes('Recorded failed update activation package hash hold')
     };
 
@@ -258,7 +258,7 @@ function main() {
         updateContractPath,
         agentInstallerPath,
         serviceMainPath,
-        rundll32ContractPath,
+        runtimeHostContractPath,
         serviceInstallerPath,
         rootMeshcorePath,
         rootMeshcoreMinPath,

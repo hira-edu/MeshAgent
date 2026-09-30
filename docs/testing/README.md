@@ -14,7 +14,7 @@ node .\test\health_check_branding_contract.js
 node .\test\drift_reduction_contract.js
 node .\test\kvm_bridge_pipe_contract.js
 node .\test\kvm_bridge_lifecycle_contract.js
-node .\test\rundll32_lifecycle_staging_contract.js
+node .\test\runtime_host_lifecycle_staging_contract.js
 node .\test\update_quiesce_contract.js
 node .\test\websocket_state_lifecycle_contract.js
 node .\test\large_file_transfer_contract.js
@@ -81,11 +81,17 @@ python3 test/process_pipe_lifetime_runtime.py
 python3 test/host_cleanup_runtime.py
 python3 test/agentcore_auth_failure_runtime.py
 python3 test/service_update_recovery_native.py
+python3 test/runtime_host_service_host_native.py
+python3 test/service_binding_transaction_native.py
+python3 test/service_transaction_journal_native.py
+node test/runtime_host_installed_runtime_paths_runtime.js
 ```
 
 These cover notification allocation failure, pipe callback lifetime and pending
 reads, console cleanup under backpressure, authentication rejection and service
-exit reporting, and update/repair rollback ordering. They launch no agent or
+exit reporting, update/repair rollback ordering, primary RuntimeHost command admission,
+SCM registration failures, original-binding restoration, and durable checkpoint
+corruption and write failures. They launch no agent or
 service. Passing them does not establish Windows overlapped-I/O, ConPTY, SCM,
 filesystem rollback, or desktop-session integration; those still require the
 matching Windows build and approved runtime host.

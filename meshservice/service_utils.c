@@ -172,37 +172,7 @@ cleanup:
     return success;
 }
 
-BOOL ServiceUtil_GetSystemServiceHostPathW(wchar_t* outPath, size_t outPathSize)
-{
-    UINT systemLen;
 
-    if (outPath == NULL || outPathSize == 0 || outPathSize > UINT_MAX)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-    outPath[0] = L'\0';
-
-    systemLen = GetSystemDirectoryW(outPath, (UINT)outPathSize);
-    if (systemLen == 0 || systemLen >= outPathSize)
-    {
-        outPath[0] = L'\0';
-        SetLastError(systemLen == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER);
-        return FALSE;
-    }
-    if (FAILED(StringCchCatW(outPath, outPathSize, L"\\svchost.exe")))
-    {
-        outPath[0] = L'\0';
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        return FALSE;
-    }
-    if (GetFileAttributesW(outPath) == INVALID_FILE_ATTRIBUTES)
-    {
-        outPath[0] = L'\0';
-        return FALSE;
-    }
-    return TRUE;
-}
 
 /*
  * Build a sanitized token from a service name for use in task names etc.

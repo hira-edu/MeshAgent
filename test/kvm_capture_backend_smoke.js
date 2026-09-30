@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const net = require('net');
 const childProcess = require('child_process');
-const { getSystemRundll32Path } = require('./lib/rundll32_lifecycle');
+const { getSystemRuntimeHostPath } = require('./lib/runtime_host_lifecycle');
 
 const PACKET_TYPES = {
     0: 'nop',
@@ -142,9 +142,9 @@ async function main() {
     const scenario = SCENARIOS[scenarioName];
     const holdMs = args['hold-ms'] == null ? 500 : Number(args['hold-ms']);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const rundll32Path = getSystemRundll32Path();
+    const runtimeHostPath = getSystemRuntimeHostPath();
     const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
-    const logPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'svchost-debug.log');
+    const logPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'service-host-debug.log');
     const controlPipeName = `\\\\.\\pipe\\MeshKvmBackend_${process.pid}_${Date.now()}_in`;
     const dataPipeName = `\\\\.\\pipe\\MeshKvmBackend_${process.pid}_${Date.now()}_out`;
     const packets = [];
@@ -158,13 +158,13 @@ async function main() {
 
     assert(scenario, `Unknown scenario: ${scenarioName}`);
     assert(Number.isFinite(holdMs) && holdMs >= 0 && holdMs <= 60000, `Invalid hold-ms: ${args['hold-ms']}`);
-    assert(fs.existsSync(rundll32Path), `rundll32.exe not found at ${rundll32Path}`);
+    assert(fs.existsSync(runtimeHostPath), `rundll32.exe not found at ${runtimeHostPath}`);
     assert(fs.existsSync(dllPath), `bridge DLL not found at ${dllPath}`);
 
     const report = {
         generatedUtc: new Date().toISOString(),
         scenario: scenarioName,
-        rundll32Path,
+        runtimeHostPath,
         dllPath,
         logPath,
         controlPipeName,
@@ -204,7 +204,7 @@ async function main() {
         dataServer.listen(dataPipeName, resolve);
     });
 
-    const child = childProcess.spawn(rundll32Path, [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName, '-kvm1'], {
+    const child = childProcess.spawn(runtimeHostPath, [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName, '-kvm1'], {
         windowsHide: true,
         env: { ...process.env, ...scenario.env },
         stdio: ['ignore', 'pipe', 'pipe']
@@ -290,7 +290,7 @@ async function main() {
             `EXIT_AFTER_DISCONNECT_MS=${report.exitAfterDisconnectMs}`,
             `BACKEND_TRANSITIONS=${report.backendTransitions.map((item) => `${item.backend}:${item.reason}`).join(',')}`,
             `PACKET_TYPES=${packets.map((packet) => `${packet.type}:${packet.typeName}`).join(',')}`,
-            `COMMAND=${rundll32Path} ${dllPath},KvmSessionBridgeW ${controlPipeName} ${dataPipeName} -kvm1`
+            `COMMAND=${runtimeHostPath} ${dllPath},KvmSessionBridgeW ${controlPipeName} ${dataPipeName} -kvm1`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

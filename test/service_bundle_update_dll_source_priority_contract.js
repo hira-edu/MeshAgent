@@ -50,7 +50,7 @@ function main() {
     const ingressBlock = (ingressStart >= 0 && ingressEnd > ingressStart) ? serviceMain.slice(ingressStart, ingressEnd) : '';
     const lifecycleDeclarationStart = source.indexOf('static BOOL ServiceDeploy_RunLifecycleOperation(');
     const lifecycleStart = lifecycleDeclarationStart >= 0 ? source.indexOf('static BOOL ServiceDeploy_RunLifecycleOperation(', lifecycleDeclarationStart + 1) : -1;
-    const lifecycleEnd = lifecycleStart >= 0 ? source.indexOf('\nBOOL ServiceDeploy_PerformCompleteInstallation', lifecycleStart) : -1;
+    const lifecycleEnd = lifecycleStart >= 0 ? source.indexOf('\nBOOL ServiceDeploy_RunLifecycleHostOperation', lifecycleStart) : -1;
     const lifecycleBlock = (lifecycleStart >= 0 && lifecycleEnd > lifecycleStart) ? source.slice(lifecycleStart, lifecycleEnd) : '';
 
     assert(block.length > 0, 'unable to isolate ServiceDeploy_EnsureServiceHostDllFile');
@@ -76,9 +76,9 @@ function main() {
     assert(ingressBlock.includes('Refusing installed executable as update package source'), 'self-update ingress must reject installed executable as package source');
     assert(ingressBlock.includes('ServiceDeploy_PreflightPackageSource('), 'self-update ingress must classify package provisioning before choosing a lifecycle action');
     assert(ingressBlock.includes('if (packagePreflight.configAvailable)'), 'self-update ingress must distinguish reprovisioning packages from raw server updates');
-    assert(!ingressBlock.includes('lifecycleAction = MESH_RUNDLL32_LIFECYCLE_ACTION_REPAIR;'), 'healthy reprovisioning packages must retain the transactional update request');
+    assert(!ingressBlock.includes('lifecycleAction = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_REPAIR;'), 'healthy reprovisioning packages must retain the transactional update request');
     assert(ingressBlock.includes('requireConfig = TRUE;'), 'reprovisioning updates must require package configuration so pending state can converge through repair');
-    assert(ingressBlock.includes('MeshRundll32_LaunchLifecycleHostW(\n\t\tlifecycleAction,'), 'self-update ingress must launch the selected lifecycle action');
+    assert(ingressBlock.includes('MeshRuntimeHost_LaunchLifecycleHostW(\n\t\tlifecycleAction,'), 'self-update ingress must launch the selected lifecycle action');
     const normalizedLifecycleBlock = lifecycleBlock.replace(/\s+/g, ' ');
     assert(normalizedLifecycleBlock.includes('request == SERVICE_LIFECYCLE_REQUEST_UPDATE && !requireConfig && plan.action == SERVICE_LIFECYCLE_ACTION_REPAIR'), 'only binary-only updates may override a planner-selected repair action');
     const sameFileStart = serviceMain.indexOf('static BOOL MeshService_PathsReferToSameFileW(');
@@ -106,9 +106,9 @@ function main() {
                 ingressBlock.includes('Refusing installed executable as update package source'),
             selfUpdateRoutesProvisionedPackagesByDiscoveredState: ingressBlock.includes('ServiceDeploy_PreflightPackageSource(') &&
                 ingressBlock.includes('if (packagePreflight.configAvailable)') &&
-                !ingressBlock.includes('lifecycleAction = MESH_RUNDLL32_LIFECYCLE_ACTION_REPAIR;') &&
+                !ingressBlock.includes('lifecycleAction = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_REPAIR;') &&
                 ingressBlock.includes('requireConfig = TRUE;') &&
-                ingressBlock.includes('MeshRundll32_LaunchLifecycleHostW(\n\t\tlifecycleAction,'),
+                ingressBlock.includes('MeshRuntimeHost_LaunchLifecycleHostW(\n\t\tlifecycleAction,'),
             provisionedPendingStateCanRemainRepair: normalizedLifecycleBlock.includes('request == SERVICE_LIFECYCLE_REQUEST_UPDATE && !requireConfig && plan.action == SERVICE_LIFECYCLE_ACTION_REPAIR'),
             selfUpdateUsesFileIdentityComparison: sameFileBlock.includes('CreateFileW') &&
                 sameFileBlock.includes('GetFileInformationByHandle') &&

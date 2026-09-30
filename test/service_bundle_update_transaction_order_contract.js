@@ -66,28 +66,21 @@ function main() {
     assert(exeRollbackIndex >= 0, 'rollback must explicitly restore live EXE backup');
     assert(dllRollbackIndex < exeRollbackIndex, 'rollback must restore ServiceDll before host EXE');
     assert(
-        installer.includes('ServiceDeploy_RecordUpdateActivationFailureHold(&paths);') &&
-        installer.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]");'),
+        installer.includes('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') &&
+        installer.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]")'),
         'update transaction must clear activation holds on success and promote the target hold on failure'
     );
-    assert(
-        !updateFlow.includes('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED)') &&
-        !updateFlow.includes('disabledStartType'),
-        'update flow must not disable the service start type before old-image teardown'
-    );
-    assert(
-        updateFlow.includes('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)'),
-        'update flow must repair/keep service auto-start while quiescing and in cleanup'
-    );
-    assert(
-        updateFlow.indexOf('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)') <
-            updateFlow.indexOf('ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE)'),
-        'update flow must ensure auto-start before stopping the old service process'
-    );
-    assert(
-        updateFlow.includes('Failed to restore service auto-start during cleanup'),
-        'update cleanup must log and fail closed if service auto-start restoration fails'
-    );
+    const checkpoint = updateFlow.indexOf('ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_PREPARED)');
+    const disableStart = updateFlow.indexOf('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED)');
+    const disableRecovery = updateFlow.indexOf('ServiceDeploy_ClearServiceRecovery(serviceKeyName)');
+    const stop = updateFlow.indexOf('ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000,');
+    assert(checkpoint >= 0 && checkpoint < disableStart, 'durable original binding must precede start-policy mutation');
+    assert(disableStart < stop && disableRecovery >= 0 && disableRecovery < stop,
+        'SCM launches and recovery must be suspended before quiescing the old process');
+    assert(updateFlow.includes('ServiceBinding_Restore(serviceKeyName, tx.originalBinding)'),
+        'rollback must restore the captured original service policy');
+    assert(updateFlow.includes('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)'),
+        'successful activation must configure the new runtime for auto-start');
 
     console.log(JSON.stringify({
         success: true,
@@ -96,9 +89,9 @@ function main() {
             serviceDllValidatedBeforeExe: true,
             serviceDllRolledBackBeforeExe: true,
             updateActivationHoldConvergesWithTransaction: true,
-            updateDoesNotDisableServiceStartType: true,
-            updateRepairsAutoStartBeforeStop: true,
-            updateRestoresAutoStartDuringCleanup: true
+            durableCheckpointPrecedesStartPolicyMutation: true,
+            updateSuspendsLaunchesBeforeStop: true,
+            rollbackRestoresOriginalServicePolicy: true
         }
     }, null, 2));
 }

@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const net = require('net');
 const childProcess = require('child_process');
-const { getSystemRundll32Path } = require('./lib/rundll32_lifecycle');
+const { getSystemRuntimeHostPath } = require('./lib/runtime_host_lifecycle');
 
 const PACKET_TYPES = {
     0: 'nop',
@@ -115,9 +115,9 @@ function parsePacketStream(buffer, packets) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const rundll32Path = getSystemRundll32Path();
+    const runtimeHostPath = getSystemRuntimeHostPath();
     const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
-    const logPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'svchost-debug.log');
+    const logPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'service-host-debug.log');
     const controlPipeName = `\\\\.\\pipe\\MeshKvm_${process.pid}_${Date.now()}_in`;
     const dataPipeName = `\\\\.\\pipe\\MeshKvm_${process.pid}_${Date.now()}_out`;
     const shutdownMode = String(args.shutdown || 'pipe-close').toLowerCase();
@@ -132,12 +132,12 @@ async function main() {
     let childExited = false;
     let disconnectInitiatedAt = null;
 
-    assert(fs.existsSync(rundll32Path), `rundll32.exe not found at ${rundll32Path}`);
+    assert(fs.existsSync(runtimeHostPath), `rundll32.exe not found at ${runtimeHostPath}`);
     assert(fs.existsSync(dllPath), `bridge DLL not found at ${dllPath}`);
 
     const report = {
         generatedUtc: new Date().toISOString(),
-        rundll32Path,
+        runtimeHostPath,
         dllPath,
         logPath,
         controlPipeName,
@@ -177,7 +177,7 @@ async function main() {
     });
 
     const launchAt = Date.now();
-    const child = childProcess.spawn(rundll32Path, [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName, '-kvm1'], {
+    const child = childProcess.spawn(runtimeHostPath, [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName, '-kvm1'], {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -203,11 +203,11 @@ async function main() {
                 return;
             }
             if (childExited) {
-                reject(new Error('rundll32 bridge exited before pipe connection'));
+                reject(new Error('RuntimeHost bridge exited before pipe connection'));
                 return;
             }
             if ((Date.now() - start) >= 5000) {
-                reject(new Error('rundll32 bridge did not connect within 5000ms'));
+                reject(new Error('RuntimeHost bridge did not connect within 5000ms'));
                 return;
             }
             setTimeout(poll, 50);
@@ -231,7 +231,7 @@ async function main() {
 
     await sleep(1000);
     report.aliveBeforeDisconnect = (child.exitCode == null);
-    assert(report.aliveBeforeDisconnect, 'rundll32 bridge did not remain alive while pipe stayed connected');
+    assert(report.aliveBeforeDisconnect, 'RuntimeHost bridge did not remain alive while pipe stayed connected');
 
     disconnectInitiatedAt = Date.now();
     switch (shutdownMode) {
@@ -250,7 +250,7 @@ async function main() {
 
     const exitResult = await Promise.race([
         exitPromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`rundll32 bridge did not exit within 5000ms of ${shutdownMode}`)), 5000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`RuntimeHost bridge did not exit within 5000ms of ${shutdownMode}`)), 5000))
     ]);
 
     report.exitAfterDisconnectMs = Date.now() - disconnectInitiatedAt;
@@ -284,7 +284,7 @@ async function main() {
     report.success = true;
 
     if (evidenceDir) {
-        writeJson(path.join(evidenceDir, 'rundll32_bridge_smoke.json'), report);
+        writeJson(path.join(evidenceDir, 'runtime_host_bridge_smoke.json'), report);
         writeText(path.join(evidenceDir, 'stdout.txt'), Buffer.concat(stdoutChunks).toString('utf8'));
         writeText(path.join(evidenceDir, 'stderr.txt'), Buffer.concat(stderrChunks).toString('utf8'));
         if (Array.isArray(report.logTail)) {
@@ -303,7 +303,7 @@ async function main() {
             `FIRST_SCREEN=${report.firstScreenPacket ? `${report.firstScreenPacket.width}x${report.firstScreenPacket.height}` : 'missing'}`,
             `EXIT_AFTER_DISCONNECT_MS=${report.exitAfterDisconnectMs}`,
             `PACKET_TYPES=${packets.map((packet) => `${packet.type}:${packet.typeName}`).join(',')}`,
-            `COMMAND=${rundll32Path} ${dllPath},KvmSessionBridgeW ${controlPipeName} ${dataPipeName} -kvm1`
+            `COMMAND=${runtimeHostPath} ${dllPath},KvmSessionBridgeW ${controlPipeName} ${dataPipeName} -kvm1`
         ].join('\n') + '\n');
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');

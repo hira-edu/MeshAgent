@@ -55,7 +55,6 @@ const DEFAULT_RELEASE_DOCUMENTS = [
     'docs/DEPLOYMENT.md',
     'docs/files/meshagent_release_checklist.md',
     'docs/UMH_CONTROL_SISTER_REPO_SSOT.md',
-    'docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md'
 ];
 
 function parseArgs(argv) {

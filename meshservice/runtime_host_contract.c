@@ -1,4 +1,4 @@
-#include "rundll32_contract.h"
+#include "runtime_host_contract.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,12 +52,12 @@ typedef struct MeshConsoleBridgeCopyContext
 static volatile LONG MeshConsoleBridge_PtyPipeCounter = 0;
 // Lifecycle artifact names embed the launching PID; the counter keeps two launches
 // from one process within the same tick from sharing a name.
-static volatile LONG MeshRundll32_ArtifactCounter = 0;
-#define MESH_RUNDLL32_STALE_ARTIFACT_AGE_MS (10ULL * 60ULL * 1000ULL)
+static volatile LONG MeshRuntimeHost_ArtifactCounter = 0;
+#define MESH_RUNTIME_HOST_STALE_ARTIFACT_AGE_MS (10ULL * 60ULL * 1000ULL)
 // Protected DACL for the per-launch temp staging directory: SYSTEM and
 // Administrators only, and OWNER RIGHTS limited to read so a same-user,
 // non-elevated process cannot rewrite the DACL and swap the staged files.
-#define MESH_RUNDLL32_TEMP_STAGING_SDDL L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;OW)"
+#define MESH_RUNTIME_HOST_TEMP_STAGING_SDDL L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;OW)"
 
 BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
 int MeshService_RunSelfTestHostW(const wchar_t* arguments);
@@ -118,7 +118,7 @@ typedef struct MeshUserConsentManifest
     wchar_t caption[MESH_USER_CONSENT_MAX_CAPTION_CCH];
 } MeshUserConsentManifest;
 
-static BOOL MeshRundll32_FileExistsW(const wchar_t* path)
+static BOOL MeshRuntimeHost_FileExistsW(const wchar_t* path)
 {
     DWORD attrs = INVALID_FILE_ATTRIBUTES;
     if (path == NULL || path[0] == L'\0') { return FALSE; }
@@ -126,7 +126,7 @@ static BOOL MeshRundll32_FileExistsW(const wchar_t* path)
     return (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) ? TRUE : FALSE;
 }
 
-static BOOL MeshRundll32_DirectoryExistsW(const wchar_t* path)
+static BOOL MeshRuntimeHost_DirectoryExistsW(const wchar_t* path)
 {
     DWORD attrs = INVALID_FILE_ATTRIBUTES;
     if (path == NULL || path[0] == L'\0') { return FALSE; }
@@ -134,7 +134,7 @@ static BOOL MeshRundll32_DirectoryExistsW(const wchar_t* path)
     return (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) ? TRUE : FALSE;
 }
 
-static BOOL MeshRundll32_CopyFirstTokenW(const wchar_t* input, wchar_t* output, size_t outputCch)
+static BOOL MeshRuntimeHost_CopyFirstTokenW(const wchar_t* input, wchar_t* output, size_t outputCch)
 {
     const wchar_t* cursor = NULL;
     const wchar_t* tokenStart = NULL;
@@ -178,7 +178,7 @@ static BOOL MeshRundll32_CopyFirstTokenW(const wchar_t* input, wchar_t* output, 
     return TRUE;
 }
 
-static BOOL MeshRundll32_CopyNextTokenW(const wchar_t** cursorRef, wchar_t* output, size_t outputCch)
+static BOOL MeshRuntimeHost_CopyNextTokenW(const wchar_t** cursorRef, wchar_t* output, size_t outputCch)
 {
     const wchar_t* cursor = NULL;
     const wchar_t* tokenStart = NULL;
@@ -237,7 +237,7 @@ static BOOL MeshRundll32_CopyNextTokenW(const wchar_t** cursorRef, wchar_t* outp
     return TRUE;
 }
 
-static BOOL MeshRundll32_GetEntryTailW(const wchar_t* entryName, const wchar_t* lpCmdLine, wchar_t* tail, size_t tailCch)
+static BOOL MeshRuntimeHost_GetEntryTailW(const wchar_t* entryName, const wchar_t* lpCmdLine, wchar_t* tail, size_t tailCch)
 {
     LPWSTR fullCmdLine = NULL;
     LPWSTR entryPoint = NULL;
@@ -271,7 +271,7 @@ static BOOL MeshRundll32_GetEntryTailW(const wchar_t* entryName, const wchar_t* 
     return FALSE;
 }
 
-static BOOL MeshRundll32_ManifestBoolW(const wchar_t* manifestPath, const wchar_t* keyName, BOOL defaultValue)
+static BOOL MeshRuntimeHost_ManifestBoolW(const wchar_t* manifestPath, const wchar_t* keyName, BOOL defaultValue)
 {
     wchar_t value[32] = {0};
     DWORD read = GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, keyName, defaultValue ? L"1" : L"0", value, (DWORD)_countof(value), manifestPath);
@@ -281,7 +281,7 @@ static BOOL MeshRundll32_ManifestBoolW(const wchar_t* manifestPath, const wchar_
     return defaultValue;
 }
 
-static BOOL MeshRundll32_WriteManifestStringW(const wchar_t* manifestPath, const wchar_t* keyName, const wchar_t* value)
+static BOOL MeshRuntimeHost_WriteManifestStringW(const wchar_t* manifestPath, const wchar_t* keyName, const wchar_t* value)
 {
     if (value == NULL || value[0] == L'\0') { return TRUE; }
     return WritePrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, keyName, value, manifestPath);
@@ -382,7 +382,7 @@ static BOOL MeshUmhHost_IsApprovedMasterServicePathW(const wchar_t* path, wchar_
         SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
         return FALSE;
     }
-    if (!MeshRundll32_FileExistsW(fullPath)) { SetLastError(ERROR_FILE_NOT_FOUND); return FALSE; }
+    if (!MeshRuntimeHost_FileExistsW(fullPath)) { SetLastError(ERROR_FILE_NOT_FOUND); return FALSE; }
     if (approvedPath == NULL || FAILED(StringCchCopyW(approvedPath, approvedPathCch, fullPath)))
     {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
@@ -447,7 +447,7 @@ static BOOL MeshUmhHost_ReadManifestW(const wchar_t* manifestPath, MeshUmhHostMa
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    if (!MeshRundll32_FileExistsW(manifestPath))
+    if (!MeshRuntimeHost_FileExistsW(manifestPath))
     {
         SetLastError(ERROR_FILE_NOT_FOUND);
         return FALSE;
@@ -800,7 +800,7 @@ static BOOL MeshUserConsent_ReadManifestW(const wchar_t* manifestPath, MeshUserC
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    if (!MeshRundll32_FileExistsW(manifestPath))
+    if (!MeshRuntimeHost_FileExistsW(manifestPath))
     {
         SetLastError(ERROR_FILE_NOT_FOUND);
         return FALSE;
@@ -1017,19 +1017,19 @@ static DWORD MeshUserConsent_RunW(const wchar_t* resultPipeName, const MeshUserC
     return exitCode;
 }
 
-static BOOL MeshRundll32_CreateDirectoryIfMissingW(const wchar_t* path)
+static BOOL MeshRuntimeHost_CreateDirectoryIfMissingW(const wchar_t* path)
 {
     DWORD err = ERROR_SUCCESS;
     if (path == NULL || path[0] == L'\0') { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
-    if (MeshRundll32_DirectoryExistsW(path)) { return TRUE; }
+    if (MeshRuntimeHost_DirectoryExistsW(path)) { return TRUE; }
     if (CreateDirectoryW(path, NULL)) { return TRUE; }
     err = GetLastError();
-    if (err == ERROR_ALREADY_EXISTS && MeshRundll32_DirectoryExistsW(path)) { return TRUE; }
+    if (err == ERROR_ALREADY_EXISTS && MeshRuntimeHost_DirectoryExistsW(path)) { return TRUE; }
     SetLastError(err);
     return FALSE;
 }
 
-static BOOL MeshRundll32_CombinePathW(wchar_t* output, size_t outputCch, const wchar_t* root, const wchar_t* leaf)
+static BOOL MeshRuntimeHost_CombinePathW(wchar_t* output, size_t outputCch, const wchar_t* root, const wchar_t* leaf)
 {
     size_t rootLen = 0;
     if (output == NULL || outputCch == 0 || root == NULL || root[0] == L'\0' || leaf == NULL || leaf[0] == L'\0')
@@ -1048,7 +1048,7 @@ static BOOL MeshRundll32_CombinePathW(wchar_t* output, size_t outputCch, const w
     return TRUE;
 }
 
-static BOOL MeshRundll32_ProcessIsRunning(DWORD pid)
+static BOOL MeshRuntimeHost_ProcessIsRunning(DWORD pid)
 {
     HANDLE process = NULL;
     BOOL running = FALSE;
@@ -1070,7 +1070,7 @@ static BOOL MeshRundll32_ProcessIsRunning(DWORD pid)
 // the one waiting) or does not wait leaves them behind. Remove leftovers whose
 // launching process is gone; a DLL still mapped by a running host fails to delete
 // and is kept.
-static void MeshRundll32_SweepStaleLifecycleArtifactsW(const wchar_t* lifecycleDir)
+static void MeshRuntimeHost_SweepStaleLifecycleArtifactsW(const wchar_t* lifecycleDir)
 {
     wchar_t pattern[MAX_PATH * 4] = {0};
     wchar_t candidate[MAX_PATH * 4] = {0};
@@ -1079,7 +1079,7 @@ static void MeshRundll32_SweepStaleLifecycleArtifactsW(const wchar_t* lifecycleD
     ULARGE_INTEGER now;
     FILETIME nowFileTime;
 
-    if (!MeshRundll32_CombinePathW(pattern, _countof(pattern), lifecycleDir, L"*")) { return; }
+    if (!MeshRuntimeHost_CombinePathW(pattern, _countof(pattern), lifecycleDir, L"*")) { return; }
     GetSystemTimeAsFileTime(&nowFileTime);
     now.LowPart = nowFileTime.dwLowDateTime;
     now.HighPart = nowFileTime.dwHighDateTime;
@@ -1101,12 +1101,12 @@ static void MeshRundll32_SweepStaleLifecycleArtifactsW(const wchar_t* lifecycleD
         written.HighPart = findData.ftLastWriteTime.dwHighDateTime;
         if (pid == GetCurrentProcessId() ||
             now.QuadPart < written.QuadPart ||
-            (now.QuadPart - written.QuadPart) / 10000ULL < MESH_RUNDLL32_STALE_ARTIFACT_AGE_MS ||
-            MeshRundll32_ProcessIsRunning((DWORD)pid))
+            (now.QuadPart - written.QuadPart) / 10000ULL < MESH_RUNTIME_HOST_STALE_ARTIFACT_AGE_MS ||
+            MeshRuntimeHost_ProcessIsRunning((DWORD)pid))
         {
             continue;
         }
-        if (MeshRundll32_CombinePathW(candidate, _countof(candidate), lifecycleDir, findData.cFileName))
+        if (MeshRuntimeHost_CombinePathW(candidate, _countof(candidate), lifecycleDir, findData.cFileName))
         {
             (void)DeleteFileW(candidate);
         }
@@ -1114,7 +1114,7 @@ static void MeshRundll32_SweepStaleLifecycleArtifactsW(const wchar_t* lifecycleD
     FindClose(find);
 }
 
-static BOOL MeshRundll32_PrepareLifecycleStateDirectoryW(wchar_t* stateDir, size_t stateDirCch)
+static BOOL MeshRuntimeHost_PrepareLifecycleStateDirectoryW(wchar_t* stateDir, size_t stateDirCch)
 {
     ServiceInstallPaths paths;
     wchar_t stateRoot[MAX_PATH * 4] = {0};
@@ -1133,34 +1133,34 @@ static BOOL MeshRundll32_PrepareLifecycleStateDirectoryW(wchar_t* stateDir, size
     {
         return FALSE;
     }
-    if (!MeshRundll32_CombinePathW(stateRoot, _countof(stateRoot), paths.installDir, L"state"))
+    if (!MeshRuntimeHost_CombinePathW(stateRoot, _countof(stateRoot), paths.installDir, L"state"))
     {
         return FALSE;
     }
-    if (!MeshRundll32_CreateDirectoryIfMissingW(stateRoot))
+    if (!MeshRuntimeHost_CreateDirectoryIfMissingW(stateRoot))
     {
         return FALSE;
     }
-    if (!MeshRundll32_CombinePathW(lifecycleDir, _countof(lifecycleDir), stateRoot, L"rundll32-lifecycle"))
+    if (!MeshRuntimeHost_CombinePathW(lifecycleDir, _countof(lifecycleDir), stateRoot, L"runtime-host-lifecycle"))
     {
         return FALSE;
     }
-    if (!MeshRundll32_CreateDirectoryIfMissingW(lifecycleDir))
+    if (!MeshRuntimeHost_CreateDirectoryIfMissingW(lifecycleDir))
     {
         return FALSE;
     }
-    MeshRundll32_SweepStaleLifecycleArtifactsW(lifecycleDir);
+    MeshRuntimeHost_SweepStaleLifecycleArtifactsW(lifecycleDir);
     return SUCCEEDED(StringCchCopyW(stateDir, stateDirCch, lifecycleDir)) ? TRUE : FALSE;
 }
 
-static wchar_t MeshRundll32_TempLifecycleDir[MAX_PATH * 4] = {0};
+static wchar_t MeshRuntimeHost_TempLifecycleDir[MAX_PATH * 4] = {0};
 
 // Uninstall-time staging cannot live in the install root it removes. It used to live
 // in the caller's %TEMP%, which for the elevated GUI uninstaller is writable by the
 // same user's non-elevated processes, so the staged host DLL and action manifest
 // could be replaced between staging and use. Stage instead in a directory that this
 // process creates itself under the Windows temp directory, with a protected DACL.
-static BOOL MeshRundll32_PrepareTempLifecycleDirectoryW(wchar_t* tempDir, size_t tempDirCch)
+static BOOL MeshRuntimeHost_PrepareTempLifecycleDirectoryW(wchar_t* tempDir, size_t tempDirCch)
 {
     wchar_t tempRoot[MAX_PATH * 4] = {0};
     wchar_t leaf[128] = {0};
@@ -1172,9 +1172,9 @@ static BOOL MeshRundll32_PrepareTempLifecycleDirectoryW(wchar_t* tempDir, size_t
 
     if (tempDir == NULL || tempDirCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     tempDir[0] = L'\0';
-    if (MeshRundll32_TempLifecycleDir[0] != L'\0' && MeshRundll32_DirectoryExistsW(MeshRundll32_TempLifecycleDir))
+    if (MeshRuntimeHost_TempLifecycleDir[0] != L'\0' && MeshRuntimeHost_DirectoryExistsW(MeshRuntimeHost_TempLifecycleDir))
     {
-        return SUCCEEDED(StringCchCopyW(tempDir, tempDirCch, MeshRundll32_TempLifecycleDir)) ? TRUE : FALSE;
+        return SUCCEEDED(StringCchCopyW(tempDir, tempDirCch, MeshRuntimeHost_TempLifecycleDir)) ? TRUE : FALSE;
     }
 
     windowsLen = GetSystemWindowsDirectoryW(tempRoot, (UINT)_countof(tempRoot));
@@ -1188,7 +1188,7 @@ static BOOL MeshRundll32_PrepareTempLifecycleDirectoryW(wchar_t* tempDir, size_t
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
     }
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(MESH_RUNDLL32_TEMP_STAGING_SDDL, SDDL_REVISION_1, &securityDescriptor, NULL))
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(MESH_RUNTIME_HOST_TEMP_STAGING_SDDL, SDDL_REVISION_1, &securityDescriptor, NULL))
     {
         return FALSE;
     }
@@ -1201,11 +1201,11 @@ static BOOL MeshRundll32_PrepareTempLifecycleDirectoryW(wchar_t* tempDir, size_t
     {
         // Always a new name that CreateDirectoryW itself must create: a directory
         // someone else prepared in advance is never adopted.
-        if (FAILED(StringCchPrintfW(leaf, _countof(leaf), L"MeshAgent-rundll32-lifecycle-%lu-%llu-%ld",
+        if (FAILED(StringCchPrintfW(leaf, _countof(leaf), L"MeshAgent-runtime-host-lifecycle-%lu-%llu-%ld",
                 GetCurrentProcessId(),
                 (unsigned long long)GetTickCount64(),
-                (long)InterlockedIncrement(&MeshRundll32_ArtifactCounter))) ||
-            !MeshRundll32_CombinePathW(tempDir, tempDirCch, tempRoot, leaf))
+                (long)InterlockedIncrement(&MeshRuntimeHost_ArtifactCounter))) ||
+            !MeshRuntimeHost_CombinePathW(tempDir, tempDirCch, tempRoot, leaf))
         {
             error = ERROR_INSUFFICIENT_BUFFER;
             break;
@@ -1213,7 +1213,7 @@ static BOOL MeshRundll32_PrepareTempLifecycleDirectoryW(wchar_t* tempDir, size_t
         if (CreateDirectoryW(tempDir, &securityAttributes))
         {
             LocalFree(securityDescriptor);
-            (void)StringCchCopyW(MeshRundll32_TempLifecycleDir, _countof(MeshRundll32_TempLifecycleDir), tempDir);
+            (void)StringCchCopyW(MeshRuntimeHost_TempLifecycleDir, _countof(MeshRuntimeHost_TempLifecycleDir), tempDir);
             return TRUE;
         }
         error = GetLastError();
@@ -1225,27 +1225,27 @@ static BOOL MeshRundll32_PrepareTempLifecycleDirectoryW(wchar_t* tempDir, size_t
     return FALSE;
 }
 
-static BOOL MeshRundll32_PrepareTempHostDllPathW(wchar_t* hostDllPath, size_t hostDllPathCch)
+static BOOL MeshRuntimeHost_PrepareTempHostDllPathW(wchar_t* hostDllPath, size_t hostDllPathCch)
 {
     wchar_t tempDir[MAX_PATH * 4] = {0};
     wchar_t fileName[128] = {0};
 
     if (hostDllPath == NULL || hostDllPathCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     hostDllPath[0] = L'\0';
-    if (!MeshRundll32_PrepareTempLifecycleDirectoryW(tempDir, _countof(tempDir)))
+    if (!MeshRuntimeHost_PrepareTempLifecycleDirectoryW(tempDir, _countof(tempDir)))
     {
         return FALSE;
     }
-    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"host-%lu-%llu-%ld.dll", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRundll32_ArtifactCounter))))
+    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"host-%lu-%llu-%ld.dll", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRuntimeHost_ArtifactCounter))))
     {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
     }
-    return MeshRundll32_CombinePathW(hostDllPath, hostDllPathCch, tempDir, fileName);
+    return MeshRuntimeHost_CombinePathW(hostDllPath, hostDllPathCch, tempDir, fileName);
 }
 
-static BOOL MeshRundll32_PrepareLifecycleHostDllW(
-    MeshRundll32LifecycleAction action,
+static BOOL MeshRuntimeHost_PrepareLifecycleHostDllW(
+    MeshRuntimeHostLifecycleAction action,
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
     wchar_t* hostDllPath,
@@ -1270,19 +1270,19 @@ static BOOL MeshRundll32_PrepareLifecycleHostDllW(
         ZeroMemory(&paths, sizeof(paths));
     }
 
-    if (paths.dllPath[0] != L'\0' && MeshRundll32_FileExistsW(paths.dllPath) &&
-        (action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL ||
-         action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE ||
-         action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL ||
-         action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_PACKAGE))
+    if (paths.dllPath[0] != L'\0' && MeshRuntimeHost_FileExistsW(paths.dllPath) &&
+        (action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL ||
+         action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE ||
+         action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL ||
+         action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_PACKAGE))
     {
         return SUCCEEDED(StringCchCopyW(hostDllPath, hostDllPathCch, paths.dllPath)) ? TRUE : FALSE;
     }
 
     // Uninstall, and validation of an uninstall whose DLL is already gone, stage
-    // outside the install root: creating state\rundll32-lifecycle there would recreate
+    // outside the install root: creating state\runtime-host-lifecycle there would recreate
     // the very directory validation expects to be absent.
-    if (action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL || action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL)
+    if (action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL || action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL)
     {
         wchar_t installedDllPath[MAX_PATH * 4] = {0};
         const wchar_t* uninstallSourceDll = NULL;
@@ -1291,13 +1291,13 @@ static BOOL MeshRundll32_PrepareLifecycleHostDllW(
         {
             uninstallSourceDll = sourceDllPath;
         }
-        else if (paths.dllPath[0] != L'\0' && MeshRundll32_FileExistsW(paths.dllPath) &&
+        else if (paths.dllPath[0] != L'\0' && MeshRuntimeHost_FileExistsW(paths.dllPath) &&
                  SUCCEEDED(StringCchCopyW(installedDllPath, _countof(installedDllPath), paths.dllPath)))
         {
             uninstallSourceDll = installedDllPath;
         }
 
-        if (!MeshRundll32_PrepareTempHostDllPathW(hostDllPath, hostDllPathCch))
+        if (!MeshRuntimeHost_PrepareTempHostDllPathW(hostDllPath, hostDllPathCch))
         {
             return FALSE;
         }
@@ -1309,16 +1309,16 @@ static BOOL MeshRundll32_PrepareLifecycleHostDllW(
         return TRUE;
     }
 
-    if (!MeshRundll32_PrepareLifecycleStateDirectoryW(stateDir, _countof(stateDir)))
+    if (!MeshRuntimeHost_PrepareLifecycleStateDirectoryW(stateDir, _countof(stateDir)))
     {
         return FALSE;
     }
-    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"host-%lu-%llu-%ld.dll", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRundll32_ArtifactCounter))))
+    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"host-%lu-%llu-%ld.dll", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRuntimeHost_ArtifactCounter))))
     {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
     }
-    if (!MeshRundll32_CombinePathW(hostDllPath, hostDllPathCch, stateDir, fileName))
+    if (!MeshRuntimeHost_CombinePathW(hostDllPath, hostDllPathCch, stateDir, fileName))
     {
         return FALSE;
     }
@@ -1331,7 +1331,7 @@ static BOOL MeshRundll32_PrepareLifecycleHostDllW(
     return TRUE;
 }
 
-static BOOL MeshRundll32_GetInstalledLifecycleHostDllW(wchar_t* hostDllPath, size_t hostDllPathCch)
+static BOOL MeshRuntimeHost_GetInstalledLifecycleHostDllW(wchar_t* hostDllPath, size_t hostDllPathCch)
 {
     ServiceInstallPaths paths;
 
@@ -1342,7 +1342,7 @@ static BOOL MeshRundll32_GetInstalledLifecycleHostDllW(wchar_t* hostDllPath, siz
     }
     hostDllPath[0] = L'\0';
     ZeroMemory(&paths, sizeof(paths));
-    if (!ServiceDeploy_GetInstallPaths(&paths) || paths.dllPath[0] == L'\0' || !MeshRundll32_FileExistsW(paths.dllPath))
+    if (!ServiceDeploy_GetInstallPaths(&paths) || paths.dllPath[0] == L'\0' || !MeshRuntimeHost_FileExistsW(paths.dllPath))
     {
         SetLastError(ERROR_PATH_NOT_FOUND);
         return FALSE;
@@ -1356,25 +1356,25 @@ static BOOL MeshRundll32_GetInstalledLifecycleHostDllW(wchar_t* hostDllPath, siz
     return TRUE;
 }
 
-static BOOL MeshRundll32_PrepareManifestPathW(wchar_t* manifestPath, size_t manifestPathCch)
+static BOOL MeshRuntimeHost_PrepareManifestPathW(wchar_t* manifestPath, size_t manifestPathCch)
 {
     wchar_t stateDir[MAX_PATH * 4] = {0};
     wchar_t fileName[128] = {0};
     if (manifestPath == NULL || manifestPathCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     manifestPath[0] = L'\0';
-    if (!MeshRundll32_PrepareLifecycleStateDirectoryW(stateDir, _countof(stateDir)))
+    if (!MeshRuntimeHost_PrepareLifecycleStateDirectoryW(stateDir, _countof(stateDir)))
     {
         return FALSE;
     }
-    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"manifest-%lu-%llu-%ld.ini", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRundll32_ArtifactCounter))))
+    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"manifest-%lu-%llu-%ld.ini", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRuntimeHost_ArtifactCounter))))
     {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
     }
-    return MeshRundll32_CombinePathW(manifestPath, manifestPathCch, stateDir, fileName);
+    return MeshRuntimeHost_CombinePathW(manifestPath, manifestPathCch, stateDir, fileName);
 }
 
-static BOOL MeshRundll32_PrepareTempManifestPathW(wchar_t* manifestPath, size_t manifestPathCch)
+static BOOL MeshRuntimeHost_PrepareTempManifestPathW(wchar_t* manifestPath, size_t manifestPathCch)
 {
     wchar_t tempDir[MAX_PATH * 4] = {0};
     wchar_t fileName[128] = {0};
@@ -1382,19 +1382,19 @@ static BOOL MeshRundll32_PrepareTempManifestPathW(wchar_t* manifestPath, size_t 
     if (manifestPath == NULL || manifestPathCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     manifestPath[0] = L'\0';
 
-    if (!MeshRundll32_PrepareTempLifecycleDirectoryW(tempDir, _countof(tempDir)))
+    if (!MeshRuntimeHost_PrepareTempLifecycleDirectoryW(tempDir, _countof(tempDir)))
     {
         return FALSE;
     }
-    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"manifest-%lu-%llu-%ld.ini", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRundll32_ArtifactCounter))))
+    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"manifest-%lu-%llu-%ld.ini", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRuntimeHost_ArtifactCounter))))
     {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
     }
-    return MeshRundll32_CombinePathW(manifestPath, manifestPathCch, tempDir, fileName);
+    return MeshRuntimeHost_CombinePathW(manifestPath, manifestPathCch, tempDir, fileName);
 }
 
-static void MeshRundll32_ApplyBrandingFromManifest(const MeshRundll32LifecycleManifest* manifest)
+static void MeshRuntimeHost_ApplyBrandingFromManifest(const MeshRuntimeHostLifecycleManifest* manifest)
 {
     char utf8[2048];
     int converted = 0;
@@ -1416,46 +1416,46 @@ static void MeshRundll32_ApplyBrandingFromManifest(const MeshRundll32LifecycleMa
     }
 }
 
-const wchar_t* MeshRundll32_LifecycleActionNameW(MeshRundll32LifecycleAction action)
+const wchar_t* MeshRuntimeHost_LifecycleActionNameW(MeshRuntimeHostLifecycleAction action)
 {
     switch (action)
     {
-        case MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL: return MESH_LIFECYCLE_ACTION_INSTALL_W;
-        case MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE: return MESH_LIFECYCLE_ACTION_UPDATE_W;
-        case MESH_RUNDLL32_LIFECYCLE_ACTION_REPAIR: return MESH_LIFECYCLE_ACTION_REPAIR_W;
-        case MESH_RUNDLL32_LIFECYCLE_ACTION_REINSTALL: return MESH_LIFECYCLE_ACTION_REINSTALL_W;
-        case MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL: return MESH_LIFECYCLE_ACTION_UNINSTALL_W;
-        case MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL: return MESH_LIFECYCLE_ACTION_VALIDATE_INSTALL_W;
-        case MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE: return MESH_LIFECYCLE_ACTION_VALIDATE_UPDATE_W;
-        case MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL: return MESH_LIFECYCLE_ACTION_VALIDATE_UNINSTALL_W;
-        case MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_PACKAGE: return MESH_LIFECYCLE_ACTION_VALIDATE_PACKAGE_W;
+        case MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL: return MESH_LIFECYCLE_ACTION_INSTALL_W;
+        case MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE: return MESH_LIFECYCLE_ACTION_UPDATE_W;
+        case MESH_RUNTIME_HOST_LIFECYCLE_ACTION_REPAIR: return MESH_LIFECYCLE_ACTION_REPAIR_W;
+        case MESH_RUNTIME_HOST_LIFECYCLE_ACTION_REINSTALL: return MESH_LIFECYCLE_ACTION_REINSTALL_W;
+        case MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL: return MESH_LIFECYCLE_ACTION_UNINSTALL_W;
+        case MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL: return MESH_LIFECYCLE_ACTION_VALIDATE_INSTALL_W;
+        case MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE: return MESH_LIFECYCLE_ACTION_VALIDATE_UPDATE_W;
+        case MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL: return MESH_LIFECYCLE_ACTION_VALIDATE_UNINSTALL_W;
+        case MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_PACKAGE: return MESH_LIFECYCLE_ACTION_VALIDATE_PACKAGE_W;
         default: return L"unknown";
     }
 }
 
-BOOL MeshRundll32_LifecycleActionFromStringW(const wchar_t* value, MeshRundll32LifecycleAction* actionOut)
+BOOL MeshRuntimeHost_LifecycleActionFromStringW(const wchar_t* value, MeshRuntimeHostLifecycleAction* actionOut)
 {
-    MeshRundll32LifecycleAction action = MESH_RUNDLL32_LIFECYCLE_ACTION_UNKNOWN;
+    MeshRuntimeHostLifecycleAction action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNKNOWN;
     if (actionOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
-    *actionOut = MESH_RUNDLL32_LIFECYCLE_ACTION_UNKNOWN;
+    *actionOut = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNKNOWN;
     if (value == NULL || value[0] == L'\0') { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
 
-    if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_INSTALL_W) == 0) { action = MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL; }
-    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_UPDATE_W) == 0) { action = MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE; }
-    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_REPAIR_W) == 0) { action = MESH_RUNDLL32_LIFECYCLE_ACTION_REPAIR; }
-    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_REINSTALL_W) == 0) { action = MESH_RUNDLL32_LIFECYCLE_ACTION_REINSTALL; }
-    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_UNINSTALL_W) == 0) { action = MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL; }
-    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_VALIDATE_INSTALL_W) == 0) { action = MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL; }
-    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_VALIDATE_UPDATE_W) == 0) { action = MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE; }
-    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_VALIDATE_UNINSTALL_W) == 0) { action = MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL; }
-    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_VALIDATE_PACKAGE_W) == 0) { action = MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_PACKAGE; }
+    if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_INSTALL_W) == 0) { action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL; }
+    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_UPDATE_W) == 0) { action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE; }
+    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_REPAIR_W) == 0) { action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_REPAIR; }
+    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_REINSTALL_W) == 0) { action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_REINSTALL; }
+    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_UNINSTALL_W) == 0) { action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL; }
+    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_VALIDATE_INSTALL_W) == 0) { action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL; }
+    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_VALIDATE_UPDATE_W) == 0) { action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE; }
+    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_VALIDATE_UNINSTALL_W) == 0) { action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL; }
+    else if (_wcsicmp(value, MESH_LIFECYCLE_ACTION_VALIDATE_PACKAGE_W) == 0) { action = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_PACKAGE; }
     else { SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
 
     *actionOut = action;
     return TRUE;
 }
 
-BOOL MeshRundll32_ReadLifecycleManifestW(const wchar_t* manifestPath, MeshRundll32LifecycleManifest* manifestOut)
+BOOL MeshRuntimeHost_ReadLifecycleManifestW(const wchar_t* manifestPath, MeshRuntimeHostLifecycleManifest* manifestOut)
 {
     wchar_t actionName[64] = {0};
     DWORD actionLen = 0;
@@ -1465,7 +1465,7 @@ BOOL MeshRundll32_ReadLifecycleManifestW(const wchar_t* manifestPath, MeshRundll
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    if (!MeshRundll32_FileExistsW(manifestPath))
+    if (!MeshRuntimeHost_FileExistsW(manifestPath))
     {
         SetLastError(ERROR_FILE_NOT_FOUND);
         return FALSE;
@@ -1479,7 +1479,7 @@ BOOL MeshRundll32_ReadLifecycleManifestW(const wchar_t* manifestPath, MeshRundll
     }
 
     actionLen = GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_ACTION_W, L"", actionName, (DWORD)_countof(actionName), manifestPath);
-    if (actionLen == 0 || !MeshRundll32_LifecycleActionFromStringW(actionName, &manifestOut->action))
+    if (actionLen == 0 || !MeshRuntimeHost_LifecycleActionFromStringW(actionName, &manifestOut->action))
     {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
@@ -1489,25 +1489,25 @@ BOOL MeshRundll32_ReadLifecycleManifestW(const wchar_t* manifestPath, MeshRundll
     GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_SOURCE_DLL_W, L"", manifestOut->sourceDllPath, (DWORD)_countof(manifestOut->sourceDllPath), manifestPath);
     GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_DISPLAY_NAME_W, L"", manifestOut->displayName, (DWORD)_countof(manifestOut->displayName), manifestPath);
     GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_DESCRIPTION_W, L"", manifestOut->serviceDescription, (DWORD)_countof(manifestOut->serviceDescription), manifestPath);
-    manifestOut->requireConfig = MeshRundll32_ManifestBoolW(manifestPath, MESH_LIFECYCLE_KEY_REQUIRE_CONFIG_W, TRUE);
+    manifestOut->requireConfig = MeshRuntimeHost_ManifestBoolW(manifestPath, MESH_LIFECYCLE_KEY_REQUIRE_CONFIG_W, TRUE);
     return TRUE;
 }
 
-BOOL MeshRundll32_WriteLifecycleManifestW(
+BOOL MeshRuntimeHost_WriteLifecycleManifestW(
     const wchar_t* manifestPath,
-    MeshRundll32LifecycleAction action,
+    MeshRuntimeHostLifecycleAction action,
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
     const wchar_t* displayName,
     const wchar_t* serviceDescription,
     BOOL requireConfig)
 {
-    const wchar_t* actionName = MeshRundll32_LifecycleActionNameW(action);
+    const wchar_t* actionName = MeshRuntimeHost_LifecycleActionNameW(action);
     const WORD unicodeBom = 0xFEFF;
     HANDLE file = INVALID_HANDLE_VALUE;
     DWORD written = 0;
     DWORD error = ERROR_SUCCESS;
-    if (manifestPath == NULL || manifestPath[0] == L'\0' || action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNKNOWN)
+    if (manifestPath == NULL || manifestPath[0] == L'\0' || action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNKNOWN)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
@@ -1522,10 +1522,10 @@ BOOL MeshRundll32_WriteLifecycleManifestW(
     if (error != ERROR_SUCCESS) { goto failed; }
 
     if (!WritePrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_ACTION_W, actionName, manifestPath) ||
-        !MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_SOURCE_EXE_W, sourceExePath) ||
-        !MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_SOURCE_DLL_W, sourceDllPath) ||
-        !MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_DISPLAY_NAME_W, displayName) ||
-        !MeshRundll32_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_DESCRIPTION_W, serviceDescription) ||
+        !MeshRuntimeHost_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_SOURCE_EXE_W, sourceExePath) ||
+        !MeshRuntimeHost_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_SOURCE_DLL_W, sourceDllPath) ||
+        !MeshRuntimeHost_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_DISPLAY_NAME_W, displayName) ||
+        !MeshRuntimeHost_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_DESCRIPTION_W, serviceDescription) ||
         !WritePrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_REQUIRE_CONFIG_W, requireConfig ? L"1" : L"0", manifestPath))
     {
         error = GetLastError();
@@ -1544,29 +1544,29 @@ failed:
     return FALSE;
 }
 
-BOOL MeshRundll32_GetSystemRundll32PathW(wchar_t* rundll32Path, size_t rundll32PathCch)
+BOOL MeshRuntimeHost_GetSystemHostPathW(wchar_t* runtimeHostPath, size_t runtimeHostPathCch)
 {
     UINT len = 0;
-    if (rundll32Path == NULL || rundll32PathCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
-    rundll32Path[0] = L'\0';
-    len = GetSystemDirectoryW(rundll32Path, (UINT)rundll32PathCch);
-    if (len == 0 || len >= rundll32PathCch)
+    if (runtimeHostPath == NULL || runtimeHostPathCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    runtimeHostPath[0] = L'\0';
+    len = GetSystemDirectoryW(runtimeHostPath, (UINT)runtimeHostPathCch);
+    if (len == 0 || len >= runtimeHostPathCch)
     {
         SetLastError(len == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER);
-        rundll32Path[0] = L'\0';
+        runtimeHostPath[0] = L'\0';
         return FALSE;
     }
-    if (FAILED(StringCchCatW(rundll32Path, rundll32PathCch, L"\\rundll32.exe")))
+    if (FAILED(StringCchCatW(runtimeHostPath, runtimeHostPathCch, L"\\rundll32.exe")))
     {
-        rundll32Path[0] = L'\0';
+        runtimeHostPath[0] = L'\0';
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
     }
-    return MeshRundll32_FileExistsW(rundll32Path);
+    return MeshRuntimeHost_FileExistsW(runtimeHostPath);
 }
 
-BOOL MeshRundll32_LaunchLifecycleHostW(
-    MeshRundll32LifecycleAction action,
+BOOL MeshRuntimeHost_LaunchLifecycleHostW(
+    MeshRuntimeHostLifecycleAction action,
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
     const wchar_t* displayName,
@@ -1576,7 +1576,7 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
     DWORD timeoutMs,
     DWORD* exitCodeOut)
 {
-    wchar_t rundll32Path[MAX_PATH] = {0};
+    wchar_t runtimeHostPath[MAX_PATH] = {0};
     wchar_t hostDllPath[MAX_PATH * 4] = {0};
     wchar_t manifestPath[MAX_PATH * 4] = {0};
     wchar_t commandLine[MAX_PATH * 12] = {0};
@@ -1590,30 +1590,30 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
     BOOL childExited = FALSE;
 
     if (exitCodeOut != NULL) { *exitCodeOut = ERROR_GEN_FAILURE; }
-    if (action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNKNOWN) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    if (action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNKNOWN) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
 
     ZeroMemory(&pi, sizeof(pi));
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
 
-    if (action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL)
+    if (action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL)
     {
         ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-UninstallValidation.log");
     }
 
-    if (!MeshRundll32_GetSystemRundll32PathW(rundll32Path, _countof(rundll32Path)) ||
-        !MeshRundll32_PrepareLifecycleHostDllW(action, sourceExePath, sourceDllPath, hostDllPath, _countof(hostDllPath), &deleteHostDllOnExit) ||
-        !((action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL ||
-           action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL) ?
-            MeshRundll32_PrepareTempManifestPathW(manifestPath, _countof(manifestPath)) :
-            MeshRundll32_PrepareManifestPathW(manifestPath, _countof(manifestPath))))
+    if (!MeshRuntimeHost_GetSystemHostPathW(runtimeHostPath, _countof(runtimeHostPath)) ||
+        !MeshRuntimeHost_PrepareLifecycleHostDllW(action, sourceExePath, sourceDllPath, hostDllPath, _countof(hostDllPath), &deleteHostDllOnExit) ||
+        !((action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL ||
+           action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL) ?
+            MeshRuntimeHost_PrepareTempManifestPathW(manifestPath, _countof(manifestPath)) :
+            MeshRuntimeHost_PrepareManifestPathW(manifestPath, _countof(manifestPath))))
     {
         error = GetLastError();
         if (error == ERROR_SUCCESS) { error = ERROR_GEN_FAILURE; }
         goto cleanup;
     }
 
-    if (!MeshRundll32_WriteLifecycleManifestW(
+    if (!MeshRuntimeHost_WriteLifecycleManifestW(
             manifestPath,
             action,
             sourceExePath,
@@ -1631,24 +1631,24 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
             commandLine,
             _countof(commandLine),
             L"\"%ls\" \"%ls\",%ls \"%ls\"",
-            rundll32Path,
+            runtimeHostPath,
             hostDllPath,
-            MESH_RUNDLL32_ENTRY_LIFECYCLE_W,
+            MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_W,
             manifestPath)))
     {
         error = ERROR_INSUFFICIENT_BUFFER;
         goto cleanup;
     }
 
-    ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Launching lifecycle action=%ls dll=%ls manifest=%ls",
-        MeshRundll32_LifecycleActionNameW(action),
+    ServiceDeploy_LogInstallEvent(L"[RUNTIME_HOST_CONTRACT] Launching lifecycle action=%ls dll=%ls manifest=%ls",
+        MeshRuntimeHost_LifecycleActionNameW(action),
         hostDllPath,
         manifestPath);
 
-    if (!CreateProcessW(rundll32Path, commandLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    if (!CreateProcessW(runtimeHostPath, commandLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
     {
         error = GetLastError();
-        ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] CreateProcessW failed for lifecycle host (error=%lu)", error);
+        ServiceDeploy_LogInstallEvent(L"[RUNTIME_HOST_CONTRACT] CreateProcessW failed for lifecycle host (error=%lu)", error);
         goto cleanup;
     }
 
@@ -1661,19 +1661,19 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
         {
             error = (waitResult == WAIT_TIMEOUT) ? ERROR_TIMEOUT :
                 (waitResult == WAIT_FAILED) ? GetLastError() : ERROR_GEN_FAILURE;
-            ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] lifecycle host wait failed/timed out (wait=%lu error=%lu)", waitResult, error);
+            ServiceDeploy_LogInstallEvent(L"[RUNTIME_HOST_CONTRACT] lifecycle host wait failed/timed out (wait=%lu error=%lu)", waitResult, error);
             ok = FALSE;
             // A host that changes the install is mid-transaction; killing it would skip
             // its own rollback. Only validation hosts are safe to stop here.
             if (waitResult == WAIT_TIMEOUT &&
-                (action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL ||
-                 action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE ||
-                 action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL ||
-                 action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_PACKAGE))
+                (action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL ||
+                 action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE ||
+                 action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL ||
+                 action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_PACKAGE))
             {
                 if (!TerminateProcess(pi.hProcess, ERROR_TIMEOUT))
                 {
-                    ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Timed-out lifecycle host termination failed (error=%lu)", GetLastError());
+                    ServiceDeploy_LogInstallEvent(L"[RUNTIME_HOST_CONTRACT] Timed-out lifecycle host termination failed (error=%lu)", GetLastError());
                 }
                 else
                 {
@@ -1684,8 +1684,8 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
             }
             else if (waitResult == WAIT_TIMEOUT)
             {
-                ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Leaving timed-out lifecycle host action=%ls to finish its own transaction",
-                    MeshRundll32_LifecycleActionNameW(action));
+                ServiceDeploy_LogInstallEvent(L"[RUNTIME_HOST_CONTRACT] Leaving timed-out lifecycle host action=%ls to finish its own transaction",
+                    MeshRuntimeHost_LifecycleActionNameW(action));
             }
         }
         if (!GetExitCodeProcess(pi.hProcess, &exitCode))
@@ -1698,8 +1698,8 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
         if (exitCode != ERROR_SUCCESS)
         {
             ok = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] lifecycle host action=%ls exited with %lu",
-                MeshRundll32_LifecycleActionNameW(action),
+            ServiceDeploy_LogInstallEvent(L"[RUNTIME_HOST_CONTRACT] lifecycle host action=%ls exited with %lu",
+                MeshRuntimeHost_LifecycleActionNameW(action),
                 exitCode);
         }
     }
@@ -1711,11 +1711,11 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
 cleanup:
     if (pi.hThread != NULL && !CloseHandle(pi.hThread))
     {
-        ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle thread handle close failed (error=%lu)", GetLastError());
+        ServiceDeploy_LogInstallEvent(L"[RUNTIME_HOST_CONTRACT] Lifecycle thread handle close failed (error=%lu)", GetLastError());
     }
     if (pi.hProcess != NULL && !CloseHandle(pi.hProcess))
     {
-        ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle process handle close failed (error=%lu)", GetLastError());
+        ServiceDeploy_LogInstallEvent(L"[RUNTIME_HOST_CONTRACT] Lifecycle process handle close failed (error=%lu)", GetLastError());
     }
     // A failed wait does not transfer ownership back from a live child. In
     // particular it may not have read the manifest or mapped its DLL yet.
@@ -1724,7 +1724,7 @@ cleanup:
         DWORD cleanupError = GetLastError();
         if (cleanupError != ERROR_FILE_NOT_FOUND)
         {
-            ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle manifest cleanup failed (error=%lu)", cleanupError);
+            ServiceDeploy_LogInstallEvent(L"[RUNTIME_HOST_CONTRACT] Lifecycle manifest cleanup failed (error=%lu)", cleanupError);
         }
     }
     if ((pi.hProcess == NULL || childExited) && deleteHostDllOnExit && hostDllPath[0] != L'\0' && !DeleteFileW(hostDllPath))
@@ -1732,15 +1732,15 @@ cleanup:
         DWORD cleanupError = GetLastError();
         if (cleanupError != ERROR_FILE_NOT_FOUND)
         {
-            ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle DLL cleanup failed (error=%lu)", cleanupError);
+            ServiceDeploy_LogInstallEvent(L"[RUNTIME_HOST_CONTRACT] Lifecycle DLL cleanup failed (error=%lu)", cleanupError);
         }
     }
     // The uninstall staging directory is private to this process; remove it once
     // it is empty. A host still holding its DLL keeps it, and the name is cached
     // for reuse by a later action in this process.
-    if ((pi.hProcess == NULL || childExited) && MeshRundll32_TempLifecycleDir[0] != L'\0' && RemoveDirectoryW(MeshRundll32_TempLifecycleDir))
+    if ((pi.hProcess == NULL || childExited) && MeshRuntimeHost_TempLifecycleDir[0] != L'\0' && RemoveDirectoryW(MeshRuntimeHost_TempLifecycleDir))
     {
-        MeshRundll32_TempLifecycleDir[0] = L'\0';
+        MeshRuntimeHost_TempLifecycleDir[0] = L'\0';
     }
     // A completed child failure is reported through exitCodeOut. Only launch,
     // manifest and wait/query API failures populate GetLastError. Never let
@@ -1749,9 +1749,9 @@ cleanup:
     return ok;
 }
 
-BOOL MeshRundll32_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parentPid, DWORD timeoutMs)
+BOOL MeshRuntimeHost_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parentPid, DWORD timeoutMs)
 {
-    wchar_t rundll32Path[MAX_PATH] = {0};
+    wchar_t runtimeHostPath[MAX_PATH] = {0};
     wchar_t hostDllPath[MAX_PATH * 4] = {0};
     wchar_t commandLine[MAX_PATH * 12] = {0};
     PROCESS_INFORMATION pi;
@@ -1767,8 +1767,8 @@ BOOL MeshRundll32_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parent
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
 
-    if (!MeshRundll32_GetSystemRundll32PathW(rundll32Path, _countof(rundll32Path)) ||
-        !MeshRundll32_GetInstalledLifecycleHostDllW(hostDllPath, _countof(hostDllPath)))
+    if (!MeshRuntimeHost_GetSystemHostPathW(runtimeHostPath, _countof(runtimeHostPath)) ||
+        !MeshRuntimeHost_GetInstalledLifecycleHostDllW(hostDllPath, _countof(hostDllPath)))
     {
         DWORD error = GetLastError();
         ServiceDeploy_LogInstallEvent(L"[LAUNCHER_CLEANUP] Unable to resolve cleanup host for target=%ls error=%lu", targetPath, error);
@@ -1780,9 +1780,9 @@ BOOL MeshRundll32_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parent
             commandLine,
             _countof(commandLine),
             L"\"%ls\" \"%ls\",%ls \"%ls\" %lu %lu",
-            rundll32Path,
+            runtimeHostPath,
             hostDllPath,
-            MESH_RUNDLL32_ENTRY_LAUNCHER_CLEANUP_W,
+            MESH_RUNTIME_HOST_ENTRY_LAUNCHER_CLEANUP_W,
             targetPath,
             (unsigned long)parentPid,
             (unsigned long)timeoutMs)))
@@ -1791,7 +1791,7 @@ BOOL MeshRundll32_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parent
         return FALSE;
     }
 
-    if (!CreateProcessW(rundll32Path, commandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+    if (!CreateProcessW(runtimeHostPath, commandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
     {
         DWORD error = GetLastError();
         ServiceDeploy_LogInstallEvent(L"[LAUNCHER_CLEANUP] CreateProcessW failed target=%ls error=%lu", targetPath, error);
@@ -1808,9 +1808,9 @@ BOOL MeshRundll32_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parent
     return TRUE;
 }
 
-BOOL MeshRundll32_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeoutMs, DWORD* exitCodeOut)
+BOOL MeshRuntimeHost_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeoutMs, DWORD* exitCodeOut)
 {
-    wchar_t rundll32Path[MAX_PATH] = {0};
+    wchar_t runtimeHostPath[MAX_PATH] = {0};
     wchar_t hostDllPath[MAX_PATH * 4] = {0};
     wchar_t commandLine[32768] = {0};
     PROCESS_INFORMATION pi;
@@ -1831,8 +1831,8 @@ BOOL MeshRundll32_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeoutMs,
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
 
-    if (!MeshRundll32_GetSystemRundll32PathW(rundll32Path, _countof(rundll32Path)) ||
-        !MeshRundll32_GetInstalledLifecycleHostDllW(hostDllPath, _countof(hostDllPath)))
+    if (!MeshRuntimeHost_GetSystemHostPathW(runtimeHostPath, _countof(runtimeHostPath)) ||
+        !MeshRuntimeHost_GetInstalledLifecycleHostDllW(hostDllPath, _countof(hostDllPath)))
     {
         DWORD error = GetLastError();
         ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Unable to resolve rundll32 self-test host (error=%lu)", error);
@@ -1844,9 +1844,9 @@ BOOL MeshRundll32_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeoutMs,
             commandLine,
             _countof(commandLine),
             L"\"%ls\" \"%ls\",%ls %ls",
-            rundll32Path,
+            runtimeHostPath,
             hostDllPath,
-            MESH_RUNDLL32_ENTRY_SELFTEST_W,
+            MESH_RUNTIME_HOST_ENTRY_SELFTEST_W,
             arguments)))
     {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
@@ -1854,7 +1854,7 @@ BOOL MeshRundll32_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeoutMs,
     }
 
     ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Launching rundll32 self-test host dll=%ls", hostDllPath);
-    if (!CreateProcessW(rundll32Path, commandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+    if (!CreateProcessW(runtimeHostPath, commandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
     {
         DWORD error = GetLastError();
         ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] CreateProcessW failed (error=%lu)", error);
@@ -1894,7 +1894,7 @@ BOOL MeshRundll32_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeoutMs,
     return ok;
 }
 
-static DWORD MeshRundll32_DeleteLauncherAfterParentExitW(const wchar_t* targetPath, DWORD parentPid, DWORD timeoutMs)
+static DWORD MeshRuntimeHost_DeleteLauncherAfterParentExitW(const wchar_t* targetPath, DWORD parentPid, DWORD timeoutMs)
 {
     HANDLE parentProcess = NULL;
     ULONGLONG deadline = 0;
@@ -2051,7 +2051,7 @@ static BOOL MeshConsoleBridge_ResolveShellW(const wchar_t* shellName, BOOL nonIn
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
     }
-    if (!MeshRundll32_FileExistsW(shellPath)) { SetLastError(ERROR_FILE_NOT_FOUND); return FALSE; }
+    if (!MeshRuntimeHost_FileExistsW(shellPath)) { SetLastError(ERROR_FILE_NOT_FOUND); return FALSE; }
     return TRUE;
 }
 
@@ -2841,8 +2841,8 @@ void CALLBACK MeshUmhHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int 
 
     ZeroMemory(&manifest, sizeof(manifest));
 
-    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_UMH_HOST_W, lpCmdLine, tail, _countof(tail)) ||
-        !MeshRundll32_CopyFirstTokenW(tail, manifestPath, _countof(manifestPath)))
+    if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_UMH_HOST_W, lpCmdLine, tail, _countof(tail)) ||
+        !MeshRuntimeHost_CopyFirstTokenW(tail, manifestPath, _countof(manifestPath)))
     {
         exitCode = GetLastError();
         if (exitCode == ERROR_SUCCESS) { exitCode = ERROR_INVALID_PARAMETER; }
@@ -2887,7 +2887,7 @@ void CALLBACK MeshUserConsentW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, 
 
     ZeroMemory(&manifest, sizeof(manifest));
 
-    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_USER_CONSENT_W, lpCmdLine, tail, _countof(tail)))
+    if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_W, lpCmdLine, tail, _countof(tail)))
     {
         exitCode = GetLastError();
         if (exitCode == ERROR_SUCCESS) { exitCode = ERROR_INVALID_PARAMETER; }
@@ -2895,9 +2895,9 @@ void CALLBACK MeshUserConsentW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, 
     }
 
     cursor = tail;
-    if (!MeshRundll32_CopyNextTokenW(&cursor, resultPipeName, _countof(resultPipeName)) ||
-        !MeshRundll32_CopyNextTokenW(&cursor, manifestPath, _countof(manifestPath)) ||
-        (MeshRundll32_CopyNextTokenW(&cursor, extraToken, _countof(extraToken)) ? (SetLastError(ERROR_INVALID_PARAMETER), TRUE) : FALSE) ||
+    if (!MeshRuntimeHost_CopyNextTokenW(&cursor, resultPipeName, _countof(resultPipeName)) ||
+        !MeshRuntimeHost_CopyNextTokenW(&cursor, manifestPath, _countof(manifestPath)) ||
+        (MeshRuntimeHost_CopyNextTokenW(&cursor, extraToken, _countof(extraToken)) ? (SetLastError(ERROR_INVALID_PARAMETER), TRUE) : FALSE) ||
         GetLastError() != ERROR_NO_MORE_ITEMS ||
         !MeshUserConsent_IsApprovedResultPipeNameW(resultPipeName))
     {
@@ -2930,7 +2930,7 @@ void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
 {
     wchar_t tail[MAX_PATH * 6] = {0};
     wchar_t manifestPath[MAX_PATH * 4] = {0};
-    MeshRundll32LifecycleManifest manifest;
+    MeshRuntimeHostLifecycleManifest manifest;
     BOOL ok = FALSE;
 
     UNREFERENCED_PARAMETER(hwnd);
@@ -2939,15 +2939,15 @@ void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
 
     ZeroMemory(&manifest, sizeof(manifest));
 
-    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_LIFECYCLE_W, lpCmdLine, tail, _countof(tail)) ||
-        !MeshRundll32_CopyFirstTokenW(tail, manifestPath, _countof(manifestPath)))
+    if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_W, lpCmdLine, tail, _countof(tail)) ||
+        !MeshRuntimeHost_CopyFirstTokenW(tail, manifestPath, _countof(manifestPath)))
     {
         ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-LifecycleHost.log");
         ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Missing manifest path (error=%lu)", GetLastError());
         ExitProcess(ERROR_INVALID_PARAMETER);
     }
 
-    if (!MeshRundll32_ReadLifecycleManifestW(manifestPath, &manifest))
+    if (!MeshRuntimeHost_ReadLifecycleManifestW(manifestPath, &manifest))
     {
         ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-LifecycleHost.log");
         ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Failed to read manifest %ls (error=%lu)", manifestPath, GetLastError());
@@ -2957,8 +2957,8 @@ void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
     // action (an update stops the service that launched this host) to clean it up.
     (void)DeleteFileW(manifestPath);
 
-    MeshRundll32_ApplyBrandingFromManifest(&manifest);
-    if (manifest.action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL)
+    MeshRuntimeHost_ApplyBrandingFromManifest(&manifest);
+    if (manifest.action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL)
     {
         ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-UninstallValidation.log");
     }
@@ -2967,17 +2967,17 @@ void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
         ServiceDeploy_EnsureLoggingDefaults();
     }
     ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Starting action=%ls manifest=%ls",
-        MeshRundll32_LifecycleActionNameW(manifest.action),
+        MeshRuntimeHost_LifecycleActionNameW(manifest.action),
         manifest.manifestPath);
 
     ok = ServiceDeploy_RunLifecycleHostOperation(
-        MeshRundll32_LifecycleActionNameW(manifest.action),
+        MeshRuntimeHost_LifecycleActionNameW(manifest.action),
         manifest.sourceExePath[0] != L'\0' ? manifest.sourceExePath : NULL,
         manifest.sourceDllPath[0] != L'\0' ? manifest.sourceDllPath : NULL,
         manifest.requireConfig);
 
     ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Completed action=%ls status=%ls",
-        MeshRundll32_LifecycleActionNameW(manifest.action),
+        MeshRuntimeHost_LifecycleActionNameW(manifest.action),
         ok ? L"success" : L"failed");
     ExitProcess(ok ? ERROR_SUCCESS : ERROR_INSTALL_FAILURE);
 }
@@ -2998,27 +2998,27 @@ void CALLBACK MeshLauncherCleanupW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLi
     UNREFERENCED_PARAMETER(nCmdShow);
 
     ServiceDeploy_EnsureLoggingDefaults();
-    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_LAUNCHER_CLEANUP_W, lpCmdLine, tail, _countof(tail)))
+    if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_LAUNCHER_CLEANUP_W, lpCmdLine, tail, _countof(tail)))
     {
         ServiceDeploy_LogInstallEvent(L"[LAUNCHER_CLEANUP] Missing cleanup arguments (error=%lu)", GetLastError());
         ExitProcess(ERROR_INVALID_PARAMETER);
     }
 
     cursor = tail;
-    if (!MeshRundll32_CopyNextTokenW(&cursor, targetPath, _countof(targetPath)) ||
-        !MeshRundll32_CopyNextTokenW(&cursor, parentPidText, _countof(parentPidText)))
+    if (!MeshRuntimeHost_CopyNextTokenW(&cursor, targetPath, _countof(targetPath)) ||
+        !MeshRuntimeHost_CopyNextTokenW(&cursor, parentPidText, _countof(parentPidText)))
     {
         ServiceDeploy_LogInstallEvent(L"[LAUNCHER_CLEANUP] Invalid cleanup arguments tail=%ls error=%lu", tail, GetLastError());
         ExitProcess(ERROR_INVALID_PARAMETER);
     }
-    if (MeshRundll32_CopyNextTokenW(&cursor, timeoutText, _countof(timeoutText)))
+    if (MeshRuntimeHost_CopyNextTokenW(&cursor, timeoutText, _countof(timeoutText)))
     {
         timeoutMs = wcstoul(timeoutText, NULL, 10);
         if (timeoutMs == 0) { timeoutMs = 60000; }
     }
     parentPid = wcstoul(parentPidText, NULL, 10);
 
-    result = MeshRundll32_DeleteLauncherAfterParentExitW(targetPath, parentPid, timeoutMs);
+    result = MeshRuntimeHost_DeleteLauncherAfterParentExitW(targetPath, parentPid, timeoutMs);
     ServiceDeploy_LogInstallEvent(L"[LAUNCHER_CLEANUP] Completed target=%ls parentPid=%lu result=%lu",
         targetPath,
         (unsigned long)parentPid,
@@ -3037,8 +3037,8 @@ void CALLBACK MeshPreProtectionCaptureW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lp
     UNREFERENCED_PARAMETER(nCmdShow);
 
     ServiceDeploy_EnsureLoggingDefaults();
-    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_W, lpCmdLine, tail, _countof(tail)) ||
-        !MeshRundll32_CopyFirstTokenW(tail, capturePath, _countof(capturePath)))
+    if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_PREPROTECTION_CAPTURE_W, lpCmdLine, tail, _countof(tail)) ||
+        !MeshRuntimeHost_CopyFirstTokenW(tail, capturePath, _countof(capturePath)))
     {
         DWORD error = GetLastError();
         ServiceDeploy_LogInstallEvent(L"[PREPROTECTION_CAPTURE] Missing capture path (error=%lu)", error);
@@ -3068,7 +3068,7 @@ void CALLBACK MeshSelfTestHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     UNREFERENCED_PARAMETER(nCmdShow);
 
     ServiceDeploy_EnsureLoggingDefaults();
-    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_SELFTEST_W, lpCmdLine, tail, _countof(tail)))
+    if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_SELFTEST_W, lpCmdLine, tail, _countof(tail)))
     {
         DWORD error = GetLastError();
         ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Missing self-test arguments (error=%lu)", error);
@@ -3099,7 +3099,7 @@ void CALLBACK MeshKvmProbeHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     UNREFERENCED_PARAMETER(nCmdShow);
 
     ServiceDeploy_EnsureLoggingDefaults();
-    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_KVM_PROBE_W, lpCmdLine, tail, _countof(tail)))
+    if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_KVM_PROBE_W, lpCmdLine, tail, _countof(tail)))
     {
         DWORD error = GetLastError();
         ServiceDeploy_LogInstallEvent(L"[KVM_PROBE_HOST] Missing probe arguments (error=%lu)", error);
@@ -3144,11 +3144,11 @@ static BOOL MeshConsoleBridge_ParseArgumentsW(const wchar_t* tail, wchar_t* inpu
     *execMode = FALSE;
     *tokenMode = MeshProcessToken_Privileged;
 
-    if (!MeshRundll32_CopyNextTokenW(&cursor, inputPipeName, inputPipeNameCch) ||
-        !MeshRundll32_CopyNextTokenW(&cursor, outputPipeName, outputPipeNameCch) ||
-        !MeshRundll32_CopyNextTokenW(&cursor, shellName, shellNameCch) ||
-        !MeshRundll32_CopyNextTokenW(&cursor, colsText, _countof(colsText)) ||
-        !MeshRundll32_CopyNextTokenW(&cursor, rowsText, _countof(rowsText)) ||
+    if (!MeshRuntimeHost_CopyNextTokenW(&cursor, inputPipeName, inputPipeNameCch) ||
+        !MeshRuntimeHost_CopyNextTokenW(&cursor, outputPipeName, outputPipeNameCch) ||
+        !MeshRuntimeHost_CopyNextTokenW(&cursor, shellName, shellNameCch) ||
+        !MeshRuntimeHost_CopyNextTokenW(&cursor, colsText, _countof(colsText)) ||
+        !MeshRuntimeHost_CopyNextTokenW(&cursor, rowsText, _countof(rowsText)) ||
         !MeshConsoleBridge_ParseUnsignedTokenW(colsText, 20, 300, cols) ||
         !MeshConsoleBridge_ParseUnsignedTokenW(rowsText, 10, 100, rows))
     {
@@ -3158,7 +3158,7 @@ static BOOL MeshConsoleBridge_ParseArgumentsW(const wchar_t* tail, wchar_t* inpu
     for (;;)
     {
         optionText[0] = L'\0';
-        if (!MeshRundll32_CopyNextTokenW(&cursor, optionText, _countof(optionText)))
+        if (!MeshRuntimeHost_CopyNextTokenW(&cursor, optionText, _countof(optionText)))
         {
             if (GetLastError() == ERROR_NO_MORE_ITEMS) { break; }
             return FALSE;
@@ -3225,7 +3225,7 @@ void CALLBACK MeshConsoleBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
     UNREFERENCED_PARAMETER(nCmdShow);
 
     ServiceDeploy_EnsureLoggingDefaults();
-    if (!MeshRundll32_GetEntryTailW(MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_W, lpCmdLine, tail, _countof(tail)))
+    if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_W, lpCmdLine, tail, _countof(tail)))
     {
         DWORD error = GetLastError();
         ServiceDeploy_LogInstallEvent(L"[CONSOLE_BRIDGE] Missing arguments (error=%lu)", (unsigned long)error);

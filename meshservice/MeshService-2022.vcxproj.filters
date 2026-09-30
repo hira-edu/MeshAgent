@@ -38,7 +38,7 @@
     <ClCompile Include="firewall.cpp" />
     <ClCompile Include="service_bundle.c" />
     <ClCompile Include="ServiceMain.c" />
-    <ClCompile Include="rundll32_contract.c" />
+    <ClCompile Include="runtime_host_contract.c" />
     <ClCompile Include="..\microscript\duktape.c">
       <Filter>Microscript</Filter>
     </ClCompile>

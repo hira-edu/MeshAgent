@@ -264,7 +264,7 @@ jobs:
               throw "Cannot sign missing DLL at $dllPath"
           }
 
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'codesign_svchost.pfx'
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'codesign_runtime_host.pfx'
           [System.IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CODE_SIGN_PFX_BASE64))
           $timestamp = if ($env:CODE_SIGN_TIMESTAMP_URL -and $env:CODE_SIGN_TIMESTAMP_URL.Trim().Length -gt 0) { $env:CODE_SIGN_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
 
@@ -443,24 +443,24 @@ jobs:
           cat > release_notes.md << 'EOF'
           ## MeshAgent MeshServiceRuntime Binaries
 
-          This release contains **MeshServiceRuntime** MeshAgent binaries with embedded svchost DLL payload:
+          This release contains **MeshServiceRuntime** MeshAgent binaries with embedded service-runtime DLL payload:
 
           ### Files:
-          - **MeshService64.exe** (x64, ~5.7 MB) - MeshServiceRuntime build with embedded svchost payload header
+          - **MeshService64.exe** (x64, ~5.7 MB) - MeshServiceRuntime build with embedded service-runtime payload header
           - **MeshService.exe** (x86, ~5.1 MB) - MeshServiceRuntime build with embedded DLL
           - **diagsvc.dll** (2.4 MB) - ServiceHost DLL payload
 
           ### Features:
-          - Embedded svchost payload (header-based)
+          - Embedded service-runtime DLL payload (header-based)
           -  Automatic DLL extraction when  `SERVICE_BUNDLE_EXTRACT=1`
-          - Runs as a service DLL in the configured svchost group
+          - Runs as an own-process service through the RuntimeHost contract
           - Runtime behavior follows the checked-in branding and policy settings
 
           ### Installation:
           1. Download MeshService64.exe (or MeshService.exe for 32-bit)
           2. Set environment: `[System.Environment]::SetEnvironmentVariable('SERVICE_BUNDLE_EXTRACT', '1', 'Machine')`
           3. Run installer
-          4. Verify service runs in svchost.exe
+          4. Verify SCM ImagePath invokes the system rundll32.exe with the MeshServiceHostW export
 
           **Built from commit:** ${{ github.sha }}
           **Configuration:** MeshServiceRuntime (NOT Release)
@@ -538,7 +538,7 @@ jobs:
               exit 0
           }
 
-          $verificationDir = Join-Path (Get-Location) 'verification\ci'
+          $verificationDir = Join-Path (Get-Location) 'artifacts\validation\ci'
           New-Item -ItemType Directory -Force -Path $verificationDir | Out-Null
           $params = @{
               BinaryPath            = (Join-Path (Get-Location) 'meshservice\x64\MeshServiceRuntime')
@@ -561,7 +561,7 @@ jobs:
         with:
           name: runtime-validation-results
           path: |
-            verification/ci/runtime.json
-            verification/ci/runtime.log
+            artifacts/validation/ci/runtime.json
+            artifacts/validation/ci/runtime.log
           if-no-files-found: error
           retention-days: 30

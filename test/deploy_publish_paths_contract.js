@@ -146,7 +146,7 @@ for (const snippet of requiredSnippets) {
 }
 
 assert(!source.includes('r"C:\\ProgramData\\MeshAgent"'), 'deploy.py must not default remote update discovery to the legacy MeshAgent install root');
-assert(!source.includes('r"%ProgramData%\\MeshAgent\\state\\rundll32-lifecycle"'), 'deploy.py must not default lifecycle state to the legacy MeshAgent install root');
+assert(!source.includes('r"%ProgramData%\\MeshAgent\\state\\runtime-host-lifecycle"'), 'deploy.py must not default lifecycle state to the legacy MeshAgent install root');
 assert(!source.includes('LOCAL_REPO / "branding_config.json"'), 'deploy.py must not fall back to the generic branding template for production install paths');
 assert(!source.includes('r"C:\\ProgramData\\DiagnosticHost"'), 'deploy.py must not hard-code the DiagnosticHost install root as a fallback');
 assert(!source.includes('../UserModeHook/build-fresh/bin/Release/MasterService.exe'), 'deploy.py must not publish MasterService.exe from the stale build-fresh path');

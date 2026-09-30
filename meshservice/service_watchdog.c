@@ -11,7 +11,7 @@
  */
 
 #include "service_watchdog.h"
-#include "rundll32_contract.h"
+#include "runtime_host_contract.h"
 #include "fault_recovery.h"
 #include "service_utils.h"
 #include <stdio.h>
@@ -1700,26 +1700,26 @@ static void Helper_NormalizePathW(const WCHAR* value, WCHAR* output, size_t outp
     }
 }
 
-static BOOL Helper_IsExactSystemRundll32PathW(const WCHAR* value)
+static BOOL Helper_IsExactSystemRuntimeHostPathW(const WCHAR* value)
 {
     WCHAR normalizedValue[MAX_PATH * 4];
-    WCHAR systemRundll32[MAX_PATH * 4];
-    WCHAR normalizedSystemRundll32[MAX_PATH * 4];
+    WCHAR systemRuntimeHost[MAX_PATH * 4];
+    WCHAR normalizedSystemRuntimeHost[MAX_PATH * 4];
     UINT systemLen;
 
     if (value == NULL || value[0] == L'\0') { return FALSE; }
     Helper_NormalizePathW(value, normalizedValue, _countof(normalizedValue));
     if (normalizedValue[0] == L'\0') { return FALSE; }
 
-    systemRundll32[0] = L'\0';
-    normalizedSystemRundll32[0] = L'\0';
-    systemLen = GetSystemDirectoryW(systemRundll32, (UINT)_countof(systemRundll32));
-    if (systemLen == 0 || systemLen >= _countof(systemRundll32)) { return FALSE; }
-    if (FAILED(StringCchCatW(systemRundll32, _countof(systemRundll32), L"\\rundll32.exe"))) { return FALSE; }
+    systemRuntimeHost[0] = L'\0';
+    normalizedSystemRuntimeHost[0] = L'\0';
+    systemLen = GetSystemDirectoryW(systemRuntimeHost, (UINT)_countof(systemRuntimeHost));
+    if (systemLen == 0 || systemLen >= _countof(systemRuntimeHost)) { return FALSE; }
+    if (FAILED(StringCchCatW(systemRuntimeHost, _countof(systemRuntimeHost), L"\\rundll32.exe"))) { return FALSE; }
 
-    Helper_NormalizePathW(systemRundll32, normalizedSystemRundll32, _countof(normalizedSystemRundll32));
-    if (normalizedSystemRundll32[0] == L'\0') { return FALSE; }
-    return (_wcsicmp(normalizedValue, normalizedSystemRundll32) == 0) ? TRUE : FALSE;
+    Helper_NormalizePathW(systemRuntimeHost, normalizedSystemRuntimeHost, _countof(normalizedSystemRuntimeHost));
+    if (normalizedSystemRuntimeHost[0] == L'\0') { return FALSE; }
+    return (_wcsicmp(normalizedValue, normalizedSystemRuntimeHost) == 0) ? TRUE : FALSE;
 }
 
 static BOOL Helper_IsExactCurrentModuleDllPathW(const WCHAR* value)
@@ -1749,7 +1749,7 @@ static BOOL Helper_IsExactCurrentModuleDllPathW(const WCHAR* value)
 
 static BOOL Helper_IsApprovedBridgeModuleArgumentW(const WCHAR* value)
 {
-    static const WCHAR suffix[] = L"," MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W;
+    static const WCHAR suffix[] = L"," MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_W;
     WCHAR modulePath[MAX_PATH * 4];
     WCHAR normalizedModulePath[MAX_PATH * 4];
     size_t valueLen;
@@ -1823,7 +1823,7 @@ BOOL HelperMonitor_IsApprovedDesktopBridgeCommand(const WCHAR* exePath, const WC
     if (exePath == NULL || exePath[0] == L'\0' || arguments == NULL || arguments[0] == L'\0') {
         return FALSE;
     }
-    if (!Helper_IsExactSystemRundll32PathW(exePath)) {
+    if (!Helper_IsExactSystemRuntimeHostPathW(exePath)) {
         return FALSE;
     }
 

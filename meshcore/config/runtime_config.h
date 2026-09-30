@@ -6,7 +6,6 @@
 typedef struct mesh_runtime_profile_s
 {
     uint8_t runtimeEnabled;
-    uint8_t svchostMode;
     uint8_t manageFiles;
     uint8_t manageRegistry;
     uint8_t eventTraceDiagnostics;
@@ -18,7 +17,6 @@ typedef struct mesh_runtime_profile_s
 static const mesh_runtime_profile_t g_meshRuntimeProfile =
 {
     MESH_AGENT_RUNTIME_ENABLED,
-    MESH_AGENT_SERVICE_HOST_MODE,
     MESH_AGENT_MANAGE_FILES,
     MESH_AGENT_MANAGE_REGISTRY,
     MESH_AGENT_EVENT_TRACE_DIAGNOSTICS,

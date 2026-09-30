@@ -72,8 +72,7 @@ that file or generated credentials.
 | Configuration | `docs/CONFIGURATION.md` |
 | Deployment, backups, rollback | `docs/DEPLOYMENT.md` |
 | Testing | `docs/testing/README.md` |
-| UMH cross-repo ownership | `docs/UMH_CONTROL_SISTER_REPO_SSOT.md` |
-| UMH live assumptions | `docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md` |
+| UMH ownership and publication contract | `docs/UMH_CONTROL_SISTER_REPO_SSOT.md` |
 
 Do not add dated planning files, status ledgers, completed-work summaries, or
 checked-in runtime evidence. Track proposed work outside the repository and

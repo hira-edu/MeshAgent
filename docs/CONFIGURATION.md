@@ -11,7 +11,7 @@ MeshAgent's Windows package build consumes two independent inputs:
 Local credentials and environment-specific identities must stay in ignored
 files.
 
-Branding remains required even when lifecycle helpers run through `rundll32`:
+Branding remains required even when lifecycle helpers run through RuntimeHost:
 the installer uses the product identity and paths, and `deploy.py` derives the
 default installed service-DLL and lifecycle-state paths from the active
 branding configuration when it performs remote native update activation.
@@ -102,7 +102,7 @@ The native writer initializes the BOM before writing fields. The JavaScript
 installer (including its embedded copy), deployment helper, and test harnesses
 use the same encoding. Existing ASCII manifests remain readable.
 
-`MeshRundll32_LaunchLifecycleHostW` preserves API failures before logging and
+`MeshRuntimeHost_LaunchLifecycleHostW` preserves API failures before logging and
 cleanup. A completed child that fails returns `FALSE` with `GetLastError()==0`
 and its actual status in `exitCodeOut`. The GUI therefore reports an install
 failure with the child status instead of an unrelated last-error value from

@@ -3,7 +3,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const { buildKvmPacket, resolveBridgeDllPath, resolveRundll32Path } = require('./lib/kvm_runtime_helpers');
+const { buildKvmPacket, resolveBridgeDllPath, resolveRuntimeHostPath } = require('./lib/kvm_runtime_helpers');
 
 function parseArgs(argv) {
     const args = {};
@@ -217,7 +217,7 @@ function captureFirstFrame(exePath, dllPath, backend, outDir) {
         controlServer.on('error', (error) => finish(error));
         dataServer.on('error', (error) => finish(error));
 
-        const child = spawn(resolveRundll32Path(), [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName], {
+        const child = spawn(resolveRuntimeHostPath(), [`${dllPath},KvmSessionBridgeW`, controlPipeName, dataPipeName], {
             env,
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true

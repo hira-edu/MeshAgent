@@ -442,9 +442,12 @@ microscript/ILibDuktape_Commit.h
 
 # Generated validation scratch paths
 test/msbuild_tmp/
-test/rundll32_*/
-rundll32-lifecycle/
+test/runtime_host_*/
+runtime-host-lifecycle/
 .aider*
 tmp/
 nul
 query
+
+# Runtime evidence belongs in artifacts/validation, never tracked history.
+/verification/

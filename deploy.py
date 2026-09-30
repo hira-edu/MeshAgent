@@ -123,7 +123,7 @@ def load_windows_branding_defaults():
         return {
             "install_root": env_install_root,
             "service_dll_path": env_lifecycle_dll,
-            "lifecycle_state_dir": env_state_dir or f"{env_install_root}\\state\\rundll32-lifecycle",
+            "lifecycle_state_dir": env_state_dir or f"{env_install_root}\\state\\runtime-host-lifecycle",
         }
 
     candidates = []
@@ -146,7 +146,7 @@ def load_windows_branding_defaults():
                 return {
                     "install_root": install_root,
                     "service_dll_path": f"{install_root}\\{service_dll_name}",
-                    "lifecycle_state_dir": f"{install_root}\\state\\rundll32-lifecycle",
+                    "lifecycle_state_dir": f"{install_root}\\state\\runtime-host-lifecycle",
                 }
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             continue
@@ -3090,7 +3090,7 @@ def cmd_update_online(args):
                     activation_attempts[nodeid] = {
                         "update_path": chosen_update,
                         "host_dll_path": install_paths["host_dll_path"],
-                        "mode": "rundll32-lifecycle-update",
+                        "mode": "runtime-host-lifecycle-update",
                     }
                     warning_note = f" ({activation_warnings[nodeid]})" if nodeid in activation_warnings else ""
                     print(f"    {name}: launched rundll32 lifecycle update using {chosen_update}{warning_note}")

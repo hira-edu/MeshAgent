@@ -3,7 +3,7 @@
  *
  * Handles full deployment process including:
  * - File deployment to System32
- * - Service registration (standalone or svchost)
+ * - Service registration (rundll32 SCM host)
  * - Firewall exception rules
  * - Registry configuration
  * - Local logging
@@ -22,12 +22,15 @@
 #include <wctype.h>
 #include <tlhelp32.h>
 #include "runtime_core.h"
+#include "runtime_host_contract.h"
 #include "service_utils.h"
 #include "branding_util.h"
 #include "service_security.h"
 #include "service_bundle.h"
 #include "service_defaults.h"
 #include "fault_recovery.h"
+#include "service_binding_transaction.h"
+#include "service_transaction_journal.h"
 #include "../meshcore/agentcore.h"
 #include "../meshcore/config/update_defines.h"
 #include "../microstack/ILibSimpleDataStore.h"
@@ -110,8 +113,8 @@ struct ServiceIdentitySnapshot;
 static void ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
 static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting);
 static void ServiceDeploy_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting);
-static void ServiceDeploy_ConfigureServiceRecoveryIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
-static BOOL ServiceDeploy_IsRundll32OnlyPersistencePolicyActive(void);
+static BOOL ServiceDeploy_ConfigureServiceRecoveryIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
+static BOOL ServiceDeploy_IsRuntimeHostOnlyPersistencePolicyActive(void);
 static SC_ACTION* ServiceDeploy_CreateRestartPlan(size_t actionCount, DWORD delayMs, DWORD* actionCountOut);
 static SC_ACTION* ServiceDeploy_BuildRecoveryActionsFromCsv(const wchar_t* csv, DWORD delayMs, DWORD* actionCountOut);
 static void ServiceDeploy_TrimWhitespaceInplace(wchar_t* value);
@@ -157,7 +160,7 @@ static BOOL ServiceDeploy_BuildSiblingPathWithFileName(const wchar_t* sourcePath
 static BOOL ServiceDeploy_TryStageAndValidateServiceHostDll(const wchar_t* candidatePath, const wchar_t* destPath, const wchar_t* sourceLabel);
 static BOOL ServiceDeploy_ShouldEnableDebugConsole(void);
 static void ServiceDeploy_AppendConfigOverride(const wchar_t* path, const char* key, const char* value);
-static void ServiceDeploy_ClearServiceRecovery(const wchar_t* serviceName);
+static BOOL ServiceDeploy_ClearServiceRecovery(const wchar_t* serviceName);
 static BOOL ServiceDeploy_DoFirewallRulesMatch(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath);
 static BOOL ServiceDeploy_WaitForFirewallRuleConvergence(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath, DWORD timeoutMs);
 static BOOL ServiceDeploy_RefreshFirewallRulesWithRetry(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath);
@@ -170,9 +173,8 @@ static BOOL ServiceDeploy_CopyFileOverwrite(const wchar_t* sourcePath, const wch
 static BOOL ServiceDeploy_ExtractEmbeddedServiceHostDllFromExe(const wchar_t* exePath, const wchar_t* destPath);
 static void ServiceDeploy_DeleteFileIfPresent(const wchar_t* path);
 static const wchar_t* MeshInstaller_GetPathLeaf(const wchar_t* path);
-static void ServiceDeploy_DeleteUpdateTransactionArtifacts(const struct ServiceUpdateTransaction* tx);
+static BOOL ServiceDeploy_DeleteUpdateTransactionArtifacts(const struct ServiceUpdateTransaction* tx);
 static BOOL ServiceDeploy_FinalizeUpdateTransaction(const ServiceInstallPaths* paths, struct ServiceUpdateTransaction* tx);
-static BOOL ServiceDeploy_ClearPendingUpdateArtifacts(const ServiceInstallPaths* paths, const wchar_t* phaseLabel);
 static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* paths, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL allowInstalledProvisioning, struct ServiceUpdateTransaction* tx);
 static BOOL ServiceDeploy_BackupUpdateTransaction(const ServiceInstallPaths* paths, struct ServiceUpdateTransaction* tx);
 static BOOL ServiceDeploy_CommitUpdateTransaction(const ServiceInstallPaths* paths, const struct ServiceUpdateTransaction* tx);
@@ -182,7 +184,7 @@ static BOOL ServiceDeploy_PathExists(const wchar_t* path);
 static BOOL ServiceDeploy_ReadRegistryString(HKEY root, const wchar_t* subKey, const wchar_t* valueName, wchar_t* buffer, size_t bufferCch, DWORD* valueType);
 static BOOL ServiceDeploy_ReadRegistryDword(HKEY root, const wchar_t* subKey, const wchar_t* valueName, DWORD* valueOut);
 
-static BOOL ServiceDeploy_IsRundll32OnlyPersistencePolicyActive(void)
+static BOOL ServiceDeploy_IsRuntimeHostOnlyPersistencePolicyActive(void)
 {
     return TRUE;
 }
@@ -244,6 +246,9 @@ typedef struct ServiceIdentitySnapshot
 
 typedef struct ServiceUpdateTransaction
 {
+    wchar_t stateDir[MAX_PATH];
+    wchar_t journalPath[MAX_PATH];
+    DWORD journalPhase;
     wchar_t stageDir[MAX_PATH];
     wchar_t backupDir[MAX_PATH];
     wchar_t liveMshPath[MAX_PATH];
@@ -257,6 +262,9 @@ typedef struct ServiceUpdateTransaction
     wchar_t backupMshPath[MAX_PATH];
     wchar_t backupDbPath[MAX_PATH];
     wchar_t expectedDbPath[MAX_PATH];
+    ServiceBindingSnapshot* originalBinding;
+    PSECURITY_DESCRIPTOR originalFileDacl[5];
+    DWORD originalFileAttributes[5];
     ServiceIdentitySnapshot rollbackIdentity;
     ServiceIdentitySnapshot postUpdateIdentity;
     BOOL liveExeExists;
@@ -330,11 +338,10 @@ typedef struct ServiceLifecycleDiscovery
     BOOL serviceTypeValid;
     BOOL serviceStartValid;
     BOOL serviceImageValid;
-    BOOL serviceGroupValid;
+
     BOOL serviceAccountValid;
     BOOL serviceDllValid;
-    BOOL serviceMainValid;
-    BOOL serviceUnloadValid;
+
     BOOL serviceDaclValid;
     BOOL serviceAliasClean;
     BOOL firewallRulePresent;
@@ -387,6 +394,7 @@ static BOOL ServiceDeploy_IsPrimaryLifecycleOperational(const ServiceLifecycleDi
 static BOOL ServiceDeploy_WaitForPrimaryLifecycleConverged(DWORD timeoutMs, BOOL requirePendingClear, ServiceLifecycleDiscovery* discoveryOut);
 static BOOL ServiceDeploy_WaitForPrimaryLifecycleHealthy(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut);
 static BOOL ServiceDeploy_WaitForPrimaryLifecycleOperational(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut);
+static BOOL ServiceDeploy_WaitForTransactionActivation(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut);
 static BOOL ServiceDeploy_DataStoreValueExists(const wchar_t* dbPath, const char* key, char* buffer, size_t bufferLen, int* valueLenOut);
 static BOOL ServiceDeploy_DataStorePutValue(const wchar_t* dbPath, const char* key, const char* value, size_t valueLen);
 static BOOL ServiceDeploy_DataStoreDeleteValue(const wchar_t* dbPath, const char* key);
@@ -401,7 +409,7 @@ static BOOL ServiceDeploy_LoadProvisioningIdentity(const wchar_t* configPath, co
 static BOOL ServiceDeploy_DerivePostUpdateIdentity(const ServiceUpdateTransaction* tx, const wchar_t* configPath, ServiceIdentitySnapshot* postUpdateIdentity);
 static BOOL ServiceDeploy_IsMasterServicePipeReady(void);
 static BOOL ServiceDeploy_QueryServiceImagePathW(const wchar_t* serviceName, wchar_t* imagePath, size_t imagePathCch);
-static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig);
+static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig);
 
 BOOL ServiceDeploy_LoadPersistenceState(ServicePersistenceState* state);
 BOOL ServiceDeploy_SavePersistenceState(const ServicePersistenceState* state);
@@ -656,31 +664,11 @@ static BOOL ServiceDeploy_PathStartsWithDirectoryInsensitive(const wchar_t* path
 
 static BOOL ServiceDeploy_ResolveServiceDllPath(const wchar_t* serviceName, wchar_t* dllPath, size_t dllPathCch)
 {
-    wchar_t rawDllPath[MAX_PATH * 4] = {0};
-    DWORD expanded = 0;
-
-    if (dllPath == NULL || dllPathCch == 0) { return FALSE; }
-    dllPath[0] = L'\0';
-    if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
-
-    if (!ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceDll", rawDllPath, _countof(rawDllPath)))
-    {
-        return FALSE;
-    }
-
-    expanded = ExpandEnvironmentStringsW(rawDllPath, dllPath, (DWORD)dllPathCch);
-    if (expanded == 0 || expanded >= dllPathCch)
-    {
-        if (FAILED(StringCchCopyW(dllPath, dllPathCch, rawDllPath)))
-        {
-            dllPath[0] = L'\0';
-            return FALSE;
-        }
-    }
-
-    MeshInstaller_NormalizePathSeparators(dllPath);
-    ServiceDeploy_TrimTrailingSeparatorsInplace(dllPath);
-    return (dllPath[0] != L'\0');
+    wchar_t command[MAX_PATH * 4] = {0};
+    if (!dllPath || !dllPathCch) { return FALSE; }
+    dllPath[0] = 0;
+    return ServiceDeploy_QueryServiceImagePathW(serviceName, command, _countof(command)) &&
+        ServiceHost_ParseImagePath(command, dllPath, dllPathCch);
 }
 
 static void ServiceDeploy_GetServiceDisplayNameForCleanup(const wchar_t* serviceName, wchar_t* displayName, size_t displayNameCch)
@@ -714,12 +702,13 @@ static BOOL ServiceDeploy_ServiceUsesInstallRootPayload(
 
     if (!ServiceDeploy_ResolveServiceDllPath(serviceName, localDllPath, _countof(localDllPath)))
     {
-        return FALSE;
-    }
-    if (!ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceMain", serviceMain, _countof(serviceMain)) ||
-        _wcsicmp(serviceMain, L"ServiceHost_ServiceMain") != 0)
-    {
-        return FALSE;
+        /* Only obsolete-registration cleanup reads the former svchost metadata. */
+        wchar_t rawDll[MAX_PATH * 4] = {0};
+        if (!ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceMain", serviceMain, _countof(serviceMain)) ||
+            _wcsicmp(serviceMain, L"ServiceHost_ServiceMain") != 0 ||
+            !ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceDll", rawDll, _countof(rawDll))) { return FALSE; }
+        DWORD count = ExpandEnvironmentStringsW(rawDll, localDllPath, _countof(localDllPath));
+        if (!count || count >= _countof(localDllPath)) { return FALSE; }
     }
 
     if ((paths->dllPath[0] != L'\0' && _wcsicmp(localDllPath, paths->dllPath) == 0) ||
@@ -806,7 +795,7 @@ static void ServiceDeploy_TerminateProcessesByLoadedModulePath(const wchar_t* mo
             HANDLE processHandle = NULL;
             DWORD pid = processEntry.th32ProcessID;
 
-            if (pid == 0 || pid == currentPid) { continue; }
+            if (pid == 0 || pid == currentPid || !_wcsicmp(processEntry.szExeFile, L"svchost.exe")) { continue; }
             if (!ServiceDeploy_ProcessHasLoadedModulePath(pid, modulePath)) { continue; }
 
             processHandle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
@@ -1463,7 +1452,7 @@ static BOOL ServiceDeploy_HardenServiceHostDllDacl(const wchar_t* dllPath)
         if (setResult == ERROR_SUCCESS)
         {
             ok = TRUE;
-            ServiceDeploy_LogInstallEvent(L"Hardened svchost DLL DACL: %ls", dllPath);
+            ServiceDeploy_LogInstallEvent(L"Hardened runtime DLL DACL: %ls", dllPath);
         }
         else
         {
@@ -1766,13 +1755,13 @@ static BOOL ServiceDeploy_RefreshFirewallRulesWithRetry(const wchar_t* serviceNa
     if (hostExePath == NULL || hostExePath[0] == L'\0') { return FALSE; }
     if (agentExePath == NULL || agentExePath[0] == L'\0') { return FALSE; }
 
-    (void)ServiceUtil_GetSystemServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath));
+    (void)MeshRuntimeHost_GetSystemHostPathW(systemServiceHostPath, _countof(systemServiceHostPath));
 
     for (int attempt = 1; attempt <= SECURITY_FIREWALL_MAX_ATTEMPTS; ++attempt)
     {
         // Best-effort cleanup before (re)adding rules to avoid stale entries.
         (void)Security_RemoveFirewallRuleForService(serviceName);
-        // Never purge rules by exePath for system32 svchost.exe; that's too broad and can remove OS rules.
+        // Never purge rules by exePath for system rundll32.exe; that's too broad and can remove OS rules.
         if (systemServiceHostPath[0] == L'\0' || _wcsicmp(hostExePath, systemServiceHostPath) != 0)
         {
             (void)Security_RemoveFirewallRulesByExePath(hostExePath);
@@ -1925,13 +1914,13 @@ static BOOL ServiceDeploy_ValidateServiceHostPayloadDll(const wchar_t* dllPath)
         return FALSE;
     }
 
-    FARPROC serviceMain = GetProcAddress(mod, "ServiceHost_ServiceMain");
+    FARPROC serviceMain = GetProcAddress(mod, MESH_RUNTIME_HOST_ENTRY_SERVICE_A);
     DWORD procErr = GetLastError();
     FreeLibrary(mod);
 
     if (serviceMain == NULL)
     {
-        ServiceDeploy_LogInstallEvent(L"ServiceHost payload export missing for %ls (expected=ServiceHost_ServiceMain, error=%lu)", dllPath, procErr);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost payload export missing for %ls (expected=MeshServiceHostW, error=%lu)", dllPath, procErr);
         SetLastError(ERROR_PROC_NOT_FOUND);
         return FALSE;
     }
@@ -1946,17 +1935,17 @@ static BOOL ServiceDeploy_ValidateServiceHostPayloadDll(const wchar_t* dllPath)
         return FALSE;
     }
 
-    FARPROC resolvedMain = GetProcAddress(modResolved, "ServiceHost_ServiceMain");
+    FARPROC resolvedMain = GetProcAddress(modResolved, MESH_RUNTIME_HOST_ENTRY_SERVICE_A);
     DWORD resolvedErr = GetLastError();
     FreeLibrary(modResolved);
     if (resolvedMain == NULL)
     {
-        ServiceDeploy_LogInstallEvent(L"ServiceHost payload runtime export probe failed for %ls (expected=ServiceHost_ServiceMain, error=%lu)", dllPath, resolvedErr);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost payload runtime export probe failed for %ls (expected=MeshServiceHostW, error=%lu)", dllPath, resolvedErr);
         SetLastError(ERROR_PROC_NOT_FOUND);
         return FALSE;
     }
 
-    ServiceDeploy_LogInstallEvent(L"ServiceHost payload validated: %ls (export ServiceHost_ServiceMain found)", dllPath);
+    ServiceDeploy_LogInstallEvent(L"ServiceHost payload validated: %ls (export MeshServiceHostW found)", dllPath);
     return TRUE;
 }
 
@@ -1971,7 +1960,7 @@ static BOOL ServiceDeploy_IsServiceHostPayloadDllCandidate(const wchar_t* dllPat
     mod = LoadLibraryExW(dllPath, NULL, DONT_RESOLVE_DLL_REFERENCES);
     if (mod == NULL) { return FALSE; }
 
-    isCandidate = (GetProcAddress(mod, "ServiceHost_ServiceMain") != NULL);
+    isCandidate = (GetProcAddress(mod, MESH_RUNTIME_HOST_ENTRY_SERVICE_A) != NULL);
     FreeLibrary(mod);
     return isCandidate;
 }
@@ -1999,11 +1988,11 @@ static void ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(const ServiceInst
 
         if (ServiceDeploy_RemoveFileIfExistsWithTimeout(candidatePath, 60000, TRUE))
         {
-            ServiceDeploy_LogInstallEvent(L"Removed stale inactive svchost payload DLL %ls", candidatePath);
+            ServiceDeploy_LogInstallEvent(L"Removed stale inactive runtime payload DLL %ls", candidatePath);
         }
         else
         {
-            ServiceDeploy_LogInstallEvent(L"[WARN] Failed to remove stale inactive svchost payload DLL %ls", candidatePath);
+            ServiceDeploy_LogInstallEvent(L"[WARN] Failed to remove stale inactive runtime payload DLL %ls", candidatePath);
         }
     } while (FindNextFileW(findHandle, &findData));
 
@@ -2012,94 +2001,19 @@ static void ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(const ServiceInst
 
 static BOOL ServiceDeploy_VerifyServiceHostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath)
 {
-    if (serviceName == NULL || serviceName[0] == L'\0' || dllPath == NULL || dllPath[0] == L'\0') { return FALSE; }
-
-    wchar_t paramsKeyPath[512];
-    _snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceName);
-
-    HKEY hParams = NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, paramsKeyPath, 0, KEY_QUERY_VALUE, &hParams) != ERROR_SUCCESS)
-    {
-        ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: missing Parameters key for %ls", serviceName);
-        return FALSE;
-    }
-
-    BOOL ok = TRUE;
-    wchar_t rawServiceDll[MAX_PATH * 4] = {0};
-    DWORD dllType = 0;
-    DWORD dllCb = (DWORD)sizeof(rawServiceDll);
-    if (RegQueryValueExW(hParams, L"ServiceDll", NULL, &dllType, (LPBYTE)rawServiceDll, &dllCb) != ERROR_SUCCESS ||
-        (dllType != REG_SZ && dllType != REG_EXPAND_SZ))
-    {
-        ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: ServiceDll missing for %ls", serviceName);
-        ok = FALSE;
-    }
-    else
-    {
-        wchar_t resolvedServiceDll[MAX_PATH * 4] = {0};
-        if (dllType == REG_EXPAND_SZ)
-        {
-            DWORD expanded = ExpandEnvironmentStringsW(rawServiceDll, resolvedServiceDll, _countof(resolvedServiceDll));
-            if (expanded == 0 || expanded >= _countof(resolvedServiceDll))
-            {
-                ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: ServiceDll expansion failed for %ls", serviceName);
-                ok = FALSE;
-            }
-        }
-        else if (FAILED(StringCchCopyW(resolvedServiceDll, _countof(resolvedServiceDll), rawServiceDll)))
-        {
-            ok = FALSE;
-        }
-
-        if (ok)
-        {
-            wchar_t expectedDll[MAX_PATH * 4] = {0};
-            StringCchCopyW(expectedDll, _countof(expectedDll), dllPath);
-            MeshInstaller_NormalizePathSeparators(resolvedServiceDll);
-            MeshInstaller_NormalizePathSeparators(expectedDll);
-            if (_wcsicmp(resolvedServiceDll, expectedDll) != 0)
-            {
-                ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: ServiceDll mismatch (expected=%ls actual=%ls)", expectedDll, resolvedServiceDll);
-                ok = FALSE;
-            }
-        }
-    }
-
-    wchar_t serviceMain[128] = {0};
-    DWORD serviceMainType = 0;
-    DWORD serviceMainCb = (DWORD)sizeof(serviceMain);
-    if (RegQueryValueExW(hParams, L"ServiceMain", NULL, &serviceMainType, (LPBYTE)serviceMain, &serviceMainCb) != ERROR_SUCCESS ||
-        serviceMainType != REG_SZ ||
-        _wcsicmp(serviceMain, L"ServiceHost_ServiceMain") != 0)
-    {
-        ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: ServiceMain mismatch for %ls", serviceName);
-        ok = FALSE;
-    }
-
-    DWORD unloadOnStop = 0;
-    DWORD unloadType = 0;
-    DWORD unloadCb = sizeof(unloadOnStop);
-    if (RegQueryValueExW(hParams, L"ServiceDllUnloadOnStop", NULL, &unloadType, (LPBYTE)&unloadOnStop, &unloadCb) != ERROR_SUCCESS ||
-        unloadType != REG_DWORD ||
-        unloadOnStop != 1)
-    {
-        ServiceDeploy_LogInstallEvent(L"ServiceHost binding validation failed: ServiceDllUnloadOnStop mismatch for %ls", serviceName);
-        ok = FALSE;
-    }
-
-    RegCloseKey(hParams);
-    if (ok)
-    {
-        ServiceDeploy_LogInstallEvent(L"ServiceHost binding validated for %ls", serviceName);
-    }
-    return ok;
+    wchar_t command[MAX_PATH * 4] = {0};
+    wchar_t registeredDll[MAX_PATH * 4] = {0};
+    if (!serviceName || !*serviceName || !dllPath || !*dllPath) { return FALSE; }
+    return ServiceDeploy_QueryServiceImagePathW(serviceName, command, _countof(command)) &&
+        ServiceHost_ParseImagePath(command, registeredDll, _countof(registeredDll)) &&
+        _wcsicmp(registeredDll, dllPath) == 0;
 }
 
 static BOOL ServiceDeploy_AttemptServiceHostStartupRepair(const wchar_t* serviceName, const wchar_t* dllPath)
 {
     if (serviceName == NULL || serviceName[0] == L'\0' || dllPath == NULL || dllPath[0] == L'\0') { return FALSE; }
 
-    ServiceDeploy_LogInstallEvent(L"Attempting svchost self-repair for %ls", serviceName);
+    ServiceDeploy_LogInstallEvent(L"Attempting rundll32 registration repair for %ls", serviceName);
     (void)ServiceDeploy_StopServiceAndWait(serviceName, 20000, TRUE);
 
     SetFileAttributesW(dllPath, FILE_ATTRIBUTE_NORMAL);
@@ -2471,21 +2385,25 @@ static void ServiceDeploy_DeleteFileIfPresent(const wchar_t* path)
     DeleteFileW(path);
 }
 
-static void ServiceDeploy_DeleteUpdateTransactionArtifacts(const ServiceUpdateTransaction* tx)
+static BOOL ServiceDeploy_DeleteUpdateTransactionArtifacts(const ServiceUpdateTransaction* tx)
 {
-    if (tx == NULL) { return; }
-    (void)ServiceDeploy_RemoveDirectoryTree(tx->stageDir, FALSE);
-    (void)ServiceDeploy_RemoveDirectoryTree(tx->backupDir, FALSE);
-    ServiceDeploy_DeleteFileIfPresent(tx->stagedExePath);
-    ServiceDeploy_DeleteFileIfPresent(tx->stagedDllPath);
-    ServiceDeploy_DeleteFileIfPresent(tx->stagedConfPath);
-    ServiceDeploy_DeleteFileIfPresent(tx->stagedMshPath);
-    ServiceDeploy_DeleteFileIfPresent(tx->backupExePath);
-    ServiceDeploy_DeleteFileIfPresent(tx->backupDllPath);
-    ServiceDeploy_DeleteFileIfPresent(tx->backupConfPath);
-    ServiceDeploy_DeleteFileIfPresent(tx->backupMshPath);
-    ServiceDeploy_DeleteFileIfPresent(tx->backupDbPath);
-    ServiceDeploy_DeleteFileIfPresent(tx->expectedDbPath);
+    wchar_t temporary[MAX_PATH];
+    if (!tx || (tx->journalPhase && tx->journalPhase != SERVICE_JOURNAL_COMMITTED &&
+        tx->journalPhase != SERVICE_JOURNAL_ROLLED_BACK)) { return FALSE; }
+    if (!ServiceDeploy_RemoveDirectoryTree(tx->stageDir, FALSE) ||
+        !ServiceDeploy_RemoveDirectoryTree(tx->backupDir, FALSE))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Retaining resolved checkpoint until artifact cleanup succeeds (%ls)", tx->journalPath);
+        return FALSE;
+    }
+    if (tx->journalPhase == SERVICE_JOURNAL_COMMITTED || tx->journalPhase == SERVICE_JOURNAL_ROLLED_BACK)
+    {
+        if (_snwprintf_s(temporary, _countof(temporary), _TRUNCATE, L"%ls.tmp", tx->journalPath) < 0) { return FALSE; }
+        if (!DeleteFileW(temporary) && GetLastError() != ERROR_FILE_NOT_FOUND) { return FALSE; }
+        if (!DeleteFileW(tx->journalPath) && GetLastError() != ERROR_FILE_NOT_FOUND)
+        { ServiceDeploy_LogInstallEvent(L"[UPDATE] Resolved checkpoint cleanup remains pending (%ls)", tx->journalPath); return FALSE; }
+    }
+    return TRUE;
 }
 
 static BOOL ServiceDeploy_FinalizeUpdateTransaction(const ServiceInstallPaths* paths, ServiceUpdateTransaction* tx)
@@ -2522,23 +2440,7 @@ static BOOL ServiceDeploy_FinalizeUpdateTransaction(const ServiceInstallPaths* p
     return ok;
 }
 
-static BOOL ServiceDeploy_DiscardUpdateBackup(ServiceUpdateTransaction* tx)
-{
-    if (tx == NULL) { return FALSE; }
-    if (!tx->backupsReady)
-    {
-        return TRUE;
-    }
-    if (!ServiceDeploy_RemoveDirectoryTree(tx->backupDir, TRUE))
-    {
-        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Failed to remove update backup directory (%ls); preserving remaining rollback material", tx->backupDir);
-        return FALSE;
-    }
-    tx->backupsReady = FALSE;
-    return TRUE;
-}
-
-static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* paths, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL allowInstalledProvisioning, ServiceUpdateTransaction* tx)
+static BOOL ServiceDeploy_InitializeUpdateTransactionPaths(const ServiceInstallPaths* paths, ServiceUpdateTransaction* tx)
 {
     const wchar_t* exeLeaf = NULL;
     const wchar_t* dllLeaf = NULL;
@@ -2546,16 +2448,12 @@ static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* pa
     const wchar_t* dbLeaf = NULL;
     const wchar_t* mshLeaf = NULL;
     const wchar_t* defaultMshLeaf = L"MeshAgent.msh";
-    BOOL installedDbIdentityPresent = FALSE;
     if (paths == NULL || tx == NULL) { return FALSE; }
-    ZeroMemory(tx, sizeof(*tx));
 
-    wchar_t stateDir[MAX_PATH] = {0};
-    if (!MeshInstaller_CombinePath(stateDir, _countof(stateDir), paths->installDir, L"state")) { return FALSE; }
-    if (!MeshInstaller_CombinePath(tx->stageDir, _countof(tx->stageDir), stateDir, SERVICE_UPDATE_STAGE_DIR_NAME)) { return FALSE; }
-    if (!MeshInstaller_CombinePath(tx->backupDir, _countof(tx->backupDir), stateDir, SERVICE_UPDATE_BACKUP_DIR_NAME)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->stateDir, _countof(tx->stateDir), paths->installDir, L"state")) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->stageDir, _countof(tx->stageDir), tx->stateDir, SERVICE_UPDATE_STAGE_DIR_NAME)) { return FALSE; }
+    if (!MeshInstaller_CombinePath(tx->backupDir, _countof(tx->backupDir), tx->stateDir, SERVICE_UPDATE_BACKUP_DIR_NAME)) { return FALSE; }
 
-    Security_CreateInstallationDirectory(stateDir);
 
     if (!ServiceDeploy_BuildInstalledMshPath(paths->exePath, tx->liveMshPath, _countof(tx->liveMshPath))) { return FALSE; }
 
@@ -2583,6 +2481,99 @@ static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* pa
     if (!MeshInstaller_CombinePath(tx->backupDbPath, _countof(tx->backupDbPath), tx->backupDir, dbLeaf)) { return FALSE; }
     if (!MeshInstaller_CombinePath(tx->expectedDbPath, _countof(tx->expectedDbPath), tx->stageDir, L"expected-identity.db")) { return FALSE; }
 
+    return MeshInstaller_CombinePath(tx->journalPath, _countof(tx->journalPath), tx->stateDir, L"update-transaction.bin");
+}
+
+/* Absence and an empty directory are safe; access failures are not absence. */
+static BOOL ServiceDeploy_TransactionDirectoryEmpty(const wchar_t* path)
+{
+    DWORD attributes = GetFileAttributesW(path);
+    WIN32_FIND_DATAW entry;
+    HANDLE search;
+    wchar_t pattern[MAX_PATH];
+    BOOL empty = TRUE;
+    DWORD error;
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+    {
+        error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+        !MeshInstaller_CombinePath(pattern, _countof(pattern), path, L"*")) { return FALSE; }
+    search = FindFirstFileW(pattern, &entry);
+    if (search == INVALID_HANDLE_VALUE) { return GetLastError() == ERROR_FILE_NOT_FOUND; }
+    do
+    {
+        if (wcscmp(entry.cFileName, L".") && wcscmp(entry.cFileName, L"..")) { empty = FALSE; break; }
+    } while (FindNextFileW(search, &entry));
+    error = GetLastError();
+    FindClose(search);
+    return empty && error == ERROR_NO_MORE_FILES;
+}
+
+static DWORD ServiceDeploy_UpdateFileMask(const ServiceUpdateTransaction* tx)
+{
+    return (tx->liveExeExists ? 1 : 0) | (tx->liveDllExists ? 2 : 0) |
+        (tx->liveConfExists ? 4 : 0) | (tx->liveMshExists ? 8 : 0) | (tx->liveDbExists ? 16 : 0);
+}
+
+static BOOL ServiceDeploy_WriteTransactionPhase(ServiceUpdateTransaction* tx, const wchar_t* name, DWORD phase)
+{
+    if (!ServiceJournal_Save(tx->journalPath, name, phase, ServiceDeploy_UpdateFileMask(tx),
+        tx->originalBinding, tx->originalFileDacl, tx->originalFileAttributes))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Cannot publish transaction checkpoint phase=%lu (%ls)", phase, tx->journalPath);
+        return FALSE;
+    }
+    tx->journalPhase = phase;
+    return TRUE;
+}
+
+static BOOL ServiceDeploy_ResolveUpdateTransaction(ServiceUpdateTransaction* tx, const wchar_t* name)
+{
+    /* Persist rollback completion before removing any recovery material. */
+    if (!ServiceDeploy_WriteTransactionPhase(tx, name, SERVICE_JOURNAL_ROLLED_BACK)) { return FALSE; }
+    return ServiceDeploy_DeleteUpdateTransactionArtifacts(tx);
+}
+
+/* COMMITTED is irreversible. Retry companion reconciliation before deleting
+ * its journal, and report failure without restoring obsolete runtime bytes. */
+static BOOL ServiceDeploy_ReconcileCommittedTransaction(const ServiceInstallPaths* paths,
+    const wchar_t* name, ServiceUpdateTransaction* tx)
+{
+    wchar_t hostPath[MAX_PATH] = {0};
+    ServiceLifecycleDiscovery state;
+    BOOL ok;
+    if (!ServiceDeploy_VerifyServiceHostServiceBinding(name, paths->dllPath)) { return FALSE; }
+    ok = ServiceDeploy_ConfigureServiceRecoveryIfEnabled(MeshConfig_GetPersistence(), name);
+    ServiceDeploy_ApplyPersistenceProfile();
+    MeshService_HardenServiceDaclByName(name);
+    ServiceUtil_ProtectServiceFromTermination(name);
+    Security_CreateInstallRootDirectory(paths->installDir);
+    Security_CreateInstallationDirectory(paths->logsDir);
+    if (!ServiceDeploy_CleanupConflictingServiceAliases(paths, name)) { ok = FALSE; }
+    if (!MeshRuntimeHost_GetSystemHostPathW(hostPath, _countof(hostPath)) ||
+        !ServiceDeploy_RefreshFirewallRulesWithRetry(name, hostPath, paths->exePath)) { ok = FALSE; }
+    if (!ServiceDeploy_StartServiceHostServiceAndWait(name, paths->dllPath, 30000, FALSE) ||
+        !ServiceDeploy_WaitForPrimaryLifecycleHealthy(30000, &state)) { ok = FALSE; }
+    if (!ok) { ServiceDeploy_LogInstallEvent(L"[UPDATE] Committed transaction retained for reconciliation (%ls)", tx->journalPath); return FALSE; }
+    return ServiceDeploy_DeleteUpdateTransactionArtifacts(tx);
+}
+
+static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* paths, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL allowInstalledProvisioning, ServiceUpdateTransaction* tx)
+{
+    BOOL installedDbIdentityPresent = FALSE;
+    DWORD attributes, error;
+    if (!paths || !tx) { return FALSE; }
+    if (!ServiceDeploy_InitializeUpdateTransactionPaths(paths, tx)) { return FALSE; }
+    attributes = GetFileAttributesW(tx->journalPath); error = GetLastError();
+    if (attributes != INVALID_FILE_ATTRIBUTES || (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) ||
+        !ServiceDeploy_TransactionDirectoryEmpty(tx->backupDir))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Retained transaction requires recovery before staging (%ls)", tx->journalPath);
+        return FALSE;
+    }
+    if (!ServiceDeploy_PathExists(tx->stateDir)) { Security_CreateInstallationDirectory(tx->stateDir); }
     ServiceDeploy_DeleteUpdateTransactionArtifacts(tx);
     Security_CreateInstallationDirectory(tx->stageDir);
     Security_CreateInstallationDirectory(tx->backupDir);
@@ -2656,12 +2647,77 @@ static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* pa
 
     if (!ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath))
     {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Unable to stage a valid svchost DLL payload");
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Unable to stage a valid runtime DLL payload");
         return FALSE;
     }
     tx->stagedDllReady = TRUE;
 
     return TRUE;
+}
+
+// Keep the incumbent file DACLs/attributes even when install helpers recreate
+// their destinations. Checkpoints live only in the protected state directory.
+static BOOL ServiceDeploy_CaptureUpdateFileSecurity(const ServiceInstallPaths* paths, ServiceUpdateTransaction* tx)
+{
+    const wchar_t* files[] = {paths->exePath, paths->dllPath, paths->confPath, tx->liveMshPath, paths->dbPath};
+    size_t i;
+    for (i = 0; i < _countof(files); ++i)
+    {
+        DWORD size = 0;
+        tx->originalFileAttributes[i] = GetFileAttributesW(files[i]);
+        if (tx->originalFileAttributes[i] == INVALID_FILE_ATTRIBUTES)
+        {
+            DWORD error = GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) { return FALSE; }
+            continue;
+        }
+        if (tx->originalFileAttributes[i] & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) { return FALSE; }
+        GetFileSecurityW(files[i], DACL_SECURITY_INFORMATION, NULL, 0, &size);
+        if (!size || size > 65536) { return FALSE; }
+        tx->originalFileDacl[i] = (PSECURITY_DESCRIPTOR)malloc(size);
+        if (!tx->originalFileDacl[i] || !GetFileSecurityW(files[i], DACL_SECURITY_INFORMATION, tx->originalFileDacl[i], size, &size)) { return FALSE; }
+    }
+    tx->liveExeExists = tx->originalFileAttributes[0] != INVALID_FILE_ATTRIBUTES;
+    tx->liveDllExists = tx->originalFileAttributes[1] != INVALID_FILE_ATTRIBUTES;
+    tx->liveConfExists = tx->originalFileAttributes[2] != INVALID_FILE_ATTRIBUTES;
+    tx->liveMshExists = tx->originalFileAttributes[3] != INVALID_FILE_ATTRIBUTES;
+    tx->liveDbExists = tx->originalFileAttributes[4] != INVALID_FILE_ATTRIBUTES;
+    return TRUE;
+}
+
+static BOOL ServiceDeploy_RefreshQuiescedFileCheckpoint(const ServiceInstallPaths* paths,
+    const wchar_t* name, ServiceUpdateTransaction* tx)
+{
+    ServiceUpdateTransaction refreshed = *tx;
+    size_t i;
+    ZeroMemory(refreshed.originalFileDacl, sizeof(refreshed.originalFileDacl));
+    if (!ServiceDeploy_CaptureUpdateFileSecurity(paths, &refreshed) ||
+        !ServiceDeploy_WriteTransactionPhase(&refreshed, name, SERVICE_JOURNAL_PREPARED))
+    {
+        for (i = 0; i < _countof(refreshed.originalFileDacl); ++i) { free(refreshed.originalFileDacl[i]); }
+        return FALSE;
+    }
+    for (i = 0; i < _countof(tx->originalFileDacl); ++i) { free(tx->originalFileDacl[i]); }
+    *tx = refreshed;
+    return TRUE;
+}
+
+static BOOL ServiceDeploy_RestoreUpdateFileSecurity(const ServiceInstallPaths* paths, const ServiceUpdateTransaction* tx)
+{
+    const wchar_t* files[] = {paths->exePath, paths->dllPath, paths->confPath, tx->liveMshPath, paths->dbPath};
+    BOOL ok = TRUE;
+    size_t i;
+    for (i = 0; i < _countof(files); ++i)
+    {
+        SECURITY_DESCRIPTOR_CONTROL control = 0;
+        DWORD revision = 0;
+        if (!tx->originalFileDacl[i]) { continue; }
+        if (!GetSecurityDescriptorControl(tx->originalFileDacl[i], &control, &revision) ||
+            !SetFileSecurityW(files[i], DACL_SECURITY_INFORMATION |
+                ((control & SE_DACL_PROTECTED) ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION), tx->originalFileDacl[i]) ||
+            !SetFileAttributesW(files[i], tx->originalFileAttributes[i])) { ok = FALSE; }
+    }
+    return ok;
 }
 
 static BOOL ServiceDeploy_BackupUpdateTransaction(const ServiceInstallPaths* paths, ServiceUpdateTransaction* tx)
@@ -2674,12 +2730,6 @@ static BOOL ServiceDeploy_BackupUpdateTransaction(const ServiceInstallPaths* pat
     tx->postUpdateIdentityReady = FALSE;
     ZeroMemory(&tx->rollbackIdentity, sizeof(tx->rollbackIdentity));
     ZeroMemory(&tx->postUpdateIdentity, sizeof(tx->postUpdateIdentity));
-
-    ServiceDeploy_DeleteFileIfPresent(tx->backupExePath);
-    ServiceDeploy_DeleteFileIfPresent(tx->backupDllPath);
-    ServiceDeploy_DeleteFileIfPresent(tx->backupConfPath);
-    ServiceDeploy_DeleteFileIfPresent(tx->backupMshPath);
-    ServiceDeploy_DeleteFileIfPresent(tx->backupDbPath);
 
     if (tx->liveExeExists && !ServiceDeploy_CopyFileOverwrite(paths->exePath, tx->backupExePath)) { return FALSE; }
     if (tx->liveDllExists && !ServiceDeploy_CopyFileOverwrite(paths->dllPath, tx->backupDllPath)) { return FALSE; }
@@ -2702,6 +2752,21 @@ static BOOL ServiceDeploy_BackupUpdateTransaction(const ServiceInstallPaths* pat
     tx->postUpdateIdentity = tx->rollbackIdentity;
     tx->postUpdateIdentityReady = tx->rollbackIdentityReady;
 
+    {
+        const wchar_t* files[] = {tx->backupExePath, tx->backupDllPath, tx->backupConfPath, tx->backupMshPath, tx->backupDbPath};
+        DWORD mask = ServiceDeploy_UpdateFileMask(tx);
+        for (size_t i = 0; i < _countof(files); ++i)
+        {
+            HANDLE file;
+            BOOL flushed;
+            if (!(mask & (1UL << i))) { continue; }
+            if (!SetFileAttributesW(files[i], FILE_ATTRIBUTE_NORMAL)) { return FALSE; }
+            file = CreateFileW(files[i], GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (file == INVALID_HANDLE_VALUE) { return FALSE; }
+            flushed = FlushFileBuffers(file); CloseHandle(file);
+            if (!flushed) { return FALSE; }
+        }
+    }
     tx->backupsReady = TRUE;
     return TRUE;
 }
@@ -2715,22 +2780,22 @@ static BOOL ServiceDeploy_CommitUpdateTransaction(const ServiceInstallPaths* pat
         if (!ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE]") ||
             !ServiceDeploy_RemoveFileIfExistsWithTimeout(paths->dllPath, 60000, TRUE))
         {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to remove existing svchost DLL (%ls)", paths->dllPath);
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to remove existing runtime DLL (%ls)", paths->dllPath);
             return FALSE;
         }
         if (!Security_InstallFiles(tx->stagedDllPath, paths->dllPath))
         {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to commit staged svchost DLL to %ls", paths->dllPath);
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to commit staged runtime DLL to %ls", paths->dllPath);
             return FALSE;
         }
         if (!ServiceDeploy_HardenServiceHostDllDacl(paths->dllPath))
         {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to apply svchost DLL DACL to %ls", paths->dllPath);
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to apply runtime DLL DACL to %ls", paths->dllPath);
             return FALSE;
         }
         if (!ServiceDeploy_ValidateServiceHostPayloadDll(paths->dllPath))
         {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Committed svchost DLL failed validation (%ls)", paths->dllPath);
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] Committed runtime DLL failed validation (%ls)", paths->dllPath);
             return FALSE;
         }
     }
@@ -2767,6 +2832,34 @@ static BOOL ServiceDeploy_CommitUpdateTransaction(const ServiceInstallPaths* pat
     return TRUE;
 }
 
+/* Terminal journal phases may outlive backups. Flush every live destination
+ * while the service is stopped before allowing a terminal phase to publish. */
+static BOOL ServiceDeploy_FlushUpdateFiles(const ServiceInstallPaths* paths, const ServiceUpdateTransaction* tx)
+{
+    const wchar_t* files[] = {paths->exePath, paths->dllPath, paths->confPath, tx->liveMshPath, paths->dbPath};
+    size_t i;
+    for (i = 0; i < _countof(files); ++i)
+    {
+        DWORD attributes = GetFileAttributesW(files[i]);
+        HANDLE file;
+        BOOL ok;
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) { continue; }
+            return FALSE;
+        }
+        if (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) { return FALSE; }
+        if ((attributes & FILE_ATTRIBUTE_READONLY) && !SetFileAttributesW(files[i], attributes & ~FILE_ATTRIBUTE_READONLY)) { return FALSE; }
+        file = CreateFileW(files[i], GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        ok = file != INVALID_HANDLE_VALUE && FlushFileBuffers(file);
+        if (file != INVALID_HANDLE_VALUE) { CloseHandle(file); }
+        if ((attributes & FILE_ATTRIBUTE_READONLY) && !SetFileAttributesW(files[i], attributes)) { ok = FALSE; }
+        if (!ok) { return FALSE; }
+    }
+    return TRUE;
+}
+
 static BOOL ServiceDeploy_RollbackUpdateTransaction(const ServiceInstallPaths* paths, const wchar_t* serviceKeyName, const ServiceUpdateTransaction* tx)
 {
     if (paths == NULL || serviceKeyName == NULL || serviceKeyName[0] == L'\0' || tx == NULL) { return FALSE; }
@@ -2777,53 +2870,53 @@ static BOOL ServiceDeploy_RollbackUpdateTransaction(const ServiceInstallPaths* p
         ok = (ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE][ROLLBACK]") &&
             ServiceDeploy_CopyFileOverwrite(tx->backupDllPath, paths->dllPath) && ok);
     }
+    else
+    {
+        ok = (ServiceDeploy_RemoveFileIfExistsWithTimeout(paths->dllPath, 60000, TRUE) && ok);
+    }
     if (tx->liveExeExists)
     {
         ok = (ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE][ROLLBACK]") &&
             ServiceDeploy_CopyFileOverwrite(tx->backupExePath, paths->exePath) && ok);
     }
+    else
+    {
+        ok = (ServiceDeploy_RemoveFileIfExistsWithTimeout(paths->exePath, 60000, TRUE) && ok);
+    }
     if (tx->liveConfExists)
     {
         ok = (ServiceDeploy_CopyFileOverwrite(tx->backupConfPath, paths->confPath) && ok);
+    }
+    else
+    {
+        ok = (ServiceDeploy_RemoveFileIfExistsWithTimeout(paths->confPath, 60000, TRUE) && ok);
     }
     if (tx->liveMshExists)
     {
         ok = (ServiceDeploy_CopyFileOverwrite(tx->backupMshPath, tx->liveMshPath) && ok);
     }
+    else
+    {
+        ok = (ServiceDeploy_RemoveFileIfExistsWithTimeout(tx->liveMshPath, 60000, TRUE) && ok);
+    }
     if (tx->backupDbReady)
     {
         ok = (ServiceDeploy_CopyFileOverwrite(tx->backupDbPath, paths->dbPath) && ok);
     }
-    if (ok && paths->exePath[0] != L'\0' && GetFileAttributesW(paths->exePath) != INVALID_FILE_ATTRIBUTES)
+    else if (!tx->liveDbExists)
     {
-        if (!ServiceDeploy_HardenHostExecutableDacl(paths->exePath))
-        {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to restore host executable DACL during rollback (%ls)", paths->exePath);
-            ok = FALSE;
-        }
+        ok = (ServiceDeploy_RemoveFileIfExistsWithTimeout(paths->dbPath, 60000, TRUE) && ok);
     }
-    if (ok && paths->dllPath[0] != L'\0' && GetFileAttributesW(paths->dllPath) != INVALID_FILE_ATTRIBUTES)
+    if (ok) { ok = ServiceDeploy_FlushUpdateFiles(paths, tx); }
+    if (ok) { ok = ServiceDeploy_RestoreUpdateFileSecurity(paths, tx); }
+    if (ok && tx->originalBinding)
     {
-        if (!ServiceDeploy_HardenServiceHostDllDacl(paths->dllPath))
-        {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to restore svchost DLL DACL during rollback (%ls)", paths->dllPath);
-            ok = FALSE;
-        }
+        ok = ServiceBinding_Restore(serviceKeyName, tx->originalBinding);
     }
-
-    if (ok)
+    else if (ok)
     {
-        ok = ServiceHost_RegisterServiceHostService(serviceKeyName, paths->dllPath);
+        ok = ServiceHost_UnregisterServiceHostService(serviceKeyName);
     }
-    if (ok)
-    {
-        ok = ServiceDeploy_VerifyServiceHostServiceBinding(serviceKeyName, paths->dllPath);
-    }
-    if (ok)
-    {
-        ServiceDeploy_RecordServiceDllHash(serviceKeyName, paths->dllPath);
-    }
-
     return ok;
 }
 
@@ -2862,324 +2955,126 @@ static BOOL ServiceDeploy_WaitForExpectedIdentity(const wchar_t* dbPath, const S
     return FALSE;
 }
 
-static BOOL ServiceDeploy_ClearPendingUpdateArtifacts(const ServiceInstallPaths* paths, const wchar_t* phaseLabel)
-{
-    BOOL ok = TRUE;
-    wchar_t stateDir[MAX_PATH] = {0};
-    wchar_t stageDir[MAX_PATH] = {0};
-    wchar_t backupDir[MAX_PATH] = {0};
-    const wchar_t* safePhase = (phaseLabel != NULL && phaseLabel[0] != L'\0') ? phaseLabel : L"[REPAIR]";
 
-    if (paths == NULL) { return FALSE; }
-
-    if (MeshInstaller_CombinePath(stateDir, _countof(stateDir), paths->installDir, L"state"))
-    {
-        if (MeshInstaller_CombinePath(stageDir, _countof(stageDir), stateDir, SERVICE_UPDATE_STAGE_DIR_NAME) &&
-            ServiceDeploy_PathExists(stageDir) &&
-            !ServiceDeploy_RemoveDirectoryTree(stageDir, TRUE))
-        {
-            ServiceDeploy_LogInstallEvent(L"%ls Failed to remove stale update-stage directory (%ls)", safePhase, stageDir);
-            ok = FALSE;
-        }
-        if (MeshInstaller_CombinePath(backupDir, _countof(backupDir), stateDir, SERVICE_UPDATE_BACKUP_DIR_NAME) &&
-            ServiceDeploy_PathExists(backupDir) &&
-            !ServiceDeploy_RemoveDirectoryTree(backupDir, TRUE))
-        {
-            ServiceDeploy_LogInstallEvent(L"%ls Failed to remove stale update-backup directory (%ls)", safePhase, backupDir);
-            ok = FALSE;
-        }
-    }
-
-    if (paths->dbPath[0] != L'\0' && ServiceDeploy_DataStoreValueExists(paths->dbPath, "PendingUpdate", NULL, 0, NULL))
-    {
-        if (!ServiceDeploy_DataStoreDeleteValue(paths->dbPath, "PendingUpdate"))
-        {
-            ServiceDeploy_LogInstallEvent(L"%ls Failed to clear PendingUpdate marker from datastore", safePhase);
-            ok = FALSE;
-        }
-        else
-        {
-            ServiceDeploy_LogInstallEvent(L"%ls Cleared stale PendingUpdate marker from datastore", safePhase);
-        }
-    }
-
-    ServiceDeploy_ClearUpdateActivationHolds(paths, safePhase);
-
-    return ok;
-}
 
 // ================================================================
 // Complete Installation Function
 // ================================================================
 
+/* The host-operation mutex covers recovery, discovery, staging and cleanup. */
+static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
+{
+    ServiceInstallPaths paths;
+    ServiceUpdateTransaction tx = {0};
+    ServiceJournalRecord* record = NULL;
+    wchar_t serviceName[256];
+    BOOL ok = FALSE, currentExists = FALSE, legacy = FALSE;
+    if (!ServiceDeploy_GetInstallPaths(&paths) || !ServiceDeploy_InitializeUpdateTransactionPaths(&paths, &tx)) { return FALSE; }
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
+    if (!ServiceJournal_Load(tx.journalPath, serviceName, &record))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Unreadable or invalid retained checkpoint; preserving transaction (%ls)", tx.journalPath);
+        return FALSE;
+    }
+    if (!record)
+    {
+        ok = ServiceDeploy_TransactionDirectoryEmpty(tx.backupDir);
+        if (!ok) { ServiceDeploy_LogInstallEvent(L"[UPDATE] Unowned backup material requires operator recovery (%ls)", tx.backupDir); }
+        return ok;
+    }
+    tx.journalPhase = record->phase;
+    tx.originalBinding = record->binding;
+    tx.liveExeExists = (record->fileMask & 1) != 0;
+    tx.liveDllExists = (record->fileMask & 2) != 0;
+    tx.liveConfExists = (record->fileMask & 4) != 0;
+    tx.liveMshExists = (record->fileMask & 8) != 0;
+    tx.liveDbExists = (record->fileMask & 16) != 0;
+    for (size_t i = 0; i < 5; ++i)
+    {
+        tx.originalFileDacl[i] = record->dacl[i];
+        tx.originalFileAttributes[i] = record->attributes[i];
+        if ((record->phase == SERVICE_JOURNAL_PREPARED || record->phase == SERVICE_JOURNAL_BACKED_UP) && (record->fileMask & (1UL << i)) &&
+            (!record->dacl[i] || record->attributes[i] == INVALID_FILE_ATTRIBUTES)) { goto done; }
+    }
+    if (record->binding && (!ServiceBinding_ImageSupported(record->binding->config, paths.exePath, paths.dllPath, &legacy) ||
+        legacy != record->binding->legacy)) { goto done; }
+    if (tx.journalPhase == SERVICE_JOURNAL_COMMITTED)
+    {
+        ok = ServiceDeploy_ReconcileCommittedTransaction(&paths, serviceName, &tx);
+        goto verifyCleanup;
+    }
+    if (tx.journalPhase == SERVICE_JOURNAL_ROLLED_BACK)
+    {
+        ok = ServiceDeploy_DeleteUpdateTransactionArtifacts(&tx);
+        goto verifyCleanup;
+    }
+    if (tx.journalPhase == SERVICE_JOURNAL_BACKED_UP)
+    {
+        const wchar_t* backups[] = {tx.backupExePath, tx.backupDllPath, tx.backupConfPath, tx.backupMshPath, tx.backupDbPath};
+        for (size_t i = 0; i < _countof(backups); ++i)
+        {
+            DWORD attributes;
+            if (!(record->fileMask & (1UL << i))) { continue; }
+            attributes = GetFileAttributesW(backups[i]);
+            if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) { goto done; }
+        }
+        tx.backupsReady = TRUE;
+        tx.backupDbReady = tx.liveDbExists;
+        if (tx.backupDbReady) { tx.rollbackIdentityReady = ServiceDeploy_CaptureIdentitySnapshot(tx.backupDbPath, &tx.rollbackIdentity); }
+    }
+    if (!ServiceBinding_QueryExists(serviceName, &currentExists)) { goto done; }
+    if (currentExists)
+    {
+        ServiceBindingSnapshot* current = ServiceBinding_Capture(serviceName, paths.exePath, paths.dllPath);
+        if (!current) { goto done; }
+        ServiceBinding_Free(current);
+    }
+    if (currentExists && (!ServiceDeploy_SetServiceStartType(serviceName, SERVICE_DISABLED) ||
+        !ServiceDeploy_ClearServiceRecovery(serviceName) ||
+        !ServiceDeploy_StopServiceAndWait(serviceName, 30000,
+            !tx.originalBinding || tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS))) { goto done; }
+    if (tx.backupsReady) { ok = ServiceDeploy_RollbackUpdateTransaction(&paths, serviceName, &tx); }
+    else
+    {
+        ok = ServiceDeploy_RestoreUpdateFileSecurity(&paths, &tx);
+        if (ok && tx.originalBinding) { ok = ServiceBinding_Restore(serviceName, tx.originalBinding); }
+        else if (ok && currentExists) { ok = ServiceHost_UnregisterServiceHostService(serviceName); }
+    }
+    if (ok && tx.originalBinding && tx.originalBinding->running)
+    { ok = ServiceDeploy_StartServiceHostServiceAndWait(serviceName, NULL, 30000, FALSE); }
+    if (ok && tx.originalBinding) { ok = ServiceDeploy_SetServiceStartType(serviceName, tx.originalBinding->config->dwStartType); }
+    if (ok && tx.rollbackIdentityReady) { ok = ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000); }
+    if (ok) { ok = ServiceDeploy_ResolveUpdateTransaction(&tx, serviceName); }
+verifyCleanup:
+    if (ok)
+    {
+        DWORD attributes = GetFileAttributesW(tx.journalPath), error = GetLastError();
+        ok = attributes == INVALID_FILE_ATTRIBUTES && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND);
+    }
+done:
+    ServiceDeploy_LogInstallEvent(L"[UPDATE] Interrupted transaction recovery %ls (phase=%lu)", ok ? L"completed" : L"retained for retry", record->phase);
+    ServiceJournal_Free(record);
+    return ok;
+}
+
 static BOOL ServiceDeploy_ApplyUpdateFlow(
-    const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig);
+    const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig);
 
 static BOOL ServiceDeploy_ApplyInstallFlow(
     const wchar_t* sourceExePath,
-    const wchar_t* sourceDllPath,
-    BOOL useServiceHostMode)
+    const wchar_t* sourceDllPath)
 {
-    UNREFERENCED_PARAMETER(useServiceHostMode);
-    ServiceInstallPaths paths;
-    BOOL success = FALSE;
-    wchar_t serviceKeyName[256] = {0};
-    wchar_t serviceDisplayName[256] = {0};
-    wchar_t serviceDescription[512] = {0};
-    ServicePackagePreflight preflight;
-    wchar_t preflightReason[512] = {0};
-    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
-    if (persistence)
-    {
-        ServiceDeploy_LogInstallEvent(L"Persistence profile: runKey=%u task=%u restart=%u watchdog=%u",
-            persistence->runKey,
-            persistence->autorunTask.enabled,
-            persistence->restartTask.enabled,
-            persistence->watchdog.enabled);
-    }
-    else
-    {
-        ServiceDeploy_LogInstallEvent(L"Persistence profile missing; RunKey/Task disabled");
-    }
-
-    ServiceDeploy_ResolveRuntimeServiceBranding(
-        serviceKeyName,
-        _countof(serviceKeyName),
-        serviceDisplayName,
-        _countof(serviceDisplayName),
-        serviceDescription,
-        _countof(serviceDescription));
-
-    // Get installation paths
-    if (!ServiceDeploy_GetInstallPaths(&paths))
-    {
-        ServiceUtil_DebugPrintfW(L"ServiceDeploy_GetInstallPaths failed");
-        ServiceDeploy_LogInstallEvent(L"Install paths unavailable; aborting install");
-        return FALSE;
-    }
-    ServiceDeploy_LogInstallEvent(L"Install paths resolved (root=%ls)", paths.installDir);
-    {
-        size_t removedAliases = ServiceDeploy_CleanupConflictingServiceAliases(&paths, serviceKeyName);
-        if (removedAliases > 0)
-        {
-            ServiceDeploy_LogInstallEvent(L"[ALIAS] Removed %Iu conflicting service alias(es) before install", removedAliases);
-        }
-    }
-    ZeroMemory(&preflight, sizeof(preflight));
-    if (!ServiceDeploy_PreflightPackageSource(sourceExePath, TRUE, &preflight, preflightReason, _countof(preflightReason)))
-    {
-        ServiceDeploy_LogInstallEvent(L"[INSTALL] Package preflight failed: %ls", preflightReason);
-        return FALSE;
-    }
-    ServiceDeploy_LogInstallEvent(
-        L"[INSTALL] Package preflight passed (embeddedProvisioning=%u sidecarProvisioning=%u)",
-        preflight.sourceEmbeddedConfigPresent,
-        preflight.sourceSidecarConfigPresent);
-    if (sourceDllPath != NULL && sourceDllPath[0] != L'\0' && !ServiceDeploy_ValidateServiceHostPayloadDll(sourceDllPath))
-    {
-        ServiceDeploy_LogInstallEvent(L"[INSTALL] Package preflight failed: invalid svchost DLL source (%ls)", sourceDllPath);
-        return FALSE;
-    }
-
-    // The update transaction can restore this supported binding as well as its files.
-    // Legacy service migrations retain their existing installation path: the transaction
-    // does not snapshot arbitrary SCM accounts, image paths or service Parameters.
-    ServiceLifecycleDiscovery incumbent;
-    if (ServiceDeploy_DiscoverCurrentState(&incumbent) && incumbent.serviceExists &&
-        incumbent.serviceTypeValid && incumbent.serviceImageValid && incumbent.serviceGroupValid &&
-        incumbent.serviceAccountValid && incumbent.serviceDllValid && incumbent.dllExists &&
-        incumbent.serviceMainValid && incumbent.serviceUnloadValid)
-    {
-        ServiceDeploy_LogInstallEvent(L"[INSTALL] Existing svchost service detected; using rollback-capable update transaction");
-        return ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, TRUE, TRUE);
-    }
-
-    ServiceDeploy_ImportWinHttpProxyFromIeBestEffort();
-
-    // Pre-clean: stop any running service and remove stale artifacts from prior failed installs
-    ServiceDeploy_StopServiceAndWait(serviceKeyName, 20000, TRUE);
-    ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);
-    ServiceDeploy_TerminateProcessesByPath(paths.exePath);
-    {
-        wchar_t staleStateDir[MAX_PATH] = {0};
-        wchar_t staleStageDir[MAX_PATH] = {0};
-        wchar_t staleBackupDir[MAX_PATH] = {0};
-        if (MeshInstaller_CombinePath(staleStateDir, _countof(staleStateDir), paths.installDir, L"state"))
-        {
-            if (MeshInstaller_CombinePath(staleStageDir, _countof(staleStageDir), staleStateDir, SERVICE_UPDATE_STAGE_DIR_NAME))
-            {
-                ServiceDeploy_RemoveDirectoryTree(staleStageDir, FALSE);
-            }
-            if (MeshInstaller_CombinePath(staleBackupDir, _countof(staleBackupDir), staleStateDir, SERVICE_UPDATE_BACKUP_DIR_NAME))
-            {
-                ServiceDeploy_RemoveDirectoryTree(staleBackupDir, FALSE);
-            }
-        }
-    }
-
-    // Step 1: Create installation directories
-    if (!Security_CreateInstallRootDirectory(paths.installDir))
-    {
-        ServiceUtil_DebugPrintfW(L"Failed to create install directory: %ls", paths.installDir);
-        ServiceDeploy_LogInstallEvent(L"Failed to create install directory: %ls", paths.installDir);
-        return FALSE;
-    }
-
-    if (!Security_CreateInstallationDirectory(paths.logsDir))
-    {
-        // Non-fatal, continue
-    }
-
-    // Step 2: Copy executable (for CLI usage) if a source path is provided
-    if (sourceExePath && sourceExePath[0] != L'\0')
-    {
-        if (!Security_InstallFiles(sourceExePath, paths.exePath))
-        {
-            ServiceUtil_DebugPrintfW(L"Security_InstallFiles failed (EXE) %ls -> %ls", sourceExePath, paths.exePath);
-            ServiceDeploy_LogInstallEvent(L"Failed to copy executable to %ls", paths.exePath);
-            return FALSE;
-        }
-        ServiceDeploy_LogInstallEvent(L"Copied executable to %ls", paths.exePath);
-    }
-
-    // Host binary must be executable by interactive users so the KVM helper can be launched
-    // via CreateProcessAsUser() in the active session.
-    if (paths.exePath[0] != L'\0' && GetFileAttributesW(paths.exePath) != INVALID_FILE_ATTRIBUTES)
-    {
-        if (!ServiceDeploy_HardenHostExecutableDacl(paths.exePath))
-        {
-            ServiceDeploy_LogInstallEvent(L"[WARN] Failed to apply host executable DACL to %ls", paths.exePath);
-            return FALSE;
-        }
-    }
-
-    if (sourceExePath && sourceExePath[0] != L'\0')
-    {
-        if (!ServiceDeploy_EnsureConfigFile(sourceExePath, paths.confPath))
-        {
-            ServiceDeploy_LogInstallEvent(L"Failed to stage required provisioning config to %ls", paths.confPath);
-            return FALSE;
-        }
-        ServiceDeploy_LogInstallEvent(L"Provisioning config staged to %ls", paths.confPath);
-    }
-
-    if (paths.exePath[0] != L'\0')
-    {
-        wchar_t mshPath[MAX_PATH] = {0};
-        StringCchCopyW(mshPath, _countof(mshPath), paths.exePath);
-        wchar_t* dot = wcsrchr(mshPath, L'.');
-        if (dot != NULL)
-        {
-            StringCchCopyW(dot, _countof(mshPath) - (dot - mshPath), L".msh");
-        }
-        else
-        {
-            StringCchCatW(mshPath, _countof(mshPath), L".msh");
-        }
-
-        if (!ServiceDeploy_EnsureMshFile(sourceExePath, mshPath))
-        {
-            ServiceDeploy_LogInstallEvent(L"Failed to stage required provisioning msh to %ls", mshPath);
-            return FALSE;
-        }
-        ServiceDeploy_LogInstallEvent(L"Provisioning msh staged to %ls", mshPath);
-
-        if (ServiceDeploy_ShouldEnableDebugConsole())
-        {
-            ServiceDeploy_AppendConfigOverride(paths.confPath, "debugConsole", "1");
-            ServiceDeploy_AppendConfigOverride(mshPath, "debugConsole", "1");
-        }
-    }
-
-    // Always stage the svchost DLL payload
-    ServiceDeploy_RemoveFileIfExists(paths.dllPath, TRUE);
-    if (!ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, paths.dllPath))
-    {
-        ServiceDeploy_LogInstallEvent(L"Failed to stage a valid svchost DLL to %ls", paths.dllPath);
-        ServiceDeploy_LogPathState(paths.dllPath);
-        return FALSE;
-    }
-    ServiceDeploy_LogInstallEvent(L"ServiceHost payload staged to %ls", paths.dllPath);
-
-    // Register svchost-hosted service only
-    if (!ServiceHost_RegisterServiceHostService(serviceKeyName, paths.dllPath))
-    {
-        ServiceUtil_DebugPrintfW(L"ServiceHost_RegisterServiceHostService failed for %ls", serviceKeyName);
-        ServiceDeploy_LogInstallEvent(L"ServiceHost registration failed for %ls (error=%lu)", serviceKeyName, GetLastError());
-        return FALSE;
-    }
-    ServiceDeploy_LogInstallEvent(L"ServiceHost registration complete for %ls", serviceKeyName);
-    if (!ServiceDeploy_VerifyServiceHostServiceBinding(serviceKeyName, paths.dllPath))
-    {
-        ServiceDeploy_LogInstallEvent(L"ServiceHost registration binding verification failed for %ls", serviceKeyName);
-        return FALSE;
-    }
-    ServiceDeploy_RecordServiceDllHash(serviceKeyName, paths.dllPath);
-    ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(&paths);
-    ServiceDeploy_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName);
-    ServiceDeploy_ApplyPersistenceProfile();
-    success = TRUE;
-    ServiceDeploy_StopServiceAndWait(serviceKeyName, 20000, TRUE);
-
-    if (MeshService_HardenServiceDaclByName(serviceKeyName))
-    {
-        ServiceDeploy_LogInstallEvent(L"Hardened service DACL for %ls", serviceKeyName);
-    }
-    else
-    {
-        ServiceDeploy_LogInstallEvent(L"[WARN] Failed to harden service DACL for %ls (see debug output)", serviceKeyName);
-    }
-
-    if (ServiceUtil_ProtectServiceFromTermination(serviceKeyName))
-    {
-        ServiceDeploy_LogInstallEvent(L"Configured service termination protection for %ls", serviceKeyName);
-    }
-    else
-    {
-        ServiceDeploy_LogInstallEvent(L"[WARN] Service termination protections not applied to %ls", serviceKeyName);
-    }
-
-    // Step 4: Add Windows Firewall exceptions
-    wchar_t systemServiceHostPath[MAX_PATH] = {0};
-    const wchar_t* hostToExcept = NULL;
-    if (ServiceUtil_GetSystemServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
-    {
-        hostToExcept = systemServiceHostPath;
-    }
-    else
-    {
-        ServiceDeploy_LogInstallEvent(L"[ERROR] Unable to resolve system svchost.exe for firewall provisioning");
-        return FALSE;
-    }
-
-    if (!ServiceDeploy_RefreshFirewallRulesWithRetry(serviceKeyName, hostToExcept, paths.exePath))
-    {
-        ServiceDeploy_LogInstallEvent(L"[ERROR] Firewall rule provisioning failed for %ls", serviceKeyName);
-        return FALSE;
-    }
-
-    // Step 5: Apply service resilience (Task Scheduler / WMI restart subscriptions)
-    ServiceDeploy_LogInstallEvent(L"Applying service resilience configuration");
-
-    // Step 6: Hide service registry key (optional, can make debugging harder)
-
-    // Step 7: Start the service and confirm running state
-    if (!ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, paths.dllPath, 20000, TRUE))
-    {
-        ServiceDeploy_LogInstallEvent(L"Installation failed: service failed to reach RUNNING state for %ls", serviceKeyName);
-        return FALSE;
-    }
-    ServiceDeploy_LogInstallEvent(L"Service reached RUNNING state for %ls", serviceKeyName);
-
-    return success;
+    /* Installation and repair use the same staged transaction as updates.
+     * A complete package is required; no alternate EXE-service repair path exists. */
+    return ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, TRUE);
 }
 
-static BOOL ServiceDeploy_ApplyRepairFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode)
+static BOOL ServiceDeploy_ApplyRepairFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath)
 {
     ServiceInstallPaths paths;
     ServiceLifecycleDiscovery finalState;
 
-    if (!ServiceDeploy_ApplyInstallFlow(sourceExePath, sourceDllPath, useServiceHostMode))
+    if (!ServiceDeploy_ApplyInstallFlow(sourceExePath, sourceDllPath))
     {
         return FALSE;
     }
@@ -3187,11 +3082,6 @@ static BOOL ServiceDeploy_ApplyRepairFlow(const wchar_t* sourceExePath, const wc
     if (!ServiceDeploy_GetInstallPaths(&paths))
     {
         ServiceDeploy_LogInstallEvent(L"[REPAIR] Failed to resolve install paths after repair install");
-        return FALSE;
-    }
-
-    if (!ServiceDeploy_ClearPendingUpdateArtifacts(&paths, L"[REPAIR]"))
-    {
         return FALSE;
     }
 
@@ -3384,14 +3274,8 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
 // Update (in-place repair/update without full uninstall)
 // ================================================================
 
-static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig)
+static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig)
 {
-    if (!useServiceHostMode)
-    {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] ServiceHost mode required; update aborted");
-        return FALSE;
-    }
-
     ServiceInstallPaths paths;
     BOOL success = TRUE;
     BOOL restartService = TRUE;
@@ -3424,18 +3308,15 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to resolve install paths");
         return FALSE;
     }
+    if (!ServiceBinding_QueryExists(serviceKeyName, &serviceExists))
     {
-        size_t removedAliases = ServiceDeploy_CleanupConflictingServiceAliases(&paths, serviceKeyName);
-        if (removedAliases > 0)
-        {
-            ServiceDeploy_LogInstallEvent(L"[ALIAS] Removed %Iu conflicting service alias(es) before update", removedAliases);
-        }
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Unable to inspect incumbent service; aborting before mutation");
+        return FALSE;
     }
-    serviceExists = ServiceDeploy_IsAlreadyInstalled();
     serviceWasRunning = serviceExists && ServiceDeploy_ServiceIsRunning(serviceKeyName);
 
     ZeroMemory(&preflight, sizeof(preflight));
-    if (!ServiceDeploy_PreflightPackageSource(sourceExePath, FALSE, &preflight, preflightReason, _countof(preflightReason)))
+    if (!ServiceDeploy_PreflightPackageSource(sourceExePath, requireConfig || !serviceExists, &preflight, preflightReason, _countof(preflightReason)))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Package preflight failed: %ls", preflightReason);
         return FALSE;
@@ -3464,99 +3345,81 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     }
     if (sourceDllPath != NULL && sourceDllPath[0] != L'\0' && !ServiceDeploy_ValidateServiceHostPayloadDll(sourceDllPath))
     {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Package preflight failed: invalid svchost DLL source (%ls)", sourceDllPath);
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Package preflight failed: invalid runtime DLL source (%ls)", sourceDllPath);
         return FALSE;
+    }
+
+    if (serviceExists)
+    {
+        tx.originalBinding = ServiceBinding_Capture(serviceKeyName, paths.exePath, paths.dllPath);
+        if (!tx.originalBinding)
+        {
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] Cannot preserve incumbent configuration; requires LocalSystem, a stable Win32 service and managed legacy EXE path. Aborting before quiesce");
+            return FALSE;
+        }
+        if (tx.originalBinding->legacy)
+        {
+            wchar_t legacyDb[MAX_PATH] = {0};
+            wchar_t legacyMshx[MAX_PATH] = {0};
+            if (!ServiceDeploy_BuildSiblingPathWithExtension(paths.exePath, L".db", legacyDb, _countof(legacyDb)) ||
+                _wcsicmp(legacyDb, paths.dbPath) != 0 ||
+                !ServiceDeploy_BuildSiblingPathWithExtension(paths.exePath, L".mshx", legacyMshx, _countof(legacyMshx)) ||
+                ServiceDeploy_PathExists(legacyMshx))
+            {
+                ServiceDeploy_LogInstallEvent(L"[UPDATE] Legacy identity layout is not covered by the managed rollback set; aborting before quiesce");
+                ServiceBinding_Free(tx.originalBinding);
+                    return FALSE;
+            }
+        }
+        serviceWasRunning = tx.originalBinding->running;
     }
 
     ServiceDeploy_ImportWinHttpProxyFromIeBestEffort();
 
-    Security_CreateInstallRootDirectory(paths.installDir);
-    Security_CreateInstallationDirectory(paths.logsDir);
-
-    // Pre-clean stale staging/backup artifacts from prior failed updates
-    {
-        wchar_t staleStateDir[MAX_PATH] = {0};
-        wchar_t staleStageDir[MAX_PATH] = {0};
-        wchar_t staleBackupDir[MAX_PATH] = {0};
-        if (MeshInstaller_CombinePath(staleStateDir, _countof(staleStateDir), paths.installDir, L"state"))
-        {
-            if (MeshInstaller_CombinePath(staleStageDir, _countof(staleStageDir), staleStateDir, SERVICE_UPDATE_STAGE_DIR_NAME))
-            {
-                ServiceDeploy_RemoveDirectoryTree(staleStageDir, FALSE);
-            }
-            if (MeshInstaller_CombinePath(staleBackupDir, _countof(staleBackupDir), staleStateDir, SERVICE_UPDATE_BACKUP_DIR_NAME))
-            {
-                ServiceDeploy_RemoveDirectoryTree(staleBackupDir, FALSE);
-            }
-        }
-    }
+    if (!ServiceDeploy_PathExists(paths.installDir)) { Security_CreateInstallRootDirectory(paths.installDir); }
+    if (!ServiceDeploy_PathExists(paths.logsDir)) { Security_CreateInstallationDirectory(paths.logsDir); }
 
     if (!ServiceDeploy_PrepareUpdateTransaction(&paths, sourceExePath, sourceDllPath, allowInstalledProvisioning, &tx))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to prepare staged update transaction");
+        ServiceBinding_Free(tx.originalBinding);
         return FALSE;
     }
 
-    // Disable restart mechanisms before stopping to avoid immediate re-launch.
-    // Keep the SCM start type repairable/auto-start: disabling it before old-image
-    // teardown can strand the endpoint if svchost terminates unexpectedly.
-    ServicePersistenceState persisted = {0};
-    BOOL havePersisted = ServiceDeploy_LoadPersistenceState(&persisted);
 
-    DWORD originalStartType = SERVICE_AUTO_START;
-    if (serviceExists)
+    if (!ServiceDeploy_CaptureUpdateFileSecurity(&paths, &tx) ||
+        !ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_PREPARED))
     {
-        if (!ServiceDeploy_QueryServiceStartType(serviceKeyName, &originalStartType))
-        {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Unable to retain service start type; aborting before quiesce (%ls, error=%lu)", serviceKeyName, GetLastError());
-            ServiceDeploy_DeleteUpdateTransactionArtifacts(&tx);
-            return FALSE;
-        }
-        if (originalStartType != SERVICE_AUTO_START)
-        {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Repairing service start type before update (%ls, original=%lu target=%lu)", serviceKeyName, originalStartType, (DWORD)SERVICE_AUTO_START);
-        }
-        if (!ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START))
-        {
-            ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Failed to ensure service auto-start before update (%ls, error=%lu)", serviceKeyName, GetLastError());
-        }
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Cannot checkpoint original file security; aborting before quiesce");
+        ServiceDeploy_DeleteUpdateTransactionArtifacts(&tx);
+        ServiceBinding_Free(tx.originalBinding);
+        for (size_t i = 0; i < _countof(tx.originalFileDacl); ++i) { free(tx.originalFileDacl[i]); }
+        return FALSE;
     }
 
-    ServiceDeploy_ClearServiceRecovery(serviceKeyName);
-    ServiceDeploy_RemoveRunKeyEntry(serviceKeyName);
-    ServiceDeploy_RemoveScheduledTasks(persistence, serviceDisplayName, serviceKeyName);
-    if (havePersisted && persisted.WmiFilter[0] != L'\0' && persisted.WmiConsumer[0] != L'\0')
+    // The durable PREPARED checkpoint can restore the original start/recovery
+    // policy after interruption. Disable SCM launches while files are in flight.
+    DWORD originalStartType = serviceExists ? tx.originalBinding->config->dwStartType : SERVICE_AUTO_START;
+    if (serviceExists && (!ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED) ||
+        !ServiceDeploy_ClearServiceRecovery(serviceKeyName)))
     {
-        if (FaultRecovery_RemoveWmiSubscription(persisted.WmiFilter, persisted.WmiConsumer))
-        {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] WMI restart subscription removed (%ls/%ls)", persisted.WmiFilter, persisted.WmiConsumer);
-        }
-        else
-        {
-            ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Failed to remove WMI restart subscription (%ls/%ls)", persisted.WmiFilter, persisted.WmiConsumer);
-        }
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to suspend incumbent launches before quiesce");
+        success = FALSE;
+        goto CLEANUP;
     }
 
-    if (serviceExists && !ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE))
+    if (serviceExists && !ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000,
+        tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS))
     {
-        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Service stop timed out; forcing dedicated host teardown");
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Service did not stop; retaining original checkpoint");
+        success = FALSE;
+        goto CLEANUP;
+    }
+    if (!tx.originalBinding || tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS)
+    {
         ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);
         ServiceDeploy_TerminateProcessesByPath(paths.exePath);
-        Sleep(1000);
-        if (ServiceDeploy_ServiceIsRunning(serviceKeyName))
-        {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Service still running after forced teardown; aborting update");
-            success = FALSE;
-            goto CLEANUP;
-        }
     }
-    if (!serviceExists)
-    {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Existing service registration absent; continuing with repair install semantics");
-    }
-
-    ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);
-    ServiceDeploy_TerminateProcessesByPath(paths.exePath);
 
     // Wait for file locks to release after process termination (DLL may still be held briefly)
     if (paths.dllPath[0] != L'\0' && GetFileAttributesW(paths.dllPath) != INVALID_FILE_ATTRIBUTES)
@@ -3576,9 +3439,16 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         }
     }
 
-    if (!ServiceDeploy_BackupUpdateTransaction(&paths, &tx))
+    if (!ServiceDeploy_RefreshQuiescedFileCheckpoint(&paths, serviceKeyName, &tx) ||
+        !ServiceDeploy_BackupUpdateTransaction(&paths, &tx))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to capture quiesced rollback set");
+        success = FALSE;
+        goto CLEANUP;
+    }
+    if (!ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_BACKED_UP))
+    {
+        tx.backupsReady = FALSE; /* Published PREPARED still guarantees unchanged live bytes. */
         success = FALSE;
         goto CLEANUP;
     }
@@ -3629,47 +3499,22 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         goto CLEANUP;
     }
     ServiceDeploy_RecordServiceDllHash(serviceKeyName, paths.dllPath);
-    ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(&paths);
 
 CLEANUP:
-    if (serviceExists && !ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START))
+    if (success && !ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START))
     {
         ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Failed to restore service auto-start during cleanup (%ls, error=%lu)", serviceKeyName, GetLastError());
         success = FALSE;
     }
-    ServiceDeploy_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName);
-    ServiceDeploy_ApplyPersistenceProfile();
-
-    MeshService_HardenServiceDaclByName(serviceKeyName);
-    ServiceUtil_ProtectServiceFromTermination(serviceKeyName);
-
-    // Refresh firewall rules (host svchost + WebRTC inbound UDP)
-    wchar_t systemServiceHostPath[MAX_PATH] = {0};
-    const wchar_t* hostToExcept = NULL;
-    if (ServiceUtil_GetSystemServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
-    {
-        hostToExcept = systemServiceHostPath;
-    }
-    else
-    {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Unable to resolve system svchost.exe for firewall provisioning");
-        success = FALSE;
-    }
-
-    if (hostToExcept != NULL && !ServiceDeploy_RefreshFirewallRulesWithRetry(serviceKeyName, hostToExcept, paths.exePath))
-    {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Firewall rule provisioning failed for %ls", serviceKeyName);
-        success = FALSE;
-    }
-
     // The service owns the datastore with a non-shareable writer once started.
     // Clear successful-activation markers while the service is still stopped.
     if (success)
     {
-        (void)ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]");
-        if (!ServiceDeploy_FinalizeUpdateTransaction(&paths, &tx))
+        if (!ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]") ||
+            !ServiceDeploy_FinalizeUpdateTransaction(&paths, &tx))
         {
             ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Transaction cleanup incomplete before service restart; retaining rollback capability");
+            success = FALSE;
         }
     }
 
@@ -3686,7 +3531,7 @@ CLEANUP:
     if (success)
     {
         ServiceLifecycleDiscovery finalState;
-        if (!ServiceDeploy_WaitForPrimaryLifecycleOperational(30000, &finalState))
+        if (!ServiceDeploy_WaitForTransactionActivation(30000, &finalState))
         {
             ServiceDeploy_LogInstallEvent(
                 L"[UPDATE] Post-update primary lifecycle did not converge before transaction cleanup (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
@@ -3704,7 +3549,7 @@ CLEANUP:
             ServiceDeploy_LogInstallEvent(L"[UPDATE] Identity preservation check failed after update");
             success = FALSE;
         }
-        else if (!ServiceDeploy_WaitForPrimaryLifecycleOperational(30000, &finalState))
+        else if (!ServiceDeploy_WaitForTransactionActivation(30000, &finalState))
         {
             ServiceDeploy_LogInstallEvent(
                 L"[UPDATE] Post-update primary lifecycle stopped being operational after transaction cleanup (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
@@ -3718,154 +3563,70 @@ CLEANUP:
         }
         else
         {
-            ServiceIdentitySnapshot finalIdentity;
-            // Commit point: primary runtime and identity are valid and transactional
-            // cleanup succeeded. From here on, backup/degraded companion cleanup is
-            // best effort and must never trigger rollback from deleted material.
-            (void)ServiceDeploy_DiscardUpdateBackup(&tx);
-            if (!ServiceDeploy_WaitForPrimaryLifecycleHealthy(30000, &finalState))
+            if (!ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, FALSE) ||
+                !ServiceDeploy_FlushUpdateFiles(&paths, &tx) ||
+                !ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_COMMITTED))
             {
-                ServiceDeploy_LogInstallEvent(
-                    L"[WARN] [UPDATE] Primary agent is operational but final companion cleanup remains degraded (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
-                    ServiceDeploy_LifecycleStateToString(finalState.stateKind),
-                    finalState.pendingUpdate,
-                    finalState.updateStageArtifactsPresent,
-                    finalState.updateBackupArtifactsPresent,
-                    finalState.firewallHealthy,
-                    finalState.persistenceHealthy);
+                success = FALSE;
+                goto ROLLBACK;
             }
-            if (finalState.stateKind != SERVICE_LIFECYCLE_STATE_HEALTHY)
-            {
-                ServiceDeploy_LogInstallEvent(L"[UPDATE] Primary agent converged but companion state remains degraded (%ls)",
-                    ServiceDeploy_LifecycleStateToString(finalState.stateKind));
-            }
-            if (ServiceDeploy_CaptureIdentitySnapshot(paths.dbPath, &finalIdentity))
-            {
-                ServiceDeploy_LogIdentitySnapshot(L"after-update", &finalIdentity);
-            }
+            success = ServiceDeploy_ReconcileCommittedTransaction(&paths, serviceKeyName, &tx);
         }
     }
 
-    if (!success)
+ROLLBACK:
+    if (!success && tx.journalPhase != SERVICE_JOURNAL_COMMITTED)
     {
-        BOOL canRollback = tx.backupsReady;
-        if (!canRollback && serviceExists)
+        BOOL rollbackOk = TRUE;
+        BOOL currentExists = FALSE;
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Restoring original transaction state for %ls", serviceKeyName);
+        rollbackOk = ServiceBinding_QueryExists(serviceKeyName, &currentExists);
+        if (rollbackOk && currentExists)
         {
-            // Backup failed before any live file or datastore commit. There is nothing to
-            // roll back, but quiescing the incumbent must not leave a running agent stopped.
-            if (serviceWasRunning && !ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, paths.dllPath, 30000, FALSE))
-            {
-                ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to restart unchanged incumbent after pre-commit failure (%ls)", serviceKeyName);
-            }
-            if (!ServiceDeploy_SetServiceStartType(serviceKeyName, originalStartType))
-            {
-                ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Failed to restore original service start type (%ls, error=%lu)", serviceKeyName, GetLastError());
-            }
+            rollbackOk = ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED) &&
+                ServiceDeploy_ClearServiceRecovery(serviceKeyName) &&
+                ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000,
+                    !tx.originalBinding || tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS);
         }
-        if (canRollback)
+        if (rollbackOk && tx.backupsReady)
         {
-            BOOL rollbackOk = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Attempting rollback for %ls", serviceKeyName);
-            (void)ServiceDeploy_StopServiceAndWait(serviceKeyName, 20000, TRUE);
-            ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);
-            ServiceDeploy_TerminateProcessesByPath(paths.exePath);
             rollbackOk = ServiceDeploy_RollbackUpdateTransaction(&paths, serviceKeyName, &tx);
-            if (rollbackOk)
-            {
-                // Promote the target to a failure hold before restarting the old
-                // service, otherwise its writable datastore handle blocks this write.
-                failureHoldRecorded = ServiceDeploy_RecordUpdateActivationFailureHold(&paths);
-                if (!ServiceDeploy_FinalizeUpdateTransaction(&paths, &tx))
-                {
-                    ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Rollback cleanup incomplete before service restart");
-                }
-            }
-            if (rollbackOk && serviceWasRunning)
-            {
-                rollbackOk = ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, paths.dllPath, 30000, FALSE);
-            }
-            if (rollbackOk && !serviceWasRunning)
-            {
-                // A stopped incumbent stays stopped; RUNNING convergence is not a rollback gate.
-                rollbackOk = (!tx.rollbackIdentityReady ||
-                    ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000));
-                if (rollbackOk) { (void)ServiceDeploy_DiscardUpdateBackup(&tx); }
-            }
-            else if (rollbackOk)
-            {
-                ServiceLifecycleDiscovery rollbackState;
-                rollbackOk = ServiceDeploy_WaitForPrimaryLifecycleOperational(30000, &rollbackState);
-                if (!rollbackOk)
-                {
-                    ServiceDeploy_LogInstallEvent(
-                        L"[UPDATE] Rollback primary lifecycle did not converge before transaction cleanup (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
-                        ServiceDeploy_LifecycleStateToString(rollbackState.stateKind),
-                        rollbackState.pendingUpdate,
-                        rollbackState.updateStageArtifactsPresent,
-                        rollbackState.updateBackupArtifactsPresent,
-                        rollbackState.firewallHealthy,
-                        rollbackState.persistenceHealthy);
-                }
-                if (rollbackOk)
-                {
-                    rollbackOk = (!tx.rollbackIdentityReady ||
-                        ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000));
-                    if (!rollbackOk)
-                    {
-                        ServiceDeploy_LogInstallEvent(L"[UPDATE] Identity preservation check failed after rollback");
-                    }
-                }
-                if (rollbackOk)
-                {
-                    (void)ServiceDeploy_DiscardUpdateBackup(&tx);
-                    if (!ServiceDeploy_WaitForPrimaryLifecycleHealthy(30000, &rollbackState))
-                    {
-                        ServiceDeploy_LogInstallEvent(
-                            L"[WARN] [UPDATE] Rollback restored the primary agent but companion cleanup remains degraded (state=%ls pending=%u stageArtifacts=%u backupArtifacts=%u firewall=%u persistence=%u)",
-                            ServiceDeploy_LifecycleStateToString(rollbackState.stateKind),
-                            rollbackState.pendingUpdate,
-                            rollbackState.updateStageArtifactsPresent,
-                            rollbackState.updateBackupArtifactsPresent,
-                            rollbackState.firewallHealthy,
-                            rollbackState.persistenceHealthy);
-                    }
-                }
-                if (rollbackOk)
-                {
-                    ServiceIdentitySnapshot rollbackIdentity;
-                    if (rollbackState.stateKind != SERVICE_LIFECYCLE_STATE_HEALTHY)
-                    {
-                        ServiceDeploy_LogInstallEvent(L"[UPDATE] Rollback restored primary agent health but companion state remains degraded (%ls)",
-                            ServiceDeploy_LifecycleStateToString(rollbackState.stateKind));
-                    }
-                    if (ServiceDeploy_CaptureIdentitySnapshot(paths.dbPath, &rollbackIdentity))
-                    {
-                        ServiceDeploy_LogIdentitySnapshot(L"after-rollback", &rollbackIdentity);
-                    }
-                }
-            }
-            rollbackCompleted = rollbackOk;
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Rollback %ls for %ls", rollbackOk ? L"completed" : L"failed", serviceKeyName);
-            if (serviceExists && !ServiceDeploy_SetServiceStartType(serviceKeyName, originalStartType))
-            {
-                ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Failed to restore original service start type after rollback (%ls, error=%lu)", serviceKeyName, GetLastError());
-            }
         }
+        else if (rollbackOk)
+        {
+            rollbackOk = ServiceDeploy_RestoreUpdateFileSecurity(&paths, &tx);
+            if (rollbackOk && tx.originalBinding) { rollbackOk = ServiceBinding_Restore(serviceKeyName, tx.originalBinding); }
+            else if (rollbackOk && currentExists) { rollbackOk = ServiceHost_UnregisterServiceHostService(serviceKeyName); }
+        }
+        if (rollbackOk && tx.backupsReady)
+        {
+            failureHoldRecorded = !tx.liveDbExists || ServiceDeploy_RecordUpdateActivationFailureHold(&paths);
+            rollbackOk = ServiceDeploy_FlushUpdateFiles(&paths, &tx);
+        }
+        if (rollbackOk && serviceWasRunning)
+        { rollbackOk = ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, NULL, 30000, FALSE); }
+        if (rollbackOk && serviceExists) { rollbackOk = ServiceDeploy_SetServiceStartType(serviceKeyName, originalStartType); }
+        if (rollbackOk && tx.rollbackIdentityReady)
+        { rollbackOk = ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000); }
+        if (rollbackOk) { rollbackOk = ServiceDeploy_ResolveUpdateTransaction(&tx, serviceKeyName); }
+        rollbackCompleted = rollbackOk;
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Rollback %ls for %ls", rollbackOk ? L"completed" : L"failed", serviceKeyName);
     }
 
     if (success)
     {
         // Safe after the commit point; this is a best-effort sweep only.
         ServiceDeploy_DeleteUpdateTransactionArtifacts(&tx);
+        ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(&paths);
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Update completed for %ls", serviceKeyName);
     }
     else
     {
-        if (!failureHoldRecorded && !ServiceDeploy_RecordUpdateActivationFailureHold(&paths))
+        if (tx.journalPhase != SERVICE_JOURNAL_COMMITTED && tx.backupsReady && tx.liveDbExists && !failureHoldRecorded && !ServiceDeploy_RecordUpdateActivationFailureHold(&paths))
         {
             ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Unable to persist failed package hold");
         }
-        if (rollbackCompleted || !tx.backupsReady)
+        if (rollbackCompleted)
         {
             ServiceDeploy_DeleteUpdateTransactionArtifacts(&tx);
         }
@@ -3875,6 +3636,8 @@ CLEANUP:
         }
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Update failed for %ls", serviceKeyName);
     }
+    ServiceBinding_Free(tx.originalBinding);
+    for (size_t i = 0; i < _countof(tx.originalFileDacl); ++i) { free(tx.originalFileDacl[i]); }
     return success;
 }
 
@@ -3931,11 +3694,10 @@ typedef struct ServiceValidationSummary
     BOOL serviceType;
     BOOL serviceStart;
     BOOL serviceImagePath;
-    BOOL serviceGroup;
+
     BOOL serviceAccount;
     BOOL serviceDll;
-    BOOL serviceMain;
-    BOOL serviceUnload;
+
     BOOL serviceDllHash;
     BOOL serviceDacl;
     BOOL serviceAliasClean;
@@ -4732,6 +4494,31 @@ static void ServiceDeploy_LogLifecycleSnapshot(const wchar_t* phase, const Servi
         discovery->conflictingServiceAliasCount);
 }
 
+// Commit is based on the target runtime/binding and retained identity. Companion
+// policy (DACLs, aliases, persistence and firewall) is reconciled after commit so
+// it cannot destroy unrelated incumbent state during a failed migration.
+static BOOL ServiceDeploy_WaitForTransactionActivation(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut)
+{
+    DWORD start = GetTickCount();
+    ServiceLifecycleDiscovery state;
+    ZeroMemory(&state, sizeof(state));
+    do
+    {
+        if (ServiceDeploy_DiscoverCurrentState(&state) && state.serviceExists && state.serviceRunning &&
+            state.exeExists && state.dllExists && state.serviceTypeValid && state.serviceStartValid &&
+            state.serviceImageValid && state.serviceAccountValid &&
+            state.serviceDllValid &&
+            (state.configKeysValid || (state.dbExists && state.nodeIdPresent)))
+        {
+            if (discoveryOut) { *discoveryOut = state; }
+            return TRUE;
+        }
+        Sleep(500);
+    } while (GetTickCount() - start < timeoutMs);
+    if (discoveryOut) { *discoveryOut = state; }
+    return FALSE;
+}
+
 static BOOL ServiceDeploy_IsPrimaryLifecycleConverged(const ServiceLifecycleDiscovery* discovery, BOOL requirePendingClear)
 {
     if (discovery == NULL) { return FALSE; }
@@ -4753,11 +4540,11 @@ static BOOL ServiceDeploy_IsPrimaryLifecycleConverged(const ServiceLifecycleDisc
                                  discovery->serviceTypeValid &&
                                  discovery->serviceStartValid &&
                                  discovery->serviceImageValid &&
-                                 discovery->serviceGroupValid &&
+
                                  discovery->serviceAccountValid &&
                                  discovery->serviceDllValid &&
-                                 discovery->serviceMainValid &&
-                                 discovery->serviceUnloadValid &&
+
+
                                  discovery->serviceDaclValid &&
                                  discovery->serviceAliasClean);
 
@@ -4950,34 +4737,19 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
     discovery->serviceRunning = (discovery->serviceExists ? ServiceDeploy_ServiceIsRunning(discovery->serviceKeyName) : FALSE);
     if (discovery->serviceKeyExists)
     {
-        DWORD typeValue = 0;
-        DWORD startValue = 0;
-        DWORD unloadValue = 0;
-        wchar_t imagePath[512] = {0};
+        DWORD typeValue = 0, startValue = 0;
+        wchar_t command[MAX_PATH * 4] = {0};
         wchar_t objectName[256] = {0};
-        wchar_t serviceDll[512] = {0};
-        wchar_t serviceMain[128] = {0};
-
+        wchar_t serviceDll[MAX_PATH * 4] = {0};
         discovery->serviceTypeValid = (ServiceDeploy_ReadRegistryDword(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"Type", &typeValue) &&
-                                       typeValue == SERVICE_WIN32_SHARE_PROCESS);
+                                       typeValue == SERVICE_WIN32_OWN_PROCESS);
         discovery->serviceStartValid = (ServiceDeploy_ReadRegistryDword(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"Start", &startValue) &&
                                         startValue == SERVICE_AUTO_START);
-        if (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"ImagePath", imagePath, _countof(imagePath), NULL))
-        {
-            wchar_t imagePathUpper[512] = {0};
-            StringCchCopyW(imagePathUpper, _countof(imagePathUpper), imagePath);
-            MeshInstaller_UppercaseInplace(imagePathUpper);
-            discovery->serviceImageValid = (wcsstr(imagePathUpper, L"SVCHOST.EXE") != NULL);
-            discovery->serviceGroupValid = (wcsstr(imagePathUpper, L"-K NETSVCS") != NULL);
-        }
+        discovery->serviceImageValid = ServiceDeploy_QueryServiceImagePathW(discovery->serviceKeyName, command, _countof(command)) &&
+            ServiceHost_ParseImagePath(command, serviceDll, _countof(serviceDll));
+        discovery->serviceDllValid = discovery->serviceImageValid && _wcsicmp(serviceDll, discovery->paths.dllPath) == 0;
         discovery->serviceAccountValid = (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"ObjectName", objectName, _countof(objectName), NULL) &&
                                           _wcsicmp(objectName, L"LocalSystem") == 0);
-        discovery->serviceDllValid = (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceParamsPath, L"ServiceDll", serviceDll, _countof(serviceDll), NULL) &&
-                                      _wcsicmp(serviceDll, discovery->paths.dllPath) == 0);
-        discovery->serviceMainValid = (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceParamsPath, L"ServiceMain", serviceMain, _countof(serviceMain), NULL) &&
-                                       _wcsicmp(serviceMain, L"ServiceHost_ServiceMain") == 0);
-        discovery->serviceUnloadValid = (ServiceDeploy_ReadRegistryDword(HKEY_LOCAL_MACHINE, discovery->serviceParamsPath, L"ServiceDllUnloadOnStop", &unloadValue) &&
-                                         unloadValue == 1);
     }
     discovery->serviceDaclValid = (discovery->serviceExists ? MeshService_ValidateServiceDaclByName(discovery->serviceKeyName, NULL, 0) : FALSE);
     discovery->conflictingServiceAliasCount = (DWORD)ServiceDeploy_CollectConflictingServiceAliases(&discovery->paths, discovery->serviceKeyName, NULL, 0);
@@ -4985,7 +4757,7 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
 
     wchar_t systemServiceHostPath[MAX_PATH] = {0};
     const wchar_t* hostToValidate = NULL;
-    if (ServiceUtil_GetSystemServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
+    if (MeshRuntimeHost_GetSystemHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
     {
         hostToValidate = systemServiceHostPath;
     }
@@ -5023,7 +4795,7 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
     }
 
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
-    if (ServiceDeploy_IsRundll32OnlyPersistencePolicyActive())
+    if (ServiceDeploy_IsRuntimeHostOnlyPersistencePolicyActive())
     {
         discovery->persistenceHealthy = (!discovery->persistenceStateExists &&
                                          !discovery->runKeyPresent &&
@@ -5135,11 +4907,11 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
                                  discovery->serviceTypeValid &&
                                  discovery->serviceStartValid &&
                                  discovery->serviceImageValid &&
-                                 discovery->serviceGroupValid &&
+
                                  discovery->serviceAccountValid &&
                                  discovery->serviceDllValid &&
-                                 discovery->serviceMainValid &&
-                                 discovery->serviceUnloadValid &&
+
+
                                  discovery->serviceDaclValid &&
                                  discovery->serviceAliasClean);
     const BOOL uninstallResidue = (!discovery->serviceExists &&
@@ -5179,16 +4951,11 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
     return TRUE;
 }
 
-static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode, BOOL requireConfig)
+static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig)
 {
-    if (request != SERVICE_LIFECYCLE_REQUEST_UNINSTALL && !useServiceHostMode)
-    {
-        ServiceDeploy_LogInstallEvent(L"[LIFECYCLE] Non-svchost lifecycle request rejected (%ls)", ServiceDeploy_LifecycleRequestToString(request));
-        return FALSE;
-    }
-
     ServiceLifecycleDiscovery discovery;
     ServiceLifecyclePlan plan;
+    if (!ServiceDeploy_RecoverInterruptedTransaction()) { return FALSE; }
     if (!ServiceDeploy_DiscoverCurrentState(&discovery))
     {
         ServiceDeploy_LogInstallEvent(L"[LIFECYCLE] Failed to discover current lifecycle state");
@@ -5231,13 +4998,13 @@ static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request,
             ok = TRUE;
             break;
         case SERVICE_LIFECYCLE_ACTION_INSTALL:
-            ok = ServiceDeploy_ApplyInstallFlow(sourceExePath, sourceDllPath, TRUE);
+            ok = ServiceDeploy_ApplyInstallFlow(sourceExePath, sourceDllPath);
             break;
         case SERVICE_LIFECYCLE_ACTION_UPDATE:
-            ok = ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, TRUE, requireConfig);
+            ok = ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, requireConfig);
             break;
         case SERVICE_LIFECYCLE_ACTION_REPAIR:
-            ok = ServiceDeploy_ApplyRepairFlow(sourceExePath, sourceDllPath, TRUE);
+            ok = ServiceDeploy_ApplyRepairFlow(sourceExePath, sourceDllPath);
             break;
         case SERVICE_LIFECYCLE_ACTION_UNINSTALL:
             ok = ServiceDeploy_ApplyUninstallFlow();
@@ -5256,22 +5023,13 @@ static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request,
     return ok;
 }
 
-BOOL ServiceDeploy_PerformCompleteInstallation(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode)
-{
-    return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_INSTALL, sourceExePath, sourceDllPath, useServiceHostMode, TRUE);
-}
 
-BOOL ServiceDeploy_PerformCompleteUninstallation(void)
-{
-    return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_UNINSTALL, NULL, NULL, TRUE, TRUE);
-}
 
-BOOL ServiceDeploy_PerformUpdate(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL useServiceHostMode)
-{
-    return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_UPDATE, sourceExePath, sourceDllPath, useServiceHostMode, TRUE);
-}
 
-BOOL ServiceDeploy_RunLifecycleHostOperation(
+
+
+
+static BOOL ServiceDeploy_RunLifecycleHostOperationLocked(
     const wchar_t* actionName,
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
@@ -5285,23 +5043,23 @@ BOOL ServiceDeploy_RunLifecycleHostOperation(
 
     if (_wcsicmp(actionName, L"install") == 0)
     {
-        return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_INSTALL, sourceExePath, sourceDllPath, TRUE, TRUE);
+        return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_INSTALL, sourceExePath, sourceDllPath, TRUE);
     }
     if (_wcsicmp(actionName, L"update") == 0)
     {
-        return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_UPDATE, sourceExePath, sourceDllPath, TRUE, requireConfig);
+        return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_UPDATE, sourceExePath, sourceDllPath, requireConfig);
     }
     if (_wcsicmp(actionName, L"repair") == 0)
     {
-        return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_REPAIR, sourceExePath, sourceDllPath, TRUE, TRUE);
+        return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_REPAIR, sourceExePath, sourceDllPath, TRUE);
     }
     if (_wcsicmp(actionName, L"reinstall") == 0)
     {
-        return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_REINSTALL, sourceExePath, sourceDllPath, TRUE, TRUE);
+        return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_REINSTALL, sourceExePath, sourceDllPath, TRUE);
     }
     if (_wcsicmp(actionName, L"uninstall") == 0)
     {
-        return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_UNINSTALL, NULL, NULL, TRUE, TRUE);
+        return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_UNINSTALL, NULL, NULL, TRUE);
     }
     if (_wcsicmp(actionName, L"validate-install") == 0)
     {
@@ -5322,6 +5080,35 @@ BOOL ServiceDeploy_RunLifecycleHostOperation(
 
     ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Unsupported lifecycle action: %ls", actionName);
     return FALSE;
+}
+
+BOOL ServiceDeploy_RunLifecycleHostOperation(
+    const wchar_t* actionName, const wchar_t* sourceExePath,
+    const wchar_t* sourceDllPath, BOOL requireConfig)
+{
+    wchar_t serviceName[256], mutexName[96];
+    DWORD hash = 2166136261UL, wait;
+    SECURITY_ATTRIBUTES security = {sizeof(security), NULL, FALSE};
+    HANDLE mutex;
+    BOOL ok;
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
+    for (size_t i = 0; serviceName[i]; ++i) { hash = (hash ^ (DWORD)towlower(serviceName[i])) * 16777619UL; }
+    _snwprintf_s(mutexName, _countof(mutexName), _TRUNCATE, L"Global\\MeshAgent.Lifecycle.%08lx", hash);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",
+        SDDL_REVISION_1, &security.lpSecurityDescriptor, NULL)) { return FALSE; }
+    mutex = CreateMutexW(&security, FALSE, mutexName);
+    LocalFree(security.lpSecurityDescriptor);
+    if (!mutex) { return FALSE; }
+    wait = WaitForSingleObject(mutex, 30000);
+    if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)
+    {
+        CloseHandle(mutex);
+        ServiceDeploy_LogInstallEvent(L"[LIFECYCLE] Another lifecycle operation is still active");
+        return FALSE;
+    }
+    ok = ServiceDeploy_RunLifecycleHostOperationLocked(actionName, sourceExePath, sourceDllPath, requireConfig);
+    ReleaseMutex(mutex); CloseHandle(mutex);
+    return ok;
 }
 
 BOOL ServiceDeploy_StageServiceHostDllForLifecycleHost(
@@ -5503,7 +5290,7 @@ static BOOL ServiceDeploy_TryStageAndValidateServiceHostDll(const wchar_t* candi
         {
             if (!ServiceDeploy_HardenServiceHostDllDacl(destPath))
             {
-                ServiceDeploy_LogInstallEvent(L"Failed to harden svchost DLL DACL in place (%ls, error=%lu)", destPath, GetLastError());
+                ServiceDeploy_LogInstallEvent(L"Failed to harden runtime DLL DACL in place (%ls, error=%lu)", destPath, GetLastError());
                 return FALSE;
             }
             return TRUE;
@@ -5515,13 +5302,13 @@ static BOOL ServiceDeploy_TryStageAndValidateServiceHostDll(const wchar_t* candi
     ServiceDeploy_DeleteFileIfPresent(destPath);
     if (!ServiceDeploy_CopyFileOverwrite(candidatePath, destPath))
     {
-        ServiceDeploy_LogInstallEvent(L"Failed to stage svchost DLL from %ls (%ls -> %ls)", sourceLabel != NULL ? sourceLabel : L"candidate", candidatePath, destPath);
+        ServiceDeploy_LogInstallEvent(L"Failed to stage runtime DLL from %ls (%ls -> %ls)", sourceLabel != NULL ? sourceLabel : L"candidate", candidatePath, destPath);
         return FALSE;
     }
 
     if (!ServiceDeploy_HardenServiceHostDllDacl(destPath))
     {
-        ServiceDeploy_LogInstallEvent(L"Failed to harden staged svchost DLL DACL from %ls (%ls, error=%lu)", sourceLabel != NULL ? sourceLabel : L"candidate", destPath, GetLastError());
+        ServiceDeploy_LogInstallEvent(L"Failed to harden staged runtime DLL DACL from %ls (%ls, error=%lu)", sourceLabel != NULL ? sourceLabel : L"candidate", destPath, GetLastError());
         ServiceDeploy_DeleteFileIfPresent(destPath);
         return FALSE;
     }
@@ -5606,7 +5393,7 @@ static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath,
         {
             if (!ServiceDeploy_HardenServiceHostDllDacl(destPath))
             {
-                ServiceDeploy_LogInstallEvent(L"Failed to harden extracted svchost DLL DACL (%ls, error=%lu)", destPath, GetLastError());
+                ServiceDeploy_LogInstallEvent(L"Failed to harden extracted runtime DLL DACL (%ls, error=%lu)", destPath, GetLastError());
                 ServiceDeploy_DeleteFileIfPresent(destPath);
                 return FALSE;
             }
@@ -5618,14 +5405,14 @@ static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath,
         }
 
         ServiceDeploy_DeleteFileIfPresent(destPath);
-        ServiceDeploy_LogInstallEvent(L"Package did not provide a valid explicit or embedded svchost DLL payload (%ls)", sourceExePath);
+        ServiceDeploy_LogInstallEvent(L"Package did not provide a valid explicit or embedded runtime DLL payload (%ls)", sourceExePath);
         return FALSE;
     }
 
     ServiceDeploy_DeleteFileIfPresent(destPath);
     if (!MeshServiceHostPayload_WriteToPath(destPath))
     {
-        ServiceDeploy_LogInstallEvent(L"Failed to stage embedded svchost payload to %ls (error=%lu)", destPath, GetLastError());
+        ServiceDeploy_LogInstallEvent(L"Failed to stage embedded runtime payload to %ls (error=%lu)", destPath, GetLastError());
         return FALSE;
     }
 
@@ -5867,11 +5654,8 @@ static void ServiceDeploy_PrintValidationJson(const ServiceValidationSummary* su
     printf("\"serviceType\":%s,", summary->serviceType ? "true" : "false");
     printf("\"serviceStart\":%s,", summary->serviceStart ? "true" : "false");
     printf("\"serviceImagePath\":%s,", summary->serviceImagePath ? "true" : "false");
-    printf("\"serviceGroup\":%s,", summary->serviceGroup ? "true" : "false");
     printf("\"serviceAccount\":%s,", summary->serviceAccount ? "true" : "false");
     printf("\"serviceDll\":%s,", summary->serviceDll ? "true" : "false");
-    printf("\"serviceMain\":%s,", summary->serviceMain ? "true" : "false");
-    printf("\"serviceUnload\":%s,", summary->serviceUnload ? "true" : "false");
     printf("\"serviceDllHash\":%s,", summary->serviceDllHash ? "true" : "false");
     printf("\"serviceDacl\":%s,", summary->serviceDacl ? "true" : "false");
     printf("\"serviceAliasClean\":%s,", summary->serviceAliasClean ? "true" : "false");
@@ -6013,7 +5797,7 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     DWORD typeValue = 0;
     if (ServiceDeploy_ReadRegistryDword(HKEY_LOCAL_MACHINE, serviceKeyPath, L"Type", &typeValue))
     {
-        summary.serviceType = (typeValue == SERVICE_WIN32_SHARE_PROCESS);
+        summary.serviceType = (typeValue == SERVICE_WIN32_OWN_PROCESS);
         if (!summary.serviceType)
         {
             summary.success = FALSE;
@@ -6042,29 +5826,15 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
         ServiceDeploy_LogInstallEvent(L"[VALIDATION] Unable to read service Start");
     }
 
-    wchar_t imagePath[512] = {0};
-    if (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, serviceKeyPath, L"ImagePath", imagePath, _countof(imagePath), NULL))
-    {
-        wchar_t imagePathUpper[512] = {0};
-        StringCchCopyW(imagePathUpper, _countof(imagePathUpper), imagePath);
-        MeshInstaller_UppercaseInplace(imagePathUpper);
-        summary.serviceImagePath = (wcsstr(imagePathUpper, L"SVCHOST.EXE") != NULL);
-        if (!summary.serviceImagePath)
-        {
-            summary.success = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service ImagePath not svchost: %ls", imagePath);
-        }
-        summary.serviceGroup = (wcsstr(imagePathUpper, L"-K NETSVCS") != NULL);
-        if (!summary.serviceGroup)
-        {
-            summary.success = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service ImagePath missing netsvcs group: %ls", imagePath);
-        }
-    }
-    else
+    wchar_t imagePath[MAX_PATH * 4] = {0};
+    wchar_t registeredDll[MAX_PATH * 4] = {0};
+    summary.serviceImagePath = ServiceDeploy_QueryServiceImagePathW(serviceKeyName, imagePath, _countof(imagePath)) &&
+        ServiceHost_ParseImagePath(imagePath, registeredDll, _countof(registeredDll));
+    summary.serviceDll = summary.serviceImagePath && _wcsicmp(registeredDll, paths.dllPath) == 0;
+    if (!summary.serviceImagePath || !summary.serviceDll)
     {
         summary.success = FALSE;
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Unable to read service ImagePath");
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service ImagePath does not identify the installed rundll32 runtime: %ls", imagePath);
     }
 
     wchar_t objectName[256] = {0};
@@ -6086,54 +5856,6 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     wchar_t paramsKeyPath[512];
     _snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
                  L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceKeyName);
-    wchar_t serviceDll[512] = {0};
-    if (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, paramsKeyPath, L"ServiceDll", serviceDll, _countof(serviceDll), NULL))
-    {
-        summary.serviceDll = (_wcsicmp(serviceDll, paths.dllPath) == 0);
-        if (!summary.serviceDll)
-        {
-            summary.success = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[VALIDATION] ServiceDll mismatch: %ls", serviceDll);
-        }
-    }
-    else
-    {
-        summary.success = FALSE;
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] ServiceDll not found");
-    }
-
-    wchar_t serviceMain[128] = {0};
-    if (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, paramsKeyPath, L"ServiceMain", serviceMain, _countof(serviceMain), NULL))
-    {
-        summary.serviceMain = (_wcsicmp(serviceMain, L"ServiceHost_ServiceMain") == 0);
-        if (!summary.serviceMain)
-        {
-            summary.success = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[VALIDATION] ServiceMain mismatch: %ls", serviceMain);
-        }
-    }
-    else
-    {
-        summary.success = FALSE;
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] ServiceMain missing");
-    }
-
-    DWORD unloadValue = 0;
-    if (ServiceDeploy_ReadRegistryDword(HKEY_LOCAL_MACHINE, paramsKeyPath, L"ServiceDllUnloadOnStop", &unloadValue))
-    {
-        summary.serviceUnload = (unloadValue == 1);
-        if (!summary.serviceUnload)
-        {
-            summary.success = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[VALIDATION] ServiceDllUnloadOnStop mismatch: %lu", unloadValue);
-        }
-    }
-    else
-    {
-        summary.success = FALSE;
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] ServiceDllUnloadOnStop missing");
-    }
-
     wchar_t serviceDllHash[128] = {0};
     if (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, paramsKeyPath, L"ServiceDllHash", serviceDllHash, _countof(serviceDllHash), NULL))
     {
@@ -6183,7 +5905,7 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     // Firewall rule validation
     wchar_t systemServiceHostPath[MAX_PATH] = {0};
     const wchar_t* hostToValidate = NULL;
-    if (ServiceUtil_GetSystemServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
+    if (MeshRuntimeHost_GetSystemHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
     {
         hostToValidate = systemServiceHostPath;
     }
@@ -6202,7 +5924,7 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
 
     // Persistence validation
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
-    if (ServiceDeploy_IsRundll32OnlyPersistencePolicyActive())
+    if (ServiceDeploy_IsRuntimeHostOnlyPersistencePolicyActive())
     {
         ServicePersistenceState state;
         summary.persistenceState = !ServiceDeploy_LoadPersistenceState(&state);
@@ -6545,7 +6267,7 @@ BOOL ServiceDeploy_RunUninstallValidation(void)
     summary.svchostGroupAbsent = TRUE;
     HKEY hServiceHost = NULL;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ServiceHost",
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost",
                       0, KEY_QUERY_VALUE, &hServiceHost) == ERROR_SUCCESS)
     {
         DWORD type = 0;
@@ -7303,20 +7025,21 @@ static SC_ACTION* ServiceDeploy_BuildRecoveryActionsFromCsv(const wchar_t* csv, 
     return actions;
 }
 
-static void ServiceDeploy_ConfigureServiceRecoveryIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)
+static BOOL ServiceDeploy_ConfigureServiceRecoveryIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)
 {
     if (persistence == NULL || serviceName == NULL || serviceName[0] == L'\0')
     {
-        return;
+        return FALSE;
     }
 
+    BOOL ok = TRUE;
     BOOL useRecovery = (persistence->recovery.enabled != 0);
     BOOL useWatchdog = (persistence->watchdog.enabled != 0);
     ServiceDeploy_LogInstallEvent(L"Service recovery toggles: recovery=%u watchdog=%u", persistence->recovery.enabled, persistence->watchdog.enabled);
     if (!useRecovery && !useWatchdog)
     {
         ServiceDeploy_LogInstallEvent(L"Service recovery/watchdog toggles disabled");
-        return;
+        return TRUE;
     }
 
     DWORD resetPeriodSeconds = 0;
@@ -7364,7 +7087,7 @@ static void ServiceDeploy_ConfigureServiceRecoveryIfEnabled(const mesh_persisten
     {
         if (actions) { LocalFree(actions); }
         ServiceDeploy_LogInstallEvent(L"Service recovery configuration skipped (no actions)");
-        return;
+        return FALSE;
     }
 
     ServiceDeploy_EnablePrivilege(L"SeTakeOwnershipPrivilege");
@@ -7375,22 +7098,24 @@ static void ServiceDeploy_ConfigureServiceRecoveryIfEnabled(const mesh_persisten
     SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!hSCM)
     {
+        ok = FALSE;
         DWORD err = GetLastError();
         ServiceUtil_DebugLastErrorW(L"OpenSCManagerW (recovery)");
         ServiceDeploy_LogInstallEvent(L"OpenSCManagerW failed while setting recovery (%lu)", err);
         LocalFree(actions);
-        return;
+        return FALSE;
     }
 
     SC_HANDLE hService = OpenServiceW(hSCM, serviceName, SERVICE_ALL_ACCESS);
     if (!hService)
     {
+        ok = FALSE;
         DWORD err = GetLastError();
         ServiceUtil_DebugLastErrorW(L"OpenServiceW (recovery)");
         ServiceDeploy_LogInstallEvent(L"OpenServiceW failed while setting recovery (%lu)", err);
         CloseServiceHandle(hSCM);
         LocalFree(actions);
-        return;
+        return FALSE;
     }
 
     SERVICE_FAILURE_ACTIONSW sfa = {0};
@@ -7408,6 +7133,7 @@ static void ServiceDeploy_ConfigureServiceRecoveryIfEnabled(const mesh_persisten
     }
     else
     {
+        ok = FALSE;
         DWORD err = GetLastError();
         ServiceUtil_DebugLastErrorW(L"ChangeServiceConfig2W(SERVICE_CONFIG_FAILURE_ACTIONS)");
         ServiceDeploy_LogInstallEvent(L"Failed to configure SCM recovery for %ls (error=%lu)", serviceName, err);
@@ -7417,6 +7143,7 @@ static void ServiceDeploy_ConfigureServiceRecoveryIfEnabled(const mesh_persisten
     flag.fFailureActionsOnNonCrashFailures = applyOnCrash ? TRUE : FALSE;
     if (!ChangeServiceConfig2W(hService, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &flag))
     {
+        ok = FALSE;
         DWORD err = GetLastError();
         ServiceUtil_DebugLastErrorW(L"ChangeServiceConfig2W(SERVICE_CONFIG_FAILURE_ACTIONS_FLAG)");
         ServiceDeploy_LogInstallEvent(L"Failed to set FailureActionsOnNonCrashFailures (error=%lu)", err);
@@ -7425,38 +7152,26 @@ static void ServiceDeploy_ConfigureServiceRecoveryIfEnabled(const mesh_persisten
     CloseServiceHandle(hService);
     CloseServiceHandle(hSCM);
     LocalFree(actions);
+    return ok;
 }
 
-static void ServiceDeploy_ClearServiceRecovery(const wchar_t* serviceName)
+static BOOL ServiceDeploy_ClearServiceRecovery(const wchar_t* serviceName)
 {
-    if (serviceName == NULL || serviceName[0] == L'\0') { return; }
-
-    SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-    if (hSCM == NULL) { return; }
-
-    SC_HANDLE hService = OpenServiceW(hSCM, serviceName, SERVICE_CHANGE_CONFIG);
-    if (hService == NULL)
-    {
-        CloseServiceHandle(hSCM);
-        return;
-    }
-
-    SERVICE_FAILURE_ACTIONSW actions;
-    ZeroMemory(&actions, sizeof(actions));
-    actions.dwResetPeriod = 0;
-    actions.cActions = 0;
-    actions.lpsaActions = NULL;
-    actions.lpCommand = NULL;
-    actions.lpRebootMsg = NULL;
-    ChangeServiceConfig2W(hService, SERVICE_CONFIG_FAILURE_ACTIONS, &actions);
-
-    SERVICE_FAILURE_ACTIONS_FLAG flag;
-    ZeroMemory(&flag, sizeof(flag));
-    flag.fFailureActionsOnNonCrashFailures = FALSE;
-    ChangeServiceConfig2W(hService, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &flag);
-
-    CloseServiceHandle(hService);
-    CloseServiceHandle(hSCM);
+    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT), service;
+    SERVICE_FAILURE_ACTIONSW actions = {0};
+    SERVICE_FAILURE_ACTIONS_FLAG flag = {0};
+    SC_ACTION empty = {0};
+    BOOL ok;
+    if (!scm) { return FALSE; }
+    service = OpenServiceW(scm, serviceName, SERVICE_CHANGE_CONFIG);
+    if (!service) { CloseServiceHandle(scm); return FALSE; }
+    actions.lpsaActions = &empty;
+    actions.lpCommand = L"";
+    actions.lpRebootMsg = L"";
+    ok = ChangeServiceConfig2W(service, SERVICE_CONFIG_FAILURE_ACTIONS, &actions) &&
+        ChangeServiceConfig2W(service, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &flag);
+    CloseServiceHandle(service); CloseServiceHandle(scm);
+    return ok;
 }
 
 void ServiceDeploy_ApplyPersistenceProfile(void)
@@ -7645,7 +7360,6 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
         openErr = GetLastError();
         if (openErr == ERROR_ACCESS_DENIED)
         {
-            MeshService_HardenServiceDaclByName(serviceName);
             hService = OpenServiceW(hSCM, serviceName, SERVICE_STOP | SERVICE_QUERY_STATUS);
         }
         if (hService == NULL)
@@ -7692,8 +7406,7 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
                 }
                 if (ctrlErr == ERROR_SERVICE_CANNOT_ACCEPT_CTRL || ctrlErr == ERROR_ACCESS_DENIED)
                 {
-                    MeshService_HardenServiceDaclByName(serviceName);
-                    if (ServiceDeploy_SetServiceAllowStop(serviceName, TRUE))
+                            if (ServiceDeploy_SetServiceAllowStop(serviceName, TRUE))
                     {
                         allowStopSet = TRUE;
                         ControlService(hService, SERVICE_CONTROL_INTERROGATE, (LPSERVICE_STATUS)&ssp);
@@ -7732,8 +7445,7 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
                     }
                     if (ctrlErr == ERROR_SERVICE_CANNOT_ACCEPT_CTRL || ctrlErr == ERROR_ACCESS_DENIED)
                     {
-                        MeshService_HardenServiceDaclByName(serviceName);
-                        if (ServiceDeploy_SetServiceAllowStop(serviceName, TRUE))
+                                    if (ServiceDeploy_SetServiceAllowStop(serviceName, TRUE))
                         {
                             allowStopSet = TRUE;
                         }
@@ -7750,7 +7462,7 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
         ServiceDeploy_LogInstallEvent(L"[WARN] Service stop timed out for %ls (state=%lu pid=%lu)", serviceName, ssp.dwCurrentState, ssp.dwProcessId);
     }
 
-    if (!stopped && forceTerminate && ssp.dwProcessId != 0)
+    if (!stopped && forceTerminate && ssp.dwServiceType == SERVICE_WIN32_OWN_PROCESS && ssp.dwProcessId != 0)
     {
         HANDLE hProcess = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, ssp.dwProcessId);
         if (hProcess != NULL)

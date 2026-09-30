@@ -32,6 +32,7 @@ prelude = r'''
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 typedef int BOOL;
@@ -41,6 +42,13 @@ typedef void* HANDLE;
 #define FALSE 0
 #define MAX_PATH 260
 #define SERVICE_AUTO_START 2
+#define SERVICE_DISABLED 4
+#define SERVICE_WIN32_SHARE_PROCESS 32
+#define SERVICE_WIN32_OWN_PROCESS 16
+#define SERVICE_JOURNAL_PREPARED 1
+#define SERVICE_JOURNAL_BACKED_UP 2
+#define SERVICE_JOURNAL_COMMITTED 3
+#define SERVICE_JOURNAL_ROLLED_BACK 4
 #define SERVICE_LIFECYCLE_STATE_HEALTHY 0
 #define SERVICE_UPDATE_STAGE_DIR_NAME L"stage"
 #define SERVICE_UPDATE_BACKUP_DIR_NAME L"backup"
@@ -53,85 +61,127 @@ typedef void* HANDLE;
 #define ERROR_LOCK_VIOLATION 33
 #define _countof(a) (sizeof(a) / sizeof((a)[0]))
 #define ZeroMemory(p,n) memset(p,0,n)
+#define _wcsicmp wcscmp
 #define UNREFERENCED_PARAMETER(p) ((void)p)
 typedef struct { wchar_t installDir[MAX_PATH], logsDir[MAX_PATH], exePath[MAX_PATH], dllPath[MAX_PATH], confPath[MAX_PATH], dbPath[MAX_PATH]; } ServiceInstallPaths;
 typedef struct { int unused; } ServiceIdentitySnapshot;
+typedef struct { DWORD dwStartType, dwServiceType; } binding_config;
+typedef struct { binding_config* config; BOOL running, legacy; } ServiceBindingSnapshot;
 typedef struct {
     BOOL backupsReady, liveDbExists, stagedMshReady, postUpdateIdentityReady, rollbackIdentityReady;
     wchar_t stagedMshPath[MAX_PATH], stagedConfPath[MAX_PATH], backupDir[MAX_PATH];
     ServiceIdentitySnapshot postUpdateIdentity, rollbackIdentity;
+    DWORD journalPhase;
     BOOL pendingUpdateMarked;
+    ServiceBindingSnapshot* originalBinding;
+    void* originalFileDacl[5];
 } ServiceUpdateTransaction;
 typedef struct { BOOL configAvailable, sourceEmbeddedConfigPresent, sourceSidecarConfigPresent; } ServicePackagePreflight;
-typedef struct { wchar_t WmiFilter[MAX_PATH], WmiConsumer[MAX_PATH]; } ServicePersistenceState;
 typedef struct { int enabled; } persistence_toggle;
 typedef struct { int runKey; persistence_toggle autorunTask, restartTask, watchdog; } mesh_persistence_profile_t;
 typedef struct {
     int stateKind, pendingUpdate, updateStageArtifactsPresent, updateBackupArtifactsPresent, firewallHealthy, persistenceHealthy;
     int serviceExists, serviceTypeValid, serviceImageValid, serviceGroupValid, serviceAccountValid, serviceDllValid, dllExists, serviceMainValid, serviceUnloadValid;
 } ServiceLifecycleDiscovery;
-static int failAt, running, liveVersion, startType, starts, mixedStarts, stops, prepared, rolledBack, convergence, discarded, recoveryRestored, incumbentRepairs;
-static int installed = 1, supportedHost = 1, packageHasConfig = 1;
+static int failAt, running, liveVersion, bindingVersion, startType, starts, mixedStarts, stops, prepared, rolledBack, convergence, discarded, incumbentRepairs, restoredBindings, deletedArtifacts;
+static int installed = 1, legacy = 0, packageHasConfig = 1, originalExists = 1;
+static DWORD retainedPhase;
 static mesh_persistence_profile_t profile;
+static binding_config savedConfig;
+static ServiceBindingSnapshot savedBinding;
 static void log_event(const wchar_t* fmt, ...) { (void)fmt; }
 static BOOL mock_paths(ServiceInstallPaths* p) {
-    memset(p, 0, sizeof(*p)); wcscpy(p->exePath,L"agent.exe"); wcscpy(p->dllPath,L"agent.dll"); return TRUE;
+    memset(p, 0, sizeof(*p)); wcscpy(p->exePath,L"agent.exe"); wcscpy(p->dllPath,L"agent.dll"); wcscpy(p->dbPath,L"agent.db"); return TRUE;
 }
 static BOOL mock_preflight(BOOL requireConfig, ServicePackagePreflight* p) {
     memset(p,0,sizeof(*p)); p->configAvailable = packageHasConfig;
     return failAt != 5 && (!requireConfig || packageHasConfig);
 }
-static BOOL discover(ServiceLifecycleDiscovery* p) {
-    memset(p,0,sizeof(*p)); p->serviceExists = installed; p->serviceTypeValid = supportedHost;
-    p->serviceImageValid = p->serviceGroupValid = p->serviceAccountValid = p->serviceDllValid = 1;
-    p->dllExists = p->serviceMainValid = p->serviceUnloadValid = 1;
+static BOOL query_exists(BOOL* out) { *out = installed; return TRUE; }
+static ServiceBindingSnapshot* capture(void) {
+    if (failAt == 4) return NULL;
+    savedConfig.dwServiceType = legacy ? SERVICE_WIN32_OWN_PROCESS : SERVICE_WIN32_SHARE_PROCESS; savedConfig.dwStartType = startType; savedBinding.config = &savedConfig;
+    savedBinding.running = running; savedBinding.legacy = legacy; return &savedBinding;
+}
+static BOOL restore_binding(void) {
+    ++restoredBindings; if (failAt == 10 || failAt == 16) return FALSE;
+    bindingVersion = 1; installed = 1;
+    startType = savedBinding.running && savedConfig.dwStartType == SERVICE_DISABLED ? 3 : (int)savedConfig.dwStartType;
     return TRUE;
 }
-static BOOL prepare(ServiceUpdateTransaction* tx) { ++prepared; tx->liveDbExists = TRUE; return failAt != 6; }
+static BOOL sibling(const wchar_t* ext, wchar_t* out) { wcscpy(out, wcscmp(ext,L".db") == 0 ? L"agent.db" : L"agent.mshx"); return TRUE; }
+static BOOL prepare(ServiceUpdateTransaction* tx) { ++prepared; tx->liveDbExists = originalExists; return failAt != 6; }
 static BOOL backup(ServiceUpdateTransaction* tx) {
-    assert(!running); if (failAt == 1) return FALSE;
-    tx->backupsReady = tx->rollbackIdentityReady = tx->postUpdateIdentityReady = TRUE; return TRUE;
+    assert(!running); if (failAt == 1 || failAt == 16) return FALSE;
+    tx->backupsReady = TRUE; tx->rollbackIdentityReady = tx->postUpdateIdentityReady = originalExists; return TRUE;
 }
-static BOOL commit(void) { assert(!running); liveVersion = failAt == 2 || failAt == 3 ? 2 : 3; return liveVersion == 3; }
-static BOOL rollback(void) { assert(!running); ++rolledBack; if (failAt == 3) return FALSE; liveVersion = 1; return TRUE; }
-static BOOL stop_service(void) { ++stops; running = 0; return TRUE; }
+static BOOL commit(void) { assert(!running); liveVersion = failAt == 2 || failAt == 3 || failAt == 10 || failAt == 17 ? 2 : 3; return liveVersion == 3; }
+static BOOL registration(void) { bindingVersion = 3; installed = 1; return failAt != 11; }
+static BOOL rollback(void) {
+    assert(!running); ++rolledBack; if (failAt == 3) return FALSE;
+    liveVersion = originalExists ? 1 : 0;
+    if (originalExists) return restore_binding();
+    bindingVersion = 0; installed = 0; return TRUE;
+}
+static BOOL stop_service(void) { ++stops; if (failAt == 9) return FALSE; running = 0; return TRUE; }
 static BOOL start_service(BOOL allowRepair) {
-    ++starts; if (liveVersion == 2) ++mixedStarts;
-    assert(startType == SERVICE_AUTO_START);
+    ++starts; if (liveVersion == 2 || liveVersion != bindingVersion) ++mixedStarts;
+    assert(startType != SERVICE_DISABLED);
     if (liveVersion == 1 && allowRepair) ++incumbentRepairs;
     if (failAt == 7 && liveVersion == 3) return FALSE;
     running = 1; return TRUE;
 }
-static BOOL query_start(DWORD* out) { *out = startType; return failAt != 4; }
 static BOOL set_start(DWORD value) { startType = (int)value; return TRUE; }
 static BOOL wait_operational(ServiceLifecycleDiscovery* state) {
-    ++convergence; memset(state,0,sizeof(*state)); return running && liveVersion != 2;
+    ++convergence; memset(state,0,sizeof(*state)); return running && liveVersion == 3 && bindingVersion == 3;
 }
-static BOOL discard(ServiceUpdateTransaction* tx) { ++discarded; tx->backupsReady = FALSE; return TRUE; }
+static BOOL publish(ServiceUpdateTransaction* tx, DWORD phase) {
+    if ((failAt == 12 && phase == SERVICE_JOURNAL_PREPARED) ||
+        (failAt == 13 && phase == SERVICE_JOURNAL_BACKED_UP) ||
+        (failAt == 14 && phase == SERVICE_JOURNAL_COMMITTED) ||
+        (failAt == 17 && phase == SERVICE_JOURNAL_ROLLED_BACK)) return FALSE;
+    retainedPhase = tx->journalPhase = phase; return TRUE;
+}
+static BOOL resolve(ServiceUpdateTransaction* tx) {
+    if (!publish(tx, SERVICE_JOURNAL_ROLLED_BACK)) return FALSE;
+    ++discarded; ++deletedArtifacts; retainedPhase = 0; return TRUE;
+}
+static BOOL reconcile(ServiceUpdateTransaction* tx) {
+    assert(tx->journalPhase == SERVICE_JOURNAL_COMMITTED);
+    if (failAt == 15) return FALSE;
+    running = 1; ++discarded; ++deletedArtifacts; retainedPhase = 0; return TRUE;
+}
 #define ServiceDeploy_LogInstallEvent log_event
 #define MeshConfig_GetPersistence() (&profile)
 #define ServiceDeploy_GetInstallPaths(p) mock_paths(p)
-#define ServiceDeploy_CleanupConflictingServiceAliases(...) 0
-#define ServiceDeploy_IsAlreadyInstalled() installed
-#define ServiceDeploy_DiscoverCurrentState(p) discover(p)
+#define ServiceBinding_QueryExists(n,out) query_exists(out)
+#define ServiceBinding_Capture(n,e,d) capture()
+#define ServiceBinding_Free(...) ((void)0)
+#define ServiceBinding_Restore(...) restore_binding()
 #define ServiceDeploy_ServiceIsRunning(...) running
 #define ServiceDeploy_PreflightPackageSource(a,b,p,d,e) mock_preflight(b,p)
 #define ServiceDeploy_PrepareUpdateTransaction(a,b,c,d,tx) prepare(tx)
 #define ServiceDeploy_BackupUpdateTransaction(p,tx) backup(tx)
 #define ServiceDeploy_CommitUpdateTransaction(...) commit()
+#define ServiceHost_RegisterServiceHostService(...) registration()
 #define ServiceDeploy_RollbackUpdateTransaction(...) rollback()
 #define ServiceDeploy_StopServiceAndWait(...) stop_service()
 #define ServiceDeploy_StartServiceHostServiceAndWait(a,b,c,repair) start_service(repair)
-#define ServiceDeploy_QueryServiceStartType(a,out) query_start(out)
 #define ServiceDeploy_SetServiceStartType(a,value) set_start(value)
-#define ServiceDeploy_LoadPersistenceState(...) FALSE
-#define ServiceDeploy_WaitForPrimaryLifecycleOperational(t,s) wait_operational(s)
+#define ServiceDeploy_WaitForTransactionActivation(t,s) wait_operational(s)
 #define ServiceDeploy_WaitForPrimaryLifecycleHealthy(t,s) wait_operational(s)
 #define ServiceDeploy_LifecycleStateToString(...) L"state"
 #define ServiceDeploy_WaitForExpectedIdentity(...) (failAt != 8 || liveVersion == 1)
-#define ServiceDeploy_DiscardUpdateBackup(tx) discard(tx)
-#define ServiceDeploy_ConfigureServiceRecoveryIfEnabled(...) (++recoveryRestored)
-#define Security_InstallFiles(...) (liveVersion = 3, TRUE)
+#define ServiceDeploy_FlushUpdateFiles(...) (failAt != 18 || liveVersion == 1)
+#define ServiceDeploy_RefreshQuiescedFileCheckpoint(...) (failAt != 19)
+#define ServiceDeploy_WriteTransactionPhase(tx,n,p) publish(tx,p)
+#define ServiceDeploy_ResolveUpdateTransaction(tx,n) resolve(tx)
+#define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx) reconcile(tx)
+#define ServiceDeploy_DeleteUpdateTransactionArtifacts(...) (++deletedArtifacts)
+#define ServiceDeploy_BuildSiblingPathWithExtension(e,x,o,c) sibling(x,o)
+#define ServiceDeploy_PathExists(p) (wcscmp(p,L"agent.mshx") != 0)
+#define ServiceDeploy_TerminateProcessesByLoadedModulePath(...) ((void)0)
+#define ServiceDeploy_TerminateProcessesByPath(...) ((void)0)
 #define GetFileAttributesW(...) INVALID_FILE_ATTRIBUTES
 #define GetLastError() 1
 #define GetTickCount() 1
@@ -141,71 +191,190 @@ static BOOL discard(ServiceUpdateTransaction* tx) { ++discarded; tx->backupsRead
 # Non-mutating collaborators succeed. The transaction, SCM, identity and startup
 # boundaries above have explicit stateful mocks; production orchestration is intact.
 mocked = set(re.findall(r'^#define (\w+)', prelude, re.M))
-calls = set(re.findall(r'\b((?:ServiceDeploy_|Security_|MeshInstaller_|FaultRecovery_|MeshService_|ServiceUtil_|ServiceHost_)\w+)\s*\(', flow + install))
+calls = set(re.findall(r'\b((?:ServiceDeploy_|ServiceBinding_|Security_|MeshInstaller_|MeshRuntimeHost_|FaultRecovery_|MeshService_|ServiceUtil_|ServiceHost_)\w+)\s*\(', flow + install))
 generic = '\n'.join(f'#define {name}(...) 1' for name in sorted(calls - mocked - {'ServiceDeploy_ApplyUpdateFlow', 'ServiceDeploy_ApplyInstallFlow'}))
 generic += '\n#define Sleep(...) ((void)0)\n#define CloseHandle(...) 1\n#define StringCchCopyW(a,b,c) wcscpy(a,c)\n#define StringCchCatW(a,b,c) wcscat(a,c)\n'
 
 cases = r'''
-static void run_case(int failure, int wasRunning, int originalStart, int expectedStarts) {
-    failAt = failure; running = wasRunning; liveVersion = 1; startType = originalStart;
-    starts = mixedStarts = stops = prepared = rolledBack = convergence = discarded = recoveryRestored = incumbentRepairs = 0;
-    BOOL result = ServiceDeploy_ApplyUpdateFlow(L"new.exe",L"new.dll",TRUE,TRUE);
-    if (starts != expectedStarts || mixedStarts != 0) {
-        fprintf(stderr,"failure=%d priorRunning=%d: starts=%d expected=%d mixedStarts=%d\n",
-            failure,wasRunning,starts,expectedStarts,mixedStarts);
-        assert(0);
-    }
-    assert(result == (failure == 0));
-    assert(incumbentRepairs == 0); /* Recovery must not rewrite retained payloads. */
-    if (!failure) { assert(running && liveVersion == 3); return; }
-    assert(startType == originalStart);
-    if (failure == 3) { assert(!running && liveVersion == 2 && !discarded); return; }
-    assert(running == wasRunning && liveVersion == 1);
-    if (!wasRunning) assert(convergence == 0);
-    if (failure == 4 || failure == 5 || failure == 6) assert(stops == 0);
-    else assert(recoveryRestored > 0);
-    if (failure == 2 || failure == 7 || failure == 8) assert(rolledBack == 1 && discarded == 1);
+static void reset(int failure, int exists, int wasRunning, int originalStart, int ownProcess) {
+    retainedPhase = 0; failAt = failure; originalExists = installed = exists; legacy = ownProcess;
+    running = wasRunning; liveVersion = bindingVersion = exists ? 1 : 0; startType = originalStart;
+    starts = mixedStarts = stops = prepared = rolledBack = convergence = discarded = incumbentRepairs = restoredBindings = deletedArtifacts = 0;
 }
-static void install_case(int failure, int config, int exists, int supported, int expectedPrepared) {
-    failAt = failure; packageHasConfig = config; installed = exists; supportedHost = supported;
-    running = exists; liveVersion = 1; startType = SERVICE_AUTO_START;
-    starts = mixedStarts = stops = prepared = rolledBack = convergence = discarded = recoveryRestored = incumbentRepairs = 0;
-    BOOL result = ServiceDeploy_ApplyInstallFlow(L"new.exe",L"new.dll",TRUE);
-    assert(prepared == expectedPrepared && mixedStarts == 0);
-    assert(result == (failure == 0 && config));
-    if (!config || failure == 6) assert(stops == 0 && running == exists && liveVersion == 1);
-    if (failure == 1 || failure == 2) assert(running == exists && liveVersion == 1);
-    if (result) assert(running && liveVersion == 3);
+static void run_case(int failure, int exists, int wasRunning, int originalStart, int ownProcess) {
+    reset(failure, exists, wasRunning, originalStart, ownProcess);
+    BOOL result = ServiceDeploy_ApplyUpdateFlow(L"new.exe",L"new.dll",FALSE);
+    if (result != (failure == 0)) fprintf(stderr,"unexpected failure=%d result=%d exists=%d active=%d\n",failure,result,exists,wasRunning);
+    assert(result == (failure == 0));
+    assert(mixedStarts == 0 && incumbentRepairs == 0);
+    if (!failure) { assert(running && liveVersion == 3 && installed); return; }
+    if (failure == 15) { assert(!running && liveVersion == 3 && bindingVersion == 3 && !rolledBack && retainedPhase == SERVICE_JOURNAL_COMMITTED && !deletedArtifacts); return; }
+    if (failure == 17) { assert(running && liveVersion == 1 && retainedPhase == SERVICE_JOURNAL_BACKED_UP && !deletedArtifacts); return; }
+    if (failure == 16) { assert(!running && liveVersion == 1 && !deletedArtifacts && retainedPhase == SERVICE_JOURNAL_PREPARED); return; }
+    if (exists && failure != 3 && failure != 10 && failure != 9) assert(startType == originalStart);
+    if (failure == 3) { assert(!running && liveVersion == 2 && !discarded && !deletedArtifacts); return; }
+    if (failure == 10) { assert(!running && !discarded && !deletedArtifacts); return; }
+    assert(running == wasRunning && liveVersion == (exists ? 1 : 0) && installed == exists);
+    if (failure == 4 || failure == 5 || failure == 6 || failure == 12) assert(stops == 0);
+    if (failure == 2 || failure == 7 || failure == 8 || failure == 11 || failure == 14) assert(rolledBack == 1 && discarded == 1);
+}
+static void install_case(int config, int exists, int ownProcess, int failure) {
+    packageHasConfig = config;
+    reset(failure,exists,exists,SERVICE_AUTO_START,ownProcess);
+    BOOL result = ServiceDeploy_ApplyInstallFlow(L"new.exe",L"new.dll");
+    assert(result == (config && failure == 0));
+    assert(mixedStarts == 0);
+    if (!config) assert(!prepared && !stops && running == exists && liveVersion == (exists ? 1 : 0));
+    if (result) assert(prepared == 1 && running && liveVersion == 3);
+    packageHasConfig = 1;
 }
 int main(void) {
-    run_case(2,1,3,1); /* Partial commit is never started; rollback starts retained bytes. */
-    run_case(2,0,4,0); /* A previously stopped/disabled incumbent remains stopped. */
-    run_case(1,1,3,1); /* Incomplete backup left live bytes unchanged: recover running state. */
-    run_case(1,0,4,0);
-    run_case(1,1,4,1); /* Restore disabled configuration after restarting, not before. */
-    run_case(3,1,3,0); /* Failed rollback preserves backup and does not start mixed files. */
-    run_case(4,1,3,0); /* Cannot snapshot start type: fail before stopping. */
-    run_case(5,1,3,0); /* Package preflight failure keeps incumbent running. */
-    run_case(6,1,3,0); /* Staging failure keeps incumbent running. */
-    run_case(7,1,3,2); /* New startup failure, then old startup. */
-    run_case(8,1,3,2); /* New identity failure, then old startup. */
-    run_case(0,0,4,1); /* Successful update still starts and repairs auto-start. */
-    packageHasConfig = 0;
-    run_case(0,1,3,1); /* Binary-only update still uses installed provisioning. */
-    install_case(6,1,1,1,1); /* Incumbent install stages before stopping. */
-    install_case(1,1,1,1,1); /* Backup failure recovers incumbent install. */
-    install_case(2,1,1,1,1); /* Partial install rolls back through update transaction. */
-    install_case(0,0,1,1,0); /* Install still requires package provisioning. */
-    install_case(0,1,1,1,1); /* Supported install uses transaction on success too. */
-    install_case(0,1,1,0,0); /* Legacy migration keeps its existing path. */
-    install_case(0,1,0,0,0); /* Fresh install keeps its existing path. */
-    puts("Service update/install native recovery: 20 cases passed");
+    int count = 0;
+    for (int own = 0; own < 2; ++own) {
+        for (int active = 0; active < 2; ++active) {
+            for (int failure = 0; failure <= 8; ++failure) {
+                run_case(failure,1,active,active ? 3 : 4,own); ++count;
+            }
+        }
+        run_case(2,1,1,4,own); ++count; /* Running but disabled: restart before restoring DISABLED. */
+        run_case(9,1,1,3,own); ++count; /* Stop failure leaves incumbent intact. */
+        run_case(11,1,1,3,own); ++count; /* Partially applied registration is rolled back. */
+    }
+    for (int failure = 12; failure <= 19; ++failure) { run_case(failure,1,1,3,0); ++count; }
+    for (int failure = 0; failure <= 8; ++failure) {
+        if (failure == 4 || failure == 3) continue;
+        run_case(failure,0,0,2,0); ++count;
+    }
+    for (int own = 0; own < 2; ++own) {
+        install_case(1,1,own,0); install_case(0,1,own,0); install_case(1,1,own,2); count += 3;
+    }
+    install_case(1,0,0,0); install_case(0,0,0,0); install_case(1,0,0,2); count += 3;
+    packageHasConfig = 0; run_case(0,1,1,3,0); ++count; /* Binary-only update retains installed identity. */
+    printf("Service transaction native orchestration: %d cases passed\n",count);
     return 0;
 }
 '''
+
 with tempfile.TemporaryDirectory(prefix='meshagent-update-recovery-') as directory:
     c_path = Path(directory) / 'recovery.c'
     executable = Path(directory) / ('recovery.exe' if os.name == 'nt' else 'recovery')
     c_path.write_text(prelude + generic + '\n' + flow + '\n' + install + '\n' + cases)
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wno-unused-value', str(c_path), '-o', str(executable)], check=True)
+    subprocess.run([str(executable)], check=True)
+
+# Exercise actual crash-recovery and cleanup orchestration separately from the
+# activation harness. Keep SCM/filesystem boundaries stateful and injectable.
+recovery_prelude = r'''
+#include <assert.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+typedef int BOOL; typedef unsigned long DWORD;
+#define TRUE 1
+#define FALSE 0
+#define MAX_PATH 260
+#define _countof(x) (sizeof(x)/sizeof(*(x)))
+#define _TRUNCATE 0
+#define SERVICE_JOURNAL_PREPARED 1
+#define SERVICE_JOURNAL_BACKED_UP 2
+#define SERVICE_JOURNAL_COMMITTED 3
+#define SERVICE_JOURNAL_ROLLED_BACK 4
+#define SERVICE_DISABLED 4
+#define SERVICE_WIN32_SHARE_PROCESS 32
+#define INVALID_FILE_ATTRIBUTES ((DWORD)-1)
+#define FILE_ATTRIBUTE_DIRECTORY 16
+#define FILE_ATTRIBUTE_REPARSE_POINT 1024
+#define ERROR_FILE_NOT_FOUND 2
+#define ERROR_PATH_NOT_FOUND 3
+#define ERROR_ACCESS_DENIED 5
+typedef struct { DWORD dwServiceType, dwStartType; } Config;
+typedef struct { Config* config; BOOL running, legacy; } ServiceBindingSnapshot;
+typedef struct { DWORD phase,fileMask; ServiceBindingSnapshot* binding; void* dacl[5]; DWORD attributes[5]; } ServiceJournalRecord;
+typedef struct { wchar_t exePath[MAX_PATH],dllPath[MAX_PATH],dbPath[MAX_PATH]; } ServiceInstallPaths;
+typedef struct {
+    DWORD journalPhase; ServiceBindingSnapshot* originalBinding;
+    BOOL liveExeExists,liveDllExists,liveConfExists,liveMshExists,liveDbExists,backupsReady,backupDbReady,rollbackIdentityReady;
+    void* originalFileDacl[5];DWORD originalFileAttributes[5];int rollbackIdentity;
+    wchar_t journalPath[MAX_PATH],stageDir[MAX_PATH],backupDir[MAX_PATH],backupExePath[MAX_PATH],backupDllPath[MAX_PATH],backupConfPath[MAX_PATH],backupMshPath[MAX_PATH],backupDbPath[MAX_PATH];
+} ServiceUpdateTransaction;
+static Config config={16,3};static ServiceBindingSnapshot binding={&config,TRUE,FALSE};
+static ServiceJournalRecord saved;
+static int loadOk,journalExists,unknownBackup,unknownBinding,missingBackup,failRestore,failReconcile,failCleanup,failPublish;
+static int mutations,stops,starts,restores,rollbacks,reconciles,deleted,phaseWritten;static DWORD error;
+static void log_event(const wchar_t* f,...){(void)f;}
+static BOOL mock_recovery_paths(ServiceInstallPaths* p){memset(p,0,sizeof(*p));return TRUE;}
+static BOOL txpaths(ServiceUpdateTransaction* t){wcscpy(t->journalPath,L"journal");wcscpy(t->stageDir,L"stage");wcscpy(t->backupDir,L"backup");wcscpy(t->backupExePath,L"exe");return TRUE;}
+static BOOL load(ServiceJournalRecord** out){*out=journalExists?&saved:NULL;return loadOk;}
+static BOOL capture_ok(void){return !unknownBinding;}
+static BOOL set_start(void){++mutations;return TRUE;}
+static BOOL stop(void){++mutations;++stops;return TRUE;}
+static BOOL restore(void){++mutations;++restores;return !failRestore;}
+static BOOL rollback(void){++mutations;++rollbacks;return !failRestore;}
+static BOOL start(void){++mutations;++starts;return TRUE;}
+static BOOL publish(ServiceUpdateTransaction* tx,DWORD phase){if(failPublish)return FALSE;phaseWritten=saved.phase=tx->journalPhase=phase;return TRUE;}
+static BOOL remove_dir(void){++deleted;return !failCleanup;}
+static DWORD GetFileAttributesW(const wchar_t* p){if(!wcscmp(p,L"journal")){error=ERROR_FILE_NOT_FOUND;return journalExists?0:INVALID_FILE_ATTRIBUTES;}return missingBackup?INVALID_FILE_ATTRIBUTES:0;}
+static DWORD GetLastError(void){return error;}
+static BOOL DeleteFileW(const wchar_t* p){++deleted;if(!wcscmp(p,L"journal"))journalExists=0;return TRUE;}
+static int _snwprintf_s(wchar_t* out,size_t size,int trunc,const wchar_t* fmt,...){(void)trunc;(void)fmt;return swprintf(out,size,L"journal.tmp");}
+#define ServiceDeploy_LogInstallEvent log_event
+#define ServiceDeploy_GetInstallPaths(p) mock_recovery_paths(p)
+#define ServiceDeploy_InitializeUpdateTransactionPaths(p,t) txpaths(t)
+#define ServiceDeploy_ResolveRuntimeServiceBranding(...) ((void)0)
+#define ServiceJournal_Load(p,n,r) load(r)
+#define ServiceJournal_Free(...) ((void)0)
+#define ServiceDeploy_TransactionDirectoryEmpty(...) (!unknownBackup)
+#define ServiceBinding_ImageSupported(c,e,d,l) (*(l)=FALSE,TRUE)
+#define ServiceBinding_QueryExists(n,e) (*(e)=TRUE,TRUE)
+#define ServiceBinding_Capture(...) (capture_ok()?&binding:NULL)
+#define ServiceBinding_Free(...) ((void)0)
+#define ServiceDeploy_SetServiceStartType(...) set_start()
+#define ServiceDeploy_ClearServiceRecovery(...) set_start()
+#define ServiceDeploy_StopServiceAndWait(...) stop()
+#define ServiceDeploy_RestoreUpdateFileSecurity(...) restore()
+#define ServiceBinding_Restore(...) restore()
+#define ServiceHost_UnregisterServiceHostService(...) restore()
+#define ServiceDeploy_RollbackUpdateTransaction(...) rollback()
+#define ServiceDeploy_StartServiceHostServiceAndWait(...) start()
+#define ServiceDeploy_CaptureIdentitySnapshot(...) TRUE
+#define ServiceDeploy_WaitForExpectedIdentity(...) TRUE
+#define ServiceDeploy_WriteTransactionPhase(tx,n,phase) publish(tx,phase)
+#define ServiceDeploy_RemoveDirectoryTree(...) remove_dir()
+static BOOL ServiceDeploy_DeleteUpdateTransactionArtifacts(const ServiceUpdateTransaction*);
+static BOOL reconcile(ServiceUpdateTransaction* tx){++reconciles;if(failReconcile)return FALSE;return ServiceDeploy_DeleteUpdateTransactionArtifacts(tx);}
+#define ServiceDeploy_ReconcileCommittedTransaction(p,n,t) reconcile(t)
+'''
+recovery_cases = r'''
+static void reset(DWORD phase){
+    memset(&saved,0,sizeof(saved));saved.phase=phase;saved.fileMask=1;saved.binding=&binding;saved.dacl[0]=(void*)1;saved.attributes[0]=32;
+    loadOk=journalExists=1;unknownBackup=unknownBinding=missingBackup=failRestore=failReconcile=failCleanup=failPublish=0;
+    mutations=stops=starts=restores=rollbacks=reconciles=deleted=phaseWritten=0;
+}
+int main(void){
+    reset(1);journalExists=0;assert(ServiceDeploy_RecoverInterruptedTransaction()&&!mutations&&!deleted);
+    reset(1);journalExists=0;unknownBackup=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&!mutations&&!deleted);
+    reset(1);loadOk=0;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!mutations&&!deleted);
+    reset(1);unknownBinding=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!mutations&&!deleted);
+    reset(1);failRestore=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!deleted&&!starts&&!rollbacks);
+    reset(1);assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&starts==1&&restores==2&&!rollbacks&&phaseWritten==4);
+    reset(2);missingBackup=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!mutations&&!deleted);
+    reset(2);failRestore=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&rollbacks==1&&!deleted&&!starts);
+    reset(2);assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&rollbacks==1&&starts==1&&phaseWritten==4);
+    reset(2);failPublish=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&rollbacks==1&&!deleted);
+    reset(3);failReconcile=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&reconciles==1&&!rollbacks&&!mutations&&!deleted);
+    reset(3);assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&reconciles==1&&!mutations);
+    reset(4);failCleanup=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!mutations&&!reconciles);
+    reset(4);assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&!mutations&&!reconciles);
+    puts("Service crash recovery: 14 preservation, retry, rollback and cleanup cases passed");return 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix='meshagent-crash-recovery-') as directory:
+    c_path = Path(directory) / 'crash.c'
+    executable = Path(directory) / 'crash'
+    c_path.write_text(recovery_prelude + '\n' + extract('ServiceDeploy_DeleteUpdateTransactionArtifacts') + '\n' +
+                      extract('ServiceDeploy_ResolveUpdateTransaction') + '\n' + extract('ServiceDeploy_RecoverInterruptedTransaction') + '\n' + recovery_cases)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wno-unused-value', str(c_path), '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)

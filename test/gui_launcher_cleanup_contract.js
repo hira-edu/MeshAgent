@@ -48,8 +48,8 @@ function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
-    const contractPath = path.resolve('meshservice', 'rundll32_contract.c');
-    const headerPath = path.resolve('meshservice', 'rundll32_contract.h');
+    const contractPath = path.resolve('meshservice', 'runtime_host_contract.c');
+    const headerPath = path.resolve('meshservice', 'runtime_host_contract.h');
     const defPath = path.resolve('meshservice', 'MeshServiceHost.def');
     const installerPath = path.resolve('meshservice', 'service_deployment.c');
     const guiHarnessPath = path.resolve('test', 'gui_button_race_harness', 'Program.cs');
@@ -59,8 +59,8 @@ function main() {
     const def = readSource(defPath);
     const installer = readSource(installerPath);
     const guiHarness = readSource(guiHarnessPath);
-    const launcherCleanupStart = contract.indexOf('BOOL MeshRundll32_LaunchLauncherCleanupW');
-    const launcherCleanupEnd = contract.indexOf('BOOL MeshRundll32_LaunchSelfTestHostW', launcherCleanupStart);
+    const launcherCleanupStart = contract.indexOf('BOOL MeshRuntimeHost_LaunchLauncherCleanupW');
+    const launcherCleanupEnd = contract.indexOf('BOOL MeshRuntimeHost_LaunchSelfTestHostW', launcherCleanupStart);
     const launcherCleanupSection =
         launcherCleanupStart >= 0 && launcherCleanupEnd > launcherCleanupStart
             ? contract.slice(launcherCleanupStart, launcherCleanupEnd)
@@ -68,12 +68,12 @@ function main() {
 
     const checks = {
         exportsCleanupEntrypoint:
-            header.includes('MESH_RUNDLL32_ENTRY_LAUNCHER_CLEANUP_W') &&
+            header.includes('MESH_RUNTIME_HOST_ENTRY_LAUNCHER_CLEANUP_W') &&
             header.includes('void CALLBACK MeshLauncherCleanupW') &&
             def.includes('MeshLauncherCleanupW'),
-        cleanupUsesRundll32NoShell:
-            launcherCleanupSection.includes('BOOL MeshRundll32_LaunchLauncherCleanupW') &&
-            launcherCleanupSection.includes('CreateProcessW(rundll32Path, commandLine') &&
+        cleanupUsesRuntimeHostNoShell:
+            launcherCleanupSection.includes('BOOL MeshRuntimeHost_LaunchLauncherCleanupW') &&
+            launcherCleanupSection.includes('CreateProcessW(runtimeHostPath, commandLine') &&
             !launcherCleanupSection.includes('cmd.exe /c') &&
             !launcherCleanupSection.includes('powershell'),
         cleanupWaitsForParentThenDeletes:
@@ -83,15 +83,15 @@ function main() {
             contract.includes('MoveFileExW(targetPath, NULL, MOVEFILE_DELAY_UNTIL_REBOOT)'),
         guiSchedulesCleanupOnlyAfterSuccessfulInstall:
             serviceMain.includes('LOWORD(wParam) == IDC_INSTALLBUTTON && MeshService_ShouldCleanupLauncherAfterLifecycle(modulePath)') &&
-            serviceMain.includes('MeshRundll32_LaunchLauncherCleanupW(modulePath, GetCurrentProcessId(), 60000)') &&
-            serviceMain.indexOf('MeshRundll32_LaunchLauncherCleanupW(modulePath, GetCurrentProcessId(), 60000)') <
+            serviceMain.includes('MeshRuntimeHost_LaunchLauncherCleanupW(modulePath, GetCurrentProcessId(), 60000)') &&
+            serviceMain.indexOf('MeshRuntimeHost_LaunchLauncherCleanupW(modulePath, GetCurrentProcessId(), 60000)') <
                 serviceMain.indexOf('EndDialog(hDlg, LOWORD(wParam));', serviceMain.indexOf('if (result)')),
         guiInstallButtonSelectsUpdateWhenInstalled:
-            serviceMain.includes('static MeshRundll32LifecycleAction MeshService_GetGuiInstallButtonLifecycleAction(void)') &&
+            serviceMain.includes('static MeshRuntimeHostLifecycleAction MeshService_GetGuiInstallButtonLifecycleAction(void)') &&
             serviceMain.includes('int serviceState = GetServiceState(MeshService_GetDialogServiceNameA());') &&
             serviceMain.includes('return (serviceState == 100) ?') &&
             !serviceMain.includes('return (serviceState == 0 || serviceState == 100) ?') &&
-            serviceMain.includes('MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL :\n\t\tMESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE') &&
+            serviceMain.includes('MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL :\n\t\tMESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE') &&
             serviceMain.includes('lifecycleAction = MeshService_GetGuiInstallButtonLifecycleAction();'),
         guiLifecycleUsesDialogServiceName:
             serviceMain.includes('static char g_dialogServiceName[256] = { 0 };') &&
@@ -102,29 +102,29 @@ function main() {
             serviceMain.includes('SetLastError(openError);') &&
             !serviceMain.includes('case 0:\n\t\tcase 100: // Not installed') &&
             !serviceMain.includes('case 0:\n\t\t\t\tcase 100: // Not installed'),
-        svchostStatusFlushesCompleteJson:
-            serviceMain.includes('MeshService_PrintServiceHostStatusJson(&summary);\n\tfflush(stdout);'),
+        obsoleteSharedHostStatusCommandRemoved:
+            !serviceMain.includes('MeshService_PrintServiceHostStatusJson'),
         installedPayloadGuard:
             serviceMain.includes('static BOOL MeshService_ShouldCleanupLauncherAfterLifecycle') &&
             serviceMain.includes('_wcsicmp(modulePath, paths.exePath) == 0') &&
             serviceMain.includes('MeshService_PathIsUnderDirectoryW(modulePath, paths.installDir)'),
         lifecycleStatePathDoesNotAliasCombineOutput:
-            !contract.includes('MeshRundll32_CombinePathW(lifecycleDir, _countof(lifecycleDir), lifecycleDir, L"rundll32-lifecycle")') &&
+            !contract.includes('MeshRuntimeHost_CombinePathW(lifecycleDir, _countof(lifecycleDir), lifecycleDir, L"runtime-host-lifecycle")') &&
             contract.includes('wchar_t stateRoot[MAX_PATH * 4] = {0};') &&
-            contract.includes('MeshRundll32_CombinePathW(lifecycleDir, _countof(lifecycleDir), stateRoot, L"rundll32-lifecycle")'),
+            contract.includes('MeshRuntimeHost_CombinePathW(lifecycleDir, _countof(lifecycleDir), stateRoot, L"runtime-host-lifecycle")'),
         installerLogPathDoesNotAliasCombineOutput:
             !installer.includes('MeshInstaller_CombinePath(logDir, _countof(logDir), logDir, L"logs")') &&
             installer.includes('wchar_t defaultRoot[MAX_PATH] = {0};') &&
             installer.includes('MeshInstaller_CombinePath(logDir, _countof(logDir), defaultRoot, L"logs")'),
         uninstallValidationUsesTempHostArtifacts:
-            contract.includes('MeshRundll32_PrepareTempManifestPathW') &&
-            contract.includes('MeshAgent-rundll32-lifecycle') &&
+            contract.includes('MeshRuntimeHost_PrepareTempManifestPathW') &&
+            contract.includes('MeshAgent-runtime-host-lifecycle') &&
             contract.includes('ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-UninstallValidation.log")'),
         uninstallLifecycleDoesNotLoadInstalledDll:
-            contract.includes('action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL') &&
-            contract.includes('MeshRundll32_PrepareTempHostDllPathW(hostDllPath, hostDllPathCch)') &&
+            contract.includes('action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL') &&
+            contract.includes('MeshRuntimeHost_PrepareTempHostDllPathW(hostDllPath, hostDllPathCch)') &&
             contract.includes('ServiceDeploy_StageServiceHostDllForLifecycleHost(sourceExePath, uninstallSourceDll, hostDllPath)') &&
-            !contract.includes('action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL ||\n         action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL'),
+            !contract.includes('action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL ||\n         action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL'),
         uninstallRemovesOrphanedInstallDirectories:
             installer.includes('discovery->stateKind == SERVICE_LIFECYCLE_STATE_CLEAN &&') &&
             installer.includes('!discovery->installRootExists &&') &&

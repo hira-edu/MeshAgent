@@ -5,17 +5,17 @@ const path = require('path');
 
 const {
     resolveBridgeDllPath,
-    resolveRundll32Path,
+    resolveRuntimeHostPath,
     runSystemScheduledTask
 } = require('./lib/kvm_runtime_helpers');
 
 const exePath = path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
 const dllPath = resolveBridgeDllPath(exePath);
-const rundll32Path = resolveRundll32Path();
+const runtimeHostPath = resolveRuntimeHostPath();
 
 console.log('EXE=' + exePath);
 console.log('DLL=' + dllPath);
-console.log('RUNDLL32=' + rundll32Path);
+console.log('RUNTIME_HOST=' + runtimeHostPath);
 
 // Write the collector as a standalone script
 const collectorPath = path.join(os.tmpdir(), `kvm_system_trace_collector_${process.pid}.js`);
@@ -28,7 +28,7 @@ const path = require('path');
 const cp = require('child_process');
 const net = require('net');
 
-const rundll32 = process.argv[2];
+const runtimeHost = process.argv[2];
 const dll = process.argv[3];
 const reportPath = process.argv[4];
 
@@ -114,7 +114,7 @@ server.listen(pipeName, () => {
         KVM_TRACE_STARTUP: '1',
         KVM_TRACE_LOOP: '1'
     });
-    child = cp.spawn(rundll32, [dll + ',KvmSessionBridgeW', pipeName], {
+    child = cp.spawn(runtimeHost, [dll + ',KvmSessionBridgeW', pipeName], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         env: env
@@ -144,7 +144,7 @@ function sleep(ms) {
 }
 
 async function main() {
-    const systemTask = await runSystemScheduledTask(process.execPath, [collectorPath, rundll32Path, dllPath, reportPath], {
+    const systemTask = await runSystemScheduledTask(process.execPath, [collectorPath, runtimeHostPath, dllPath, reportPath], {
         prefix: `meshagent_kvm_system_trace_${process.pid}_${Date.now()}`,
         reportPath,
         timeoutMs: 30000

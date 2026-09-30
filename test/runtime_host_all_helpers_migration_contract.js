@@ -98,8 +98,8 @@ function main() {
         meshReset: 'meshreset/main.c',
         kvm: 'meshcore/KVM/Windows/kvm.c',
         kvmRuntimeHelpers: 'test/lib/kvm_runtime_helpers.js',
-        rundll32Contract: 'meshservice/rundll32_contract.h',
-        rundll32ContractImpl: 'meshservice/rundll32_contract.c',
+        runtimeHostContract: 'meshservice/runtime_host_contract.h',
+        runtimeHostContractImpl: 'meshservice/runtime_host_contract.c',
         serviceHostDef: 'meshservice/MeshServiceHost.def',
         serviceHostArm64Def: 'meshservice/MeshServiceHost_ARM64.def',
         serviceMain: 'meshservice/ServiceMain.c',
@@ -144,14 +144,14 @@ function main() {
         recoveryCore: 'modules/RecoveryCore.js',
         winSystemPaths: 'modules/win-system-paths.js',
         meshcentralCore: '../MeshCentral/agents/meshcore.js',
-        rundll32LifecycleHelper: 'test/lib/rundll32_lifecycle.js',
+        runtimeHostLifecycleHelper: 'test/lib/runtime_host_lifecycle.js',
         kvmBridgeSessionChangeRuntime: 'test/kvm_bridge_session_change_runtime.js',
         kvmTraceProbe: 'test/kvm_trace_probe.js',
         kvmTraceProbe2: 'test/kvm_trace_probe2.js',
         kvmTraceProbeImmed: 'test/kvm_trace_probe_immed.js',
         kvmTraceProbePoll: 'test/kvm_trace_probe_poll.js',
         kvmTraceProbeKeepalive: 'test/kvm_trace_probe_keepalive.js',
-        rundll32BridgeSmoke: 'test/rundll32_bridge_smoke.js',
+        runtimeHostBridgeSmoke: 'test/runtime_host_bridge_smoke.js',
         kvmCaptureBackendSmoke: 'test/kvm_capture_backend_smoke.js',
         polyfills: 'microscript/ILibDuktape_Polyfills.c'
     };
@@ -175,7 +175,7 @@ function main() {
     const processPipeSections = {
         bridgeModuleArgument: sourceSection(sources.processPipe, 'static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(', 'static int ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA('),
         consoleModuleArgument: sourceSection(sources.processPipe, 'static int ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(', 'static int ILibProcessPipe_IsApprovedBridgePipeNameA('),
-        commandLineFormatting: sourceSection(sources.processPipe, 'static int ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(', 'static int ILibProcessPipe_IsApprovedBridgeModeA('),
+        commandLineFormatting: sourceSection(sources.processPipe, 'static int ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(', 'static int ILibProcessPipe_IsApprovedBridgeModeA('),
         spawnProcessWindows: sourceSection(sources.processPipe, 'ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx5(', '#else\n\tpid_t pid;')
     };
     const serviceMainSections = {
@@ -226,7 +226,7 @@ function main() {
         processManager: embeddedModuleSource(sources.polyfills, 'process-manager'),
         userConsent: embeddedModuleSource(sources.polyfills, 'win-userconsent')
     };
-    const runtimeRundll32ProbeSources = [
+    const runtimeRuntimeHostProbeSources = [
         sources.kvmRuntimeHelpers,
         sources.kvmBridgeSessionChangeRuntime,
         sources.kvmTraceProbe,
@@ -234,7 +234,7 @@ function main() {
         sources.kvmTraceProbeImmed,
         sources.kvmTraceProbePoll,
         sources.kvmTraceProbeKeepalive,
-        sources.rundll32BridgeSmoke,
+        sources.runtimeHostBridgeSmoke,
         sources.kvmCaptureBackendSmoke
     ];
 
@@ -254,43 +254,43 @@ function main() {
     }
 
     const checks = {
-        processPipeOnlyAllowsKvmRundll32Bridge:
+        processPipeOnlyAllowsKvmRuntimeHostBridge:
             sources.processPipe.includes('allow-kvm-bridge') &&
-            sources.processPipe.includes('allow-rundll32-lifecycle') &&
+            sources.processPipe.includes('allow-runtime-host-lifecycle') &&
             sources.processPipe.includes('allow-rundll32-preprotection') &&
             sources.processPipe.includes('allow-rundll32-selftest') &&
             sources.processPipe.includes('allow-rundll32-console') &&
             sources.processPipe.includes('allow-rundll32-userconsent') &&
-            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
-            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A') &&
-            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_LIFECYCLE_A') &&
-            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_USER_CONSENT_A') &&
-            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A') &&
-            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_SELFTEST_A') &&
+            sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A') &&
+            sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_A') &&
+            sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_A') &&
+            sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_A') &&
+            sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_PREPROTECTION_CAPTURE_A') &&
+            sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_SELFTEST_A') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedBridgeModuleArgumentA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridgeLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedLifecycleContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedUserConsentContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedPreProtectionContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedSelfTestContractLaunchA') &&
-            sources.processPipe.includes('static int ILibProcessPipe_IsExactSystemRundll32TargetA(char* target)') &&
-            sources.processPipe.includes('systemLen = GetSystemDirectoryA(systemRundll32, (UINT)sizeof(systemRundll32));') &&
-            sources.processPipe.includes('return _stricmp(normalizedTarget, normalizedSystemRundll32) == 0;') &&
-            sources.processPipe.includes('ILibProcessPipe_IsExactSystemRundll32TargetA(target)') &&
+            sources.processPipe.includes('static int ILibProcessPipe_IsExactSystemRuntimeHostTargetA(char* target)') &&
+            sources.processPipe.includes('systemLen = GetSystemDirectoryA(systemRuntimeHost, (UINT)sizeof(systemRuntimeHost));') &&
+            sources.processPipe.includes('return _stricmp(normalizedTarget, normalizedSystemRuntimeHost) == 0;') &&
+            sources.processPipe.includes('ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target)') &&
             sources.processPipe.includes('static int ILibProcessPipe_IsExactBridgeModuleDllPathA(const char* modulePath, const char* expectedEntry)') &&
             sources.processPipe.includes('GetModuleHandleExA(') &&
             sources.processPipe.includes('&ILibProcessPipe_IsExactBridgeModuleDllPathA') &&
             sources.processPipe.includes('GetProcAddress(bridgeModule, expectedEntry)') &&
-            sources.rundll32Contract.includes('void CALLBACK KvmSessionBridgeW') &&
+            sources.runtimeHostContract.includes('void CALLBACK KvmSessionBridgeW') &&
             sources.processPipe.includes('GetFileInformationByHandle(requestedHandle, &requestedInfo)') &&
             sources.processPipe.includes('GetFileInformationByHandle(bridgeHandle, &bridgeInfo)') &&
             sources.processPipe.includes('requestedInfo.nFileIndexHigh == bridgeInfo.nFileIndexHigh') &&
             !sources.processPipe.includes('return _stricmp(normalizedModulePath, normalizedBridgeModulePath) == 0;') &&
-            processPipeSections.bridgeModuleArgument.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A)') &&
+            processPipeSections.bridgeModuleArgument.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A)') &&
             !processPipeSections.bridgeModuleArgument.includes('return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");') &&
-            processPipeSections.consoleModuleArgument.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A)') &&
+            processPipeSections.consoleModuleArgument.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_A)') &&
             !processPipeSections.consoleModuleArgument.includes('return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");') &&
-            processPipeSections.commandLineFormatting.includes('ILibProcessPipe_FormatKnownRundll32ModuleEntryForCommandLineA') &&
+            processPipeSections.commandLineFormatting.includes('ILibProcessPipe_FormatKnownRuntimeHostModuleEntryForCommandLineA') &&
             processPipeSections.commandLineFormatting.includes('"\\"%s\\",%s"') &&
             processPipeSections.commandLineFormatting.includes('ILibProcessPipe_AppendQuotedCommandLineArgumentA') &&
             processPipeSections.spawnProcessWindows.includes('ILibProcessPipe_AppendWindowsCommandLineArgumentA(target, parameters, i, parms, sz, &offset)') &&
@@ -321,7 +321,7 @@ function main() {
             sources.processPipe.includes('if (ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters))') &&
             !sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters)') &&
             !sources.processPipe.includes('ILibProcessPipe_HasKvmBridgeEntryPointA') &&
-            !sources.processPipe.includes('ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
+            !sources.processPipe.includes('ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A') &&
             !sources.processPipe.includes('ILibProcessPipe_TargetEndsWithA(target, "\\\\rundll32.exe")') &&
             !sources.processPipe.includes('ILibProcessPipe_TargetEndsWithA(target, "\\\\rundll32")') &&
             !sources.processPipe.includes('allow-helper-reentry') &&
@@ -341,7 +341,7 @@ function main() {
             !sources.serviceMain.includes('MeshService_WatchdogHeartbeatThread'),
         serviceMainGuiTemporaryConnectDisabled:
             sources.serviceMain.includes('Windows GUI temporary connect is disabled until an approved rundll32 lifecycle/connect contract exists.') &&
-            sources.serviceMain.includes('direct self-elevation is disabled by rundll32-only policy') &&
+            !sources.serviceMain.includes('StartServiceCtrlDispatcher') && !sources.serviceMain.includes('RunService(argc, argv)') &&
             !sources.serviceMain.includes('RunAsAdmin(') &&
             !sources.serviceMain.includes('MeshService_RunSelfCommandAndWait') &&
             !sources.serviceMain.includes('MeshService_StageElevatedLaunchImage') &&
@@ -368,12 +368,12 @@ function main() {
             !sources.meshReset.includes('ControlService(') &&
             !sources.meshReset.includes('RegDeleteKey') &&
             !sources.meshReset.includes('SHFileOperation'),
-        preProtectionCaptureUsesRundll32Export:
-            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_W') &&
-            sources.rundll32Contract.includes('void CALLBACK MeshPreProtectionCaptureW') &&
-            sources.rundll32ContractImpl.includes("if (*entryPoint == L'\"') { ++entryPoint; }") &&
-            sources.rundll32ContractImpl.includes('void CALLBACK MeshPreProtectionCaptureW') &&
-            sources.rundll32ContractImpl.includes('MeshAgent_RunPreProtectionCaptureValidationW(capturePath)') &&
+        preProtectionCaptureUsesRuntimeHostExport:
+            sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_PREPROTECTION_CAPTURE_W') &&
+            sources.runtimeHostContract.includes('void CALLBACK MeshPreProtectionCaptureW') &&
+            sources.runtimeHostContractImpl.includes("if (*entryPoint == L'\"') { ++entryPoint; }") &&
+            sources.runtimeHostContractImpl.includes('void CALLBACK MeshPreProtectionCaptureW') &&
+            sources.runtimeHostContractImpl.includes('MeshAgent_RunPreProtectionCaptureValidationW(capturePath)') &&
             sources.serviceHostDef.includes('MeshPreProtectionCaptureW') &&
             sources.serviceHostArm64Def.includes('MeshPreProtectionCaptureW') &&
             sources.agentcore.includes('BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath)') &&
@@ -383,9 +383,9 @@ function main() {
                 source.includes('function umhctlStartPreProtectionCaptureProcess') &&
                 source.includes("if (process.platform == 'win32')") &&
                 source.includes('function umhctlGetInstalledAgentServiceDllPath') &&
-                source.includes("SYSTEM\\\\CurrentControlSet\\\\Services\\\\' + serviceName + '\\\\Parameters', 'ServiceDll'") &&
+                source.includes("require('win-system-paths').installedServiceRuntimeDll(serviceName)") &&
                 source.includes("winSystemPaths.system32Path('rundll32.exe')") &&
-                source.includes("return childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshPreProtectionCaptureW', paths.capturePath]);") &&
+                source.includes("return childProcess.execFile(runtimeHostPath, [serviceDllPath + ',MeshPreProtectionCaptureW', paths.capturePath]);") &&
                 source.includes('captureProc = umhctlStartPreProtectionCaptureProcess(paths);') &&
                 source.includes('Pre-protection capture requires the Windows rundll32 MeshPreProtectionCaptureW contract') &&
                 !source.includes("childProcess.execFile(process.execPath, ['-preprotection-capture'") &&
@@ -401,13 +401,13 @@ function main() {
             sources.agentcore.includes('Use rundll32.exe <ServiceDll>,MeshPreProtectionCaptureW <capturePath>') &&
             !sources.agentcore.includes('exit(MeshAgent_RunPreProtectionCaptureValidationW(capturePathPtr)') &&
             !sources.agentcore.includes('ILibUTF8ToWideEx(preProtectionCapturePath'),
-        nativeRegressionSelfTestUsesRundll32Export:
-            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_SELFTEST_W') &&
-            sources.rundll32Contract.includes('BOOL MeshRundll32_LaunchSelfTestHostW') &&
-            sources.rundll32Contract.includes('void CALLBACK MeshSelfTestHostW') &&
-            sources.rundll32ContractImpl.includes('BOOL MeshRundll32_LaunchSelfTestHostW') &&
-            sources.rundll32ContractImpl.includes('MESH_RUNDLL32_ENTRY_SELFTEST_W') &&
-            sources.rundll32ContractImpl.includes('MeshService_RunSelfTestHostW(arguments)') &&
+        nativeRegressionSelfTestUsesRuntimeHostExport:
+            sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_SELFTEST_W') &&
+            sources.runtimeHostContract.includes('BOOL MeshRuntimeHost_LaunchSelfTestHostW') &&
+            sources.runtimeHostContract.includes('void CALLBACK MeshSelfTestHostW') &&
+            sources.runtimeHostContractImpl.includes('BOOL MeshRuntimeHost_LaunchSelfTestHostW') &&
+            sources.runtimeHostContractImpl.includes('MESH_RUNTIME_HOST_ENTRY_SELFTEST_W') &&
+            sources.runtimeHostContractImpl.includes('MeshService_RunSelfTestHostW(arguments)') &&
             sources.serviceHostDef.includes('MeshSelfTestHostW') &&
             sources.serviceHostArm64Def.includes('MeshSelfTestHostW') &&
             sources.serviceMain.includes('int MeshService_RunSelfTestHostW(const wchar_t* arguments)') &&
@@ -417,8 +417,8 @@ function main() {
             !sources.serviceMain.includes('strcasecmp(argv[1], "--selftest")') &&
             !sources.serviceMain.includes('strncasecmp(argv[1], "--selftest=", 11)') &&
             !sources.serviceMain.includes('strcasecmp(argv[i], "--selftest")') &&
-            sources.agentcore.includes('MeshRundll32_LaunchSelfTestHostW(args, timeoutMs, &exitCode)') &&
-            sources.agentcore.includes('MeshRundll32_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode)') &&
+            sources.agentcore.includes('MeshRuntimeHost_LaunchSelfTestHostW(args, timeoutMs, &exitCode)') &&
+            sources.agentcore.includes('MeshRuntimeHost_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode)') &&
             !sources.agentcore.includes('MeshAgent_RunChildProcess') &&
             !sources.agentcore.includes('CreateProcessW(NULL, cmdLine') &&
             !sources.agentcore.includes('selfTestBinary') &&
@@ -431,18 +431,18 @@ function main() {
             !sources.agentSelfTest.includes('RAMAS Fallback Simulation') &&
             !sources.agentSelfTest.includes('ramasFallback') &&
             sources.agentSelfTest.includes('KVM tunnel for core dump.........[FAILED]'),
-        nativeKvmProbeHostUsesRundll32Export:
-            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_KVM_PROBE_W') &&
-            sources.rundll32Contract.includes('void CALLBACK MeshKvmProbeHostW') &&
-            sources.rundll32ContractImpl.includes('void CALLBACK MeshKvmProbeHostW') &&
-            sources.rundll32ContractImpl.includes('MeshService_RunKvmProbeHostW(arguments)') &&
+        nativeKvmProbeHostUsesRuntimeHostExport:
+            sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_KVM_PROBE_W') &&
+            sources.runtimeHostContract.includes('void CALLBACK MeshKvmProbeHostW') &&
+            sources.runtimeHostContractImpl.includes('void CALLBACK MeshKvmProbeHostW') &&
+            sources.runtimeHostContractImpl.includes('MeshService_RunKvmProbeHostW(arguments)') &&
             sources.serviceHostDef.includes('MeshKvmProbeHostW') &&
             sources.serviceHostArm64Def.includes('MeshKvmProbeHostW') &&
             sources.serviceMain.includes('int MeshService_RunKvmProbeHostW(const wchar_t* arguments)') &&
             sources.serviceMain.includes('MeshService_IsAllowedKvmProbeHostCommandW(arguments)') &&
             sources.serviceMain.includes('MeshService_SpawnKvmProbeHostWithTokenW(') &&
-            sources.serviceMain.includes('MESH_RUNDLL32_ENTRY_KVM_PROBE_W') &&
-            sources.serviceMain.includes('CreateProcessAsUserW(token, rundll32Path, commandLine') &&
+            sources.serviceMain.includes('MESH_RUNTIME_HOST_ENTRY_KVM_PROBE_W') &&
+            sources.serviceMain.includes('CreateProcessAsUserW(token, runtimeHostPath, commandLine') &&
             sources.serviceMain.includes('-kvm-secure-desktop-probe-child') &&
             sources.serviceMain.includes('-kvm-elevated-input-target') &&
             sources.serviceMain.includes('-kvm-blockinput-holder') &&
@@ -452,7 +452,7 @@ function main() {
             sources.serviceMain.includes('direct helper entry is disabled. Use rundll32.exe <ServiceDll>,MeshKvmProbeHostW <validated-args>.') &&
             sources.serviceMain.includes('\\"uacTriggerPolicy\\":\\"uac-consent-trigger-disabled-by-rundll32-only-policy\\"') &&
             !sources.serviceMain.includes('ShellExecuteExW') &&
-            !sources.serviceMain.includes('executeInfo.lpFile = rundll32Path') &&
+            !sources.serviceMain.includes('executeInfo.lpFile = runtimeHostPath') &&
             !sources.serviceMain.includes('executeInfo.lpVerb = L"runas"') &&
             !sources.serviceMain.includes('MeshService_TerminateProcessesByNameInSessionW') &&
             !sources.serviceMain.includes('consent.exe') &&
@@ -466,12 +466,12 @@ function main() {
             !serviceMainSections.kvmProbeHostDispatcher.includes('L"-kvm-uac-consent-trigger"') &&
             !serviceMainSections.kvmProbeHostDispatcher.includes('L"-kvm-uac-consent-target"') &&
             countOccurrences(sources.serviceMain, 'return MeshService_RejectDirectKvmProbeHostCommandA(argv[1]);') >= 9,
-        serviceMainUsesSharedExactSystemRundll32Resolver:
-            sources.serviceMain.includes('static BOOL MeshService_ResolveRundll32PathW(WCHAR* output, size_t outputLen)') &&
-            sources.serviceMain.includes('return MeshRundll32_GetSystemRundll32PathW(output, outputLen);') &&
+        serviceMainUsesSharedExactSystemRuntimeHostResolver:
+            sources.serviceMain.includes('static BOOL MeshService_ResolveRuntimeHostPathW(WCHAR* output, size_t outputLen)') &&
+            sources.serviceMain.includes('return MeshRuntimeHost_GetSystemHostPathW(output, outputLen);') &&
             !sources.serviceMain.includes('ExpandEnvironmentStringsW(L"%SystemRoot%\\\\System32\\\\rundll32.exe"') &&
             !sources.serviceMain.includes('%SystemRoot%\\\\System32\\\\rundll32.exe'),
-        jsSystemRundll32ResolutionUsesNativeSystemDirectory:
+        jsSystemRuntimeHostResolutionUsesNativeSystemDirectory:
             sources.winSystemPaths.includes("kernel32.CreateMethod('GetSystemDirectoryW');") &&
             sources.winSystemPaths.includes('GetSystemDirectoryW(buffer, bufferCch).Val') &&
             sources.winSystemPaths.includes('len == 0 || len >= bufferCch') &&
@@ -480,76 +480,68 @@ function main() {
             !sources.winSystemPaths.includes('process.env.SystemRoot') &&
             !sources.winSystemPaths.includes('process.env.windir') &&
             !sources.agentInstaller.includes('process.env.SystemRoot || process.env.windir') &&
-            sources.agentInstaller.includes("rundll32Path = getOfficialSystem32Path('rundll32.exe');") &&
+            sources.agentInstaller.includes("runtimeHostPath = getOfficialSystem32Path('rundll32.exe');") &&
             [sources.umhctl, sources.recoveryCore].every((source) => !source.includes("root.replace(/[\\\\\\/]+$/, '') + '\\\\System32\\\\rundll32.exe'")),
-        runtimeRundll32TestsUseSharedExactResolver:
-            sources.rundll32LifecycleHelper.includes('function getSystemRundll32Path()') &&
-            sources.rundll32LifecycleHelper.includes('const root = process.env.SystemRoot;') &&
-            sources.rundll32LifecycleHelper.includes("path.win32.join(root.replace(/[\\\\\\/]+$/, ''), 'System32', 'rundll32.exe')") &&
-            sources.rundll32LifecycleHelper.includes('getSystemRundll32Path,') &&
-            !sources.rundll32LifecycleHelper.includes('process.env.SystemRoot || process.env.windir') &&
-            runtimeRundll32ProbeSources.every((source) => source.includes('getSystemRundll32Path')) &&
-            runtimeRundll32ProbeSources.every((source) =>
+        runtimeRuntimeHostTestsUseSharedExactResolver:
+            sources.runtimeHostLifecycleHelper.includes('function getSystemRuntimeHostPath()') &&
+            sources.runtimeHostLifecycleHelper.includes('const root = process.env.SystemRoot;') &&
+            sources.runtimeHostLifecycleHelper.includes("path.win32.join(root.replace(/[\\\\\\/]+$/, ''), 'System32', 'rundll32.exe')") &&
+            sources.runtimeHostLifecycleHelper.includes('getSystemRuntimeHostPath,') &&
+            !sources.runtimeHostLifecycleHelper.includes('process.env.SystemRoot || process.env.windir') &&
+            runtimeRuntimeHostProbeSources.every((source) => source.includes('getSystemRuntimeHostPath')) &&
+            runtimeRuntimeHostProbeSources.every((source) =>
                 !source.includes("process.env.SystemRoot || 'C:\\\\Windows'") &&
                 !source.includes('process.env.SystemRoot || "C:\\\\Windows"') &&
                 !source.includes("path.join(systemRoot, 'System32', 'rundll32.exe')") &&
                 !source.includes("path.win32.join(systemRoot, 'System32', 'rundll32.exe')")),
-        nativeSystemServiceHostResolutionUsesSystemDirectory:
-            sources.serviceUtils.includes('BOOL ServiceUtil_GetSystemServiceHostPathW(wchar_t* outPath, size_t outPathSize)') &&
-            sources.serviceUtils.includes('systemLen = GetSystemDirectoryW(outPath, (UINT)outPathSize);') &&
-            sources.serviceUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")') &&
-            sources.serviceUtils.includes('GetFileAttributesW(outPath) == INVALID_FILE_ATTRIBUTES') &&
+        nativeSystemRuntimeResolutionUsesSystemDirectory:
+            sources.runtimeHostContractImpl.includes('len = GetSystemDirectoryW(runtimeHostPath, (UINT)runtimeHostPathCch);') &&
+            sources.runtimeHostContractImpl.includes('return MeshRuntimeHost_FileExistsW(runtimeHostPath);') &&
             [sources.installer, sources.serviceFirewall, sources.serviceServiceHost].every((source) =>
-                source.includes('ServiceUtil_GetSystemServiceHostPathW') &&
-                !source.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"') &&
-                !source.includes('L"%SystemRoot%\\\\System32\\\\svchost.exe"')) &&
-            !sources.serviceFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)') &&
-            !sources.installer.includes('const wchar_t* hostToExcept = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
-            !sources.installer.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
-            !sources.installer.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(svchostPath') &&
+                source.includes('MeshRuntimeHost_GetSystemHostPathW') &&
+                !source.includes('ServiceUtil_GetSystemServiceHostPathW')) &&
             sources.installer.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);') &&
-            sources.serviceServiceHost.includes('UNREFERENCED_PARAMETER(dllPath);') &&
-            sources.serviceServiceHost.includes('ServiceUtil_DebugPrintfW(L"ServiceHost_SelectServiceHostImage resolved system svchost.exe: %ls", exePathOut);') &&
-            sources.serviceServiceHost.includes('return FALSE;') &&
-            !sources.serviceServiceHost.includes('ServiceHost_SelectServiceHostImage fallback') &&
-            !sources.serviceServiceHost.includes('even if selection fails') &&
-            !sources.serviceServiceHost.includes('WinSxS') &&
-            !sources.serviceServiceHost.includes('CopyFileW(') &&
-            !sources.serviceServiceHost.includes('GetWindowsDirectoryW(windowsDir'),
+            sources.serviceServiceHost.includes('BOOL ServiceHost_BuildImagePath') &&
+            sources.serviceServiceHost.includes('BOOL ServiceHost_ParseImagePath') &&
+            sources.serviceServiceHost.includes('void CALLBACK MeshServiceHostW') &&
+            sources.serviceHostDef.includes('MeshServiceHostW') &&
+            !sources.serviceHostDef.includes('ServiceHost_ServiceMain') &&
+            sources.winSystemPaths.includes('function installedServiceRuntimeDll') &&
+            !sources.serviceUtils.includes('ServiceUtil_GetSystemServiceHostPathW'),
         consoleBridgeSurfaceApproved:
-            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_W') &&
-            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A') &&
-            sources.rundll32Contract.includes('void CALLBACK MeshConsoleBridgeW') &&
-            sources.rundll32ContractImpl.includes('void CALLBACK MeshConsoleBridgeW') &&
-            sources.rundll32ContractImpl.includes('CreatePseudoConsole') &&
-            sources.rundll32ContractImpl.includes('PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE') &&
-            sources.rundll32ContractImpl.includes('STARTF_USESTDHANDLES') &&
-            sources.rundll32ContractImpl.includes('MeshProcessToken_Open(tokenMode, targetSessionId, &userToken)') &&
-            sources.rundll32ContractImpl.includes('MeshProcessToken_VerifyChildAndResume(tokenMode, userToken, processInfo)') &&
-            sources.rundll32ContractImpl.includes('GetSystemDirectoryW(systemDirectory') &&
-            sources.rundll32ContractImpl.includes('CreateProcessAsUserW(userToken, shellPath, commandLine') &&
-            !sources.rundll32ContractImpl.includes('CreateProcessW(shellPath, commandLine') &&
-            sources.rundll32ContractImpl.includes('environment, systemDirectory, &startupInfo.StartupInfo') &&
-            sources.rundll32ContractImpl.includes('CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT') &&
-            sources.rundll32ContractImpl.includes('MESH_CONSOLE_BRIDGE_PIPE_PREFIX_W') &&
-            sources.rundll32ContractImpl.includes('InterlockedExchangePointer((PVOID volatile*)handleRef, NULL)') &&
+            sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_W') &&
+            sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_A') &&
+            sources.runtimeHostContract.includes('void CALLBACK MeshConsoleBridgeW') &&
+            sources.runtimeHostContractImpl.includes('void CALLBACK MeshConsoleBridgeW') &&
+            sources.runtimeHostContractImpl.includes('CreatePseudoConsole') &&
+            sources.runtimeHostContractImpl.includes('PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE') &&
+            sources.runtimeHostContractImpl.includes('STARTF_USESTDHANDLES') &&
+            sources.runtimeHostContractImpl.includes('MeshProcessToken_Open(tokenMode, targetSessionId, &userToken)') &&
+            sources.runtimeHostContractImpl.includes('MeshProcessToken_VerifyChildAndResume(tokenMode, userToken, processInfo)') &&
+            sources.runtimeHostContractImpl.includes('GetSystemDirectoryW(systemDirectory') &&
+            sources.runtimeHostContractImpl.includes('CreateProcessAsUserW(userToken, shellPath, commandLine') &&
+            !sources.runtimeHostContractImpl.includes('CreateProcessW(shellPath, commandLine') &&
+            sources.runtimeHostContractImpl.includes('environment, systemDirectory, &startupInfo.StartupInfo') &&
+            sources.runtimeHostContractImpl.includes('CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT') &&
+            sources.runtimeHostContractImpl.includes('MESH_CONSOLE_BRIDGE_PIPE_PREFIX_W') &&
+            sources.runtimeHostContractImpl.includes('InterlockedExchangePointer((PVOID volatile*)handleRef, NULL)') &&
             sources.serviceHostDef.includes('MeshConsoleBridgeW') &&
             sources.serviceHostArm64Def.includes('MeshConsoleBridgeW') &&
-            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE') &&
+            sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridge') &&
             sources.processPipe.includes('allow-rundll32-console'),
-        userConsentRundll32SurfaceApproved:
-            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_USER_CONSENT_W') &&
-            sources.rundll32Contract.includes('MESH_RUNDLL32_ENTRY_USER_CONSENT_A') &&
-            sources.rundll32Contract.includes('void CALLBACK MeshUserConsentW') &&
-            sources.rundll32ContractImpl.includes('void CALLBACK MeshUserConsentW') &&
-            sources.rundll32ContractImpl.includes('MeshUserConsent_ReadManifestW') &&
-            sources.rundll32ContractImpl.includes('MeshUserConsent_IsApprovedResultPipeNameW') &&
-            sources.rundll32ContractImpl.includes('MESH_USER_CONSENT_RESULT_PIPE_PREFIX_W') &&
-            sources.rundll32ContractImpl.includes('WTSSendMessageW(') &&
+        userConsentRuntimeHostSurfaceApproved:
+            sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_W') &&
+            sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_A') &&
+            sources.runtimeHostContract.includes('void CALLBACK MeshUserConsentW') &&
+            sources.runtimeHostContractImpl.includes('void CALLBACK MeshUserConsentW') &&
+            sources.runtimeHostContractImpl.includes('MeshUserConsent_ReadManifestW') &&
+            sources.runtimeHostContractImpl.includes('MeshUserConsent_IsApprovedResultPipeNameW') &&
+            sources.runtimeHostContractImpl.includes('MESH_USER_CONSENT_RESULT_PIPE_PREFIX_W') &&
+            sources.runtimeHostContractImpl.includes('WTSSendMessageW(') &&
             sources.serviceHostDef.includes('MeshUserConsentW') &&
             sources.serviceHostArm64Def.includes('MeshUserConsentW') &&
-            sources.processPipe.includes('MESH_RUNDLL32_ENTRY_USER_CONSENT_A') &&
+            sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_A') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedUserConsentContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedUserConsentPipeNameA') &&
             sources.processPipe.includes('allow-rundll32-userconsent') &&
@@ -632,23 +624,23 @@ function main() {
             !sources.watchdog.includes('CreateProcessW(') &&
             !sources.watchdog.includes('CreateProcessAsUserW(') &&
             !sources.watchdog.includes('Helper_IsSessionSpawnAllowed('),
-        watchdogHelperPolicyStrictKvmRundll32Bridge:
+        watchdogHelperPolicyStrictKvmRuntimeHostBridge:
             sources.watchdog.includes('Helper_IsApprovedBridgeModuleArgumentW(argumentVector[0])') &&
             sources.watchdog.includes('Helper_IsApprovedBridgePipeNameW(argumentVector[1], L"_in")') &&
             sources.watchdog.includes('Helper_IsApprovedBridgePipeNameW(argumentVector[2], L"_out")') &&
             sources.watchdog.includes('Helper_IsApprovedBridgeModeW(argumentVector[3])') &&
             sources.watchdog.includes('Helper_IsApprovedBridgeOptionalFlagW(argumentVector[i])') &&
-            sources.watchdog.includes('static BOOL Helper_IsExactSystemRundll32PathW(const WCHAR* value)') &&
-            sources.watchdog.includes('systemLen = GetSystemDirectoryW(systemRundll32, (UINT)_countof(systemRundll32));') &&
-            sources.watchdog.includes('return (_wcsicmp(normalizedValue, normalizedSystemRundll32) == 0) ? TRUE : FALSE;') &&
-            sources.watchdog.includes('Helper_IsExactSystemRundll32PathW(exePath)') &&
+            sources.watchdog.includes('static BOOL Helper_IsExactSystemRuntimeHostPathW(const WCHAR* value)') &&
+            sources.watchdog.includes('systemLen = GetSystemDirectoryW(systemRuntimeHost, (UINT)_countof(systemRuntimeHost));') &&
+            sources.watchdog.includes('return (_wcsicmp(normalizedValue, normalizedSystemRuntimeHost) == 0) ? TRUE : FALSE;') &&
+            sources.watchdog.includes('Helper_IsExactSystemRuntimeHostPathW(exePath)') &&
             sources.watchdog.includes('static BOOL Helper_IsExactCurrentModuleDllPathW(const WCHAR* value)') &&
             sources.watchdog.includes('GetModuleHandleExW(') &&
             sources.watchdog.includes('return (_wcsicmp(normalizedValue, normalizedCurrentModulePath) == 0) ? TRUE : FALSE;') &&
             watchdogSections.bridgeModuleArgument.includes('Helper_IsExactCurrentModuleDllPathW(normalizedModulePath)') &&
             !watchdogSections.bridgeModuleArgument.includes('return Helper_EndsWithInsensitiveW(normalizedModulePath, L".dll");') &&
             sources.watchdog.includes('CommandLineToArgvW(arguments, &argumentCount)') &&
-            sources.watchdog.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W') &&
+            sources.watchdog.includes('MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_W') &&
             sources.watchdog.includes('static BOOL Helper_IsApprovedBridgePipeNameW') &&
             sources.watchdog.includes('MeshKvm_') &&
             sources.watchdog.includes('i > 5') &&
@@ -831,7 +823,7 @@ function main() {
             sources.terminal.includes('MeshConsoleBridge_') &&
             sources.terminal.includes("serviceDllPath + ',MeshConsoleBridgeW'") &&
             !sources.terminal.includes('",MeshConsoleBridgeW') &&
-            sources.terminal.includes('childProcess.execFile(rundll32Path, args)') &&
+            sources.terminal.includes('childProcess.execFile(runtimeHostPath, args)') &&
             sources.terminal.includes('resolveInstalledServiceDllPath') &&
             sources.terminal.includes('StartAsUser') &&
             sources.terminal.includes('StartPowerShellAsUser') &&
@@ -860,26 +852,26 @@ function main() {
             !sources.terminal.includes('BRIDGE_LAUNCH_MAX_ATTEMPTS') &&
             !sources.terminal.includes('retryLaunchBridge') &&
             !sources.terminal.includes('BRIDGE_LAUNCH_RETRY_DELAY_MS') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridge_CreateShellProcessW') &&
-            !sources.rundll32ContractImpl.includes('MeshConsoleBridge_CreateShellProcessWithRetryW') &&
-            !sources.rundll32ContractImpl.includes('Falling back to bridge token') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunExecW') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridge_CreateRedirectedShellProcessW') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridge_WriteReadyMarker') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridgeReady') &&
-            sources.rundll32ContractImpl.includes('if (!MeshConsoleBridge_WriteReadyMarker(outputPipe)) { exitCode = GetLastError(); goto cleanup; }') &&
-            sources.rundll32ContractImpl.includes('CreateProcessAsUserW(userToken, shellPath, commandLine, NULL, NULL, TRUE') &&
-            !sources.rundll32ContractImpl.includes('CreateProcessW(shellPath, commandLine, NULL, NULL, TRUE') &&
-            sources.rundll32ContractImpl.includes(' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -Command -') &&
-            sources.rundll32ContractImpl.includes('nonInteractive ? L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -Command -" : L" -NoLogo -NoProfile"') &&
-            !sources.rundll32ContractImpl.includes('-NoProfile -NoExit') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunW(inputPipeName, outputPipeName, shellName, cols, rows, targetSessionId, tokenMode)') &&
-            !sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunRedirectedShellW(inputPipeName, outputPipeName, shellName, targetSessionId, FALSE);') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridge_CloseHandle(&ptyInputRead);') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridge_CloseHandle(&ptyOutputWrite);') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridge_ClosePseudoConsole(&pseudoConsole, conptyApi.ClosePseudoConsoleFn,') &&
-            sources.rundll32ContractImpl.includes('MeshConsoleBridge_ClosePseudoConsoleThread') &&
-            sources.rundll32ContractImpl.includes('_wcsicmp(optionText, L"mode=exec") == 0') &&
+            sources.runtimeHostContractImpl.includes('MeshConsoleBridge_CreateShellProcessW') &&
+            !sources.runtimeHostContractImpl.includes('MeshConsoleBridge_CreateShellProcessWithRetryW') &&
+            !sources.runtimeHostContractImpl.includes('Falling back to bridge token') &&
+            sources.runtimeHostContractImpl.includes('MeshConsoleBridge_RunExecW') &&
+            sources.runtimeHostContractImpl.includes('MeshConsoleBridge_CreateRedirectedShellProcessW') &&
+            sources.runtimeHostContractImpl.includes('MeshConsoleBridge_WriteReadyMarker') &&
+            sources.runtimeHostContractImpl.includes('MeshConsoleBridgeReady') &&
+            sources.runtimeHostContractImpl.includes('if (!MeshConsoleBridge_WriteReadyMarker(outputPipe)) { exitCode = GetLastError(); goto cleanup; }') &&
+            sources.runtimeHostContractImpl.includes('CreateProcessAsUserW(userToken, shellPath, commandLine, NULL, NULL, TRUE') &&
+            !sources.runtimeHostContractImpl.includes('CreateProcessW(shellPath, commandLine, NULL, NULL, TRUE') &&
+            sources.runtimeHostContractImpl.includes(' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -Command -') &&
+            sources.runtimeHostContractImpl.includes('nonInteractive ? L" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -Command -" : L" -NoLogo -NoProfile"') &&
+            !sources.runtimeHostContractImpl.includes('-NoProfile -NoExit') &&
+            sources.runtimeHostContractImpl.includes('MeshConsoleBridge_RunW(inputPipeName, outputPipeName, shellName, cols, rows, targetSessionId, tokenMode)') &&
+            !sources.runtimeHostContractImpl.includes('MeshConsoleBridge_RunRedirectedShellW(inputPipeName, outputPipeName, shellName, targetSessionId, FALSE);') &&
+            sources.runtimeHostContractImpl.includes('MeshConsoleBridge_CloseHandle(&ptyInputRead);') &&
+            sources.runtimeHostContractImpl.includes('MeshConsoleBridge_CloseHandle(&ptyOutputWrite);') &&
+            sources.runtimeHostContractImpl.includes('MeshConsoleBridge_ClosePseudoConsole(&pseudoConsole, conptyApi.ClosePseudoConsoleFn,') &&
+            sources.runtimeHostContractImpl.includes('MeshConsoleBridge_ClosePseudoConsoleThread') &&
+            sources.runtimeHostContractImpl.includes('_wcsicmp(optionText, L"mode=exec") == 0') &&
             sources.terminal.includes("try { if (stream.createEvent) { stream.createEvent('ready'); } } catch (ex) { }") &&
             sources.terminal.includes("var BRIDGE_READY_MARKER = '\\x1b]MeshConsoleBridgeReady\\x07';") &&
             sources.terminal.includes('this.readyCallbacks = [];') &&
@@ -1087,9 +1079,9 @@ function main() {
             sources.agentcore.includes('MeshAgent_RunNativeServiceFullUpdate(') &&
             sources.agentcore.includes('displayName != NULL ? displayNameW : NULL') &&
             sources.agentInstaller.includes("args = [sourceDll + ',MeshLifecycleHostW', manifestPath];") &&
-            sources.agentInstaller.includes('result = runWindowsChildProcessAndCapture(rundll32Path, args') &&
+            sources.agentInstaller.includes('result = runWindowsChildProcessAndCapture(runtimeHostPath, args') &&
             sources.serviceMain.includes('static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)') &&
-            sources.serviceMain.includes('MeshRundll32_LaunchLifecycleHostW(') &&
+            sources.serviceMain.includes('MeshRuntimeHost_LaunchLifecycleHostW(') &&
             sources.agentInstaller.includes('if (process.platform == \'win32\') { return (windowsNativeUpdate(isservice, b64)); }') &&
             sources.agentInstaller.includes('if (process.platform == \'win32\') { return (ret); }') &&
             !sources.agentInstaller.includes("'.update.exe'") &&
@@ -1102,8 +1094,8 @@ function main() {
             !sources.agentInstaller.includes('module.exports.checkfirewall') &&
             !sources.agentInstaller.includes('WinHTTP proxy import source=ie'),
         serviceMainDirectServiceHostMaintenanceBlocked:
-            sources.serviceMain.includes('strcasecmp(arg, "-svchost-register") == 0') &&
-            sources.serviceMain.includes('strcasecmp(arg, "-svchost-unregister") == 0') &&
+            !sources.serviceMain.includes('svchost-register') &&
+            !sources.serviceMain.includes('svchost-unregister') &&
             !sources.serviceMain.includes('ServiceHost registration maintenance') &&
             !sources.serviceMain.includes('Register service DLL in svchost') &&
             !sources.serviceMain.includes('MeshServiceHostPayload_WriteToPath') &&
@@ -1182,7 +1174,7 @@ function main() {
     };
 
     if (evidenceDir) {
-        writeJson(path.join(evidenceDir, 'rundll32_all_helpers_migration_contract.json'), report);
+        writeJson(path.join(evidenceDir, 'runtime_host_all_helpers_migration_contract.json'), report);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',

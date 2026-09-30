@@ -84,7 +84,8 @@ function main() {
         }
     } else {
         mode = 'live-mirror';
-        const deploymentDoc = fs.existsSync(deploymentDocPath) ? fs.readFileSync(deploymentDocPath, 'utf8') : '';
+        const deploymentDoc = fs.existsSync(deploymentDocPath)
+            ? fs.readFileSync(deploymentDocPath, 'utf8').replace(/\s+/g, ' ') : '';
         checks.trackedReleaseAuthorityDocumented = deploymentDoc.includes('local release authorities') &&
             deploymentDoc.includes('must not be selected as deployment sources');
         for (const entry of requiredEntries) {

@@ -39,8 +39,6 @@
   },
   "runtime": {
     "enabled": true,
-    "svchostMode": false,
-    "svchostGroup": "netsvcs",
     "bundleExtract": true,
     "manageFiles": true,
     "manageRegistry": true,

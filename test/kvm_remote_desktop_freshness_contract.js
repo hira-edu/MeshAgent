@@ -97,7 +97,7 @@ function main() {
             kvmSource.includes('kvm_bridge_debug_note_input') &&
             kvmSource.includes('kvm_bridge_debug_note_output'),
         kvmExportsSnapshotGetter: kvmSource.includes('int kvm_bridge_debug_get_snapshot_for_reserved(void *reserved, KvmBridgeDebugSnapshot* snapshotOut)'),
-        kvmRefreshProbeTimeoutRespawnsRundll32Bridge:
+        kvmRefreshProbeTimeoutRespawnsRuntimeHostBridge:
             kvmSource.includes('#define KVM_REFRESH_PROBE_TIMEOUT_MS (KVM_BRIDGE_CONNECT_TIMEOUT_MS * 2)') &&
             kvmSource.includes('static int kvm_relay_handle_refresh_probe_timeout(KvmRelayContext* ctx, const char* source)') &&
             kvmSource.includes('respawning rundll32 KVM bridge') &&
@@ -106,7 +106,7 @@ function main() {
             kvmSource.includes('kvm_schedule_retry_timer_delay(KVM_REFRESH_PROBE_TIMEOUT_MS);') &&
             kvmSource.includes('gChildProcess == NULL && gKvmPipeMgr != NULL') &&
             kvmSource.includes('kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);'),
-        kvmServiceFeeddataRespawnsSameRundll32Bridge:
+        kvmServiceFeeddataRespawnsSameRuntimeHostBridge:
             kvmSource.includes('static int kvm_relay_prepare_bridge_respawn_from_input') &&
             kvmSource.includes('service-mode KVM input routed to rundll32 bridge respawn') &&
             feedDataBlock.includes('kvm_relay_prepare_bridge_respawn_from_input(ctx, buf, len, "write-failed", writeError)') &&

@@ -20,11 +20,11 @@ the documentation tree.
 ## Cross-repository contracts
 
 - [UMH control sister-repository SSOT](UMH_CONTROL_SISTER_REPO_SSOT.md)
-- [UMH control deployment ledger](UMH_CONTROL_DEPLOYMENT_LEDGER.md)
 - [UMH operator panel SSOT](testing/UMH_OPERATOR_PANEL_SSOT.md)
 
-These files are retained because they define active ownership and deployment
-contracts shared with MeshCentral and UserModeHook.
+These files define current ownership, publication, and operator contracts
+shared with MeshCentral and UserModeHook. Per-run publication and endpoint
+validation evidence belongs under ignored `artifacts/validation/` paths.
 
 ## Technical references
 

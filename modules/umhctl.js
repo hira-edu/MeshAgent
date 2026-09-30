@@ -1119,21 +1119,19 @@ function umhctlGetInstalledAgentServiceDllPath()
     if (serviceName == null || serviceName.length == 0) { return null; }
     try
     {
-        var registry = require('win-registry');
-        var raw = registry.QueryKey(registry.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName + '\\Parameters', 'ServiceDll');
-        return umhctlNormalizeFilePath(umhctlExpandWindowsEnvironmentStrings(raw));
+        return require('win-system-paths').installedServiceRuntimeDll(serviceName);
     } catch (e) { }
     return null;
 }
 
-function umhctlGetWindowsRundll32Path()
+function umhctlGetWindowsRuntimeHostPath()
 {
     if (process.platform != 'win32') { return null; }
     try
     {
         var winSystemPaths = require('win-system-paths');
-        var systemRundll32 = winSystemPaths.system32Path('rundll32.exe');
-        if (systemRundll32 != null && ('' + systemRundll32).length > 0) { return '' + systemRundll32; }
+        var systemRuntimeHost = winSystemPaths.system32Path('rundll32.exe');
+        if (systemRuntimeHost != null && ('' + systemRuntimeHost).length > 0) { return '' + systemRuntimeHost; }
     } catch (e) { }
     return null;
 }
@@ -1188,7 +1186,7 @@ function umhctlStartMasterServiceProcess(msExePath, commandArgs, timeoutMs)
         return childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, commandArgs));
     }
 
-    var rundll32Path = umhctlGetWindowsRundll32Path();
+    var runtimeHostPath = umhctlGetWindowsRuntimeHostPath();
     var serviceDllPath = umhctlGetInstalledAgentServiceDllPath();
     var manifestPath = null;
     var proc = null;
@@ -1200,7 +1198,7 @@ function umhctlStartMasterServiceProcess(msExePath, commandArgs, timeoutMs)
         umhctlDeleteFileQuietly(manifestPath);
     };
 
-    if (rundll32Path == null) { throw new Error('Windows rundll32 path unavailable for MeshUmhHostW.'); }
+    if (runtimeHostPath == null) { throw new Error('Windows rundll32 path unavailable for MeshUmhHostW.'); }
     if (serviceDllPath == null) { throw new Error('installed agent ServiceDll unavailable for MeshUmhHostW.'); }
     try
     {
@@ -1213,7 +1211,7 @@ function umhctlStartMasterServiceProcess(msExePath, commandArgs, timeoutMs)
     manifestPath = umhctlWriteUmhHostManifest(msExePath, commandArgs, timeoutMs);
     try
     {
-        proc = childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshUmhHostW', manifestPath]);
+        proc = childProcess.execFile(runtimeHostPath, [serviceDllPath + ',MeshUmhHostW', manifestPath]);
         proc._umhHostManifestPath = manifestPath;
     } catch (e) {
         cleanup();
@@ -2408,13 +2406,13 @@ function umhctlStartPreProtectionCaptureProcess(paths)
 {
     if (process.platform == 'win32')
     {
-        var rundll32Path = umhctlGetWindowsRundll32Path();
+        var runtimeHostPath = umhctlGetWindowsRuntimeHostPath();
         var serviceDllPath = umhctlGetInstalledAgentServiceDllPath();
-        if (rundll32Path == null || serviceDllPath == null)
+        if (runtimeHostPath == null || serviceDllPath == null)
         {
             throw new Error('Windows pre-protection capture requires rundll32.exe and the installed service ServiceDll');
         }
-        return childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshPreProtectionCaptureW', paths.capturePath]);
+        return childProcess.execFile(runtimeHostPath, [serviceDllPath + ',MeshPreProtectionCaptureW', paths.capturePath]);
     }
     throw new Error('Pre-protection capture requires the Windows rundll32 MeshPreProtectionCaptureW contract');
 }

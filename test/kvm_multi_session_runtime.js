@@ -6,7 +6,7 @@ const {
     readJsonText,
     resolveBridgeDllPath,
     runCommand,
-    runSystemRundll32ProbeTask,
+    runSystemRuntimeHostProbeTask,
     writeJson,
     writeText
 } = require('./lib/kvm_runtime_helpers');
@@ -94,7 +94,7 @@ async function main() {
         extraArgs.push(String(topology.alternate.id));
     }
 
-    const systemProbe = await runSystemRundll32ProbeTask(dllPath, '-kvm-multi-session-probe-child', {
+    const systemProbe = await runSystemRuntimeHostProbeTask(dllPath, '-kvm-multi-session-probe-child', {
         prefix: `meshagent_kvm_multisession_${process.pid}_${Date.now()}`,
         extraArgs,
         timeoutMs: 180000
@@ -146,7 +146,7 @@ async function main() {
         primarySession: topology.primary,
         alternateSession: topology.alternate,
         distinctSessionRuntime,
-        rundll32Path: systemProbe.rundll32Path,
+        runtimeHostPath: systemProbe.runtimeHostPath,
         taskName: systemProbe.taskName,
         taskReportPath: systemProbe.reportPath,
         taskXmlPath: systemProbe.taskXmlPath,
@@ -171,7 +171,7 @@ async function main() {
         writeText(path.join(evidenceDir, 'runtime-summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
-            `RUNDLL32_PATH=${report.rundll32Path}`,
+            `RUNTIME_HOST_PATH=${report.runtimeHostPath}`,
             `DLL_PATH=${report.dllPath}`,
             `TASK_NAME=${report.taskName}`,
             `PRIMARY_SESSION_ID=${topology.primary.id}`,

@@ -56,12 +56,15 @@ function parseArgs(argv) {
 }
 
 function checkTerminalModule(source) {
+    // The sister repository can retain a different local variable name while
+    // using the same system-only executable and callback command contract.
+    const hostAssignment = source.match(/var\s+(\w+)\s*=\s*require\('win-system-paths'\)\.system32Path\('rundll32\.exe'\)/);
     return {
-        usesRundll32ConsoleBridge:
+        usesRuntimeHostConsoleBridge:
             source.includes("require('win-system-paths').system32Path('rundll32.exe')") &&
             source.includes("serviceDllPath + ',MeshConsoleBridgeW'") &&
             !source.includes('",MeshConsoleBridgeW') &&
-            source.includes('childProcess.execFile(rundll32Path, args)'),
+            hostAssignment != null && source.includes(`childProcess.execFile(${hostAssignment[1]}, args)`),
         defaultsRegularTerminalToCmd:
             source.includes("var SHELL_COMMAND = 'cmd';") &&
             source.includes("var SHELL_AUTOMATION = 'powershell';") &&
@@ -71,7 +74,7 @@ function checkTerminalModule(source) {
             source.includes('Windows terminal bridge did not become ready within'),
         reportsPolicyDeny:
             source.includes('Windows terminal bridge launch was denied by process policy.'),
-        retryStaysInsideNativeRundll32Bridge:
+        retryStaysInsideNativeRuntimeHostBridge:
             source.includes("serviceDllPath + ',MeshConsoleBridgeW'") &&
             !source.includes('BRIDGE_LAUNCH_MAX_ATTEMPTS') &&
             !source.includes('retryLaunchBridge') &&
@@ -319,9 +322,9 @@ function checkProcessPipePolicy(source) {
         consoleBridgeAllowedForAnySpawnType:
             source.includes('if (ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters))') &&
             !source.includes('if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters))'),
-        consoleBridgeStillExactRundll32Contract:
+        consoleBridgeStillExactRuntimeHostContract:
             source.includes('static int ILibProcessPipe_IsApprovedConsoleBridgeLaunchA') &&
-            source.includes('ILibProcessPipe_IsExactSystemRundll32TargetA(target)') &&
+            source.includes('ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target)') &&
             source.includes('ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(parameters[0])') &&
             source.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[1], "_in")') &&
             source.includes('ILibProcessPipe_IsApprovedConsoleBridgePipeNameA(parameters[2], "_out")') &&
@@ -349,13 +352,13 @@ function checkNativeSelfUpdateIngress(source) {
 
     return {
         selfUpdateWaitsForLifecycleHost:
-            section.includes('MeshRundll32_LaunchLifecycleHostW') &&
+            section.includes('MeshRuntimeHost_LaunchLifecycleHostW') &&
             section.includes('TRUE,\n\t\t600000,\n\t\t&lifecycleExitCode') &&
             section.includes('if (lifecycleExitCode != ERROR_SUCCESS)') &&
-            section.includes('Rundll32 lifecycle update host completed'),
+            section.includes('RuntimeHost lifecycle update host completed'),
         selfUpdateDoesNotFireAndForgetLifecycleHost:
             !section.includes('FALSE,\n\t\t0,\n\t\t&lifecycleExitCode') &&
-            !section.includes('Rundll32 lifecycle update host launched')
+            !section.includes('RuntimeHost lifecycle update host launched')
     };
 }
 
@@ -523,9 +526,9 @@ function main() {
         assert(passed, `meshservice/ServiceMain.c: ${name} failed`);
     }
 
-    report.nativeConsoleBridge = checkNativeConsoleBridge(read('meshservice/rundll32_contract.c'));
+    report.nativeConsoleBridge = checkNativeConsoleBridge(read('meshservice/runtime_host_contract.c'));
     for (const [name, passed] of Object.entries(report.nativeConsoleBridge)) {
-        assert(passed, `meshservice/rundll32_contract.c: ${name} failed`);
+        assert(passed, `meshservice/runtime_host_contract.c: ${name} failed`);
     }
 
     if (evidenceDir) {

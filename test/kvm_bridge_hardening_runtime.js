@@ -3,7 +3,7 @@ const path = require('path');
 const net = require('net');
 const childProcess = require('child_process');
 const {
-    resolveRundll32Path
+    resolveRuntimeHostPath
 } = require('./lib/kvm_runtime_helpers');
 
 function parseArgs(argv) {
@@ -95,15 +95,15 @@ async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
-    const rundll32Path = resolveRundll32Path();
+    const runtimeHostPath = resolveRuntimeHostPath();
 
     assert(fs.existsSync(dllPath), `bridge DLL missing at ${dllPath}`);
-    assert(fs.existsSync(rundll32Path), `rundll32.exe missing at ${rundll32Path}`);
+    assert(fs.existsSync(runtimeHostPath), `rundll32.exe missing at ${runtimeHostPath}`);
 
     const report = {
         generatedUtc: new Date().toISOString(),
         dllPath,
-        rundll32Path,
+        runtimeHostPath,
         probe: null,
         controller: null,
         controllerConnectionMs: null,
@@ -114,7 +114,7 @@ async function main() {
     };
     let attachClose = null;
 
-    const probe = runCommandJson(rundll32Path, [`${dllPath},MeshKvmProbeHostW`, '-kvm-bridge-hardening-probe-child', dllPath]);
+    const probe = runCommandJson(runtimeHostPath, [`${dllPath},MeshKvmProbeHostW`, '-kvm-bridge-hardening-probe-child', dllPath]);
     report.probe = probe.json;
     assert(probe.status === 0, `hardening probe exited with code ${probe.status}`);
     assert(probe.json.success === true, 'hardening probe reported failure');
@@ -164,7 +164,7 @@ async function main() {
         dataServer.listen(dataPipeName, resolve);
     });
 
-    const controller = childProcess.spawn(rundll32Path, [`${dllPath},MeshKvmProbeHostW`, '-kvm-bridge-job-controller', dllPath, controlPipeName, dataPipeName], {
+    const controller = childProcess.spawn(runtimeHostPath, [`${dllPath},MeshKvmProbeHostW`, '-kvm-bridge-job-controller', dllPath, controlPipeName, dataPipeName], {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe']
     });

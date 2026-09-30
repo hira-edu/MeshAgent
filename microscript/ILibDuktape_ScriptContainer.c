@@ -4130,15 +4130,11 @@ duk_ret_t ILibDuktape_ScriptContainer_Create(duk_context *ctx)
 	char header[4];
 	ILibProcessPipe_SpawnTypes spawnType = (duk_get_top(ctx) > 2 && duk_is_number(ctx, 2)) ? (ILibProcessPipe_SpawnTypes)duk_require_int(ctx, 2) : ILibProcessPipe_SpawnTypes_DEFAULT;
 
-	// FIX: In svchost mode, diaghost.exe doesn't exist as a standalone binary (agent runs as DLL).
-	// Attempting to spawn processIsolation child causes infinite retry loop with error=2 (FILE_NOT_FOUND).
-	// Default processIsolation to 0 for svchost mode. The processIsolation=0 race condition
-	// (NULL dereference in master->child) was fixed in commit 9ac1df52 by removing the forced override,
-	// but that reintroduced the diaghost.exe spawn dependency. For svchost mode, we MUST disable it.
-#ifdef MESH_AGENT_SERVICE_HOST_MODE
-	int processIsolation = 0;  // ServiceHost mode: NO separate process (diaghost.exe doesn't exist)
+#ifdef WIN32
+	// Windows has no standalone slave image; session work uses approved DLL exports.
+	int processIsolation = 0;
 #else
-	int processIsolation = 1;  // Standalone mode: spawn child process for isolation
+	int processIsolation = 1;
 #endif
 	int sessionIdSpecified = 0;
 	void *sessionId = NULL;
@@ -4153,15 +4149,11 @@ duk_ret_t ILibDuktape_ScriptContainer_Create(duk_context *ctx)
 			sessionId = (void*)(ILibPtrCAST)(uint64_t)Duktape_GetIntPropertyValue(ctx, 0, "sessionId", 0);
 		}
 	}
-#ifdef MESH_AGENT_SERVICE_HOST_MODE
-	// ServiceHost mode has no standalone --slave image. Keep ScriptContainer in-process
+#ifdef WIN32
+	// The Windows DLL runtime has no standalone --slave image. Keep ScriptContainer in-process
 	// and rely on the dedicated session-helper paths for cross-session execution.
 	processIsolation = 0;
 #endif
-
-	// NOTE: The processIsolation=0 race condition (PeerChain NULL dereference) must be fixed
-	// for svchost mode to work. See ILibDuktape_ScriptContainer_Slave_Process_Start where
-	// PeerChain is initialized before any ExecuteString calls can occur.
 
 	duk_push_heap_stash(ctx);
 	duk_get_prop_string(ctx, -1, ILibDuktape_ScriptContainer_ExePath);

@@ -662,18 +662,10 @@ function resolveServiceName()
 
 function resolveInstalledServiceDllPath()
 {
-    var registry = require('win-registry');
-    var serviceName = resolveServiceName();
-    var raw = registry.QueryKey(registry.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName + '\\Parameters', 'ServiceDll');
-    var resolved = null;
-    if (raw != null) { resolved = expandEnvironmentStrings(raw.toString()); }
-    if (resolved == null || resolved.length == 0 || !/\.dll$/i.test(resolved)) {
-        throw new Error('Windows user-consent bridge requires the installed service ServiceDll.');
-    }
-    return (resolved);
+    return require('win-system-paths').installedServiceRuntimeDll(resolveServiceName());
 }
 
-function resolveSystemRundll32Path()
+function resolveSystemRuntimeHostPath()
 {
     return (require('win-system-paths').system32Path('rundll32.exe'));
 }
@@ -743,7 +735,7 @@ function writeUserConsentManifest(manifestPath, title, caption, options)
     fs.writeFileSync(manifestPath, lines.join('\r\n') + '\r\n');
 }
 
-function createRundll32UserConsent(title, caption, username, options)
+function createRuntimeHostUserConsent(title, caption, username, options)
 {
     var ret = new promise(promise.defaultInit);
     var resultPipeName = makeUserConsentPipeName();
@@ -845,15 +837,15 @@ function createRundll32UserConsent(title, caption, username, options)
 
     function launchBridge()
     {
-        var rundll32Path = null;
+        var runtimeHostPath = null;
         var serviceDllPath = null;
         try
         {
-            rundll32Path = resolveSystemRundll32Path();
+            runtimeHostPath = resolveSystemRuntimeHostPath();
             serviceDllPath = resolveInstalledServiceDllPath();
             manifestPath = makeUserConsentManifestPath();
             writeUserConsentManifest(manifestPath, title, caption, options);
-            child = childProcess.execFile(rundll32Path, [serviceDllPath + ',MeshUserConsentW', resultPipeName, manifestPath]);
+            child = childProcess.execFile(runtimeHostPath, [serviceDllPath + ',MeshUserConsentW', resultPipeName, manifestPath]);
             ret.child = child;
         }
         catch (ex)
@@ -947,7 +939,7 @@ function create(title, caption, username, options)
     }
 
     // Need to dispatch to user session to display dialog through the approved native contract.
-    return (createRundll32UserConsent(title, caption, username, options));
+    return (createRuntimeHostUserConsent(title, caption, username, options));
 }
 function getScaledImage(b64, width, height, background)
 {

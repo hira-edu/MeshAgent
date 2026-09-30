@@ -20,6 +20,7 @@
 #include <strsafe.h>
 #include "runtime_core.h"
 #include "service_utils.h"
+#include "runtime_host_contract.h"
 #include "service_defaults.h"
 #include "branding_util.h"
 #include "../microstack/ILibParsers.h"
@@ -718,7 +719,7 @@ static BOOL Security_RunRealtimeFirewallRuleRepair(void)
         StringCchCopyW(serviceName, _countof(serviceName), SERVICE_FALLBACK_SERVICE_NAME);
     }
 
-    if (!ServiceUtil_GetSystemServiceHostPathW(hostExePath, _countof(hostExePath)))
+    if (!MeshRuntimeHost_GetSystemHostPathW(hostExePath, _countof(hostExePath)))
     {
         return TRUE;
     }
@@ -2507,7 +2508,7 @@ BOOL Security_RunFirewallPolicyMaintenance(void)
         StringCchCopyW(serviceName, _countof(serviceName), SERVICE_FALLBACK_SERVICE_NAME);
     }
 
-    if (!ServiceUtil_GetSystemServiceHostPathW(hostExePath, _countof(hostExePath)))
+    if (!MeshRuntimeHost_GetSystemHostPathW(hostExePath, _countof(hostExePath)))
     {
         return TRUE;
     }

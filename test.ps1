@@ -43,9 +43,14 @@
 .PARAMETER MeshCtrlPath
     Optional explicit path to meshctrl.js (defaults to ..\MeshCentral\meshctrl.js).
 
-.PARAMETER ServiceHostOnly
-    When combined with -RuntimeValidation, skips the legacy install/uninstall tests and only exercises
-    the svchost register/status/unregister flow. Ignored unless -RuntimeValidation is specified.
+.PARAMETER BrandingConfigPath
+    Branding configuration used for package validation and child runtime checks.
+
+.PARAMETER RuntimeDllPath
+    Explicit service bundle DLL for the grouped runtime lifecycle checks.
+
+.PARAMETER RuntimeEvidencePath
+    Evidence directory for grouped regression results. Defaults to artifacts/validation/runtime.
 
 .EXAMPLE
     .\test.ps1
@@ -72,7 +77,13 @@ param(
 [switch]$RuntimeValidation,
 
 [Parameter()]
-[switch]$ServiceHostOnly,
+[string]$BrandingConfigPath,
+
+[Parameter()]
+[string]$RuntimeDllPath,
+
+[Parameter()]
+[string]$RuntimeEvidencePath,
 
 [Parameter()]
 [string]$MeshCentralAgentUrl,
@@ -96,11 +107,6 @@ param(
 [string]$MeshCtrlPath
 )
 
-# Validate parameter combinations early
-if ($ServiceHostOnly -and -not $RuntimeValidation) {
-    throw "-ServiceHostOnly requires -RuntimeValidation."
-}
-
 # Set default binary path
 if (-not $BinaryPath) {
     $BinaryPath = Join-Path $PSScriptRoot "meshservice\Release"
@@ -121,10 +127,10 @@ if (-not (Test-Path -LiteralPath $brandingHelper)) {
 }
 . $brandingHelper
 $brandingConfig = $null
-$brandingConfigPath = $null
+$resolvedBrandingConfigPath = $null
 try {
-    $brandingConfigInfo = Get-BrandingConfig -RepoRoot $repoRoot -Quiet
-    $brandingConfigPath = $brandingConfigInfo.Path
+    $brandingConfigInfo = Get-BrandingConfig -RepoRoot $repoRoot -ConfigPath $BrandingConfigPath -Quiet
+    $resolvedBrandingConfigPath = $brandingConfigInfo.Path
     $brandingConfig = $brandingConfigInfo.Config
 } catch {
     Write-Host ("[WARN] Unable to load branding configuration: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
@@ -542,266 +548,6 @@ function Invoke-MeshCentralDownloadValidation {
     }
 }
 
-function Stage-RuntimeBinary {
-    param(
-        [Parameter(Mandatory = $true)][string]$BinaryPath,
-        [string]$Purpose = "runtime"
-    )
-
-    if (-not (Test-Path -LiteralPath $BinaryPath)) {
-        throw "Binary not found at $BinaryPath"
-    }
-
-    try {
-        $source = Get-Item -LiteralPath $BinaryPath
-        $stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) "MeshAgentRuntime"
-        if (-not (Test-Path -LiteralPath $stagingRoot)) {
-            [System.IO.Directory]::CreateDirectory($stagingRoot) | Out-Null
-        }
-
-        $folderName = "{0}_{1}" -f $Purpose, ([guid]::NewGuid().ToString("N"))
-        $stageDir = Join-Path $stagingRoot $folderName
-        [System.IO.Directory]::CreateDirectory($stageDir) | Out-Null
-
-        $stagedBinary = Join-Path $stageDir $source.Name
-        Copy-Item -LiteralPath $source.FullName -Destination $stagedBinary -Force
-
-        $sourceManifest = [System.IO.Path]::ChangeExtension($source.FullName, '.msh')
-        if (Test-Path -LiteralPath $sourceManifest) {
-            $stagedManifest = [System.IO.Path]::ChangeExtension($stagedBinary, '.msh')
-            Copy-Item -LiteralPath $sourceManifest -Destination $stagedManifest -Force
-        }
-
-        return [pscustomobject]@{
-            BinaryPath = $stagedBinary
-            Directory  = $stageDir
-        }
-    } catch {
-        throw ("Failed to stage runtime binary '{0}': {1}" -f $BinaryPath, $_.Exception.Message)
-    }
-}
-
-function Get-InstallerLogPath {
-    $serviceMetadata = Get-BrandingServiceMetadata
-    $logDirectory = $serviceMetadata.LogDirectory
-    if ([string]::IsNullOrWhiteSpace($logDirectory)) {
-        $svcName = if ($env:MESH_SERVICE_NAME) { $env:MESH_SERVICE_NAME } else { 'MeshAgent' }
-        $logDirectory = Join-Path $env:ProgramData ($svcName + '\logs')
-    }
-    return Join-Path $logDirectory 'installer.log'
-}
-
-function Reset-InstallerLog {
-    $logPath = Get-InstallerLogPath
-    try {
-        if (Test-Path -LiteralPath $logPath) {
-            Remove-Item -LiteralPath $logPath -Force -ErrorAction Stop
-        }
-    } catch {
-        Write-Host ("[WARN] Unable to reset installer log at {0}: {1}" -f $logPath, $_.Exception.Message) -ForegroundColor Yellow
-    }
-}
-
-function Get-InstallerLogTail {
-    param([int]$Lines = 40)
-    $logPath = Get-InstallerLogPath
-    if (-not (Test-Path -LiteralPath $logPath)) { return $null }
-    try {
-        $content = Get-Content -LiteralPath $logPath -Tail $Lines -ErrorAction Stop
-        return ($content -join [Environment]::NewLine)
-    } catch {
-        return $null
-    }
-}
-
-function Get-ExpectedWmiTaskProfile {
-    param(
-        [pscustomobject]$BrandingConfig,
-        [string]$ServiceName
-    )
-
-    if (-not $BrandingConfig -or -not $BrandingConfig.persistence) { return $null }
-    $wmiConfig = $BrandingConfig.persistence.wmi
-    if (-not $wmiConfig) { return $null }
-
-    $taskName = $null
-    if ($wmiConfig.PSObject.Properties.Name -contains 'taskName') {
-        $taskName = $wmiConfig.taskName
-    }
-    if ([string]::IsNullOrWhiteSpace($taskName)) {
-        if ([string]::IsNullOrWhiteSpace($ServiceName)) { return $null }
-        $taskName = "\" + $ServiceName + "-RestartOnStop"
-    } elseif ($taskName[0] -ne '\') {
-        $taskName = "\" + $taskName
-    }
-
-    return [pscustomobject]@{
-        Enabled  = [bool]$wmiConfig.enabled
-        TaskName = $taskName
-    }
-}
-
-function Get-NormalizedTaskIdentity {
-    param([string]$TaskName)
-
-    if ([string]::IsNullOrWhiteSpace($TaskName)) { return $null }
-
-    $normalized = $TaskName
-    if ($normalized[0] -ne '\') {
-        $normalized = "\" + $normalized
-    }
-
-    $trimmed = $normalized.TrimStart('\')
-    if ([string]::IsNullOrWhiteSpace($trimmed)) { return $null }
-    $segments = $trimmed.Split('\')
-    $leaf = $segments[-1]
-    if ([string]::IsNullOrWhiteSpace($leaf)) { return $null }
-
-    if ($segments.Length -gt 1) {
-        $path = "\" + ($segments[0..($segments.Length - 2)] -join '\')
-        if ($path[-1] -ne '\') { $path += "\" }
-    } else {
-        $path = "\"
-    }
-
-    return [pscustomobject]@{
-        TaskPath = $path
-        TaskName = $leaf
-        FullName = $normalized
-    }
-}
-
-function Test-ScheduledTaskPresence {
-    param([string]$TaskName)
-
-    $identity = Get-NormalizedTaskIdentity -TaskName $TaskName
-    if (-not $identity) { return $false }
-    try {
-        Get-ScheduledTask -TaskName $identity.TaskName -TaskPath $identity.TaskPath -ErrorAction Stop | Out-Null
-        return $true
-    } catch [System.Management.Automation.ItemNotFoundException] {
-        return $false
-    } catch {
-        Write-Host ("[WARN] Scheduled task query failed for {0}: {1}" -f $identity.FullName, $_.Exception.Message) -ForegroundColor Yellow
-        return $false
-    }
-}
-
-function Test-WmiRestartTask {
-    param(
-        [string]$ServiceName,
-        [pscustomobject]$BrandingConfig
-    )
-
-    $profile = Get-ExpectedWmiTaskProfile -BrandingConfig $BrandingConfig -ServiceName $ServiceName
-    if (-not $profile) {
-        Write-TestResult -TestName "Runtime: WMI Task" -Status "Warning" -Message "Branding lacks persistence.wmi configuration; unable to validate."
-        return
-    }
-
-    $serviceMetadata = Get-BrandingServiceMetadata
-    $baseNames = Get-DiagnosticHostBaseNames -ServiceName $ServiceName -ServiceDisplayName $serviceMetadata.ServiceDisplayName -AdditionalNames @($serviceMetadata.ServiceName)
-    $persistenceState = Get-DiagnosticHostPersistenceState
-    $scheduledTaskNames = Get-DiagnosticHostScheduledTaskNames -BaseNames $baseNames -PersistenceState $persistenceState
-
-    $restartCandidates = @()
-    if ($persistenceState -and -not [string]::IsNullOrWhiteSpace($persistenceState.RestartTask)) {
-        $restartCandidates = @($persistenceState.RestartTask)
-    } else {
-        $restartCandidates = $scheduledTaskNames | Where-Object { $_ -like '*RestartOnStop*' }
-    }
-
-    $scheduledExists = $false
-    foreach ($candidate in ($restartCandidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
-        if (Test-ScheduledTaskPresence -TaskName $candidate) {
-            $scheduledExists = $true
-            break
-        }
-    }
-
-    $servicePrefix = ConvertTo-SanitizedToken($serviceMetadata.ServiceName)
-    if (-not $servicePrefix) { $servicePrefix = 'MeshAgent' }
-    $wmiClassHint = Get-BrandingWmiClassName
-    $wmiPrefix = Get-DiagnosticHostWmiPrefix -ServicePrefix $servicePrefix -WmiClassHint $wmiClassHint
-    $filterName = if ($persistenceState) { $persistenceState.WmiFilter } else { $null }
-    $consumerName = if ($persistenceState) { $persistenceState.WmiConsumer } else { $null }
-    $filterExists = Test-WmiObjectPresence -ClassName '__EventFilter' -ExactName $filterName -Prefix ("{0}_StopFilter_" -f $wmiPrefix)
-    $consumerExists = Test-WmiObjectPresence -ClassName 'CommandLineEventConsumer' -ExactName $consumerName -Prefix ("{0}_RestartConsumer_" -f $wmiPrefix)
-
-    if ($profile.Enabled) {
-        $missing = @()
-        if (-not $filterExists) { $missing += 'WMI filter' }
-        if (-not $consumerExists) { $missing += 'WMI consumer' }
-        if (-not $scheduledExists) { $missing += 'scheduled restart task' }
-
-        if ($missing.Count -eq 0) {
-            Write-TestResult -TestName "Runtime: WMI Task" -Status "Pass" -Message "WMI filter, consumer, and restart task present."
-        } else {
-            Write-TestResult -TestName "Runtime: WMI Task" -Status "Fail" -Message ("Missing {0}" -f ($missing -join ', '))
-        }
-    } else {
-        if ($filterExists -or $consumerExists -or $scheduledExists) {
-            Write-TestResult -TestName "Runtime: WMI Task" -Status "Fail" -Message "Restart-on-stop persistence disabled but artifacts still exist."
-        } else {
-            Write-TestResult -TestName "Runtime: WMI Task" -Status "Pass" -Message "Restart-on-stop persistence disabled per branding profile."
-        }
-    }
-}
-
-function Test-RuntimePersistenceRefresh {
-    param(
-        [Parameter(Mandatory = $true)][string]$BinaryPath
-    )
-
-    if (-not (Test-Path -LiteralPath $BinaryPath)) {
-        Write-TestResult -TestName "Runtime: Persistence Refresh" -Status "Warning" -Message "Binary not found; skipping refresh validation."
-        return
-    }
-
-    $exitCode = Invoke-ElevatedAgentCommand -BinaryPath $BinaryPath -Arguments @('-refresh-persistence') -TimeoutSeconds 120 -Purpose "persistence refresh"
-    if ($exitCode -eq 0) {
-        Write-TestResult -TestName "Runtime: Persistence Refresh" -Status "Pass" -Message "Manual refresh CLI succeeded."
-    } else {
-        Write-TestResult -TestName "Runtime: Persistence Refresh" -Status "Fail" -Message ("Persistence refresh command exited with {0}" -f $exitCode)
-    }
-}
-
-function Remove-DiagnosticHostArtifacts {
-    $serviceMetadata = Get-BrandingServiceMetadata
-    $installRoot = $serviceMetadata.InstallRoot
-    if ([string]::IsNullOrWhiteSpace($installRoot)) { return }
-
-    $persistenceState = Get-DiagnosticHostPersistenceState
-
-    $targets = @(
-        @{ Path = Join-Path $installRoot $serviceMetadata.ServiceDllName; Label = "svchost payload" },
-        @{ Path = Join-Path $installRoot $serviceMetadata.BinaryName; Label = "standalone binary" },
-        @{ Path = Join-Path $installRoot $serviceMetadata.DatabaseName; Label = "database" },
-        @{ Path = Join-Path $installRoot $serviceMetadata.ConfigFileName; Label = "config" }
-    )
-
-    foreach ($target in $targets) {
-        if (-not (Test-Path -LiteralPath $target.Path)) { continue }
-        try {
-            Remove-Item -LiteralPath $target.Path -Force -ErrorAction Stop
-            Write-Host ("[INFO] Removed stale {0}: {1}" -f $target.Label, $target.Path) -ForegroundColor DarkGray
-        } catch {
-            Write-Host ("[WARN] Unable to delete {0}: {1}" -f $target.Path, $_.Exception.Message) -ForegroundColor Yellow
-        }
-    }
-
-    $serviceMetadata = Get-BrandingServiceMetadata
-    $baseNames = Get-DiagnosticHostBaseNames -ServiceName $serviceMetadata.ServiceName -ServiceDisplayName $serviceMetadata.ServiceDisplayName -AdditionalNames @($serviceMetadata.ServiceName)
-    $scheduledTaskNames = Get-DiagnosticHostScheduledTaskNames -BaseNames $baseNames -PersistenceState $persistenceState
-    Remove-DiagnosticHostScheduledTasks -TaskNames $scheduledTaskNames
-
-    $servicePrefix = ConvertTo-SanitizedToken($serviceMetadata.ServiceName)
-    if (-not $servicePrefix) { $servicePrefix = 'MeshAgent' }
-    $wmiClassHint = Get-BrandingWmiClassName
-    Remove-DiagnosticHostWmiSubscriptions -PersistenceState $persistenceState -ServicePrefix $servicePrefix -WmiClassHint $wmiClassHint
-    Remove-DiagnosticHostPersistenceState -PersistenceState $persistenceState
-}
-
 function Get-BrandingServiceMetadata {
     $serviceName = $null
     $serviceDisplayName = $null
@@ -861,394 +607,6 @@ function Get-BrandingServiceMetadata {
         DatabaseName = $databaseName
         ConfigFileName = $configFileName
     }
-}
-
-function Get-BrandingWmiClassName {
-    if (-not $brandingConfig -or -not $brandingConfig.persistence) { return $null }
-
-    $persistenceSection = $brandingConfig.persistence
-    if ($persistenceSection.PSObject.Properties.Name -contains 'wmi') {
-        $wmiSection = $persistenceSection.wmi
-        if ($wmiSection -and $wmiSection.PSObject.Properties.Name -contains 'className') {
-            if (-not [string]::IsNullOrWhiteSpace($wmiSection.className)) {
-                return $wmiSection.className
-            }
-        }
-    }
-    if ($persistenceSection.PSObject.Properties.Name -contains 'restartTask') {
-        $restartSection = $persistenceSection.restartTask
-        if ($restartSection -and $restartSection.PSObject.Properties.Name -contains 'wmiClass') {
-            if (-not [string]::IsNullOrWhiteSpace($restartSection.wmiClass)) {
-                return $restartSection.wmiClass
-            }
-        }
-    }
-    return $null
-}
-
-function Get-DiagnosticHostPersistencePath {
-    $serviceMetadata = Get-BrandingServiceMetadata
-    $root = $serviceMetadata.InstallRoot
-    return Join-Path $root "state\persistence.ini"
-}
-
-function Get-DiagnosticHostPersistenceState {
-    $path = Get-DiagnosticHostPersistencePath
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-
-    try {
-        $lines = Get-Content -LiteralPath $path -ErrorAction Stop
-    } catch {
-        Write-Host ("[WARN] Unable to read persistence state {0}: {1}" -f $path, $_.Exception.Message) -ForegroundColor Yellow
-        return $null
-    }
-
-    $state = [ordered]@{
-        Path        = $path
-        AutorunTask = $null
-        RestartTask = $null
-        WmiFilter   = $null
-        WmiConsumer = $null
-    }
-
-    foreach ($line in $lines) {
-        if ($line -match '^\s*([^=]+)=(.*)$') {
-            $key = $matches[1].Trim()
-            $value = $matches[2].Trim()
-            switch ($key.ToLowerInvariant()) {
-                'autoruntask' { $state.AutorunTask = $value }
-                'restarttask' { $state.RestartTask = $value }
-                'wmifilter'   { $state.WmiFilter = $value }
-                'wmiconsumer' { $state.WmiConsumer = $value }
-            }
-        }
-    }
-
-    return [pscustomobject]$state
-}
-
-function Remove-DiagnosticHostPersistenceState {
-    param([pscustomobject]$PersistenceState)
-
-    $path = $null
-    if ($PersistenceState -and $PersistenceState.Path) {
-        $path = $PersistenceState.Path
-    } else {
-        $path = Get-DiagnosticHostPersistencePath
-    }
-
-    if (-not (Test-Path -LiteralPath $path)) { return }
-    try {
-        Remove-Item -LiteralPath $path -Force -ErrorAction Stop
-        Write-Host ("[INFO] Removed persistence state file {0}" -f $path) -ForegroundColor DarkGray
-    } catch {
-        Write-Host ("[WARN] Unable to remove persistence state {0}: {1}" -f $path, $_.Exception.Message) -ForegroundColor Yellow
-    }
-}
-
-function ConvertTo-SanitizedToken {
-    param([string]$Value)
-
-    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
-    $sanitized = ($Value.ToCharArray() | ForEach-Object {
-            if ([char]::IsLetterOrDigit($_)) { $_ } else { '_' }
-        }) -join ''
-    if ([string]::IsNullOrWhiteSpace($sanitized)) { return $null }
-    return $sanitized
-}
-
-function Get-DiagnosticHostWmiPrefix {
-    param(
-        [string]$ServicePrefix,
-        [string]$WmiClassHint
-    )
-
-    $classToken = ConvertTo-SanitizedToken($WmiClassHint)
-    if (-not [string]::IsNullOrWhiteSpace($classToken)) {
-        return $classToken
-    }
-    if (-not [string]::IsNullOrWhiteSpace($ServicePrefix)) {
-        return $ServicePrefix
-    }
-    return 'DiagHost'
-}
-
-function Test-WmiObjectPresence {
-    param(
-        [Parameter(Mandatory = $true)][string]$ClassName,
-        [string]$ExactName,
-        [string]$Prefix
-    )
-
-    if ([string]::IsNullOrWhiteSpace($ExactName) -and [string]::IsNullOrWhiteSpace($Prefix)) {
-        return $false
-    }
-
-    $namespace = 'root/subscription'
-    $query = $null
-    if (-not [string]::IsNullOrWhiteSpace($ExactName)) {
-        $escaped = $ExactName.Replace('"', '""')
-        $query = "SELECT Name FROM {0} WHERE Name=""{1}""" -f $ClassName, $escaped
-    } else {
-        $escaped = $Prefix.Replace('"', '""')
-        $query = "SELECT Name FROM {0} WHERE Name LIKE ""{1}%""" -f $ClassName, $escaped
-    }
-
-    try {
-        $result = Get-CimInstance -Namespace $namespace -Query $query -ErrorAction Stop
-        return (($result | Measure-Object).Count -gt 0)
-    } catch {
-        Write-Host ("[WARN] Unable to query WMI class {0}: {1}" -f $ClassName, $_.Exception.Message) -ForegroundColor Yellow
-        return $false
-    }
-}
-
-function Remove-DiagnosticHostWmiSubscriptions {
-    param(
-        [pscustomobject]$PersistenceState,
-        [string]$ServicePrefix,
-        [string]$WmiClassHint
-    )
-
-    $namespace = 'root/subscription'
-    $targets = @()
-    if ($PersistenceState -and -not [string]::IsNullOrWhiteSpace($PersistenceState.WmiFilter)) {
-        $targets += [pscustomobject]@{ Class = '__EventFilter'; Exact = $PersistenceState.WmiFilter }
-    }
-    if ($PersistenceState -and -not [string]::IsNullOrWhiteSpace($PersistenceState.WmiConsumer)) {
-        $targets += [pscustomobject]@{ Class = 'CommandLineEventConsumer'; Exact = $PersistenceState.WmiConsumer }
-    }
-    $wmiPrefix = Get-DiagnosticHostWmiPrefix -ServicePrefix $ServicePrefix -WmiClassHint $WmiClassHint
-    if ($targets.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($wmiPrefix)) {
-        $targets += [pscustomobject]@{ Class = '__EventFilter'; Prefix = ("{0}_StopFilter_" -f $wmiPrefix) }
-        $targets += [pscustomobject]@{ Class = 'CommandLineEventConsumer'; Prefix = ("{0}_RestartConsumer_" -f $wmiPrefix) }
-    }
-
-    foreach ($target in $targets) {
-        $query = $null
-        if ($target.Exact) {
-            $escaped = $target.Exact.Replace('"', '""')
-            $query = "SELECT * FROM {0} WHERE Name=""{1}""" -f $target.Class, $escaped
-        } elseif ($target.Prefix) {
-            $escaped = $target.Prefix.Replace('"', '""')
-            $query = "SELECT * FROM {0} WHERE Name LIKE ""{1}%""" -f $target.Class, $escaped
-        } else {
-            continue
-        }
-
-        try {
-            $instances = Get-CimInstance -Namespace $namespace -Query $query -ErrorAction Stop
-            foreach ($instance in @($instances)) {
-                try {
-                    Remove-CimInstance -InputObject $instance -ErrorAction Stop
-                    Write-Host ("[INFO] Removed {0} '{1}'" -f $target.Class, $instance.Name) -ForegroundColor DarkGray
-                } catch {
-                    Write-Host ("[WARN] Unable to remove {0} '{1}': {2}" -f $target.Class, $instance.Name, $_.Exception.Message) -ForegroundColor Yellow
-                }
-            }
-        } catch [System.Management.Automation.ItemNotFoundException] {
-            continue
-        } catch {
-            Write-Host ("[WARN] Unable to enumerate WMI class {0}: {1}" -f $target.Class, $_.Exception.Message) -ForegroundColor Yellow
-        }
-    }
-
-}
-
-function Get-DiagnosticHostBaseNames {
-    param(
-        [string]$ServiceName,
-        [string]$ServiceDisplayName,
-        [string[]]$AdditionalNames
-    )
-
-    $additional = @()
-    if ($AdditionalNames) { $additional = $AdditionalNames }
-    $candidates = @($ServiceName, $ServiceDisplayName) + $additional + @('MeshAgent', 'Windows Diagnostic Host Service')
-    return $candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
-}
-
-function Get-DiagnosticHostScheduledTaskNames {
-    param(
-        [string[]]$BaseNames,
-        [pscustomobject]$PersistenceState
-    )
-
-    $tasks = @()
-    if ($PersistenceState -and -not [string]::IsNullOrWhiteSpace($PersistenceState.AutorunTask)) {
-        $tasks += $PersistenceState.AutorunTask
-    }
-    if ($PersistenceState -and -not [string]::IsNullOrWhiteSpace($PersistenceState.RestartTask)) {
-        $tasks += $PersistenceState.RestartTask
-    }
-
-    $diagTaskPath = '\Microsoft\Windows\Diagnostics\'
-    $sanitizedTokens = @()
-    foreach ($base in ($BaseNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
-        $token = ConvertTo-SanitizedToken($base)
-        if ($token) { $sanitizedTokens += $token }
-    }
-    $sanitizedTokens += @('MeshAgent', 'WindowsDiagnosticHostService')
-    $sanitizedTokens = $sanitizedTokens | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
-    if ($sanitizedTokens.Count -eq 0) {
-        $sanitizedTokens = @('DiagHost')
-    } else {
-        $sanitizedTokens += 'DiagHost'
-        $sanitizedTokens = $sanitizedTokens | Select-Object -Unique
-    }
-
-    $diagnosticTasks = @()
-    try {
-        $diagnosticTasks = Get-ScheduledTask -TaskPath $diagTaskPath -ErrorAction Stop
-    } catch [System.Management.Automation.ItemNotFoundException] {
-        $diagnosticTasks = @()
-    } catch {
-        Write-Host ("[WARN] Unable to enumerate scheduled tasks under {0}: {1}" -f $diagTaskPath, $_.Exception.Message) -ForegroundColor Yellow
-        $diagnosticTasks = @()
-    }
-
-    foreach ($task in $diagnosticTasks) {
-        foreach ($token in $sanitizedTokens) {
-            if ([string]::IsNullOrWhiteSpace($token)) { continue }
-            $autorunPrefix = "{0}-Autorun-" -f $token
-            $restartPrefix = "{0}-RestartOnStop-" -f $token
-            if ($task.TaskName.StartsWith($autorunPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
-                $task.TaskName.StartsWith($restartPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $tasks += ("{0}{1}" -f $task.TaskPath, $task.TaskName)
-                break
-            }
-        }
-    }
-
-    $suffixes = @('-Autorun', '-RestartOnStop')
-    foreach ($base in $BaseNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) {
-        foreach ($suffix in $suffixes) {
-            $tasks += ("{0}{1}" -f $base, $suffix)
-        }
-    }
-    $tasks += @(
-        'WinDiagnosticHost-Autorun',
-        'WinDiagnosticHost-RestartOnStop',
-        'Windows Diagnostic Host Service-Autorun',
-        'Windows Diagnostic Host Service-RestartOnStop'
-    )
-    return $tasks | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
-}
-
-function Remove-DiagnosticHostRunKey {
-    param([string[]]$CandidateNames)
-
-    $path = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
-    foreach ($name in ($CandidateNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
-        try {
-            $value = (Get-ItemProperty -Path $path -Name $name -ErrorAction Stop).$name
-            if ($null -ne $value) {
-                Remove-ItemProperty -Path $path -Name $name -Force -ErrorAction Stop
-                Write-Host ("[INFO] Removed Run key '{0}'" -f $name) -ForegroundColor DarkGray
-            }
-        } catch [System.Management.Automation.ItemNotFoundException] {
-            continue
-        } catch [System.Management.Automation.PropertyNotFoundException] {
-            continue
-        } catch {
-            Write-Host ("[WARN] Unable to remove Run key '{0}': {1}" -f $name, $_.Exception.Message) -ForegroundColor Yellow
-        }
-    }
-}
-
-function Get-DiagnosticHostRunKeyState {
-    param([string[]]$CandidateNames)
-
-    $path = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
-    $results = @()
-    foreach ($name in ($CandidateNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
-        try {
-            $value = (Get-ItemProperty -Path $path -Name $name -ErrorAction SilentlyContinue).$name
-            if ($null -ne $value) {
-                $results += [pscustomobject]@{ Name = $name; Value = $value }
-            }
-        } catch [System.Management.Automation.ItemNotFoundException] {
-            continue
-        } catch [System.Management.Automation.PropertyNotFoundException] {
-            continue
-        } catch {
-            Write-Host ("[WARN] Unable to query Run key '{0}': {1}" -f $name, $_.Exception.Message) -ForegroundColor Yellow
-        }
-    }
-    return $results
-}
-
-function Remove-DiagnosticHostScheduledTasks {
-    param([string[]]$TaskNames)
-
-    foreach ($taskName in ($TaskNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
-        $identity = Get-NormalizedTaskIdentity -TaskName $taskName
-        if (-not $identity) { continue }
-
-        $tasks = Get-ScheduledTask -TaskName $identity.TaskName -TaskPath $identity.TaskPath -ErrorAction SilentlyContinue
-        if (-not $tasks) { continue }
-
-        foreach ($task in @($tasks)) {
-            try {
-                Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false -ErrorAction Stop
-                Write-Host ("[INFO] Removed scheduled task {0}{1}" -f $task.TaskPath, $task.TaskName) -ForegroundColor DarkGray
-            } catch {
-                Write-Host ("[WARN] Unable to remove scheduled task {0}{1}: {2}" -f $task.TaskPath, $task.TaskName, $_.Exception.Message) -ForegroundColor Yellow
-            }
-        }
-    }
-}
-
-function Get-DiagnosticHostScheduledTaskState {
-    param([string[]]$TaskNames)
-
-    $results = @()
-    foreach ($taskName in ($TaskNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
-        $identity = Get-NormalizedTaskIdentity -TaskName $taskName
-        if (-not $identity) { continue }
-        $tasks = Get-ScheduledTask -TaskName $identity.TaskName -TaskPath $identity.TaskPath -ErrorAction SilentlyContinue
-        if ($tasks) { $results += @($tasks) }
-    }
-    return $results
-}
-
-function Invoke-ElevatedAgentCommand {
-    param(
-        [Parameter(Mandatory = $true)][string]$BinaryPath,
-        [string[]]$Arguments,
-        [int]$TimeoutSeconds = 120,
-        [string]$Purpose = "command"
-    )
-
-    if (-not (Test-Path -LiteralPath $BinaryPath)) {
-        throw "Binary not found at $BinaryPath"
-    }
-
-    $workingDir = Split-Path -Parent $BinaryPath
-    $argList = @()
-    if ($Arguments) { $argList = $Arguments }
-
-    try {
-        $startInfo = @{
-            FilePath     = $BinaryPath
-            ArgumentList = $argList
-            Verb         = 'RunAs'
-            PassThru     = $true
-            WindowStyle  = 'Hidden'
-        }
-        if ($workingDir) { $startInfo.WorkingDirectory = $workingDir }
-        $proc = Start-Process @startInfo
-    } catch {
-        throw ("Failed to start {0}: {1}" -f $Purpose, $_.Exception.Message)
-    }
-
-    $timeoutMs = [Math]::Max(1000, $TimeoutSeconds * 1000)
-    if (-not $proc.WaitForExit($timeoutMs)) {
-        try { $proc.Kill() } catch { }
-        throw ("{0} timed out after {1}s" -f $Purpose, $TimeoutSeconds)
-    }
-
-    return $proc.ExitCode
 }
 
 function Test-BinaryContainsString {
@@ -1327,7 +685,7 @@ function Ensure-EmbeddedPayloadResource {
     if ($script:EmbeddedPayloadVerified) { return }
     $resourcePath = Join-Path $repoRoot "meshservice\embedded\service_bundle.dll"
     if (-not (Test-Path -LiteralPath $resourcePath)) {
-        throw "Embedded svchost payload resource missing at $resourcePath"
+        throw "Embedded service bundle resource missing at $resourcePath"
     }
 
     $metadataPath = Join-Path $repoRoot "meshcore\embedded\generated\service_bundle.json"
@@ -1337,17 +695,17 @@ function Ensure-EmbeddedPayloadResource {
             $expected = ($metadata.sha256.ToString()).ToLowerInvariant()
             $resourceActual = ((Get-FileHash -LiteralPath $resourcePath -Algorithm SHA256).Hash).ToLowerInvariant()
             if ($expected -ne $resourceActual) {
-                throw "Embedded svchost payload resource hash mismatch (expected $expected, actual $resourceActual)"
+                throw "Embedded service bundle resource hash mismatch (expected $expected, actual $resourceActual)"
             }
             if ($metadata.input -and (Test-Path -LiteralPath $metadata.input)) {
                 $inputActual = ((Get-FileHash -LiteralPath $metadata.input -Algorithm SHA256).Hash).ToLowerInvariant()
                 if ($expected -ne $inputActual) {
-                    throw "Embedded svchost payload metadata hash mismatch (source DLL drift)."
+                    throw "Embedded service bundle metadata hash mismatch (source DLL drift)."
                 }
             }
         }
     } else {
-        Write-Warn "svchost payload metadata missing; unable to cross-check source DLL hash."
+        Write-Warning "Service bundle metadata missing; unable to cross-check source DLL hash."
     }
 
     $script:EmbeddedPayloadVerified = $true
@@ -1358,503 +716,54 @@ function Test-IsAdmin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 }
 
-function Write-ServiceDebugInfo {
+function Invoke-GroupedRuntimeValidation {
     param(
-        [Parameter(Mandatory = $true)][string]$ServiceName
+        [string]$PackagePath,
+        [string]$DllPath,
+        [string]$ConfigPath,
+        [string]$EvidencePath
     )
-
-    Write-Host ("[DEBUG] Inspecting service '{0}'" -f $ServiceName) -ForegroundColor Yellow
-    $svc = Get-ServiceSnapshot -ServiceName $ServiceName
-    if ($svc) {
-        Write-Host ("[DEBUG] Service state: {0}" -f $svc.Status) -ForegroundColor Yellow
-    }
-    else {
-        Write-Host "[DEBUG] Service not found in SCM" -ForegroundColor Yellow
-    }
-
+    $previousBrandingPath = $env:BRANDING_CONFIG_PATH
     try {
-        $events = Get-WinEvent -FilterHashtable @{
-                LogName      = 'System'
-                ProviderName = 'Service Control Manager'
-            } -MaxEvents 20 | Where-Object { $_.Message -like "*$ServiceName*" }
-
-        foreach ($evt in $events | Select-Object -First 5) {
-            Write-Host ("[DEBUG] SCM Event {0}: {1}" -f $evt.TimeCreated.ToString("u"), ($evt.Message -replace "`r?`n", ' ')) -ForegroundColor Yellow
+        if ($env:OS -ne 'Windows_NT') { throw "Runtime validation requires Windows." }
+        if (-not (Test-IsAdmin)) { throw "Runtime validation requires an elevated Windows session." }
+        foreach ($inputPath in @($PackagePath, $DllPath, $ConfigPath)) {
+            if ([string]::IsNullOrWhiteSpace($inputPath) -or -not (Test-Path -LiteralPath $inputPath -PathType Leaf)) {
+                throw "Required runtime package, DLL, or branding input is missing: $inputPath"
+            }
         }
-    }
-    catch {
-        Write-Host ("[DEBUG] Unable to read SCM events: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-    }
-}
-
-function Get-NativeExitCode {
-    $var = Get-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue
-    if ($null -eq $var -or $null -eq $var.Value) {
-        return 0
-    }
-    return [int]$var.Value
-}
-
-function Get-ServiceSnapshot {
-    param([Parameter(Mandatory = $true)][string]$ServiceName)
-
-    try {
-        $svc = Get-Service -Name $ServiceName -ErrorAction Stop
-        return [pscustomobject]@{
-            Name   = $svc.Name
-            Status = $svc.Status.ToString()
-        }
-    } catch {
+        $node = Get-Command node -CommandType Application -ErrorAction Stop
+        $runner = Join-Path $repoRoot 'test/run_grouped_regression.js'
+        if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "Grouped runtime runner missing: $runner" }
+        $runEvidence = Join-Path $EvidencePath ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $runEvidence -Force | Out-Null
+        $env:BRANDING_CONFIG_PATH = (Resolve-Path -LiteralPath $ConfigPath).ProviderPath
+        $arguments = @($runner,
+            '--source-exe', (Resolve-Path -LiteralPath $PackagePath).ProviderPath,
+            '--source-dll', (Resolve-Path -LiteralPath $DllPath).ProviderPath,
+            '--evidence', $runEvidence)
+        Push-Location $repoRoot
         try {
-            $escaped = $ServiceName.Replace("'", "''")
-            $cim = Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $escaped) -ErrorAction Stop
-            if ($cim) {
-                return [pscustomobject]@{
-                    Name   = $cim.Name
-                    Status = $cim.State
-                }
-            }
-        } catch {
-            return $null
+            & $node.Source @arguments | Out-Host
+            $runnerExitCode = $LASTEXITCODE
+        } finally {
+            Pop-Location
         }
-        return $null
-    }
-}
-
-function Get-ServiceFailureActionsSnapshot {
-    param([Parameter(Mandatory = $true)][string]$ServiceName)
-
-    try {
-        $output = sc.exe qfailure $ServiceName 2>&1
+        if ($runnerExitCode -ne 0) { throw "Grouped runtime regression exited with code $runnerExitCode. Evidence: $runEvidence" }
+        $resultsPath = Join-Path $runEvidence 'results.json'
+        if (-not (Test-Path -LiteralPath $resultsPath -PathType Leaf)) { throw "Grouped runtime regression produced no results: $resultsPath" }
+        $results = Get-Content -LiteralPath $resultsPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        if ($results.allOk -ne $true -or $results.fatal) { throw "Grouped runtime regression reported failure. Evidence: $resultsPath" }
+        foreach ($phase in @('package_preflight', 'js_local_tests', 'meshcentral_same_size_contracts', 'native_cli', 'gui_lifecycle')) {
+            $completed = @($results.phaseResults | Where-Object { $_.name -eq $phase -and $_.passed -eq $true })
+            if ($completed.Count -ne 1) { throw "Grouped runtime phase did not pass: $phase. Evidence: $resultsPath" }
+        }
+        Write-TestResult -TestName 'Runtime: Grouped Lifecycle' -Status 'Pass' -Message "All lifecycle phases passed. Evidence: $resultsPath"
     } catch {
-        return $null
-    }
-    if ($LASTEXITCODE -ne 0) { return $null }
-
-    $resetPeriod = $null
-    $actions = @()
-    foreach ($line in $output) {
-        if ($line -match 'RESET_PERIOD\s*\((?:in\s+)?seconds\)\s*:\s*(\d+)') {
-            $resetPeriod = [int]$matches[1]
-            continue
-        }
-        if ($line -match '([A-Z ]+)\s*--\s*Delay\s*=\s*(\d+)\s*milliseconds') {
-            $token = ($matches[1] -replace '\s+', '').ToLowerInvariant()
-            if ($token -eq 'run') { $token = 'runcommand' }
-            $actions += [pscustomobject]@{
-                Type    = $token
-                DelayMs = [int]$matches[2]
-            }
-        }
-    }
-
-    try {
-        $flagOutput = sc.exe qfailureflag $ServiceName 2>&1
-    } catch {
-        $flagOutput = @()
-    }
-    $applyOnCrash = $null
-    foreach ($line in $flagOutput) {
-        if ($line -match 'FAILURE_ACTIONS_ON_NONCRASH_FAILURES\s*:\s*([A-Za-z0-9]+)') {
-            $token = $matches[1].Trim().ToLowerInvariant()
-            switch ($token) {
-                '1' { $applyOnCrash = $true }
-                '0' { $applyOnCrash = $false }
-                'true' { $applyOnCrash = $true }
-                'false' { $applyOnCrash = $false }
-                Default { $applyOnCrash = $null }
-            }
-            break
-        }
-    }
-
-    return [pscustomobject]@{
-        ResetPeriod = if ($resetPeriod -ne $null) { $resetPeriod } else { 0 }
-        Actions     = $actions
-        ApplyOnCrash = $applyOnCrash
-    }
-}
-
-function Get-ExpectedServiceRecoveryProfile {
-    param([pscustomobject]$BrandingConfig)
-
-    if (-not $BrandingConfig -or -not $BrandingConfig.persistence) {
-        return $null
-    }
-
-    $watchdog = $BrandingConfig.persistence.watchdog
-    $serviceRecovery = $BrandingConfig.persistence.serviceRecovery
-
-    $profile = [pscustomobject]@{
-        Enabled      = $false
-        ResetPeriod  = 0
-        DelayMs      = 0
-        ApplyOnCrash = $false
-        Actions      = @()
-    }
-
-    if ($serviceRecovery -and ($serviceRecovery.enabled -eq $true -or $serviceRecovery.enabled -eq 1)) {
-        $profile.Enabled = $true
-        $profile.ResetPeriod = [int]$serviceRecovery.resetPeriod
-        if ($profile.ResetPeriod -le 0) { $profile.ResetPeriod = 86400 }
-        $profile.DelayMs = [int]$serviceRecovery.restartDelay
-        if ($profile.DelayMs -le 0) { $profile.DelayMs = 10000 }
-        if ($watchdog) {
-            $profile.ApplyOnCrash = [bool]$watchdog.restartOnCrash
-        } else {
-            $profile.ApplyOnCrash = $true
-        }
-        $actionTokens = @()
-        if ($serviceRecovery.actions) {
-            foreach ($action in $serviceRecovery.actions) {
-                if ([string]::IsNullOrWhiteSpace($action)) { continue }
-                $actionTokens += $action.ToString().Trim().ToLowerInvariant()
-            }
-        }
-        if ($actionTokens.Count -eq 0) {
-            $actionTokens = @('restart','restart','restart')
-        }
-        $profile.Actions = $actionTokens | ForEach-Object {
-            [pscustomobject]@{
-                Type    = $_
-                DelayMs = $profile.DelayMs
-            }
-        }
-        return $profile
-    }
-
-    if ($watchdog -and ($watchdog.enabled -eq $true -or $watchdog.enabled -eq 1)) {
-        $profile.Enabled = $true
-        $profile.DelayMs = [math]::Max(1, [int]$watchdog.restartDelay) * 1000
-        $profile.ResetPeriod = [int]$watchdog.intervalSeconds
-        if ($profile.ResetPeriod -le 0) { $profile.ResetPeriod = 86400 }
-        $profile.ApplyOnCrash = [bool]$watchdog.restartOnCrash
-        $profile.Actions = 0..2 | ForEach-Object {
-            [pscustomobject]@{
-                Type    = 'restart'
-                DelayMs = $profile.DelayMs
-            }
-        }
-        return $profile
-    }
-
-    return $profile
-}
-
-function Test-ServiceRecoveryConfiguration {
-    param(
-        [Parameter(Mandatory = $true)][string]$ServiceName,
-        [pscustomobject]$BrandingConfig
-    )
-
-    $expected = Get-ExpectedServiceRecoveryProfile -BrandingConfig $BrandingConfig
-    if (-not $expected) {
-        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Branding configuration unavailable; SCM recovery not evaluated."
-        return
-    }
-    if (-not $expected.Enabled) {
-        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Pass" -Message "Watchdog/service recovery disabled per branding profile."
-        return
-    }
-
-    $actual = Get-ServiceFailureActionsSnapshot -ServiceName $ServiceName
-    if (-not $actual) {
-        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Fail" -Message "Unable to query SCM failure actions via sc.exe."
-        return
-    }
-
-    $mismatches = @()
-    if ($actual.ResetPeriod -ne $expected.ResetPeriod) {
-        $mismatches += ("ResetPeriod expected {0}s but found {1}s" -f $expected.ResetPeriod, $actual.ResetPeriod)
-    }
-    if ($actual.ApplyOnCrash -ne $expected.ApplyOnCrash) {
-        $mismatches += ("FailureActionsOnNonCrash expected {0} but found {1}" -f $expected.ApplyOnCrash, $actual.ApplyOnCrash)
-    }
-    if ($actual.Actions.Count -ne $expected.Actions.Count) {
-        $mismatches += ("Expected {0} SCM failure actions but found {1}" -f $expected.Actions.Count, $actual.Actions.Count)
-    } else {
-        for ($i = 0; $i -lt $expected.Actions.Count; $i++) {
-            $exp = $expected.Actions[$i]
-            $act = $actual.Actions[$i]
-            if ($act.Type -ne $exp.Type) {
-                $mismatches += ("Action {0} expected '{1}' but found '{2}'" -f ($i + 1), $exp.Type, $act.Type)
-            }
-            if ($act.DelayMs -ne $exp.DelayMs) {
-                $mismatches += ("Action {0} delay expected {1}ms but found {2}ms" -f ($i + 1), $exp.DelayMs, $act.DelayMs)
-            }
-        }
-    }
-
-    if ($mismatches.Count -eq 0) {
-        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Pass" -Message ("SCM recovery matches branding profile ({0} actions, reset {1}s)" -f $expected.Actions.Count, $expected.ResetPeriod)
-    } else {
-        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Fail" -Message ($mismatches -join "; ")
-    }
-}
-
-function Invoke-RuntimeInstallValidation {
-    param(
-        [Parameter(Mandatory = $true)][string]$BinaryPath,
-        [Parameter(Mandatory = $true)][string]$ServiceName,
-        [pscustomobject]$BrandingConfig
-    )
-
-    $runtimeRecoveryRecorded = $false
-    $runtimePersistenceRecorded = $false
-
-    if (-not (Test-Path -LiteralPath $BinaryPath)) {
-        Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message "Binary not found at $BinaryPath"
-        Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message "Skipped install/state validation"
-        Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message "Skipped uninstall validation"
-        if (-not $runtimeRecoveryRecorded) {
-            Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: runtime binary missing"
-            $runtimeRecoveryRecorded = $true
-        }
-        if (-not $runtimePersistenceRecorded) {
-            Write-RuntimePersistenceSkip "runtime binary missing"
-            $runtimePersistenceRecorded = $true
-        }
-        return
-    }
-
-    Ensure-BinaryProvisioningManifest -BinaryPath $BinaryPath -Quiet | Out-Null
-
-    $existing = Get-ServiceSnapshot -ServiceName $ServiceName
-    if ($existing) {
-        Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message ("Service '{0}' already exists; skipping install/uninstall validation." -f $ServiceName)
-        Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message ("Skipped: service '{0}' pre-exists" -f $ServiceName)
-        Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message ("Skipped: service '{0}' pre-exists" -f $ServiceName)
-        if (-not $runtimeRecoveryRecorded) {
-            Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message ("Skipped: service '{0}' pre-exists" -f $ServiceName)
-            $runtimeRecoveryRecorded = $true
-        }
-        if (-not $runtimePersistenceRecorded) {
-            Write-RuntimePersistenceSkip ("service '{0}' pre-exists" -f $ServiceName)
-            $runtimePersistenceRecorded = $true
-        }
-        return
-    }
-
-    Reset-InstallerLog
-
-    $stagedBinary = $null
-    try {
-        $stagedBinary = Stage-RuntimeBinary -BinaryPath $BinaryPath -Purpose 'install'
-    } catch {
-        Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message ("Unable to stage runtime binary: {0}" -f $_.Exception.Message)
-        Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message "Skipped due to staging failure"
-        Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message "Skipped due to staging failure"
-        if (-not $runtimeRecoveryRecorded) {
-            Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped due to staging failure"
-            $runtimeRecoveryRecorded = $true
-        }
-        if (-not $runtimePersistenceRecorded) {
-            Write-RuntimePersistenceSkip "staging failure"
-            $runtimePersistenceRecorded = $true
-        }
-        return
-    }
-    $runtimeBinary = $stagedBinary.BinaryPath
-
-    $installed = $false
-    try {
-        $installExit = Invoke-ElevatedAgentCommand -BinaryPath $runtimeBinary -Arguments @('-fullinstall') -TimeoutSeconds 180 -Purpose "runtime install"
-        if ($installExit -ne 0) {
-            $logTail = Get-InstallerLogTail
-            $msg = ("Install command exited with code {0}" -f $installExit)
-            if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
-            Write-TestResult -TestName "Runtime: Install" -Status "Fail" -Message $msg
-            if (-not $runtimeRecoveryRecorded) {
-                Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: install did not complete"
-                $runtimeRecoveryRecorded = $true
-            }
-            if (-not $runtimePersistenceRecorded) {
-                Write-RuntimePersistenceSkip "install command failed"
-                $runtimePersistenceRecorded = $true
-            }
-            return
-        }
-
-        Start-Sleep -Milliseconds 500
-        $svc = Get-ServiceSnapshot -ServiceName $ServiceName
-        if ($svc) {
-            Write-TestResult -TestName "Runtime: Install" -Status "Pass" -Message ("Service '{0}' registered (Status: {1})" -f $ServiceName, $svc.Status)
-            $installed = $true
-        } else {
-            Write-TestResult -TestName "Runtime: Install" -Status "Fail" -Message ("Service '{0}' not visible after install" -f $ServiceName)
-            Write-ServiceDebugInfo -ServiceName $ServiceName
-            if (-not $runtimePersistenceRecorded) {
-                Write-RuntimePersistenceSkip ("service '{0}' not visible after install" -f $ServiceName)
-                $runtimePersistenceRecorded = $true
-            }
-            return
-        }
-
-        $stateOutput = & $runtimeBinary "-state" 2>&1
-        $stateExit = Get-NativeExitCode
-        if ($stateOutput) {
-            Write-Host "[DEBUG] State output:" -ForegroundColor Yellow
-            $stateOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
-        }
-        if ($stateExit -eq 0) {
-            $svc = Get-ServiceSnapshot -ServiceName $ServiceName
-            if ($svc) {
-                Write-TestResult -TestName "Runtime: Service State" -Status "Pass" -Message ("'{0}' currently {1}" -f $ServiceName, $svc.Status)
-            } else {
-                Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message ("State command succeeded but service '{0}' disappeared" -f $ServiceName)
-                Write-ServiceDebugInfo -ServiceName $ServiceName
-            }
-        } else {
-            Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message ("State command exited with code {0}" -f $stateExit)
-        }
-        Test-ServiceRecoveryConfiguration -ServiceName $ServiceName -BrandingConfig $BrandingConfig
-        $runtimeRecoveryRecorded = $true
-        Test-WmiRestartTask -ServiceName $ServiceName -BrandingConfig $BrandingConfig
-        Test-RuntimePersistenceRefresh -BinaryPath $runtimeBinary
-        $runtimePersistenceRecorded = $true
-    }
-    catch {
-        $logTail = Get-InstallerLogTail
-        $msg = ("Install command failed: {0}" -f $_.Exception.Message)
-        if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
-        Write-TestResult -TestName "Runtime: Install" -Status "Fail" -Message $msg
-        if (-not $runtimeRecoveryRecorded) {
-            Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: install command failed"
-            $runtimeRecoveryRecorded = $true
-        }
-        if (-not $runtimePersistenceRecorded) {
-            Write-RuntimePersistenceSkip "install command failed"
-            $runtimePersistenceRecorded = $true
-        }
-        return
-    }
-    finally {
-        if ($installed) {
-            try {
-                $uninstallExit = Invoke-ElevatedAgentCommand -BinaryPath $runtimeBinary -Arguments @('-fulluninstall') -TimeoutSeconds 180 -Purpose "runtime uninstall"
-            } catch {
-                $logTail = Get-InstallerLogTail
-                $msg = ("Uninstall command failed: {0}" -f $_.Exception.Message)
-                if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
-                Write-TestResult -TestName "Runtime: Uninstall" -Status "Fail" -Message $msg
-                $uninstallExit = $null
-            }
-
-            if ($uninstallExit -ne 0 -and $uninstallExit -ne $null) {
-                $logTail = Get-InstallerLogTail
-                $msg = ("Uninstall command exited with code {0}" -f $uninstallExit)
-                if ($logTail) { $msg += "`nInstaller log:`n$logTail" }
-                Write-TestResult -TestName "Runtime: Uninstall" -Status "Fail" -Message $msg
-            } elseif ($uninstallExit -ne $null) {
-                if (Ensure-RuntimeServiceAbsent -ServiceName $ServiceName -BinaryPath $BinaryPath) {
-                    Write-TestResult -TestName "Runtime: Uninstall" -Status "Pass" -Message ("Service '{0}' removed" -f $ServiceName)
-                } else {
-                    Write-TestResult -TestName "Runtime: Uninstall" -Status "Fail" -Message ("Service '{0}' still registered after uninstall" -f $ServiceName)
-                    Write-ServiceDebugInfo -ServiceName $ServiceName
-                }
-            }
-        }
-
-        if ($stagedBinary -and (Test-Path -LiteralPath $stagedBinary.Directory)) {
-            Remove-Item -LiteralPath $stagedBinary.Directory -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
-function Invoke-RuntimeServiceHostValidation {
-    param(
-        [Parameter(Mandatory = $true)][string]$BinaryPath,
-        [Parameter(Mandatory = $true)][string]$ServiceName
-    )
-
-    if (-not (Test-Path -LiteralPath $BinaryPath)) {
-        Write-TestResult -TestName "Runtime: ServiceHost Register" -Status "Warning" -Message "Binary not found at $BinaryPath"
-        return
-    }
-
-    Ensure-BinaryProvisioningManifest -BinaryPath $BinaryPath -Quiet | Out-Null
-    $message = "Direct executable svchost registration validation is retired. Run install, update, and uninstall through the MeshLifecycleHostW rundll32 lifecycle host."
-    Write-TestResult -TestName "Runtime: ServiceHost Register" -Status "Warning" -Message $message
-    Write-TestResult -TestName "Runtime: ServiceHost Status" -Status "Warning" -Message $message
-    Write-TestResult -TestName "Runtime: ServiceHost Unregister" -Status "Warning" -Message $message
-}
-
-function Ensure-RuntimeServiceAbsent {
-    param(
-        [Parameter(Mandatory = $true)][string]$ServiceName,
-        [Parameter(Mandatory = $true)][string]$BinaryPath
-    )
-
-    $serviceMetadata = Get-BrandingServiceMetadata
-    $baseNames = Get-DiagnosticHostBaseNames -ServiceName $ServiceName -ServiceDisplayName $serviceMetadata.ServiceDisplayName -AdditionalNames @($serviceMetadata.ServiceName)
-    $persistenceState = Get-DiagnosticHostPersistenceState
-    $scheduledTaskNames = Get-DiagnosticHostScheduledTaskNames -BaseNames $baseNames -PersistenceState $persistenceState
-
-    $existing = Get-ServiceSnapshot -ServiceName $ServiceName
-    if ($existing) {
-        Write-Host ("[INFO] Removing existing service '{0}' before runtime validation..." -f $ServiceName) -ForegroundColor Cyan
-    } else {
-        Write-Host ("[INFO] Service '{0}' not registered; forcing cleanup to clear stale artifacts..." -f $ServiceName) -ForegroundColor Cyan
-    }
-    $stagedCleanup = $null
-    $cleanupExit = $null
-    try {
-        if (Test-Path -LiteralPath $BinaryPath) {
-            $stagedCleanup = Stage-RuntimeBinary -BinaryPath $BinaryPath -Purpose 'cleanup'
-            $cleanupExit = Invoke-ElevatedAgentCommand -BinaryPath $stagedCleanup.BinaryPath -Arguments @('-fulluninstall') -TimeoutSeconds 180 -Purpose "runtime cleanup full uninstall"
-            if ($cleanupExit -ne 0 -and $cleanupExit -ne $null) {
-                $logTail = Get-InstallerLogTail
-                Write-Host ("[WARN] Full uninstall exited with code {0}" -f $cleanupExit) -ForegroundColor Yellow
-                if ($logTail) {
-                    Write-Host "[WARN] Installer log tail:" -ForegroundColor Yellow
-                    Write-Host $logTail -ForegroundColor Yellow
-                }
-            }
-        }
-    } catch {
-        Write-Host ("[WARN] Initial uninstall attempt failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+        Write-TestResult -TestName 'Runtime: Grouped Lifecycle' -Status 'Fail' -Message $_.Exception.Message
     } finally {
-        if ($stagedCleanup -and (Test-Path -LiteralPath $stagedCleanup.Directory)) {
-            Remove-Item -LiteralPath $stagedCleanup.Directory -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        $env:BRANDING_CONFIG_PATH = $previousBrandingPath
     }
-
-    Start-Sleep -Milliseconds 750
-    $existing = Get-ServiceSnapshot -ServiceName $ServiceName
-    if ($existing) {
-        try {
-            sc.exe stop $ServiceName 2>$null | Out-Null
-        } catch { }
-        try {
-            sc.exe delete $ServiceName 2>$null | Out-Null
-        } catch {
-            Write-Host ("[WARN] Unable to delete service via sc.exe: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-        }
-        Start-Sleep -Milliseconds 750
-    }
-
-    Remove-DiagnosticHostArtifacts
-    Remove-DiagnosticHostScheduledTasks -TaskNames $scheduledTaskNames
-    Remove-DiagnosticHostRunKey -CandidateNames $baseNames
-
-    $remainingTasks = Get-DiagnosticHostScheduledTaskState -TaskNames $scheduledTaskNames
-    if ($remainingTasks -and $remainingTasks.Count -gt 0) {
-        $taskList = ($remainingTasks | ForEach-Object { "{0}{1}" -f $_.TaskPath, $_.TaskName } | Sort-Object -Unique) -join ', '
-        Write-Host ("[WARN] Scheduled tasks still present: {0}" -f $taskList) -ForegroundColor Yellow
-    } else {
-        Write-Host "[INFO] Scheduled tasks cleared" -ForegroundColor DarkGray
-    }
-
-    $remainingRunKeys = Get-DiagnosticHostRunKeyState -CandidateNames $baseNames
-    if ($remainingRunKeys -and $remainingRunKeys.Count -gt 0) {
-        $runKeyList = ($remainingRunKeys | ForEach-Object { $_.Name }) -join ', '
-        Write-Host ("[WARN] Run key entries still exist: {0}" -f $runKeyList) -ForegroundColor Yellow
-    } else {
-        Write-Host "[INFO] Run key entries cleared" -ForegroundColor DarkGray
-    }
-
-    $existing = Get-ServiceSnapshot -ServiceName $ServiceName
-    return (-not $existing)
 }
 
 function Test-BinaryContainsStringAny {
@@ -2069,18 +978,18 @@ Write-Host ""
 Write-Host "Test Suite 2: Branding Configuration" -ForegroundColor Cyan
 Write-Host "------------------------------------" -ForegroundColor Cyan
 
-if (-not $brandingConfigPath) {
-    $brandingConfigPath = Join-Path $PSScriptRoot "branding_config.json"
+if (-not $resolvedBrandingConfigPath) {
+    $resolvedBrandingConfigPath = Join-Path $PSScriptRoot "branding_config.json"
 }
 $brandingHeaderPath = Join-Path $PSScriptRoot "meshcore\generated\meshagent_branding.h"
 
 # Test 2.1: Branding Config Exists
-if (Test-Path $brandingConfigPath) {
-    Write-TestResult -TestName "Branding Config Exists" -Status "Pass" -Message "Found at $brandingConfigPath"
+if (Test-Path $resolvedBrandingConfigPath) {
+    Write-TestResult -TestName "Branding Config Exists" -Status "Pass" -Message "Found at $resolvedBrandingConfigPath"
 
     # Test 2.2: Branding Config is Valid JSON
     try {
-        $brandingConfig = Get-Content -Path $brandingConfigPath -Raw | ConvertFrom-Json
+        $brandingConfig = Get-Content -Path $resolvedBrandingConfigPath -Raw | ConvertFrom-Json
         Write-TestResult -TestName "Branding Config Valid JSON" -Status "Pass" -Message "Successfully parsed JSON"
 
         # Test 2.3: Required Fields Present
@@ -2137,7 +1046,7 @@ if (Test-Path $brandingConfigPath) {
         Write-TestResult -TestName "Branding Config Valid JSON" -Status "Fail" -Message "JSON parsing error: $_"
     }
 } else {
-    Write-TestResult -TestName "Branding Config Exists" -Status "Fail" -Message "Branding configuration not found at $brandingConfigPath"
+    Write-TestResult -TestName "Branding Config Exists" -Status "Fail" -Message "Branding configuration not found at $resolvedBrandingConfigPath"
 }
 
 # Test 2.6: Branding Header Generated
@@ -2255,69 +1164,16 @@ if ($brandingConfig) {
 if ($RuntimeValidation) {
     Write-Host "Test Suite 3: Runtime Validation" -ForegroundColor Cyan
     Write-Host "---------------------------------" -ForegroundColor Cyan
-
-    function Write-RuntimePersistenceSkip([string]$Reason) {
-        Write-TestResult -TestName "Runtime: WMI Task" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
+    if ([string]::IsNullOrWhiteSpace($RuntimeDllPath)) {
+        $RuntimeDllPath = Resolve-BinaryPath -Candidates @(
+            (Join-Path $BinaryPath 'MeshService-2022.dll'),
+            (Join-Path $repoRoot 'meshservice/x64/MeshServiceBundle/MeshService-2022.dll')
+        )
     }
-
-    function Write-RuntimeSkipResults([string]$Reason) {
-        Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
-        Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
-        Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
-        Write-TestResult -TestName "Runtime: ServiceHost Register" -Status "Warning" -Message $Reason
-        Write-TestResult -TestName "Runtime: ServiceHost Status" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
-        Write-TestResult -TestName "Runtime: ServiceHost Unregister" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
-        Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message ("Skipped: {0}" -f $Reason)
-        Write-RuntimePersistenceSkip -Reason $Reason
+    if ([string]::IsNullOrWhiteSpace($RuntimeEvidencePath)) {
+        $RuntimeEvidencePath = Join-Path $repoRoot 'artifacts/validation/runtime'
     }
-
-    if (-not (Test-IsAdmin)) {
-        Write-RuntimeSkipResults "Administrator privileges are required for runtime validation."
-    }
-    elseif (-not $brandingConfig) {
-        Write-RuntimeSkipResults "Branding configuration unavailable; cannot determine service metadata."
-    }
-    elseif (-not $x64Binary) {
-        Write-RuntimeSkipResults "x64 binary not found; cannot perform runtime validation."
-    }
-    else {
-        try {
-            Ensure-EmbeddedPayloadResource
-            $runtimeServiceName = $null
-            if ($brandingConfig.branding) {
-                $runtimeServiceName = ($brandingConfig.branding | Select-Object -ExpandProperty serviceFile -ErrorAction SilentlyContinue)
-                if (-not $runtimeServiceName) {
-                    $runtimeServiceName = ($brandingConfig.branding | Select-Object -ExpandProperty serviceName -ErrorAction SilentlyContinue)
-                }
-                if (-not $runtimeServiceName) {
-                    $runtimeServiceName = ($brandingConfig.branding | Select-Object -ExpandProperty binaryName -ErrorAction SilentlyContinue)
-                }
-            }
-            if ([string]::IsNullOrWhiteSpace($runtimeServiceName)) {
-                $runtimeServiceName = "MeshAgent"
-            }
-            if (-not (Ensure-RuntimeServiceAbsent -ServiceName $runtimeServiceName -BinaryPath $x64Binary)) {
-                Write-RuntimeSkipResults ("Runtime validation aborted: Unable to remove existing service '{0}'." -f $runtimeServiceName)
-            }
-            else {
-                if ($ServiceHostOnly) {
-                    Write-Host "[RuntimeValidation] ServiceHost-only mode: skipping installer/service recovery checks." -ForegroundColor Yellow
-                    Write-TestResult -TestName "Runtime: Install" -Status "Warning" -Message "Skipped: -ServiceHostOnly mode enforces svchost-only verification."
-                    Write-TestResult -TestName "Runtime: Service State" -Status "Warning" -Message "Skipped: -ServiceHostOnly mode."
-                    Write-TestResult -TestName "Runtime: Uninstall" -Status "Warning" -Message "Skipped: -ServiceHostOnly mode."
-                    Write-TestResult -TestName "Runtime: Service Recovery" -Status "Warning" -Message "Skipped: -ServiceHostOnly mode."
-                    Write-RuntimePersistenceSkip "-ServiceHostOnly mode"
-                }
-                else {
-                    Invoke-RuntimeInstallValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName -BrandingConfig $brandingConfig
-                }
-                Invoke-RuntimeServiceHostValidation -BinaryPath $x64Binary -ServiceName $runtimeServiceName
-            }
-        } catch {
-            Write-RuntimeSkipResults ("Runtime validation aborted: {0}" -f $_.Exception.Message)
-        }
-    }
-
+    Invoke-GroupedRuntimeValidation -PackagePath $x64Binary -DllPath $RuntimeDllPath -ConfigPath $resolvedBrandingConfigPath -EvidencePath $RuntimeEvidencePath
     Write-Host ""
 }
 
@@ -2394,6 +1250,8 @@ if ($ReportPath) {
         $report = [ordered]@{
             generatedUtc = (Get-Date).ToUniversalTime().ToString("o")
             binaryPath = $BinaryPath
+            brandingConfigPath = $resolvedBrandingConfigPath
+            runtimeEvidencePath = $RuntimeEvidencePath
             summary = [ordered]@{
                 total = $total
                 passed = $Script:TestResults.Passed

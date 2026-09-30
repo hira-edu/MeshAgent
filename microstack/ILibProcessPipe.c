@@ -33,7 +33,7 @@ limitations under the License.
 #include "ILibRemoteLogging.h"
 #include "ILibProcessPipe.h"
 #if defined(WIN32)
-#include "../meshservice/rundll32_contract.h"
+#include "../meshservice/runtime_host_contract.h"
 #endif
 #ifndef WIN32
 #include <fcntl.h>              /* Obtain O_* constant definitions */
@@ -138,26 +138,26 @@ static void ILibProcessPipe_NormalizePathA(const char *value, char *normalized, 
 		if (normalized[len] == '/') { normalized[len] = '\\'; }
 	}
 }
-static int ILibProcessPipe_IsExactSystemRundll32TargetA(char* target)
+static int ILibProcessPipe_IsExactSystemRuntimeHostTargetA(char* target)
 {
 	char normalizedTarget[MAX_PATH * 4];
-	char systemRundll32[MAX_PATH * 4];
-	char normalizedSystemRundll32[MAX_PATH * 4];
+	char systemRuntimeHost[MAX_PATH * 4];
+	char normalizedSystemRuntimeHost[MAX_PATH * 4];
 	DWORD systemLen;
 
 	if (target == NULL || target[0] == 0) { return 0; }
 	ILibProcessPipe_NormalizePathA(target, normalizedTarget, sizeof(normalizedTarget));
 	if (normalizedTarget[0] == 0) { return 0; }
 
-	systemRundll32[0] = 0;
-	normalizedSystemRundll32[0] = 0;
-	systemLen = GetSystemDirectoryA(systemRundll32, (UINT)sizeof(systemRundll32));
-	if (systemLen == 0 || systemLen >= sizeof(systemRundll32)) { return 0; }
-	if (strcat_s(systemRundll32, sizeof(systemRundll32), "\\rundll32.exe") != 0) { return 0; }
+	systemRuntimeHost[0] = 0;
+	normalizedSystemRuntimeHost[0] = 0;
+	systemLen = GetSystemDirectoryA(systemRuntimeHost, (UINT)sizeof(systemRuntimeHost));
+	if (systemLen == 0 || systemLen >= sizeof(systemRuntimeHost)) { return 0; }
+	if (strcat_s(systemRuntimeHost, sizeof(systemRuntimeHost), "\\rundll32.exe") != 0) { return 0; }
 
-	ILibProcessPipe_NormalizePathA(systemRundll32, normalizedSystemRundll32, sizeof(normalizedSystemRundll32));
-	if (normalizedSystemRundll32[0] == 0) { return 0; }
-	return _stricmp(normalizedTarget, normalizedSystemRundll32) == 0;
+	ILibProcessPipe_NormalizePathA(systemRuntimeHost, normalizedSystemRuntimeHost, sizeof(normalizedSystemRuntimeHost));
+	if (normalizedSystemRuntimeHost[0] == 0) { return 0; }
+	return _stricmp(normalizedTarget, normalizedSystemRuntimeHost) == 0;
 }
 static int ILibProcessPipe_StringEndsWithA(const char* value, const char* suffix)
 {
@@ -182,7 +182,7 @@ static void ILibProcessPipe_SetModuleEntryRejectReasonA(const char* reasonPrefix
 	sprintf_s(scratch, sizeof(scratch), "%s-%s", reasonPrefix, reason);
 	ILibProcessPipe_SetBridgePolicyRejectReasonA(scratch);
 }
-static int ILibProcessPipe_TryParseRundll32ModuleEntryA(const char* value, const char* expectedEntry, char* modulePath, size_t modulePathLen, const char* reasonPrefix)
+static int ILibProcessPipe_TryParseRuntimeHostModuleEntryA(const char* value, const char* expectedEntry, char* modulePath, size_t modulePathLen, const char* reasonPrefix)
 {
 	const char* cursor = value;
 	const char* moduleStart = NULL;
@@ -229,11 +229,11 @@ static int ILibProcessPipe_TryParseRundll32ModuleEntryA(const char* value, const
 	if (modulePath[0] == 0) { ILibProcessPipe_SetModuleEntryRejectReasonA(reasonPrefix, "path-empty"); return 0; }
 	return 1;
 }
-static int ILibProcessPipe_IsApprovedRundll32ModuleEntryA(const char* value, const char* expectedEntry)
+static int ILibProcessPipe_IsApprovedRuntimeHostModuleEntryA(const char* value, const char* expectedEntry)
 {
 	char modulePath[MAX_PATH * 4];
 
-	if (!ILibProcessPipe_TryParseRundll32ModuleEntryA(value, expectedEntry, modulePath, sizeof(modulePath), "module")) { return 0; }
+	if (!ILibProcessPipe_TryParseRuntimeHostModuleEntryA(value, expectedEntry, modulePath, sizeof(modulePath), "module")) { return 0; }
 	return ILibProcessPipe_StringEndsWithA(modulePath, ".dll");
 }
 static int ILibProcessPipe_IsExactBridgeModuleDllPathA(const char* modulePath, const char* expectedEntry)
@@ -297,15 +297,15 @@ static int ILibProcessPipe_IsApprovedBridgeModuleArgumentA(const char* value)
 {
 	char modulePath[MAX_PATH * 4];
 
-	if (!ILibProcessPipe_TryParseRundll32ModuleEntryA(value, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, modulePath, sizeof(modulePath), "module")) { return 0; }
-	return ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A);
+	if (!ILibProcessPipe_TryParseRuntimeHostModuleEntryA(value, MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A, modulePath, sizeof(modulePath), "module")) { return 0; }
+	return ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A);
 }
 static int ILibProcessPipe_IsApprovedConsoleBridgeModuleArgumentA(const char* value)
 {
 	char modulePath[MAX_PATH * 4];
 
-	if (!ILibProcessPipe_TryParseRundll32ModuleEntryA(value, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A, modulePath, sizeof(modulePath), "console-module")) { return 0; }
-	return ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A);
+	if (!ILibProcessPipe_TryParseRuntimeHostModuleEntryA(value, MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_A, modulePath, sizeof(modulePath), "console-module")) { return 0; }
+	return ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_A);
 }
 static int ILibProcessPipe_IsApprovedBridgePipeNameA(const char* value, const char* suffix)
 {
@@ -379,38 +379,38 @@ static int ILibProcessPipe_IsApprovedUserConsentPipeNameA(const char* value)
 }
 static int ILibProcessPipe_IsApprovedLifecycleContractLaunchA(char* target, char* const* parameters)
 {
-	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
+	if (!ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target)) { return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] != NULL) { return 0; }
-	if (!ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_LIFECYCLE_A)) { return 0; }
+	if (!ILibProcessPipe_IsApprovedRuntimeHostModuleEntryA(parameters[0], MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_A)) { return 0; }
 	return ILibProcessPipe_StringEndsWithA(parameters[1], ".ini");
 }
 static int ILibProcessPipe_IsApprovedUmhHostContractLaunchA(char* target, char* const* parameters)
 {
-	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
+	if (!ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target)) { return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] != NULL) { return 0; }
-	if (!ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_UMH_HOST_A)) { return 0; }
+	if (!ILibProcessPipe_IsApprovedRuntimeHostModuleEntryA(parameters[0], MESH_RUNTIME_HOST_ENTRY_UMH_HOST_A)) { return 0; }
 	return ILibProcessPipe_StringEndsWithA(parameters[1], ".ini");
 }
 static int ILibProcessPipe_IsApprovedUserConsentContractLaunchA(char* target, char* const* parameters)
 {
-	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
+	if (!ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target)) { return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] == NULL || parameters[3] != NULL) { return 0; }
-	if (!ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_USER_CONSENT_A)) { return 0; }
+	if (!ILibProcessPipe_IsApprovedRuntimeHostModuleEntryA(parameters[0], MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_A)) { return 0; }
 	if (!ILibProcessPipe_IsApprovedUserConsentPipeNameA(parameters[1])) { return 0; }
 	return ILibProcessPipe_StringEndsWithA(parameters[2], ".ini");
 }
 static int ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(char* target, char* const* parameters)
 {
-	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
+	if (!ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target)) { return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] != NULL) { return 0; }
-	if (!ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A)) { return 0; }
+	if (!ILibProcessPipe_IsApprovedRuntimeHostModuleEntryA(parameters[0], MESH_RUNTIME_HOST_ENTRY_PREPROTECTION_CAPTURE_A)) { return 0; }
 	return parameters[1][0] != 0 ? 1 : 0;
 }
 static int ILibProcessPipe_IsApprovedSelfTestContractLaunchA(char* target, char* const* parameters)
 {
-	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { return 0; }
+	if (!ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target)) { return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL) { return 0; }
-	return ILibProcessPipe_IsApprovedRundll32ModuleEntryA(parameters[0], MESH_RUNDLL32_ENTRY_SELFTEST_A);
+	return ILibProcessPipe_IsApprovedRuntimeHostModuleEntryA(parameters[0], MESH_RUNTIME_HOST_ENTRY_SELFTEST_A);
 }
 static int ILibProcessPipe_IsApprovedConsoleBridgeShellA(const char* value)
 {
@@ -455,7 +455,7 @@ static int ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(char* target, char* co
 	int seenMode = 0;
 	int tokenMode = 0;
 
-	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-target"); return 0; }
+	if (!ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("console-target"); return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] == NULL || parameters[3] == NULL || parameters[4] == NULL || parameters[5] == NULL)
 	{
 		ILibProcessPipe_SetBridgePolicyRejectReasonA("console-arity");
@@ -499,26 +499,26 @@ static int ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(char* target, char* co
 	ILibProcessPipe_SetBridgePolicyRejectReasonA("ok-console");
 	return 1;
 }
-static int ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(const char* value, const char* expectedEntry, char* output, size_t outputLen)
+static int ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(const char* value, const char* expectedEntry, char* output, size_t outputLen)
 {
 	char modulePath[MAX_PATH * 4];
 
 	if (value == NULL || expectedEntry == NULL || output == NULL || outputLen == 0) { return 0; }
 	output[0] = 0;
-	if (!ILibProcessPipe_TryParseRundll32ModuleEntryA(value, expectedEntry, modulePath, sizeof(modulePath), "cmdline-module")) { return 0; }
+	if (!ILibProcessPipe_TryParseRuntimeHostModuleEntryA(value, expectedEntry, modulePath, sizeof(modulePath), "cmdline-module")) { return 0; }
 	if (strchr(modulePath, '"') != NULL || strchr(expectedEntry, '"') != NULL) { return 0; }
 	return (sprintf_s(output, outputLen, "\"%s\",%s", modulePath, expectedEntry) > 0) ? 1 : 0;
 }
-static int ILibProcessPipe_FormatKnownRundll32ModuleEntryForCommandLineA(const char* value, char* output, size_t outputLen)
+static int ILibProcessPipe_FormatKnownRuntimeHostModuleEntryForCommandLineA(const char* value, char* output, size_t outputLen)
 {
-	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A, output, outputLen)) { return 1; }
-	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_CONSOLE_BRIDGE_A, output, outputLen)) { return 1; }
-	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_LIFECYCLE_A, output, outputLen)) { return 1; }
-	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_UMH_HOST_A, output, outputLen)) { return 1; }
-	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_USER_CONSENT_A, output, outputLen)) { return 1; }
-	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_PREPROTECTION_CAPTURE_A, output, outputLen)) { return 1; }
-	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_SELFTEST_A, output, outputLen)) { return 1; }
-	if (ILibProcessPipe_FormatRundll32ModuleEntryForCommandLineA(value, MESH_RUNDLL32_ENTRY_KVM_PROBE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_UMH_HOST_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_PREPROTECTION_CAPTURE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_SELFTEST_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_KVM_PROBE_A, output, outputLen)) { return 1; }
 	return 0;
 }
 static int ILibProcessPipe_AppendRawCommandLineArgumentA(char* output, size_t outputLen, size_t* offset, const char* value)
@@ -590,14 +590,14 @@ static int ILibProcessPipe_AppendQuotedCommandLineArgumentA(char* output, size_t
 }
 static int ILibProcessPipe_AppendWindowsCommandLineArgumentA(char* target, char* const* parameters, int parameterIndex, char* output, size_t outputLen, size_t* offset)
 {
-	char rundll32ModuleEntry[MAX_PATH * 4 + 128];
+	char runtimeHostModuleEntry[MAX_PATH * 4 + 128];
 
 	if (parameters == NULL || parameters[parameterIndex] == NULL) { return 0; }
 	if (parameterIndex == 0 &&
-		ILibProcessPipe_IsExactSystemRundll32TargetA(target) &&
-		ILibProcessPipe_FormatKnownRundll32ModuleEntryForCommandLineA(parameters[0], rundll32ModuleEntry, sizeof(rundll32ModuleEntry)))
+		ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target) &&
+		ILibProcessPipe_FormatKnownRuntimeHostModuleEntryForCommandLineA(parameters[0], runtimeHostModuleEntry, sizeof(runtimeHostModuleEntry)))
 	{
-		return ILibProcessPipe_AppendRawCommandLineArgumentA(output, outputLen, offset, rundll32ModuleEntry);
+		return ILibProcessPipe_AppendRawCommandLineArgumentA(output, outputLen, offset, runtimeHostModuleEntry);
 	}
 	return ILibProcessPipe_AppendQuotedCommandLineArgumentA(output, outputLen, offset, parameters[parameterIndex]);
 }
@@ -616,7 +616,7 @@ static int ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(char* target, char* co
 	int sawRemoteCursor = 0;
 
 	ILibProcessPipe_SetBridgePolicyRejectReasonA("checking");
-	if (!ILibProcessPipe_IsExactSystemRundll32TargetA(target)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("target"); return 0; }
+	if (!ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target)) { ILibProcessPipe_SetBridgePolicyRejectReasonA("target"); return 0; }
 	if (parameters == NULL || parameters[0] == NULL || parameters[1] == NULL || parameters[2] == NULL || parameters[3] == NULL) { ILibProcessPipe_SetBridgePolicyRejectReasonA("arity"); return 0; }
 	if (!ILibProcessPipe_IsApprovedBridgeModuleArgumentA(parameters[0])) { return 0; }
 	if (!ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[1], "_in")) { ILibProcessPipe_SetBridgePolicyRejectReasonA("input-pipe"); return 0; }
@@ -884,27 +884,27 @@ static int ILibProcessPipe_IsWindowsSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedLifecycleContractLaunchA(target, parameters))
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-lifecycle", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow-runtime-host-lifecycle", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedUmhHostContractLaunchA(target, parameters))
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-umh-host", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-umh-host", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedUserConsentContractLaunchA(target, parameters))
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-userconsent", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-userconsent", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(target, parameters))
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-preprotection", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-preprotection", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedSelfTestContractLaunchA(target, parameters))
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-selftest", "rundll32-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-selftest", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 

@@ -1,8 +1,8 @@
 /*
- * MeshAgent ServiceHost.exe Hosting Implementation
+ * MeshAgent rundll32 Service Hosting Implementation
  *
- * Hosts MeshAgent as a service DLL in a configured Windows svchost group instead
- * of a standalone process. The selected host mode remains visible in service
+ * Hosts MeshAgent through the approved MeshServiceHostW rundll32 callback
+ * and an own-process SCM service. The selected host mode remains visible in service
  * metadata and operator logs.
  */
 
@@ -20,7 +20,7 @@
 #include "service_utils.h"
 #include "service_defaults.h"
 #include "service_security.h"
-#include "rundll32_contract.h"
+#include "runtime_host_contract.h"
 #include "../meshcore/agentcore.h"
 #include "../meshcore/meshdefines.h"
 #include "../meshcore/KVM/Windows/kvm.h"
@@ -38,10 +38,26 @@ static void MeshAgent_Run(MeshAgentHostContainer* agent)
     }
 }
 
-// Global state for svchost-hosted service
+// Global state for rundll32-hosted service
 static SERVICE_STATUS_HANDLE g_ServiceHostStatusHandle = NULL;
 static SERVICE_STATUS g_ServiceHostStatus = {0};
 static BOOL g_ServiceHostRunning = FALSE;
+// SCM supplies the installed key name even when runtime branding differs from
+// the build defaults. Use that identity for controls and the agent runtime.
+static wchar_t g_ServiceHostServiceName[256] = {0};
+
+static BOOL ServiceHost_SetScmServiceName(DWORD argc, LPWSTR* argv)
+{
+    g_ServiceHostServiceName[0] = L'\0';
+    if (argc == 0 || argv == NULL || argv[0] == NULL || argv[0][0] == L'\0' ||
+        wcslen(argv[0]) >= _countof(g_ServiceHostServiceName) ||
+        wcschr(argv[0], L'\\') != NULL || wcschr(argv[0], L'/') != NULL)
+    {
+        SetLastError(ERROR_INVALID_NAME);
+        return FALSE;
+    }
+    return SUCCEEDED(StringCchCopyW(g_ServiceHostServiceName, _countof(g_ServiceHostServiceName), argv[0]));
+}
 
 static void ServiceHost_ReportStopDenial(void)
 {
@@ -100,17 +116,12 @@ static BOOL ServiceHost_RequestAgentStop(void)
 
 static BOOL ServiceHost_AllowStop(void)
 {
-    wchar_t serviceKeyName[256] = {0};
-    // AllowStop is stored under the SCM service key name, not the display name.
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceKeyName, _countof(serviceKeyName));
-    if (serviceKeyName[0] == L'\0')
-    {
-        StringCchCopyW(serviceKeyName, _countof(serviceKeyName), SERVICE_FALLBACK_SERVICE_NAME);
-    }
+    // AllowStop is stored under the actual SCM service key, not display branding.
+    if (g_ServiceHostServiceName[0] == L'\0') { return FALSE; }
 
     wchar_t paramsKeyPath[512];
     _snwprintf_s(paramsKeyPath, _countof(paramsKeyPath), _TRUNCATE,
-                 L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", serviceKeyName);
+                 L"SYSTEM\\CurrentControlSet\\Services\\%s\\Parameters", g_ServiceHostServiceName);
 
     DWORD value = 0;
     DWORD cb = sizeof(value);
@@ -142,7 +153,6 @@ static BOOL g_ServiceHostPathsInitialized = FALSE;
 static BOOL g_ServiceHostCrtHandlersInstalled = FALSE;
 
 // Forward declarations
-static BOOL ServiceHost_SelectServiceHostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand);
 static void ServiceHost_InitializePaths(HINSTANCE moduleHandle);
 static void ServiceHost_LogProvisioningStatus(void);
 static void ServiceHost_LogLine(const wchar_t* format, ...);
@@ -607,10 +617,10 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
         LPWSTR entryPoint = NULL;
         if (fullCmdLine != NULL)
         {
-            entryPoint = wcsstr(fullCmdLine, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W);
+            entryPoint = wcsstr(fullCmdLine, MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_W);
             if (entryPoint != NULL)
             {
-                entryPoint += wcslen(MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W);
+                entryPoint += wcslen(MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_W);
                 while (*entryPoint == L' ') { entryPoint++; }
                 lpCmdLine = entryPoint;
             }
@@ -985,12 +995,12 @@ static BOOL ServiceHost_WideContains(const wchar_t* haystack, const wchar_t* nee
 
 static BOOL ServiceHost_IsKvmBridgeInvocation(void)
 {
-    return ServiceHost_WideContains(GetCommandLineW(), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W);
+    return ServiceHost_WideContains(GetCommandLineW(), MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_W);
 }
 
 static BOOL ServiceHost_IsLifecycleHostInvocation(void)
 {
-    return ServiceHost_WideContains(GetCommandLineW(), MESH_RUNDLL32_ENTRY_LIFECYCLE_W);
+    return ServiceHost_WideContains(GetCommandLineW(), MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_W);
 }
 
 static void ServiceHost_InvalidParameterHandler(
@@ -1009,7 +1019,7 @@ static void ServiceHost_InvalidParameterHandler(
                            func,
                            src,
                            line);
-    ServiceUtil_DebugPrintfW(L"[svchost] CRT invalid parameter: expr=%ls func=%ls file=%ls line=%u",
+    ServiceUtil_DebugPrintfW(L"[service-host] CRT invalid parameter: expr=%ls func=%ls file=%ls line=%u",
                          expr,
                          func,
                          src,
@@ -1082,9 +1092,9 @@ static void ServiceHost_InitializePaths(HINSTANCE moduleHandle)
         lstrcpynW(g_ServiceHostInstallDir, g_ServiceHostModulePath, (int)_countof(g_ServiceHostInstallDir));
         wchar_t* slash = wcsrchr(g_ServiceHostInstallDir, L'\\');
         if (slash != NULL) { *slash = L'\0'; }
-        ServiceUtil_DebugPrintfW(L"[svchost] module path: %ls", g_ServiceHostModulePath);
-        ServiceUtil_DebugPrintfW(L"[svchost] install directory: %ls", g_ServiceHostInstallDir);
-        _snwprintf_s(g_ServiceHostLogFile, _countof(g_ServiceHostLogFile), _TRUNCATE, L"%s\\svchost-debug.log", g_ServiceHostInstallDir);
+        ServiceUtil_DebugPrintfW(L"[service-host] module path: %ls", g_ServiceHostModulePath);
+        ServiceUtil_DebugPrintfW(L"[service-host] install directory: %ls", g_ServiceHostInstallDir);
+        _snwprintf_s(g_ServiceHostLogFile, _countof(g_ServiceHostLogFile), _TRUNCATE, L"%s\\service-host-debug.log", g_ServiceHostInstallDir);
         ServiceHost_LogLine(L"module path: %ls", g_ServiceHostModulePath);
         ServiceHost_LogLine(L"install directory: %ls", g_ServiceHostInstallDir);
         ServiceHost_InstallCrtHandlers();
@@ -1094,7 +1104,7 @@ static void ServiceHost_InitializePaths(HINSTANCE moduleHandle)
             {
                 DWORD aclError = GetLastError();
                 if (aclError == ERROR_SUCCESS) { aclError = ERROR_ACCESS_DENIED; }
-                ServiceUtil_DebugPrintfW(L"[svchost] failed to apply DLL DACL to %ls (error=%lu)", g_ServiceHostModulePath, aclError);
+                ServiceUtil_DebugPrintfW(L"[service-host] failed to apply DLL DACL to %ls (error=%lu)", g_ServiceHostModulePath, aclError);
                 ServiceHost_LogLine(L"failed to apply DLL DACL to %ls (error=%lu)", g_ServiceHostModulePath, aclError);
             }
         }
@@ -1105,7 +1115,7 @@ static void ServiceHost_InitializePaths(HINSTANCE moduleHandle)
     }
     else
     {
-        ServiceUtil_DebugPrintfW(L"[svchost] unable to resolve module path for DLL");
+        ServiceUtil_DebugPrintfW(L"[service-host] unable to resolve module path for DLL");
         ServiceHost_LogLine(L"module path resolution failed");
         g_ServiceHostLogFile[0] = L'\0';
     }
@@ -1145,12 +1155,12 @@ static void ServiceHost_InitializePaths(HINSTANCE moduleHandle)
                 ServiceHost_LogLine(L"helper candidate: %ls (exists=%d)", helperPath, helperExists ? 1 : 0);
                 if (helperExists)
                 {
-                    ServiceUtil_DebugPrintfW(L"[svchost] helper executable detected: %ls", helperPath);
+                    ServiceUtil_DebugPrintfW(L"[service-host] helper executable detected: %ls", helperPath);
                     ServiceHost_LogLine(L"helper executable: %ls", helperPath);
                 }
                 else
                 {
-                    ServiceUtil_DebugPrintfW(L"[svchost] configured helper executable is missing: %ls", helperPath);
+                    ServiceUtil_DebugPrintfW(L"[service-host] configured helper executable is missing: %ls", helperPath);
                     ServiceHost_LogLine(L"configured helper executable missing: %ls", helperPath);
                 }
             }
@@ -1176,7 +1186,7 @@ static void ServiceHost_InitializePaths(HINSTANCE moduleHandle)
     }
     else
     {
-        ServiceUtil_DebugPrintfA("[svchost] failed to initialise UTF-8 module buffer");
+        ServiceUtil_DebugPrintfA("[service-host] failed to initialise UTF-8 module buffer");
     }
 
     g_ServiceHostPathsInitialized = TRUE;
@@ -1191,7 +1201,7 @@ static void ServiceHost_LogProvisioningStatus(void)
 
     if (g_ServiceHostInstallDir[0] == L'\0')
     {
-        ServiceUtil_DebugPrintfW(L"[svchost] install directory unavailable; provisioning files cannot be validated");
+        ServiceUtil_DebugPrintfW(L"[service-host] install directory unavailable; provisioning files cannot be validated");
         ServiceHost_LogLine(L"provisioning check skipped: install directory unavailable");
         return;
     }
@@ -1208,7 +1218,7 @@ static void ServiceHost_LogProvisioningStatus(void)
         {
             _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s.msh", g_ServiceHostInstallDir, baseName);
             attr = GetFileAttributesW(candidatePath);
-            ServiceUtil_DebugPrintfW(L"[svchost] executable sibling provisioning file %ls (%ls)",
+            ServiceUtil_DebugPrintfW(L"[service-host] executable sibling provisioning file %ls (%ls)",
                                  candidatePath,
                                  (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
             ServiceHost_LogLine(L"executable sibling provisioning file %ls (%ls)",
@@ -1223,7 +1233,7 @@ static void ServiceHost_LogProvisioningStatus(void)
     {
         _snwprintf_s(candidatePath, _countof(candidatePath), _TRUNCATE, L"%s\\%s", g_ServiceHostInstallDir, leafName);
         attr = GetFileAttributesW(candidatePath);
-        ServiceUtil_DebugPrintfW(L"[svchost] configuration file %ls (%ls)",
+        ServiceUtil_DebugPrintfW(L"[service-host] configuration file %ls (%ls)",
                              candidatePath,
                              (attr == INVALID_FILE_ATTRIBUTES) ? L"missing" : L"present");
         ServiceHost_LogLine(L"configuration file %ls (%ls)",
@@ -1233,7 +1243,7 @@ static void ServiceHost_LogProvisioningStatus(void)
 }
 
 /**
- * Service control handler for svchost-hosted mode
+ * Service control handler for rundll32-hosted mode
  */
 DWORD WINAPI ServiceHost_CtrlHandler(
     DWORD dwControl,
@@ -1324,7 +1334,7 @@ DWORD WINAPI ServiceHost_CtrlHandler(
             ServiceIntegration_HandleSessionChange(dwEventType, sessionId);
 #endif
 #if defined(_LINKVM)
-            ServiceUtil_DebugPrintfA("[svchost] Forwarding KVM session change event=%lu session=%lu", (unsigned long)dwEventType, (unsigned long)sessionId);
+            ServiceUtil_DebugPrintfA("[service-host] Forwarding KVM session change event=%lu session=%lu", (unsigned long)dwEventType, (unsigned long)sessionId);
             ServiceHost_LogLine(L"Forwarding KVM session change event=%lu session=%lu", (unsigned long)dwEventType, (unsigned long)sessionId);
             kvm_notify_session_change(dwEventType, sessionId);
 #endif
@@ -1337,30 +1347,33 @@ DWORD WINAPI ServiceHost_CtrlHandler(
 }
 
 /**
- * Main service entry point for svchost.exe hosting
- * This is the function that svchost.exe calls when starting our service
+ * Private SCM entry point dispatched by MeshServiceHostW.
  */
-VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
+static VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
 {
-    // DWORD i; // not used; removed to avoid unused variable warning
+    if (!ServiceHost_SetScmServiceName(dwArgc, lpszArgv))
+    {
+        g_ServiceHostStatus.dwWin32ExitCode = GetLastError();
+        return;
+    }
 
     // Register service control handler
     ServiceHost_LogLine(L"ServiceMain invoked (argc=%lu)", (unsigned long)dwArgc);
-    LPCTSTR svcKeyName = (LPCTSTR)MeshService_GetServiceFileText();
-    g_ServiceHostStatusHandle = RegisterServiceCtrlHandlerEx(
-        svcKeyName,
+    g_ServiceHostStatusHandle = RegisterServiceCtrlHandlerExW(
+        g_ServiceHostServiceName,
         (LPHANDLER_FUNCTION_EX)ServiceHost_CtrlHandler,
         NULL                    // Context
     );
 
     if (!g_ServiceHostStatusHandle)
     {
-        ServiceUtil_DebugLastErrorW(L"RegisterServiceCtrlHandlerEx");
+        g_ServiceHostStatus.dwWin32ExitCode = GetLastError();
+        ServiceUtil_DebugLastErrorW(L"RegisterServiceCtrlHandlerExW");
         return;  // Failed to register handler
     }
 
     // Initialize service status structure
-    g_ServiceHostStatus.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;  // Shared svchost service
+    g_ServiceHostStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     g_ServiceHostStatus.dwCurrentState = SERVICE_START_PENDING;
     g_ServiceHostStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP |
                                           SERVICE_ACCEPT_SHUTDOWN |
@@ -1381,7 +1394,7 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
 
     if (!g_ServiceHostAgent)
     {
-        ServiceUtil_DebugPrintfA("MeshAgent_Create failed in svchost service main");
+        ServiceUtil_DebugPrintfA("MeshAgent_Create failed in rundll32 service main");
         ServiceHost_LogLine(L"MeshAgent_Create failed");
         // Failed to create agent
         g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
@@ -1399,18 +1412,14 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
         ServiceHost_LogLine(L"agent exePath set to %hs", g_ServiceHostExeUtf8);
     }
 
-    mesh_branding_text_t serviceFileText = MeshService_GetServiceFileText();
     mesh_branding_text_t serviceDisplayText = MeshService_GetServiceNameText();
-#if defined(UNICODE) || defined(_UNICODE)
-    if (serviceFileText != NULL)
+    char utf8Name[sizeof(g_ServiceHostServiceName) * 2] = {0};
+    if (WideCharToMultiByte(CP_UTF8, 0, g_ServiceHostServiceName, -1, utf8Name, (int)sizeof(utf8Name), NULL, NULL) > 0)
     {
-        char utf8Name[128] = {0};
-        if (WideCharToMultiByte(CP_UTF8, 0, serviceFileText, -1, utf8Name, (int)sizeof(utf8Name), NULL, NULL) > 0)
-        {
-            g_ServiceHostAgent->meshServiceName = ILibString_Copy(utf8Name, 0);
-            ServiceHost_LogLine(L"service name set to %hs", g_ServiceHostAgent->meshServiceName);
-        }
+        g_ServiceHostAgent->meshServiceName = ILibString_Copy(utf8Name, 0);
+        ServiceHost_LogLine(L"service name set to %hs", g_ServiceHostAgent->meshServiceName);
     }
+#if defined(UNICODE) || defined(_UNICODE)
     if (serviceDisplayText != NULL)
     {
         char utf8Display[256] = {0};
@@ -1420,11 +1429,6 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
         }
     }
 #else
-    if (serviceFileText != NULL)
-    {
-        g_ServiceHostAgent->meshServiceName = ILibString_Copy(serviceFileText, 0);
-        ServiceHost_LogLine(L"service name set to %hs", g_ServiceHostAgent->meshServiceName);
-    }
     if (serviceDisplayText != NULL)
     {
         g_ServiceHostAgent->displayName = ILibString_Copy(serviceDisplayText, 0);
@@ -1454,18 +1458,18 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 
     // Apply process-level termination protection
-    // This prevents Task Manager and TerminateProcess() from killing our svchost.exe
+    // This prevents Task Manager and TerminateProcess() from killing the service host process
     // NOTE: This is different from ServiceUtil_ProtectServiceFromTermination() which only
     // protects the SERVICE object in SCM. This protects the actual PROCESS.
     if (ServiceUtil_ProtectCurrentProcess())
     {
         ServiceHost_LogLine(L"Process termination protection applied successfully");
-        ServiceUtil_DebugPrintfW(L"[svchost] Process DACL protection active - TerminateProcess blocked");
+        ServiceUtil_DebugPrintfW(L"[service-host] Process DACL protection active - TerminateProcess blocked");
     }
     else
     {
         ServiceHost_LogLine(L"WARNING: Failed to apply process termination protection");
-        ServiceUtil_DebugPrintfW(L"[svchost] WARNING: Process DACL protection failed");
+        ServiceUtil_DebugPrintfW(L"[service-host] WARNING: Process DACL protection failed");
     }
 
     g_ServiceHostRunning = TRUE;
@@ -1477,7 +1481,7 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     }
     if (startArgv[0] == NULL)
     {
-        ServiceUtil_DebugPrintfA("[svchost] configured helper path is unavailable; refusing to start MeshAgent core");
+        ServiceUtil_DebugPrintfA("[service-host] configured helper path is unavailable; refusing to start MeshAgent core");
         ServiceHost_LogLine(L"configured helper path unavailable; MeshAgent_Start skipped");
         g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
         g_ServiceHostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
@@ -1487,10 +1491,10 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     }
     int startArgc = 1;
 
-    ServiceUtil_DebugPrintfA("[svchost] launching MeshAgent_Start (argv[0]=%s)", startArgv[0]);
+    ServiceUtil_DebugPrintfA("[service-host] launching MeshAgent_Start (argv[0]=%s)", startArgv[0]);
     ServiceHost_LogLine(L"launching MeshAgent_Start (argv0=%hs)", startArgv[0]);
     int startResult = MeshAgent_Start(g_ServiceHostAgent, startArgc, startArgv);
-    ServiceUtil_DebugPrintfA("[svchost] MeshAgent_Start returned %d", startResult);
+    ServiceUtil_DebugPrintfA("[service-host] MeshAgent_Start returned %d", startResult);
     ServiceHost_LogLine(L"MeshAgent_Start returned %d", startResult);
     if (g_ServiceHostAgent != NULL)
     {
@@ -1515,302 +1519,208 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 }
 
-/**
- * Register service for svchost.exe hosting
- * Creates required registry entries for svchost to load our DLL
- */
+/* One command contract for registration, discovery and the runtime callback.
+ * Reject relative paths and syntax that could alter rundll32's entry selection. */
+BOOL ServiceHost_BuildImagePath(const wchar_t* dllPath, wchar_t* command, size_t commandCch)
+{
+    wchar_t host[MAX_PATH * 4] = {0};
+    wchar_t absolute[MAX_PATH * 4] = {0};
+    DWORD length;
+    if (!dllPath || !command || !commandCch) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    command[0] = 0;
+    length = (DWORD)wcslen(dllPath);
+    if (length < 4 || length >= MAX_PATH || _wcsicmp(dllPath + length - 4, L".dll") != 0 ||
+        !((dllPath[0] >= L'A' && dllPath[0] <= L'Z') || (dllPath[0] >= L'a' && dllPath[0] <= L'z')) ||
+        dllPath[1] != L':' || dllPath[2] != L'\\') { SetLastError(ERROR_INVALID_NAME); return FALSE; }
+    for (DWORD i = 0; i < length; ++i)
+    {
+        if (dllPath[i] < L' ' || wcschr(L"\",/*?|<>", dllPath[i]) || (dllPath[i] == L':' && i != 1))
+        {
+            SetLastError(ERROR_INVALID_NAME);
+            return FALSE;
+        }
+    }
+    length = GetFullPathNameW(dllPath, _countof(absolute), absolute, NULL);
+    if (!length || length >= _countof(absolute) || _wcsicmp(absolute, dllPath) != 0) { SetLastError(ERROR_INVALID_NAME); return FALSE; }
+    if (!MeshRuntimeHost_GetSystemHostPathW(host, _countof(host))) { return FALSE; }
+    if (FAILED(StringCchPrintfW(command, commandCch, L"\"%ls\" \"%ls\",%ls", host, dllPath, MESH_RUNTIME_HOST_ENTRY_SERVICE_W)))
+    {
+        command[0] = 0;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL ServiceHost_ParseImagePath(const wchar_t* command, wchar_t* dllPath, size_t dllPathCch)
+{
+    const wchar_t* hostEnd;
+    const wchar_t* dllStart;
+    const wchar_t* dllEnd;
+    wchar_t canonical[MAX_PATH * 8] = {0};
+    size_t length;
+    if (!command || !dllPath || !dllPathCch) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    dllPath[0] = 0;
+    if (command[0] != L'"' || !(hostEnd = wcschr(command + 1, L'"')) ||
+        wcsncmp(hostEnd, L"\" \"", 3) != 0) { return FALSE; }
+    dllStart = hostEnd + 3;
+    dllEnd = wcschr(dllStart, L'"');
+    if (!dllEnd || wcscmp(dllEnd, L"\"," MESH_RUNTIME_HOST_ENTRY_SERVICE_W) != 0) { return FALSE; }
+    length = (size_t)(dllEnd - dllStart);
+    if (!length || length >= dllPathCch) { return FALSE; }
+    memcpy(dllPath, dllStart, length * sizeof(wchar_t));
+    dllPath[length] = 0;
+    if (!ServiceHost_BuildImagePath(dllPath, canonical, _countof(canonical)) || _wcsicmp(canonical, command) != 0)
+    {
+        dllPath[0] = 0;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+void CALLBACK MeshServiceHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
+{
+    wchar_t serviceName[256] = {0};
+    wchar_t configuredDll[MAX_PATH * 4] = {0};
+    wchar_t loadedDll[MAX_PATH * 4] = {0};
+    wchar_t process[MAX_PATH * 4] = {0};
+    wchar_t systemHost[MAX_PATH * 4] = {0};
+    SERVICE_TABLE_ENTRYW table[2] = {0};
+    DWORD length, exitCode = ERROR_INVALID_PARAMETER;
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(lpCmdLine);
+    UNREFERENCED_PARAMETER(nCmdShow);
+    /* W-suffix rundll32 callbacks must parse the authoritative Unicode command
+     * line, not lpCmdLine (which can carry ANSI bytes on some Windows paths). */
+    if (!hinstDLL || !ServiceHost_ParseImagePath(GetCommandLineW(), configuredDll, _countof(configuredDll))) { goto done; }
+    length = GetModuleFileNameW(hinstDLL, loadedDll, _countof(loadedDll));
+    if (!length || length >= _countof(loadedDll) || _wcsicmp(loadedDll, configuredDll) != 0) { goto done; }
+    length = GetModuleFileNameW(NULL, process, _countof(process));
+    if (!length || length >= _countof(process) ||
+        !MeshRuntimeHost_GetSystemHostPathW(systemHost, _countof(systemHost)) || _wcsicmp(process, systemHost) != 0) { goto done; }
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceFileText(), serviceName, _countof(serviceName));
+    if (!serviceName[0]) { goto done; }
+    table[0].lpServiceName = serviceName;
+    table[0].lpServiceProc = ServiceHost_ServiceMain;
+    if (!StartServiceCtrlDispatcherW(table)) { exitCode = GetLastError(); goto done; }
+    exitCode = g_ServiceHostStatus.dwWin32ExitCode == ERROR_SERVICE_SPECIFIC_ERROR ?
+        g_ServiceHostStatus.dwServiceSpecificExitCode : g_ServiceHostStatus.dwWin32ExitCode;
+done:
+    if (exitCode != ERROR_SUCCESS) { ServiceHost_LogLine(L"Primary rundll32 service host exited with error %lu", exitCode); }
+    ExitProcess(exitCode);
+}
+
+/* Migration/uninstall cleanup only: the current runtime never joins a shared
+ * host group. Preserve every unrelated membership and registry value. */
+static BOOL ServiceHost_RemoveLegacyGroupMembership(const wchar_t* serviceName)
+{
+    HKEY key = NULL;
+    DWORD size = 0, type = 0;
+    wchar_t* list = NULL;
+    size_t read = 0, written = 0, chars;
+    BOOL found = FALSE, ok = FALSE;
+    LONG result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &key);
+    if (result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND) { return TRUE; }
+    if (result != ERROR_SUCCESS) { return FALSE; }
+    result = RegQueryValueExW(key, L"netsvcs", NULL, &type, NULL, &size);
+    if (result == ERROR_FILE_NOT_FOUND) { ok = TRUE; goto done; }
+    if (result != ERROR_SUCCESS || type != REG_MULTI_SZ || size < 2 * sizeof(wchar_t) ||
+        size > 65536 || size % sizeof(wchar_t)) { goto done; }
+    list = (wchar_t*)calloc(1, size);
+    if (!list || RegQueryValueExW(key, L"netsvcs", NULL, &type, (BYTE*)list, &size) != ERROR_SUCCESS || type != REG_MULTI_SZ) { goto done; }
+    if (size < 2 * sizeof(wchar_t) || size % sizeof(wchar_t)) { goto done; }
+    chars = size / sizeof(wchar_t);
+    if (list[chars - 1] || list[chars - 2]) { goto done; }
+    while (read < chars && list[read])
+    {
+        size_t length = wcslen(list + read) + 1;
+        if (_wcsicmp(list + read, serviceName) == 0) { found = TRUE; }
+        else { memmove(list + written, list + read, length * sizeof(wchar_t)); written += length; }
+        read += length;
+    }
+    if (!found) { ok = TRUE; goto done; }
+    list[written++] = 0;
+    if (written == 1) { list[written++] = 0; }
+    ok = RegSetValueExW(key, L"netsvcs", 0, REG_MULTI_SZ, (BYTE*)list, (DWORD)(written * sizeof(wchar_t))) == ERROR_SUCCESS;
+done:
+    free(list);
+    RegCloseKey(key);
+    return ok;
+}
+
+static BOOL ServiceHost_RemoveLegacyParameters(const wchar_t* serviceName)
+{
+    const wchar_t* names[] = {L"ServiceDll", L"ServiceMain", L"ServiceDllUnloadOnStop"};
+    wchar_t keyPath[512] = {0};
+    HKEY key = NULL;
+    size_t i;
+    LONG result;
+    if (FAILED(StringCchPrintfW(keyPath, _countof(keyPath), L"SYSTEM\\CurrentControlSet\\Services\\%ls\\Parameters", serviceName))) { return FALSE; }
+    result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_SET_VALUE, &key);
+    if (result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND) { return TRUE; }
+    if (result != ERROR_SUCCESS) { return FALSE; }
+    for (i = 0; i < _countof(names); ++i)
+    {
+        result = RegDeleteValueW(key, names[i]);
+        if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND) { RegCloseKey(key); return FALSE; }
+    }
+    RegCloseKey(key);
+    return TRUE;
+}
+
 BOOL ServiceHost_RegisterServiceHostService(const wchar_t* serviceName, const wchar_t* dllPath)
 {
-    HKEY hKey = NULL;
-    HKEY hParamsKey = NULL;
-    HKEY hServiceHostKey = NULL;
-    SC_HANDLE hSCM = NULL;
-    SC_HANDLE hService = NULL;
-    LONG result;
-    BOOL success = FALSE;
-    BOOL netsvcsConfigured = FALSE;
-    wchar_t keyPath[512];
-    DWORD dwType, dwSize;
-    WCHAR wDisplayName[256] = {0};
-    WCHAR wDescription[512] = {0};
-    const wchar_t* groupName = L"netsvcs";
-    WCHAR hostExePath[MAX_PATH] = {0};
-    BOOL hostExeUsesExpand = FALSE;
-    WCHAR imagePathValue[512] = {0};
-    BOOL serviceSidConfigured = FALSE;
-
-    if (serviceName == NULL || serviceName[0] == 0 || dllPath == NULL || dllPath[0] == 0)
+    SC_HANDLE scm = NULL, service = NULL;
+    wchar_t command[MAX_PATH * 8] = {0}, displayName[256] = {0}, description[512] = {0};
+    SERVICE_SID_INFO sid = {SERVICE_SID_TYPE_UNRESTRICTED};
+    SERVICE_DESCRIPTIONW descriptionInfo;
+    BOOL ok = FALSE;
+    DWORD error = ERROR_SUCCESS;
+    if (!serviceName || !serviceName[0] || !ServiceHost_BuildImagePath(dllPath, command, _countof(command))) { return FALSE; }
+    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), displayName, _countof(displayName));
+    MeshService_CopyBrandingTextToWide(MeshConfig_GetBranding()->fileDescription, description, _countof(description));
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
+    if (!scm) { goto done; }
+    service = CreateServiceW(scm, serviceName, displayName[0] ? displayName : serviceName,
+        SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG | SERVICE_START | SERVICE_QUERY_STATUS | DELETE,
+        SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, command,
+        NULL, NULL, NULL, L"LocalSystem", NULL);
+    if (!service)
     {
-        ServiceUtil_DebugPrintfW(L"ServiceHost_RegisterServiceHostService invalid parameters (service=%ls path=%ls)", serviceName, dllPath);
-        return FALSE;
-    }
-
-    if (!ServiceHost_SelectServiceHostImage(dllPath, hostExePath, _countof(hostExePath), &hostExeUsesExpand))
-    {
-        ServiceUtil_DebugPrintfW(L"ServiceHost_RegisterServiceHostService failed to resolve system svchost.exe (error=%lu)", GetLastError());
-        return FALSE;
-    }
-
-    _snwprintf_s(imagePathValue, _countof(imagePathValue), _TRUNCATE, L"%s -k %s -p", hostExePath, groupName);
-
-    MeshService_CopyBrandingTextToWide(MeshService_GetServiceNameText(), wDisplayName, _countof(wDisplayName));
-    MeshService_CopyBrandingTextToWide(MeshConfig_GetBranding()->fileDescription, wDescription, _countof(wDescription));
-    if (wDescription[0] == 0)
-    {
-        lstrcpynW(wDescription, L"system service", (int)_countof(wDescription));
-    }
-
-    hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
-    if (hSCM != NULL)
-    {
-        hService = CreateServiceW(
-            hSCM,
-            serviceName,
-            (wDisplayName[0] != 0) ? wDisplayName : serviceName,
-            SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_CHANGE_CONFIG | DELETE,
-            SERVICE_WIN32_SHARE_PROCESS,
-            SERVICE_AUTO_START,
-            SERVICE_ERROR_NORMAL,
-            imagePathValue,
-            NULL,
-            NULL,
-            NULL,
-            L"LocalSystem",
-            NULL);
-
-        if (hService == NULL)
+        DWORD bytes = 0;
+        QUERY_SERVICE_CONFIGW* config = NULL;
+        BOOL compatible = FALSE;
+        if (GetLastError() != ERROR_SERVICE_EXISTS) { goto done; }
+        service = OpenServiceW(scm, serviceName, SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG);
+        if (!service) { goto done; }
+        QueryServiceConfigW(service, NULL, 0, &bytes);
+        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && bytes && bytes <= 65536)
         {
-            if (GetLastError() == ERROR_SERVICE_EXISTS)
+            config = (QUERY_SERVICE_CONFIGW*)calloc(1, bytes);
+            if (config && QueryServiceConfigW(service, config, bytes, &bytes))
             {
-                hService = OpenServiceW(hSCM, serviceName, SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_CHANGE_CONFIG | DELETE);
-                if (hService != NULL)
-                {
-                    if (!ChangeServiceConfigW(
-                        hService,
-                        SERVICE_WIN32_SHARE_PROCESS,
-                        SERVICE_AUTO_START,
-                        SERVICE_ERROR_NORMAL,
-                        imagePathValue,
-                        NULL,
-                        NULL,
-                        NULL,
-                        NULL,
-                        L"LocalSystem",
-                        (wDisplayName[0] != 0) ? wDisplayName : NULL))
-                    {
-                        ServiceUtil_DebugLastErrorW(L"ChangeServiceConfigW");
-                        goto CLEANUP;
-                    }
-                }
-                else
-                {
-                    ServiceUtil_DebugLastErrorW(L"OpenServiceW");
-                }
-            }
-            else
-            {
-                ServiceUtil_DebugLastErrorW(L"CreateServiceW");
+                compatible = config->lpServiceStartName && _wcsicmp(config->lpServiceStartName, L"LocalSystem") == 0;
             }
         }
+        free(config);
+        if (!compatible) { SetLastError(ERROR_NOT_SUPPORTED); goto done; }
+        /* NULL account AND NULL password preserve SCM-held credentials. */
+        if (!ChangeServiceConfigW(service, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
+            SERVICE_ERROR_NORMAL, command, NULL, NULL, NULL, NULL, NULL,
+            displayName[0] ? displayName : NULL)) { goto done; }
     }
-    else
-    {
-        ServiceUtil_DebugLastErrorW(L"OpenSCManagerW");
-        goto CLEANUP;
-    }
-
-    if (hService == NULL)
-    {
-        ServiceUtil_DebugLastErrorW(L"RegCreateKeyEx(Service)");
-        goto CLEANUP;
-    }
-
-    {
-        SERVICE_SID_INFO sidInfo = {0};
-        sidInfo.dwServiceSidType = SERVICE_SID_TYPE_UNRESTRICTED;
-        if (ChangeServiceConfig2W(hService, SERVICE_CONFIG_SERVICE_SID_INFO, &sidInfo))
-        {
-            serviceSidConfigured = TRUE;
-        }
-        else
-        {
-            ServiceUtil_DebugLastErrorW(L"ChangeServiceConfig2W(ServiceSid)");
-            goto CLEANUP;
-        }
-    }
-
-    // Create service registry key
-    swprintf_s(keyPath, sizeof(keyPath)/sizeof(wchar_t),
-               L"SYSTEM\\CurrentControlSet\\Services\\%s", serviceName);
-
-    result = RegCreateKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, NULL, 0,
-                             KEY_WRITE, NULL, &hKey, NULL);
-    if (result != ERROR_SUCCESS)
-    {
-        goto CLEANUP;
-    }
-
-    // Set service type to SHARE_PROCESS
-    DWORD dwServiceType = SERVICE_WIN32_SHARE_PROCESS;
-    RegSetValueExW(hKey, L"Type", 0, REG_DWORD, (LPBYTE)&dwServiceType, sizeof(DWORD));
-
-    // Set start type to AUTO_START
-    DWORD dwStartType = SERVICE_AUTO_START;
-    RegSetValueExW(hKey, L"Start", 0, REG_DWORD, (LPBYTE)&dwStartType, sizeof(DWORD));
-
-    // Set error control
-    DWORD dwErrorControl = SERVICE_ERROR_NORMAL;
-    RegSetValueExW(hKey, L"ErrorControl", 0, REG_DWORD, (LPBYTE)&dwErrorControl, sizeof(DWORD));
-
-    // Set ImagePath to svchost with netsvcs group
-    RegSetValueExW(hKey, L"ImagePath", 0, hostExeUsesExpand ? REG_EXPAND_SZ : REG_SZ,
-                   (LPBYTE)imagePathValue, (DWORD)((wcslen(imagePathValue) + 1) * sizeof(wchar_t)));
-
-    // Set display name (generic)
-    if (wDisplayName[0] != 0)
-    {
-        RegSetValueExW(hKey, L"DisplayName", 0, REG_SZ,
-                       (LPBYTE)wDisplayName, (DWORD)((wcslen(wDisplayName) + 1) * sizeof(wchar_t)));
-    }
-
-    // Set description (generic)
-    if (wDescription[0] != 0)
-    {
-        RegSetValueExW(hKey, L"Description", 0, REG_SZ,
-                       (LPBYTE)wDescription, (DWORD)((wcslen(wDescription) + 1) * sizeof(wchar_t)));
-    }
-
-    // Set ObjectName (LocalSystem)
-    const wchar_t* objectName = L"LocalSystem";
-    RegSetValueExW(hKey, L"ObjectName", 0, REG_SZ,
-                   (LPBYTE)objectName, (DWORD)((wcslen(objectName) + 1) * sizeof(wchar_t)));
-
-    if (serviceSidConfigured)
-    {
-        DWORD serviceSidType = SERVICE_SID_TYPE_UNRESTRICTED;
-        RegSetValueExW(hKey, L"ServiceSidType", 0, REG_DWORD, (LPBYTE)&serviceSidType, sizeof(serviceSidType));
-    }
-
-    // Create Parameters subkey
-    result = RegCreateKeyExW(hKey, L"Parameters", 0, NULL, 0,
-                             KEY_WRITE, NULL, &hParamsKey, NULL);
-    if (result == ERROR_SUCCESS)
-    {
-        // Set ServiceDll parameter (optional)
-        if (dllPath && *dllPath)
-        {
-            RegSetValueExW(hParamsKey, L"ServiceDll", 0, REG_EXPAND_SZ,
-                           (LPBYTE)dllPath, (DWORD)((wcslen(dllPath) + 1) * sizeof(wchar_t)));
-        }
-
-        // Set ServiceMain export name and unload policy
-        const wchar_t* serviceMain = L"ServiceHost_ServiceMain";
-        RegSetValueExW(hParamsKey, L"ServiceMain", 0, REG_SZ,
-                       (LPBYTE)serviceMain, (DWORD)((wcslen(serviceMain) + 1) * sizeof(wchar_t)));
-        DWORD unload = 1;
-        RegSetValueExW(hParamsKey, L"ServiceDllUnloadOnStop", 0, REG_DWORD, (LPBYTE)&unload, sizeof(unload));
-
-        RegCloseKey(hParamsKey);
-        hParamsKey = NULL;
-    }
-
-    if (hKey != NULL)
-    {
-        RegCloseKey(hKey);
-        hKey = NULL;
-    }
-
-    // Add service to svchost netsvcs group
-    result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                           L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ServiceHost",
-                           0, KEY_READ | KEY_WRITE, &hServiceHostKey);
-    if (result == ERROR_SUCCESS)
-    {
-        WCHAR currentServices[4096] = {0};
-        dwSize = sizeof(currentServices);
-        dwType = REG_MULTI_SZ;
-
-        result = RegQueryValueExW(hServiceHostKey, L"netsvcs", NULL, &dwType,
-                                  (LPBYTE)currentServices, &dwSize);
-
-        if (result == ERROR_FILE_NOT_FOUND)
-        {
-            currentServices[0] = L'\0';
-            currentServices[1] = L'\0';
-            dwSize = sizeof(wchar_t);
-            result = ERROR_SUCCESS;
-        }
-
-        if (result == ERROR_SUCCESS)
-        {
-            WCHAR* ptr = currentServices;
-            BOOL alreadyPresent = FALSE;
-
-            while (*ptr != L'\0')
-            {
-                if (_wcsicmp(ptr, serviceName) == 0)
-                {
-                    alreadyPresent = TRUE;
-                    break;
-                }
-                ptr += wcslen(ptr) + 1;
-            }
-
-            if (!alreadyPresent)
-            {
-                size_t usedChars = (size_t)(ptr - currentServices);
-                size_t nameLen = wcslen(serviceName) + 1; // include null terminator
-                size_t required = usedChars + nameLen + 1; // extra null for double-terminator
-
-                if (required >= _countof(currentServices))
-                {
-                    ServiceUtil_DebugLastErrorW(L"RegSetValueEx(netsvcs)");
-                    goto CLEANUP;
-                }
-
-                wcscpy_s(currentServices + usedChars, _countof(currentServices) - usedChars, serviceName);
-                usedChars += nameLen;
-                currentServices[usedChars] = L'\0';
-                usedChars++;
-
-                DWORD bytesToWrite = (DWORD)(usedChars * sizeof(wchar_t));
-                if (RegSetValueExW(hServiceHostKey, L"netsvcs", 0, REG_MULTI_SZ,
-                                   (LPBYTE)currentServices, bytesToWrite) != ERROR_SUCCESS)
-                {
-                    goto CLEANUP;
-                }
-            }
-
-            netsvcsConfigured = TRUE;
-        }
-
-        RegCloseKey(hServiceHostKey);
-        hServiceHostKey = NULL;
-    }
-
-    if (!netsvcsConfigured)
-    {
-        ServiceUtil_DebugPrintfA("Failed to ensure netsvcs membership for %ls", serviceName);
-        goto CLEANUP;
-    }
-
-    if (hService != NULL && wDescription[0] != 0)
-    {
-        SERVICE_DESCRIPTIONW sd = {0};
-        sd.lpDescription = wDescription;
-        ChangeServiceConfig2W(hService, SERVICE_CONFIG_DESCRIPTION, &sd);
-    }
-
-    success = TRUE;
-
-CLEANUP:
-    if (hServiceHostKey != NULL) { RegCloseKey(hServiceHostKey); }
-    if (hParamsKey != NULL) { RegCloseKey(hParamsKey); }
-    if (hKey != NULL) { RegCloseKey(hKey); }
-    if (hService != NULL) { CloseServiceHandle(hService); }
-    if (hSCM != NULL) { CloseServiceHandle(hSCM); }
-
-    return success;
+    if (!ChangeServiceConfig2W(service, SERVICE_CONFIG_SERVICE_SID_INFO, &sid)) { goto done; }
+    descriptionInfo.lpDescription = description;
+    if (!ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &descriptionInfo)) { goto done; }
+    if (!ServiceHost_RemoveLegacyParameters(serviceName) || !ServiceHost_RemoveLegacyGroupMembership(serviceName)) { goto done; }
+    ok = TRUE;
+done:
+    error = GetLastError();
+    if (service) { CloseServiceHandle(service); }
+    if (scm) { CloseServiceHandle(scm); }
+    if (!ok) { SetLastError(error); }
+    return ok;
 }
 
 static BOOL ServiceHost_ResetServiceSecurityByRegistry(const wchar_t* targetName)
@@ -1846,43 +1756,7 @@ BOOL ServiceHost_UnregisterServiceHostService(const wchar_t* serviceName)
     if (!serviceName || !*serviceName) { return FALSE; }
 
     BOOL success = TRUE;
-    // Remove from svchost group (netsvcs)
-    HKEY hServiceHostKey = NULL;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ServiceHost",
-                      0, KEY_READ | KEY_WRITE, &hServiceHostKey) == ERROR_SUCCESS)
-    {
-        DWORD type = 0;
-        DWORD cb = 0;
-        if (RegQueryValueExW(hServiceHostKey, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
-        {
-            wchar_t* buf = (wchar_t*)malloc(cb + 2 * sizeof(wchar_t));
-            if (buf && RegQueryValueExW(hServiceHostKey, L"netsvcs", NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS)
-            {
-                buf[cb / sizeof(wchar_t)] = L'\0';
-                buf[cb / sizeof(wchar_t) + 1] = L'\0';
-                // Build new list excluding serviceName
-                size_t outLen = 0;
-                wchar_t* out = (wchar_t*)malloc(cb + 2 * sizeof(wchar_t));
-                if (out)
-                {
-                    for (wchar_t* p = buf; *p; p += (wcslen(p) + 1))
-                    {
-                        if (_wcsicmp(p, serviceName) == 0) { continue; }
-                        size_t len = wcslen(p) + 1;
-                        wcscpy_s(out + outLen, (cb/sizeof(wchar_t)) - outLen, p);
-                        outLen += len;
-                    }
-                    out[outLen] = L'\0';
-                    RegSetValueExW(hServiceHostKey, L"netsvcs", 0, REG_MULTI_SZ,
-                                   (LPBYTE)out, (DWORD)((outLen + 1) * sizeof(wchar_t)));
-                    free(out);
-                }
-            }
-            if (buf) free(buf);
-        }
-        RegCloseKey(hServiceHostKey);
-    }
+    if (!ServiceHost_RemoveLegacyGroupMembership(serviceName)) { success = FALSE; }
 
     // Remove service from SCM
     SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
@@ -1959,55 +1833,10 @@ BOOL ServiceHost_UnregisterServiceHostService(const wchar_t* serviceName)
 #ifdef BUILD_SERVICE_BUNDLE_DLL
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
-    UNREFERENCED_PARAMETER(hinstDLL);
     UNREFERENCED_PARAMETER(lpvReserved);
-
-    switch (fdwReason)
-    {
-        case DLL_PROCESS_ATTACH:
-            // DLL is being loaded
-            // Disable thread notifications for performance
-            ServiceHost_InitializePaths(hinstDLL);
-            DisableThreadLibraryCalls(hinstDLL);
-            break;
-
-        case DLL_PROCESS_DETACH:
-            // DLL is being unloaded
-            if (g_ServiceHostAgent != NULL)
-            {
-                MeshAgent_Stop(g_ServiceHostAgent);
-                g_ServiceHostAgent = NULL;
-            }
-            break;
-
-        case DLL_THREAD_ATTACH:
-        case DLL_THREAD_DETACH:
-            // Not used due to DisableThreadLibraryCalls
-            break;
-    }
-
+    // Do not initialize the agent, touch files/DACLs or stop worker threads under
+    // the loader lock. Each approved callback initializes its own runtime.
+    if (fdwReason == DLL_PROCESS_ATTACH) { DisableThreadLibraryCalls(hinstDLL); }
     return TRUE;
 }
 #endif // BUILD_SERVICE_BUNDLE_DLL
-static BOOL ServiceHost_SelectServiceHostImage(const wchar_t* dllPath, wchar_t* exePathOut, size_t exePathOutLen, BOOL *useExpand)
-{
-    UNREFERENCED_PARAMETER(dllPath);
-
-    if (exePathOut == NULL || exePathOutLen == 0)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-    exePathOut[0] = L'\0';
-    if (useExpand != NULL) { *useExpand = FALSE; }
-
-    if (!ServiceUtil_GetSystemServiceHostPathW(exePathOut, exePathOutLen))
-    {
-        ServiceUtil_DebugPrintfW(L"ServiceHost_SelectServiceHostImage failed to resolve system svchost.exe (error=%lu)", GetLastError());
-        if (useExpand != NULL) { *useExpand = FALSE; }
-        return FALSE;
-    }
-    ServiceUtil_DebugPrintfW(L"ServiceHost_SelectServiceHostImage resolved system svchost.exe: %ls", exePathOut);
-    if (useExpand != NULL) { *useExpand = FALSE; }
-    return TRUE;
-}

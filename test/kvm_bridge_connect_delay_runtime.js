@@ -5,7 +5,7 @@ const {
     parseArgs,
     readJsonText,
     resolveBridgeDllPath,
-    runSystemRundll32ProbeTask,
+    runSystemRuntimeHostProbeTask,
     writeJson,
     writeText
 } = require('./lib/kvm_runtime_helpers');
@@ -15,14 +15,14 @@ async function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveBridgeDllPath(exePath, args.dll);
-    const logPath = args.log ? path.resolve(args.log) : path.resolve(path.dirname(dllPath), 'svchost-debug.log');
+    const logPath = args.log ? path.resolve(args.log) : path.resolve(path.dirname(dllPath), 'service-host-debug.log');
     const requestedConnectDelayMs = Number.parseInt(String(args['connect-delay-ms'] || '2000'), 10);
     const logStartOffset = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
 
     assert(Number.isFinite(requestedConnectDelayMs) && requestedConnectDelayMs > 0, `invalid connect delay ${args['connect-delay-ms']}`);
     assert(fs.existsSync(dllPath), `bridge DLL missing at ${dllPath}`);
 
-    const systemProbe = await runSystemRundll32ProbeTask(dllPath, '-kvm-bridge-connect-delay-probe-child', {
+    const systemProbe = await runSystemRuntimeHostProbeTask(dllPath, '-kvm-bridge-connect-delay-probe-child', {
         prefix: `meshagent_kvm_connect_delay_${process.pid}_${Date.now()}`,
         extraArgs: [String(requestedConnectDelayMs)],
         timeoutMs: 180000
@@ -57,7 +57,7 @@ async function main() {
         dllPath,
         logPath,
         requestedConnectDelayMs,
-        rundll32Path: systemProbe.rundll32Path,
+        runtimeHostPath: systemProbe.runtimeHostPath,
         taskName: systemProbe.taskName,
         taskReportPath: systemProbe.reportPath,
         taskXmlPath: systemProbe.taskXmlPath,
@@ -99,7 +99,7 @@ async function main() {
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
-            `RUNDLL32_PATH=${report.rundll32Path}`,
+            `RUNTIME_HOST_PATH=${report.runtimeHostPath}`,
             `DLL_PATH=${report.dllPath}`,
             `TASK_NAME=${report.taskName}`,
             `REQUESTED_CONNECT_DELAY_MS=${requestedConnectDelayMs}`,

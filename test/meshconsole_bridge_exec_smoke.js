@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const net = require('net');
 const childProcess = require('child_process');
-const { getSystemRundll32Path } = require('./lib/rundll32_lifecycle');
+const { getSystemRuntimeHostPath } = require('./lib/runtime_host_lifecycle');
 
 function parseArgs(argv) {
     const args = {};
@@ -64,7 +64,7 @@ function waitFor(predicate, timeoutMs, label) {
 async function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const rundll32Path = getSystemRundll32Path();
+    const runtimeHostPath = getSystemRuntimeHostPath();
     const dllPath = path.resolve(args.dll || path.join('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll'));
     const inputPipeName = `\\\\.\\pipe\\MeshConsoleBridge_${process.pid}_${Date.now()}_in`;
     const outputPipeName = `\\\\.\\pipe\\MeshConsoleBridge_${process.pid}_${Date.now()}_out`;
@@ -75,12 +75,12 @@ async function main() {
     let childExit = null;
 
     assert(process.platform === 'win32', 'meshconsole bridge exec smoke requires Windows');
-    assert(fs.existsSync(rundll32Path), `rundll32.exe not found at ${rundll32Path}`);
+    assert(fs.existsSync(runtimeHostPath), `rundll32.exe not found at ${runtimeHostPath}`);
     assert(fs.existsSync(dllPath), `bridge DLL not found at ${dllPath}`);
 
     const report = {
         generatedUtc: new Date().toISOString(),
-        rundll32Path,
+        runtimeHostPath,
         dllPath,
         inputPipeName,
         outputPipeName,
@@ -113,7 +113,7 @@ async function main() {
         outputServer.listen(outputPipeName, resolve);
     });
 
-    const child = childProcess.spawn(rundll32Path, report.launchArgs, {
+    const child = childProcess.spawn(runtimeHostPath, report.launchArgs, {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe']
     });

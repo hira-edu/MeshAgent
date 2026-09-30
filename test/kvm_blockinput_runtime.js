@@ -5,7 +5,7 @@ const {
     parseArgs,
     readJsonText,
     resolveBridgeDllPath,
-    runSystemRundll32ProbeTask,
+    runSystemRuntimeHostProbeTask,
     writeJson,
     writeText
 } = require('./lib/kvm_runtime_helpers');
@@ -26,7 +26,7 @@ async function main() {
     assert(fs.existsSync(dllPath), `bridge DLL missing at ${dllPath}`);
     ensureDir(outputDir);
 
-    const systemProbe = await runSystemRundll32ProbeTask(dllPath, '-kvm-blockinput-probe', {
+    const systemProbe = await runSystemRuntimeHostProbeTask(dllPath, '-kvm-blockinput-probe', {
         prefix: `MeshAgentKvmBlockInput_${Date.now()}`,
         reportPath: probeStdoutPath,
         timeoutMs: 120000
@@ -57,7 +57,7 @@ async function main() {
         success: true,
         exePath,
         dllPath,
-        rundll32Path: systemProbe.rundll32Path,
+        runtimeHostPath: systemProbe.runtimeHostPath,
         taskName: systemProbe.taskName,
         taskReportPath: systemProbe.reportPath,
         taskXmlPath: systemProbe.taskXmlPath,
@@ -80,7 +80,7 @@ async function main() {
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
-            `RUNDLL32_PATH=${report.rundll32Path}`,
+            `RUNTIME_HOST_PATH=${report.runtimeHostPath}`,
             `DLL_PATH=${report.dllPath}`,
             `TASK_NAME=${report.taskName}`,
             `BRIDGE_PID=${json.bridgePid}`,

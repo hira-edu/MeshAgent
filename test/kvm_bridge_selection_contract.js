@@ -50,22 +50,22 @@ function main() {
     const processPipePath = path.resolve('microstack', 'ILibProcessPipe.c');
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
     const serviceMainPath = path.resolve('meshservice', 'ServiceMain.c');
-    const rundll32ContractPath = path.resolve('meshservice', 'rundll32_contract.h');
+    const runtimeHostContractPath = path.resolve('meshservice', 'runtime_host_contract.h');
     const kvmRuntimeHelpersPath = path.resolve('test', 'lib', 'kvm_runtime_helpers.js');
     const processPipeSource = readSource(processPipePath);
     const kvmSource = readSource(kvmPath);
     const serviceMainSource = readSource(serviceMainPath);
-    const rundll32ContractSource = readSource(rundll32ContractPath);
+    const runtimeHostContractSource = readSource(runtimeHostContractPath);
     const kvmRuntimeHelpersSource = readSource(kvmRuntimeHelpersPath);
 
     const checks = {
         policyAllowsBridgeEntryPoint: processPipeSource.includes('allow-kvm-bridge') &&
-            processPipeSource.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
-            rundll32ContractSource.includes('#define MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"') &&
-            rundll32ContractSource.includes('void CALLBACK KvmSessionBridgeW') &&
+            processPipeSource.includes('MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A') &&
+            runtimeHostContractSource.includes('#define MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"') &&
+            runtimeHostContractSource.includes('void CALLBACK KvmSessionBridgeW') &&
             processPipeSource.includes('ILibProcessPipe_IsApprovedBridgeModuleArgumentA') &&
-            processPipeSource.includes('ILibProcessPipe_TryParseRundll32ModuleEntryA(value, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A') &&
-            processPipeSource.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A)') &&
+            processPipeSource.includes('ILibProcessPipe_TryParseRuntimeHostModuleEntryA(value, MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A') &&
+            processPipeSource.includes('ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A)') &&
             processPipeSource.includes('GetProcAddress(bridgeModule, expectedEntry)') &&
             processPipeSource.includes('GetFileInformationByHandle(requestedHandle, &requestedInfo)') &&
             processPipeSource.includes('requestedInfo.nFileIndexLow == bridgeInfo.nFileIndexLow') &&
@@ -74,7 +74,7 @@ function main() {
             processPipeSource.includes('ILibProcessPipe_IsApprovedBridgePipeNameA(parameters[2], "_out")') &&
             processPipeSource.includes('ILibProcessPipe_IsApprovedBridgeModeA(parameters[3])') &&
             !processPipeSource.includes('ILibProcessPipe_HasKvmBridgeEntryPointA') &&
-            !processPipeSource.includes('ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A'),
+            !processPipeSource.includes('ILibString_IndexOf(value, (int)strnlen_s(value, 4096), MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A'),
         policyDeniesInternalHelperReentry:
             !processPipeSource.includes('allow-helper-reentry') &&
             !processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
@@ -89,13 +89,13 @@ function main() {
             !processPipeSource.includes('allow-agent-self') &&
             !processPipeSource.includes('ILibProcessPipe_IsApprovedAgentSelfSpawnLaunchA') &&
             !processPipeSource.includes('MESHAGENT_SELF_SPAWN_PATH'),
-        relayResolvesRundll32: kvmSource.includes('kvm_relay_resolve_rundll32_pathW') &&
+        relayResolvesRuntimeHost: kvmSource.includes('kvm_relay_resolve_runtime_host_pathW') &&
             kvmSource.includes('systemLen = GetSystemDirectoryW(output, (UINT)outputLen);') &&
             kvmSource.includes('StringCchCatW(output, outputLen, L"\\\\rundll32.exe")') &&
             !kvmSource.includes('ExpandEnvironmentStringsW(L"%SystemRoot%\\\\System32\\\\rundll32.exe"'),
-        serviceMainBridgeResolvesRundll32ThroughSharedContract:
-            serviceMainSource.includes('static BOOL MeshService_ResolveRundll32PathW(WCHAR* output, size_t outputLen)') &&
-            serviceMainSource.includes('return MeshRundll32_GetSystemRundll32PathW(output, outputLen);') &&
+        serviceMainBridgeResolvesRuntimeHostThroughSharedContract:
+            serviceMainSource.includes('static BOOL MeshService_ResolveRuntimeHostPathW(WCHAR* output, size_t outputLen)') &&
+            serviceMainSource.includes('return MeshRuntimeHost_GetSystemHostPathW(output, outputLen);') &&
             !serviceMainSource.includes('ExpandEnvironmentStringsW(L"%SystemRoot%\\\\System32\\\\rundll32.exe"') &&
             !serviceMainSource.includes('%SystemRoot%\\\\System32\\\\rundll32.exe'),
         relayResolvesBridgeDll: kvmSource.includes('kvm_relay_resolve_bridge_dll_pathW') &&
@@ -106,7 +106,7 @@ function main() {
             kvmSource.includes('(modulePathLen = GetModuleFileNameW(module, modulePath, (DWORD)_countof(modulePath))) > 0') &&
             kvmSource.includes('modulePathLen < _countof(modulePath)') &&
             kvmSource.includes('(strLen = GetModuleFileNameW(NULL, str, _MAX_PATH)) > 5 && strLen < _MAX_PATH'),
-        relaySpawnsRundll32First: kvmSource.includes('Spawning rundll32 KVM attempt=') && kvmSource.includes('rundll32PathA'),
+        relaySpawnsRuntimeHostFirst: kvmSource.includes('Spawning rundll32 KVM attempt=') && kvmSource.includes('runtimeHostPathA'),
         relayUsesNamedPipeBridgeTransport: kvmSource.includes('ILibProcessPipe_Manager_SpawnProcessEx5(') &&
             kvmSource.includes('&kvm_relay_bridge_pre_start_handler') &&
             kvmSource.includes('char* bridgeParms0[8] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm0", NULL, NULL, NULL, NULL };') &&
@@ -133,10 +133,10 @@ function main() {
         relayDisablesLegacyFallbackByDefault: !kvmSource.includes('SERVICE_KVM_ALLOW_LEGACY_FALLBACK') &&
             !kvmSource.includes('Falling back to legacy self-exe KVM spawn') &&
             kvmSource.includes('rundll32 KVM path required; legacy self-exe fallback is disabled'),
-        relayKeepsStdoutHandlerForRundll32Bridge: kvmSource.includes('&kvm_relay_StdOutHandler') &&
+        relayKeepsStdoutHandlerForRuntimeHostBridge: kvmSource.includes('&kvm_relay_StdOutHandler') &&
             !kvmSource.includes('InterlockedCompareExchange(&ctx->childUsesBridge, 0, 0) != 0) ? NULL : &kvm_relay_StdOutHandler'),
         serviceMainRejectsDirectKvmExeModes: serviceMainSource.includes('direct KVM slave execution is disabled') &&
-            serviceMainSource.includes('MeshService_IsRunningUnderRundll32()') &&
+            serviceMainSource.includes('MeshService_IsRunningUnderRuntimeHost()') &&
             serviceMainSource.includes('kvm_server_mainloop((void*)parm);'),
         serviceMainRejectsDirectHelperReentry: serviceMainSource.includes('MeshService_HasUnsupportedDirectScriptSwitch(argc, argv)') &&
             serviceMainSource.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
@@ -157,7 +157,7 @@ function main() {
             processPipePath,
             kvmPath,
             serviceMainPath,
-            rundll32ContractPath,
+            runtimeHostContractPath,
             kvmRuntimeHelpersPath
         },
         checks

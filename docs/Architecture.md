@@ -64,11 +64,23 @@ launched through bounded `rundll32.exe <dll>,<export>` contracts. The service
 creates the IPC endpoints, selects the target session, starts the approved
 host, monitors it, and cleans up on shutdown.
 
-The normal package entry point is the `MeshServiceRuntime` executable.
-`rundll32.exe` hosts approved exported lifecycle and helper operations; it does
-not replace the primary agent executable. The service bundle DLL also supports
-the Windows shared-process service registration, which uses the real system
-`svchost.exe` image.
+The installed Windows service runs only as the system `rundll32.exe` loading
+the service DLL's `MeshServiceHostW` export. This callback enters the Windows
+service-control dispatcher and reports an own-process service. Lifecycle and
+user-session helpers use their separate approved exports in the same DLL.
+There is no `svchost` registration or standalone EXE service entry point.
+
+Project code names this boundary `RuntimeHost`: shared contracts live in
+`meshservice/runtime_host_contract.c` and `.h`, with `MeshRuntimeHost_*`
+functions and `MESH_RUNTIME_HOST_*` constants. The Windows executable retains
+its system filename, `rundll32.exe`.
+
+The `MeshServiceRuntime` EXE is the delivery package and bootstrapper. Its
+configured installed path remains the identity/provisioning base and update
+package reference; it does not run the background agent. Installed DLL readers
+validate the SCM `ImagePath` command, system host, and primary export. The old
+`ServiceDll`, `ServiceMain`, and unload-on-stop registry values are removed by
+successful migration; they are not fallback launch configuration.
 
 The design rules for this boundary are:
 
@@ -192,6 +204,5 @@ Validation is layered:
    contents;
 5. deployment health checks compare published bytes and service state.
 
-Generated reports belong under ignored `artifacts/` paths. The tracked
-`verification/` files are small fixtures or examples consumed by validation,
-not a chronological project record.
+Generated reports belong under ignored `artifacts/validation/` paths. Reusable
+fixtures belong with their tests; dated runtime evidence is not tracked.

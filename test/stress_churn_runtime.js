@@ -3,6 +3,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const childProcess = require('child_process');
+const lifecycleRunner = require('./lib/runtime_host_lifecycle');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_SOURCE_EXE = path.join(REPO_ROOT, 'meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
@@ -64,6 +65,7 @@ function resolveSourceSet(args) {
     ensureFile(exe, 'source exe');
     return {
         exe,
+        dll: args['source-dll'] ? path.resolve(args['source-dll']) : lifecycleRunner.resolveSourceDll(exe, null, REPO_ROOT),
         db: args['source-db'] ? path.resolve(args['source-db']) : defaultSidecar(exe, '.db'),
         msh: args['source-msh'] ? path.resolve(args['source-msh']) : defaultSidecar(exe, '.msh'),
         conf: args['source-conf'] ? path.resolve(args['source-conf']) : defaultSidecar(exe, '.conf'),
@@ -89,6 +91,7 @@ function stageExecutable(sourceSet, destinationExe, options = {}) {
     fs.copyFileSync(sourceSet.exe, destinationExe);
     return {
         exe: destinationExe,
+        dll: copyIfPresent(sourceSet.dll, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.dll`)),
         db: includeDb ? copyIfPresent(sourceSet.db, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.db`)) : null,
         msh: includeMsh ? copyIfPresent(sourceSet.msh, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.msh`)) : null,
         conf: includeConf ? copyIfPresent(sourceSet.conf, path.join(path.dirname(destinationExe), `${path.basename(destinationExe, path.extname(destinationExe))}.conf`)) : null,
@@ -110,25 +113,31 @@ function createCommandRunner(commandsPath, commandRecords) {
     return function runCommand(label, file, args, options = {}) {
         const start = Date.now();
         const cwd = options.cwd || REPO_ROOT;
-        const result = childProcess.spawnSync(file, args, {
-            cwd,
-            encoding: 'utf8',
-            timeout: options.timeoutMs || 120000,
-            windowsHide: true
-        });
-        const record = {
-            label,
-            file,
-            args,
-            cwd,
-            startedUtc: new Date(start).toISOString(),
-            durationMs: Date.now() - start,
-            exitCode: Number.isInteger(result.status) ? result.status : -1,
-            signal: result.signal || null,
-            stdout: result.stdout || '',
-            stderr: result.stderr || '',
-            error: result.error ? (result.error.stack || result.error.message || String(result.error)) : null
-        };
+        let record;
+        if (lifecycleRunner.isLifecycleSwitch(args[0])) {
+            record = lifecycleRunner.runLifecycleCommand(file, args, { ...options, label, cwd, repoRoot: REPO_ROOT });
+        } else {
+            const result = childProcess.spawnSync(file, args, {
+                cwd,
+                encoding: 'utf8',
+                timeout: options.timeoutMs || 120000,
+                windowsHide: true,
+                windowsVerbatimArguments: options.windowsVerbatimArguments === true
+            });
+            record = {
+                label,
+                file,
+                args,
+                cwd,
+                startedUtc: new Date(start).toISOString(),
+                durationMs: Date.now() - start,
+                exitCode: Number.isInteger(result.status) ? result.status : -1,
+                signal: result.signal || null,
+                stdout: result.stdout || '',
+                stderr: result.stderr || '',
+                error: result.error ? (result.error.stack || result.error.message || String(result.error)) : null
+            };
+        }
         commandRecords.push(record);
         fs.appendFileSync(commandsPath, JSON.stringify({
             label: record.label,
@@ -203,26 +212,13 @@ function queryServiceName(runCommand, runnerExe) {
 
 function resolveInstalledPathsFromStatus(statusRecord) {
     const payload = parseJson(statusRecord);
-    const values = payload.values || {};
-    const serviceDll = values.expectedServiceDll || values.serviceDllExpanded || '';
-    if (!serviceDll) {
-        throw new Error('svchost status did not provide service DLL path');
+    const serviceDll = payload.installedDllPath;
+    const installedExe = payload.installedExePath;
+    if (typeof serviceDll !== 'string' || typeof installedExe !== 'string' ||
+        !fs.existsSync(serviceDll) || !fs.existsSync(installedExe)) {
+        throw new Error('Runtime validation did not provide existing installedExePath/installedDllPath');
     }
-
     const installDir = path.dirname(serviceDll);
-    const preferredExe = path.join(installDir, 'diaghost.exe');
-    let installedExe = preferredExe;
-    if (!fs.existsSync(installedExe)) {
-        const candidates = fs.readdirSync(installDir, { withFileTypes: true })
-            .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.exe'))
-            .map((entry) => entry.name)
-            .filter((name) => name.toLowerCase() !== 'svchost.exe' && name.toLowerCase() !== 'masterservice.exe')
-            .sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' }));
-        if (candidates.length !== 1) {
-            throw new Error(`Unable to resolve installed agent executable in ${installDir}`);
-        }
-        installedExe = path.join(installDir, candidates[0]);
-    }
 
     return {
         installDir,
@@ -330,12 +326,12 @@ function runRestartChurn(runCommand, runnerExe, serviceName, phaseDir, restartCo
             attempts: attemptsUsed
         };
         if ((i + 1) % sampleEvery === 0 || (i + 1) === restartCount) {
-            const statusRecord = runCommand(`restart-status-${i + 1}`, runnerExe, ['-svchost-status'], {
+            const statusRecord = runCommand(`restart-status-${i + 1}`, runnerExe, ['-validate-install'], {
                 cwd: path.dirname(runnerExe),
                 timeoutMs: 180000
             });
             writeCommandArtifacts(phaseDir, `restart-status-${i + 1}`, statusRecord);
-            ensureSuccess(statusRecord, `svchost status after restart cycle ${i + 1}`);
+            ensureSuccess(statusRecord, `runtime validation after restart cycle ${i + 1}`);
             cycle.status = parseJson(statusRecord);
         }
         samples.push(cycle);
@@ -409,12 +405,12 @@ function runUpdateChurn(runCommand, runnerExe, updateSourceExe, phaseDir, update
             attempts: attemptsUsed
         };
         if ((i + 1) % sampleEvery === 0 || (i + 1) === updateCount) {
-            const statusRecord = runCommand(`update-status-${i + 1}`, runnerExe, ['-svchost-status'], {
+            const statusRecord = runCommand(`update-status-${i + 1}`, runnerExe, ['-validate-install'], {
                 cwd: path.dirname(runnerExe),
                 timeoutMs: 180000
             });
             writeCommandArtifacts(phaseDir, `update-status-${i + 1}`, statusRecord);
-            ensureSuccess(statusRecord, `svchost status after update cycle ${i + 1}`);
+            ensureSuccess(statusRecord, `runtime validation after update cycle ${i + 1}`);
             cycle.status = parseJson(statusRecord);
         }
         cycles.push(cycle);
@@ -456,10 +452,10 @@ function runMajorBugProbe(runCommand, serviceName, installedPaths, selfTestScrip
 
     let lastRecord = null;
     for (let attempt = 1; attempt <= 24; ++attempt) {
-        const record = runCommand(`${name}-attempt-${attempt}`, installedPaths.installedExe, args, {
-            cwd: installedPaths.installDir,
-            timeoutMs: 1800000
-        });
+        const record = runCommand(`${name}-attempt-${attempt}`, lifecycleRunner.getSystemRuntimeHostPath(),
+            [`"${installedPaths.installedDll}",MeshSelfTestHostW`, ...args.map(value => `"${value.replace(/"/g, '')}"`)], {
+                cwd: installedPaths.installDir, timeoutMs: 1800000, windowsVerbatimArguments: true
+            });
         writeCommandArtifacts(phaseDir, `${name}-attempt-${attempt}`, record);
         if (!record.error && record.exitCode === 0) {
             writeJson(path.join(phaseDir, `${name}.json`), {
@@ -483,16 +479,16 @@ function runMajorBugProbe(runCommand, serviceName, installedPaths, selfTestScrip
     return lastRecord;
 }
 
-function runRollbackFaultInjection(commandRecords, commandsPath, runnerExe, updateSourceExe, installedPaths, phaseDir) {
+async function runRollbackFaultInjection(commandRecords, commandsPath, runnerExe, updateSourceExe, installedPaths, phaseDir) {
     const start = Date.now();
     const cwd = path.dirname(runnerExe);
     const commitMarker = '[UPDATE] PendingUpdate marker written prior to commit';
     const baselineInstallerLogSize = fs.existsSync(installedPaths.installerLog) ? fs.statSync(installedPaths.installerLog).size : 0;
-    const child = childProcess.spawn(runnerExe, ['-fullupdate', `--update-source=${updateSourceExe}`], {
-        cwd,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe']
+    const launch = lifecycleRunner.prepareLifecycleCommand(runnerExe, ['-fullupdate', `--update-source=${updateSourceExe}`], { cwd, repoRoot: REPO_ROOT });
+    const child = childProcess.spawn(launch.file, launch.args, {
+        cwd, windowsHide: true, windowsVerbatimArguments: true, stdio: ['ignore', 'pipe', 'pipe']
     });
+    const completed = new Promise(resolve => { child.once('close', resolve); child.once('error', resolve); });
 
     let stdout = '';
     let stderr = '';
@@ -507,47 +503,53 @@ function runRollbackFaultInjection(commandRecords, commandsPath, runnerExe, upda
     child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
     child.on('error', (error) => { errorText = error.stack || error.message || String(error); });
 
-    const deadline = Date.now() + 90000;
-    while (child.exitCode == null && child.signalCode == null && Date.now() <= deadline) {
-        if (!commitMarkerSeen && fs.existsSync(installedPaths.installerLog)) {
-            const stats = fs.statSync(installedPaths.installerLog);
-            const offset = Math.min(baselineInstallerLogSize, stats.size);
-            const fd = fs.openSync(installedPaths.installerLog, 'r');
-            const buffer = Buffer.alloc(Math.max(stats.size - offset, 0));
-            try {
-                if (buffer.length > 0) {
-                    fs.readSync(fd, buffer, 0, buffer.length, offset);
+    try {
+        const deadline = Date.now() + 90000;
+        while (!errorText && child.exitCode == null && child.signalCode == null && Date.now() <= deadline) {
+            if (!commitMarkerSeen && fs.existsSync(installedPaths.installerLog)) {
+                const stats = fs.statSync(installedPaths.installerLog);
+                const offset = Math.min(baselineInstallerLogSize, stats.size);
+                const fd = fs.openSync(installedPaths.installerLog, 'r');
+                const buffer = Buffer.alloc(Math.max(stats.size - offset, 0));
+                try {
+                    if (buffer.length > 0) {
+                        fs.readSync(fd, buffer, 0, buffer.length, offset);
+                    }
+                } finally {
+                    fs.closeSync(fd);
                 }
-            } finally {
-                fs.closeSync(fd);
+                const installerLogDelta = buffer.toString('utf8');
+                if (installerLogDelta.includes(commitMarker)) {
+                    commitMarkerSeen = true;
+                    commitMarkerSeenAtUtc = new Date().toISOString();
+                }
             }
-            const installerLogDelta = buffer.toString('utf8');
-            if (installerLogDelta.includes(commitMarker)) {
-                commitMarkerSeen = true;
-                commitMarkerSeenAtUtc = new Date().toISOString();
+            if (commitMarkerSeen && !deleted && fs.existsSync(installedPaths.installedConf)) {
+                try {
+                    fs.unlinkSync(installedPaths.installedConf);
+                    deleted = true;
+                    deletedAtUtc = new Date().toISOString();
+                } catch {
+                    // The updater can be racing the delete; keep polling until the delete lands or the child exits.
+                }
             }
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
-        if (commitMarkerSeen && !deleted && fs.existsSync(installedPaths.installedConf)) {
-            try {
-                fs.unlinkSync(installedPaths.installedConf);
-                deleted = true;
-                deletedAtUtc = new Date().toISOString();
-            } catch {
-                // The updater can be racing the delete; keep polling until the delete lands or the child exits.
-            }
+
+        if (child.exitCode == null && child.signalCode == null) {
+            timedOut = true;
+            child.kill();
         }
-        sleepMs(100);
-    }
 
-    if (child.exitCode == null && child.signalCode == null) {
-        timedOut = true;
-        child.kill();
+    } finally {
+        if (child.exitCode == null && child.signalCode == null) { child.kill(); }
+        await completed;
+        launch.cleanup();
     }
-
     const record = {
         label: 'rollback-fault-update',
-        file: runnerExe,
-        args: ['-fullupdate', `--update-source=${updateSourceExe}`],
+        file: launch.file,
+        args: launch.args,
         cwd,
         startedUtc: new Date(start).toISOString(),
         durationMs: Date.now() - start,
@@ -684,18 +686,18 @@ function runInstallAndValidate(runCommand, runnerExe, phaseDir, suffix) {
 
 function ensureInstalledServiceReady(runCommand, runnerExe, serviceName, phaseDir, prefix) {
     for (let attempt = 1; attempt <= 2; ++attempt) {
-        const statusRecord = runCommand(`${prefix}-svchost-status-attempt-${attempt}`, runnerExe, ['-svchost-status'], {
+        const statusRecord = runCommand(`${prefix}-runtime-status-attempt-${attempt}`, runnerExe, ['-validate-install'], {
             cwd: path.dirname(runnerExe),
             timeoutMs: 180000
         });
-        writeCommandArtifacts(phaseDir, `${prefix}-svchost-status-attempt-${attempt}`, statusRecord);
+        writeCommandArtifacts(phaseDir, `${prefix}-runtime-status-attempt-${attempt}`, statusRecord);
         const statusPayload = tryParseJson(statusRecord);
         const ready = !statusRecord.error &&
             statusRecord.exitCode === 0 &&
             statusPayload != null &&
-            statusPayload.statusMask === 0 &&
+            statusPayload.success === true &&
             statusPayload.checks != null &&
-            statusPayload.checks.serviceInstalledInScm === true &&
+            statusPayload.checks.serviceExists === true &&
             statusPayload.checks.serviceRunning === true;
         if (ready) {
             return resolveInstalledPathsFromStatus(statusRecord);
@@ -707,10 +709,10 @@ function ensureInstalledServiceReady(runCommand, runnerExe, serviceName, phaseDi
         }
     }
 
-    throw new Error(`${prefix}: svchost status did not converge to a healthy installed service state`);
+    throw new Error(`${prefix}: runtime validation did not converge to a healthy installed service state`);
 }
 
-function main() {
+async function main() {
     const args = parseArgs(process.argv);
     const restartCount = parseIntegerArg(args, 'restart-count', 200);
     const updateCount = parseIntegerArg(args, 'update-count', 50);
@@ -806,7 +808,7 @@ function main() {
         ]);
         phaseResults.push({ name: 'majorbug-post-update', passed: true });
 
-        const statusBeforeRollback = runCommand('rollback-pre-status', runner.exe, ['-svchost-status'], {
+        const statusBeforeRollback = runCommand('rollback-pre-status', runner.exe, ['-validate-install'], {
             cwd: path.dirname(runner.exe),
             timeoutMs: 180000
         });
@@ -815,7 +817,7 @@ function main() {
 
         const rollbackDir = path.join(evidenceRoot, 'rollback-safety');
         ensureDir(rollbackDir);
-        const rollbackUpdate = runRollbackFaultInjection(commandRecords, commandsPath, runner.exe, updateSource.exe, installedPaths, rollbackDir);
+        const rollbackUpdate = await runRollbackFaultInjection(commandRecords, commandsPath, runner.exe, updateSource.exe, installedPaths, rollbackDir);
         assert(rollbackUpdate.commitMarkerSeen === true, 'rollback fault injection did not observe the update commit marker');
         assert(rollbackUpdate.deletedLiveConf === true, 'rollback fault injection did not delete the live conf after commit');
         ensureFailure(rollbackUpdate, 'rollback fault-injection update');
@@ -827,12 +829,12 @@ function main() {
         ensureSuccess(rollbackValidate, 'rollback validate update');
         const rollbackValidatePayload = parseJson(rollbackValidate);
         assert(rollbackValidatePayload.success === true, 'rollback validate update reported failure');
-        const rollbackStatus = runCommand('rollback-svchost-status', runner.exe, ['-svchost-status'], {
+        const rollbackStatus = runCommand('rollback-runtime-status', runner.exe, ['-validate-install'], {
             cwd: path.dirname(runner.exe),
             timeoutMs: 180000
         });
-        writeCommandArtifacts(rollbackDir, 'rollback-svchost-status', rollbackStatus);
-        ensureSuccess(rollbackStatus, 'rollback svchost status');
+        writeCommandArtifacts(rollbackDir, 'rollback-runtime-status', rollbackStatus);
+        ensureSuccess(rollbackStatus, 'rollback runtime validation');
         const rollbackLogTail = tailLines(installedPaths.installerLog, 400);
         writeText(path.join(rollbackDir, 'installer-log-tail.txt'), `${rollbackLogTail.join('\n')}\n`);
         const rollbackLogText = fs.existsSync(installedPaths.installerLog) ? fs.readFileSync(installedPaths.installerLog, 'utf8') : '';
@@ -925,4 +927,4 @@ function main() {
     }
 }
 
-main();
+main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

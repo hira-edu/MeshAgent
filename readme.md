@@ -24,7 +24,6 @@ logs, traces, and release bundles are intentionally ignored.
 | `tools/` | Branding, signing, health, publication, tunnel, and validation helpers |
 | `docs/` | Current architecture, configuration, deployment, testing, and cross-repo contracts |
 | `schema/` | JSON schema for branding configuration |
-| `verification/` | Small machine-readable validation fixtures retained with the source |
 | `openssl/`, `lib-jpeg-turbo/`, `webrtc/` | Bundled third-party build inputs |
 
 See [Repository layout](docs/Files.md) and
@@ -99,9 +98,8 @@ artifact handling.
 - [Deployment SSOT](docs/DEPLOYMENT.md) is the authoritative build-to-server,
   backup, rollback, and health-check runbook.
 - [UMH sister-repository contract](docs/UMH_CONTROL_SISTER_REPO_SSOT.md) defines
-  ownership across MeshAgent, MeshCentral, and UserModeHook.
-- [UMH deployment ledger](docs/UMH_CONTROL_DEPLOYMENT_LEDGER.md) records the
-  live cross-repository deployment assumptions that must remain synchronized.
+  ownership and the publication contract across MeshAgent, MeshCentral, and
+  UserModeHook.
 
 Staging and read-only health checks are safe preparation steps. Replacing live
 agent payloads, restarting services, or rolling out to endpoints requires

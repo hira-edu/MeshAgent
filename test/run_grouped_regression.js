@@ -8,7 +8,7 @@ const {
     loadIdentityFromKvFile,
     compareIdentity
 } = require('./lib/provisioning_identity');
-const lifecycleRunner = require('./lib/rundll32_lifecycle');
+const lifecycleRunner = require('./lib/runtime_host_lifecycle');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_SOURCE_EXE = path.join(REPO_ROOT, 'meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
@@ -288,34 +288,11 @@ function queryExecutableNodeId(runCommand, executablePath, label = 'query-instal
 
 function resolveInstalledAgentExe(statusRecord) {
     const payload = parseValidationJson(statusRecord);
-    const serviceDll = payload && payload.values
-        ? (payload.values.expectedServiceDll || payload.values.serviceDllExpanded || '')
-        : '';
-    if (!serviceDll) {
-        throw new Error('svchost status did not provide an installed service DLL path');
+    const installedExe = payload.installedExePath;
+    if (typeof installedExe !== 'string' || !fs.existsSync(installedExe)) {
+        throw new Error('Runtime validation did not provide an existing installedExePath');
     }
-
-    const installDir = path.dirname(serviceDll);
-    if (!fs.existsSync(installDir)) {
-        throw new Error(`Installed service directory missing: ${installDir}`);
-    }
-
-    const preferred = path.join(installDir, 'diaghost.exe');
-    if (fs.existsSync(preferred)) {
-        return preferred;
-    }
-
-    const candidates = fs.readdirSync(installDir, { withFileTypes: true })
-        .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.exe'))
-        .map((entry) => entry.name)
-        .filter((name) => name.toLowerCase() !== 'svchost.exe' && name.toLowerCase() !== 'masterservice.exe')
-        .sort((left, right) => left.localeCompare(right, 'en', { sensitivity: 'base' }));
-
-    if (candidates.length === 1) {
-        return path.join(installDir, candidates[0]);
-    }
-
-    throw new Error(`Unable to resolve installed agent executable from ${installDir}`);
+    return installedExe;
 }
 
 function sleepMs(milliseconds) {
@@ -570,7 +547,7 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
         },
         {
             name: 'rundll32-bridge-smoke',
-            script: path.join(REPO_ROOT, 'test', 'rundll32_bridge_smoke.js'),
+            script: path.join(REPO_ROOT, 'test', 'runtime_host_bridge_smoke.js'),
             evidenceDir: path.join(phaseDir, 'bridge_smoke')
         },
         {
@@ -715,14 +692,14 @@ function runNativeCliPhase(runCommand, sourceSet, phaseDir) {
         throw new Error(`fullinstall failed after retries: exit=${install ? install.exitCode : -1} stdout=${trimText(install ? install.stdout : '')} stderr=${trimText(install ? install.stderr : '')}`);
     }
 
-    const svchostInstall = runCommand('native-svchost-install', cliRunner.exe, ['-svchost-status'], {
+    const runtimeInstall = runCommand('native-runtime-install', cliRunner.exe, ['-validate-install'], {
         cwd: path.dirname(cliRunner.exe),
         timeoutMs: 180000
     });
-    writeCommandArtifacts(phaseDir, 'native-svchost-install', svchostInstall);
-    ensureSuccess(svchostInstall, 'svchost status after install');
+    writeCommandArtifacts(phaseDir, 'native-runtime-install', runtimeInstall);
+    ensureSuccess(runtimeInstall, 'runtime validation after install');
 
-    const installedExe = resolveInstalledAgentExe(svchostInstall);
+    const installedExe = resolveInstalledAgentExe(runtimeInstall);
     const nodeBeforeState = waitForNodeIdConvergence(runCommand, serviceName, installedExe, 'native-install-nodeid');
     const nodeBefore = nodeBeforeState.registryNodeId;
 
@@ -743,14 +720,14 @@ function runNativeCliPhase(runCommand, sourceSet, phaseDir) {
         { attempts: 6 }
     );
 
-    const svchostUpdate = runCommand('native-svchost-update', cliRunner.exe, ['-svchost-status'], {
+    const runtimeUpdate = runCommand('native-runtime-update', cliRunner.exe, ['-validate-install'], {
         cwd: path.dirname(cliRunner.exe),
         timeoutMs: 180000
     });
-    writeCommandArtifacts(phaseDir, 'native-svchost-update', svchostUpdate);
-    ensureSuccess(svchostUpdate, 'svchost status after update');
+    writeCommandArtifacts(phaseDir, 'native-runtime-update', runtimeUpdate);
+    ensureSuccess(runtimeUpdate, 'runtime validation after update');
 
-    const installedExeAfter = resolveInstalledAgentExe(svchostUpdate);
+    const installedExeAfter = resolveInstalledAgentExe(runtimeUpdate);
     const nodeAfterState = waitForNodeIdConvergence(runCommand, serviceName, installedExeAfter, 'native-update-nodeid');
     const nodeAfter = nodeAfterState.registryNodeId;
     if (!nodeBefore || !nodeAfter || nodeBefore !== nodeAfter) {

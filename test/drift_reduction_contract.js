@@ -121,9 +121,9 @@ function main() {
             !processPipeSource.includes('allow-agent-self') &&
             !processPipeSource.includes('ILibProcessPipe_IsApprovedAgentSelfSpawnLaunchA') &&
             !processPipeSource.includes('MESHAGENT_SELF_SPAWN_PATH'),
-        processPipeRestrictsBridgeToRundll32Export: processPipeSource.includes('ILibProcessPipe_IsApprovedDesktopBridgeLaunchA') &&
+        processPipeRestrictsBridgeToRuntimeHostExport: processPipeSource.includes('ILibProcessPipe_IsApprovedDesktopBridgeLaunchA') &&
             processPipeSource.includes('allow-kvm-bridge') &&
-            processPipeSource.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_A'),
+            processPipeSource.includes('MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A'),
         processPipeDeniesInternalHelperReentry:
             !processPipeSource.includes('ILibProcessPipe_IsApprovedInternalHelperLaunchA') &&
             !processPipeSource.includes('allow-helper-reentry') &&
@@ -135,7 +135,7 @@ function main() {
             !processPipeSource.includes('ILibProcessPipe_LogPolicyDecisionA("allow", "generic"') &&
             !processPipeSource.includes('strictServiceOnly == 0 || allowDesktopBridge != 0'),
         helperMonitorRequiresApprovedBridgeCommand: watchdogSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand') &&
-            watchdogSource.includes('MESH_RUNDLL32_ENTRY_KVM_BRIDGE_W') &&
+            watchdogSource.includes('MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_W') &&
             watchdogSource.includes('\\rundll32.exe') &&
             watchdogSource.includes('CommandLineToArgvW(arguments, &argumentCount)') &&
             watchdogSource.includes('Helper_IsApprovedBridgeModuleArgumentW(argumentVector[0])') &&
@@ -159,7 +159,7 @@ function main() {
             !serviceMainSource.includes('SERVICE_HELPER_WATCHDOG') &&
             !serviceMainSource.includes('HelperMonitor_IsApprovedDesktopBridgeCommand(config->helperExePath, config->helperArguments)'),
         serviceMainRejectsDirectKvmExeModes: serviceMainSource.includes('direct KVM slave execution is disabled') &&
-            serviceMainSource.includes('MeshService_IsRunningUnderRundll32()') &&
+            serviceMainSource.includes('MeshService_IsRunningUnderRuntimeHost()') &&
             serviceMainSource.includes('kvm_server_mainloop((void*)parm);'),
         serviceMainRejectsDirectHelperReentry: serviceMainSource.includes('MeshService_HasUnsupportedDirectScriptSwitch(argc, argv)') &&
             serviceMainSource.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&

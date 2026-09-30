@@ -2,7 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
-const { getSystemRundll32Path } = require('./lib/rundll32_lifecycle');
+const { getSystemRuntimeHostPath } = require('./lib/runtime_host_lifecycle');
 
 function parseArgs(argv) {
     const args = {};
@@ -77,7 +77,7 @@ function xmlEscape(value) {
         .replace(/'/g, '&apos;');
 }
 
-function buildSystemScheduledTaskXml(rundll32Path, rundll32Arguments, startBoundary) {
+function buildSystemScheduledTaskXml(runtimeHostPath, runtimeHostArguments, startBoundary) {
     return [
         '<?xml version="1.0" encoding="UTF-16"?>',
         '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
@@ -108,8 +108,8 @@ function buildSystemScheduledTaskXml(rundll32Path, rundll32Arguments, startBound
         '  </Triggers>',
         '  <Actions Context="Author">',
         '    <Exec>',
-        `      <Command>${xmlEscape(rundll32Path)}</Command>`,
-        `      <Arguments>${xmlEscape(rundll32Arguments)}</Arguments>`,
+        `      <Command>${xmlEscape(runtimeHostPath)}</Command>`,
+        `      <Arguments>${xmlEscape(runtimeHostArguments)}</Arguments>`,
         '    </Exec>',
         '  </Actions>',
         '</Task>',
@@ -117,11 +117,11 @@ function buildSystemScheduledTaskXml(rundll32Path, rundll32Arguments, startBound
     ].join('\r\n');
 }
 
-function resolveSystemRundll32Path(args) {
-    if (args.rundll32) {
-        return path.resolve(args.rundll32);
+function resolveSystemRuntimeHostPath(args) {
+    if (args['runtime-host']) {
+        return path.resolve(args['runtime-host']);
     }
-    return getSystemRundll32Path();
+    return getSystemRuntimeHostPath();
 }
 
 function resolveKvmProbeDllPath(exePath, args) {
@@ -166,15 +166,15 @@ async function waitForReadableFile(filePath, timeoutMs) {
     throw new Error(`Timed out waiting for probe report: ${filePath}`);
 }
 
-async function runSystemProbe(rundll32Path, dllPath, mode) {
+async function runSystemProbe(runtimeHostPath, dllPath, mode) {
     const taskName = `MeshAgentKvmSessionProbe_${mode}_${process.pid}_${Date.now()}`;
     const reportPath = path.join(os.tmpdir(), `${taskName}.json`);
     const taskXmlPath = path.join(os.tmpdir(), `${taskName}.xml`);
     const startBoundary = formatTaskStartBoundary(new Date(Date.now() + 60000));
     const modeArgs = mode === 'auto' ? ' --auto-selected-tsid' : '';
-    const rundll32Arguments = `"${dllPath}",MeshKvmProbeHostW -kvm-bridge-session-change-probe-child "${reportPath}"${modeArgs}`;
-    const commandLine = `"${rundll32Path}" ${rundll32Arguments}`;
-    const taskXml = buildSystemScheduledTaskXml(rundll32Path, rundll32Arguments, startBoundary);
+    const runtimeHostArguments = `"${dllPath}",MeshKvmProbeHostW -kvm-bridge-session-change-probe-child "${reportPath}"${modeArgs}`;
+    const commandLine = `"${runtimeHostPath}" ${runtimeHostArguments}`;
+    const taskXml = buildSystemScheduledTaskXml(runtimeHostPath, runtimeHostArguments, startBoundary);
 
     fs.writeFileSync(taskXmlPath, Buffer.from(`\ufeff${taskXml}`, 'utf16le'));
     const create = runCommand('schtasks', [
@@ -289,8 +289,8 @@ function validateProbeJson(json, expectedAutoSelected) {
     assert((json.screenPackets + json.displayListPackets + json.displayInfoPackets + json.cursorPackets) > 0, `${label} probe did not observe any KVM packets`);
 }
 
-async function runAndParseProbe(rundll32Path, dllPath, mode) {
-    const systemProbe = await runSystemProbe(rundll32Path, dllPath, mode);
+async function runAndParseProbe(runtimeHostPath, dllPath, mode) {
+    const systemProbe = await runSystemProbe(runtimeHostPath, dllPath, mode);
     let json = null;
 
     try {
@@ -308,21 +308,21 @@ async function main() {
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const exePath = args.exe ? path.resolve(args.exe) : path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = resolveKvmProbeDllPath(exePath, args);
-    const rundll32Path = resolveSystemRundll32Path(args);
-    const logPath = args.log ? path.resolve(args.log) : path.join(path.dirname(exePath), 'svchost-debug.log');
+    const runtimeHostPath = resolveSystemRuntimeHostPath(args);
+    const logPath = args.log ? path.resolve(args.log) : path.join(path.dirname(exePath), 'service-host-debug.log');
 
     assert(fs.existsSync(exePath), `probe executable missing at ${exePath}`);
     assert(fs.existsSync(dllPath), `probe DLL missing at ${dllPath}`);
-    assert(fs.existsSync(rundll32Path), `rundll32.exe missing at ${rundll32Path}`);
+    assert(fs.existsSync(runtimeHostPath), `rundll32.exe missing at ${runtimeHostPath}`);
 
-    const explicitProbe = await runAndParseProbe(rundll32Path, dllPath, 'explicit');
-    const autoProbe = await runAndParseProbe(rundll32Path, dllPath, 'auto');
+    const explicitProbe = await runAndParseProbe(runtimeHostPath, dllPath, 'explicit');
+    const autoProbe = await runAndParseProbe(runtimeHostPath, dllPath, 'auto');
 
     const report = {
         generatedUtc: new Date().toISOString(),
         exePath,
         dllPath,
-        rundll32Path,
+        runtimeHostPath,
         logPath,
         probes: {
             explicit: {
@@ -375,7 +375,7 @@ async function main() {
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
-            `RUNDLL32_PATH=${report.rundll32Path}`,
+            `RUNTIME_HOST_PATH=${report.runtimeHostPath}`,
             `DLL_PATH=${report.dllPath}`,
             `EXPLICIT_TASK_NAME=${report.probes.explicit.taskName}`,
             `EXPLICIT_SESSION_ID=${explicitProbe.json.sessionId}`,

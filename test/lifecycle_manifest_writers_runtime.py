@@ -73,7 +73,7 @@ def main():
         check(label, manifests[0], {"Action": "validate-package", "SourceExe": source, "SourceDll": source,
                                   "DisplayName": description, "Description": description, "RequireConfig": "1"})
 
-    helper = (ROOT / "test/lib/rundll32_lifecycle.js").read_text()
+    helper = (ROOT / "test/lib/runtime_host_lifecycle.js").read_text()
     functions = "\n".join(js_function(helper, name) for name in ["sanitizeManifestValue", "writeManifest"])
     manifest = evidence / "test-helper.ini"
     fields = {"action": "validate-package", "sourceExe": source, "sourceDll": source,

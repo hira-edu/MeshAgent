@@ -58,7 +58,7 @@ function main() {
         kvmTelemetryWritesToModuleLocalDiagnosticLog:
             kvm.includes('GetModuleHandleExW') &&
             kvm.includes('GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS') &&
-            kvm.includes('svchost-debug.log') &&
+            kvm.includes('service-host-debug.log') &&
             kvm.includes('FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE'),
         kvmInputTelemetryClosesSendInputBlindSpot:
             kvm.includes('bridge input packet after') &&

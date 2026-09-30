@@ -1,9 +1,5 @@
 # MeshAgent UMH Control Sister-Repo SSOT
 
-Last Updated: 2026-08-05
-Owner: Codex + User
-Status: Active sister-repo SSOT for the agent-side `umhctl` operator contract
-
 ## Purpose
 
 This repo owns the endpoint-side UMH operator contract. It does not own the native `UserModeHook` CLI text surface, and it does not own the MeshCentral browser UI.
@@ -16,21 +12,19 @@ The authoritative agent-side UMH contract currently lives in:
 - `test/lib/umh_operator_contract.js`
 - `test_umhctl_e2e.js`
 - `meshcore/config/umh_defines.h`
+- `meshservice/runtime_host_contract.c` / `MeshUmhHostW`
 
 ## Sister Repos
 
-| Repo | Local Path | Role |
-|---|---|---|
-| `UserModeHook` | `C:\Users\Workstation\Documents\GitHub\UserModeHook` | native service, native control pipe, native CLI, native docs |
-| `MeshCentral` | `C:\Users\Workstation\Documents\GitHub\MeshCentral` | web UI that emits `umhctl` commands and live VPS publication workspace |
-| `MeshAgent` | `C:\Users\Workstation\Documents\GitHub\MeshAgent` | endpoint-side operator contract, flow-header defaults, companion-service deployment rules |
+| Repo | Role |
+|---|---|
+| `UserModeHook` | Native service, control pipe, CLI, and native docs |
+| `MeshCentral` | Web UI that emits `umhctl` commands and server publication |
+| `MeshAgent` | Endpoint operator contract, flow-header defaults, and companion-service deployment |
 
-Authoritative sister docs:
-
-- `C:\Users\Workstation\Documents\GitHub\UserModeHook\docs\ssot\UmhControlSisterRepoContract.md`
-- `C:\Users\Workstation\Documents\GitHub\UserModeHook\docs\ssot\UmhControlDeploymentLedger.md`
-- `C:\Users\Workstation\Documents\GitHub\MeshCentral\docs\UMH_CONTROL_SISTER_REPO_SSOT.md`
-- `C:\Users\Workstation\Documents\GitHub\MeshCentral\docs\UMH_CONTROL_DEPLOYMENT_LEDGER.md`
+Authoritative sister contracts are `UserModeHook/docs/ssot/UmhControlSisterRepoContract.md`
+and `MeshCentral/docs/UMH_CONTROL_SISTER_REPO_SSOT.md`. Resolve these paths from
+the configured sibling checkouts rather than a particular workstation.
 
 ## What This Repo Owns
 
@@ -79,10 +73,26 @@ The HookDLL applies its configured input and Window Display Affinity changes
 automatically only to applicable authorized test targets; there is no operator
 toggle.
 
-The current agent-side default flow contract is:
+## Shared Identity and Flow Contract
 
+`meshcore/config/umh_defines.h` defines the native identifiers mirrored by the
+shared JavaScript modules:
+
+- executable: `MasterService.exe`
+- service: `AdvancedHookService`
+- control pipe: `\\.\pipe\{95c1a2e0-f84e-4c8a-9c32}-control`
+
+The default flow contract is:
+
+- protocol: `umh-control`
 - `x-umh-contract-version=2026-03-05`
 - `x-umh-flow-profile=report-driven-lab-v1`
+
+The version is a protocol identifier, not a deployment date. Flow-scoped
+requests also carry `x-umh-run-id`, `x-umh-client`, `x-umh-target-tag`, and
+`x-umh-method-key`; preserve explicit operator overrides. See the
+[operator panel contract](testing/UMH_OPERATOR_PANEL_SSOT.md#flow-headers)
+for UI and console parity requirements.
 
 ## `uiSnapshot` Aggregate Contract
 
@@ -104,11 +114,10 @@ With `--pid <pid>`, it additionally requests:
 
 `partial=true` means one or more section requests failed. It does not mean the entire snapshot failed.
 
-Current expected live partial on a healthy canary:
-
-- native `getConfig` reads `C:\ProgramData\UserModeHook\config.json`
-- if that file is absent, `UserModeHook` returns `config not found`
-- that missing-file condition is currently the expected reason `uiSnapshot` remains `partial=true`
+The native `getConfig` operation reads the UserModeHook configuration at
+`C:\ProgramData\UserModeHook\config.json`. If it returns `config not found`,
+the `config` section makes the aggregate partial. Inspect the per-section
+errors to distinguish missing configuration from failures in other requests.
 
 ## Runtime Compatibility Notes
 
@@ -137,26 +146,30 @@ The current shared implementation also carries mandatory runtime-compatibility g
 
 These are contract-level runtime requirements, not optional workarounds.
 
-## Current Live Publication State
+## Publication Contract
 
-As of 2026-04-14:
+Behavioral changes originate in `modules/umhctl.js` and its matching recovery-core
+implementation, then must be mirrored into the MeshCentral core/module copies
+before publication. Keep default, minified, recovery, diagnostic, tiny, and
+configured data-override cores aligned with the operator surface.
 
-- MeshCentral's live publication exposes `umhctl` across the default core, minified default core, recovery core, diagnostic core, tiny core, and the `meshcentral-data` default override
-- live requested node `Sal` was offline during validation
-- representative live validation used `DESKTOP-TONBSMQ` on core lineage `Apr 9 2026, 3220172809`
+`deploy.py` supplies the publish mappings. Its UMH candidate is
+`../UserModeHook/build/bin/Release/MasterService.exe`; any companion publication
+tool must select the same reviewed candidate. Set `MESHCENTRAL_USERFILES_USER`
+to publish it under the configured MeshCentral user's public files directory.
+The UI source `../MeshCentral/public/scripts/custom.js` is published to both
+configured module-public and web-public targets.
 
-## Current Agent-Compatible Live Publication
+The agent resolves its download URL from `UMH_MASTERSERVICE_URL`, or from its
+server URL plus `UMH_MASTERSERVICE_PATH` or `UMH_USERFILES_USER`. The userfiles
+form is `/userfiles/<owner>/MasterService.exe?download=1`. Configure an HTTPS
+endpoint compatible with the deployed agent's TLS client, retain certificate
+verification, and verify the published payload against the selected package's
+digest. Server addresses, release hashes, and canary observations belong in
+per-run evidence rather than this contract.
 
-- active MeshCentral VPS IP: `74.208.52.191`
-- compatible rolled-back embedded client lineage: `0fb268971e670b09a89f977f727336a91328f0ea`
-- current MeshAgent source baseline: `1f21cd62ac8699f3e35e2d11c6ef73098faeebf9` plus the coordinated local retired-op removal
-- live `MasterService.exe` size: `16986624`
-- live `MasterService.exe` SHA384 / install pin: `827b9d4e9bb254a2bdb4e9c423a3ae97e319f119941f4c2bd792719ac7bcf178e6932b452aa23d02e7164908f60e1b54`
-- live `MasterService.exe` SHA256: `347f3c5ec7478fbb9e765d70b39ba4130a018662b2be633fe424af9440d14fc1`
-- all four live `umhctl.js` copies: SHA256 `64cd8c4c660fd14f4b9a64a9b20345e84488762b152f3943491664ed94a5448f`
-- live `recoverycore.js`: SHA256 `4013fa7f958632df0462f2fbbd8cef6cb35663e7b2f3334a43017be7a4a75843`
-- compatible HTTPS publication URL: `https://agents.high.support/userfiles/hsadmin/MasterService.exe?download=1`
-- the direct endpoint is required because the rolled-back embedded client fails the Cloudflare-backed `high.support` TLS handshake but succeeds with certificate validation against the existing Caddy-backed `agents.high.support` endpoint
+See [Deployment](DEPLOYMENT.md) for staging, publication, verification, and
+rollback, and [Testing](testing/README.md) for the validation workflow.
 
 ## Required Sync Rules
 
@@ -171,12 +184,12 @@ If this repo changes any of the following:
 - control pipe name
 - service name or UMH binary name
 - runtime compatibility behavior for timers, child-process completion, or exec-file invocation
-- the `MeshUmhHostW` rundll32 host contract used by Windows UMH lifecycle commands
+- the `MeshUmhHostW` RuntimeHost contract used by Windows UMH lifecycle commands
 
-then the same change tranche must also update:
+then coordinate the matching changes in:
 
-1. `UserModeHook` native code and docs
-2. `MeshCentral` UI/ledger docs
-3. this repo's sister ledger docs
+1. `UserModeHook` native code and current contract docs
+2. `MeshCentral` UI, published modules, and current contract docs
+3. this document and the operator panel contract
 
-No MeshAgent UMH contract change is complete until those sister docs agree.
+The implementations and current contracts must agree before rollout.

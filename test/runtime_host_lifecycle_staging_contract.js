@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-// Static contract for the rundll32 lifecycle, UMH and consent hosts: private
+// Static contract for the RuntimeHost lifecycle, UMH and consent hosts: private
 // uninstall staging, unique and swept staged artifacts, timed-out host
 // handling, the anchored MasterService.exe path, and fail-closed job setup.
 
@@ -74,18 +74,18 @@ function extractFunction(source, name) {
 function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
-    const contractPath = path.resolve('meshservice', 'rundll32_contract.c');
+    const contractPath = path.resolve('meshservice', 'runtime_host_contract.c');
     const consentModulePath = path.resolve('modules', 'win-userconsent.js');
     const source = fs.readFileSync(contractPath, 'utf8');
     const consentModule = fs.readFileSync(consentModulePath, 'utf8');
 
-    const tempDir = extractFunction(source, 'MeshRundll32_PrepareTempLifecycleDirectoryW');
-    const stateDir = extractFunction(source, 'MeshRundll32_PrepareLifecycleStateDirectoryW');
-    const sweep = extractFunction(source, 'MeshRundll32_SweepStaleLifecycleArtifactsW');
-    const hostDll = extractFunction(source, 'MeshRundll32_PrepareLifecycleHostDllW');
-    const launch = extractFunction(source, 'MeshRundll32_LaunchLifecycleHostW');
+    const tempDir = extractFunction(source, 'MeshRuntimeHost_PrepareTempLifecycleDirectoryW');
+    const stateDir = extractFunction(source, 'MeshRuntimeHost_PrepareLifecycleStateDirectoryW');
+    const sweep = extractFunction(source, 'MeshRuntimeHost_SweepStaleLifecycleArtifactsW');
+    const hostDll = extractFunction(source, 'MeshRuntimeHost_PrepareLifecycleHostDllW');
+    const launch = extractFunction(source, 'MeshRuntimeHost_LaunchLifecycleHostW');
     const lifecycleHost = extractFunction(source, 'MeshLifecycleHostW');
-    const selfTest = extractFunction(source, 'MeshRundll32_LaunchSelfTestHostW');
+    const selfTest = extractFunction(source, 'MeshRuntimeHost_LaunchSelfTestHostW');
     const approvedPath = extractFunction(source, 'MeshUmhHost_IsApprovedMasterServicePathW');
     const managedLocation = extractFunction(source, 'MeshUmhHost_IsManagedMasterServiceLocationW');
     const readManifest = extractFunction(source, 'MeshUmhHost_ReadManifestW');
@@ -101,28 +101,28 @@ function main() {
         uninstallStagingUsesPrivateSystemTempDirectory:
             !tempDir.includes('GetTempPathW(') &&
             tempDir.includes('GetSystemWindowsDirectoryW(') &&
-            tempDir.includes('MESH_RUNDLL32_TEMP_STAGING_SDDL') &&
+            tempDir.includes('MESH_RUNTIME_HOST_TEMP_STAGING_SDDL') &&
             tempDir.includes('CreateDirectoryW(tempDir, &securityAttributes)') &&
             !tempDir.includes('CreateDirectoryIfMissingW(') &&
-            /#define MESH_RUNDLL32_TEMP_STAGING_SDDL L"D:P\(/.test(source),
+            /#define MESH_RUNTIME_HOST_TEMP_STAGING_SDDL L"D:P\(/.test(source),
         validateUninstallStagesOutsideInstallRoot:
-            hostDll.includes('action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL || action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL'),
+            hostDll.includes('action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL || action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL'),
         launcherRemovesEmptyStagingDirectory:
-            launch.includes('RemoveDirectoryW(MeshRundll32_TempLifecycleDir)'),
+            launch.includes('RemoveDirectoryW(MeshRuntimeHost_TempLifecycleDir)'),
         stagedArtifactNamesAreUniquePerCall:
             source.includes('L"host-%lu-%llu-%ld.dll"') &&
             source.includes('L"manifest-%lu-%llu-%ld.ini"') &&
             !source.includes('L"host-%lu-%llu.dll"') &&
             !source.includes('L"manifest-%lu-%llu.ini"'),
         staleArtifactsAreSweptOnlyForExitedLaunchers:
-            stateDir.includes('MeshRundll32_SweepStaleLifecycleArtifactsW(lifecycleDir);') &&
-            sweep.includes('MESH_RUNDLL32_STALE_ARTIFACT_AGE_MS') &&
-            sweep.includes('MeshRundll32_ProcessIsRunning((DWORD)pid)') &&
+            stateDir.includes('MeshRuntimeHost_SweepStaleLifecycleArtifactsW(lifecycleDir);') &&
+            sweep.includes('MESH_RUNTIME_HOST_STALE_ARTIFACT_AGE_MS') &&
+            sweep.includes('MeshRuntimeHost_ProcessIsRunning((DWORD)pid)') &&
             sweep.includes('pid == GetCurrentProcessId()'),
         lifecycleHostConsumesManifestOnce:
             lifecycleHost.indexOf('(void)DeleteFileW(manifestPath);') > lifecycleHost.indexOf('Failed to read manifest'),
         timedOutMutatingHostIsNotKilled:
-            launch.includes('MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_PACKAGE))') &&
+            launch.includes('MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_PACKAGE))') &&
             launch.includes('to finish its own transaction') &&
             launch.includes('childExited = (WaitForSingleObject(pi.hProcess, 5000) == WAIT_OBJECT_0);') &&
             launch.includes('(pi.hProcess == NULL || childExited) && manifestPath') &&
@@ -161,7 +161,7 @@ function main() {
     };
 
     for (const [name, passed] of Object.entries(checks)) {
-        assert(passed, `rundll32 lifecycle staging contract failed: ${name}`);
+        assert(passed, `RuntimeHost lifecycle staging contract failed: ${name}`);
     }
 
     const report = {
@@ -173,7 +173,7 @@ function main() {
 
     if (evidenceDir) {
         ensureDir(evidenceDir);
-        fs.writeFileSync(path.join(evidenceDir, 'rundll32_lifecycle_staging_contract.json'), JSON.stringify(report, null, 2));
+        fs.writeFileSync(path.join(evidenceDir, 'runtime_host_lifecycle_staging_contract.json'), JSON.stringify(report, null, 2));
     } else {
         process.stdout.write(JSON.stringify(report, null, 2) + '\n');
     }

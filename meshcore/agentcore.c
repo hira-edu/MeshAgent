@@ -70,7 +70,7 @@ limitations under the License.
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 #include "../meshservice/runtime_core.h"
 #include "../meshservice/service_defaults.h"
-#include "../meshservice/rundll32_contract.h"
+#include "../meshservice/runtime_host_contract.h"
 #include "../meshservice/branding_util.h"
 #include <stdarg.h>
 #include <ShlObj.h>
@@ -307,8 +307,8 @@ static BOOL MeshAgent_RunNativeServiceFullInstall(struct MeshAgentHostContainer*
 	const BOOL previouslyInstalled = ServiceDeploy_IsAlreadyInstalled();
 	MeshAgent_LogNativeInstallerEvent("...Lifecycle planner will evaluate existing state before install (detected installed: %s)", previouslyInstalled ? "yes" : "no");
 
-	if (MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL,
+	if (MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
 			exePathW,
 			NULL,
 			NULL,
@@ -319,12 +319,12 @@ static BOOL MeshAgent_RunNativeServiceFullInstall(struct MeshAgentHostContainer*
 			&lifecycleExitCode))
 	{
 		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle installer completed successfully");
+		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle installer completed successfully");
 		return TRUE;
 	}
 
-	if (MeshRundll32_LaunchLifecycleHostW(
-			previouslyInstalled ? MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE : MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL,
+	if (MeshRuntimeHost_LaunchLifecycleHostW(
+			previouslyInstalled ? MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE : MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL,
 			NULL,
 			NULL,
 			NULL,
@@ -335,12 +335,12 @@ static BOOL MeshAgent_RunNativeServiceFullInstall(struct MeshAgentHostContainer*
 			&lifecycleExitCode))
 	{
 		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle installer reported failure but final %s validation passed",
+		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle installer reported failure but final %s validation passed",
 			previouslyInstalled ? "update" : "install");
 		return TRUE;
 	}
 
-	MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle installer failed (exit=%lu LastError=%lu). Legacy installer path disabled.", lifecycleExitCode, GetLastError());
+	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle installer failed (exit=%lu LastError=%lu). Legacy installer path disabled.", lifecycleExitCode, GetLastError());
 	return FALSE;
 }
 
@@ -348,8 +348,8 @@ static BOOL MeshAgent_RunNativeServiceFullUninstall(void)
 {
 	DWORD lifecycleExitCode = ERROR_SUCCESS;
 	MeshAgent_LogNativeInstallerEvent("...Running rundll32 lifecycle uninstaller");
-	if (MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL,
+	if (MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL,
 			NULL,
 			NULL,
 			NULL,
@@ -363,8 +363,8 @@ static BOOL MeshAgent_RunNativeServiceFullUninstall(void)
 	}
 
 	// Treat a fully clean final state as success even if teardown reported a non-fatal error code.
-	if (MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
+	if (MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
 			NULL,
 			NULL,
 			NULL,
@@ -374,11 +374,11 @@ static BOOL MeshAgent_RunNativeServiceFullUninstall(void)
 			120000,
 			&lifecycleExitCode))
 	{
-		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle uninstaller reported failure but final uninstall validation passed");
+		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle uninstaller reported failure but final uninstall validation passed");
 		return TRUE;
 	}
 
-	MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle uninstaller failed (exit=%lu LastError=%lu)", lifecycleExitCode, GetLastError());
+	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle uninstaller failed (exit=%lu LastError=%lu)", lifecycleExitCode, GetLastError());
 	return FALSE;
 }
 
@@ -1153,8 +1153,8 @@ static void MeshAgent_CopyEvidenceSnapshot(const wchar_t* phaseLabel)
 
 	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\controlchannel-debug.log", installDir);
 	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"controlchannel-debug.log");
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\svchost-debug.log", installDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"svchost-debug.log");
+	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\service-host-debug.log", installDir);
+	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"service-host-debug.log");
 	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\" SERVICE_FALLBACK_LOG_NAME, installDir);
 	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, SERVICE_FALLBACK_LOG_NAME);
 }
@@ -1753,7 +1753,7 @@ static BOOL MeshAgent_RunMajorBugSelfTest(
 	}
 
 	started = GetTickCount64();
-	ok = MeshRundll32_LaunchSelfTestHostW(args, timeoutMs, &exitCode);
+	ok = MeshRuntimeHost_LaunchSelfTestHostW(args, timeoutMs, &exitCode);
 	elapsedMs = (DWORD)(GetTickCount64() - started);
 
 	if (progressLogPath[0] != L'\0')
@@ -1816,8 +1816,8 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 
 	if (_wcsicmp(sourceExe, exePathW) != 0)
 	{
-		if (!MeshRundll32_LaunchLifecycleHostW(
-				MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
+		if (!MeshRuntimeHost_LaunchLifecycleHostW(
+				MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE,
 				sourceExe,
 				sourceDll,
 				displayName,
@@ -1827,11 +1827,11 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 				0,
 				&lifecycleExitCode))
 		{
-			MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle update handoff failed (exit=%lu error=%lu)", lifecycleExitCode, GetLastError());
+			MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update handoff failed (exit=%lu error=%lu)", lifecycleExitCode, GetLastError());
 			return FALSE;
 		}
 
-		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle update handed off to service DLL host");
+		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update handed off to service DLL host");
 
 		if (serviceName[0] != L'\0' && !MeshAgent_WaitForServiceNotRunning(serviceName, 60000))
 		{
@@ -1843,8 +1843,8 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 	}
 
 	MeshAgent_LogNativeInstallerEvent("...Running rundll32 lifecycle update");
-	if (MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
+	if (MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE,
 			sourceExe,
 			sourceDll,
 			displayName,
@@ -1855,12 +1855,12 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 			&lifecycleExitCode))
 	{
 		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle update completed successfully");
+		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update completed successfully");
 		return TRUE;
 	}
 
-	if (MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE,
+	if (MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE,
 			NULL,
 			NULL,
 			displayName,
@@ -1871,11 +1871,11 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 			&lifecycleExitCode))
 	{
 		MeshAgent_StageSelfTestModuleBestEffort();
-		MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle update reported failure but final update validation passed");
+		MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update reported failure but final update validation passed");
 		return TRUE;
 	}
 
-	MeshAgent_LogNativeInstallerEvent("...Rundll32 lifecycle update failed (exit=%lu LastError=%lu)", lifecycleExitCode, GetLastError());
+	MeshAgent_LogNativeInstallerEvent("...RuntimeHost lifecycle update failed (exit=%lu LastError=%lu)", lifecycleExitCode, GetLastError());
 	return FALSE;
 }
 
@@ -1895,8 +1895,8 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	SetEnvironmentVariableW(L"MESHAGENT_SELFTEST", L"1");
 
 	DWORD exitCode = ERROR_SUCCESS;
-	if (!MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_INSTALL,
+	if (!MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
 			exePathW,
 			NULL,
 			NULL,
@@ -1922,8 +1922,8 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	if (!MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL,
+	if (!MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL,
 			NULL,
 			NULL,
 			NULL,
@@ -2047,7 +2047,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	if (!MeshRundll32_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode))
+	if (!MeshRuntimeHost_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Self-test failed (exit=%lu)", exitCode);
 		return FALSE;
@@ -2056,8 +2056,8 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 
 	const wchar_t* updateSource = (updateExePath != NULL && updateExePath[0] != L'\0') ? updateExePath : exePathW;
 
-	if (!MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
+	if (!MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE,
 			updateSource,
 			updateDllPath,
 			NULL,
@@ -2077,8 +2077,8 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	if (!MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE,
+	if (!MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE,
 			NULL,
 			NULL,
 			NULL,
@@ -2099,7 +2099,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	if (!MeshRundll32_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode))
+	if (!MeshRuntimeHost_LaunchSelfTestHostW(selfTestArgs, 900000, &exitCode))
 	{
 		MeshAgent_LogNativeInstallerEvent("...Post-update self-test failed (exit=%lu)", exitCode);
 		return FALSE;
@@ -2162,8 +2162,8 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 	}
 
 	MeshAgent_CopyEvidenceSnapshot(L"pre_uninstall");
-	if (!MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL,
+	if (!MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL,
 			NULL,
 			NULL,
 			NULL,
@@ -2177,8 +2177,8 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 		return FALSE;
 	}
 
-	if (!MeshRundll32_LaunchLifecycleHostW(
-			MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
+	if (!MeshRuntimeHost_LaunchLifecycleHostW(
+			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
 			NULL,
 			NULL,
 			NULL,
@@ -4282,7 +4282,7 @@ duk_ret_t ILibDuktape_MeshAgent_Disconnect(duk_context *ctx)
 	return(0);
 }
 
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)
 {
 	MeshAgentHostContainer *agent;
@@ -4433,7 +4433,7 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 		ILibDuktape_CreateEventWithGetter(ctx, "controlChannelDebug", ILibDuktape_MeshAgent_controlChannelDebug);
 		ILibDuktape_CreateInstanceMethod(ctx, "DataPing", ILibDuktape_MeshAgent_DataPing, DUK_VARARGS);
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ARCHID", MESH_AGENTID);
-	#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
+	#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 4);
 		duk_push_true(ctx);
 	#else
@@ -5337,13 +5337,13 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 			haveUpdateActivationHash = 1;
 		}
 
-#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
+#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		// Launch the downloaded update through the rundll32 lifecycle host.
-		ILIBLOGMESSAGEX("SelfUpdate -> ServiceHost mode: launching rundll32 lifecycle update activation...");
+		ILIBLOGMESSAGEX("SelfUpdate -> Launching rundll32 lifecycle update activation...");
 
 		DWORD lifecycleExitCode = ERROR_SUCCESS;
-		if (MeshRundll32_LaunchLifecycleHostW(
-				MESH_RUNDLL32_LIFECYCLE_ACTION_UPDATE,
+		if (MeshRuntimeHost_LaunchLifecycleHostW(
+				MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE,
 				w_updatefile,
 				NULL,
 				NULL,
@@ -5355,7 +5355,7 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 		{
 			MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
 			MeshAgent_ClearUpdateActivationFailureHash(agent->masterDb);
-			ILIBLOGMESSAGEX("SelfUpdate -> Rundll32 lifecycle update activation completed (exit %lu, %ls)", lifecycleExitCode, w_updatefile);
+			ILIBLOGMESSAGEX("SelfUpdate -> RuntimeHost lifecycle update activation completed (exit %lu, %ls)", lifecycleExitCode, w_updatefile);
 		}
 		else
 		{
@@ -5371,7 +5371,7 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 		(void)w_updatefile;
 		if (haveUpdateActivationHash != 0) { MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, updateActivationHash); }
 		MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
-		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires rundll32/svchost mode; legacy command-shell update path disabled.");
+		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires the rundll32 lifecycle runtime; legacy command-shell update path disabled.");
 		util_deletefile(updatefile); // Fail closed: this build cannot apply the staged update, so do not leave it on disk
 		MeshServer_ReportUpdateFailure(agent);
 		return;
@@ -6194,8 +6194,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		case MeshCommand_AgentUpdate:
 		{
 			if (agent->disableUpdate != 0) { break; }	 // Ignore if updates are disabled
-#if defined(WIN32) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
-			// In svchost mode, check if an update is already pending reboot
+#if defined(WIN32)
+			// In the DLL runtime, check if an update is already pending reboot
 			{
 				char pendingBuf[8] = {0};
 				int pendingLen = ILibSimpleDataStore_Get(agent->masterDb, "PendingUpdate", pendingBuf, sizeof(pendingBuf));
@@ -8093,7 +8093,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		}
 	}
 
-#if defined(WIN32) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
+#if defined(WIN32)
 	// Clear the PendingUpdate marker after startup - this means either the update was applied on reboot
 	// or the marker is stale. Either way, allow new updates to be processed.
 	if (agentHost->masterDb != NULL)
@@ -8205,7 +8205,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	}
 	else if (installFlag != 0)
 	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE)
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		printf("Direct Windows service install/uninstall switches are disabled. Use the rundll32 lifecycle manifest path.\n");
 		exit(ERROR_NOT_SUPPORTED);
 #endif
@@ -8341,6 +8341,15 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	agentHost->JSRunningAsService = 0;
 	agentHost->JSRunningWithAdmin = 0;
 
+#ifdef WIN32
+	// The SCM dispatcher supplies the running service identity. A datastore
+	// retained across migration must not override that authoritative name.
+	if (agentHost->serviceReserved != 0 && agentHost->meshServiceName != NULL && agentHost->meshServiceName[0] != 0)
+	{
+		MeshAgent_ControlChannelDebugLog(agentHost, "ServiceName supplied by SCM [%s]", agentHost->meshServiceName);
+	}
+	else
+#endif
 	if ((msnlen = ILibSimpleDataStore_Get(agentHost->masterDb, "meshServiceName", NULL, 0)) != 0)
 	{
 		if (agentHost->meshServiceName != NULL) { ILibMemory_Free(agentHost->meshServiceName); agentHost->meshServiceName = NULL; }
@@ -8382,7 +8391,14 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		agentHost->displayName = ILibString_Copy("MeshCentral", 0);
 	}
 
-	duk_push_sprintf(tmpCtx, "require('service-manager').manager.getService('%s').isMe();", agentHost->meshServiceName);
+#ifdef WIN32
+	// Windows background execution enters only through the SCM runtime host.
+	agentHost->platformType = MeshAgent_Posix_PlatformTypes_WINDOWS;
+	agentHost->JSRunningAsService = agentHost->serviceReserved != 0;
+#else
+	duk_push_string(tmpCtx, agentHost->meshServiceName);
+	duk_json_encode(tmpCtx, -1);
+	duk_push_sprintf(tmpCtx, "require('service-manager').manager.getService(%s).isMe();", duk_get_string(tmpCtx, -1));
 	tmpString = (char*)duk_get_string(tmpCtx, -1);
 
 	if (duk_peval_string(tmpCtx, "(function foo() { var f = require('service-manager').manager.getServiceType(); switch(f){case 'procd': return(7); case 'windows': return(10); case 'launchd': return(3); case 'freebsd': return(5); case 'systemd': return(1); case 'init': return(2); case 'upstart': return(4); default: return(0);}})()") == 0)
@@ -8393,43 +8409,16 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	{
 		agentHost->JSRunningAsService = duk_get_boolean(tmpCtx, -1);
 	}
+#endif
 	if (duk_peval_string(tmpCtx, "require('user-sessions').isRoot();") == 0)
 	{
 		agentHost->JSRunningWithAdmin = duk_get_boolean(tmpCtx, -1);
 	}
 
-	if (agentHost->JSRunningAsService == 0 && agentHost->serviceReserved != 0)
-	{
-		// We are definitely running as a service, but the check failed. We must be configured with the wrong service name
-
-#ifdef WIN32
-		// First, let's enumerate 'LocalMachine/SOFTWARE/Open Source' to see if we can find the correct service name
-		if (duk_peval_string(tmpCtx, "require('util-service-check')()") == 0)
-		{
-			if (!duk_is_null_or_undefined(tmpCtx, -1))
-			{
-				duk_size_t actualnameLen;
-				char *actualname = (char*)duk_safe_to_lstring(tmpCtx, -1, &actualnameLen);
-				ILIBLOGMESSAGEX("Service Name Conflict: Configured [%s] but is actually [%s]", agentHost->meshServiceName, actualname);
-
-				ILibMemory_Free(agentHost->meshServiceName);
-				agentHost->meshServiceName = ILibMemory_SmartAllocate(actualnameLen + 1);
-				memcpy_s(agentHost->meshServiceName, ILibMemory_Size(agentHost->meshServiceName), actualname, actualnameLen);
-				agentHost->meshServiceName[actualnameLen] = 0;
-				MeshAgent_ControlChannelDebugLog(agentHost, "ServiceName resolved via util-service-check [%s]", agentHost->meshServiceName);
-				agentHost->JSRunningAsService = 1;
-
-				if (agentHost->masterDb != NULL && ILibSimpleDataStore_IsCacheOnly(agentHost->masterDb) == 0)
-				{
-					ILibSimpleDataStore_PutEx(agentHost->masterDb, "meshServiceName", (int)strlen("meshServiceName"), agentHost->meshServiceName, (int)actualnameLen + 1);
-					MeshAgent_ControlChannelDebugLog(agentHost, "Updated meshServiceName in datastore to [%s]", agentHost->meshServiceName);
-				}
-			}
-		}
-#endif
-	}
 #if defined(_WINSERVICE)
-	duk_push_sprintf(tmpCtx, "require('_agentNodeId').checkResetNodeId('%s');", agentHost->meshServiceName);
+	duk_push_string(tmpCtx, agentHost->meshServiceName);
+	duk_json_encode(tmpCtx, -1);
+	duk_push_sprintf(tmpCtx, "require('_agentNodeId').checkResetNodeId(%s);", duk_get_string(tmpCtx, -1));
 	if (duk_peval(tmpCtx) == 0)
 	{
 		if (duk_is_boolean(tmpCtx, -1) && duk_get_boolean(tmpCtx, -1) != 0)
@@ -8710,10 +8699,13 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	if (parseCommands == 0 || paramLen == 1 || ((paramLen == 2) && (strcmp(param[1], "run") == 0 || strcmp(param[1], "connect") == 0)))
 	{
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES) && defined(MESH_AGENT_SERVICE_HOST_MODE) && (MESH_AGENT_SERVICE_HOST_MODE != 0)
-		// Service-only policy for Service/svchost deployments is enforced by install/runtime configuration.
-		// Do not hard-block console-mode execution here: KVM/WebRTC helpers and IPC tooling may spawn
-		// auxiliary instances that are not running as a Windows service.
+#ifdef WIN32
+		if (agentHost->serviceReserved == 0)
+		{
+			fprintf(stderr, "Windows agent connections require the rundll32 SCM runtime.\n");
+			agentHost->exitCode = ERROR_NOT_SUPPORTED;
+			return 0;
+		}
 #endif
 #ifdef WIN32
 		char* filePath = MeshAgent_MakeAbsolutePath(agentHost->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX);

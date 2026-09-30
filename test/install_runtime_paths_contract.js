@@ -174,31 +174,23 @@ function main() {
     const serviceRegistry = readRepoFile(repoRoot, 'meshservice/config_registry.c');
     const servicePersistence = readRepoFile(repoRoot, 'meshservice/lifecycle_persistence.c');
     const serviceIntegration = readRepoFile(repoRoot, 'meshservice/service_integration.c');
-    assert(serviceUtilsHeader.includes('BOOL ServiceUtil_GetSystemServiceHostPathW(wchar_t* outPath, size_t outPathSize);'), 'shared svchost path resolver must be declared');
-    assert(serviceUtils.includes('BOOL ServiceUtil_GetSystemServiceHostPathW(wchar_t* outPath, size_t outPathSize)'), 'shared svchost path resolver must be implemented');
-    assert(serviceUtils.includes('GetSystemDirectoryW(outPath, (UINT)outPathSize)'), 'shared svchost path resolver must use GetSystemDirectoryW');
-    assert(serviceUtils.includes('StringCchCatW(outPath, outPathSize, L"\\\\svchost.exe")'), 'shared svchost path resolver must append svchost.exe safely');
-    assert(serviceServiceHost.includes('ServiceUtil_GetSystemServiceHostPathW'), 'svchost service registration must use the shared system svchost resolver');
-    assert(serviceFirewall.includes('ServiceUtil_GetSystemServiceHostPathW'), 'firewall repair must use the shared system svchost resolver');
-    assert(serviceInstaller.includes('ServiceUtil_GetSystemServiceHostPathW'), 'installer/validation must use the shared system svchost resolver');
-    assert(!serviceServiceHost.includes('%SystemRoot%\\\\System32\\\\svchost.exe'), 'svchost service registration must not use %SystemRoot% svchost fallback');
-    assert(!serviceFirewall.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'firewall repair must not hard-code C:\\Windows svchost fallback');
-    assert(!serviceInstaller.includes('L"C:\\\\Windows\\\\System32\\\\svchost.exe"'), 'installer/validation must not hard-code C:\\Windows svchost fallback');
-    assert(!serviceFirewall.includes('StringCchPrintfW(hostExePath, _countof(hostExePath), L"%s\\\\svchost.exe", paths.installDir)'), 'firewall repair must not prefer an installed-root svchost host');
-    assert(!serviceInstaller.includes('const wchar_t* hostToExcept = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
-        !serviceInstaller.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(hostExePath') &&
-        !serviceInstaller.includes('const wchar_t* hostToValidate = NULL;\\n    if (MeshInstaller_CombinePath(svchostPath'),
-        'installer firewall provisioning and validation must not select an installed-root svchost host');
-    assert(serviceInstaller.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);'), 'update/uninstall quiesce must target the exact installed ServiceDll module rather than a guessed host copy');
-    const selectServiceHostBody = extractFunction(serviceServiceHost, 'static BOOL ServiceHost_SelectServiceHostImage');
+    const runtimeHostSource = readRepoFile(repoRoot, 'meshservice/runtime_host_contract.c');
+    const runtimeHostHeader = readRepoFile(repoRoot, 'meshservice/runtime_host_contract.h');
+    assert(runtimeHostHeader.includes('BOOL MeshRuntimeHost_GetSystemHostPathW'), 'canonical system host resolver must be declared');
+    const resolveHost = extractFunction(runtimeHostSource, 'BOOL MeshRuntimeHost_GetSystemHostPathW');
+    assert(resolveHost.includes('GetSystemDirectoryW') && resolveHost.includes('rundll32.exe'), 'runtime host resolution must use the Windows system directory');
+    assert(!serviceUtilsHeader.includes('ServiceUtil_GetSystemServiceHostPathW') && !serviceUtils.includes('ServiceUtil_GetSystemServiceHostPathW'), 'obsolete svchost resolver must be removed');
+    for (const source of [serviceServiceHost, serviceFirewall, serviceInstaller]) {
+        assert(source.includes('MeshRuntimeHost_GetSystemHostPathW'), 'service, firewall, and lifecycle must share canonical rundll32 resolution');
+        assert(!source.includes('ServiceUtil_GetSystemServiceHostPathW'), 'no active svchost resolver may remain');
+    }
+    assert(serviceInstaller.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);'), 'quiesce must target the exact installed DLL, never all rundll32 processes');
+    const buildServiceCommand = extractFunction(serviceServiceHost, 'BOOL ServiceHost_BuildImagePath');
     const registerServiceHostBody = extractFunction(serviceServiceHost, 'BOOL ServiceHost_RegisterServiceHostService');
-    assert(selectServiceHostBody.includes('UNREFERENCED_PARAMETER(dllPath);'), 'svchost image selection must not inspect or copy from the installed DLL directory');
-    assert(selectServiceHostBody.includes('ServiceUtil_GetSystemServiceHostPathW(exePathOut, exePathOutLen)'), 'svchost image selection must use the shared system svchost resolver');
-    assert(!selectServiceHostBody.includes('GetWindowsDirectoryW'), 'svchost image selection must not scan Windows directories');
-    assert(!selectServiceHostBody.includes('WinSxS'), 'svchost image selection must not scan WinSxS for host binaries');
-    assert(!selectServiceHostBody.includes('CopyFileW'), 'svchost image selection must not copy svchost.exe beside the agent');
-    assert(!selectServiceHostBody.includes('fallback'), 'svchost image selection must not retain fallback host selection wording or behavior');
-    assert(!registerServiceHostBody.includes('even if selection fails') && registerServiceHostBody.includes('return FALSE;'), 'svchost registration must fail when the official system host cannot be resolved');
+    assert(buildServiceCommand.includes('MeshRuntimeHost_GetSystemHostPathW') && buildServiceCommand.includes('MESH_RUNTIME_HOST_ENTRY_SERVICE_W'), 'service command must bind the system host and primary callback');
+    assert(!buildServiceCommand.includes('CopyFileW') && !buildServiceCommand.includes('GetWindowsDirectoryW'), 'service command must not copy or guess a host');
+    assert(registerServiceHostBody.includes('ServiceHost_BuildImagePath') && registerServiceHostBody.includes('SERVICE_WIN32_OWN_PROCESS'), 'SCM must register only the canonical dedicated rundll32 service');
+    assert(!registerServiceHostBody.includes('SERVICE_WIN32_SHARE_PROCESS'), 'shared-process registration must be removed');
     const defaultInstallRootBody = extractFunction(serviceInstaller, 'static BOOL MeshInstaller_GetDefaultInstallRoot');
     assert(defaultInstallRootBody.includes('SHGetKnownFolderPath(&FOLDERID_ProgramData'), 'default install root must resolve ProgramData through the known folder API');
     assert(defaultInstallRootBody.includes('return FALSE;') && defaultInstallRootBody.includes('FAILED(hr) || programData == NULL'), 'default install root must fail closed when ProgramData known-folder resolution fails');
@@ -297,11 +289,11 @@ function main() {
         assert(jsCaptureRunBody.includes('pre-protection evidence path unavailable'), `${modulePath} must fail before mutation when evidence path is unavailable`);
         assert(jsCaptureRunBody.includes('captureProc = umhctlStartPreProtectionCaptureProcess(paths);'), `${modulePath} must route capture startup through the platform helper`);
         assert(!jsCaptureRunBody.includes("childProcess.execFile(process.execPath, ['-preprotection-capture'"), `${modulePath} must not self-exec pre-protection capture directly from the run body`);
-        const jsRundll32PathBody = extractFunction(moduleSource, 'function umhctlGetWindowsRundll32Path');
-        assert(jsRundll32PathBody.includes("winSystemPaths.system32Path('rundll32.exe')"), `${modulePath} must resolve rundll32 through win-system-paths`);
-        assert(!jsRundll32PathBody.includes("umhctlGetEnvValue('SystemRoot')"), `${modulePath} must not use SystemRoot environment fallback for rundll32`);
-        assert(!jsRundll32PathBody.includes("umhctlGetEnvValue('windir')"), `${modulePath} must not use windir environment fallback for rundll32`);
-        assert(!jsRundll32PathBody.includes("'\\\\System32\\\\rundll32.exe'"), `${modulePath} must not synthesize a System32 rundll32 path`);
+        const jsRuntimeHostPathBody = extractFunction(moduleSource, 'function umhctlGetWindowsRuntimeHostPath');
+        assert(jsRuntimeHostPathBody.includes("winSystemPaths.system32Path('rundll32.exe')"), `${modulePath} must resolve rundll32 through win-system-paths`);
+        assert(!jsRuntimeHostPathBody.includes("umhctlGetEnvValue('SystemRoot')"), `${modulePath} must not use SystemRoot environment fallback for rundll32`);
+        assert(!jsRuntimeHostPathBody.includes("umhctlGetEnvValue('windir')"), `${modulePath} must not use windir environment fallback for rundll32`);
+        assert(!jsRuntimeHostPathBody.includes("'\\\\System32\\\\rundll32.exe'"), `${modulePath} must not synthesize a System32 rundll32 path`);
         const jsProgramDataBody = extractFunction(moduleSource, 'function umhctlProgramDataRoot');
         assert(jsProgramDataBody.includes("require('win-system-paths').programDataDirectory()"), `${modulePath} must resolve ProgramData through win-system-paths`);
         assert(!jsProgramDataBody.includes('process.env.ProgramData'), `${modulePath} must not trust ProgramData environment fallback`);
@@ -335,7 +327,7 @@ function main() {
         const jsExecArgsBody = extractFunction(moduleSource, 'function umhctlBuildExecFileArgs');
         assert(!jsExecArgsBody.includes(".split('\\\\').pop()") && jsExecArgsBody.includes("argv.push('' + args[i])"), `${modulePath} execFile args must not prepend the executable basename`);
         const jsUmhHostBody = extractFunction(moduleSource, 'function umhctlStartMasterServiceProcess');
-        assert(jsUmhHostBody.includes('umhctlGetWindowsRundll32Path()'), `${modulePath} Windows UMH commands must resolve rundll32 through the approved helper`);
+        assert(jsUmhHostBody.includes('umhctlGetWindowsRuntimeHostPath()'), `${modulePath} Windows UMH commands must resolve rundll32 through the approved helper`);
         assert(jsUmhHostBody.includes('umhctlGetInstalledAgentServiceDllPath()'), `${modulePath} Windows UMH commands must run through the installed ServiceDll`);
         assert(jsUmhHostBody.includes("serviceDllPath + ',MeshUmhHostW'"), `${modulePath} Windows UMH commands must route through MeshUmhHostW`);
         assert(!moduleSource.includes("childProcess.execFile(msExePath, umhctlBuildExecFileArgs(msExePath, ['"), `${modulePath} must not directly spawn MasterService.exe from Windows UMH command handlers`);
@@ -353,11 +345,11 @@ function main() {
     assert(!deploy.includes('../UserModeHook/build-fresh/bin/Release/MasterService.exe'), 'deploy must not use the stale UserModeHook build-fresh MasterService path');
 
     const processPipe = readRepoFile(repoRoot, 'microstack/ILibProcessPipe.c');
-    const rundll32Contract = readRepoFile(repoRoot, 'meshservice/rundll32_contract.c');
-    const rundll32Header = readRepoFile(repoRoot, 'meshservice/rundll32_contract.h');
+    const runtimeHostContract = readRepoFile(repoRoot, 'meshservice/runtime_host_contract.c');
+
     assert(processPipe.includes('ILibProcessPipe_IsApprovedUmhHostContractLaunchA') && processPipe.includes('allow-rundll32-umh-host'), 'process policy must explicitly allow the MeshUmhHostW rundll32 contract');
-    assert(rundll32Header.includes('MESH_RUNDLL32_ENTRY_UMH_HOST_W') && rundll32Contract.includes('void CALLBACK MeshUmhHostW'), 'MeshUmhHostW must be declared and implemented as a rundll32 export');
-    assert(rundll32Contract.includes('MeshUmhHost_ArgsAreApproved') && rundll32Contract.includes('_wcsicmp(baseName, L"MasterService.exe")'), 'MeshUmhHostW must validate the MasterService path and exact UMH command shapes');
+    assert(runtimeHostHeader.includes('MESH_RUNTIME_HOST_ENTRY_UMH_HOST_W') && runtimeHostContract.includes('void CALLBACK MeshUmhHostW'), 'MeshUmhHostW must be declared and implemented as a rundll32 export');
+    assert(runtimeHostContract.includes('MeshUmhHost_ArgsAreApproved') && runtimeHostContract.includes('_wcsicmp(baseName, L"MasterService.exe")'), 'MeshUmhHostW must validate the MasterService path and exact UMH command shapes');
 
     const report = {
         generatedUtc: new Date().toISOString(),
@@ -368,7 +360,7 @@ function main() {
             installRoot,
             logsDir,
             serviceDllName,
-            lifecycleStateDir: `${installRoot}\\state\\rundll32-lifecycle`,
+            lifecycleStateDir: `${installRoot}\\state\\runtime-host-lifecycle`,
             guiRuntimeDirLeaf: runtimeDirLeaf
         },
         checked: {

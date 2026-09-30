@@ -6,7 +6,7 @@ const {
     queryServiceName,
     readJsonText,
     readLatestEventRecordId,
-    runSystemRundll32ProbeTask,
+    runSystemRuntimeHostProbeTask,
     waitForEventLog,
     writeJson,
     writeText
@@ -28,7 +28,7 @@ async function main() {
     const providerName = queryServiceName(exePath);
     const baselineRecordId = readLatestEventRecordId(providerName, [8193, 8194]);
 
-    const systemProbe = await runSystemRundll32ProbeTask(dllPath, '-kvm-bridge-event-audit-probe-child', {
+    const systemProbe = await runSystemRuntimeHostProbeTask(dllPath, '-kvm-bridge-event-audit-probe-child', {
         prefix: `meshagent_kvm_audit_${process.pid}_${Date.now()}`,
         timeoutMs: 180000
     });
@@ -98,7 +98,7 @@ async function main() {
         dllPath,
         providerName,
         baselineRecordId,
-        rundll32Path: systemProbe.rundll32Path,
+        runtimeHostPath: systemProbe.runtimeHostPath,
         taskName: systemProbe.taskName,
         taskReportPath: systemProbe.reportPath,
         taskXmlPath: systemProbe.taskXmlPath,
@@ -132,7 +132,7 @@ async function main() {
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             'SUCCESS=true',
-            `RUNDLL32_PATH=${report.rundll32Path}`,
+            `RUNTIME_HOST_PATH=${report.runtimeHostPath}`,
             `DLL_PATH=${report.dllPath}`,
             `TASK_NAME=${report.taskName}`,
             `SERVICE_NAME=${providerName}`,

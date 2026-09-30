@@ -48,7 +48,6 @@ Selected Microstack API notes remain under `docs/files/`:
 | `test/` | Node contracts, native/runtime probes, grouped regression, C# GUI harness, and Playwright tests |
 | `test/lib/` | Shared test helpers and contract models |
 | `tools/` | Branding generators, signing checks, runtime validation, publication helpers, and health checks |
-| `verification/` | Small tracked validation fixtures |
 | `.github/workflows/` | Active build/release and CodeQL workflows |
 
 ## Dependencies

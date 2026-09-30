@@ -2,7 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
-const { getSystemRundll32Path } = require('./rundll32_lifecycle');
+const { getSystemRuntimeHostPath } = require('./runtime_host_lifecycle');
 
 function parseArgs(argv) {
     const args = {};
@@ -213,8 +213,8 @@ function queryServiceName(exePath) {
     return serviceName;
 }
 
-function resolveRundll32Path() {
-    return getSystemRundll32Path();
+function resolveRuntimeHostPath() {
+    return getSystemRuntimeHostPath();
 }
 
 function resolveBridgeDllPath(exePath, explicitDllPath) {
@@ -312,22 +312,22 @@ async function runSystemScheduledTask(commandPath, commandArgs = [], options = {
     }
 }
 
-async function runSystemRundll32ProbeTask(dllPath, probeCommand, options = {}) {
+async function runSystemRuntimeHostProbeTask(dllPath, probeCommand, options = {}) {
     const prefix = options.prefix || `meshagent_kvm_probe_${process.pid}_${Date.now()}`;
-    const rundll32Path = options.rundll32Path || resolveRundll32Path();
+    const runtimeHostPath = options.runtimeHostPath || resolveRuntimeHostPath();
     const taskName = options.taskName || prefix;
     const taskXmlPath = options.taskXmlPath || path.join(os.tmpdir(), `${prefix}.xml`);
     const reportPath = options.reportPath || path.join(os.tmpdir(), `${prefix}.json`);
     const timeoutMs = options.timeoutMs || 180000;
     const startBoundary = formatTaskStartBoundary(new Date(Date.now() + 60000));
     const extraArgs = Array.isArray(options.extraArgs) ? options.extraArgs : [];
-    const rundll32Arguments = [
+    const runtimeHostArguments = [
         `${quoteWindowsArg(dllPath)},MeshKvmProbeHostW`,
         quoteWindowsArg(probeCommand),
         quoteWindowsArg(reportPath),
         ...extraArgs.map(quoteWindowsArg)
     ].join(' ');
-    const taskXml = buildSystemScheduledTaskXml(rundll32Path, rundll32Arguments, startBoundary);
+    const taskXml = buildSystemScheduledTaskXml(runtimeHostPath, runtimeHostArguments, startBoundary);
 
     fs.writeFileSync(taskXmlPath, Buffer.from(`\ufeff${taskXml}`, 'utf16le'));
     const create = runCommand('schtasks', ['/Create', '/TN', taskName, '/XML', taskXmlPath, '/F'], {
@@ -346,14 +346,14 @@ async function runSystemRundll32ProbeTask(dllPath, probeCommand, options = {}) {
         }
         const reportContent = await waitForReadableFile(reportPath, timeoutMs);
         return {
-            rundll32Path,
+            runtimeHostPath,
             dllPath,
             taskName,
             taskXmlPath,
             taskXml,
             reportPath,
             reportContent,
-            commandLine: `"${rundll32Path}" ${rundll32Arguments}`,
+            commandLine: `"${runtimeHostPath}" ${runtimeHostArguments}`,
             create,
             run
         };
@@ -489,10 +489,10 @@ module.exports = {
     readJsonText,
     readLatestEventRecordId,
     resolveBridgeDllPath,
-    resolveRundll32Path,
+    resolveRuntimeHostPath,
     runCommand,
     runSystemScheduledTask,
-    runSystemRundll32ProbeTask,
+    runSystemRuntimeHostProbeTask,
     sleep,
     waitForEventLog,
     waitForReadableFile,

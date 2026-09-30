@@ -44,7 +44,7 @@ function main() {
     const args = parseArgs(process.argv);
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
-    const smokePath = path.resolve('test', 'rundll32_bridge_smoke.js');
+    const smokePath = path.resolve('test', 'runtime_host_bridge_smoke.js');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const smokeSource = fs.readFileSync(smokePath, 'utf8');
     const exitStart = kvmSource.indexOf('void kvm_relay_ExitHandler');
