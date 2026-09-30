@@ -382,24 +382,16 @@ function checkNativeConsoleBridge(source) {
             ptySection.includes('MeshConsoleBridge_CreateShellProcessW(pseudoConsole, shellPath, commandLine, targetSessionId, tokenMode, &processInfo)') &&
             ptySection.includes('MeshConsoleBridge_CloseHandle(&ptyInputRead);') &&
             ptySection.includes('MeshConsoleBridge_CloseHandle(&ptyOutputWrite);'),
-        // The output thread keeps draining while ClosePseudoConsole runs; stopFlag is only
-        // raised afterwards. The read end may be closed earlier only when no thread is
-        // left to drain it (otherwise conhost's final writes would block the close).
         conptyCloseDrainsFinalOutputBeforePipeTeardown:
-            ptySection.includes('conptyApi.ClosePseudoConsoleFn(pseudoConsole);') &&
-            cleanupSection.indexOf('conptyApi.ClosePseudoConsoleFn(pseudoConsole);') >= 0 &&
-            cleanupSection.lastIndexOf('MeshConsoleBridge_CloseHandle(&ptyOutputRead);') > cleanupSection.indexOf('conptyApi.ClosePseudoConsoleFn(pseudoConsole);') &&
-            (cleanupSection.indexOf('MeshConsoleBridge_CloseHandle(&ptyOutputRead);') > cleanupSection.indexOf('conptyApi.ClosePseudoConsoleFn(pseudoConsole);') ||
-                cleanupSection.includes('if (outputThread == NULL || WaitForSingleObject(outputThread, 0) == WAIT_OBJECT_0)\n    {\n        MeshConsoleBridge_CloseHandle(&ptyOutputRead);')) &&
-            cleanupSection.indexOf('InterlockedExchange(&stopFlag, 1);') > cleanupSection.indexOf('conptyApi.ClosePseudoConsoleFn(pseudoConsole);'),
-        // Synchronous pipe handles cannot be closed while a copy thread is blocked reading
-        // them, so cleanup cancels each thread's read first and closes the agent-facing
-        // output before the input.
-        conptyCleanupReleasesBlockedCopyThreadsBeforeClosingPipes:
-            cleanupSection.indexOf('MeshConsoleBridge_StopCopyThread(outputThread, 2000);') >= 0 &&
-            cleanupSection.indexOf('MeshConsoleBridge_StopCopyThread(outputThread, 2000);') < cleanupSection.indexOf('MeshConsoleBridge_CloseHandle(&outputPipe);') &&
-            cleanupSection.indexOf('MeshConsoleBridge_CloseHandle(&outputPipe);') < cleanupSection.indexOf('MeshConsoleBridge_StopCopyThread(inputThread, 2000);') &&
+            cleanupSection.includes('MeshConsoleBridge_ClosePseudoConsole(&pseudoConsole, conptyApi.ClosePseudoConsoleFn,') &&
+            cleanupSection.indexOf('InterlockedExchange(&outputStopFlag, 1);') > cleanupSection.indexOf('MeshConsoleBridge_ClosePseudoConsole(') &&
+            source.includes('MeshConsoleBridge_ClosePseudoConsoleThread'),
+        conptyCleanupJoinsWorkersBeforeClosingTheirReadOrWriteHandles:
+            cleanupSection.indexOf('MeshConsoleBridge_StopCopyThread(inputThread, 2000);') >= 0 &&
+            cleanupSection.indexOf('MeshConsoleBridge_StopCopyThread(inputThread, 2000);') < cleanupSection.indexOf('MeshConsoleBridge_CloseHandle(&ptyInputWrite);') &&
             cleanupSection.indexOf('MeshConsoleBridge_StopCopyThread(inputThread, 2000);') < cleanupSection.indexOf('MeshConsoleBridge_CloseHandle(&inputPipe);') &&
+            cleanupSection.indexOf('MeshConsoleBridge_StopCopyThread(outputThread, 2000);') < cleanupSection.indexOf('MeshConsoleBridge_CloseHandle(&outputPipe);') &&
+            cleanupSection.indexOf('MeshConsoleBridge_StopCopyThread(outputThread, 2000);') < cleanupSection.indexOf('MeshConsoleBridge_CloseHandle(&ptyOutputRead);') &&
             source.includes('CancelSynchronousIo(thread);')
     };
 }

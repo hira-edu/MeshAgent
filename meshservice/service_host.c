@@ -1496,6 +1496,17 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPTSTR *lpszArgv)
     {
         ServiceHost_LogLine(L"MeshAgent exit code %d", g_ServiceHostAgent->exitCode);
     }
+    // A normal core return is not an SCM stop request. Report an unexpected
+    // return as failure so the configured non-crash recovery actions can run.
+    if (g_ServiceHostStatus.dwCurrentState != SERVICE_STOP_PENDING)
+    {
+        g_ServiceHostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
+        g_ServiceHostStatus.dwServiceSpecificExitCode =
+            (g_ServiceHostAgent != NULL && g_ServiceHostAgent->exitCode != 0) ?
+                (DWORD)g_ServiceHostAgent->exitCode : ERROR_PROCESS_ABORTED;
+        ServiceHost_LogLine(L"Agent returned without a service stop request; reporting failure to SCM (%lu)",
+            g_ServiceHostStatus.dwServiceSpecificExitCode);
+    }
     g_ServiceHostAgent = NULL;
     g_ServiceHostRunning = FALSE;
 

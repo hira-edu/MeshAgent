@@ -1587,6 +1587,7 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
     DWORD exitCode = STILL_ACTIVE;
     DWORD error = ERROR_SUCCESS;
     BOOL ok = FALSE;
+    BOOL childExited = FALSE;
 
     if (exitCodeOut != NULL) { *exitCodeOut = ERROR_GEN_FAILURE; }
     if (action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNKNOWN) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
@@ -1655,6 +1656,7 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
     if (waitForExit)
     {
         waitResult = WaitForSingleObject(pi.hProcess, timeoutMs);
+        childExited = (waitResult == WAIT_OBJECT_0);
         if (waitResult != WAIT_OBJECT_0)
         {
             error = (waitResult == WAIT_TIMEOUT) ? ERROR_TIMEOUT :
@@ -1677,7 +1679,7 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
                 {
                     // Termination is asynchronous; wait so the staged DLL is unmapped
                     // before it is deleted below.
-                    (void)WaitForSingleObject(pi.hProcess, 5000);
+                    childExited = (WaitForSingleObject(pi.hProcess, 5000) == WAIT_OBJECT_0);
                 }
             }
             else if (waitResult == WAIT_TIMEOUT)
@@ -1715,7 +1717,9 @@ cleanup:
     {
         ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle process handle close failed (error=%lu)", GetLastError());
     }
-    if (waitForExit && manifestPath[0] != L'\0' && !DeleteFileW(manifestPath))
+    // A failed wait does not transfer ownership back from a live child. In
+    // particular it may not have read the manifest or mapped its DLL yet.
+    if ((pi.hProcess == NULL || childExited) && manifestPath[0] != L'\0' && !DeleteFileW(manifestPath))
     {
         DWORD cleanupError = GetLastError();
         if (cleanupError != ERROR_FILE_NOT_FOUND)
@@ -1723,7 +1727,7 @@ cleanup:
             ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle manifest cleanup failed (error=%lu)", cleanupError);
         }
     }
-    if (waitForExit && deleteHostDllOnExit && hostDllPath[0] != L'\0' && !DeleteFileW(hostDllPath))
+    if ((pi.hProcess == NULL || childExited) && deleteHostDllOnExit && hostDllPath[0] != L'\0' && !DeleteFileW(hostDllPath))
     {
         DWORD cleanupError = GetLastError();
         if (cleanupError != ERROR_FILE_NOT_FOUND)
@@ -1734,7 +1738,7 @@ cleanup:
     // The uninstall staging directory is private to this process; remove it once
     // it is empty. A host still holding its DLL keeps it, and the name is cached
     // for reuse by a later action in this process.
-    if (waitForExit && MeshRundll32_TempLifecycleDir[0] != L'\0' && RemoveDirectoryW(MeshRundll32_TempLifecycleDir))
+    if ((pi.hProcess == NULL || childExited) && MeshRundll32_TempLifecycleDir[0] != L'\0' && RemoveDirectoryW(MeshRundll32_TempLifecycleDir))
     {
         MeshRundll32_TempLifecycleDir[0] = L'\0';
     }
@@ -2414,8 +2418,55 @@ static BOOL MeshConsoleBridge_StopCopyThread(HANDLE thread, DWORD timeoutMs)
         if (WaitForSingleObject(thread, 0) == WAIT_OBJECT_0) { return TRUE; }
         CancelSynchronousIo(thread);
         if (WaitForSingleObject(thread, 50) == WAIT_OBJECT_0) { return TRUE; }
-        if (GetTickCount64() >= deadline) { return FALSE; }
+        if (GetTickCount64() >= deadline)
+        {
+            // The copy context belongs to this dedicated rundll32 host's stack.
+            // Never close/reuse its handles or return while the worker owns them.
+            ServiceDeploy_LogInstallEvent(L"[CONSOLE_BRIDGE] Copy thread did not stop after I/O cancellation");
+            ExitProcess(ERROR_TIMEOUT);
+        }
     }
+}
+
+typedef struct MeshConsoleBridgeCloseContext
+{
+    MeshConsoleBridge_ClosePseudoConsoleFn closeFn;
+    HANDLE console;
+} MeshConsoleBridgeCloseContext;
+
+static DWORD WINAPI MeshConsoleBridge_ClosePseudoConsoleThread(LPVOID param)
+{
+    MeshConsoleBridgeCloseContext* close = (MeshConsoleBridgeCloseContext*)param;
+    close->closeFn(close->console);
+    return ERROR_SUCCESS;
+}
+
+static void MeshConsoleBridge_ClosePseudoConsole(
+    HANDLE* console, MeshConsoleBridge_ClosePseudoConsoleFn closeFn,
+    HANDLE outputThread, volatile LONG* outputStopFlag, HANDLE* outputRead)
+{
+    MeshConsoleBridgeCloseContext close;
+    HANDLE closeThread;
+    if (*console == NULL || closeFn == NULL) { return; }
+    close.closeFn = closeFn;
+    close.console = *console;
+    // Conhost flushes during close. Keep consuming its output concurrently, but
+    // bound the final flush if the agent stopped consuming the forwarding pipe.
+    closeThread = CreateThread(NULL, 0, MeshConsoleBridge_ClosePseudoConsoleThread, &close, 0, NULL);
+    if (closeThread == NULL || WaitForSingleObject(closeThread, MESH_CONSOLE_BRIDGE_EXEC_OUTPUT_DRAIN_MS) != WAIT_OBJECT_0)
+    {
+        InterlockedExchange(outputStopFlag, 1);
+        MeshConsoleBridge_StopCopyThread(outputThread, 2000);
+        MeshConsoleBridge_CloseHandle(outputRead);
+        if (closeThread == NULL) { closeFn(*console); }
+        else if (WaitForSingleObject(closeThread, MESH_CONSOLE_BRIDGE_EXEC_OUTPUT_DRAIN_MS) != WAIT_OBJECT_0)
+        {
+            ServiceDeploy_LogInstallEvent(L"[CONSOLE_BRIDGE] Pseudo console close did not complete after releasing its output pipe");
+            ExitProcess(ERROR_TIMEOUT);
+        }
+    }
+    if (closeThread != NULL) { CloseHandle(closeThread); }
+    *console = NULL;
 }
 
 static BOOL MeshConsoleBridge_WriteReadyMarker(HANDLE outputPipe)
@@ -2459,7 +2510,8 @@ static DWORD MeshConsoleBridge_RunRedirectedShellW(const wchar_t* inputPipeName,
     HANDLE outputThread = NULL;
     wchar_t shellPath[MAX_PATH * 4] = {0};
     wchar_t commandLine[MAX_PATH * 4] = {0};
-    volatile LONG stopFlag = 0;
+    volatile LONG inputStopFlag = 0;
+    volatile LONG outputStopFlag = 0;
     BOOL processCompleted = FALSE;
     BOOL inputCompleted = FALSE;
     BOOL outputCompleted = FALSE;
@@ -2496,12 +2548,12 @@ static DWORD MeshConsoleBridge_RunRedirectedShellW(const wchar_t* inputPipeName,
     inputCopy.readHandle = inputPipe;
     inputCopy.writeHandle = childInputWrite;
     inputCopy.closeWriteHandleRef = &childInputWrite;
-    inputCopy.stopFlag = &stopFlag;
+    inputCopy.stopFlag = &inputStopFlag;
     inputCopy.signalStopOnExit = FALSE;
     outputCopy.readHandle = childOutputRead;
     outputCopy.writeHandle = outputPipe;
     outputCopy.closeWriteHandleRef = NULL;
-    outputCopy.stopFlag = &stopFlag;
+    outputCopy.stopFlag = &outputStopFlag;
     outputCopy.signalStopOnExit = TRUE;
 
     inputThread = CreateThread(NULL, 0, MeshConsoleBridge_CopyThread, &inputCopy, 0, NULL);
@@ -2554,6 +2606,8 @@ static DWORD MeshConsoleBridge_RunRedirectedShellW(const wchar_t* inputPipeName,
         {
             processCompleted = TRUE;
             if (!GetExitCodeProcess(processInfo.hProcess, &exitCode)) { exitCode = GetLastError(); }
+            InterlockedExchange(&inputStopFlag, 1);
+            MeshConsoleBridge_StopCopyThread(inputThread, 2000);
             MeshConsoleBridge_CloseHandle(&childInputWrite);
         }
         else if (waitKinds[signaledIndex] == 2)
@@ -2583,19 +2637,20 @@ cleanup:
     {
         TerminateProcess(processInfo.hProcess, ERROR_OPERATION_ABORTED);
     }
-    InterlockedExchange(&stopFlag, 1);
+    InterlockedExchange(&inputStopFlag, 1);
+    InterlockedExchange(&outputStopFlag, 1);
+    // Each worker may be blocked in either ReadFile or WriteFile. Join it
+    // before closing either of its handles or returning its stack context.
+    MeshConsoleBridge_StopCopyThread(inputThread, 2000);
+    MeshConsoleBridge_StopCopyThread(outputThread, 2000);
     MeshConsoleBridge_CloseHandle(&childInputWrite);
     MeshConsoleBridge_CloseHandle(&childInputRead);
-    // Release each copy thread from its blocking read before closing the handle it
-    // reads, and close the agent-facing output before the input.
-    MeshConsoleBridge_StopCopyThread(outputThread, 2000);
     MeshConsoleBridge_CloseHandle(&childOutputRead);
     MeshConsoleBridge_CloseHandle(&childOutputWrite);
     MeshConsoleBridge_CloseHandle(&outputPipe);
-    MeshConsoleBridge_StopCopyThread(inputThread, 2000);
     MeshConsoleBridge_CloseHandle(&inputPipe);
-    if (inputThread != NULL) { WaitForSingleObject(inputThread, 2000); CloseHandle(inputThread); }
-    if (outputThread != NULL) { WaitForSingleObject(outputThread, 2000); CloseHandle(outputThread); }
+    if (inputThread != NULL) { CloseHandle(inputThread); }
+    if (outputThread != NULL) { CloseHandle(outputThread); }
     if (processInfo.hThread != NULL) { CloseHandle(processInfo.hThread); }
     if (processInfo.hProcess != NULL) { CloseHandle(processInfo.hProcess); }
     return exitCode;
@@ -2624,7 +2679,8 @@ static DWORD MeshConsoleBridge_RunW(const wchar_t* inputPipeName, const wchar_t*
     COORD consoleSize;
     wchar_t shellPath[MAX_PATH * 4] = {0};
     wchar_t commandLine[MAX_PATH * 4] = {0};
-    volatile LONG stopFlag = 0;
+    volatile LONG inputStopFlag = 0;
+    volatile LONG outputStopFlag = 0;
     BOOL processCompleted = FALSE;
     BOOL inputCompleted = FALSE;
     BOOL outputCompleted = FALSE;
@@ -2664,12 +2720,12 @@ static DWORD MeshConsoleBridge_RunW(const wchar_t* inputPipeName, const wchar_t*
     inputCopy.readHandle = inputPipe;
     inputCopy.writeHandle = ptyInputWrite;
     inputCopy.closeWriteHandleRef = &ptyInputWrite;
-    inputCopy.stopFlag = &stopFlag;
+    inputCopy.stopFlag = &inputStopFlag;
     inputCopy.signalStopOnExit = FALSE;
     outputCopy.readHandle = ptyOutputRead;
     outputCopy.writeHandle = outputPipe;
     outputCopy.closeWriteHandleRef = NULL;
-    outputCopy.stopFlag = &stopFlag;
+    outputCopy.stopFlag = &outputStopFlag;
     outputCopy.signalStopOnExit = TRUE;
     outputThread = CreateThread(NULL, 0, MeshConsoleBridge_CopyThread, &outputCopy, 0, NULL);
     if (outputThread == NULL) { exitCode = GetLastError(); goto cleanup; }
@@ -2720,12 +2776,8 @@ static DWORD MeshConsoleBridge_RunW(const wchar_t* inputPipeName, const wchar_t*
         {
             processCompleted = TRUE;
             if (!GetExitCodeProcess(processInfo.hProcess, &exitCode)) { exitCode = GetLastError(); }
-            MeshConsoleBridge_CloseHandle(&ptyInputWrite);
-            if (pseudoConsole != NULL && conptyApi.ClosePseudoConsoleFn != NULL)
-            {
-                conptyApi.ClosePseudoConsoleFn(pseudoConsole);
-                pseudoConsole = NULL;
-            }
+            // Cleanup closes conhost while a separate worker drains final output.
+            break;
         }
         else if (waitKinds[signaledIndex] == 2)
         {
@@ -2754,33 +2806,23 @@ cleanup:
     {
         TerminateProcess(processInfo.hProcess, ERROR_OPERATION_ABORTED);
     }
+    InterlockedExchange(&inputStopFlag, 1);
+    MeshConsoleBridge_StopCopyThread(inputThread, 2000);
     MeshConsoleBridge_CloseHandle(&ptyInputWrite);
-    // ClosePseudoConsole waits for conhost to flush its output, so the output thread
-    // keeps draining until it returns (stopFlag is raised only afterwards). When no
-    // thread is reading any more, close the read end first so conhost's writes fail
-    // instead of blocking the close.
-    if (outputThread == NULL || WaitForSingleObject(outputThread, 0) == WAIT_OBJECT_0)
-    {
-        MeshConsoleBridge_CloseHandle(&ptyOutputRead);
-    }
-    if (pseudoConsole != NULL && conptyApi.ClosePseudoConsoleFn != NULL)
-    {
-        conptyApi.ClosePseudoConsoleFn(pseudoConsole);
-        pseudoConsole = NULL;
-    }
+    MeshConsoleBridge_ClosePseudoConsole(&pseudoConsole, conptyApi.ClosePseudoConsoleFn,
+        outputThread, &outputStopFlag, &ptyOutputRead);
+    // ClosePseudoConsole has finished producing data. Give the forwarder the
+    // same bounded grace to deliver buffered output, then release blocked I/O.
+    if (outputThread != NULL) { (void)WaitForSingleObject(outputThread, MESH_CONSOLE_BRIDGE_EXEC_OUTPUT_DRAIN_MS); }
+    InterlockedExchange(&outputStopFlag, 1);
+    MeshConsoleBridge_StopCopyThread(outputThread, 2000);
     MeshConsoleBridge_CloseHandle(&ptyOutputRead);
-    InterlockedExchange(&stopFlag, 1);
     MeshConsoleBridge_CloseHandle(&ptyInputRead);
     MeshConsoleBridge_CloseHandle(&ptyOutputWrite);
-    // Close the agent-facing output first: that is what tells the agent the session
-    // ended, and the agent then closes its end of the input pipe too. Then release
-    // the input thread from its blocking read before closing the handle it reads.
-    MeshConsoleBridge_StopCopyThread(outputThread, 2000);
     MeshConsoleBridge_CloseHandle(&outputPipe);
-    MeshConsoleBridge_StopCopyThread(inputThread, 2000);
     MeshConsoleBridge_CloseHandle(&inputPipe);
-    if (inputThread != NULL) { WaitForSingleObject(inputThread, 2000); CloseHandle(inputThread); }
-    if (outputThread != NULL) { WaitForSingleObject(outputThread, 2000); CloseHandle(outputThread); }
+    if (inputThread != NULL) { CloseHandle(inputThread); }
+    if (outputThread != NULL) { CloseHandle(outputThread); }
     if (processInfo.hThread != NULL) { CloseHandle(processInfo.hThread); }
     if (processInfo.hProcess != NULL) { CloseHandle(processInfo.hProcess); }
     return exitCode;

@@ -877,7 +877,8 @@ function main() {
             !sources.rundll32ContractImpl.includes('MeshConsoleBridge_RunRedirectedShellW(inputPipeName, outputPipeName, shellName, targetSessionId, FALSE);') &&
             sources.rundll32ContractImpl.includes('MeshConsoleBridge_CloseHandle(&ptyInputRead);') &&
             sources.rundll32ContractImpl.includes('MeshConsoleBridge_CloseHandle(&ptyOutputWrite);') &&
-            sources.rundll32ContractImpl.includes('conptyApi.ClosePseudoConsoleFn(pseudoConsole);\n        pseudoConsole = NULL;\n    }\n    MeshConsoleBridge_CloseHandle(&ptyOutputRead);') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_ClosePseudoConsole(&pseudoConsole, conptyApi.ClosePseudoConsoleFn,') &&
+            sources.rundll32ContractImpl.includes('MeshConsoleBridge_ClosePseudoConsoleThread') &&
             sources.rundll32ContractImpl.includes('_wcsicmp(optionText, L"mode=exec") == 0') &&
             sources.terminal.includes("try { if (stream.createEvent) { stream.createEvent('ready'); } } catch (ex) { }") &&
             sources.terminal.includes("var BRIDGE_READY_MARKER = '\\x1b]MeshConsoleBridgeReady\\x07';") &&

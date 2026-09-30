@@ -124,7 +124,9 @@ function main() {
         timedOutMutatingHostIsNotKilled:
             launch.includes('MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_PACKAGE))') &&
             launch.includes('to finish its own transaction') &&
-            launch.includes('(void)WaitForSingleObject(pi.hProcess, 5000);'),
+            launch.includes('childExited = (WaitForSingleObject(pi.hProcess, 5000) == WAIT_OBJECT_0);') &&
+            launch.includes('(pi.hProcess == NULL || childExited) && manifestPath') &&
+            launch.includes('(pi.hProcess == NULL || childExited) && deleteHostDllOnExit'),
         selfTestReportsTimeoutNotStillActive:
             selfTest.includes('exitCode = (waitError != ERROR_SUCCESS) ? waitError : ERROR_GEN_FAILURE;') &&
             selfTest.includes('else if (!GetExitCodeProcess(pi.hProcess, &exitCode))'),

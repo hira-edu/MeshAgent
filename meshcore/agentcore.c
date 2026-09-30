@@ -5368,7 +5368,7 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 			return;
 		}
 #else
-		UNREFERENCED_PARAMETER(w_updatefile);
+		(void)w_updatefile;
 		if (haveUpdateActivationHash != 0) { MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, updateActivationHash); }
 		MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
 		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires rundll32/svchost mode; legacy command-shell update path disabled.");
@@ -5495,6 +5495,19 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 	if (agent->serverAuthState != 3)
 	{
 		X509* peer = ILibWebClient_SslGetCert(WebStateObject);
+		int authenticationFailed = 0;
+
+		// Reject malformed proofs instead of leaving a live, unauthenticated
+		// channel that never advances to another configured server.
+		if ((command == MeshCommand_AuthRequest && cmdLen != sizeof(MeshCommand_BinaryPacket_AuthRequest)) ||
+			(command == MeshCommand_AuthVerify && (cmdLen <= 8 ||
+				cmdLen <= (int)(sizeof(MeshCommand_BinaryPacket_AuthVerify_Header) + ntohs(((MeshCommand_BinaryPacket_AuthVerify_Header*)cmd)->certLen)))))
+		{
+			if (peer != NULL) { X509_free(peer); }
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: malformed authentication packet");
+			ILibWebClient_Disconnect(WebStateObject);
+			return;
+		}
 
 		switch (command)
 		{
@@ -5532,7 +5545,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						}
 						else
 						{
-						printf("Bad server certificate hash\r\n"); // TODO: Disconnect
+						printf("Bad server certificate hash\r\n");
+						authenticationFailed = 1;
 						if (agent->controlChannelDebug != 0)
 						{
 							ILIBLOGMESSAGEX("Bad server certificate hash");
@@ -5621,7 +5635,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					{
 						printf("Invalid server certificate\r\n");
 						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify invalid server certificate");
-						break; // TODO: Disconnect
+						authenticationFailed = 1;
+						break;
 					}
 
 					// Check if this certificate public key hash matches what we want
@@ -5640,7 +5655,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 							MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify legacy mismatch actual=%s expected=%s", actualHex, ILibScratchPad2);
 							if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Server certificate mismatch"); }
 							X509_free(serverCert);
-							break; // TODO: Disconnect
+							authenticationFailed = 1;
+							break;
 						}
 					}
 
@@ -5654,8 +5670,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 
 					// Verify the hash signature using the server certificate
 					evp_pubkey = X509_get_pubkey(serverCert);
-					rsa_pubkey = EVP_PKEY_get1_RSA(evp_pubkey);
-					if (RSA_verify(NID_sha384, (unsigned char*)ILibScratchPad, UTIL_SHA384_HASHSIZE, (unsigned char*)AuthVerify->signature, AuthVerify->signatureLen, rsa_pubkey) == 1)
+					rsa_pubkey = evp_pubkey != NULL ? EVP_PKEY_get1_RSA(evp_pubkey) : NULL;
+					if (rsa_pubkey != NULL && RSA_verify(NID_sha384, (unsigned char*)ILibScratchPad, UTIL_SHA384_HASHSIZE, (unsigned char*)AuthVerify->signature, AuthVerify->signatureLen, rsa_pubkey) == 1)
 					{
 						// Server signature verified, we are good to go.
 						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify signature OK");
@@ -5677,7 +5693,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						printf("Invalid server signature\r\n");
 						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify signature INVALID");
 						if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Invalid Server Signature"); }
-						// TODO: Disconnect
+						authenticationFailed = 1;
 					}
 
 					RSA_free(rsa_pubkey);
@@ -5699,6 +5715,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			}
 		}
 		if (peer != NULL) { X509_free(peer); peer = NULL; }
+		// Release proof objects first; disconnection may synchronously re-enter
+		// OnResponse, which owns channel reset and the bounded reconnect timer.
+		if (authenticationFailed) { ILibWebClient_Disconnect(WebStateObject); }
 		return;
 	}
 #endif
@@ -6918,6 +6937,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	{
 		printf("No MeshCentral settings found, place .msh file with this executable and restart.\r\n");
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: MeshServer URI not found");
+		MeshServer_Connect(agent);
 		return;
 	}
 
@@ -6927,6 +6947,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		if (rs != NULL) { ILibDestructParserResults(rs); }
 		printf("No MeshCentral settings found, place .msh file with this executable and restart.\r\n");
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: MeshServer URI list empty");
+		MeshServer_Connect(agent);
 		return;
 	}
 	if (agent->serverIndex == 0)
@@ -6947,6 +6968,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		ILibDestructParserResults(rs);
 		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: MeshServer count mismatch (index=%d total=%d)", agent->serverIndex, totalResults);
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore: MeshServer count mismatch. URL Count = %d, Server Index = %d", totalResults, agent->serverIndex);
+		MeshServer_Connect(agent);
 		return;
 	}
 	f->datalength = ILibTrimString(&(f->data), f->datalength);
@@ -6968,6 +6990,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 			ILibRemoteLogging_Flags_VerbosityLevel_1,
 			"agentcore: Server URL too long (%d >= %d), rejected",
 			(int)serverUrlLen, (int)sizeof(agent->serveruri));
+		MeshServer_Connect(agent);
 		return;
 	}
 	strncpy_s(agent->serveruri, sizeof(agent->serveruri), serverUrl, serverUrlLen);
@@ -6985,6 +7008,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		if (host != NULL) { free(host); }
 		if (path != NULL) { free(path); }
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: Invalid MeshServer URI: %s", agent->serveruri);
+		MeshServer_Connect(agent);
 		return;
 	}
 
@@ -7058,7 +7082,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 	ILibDestructParserResults(rs);
 	rs = NULL;
 
-	if ((len = ILibSimpleDataStore_Get(agent->masterDb, "ServerID", ILibScratchPad2, sizeof(ILibScratchPad2))) == 0) { printf("ServerID entry not found in Db!\n"); free(host); free(path); return; }
+	if ((len = ILibSimpleDataStore_Get(agent->masterDb, "ServerID", ILibScratchPad2, sizeof(ILibScratchPad2))) == 0) { printf("ServerID entry not found in Db!\n"); free(host); free(path); MeshServer_Connect(agent); return; }
 	rs = ILibParseString(ILibScratchPad2, 0, len, ",", 1);
 	f = ILibParseString_GetResultIndex(rs, agent->serverIndex);
 	if (f == NULL)
@@ -7069,6 +7093,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		ILibDestructParserResults(rs);
 		free(host);
 		free(path);
+		MeshServer_Connect(agent);
 		return;
 	}
 	f->datalength = ILibTrimString(&(f->data), f->datalength);
@@ -7080,6 +7105,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		ILibDestructParserResults(rs);
 		free(host);
 		free(path);
+		MeshServer_Connect(agent);
 		return;
 	}
 
@@ -7117,6 +7143,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: MeshID missing or bad len=%d", storedMeshIdLen);
 			free(host);
 			free(path);
+			MeshServer_Connect(agent);
 			return;
 		}
 		if (storedMeshIdLen != meshIdLen)

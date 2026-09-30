@@ -40,7 +40,7 @@ function main() {
     const markComplete = extractSpan(
         agentcore,
         'static void MeshServer_ControlChannelRequest_MarkConnectComplete',
-        'static void MeshServer_ControlChannelRequest_Finalize'
+        'static void MeshServer_ControlChannelRequest_FreeSink'
     );
     const finalize = extractSpan(
         agentcore,
@@ -87,7 +87,7 @@ function main() {
             !markComplete.includes('ILibMemory_Free('),
         finalizeIsSingleOwnerOfTrackerFree:
             finalize.includes('requestState->finalized = 1;') &&
-            finalize.includes('ILibMemory_Free(requestState);'),
+            finalize.includes('ILibLifeTime_AddEx(ILibGetBaseTimer(requestState->agent->chain), requestState, 0, MeshServer_ControlChannelRequest_FreeSink, MeshServer_ControlChannelRequest_FreeSink);'),
         onResponseDoesNotFreeControlChannelRequestDirectly:
             !onResponse.includes('ILibMemory_Free(agent->controlChannelRequest)') &&
             !onResponse.includes('ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), agent->controlChannelRequest)'),

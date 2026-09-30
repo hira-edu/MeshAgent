@@ -1308,7 +1308,7 @@ function umhctlGetPreferredManagedMasterServicePaths(agentDir)
     var seen = {};
     var pushPath = function (raw)
     {
-        var normalized = umhctlNormalizeExecutablePath(raw);
+        var normalized = umhctlNormalizeFilePath(raw);
         if (normalized == null) { return; }
         var key = normalized.toLowerCase();
         if (seen[key]) { return; }
@@ -1369,8 +1369,51 @@ function umhctlIsManagedMasterServicePath(filePath, agentDir)
     return false;
 }
 
+// Keep selection/download within the same roots the native UMH host accepts.
+// This is a lexical Windows canonicalization; the native host validates again.
+function umhctlGetApprovedMasterServicePath(raw)
+{
+    function canonicalPath(value)
+    {
+        value = umhctlNormalizeFilePath(value);
+        if (value == null) { return null; }
+        value = value.replace(/\//g, '\\');
+        if (!/^[a-zA-Z]:\\/.test(value)) { return null; }
+        var parts = value.substring(3).split('\\');
+        var clean = [];
+        for (var i = 0; i < parts.length; ++i)
+        {
+            var part = parts[i];
+            if (part == '' || part == '.') { continue; }
+            if (part == '..') { if (clean.length == 0) { return null; } clean.pop(); continue; }
+            if (/[\x00-\x1f:*?"<>|]/.test(part) || /[ .]$/.test(part)) { return null; }
+            clean.push(part);
+        }
+        return value.substring(0, 3) + clean.join('\\');
+    }
+    var candidate = canonicalPath(raw);
+    if (candidate == null || !/\\MasterService\.exe$/i.test(candidate)) { return null; }
+    var roots = [];
+    var programData = umhctlProgramDataRoot();
+    if (programData != null) { roots.push(programData + '\\UserModeHook'); }
+    var serviceDll = canonicalPath(umhctlGetInstalledAgentServiceDllPath());
+    if (serviceDll != null) { roots.push(serviceDll.substring(0, serviceDll.lastIndexOf('\\'))); }
+    for (var j = 0; j < roots.length; ++j)
+    {
+        var root = canonicalPath(roots[j]);
+        if (root != null && candidate.toLowerCase().indexOf(root.toLowerCase() + '\\') == 0) { return candidate; }
+    }
+    return null;
+}
+
 function umhctlResolveMasterServicePaths(agentDir)
 {
+    var explicitPath = umhctlGetEnvValue('UMH_MASTERSERVICE_EXE');
+    if (process.platform == 'win32' && explicitPath != null && umhctlGetApprovedMasterServicePath(explicitPath) == null)
+    {
+        return { exePath: null, tmpPath: null, bakPath: null,
+            error: 'UMH_MASTERSERVICE_EXE must name MasterService.exe under the ProgramData UserModeHook directory or the installed service DLL directory.' };
+    }
     var preferred = umhctlGetPreferredManagedMasterServicePaths(agentDir);
     if (process.platform == 'win32')
     {
@@ -1389,7 +1432,8 @@ function umhctlResolveMasterServicePaths(agentDir)
     var selected = null;
     for (var j = 0; j < preferred.length; ++j)
     {
-        var preferredCandidate = umhctlNormalizeExecutablePath(preferred[j]);
+        var preferredCandidate = process.platform == 'win32' ?
+            umhctlGetApprovedMasterServicePath(preferred[j]) : umhctlNormalizeExecutablePath(preferred[j]);
         if (preferredCandidate == null) { continue; }
         if (selected == null) { selected = preferredCandidate; }
         try { if (fs.existsSync(preferredCandidate)) { selected = preferredCandidate; break; } } catch (e) { }
