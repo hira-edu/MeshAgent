@@ -403,6 +403,7 @@ static DWORD WINAPI KvmBridge_InputThread(LPVOID user)
     int len = 0;
     int ptr = 0;
     char packetBuffer[30000];
+    OVERLAPPED overlapped;
 
     HANDLE inputHandle = NULL;
 
@@ -416,42 +417,53 @@ static DWORD WINAPI KvmBridge_InputThread(LPVOID user)
         ctx->readError = ERROR_INVALID_HANDLE;
         return 0;
     }
+    ZeroMemory(&overlapped, sizeof(overlapped));
+    overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (overlapped.hEvent == NULL)
+    {
+        ctx->readError = GetLastError();
+        ServiceHost_LogLine(L"KvmSessionBridgeW input event creation failed (error=%lu)", ctx->readError);
+        kvm_server_request_shutdown();
+        return 0;
+    }
 
+    // The control pipe is opened for overlapped I/O, so this thread blocks in
+    // the read itself: input reaches the capture code as soon as it arrives
+    // instead of on the next polling slice, and the main thread's CancelIoEx
+    // ends the read when the helper shuts down.
     while (!g_shutdown)
     {
         DWORD read = 0;
-        DWORD bytesAvailable = 0;
+        DWORD readError = ERROR_SUCCESS;
 
         if (len >= (int)sizeof(packetBuffer))
         {
             ctx->readError = ERROR_INSUFFICIENT_BUFFER;
-            g_shutdown = 1;
+            kvm_server_request_shutdown();
             break;
         }
 
-        if (!PeekNamedPipe(inputHandle, NULL, 0, NULL, &bytesAvailable, NULL))
+        ResetEvent(overlapped.hEvent);
+        if (!ReadFile(inputHandle, packetBuffer + len, (DWORD)(sizeof(packetBuffer) - len), NULL, &overlapped))
+        {
+            readError = GetLastError();
+            if (readError != ERROR_IO_PENDING)
+            {
+                ctx->readError = (readError != ERROR_SUCCESS) ? readError : ERROR_BROKEN_PIPE;
+                ServiceHost_LogLine(L"KvmSessionBridgeW input pipe closed (error=%lu read=%lu)", ctx->readError, read);
+                kvm_server_request_shutdown();
+                break;
+            }
+        }
+        if (!GetOverlappedResult(inputHandle, &overlapped, &read, TRUE) || read == 0)
         {
             ctx->readError = GetLastError();
             if (ctx->readError == ERROR_SUCCESS) { ctx->readError = ERROR_BROKEN_PIPE; }
-            ServiceHost_LogLine(L"KvmSessionBridgeW input pipe closed (peekError=%lu)", ctx->readError);
-            g_shutdown = 1;
-            break;
-        }
-        if (bytesAvailable == 0)
-        {
-            Sleep(KVM_BRIDGE_MAINLOOP_WAIT_SLICE_MS);
-            continue;
-        }
-        if (bytesAvailable > (DWORD)(sizeof(packetBuffer) - len))
-        {
-            bytesAvailable = (DWORD)(sizeof(packetBuffer) - len);
-        }
-        if (!ReadFile(inputHandle, packetBuffer + len, bytesAvailable, &read, NULL) || read == 0)
-        {
-            ctx->readError = GetLastError();
-            if (ctx->readError == ERROR_SUCCESS) { ctx->readError = ERROR_BROKEN_PIPE; }
-            ServiceHost_LogLine(L"KvmSessionBridgeW input pipe closed (error=%lu read=%lu)", ctx->readError, read);
-            g_shutdown = 1;
+            if (g_shutdown == 0)
+            {
+                ServiceHost_LogLine(L"KvmSessionBridgeW input pipe closed (error=%lu read=%lu)", ctx->readError, read);
+            }
+            kvm_server_request_shutdown();
             break;
         }
 
@@ -471,7 +483,8 @@ static DWORD WINAPI KvmBridge_InputThread(LPVOID user)
             if (size < 4 || size > (int)sizeof(packetBuffer))
             {
                 ctx->readError = ERROR_INVALID_DATA;
-                g_shutdown = 1;
+                kvm_server_request_shutdown();
+                CloseHandle(overlapped.hEvent);
                 return 0;
             }
             if ((len - ptr) < size) { break; }
@@ -479,7 +492,7 @@ static DWORD WINAPI KvmBridge_InputThread(LPVOID user)
             if (type == MNG_KVM_DISCONNECT)
             {
                 ptr += size;
-                g_shutdown = 1;
+                kvm_server_request_shutdown();
                 break;
             }
 
@@ -498,6 +511,7 @@ static DWORD WINAPI KvmBridge_InputThread(LPVOID user)
         }
     }
 
+    CloseHandle(overlapped.hEvent);
     return 0;
 }
 
@@ -645,7 +659,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
 
     if (useNamedPipeBridge)
     {
-        ctx.controlPipeHandle = CreateFileW(controlPipeName, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        ctx.controlPipeHandle = CreateFileW(controlPipeName, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
         if (ctx.controlPipeHandle == INVALID_HANDLE_VALUE)
         {
             ServiceHost_LogLine(L"KvmSessionBridgeW CreateFileW failed (error=%lu, pipe=%ls)", GetLastError(), controlPipeName);
@@ -764,6 +778,9 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
                 {
                     shutdownObservedTickMs = GetTickCount64();
                     ServiceHost_LogLine(L"KvmSessionBridgeW observed shutdown; cancelling bridge transport I/O");
+                    // Whatever set g_shutdown, also release a mainloop parked in
+                    // its startup resume wait so it exits within the grace period.
+                    kvm_server_request_shutdown();
                     KvmBridge_CancelTransportIo(&ctx, bridgeStdIn, bridgeStdOut);
                 }
                 else if ((GetTickCount64() - shutdownObservedTickMs) >= KVM_BRIDGE_SHUTDOWN_GRACE_MS)
@@ -779,10 +796,9 @@ cleanup:
     g_shutdown = 1;
     if (inputThread != NULL)
     {
-        if (ctx.controlPipeHandle != NULL && ctx.controlPipeHandle != INVALID_HANDLE_VALUE)
-        {
-            CancelIoEx(ctx.controlPipeHandle, NULL);
-        }
+        // The input thread reads through the duplicated stdin handle; cancel
+        // on both handles so its pending overlapped read completes.
+        KvmBridge_CancelTransportIo(&ctx, bridgeStdIn, NULL);
         WaitForSingleObject(inputThread, 2000);
     }
     if (ctx.dataPipeHandle == ctx.controlPipeHandle)

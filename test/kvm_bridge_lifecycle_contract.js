@@ -1,0 +1,258 @@
+const fs = require('fs');
+const path = require('path');
+
+// Static contract for the Windows KVM session bridge lifecycle: per-session
+// context isolation, nest-safe activation, bounded transport I/O, restart
+// backoff, output framing validation, and the helper's input/shutdown path.
+
+function parseArgs(argv) {
+    const args = {};
+    for (let i = 2; i < argv.length; ++i) {
+        const token = argv[i];
+        if (!token.startsWith('--')) {
+            throw new Error(`Unexpected argument: ${token}`);
+        }
+        const key = token.substring(2);
+        const value = argv[i + 1];
+        if (value == null || value.startsWith('--')) {
+            args[key] = true;
+        } else {
+            args[key] = value;
+            i += 1;
+        }
+    }
+    return args;
+}
+
+function ensureDir(dirPath) {
+    fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function assert(condition, message) {
+    if (!condition) {
+        throw new Error(message);
+    }
+}
+
+function extractFunction(source, signature) {
+    // Skip forward declarations: the definition is the occurrence whose
+    // signature is followed directly by the opening brace.
+    let start = source.indexOf(signature);
+    while (start >= 0 && !/^\s*\{/.test(source.slice(start + signature.length, start + signature.length + 8))) {
+        start = source.indexOf(signature, start + signature.length);
+    }
+    assert(start >= 0, `${signature} definition not found`);
+    const bodyStart = source.indexOf('{', start);
+    assert(bodyStart >= 0, `${signature} body start not found`);
+    let depth = 0;
+    for (let i = bodyStart; i < source.length; ++i) {
+        const ch = source[i];
+        if (ch === '{') {
+            depth += 1;
+        } else if (ch === '}') {
+            depth -= 1;
+            if (depth === 0) {
+                return source.slice(start, i + 1);
+            }
+        }
+    }
+    throw new Error(`${signature} body end not found`);
+}
+
+function countOccurrences(source, needle) {
+    let count = 0;
+    let index = source.indexOf(needle);
+    while (index >= 0) {
+        count += 1;
+        index = source.indexOf(needle, index + needle.length);
+    }
+    return count;
+}
+
+function main() {
+    const args = parseArgs(process.argv);
+    const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
+    const kvmPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.c');
+    const kvmHeaderPath = path.resolve('meshcore', 'KVM', 'Windows', 'kvm.h');
+    const bridgePath = path.resolve('meshservice', 'service_host.c');
+    const kvm = fs.readFileSync(kvmPath, 'utf8');
+    const kvmHeader = fs.readFileSync(kvmHeaderPath, 'utf8');
+    const bridge = fs.readFileSync(bridgePath, 'utf8');
+
+    const ensureLock = extractFunction(kvm, 'static void kvm_relay_ensure_registry_lock()');
+    const lookup = extractFunction(kvm, 'static KvmRelayContext* kvm_relay_lookup_context(void* reserved)');
+    const activate = extractFunction(kvm, 'static void kvm_relay_activate_context(KvmRelayContext* ctx)');
+    const deactivate = extractFunction(kvm, 'static void kvm_relay_deactivate_context()');
+    const getContext = extractFunction(kvm, 'static KvmRelayContext* kvm_relay_get_context()');
+    const cacheControl = extractFunction(kvm, 'static BOOL kvm_relay_cache_control_packet(KvmRelayContext* ctx, char* buffer, int bufferLen)');
+    const respawn = extractFunction(kvm, 'static int kvm_relay_prepare_bridge_respawn_from_input(KvmRelayContext* ctx, char* buffer, int bufferLen, const char* reason, DWORD errorCode)');
+    const writeInput = extractFunction(kvm, 'static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int bufferLen)');
+    const brokenPipe = extractFunction(kvm, 'static void kvm_relay_bridge_pipe_broken_handler(ILibProcessPipe_Pipe sender)');
+    const consumeOutput = extractFunction(kvm, 'static void kvm_relay_consume_output_buffer(KvmRelayContext* ctx, char *buffer, size_t bufferLen, size_t* bytesConsumed)');
+    const createPipe = extractFunction(kvm, 'static BOOL kvm_relay_create_bridge_server_pipeW(const WCHAR* pipeName, DWORD pipeOpenMode, HANDLE* pipeOut)');
+    const verifyClient = extractFunction(kvm, 'static BOOL kvm_relay_verify_bridge_client(HANDLE pipeHandle, DWORD expectedPid, DWORD* errorOut)');
+    const waitClient = extractFunction(kvm, 'static BOOL kvm_relay_wait_for_bridge_client(KvmRelayContext* ctx, HANDLE bridgePipeHandle, DWORD timeoutMs, LONG expectedSessionGeneration, DWORD* errorOut, BOOL* sessionChangedOut)');
+    const attach = extractFunction(kvm, 'static BOOL kvm_relay_attach_bridge_transport(KvmRelayContext* ctx, HANDLE inputPipeHandle, HANDLE outputPipeHandle)');
+    const spawnSuccess = extractFunction(kvm, 'static void kvm_record_spawn_success(void *reserved, void *pipeMgr, char *exePath, ILibKVM_WriteHandler writeHandler)');
+    const healthy = extractFunction(kvm, 'static void kvm_record_healthy_output(void)');
+    const retryTimer = extractFunction(kvm, 'static void kvm_retry_timer_callback(void* object)');
+    const scheduleDelay = extractFunction(kvm, 'static void kvm_schedule_retry_timer_delay(DWORD delayMs)');
+    const scheduleBackoff = extractFunction(kvm, 'static void kvm_schedule_retry_timer(void)');
+    const restartAfterFailure = extractFunction(kvm, 'static void kvm_relay_schedule_restart_after_failure(DWORD restartError, const char* source)');
+    const feeddata = extractFunction(kvm, 'int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, void *reserved)');
+    const pause = extractFunction(kvm, 'void kvm_pause(int pause, void *reserved)');
+    const exitHandler = extractFunction(kvm, 'void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* user)');
+    const stdoutHandler = extractFunction(kvm, 'void kvm_relay_StdOutHandler(ILibProcessPipe_Process sender, char *buffer, size_t bufferLen, size_t* bytesConsumed, void* user)');
+    const restart = extractFunction(kvm, 'int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHandler writeHandler, void *reserved)');
+    const setup = extractFunction(kvm, 'int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int tsid)');
+    const cleanup = extractFunction(kvm, 'void kvm_cleanup(void *reserved)');
+    const sessionChange = extractFunction(kvm, 'static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)');
+    const notify = extractFunction(kvm, 'void kvm_notify_session_change(DWORD eventType, DWORD sessionId)');
+    const snapshot = extractFunction(kvm, 'int kvm_bridge_debug_get_snapshot_for_reserved(void *reserved, KvmBridgeDebugSnapshot* snapshotOut)');
+    const requestShutdown = extractFunction(kvm, 'void kvm_server_request_shutdown(void)');
+    const inputThread = extractFunction(bridge, 'static DWORD WINAPI KvmBridge_InputThread(LPVOID user)');
+    const bridgeEntry = extractFunction(bridge, 'void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)');
+
+    const checks = {
+        registryLockInitializedOnce:
+            ensureLock.includes('InitOnceExecuteOnce(&gKvmRelayContextLockOnce, kvm_relay_initialize_locks, NULL, NULL);') &&
+            !kvm.includes('gKvmRelayContextLockInitialized'),
+        reservedLookupNeverFallsBackToAnotherSession:
+            lookup.includes('return kvm_relay_get_registered_context(reserved);') &&
+            getContext.includes('return gKvmActiveContext;') &&
+            !getContext.includes('kvm_relay_lookup_context'),
+        nestedActivationKeepsLiveGlobals:
+            activate.includes('if (previous != NULL && previous == ctx) { return; }') &&
+            activate.includes('if (previous != NULL) { kvm_relay_capture_context(previous); }') &&
+            activate.includes('gKvmActivationStack[gKvmActivationDepth] = previous;') &&
+            deactivate.includes('previous = gKvmActivationStack[gKvmActivationDepth];') &&
+            deactivate.includes('if (previous == gKvmActiveContext) { return; }') &&
+            deactivate.includes('kvm_relay_load_context(previous);') &&
+            !deactivate.includes('kvm_relay_capture_context('),
+        feeddataResolvesSessionUnderLockAndDropsOrphanInput:
+            feeddata.indexOf('kvm_relay_lock();') >= 0 &&
+            feeddata.indexOf('kvm_relay_lock();') < feeddata.indexOf('ctx = kvm_relay_find_context_by_reserved(reserved);') &&
+            feeddata.includes('if (ctx == NULL && kvmConsoleMode == 0)') &&
+            feeddata.includes('Dropping input for session without relay'),
+        detachedBridgeInputCachesOnlyReplayableControl:
+            feeddata.includes('!kvm_relay_input_is_replayable_after_respawn(buf, len) || !kvm_relay_cache_control_packet(ctx, buf, len)') &&
+            cacheControl.includes('ctx->cachedControlPacketCount >= KVM_BRIDGE_MAX_CACHED_CONTROL_PACKETS') &&
+            kvm.includes('#define KVM_BRIDGE_MAX_CACHED_CONTROL_PACKETS 64'),
+        pauseResolvesSessionUnderLockAndRespawnsOnWriteFailure:
+            pause.indexOf('kvm_relay_lock();') < pause.indexOf('ctx = kvm_relay_lookup_context(reserved);') &&
+            pause.includes('if (ctx == NULL && reserved != NULL)') &&
+            pause.includes('kvm_relay_prepare_bridge_respawn_from_input(ctx, NULL, 0, "pause-write-failed"'),
+        cleanupIgnoresUnknownSessionAndDefersNestedDestroy:
+            cleanup.includes('with no relay context consoleMode=%d') &&
+            cleanup.includes('kvm_server_signal_remote_resume_waiters();') &&
+            cleanup.includes('if (destroyNow && kvm_relay_context_is_active_in_outer_frame(ctx))') &&
+            cleanup.includes('ILibLifeTime_AddEx(ILibGetBaseTimer(gILibChain), ctx, 0, &kvm_retry_timer_callback, NULL);'),
+        bridgeInputWritesAreBounded:
+            writeInput.includes('WaitForSingleObject(overlapped.hEvent, KVM_BRIDGE_WRITE_TIMEOUT_MS) == WAIT_OBJECT_0') &&
+            writeInput.includes('CancelIoEx(ctx->bridgeInputPipeHandle, &overlapped);') &&
+            writeInput.includes('errorCode = ERROR_TIMEOUT;') &&
+            countOccurrences(writeInput, 'GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, TRUE)') === 1,
+        failedLaunchesFreeUnattachedHelpers:
+            !restart.includes('ILibProcessPipe_Process_SoftKill(gChildProcess);') &&
+            countOccurrences(restart, 'ILibProcessPipe_Process_HardKill(gChildProcess);') >= 7,
+        bridgePipesAcceptOnlyTheSpawnedLocalHelper:
+            createPipe.includes('FILE_FLAG_FIRST_PIPE_INSTANCE') &&
+            createPipe.includes('PIPE_REJECT_REMOTE_CLIENTS') &&
+            verifyClient.includes('GetNamedPipeClientProcessId(pipeHandle, &clientPid)') &&
+            verifyClient.includes('(DWORD)clientPid != expectedPid') &&
+            restart.includes('kvm_relay_verify_bridge_client(ctx->bridgeInputPipeHandle, ILibProcessPipe_Process_GetPID(gChildProcess), &lastError)') &&
+            restart.includes('kvm_relay_verify_bridge_client(ctx->bridgeOutputPipeHandle, ILibProcessPipe_Process_GetPID(gChildProcess), &lastError)'),
+        outputFramingIsValidated:
+            consumeOutput.includes('if (jumboLen < 4 || jumboLen > KVM_BRIDGE_MAX_JUMBO_PAYLOAD)') &&
+            consumeOutput.includes('kvm_relay_fail_bridge_protocol(ctx, "jumbo-length"') &&
+            consumeOutput.includes('else if (bufferLen >= 4)') &&
+            consumeOutput.includes('kvm_relay_fail_bridge_protocol(ctx, "packet-length"') &&
+            !consumeOutput.includes('(int)ntohl(') &&
+            stdoutHandler.includes('Dropping unframed KVM stdout data') &&
+            !stdoutHandler.includes('(int)ntohl('),
+        healthyOutputResetsBackoffOnlyAfterStableRun:
+            consumeOutput.includes('(GetTickCount64() - gKvmSessionStartTickMs) >= KVM_BRIDGE_HEALTHY_RESET_MS') &&
+            consumeOutput.includes('kvm_record_healthy_output();') &&
+            !healthy.includes('gKvmRetryScheduled = 0;') &&
+            !spawnSuccess.includes('gKvmRetryScheduled = 0;') &&
+            !spawnSuccess.includes('gKvmRegisteredContextCount ='),
+        retryTimerKeepsEarliestDeadline:
+            scheduleDelay.includes('if (gKvmRetryScheduled != 0 && gKvmRetryDueTickMs != 0 && gKvmRetryDueTickMs <= dueTickMs)') &&
+            scheduleBackoff.includes('gKvmRestartNotBeforeTickMs = GetTickCount64() + (ULONGLONG)backoffDelayMs;') &&
+            retryTimer.includes('if (gKvmRestartNotBeforeTickMs > now)') &&
+            retryTimer.includes('kvm_schedule_retry_timer_delay(ageMs < KVM_REFRESH_PROBE_TIMEOUT_MS'),
+        failedRestartsBackOffAndEventuallyCloseViewer:
+            restartAfterFailure.includes('if (restartError == ERROR_OPERATION_ABORTED) { return; }') &&
+            restartAfterFailure.includes('++g_restartcount;') &&
+            restartAfterFailure.includes('kvm_schedule_retry_timer();') &&
+            retryTimer.includes('kvm_relay_schedule_restart_after_failure(GetLastError(), "timer");') &&
+            sessionChange.includes('kvm_relay_schedule_restart_after_failure(GetLastError(), "session-change");') &&
+            respawn.includes('kvm_relay_schedule_restart_after_failure(GetLastError(), "input");') &&
+            retryTimer.includes('else if (g_restartcount >= KVM_RESTART_LIMIT)') &&
+            retryTimer.indexOf('kvm_relay_unlock();') < retryTimer.indexOf('closeWriteHandler(NULL, 0, closeReserved);'),
+        inputRespawnRespectsPendingBackoff:
+            respawn.includes('if (gKvmRetryScheduled != 0 && gKvmRestartNotBeforeTickMs > GetTickCount64())') &&
+            respawn.includes('service-mode KVM input respawn deferred to pending backoff'),
+        brokenPipeReplacesHelperThatOutlivesTransport:
+            brokenPipe.includes('kvm_schedule_retry_timer_delay(KVM_BRIDGE_BROKEN_PIPE_GRACE_MS);') &&
+            retryTimer.includes('bridge helper outlived its transport pid=%u; terminating'),
+        exitHandlerIgnoresSupersededHelperAndIntentionalKills:
+            exitHandler.includes('bridge child exit ignored for superseded helper') &&
+            exitHandler.includes('intentionalExit = (gKvmChildExitSignaled != 0);') &&
+            exitHandler.includes('if (exitCode != 0 && intentionalExit == 0)') &&
+            exitHandler.includes('if (g_restartcount < KVM_RESTART_LIMIT)'),
+        refreshProbeWindowStartsAtAttach:
+            attach.includes('gKvmPendingProbeSinceTickMs = GetTickCount64();') &&
+            kvm.includes('if (gKvmChildExitSignaled != 0) { return 0; }'),
+        sessionPreSignalCannotTouchFreedContext:
+            waitClient.includes('kvm_relay_publish_blocking_wait(ctx);') &&
+            waitClient.includes('kvm_relay_publish_blocking_wait(NULL);') &&
+            notify.includes('EnterCriticalSection(&gKvmSessionSignalLock);') &&
+            notify.includes('preSignaledContext = gKvmBlockingWaitContext;') &&
+            !notify.includes('preSignaledContext = gKvmActiveContext;'),
+        failedSetupRemovesPendingTimerBeforeDestroy:
+            setup.indexOf('ILibLifeTime_Remove(ILibGetBaseTimer(gILibChain), ctx);') >= 0 &&
+            setup.indexOf('ILibLifeTime_Remove(ILibGetBaseTimer(gILibChain), ctx);') < setup.lastIndexOf('kvm_relay_destroy_context(ctx);'),
+        snapshotReadsUnderRelayLock:
+            snapshot.indexOf('kvm_relay_lock();') < snapshot.indexOf('ctx = kvm_relay_find_context_by_reserved(reserved);') &&
+            countOccurrences(snapshot, 'kvm_relay_unlock();') === 2,
+        helperShutdownWakesStartupResumeWait:
+            kvmHeader.includes('void kvm_server_request_shutdown(void);') &&
+            requestShutdown.includes('g_shutdown = 1;') &&
+            requestShutdown.includes('kvm_server_signal_remote_resume_waiters();') &&
+            bridgeEntry.includes('kvm_server_request_shutdown();') &&
+            inputThread.includes('kvm_server_request_shutdown();'),
+        helperInputReadsBlockInsteadOfPolling:
+            bridgeEntry.includes('FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED') &&
+            inputThread.includes('ReadFile(inputHandle, packetBuffer + len, (DWORD)(sizeof(packetBuffer) - len), NULL, &overlapped)') &&
+            inputThread.includes('GetOverlappedResult(inputHandle, &overlapped, &read, TRUE)') &&
+            inputThread.includes('CloseHandle(overlapped.hEvent);') &&
+            !inputThread.includes('PeekNamedPipe(') &&
+            !inputThread.includes('Sleep(')
+    };
+
+    for (const [name, passed] of Object.entries(checks)) {
+        assert(passed, `kvm bridge lifecycle contract failed: ${name}`);
+    }
+
+    const report = {
+        generatedUtc: new Date().toISOString(),
+        success: true,
+        files: { kvmPath, kvmHeaderPath, bridgePath },
+        checks
+    };
+
+    if (evidenceDir) {
+        ensureDir(evidenceDir);
+        fs.writeFileSync(path.join(evidenceDir, 'kvm_bridge_lifecycle_contract.json'), JSON.stringify(report, null, 2));
+    } else {
+        process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+    }
+}
+
+try {
+    main();
+} catch (error) {
+    console.error(error && error.stack ? error.stack : String(error));
+    process.exit(1);
+}

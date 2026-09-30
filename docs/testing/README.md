@@ -13,6 +13,7 @@ node .\test\deploy_publish_paths_contract.js
 node .\test\health_check_branding_contract.js
 node .\test\drift_reduction_contract.js
 node .\test\kvm_bridge_pipe_contract.js
+node .\test\kvm_bridge_lifecycle_contract.js
 node .\test\update_quiesce_contract.js
 node .\test\websocket_state_lifecycle_contract.js
 node .\test\large_file_transfer_contract.js

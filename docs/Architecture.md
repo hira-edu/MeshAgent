@@ -98,6 +98,36 @@ The exact native implementation is spread across `meshservice/`,
 `microstack/ILibProcessPipe.c`, and `meshcore/KVM/Windows/`. Contract and
 runtime coverage lives in `test/`.
 
+### KVM session bridge
+
+Each remote desktop session owns one relay context in
+`meshcore/KVM/Windows/kvm.c`, keyed by the caller's `reserved` pointer. The
+relay lock serializes every entry point (chain callbacks, the service control
+thread's session-change notifications, and probe threads). Session state is
+mirrored into globals only while a context is activated; activation nests, so
+a stream callback that re-enters `kvm_pause()` or `kvm_cleanup()` keeps the
+outer frame's state. A call that names an unregistered session is dropped; it
+never falls back to another session's context.
+
+The helper is `rundll32.exe <bundle dll>,KvmSessionBridgeW`, connected over two
+directional named pipes. The service accepts only local clients and verifies
+that each pipe client is the process it spawned. A helper that fails before
+attaching is terminated and its process object freed. Relay writes to the helper
+are bounded; a timed-out, broken, or badly framed helper is replaced
+through the exit/restart path. While no helper is attached, only replayable
+control packets (refresh, display, compression, frame-rate, input-lock) are
+queued, up to a fixed limit; mouse and keyboard input is dropped rather than
+replayed later.
+
+Restarts share one per-context timer that keeps the earliest deadline:
+exponential backoff (capped at 60 s) after failed launches or failed exits, a
+refresh-probe watchdog, and session-start token retries. Input never bypasses a
+pending backoff. After four restarts without output the viewer stream is
+closed. Consecutive-failure backoff resets once a helper has streamed for
+twice the connect timeout. Inside the helper, the control pipe is read with a
+blocking overlapped read, and any shutdown also releases the capture loop's
+startup resume wait.
+
 ## Configuration and identity
 
 The build uses one branding JSON document and one provisioning manifest:
