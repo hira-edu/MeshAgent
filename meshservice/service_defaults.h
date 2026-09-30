@@ -4,8 +4,8 @@
 // Shared generic branding strings used when generated branding values are
 // unavailable. Deployment-specific names belong in the generated branding
 // header or the .msh file the server embeds.
-#define SERVICE_FALLBACK_DESCRIPTION       L"remote management agent service."
-#define SERVICE_FALLBACK_NAME              L"MeshAgent"
+#define SERVICE_FALLBACK_SERVICE_DESCRIPTION L"remote management agent service."
+#define SERVICE_FALLBACK_SERVICE_NAME      L"MeshAgent"
 #define SERVICE_FALLBACK_DISPLAY_NAME      L"Mesh Agent Service"
 #define SERVICE_FALLBACK_EXE_NAME          L"meshagent.exe"
 #define SERVICE_FALLBACK_DLL_NAME          L"meshsvc.dll"

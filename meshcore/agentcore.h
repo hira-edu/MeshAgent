@@ -27,6 +27,7 @@ typedef char JS_ENGINE_CONTEXT[16];
 
 #include <Windows.h>
 #include <WinBase.h>
+#include <shellscalingapi.h>
 #endif
 
 #include "microstack/ILibParsers.h"

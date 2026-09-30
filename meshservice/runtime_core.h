@@ -21,8 +21,8 @@
 
 // Used for persisted task paths and scheduler/WMI naming.
 // 260 matches typical MAX_PATH-sized task path buffers used in this codebase.
-#ifndef RUNTIME_TASK_NAME_MAX
-#define RUNTIME_TASK_NAME_MAX 260
+#ifndef SERVICE_TASK_NAME_MAX
+#define SERVICE_TASK_NAME_MAX 260
 #endif
 
 // Avoid pulling in winternl/ntdll by default to reduce surface area and

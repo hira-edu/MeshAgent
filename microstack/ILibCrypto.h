@@ -141,8 +141,8 @@ typedef enum CERTIFICATE_TYPES
 
 #define ILibCrypto_Cert_Ownership_Other 0x01
 
-void  __fastcall util_openssl_init();
-void  __fastcall util_openssl_uninit();
+void  __fastcall util_openssl_init(void);
+void  __fastcall util_openssl_uninit(void);
 int  __fastcall util_load_system_certs(SSL_CTX *ctx);
 void  __fastcall util_free(char* ptr);
 
