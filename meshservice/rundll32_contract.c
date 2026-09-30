@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
+#include <shlobj.h>
+#include <sddl.h>
 #include <strsafe.h>
 #include <WtsApi32.h>
 #include "runtime_core.h"
@@ -22,6 +24,8 @@
 #define MESH_CONSOLE_BRIDGE_CONNECT_TIMEOUT_MS 15000UL
 #define MESH_CONSOLE_BRIDGE_IO_BUFFER_SIZE 8192
 #define MESH_CONSOLE_BRIDGE_NO_SESSION 0xFFFFFFFFUL
+// How long exec mode keeps draining output after the shell itself has exited.
+#define MESH_CONSOLE_BRIDGE_EXEC_OUTPUT_DRAIN_MS 5000UL
 
 typedef HRESULT (WINAPI* MeshConsoleBridge_CreatePseudoConsoleFn)(COORD, HANDLE, HANDLE, DWORD, HANDLE*);
 typedef void (WINAPI* MeshConsoleBridge_ClosePseudoConsoleFn)(HANDLE);
@@ -46,6 +50,14 @@ typedef struct MeshConsoleBridgeCopyContext
 } MeshConsoleBridgeCopyContext;
 
 static volatile LONG MeshConsoleBridge_PtyPipeCounter = 0;
+// Lifecycle artifact names embed the launching PID; the counter keeps two launches
+// from one process within the same tick from sharing a name.
+static volatile LONG MeshRundll32_ArtifactCounter = 0;
+#define MESH_RUNDLL32_STALE_ARTIFACT_AGE_MS (10ULL * 60ULL * 1000ULL)
+// Protected DACL for the per-launch temp staging directory: SYSTEM and
+// Administrators only, and OWNER RIGHTS limited to read so a same-user,
+// non-elevated process cannot rewrite the DACL and swap the staged files.
+#define MESH_RUNDLL32_TEMP_STAGING_SDDL L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;OW)"
 
 BOOL MeshAgent_RunPreProtectionCaptureValidationW(const wchar_t* outputPath);
 int MeshService_RunSelfTestHostW(const wchar_t* arguments);
@@ -308,19 +320,82 @@ static const wchar_t* MeshUmhHost_BaseNameW(const wchar_t* path)
     return (slash > backslash) ? (slash + 1) : (backslash + 1);
 }
 
-static BOOL MeshUmhHost_IsApprovedMasterServicePathW(const wchar_t* path)
+static BOOL MeshUmhHost_PathIsUnderDirectoryW(const wchar_t* path, const wchar_t* directory)
+{
+    size_t dirLen = 0;
+
+    if (path == NULL || directory == NULL) { return FALSE; }
+    dirLen = wcslen(directory);
+    while (dirLen > 0 && (directory[dirLen - 1] == L'\\' || directory[dirLen - 1] == L'/')) { --dirLen; }
+    if (dirLen == 0 || wcslen(path) <= dirLen + 1) { return FALSE; }
+    return (_wcsnicmp(path, directory, dirLen) == 0 && path[dirLen] == L'\\') ? TRUE : FALSE;
+}
+
+// MasterService.exe is only launched from the directories umhctl manages: the
+// ProgramData UserModeHook folder and the agent install root (the directory of
+// this service DLL). A file of that name anywhere else is not approved.
+static BOOL MeshUmhHost_IsManagedMasterServiceLocationW(const wchar_t* fullPath)
+{
+    PWSTR programData = NULL;
+    wchar_t managedRoot[MAX_PATH * 4] = {0};
+    HMODULE module = NULL;
+    DWORD moduleLen = 0;
+    wchar_t* slash = NULL;
+    BOOL managed = FALSE;
+
+    if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, NULL, &programData)) && programData != NULL &&
+        SUCCEEDED(StringCchPrintfW(managedRoot, _countof(managedRoot), L"%ls\\UserModeHook", programData)) &&
+        MeshUmhHost_PathIsUnderDirectoryW(fullPath, managedRoot))
+    {
+        managed = TRUE;
+    }
+    if (programData != NULL) { CoTaskMemFree(programData); }
+    if (!managed &&
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&MeshUmhHost_IsManagedMasterServiceLocationW, &module) &&
+        (moduleLen = GetModuleFileNameW(module, managedRoot, (DWORD)_countof(managedRoot))) > 0 &&
+        moduleLen < (DWORD)_countof(managedRoot) &&
+        (slash = wcsrchr(managedRoot, L'\\')) != NULL)
+    {
+        *slash = L'\0';
+        managed = MeshUmhHost_PathIsUnderDirectoryW(fullPath, managedRoot);
+    }
+    return managed;
+}
+
+// On success the canonical path (no '.'/'..' segments, backslash separators) is
+// written to approvedPath; that is the path that gets executed.
+static BOOL MeshUmhHost_IsApprovedMasterServicePathW(const wchar_t* path, wchar_t* approvedPath, size_t approvedPathCch)
 {
     const wchar_t* baseName = MeshUmhHost_BaseNameW(path);
+    wchar_t fullPath[MAX_PATH * 4] = {0};
+    DWORD fullLen = 0;
+
     if (!MeshUmhHost_IsAbsolutePathW(path)) { SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY); return FALSE; }
     if (baseName == NULL || _wcsicmp(baseName, L"MasterService.exe") != 0) { SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY); return FALSE; }
-    if (!MeshRundll32_FileExistsW(path)) { SetLastError(ERROR_FILE_NOT_FOUND); return FALSE; }
+    // UNC and device paths are never a managed location.
+    if (path[0] == L'\\' || path[0] == L'/') { SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY); return FALSE; }
+    fullLen = GetFullPathNameW(path, (DWORD)_countof(fullPath), fullPath, NULL);
+    if (fullLen == 0 || fullLen >= (DWORD)_countof(fullPath)) { SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY); return FALSE; }
+    baseName = MeshUmhHost_BaseNameW(fullPath);
+    if (baseName == NULL || _wcsicmp(baseName, L"MasterService.exe") != 0 || !MeshUmhHost_IsManagedMasterServiceLocationW(fullPath))
+    {
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        return FALSE;
+    }
+    if (!MeshRundll32_FileExistsW(fullPath)) { SetLastError(ERROR_FILE_NOT_FOUND); return FALSE; }
+    if (approvedPath == NULL || FAILED(StringCchCopyW(approvedPath, approvedPathCch, fullPath)))
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
     return TRUE;
 }
 
 static BOOL MeshUmhHost_ArgEquals(const MeshUmhHostManifest* manifest, DWORD index, const wchar_t* expected)
 {
     if (manifest == NULL || expected == NULL || index >= manifest->argCount || index >= MESH_UMH_MAX_ARGS) { return FALSE; }
-    return (_wcsicmp(manifest->args[index], expected) == 0) ? TRUE : FALSE;
+    // umhctl writes these exact tokens; the approved shapes are case-sensitive.
+    return (wcscmp(manifest->args[index], expected) == 0) ? TRUE : FALSE;
 }
 
 static BOOL MeshUmhHost_ArgsAreApproved(const MeshUmhHostManifest* manifest)
@@ -385,7 +460,16 @@ static BOOL MeshUmhHost_ReadManifestW(const wchar_t* manifestPath, MeshUmhHostMa
         return FALSE;
     }
     read = GetPrivateProfileStringW(MESH_UMH_SECTION_W, MESH_UMH_KEY_EXE_PATH_W, L"", manifestOut->exePath, (DWORD)_countof(manifestOut->exePath), manifestPath);
-    if (read == 0 || !MeshUmhHost_IsApprovedMasterServicePathW(manifestOut->exePath)) { return FALSE; }
+    if (read >= (DWORD)_countof(manifestOut->exePath) - 1) { SetLastError(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
+    {
+        wchar_t approvedExePath[MAX_PATH * 4] = {0};
+        if (read == 0 || !MeshUmhHost_IsApprovedMasterServicePathW(manifestOut->exePath, approvedExePath, _countof(approvedExePath))) { return FALSE; }
+        if (FAILED(StringCchCopyW(manifestOut->exePath, _countof(manifestOut->exePath), approvedExePath)))
+        {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+    }
 
     read = GetPrivateProfileStringW(MESH_UMH_SECTION_W, MESH_UMH_KEY_ARG_COUNT_W, L"", countText, (DWORD)_countof(countText), manifestPath);
     if (read == 0) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
@@ -404,7 +488,7 @@ static BOOL MeshUmhHost_ReadManifestW(const wchar_t* manifestPath, MeshUmhHostMa
             return FALSE;
         }
         read = GetPrivateProfileStringW(MESH_UMH_SECTION_W, key, L"", manifestOut->args[i], (DWORD)_countof(manifestOut->args[i]), manifestPath);
-        if (read == 0 || !MeshUmhHost_ValueIsSafeW(manifestOut->args[i]))
+        if (read == 0 || read >= (DWORD)_countof(manifestOut->args[i]) - 1 || !MeshUmhHost_ValueIsSafeW(manifestOut->args[i]))
         {
             SetLastError(ERROR_INVALID_DATA);
             return FALSE;
@@ -523,15 +607,22 @@ static DWORD MeshUmhHost_RunManifestCommandW(const MeshUmhHostManifest* manifest
         return exitCode;
     }
 
+    // The job ties MasterService.exe to this host: when umhctl kills the host on
+    // its own timeout, the child must not survive holding the agent's pipes.
     job = CreateJobObjectW(NULL, NULL);
-    if (job != NULL)
+    if (job == NULL)
     {
-        jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jobInfo, sizeof(jobInfo)))
-        {
-            CloseHandle(job);
-            job = NULL;
-        }
+        exitCode = GetLastError();
+        MeshUmhHost_WriteStderrW(L"job object unavailable", exitCode);
+        return exitCode;
+    }
+    jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jobInfo, sizeof(jobInfo)))
+    {
+        exitCode = GetLastError();
+        MeshUmhHost_WriteStderrW(L"job object configuration failed", exitCode);
+        CloseHandle(job);
+        return exitCode;
     }
 
     if (!MeshProcessToken_Open(MeshProcessToken_Privileged, MESH_PROCESS_TOKEN_CURRENT_SESSION, &launchToken) ||
@@ -567,10 +658,17 @@ static DWORD MeshUmhHost_RunManifestCommandW(const MeshUmhHostManifest* manifest
     if (environment != NULL && destroyEnvironmentFn != NULL) { destroyEnvironmentFn(environment); }
     if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
 
-    if (job != NULL && !AssignProcessToJobObject(job, processInfo.hProcess))
+    if (!AssignProcessToJobObject(job, processInfo.hProcess))
     {
+        // Still suspended: nothing has run yet, so discard it.
+        exitCode = GetLastError();
+        MeshUmhHost_WriteStderrW(L"job assignment failed for MasterService.exe", exitCode);
+        TerminateProcess(processInfo.hProcess, exitCode);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+        CloseHandle(launchToken);
         CloseHandle(job);
-        job = NULL;
+        return exitCode;
     }
 
     if (!MeshProcessToken_VerifyChildAndResume(MeshProcessToken_Privileged, launchToken, &processInfo))
@@ -799,27 +897,31 @@ static HANDLE MeshUserConsent_OpenResultPipeW(const wchar_t* pipeName)
     for (;;)
     {
         HANDLE pipeHandle = CreateFileW(pipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        ULONGLONG now = 0;
         if (pipeHandle != INVALID_HANDLE_VALUE) { return pipeHandle; }
         lastError = GetLastError();
-        if (lastError != ERROR_PIPE_BUSY && lastError != ERROR_FILE_NOT_FOUND && lastError != ERROR_PATH_NOT_FOUND)
+        // The agent creates the result pipe before it launches this host, so a
+        // missing pipe means the agent side is gone; only a busy pipe is worth
+        // waiting for.
+        if (lastError != ERROR_PIPE_BUSY)
         {
             SetLastError(lastError);
             return INVALID_HANDLE_VALUE;
         }
-        if (GetTickCount64() >= deadline)
+        now = GetTickCount64();
+        if (now >= deadline)
         {
-            SetLastError(lastError == ERROR_SUCCESS ? ERROR_SEM_TIMEOUT : lastError);
+            SetLastError(ERROR_SEM_TIMEOUT);
             return INVALID_HANDLE_VALUE;
         }
-        if (!WaitNamedPipeW(pipeName, 250))
+        if (!WaitNamedPipeW(pipeName, (DWORD)(deadline - now)))
         {
             lastError = GetLastError();
-            if (lastError != ERROR_SEM_TIMEOUT && lastError != ERROR_FILE_NOT_FOUND && lastError != ERROR_PATH_NOT_FOUND && lastError != ERROR_PIPE_BUSY)
+            if (lastError != ERROR_SEM_TIMEOUT && lastError != ERROR_PIPE_BUSY)
             {
                 SetLastError(lastError);
                 return INVALID_HANDLE_VALUE;
             }
-            Sleep(50);
         }
     }
 }
@@ -946,6 +1048,72 @@ static BOOL MeshRundll32_CombinePathW(wchar_t* output, size_t outputCch, const w
     return TRUE;
 }
 
+static BOOL MeshRundll32_ProcessIsRunning(DWORD pid)
+{
+    HANDLE process = NULL;
+    BOOL running = FALSE;
+
+    if (pid == 0) { return FALSE; }
+    process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (process == NULL)
+    {
+        // Access denied still means a process with that PID exists.
+        return (GetLastError() == ERROR_ACCESS_DENIED) ? TRUE : FALSE;
+    }
+    running = (WaitForSingleObject(process, 0) == WAIT_TIMEOUT) ? TRUE : FALSE;
+    CloseHandle(process);
+    return running;
+}
+
+// Staged host DLLs and manifests are normally deleted by the launcher once the host
+// exits. A launcher that does not survive the action (the service being updated is
+// the one waiting) or does not wait leaves them behind. Remove leftovers whose
+// launching process is gone; a DLL still mapped by a running host fails to delete
+// and is kept.
+static void MeshRundll32_SweepStaleLifecycleArtifactsW(const wchar_t* lifecycleDir)
+{
+    wchar_t pattern[MAX_PATH * 4] = {0};
+    wchar_t candidate[MAX_PATH * 4] = {0};
+    WIN32_FIND_DATAW findData;
+    HANDLE find = INVALID_HANDLE_VALUE;
+    ULARGE_INTEGER now;
+    FILETIME nowFileTime;
+
+    if (!MeshRundll32_CombinePathW(pattern, _countof(pattern), lifecycleDir, L"*")) { return; }
+    GetSystemTimeAsFileTime(&nowFileTime);
+    now.LowPart = nowFileTime.dwLowDateTime;
+    now.HighPart = nowFileTime.dwHighDateTime;
+    find = FindFirstFileW(pattern, &findData);
+    if (find == INVALID_HANDLE_VALUE) { return; }
+    do
+    {
+        unsigned long pid = 0;
+        unsigned long long tick = 0;
+        ULARGE_INTEGER written;
+
+        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) { continue; }
+        if (swscanf_s(findData.cFileName, L"host-%lu-%llu", &pid, &tick) != 2 &&
+            swscanf_s(findData.cFileName, L"manifest-%lu-%llu", &pid, &tick) != 2)
+        {
+            continue;
+        }
+        written.LowPart = findData.ftLastWriteTime.dwLowDateTime;
+        written.HighPart = findData.ftLastWriteTime.dwHighDateTime;
+        if (pid == GetCurrentProcessId() ||
+            now.QuadPart < written.QuadPart ||
+            (now.QuadPart - written.QuadPart) / 10000ULL < MESH_RUNDLL32_STALE_ARTIFACT_AGE_MS ||
+            MeshRundll32_ProcessIsRunning((DWORD)pid))
+        {
+            continue;
+        }
+        if (MeshRundll32_CombinePathW(candidate, _countof(candidate), lifecycleDir, findData.cFileName))
+        {
+            (void)DeleteFileW(candidate);
+        }
+    } while (FindNextFileW(find, &findData));
+    FindClose(find);
+}
+
 static BOOL MeshRundll32_PrepareLifecycleStateDirectoryW(wchar_t* stateDir, size_t stateDirCch)
 {
     ServiceInstallPaths paths;
@@ -981,28 +1149,80 @@ static BOOL MeshRundll32_PrepareLifecycleStateDirectoryW(wchar_t* stateDir, size
     {
         return FALSE;
     }
+    MeshRundll32_SweepStaleLifecycleArtifactsW(lifecycleDir);
     return SUCCEEDED(StringCchCopyW(stateDir, stateDirCch, lifecycleDir)) ? TRUE : FALSE;
 }
 
+static wchar_t MeshRundll32_TempLifecycleDir[MAX_PATH * 4] = {0};
+
+// Uninstall-time staging cannot live in the install root it removes. It used to live
+// in the caller's %TEMP%, which for the elevated GUI uninstaller is writable by the
+// same user's non-elevated processes, so the staged host DLL and action manifest
+// could be replaced between staging and use. Stage instead in a directory that this
+// process creates itself under the Windows temp directory, with a protected DACL.
 static BOOL MeshRundll32_PrepareTempLifecycleDirectoryW(wchar_t* tempDir, size_t tempDirCch)
 {
     wchar_t tempRoot[MAX_PATH * 4] = {0};
-    DWORD tempLen = 0;
+    wchar_t leaf[128] = {0};
+    PSECURITY_DESCRIPTOR securityDescriptor = NULL;
+    SECURITY_ATTRIBUTES securityAttributes;
+    UINT windowsLen = 0;
+    int attempt = 0;
+    DWORD error = ERROR_ALREADY_EXISTS;
 
     if (tempDir == NULL || tempDirCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     tempDir[0] = L'\0';
+    if (MeshRundll32_TempLifecycleDir[0] != L'\0' && MeshRundll32_DirectoryExistsW(MeshRundll32_TempLifecycleDir))
+    {
+        return SUCCEEDED(StringCchCopyW(tempDir, tempDirCch, MeshRundll32_TempLifecycleDir)) ? TRUE : FALSE;
+    }
 
-    tempLen = GetTempPathW((DWORD)_countof(tempRoot), tempRoot);
-    if (tempLen == 0 || tempLen >= (DWORD)_countof(tempRoot))
+    windowsLen = GetSystemWindowsDirectoryW(tempRoot, (UINT)_countof(tempRoot));
+    if (windowsLen == 0 || windowsLen >= (UINT)_countof(tempRoot))
     {
-        SetLastError(tempLen == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER);
+        SetLastError(windowsLen == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
     }
-    if (!MeshRundll32_CombinePathW(tempDir, tempDirCch, tempRoot, L"MeshAgent-rundll32-lifecycle"))
+    if (FAILED(StringCchCatW(tempRoot, _countof(tempRoot), L"\\Temp")))
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(MESH_RUNDLL32_TEMP_STAGING_SDDL, SDDL_REVISION_1, &securityDescriptor, NULL))
     {
         return FALSE;
     }
-    return MeshRundll32_CreateDirectoryIfMissingW(tempDir);
+    ZeroMemory(&securityAttributes, sizeof(securityAttributes));
+    securityAttributes.nLength = sizeof(securityAttributes);
+    securityAttributes.lpSecurityDescriptor = securityDescriptor;
+    securityAttributes.bInheritHandle = FALSE;
+
+    for (attempt = 0; attempt < 16; ++attempt)
+    {
+        // Always a new name that CreateDirectoryW itself must create: a directory
+        // someone else prepared in advance is never adopted.
+        if (FAILED(StringCchPrintfW(leaf, _countof(leaf), L"MeshAgent-rundll32-lifecycle-%lu-%llu-%ld",
+                GetCurrentProcessId(),
+                (unsigned long long)GetTickCount64(),
+                (long)InterlockedIncrement(&MeshRundll32_ArtifactCounter))) ||
+            !MeshRundll32_CombinePathW(tempDir, tempDirCch, tempRoot, leaf))
+        {
+            error = ERROR_INSUFFICIENT_BUFFER;
+            break;
+        }
+        if (CreateDirectoryW(tempDir, &securityAttributes))
+        {
+            LocalFree(securityDescriptor);
+            (void)StringCchCopyW(MeshRundll32_TempLifecycleDir, _countof(MeshRundll32_TempLifecycleDir), tempDir);
+            return TRUE;
+        }
+        error = GetLastError();
+        if (error != ERROR_ALREADY_EXISTS) { break; }
+    }
+    LocalFree(securityDescriptor);
+    tempDir[0] = L'\0';
+    SetLastError(error);
+    return FALSE;
 }
 
 static BOOL MeshRundll32_PrepareTempHostDllPathW(wchar_t* hostDllPath, size_t hostDllPathCch)
@@ -1016,7 +1236,7 @@ static BOOL MeshRundll32_PrepareTempHostDllPathW(wchar_t* hostDllPath, size_t ho
     {
         return FALSE;
     }
-    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"host-%lu-%llu.dll", GetCurrentProcessId(), (unsigned long long)GetTickCount64())))
+    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"host-%lu-%llu-%ld.dll", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRundll32_ArtifactCounter))))
     {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
@@ -1059,7 +1279,10 @@ static BOOL MeshRundll32_PrepareLifecycleHostDllW(
         return SUCCEEDED(StringCchCopyW(hostDllPath, hostDllPathCch, paths.dllPath)) ? TRUE : FALSE;
     }
 
-    if (action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL)
+    // Uninstall, and validation of an uninstall whose DLL is already gone, stage
+    // outside the install root: creating state\rundll32-lifecycle there would recreate
+    // the very directory validation expects to be absent.
+    if (action == MESH_RUNDLL32_LIFECYCLE_ACTION_UNINSTALL || action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL)
     {
         wchar_t installedDllPath[MAX_PATH * 4] = {0};
         const wchar_t* uninstallSourceDll = NULL;
@@ -1090,7 +1313,7 @@ static BOOL MeshRundll32_PrepareLifecycleHostDllW(
     {
         return FALSE;
     }
-    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"host-%lu-%llu.dll", GetCurrentProcessId(), (unsigned long long)GetTickCount64())))
+    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"host-%lu-%llu-%ld.dll", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRundll32_ArtifactCounter))))
     {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
@@ -1143,7 +1366,7 @@ static BOOL MeshRundll32_PrepareManifestPathW(wchar_t* manifestPath, size_t mani
     {
         return FALSE;
     }
-    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"manifest-%lu-%llu.ini", GetCurrentProcessId(), (unsigned long long)GetTickCount64())))
+    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"manifest-%lu-%llu-%ld.ini", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRundll32_ArtifactCounter))))
     {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
@@ -1163,7 +1386,7 @@ static BOOL MeshRundll32_PrepareTempManifestPathW(wchar_t* manifestPath, size_t 
     {
         return FALSE;
     }
-    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"manifest-%lu-%llu.ini", GetCurrentProcessId(), (unsigned long long)GetTickCount64())))
+    if (FAILED(StringCchPrintfW(fileName, _countof(fileName), L"manifest-%lu-%llu-%ld.ini", GetCurrentProcessId(), (unsigned long long)GetTickCount64(), (long)InterlockedIncrement(&MeshRundll32_ArtifactCounter))))
     {
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
@@ -1438,9 +1661,29 @@ BOOL MeshRundll32_LaunchLifecycleHostW(
                 (waitResult == WAIT_FAILED) ? GetLastError() : ERROR_GEN_FAILURE;
             ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] lifecycle host wait failed/timed out (wait=%lu error=%lu)", waitResult, error);
             ok = FALSE;
-            if (waitResult == WAIT_TIMEOUT && !TerminateProcess(pi.hProcess, ERROR_TIMEOUT))
+            // A host that changes the install is mid-transaction; killing it would skip
+            // its own rollback. Only validation hosts are safe to stop here.
+            if (waitResult == WAIT_TIMEOUT &&
+                (action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_INSTALL ||
+                 action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UPDATE ||
+                 action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL ||
+                 action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_PACKAGE))
             {
-                ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Timed-out lifecycle host termination failed (error=%lu)", GetLastError());
+                if (!TerminateProcess(pi.hProcess, ERROR_TIMEOUT))
+                {
+                    ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Timed-out lifecycle host termination failed (error=%lu)", GetLastError());
+                }
+                else
+                {
+                    // Termination is asynchronous; wait so the staged DLL is unmapped
+                    // before it is deleted below.
+                    (void)WaitForSingleObject(pi.hProcess, 5000);
+                }
+            }
+            else if (waitResult == WAIT_TIMEOUT)
+            {
+                ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Leaving timed-out lifecycle host action=%ls to finish its own transaction",
+                    MeshRundll32_LifecycleActionNameW(action));
             }
         }
         if (!GetExitCodeProcess(pi.hProcess, &exitCode))
@@ -1488,6 +1731,13 @@ cleanup:
             ServiceDeploy_LogInstallEvent(L"[RUNDLL32_CONTRACT] Lifecycle DLL cleanup failed (error=%lu)", cleanupError);
         }
     }
+    // The uninstall staging directory is private to this process; remove it once
+    // it is empty. A host still holding its DLL keeps it, and the name is cached
+    // for reuse by a later action in this process.
+    if (waitForExit && MeshRundll32_TempLifecycleDir[0] != L'\0' && RemoveDirectoryW(MeshRundll32_TempLifecycleDir))
+    {
+        MeshRundll32_TempLifecycleDir[0] = L'\0';
+    }
     // A completed child failure is reported through exitCodeOut. Only launch,
     // manifest and wait/query API failures populate GetLastError. Never let
     // logging or cleanup relabel an install failure as "failed to launch".
@@ -1516,7 +1766,9 @@ BOOL MeshRundll32_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parent
     if (!MeshRundll32_GetSystemRundll32PathW(rundll32Path, _countof(rundll32Path)) ||
         !MeshRundll32_GetInstalledLifecycleHostDllW(hostDllPath, _countof(hostDllPath)))
     {
-        ServiceDeploy_LogInstallEvent(L"[LAUNCHER_CLEANUP] Unable to resolve cleanup host for target=%ls error=%lu", targetPath, GetLastError());
+        DWORD error = GetLastError();
+        ServiceDeploy_LogInstallEvent(L"[LAUNCHER_CLEANUP] Unable to resolve cleanup host for target=%ls error=%lu", targetPath, error);
+        SetLastError(error);
         return FALSE;
     }
 
@@ -1537,7 +1789,9 @@ BOOL MeshRundll32_LaunchLauncherCleanupW(const wchar_t* targetPath, DWORD parent
 
     if (!CreateProcessW(rundll32Path, commandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
     {
-        ServiceDeploy_LogInstallEvent(L"[LAUNCHER_CLEANUP] CreateProcessW failed target=%ls error=%lu", targetPath, GetLastError());
+        DWORD error = GetLastError();
+        ServiceDeploy_LogInstallEvent(L"[LAUNCHER_CLEANUP] CreateProcessW failed target=%ls error=%lu", targetPath, error);
+        SetLastError(error);
         return FALSE;
     }
 
@@ -1576,7 +1830,9 @@ BOOL MeshRundll32_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeoutMs,
     if (!MeshRundll32_GetSystemRundll32PathW(rundll32Path, _countof(rundll32Path)) ||
         !MeshRundll32_GetInstalledLifecycleHostDllW(hostDllPath, _countof(hostDllPath)))
     {
-        ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Unable to resolve rundll32 self-test host (error=%lu)", GetLastError());
+        DWORD error = GetLastError();
+        ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Unable to resolve rundll32 self-test host (error=%lu)", error);
+        SetLastError(error);
         return FALSE;
     }
 
@@ -1596,26 +1852,31 @@ BOOL MeshRundll32_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeoutMs,
     ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Launching rundll32 self-test host dll=%ls", hostDllPath);
     if (!CreateProcessW(rundll32Path, commandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
     {
-        ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] CreateProcessW failed (error=%lu)", GetLastError());
+        DWORD error = GetLastError();
+        ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] CreateProcessW failed (error=%lu)", error);
+        SetLastError(error);
         return FALSE;
     }
 
     waitResult = WaitForSingleObject(pi.hProcess, timeoutMs);
     if (waitResult != WAIT_OBJECT_0)
     {
-        ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Wait failed/timed out (wait=%lu error=%lu)", waitResult, GetLastError());
-        if (waitResult == WAIT_TIMEOUT) { TerminateProcess(pi.hProcess, ERROR_TIMEOUT); }
+        DWORD waitError = (waitResult == WAIT_TIMEOUT) ? ERROR_TIMEOUT : GetLastError();
+        ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Wait failed/timed out (wait=%lu error=%lu)", waitResult, waitError);
+        // Stop the host on any failed wait, and wait for the termination to land so
+        // the reported result is not the still-running STILL_ACTIVE status.
+        if (TerminateProcess(pi.hProcess, ERROR_TIMEOUT)) { (void)WaitForSingleObject(pi.hProcess, 5000); }
+        exitCode = (waitError != ERROR_SUCCESS) ? waitError : ERROR_GEN_FAILURE;
+        ok = FALSE;
+    }
+    else if (!GetExitCodeProcess(pi.hProcess, &exitCode))
+    {
+        exitCode = GetLastError();
         ok = FALSE;
     }
     else
     {
         ok = TRUE;
-    }
-
-    if (!GetExitCodeProcess(pi.hProcess, &exitCode))
-    {
-        exitCode = GetLastError();
-        ok = FALSE;
     }
     if (exitCodeOut != NULL) { *exitCodeOut = exitCode; }
     if (exitCode != ERROR_SUCCESS)
@@ -1638,6 +1899,8 @@ static DWORD MeshRundll32_DeleteLauncherAfterParentExitW(const wchar_t* targetPa
     if (targetPath == NULL || targetPath[0] == L'\0') { return ERROR_INVALID_PARAMETER; }
     if (timeoutMs == 0) { timeoutMs = 60000; }
 
+    // One budget covers both waiting for the parent and retrying the delete.
+    deadline = GetTickCount64() + timeoutMs;
     if (parentPid != 0)
     {
         parentProcess = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
@@ -1648,7 +1911,6 @@ static DWORD MeshRundll32_DeleteLauncherAfterParentExitW(const wchar_t* targetPa
         }
     }
 
-    deadline = GetTickCount64() + timeoutMs;
     for (;;)
     {
         DWORD attrs = GetFileAttributesW(targetPath);
@@ -2138,6 +2400,24 @@ static DWORD WINAPI MeshConsoleBridge_CopyThread(LPVOID param)
     return ctx->errorCode;
 }
 
+// The bridge pipes are synchronous, so a copy thread blocked in ReadFile holds the
+// file object: closing that handle from another thread waits for the read instead
+// of cancelling it. Cancel the thread's I/O (repeatedly, in case it was between
+// reads) until it exits, so handles can be closed without blocking.
+static BOOL MeshConsoleBridge_StopCopyThread(HANDLE thread, DWORD timeoutMs)
+{
+    ULONGLONG deadline = GetTickCount64() + timeoutMs;
+
+    if (thread == NULL) { return TRUE; }
+    for (;;)
+    {
+        if (WaitForSingleObject(thread, 0) == WAIT_OBJECT_0) { return TRUE; }
+        CancelSynchronousIo(thread);
+        if (WaitForSingleObject(thread, 50) == WAIT_OBJECT_0) { return TRUE; }
+        if (GetTickCount64() >= deadline) { return FALSE; }
+    }
+}
+
 static BOOL MeshConsoleBridge_WriteReadyMarker(HANDLE outputPipe)
 {
     static const char readyMarker[] = "\x1b]MeshConsoleBridgeReady\x07";
@@ -2255,7 +2535,13 @@ static DWORD MeshConsoleBridge_RunRedirectedShellW(const wchar_t* inputPipeName,
         }
         if (waitCount == 0) { break; }
 
-        waitResult = WaitForMultipleObjects(waitCount, waitHandles, FALSE, INFINITE);
+        waitResult = WaitForMultipleObjects(waitCount, waitHandles, FALSE, processCompleted ? MESH_CONSOLE_BRIDGE_EXEC_OUTPUT_DRAIN_MS : INFINITE);
+        if (waitResult == WAIT_TIMEOUT && processCompleted)
+        {
+            // The shell exited, but a process it started inherited its output pipe
+            // and keeps it open. Finish the command rather than wait for that process.
+            break;
+        }
         if (waitResult < WAIT_OBJECT_0 || waitResult >= WAIT_OBJECT_0 + waitCount)
         {
             exitCode = GetLastError();
@@ -2292,13 +2578,22 @@ static DWORD MeshConsoleBridge_RunRedirectedShellW(const wchar_t* inputPipeName,
     }
 
 cleanup:
+    // A shell still running here means an error path; the bridge is going away.
+    if (processInfo.hProcess != NULL && !processCompleted)
+    {
+        TerminateProcess(processInfo.hProcess, ERROR_OPERATION_ABORTED);
+    }
     InterlockedExchange(&stopFlag, 1);
     MeshConsoleBridge_CloseHandle(&childInputWrite);
     MeshConsoleBridge_CloseHandle(&childInputRead);
+    // Release each copy thread from its blocking read before closing the handle it
+    // reads, and close the agent-facing output before the input.
+    MeshConsoleBridge_StopCopyThread(outputThread, 2000);
     MeshConsoleBridge_CloseHandle(&childOutputRead);
     MeshConsoleBridge_CloseHandle(&childOutputWrite);
-    MeshConsoleBridge_CloseHandle(&inputPipe);
     MeshConsoleBridge_CloseHandle(&outputPipe);
+    MeshConsoleBridge_StopCopyThread(inputThread, 2000);
+    MeshConsoleBridge_CloseHandle(&inputPipe);
     if (inputThread != NULL) { WaitForSingleObject(inputThread, 2000); CloseHandle(inputThread); }
     if (outputThread != NULL) { WaitForSingleObject(outputThread, 2000); CloseHandle(outputThread); }
     if (processInfo.hThread != NULL) { CloseHandle(processInfo.hThread); }
@@ -2361,6 +2656,11 @@ static DWORD MeshConsoleBridge_RunW(const wchar_t* inputPipeName, const wchar_t*
         if (exitCode == ERROR_SUCCESS) { exitCode = ERROR_NOT_SUPPORTED; }
         goto cleanup;
     }
+    // The pseudo console holds its own copies of its pipe ends. Release ours now:
+    // while the bridge keeps ptyOutputWrite open, a read of ptyOutputRead can never
+    // see EOF, so a failed shell launch would leave the output thread blocked.
+    MeshConsoleBridge_CloseHandle(&ptyInputRead);
+    MeshConsoleBridge_CloseHandle(&ptyOutputWrite);
     inputCopy.readHandle = inputPipe;
     inputCopy.writeHandle = ptyInputWrite;
     inputCopy.closeWriteHandleRef = &ptyInputWrite;
@@ -2378,8 +2678,6 @@ static DWORD MeshConsoleBridge_RunW(const wchar_t* inputPipeName, const wchar_t*
         exitCode = GetLastError();
         goto cleanup;
     }
-    MeshConsoleBridge_CloseHandle(&ptyInputRead);
-    MeshConsoleBridge_CloseHandle(&ptyOutputWrite);
     inputThread = CreateThread(NULL, 0, MeshConsoleBridge_CopyThread, &inputCopy, 0, NULL);
     if (inputThread == NULL) { exitCode = GetLastError(); goto cleanup; }
     if (!MeshConsoleBridge_WriteReadyMarker(outputPipe)) { exitCode = GetLastError(); goto cleanup; }
@@ -2451,18 +2749,36 @@ static DWORD MeshConsoleBridge_RunW(const wchar_t* inputPipeName, const wchar_t*
     }
 
 cleanup:
-    InterlockedExchange(&stopFlag, 1);
+    // A shell still running here means an error path; the bridge is going away.
+    if (processInfo.hProcess != NULL && !processCompleted)
+    {
+        TerminateProcess(processInfo.hProcess, ERROR_OPERATION_ABORTED);
+    }
     MeshConsoleBridge_CloseHandle(&ptyInputWrite);
+    // ClosePseudoConsole waits for conhost to flush its output, so the output thread
+    // keeps draining until it returns (stopFlag is raised only afterwards). When no
+    // thread is reading any more, close the read end first so conhost's writes fail
+    // instead of blocking the close.
+    if (outputThread == NULL || WaitForSingleObject(outputThread, 0) == WAIT_OBJECT_0)
+    {
+        MeshConsoleBridge_CloseHandle(&ptyOutputRead);
+    }
     if (pseudoConsole != NULL && conptyApi.ClosePseudoConsoleFn != NULL)
     {
         conptyApi.ClosePseudoConsoleFn(pseudoConsole);
         pseudoConsole = NULL;
     }
     MeshConsoleBridge_CloseHandle(&ptyOutputRead);
+    InterlockedExchange(&stopFlag, 1);
     MeshConsoleBridge_CloseHandle(&ptyInputRead);
     MeshConsoleBridge_CloseHandle(&ptyOutputWrite);
-    MeshConsoleBridge_CloseHandle(&inputPipe);
+    // Close the agent-facing output first: that is what tells the agent the session
+    // ended, and the agent then closes its end of the input pipe too. Then release
+    // the input thread from its blocking read before closing the handle it reads.
+    MeshConsoleBridge_StopCopyThread(outputThread, 2000);
     MeshConsoleBridge_CloseHandle(&outputPipe);
+    MeshConsoleBridge_StopCopyThread(inputThread, 2000);
+    MeshConsoleBridge_CloseHandle(&inputPipe);
     if (inputThread != NULL) { WaitForSingleObject(inputThread, 2000); CloseHandle(inputThread); }
     if (outputThread != NULL) { WaitForSingleObject(outputThread, 2000); CloseHandle(outputThread); }
     if (processInfo.hThread != NULL) { CloseHandle(processInfo.hThread); }
@@ -2539,7 +2855,7 @@ void CALLBACK MeshUserConsentW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, 
     cursor = tail;
     if (!MeshRundll32_CopyNextTokenW(&cursor, resultPipeName, _countof(resultPipeName)) ||
         !MeshRundll32_CopyNextTokenW(&cursor, manifestPath, _countof(manifestPath)) ||
-        MeshRundll32_CopyNextTokenW(&cursor, extraToken, _countof(extraToken)) ||
+        (MeshRundll32_CopyNextTokenW(&cursor, extraToken, _countof(extraToken)) ? (SetLastError(ERROR_INVALID_PARAMETER), TRUE) : FALSE) ||
         GetLastError() != ERROR_NO_MORE_ITEMS ||
         !MeshUserConsent_IsApprovedResultPipeNameW(resultPipeName))
     {
@@ -2595,6 +2911,9 @@ void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
         ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Failed to read manifest %ls (error=%lu)", manifestPath, GetLastError());
         ExitProcess(ERROR_INVALID_DATA);
     }
+    // The manifest is read once. Remove it now: the launcher may not survive the
+    // action (an update stops the service that launched this host) to clean it up.
+    (void)DeleteFileW(manifestPath);
 
     MeshRundll32_ApplyBrandingFromManifest(&manifest);
     if (manifest.action == MESH_RUNDLL32_LIFECYCLE_ACTION_VALIDATE_UNINSTALL)
@@ -2892,6 +3211,17 @@ void CALLBACK MeshConsoleBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
         (unsigned long)targetSessionId,
         inputPipeName,
         outputPipeName);
+    {
+        // The agent hands this helper inheritable std handles. Exec mode starts the
+        // shell with handle inheritance for its redirected pipes, which would also
+        // pass these on to the shell and anything it launches.
+        HANDLE stdHandle = GetStdHandle(STD_INPUT_HANDLE);
+        if (stdHandle != NULL && stdHandle != INVALID_HANDLE_VALUE) { SetHandleInformation(stdHandle, HANDLE_FLAG_INHERIT, 0); }
+        stdHandle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (stdHandle != NULL && stdHandle != INVALID_HANDLE_VALUE) { SetHandleInformation(stdHandle, HANDLE_FLAG_INHERIT, 0); }
+        stdHandle = GetStdHandle(STD_ERROR_HANDLE);
+        if (stdHandle != NULL && stdHandle != INVALID_HANDLE_VALUE) { SetHandleInformation(stdHandle, HANDLE_FLAG_INHERIT, 0); }
+    }
     exitCode = execMode ?
         MeshConsoleBridge_RunExecW(inputPipeName, outputPipeName, shellName, targetSessionId, tokenMode) :
         MeshConsoleBridge_RunW(inputPipeName, outputPipeName, shellName, cols, rows, targetSessionId, tokenMode);
