@@ -29,6 +29,7 @@
 #include "service_bundle.h"
 #include "service_defaults.h"
 #include "fault_recovery.h"
+void ServiceDeploy_LogInstallEvent(const wchar_t* format, ...);
 #include "service_binding_transaction.h"
 #include "service_transaction_journal.h"
 #include "../meshcore/agentcore.h"
@@ -705,7 +706,8 @@ static BOOL ServiceDeploy_ServiceUsesInstallRootPayload(
         /* Only obsolete-registration cleanup reads the former svchost metadata. */
         wchar_t rawDll[MAX_PATH * 4] = {0};
         if (!ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceMain", serviceMain, _countof(serviceMain)) ||
-            _wcsicmp(serviceMain, L"ServiceHost_ServiceMain") != 0 ||
+            (_wcsicmp(serviceMain, L"ServiceHost_ServiceMain") != 0 &&
+             _wcsicmp(serviceMain, L"Stealth_SvchostServiceMain") != 0) ||
             !ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceDll", rawDll, _countof(rawDll))) { return FALSE; }
         DWORD count = ExpandEnvironmentStringsW(rawDll, localDllPath, _countof(localDllPath));
         if (!count || count >= _countof(localDllPath)) { return FALSE; }
@@ -2030,7 +2032,41 @@ static BOOL ServiceDeploy_StartServiceHostServiceAndWait(const wchar_t* serviceN
         return FALSE;
     }
 
-    if (!StartServiceW(hService, 0, NULL))
+    /* A failed stop can leave the incumbent in STOP_PENDING while rollback
+     * restores its original binding. Let SCM finish that transition before
+     * asking it to start the service again. */
+    DWORD waited = 0;
+    SERVICE_STATUS_PROCESS initialStatus = {0};
+    DWORD bytesNeeded = 0;
+    while (waited < timeoutMs)
+    {
+        if (!QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&initialStatus,
+            sizeof(initialStatus), &bytesNeeded))
+        {
+            terminalError = GetLastError();
+            ServiceDeploy_LogInstallEvent(L"Service start failed: status query for %ls (error=%lu)", serviceName, terminalError);
+            SetLastError(terminalError);
+            CloseServiceHandle(hService);
+            CloseServiceHandle(hScm);
+            return FALSE;
+        }
+        if (initialStatus.dwCurrentState != SERVICE_STOP_PENDING) { break; }
+        Sleep(500);
+        waited += 500;
+    }
+    if (initialStatus.dwCurrentState == SERVICE_STOP_PENDING)
+    {
+        terminalError = ERROR_SERVICE_REQUEST_TIMEOUT;
+        ServiceDeploy_LogInstallEvent(L"Service %ls remained STOP_PENDING during restart", serviceName);
+        SetLastError(terminalError);
+        CloseServiceHandle(hService);
+        CloseServiceHandle(hScm);
+        return FALSE;
+    }
+
+    if (initialStatus.dwCurrentState != SERVICE_RUNNING &&
+        initialStatus.dwCurrentState != SERVICE_START_PENDING &&
+        !StartServiceW(hService, 0, NULL))
     {
         DWORD startError = GetLastError();
         if (startError != ERROR_SERVICE_ALREADY_RUNNING)
@@ -2046,7 +2082,6 @@ static BOOL ServiceDeploy_StartServiceHostServiceAndWait(const wchar_t* serviceN
         }
     }
 
-    DWORD waited = 0;
     BOOL running = FALSE;
     while (waited <= timeoutMs)
     {
@@ -3570,7 +3605,10 @@ ROLLBACK:
         BOOL currentExists = FALSE;
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Restoring original transaction state for %ls", serviceKeyName);
         rollbackOk = ServiceBinding_QueryExists(serviceKeyName, &currentExists);
-        if (rollbackOk && currentExists)
+        /* PREPARED has not replaced any live bytes. A first stop failure may
+         * leave the incumbent running, so do not make recovery depend on a
+         * second stop before restoring its original SCM policy. */
+        if (rollbackOk && currentExists && tx.journalPhase != SERVICE_JOURNAL_PREPARED)
         {
             rollbackOk = ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED) &&
                 ServiceDeploy_ClearServiceRecovery(serviceKeyName) &&

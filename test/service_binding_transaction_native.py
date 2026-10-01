@@ -103,8 +103,14 @@ int main(void){
     config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\" -other";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.lpBinaryPathName=L"C:\\Another\\agent.exe";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",MeshServiceHostW";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Other\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Other\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"\"C:\\fake\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain extra";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.dwServiceType=SERVICE_WIN32_SHARE_PROCESS;config.lpBinaryPathName=L"%SystemRoot%\\System32\\svchost.exe -k netsvcs";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
     config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs -p";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
+    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\svchost.exe\" -k netsvcs -p";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs -p extra";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.lpBinaryPathName=L"C:\\Malware\\svchost.exe -k netsvcs";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.dwServiceType=1;assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     ServiceBindingSnapshot owner={0};owner.config=&config;config.dwServiceType=SERVICE_WIN32_SHARE_PROCESS;
@@ -112,6 +118,8 @@ int main(void){
     owner.values[9]=(ServiceBindingValue){(BYTE*)knownDll,(DWORD)((wide_len(knownDll)+1)*2),REG_SZ,TRUE};
     owner.values[10]=(ServiceBindingValue){(BYTE*)knownEntry,(DWORD)((wide_len(knownEntry)+1)*2),REG_SZ,TRUE};
     assert(ServiceBinding_SharedPayloadSupported(&owner,knownDll));assert(!ServiceBinding_SharedPayloadSupported(&owner,L"C:\\Other\\agent.dll"));
+    const wchar_t* oldEntry=L"Stealth_SvchostServiceMain";owner.values[10]=(ServiceBindingValue){(BYTE*)oldEntry,(DWORD)((wide_len(oldEntry)+1)*2),REG_SZ,TRUE};assert(ServiceBinding_SharedPayloadSupported(&owner,knownDll));
+    owner.values[10]=(ServiceBindingValue){(BYTE*)knownEntry,(DWORD)((wide_len(knownEntry)+1)*2),REG_SZ,TRUE};
     owner.values[10].present=FALSE;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));owner.values[10].present=TRUE;
     owner.values[9].size-=2;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));
     config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;assert(ServiceBinding_SharedPayloadSupported(&owner,knownDll));
@@ -130,6 +138,16 @@ int main(void){
 functions = '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_ImageSupported', 'ServiceBinding_SharedPayloadSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_ApplyExtra', 'ServiceBinding_Restore'])
 with tempfile.TemporaryDirectory(prefix='mesh-service-binding-') as tmp:
     src, exe = Path(tmp) / 'binding.c', Path(tmp) / 'binding'
-    src.write_text(prelude + prefix + mocks + functions + cases)
-    subprocess.run([os.environ.get('CC', 'clang'), '-std=c11', '-fshort-wchar', '-Wall', '-Wextra', '-Werror', '-Wno-int-conversion', '-fsanitize=address,undefined', str(src), '-o', str(exe)], check=True)
+    harness = prelude + prefix + mocks + functions + cases
+    # Keep the portable mocks distinct from Windows UCRT names when clang
+    # discovers the host SDK through its default include path.
+    for system_name, mock_name in (('_countof', 'mock_countof'),
+                                   ('_TRUNCATE', 'MOCK_TRUNCATE'),
+                                   ('_snwprintf_s', 'mock_snwprintf_s')):
+        harness = harness.replace(system_name, mock_name)
+    src.write_text(harness)
+    compiler = [os.environ.get('CC', 'clang'), '-std=c11', '-fshort-wchar', '-Wall', '-Wextra', '-Werror', '-Wno-int-conversion']
+    if os.name != 'nt':
+        compiler.append('-fsanitize=address,undefined')
+    subprocess.run(compiler + [str(src), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

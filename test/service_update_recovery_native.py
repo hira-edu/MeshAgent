@@ -211,10 +211,11 @@ static void run_case(int failure, int exists, int wasRunning, int originalStart,
     if (failure == 15) { assert(!running && liveVersion == 3 && bindingVersion == 3 && !rolledBack && retainedPhase == SERVICE_JOURNAL_COMMITTED && !deletedArtifacts); return; }
     if (failure == 17) { assert(running && liveVersion == 1 && retainedPhase == SERVICE_JOURNAL_BACKED_UP && !deletedArtifacts); return; }
     if (failure == 16) { assert(!running && liveVersion == 1 && !deletedArtifacts && retainedPhase == SERVICE_JOURNAL_PREPARED); return; }
-    if (exists && failure != 3 && failure != 10 && failure != 9) assert(startType == originalStart);
+    if (exists && failure != 3 && failure != 10) assert(startType == originalStart);
     if (failure == 3) { assert(!running && liveVersion == 2 && !discarded && !deletedArtifacts); return; }
     if (failure == 10) { assert(!running && !discarded && !deletedArtifacts); return; }
     assert(running == wasRunning && liveVersion == (exists ? 1 : 0) && installed == exists);
+    if (failure == 9) assert(stops == 1 && restoredBindings == 1 && discarded == 1);
     if (failure == 4 || failure == 5 || failure == 6 || failure == 12) assert(stops == 0);
     if (failure == 2 || failure == 7 || failure == 8 || failure == 11 || failure == 14) assert(rolledBack == 1 && discarded == 1);
 }
@@ -319,7 +320,7 @@ static BOOL remove_dir(void){++deleted;return !failCleanup;}
 static DWORD GetFileAttributesW(const wchar_t* p){if(!wcscmp(p,L"journal")){error=ERROR_FILE_NOT_FOUND;return journalExists?0:INVALID_FILE_ATTRIBUTES;}return missingBackup?INVALID_FILE_ATTRIBUTES:0;}
 static DWORD GetLastError(void){return error;}
 static BOOL DeleteFileW(const wchar_t* p){++deleted;if(!wcscmp(p,L"journal"))journalExists=0;return TRUE;}
-static int _snwprintf_s(wchar_t* out,size_t size,int trunc,const wchar_t* fmt,...){(void)trunc;(void)fmt;return swprintf(out,size,L"journal.tmp");}
+static int mock_snwprintf(wchar_t* out,size_t size,int trunc,const wchar_t* fmt,...){(void)trunc;(void)fmt;return swprintf(out,size,L"journal.tmp");}
 #define ServiceDeploy_LogInstallEvent log_event
 #define ServiceDeploy_GetInstallPaths(p) mock_recovery_paths(p)
 #define ServiceDeploy_InitializeUpdateTransactionPaths(p,t) txpaths(t)
@@ -376,7 +377,12 @@ int main(void){
 with tempfile.TemporaryDirectory(prefix='meshagent-crash-recovery-') as directory:
     c_path = Path(directory) / 'crash.c'
     executable = Path(directory) / 'crash'
-    c_path.write_text(recovery_prelude + '\n' + extract('ServiceDeploy_DeleteUpdateTransactionArtifacts') + '\n' +
-                      extract('ServiceDeploy_ResolveUpdateTransaction') + '\n' + extract('ServiceDeploy_RecoverInterruptedTransaction') + '\n' + recovery_cases)
+    recovery_flow = '\n'.join(extract(name) for name in (
+        'ServiceDeploy_DeleteUpdateTransactionArtifacts',
+        'ServiceDeploy_ResolveUpdateTransaction',
+        'ServiceDeploy_RecoverInterruptedTransaction'))
+    if os.name == 'nt':
+        recovery_flow = recovery_flow.replace('_snwprintf_s(', 'mock_snwprintf(')
+    c_path.write_text(recovery_prelude + '\n' + recovery_flow + '\n' + recovery_cases)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wno-unused-value', str(c_path), '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)

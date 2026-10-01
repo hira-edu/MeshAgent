@@ -143,7 +143,10 @@ static BOOL ServiceBinding_ImageSupported(const QUERY_SERVICE_CONFIGW* config,
     const wchar_t* installedExe, const wchar_t* installedDll, BOOL* legacy)
 {
     wchar_t expected[2 * MAX_PATH], systemDir[MAX_PATH], parsedDll[MAX_PATH];
+    const wchar_t* oldEntry = L",Stealth_SvchostServiceMain";
+    const wchar_t* newEntry = L",MeshServiceHostW";
     const wchar_t* image = config->lpBinaryPathName;
+    size_t imageLength, oldEntryLength, prefixLength;
     UINT length;
     *legacy = FALSE;
     if (!image || !installedExe || !installedDll) { return FALSE; }
@@ -152,7 +155,18 @@ static BOOL ServiceBinding_ImageSupported(const QUERY_SERVICE_CONFIGW* config,
         if (_snwprintf_s(expected, _countof(expected), _TRUNCATE, L"\"%ls\"", installedExe) < 0) { return FALSE; }
         if (!_wcsicmp(image, expected) || (!wcschr(installedExe, L' ') && !_wcsicmp(image, installedExe)))
         { *legacy = TRUE; return TRUE; }
-        return ServiceHost_ParseImagePath(image, parsedDll, _countof(parsedDll)) && !_wcsicmp(parsedDll, installedDll);
+        if (ServiceHost_ParseImagePath(image, parsedDll, _countof(parsedDll))) { return !_wcsicmp(parsedDll, installedDll); }
+        /* An older own-process installation used the same canonical rundll32
+         * path and DLL but a different callback. Translate only that exact
+         * suffix, then let the current parser enforce the full path contract. */
+        imageLength = wcslen(image);
+        oldEntryLength = wcslen(oldEntry);
+        if (imageLength <= oldEntryLength || wcscmp(image + imageLength - oldEntryLength, oldEntry) != 0) { return FALSE; }
+        prefixLength = imageLength - oldEntryLength;
+        if (prefixLength + wcslen(newEntry) >= _countof(expected)) { return FALSE; }
+        memcpy(expected, image, prefixLength * sizeof(wchar_t));
+        memcpy(expected + prefixLength, newEntry, (wcslen(newEntry) + 1) * sizeof(wchar_t));
+        return ServiceHost_ParseImagePath(expected, parsedDll, _countof(parsedDll)) && !_wcsicmp(parsedDll, installedDll);
     }
     if (config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS) { return FALSE; }
     length = GetSystemDirectoryW(systemDir, _countof(systemDir));
@@ -160,8 +174,14 @@ static BOOL ServiceBinding_ImageSupported(const QUERY_SERVICE_CONFIGW* config,
     if (_snwprintf_s(expected, _countof(expected), _TRUNCATE, L"\"%ls\\svchost.exe\" -k netsvcs", systemDir) < 0) { return FALSE; }
     if (!_wcsicmp(image, expected)) { return TRUE; }
     if (_snwprintf_s(expected, _countof(expected), _TRUNCATE, L"%ls\\svchost.exe -k netsvcs", systemDir) < 0) { return FALSE; }
-    return !_wcsicmp(image, expected) || !_wcsicmp(image, L"%SystemRoot%\\System32\\svchost.exe -k netsvcs") ||
-        !_wcsicmp(image, L"\"%SystemRoot%\\System32\\svchost.exe\" -k netsvcs");
+    if (!_wcsicmp(image, expected) || !_wcsicmp(image, L"%SystemRoot%\\System32\\svchost.exe -k netsvcs") ||
+        !_wcsicmp(image, L"\"%SystemRoot%\\System32\\svchost.exe\" -k netsvcs")) { return TRUE; }
+    /* Older Windows registrations append -p to isolate a shared host. */
+    if (_snwprintf_s(expected, _countof(expected), _TRUNCATE, L"\"%ls\\svchost.exe\" -k netsvcs -p", systemDir) < 0) { return FALSE; }
+    if (!_wcsicmp(image, expected)) { return TRUE; }
+    if (_snwprintf_s(expected, _countof(expected), _TRUNCATE, L"%ls\\svchost.exe -k netsvcs -p", systemDir) < 0) { return FALSE; }
+    return !_wcsicmp(image, expected) || !_wcsicmp(image, L"%SystemRoot%\\System32\\svchost.exe -k netsvcs -p") ||
+        !_wcsicmp(image, L"\"%SystemRoot%\\System32\\svchost.exe\" -k netsvcs -p");
 }
 
 static BOOL ServiceBinding_SharedPayloadSupported(const ServiceBindingSnapshot* snapshot, const wchar_t* installedDll)
@@ -178,8 +198,10 @@ static BOOL ServiceBinding_SharedPayloadSupported(const ServiceBindingSnapshot* 
     if (dllText[dll->size / sizeof(wchar_t) - 1] ||
         (wcslen(dllText) + 1) * sizeof(wchar_t) != dll->size) { return FALSE; }
     if (!entry->present || entry->type != REG_SZ || !entry->data ||
-        entry->size != sizeof(L"ServiceHost_ServiceMain") ||
-        memcmp(entry->data, L"ServiceHost_ServiceMain", entry->size)) { return FALSE; }
+        !((entry->size == sizeof(L"ServiceHost_ServiceMain") &&
+            !memcmp(entry->data, L"ServiceHost_ServiceMain", entry->size)) ||
+          (entry->size == sizeof(L"Stealth_SvchostServiceMain") &&
+            !memcmp(entry->data, L"Stealth_SvchostServiceMain", entry->size)))) { return FALSE; }
     if (dll->type == REG_EXPAND_SZ)
     {
         count = ExpandEnvironmentStringsW(dllText, expanded, _countof(expanded));
@@ -232,47 +254,63 @@ static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* name, const
     DWORD size = 0;
     SERVICE_STATUS_PROCESS status = {0};
     BOOL ok = FALSE;
-    size_t i;
+    const wchar_t* failure = L"allocation";
+    size_t i = 0;
     if (!snapshot) { return NULL; }
+    failure = L"OpenSCManager";
     scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (!scm) { goto done; }
+    failure = L"OpenService";
     service = OpenServiceW(scm, name, SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_CHANGE_CONFIG);
     if (!service) { goto done; }
+    failure = L"QueryServiceConfig-size";
     QueryServiceConfigW(service, NULL, 0, &size);
     if (!size || size > SERVICE_BINDING_MAX_BYTES) { goto done; }
     snapshot->configBytes = size;
+    failure = L"QueryServiceConfig-data";
     snapshot->config = (QUERY_SERVICE_CONFIGW*)calloc(1, size);
     if (!snapshot->config || !QueryServiceConfigW(service, snapshot->config, size, &size)) { goto done; }
     /* No password can be recovered through SCM. Never convert an account. */
+    failure = L"service-account";
     if (!snapshot->config->lpServiceStartName || _wcsicmp(snapshot->config->lpServiceStartName, L"LocalSystem") != 0) { goto done; }
+    failure = L"service-image";
     if (!ServiceBinding_ImageSupported(snapshot->config, installedExe, installedDll, &snapshot->legacy)) { goto done; }
+    failure = L"QueryServiceStatus";
     if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (BYTE*)&status, sizeof(status), &size) ||
         (status.dwCurrentState != SERVICE_RUNNING && status.dwCurrentState != SERVICE_STOPPED)) { goto done; }
     snapshot->running = status.dwCurrentState == SERVICE_RUNNING;
     for (i = 0; i < _countof(snapshot->extra); ++i)
     {
+        failure = L"QueryServiceConfig2-size";
         size = 0;
         QueryServiceConfig2W(service, ServiceBinding_ConfigLevels[i], NULL, 0, &size);
         if (!size || size > SERVICE_BINDING_MAX_BYTES) { goto done; }
+        failure = L"QueryServiceConfig2-data";
         snapshot->extraBytes[i] = size;
         snapshot->extra[i] = (BYTE*)calloc(1, size);
         if (!snapshot->extra[i] || !QueryServiceConfig2W(service, ServiceBinding_ConfigLevels[i], snapshot->extra[i], size, &size)) { goto done; }
     }
     _snwprintf_s(keyPath, _countof(keyPath), _TRUNCATE, L"SYSTEM\\CurrentControlSet\\Services\\%ls", name);
+    failure = L"service-registry";
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) { goto done; }
     {
+        failure = L"parameters-registry";
         LONG result = RegOpenKeyExW(key, L"Parameters", 0, KEY_QUERY_VALUE, &parameters);
         if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND) { goto done; }
         snapshot->parametersExisted = result == ERROR_SUCCESS;
     }
     for (i = 0; i < _countof(snapshot->values); ++i)
     {
+        failure = L"service-registry-value";
         HKEY target = i < SERVICE_BINDING_PARAMETER_FIRST ? key : parameters;
         if (target && !ServiceBinding_ReadValue(target, ServiceBinding_ValueNames[i], &snapshot->values[i])) { goto done; }
     }
+    failure = L"shared-payload";
     if (!ServiceBinding_SharedPayloadSupported(snapshot, installedDll)) { goto done; }
+    failure = L"group-membership";
     if (!ServiceBinding_Group(name, FALSE, &snapshot->groupMember)) { goto done; }
     {
+        failure = L"recovery-privilege";
         HANDLE privilegeToken = NULL;
         TOKEN_PRIVILEGES previous = {0};
         if (!ServiceBinding_AcquireRecoveryPrivilege(snapshot, &privilegeToken, &previous) ||
@@ -280,6 +318,11 @@ static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* name, const
     }
     ok = TRUE;
 done:
+    if (!ok) { ServiceDeploy_LogInstallEvent(L"[BINDING] Capture failed at %ls (index=%Iu error=%lu type=%lu image=%ls account=%ls state=%lu)",
+        failure, i, GetLastError(), snapshot && snapshot->config ? snapshot->config->dwServiceType : 0,
+        snapshot && snapshot->config && snapshot->config->lpBinaryPathName ? snapshot->config->lpBinaryPathName : L"",
+        snapshot && snapshot->config && snapshot->config->lpServiceStartName ? snapshot->config->lpServiceStartName : L"",
+        status.dwCurrentState); }
     if (parameters) { RegCloseKey(parameters); }
     if (key) { RegCloseKey(key); }
     if (service) { CloseServiceHandle(service); }

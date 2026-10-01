@@ -60,6 +60,9 @@ function checkTerminalModule(source) {
     // using the same system-only executable and callback command contract.
     const hostAssignment = source.match(/var\s+(\w+)\s*=\s*require\('win-system-paths'\)\.system32Path\('rundll32\.exe'\)/);
     return {
+        resolvesCanonicalInstalledDll:
+            source.includes("require('win-system-paths').installedServiceRuntimeDll(resolveServiceName())") &&
+            !source.includes("\\\\Parameters', 'ServiceDll'"),
         usesRuntimeHostConsoleBridge:
             source.includes("require('win-system-paths').system32Path('rundll32.exe')") &&
             source.includes("serviceDllPath + ',MeshConsoleBridgeW'") &&
@@ -429,6 +432,12 @@ function main() {
         '../MeshCentral/agents/modules_meshcore_min/win-terminal.js',
         '../MeshCentral/agents/modules_meshcore_min/win-terminal.min.js'
     ]);
+    const systemPathModules = existingPaths([
+        'modules/win-system-paths.js',
+        '../MeshCentral/agents/modules_meshcore/win-system-paths.js',
+        '../MeshCentral/agents/modules_meshcore_min/win-system-paths.js',
+        '../MeshCentral/agents/modules_meshcore_min/win-system-paths.min.js'
+    ]);
     const virtualTerminalPaths = existingPaths([
         'modules/win-virtual-terminal.js',
         '../MeshCentral/agents/modules_meshcore/win-virtual-terminal.js',
@@ -451,6 +460,7 @@ function main() {
 
     const report = {
         terminalModules: {},
+        systemPathModules: {},
         virtualTerminalModules: {},
         dispatcherModules: {},
         meshCores: {},
@@ -466,6 +476,20 @@ function main() {
         report.terminalModules[terminalPath] = checks;
         for (const [name, passed] of Object.entries(checks)) {
             assert(passed, `${terminalPath}: ${name} failed`);
+        }
+    }
+    for (const modulePath of systemPathModules) {
+        const source = read(modulePath);
+        const checks = {
+            resolvesCanonicalServiceBinding:
+                source.includes('function installedServiceRuntimeDll(serviceName)') &&
+                source.includes("'SYSTEM\\\\CurrentControlSet\\\\Services\\\\' + serviceName, 'ImagePath'") &&
+                source.includes('serviceRuntimeDllFromCommand(command)') &&
+                source.includes('MeshServiceHostW')
+        };
+        report.systemPathModules[modulePath] = checks;
+        for (const [name, passed] of Object.entries(checks)) {
+            assert(passed, `${modulePath}: ${name} failed`);
         }
     }
 

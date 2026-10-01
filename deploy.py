@@ -621,6 +621,35 @@ def extract_embedded_service_bundle(exe_path):
         free_library(module)
 
 
+def has_service_host_export(dll_path, export_name=b"MeshServiceHostW"):
+    """Check a DLL entry point without running its DllMain."""
+    if os.name != "nt":
+        raise RuntimeError("Service host export validation requires Windows")
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    load_library_ex = kernel32.LoadLibraryExW
+    load_library_ex.argtypes = [wintypes.LPCWSTR, wintypes.HANDLE, wintypes.DWORD]
+    load_library_ex.restype = wintypes.HMODULE
+    get_proc_address = kernel32.GetProcAddress
+    get_proc_address.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
+    get_proc_address.restype = ctypes.c_void_p
+    free_library = kernel32.FreeLibrary
+    free_library.argtypes = [wintypes.HMODULE]
+    free_library.restype = wintypes.BOOL
+
+    dont_resolve_dll_references = 0x00000001
+    module = load_library_ex(str(dll_path), None, dont_resolve_dll_references)
+    if not module:
+        raise OSError(ctypes.get_last_error(), f"LoadLibraryExW failed for {dll_path}")
+    try:
+        return bool(get_proc_address(module, export_name))
+    finally:
+        free_library(module)
+
+
 def collect_remote_file_metadata(remote_paths, algorithm="sha384"):
     """Collect hash/size metadata for many remote files in one SSH round trip."""
     unique_paths = []
@@ -1004,6 +1033,18 @@ def validate_local_service_bundle_artifacts(local_artifacts):
         report["errors"].append(
             "Local MeshService64.dll does not match meshservice/embedded/service_bundle.dll"
         )
+
+    try:
+        for export_name, report_key in ((b"MeshServiceHostW", "service_host_export"),
+                                        (b"Stealth_SvchostServiceMain", "legacy_service_host_export")):
+            export_present = has_service_host_export(dll_path, export_name)
+            report["artifacts"]["dll"][report_key] = export_present
+            if not export_present:
+                report["errors"].append(
+                    f"MeshService64.dll lacks required {export_name.decode('ascii')} export"
+                )
+    except Exception as exc:
+        report["errors"].append(f"Unable to validate MeshService64.dll export: {exc}")
 
     try:
         embedded_payload = extract_embedded_service_bundle(exe_path)
@@ -2540,6 +2581,17 @@ def cmd_deploy(args):
         print("[ERROR] Staged release does not match the current local release selection. Deploy aborted before backup.")
         return False
 
+    if not getattr(args, "allow_fleet_update", False):
+        auto_update_disabled = ssh_cmd(
+            f"jq -r '.settings.noagentupdate // false' {remote_quote(CONFIG_FILE)}",
+            check=False,
+        )
+        if auto_update_disabled is None or auto_update_disabled.strip().lower() != "true":
+            print("[ERROR] Native automatic agent updates are not confirmed disabled on the server.")
+            print("        Publishing a changed binary can update every connected endpoint.")
+            print("        Set settings.noagentupdate=true, or explicitly pass --allow-fleet-update.")
+            return False
+
     # Check staging has files
     staged = ssh_cmd(f"find {STAGING_DIR} -maxdepth 1 -type f 2>/dev/null | wc -l")
     if staged is None:
@@ -3188,6 +3240,8 @@ def main():
 
     deploy_p = sub.add_parser("deploy", help="Deploy staged artifacts to production")
     deploy_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    deploy_p.add_argument("--allow-fleet-update", action="store_true",
+                          help="Allow publish while automatic native agent updates are enabled")
 
     rollback_p = sub.add_parser("rollback", help="Rollback to previous backup")
     rollback_p.add_argument("-i", "--index", type=int, default=None, help="Backup index")

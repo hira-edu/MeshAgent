@@ -79,6 +79,17 @@ const manualUpdate = server.slice(server.indexOf("case 'agentupdate':"), server.
 assert(manualUpdate.includes('isWindowsServiceAgentArchitecture(obj.agentInfo.agentId)'), 'manual Windows update must branch to native routing');
 assert(manualUpdate.includes('obj.sendBinary(common.ShortToStr(12) + common.ShortToStr(0));'), 'manual Windows update must request native hash negotiation');
 assert(manualUpdate.includes('obj.agentUpdateRequestPending = true'), 'manual update requests must be coalesced');
+const hashRoute = server.slice(server.indexOf('else if (cmdid == 12)'),
+    server.indexOf('const agenthash = msg.substring(4);') + 'const agenthash'.length);
+const hashGuardMatch = hashRoute.match(/\n\s*if (\([\s\S]*?\)) \{\s*const agenthash/);
+assert(hashGuardMatch, 'native hash-response guard is missing');
+const acceptsHashResponse = new Function('msg', 'obj', `return ${hashGuardMatch[1]};`);
+assert(acceptsHashResponse({ length: 52 }, { agentExeInfo: { update: false }, agentUpdateRequestPending: true }),
+    'explicit native update must work while fleet automatic updates are disabled');
+assert(!acceptsHashResponse({ length: 52 }, { agentExeInfo: { update: false }, agentUpdateRequestPending: false }),
+    'unsolicited native update must stay disabled');
+assert(acceptsHashResponse({ length: 52 }, { agentExeInfo: { update: true }, agentUpdateRequestPending: false }),
+    'automatic native update must remain available when enabled');
 assert(server.includes("obj.send(JSON.stringify({ action: 'agentupdatefailurecapability' }));"), 'server must advertise separate failure-status support before hash negotiation');
 assert(server.includes('obj.agentUpdateTransferPending = true'), 'native transfers must be guarded against duplicate command-12 responses');
 assert(server.includes("case 'agentupdatefailure':"), 'server must accept separate failed-package status');

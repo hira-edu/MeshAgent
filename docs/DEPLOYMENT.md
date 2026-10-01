@@ -26,8 +26,9 @@ deployment tool uses these Windows paths when it performs remote native update
 activation. Keep local identity and credential files out of version control.
 
 `stage` validates required local MeshAgent artifacts, checks embedded service
-bundle parity, selects configured MeshCentral and optional UserModeHook files,
-creates a digest manifest, uploads the bundle, and verifies the staged bytes.
+bundle parity and the DLL's `MeshServiceHostW` export, selects configured
+MeshCentral and optional UserModeHook files, creates a digest manifest, uploads
+the bundle, and verifies the staged bytes.
 The script's artifact mappings in `deploy.py` are the source of truth for
 staging names and destinations.
 
@@ -62,6 +63,17 @@ verified content mismatch triggers restoration from the backup. If SSH fails
 during verification, the tool reports the incomplete state and does not
 restart based on an unverified publish.
 
+Publishing a changed agent binary makes it eligible for MeshCentral's native
+automatic update on **every connected agent**. A later `update-online --filter`
+only scopes the explicit update command; it does not make the preceding
+publication a canary deployment. To isolate a canary, disable automatic native
+updates in the server's settings (`noagentupdate: true`) before publishing,
+then verify the setting is active and explicitly update the selected agent.
+Keep automatic updates disabled until the selected agent reconnects with the
+expected binary and service health. `deploy.py deploy` checks this setting and
+stops before publishing if it cannot confirm it; `--allow-fleet-update` is the
+explicit override for a planned fleet rollout.
+
 ## Recovery and maintenance
 
 ```powershell
@@ -74,9 +86,11 @@ python .\deploy.py rollback
 `rollback` lists available backups and asks before restoring one. Other
 supported commands are `config [edit]`, `repair-hashagents`, and
 `update-online`. The latter submits update commands to online agents and can
-also request native lifecycle activation. Run it with `--dry-run` first, then
-scope a live operation with `--filter` or `--limit`; it does not prompt for
-confirmation.
+also request native lifecycle activation. An agent already running the
+published binary can answer the update hash check without downloading or
+reconnecting; a submitted command alone is not proof of binary replacement.
+Run it with `--dry-run` first, then scope a live operation with `--filter` or
+`--limit`; it does not prompt for confirmation.
 
 Use `python .\deploy.py --help` for the current command options. The script
 also offers `ssh` for operator-run remote commands; routine publication should
@@ -105,6 +119,14 @@ The installed background service runs through the system `rundll32.exe` and
 the service DLL's `MeshServiceHostW` export, registered as an own-process SCM
 service. Installation, update, repair, validation, and uninstall enter through
 `MeshLifecycleHostW`; desktop helpers use their approved DLL exports.
+The DLL also exports `Stealth_SvchostServiceMain` as a compatibility alias so
+older installed updaters can validate a new package. The updater accepts an
+existing canonical rundll32 binding with that legacy entry point during
+checkpoint capture, then registers the current `MeshServiceHostW` binding.
+Checkpoint capture also recognizes the historical shared `svchost.exe -k
+netsvcs -p` command and its exact legacy `ServiceMain` entry when the
+registered `ServiceDll` is the managed install path. These forms are restored
+only on rollback; successful updates use the current own-process binding.
 
 Installation, repair, and migration share the staged update transaction.
 Before changing a supported existing installation, deployment saves its original
