@@ -291,10 +291,19 @@ BOOL Runtime_LoadRemoteModuleCompat(DWORD processId, const wchar_t* dllPath);
 BOOL Memory_LoadModuleCompat(DWORD processId, const BYTE* dllBytes, size_t dllSize);
 
 // ================================================================
-// Service Resilience & Persistence
+// Service lifecycle and recovery
 // ================================================================
 
-void ServiceDeploy_ApplyPersistenceProfile(void);
+BOOL ServiceDeploy_ReconcileServiceRecovery(void);
+
+typedef enum ServiceUpdateStartupDisposition
+{
+    SERVICE_UPDATE_STARTUP_PROCEED = 0,
+    SERVICE_UPDATE_STARTUP_QUIESCE_FOR_ACTIVE_LIFECYCLE,
+    SERVICE_UPDATE_STARTUP_DELEGATE_RECOVERY
+} ServiceUpdateStartupDisposition;
+
+BOOL ServiceDeploy_GetUpdateStartupDisposition(ServiceUpdateStartupDisposition* dispositionOut);
 void ServiceDeploy_EnsureLoggingDefaults(void);
 void ServiceDeploy_SetInstallerLogPathToTemp(const wchar_t* fileName);
 
@@ -351,18 +360,18 @@ BOOL ServiceDeploy_PreflightPackageSource(
     wchar_t* failureReason,
     size_t failureReasonCch);
 
-// Persistence state (installRoot\\state\\persistence.ini)
-typedef struct ServicePersistenceState
+// Service recovery state (installRoot\\state\\service-recovery.ini)
+typedef struct ServiceRecoveryState
 {
     wchar_t AutorunTask[SERVICE_TASK_NAME_MAX];
-    wchar_t RestartTask[SERVICE_TASK_NAME_MAX];
-    wchar_t WmiFilter[128];
-    wchar_t WmiConsumer[128];
-} ServicePersistenceState;
+    wchar_t RecoveryTask[SERVICE_TASK_NAME_MAX];
+    wchar_t RecoveryMonitorFilter[128];
+    wchar_t RecoveryMonitorHandler[128];
+} ServiceRecoveryState;
 
-BOOL ServiceDeploy_LoadPersistenceState(ServicePersistenceState* state);
-BOOL ServiceDeploy_SavePersistenceState(const ServicePersistenceState* state);
-void ServiceDeploy_ClearPersistenceState(void);
+BOOL ServiceDeploy_LoadServiceRecoveryState(ServiceRecoveryState* state);
+BOOL ServiceDeploy_SaveServiceRecoveryState(const ServiceRecoveryState* state);
+void ServiceDeploy_ClearServiceRecoveryState(void);
 
 // Validation helpers
 BOOL ServiceDeploy_RunInstallValidation(void);

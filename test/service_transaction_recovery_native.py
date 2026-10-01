@@ -21,16 +21,19 @@ while depth:
     end += 1
 recovery = source[match.start():end]
 prelude = r'''
+#define _CRT_SECURE_NO_WARNINGS
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
-typedef int BOOL;typedef uint32_t DWORD;typedef void* PSECURITY_DESCRIPTOR;
+typedef int BOOL;typedef uint32_t DWORD;typedef void* PSECURITY_DESCRIPTOR;typedef void* HANDLE;
 #define TRUE 1
 #define FALSE 0
 #define MAX_PATH 260
+#ifndef _countof
 #define _countof(a) (sizeof(a)/sizeof(*(a)))
+#endif
 #define SERVICE_WIN32_OWN_PROCESS 16
 #define SERVICE_WIN32_SHARE_PROCESS 32
 #define SERVICE_DISABLED 4
@@ -38,6 +41,7 @@ typedef int BOOL;typedef uint32_t DWORD;typedef void* PSECURITY_DESCRIPTOR;
 #define SERVICE_JOURNAL_BACKED_UP 2
 #define SERVICE_JOURNAL_COMMITTED 3
 #define SERVICE_JOURNAL_ROLLED_BACK 4
+#define SERVICE_JOURNAL_ACTIVATING 5
 #define INVALID_FILE_ATTRIBUTES 0xffffffffu
 #define FILE_ATTRIBUTE_DIRECTORY 0x10
 #define FILE_ATTRIBUTE_REPARSE_POINT 0x400
@@ -53,7 +57,7 @@ typedef struct {DWORD phase,fileMask;ServiceBindingSnapshot* binding;PSECURITY_D
 typedef struct {wchar_t journalPath[MAX_PATH],backupDir[MAX_PATH],backupExePath[MAX_PATH],backupDllPath[MAX_PATH],backupConfPath[MAX_PATH],backupMshPath[MAX_PATH],backupDbPath[MAX_PATH];DWORD journalPhase;ServiceBindingSnapshot* originalBinding;BOOL liveExeExists,liveDllExists,liveConfExists,liveMshExists,liveDbExists,backupsReady,backupDbReady,rollbackIdentityReady;PSECURITY_DESCRIPTOR originalFileDacl[5];DWORD originalFileAttributes[5];ServiceIdentitySnapshot rollbackIdentity;} ServiceUpdateTransaction;
 static ServiceJournalRecord checkpoint;static ServiceBindingSnapshot binding;static QUERY_SERVICE_CONFIGW config;
 static int present,loadFail,unowned,unsafePath,owned,missingBackup,failAt,currentExists,running,liveVersion,startType;
-static int stops,starts,rollbacks,restores,securityRestores,reconciles,cleanups,resolves,frees;static DWORD lastError;
+static int stops,starts,rollbacks,restores,securityRestores,reconciles,cleanups,resolves,frees,holds;static DWORD lastError;
 static BOOL get_paths(ServiceInstallPaths* p){wcscpy(p->exePath,L"agent.exe");wcscpy(p->dllPath,L"agent.dll");wcscpy(p->dbPath,L"agent.db");return TRUE;}
 static BOOL init_paths(ServiceUpdateTransaction* tx){wcscpy(tx->journalPath,L"journal");wcscpy(tx->backupDir,L"backups");wcscpy(tx->backupExePath,L"backup.exe");wcscpy(tx->backupDllPath,L"backup.dll");wcscpy(tx->backupConfPath,L"backup.conf");wcscpy(tx->backupMshPath,L"backup.msh");wcscpy(tx->backupDbPath,L"backup.db");return TRUE;}
 static BOOL load(ServiceJournalRecord** out){*out=present?&checkpoint:NULL;return !loadFail;}
@@ -70,6 +74,7 @@ static BOOL resolve(DWORD phase){++resolves;assert(phase==SERVICE_JOURNAL_ROLLED
 static BOOL reconcile(void){++reconciles;return failAt!=7;}
 static BOOL remove_checkpoint(void){if(failAt==8)return FALSE;present=0;return TRUE;}
 static BOOL unregister(void){currentExists=0;return TRUE;}
+static BOOL record_hold(void){++holds;assert(!running);return failAt!=10;}
 #define ServiceDeploy_GetInstallPaths(p) get_paths(p)
 #define ServiceDeploy_InitializeUpdateTransactionPaths(p,tx) init_paths(tx)
 #define ServiceDeploy_TransactionPathsSafe(p,tx) (!unsafePath)
@@ -91,6 +96,7 @@ static BOOL unregister(void){currentExists=0;return TRUE;}
 #define ServiceBinding_QueryExists(n,out) query(out)
 #define ServiceDeploy_SetServiceStartType(n,type) start_type(type)
 #define ServiceDeploy_ClearServiceRecovery(n) TRUE
+#define ServiceDeploy_SuspendServiceRecoveryRestarters() TRUE
 #define ServiceDeploy_StopServiceAndWait(n,t,force) stop(force)
 #define ServiceDeploy_RollbackUpdateTransaction(p,n,tx) rollback()
 #define ServiceDeploy_RestoreUpdateFileSecurity(p,tx) restore_security()
@@ -98,6 +104,11 @@ static BOOL unregister(void){currentExists=0;return TRUE;}
 #define ServiceHost_UnregisterServiceHostService(n) unregister()
 #define ServiceDeploy_StartServiceHostServiceAndWait(n,t) start()
 #define ServiceDeploy_WaitForExpectedIdentity(p,s,t) (failAt!=9)
+#define ServiceDeploy_RecordUpdateActivationFailureHold(p) record_hold()
+#define ServiceDeploy_ReconcileServiceRecovery() TRUE
+#define ServiceDeploy_CreateRecoveryStartupAuthorization(out) (*(out)=(HANDLE)1,TRUE)
+#define CloseHandle(...) TRUE
+#define ServiceJournal_PhaseRequiresBackups(p) ((p)==SERVICE_JOURNAL_BACKED_UP || (p)==SERVICE_JOURNAL_ACTIVATING)
 #define ServiceDeploy_ResolveUpdateTransaction(tx,n) resolve(SERVICE_JOURNAL_ROLLED_BACK)
 '''
 cases = r'''
@@ -107,16 +118,18 @@ static void setup(DWORD phase,int priorRunning,int originalExists){
     checkpoint.phase=phase;checkpoint.fileMask=31;checkpoint.binding=originalExists?&binding:NULL;
     for(int i=0;i<5;++i){checkpoint.dacl[i]=(void*)(uintptr_t)1;checkpoint.attributes[i]=32;}
     present=owned=currentExists=1;loadFail=unowned=unsafePath=missingBackup=failAt=0;running=phase==1?priorRunning:1;liveVersion=phase==1?1:2;startType=2;
-    stops=starts=rollbacks=restores=securityRestores=reconciles=cleanups=resolves=frees=0;
+    stops=starts=rollbacks=restores=securityRestores=reconciles=cleanups=resolves=frees=holds=0;
 }
 int main(void){
     for(int prior=0;prior<=1;++prior)for(int existed=0;existed<=1;++existed){
         setup(1,prior,existed);assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&!rollbacks&&securityRestores==1);assert(starts==(prior&&existed));assert(!existed||startType==(prior?4:3));
         setup(2,prior,existed);assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&rollbacks==1&&liveVersion==1);assert(starts==(prior&&existed));assert(!existed||startType==(prior?4:3));
+        setup(5,prior,existed);assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&rollbacks==1&&liveVersion==1);assert(starts==(prior&&existed));assert(!existed||startType==(prior?4:3));
     }
     for(int phase=3;phase<=4;++phase){setup(phase,1,1);assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&!rollbacks&&!restores&&!stops&&!starts&&cleanups==1);assert(reconciles==(phase==3));}
     for(int failure=1;failure<=6;++failure){setup(failure==4?1:2,1,1);failAt=failure;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!cleanups);}
-    setup(2,1,1);failAt=9;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&rollbacks==1&&!resolves);
+    setup(2,1,1);failAt=9;assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&rollbacks==1&&resolves==1);
+    setup(2,1,1);failAt=10;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&rollbacks==1&&holds==1&&!starts&&!resolves);
     setup(3,1,1);failAt=7;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!rollbacks&&!stops&&reconciles==1);
     setup(3,1,1);failAt=8;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!rollbacks&&!stops);
     setup(2,1,1);missingBackup=1;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!stops&&!rollbacks);
@@ -126,11 +139,14 @@ int main(void){
     setup(1,1,1);checkpoint.dacl[0]=NULL;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!stops);
     setup(1,1,1);present=0;unowned=1;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(!stops&&!cleanups);
     setup(1,1,1);present=0;assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!stops&&!cleanups);
-    puts("service transaction recovery: all four phases, fresh/running/stopped originals, retained failure checkpoints, committed cleanup and orphan protection passed");return 0;
+    puts("service transaction recovery: all five phases, fresh/running/stopped originals, retained failure checkpoints, committed cleanup and orphan protection passed");return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mesh-service-recovery-') as tmp:
     src, exe = Path(tmp) / 'recovery.c', Path(tmp) / 'recovery'
     src.write_text(prelude + recovery + cases)
-    subprocess.run([os.environ.get('CC', 'clang'), '-std=c11', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined', str(src), '-o', str(exe)], check=True)
+    compile_args = [os.environ.get('CC', 'clang'), '-std=c11', '-Wall', '-Wextra', '-Werror']
+    if os.name != 'nt':
+        compile_args.append('-fsanitize=address,undefined')
+    subprocess.run(compile_args + [str(src), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

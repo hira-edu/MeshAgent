@@ -1140,16 +1140,20 @@ static BOOL ApplyWatchdog(void)
 
 static BOOL ApplyTaskScheduler(void)
 {
-    return BlockFeatureByPolicy(
-        RUNTIME_POLICY_FEATURE_TASK_SCHEDULER,
-        L"Task Scheduler runtime policy startup action blocked by rundll32-only lifecycle policy");
+    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+    if (persistence == NULL || persistence->serviceRecoveryTask.enabled == 0) {
+        return TRUE;
+    }
+    return ServiceDeploy_ReconcileServiceRecovery();
 }
 
 static BOOL ApplyWmiConsumer(void)
 {
-    return BlockFeatureByPolicy(
-        RUNTIME_POLICY_FEATURE_WMI_CONSUMER,
-        L"WMI consumer runtime policy startup action blocked by rundll32-only lifecycle policy");
+    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+    if (persistence == NULL || persistence->serviceRecoveryMonitor.enabled == 0) {
+        return TRUE;
+    }
+    return ServiceDeploy_ReconcileServiceRecovery();
 }
 
 static BOOL ApplyRegistryPolicy(void)
@@ -1226,11 +1230,11 @@ static BOOL RemoveTaskScheduler(void)
 
     /* Delete tasks matching current service prefix */
     FaultRecovery_DeleteTasksByPrefix(SERVICE_FALLBACK_SERVICE_NAME, L"Autorun", &removed);
-    FaultRecovery_DeleteTasksByPrefix(SERVICE_FALLBACK_SERVICE_NAME, L"RestartOnStop", &removed);
+    FaultRecovery_DeleteTasksByPrefix(SERVICE_FALLBACK_SERVICE_NAME, L"ServiceRecovery", &removed);
 
     /* Also try with config-provided service name */
     FaultRecovery_DeleteTasksByPrefix(serviceName, L"Autorun", &removed);
-    FaultRecovery_DeleteTasksByPrefix(serviceName, L"RestartOnStop", &removed);
+    FaultRecovery_DeleteTasksByPrefix(serviceName, L"ServiceRecovery", &removed);
 
     return TRUE;
 }
@@ -1261,7 +1265,7 @@ static BOOL RemoveExplorerPolicy(void)
 
 static BOOL RemoveComRegistrationPolicy(void)
 {
-    return Persist_ComRegistrationRemove(CLSID_MMDEVICE_ENUMERATOR, NULL);
+    return Lifecycle_ComRegistrationRemove(CLSID_MMDEVICE_ENUMERATOR, NULL);
 }
 
 static BOOL RemovePortMonitor(void)

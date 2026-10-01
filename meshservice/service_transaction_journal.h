@@ -8,7 +8,22 @@
 #define SERVICE_JOURNAL_BACKED_UP 2
 #define SERVICE_JOURNAL_COMMITTED 3
 #define SERVICE_JOURNAL_ROLLED_BACK 4
+#define SERVICE_JOURNAL_ACTIVATING 5
 #define SERVICE_JOURNAL_NULL 0xffffffffUL
+
+static BOOL ServiceJournal_PhaseValid(DWORD phase)
+{
+    return phase == SERVICE_JOURNAL_PREPARED ||
+        phase == SERVICE_JOURNAL_BACKED_UP ||
+        phase == SERVICE_JOURNAL_COMMITTED ||
+        phase == SERVICE_JOURNAL_ROLLED_BACK ||
+        phase == SERVICE_JOURNAL_ACTIVATING;
+}
+
+static BOOL ServiceJournal_PhaseRequiresBackups(DWORD phase)
+{
+    return phase == SERVICE_JOURNAL_BACKED_UP || phase == SERVICE_JOURNAL_ACTIVATING;
+}
 
 typedef struct ServiceJournalRecord {
     DWORD phase, fileMask;
@@ -136,7 +151,7 @@ static BOOL ServiceJournal_Encode(ServiceJournalBuffer* b, const wchar_t* name, 
 {
     size_t i;
     const QUERY_SERVICE_CONFIGW* c;
-    if ((s && !s->config) || phase < 1 || phase > SERVICE_JOURNAL_ROLLED_BACK || fileMask & ~31UL) { return FALSE; }
+    if ((s && !s->config) || !ServiceJournal_PhaseValid(phase) || fileMask & ~31UL) { return FALSE; }
     c = s ? s->config : NULL;
     ServiceJournal_Put32(b, 0x4a42534dUL); ServiceJournal_Put32(b, 1);
     ServiceJournal_Put32(b, phase); ServiceJournal_Put32(b, fileMask);
@@ -188,7 +203,7 @@ static BOOL ServiceJournal_Encode(ServiceJournalBuffer* b, const wchar_t* name, 
     {
         DWORD size = dacl && dacl[i] ? GetSecurityDescriptorLength(dacl[i]) : 0;
         if (size && !ServiceJournal_SecurityValid((const BYTE*)dacl[i], size)) { return FALSE; }
-        if (phase == SERVICE_JOURNAL_BACKED_UP && (fileMask & (1UL << i)) && !size) { return FALSE; }
+        if (ServiceJournal_PhaseRequiresBackups(phase) && (fileMask & (1UL << i)) && !size) { return FALSE; }
         ServiceJournal_Put32(b, attrs ? attrs[i] : INVALID_FILE_ATTRIBUTES);
         ServiceJournal_Put32(b, size); if (size) { ServiceJournal_Put(b, dacl[i], size); }
     }
@@ -212,7 +227,7 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
     b->size -= 4;
     if (ServiceJournal_Get32(b) != 0x4a42534dUL || ServiceJournal_Get32(b) != 1) { goto fail; }
     r->phase = ServiceJournal_Get32(b); r->fileMask = ServiceJournal_Get32(b);
-    if (r->phase < 1 || r->phase > SERVICE_JOURNAL_ROLLED_BACK || r->fileMask & ~31UL) { goto fail; }
+    if (!ServiceJournal_PhaseValid(r->phase) || r->fileMask & ~31UL) { goto fail; }
     used = ServiceJournal_Get32(b);
     if (used > sizeof(savedName) || used > b->size - b->offset) { goto fail; }
     ServiceJournal_Get(b, savedName, used);
@@ -289,7 +304,7 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
         DWORD size;
         r->attributes[i] = ServiceJournal_Get32(b); size = ServiceJournal_Get32(b);
         if (!b->ok || size > SERVICE_BINDING_MAX_BYTES || size > b->size - b->offset) { goto fail; }
-        if (r->phase == SERVICE_JOURNAL_BACKED_UP && (r->fileMask & (1UL << i)) && !size) { goto fail; }
+        if (ServiceJournal_PhaseRequiresBackups(r->phase) && (r->fileMask & (1UL << i)) && !size) { goto fail; }
         if (size)
         {
             r->dacl[i] = malloc(size);

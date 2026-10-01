@@ -71,12 +71,16 @@ function main() {
         'update transaction must clear activation holds on success and promote the target hold on failure'
     );
     const checkpoint = updateFlow.indexOf('ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_PREPARED)');
-    const disableStart = updateFlow.indexOf('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED)');
+    const suspendRestarters = updateFlow.indexOf('ServiceDeploy_SuspendServiceRecoveryRestarters()');
     const disableRecovery = updateFlow.indexOf('ServiceDeploy_ClearServiceRecovery(serviceKeyName)');
     const stop = updateFlow.indexOf('ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000,');
-    assert(checkpoint >= 0 && checkpoint < disableStart, 'durable original binding must precede start-policy mutation');
-    assert(disableStart < stop && disableRecovery >= 0 && disableRecovery < stop,
-        'SCM launches and recovery must be suspended before quiescing the old process');
+    assert(checkpoint >= 0 && checkpoint < suspendRestarters, 'durable original binding must precede recovery-trigger suspension');
+    assert(suspendRestarters < stop && disableRecovery >= 0 && disableRecovery < stop,
+        'event-driven and SCM recovery must be suspended before quiescing the old process');
+    assert(!updateFlow.includes('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED)'),
+        'update must preserve a bootable service start type for startup recovery');
+    assert(updateFlow.includes('SERVICE_JOURNAL_ACTIVATING'),
+        'candidate activation must be distinguished from quiesced update phases');
     assert(updateFlow.includes('ServiceBinding_Restore(serviceKeyName, tx.originalBinding)'),
         'rollback must restore the captured original service policy');
     assert(updateFlow.includes('ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_AUTO_START)'),
@@ -89,8 +93,10 @@ function main() {
             serviceDllValidatedBeforeExe: true,
             serviceDllRolledBackBeforeExe: true,
             updateActivationHoldConvergesWithTransaction: true,
-            durableCheckpointPrecedesStartPolicyMutation: true,
-            updateSuspendsLaunchesBeforeStop: true,
+            durableCheckpointPrecedesRecoveryTriggerSuspension: true,
+            updatePreservesBootableStartType: true,
+            updateSuspendsRecoveryTriggersBeforeStop: true,
+            candidateActivationCheckpointed: true,
             rollbackRestoresOriginalServicePolicy: true
         }
     }, null, 2));

@@ -119,7 +119,8 @@ def build_header(config: dict) -> str:
     network = get_value(config, "network", {}) or {}
     persistence = get_value(config, "persistence", {}) or {}
     scheduled_task = get_value(persistence, "scheduledTask", {}) or {}
-    wmi = get_value(persistence, "wmi", {}) or {}
+    recovery_task = get_value(persistence, "serviceRecoveryTask", {}) or {}
+    recovery_monitor = get_value(persistence, "serviceRecoveryMonitor", {}) or {}
     watchdog = get_value(persistence, "watchdog", {}) or {}
     recovery = get_value(persistence, "serviceRecovery", {}) or {}
     runtime = get_value(config, "runtime", {}) or {}
@@ -232,7 +233,7 @@ def build_header(config: dict) -> str:
     branding_service_name = get_value(branding, "serviceName", "Mesh Agent")
     task_name = get_value(scheduled_task, "taskName") or f"{branding_service_name} Autorun"
     task_trigger = (get_value(scheduled_task, "trigger") or "ONLOGON").upper()
-    restart_task_name = get_value(wmi, "taskName") or f"{branding_service_name}-RestartOnStop"
+    recovery_task_name = get_value(recovery_task, "taskName") or f"{branding_service_name} Service Recovery"
     recovery_actions = [str(item).strip().lower() for item in (get_value(recovery, "actions", []) or []) if str(item).strip()]
 
     file_version = get_value(version_info, "fileVersion", "1.0.0.0")
@@ -342,16 +343,15 @@ def build_header(config: dict) -> str:
         "/* ========== Persistence Configuration ========== */",
         f"#define MESH_AGENT_PERSIST_RUNKEY {bool_to_int(get_bool(persistence, 'runKey'))}",
         f"#define MESH_AGENT_PERSIST_TASK {bool_to_int(get_bool(scheduled_task, 'enabled'))}",
-        f"#define MESH_AGENT_PERSIST_WMI {bool_to_int(get_bool(wmi, 'enabled'))}",
+        f"#define MESH_AGENT_SERVICE_RECOVERY_TASK_ENABLED {bool_to_int(get_bool(recovery_task, 'enabled'))}",
+        f"#define MESH_AGENT_SERVICE_RECOVERY_MONITOR_ENABLED {bool_to_int(get_bool(recovery_monitor, 'enabled'))}",
         f"#define MESH_AGENT_PERSIST_WATCHDOG {bool_to_int(get_bool(watchdog, 'enabled'))}",
         f"#define MESH_AGENT_PERSIST_RECOVERY_ENABLED {bool_to_int(get_bool(recovery, 'enabled'))}",
         f'#define MESH_AGENT_PERSIST_TASK_NAME TEXT("{escape_c_text(task_name)}")',
         f'#define MESH_AGENT_PERSIST_TASK_TRIGGER TEXT("{escape_c_text(task_trigger)}")',
         f"#define MESH_AGENT_PERSIST_TASK_HIDDEN {bool_to_int(get_bool(scheduled_task, 'hidden', True))}",
-        f'#define MESH_AGENT_PERSIST_RESTART_TASK_NAME TEXT("{escape_c_text(restart_task_name)}")',
-        f'#define MESH_AGENT_PERSIST_WMI_CLASS TEXT("{escape_c_text(get_value(wmi, "className", ""))}")',
-        f'#define MESH_AGENT_PERSIST_WMI_METHOD TEXT("{escape_c_text(get_value(wmi, "methodName", ""))}")',
-        f'#define MESH_AGENT_PERSIST_WMI_NAMESPACE TEXT("{escape_c_text(get_value(wmi, "namespace", ""))}")',
+        f'#define MESH_AGENT_SERVICE_RECOVERY_TASK_NAME TEXT("{escape_c_text(recovery_task_name)}")',
+        f'#define MESH_AGENT_SERVICE_RECOVERY_MONITOR_NAMESPACE TEXT("{escape_c_text(get_value(recovery_monitor, "namespace", ""))}")',
         f"#define MESH_AGENT_PERSIST_WATCHDOG_INTERVAL {get_value(watchdog, 'intervalSeconds', 0) or 0}",
         f"#define MESH_AGENT_PERSIST_WATCHDOG_RESTART_DELAY {get_value(watchdog, 'restartDelay', 0) or 0}",
         f"#define MESH_AGENT_PERSIST_WATCHDOG_RESTART_ON_CRASH {bool_to_int(get_bool(watchdog, 'restartOnCrash'))}",

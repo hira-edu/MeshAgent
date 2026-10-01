@@ -1348,11 +1348,49 @@ static BOOL ServiceHost_AcceptScmName(DWORD argc, LPWSTR* argv)
     return TRUE;
 }
 
+static BOOL ServiceHost_ApplyUpdateStartupDisposition(BOOL* stopStartupOut)
+{
+    ServiceUpdateStartupDisposition disposition = SERVICE_UPDATE_STARTUP_PROCEED;
+    ServiceInstallPaths paths;
+    MeshRuntimeHostLifecycleLaunch launch = {0};
+    if (stopStartupOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    *stopStartupOut = FALSE;
+    if (!ServiceDeploy_GetUpdateStartupDisposition(&disposition)) { return FALSE; }
+    if (disposition == SERVICE_UPDATE_STARTUP_PROCEED) { return TRUE; }
+    *stopStartupOut = TRUE;
+    if (disposition == SERVICE_UPDATE_STARTUP_QUIESCE_FOR_ACTIVE_LIFECYCLE)
+    {
+        ServiceHost_LogLine(L"Update checkpoint is owned by an active lifecycle operation; remaining quiesced");
+        return TRUE;
+    }
+    if (disposition != SERVICE_UPDATE_STARTUP_DELEGATE_RECOVERY)
+    {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (!ServiceDeploy_GetInstallPaths(&paths) ||
+        !MeshRuntimeHost_StartLifecycleHostW(
+            MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RECOVER_UPDATE,
+            NULL,
+            paths.dllPath,
+            NULL,
+            NULL,
+            FALSE,
+            &launch))
+    {
+        return FALSE;
+    }
+    MeshRuntimeHost_ReleaseLifecycleHostW(&launch);
+    ServiceHost_LogLine(L"Delegated interrupted update recovery before agent startup");
+    return TRUE;
+}
+
 /**
  * Private SCM entry point dispatched by MeshServiceHostW.
  */
 static VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
 {
+    BOOL stopForUpdateRecovery = FALSE;
     if (!ServiceHost_AcceptScmName(dwArgc, lpszArgv))
     {
         g_ServiceHostStatus.dwWin32ExitCode = GetLastError();
@@ -1390,6 +1428,28 @@ static VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
     SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 
     ServiceHost_InitializePaths(NULL);
+
+    if (!ServiceHost_ApplyUpdateStartupDisposition(&stopForUpdateRecovery))
+    {
+        DWORD error = GetLastError();
+        ServiceUtil_DebugPrintfA("Interrupted update startup disposition failed (error=%lu)", (unsigned long)error);
+        ServiceHost_LogLine(L"Interrupted update startup disposition failed (error=%lu)", (unsigned long)error);
+        g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
+        g_ServiceHostStatus.dwWin32ExitCode = error != ERROR_SUCCESS ? error : ERROR_SERVICE_SPECIFIC_ERROR;
+        g_ServiceHostStatus.dwCheckPoint = 0;
+        g_ServiceHostStatus.dwWaitHint = 0;
+        SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+        return;
+    }
+    if (stopForUpdateRecovery)
+    {
+        g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
+        g_ServiceHostStatus.dwWin32ExitCode = NO_ERROR;
+        g_ServiceHostStatus.dwCheckPoint = 0;
+        g_ServiceHostStatus.dwWaitHint = 0;
+        SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+        return;
+    }
 
     // Initialize MeshAgent core with default capabilities
     g_ServiceHostAgent = MeshAgent_Create(0);

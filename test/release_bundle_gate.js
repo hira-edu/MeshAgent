@@ -53,8 +53,7 @@ const DEFAULT_RELEASE_DOCUMENTS = [
     'docs/README.md',
     'docs/CONFIGURATION.md',
     'docs/DEPLOYMENT.md',
-    'docs/files/meshagent_release_checklist.md',
-    'docs/UMH_CONTROL_SISTER_REPO_SSOT.md',
+    'docs/testing/README.md',
 ];
 
 function parseArgs(argv) {

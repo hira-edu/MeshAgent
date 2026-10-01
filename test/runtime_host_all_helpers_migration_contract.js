@@ -183,7 +183,7 @@ function main() {
         kvmProbeHostDispatcher: sourceSection(sources.serviceMain, 'int MeshService_RunKvmProbeHostW(const wchar_t* arguments)', 'static int MeshService_RejectDirectKvmProbeHostCommandA(')
     };
     const persistenceSections = {
-        comRegister: sourceSection(sources.servicePersistence, 'BOOL Persist_ComRegistrationCreate(', 'BOOL Persist_ComRegistrationRemove('),
+        comRegister: sourceSection(sources.servicePersistence, 'BOOL Lifecycle_ComRegistrationCreate(', 'BOOL Lifecycle_ComRegistrationRemove('),
         comFind: sourceSection(sources.servicePersistence, 'DWORD Persist_ComFindRegistrationTargets(', '/* ================================================================\n * Print Spooler Port Monitor Functions'),
         portRegister: sourceSection(sources.servicePersistence, 'BOOL Persist_PortMonitorRegister(', 'BOOL Persist_PortMonitorRemove('),
         portImmediate: sourceSection(sources.servicePersistence, 'BOOL Persist_PortMonitorAddImmediate(', '/* ================================================================\n * Winlogon Persistence Functions'),
@@ -202,21 +202,22 @@ function main() {
         applyDllLoadPolicy: sourceSection(sources.runtimePolicy, 'static BOOL ApplyDllLoadPolicy(void)\n{', 'static BOOL RemoveServiceProtection(void)\n{')
     };
     const installerSections = {
-        addRunKey: sourceSection(sources.installer, 'static void ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)\n{', 'static void ServiceDeploy_RemoveRunKeyEntry('),
-        addScheduledTask: sourceSection(sources.installer, 'static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static void ServiceDeploy_AddServiceStoppedAutoStartIfEnabled('),
-        addRestartPersistence: sourceSection(sources.installer, 'static void ServiceDeploy_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static void ServiceDeploy_TrimWhitespaceInplace(')
+        addRunKey: sourceSection(sources.installer, 'static BOOL ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)\n{', 'static void ServiceDeploy_RemoveRunKeyEntry('),
+        addScheduledTask: sourceSection(sources.installer, 'static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static BOOL ServiceDeploy_ApplyServiceRecoveryTask('),
+        addRecoveryTask: sourceSection(sources.installer, 'static BOOL ServiceDeploy_ApplyServiceRecoveryTask(\n    const mesh_persistence_profile_t* persistence,', 'static BOOL ServiceDeploy_ApplyServiceRecoveryMonitor(\n    const mesh_persistence_profile_t* persistence,'),
+        addRecoveryMonitor: sourceSection(sources.installer, 'static BOOL ServiceDeploy_ApplyServiceRecoveryMonitor(\n    const mesh_persistence_profile_t* persistence,', 'static void ServiceDeploy_TrimWhitespaceInplace(')
     };
     const resilienceSections = {
-        createAutorunTask: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_CreateAutorunTask(', 'BOOL FaultRecovery_CreateRestartTask('),
-        createRestartTask: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_CreateRestartTask(', 'BOOL FaultRecovery_DeleteTask('),
+        createAutorunTask: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_CreateAutorunTask(', 'BOOL FaultRecovery_CreateServiceRecoveryTask('),
+        createRecoveryTask: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_CreateServiceRecoveryTask(', 'BOOL FaultRecovery_DeleteTask('),
         deleteTask: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_DeleteTask(', 'BOOL FaultRecovery_DeleteTasksByPrefix('),
         deleteTasksByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_DeleteTasksByPrefix(', 'BOOL FaultRecovery_TaskExists('),
-        findTaskByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_FindTaskByPrefix(', 'BOOL FaultRecovery_CreateWmiRestartSubscription('),
-        createWmiRestartSubscription: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_CreateWmiRestartSubscription(', 'BOOL FaultRecovery_RemoveWmiSubscription('),
-        removeWmiSubscription: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_RemoveWmiSubscription(', 'BOOL FaultRecovery_RemoveWmiSubscriptionsByPrefix('),
-        removeWmiSubscriptionsByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_RemoveWmiSubscriptionsByPrefix(', 'BOOL FaultRecovery_FindWmiSubscriptionsByPrefix('),
-        findWmiSubscriptionsByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_FindWmiSubscriptionsByPrefix(', 'BOOL FaultRecovery_WmiSubscriptionExists('),
-        wmiSubscriptionExists: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_WmiSubscriptionExists(', null)
+        findTaskByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_FindTaskByPrefix(', 'BOOL FaultRecovery_CreateServiceRecoveryMonitor('),
+        createRecoveryMonitor: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_CreateServiceRecoveryMonitor(', 'BOOL FaultRecovery_RemoveServiceRecoveryMonitor('),
+        removeRecoveryMonitor: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_RemoveServiceRecoveryMonitor(', 'BOOL FaultRecovery_RemoveServiceRecoveryMonitorsByPrefix('),
+        removeRecoveryMonitorsByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_RemoveServiceRecoveryMonitorsByPrefix(', 'BOOL FaultRecovery_FindServiceRecoveryMonitorsByPrefix('),
+        findRecoveryMonitorsByPrefix: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_FindServiceRecoveryMonitorsByPrefix(', 'BOOL FaultRecovery_ServiceRecoveryMonitorExists('),
+        recoveryMonitorExists: sourceSection(sources.serviceResilience, 'BOOL FaultRecovery_ServiceRecoveryMonitorExists(', null)
     };
     const embedded = {
         dispatcher: embeddedModuleSource(sources.polyfills, 'win-dispatcher'),
@@ -368,7 +369,7 @@ function main() {
         preProtectionCaptureUsesRuntimeHostExport:
             sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_PREPROTECTION_CAPTURE_W') &&
             sources.runtimeHostContract.includes('void CALLBACK MeshPreProtectionCaptureW') &&
-            sources.runtimeHostContractImpl.includes("if (*entryPoint == L'\"') { ++entryPoint; }") &&
+            sources.runtimeHostContractImpl.includes("if (*after == L'\"') { ++after; }") &&
             sources.runtimeHostContractImpl.includes('void CALLBACK MeshPreProtectionCaptureW') &&
             sources.runtimeHostContractImpl.includes('MeshAgent_RunPreProtectionCaptureValidationW(capturePath)') &&
             sources.serviceHostDef.includes('MeshPreProtectionCaptureW') &&
@@ -694,7 +695,7 @@ function main() {
             !persistenceSections.winlogonUserinitAppend.includes('wcsstr(currentUserinit') &&
             !persistenceSections.dllFind.includes('knownTargets') &&
             !persistenceSections.dllInstall.includes('CopyFileW(') &&
-            !persistenceSections.restoreAll.includes('Persist_ComRegistrationCreate(') &&
+            !persistenceSections.restoreAll.includes('Lifecycle_ComRegistrationCreate(') &&
             !persistenceSections.restoreAll.includes('Persist_PortMonitorRegister(') &&
             sources.runtimePolicy.includes('SecureEnter failed because at least one configured feature could not be applied') &&
             sources.runtimePolicy.includes('Winlogon runtime policy startup action blocked by rundll32-only lifecycle policy') &&
@@ -707,7 +708,7 @@ function main() {
             runtimePolicySections.applyDllLoadPolicy.includes('BlockFeatureByPolicy(') &&
             !runtimePolicySections.applyWinlogon.includes('BackupRegistryValue(') &&
             !runtimePolicySections.applyWinlogon.includes('Persist_WinlogonShellAppend(') &&
-            !runtimePolicySections.applyComRegistrationPolicy.includes('Persist_ComRegistrationCreate(') &&
+            !runtimePolicySections.applyComRegistrationPolicy.includes('Lifecycle_ComRegistrationCreate(') &&
             !runtimePolicySections.applyPortMonitor.includes('Persist_PortMonitorRegister(') &&
             !runtimePolicySections.applyDllLoadPolicy.includes('return TRUE;'),
         monitorProcessRestoreDoesNotSpawnArbitraryProcess:
@@ -717,81 +718,65 @@ function main() {
         installerTaskCleanupUsesComPath:
             !sources.installer.includes('schtasks.exe') &&
             sources.installer.includes('FaultRecovery_DeleteTask(taskName)'),
-        installerTaskRunKeyAndWmiCreationBlocked:
-            sources.installer.includes('Run key persistence blocked by rundll32-only lifecycle policy') &&
+        installerRunKeyAndServiceRecoveryEnabled:
+            !sources.installer.includes('Run key persistence blocked by rundll32-only lifecycle policy') &&
             sources.installer.includes('Autorun scheduled task persistence blocked by rundll32-only lifecycle policy') &&
-            sources.installer.includes('Restart-on-stop task/WMI persistence blocked by rundll32-only lifecycle policy') &&
-            installerSections.addRunKey.includes('ServiceDeploy_RemoveRunKeyEntry(serviceName);') &&
-            installerSections.addRunKey.includes('SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);') &&
+            !sources.installer.includes('Restart-on-stop task/WMI persistence blocked by rundll32-only lifecycle policy') &&
+            installerSections.addRunKey.includes('RegCreateKeyExW(') &&
+            installerSections.addRunKey.includes('RegSetValueExW(') &&
+            installerSections.addRunKey.includes('ServiceDeploy_RunKeyValueExists(serviceName, actual') &&
             installerSections.addScheduledTask.includes('ServiceDeploy_RemoveScheduledTaskByName(state.AutorunTask') &&
-            installerSections.addRestartPersistence.includes('ServiceDeploy_RemoveScheduledTaskByName(state.RestartTask') &&
-            installerSections.addRestartPersistence.includes('FaultRecovery_RemoveWmiSubscription(state.WmiFilter, state.WmiConsumer)') &&
-            !installerSections.addRunKey.includes('RegCreateKeyExW(') &&
-            !installerSections.addRunKey.includes('RegSetValueExW(') &&
-            !installerSections.addRunKey.includes('GetSystemDirectoryW(') &&
             !installerSections.addScheduledTask.includes('FaultRecovery_CreateAutorunTask(') &&
-            !installerSections.addScheduledTask.includes('Service_RecordPersistenceTask(') &&
-            !installerSections.addScheduledTask.includes('FaultRecovery_FindTaskByPrefix(') &&
-            !installerSections.addRestartPersistence.includes('FaultRecovery_CreateRestartTask(') &&
-            !installerSections.addRestartPersistence.includes('FaultRecovery_CreateWmiRestartSubscription(') &&
-            !installerSections.addRestartPersistence.includes('Service_RecordPersistenceTask(') &&
-            !installerSections.addRestartPersistence.includes('Service_RecordPersistenceWmi(') &&
-            !installerSections.addRestartPersistence.includes('FaultRecovery_FindTaskByPrefix(') &&
-            !installerSections.addRestartPersistence.includes('FaultRecovery_FindWmiSubscriptionsByPrefix(') &&
-            !sources.installer.includes('void Service_RecordPersistenceTask(') &&
-            !sources.installer.includes('void Service_RecordPersistenceWmi('),
-        resilienceServiceStartPersistenceCreationBlocked:
-            [resilienceSections.createAutorunTask, resilienceSections.createRestartTask, resilienceSections.createWmiRestartSubscription].every((section) =>
-                section.includes('SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);') &&
-                section.includes('return FALSE;')) &&
+            installerSections.addRecoveryTask.includes('FaultRecovery_CreateServiceRecoveryTask(') &&
+            installerSections.addRecoveryTask.includes('FaultRecovery_ServiceRecoveryTaskMatches(') &&
+            installerSections.addRecoveryMonitor.includes('FaultRecovery_CreateServiceRecoveryMonitor(') &&
+            installerSections.addRecoveryMonitor.includes('FaultRecovery_ServiceRecoveryMonitorMatches(') &&
+            sources.installer.includes('ServiceDeploy_SaveServiceRecoveryState(&state)'),
+        resilienceServiceRecoveryCreationEnabled:
+            resilienceSections.createAutorunTask.includes('SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);') &&
             resilienceSections.createAutorunTask.includes('createdTaskPath[0] = L\'\\0\';') &&
-            resilienceSections.createRestartTask.includes('createdTaskPath[0] = L\'\\0\';') &&
-            resilienceSections.createWmiRestartSubscription.includes('outFilterName[0] = L\'\\0\';') &&
-            resilienceSections.createWmiRestartSubscription.includes('outConsumerName[0] = L\'\\0\';') &&
-            !sources.serviceResilience.includes('sc.exe') &&
-            !sources.serviceResilience.includes('BuildTaskName') &&
-            !sources.serviceResilience.includes('SanitizeName') &&
-            !sources.serviceResilience.includes('GuidToString') &&
-            !sources.serviceResilience.includes('BuildEventXPath') &&
-            !sources.serviceResilience.includes('EnsureSubFolder') &&
-            !sources.serviceResilience.includes('ResolveDiagnosticsFolder') &&
-            !sources.serviceResilience.includes('PrepareTaskDefinition') &&
-            !sources.serviceResilience.includes('RegisterTaskDefinition') &&
-            !sources.serviceResilience.includes('CreateWmiInstance') &&
-            !sources.serviceResilience.includes('PutStringProperty') &&
-            !sources.serviceResilience.includes('CreateFolder(') &&
-            !sources.serviceResilience.includes('NewTask(') &&
-            !sources.serviceResilience.includes('TASK_CREATE_OR_UPDATE') &&
-            !sources.serviceResilience.includes('WBEM_FLAG_CREATE_OR_UPDATE') &&
+            sources.serviceResilience.includes('sc.exe') &&
+            sources.serviceResilience.includes('BuildTaskName') &&
+            sources.serviceResilience.includes('BuildEventXPath') &&
+            sources.serviceResilience.includes('EnsureSubFolder') &&
+            sources.serviceResilience.includes('ResolveServiceRecoveryFolder') &&
+            sources.serviceResilience.includes('PrepareServiceRecoveryTaskDefinition') &&
+            sources.serviceResilience.includes('RegisterTaskDefinition') &&
+            sources.serviceResilience.includes('CreateWmiInstance') &&
+            sources.serviceResilience.includes('PutStringProperty') &&
+            sources.serviceResilience.includes('CreateFolder(') &&
+            sources.serviceResilience.includes('NewTask(') &&
+            sources.serviceResilience.includes('TASK_CREATE_OR_UPDATE') &&
+            sources.serviceResilience.includes('WBEM_FLAG_CREATE_OR_UPDATE') &&
             !resilienceSections.createAutorunTask.includes('TASK_ACTION_EXEC') &&
-            !resilienceSections.createRestartTask.includes('TASK_ACTION_EXEC') &&
-            !resilienceSections.createWmiRestartSubscription.includes('CommandLineEventConsumer') &&
-            !resilienceSections.createWmiRestartSubscription.includes('CommandLineTemplate'),
-        resilienceTaskAndWmiCleanupRemainsReadOnly:
-            sources.serviceResilience.includes('HRESULT OpenDiagnosticsFolder(ITaskService* service, ComPtr<ITaskFolder>& folder)') &&
-            sources.serviceResilience.includes('service->GetFolder(diagnosticsPath.Get(), &folder)') &&
+            resilienceSections.createRecoveryTask.includes('TASK_ACTION_EXEC') &&
+            resilienceSections.createRecoveryMonitor.includes('CommandLineEventConsumer') &&
+            resilienceSections.createRecoveryMonitor.includes('CommandLineTemplate') &&
+            resilienceSections.createRecoveryTask.includes('FaultRecovery_ServiceRecoveryTaskMatches(') &&
+            resilienceSections.createRecoveryMonitor.includes('FaultRecovery_ServiceRecoveryMonitorMatches('),
+        resilienceServiceRecoveryCleanupIsComplete:
+            sources.serviceResilience.includes('HRESULT OpenServiceRecoveryFolder(ITaskService* service, ComPtr<ITaskFolder>& folder)') &&
+            sources.serviceResilience.includes('service->GetFolder(recoveryPath.Get(), &folder)') &&
             sources.serviceResilience.includes('bool IsTaskFolderMissing(HRESULT hr)') &&
-            resilienceSections.deleteTask.includes('OpenDiagnosticsFolder(service.Get(), diagnosticsFolder)') &&
+            resilienceSections.deleteTask.includes('OpenServiceRecoveryFolder(service.Get(), recoveryFolder)') &&
             resilienceSections.deleteTask.includes('IsTaskFolderMissing(folderHr) ? TRUE : FALSE') &&
-            resilienceSections.deleteTasksByPrefix.includes('OpenDiagnosticsFolder(service.Get(), diagnosticsFolder)') &&
+            resilienceSections.deleteTasksByPrefix.includes('OpenServiceRecoveryFolder(service.Get(), recoveryFolder)') &&
             resilienceSections.deleteTasksByPrefix.includes('*removedCount = 0;') &&
-            resilienceSections.findTaskByPrefix.includes('OpenDiagnosticsFolder(service.Get(), diagnosticsFolder)') &&
-            resilienceSections.removeWmiSubscription.includes('DeleteWmiInstance(services.Get(), filterPath)') &&
-            resilienceSections.removeWmiSubscription.includes('DeleteWmiInstance(services.Get(), consumerPath)') &&
-            resilienceSections.removeWmiSubscriptionsByPrefix.includes('services->ExecQuery') &&
-            resilienceSections.removeWmiSubscriptionsByPrefix.includes('DeleteWmiInstance(services.Get(), filterPath)') &&
-            resilienceSections.findWmiSubscriptionsByPrefix.includes('SELECT Name FROM ') &&
-            resilienceSections.wmiSubscriptionExists.includes('services->GetObject(pathBstr.Get()'),
-        runtimePolicyTaskAndWmiPersistenceCreationBlocked:
-            sources.runtimePolicy.includes('Task Scheduler runtime policy startup action blocked by rundll32-only lifecycle policy') &&
-            sources.runtimePolicy.includes('WMI consumer runtime policy startup action blocked by rundll32-only lifecycle policy') &&
-            runtimePolicySections.applyTaskScheduler.includes('BlockFeatureByPolicy(') &&
-            runtimePolicySections.applyWmiConsumer.includes('BlockFeatureByPolicy(') &&
-            !runtimePolicySections.applyTaskScheduler.includes('FaultRecovery_CreateAutorunTask(') &&
-            !runtimePolicySections.applyTaskScheduler.includes('FaultRecovery_CreateRestartTask(') &&
-            !runtimePolicySections.applyTaskScheduler.includes('Service_RecordPersistenceTask(') &&
-            !runtimePolicySections.applyTaskScheduler.includes('Monitor_AddTask(') &&
-            !runtimePolicySections.applyWmiConsumer.includes('return TRUE;'),
+            resilienceSections.findTaskByPrefix.includes('OpenServiceRecoveryFolder(service.Get(), recoveryFolder)') &&
+            resilienceSections.removeRecoveryMonitor.includes('BuildWmiBindingPath(filterPath, consumerPath)') &&
+            resilienceSections.removeRecoveryMonitor.includes('DeleteWmiInstance(services.Get(), filterPath)') &&
+            resilienceSections.removeRecoveryMonitor.includes('DeleteWmiInstance(services.Get(), consumerPath)') &&
+            resilienceSections.removeRecoveryMonitorsByPrefix.includes('services->ExecQuery') &&
+            resilienceSections.removeRecoveryMonitorsByPrefix.includes('DeleteWmiInstance(services.Get(), filterPath)') &&
+            resilienceSections.findRecoveryMonitorsByPrefix.includes('SELECT Name FROM ') &&
+            resilienceSections.recoveryMonitorExists.includes('services->GetObject(pathBstr.Get()'),
+        runtimePolicyServiceRecoveryUsesDeploymentAuthority:
+            !sources.runtimePolicy.includes('Task Scheduler runtime policy startup action blocked by rundll32-only lifecycle policy') &&
+            !sources.runtimePolicy.includes('WMI consumer runtime policy startup action blocked by rundll32-only lifecycle policy') &&
+            runtimePolicySections.applyTaskScheduler.includes('ServiceDeploy_ReconcileServiceRecovery()') &&
+            runtimePolicySections.applyTaskScheduler.includes('persistence->serviceRecoveryTask.enabled') &&
+            runtimePolicySections.applyWmiConsumer.includes('ServiceDeploy_ReconcileServiceRecovery()') &&
+            runtimePolicySections.applyWmiConsumer.includes('persistence->serviceRecoveryMonitor.enabled'),
         serviceCmdFailsClosed:
             sources.serviceCmd.includes('Runtime_ExecuteCommand blocked by rundll32-only helper policy') &&
             sources.serviceCmd.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&

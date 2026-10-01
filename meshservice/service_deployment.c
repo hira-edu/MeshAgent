@@ -106,14 +106,15 @@ static BOOL MeshInstaller_CombinePath(wchar_t* dest, size_t destLen, const wchar
 }
 
 // Forward declaration - implementation after global variables
-static void ServiceDeploy_UpdatePersistenceStatePath(const wchar_t* installRoot);
+static void ServiceDeploy_UpdateServiceRecoveryStatePath(const wchar_t* installRoot);
 
-// Forward declarations for persistence helpers
+// Forward declarations for service lifecycle helpers
 struct ServiceUpdateTransaction;
 struct ServiceIdentitySnapshot;
-static void ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
+static BOOL ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
 static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting);
-static void ServiceDeploy_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting);
+static BOOL ServiceDeploy_ApplyServiceRecoveryTask(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, const wchar_t* serviceEventName, ServiceRecoveryState* state);
+static BOOL ServiceDeploy_ApplyServiceRecoveryMonitor(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, ServiceRecoveryState* state);
 static BOOL ServiceDeploy_ConfigureServiceRecoveryIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName);
 
 static SC_ACTION* ServiceDeploy_CreateRestartPlan(size_t actionCount, DWORD delayMs, DWORD* actionCountOut);
@@ -148,7 +149,7 @@ static void ServiceDeploy_BuildTaskPrefixFromHint(const wchar_t* hint, const wch
 static BOOL ServiceDeploy_AddTaskCandidate(wchar_t candidates[][SERVICE_TASK_NAME_MAX], size_t* count, size_t capacity, const wchar_t* name);
 static size_t ServiceDeploy_BuildTaskPrefixCandidates(const mesh_persistence_profile_t* persistence, const wchar_t* serviceDisplayName, const wchar_t* serviceKeyName, wchar_t candidates[][SERVICE_TASK_NAME_MAX], size_t capacity);
 static BOOL ServiceDeploy_FindTaskByPrefixCandidates(wchar_t candidates[][SERVICE_TASK_NAME_MAX], size_t count, const wchar_t* token, wchar_t* outTaskPath, size_t outTaskPathCch);
-static BOOL ServiceDeploy_FindWmiByPrefixCandidates(wchar_t candidates[][SERVICE_TASK_NAME_MAX], size_t count, wchar_t* outFilterName, size_t outFilterNameCch, wchar_t* outConsumerName, size_t outConsumerNameCch);
+static BOOL ServiceDeploy_FindServiceRecoveryMonitorByPrefixCandidates(wchar_t candidates[][SERVICE_TASK_NAME_MAX], size_t count, wchar_t* outFilterName, size_t outFilterNameCch, wchar_t* outHandlerName, size_t outHandlerNameCch);
 static BOOL ServiceDeploy_RemoveScheduledTaskByName(const wchar_t* taskName, const wchar_t* context);
 static void ServiceDeploy_RemoveScheduledTasks(const mesh_persistence_profile_t* persistence, const wchar_t* serviceDisplayName, const wchar_t* serviceKeyName);
 static BOOL ServiceDeploy_EnsureConfigFile(const wchar_t* sourceExePath, const wchar_t* destPath);
@@ -175,6 +176,7 @@ static BOOL ServiceDeploy_ExtractEmbeddedServiceHostDllFromExe(const wchar_t* ex
 static void ServiceDeploy_DeleteFileIfPresent(const wchar_t* path);
 static const wchar_t* MeshInstaller_GetPathLeaf(const wchar_t* path);
 static BOOL ServiceDeploy_DeleteUpdateTransactionArtifacts(const struct ServiceUpdateTransaction* tx);
+static BOOL ServiceDeploy_TransactionPathsSafe(const ServiceInstallPaths* paths, const struct ServiceUpdateTransaction* tx);
 static BOOL ServiceDeploy_FinalizeUpdateTransaction(const ServiceInstallPaths* paths, struct ServiceUpdateTransaction* tx);
 static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* paths, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL allowInstalledProvisioning, struct ServiceUpdateTransaction* tx);
 static BOOL ServiceDeploy_BackupUpdateTransaction(const ServiceInstallPaths* paths, struct ServiceUpdateTransaction* tx);
@@ -193,6 +195,11 @@ static BOOL ServiceDeploy_VerifyServiceHostServiceBinding(const wchar_t* service
 static BOOL ServiceDeploy_StartServiceHostServiceAndWait(const wchar_t* serviceName, DWORD timeoutMs);
 static void ServiceDeploy_RecordServiceDllHash(const wchar_t* serviceName, const wchar_t* dllPath);
 static void ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(const ServiceInstallPaths* paths);
+static BOOL ServiceDeploy_BuildLifecycleMutexName(wchar_t* mutexName, size_t mutexNameCch);
+static BOOL ServiceDeploy_QueryLifecycleOperationActive(BOOL* activeOut);
+static BOOL ServiceDeploy_CreateRecoveryStartupAuthorization(HANDLE* eventOut);
+static BOOL ServiceDeploy_QueryRecoveryStartupAuthorized(BOOL* authorizedOut);
+static BOOL ServiceDeploy_SuspendServiceRecoveryRestarters(void);
 
 #define SERVICE_INSTALL_LOG_MAX_BYTES    (512ULL * 1024ULL)
 #define SERVICE_SERVICE_STOP_TIMEOUT_MS  (30 * 1000)
@@ -212,8 +219,8 @@ static wchar_t g_InstallLogPath[MAX_PATH] = {0};
 static BOOL g_HaveInstallLogPath = FALSE;
 static volatile LONG g_InstallLogDirEnsured = 0;
 static wchar_t g_InstallLogDirEnsuredPath[MAX_PATH] = {0};
-static wchar_t g_PersistenceStatePath[MAX_PATH] = {0};
-static BOOL g_HavePersistenceStatePath = FALSE;
+static wchar_t g_ServiceRecoveryStatePath[MAX_PATH] = {0};
+static BOOL g_HaveServiceRecoveryStatePath = FALSE;
 
 typedef struct ServiceRuntimeBrandingOverrides
 {
@@ -280,6 +287,7 @@ typedef struct ServiceUpdateTransaction
     BOOL rollbackIdentityReady;
     BOOL postUpdateIdentityReady;
     BOOL pendingUpdateMarked;
+    BOOL stagingOwned; /* Prepare cleared the staging area; retained material is never ours to delete. */
 } ServiceUpdateTransaction;
 
 typedef enum ServiceLifecycleStateKind
@@ -348,8 +356,8 @@ typedef struct ServiceLifecycleDiscovery
     BOOL persistenceStateExists;
     BOOL runKeyPresent;
     BOOL autorunTaskPresent;
-    BOOL restartTaskPresent;
-    BOOL wmiSubscriptionPresent;
+    BOOL recoveryTaskPresent;
+    BOOL recoveryMonitorPresent;
     BOOL persistenceHealthy;
     BOOL pendingUpdate;
     BOOL updateStageArtifactsPresent;
@@ -410,19 +418,19 @@ static BOOL ServiceDeploy_IsMasterServicePipeReady(void);
 static BOOL ServiceDeploy_QueryServiceImagePathW(const wchar_t* serviceName, wchar_t* imagePath, size_t imagePathCch);
 static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig);
 
-BOOL ServiceDeploy_LoadPersistenceState(ServicePersistenceState* state);
-BOOL ServiceDeploy_SavePersistenceState(const ServicePersistenceState* state);
-void ServiceDeploy_ClearPersistenceState(void);
-static BOOL ServiceDeploy_GetPersistenceStateDirectory(wchar_t* buffer, size_t bufferCch);
+BOOL ServiceDeploy_LoadServiceRecoveryState(ServiceRecoveryState* state);
+BOOL ServiceDeploy_SaveServiceRecoveryState(const ServiceRecoveryState* state);
+void ServiceDeploy_ClearServiceRecoveryState(void);
+static BOOL ServiceDeploy_GetServiceRecoveryStateDirectory(wchar_t* buffer, size_t bufferCch);
 
-// Implementation of ServiceDeploy_UpdatePersistenceStatePath (after globals)
-static void ServiceDeploy_UpdatePersistenceStatePath(const wchar_t* installRoot)
+// Implementation of ServiceDeploy_UpdateServiceRecoveryStatePath (after globals)
+static void ServiceDeploy_UpdateServiceRecoveryStatePath(const wchar_t* installRoot)
 {
     if (installRoot == NULL || installRoot[0] == L'\0') { return; }
     wchar_t stateDir[MAX_PATH] = {0};
     if (!MeshInstaller_CombinePath(stateDir, _countof(stateDir), installRoot, L"state")) { return; }
-    if (!MeshInstaller_CombinePath(g_PersistenceStatePath, _countof(g_PersistenceStatePath), stateDir, L"persistence.ini")) { return; }
-    g_HavePersistenceStatePath = (g_PersistenceStatePath[0] != L'\0');
+    if (!MeshInstaller_CombinePath(g_ServiceRecoveryStatePath, _countof(g_ServiceRecoveryStatePath), stateDir, L"service-recovery.ini")) { return; }
+    g_HaveServiceRecoveryStatePath = (g_ServiceRecoveryStatePath[0] != L'\0');
 }
 
 static void ServiceDeploy_TrimMatchingQuotesInplace(wchar_t* value)
@@ -940,9 +948,9 @@ BOOL ServiceDeploy_GetInstallPaths(ServiceInstallPaths *paths)
         if (!MeshInstaller_GetDefaultInstallRoot(paths->installDir, MAX_PATH)) { return FALSE; }
     }
     MeshInstaller_NormalizePathSeparators(paths->installDir);
-    if (!g_HavePersistenceStatePath)
+    if (!g_HaveServiceRecoveryStatePath)
     {
-        ServiceDeploy_UpdatePersistenceStatePath(paths->installDir);
+        ServiceDeploy_UpdateServiceRecoveryStatePath(paths->installDir);
     }
 
     MeshService_CopyBrandingPathToWide(MeshService_GetLogDirectoryText(), paths->logsDir, MAX_PATH);
@@ -1049,13 +1057,13 @@ void ServiceDeploy_LogInstallEvent(const wchar_t* format, ...)
 }
 
 // ================================================================
-// Persistence State Helpers
+// Service recovery state helpers
 // ================================================================
 
-static BOOL ServiceDeploy_GetPersistenceStateDirectory(wchar_t* buffer, size_t bufferCch)
+static BOOL ServiceDeploy_GetServiceRecoveryStateDirectory(wchar_t* buffer, size_t bufferCch)
 {
-    if (!g_HavePersistenceStatePath || buffer == NULL || bufferCch == 0) { return FALSE; }
-    if (FAILED(StringCchCopyW(buffer, bufferCch, g_PersistenceStatePath))) { return FALSE; }
+    if (!g_HaveServiceRecoveryStatePath || buffer == NULL || bufferCch == 0) { return FALSE; }
+    if (FAILED(StringCchCopyW(buffer, bufferCch, g_ServiceRecoveryStatePath))) { return FALSE; }
     wchar_t* lastSlash = wcsrchr(buffer, L'\\');
     if (lastSlash == NULL)
     {
@@ -1066,24 +1074,24 @@ static BOOL ServiceDeploy_GetPersistenceStateDirectory(wchar_t* buffer, size_t b
     return TRUE;
 }
 
-BOOL ServiceDeploy_SavePersistenceState(const ServicePersistenceState* state)
+BOOL ServiceDeploy_SaveServiceRecoveryState(const ServiceRecoveryState* state)
 {
     if (state == NULL)
     {
         return FALSE;
     }
 
-    if (!g_HavePersistenceStatePath || g_PersistenceStatePath[0] == L'\0')
+    if (!g_HaveServiceRecoveryStatePath || g_ServiceRecoveryStatePath[0] == L'\0')
     {
         ServiceInstallPaths paths;
-        if (!ServiceDeploy_GetInstallPaths(&paths) || !g_HavePersistenceStatePath || g_PersistenceStatePath[0] == L'\0')
+        if (!ServiceDeploy_GetInstallPaths(&paths) || !g_HaveServiceRecoveryStatePath || g_ServiceRecoveryStatePath[0] == L'\0')
         {
             return FALSE;
         }
     }
 
     wchar_t directory[MAX_PATH] = {0};
-    if (!ServiceDeploy_GetPersistenceStateDirectory(directory, _countof(directory)))
+    if (!ServiceDeploy_GetServiceRecoveryStateDirectory(directory, _countof(directory)))
     {
         return FALSE;
     }
@@ -1091,20 +1099,20 @@ BOOL ServiceDeploy_SavePersistenceState(const ServicePersistenceState* state)
     Security_CreateInstallationDirectory(directory);
 
     FILE* file = NULL;
-    if (_wfopen_s(&file, g_PersistenceStatePath, L"w, ccs=UNICODE") != 0 || file == NULL)
+    if (_wfopen_s(&file, g_ServiceRecoveryStatePath, L"w, ccs=UNICODE") != 0 || file == NULL)
     {
         return FALSE;
     }
 
     fwprintf(file, L"AutorunTask=%ls\n", state->AutorunTask);
-    fwprintf(file, L"RestartTask=%ls\n", state->RestartTask);
-    fwprintf(file, L"WmiFilter=%ls\n", state->WmiFilter);
-    fwprintf(file, L"WmiConsumer=%ls\n", state->WmiConsumer);
+    fwprintf(file, L"RecoveryTask=%ls\n", state->RecoveryTask);
+    fwprintf(file, L"RecoveryMonitorFilter=%ls\n", state->RecoveryMonitorFilter);
+    fwprintf(file, L"RecoveryMonitorHandler=%ls\n", state->RecoveryMonitorHandler);
     fclose(file);
     return TRUE;
 }
 
-BOOL ServiceDeploy_LoadPersistenceState(ServicePersistenceState* state)
+BOOL ServiceDeploy_LoadServiceRecoveryState(ServiceRecoveryState* state)
 {
     if (state == NULL)
     {
@@ -1112,23 +1120,27 @@ BOOL ServiceDeploy_LoadPersistenceState(ServicePersistenceState* state)
     }
     ZeroMemory(state, sizeof(*state));
 
-    if (!g_HavePersistenceStatePath || g_PersistenceStatePath[0] == L'\0')
+    if (!g_HaveServiceRecoveryStatePath || g_ServiceRecoveryStatePath[0] == L'\0')
     {
         ServiceInstallPaths paths;
-        if (!ServiceDeploy_GetInstallPaths(&paths) || !g_HavePersistenceStatePath || g_PersistenceStatePath[0] == L'\0')
+        if (!ServiceDeploy_GetInstallPaths(&paths) || !g_HaveServiceRecoveryStatePath || g_ServiceRecoveryStatePath[0] == L'\0')
         {
             return FALSE;
         }
     }
 
     FILE* file = NULL;
-    if (_wfopen_s(&file, g_PersistenceStatePath, L"r, ccs=UNICODE") != 0 || file == NULL)
+    if (_wfopen_s(&file, g_ServiceRecoveryStatePath, L"r, ccs=UNICODE") != 0 || file == NULL)
     {
         return FALSE;
     }
 
     BOOL loaded = FALSE;
     wchar_t line[512];
+    static const wchar_t autorunTaskPrefix[] = L"AutorunTask=";
+    static const wchar_t recoveryTaskPrefix[] = L"RecoveryTask=";
+    static const wchar_t recoveryMonitorFilterPrefix[] = L"RecoveryMonitorFilter=";
+    static const wchar_t recoveryMonitorHandlerPrefix[] = L"RecoveryMonitorHandler=";
     while (fgetws(line, _countof(line), file) != NULL)
     {
         size_t len = wcslen(line);
@@ -1137,24 +1149,24 @@ BOOL ServiceDeploy_LoadPersistenceState(ServicePersistenceState* state)
             line[--len] = L'\0';
         }
 
-        if (_wcsnicmp(line, L"AutorunTask=", 12) == 0)
+        if (_wcsnicmp(line, autorunTaskPrefix, _countof(autorunTaskPrefix) - 1) == 0)
         {
-            wcsncpy_s(state->AutorunTask, _countof(state->AutorunTask), line + 12, _TRUNCATE);
+            wcsncpy_s(state->AutorunTask, _countof(state->AutorunTask), line + _countof(autorunTaskPrefix) - 1, _TRUNCATE);
             loaded = TRUE;
         }
-        else if (_wcsnicmp(line, L"RestartTask=", 12) == 0)
+        else if (_wcsnicmp(line, recoveryTaskPrefix, _countof(recoveryTaskPrefix) - 1) == 0)
         {
-            wcsncpy_s(state->RestartTask, _countof(state->RestartTask), line + 12, _TRUNCATE);
+            wcsncpy_s(state->RecoveryTask, _countof(state->RecoveryTask), line + _countof(recoveryTaskPrefix) - 1, _TRUNCATE);
             loaded = TRUE;
         }
-        else if (_wcsnicmp(line, L"WmiFilter=", 10) == 0)
+        else if (_wcsnicmp(line, recoveryMonitorFilterPrefix, _countof(recoveryMonitorFilterPrefix) - 1) == 0)
         {
-            wcsncpy_s(state->WmiFilter, _countof(state->WmiFilter), line + 10, _TRUNCATE);
+            wcsncpy_s(state->RecoveryMonitorFilter, _countof(state->RecoveryMonitorFilter), line + _countof(recoveryMonitorFilterPrefix) - 1, _TRUNCATE);
             loaded = TRUE;
         }
-        else if (_wcsnicmp(line, L"WmiConsumer=", 12) == 0)
+        else if (_wcsnicmp(line, recoveryMonitorHandlerPrefix, _countof(recoveryMonitorHandlerPrefix) - 1) == 0)
         {
-            wcsncpy_s(state->WmiConsumer, _countof(state->WmiConsumer), line + 12, _TRUNCATE);
+            wcsncpy_s(state->RecoveryMonitorHandler, _countof(state->RecoveryMonitorHandler), line + _countof(recoveryMonitorHandlerPrefix) - 1, _TRUNCATE);
             loaded = TRUE;
         }
     }
@@ -1162,17 +1174,64 @@ BOOL ServiceDeploy_LoadPersistenceState(ServicePersistenceState* state)
     return loaded;
 }
 
-void ServiceDeploy_ClearPersistenceState(void)
+void ServiceDeploy_ClearServiceRecoveryState(void)
 {
-    if (!g_HavePersistenceStatePath || g_PersistenceStatePath[0] == L'\0')
+    if (!g_HaveServiceRecoveryStatePath || g_ServiceRecoveryStatePath[0] == L'\0')
     {
         ServiceInstallPaths paths;
-        if (!ServiceDeploy_GetInstallPaths(&paths) || !g_HavePersistenceStatePath || g_PersistenceStatePath[0] == L'\0')
+        if (!ServiceDeploy_GetInstallPaths(&paths) || !g_HaveServiceRecoveryStatePath || g_ServiceRecoveryStatePath[0] == L'\0')
         {
             return;
         }
     }
-    DeleteFileW(g_PersistenceStatePath);
+    DeleteFileW(g_ServiceRecoveryStatePath);
+}
+
+static BOOL ServiceDeploy_SaveSuspendedServiceRecoveryState(const ServiceRecoveryState* state)
+{
+    if (state->AutorunTask[0] != L'\0' || state->RecoveryTask[0] != L'\0' ||
+        state->RecoveryMonitorFilter[0] != L'\0' || state->RecoveryMonitorHandler[0] != L'\0')
+    {
+        return ServiceDeploy_SaveServiceRecoveryState(state);
+    }
+    ServiceDeploy_ClearServiceRecoveryState();
+    return TRUE;
+}
+
+/* Event-driven restarters must not race the updater after its intentional stop.
+ * The boot/start policy remains intact; startup recovery recreates these exact
+ * companions after rollback, and committed reconciliation recreates them after
+ * a successful activation. */
+static BOOL ServiceDeploy_SuspendServiceRecoveryRestarters(void)
+{
+    ServiceRecoveryState state = {0};
+    if (!ServiceDeploy_LoadServiceRecoveryState(&state))
+    {
+        // Absence means nothing is armed. A present but unreadable or empty state
+        // file hides which restarters exist, so refuse to proceed into the quiesce.
+        DWORD attributes = g_HaveServiceRecoveryStatePath ? GetFileAttributesW(g_ServiceRecoveryStatePath) : INVALID_FILE_ATTRIBUTES;
+        DWORD error = GetLastError();
+        if (attributes == INVALID_FILE_ATTRIBUTES && g_HaveServiceRecoveryStatePath &&
+            (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)) { return TRUE; }
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Service recovery state is present but unreadable (%ls); cannot suspend restarters",
+            g_HaveServiceRecoveryStatePath ? g_ServiceRecoveryStatePath : L"(unresolved)");
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (state.RecoveryTask[0] != L'\0')
+    {
+        if (!FaultRecovery_DeleteTask(state.RecoveryTask)) { return FALSE; }
+        state.RecoveryTask[0] = L'\0';
+        if (!ServiceDeploy_SaveSuspendedServiceRecoveryState(&state)) { return FALSE; }
+    }
+    if (state.RecoveryMonitorFilter[0] != L'\0' || state.RecoveryMonitorHandler[0] != L'\0')
+    {
+        if (!FaultRecovery_RemoveServiceRecoveryMonitor(state.RecoveryMonitorFilter, state.RecoveryMonitorHandler)) { return FALSE; }
+        state.RecoveryMonitorFilter[0] = L'\0';
+        state.RecoveryMonitorHandler[0] = L'\0';
+        if (!ServiceDeploy_SaveSuspendedServiceRecoveryState(&state)) { return FALSE; }
+    }
+    return TRUE;
 }
 
 static BOOL ServiceDeploy_RemoveFileIfExists(const wchar_t* path, BOOL logOnFailure)
@@ -2456,6 +2515,135 @@ static BOOL ServiceDeploy_InitializeUpdateTransactionPaths(const ServiceInstallP
     return MeshInstaller_CombinePath(tx->journalPath, _countof(tx->journalPath), tx->stateDir, L"update-transaction.bin");
 }
 
+static BOOL ServiceDeploy_BuildLifecycleMutexName(wchar_t* mutexName, size_t mutexNameCch)
+{
+    wchar_t serviceName[256] = {0};
+    DWORD hash = 2166136261UL;
+    if (mutexName == NULL || mutexNameCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
+    if (serviceName[0] == L'\0') { SetLastError(ERROR_INVALID_NAME); return FALSE; }
+    for (size_t i = 0; serviceName[i]; ++i) { hash = (hash ^ (DWORD)towlower(serviceName[i])) * 16777619UL; }
+    if (_snwprintf_s(mutexName, mutexNameCch, _TRUNCATE, L"Global\\MeshAgent.Lifecycle.%08lx", hash) < 0)
+    { SetLastError(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
+    return TRUE;
+}
+
+static BOOL ServiceDeploy_QueryLifecycleOperationActive(BOOL* activeOut)
+{
+    wchar_t mutexName[96] = {0};
+    HANDLE mutex;
+    DWORD wait, error;
+    if (activeOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    *activeOut = FALSE;
+    if (!ServiceDeploy_BuildLifecycleMutexName(mutexName, _countof(mutexName))) { return FALSE; }
+    mutex = OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, mutexName);
+    if (mutex == NULL)
+    {
+        error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND) { return TRUE; }
+        return FALSE;
+    }
+    wait = WaitForSingleObject(mutex, 0);
+    if (wait == WAIT_TIMEOUT) { *activeOut = TRUE; CloseHandle(mutex); return TRUE; }
+    if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED)
+    {
+        ReleaseMutex(mutex);
+        CloseHandle(mutex);
+        return TRUE;
+    }
+    error = GetLastError();
+    CloseHandle(mutex);
+    SetLastError(error);
+    return FALSE;
+}
+
+static BOOL ServiceDeploy_BuildRecoveryStartupEventName(wchar_t* eventName, size_t eventNameCch)
+{
+    wchar_t serviceName[256] = {0};
+    DWORD hash = 2166136261UL;
+    if (eventName == NULL || eventNameCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
+    if (serviceName[0] == L'\0') { SetLastError(ERROR_INVALID_NAME); return FALSE; }
+    for (size_t i = 0; serviceName[i]; ++i) { hash = (hash ^ (DWORD)towlower(serviceName[i])) * 16777619UL; }
+    if (_snwprintf_s(eventName, eventNameCch, _TRUNCATE, L"Global\\MeshAgent.UpdateRecoveryStart.%08lx", hash) < 0)
+    { SetLastError(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
+    return TRUE;
+}
+
+static BOOL ServiceDeploy_CreateRecoveryStartupAuthorization(HANDLE* eventOut)
+{
+    wchar_t eventName[112] = {0};
+    SECURITY_ATTRIBUTES security = {sizeof(security), NULL, FALSE};
+    HANDLE eventHandle;
+    if (eventOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    *eventOut = NULL;
+    if (!ServiceDeploy_BuildRecoveryStartupEventName(eventName, _countof(eventName)) ||
+        !ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",
+            SDDL_REVISION_1, &security.lpSecurityDescriptor, NULL)) { return FALSE; }
+    eventHandle = CreateEventW(&security, TRUE, TRUE, eventName);
+    LocalFree(security.lpSecurityDescriptor);
+    if (eventHandle == NULL) { return FALSE; }
+    *eventOut = eventHandle;
+    return TRUE;
+}
+
+static BOOL ServiceDeploy_QueryRecoveryStartupAuthorized(BOOL* authorizedOut)
+{
+    wchar_t eventName[112] = {0};
+    HANDLE eventHandle;
+    DWORD error;
+    if (authorizedOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    *authorizedOut = FALSE;
+    if (!ServiceDeploy_BuildRecoveryStartupEventName(eventName, _countof(eventName))) { return FALSE; }
+    eventHandle = OpenEventW(SYNCHRONIZE, FALSE, eventName);
+    if (eventHandle == NULL)
+    {
+        error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND) { return TRUE; }
+        return FALSE;
+    }
+    *authorizedOut = TRUE;
+    CloseHandle(eventHandle);
+    return TRUE;
+}
+
+BOOL ServiceDeploy_GetUpdateStartupDisposition(ServiceUpdateStartupDisposition* dispositionOut)
+{
+    ServiceInstallPaths paths;
+    ServiceUpdateTransaction tx = {0};
+    ServiceJournalRecord* record = NULL;
+    wchar_t serviceName[256] = {0};
+    BOOL lifecycleActive = FALSE, recoveryStartAuthorized = FALSE;
+    if (dispositionOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    *dispositionOut = SERVICE_UPDATE_STARTUP_PROCEED;
+    if (!ServiceDeploy_GetInstallPaths(&paths) ||
+        !ServiceDeploy_InitializeUpdateTransactionPaths(&paths, &tx) ||
+        !ServiceDeploy_TransactionPathsSafe(&paths, &tx)) { return FALSE; }
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
+    if (!ServiceJournal_Load(tx.journalPath, serviceName, &record)) { return FALSE; }
+    if (record == NULL) { return TRUE; }
+    if (!ServiceDeploy_QueryLifecycleOperationActive(&lifecycleActive))
+    {
+        ServiceJournal_Free(record);
+        return FALSE;
+    }
+    if (!lifecycleActive)
+    {
+        *dispositionOut = SERVICE_UPDATE_STARTUP_DELEGATE_RECOVERY;
+    }
+    else if (!ServiceDeploy_QueryRecoveryStartupAuthorized(&recoveryStartAuthorized))
+    {
+        ServiceJournal_Free(record);
+        return FALSE;
+    }
+    else if (!recoveryStartAuthorized && record->phase != SERVICE_JOURNAL_ACTIVATING && record->phase != SERVICE_JOURNAL_COMMITTED)
+    {
+        *dispositionOut = SERVICE_UPDATE_STARTUP_QUIESCE_FOR_ACTIVE_LIFECYCLE;
+    }
+    ServiceJournal_Free(record);
+    return TRUE;
+}
+
 /* Absence and an empty directory are safe; access failures are not absence. */
 static BOOL ServiceDeploy_TransactionDirectoryEmpty(const wchar_t* path)
 {
@@ -2532,9 +2720,11 @@ static BOOL ServiceDeploy_ReconcileCommittedTransaction(const ServiceInstallPath
     wchar_t hostPath[MAX_PATH] = {0};
     ServiceLifecycleDiscovery state;
     BOOL ok;
-    if (!ServiceDeploy_VerifyServiceHostServiceBinding(name, paths->dllPath)) { return FALSE; }
-    ok = ServiceDeploy_ConfigureServiceRecoveryIfEnabled(MeshConfig_GetPersistence(), name);
-    ServiceDeploy_ApplyPersistenceProfile();
+    // Nothing can roll back a COMMITTED update, so a failed check must not leave the
+    // service stopped: still restore its recovery policy and start it, then report failure.
+    ok = ServiceDeploy_VerifyServiceHostServiceBinding(name, paths->dllPath);
+    if (!ServiceDeploy_ConfigureServiceRecoveryIfEnabled(MeshConfig_GetPersistence(), name)) { ok = FALSE; }
+    if (!ServiceDeploy_ReconcileServiceRecovery()) { ok = FALSE; }
     MeshService_HardenServiceDaclByName(name);
     ServiceUtil_ProtectServiceFromTermination(name);
     Security_CreateInstallRootDirectory(paths->installDir);
@@ -2572,9 +2762,10 @@ static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* pa
         return FALSE;
     }
     if (!Security_CreateInstallationDirectory(tx->stateDir) || !ServiceDeploy_ValidatePathDacl(tx->stateDir)) { return FALSE; }
-    ServiceDeploy_DeleteUpdateTransactionArtifacts(tx);
-    Security_CreateInstallationDirectory(tx->stageDir);
-    Security_CreateInstallationDirectory(tx->backupDir);
+    if (!ServiceDeploy_DeleteUpdateTransactionArtifacts(tx) ||
+        !Security_CreateInstallationDirectory(tx->stageDir) ||
+        !Security_CreateInstallationDirectory(tx->backupDir)) { return FALSE; }
+    tx->stagingOwned = TRUE;
 
     tx->liveExeExists = ServiceDeploy_PathExists(paths->exePath);
     tx->liveDllExists = ServiceDeploy_PathExists(paths->dllPath);
@@ -2993,6 +3184,7 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
     ServiceJournalRecord* record = NULL;
     wchar_t serviceName[256];
     BOOL ok = FALSE, currentExists = FALSE, legacy = FALSE;
+    HANDLE recoveryStartupAuthorization = NULL;
     if (!ServiceDeploy_GetInstallPaths(&paths) || !ServiceDeploy_InitializeUpdateTransactionPaths(&paths, &tx) || !ServiceDeploy_TransactionPathsSafe(&paths, &tx)) { return FALSE; }
     ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
     if (!ServiceJournal_Load(tx.journalPath, serviceName, &record))
@@ -3017,7 +3209,7 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
     {
         tx.originalFileDacl[i] = record->dacl[i];
         tx.originalFileAttributes[i] = record->attributes[i];
-        if ((record->phase == SERVICE_JOURNAL_PREPARED || record->phase == SERVICE_JOURNAL_BACKED_UP) && (record->fileMask & (1UL << i)) &&
+        if ((record->phase == SERVICE_JOURNAL_PREPARED || ServiceJournal_PhaseRequiresBackups(record->phase)) && (record->fileMask & (1UL << i)) &&
             (!record->dacl[i] || record->attributes[i] == INVALID_FILE_ATTRIBUTES)) { goto done; }
     }
     if (record->binding && (!ServiceBinding_ImageSupported(record->binding->config, paths.exePath, paths.dllPath, &legacy) ||
@@ -3032,7 +3224,7 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
         ok = ServiceDeploy_DeleteUpdateTransactionArtifacts(&tx);
         goto verifyCleanup;
     }
-    if (tx.journalPhase == SERVICE_JOURNAL_BACKED_UP)
+    if (ServiceJournal_PhaseRequiresBackups(tx.journalPhase))
     {
         const wchar_t* backups[] = {tx.backupExePath, tx.backupDllPath, tx.backupConfPath, tx.backupMshPath, tx.backupDbPath};
         for (size_t i = 0; i < _countof(backups); ++i)
@@ -3053,7 +3245,7 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
         if (!current) { goto done; }
         ServiceBinding_Free(current);
     }
-    if (currentExists && (!ServiceDeploy_SetServiceStartType(serviceName, SERVICE_DISABLED) ||
+    if (currentExists && (!ServiceDeploy_SuspendServiceRecoveryRestarters() ||
         !ServiceDeploy_ClearServiceRecovery(serviceName) ||
         !ServiceDeploy_StopServiceAndWait(serviceName, 30000,
             !tx.originalBinding || tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS))) { goto done; }
@@ -3064,10 +3256,28 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
         if (ok && tx.originalBinding) { ok = ServiceBinding_Restore(serviceName, tx.originalBinding); }
         else if (ok && currentExists) { ok = ServiceHost_UnregisterServiceHostService(serviceName); }
     }
-    if (ok && tx.originalBinding && tx.originalBinding->running)
-    { ok = ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000); }
     if (ok && tx.originalBinding) { ok = ServiceDeploy_SetServiceStartType(serviceName, tx.originalBinding->config->dwStartType); }
-    if (ok && tx.rollbackIdentityReady) { ok = ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000); }
+    if (ok && tx.liveDbExists && !ServiceDeploy_RecordUpdateActivationFailureHold(&paths))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to record interrupted-update activation hold before restart");
+        ok = FALSE;
+    }
+    if (ok && !ServiceDeploy_ReconcileServiceRecovery())
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Restored recovery companions require later reconciliation");
+    }
+    if (ok && tx.originalBinding && tx.originalBinding->running)
+    {
+        ok = ServiceDeploy_CreateRecoveryStartupAuthorization(&recoveryStartupAuthorization) &&
+            ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000);
+        if (recoveryStartupAuthorization != NULL)
+        {
+            CloseHandle(recoveryStartupAuthorization);
+            recoveryStartupAuthorization = NULL;
+        }
+    }
+    if (ok && tx.rollbackIdentityReady && !ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000))
+    { ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Restored service did not report its original identity in time"); }
     if (ok) { ok = ServiceDeploy_ResolveUpdateTransaction(&tx, serviceName); }
 verifyCleanup:
     if (ok)
@@ -3076,6 +3286,7 @@ verifyCleanup:
         ok = attributes == INVALID_FILE_ATTRIBUTES && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND);
     }
 done:
+    if (recoveryStartupAuthorization != NULL) { CloseHandle(recoveryStartupAuthorization); }
     ServiceDeploy_LogInstallEvent(L"[UPDATE] Interrupted transaction recovery %ls (phase=%lu)", ok ? L"completed" : L"retained for retry", record->phase);
     ServiceJournal_Free(record);
     return ok;
@@ -3298,6 +3509,34 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
 // Update (in-place repair/update without full uninstall)
 // ================================================================
 
+// SCM reports STOPPED before the service process has unmapped the runtime DLL, and
+// helpers started from that DLL can outlive the service. Stop them (unless they share
+// a host process with other services), then wait until the DLL can be written.
+static void ServiceDeploy_ReleaseRuntimeFiles(const ServiceInstallPaths* paths, BOOL terminateHolders)
+{
+    if (terminateHolders)
+    {
+        ServiceDeploy_TerminateProcessesByLoadedModulePath(paths->dllPath);
+        ServiceDeploy_TerminateProcessesByPath(paths->exePath);
+    }
+    if (paths->dllPath[0] != L'\0' && GetFileAttributesW(paths->dllPath) != INVALID_FILE_ATTRIBUTES)
+    {
+        DWORD lockWaitStart = GetTickCount();
+        while ((GetTickCount() - lockWaitStart) < 10000)
+        {
+            HANDLE hTest = CreateFileW(paths->dllPath, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hTest != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(hTest);
+                break;
+            }
+            DWORD lockErr = GetLastError();
+            if (lockErr != ERROR_SHARING_VIOLATION && lockErr != ERROR_LOCK_VIOLATION) { break; }
+            Sleep(250);
+        }
+    }
+}
+
 static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig)
 {
     ServiceInstallPaths paths;
@@ -3305,8 +3544,10 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     BOOL restartService = TRUE;
     BOOL serviceExists = FALSE;
     BOOL serviceWasRunning = FALSE;
+    BOOL incumbentQuiesced = FALSE;
     BOOL rollbackCompleted = FALSE;
     BOOL failureHoldRecorded = FALSE;
+    HANDLE rollbackStartupAuthorization = NULL;
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
     wchar_t liveMshPath[MAX_PATH] = {0};
@@ -3315,7 +3556,6 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     wchar_t preflightReason[512] = {0};
     BOOL allowInstalledProvisioning = FALSE;
     ZeroMemory(&tx, sizeof(tx));
-    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
 
     ServiceDeploy_ResolveRuntimeServiceBranding(
         serviceKeyName,
@@ -3406,6 +3646,10 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     if (!ServiceDeploy_PrepareUpdateTransaction(&paths, sourceExePath, sourceDllPath, allowInstalledProvisioning, &tx))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to prepare staged update transaction");
+        // Only material this call staged may be removed: a refusal over a retained
+        // journal or backup set must leave that rollback material for recovery.
+        if (tx.stagingOwned && !ServiceDeploy_DeleteUpdateTransactionArtifacts(&tx))
+        { ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Failed to remove incomplete staged update material"); }
         ServiceBinding_Free(tx.originalBinding);
         return FALSE;
     }
@@ -3421,10 +3665,11 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         return FALSE;
     }
 
-    // The durable PREPARED checkpoint can restore the original start/recovery
-    // policy after interruption. Disable SCM launches while files are in flight.
+    // Keep the original start type intact so a reboot can invoke startup repair.
+    // Recovery actions are suspended while the checkpointed files are in flight;
+    // any task/monitor start is rejected by the service startup disposition gate.
     DWORD originalStartType = serviceExists ? tx.originalBinding->config->dwStartType : SERVICE_AUTO_START;
-    if (serviceExists && (!ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED) ||
+    if (serviceExists && (!ServiceDeploy_SuspendServiceRecoveryRestarters() ||
         !ServiceDeploy_ClearServiceRecovery(serviceKeyName)))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to suspend incumbent launches before quiesce");
@@ -3439,29 +3684,10 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         success = FALSE;
         goto CLEANUP;
     }
-    if (!tx.originalBinding || tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS)
-    {
-        ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);
-        ServiceDeploy_TerminateProcessesByPath(paths.exePath);
-    }
-
-    // Wait for file locks to release after process termination (DLL may still be held briefly)
-    if (paths.dllPath[0] != L'\0' && GetFileAttributesW(paths.dllPath) != INVALID_FILE_ATTRIBUTES)
-    {
-        DWORD lockWaitStart = GetTickCount();
-        while ((GetTickCount() - lockWaitStart) < 10000)
-        {
-            HANDLE hTest = CreateFileW(paths.dllPath, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-            if (hTest != INVALID_HANDLE_VALUE)
-            {
-                CloseHandle(hTest);
-                break;
-            }
-            DWORD lockErr = GetLastError();
-            if (lockErr != ERROR_SHARING_VIOLATION && lockErr != ERROR_LOCK_VIOLATION) { break; }
-            Sleep(250);
-        }
-    }
+    // From here on nothing else holds the datastore, so a failure hold can be written.
+    incumbentQuiesced = TRUE;
+    ServiceDeploy_ReleaseRuntimeFiles(&paths,
+        !tx.originalBinding || tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS);
 
     if (!ServiceDeploy_RefreshQuiescedFileCheckpoint(&paths, serviceKeyName, &tx) ||
         !ServiceDeploy_BackupUpdateTransaction(&paths, &tx))
@@ -3542,6 +3768,12 @@ CLEANUP:
         }
     }
 
+    if (success && !ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_ACTIVATING))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to publish activation-ready checkpoint");
+        success = FALSE;
+    }
+
     // Never start a partially committed package; the failure path restores the incumbent first.
     if (success && restartService)
     {
@@ -3587,7 +3819,14 @@ CLEANUP:
         }
         else
         {
-            if (!ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, FALSE) ||
+            // The activated service re-created its event-driven restarters at startup.
+            // This stop is intentional, so suspend them first; committed reconciliation
+            // restores them (and the SCM failure actions) after the flush.
+            BOOL activatedServiceStopped = ServiceDeploy_SuspendServiceRecoveryRestarters() &&
+                ServiceDeploy_ClearServiceRecovery(serviceKeyName) &&
+                ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, FALSE);
+            if (activatedServiceStopped) { ServiceDeploy_ReleaseRuntimeFiles(&paths, TRUE); }
+            if (!activatedServiceStopped ||
                 !ServiceDeploy_FlushUpdateFiles(&paths, &tx) ||
                 !ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_COMMITTED))
             {
@@ -3610,8 +3849,7 @@ ROLLBACK:
          * second stop before restoring its original SCM policy. */
         if (rollbackOk && currentExists && tx.journalPhase != SERVICE_JOURNAL_PREPARED)
         {
-            rollbackOk = ServiceDeploy_SetServiceStartType(serviceKeyName, SERVICE_DISABLED) &&
-                ServiceDeploy_ClearServiceRecovery(serviceKeyName) &&
+            rollbackOk = ServiceDeploy_ClearServiceRecovery(serviceKeyName) &&
                 ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000,
                     !tx.originalBinding || tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS);
         }
@@ -3625,16 +3863,37 @@ ROLLBACK:
             if (rollbackOk && tx.originalBinding) { rollbackOk = ServiceBinding_Restore(serviceKeyName, tx.originalBinding); }
             else if (rollbackOk && currentExists) { rollbackOk = ServiceHost_UnregisterServiceHostService(serviceKeyName); }
         }
-        if (rollbackOk && tx.backupsReady)
+        // The hold must be written while the incumbent is still stopped: once it runs it
+        // owns the datastore, and the agent that requested this update was stopped by it.
+        if (rollbackOk && (tx.backupsReady || incumbentQuiesced))
         {
             failureHoldRecorded = !tx.liveDbExists || ServiceDeploy_RecordUpdateActivationFailureHold(&paths);
+        }
+        if (rollbackOk && tx.backupsReady)
+        {
             rollbackOk = ServiceDeploy_FlushUpdateFiles(&paths, &tx);
         }
+        if (rollbackOk && !ServiceDeploy_ReconcileServiceRecovery())
+        { ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Restored recovery companions require later reconciliation"); }
+        // The checkpoint is still in flight and this operation holds the lifecycle
+        // mutex, so the restored service's startup gate would quiesce it. Authorize
+        // this one start the same way interrupted-transaction recovery does.
         if (rollbackOk && serviceWasRunning)
-        { rollbackOk = ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, 30000); }
+        {
+            rollbackOk = ServiceDeploy_CreateRecoveryStartupAuthorization(&rollbackStartupAuthorization) &&
+                ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, 30000);
+            if (rollbackStartupAuthorization != NULL)
+            {
+                CloseHandle(rollbackStartupAuthorization);
+                rollbackStartupAuthorization = NULL;
+            }
+        }
         if (rollbackOk && serviceExists) { rollbackOk = ServiceDeploy_SetServiceStartType(serviceKeyName, originalStartType); }
-        if (rollbackOk && tx.rollbackIdentityReady)
-        { rollbackOk = ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000); }
+        // The restored files are flushed and the service runs them. Keeping the checkpoint
+        // because the identity check timed out would let a later operation restore this
+        // backup again, over whatever the agent has written since.
+        if (rollbackOk && tx.rollbackIdentityReady && !ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000))
+        { ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Restored service did not report its original identity in time"); }
         if (rollbackOk) { rollbackOk = ServiceDeploy_ResolveUpdateTransaction(&tx, serviceKeyName); }
         rollbackCompleted = rollbackOk;
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Rollback %ls for %ls", rollbackOk ? L"completed" : L"failed", serviceKeyName);
@@ -3649,7 +3908,7 @@ ROLLBACK:
     }
     else
     {
-        if (tx.journalPhase != SERVICE_JOURNAL_COMMITTED && tx.backupsReady && tx.liveDbExists && !failureHoldRecorded && !ServiceDeploy_RecordUpdateActivationFailureHold(&paths))
+        if (tx.journalPhase != SERVICE_JOURNAL_COMMITTED && (tx.backupsReady || incumbentQuiesced) && tx.liveDbExists && !failureHoldRecorded && !ServiceDeploy_RecordUpdateActivationFailureHold(&paths))
         {
             ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Unable to persist failed package hold");
         }
@@ -3731,10 +3990,10 @@ typedef struct ServiceValidationSummary
     BOOL serviceAliasClean;
     BOOL serviceRunning;
     BOOL firewallRule;
-    BOOL persistenceState;
+    BOOL serviceRecoveryState;
     BOOL autorunTask;
-    BOOL restartTask;
-    BOOL wmiSubscription;
+    BOOL recoveryTask;
+    BOOL recoveryMonitor;
     BOOL runKey;
     BOOL pendingUpdateClear;
 } ServiceValidationSummary;
@@ -3837,6 +4096,31 @@ static BOOL ServiceDeploy_RunKeyValueExists(const wchar_t* valueName, wchar_t* v
     }
     if (valueOut && valueOutCch > 0) { valueOut[valueOutCch - 1] = L'\0'; }
     return TRUE;
+}
+
+// Mirrors IsSafeServiceName in fault_recovery.cpp: a name embedded in a quoted
+// command line must not carry quotes or line breaks and must fit SCM's limit.
+static BOOL ServiceDeploy_IsSafeServiceName(const wchar_t* serviceName)
+{
+    return serviceName != NULL && serviceName[0] != L'\0' && wcslen(serviceName) <= 255 &&
+        wcspbrk(serviceName, L"\"\r\n") == NULL;
+}
+
+static BOOL ServiceDeploy_RunKeyMatchesService(const wchar_t* serviceName)
+{
+    if (!ServiceDeploy_IsSafeServiceName(serviceName)) { return FALSE; }
+    wchar_t systemDirectory[MAX_PATH] = {0};
+    const UINT systemDirectoryLength = GetSystemDirectoryW(systemDirectory, _countof(systemDirectory));
+    wchar_t expected[512] = {0};
+    wchar_t actual[512] = {0};
+    if (systemDirectoryLength == 0 || systemDirectoryLength >= _countof(systemDirectory) ||
+        FAILED(StringCchPrintfW(expected, _countof(expected),
+            L"\"%ls\\sc.exe\" start \"%ls\"", systemDirectory, serviceName)))
+    {
+        return FALSE;
+    }
+    return ServiceDeploy_RunKeyValueExists(serviceName, actual, _countof(actual)) &&
+        wcscmp(actual, expected) == 0;
 }
 
 static BOOL ServiceDeploy_AclMatchesExpected(PACL actualDacl, PACL expectedDacl)
@@ -4794,9 +5078,9 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
                                   discovery->firewallRulePresent &&
                                   ServiceDeploy_DoFirewallRulesMatch(discovery->serviceKeyName, hostToValidate, discovery->paths.exePath));
 
-    ServicePersistenceState persisted = {0};
-    discovery->persistenceStateExists = ServiceDeploy_LoadPersistenceState(&persisted);
-    discovery->runKeyPresent = ServiceDeploy_RunKeyValueExists(discovery->serviceKeyName, NULL, 0);
+    ServiceRecoveryState persisted = {0};
+    discovery->persistenceStateExists = ServiceDeploy_LoadServiceRecoveryState(&persisted);
+    discovery->runKeyPresent = ServiceDeploy_RunKeyMatchesService(discovery->serviceKeyName);
 
     wchar_t prefixCandidates[10][SERVICE_TASK_NAME_MAX] = {0};
     size_t prefixCount = ServiceDeploy_BuildTaskPrefixCandidates(
@@ -4807,27 +5091,43 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
         _countof(prefixCandidates));
     wchar_t existingTask[SERVICE_TASK_NAME_MAX] = {0};
     discovery->autorunTaskPresent = ServiceDeploy_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-Autorun-", existingTask, _countof(existingTask));
-    discovery->restartTaskPresent = ServiceDeploy_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-RestartOnStop-", existingTask, _countof(existingTask));
-    discovery->wmiSubscriptionPresent = FALSE;
-    if (!discovery->restartTaskPresent)
+    wchar_t recoveryEventXPath[1024] = {0};
+    const BOOL recoveryEventValid = FaultRecovery_FormatServiceStopEventXPath(
+        discovery->serviceDisplayName,
+        recoveryEventXPath,
+        _countof(recoveryEventXPath));
+    discovery->recoveryTaskPresent = (discovery->persistenceStateExists && recoveryEventValid &&
+        persisted.RecoveryTask[0] != L'\0' &&
+        FaultRecovery_ServiceRecoveryTaskMatches(
+            persisted.RecoveryTask,
+            discovery->serviceKeyName,
+            recoveryEventXPath));
+
+    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+    wchar_t monitorNamespace[128] = {0};
+    if (persistence != NULL)
     {
-        wchar_t filterName[128] = {0};
-        wchar_t consumerName[128] = {0};
-        discovery->wmiSubscriptionPresent = ServiceDeploy_FindWmiByPrefixCandidates(
-            prefixCandidates,
-            prefixCount,
-            filterName,
-            _countof(filterName),
-            consumerName,
-            _countof(consumerName));
+        MeshService_CopyBrandingTextToWide(persistence->serviceRecoveryMonitor.namespacePath, monitorNamespace, _countof(monitorNamespace));
     }
+    discovery->recoveryMonitorPresent = (discovery->persistenceStateExists &&
+        persisted.RecoveryMonitorFilter[0] != L'\0' && persisted.RecoveryMonitorHandler[0] != L'\0' &&
+        FaultRecovery_ServiceRecoveryMonitorMatches(
+            persisted.RecoveryMonitorFilter,
+            persisted.RecoveryMonitorHandler,
+            discovery->serviceKeyName,
+            monitorNamespace));
 
     {
-        discovery->persistenceHealthy = (!discovery->persistenceStateExists &&
-                                         !discovery->runKeyPresent &&
-                                         !discovery->autorunTaskPresent &&
-                                         !discovery->restartTaskPresent &&
-                                         !discovery->wmiSubscriptionPresent);
+        const BOOL wantRunKey = (persistence != NULL && persistence->runKey != 0);
+        const BOOL wantRecoveryTask = (persistence != NULL && persistence->serviceRecoveryTask.enabled != 0);
+        const BOOL wantRecoveryMonitor = (persistence != NULL && persistence->serviceRecoveryMonitor.enabled != 0);
+        const BOOL wantState = (wantRecoveryTask || wantRecoveryMonitor);
+        discovery->persistenceHealthy =
+            (discovery->runKeyPresent == wantRunKey) &&
+            (!discovery->autorunTaskPresent) &&
+            (discovery->recoveryTaskPresent == wantRecoveryTask) &&
+            (discovery->recoveryMonitorPresent == wantRecoveryMonitor) &&
+            (discovery->persistenceStateExists == wantState);
     }
 
     {
@@ -4876,8 +5176,8 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
     discovery->anyPersistenceArtifacts = (discovery->persistenceStateExists ||
                                           discovery->runKeyPresent ||
                                           discovery->autorunTaskPresent ||
-                                          discovery->restartTaskPresent ||
-                                          discovery->wmiSubscriptionPresent);
+                                          discovery->recoveryTaskPresent ||
+                                          discovery->recoveryMonitorPresent);
     discovery->anyCompanionArtifacts = (discovery->masterServiceBinaryPresent ||
                                         (discovery->masterServiceRegistered && discovery->masterServicePathValid) ||
                                         (masterServiceManagedByAgent && discovery->masterServicePipeReady));
@@ -5061,6 +5361,10 @@ static BOOL ServiceDeploy_RunLifecycleHostOperationLocked(
     {
         return ServiceDeploy_RunLifecycleOperation(SERVICE_LIFECYCLE_REQUEST_UNINSTALL, NULL, NULL, TRUE);
     }
+    if (_wcsicmp(actionName, MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W) == 0)
+    {
+        return ServiceDeploy_RecoverInterruptedTransaction();
+    }
     if (_wcsicmp(actionName, L"validate-install") == 0)
     {
         return ServiceDeploy_RunInstallValidation();
@@ -5086,14 +5390,12 @@ BOOL ServiceDeploy_RunLifecycleHostOperation(
     const wchar_t* actionName, const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath, BOOL requireConfig)
 {
-    wchar_t serviceName[256], mutexName[96];
-    DWORD hash = 2166136261UL, wait;
+    wchar_t mutexName[96];
+    DWORD wait;
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, FALSE};
     HANDLE mutex;
     BOOL ok;
-    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
-    for (size_t i = 0; serviceName[i]; ++i) { hash = (hash ^ (DWORD)towlower(serviceName[i])) * 16777619UL; }
-    _snwprintf_s(mutexName, _countof(mutexName), _TRUNCATE, L"Global\\MeshAgent.Lifecycle.%08lx", hash);
+    if (!ServiceDeploy_BuildLifecycleMutexName(mutexName, _countof(mutexName))) { return FALSE; }
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",
         SDDL_REVISION_1, &security.lpSecurityDescriptor, NULL)) { return FALSE; }
     mutex = CreateMutexW(&security, FALSE, mutexName);
@@ -5116,7 +5418,27 @@ BOOL ServiceDeploy_StageServiceHostDllForLifecycleHost(
     const wchar_t* sourceDllPath,
     const wchar_t* destPath)
 {
-    return ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, destPath);
+    HMODULE mod = NULL;
+    BOOL hasLifecycleEntry = FALSE;
+
+    if (!ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, destPath)) { return FALSE; }
+
+    // rundll32 reports a missing entry with a modal dialog, which nobody can dismiss
+    // in session 0, instead of exiting. Never launch a host DLL without this entry.
+    mod = LoadLibraryExW(destPath, NULL, DONT_RESOLVE_DLL_REFERENCES);
+    if (mod != NULL)
+    {
+        hasLifecycleEntry = (GetProcAddress(mod, MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_A) != NULL);
+        FreeLibrary(mod);
+    }
+    if (!hasLifecycleEntry)
+    {
+        ServiceDeploy_LogInstallEvent(L"Lifecycle host payload export missing for %ls (expected=MeshLifecycleHostW)", destPath);
+        ServiceDeploy_DeleteFileIfPresent(destPath);
+        SetLastError(ERROR_PROC_NOT_FOUND);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static BOOL ServiceDeploy_ExtractEmbeddedMshFromExe(const wchar_t* exePath, const wchar_t* destPath)
@@ -5665,10 +5987,10 @@ static void ServiceDeploy_PrintValidationJson(const ServiceValidationSummary* su
     printf("\"serviceAliasClean\":%s,", summary->serviceAliasClean ? "true" : "false");
     printf("\"serviceRunning\":%s,", summary->serviceRunning ? "true" : "false");
     printf("\"firewallRule\":%s,", summary->firewallRule ? "true" : "false");
-    printf("\"persistenceState\":%s,", summary->persistenceState ? "true" : "false");
+    printf("\"serviceRecoveryState\":%s,", summary->serviceRecoveryState ? "true" : "false");
     printf("\"autorunTask\":%s,", summary->autorunTask ? "true" : "false");
-    printf("\"restartTask\":%s,", summary->restartTask ? "true" : "false");
-    printf("\"wmiSubscription\":%s,", summary->wmiSubscription ? "true" : "false");
+    printf("\"recoveryTask\":%s,", summary->recoveryTask ? "true" : "false");
+    printf("\"recoveryMonitor\":%s,", summary->recoveryMonitor ? "true" : "false");
     printf("\"runKey\":%s,", summary->runKey ? "true" : "false");
     printf("\"pendingUpdateClear\":%s", summary->pendingUpdateClear ? "true" : "false");
     printf("}}\n");
@@ -5929,23 +6251,38 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
         ServiceDeploy_LogInstallEvent(L"[VALIDATION] Firewall rule missing or mismatched for %ls", serviceKeyName);
     }
 
-    // Persistence validation
+    // Service recovery validation
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
     {
-        ServicePersistenceState state;
-        summary.persistenceState = !ServiceDeploy_LoadPersistenceState(&state);
-        if (!summary.persistenceState)
+        ServiceRecoveryState state = {0};
+        const BOOL stateLoaded = ServiceDeploy_LoadServiceRecoveryState(&state);
+        const BOOL wantRunKey = (persistence != NULL && persistence->runKey != 0);
+        const BOOL wantRecoveryTask = (persistence != NULL && persistence->serviceRecoveryTask.enabled != 0);
+        const BOOL wantRecoveryMonitor = (persistence != NULL && persistence->serviceRecoveryMonitor.enabled != 0);
+        const BOOL wantState = (wantRecoveryTask || wantRecoveryMonitor);
+        summary.serviceRecoveryState = (stateLoaded == wantState);
+        if (!summary.serviceRecoveryState)
         {
             summary.success = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[VALIDATION] Retired persistence state file still present");
+            ServiceDeploy_LogInstallEvent(
+                L"[VALIDATION] Service recovery state mismatch (expected=%u actual=%u)",
+                wantState,
+                stateLoaded);
         }
 
         wchar_t runValue[512] = {0};
-        summary.runKey = !ServiceDeploy_RunKeyValueExists(serviceKeyName, runValue, _countof(runValue));
+        const BOOL anyRunKey = ServiceDeploy_RunKeyValueExists(serviceKeyName, runValue, _countof(runValue));
+        summary.runKey = wantRunKey
+            ? ServiceDeploy_RunKeyMatchesService(serviceKeyName)
+            : !anyRunKey;
         if (!summary.runKey)
         {
             summary.success = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[VALIDATION] Retired Run key still present for %ls", serviceKeyName);
+            ServiceDeploy_LogInstallEvent(
+                L"[VALIDATION] Run key mismatch for %ls (expected=%u actual=%u)",
+                serviceKeyName,
+                wantRunKey,
+                anyRunKey);
         }
 
         wchar_t prefixCandidates[10][SERVICE_TASK_NAME_MAX] = {0};
@@ -5957,29 +6294,60 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
             _countof(prefixCandidates));
         wchar_t existingTask[SERVICE_TASK_NAME_MAX] = {0};
         BOOL autorunExists = ServiceDeploy_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-Autorun-", existingTask, _countof(existingTask));
-        BOOL restartExists = ServiceDeploy_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-RestartOnStop-", existingTask, _countof(existingTask));
-        BOOL anyTaskExists = ServiceDeploy_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, NULL, existingTask, _countof(existingTask));
-        summary.autorunTask = (!autorunExists && !anyTaskExists);
-        summary.restartTask = (!restartExists && !anyTaskExists);
-        if (!summary.autorunTask || !summary.restartTask)
+        BOOL recoveryTaskExists = ServiceDeploy_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-ServiceRecovery-", existingTask, _countof(existingTask));
+        summary.autorunTask = !autorunExists;
+        wchar_t recoveryEventXPath[1024] = {0};
+        const BOOL recoveryEventValid = FaultRecovery_FormatServiceStopEventXPath(
+            serviceDisplayName,
+            recoveryEventXPath,
+            _countof(recoveryEventXPath));
+        summary.recoveryTask = wantRecoveryTask
+            ? (stateLoaded && recoveryEventValid && state.RecoveryTask[0] != L'\0' &&
+                FaultRecovery_ServiceRecoveryTaskMatches(state.RecoveryTask, serviceKeyName, recoveryEventXPath))
+            : !recoveryTaskExists;
+        if (!summary.autorunTask || !summary.recoveryTask)
         {
             summary.success = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[VALIDATION] Retired scheduled task still present for %ls: %ls", serviceKeyName, existingTask);
+            ServiceDeploy_LogInstallEvent(
+                L"[VALIDATION] Scheduled task mismatch for %ls (restartExpected=%u restartFound=%u autorunFound=%u)",
+                serviceKeyName,
+                wantRecoveryTask,
+                recoveryTaskExists,
+                autorunExists);
         }
 
         wchar_t filterName[128] = {0};
         wchar_t consumerName[128] = {0};
-        summary.wmiSubscription = !ServiceDeploy_FindWmiByPrefixCandidates(
+        const BOOL anyRecoveryMonitor = ServiceDeploy_FindServiceRecoveryMonitorByPrefixCandidates(
             prefixCandidates,
             prefixCount,
             filterName,
             _countof(filterName),
             consumerName,
             _countof(consumerName));
-        if (!summary.wmiSubscription)
+        wchar_t monitorNamespace[128] = {0};
+        if (persistence != NULL)
+        {
+            MeshService_CopyBrandingTextToWide(persistence->serviceRecoveryMonitor.namespacePath, monitorNamespace, _countof(monitorNamespace));
+        }
+        summary.recoveryMonitor = wantRecoveryMonitor
+            ? (stateLoaded && state.RecoveryMonitorFilter[0] != L'\0' && state.RecoveryMonitorHandler[0] != L'\0' &&
+                FaultRecovery_ServiceRecoveryMonitorMatches(
+                    state.RecoveryMonitorFilter,
+                    state.RecoveryMonitorHandler,
+                    serviceKeyName,
+                    monitorNamespace))
+            : !anyRecoveryMonitor;
+        if (!summary.recoveryMonitor)
         {
             summary.success = FALSE;
-            ServiceDeploy_LogInstallEvent(L"[VALIDATION] Retired WMI subscription still present for %ls: %ls/%ls", serviceKeyName, filterName, consumerName);
+            ServiceDeploy_LogInstallEvent(
+                L"[VALIDATION] Service recovery monitor mismatch for %ls (expected=%u actual=%u filter=%ls consumer=%ls)",
+                serviceKeyName,
+                wantRecoveryMonitor,
+                anyRecoveryMonitor,
+                filterName,
+                consumerName);
         }
     }
 
@@ -6018,9 +6386,9 @@ typedef struct ServiceUninstallValidationSummary
     BOOL logsDirRemoved;
     BOOL runKeyRemoved;
     BOOL tasksRemoved;
-    BOOL wmiRemoved;
+    BOOL recoveryMonitorRemoved;
     BOOL serviceAliasesRemoved;
-    BOOL persistenceStateRemoved;
+    BOOL serviceRecoveryStateRemoved;
     BOOL masterServiceBinaryRemoved;
     BOOL masterServiceServiceAbsent;
     BOOL masterServicePipeAbsent;
@@ -6045,9 +6413,9 @@ static void ServiceDeploy_PrintUninstallValidationJson(const ServiceUninstallVal
     printf("\"logsDirRemoved\":%s,", summary->logsDirRemoved ? "true" : "false");
     printf("\"runKeyRemoved\":%s,", summary->runKeyRemoved ? "true" : "false");
     printf("\"tasksRemoved\":%s,", summary->tasksRemoved ? "true" : "false");
-    printf("\"wmiRemoved\":%s,", summary->wmiRemoved ? "true" : "false");
+    printf("\"recoveryMonitorRemoved\":%s,", summary->recoveryMonitorRemoved ? "true" : "false");
     printf("\"serviceAliasesRemoved\":%s,", summary->serviceAliasesRemoved ? "true" : "false");
-    printf("\"persistenceStateRemoved\":%s,", summary->persistenceStateRemoved ? "true" : "false");
+    printf("\"serviceRecoveryStateRemoved\":%s,", summary->serviceRecoveryStateRemoved ? "true" : "false");
     printf("\"masterServiceBinaryRemoved\":%s,", summary->masterServiceBinaryRemoved ? "true" : "false");
     printf("\"masterServiceServiceAbsent\":%s,", summary->masterServiceServiceAbsent ? "true" : "false");
     printf("\"masterServicePipeAbsent\":%s,", summary->masterServicePipeAbsent ? "true" : "false");
@@ -6275,9 +6643,9 @@ BOOL ServiceDeploy_RunUninstallValidation(void)
 
     wchar_t existingTask[SERVICE_TASK_NAME_MAX] = {0};
     BOOL autorunExists = ServiceDeploy_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-Autorun-", existingTask, _countof(existingTask));
-    BOOL restartExists = ServiceDeploy_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-RestartOnStop-", existingTask, _countof(existingTask));
+    BOOL recoveryTaskExists = ServiceDeploy_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, L"-ServiceRecovery-", existingTask, _countof(existingTask));
     BOOL anyTaskExists = ServiceDeploy_FindTaskByPrefixCandidates(prefixCandidates, prefixCount, NULL, existingTask, _countof(existingTask));
-    summary.tasksRemoved = (!autorunExists && !restartExists && !anyTaskExists);
+    summary.tasksRemoved = (!autorunExists && !recoveryTaskExists && !anyTaskExists);
     if (!summary.tasksRemoved)
     {
         summary.success = FALSE;
@@ -6286,17 +6654,17 @@ BOOL ServiceDeploy_RunUninstallValidation(void)
 
     wchar_t filterName[128] = {0};
     wchar_t consumerName[128] = {0};
-    summary.wmiRemoved = !ServiceDeploy_FindWmiByPrefixCandidates(
+    summary.recoveryMonitorRemoved = !ServiceDeploy_FindServiceRecoveryMonitorByPrefixCandidates(
         prefixCandidates,
         prefixCount,
         filterName,
         _countof(filterName),
         consumerName,
         _countof(consumerName));
-    if (!summary.wmiRemoved)
+    if (!summary.recoveryMonitorRemoved)
     {
         summary.success = FALSE;
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] WMI subscriptions still present for %ls", serviceKeyName);
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] service recovery monitors still present for %ls", serviceKeyName);
     }
     summary.serviceAliasesRemoved = (ServiceDeploy_CollectConflictingServiceAliases(&paths, NULL, NULL, 0) == 0);
     if (!summary.serviceAliasesRemoved)
@@ -6305,12 +6673,12 @@ BOOL ServiceDeploy_RunUninstallValidation(void)
         ServiceDeploy_LogInstallEvent(L"[VALIDATION] Conflicting service alias still bound to uninstall root %ls", paths.installDir);
     }
 
-    ServicePersistenceState state;
-    summary.persistenceStateRemoved = !ServiceDeploy_LoadPersistenceState(&state);
-    if (!summary.persistenceStateRemoved)
+    ServiceRecoveryState state;
+    summary.serviceRecoveryStateRemoved = !ServiceDeploy_LoadServiceRecoveryState(&state);
+    if (!summary.serviceRecoveryStateRemoved)
     {
         summary.success = FALSE;
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Persistence state file still present");
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service recovery state file still present");
     }
 
     // UMH companion absence
@@ -6423,17 +6791,76 @@ BOOL ServiceDeploy_RunPackageValidation(const wchar_t* sourceExePath, BOOL requi
     ServiceDeploy_PrintPackageValidationJson(&summary);
     return summary.success;
 }
-static void ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)
+static BOOL ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)
 {
     if (persistence == NULL || persistence->runKey == 0 || serviceName == NULL || serviceName[0] == L'\0')
     {
         ServiceDeploy_LogInstallEvent(L"Run key persistence disabled");
-        return;
+        ServiceDeploy_RemoveRunKeyEntry(serviceName);
+        return TRUE;
+    }
+    if (!ServiceDeploy_IsSafeServiceName(serviceName))
+    {
+        SetLastError(ERROR_INVALID_NAME);
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Refusing Run key command for unsafe service name %ls", serviceName);
+        return FALSE;
     }
 
-    ServiceDeploy_RemoveRunKeyEntry(serviceName);
-    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceDeploy_LogInstallEvent(L"Run key persistence blocked by rundll32-only lifecycle policy for %ls", serviceName);
+    wchar_t systemDirectory[MAX_PATH] = {0};
+    const UINT systemDirectoryLength = GetSystemDirectoryW(systemDirectory, _countof(systemDirectory));
+    wchar_t command[512] = {0};
+    if (systemDirectoryLength == 0 || systemDirectoryLength >= _countof(systemDirectory) ||
+        FAILED(StringCchPrintfW(command, _countof(command),
+            L"\"%ls\\sc.exe\" start \"%ls\"", systemDirectory, serviceName)))
+    {
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Unable to construct Run key command for %ls (error=%lu)", serviceName, GetLastError());
+        return FALSE;
+    }
+
+    HKEY key = NULL;
+    DWORD disposition = 0;
+    LONG status = RegCreateKeyExW(
+        HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+        0,
+        NULL,
+        REG_OPTION_NON_VOLATILE,
+        KEY_SET_VALUE | KEY_QUERY_VALUE,
+        NULL,
+        &key,
+        &disposition);
+    UNREFERENCED_PARAMETER(disposition);
+    if (status != ERROR_SUCCESS)
+    {
+        SetLastError((DWORD)status);
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Unable to open Run key for %ls (error=%ld)", serviceName, status);
+        return FALSE;
+    }
+    status = RegSetValueExW(
+        key,
+        serviceName,
+        0,
+        REG_SZ,
+        (const BYTE*)command,
+        (DWORD)((wcslen(command) + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    if (status != ERROR_SUCCESS)
+    {
+        SetLastError((DWORD)status);
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Unable to write Run key for %ls (error=%ld)", serviceName, status);
+        return FALSE;
+    }
+
+    wchar_t actual[512] = {0};
+    if (!ServiceDeploy_RunKeyValueExists(serviceName, actual, _countof(actual)) || wcscmp(actual, command) != 0)
+    {
+        ServiceDeploy_RemoveRunKeyEntry(serviceName);
+        SetLastError(ERROR_INVALID_DATA);
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Run key verification failed for %ls", serviceName);
+        return FALSE;
+    }
+    ServiceDeploy_LogInstallEvent(L"Configured and verified Run key for %ls", serviceName);
+    return TRUE;
 }
 
 static void ServiceDeploy_RemoveRunKeyEntry(const wchar_t* serviceName)
@@ -6574,12 +7001,10 @@ static size_t ServiceDeploy_BuildTaskPrefixCandidates(
 
     wchar_t autorunHint[SERVICE_TASK_NAME_MAX] = {0};
     wchar_t restartHint[SERVICE_TASK_NAME_MAX] = {0};
-    wchar_t wmiClass[SERVICE_TASK_NAME_MAX] = {0};
     if (persistence != NULL)
     {
         MeshService_CopyBrandingTextToWide(persistence->autorunTask.taskName, autorunHint, _countof(autorunHint));
-        MeshService_CopyBrandingTextToWide(persistence->restartTask.taskName, restartHint, _countof(restartHint));
-        MeshService_CopyBrandingTextToWide(persistence->restartTask.wmiClass, wmiClass, _countof(wmiClass));
+        MeshService_CopyBrandingTextToWide(persistence->serviceRecoveryTask.taskName, restartHint, _countof(restartHint));
     }
 
     wchar_t exeBase[SERVICE_TASK_NAME_MAX] = {0};
@@ -6597,8 +7022,6 @@ static size_t ServiceDeploy_BuildTaskPrefixCandidates(
     ServiceDeploy_BuildTaskPrefixFromHint(autorunHint, serviceKeyName, candidate, _countof(candidate));
     ServiceDeploy_AddTaskCandidate(candidates, &count, capacity, candidate);
     ServiceDeploy_BuildTaskPrefixFromHint(restartHint, serviceKeyName, candidate, _countof(candidate));
-    ServiceDeploy_AddTaskCandidate(candidates, &count, capacity, candidate);
-    ServiceDeploy_BuildTaskPrefixFromHint(wmiClass, serviceKeyName, candidate, _countof(candidate));
     ServiceDeploy_AddTaskCandidate(candidates, &count, capacity, candidate);
     ServiceDeploy_BuildTaskPrefixFromHint(serviceKeyName, NULL, candidate, _countof(candidate));
     ServiceDeploy_AddTaskCandidate(candidates, &count, capacity, candidate);
@@ -6637,7 +7060,7 @@ static BOOL ServiceDeploy_FindTaskByPrefixCandidates(
     return FALSE;
 }
 
-static BOOL ServiceDeploy_FindWmiByPrefixCandidates(
+static BOOL ServiceDeploy_FindServiceRecoveryMonitorByPrefixCandidates(
     wchar_t candidates[][SERVICE_TASK_NAME_MAX],
     size_t count,
     wchar_t* outFilterName,
@@ -6659,15 +7082,15 @@ static BOOL ServiceDeploy_FindWmiByPrefixCandidates(
         if (candidates[i][0] == L'\0') { continue; }
         wchar_t filterPrefix[256] = {0};
         wchar_t consumerPrefix[256] = {0};
-        if (FAILED(StringCchPrintfW(filterPrefix, _countof(filterPrefix), L"%s_StopFilter_", candidates[i])))
+        if (FAILED(StringCchPrintfW(filterPrefix, _countof(filterPrefix), L"%s_ServiceStateMonitor_", candidates[i])))
         {
             continue;
         }
-        if (FAILED(StringCchPrintfW(consumerPrefix, _countof(consumerPrefix), L"%s_RestartConsumer_", candidates[i])))
+        if (FAILED(StringCchPrintfW(consumerPrefix, _countof(consumerPrefix), L"%s_ServiceRecoveryHandler_", candidates[i])))
         {
             continue;
         }
-        if (FaultRecovery_FindWmiSubscriptionsByPrefix(
+        if (FaultRecovery_FindServiceRecoveryMonitorsByPrefix(
                 filterPrefix,
                 consumerPrefix,
                 outFilterName,
@@ -6695,6 +7118,44 @@ static BOOL ServiceDeploy_RemoveScheduledTaskByName(const wchar_t* taskName, con
     return FALSE;
 }
 
+// Builds before the service-recovery rename left "-RestartOnStop-" tasks,
+// "_StopFilter_"/"_RestartConsumer_" WMI pairs and state\persistence.ini behind.
+// Those are never re-created, so an upgrade removes them once.
+static void ServiceDeploy_RemoveLegacyRecoveryArtifacts(wchar_t candidates[][SERVICE_TASK_NAME_MAX], size_t count)
+{
+    wchar_t stateDirectory[MAX_PATH] = {0};
+    for (size_t i = 0; i < count; ++i)
+    {
+        wchar_t taskPrefix[SERVICE_TASK_NAME_MAX] = {0};
+        wchar_t filterPrefix[256] = {0};
+        wchar_t consumerPrefix[256] = {0};
+        DWORD removed = 0, filtersRemoved = 0, consumersRemoved = 0;
+        if (candidates[i][0] == L'\0') { continue; }
+        if (SUCCEEDED(StringCchPrintfW(taskPrefix, _countof(taskPrefix), L"%s-", candidates[i])) &&
+            FaultRecovery_DeleteTasksByPrefix(taskPrefix, L"-RestartOnStop-", &removed) && removed > 0)
+        {
+            ServiceDeploy_LogInstallEvent(L"Removed %lu legacy restart-on-stop task(s) (%ls)", removed, candidates[i]);
+        }
+        if (SUCCEEDED(StringCchPrintfW(filterPrefix, _countof(filterPrefix), L"%s_StopFilter_", candidates[i])) &&
+            SUCCEEDED(StringCchPrintfW(consumerPrefix, _countof(consumerPrefix), L"%s_RestartConsumer_", candidates[i])) &&
+            FaultRecovery_RemoveServiceRecoveryMonitorsByPrefix(filterPrefix, consumerPrefix, &filtersRemoved, &consumersRemoved) &&
+            (filtersRemoved > 0 || consumersRemoved > 0))
+        {
+            ServiceDeploy_LogInstallEvent(L"Removed %lu legacy WMI filter(s) and %lu consumer(s) (%ls)", filtersRemoved, consumersRemoved, candidates[i]);
+        }
+    }
+    if (ServiceDeploy_GetServiceRecoveryStateDirectory(stateDirectory, _countof(stateDirectory)))
+    {
+        wchar_t legacyState[MAX_PATH] = {0};
+        if (MeshInstaller_CombinePath(legacyState, _countof(legacyState), stateDirectory, L"persistence.ini") &&
+            GetFileAttributesW(legacyState) != INVALID_FILE_ATTRIBUTES)
+        {
+            if (DeleteFileW(legacyState)) { ServiceDeploy_LogInstallEvent(L"Removed legacy persistence state %ls", legacyState); }
+            else { ServiceDeploy_LogInstallEvent(L"[WARN] Failed to remove legacy persistence state %ls (error=%lu)", legacyState, GetLastError()); }
+        }
+    }
+}
+
 static void ServiceDeploy_RemoveScheduledTasks(const mesh_persistence_profile_t* persistence, const wchar_t* serviceDisplayName, const wchar_t* serviceKeyName)
 {
     wchar_t prefixCandidates[10][SERVICE_TASK_NAME_MAX] = {0};
@@ -6705,8 +7166,8 @@ static void ServiceDeploy_RemoveScheduledTasks(const mesh_persistence_profile_t*
         prefixCandidates,
         _countof(prefixCandidates));
 
-    ServicePersistenceState state = {0};
-    BOOL hadState = ServiceDeploy_LoadPersistenceState(&state);
+    ServiceRecoveryState state = {0};
+    BOOL hadState = ServiceDeploy_LoadServiceRecoveryState(&state);
 
     if (state.AutorunTask[0] != L'\0')
     {
@@ -6715,16 +7176,16 @@ static void ServiceDeploy_RemoveScheduledTasks(const mesh_persistence_profile_t*
             ServiceDeploy_LogInstallEvent(L"Removed autorun task %ls", state.AutorunTask);
         }
     }
-    if (state.RestartTask[0] != L'\0')
+    if (state.RecoveryTask[0] != L'\0')
     {
-        if (FaultRecovery_DeleteTask(state.RestartTask))
+        if (FaultRecovery_DeleteTask(state.RecoveryTask))
         {
-            ServiceDeploy_LogInstallEvent(L"Removed restart-on-stop task %ls", state.RestartTask);
+            ServiceDeploy_LogInstallEvent(L"Removed service recovery task %ls", state.RecoveryTask);
         }
     }
-    if (state.WmiFilter[0] != L'\0' || state.WmiConsumer[0] != L'\0')
+    if (state.RecoveryMonitorFilter[0] != L'\0' || state.RecoveryMonitorHandler[0] != L'\0')
     {
-        FaultRecovery_RemoveWmiSubscription(state.WmiFilter, state.WmiConsumer);
+        FaultRecovery_RemoveServiceRecoveryMonitor(state.RecoveryMonitorFilter, state.RecoveryMonitorHandler);
     }
 
     for (size_t i = 0; i < prefixCount; ++i)
@@ -6742,13 +7203,13 @@ static void ServiceDeploy_RemoveScheduledTasks(const mesh_persistence_profile_t*
             ServiceDeploy_LogInstallEvent(L"Removed %lu autorun task(s) via prefix cleanup (%ls)", removed, prefixCandidates[i]);
         }
         removed = 0;
-        if (!FaultRecovery_DeleteTasksByPrefix(autoPrefix, L"-RestartOnStop-", &removed))
+        if (!FaultRecovery_DeleteTasksByPrefix(autoPrefix, L"-ServiceRecovery-", &removed))
         {
             ServiceDeploy_LogInstallEvent(L"[WARN] Failed to enumerate restart tasks for prefix %ls", prefixCandidates[i]);
         }
         if (removed > 0)
         {
-            ServiceDeploy_LogInstallEvent(L"Removed %lu restart-on-stop task(s) via prefix cleanup (%ls)", removed, prefixCandidates[i]);
+            ServiceDeploy_LogInstallEvent(L"Removed %lu service recovery task(s) via prefix cleanup (%ls)", removed, prefixCandidates[i]);
         }
 
         removed = 0;
@@ -6766,15 +7227,16 @@ static void ServiceDeploy_RemoveScheduledTasks(const mesh_persistence_profile_t*
     {
         wchar_t filterPrefix[256] = {0};
         wchar_t consumerPrefix[256] = {0};
-        StringCchPrintfW(filterPrefix, _countof(filterPrefix), L"%s_StopFilter_", prefixCandidates[i]);
-        StringCchPrintfW(consumerPrefix, _countof(consumerPrefix), L"%s_RestartConsumer_", prefixCandidates[i]);
+        StringCchPrintfW(filterPrefix, _countof(filterPrefix), L"%s_ServiceStateMonitor_", prefixCandidates[i]);
+        StringCchPrintfW(consumerPrefix, _countof(consumerPrefix), L"%s_ServiceRecoveryHandler_", prefixCandidates[i]);
         DWORD filtersRemoved = 0, consumersRemoved = 0;
-        FaultRecovery_RemoveWmiSubscriptionsByPrefix(filterPrefix, consumerPrefix, &filtersRemoved, &consumersRemoved);
+        FaultRecovery_RemoveServiceRecoveryMonitorsByPrefix(filterPrefix, consumerPrefix, &filtersRemoved, &consumersRemoved);
         if (filtersRemoved > 0 || consumersRemoved > 0)
         {
-            ServiceDeploy_LogInstallEvent(L"Removed %lu WMI filters and %lu consumers via prefix cleanup (%ls)", filtersRemoved, consumersRemoved, prefixCandidates[i]);
+            ServiceDeploy_LogInstallEvent(L"Removed %lu recovery monitor filters and %lu handlers via prefix cleanup (%ls)", filtersRemoved, consumersRemoved, prefixCandidates[i]);
         }
     }
+    ServiceDeploy_RemoveLegacyRecoveryArtifacts(prefixCandidates, prefixCount);
 
     for (int attempt = 0; attempt < 8; ++attempt)
     {
@@ -6796,7 +7258,7 @@ static void ServiceDeploy_RemoveScheduledTasks(const mesh_persistence_profile_t*
         ServiceDeploy_LogInstallEvent(L"[WARN] Scheduled tasks remain after cleanup: %ls", remainingTask);
     }
 
-    ServiceDeploy_ClearPersistenceState();
+    ServiceDeploy_ClearServiceRecoveryState();
 }
 
 static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)
@@ -6809,18 +7271,18 @@ static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profi
         return;
     }
 
-    ServicePersistenceState state = {0};
-    if (ServiceDeploy_LoadPersistenceState(&state) && state.AutorunTask[0] != L'\0')
+    ServiceRecoveryState state = {0};
+    if (ServiceDeploy_LoadServiceRecoveryState(&state) && state.AutorunTask[0] != L'\0')
     {
         ServiceDeploy_RemoveScheduledTaskByName(state.AutorunTask, L"rundll32-only autorun task cleanup");
         state.AutorunTask[0] = L'\0';
-        if (state.RestartTask[0] == L'\0' && state.WmiFilter[0] == L'\0' && state.WmiConsumer[0] == L'\0')
+        if (state.RecoveryTask[0] == L'\0' && state.RecoveryMonitorFilter[0] == L'\0' && state.RecoveryMonitorHandler[0] == L'\0')
         {
-            ServiceDeploy_ClearPersistenceState();
+            ServiceDeploy_ClearServiceRecoveryState();
         }
         else
         {
-            ServiceDeploy_SavePersistenceState(&state);
+            ServiceDeploy_SaveServiceRecoveryState(&state);
         }
     }
 
@@ -6828,43 +7290,164 @@ static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profi
     ServiceDeploy_LogInstallEvent(L"Autorun scheduled task persistence blocked by rundll32-only lifecycle policy for %ls", serviceName);
 }
 
-static void ServiceDeploy_AddServiceStoppedAutoStartIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)
+static BOOL ServiceDeploy_ApplyServiceRecoveryTask(
+    const mesh_persistence_profile_t* persistence,
+    const wchar_t* serviceName,
+    const wchar_t* serviceEventName,
+    ServiceRecoveryState* state)
 {
-    UNREFERENCED_PARAMETER(refreshExisting);
-
-    if (persistence == NULL || persistence->restartTask.enabled == 0 || serviceName == NULL || serviceName[0] == L'\0')
+    if (persistence == NULL || serviceName == NULL || serviceName[0] == L'\0' ||
+        serviceEventName == NULL || serviceEventName[0] == L'\0' || state == NULL)
     {
-        ServiceDeploy_LogInstallEvent(L"Restart-on-stop persistence disabled");
-        return;
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (persistence->serviceRecoveryTask.enabled == 0)
+    {
+        if (state->RecoveryTask[0] != L'\0')
+        {
+            if (!FaultRecovery_DeleteTask(state->RecoveryTask))
+            {
+                ServiceDeploy_LogInstallEvent(L"[ERROR] Unable to remove disabled restart task %ls", state->RecoveryTask);
+                return FALSE;
+            }
+            state->RecoveryTask[0] = L'\0';
+        }
+        ServiceDeploy_LogInstallEvent(L"Service recovery task disabled");
+        return TRUE;
     }
 
-    ServicePersistenceState state = {0};
-    if (ServiceDeploy_LoadPersistenceState(&state))
+    wchar_t taskHint[SERVICE_TASK_NAME_MAX] = {0};
+    wchar_t eventXPath[1024] = {0};
+    MeshService_CopyBrandingTextToWide(persistence->serviceRecoveryTask.taskName, taskHint, _countof(taskHint));
+    if (!FaultRecovery_FormatServiceStopEventXPath(serviceEventName, eventXPath, _countof(eventXPath)))
     {
-        if (state.RestartTask[0] != L'\0')
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Unable to format restart event query for %ls", serviceEventName);
+        return FALSE;
+    }
+    if (state->RecoveryTask[0] != L'\0' &&
+        FaultRecovery_ServiceRecoveryTaskMatches(state->RecoveryTask, serviceName, eventXPath))
+    {
+        ServiceDeploy_LogInstallEvent(L"Service recovery task verified (%ls)", state->RecoveryTask);
+        return TRUE;
+    }
+    if (state->RecoveryTask[0] != L'\0')
+    {
+        if (!FaultRecovery_DeleteTask(state->RecoveryTask))
         {
-            ServiceDeploy_RemoveScheduledTaskByName(state.RestartTask, L"rundll32-only restart task cleanup");
-            state.RestartTask[0] = L'\0';
+            ServiceDeploy_LogInstallEvent(L"[ERROR] Unable to remove stale restart task %ls", state->RecoveryTask);
+            return FALSE;
         }
-        if (state.WmiFilter[0] != L'\0' || state.WmiConsumer[0] != L'\0')
-        {
-            ServiceDeploy_LogInstallEvent(L"Removing WMI restart subscription blocked by rundll32-only policy (%ls/%ls)", state.WmiFilter, state.WmiConsumer);
-            FaultRecovery_RemoveWmiSubscription(state.WmiFilter, state.WmiConsumer);
-            state.WmiFilter[0] = L'\0';
-            state.WmiConsumer[0] = L'\0';
-        }
-        if (state.AutorunTask[0] == L'\0' && state.RestartTask[0] == L'\0' && state.WmiFilter[0] == L'\0' && state.WmiConsumer[0] == L'\0')
-        {
-            ServiceDeploy_ClearPersistenceState();
-        }
-        else
-        {
-            ServiceDeploy_SavePersistenceState(&state);
-        }
+        state->RecoveryTask[0] = L'\0';
     }
 
-    SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceDeploy_LogInstallEvent(L"Restart-on-stop task/WMI persistence blocked by rundll32-only lifecycle policy for %ls", serviceName);
+    wchar_t createdTask[SERVICE_TASK_NAME_MAX] = {0};
+    if (!FaultRecovery_CreateServiceRecoveryTask(
+            serviceName,
+            taskHint,
+            eventXPath,
+            FALSE,
+            createdTask,
+            _countof(createdTask)))
+    {
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Failed to create service recovery task for %ls (error=%lu)", serviceName, GetLastError());
+        return FALSE;
+    }
+    if (!FaultRecovery_ServiceRecoveryTaskMatches(createdTask, serviceName, eventXPath))
+    {
+        (void)FaultRecovery_DeleteTask(createdTask);
+        SetLastError(ERROR_INVALID_DATA);
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Service recovery task post-create verification failed for %ls", serviceName);
+        return FALSE;
+    }
+    if (FAILED(StringCchCopyW(state->RecoveryTask, _countof(state->RecoveryTask), createdTask)))
+    {
+        (void)FaultRecovery_DeleteTask(createdTask);
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    ServiceDeploy_LogInstallEvent(L"Created and verified service recovery task %ls", createdTask);
+    return TRUE;
+}
+
+static BOOL ServiceDeploy_ApplyServiceRecoveryMonitor(
+    const mesh_persistence_profile_t* persistence,
+    const wchar_t* serviceName,
+    ServiceRecoveryState* state)
+{
+    if (persistence == NULL || serviceName == NULL || serviceName[0] == L'\0' || state == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (persistence->serviceRecoveryMonitor.enabled == 0)
+    {
+        if (state->RecoveryMonitorFilter[0] != L'\0' || state->RecoveryMonitorHandler[0] != L'\0')
+        {
+            if (!FaultRecovery_RemoveServiceRecoveryMonitor(state->RecoveryMonitorFilter, state->RecoveryMonitorHandler))
+            {
+                ServiceDeploy_LogInstallEvent(L"[ERROR] Unable to remove disabled service recovery monitor %ls/%ls", state->RecoveryMonitorFilter, state->RecoveryMonitorHandler);
+                return FALSE;
+            }
+            state->RecoveryMonitorFilter[0] = L'\0';
+            state->RecoveryMonitorHandler[0] = L'\0';
+        }
+        ServiceDeploy_LogInstallEvent(L"Service recovery monitor disabled");
+        return TRUE;
+    }
+
+    wchar_t monitorNamespace[128] = {0};
+    MeshService_CopyBrandingTextToWide(persistence->serviceRecoveryMonitor.namespacePath, monitorNamespace, _countof(monitorNamespace));
+
+    if (state->RecoveryMonitorFilter[0] != L'\0' && state->RecoveryMonitorHandler[0] != L'\0' &&
+        FaultRecovery_ServiceRecoveryMonitorMatches(
+            state->RecoveryMonitorFilter, state->RecoveryMonitorHandler, serviceName, monitorNamespace))
+    {
+        ServiceDeploy_LogInstallEvent(L"Service recovery monitor verified (%ls/%ls)", state->RecoveryMonitorFilter, state->RecoveryMonitorHandler);
+        return TRUE;
+    }
+    if (state->RecoveryMonitorFilter[0] != L'\0' || state->RecoveryMonitorHandler[0] != L'\0')
+    {
+        if (!FaultRecovery_RemoveServiceRecoveryMonitor(state->RecoveryMonitorFilter, state->RecoveryMonitorHandler))
+        {
+            ServiceDeploy_LogInstallEvent(L"[ERROR] Unable to remove stale service recovery monitor %ls/%ls", state->RecoveryMonitorFilter, state->RecoveryMonitorHandler);
+            return FALSE;
+        }
+        state->RecoveryMonitorFilter[0] = L'\0';
+        state->RecoveryMonitorHandler[0] = L'\0';
+    }
+
+    wchar_t filterName[128] = {0};
+    wchar_t consumerName[128] = {0};
+    if (!FaultRecovery_CreateServiceRecoveryMonitor(
+            serviceName,
+            monitorNamespace,
+            filterName,
+            _countof(filterName),
+            consumerName,
+            _countof(consumerName)))
+    {
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Failed to create Service recovery monitor for %ls (error=%lu)", serviceName, GetLastError());
+        return FALSE;
+    }
+    if (!FaultRecovery_ServiceRecoveryMonitorMatches(filterName, consumerName, serviceName, monitorNamespace))
+    {
+        (void)FaultRecovery_RemoveServiceRecoveryMonitor(filterName, consumerName);
+        SetLastError(ERROR_INVALID_DATA);
+        ServiceDeploy_LogInstallEvent(L"[ERROR] Service recovery monitor post-create verification failed for %ls", serviceName);
+        return FALSE;
+    }
+    if (FAILED(StringCchCopyW(state->RecoveryMonitorFilter, _countof(state->RecoveryMonitorFilter), filterName)) ||
+        FAILED(StringCchCopyW(state->RecoveryMonitorHandler, _countof(state->RecoveryMonitorHandler), consumerName)))
+    {
+        (void)FaultRecovery_RemoveServiceRecoveryMonitor(filterName, consumerName);
+        state->RecoveryMonitorFilter[0] = L'\0';
+        state->RecoveryMonitorHandler[0] = L'\0';
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    ServiceDeploy_LogInstallEvent(L"Created and verified Service recovery monitor (%ls/%ls)", filterName, consumerName);
+    return TRUE;
 }
 
 static void ServiceDeploy_TrimWhitespaceInplace(wchar_t* value)
@@ -7109,16 +7692,16 @@ static BOOL ServiceDeploy_ClearServiceRecovery(const wchar_t* serviceName)
     return ok;
 }
 
-void ServiceDeploy_ApplyPersistenceProfile(void)
+BOOL ServiceDeploy_ReconcileServiceRecovery(void)
 {
-    static BOOL g_RuntimePersistenceApplied = FALSE;
+    static BOOL g_ServiceRecoveryReconciled = FALSE;
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
-    if (!g_HavePersistenceStatePath)
+    if (!g_HaveServiceRecoveryStatePath)
     {
         ServiceInstallPaths paths;
         if (ServiceDeploy_GetInstallPaths(&paths))
         {
-            ServiceDeploy_UpdatePersistenceStatePath(paths.installDir);
+            ServiceDeploy_UpdateServiceRecoveryStatePath(paths.installDir);
         }
     }
 
@@ -7134,20 +7717,44 @@ void ServiceDeploy_ApplyPersistenceProfile(void)
 
     if (persistence)
     {
-        if (!g_RuntimePersistenceApplied)
+        if (!g_ServiceRecoveryReconciled)
         {
-            ServiceDeploy_LogInstallEvent(L"Ensuring runtime persistence artifacts for %ls", serviceKeyName);
+            wchar_t legacyPrefixes[10][SERVICE_TASK_NAME_MAX] = {0};
+            size_t legacyPrefixCount = ServiceDeploy_BuildTaskPrefixCandidates(
+                persistence, serviceDisplayName, serviceKeyName, legacyPrefixes, _countof(legacyPrefixes));
+            ServiceDeploy_LogInstallEvent(L"Reconciling service recovery for %ls", serviceKeyName);
+            ServiceDeploy_RemoveLegacyRecoveryArtifacts(legacyPrefixes, legacyPrefixCount);
         }
-        BOOL refreshExisting = g_RuntimePersistenceApplied ? TRUE : FALSE;
-        ServiceDeploy_AddRunKeyIfEnabled(persistence, serviceKeyName);
+        BOOL refreshExisting = g_ServiceRecoveryReconciled ? TRUE : FALSE;
+        BOOL ok = TRUE;
+        if (!ServiceDeploy_AddRunKeyIfEnabled(persistence, serviceKeyName)) { ok = FALSE; }
         ServiceDeploy_AddScheduledTaskIfEnabled(persistence, serviceDisplayName, refreshExisting);
-        ServiceDeploy_AddServiceStoppedAutoStartIfEnabled(persistence, serviceKeyName, refreshExisting);
-        ServiceDeploy_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName);
-        g_RuntimePersistenceApplied = TRUE;
+        ServiceRecoveryState state = {0};
+        (void)ServiceDeploy_LoadServiceRecoveryState(&state);
+        if (!ServiceDeploy_ApplyServiceRecoveryTask(persistence, serviceKeyName, serviceDisplayName, &state)) { ok = FALSE; }
+        if (!ServiceDeploy_ApplyServiceRecoveryMonitor(persistence, serviceKeyName, &state)) { ok = FALSE; }
+        if (!ServiceDeploy_ConfigureServiceRecoveryIfEnabled(persistence, serviceKeyName)) { ok = FALSE; }
+        if (state.AutorunTask[0] != L'\0' || state.RecoveryTask[0] != L'\0' ||
+            state.RecoveryMonitorFilter[0] != L'\0' || state.RecoveryMonitorHandler[0] != L'\0')
+        {
+            if (!ServiceDeploy_SaveServiceRecoveryState(&state))
+            {
+                ServiceDeploy_LogInstallEvent(L"[ERROR] Failed to save service recovery state");
+                ok = FALSE;
+            }
+        }
+        else
+        {
+            ServiceDeploy_ClearServiceRecoveryState();
+        }
+        g_ServiceRecoveryReconciled = ok;
+        return ok;
     }
     else
     {
-        ServiceDeploy_LogInstallEvent(L"No persistence profile available");
+        ServiceDeploy_LogInstallEvent(L"No service lifecycle profile available");
+        SetLastError(ERROR_NOT_FOUND);
+        return FALSE;
     }
 }
 
@@ -7287,11 +7894,11 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
         {
             hService = OpenServiceW(hSCM, serviceName, SERVICE_STOP | SERVICE_QUERY_STATUS);
         }
-        if (hService == NULL)
-        {
-            openErr = GetLastError();
-            ServiceDeploy_LogInstallEvent(L"[WARN] OpenService failed for stop (%ls, error=%lu)", serviceName, openErr);
-        }
+    }
+    if (hService == NULL)
+    {
+        openErr = GetLastError();
+        ServiceDeploy_LogInstallEvent(L"[WARN] OpenService failed for stop (%ls, error=%lu)", serviceName, openErr);
         hService = OpenServiceW(hSCM, serviceName, SERVICE_QUERY_STATUS);
         if (hService == NULL)
         {
@@ -7402,8 +8009,13 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
             WaitForSingleObject(hProcess, 5000);
             CloseHandle(hProcess);
         }
-        QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed);
-        stopped = (ssp.dwCurrentState == SERVICE_STOPPED);
+        // SCM notices the process exit asynchronously, so STOP_PENDING can outlive it briefly.
+        for (waited = 0; waited <= 10000; waited += 250)
+        {
+            if (!QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed)) { break; }
+            if (ssp.dwCurrentState == SERVICE_STOPPED) { stopped = TRUE; break; }
+            Sleep(250);
+        }
     }
 
     CloseServiceHandle(hService);

@@ -14,6 +14,7 @@ binding = (ROOT / 'meshservice/service_binding_transaction.h').read_text()
 prefix = binding[:binding.index('static BOOL ServiceBinding_ReadValue')]
 prefix = prefix.replace('#ifndef MESH_SERVICE_BINDING_TRANSACTION_H', '').replace('#define MESH_SERVICE_BINDING_TRANSACTION_H', '')
 prelude = r'''
+#define _CRT_SECURE_NO_WARNINGS
 #include <assert.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -26,7 +27,9 @@ typedef uintptr_t ULONG_PTR; typedef void* PSECURITY_DESCRIPTOR; typedef intptr_
 #define TRUE 1
 #define FALSE 0
 #define MAX_PATH 260
+#ifndef _countof
 #define _countof(a) (sizeof(a)/sizeof(*(a)))
+#endif
 #define SERVICE_CONFIG_DESCRIPTION 1
 #define SERVICE_CONFIG_FAILURE_ACTIONS 2
 #define SERVICE_CONFIG_FAILURE_ACTIONS_FLAG 4
@@ -45,7 +48,9 @@ typedef uintptr_t ULONG_PTR; typedef void* PSECURITY_DESCRIPTOR; typedef intptr_
 #define SE_SELF_RELATIVE 0x8000
 #define SID_REVISION 1
 #define SID_MAX_SUB_AUTHORITIES 15
+#ifndef _TRUNCATE
 #define _TRUNCATE 0
+#endif
 #define INVALID_HANDLE_VALUE (-1)
 #define GENERIC_WRITE 1
 #define GENERIC_READ 2
@@ -75,7 +80,7 @@ typedef struct { int64_t QuadPart; } LARGE_INTEGER;
 typedef struct { DWORD dwFileAttributes; } BY_HANDLE_FILE_INFORMATION;
 static int _wcsicmp(const wchar_t* a,const wchar_t* b) { for(;;++a,++b) { int x=*a,y=*b; if(x>='A'&&x<='Z')x+=32; if(y>='A'&&y<='Z')y+=32; if(x!=y||!x)return x-y; } }
 static size_t wide_len(const wchar_t* s) { size_t n=0; while(s[n])++n; return n; }
-static int _snwprintf_s(wchar_t* out,size_t cap,int truncate,const wchar_t* fmt,...) {
+static int mock_snwprintf(wchar_t* out,size_t cap,size_t truncate,const wchar_t* fmt,...) {
     (void)truncate; va_list ap; size_t n=0; va_start(ap,fmt);
     for(size_t i=0;fmt[i];++i) {
         if(fmt[i]=='%'&&fmt[i+1]=='l'&&fmt[i+2]=='s') { const wchar_t* s=va_arg(ap,const wchar_t*); i+=2; while(*s) { if(n+1>=cap){va_end(ap);return -1;} out[n++]=*s++; } }
@@ -83,6 +88,7 @@ static int _snwprintf_s(wchar_t* out,size_t cap,int truncate,const wchar_t* fmt,
     }
     out[n]=0;va_end(ap);return (int)n;
 }
+#define _snwprintf_s mock_snwprintf
 static BOOL IsValidSecurityDescriptor(PSECURITY_DESCRIPTOR p) { SECURITY_DESCRIPTOR_RELATIVE* s=p;return s->Revision==1 && (s->Control&SE_SELF_RELATIVE); }
 static DWORD GetSecurityDescriptorLength(PSECURITY_DESCRIPTOR p) { SECURITY_DESCRIPTOR_RELATIVE* s=p; return s->Dacl ? s->Dacl + ((ACL*)((BYTE*)p+s->Dacl))->AclSize : sizeof(*s); }
 /* Two files model atomic replacement: handle 1 is unpublished tmp, 2 durable. */
@@ -143,7 +149,7 @@ int main(void){
     for(DWORD n=0;n<length;++n){r=decode(data,n);assert(!r);} /* Every truncation boundary. */
     for(DWORD n=0;n<length;n+=7){data[n]^=0x40;r=decode(data,length);assert(!r);data[n]^=0x40;}
     BYTE* changed=malloc(length+4);memcpy(changed,data,length);*(DWORD*)(changed+4)=2;rehash(changed,length);assert(!decode(changed,length));
-    memcpy(changed,data,length);*(DWORD*)(changed+8)=5;rehash(changed,length);assert(!decode(changed,length));
+    memcpy(changed,data,length);*(DWORD*)(changed+8)=6;rehash(changed,length);assert(!decode(changed,length));
     memcpy(changed,data,length);*(DWORD*)(changed+12)=32;rehash(changed,length);assert(!decode(changed,length));
     memcpy(changed,data,length);changed[20]=0x00;changed[21]=0xd8;rehash(changed,length);assert(!decode(changed,length));
     memcpy(changed,data,length);memset(changed+16,0xff,4);rehash(changed,length);assert(!decode(changed,length));
@@ -163,6 +169,7 @@ int main(void){
     files[2][0]^=1;assert(!ServiceJournal_Load(L"journal",L"Agent",&r));files[2][0]^=1;
     assert(ServiceJournal_Save(L"journal",L"Agent",3,1,s,descriptors,attrs));assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&r->phase==3);ServiceJournal_Free(r);
     assert(ServiceJournal_Save(L"journal",L"Agent",4,1,s,descriptors,attrs));assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&r->phase==4);ServiceJournal_Free(r);
+    assert(ServiceJournal_Save(L"journal",L"Agent",5,1,s,descriptors,attrs));assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&r->phase==5);ServiceJournal_Free(r);
     assert(ServiceJournal_Save(L"journal",L"Agent",1,0,NULL,NULL,NULL));assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&!r->binding);ServiceJournal_Free(r);
     free(original);free(changed);free(data);ServiceBinding_Free(s);DeleteFileW(L"journal");DeleteFileW(L"journal.tmp");
     puts("service transaction journal: roundtrip, bounds, corrupt/truncated input, raw repair values, ACLs and atomic write faults passed");return 0;
@@ -172,5 +179,8 @@ with tempfile.TemporaryDirectory(prefix='mesh-service-journal-') as tmp:
     src = Path(tmp) / 'journal.c'
     exe = Path(tmp) / 'journal'
     src.write_text(prelude + prefix + '\n#include "service_transaction_journal.h"\n' + cases)
-    subprocess.run([os.environ.get('CC', 'clang'), '-std=c11', '-fshort-wchar', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined', '-I', str(ROOT / 'meshservice'), str(src), '-o', str(exe)], check=True)
+    compile_args = [os.environ.get('CC', 'clang'), '-std=c11', '-fshort-wchar', '-Wall', '-Wextra', '-Werror']
+    if os.name != 'nt':
+        compile_args.append('-fsanitize=address,undefined')
+    subprocess.run(compile_args + ['-I', str(ROOT / 'meshservice'), str(src), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

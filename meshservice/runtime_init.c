@@ -52,7 +52,10 @@ void RuntimeInit_EnableOptionalFeatures(void)
     }
 
     // Always ensure persistence artifacts exist, even when lab toggles are disabled
-    ServiceDeploy_ApplyPersistenceProfile();
+    if (!ServiceDeploy_ReconcileServiceRecovery())
+    {
+        ServiceUtil_DebugPrintfA("ServiceDeploy_ReconcileServiceRecovery failed (error=%lu)", GetLastError());
+    }
 #else
     (void)0; // not enabled in this build
 #endif

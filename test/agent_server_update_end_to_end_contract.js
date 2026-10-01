@@ -122,8 +122,10 @@ const finalizer = extractFunction(installer, 'static BOOL ServiceDeploy_Finalize
 assert(!finalizer.includes('tx->backupDir'), 'transaction finalizer must not delete rollback backups');
 assert(installer.includes('static BOOL ServiceDeploy_ReconcileCommittedTransaction('), 'backup disposal must have an explicit committed-transaction helper');
 const updateFlow = extractFunction(installer, 'static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig)');
+const rollbackFlow = updateFlow.slice(updateFlow.indexOf('ROLLBACK:'));
 const lifecycleConverged = extractFunction(installer, 'static BOOL ServiceDeploy_IsPrimaryLifecycleConverged(const ServiceLifecycleDiscovery* discovery, BOOL requirePendingClear)');
-assert(updateFlow.indexOf('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') < updateFlow.indexOf('rollbackOk = ServiceDeploy_StartServiceHostServiceAndWait'), 'failure hold must be written before rollback service restart');
+assert(rollbackFlow.indexOf('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') < rollbackFlow.indexOf('ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, 30000)'), 'failure hold must be written before rollback service restart');
+assert(rollbackFlow.includes('ServiceDeploy_CreateRecoveryStartupAuthorization(&rollbackStartupAuthorization)'), 'rollback restart must be explicitly authorized through the startup checkpoint gate');
 assert(updateFlow.indexOf('ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity') < updateFlow.indexOf('ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_COMMITTED)'), 'backup must survive post-update identity validation');
 assert(updateFlow.includes('Preserving transaction artifacts after failed rollback'), 'failed rollback must preserve recovery artifacts');
 assert(updateFlow.indexOf('ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_COMMITTED)') < updateFlow.indexOf('ServiceDeploy_ReconcileCommittedTransaction(&paths, serviceKeyName, &tx)'), 'durable commit must precede reconciliation and backup disposal');

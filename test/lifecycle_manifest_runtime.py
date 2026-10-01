@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def function(source, name):
-    match = re.search(r"^(?:static )?(?:BOOL|const wchar_t\*) " + re.escape(name) + r"\(", source, re.M)
+    match = re.search(r"^(?:static )?(?:BOOL|void|const wchar_t\*) " + re.escape(name) + r"\(", source, re.M)
     if not match:
         raise ValueError("Function not found: " + name)
     start = source.index("{", match.start())
@@ -41,12 +41,20 @@ def main():
     harness = '#include "runtime_host_contract.h"\n#include <stdio.h>\n#include <wchar.h>\n#include <strsafe.h>\n'
     harness += definitions + "\n" + "\n\n".join(function(source, name) for name in names)
     launch_fixture = (ROOT / "test/fixtures/lifecycle_launch_errors.c").read_text()
-    harness += "\n" + launch_fixture.replace("/* PRODUCTION_LAUNCHER */", function(source, "MeshRuntimeHost_LaunchLifecycleHostW"))
+    launcher_functions = "\n\n".join(function(source, name) for name in [
+        "MeshRuntimeHost_DeleteLifecycleArtifactsW",
+        "MeshRuntimeHost_StartLifecycleHostW",
+        "MeshRuntimeHost_CompleteLifecycleHostW",
+        "MeshRuntimeHost_ReleaseLifecycleHostW",
+        "MeshRuntimeHost_LaunchLifecycleHostW"
+    ])
+    harness += "\n" + launch_fixture.replace("/* PRODUCTION_LAUNCHER */", launcher_functions)
     harness += r'''
 int wmain(int argc, wchar_t** argv)
 {
     MeshRuntimeHostLifecycleManifest read;
-    BOOL wrote, parsed, equal, exists;
+    BOOL wrote, parsed, equal, exists, recoveryAction;
+    MeshRuntimeHostLifecycleAction action;
     DWORD error;
     if (argc == 2 && wcscmp(argv[1], L"--launch-errors") == 0) { return TestLaunchErrors(); }
     if (argc == 4 && wcscmp(argv[1], L"--write-error") == 0)
@@ -62,12 +70,15 @@ int wmain(int argc, wchar_t** argv)
         argv[2], argv[2], argv[3], argv[3], FALSE);
     error = wrote ? ERROR_SUCCESS : GetLastError();
     parsed = wrote && MeshRuntimeHost_ReadLifecycleManifestW(argv[1], &read);
+    recoveryAction = MeshRuntimeHost_LifecycleActionFromStringW(MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W, &action) &&
+        action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RECOVER_UPDATE &&
+        wcscmp(MeshRuntimeHost_LifecycleActionNameW(action), MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W) == 0;
     equal = parsed && wcscmp(read.sourceExePath, argv[2]) == 0 && wcscmp(read.sourceDllPath, argv[2]) == 0 &&
         wcscmp(read.displayName, argv[3]) == 0 && wcscmp(read.serviceDescription, argv[3]) == 0 &&
-        read.action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL && read.requireConfig == FALSE;
+        read.action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL && read.requireConfig == FALSE && recoveryAction;
     exists = parsed && GetFileAttributesW(read.sourceExePath) != INVALID_FILE_ATTRIBUTES;
-    printf("{\"wrote\":%d,\"parsed\":%d,\"equal\":%d,\"sourceExists\":%d,\"error\":%lu,\"acp\":%u}\n",
-        wrote, parsed, equal, exists, error, GetACP());
+    printf("{\"wrote\":%d,\"parsed\":%d,\"equal\":%d,\"recoveryAction\":%d,\"sourceExists\":%d,\"error\":%lu,\"acp\":%u}\n",
+        wrote, parsed, equal, recoveryAction, exists, error, GetACP());
     return equal && exists ? 0 : 1;
 }
 '''

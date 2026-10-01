@@ -329,7 +329,8 @@
       "required": [
         "runKey",
         "scheduledTask",
-        "wmi",
+        "serviceRecoveryTask",
+        "serviceRecoveryMonitor",
         "watchdog",
         "serviceRecovery"
       ],
@@ -363,26 +364,33 @@
             }
           }
         },
-        "wmi": {
+        "serviceRecoveryTask": {
           "type": "object",
           "additionalProperties": false,
           "required": [
             "enabled",
-            "className",
-            "methodName",
-            "namespace"
+            "taskName"
           ],
           "properties": {
             "enabled": {
               "type": "boolean"
             },
-            "className": {
+            "taskName": {
               "type": "string",
               "minLength": 1
-            },
-            "methodName": {
-              "type": "string",
-              "minLength": 1
+            }
+          }
+        },
+        "serviceRecoveryMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "namespace"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
             },
             "namespace": {
               "type": "string",

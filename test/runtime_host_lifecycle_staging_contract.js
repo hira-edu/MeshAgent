@@ -84,6 +84,7 @@ function main() {
     const sweep = extractFunction(source, 'MeshRuntimeHost_SweepStaleLifecycleArtifactsW');
     const hostDll = extractFunction(source, 'MeshRuntimeHost_PrepareLifecycleHostDllW');
     const launch = extractFunction(source, 'MeshRuntimeHost_LaunchLifecycleHostW');
+    const deleteArtifacts = extractFunction(source, 'MeshRuntimeHost_DeleteLifecycleArtifactsW');
     const lifecycleHost = extractFunction(source, 'MeshLifecycleHostW');
     const selfTest = extractFunction(source, 'MeshRuntimeHost_LaunchSelfTestHostW');
     const approvedPath = extractFunction(source, 'MeshUmhHost_IsApprovedMasterServicePathW');
@@ -108,7 +109,7 @@ function main() {
         validateUninstallStagesOutsideInstallRoot:
             hostDll.includes('action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL || action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL'),
         launcherRemovesEmptyStagingDirectory:
-            launch.includes('RemoveDirectoryW(MeshRuntimeHost_TempLifecycleDir)'),
+            deleteArtifacts.includes('RemoveDirectoryW(MeshRuntimeHost_TempLifecycleDir)'),
         stagedArtifactNamesAreUniquePerCall:
             source.includes('L"host-%lu-%llu-%ld.dll"') &&
             source.includes('L"manifest-%lu-%llu-%ld.ini"') &&
@@ -124,9 +125,11 @@ function main() {
         timedOutMutatingHostIsNotKilled:
             launch.includes('MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_PACKAGE))') &&
             launch.includes('to finish its own transaction') &&
-            launch.includes('childExited = (WaitForSingleObject(pi.hProcess, 5000) == WAIT_OBJECT_0);') &&
-            launch.includes('(pi.hProcess == NULL || childExited) && manifestPath') &&
-            launch.includes('(pi.hProcess == NULL || childExited) && deleteHostDllOnExit'),
+            launch.includes('childExited = (WaitForSingleObject(launch.process, 5000) == WAIT_OBJECT_0);') &&
+            launch.includes('MeshRuntimeHost_CompleteLifecycleHostW(&launch, exitCodeOut)') &&
+            launch.includes('MeshRuntimeHost_ReleaseLifecycleHostW(&launch)') &&
+            deleteArtifacts.includes("launch->manifestPath[0] != L'\\0'") &&
+            deleteArtifacts.includes('launch->deleteHostDllOnExit'),
         selfTestReportsTimeoutNotStillActive:
             selfTest.includes('exitCode = (waitError != ERROR_SUCCESS) ? waitError : ERROR_GEN_FAILURE;') &&
             selfTest.includes('else if (!GetExitCodeProcess(pi.hProcess, &exitCode))'),

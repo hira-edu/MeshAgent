@@ -60,6 +60,7 @@ static void TestLogPath(const wchar_t* path) { UNREFERENCED_PARAMETER(path); }
 #define TerminateProcess TestTerminate
 #define CloseHandle TestClose
 #define DeleteFileW TestDelete
+#define RemoveDirectoryW TestDelete
 /* PRODUCTION_LAUNCHER */
 #undef MeshRuntimeHost_GetSystemHostPathW
 #undef MeshRuntimeHost_PrepareLifecycleHostDllW
@@ -74,6 +75,7 @@ static void TestLogPath(const wchar_t* path) { UNREFERENCED_PARAMETER(path); }
 #undef TerminateProcess
 #undef CloseHandle
 #undef DeleteFileW
+#undef RemoveDirectoryW
 
 static int TestLaunchErrors(void)
 {

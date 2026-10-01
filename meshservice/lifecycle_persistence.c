@@ -59,7 +59,7 @@ static BOOL Persist_IsCreationType(PersistenceType type)
  * COM Registration Policy Functions
  * ================================================================ */
 
-BOOL Persist_ComRegistrationCreate(
+BOOL Lifecycle_ComRegistrationCreate(
     const WCHAR* clsid,
     const WCHAR* dllPath,
     WCHAR* outBackupValue,
@@ -77,7 +77,7 @@ BOOL Persist_ComRegistrationCreate(
     return Lifecycle_BlockCreationByPolicyA("COM registration policy");
 }
 
-BOOL Persist_ComRegistrationRemove(
+BOOL Lifecycle_ComRegistrationRemove(
     const WCHAR* clsid,
     const WCHAR* originalValue)
 {
@@ -737,7 +737,7 @@ BOOL Persist_RemoveAll(PersistenceState* state)
 
         switch (entry->type) {
             case PERSIST_COM_REGISTRATION:
-                if (!Persist_ComRegistrationRemove(entry->identifier, entry->backupData)) {
+                if (!Lifecycle_ComRegistrationRemove(entry->identifier, entry->backupData)) {
                     success = FALSE;
                 }
                 break;

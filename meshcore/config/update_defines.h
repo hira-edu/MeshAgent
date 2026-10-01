@@ -7,6 +7,8 @@
 #include <stddef.h>
 
 #define MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX ".update.pkg"
+// modules/update-helper.js extracts a compressed package to this sibling first.
+#define MESHAGENT_WINDOWS_UPDATE_UNZIPPED_SUFFIX MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX "_unzipped"
 #define MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY   "UpdateActivationTargetHash"
 #define MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY  "UpdateActivationFailureHash"
 #define MESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS   600000

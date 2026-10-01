@@ -46,6 +46,35 @@ function extractNext(p)
 {
     if (p.pending.length == 0) { p.source.close(); p._res(); return; }
     var next = p.pending.pop();
+
+    // Fail closed on central-directory entry names that would escape the destination folder.
+    // Reject absolute paths, drive-letter prefixes, and '..' traversal segments after
+    // normalizing both separator styles.
+    var normalizedEntry = next.split('\\').join('/');
+    var unsafeEntry = false;
+    if (normalizedEntry.charAt(0) == '/') { unsafeEntry = true; }
+    var firstEntryChar = normalizedEntry.charAt(0);
+    if (!unsafeEntry && normalizedEntry.length >= 2 && normalizedEntry.charAt(1) == ':' &&
+        ((firstEntryChar >= 'A' && firstEntryChar <= 'Z') || (firstEntryChar >= 'a' && firstEntryChar <= 'z')))
+    {
+        unsafeEntry = true;
+    }
+    if (!unsafeEntry)
+    {
+        var entrySegments = normalizedEntry.split('/');
+        var segIndex;
+        for (segIndex = 0; segIndex < entrySegments.length; ++segIndex)
+        {
+            if (entrySegments[segIndex] == '..') { unsafeEntry = true; break; }
+        }
+    }
+    if (unsafeEntry)
+    {
+        p.source.close();
+        p._rej('Unsafe ZIP entry path: ' + next);
+        return;
+    }
+
     var dest = p.baseFolder + (process.platform == 'win32' ? '\\' : '/') + next;
     if (process.platform == 'win32')
     {
@@ -83,15 +112,12 @@ function extractNext(p)
     p._stream.pipe(p._output);
 }
 
-function zippedObject(table)
+function zippedObject(table, fd)
 {
     this._ObjectID = 'zip-reader.zippedObject';
     this._table = table;
-    for (var jx in table)
-    {
-        this._FD = table[jx].fd;
-        break;
-    }
+    // The archive descriptor belongs to this object even when no entry survived parsing.
+    this._FD = fd;
     Object.defineProperty(this, 'files', {
         get: function ()
         {
@@ -359,7 +385,7 @@ function zippedObject(table)
     {
         if (this._FD != null)
         {
-            require('fs').closeSync(this._FD);
+            if (typeof this._FD == 'number') { require('fs').closeSync(this._FD); }
             this._FD = null;
             this._table = null;
         }
@@ -449,7 +475,7 @@ function read(path)
         }
 
         _cdr.self._settled = true;
-        _cdr.self._res(new zippedObject(table));
+        _cdr.self._res(new zippedObject(table, _cdr.self._fd));
     };
     ret._eocdr = function _eocdr(err, bytesRead, buffer)
     {

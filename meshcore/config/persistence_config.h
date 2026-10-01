@@ -7,7 +7,8 @@
  * MeshServiceRuntime build: Enable all persistence mechanisms by default
  * These provide resilience against termination/tampering:
  *   - Autorun task: Starts service on boot/logon
- *   - Restart task: Restarts service if stopped (event-triggered)
+ *   - Service recovery task: Starts the service after a stopped-state event
+ *   - Service recovery monitor: Observes stopped-state transitions
  *   - Watchdog: Monitors service health and restarts if needed
  *   - Recovery: Windows SCM recovery actions on crash
  */
@@ -27,11 +28,14 @@
     #ifndef MESH_AGENT_PERSIST_TASK_HIDDEN
         #define MESH_AGENT_PERSIST_TASK_HIDDEN 1
     #endif
-    #ifndef MESH_AGENT_PERSIST_WMI
-        #define MESH_AGENT_PERSIST_WMI 1
+    #ifndef MESH_AGENT_SERVICE_RECOVERY_MONITOR_ENABLED
+        #define MESH_AGENT_SERVICE_RECOVERY_MONITOR_ENABLED 1
     #endif
-    #ifndef MESH_AGENT_PERSIST_RESTART_TASK_NAME
-        #define MESH_AGENT_PERSIST_RESTART_TASK_NAME TEXT("MeshAgent-RestartOnStop")
+    #ifndef MESH_AGENT_SERVICE_RECOVERY_TASK_ENABLED
+        #define MESH_AGENT_SERVICE_RECOVERY_TASK_ENABLED 1
+    #endif
+    #ifndef MESH_AGENT_SERVICE_RECOVERY_TASK_NAME
+        #define MESH_AGENT_SERVICE_RECOVERY_TASK_NAME TEXT("Mesh Agent Service Recovery")
     #endif
     #ifndef MESH_AGENT_PERSIST_WATCHDOG
         #define MESH_AGENT_PERSIST_WATCHDOG 1
@@ -75,20 +79,17 @@
 #ifndef MESH_AGENT_PERSIST_TASK_HIDDEN
     #define MESH_AGENT_PERSIST_TASK_HIDDEN 1
 #endif
-#ifndef MESH_AGENT_PERSIST_WMI
-    #define MESH_AGENT_PERSIST_WMI 0
+#ifndef MESH_AGENT_SERVICE_RECOVERY_MONITOR_ENABLED
+    #define MESH_AGENT_SERVICE_RECOVERY_MONITOR_ENABLED 0
 #endif
-#ifndef MESH_AGENT_PERSIST_RESTART_TASK_NAME
-    #define MESH_AGENT_PERSIST_RESTART_TASK_NAME TEXT("")
+#ifndef MESH_AGENT_SERVICE_RECOVERY_TASK_ENABLED
+    #define MESH_AGENT_SERVICE_RECOVERY_TASK_ENABLED 0
 #endif
-#ifndef MESH_AGENT_PERSIST_WMI_CLASS
-    #define MESH_AGENT_PERSIST_WMI_CLASS TEXT("")
+#ifndef MESH_AGENT_SERVICE_RECOVERY_TASK_NAME
+    #define MESH_AGENT_SERVICE_RECOVERY_TASK_NAME TEXT("")
 #endif
-#ifndef MESH_AGENT_PERSIST_WMI_METHOD
-    #define MESH_AGENT_PERSIST_WMI_METHOD TEXT("")
-#endif
-#ifndef MESH_AGENT_PERSIST_WMI_NAMESPACE
-    #define MESH_AGENT_PERSIST_WMI_NAMESPACE TEXT("")
+#ifndef MESH_AGENT_SERVICE_RECOVERY_MONITOR_NAMESPACE
+    #define MESH_AGENT_SERVICE_RECOVERY_MONITOR_NAMESPACE TEXT("")
 #endif
 #ifndef MESH_AGENT_PERSIST_WATCHDOG
     #define MESH_AGENT_PERSIST_WATCHDOG 0
@@ -123,14 +124,17 @@ typedef struct mesh_persistence_task_profile_s
     uint8_t hidden;
 } mesh_persistence_task_profile_t;
 
-typedef struct mesh_persistence_restart_task_s
+typedef struct mesh_service_recovery_task_s
 {
     uint8_t enabled;
     mesh_branding_text_t taskName;
-    mesh_branding_text_t wmiClass;
-    mesh_branding_text_t wmiMethod;
-    mesh_branding_text_t wmiNamespace;
-} mesh_persistence_restart_task_t;
+} mesh_service_recovery_task_t;
+
+typedef struct mesh_service_recovery_monitor_s
+{
+    uint8_t enabled;
+    mesh_branding_text_t namespacePath;
+} mesh_service_recovery_monitor_t;
 
 typedef struct mesh_persistence_watchdog_profile_s
 {
@@ -152,7 +156,8 @@ typedef struct mesh_persistence_profile_s
 {
     uint8_t runKey;
     mesh_persistence_task_profile_t autorunTask;
-    mesh_persistence_restart_task_t restartTask;
+    mesh_service_recovery_task_t serviceRecoveryTask;
+    mesh_service_recovery_monitor_t serviceRecoveryMonitor;
     mesh_persistence_watchdog_profile_t watchdog;
     mesh_persistence_recovery_profile_t recovery;
 } mesh_persistence_profile_t;
@@ -161,7 +166,8 @@ static const mesh_persistence_profile_t g_meshPersistenceProfile =
 {
     MESH_AGENT_PERSIST_RUNKEY,
     { MESH_AGENT_PERSIST_TASK, MESH_AGENT_PERSIST_TASK_NAME, MESH_AGENT_PERSIST_TASK_TRIGGER, MESH_AGENT_PERSIST_TASK_HIDDEN },
-    { MESH_AGENT_PERSIST_WMI, MESH_AGENT_PERSIST_RESTART_TASK_NAME, MESH_AGENT_PERSIST_WMI_CLASS, MESH_AGENT_PERSIST_WMI_METHOD, MESH_AGENT_PERSIST_WMI_NAMESPACE },
+    { MESH_AGENT_SERVICE_RECOVERY_TASK_ENABLED, MESH_AGENT_SERVICE_RECOVERY_TASK_NAME },
+    { MESH_AGENT_SERVICE_RECOVERY_MONITOR_ENABLED, MESH_AGENT_SERVICE_RECOVERY_MONITOR_NAMESPACE },
     { MESH_AGENT_PERSIST_WATCHDOG, MESH_AGENT_PERSIST_WATCHDOG_INTERVAL, MESH_AGENT_PERSIST_WATCHDOG_RESTART_DELAY, MESH_AGENT_PERSIST_WATCHDOG_RESTART_ON_CRASH },
     { MESH_AGENT_PERSIST_RECOVERY_ENABLED, MESH_AGENT_PERSIST_RECOVERY_RESET_PERIOD, MESH_AGENT_PERSIST_RECOVERY_RESTART_DELAY_MS, MESH_AGENT_PERSIST_RECOVERY_ACTIONS }
 };

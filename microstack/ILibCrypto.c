@@ -331,7 +331,7 @@ size_t __fastcall util_readfile(char* filename, char** data, size_t maxlen)
 		else { count = maxlen - 1; }
 		while (r != 0 && len < count)
 		{
-			r = fread(*data, 1, count - len, pFile);
+			r = fread(*data + len, 1, count - len, pFile);
 			len += r;
 		}
 		(*data)[len] = 0;

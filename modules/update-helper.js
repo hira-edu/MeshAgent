@@ -85,6 +85,7 @@ function start(updatePath)
         }
         catch(e)
         {
+            try { require('fs').unlinkSync(updatePath + '_unzipped'); } catch (ignored) { }
             ret._rej(e);
             return;
         }

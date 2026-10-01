@@ -7,9 +7,6 @@ operator owns or is permitted to administer. Changes should improve
 reliability, auditability, maintainability, and visible remote-support
 behavior.
 
-`AGENTS.override.md` contains the highest-priority repository-specific safety
-and execution rules.
-
 ## Source map
 
 - `meshcore/`: control channel, identity, update, and KVM platform code

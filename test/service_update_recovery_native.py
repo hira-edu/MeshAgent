@@ -29,6 +29,7 @@ flow = extract('ServiceDeploy_ApplyUpdateFlow')
 install = extract('ServiceDeploy_ApplyInstallFlow')
 
 prelude = r'''
+#define _CRT_SECURE_NO_WARNINGS
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -49,6 +50,7 @@ typedef void* HANDLE;
 #define SERVICE_JOURNAL_BACKED_UP 2
 #define SERVICE_JOURNAL_COMMITTED 3
 #define SERVICE_JOURNAL_ROLLED_BACK 4
+#define SERVICE_JOURNAL_ACTIVATING 5
 #define SERVICE_LIFECYCLE_STATE_HEALTHY 0
 #define SERVICE_UPDATE_STAGE_DIR_NAME L"stage"
 #define SERVICE_UPDATE_BACKUP_DIR_NAME L"backup"
@@ -59,7 +61,9 @@ typedef void* HANDLE;
 #define FILE_ATTRIBUTE_NORMAL 1
 #define ERROR_SHARING_VIOLATION 32
 #define ERROR_LOCK_VIOLATION 33
+#ifndef _countof
 #define _countof(a) (sizeof(a) / sizeof((a)[0]))
+#endif
 #define ZeroMemory(p,n) memset(p,0,n)
 #define _wcsicmp wcscmp
 #define UNREFERENCED_PARAMETER(p) ((void)p)
@@ -73,12 +77,13 @@ typedef struct {
     ServiceIdentitySnapshot postUpdateIdentity, rollbackIdentity;
     DWORD journalPhase;
     BOOL pendingUpdateMarked;
+    BOOL stagingOwned;
     ServiceBindingSnapshot* originalBinding;
     void* originalFileDacl[5];
 } ServiceUpdateTransaction;
 typedef struct { BOOL configAvailable, sourceEmbeddedConfigPresent, sourceSidecarConfigPresent; } ServicePackagePreflight;
 typedef struct { int enabled; } persistence_toggle;
-typedef struct { int runKey; persistence_toggle autorunTask, restartTask, watchdog; } mesh_persistence_profile_t;
+typedef struct { int runKey; persistence_toggle autorunTask, serviceRecoveryTask, serviceRecoveryMonitor, watchdog; } mesh_persistence_profile_t;
 typedef struct {
     int stateKind, pendingUpdate, updateStageArtifactsPresent, updateBackupArtifactsPresent, firewallHealthy, persistenceHealthy;
     int serviceExists, serviceTypeValid, serviceImageValid, serviceGroupValid, serviceAccountValid, serviceDllValid, dllExists, serviceMainValid, serviceUnloadValid;
@@ -110,7 +115,8 @@ static BOOL restore_binding(void) {
     return TRUE;
 }
 static BOOL sibling(const wchar_t* ext, wchar_t* out) { wcscpy(out, wcscmp(ext,L".db") == 0 ? L"agent.db" : L"agent.mshx"); return TRUE; }
-static BOOL prepare(ServiceUpdateTransaction* tx) { ++prepared; tx->liveDbExists = originalExists; return failAt != 6; }
+/* Scenario 6 fails after the staging area is owned, so its cleanup is expected. */
+static BOOL prepare(ServiceUpdateTransaction* tx) { ++prepared; tx->liveDbExists = originalExists; tx->stagingOwned = TRUE; return failAt != 6; }
 static BOOL backup(ServiceUpdateTransaction* tx) {
     assert(!running); if (failAt == 1 || failAt == 16) return FALSE;
     tx->backupsReady = TRUE; tx->rollbackIdentityReady = tx->postUpdateIdentityReady = originalExists; return TRUE;
@@ -217,6 +223,7 @@ static void run_case(int failure, int exists, int wasRunning, int originalStart,
     assert(running == wasRunning && liveVersion == (exists ? 1 : 0) && installed == exists);
     if (failure == 9) assert(stops == 1 && restoredBindings == 1 && discarded == 1);
     if (failure == 4 || failure == 5 || failure == 6 || failure == 12) assert(stops == 0);
+    if (failure == 6) assert(deletedArtifacts == 1);
     if (failure == 2 || failure == 7 || failure == 8 || failure == 11 || failure == 14) assert(rolledBack == 1 && discarded == 1);
 }
 static void install_case(int config, int exists, int ownProcess, int failure) {
@@ -266,6 +273,7 @@ with tempfile.TemporaryDirectory(prefix='meshagent-update-recovery-') as directo
 # Exercise actual crash-recovery and cleanup orchestration separately from the
 # activation harness. Keep SCM/filesystem boundaries stateful and injectable.
 recovery_prelude = r'''
+#define _CRT_SECURE_NO_WARNINGS
 #include <assert.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -273,16 +281,21 @@ recovery_prelude = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
-typedef int BOOL; typedef unsigned long DWORD;
+typedef int BOOL; typedef unsigned long DWORD; typedef void* HANDLE;
 #define TRUE 1
 #define FALSE 0
 #define MAX_PATH 260
+#ifndef _countof
 #define _countof(x) (sizeof(x)/sizeof(*(x)))
+#endif
+#ifndef _TRUNCATE
 #define _TRUNCATE 0
+#endif
 #define SERVICE_JOURNAL_PREPARED 1
 #define SERVICE_JOURNAL_BACKED_UP 2
 #define SERVICE_JOURNAL_COMMITTED 3
 #define SERVICE_JOURNAL_ROLLED_BACK 4
+#define SERVICE_JOURNAL_ACTIVATING 5
 #define SERVICE_DISABLED 4
 #define SERVICE_WIN32_SHARE_PROCESS 32
 #define INVALID_FILE_ATTRIBUTES ((DWORD)-1)
@@ -320,7 +333,7 @@ static BOOL remove_dir(void){++deleted;return !failCleanup;}
 static DWORD GetFileAttributesW(const wchar_t* p){if(!wcscmp(p,L"journal")){error=ERROR_FILE_NOT_FOUND;return journalExists?0:INVALID_FILE_ATTRIBUTES;}return missingBackup?INVALID_FILE_ATTRIBUTES:0;}
 static DWORD GetLastError(void){return error;}
 static BOOL DeleteFileW(const wchar_t* p){++deleted;if(!wcscmp(p,L"journal"))journalExists=0;return TRUE;}
-static int mock_snwprintf(wchar_t* out,size_t size,int trunc,const wchar_t* fmt,...){(void)trunc;(void)fmt;return swprintf(out,size,L"journal.tmp");}
+static int mock_snwprintf(wchar_t* out,size_t size,size_t trunc,const wchar_t* fmt,...){(void)trunc;(void)fmt;return swprintf(out,size,L"journal.tmp");}
 #define ServiceDeploy_LogInstallEvent log_event
 #define ServiceDeploy_GetInstallPaths(p) mock_recovery_paths(p)
 #define ServiceDeploy_InitializeUpdateTransactionPaths(p,t) txpaths(t)
@@ -336,6 +349,7 @@ static int mock_snwprintf(wchar_t* out,size_t size,int trunc,const wchar_t* fmt,
 #define ServiceBinding_Free(...) ((void)0)
 #define ServiceDeploy_SetServiceStartType(...) set_start()
 #define ServiceDeploy_ClearServiceRecovery(...) set_start()
+#define ServiceDeploy_SuspendServiceRecoveryRestarters(...) TRUE
 #define ServiceDeploy_StopServiceAndWait(...) stop()
 #define ServiceDeploy_RestoreUpdateFileSecurity(...) restore()
 #define ServiceBinding_Restore(...) restore()
@@ -344,6 +358,11 @@ static int mock_snwprintf(wchar_t* out,size_t size,int trunc,const wchar_t* fmt,
 #define ServiceDeploy_StartServiceHostServiceAndWait(...) start()
 #define ServiceDeploy_CaptureIdentitySnapshot(...) TRUE
 #define ServiceDeploy_WaitForExpectedIdentity(...) TRUE
+#define ServiceDeploy_RecordUpdateActivationFailureHold(...) TRUE
+#define ServiceDeploy_ReconcileServiceRecovery(...) TRUE
+#define ServiceDeploy_CreateRecoveryStartupAuthorization(out) (*(out)=(HANDLE)1,TRUE)
+#define CloseHandle(...) TRUE
+#define ServiceJournal_PhaseRequiresBackups(p) ((p)==SERVICE_JOURNAL_BACKED_UP || (p)==SERVICE_JOURNAL_ACTIVATING)
 #define ServiceDeploy_WriteTransactionPhase(tx,n,phase) publish(tx,phase)
 #define ServiceDeploy_RemoveDirectoryTree(...) remove_dir()
 static BOOL ServiceDeploy_DeleteUpdateTransactionArtifacts(const ServiceUpdateTransaction*);
@@ -366,12 +385,13 @@ int main(void){
     reset(2);missingBackup=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!mutations&&!deleted);
     reset(2);failRestore=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&rollbacks==1&&!deleted&&!starts);
     reset(2);assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&rollbacks==1&&starts==1&&phaseWritten==4);
+    reset(5);assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&rollbacks==1&&starts==1&&phaseWritten==4);
     reset(2);failPublish=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&rollbacks==1&&!deleted);
     reset(3);failReconcile=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&reconciles==1&&!rollbacks&&!mutations&&!deleted);
     reset(3);assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&reconciles==1&&!mutations);
     reset(4);failCleanup=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!mutations&&!reconciles);
     reset(4);assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&!mutations&&!reconciles);
-    puts("Service crash recovery: 14 preservation, retry, rollback and cleanup cases passed");return 0;
+    puts("Service crash recovery: 15 preservation, retry, rollback and cleanup cases passed");return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='meshagent-crash-recovery-') as directory:

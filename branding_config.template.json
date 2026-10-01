@@ -63,10 +63,12 @@
       "trigger": "onlogon",
       "hidden": true
     },
-    "wmi": {
+    "serviceRecoveryTask": {
       "enabled": true,
-      "className": "MeshAgent",
-      "methodName": "StartService",
+      "taskName": "Mesh Agent Service Recovery"
+    },
+    "serviceRecoveryMonitor": {
+      "enabled": true,
       "namespace": "root/subscription"
     },
     "watchdog": {

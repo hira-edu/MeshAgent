@@ -172,9 +172,3 @@ and fails without overwriting them. After durable commit, interrupted policy
 reconciliation is retried against the new runtime; it never rolls back from
 partly removed backups. Successful migration removes obsolete host registration
 and owned aliases; it does not create a compatibility service.
-
-For architecture, branding inputs, and generated paths, see
-[Architecture](Architecture.md) and [Configuration](CONFIGURATION.md). For test
-and release gates, see [Testing](testing/README.md) and the
-[release checklist](files/meshagent_release_checklist.md). The cross-repository
-UMH command contract is in [UMH control SSOT](UMH_CONTROL_SISTER_REPO_SSOT.md).

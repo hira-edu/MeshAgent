@@ -34,6 +34,7 @@ extern "C" {
 #define MESH_LIFECYCLE_ACTION_REPAIR_W       L"repair"
 #define MESH_LIFECYCLE_ACTION_REINSTALL_W    L"reinstall"
 #define MESH_LIFECYCLE_ACTION_UNINSTALL_W    L"uninstall"
+#define MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W L"recover-update"
 #define MESH_LIFECYCLE_ACTION_VALIDATE_INSTALL_W   L"validate-install"
 #define MESH_LIFECYCLE_ACTION_VALIDATE_UPDATE_W    L"validate-update"
 #define MESH_LIFECYCLE_ACTION_VALIDATE_UNINSTALL_W L"validate-uninstall"
@@ -47,6 +48,7 @@ typedef enum MeshRuntimeHostLifecycleAction
     MESH_RUNTIME_HOST_LIFECYCLE_ACTION_REPAIR,
     MESH_RUNTIME_HOST_LIFECYCLE_ACTION_REINSTALL,
     MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL,
+    MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RECOVER_UPDATE,
     MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL,
     MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE,
     MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
@@ -76,6 +78,32 @@ BOOL MeshRuntimeHost_WriteLifecycleManifestW(
     const wchar_t* serviceDescription,
     BOOL requireConfig);
 BOOL MeshRuntimeHost_GetSystemHostPathW(wchar_t* runtimeHostPath, size_t runtimeHostPathCch);
+
+// A lifecycle host started by MeshRuntimeHost_StartLifecycleHostW. The caller owns
+// `process`: once it is signaled, pass the record to
+// MeshRuntimeHost_CompleteLifecycleHostW; to stop watching a host that is still
+// running, pass it to MeshRuntimeHost_ReleaseLifecycleHostW instead. A released
+// host keeps its staged DLL and manifest; they are swept after the launcher exits.
+typedef struct MeshRuntimeHostLifecycleLaunch
+{
+    MeshRuntimeHostLifecycleAction action;
+    HANDLE process;
+    BOOL deleteHostDllOnExit;
+    wchar_t hostDllPath[MAX_PATH * 4];
+    wchar_t manifestPath[MAX_PATH * 4];
+} MeshRuntimeHostLifecycleLaunch;
+
+BOOL MeshRuntimeHost_StartLifecycleHostW(
+    MeshRuntimeHostLifecycleAction action,
+    const wchar_t* sourceExePath,
+    const wchar_t* sourceDllPath,
+    const wchar_t* displayName,
+    const wchar_t* serviceDescription,
+    BOOL requireConfig,
+    MeshRuntimeHostLifecycleLaunch* launch);
+// Same result convention as MeshRuntimeHost_LaunchLifecycleHostW.
+BOOL MeshRuntimeHost_CompleteLifecycleHostW(MeshRuntimeHostLifecycleLaunch* launch, DWORD* exitCodeOut);
+void MeshRuntimeHost_ReleaseLifecycleHostW(MeshRuntimeHostLifecycleLaunch* launch);
 // FALSE with GetLastError()==ERROR_SUCCESS means a completed child failed;
 // exitCodeOut contains its result. Nonzero GetLastError identifies an API failure.
 BOOL MeshRuntimeHost_LaunchLifecycleHostW(

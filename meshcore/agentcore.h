@@ -209,6 +209,11 @@ typedef struct MeshAgentHostContainer
 	int logUpdate;
 	int fakeUpdate;
 	int serverSupportsUpdateFailureStatus;
+#ifdef WIN32
+	void *updateActivation;	// Lifecycle host still applying a downloaded update, NULL when idle
+	char updateHashMismatch[UTIL_SHA384_HASHSIZE];	// Advertised hash of the last package that failed verification
+	int updateHashMismatchSet;
+#endif
 	int controlChannelDebug;
 	void *coreTimeout;
 	char lastFailedCoreHash[UTIL_SHA384_HASHSIZE]; // C7: last core that failed verify/execute this session (in-memory, cleared on success)

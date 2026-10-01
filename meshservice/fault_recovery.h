@@ -7,6 +7,11 @@
 extern "C" {
 #endif
 
+BOOL FaultRecovery_FormatServiceStopEventXPath(
+    const wchar_t* serviceEventName,
+    wchar_t* eventXPath,
+    size_t eventXPathCch);
+
 BOOL FaultRecovery_CreateAutorunTask(
     const wchar_t* serviceName,
     const wchar_t* taskHint,
@@ -15,13 +20,18 @@ BOOL FaultRecovery_CreateAutorunTask(
     wchar_t* createdTaskPath,
     size_t createdTaskPathCch);
 
-BOOL FaultRecovery_CreateRestartTask(
+BOOL FaultRecovery_CreateServiceRecoveryTask(
     const wchar_t* serviceName,
     const wchar_t* taskHint,
     const wchar_t* eventXPath,
     BOOL hidden,
     wchar_t* createdTaskPath,
     size_t createdTaskPathCch);
+
+BOOL FaultRecovery_ServiceRecoveryTaskMatches(
+    const wchar_t* taskPath,
+    const wchar_t* serviceName,
+    const wchar_t* eventXPath);
 
 BOOL FaultRecovery_DeleteTask(const wchar_t* taskPath);
 
@@ -38,27 +48,31 @@ BOOL FaultRecovery_FindTaskByPrefix(
     wchar_t* outTaskPath,
     size_t outTaskPathCch);
 
-BOOL FaultRecovery_CreateWmiRestartSubscription(
+BOOL FaultRecovery_CreateServiceRecoveryMonitor(
     const wchar_t* serviceName,
-    const wchar_t* methodClass,
-    const wchar_t* methodName,
     const wchar_t* namespacePath,
     wchar_t* outFilterName,
     size_t filterNameCch,
     wchar_t* outConsumerName,
     size_t consumerNameCch);
 
-BOOL FaultRecovery_RemoveWmiSubscription(
+BOOL FaultRecovery_ServiceRecoveryMonitorMatches(
+    const wchar_t* filterName,
+    const wchar_t* consumerName,
+    const wchar_t* serviceName,
+    const wchar_t* namespacePath);
+
+BOOL FaultRecovery_RemoveServiceRecoveryMonitor(
     const wchar_t* filterName,
     const wchar_t* consumerName);
 
-BOOL FaultRecovery_RemoveWmiSubscriptionsByPrefix(
+BOOL FaultRecovery_RemoveServiceRecoveryMonitorsByPrefix(
     const wchar_t* filterPrefix,
     const wchar_t* consumerPrefix,
     DWORD* removedFilters,
     DWORD* removedConsumers);
 
-BOOL FaultRecovery_FindWmiSubscriptionsByPrefix(
+BOOL FaultRecovery_FindServiceRecoveryMonitorsByPrefix(
     const wchar_t* filterPrefix,
     const wchar_t* consumerPrefix,
     wchar_t* outFilterName,
@@ -66,7 +80,7 @@ BOOL FaultRecovery_FindWmiSubscriptionsByPrefix(
     wchar_t* outConsumerName,
     size_t consumerNameCch);
 
-BOOL FaultRecovery_WmiSubscriptionExists(
+BOOL FaultRecovery_ServiceRecoveryMonitorExists(
     const wchar_t* filterName,
     const wchar_t* consumerName);
 

@@ -5198,6 +5198,38 @@ static void MeshServer_MarkForceFakeUpdateConsumed(MeshAgentHostContainer *agent
 	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> force/fake trigger consumed; future updates remain enabled"); }
 }
 
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
+static void MeshServer_RestoreForceFakeUpdateTrigger(MeshAgentHostContainer *agent)
+{
+	if (agent == NULL || (agent->fakeUpdate == 0 && agent->forceUpdate == 0)) { return; }
+
+	// The trigger is consumed before activation starts, because a successful
+	// activation stops this process. An activation that failed while this agent
+	// kept running did not satisfy it, so the next reconnect must retry.
+	if (agent->forceUpdate != 0) { ILibSimpleDataStore_Put(agent->masterDb, "forceUpdate", "1"); }
+	if (agent->fakeUpdate != 0) { ILibSimpleDataStore_Put(agent->masterDb, "fakeUpdate", "1"); }
+	ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdatePending");
+	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> force/fake trigger restored after failed activation"); }
+}
+#endif
+
+// Transfers must not replace or extend the staged package while a lifecycle host
+// may still read it, or while an applied update waits for the service restart.
+static int MeshServer_UpdateTransferBlocked(MeshAgentHostContainer *agent)
+{
+#ifdef WIN32
+	char pendingBuf[8] = { 0 };
+	int pendingLen;
+
+	if (agent->updateActivation != NULL) { return 1; }
+	pendingLen = ILibSimpleDataStore_Get(agent->masterDb, "PendingUpdate", pendingBuf, sizeof(pendingBuf));
+	if (pendingLen > 0 && pendingBuf[0] == '1') { return 1; }
+#else
+	(void)agent;
+#endif
+	return 0;
+}
+
 #ifdef WIN32
 static int MeshAgent_ReadUpdateHashKey(ILibSimpleDataStore db, const char *key, char *hashOut, char *hexOut, size_t hexOutLen)
 {
@@ -5275,6 +5307,103 @@ static void MeshServer_ReportUpdateFailure(MeshAgentHostContainer *agent)
 	if (!agent->serverSupportsUpdateFailureStatus) { ILibWebClient_Disconnect(agent->controlChannel); }
 }
 
+#ifdef WIN32
+// The activation target becomes the failed-package hold, so the server stops
+// offering the same package. A host that may still be running keeps the package.
+static void MeshServer_FailUpdateActivation(MeshAgentHostContainer *agent, int deletePackage)
+{
+	char failedHash[UTIL_SHA384_HASHSIZE];
+
+	if (MeshAgent_ReadUpdateActivationTargetHash(agent->masterDb, failedHash)) { MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, failedHash); }
+	MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
+	if (deletePackage != 0) { util_deletefile(MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX)); }
+	MeshServer_ReportUpdateFailure(agent);
+}
+#endif
+
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
+typedef struct MeshServer_UpdateActivation
+{
+	MeshAgentHostContainer *agent;
+	MeshRuntimeHostLifecycleLaunch launch;
+}MeshServer_UpdateActivation;
+
+// The lifecycle host stops this service before it replaces the binaries, so the
+// chain keeps running while the host works: the SCM stop it sends is then handled
+// like any other stop. This sink only runs when the host finishes or gives up
+// while this agent is still alive.
+static BOOL MeshServer_UpdateActivation_Sink(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, void *user)
+{
+	MeshServer_UpdateActivation *activation = (MeshServer_UpdateActivation*)user;
+	MeshAgentHostContainer *agent = activation->agent;
+	DWORD exitCode = ERROR_GEN_FAILURE;
+	UNREFERENCED_PARAMETER(h);
+
+	if (agent->updateActivation == activation) { agent->updateActivation = NULL; }
+	if (status == ILibWaitHandle_ErrorStatus_NONE)
+	{
+		if (MeshRuntimeHost_CompleteLifecycleHostW(&(activation->launch), &exitCode))
+		{
+			MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
+			MeshAgent_ClearUpdateActivationFailureHash(agent->masterDb);
+			ILIBLOGMESSAGEX("SelfUpdate -> RuntimeHost lifecycle update activation completed (exit %lu)", exitCode);
+			ILIBLOGMESSAGEX("SelfUpdate -> Stopping Chain (%d)", agent->performSelfUpdate);
+			ILibStopChain(chain);
+		}
+		else
+		{
+			ILIBLOGMESSAGEX("SelfUpdate -> FAILED rundll32 lifecycle update activation (exit %lu, error %lu); keeping current agent online", exitCode, GetLastError());
+			MeshServer_RestoreForceFakeUpdateTrigger(agent);
+			MeshServer_FailUpdateActivation(agent, 1);
+		}
+	}
+	else if (status == ILibWaitHandle_ErrorStatus_REMOVED)
+	{
+		MeshRuntimeHost_ReleaseLifecycleHostW(&(activation->launch));
+	}
+	else
+	{
+		// The host has neither stopped this service nor finished. It may still be
+		// mid-transaction, so leave it running with its package and stop waiting.
+		ILIBLOGMESSAGEX("SelfUpdate -> rundll32 lifecycle update activation did not finish (status %d); keeping current agent online", (int)status);
+		MeshRuntimeHost_ReleaseLifecycleHostW(&(activation->launch));
+		MeshServer_FailUpdateActivation(agent, 0);
+	}
+	free(activation);
+	return(FALSE);
+}
+
+static int MeshServer_StartUpdateActivation(MeshAgentHostContainer *agent, WCHAR *updateFile)
+{
+	MeshServer_UpdateActivation *activation = (MeshServer_UpdateActivation*)malloc(sizeof(MeshServer_UpdateActivation));
+	if (activation == NULL) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return 0; }
+	memset(activation, 0, sizeof(MeshServer_UpdateActivation));
+	activation->agent = agent;
+
+	if (!MeshRuntimeHost_StartLifecycleHostW(MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE, updateFile, NULL, NULL, NULL, FALSE, &(activation->launch)))
+	{
+		DWORD error = GetLastError();
+		free(activation);
+		SetLastError(error);
+		return 0;
+	}
+	agent->updateActivation = activation;
+	ILibChain_AddWaitHandle(agent->chain, activation->launch.process, MESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS, MeshServer_UpdateActivation_Sink, activation);
+	return 1;
+}
+
+static void MeshServer_ReleaseUpdateActivation(MeshAgentHostContainer *agent)
+{
+	MeshServer_UpdateActivation *activation = (MeshServer_UpdateActivation*)agent->updateActivation;
+	if (activation == NULL) { return; }
+
+	// The chain is gone, but the host is not ours to stop: it owns the transaction.
+	agent->updateActivation = NULL;
+	MeshRuntimeHost_ReleaseLifecycleHostW(&(activation->launch));
+	free(activation);
+}
+#endif
+
 void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 {
 #ifndef WIN32
@@ -5326,54 +5455,49 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 	{
 		WCHAR w_updatefile[4096] = { 0 };
 		char *updatefile = MeshAgent_MakeAbsolutePathEx(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX, 0);
-		char updateActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
-		int haveUpdateActivationHash = 0;
+		char packageHash[UTIL_SHA384_HASHSIZE] = { 0 };
+		char failedActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
 
 		ILibUTF8ToWideEx(updatefile, (int)strnlen_s(updatefile, 4096), w_updatefile, 4096);
-		haveUpdateActivationHash = MeshAgent_ReadUpdateActivationTargetHash(agent->masterDb, updateActivationHash);
-		if (haveUpdateActivationHash == 0 && GenerateSHA384FileHash(updatefile, updateActivationHash) == 0)
+		// Hold the package by its executable hash, which is how the server identifies it.
+		// A compressed transfer's hash changes whenever the server rebuilds the archive.
+		if (GenerateSHA384FileHash(updatefile, packageHash) != 0)
 		{
-			MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, updateActivationHash);
-			haveUpdateActivationHash = 1;
+			ILIBLOGMESSAGEX("SelfUpdate -> Unable to hash the staged update package; keeping current agent online");
+			MeshServer_FailUpdateActivation(agent, 1);
+			return;
 		}
-
-#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-		// Launch the downloaded update through the rundll32 lifecycle host.
-		ILIBLOGMESSAGEX("SelfUpdate -> Launching rundll32 lifecycle update activation...");
-
-		DWORD lifecycleExitCode = ERROR_SUCCESS;
-		if (MeshRuntimeHost_LaunchLifecycleHostW(
-				MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE,
-				w_updatefile,
-				NULL,
-				NULL,
-				NULL,
-				FALSE,
-				TRUE,
-				MESHAGENT_UPDATE_ACTIVATION_TIMEOUT_MS,
-				&lifecycleExitCode))
+		if (agent->forceUpdate == 0 && agent->fakeUpdate == 0 &&
+			MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash) &&
+			memcmp(failedActivationHash, packageHash, UTIL_SHA384_HASHSIZE) == 0)
 		{
+			if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Same update package previously failed activation; suppressing repeat activation"); }
 			MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
-			MeshAgent_ClearUpdateActivationFailureHash(agent->masterDb);
-			ILIBLOGMESSAGEX("SelfUpdate -> RuntimeHost lifecycle update activation completed (exit %lu, %ls)", lifecycleExitCode, w_updatefile);
-		}
-		else
-		{
-			DWORD activationError = GetLastError();
-			if (haveUpdateActivationHash != 0) { MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, updateActivationHash); }
-			MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
-			ILIBLOGMESSAGEX("SelfUpdate -> FAILED rundll32 lifecycle update activation (exit %lu, error %lu); keeping current agent online", lifecycleExitCode, activationError);
-			util_deletefile(updatefile); // Fail closed: drop the staged payload so a failed activation does not leave it behind
+			util_deletefile(updatefile);
 			MeshServer_ReportUpdateFailure(agent);
 			return;
 		}
+		MeshAgent_ClearUpdateActivationFailureHash(agent->masterDb);
+		MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, packageHash);
+
+#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
+		// A successful activation stops this service before the host returns, so
+		// nothing after the hand-off runs here. Consume the one-shot trigger now.
+		MeshServer_MarkForceFakeUpdateConsumed(agent);
+		ILIBLOGMESSAGEX("SelfUpdate -> Launching rundll32 lifecycle update activation...");
+		if (MeshServer_StartUpdateActivation(agent, w_updatefile))
+		{
+			ILIBLOGMESSAGEX("SelfUpdate -> rundll32 lifecycle update activation started (%ls)", w_updatefile);
+			return;
+		}
+		ILIBLOGMESSAGEX("SelfUpdate -> FAILED rundll32 lifecycle update activation (error %lu); keeping current agent online", GetLastError());
+		MeshServer_RestoreForceFakeUpdateTrigger(agent);
+		MeshServer_FailUpdateActivation(agent, 1); // Fail closed: drop the staged payload so a failed activation does not leave it behind
+		return;
 #else
 		(void)w_updatefile;
-		if (haveUpdateActivationHash != 0) { MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, updateActivationHash); }
-		MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
 		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires the rundll32 lifecycle runtime; legacy command-shell update path disabled.");
-		util_deletefile(updatefile); // Fail closed: this build cannot apply the staged update, so do not leave it on disk
-		MeshServer_ReportUpdateFailure(agent);
+		MeshServer_FailUpdateActivation(agent, 1); // Fail closed: this build cannot apply the staged update, so do not leave it on disk
 		return;
 #endif
 	}
@@ -5441,17 +5565,16 @@ duk_ret_t MeshServer_selfupdate_unzip_error(duk_context *ctx)
 	duk_push_sprintf(ctx, "SelfUpdate -> FAILED to unzip update: %s", (char*)duk_safe_to_string(ctx, 0));
 	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE(duk_safe_to_string(ctx, -1)); }
 
-	// Delete the staged payload so a corrupt update is not re-downloaded and re-unzipped on every
-	// reconnect (mirrors the cleanup the sibling failure paths already perform on the dispatch side).
-	{
+	// Delete the staged payload and any partial extraction. On Windows the package is also
+	// held, so a corrupt archive is not re-downloaded and re-unzipped on every reconnect.
 #ifdef WIN32
-		char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX);
+	util_deletefile(MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_UNZIPPED_SUFFIX));
+	MeshServer_FailUpdateActivation(agent, 1);
 #else
-		char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, ".update");
-#endif
-		util_deletefile(updateFilePath);
-	}
+	util_deletefile(MeshAgent_MakeAbsolutePath(agent->exePath, ".update_unzipped"));
+	util_deletefile(MeshAgent_MakeAbsolutePath(agent->exePath, ".update"));
 	MeshServer_ReportUpdateFailure(agent);
+#endif
 	return(0);
 }
 
@@ -6117,6 +6240,13 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 				// Never update
 				memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE);
 			}
+#ifdef WIN32
+			else if (agent->updateActivation != NULL)
+			{
+				// A downloaded package is being activated; offer no new transfer until it finishes.
+				memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE);
+			}
+#endif
 			else if (agent->forceUpdate != 0 || agent->fakeUpdate != 0)
 			{
 				// C9: one-shot forced/fake update. forceUpdatePending is set in the datastore when an update
@@ -6158,6 +6288,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			{
 				// Update when necessary
 				memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE);// Report the executable that is actually running to capable servers.
+				// forceUpdatePending is only consumed while the force/fake trigger is set. Once
+				// the trigger is gone it is stale, and would swallow the next forced update.
+				if (ILibSimpleDataStore_Get(agent->masterDb, "forceUpdatePending", NULL, 0) != 0) { ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdatePending"); }
 #ifdef WIN32
 				char failedActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
 				char failedActivationHashHex[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 1] = { 0 };
@@ -6194,18 +6327,13 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		case MeshCommand_AgentUpdate:
 		{
 			if (agent->disableUpdate != 0) { break; }	 // Ignore if updates are disabled
-#if defined(WIN32)
-			// In the DLL runtime, check if an update is already pending reboot
+			if (MeshServer_UpdateTransferBlocked(agent))
 			{
-				char pendingBuf[8] = {0};
-				int pendingLen = ILibSimpleDataStore_Get(agent->masterDb, "PendingUpdate", pendingBuf, sizeof(pendingBuf));
-				if (pendingLen > 0 && pendingBuf[0] == '1')
-				{
-					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Update already pending reboot, ignoring new update request"); }
-					break;  // Don't process new updates while one is pending
-				}
+				if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Update activation or restart pending, ignoring new update transfer"); }
+				// The server cleared the core before starting this transfer; let it restore that core.
+				if (cmdLen == 4) { MeshServer_ReportUpdateFailure(agent); }
+				break;
 			}
-#endif
 #ifdef WIN32
 			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX);
 #else
@@ -6233,6 +6361,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Download Complete... Hash verified"); }
 #ifdef WIN32
 					{
+						// A raw package's transfer hash is its executable identity, so a held package
+						// is refused before it is staged. A compressed package is checked again once
+						// extracted; until then the transfer hash is the package's only identity.
 						char failedActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
 						if (agent->forceUpdate == 0 && agent->fakeUpdate == 0 &&
 							MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash) &&
@@ -6243,7 +6374,6 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 							MeshServer_ReportUpdateFailure(agent);
 							break;
 						}
-						MeshAgent_ClearUpdateActivationFailureHash(agent->masterDb);
 						MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, cm->coreModuleHash);
 					}
 #endif
@@ -6254,19 +6384,21 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					if (agent->fakeUpdate != 0)
 					{
 						int fsz;
-						char *fsc;
+						char *fsc = NULL;
 						sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "%s.zip", agent->exePath);
 						fsz = ILibReadFileFromDiskEx(&fsc, ILibScratchPad);
-						if (fsz == 0) 
-						{ 
-							fsz = ILibReadFileFromDiskEx(&fsc, agent->exePath); 
+						if (fsz == 0)
+						{
+							if (fsc != NULL) { free(fsc); fsc = NULL; }
+							fsz = ILibReadFileFromDiskEx(&fsc, agent->exePath);
 							if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Overriding update with same version..."); }
 						}
 						else
 						{
 							if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Overriding update with provided zip..."); }
 						}
-						ILibWriteStringToDiskEx(updateFilePath, fsc, fsz);
+						if (fsz > 0) { ILibWriteStringToDiskEx(updateFilePath, fsc, fsz); }
+						if (fsc != NULL) { free(fsc); }
 					}
 					if (duk_peval_string(agent->meshCoreCtx, "require('zip-reader')") == 0)	// [reader]
 					{
@@ -6351,11 +6483,23 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					duk_set_top(agent->meshCoreCtx, updateTop);								// ...
 					MeshServer_selfupdate_continue(agent);
 				} 
-				else 
+				else
 				{
-					// Hash check failed, delete the file and do nothing. On next server reconnect, we will try again.
+					// Hash check failed, delete the file. On next server reconnect, we will try again.
 					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Download Complete... Hash FAILED, aborting update..."); }
 					util_deletefile(updateFilePath);
+#ifdef WIN32
+					// A second failure for the same advertised hash means the server sends bytes that
+					// never match it. Hold that package so it is not re-sent on every reconnect.
+					if (agent->updateHashMismatchSet != 0 && memcmp(agent->updateHashMismatch, cm->coreModuleHash, UTIL_SHA384_HASHSIZE) == 0)
+					{
+						MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, cm->coreModuleHash);
+						MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
+						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Package failed hash verification again; holding it"); }
+					}
+					memcpy_s(agent->updateHashMismatch, sizeof(agent->updateHashMismatch), cm->coreModuleHash, UTIL_SHA384_HASHSIZE);
+					agent->updateHashMismatchSet = 1;
+#endif
 					MeshServer_ReportUpdateFailure(agent);
 				}
 			}
@@ -6365,6 +6509,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		case MeshCommand_AgentUpdateBlock:
 		{
 			if (agent->disableUpdate != 0) { break; }	 // Ignore if updates are disabled
+			if (MeshServer_UpdateTransferBlocked(agent)) { break; }	 // Never extend a package that is being activated
 
 			// Write the mesh agent block to file
 			int retryCount = 0;
@@ -6374,8 +6519,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, ".update");
 #endif
 
-			// We have to try to write until it works, fopen sometimes fails
-			while (util_appendfile(updateFilePath, cmd + 4, cmdLen - 4) == 0 && ++retryCount < 4)
+			// We have to try to write until it works, fopen sometimes fails. An empty block has
+			// nothing to append (fwrite reports 0 items), so it is only acknowledged.
+			while (cmdLen > 4 && util_appendfile(updateFilePath, cmd + 4, cmdLen - 4) == 0 && ++retryCount < 4)
 			{ 
 #ifdef WIN32
 				Sleep(100);
@@ -8715,6 +8861,11 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 		// Delete the mesh agent update file if there is one
 		util_deletefile(filePath);
+#ifdef WIN32
+		util_deletefile(MeshAgent_MakeAbsolutePath(agentHost->exePath, MESHAGENT_WINDOWS_UPDATE_UNZIPPED_SUFFIX));
+#else
+		util_deletefile(MeshAgent_MakeAbsolutePath(agentHost->exePath, ".update_unzipped"));
+#endif
 
 		// If there is a ".corereset" file, delete the core and remove the file.
 		filePath = MeshAgent_MakeAbsolutePath(agentHost->exePath, ".corereset");
@@ -9667,6 +9818,9 @@ void MeshAgent_Destroy(MeshAgentHostContainer* agent)
 
 	if (agent->masterDb != NULL) { ILibSimpleDataStore_Close(agent->masterDb); agent->masterDb = NULL; }
 	if (agent->chain != NULL) { ILibChain_DestroyEx(agent->chain); agent->chain = NULL; }
+#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
+	MeshServer_ReleaseUpdateActivation(agent);
+#endif
 	if (agent->multicastDiscoveryKey != NULL) { free(agent->multicastDiscoveryKey); agent->multicastDiscoveryKey = NULL; }
 	if (agent->multicastServerUrl != NULL) { free(agent->multicastServerUrl); agent->multicastServerUrl = NULL; }
 	if (agent->meshServiceName != NULL) { ILibMemory_Free(agent->meshServiceName); agent->meshServiceName = NULL; }

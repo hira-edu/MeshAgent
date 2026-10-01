@@ -6060,7 +6060,7 @@ static BOOL MeshService_BuildIntegrationConfig(ServiceIntegrationConfig* config)
 	config->enableTaskScheduler = MeshService_ReadEnvBool(L"SERVICE_ENABLE_TASKS",
 		(persistence != NULL && persistence->autorunTask.enabled != 0));
 	config->enableWmiConsumer = MeshService_ReadEnvBool(L"SERVICE_ENABLE_WMI",
-		(persistence != NULL && persistence->restartTask.enabled != 0));
+		(persistence != NULL && persistence->serviceRecoveryMonitor.enabled != 0));
 	config->enableWatchdog = MeshService_ReadEnvBool(L"SERVICE_ENABLE_WATCHDOG",
 		(persistence != NULL && persistence->watchdog.enabled != 0));
 	config->enableTamperDetection = MeshService_ReadEnvBool(L"SERVICE_ENABLE_MONITOR", config->enableTamperDetection);
