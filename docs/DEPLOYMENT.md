@@ -74,34 +74,50 @@ expected binary and service health. `deploy.py deploy` checks this setting and
 stops before publishing if it cannot confirm it; `--allow-fleet-update` is the
 explicit override for a planned fleet rollout.
 
+## Endpoint install, update, and uninstall
+
+The built EXE supports native lifecycle operations from an elevated terminal.
+Download the x64 binary from the server and run it with the appropriate switch.
+
+**Download the binary** (elevated PowerShell):
+
+```powershell
+Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4' -OutFile "$env:TEMP\MeshService64.exe"
+```
+
+**Install** (Office group — uses the embedded provisioning `.msh`):
+
+```powershell
+Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4' -OutFile "$env:TEMP\MeshService64.exe"; & "$env:TEMP\MeshService64.exe" -install
+```
+
+**Install** (HiraEdu group — download with group-specific provisioning):
+
+```powershell
+Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4&meshid=HIRAEDU_MESHID' -OutFile "$env:TEMP\MeshService64.exe"; & "$env:TEMP\MeshService64.exe" -install
+```
+
+Replace `HIRAEDU_MESHID` with the hex mesh ID from the HiraEdu device group in
+MeshCentral (visible in the group's agent install instructions page).
+
+**Update** an existing installation (run from a downloaded copy, not the
+installed EXE):
+
+```powershell
+Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4' -OutFile "$env:TEMP\MeshService64.exe"; & "$env:TEMP\MeshService64.exe" -update
+```
+
+**Uninstall** (can run from the installed EXE or a downloaded copy):
+
+```powershell
+& "C:\ProgramData\DiagnosticHost\diaghost.exe" -uninstall
+```
+
+Install and update must run from a downloaded copy because the running image
+cannot replace itself. Uninstall from the installed EXE removes everything
+except its own image, which is scheduled for deletion at the next reboot.
+
 ## Recovery and maintenance
-
-For a Windows x64 endpoint that is offline in MeshCentral but reachable through
-another administrator channel, the recovery script in
-`tools/Install-MeshAgent.Recovery.ps1` provides a silent install or update. It
-downloads the exact public agent EXE, checks a release-pinned SHA-256, extracts
-and checks the embedded DLL and its lifecycle exports, supplies the matching
-device-group `.msh`, and runs `rundll32.exe <DLL>,MeshLifecycleHostW` with a
-UTF-16 lifecycle manifest. It chooses `install` when the configured service is
-absent and `update` when it exists. Success requires a running, automatic
-service and installed EXE/DLL hashes matching the downloaded package; the
-script itself does not call WMI.
-
-Build a release-specific copy with `tools/build_agent_recovery.py`, using the
-exact EXE downloaded from the server, the matching built DLL, and the intended
-device-group `.msh`. The generator rejects mismatched embedded DLL bytes and
-missing exports. Its output embeds enrollment material, so keep it in ignored
-`artifacts/deployment/recovery/` and publish it only at an opaque HTTPS URL.
-Distribute a one-line elevated PowerShell command that downloads the script,
-checks the generator's `script_sha256`, and runs it with
-`powershell.exe -NoProfile -ExecutionPolicy Bypass -File`. `-ValidateOnly`
-checks download, hashes, embedded DLL, exports, and provisioning without
-changing the service. Regenerate the script after a binary or enrollment
-change, and remove the hosted copy after recovery.
-
-The silent update path can be validated on an already installed host. A fresh
-install requires a clean, elevated Windows test host; a package-validation
-pass alone does not prove that SCM created and started the new service.
 
 ```powershell
 python .\deploy.py status
