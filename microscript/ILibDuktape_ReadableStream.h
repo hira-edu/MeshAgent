@@ -84,6 +84,9 @@ void ILibDuktape_ReadableStream_DestroyPausedData(ILibDuktape_readableStream *st
 int ILibDuktape_readableStream_WriteDataEx(ILibDuktape_readableStream *stream, int streamReserved, char* buffer, size_t bufferLen);
 int ILibDuktape_readableStream_WriteEnd(ILibDuktape_readableStream *stream);
 #define ILibDuktape_readableStream_WriteData(stream, buffer, bufferLen) ILibDuktape_readableStream_WriteDataEx(stream, 0, buffer, bufferLen)
+// Re-delivers data buffered while paused; returns 0 when everything was flushed (the stream
+// may then be resumed) and 1 when a destination is still congested (the stream stays paused).
+int ILibDuktape_readableStream_resume_flush(ILibDuktape_readableStream *rs);
 void ILibDuktape_readableStream_Closed(ILibDuktape_readableStream *stream);
 
 #endif

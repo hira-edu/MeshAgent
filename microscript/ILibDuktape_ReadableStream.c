@@ -740,6 +740,7 @@ duk_ret_t ILibDuktape_readableStream_pipe(duk_context *ctx)
 }
 void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int argsLen)
 {
+	int resumeAfterUnpipe = 0;
 	ILibDuktape_readableStream *data;
 	ILibDuktape_readableStream_nextWriteablePipe *w;
 	int i;
@@ -802,6 +803,16 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 					{
 						data->nextWriteable = w->next;
 					}
+					// If the departing destination is the one holding this stream paused (its drain
+					// callback still points here), that drain will never come. Detach it and resume the
+					// remaining destinations once the unpipe completes; a destination that is still
+					// congested simply pauses the stream again on the next write.
+					if (w->nativeWritable != NULL)
+					{
+						ILibDuktape_WritableStream *removedWs = (ILibDuktape_WritableStream*)w->nativeWritable;
+						if (ILibMemory_CanaryOK(removedWs) && removedWs->OnWriteFlushEx_User == data) { removedWs->OnWriteFlushEx = NULL; removedWs->OnWriteFlushEx_User = NULL; }
+					}
+					if (data->paused != 0 && data->nextWriteable != NULL) { resumeAfterUnpipe = 1; }
 					duk_push_heapptr(ctx, data->pipeArray);								// [array]
 					arrayLen = duk_get_length(ctx, -1);									   
 					for (i = 0; i < (int)arrayLen; ++i)									   
@@ -858,6 +869,11 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 	}
 	data->unpipeInProgress = 0;
 	ILibSpinLock_UnLock(&(data->pipeLock));
+
+	if (resumeAfterUnpipe != 0 && data->paused != 0 && data->nextWriteable != NULL)
+	{
+		if (ILibDuktape_readableStream_resume_flush(data) == 0 && data->ResumeHandler != NULL) { data->paused = 0; data->ResumeHandler(data, data->user); }
+	}
 
 	// Delete Reference before returning
 	duk_push_this(ctx);

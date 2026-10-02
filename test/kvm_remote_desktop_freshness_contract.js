@@ -137,7 +137,7 @@ function main() {
             agentcore.includes('snapshot.childPresent == 0 || snapshot.transportActive == 0') &&
             agentcore.includes('snapshot.lastScreenTickMs == 0') &&
             agentcore.includes('snapshot.pendingProbeMask & KVM_PENDING_PROBE_REFRESH') &&
-            agentcore.includes('snapshot.pendingProbeSinceTickMs') &&
+            agentcore.includes('snapshot.refreshProbeSinceTickMs') &&
             agentcore.includes('REMOTE_DESKTOP_REFRESH_PROBE_TIMEOUT_MS') &&
             agentcore.includes('static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(duk_context *ctx, RemoteDesktop_Ptrs *ptrs)') &&
             agentcore.includes('ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(ctx, ptrs);'),

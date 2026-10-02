@@ -4716,8 +4716,9 @@ void ILibDuktape_httpStream_webSocket_EncodedResumeSink(ILibDuktape_DuplexStream
 	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasDecodedWritable(state)) { return; }
 	if (state->decodedStream->writableStream->pipedReadable_native != NULL && state->decodedStream->writableStream->pipedReadable_native->ResumeHandler != NULL)
 	{
-		state->decodedStream->writableStream->pipedReadable_native->paused = 0;
-		state->decodedStream->writableStream->pipedReadable_native->ResumeHandler(state->decodedStream->writableStream->pipedReadable_native, state->decodedStream->writableStream->pipedReadable_native->user);
+		ILibDuktape_readableStream *rs = state->decodedStream->writableStream->pipedReadable_native;
+		// Deliver what was buffered while paused before new data flows, or later packets overtake it.
+		if (ILibDuktape_readableStream_resume_flush(rs) == 0) { rs->paused = 0; rs->ResumeHandler(rs, rs->user); }
 	}
 	else
 	{
@@ -4819,8 +4820,9 @@ void ILibDuktape_httpStream_webSocket_DecodedResumeSink(ILibDuktape_DuplexStream
 	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasEncodedWritable(state)) { return; }
 	if (state->encodedStream->writableStream->pipedReadable_native != NULL && state->encodedStream->writableStream->pipedReadable_native->ResumeHandler != NULL)
 	{
-		state->encodedStream->writableStream->pipedReadable_native->paused = 0;
-		state->encodedStream->writableStream->pipedReadable_native->ResumeHandler(state->encodedStream->writableStream->pipedReadable_native, state->encodedStream->writableStream->pipedReadable_native->user);
+		ILibDuktape_readableStream *rs = state->encodedStream->writableStream->pipedReadable_native;
+		// Deliver what was buffered while paused before new data flows, or later packets overtake it.
+		if (ILibDuktape_readableStream_resume_flush(rs) == 0) { rs->paused = 0; rs->ResumeHandler(rs, rs->user); }
 	}
 	else
 	{

@@ -263,6 +263,12 @@ static unsigned short gKvmLastInputType = 0;
 static unsigned short gKvmLastOutputType = 0;
 static LONG gKvmPendingProbeMask = 0;
 static ULONGLONG gKvmPendingProbeSinceTickMs = 0;
+// Age of the outstanding REFRESH probe alone. The shared tick above starts with the oldest
+// probe of any type, so a refresh that followed an older query inherited its age and the
+// watchdog killed healthy helpers.
+static ULONGLONG gKvmRefreshProbeSinceTickMs = 0;
+// A refresh requested while one this recent is still outstanding is coalesced into it.
+#define KVM_REFRESH_COALESCE_MS 1000
 
 static void kvm_server_ensure_tile_geometry()
 {
@@ -404,6 +410,7 @@ typedef struct KvmRelayContext
 	unsigned short lastOutputType;
 	LONG pendingProbeMask;
 	ULONGLONG pendingProbeSinceTickMs;
+	ULONGLONG refreshProbeSinceTickMs;
 	LONG destroyPending;
 	int cachedControlPacketCount;
 	// Set by kvm_cleanup() while a helper it stopped has not reported its
@@ -812,6 +819,7 @@ static void kvm_relay_load_context(KvmRelayContext* ctx)
 	gKvmLastOutputType = ctx->lastOutputType;
 	gKvmPendingProbeMask = ctx->pendingProbeMask;
 	gKvmPendingProbeSinceTickMs = ctx->pendingProbeSinceTickMs;
+	gKvmRefreshProbeSinceTickMs = ctx->refreshProbeSinceTickMs;
 	g_shutdown = ctx->shutdown;
 }
 
@@ -864,6 +872,7 @@ static void kvm_relay_capture_context(KvmRelayContext* ctx)
 	ctx->lastOutputType = gKvmLastOutputType;
 	ctx->pendingProbeMask = gKvmPendingProbeMask;
 	ctx->pendingProbeSinceTickMs = gKvmPendingProbeSinceTickMs;
+	ctx->refreshProbeSinceTickMs = gKvmRefreshProbeSinceTickMs;
 	ctx->shutdown = g_shutdown;
 }
 
@@ -951,6 +960,7 @@ static void kvm_bridge_debug_reset_activity_state()
 {
 	InterlockedExchange(&gKvmPendingProbeMask, 0);
 	gKvmPendingProbeSinceTickMs = 0;
+	gKvmRefreshProbeSinceTickMs = 0;
 	gKvmSessionStartTickMs = 0;
 	gKvmLastInputTickMs = 0;
 	gKvmLastOutputTickMs = 0;
@@ -989,6 +999,7 @@ static void kvm_bridge_debug_arm_pending_probe(unsigned int probeMask)
 	}
 	if ((probeMask & KVM_PENDING_PROBE_REFRESH) != 0 && (previousMask & KVM_PENDING_PROBE_REFRESH) == 0)
 	{
+		gKvmRefreshProbeSinceTickMs = GetTickCount64();
 		kvm_schedule_retry_timer_delay(KVM_REFRESH_PROBE_TIMEOUT_MS);
 	}
 }
@@ -1003,6 +1014,7 @@ static void kvm_bridge_debug_clear_pending_probe(unsigned int probeMask)
 	{
 		gKvmPendingProbeSinceTickMs = 0;
 	}
+	if ((probeMask & KVM_PENDING_PROBE_REFRESH) != 0) { gKvmRefreshProbeSinceTickMs = 0; }
 }
 
 static void kvm_bridge_debug_note_input(char* buffer, size_t bufferLen)
@@ -1071,8 +1083,8 @@ static int kvm_relay_refresh_probe_timed_out(ULONGLONG now, ULONGLONG* ageMsOut)
 
 	if (ageMsOut != NULL) { *ageMsOut = 0; }
 	if ((pendingMask & KVM_PENDING_PROBE_REFRESH) == 0) { return 0; }
-	if (gKvmPendingProbeSinceTickMs == 0) { return 1; }
-	ageMs = now - gKvmPendingProbeSinceTickMs;
+	if (gKvmRefreshProbeSinceTickMs == 0) { return 1; }
+	ageMs = now - gKvmRefreshProbeSinceTickMs;
 	if (ageMsOut != NULL) { *ageMsOut = ageMs; }
 	return ageMs > KVM_REFRESH_PROBE_TIMEOUT_MS ? 1 : 0;
 }
@@ -1106,6 +1118,7 @@ static int kvm_relay_handle_refresh_probe_timeout(KvmRelayContext* ctx, const ch
 	kvm_record_spawn_failure(ERROR_TIMEOUT, KVM_BRIDGE_FAILURE_STAGE_EXIT, (DWORD)gProcessSpawnType);
 	kvm_relay_cache_refresh_probe_for_respawn(ctx);
 	InterlockedAnd(&gKvmPendingProbeMask, (LONG)(~KVM_PENDING_PROBE_REFRESH));
+	gKvmRefreshProbeSinceTickMs = 0;
 	if (InterlockedCompareExchange(&gKvmPendingProbeMask, 0, 0) == 0) { gKvmPendingProbeSinceTickMs = 0; }
 	gKvmChildExitSignaled = 1;
 	kvm_update_runtime_state(0, 0);
@@ -1660,6 +1673,7 @@ static BOOL kvm_relay_set_bridge_pause_state(KvmRelayContext* ctx, int normalize
 		// The probe is not timed while the viewer is paused; give a refresh that was pending
 		// during the pause a full window from the moment the viewer resumed.
 		gKvmPendingProbeSinceTickMs = GetTickCount64();
+		gKvmRefreshProbeSinceTickMs = gKvmPendingProbeSinceTickMs;
 		kvm_schedule_retry_timer_delay(KVM_REFRESH_PROBE_TIMEOUT_MS + 1);
 	}
 
@@ -2386,6 +2400,7 @@ static BOOL kvm_relay_attach_bridge_transport(KvmRelayContext* ctx, HANDLE input
 	if (InterlockedCompareExchange(&gKvmPendingProbeMask, 0, 0) != 0)
 	{
 		gKvmPendingProbeSinceTickMs = GetTickCount64();
+		if ((InterlockedCompareExchange(&gKvmPendingProbeMask, 0, 0) & KVM_PENDING_PROBE_REFRESH) != 0) { gKvmRefreshProbeSinceTickMs = gKvmPendingProbeSinceTickMs; }
 	}
 	return TRUE;
 }
@@ -2594,7 +2609,7 @@ static void kvm_retry_timer_callback(void* object)
 		// probe from re-arming at ~0 ms and spinning the chain thread.
 		ULONGLONG ageMs = 0;
 		now = GetTickCount64();
-		ageMs = (gKvmPendingProbeSinceTickMs != 0 && now > gKvmPendingProbeSinceTickMs) ? (now - gKvmPendingProbeSinceTickMs) : 0;
+		ageMs = (gKvmRefreshProbeSinceTickMs != 0 && now > gKvmRefreshProbeSinceTickMs) ? (now - gKvmRefreshProbeSinceTickMs) : 0;
 		kvm_schedule_retry_timer_delay(ageMs + KVM_REFRESH_PROBE_RECHECK_FLOOR_MS < KVM_REFRESH_PROBE_TIMEOUT_MS ?
 			(DWORD)(KVM_REFRESH_PROBE_TIMEOUT_MS - ageMs) + 1 :
 			KVM_REFRESH_PROBE_RECHECK_FLOOR_MS);
@@ -5818,6 +5833,28 @@ void kvm_relay_reset(ILibKVM_WriteHandler writeHandler, void *reserved)
 {
 	char buffer[4];
 	KVMDEBUG("kvm_relay_reset", 0);
+#ifdef _WINSERVICE
+	{
+		// Every viewer that attaches asks for a full refresh. When one is already outstanding and
+		// recent, the frame it produces reaches every destination, so a second request would only
+		// make the helper resend everything once more to all viewers.
+		KvmRelayContext* ctx = NULL;
+		int coalesce = 0;
+		kvm_relay_lock();
+		ctx = kvm_relay_find_context_by_reserved(reserved);
+		if (ctx != NULL)
+		{
+			if (ctx == gKvmActiveContext) { kvm_relay_capture_context(ctx); }
+			if ((ctx->pendingProbeMask & KVM_PENDING_PROBE_REFRESH) != 0 && ctx->refreshProbeSinceTickMs != 0 &&
+				(GetTickCount64() - ctx->refreshProbeSinceTickMs) < KVM_REFRESH_COALESCE_MS)
+			{
+				coalesce = 1;
+			}
+		}
+		kvm_relay_unlock();
+		if (coalesce) { kvm_trace_startupf("kvm_relay_reset coalesced into the refresh already outstanding"); return; }
+	}
+#endif
 	((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_REFRESH);	// Write the type
 	((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)4);				// Write the size
 	kvm_relay_feeddata(buffer, 4, writeHandler, reserved);
@@ -6430,6 +6467,9 @@ int kvm_bridge_debug_get_snapshot_for_reserved(void *reserved, KvmBridgeDebugSna
 	snapshotOut->lastOutputType = ctx->lastOutputType;
 	snapshotOut->pendingProbeMask = (unsigned int)ctx->pendingProbeMask;
 	snapshotOut->pendingProbeSinceTickMs = ctx->pendingProbeSinceTickMs;
+	snapshotOut->refreshProbeSinceTickMs = ctx->refreshProbeSinceTickMs;
+	snapshotOut->bridgePaused = (InterlockedCompareExchange(&ctx->bridgeProtocolPauseState, 0, 0) != 0) ? 1 : 0;
+	snapshotOut->restartSuppressed = ctx->restartSuppressed;
 	kvm_relay_unlock();
 	return 1;
 }
