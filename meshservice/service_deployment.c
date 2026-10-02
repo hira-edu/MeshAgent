@@ -972,6 +972,8 @@ static const wchar_t* const g_LegacyDllNames[] = {
     L"MeshService-2022.dll",        /* build output DLL (MeshServiceBundle configuration) */
     L"svchost_payload.dll",         /* embedded svchost payload candidate at install root */
     L"diagsvc.dll",                 /* legacy diagnostic service DLL */
+    L"MeshService64.dll",           /* prior build-output service DLL (git history) */
+    L"MeshServiceHost64.dll",       /* prior build-output host DLL (git history) */
 };
 
 static const wchar_t* const g_LegacyExeNames[] = {
@@ -1346,6 +1348,39 @@ static size_t ServiceDeploy_DiscoverLegacyInstallations(
     return count;
 }
 
+/* Defense-in-depth: refuse to run file/directory removal against a directory
+ * that is (or contains, or is contained by) a Windows system location, or a
+ * drive root. A malformed or hostile legacy service ImagePath could otherwise
+ * steer the per-name deletions (including the "svchost.exe" remnant removal)
+ * at System32. Discovery should never produce such a directory, but file
+ * deletion is irreversible, so guard it here as well. */
+static BOOL ServiceDeploy_IsUnsafeLegacyInstallDir(const wchar_t* dir)
+{
+    wchar_t systemDir[MAX_PATH] = {0};
+    wchar_t windowsDir[MAX_PATH] = {0};
+    size_t len;
+
+    if (dir == NULL) { return TRUE; }
+    len = wcslen(dir);
+    /* Empty, or too short to be anything but a drive root (e.g. "C:" / "C:\"). */
+    if (len < 4) { return TRUE; }
+    /* Drive root like "C:\" (3 chars handled above) or "C:\\" with nothing else. */
+    if (dir[1] == L':' && (dir[2] == L'\\' || dir[2] == L'/') && dir[3] == L'\0') { return TRUE; }
+
+    if (GetSystemDirectoryW(systemDir, _countof(systemDir)) > 0)
+    {
+        if (_wcsicmp(dir, systemDir) == 0 ||
+            ServiceDeploy_PathStartsWithDirectoryInsensitive(dir, systemDir) ||
+            ServiceDeploy_PathStartsWithDirectoryInsensitive(systemDir, dir)) { return TRUE; }
+    }
+    if (GetWindowsDirectoryW(windowsDir, _countof(windowsDir)) > 0)
+    {
+        if (_wcsicmp(dir, windowsDir) == 0 ||
+            ServiceDeploy_PathStartsWithDirectoryInsensitive(windowsDir, dir)) { return TRUE; }
+    }
+    return FALSE;
+}
+
 static void ServiceDeploy_CleanupLegacyRecord(const LegacyInstallRecord* record)
 {
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
@@ -1402,7 +1437,8 @@ static void ServiceDeploy_CleanupLegacyRecord(const LegacyInstallRecord* record)
     }
 
     /* Remove files at the legacy install directory. */
-    if (record->installDir[0] != L'\0' && GetFileAttributesW(record->installDir) != INVALID_FILE_ATTRIBUTES)
+    if (record->installDir[0] != L'\0' && GetFileAttributesW(record->installDir) != INVALID_FILE_ATTRIBUTES &&
+        !ServiceDeploy_IsUnsafeLegacyInstallDir(record->installDir))
     {
         size_t i;
         wchar_t filePath[MAX_PATH] = {0};
@@ -1482,6 +1518,10 @@ static void ServiceDeploy_CleanupLegacyRecord(const LegacyInstallRecord* record)
 
         /* Remove the legacy install root only if it is now empty. */
         (void)RemoveDirectoryW(record->installDir);
+    }
+    else if (record->installDir[0] != L'\0' && ServiceDeploy_IsUnsafeLegacyInstallDir(record->installDir))
+    {
+        ServiceDeploy_LogInstallEvent(L"[LEGACY] Skipped file cleanup for unsafe/system directory %ls", record->installDir);
     }
 
     ServiceDeploy_LogInstallEvent(L"[LEGACY] Legacy installation cleanup completed for %ls",
