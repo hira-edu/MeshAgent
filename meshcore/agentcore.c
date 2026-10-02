@@ -2230,6 +2230,9 @@ char exeNullPolicyGuid[] = { 0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19, 0xB
 // A pong timer that fires this much later than scheduled means the event thread was stalled
 // (for example by a synchronous helper launch), not that the server stopped answering.
 #define CONTROLCHANNEL_PONG_STALL_SLACK_MS 2000
+// A session the server accepted but closed again within this window does not reset the
+// reconnect backoff; reconnecting at once after such a close loops at handshake speed.
+#define CONTROLCHANNEL_STABLE_SESSION_MS 60000
 #define MESH_USER_CHANGED_CB	"\xFF_MeshAgent_UserChangedCallback"
 #define REMOTE_DESKTOP_UID		"\xFF_RemoteDesktopUID"
 #define REMOTE_DESKTOP_VIRTUAL_SESSION_USERNAME "\xFF_RemoteDesktopUSERNAME"
@@ -5086,6 +5089,8 @@ void MeshServer_ServerAuthenticated(ILibWebClient_StateObject WebStateObject, Me
 	// TODO: Verify with Bryan that only the core module will get this. No other modules should.
 	if (agent->serverAuthState == 3) 
 	{
+		agent->lastAuthenticatedTick = ILibGetUptime();
+		agent->retryTime = 0;
 		ILibDuktape_MeshAgent_PUSH(agent->meshCoreCtx, agent->chain);				// [agent]
 		duk_get_prop_string(agent->meshCoreCtx, -1, "emit");						// [agent][emit]
 		duk_swap_top(agent->meshCoreCtx, -2);										// [emit][this]
@@ -5151,8 +5156,15 @@ void MeshServer_SendAgentInfo(MeshAgentHostContainer* agent, ILibWebClient_State
 		}
 	}
 
-	if (agent->meshCoreCtx != NULL)
+	if (agent->agentInfoPlatformType != 0)
 	{
+		info->platformType = htonl((unsigned int)agent->agentInfoPlatformType);
+	}
+	else if (agent->meshCoreCtx != NULL)
+	{
+		// These run about a dozen synchronous WMI queries on the event thread. The answers do not
+		// change for the life of the process, so they are computed once rather than on every
+		// handshake, where a busy host turned each reconnect into a multi-second stall.
 		if (duk_peval_string(agent->meshCoreCtx, "require('identifiers').isVM();") == 0)
 		{
 			if (duk_get_boolean(agent->meshCoreCtx, -1))
@@ -5172,13 +5184,14 @@ void MeshServer_SendAgentInfo(MeshAgentHostContainer* agent, ILibWebClient_State
 			}
 			duk_pop(agent->meshCoreCtx);
 		}
+		agent->agentInfoPlatformType = (int)ntohl(info->platformType);
 	}
 
 
 
-	// Send mesh agent information to the server
+	// Send mesh agent information to the server. The reconnect backoff is reset only once the
+	// server has accepted the agent (MeshServer_ServerAuthenticated), not here.
 	ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_BINARY, (char*)info, sizeof(MeshCommand_BinaryPacket_AuthInfo) + hostnamelen, ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
-	agent->retryTime = 0;
 
 	if ((agent->capabilities & MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY) == MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY)
 	{
@@ -6599,6 +6612,29 @@ static void MeshServer_ControlChannel_EmitDisconnected(MeshAgentHostContainer *a
 	duk_pop(agent->meshCoreCtx);																											// ...
 }
 
+// True when the control socket has unread input waiting: after an event-thread stall this is
+// usually the pong itself, which the timer would otherwise pre-empt.
+static int MeshServer_ControlChannel_HasPendingInput(ILibWebClient_StateObject channel)
+{
+	int fd = ILibWebClient_GetDescriptorValue_FromStateObject(channel);
+	fd_set readSet;
+	struct timeval zeroWait;
+
+	if (fd < 0) { return 0; }
+#ifndef WIN32
+	if (fd >= FD_SETSIZE) { return 0; }
+#endif
+	FD_ZERO(&readSet);
+#ifdef WIN32
+	FD_SET((SOCKET)fd, &readSet);
+#else
+	FD_SET(fd, &readSet);
+#endif
+	zeroWait.tv_sec = 0;
+	zeroWait.tv_usec = 0;
+	return (select(fd + 1, &readSet, NULL, NULL, &zeroWait) > 0) ? 1 : 0;
+}
+
 void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 {
 	// We didn't receive a timely PONG response, so we must disconnect the control channel, and reconnect
@@ -6631,15 +6667,17 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 	// read, which would drop a healthy connection. Give one re-ping before concluding the peer is gone.
 	{
 		long long overdueMs = ILibGetUptime() - agent->controlChannel_pingSentTick - ((long long)CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 1000);
-		if (agent->controlChannel_pingSentTick != 0 && overdueMs > CONTROLCHANNEL_PONG_STALL_SLACK_MS && agent->controlChannel_pongGraceUsed == 0)
+		int pendingInput = MeshServer_ControlChannel_HasPendingInput(timedOutChannel);
+		if (agent->controlChannel_pingSentTick != 0 && (overdueMs > CONTROLCHANNEL_PONG_STALL_SLACK_MS || pendingInput != 0) && agent->controlChannel_pongGraceUsed == 0)
 		{
 			agent->controlChannel_pongGraceUsed = 1;
 			agent->controlChannel_pingSentTick = ILibGetUptime();
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG timer fired %lld ms late (event thread stalled); re-pinging instead of disconnecting (descriptor=%d)", overdueMs, descriptorValue);
-			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG timer %lld ms late, re-pinging", overdueMs);
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG timer fired %lld ms late, pendingInput=%d; re-pinging instead of disconnecting (descriptor=%d)", overdueMs, pendingInput, descriptorValue);
+			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG timer %lld ms late (pendingInput=%d), re-pinging", overdueMs, pendingInput);
 			ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
-			ILibWebClient_WebSocket_Ping(timedOutChannel);
-			return;
+			if ((int)ILibWebClient_WebSocket_Ping(timedOutChannel) >= 0) { return; }
+			// The re-ping could not even be queued: the socket is gone, so reconnect now.
+			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
 		}
 	}
 
@@ -6654,6 +6692,13 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 void MeshServer_ControlChannel_IdleTimeout(ILibWebClient_StateObject WebStateObject, void *user)
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user;
+
+	if (WebStateObject != agent->controlChannel)
+	{
+		// A channel that is no longer the control channel must not arm the shared pong timer.
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): idle timeout on a stale channel ignored (descriptor=%d)", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
+		return;
+	}
 
 	if (agent->controlChannelDebug != 0)
 	{
@@ -6676,6 +6721,12 @@ ILibWebClient_WebSocket_PingResponse MeshServer_ControlChannel_PingSink(ILibWebC
 void MeshServer_ControlChannel_PongSink(ILibWebClient_StateObject WebStateObject, void *user)
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user;
+	if (WebStateObject != agent->controlChannel)
+	{
+		// A pong from a channel that is no longer the control channel says nothing about the live one.
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): pong on a stale channel ignored (descriptor=%d)", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
+		return;
+	}
 	ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
 	agent->controlChannel_pingSentTick = 0;
 	agent->controlChannel_pongGraceUsed = 0;
@@ -6850,6 +6901,10 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			{
 				agent->controlChannel_idleTimeout_seconds = DEFAULT_IDLE_TIMEOUT;
 			}
+
+			// Below twice the pong timeout the next ping re-arms the pong timer before it can fire,
+			// so a dead peer would never be detected; zero or negative would disable or flood pings.
+			if (agent->controlChannel_idleTimeout_seconds < CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 2) { agent->controlChannel_idleTimeout_seconds = CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 2; }
 
 			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
 			agent->controlChannel_pingSentTick = 0;
@@ -7582,7 +7637,7 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	#define INITIAL_JITTER_MS 1500          // 1500ms jitter range
 	#define BACKOFF_CAP_MS 240000           // 4 minutes cap before adding jitter
 
-	if (agent->retryTime == 0)
+	if (agent->retryTime == 0 && (agent->lastAuthenticatedTick == 0 || (ILibGetUptime() - agent->lastAuthenticatedTick) >= CONTROLCHANNEL_STABLE_SESSION_MS))
 	{
 		// Use unsigned arithmetic for timeout to prevent sign issues
 		unsigned int jitter = ((unsigned int)timeout) % INITIAL_JITTER_MS;
@@ -7592,6 +7647,14 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	else
 	{
 		int delay;
+		if (agent->retryTime == 0)
+		{
+			// The server accepted the previous session but closed it again within
+			// CONTROLCHANNEL_STABLE_SESSION_MS. Start the backoff ladder instead of reconnecting at once.
+			unsigned int jitter = ((unsigned int)timeout) % INITIAL_JITTER_MS;
+			agent->retryTime = BASE_RETRY_DELAY_MS + (int)jitter;
+			if (agent->timerLogging != 0) { ILIBLOGMESSAGEX(" >> Previous session was short-lived; using backoff for the reconnect"); }
+		}
 		if (agent->retryTime >= BACKOFF_CAP_MS)
 		{
 			// Cap at around 4-6 minutes with bounded jitter
