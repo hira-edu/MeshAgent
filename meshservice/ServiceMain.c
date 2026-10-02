@@ -7916,7 +7916,6 @@ static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 int wmain(int argc, char* wargv[])
 {
 	MeshService_InstallInvalidParameterHandler();
-	size_t str2len = 0;// , proxylen = 0, taglen = 0;
 	ILib_DumpEnabledContext winException;
 	int retCode = 0;
 

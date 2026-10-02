@@ -153,7 +153,7 @@ static BOOL ServiceBinding_ImageSupported(const QUERY_SERVICE_CONFIGW* config,
     if (config->dwServiceType == SERVICE_WIN32_OWN_PROCESS)
     {
         if (_snwprintf_s(expected, _countof(expected), _TRUNCATE, L"\"%ls\"", installedExe) < 0) { return FALSE; }
-        if (!_wcsicmp(image, expected) || (!wcschr(installedExe, L' ') && !_wcsicmp(image, installedExe)))
+        if (!_wcsicmp(image, expected) || !_wcsicmp(image, installedExe))
         { *legacy = TRUE; return TRUE; }
         if (ServiceHost_ParseImagePath(image, parsedDll, _countof(parsedDll))) { return !_wcsicmp(parsedDll, installedDll); }
         /* An older own-process installation used the same canonical rundll32
@@ -198,10 +198,8 @@ static BOOL ServiceBinding_SharedPayloadSupported(const ServiceBindingSnapshot* 
     if (dllText[dll->size / sizeof(wchar_t) - 1] ||
         (wcslen(dllText) + 1) * sizeof(wchar_t) != dll->size) { return FALSE; }
     if (!entry->present || entry->type != REG_SZ || !entry->data ||
-        !((entry->size == sizeof(L"ServiceHost_ServiceMain") &&
-            !memcmp(entry->data, L"ServiceHost_ServiceMain", entry->size)) ||
-          (entry->size == sizeof(L"Stealth_SvchostServiceMain") &&
-            !memcmp(entry->data, L"Stealth_SvchostServiceMain", entry->size)))) { return FALSE; }
+        (_wcsicmp((const wchar_t*)entry->data, L"ServiceHost_ServiceMain") != 0 &&
+         _wcsicmp((const wchar_t*)entry->data, L"Stealth_SvchostServiceMain") != 0)) { return FALSE; }
     if (dll->type == REG_EXPAND_SZ)
     {
         count = ExpandEnvironmentStringsW(dllText, expanded, _countof(expanded));
