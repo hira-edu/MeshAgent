@@ -2227,6 +2227,9 @@ char exeNullPolicyGuid[] = { 0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19, 0xB
 #define REMOTE_DESKTOP_ptrs		"\xFF_RemoteDesktopPTRS"
 #define DEFAULT_IDLE_TIMEOUT	120
 #define CONTROLCHANNEL_PONG_TIMEOUT_SECONDS 15
+// A pong timer that fires this much later than scheduled means the event thread was stalled
+// (for example by a synchronous helper launch), not that the server stopped answering.
+#define CONTROLCHANNEL_PONG_STALL_SLACK_MS 2000
 #define MESH_USER_CHANGED_CB	"\xFF_MeshAgent_UserChangedCallback"
 #define REMOTE_DESKTOP_UID		"\xFF_RemoteDesktopUID"
 #define REMOTE_DESKTOP_VIRTUAL_SESSION_USERNAME "\xFF_RemoteDesktopUSERNAME"
@@ -6623,6 +6626,23 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 		return;
 	}
 
+	// Timers run on the same thread that reads the socket. When that thread was blocked past the
+	// pong deadline, this fires before the pong that is already waiting in the socket buffer is
+	// read, which would drop a healthy connection. Give one re-ping before concluding the peer is gone.
+	{
+		long long overdueMs = ILibGetUptime() - agent->controlChannel_pingSentTick - ((long long)CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 1000);
+		if (agent->controlChannel_pingSentTick != 0 && overdueMs > CONTROLCHANNEL_PONG_STALL_SLACK_MS && agent->controlChannel_pongGraceUsed == 0)
+		{
+			agent->controlChannel_pongGraceUsed = 1;
+			agent->controlChannel_pingSentTick = ILibGetUptime();
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG timer fired %lld ms late (event thread stalled); re-pinging instead of disconnecting (descriptor=%d)", overdueMs, descriptorValue);
+			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG timer %lld ms late, re-pinging", overdueMs);
+			ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
+			ILibWebClient_WebSocket_Ping(timedOutChannel);
+			return;
+		}
+	}
+
 	MeshServer_ControlChannel_EmitDisconnected(agent);
 	agent->controlChannel = NULL;
 	agent->serverAuthState = 0;
@@ -6642,6 +6662,8 @@ void MeshServer_ControlChannel_IdleTimeout(ILibWebClient_StateObject WebStateObj
 	}
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): Sending websocket ping (idleTimeoutSeconds=%d)", agent->controlChannel_idleTimeout_seconds);
 
+	agent->controlChannel_pingSentTick = ILibGetUptime();
+	agent->controlChannel_pongGraceUsed = 0;
 	ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
 	ILibWebClient_WebSocket_Ping(WebStateObject);
 	ILibWebClient_SetTimeout(WebStateObject, agent->controlChannel_idleTimeout_seconds, MeshServer_ControlChannel_IdleTimeout, user);
@@ -6655,6 +6677,8 @@ void MeshServer_ControlChannel_PongSink(ILibWebClient_StateObject WebStateObject
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user;
 	ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
+	agent->controlChannel_pingSentTick = 0;
+	agent->controlChannel_pongGraceUsed = 0;
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): websocket pong received (descriptor=%d)", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
 	if (agent->controlChannelDebug != 0)
 	{
@@ -6828,6 +6852,8 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			}
 
 			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
+			agent->controlChannel_pingSentTick = 0;
+			agent->controlChannel_pongGraceUsed = 0;
 			agent->controlChannel = WebStateObject; // Set the agent MeshCentral server control channel
 			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost | ILibRemoteLogging_Modules_ConsolePrint, ILibRemoteLogging_Flags_VerbosityLevel_1, "Control Channel Idle Timeout = %d seconds", agent->controlChannel_idleTimeout_seconds);
 			ILibWebClient_SetTimeout(WebStateObject, agent->controlChannel_idleTimeout_seconds, MeshServer_ControlChannel_IdleTimeout, agent);

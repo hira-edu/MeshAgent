@@ -247,6 +247,8 @@ typedef struct MeshAgentHostContainer
 	int retryTimerSet;
 	int controlChannel_idleTimeout_seconds;
 	int controlChannel_idleTimeout_dataMode;
+	long long controlChannel_pingSentTick;	// ILibGetUptime() when the last websocket ping was sent
+	int controlChannel_pongGraceUsed;		// A late pong timer already got one re-ping for this ping
 	char g_selfid[UTIL_SHA384_HASHSIZE];
 	void* microLMS;
 	void* multicastDiscovery;

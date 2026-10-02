@@ -195,7 +195,7 @@ function main() {
             sessionArmBody.includes('SetEvent(eventHandle);') &&
             sessionArmBody.includes('*errorOut = ERROR_OPERATION_ABORTED;'),
         relayPipeConnectWaitObservesSessionCancel:
-            kvmSource.includes('WaitForMultipleObjects(2, waitHandles, FALSE, timeoutMs)') &&
+            kvmSource.includes('WaitForMultipleObjects(waitCount, waitHandles, FALSE, timeoutMs)') &&
             kvmSource.includes('kvm_relay_wait_for_bridge_client(KvmRelayContext* ctx, HANDLE bridgePipeHandle, DWORD timeoutMs, LONG expectedSessionGeneration, DWORD* errorOut, BOOL* sessionChangedOut)') &&
             kvmSource.includes('ERROR_OPERATION_ABORTED'),
         relayPipeConnectWaitReportsSessionAbortAtEveryBoundary:
