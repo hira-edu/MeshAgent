@@ -7698,6 +7698,221 @@ duk_ret_t _start(duk_context *ctx)
 	return(0);
 }
 
+// An in-process lifecycle transaction must not be cut short by Ctrl+C or Ctrl+Break: that
+// would skip the transaction's own rollback, which the console-detached rundll32 host is not
+// exposed to. Closing the console still ends the process; the transaction journal recovers
+// that interruption on the next lifecycle operation.
+static BOOL WINAPI MeshService_LifecycleConsoleCtrlHandler(DWORD ctrlType)
+{
+	if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT)
+	{
+		printf("[!] Lifecycle operation in progress; interrupt ignored.\n");
+		return TRUE;
+	}
+	return FALSE;
+}
+
+// An uninstall started from the installed image cannot delete its own running binary. When
+// that binary is the only remaining artifact, move it off the canonical path (a running image
+// can be renamed, not deleted) and schedule the retired copy and the then-empty install
+// directory for removal at reboot. Retiring it first keeps the pending delete from removing a
+// binary that is reinstalled before the reboot.
+static BOOL MeshService_RetireRunningInstalledImage(const ServiceInstallPaths* paths, WCHAR* retiredPath, size_t retiredPathCch, BOOL* removalScheduled)
+{
+	*removalScheduled = FALSE;
+	if (!ServiceDeploy_IsUninstallCleanExceptInstalledExe())
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Uninstall left artifacts beyond the running installed image; not treating as complete");
+		return FALSE;
+	}
+	if (FAILED(StringCchPrintfW(retiredPath, retiredPathCch, L"%ls.%lu.pending-delete", paths->exePath, (unsigned long)GetCurrentProcessId())))
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Retired image path too long for %ls", paths->exePath);
+		return FALSE;
+	}
+	if (!MoveFileExW(paths->exePath, retiredPath, 0))
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to retire running installed image %ls (error=%lu)", paths->exePath, GetLastError());
+		return FALSE;
+	}
+	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Retired running installed image to %ls", retiredPath);
+
+	if (!MoveFileExW(retiredPath, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to schedule reboot removal of %ls (error=%lu)", retiredPath, GetLastError());
+		return TRUE;
+	}
+	*removalScheduled = TRUE;
+	// Removed at restart only if the directory is empty by then.
+	if (paths->installDir[0] != L'\0' && !MoveFileExW(paths->installDir, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to schedule reboot removal of %ls (error=%lu)", paths->installDir, GetLastError());
+	}
+	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Scheduled reboot removal of %ls", retiredPath);
+	return TRUE;
+}
+
+// Runs an install/uninstall/update lifecycle operation entirely in-process by calling the shared
+// deployment engine (ServiceDeploy_RunLifecycleHostOperation) directly from the terminal. This
+// deliberately bypasses BOTH the JavaScript agent-installer module and the rundll32.exe lifecycle
+// subprocess. argv[1] is the console switch ("-install" / "-uninstall" / "-update").
+// Returns a process exit code (0 on success).
+static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
+{
+	const char* label;
+	const wchar_t* action;
+	const wchar_t* validateAction;
+	BOOL requireConfig;
+	BOOL isUpdate = FALSE;
+	BOOL isUninstall = FALSE;
+	WCHAR exePathW[MAX_PATH * 4] = { 0 };
+	DWORD moduleLen = 0;
+	DWORD lastErr = ERROR_SUCCESS;
+	WCHAR retiredPath[MAX_PATH * 4] = { 0 };
+	ServiceInstallPaths paths;
+	BOOL runningFromInstalledImage = FALSE;
+	BOOL removalScheduled = FALSE;
+	BOOL ok = FALSE;
+
+	if (strcasecmp(argv[1], "-uninstall") == 0)
+	{
+		label = "uninstall";
+		action = MESH_LIFECYCLE_ACTION_UNINSTALL_W;
+		validateAction = MESH_LIFECYCLE_ACTION_VALIDATE_UNINSTALL_W;
+		requireConfig = FALSE;
+		isUninstall = TRUE;
+	}
+	else if (strcasecmp(argv[1], "-update") == 0)
+	{
+		label = "update";
+		action = MESH_LIFECYCLE_ACTION_UPDATE_W;
+		validateAction = MESH_LIFECYCLE_ACTION_VALIDATE_UPDATE_W;
+		requireConfig = FALSE;
+		isUpdate = TRUE;
+	}
+	else
+	{
+		label = "install";
+		action = MESH_LIFECYCLE_ACTION_INSTALL_W;
+		validateAction = MESH_LIFECYCLE_ACTION_VALIDATE_INSTALL_W;
+		requireConfig = TRUE;
+	}
+
+	// Paths and identities come only from the package and branding; refuse options this path
+	// would otherwise silently ignore.
+	if (argc > 2)
+	{
+		printf("[-] %s takes no additional arguments.\n", argv[1]);
+		return (int)ERROR_INVALID_PARAMETER;
+	}
+
+	if (!IsAdmin())
+	{
+		printf("[-] Administrator permissions are required for %s.\n", label);
+		return (int)ERROR_ACCESS_DENIED;
+	}
+
+	ServiceDeploy_EnsureLoggingDefaults();
+	moduleLen = GetModuleFileNameW(NULL, exePathW, (DWORD)_countof(exePathW));
+	if (moduleLen == 0 || moduleLen >= _countof(exePathW))
+	{
+		lastErr = (moduleLen == 0) ? GetLastError() : ERROR_INSUFFICIENT_BUFFER;
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to resolve agent executable path for %hs (error=%lu)", label, lastErr);
+		printf("[-] Unable to resolve the agent executable path (error=%lu).\n", lastErr);
+		return (int)lastErr;
+	}
+
+	// Determine, by file identity (not a brittle string compare), whether this executable IS the
+	// installed service image.
+	ZeroMemory(&paths, sizeof(paths));
+	if (ServiceDeploy_GetInstallPaths(&paths) && paths.exePath[0] != L'\0')
+	{
+		runningFromInstalledImage = MeshService_PathsReferToSameFileW(exePathW, paths.exePath);
+	}
+
+	// An in-process install/update cannot replace the binary the current process is executing: the
+	// file-replace step cannot overwrite the running image, so the operation would stop the service,
+	// stall on the quiesce timeout, then roll back. Refuse up front and direct the caller to run
+	// from a separate (staging/download) copy of the agent instead. (Uninstall is handled below.)
+	if (runningFromInstalledImage && !isUninstall)
+	{
+		printf("[-] Refusing in-process %s from the installed image (%ls).\n", label, exePathW);
+		printf("    Run %s from a separate copy of the agent so the installed binary can be replaced.\n", label);
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Refused in-process %hs from installed image %ls", label, exePathW);
+		return (int)ERROR_INSTALL_FAILURE;
+	}
+
+	// For update, mirror the sanctioned self-update ingress: reject a package that fails preflight,
+	// and treat a package that carries provisioning as a reprovisioning update that requires its
+	// config for convergent-repair planning. Raw-binary updates keep the installed provisioning
+	// identity (requireConfig stays FALSE).
+	if (isUpdate)
+	{
+		ServicePackagePreflight preflight;
+		WCHAR preflightReason[512] = { 0 };
+
+		ZeroMemory(&preflight, sizeof(preflight));
+		if (!ServiceDeploy_PreflightPackageSource(exePathW, FALSE, &preflight, preflightReason, _countof(preflightReason)))
+		{
+			ServiceDeploy_LogInstallEvent(L"[TERMINAL] Update package preflight failed: %ls",
+				preflightReason[0] != L'\0' ? preflightReason : L"unknown package error");
+			printf("[-] Update package preflight failed: %ls\n",
+				preflightReason[0] != L'\0' ? preflightReason : L"unknown package error");
+			return (int)ERROR_INVALID_DATA;
+		}
+		if (preflight.configAvailable)
+		{
+			requireConfig = TRUE;
+		}
+	}
+
+	SetConsoleCtrlHandler(MeshService_LifecycleConsoleCtrlHandler, TRUE);
+	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Native in-process %hs starting (source=%ls)", label, isUninstall ? L"(none)" : exePathW);
+	ok = ServiceDeploy_RunLifecycleHostOperation(action, isUninstall ? NULL : exePathW, NULL, requireConfig);
+	// The engine does not set a dependable error code; this is logged as a diagnostic hint only.
+	lastErr = GetLastError();
+
+	if (!ok && isUninstall && runningFromInstalledImage)
+	{
+		// Clean-state convergence always fails here because the running image remains.
+		if (MeshService_RetireRunningInstalledImage(&paths, retiredPath, _countof(retiredPath), &removalScheduled))
+		{
+			SetConsoleCtrlHandler(MeshService_LifecycleConsoleCtrlHandler, FALSE);
+			ServiceDeploy_LogInstallEvent(L"[TERMINAL] Native in-process uninstall completed; running image retired to %ls", retiredPath);
+			printf("[+] Service uninstall completed.\n");
+			if (removalScheduled)
+			{
+				printf("    The running agent binary is removed on the next reboot.\n");
+			}
+			else
+			{
+				printf("[!] Delete %ls after this process exits.\n", retiredPath);
+			}
+			return 0;
+		}
+	}
+	else if (!ok && ServiceDeploy_RunLifecycleHostOperation(validateAction, NULL, NULL, requireConfig))
+	{
+		// Mirror the rundll32 wrappers' tolerance: a reported failure whose post-condition
+		// validation passes is treated as success. Validation runs under the lifecycle mutex.
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] %hs reported failure but post-operation validation passed", label);
+		ok = TRUE;
+	}
+	SetConsoleCtrlHandler(MeshService_LifecycleConsoleCtrlHandler, FALSE);
+
+	if (ok)
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Native in-process %hs completed successfully", label);
+		printf("[+] Service %s completed successfully.\n", label);
+		return 0;
+	}
+
+	// Match the rundll32 lifecycle host's failure exit code.
+	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Native in-process %hs failed (LastError hint=%lu)", label, lastErr);
+	printf("[-] Service %s failed. See the installer log for details.\n", label);
+	return (int)ERROR_INSTALL_FAILURE;
+}
+
 int wmain(int argc, char* wargv[])
 {
 	MeshService_InstallInvalidParameterHandler();
@@ -7763,11 +7978,16 @@ int wmain(int argc, char* wargv[])
 		return retCode;
 	}
 
-	if (argc > 1 && (strcasecmp(argv[1], "-install") == 0 || strcasecmp(argv[1], "-uninstall") == 0))
+	if (argc > 1 && (strcasecmp(argv[1], "-install") == 0 ||
+		strcasecmp(argv[1], "-uninstall") == 0 ||
+		strcasecmp(argv[1], "-update") == 0))
 	{
-		printf("[-] Direct -install/-uninstall switches are no longer supported. Use the rundll32 MeshLifecycleHostW manifest path.\n");
+		// Native, in-process lifecycle driven directly from the terminal: calls the shared
+		// deployment engine in this process, bypassing both the JavaScript agent-installer
+		// module and the rundll32.exe lifecycle subprocess.
+		retCode = MeshService_RunNativeTerminalLifecycle(argc, argv);
 		wmain_free(argv);
-		return 1;
+		return retCode;
 	}
 
 	if (argc > 1 && MeshService_IsUnsupportedLifecycleSwitch(argv[1]))
@@ -8264,8 +8484,11 @@ int wmain(int argc, char* wargv[])
 				printf("  -resetnodeid          Reset the NodeID next time the service is started.\r\n");
 				printf("\r\n");
 				printf("Install / Update / Uninstall:\r\n");
+				printf("  -install              Install the service natively (in-process); requires an embedded or sidecar .msh.\r\n");
+				printf("  -uninstall            Uninstall the service natively (in-process).\r\n");
+				printf("  -update               Update the service natively (in-process); run from a staged copy, not the installed image.\r\n");
 				printf("  rundll32.exe <ServiceDll>,MeshLifecycleHostW <manifest>\r\n");
-				printf("                        Authoritative install/update/uninstall lifecycle path.\r\n");
+				printf("                        Alternate out-of-process install/update/uninstall lifecycle path.\r\n");
 				printf("  -fullregression       Run full end-to-end regression (install/validate/self-test/update/uninstall).\r\n");
 				printf("\r\n");
 				printf("Validation / Troubleshooting:\r\n");

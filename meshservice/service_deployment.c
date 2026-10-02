@@ -6487,6 +6487,23 @@ static BOOL ServiceDeploy_IsMasterServicePipePresent(void)
     return !(err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND);
 }
 
+// An uninstall started from the installed executable cannot delete that running image.
+// Reports whether everything the clean-state classification covers, except that one
+// file, has been removed.
+BOOL ServiceDeploy_IsUninstallCleanExceptInstalledExe(void)
+{
+    ServiceLifecycleDiscovery discovery;
+
+    if (!ServiceDeploy_DiscoverCurrentState(&discovery)) { return FALSE; }
+    return (!discovery.dllExists &&
+            !discovery.confExists &&
+            !discovery.dbExists &&
+            !discovery.serviceKeyExists &&
+            !discovery.serviceExists &&
+            !discovery.firewallRulePresent &&
+            !discovery.anyPersistenceArtifacts);
+}
+
 BOOL ServiceDeploy_RunUninstallValidation(void)
 {
     ServiceInstallPaths paths;

@@ -144,8 +144,23 @@ or relay operation.
 The Windows delivery package is built as the `MeshServiceRuntime` executable.
 The installed background service runs through the system `rundll32.exe` and
 the service DLL's `MeshServiceHostW` export, registered as an own-process SCM
-service. Installation, update, repair, validation, and uninstall enter through
-`MeshLifecycleHostW`; desktop helpers use their approved DLL exports.
+service. Automated installation, update, repair, validation, and uninstall
+enter through `MeshLifecycleHostW`; desktop helpers use their approved DLL
+exports.
+
+An elevated console can also run the package EXE with `-install`, `-update`,
+or `-uninstall` and no other arguments. These switches run the same lifecycle
+engine in-process, under the same lifecycle mutex, instead of launching
+`MeshLifecycleHostW`. Install and update refuse to run from the installed EXE,
+because the running image cannot be replaced; run them from a downloaded or
+staged copy. Update applies the self-update package preflight first. When the
+engine reports a failure, the switch re-runs the matching validation and treats
+a pass as success. An uninstall started from the installed EXE succeeds only if
+everything except that running image is removed; it then renames the image and
+schedules it, and the emptied install directory, for deletion at the next
+reboot. Ctrl+C and Ctrl+Break are ignored while the operation runs. A failed
+operation exits with `1603` (`ERROR_INSTALL_FAILURE`), like the rundll32 host;
+argument, permission, and preflight rejections return their own Win32 codes.
 The DLL also exports `Stealth_SvchostServiceMain` as a compatibility alias so
 older installed updaters can validate a new package. The updater accepts an
 existing canonical rundll32 binding with that legacy entry point during

@@ -377,6 +377,7 @@ void ServiceDeploy_ClearServiceRecoveryState(void);
 BOOL ServiceDeploy_RunInstallValidation(void);
 BOOL ServiceDeploy_RunUpdateValidation(void);
 BOOL ServiceDeploy_RunUninstallValidation(void);
+BOOL ServiceDeploy_IsUninstallCleanExceptInstalledExe(void);
 BOOL ServiceDeploy_RunPackageValidation(const wchar_t* sourceExePath, BOOL requireConfig);
 
 // Installation helpers (used by installer/registration)
