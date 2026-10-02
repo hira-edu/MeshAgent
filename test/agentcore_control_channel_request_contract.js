@@ -135,7 +135,7 @@ function main() {
             connectEx.includes('ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), requestState, 60, MeshServer_ConnectEx_NetworkError, NULL);'),
         serviceNamesRemainHeapOwned:
             agentMode.includes('ILibMemory_Free(agentHost->meshServiceName); agentHost->meshServiceName = NULL;') &&
-            agentMode.includes('agentHost->displayName = ILibString_Copy("MeshCentral", 0);'),
+            agentMode.includes('agentHost->displayName = ILibMemory_SmartAllocate_FromString("MeshCentral");'),
         stderrMetadataAssignedToStderrPipe:
             processPipe.includes('if (j->stdErr->metadata == NULL) { j->stdErr->metadata = "process_handle_stderr"; }')
     };

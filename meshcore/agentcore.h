@@ -230,10 +230,10 @@ typedef struct MeshAgentHostContainer
 #ifdef WIN32
 	int noCertStore;
 	void* certObject;
+#endif
 	int tlsRelaxedValidation;
 	int tlsInspectionDetected;
 	int tlsInspectionLogged;
-#endif
 	struct util_cert selfcert;
 	struct util_cert selftlscert;
 	char serverWebHash[UTIL_SHA384_HASHSIZE];
