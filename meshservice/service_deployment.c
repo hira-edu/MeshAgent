@@ -6374,7 +6374,6 @@ static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath,
 
     if (packageProvided)
     {
-        wchar_t siblingDll[MAX_PATH * 4] = {0};
         ServiceDeploy_DeleteFileIfPresent(destPath);
         if (ServiceDeploy_ExtractEmbeddedServiceHostDllFromExe(sourceExePath, destPath))
         {
@@ -6389,16 +6388,6 @@ static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath,
                 return TRUE;
             }
             ServiceDeploy_DeleteFileIfPresent(destPath);
-        }
-
-        /* Check for sibling DLL next to sourceExePath */
-        if (ServiceDeploy_BuildSiblingPathWithExtension(sourceExePath, L".dll", siblingDll, _countof(siblingDll)) &&
-            ServiceDeploy_PathExists(siblingDll))
-        {
-            if (ServiceDeploy_TryStageAndValidateServiceHostDll(siblingDll, destPath, L"sibling package DLL"))
-            {
-                return TRUE;
-            }
         }
 
         /* Historical binaries do not embed resource 101. Fall back to current process embedded bundle. */

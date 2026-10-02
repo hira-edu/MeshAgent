@@ -572,13 +572,12 @@ int ILibDuktape_readableStream_resume_flush(ILibDuktape_readableStream *rs)
 
 		while ((buffered = rs->paused_data))
 		{
-			rs->paused_data = buffered->Next;
 			if (ILibDuktape_readableStream_WriteDataEx(rs, buffered->Reserved, buffered->buffer, buffered->bufferLen) != 0)
 			{
-				// Send did not complete, so lets exit out, and we'll continue next time.
-				free(buffered);
+				// Send did not complete, so leave buffered at head of paused_data and continue on next resume
 				break;
 			}
+			rs->paused_data = buffered->Next;
 			free(buffered);
 		}
 		return(rs->paused_data == NULL ? 0 : 1);
@@ -724,7 +723,7 @@ duk_ret_t ILibDuktape_readableStream_pipe(duk_context *ctx)
 		rstream->paused = 0; // Set state now, so nobody tries to resume before we can finish piping
 
 		// We are paused, so we should yield and resume... We yield, so in case the user tries to chain multiple pipes, it will chain first
-		rstream->resumeImmediate = ILibDuktape_Immediate(ctx, (void*[]) { rstream, duk_get_heapptr(ctx, 0) }, 1, ILibDuktape_ReadableStream_pipe_ResumeLater);
+		rstream->resumeImmediate = ILibDuktape_Immediate(ctx, (void*[]) { rstream, duk_get_heapptr(ctx, 0) }, 2, ILibDuktape_ReadableStream_pipe_ResumeLater);
 		duk_push_heapptr(ctx, rstream->resumeImmediate);		// [immediate]
 		duk_push_this(ctx);										// [immediate][this]
 		duk_put_prop_string(ctx, -2, "self");					// [immediate]
@@ -802,6 +801,10 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 					{
 						data->nextWriteable = w->next;
 					}
+					if (w->next != NULL)
+					{
+						w->next->previous = w->previous;
+					}
 					duk_push_heapptr(ctx, data->pipeArray);								// [array]
 					arrayLen = duk_get_length(ctx, -1);									   
 					for (i = 0; i < (int)arrayLen; ++i)									   
@@ -826,6 +829,20 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 						}
 					}
 					duk_pop(ctx);														// ...
+
+					if (data->nextWriteable != NULL && data->paused != 0)
+					{
+						data->pipe_pendingCount = 0;
+						data->paused = 0;
+						if (ILibDuktape_readableStream_resume_flush(data) == 0 && data->ResumeHandler != NULL)
+						{
+							data->ResumeHandler(data, data->user);
+						}
+					}
+					else if (data->nextWriteable == NULL)
+					{
+						data->pipe_pendingCount = 0;
+					}
 					break;
 				}
 				w = w->next;
@@ -848,6 +865,7 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 				w = w->next;
 			}
 			data->nextWriteable = NULL;
+			data->pipe_pendingCount = 0;
 			duk_push_heapptr(ctx, args[0]);										// [readable]
 			duk_del_prop_string(ctx, -1, ILibDuktape_readableStream_PipeArray);
 			duk_push_array(ctx);												// [readable][array]

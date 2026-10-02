@@ -248,6 +248,7 @@ typedef struct MeshAgentHostContainer
 	int controlChannel_idleTimeout_seconds;
 	int controlChannel_idleTimeout_dataMode;
 	long long controlChannel_pingSentTick;	// ILibGetUptime() when the last websocket ping was sent
+	long long controlChannel_lastDataTick;	// ILibGetUptime() when data was last received on controlChannel
 	int controlChannel_pongGraceUsed;		// A late pong timer already got one re-ping for this ping
 	long long lastAuthenticatedTick;			// ILibGetUptime() when the server last accepted this agent (0 = never)
 	int agentInfoPlatformType;				// Platform type sent in AuthInfo, computed once per process (0 = not yet)

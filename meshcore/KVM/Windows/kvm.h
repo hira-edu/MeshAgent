@@ -37,8 +37,12 @@ void kvm_relay_query_input_lock(ILibKVM_WriteHandler writeHandler, void *reserve
 const char* kvm_get_current_desktop_name();
 void kvm_set_force_default_desktop(int enabled);
 void kvm_server_request_shutdown(void);
+void kvm_set_helper_linger_seconds(int seconds);
+int kvm_get_helper_linger_seconds(void);
+void kvm_relay_shutdown_all_parked_helpers(void);
 void KVM_TraceStartupF(const char* format, ...);
 #ifdef WIN32
+int kvm_bridge_debug_get_parked_context_count(void);
 typedef struct KvmBridgeDebugSnapshot
 {
 	int childPresent;

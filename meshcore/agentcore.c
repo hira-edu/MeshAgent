@@ -2227,6 +2227,7 @@ char exeNullPolicyGuid[] = { 0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19, 0xB
 #define REMOTE_DESKTOP_ptrs		"\xFF_RemoteDesktopPTRS"
 #define DEFAULT_IDLE_TIMEOUT	120
 #define CONTROLCHANNEL_PONG_TIMEOUT_SECONDS 15
+#define CONTROLCHANNEL_PONG_MAX_RETRIES 3
 // A pong timer that fires this much later than scheduled means the event thread was stalled
 // (for example by a synchronous helper launch), not that the server stopped answering.
 #define CONTROLCHANNEL_PONG_STALL_SLACK_MS 2000
@@ -2276,6 +2277,7 @@ typedef struct RemoteDesktop_Ptrs
 #ifdef WIN32
 	MeshAgentHostContainer *agent;
 	int tsid;
+	ULONGLONG lastPipeResetTick;
 #endif
 #ifdef _POSIX
 	void *kvmPipe;
@@ -3231,6 +3233,13 @@ void ILibDuktape_MeshAgent_RemoteDesktop_PipeHook(ILibDuktape_readableStream *st
 #ifdef _LINKVM
 #ifdef WIN32
 	ILibDuktape_DuplexStream *ds = (ILibDuktape_DuplexStream*)user;
+	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)ds->user;
+	ULONGLONG now = GetTickCount64();
+	if (ptrs != NULL && ptrs->lastPipeResetTick != 0 && (now - ptrs->lastPipeResetTick) < 500)
+	{
+		return;
+	}
+	if (ptrs != NULL) { ptrs->lastPipeResetTick = now; }
 	kvm_relay_reset(ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ds->user);
 #else
 	kvm_relay_reset();
@@ -3437,6 +3446,7 @@ static int ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(RemoteDesktop_
 		ULONGLONG now;
 		if (!kvm_bridge_debug_get_snapshot_for_reserved(ptrs, &snapshot)) { return 0; }
 		if (snapshot.childPresent == 0 || snapshot.transportActive == 0) { return 0; }
+		if (ptrs->stream->readableStream->paused != 0) { return 1; }
 		now = GetTickCount64();
 		if (snapshot.sessionStartTickMs != 0 &&
 			snapshot.lastScreenTickMs == 0 &&
@@ -6663,17 +6673,31 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 	}
 
 	// Timers run on the same thread that reads the socket. When that thread was blocked past the
-	// pong deadline, this fires before the pong that is already waiting in the socket buffer is
-	// read, which would drop a healthy connection. Give one re-ping before concluding the peer is gone.
+	// pong deadline, or when the host is under high CPU/GPU load, this fires before the pong or pending
+	// frames are read, which would drop a healthy connection. Validate socket activity and allow up to
+	// CONTROLCHANNEL_PONG_MAX_RETRIES consecutive probes before concluding the peer is gone.
 	{
 		long long overdueMs = ILibGetUptime() - agent->controlChannel_pingSentTick - ((long long)CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 1000);
 		int pendingInput = MeshServer_ControlChannel_HasPendingInput(timedOutChannel);
-		if (agent->controlChannel_pingSentTick != 0 && (overdueMs > CONTROLCHANNEL_PONG_STALL_SLACK_MS || pendingInput != 0) && agent->controlChannel_pongGraceUsed == 0)
+		long long recentDataMs = (agent->controlChannel_lastDataTick != 0) ? (ILibGetUptime() - agent->controlChannel_lastDataTick) : -1;
+		int hasRecentData = (recentDataMs >= 0 && recentDataMs < ((long long)CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 1000)) ? 1 : 0;
+
+		if (hasRecentData != 0 || pendingInput != 0)
 		{
-			agent->controlChannel_pongGraceUsed = 1;
+			// Connection is actively receiving data or has input buffered; do not drop
+			agent->controlChannel_pongGraceUsed = 0;
 			agent->controlChannel_pingSentTick = ILibGetUptime();
-			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG timer fired %lld ms late, pendingInput=%d; re-pinging instead of disconnecting (descriptor=%d)", overdueMs, pendingInput, descriptorValue);
-			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG timer %lld ms late (pendingInput=%d), re-pinging", overdueMs, pendingInput);
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): active traffic detected (pendingInput=%d recentDataMs=%lld); extending pong deadline (descriptor=%d)", pendingInput, recentDataMs, descriptorValue);
+			ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
+			return;
+		}
+
+		if (agent->controlChannel_pingSentTick != 0 && agent->controlChannel_pongGraceUsed < CONTROLCHANNEL_PONG_MAX_RETRIES)
+		{
+			agent->controlChannel_pongGraceUsed++;
+			agent->controlChannel_pingSentTick = ILibGetUptime();
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG missed (probe %d/%d, overdueMs=%lld ms, pendingInput=%d); re-pinging (descriptor=%d)", agent->controlChannel_pongGraceUsed, CONTROLCHANNEL_PONG_MAX_RETRIES, overdueMs, pendingInput, descriptorValue);
+			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG missed (%d/%d, overdueMs=%lld ms), re-pinging", agent->controlChannel_pongGraceUsed, CONTROLCHANNEL_PONG_MAX_RETRIES, overdueMs);
 			ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
 			if ((int)ILibWebClient_WebSocket_Ping(timedOutChannel) >= 0) { return; }
 			// The re-ping could not even be queued: the socket is gone, so reconnect now.
@@ -6730,6 +6754,7 @@ void MeshServer_ControlChannel_PongSink(ILibWebClient_StateObject WebStateObject
 	ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
 	agent->controlChannel_pingSentTick = 0;
 	agent->controlChannel_pongGraceUsed = 0;
+	agent->controlChannel_lastDataTick = ILibGetUptime();
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): websocket pong received (descriptor=%d)", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
 	if (agent->controlChannelDebug != 0)
 	{
@@ -6909,6 +6934,7 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
 			agent->controlChannel_pingSentTick = 0;
 			agent->controlChannel_pongGraceUsed = 0;
+			agent->controlChannel_lastDataTick = ILibGetUptime();
 			agent->controlChannel = WebStateObject; // Set the agent MeshCentral server control channel
 			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost | ILibRemoteLogging_Modules_ConsolePrint, ILibRemoteLogging_Flags_VerbosityLevel_1, "Control Channel Idle Timeout = %d seconds", agent->controlChannel_idleTimeout_seconds);
 			ILibWebClient_SetTimeout(WebStateObject, agent->controlChannel_idleTimeout_seconds, MeshServer_ControlChannel_IdleTimeout, agent);
@@ -7034,6 +7060,10 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			break;
 		}
 		case ILibWebClient_ReceiveStatus_MoreDataToBeReceived:	// Data received			
+		if (agent->controlChannel == WebStateObject)
+		{
+			agent->controlChannel_lastDataTick = ILibGetUptime();
+		}
 		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: MoreDataToBeReceived status=%d begin=%d end=%d",
 			header != NULL ? header->StatusCode : -1,
 			(beginPointer != NULL) ? *beginPointer : -1,
@@ -9003,6 +9033,17 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		}
 		agentHost->agentMode = 1;
 		ILibDuktape_ModSearch_ShowNames = ILibSimpleDataStore_Get(agentHost->masterDb, "showModuleNames", NULL, 0);
+#if defined(_LINKVM) && defined(WIN32)
+		{
+			char lingerBuf[16];
+			int lingerLen = ILibSimpleDataStore_Get(agentHost->masterDb, "kvmHelperLingerSeconds", lingerBuf, sizeof(lingerBuf) - 1);
+			if (lingerLen > 0)
+			{
+				lingerBuf[lingerLen] = 0;
+				kvm_set_helper_linger_seconds(atoi(lingerBuf));
+			}
+		}
+#endif
 
 		if (agentHost->meshCoreCtx != NULL)
 		{

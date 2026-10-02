@@ -49,6 +49,7 @@ limitations under the License.
 
 #ifdef _DEBUG
 #include "ILibCrypto.h"
+#endif
 
 // A non-blocking send that could not take data right now is retried from PostSelect once the
 // socket is writable again. Besides would-block that covers an interrupted call and the
@@ -62,7 +63,6 @@ limitations under the License.
 #define ILibAsyncSocket_SendErrorIsTransient(err) ((err) == EWOULDBLOCK || (err) == EAGAIN || (err) == EINTR || (err) == ENOBUFS)
 #define ILibAsyncSocket_RecvErrorIsTransient(err) ((err) == EWOULDBLOCK || (err) == EAGAIN || (err) == EINTR)
 #define ILibAsyncSocket_LastSocketError() errno
-#endif
 #endif
 
 #ifdef _POSIX
