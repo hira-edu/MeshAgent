@@ -137,36 +137,138 @@ static BOOL ServiceBinding_QueryExists(const wchar_t* name, BOOL* exists)
     return TRUE;
 }
 
+static BOOL ServiceBinding_IsLegacyExe(const wchar_t* path)
+{
+    const wchar_t* leaf;
+    const wchar_t* p;
+    if (!path || !*path) { return FALSE; }
+    leaf = path;
+    p = path;
+    while (*p)
+    {
+        if (*p == L'\\' || *p == L'/') { leaf = p + 1; }
+        ++p;
+    }
+    if (!*leaf) { return FALSE; }
+    return !_wcsicmp(leaf, L"meshagent.exe") ||
+           !_wcsicmp(leaf, L"MeshAgent.exe") ||
+           !_wcsicmp(leaf, L"MeshService.exe") ||
+           !_wcsicmp(leaf, L"MeshService64.exe") ||
+           !_wcsicmp(leaf, L"MeshService-2022.exe") ||
+           !_wcsicmp(leaf, L"diaghost.exe");
+}
+
 /* Ownership is established from the executable/DLL command only. Parameters
  * may be malformed: their exact prior values must remain repairable. */
 static BOOL ServiceBinding_ImageSupported(const QUERY_SERVICE_CONFIGW* config,
     const wchar_t* installedExe, const wchar_t* installedDll, BOOL* legacy)
 {
     wchar_t expected[2 * MAX_PATH], systemDir[MAX_PATH], parsedDll[MAX_PATH];
+    wchar_t cleanImage[2 * MAX_PATH], extractedExe[MAX_PATH];
     const wchar_t* oldEntry = L",Stealth_SvchostServiceMain";
     const wchar_t* newEntry = L",MeshServiceHostW";
     const wchar_t* image = config->lpBinaryPathName;
-    size_t imageLength, oldEntryLength, prefixLength;
+    const wchar_t* imgStart;
+    const wchar_t* imgEnd;
+    const wchar_t* space;
+    size_t imageLength, oldEntryLength, prefixLength, cleanLen;
     UINT length;
+    DWORD ownProcessMask = 0x00000010;
     *legacy = FALSE;
     if (!image || !installedExe || !installedDll) { return FALSE; }
-    if (config->dwServiceType == SERVICE_WIN32_OWN_PROCESS)
+    if ((config->dwServiceType & ownProcessMask) == ownProcessMask &&
+        (config->dwServiceType & ~0x00000110) == 0)
     {
-        if (_snwprintf_s(expected, _countof(expected), _TRUNCATE, L"\"%ls\"", installedExe) < 0) { return FALSE; }
-        if (!_wcsicmp(image, expected) || !_wcsicmp(image, installedExe))
-        { *legacy = TRUE; return TRUE; }
         if (ServiceHost_ParseImagePath(image, parsedDll, _countof(parsedDll))) { return !_wcsicmp(parsedDll, installedDll); }
         /* An older own-process installation used the same canonical rundll32
          * path and DLL but a different callback. Translate only that exact
          * suffix, then let the current parser enforce the full path contract. */
         imageLength = wcslen(image);
         oldEntryLength = wcslen(oldEntry);
-        if (imageLength <= oldEntryLength || wcscmp(image + imageLength - oldEntryLength, oldEntry) != 0) { return FALSE; }
-        prefixLength = imageLength - oldEntryLength;
-        if (prefixLength + wcslen(newEntry) >= _countof(expected)) { return FALSE; }
-        memcpy(expected, image, prefixLength * sizeof(wchar_t));
-        memcpy(expected + prefixLength, newEntry, (wcslen(newEntry) + 1) * sizeof(wchar_t));
-        return ServiceHost_ParseImagePath(expected, parsedDll, _countof(parsedDll)) && !_wcsicmp(parsedDll, installedDll);
+        if (imageLength > oldEntryLength && wcscmp(image + imageLength - oldEntryLength, oldEntry) == 0)
+        {
+            prefixLength = imageLength - oldEntryLength;
+            if (prefixLength + wcslen(newEntry) < _countof(expected))
+            {
+                memcpy(expected, image, prefixLength * sizeof(wchar_t));
+                memcpy(expected + prefixLength, newEntry, (wcslen(newEntry) + 1) * sizeof(wchar_t));
+                if (ServiceHost_ParseImagePath(expected, parsedDll, _countof(parsedDll)) && !_wcsicmp(parsedDll, installedDll))
+                {
+                    return TRUE;
+                }
+            }
+        }
+
+        /* Check legacy own-process standalone executable commands. */
+        imgStart = image;
+        while (*imgStart == L' ' || *imgStart == L'\t') { ++imgStart; }
+        imgEnd = imgStart + wcslen(imgStart);
+        while (imgEnd > imgStart && (imgEnd[-1] == L' ' || imgEnd[-1] == L'\t' || imgEnd[-1] == L'\r' || imgEnd[-1] == L'\n')) { --imgEnd; }
+        cleanLen = (size_t)(imgEnd - imgStart);
+        if (cleanLen == 0 || cleanLen >= _countof(cleanImage)) { return FALSE; }
+        memcpy(cleanImage, imgStart, cleanLen * sizeof(wchar_t));
+        cleanImage[cleanLen] = L'\0';
+
+        if (_snwprintf_s(expected, _countof(expected), _TRUNCATE, L"\"%ls\"", installedExe) < 0) { return FALSE; }
+        if (!_wcsicmp(cleanImage, expected) || !_wcsicmp(cleanImage, installedExe))
+        {
+            *legacy = TRUE;
+            return TRUE;
+        }
+
+        if (cleanImage[0] == L'"')
+        {
+            const wchar_t* closeQuote = wcschr(cleanImage + 1, L'"');
+            if (!closeQuote) { return FALSE; }
+            size_t exeLen = (size_t)(closeQuote - (cleanImage + 1));
+            if (exeLen == 0 || exeLen >= _countof(extractedExe)) { return FALSE; }
+            memcpy(extractedExe, cleanImage + 1, exeLen * sizeof(wchar_t));
+            extractedExe[exeLen] = L'\0';
+
+            const wchar_t* after = closeQuote + 1;
+            while (*after == L' ' || *after == L'\t') { ++after; }
+            if (*after == L'\0')
+            {
+                if (!_wcsicmp(extractedExe, installedExe) || ServiceBinding_IsLegacyExe(extractedExe))
+                {
+                    *legacy = TRUE;
+                    return TRUE;
+                }
+            }
+            else
+            {
+                if (ServiceBinding_IsLegacyExe(extractedExe))
+                {
+                    *legacy = TRUE;
+                    return TRUE;
+                }
+            }
+        }
+        else
+        {
+            if (!_wcsicmp(cleanImage, installedExe) || ServiceBinding_IsLegacyExe(cleanImage))
+            {
+                *legacy = TRUE;
+                return TRUE;
+            }
+            space = wcschr(cleanImage, L' ');
+            while (space)
+            {
+                size_t partLen = (size_t)(space - cleanImage);
+                if (partLen > 0 && partLen < _countof(extractedExe))
+                {
+                    memcpy(extractedExe, cleanImage, partLen * sizeof(wchar_t));
+                    extractedExe[partLen] = L'\0';
+                    if (ServiceBinding_IsLegacyExe(extractedExe))
+                    {
+                        *legacy = TRUE;
+                        return TRUE;
+                    }
+                }
+                space = wcschr(space + 1, L' ');
+            }
+        }
+        return FALSE;
     }
     if (config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS) { return FALSE; }
     length = GetSystemDirectoryW(systemDir, _countof(systemDir));
@@ -270,7 +372,10 @@ static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* name, const
     if (!snapshot->config || !QueryServiceConfigW(service, snapshot->config, size, &size)) { goto done; }
     /* No password can be recovered through SCM. Never convert an account. */
     failure = L"service-account";
-    if (!snapshot->config->lpServiceStartName || _wcsicmp(snapshot->config->lpServiceStartName, L"LocalSystem") != 0) { goto done; }
+    if (!snapshot->config->lpServiceStartName ||
+        (_wcsicmp(snapshot->config->lpServiceStartName, L"LocalSystem") != 0 &&
+         _wcsicmp(snapshot->config->lpServiceStartName, L".\\LocalSystem") != 0 &&
+         _wcsicmp(snapshot->config->lpServiceStartName, L"NT AUTHORITY\\System") != 0)) { goto done; }
     failure = L"service-image";
     if (!ServiceBinding_ImageSupported(snapshot->config, installedExe, installedDll, &snapshot->legacy)) { goto done; }
     failure = L"QueryServiceStatus";

@@ -160,6 +160,7 @@ static BOOL ServiceDeploy_HasEmbeddedMshPayload(const wchar_t* exePath);
 static BOOL ServiceDeploy_BuildSiblingPathWithExtension(const wchar_t* sourcePath, const wchar_t* extension, wchar_t* outPath, size_t outPathCch);
 static BOOL ServiceDeploy_BuildSiblingPathWithFileName(const wchar_t* sourcePath, const wchar_t* fileName, wchar_t* outPath, size_t outPathCch);
 static BOOL ServiceDeploy_TryStageAndValidateServiceHostDll(const wchar_t* candidatePath, const wchar_t* destPath, const wchar_t* sourceLabel);
+static BOOL ServiceDeploy_ExtractExecutableFromCommand(const wchar_t* command, wchar_t* exeOut, size_t exeOutCch);
 static BOOL ServiceDeploy_ShouldEnableDebugConsole(void);
 static void ServiceDeploy_AppendConfigOverride(const wchar_t* path, const char* key, const char* value);
 static BOOL ServiceDeploy_ClearServiceRecovery(const wchar_t* serviceName);
@@ -4270,16 +4271,32 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         }
         if (tx.originalBinding->legacy)
         {
+            wchar_t legacyExe[MAX_PATH] = {0};
             wchar_t legacyDb[MAX_PATH] = {0};
             wchar_t legacyMshx[MAX_PATH] = {0};
-            if (!ServiceDeploy_BuildSiblingPathWithExtension(paths.exePath, L".db", legacyDb, _countof(legacyDb)) ||
-                _wcsicmp(legacyDb, paths.dbPath) != 0 ||
-                !ServiceDeploy_BuildSiblingPathWithExtension(paths.exePath, L".mshx", legacyMshx, _countof(legacyMshx)) ||
+
+            if (ServiceDeploy_ExtractExecutableFromCommand(tx.originalBinding->config->lpBinaryPathName, legacyExe, _countof(legacyExe)) &&
+                ServiceDeploy_BuildSiblingPathWithExtension(legacyExe, L".db", legacyDb, _countof(legacyDb)))
+            {
+                if (_wcsicmp(legacyDb, paths.dbPath) != 0 && ServiceDeploy_PathExists(legacyDb) && !ServiceDeploy_PathExists(paths.dbPath))
+                {
+                    ServiceDeploy_LogInstallEvent(L"[UPDATE] Migrating legacy database %ls -> %ls", legacyDb, paths.dbPath);
+                    ServiceDeploy_CopyFileOverwrite(legacyDb, paths.dbPath);
+                }
+            }
+            if (ServiceDeploy_BuildSiblingPathWithExtension(paths.exePath, L".db", legacyDb, _countof(legacyDb)))
+            {
+                if (_wcsicmp(legacyDb, paths.dbPath) != 0 && ServiceDeploy_PathExists(legacyDb) && !ServiceDeploy_PathExists(paths.dbPath))
+                {
+                    ServiceDeploy_LogInstallEvent(L"[UPDATE] Migrating legacy database %ls -> %ls", legacyDb, paths.dbPath);
+                    ServiceDeploy_CopyFileOverwrite(legacyDb, paths.dbPath);
+                }
+            }
+            if (ServiceDeploy_BuildSiblingPathWithExtension(paths.exePath, L".mshx", legacyMshx, _countof(legacyMshx)) &&
                 ServiceDeploy_PathExists(legacyMshx))
             {
-                ServiceDeploy_LogInstallEvent(L"[UPDATE] Legacy identity layout is not covered by the managed rollback set; aborting before quiesce");
-                ServiceBinding_Free(tx.originalBinding);
-                    return FALSE;
+                ServiceDeploy_LogInstallEvent(L"[UPDATE] Cleaning obsolete legacy .mshx file (%ls)", legacyMshx);
+                ServiceDeploy_RemoveFileIfExists(legacyMshx, TRUE);
             }
         }
         serviceWasRunning = tx.originalBinding->running;
@@ -6357,6 +6374,7 @@ static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath,
 
     if (packageProvided)
     {
+        wchar_t siblingDll[MAX_PATH * 4] = {0};
         ServiceDeploy_DeleteFileIfPresent(destPath);
         if (ServiceDeploy_ExtractEmbeddedServiceHostDllFromExe(sourceExePath, destPath))
         {
@@ -6371,6 +6389,38 @@ static BOOL ServiceDeploy_EnsureServiceHostDllFile(const wchar_t* sourceExePath,
                 return TRUE;
             }
             ServiceDeploy_DeleteFileIfPresent(destPath);
+        }
+
+        /* Check for sibling DLL next to sourceExePath */
+        if (ServiceDeploy_BuildSiblingPathWithExtension(sourceExePath, L".dll", siblingDll, _countof(siblingDll)) &&
+            ServiceDeploy_PathExists(siblingDll))
+        {
+            if (ServiceDeploy_TryStageAndValidateServiceHostDll(siblingDll, destPath, L"sibling package DLL"))
+            {
+                return TRUE;
+            }
+        }
+
+        /* Historical binaries do not embed resource 101. Fall back to current process embedded bundle. */
+        if (ServiceBundle_WriteToPath(destPath))
+        {
+            if (!ServiceDeploy_HardenServiceHostDllDacl(destPath))
+            {
+                ServiceDeploy_LogInstallEvent(L"Warning: DLL DACL hardening failed for %ls (error=%lu)", destPath, GetLastError());
+            }
+            if (ServiceDeploy_ValidateServiceHostPayloadDll(destPath))
+            {
+                ServiceDeploy_LogInstallEvent(L"Provided package (%ls) lacks embedded DLL payload; successfully staged from current running bundle", sourceExePath);
+                return TRUE;
+            }
+            ServiceDeploy_DeleteFileIfPresent(destPath);
+        }
+
+        /* Fallback: if destPath is already present and valid (e.g. existing installation), preserve it. */
+        if (ServiceDeploy_PathExists(destPath) && ServiceDeploy_ValidateServiceHostPayloadDll(destPath))
+        {
+            ServiceDeploy_LogInstallEvent(L"Reusing existing valid runtime DLL at %ls", destPath);
+            return TRUE;
         }
 
         ServiceDeploy_DeleteFileIfPresent(destPath);

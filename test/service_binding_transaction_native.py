@@ -102,6 +102,13 @@ int main(void){
     assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
     config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\" -other";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.lpBinaryPathName=L"C:\\Another\\agent.exe";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.dwServiceType=0x110;config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\"";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"\"C:\\Program Files\\Mesh Agent\\MeshAgent.exe\" -run";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe -run";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"\"C:\\Mesh\\MeshService64.exe\"";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"C:\\Mesh\\diaghost.exe  \r\n";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;
     config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",MeshServiceHostW";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Other\\agent.dll",&legacy));
     config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Other\\agent.dll",&legacy));
     config.lpBinaryPathName=L"\"C:\\fake\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
@@ -135,7 +142,7 @@ int main(void){
     ServiceBinding_Free(s);puts("service binding transaction: owned image selection, membership restoration, exact value ordering, disabled running state and failure propagation passed");return 0;
 }
 '''
-functions = '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_ImageSupported', 'ServiceBinding_SharedPayloadSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_ApplyExtra', 'ServiceBinding_Restore'])
+functions = '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_IsLegacyExe', 'ServiceBinding_ImageSupported', 'ServiceBinding_SharedPayloadSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_ApplyExtra', 'ServiceBinding_Restore'])
 with tempfile.TemporaryDirectory(prefix='mesh-service-binding-') as tmp:
     src, exe = Path(tmp) / 'binding.c', Path(tmp) / 'binding'
     harness = prelude + prefix + mocks + functions + cases

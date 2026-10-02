@@ -296,20 +296,53 @@ function isWindowsPackageLifecycleAction(actionName)
 function findWindowsLifecycleServiceDll(targetBinary, actionName, parms, cleanupPaths)
 {
     var fs = require('fs');
-    var installedDll, embeddedDll;
+    var installedDll, embeddedDll, siblingDll;
+
+    function trySiblingDll(basePath)
+    {
+        if (basePath == null || typeof basePath !== 'string' || basePath.length === 0) { return (null); }
+        var candidate = basePath.replace(/\.[^\\/.]+$/, '') + '.dll';
+        if (fs.existsSync(candidate)) { return (candidate); }
+        return (null);
+    }
 
     if (isWindowsInstalledLifecycleAction(actionName))
     {
         installedDll = readWindowsInstalledServiceDllPath(parms);
         if (installedDll != null && fs.existsSync(installedDll)) { return (installedDll); }
-        throw new Error('Windows rundll32 lifecycle requires the installed service ServiceDll for action: ' + actionName);
+
+        siblingDll = trySiblingDll(targetBinary) || trySiblingDll(process.execPath);
+        if (siblingDll != null) { return (siblingDll); }
+
+        embeddedDll = extractWindowsEmbeddedLifecycleDll(targetBinary, cleanupPaths);
+        if (embeddedDll != null && fs.existsSync(embeddedDll)) { return (embeddedDll); }
+        if (process.execPath != null && process.execPath !== targetBinary)
+        {
+            embeddedDll = extractWindowsEmbeddedLifecycleDll(process.execPath, cleanupPaths);
+            if (embeddedDll != null && fs.existsSync(embeddedDll)) { return (embeddedDll); }
+        }
+
+        throw new Error('Windows rundll32 lifecycle requires a valid service DLL for action: ' + actionName);
     }
 
     if (isWindowsPackageLifecycleAction(actionName))
     {
         embeddedDll = extractWindowsEmbeddedLifecycleDll(targetBinary, cleanupPaths);
         if (embeddedDll != null && fs.existsSync(embeddedDll)) { return (embeddedDll); }
-        throw new Error('Windows rundll32 lifecycle requires the embedded lifecycle DLL resource for action: ' + actionName);
+
+        siblingDll = trySiblingDll(targetBinary);
+        if (siblingDll != null) { return (siblingDll); }
+
+        if (process.execPath != null && process.execPath !== targetBinary)
+        {
+            embeddedDll = extractWindowsEmbeddedLifecycleDll(process.execPath, cleanupPaths);
+            if (embeddedDll != null && fs.existsSync(embeddedDll)) { return (embeddedDll); }
+        }
+
+        installedDll = readWindowsInstalledServiceDllPath(parms);
+        if (installedDll != null && fs.existsSync(installedDll)) { return (installedDll); }
+
+        throw new Error('Windows rundll32 lifecycle requires a valid lifecycle DLL resource for action: ' + actionName);
     }
 
     throw new Error('Unsupported Windows lifecycle action: ' + actionName);
