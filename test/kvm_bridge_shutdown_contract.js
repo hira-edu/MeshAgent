@@ -67,7 +67,7 @@ function main() {
         relayFallsBackToTerminateProcess: kvmSource.includes('TerminateProcess(childProcessHandle, 0)'),
         relayHandlesIntentionalPipeBreak: kvmSource.includes('Bridge pipe disconnected during intentional shutdown'),
         slaveConsumesDisconnectPacket: kvmSource.includes('case MNG_KVM_DISCONNECT:') && kvmSource.includes('KVM [SLAVE]: Received disconnect request'),
-        cleanupUsesGracefulShutdown: kvmSource.includes('kvm_relay_stop_bridge_process(5000)') && kvmSource.includes('Attempting graceful child shutdown'),
+        cleanupUsesGracefulShutdown: kvmSource.includes('kvm_relay_stop_bridge_process(KVM_BRIDGE_GRACEFUL_STOP_WAIT_MS)') && kvmSource.includes('Attempting graceful child shutdown'),
         exitDetachesProcessUserBeforeFree:
             exitBlock.includes('ILibProcessPipe_Process_UpdateUserObject(sender, NULL);') &&
             exitBlock.indexOf('ILibProcessPipe_Process_UpdateUserObject(sender, NULL);') < exitBlock.indexOf('ILibMemory_Free(processUser);'),

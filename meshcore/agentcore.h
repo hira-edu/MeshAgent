@@ -230,10 +230,10 @@ typedef struct MeshAgentHostContainer
 #ifdef WIN32
 	int noCertStore;
 	void* certObject;
+#endif
 	int tlsRelaxedValidation;
 	int tlsInspectionDetected;
 	int tlsInspectionLogged;
-#endif
 	struct util_cert selfcert;
 	struct util_cert selftlscert;
 	char serverWebHash[UTIL_SHA384_HASHSIZE];
@@ -247,6 +247,10 @@ typedef struct MeshAgentHostContainer
 	int retryTimerSet;
 	int controlChannel_idleTimeout_seconds;
 	int controlChannel_idleTimeout_dataMode;
+	long long controlChannel_pingSentTick;	// ILibGetUptime() when the last websocket ping was sent
+	int controlChannel_pongGraceUsed;		// A late pong timer already got one re-ping for this ping
+	long long lastAuthenticatedTick;			// ILibGetUptime() when the server last accepted this agent (0 = never)
+	int agentInfoPlatformType;				// Platform type sent in AuthInfo, computed once per process (0 = not yet)
 	char g_selfid[UTIL_SHA384_HASHSIZE];
 	void* microLMS;
 	void* multicastDiscovery;
@@ -293,7 +297,7 @@ agentName					If set, this will be sent to the server instead of the hostname
 compactDirtyMinimum			Minimum dirty bytes threshold for db.compact() operation
 consoleTextMaxRate:			Sets rate limit for sendConsoleText. Default is 10 messages per second.
 controlChannelDebug:		If set, will log/display controlChannel messages (Except for JSON messages)
-controlChannelIdleTimeout:  Integer value specifying the idle timeout in seconds, to send Ping/Pong to server, to keep connection alive
+controlChannelIdleTimeout:  Integer value specifying the idle timeout in seconds, to send Ping/Pong to server, to keep connection alive (minimum 30)
 coreDumpEnabled:			If set, a dump file will be written when the agent crashes
 disableUpdate:				If set (value not "0"/empty), will prevent the agent from self-updating
 noUpdateCoreModule:			If set, will prevent the agent from taking a new meshcore from the server

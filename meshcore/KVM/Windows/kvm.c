@@ -330,6 +330,12 @@ static void kvm_write_scaling_factor(volatile LONG* scalingFactor, int scaling)
 #define KVM_BRIDGE_HEALTHY_RESET_MS (KVM_BRIDGE_CONNECT_TIMEOUT_MS * 2)
 #define KVM_RELAY_ACTIVATION_STACK_MAX 8
 #define KVM_BRIDGE_BROKEN_PIPE_GRACE_MS 2000
+// Bounded wait for a helper to leave on its own after MNG_KVM_DISCONNECT. The relay runs on the
+// agent's event thread, which also services the control channel; a long wait here stalls both.
+#define KVM_BRIDGE_GRACEFUL_STOP_WAIT_MS 300
+// A helper asked to leave gets this long (its own shutdown grace is 3 s) before it is terminated by
+// a one-shot timer; nothing waits for it on the event thread.
+#define KVM_BRIDGE_DEFERRED_STOP_TIMEOUT_MS 3500
 
 typedef struct KvmRelayCachedControlPacket
 {
@@ -629,9 +635,11 @@ static void kvm_relay_destroy_context(KvmRelayContext* ctx)
 	kvm_relay_signal_unlock();
 	if (gILibChain != NULL)
 	{
-		// The retry timer is keyed by ctx; never let it fire on a released context.
+		// The retry timer is keyed by ctx and the deferred-stop timer by a field address; never
+		// let either fire on a released context.
 		void* timer = ILibGetBaseTimer(gILibChain);
 		if (timer != NULL) { ILibLifeTime_Remove(timer, ctx); }
+		if (timer != NULL) { ILibLifeTime_Remove(timer, &ctx->awaitingChildExit); }
 	}
 	kvm_relay_close_bridge_transport(ctx);
 	kvm_relay_close_bridge_job(ctx);
@@ -1456,17 +1464,66 @@ static BOOL kvm_relay_stop_bridge_process(DWORD timeoutMs)
 		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: TerminateProcess failed error=%lu", (unsigned long)terminateError);
 		return FALSE;
 	}
-	if (WaitForSingleObject(childProcessHandle, 1000) == WAIT_OBJECT_0)
+	// Termination completes asynchronously and the exit handler reports it. Waiting for it here
+	// would stall the event thread that also services the control channel.
+	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: Bridge helper termination requested; the exit handler reports completion");
+	return TRUE;
+}
+
+// Safety net for kvm_relay_request_bridge_stop: a helper that is still alive after the grace
+// period is terminated here. The context is only freed by kvm_relay_destroy_context, which
+// removes this entry first, so ctx is valid whenever this fires.
+static void kvm_relay_deferred_stop_timer_callback(void* object)
+{
+	KvmRelayContext* ctx = (KvmRelayContext*)((char*)object - offsetof(KvmRelayContext, awaitingChildExit));
+	HANDLE childProcessHandle = NULL;
+	int registered = 0;
+	int i;
+
+	kvm_relay_lock();
+	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i) { if (gKvmRelayContexts[i] == ctx) { registered = 1; break; } }
+	if (registered && ctx->awaitingChildExit != 0 && ctx->childProcess != NULL)
 	{
-		DWORD exitCode = 0;
-		if (GetExitCodeProcess(childProcessHandle, &exitCode))
+		ILibProcessPipe_Process_GetWaitHandles(ctx->childProcess, &childProcessHandle, NULL, NULL, NULL);
+		if (childProcessHandle != NULL && childProcessHandle != INVALID_HANDLE_VALUE && WaitForSingleObject(childProcessHandle, 0) != WAIT_OBJECT_0)
 		{
-			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: Bridge helper terminated forcefully exitCode=%lu", (unsigned long)exitCode);
+			kvm_trace_startupf("bridge helper still alive %u ms after the stop request; terminating pid=%u", (unsigned int)KVM_BRIDGE_DEFERRED_STOP_TIMEOUT_MS, (unsigned int)ILibProcessPipe_Process_GetPID(ctx->childProcess));
+			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: Bridge helper did not exit within %u ms of the stop request; terminating process", (unsigned int)KVM_BRIDGE_DEFERRED_STOP_TIMEOUT_MS);
+			TerminateProcess(childProcessHandle, 0);
 		}
-		return TRUE;
+		// The kill-on-close job finishes anything the terminate request did not; the exit handler
+		// then completes the context teardown.
+		kvm_relay_close_bridge_job(ctx);
 	}
-	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: Bridge helper failed to terminate within timeout");
-	return FALSE;
+	kvm_relay_unlock();
+}
+
+// Ask the helper to leave without waiting for it: MNG_KVM_DISCONNECT goes out, the caller closes
+// the transport (which the helper also treats as a stop), the job stays open so the helper can
+// finish its own shutdown, and the timer above terminates a helper that does not. Returns 0 when
+// the request could not be armed, in which case the caller falls back to the bounded stop.
+static int kvm_relay_request_bridge_stop(KvmRelayContext* ctx)
+{
+	char disconnectPacket[4];
+	void* timer = NULL;
+
+	if (ctx == NULL || gChildProcess == NULL || gILibChain == NULL) { return 0; }
+	timer = ILibGetBaseTimer(gILibChain);
+	if (timer == NULL) { return 0; }
+	if (InterlockedCompareExchange(&ctx->childUsesBridge, 0, 0) != 0)
+	{
+		((unsigned short*)disconnectPacket)[0] = (unsigned short)htons((unsigned short)MNG_KVM_DISCONNECT);
+		((unsigned short*)disconnectPacket)[1] = (unsigned short)htons((unsigned short)4);
+		if (!kvm_relay_write_bridge_input(ctx, disconnectPacket, (int)sizeof(disconnectPacket)))
+		{
+			kvm_trace_startupf("Bridge pipe disconnected during deferred shutdown request error=%lu", (unsigned long)GetLastError());
+		}
+	}
+	// Keyed on a field address so it never collides with the retry timer entries keyed on ctx.
+	ILibLifeTime_Remove(timer, &ctx->awaitingChildExit);
+	ILibLifeTime_AddEx(timer, &ctx->awaitingChildExit, KVM_BRIDGE_DEFERRED_STOP_TIMEOUT_MS, &kvm_relay_deferred_stop_timer_callback, NULL);
+	kvm_trace_startupf("Requested bridge helper shutdown without waiting; terminate timer armed for %u ms", (unsigned int)KVM_BRIDGE_DEFERRED_STOP_TIMEOUT_MS);
+	return 1;
 }
 
 typedef struct KvmBridgeHardeningResult
@@ -2119,7 +2176,9 @@ static BOOL kvm_relay_wait_for_bridge_client(KvmRelayContext* ctx, HANDLE bridge
 {
 	HANDLE pipeHandle = bridgePipeHandle;
 	HANDLE sessionChangeEvent = NULL;
-	HANDLE waitHandles[2];
+	HANDLE childProcessHandle = NULL;
+	HANDLE waitHandles[3];
+	DWORD waitCount = 2;
 	OVERLAPPED overlapped;
 	DWORD waitResult = WAIT_FAILED;
 	DWORD transferred = 0;
@@ -2174,7 +2233,11 @@ static BOOL kvm_relay_wait_for_bridge_client(KvmRelayContext* ctx, HANDLE bridge
 		}
 		waitHandles[0] = overlapped.hEvent;
 		waitHandles[1] = sessionChangeEvent;
-		waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, timeoutMs);
+		// A helper that exits before opening the pipe must not cost the whole connect timeout on
+		// the event thread: its process handle ends the wait the moment it is gone.
+		if (gChildProcess != NULL) { ILibProcessPipe_Process_GetWaitHandles(gChildProcess, &childProcessHandle, NULL, NULL, NULL); }
+		if (childProcessHandle != NULL && childProcessHandle != INVALID_HANDLE_VALUE) { waitHandles[2] = childProcessHandle; waitCount = 3; }
+		waitResult = WaitForMultipleObjects(waitCount, waitHandles, FALSE, timeoutMs);
 		if (waitResult == WAIT_OBJECT_0)
 		{
 			if (GetOverlappedResult(pipeHandle, &overlapped, &transferred, FALSE))
@@ -2191,6 +2254,18 @@ static BOOL kvm_relay_wait_for_bridge_client(KvmRelayContext* ctx, HANDLE bridge
 		{
 			errorCode = ERROR_OPERATION_ABORTED;
 			if (sessionChangedOut != NULL) { *sessionChangedOut = TRUE; }
+			kvm_relay_cancel_bridge_pipe_connect(pipeHandle, &overlapped);
+		}
+		else if (waitCount == 3 && waitResult == WAIT_OBJECT_0 + 2)
+		{
+			// The helper exited before connecting; report it as a failed start right away, with the
+			// helper's own exit code when it left one (the exit handler maps those to causes).
+			{
+				DWORD helperExitCode = 0;
+				errorCode = ERROR_PROCESS_ABORTED;
+				if (GetExitCodeProcess(childProcessHandle, &helperExitCode) && helperExitCode != STILL_ACTIVE && helperExitCode != 0) { errorCode = helperExitCode; }
+			}
+			kvm_trace_startupf("bridge helper exited before connecting its pipe; ending connect wait early");
 			kvm_relay_cancel_bridge_pipe_connect(pipeHandle, &overlapped);
 		}
 		else
@@ -2334,6 +2409,13 @@ static void kvm_clear_pending_unqueryable_start(void)
 	gKvmPendingUnqueryableStartRetryCount = 0;
 }
 
+// Launch failures are remembered across relay contexts. A reconnecting viewer gets a fresh
+// context, and without this memory its first launch would run inline at once, bypassing the
+// backoff and stalling the event thread again on every reconnect while the helper keeps failing.
+static DWORD gKvmCrossContextConsecutiveFailures = 0;
+static ULONGLONG gKvmCrossContextRestartNotBeforeTickMs = 0;
+static DWORD gKvmCrossContextSessionId = 0; // Session whose launches failed; other sessions start fresh
+
 static void kvm_record_spawn_failure(DWORD error, DWORD stage, DWORD spawnType)
 {
 	if (error == ERROR_SUCCESS) { error = ERROR_GEN_FAILURE; }
@@ -2341,6 +2423,8 @@ static void kvm_record_spawn_failure(DWORD error, DWORD stage, DWORD spawnType)
 	gKvmLastBridgeFailureStage = stage;
 	gKvmLastBridgeFailureSpawnType = spawnType;
 	++gKvmConsecutiveFailures;
+	gKvmCrossContextConsecutiveFailures = gKvmConsecutiveFailures;
+	gKvmCrossContextSessionId = gKvmProcessSessionId;
 }
 
 static void kvm_record_spawn_success(void *reserved, void *pipeMgr, char *exePath, ILibKVM_WriteHandler writeHandler)
@@ -2362,6 +2446,7 @@ static void kvm_record_spawn_success(void *reserved, void *pipeMgr, char *exePat
 	// watchdog); only the timer callback clears gKvmRetryScheduled, so the
 	// flag keeps describing the lifetime entry that actually exists.
 	gKvmRestartNotBeforeTickMs = 0;
+	gKvmCrossContextRestartNotBeforeTickMs = 0;
 	gKvmSessionStartTickMs = GetTickCount64();
 	gKvmLastBridgeAvailable = kvm_is_bridge_available();
 	gKvmLastUsedBridge = childUsesBridge;
@@ -2377,6 +2462,8 @@ static void kvm_record_healthy_output(void)
 	gKvmLastBridgeFailureSpawnType = 0;
 	gKvmConsecutiveFailures = 0;
 	gKvmLastBackoffDelayMs = 0;
+	gKvmCrossContextConsecutiveFailures = 0;
+	gKvmCrossContextRestartNotBeforeTickMs = 0;
 }
 
 static DWORD kvm_calculate_backoff_delay_ms(void)
@@ -2557,6 +2644,7 @@ static void kvm_schedule_retry_timer_at_least(DWORD minimumDelayMs)
 	if (backoffDelayMs < minimumDelayMs) { backoffDelayMs = minimumDelayMs; }
 	gKvmLastBackoffDelayMs = backoffDelayMs;
 	gKvmRestartNotBeforeTickMs = GetTickCount64() + (ULONGLONG)backoffDelayMs;
+	gKvmCrossContextRestartNotBeforeTickMs = gKvmRestartNotBeforeTickMs;
 	kvm_schedule_retry_timer_delay(backoffDelayMs);
 }
 
@@ -5680,9 +5768,26 @@ int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler wr
 		// change's own handler).
 		g_shutdown = 0;
 		KVMDEBUG("kvm_relay_setup() session starting", 0);
-		if (!kvm_relay_restart(1, processPipeMgr, exePath, writeHandler, reserved))
 		{
-			kvm_relay_schedule_restart_after_failure(GetLastError(), "setup");
+			ULONGLONG now = GetTickCount64();
+			int carryBackoff = (gKvmCrossContextSessionId == gKvmProcessSessionId && gKvmCrossContextConsecutiveFailures != 0);
+			// Launch failures of an earlier context for this same session carry over, so a reconnect
+			// neither restarts the backoff ladder nor bypasses a deadline that is still running.
+			if (carryBackoff) { gKvmConsecutiveFailures = gKvmCrossContextConsecutiveFailures; }
+			if (carryBackoff && gKvmCrossContextRestartNotBeforeTickMs > now)
+			{
+				// The backoff has not elapsed: defer the first launch to the retry timer instead of
+				// launching inline right away.
+				gKvmRestartNotBeforeTickMs = gKvmCrossContextRestartNotBeforeTickMs;
+				kvm_trace_startupf("kvm_relay_setup() deferring first launch by %llu ms (carried backoff, consecutiveFailures=%lu)",
+					(unsigned long long)(gKvmCrossContextRestartNotBeforeTickMs - now),
+					(unsigned long)gKvmConsecutiveFailures);
+				kvm_schedule_retry_timer_delay((DWORD)(gKvmCrossContextRestartNotBeforeTickMs - now));
+			}
+			else if (!kvm_relay_restart(1, processPipeMgr, exePath, writeHandler, reserved))
+			{
+				kvm_relay_schedule_restart_after_failure(GetLastError(), "setup");
+			}
 		}
 		kvm_relay_capture_context(ctx);
 		kvm_relay_deactivate_context();
@@ -5742,6 +5847,7 @@ void kvm_cleanup(void *reserved)
 	ILibProcessPipe_Process childProcessForExit = NULL;
 	int destroyNow = 0;
 	int hadChildProcess = 0;
+	int deferredStop = 0;
 	//ILIBMESSAGE("KVMBREAK-CLEAN\r\n");
 	kvm_relay_lock();
 	ctx = reserved != NULL ? kvm_relay_find_context_by_reserved(reserved) : kvm_relay_lookup_context(NULL);
@@ -5790,13 +5896,21 @@ void kvm_cleanup(void *reserved)
 	{
 		DWORD childPid = ILibProcessPipe_Process_GetPID(gChildProcess);
 		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: kvm_cleanup: Attempting graceful child shutdown (pid=%u)", (unsigned int)childPid);
-		if (!kvm_relay_stop_bridge_process(5000))
+		// Preferred: ask the helper to leave and return at once. Its exit handler completes the
+		// teardown and closes the job; a one-shot timer terminates a helper that overstays.
+		deferredStop = kvm_relay_request_bridge_stop(ctx);
+		if (!deferredStop)
 		{
-			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: kvm_cleanup: Graceful shutdown failed, attempting to kill child process (pid=%u)", (unsigned int)childPid);
-			ILibProcessPipe_Process_SoftKill(gChildProcess);
+			// Fallback (no timer available): bounded wait, then the kill-on-close job and the exit
+			// handler finish any helper that does not leave in time.
+			if (!kvm_relay_stop_bridge_process(KVM_BRIDGE_GRACEFUL_STOP_WAIT_MS))
+			{
+				ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: kvm_cleanup: Graceful shutdown failed, attempting to kill child process (pid=%u)", (unsigned int)childPid);
+				ILibProcessPipe_Process_SoftKill(gChildProcess);
+			}
+			kvm_relay_close_bridge_job(ctx);
 		}
 		gChildProcess = NULL;
-		kvm_relay_close_bridge_job(ctx);
 	}
 	else
 	{
@@ -5805,7 +5919,8 @@ void kvm_cleanup(void *reserved)
 	if (ctx != NULL)
 	{
 		kvm_relay_close_bridge_transport(ctx);
-		kvm_relay_close_bridge_job(ctx);
+		// With a deferred stop the job stays open until the helper has left (exit handler or timer).
+		if (!deferredStop) { kvm_relay_close_bridge_job(ctx); }
 		ctx->pipeMgr = NULL;
 		ctx->writeHandler = NULL;
 		ctx->reserved = NULL;

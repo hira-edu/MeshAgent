@@ -49,6 +49,20 @@ limitations under the License.
 
 #ifdef _DEBUG
 #include "ILibCrypto.h"
+
+// A non-blocking send that could not take data right now is retried from PostSelect once the
+// socket is writable again. Besides would-block that covers an interrupted call and the
+// transient out-of-buffers condition a loaded host reports; treating those as fatal dropped
+// healthy connections. The same classes are not a close on the receive side.
+#if defined(WIN32)
+#define ILibAsyncSocket_SendErrorIsTransient(err) ((err) == WSAEWOULDBLOCK || (err) == WSAENOBUFS || (err) == WSAEINTR)
+#define ILibAsyncSocket_RecvErrorIsTransient(err) ((err) == WSAEWOULDBLOCK || (err) == WSAENOBUFS || (err) == WSAEINTR)
+#define ILibAsyncSocket_LastSocketError() WSAGetLastError()
+#else
+#define ILibAsyncSocket_SendErrorIsTransient(err) ((err) == EWOULDBLOCK || (err) == EAGAIN || (err) == EINTR || (err) == ENOBUFS)
+#define ILibAsyncSocket_RecvErrorIsTransient(err) ((err) == EWOULDBLOCK || (err) == EAGAIN || (err) == EINTR)
+#define ILibAsyncSocket_LastSocketError() errno
+#endif
 #endif
 
 #ifdef _POSIX
@@ -598,9 +612,9 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 					bytesSent = send(module->internalSocket, module->writeBioBuffer->data, (int)(module->writeBioBuffer->length), MSG_NOSIGNAL); // Klocwork reports that this could block while holding a lock... This socket has been set to O_NONBLOCK, so that will never happen
 					TLSLOG1("--> SOCKET WRITE[%d]: %d bytes...\n", module->internalSocket, bytesSent);
 #ifdef WIN32
-					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && WSAGetLastError() == WSAEWOULDBLOCK))
+					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(WSAGetLastError())))
 #else
-					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && errno == EWOULDBLOCK))
+					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(errno)))
 #endif
 					{
 						// Still Pending Data to be sent
@@ -743,9 +757,9 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 				bytesSent = sendto(module->internalSocket, buffer, (int)bufferLen, MSG_NOSIGNAL, (struct sockaddr*)remoteAddress, INET_SOCKADDR_LENGTH(remoteAddress->sa_family)); // No dataloss, capped to INT32_MAX
 			}
 #ifdef WIN32
-			if ((bytesSent > 0 && bytesSent < (int)bufferLen) || (bytesSent < 0 && WSAGetLastError() == WSAEWOULDBLOCK))
+			if ((bytesSent > 0 && bytesSent < (int)bufferLen) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(WSAGetLastError())))
 #else
-			if ((bytesSent > 0 && bytesSent < (int)bufferLen) || (bytesSent < 0 && errno == EWOULDBLOCK))
+			if ((bytesSent > 0 && bytesSent < (int)bufferLen) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(errno)))
 #endif
 			{
 				// Not all data was sent
@@ -1189,6 +1203,7 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 	int j;
 	#endif
 	int bytesReceived = 0;
+	int recvError = 0;
 #ifdef WIN32
 	int len;
 #else
@@ -1248,6 +1263,7 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 			{
 				bytesReceived = recvfrom(Reader->internalSocket, Reader->readBioBuffer_mem + Reader->readBioBuffer->length, (int)(Reader->readBioBuffer->max - Reader->readBioBuffer->length), 0, (struct sockaddr*)&(Reader->SourceAddress), &len);
 			}
+			if (bytesReceived < 0) { recvError = ILibAsyncSocket_LastSocketError(); }
 			if (bytesReceived > 0)
 			{
 				Reader->readBioBuffer->length += bytesReceived;
@@ -1353,6 +1369,7 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 				bytesReceived = (int)recvfrom(Reader->internalSocket, Reader->buffer + Reader->EndPointer, Reader->MallocSize - Reader->EndPointer, 0, (struct sockaddr*)&(Reader->SourceAddress), &len);
 			}
 #endif
+			if (bytesReceived < 0) { recvError = ILibAsyncSocket_LastSocketError(); }
 			if (Reader->RemoteAddress.sin6_family != AF_UNIX)
 			{
 				ILib6to4((struct sockaddr*)&(Reader->SourceAddress));
@@ -1398,10 +1415,10 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 		// If a UDP packet is larger than the buffer, drop it.
 #if defined(WINSOCK2)
 		if (bytesReceived == SOCKET_ERROR && WSAGetLastError() == 10040) { return; }
-#else
-		// TODO: Linux errno
-		//if (bytesReceived == -1 && errno != 0) printf("ERROR: errno = %d, %s\r\n", errno, strerror(errno));
 #endif
+		// A transient receive error (would-block, interrupted, out of buffers) is not a close:
+		// keep the socket and read again on the next readiness notification.
+		if (bytesReceived < 0 && ILibAsyncSocket_RecvErrorIsTransient(recvError)) { return; }
 
 		//
 		// This means the socket was gracefully closed by the remote endpoint
@@ -1999,9 +2016,9 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 					bytesSent = (int)send(module->internalSocket, module->writeBioBuffer->data, (int)(module->writeBioBuffer->length), MSG_NOSIGNAL); // Klocwork reports that this could block while holding a lock... This socket has been set to O_NONBLOCK, so that will never happen
 					TLSLOG1("  << BIOBUFFER[%d] drain: %d of %d bytes >>\n", module->internalSocket, bytesSent, (int)module->writeBioBuffer->length);
 #ifdef WIN32
-					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && WSAGetLastError() == WSAEWOULDBLOCK))
+					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(WSAGetLastError())))
 #else
-					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && errno == EWOULDBLOCK))
+					if ((bytesSent > 0 && bytesSent < (int)(module->writeBioBuffer->length)) || (bytesSent < 0 && ILibAsyncSocket_SendErrorIsTransient(errno)))
 #endif
 					{
 						if (bytesSent > 0) 
@@ -2024,6 +2041,9 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 							// No Data was sent, so we can just leave the data in the writeBio, and fetch it later
 						}
 						TRY_TO_SEND = 0;
+						// Handled: the data is buffered. Keep the error checks below from reading this as a
+						// failed SSL write (SSL_get_error on a clean object reports SSL_ERROR_SYSCALL).
+						bytesSent = 0;
 					}
 					else if(bytesSent == module->writeBioBuffer->length)
 					{
@@ -2114,9 +2134,9 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 				// Error, clean up everything
 				TRY_TO_SEND = 0;
 #if defined(_WIN32_WCE) || defined(WIN32)
-				if (WSAGetLastError() != WSAEWOULDBLOCK)
+				if (!ILibAsyncSocket_SendErrorIsTransient(WSAGetLastError()))
 #elif defined(_POSIX)
-				if (errno != EWOULDBLOCK)
+				if (!ILibAsyncSocket_SendErrorIsTransient(errno))
 #endif
 				{
 					// There was an error sending

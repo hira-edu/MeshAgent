@@ -9962,7 +9962,7 @@ long long ILibGetUptime()
 	struct timespec ts; 
 	memset(&ts, 0, sizeof ts);
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (((long long)ts.tv_sec) * 1000) + ((((long long)ts.tv_nsec) / 1000) % 1000);
+	return (((long long)ts.tv_sec) * 1000) + (((long long)ts.tv_nsec) / 1000000); // Milliseconds; the old (ns/1000)%1000 term jumped backwards within every second
 }
 #endif
 

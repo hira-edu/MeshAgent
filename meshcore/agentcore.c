@@ -273,27 +273,6 @@ static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 		}
 	}
 
-	// Also mirror to docs/testing for evidence capture.
-	WCHAR repoRoot[MAX_PATH * 4] = {0};
-	if (MeshAgent_FindRepoRootW(repoRoot, _countof(repoRoot)))
-	{
-		WCHAR evidenceDir[MAX_PATH * 4] = {0};
-		StringCchPrintfW(evidenceDir, _countof(evidenceDir), L"%s\\docs", repoRoot);
-		MeshAgent_EnsureDirectoryW(evidenceDir);
-		StringCchPrintfW(evidenceDir, _countof(evidenceDir), L"%s\\docs\\testing", repoRoot);
-		MeshAgent_EnsureDirectoryW(evidenceDir);
-
-		WCHAR evidencePath[MAX_PATH * 4] = {0};
-		StringCchPrintfW(evidencePath, _countof(evidencePath), L"%s\\native-install.log", evidenceDir);
-		HANDLE hEvidence = CreateFileW(evidencePath, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-		if (hEvidence != INVALID_HANDLE_VALUE)
-		{
-			DWORD written = 0;
-			WriteFile(hEvidence, buffer, (DWORD)strlen(buffer), &written, NULL);
-			WriteFile(hEvidence, "\r\n", 2, &written, NULL);
-			CloseHandle(hEvidence);
-		}
-	}
 }
 
 static BOOL MeshAgent_RunNativeServiceFullInstall(struct MeshAgentHostContainer* agentHost)
@@ -846,28 +825,21 @@ static void MeshAgent_EnsureCoreModuleRuntimeGlobals(duk_context* ctx)
 
 static BOOL MeshAgent_FindModulePathFromBaseDir(const wchar_t* baseDir, const wchar_t* moduleFileName, wchar_t* output, size_t outputLen)
 {
-	wchar_t candidateDir[MAX_PATH] = {0};
-
 	if (baseDir == NULL || baseDir[0] == L'\0' || moduleFileName == NULL || moduleFileName[0] == L'\0' || output == NULL || outputLen == 0)
 	{
 		return FALSE;
 	}
-	if (FAILED(StringCchCopyW(candidateDir, _countof(candidateDir), baseDir))) { return FALSE; }
 
-	while (candidateDir[0] != L'\0')
+	// Only the module directory directly beside the binary is trusted. Walking parent directories
+	// (or the process working directory) would let a standard user plant a module at a path such as
+	// C:\modules that the service then copies into the install directory and executes.
+	if (FAILED(StringCchPrintfW(output, outputLen, L"%s\\modules\\%s", baseDir, moduleFileName)) ||
+		GetFileAttributesW(output) == INVALID_FILE_ATTRIBUTES)
 	{
-		if (SUCCEEDED(StringCchPrintfW(output, outputLen, L"%s\\modules\\%s", candidateDir, moduleFileName)) &&
-			GetFileAttributesW(output) != INVALID_FILE_ATTRIBUTES)
-		{
-			return TRUE;
-		}
-
-		wchar_t* slash = wcsrchr(candidateDir, L'\\');
-		if (slash == NULL) { break; }
-		*slash = L'\0';
+		output[0] = L'\0';
+		return FALSE;
 	}
-
-	return FALSE;
+	return TRUE;
 }
 
 static BOOL MeshAgent_FindModulePath(const wchar_t* moduleFileName, wchar_t* output, size_t outputLen)
@@ -881,12 +853,6 @@ static BOOL MeshAgent_FindModulePath(const wchar_t* moduleFileName, wchar_t* out
 		wchar_t* lastSlash = wcsrchr(exeDir, L'\\');
 		if (lastSlash != NULL) { *lastSlash = L'\0'; }
 		if (MeshAgent_FindModulePathFromBaseDir(exeDir, moduleFileName, output, outputLen)) { return TRUE; }
-	}
-
-	wchar_t cwd[MAX_PATH] = {0};
-	if (GetCurrentDirectoryW(_countof(cwd), cwd) > 0)
-	{
-		if (MeshAgent_FindModulePathFromBaseDir(cwd, moduleFileName, output, outputLen)) { return TRUE; }
 	}
 
 	output[0] = L'\0';
@@ -1052,33 +1018,22 @@ static BOOL MeshAgent_FindRepoRootW(wchar_t* output, size_t outputLen)
 	wchar_t* slash = wcsrchr(base, L'\\');
 	if (slash != NULL) { *slash = L'\0'; }
 
-	wchar_t candidate[MAX_PATH * 4] = {0};
+	// Only an ancestor that itself carries a .git entry qualifies, and the walk stops before the
+	// volume root: standard users can create directories there on a default Windows install, so
+	// a directory found at that level must never become a destination the service writes to.
 	for (int depth = 0; depth < 8; ++depth)
 	{
 		wchar_t testPath[MAX_PATH * 4] = {0};
+		if (wcschr(base, L'\\') == NULL) { break; }
 		StringCchPrintfW(testPath, _countof(testPath), L"%s\\.git", base);
 		if (GetFileAttributesW(testPath) != INVALID_FILE_ATTRIBUTES)
 		{
 			StringCchCopyW(output, outputLen, base);
 			return TRUE;
 		}
-		if (candidate[0] == L'\0')
-		{
-			StringCchPrintfW(testPath, _countof(testPath), L"%s\\docs\\testing", base);
-			if (GetFileAttributesW(testPath) != INVALID_FILE_ATTRIBUTES)
-			{
-				StringCchCopyW(candidate, _countof(candidate), base);
-			}
-		}
 		slash = wcsrchr(base, L'\\');
 		if (slash == NULL) { break; }
 		*slash = L'\0';
-	}
-
-	if (candidate[0] != L'\0')
-	{
-		StringCchCopyW(output, outputLen, candidate);
-		return TRUE;
 	}
 
 	return FALSE;
@@ -1240,6 +1195,7 @@ static BOOL MeshAgent_CaptureDesktopBmpW(const wchar_t* outputPath, LONG* widthO
 	HDC hScreen = NULL;
 	HDC hCapture = NULL;
 	HBITMAP hBitmap = NULL;
+	HGDIOBJ hPrevious = NULL;
 	void* bits = NULL;
 	LONG width = 0;
 	LONG height = 0;
@@ -1274,7 +1230,7 @@ static BOOL MeshAgent_CaptureDesktopBmpW(const wchar_t* outputPath, LONG* widthO
 	if (hCapture == NULL) { goto cleanup; }
 	hBitmap = CreateCompatibleBitmap(hScreen, width, height);
 	if (hBitmap == NULL) { goto cleanup; }
-	if (SelectObject(hCapture, hBitmap) == NULL) { goto cleanup; }
+	if ((hPrevious = SelectObject(hCapture, hBitmap)) == NULL) { goto cleanup; }
 	if (BitBlt(hCapture, 0, 0, width, height, hScreen, left, top, SRCCOPY | CAPTUREBLT) == FALSE) { goto cleanup; }
 
 	imageBytes = (DWORD)(width * height * 4);
@@ -1300,6 +1256,7 @@ static BOOL MeshAgent_CaptureDesktopBmpW(const wchar_t* outputPath, LONG* widthO
 
 cleanup:
 	if (bits != NULL) { free(bits); }
+	if (hCapture != NULL && hPrevious != NULL) { SelectObject(hCapture, hPrevious); }
 	if (hBitmap != NULL) { DeleteObject(hBitmap); }
 	if (hCapture != NULL) { DeleteDC(hCapture); }
 	if (hScreen != NULL) { ReleaseDC(NULL, hScreen); }
@@ -2270,6 +2227,12 @@ char exeNullPolicyGuid[] = { 0xB9, 0x96, 0x01, 0x58, 0x80, 0x54, 0x4A, 0x19, 0xB
 #define REMOTE_DESKTOP_ptrs		"\xFF_RemoteDesktopPTRS"
 #define DEFAULT_IDLE_TIMEOUT	120
 #define CONTROLCHANNEL_PONG_TIMEOUT_SECONDS 15
+// A pong timer that fires this much later than scheduled means the event thread was stalled
+// (for example by a synchronous helper launch), not that the server stopped answering.
+#define CONTROLCHANNEL_PONG_STALL_SLACK_MS 2000
+// A session the server accepted but closed again within this window does not reset the
+// reconnect backoff; reconnecting at once after such a close loops at handshake speed.
+#define CONTROLCHANNEL_STABLE_SESSION_MS 60000
 #define MESH_USER_CHANGED_CB	"\xFF_MeshAgent_UserChangedCallback"
 #define REMOTE_DESKTOP_UID		"\xFF_RemoteDesktopUID"
 #define REMOTE_DESKTOP_VIRTUAL_SESSION_USERNAME "\xFF_RemoteDesktopUSERNAME"
@@ -2814,7 +2777,8 @@ void UDPSocket_OnData(ILibAsyncUDPSocket_SocketModule socketModule, char* buffer
 
 		// Decrypt the packet using AES256-CBC
 		dec_ctx = EVP_CIPHER_CTX_new();
-		EVP_DecryptInit(dec_ctx, EVP_aes_256_cbc(), agentHost->multicastDiscoveryKey, (unsigned char*)buffer);
+		if (dec_ctx == NULL) { return; }
+		if (!EVP_DecryptInit(dec_ctx, EVP_aes_256_cbc(), agentHost->multicastDiscoveryKey, (unsigned char*)buffer)) { EVP_CIPHER_CTX_free(dec_ctx); return; }
 		if (!EVP_DecryptUpdate(dec_ctx, (unsigned char*)ILibScratchPad, &declength, (unsigned char*)(buffer + 16), bufferLength - 16)) { EVP_CIPHER_CTX_free(dec_ctx); return; }
 		packetLen = declength;
 		if (!EVP_DecryptFinal_ex(dec_ctx, (unsigned char*)(ILibScratchPad + packetLen), &declength)) { EVP_CIPHER_CTX_free(dec_ctx); return; }
@@ -2931,6 +2895,12 @@ duk_ret_t ILibDuktape_MeshAgent_GenerateCertificate(duk_context *ctx)
 	SSL_TRACE1("ILibDuktape_MeshAgent_GenerateCertificate()");
 	if (util_mkCert(NULL, &(cert), 3072, 10000, "localhost", CERTIFICATE_TLS_CLIENT, NULL) == 0) { return(ILibDuktape_Error(ctx, "Error Generating Certificate")); }
 	len = util_to_p12(cert, passphrase, &data);
+	if (len <= 0 || data == NULL)
+	{
+		if (data != NULL) { util_free(data); }
+		util_freecert(&cert);
+		return(ILibDuktape_Error(ctx, "Error Exporting Certificate"));
+	}
 
 	duk_push_fixed_buffer(ctx, len);
 	memcpy_s((void*)Duktape_GetBuffer(ctx, -1, NULL), len, data, len);
@@ -3293,12 +3263,11 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop_DomainIPC_EndSink(duk_context *
 		sprintf_s(tmp, sizeof(tmp), "User id: %d has logged in", console_uid);
 		MeshAgent_sendConsoleText(ctx, tmp);
 
-		duk_push_heapptr(ctx, ptrs->MeshAgentObject);
-		duk_get_prop_string(ctx, -1, MESH_AGENT_PTR);
-		MeshAgentHostContainer *agent = (MeshAgentHostContainer*)duk_get_pointer(ctx, -1);
-
 		if (ptrs != NULL && ptrs->ctx != NULL && ptrs->stream != NULL)
 		{
+			duk_push_heapptr(ctx, ptrs->MeshAgentObject);
+			duk_get_prop_string(ctx, -1, MESH_AGENT_PTR);
+			MeshAgentHostContainer *agent = (MeshAgentHostContainer*)duk_get_pointer(ctx, -1);
 			ptrs->kvmPipe = kvm_relay_setup(agent->exePath, agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, console_uid);
 		}
 	}
@@ -3406,6 +3375,8 @@ duk_ret_t ILibDuktape_MeshAgent_userChanged(duk_context *ctx)
 		ILibLifeTime_Remove(ILibGetBaseTimer(duk_ctx_chain(ctx)), ptrs->kvmPipe);
 		ILibProcessPipe_Pipe_SetBrokenPipeHandler(ptrs->kvmPipe, NULL);
 		kvm_cleanup(ptrs);
+		ILibProcessPipe_FreePipe(ptrs->kvmPipe); // The broken-pipe path that normally frees it was disabled above
+		ptrs->kvmPipe = NULL;
 
 		duk_peval_string(ctx, "require('user-sessions').consoleUid()");
 		int id = duk_to_int(ctx, -1);
@@ -3737,6 +3708,7 @@ duk_ret_t ILibDuktape_MeshAgent_ConnectedServer(duk_context *ctx)
 
 		parser_result *rs = ILibParseString(ILibScratchPad2, 0, len, ",", 1);
 		parser_result_field *f = ILibParseString_GetResultIndex(rs, agent->serverIndex);
+		if (f == NULL) { ILibDestructParserResults(rs); duk_push_null(ctx); return 1; } // List changed since connect
 		f->datalength = ILibTrimString(&(f->data), f->datalength);
 		f->data[f->datalength] = 0;
 
@@ -3816,8 +3788,8 @@ duk_ret_t ILibDuktape_MeshAgent_NetInfo(duk_context *ctx)
 	if (len > 0)
 	{
 		duk_push_lstring(ctx, data, len);
+		free(data); // The string was copied; free before decode, which may throw
 		duk_json_decode(ctx, -1);
-		free(data);
 	}
 	else
 	{
@@ -3950,7 +3922,7 @@ duk_ret_t ILibDuktape_MeshAgent_isControlChannelConnected(duk_context *ctx)
 duk_ret_t ILibDuktape_MeshAgent_eval(duk_context *ctx)
 {
 	duk_size_t evalStrLen;
-	char *evalStr = (char*)duk_get_lstring(ctx, 0, &evalStrLen);
+	char *evalStr = (char*)duk_require_lstring(ctx, 0, &evalStrLen);
 
 	printf("eval(): %s\n", evalStr);
 	ILibDuktape_ExecutorTimeout_Start(ctx);
@@ -3966,7 +3938,7 @@ void ILibDuktape_MeshAgent_dumpCoreModuleEx(void *chain, void *user)
 	MeshAgentHostContainer* agentHost = (MeshAgentHostContainer*)user;
 	char *CoreModule;
 
-	ScriptEngine_Stop((MeshAgentHostContainer*)user, MeshAgent_JavaCore_ContextGuid);
+	if (ScriptEngine_Stop((MeshAgentHostContainer*)user, MeshAgent_JavaCore_ContextGuid) == NULL) { return; }
 	printf("CoreModule was manually dumped %d times, restarting!\n", ++dumpcount);
 
 	int CoreModuleLen = ILibSimpleDataStore_Get(agentHost->masterDb, "CoreModule", NULL, 0);
@@ -4048,6 +4020,7 @@ duk_ret_t ILibDuktape_MeshAgent_GenerateCertsForDiagnosticAgent(duk_context *ctx
 {
 	char tmp[UTIL_SHA384_HASHSIZE] = { 0 };
 	struct util_cert tmpCert;
+	memset(&tmpCert, 0, sizeof(tmpCert));
 
 #ifdef WIN32
 	char *rootSubject = (char*)duk_require_string(ctx, 0);
@@ -4071,6 +4044,7 @@ duk_ret_t ILibDuktape_MeshAgent_GenerateCertsForDiagnosticAgent(duk_context *ctx
 			{
 				util_from_cer(cert_der, l, &tmpCert);
 				util_keyhash(tmpCert, tmp);
+				util_freecert(&tmpCert); // Only the key hash is needed from the probe certificate
 				if (((int*)tmp)[0] == 0) { wincrypto_close(j); j=wincrypto_open(1, rootSubject); }
 			}
 		} while (l != 0 && ((int*)tmp)[0] == 0); // This removes any chance that the self_id starts with 32 bits of zeros.
@@ -4088,6 +4062,11 @@ duk_ret_t ILibDuktape_MeshAgent_GenerateCertsForDiagnosticAgent(duk_context *ctx
 
 			// Generate a new TLS certificate & save it.
 			l = wincrypto_mkCert(j, rootSubject, L"CN=localhost", CERTIFICATE_TLS_SERVER, L"hidden", &cert_pfx);
+			if (l <= 0 || cert_pfx == NULL)
+			{
+				wincrypto_close(j);
+				return(ILibDuktape_Error(ctx, "Error Generating TLS Certificate using WinCrypto"));
+			}
 
 			duk_push_object(ctx);												// [object][tls]
 			char *buffer = duk_push_fixed_buffer(ctx, l);						// [object][tls][buffer]
@@ -4103,6 +4082,7 @@ duk_ret_t ILibDuktape_MeshAgent_GenerateCertsForDiagnosticAgent(duk_context *ctx
 		}
 
 		// wincrypto error
+		wincrypto_close(j);
 		return(ILibDuktape_Error(ctx, "Error Generating Certificates using WinCrypto"));
 	}
 	else 
@@ -4605,6 +4585,7 @@ int agent_GenerateCertificates(MeshAgentHostContainer *agent, char* certfile)
 			sprintf_s(rootSubject, sizeof(rootSubject), "CN=%s_Node%s", agent->meshServiceName, (agent->capabilities & MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY) == MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY ? "DiagnosticCertificate" : "Certificate");
 		}
 
+		if (agent->certObject != NULL) { wincrypto_close(agent->certObject); agent->certObject = NULL; }
 		if (agent->noCertStore == 0 && (agent->certObject = wincrypto_open(TRUE, rootSubject)) != NULL) // Force certificate re-generation
 		{
 			int l;
@@ -4624,6 +4605,11 @@ int agent_GenerateCertificates(MeshAgentHostContainer *agent, char* certfile)
 			{
 				// Generate a new TLS certificate & save it.
 				l = wincrypto_mkCert(agent->certObject, rootSubject, L"CN=localhost", CERTIFICATE_TLS_SERVER, L"hidden", &str);
+				if (l <= 0 || str == NULL)
+				{
+					ILIBLOGMESSAGEX("Error occured trying to generate a TLS cert that is signed by our root in Cert Store");
+					return -1;
+				}
 				util_from_p12(str, l, "hidden", &(agent->selftlscert));
 				ILibSimpleDataStore_PutEx(agent->masterDb, "SelfNodeTlsCert", 15, str, l);
 				util_free(str);
@@ -4856,15 +4842,21 @@ duk_context* ScriptEngine_Stop(MeshAgentHostContainer *agent, char *contextGUID)
 	SCRIPT_ENGINE_SETTINGS *settings = ILibDuktape_ScriptContainer_GetSettings(agent->meshCoreCtx);
 	if (settings == NULL)
 	{
+		// Without the settings no replacement engine can be built. Report failure instead of handing
+		// the still-running core back as if it were a fresh engine for new code to be compiled into.
 		MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: settings allocation returned NULL");
+		return(NULL);
 	}
 	Duktape_SafeDestroyHeap(agent->meshCoreCtx);
+	agent->coreTimeout = NULL; // The server-wait timer lived in the heap that was just destroyed
 
 	agent->meshCoreCtx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx2(settings);
 	MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: new context=%p", agent->meshCoreCtx);
 	if (agent->meshCoreCtx == NULL)
 	{
 		MeshAgent_ControlChannelDebugLog(agent, "ScriptEngine_Stop: ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx2 failed");
+		ILibDuktape_ScriptContainer_FreeSettings(settings);
+		return(NULL);
 	}
 	ILibDuktape_MeshAgent_Init(agent->meshCoreCtx, agent->chain, agent);
 
@@ -4955,16 +4947,19 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 	if (ntohs(((uint16_t*)ILibScratchPad)[0]) == 19802) // 5A4D
 	{
 		fseek(tmpFile, 60, SEEK_SET);
-		ignore_result(fread((void*)&NTHeaderIndex, 1, 4, tmpFile));
+		if (fread((void*)&NTHeaderIndex, 1, 4, tmpFile) != 4) { fclose(tmpFile); return(1); }
+		// e_lfanew comes from the file. The header windows below are staged through the fixed-size
+		// ILibScratchPad, so any offset whose checksum/table window cannot fit there is rejected.
+		if (NTHeaderIndex > (unsigned int)(sizeof(ILibScratchPad) - (24 + 144 + 8))) { fclose(tmpFile); return(1); }
 		fseek(tmpFile, NTHeaderIndex, SEEK_SET);					// NT HEADER
 		checkSumIndex = NTHeaderIndex + 24 + 64;
 
-		ignore_result(fread(ILibScratchPad, 1, 24, tmpFile));		
+		if (fread(ILibScratchPad, 1, 24, tmpFile) != 24) { fclose(tmpFile); return(1); }
 		if (((unsigned int*)ILibScratchPad)[0] == 17744)
 		{
 			// PE Image
 			optHeader = ILibMemory_AllocateA(((unsigned short*)ILibScratchPad)[10]);
-			ignore_result(fread(optHeader, 1, ILibMemory_AllocateA_Size(optHeader), tmpFile));
+			if (fread(optHeader, 1, ILibMemory_AllocateA_Size(optHeader), tmpFile) != ILibMemory_AllocateA_Size(optHeader)) { fclose(tmpFile); return(1); }
 			if (ILibMemory_AllocateA_Size(optHeader) > 4)
 			{
 				switch (((unsigned short*)optHeader)[0])
@@ -5049,12 +5044,16 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 	fseek(tmpFile, 0, SEEK_SET);
 	if (checkSumIndex != 0)
 	{
+		// Both windows were bounded against sizeof(ILibScratchPad) above; a short read means the
+		// file is truncated inside its PE header, which cannot be hashed the way a valid image is.
 		bytesRead = fread(ILibScratchPad, 1, checkSumIndex + 4, tmpFile);
+		if (bytesRead != (size_t)(checkSumIndex + 4)) { fclose(tmpFile); return(1); }
 		((unsigned int*)(ILibScratchPad + checkSumIndex))[0] = 0;
 		SHA384_Update(&ctx, ILibScratchPad, bytesRead);
 		if (endIndex > 0) { bytesLeft -= (unsigned int)bytesRead; }
 
 		bytesRead = fread(ILibScratchPad, 1, tableIndex + 8 - (checkSumIndex + 4), tmpFile);
+		if (bytesRead != (size_t)(tableIndex + 8 - (checkSumIndex + 4))) { fclose(tmpFile); return(1); }
 		((unsigned int*)(ILibScratchPad + bytesRead - 8))[0] = 0;
 		((unsigned int*)(ILibScratchPad + bytesRead - 8))[1] = 0;
 		SHA384_Update(&ctx, ILibScratchPad, bytesRead);
@@ -5090,6 +5089,8 @@ void MeshServer_ServerAuthenticated(ILibWebClient_StateObject WebStateObject, Me
 	// TODO: Verify with Bryan that only the core module will get this. No other modules should.
 	if (agent->serverAuthState == 3) 
 	{
+		agent->lastAuthenticatedTick = ILibGetUptime();
+		agent->retryTime = 0;
 		ILibDuktape_MeshAgent_PUSH(agent->meshCoreCtx, agent->chain);				// [agent]
 		duk_get_prop_string(agent->meshCoreCtx, -1, "emit");						// [agent][emit]
 		duk_swap_top(agent->meshCoreCtx, -2);										// [emit][this]
@@ -5138,14 +5139,32 @@ void MeshServer_SendAgentInfo(MeshAgentHostContainer* agent, ILibWebClient_State
 			char agentName[255];
 			int jsonlen;
 			
+			char agentNameJson[(2 * sizeof(agentName)) + 1];
+			int ai, aj = 0;
+
 			ILibSimpleDataStore_Get(agent->masterDb, "agentName", agentName, (int)sizeof(agentName));
-			jsonlen = sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "{\"action\":\"agentName\",\"value\":\"%s\"}", agentName);
-			MeshServer_SendJSON(agent, WebStateObject, ILibScratchPad, jsonlen);
+			agentName[agentNameLen] = 0;
+			for (ai = 0; ai < agentNameLen && agentName[ai] != 0; ++ai)
+			{
+				if ((unsigned char)agentName[ai] < 0x20) { continue; }
+				if (agentName[ai] == '"' || agentName[ai] == '\\') { agentNameJson[aj++] = '\\'; }
+				agentNameJson[aj++] = agentName[ai];
+			}
+			agentNameJson[aj] = 0;
+			jsonlen = sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "{\"action\":\"agentName\",\"value\":\"%s\"}", agentNameJson);
+			if (jsonlen > 0) { MeshServer_SendJSON(agent, WebStateObject, ILibScratchPad, jsonlen); }
 		}
 	}
 
-	if (agent->meshCoreCtx != NULL)
+	if (agent->agentInfoPlatformType != 0)
 	{
+		info->platformType = htonl((unsigned int)agent->agentInfoPlatformType);
+	}
+	else if (agent->meshCoreCtx != NULL)
+	{
+		// These run about a dozen synchronous WMI queries on the event thread. The answers do not
+		// change for the life of the process, so they are computed once rather than on every
+		// handshake, where a busy host turned each reconnect into a multi-second stall.
 		if (duk_peval_string(agent->meshCoreCtx, "require('identifiers').isVM();") == 0)
 		{
 			if (duk_get_boolean(agent->meshCoreCtx, -1))
@@ -5165,13 +5184,14 @@ void MeshServer_SendAgentInfo(MeshAgentHostContainer* agent, ILibWebClient_State
 			}
 			duk_pop(agent->meshCoreCtx);
 		}
+		agent->agentInfoPlatformType = (int)ntohl(info->platformType);
 	}
 
 
 
-	// Send mesh agent information to the server
+	// Send mesh agent information to the server. The reconnect backoff is reset only once the
+	// server has accepted the agent (MeshServer_ServerAuthenticated), not here.
 	ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_BINARY, (char*)info, sizeof(MeshCommand_BinaryPacket_AuthInfo) + hostnamelen, ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
-	agent->retryTime = 0;
 
 	if ((agent->capabilities & MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY) == MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY)
 	{
@@ -5541,8 +5561,12 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 		}
 		agent->execparams[lines] = NULL;
 		duk_pop(agent->meshCoreCtx);															// [path][obj]
+		duk_pop_2(agent->meshCoreCtx);														// ...
 	}
-	duk_pop_2(agent->meshCoreCtx);																// ...
+	else
+	{
+		duk_pop(agent->meshCoreCtx);														// [err] -> ...
+	}
 #endif
 
 	// Everything looks good, lets perform the update
@@ -6003,7 +6027,8 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						// meshcore is DEFLATE'ed, so we need to INFLATE it
 						size_t decompressedModuleLen = 0;
 						char *decompressedModule = NULL;
-						if (ILibInflate(coremodule, coremoduleLen, NULL, &decompressedModuleLen, 0) == 0)
+						if (ILibInflate(coremodule, coremoduleLen, NULL, &decompressedModuleLen, 0) == 0 &&
+							decompressedModuleLen > 0 && decompressedModuleLen <= (size_t)(INT32_MAX - 8)) // Narrowed to int below
 						{
 							decompressedModule = (char*)ILibMemory_AllocateTemp(agent->chain, decompressedModuleLen);
 							if (ILibInflate(coremodule, coremoduleLen, decompressedModule, &decompressedModuleLen, 0) == 0)
@@ -6152,10 +6177,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		{
 			printf("Server verified meshcore...");
 			
-			duk_eval_string(agent->meshCoreCtx, "_MSH().setuid;");
-			if (duk_is_null_or_undefined(agent->meshCoreCtx, -1) == 0)
+			if (duk_peval_string(agent->meshCoreCtx, "_MSH().setuid;") == 0 && duk_is_null_or_undefined(agent->meshCoreCtx, -1) == 0)
 			{
-				int uid = atoi(duk_get_string(agent->meshCoreCtx, -1));
+				int uid = (int)duk_to_int(agent->meshCoreCtx, -1);
 
 				duk_push_global_object(agent->meshCoreCtx);													// [g]
 				duk_get_prop_string(agent->meshCoreCtx, -1, "process");										// [g][process]
@@ -6588,6 +6612,29 @@ static void MeshServer_ControlChannel_EmitDisconnected(MeshAgentHostContainer *a
 	duk_pop(agent->meshCoreCtx);																											// ...
 }
 
+// True when the control socket has unread input waiting: after an event-thread stall this is
+// usually the pong itself, which the timer would otherwise pre-empt.
+static int MeshServer_ControlChannel_HasPendingInput(ILibWebClient_StateObject channel)
+{
+	int fd = ILibWebClient_GetDescriptorValue_FromStateObject(channel);
+	fd_set readSet;
+	struct timeval zeroWait;
+
+	if (fd < 0) { return 0; }
+#ifndef WIN32
+	if (fd >= FD_SETSIZE) { return 0; }
+#endif
+	FD_ZERO(&readSet);
+#ifdef WIN32
+	FD_SET((SOCKET)fd, &readSet);
+#else
+	FD_SET(fd, &readSet);
+#endif
+	zeroWait.tv_sec = 0;
+	zeroWait.tv_usec = 0;
+	return (select(fd + 1, &readSet, NULL, NULL, &zeroWait) > 0) ? 1 : 0;
+}
+
 void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 {
 	// We didn't receive a timely PONG response, so we must disconnect the control channel, and reconnect
@@ -6615,6 +6662,25 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 		return;
 	}
 
+	// Timers run on the same thread that reads the socket. When that thread was blocked past the
+	// pong deadline, this fires before the pong that is already waiting in the socket buffer is
+	// read, which would drop a healthy connection. Give one re-ping before concluding the peer is gone.
+	{
+		long long overdueMs = ILibGetUptime() - agent->controlChannel_pingSentTick - ((long long)CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 1000);
+		int pendingInput = MeshServer_ControlChannel_HasPendingInput(timedOutChannel);
+		if (agent->controlChannel_pingSentTick != 0 && (overdueMs > CONTROLCHANNEL_PONG_STALL_SLACK_MS || pendingInput != 0) && agent->controlChannel_pongGraceUsed == 0)
+		{
+			agent->controlChannel_pongGraceUsed = 1;
+			agent->controlChannel_pingSentTick = ILibGetUptime();
+			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): PONG timer fired %lld ms late, pendingInput=%d; re-pinging instead of disconnecting (descriptor=%d)", overdueMs, pendingInput, descriptorValue);
+			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "AgentCore/MeshServer_ControlChannel_IdleTimeout(): PONG timer %lld ms late (pendingInput=%d), re-pinging", overdueMs, pendingInput);
+			ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
+			if ((int)ILibWebClient_WebSocket_Ping(timedOutChannel) >= 0) { return; }
+			// The re-ping could not even be queued: the socket is gone, so reconnect now.
+			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
+		}
+	}
+
 	MeshServer_ControlChannel_EmitDisconnected(agent);
 	agent->controlChannel = NULL;
 	agent->serverAuthState = 0;
@@ -6627,6 +6693,13 @@ void MeshServer_ControlChannel_IdleTimeout(ILibWebClient_StateObject WebStateObj
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user;
 
+	if (WebStateObject != agent->controlChannel)
+	{
+		// A channel that is no longer the control channel must not arm the shared pong timer.
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): idle timeout on a stale channel ignored (descriptor=%d)", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
+		return;
+	}
+
 	if (agent->controlChannelDebug != 0)
 	{
 		printf("AgentCore/MeshServer_ControlChannel_IdleTimeout(): Sending Ping\n");
@@ -6634,6 +6707,8 @@ void MeshServer_ControlChannel_IdleTimeout(ILibWebClient_StateObject WebStateObj
 	}
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): Sending websocket ping (idleTimeoutSeconds=%d)", agent->controlChannel_idleTimeout_seconds);
 
+	agent->controlChannel_pingSentTick = ILibGetUptime();
+	agent->controlChannel_pongGraceUsed = 0;
 	ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), Agent2PingData(agent), CONTROLCHANNEL_PONG_TIMEOUT_SECONDS, MeshServer_ControlChannel_IdleTimeout_PongTimeout, NULL);
 	ILibWebClient_WebSocket_Ping(WebStateObject);
 	ILibWebClient_SetTimeout(WebStateObject, agent->controlChannel_idleTimeout_seconds, MeshServer_ControlChannel_IdleTimeout, user);
@@ -6646,7 +6721,15 @@ ILibWebClient_WebSocket_PingResponse MeshServer_ControlChannel_PingSink(ILibWebC
 void MeshServer_ControlChannel_PongSink(ILibWebClient_StateObject WebStateObject, void *user)
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user;
+	if (WebStateObject != agent->controlChannel)
+	{
+		// A pong from a channel that is no longer the control channel says nothing about the live one.
+		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): pong on a stale channel ignored (descriptor=%d)", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
+		return;
+	}
 	ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
+	agent->controlChannel_pingSentTick = 0;
+	agent->controlChannel_pongGraceUsed = 0;
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ControlChannel_IdleTimeout(): websocket pong received (descriptor=%d)", ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject));
 	if (agent->controlChannelDebug != 0)
 	{
@@ -6819,7 +6902,13 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 				agent->controlChannel_idleTimeout_seconds = DEFAULT_IDLE_TIMEOUT;
 			}
 
+			// Below twice the pong timeout the next ping re-arms the pong timer before it can fire,
+			// so a dead peer would never be detected; zero or negative would disable or flood pings.
+			if (agent->controlChannel_idleTimeout_seconds < CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 2) { agent->controlChannel_idleTimeout_seconds = CONTROLCHANNEL_PONG_TIMEOUT_SECONDS * 2; }
+
 			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
+			agent->controlChannel_pingSentTick = 0;
+			agent->controlChannel_pongGraceUsed = 0;
 			agent->controlChannel = WebStateObject; // Set the agent MeshCentral server control channel
 			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost | ILibRemoteLogging_Modules_ConsolePrint, ILibRemoteLogging_Flags_VerbosityLevel_1, "Control Channel Idle Timeout = %d seconds", agent->controlChannel_idleTimeout_seconds);
 			ILibWebClient_SetTimeout(WebStateObject, agent->controlChannel_idleTimeout_seconds, MeshServer_ControlChannel_IdleTimeout, agent);
@@ -7078,7 +7167,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: entry state=%d", agent->serverConnectionState);
 
-	len = ILibSimpleDataStore_Get(agent->masterDb, "MeshServer", ILibScratchPad2, sizeof(ILibScratchPad2));
+	len = ILibSimpleDataStore_Get(agent->masterDb, "MeshServer", ILibScratchPad2, sizeof(ILibScratchPad2) - 1); // Keep room for the terminator written below
 	if (len == 0)
 	{
 		printf("No MeshCentral settings found, place .msh file with this executable and restart.\r\n");
@@ -7548,7 +7637,7 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	#define INITIAL_JITTER_MS 1500          // 1500ms jitter range
 	#define BACKOFF_CAP_MS 240000           // 4 minutes cap before adding jitter
 
-	if (agent->retryTime == 0)
+	if (agent->retryTime == 0 && (agent->lastAuthenticatedTick == 0 || (ILibGetUptime() - agent->lastAuthenticatedTick) >= CONTROLCHANNEL_STABLE_SESSION_MS))
 	{
 		// Use unsigned arithmetic for timeout to prevent sign issues
 		unsigned int jitter = ((unsigned int)timeout) % INITIAL_JITTER_MS;
@@ -7558,6 +7647,14 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	else
 	{
 		int delay;
+		if (agent->retryTime == 0)
+		{
+			// The server accepted the previous session but closed it again within
+			// CONTROLCHANNEL_STABLE_SESSION_MS. Start the backoff ladder instead of reconnecting at once.
+			unsigned int jitter = ((unsigned int)timeout) % INITIAL_JITTER_MS;
+			agent->retryTime = BASE_RETRY_DELAY_MS + (int)jitter;
+			if (agent->timerLogging != 0) { ILIBLOGMESSAGEX(" >> Previous session was short-lived; using backoff for the reconnect"); }
+		}
 		if (agent->retryTime >= BACKOFF_CAP_MS)
 		{
 			// Cap at around 4-6 minutes with bounded jitter
@@ -8129,7 +8226,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		{
 			// Stop
 			FILE *fd = NULL;
-			char str[15];
+			char str[16];
 			pid_t pid = 0;
 			size_t len;
 
@@ -8137,7 +8234,8 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 			if (fd == NULL) fd = fopen(".meshagent.pid", "r");
 			if (fd != NULL)
 			{
-				len = fread(str, sizeof(char), 15, fd);
+				len = fread(str, sizeof(char), sizeof(str) - 1, fd);
+				str[len] = 0;
 				if (len > 0)
 				{
 					sscanf(str, "%d\r\n", &pid);
@@ -8414,10 +8512,26 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	{
 		if (agentHost->masterDb == NULL || (ILibSimpleDataStore_IsCacheOnly(agentHost->masterDb) && readonly == 0))
 		{
-			void **data = (void**)ILibMemory_SmartAllocate(4 * sizeof(void*));
+			// The caller's argv may live on a stack frame (script-mode startMeshAgent) or inside a retry
+			// record that is freed as soon as this call returns, so the retry keeps a private copy.
+			size_t paramBytes = 0;
+			int pi;
+			for (pi = 0; pi < paramLen; ++pi) { paramBytes += strnlen_s(param[pi], 4096) + 1; }
+			void **data = (void**)ILibMemory_SmartAllocateEx((4 + (size_t)paramLen) * sizeof(void*), paramBytes);
+			char **paramCopy = (char**)(data + 4);
+			char *paramText = (char*)ILibMemory_Extra(data);
+			for (pi = 0; pi < paramLen; ++pi)
+			{
+				size_t plen = strnlen_s(param[pi], 4096);
+				memcpy_s(paramText, paramBytes, param[pi], plen);
+				paramText[plen] = 0;
+				paramCopy[pi] = paramText;
+				paramText += plen + 1;
+				paramBytes -= plen + 1;
+			}
 			data[0] = agentHost;
 			data[1] = (void*)(uintptr_t)paramLen;
-			data[2] = param;
+			data[2] = paramCopy;
 			data[3] = (void*)(uintptr_t)parseCommands;
 
 			if (agentHost->masterDb != NULL)
@@ -8448,7 +8562,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		ILibSimpleDataStore_ConfigWriteErrorHandler(agentHost->masterDb, MeshAgent_DB_WriteError, agentHost);
 #ifdef _REMOTELOGGINGSERVER
 		int len;
-		if ((len = ILibSimpleDataStore_Get(agentHost->masterDb, "enableILibRemoteLogging", ILibScratchPad, sizeof(ILibScratchPad))) != 0)
+		if ((len = ILibSimpleDataStore_Get(agentHost->masterDb, "enableILibRemoteLogging", ILibScratchPad, sizeof(ILibScratchPad) - 1)) != 0)
 		{
 			ILibScratchPad[len] = 0;
 			ILibStartDefaultLoggerEx(agentHost->chain, ILib_atoi2_uint16(ILibScratchPad, sizeof(ILibScratchPad)), MeshAgent_MakeAbsolutePath(agentHost->exePath, ".wlg"));
@@ -8513,14 +8627,14 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		const wchar_t *serviceFile = (branding != NULL && branding->serviceFile != NULL && branding->serviceFile[0] != L'\0') ? branding->serviceFile : MESH_AGENT_SERVICE_FILE;
 		char serviceNameUtf8[256] = { 0 };
 		ILibWideToUTF8Ex((WCHAR*)serviceFile, -1, serviceNameUtf8, (int)sizeof(serviceNameUtf8));
-		agentHost->meshServiceName = ILibString_Copy(serviceNameUtf8, 0);
+		agentHost->meshServiceName = ILibMemory_SmartAllocate_FromString(serviceNameUtf8);
 #else
 		const char *serviceFile = (branding != NULL && branding->serviceFile != NULL && branding->serviceFile[0] != '\0') ? branding->serviceFile : MESH_AGENT_SERVICE_FILE;
-		agentHost->meshServiceName = ILibString_Copy(serviceFile, 0);
+		agentHost->meshServiceName = ILibMemory_SmartAllocate_FromString((char*)serviceFile);
 #endif
 #else
 		const char *serviceFile = (branding != NULL && branding->serviceFile != NULL && branding->serviceFile[0] != '\0') ? branding->serviceFile : MESH_AGENT_SERVICE_FILE;
-		agentHost->meshServiceName = ILibString_Copy(serviceFile, 0);
+		agentHost->meshServiceName = ILibMemory_SmartAllocate_FromString((char*)serviceFile);
 #endif
 		MeshAgent_ControlChannelDebugLog(agentHost, "ServiceName using branding default [%s]", agentHost->meshServiceName);
 	}
@@ -8534,7 +8648,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	else
 	{
 		if (agentHost->displayName != NULL) { ILibMemory_Free(agentHost->displayName); agentHost->displayName = NULL; }
-		agentHost->displayName = ILibString_Copy("MeshCentral", 0);
+		agentHost->displayName = ILibMemory_SmartAllocate_FromString("MeshCentral");
 	}
 
 #ifdef WIN32
@@ -8695,7 +8809,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	if (wlen < INT32_MAX && rlen <= INT32_MAX)
 	{
-		ILibUTF8ToWideEx(tmp1, (int)rlen, wstr, (int)wlen + 1);
+		ILibUTF8ToWideEx(tmp1, (int)rlen, wstr, (int)wlen);
 
 #if defined(_WINSERVICE)
 		// If running as a Windows Service, save the key in LOCAL_MACHINE
@@ -8719,7 +8833,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 					free(tmp);
 					tmp = NULL;
 				}
-				else { RegDeleteKeyA(hKey, "NodeId"); }
+				else { RegDeleteValueA(hKey, "NodeId"); }
 
 
 				// Save the AgentHash
@@ -8727,7 +8841,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 				RegSetValueExA(hKey, "AgentHash", 0, REG_SZ, ILibScratchPad, (int)strlen(ILibScratchPad));
 
 				// Save the MeshId
-				if (ILibSimpleDataStore_Get(agentHost->masterDb, "MeshID", NULL, 0) == 0) { RegDeleteKeyA(hKey, "MeshId"); }
+				if (ILibSimpleDataStore_Get(agentHost->masterDb, "MeshID", NULL, 0) == 0) { RegDeleteValueA(hKey, "MeshId"); }
 				else {
 					len = ILibSimpleDataStore_Get(agentHost->masterDb, "MeshID", ILibScratchPad2, (int)sizeof(ILibScratchPad2));
 					if (len > 0) {
@@ -8738,21 +8852,21 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 							free(tmp);
 							tmp = NULL;
 						}
-						else { RegDeleteKeyA(hKey, "MeshId"); }
+						else { RegDeleteValueA(hKey, "MeshId"); }
 					}
-					else { RegDeleteKeyA(hKey, "MeshId"); }
+					else { RegDeleteValueA(hKey, "MeshId"); }
 				}
 
 				// Save a bunch of values in the registry
 				RegSetValueExA(hKey, "CommitDate", 0, REG_SZ, SOURCE_COMMIT_DATE, sizeof(SOURCE_COMMIT_DATE)); // Save the Agent Commit Date
 
-				if ((pLen = ILibSimpleDataStore_Get(agentHost->masterDb, "MeshServer", ILibScratchPad2, (int)sizeof(ILibScratchPad2))) == 0) { RegDeleteKeyA(hKey, "MeshServerUrl"); }
+				if ((pLen = ILibSimpleDataStore_Get(agentHost->masterDb, "MeshServer", ILibScratchPad2, (int)sizeof(ILibScratchPad2))) == 0) { RegDeleteValueA(hKey, "MeshServerUrl"); }
 				else { RegSetValueExA(hKey, "MeshServerUrl", 0, REG_SZ, (BYTE*)ILibScratchPad2, (int)strlen(ILibScratchPad2)); } // Save the mesh server URL
-				if ((pLen = ILibSimpleDataStore_Get(agentHost->masterDb, "ServerID", ILibScratchPad2, (int)sizeof(ILibScratchPad2))) == 0) { RegDeleteKeyA(hKey, "MeshServerId"); }
+				if ((pLen = ILibSimpleDataStore_Get(agentHost->masterDb, "ServerID", ILibScratchPad2, (int)sizeof(ILibScratchPad2))) == 0) { RegDeleteValueA(hKey, "MeshServerId"); }
 				else { RegSetValueExA(hKey, "MeshServerId", 0, REG_SZ, (BYTE*)ILibScratchPad2, (int)strlen(ILibScratchPad2)); } // Save the mesh server id
-				if ((pLen = ILibSimpleDataStore_Get(agentHost->masterDb, "WebProxy", ILibScratchPad2, (int)sizeof(ILibScratchPad2))) == 0) { RegDeleteKeyA(hKey, "Proxy"); }
+				if ((pLen = ILibSimpleDataStore_Get(agentHost->masterDb, "WebProxy", ILibScratchPad2, (int)sizeof(ILibScratchPad2))) == 0) { RegDeleteValueA(hKey, "Proxy"); }
 				else { RegSetValueExA(hKey, "Proxy", 0, REG_SZ, (BYTE*)ILibScratchPad2, (int)strlen(ILibScratchPad2)); } // Save the proxy
-				if ((pLen = ILibSimpleDataStore_Get(agentHost->masterDb, "Tag", ILibScratchPad2, (int)sizeof(ILibScratchPad2))) == 0) { RegDeleteKeyA(hKey, "Tag"); }
+				if ((pLen = ILibSimpleDataStore_Get(agentHost->masterDb, "Tag", ILibScratchPad2, (int)sizeof(ILibScratchPad2))) == 0) { RegDeleteValueA(hKey, "Tag"); }
 				else { RegSetValueExA(hKey, "Tag", 0, REG_SZ, (BYTE*)ILibScratchPad2, (int)strlen(ILibScratchPad2)); } // Save the tag	
 			}
 			else
@@ -8767,7 +8881,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 					free(tmp);
 					tmp = NULL;
 				}
-				else { RegDeleteKeyA(hKey, "DiagnosticAgentNodeId"); }
+				else { RegDeleteValueA(hKey, "DiagnosticAgentNodeId"); }
 			}
 
 			if (ILibSimpleDataStore_Get(agentHost->masterDb, "SelfNodeCert", NULL, 0) == 0)
@@ -9536,7 +9650,6 @@ int MeshAgent_System(char *cmd)
 
 int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **param)
 {
-	char *startParms = NULL;
 	char _exedata[ILibMemory_Init_Size(1024, sizeof(void*))];
 	char *exePath = ILibMemory_Init(_exedata, 1024, sizeof(void*), ILibMemory_Types_STACK);
 	((void**)ILibMemory_Extra(exePath))[0] = agentHost;
@@ -9664,52 +9777,6 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 		// Close the database
 		if (agentHost->masterDb != NULL)
 		{
-			if (agentHost->performSelfUpdate != 0)
-			{
-				if (agentHost->JSRunningAsService == 0)
-				{
-					duk_context *ctxx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngine_minimal();
-					duk_size_t jsonLen;
-					char *json = NULL;
-
-					ILibDuktape_SimpleDataStore_raw_GetCachedValues_Array(ctxx, agentHost->masterDb);			// [array]
-					if (duk_get_length(ctxx, -1) > 0)
-					{
-						duk_json_encode(ctxx, -1);																	// [json]
-						json = (char*)duk_get_lstring(ctxx, -1, &jsonLen);
-
-						startParms = (char*)ILibMemory_SmartAllocateEx(jsonLen + 1, ILibBase64EncodeLength(jsonLen + 1));
-						unsigned char* tmp = (unsigned char*)ILibMemory_Extra(startParms);
-						memcpy_s(startParms, jsonLen + 1, json, jsonLen);
-						Duktape_SafeDestroyHeap(ctxx);
-
-						if (jsonLen > INT32_MAX)
-						{
-							ILibMemory_Free(startParms);
-							startParms = NULL;
-							if (agentHost->logUpdate != 0) { ILIBLOGMESSAGEX(" Service Parameters => ERROR"); }
-						}
-						else
-						{
-							ILibBase64Encode((unsigned char*)startParms, (int)jsonLen, &tmp);
-							if (agentHost->logUpdate != 0) { ILIBLOGMESSAGEX(" Service Parameters => %s", startParms); }
-						}
-					}
-					else
-					{
-						if (agentHost->logUpdate != 0) { ILIBLOGMESSAGEX(" Service Parameters => NONE"); }
-					}
-				}
-				else
-				{
-					if (strcmp(agentHost->meshServiceName, "meshagent") != 0)
-					{
-						startParms = ILibMemory_SmartAllocateEx(ILibMemory_Size(agentHost->meshServiceName) + 30, ILibBase64EncodeLength(ILibMemory_Size(agentHost->meshServiceName) + 30));
-						unsigned char* tmp = (unsigned char*)ILibMemory_Extra(startParms);
-						ILibBase64Encode((unsigned char*)startParms, sprintf_s(startParms, ILibMemory_Size(startParms), "[\"--meshServiceName=\\\"%s\\\"\"]", agentHost->meshServiceName), &tmp);
-					}
-				}
-			}
 			ILibSimpleDataStore_Close(agentHost->masterDb);
 			agentHost->masterDb = NULL;
 		}
@@ -9798,8 +9865,6 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 		}
 #endif
 	}
-
-	if (startParms != NULL) { ILibMemory_Free(startParms); }
 
 #ifndef MICROSTACK_NOTLS
 	util_openssl_uninit();
