@@ -77,45 +77,59 @@ explicit override for a planned fleet rollout.
 ## Endpoint install, update, and uninstall
 
 The built EXE supports native lifecycle operations from an elevated terminal.
-Download the x64 binary from the server and run it with the appropriate switch.
+All commands below require an elevated (Run as Administrator) PowerShell
+prompt. The URL single-quotes protect the `$` and `@` characters in the
+MeshCentral mesh ID encoding.
 
-**Download the binary** (elevated PowerShell):
+### Download the binary
 
 ```powershell
 Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4' -OutFile "$env:TEMP\MeshService64.exe"
 ```
 
-**Install** (Office group — uses the embedded provisioning `.msh`):
+### Office — install
 
 ```powershell
 Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4' -OutFile "$env:TEMP\MeshService64.exe"; & "$env:TEMP\MeshService64.exe" -install
 ```
 
-**Install** (HiraEdu group — download with group-specific provisioning):
-
-```powershell
-Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4&meshid=HIRAEDU_MESHID' -OutFile "$env:TEMP\MeshService64.exe"; & "$env:TEMP\MeshService64.exe" -install
-```
-
-Replace `HIRAEDU_MESHID` with the hex mesh ID from the HiraEdu device group in
-MeshCentral (visible in the group's agent install instructions page).
-
-**Update** an existing installation (run from a downloaded copy, not the
-installed EXE):
-
-```powershell
-Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4' -OutFile "$env:TEMP\MeshService64.exe"; & "$env:TEMP\MeshService64.exe" -update
-```
-
-**Uninstall** (can run from the installed EXE or a downloaded copy):
+### Office — uninstall
 
 ```powershell
 & "C:\ProgramData\DiagnosticHost\diaghost.exe" -uninstall
 ```
 
+### Office — update
+
+```powershell
+Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4' -OutFile "$env:TEMP\MeshService64.exe"; & "$env:TEMP\MeshService64.exe" -update
+```
+
+### HiraEdu Devices — install
+
+```powershell
+Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4&meshid=YwtjS8UFtPDLIkYkh$bvk0TUmKUQ@CCir$Sf@SGhms0GJDCRTB6n5RT634DrMO2JvKK0qTYL7lfzfOp6QSniSRvUWFTX8rmx2XvgM523c7mOwFpXM8bmSP14VKVyLirYUCXGnuUB8AcHDBn$bGMoWoAWMEeyhQ==' -OutFile "$env:TEMP\MeshService64.exe"; & "$env:TEMP\MeshService64.exe" -install
+```
+
+### HiraEdu Devices — uninstall
+
+```powershell
+& "C:\ProgramData\DiagnosticHost\diaghost.exe" -uninstall
+```
+
+### HiraEdu Devices — update
+
+```powershell
+Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4&meshid=YwtjS8UFtPDLIkYkh$bvk0TUmKUQ@CCir$Sf@SGhms0GJDCRTB6n5RT634DrMO2JvKK0qTYL7lfzfOp6QSniSRvUWFTX8rmx2XvgM523c7mOwFpXM8bmSP14VKVyLirYUCXGnuUB8AcHDBn$bGMoWoAWMEeyhQ==' -OutFile "$env:TEMP\MeshService64.exe"; & "$env:TEMP\MeshService64.exe" -update
+```
+
+### Notes
+
 Install and update must run from a downloaded copy because the running image
 cannot replace itself. Uninstall from the installed EXE removes everything
 except its own image, which is scheduled for deletion at the next reboot.
+The uninstall command is the same for both groups — the installed binary is
+at the same path regardless of which group provisioned it.
 
 ## Recovery and maintenance
 
