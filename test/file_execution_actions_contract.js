@@ -91,7 +91,7 @@ function runOverlay(customSource, options) {
         p13filetreelocation: ['C:', 'Program Files', "Vendor's Tool"],
         filesNode: { _id: 'node/domain/id', agent: { id: 4 } },
         currentNode: { _id: 'node/domain/id', agent: { id: 4 } },
-        files: { state: 3 },
+        files: { State: 3, sendText(message) { sends.push(message); }, m: { ProcessData() { } } },
         isWindowsNode() { return true; },
         GetNodeRights() { return options.rights; },
         meshserver: { send(message) { sends.push(message); } },
@@ -115,7 +115,7 @@ function main() {
     const cores = corePaths.map((relativePath) => ({ relativePath, source: fs.readFileSync(path.join(meshCentralRoot, relativePath), 'utf8') }));
     const recoverySource = cores.find(({ relativePath }) => relativePath === 'agents/recoverycore.js').source;
 
-    const authorized = runOverlay(customSource, { rights: 131072 });
+    const authorized = runOverlay(customSource, { rights: 131072 | 8 });
     const userButton = authorized.registry['mc-files-run-user'];
     const privilegedButton = authorized.registry['mc-files-run-privileged'];
     assert(userButton && privilegedButton, 'both Files execution buttons must be installed');
@@ -123,11 +123,13 @@ function main() {
     userButton.click();
     privilegedButton.click();
     assert(authorized.sends.length === 2, 'each Files action must dispatch exactly once');
-    assert(authorized.sends[0].action === 'runcommands' && authorized.sends[0].type === 2 && authorized.sends[0].runAsUser === 2, 'Run must use the authorized PowerShell user-only route');
-    assert(authorized.sends[1].action === 'runcommands' && authorized.sends[1].type === 2 && authorized.sends[1].runAsUser === 0, 'Run privileged must use the privileged-agent route');
-    assert(authorized.sends.every((message) => message.nodeids.length === 1 && message.nodeids[0] === 'node/domain/id'), 'launch must target the connected Files node');
-    assert(authorized.sends.every((message) => message.cmds.includes('Get-Item -LiteralPath $path') && message.cmds.includes('Start-Process -FilePath $item.FullName')), 'launch command must validate and start the selected path as data');
-    assert(!authorized.sends.some((message) => message.cmds.includes("Vendor's Tool\\Tool.exe")), 'raw file paths must not be interpolated into the command text');
+    assert(authorized.sends[0].action === 'execute' && authorized.sends[0].privileged === false, 'Run must request the native user identity');
+    assert(authorized.sends[1].action === 'execute' && authorized.sends[1].privileged === true, 'Run privileged must request the native agent identity');
+    assert(authorized.sends.every((message) => message.path === "C:\\Program Files\\Vendor's Tool\\Tool.exe" && !message.cmds && !message.type && !message.nodeids), 'literal paths must travel through the connected Files tunnel');
+    authorized.window.files.m.ProcessData(JSON.stringify({ action: 'fileaction', operation: 'execute', ok: false, error: 740 }));
+    assert(authorized.registry['mc-files-exec-status'].textContent.includes('failed: 740'), 'native errors must be visible in Files');
+    authorized.window.files.m.ProcessData(JSON.stringify({ action: 'fileaction', operation: 'execute', ok: true, pid: 123 }));
+    assert(authorized.registry['mc-files-exec-status'].textContent.includes('PID 123'), 'native success must show the actual PID');
 
     const unauthorized = runOverlay(customSource, { rights: 8 });
     assert(unauthorized.registry['mc-files-run-user'].style.display === 'none', 'Run must be hidden without Remote Commands permission');
@@ -136,13 +138,40 @@ function main() {
     assert(wrongType.registry['mc-files-run-user'].disabled === true && wrongType.registry['mc-files-run-privileged'].disabled === true, 'non-EXE selections must stay disabled');
     exerciseRecoveryCommandError(recoverySource);
 
+    for (const core of cores) {
+        const calls = [], replies = [];
+        const sandbox = { process: { platform: 'win32' }, Buffer, sendConsoleText() { },
+            require(name) { assert(name === 'MeshAgent', 'native handler must not load helpers'); return { fileAction(...args) { calls.push(args); return { ok: true, pid: 42 }; } }; } };
+        vm.runInNewContext(extractFunction(core.source, 'function nativeFileAction('), sandbox);
+        const invoke = (rights, action, extra) => sandbox.nativeFileAction({ httprequest: { rights }, write(data) { replies.push(JSON.parse(data)); } }, Object.assign({ action, path: 'C:\\literal & name.exe', reqid: 'owned' }, extra));
+        invoke(8, 'execute', { privileged: true });
+        invoke(131072, 'execute', { privileged: false });
+        invoke(8 | 131072 | 1024, 'execute', { privileged: false });
+        invoke(8 | 131072, 'execute', { privileged: 'true' });
+        assert(calls.length === 0 && replies.every((r) => !r.ok), `${core.relativePath}: malformed/unauthorized execution must fail before native entry`);
+        invoke(8 | 131072, 'execute', { privileged: false });
+        invoke(0xFFFFFFFF, 'execute', { privileged: true });
+        invoke(8 | 131072, 'open', { privileged: true });
+        invoke(8, 'delete', { rec: true });
+        assert(calls.length === 4 && calls[0][2] === false && calls[1][2] === true && calls[2][2] === false && calls[3][2] === true, `${core.relativePath}: native identity and delete mode must be explicit`);
+        assert(calls.every((c) => c[1] === 'C:\\literal & name.exe'), 'paths must remain literal');
+        assert(replies.every((r) => r.reqid === 'owned' && r.action === 'fileaction'), 'every outcome must retain correlation');
+        sandbox.require = () => ({});
+        const missing = invoke(8 | 131072, 'execute', { privileged: false });
+        assert(!missing.ok && missing.error.includes('Update the agent'), 'old agents must fail visibly without a helper fallback');
+    }
+
+    const native = fs.readFileSync(path.resolve('meshcore/native_file_actions.h'), 'utf8');
     const checks = {
-        uiUsesExistingAuthorizedRoute: customSource.includes("action: 'runcommands'") && customSource.includes('FILE_EXECUTE_RIGHT = 131072'),
+        uiUsesNativeFilesRoute: customSource.includes("window.files.sendText({ action: 'execute'") && customSource.includes('FILE_EXECUTE_RIGHT = 131072'),
         uiRevalidatesConnectedNode: customSource.includes('node._id !== current._id') && customSource.includes('getLaunchState()'),
-        uiValidatesOneAbsoluteExe: customSource.includes("String(box.attributes.file.value) !== '3'") && customSource.includes('Only Windows .exe files can be launched.') && customSource.includes('IsPathRooted'),
-        uiTreatsPathAsEncodedData: customSource.includes('var path64 = utf16leBase64(path);') && customSource.includes('FromBase64String'),
+        uiValidatesOneAbsoluteExe: customSource.includes("String(box.attributes.file.value) !== '3'") && customSource.includes('test(entry.n)'),
+        uiHasNoLaunchCommandBuilder: !customSource.includes('buildWindowsFileLaunchCommand') && !customSource.includes('MESH_FILE_EXEC_OK'),
         uiRequiresExplicitConfirmation: customSource.includes('window.confirm(promptText)'),
-        noNewFilesRelayExecutionAction: !customSource.includes("files.sendText({ action: 'execute'") && !cores.some(({ source }) => source.includes("case 'execute':")),
+        allFilesCoresHandleNativeExecution: cores.every(({ source }) => source.includes("case 'execute':") && source.includes("case 'open':") && source.includes("action: 'delete'")),
+        nativeLaunchVerifiesTokenBeforeResume: native.includes('CREATE_SUSPENDED') && native.includes('MeshProcessToken_VerifyChildAndResume'),
+        nativeDeleteDoesNotTraverseReparsePoints: native.includes('FILE_FLAG_OPEN_REPARSE_POINT') && native.includes('FILE_ATTRIBUTE_REPARSE_POINT'),
+        nativeCodeHasNoHelperCommands: !/powershell|schtasks|rundll32|cmd\.exe/i.test(native),
         allFilesCoresHandleRunCommands: cores.every(({ source }) => source.includes("case 'runcommands':")),
         allFilesCoresUseApprovedTokenBridge: cores.every(({ source }) => source.includes("'RunPowerShellCommandAsUser'") && source.includes("'RunPowerShellCommand'")),
         allFilesCoresReportTerminalFailure: cores.every(({ source }) => source.includes('Run commands failed.')),

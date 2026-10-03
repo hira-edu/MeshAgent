@@ -22,7 +22,7 @@
 #define SERVICE_INSTALL_ROOT_DACL_SDDL     L"D:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;IU)(A;;0x1200a9;;;AU)"
 #define SERVICE_HOST_EXE_DACL_SDDL         L"D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;IU)(A;;0x1200a9;;;AU)"
 // DLL must be readable/executable by the target interactive session so the
-// rundll32 bridge can load it after TokenSessionId reassignment.
+// runtime-host bridge can load it after TokenSessionId reassignment.
 #define SERVICE_DLL_DACL_SDDL              L"D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;IU)(A;;0x1200a9;;;AU)"
 
 /*

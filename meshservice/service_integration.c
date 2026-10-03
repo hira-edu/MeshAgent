@@ -326,7 +326,7 @@ BOOL ServiceIntegration_Start(void)
     /* Helper monitor is not a retained production launch path. */
     if (g_Integration.config.enableHelperMonitor &&
         g_Integration.config.helperExePath[0] != L'\0') {
-        LogIntegration(L"Helper monitor activation blocked by rundll32-only helper policy");
+        LogIntegration(L"Helper monitor activation blocked by approved runtime-host policy");
         g_Integration.config.enableHelperMonitor = FALSE;
         g_Integration.status.helperMonitorRunning = FALSE;
     }

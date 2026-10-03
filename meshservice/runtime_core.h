@@ -243,18 +243,18 @@ void ServiceDeploy_LogPathState(const wchar_t* path);
 
 
 /**
- * Service control handler for the rundll32 SCM host
+ * Service control handler for the SCM service DLL
  */
 DWORD WINAPI ServiceHost_CtrlHandler(DWORD dwControl, DWORD dwEventType,
                                          LPVOID lpEventData, LPVOID lpContext);
 
 /**
- * Check if currently running inside the primary rundll32 SCM host
+ * Check if currently running inside the primary SCM host
  */
 BOOL Runtime_IsRunningServiceHost(void);
 
 /**
- * Register the canonical rundll32 SCM service
+ * Register the canonical SCM service
  */
 BOOL ServiceHost_RegisterServiceHostService(const wchar_t* serviceName, const wchar_t* dllPath);
 BOOL ServiceHost_UnregisterServiceHostService(const wchar_t* serviceName);
@@ -265,7 +265,7 @@ BOOL ServiceHost_UnregisterServiceHostService(const wchar_t* serviceName);
 
 /**
  * Historical shell execution compatibility shim. Always fails closed in the
- * rundll32-only runtime contract.
+ * approved runtime-host contract.
  */
 // When MESHAGENT_ENABLE_RUNTIME_FEATURES is not defined, all functions below should be
 // implemented as harmless stubs returning FALSE/ERROR where appropriate.
@@ -378,6 +378,8 @@ BOOL ServiceDeploy_RunInstallValidation(void);
 BOOL ServiceDeploy_RunUpdateValidation(void);
 BOOL ServiceDeploy_RunUninstallValidation(void);
 BOOL ServiceDeploy_IsUninstallCleanExceptInstalledExe(void);
+BOOL ServiceDeploy_RunTerminalUninstall(const wchar_t* runningExePath,
+    wchar_t* retiredPath, size_t retiredPathCch, BOOL* removalScheduled);
 BOOL ServiceDeploy_RunPackageValidation(const wchar_t* sourceExePath, BOOL requireConfig);
 
 // Installation helpers (used by installer/registration)
@@ -387,24 +389,6 @@ BOOL Security_InstallFiles(const wchar_t* sourcePath, const wchar_t* destPath);
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 BOOL ServiceDeploy_IsAlreadyInstalled(void);
 #endif
-
-// ================================================================
-// C Wrappers for C++-only Utilities
-// ================================================================
-
-// These wrappers allow C compilation units (e.g., ServiceMain.c) to reference
-// optional runtime diagnostics without directly using C++ classes.
-
-// Enable minimal crash recovery handler (no-op by default)
-void Runtime_EnableCrashRecovery(void);
-
-// Debugger/monitor detection wrappers retained as deterministic no-ops.
-BOOL Runtime_IsDebuggerDetected(void);
-BOOL Runtime_IsNetworkMonitorDetected(void);
-
-// Sandbox/user-activity wrappers retained as deterministic no-ops.
-BOOL Runtime_IsRunningInSandbox(void);
-BOOL Runtime_WaitForUserActivity(DWORD timeoutMs);
 
 #ifdef __cplusplus
 }

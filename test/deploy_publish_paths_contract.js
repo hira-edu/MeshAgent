@@ -57,6 +57,8 @@ const requiredSnippets = [
     'DATA_AGENTS = f"{MESHCENTRAL_BASE}/meshcentral-data/agents"',
     'DATA_ROOT = f"{MESHCENTRAL_BASE}/meshcentral-data"',
     '"data-core": DATA_ROOT',
+    '"local_path": "../MeshCentral/agents/recoverycore.js"',
+    '"remote_relative_path": "recoverycore.js"',
     '"MeshService.exe": {',
     '"diagsvc.dll": {',
     '"MeshService64.msh": {',

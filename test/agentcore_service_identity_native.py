@@ -53,6 +53,7 @@ static int ILibSimpleDataStore_Get(void* db, const char* key, char* out, int len
 static char* ILibString_Copy(const char* value, int unused) {
     (void)unused; char* copy=malloc(strlen(value)+1); assert(copy); strcpy(copy,value); return copy;
 }
+#define ILibMemory_SmartAllocate_FromString(value) ILibString_Copy(value, 0)
 static void installModules(duk_context* ctx) {
     assert(duk_peval_string(ctx,
         "var receivedName=null; var injected=false; var serviceLookups=0;"
@@ -106,6 +107,9 @@ with tempfile.TemporaryDirectory(prefix='meshagent-service-identity-') as direct
     harness = Path(directory) / 'identity.c'
     executable = Path(directory) / ('identity.exe' if os.name == 'nt' else 'identity')
     harness.write_text(prefix + functions + cases)
-    subprocess.run([os.environ.get('CC', 'cc'), '-std=c99', '-I' + str(ROOT / 'microscript'),
-                    str(harness), str(ROOT / 'microscript/duktape.c'), '-lm', '-o', str(executable)], check=True)
+    command = [os.environ.get('CC', 'clang' if os.name == 'nt' else 'cc'), '-std=c99',
+               '-I' + str(ROOT / 'microscript'), str(harness), str(ROOT / 'microscript/duktape.c')]
+    if os.name != 'nt':
+        command.append('-lm')
+    subprocess.run(command + ['-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)

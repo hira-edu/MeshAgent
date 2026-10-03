@@ -100,7 +100,7 @@ function main() {
         kvmRefreshProbeTimeoutRespawnsRuntimeHostBridge:
             kvmSource.includes('#define KVM_REFRESH_PROBE_TIMEOUT_MS (KVM_BRIDGE_CONNECT_TIMEOUT_MS * 2)') &&
             kvmSource.includes('static int kvm_relay_handle_refresh_probe_timeout(KvmRelayContext* ctx, const char* source)') &&
-            kvmSource.includes('respawning rundll32 KVM bridge') &&
+            kvmSource.includes('respawning runtime-host KVM bridge') &&
             kvmSource.includes('kvm_relay_cache_refresh_probe_for_respawn(ctx);') &&
             kvmSource.includes('ILibProcessPipe_Process_SoftKill(gChildProcess);') &&
             kvmSource.includes('kvm_schedule_retry_timer_delay(KVM_REFRESH_PROBE_TIMEOUT_MS);') &&
@@ -108,7 +108,7 @@ function main() {
             kvmSource.includes('kvm_relay_restart(1, gKvmPipeMgr, gKvmExePath, gKvmWriteHandler, gKvmDebugReserved);'),
         kvmServiceFeeddataRespawnsSameRuntimeHostBridge:
             kvmSource.includes('static int kvm_relay_prepare_bridge_respawn_from_input') &&
-            kvmSource.includes('service-mode KVM input routed to rundll32 bridge respawn') &&
+            kvmSource.includes('service-mode KVM input routed to runtime-host bridge respawn') &&
             feedDataBlock.includes('kvm_relay_prepare_bridge_respawn_from_input(ctx, buf, len, "write-failed", writeError)') &&
             feedDataBlock.includes('kvm_relay_prepare_bridge_respawn_from_input(ctx, buf, len, "no-child", ERROR_SUCCESS)') &&
             feedDataBlock.includes('ctx != NULL && gKvmPipeMgr != NULL && gKvmExePath != NULL && gKvmWriteHandler != NULL') &&

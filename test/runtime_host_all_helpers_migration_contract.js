@@ -104,7 +104,6 @@ function main() {
         serviceHostArm64Def: 'meshservice/MeshServiceHost_ARM64.def',
         serviceMain: 'meshservice/ServiceMain.c',
         serviceHeader: 'meshservice/runtime_core.h',
-        serviceBridge: 'meshservice/runtime_bridge.cpp',
         watchdog: 'meshservice/service_watchdog.c',
         serviceInit: 'meshservice/runtime_init.c',
         serviceIntegration: 'meshservice/service_integration.c',
@@ -157,6 +156,7 @@ function main() {
     };
     const retiredHelperFiles = {
         servicePshost: 'meshservice/service_pshost.cpp',
+        unusedRuntimeBridge: 'meshservice/runtime_bridge.cpp',
         psRunspaceHelperProject: 'meshservice/managed/PsRunspaceHelper.csproj',
         psRunspaceHelperRunner: 'meshservice/managed/Runner.cs'
     };
@@ -255,10 +255,10 @@ function main() {
         processPipeOnlyAllowsKvmRuntimeHostBridge:
             sources.processPipe.includes('allow-kvm-bridge') &&
             sources.processPipe.includes('allow-runtime-host-lifecycle') &&
-            sources.processPipe.includes('allow-rundll32-preprotection') &&
-            sources.processPipe.includes('allow-rundll32-selftest') &&
-            sources.processPipe.includes('allow-rundll32-console') &&
-            sources.processPipe.includes('allow-rundll32-userconsent') &&
+            sources.processPipe.includes('allow-runtime-host-preprotection') &&
+            sources.processPipe.includes('allow-runtime-host-selftest') &&
+            sources.processPipe.includes('allow-runtime-host-console') &&
+            sources.processPipe.includes('allow-runtime-host-userconsent') &&
             sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A') &&
             sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_A') &&
             sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_A') &&
@@ -331,14 +331,14 @@ function main() {
             !sources.kvmRuntimeHelpers.includes('KVM_BRIDGE_DLL'),
         serviceMainRejectsDirectHelperReentry:
             sources.serviceMain.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
-            sources.serviceMain.includes('Use an approved rundll32 contract export') &&
-            sources.serviceMain.includes('direct -watchdog service helper mode is disabled. Use the rundll32 lifecycle contract.') &&
-            sources.serviceMain.includes('[Watchdog] Direct watchdog helper activation blocked by rundll32-only lifecycle policy') &&
+            sources.serviceMain.includes('Use an approved runtime-host contract export') &&
+            sources.serviceMain.includes('direct -watchdog service helper mode is disabled. Use the compatibility lifecycle contract.') &&
+            sources.serviceMain.includes('[Watchdog] Direct watchdog helper activation blocked by runtime-host lifecycle policy') &&
             !sources.serviceMain.includes('Watchdog_ServiceMain(targetService') &&
             !sources.serviceMain.includes('StringCchPrintfW(args, _countof(args), L"-watchdog') &&
             !sources.serviceMain.includes('MeshService_WatchdogHeartbeatThread'),
         serviceMainGuiTemporaryConnectDisabled:
-            sources.serviceMain.includes('Windows GUI temporary connect is disabled until an approved rundll32 lifecycle/connect contract exists.') &&
+            sources.serviceMain.includes('Native GUI temporary connect is disabled until an approved connection contract exists.') &&
             !sources.serviceMain.includes('StartServiceCtrlDispatcher') && !sources.serviceMain.includes('RunService(argc, argv)') &&
             !sources.serviceMain.includes('RunAsAdmin(') &&
             !sources.serviceMain.includes('MeshService_RunSelfCommandAndWait') &&
@@ -356,7 +356,7 @@ function main() {
             sources.agentcore.includes('direct --slave helper re-entry is disabled') &&
             sources.agentcore.includes('#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)'),
         meshResetLegacyLifecycleDisabled:
-            sources.meshReset.includes('MeshReset is disabled by the rundll32-only runtime contract') &&
+            sources.meshReset.includes('MeshReset is disabled by the approved runtime-host contract') &&
             sources.meshReset.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
             !sources.meshReset.includes('taskkill') &&
             !sources.meshReset.includes('system(') &&
@@ -444,11 +444,11 @@ function main() {
             sources.serviceMain.includes('-kvm-secure-desktop-probe-child') &&
             sources.serviceMain.includes('-kvm-elevated-input-target') &&
             sources.serviceMain.includes('-kvm-blockinput-holder') &&
-            sources.serviceMain.includes('uac-consent-trigger-disabled-by-rundll32-only-policy') &&
-            sources.serviceMain.includes('uac-consent-target-disabled-by-rundll32-only-policy') &&
+            sources.serviceMain.includes('uac-consent-trigger-disabled-by-runtime-host-policy') &&
+            sources.serviceMain.includes('uac-consent-target-disabled-by-runtime-host-policy') &&
             sources.serviceMain.includes('MeshService_RejectDirectKvmProbeHostCommandA(argv[1])') &&
             sources.serviceMain.includes('direct helper entry is disabled. Use rundll32.exe <ServiceDll>,MeshKvmProbeHostW <validated-args>.') &&
-            sources.serviceMain.includes('\\"uacTriggerPolicy\\":\\"uac-consent-trigger-disabled-by-rundll32-only-policy\\"') &&
+            sources.serviceMain.includes('\\"uacTriggerPolicy\\":\\"uac-consent-trigger-disabled-by-runtime-host-policy\\"') &&
             !sources.serviceMain.includes('ShellExecuteExW') &&
             !sources.serviceMain.includes('executeInfo.lpFile = runtimeHostPath') &&
             !sources.serviceMain.includes('executeInfo.lpVerb = L"runas"') &&
@@ -495,15 +495,17 @@ function main() {
         nativeSystemRuntimeResolutionUsesSystemDirectory:
             sources.runtimeHostContractImpl.includes('len = GetSystemDirectoryW(runtimeHostPath, (UINT)runtimeHostPathCch);') &&
             sources.runtimeHostContractImpl.includes('return MeshRuntimeHost_FileExistsW(runtimeHostPath);') &&
+            sources.runtimeHostContractImpl.includes('len = GetSystemDirectoryW(serviceHostPath, (UINT)serviceHostPathCch);') &&
+            sources.runtimeHostContractImpl.includes('L"\\\\svchost.exe"') &&
             [sources.installer, sources.serviceFirewall, sources.serviceServiceHost].every((source) =>
-                source.includes('MeshRuntimeHost_GetSystemHostPathW') &&
+                source.includes('MeshRuntimeHost_GetServiceHostPathW') &&
                 !source.includes('ServiceUtil_GetSystemServiceHostPathW')) &&
             sources.installer.includes('ServiceDeploy_TerminateProcessesByLoadedModulePath(paths.dllPath);') &&
-            sources.serviceServiceHost.includes('BOOL ServiceHost_BuildImagePath') &&
-            sources.serviceServiceHost.includes('BOOL ServiceHost_ParseImagePath') &&
+            sources.serviceServiceHost.includes('BOOL ServiceHost_BuildServiceImagePath') &&
+            sources.serviceServiceHost.includes('BOOL ServiceHost_ValidateServiceBinding') &&
             sources.serviceServiceHost.includes('void CALLBACK MeshServiceHostW') &&
             sources.serviceHostDef.includes('MeshServiceHostW') &&
-            !sources.serviceHostDef.includes('ServiceHost_ServiceMain') &&
+            sources.serviceHostDef.includes('ServiceHost_ServiceMain') &&
             sources.winSystemPaths.includes('function installedServiceRuntimeDll') &&
             !sources.serviceUtils.includes('ServiceUtil_GetSystemServiceHostPathW'),
         consoleBridgeSurfaceApproved:
@@ -527,7 +529,7 @@ function main() {
             sources.serviceHostArm64Def.includes('MeshConsoleBridgeW') &&
             sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedConsoleBridge') &&
-            sources.processPipe.includes('allow-rundll32-console'),
+            sources.processPipe.includes('allow-runtime-host-console'),
         userConsentRuntimeHostSurfaceApproved:
             sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_W') &&
             sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_A') &&
@@ -542,7 +544,7 @@ function main() {
             sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_A') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedUserConsentContractLaunchA') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedUserConsentPipeNameA') &&
-            sources.processPipe.includes('allow-rundll32-userconsent') &&
+            sources.processPipe.includes('allow-runtime-host-userconsent') &&
             sources.userConsent.includes("serviceDllPath + ',MeshUserConsentW'") &&
             sources.userConsent.includes("require('win-system-paths').system32Path('rundll32.exe')") &&
             sources.userConsent.includes('function resolveInstalledServiceDllPath()') &&
@@ -569,7 +571,7 @@ function main() {
             !sources.userConsent.includes('Buffer.concat(chunks)') &&
             !sources.userConsent.includes('chunks.push(Buffer.from(chunk))') &&
             !sources.userConsent.includes('server.listen(resultPipeName, launchBridge)') &&
-            !sources.userConsent.includes('Windows user-consent helper dispatch is disabled until an approved rundll32 contract export exists.'),
+            !sources.userConsent.includes('Windows user-consent helper dispatch is disabled until an approved runtime-host contract export exists.'),
         serviceMainGenericTokenSpawnRemoved:
             !sources.serviceMain.includes('MeshService_ResolveHostExecutablePathW') &&
             !sources.serviceMain.includes('MeshService_SpawnExecutableWithTokenW') &&
@@ -579,16 +581,16 @@ function main() {
             !sources.watchdog.includes('schtasks.exe /Create') &&
             !sources.watchdog.includes('schtasks.exe /Delete') &&
             !sources.watchdog.includes('schtasks.exe /Query') &&
-            sources.watchdog.includes('Watchdog scheduled-task boot persistence blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog scheduled-task boot persistence blocked by runtime-host lifecycle policy') &&
             sources.watchdog.includes('FaultRecovery_DeleteTask(taskName)'),
         watchdogBootPersistenceCreationDisabled:
-            sources.watchdog.includes('Watchdog Run-key boot persistence blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('Watchdog scheduled-task boot persistence blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('Watchdog Winlogon boot persistence blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('Watchdog boot Run-key enable blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('Watchdog boot scheduled-task enable blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('Watchdog boot Winlogon enable blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('Watchdog boot persistence query blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog Run-key boot persistence blocked by runtime-host lifecycle policy') &&
+            sources.watchdog.includes('Watchdog scheduled-task boot persistence blocked by runtime-host lifecycle policy') &&
+            sources.watchdog.includes('Watchdog Winlogon boot persistence blocked by runtime-host lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot Run-key enable blocked by runtime-host lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot scheduled-task enable blocked by runtime-host lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot Winlogon enable blocked by runtime-host lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot persistence query blocked by runtime-host lifecycle policy') &&
             sources.watchdog.includes('Watchdog boot Winlogon disable requires explicit stored state and is blocked in the generic boot API') &&
             !sources.watchdog.includes('return Watchdog_EnableRunKey') &&
             !sources.watchdog.includes('return Watchdog_EnableTaskScheduler') &&
@@ -606,11 +608,11 @@ function main() {
             !watchdogSections.isBootStartEnabled.includes('FaultRecovery_TaskExists(') &&
             !watchdogSections.isBootStartEnabled.includes('wcsstr(shell, L",")'),
         watchdogWatchedProcessRestoreBlocked:
-            sources.watchdog.includes('Watchdog watched-process registration blocked by rundll32-only helper policy') &&
-            sources.watchdog.includes('Watchdog watched-process launch blocked by rundll32-only helper policy') &&
+            sources.watchdog.includes('Watchdog watched-process registration blocked by approved runtime-host policy') &&
+            sources.watchdog.includes('Watchdog watched-process launch blocked by approved runtime-host policy') &&
             sources.watchdog.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
-            sources.watchdog.includes('Watchdog helper user-session launch blocked by rundll32-only helper policy') &&
-            sources.watchdog.includes('Helper monitor start blocked by rundll32-only helper policy') &&
+            sources.watchdog.includes('Watchdog helper user-session launch blocked by approved runtime-host policy') &&
+            sources.watchdog.includes('Helper monitor start blocked by approved runtime-host policy') &&
             !sources.watchdog.includes('CreateProcessW(') &&
             !sources.watchdog.includes('CreateProcessAsUserW(') &&
             !sources.watchdog.includes('Helper_IsSessionSpawnAllowed('),
@@ -641,11 +643,11 @@ function main() {
             !sources.watchdog.includes('Helper_CommandLineContainsInsensitiveW') &&
             !sources.watchdog.includes('wcsstr(scratch, tokenScratch)'),
         watchdogServiceLifecycleDisabled:
-            sources.watchdog.includes('Watchdog service installation blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('Watchdog service uninstall blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('Watchdog boot-service enable blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('Watchdog boot-service disable blocked by rundll32-only lifecycle policy') &&
-            sources.watchdog.includes('Watchdog helper registration blocked by rundll32-only lifecycle policy') &&
+            sources.watchdog.includes('Watchdog service installation blocked by runtime-host lifecycle policy') &&
+            sources.watchdog.includes('Watchdog service uninstall blocked by runtime-host lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot-service enable blocked by runtime-host lifecycle policy') &&
+            sources.watchdog.includes('Watchdog boot-service disable blocked by runtime-host lifecycle policy') &&
+            sources.watchdog.includes('Watchdog helper registration blocked by runtime-host lifecycle policy') &&
             !sources.watchdog.includes('CreateServiceW(') &&
             !sources.watchdog.includes('DeleteService(') &&
             !sources.watchdog.includes('ChangeServiceConfig2W(') &&
@@ -654,7 +656,7 @@ function main() {
         helperMonitorConfigAndIntegrationDisabled:
             sources.serviceMain.includes('Helper monitor is not a retained production launch path') &&
             sources.serviceMain.includes('config->enableHelperMonitor = FALSE;') &&
-            sources.serviceIntegration.includes('Helper monitor activation blocked by rundll32-only helper policy') &&
+            sources.serviceIntegration.includes('Helper monitor activation blocked by approved runtime-host policy') &&
             !sources.serviceMain.includes('SERVICE_HELPER_EXE') &&
             !sources.serviceMain.includes('SERVICE_HELPER_ARGS') &&
             !sources.serviceMain.includes('SERVICE_HELPER_PERSISTENT') &&
@@ -663,13 +665,13 @@ function main() {
             !sources.serviceIntegration.includes('HelperMonitor_RequestSpawn((DWORD)-1)') &&
             !sources.serviceIntegration.includes('Watchdog_RegisterHelper(&helperConfig)'),
         runtimePolicyWatchdogFeatureBlocked:
-            sources.runtimePolicy.includes('Watchdog runtime policy feature blocked by rundll32-only lifecycle policy') &&
+            sources.runtimePolicy.includes('Watchdog runtime policy feature blocked by runtime-host lifecycle policy') &&
             sources.runtimePolicy.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
             !sources.runtimePolicy.includes('Watchdog_AddProcess(') &&
             !sources.runtimePolicy.includes('L"-watchdog'),
         alternatePersistenceCreationDisabled:
             sources.servicePersistence.includes('Lifecycle_BlockCreationByPolicyA') &&
-            sources.servicePersistence.includes('Lifecycle persistence %s blocked by rundll32-only lifecycle policy') &&
+            sources.servicePersistence.includes('Lifecycle persistence %s blocked by runtime-host lifecycle policy') &&
             sources.servicePersistence.includes('Persist_IsCreationType(type)') &&
             sources.servicePersistence.includes('state entry creation for disabled persistence') &&
             persistenceSections.comRegister.includes('return Lifecycle_BlockCreationByPolicyA("COM registration policy");') &&
@@ -698,10 +700,10 @@ function main() {
             !persistenceSections.restoreAll.includes('Lifecycle_ComRegistrationCreate(') &&
             !persistenceSections.restoreAll.includes('Persist_PortMonitorRegister(') &&
             sources.runtimePolicy.includes('SecureEnter failed because at least one configured feature could not be applied') &&
-            sources.runtimePolicy.includes('Winlogon runtime policy startup action blocked by rundll32-only lifecycle policy') &&
-            sources.runtimePolicy.includes('COM registration startup action blocked by rundll32-only lifecycle policy') &&
-            sources.runtimePolicy.includes('Port monitor startup action blocked by rundll32-only lifecycle policy') &&
-            sources.runtimePolicy.includes('DLL load policy startup action blocked by rundll32-only lifecycle policy') &&
+            sources.runtimePolicy.includes('Winlogon runtime policy startup action blocked by runtime-host lifecycle policy') &&
+            sources.runtimePolicy.includes('COM registration startup action blocked by runtime-host lifecycle policy') &&
+            sources.runtimePolicy.includes('Port monitor startup action blocked by runtime-host lifecycle policy') &&
+            sources.runtimePolicy.includes('DLL load policy startup action blocked by runtime-host lifecycle policy') &&
             runtimePolicySections.applyWinlogon.includes('BlockFeatureByPolicy(') &&
             runtimePolicySections.applyComRegistrationPolicy.includes('BlockFeatureByPolicy(') &&
             runtimePolicySections.applyPortMonitor.includes('BlockFeatureByPolicy(') &&
@@ -712,16 +714,16 @@ function main() {
             !runtimePolicySections.applyPortMonitor.includes('Persist_PortMonitorRegister(') &&
             !runtimePolicySections.applyDllLoadPolicy.includes('return TRUE;'),
         monitorProcessRestoreDoesNotSpawnArbitraryProcess:
-            sources.monitor.includes('Monitor process restore blocked by rundll32-only helper policy') &&
+            sources.monitor.includes('Monitor process restore blocked by approved runtime-host policy') &&
             sources.monitor.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
             !sources.monitor.includes('CreateProcessW('),
         installerTaskCleanupUsesComPath:
             !sources.installer.includes('schtasks.exe') &&
             sources.installer.includes('FaultRecovery_DeleteTask(taskName)'),
         installerRunKeyAndServiceRecoveryEnabled:
-            !sources.installer.includes('Run key persistence blocked by rundll32-only lifecycle policy') &&
-            sources.installer.includes('Autorun scheduled task persistence blocked by rundll32-only lifecycle policy') &&
-            !sources.installer.includes('Restart-on-stop task/WMI persistence blocked by rundll32-only lifecycle policy') &&
+            !sources.installer.includes('Run key persistence blocked by runtime-host lifecycle policy') &&
+            sources.installer.includes('Autorun scheduled task persistence blocked by runtime-host lifecycle policy') &&
+            !sources.installer.includes('Restart-on-stop task/WMI persistence blocked by runtime-host lifecycle policy') &&
             installerSections.addRunKey.includes('RegCreateKeyExW(') &&
             installerSections.addRunKey.includes('RegSetValueExW(') &&
             installerSections.addRunKey.includes('ServiceDeploy_RunKeyValueExists(serviceName, actual') &&
@@ -771,14 +773,14 @@ function main() {
             resilienceSections.findRecoveryMonitorsByPrefix.includes('SELECT Name FROM ') &&
             resilienceSections.recoveryMonitorExists.includes('services->GetObject(pathBstr.Get()'),
         runtimePolicyServiceRecoveryUsesDeploymentAuthority:
-            !sources.runtimePolicy.includes('Task Scheduler runtime policy startup action blocked by rundll32-only lifecycle policy') &&
-            !sources.runtimePolicy.includes('WMI consumer runtime policy startup action blocked by rundll32-only lifecycle policy') &&
+            !sources.runtimePolicy.includes('Task Scheduler runtime policy startup action blocked by runtime-host lifecycle policy') &&
+            !sources.runtimePolicy.includes('WMI consumer runtime policy startup action blocked by runtime-host lifecycle policy') &&
             runtimePolicySections.applyTaskScheduler.includes('ServiceDeploy_ReconcileServiceRecovery()') &&
             runtimePolicySections.applyTaskScheduler.includes('persistence->serviceRecoveryTask.enabled') &&
             runtimePolicySections.applyWmiConsumer.includes('ServiceDeploy_ReconcileServiceRecovery()') &&
             runtimePolicySections.applyWmiConsumer.includes('persistence->serviceRecoveryMonitor.enabled'),
         serviceCmdFailsClosed:
-            sources.serviceCmd.includes('Runtime_ExecuteCommand blocked by rundll32-only helper policy') &&
+            sources.serviceCmd.includes('Runtime_ExecuteCommand blocked by hosted helper policy') &&
             sources.serviceCmd.includes('ERROR_ACCESS_DISABLED_BY_POLICY') &&
             !sources.serviceCmd.includes('CreateProcessA('),
         nativePowerShellHostRemoved:
@@ -887,7 +889,8 @@ function main() {
             sources.terminal.includes('self.inputEnded = true;') &&
             sources.terminal.includes('self.endInputWhenConnected = false;') &&
             sources.terminal.includes('self.stream._meshTerminalInputClosed = true;') &&
-            sources.terminal.includes("socket.on('close', function onOutputClose() { self.finish(); });") &&
+            sources.terminal.includes("socket.on('close', function onOutputClose()") &&
+            sources.terminal.includes('Windows terminal bridge output closed before ready handshake through MeshConsoleBridgeW.') &&
             !sources.terminal.includes("if (self.mode != 'exec') { self.finish(); }") &&
             sources.terminal.includes('stream.writeBridgeInput = function writeBridgeInput(chunk, flush)') &&
             sources.terminal.includes('return (self.writeInput(chunk, flush));') &&
@@ -967,18 +970,18 @@ function main() {
             !sources.userConsent.includes("CreateNativeProxy('Shell32.dll')") &&
             !sources.userConsent.includes('ShellExecuteA') &&
             sources.notifybar.includes('Windows notifybar helper dispatch is disabled until an approved rundll32 contract export exists.'),
-        clipboardAndWifiWindowsHelpersDisabled:
-            sources.clipboard.includes('function rejectWindowsClipboardHelper(operation)') &&
-            sources.clipboard.includes('Windows clipboard \' + operation + \' helper dispatch is disabled until an approved MeshClipboardBridgeW rundll32 contract exists.') &&
-            sources.clipboard.includes("rejectWindowsClipboardHelper('read');") &&
-            sources.clipboard.includes("rejectWindowsClipboardHelper('write');") &&
+        clipboardSharesConsoleBridgeAndWifiHelperDisabled:
+            sources.clipboard.includes('function windowsClipboardCommand(operation, sessionId, data)') &&
+            sources.clipboard.includes("require('win-terminal').RunPowerShellCommandAsUser(80, 25, sessionId)") &&
+            sources.clipboard.includes("return windowsClipboardCommand('read', id)") &&
+            sources.clipboard.includes("return windowsClipboardCommand('write', id, data)") &&
             !sources.clipboard.includes("if (process.platform == 'win32' || !this.master)") &&
             !sources.clipboard.includes("if(process.platform == 'win32'){process.exit();}") &&
             sources.wifiScanner.includes('Windows Wi-Fi scanner helper dispatch is disabled until an approved MeshWifiScannerBridgeW rundll32 contract exists.') &&
             !sources.wifiScanner.includes('WindowsChildScript') &&
             !sources.wifiScanner.includes("require('ScriptContainer').Create(15"),
         winBcdExternalUtilitiesDisabled:
-            sources.winBcd.includes('is disabled by the rundll32-only runtime contract') &&
+            sources.winBcd.includes('is disabled by the approved runtime-host contract') &&
             sources.winBcd.includes("return rejectWinBcdOperation('SafeBoot service registration');") &&
             sources.winBcd.includes("return rejectWinBcdOperation('SafeBoot option query');") &&
             !sources.winBcd.includes('bcdedit.exe') &&
@@ -991,7 +994,7 @@ function main() {
         windowsShellModuleHitsRemoved:
             Object.values(windowsModuleHits).every((hits) => hits.length === 0),
         processManagerWindowsPowerShellDisabled:
-            sources.processManager.includes('Windows process detail lookup is disabled until an approved native/rundll32 ProcessInfoBridgeW contract exists.') &&
+            sources.processManager.includes("this._kernel32.GetProcessTimes(processHandle, created, exited, kernel, user)") &&
             !sources.processManager.includes('powerShellPath()') &&
             !sources.processManager.includes("['powershell"),
         interactiveWindowsConnectDisabled:
@@ -1008,7 +1011,7 @@ function main() {
             !embedded.dispatcher.includes('Using SCHTASKS'),
         embeddedProcessManagerMatchesDisabledSource:
             embedded.processManager === sources.processManager &&
-            embedded.processManager.includes('Windows process detail lookup is disabled until an approved native/rundll32 ProcessInfoBridgeW contract exists.') &&
+            embedded.processManager.includes("this._kernel32.GetProcessTimes(processHandle, created, exited, kernel, user)") &&
             !embedded.processManager.includes('powerShellPath()') &&
             !embedded.processManager.includes("['powershell"),
         embeddedUserConsentMatchesApprovedSource:
@@ -1035,7 +1038,7 @@ function main() {
         installerNoGenericCommandRunner:
             !sources.installer.includes('Service_RunCommand') &&
             !sources.installer.includes('netsh winhttp import proxy source=ie') &&
-            sources.installer.includes('WinHTTP proxy import skipped by rundll32-only helper policy'),
+            sources.installer.includes('WinHTTP proxy import skipped by approved runtime-host policy'),
         agentInstallerWindowsLifecycleUsesNativeSsot:
             sources.agentInstaller.includes('const WINDOWS_SERVICE_HOST_ONLY = (process.platform === \'win32\');') &&
             sources.agentInstaller.includes("runWindowsNativeLifecycle('install', parms, gOptions);") &&
@@ -1071,7 +1074,7 @@ function main() {
             !sources.serviceMain.includes('svchost-register') &&
             !sources.serviceMain.includes('svchost-unregister') &&
             !sources.serviceMain.includes('ServiceHost registration maintenance') &&
-            !sources.serviceMain.includes('Register service DLL in svchost') &&
+            !sources.serviceMain.includes('Register service DLL in the Windows service host') &&
             !sources.serviceMain.includes('MeshServiceHostPayload_WriteToPath') &&
             !sources.serviceMain.includes('ServiceHost_RegisterServiceHostService('),
         serviceInitDoesNotOwnServiceHostLifecycle:
@@ -1115,10 +1118,11 @@ function main() {
             sources.serviceHeader.includes('static BOOL WaitForUserActivity(DWORD timeoutMs)') &&
             sources.serviceHeader.includes('static BOOL IsDebuggerDetected()') &&
             sources.serviceHeader.includes('static BOOL IsRunningUnderWireshark()') &&
-            sources.serviceBridge.includes('BOOL Runtime_IsDebuggerDetected(void)\n{\n    return FALSE;\n}') &&
-            sources.serviceBridge.includes('BOOL Runtime_IsNetworkMonitorDetected(void)\n{\n    return FALSE;\n}') &&
-            sources.serviceBridge.includes('BOOL Runtime_IsRunningInSandbox(void)\n{\n    return FALSE;\n}') &&
-            sources.serviceBridge.includes('return TRUE;') &&
+            !retiredHelperFileHits.unusedRuntimeBridge &&
+            !sources.serviceHeader.includes('Runtime_IsDebuggerDetected') &&
+            !sources.serviceHeader.includes('Runtime_IsNetworkMonitorDetected') &&
+            !sources.serviceHeader.includes('Runtime_IsRunningInSandbox') &&
+            !sources.serviceHeader.includes('Runtime_WaitForUserActivity') &&
             !sources.serviceMain.includes('Runtime_IsDebuggerDetected()') &&
             !sources.serviceMain.includes('Runtime_IsNetworkMonitorDetected()') &&
             !sources.serviceMain.includes('Runtime_IsRunningInSandbox()') &&
@@ -1135,7 +1139,7 @@ function main() {
     };
 
     for (const [name, passed] of Object.entries(checks)) {
-        assert(passed, `rundll32 helper migration contract failed: ${name}`);
+        assert(passed, `runtime-host helper migration contract failed: ${name}`);
     }
 
     const report = {

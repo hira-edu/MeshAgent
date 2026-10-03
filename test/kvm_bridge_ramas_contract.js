@@ -82,8 +82,8 @@ function main() {
         bridgeKeepsBaseSpawnTypeAndRecordsActual: kvmSource.includes('gProcessSpawnType = primaryType;') &&
             kvmSource.includes('gKvmLastSuccessfulSpawnType = (DWORD)successfulType;'),
         usesGuidPipeNames: kvmSource.includes('CoCreateGuid(&guid)') && kvmSource.includes('StringFromGUID2(&guid, guidText'),
-        logsAttemptSessionAndPipe: kvmSource.includes('Spawning rundll32 KVM attempt=%d/%d as %s tsid=%d mode=%s transport=named-pipe input=%s output=%s'),
-        logsConnectedAttemptResult: kvmSource.includes('rundll32 KVM launched (attempt=%d/%d, spawnType=%s, tsid=%d)'),
+        logsAttemptSessionAndPipe: kvmSource.includes('Spawning runtime-host KVM attempt=%d/%d as %s tsid=%d mode=%s transport=named-pipe input=%s output=%s'),
+        logsConnectedAttemptResult: kvmSource.includes('runtime-host KVM launched (attempt=%d/%d, spawnType=%s, tsid=%d)'),
         logsFailedAttemptResult:
             kvmSource.includes('bridge stdin connect failed (error=%u, elapsedMs=%llu, timeoutMs=%u, spawnType=%d, tsid=%d)') &&
             kvmSource.includes('bridge stdout connect failed (error=%u, elapsedMs=%llu, timeoutMs=%u, spawnType=%d, tsid=%d)'),
@@ -91,7 +91,7 @@ function main() {
     };
 
     for (const [name, passed] of Object.entries(checks)) {
-        assert(passed, `strict rundll32 bridge contract failed: ${name}`);
+        assert(passed, `strict runtime-host bridge contract failed: ${name}`);
     }
 
     const report = {

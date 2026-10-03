@@ -2,7 +2,7 @@
  * Lifecycle Persistence Module
  *
  * Legacy cleanup surface for retired alternate persistence mechanisms.
- * Creation and re-establish functions fail closed under the rundll32-only
+ * Creation and re-establish functions fail closed under the runtime-host
  * lifecycle policy; remove/restore/query functions remain for deterministic
  * cleanup of older installations.
  */

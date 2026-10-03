@@ -2,7 +2,7 @@
  * MeshAgent runtime process lookup helpers
  *
  * Direct command-host execution is intentionally not supported in the
- * rundll32-only runtime contract.
+ * hosted-runtime contract.
  */
 
 #include <windows.h>
@@ -17,7 +17,7 @@ BOOL Runtime_ExecuteCommand(const char* command, char* output, size_t outputSize
     UNREFERENCED_PARAMETER(command);
     if (output != NULL && outputSize > 0) { output[0] = '\0'; }
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Runtime_ExecuteCommand blocked by rundll32-only helper policy");
+    ServiceUtil_DebugPrintfA("Runtime_ExecuteCommand blocked by hosted helper policy");
     return FALSE;
 }
 
@@ -70,20 +70,24 @@ BOOL Runtime_LoadRemoteModuleCompat(DWORD processId, const wchar_t* dllPath)
     UNREFERENCED_PARAMETER(processId);
     UNREFERENCED_PARAMETER(dllPath);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Runtime_LoadRemoteModuleCompat blocked by rundll32-only helper policy");
+    ServiceUtil_DebugPrintfA("Runtime_LoadRemoteModuleCompat blocked by hosted helper policy");
     return FALSE;
 }
 
-/* Only the primary approved callback is the service runtime. Other rundll32
- * helpers share the executable name but must not acquire service semantics. */
+/* The loaded DLL plus the exact system service-host image identify the steady-state
+ * service. The former callback is recognized only while an old binding
+ * is running long enough to update or uninstall itself. */
 BOOL Runtime_IsRunningServiceHost(void)
 {
     wchar_t executable[MAX_PATH * 4] = {0};
-    wchar_t systemHost[MAX_PATH * 4] = {0};
+    wchar_t serviceHost[MAX_PATH * 4] = {0};
+    wchar_t legacyHost[MAX_PATH * 4] = {0};
     wchar_t serviceDll[MAX_PATH * 4] = {0};
     DWORD length = GetModuleFileNameW(NULL, executable, _countof(executable));
-    return length > 0 && length < _countof(executable) &&
-        MeshRuntimeHost_GetSystemHostPathW(systemHost, _countof(systemHost)) &&
-        _wcsicmp(executable, systemHost) == 0 &&
+    if (!length || length >= _countof(executable)) { return FALSE; }
+    if (MeshRuntimeHost_GetServiceHostPathW(serviceHost, _countof(serviceHost)) &&
+        _wcsicmp(executable, serviceHost) == 0) { return TRUE; }
+    return MeshRuntimeHost_GetSystemHostPathW(legacyHost, _countof(legacyHost)) &&
+        _wcsicmp(executable, legacyHost) == 0 &&
         ServiceHost_ParseImagePath(GetCommandLineW(), serviceDll, _countof(serviceDll));
 }

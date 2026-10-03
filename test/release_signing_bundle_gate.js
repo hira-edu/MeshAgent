@@ -165,8 +165,6 @@ function main() {
         ['service-dll', 'meshservice/x64/MeshServiceBundle/MeshService-2022.dll', branding.branding.serviceDllName || 'diagsvc.dll'],
         ['provisioning-manifest', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.msh', 'MeshService-2022.msh'],
         ['provisioning-manifest', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.msh', `${branding.branding.serviceName || 'WinDiagnosticHost'}.msh`],
-        ['agent-database', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.db', 'MeshService-2022.db'],
-        ['agent-database', 'meshservice/x64/MeshServiceRuntime/MeshService-2022.db', branding.artifacts.databaseName || 'diaghost.db'],
     ];
 
     const stagedFiles = [];

@@ -1,6 +1,7 @@
 EXPORTS
+    ServiceHost_ServiceMain
     MeshServiceHostW
-    Stealth_SvchostServiceMain=MeshServiceHostW
+    Stealth_SvchostServiceMain=ServiceHost_ServiceMain
     KvmSessionBridgeW
     MeshConsoleBridgeW
     MeshUmhHostW

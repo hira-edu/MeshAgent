@@ -147,6 +147,38 @@ access. Already-elevated callers retain their existing privileges. This is the
 standard Windows manifest boundary. Check the manifest in the actual downloaded
 EXE when diagnosing an access-denied report.
 
+## Windows inventory and session boundaries
+
+Process lists, process details, service lists, and account SID resolution use
+Win32 APIs in the agent. They do not launch a shell or require an inventory
+helper. Protected processes may omit optional owner information. Enumeration
+closes snapshot, process, token, and SCM handles on failure as well as success,
+and consumes all service enumeration pages.
+
+Interactive terminals and run commands use `MeshConsoleBridgeW`. The bridge
+must send its ready marker before input is flushed; a startup failure closes the
+tunnel with an error. `win-virtual-terminal` remains a compatibility alias.
+Clipboard dispatch reuses the console bridge in the interactive user's session
+with `token=session-user`, running Windows PowerShell clipboard commands. It
+does not start a ScriptContainer, create another callback export, or fall back
+to the service identity. Clipboard operations have a 30-second bound and a
+1 MiB text input limit. An elevated administrator alone cannot call
+`WTSQueryUserToken`; the service performs the session transition.
+
+Desktop capture, consent, and service lifecycle callbacks retain their required
+process/session boundaries. Legacy update and uninstall callbacks remain needed
+for endpoints installed with older bindings until those bindings are migrated.
+
+MeshCentral core overrides carry the source module's UTC modification date into
+`addModule`. Undated overrides cannot replace dated embedded modules. Deployment
+generates the patched core loader from the target server's installed package and
+publishes inventory/clipboard modules into both normal and minified module
+directories under the data and package roots. The tracked transformation preserves
+the server's package version; staging binds its original digest and publication
+rejects a loader that changed afterward. Local npm copies are not release sources.
+Refresh the target's default core
+after publication; a server loader change requires a server restart.
+
 ## Windows lifecycle manifest encoding and errors
 
 Every lifecycle INI writer uses UTF-16LE with a BOM. `WritePrivateProfileStringW`
@@ -177,8 +209,10 @@ verification remains mandatory for both formats.
 
 The Windows self-update activation is asynchronous: `MeshServer_selfupdate_continue`
 stages the package, records its activation target hash, and calls
-`MeshServer_StartUpdateActivation`, which launches the rundll32 lifecycle host
-and registers the process with the agent chain. The activation result is
+`MeshServer_StartUpdateActivation`, which launches the update-only compatibility
+lifecycle host and registers the process with the agent chain. This host also
+provides uninstall and interrupted-update recovery for older callback-based
+service bindings; normal service startup uses the scoped service group. The activation result is
 observed in `MeshServer_UpdateActivation_Sink`; on failure the staged payload is
 dropped and the failure is reported through `MeshServer_FailUpdateActivation`
 (fail-closed). Builds without the RuntimeHost feature set refuse the update and
@@ -222,6 +256,23 @@ If a proxy is required, provide an explicit MeshCentral `WebProxy` value.
 Ambient proxy discovery is not used by the active agent path; do not rely on
 WPAD, per-user browser settings, or heuristic proxy fallback. Stock reconnect
 handling remains part of MeshAgent and is not an endpoint-selection fallback.
+
+## Windows Files actions
+
+The MeshCentral Files tunnel sends literal paths to `MeshAgent.fileAction` for
+Open, Run, Run privileged, and Delete. These actions execute native Win32 code;
+they do not build PowerShell commands, use scheduled tasks, or start an agent
+helper. Open resolves the signed-in user's file association, and folders open
+in Windows Explorer. Run launches one selected `.exe` as the interactive user;
+Run privileged uses the agent's existing privileged identity. An absent user or
+insufficient privilege produces an error without switching identities.
+
+The agent checks Files access for deletion and also requires Remote Commands
+permission for Open and execution. Recursive deletion treats junctions and
+symbolic links as leaves and rejects drive/share roots. Outcomes include Win32
+errors, process IDs, or deletion counts and are returned to the Files tunnel.
+The native agent and all server core variants must be updated together; older
+agents receive no command-shell fallback.
 
 ## Deployment environment
 

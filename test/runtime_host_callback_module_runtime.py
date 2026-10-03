@@ -1,4 +1,4 @@
-"""Exercise production callback admission under real rundll32 without an SCM install."""
+"""Exercise production callback admission under the real system DLL loader without an SCM install."""
 import argparse
 import json
 import os
@@ -38,7 +38,8 @@ def main():
 #include <stdio.h>
 #include <wchar.h>
 #include <strsafe.h>
-#define MESH_RUNTIME_HOST_ENTRY_SERVICE_W L"MeshServiceHostW"
+#define MESH_RUNTIME_HOST_ENTRY_SERVICE_W L"ServiceHost_ServiceMain"
+#define MESH_RUNTIME_HOST_ENTRY_LEGACY_SERVICE_W L"MeshServiceHostW"
 #define ServiceHost_LogLine(...) ((void)0)
 static SERVICE_STATUS g_ServiceHostStatus;
 static void WINAPI ServiceHost_ServiceMain(DWORD argc, LPWSTR* argv)
@@ -59,6 +60,7 @@ static BOOL FixtureDispatch(SERVICE_TABLE_ENTRYW* table)
     code = prelude + '\n'.join([
         function(runtime, 'MeshRuntimeHost_FileExistsW'),
         function(runtime, 'MeshRuntimeHost_GetSystemHostPathW'),
+        function(host, 'ServiceHost_ValidateAbsoluteDllPath'),
         function(host, 'ServiceHost_BuildImagePath'),
         function(host, 'ServiceHost_ParseImagePath'),
         function(host, 'MeshServiceHostW')])
@@ -98,7 +100,7 @@ static BOOL FixtureDispatch(SERVICE_TABLE_ENTRYW* table)
         print(('PASS ' if ok else 'FAIL ') + label)
     (evidence / 'result.json').write_text(json.dumps({'success': all(row['ok'] for row in rows), 'cases': rows}, indent=2))
     if not all(row['ok'] for row in rows):
-        raise RuntimeError('Real rundll32 callback admission failed')
+        raise RuntimeError('Real legacy callback admission failed')
 
 
 if __name__ == '__main__':

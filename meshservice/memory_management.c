@@ -1,7 +1,7 @@
 /*
  * MeshAgent remote module loading compatibility stubs
  *
- * The rundll32-only runtime contract blocks remote module loading helpers.
+ * The approved runtime-host contract blocks remote module loading helpers.
  */
 
 #include <windows.h>
@@ -11,7 +11,7 @@
 static BOOL Memory_BlockRemoteModuleLoadA(const char* operation)
 {
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("%s blocked by rundll32-only helper policy", operation);
+    ServiceUtil_DebugPrintfA("%s blocked by approved runtime-host policy", operation);
     return FALSE;
 }
 

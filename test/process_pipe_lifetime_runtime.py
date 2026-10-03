@@ -10,6 +10,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 
@@ -134,7 +135,9 @@ static void ILibChain_ReadEx2(void *c, HANDLE h, OVERLAPPED *o, char *b, DWORD n
     (void)c; (void)h; (void)o; (void)b; (void)n; (void)f; (void)u; (void)m;
     ++reads_issued; // Hold completion until the test explicitly dispatches it.
 }
+#ifndef _WIN32
 static void memmove_s(void *d, size_t cap, const void *s, size_t n) { assert(n <= cap); memmove(d,s,n); }
+#endif
 #define ILibMemory_ReallocateRaw(p,n) (*(p) = realloc(*(p),n))
 '''
 
@@ -222,15 +225,22 @@ def main():
     args.evidence.mkdir(parents=True, exist_ok=True)
     functions = [extract(args.source.read_text(), name) for name in FUNCTIONS]
     fixture = args.evidence / "process-pipe-lifetime.c"
-    executable = args.evidence / "process-pipe-lifetime"
+    executable = args.evidence / ("process-pipe-lifetime.exe" if os.name == "nt" else "process-pipe-lifetime")
     fixture.write_text(PRELUDE + "\n".join(signature + ";" for signature, _ in functions) +
                        "\n" + "\n".join(signature + "\n" + body for signature, body in functions) + TESTS)
     subprocess.run([args.cc, "-std=c11", "-g", "-O1", "-fsanitize=address,undefined",
                     "-fno-omit-frame-pointer", str(fixture), "-o", str(executable)], check=True)
+    runtime_env = os.environ.copy()
+    if os.name == "nt":
+        compiler = shutil.which(args.cc)
+        if compiler:
+            runtimes = list(Path(compiler).parent.parent.glob("lib/clang/*/lib/windows/clang_rt.asan_dynamic-*.dll"))
+            if runtimes:
+                runtime_env["PATH"] = str(runtimes[0].parent) + os.pathsep + runtime_env.get("PATH", "")
     failures = []
     for case in ["resume-close", "resume-pending", "process-close-pending", "close-queued-resume", "resume-buffered"]:
-        result = subprocess.run([str(executable.resolve()), case], text=True, capture_output=True)
-        (args.evidence / (case + ".log")).write_text(result.stdout + result.stderr)
+        result = subprocess.run([str(executable.resolve()), case], text=True, capture_output=True, env=runtime_env)
+        (args.evidence / (case + ".log")).write_text("exit=" + str(result.returncode) + "\n" + result.stdout + result.stderr)
         print(f"{'PASS' if result.returncode == 0 else 'FAIL'} {case}")
         if result.returncode:
             failures.append(case)

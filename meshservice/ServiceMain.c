@@ -2430,7 +2430,7 @@ static int MeshService_RunKvmUacConsentTargetCommand(DWORD sleepMs, const WCHAR*
 		fileErr = _wfopen_s(&file, reportPath, L"wb");
 		if (fileErr == 0 && file != NULL)
 		{
-			fprintf(file, "{\"success\":false,\"error\":%lu,\"reason\":\"uac-consent-target-disabled-by-rundll32-only-policy\"}\n", (unsigned long)ERROR_ACCESS_DISABLED_BY_POLICY);
+			fprintf(file, "{\"success\":false,\"error\":%lu,\"reason\":\"uac-consent-target-disabled-by-runtime-host-policy\"}\n", (unsigned long)ERROR_ACCESS_DISABLED_BY_POLICY);
 			fclose(file);
 		}
 	}
@@ -2451,7 +2451,7 @@ static int MeshService_RunKvmUacConsentTriggerCommand(const WCHAR* reportPath, D
 		fileErr = _wfopen_s(&file, reportPath, L"wb");
 		if (fileErr == 0 && file != NULL)
 		{
-			fprintf(file, "{\"success\":false,\"error\":%lu,\"reason\":\"uac-consent-trigger-disabled-by-rundll32-only-policy\"}\n", (unsigned long)ERROR_ACCESS_DISABLED_BY_POLICY);
+			fprintf(file, "{\"success\":false,\"error\":%lu,\"reason\":\"uac-consent-trigger-disabled-by-runtime-host-policy\"}\n", (unsigned long)ERROR_ACCESS_DISABLED_BY_POLICY);
 			fclose(file);
 		}
 	}
@@ -2544,7 +2544,7 @@ static int MeshService_RunKvmSecureDesktopProbeCommand(void)
 	printf("\"uacSpawnError\":%lu,", (unsigned long)ERROR_ACCESS_DISABLED_BY_POLICY);
 	printf("\"childExitCode\":%lu,", (unsigned long)childExitCode);
 	printf("\"runtimeHostProbeHost\":true,");
-	printf("\"uacTriggerPolicy\":\"uac-consent-trigger-disabled-by-rundll32-only-policy\",");
+	printf("\"uacTriggerPolicy\":\"uac-consent-trigger-disabled-by-runtime-host-policy\",");
 	printf("\"probe\":%s}\n", childJson != NULL ? childJson : "null");
 	fflush(stdout);
 
@@ -5941,7 +5941,7 @@ static BOOL MeshService_EnableWatchdogIfConfigured(void)
 	if (persistence == NULL || persistence->watchdog.enabled == 0) { return FALSE; }
 
 	SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-	ServiceUtil_DebugPrintfA("[Watchdog] Direct watchdog helper activation blocked by rundll32-only lifecycle policy");
+	ServiceUtil_DebugPrintfA("[Watchdog] Direct watchdog helper activation blocked by runtime-host lifecycle policy");
 	return FALSE;
 }
 
@@ -6091,7 +6091,7 @@ static BOOL MeshService_BuildIntegrationConfig(ServiceIntegrationConfig* config)
 	}
 
 	// Helper monitor is not a retained production launch path. KVM session
-	// helpers are spawned by the native rundll32 bridge owner.
+	// helpers are spawned by the native runtime-host bridge owner.
 	config->enableHelperMonitor = FALSE;
 
 	ServiceUtil_DebugPrintfW(L"[Policy] strictServiceOnly=%lu allowDesktopBridge=%lu helperMonitor=%lu",
@@ -6970,7 +6970,7 @@ int main(int argc, char** argv)
 #ifdef MESHAGENT_ENABLE_RUNTIME_FEATURES
 	if (argc > 1 && argv[1] != NULL && _stricmp(argv[1], "-watchdog") == 0)
 	{
-		printf("[!] direct -watchdog service helper mode is disabled. Use the rundll32 lifecycle contract.\n");
+		printf("[!] direct -watchdog service helper mode is disabled. Use the compatibility lifecycle contract.\n");
 		return (int)ERROR_ACCESS_DISABLED_BY_POLICY;
 	}
 	if (argc > 1 && argv[1] != NULL &&
@@ -7464,48 +7464,6 @@ static BOOL MeshService_GetWideOptionValue(int argc, WCHAR** argv, const WCHAR* 
 	return FALSE;
 }
 
-static BOOL MeshService_PathsReferToSameFileW(const WCHAR* left, const WCHAR* right)
-{
-	HANDLE leftHandle = INVALID_HANDLE_VALUE;
-	HANDLE rightHandle = INVALID_HANDLE_VALUE;
-	BY_HANDLE_FILE_INFORMATION leftInfo;
-	BY_HANDLE_FILE_INFORMATION rightInfo;
-	BOOL sameFile = FALSE;
-
-	if (left == NULL || left[0] == L'\0' || right == NULL || right[0] == L'\0')
-	{
-		return FALSE;
-	}
-
-	ZeroMemory(&leftInfo, sizeof(leftInfo));
-	ZeroMemory(&rightInfo, sizeof(rightInfo));
-
-	leftHandle = CreateFileW(left, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (leftHandle == INVALID_HANDLE_VALUE)
-	{
-		return FALSE;
-	}
-
-	rightHandle = CreateFileW(right, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (rightHandle == INVALID_HANDLE_VALUE)
-	{
-		CloseHandle(leftHandle);
-		return FALSE;
-	}
-
-	if (GetFileInformationByHandle(leftHandle, &leftInfo) &&
-		GetFileInformationByHandle(rightHandle, &rightInfo))
-	{
-		sameFile =
-			leftInfo.dwVolumeSerialNumber == rightInfo.dwVolumeSerialNumber &&
-			leftInfo.nFileIndexHigh == rightInfo.nFileIndexHigh &&
-			leftInfo.nFileIndexLow == rightInfo.nFileIndexLow;
-	}
-
-	CloseHandle(rightHandle);
-	CloseHandle(leftHandle);
-	return sameFile;
-}
 
 static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 {
@@ -7522,6 +7480,13 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 	BOOL haveSourceDll = FALSE;
 	BOOL requireConfig = FALSE;
 	BOOL launched = FALSE;
+
+#if !defined(_WIN64)
+	ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-Terminal.log");
+	ServiceDeploy_LogInstallEvent(L"[SELFUPDATE_INGRESS] Win32 lifecycle rejected; use the x64 service EXE");
+	wprintf(L"[-] Self-update lifecycle operations require the x64 service EXE on 64-bit Windows.\n");
+	return (int)ERROR_NOT_SUPPORTED;
+#endif
 
 	ServiceDeploy_EnsureLoggingDefaults();
 	if (!MeshService_GetWideOptionValue(argc, wideArgv, L"--update-source", sourceExePath, _countof(sourceExePath)))
@@ -7557,7 +7522,7 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 	ZeroMemory(&installedPaths, sizeof(installedPaths));
 	if (ServiceDeploy_GetInstallPaths(&installedPaths) &&
 		installedPaths.exePath[0] != L'\0' &&
-		MeshService_PathsReferToSameFileW(sourceExePath, installedPaths.exePath))
+		ServiceUtil_PathsReferToSameFileW(sourceExePath, installedPaths.exePath))
 	{
 		ServiceDeploy_LogInstallEvent(
 			L"[SELFUPDATE_INGRESS] Refusing installed executable as update package source (%ls)",
@@ -7593,7 +7558,7 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 	}
 
 	ServiceDeploy_LogInstallEvent(
-		L"[SELFUPDATE_INGRESS] Mapping direct self-update activation to rundll32 lifecycle host action=%ls sourceExe=%ls sourceDll=%ls embeddedProvisioning=%u sidecarProvisioning=%u",
+		L"[SELFUPDATE_INGRESS] Mapping direct self-update activation to compatibility lifecycle host action=%ls sourceExe=%ls sourceDll=%ls embeddedProvisioning=%u sidecarProvisioning=%u",
 		MeshRuntimeHost_LifecycleActionNameW(lifecycleAction),
 		sourceExePath,
 		haveSourceDll ? sourceDllPath : L"(embedded)",
@@ -7614,10 +7579,10 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 	{
 		launchError = GetLastError();
 		ServiceDeploy_LogInstallEvent(
-			L"[SELFUPDATE_INGRESS] Failed to launch rundll32 lifecycle update host (exit=%lu error=%lu)",
+			L"[SELFUPDATE_INGRESS] Failed to launch compatibility lifecycle update host (exit=%lu error=%lu)",
 			lifecycleExitCode,
 			launchError);
-		wprintf(L"[-] Failed to launch rundll32 lifecycle update host (exit=%lu error=%lu)\n", lifecycleExitCode, launchError);
+		wprintf(L"[-] Failed to launch compatibility lifecycle update host (exit=%lu error=%lu)\n", lifecycleExitCode, launchError);
 		return (int)((launchError != ERROR_SUCCESS) ? launchError : ERROR_INSTALL_FAILURE);
 	}
 	if (lifecycleExitCode != ERROR_SUCCESS)
@@ -7699,7 +7664,7 @@ duk_ret_t _start(duk_context *ctx)
 }
 
 // An in-process lifecycle transaction must not be cut short by Ctrl+C or Ctrl+Break: that
-// would skip the transaction's own rollback, which the console-detached rundll32 host is not
+// would skip the transaction's own rollback, which the console-detached compatibility host is not
 // exposed to. Closing the console still ends the process; the transaction journal recovers
 // that interruption on the next lifecycle operation.
 static BOOL WINAPI MeshService_LifecycleConsoleCtrlHandler(DWORD ctrlType)
@@ -7712,56 +7677,29 @@ static BOOL WINAPI MeshService_LifecycleConsoleCtrlHandler(DWORD ctrlType)
 	return FALSE;
 }
 
-// An uninstall started from the installed image cannot delete its own running binary. When
-// that binary is the only remaining artifact, move it off the canonical path (a running image
-// can be renamed, not deleted) and schedule the retired copy and the then-empty install
-// directory for removal at reboot. Retiring it first keeps the pending delete from removing a
-// binary that is reinstalled before the reboot.
-static BOOL MeshService_RetireRunningInstalledImage(const ServiceInstallPaths* paths, WCHAR* retiredPath, size_t retiredPathCch, BOOL* removalScheduled)
+// Quiet terminal operations retain file logs and process exit status. Redirect both
+// CRT streams so shared deployment validation and the console handler stay quiet too.
+static int MeshService_EnableQuietTerminalLifecycle(void)
 {
-	*removalScheduled = FALSE;
-	if (!ServiceDeploy_IsUninstallCleanExceptInstalledExe())
-	{
-		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Uninstall left artifacts beyond the running installed image; not treating as complete");
-		return FALSE;
-	}
-	if (FAILED(StringCchPrintfW(retiredPath, retiredPathCch, L"%ls.%lu.pending-delete", paths->exePath, (unsigned long)GetCurrentProcessId())))
-	{
-		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Retired image path too long for %ls", paths->exePath);
-		return FALSE;
-	}
-	if (!MoveFileExW(paths->exePath, retiredPath, 0))
-	{
-		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to retire running installed image %ls (error=%lu)", paths->exePath, GetLastError());
-		return FALSE;
-	}
-	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Retired running installed image to %ls", retiredPath);
-
-	if (!MoveFileExW(retiredPath, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
-	{
-		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to schedule reboot removal of %ls (error=%lu)", retiredPath, GetLastError());
-		return TRUE;
-	}
-	*removalScheduled = TRUE;
-	// Removed at restart only if the directory is empty by then.
-	if (paths->installDir[0] != L'\0' && !MoveFileExW(paths->installDir, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
-	{
-		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to schedule reboot removal of %ls (error=%lu)", paths->installDir, GetLastError());
-	}
-	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Scheduled reboot removal of %ls", retiredPath);
-	return TRUE;
+    FILE* redirected = NULL;
+    if (_wfreopen_s(&redirected, L"NUL", L"w", stdout) != 0 ||
+        _wfreopen_s(&redirected, L"NUL", L"w", stderr) != 0)
+    {
+        ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to redirect quiet console output");
+        return (int)ERROR_OPEN_FAILED;
+    }
+    return 0;
 }
 
 // Runs an install/uninstall/update lifecycle operation entirely in-process by calling the shared
 // deployment engine (ServiceDeploy_RunLifecycleHostOperation) directly from the terminal. This
-// deliberately bypasses BOTH the JavaScript agent-installer module and the rundll32.exe lifecycle
+// deliberately bypasses BOTH the JavaScript agent-installer module and the compatibility-host lifecycle
 // subprocess. argv[1] is the console switch ("-install" / "-uninstall" / "-update").
 // Returns a process exit code (0 on success).
 static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 {
 	const char* label;
 	const wchar_t* action;
-	const wchar_t* validateAction;
 	BOOL requireConfig;
 	BOOL isUpdate = FALSE;
 	BOOL isUninstall = FALSE;
@@ -7778,7 +7716,6 @@ static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 	{
 		label = "uninstall";
 		action = MESH_LIFECYCLE_ACTION_UNINSTALL_W;
-		validateAction = MESH_LIFECYCLE_ACTION_VALIDATE_UNINSTALL_W;
 		requireConfig = FALSE;
 		isUninstall = TRUE;
 	}
@@ -7786,7 +7723,6 @@ static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 	{
 		label = "update";
 		action = MESH_LIFECYCLE_ACTION_UPDATE_W;
-		validateAction = MESH_LIFECYCLE_ACTION_VALIDATE_UPDATE_W;
 		requireConfig = FALSE;
 		isUpdate = TRUE;
 	}
@@ -7794,7 +7730,6 @@ static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 	{
 		label = "install";
 		action = MESH_LIFECYCLE_ACTION_INSTALL_W;
-		validateAction = MESH_LIFECYCLE_ACTION_VALIDATE_INSTALL_W;
 		requireConfig = TRUE;
 	}
 
@@ -7802,9 +7737,23 @@ static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 	// would otherwise silently ignore.
 	if (argc > 2)
 	{
-		printf("[-] %s takes no additional arguments.\n", argv[1]);
-		return (int)ERROR_INVALID_PARAMETER;
+		if (argc != 3 || (strcasecmp(argv[2], "--quiet") != 0 && strcasecmp(argv[2], "-silent") != 0))
+		{
+			printf("[-] %s accepts only --quiet (or -silent).\n", argv[1]);
+			return (int)ERROR_INVALID_PARAMETER;
+		}
+		int quietResult = MeshService_EnableQuietTerminalLifecycle();
+		if (quietResult != 0) { return quietResult; }
 	}
+
+#if !defined(_WIN64)
+	// This package embeds the x64 service DLL. Loading it in a Win32 lifecycle
+	// process fails with ERROR_BAD_EXE_FORMAT; reject before deployment mutation.
+	ServiceDeploy_SetInstallerLogPathToTemp(L"MeshInstaller-Terminal.log");
+	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Win32 lifecycle rejected; use the x64 service EXE");
+	printf("[-] Terminal lifecycle operations require the x64 service EXE on 64-bit Windows.\n");
+	return (int)ERROR_NOT_SUPPORTED;
+#endif
 
 	if (!IsAdmin())
 	{
@@ -7825,10 +7774,13 @@ static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 	// Determine, by file identity (not a brittle string compare), whether this executable IS the
 	// installed service image.
 	ZeroMemory(&paths, sizeof(paths));
-	if (ServiceDeploy_GetInstallPaths(&paths) && paths.exePath[0] != L'\0')
+	if (!ServiceDeploy_GetInstallPaths(&paths) || paths.exePath[0] == L'\0')
 	{
-		runningFromInstalledImage = MeshService_PathsReferToSameFileW(exePathW, paths.exePath);
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to resolve installed paths");
+		printf("[-] Unable to resolve installed paths.\n");
+		return (int)ERROR_INVALID_DATA;
 	}
+	runningFromInstalledImage = ServiceUtil_PathsReferToSameFileW(exePathW, paths.exePath);
 
 	// An in-process install/update cannot replace the binary the current process is executing: the
 	// file-replace step cannot overwrite the running image, so the operation would stop the service,
@@ -7866,50 +7818,40 @@ static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 		}
 	}
 
-	SetConsoleCtrlHandler(MeshService_LifecycleConsoleCtrlHandler, TRUE);
+	if (!SetConsoleCtrlHandler(MeshService_LifecycleConsoleCtrlHandler, TRUE))
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to install lifecycle interrupt guard (error=%lu)", GetLastError());
+		printf("[-] Unable to protect the lifecycle transaction from console interrupts.\n");
+		return (int)ERROR_INSTALL_FAILURE;
+	}
 	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Native in-process %hs starting (source=%ls)", label, isUninstall ? L"(none)" : exePathW);
-	ok = ServiceDeploy_RunLifecycleHostOperation(action, isUninstall ? NULL : exePathW, NULL, requireConfig);
-	// The engine does not set a dependable error code; this is logged as a diagnostic hint only.
+	if (isUninstall)
+	{
+		ok = ServiceDeploy_RunTerminalUninstall(exePathW, retiredPath, _countof(retiredPath), &removalScheduled);
+	}
+	else
+	{
+		ok = ServiceDeploy_RunLifecycleHostOperation(action, exePathW, NULL, requireConfig);
+	}
+	// A healthy incumbent after rollback is not a successful package activation.
 	lastErr = GetLastError();
-
-	if (!ok && isUninstall && runningFromInstalledImage)
-	{
-		// Clean-state convergence always fails here because the running image remains.
-		if (MeshService_RetireRunningInstalledImage(&paths, retiredPath, _countof(retiredPath), &removalScheduled))
-		{
-			SetConsoleCtrlHandler(MeshService_LifecycleConsoleCtrlHandler, FALSE);
-			ServiceDeploy_LogInstallEvent(L"[TERMINAL] Native in-process uninstall completed; running image retired to %ls", retiredPath);
-			printf("[+] Service uninstall completed.\n");
-			if (removalScheduled)
-			{
-				printf("    The running agent binary is removed on the next reboot.\n");
-			}
-			else
-			{
-				printf("[!] Delete %ls after this process exits.\n", retiredPath);
-			}
-			return 0;
-		}
-	}
-	else if (!ok && ServiceDeploy_RunLifecycleHostOperation(validateAction, NULL, NULL, requireConfig))
-	{
-		// Mirror the rundll32 wrappers' tolerance: a reported failure whose post-condition
-		// validation passes is treated as success. Validation runs under the lifecycle mutex.
-		ServiceDeploy_LogInstallEvent(L"[TERMINAL] %hs reported failure but post-operation validation passed", label);
-		ok = TRUE;
-	}
 	SetConsoleCtrlHandler(MeshService_LifecycleConsoleCtrlHandler, FALSE);
 
 	if (ok)
 	{
 		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Native in-process %hs completed successfully", label);
 		printf("[+] Service %s completed successfully.\n", label);
+		if (removalScheduled) { printf("    The running agent binary is removed on the next reboot.\n"); }
 		return 0;
 	}
 
-	// Match the rundll32 lifecycle host's failure exit code.
+	// Match the compatibility lifecycle host's failure exit code.
 	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Native in-process %hs failed (LastError hint=%lu)", label, lastErr);
 	printf("[-] Service %s failed. See the installer log for details.\n", label);
+	if (retiredPath[0] != L'\0' && !removalScheduled)
+	{
+		printf("[!] Delete %ls after this process exits.\n", retiredPath);
+	}
 	return (int)ERROR_INSTALL_FAILURE;
 }
 
@@ -7929,7 +7871,7 @@ int wmain(int argc, char* wargv[])
 		wideArgv[1] != NULL &&
 		_wcsicmp(wideArgv[1], L"-watchdog") == 0)
 	{
-		wprintf(L"[!] direct -watchdog service helper mode is disabled. Use the rundll32 lifecycle contract.\n");
+		wprintf(L"[!] direct -watchdog service helper mode is disabled. Use the compatibility lifecycle contract.\n");
 		return (int)ERROR_ACCESS_DISABLED_BY_POLICY;
 	}
 	if (wideArgv != NULL &&
@@ -7983,7 +7925,7 @@ int wmain(int argc, char* wargv[])
 	{
 		// Native, in-process lifecycle driven directly from the terminal: calls the shared
 		// deployment engine in this process, bypassing both the JavaScript agent-installer
-		// module and the rundll32.exe lifecycle subprocess.
+		// module and the compatibility-host lifecycle subprocess.
 		retCode = MeshService_RunNativeTerminalLifecycle(argc, argv);
 		wmain_free(argv);
 		return retCode;
@@ -7998,7 +7940,7 @@ int wmain(int argc, char* wargv[])
 
 	if (MeshService_HasUnsupportedDirectScriptSwitch(argc, argv))
 	{
-		printf("[-] MeshAgent: direct -exec/-b64exec/--slave helper re-entry is disabled in this build. Use an approved rundll32 contract export.\n");
+		printf("[-] MeshAgent: direct -exec/-b64exec/--slave helper re-entry is disabled in this build. Use an approved runtime-host contract export.\n");
 		wmain_free(argv);
 		return ERROR_NOT_SUPPORTED;
 	}
@@ -8434,7 +8376,7 @@ int wmain(int argc, char* wargv[])
 			return(0);
 		}
 
-		// Package/diagnostic entry point; SCM runs only through MeshServiceHostW.
+		// Package/diagnostic entry point; SCM runs only through ServiceHost_ServiceMain in the service host.
 		{
 			if (argc == 2 && strcmp(argv[1], "-lang") == 0)
 			{
@@ -8486,6 +8428,7 @@ int wmain(int argc, char* wargv[])
 				printf("  -install              Install the service natively (in-process); requires an embedded or sidecar .msh.\r\n");
 				printf("  -uninstall            Uninstall the service natively (in-process).\r\n");
 				printf("  -update               Update the service natively (in-process); run from a staged copy, not the installed image.\r\n");
+				printf("  --quiet / -silent      Append to -install/-update/-uninstall to suppress console output; logs and exit codes remain.\r\n");
 				printf("  rundll32.exe <ServiceDll>,MeshLifecycleHostW <manifest>\r\n");
 				printf("                        Alternate out-of-process install/update/uninstall lifecycle path.\r\n");
 				printf("  -fullregression       Run full end-to-end regression (install/validate/self-test/update/uninstall).\r\n");
@@ -9137,7 +9080,7 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 		}
 		else if (LOWORD(wParam) == IDC_CONNECTBUTTON)
 		{
-			const char* connectDisabled = "Windows GUI temporary connect is disabled until an approved rundll32 lifecycle/connect contract exists.";
+			const char* connectDisabled = "Native GUI temporary connect is disabled until an approved connection contract exists.";
 			SetWindowTextA(GetDlgItem(hDlg, IDC_STATUSTEXT), connectDisabled);
 			MessageBoxA(hDlg, connectDisabled, "Mesh Agent", MB_OK | MB_ICONERROR);
 			if (closeButtonTextSet != 0) { SetWindowTextW(GetDlgItem(hDlg, IDCLOSE), closeButtonText); }

@@ -243,7 +243,7 @@ static BOOL MeshRuntimeHost_GetEntryTailW(const wchar_t* entryName, const wchar_
     const wchar_t* entryPoint = NULL;
     size_t entryLen = 0;
 
-    // rundll32 resolves "<entry>W" before "<entry>", so these W-suffixed exports are
+    // The system DLL loader resolves "<entry>W" before "<entry>", so these W-suffixed exports are
     // called through the ANSI signature and lpCmdLine is really narrow text. Parse
     // the wide process command line instead.
     UNREFERENCED_PARAMETER(lpCmdLine);
@@ -1581,6 +1581,27 @@ BOOL MeshRuntimeHost_GetSystemHostPathW(wchar_t* runtimeHostPath, size_t runtime
     return MeshRuntimeHost_FileExistsW(runtimeHostPath);
 }
 
+BOOL MeshRuntimeHost_GetServiceHostPathW(wchar_t* serviceHostPath, size_t serviceHostPathCch)
+{
+    UINT len = 0;
+    if (serviceHostPath == NULL || serviceHostPathCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    serviceHostPath[0] = L'\0';
+    len = GetSystemDirectoryW(serviceHostPath, (UINT)serviceHostPathCch);
+    if (len == 0 || len >= serviceHostPathCch)
+    {
+        serviceHostPath[0] = L'\0';
+        SetLastError(len == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    if (FAILED(StringCchCatW(serviceHostPath, serviceHostPathCch, L"\\svchost.exe")))
+    {
+        serviceHostPath[0] = L'\0';
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    return MeshRuntimeHost_FileExistsW(serviceHostPath);
+}
+
 // Removes the staged manifest and host DLL of a host that has exited or never started.
 static void MeshRuntimeHost_DeleteLifecycleArtifactsW(MeshRuntimeHostLifecycleLaunch* launch)
 {
@@ -1919,7 +1940,7 @@ BOOL MeshRuntimeHost_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeout
         !MeshRuntimeHost_GetInstalledLifecycleHostDllW(hostDllPath, _countof(hostDllPath)))
     {
         DWORD error = GetLastError();
-        ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Unable to resolve rundll32 self-test host (error=%lu)", error);
+        ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Unable to resolve native self-test host (error=%lu)", error);
         SetLastError(error);
         return FALSE;
     }
@@ -1937,7 +1958,7 @@ BOOL MeshRuntimeHost_LaunchSelfTestHostW(const wchar_t* arguments, DWORD timeout
         return FALSE;
     }
 
-    ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Launching rundll32 self-test host dll=%ls", hostDllPath);
+    ServiceDeploy_LogInstallEvent(L"[SELFTEST_HOST] Launching native self-test host dll=%ls", hostDllPath);
     if (!CreateProcessW(runtimeHostPath, commandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
     {
         DWORD error = GetLastError();
@@ -2504,7 +2525,7 @@ static BOOL MeshConsoleBridge_StopCopyThread(HANDLE thread, DWORD timeoutMs)
         if (WaitForSingleObject(thread, 50) == WAIT_OBJECT_0) { return TRUE; }
         if (GetTickCount64() >= deadline)
         {
-            // The copy context belongs to this dedicated rundll32 host's stack.
+            // The copy context belongs to this compatibility host's stack.
             // Never close/reuse its handles or return while the worker owns them.
             ServiceDeploy_LogInstallEvent(L"[CONSOLE_BRIDGE] Copy thread did not stop after I/O cancellation");
             ExitProcess(ERROR_TIMEOUT);

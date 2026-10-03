@@ -8,6 +8,8 @@
 extern "C" {
 #endif
 
+BOOL ServiceUtil_PathsReferToSameFileW(const wchar_t* left, const wchar_t* right);
+
 void ServiceUtil_DebugPrintfA(const char* format, ...);
 void ServiceUtil_DebugPrintfW(const wchar_t* format, ...);
 void ServiceUtil_DebugLastErrorA(const char* context);

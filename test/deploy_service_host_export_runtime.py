@@ -14,11 +14,12 @@ def main():
     dll = ROOT / "meshservice/x64/MeshServiceBundle/MeshService-2022.dll"
     assert dll.is_file(), "Build the x64 service bundle before running this probe"
     assert deploy.has_service_host_export(dll)
+    assert deploy.has_service_host_export(dll, b"MeshServiceHostW")
     assert deploy.has_service_host_export(dll, b"Stealth_SvchostServiceMain")
 
     original = dll.read_bytes()
     with tempfile.TemporaryDirectory(prefix="meshagent-export-gate-") as directory:
-        for export_name in (b"MeshServiceHostW", b"Stealth_SvchostServiceMain"):
+        for export_name in (b"ServiceHost_ServiceMain", b"MeshServiceHostW", b"Stealth_SvchostServiceMain"):
             offset = original.rfind(export_name + b"\0")
             assert offset >= 0, f"Built DLL does not contain {export_name!r}"
             changed = bytearray(original)
@@ -31,6 +32,7 @@ def main():
     report = deploy.validate_local_service_bundle_artifacts(local_artifacts)
     assert report["ok"], report["errors"]
     assert report["artifacts"]["dll"]["service_host_export"] is True
+    assert report["artifacts"]["dll"]["legacy_callback_export"] is True
     assert report["artifacts"]["dll"]["legacy_service_host_export"] is True
     print("service_host_export_gate=pass")
 

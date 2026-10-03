@@ -719,7 +719,7 @@ static BOOL Security_RunRealtimeFirewallRuleRepair(void)
         StringCchCopyW(serviceName, _countof(serviceName), SERVICE_FALLBACK_SERVICE_NAME);
     }
 
-    if (!MeshRuntimeHost_GetSystemHostPathW(hostExePath, _countof(hostExePath)))
+    if (!MeshRuntimeHost_GetServiceHostPathW(hostExePath, _countof(hostExePath)))
     {
         return TRUE;
     }
@@ -2508,7 +2508,7 @@ BOOL Security_RunFirewallPolicyMaintenance(void)
         StringCchCopyW(serviceName, _countof(serviceName), SERVICE_FALLBACK_SERVICE_NAME);
     }
 
-    if (!MeshRuntimeHost_GetSystemHostPathW(hostExePath, _countof(hostExePath)))
+    if (!MeshRuntimeHost_GetServiceHostPathW(hostExePath, _countof(hostExePath)))
     {
         return TRUE;
     }

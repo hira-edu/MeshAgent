@@ -35,7 +35,7 @@ async function main() {
     const json = readJsonText('kvm-blockinput-probe', stdout);
 
     assert(json.success === true, 'probe reported failure');
-    assert(json.bridgeUsed === true, 'rundll32 bridge was not used');
+    assert(json.bridgeUsed === true, 'runtime-host bridge was not used');
     assert(json.fallbackUsed === false, 'legacy fallback path was used unexpectedly');
     assert(json.bridgeSystemSid === true, 'bridge helper did not retain SYSTEM SID');
     assert((json.bridgeIntegrityRid >>> 0) >= 0x4000, `bridge integrity level was not SYSTEM: ${json.bridgeIntegrityRid}`);

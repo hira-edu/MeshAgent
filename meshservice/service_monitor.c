@@ -994,7 +994,7 @@ static BOOL RestoreProcess(MonitorItem* item)
 {
     UNREFERENCED_PARAMETER(item);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Monitor process restore blocked by rundll32-only helper policy");
+    ServiceUtil_DebugPrintfA("Monitor process restore blocked by approved runtime-host policy");
     return FALSE;
 }
 

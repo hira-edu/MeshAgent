@@ -114,7 +114,7 @@ cases = r'''
 static wchar_t* add_text(BYTE* arena,DWORD* pos,const wchar_t* text,DWORD chars){wchar_t* p=(wchar_t*)(arena+*pos);memcpy(p,text,chars*2);*pos+=chars*2;return p;}
 static ServiceBindingSnapshot* fixture(void){
     ServiceBindingSnapshot* s=calloc(1,sizeof(*s));DWORD pos=sizeof(QUERY_SERVICE_CONFIGW);
-    s->running=TRUE;s->groupMember=TRUE;s->parametersExisted=TRUE;
+    s->running=TRUE;s->legacyGroupMember=TRUE;s->serviceGroupMember=TRUE;s->parametersExisted=TRUE;
     s->configBytes=4096;s->config=calloc(1,s->configBytes);QUERY_SERVICE_CONFIGW* c=s->config;
     c->dwServiceType=SERVICE_WIN32_OWN_PROCESS;c->dwStartType=2;c->dwErrorControl=1;c->dwTagId=77;
     c->lpBinaryPathName=add_text((BYTE*)c,&pos,L"C:\\Windows\\System32\\rundll32.exe",33);
@@ -141,7 +141,7 @@ int main(void){
     BYTE sd[sizeof(SECURITY_DESCRIPTOR_RELATIVE)+sizeof(ACL)]={0};SECURITY_DESCRIPTOR_RELATIVE* relative=(SECURITY_DESCRIPTOR_RELATIVE*)sd;relative->Revision=1;relative->Control=SE_SELF_RELATIVE;relative->Dacl=sizeof(*relative);((ACL*)(sd+sizeof(*relative)))->AclSize=sizeof(ACL);
     PSECURITY_DESCRIPTOR descriptors[5]={sd,NULL,NULL,NULL,NULL};DWORD attrs[5]={32,0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu};
     assert(ServiceJournal_Encode(&b,L"Agent",SERVICE_JOURNAL_BACKED_UP,1,s,descriptors,attrs));DWORD length=b.offset;
-    ServiceJournalRecord* r=decode(data,length);assert(r&&r->phase==2&&r->fileMask==1&&r->binding->running&&!r->binding->legacy&&r->binding->groupMember);
+    ServiceJournalRecord* r=decode(data,length);assert(r&&r->phase==2&&r->fileMask==1&&r->binding->running&&!r->binding->legacy&&r->binding->legacyGroupMember&&r->binding->serviceGroupMember);
     assert(!_wcsicmp(r->binding->config->lpDisplayName,L"Agent"));assert(r->binding->config->dwTagId==77);
     assert(r->binding->config->lpDependencies[6]=='T');assert(((SERVICE_FAILURE_ACTIONSW*)r->binding->extra[1])->lpsaActions[1].Delay==15000);
     assert(r->binding->values[9].size==3&&!memcmp(r->binding->values[9].data,"bad",3));assert(r->attributes[0]==32&&r->dacl[0]);

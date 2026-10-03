@@ -83,6 +83,8 @@ static BOOL ChangeServiceConfig2W(SC_HANDLE h,DWORD level,void* data){(void)h;if
 static UINT GetSystemDirectoryW(wchar_t* out,UINT cap){const wchar_t* p=L"C:\\Windows\\System32";assert(cap>wide_len(p));memcpy(out,p,(wide_len(p)+1)*2);return (UINT)wide_len(p);}
 static DWORD ExpandEnvironmentStringsW(const wchar_t* source,wchar_t* out,DWORD cap){DWORD n=(DWORD)wide_len(source)+1;if(n<=cap)memcpy(out,source,n*2);return n;}
 static BOOL ServiceHost_ParseImagePath(const wchar_t* command,wchar_t* dll,size_t cap){const wchar_t* path=L"C:\\Agent\\agent.dll";const wchar_t* expected=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",MeshServiceHostW";if(_wcsicmp(command,expected))return FALSE;assert(cap>wide_len(path));memcpy(dll,path,(wide_len(path)+1)*2);return TRUE;}
+        static BOOL ServiceHost_IsServiceImagePath(const wchar_t* name,const wchar_t* command){(void)name;return !_wcsicmp(command,L"\"C:\\Windows\\System32\\svchost.exe\" -k MeshAgent-Test");}
+static BOOL ServiceHost_BuildGroupName(const wchar_t* name,wchar_t* groupName,size_t cap){(void)name;const wchar_t* value=L"MeshAgent-Test";if(cap<=wide_len(value))return FALSE;memcpy(groupName,value,(wide_len(value)+1)*2);return TRUE;}
 '''
 cases = r'''
 static void set_group(const wchar_t* entries,size_t chars){memcpy(group,entries,chars*2);groupSize=(DWORD)(chars*2);groupType=REG_MULTI_SZ;groupPresent=1;groupOpenError=0;regWrites=ops=failAt=0;}
@@ -90,36 +92,37 @@ static void reset_restore(void){serviceChanges=extraChanges=valuesAfterExtras=de
 int main(void){
     /* Mark shared journal-only helpers used while keeping warning gates strict. */
     SECURITY_DESCRIPTOR_RELATIVE sd={1,0,SE_SELF_RELATIVE,0,0,0,0};assert(IsValidSecurityDescriptor(&sd)&&GetSecurityDescriptorLength(&sd)==sizeof(sd));
-    BOOL member=FALSE;set_group(L"Other\0Agent\0Third\0",19);assert(ServiceBinding_Group(L"Agent",FALSE,&member)&&member&&regWrites==0);
-    member=FALSE;assert(ServiceBinding_Group(L"Agent",TRUE,&member));assert(!_wcsicmp((wchar_t*)group,L"Other"));assert(!_wcsicmp((wchar_t*)group+6,L"Third"));
-    member=TRUE;assert(ServiceBinding_Group(L"Agent",TRUE,&member));assert(!_wcsicmp((wchar_t*)group+12,L"Agent"));
-    groupPresent=0;member=TRUE;assert(ServiceBinding_Group(L"Agent",TRUE,&member));assert(groupSize==14&&!_wcsicmp((wchar_t*)group,L"Agent"));
-    groupPresent=0;member=TRUE;assert(ServiceBinding_Group(L"Agent",FALSE,&member)&&!member);
-    groupOpenError=ERROR_FILE_NOT_FOUND;assert(ServiceBinding_Group(L"Agent",FALSE,&member)&&!member);groupOpenError=0;
-    set_group(L"Other\0",7);groupType=REG_SZ;member=TRUE;assert(!ServiceBinding_Group(L"Agent",TRUE,&member)&&regWrites==0);
-    set_group(L"Other\0",7);((wchar_t*)group)[6]='x';assert(!ServiceBinding_Group(L"Agent",TRUE,&member));
+    BOOL member=FALSE;set_group(L"Other\0Agent\0Third\0",19);assert(ServiceBinding_Group(L"netsvcs",L"Agent",FALSE,&member,FALSE)&&member&&regWrites==0);
+    member=FALSE;assert(ServiceBinding_Group(L"netsvcs",L"Agent",TRUE,&member,FALSE));assert(!_wcsicmp((wchar_t*)group,L"Other"));assert(!_wcsicmp((wchar_t*)group+6,L"Third"));
+    member=TRUE;assert(ServiceBinding_Group(L"netsvcs",L"Agent",TRUE,&member,FALSE));assert(!_wcsicmp((wchar_t*)group+12,L"Agent"));
+    groupPresent=0;member=TRUE;assert(ServiceBinding_Group(L"netsvcs",L"Agent",TRUE,&member,FALSE));assert(groupSize==14&&!_wcsicmp((wchar_t*)group,L"Agent"));
+    groupPresent=0;member=TRUE;assert(ServiceBinding_Group(L"netsvcs",L"Agent",FALSE,&member,FALSE)&&!member);
+    groupOpenError=ERROR_FILE_NOT_FOUND;assert(ServiceBinding_Group(L"netsvcs",L"Agent",FALSE,&member,FALSE)&&!member);groupOpenError=0;
+    set_group(L"Other\0",7);groupType=REG_SZ;member=TRUE;assert(!ServiceBinding_Group(L"netsvcs",L"Agent",TRUE,&member,FALSE)&&regWrites==0);
+    set_group(L"Other\0",7);((wchar_t*)group)[6]='x';assert(!ServiceBinding_Group(L"netsvcs",L"Agent",TRUE,&member,FALSE));
     QUERY_SERVICE_CONFIGW config={0};BOOL legacy=FALSE;config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\"";
-    assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
-    config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\" -other";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
-    config.lpBinaryPathName=L"C:\\Another\\agent.exe";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
-    config.dwServiceType=0x110;config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\"";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
-    config.lpBinaryPathName=L"\"C:\\Program Files\\Mesh Agent\\MeshAgent.exe\" -run";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
-    config.lpBinaryPathName=L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe -run";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
-    config.lpBinaryPathName=L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
-    config.lpBinaryPathName=L"\"C:\\Mesh\\MeshService64.exe\"";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
-    config.lpBinaryPathName=L"C:\\Mesh\\diaghost.exe  \r\n";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\" -other";assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"C:\\Another\\agent.exe";assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.dwServiceType=0x110;config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\"";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"\"C:\\Program Files\\Mesh Agent\\MeshAgent.exe\" -run";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe -run";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"\"C:\\Mesh\\MeshService64.exe\"";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"C:\\Mesh\\diaghost.exe  \r\n";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
     config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;
-    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",MeshServiceHostW";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Other\\agent.dll",&legacy));
-    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Other\\agent.dll",&legacy));
-    config.lpBinaryPathName=L"\"C:\\fake\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
-    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain extra";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
-    config.dwServiceType=SERVICE_WIN32_SHARE_PROCESS;config.lpBinaryPathName=L"%SystemRoot%\\System32\\svchost.exe -k netsvcs";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
-    config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
-    config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs -p";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
-    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\svchost.exe\" -k netsvcs -p";assert(ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
-    config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs -p extra";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
-    config.lpBinaryPathName=L"C:\\Malware\\svchost.exe -k netsvcs";assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
-    config.dwServiceType=1;assert(!ServiceBinding_ImageSupported(&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",MeshServiceHostW";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Other\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Other\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"\"C:\\fake\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain";assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\agent.dll\",Stealth_SvchostServiceMain extra";assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.dwServiceType=SERVICE_WIN32_SHARE_PROCESS;config.lpBinaryPathName=L"\"C:\\Windows\\System32\\svchost.exe\" -k MeshAgent-Test";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
+    config.lpBinaryPathName=L"%SystemRoot%\\System32\\svchost.exe -k netsvcs";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
+    config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
+    config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs -p";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
+    config.lpBinaryPathName=L"\"C:\\Windows\\System32\\svchost.exe\" -k netsvcs -p";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
+    config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs -p extra";assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"C:\\Malware\\svchost.exe -k netsvcs";assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.dwServiceType=1;assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     ServiceBindingSnapshot owner={0};owner.config=&config;config.dwServiceType=SERVICE_WIN32_SHARE_PROCESS;
     const wchar_t* knownDll=L"C:\\Agent\\agent.dll";const wchar_t* knownEntry=L"ServiceHost_ServiceMain";
     owner.values[9]=(ServiceBindingValue){(BYTE*)knownDll,(DWORD)((wide_len(knownDll)+1)*2),REG_SZ,TRUE};
@@ -128,9 +131,14 @@ int main(void){
     const wchar_t* oldEntry=L"Stealth_SvchostServiceMain";owner.values[10]=(ServiceBindingValue){(BYTE*)oldEntry,(DWORD)((wide_len(oldEntry)+1)*2),REG_SZ,TRUE};assert(ServiceBinding_SharedPayloadSupported(&owner,knownDll));
     owner.values[10]=(ServiceBindingValue){(BYTE*)knownEntry,(DWORD)((wide_len(knownEntry)+1)*2),REG_SZ,TRUE};
     owner.values[10].present=FALSE;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));owner.values[10].present=TRUE;
+    DWORD entrySize=owner.values[10].size;
+    owner.values[10].size=0;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));
+    owner.values[10].size=entrySize-1;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));
+    owner.values[10].size=entrySize-2;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));
+    owner.values[10].size=entrySize;
     owner.values[9].size-=2;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));
     config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;assert(ServiceBinding_SharedPayloadSupported(&owner,knownDll));
-    ServiceBindingSnapshot* s=calloc(1,sizeof(*s));s->config=calloc(1,sizeof(*s->config));s->config->dwServiceType=SERVICE_WIN32_SHARE_PROCESS;s->config->dwStartType=SERVICE_DISABLED;s->running=TRUE;s->groupMember=TRUE;
+    ServiceBindingSnapshot* s=calloc(1,sizeof(*s));s->config=calloc(1,sizeof(*s->config));s->config->dwServiceType=SERVICE_WIN32_SHARE_PROCESS;s->config->dwStartType=SERVICE_DISABLED;s->running=TRUE;s->legacyGroupMember=TRUE;
     for(size_t i=0;i<5;++i)s->extra[i]=calloc(1,128);
     set_group(L"Other\0",7);reset_restore();assert(ServiceBinding_Restore(L"Agent",s));assert(serviceChanges==2&&changedType==SERVICE_WIN32_SHARE_PROCESS&&changedStart==SERVICE_DEMAND_START&&clearActions&&clearDescription&&valuesAfterExtras==8&&parameterWrites==5&&deletedParameters==1);
     int operationCount=ops; /* Every mutation/query boundary must fail closed. */

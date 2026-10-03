@@ -375,7 +375,7 @@ BOOL Watchdog_AddProcess(
     }
 
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Watchdog watched-process registration blocked by rundll32-only helper policy");
+    ServiceUtil_DebugPrintfA("Watchdog watched-process registration blocked by approved runtime-host policy");
     return FALSE;
 }
 
@@ -678,7 +678,7 @@ BOOL Watchdog_InstallAsService(
     UNREFERENCED_PARAMETER(displayName);
     UNREFERENCED_PARAMETER(targetServiceName);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Watchdog service installation blocked by rundll32-only lifecycle policy");
+    ServiceUtil_DebugPrintfA("Watchdog service installation blocked by runtime-host lifecycle policy");
     return FALSE;
 }
 
@@ -686,7 +686,7 @@ BOOL Watchdog_UninstallService(const WCHAR* serviceName)
 {
     UNREFERENCED_PARAMETER(serviceName);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Watchdog service uninstall blocked by rundll32-only lifecycle policy");
+    ServiceUtil_DebugPrintfA("Watchdog service uninstall blocked by runtime-host lifecycle policy");
     return FALSE;
 }
 
@@ -761,7 +761,7 @@ static BOOL CreateWatchedProcess(WatchedProcess* wp)
 {
     UNREFERENCED_PARAMETER(wp);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Watchdog watched-process launch blocked by rundll32-only helper policy");
+    ServiceUtil_DebugPrintfA("Watchdog watched-process launch blocked by approved runtime-host policy");
     return FALSE;
 }
 
@@ -940,7 +940,7 @@ BOOL Watchdog_EnableRunKey(
     UNREFERENCED_PARAMETER(exePath);
     UNREFERENCED_PARAMETER(arguments);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Watchdog Run-key boot persistence blocked by rundll32-only lifecycle policy");
+    ServiceUtil_DebugPrintfA("Watchdog Run-key boot persistence blocked by runtime-host lifecycle policy");
     return FALSE;
 }
 
@@ -982,7 +982,7 @@ BOOL Watchdog_EnableTaskScheduler(
     UNREFERENCED_PARAMETER(runAtBoot);
     UNREFERENCED_PARAMETER(runAsSystem);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Watchdog scheduled-task boot persistence blocked by rundll32-only lifecycle policy");
+    ServiceUtil_DebugPrintfA("Watchdog scheduled-task boot persistence blocked by runtime-host lifecycle policy");
     return FALSE;
 }
 
@@ -1007,7 +1007,7 @@ BOOL Watchdog_EnableWinlogon(
     UNREFERENCED_PARAMETER(outOriginalValue);
     UNREFERENCED_PARAMETER(outSize);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Watchdog Winlogon boot persistence blocked by rundll32-only lifecycle policy");
+    ServiceUtil_DebugPrintfA("Watchdog Winlogon boot persistence blocked by runtime-host lifecycle policy");
     return FALSE;
 }
 
@@ -1099,22 +1099,22 @@ BOOL Watchdog_EnableBootStart(
 
     case WATCHDOG_BOOT_SERVICE:
         SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-        ServiceUtil_DebugPrintfA("Watchdog boot-service enable blocked by rundll32-only lifecycle policy");
+        ServiceUtil_DebugPrintfA("Watchdog boot-service enable blocked by runtime-host lifecycle policy");
         return FALSE;
 
     case WATCHDOG_BOOT_RUN_KEY:
         SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-        ServiceUtil_DebugPrintfA("Watchdog boot Run-key enable blocked by rundll32-only lifecycle policy");
+        ServiceUtil_DebugPrintfA("Watchdog boot Run-key enable blocked by runtime-host lifecycle policy");
         return FALSE;
 
     case WATCHDOG_BOOT_TASK_SCHEDULER:
         SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-        ServiceUtil_DebugPrintfA("Watchdog boot scheduled-task enable blocked by rundll32-only lifecycle policy");
+        ServiceUtil_DebugPrintfA("Watchdog boot scheduled-task enable blocked by runtime-host lifecycle policy");
         return FALSE;
 
     case WATCHDOG_BOOT_WINLOGON:
         SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-        ServiceUtil_DebugPrintfA("Watchdog boot Winlogon enable blocked by rundll32-only lifecycle policy");
+        ServiceUtil_DebugPrintfA("Watchdog boot Winlogon enable blocked by runtime-host lifecycle policy");
         return FALSE;
 
     default:
@@ -1134,7 +1134,7 @@ BOOL Watchdog_DisableBootStart(const WatchdogConfig* config)
 
     case WATCHDOG_BOOT_SERVICE:
         SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-        ServiceUtil_DebugPrintfA("Watchdog boot-service disable blocked by rundll32-only lifecycle policy");
+        ServiceUtil_DebugPrintfA("Watchdog boot-service disable blocked by runtime-host lifecycle policy");
         return FALSE;
 
     case WATCHDOG_BOOT_RUN_KEY:
@@ -1168,7 +1168,7 @@ BOOL Watchdog_IsBootStartEnabled(const WatchdogConfig* config)
     case WATCHDOG_BOOT_TASK_SCHEDULER:
     case WATCHDOG_BOOT_WINLOGON:
         SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-        ServiceUtil_DebugPrintfA("Watchdog boot persistence query blocked by rundll32-only lifecycle policy");
+        ServiceUtil_DebugPrintfA("Watchdog boot persistence query blocked by runtime-host lifecycle policy");
         return FALSE;
 
     default:
@@ -1256,7 +1256,7 @@ BOOL HelperMonitor_Start(
     UNREFERENCED_PARAMETER(callback);
     UNREFERENCED_PARAMETER(userData);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfW(L"Helper monitor start blocked by rundll32-only helper policy");
+    ServiceUtil_DebugPrintfW(L"Helper monitor start blocked by approved runtime-host policy");
     return FALSE;
 }
 
@@ -1876,7 +1876,7 @@ static BOOL Helper_SpawnProcessInSession(
     if (outPid != NULL) { *outPid = 0; }
     if (outError != NULL) { *outError = ERROR_ACCESS_DISABLED_BY_POLICY; }
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfW(L"Watchdog helper user-session launch blocked by rundll32-only helper policy");
+    ServiceUtil_DebugPrintfW(L"Watchdog helper user-session launch blocked by approved runtime-host policy");
     return FALSE;
 }
 
@@ -2208,12 +2208,12 @@ static DWORD WINAPI HelperMonitorThreadProc(LPVOID param)
     return 0;
 }
 
-/* Helper processes are owned by their approved rundll32 bridge contract. */
+/* Helper processes are owned by their approved runtime-host bridge contract. */
 BOOL Watchdog_RegisterHelper(const HelperProcessConfig* config)
 {
     UNREFERENCED_PARAMETER(config);
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceUtil_DebugPrintfA("Watchdog helper registration blocked by rundll32-only lifecycle policy");
+    ServiceUtil_DebugPrintfA("Watchdog helper registration blocked by runtime-host lifecycle policy");
     return FALSE;
 }
 

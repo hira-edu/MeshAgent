@@ -686,38 +686,45 @@ function serviceManager()
         };
 
         this.enumerateService = function () {
-            var machineName = this.GM.CreatePointer();
-            var dbName = this.GM.CreatePointer();
             var handle = this.proxy.OpenSCManagerA(0x00, 0x00, 0x0001 | 0x0004);
-
-            var bytesNeeded = this.GM.CreatePointer();
-            var servicesReturned = this.GM.CreatePointer();
-            var resumeHandle = this.GM.CreatePointer();
-            //var services = this.proxy.CreateVariable(262144);
-            var success = this.proxy.EnumServicesStatusExW(handle, 0, 0x00000030, 0x00000003, 0x00, 0x00, bytesNeeded, servicesReturned, resumeHandle, 0x00);
-
-            var ptrSize = dbName._size;
-            var sz = bytesNeeded.Deref(0, dbName._size).toBuffer().readUInt32LE();
-
-            if (sz < 0) { throw ('error enumerating services'); }
-
+            if (handle.Val == 0) { throw new Error('Error opening service manager: ' + this.proxy2.GetLastError().Val); }
+            try
+            {
+            var bytesNeeded = this.GM.CreateVariable(4);
+            var servicesReturned = this.GM.CreateVariable(4);
+            var resumeHandle = this.GM.CreateVariable(4);
+            resumeHandle.toBuffer().writeUInt32LE(0);
+            // The SCM limit is 256 KiB. Consume partial pages before resuming;
+            // a size probe followed by one unchecked call can lose services.
+            var sz = 262144;
             var services = this.GM.CreateVariable(sz);
-            this.proxy.EnumServicesStatusExW(handle, 0, 0x00000030, 0x00000003, services, sz, bytesNeeded, servicesReturned, resumeHandle, 0x00);
-
+            var ptrSize = this.GM.PointerSize;
             var blockSize = 36 + (2 * ptrSize);
             blockSize += ((ptrSize - (blockSize % ptrSize)) % ptrSize);
             var retVal = [];
-            for (var i = 0; i < servicesReturned.Deref(0, dbName._size).toBuffer().readUInt32LE(); ++i)
+            for (;;)
             {
+                var previousResume = resumeHandle.toBuffer().readUInt32LE();
+                var success = this.proxy.EnumServicesStatusExW(handle, 0, 0x00000030, 0x00000003, services, sz, bytesNeeded, servicesReturned, resumeHandle, 0x00).Val;
+                var error = success ? 0 : this.proxy2.GetLastError().Val;
+                if (!success && error != 234) { throw new Error('Error enumerating services: ' + error); }
+                var count = servicesReturned.toBuffer().readUInt32LE();
+                if (count * blockSize > sz) { throw new Error('Invalid service enumeration page'); }
+                for (var i = 0; i < count; ++i)
+                {
                 var token = services.Deref(i * blockSize, blockSize);
                 var j = {};
                 j.name = token.Deref(0, ptrSize).Deref().Wide2UTF8;
                 j.displayName = token.Deref(ptrSize, ptrSize).Deref().Wide2UTF8;
                 j.status = parseServiceStatus(token.Deref(2 * ptrSize, 36));
                 retVal.push(j);
+                }
+                if (success) { break; }
+                if (resumeHandle.toBuffer().readUInt32LE() == previousResume) { throw new Error('Service enumeration did not advance'); }
             }
-            this.proxy.CloseServiceHandle(handle);
             return (retVal);
+            }
+            finally { this.proxy.CloseServiceHandle(handle); }
         }
         this.getService = function getService(name)
         {

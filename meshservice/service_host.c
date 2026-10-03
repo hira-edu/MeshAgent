@@ -1,9 +1,8 @@
 /*
- * MeshAgent rundll32 Service Hosting Implementation
+ * MeshAgent Native Service Hosting Implementation
  *
- * Hosts MeshAgent through the approved MeshServiceHostW rundll32 callback
- * and an own-process SCM service. The selected host mode remains visible in service
- * metadata and operator logs.
+ * Hosts MeshAgent as a service DLL in a scoped service group.
+ * The legacy MeshServiceHostW callback remains only for update/uninstall migration.
  */
 
 #include <windows.h>
@@ -38,7 +37,7 @@ static void MeshAgent_Run(MeshAgentHostContainer* agent)
     }
 }
 
-// Global state for rundll32-hosted service
+// Global state for the SCM-hosted service DLL
 static SERVICE_STATUS_HANDLE g_ServiceHostStatusHandle = NULL;
 static SERVICE_STATUS g_ServiceHostStatus = {0};
 static BOOL g_ServiceHostRunning = FALSE;
@@ -610,10 +609,10 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
     ctx.controlPipeHandle = INVALID_HANDLE_VALUE;
     ctx.dataPipeHandle = INVALID_HANDLE_VALUE;
 
-    // rundll32 supplies its own executable instance, not this DLL's handle.
+    // The system DLL loader supplies its own executable instance, not this DLL's handle.
     ServiceHost_InitializePaths(NULL);
 
-    // rundll32.exe's lpCmdLine parameter is unreliable for W-suffix entry points
+    // The system DLL loader's lpCmdLine parameter is unreliable for W-suffix entry points
     // in cross-session spawns — it passes the ANSI PEB command line bytes as-is,
     // producing garbled WIDE text.  Use GetCommandLineW() directly and extract
     // the arguments after the entry point name.
@@ -1238,7 +1237,7 @@ static void ServiceHost_LogProvisioningStatus(void)
 }
 
 /**
- * Service control handler for rundll32-hosted mode
+ * Service control handler for the SCM-hosted service DLL
  */
 DWORD WINAPI ServiceHost_CtrlHandler(
     DWORD dwControl,
@@ -1402,9 +1401,9 @@ static BOOL ServiceHost_ApplyUpdateStartupDisposition(BOOL* stopStartupOut)
 }
 
 /**
- * Private SCM entry point dispatched by MeshServiceHostW.
+ * SCM entry point exported for native ServiceDll loading.
  */
-static VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
+VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
 {
     BOOL stopForUpdateRecovery = FALSE;
     if (!ServiceHost_AcceptScmName(dwArgc, lpszArgv))
@@ -1429,7 +1428,16 @@ static VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
     }
 
     // Initialize service status structure
-    g_ServiceHostStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    {
+        wchar_t processPath[MAX_PATH * 4] = {0};
+        wchar_t legacyHostPath[MAX_PATH * 4] = {0};
+        DWORD processLength = GetModuleFileNameW(NULL, processPath, _countof(processPath));
+        g_ServiceHostStatus.dwServiceType =
+            (processLength && processLength < _countof(processPath) &&
+             MeshRuntimeHost_GetSystemHostPathW(legacyHostPath, _countof(legacyHostPath)) &&
+             _wcsicmp(processPath, legacyHostPath) == 0) ?
+                SERVICE_WIN32_OWN_PROCESS : SERVICE_WIN32_SHARE_PROCESS;
+    }
     g_ServiceHostStatus.dwCurrentState = SERVICE_START_PENDING;
     g_ServiceHostStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP |
                                           SERVICE_ACCEPT_SHUTDOWN |
@@ -1472,7 +1480,7 @@ static VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
 
     if (!g_ServiceHostAgent)
     {
-        ServiceUtil_DebugPrintfA("MeshAgent_Create failed in rundll32 service main");
+        ServiceUtil_DebugPrintfA("MeshAgent_Create failed in native service main");
         ServiceHost_LogLine(L"MeshAgent_Create failed");
         // Failed to create agent
         g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
@@ -1593,15 +1601,11 @@ static VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
     SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 }
 
-/* One command contract for registration, discovery and the runtime callback.
- * Reject relative paths and syntax that could alter rundll32's entry selection. */
-BOOL ServiceHost_BuildImagePath(const wchar_t* dllPath, wchar_t* command, size_t commandCch)
+static BOOL ServiceHost_ValidateAbsoluteDllPath(const wchar_t* dllPath)
 {
-    wchar_t host[MAX_PATH * 4] = {0};
     wchar_t absolute[MAX_PATH * 4] = {0};
     DWORD length;
-    if (!dllPath || !command || !commandCch) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
-    command[0] = 0;
+    if (!dllPath) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     length = (DWORD)wcslen(dllPath);
     if (length < 4 || length >= MAX_PATH || _wcsicmp(dllPath + length - 4, L".dll") != 0 ||
         !((dllPath[0] >= L'A' && dllPath[0] <= L'Z') || (dllPath[0] >= L'a' && dllPath[0] <= L'z')) ||
@@ -1615,9 +1619,24 @@ BOOL ServiceHost_BuildImagePath(const wchar_t* dllPath, wchar_t* command, size_t
         }
     }
     length = GetFullPathNameW(dllPath, _countof(absolute), absolute, NULL);
-    if (!length || length >= _countof(absolute) || _wcsicmp(absolute, dllPath) != 0) { SetLastError(ERROR_INVALID_NAME); return FALSE; }
+    if (!length || length >= _countof(absolute) || _wcsicmp(absolute, dllPath) != 0)
+    {
+        SetLastError(ERROR_INVALID_NAME);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* Legacy legacy callback command contract. This parser is intentionally retained only
+ * so update, server-update and uninstall can recognize existing installations. */
+BOOL ServiceHost_BuildImagePath(const wchar_t* dllPath, wchar_t* command, size_t commandCch)
+{
+    wchar_t host[MAX_PATH * 4] = {0};
+    if (!dllPath || !command || !commandCch) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    command[0] = 0;
+    if (!ServiceHost_ValidateAbsoluteDllPath(dllPath)) { return FALSE; }
     if (!MeshRuntimeHost_GetSystemHostPathW(host, _countof(host))) { return FALSE; }
-    if (FAILED(StringCchPrintfW(command, commandCch, L"\"%ls\" \"%ls\",%ls", host, dllPath, MESH_RUNTIME_HOST_ENTRY_SERVICE_W)))
+    if (FAILED(StringCchPrintfW(command, commandCch, L"\"%ls\" \"%ls\",%ls", host, dllPath, MESH_RUNTIME_HOST_ENTRY_LEGACY_SERVICE_W)))
     {
         command[0] = 0;
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
@@ -1639,7 +1658,7 @@ BOOL ServiceHost_ParseImagePath(const wchar_t* command, wchar_t* dllPath, size_t
         wcsncmp(hostEnd, L"\" \"", 3) != 0) { return FALSE; }
     dllStart = hostEnd + 3;
     dllEnd = wcschr(dllStart, L'"');
-    if (!dllEnd || wcscmp(dllEnd, L"\"," MESH_RUNTIME_HOST_ENTRY_SERVICE_W) != 0) { return FALSE; }
+    if (!dllEnd || wcscmp(dllEnd, L"\"," MESH_RUNTIME_HOST_ENTRY_LEGACY_SERVICE_W) != 0) { return FALSE; }
     length = (size_t)(dllEnd - dllStart);
     if (!length || length >= dllPathCch) { return FALSE; }
     memcpy(dllPath, dllStart, length * sizeof(wchar_t));
@@ -1650,6 +1669,112 @@ BOOL ServiceHost_ParseImagePath(const wchar_t* command, wchar_t* dllPath, size_t
         return FALSE;
     }
     return TRUE;
+}
+
+BOOL ServiceHost_BuildGroupName(const wchar_t* serviceName, wchar_t* groupName, size_t groupNameCch)
+{
+    unsigned __int64 hash = 1469598103934665603ULL;
+    wchar_t normalized[256] = {0};
+    size_t length;
+    if (!serviceName || !serviceName[0] || !groupName || !groupNameCch) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    length = wcsnlen_s(serviceName, 256);
+    if (!length || length >= 256) { SetLastError(ERROR_INVALID_NAME); return FALSE; }
+    if (FAILED(StringCchCopyW(normalized, _countof(normalized), serviceName)) ||
+        CharLowerBuffW(normalized, (DWORD)length) != length) { SetLastError(ERROR_INVALID_NAME); return FALSE; }
+    for (size_t i = 0; i < length; ++i)
+    {
+        wchar_t ch = normalized[i];
+        if (ch < L' ' || ch == L'\\' || ch == L'/' || ch == L'\"') { SetLastError(ERROR_INVALID_NAME); return FALSE; }
+        hash ^= (unsigned __int64)ch;
+        hash *= 1099511628211ULL;
+    }
+    if (FAILED(StringCchPrintfW(groupName, groupNameCch, L"MeshAgent-%016I64X", hash)))
+    {
+        groupName[0] = 0;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL ServiceHost_BuildServiceImagePath(const wchar_t* serviceName, wchar_t* command, size_t commandCch)
+{
+    wchar_t host[MAX_PATH * 4] = {0};
+    wchar_t group[64] = {0};
+    if (!command || !commandCch) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    command[0] = 0;
+    if (!ServiceHost_BuildGroupName(serviceName, group, _countof(group)) ||
+        !MeshRuntimeHost_GetServiceHostPathW(host, _countof(host))) { return FALSE; }
+    if (FAILED(StringCchPrintfW(command, commandCch, L"\"%ls\" -k %ls", host, group)))
+    {
+        command[0] = 0;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL ServiceHost_IsServiceImagePath(const wchar_t* serviceName, const wchar_t* command)
+{
+    wchar_t expected[MAX_PATH * 4] = {0};
+    return command && ServiceHost_BuildServiceImagePath(serviceName, expected, _countof(expected)) &&
+        _wcsicmp(expected, command) == 0;
+}
+
+BOOL ServiceHost_ReadServiceDllPath(const wchar_t* serviceName, wchar_t* dllPath, size_t dllPathCch, BOOL allowLegacyEntry)
+{
+    wchar_t keyPath[512] = {0};
+    wchar_t rawDll[MAX_PATH * 4] = {0};
+    wchar_t serviceMain[128] = {0};
+    HKEY key = NULL;
+    DWORD type = 0, size = sizeof(serviceMain);
+    LONG result;
+    BOOL ok = FALSE;
+    if (!serviceName || !serviceName[0] || !dllPath || !dllPathCch) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    dllPath[0] = 0;
+    if (FAILED(StringCchPrintfW(keyPath, _countof(keyPath), L"SYSTEM\\CurrentControlSet\\Services\\%ls\\Parameters", serviceName))) { return FALSE; }
+    result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_QUERY_VALUE, &key);
+    if (result != ERROR_SUCCESS) { SetLastError(result); return FALSE; }
+    result = RegQueryValueExW(key, L"ServiceMain", NULL, &type, (BYTE*)serviceMain, &size);
+    if (result != ERROR_SUCCESS || type != REG_SZ || size < sizeof(wchar_t) || size > sizeof(serviceMain) ||
+        size % sizeof(wchar_t) || serviceMain[size / sizeof(wchar_t) - 1] != 0)
+    {
+        SetLastError(result == ERROR_SUCCESS ? ERROR_INVALID_DATA : result);
+        goto done;
+    }
+    if ((wcslen(serviceMain) + 1) * sizeof(wchar_t) != size) { SetLastError(ERROR_INVALID_DATA); goto done; }
+    if (wcscmp(serviceMain, MESH_RUNTIME_HOST_ENTRY_SERVICE_W) != 0 &&
+        !(allowLegacyEntry && wcscmp(serviceMain, L"Stealth_SvchostServiceMain") == 0))
+    {
+        SetLastError(ERROR_INVALID_DATA);
+        goto done;
+    }
+    size = sizeof(rawDll); type = 0;
+    result = RegQueryValueExW(key, L"ServiceDll", NULL, &type, (BYTE*)rawDll, &size);
+    if (result != ERROR_SUCCESS ||
+        (type != REG_EXPAND_SZ && !(allowLegacyEntry && type == REG_SZ)) ||
+        size < sizeof(wchar_t) || size > sizeof(rawDll) || size % sizeof(wchar_t))
+    {
+        SetLastError(result == ERROR_SUCCESS ? ERROR_INVALID_DATA : result);
+        goto done;
+    }
+    if (rawDll[size / sizeof(wchar_t) - 1] != 0 ||
+        (wcslen(rawDll) + 1) * sizeof(wchar_t) != size) { SetLastError(ERROR_INVALID_DATA); goto done; }
+    if (type == REG_EXPAND_SZ)
+    {
+        DWORD count = ExpandEnvironmentStringsW(rawDll, dllPath, (DWORD)dllPathCch);
+        if (!count || count > dllPathCch) { SetLastError(ERROR_INSUFFICIENT_BUFFER); goto done; }
+    }
+    else if (FAILED(StringCchCopyW(dllPath, dllPathCch, rawDll)))
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        goto done;
+    }
+    if (!ServiceHost_ValidateAbsoluteDllPath(dllPath)) { dllPath[0] = 0; goto done; }
+    ok = TRUE;
+done:
+    RegCloseKey(key);
+    return ok;
 }
 
 void CALLBACK MeshServiceHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
@@ -1665,7 +1790,7 @@ void CALLBACK MeshServiceHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, 
     UNREFERENCED_PARAMETER(hinstDLL);
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nCmdShow);
-    /* W-suffix rundll32 callbacks must parse the authoritative Unicode command
+    /* W-suffix legacy callbacks must parse the authoritative Unicode command
      * line, not lpCmdLine (which can carry ANSI bytes on some Windows paths). */
     if (!ServiceHost_ParseImagePath(GetCommandLineW(), configuredDll, _countof(configuredDll)) ||
         !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -1683,13 +1808,13 @@ void CALLBACK MeshServiceHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, 
     exitCode = g_ServiceHostStatus.dwWin32ExitCode == ERROR_SERVICE_SPECIFIC_ERROR ?
         g_ServiceHostStatus.dwServiceSpecificExitCode : g_ServiceHostStatus.dwWin32ExitCode;
 done:
-    if (exitCode != ERROR_SUCCESS) { ServiceHost_LogLine(L"Primary rundll32 service host exited with error %lu", exitCode); }
+    if (exitCode != ERROR_SUCCESS) { ServiceHost_LogLine(L"Legacy compatibility service host exited with error %lu", exitCode); }
     ExitProcess(exitCode);
 }
 
-/* Migration/uninstall cleanup only: the current runtime never joins a shared
- * host group. Preserve every unrelated membership and registry value. */
-static BOOL ServiceHost_RemoveLegacyGroupMembership(const wchar_t* serviceName)
+/* Remove only this service from a group. An empty scoped group value is
+ * deleted; shared legacy groups retain every unrelated member. */
+static BOOL ServiceHost_RemoveGroupMembership(const wchar_t* groupName, const wchar_t* serviceName, BOOL deleteEmptyValue)
 {
     HKEY key = NULL;
     DWORD size = 0, type = 0;
@@ -1700,12 +1825,12 @@ static BOOL ServiceHost_RemoveLegacyGroupMembership(const wchar_t* serviceName)
         L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &key);
     if (result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND) { return TRUE; }
     if (result != ERROR_SUCCESS) { return FALSE; }
-    result = RegQueryValueExW(key, L"netsvcs", NULL, &type, NULL, &size);
+    result = RegQueryValueExW(key, groupName, NULL, &type, NULL, &size);
     if (result == ERROR_FILE_NOT_FOUND) { ok = TRUE; goto done; }
     if (result != ERROR_SUCCESS || type != REG_MULTI_SZ || size < 2 * sizeof(wchar_t) ||
         size > 65536 || size % sizeof(wchar_t)) { goto done; }
     list = (wchar_t*)calloc(1, size);
-    if (!list || RegQueryValueExW(key, L"netsvcs", NULL, &type, (BYTE*)list, &size) != ERROR_SUCCESS || type != REG_MULTI_SZ) { goto done; }
+    if (!list || RegQueryValueExW(key, groupName, NULL, &type, (BYTE*)list, &size) != ERROR_SUCCESS || type != REG_MULTI_SZ) { goto done; }
     if (size < 2 * sizeof(wchar_t) || size % sizeof(wchar_t)) { goto done; }
     chars = size / sizeof(wchar_t);
     if (list[chars - 1] || list[chars - 2]) { goto done; }
@@ -1717,50 +1842,157 @@ static BOOL ServiceHost_RemoveLegacyGroupMembership(const wchar_t* serviceName)
         read += length;
     }
     if (!found) { ok = TRUE; goto done; }
-    list[written++] = 0;
-    if (written == 1) { list[written++] = 0; }
-    ok = RegSetValueExW(key, L"netsvcs", 0, REG_MULTI_SZ, (BYTE*)list, (DWORD)(written * sizeof(wchar_t))) == ERROR_SUCCESS;
+    if (written == 0 && deleteEmptyValue)
+    {
+        result = RegDeleteValueW(key, groupName);
+        ok = result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND;
+    }
+    else
+    {
+        list[written++] = 0;
+        if (written == 1) { list[written++] = 0; }
+        ok = RegSetValueExW(key, groupName, 0, REG_MULTI_SZ, (BYTE*)list, (DWORD)(written * sizeof(wchar_t))) == ERROR_SUCCESS;
+    }
 done:
     free(list);
     RegCloseKey(key);
     return ok;
 }
 
-static BOOL ServiceHost_RemoveLegacyParameters(const wchar_t* serviceName)
+static BOOL ServiceHost_ConfigureServiceGroup(const wchar_t* groupName, const wchar_t* serviceName)
 {
-    const wchar_t* names[] = {L"ServiceDll", L"ServiceMain", L"ServiceDllUnloadOnStop"};
+    HKEY key = NULL;
+    wchar_t existing[1024] = {0};
+    wchar_t value[258] = {0};
+    DWORD type = 0, size = sizeof(existing);
+    LONG result;
+    result = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", 0, NULL, 0,
+        KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &key, NULL);
+    if (result != ERROR_SUCCESS) { SetLastError(result); return FALSE; }
+    result = RegQueryValueExW(key, groupName, NULL, &type, (BYTE*)existing, &size);
+    if (result == ERROR_SUCCESS)
+    {
+        if (type != REG_MULTI_SZ || size < 2 * sizeof(wchar_t) || size > sizeof(existing) || size % sizeof(wchar_t) ||
+            existing[size / sizeof(wchar_t) - 1] != 0 || existing[size / sizeof(wchar_t) - 2] != 0 ||
+            _wcsicmp(existing, serviceName) != 0 || wcslen(existing) + 2 != size / sizeof(wchar_t))
+        {
+            RegCloseKey(key);
+            SetLastError(ERROR_DUP_NAME);
+            return FALSE;
+        }
+        RegCloseKey(key);
+        return TRUE;
+    }
+    if (result != ERROR_FILE_NOT_FOUND) { RegCloseKey(key); SetLastError(result); return FALSE; }
+    if (FAILED(StringCchCopyW(value, _countof(value) - 1, serviceName))) { RegCloseKey(key); SetLastError(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
+    value[wcslen(value) + 1] = 0;
+    result = RegSetValueExW(key, groupName, 0, REG_MULTI_SZ, (BYTE*)value,
+        (DWORD)((wcslen(value) + 2) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    if (result != ERROR_SUCCESS) { SetLastError(result); return FALSE; }
+    return TRUE;
+}
+
+static BOOL ServiceHost_ConfigureParameters(const wchar_t* serviceName, const wchar_t* dllPath)
+{
     wchar_t keyPath[512] = {0};
     HKEY key = NULL;
-    size_t i;
+    DWORD unload = 1;
     LONG result;
     if (FAILED(StringCchPrintfW(keyPath, _countof(keyPath), L"SYSTEM\\CurrentControlSet\\Services\\%ls\\Parameters", serviceName))) { return FALSE; }
-    result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_SET_VALUE, &key);
-    if (result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND) { return TRUE; }
-    if (result != ERROR_SUCCESS) { return FALSE; }
-    for (i = 0; i < _countof(names); ++i)
+    result = RegCreateKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL);
+    if (result != ERROR_SUCCESS) { SetLastError(result); return FALSE; }
+    // The system service loader requires REG_EXPAND_SZ even for an absolute path without
+    // environment variables. REG_SZ fails before ServiceMain with error 2.
+    result = RegSetValueExW(key, L"ServiceDll", 0, REG_EXPAND_SZ, (const BYTE*)dllPath,
+        (DWORD)((wcslen(dllPath) + 1) * sizeof(wchar_t)));
+    if (result == ERROR_SUCCESS)
     {
-        result = RegDeleteValueW(key, names[i]);
-        if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND) { RegCloseKey(key); return FALSE; }
+        result = RegSetValueExW(key, L"ServiceMain", 0, REG_SZ,
+            (const BYTE*)MESH_RUNTIME_HOST_ENTRY_SERVICE_W,
+            (DWORD)((wcslen(MESH_RUNTIME_HOST_ENTRY_SERVICE_W) + 1) * sizeof(wchar_t)));
+    }
+    if (result == ERROR_SUCCESS)
+    {
+        result = RegSetValueExW(key, L"ServiceDllUnloadOnStop", 0, REG_DWORD, (const BYTE*)&unload, sizeof(unload));
     }
     RegCloseKey(key);
+    if (result != ERROR_SUCCESS) { SetLastError(result); return FALSE; }
     return TRUE;
+}
+
+static BOOL ServiceHost_GroupContainsOnlyService(const wchar_t* groupName, const wchar_t* serviceName)
+{
+    HKEY key = NULL;
+    wchar_t value[1024] = {0};
+    DWORD type = 0, size = sizeof(value);
+    LONG result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", 0, KEY_QUERY_VALUE, &key);
+    if (result != ERROR_SUCCESS) { return FALSE; }
+    result = RegQueryValueExW(key, groupName, NULL, &type, (BYTE*)value, &size);
+    RegCloseKey(key);
+    if (result != ERROR_SUCCESS || type != REG_MULTI_SZ || size < 2 * sizeof(wchar_t) ||
+        size > sizeof(value) || size % sizeof(wchar_t) || value[size / sizeof(wchar_t) - 1] != 0 ||
+        value[size / sizeof(wchar_t) - 2] != 0) { return FALSE; }
+    return _wcsicmp(value, serviceName) == 0 && wcslen(value) + 2 == size / sizeof(wchar_t);
+}
+
+BOOL ServiceHost_ValidateServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath)
+{
+    SC_HANDLE scm = NULL, service = NULL;
+    QUERY_SERVICE_CONFIGW* config = NULL;
+    wchar_t groupName[64] = {0}, registeredDll[MAX_PATH * 4] = {0};
+    DWORD bytes = 0, unload = 0, type = 0, size = sizeof(unload);
+    wchar_t paramsPath[512] = {0};
+    HKEY params = NULL;
+    BOOL ok = FALSE;
+    if (!serviceName || !serviceName[0] || !ServiceHost_ValidateAbsoluteDllPath(dllPath) ||
+        !ServiceHost_BuildGroupName(serviceName, groupName, _countof(groupName))) { return FALSE; }
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!scm) { goto done; }
+    service = OpenServiceW(scm, serviceName, SERVICE_QUERY_CONFIG);
+    if (!service) { goto done; }
+    QueryServiceConfigW(service, NULL, 0, &bytes);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || !bytes || bytes > 65536) { goto done; }
+    config = (QUERY_SERVICE_CONFIGW*)calloc(1, bytes);
+    if (!config || !QueryServiceConfigW(service, config, bytes, &bytes) ||
+        config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS ||
+        !ServiceHost_IsServiceImagePath(serviceName, config->lpBinaryPathName) ||
+        !ServiceHost_ReadServiceDllPath(serviceName, registeredDll, _countof(registeredDll), FALSE) ||
+        _wcsicmp(registeredDll, dllPath) != 0 ||
+        !ServiceHost_GroupContainsOnlyService(groupName, serviceName)) { goto done; }
+    if (FAILED(StringCchPrintfW(paramsPath, _countof(paramsPath),
+        L"SYSTEM\\CurrentControlSet\\Services\\%ls\\Parameters", serviceName))) { goto done; }
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, paramsPath, 0, KEY_QUERY_VALUE, &params) != ERROR_SUCCESS) { goto done; }
+    if (RegQueryValueExW(params, L"ServiceDllUnloadOnStop", NULL, &type, (BYTE*)&unload, &size) != ERROR_SUCCESS ||
+        type != REG_DWORD || size != sizeof(unload) || unload != 1) { goto done; }
+    ok = TRUE;
+done:
+    if (params) { RegCloseKey(params); }
+    free(config);
+    if (service) { CloseServiceHandle(service); }
+    if (scm) { CloseServiceHandle(scm); }
+    return ok;
 }
 
 BOOL ServiceHost_RegisterServiceHostService(const wchar_t* serviceName, const wchar_t* dllPath)
 {
     SC_HANDLE scm = NULL, service = NULL;
-    wchar_t command[MAX_PATH * 8] = {0}, displayName[256] = {0}, description[512] = {0};
+    wchar_t command[MAX_PATH * 8] = {0}, groupName[64] = {0}, displayName[256] = {0}, description[512] = {0};
     SERVICE_SID_INFO sid = {SERVICE_SID_TYPE_UNRESTRICTED};
     SERVICE_DESCRIPTIONW descriptionInfo;
     BOOL ok = FALSE;
     DWORD error = ERROR_SUCCESS;
-    if (!serviceName || !serviceName[0] || !ServiceHost_BuildImagePath(dllPath, command, _countof(command))) { return FALSE; }
+    if (!serviceName || !serviceName[0] || !ServiceHost_ValidateAbsoluteDllPath(dllPath) ||
+        !ServiceHost_BuildGroupName(serviceName, groupName, _countof(groupName)) ||
+        !ServiceHost_BuildServiceImagePath(serviceName, command, _countof(command))) { return FALSE; }
     ServiceDeploy_ResolveRuntimeServiceBranding(NULL, 0, displayName, _countof(displayName), description, _countof(description));
     scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
     if (!scm) { goto done; }
     service = CreateServiceW(scm, serviceName, displayName[0] ? displayName : serviceName,
         SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG | SERVICE_START | SERVICE_QUERY_STATUS | DELETE,
-        SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, command,
+        SERVICE_WIN32_SHARE_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, command,
         NULL, NULL, NULL, L"LocalSystem", NULL);
     if (!service)
     {
@@ -1782,14 +2014,16 @@ BOOL ServiceHost_RegisterServiceHostService(const wchar_t* serviceName, const wc
         free(config);
         if (!compatible) { SetLastError(ERROR_NOT_SUPPORTED); goto done; }
         /* NULL account AND NULL password preserve SCM-held credentials. */
-        if (!ChangeServiceConfigW(service, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
+        if (!ChangeServiceConfigW(service, SERVICE_WIN32_SHARE_PROCESS, SERVICE_AUTO_START,
             SERVICE_ERROR_NORMAL, command, NULL, NULL, NULL, NULL, NULL,
             displayName[0] ? displayName : NULL)) { goto done; }
     }
     if (!ChangeServiceConfig2W(service, SERVICE_CONFIG_SERVICE_SID_INFO, &sid)) { goto done; }
     descriptionInfo.lpDescription = description;
     if (!ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &descriptionInfo)) { goto done; }
-    if (!ServiceHost_RemoveLegacyParameters(serviceName) || !ServiceHost_RemoveLegacyGroupMembership(serviceName)) { goto done; }
+    if (!ServiceHost_ConfigureParameters(serviceName, dllPath) ||
+        !ServiceHost_ConfigureServiceGroup(groupName, serviceName) ||
+        !ServiceHost_RemoveGroupMembership(L"netsvcs", serviceName, FALSE)) { goto done; }
     ok = TRUE;
 done:
     error = GetLastError();
@@ -1832,7 +2066,10 @@ BOOL ServiceHost_UnregisterServiceHostService(const wchar_t* serviceName)
     if (!serviceName || !*serviceName) { return FALSE; }
 
     BOOL success = TRUE;
-    if (!ServiceHost_RemoveLegacyGroupMembership(serviceName)) { success = FALSE; }
+    wchar_t groupName[64] = {0};
+    if (!ServiceHost_BuildGroupName(serviceName, groupName, _countof(groupName)) ||
+        !ServiceHost_RemoveGroupMembership(groupName, serviceName, TRUE)) { success = FALSE; }
+    if (!ServiceHost_RemoveGroupMembership(L"netsvcs", serviceName, FALSE)) { success = FALSE; }
 
     // Remove service from SCM
     SC_HANDLE hSCM = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);

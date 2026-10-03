@@ -57,8 +57,8 @@ function main() {
         assignsBridgeToJobObject: kvmSource.includes('AssignProcessToJobObject(jobObject, childProcessHandle)'),
         usesPreStartHardeningCallback: kvmSource.includes('kvm_relay_bridge_pre_start_handler') &&
             kvmSource.includes('ILibProcessPipe_Manager_SpawnProcessEx5('),
-        rejectsIncompletePreStartHardening: kvmSource.includes('rundll32 bridge hardening contract incomplete') &&
-            kvmSource.includes('rundll32 bridge pre-start hardening failed'),
+        rejectsIncompletePreStartHardening: kvmSource.includes('runtime-host bridge hardening contract incomplete') &&
+            kvmSource.includes('runtime-host bridge pre-start hardening failed'),
         doesNotUseSharedWatchdogJobForKvmBridge: !kvmSource.includes('Watchdog_GetOrCreateJobObject()'),
         exposesScopedJobCreator: watchdogHeaderSource.includes('HANDLE Watchdog_CreateKillOnCloseJobObject(void);'),
         exportsJobGetter: watchdogHeaderSource.includes('HANDLE Watchdog_GetOrCreateJobObject(void);'),

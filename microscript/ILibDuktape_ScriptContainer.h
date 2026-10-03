@@ -22,6 +22,9 @@ limitations under the License.
 #include "../microstack/ILibProcessPipe.h"
 #include "../microstack/ILibSimpleDataStore.h"
 
+// Shared heap-stash key for native bindings that enforce container permissions.
+#define ILibDuktape_ScriptContainer_Settings_SecurityFlags "\xFF_ScriptContainerSettings_SecurityFlags"
+
 #ifdef __DOXY__
 /*!
 \brief Process Encapsulation for a JavaScript engine. To use, must <b>require('ScriptContainer')</b>
@@ -157,6 +160,7 @@ duk_context *ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx2(SCRIPT_EN
 int ILibDuktape_ScriptContainer_DebuggingOK(duk_context *ctx);
 
 SCRIPT_ENGINE_SETTINGS* ILibDuktape_ScriptContainer_GetSettings(duk_context *ctx);
+SCRIPT_ENGINE_SECURITY_FLAGS ILibDuktape_ScriptContainer_GetSecurityFlags(duk_context *ctx);
 void ILibDuktape_ScriptContainer_FreeSettings(SCRIPT_ENGINE_SETTINGS *settings);
 int ILibDuktape_ScriptContainer_CompileJavaScript_FromFile(duk_context *ctx, char *path, int pathLen);
 int ILibDuktape_ScriptContainer_CompileJavaScriptEx(duk_context *ctx, char *payload, int payloadLen, char *filename, int filenameLen);

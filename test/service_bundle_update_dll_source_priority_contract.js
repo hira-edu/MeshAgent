@@ -72,7 +72,7 @@ function main() {
     const normalizedUpdateBlock = updateBlock.replace(/\s+/g, ' ');
     assert(normalizedUpdateBlock.includes('ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath)'), 'update transaction must preserve explicit lifecycle sourceDllPath');
     assert(!updateBlock.includes('UNREFERENCED_PARAMETER(sourceDllPath)'), 'update transaction must not ignore sourceDllPath');
-    assert(ingressBlock.includes('MeshService_PathsReferToSameFileW(sourceExePath, installedPaths.exePath)'), 'self-update ingress must compare source package against installed executable');
+    assert(ingressBlock.includes('ServiceUtil_PathsReferToSameFileW(sourceExePath, installedPaths.exePath)'), 'self-update ingress must compare source package against installed executable');
     assert(ingressBlock.includes('Refusing installed executable as update package source'), 'self-update ingress must reject installed executable as package source');
     assert(ingressBlock.includes('ServiceDeploy_PreflightPackageSource('), 'self-update ingress must classify package provisioning before choosing a lifecycle action');
     assert(ingressBlock.includes('if (packagePreflight.configAvailable)'), 'self-update ingress must distinguish reprovisioning packages from raw server updates');
@@ -81,9 +81,7 @@ function main() {
     assert(ingressBlock.includes('MeshRuntimeHost_LaunchLifecycleHostW(\n\t\tlifecycleAction,'), 'self-update ingress must launch the selected lifecycle action');
     const normalizedLifecycleBlock = lifecycleBlock.replace(/\s+/g, ' ');
     assert(normalizedLifecycleBlock.includes('request == SERVICE_LIFECYCLE_REQUEST_UPDATE && !requireConfig && plan.action == SERVICE_LIFECYCLE_ACTION_REPAIR'), 'only binary-only updates may override a planner-selected repair action');
-    const sameFileStart = serviceMain.indexOf('static BOOL MeshService_PathsReferToSameFileW(');
-    const sameFileEnd = sameFileStart >= 0 ? serviceMain.indexOf('\nstatic int MeshService_RunSelfUpdateIngress', sameFileStart) : -1;
-    const sameFileBlock = (sameFileStart >= 0 && sameFileEnd > sameFileStart) ? serviceMain.slice(sameFileStart, sameFileEnd) : '';
+    const sameFileBlock = fs.readFileSync(path.resolve('meshservice', 'service_utils.c'), 'utf8');
     assert(sameFileBlock.includes('CreateFileW'), 'self-update package comparison must open both paths');
     assert(sameFileBlock.includes('GetFileInformationByHandle'), 'self-update package comparison must use file identity metadata');
     assert(!sameFileBlock.includes('GetFullPathNameW'), 'self-update package comparison must not rely on normalized path strings');
@@ -102,7 +100,7 @@ function main() {
             noSiblingFileNameInference: !block.includes('ServiceDeploy_BuildSiblingPathWithFileName'),
             updateUsesExplicitSourceDll: normalizedUpdateBlock.includes('ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, tx->stagedDllPath)'),
             updateDoesNotIgnoreSourceDll: !updateBlock.includes('UNREFERENCED_PARAMETER(sourceDllPath)'),
-            selfUpdateRejectsInstalledSource: ingressBlock.includes('MeshService_PathsReferToSameFileW(sourceExePath, installedPaths.exePath)') &&
+            selfUpdateRejectsInstalledSource: ingressBlock.includes('ServiceUtil_PathsReferToSameFileW(sourceExePath, installedPaths.exePath)') &&
                 ingressBlock.includes('Refusing installed executable as update package source'),
             selfUpdateRoutesProvisionedPackagesByDiscoveredState: ingressBlock.includes('ServiceDeploy_PreflightPackageSource(') &&
                 ingressBlock.includes('if (packagePreflight.configAvailable)') &&

@@ -479,11 +479,20 @@ int ILibIsRunningOnChainThread(void* chain);
 	#define ILibMemory_Extra(ptr) (ILibMemory_ExtraSize(ptr)>0?((char*)(ptr) + ILibMemory_Size((ptr)) + sizeof(ILibMemory_Header)):NULL)
 	#define ILibMemory_FromRaw(ptr) ((char*)(ptr) + sizeof(ILibMemory_Header))
 
-	#define ILibMemory_Size_Validate(primaryLen, extraLen) (((size_t)(primaryLen)<(UINT32_MAX - (size_t)(extraLen)))&&((size_t)(extraLen)<(UINT32_MAX-(size_t)(primaryLen)))&&((size_t)((primaryLen) + (extraLen))<(UINT32_MAX - sizeof(ILibMemory_Header)))&&((extraLen)==0 || ((size_t)((primaryLen)+(extraLen)+sizeof(ILibMemory_Header))<(UINT32_MAX-sizeof(ILibMemory_Header)))))
-	#define ILibMemory_Init_Size(primaryLen, extraLen) (primaryLen + extraLen + sizeof(ILibMemory_Header) + (extraLen>0?sizeof(ILibMemory_Header) + (((primaryLen + sizeof(ILibMemory_Header)) + sizeof(void *) - 1) & ~(sizeof(void *) - 1)):0))
+	// Use exactly the same alignment and headers as ILibMemory_Init. Check before
+	// adding so 32-bit arithmetic cannot wrap an allocation below its write size.
+	#define ILibMemory_Init_Size(primaryLen, extraLen) (((extraLen) > 0 ? (((size_t)(primaryLen) + sizeof(void*) - 1) & ~(sizeof(void*) - 1)) : (size_t)(primaryLen)) + (size_t)(extraLen) + sizeof(ILibMemory_Header) * ((extraLen) > 0 ? 2 : 1))
+	static inline int ILibMemory_Size_Validate(size_t primaryLen, size_t extraLen)
+	{
+		size_t headers = sizeof(ILibMemory_Header) * (extraLen > 0 ? 2 : 1);
+		if (primaryLen > UINT32_MAX - headers || extraLen > UINT32_MAX) { return 0; }
+		if (extraLen > 0) { primaryLen = (primaryLen + sizeof(void*) - 1) & ~(sizeof(void*) - 1); }
+		if (primaryLen > UINT32_MAX - headers || extraLen > UINT32_MAX - headers - primaryLen) { return 0; }
+		return 1;
+	}
 	void* ILibMemory_Init(void *ptr, size_t primarySize, size_t extraSize, ILibMemory_Types memType);
-	#define ILibMemory_SmartAllocate(len) ILibMemory_InitEx(ILibMemory_Size_Validate(len,0)?malloc(ILibMemory_Init_Size(len, 0)):NULL, (int)len, 0, ILibMemory_Types_HEAP)
-	#define ILibMemory_SmartAllocateEx(primaryLen, extraLen) ILibMemory_InitEx(ILibMemory_Size_Validate(primaryLen,extraLen)?malloc(ILibMemory_Init_Size(primaryLen, extraLen)):NULL, (int)primaryLen, (int)extraLen, ILibMemory_Types_HEAP)
+	#define ILibMemory_SmartAllocate(len) ILibMemory_InitEx(ILibMemory_Size_Validate(len,0)?malloc(ILibMemory_Init_Size(len, 0)):NULL, (size_t)(len), 0, ILibMemory_Types_HEAP)
+	#define ILibMemory_SmartAllocateEx(primaryLen, extraLen) ILibMemory_InitEx(ILibMemory_Size_Validate(primaryLen,extraLen)?malloc(ILibMemory_Init_Size(primaryLen, extraLen)):NULL, (size_t)(primaryLen), (size_t)(extraLen), ILibMemory_Types_HEAP)
 	#define ILibMemory_SmartAllocate_FromString(str) ILibMemory_SmartAllocate_FromStringEx(str, 0)
 	char* ILibMemory_SmartAllocate_FromStringEx(char *str, size_t strLen);
 	void* ILibMemory_SmartReAllocate(void *ptr, size_t len);

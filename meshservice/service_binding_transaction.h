@@ -27,7 +27,7 @@ typedef struct ServiceBindingSnapshot {
     DWORD configBytes, extraBytes[_countof(ServiceBinding_ConfigLevels)];
     BYTE* extra[_countof(ServiceBinding_ConfigLevels)];
     ServiceBindingValue values[_countof(ServiceBinding_ValueNames)];
-    BOOL running, legacy, groupMember, parametersExisted;
+    BOOL running, legacy, legacyGroupMember, serviceGroupMember, parametersExisted;
 } ServiceBindingSnapshot;
 
 static void ServiceBinding_Free(ServiceBindingSnapshot* snapshot)
@@ -54,7 +54,7 @@ static BOOL ServiceBinding_ReadValue(HKEY key, const wchar_t* name, ServiceBindi
 }
 
 /* Change only our membership, preserving other services added during activation. */
-static BOOL ServiceBinding_Group(const wchar_t* name, BOOL restore, BOOL* member)
+static BOOL ServiceBinding_Group(const wchar_t* groupName, const wchar_t* name, BOOL restore, BOOL* member, BOOL deleteEmptyValue)
 {
     HKEY key = NULL;
     ServiceBindingValue value = {0};
@@ -69,7 +69,7 @@ static BOOL ServiceBinding_Group(const wchar_t* name, BOOL restore, BOOL* member
         if (result == ERROR_FILE_NOT_FOUND && restore && !*member) { return TRUE; }
         if (result != ERROR_SUCCESS) { return FALSE; }
     }
-    if (!ServiceBinding_ReadValue(key, L"netsvcs", &value)) { goto done; }
+    if (!ServiceBinding_ReadValue(key, groupName, &value)) { goto done; }
     if (!value.present)
     {
         if (!restore) { *member = FALSE; ok = TRUE; goto done; }
@@ -105,14 +105,22 @@ static BOOL ServiceBinding_Group(const wchar_t* name, BOOL restore, BOOL* member
         value.data = expanded; list = (wchar_t*)expanded;
         memcpy(list + write, name, length * sizeof(wchar_t)); write += length;
         list[write++] = 0;
-        ok = RegSetValueExW(key, L"netsvcs", 0, REG_MULTI_SZ, value.data, (DWORD)(write * sizeof(wchar_t))) == ERROR_SUCCESS;
+        ok = RegSetValueExW(key, groupName, 0, REG_MULTI_SZ, value.data, (DWORD)(write * sizeof(wchar_t))) == ERROR_SUCCESS;
         goto done;
     }
     if (!*member && found)
     {
-        list[write++] = 0;
-        if (write == 1) { list[write++] = 0; }
-        ok = RegSetValueExW(key, L"netsvcs", 0, REG_MULTI_SZ, value.data, (DWORD)(write * sizeof(wchar_t))) == ERROR_SUCCESS;
+        if (write == 0 && deleteEmptyValue)
+        {
+            LONG result = RegDeleteValueW(key, groupName);
+            ok = result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND;
+        }
+        else
+        {
+            list[write++] = 0;
+            if (write == 1) { list[write++] = 0; }
+            ok = RegSetValueExW(key, groupName, 0, REG_MULTI_SZ, value.data, (DWORD)(write * sizeof(wchar_t))) == ERROR_SUCCESS;
+        }
     }
     else { ok = TRUE; }
 done:
@@ -160,7 +168,7 @@ static BOOL ServiceBinding_IsLegacyExe(const wchar_t* path)
 
 /* Ownership is established from the executable/DLL command only. Parameters
  * may be malformed: their exact prior values must remain repairable. */
-static BOOL ServiceBinding_ImageSupported(const QUERY_SERVICE_CONFIGW* config,
+static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVICE_CONFIGW* config,
     const wchar_t* installedExe, const wchar_t* installedDll, BOOL* legacy)
 {
     wchar_t expected[2 * MAX_PATH], systemDir[MAX_PATH], parsedDll[MAX_PATH];
@@ -179,8 +187,11 @@ static BOOL ServiceBinding_ImageSupported(const QUERY_SERVICE_CONFIGW* config,
     if ((config->dwServiceType & ownProcessMask) == ownProcessMask &&
         (config->dwServiceType & ~0x00000110) == 0)
     {
-        if (ServiceHost_ParseImagePath(image, parsedDll, _countof(parsedDll))) { return !_wcsicmp(parsedDll, installedDll); }
-        /* An older own-process installation used the same canonical rundll32
+        if (ServiceHost_ParseImagePath(image, parsedDll, _countof(parsedDll)))
+        {
+            return !_wcsicmp(parsedDll, installedDll);
+        }
+        /* An older own-process installation used the same canonical system loader
          * path and DLL but a different callback. Translate only that exact
          * suffix, then let the current parser enforce the full path contract. */
         imageLength = wcslen(image);
@@ -271,6 +282,7 @@ static BOOL ServiceBinding_ImageSupported(const QUERY_SERVICE_CONFIGW* config,
         return FALSE;
     }
     if (config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS) { return FALSE; }
+    if (ServiceHost_IsServiceImagePath(name, image)) { return TRUE; }
     length = GetSystemDirectoryW(systemDir, _countof(systemDir));
     if (!length || length >= _countof(systemDir)) { return FALSE; }
     if (_snwprintf_s(expected, _countof(expected), _TRUNCATE, L"\"%ls\\svchost.exe\" -k netsvcs", systemDir) < 0) { return FALSE; }
@@ -300,6 +312,9 @@ static BOOL ServiceBinding_SharedPayloadSupported(const ServiceBindingSnapshot* 
     if (dllText[dll->size / sizeof(wchar_t) - 1] ||
         (wcslen(dllText) + 1) * sizeof(wchar_t) != dll->size) { return FALSE; }
     if (!entry->present || entry->type != REG_SZ || !entry->data ||
+        entry->size < sizeof(wchar_t) || entry->size % sizeof(wchar_t) ||
+        ((const wchar_t*)entry->data)[entry->size / sizeof(wchar_t) - 1] != 0 ||
+        (wcslen((const wchar_t*)entry->data) + 1) * sizeof(wchar_t) != entry->size ||
         (_wcsicmp((const wchar_t*)entry->data, L"ServiceHost_ServiceMain") != 0 &&
          _wcsicmp((const wchar_t*)entry->data, L"Stealth_SvchostServiceMain") != 0)) { return FALSE; }
     if (dll->type == REG_EXPAND_SZ)
@@ -377,7 +392,7 @@ static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* name, const
          _wcsicmp(snapshot->config->lpServiceStartName, L".\\LocalSystem") != 0 &&
          _wcsicmp(snapshot->config->lpServiceStartName, L"NT AUTHORITY\\System") != 0)) { goto done; }
     failure = L"service-image";
-    if (!ServiceBinding_ImageSupported(snapshot->config, installedExe, installedDll, &snapshot->legacy)) { goto done; }
+    if (!ServiceBinding_ImageSupported(name, snapshot->config, installedExe, installedDll, &snapshot->legacy)) { goto done; }
     failure = L"QueryServiceStatus";
     if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (BYTE*)&status, sizeof(status), &size) ||
         (status.dwCurrentState != SERVICE_RUNNING && status.dwCurrentState != SERVICE_STOPPED)) { goto done; }
@@ -411,7 +426,12 @@ static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* name, const
     failure = L"shared-payload";
     if (!ServiceBinding_SharedPayloadSupported(snapshot, installedDll)) { goto done; }
     failure = L"group-membership";
-    if (!ServiceBinding_Group(name, FALSE, &snapshot->groupMember)) { goto done; }
+    {
+        wchar_t serviceGroup[64] = {0};
+        if (!ServiceHost_BuildGroupName(name, serviceGroup, _countof(serviceGroup)) ||
+            !ServiceBinding_Group(serviceGroup, name, FALSE, &snapshot->serviceGroupMember, TRUE) ||
+            !ServiceBinding_Group(L"netsvcs", name, FALSE, &snapshot->legacyGroupMember, FALSE)) { goto done; }
+    }
     {
         failure = L"recovery-privilege";
         HANDLE privilegeToken = NULL;
@@ -520,8 +540,12 @@ static BOOL ServiceBinding_Restore(const wchar_t* name, const ServiceBindingSnap
         if (!subkeys && !values && RegDeleteKeyW(key, L"Parameters") != ERROR_SUCCESS) { goto done; }
     }
     {
-        BOOL member = snapshot->groupMember;
-        if (!ServiceBinding_Group(name, TRUE, &member)) { goto done; }
+        wchar_t serviceGroup[64] = {0};
+        BOOL serviceMember = snapshot->serviceGroupMember;
+        BOOL legacyMember = snapshot->legacyGroupMember;
+        if (!ServiceHost_BuildGroupName(name, serviceGroup, _countof(serviceGroup)) ||
+            !ServiceBinding_Group(serviceGroup, name, TRUE, &serviceMember, TRUE) ||
+            !ServiceBinding_Group(L"netsvcs", name, TRUE, &legacyMember, FALSE)) { goto done; }
     }
     if (!ServiceBinding_ApplyExtra(service, 1, snapshot->extra[1]) ||
         !ServiceBinding_ApplyExtra(service, 2, snapshot->extra[2])) { goto done; }

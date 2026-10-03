@@ -159,7 +159,9 @@ static BOOL ServiceJournal_Encode(ServiceJournalBuffer* b, const wchar_t* name, 
     ServiceJournal_Put32(b, s ? 1 : 0);
     if (s)
     {
-    ServiceJournal_Put32(b, (s->running ? 1 : 0) | (s->legacy ? 2 : 0) | (s->groupMember ? 4 : 0) | (s->parametersExisted ? 8 : 0));
+    ServiceJournal_Put32(b, (s->running ? 1 : 0) | (s->legacy ? 2 : 0) |
+        (s->legacyGroupMember ? 4 : 0) | (s->parametersExisted ? 8 : 0) |
+        (s->serviceGroupMember ? 16 : 0));
     if (s->configBytes < sizeof(*c) || s->configBytes > SERVICE_BINDING_MAX_BYTES) { return FALSE; }
     ServiceJournal_Put32(b, c->dwServiceType); ServiceJournal_Put32(b, c->dwStartType);
     ServiceJournal_Put32(b, c->dwErrorControl); ServiceJournal_Put32(b, c->dwTagId);
@@ -239,9 +241,10 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
     r->binding = s = (ServiceBindingSnapshot*)calloc(1, sizeof(*s));
     if (!s) { goto fail; }
     flags = ServiceJournal_Get32(b);
-    if (flags & ~15UL) { goto fail; }
+    if (flags & ~31UL) { goto fail; }
     s->running = (flags & 1) != 0; s->legacy = (flags & 2) != 0;
-    s->groupMember = (flags & 4) != 0; s->parametersExisted = (flags & 8) != 0;
+    s->legacyGroupMember = (flags & 4) != 0; s->parametersExisted = (flags & 8) != 0;
+    s->serviceGroupMember = (flags & 16) != 0;
     s->config = c = (QUERY_SERVICE_CONFIGW*)calloc(1, SERVICE_BINDING_MAX_BYTES);
     if (!c) { goto fail; }
     used = sizeof(*c); s->configBytes = SERVICE_BINDING_MAX_BYTES;
@@ -255,8 +258,7 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
     if (!b->ok || !c->lpBinaryPathName || !c->lpDisplayName || !c->lpServiceStartName ||
         _wcsicmp(c->lpServiceStartName, L"LocalSystem") || c->dwStartType > SERVICE_DISABLED ||
         c->dwErrorControl > SERVICE_ERROR_CRITICAL ||
-        (c->dwServiceType != SERVICE_WIN32_OWN_PROCESS && c->dwServiceType != SERVICE_WIN32_SHARE_PROCESS) ||
-        (s->legacy && c->dwServiceType != SERVICE_WIN32_OWN_PROCESS)) { goto fail; }
+        (c->dwServiceType != SERVICE_WIN32_OWN_PROCESS && c->dwServiceType != SERVICE_WIN32_SHARE_PROCESS)) { goto fail; }
     for (i = 0; i < 5; ++i)
     {
         BYTE* e = s->extra[i] = (BYTE*)calloc(1, SERVICE_BINDING_MAX_BYTES);

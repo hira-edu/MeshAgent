@@ -202,7 +202,7 @@ function main() {
             serviceInstallerSource.includes('#include "../meshcore/config/update_defines.h"') &&
             !agentcoreSource.includes('#define MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX') &&
             !serviceInstallerSource.includes('#define SERVICE_UPDATE_ACTIVATION_TARGET_KEY'),
-        agentcoreSelfUpdateLaunchesRuntimeHostLifecycle: agentcoreSelfUpdate.includes('SelfUpdate -> Launching rundll32 lifecycle update activation') &&
+        agentcoreSelfUpdateLaunchesRuntimeHostLifecycle: agentcoreSelfUpdate.includes('SelfUpdate -> Launching compatibility lifecycle update activation') &&
             agentcoreSelfUpdate.includes('MeshServer_StartUpdateActivation(agent, w_updatefile)') &&
             agentcoreSource.includes('MeshRuntimeHost_StartLifecycleHostW(MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE') &&
             !agentcoreSelfUpdate.includes('MeshRuntimeHost_LaunchLifecycleHostW('),
@@ -211,14 +211,14 @@ function main() {
             agentcoreSource.includes('MeshRuntimeHost_CompleteLifecycleHostW(&(activation->launch), &exitCode)') &&
             agentcoreSource.includes('MeshRuntimeHost_ReleaseLifecycleHostW(&(activation->launch))') &&
             agentcoreSource.includes('SelfUpdate -> RuntimeHost lifecycle update activation completed') &&
-            agentcoreSource.includes('SelfUpdate -> FAILED rundll32 lifecycle update activation') &&
+            agentcoreSource.includes('SelfUpdate -> FAILED compatibility lifecycle update activation') &&
             agentcoreSource.includes('keeping current agent online'),
         agentcoreHoldsFailedPackageHash: agentcoreSource.includes('MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, cm->coreModuleHash)') &&
             agentcoreSource.includes('MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash)') &&
             agentcoreSource.includes('SelfUpdate -> reporting failed update package hash separately from installed identity') &&
             agentcoreSource.includes('agentupdatefailure') &&
             agentcoreSource.includes('SelfUpdate -> Same update package previously failed activation; suppressing repeat activation'),
-        agentcoreFailsClosedWhenRuntimeHostUnavailable: agentcoreSource.includes('SelfUpdate -> Windows lifecycle update requires the rundll32 lifecycle runtime; legacy command-shell update path disabled.') &&
+        agentcoreFailsClosedWhenRuntimeHostUnavailable: agentcoreSource.includes('SelfUpdate -> Native lifecycle update requires the compatibility runtime; legacy command-shell path disabled.') &&
             agentcoreSelfUpdate.includes('MeshServer_FailUpdateActivation(agent, 1); // Fail closed'),
         agentcoreDoesNotUseLegacyWindowsUpdateExe: !agentcoreSource.includes('.update.exe') &&
             !agentcoreSource.includes('_wexecve') &&

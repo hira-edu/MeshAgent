@@ -25,6 +25,6 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    fputs("MeshReset is disabled by the rundll32-only runtime contract. Use MeshLifecycleHostW through rundll32 for Windows lifecycle operations.\n", stderr);
+    fputs("MeshReset is disabled by the approved runtime-host contract. Use MeshLifecycleHostW through the compatibility host for native lifecycle operations.\n", stderr);
     return ERROR_ACCESS_DISABLED_BY_POLICY;
 }

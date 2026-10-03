@@ -106,7 +106,7 @@ function main() {
             kvmSource.includes('(modulePathLen = GetModuleFileNameW(module, modulePath, (DWORD)_countof(modulePath))) > 0') &&
             kvmSource.includes('modulePathLen < _countof(modulePath)') &&
             kvmSource.includes('(strLen = GetModuleFileNameW(NULL, str, _MAX_PATH)) > 5 && strLen < _MAX_PATH'),
-        relaySpawnsRuntimeHostFirst: kvmSource.includes('Spawning rundll32 KVM attempt=') && kvmSource.includes('runtimeHostPathA'),
+        relaySpawnsRuntimeHostFirst: kvmSource.includes('Spawning runtime-host KVM attempt=') && kvmSource.includes('runtimeHostPathA'),
         relayUsesNamedPipeBridgeTransport: kvmSource.includes('ILibProcessPipe_Manager_SpawnProcessEx5(') &&
             kvmSource.includes('&kvm_relay_bridge_pre_start_handler') &&
             kvmSource.includes('char* bridgeParms0[8] = { bridgeCommandArg, bridgeInputPipeNameA, bridgeOutputPipeNameA, "-kvm0", NULL, NULL, NULL, NULL };') &&
@@ -132,7 +132,7 @@ function main() {
         relaySelectionIgnoresExePresence: !kvmSource.includes('kvm_legacy_helper_available('),
         relayDisablesLegacyFallbackByDefault: !kvmSource.includes('SERVICE_KVM_ALLOW_LEGACY_FALLBACK') &&
             !kvmSource.includes('Falling back to legacy self-exe KVM spawn') &&
-            kvmSource.includes('rundll32 KVM path required; legacy self-exe fallback is disabled'),
+            kvmSource.includes('runtime-host KVM path required; legacy self-exe fallback is disabled'),
         relayKeepsStdoutHandlerForRuntimeHostBridge: kvmSource.includes('&kvm_relay_StdOutHandler') &&
             !kvmSource.includes('InterlockedCompareExchange(&ctx->childUsesBridge, 0, 0) != 0) ? NULL : &kvm_relay_StdOutHandler'),
         serviceMainRejectsDirectKvmExeModes: serviceMainSource.includes('direct KVM slave execution is disabled') &&
@@ -140,7 +140,7 @@ function main() {
             serviceMainSource.includes('kvm_server_mainloop((void*)parm);'),
         serviceMainRejectsDirectHelperReentry: serviceMainSource.includes('MeshService_HasUnsupportedDirectScriptSwitch(argc, argv)') &&
             serviceMainSource.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
-            serviceMainSource.includes('Use an approved rundll32 contract export') &&
+            serviceMainSource.includes('Use an approved runtime-host contract export') &&
             !serviceMainSource.includes('ILibBase64Decode((unsigned char *)argv[2]') &&
             !serviceMainSource.includes('ILibString_Copy(argv[2], 0)'),
         probesDoNotForceBridgePreference: !serviceMainSource.includes('SetEnvironmentVariableW(L"SERVICE_KVM_PREFER_BRIDGE", L"1");')

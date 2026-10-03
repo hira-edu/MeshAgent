@@ -871,14 +871,14 @@ static int ILibProcessPipe_IsWindowsSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 
 	if (ILibProcessPipe_IsApprovedDesktopBridgeLaunchA(target, parameters))
 	{
-		// The rundll32-hosted KVM bridge is the only approved remote-desktop user-session workflow.
+		// The runtime-hosted KVM bridge is the only approved remote-desktop user-session workflow.
 		ILibProcessPipe_LogPolicyDecisionA("allow-kvm-bridge", "desktop-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 
 	if (ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(target, parameters))
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-console", "console-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow-runtime-host-console", "console-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 
@@ -889,22 +889,22 @@ static int ILibProcessPipe_IsWindowsSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 	}
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedUmhHostContractLaunchA(target, parameters))
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-umh-host", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow-runtime-host-umh-host", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedUserConsentContractLaunchA(target, parameters))
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-userconsent", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow-runtime-host-userconsent", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedPreProtectionContractLaunchA(target, parameters))
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-preprotection", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow-runtime-host-preprotection", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedSelfTestContractLaunchA(target, parameters))
 	{
-		ILibProcessPipe_LogPolicyDecisionA("allow-rundll32-selftest", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+		ILibProcessPipe_LogPolicyDecisionA("allow-runtime-host-selftest", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
 		return 1;
 	}
 

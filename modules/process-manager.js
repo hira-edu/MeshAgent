@@ -17,17 +17,8 @@ limitations under the License.
 
 var GM = require('_GenericMarshal');
 var TH32CS_SNAPPROCESS = 0x02;
-var TH32CS_SNAPMODULE32 = 0x10;
-var TH32CS_SNAPMODULE = 0x08;
 var PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 
-
-var promise = require('promise');
-function defPromiseHandler(res, rej)
-{
-    this._res = res;
-    this._rej = rej;
-}
 
 // Used on Windows and Linux to get information about running processes
 function processManager() {
@@ -41,12 +32,13 @@ function processManager() {
             this._kernel32.CreateMethod('CloseHandle');
             this._kernel32.CreateMethod('GetLastError');
             this._kernel32.CreateMethod('CreateToolhelp32Snapshot');
-            this._kernel32.CreateMethod('Module32FirstW');
-            this._kernel32.CreateMethod('Module32NextW');
             this._kernel32.CreateMethod('OpenProcess');
             this._kernel32.CreateMethod('Process32FirstW');
             this._kernel32.CreateMethod('Process32NextW');
             this._kernel32.CreateMethod('QueryFullProcessImageNameW');
+            this._kernel32.CreateMethod('GetProcessTimes');
+            this._kernel32.CreateMethod('GetProcessHandleCount');
+            this._kernel32.CreateMethod('ProcessIdToSessionId');
             break;
 	case 'freebsd':
         case 'linux':
@@ -86,21 +78,27 @@ function processManager() {
                 var pathSize = GM.CreateVariable(4);
                 var ph;
 
+                if (h.Val == -1) { throw new Error('Error enumerating processes: ' + this._kernel32.GetLastError().Val); }
+                try
+                {
                 info.toBuffer().writeUInt32LE(info._size, 0);
                 var nextProcess = this._kernel32.Process32FirstW(h, info);
                 while (nextProcess.Val) 
                 {
                     pid = info.Deref(8, 4).toBuffer().readUInt32LE(0);
-                    retVal[pid] = { pid: pid, cmd: info.Deref(GM.PointerSize == 4 ? 36 : 44, 260).Wide2UTF8 };
+                    retVal[pid] = { pid: pid, cmd: info.Deref(GM.PointerSize == 4 ? 36 : 44, 520).Wide2UTF8 };
 
-                    if ((ph = this._kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)).Val != -1)
+                    if ((ph = this._kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)).Val != 0)
                     {
-                        pathSize.toBuffer().writeUInt32LE(fullpath._size);
+                        try
+                        {
+                        pathSize.toBuffer().writeUInt32LE(fullpath._size / 2);
                         if (this._kernel32.QueryFullProcessImageNameW(ph, 0, fullpath, pathSize).Val != 0)
                         {
                             retVal[pid].path = fullpath.Wide2UTF8;
                         }
-                        this._kernel32.CloseHandle(ph);
+                        }
+                        finally { this._kernel32.CloseHandle(ph); }
                     }
                  
                     try
@@ -113,7 +111,8 @@ function processManager() {
                     
                     nextProcess = this._kernel32.Process32NextW(h, info);
                 }
-                this._kernel32.CloseHandle(h);
+                }
+                finally { this._kernel32.CloseHandle(h); }
                 if (callback) { callback.apply(this, [retVal]); }
                 break;
             case 'linux': // Linux processes
@@ -259,7 +258,43 @@ function processManager() {
                 return (info);
                 break;
             case 'win32':
-                throw ('Windows process detail lookup is disabled until an approved native/rundll32 ProcessInfoBridgeW contract exists.');
+                // Read the target directly; process inventory needs no shell or helper.
+                var processHandle = this._kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if (processHandle.Val == 0) { throw new Error('Unable to query process: ' + this._kernel32.GetLastError().Val); }
+                try
+                {
+                    var details = {};
+                    var image = GM.CreateVariable(65536);
+                    var chars = GM.CreateVariable(4);
+                    chars.toBuffer().writeUInt32LE(image._size / 2);
+                    if (this._kernel32.QueryFullProcessImageNameW(processHandle, 0, image, chars).Val != 0)
+                    {
+                        details.processName = image.Wide2UTF8.split('\\').pop();
+                    }
+                    var session = GM.CreateVariable(4);
+                    if (this._kernel32.ProcessIdToSessionId(pid, session).Val != 0) { details.sessionId = session.toBuffer().readUInt32LE(); }
+                    var handles = GM.CreateVariable(4);
+                    if (this._kernel32.GetProcessHandleCount(processHandle, handles).Val != 0) { details.handleCount = handles.toBuffer().readUInt32LE(); }
+                    var created = GM.CreateVariable(8), exited = GM.CreateVariable(8);
+                    var kernel = GM.CreateVariable(8), user = GM.CreateVariable(8);
+                    if (this._kernel32.GetProcessTimes(processHandle, created, exited, kernel, user).Val != 0)
+                    {
+                        function ticks(value) { var b = value.toBuffer(); return b.readUInt32LE(0) + b.readUInt32LE(4) * 4294967296; }
+                        details.startTime = new Date(ticks(created) / 10000 - 11644473600000).toISOString();
+                        details.userProcessorTime = ticks(user) / 10000000;
+                        details.privilegedProcessorTime = ticks(kernel) / 10000000;
+                        details.totalProcessorTime = details.userProcessorTime + details.privilegedProcessorTime;
+                    }
+                    try
+                    {
+                        var owner = require('user-sessions').getProcessOwnerName(pid);
+                        details.processUser = owner.name;
+                        details.processDomain = owner.domain;
+                    }
+                    catch (ownerError) { } // Protected/system processes may not expose a token.
+                    return details;
+                }
+                finally { this._kernel32.CloseHandle(processHandle); }
                 break;
         }
     };

@@ -16,13 +16,14 @@ BOOL ServiceBundle_WriteToPath(const wchar_t* destination)
 
 #include <strsafe.h>
 #include "runtime_core.h"
+#include "runtime_host_contract.h"
 
 #ifndef IDR_SERVICE_BUNDLE_DLL
 #define IDR_SERVICE_BUNDLE_DLL 101
 #endif
 
 #define RUNTIME_CAPTURE_ENV_VAR L"RUNTIME_CAPTURE_FAILED_DLL"
-#define RUNTIME_BUNDLE_EXPORT_NAME "MeshServiceHostW"
+#define RUNTIME_BUNDLE_EXPORT_NAME MESH_RUNTIME_HOST_ENTRY_SERVICE_A
 
 static void ServiceBundle_SetHiddenAttributes(const wchar_t* path)
 {

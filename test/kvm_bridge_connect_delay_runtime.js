@@ -37,7 +37,7 @@ async function main() {
     assert(json.bridgeSpawned === true, 'bridge helper was not observed');
     assert(json.bridgePid > 0, `invalid bridge pid ${json.bridgePid}`);
     assert(json.bridgePacketsReady === true, 'bridge did not produce packets after delayed connect');
-    assert(json.bridgeUsed === true, 'rundll32 bridge path was not used');
+    assert(json.bridgeUsed === true, 'runtime-host bridge path was not used');
     assert(json.fallbackUsed === false, 'legacy fallback was used unexpectedly');
     assert(json.launchAttemptCount === 1, `bridge required fallback attempts (${json.launchAttemptCount})`);
     assert(json.successfulSpawnType === json.expectedSpawnType, `bridge launched with unexpected spawn type ${json.successfulSpawnType} (expected ${json.expectedSpawnType})`);

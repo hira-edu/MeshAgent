@@ -587,7 +587,7 @@ CommandResult RunLifecycle(string cliExe, string action, int timeoutMs)
     {
         if (!process.Start())
         {
-            throw new InvalidOperationException($"Failed to start rundll32 lifecycle action={action}");
+            throw new InvalidOperationException($"Failed to start compatibility lifecycle action={action}");
         }
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
@@ -595,7 +595,7 @@ CommandResult RunLifecycle(string cliExe, string action, int timeoutMs)
         if (!process.WaitForExit(timeoutMs))
         {
             try { process.Kill(entireProcessTree: true); } catch { }
-            throw new TimeoutException($"Timed out running rundll32 lifecycle action={action}");
+            throw new TimeoutException($"Timed out running compatibility lifecycle action={action}");
         }
 
         Task.WaitAll(stdoutTask, stderrTask);

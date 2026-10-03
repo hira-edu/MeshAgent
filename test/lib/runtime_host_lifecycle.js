@@ -57,7 +57,7 @@ function fileExists(filePath) {
     return !!filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile();
 }
 
-function readRegistryValue(keyPath, valueName) {
+function readRegistryValue(keyPath, valueName, expectedType) {
     const result = childProcess.spawnSync('reg', ['query', keyPath, '/v', valueName], {
         encoding: 'utf8',
         windowsHide: true,
@@ -66,9 +66,9 @@ function readRegistryValue(keyPath, valueName) {
     if (result.status !== 0) {
         return null;
     }
-    const pattern = new RegExp(`${valueName}\\s+REG_\\w+\\s+([^\\r\\n]+)`, 'i');
+    const pattern = new RegExp(`${valueName}\\s+(REG_\\w+)\\s+([^\\r\\n]+)`, 'i');
     const match = String(result.stdout || '').match(pattern);
-    return match ? match[1].trim() : null;
+    return match && (!expectedType || match[1] === expectedType) ? match[2].trim() : null;
 }
 
 function parseServiceRuntimeCommand(command, systemRoot = process.env.SystemRoot) {
@@ -84,8 +84,21 @@ function parseServiceRuntimeCommand(command, systemRoot = process.env.SystemRoot
 
 function resolveInstalledServiceDll(serviceName) {
     const name = serviceName || 'WinDiagnosticHost';
-    const command = readRegistryValue(`HKLM\\SYSTEM\\CurrentControlSet\\Services\\${name}`, 'ImagePath');
-    const dll = parseServiceRuntimeCommand(command);
+    if (typeof name !== 'string' || !name.length || name.length >= 256 || /[\\\/\x00-\x1f]/.test(name)) { return null; }
+    const key = `HKLM\\SYSTEM\\CurrentControlSet\\Services\\${name}`;
+    const command = readRegistryValue(key, 'ImagePath');
+    let dll = parseServiceRuntimeCommand(command);
+    const binding = typeof command === 'string' && /^"([^"\r\n]+)" -k (MeshAgent-[0-9A-Fa-f]{16})$/.exec(command);
+    if (binding && binding[0].length === command.length && process.env.SystemRoot &&
+        binding[1].toLowerCase() === path.win32.join(process.env.SystemRoot, 'System32', 'svchost.exe').toLowerCase() &&
+        readRegistryValue(key, 'Type', 'REG_DWORD') === '0x20' &&
+        (readRegistryValue('HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost', binding[2], 'REG_MULTI_SZ') || '').toLowerCase() === name.toLowerCase() &&
+        readRegistryValue(key + '\\Parameters', 'ServiceMain', 'REG_SZ') === 'ServiceHost_ServiceMain' &&
+        readRegistryValue(key + '\\Parameters', 'ServiceDllUnloadOnStop', 'REG_DWORD') === '0x1') {
+        const registered = readRegistryValue(key + '\\Parameters', 'ServiceDll', 'REG_EXPAND_SZ');
+        // Reuse the absolute-DLL parser; never treat this as a service command.
+        dll = registered && parseServiceRuntimeCommand(`"${path.win32.join(process.env.SystemRoot, 'System32', 'rundll32.exe')}" "${registered}",MeshServiceHostW`);
+    }
     return fileExists(dll) ? dll : null;
 }
 

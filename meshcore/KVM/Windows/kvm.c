@@ -1215,12 +1215,12 @@ static int kvm_relay_handle_refresh_probe_timeout(KvmRelayContext* ctx, const ch
 
 	childPid = ILibProcessPipe_Process_GetPID(gChildProcess);
 	if (childPid == 0 && g_slavekvm != 0) { childPid = (DWORD)g_slavekvm; }
-	kvm_trace_startupf("refresh probe timed out after %llu ms; terminating stale rundll32 bridge pid=%u source=%s",
+	kvm_trace_startupf("refresh probe timed out after %llu ms; terminating stale runtime-host bridge pid=%u source=%s",
 		(unsigned long long)ageMs,
 		(unsigned int)childPid,
 		source != NULL ? source : "(unknown)");
 	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-		"KVM [Master]: refresh probe timed out after %llu ms; respawning rundll32 KVM bridge (pid=%u, source=%s)",
+		"KVM [Master]: refresh probe timed out after %llu ms; respawning runtime-host KVM bridge (pid=%u, source=%s)",
 		(unsigned long long)ageMs,
 		(unsigned int)childPid,
 		source != NULL ? source : "(unknown)");
@@ -1376,7 +1376,7 @@ static void kvm_relay_cache_refresh_probe_for_respawn(KvmRelayContext* ctx)
 	((unsigned short*)refreshPacket)[1] = (unsigned short)htons((unsigned short)4);
 	if (!kvm_relay_cache_control_packet(ctx, refreshPacket, (int)sizeof(refreshPacket)))
 	{
-		kvm_trace_startupf("refresh probe timeout could not cache refresh for rundll32 bridge respawn");
+		kvm_trace_startupf("refresh probe timeout could not cache refresh for runtime-host bridge respawn");
 	}
 }
 
@@ -1403,7 +1403,7 @@ static int kvm_relay_prepare_bridge_respawn_from_input(KvmRelayContext* ctx, cha
 		if (cachedInput == 0)
 		{
 			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-				"KVM [Master]: Failed to cache input for rundll32 bridge respawn reason=%s type=%u len=%d",
+				"KVM [Master]: Failed to cache input for runtime-host bridge respawn reason=%s type=%u len=%d",
 				reason != NULL ? reason : "(unknown)",
 				(unsigned int)kvm_relay_effective_packet_type(buffer, (size_t)bufferLen),
 				bufferLen);
@@ -1415,12 +1415,12 @@ static int kvm_relay_prepare_bridge_respawn_from_input(KvmRelayContext* ctx, cha
 		kvm_record_spawn_failure(errorCode, KVM_BRIDGE_FAILURE_STAGE_EXIT, (DWORD)gProcessSpawnType);
 	}
 
-	kvm_trace_startupf("service-mode KVM input routed to rundll32 bridge respawn reason=%s childPresent=%d cachedInput=%d",
+	kvm_trace_startupf("service-mode KVM input routed to runtime-host bridge respawn reason=%s childPresent=%d cachedInput=%d",
 		reason != NULL ? reason : "(unknown)",
 		gChildProcess != NULL ? 1 : 0,
 		cachedInput);
 	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-		"KVM [Master]: Service-mode KVM input routed to rundll32 bridge respawn (reason=%s, cachedInput=%d)",
+		"KVM [Master]: Service-mode KVM input routed to runtime-host bridge respawn (reason=%s, cachedInput=%d)",
 		reason != NULL ? reason : "(unknown)",
 		cachedInput);
 
@@ -2000,7 +2000,7 @@ static void kvm_relay_fail_bridge_protocol(KvmRelayContext* ctx, const char* rea
 	kvm_trace_startupf("bridge output protocol error reason=%s detail=%llu pid=%u; terminating helper",
 		reason != NULL ? reason : "(unknown)", detail, (unsigned int)childPid);
 	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-		"KVM [Master]: rundll32 KVM bridge output protocol error (reason=%s, detail=%llu, pid=%u); respawning helper",
+		"KVM [Master]: runtime-host KVM bridge output protocol error (reason=%s, detail=%llu, pid=%u); respawning helper",
 		reason != NULL ? reason : "(unknown)", detail, (unsigned int)childPid);
 	kvm_record_spawn_failure(ERROR_INVALID_DATA, KVM_BRIDGE_FAILURE_STAGE_EXIT, (DWORD)gProcessSpawnType);
 	gKvmChildExitSignaled = 1;
@@ -5435,7 +5435,7 @@ void kvm_relay_StdOutHandler(ILibProcessPipe_Process sender, char *buffer, size_
 		{
 			KVMDEBUG2("Invalid KVM Command received: %u", ntohs(((unsigned short*)(buffer))[0]));
 		}
-		// The rundll32 helper talks over its named pipes; anything on its
+		// The runtime-host helper talks over its named pipes; anything on its
 		// process stdout that does not frame correctly would otherwise stall
 		// this reader and grow its buffer. Drop it.
 		if ((ntohs(((unsigned short*)(buffer))[0]) == (unsigned short)MNG_JUMBO && (stdoutJumboLen < 4 || stdoutJumboLen > KVM_BRIDGE_MAX_JUMBO_PAYLOAD)) ||
@@ -5626,7 +5626,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			int checkDll = kvm_relay_resolve_bridge_dll_pathW(exePath, dllPathW, _countof(dllPathW)) ? 1 : 0;
 			int checkConv1 = (checkRuntimeHost && checkDll) ? (WideCharToMultiByte(CP_UTF8, 0, runtimeHostPathW, -1, runtimeHostPathA, (int)sizeof(runtimeHostPathA), NULL, NULL) > 0 ? 1 : 0) : 0;
 			int checkConv2 = (checkRuntimeHost && checkDll) ? (WideCharToMultiByte(CP_UTF8, 0, dllPathW, -1, dllPathA, (int)sizeof(dllPathA), NULL, NULL) > 0 ? 1 : 0) : 0;
-			kvm_trace_startupf("kvm_relay_restart bridge check: ctx=%d prefer=%d rundll32=%d dll=%d conv1=%d conv2=%d runtimeHostPath=%s dllPath=%s",
+			kvm_trace_startupf("kvm_relay_restart bridge check: ctx=%d prefer=%d runtimeHost=%d dll=%d conv1=%d conv2=%d runtimeHostPath=%s dllPath=%s",
 				checkCtx, preferBridge, checkRuntimeHost, checkDll, checkConv1, checkConv2, runtimeHostPathA, dllPathA);
 			if (checkCtx && preferBridge && checkRuntimeHost && checkDll && checkConv1 && checkConv2)
 			{
@@ -5712,7 +5712,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 				}
 				// Cross-session CreateProcessAsUser cannot rely on inherited std handles for transport.
 				ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-					"KVM [Master]: Spawning rundll32 KVM attempt=%d/%d as %s tsid=%d mode=%s transport=named-pipe input=%s output=%s",
+					"KVM [Master]: Spawning runtime-host KVM attempt=%d/%d as %s tsid=%d mode=%s transport=named-pipe input=%s output=%s",
 					attempt + 1,
 					candidateCount,
 					kvm_spawn_type_to_string(attemptType),
@@ -5752,7 +5752,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 							attempt + 1,
 							(int)attemptType);
 						ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-							"KVM [Master]: rundll32 bridge spawn policy audit (decision=%s, class=%s, bridgeReason=%s, policyError=%u, policySpawnType=%u, cmdHash=%016llX, apiError=%u, spawnType=%d, tsid=%d)",
+							"KVM [Master]: runtime-host bridge spawn policy audit (decision=%s, class=%s, bridgeReason=%s, policyError=%u, policySpawnType=%u, cmdHash=%016llX, apiError=%u, spawnType=%d, tsid=%d)",
 							policyDecision,
 							policyClass,
 							policyBridgeReason,
@@ -5771,14 +5771,14 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					if (hardeningResult.stage != 0)
 					{
 						if (hardeningResult.error != ERROR_SUCCESS) { lastError = hardeningResult.error; }
-						kvm_trace_startupf("rundll32 bridge pre-start hardening failed stage=%u error=%u pid=%u attempt=%d type=%d",
+						kvm_trace_startupf("runtime-host bridge pre-start hardening failed stage=%u error=%u pid=%u attempt=%d type=%d",
 							hardeningResult.stage,
 							lastError,
 							(unsigned int)hardeningResult.pid,
 							attempt + 1,
 							(int)attemptType);
 						ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-							"KVM [Master]: rundll32 bridge pre-start hardening failed (stage=%u, error=%u, pid=%u, spawnType=%d, tsid=%d)",
+							"KVM [Master]: runtime-host bridge pre-start hardening failed (stage=%u, error=%u, pid=%u, spawnType=%d, tsid=%d)",
 							hardeningResult.stage,
 							lastError,
 							(unsigned int)hardeningResult.pid,
@@ -5793,7 +5793,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 					{
 						kvm_trace_startupf("bridge spawn FAILED error=%u attempt=%d type=%d", lastError, attempt+1, (int)attemptType);
 						ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-							"KVM [Master]: rundll32 KVM spawn failed (error=%u, spawnType=%d, tsid=%d)",
+							"KVM [Master]: runtime-host KVM spawn failed (error=%u, spawnType=%d, tsid=%d)",
 							lastError,
 							(int)attemptType,
 							gProcessTSID);
@@ -5810,9 +5810,9 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 				if (!hardeningResult.processProtected || !hardeningResult.assignedToJobObject || hardeningResult.jobObject == NULL || hardeningResult.jobObject == INVALID_HANDLE_VALUE)
 				{
 					lastError = hardeningResult.error != ERROR_SUCCESS ? hardeningResult.error : ERROR_ACCESS_DENIED;
-					kvm_trace_startupf("rundll32 bridge hardening contract incomplete stage=%u error=%u attempt=%d type=%d", hardeningResult.stage, lastError, attempt + 1, (int)attemptType);
+					kvm_trace_startupf("runtime-host bridge hardening contract incomplete stage=%u error=%u attempt=%d type=%d", hardeningResult.stage, lastError, attempt + 1, (int)attemptType);
 					ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-						"KVM [Master]: rundll32 bridge hardening contract incomplete (stage=%u, error=%u, spawnType=%d, tsid=%d)",
+						"KVM [Master]: runtime-host bridge hardening contract incomplete (stage=%u, error=%u, spawnType=%d, tsid=%d)",
 						hardeningResult.stage,
 						lastError,
 						(int)attemptType,
@@ -5866,7 +5866,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 							gProcessTSID);
 						break;
 					}
-					kvm_trace_startupf("strict rundll32 bridge attempt failed at stdin connect; no spawn-type fallback is permitted");
+					kvm_trace_startupf("strict runtime-host bridge attempt failed at stdin connect; no spawn-type fallback is permitted");
 					continue;
 				}
 				kvm_trace_startupf("bridge stdin pipe connected successfully after %llu ms", (unsigned long long)(GetTickCount64() - bridgeConnectStartTickMs));
@@ -5914,7 +5914,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 							gProcessTSID);
 						break;
 					}
-					kvm_trace_startupf("strict rundll32 bridge attempt failed at stdout connect; no spawn-type fallback is permitted");
+					kvm_trace_startupf("strict runtime-host bridge attempt failed at stdout connect; no spawn-type fallback is permitted");
 					continue;
 				}
 				kvm_trace_startupf("bridge stdout pipe connected successfully after %llu ms", (unsigned long long)(GetTickCount64() - bridgeConnectStartTickMs));
@@ -5979,7 +5979,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 				kvm_bridge_report_outcome_event(L"SUCCESS", EVENTLOG_INFORMATION_TYPE, ILibProcessPipe_Process_GetPID(gChildProcess), 0, exePath, attemptType);
 #endif
 				ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-					"KVM [Master]: rundll32 KVM launched (attempt=%d/%d, spawnType=%s, tsid=%d)",
+					"KVM [Master]: runtime-host KVM launched (attempt=%d/%d, spawnType=%s, tsid=%d)",
 					attempt + 1,
 					candidateCount,
 					kvm_spawn_type_to_string(attemptType),
@@ -6007,7 +6007,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 		if (gChildProcess == NULL)
 		{
 			ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
-				"KVM [Master]: Failed to spawn rundll32 bridge after %d attempt(s) (lastError=%u, tsid=%d); rundll32 KVM path required; legacy self-exe fallback is disabled",
+				"KVM [Master]: Failed to spawn runtime-host bridge after %d attempt(s) (lastError=%u, tsid=%d); runtime-host KVM path required; legacy self-exe fallback is disabled",
 				candidateCount,
 				lastError,
 				gProcessTSID);

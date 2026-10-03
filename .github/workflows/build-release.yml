@@ -460,7 +460,7 @@ jobs:
           1. Download MeshService64.exe (or MeshService.exe for 32-bit)
           2. Set environment: `[System.Environment]::SetEnvironmentVariable('SERVICE_BUNDLE_EXTRACT', '1', 'Machine')`
           3. Run installer
-          4. Verify SCM ImagePath invokes the system rundll32.exe with the MeshServiceHostW export
+          4. Verify SCM ImagePath and ServiceDll metadata use the canonical service-host contract
 
           **Built from commit:** ${{ github.sha }}
           **Configuration:** MeshServiceRuntime (NOT Release)

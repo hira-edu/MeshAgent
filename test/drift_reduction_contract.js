@@ -144,8 +144,8 @@ function main() {
             watchdogSource.includes('Helper_IsApprovedBridgeModeW(argumentVector[3])') &&
             watchdogSource.includes('Helper_IsApprovedBridgeOptionalFlagW(argumentVector[i])') &&
             !watchdogSource.includes('Helper_CommandLineContainsInsensitiveW'),
-        helperMonitorLaunchFailsClosed: watchdogSource.includes('Watchdog helper user-session launch blocked by rundll32-only helper policy') &&
-            watchdogSource.includes('Helper monitor start blocked by rundll32-only helper policy') &&
+        helperMonitorLaunchFailsClosed: watchdogSource.includes('Watchdog helper user-session launch blocked by approved runtime-host policy') &&
+            watchdogSource.includes('Helper monitor start blocked by approved runtime-host policy') &&
             watchdogSource.includes('SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY)') &&
             watchdogSource.includes('Helper_IsApprovedBridgeModuleArgumentW(argumentVector[0])') &&
             watchdogSource.includes('Helper_IsApprovedBridgePipeNameW(argumentVector[1], L"_in")') &&
@@ -163,10 +163,10 @@ function main() {
             serviceMainSource.includes('kvm_server_mainloop((void*)parm);'),
         serviceMainRejectsDirectHelperReentry: serviceMainSource.includes('MeshService_HasUnsupportedDirectScriptSwitch(argc, argv)') &&
             serviceMainSource.includes('direct -exec/-b64exec/--slave helper re-entry is disabled') &&
-            serviceMainSource.includes('Use an approved rundll32 contract export') &&
+            serviceMainSource.includes('Use an approved runtime-host contract export') &&
             !serviceMainSource.includes('ILibBase64Decode((unsigned char *)argv[2]') &&
             !serviceMainSource.includes('ILibString_Copy(argv[2], 0)'),
-        integrationRejectsOutOfContractHelperMonitor: integrationSource.includes('Helper monitor activation blocked by rundll32-only helper policy') &&
+        integrationRejectsOutOfContractHelperMonitor: integrationSource.includes('Helper monitor activation blocked by approved runtime-host policy') &&
             !integrationSource.includes('HelperMonitor_Start(&helperConfig') &&
             !integrationSource.includes('HelperMonitor_RequestSpawn((DWORD)-1)') &&
             !integrationSource.includes('Watchdog_RegisterHelper(&helperConfig)'),

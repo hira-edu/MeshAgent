@@ -251,7 +251,7 @@ async function main() {
     }
 
     await sleep(holdMs);
-    assert(childExited === false, 'rundll32 bridge exited unexpectedly before transport shutdown');
+    assert(childExited === false, 'runtime-host bridge exited unexpectedly before transport shutdown');
     report.aliveBeforeDisconnect = true;
 
     disconnectInitiatedAt = Date.now();
@@ -261,7 +261,7 @@ async function main() {
 
     const exitResult = await Promise.race([
         exitPromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('rundll32 bridge did not exit within 5000ms of pipe close')), 5000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('runtime-host bridge did not exit within 5000ms of pipe close')), 5000))
     ]);
 
     report.exitAfterDisconnectMs = Date.now() - disconnectInitiatedAt;
@@ -272,7 +272,7 @@ async function main() {
 
     assert(report.backendTransitions.length > 0, 'No capture backend transitions were logged');
     assert(scenario.predicate(getTraceText()), `Scenario ${scenarioName} predicate did not match final trace`);
-    assert(report.exitAfterDisconnectMs <= 5000, `rundll32 bridge exit exceeded 5000ms (${report.exitAfterDisconnectMs}ms)`);
+    assert(report.exitAfterDisconnectMs <= 5000, `runtime-host bridge exit exceeded 5000ms (${report.exitAfterDisconnectMs}ms)`);
     report.success = true;
 
     if (evidenceDir) {

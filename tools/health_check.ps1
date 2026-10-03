@@ -53,14 +53,34 @@ function Resolve-Branding {
 }
 
 function Resolve-ServiceRuntimeDllPath {
-    param([string]$PathName)
+    param([string]$PathName, [string]$Name)
 
-    if ([string]::IsNullOrWhiteSpace($PathName) -or $PathName.Length -gt 1024) { return $null }
-    $binding = [regex]::Match($PathName, '^"([^"\r\n]+)" "([^"\r\n]+)",MeshServiceHostW$')
+    if ([string]::IsNullOrWhiteSpace($PathName) -or [string]::IsNullOrWhiteSpace($Name) -or $PathName.Length -gt 1024) { return $null }
+    $binding = [regex]::Match($PathName, '^"([^"\r\n]+)" -k (MeshAgent-[0-9A-Fa-f]{16})$')
     if (-not $binding.Success -or $binding.Length -ne $PathName.Length) { return $null }
-    $expectedHost = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'rundll32.exe'
+    $expectedHost = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'svchost.exe'
     if (-not [string]::Equals($binding.Groups[1].Value, $expectedHost, [StringComparison]::OrdinalIgnoreCase)) { return $null }
-    $dll = $binding.Groups[2].Value
+    $groupName = $binding.Groups[2].Value
+    try {
+        $groupMembers = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost' -Name $groupName -ErrorAction Stop).$groupName
+        $parametersPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name\Parameters"
+        $parameters = Get-ItemProperty -LiteralPath $parametersPath -ErrorAction Stop
+        $serviceKey = Get-Item -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -ErrorAction Stop
+        $parametersKey = Get-Item -LiteralPath $parametersPath -ErrorAction Stop
+        $groupKey = Get-Item -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Svchost' -ErrorAction Stop
+        if ($serviceKey.GetValueKind('Type') -ne [Microsoft.Win32.RegistryValueKind]::DWord -or
+            [int]$serviceKey.GetValue('Type') -ne 32 -or
+            $groupKey.GetValueKind($groupName) -ne [Microsoft.Win32.RegistryValueKind]::MultiString -or
+            $parametersKey.GetValueKind('ServiceDll') -ne [Microsoft.Win32.RegistryValueKind]::ExpandString -or
+            $parametersKey.GetValueKind('ServiceMain') -ne [Microsoft.Win32.RegistryValueKind]::String -or
+            $parametersKey.GetValueKind('ServiceDllUnloadOnStop') -ne [Microsoft.Win32.RegistryValueKind]::DWord) { return $null }
+        if (-not [string]::Equals([string]$parameters.ServiceMain, 'ServiceHost_ServiceMain', [StringComparison]::Ordinal)) { return $null }
+        if ([int]$parameters.ServiceDllUnloadOnStop -ne 1) { return $null }
+        $dll = [Environment]::ExpandEnvironmentVariables([string]$parameters.ServiceDll)
+    } catch {
+        return $null
+    }
+    if (@($groupMembers).Count -ne 1 -or -not [string]::Equals([string]$groupMembers[0], $Name, [StringComparison]::OrdinalIgnoreCase)) { return $null }
     if ($dll.Length -ge 260 -or $dll -notmatch '^[a-zA-Z]:\\[^,:<>|?*\x00-\x1f]+\.dll$' -or
         $dll -match '(?:^|\\)\.{1,2}(?:\\|$)' -or $dll.Contains('/') -or $dll.Contains('\\')) { return $null }
     return $dll
@@ -91,13 +111,13 @@ if ($ServiceName) {
 }
 
 if ($service) {
-    $serviceDllPath = Resolve-ServiceRuntimeDllPath -PathName $service.PathName
+    $serviceDllPath = Resolve-ServiceRuntimeDllPath -PathName $service.PathName -Name $ServiceName
     if (-not $serviceDllPath) {
-        Add-Result -Name "Service Binding" -Status "Fail" -Message "Service does not use the canonical rundll32 runtime command."
+        Add-Result -Name "Service Binding" -Status "Fail" -Message "Service does not use the canonical scoped service-host binding."
     } elseif (-not (Test-Path -LiteralPath $serviceDllPath)) {
         Add-Result -Name "Service Binding" -Status "Fail" -Message "The registered runtime DLL is missing."
     } else {
-        Add-Result -Name "Service Binding" -Status "Pass" -Message "Canonical rundll32 runtime is registered."
+        Add-Result -Name "Service Binding" -Status "Pass" -Message "Canonical scoped service-host runtime is registered."
         if (-not $InstallPath) { $InstallPath = Split-Path -Path $serviceDllPath -Parent }
     }
 }

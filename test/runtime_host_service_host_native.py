@@ -2,8 +2,8 @@
 """Compile the production primary-host contract with fault-injected Win32 APIs.
 
 No services are installed or processes launched. Requires Python and a C compiler.
-This covers command admission, SCM registration and callback dispatch; Windows
-SCM/rundll32 integration still requires the built bundle on an approved host.
+This covers service-host command admission, SCM registration and legacy callback
+dispatch; SCM integration still requires the built bundle on an approved host.
 """
 import os
 from pathlib import Path
@@ -34,6 +34,7 @@ prelude = r'''
 #include <wchar.h>
 #include <setjmp.h>
 typedef int BOOL;
+typedef void VOID;
 typedef uint32_t DWORD;
 typedef unsigned char BYTE;
 typedef long LONG;
@@ -58,7 +59,10 @@ typedef struct { wchar_t* lpServiceName; void (*lpServiceProc)(DWORD, LPWSTR*); 
 #define ERROR_FILE_NOT_FOUND 2
 #define ERROR_PATH_NOT_FOUND 3
 #define ERROR_ACCESS_DENIED 5
+#define ERROR_DUP_NAME 52
+#define ERROR_INVALID_DATA 13
 #define SERVICE_WIN32_OWN_PROCESS 16
+#define SERVICE_WIN32_SHARE_PROCESS 32
 #define SERVICE_AUTO_START 2
 #define SERVICE_ERROR_NORMAL 1
 #define SERVICE_QUERY_CONFIG 1
@@ -73,6 +77,9 @@ typedef struct { wchar_t* lpServiceName; void (*lpServiceProc)(DWORD, LPWSTR*); 
 #define SERVICE_CONFIG_DESCRIPTION 1
 #define KEY_QUERY_VALUE 1
 #define KEY_SET_VALUE 2
+#define REG_SZ 1
+#define REG_EXPAND_SZ 2
+#define REG_DWORD 4
 #define REG_MULTI_SZ 7
 #define HKEY_LOCAL_MACHINE ((HKEY)1)
 #define _countof(a) (sizeof(a) / sizeof((a)[0]))
@@ -87,7 +94,9 @@ typedef struct { wchar_t* lpServiceName; void (*lpServiceProc)(DWORD, LPWSTR*); 
 #define GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT 2
 #define wcsnlen_s wcsnlen
 #define StringCchCopyW(a,b,c) wcscpy(a,c)
-#define MESH_RUNTIME_HOST_ENTRY_SERVICE_W L"MeshServiceHostW"
+#define __int64 long long
+#define MESH_RUNTIME_HOST_ENTRY_SERVICE_W L"ServiceHost_ServiceMain"
+#define MESH_RUNTIME_HOST_ENTRY_LEGACY_SERVICE_W L"MeshServiceHostW"
 static DWORD lastError, exitCode;
 static wchar_t g_ServiceHostServiceName[256];
 static char g_ServiceHostServiceNameUtf8[1024], runtimeServiceName[1024];
@@ -100,10 +109,11 @@ static int WideCharToMultiByte(unsigned cp,unsigned flags,const wchar_t* input,i
 }
 static void ServiceDeploy_SetRuntimeServiceKeyNameUtf8(const char* value) { strcpy(runtimeServiceName,value); }
 
-static int installed, customAccount, changeCalls, config2Calls, deletes, registryWrites, dispatches;
+static int installed, customAccount, changeCalls, config2Calls, deletes, registryWrites, parameterWrites, dispatches;
 static int failApi, apiIndex, badModule, badProcess, dispatcherFails, runtimeFails, moduleLookupFails;
-static wchar_t command[2080], registeredCommand[2080], group[64];
-static DWORD groupBytes;
+static wchar_t command[2080], registeredCommand[2080], group[64], serviceGroup[258];
+static DWORD groupBytes, serviceGroupBytes;
+static int serviceGroupPresent;
 static DWORD registeredType;
 static jmp_buf exitJump;
 static struct { DWORD dwWin32ExitCode, dwServiceSpecificExitCode; } g_ServiceHostStatus;
@@ -119,8 +129,13 @@ static DWORD GetFullPathNameW(const wchar_t* path, DWORD count, wchar_t* out, vo
     if (path[0] != L'C' || path[1] != L':') { wcscpy(out,L"C:\\relative"); return (DWORD)wcslen(out); }
     wcscpy(out,path); return (DWORD)wcslen(out);
 }
+static DWORD CharLowerBuffW(wchar_t* value,DWORD length){for(DWORD i=0;i<length;++i){if(value[i]>=L'A'&&value[i]<=L'Z')value[i]=(wchar_t)(value[i]-L'A'+L'a');}return length;}
 static BOOL MeshRuntimeHost_GetSystemHostPathW(wchar_t* out, size_t count) {
     const wchar_t* value=L"C:\\Windows\\System32\\rundll32.exe";
+    if (count <= wcslen(value)) return FALSE; wcscpy(out,value); return TRUE;
+}
+static BOOL MeshRuntimeHost_GetServiceHostPathW(wchar_t* out, size_t count) {
+    const wchar_t* value=L"C:\\Windows\\System32\\svchost.exe";
     if (count <= wcslen(value)) return FALSE; wcscpy(out,value); return TRUE;
 }
 static const wchar_t* GetCommandLineW(void) { return command; }
@@ -129,7 +144,7 @@ static BOOL GetModuleHandleExW(DWORD flags, const wchar_t* address, HMODULE* mod
     assert(address && module); if(moduleLookupFails)return FALSE; *module=(HMODULE)2; return TRUE;
 }
 static DWORD GetModuleFileNameW(HINSTANCE module, wchar_t* out, DWORD count) {
-    // rundll32 supplies its executable instance as the callback argument.
+    // The system DLL loader supplies its executable instance as the callback argument.
     (void)count; wcscpy(out,module == (HMODULE)2 ? (badModule ? L"C:\\wrong.dll" : L"C:\\Agent\\bundle.dll") :
         (badProcess ? L"C:\\fake\\rundll32.exe" : L"C:\\Windows\\System32\\rundll32.exe")); return (DWORD)wcslen(out);
 }
@@ -180,30 +195,77 @@ static LONG RegOpenKeyExW(HKEY root,const wchar_t* name,DWORD options,DWORD acce
     *key=wcsstr(name,L"Parameters")?(HKEY)2:(HKEY)3; return ERROR_SUCCESS;
 }
 static LONG RegDeleteValueW(HKEY key,const wchar_t* name) {
-    (void)key; assert(wcscmp(name,L"ServiceDllHash")!=0); ++deletes; return step()?ERROR_SUCCESS:ERROR_ACCESS_DENIED;
+    (void)key;(void)name; ++deletes; return step()?ERROR_SUCCESS:ERROR_ACCESS_DENIED;
+}
+static DWORD dllRegistryType=REG_EXPAND_SZ, entryRegistryBytes;
+static const wchar_t* dllRegistryValue=L"C:\\Agent\\bundle.dll";
+static const wchar_t* entryRegistryValue=L"ServiceHost_ServiceMain";
+static DWORD ExpandEnvironmentStringsW(const wchar_t* from,wchar_t* to,DWORD count) {
+    DWORD needed=(DWORD)wcslen(from)+1;
+    if(needed<=count)wcscpy(to,from);return needed;
 }
 static LONG RegQueryValueExW(HKEY key,const wchar_t* name,void* reserved,DWORD* type,BYTE* bytes,DWORD* size) {
-    (void)key;(void)name;(void)reserved; if (!step()) return ERROR_ACCESS_DENIED; *type=REG_MULTI_SZ;
-    if (bytes) { assert(*size>=groupBytes); memcpy(bytes,group,groupBytes); } *size=groupBytes; return ERROR_SUCCESS;
+    (void)reserved; if (!step()) return ERROR_ACCESS_DENIED;
+    if(key==(HKEY)2) {
+        const wchar_t* value=wcscmp(name,L"ServiceMain")==0?entryRegistryValue:dllRegistryValue;
+        DWORD length=(DWORD)((wcslen(value)+1)*sizeof(wchar_t));
+        *type=wcscmp(name,L"ServiceMain")==0?REG_SZ:dllRegistryType;
+        if(wcscmp(name,L"ServiceMain")==0&&entryRegistryBytes)length=entryRegistryBytes;
+        if(*size<length)return ERROR_INSUFFICIENT_BUFFER;
+        memcpy(bytes,value,length);*size=length;return ERROR_SUCCESS;
+    }
+    assert(key==(HKEY)3); *type=REG_MULTI_SZ;
+    if (wcscmp(name,L"netsvcs")==0) { if (bytes) { assert(*size>=groupBytes); memcpy(bytes,group,groupBytes); } *size=groupBytes; return ERROR_SUCCESS; }
+    if (!serviceGroupPresent) return ERROR_FILE_NOT_FOUND;
+    if (bytes) { assert(*size>=serviceGroupBytes); memcpy(bytes,serviceGroup,serviceGroupBytes); }
+    *size=serviceGroupBytes; return ERROR_SUCCESS;
 }
 static LONG RegSetValueExW(HKEY key,const wchar_t* name,DWORD reserved,DWORD type,const BYTE* bytes,DWORD size) {
-    (void)key;(void)reserved; assert(wcscmp(name,L"netsvcs")==0 && type==REG_MULTI_SZ); ++registryWrites;
-    if (!step()) return ERROR_ACCESS_DENIED; memcpy(group,bytes,size); groupBytes=size; return ERROR_SUCCESS;
+    (void)reserved; if (!step()) return ERROR_ACCESS_DENIED;
+    if (key==(HKEY)2) {
+        assert(type==(wcscmp(name,L"ServiceDll")==0 ? REG_EXPAND_SZ :
+            wcscmp(name,L"ServiceMain")==0 ? REG_SZ : REG_DWORD));
+        ++parameterWrites; return ERROR_SUCCESS;
+    }
+    assert(key==(HKEY)3 && type==REG_MULTI_SZ); ++registryWrites;
+    if (wcscmp(name,L"netsvcs")==0) { memcpy(group,bytes,size); groupBytes=size; }
+    else { memcpy(serviceGroup,bytes,size); serviceGroupBytes=size; serviceGroupPresent=1; }
+    return ERROR_SUCCESS;
+}
+static LONG RegCreateKeyExW(HKEY root,const wchar_t* name,DWORD reserved,wchar_t* cls,DWORD options,DWORD access,void* security,HKEY* key,DWORD* disposition) {
+    (void)root;(void)reserved;(void)cls;(void)options;(void)access;(void)security;(void)disposition;
+    if(!step())return ERROR_ACCESS_DENIED;*key=wcsstr(name,L"Parameters")?(HKEY)2:(HKEY)3;return ERROR_SUCCESS;
 }
 #define RegCloseKey(x) ((void)(x))
 static void reset(void) {
-    installed=1; customAccount=changeCalls=config2Calls=deletes=registryWrites=dispatches=0;
+    installed=1; customAccount=changeCalls=config2Calls=deletes=registryWrites=parameterWrites=dispatches=0;
+    serviceGroupPresent=0;serviceGroupBytes=0;
     failApi=apiIndex=badModule=badProcess=dispatcherFails=runtimeFails=moduleLookupFails=0; registeredType=32; registeredCommand[0]=0;
     static const wchar_t members[]=L"Other\0Agent\0Third\0"; memcpy(group,members,sizeof(members)); groupBytes=sizeof(members);
 }
 '''
 prelude = prelude.replace('#include <setjmp.h>', '#include <setjmp.h>\n#include <stdarg.h>')
 functions = '\n'.join(extract(name) for name in [
-    'ServiceHost_BuildImagePath', 'ServiceHost_ParseImagePath', 'ServiceHost_AcceptScmName', 'MeshServiceHostW',
-    'ServiceHost_RemoveLegacyGroupMembership', 'ServiceHost_RemoveLegacyParameters', 'ServiceHost_RegisterServiceHostService'])
+    'ServiceHost_ValidateAbsoluteDllPath', 'ServiceHost_BuildImagePath', 'ServiceHost_ParseImagePath',
+        'ServiceHost_BuildGroupName', 'ServiceHost_BuildServiceImagePath', 'ServiceHost_AcceptScmName', 'MeshServiceHostW',
+    'ServiceHost_ReadServiceDllPath', 'ServiceHost_RemoveGroupMembership', 'ServiceHost_ConfigureServiceGroup', 'ServiceHost_ConfigureParameters',
+    'ServiceHost_RegisterServiceHostService'])
 cases = r'''
 int main(void) {
     wchar_t parsed[1040]; reset();
+    assert(ServiceHost_ReadServiceDllPath(L"Agent",parsed,1040,FALSE));
+    dllRegistryType=REG_SZ;
+    assert(!ServiceHost_ReadServiceDllPath(L"Agent",parsed,1040,FALSE));
+    assert(ServiceHost_ReadServiceDllPath(L"Agent",parsed,1040,TRUE));
+    dllRegistryType=REG_EXPAND_SZ;
+    entryRegistryBytes=(DWORD)(wcslen(entryRegistryValue)*sizeof(wchar_t));
+    assert(!ServiceHost_ReadServiceDllPath(L"Agent",parsed,1040,FALSE));
+    entryRegistryBytes=0;
+    entryRegistryValue=L"Stealth_SvchostServiceMain";
+    assert(!ServiceHost_ReadServiceDllPath(L"Agent",parsed,1040,FALSE));
+    assert(ServiceHost_ReadServiceDllPath(L"Agent",parsed,1040,TRUE));
+    entryRegistryValue=L"ServiceHost_ServiceMain";
+    reset();
     wchar_t* scmArgs[] = {L"Operator Renamed Service", NULL};
     assert(ServiceHost_AcceptScmName(1,scmArgs));
     assert(wcscmp(g_ServiceHostServiceName,scmArgs[0])==0 && strcmp(runtimeServiceName,"Operator Renamed Service")==0);
@@ -231,6 +293,11 @@ int main(void) {
     assert(!ServiceHost_ParseImagePath(L"\"C:\\fake\\rundll32.exe\" \"C:\\Agent\\bundle.dll\",MeshServiceHostW",parsed,1040));
     assert(!ServiceHost_ParseImagePath(L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Agent\\bundle.dll\",MeshLifecycleHostW",parsed,1040));
     wcscat(command,L" extra"); assert(!ServiceHost_ParseImagePath(command,parsed,1040));
+    assert(ServiceHost_BuildGroupName(L"Agent",parsed,1040));
+    assert(wcsncmp(parsed,L"MeshAgent-",10)==0);
+            assert(ServiceHost_BuildServiceImagePath(L"Agent",command,2080));
+    assert(wcsstr(command,L"C:\\Windows\\System32\\svchost.exe") && wcsstr(command,L" -k MeshAgent-"));
+    assert(!ServiceHost_BuildGroupName(L"bad\"name",parsed,1040));
     ServiceHost_BuildImagePath(L"C:\\Agent\\bundle.dll",command,2080);
     for (int mode=0;mode<6;++mode) {
         reset(); badModule=mode==1; badProcess=mode==2; dispatcherFails=mode==3; runtimeFails=mode==4; moduleLookupFails=mode==5;
@@ -240,18 +307,18 @@ int main(void) {
     }
     moduleLookupFails=0;
     reset(); assert(ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
-    int boundaries=apiIndex; assert(changeCalls==1 && registeredType==SERVICE_WIN32_OWN_PROCESS && deletes==3 && registryWrites==1);
-    assert(ServiceHost_ParseImagePath(registeredCommand,parsed,1040));
+    int boundaries=apiIndex; assert(changeCalls==1 && registeredType==SERVICE_WIN32_SHARE_PROCESS && parameterWrites==3 && registryWrites==2);
+    assert(wcsstr(registeredCommand,L"svchost.exe") && wcsstr(registeredCommand,L" -k MeshAgent-"));
     static const wchar_t expected[]=L"Other\0Third\0";
     assert(groupBytes==sizeof(expected) && memcmp(group,expected,sizeof(expected))==0);
     for (int fail=1;fail<=boundaries;++fail) {
         reset(); failApi=fail; assert(!ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
     }
     reset(); customAccount=1; assert(!ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
-    assert(changeCalls==0 && config2Calls==0 && deletes==0 && registryWrites==0);
+    assert(changeCalls==0 && config2Calls==0 && deletes==0 && registryWrites==0 && parameterWrites==0);
     reset(); installed=0; assert(ServiceHost_RegisterServiceHostService(L"Agent",L"C:\\Agent\\bundle.dll"));
-    assert(changeCalls==0 && registeredType==SERVICE_WIN32_OWN_PROCESS);
-    puts("rundll32 primary host: command admission, callback dispatch, account preservation and registration faults passed");
+    assert(changeCalls==0 && registeredType==SERVICE_WIN32_SHARE_PROCESS);
+            puts("primary service host: isolated-group admission, legacy callback, account preservation and registration faults passed");
     return 0;
 }
 '''

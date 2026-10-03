@@ -37,6 +37,7 @@ limitations under the License.
 #include "wincrypto.h"
 #include <shellscalingapi.h>
 #include <process.h>
+#include "native_file_actions.h"
 #include "../meshservice/runtime_core.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
@@ -282,7 +283,7 @@ static BOOL MeshAgent_RunNativeServiceFullInstall(struct MeshAgentHostContainer*
 	DWORD lifecycleExitCode = ERROR_SUCCESS;
 	ILibUTF8ToWideEx(agentHost->exePath, -1, exePathW, (int)(sizeof(exePathW) / sizeof(WCHAR)));
 
-	MeshAgent_LogNativeInstallerEvent("...Running rundll32 lifecycle installer");
+	MeshAgent_LogNativeInstallerEvent("...Running compatibility lifecycle installer");
 	const BOOL previouslyInstalled = ServiceDeploy_IsAlreadyInstalled();
 	MeshAgent_LogNativeInstallerEvent("...Lifecycle planner will evaluate existing state before install (detected installed: %s)", previouslyInstalled ? "yes" : "no");
 
@@ -326,7 +327,7 @@ static BOOL MeshAgent_RunNativeServiceFullInstall(struct MeshAgentHostContainer*
 static BOOL MeshAgent_RunNativeServiceFullUninstall(void)
 {
 	DWORD lifecycleExitCode = ERROR_SUCCESS;
-	MeshAgent_LogNativeInstallerEvent("...Running rundll32 lifecycle uninstaller");
+	MeshAgent_LogNativeInstallerEvent("...Running compatibility lifecycle uninstaller");
 	if (MeshRuntimeHost_LaunchLifecycleHostW(
 			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNINSTALL,
 			NULL,
@@ -1799,7 +1800,7 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 		return TRUE;
 	}
 
-	MeshAgent_LogNativeInstallerEvent("...Running rundll32 lifecycle update");
+	MeshAgent_LogNativeInstallerEvent("...Running compatibility lifecycle update");
 	if (MeshRuntimeHost_LaunchLifecycleHostW(
 			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE,
 			sourceExe,
@@ -4340,6 +4341,46 @@ static duk_ret_t ILibDuktape_MeshAgent_ActivateNativeUpdate(duk_context *ctx)
 }
 #endif
 
+#ifdef WIN32
+static duk_ret_t ILibDuktape_MeshAgent_FileAction(duk_context *ctx)
+{
+    const char* action = duk_require_string(ctx, 0);
+    DWORD pid = 0, deleted = 0, error;
+    BOOL ok = FALSE;
+    duk_size_t length, i;
+    wchar_t* path;
+    BOOL openAssociation = strcmp(action, "open") == 0;
+    BOOL deleting = strcmp(action, "delete") == 0;
+    BOOL privileged = duk_require_boolean(ctx, 2);
+    unsigned int securityFlags = (unsigned int)ILibDuktape_ScriptContainer_GetSecurityFlags(ctx);
+    BOOL denied = (securityFlags & (SCRIPT_ENGINE_NO_MESH_AGENT_ACCESS | SCRIPT_ENGINE_NO_FILE_SYSTEM_ACCESS | (deleting ? 0 : SCRIPT_ENGINE_NO_PROCESS_SPAWNING))) != 0;
+    if (denied) { return ILibDuktape_Error(ctx, "Native file actions are disabled for this script container"); }
+    duk_require_string(ctx, 1);
+    length = duk_get_length(ctx, 1);
+    if ((!deleting && !openAssociation && strcmp(action, "execute") != 0) || length == 0 || length >= MESH_FILE_PATH_CHARS)
+    { return ILibDuktape_Error(ctx, "Invalid native file action"); }
+    path = (wchar_t*)calloc(length + 1, sizeof(wchar_t));
+    if (path == NULL) { return ILibDuktape_Error(ctx, "Native file action allocation failed"); }
+    // Duktape strings use CESU-8 internally. Copy UTF-16 code units directly so
+    // non-ASCII names, including surrogate pairs, reach Win32 without truncation.
+    for (i = 0; i < length; ++i)
+    {
+        duk_codepoint_t code = duk_char_code_at(ctx, 1, i);
+        if (code == 0 || code > 0xffff) { free(path); return ILibDuktape_Error(ctx, "Invalid file path encoding"); }
+        path[i] = (wchar_t)code;
+    }
+    ok = deleting ? MeshFileAction_Delete(path, privileged, &deleted) : MeshFileAction_Launch(path, openAssociation, privileged, &pid);
+    error = ok ? ERROR_SUCCESS : GetLastError();
+    free(path);
+    duk_push_object(ctx);
+    duk_push_boolean(ctx, ok); duk_put_prop_string(ctx, -2, "ok");
+    duk_push_uint(ctx, error); duk_put_prop_string(ctx, -2, "error");
+    duk_push_uint(ctx, pid); duk_put_prop_string(ctx, -2, "pid");
+    duk_push_uint(ctx, deleted); duk_put_prop_string(ctx, -2, "deleted");
+    return 1;
+}
+#endif
+
 void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 {
 	MeshAgentHostContainer *agent;
@@ -4422,6 +4463,9 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 		ILibDuktape_CreateInstanceMethod(ctx, "log", ILibDuktape_MeshAgent_log, 1);
 		ILibDuktape_CreateEventWithGetter(ctx, "controlChannelDebug", ILibDuktape_MeshAgent_controlChannelDebug);
 		ILibDuktape_CreateInstanceMethod(ctx, "DataPing", ILibDuktape_MeshAgent_DataPing, DUK_VARARGS);
+#ifdef WIN32
+        ILibDuktape_CreateInstanceMethod(ctx, "fileAction", ILibDuktape_MeshAgent_FileAction, 3);
+#endif
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ARCHID", MESH_AGENTID);
 	#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 4);
@@ -5382,7 +5426,7 @@ static BOOL MeshServer_UpdateActivation_Sink(void *chain, HANDLE h, ILibWaitHand
 		}
 		else
 		{
-			ILIBLOGMESSAGEX("SelfUpdate -> FAILED rundll32 lifecycle update activation (exit %lu, error %lu); keeping current agent online", exitCode, GetLastError());
+			ILIBLOGMESSAGEX("SelfUpdate -> FAILED compatibility lifecycle update activation (exit %lu, error %lu); keeping current agent online", exitCode, GetLastError());
 			MeshServer_RestoreForceFakeUpdateTrigger(agent);
 			MeshServer_FailUpdateActivation(agent, 1);
 		}
@@ -5395,7 +5439,7 @@ static BOOL MeshServer_UpdateActivation_Sink(void *chain, HANDLE h, ILibWaitHand
 	{
 		// The host has neither stopped this service nor finished. It may still be
 		// mid-transaction, so leave it running with its package and stop waiting.
-		ILIBLOGMESSAGEX("SelfUpdate -> rundll32 lifecycle update activation did not finish (status %d); keeping current agent online", (int)status);
+		ILIBLOGMESSAGEX("SelfUpdate -> compatibility lifecycle update activation did not finish (status %d); keeping current agent online", (int)status);
 		MeshRuntimeHost_ReleaseLifecycleHostW(&(activation->launch));
 		MeshServer_FailUpdateActivation(agent, 0);
 	}
@@ -5514,19 +5558,19 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 		// A successful activation stops this service before the host returns, so
 		// nothing after the hand-off runs here. Consume the one-shot trigger now.
 		MeshServer_MarkForceFakeUpdateConsumed(agent);
-		ILIBLOGMESSAGEX("SelfUpdate -> Launching rundll32 lifecycle update activation...");
+		ILIBLOGMESSAGEX("SelfUpdate -> Launching compatibility lifecycle update activation...");
 		if (MeshServer_StartUpdateActivation(agent, w_updatefile))
 		{
-			ILIBLOGMESSAGEX("SelfUpdate -> rundll32 lifecycle update activation started (%ls)", w_updatefile);
+			ILIBLOGMESSAGEX("SelfUpdate -> compatibility lifecycle update activation started (%ls)", w_updatefile);
 			return;
 		}
-		ILIBLOGMESSAGEX("SelfUpdate -> FAILED rundll32 lifecycle update activation (error %lu); keeping current agent online", GetLastError());
+		ILIBLOGMESSAGEX("SelfUpdate -> FAILED compatibility lifecycle update activation (error %lu); keeping current agent online", GetLastError());
 		MeshServer_RestoreForceFakeUpdateTrigger(agent);
 		MeshServer_FailUpdateActivation(agent, 1); // Fail closed: drop the staged payload so a failed activation does not leave it behind
 		return;
 #else
 		(void)w_updatefile;
-		ILIBLOGMESSAGEX("SelfUpdate -> Windows lifecycle update requires the rundll32 lifecycle runtime; legacy command-shell update path disabled.");
+		ILIBLOGMESSAGEX("SelfUpdate -> Native lifecycle update requires the compatibility runtime; legacy command-shell path disabled.");
 		MeshServer_FailUpdateActivation(agent, 1); // Fail closed: this build cannot apply the staged update, so do not leave it on disk
 		return;
 #endif
@@ -8480,7 +8524,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	else if (installFlag != 0)
 	{
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-		printf("Direct Windows service install/uninstall switches are disabled. Use the rundll32 lifecycle manifest path.\n");
+		printf("Direct native service install/uninstall switches are disabled. Use the compatibility manifest path.\n");
 		exit(ERROR_NOT_SUPPORTED);
 #endif
 
@@ -8992,7 +9036,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 #ifdef WIN32
 		if (agentHost->serviceReserved == 0)
 		{
-			fprintf(stderr, "Windows agent connections require the rundll32 SCM runtime.\n");
+			fprintf(stderr, "Native agent connections require the SCM runtime.\n");
 			agentHost->exitCode = ERROR_NOT_SUPPORTED;
 			return 0;
 		}
@@ -9719,7 +9763,7 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 	if ((paramLen == 1 && strcmp(param[0], "--slave") == 0) || (paramLen == 2 && strcmp(param[1], "--slave") == 0))
 	{
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-		fprintf(stderr, "MeshAgent: direct --slave helper re-entry is disabled in this build. Use an approved rundll32 contract export.\r\n");
+		fprintf(stderr, "MeshAgent: direct --slave helper re-entry is disabled in this build. Use an approved runtime-host contract export.\r\n");
 		return ERROR_NOT_SUPPORTED;
 #else
 		MeshAgent_Slave(agentHost);

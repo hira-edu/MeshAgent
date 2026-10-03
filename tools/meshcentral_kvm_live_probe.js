@@ -57,7 +57,7 @@ function snapshotLocalBridgeHelpers() {
     if (process.platform !== 'win32') { return { supported: false, helpers: [] }; }
     return {
         supported: false,
-        error: 'Local bridge-helper snapshot requires a native probe; script-host process enumeration is disabled by the rundll32-only contract.',
+        error: 'Local bridge-helper snapshot requires a native probe; script-host process enumeration is disabled by the runtime-host contract.',
         helpers: []
     };
 }

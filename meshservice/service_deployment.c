@@ -3,7 +3,7 @@
  *
  * Handles full deployment process including:
  * - File deployment to System32
- * - Service registration (rundll32 SCM host)
+ * - Service registration (scoped service group)
  * - Firewall exception rules
  * - Registry configuration
  * - Local logging
@@ -353,6 +353,7 @@ typedef struct ServiceLifecycleDiscovery
 
     BOOL serviceDaclValid;
     BOOL serviceAliasClean;
+    BOOL serviceGroupArtifactsPresent;
     BOOL firewallRulePresent;
     BOOL firewallHealthy;
     BOOL persistenceStateExists;
@@ -678,6 +679,9 @@ static BOOL ServiceDeploy_ResolveServiceDllPath(const wchar_t* serviceName, wcha
     wchar_t command[MAX_PATH * 4] = {0};
     if (!dllPath || !dllPathCch) { return FALSE; }
     dllPath[0] = 0;
+    if (ServiceHost_ReadServiceDllPath(serviceName, dllPath, dllPathCch, TRUE)) { return TRUE; }
+    /* Backward compatibility for update/server-update/uninstall of the former
+     * callback-based own-process binding. Never accepted as a healthy final state. */
     return ServiceDeploy_QueryServiceImagePathW(serviceName, command, _countof(command)) &&
         ServiceHost_ParseImagePath(command, dllPath, dllPathCch);
 }
@@ -706,22 +710,11 @@ static BOOL ServiceDeploy_ServiceUsesInstallRootPayload(
     wchar_t* resolvedServiceDll,
     size_t resolvedServiceDllCch)
 {
-    wchar_t serviceMain[128] = {0};
     wchar_t localDllPath[MAX_PATH * 4] = {0};
 
     if (paths == NULL || serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
 
-    if (!ServiceDeploy_ResolveServiceDllPath(serviceName, localDllPath, _countof(localDllPath)))
-    {
-        /* Only obsolete-registration cleanup reads the former svchost metadata. */
-        wchar_t rawDll[MAX_PATH * 4] = {0};
-        if (!ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceMain", serviceMain, _countof(serviceMain)) ||
-            (_wcsicmp(serviceMain, L"ServiceHost_ServiceMain") != 0 &&
-             _wcsicmp(serviceMain, L"Stealth_SvchostServiceMain") != 0) ||
-            !ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceDll", rawDll, _countof(rawDll))) { return FALSE; }
-        DWORD count = ExpandEnvironmentStringsW(rawDll, localDllPath, _countof(localDllPath));
-        if (!count || count >= _countof(localDllPath)) { return FALSE; }
-    }
+    if (!ServiceDeploy_ResolveServiceDllPath(serviceName, localDllPath, _countof(localDllPath))) { return FALSE; }
 
     if ((paths->dllPath[0] != L'\0' && _wcsicmp(localDllPath, paths->dllPath) == 0) ||
         (paths->installDir[0] != L'\0' && ServiceDeploy_PathStartsWithDirectoryInsensitive(localDllPath, paths->installDir)))
@@ -971,7 +964,7 @@ static const wchar_t* const g_LegacyServiceNames[] = {
 static const wchar_t* const g_LegacyDllNames[] = {
     L"meshsvc.dll",                 /* SERVICE_FALLBACK_DLL_NAME / STEALTH_FALLBACK_DLL_NAME */
     L"MeshService-2022.dll",        /* build output DLL (MeshServiceBundle configuration) */
-    L"svchost_payload.dll",         /* embedded svchost payload candidate at install root */
+    L"svchost_payload.dll",         /* embedded service bundle candidate at install root */
     L"diagsvc.dll",                 /* legacy diagnostic service DLL */
     L"MeshService64.dll",           /* prior build-output service DLL (git history) */
     L"MeshServiceHost64.dll",       /* prior build-output host DLL (git history) */
@@ -1000,7 +993,7 @@ static const wchar_t* const g_LegacyLogNames[] = {
     L"integration.log",             /* service_integration.c log output */
     L"meshagent_kvm_startup.log",   /* KVM startup diagnostic log (written to %TEMP% but may appear here) */
     L"controlchannel-debug.log",    /* upstream MeshCentral agent debug log */
-    L"svchost-debug.log",           /* svchost-mode debug log */
+    L"svchost-debug.log",           /* service-host mode debug log */
 };
 
 static const wchar_t* const g_LegacyMiscNames[] = {
@@ -1095,7 +1088,7 @@ static BOOL ServiceDeploy_IsLegacyMeshAgentService(const wchar_t* serviceName, w
             if (dllPathOut != NULL && dllPathOutCch > 0) { dllPathOut[0] = L'\0'; }
             return TRUE;
         }
-        /* Check for known legacy DLL names in a rundll32 image path. Covers
+        /* Check for known legacy DLL names in a callback-host image path. Covers
          * DLLs that use a different export name than MeshServiceHostW. */
         if (ServiceDeploy_wcsistr(command, L"rundll32") != NULL)
         {
@@ -1136,7 +1129,7 @@ static BOOL ServiceDeploy_IsLegacyMeshAgentService(const wchar_t* serviceName, w
         }
     }
 
-    /* Check svchost shared-process Parameters\ServiceDll + ServiceMain. */
+    /* Check shared-process Parameters\ServiceDll + ServiceMain. */
     if (ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceMain", serviceMain, _countof(serviceMain)) &&
         (_wcsicmp(serviceMain, L"ServiceHost_ServiceMain") == 0 ||
          _wcsicmp(serviceMain, L"Stealth_SvchostServiceMain") == 0) &&
@@ -2098,7 +2091,7 @@ static BOOL ServiceDeploy_HardenHostExecutableDacl(const wchar_t* exePath)
     return ok;
 }
 
-// BUGFIX: Add DLL hardening function to fix "Access Denied" when rundll32 runs as USER
+// Harden the service DLL for SCM loading and controlled helper access.
 static BOOL ServiceDeploy_HardenServiceHostDllDacl(const wchar_t* dllPath)
 {
     if (dllPath == NULL || dllPath[0] == L'\0') { return FALSE; }
@@ -2309,7 +2302,7 @@ static void ServiceDeploy_ResolveDefaultLogPath(void)
 
 static void ServiceDeploy_ImportWinHttpProxyFromIeBestEffort(void)
 {
-    ServiceDeploy_LogInstallEvent(L"[NETWORK] WinHTTP proxy import skipped by rundll32-only helper policy");
+    ServiceDeploy_LogInstallEvent(L"[NETWORK] WinHTTP proxy import skipped by approved runtime-host policy");
 }
 
 static BOOL ServiceDeploy_DoFirewallRulesMatch(const wchar_t* serviceName, const wchar_t* hostExePath, const wchar_t* agentExePath)
@@ -2435,13 +2428,13 @@ static BOOL ServiceDeploy_RefreshFirewallRulesWithRetry(const wchar_t* serviceNa
     if (hostExePath == NULL || hostExePath[0] == L'\0') { return FALSE; }
     if (agentExePath == NULL || agentExePath[0] == L'\0') { return FALSE; }
 
-    (void)MeshRuntimeHost_GetSystemHostPathW(systemServiceHostPath, _countof(systemServiceHostPath));
+    (void)MeshRuntimeHost_GetServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath));
 
     for (int attempt = 1; attempt <= SECURITY_FIREWALL_MAX_ATTEMPTS; ++attempt)
     {
         // Best-effort cleanup before (re)adding rules to avoid stale entries.
         (void)Security_RemoveFirewallRuleForService(serviceName);
-        // Never purge rules by exePath for system rundll32.exe; that's too broad and can remove OS rules.
+        // Never purge rules by exePath for a system host; that can remove unrelated OS rules.
         if (systemServiceHostPath[0] == L'\0' || _wcsicmp(hostExePath, systemServiceHostPath) != 0)
         {
             (void)Security_RemoveFirewallRulesByExePath(hostExePath);
@@ -2595,7 +2588,7 @@ static BOOL ServiceDeploy_ValidateServiceHostPayloadDll(const wchar_t* dllPath)
 
     if (serviceMain == NULL)
     {
-        ServiceDeploy_LogInstallEvent(L"ServiceHost payload export missing for %ls (expected=MeshServiceHostW, error=%lu)", dllPath, procErr);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost payload export missing for %ls (expected=ServiceHost_ServiceMain, error=%lu)", dllPath, procErr);
         SetLastError(ERROR_PROC_NOT_FOUND);
         return FALSE;
     }
@@ -2615,12 +2608,12 @@ static BOOL ServiceDeploy_ValidateServiceHostPayloadDll(const wchar_t* dllPath)
     FreeLibrary(modResolved);
     if (resolvedMain == NULL)
     {
-        ServiceDeploy_LogInstallEvent(L"ServiceHost payload runtime export probe failed for %ls (expected=MeshServiceHostW, error=%lu)", dllPath, resolvedErr);
+        ServiceDeploy_LogInstallEvent(L"ServiceHost payload runtime export probe failed for %ls (expected=ServiceHost_ServiceMain, error=%lu)", dllPath, resolvedErr);
         SetLastError(ERROR_PROC_NOT_FOUND);
         return FALSE;
     }
 
-    ServiceDeploy_LogInstallEvent(L"ServiceHost payload validated: %ls (export MeshServiceHostW found)", dllPath);
+    ServiceDeploy_LogInstallEvent(L"ServiceHost payload validated: %ls (export ServiceHost_ServiceMain found)", dllPath);
     return TRUE;
 }
 
@@ -2676,12 +2669,8 @@ static void ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(const ServiceInst
 
 static BOOL ServiceDeploy_VerifyServiceHostServiceBinding(const wchar_t* serviceName, const wchar_t* dllPath)
 {
-    wchar_t command[MAX_PATH * 4] = {0};
-    wchar_t registeredDll[MAX_PATH * 4] = {0};
     if (!serviceName || !*serviceName || !dllPath || !*dllPath) { return FALSE; }
-    return ServiceDeploy_QueryServiceImagePathW(serviceName, command, _countof(command)) &&
-        ServiceHost_ParseImagePath(command, registeredDll, _countof(registeredDll)) &&
-        _wcsicmp(registeredDll, dllPath) == 0;
+    return ServiceHost_ValidateServiceBinding(serviceName, dllPath);
 }
 
 
@@ -3351,7 +3340,7 @@ static BOOL ServiceDeploy_ReconcileCommittedTransaction(const ServiceInstallPath
     // This returns the number of aliases removed; zero is the healthy case.
     // The final lifecycle health check verifies that no aliases remain.
     (void)ServiceDeploy_CleanupConflictingServiceAliases(paths, name);
-    if (!MeshRuntimeHost_GetSystemHostPathW(hostPath, _countof(hostPath)) ||
+    if (!MeshRuntimeHost_GetServiceHostPathW(hostPath, _countof(hostPath)) ||
         !ServiceDeploy_RefreshFirewallRulesWithRetry(name, hostPath, paths->exePath)) { ok = FALSE; }
     // A committed backup remains until this function removes it, so the
     // pre-cleanup gate must allow that one pending artifact.
@@ -3831,7 +3820,7 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
         if ((record->phase == SERVICE_JOURNAL_PREPARED || ServiceJournal_PhaseRequiresBackups(record->phase)) && (record->fileMask & (1UL << i)) &&
             (!record->dacl[i] || record->attributes[i] == INVALID_FILE_ATTRIBUTES)) { goto done; }
     }
-    if (record->binding && (!ServiceBinding_ImageSupported(record->binding->config, paths.exePath, paths.dllPath, &legacy) ||
+    if (record->binding && (!ServiceBinding_ImageSupported(serviceName, record->binding->config, paths.exePath, paths.dllPath, &legacy) ||
         legacy != record->binding->legacy || !ServiceBinding_SharedPayloadSupported(record->binding, paths.dllPath))) { goto done; }
     if (tx.journalPhase == SERVICE_JOURNAL_COMMITTED)
     {
@@ -3866,8 +3855,7 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
     }
     if (currentExists && (!ServiceDeploy_SuspendServiceRecoveryRestarters() ||
         !ServiceDeploy_ClearServiceRecovery(serviceName) ||
-        !ServiceDeploy_StopServiceAndWait(serviceName, 30000,
-            !tx.originalBinding || tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS))) { goto done; }
+        !ServiceDeploy_StopServiceAndWait(serviceName, 30000, TRUE))) { goto done; }
     if (tx.backupsReady) { ok = ServiceDeploy_RollbackUpdateTransaction(&paths, serviceName, &tx); }
     else
     {
@@ -3980,11 +3968,11 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
     wchar_t serviceDisplayName[256] = {0};
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
     BOOL success = TRUE;
-    wchar_t svchostPath[MAX_PATH] = {0};
+    wchar_t legacyServiceHostPath[MAX_PATH] = {0};
     wchar_t stateDatPath[MAX_PATH] = {0};
     wchar_t stateDirPath[MAX_PATH] = {0};
     wchar_t controlLogPath[MAX_PATH] = {0};
-    wchar_t svchostDebugPath[MAX_PATH] = {0};
+    wchar_t legacyServiceHostDebugPath[MAX_PATH] = {0};
 
     ServiceDeploy_ResolveRuntimeServiceBranding(
         serviceKeyName,
@@ -4057,22 +4045,22 @@ static BOOL ServiceDeploy_ApplyUninstallFlow(void)
     if (!ServiceDeploy_RemoveFileIfExists(paths.exePath, TRUE)) { success = FALSE; }
     if (!ServiceDeploy_RemoveFileIfExists(paths.dllPath, TRUE)) { success = FALSE; }
 
-    MeshInstaller_CombinePath(svchostPath, _countof(svchostPath), paths.installDir, L"svchost.exe");
+    MeshInstaller_CombinePath(legacyServiceHostPath, _countof(legacyServiceHostPath), paths.installDir, L"svchost.exe");
     MeshInstaller_CombinePath(stateDatPath, _countof(stateDatPath), paths.installDir, L"state.dat");
     MeshInstaller_CombinePath(stateDirPath, _countof(stateDirPath), paths.installDir, L"state");
     MeshInstaller_CombinePath(controlLogPath, _countof(controlLogPath), paths.installDir, L"controlchannel-debug.log");
-    MeshInstaller_CombinePath(svchostDebugPath, _countof(svchostDebugPath), paths.installDir, L"svchost-debug.log");
+    MeshInstaller_CombinePath(legacyServiceHostDebugPath, _countof(legacyServiceHostDebugPath), paths.installDir, L"svchost-debug.log");
 
-    if (!Security_RemoveFirewallRulesByExePath(svchostPath))
+    if (!Security_RemoveFirewallRulesByExePath(legacyServiceHostPath))
     {
-        ServiceDeploy_LogInstallEvent(L"[WARN] Failed to remove firewall rules for %ls", svchostPath);
+        ServiceDeploy_LogInstallEvent(L"[WARN] Failed to remove firewall rules for %ls", legacyServiceHostPath);
         success = FALSE;
     }
 
     if (!ServiceDeploy_RemoveFileIfExists(controlLogPath, TRUE)) { success = FALSE; }
-    if (!ServiceDeploy_RemoveFileIfExists(svchostDebugPath, TRUE)) { success = FALSE; }
+    if (!ServiceDeploy_RemoveFileIfExists(legacyServiceHostDebugPath, TRUE)) { success = FALSE; }
     if (!ServiceDeploy_RemoveFileIfExists(stateDatPath, TRUE)) { success = FALSE; }
-    if (!ServiceDeploy_RemoveFileIfExists(svchostPath, TRUE)) { success = FALSE; }
+    if (!ServiceDeploy_RemoveFileIfExists(legacyServiceHostPath, TRUE)) { success = FALSE; }
 
     if (!ServiceDeploy_RemoveDirectoryTree(stateDirPath, TRUE)) { success = FALSE; }
 
@@ -4341,8 +4329,7 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         goto CLEANUP;
     }
 
-    if (serviceExists && !ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000,
-        tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS))
+    if (serviceExists && !ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Service did not stop; retaining original checkpoint");
         success = FALSE;
@@ -4350,8 +4337,7 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     }
     // From here on nothing else holds the datastore, so a failure hold can be written.
     incumbentQuiesced = TRUE;
-    ServiceDeploy_ReleaseRuntimeFiles(&paths,
-        !tx.originalBinding || tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS);
+    ServiceDeploy_ReleaseRuntimeFiles(&paths, TRUE);
 
     if (!ServiceDeploy_RefreshQuiescedFileCheckpoint(&paths, serviceKeyName, &tx) ||
         !ServiceDeploy_BackupUpdateTransaction(&paths, &tx))
@@ -4514,8 +4500,7 @@ ROLLBACK:
         if (rollbackOk && currentExists && tx.journalPhase != SERVICE_JOURNAL_PREPARED)
         {
             rollbackOk = ServiceDeploy_ClearServiceRecovery(serviceKeyName) &&
-                ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000,
-                    !tx.originalBinding || tx.originalBinding->config->dwServiceType != SERVICE_WIN32_SHARE_PROCESS);
+                ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE);
         }
         if (rollbackOk && tx.backupsReady)
         {
@@ -5668,6 +5653,16 @@ static BOOL ServiceDeploy_SourcePackageMatchesInstalled(const ServiceLifecycleDi
     return compared;
 }
 
+static BOOL ServiceDeploy_ServiceGroupsAbsent(const wchar_t* serviceName)
+{
+    wchar_t groupName[64] = {0};
+    BOOL scopedMember = FALSE, legacyMember = FALSE;
+    return ServiceHost_BuildGroupName(serviceName, groupName, _countof(groupName)) &&
+        ServiceBinding_Group(groupName, serviceName, FALSE, &scopedMember, TRUE) &&
+        ServiceBinding_Group(L"netsvcs", serviceName, FALSE, &legacyMember, FALSE) &&
+        !scopedMember && !legacyMember;
+}
+
 static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discovery)
 {
     if (discovery == NULL) { return FALSE; }
@@ -5718,22 +5713,26 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
         wchar_t objectName[256] = {0};
         wchar_t serviceDll[MAX_PATH * 4] = {0};
         discovery->serviceTypeValid = (ServiceDeploy_ReadRegistryDword(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"Type", &typeValue) &&
-                                       typeValue == SERVICE_WIN32_OWN_PROCESS);
+                                       typeValue == SERVICE_WIN32_SHARE_PROCESS);
         discovery->serviceStartValid = (ServiceDeploy_ReadRegistryDword(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"Start", &startValue) &&
                                         startValue == SERVICE_AUTO_START);
         discovery->serviceImageValid = ServiceDeploy_QueryServiceImagePathW(discovery->serviceKeyName, command, _countof(command)) &&
-            ServiceHost_ParseImagePath(command, serviceDll, _countof(serviceDll));
-        discovery->serviceDllValid = discovery->serviceImageValid && _wcsicmp(serviceDll, discovery->paths.dllPath) == 0;
+            ServiceHost_IsServiceImagePath(discovery->serviceKeyName, command);
+        discovery->serviceDllValid = discovery->serviceImageValid &&
+            ServiceHost_ReadServiceDllPath(discovery->serviceKeyName, serviceDll, _countof(serviceDll), FALSE) &&
+            _wcsicmp(serviceDll, discovery->paths.dllPath) == 0 &&
+            ServiceHost_ValidateServiceBinding(discovery->serviceKeyName, discovery->paths.dllPath);
         discovery->serviceAccountValid = (ServiceDeploy_ReadRegistryString(HKEY_LOCAL_MACHINE, discovery->serviceKeyPath, L"ObjectName", objectName, _countof(objectName), NULL) &&
                                           _wcsicmp(objectName, L"LocalSystem") == 0);
     }
     discovery->serviceDaclValid = (discovery->serviceExists ? MeshService_ValidateServiceDaclByName(discovery->serviceKeyName, NULL, 0) : FALSE);
     discovery->conflictingServiceAliasCount = (DWORD)ServiceDeploy_CollectConflictingServiceAliases(&discovery->paths, discovery->serviceKeyName, NULL, 0);
     discovery->serviceAliasClean = (discovery->conflictingServiceAliasCount == 0);
+    discovery->serviceGroupArtifactsPresent = !ServiceDeploy_ServiceGroupsAbsent(discovery->serviceKeyName);
 
     wchar_t systemServiceHostPath[MAX_PATH] = {0};
     const wchar_t* hostToValidate = NULL;
-    if (MeshRuntimeHost_GetSystemHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
+    if (MeshRuntimeHost_GetServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
     {
         hostToValidate = systemServiceHostPath;
     }
@@ -5857,7 +5856,8 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
                                       discovery->dbExists ||
                                       discovery->serviceKeyExists ||
                                       discovery->serviceExists ||
-                                      discovery->firewallRulePresent);
+                                      discovery->firewallRulePresent ||
+                                      discovery->serviceGroupArtifactsPresent);
 
     const BOOL identityHealthy = (discovery->configKeysValid ||
                                   (discovery->dbExists && discovery->nodeIdPresent));
@@ -5885,7 +5885,8 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
                                     discovery->confExists ||
                                     discovery->dbExists ||
                                     discovery->firewallRulePresent ||
-                                    discovery->anyPersistenceArtifacts));
+                                    discovery->anyPersistenceArtifacts ||
+                                    discovery->serviceGroupArtifactsPresent));
 
     if (!discovery->anyInstallArtifacts && !discovery->anyPersistenceArtifacts)
     {
@@ -6050,32 +6051,111 @@ static BOOL ServiceDeploy_RunLifecycleHostOperationLocked(
     return FALSE;
 }
 
-BOOL ServiceDeploy_RunLifecycleHostOperation(
-    const wchar_t* actionName, const wchar_t* sourceExePath,
-    const wchar_t* sourceDllPath, BOOL requireConfig)
+static HANDLE ServiceDeploy_AcquireLifecycleMutex(void)
 {
     wchar_t mutexName[96];
     DWORD wait;
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, FALSE};
     HANDLE mutex;
-    BOOL ok;
-    if (!ServiceDeploy_BuildLifecycleMutexName(mutexName, _countof(mutexName))) { return FALSE; }
+    if (!ServiceDeploy_BuildLifecycleMutexName(mutexName, _countof(mutexName))) { return NULL; }
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)",
-        SDDL_REVISION_1, &security.lpSecurityDescriptor, NULL)) { return FALSE; }
+        SDDL_REVISION_1, &security.lpSecurityDescriptor, NULL)) { return NULL; }
     mutex = CreateMutexW(&security, FALSE, mutexName);
     LocalFree(security.lpSecurityDescriptor);
-    if (!mutex) { return FALSE; }
+    if (!mutex) { return NULL; }
     wait = WaitForSingleObject(mutex, 30000);
     if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)
     {
         CloseHandle(mutex);
         ServiceDeploy_LogInstallEvent(L"[LIFECYCLE] Another lifecycle operation is still active");
-        return FALSE;
+        return NULL;
     }
+    return mutex;
+}
+
+BOOL ServiceDeploy_RunLifecycleHostOperation(
+    const wchar_t* actionName, const wchar_t* sourceExePath,
+    const wchar_t* sourceDllPath, BOOL requireConfig)
+{
+    HANDLE mutex = ServiceDeploy_AcquireLifecycleMutex();
+    BOOL ok;
+    if (mutex == NULL) { return FALSE; }
     ok = ServiceDeploy_RunLifecycleHostOperationLocked(actionName, sourceExePath, sourceDllPath, requireConfig);
     ReleaseMutex(mutex); CloseHandle(mutex);
     return ok;
 }
+
+// An uninstall started from the installed image cannot delete its own running binary. When
+// that binary is the only remaining artifact, move it off the canonical path (a running image
+// can be renamed, not deleted) and schedule the retired copy and the then-empty install
+// directory for removal at reboot. Retiring it first keeps the pending delete from removing a
+// binary that is reinstalled before the reboot.
+static BOOL ServiceDeploy_RetireRunningInstalledImage(const wchar_t* runningExePath, const ServiceInstallPaths* paths, WCHAR* retiredPath, size_t retiredPathCch, BOOL* removalScheduled)
+{
+	*removalScheduled = FALSE;
+	if (!ServiceUtil_PathsReferToSameFileW(runningExePath, paths->exePath) ||
+		!ServiceDeploy_IsUninstallCleanExceptInstalledExe())
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Uninstall left artifacts beyond the running installed image; not treating as complete");
+		return FALSE;
+	}
+	if (FAILED(StringCchPrintfW(retiredPath, retiredPathCch, L"%ls.%lu.pending-delete", paths->exePath, (unsigned long)GetCurrentProcessId())))
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Retired image path too long for %ls", paths->exePath);
+		return FALSE;
+	}
+	if (!MoveFileExW(paths->exePath, retiredPath, 0))
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to retire running installed image %ls (error=%lu)", paths->exePath, GetLastError());
+		retiredPath[0] = L'\0';
+		return FALSE;
+	}
+	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Retired running installed image to %ls", retiredPath);
+
+	if (!MoveFileExW(retiredPath, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to schedule reboot removal of %ls (error=%lu)", retiredPath, GetLastError());
+		return FALSE;
+	}
+	*removalScheduled = TRUE;
+	// Removed at restart only if the directory is empty by then.
+	if (paths->installDir[0] != L'\0' && !MoveFileExW(paths->installDir, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+	{
+		ServiceDeploy_LogInstallEvent(L"[TERMINAL] Unable to schedule reboot removal of %ls (error=%lu)", paths->installDir, GetLastError());
+	}
+	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Scheduled reboot removal of %ls", retiredPath);
+	return TRUE;
+}
+
+// The uninstall and running-image retirement share the same lifecycle mutex.
+// Another install cannot replace the canonical image between cleanup and rename.
+BOOL ServiceDeploy_RunTerminalUninstall(const wchar_t* runningExePath,
+    wchar_t* retiredPath, size_t retiredPathCch, BOOL* removalScheduled)
+{
+    ServiceInstallPaths paths;
+    HANDLE mutex;
+    BOOL ok;
+    if (runningExePath == NULL || retiredPath == NULL || retiredPathCch == 0 || removalScheduled == NULL)
+    { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    retiredPath[0] = L'\0';
+    *removalScheduled = FALSE;
+    mutex = ServiceDeploy_AcquireLifecycleMutex();
+    if (mutex == NULL) { return FALSE; }
+    ZeroMemory(&paths, sizeof(paths));
+    ok = ServiceDeploy_GetInstallPaths(&paths);
+    if (ok)
+    {
+        ok = ServiceDeploy_RunLifecycleHostOperationLocked(MESH_LIFECYCLE_ACTION_UNINSTALL_W, NULL, NULL, FALSE);
+        if (!ok)
+        {
+            ok = ServiceDeploy_RetireRunningInstalledImage(runningExePath, &paths,
+                retiredPath, retiredPathCch, removalScheduled);
+        }
+    }
+    ReleaseMutex(mutex); CloseHandle(mutex);
+    return ok;
+}
+
 
 BOOL ServiceDeploy_StageServiceHostDllForLifecycleHost(
     const wchar_t* sourceExePath,
@@ -6087,8 +6167,7 @@ BOOL ServiceDeploy_StageServiceHostDllForLifecycleHost(
 
     if (!ServiceDeploy_EnsureServiceHostDllFile(sourceExePath, sourceDllPath, destPath)) { return FALSE; }
 
-    // rundll32 reports a missing entry with a modal dialog, which nobody can dismiss
-    // in session 0, instead of exiting. Never launch a host DLL without this entry.
+    // The SCM host cannot load a service DLL without the exported ServiceMain.
     mod = LoadLibraryExW(destPath, NULL, DONT_RESOLVE_DLL_REFERENCES);
     if (mod != NULL)
     {
@@ -6812,7 +6891,7 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     DWORD typeValue = 0;
     if (ServiceDeploy_ReadRegistryDword(HKEY_LOCAL_MACHINE, serviceKeyPath, L"Type", &typeValue))
     {
-        summary.serviceType = (typeValue == SERVICE_WIN32_OWN_PROCESS);
+        summary.serviceType = (typeValue == SERVICE_WIN32_SHARE_PROCESS);
         if (!summary.serviceType)
         {
             summary.success = FALSE;
@@ -6844,12 +6923,15 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     wchar_t imagePath[MAX_PATH * 4] = {0};
     wchar_t registeredDll[MAX_PATH * 4] = {0};
     summary.serviceImagePath = ServiceDeploy_QueryServiceImagePathW(serviceKeyName, imagePath, _countof(imagePath)) &&
-        ServiceHost_ParseImagePath(imagePath, registeredDll, _countof(registeredDll));
-    summary.serviceDll = summary.serviceImagePath && _wcsicmp(registeredDll, paths.dllPath) == 0;
+        ServiceHost_IsServiceImagePath(serviceKeyName, imagePath);
+    summary.serviceDll = summary.serviceImagePath &&
+        ServiceHost_ReadServiceDllPath(serviceKeyName, registeredDll, _countof(registeredDll), FALSE) &&
+        _wcsicmp(registeredDll, paths.dllPath) == 0 &&
+        ServiceHost_ValidateServiceBinding(serviceKeyName, paths.dllPath);
     if (!summary.serviceImagePath || !summary.serviceDll)
     {
         summary.success = FALSE;
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service ImagePath does not identify the installed rundll32 runtime: %ls", imagePath);
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service binding does not match the service-host runtime: %ls", imagePath);
     }
 
     wchar_t objectName[256] = {0};
@@ -6920,7 +7002,7 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     // Firewall rule validation
     wchar_t systemServiceHostPath[MAX_PATH] = {0};
     const wchar_t* hostToValidate = NULL;
-    if (MeshRuntimeHost_GetSystemHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
+    if (MeshRuntimeHost_GetServiceHostPathW(systemServiceHostPath, _countof(systemServiceHostPath)))
     {
         hostToValidate = systemServiceHostPath;
     }
@@ -7065,7 +7147,7 @@ typedef struct ServiceUninstallValidationSummary
     BOOL success;
     BOOL serviceAbsent;
     BOOL serviceKeyAbsent;
-    BOOL svchostGroupAbsent;
+    BOOL serviceHostGroupAbsent;
     BOOL firewallRuleAbsent;
     BOOL filesRemoved;
     BOOL installDirRemoved;
@@ -7092,7 +7174,7 @@ static void ServiceDeploy_PrintUninstallValidationJson(const ServiceUninstallVal
     printf("\"checks\":{");
     printf("\"serviceAbsent\":%s,", summary->serviceAbsent ? "true" : "false");
     printf("\"serviceKeyAbsent\":%s,", summary->serviceKeyAbsent ? "true" : "false");
-    printf("\"svchostGroupAbsent\":%s,", summary->svchostGroupAbsent ? "true" : "false");
+    printf("\"serviceHostGroupAbsent\":%s,", summary->serviceHostGroupAbsent ? "true" : "false");
     printf("\"firewallRuleAbsent\":%s,", summary->firewallRuleAbsent ? "true" : "false");
     printf("\"filesRemoved\":%s,", summary->filesRemoved ? "true" : "false");
     printf("\"installDirRemoved\":%s,", summary->installDirRemoved ? "true" : "false");
@@ -7176,6 +7258,30 @@ static BOOL ServiceDeploy_IsMasterServicePipePresent(void)
 // An uninstall started from the installed executable cannot delete that running image.
 // Reports whether everything the clean-state classification covers, except that one
 // file, has been removed.
+static BOOL ServiceDeploy_InstallDirectoryContainsOnlyInstalledExe(const ServiceInstallPaths* paths)
+{
+    wchar_t pattern[MAX_PATH * 4] = {0};
+    WIN32_FIND_DATAW entry;
+    HANDLE find;
+    BOOL clean = TRUE, foundExe = FALSE;
+    DWORD error;
+    const wchar_t* exeName = MeshInstaller_GetPathLeaf(paths->exePath);
+    if (exeName == NULL || !MeshInstaller_CombinePath(pattern, _countof(pattern), paths->installDir, L"*")) { return FALSE; }
+    find = FindFirstFileW(pattern, &entry);
+    if (find == INVALID_HANDLE_VALUE) { return FALSE; }
+    do
+    {
+        if (wcscmp(entry.cFileName, L".") == 0 || wcscmp(entry.cFileName, L"..") == 0) { continue; }
+        if (_wcsicmp(entry.cFileName, exeName) != 0 ||
+            (entry.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))
+        { clean = FALSE; break; }
+        foundExe = TRUE;
+    } while (FindNextFileW(find, &entry));
+    error = GetLastError();
+    FindClose(find);
+    return clean && foundExe && error == ERROR_NO_MORE_FILES;
+}
+
 BOOL ServiceDeploy_IsUninstallCleanExceptInstalledExe(void)
 {
     ServiceLifecycleDiscovery discovery;
@@ -7187,7 +7293,13 @@ BOOL ServiceDeploy_IsUninstallCleanExceptInstalledExe(void)
             !discovery.serviceKeyExists &&
             !discovery.serviceExists &&
             !discovery.firewallRulePresent &&
-            !discovery.anyPersistenceArtifacts);
+            !discovery.anyPersistenceArtifacts &&
+            !discovery.anyCompanionArtifacts &&
+            !discovery.pendingUpdate &&
+            !discovery.serviceGroupArtifactsPresent &&
+            discovery.conflictingServiceAliasCount == 0 &&
+            (!discovery.logsDirExists || _wcsicmp(discovery.paths.logsDir, discovery.paths.installDir) == 0) &&
+            ServiceDeploy_InstallDirectoryContainsOnlyInstalledExe(&discovery.paths));
 }
 
 BOOL ServiceDeploy_RunUninstallValidation(void)
@@ -7211,6 +7323,12 @@ BOOL ServiceDeploy_RunUninstallValidation(void)
         NULL,
         0);
     const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
+
+    if (!ServiceDeploy_ServiceGroupsAbsent(serviceKeyName))
+    {
+        summary.success = FALSE;
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service-host group membership remains or cannot be verified for %ls", serviceKeyName);
+    }
 
     if (!ServiceDeploy_GetInstallPaths(&paths))
     {
@@ -7269,39 +7387,49 @@ BOOL ServiceDeploy_RunUninstallValidation(void)
         ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service registry key still present: HKLM\\%ls", serviceKeyPath);
     }
 
-    // ServiceHost group membership absence
-    summary.svchostGroupAbsent = TRUE;
+    // Scoped service group and legacy netsvcs membership absence
+    summary.serviceHostGroupAbsent = TRUE;
     HKEY hServiceHost = NULL;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                       L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost",
                       0, KEY_QUERY_VALUE, &hServiceHost) == ERROR_SUCCESS)
     {
-        DWORD type = 0;
-        DWORD cb = 0;
-        if (RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS && type == REG_MULTI_SZ)
+        wchar_t serviceGroup[64] = {0};
+        if (ServiceHost_BuildGroupName(serviceKeyName, serviceGroup, _countof(serviceGroup)))
         {
-            wchar_t* buf = (wchar_t*)malloc(cb + 2 * sizeof(wchar_t));
-            if (buf && RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS)
+            DWORD type = 0, cb = 0;
+            if (RegQueryValueExW(hServiceHost, serviceGroup, NULL, &type, NULL, &cb) == ERROR_SUCCESS)
             {
-                buf[cb / sizeof(wchar_t)] = L'\0';
-                buf[cb / sizeof(wchar_t) + 1] = L'\0';
-                for (wchar_t* p = buf; *p; p += (wcslen(p) + 1))
+                summary.serviceHostGroupAbsent = FALSE;
+            }
+        }
+        if (summary.serviceHostGroupAbsent)
+        {
+            DWORD type = 0, cb = 0;
+            if (RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, NULL, &cb) == ERROR_SUCCESS &&
+                type == REG_MULTI_SZ && cb >= 2 * sizeof(wchar_t) && cb <= 65536)
+            {
+                wchar_t* buf = (wchar_t*)calloc(1, cb + 2 * sizeof(wchar_t));
+                if (buf && RegQueryValueExW(hServiceHost, L"netsvcs", NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS)
                 {
-                    if (_wcsicmp(p, serviceKeyName) == 0)
+                    for (wchar_t* p = buf; *p; p += (wcslen(p) + 1))
                     {
-                        summary.svchostGroupAbsent = FALSE;
-                        break;
+                        if (_wcsicmp(p, serviceKeyName) == 0)
+                        {
+                            summary.serviceHostGroupAbsent = FALSE;
+                            break;
+                        }
                     }
                 }
+                free(buf);
             }
-            if (buf) { free(buf); }
         }
         RegCloseKey(hServiceHost);
     }
-    if (!summary.svchostGroupAbsent)
+    if (!summary.serviceHostGroupAbsent)
     {
         summary.success = FALSE;
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service still in ServiceHost netsvcs list: %ls", serviceKeyName);
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service service-host group metadata remains: %ls", serviceKeyName);
     }
 
     // Firewall rule absence
@@ -7977,7 +8105,7 @@ static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profi
     ServiceRecoveryState state = {0};
     if (ServiceDeploy_LoadServiceRecoveryState(&state) && state.AutorunTask[0] != L'\0')
     {
-        ServiceDeploy_RemoveScheduledTaskByName(state.AutorunTask, L"rundll32-only autorun task cleanup");
+        ServiceDeploy_RemoveScheduledTaskByName(state.AutorunTask, L"runtime-host autorun task cleanup");
         state.AutorunTask[0] = L'\0';
         if (state.RecoveryTask[0] == L'\0' && state.RecoveryMonitorFilter[0] == L'\0' && state.RecoveryMonitorHandler[0] == L'\0')
         {
@@ -7990,7 +8118,7 @@ static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profi
     }
 
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
-    ServiceDeploy_LogInstallEvent(L"Autorun scheduled task persistence blocked by rundll32-only lifecycle policy for %ls", serviceName);
+    ServiceDeploy_LogInstallEvent(L"Autorun scheduled task persistence blocked by runtime-host lifecycle policy for %ls", serviceName);
 }
 
 static BOOL ServiceDeploy_ApplyServiceRecoveryTask(
@@ -8580,6 +8708,37 @@ static BOOL ServiceDeploy_SetServiceAllowStop(const wchar_t* serviceName, BOOL a
     return ok;
 }
 
+/* Registry binding describes the next start, not necessarily the running PID.
+ * A migrated shared service can still be in its former multi-service process. */
+static BOOL ServiceDeploy_ProcessHostsOnlyService(const wchar_t* serviceName, DWORD processId)
+{
+    SC_HANDLE scm = NULL;
+    ENUM_SERVICE_STATUS_PROCESSW* services = NULL;
+    DWORD bytes = 0, count = 0, resume = 0;
+    BOOL found = FALSE, ok = FALSE;
+    if (!serviceName || !*serviceName || !processId) { return FALSE; }
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ENUMERATE_SERVICE);
+    if (!scm) { return FALSE; }
+    if (EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_ACTIVE,
+        NULL, 0, &bytes, &count, &resume, NULL) || GetLastError() != ERROR_MORE_DATA ||
+        !bytes || bytes > 256 * 1024) { goto done; }
+    services = (ENUM_SERVICE_STATUS_PROCESSW*)calloc(1, bytes);
+    resume = 0;
+    if (!services || !EnumServicesStatusExW(scm, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_ACTIVE,
+        (BYTE*)services, bytes, &bytes, &count, &resume, NULL)) { goto done; }
+    for (DWORD i = 0; i < count; ++i)
+    {
+        if (services[i].ServiceStatusProcess.dwProcessId != processId) { continue; }
+        if (_wcsicmp(services[i].lpServiceName, serviceName) != 0) { goto done; }
+        found = TRUE;
+    }
+    ok = found;
+done:
+    free(services);
+    CloseServiceHandle(scm);
+    return ok;
+}
+
 static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD timeoutMs, BOOL forceTerminate)
 {
     if (serviceName == NULL || serviceName[0] == L'\0') { return FALSE; }
@@ -8617,6 +8776,7 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
     DWORD needed = 0;
     DWORD lastStopAttempt = 0;
     BOOL loggedStopFailure = FALSE;
+    wchar_t serviceDll[MAX_PATH * 4] = {0};
 
     // The service rejects a STOP unless AllowStop is already set. Enable it
     // before the first control even when process termination is not permitted.
@@ -8699,7 +8859,14 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
         ServiceDeploy_LogInstallEvent(L"[WARN] Service stop timed out for %ls (state=%lu pid=%lu)", serviceName, ssp.dwCurrentState, ssp.dwProcessId);
     }
 
-    if (!stopped && forceTerminate && ssp.dwServiceType == SERVICE_WIN32_OWN_PROCESS && ssp.dwProcessId != 0)
+    /* Terminating a generic shared service host could stop unrelated services.
+     * It is permitted only after proving our one-service group. */
+    BOOL processIsExclusivelyOurs = ssp.dwServiceType == SERVICE_WIN32_OWN_PROCESS ||
+        (ssp.dwServiceType == SERVICE_WIN32_SHARE_PROCESS &&
+         ServiceDeploy_ResolveServiceDllPath(serviceName, serviceDll, _countof(serviceDll)) &&
+         ServiceHost_ValidateServiceBinding(serviceName, serviceDll) &&
+         ServiceDeploy_ProcessHostsOnlyService(serviceName, ssp.dwProcessId));
+    if (!stopped && forceTerminate && processIsExclusivelyOurs && ssp.dwProcessId != 0)
     {
         HANDLE hProcess = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, ssp.dwProcessId);
         if (hProcess != NULL)

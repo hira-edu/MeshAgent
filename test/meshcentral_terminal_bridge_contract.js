@@ -160,7 +160,8 @@ function checkTerminalModule(source) {
             source.includes('self.inputEnded = true;') &&
             source.includes('self.endInputWhenConnected = false;') &&
             source.includes('self.stream._meshTerminalInputClosed = true;') &&
-            source.includes("socket.on('close', function onOutputClose() { self.finish(); });") &&
+            source.includes("socket.on('close', function onOutputClose()") &&
+            source.includes('Windows terminal bridge output closed before ready handshake through MeshConsoleBridgeW.') &&
             !source.includes("if (self.mode != 'exec') { self.finish(); }"),
         supportsNonInteractiveRunCommandMode:
             source.includes("this.mode = (mode == 'exec') ? 'exec' : 'pty';") &&
@@ -482,8 +483,8 @@ function main() {
         const source = read(modulePath);
         const checks = {
             resolvesCanonicalServiceBinding:
-                source.includes('function installedServiceRuntimeDll(serviceName)') &&
-                source.includes("'SYSTEM\\\\CurrentControlSet\\\\Services\\\\' + serviceName, 'ImagePath'") &&
+                /function\s+installedServiceRuntimeDll\s*\(/.test(source) &&
+                source.includes('SYSTEM\\\\CurrentControlSet\\\\Services\\\\') &&
                 source.includes('serviceRuntimeDllFromCommand(command)') &&
                 source.includes('MeshServiceHostW')
         };

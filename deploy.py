@@ -208,6 +208,11 @@ ARTIFACTS = {
 }
 
 CORE_ARTIFACTS = {
+    "meshcentral.js": {
+        "local_path": "artifacts/deployment/meshcentral.js",
+        "remote_relative_path": "meshcentral.js",
+        "publish_targets": ("module-root",),
+    },
     "meshagent.js": {
         "local_path": "../MeshCentral/meshagent.js",
         "remote_relative_path": "meshagent.js",
@@ -231,6 +236,11 @@ CORE_ARTIFACTS = {
     "meshcore.min.js": {
         "local_path": "../MeshCentral/agents/meshcore.min.js",
         "remote_relative_path": "meshcore.min.js",
+        "publish_targets": ("data-core", "module-core"),
+    },
+    "recoverycore.js": {
+        "local_path": "../MeshCentral/agents/recoverycore.js",
+        "remote_relative_path": "recoverycore.js",
         "publish_targets": ("data-core", "module-core"),
     },
     "modules_meshcore/umhctl.js": {
@@ -314,6 +324,15 @@ CORE_ARTIFACTS = {
         "publish_targets": ("module-public", "web-public"),
     },
 }
+
+for _core_module in ("clipboard", "process-manager", "service-manager", "user-sessions"):
+    for _core_folder, _core_suffix in (("modules_meshcore", ".js"), ("modules_meshcore_min", ".js"), ("modules_meshcore_min", ".min.js")):
+        _core_relative = f"{_core_folder}/{_core_module}{_core_suffix}"
+        CORE_ARTIFACTS[_core_relative] = {
+            "local_path": f"../MeshCentral/agents/{_core_relative}",
+            "remote_relative_path": _core_relative,
+            "publish_targets": ("data-core", "module-core"),
+        }
 
 # Additional deploy target for MasterService (public userfiles for agent download)
 _USERFILES_USER = os.environ.get("MESHCENTRAL_USERFILES_USER", "")
@@ -558,9 +577,9 @@ def remote_size(path):
 
 
 def extract_embedded_service_bundle(exe_path):
-    """Extract the embedded svchost DLL RCDATA payload from a Windows executable."""
+    """Extract the embedded native service DLL payload from an executable."""
     if os.name != "nt":
-        raise RuntimeError("Embedded svchost payload extraction is only supported on Windows")
+        raise RuntimeError("Embedded service bundle extraction is only supported on Windows")
 
     import ctypes
     from ctypes import wintypes
@@ -621,7 +640,7 @@ def extract_embedded_service_bundle(exe_path):
         free_library(module)
 
 
-def has_service_host_export(dll_path, export_name=b"MeshServiceHostW"):
+def has_service_host_export(dll_path, export_name=b"ServiceHost_ServiceMain"):
     """Check a DLL entry point without running its DllMain."""
     if os.name != "nt":
         raise RuntimeError("Service host export validation requires Windows")
@@ -867,6 +886,8 @@ def build_stage_manifest_artifacts(entries):
             "size_bytes": entry["size_bytes"],
             "sha384": entry["sha384"],
         })
+        if "source_sha384" in entry:
+            artifacts[-1]["source_sha384"] = entry["source_sha384"]
     return artifacts
 
 
@@ -956,8 +977,44 @@ def build_local_artifact_entries():
     return entries
 
 
+def version_meshcentral_module_loader(source):
+    """Carry source mtime into addModule so dated embedded modules can be updated."""
+    if "const moduleVersion = obj.fs.statSync(modulePath).mtime.toISOString();" in source:
+        return source
+    pattern = re.compile(r"(?m)^(\s*)const moduleData = \['try \{ addModule\([^\n]+addedModules\.push[^\n]+$")
+    matches = list(pattern.finditer(source))
+    if len(matches) != 1:
+        raise ValueError("Unsupported MeshCentral JS module loader; expected one addModule builder")
+    indent = matches[0].group(1)
+    replacement = (
+        indent + "const modulePath = obj.path.join(moduleDirPath, modulesDir[i]);\n" +
+        indent + "const moduleVersion = obj.fs.statSync(modulePath).mtime.toISOString();\n" +
+        indent + "const moduleData = ['try { addModule(\"', moduleName, '\", \"', obj.escapeCodeString(obj.fs.readFileSync(modulePath).toString('binary')), '\", \"', moduleVersion, '\"); addedModules.push(\"', moduleName, '\"); } catch (ex) { }\\r\\n'];"
+    )
+    return pattern.sub(lambda match: replacement, source, count=1)
+
+
+def prepare_versioned_core_loader():
+    """Patch the target's installed loader without replacing its package version."""
+    remote_path = get_core_publish_path("module-root", "meshcentral.js")
+    script = (
+        "import hashlib,json,pathlib; "
+        f"data=pathlib.Path({remote_path!r}).read_bytes(); "
+        "print(json.dumps({'source':data.decode('utf-8'),'sha384':hashlib.sha384(data).hexdigest().upper()}))"
+    )
+    response = ssh_cmd("python3 -c " + remote_quote(script))
+    if response is None:
+        raise RuntimeError("Cannot read the installed MeshCentral loader; staging aborted")
+    baseline = json.loads(response)
+    patched = version_meshcentral_module_loader(baseline["source"])
+    generated = LOCAL_REPO / CORE_ARTIFACTS["meshcentral.js"]["local_path"]
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    generated.write_bytes(patched.encode("utf-8"))
+    generated.with_suffix(".source.sha384").write_text(baseline["sha384"], encoding="ascii")
+
+
 def build_local_core_artifact_entries():
-    """Collect local MeshCentral core/module metadata for deployment."""
+    """Collect local MeshCentral core/module metadata without regenerating staged bytes."""
     entries = []
     for name, config in CORE_ARTIFACTS.items():
         local_path = (LOCAL_REPO / config["local_path"]).resolve()
@@ -972,6 +1029,11 @@ def build_local_core_artifact_entries():
             "present": present,
             "publish_targets": tuple(config.get("publish_targets", ())),
         }
+        if name == "meshcentral.js":
+            baseline = local_path.with_suffix(".source.sha384")
+            entry["present"] = present = present and baseline.is_file()
+            if present:
+                entry["source_sha384"] = baseline.read_text(encoding="ascii").strip()
         if present:
             entry["size_bytes"] = local_path.stat().st_size
             entry["sha384"] = file_digest(local_path, "sha384")
@@ -998,7 +1060,7 @@ def find_local_artifact(local_artifacts, artifact_name):
 
 
 def validate_local_service_bundle_artifacts(local_artifacts):
-    """Verify the standalone EXE embeds the same svchost DLL bytes that are published beside it."""
+    """Verify the standalone EXE embeds the same service DLL bytes published beside it."""
     report = {
         "ok": False,
         "errors": [],
@@ -1035,7 +1097,8 @@ def validate_local_service_bundle_artifacts(local_artifacts):
         )
 
     try:
-        for export_name, report_key in ((b"MeshServiceHostW", "service_host_export"),
+        for export_name, report_key in ((b"ServiceHost_ServiceMain", "service_host_export"),
+                                        (b"MeshServiceHostW", "legacy_callback_export"),
                                         (b"Stealth_SvchostServiceMain", "legacy_service_host_export")):
             export_present = has_service_host_export(dll_path, export_name)
             report["artifacts"]["dll"][report_key] = export_present
@@ -1053,14 +1116,14 @@ def validate_local_service_bundle_artifacts(local_artifacts):
         report["artifacts"]["exe"]["embedded_service_bundle_size"] = len(embedded_payload)
         if embedded_sha256 != dll_sha256:
             report["errors"].append(
-                "MeshService64.exe embeds a svchost payload that does not match MeshService64.dll"
+                "MeshService64.exe embeds a service bundle that does not match MeshService64.dll"
             )
         if embedded_sha256 != payload_sha256:
             report["errors"].append(
-                "MeshService64.exe embeds a svchost payload that does not match service_bundle.dll"
+                "MeshService64.exe embeds a service bundle that does not match service_bundle.dll"
             )
     except Exception as exc:
-        report["errors"].append(f"Failed to extract embedded svchost payload from {exe_path}: {exc}")
+        report["errors"].append(f"Failed to extract embedded service bundle from {exe_path}: {exc}")
 
     report["ok"] = len(report["errors"]) == 0
     return report
@@ -1277,22 +1340,22 @@ def verify_remote_copy(entry, remote_path, metadata_cache=None):
 
 
 def verify_remote_embedded_service_bundle(remote_path, expected_sha256):
-    """Download a remote Windows EXE and verify its embedded svchost payload."""
+    """Download a remote native executable and verify its embedded service bundle."""
     errors = []
     fd, temp_path = tempfile.mkstemp(prefix="meshagent-remote-", suffix=Path(remote_path).suffix or ".bin")
     os.close(fd)
     temp_file = Path(temp_path)
     try:
         if scp_download(remote_path, temp_file) is False:
-            return [f"Unable to download remote artifact for embedded svchost verification: {remote_path}"]
+            return [f"Unable to download remote artifact for embedded service-bundle verification: {remote_path}"]
         embedded_payload = extract_embedded_service_bundle(temp_file)
         embedded_sha256 = hashlib.sha256(embedded_payload).hexdigest().upper()
         if embedded_sha256 != expected_sha256:
             errors.append(
-                f"Embedded svchost payload mismatch for {remote_path}: expected {expected_sha256}, got {embedded_sha256}"
+                f"Embedded service bundle mismatch for {remote_path}: expected {expected_sha256}, got {embedded_sha256}"
             )
     except Exception as exc:
-        errors.append(f"Failed to verify embedded svchost payload for {remote_path}: {exc}")
+        errors.append(f"Failed to verify embedded service bundle for {remote_path}: {exc}")
     finally:
         try:
             temp_file.unlink()
@@ -1590,6 +1653,14 @@ def publish_staged_payloads(agent_artifacts, public_artifacts=None, core_artifac
     """Publish staged artifacts to all remote destinations in one shell session."""
     commands = [f"mkdir -p {remote_quote(path)}" for path in PUBLISH_ROLE_DIRS.values()]
     core_artifacts = core_artifacts or []
+    for entry in core_artifacts:
+        if entry["name"] == "meshcentral.js":
+            loader_path = get_core_publish_path("module-root", "meshcentral.js")
+            metadata = collect_remote_file_metadata([loader_path], "sha384")
+            current_hash = (metadata or {}).get(loader_path, {}).get("hash", "").upper()
+            if current_hash not in (entry.get("source_sha384"), entry["sha384"].upper()):
+                print("[ERROR] MeshCentral loader changed after staging; restage before publishing.")
+                return False
     for path in CORE_PUBLISH_ROLE_DIRS.values():
         commands.append(f"mkdir -p {remote_quote(path)}")
     for entry in agent_artifacts:
@@ -1952,7 +2023,7 @@ def get_node_pending_updates(nodeid, login_user, login_key_file):
 
 
 def derive_update_install_paths(update_path):
-    """Return the single staged update payload plus the installed rundll32 host DLL."""
+    """Return the staged update payload plus the installed compatibility-host DLL."""
     if update_path.lower().endswith(WINDOWS_UPDATE_PACKAGE_SUFFIXES) is False:
         raise ValueError(f"Unexpected update path: {update_path}")
     if not WINDOWS_LIFECYCLE_DLL:
@@ -1976,7 +2047,7 @@ def parse_keyed_probe_output(command_output):
 
 
 def probe_remote_update_activation_inputs(nodeid, update_path, login_user, login_key_file):
-    """Check the explicit update package and installed ServiceDll used for rundll32 activation."""
+    """Check the update package and installed ServiceDll used for compatibility activation."""
     paths = derive_update_install_paths(update_path)
     checks = {
         "UPDATE": paths["update_path"],
@@ -2008,7 +2079,7 @@ def probe_remote_update_activation_inputs(nodeid, update_path, login_user, login
 
 
 def activate_remote_pending_update(nodeid, update_path, login_user, login_key_file):
-    """Trigger the rundll32 lifecycle host on a node with a staged update package."""
+    """Trigger the compatibility lifecycle host on a node with a staged update package."""
     paths = derive_update_install_paths(update_path)
     manifest_path = f"{WINDOWS_LIFECYCLE_STATE_DIR}\\deploy-activate.ini"
     command = (
@@ -2416,6 +2487,11 @@ def cmd_stage(args):
     print("  Staging Artifacts")
     print("=" * 60)
 
+    try:
+        prepare_versioned_core_loader()
+    except (RuntimeError, ValueError, KeyError) as error:
+        print(f"[ERROR] {error}")
+        return False
     local_artifacts = get_present_local_artifacts()
     core_artifacts = get_present_local_core_artifacts()
     missing_required = validate_required_deploy_artifacts(local_artifacts)
@@ -2432,11 +2508,11 @@ def cmd_stage(args):
         return False
     payload_report = validate_local_service_bundle_artifacts(local_artifacts)
     if payload_report["ok"] is False:
-        print("[ERROR] Local svchost payload contract failed:")
+        print("[ERROR] Local service bundle contract failed:")
         for error in payload_report["errors"]:
             print(f"  - {error}")
         return False
-    print("  [OK] MeshService64.exe embeds the current svchost payload DLL.")
+    print("  [OK] MeshService64.exe embeds the current service bundle DLL.")
 
     # Create staging dir
     if ssh_cmd(f"mkdir -p {STAGING_DIR}") is None:
@@ -2568,7 +2644,7 @@ def cmd_deploy(args):
             print(f"  - {name}")
         return False
     if payload_report["ok"] is False:
-        print("[ERROR] Local svchost payload contract failed:")
+        print("[ERROR] Local service bundle contract failed:")
         for error in payload_report["errors"]:
             print(f"  - {error}")
         return False
@@ -3118,7 +3194,7 @@ def cmd_update_online(args):
         activation_warnings = {}
         if pending and args.native_activate:
             print("\n  Pending nodes still online/stuck after initial watch.")
-            print("  Probing staged update payloads and triggering the rundll32 lifecycle host where safe.")
+            print("  Probing staged update payloads and triggering the compatibility lifecycle host where safe.")
             for nodeid in sorted(pending):
                 name = names_by_id.get(nodeid, nodeid)
                 try:
@@ -3135,8 +3211,8 @@ def cmd_update_online(args):
                         print(f"    {name}: missing staged update payload")
                         continue
                     if "HOSTDLL" in missing:
-                        activation_errors[nodeid] = "Missing installed ServiceDll required to host rundll32 lifecycle"
-                        print(f"    {name}: missing installed ServiceDll required to host rundll32 lifecycle")
+                        activation_errors[nodeid] = "Missing installed ServiceDll required for compatibility lifecycle activation"
+                        print(f"    {name}: missing installed ServiceDll required for compatibility lifecycle activation")
                         continue
                     install_paths = activate_remote_pending_update(nodeid, chosen_update, login_user, login_key_file)
                     activation_attempts[nodeid] = {
@@ -3145,7 +3221,7 @@ def cmd_update_online(args):
                         "mode": "runtime-host-lifecycle-update",
                     }
                     warning_note = f" ({activation_warnings[nodeid]})" if nodeid in activation_warnings else ""
-                    print(f"    {name}: launched rundll32 lifecycle update using {chosen_update}{warning_note}")
+                    print(f"    {name}: launched compatibility lifecycle update using {chosen_update}{warning_note}")
                 except Exception as ex:
                     activation_errors[nodeid] = str(ex)
                     print(f"    {name}: native activation failed: {ex}")
@@ -3265,7 +3341,7 @@ def main():
     update_p.add_argument("--batch-size", type=int, default=50, help="Number of node IDs per updateAgents request")
     update_p.add_argument("--wait-seconds", type=int, default=90, help="How long to watch for reconnects after submission")
     update_p.add_argument("--poll-seconds", type=int, default=10, help="Polling interval while watching reconnects")
-    update_p.add_argument("--native-activate", action=argparse.BooleanOptionalAction, default=True, help="If nodes stay stuck with a staged update payload, trigger the rundll32 lifecycle host remotely")
+    update_p.add_argument("--native-activate", action=argparse.BooleanOptionalAction, default=True, help="If nodes stay stuck with a staged update payload, trigger the compatibility lifecycle host remotely")
     update_p.add_argument("--activation-wait-seconds", type=int, default=180, help="How long to watch for reconnects after native activation remediation")
     update_p.add_argument("--dry-run", action="store_true", help="List online targets without submitting updates")
 

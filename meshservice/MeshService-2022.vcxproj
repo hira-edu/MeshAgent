@@ -1167,7 +1167,6 @@
     <ClCompile Include="memory_management.c" />
     <ClCompile Include="runtime_init.c" />
     <ClCompile Include="service_utils.c" />
-    <ClCompile Include="runtime_bridge.cpp" />
     <ClCompile Include="service_bundle.c">
       <WholeProgramOptimization Condition="'$(Platform)'=='x64'">false</WholeProgramOptimization>
       <WholeProgramOptimization Condition="'$(Platform)'=='ARM64'">false</WholeProgramOptimization>

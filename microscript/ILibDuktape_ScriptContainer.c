@@ -103,7 +103,6 @@ char exeJavaScriptGuid[] = "B996015880544A19B7F7E9BE44914C18";
 #define ILibDuktape_ScriptContainer_Command_Execute_Status		"ScriptContainer_Command_Execute_Status"
 #define ILibDuktape_ScriptContainer_Command_Log					"ScriptContainer_Command_Log"
 #define ILibDuktape_ScriptContainer_Settings_ExecutionTimeout	"\xFF_ScriptContainerSettings_ExecutionTimeout"
-#define ILibDuktape_ScriptContainer_Settings_SecurityFlags		"\xFF_ScriptContainerSettings_SecurityFlags"
 #define ILibDuktape_ScriptContainer_Settings_DB					"\xFF_ScriptContainerSettings_DB"
 #define ILibDuktape_ScriptContainer_Settings_ExitHandler		"\xFF_ScriptContainerSettings_ExitHandler"
 #define ILibDuktape_ScriptContainer_Settings_ExitUser			"\xFF_ScriptContainerSettings_ExitUser"
@@ -1596,6 +1595,15 @@ void ILibDuktape_ScriptContainer_ExecTimeout(void *obj)
 
 	Duktape_SafeDestroyHeap(ctx);
 }
+SCRIPT_ENGINE_SECURITY_FLAGS ILibDuktape_ScriptContainer_GetSecurityFlags(duk_context *ctx)
+{
+    SCRIPT_ENGINE_SECURITY_FLAGS flags;
+    duk_push_heap_stash(ctx);
+    flags = (SCRIPT_ENGINE_SECURITY_FLAGS)Duktape_GetIntPropertyValue(ctx, -1, ILibDuktape_ScriptContainer_Settings_SecurityFlags, 0);
+    duk_pop(ctx);
+    return flags;
+}
+
 SCRIPT_ENGINE_SETTINGS* ILibDuktape_ScriptContainer_GetSettings(duk_context *ctx)
 {
 	SCRIPT_ENGINE_SETTINGS *settings = (SCRIPT_ENGINE_SETTINGS*)ILibMemory_SmartAllocate(sizeof(SCRIPT_ENGINE_SETTINGS));

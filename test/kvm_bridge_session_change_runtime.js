@@ -248,7 +248,7 @@ function validateProbeJson(json, expectedAutoSelected) {
         assert(json.validRebindSuccessfulSpawnAttemptOrdinal === 1, `auto-selected valid rebind succeeded on attempt ${json.validRebindSuccessfulSpawnAttemptOrdinal}`);
     }
     assert(json.initialBridgeAvailable === true, `${label} bridge DLL path was not resolved`);
-    assert(json.initialBridgeUsed === true, `${label} rundll32 bridge path was not used`);
+    assert(json.initialBridgeUsed === true, `${label} runtime-host bridge path was not used`);
     assert(json.initialFallbackUsed === false, `${label} legacy fallback was used unexpectedly`);
     assert(json.initialLaunchAttemptCount === 1, `${label} initial bridge needed fallback attempts (${json.initialLaunchAttemptCount})`);
     assert(json.initialSuccessfulSpawnType === json.initialExpectedSpawnType, `${label} initial bridge used unexpected spawn type ${json.initialSuccessfulSpawnType} (expected ${json.initialExpectedSpawnType})`);

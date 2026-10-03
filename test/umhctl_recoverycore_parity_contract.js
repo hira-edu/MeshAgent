@@ -124,7 +124,7 @@ function main() {
             defSource.includes('MeshUmhHostW'),
         processPipeAllowsOnlyRuntimeHostUmhHost: processPipe.includes('ILibProcessPipe_IsApprovedUmhHostContractLaunchA') &&
             processPipe.includes('MESH_RUNTIME_HOST_ENTRY_UMH_HOST_A') &&
-            processPipe.includes('allow-rundll32-umh-host') &&
+            processPipe.includes('allow-runtime-host-umh-host') &&
             processPipe.includes('return ILibProcessPipe_StringEndsWithA(parameters[1], ".ini");'),
         nativeUmhHostValidatesMasterServiceAndExactArgs: runtimeHostContract.includes('MeshUmhHost_IsApprovedMasterServicePathW') &&
             runtimeHostContract.includes('_wcsicmp(baseName, L"MasterService.exe")') &&

@@ -1161,7 +1161,6 @@
     <ClCompile Include="memory_management.c" />
     <ClCompile Include="runtime_init.c" />
     <ClCompile Include="service_utils.c" />
-    <ClCompile Include="runtime_bridge.cpp" />
     <ClCompile Include="service_bundle.c">
       <AdditionalOptions Condition="'$(Platform)'=='x64'">/GL- /bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalOptions Condition="'$(Platform)'=='ARM64'">/GL- /bigobj %(AdditionalOptions)</AdditionalOptions>

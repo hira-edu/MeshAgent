@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -153,7 +154,7 @@ function createCommandRunner(commandsPath, commandRecords, context = {}) {
         const start = Date.now();
         const cwd = options.cwd || REPO_ROOT;
         let record;
-        if (process.platform === 'win32' && args && args.length > 0 && lifecycleRunner.isLifecycleSwitch(args[0])) {
+        if (!options.direct && process.platform === 'win32' && args && args.length > 0 && lifecycleRunner.isLifecycleSwitch(args[0])) {
             record = lifecycleRunner.runLifecycleCommand(file, args, {
                 label,
                 cwd,
@@ -632,65 +633,23 @@ function runNativeCliPhase(runCommand, sourceSet, phaseDir) {
         { attempts: 12, delayMs: 5000 }
     );
 
-    let install = null;
-    let validateInstall = null;
-    let installAttempts = 0;
-    let installFailure = null;
-
-    for (let attempt = 1; attempt <= 3; ++attempt) {
-        install = runCommand(`native-install-attempt-${attempt}`, cliRunner.exe, ['-fullinstall'], {
-            cwd: path.dirname(cliRunner.exe),
-            timeoutMs: 600000
-        });
-        writeCommandArtifacts(phaseDir, `native-install-attempt-${attempt}`, install);
-
-        try {
-            validateInstall = runValidationWithRetries(
-                runCommand,
-                cliRunner.exe,
-                phaseDir,
-                `native-validate-install-attempt-${attempt}`,
-                ['-validate-install'],
-                `validate install after fullinstall attempt ${attempt}`,
-                { attempts: 6, delayMs: 3000 }
-            );
-            installAttempts = attempt;
-            writeCommandArtifacts(phaseDir, 'native-install', install);
-            writeCommandArtifacts(phaseDir, 'native-validate-install', validateInstall.record);
-            installFailure = null;
-            break;
-        } catch (error) {
-            installFailure = error;
-        }
-
-        if (attempt < 3) {
-            const cleanup = runCommand(`native-install-recovery-uninstall-attempt-${attempt}`, cliRunner.exe, ['-fulluninstall'], {
-                cwd: path.dirname(cliRunner.exe),
-                timeoutMs: 600000
-            });
-            writeCommandArtifacts(phaseDir, `native-install-recovery-uninstall-attempt-${attempt}`, cleanup);
-
-            runValidationWithRetries(
-                runCommand,
-                cliRunner.exe,
-                phaseDir,
-                `native-install-recovery-validate-uninstall-attempt-${attempt}`,
-                ['-validate-uninstall'],
-                `validate uninstall after failed fullinstall attempt ${attempt}`,
-                { attempts: 12, delayMs: 5000 }
-            );
-        }
-    }
-
-    if (!validateInstall) {
-        if (install && install.error) {
-            throw new Error(`fullinstall: ${install.error}`);
-        }
-        if (installFailure instanceof Error) {
-            throw installFailure;
-        }
-        throw new Error(`fullinstall failed after retries: exit=${install ? install.exitCode : -1} stdout=${trimText(install ? install.stdout : '')} stderr=${trimText(install ? install.stderr : '')}`);
-    }
+    const install = runCommand('terminal-install', cliRunner.exe, ['-install'], {
+        cwd: path.dirname(cliRunner.exe), timeoutMs: 600000
+    });
+    writeCommandArtifacts(phaseDir, 'native-install', install);
+    ensureSuccess(install, 'terminal install');
+    const installAttempts = 1;
+    const validateInstall = runValidationWithRetries(
+        runCommand, cliRunner.exe, phaseDir, 'native-validate-install',
+        ['-validate-install'], 'validate terminal install', { attempts: 6, delayMs: 3000 }
+    );
+    writeCommandArtifacts(phaseDir, 'native-validate-install', validateInstall.record);
+    const quietInstall = runCommand('terminal-install-idempotent-quiet', cliRunner.exe, ['-install', '-silent'], {
+        cwd: path.dirname(cliRunner.exe), timeoutMs: 600000
+    });
+    writeCommandArtifacts(phaseDir, 'terminal-install-idempotent-quiet', quietInstall);
+    ensureSuccess(quietInstall, 'quiet terminal install');
+    assert(!quietInstall.stdout && !quietInstall.stderr, 'quiet terminal install emitted console output');
 
     const runtimeInstall = runCommand('native-runtime-install', cliRunner.exe, ['-validate-install'], {
         cwd: path.dirname(cliRunner.exe),
@@ -703,12 +662,30 @@ function runNativeCliPhase(runCommand, sourceSet, phaseDir) {
     const nodeBeforeState = waitForNodeIdConvergence(runCommand, serviceName, installedExe, 'native-install-nodeid');
     const nodeBefore = nodeBeforeState.registryNodeId;
 
-    const update = runCommand('native-update', cliRunner.exe, ['-fullupdate', `--update-source=${updateSource.exe}`], {
-        cwd: path.dirname(cliRunner.exe),
+    // Refusal must happen before quiescing the installed service, even for an
+    // alias whose pathname is outside the installation directory.
+    const installedAlias = path.join(phaseDir, 'installed-image-hardlink.exe');
+    fs.linkSync(installedExe, installedAlias);
+    try {
+        for (const [label, executable, args] of [
+            ['installed-install-refused', installedExe, ['-install']],
+            ['installed-update-refused-quiet', installedExe, ['-update', '--quiet']],
+            ['hardlink-update-refused-quiet', installedAlias, ['-update', '-silent']]
+        ]) {
+            const record = runCommand(label, executable, args, { timeoutMs: 30000 });
+            writeCommandArtifacts(phaseDir, label, record);
+            assert(record.exitCode === 1603, `${label} must return ERROR_INSTALL_FAILURE`);
+            if (args.length > 1) { assert(!record.stdout && !record.stderr, `${label} emitted quiet output`); }
+        }
+    } finally { fs.unlinkSync(installedAlias); }
+
+    const update = runCommand('native-update', updateSource.exe, ['-update', '--quiet'], {
+        cwd: path.dirname(updateSource.exe),
         timeoutMs: 600000
     });
     writeCommandArtifacts(phaseDir, 'native-update', update);
-    ensureSuccess(update, 'fullupdate');
+    ensureSuccess(update, 'quiet terminal update');
+    assert(!update.stdout && !update.stderr, 'quiet terminal update emitted console output');
 
     const validateUpdate = runValidationWithRetries(
         runCommand,
@@ -734,12 +711,29 @@ function runNativeCliPhase(runCommand, sourceSet, phaseDir) {
         throw new Error(`NodeId changed across update: before=${nodeBefore || '(missing)'} after=${nodeAfter || '(missing)'}`);
     }
 
-    const uninstall = runCommand('native-uninstall', cliRunner.exe, ['-fulluninstall'], {
+    const rawSource = stageExecutable(sourceSet, path.join(phaseDir, 'raw update source', 'raw.exe'),
+        { includeDb: false, includeMsh: false, includeConf: false, includeDll: false });
+    const rawUpdate = runCommand('terminal-raw-update-quiet', rawSource.exe, ['-update', '--quiet'], { timeoutMs: 600000 });
+    writeCommandArtifacts(phaseDir, 'terminal-raw-update-quiet', rawUpdate);
+    ensureSuccess(rawUpdate, 'raw terminal update');
+    assert(!rawUpdate.stdout && !rawUpdate.stderr, 'raw update emitted quiet output');
+    const rawIdentity = waitForNodeIdConvergence(runCommand, serviceName, installedExeAfter, 'terminal-raw-update-nodeid');
+    assert(rawIdentity.registryNodeId === nodeBefore, 'raw update changed NodeID');
+
+    const ingressUpdate = runCommand('terminal-fullupdate-ingress', cliRunner.exe,
+        ['-fullupdate', `--update-source=${updateSource.exe}`], { timeoutMs: 600000, direct: true });
+    writeCommandArtifacts(phaseDir, 'terminal-fullupdate-ingress', ingressUpdate);
+    ensureSuccess(ingressUpdate, 'terminal self-update ingress');
+    const ingressIdentity = waitForNodeIdConvergence(runCommand, serviceName, installedExeAfter, 'terminal-ingress-nodeid');
+    assert(ingressIdentity.registryNodeId === nodeBefore, 'self-update ingress changed NodeID');
+
+    const uninstall = runCommand('native-uninstall', cliRunner.exe, ['-uninstall', '-silent'], {
         cwd: path.dirname(cliRunner.exe),
         timeoutMs: 600000
     });
     writeCommandArtifacts(phaseDir, 'native-uninstall', uninstall);
-    ensureSuccess(uninstall, 'fulluninstall');
+    ensureSuccess(uninstall, 'quiet terminal uninstall');
+    assert(!uninstall.stdout && !uninstall.stderr, 'quiet terminal uninstall emitted console output');
 
     const validateUninstall = runValidationWithRetries(
         runCommand,
@@ -750,6 +744,26 @@ function runNativeCliPhase(runCommand, sourceSet, phaseDir) {
         'validate uninstall',
         { attempts: 12, delayMs: 5000 }
     );
+
+    const reinstall = runCommand('terminal-reinstall-for-self-uninstall', cliRunner.exe, ['-install', '--quiet'], { timeoutMs: 600000 });
+    writeCommandArtifacts(phaseDir, 'terminal-reinstall-for-self-uninstall', reinstall);
+    ensureSuccess(reinstall, 'terminal reinstall for installed-image uninstall');
+    assert(!reinstall.stdout && !reinstall.stderr, 'quiet reinstall emitted console output');
+    const selfUninstall = runCommand('terminal-installed-image-uninstall', installedExe, ['-uninstall', '--quiet'], { timeoutMs: 600000 });
+    writeCommandArtifacts(phaseDir, 'terminal-installed-image-uninstall', selfUninstall);
+    ensureSuccess(selfUninstall, 'installed-image terminal uninstall');
+    assert(!selfUninstall.stdout && !selfUninstall.stderr, 'quiet installed-image uninstall emitted console output');
+    // The child has exited, so the retired image can be removed now. Only this
+    // exact product filename with a numeric PID is eligible for test cleanup.
+    const installDir = path.dirname(installedExe);
+    const leafPrefix = path.basename(installedExe) + '.';
+    const retiredImages = fs.readdirSync(installDir).filter(name => name.startsWith(leafPrefix) &&
+        /^\d+\.pending-delete$/.test(name.substring(leafPrefix.length)));
+    assert(retiredImages.length === 1, 'installed-image uninstall must retire exactly one running executable');
+    for (const name of retiredImages) { fs.unlinkSync(path.join(installDir, name)); }
+    fs.rmdirSync(installDir);
+    runValidationWithRetries(runCommand, cliRunner.exe, phaseDir, 'terminal-validate-self-uninstall',
+        ['-validate-uninstall'], 'validate installed-image uninstall after child exit', { attempts: 3 });
 
     const result = {
         cliRunner,

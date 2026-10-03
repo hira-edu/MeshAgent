@@ -65,7 +65,7 @@ static DWORD attrs(const wchar_t* path){if(!wcscmp(path,L"journal")){lastError=E
 static BOOL image(BOOL* legacy){*legacy=binding.legacy;return owned;}
 static BOOL query(BOOL* exists){*exists=currentExists;return failAt!=1;}
 static BOOL start_type(DWORD value){startType=value;return TRUE;}
-static BOOL stop(BOOL force){if(checkpoint.binding&&config.dwServiceType==SERVICE_WIN32_SHARE_PROCESS)assert(!force);++stops;if(failAt==2)return FALSE;running=0;return TRUE;}
+static BOOL stop(BOOL force){assert(force);++stops;if(failAt==2)return FALSE;running=0;return TRUE;}
 static BOOL rollback(void){++rollbacks;assert(!running);if(failAt==3)return FALSE;liveVersion=1;currentExists=checkpoint.binding!=NULL;return TRUE;}
 static BOOL restore_security(void){++securityRestores;return failAt!=4;}
 static BOOL restore_binding(void){++restores;return failAt!=4;}
@@ -83,7 +83,7 @@ static BOOL record_hold(void){++holds;assert(!running);return failAt!=10;}
 #define ServiceJournal_Free(r) (++frees)
 #define ServiceDeploy_LogInstallEvent(...) ((void)0)
 #define ServiceDeploy_TransactionDirectoryEmpty(path) (!unowned)
-#define ServiceBinding_ImageSupported(c,e,d,l) image(l)
+#define ServiceBinding_ImageSupported(n,c,e,d,l) image(l)
 #define ServiceBinding_SharedPayloadSupported(s,d) owned
 #define ServiceDeploy_DeleteUpdateTransactionArtifacts(tx) (++cleanups,remove_checkpoint())
 #define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx) (reconcile() && (++cleanups, remove_checkpoint()))

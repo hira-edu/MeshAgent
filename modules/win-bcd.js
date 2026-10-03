@@ -17,7 +17,7 @@ limitations under the License.
 //
 function rejectWinBcdOperation(operation)
 {
-    throw new Error('Windows ' + operation + ' is disabled by the rundll32-only runtime contract. Use the native MeshLifecycleHostW lifecycle path for Windows state changes.');
+    throw new Error('Windows ' + operation + ' is disabled by the approved runtime-host contract. Use the native MeshLifecycleHostW lifecycle path for Windows state changes.');
 }
 
 function getKeys()

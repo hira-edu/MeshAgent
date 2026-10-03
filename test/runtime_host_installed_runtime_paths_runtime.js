@@ -9,6 +9,17 @@ const system = 'D:\\Windows\\System32';
 const dll = 'C:\\ProgramData\\Agent Space\\主机.dll';
 const command = `"${system}\\rundll32.exe" "${dll}",MeshServiceHostW`;
 let registryCommand = command;
+const serviceKey = 'SYSTEM\\CurrentControlSet\\Services\\MeshAgent';
+const groupKey = 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost';
+const groupName = 'MeshAgent-1234567890ABCDEF';
+const values = {};
+function setValue(key, name, value) { values[key + '|' + name] = value; }
+function setMembers(text, type = 7) {
+    const value = Buffer.from(text, 'utf16le'); value._type = type;
+    // Match Duktape: its Buffer has no Node-compatible UTF-16 decoder.
+    value.toString = () => { throw Error('Unrecognized parameter'); };
+    setValue(groupKey, groupName, value);
+}
 const queries = [];
 const marshal = {
     CreateVariable: () => ({ Wide2UTF8: system }),
@@ -20,7 +31,13 @@ const context = {
         if (name === '_GenericMarshal') return marshal;
         if (name === 'win-registry') return {
             HKEY: { LocalMachine: 1 },
-            QueryKey(hive, key, value) { queries.push({ hive, key, value }); return registryCommand; }
+            QueryKey(hive, key, value) {
+                queries.push({ hive, key, value });
+                if (value === 'ImagePath') return registryCommand;
+                const result = values[key + '|' + value];
+                if (result === undefined) throw Error('Registry value missing');
+                return result;
+            }
         };
         throw new Error('Unexpected dependency: ' + name);
     }
@@ -41,10 +58,45 @@ const rejected = [
         'C:\\bad\u0000.dll', 'C:\\' + 'a'.repeat(260) + '.dll'].map(value => command.replace(dll, value))
 ];
 for (const value of rejected) assert.throws(() => api.serviceRuntimeDllFromCommand(value), String(value));
-for (const value of ['', '../Other', 'x\\Parameters', 'x\u0000']) assert.throws(() => api.installedServiceRuntimeDll(value));
+for (const value of ['', '../Other', 'x\\Parameters', 'x\u0000', 'x'.repeat(256)]) assert.throws(() => api.installedServiceRuntimeDll(value));
 registryCommand = '"C:\\old-agent.exe"';
 assert.throws(() => api.installedServiceRuntimeDll('MeshAgent'));
 assert.equal(queries[queries.length - 1].value, 'ImagePath');
+
+registryCommand = `"${system}\\svchost.exe" -k ${groupName}`;
+setValue(serviceKey, 'Type', 32);
+setValue(serviceKey + '\\Parameters', 'ServiceMain', 'ServiceHost_ServiceMain');
+setValue(serviceKey + '\\Parameters', 'ServiceDllUnloadOnStop', 1);
+setValue(serviceKey + '\\Parameters', 'ServiceDll', dll);
+setMembers('MeshAgent\0\0');
+assert.equal(api.installedServiceRuntimeDll('MeshAgent'), dll);
+setMembers('meshagent\0\0');
+assert.equal(api.installedServiceRuntimeDll('MeshAgent'), dll);
+for (const members of ['Other\0\0', 'MeshAgent\0Other\0\0', 'MeshAgent\0', 'MeshAgent\0\0extra', '']) {
+    setMembers(members); assert.throws(() => api.installedServiceRuntimeDll('MeshAgent'), 'group: ' + members);
+}
+setMembers('MeshAgent\0\0', 1);
+assert.throws(() => api.installedServiceRuntimeDll('MeshAgent'), 'group registry type');
+setMembers('MeshAgent\0\0');
+for (const [key, name, invalid] of [
+    [serviceKey, 'Type', 16],
+    [serviceKey + '\\Parameters', 'ServiceMain', 'Stealth_SvchostServiceMain'],
+    [serviceKey + '\\Parameters', 'ServiceDllUnloadOnStop', 0],
+    [serviceKey + '\\Parameters', 'ServiceDll', 'C:\\a\\..\\agent.dll'],
+    [serviceKey + '\\Parameters', 'ServiceDll', '%SystemRoot%\\agent.dll']
+]) {
+    const prior = values[key + '|' + name]; setValue(key, name, invalid);
+    assert.throws(() => api.installedServiceRuntimeDll('MeshAgent'), name);
+    setValue(key, name, undefined);
+    assert.throws(() => api.installedServiceRuntimeDll('MeshAgent'), 'missing ' + name);
+    setValue(key, name, prior);
+}
+const serviceCommand = registryCommand;
+for (const invalid of [serviceCommand + ' extra', serviceCommand + '\n',
+    serviceCommand.replace(system, 'C:\\attacker'), serviceCommand.replace(groupName, 'netsvcs')]) {
+    registryCommand = invalid; assert.throws(() => api.installedServiceRuntimeDll('MeshAgent'), invalid);
+}
+registryCommand = serviceCommand;
 
 function functionSource(file, name) {
     const source = fs.readFileSync(path.join(root, file), 'utf8');

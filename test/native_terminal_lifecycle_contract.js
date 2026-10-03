@@ -46,23 +46,27 @@ function verifyDispatch(serviceMain) {
 
 function verifyTerminalLifecycle(serviceMain) {
     const body = extractFunctionBody(serviceMain, 'static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)');
-    assert(body.includes('argc > 2'), 'terminal lifecycle must reject arguments it would ignore');
+    assert(body.includes('argc != 3') && body.includes('"--quiet"') && body.includes('"-silent"'), 'terminal lifecycle must admit only one quiet flag');
     assert(body.includes('!IsAdmin()'), 'terminal lifecycle must require elevation');
+    const architectureGuard = body.indexOf('#if !defined(_WIN64)');
+    const operation = body.indexOf('ServiceDeploy_RunLifecycleHostOperation(');
+    assert(architectureGuard >= 0 && architectureGuard < operation && body.includes('return (int)ERROR_NOT_SUPPORTED;'),
+        'Win32 lifecycle must reject the x64 payload before deployment mutation');
     assert(body.includes('moduleLen == 0 || moduleLen >= _countof(exePathW)'), 'executable path resolution must be checked');
     assert(body.includes('runningFromInstalledImage && !isUninstall'), 'install/update must refuse to run from the installed image');
     assert(/if \(!ServiceDeploy_PreflightPackageSource\([\s\S]*?return \(int\)ERROR_INVALID_DATA;/.test(body),
         'update must fail closed when package preflight fails');
     assert(body.includes('SetConsoleCtrlHandler(MeshService_LifecycleConsoleCtrlHandler, TRUE)'), 'console interrupts must be shielded during the transaction');
-    assert(body.includes('ServiceDeploy_RunLifecycleHostOperation(validateAction'), 'tolerance validation must run through the locked lifecycle dispatcher');
+    assert(!body.includes('validateAction'), 'a restored healthy incumbent must not convert a failed operation to success');
     assert(!/ServiceDeploy_Run(Install|Update|Uninstall)Validation\(\)/.test(body), 'validation must not bypass the lifecycle mutex');
-    assert(body.includes('MeshService_RetireRunningInstalledImage(&paths'), 'installed-image uninstall must go through the residual check');
+    assert(body.includes('ServiceDeploy_RunTerminalUninstall('), 'terminal uninstall must keep retirement under the lifecycle lock');
     assert(body.includes('return (int)ERROR_INSTALL_FAILURE;'), 'operation failure must exit with ERROR_INSTALL_FAILURE');
     assert(!body.includes('return (int)((lastErr'), 'exit code must not come from a stale GetLastError value');
     assert(!body.includes('MOVEFILE_DELAY_UNTIL_REBOOT'), 'reboot deletion must stay behind the residual check');
 }
 
-function verifyRetireInstalledImage(serviceMain) {
-    const body = extractFunctionBody(serviceMain, 'static BOOL MeshService_RetireRunningInstalledImage(');
+function verifyRetireInstalledImage(deployment) {
+    const body = extractFunctionBody(deployment, 'static BOOL ServiceDeploy_RetireRunningInstalledImage(');
     const cleanCheck = body.indexOf('ServiceDeploy_IsUninstallCleanExceptInstalledExe()');
     const rename = body.indexOf('MoveFileExW(paths->exePath, retiredPath, 0)');
     const schedule = body.indexOf('MoveFileExW(retiredPath, NULL, MOVEFILE_DELAY_UNTIL_REBOOT)');
@@ -70,14 +74,23 @@ function verifyRetireInstalledImage(serviceMain) {
     assert(rename > cleanCheck, 'running image must be retired only after the clean check');
     assert(schedule > rename, 'only the retired image may be scheduled for reboot deletion');
     assert(!body.includes('MoveFileExW(paths->exePath, NULL'), 'the canonical image path must never be scheduled for deletion');
+    assert(body.includes('ServiceUtil_PathsReferToSameFileW(runningExePath, paths->exePath)'), 'retirement must recheck running-file identity while locked');
+    const uninstall = extractFunctionBody(deployment, 'BOOL ServiceDeploy_RunTerminalUninstall(');
+    const acquire = uninstall.indexOf('ServiceDeploy_AcquireLifecycleMutex()');
+    const operation = uninstall.indexOf('ServiceDeploy_RunLifecycleHostOperationLocked(');
+    const retire = uninstall.indexOf('ServiceDeploy_RetireRunningInstalledImage(');
+    const release = uninstall.indexOf('ReleaseMutex(mutex)');
+    assert(acquire >= 0 && operation > acquire && retire > operation && release > retire,
+        'uninstall and retirement must be completed under one mutex acquisition');
 }
 
 function verifyCleanExceptExe(deployment) {
     const body = extractFunctionBody(deployment, 'BOOL ServiceDeploy_IsUninstallCleanExceptInstalledExe(void)');
-    for (const field of ['dllExists', 'confExists', 'dbExists', 'serviceKeyExists', 'serviceExists', 'firewallRulePresent', 'anyPersistenceArtifacts']) {
+    for (const field of ['dllExists', 'confExists', 'dbExists', 'serviceKeyExists', 'serviceExists', 'firewallRulePresent', 'anyPersistenceArtifacts', 'anyCompanionArtifacts', 'pendingUpdate', 'serviceGroupArtifactsPresent']) {
         assert(body.includes(`!discovery.${field}`), `clean-except-exe check must require ${field} to be false`);
     }
     assert(!body.includes('exeExists'), 'clean-except-exe check must ignore only the installed executable');
+    assert(body.includes('ServiceDeploy_InstallDirectoryContainsOnlyInstalledExe'), 'unknown filesystem residue must prevent uninstall success');
 }
 
 function main() {
@@ -88,7 +101,7 @@ function main() {
 
     verifyDispatch(serviceMain);
     verifyTerminalLifecycle(serviceMain);
-    verifyRetireInstalledImage(serviceMain);
+    verifyRetireInstalledImage(deployment);
     verifyCleanExceptExe(deployment);
     assert(header.includes('BOOL ServiceDeploy_IsUninstallCleanExceptInstalledExe(void);'), 'clean-except-exe check must be declared');
     process.stdout.write(JSON.stringify({ success: true }, null, 2) + '\n');

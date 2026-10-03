@@ -36,7 +36,7 @@ static BOOL Lifecycle_BlockCreationByPolicyA(const char* operation)
     SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
     if (operation != NULL && operation[0] != '\0') {
         sprintf_s(message, sizeof(message),
-                  "Lifecycle persistence %s blocked by rundll32-only lifecycle policy",
+                  "Lifecycle persistence %s blocked by runtime-host lifecycle policy",
                   operation);
         OutputDebugStringA(message);
     }

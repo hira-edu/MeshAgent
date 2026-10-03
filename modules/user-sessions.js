@@ -24,6 +24,7 @@ var PBT_APMRESUMESUSPEND = 0x7;
 var PBT_APMRESUMEAUTOMATIC = 0x12;
 var PBT_APMPOWERSTATUSCHANGE = 0xA;
 var PROCESS_QUERY_INFORMATION = 0x0400;
+var PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 var TOKEN_QUERY = 0x0008;
 var TokenUser = 1;
 var TokenType = 8;
@@ -124,6 +125,8 @@ function UserSessions()
             this._advapi.CreateMethod('OpenProcessToken');
             this._advapi.CreateMethod('GetTokenInformation');
             this._advapi.CreateMethod('LookupAccountSidW');
+            this._advapi.CreateMethod('ConvertStringSidToSidW');
+            this._kernel32.CreateMethod('LocalFree');
             this._advapi.CreateMethod('OpenThreadToken');
         }
         catch(e)
@@ -189,33 +192,52 @@ function UserSessions()
             }
             return admin;
         }
+        this.getAccountName = function getAccountName(sidText)
+        {
+            var sid = this._marshal.CreatePointer();
+            if (this._advapi.ConvertStringSidToSidW(this._marshal.CreateVariable(sidText, { wide: true }), sid).Val == 0) { throw new Error('Invalid account SID'); }
+            try
+            {
+                var name = this._marshal.CreateVariable(2048), domain = this._marshal.CreateVariable(2048);
+                var nameChars = this._marshal.CreateVariable(4), domainChars = this._marshal.CreateVariable(4);
+                nameChars.toBuffer().writeUInt32LE(name._size / 2);
+                domainChars.toBuffer().writeUInt32LE(domain._size / 2);
+                if (this._advapi.LookupAccountSidW(0, sid.Deref(), name, nameChars, domain, domainChars, this._marshal.CreateVariable(4)).Val == 0) { throw new Error('Account SID lookup failed'); }
+                return domain.Wide2UTF8 + '\\' + name.Wide2UTF8;
+            }
+            finally { this._kernel32.LocalFree(sid.Deref()); }
+        };
         this.getProcessOwnerName = function getProcessOwnerName(pid)
         {
             var ret = null;
-            var name = this._marshal.CreateVariable(1024);
-            var domain = this._marshal.CreateVariable(1024);
-            var nameDomainLength = this._marshal.CreateVariable(4); nameDomainLength.toBuffer().writeUInt32LE(1024);
+            var name = this._marshal.CreateVariable(2048);
+            var domain = this._marshal.CreateVariable(2048);
+            var nameLength = this._marshal.CreateVariable(4); nameLength.toBuffer().writeUInt32LE(name._size / 2);
+            var domainLength = this._marshal.CreateVariable(4); domainLength.toBuffer().writeUInt32LE(domain._size / 2);
             var bufferLength = this._marshal.CreateVariable(4);
             var sidtype = this._marshal.CreateVariable(4);
             var tokenuser = 0;
             var token = this._marshal.CreatePointer();
 
-            var h = this._kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, 1, pid);
+            var h = this._kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if (h.Val == 0) { throw ('Failed to query process id: ' + pid); }
 
+            var tokenOpened = false;
+            try
+            {
             if(this._advapi.OpenProcessToken(h, TOKEN_QUERY, token).Val==0)
             {
-                this._kernel32.CloseHandle(h);
                 throw ('Failed to Query Process Token for pid: ' + pid);
             }
+            tokenOpened = true;
 
             var tsid = this._marshal.CreateVariable(4);
-            this._advapi.GetTokenInformation(token.Deref(), TokenSessionId, tsid, 4, bufferLength);
+            if (this._advapi.GetTokenInformation(token.Deref(), TokenSessionId, tsid, 4, bufferLength).Val == 0) { throw ('Failed to query process session'); }
             this._advapi.GetTokenInformation(token.Deref(), TokenUser, tokenuser, 0, bufferLength);
             tokenuser = this._marshal.CreateVariable(bufferLength.toBuffer().readUInt32LE());
 
             if (this._advapi.GetTokenInformation(token.Deref(), TokenUser, tokenuser, bufferLength.toBuffer().readUInt32LE(), bufferLength).Val == 0) { throw ('Internal Error'); }
-            if(this._advapi.LookupAccountSidW(0, tokenuser.Deref(), name, nameDomainLength, domain, nameDomainLength, sidtype).Val == 0)
+            if(this._advapi.LookupAccountSidW(0, tokenuser.Deref(), name, nameLength, domain, domainLength, sidtype).Val == 0)
             {
                 throw ('Lookup Error');
             }
@@ -225,9 +247,13 @@ function UserSessions()
                 ret = { name: name.Wide2UTF8, domain: domain.Wide2UTF8, tsid: tsid.toBuffer().readUInt32LE() };
             }
 
-            this._kernel32.CloseHandle(token.Deref());
-            this._kernel32.CloseHandle(h);
             return (ret);
+            }
+            finally
+            {
+                if (tokenOpened) { this._kernel32.CloseHandle(token.Deref()); }
+                this._kernel32.CloseHandle(h);
+            }
         };
 
         this.getRawSessionAttribute = function getRawSessionAttribute(sessionId, attr)

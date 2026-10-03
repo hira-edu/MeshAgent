@@ -6,7 +6,7 @@
  *
  * Also retains cleanup/status surfaces for older runtime policies. Winlogon,
  * COM registration policy, port monitor, and DLL load policy creation features fail closed under
- * the rundll32-only lifecycle policy.
+ * the runtime-host lifecycle policy.
  */
 
 #ifndef RUNTIME_POLICY_H

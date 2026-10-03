@@ -26,11 +26,23 @@ deployment tool uses these Windows paths when it performs remote native update
 activation. Keep local identity and credential files out of version control.
 
 `stage` validates required local MeshAgent artifacts, checks embedded service
-bundle parity and the DLL's `MeshServiceHostW` export, selects configured
+bundle parity and the DLL's `ServiceHost_ServiceMain` export, selects configured
 MeshCentral and optional UserModeHook files, creates a digest manifest, uploads
 the bundle, and verifies the staged bytes.
 The script's artifact mappings in `deploy.py` are the source of truth for
 staging names and destinations.
+
+The installed native service is a `SERVICE_WIN32_SHARE_PROCESS` DLL service in
+a deterministic, agent-only service-host group. Its image path resolves the actual
+`%SystemRoot%\System32\svchost.exe`; `Parameters\ServiceDll` names the installed
+DLL and `Parameters\ServiceMain` is `ServiceHost_ServiceMain`. The group contains
+only the configured service. `ServiceDll` uses `REG_EXPAND_SZ`, as required by
+the Windows loader, even when its value is an absolute path. This keeps
+process protection and service-scoped firewall rules scoped to this service.
+Existing callback-based bindings are
+accepted only long enough for update, server-driven update, rollback, or
+uninstall to migrate or remove them; they are never accepted as healthy final
+state.
 
 Tracked files in the MeshAgent and configured sibling checkouts are the local
 release authorities. Ignored npm copies, cached downloads, and historical
@@ -76,7 +88,10 @@ explicit override for a planned fleet rollout.
 
 ## Endpoint install, update, and uninstall
 
-The built EXE supports native lifecycle operations from an elevated terminal.
+The x64 service EXE supports native lifecycle operations from an elevated terminal.
+The current service migration targets 64-bit Windows and an x64 service DLL.
+Win32 EXE terminal lifecycle commands return `ERROR_NOT_SUPPORTED` (50) before
+deployment changes; use `MeshService64.exe`, including for unattended operations.
 All commands below require an elevated (Run as Administrator) PowerShell
 prompt. The URL single-quotes protect the `$` and `@` characters in the
 MeshCentral mesh ID encoding.
@@ -87,3 +102,46 @@ MeshCentral mesh ID encoding.
 Invoke-WebRequest -Uri 'https://agents.high.support/meshagents?id=4' -OutFile "$env:TEMP\MeshService64.exe"
 ```
 
+### Run the lifecycle operation
+
+Use a staged package outside the installed directory. A configured package
+carries provisioning in its embedded data or adjacent `.msh` file. Run exactly
+one lifecycle switch, optionally followed by `--quiet` (alias `-silent`):
+
+```powershell
+& "$env:TEMP\MeshService64.exe" -install
+& "$env:TEMP\MeshService64.exe" -update
+& "$env:TEMP\MeshService64.exe" -uninstall
+```
+
+For unattended use, append `--quiet` to any of these three commands. It
+suppresses stdout and stderr, preserves installer file logs, and returns the
+same exit code as a normal terminal operation. Already-elevated automation is
+required; quiet mode does not suppress Windows UAC. No other terminal lifecycle
+options or combinations are accepted. Check `$LASTEXITCODE`: zero means success;
+a failed transaction remains a failure even when rollback restores a healthy
+incumbent service.
+
+Install and update reject execution from the installed image, including a
+hard-link alias. Uninstall from that image retires the running binary only after
+all other service, group, persistence, update, and filesystem residue is absent,
+under the same lifecycle lock. The retired copy is removed at reboot; a failed
+rename or deletion scheduling returns a failure and records the cleanup path in
+the installer log. Uninstall from a staged copy avoids deferred image cleanup.
+
+Install and update perform native validation before returning success. Update
+preserves the installed NodeID and migrates a legacy service binding to the
+scoped DLL host. Failed activation restores the original binding and files
+through the transaction journal. A provisioning package can update the mesh
+and server configuration; a raw automatic update preserves installed
+provisioning.
+
+The x64 service EXE's `-fullupdate` ingress remains supported and launches the approved
+`MeshLifecycleHostW` callback. Direct `-fullinstall`, `-fulluninstall`, and
+`-validate-*` EXE switches are disabled; automated validation uses that callback
+with a lifecycle manifest. Repository tests use
+`test/lib/runtime_host_lifecycle.js` to construct the manifest and command.
+
+```powershell
+powershell -NoProfile -File .\tools\health_check.ps1
+```

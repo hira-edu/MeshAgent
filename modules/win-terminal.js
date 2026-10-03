@@ -24,14 +24,6 @@ var SHELL_AUTOMATION = 'powershell';
 var BRIDGE_CONNECT_TIMEOUT_MS = 15000;
 var BRIDGE_READY_MARKER = '\x1b]MeshConsoleBridgeReady\x07';
 
-function expandEnvironmentStrings(value)
-{
-    return (('' + value).replace(/%([^%]+)%/g, function replaceEnv(match, name) {
-        var replacement = process.env[name];
-        return (replacement == null ? match : replacement);
-    }));
-}
-
 function resolveServiceName()
 {
     var msh = null;
@@ -195,7 +187,11 @@ function ConsoleBridgeTerminal(shellName, cols, rows, targetSessionId, mode, tok
     stream._meshTerminalOutputBytes = 0;
     stream._meshTerminalHandshakeBytes = 0;
     this.stream = stream;
-    this.start();
+    // Let the caller attach error/close listeners before registry or policy
+    // validation can fail. Native pipe handles are still created before launch.
+    setImmediate(function startBridge() {
+        if (self.closed == false) { self.start(); }
+    });
     return (stream);
 }
 
@@ -457,7 +453,14 @@ ConsoleBridgeTerminal.prototype.start = function start()
             self.processOutputChunk(chunk);
         });
         socket.on('error', function onOutputError(error) { self.fail(error); });
-        socket.on('close', function onOutputClose() { self.finish(); });
+        socket.on('close', function onOutputClose() {
+            if (self.readyEmitted == false && self.closed == false)
+            {
+                self.fail(new Error('Windows terminal bridge output closed before ready handshake through MeshConsoleBridgeW.'));
+                return;
+            }
+            self.finish();
+        });
         self.checkBridgeConnected();
     });
     this.inputServer.on('error', function onServerError(error) { self.fail(error); });

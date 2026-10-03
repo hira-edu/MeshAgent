@@ -343,7 +343,7 @@ static int mock_snwprintf(wchar_t* out,size_t size,size_t trunc,const wchar_t* f
 #define ServiceDeploy_TransactionPathsSafe(...) TRUE
 #define ServiceBinding_SharedPayloadSupported(...) TRUE
 #define ServiceDeploy_TransactionDirectoryEmpty(...) (!unknownBackup)
-#define ServiceBinding_ImageSupported(c,e,d,l) (*(l)=FALSE,TRUE)
+#define ServiceBinding_ImageSupported(n,c,e,d,l) (*(l)=FALSE,TRUE)
 #define ServiceBinding_QueryExists(n,e) (*(e)=TRUE,TRUE)
 #define ServiceBinding_Capture(...) (capture_ok()?&binding:NULL)
 #define ServiceBinding_Free(...) ((void)0)

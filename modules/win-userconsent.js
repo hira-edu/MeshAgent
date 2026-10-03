@@ -639,14 +639,6 @@ function createLocal(title, caption, username, options)
 
 var userConsentBridgeCounter = 0;
 
-function expandEnvironmentStrings(value)
-{
-    return (('' + value).replace(/%([^%]+)%/g, function replaceEnv(match, name) {
-        var replacement = process.env[name];
-        return (replacement == null ? match : replacement);
-    }));
-}
-
 function resolveServiceName()
 {
     var msh = null;

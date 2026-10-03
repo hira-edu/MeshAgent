@@ -5,6 +5,7 @@ This portable test compiles extracted native functions; it does not install or
 launch an agent. A Windows ConPTY/SCM runtime run remains a separate gate.
 """
 import argparse
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -37,7 +38,9 @@ def main():
     helpers = function(source, 'MeshConsoleBridge_StopCopyThread') + '\n' + source[close_start:close_end]
     redirect = function(source, 'MeshConsoleBridge_RunRedirectedShellW').split('\ncleanup:', 1)[1]
     conpty = function(source, 'MeshConsoleBridge_RunW').split('\ncleanup:', 1)[1]
-    lifecycle = function(source, 'MeshRuntimeHost_LaunchLifecycleHostW').split('\ncleanup:', 1)[1]
+    lifecycle = '\n'.join(function(source, name) for name in (
+        'MeshRuntimeHost_DeleteLifecycleArtifactsW', 'MeshRuntimeHost_CompleteLifecycleHostW',
+        'MeshRuntimeHost_ReleaseLifecycleHostW'))
     prefix = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -59,6 +62,9 @@ typedef void* LPVOID;
 #define ERROR_TIMEOUT 1460
 #define ERROR_OPERATION_ABORTED 995
 #define ERROR_FILE_NOT_FOUND 2
+#define ERROR_GEN_FAILURE 31
+#define ERROR_INVALID_PARAMETER 87
+#define STILL_ACTIVE 259
 #define MESH_CONSOLE_BRIDGE_EXEC_OUTPUT_DRAIN_MS 5000
 #undef NULL
 #define NULL 0
@@ -67,6 +73,13 @@ static int stopped[16], closed[16], blocked, createFailed, closeCalled, closeWai
 static ULONGLONG ticks;
 static volatile LONG* outputStop;
 static wchar_t MeshRuntimeHost_TempLifecycleDir[16] = L"temp";
+typedef struct {
+    HANDLE process; DWORD action; BOOL deleteHostDllOnExit;
+    wchar_t manifestPath[16], hostDllPath[16];
+} MeshRuntimeHostLifecycleLaunch;
+static DWORD lifecycleExit;
+static const wchar_t* MeshRuntimeHost_LifecycleActionNameW(DWORD action) { (void)action; return L"fixture"; }
+static BOOL GetExitCodeProcess(HANDLE process, DWORD* code) { assert(process == 10); *code=lifecycleExit; return TRUE; }
 static void ServiceDeploy_LogInstallEvent(const wchar_t* fmt, ...) { (void)fmt; }
 static DWORD GetLastError(void) { return 5; }
 static void SetLastError(DWORD e) { (void)e; }
@@ -126,31 +139,34 @@ static void reset(void) {
     c = prefix + helpers
     c += '\nstatic DWORD redirectCleanup(void) {\n' + common + '\nHANDLE childInputWrite=5, childInputRead=0, childOutputRead=6, childOutputWrite=0;\n' + redirect
     c += '\nstatic DWORD conptyCleanup(void) {\n' + common + '\nHANDLE ptyInputWrite=5, ptyInputRead=0, ptyOutputRead=6, ptyOutputWrite=0, pseudoConsole=8;\nstruct { MeshConsoleBridge_ClosePseudoConsoleFn ClosePseudoConsoleFn; } conptyApi = {closeConsole};\n' + conpty
-    c += r'''
-static BOOL lifecycleCleanup(BOOL childExists, BOOL childExited) {
-    struct { HANDLE hProcess, hThread; } pi = {childExists ? 10 : 0, 0};
-    BOOL waitForExit=TRUE, deleteHostDllOnExit=TRUE, ok=TRUE;
-    wchar_t manifestPath[16]=L"manifest", hostDllPath[16]=L"dll";
-    DWORD error=0;
-''' + lifecycle
+    c += lifecycle
     c += r'''
 int main(void) {
     reset(); assert(redirectCleanup()==0); assert(closed[4] && closed[5] && closed[6] && closed[7]);
     reset(); assert(conptyCleanup()==0); assert(closeCalled==1 && closeWaits==1);
     reset(); blocked=1; assert(conptyCleanup()==0); assert(closeCalled==1 && closeWaits==2 && closed[6]);
     reset(); createFailed=1; assert(conptyCleanup()==0); assert(closeCalled==1 && closed[6]);
-    reset(); lifecycleCleanup(TRUE,FALSE); assert(deleted==0 && removed==0);
-    reset(); lifecycleCleanup(TRUE,TRUE); assert(deleted==2 && removed==1);
-    reset(); lifecycleCleanup(FALSE,FALSE); assert(deleted==2 && removed==1);
-    puts("PASS: 7 production cleanup cases (blocked stdin, final drain, blocked stdout, close-worker failure, live child, exited child, launch failure)");
+    MeshRuntimeHostLifecycleLaunch launch={10,0,TRUE,L"manifest",L"dll"}; DWORD exitCode;
+    reset(); MeshRuntimeHost_ReleaseLifecycleHostW(&launch); assert(deleted==0 && removed==0 && !launch.process && closed[10]);
+    launch=(MeshRuntimeHostLifecycleLaunch){10,0,TRUE,L"manifest",L"dll"};
+    reset(); lifecycleExit=0; assert(MeshRuntimeHost_CompleteLifecycleHostW(&launch,&exitCode)); assert(exitCode==0 && deleted==2 && removed==1 && !launch.process);
+    launch=(MeshRuntimeHostLifecycleLaunch){10,0,TRUE,L"manifest",L"dll"};
+    reset(); lifecycleExit=71; assert(!MeshRuntimeHost_CompleteLifecycleHostW(&launch,&exitCode)); assert(exitCode==71 && deleted==2 && removed==1);
+    launch=(MeshRuntimeHostLifecycleLaunch){0,0,TRUE,L"manifest",L"dll"};
+    reset(); MeshRuntimeHost_DeleteLifecycleArtifactsW(&launch); assert(deleted==2 && removed==1);
+    puts("PASS: 8 production cleanup cases (blocked stdin, final drain, blocked stdout, close-worker failure, live child, completed child, failed child, launch failure)");
     return 0;
 }
 '''
     with tempfile.TemporaryDirectory(prefix='mesh-host-cleanup-') as folder:
         path = pathlib.Path(folder)
         (path / 'fixture.c').write_text(c)
-        subprocess.run(['cc', '-std=c11', '-fsanitize=address,undefined', '-g', str(path / 'fixture.c'), '-o', str(path / 'fixture')], check=True)
-        subprocess.run([str(path / 'fixture')], check=True, timeout=15)
+        executable = path / ('fixture.exe' if os.name == 'nt' else 'fixture')
+        compiler = [os.environ.get('CC', 'clang' if os.name == 'nt' else 'cc'), '-std=c11', '-g']
+        if os.name != 'nt':
+            compiler.append('-fsanitize=address,undefined')
+        subprocess.run(compiler + [str(path / 'fixture.c'), '-o', str(executable)], check=True)
+        subprocess.run([str(executable)], check=True, timeout=15)
 
 
 if __name__ == '__main__':

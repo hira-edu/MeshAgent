@@ -122,8 +122,17 @@ function canonicalizeConsoleTarget(target)
     return (target);
 }
 
-// The SCM command is the authoritative installed runtime binding. Do not
-// recover a path from obsolete ServiceDll parameters or a different host.
+function validateServiceRuntimeDllPath(dll)
+{
+    if (typeof dll != 'string' || dll.length >= 260 || !/^[a-zA-Z]:\\[^,:<>|?*\x00-\x1f]+\.dll$/i.test(dll) ||
+        /(?:^|\\)\.{1,2}(?:\\|$)/.test(dll) || /[\\/]$/.test(dll) || dll.indexOf('/') >= 0 || dll.indexOf('\\\\') >= 0)
+    {
+        throw new Error('Service runtime DLL must be an absolute local DLL path.');
+    }
+    return dll;
+}
+
+// Legacy own-process binding, retained for update and uninstall callers.
 function serviceRuntimeDllFromCommand(command)
 {
     if (typeof command != 'string' || command.length > 1024) { throw new Error('Invalid service runtime command.'); }
@@ -133,25 +142,53 @@ function serviceRuntimeDllFromCommand(command)
     {
         throw new Error('Service runtime must use the canonical system rundll32 command.');
     }
-    var dll = match[2];
-    if (dll.length >= 260 || !/^[a-zA-Z]:\\[^,:<>|?*\x00-\x1f]+\.dll$/i.test(dll) ||
-        /(?:^|\\)\.{1,2}(?:\\|$)/.test(dll) || /[\\/]$/.test(dll) || dll.indexOf('/') >= 0 || dll.indexOf('\\\\') >= 0)
-    {
-        throw new Error('Service runtime DLL must be an absolute local DLL path.');
-    }
-    return dll;
+    return validateServiceRuntimeDllPath(match[2]);
 }
 
 function installedServiceRuntimeDll(serviceName)
 {
-    if (typeof serviceName != 'string' || serviceName.length == 0 || serviceName.length > 256 || /[\\\/\x00-\x1f]/.test(serviceName))
+    if (typeof serviceName != 'string' || serviceName.length == 0 || serviceName.length >= 256 || /[\\\/\x00-\x1f]/.test(serviceName))
     {
         throw new Error('Invalid service name.');
     }
     var registry = require('win-registry');
-    var command = registry.QueryKey(registry.HKEY.LocalMachine,
-        'SYSTEM\\CurrentControlSet\\Services\\' + serviceName, 'ImagePath');
-    return serviceRuntimeDllFromCommand(command);
+    var key = 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName;
+    var command = registry.QueryKey(registry.HKEY.LocalMachine, key, 'ImagePath');
+    if (typeof command != 'string' || command.length > 1024) { throw new Error('Invalid service runtime command.'); }
+    var binding = /^"([^"\r\n]+)" -k (MeshAgent-[0-9A-Fa-f]{16})$/.exec(command);
+    if (binding == null) { return serviceRuntimeDllFromCommand(command); }
+    if (binding[0].length != command.length ||
+        binding[1].toLowerCase() != system32Path('svchost.exe').toLowerCase() ||
+        registry.QueryKey(registry.HKEY.LocalMachine, key, 'Type') !== 32)
+    {
+        throw new Error('Invalid scoped service-host binding.');
+    }
+    // win-registry returns REG_MULTI_SZ as its typed raw UTF-16 buffer.
+    var members = registry.QueryKey(registry.HKEY.LocalMachine,
+        'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost', binding[2]);
+    if (members == null || members._type !== 7 || members.length !== (serviceName.length + 2) * 2)
+    {
+        throw new Error('Service-host group must contain only the requested service.');
+    }
+    // Duktape's Buffer.toString does not implement Node's utf16le decoder.
+    // Read every code unit, including both terminators, to reject extra members.
+    var memberText = '';
+    for (var i = 0; i < members.length; i += 2)
+    {
+        memberText += String.fromCharCode(members[i] | (members[i + 1] << 8));
+    }
+    if (memberText.toLowerCase() != serviceName.toLowerCase() + '\x00\x00')
+    {
+        throw new Error('Service-host group must contain only the requested service.');
+    }
+    var parameters = key + '\\Parameters';
+    if (registry.QueryKey(registry.HKEY.LocalMachine, parameters, 'ServiceMain') !== 'ServiceHost_ServiceMain' ||
+        registry.QueryKey(registry.HKEY.LocalMachine, parameters, 'ServiceDllUnloadOnStop') !== 1)
+    {
+        throw new Error('Invalid service DLL entry or unload policy.');
+    }
+    // The system service loader requires REG_EXPAND_SZ; registrations still use an absolute path.
+    return validateServiceRuntimeDllPath(registry.QueryKey(registry.HKEY.LocalMachine, parameters, 'ServiceDll'));
 }
 
 module.exports = {

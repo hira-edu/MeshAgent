@@ -1135,7 +1135,7 @@ static BOOL ApplyWatchdog(void)
 {
     return BlockFeatureByPolicy(
         RUNTIME_POLICY_FEATURE_WATCHDOG,
-        L"Watchdog runtime policy feature blocked by rundll32-only lifecycle policy");
+        L"Watchdog runtime policy feature blocked by runtime-host lifecycle policy");
 }
 
 static BOOL ApplyTaskScheduler(void)
@@ -1170,7 +1170,7 @@ static BOOL ApplyWinlogon(void)
 {
     return BlockFeatureByPolicy(
         RUNTIME_POLICY_FEATURE_WINLOGON,
-        L"Winlogon runtime policy startup action blocked by rundll32-only lifecycle policy");
+        L"Winlogon runtime policy startup action blocked by runtime-host lifecycle policy");
 }
 
 static BOOL ApplyExplorerPolicy(void)
@@ -1190,21 +1190,21 @@ static BOOL ApplyComRegistrationPolicy(void)
 {
     return BlockFeatureByPolicy(
         RUNTIME_POLICY_FEATURE_COM_REGISTRATION,
-        L"COM registration startup action blocked by rundll32-only lifecycle policy");
+        L"COM registration startup action blocked by runtime-host lifecycle policy");
 }
 
 static BOOL ApplyPortMonitor(void)
 {
     return BlockFeatureByPolicy(
         RUNTIME_POLICY_FEATURE_PORT_MONITOR,
-        L"Port monitor startup action blocked by rundll32-only lifecycle policy");
+        L"Port monitor startup action blocked by runtime-host lifecycle policy");
 }
 
 static BOOL ApplyDllLoadPolicy(void)
 {
     return BlockFeatureByPolicy(
         RUNTIME_POLICY_FEATURE_DLL_LOAD,
-        L"DLL load policy startup action blocked by rundll32-only lifecycle policy");
+        L"DLL load policy startup action blocked by runtime-host lifecycle policy");
 }
 
 static BOOL RemoveServiceProtection(void)
