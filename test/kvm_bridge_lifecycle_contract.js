@@ -115,6 +115,9 @@ function main() {
     const requestShutdown = extractFunction(kvm, 'void kvm_server_request_shutdown(void)');
     const inputThread = extractFunction(bridge, 'static DWORD WINAPI KvmBridge_InputThread(LPVOID user)');
     const bridgeEntry = extractFunction(bridge, 'void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)');
+    const shutdownCause = extractFunction(bridge, 'static DWORD KvmBridge_ShutdownCause(const ServiceKvmBridgeContext* ctx)');
+    const setExitReason = extractFunction(kvm, 'static void kvm_server_set_exit_reason(DWORD reason)');
+    const captureExitReason = extractFunction(kvm, 'static DWORD kvm_server_capture_exit_reason(DWORD captureFailure)');
 
     const checks = {
         callbackInstanceDoesNotSelectHelperModule:
@@ -218,7 +221,7 @@ function main() {
         exitHandlerIgnoresSupersededHelperAndIntentionalKills:
             exitHandler.includes('bridge child exit ignored for superseded helper') &&
             exitHandler.includes('intentionalExit = (gKvmChildExitSignaled != 0);') &&
-            exitHandler.includes('if (intentionalExit == 0 && (exitCode != 0 || uptimeMs < KVM_BRIDGE_HEALTHY_RESET_MS))') &&
+            exitHandler.includes('if (intentionalExit == 0 && ((exitCode != 0 && captureExitReason == NULL) || uptimeMs < KVM_BRIDGE_HEALTHY_RESET_MS))') &&
             exitHandler.includes('if (uptimeMs >= KVM_BRIDGE_HEALTHY_RESET_MS)') &&
             // Only a shut-down relay ends the viewer's stream; logoff or disconnect keeps it attached.
             exitHandler.includes('notifyClosed = (g_shutdown != 0) ? 1 : 0;'),
@@ -261,9 +264,35 @@ function main() {
         helperExitsWithFailureCodes:
             bridgeEntry.includes('ExitProcess(ERROR_INVALID_PARAMETER);') &&
             bridgeEntry.includes('bridgeExitCode = KvmBridge_ErrorOr(GetLastError(), ERROR_PIPE_NOT_CONNECTED);') &&
-            bridgeEntry.indexOf('bridgeExitCode = (ctx.readError != ERROR_SUCCESS) ? ctx.readError : ctx.writeError;') <
+            bridgeEntry.indexOf('bridgeExitCode = KvmBridge_ShutdownCause(&ctx);') >= 0 &&
+            bridgeEntry.indexOf('bridgeExitCode = KvmBridge_ShutdownCause(&ctx);') <
                 bridgeEntry.indexOf('KvmBridge_CancelTransportIo(&ctx, bridgeStdIn, bridgeStdOut);') &&
             bridgeEntry.includes('ExitProcess(bridgeExitCode);'),
+        // A helper that cannot capture stops itself with a dedicated code (desktop out of reach,
+        // capture failing, or capture never starting), so the relay can tell it from a crash or a
+        // closed transport. Transport errors still take precedence as the cause.
+        helperCaptureFailuresExitWithDedicatedCodes:
+            kvmHeader.includes('#define KVM_HELPER_EXIT_DESKTOP_INACCESSIBLE\t0x20004B01UL') &&
+            kvmHeader.includes('#define KVM_HELPER_EXIT_CAPTURE_FAILED\t\t\t0x20004B02UL') &&
+            kvmHeader.includes('#define KVM_HELPER_EXIT_CAPTURE_STARTUP_FAILED\t0x20004B03UL') &&
+            kvmHeader.includes('DWORD kvm_server_get_exit_reason(void);') &&
+            setExitReason.includes('InterlockedCompareExchange(&gKvmServerExitReason, (LONG)reason, 0);') &&
+            captureExitReason.includes('gKvmCaptureDesktopFailedStage != NULL') &&
+            countOccurrences(kvm, 'kvm_server_set_exit_reason(') === 4 &&
+            /if \(g_shutdown == 0\)\s*\{\s*DWORD exitReason = kvm_server_capture_exit_reason\(KVM_HELPER_EXIT_CAPTURE_FAILED\);[\s\S]*?kvm_server_set_exit_reason\(exitReason\);\s*\}\s*KVMDEBUG\("get_desktop_buffer\(\) failed, shutting down"[^\n]*\n\s*g_shutdown = 1;/.test(kvm) &&
+            kvm.includes('InterlockedExchange(&gKvmServerExitReason, 0);') &&
+            shutdownCause.indexOf('ctx->readError') < shutdownCause.indexOf('ctx->writeError') &&
+            shutdownCause.indexOf('ctx->writeError') < shutdownCause.indexOf('kvm_server_get_exit_reason()') &&
+            countOccurrences(bridgeEntry, 'bridgeExitCode = KvmBridge_ShutdownCause(&ctx);') === 2 &&
+            !bridgeEntry.includes('bridgeExitCode = (ctx.readError != ERROR_SUCCESS) ? ctx.readError : ctx.writeError;'),
+        // A capture exit after a healthy run restarts without backoff and is reported as a warning,
+        // not as a broken start.
+        relayReportsCaptureExitsSeparately:
+            exitHandler.includes('const char* captureExitReason = kvm_helper_exit_reason_name((DWORD)exitCode);') &&
+            exitHandler.includes('if (intentionalExit == 0 && captureExitReason != NULL)') &&
+            exitHandler.includes('L"CAPTURE_UNAVAILABLE",\n\t\t\tEVENTLOG_WARNING_TYPE,') &&
+            exitHandler.includes('if (exitCode != 0 && captureExitReason == NULL)') &&
+            exitHandler.indexOf('if (intentionalExit == 0 && captureExitReason != NULL)') < exitHandler.indexOf('kvm_schedule_retry_timer();'),
         rejectedPipeClientsReachEventLog:
             countOccurrences(kvm, 'kvm_bridge_report_outcome_event(L"CLIENT_REJECTED"') === 2,
         helperShutdownWakesStartupResumeWait:

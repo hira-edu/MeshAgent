@@ -3602,103 +3602,256 @@ static void kvm_server_prime_startup_geometry_if_needed()
 	}
 }
 
-void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *reserved)
+#define KVM_CAPTURE_FAILURE_TIMEOUT_MS 5000
+
+// Desktop binding is per thread: SetThreadDesktop moves only the calling thread, so the capture
+// thread and the thread that injects viewer input each track their own binding. Only the capture
+// thread's binding decides whether GDI capture can run (gKvmDesktopCaptureReady); a thread that
+// fails to move must never mark capture ready or unready for another thread.
+typedef struct KvmThreadDesktopState
 {
-	int x, y, w, h;
-	HDESK desktop;
-	HDESK desktop2;
-	char name[64];
-	char currentName[64] = { 0 };
+	const char* role;
+	HDESK ownedDesktop;			// handle this role opened and attached; closed once the thread moves on
+	int lastAccessible;			// -1 until the first bind, then the last traced accessibility
+	DWORD lastError;
+	const char* lastFailedStage;
+} KvmThreadDesktopState;
+
+typedef struct KvmDesktopBindResult
+{
+	int accessible;				// attached to the input desktop, or to the Default fallback
+	int switched;				// this bind moved the thread to another desktop
+	int explicitWinlogon;
+	const char* failedStage;	// first step that failed to reach the input desktop, NULL when none did
+	DWORD error;				// error of failedStage
+	char previousName[64];		// desktop the thread was attached to before the bind
+	char currentName[64];		// desktop the thread is attached to after the bind
+} KvmDesktopBindResult;
+
+static KvmThreadDesktopState gKvmCaptureDesktopState = { "capture", NULL, -1, ERROR_SUCCESS, NULL };
+static KvmThreadDesktopState gKvmInputDesktopState = { "input", NULL, -1, ERROR_SUCCESS, NULL };
+// Written by the capture thread from its latest bind and read by it when capture gives up.
+static const char* gKvmCaptureDesktopFailedStage = NULL;
+static DWORD gKvmCaptureDesktopError = ERROR_SUCCESS;
+static volatile LONG gKvmServerExitReason = 0;
+
+// Records why the capture loop stopped itself, for the bridge helper's exit code. The first reason
+// wins, and it is recorded before g_shutdown is set so the bridge, which polls g_shutdown, reads both.
+static void kvm_server_set_exit_reason(DWORD reason)
+{
+	InterlockedCompareExchange(&gKvmServerExitReason, (LONG)reason, 0);
+}
+
+DWORD kvm_server_get_exit_reason(void)
+{
+	return (DWORD)InterlockedCompareExchange(&gKvmServerExitReason, 0, 0);
+}
+
+const char* kvm_helper_exit_reason_name(DWORD exitCode)
+{
+	switch (exitCode)
+	{
+	case KVM_HELPER_EXIT_DESKTOP_INACCESSIBLE: return "desktop-inaccessible";
+	case KVM_HELPER_EXIT_CAPTURE_FAILED: return "capture-failed";
+	case KVM_HELPER_EXIT_CAPTURE_STARTUP_FAILED: return "capture-startup-failed";
+	default: return NULL;
+	}
+}
+
+// A capture failure counts as an unreachable desktop when the capture thread's latest bind could
+// not reach the input desktop, even if it kept a Default fallback; otherwise it is captureFailure.
+static DWORD kvm_server_capture_exit_reason(DWORD captureFailure)
+{
+	return (gKvmDesktopCaptureReady == 0 || gKvmCaptureDesktopFailedStage != NULL) ? KVM_HELPER_EXIT_DESKTOP_INACCESSIBLE : captureFailure;
+}
+
+static void kvm_thread_desktop_state_reset(KvmThreadDesktopState* state)
+{
+	// A new capture thread starts after the previous one finished, so the handle the previous
+	// thread attached is released. CloseDesktop fails while a thread still uses the handle.
+	if (state->ownedDesktop != NULL && CloseDesktop(state->ownedDesktop) == 0) { KVMDEBUG("CloseDesktop(StaleDesktop) Error", 0); }
+	state->ownedDesktop = NULL;
+	state->lastAccessible = -1;
+	state->lastError = ERROR_SUCCESS;
+	state->lastFailedStage = NULL;
+}
+
+static void kvm_desktop_bind_note_failure(KvmDesktopBindResult* result, const char* stage, DWORD error)
+{
+	if (result->failedStage != NULL) { return; }
+	result->failedStage = stage;
+	result->error = (error != ERROR_SUCCESS) ? error : ERROR_GEN_FAILURE;
+}
+
+static int kvm_read_thread_desktop_name(char* name, DWORD nameLen)
+{
+	// GetThreadDesktop returns a borrowed handle; it is never closed.
+	HDESK threadDesktop = GetThreadDesktop(GetCurrentThreadId());
+
+	name[0] = 0;
+	if (threadDesktop == NULL) { KVMDEBUG("GetThreadDesktop Error", 0); return 0; }
+	if (GetUserObjectInformationA(threadDesktop, UOI_NAME, name, nameLen - 1, NULL) == 0) { name[0] = 0; return 0; }
+	name[nameLen - 1] = 0;
+	return 1;
+}
+
+// Attaches the calling thread to the desktop that currently receives input (WinSta0\Winlogon while a
+// UAC prompt or the lock screen is up). The result says whether the thread is on a desktop it can
+// use and, separately, whether reaching the input desktop failed.
+static void kvm_bind_thread_to_input_desktop(KvmThreadDesktopState* state, KvmDesktopBindResult* result)
+{
+	HDESK desktop = NULL;
 	char targetName[64] = { 0 };
 	int haveCurrentName = 0;
 	int haveTargetName = 0;
-	int desktopSwitchEvent = KVM_ConsumeDesktopSwitchEvent();
-	int desktopNameChanged = 0;
-	int explicitWinlogon = 0;
-	int desktopAccessReady = 1;
+	int forceDefault = (InterlockedCompareExchange(&gKvmForceDefaultDesktop, 0, 0) != 0);
 	DWORD windowStationError = ERROR_SUCCESS;
 
-	// KVMDEBUG("CheckDesktopSwitch", checkres);
-
-	// Check desktop switch
-	if ((desktop2 = GetThreadDesktop(GetCurrentThreadId())) == NULL) { KVMDEBUG("GetThreadDesktop Error", 0); } // CloseDesktop() is not needed
-	if (desktop2 != NULL && GetUserObjectInformationA(desktop2, UOI_NAME, currentName, 63, 0))
-	{
-		currentName[63] = 0;
-		haveCurrentName = 1;
-	}
+	memset(result, 0, sizeof(KvmDesktopBindResult));
+	haveCurrentName = kvm_read_thread_desktop_name(result->previousName, (DWORD)sizeof(result->previousName));
 	if (!kvm_bind_current_process_to_interactive_window_station(&windowStationError))
 	{
-		kvm_trace_startupf("KVM startup: SetProcessWindowStation(WinSta0) failed error=%lu", windowStationError);
+		kvm_trace_startupf("KVM desktop[%s]: SetProcessWindowStation(WinSta0) failed error=%lu", state->role, windowStationError);
 	}
-	if (InterlockedCompareExchange(&gKvmForceDefaultDesktop, 0, 0) != 0)
+	if (forceDefault)
 	{
 		desktop = OpenDesktopW(L"Default", 0, FALSE, kvm_desktop_access_mask());
-		if (desktop == NULL) { KVMDEBUG("OpenDesktop(Default) Error", 0); }
+		if (desktop == NULL) { kvm_desktop_bind_note_failure(result, "OpenDesktop(Default)", GetLastError()); }
 	}
 	else
 	{
 		desktop = OpenInputDesktop(0, FALSE, kvm_desktop_access_mask());
 		if (desktop == NULL)
 		{
-			DWORD inputDesktopError = GetLastError();
-			KVMDEBUG("OpenInputDesktop Error", 0);
-			kvm_trace_startupf("KVM startup: OpenInputDesktop failed error=%lu", inputDesktopError);
+			// Keep the thread on a valid desktop by falling back to Default, but record that the
+			// input desktop itself (for example the secure desktop) was out of reach.
+			kvm_desktop_bind_note_failure(result, "OpenInputDesktop", GetLastError());
 			desktop = OpenDesktopW(L"Default", 0, FALSE, kvm_desktop_access_mask());
-			if (desktop != NULL)
-			{
-				kvm_trace_startupf("KVM startup: falling back to WinSta0\\\\Default after OpenInputDesktop failure");
-			}
-			else
-			{
-				kvm_trace_startupf("KVM startup: OpenDesktop(Default) fallback failed error=%lu", GetLastError());
-			}
 		}
-	}
-	if (desktop == NULL)
-	{
-		desktopAccessReady = 0;
 	}
 
 	if (desktop != NULL && GetUserObjectInformationA(desktop, UOI_NAME, targetName, 63, 0))
 	{
 		targetName[63] = 0;
 		haveTargetName = 1;
-		if (InterlockedCompareExchange(&gKvmForceDefaultDesktop, 0, 0) == 0 && _stricmp(targetName, "Winlogon") == 0)
+		if (!forceDefault && _stricmp(targetName, "Winlogon") == 0)
 		{
+			// Reopen the secure desktop by name with the full access mask before attaching to it.
 			HDESK secureDesktop = OpenDesktopW(L"Winlogon", 0, FALSE, kvm_desktop_access_mask());
-			explicitWinlogon = 1;
+			result->explicitWinlogon = 1;
 			if (secureDesktop != NULL)
 			{
 				if (CloseDesktop(desktop) == 0) { KVMDEBUG("CloseDesktop(OpenInputDesktop) Error", 0); }
 				desktop = secureDesktop;
-				strncpy_s(targetName, sizeof(targetName), "Winlogon", _TRUNCATE);
 			}
 		}
 	}
 
-	if (desktop != NULL && haveCurrentName != 0 && haveTargetName != 0 && _stricmp(currentName, targetName) == 0)
+	if (desktop == NULL)
 	{
-		if (CloseDesktop(desktop) == 0) { KVMDEBUG("CloseDesktop(UnchangedDesktop) Error", 0); }
-		desktop = desktop2;
+		result->accessible = 0;
 	}
-	else if (desktop != NULL && SetThreadDesktop(desktop) == 0)
+	else if (haveCurrentName != 0 && haveTargetName != 0 && _stricmp(result->previousName, targetName) == 0)
 	{
-		kvm_trace_startupf("KVM startup: SetThreadDesktop failed error=%lu desktop=%p", GetLastError(), desktop);
+		// Already attached to the target: close only the handle opened for this poll.
+		if (CloseDesktop(desktop) == 0) { KVMDEBUG("CloseDesktop(UnchangedDesktop) Error", 0); }
+		result->accessible = 1;
+	}
+	else if (SetThreadDesktop(desktop) == 0)
+	{
+		// ERROR_BUSY when the thread owns windows or hooks, ERROR_ACCESS_DENIED when the handle
+		// lacks access. The thread stays on its previous desktop.
+		kvm_desktop_bind_note_failure(result, "SetThreadDesktop", GetLastError());
 		if (CloseDesktop(desktop) == 0) { KVMDEBUG("CloseDesktop1 Error", 0); }
-		desktop = desktop2;
-		desktopAccessReady = 0;
+		result->accessible = 0;
 	}
 	else
 	{
-		desktop = desktop2;
+		// The thread now uses this handle. Release the one this role attached before, which no
+		// thread uses any more; the process's startup desktop handle is not ours and stays open.
+		if (state->ownedDesktop != NULL && state->ownedDesktop != desktop && CloseDesktop(state->ownedDesktop) == 0)
+		{
+			KVMDEBUG("CloseDesktop(PreviousDesktop) Error", 0);
+		}
+		state->ownedDesktop = desktop;
+		result->switched = 1;
+		result->accessible = 1;
 	}
-	gKvmDesktopCaptureReady = desktopAccessReady;
+
+	// Name the desktop the thread is on now, so the poll that moved it also sees the switch.
+	(void)kvm_read_thread_desktop_name(result->currentName, (DWORD)sizeof(result->currentName));
+}
+
+static void kvm_trace_desktop_bind(KvmThreadDesktopState* state, const KvmDesktopBindResult* result)
+{
+	const char* currentName = result->currentName[0] != 0 ? result->currentName : "(unknown)";
+
+	if (result->switched != 0)
+	{
+		kvm_trace_startupf("KVM desktop[%s]: thread moved from '%s' to '%s' explicitWinlogon=%d",
+			state->role,
+			result->previousName[0] != 0 ? result->previousName : "(unknown)",
+			currentName,
+			result->explicitWinlogon);
+	}
+	// Trace changes only: the capture thread binds every frame and the input thread on every packet.
+	if (result->accessible == state->lastAccessible &&
+		result->failedStage == state->lastFailedStage &&
+		result->error == state->lastError)
+	{
+		return;
+	}
+	if (result->failedStage != NULL)
+	{
+		kvm_trace_startupf("KVM desktop[%s]: %s failed error=%lu; thread desktop='%s' accessible=%d",
+			state->role,
+			result->failedStage,
+			(unsigned long)result->error,
+			currentName,
+			result->accessible);
+	}
+	else if (state->lastAccessible >= 0)
+	{
+		kvm_trace_startupf("KVM desktop[%s]: input desktop reachable again; thread desktop='%s'", state->role, currentName);
+	}
+	state->lastAccessible = result->accessible;
+	state->lastFailedStage = result->failedStage;
+	state->lastError = result->error;
+}
+
+// Attaches the thread that injects viewer input to the current input desktop: SendInput reaches
+// only the desktop of the calling thread. Capture readiness is left alone; it belongs to the
+// capture thread, and this thread failing to move says nothing about capture.
+static void kvm_server_bind_input_thread_desktop(void)
+{
+	KvmDesktopBindResult bind;
+
+	kvm_bind_thread_to_input_desktop(&gKvmInputDesktopState, &bind);
+	kvm_trace_desktop_bind(&gKvmInputDesktopState, &bind);
+}
+
+// Runs on the capture thread only; the input path binds its own thread with
+// kvm_server_bind_input_thread_desktop().
+void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *reserved)
+{
+	int x, y, w, h;
+	char name[64];
+	int desktopSwitchEvent = KVM_ConsumeDesktopSwitchEvent();
+	int desktopNameChanged = 0;
+	KvmDesktopBindResult bind;
+
+	// KVMDEBUG("CheckDesktopSwitch", checkres);
+
+	kvm_bind_thread_to_input_desktop(&gKvmCaptureDesktopState, &bind);
+	kvm_trace_desktop_bind(&gKvmCaptureDesktopState, &bind);
+	gKvmCaptureDesktopFailedStage = bind.failedStage;
+	gKvmCaptureDesktopError = bind.error;
+	gKvmDesktopCaptureReady = bind.accessible;
 
 	// Check desktop name switch
-	if (GetUserObjectInformationA(desktop, UOI_NAME, name, 63, 0))
+	if (bind.currentName[0] != 0)
 	{
-		name[63] = 0;
+		strncpy_s(name, sizeof(name), bind.currentName, _TRUNCATE);
 		strncpy_s(gKvmCurrentDesktopName, sizeof(gKvmCurrentDesktopName), name, _TRUNCATE);
 
 		//ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: name = %s", name);
@@ -3725,9 +3878,9 @@ void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *r
 		{
 			ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
 				"KVM [SLAVE]: desktop switch old=%s new=%s explicitWinlogon=%d event=%d",
-				haveCurrentName != 0 ? currentName : "(unknown)",
+				bind.previousName[0] != 0 ? bind.previousName : "(unknown)",
 				name,
-				explicitWinlogon,
+				bind.explicitWinlogon,
 				desktopSwitchEvent);
 			kvm_server_SetResolution(writeHandler, reserved);
 			kvm_send_display_list(writeHandler, reserved);
@@ -3858,7 +4011,7 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 
 	ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_2, "KVM [SLAVE]: Handle Input [Len = %d]", blocklen);
 	// KVMDEBUG("kvm_server_inputdata", blocklen);
-	CheckDesktopSwitch(0, writeHandler, reserved);
+	kvm_server_bind_input_thread_desktop();
 
 	type = ntohs(((unsigned short*)(block))[0]);
 	size = ntohs(((unsigned short*)(block))[1]);
@@ -4520,6 +4673,8 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	if (height >= 200 && ThreadRunning != 0) { kvm_trace_startupf("kvm_server_mainloop_ex ABORT ThreadRunning stuck"); return 0; }
 	ThreadRunning = 1;
 	g_shutdown = 0;
+	InterlockedExchange(&gKvmServerExitReason, 0);
+	kvm_thread_desktop_state_reset(&gKvmCaptureDesktopState);
 
 		g_pause = 0;
 		g_remotepause = ((int*)&(((void**)parm)[2]))[0];
@@ -4569,6 +4724,7 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 			SCREEN_WIDTH,
 			SCREEN_HEIGHT);
 		KVMDEBUG("kvm_server_mainloop / initialize_gdiplus failed", (int)GetCurrentThreadId());
+		kvm_server_set_exit_reason(kvm_server_capture_exit_reason(KVM_HELPER_EXIT_CAPTURE_STARTUP_FAILED));
 		goto cleanup;
 	}
 #ifdef _WINSERVICE
@@ -4607,6 +4763,8 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 			VSCREEN_WIDTH,
 			VSCREEN_HEIGHT);
 		KVMDEBUG("kvm_server_mainloop / invalid startup resolution", (int)GetCurrentThreadId());
+		// A requested stop also skips the resolution refresh; only a real failure gets a reason.
+		if (g_shutdown == 0) { kvm_server_set_exit_reason(kvm_server_capture_exit_reason(KVM_HELPER_EXIT_CAPTURE_STARTUP_FAILED)); }
 		g_shutdown = 1;
 		goto cleanup;
 	}
@@ -4772,10 +4930,26 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 			}
 #endif
 			CheckDesktopSwitch(1, writeHandler, reserved);
-			if ((now - captureFailureStartTick) < 5000)
+			if ((now - captureFailureStartTick) < KVM_CAPTURE_FAILURE_TIMEOUT_MS)
 			{
 				Sleep(100);
 				continue;
+			}
+			// get_desktop_buffer() also fails once a stop was requested; only a capture that kept
+			// failing on its own gets a reason, which becomes the bridge helper's exit code.
+			if (g_shutdown == 0)
+			{
+				DWORD exitReason = kvm_server_capture_exit_reason(KVM_HELPER_EXIT_CAPTURE_FAILED);
+				kvm_trace_startupf("KVM capture: no frame for %llu ms (failures=%d desktop='%s' desktopReady=%d desktopStage=%s desktopError=%lu); stopping reason=%s exitCode=0x%08lX",
+					(unsigned long long)(now - captureFailureStartTick),
+					captureFailureCount,
+					gKvmCurrentDesktopName[0] != 0 ? gKvmCurrentDesktopName : "unknown",
+					gKvmDesktopCaptureReady,
+					gKvmCaptureDesktopFailedStage != NULL ? gKvmCaptureDesktopFailedStage : "none",
+					(unsigned long)gKvmCaptureDesktopError,
+					kvm_helper_exit_reason_name(exitReason),
+					(unsigned long)exitReason);
+				kvm_server_set_exit_reason(exitReason);
 			}
 			KVMDEBUG("get_desktop_buffer() failed, shutting down", (int)GetCurrentThreadId());
 			g_shutdown = 1;
@@ -4975,6 +5149,8 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	int intentionalExit = 0;
 	ULONGLONG uptimeMs = 0;
 	DWORD childPid = ILibProcessPipe_Process_GetPID(sender);
+	// Non-NULL when the helper stopped itself because it could not capture the input desktop.
+	const char* captureExitReason = kvm_helper_exit_reason_name((DWORD)exitCode);
 
 	if (processUser != NULL)
 	{
@@ -5050,11 +5226,38 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 		kvm_record_healthy_output();
 		g_restartcount = 1;
 	}
-	if (intentionalExit == 0 && (exitCode != 0 || uptimeMs < KVM_BRIDGE_HEALTHY_RESET_MS))
+	if (intentionalExit == 0 && captureExitReason != NULL)
+	{
+		// The helper could not capture the input desktop (for example a secure desktop it cannot
+		// open) and stopped itself. Like a clean exit, this is a failed start only when the helper
+		// was not up long enough to be healthy: one that loses the desktop after a healthy run is
+		// replaced without backoff, and the replacement starts on the desktop that now has input.
+		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
+			"Agent KVM: KVM Child Process(%u) stopped itself: %s (exitCode=0x%08X, uptimeMs=%llu)",
+			(unsigned int)childPid,
+			captureExitReason,
+			(unsigned int)exitCode,
+			(unsigned long long)uptimeMs);
+		kvm_trace_startupf("bridge child stopped itself reason=%s pid=%u exitCode=0x%08X uptimeMs=%llu",
+			captureExitReason,
+			(unsigned int)childPid,
+			(unsigned int)exitCode,
+			(unsigned long long)uptimeMs);
+#ifdef _WINSERVICE
+		kvm_bridge_report_outcome_event(
+			L"CAPTURE_UNAVAILABLE",
+			EVENTLOG_WARNING_TYPE,
+			childPid,
+			(DWORD)exitCode,
+			exePath,
+			(ILibProcessPipe_SpawnTypes)(gKvmLastSuccessfulSpawnType != 0 ? gKvmLastSuccessfulSpawnType : (DWORD)gProcessSpawnType));
+#endif
+	}
+	if (intentionalExit == 0 && ((exitCode != 0 && captureExitReason == NULL) || uptimeMs < KVM_BRIDGE_HEALTHY_RESET_MS))
 	{
 		kvm_record_spawn_failure(exitCode != 0 ? (DWORD)exitCode : ERROR_GEN_FAILURE, 7, (DWORD)gProcessSpawnType);
 #ifdef _WINSERVICE
-		if (exitCode != 0)
+		if (exitCode != 0 && captureExitReason == NULL)
 		{
 			kvm_bridge_report_outcome_event(
 				exitCode == ERROR_BAD_EXE_FORMAT ? L"DLL_LOAD_FAILURE" : L"EXIT_FAILURE",

@@ -158,9 +158,8 @@ function main() {
 			!kvmSource.includes('ILIBCRITICALEXIT(254)'),
 		slaveSkipsCaptureWhenDesktopUnavailable:
 			kvmSource.includes('int gKvmDesktopCaptureReady = 1;') &&
-			kvmSource.includes('int desktopAccessReady = 1;') &&
-			kvmSource.includes('desktopAccessReady = 0;') &&
-			kvmSource.includes('gKvmDesktopCaptureReady = desktopAccessReady;') &&
+			kvmSource.includes('result->accessible = 0;') &&
+			kvmSource.includes('gKvmDesktopCaptureReady = bind.accessible;') &&
 			tileSource.includes('extern int gKvmDesktopCaptureReady;') &&
 			tileSource.includes('if (!gKvmDesktopCaptureReady)') &&
 			tileSource.includes('KVM capture: target desktop is not accessible; skipping GDI capture'),

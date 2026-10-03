@@ -560,6 +560,22 @@ static DWORD KvmBridge_ErrorOr(DWORD errorCode, DWORD fallback)
     return (errorCode != ERROR_SUCCESS) ? errorCode : fallback;
 }
 
+// The cause of a helper shutdown, which becomes its exit code: a transport error first, then the
+// reason the capture loop recorded when it stopped itself (KVM_HELPER_EXIT_*), or ERROR_SUCCESS for
+// a requested stop.
+static DWORD KvmBridge_ShutdownCause(const ServiceKvmBridgeContext* ctx)
+{
+    if (ctx->readError != ERROR_SUCCESS) { return ctx->readError; }
+    if (ctx->writeError != ERROR_SUCCESS) { return ctx->writeError; }
+    return kvm_server_get_exit_reason();
+}
+
+static const char* KvmBridge_ExitReasonLabel(DWORD exitCode)
+{
+    const char* name = kvm_helper_exit_reason_name(exitCode);
+    return (name != NULL) ? name : "none";
+}
+
 void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
 {
     wchar_t controlPipeName[MAX_PATH * 4] = {0};
@@ -756,7 +772,7 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
                 ServiceHost_LogLine(L"KvmSessionBridgeW mainloop exited (threadExitCode=%lu readError=%lu writeError=%lu)", exitCode, ctx.readError, ctx.writeError);
                 if (shutdownObservedTickMs == 0)
                 {
-                    bridgeExitCode = (ctx.readError != ERROR_SUCCESS) ? ctx.readError : ctx.writeError;
+                    bridgeExitCode = KvmBridge_ShutdownCause(&ctx);
                 }
                 break;
             }
@@ -797,8 +813,8 @@ void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine,
                 {
                     shutdownObservedTickMs = GetTickCount64();
                     // Errors after this point come from cancelling I/O below, not from the cause.
-                    bridgeExitCode = (ctx.readError != ERROR_SUCCESS) ? ctx.readError : ctx.writeError;
-                    ServiceHost_LogLine(L"KvmSessionBridgeW observed shutdown (cause=%lu); cancelling bridge transport I/O", bridgeExitCode);
+                    bridgeExitCode = KvmBridge_ShutdownCause(&ctx);
+                    ServiceHost_LogLine(L"KvmSessionBridgeW observed shutdown (cause=%lu reason=%hs); cancelling bridge transport I/O", bridgeExitCode, KvmBridge_ExitReasonLabel(bridgeExitCode));
                     // Whatever set g_shutdown, also release a mainloop parked in
                     // its startup resume wait so it exits within the grace period.
                     kvm_server_request_shutdown();
@@ -848,7 +864,7 @@ cleanup:
     if (bridgeStdIn != NULL) { CloseHandle(bridgeStdIn); }
     if (bridgeExitCode != ERROR_SUCCESS)
     {
-        ServiceHost_LogLine(L"KvmSessionBridgeW exiting with code %lu", bridgeExitCode);
+        ServiceHost_LogLine(L"KvmSessionBridgeW exiting with code %lu (0x%08lX reason=%hs)", bridgeExitCode, bridgeExitCode, KvmBridge_ExitReasonLabel(bridgeExitCode));
         ExitProcess(bridgeExitCode);
     }
 }

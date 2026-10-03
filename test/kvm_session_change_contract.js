@@ -170,7 +170,7 @@ function main() {
         // No restart limit while the viewer is attached; short-lived exits back off, a stable run resets.
         relayRestartsWithoutLimitAndBacksOffShortLivedExits:
             exitHandlerBody.includes('if (uptimeMs >= KVM_BRIDGE_HEALTHY_RESET_MS)') &&
-            exitHandlerBody.includes('if (intentionalExit == 0 && (exitCode != 0 || uptimeMs < KVM_BRIDGE_HEALTHY_RESET_MS))') &&
+            exitHandlerBody.includes('if (intentionalExit == 0 && ((exitCode != 0 && captureExitReason == NULL) || uptimeMs < KVM_BRIDGE_HEALTHY_RESET_MS))') &&
             exitHandlerBody.includes('kvm_schedule_retry_timer();') &&
             !kvmSource.includes('KVM_RESTART_LIMIT') &&
             !retryTimerBody.includes('closeWriteHandler'),

@@ -42,6 +42,14 @@ int kvm_get_helper_linger_seconds(void);
 void kvm_relay_shutdown_all_parked_helpers(void);
 void KVM_TraceStartupF(const char* format, ...);
 #ifdef WIN32
+// Exit codes of a bridge helper that stops itself because it cannot capture the screen. They set
+// the application bit (0x20000000), so they never collide with Win32 errors, NTSTATUS crash codes,
+// or the transport errors the helper reports for its pipes.
+#define KVM_HELPER_EXIT_DESKTOP_INACCESSIBLE	0x20004B01UL	// the input desktop could not be opened or attached
+#define KVM_HELPER_EXIT_CAPTURE_FAILED			0x20004B02UL	// attached to the input desktop, but GDI capture kept failing
+#define KVM_HELPER_EXIT_CAPTURE_STARTUP_FAILED	0x20004B03UL	// capture could not be initialized on the input desktop
+DWORD kvm_server_get_exit_reason(void);
+const char* kvm_helper_exit_reason_name(DWORD exitCode);
 int kvm_bridge_debug_get_parked_context_count(void);
 typedef struct KvmBridgeDebugSnapshot
 {

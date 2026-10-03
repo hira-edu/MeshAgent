@@ -85,13 +85,19 @@ function main() {
     const kvmBindBody = extractFunction(kvmSource, 'static BOOL kvm_bind_current_process_to_interactive_window_station(DWORD* errorOut)');
     const serviceBindBody = extractFunction(serviceMainSource, 'static BOOL MeshService_BindCurrentProcessToInteractiveWindowStation(DWORD* errorOut)');
     const checkDesktopSwitchBody = extractFunction(kvmSource, 'void CheckDesktopSwitch(int checkres, ILibKVM_WriteHandler writeHandler, void *reserved)');
+    const bindBody = extractFunction(kvmSource, 'static void kvm_bind_thread_to_input_desktop(KvmThreadDesktopState* state, KvmDesktopBindResult* result)');
+    const readThreadDesktopNameBody = extractFunction(kvmSource, 'static int kvm_read_thread_desktop_name(char* name, DWORD nameLen)');
+    const inputBindBody = extractFunction(kvmSource, 'static void kvm_server_bind_input_thread_desktop(void)');
+    const traceBindBody = extractFunction(kvmSource, 'static void kvm_trace_desktop_bind(KvmThreadDesktopState* state, const KvmDesktopBindResult* result)');
+    const inputDataBody = extractFunction(kvmSource, 'int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHandler, void *reserved)');
     const setResolutionBody = extractFunction(kvmSource, 'void kvm_server_SetResolution(ILibKVM_WriteHandler writeHandler, void *reserved)');
     const ensureTileGeometryBody = extractFunction(kvmSource, 'static void kvm_server_ensure_tile_geometry()');
     const primeStartupGeometryBody = extractFunction(kvmSource, 'static void kvm_server_prime_startup_geometry_if_needed()');
     const initializeGdiplusBody = extractFunction(tileSource, 'short initialize_gdiplus()');
-    const winlogonReopenIndex = checkDesktopSwitchBody.indexOf('HDESK secureDesktop = OpenDesktopW(L"Winlogon"');
-    const unchangedDesktopIndex = checkDesktopSwitchBody.indexOf('_stricmp(currentName, targetName) == 0');
-    const setThreadDesktopIndex = checkDesktopSwitchBody.indexOf('SetThreadDesktop(desktop)');
+    const winlogonReopenIndex = bindBody.indexOf('HDESK secureDesktop = OpenDesktopW(L"Winlogon"');
+    const unchangedDesktopIndex = bindBody.indexOf('_stricmp(result->previousName, targetName) == 0');
+    const setThreadDesktopIndex = bindBody.indexOf('SetThreadDesktop(desktop)');
+    const captureReadyAssignments = (kvmSource.match(/\bgKvmDesktopCaptureReady\s*=[^=]/g) || []).length;
     const setResolutionEnsureIndex = setResolutionBody.indexOf('kvm_server_ensure_tile_geometry();');
     const setResolutionPrimeIndex = setResolutionBody.indexOf('kvm_server_prime_startup_geometry_if_needed();');
     const setResolutionInvalidGeometryIndex = setResolutionBody.indexOf('if (SCREEN_WIDTH <= 0 || SCREEN_HEIGHT <= 0)');
@@ -129,27 +135,55 @@ function main() {
         kvmBindClosesOpenedWindowStationOnlyOnFailure:
             countOccurrences(kvmBindBody, 'CloseWindowStation(windowStation)') === 1 &&
             kvmBindBody.includes('if (!ok) { CloseWindowStation(windowStation); }'),
-        kvmCheckDesktopSwitchIsOnlyKvmStationBindCaller:
-            countOccurrences(kvmSource, 'kvm_bind_current_process_to_interactive_window_station(&windowStationError)') === 1,
+        kvmDesktopBindIsOnlyKvmStationBindCaller:
+            countOccurrences(kvmSource, 'kvm_bind_current_process_to_interactive_window_station(&windowStationError)') === 1 &&
+            bindBody.includes('kvm_bind_current_process_to_interactive_window_station(&windowStationError)'),
+        // The capture thread runs CheckDesktopSwitch; the input path only moves its own thread.
         kvmCheckDesktopSwitchStillCoversKnownCallSurface:
-            countOccurrences(kvmSource, 'CheckDesktopSwitch(') === 6 &&
+            countOccurrences(kvmSource, 'CheckDesktopSwitch(') === 5 &&
             kvmSource.includes('CheckDesktopSwitch(0, writeHandler, reserved);') &&
-            kvmSource.includes('CheckDesktopSwitch(1, writeHandler, reserved);'),
+            kvmSource.includes('CheckDesktopSwitch(1, writeHandler, reserved);') &&
+            !inputDataBody.includes('CheckDesktopSwitch(') &&
+            inputDataBody.includes('kvm_server_bind_input_thread_desktop();'),
+        // SetThreadDesktop moves only the calling thread, so capture readiness is decided by the
+        // capture thread alone; the input thread's binding never marks capture ready or unready.
+        kvmCaptureReadinessOwnedByCaptureThread:
+            captureReadyAssignments === 2 &&
+            kvmSource.includes('int gKvmDesktopCaptureReady = 1;') &&
+            checkDesktopSwitchBody.includes('kvm_bind_thread_to_input_desktop(&gKvmCaptureDesktopState, &bind);') &&
+            checkDesktopSwitchBody.includes('gKvmDesktopCaptureReady = bind.accessible;') &&
+            inputBindBody.includes('kvm_bind_thread_to_input_desktop(&gKvmInputDesktopState, &bind);') &&
+            !inputBindBody.includes('gKvmDesktopCaptureReady') &&
+            !bindBody.includes('gKvmDesktopCaptureReady'),
         kvmDoesNotCloseBorrowedThreadDesktopHandle:
-            !kvmSource.includes('CloseDesktop(desktop2)'),
+            !kvmSource.includes('CloseDesktop(desktop2)') &&
+            !kvmSource.includes('CloseDesktop(threadDesktop)') &&
+            readThreadDesktopNameBody.includes('HDESK threadDesktop = GetThreadDesktop(GetCurrentThreadId());'),
+        // Each role closes only the handle it opened and attached, once its thread has moved on.
+        kvmReleasesOnlyDesktopHandlesItAttached:
+            bindBody.includes('state->ownedDesktop = desktop;') &&
+            bindBody.includes('state->ownedDesktop != desktop && CloseDesktop(state->ownedDesktop) == 0') &&
+            bindBody.indexOf('SetThreadDesktop(desktop) == 0') < bindBody.indexOf('state->ownedDesktop = desktop;'),
         kvmReadsCurrentAndTargetDesktopNames:
-            checkDesktopSwitchBody.includes('GetThreadDesktop(GetCurrentThreadId())') &&
-            checkDesktopSwitchBody.includes('GetUserObjectInformationA(desktop2, UOI_NAME, currentName') &&
-            checkDesktopSwitchBody.includes('GetUserObjectInformationA(desktop, UOI_NAME, targetName'),
+            readThreadDesktopNameBody.includes('GetUserObjectInformationA(threadDesktop, UOI_NAME, name') &&
+            bindBody.includes('kvm_read_thread_desktop_name(result->previousName') &&
+            bindBody.includes('GetUserObjectInformationA(desktop, UOI_NAME, targetName') &&
+            bindBody.indexOf('SetThreadDesktop(desktop) == 0') < bindBody.indexOf('kvm_read_thread_desktop_name(result->currentName'),
         kvmUnchangedDesktopPollClosesOnlyNewTargetHandle:
             unchangedDesktopIndex >= 0 &&
             unchangedDesktopIndex < setThreadDesktopIndex &&
-            checkDesktopSwitchBody.includes('CloseDesktop(UnchangedDesktop)') &&
-            checkDesktopSwitchBody.includes('desktop = desktop2;'),
+            bindBody.includes('CloseDesktop(UnchangedDesktop)'),
         kvmReopensSecureDesktopBeforeThreadAssignment:
             winlogonReopenIndex >= 0 &&
             setThreadDesktopIndex >= 0 &&
             winlogonReopenIndex < setThreadDesktopIndex,
+        // Failures keep the API name in the trace ("OpenInputDesktop failed", "SetThreadDesktop
+        // failed") for the runtime probes, and are traced on change rather than on every poll.
+        kvmTracesDesktopBindFailuresOnChange:
+            bindBody.includes('kvm_desktop_bind_note_failure(result, "OpenInputDesktop", GetLastError());') &&
+            bindBody.includes('kvm_desktop_bind_note_failure(result, "SetThreadDesktop", GetLastError());') &&
+            traceBindBody.includes('"KVM desktop[%s]: %s failed error=%lu; thread desktop=\'%s\' accessible=%d"') &&
+            traceBindBody.indexOf('result->failedStage == state->lastFailedStage') < traceBindBody.indexOf('%s failed error=%lu'),
         serviceBindChecksCurrentWindowStationBeforeOpen:
             serviceBindBody.indexOf('GetProcessWindowStation()') >= 0 &&
             serviceBindBody.indexOf('GetProcessWindowStation()') < serviceBindBody.indexOf('OpenWindowStationW(L"WinSta0"'),
@@ -179,7 +213,7 @@ function main() {
         },
         regressionSurface: {
             kvm: [
-                'CheckDesktopSwitch input path',
+                'kvm_server_bind_input_thread_desktop input path',
                 'CheckDesktopSwitch startup pre-GDI path',
                 'CheckDesktopSwitch startup resolution recovery path',
                 'CheckDesktopSwitch steady capture loop',
