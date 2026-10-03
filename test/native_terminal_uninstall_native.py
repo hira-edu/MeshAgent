@@ -40,6 +40,8 @@ typedef struct {
     DWORD conflictingServiceAliasCount;
 } ServiceLifecycleDiscovery;
 static ServiceLifecycleDiscovery state;
+#define ServiceDeploy_SelectIncumbent() TRUE
+#define ServiceDeploy_ResolveRuntimeServiceBranding(n,c,...) StringCchCopyW(n,c,L"Agent")
 static BOOL locked, lockFault, pathFault, discoveryFault, engineResult, scopedMember, legacyMember, groupFault;
 static int calls, moves, moveFault, closes, groupCalls;
 static HANDLE acquire(void) {

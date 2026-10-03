@@ -247,7 +247,7 @@ function main() {
             lifecycleDispatcher.includes('ok = ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, requireConfig);'),
         serviceInstallerPromotesFailedActivationHold: serviceInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY') &&
             serviceInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY') &&
-            serviceInstallerSource.includes('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') &&
+            serviceInstallerSource.includes('ServiceDeploy_RecordUpdateActivationFailureHold(rollbackPaths)') &&
             serviceInstallerSource.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]")') &&
             serviceInstallerSource.includes('Recorded failed update activation package hash hold')
     };

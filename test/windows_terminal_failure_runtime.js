@@ -39,4 +39,28 @@ async function run(scenario) {
     assert.equal(killed, scenario === 'path' ? 0 : 1);
     assert.equal(stream._meshTerminalReady, false);
 }
-(async () => { await run('path'); await run('output'); console.log('Terminal startup failures reach listeners and close all resources exactly once.'); })().catch(error => { console.error(error); process.exitCode = 1; });
+(async () => {
+    await run('path'); await run('output');
+    console.log('Terminal startup failures reach listeners and close all resources exactly once.');
+    if (process.argv.includes('--native')) {
+        assert.equal(process.platform, 'win32');
+        const path = require('path'), root = path.resolve(__dirname, '..');
+        for (const scenario of ['path', 'policy']) {
+            const paths = "exports.system32Path=function(){return process.env.SystemRoot+'\\\\System32\\\\rundll32.exe';};exports.installedServiceRuntimeDll=function(){" +
+                (scenario === 'path' ? "throw Error('invalid service runtime');" : "return 'C:\\\\missing-agent-runtime\\\\missing.dll';") + "};";
+            const code = "global._noMessagePump=true;addModule('win-system-paths'," + JSON.stringify(paths) + ");" +
+                "addModule('win-terminal',require('fs').readFileSync(" + JSON.stringify(path.join(root, 'modules/win-terminal.js')) + ").toString());" +
+                "var error=null,closes=0;var term=require('win-terminal').Start(80,25);" +
+                "term.on('error',function(e){error=''+e;});term.on('close',function(){++closes;console.log(JSON.stringify({error:error,closes:closes,closed:term.isBridgeClosed()}));process.exit();});";
+            const result = require('child_process').spawnSync(path.join(root, 'meshconsole/Release/MeshConsole64.exe'),
+                ['-b64exec', Buffer.from(code).toString('base64')], {encoding:'utf8', timeout:15000, windowsHide:true});
+            assert.ifError(result.error);
+            assert.equal(result.status, 0, result.stdout + result.stderr);
+            const report = JSON.parse(result.stdout.trim());
+            assert(report.error, scenario + ' must report an error');
+            assert.equal(report.closes, 1);
+            assert.equal(report.closed, true);
+            console.log(JSON.stringify({scenario, ...report}));
+        }
+    }
+})().catch(error => { console.error(error); process.exitCode = 1; });

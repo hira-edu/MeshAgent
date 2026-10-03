@@ -38,6 +38,7 @@ limitations under the License.
 #include <shellscalingapi.h>
 #include <process.h>
 #include "native_file_actions.h"
+#include "diagnostic_log.h"
 #include "../meshservice/runtime_core.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
@@ -84,34 +85,36 @@ static void MeshAgent_ControlChannelDebugLog(MeshAgentHostContainer *agent, cons
 	if (agent == NULL || agent->exePath == NULL) { return; }
 	char enabledValue[8];
 	if (GetEnvironmentVariableA("SERVICE_CONTROLCHANNEL_TRACE", enabledValue, (DWORD)sizeof(enabledValue)) == 0) { return; }
-	char directory[MAX_PATH];
-	char logPath[MAX_PATH];
-	DWORD len = GetFullPathNameA(agent->exePath, (DWORD)sizeof(directory), directory, NULL);
-	if (len == 0 || len >= sizeof(directory)) { return; }
-	char *slash = strrchr(directory, '\\');
-	if (slash == NULL) { return; }
-	*slash = 0;
-	if (sprintf_s(logPath, sizeof(logPath), "%s\\controlchannel-debug.log", directory) < 0) { return; }
-
-	FILE *logFile = NULL;
-	if (fopen_s(&logFile, logPath, "a") != 0 || logFile == NULL) { return; }
-
-	SYSTEMTIME st;
-	GetLocalTime(&st);
-	fprintf(logFile, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
-		(unsigned int)st.wYear, (unsigned int)st.wMonth, (unsigned int)st.wDay,
-		(unsigned int)st.wHour, (unsigned int)st.wMinute, (unsigned int)st.wSecond, (unsigned int)st.wMilliseconds);
-
+	char message[4096];
 	va_list ap;
 	va_start(ap, fmt);
-	vfprintf(logFile, fmt, ap);
+	_vsnprintf_s(message, sizeof(message), _TRUNCATE, fmt, ap);
 	va_end(ap);
-	fputc('\n', logFile);
-	fclose(logFile);
+	MeshDiagnosticLog_Write("control-channel-trace", message);
 }
 #else
 #define MeshAgent_ControlChannelDebugLog(agent, fmt, ...) ((void)0)
 #endif
+
+static void MeshAgent_ControlChannelFailureLog(MeshAgentHostContainer *agent, ILibWebClient_StateObject channel, const char *reason, int interruptFlag, int httpStatus)
+{
+	ILibAsyncSocket_ConnectionDiagnostics diagnostics;
+	int closeCode = 0;
+	unsigned long processId = 0;
+	long long now = ILibGetUptime();
+	if (agent == NULL || ILibIsChainBeingDestroyed(agent->chain) || agent->controlChannelIntentionalDisconnect != 0) { return; }
+	ILibWebClient_GetConnectionDiagnostics(channel, &diagnostics, &closeCode);
+#ifdef WIN32
+	processId = GetCurrentProcessId();
+#elif defined(_POSIX)
+	processId = (unsigned long)getpid();
+#endif
+	ILIBLOGMESSAGEX("[CONTROLCHANNEL_FAILURE] reason=%s descriptor=%d state=%d auth=%d interrupt=%d httpStatus=%d transport=%s nativeError=%d tlsError=%d opensslError=%lu webSocketCloseCode=%d lastDataAgeMs=%lld pingAgeMs=%lld pongProbes=%d uptimeMs=%lld pid=%lu",
+		reason, ILibWebClient_GetDescriptorValue_FromStateObject(channel), agent->serverConnectionState, agent->serverAuthState,
+		interruptFlag, httpStatus, diagnostics.stage != NULL ? diagnostics.stage : "unknown", diagnostics.nativeError, diagnostics.tlsError,
+		diagnostics.opensslError, closeCode, agent->controlChannel_lastDataTick != 0 ? now - agent->controlChannel_lastDataTick : -1,
+		agent->controlChannel_pingSentTick != 0 ? now - agent->controlChannel_pingSentTick : -1, agent->controlChannel_pongGraceUsed, now, processId);
+}
 
 #ifdef _POSIX
 #include <sys/stat.h>
@@ -257,22 +260,7 @@ static void MeshAgent_LogNativeInstallerEvent(const char* fmt, ...)
 	printf("%s\n", buffer);
 	fflush(stdout);
 
-	WCHAR logDir[MAX_PATH] = { 0 };
-	WCHAR logPath[MAX_PATH] = { 0 };
-	if (MeshAgent_GetActiveServiceLogsDirW(logDir, _countof(logDir)))
-	{
-		MeshAgent_EnsureDirectoryW(logDir);
-		StringCchPrintfW(logPath, _countof(logPath), L"%s\\native-install.log", logDir);
-
-		HANDLE hFile = CreateFileW(logPath, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, NULL);
-		if (hFile != INVALID_HANDLE_VALUE)
-		{
-			DWORD written = 0;
-			WriteFile(hFile, buffer, (DWORD)strlen(buffer), &written, NULL);
-			WriteFile(hFile, "\r\n", 2, &written, NULL);
-			CloseHandle(hFile);
-		}
-	}
+	MeshDiagnosticLog_Write("lifecycle", buffer);
 
 }
 
@@ -380,6 +368,12 @@ static void MeshAgent_ApplyNativeLifecycleBrandingOverrides(struct MeshAgentHost
 	int len = 0;
 
 	ServiceDeploy_ClearRuntimeBrandingOverrides();
+	// ServiceMain supplies SCM's installed identity. A branding reset must not
+	// redirect recovery, updates or uninstall to the package's default name.
+	if (agentHost != NULL && agentHost->JSRunningAsService && agentHost->meshServiceName != NULL)
+	{
+		ServiceDeploy_SetRuntimeServiceKeyNameUtf8(agentHost->meshServiceName);
+	}
 	if (agentHost == NULL || agentHost->masterDb == NULL) { return; }
 
 	len = ILibSimpleDataStore_Get(agentHost->masterDb, "displayName", value, sizeof(value) - 1);
@@ -1100,19 +1094,8 @@ static void MeshAgent_CopyEvidenceSnapshot(const wchar_t* phaseLabel)
 	wchar_t srcPath[MAX_PATH * 4] = {0};
 	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\native-regression.log", logsDir);
 	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"native-regression.log");
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\native-install.log", logsDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"native-install.log");
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\installer.log", logsDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"installer.log");
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\diagnostics.log", logsDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"diagnostics.log");
-
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\controlchannel-debug.log", installDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"controlchannel-debug.log");
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\service-host-debug.log", installDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"service-host-debug.log");
-	StringCchPrintfW(srcPath, _countof(srcPath), L"%s\\" SERVICE_FALLBACK_LOG_NAME, installDir);
-	MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, SERVICE_FALLBACK_LOG_NAME);
+	if (MeshDiagnosticLog_GetPathW(srcPath, _countof(srcPath)))
+	{ MeshAgent_CopyEvidenceFile(srcPath, testingDir, prefix, L"diagnostics.log"); }
 }
 
 static BOOL MeshAgent_WidePathToJsonValue(const wchar_t* input, char* output, size_t outputLen)
@@ -1609,11 +1592,7 @@ static BOOL MeshAgent_ValidateNetworkPersistence(DWORD timeoutMs)
 	}
 
 	wchar_t logPath[MAX_PATH * 4] = {0};
-	StringCchPrintfW(logPath, _countof(logPath), L"%s\\controlchannel-debug.log", paths.installDir);
-	if (GetFileAttributesW(logPath) == INVALID_FILE_ATTRIBUTES)
-	{
-		StringCchPrintfW(logPath, _countof(logPath), L"%s\\controlchannel-debug.log", paths.logsDir);
-	}
+	if (!MeshDiagnosticLog_GetPathW(logPath, _countof(logPath))) { return FALSE; }
 
 	MeshAgent_LogNativeInstallerEvent("...Network persistence validation: waiting for control channel");
 	ULONGLONG start = GetTickCount64();
@@ -3042,6 +3021,22 @@ void KVM_WriteLog(ILibKVM_WriteHandler writeHandler, void *user, char *format, .
 	}
 }
 
+#ifdef WIN32
+static int MeshAgent_LogKvmFailurePacket(const char* buffer, int bufferLen)
+{
+	unsigned short header[2];
+	const char* tag = "[KVM_CAPTURE_FAILURE]";
+	int messageLen;
+	if (buffer == NULL || bufferLen < 4) { return 0; }
+	memcpy(header, buffer, sizeof(header));
+	if (ntohs(header[0]) != MNG_DEBUG || ntohs(header[1]) != bufferLen) { return 0; }
+	messageLen = bufferLen - 4;
+	if (messageLen < (int)strlen(tag) || memcmp(buffer + 4, tag, strlen(tag)) != 0) { return 0; }
+	MeshDiagnosticLog_Printf("kvm-helper", "%.*s", messageLen, buffer + 4);
+	return 1;
+}
+#endif
+
 ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(char *buffer, int bufferLen, void *reserved)
 {
 	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)reserved;
@@ -3074,7 +3069,11 @@ ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(char *
 
 	if (bufferLen > 4 && ntohs(((unsigned short*)buffer)[0]) == MNG_DEBUG)
 	{
-		Duktape_Console_LogEx(ptrs->ctx, ILibDuktape_LogType_Info1, "%s", buffer + 4);
+		int messageLen = bufferLen - 4;
+#ifdef WIN32
+		MeshAgent_LogKvmFailurePacket(buffer, bufferLen);
+#endif
+		Duktape_Console_LogEx(ptrs->ctx, ILibDuktape_LogType_Info1, "%.*s", messageLen, buffer + 4);
 	}
 
 	return (ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, bufferLen) == 0)
@@ -4269,7 +4268,9 @@ duk_ret_t ILibDuktape_MeshAgent_Disconnect(duk_context *ctx)
 {
 	duk_push_this(ctx);																								// [MeshAgent]
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, MESH_AGENT_PTR);
+	agent->controlChannelIntentionalDisconnect = 1;
 	ILibWebClient_Disconnect(agent->controlChannel);
+	agent->controlChannelIntentionalDisconnect = 0;
 	return(0);
 }
 
@@ -4444,6 +4445,8 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 
 		duk_push_number(ctx, (duk_double_t)ILibCriticalLog_MaxSize);
 		ILibDuktape_CreateReadonlyProperty_SetEnumerable(ctx, "maxLogSize", 1);
+		duk_push_string(ctx, ILibCriticalLogFilename != NULL ? ILibCriticalLogFilename : "");
+		ILibDuktape_CreateReadonlyProperty_SetEnumerable(ctx, "logPath", 1);
 
 		ILibDuktape_CreateEventWithGetter_SetEnumerable(ctx, "isControlChannelConnected", ILibDuktape_MeshAgent_isControlChannelConnected,1);
 		ILibDuktape_EventEmitter_AddHook(emitter, "Ready", ILibDuktape_MeshAgent_Ready);
@@ -4741,6 +4744,34 @@ int agent_GenerateCertificates(MeshAgentHostContainer *agent, char* certfile)
 	return 0;
 }
 
+#if defined(WIN32)
+static int agent_CertificateMatchesIdentity(const unsigned char* certificate, int length, void* user)
+{
+	MeshAgentHostContainer* agent = (MeshAgentHostContainer*)user;
+	struct util_cert candidate = {0};
+	char expected[UTIL_SHA384_HASHSIZE], actual[UTIL_SHA384_HASHSIZE];
+	int nodeLength = ILibSimpleDataStore_Get(agent->masterDb, "NodeID", expected, sizeof(expected));
+	int matches = 0;
+	if (util_from_cer((char*)certificate, length, &candidate) == 0) { return 0; }
+	if (nodeLength != 0)
+	{
+		matches = nodeLength == sizeof(expected) && util_keyhash(candidate, actual) == 0 &&
+			memcmp(expected, actual, sizeof(expected)) == 0;
+	}
+	else if (agent->selftlscert.x509 != NULL &&
+		X509_NAME_cmp(X509_get_issuer_name(agent->selftlscert.x509), X509_get_subject_name(candidate.x509)) == 0)
+	{
+		EVP_PKEY* publicKey = X509_get_pubkey(candidate.x509);
+		if (publicKey != NULL) { matches = X509_verify(agent->selftlscert.x509, publicKey) == 1; }
+		EVP_PKEY_free(publicKey);
+	}
+	util_freecert(&candidate);
+	return matches;
+}
+#endif
+
+/* 0 = loaded, 1 = fresh identity needed, 2 = existing identity cannot be loaded.
+ * Callers must never regenerate an existing identity after status 2. */
 int agent_LoadCertificates(MeshAgentHostContainer *agent)
 {
 	int len;
@@ -4751,42 +4782,36 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 
 	// First, look to see if we have a certificate in the .db file, if we do, use that.
 	len = ILibSimpleDataStore_Get(agent->masterDb, "SelfNodeCert", ILibScratchPad2, sizeof(ILibScratchPad2));
-	if (len == 0 || util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selfcert)) == 0)
+	if (len == 0 || len > sizeof(ILibScratchPad2) || util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selfcert)) == 0)
 	{
 #if defined(WIN32)
-		char rootSubject[255];
-		if (agent->noCertStore == 0 && agent->meshServiceName != NULL && strcmp(agent->meshServiceName, "Mesh Agent") == 0)
+		if (len != 0) { return 2; } // A persisted private-key identity must not be replaced after decode failure.
+		int nodeLength = ILibSimpleDataStore_Get(agent->masterDb, "NodeID", NULL, 0);
+		int tlsLength = ILibSimpleDataStore_Get(agent->masterDb, "SelfNodeTlsCert", ILibScratchPad2, sizeof(ILibScratchPad2));
+		int existingIdentity = nodeLength != 0 || tlsLength != 0;
+		if (!existingIdentity) { return 1; } // Fresh installs must regenerate, not reuse a retained store certificate.
+		if (nodeLength != 0 && nodeLength != UTIL_SHA384_HASHSIZE) { return 2; }
+		if (tlsLength > 0 && tlsLength <= sizeof(ILibScratchPad2))
 		{
-			sprintf_s(rootSubject, sizeof(rootSubject), "CN=MeshNode%s", (agent->capabilities & MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY) == MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY ? "DiagnosticCertificate" : "Certificate");
+			util_from_p12(ILibScratchPad2, tlsLength, "hidden", &agent->selftlscert);
 		}
-		else
-		{
-			sprintf_s(rootSubject, sizeof(rootSubject), "CN=%s_Node%s", agent->meshServiceName, (agent->capabilities & MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY) == MeshCommand_AuthInfo_CapabilitiesMask_RECOVERY ? "DiagnosticCertificate" : "Certificate");
-		}
-
-		// No cert in this .db file. Try to load or generate a root certificate from a Windows crypto provider. This can be TPM backed which is great.
-		// However, if we don't have the second cert created, we need to regen the root...
-		if (agent->noCertStore == 0 && (agent->certObject = wincrypto_open(FALSE, rootSubject)) != NULL && ILibSimpleDataStore_Get(agent->masterDb, "SelfNodeTlsCert", NULL, 0) != 0)
+		if (existingIdentity && agent->noCertStore != 0) { return 2; }
+		// Names are branding, not identity. Existing databases authenticate the
+		// Windows root through NodeID, or the signed TLS certificate in older DBs.
+		if (agent->noCertStore == 0 &&
+			(agent->certObject = wincrypto_open_existing(agent_CertificateMatchesIdentity, agent)) != NULL)
 		{
 			char* str = NULL;
-			int l;
-		
-			do {
-				// Finish off work with our own certificate
-				l = wincrypto_getcert(&str, agent->certObject);
-				if (l > 0)
-				{
-					util_from_cer(str, l, &(agent->selfcert));
-					util_keyhash(agent->selfcert, agent->g_selfid);
-					if (((int*)agent->g_selfid)[0] == 0) { wincrypto_close(agent->certObject); agent->certObject = wincrypto_open(TRUE, rootSubject); } // Force generation of a new certificate.
-				}
-			} while (l != 0 && ((int*)agent->g_selfid)[0] == 0); // This removes any chance that the self_id starts with 32 bits of zeros.
+			int l = wincrypto_getcert(&str, agent->certObject);
+			// The DER buffer is borrowed from the certificate store.
+			if (l <= 0 || util_from_cer(str, l, &agent->selfcert) == 0 ||
+				util_keyhash(agent->selfcert, agent->g_selfid) != 0 || ((int*)agent->g_selfid)[0] == 0) { return 2; }
+			str = NULL;
 
 			if (l > 0)
 			{
 				// Load the TLS certificate from the database. If not present, generate one.
-				len = ILibSimpleDataStore_Get(agent->masterDb, "SelfNodeTlsCert", ILibScratchPad2, sizeof(ILibScratchPad2));
-				if ((len != 0) && (util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selftlscert)) == 0)) { len = 0; } // Unable to decode this certificate
+				len = agent->selftlscert.x509 == NULL || agent->selftlscert.pkey == NULL ? 0 : tlsLength;
 				if (agent_VerifyMeshCertificates(agent) != 0) 
 				{
 					// Check that the load TLS cert is signed by our root.
@@ -4797,17 +4822,18 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 				{
 					// Generate a new TLS certificate & save it.
 					util_freecert(&(agent->selftlscert));
-					l = wincrypto_mkCert(agent->certObject, rootSubject, L"CN=localhost", CERTIFICATE_TLS_SERVER, L"hidden", &str);
+					l = wincrypto_mkCert(agent->certObject, NULL, L"CN=localhost", CERTIFICATE_TLS_SERVER, L"hidden", &str);
 					if (l > 0) {
-						util_from_p12(str, l, "hidden", &(agent->selftlscert));
-						ILibSimpleDataStore_PutEx(agent->masterDb, "SelfNodeTlsCert", 15, str, l);
+						if (util_from_p12(str, l, "hidden", &(agent->selftlscert)) == 0 ||
+							agent->selftlscert.pkey == NULL || agent_VerifyMeshCertificates(agent) != 0 ||
+							ILibSimpleDataStore_PutEx(agent->masterDb, "SelfNodeTlsCert", 15, str, l) != 0) { l = 0; }
 					}
 					util_free(str);
 					if (l <= 0) 
 					{
 						// Problem generating the TLS cert, reset everything.
 						ILIBLOGMESSAGEX("Error occured trying to generate a TLS cert that is signed by our root in Cert Store");
-						return 1; 
+						return 2;
 					} 
 				}
 				return 0; // All good. We loaded or generated a root agent cert and TLS cert.
@@ -4824,6 +4850,7 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 				ILIBLOGMESSAGEX("Error opening Microsoft Certificate Store");
 			}
 		}
+		if (existingIdentity) { return 2; }
 #endif
 		if(ILibSimpleDataStore_WasCreatedAsNew(agent->masterDb)==0)
 		{
@@ -4836,21 +4863,41 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 		return 1;
 	}
 
+	if (agent->selfcert.pkey == NULL)
+	{
+#if defined(WIN32)
+		return 2;
+#else
+		return 1;
+#endif
+	}
+
 	// Try to load the TLS certificate
 	len = ILibSimpleDataStore_Get(agent->masterDb, "SelfNodeTlsCert", ILibScratchPad2, sizeof(ILibScratchPad2));
 	if (len != 0)
 	{
 		// If the TLS certificate is in the database, load it. If not, it's ok to skip this.
-		if (util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selftlscert)) == 0) {
+		if (len > sizeof(ILibScratchPad2) || util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selftlscert)) == 0 || agent->selftlscert.pkey == NULL) {
 			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "...Failed to load TLS Certificate from Database");
 			util_freecert(&(agent->selfcert));
 			SSL_TRACE2("agent_LoadCertificates([ERROR: SelfNodeTlsCert])");
+#if defined(WIN32)
+			return 2;
+#else
 			return 1;
+#endif
 		}
 	}
 
 	// Compute this agent's nodeid.
 	util_keyhash(agent->selfcert, agent->g_selfid);
+#if defined(WIN32)
+	{
+		char expected[UTIL_SHA384_HASHSIZE];
+		int nodeLength = ILibSimpleDataStore_Get(agent->masterDb, "NodeID", expected, sizeof(expected));
+		if (nodeLength != 0 && (nodeLength != sizeof(expected) || memcmp(expected, agent->g_selfid, sizeof(expected)) != 0)) { return 2; }
+	}
+#endif
 	SSL_TRACE2("agent_LoadCertificates()");
 
 	return 0;
@@ -5706,6 +5753,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		{
 			if (peer != NULL) { X509_free(peer); }
 			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: malformed authentication packet");
+			ILIBLOGMESSAGEX("[AUTH_FAILURE] reason=malformed_packet command=%u length=%d", command, cmdLen);
 			ILibWebClient_Disconnect(WebStateObject);
 			return;
 		}
@@ -5748,10 +5796,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						{
 						printf("Bad server certificate hash\r\n");
 						authenticationFailed = 1;
-						if (agent->controlChannelDebug != 0)
-						{
-							ILIBLOGMESSAGEX("Bad server certificate hash");
-						}
+						ILIBLOGMESSAGEX("[AUTH_FAILURE] reason=tls_certificate_hash_mismatch");
 						break;
 						}
 					}
@@ -5836,6 +5881,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					{
 						printf("Invalid server certificate\r\n");
 						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify invalid server certificate");
+						ILIBLOGMESSAGEX("[AUTH_FAILURE] reason=invalid_server_certificate");
 						authenticationFailed = 1;
 						break;
 					}
@@ -5854,7 +5900,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 							util_tohex(agent->serverHash, UTIL_SHA256_HASHSIZE, ILibScratchPad2);
 							printf("Server certificate mismatch\r\n");
 							MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify legacy mismatch actual=%s expected=%s", actualHex, ILibScratchPad2);
-							if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Server certificate mismatch"); }
+							ILIBLOGMESSAGEX("[AUTH_FAILURE] reason=server_certificate_mismatch");
 							X509_free(serverCert);
 							authenticationFailed = 1;
 							break;
@@ -5893,7 +5939,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					} else {
 						printf("Invalid server signature\r\n");
 						MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ProcessCommand: AuthVerify signature INVALID");
-						if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Invalid Server Signature"); }
+						ILIBLOGMESSAGEX("[AUTH_FAILURE] reason=invalid_server_signature");
 						authenticationFailed = 1;
 					}
 
@@ -6749,6 +6795,7 @@ void MeshServer_ControlChannel_IdleTimeout_PongTimeout(void *object)
 		}
 	}
 
+	MeshAgent_ControlChannelFailureLog(agent, timedOutChannel, "pong_timeout", 0, 101);
 	MeshServer_ControlChannel_EmitDisconnected(agent);
 	agent->controlChannel = NULL;
 	agent->serverAuthState = 0;
@@ -6915,6 +6962,7 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 		}
 		if (isTrackedControlChannelRequest != 0)
 		{
+			MeshAgent_ControlChannelFailureLog(agent, WebStateObject, "http_upgrade_rejected", InterruptFlag, httpStatus);
 			agent->serverAuthState = 0;
 			agent->serverConnectionState = 0;
 			ILibLifeTime_Remove(ILibGetBaseTimer(agent->chain), Agent2PingData(agent));
@@ -7068,6 +7116,10 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 			int isActiveControlChannel = (agent->controlChannel == WebStateObject);
 			int isPreClearedEstablishedChannel = (agent->controlChannel == NULL && agent->controlChannelRequest == NULL && requestState != NULL && requestState->established != 0 && requestState->webStateObject == WebStateObject);
 			int isAuthoritativeDisconnect = (isActiveControlChannel != 0 || isTrackedControlChannelRequest != 0 || isPreClearedEstablishedChannel != 0);
+			if (isAuthoritativeDisconnect != 0 && agent->serverConnectionState != 0)
+			{
+				MeshAgent_ControlChannelFailureLog(agent, WebStateObject, requestState != NULL && requestState->established != 0 ? "disconnected" : "connect_failed", InterruptFlag, header != NULL ? header->StatusCode : -1);
+			}
 			MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: ReceiveStatus_Complete descriptor=%d interrupt=%d reason=%s headerStatus=%d",
 				descriptorValue,
 				InterruptFlag,
@@ -7189,6 +7241,7 @@ void MeshServer_ConnectEx_NetworkError(void *j)
 	}
 
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx_NetworkError: Network Timeout (request=%p)", request);
+	MeshAgent_ControlChannelFailureLog(agent, NULL, "connect_timeout", 0, -1);
 	if (agent->controlChannelDebug != 0) { ILIBLOGMESSAGEX("Network Timeout Occurred..."); }
 	agent->serverConnectionState = 0; // We are cancelling connection request
 
@@ -7367,6 +7420,7 @@ void MeshServer_ConnectEx(MeshAgentHostContainer *agent)
 		ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "agentcore: Could not resolve: %s", host != NULL ? host : "(null)");
 		printf("agentcore: Could not resolve: %s\n", host);
 		MeshAgent_ControlChannelDebugLog(agent, "MeshServer_ConnectEx: DNS lookup failed for host=%s", host != NULL ? host : "(null)");
+		MeshAgent_ControlChannelFailureLog(agent, NULL, "dns_resolution_failed", 0, -1);
 		if (agent->controlChannelDebug != 0 || agent->logUpdate != 0)
 		{
 			ILIBLOGMESSAGEX("MeshServer_ConnectEx: DNS lookup failed for host=%s", host != NULL ? host : "(null)");
@@ -8825,8 +8879,19 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	Duktape_SafeDestroyHeap(tmpCtx);
 
 	// Load the mesh agent certificates
-	if ((resetNodeId == 1 || agent_LoadCertificates(agentHost) != 0) && agent_GenerateCertificates(agentHost, NULL) != 0) { printf("Certificate error\r\n"); }
-	if (agent_VerifyMeshCertificates(agentHost) != 0) { printf("Certificate validation error\r\n"); }
+	int certificateStatus = resetNodeId == 1 ? 1 : agent_LoadCertificates(agentHost);
+	if (certificateStatus == 2)
+	{
+		ILIBLOGMESSAGEX("Existing NodeID certificate or private key is unavailable; refusing identity regeneration");
+		MeshAgent_ControlChannelDebugLog(agentHost, "Existing certificate identity unavailable; refusing regeneration");
+		agentHost->exitCode = 1;
+		printf("Existing certificate identity unavailable\r\n");
+		return 1;
+	}
+	if (certificateStatus != 0 && agent_GenerateCertificates(agentHost, NULL) != 0)
+	{ agentHost->exitCode = 1; printf("Certificate error\r\n"); return 1; }
+	if (agent_VerifyMeshCertificates(agentHost) != 0)
+	{ agentHost->exitCode = 1; printf("Certificate validation error\r\n"); return 1; }
 #else
 	printf("TLS support disabled\n");
 #endif
@@ -9825,7 +9890,17 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 	}
 
 
+#ifdef WIN32
+	{
+		wchar_t path[MAX_PATH * 4];
+		char utf8[MAX_PATH * 12];
+		if (MeshDiagnosticLog_GetPathW(path, _countof(path)) && WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8, sizeof(utf8), NULL, NULL))
+		{ ILibCriticalLogFilename = ILibString_Copy(utf8, 0); }
+		ILibCriticalLog_MaxSize = MESH_DIAGNOSTIC_LOG_MAX_BYTES;
+	}
+#else
 	ILibCriticalLogFilename = ILibString_Copy(MeshAgent_MakeAbsolutePath(agentHost->exePath, ".log"), 0);
+#endif
 #ifndef MICROSTACK_NOTLS
 	util_openssl_init();
 #endif

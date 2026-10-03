@@ -6,6 +6,7 @@
  */
 
 #include "service_integration.h"
+#include "../meshcore/diagnostic_log.h"
 #include "runtime_policy.h"
 #include "service_monitor.h"
 #include "runtime_state.h"
@@ -115,7 +116,7 @@ void ServiceIntegration_LoadDefaultConfig(ServiceIntegrationConfig* config)
     /* Paths - resolved from the documented ProgramData known folder. */
     if (!BuildDynamicPath(config->installDir, MAX_PATH, SERVICE_FALLBACK_SERVICE_NAME, NULL)) { config->installDir[0] = L'\0'; }
     if (!BuildDynamicPath(config->stateFilePath, MAX_PATH, SERVICE_FALLBACK_SERVICE_NAME, L"state.dat")) { config->stateFilePath[0] = L'\0'; }
-    if (!BuildDynamicPath(config->logFilePath, MAX_PATH, SERVICE_FALLBACK_SERVICE_NAME, L"integration.log")) { config->logFilePath[0] = L'\0'; }
+    if (!MeshDiagnosticLog_GetPathW(config->logFilePath, MAX_PATH)) { config->logFilePath[0] = L'\0'; }
 
     /* IPC - use service name for pipe name */
     _snwprintf_s(config->ipcPipeName, 128, _TRUNCATE, L"\\\\.\\pipe\\%s_Ipc", SERVICE_FALLBACK_SERVICE_NAME);
@@ -689,18 +690,6 @@ static LONGLONG GetCurrentTimeMs(void)
 
 static void LogIntegration(const WCHAR* message)
 {
-    FILE* fp;
-    SYSTEMTIME st;
-
     if (!message) return;
-
-    GetLocalTime(&st);
-
-    if (_wfopen_s(&fp, g_Integration.config.logFilePath, L"a") == 0 && fp) {
-        fwprintf(fp, L"[%04d-%02d-%02d %02d:%02d:%02d] INTEGRATION: %s\n",
-                 st.wYear, st.wMonth, st.wDay,
-                 st.wHour, st.wMinute, st.wSecond,
-                 message);
-        fclose(fp);
-    }
+    MeshDiagnosticLog_PrintfW("integration", L"%ls", message);
 }

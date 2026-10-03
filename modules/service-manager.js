@@ -1042,7 +1042,7 @@ function serviceManager()
                     return (retVal);
                 }
                 else {
-
+                    this.proxy.CloseServiceHandle(h);
                 }
             }
 

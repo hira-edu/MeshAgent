@@ -248,7 +248,7 @@ static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVI
             }
             else
             {
-                if (ServiceBinding_IsLegacyExe(extractedExe))
+                if ((!_wcsicmp(extractedExe, installedExe) && !_wcsicmp(after, L"-run")) || ServiceBinding_IsLegacyExe(extractedExe))
                 {
                     *legacy = TRUE;
                     return TRUE;
@@ -270,7 +270,9 @@ static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVI
                 {
                     memcpy(extractedExe, cleanImage, partLen * sizeof(wchar_t));
                     extractedExe[partLen] = L'\0';
-                    if (ServiceBinding_IsLegacyExe(extractedExe))
+                    const wchar_t* after = space;
+                    while (*after == L' ' || *after == L'\t') { ++after; }
+                    if ((!_wcsicmp(extractedExe, installedExe) && !_wcsicmp(after, L"-run")) || ServiceBinding_IsLegacyExe(extractedExe))
                     {
                         *legacy = TRUE;
                         return TRUE;

@@ -272,6 +272,8 @@ typedef struct ILibWebClientDataObject
 	ILibWebClient_TimeoutHandler timeoutHandler;
 	void *timeoutUser;
 	int __tmpDescriptor;
+	ILibAsyncSocket_ConnectionDiagnostics diagnostics;
+	int webSocketCloseCode;
 
 #ifndef MICROSTACK_NOTLS
 	ILibWebClient_RequestToken_HTTPS requestMode;
@@ -346,6 +348,16 @@ typedef struct ILibWebClient_WebSocketState
 int ILibWebClient_GetDescriptorValue_FromStateObject(ILibWebClient_StateObject state)
 {
 	return((state != NULL ? ((ILibWebClientDataObject*)state)->__tmpDescriptor : -1));
+}
+void ILibWebClient_GetConnectionDiagnostics(ILibWebClient_StateObject state, ILibAsyncSocket_ConnectionDiagnostics *diagnostics, int *webSocketCloseCode)
+{
+	ILibWebClientDataObject *wcdo = (ILibWebClientDataObject*)state;
+	if (webSocketCloseCode != NULL) { *webSocketCloseCode = wcdo != NULL ? wcdo->webSocketCloseCode : 0; }
+	if (diagnostics == NULL) { return; }
+	memset(diagnostics, 0, sizeof(*diagnostics));
+	if (wcdo == NULL) { return; }
+	*diagnostics = wcdo->diagnostics;
+	if (diagnostics->stage == NULL) { ILibAsyncSocket_GetConnectionDiagnostics(wcdo->SOCK, diagnostics); }
 }
 int *ILibWebClient_WCDO_ServerFlag(ILibWebClient_StateObject j)
 {
@@ -1493,6 +1505,7 @@ int ILibWebClient_ProcessWebSocketData(char* buffer, int offset, int length, ILi
 		switch (OPCODE)
 		{
 		case WEBSOCKET_OPCODE_CLOSE:
+			wcdo->webSocketCloseCode = plen >= 2 ? (((unsigned char)buffer[i] << 8) | (unsigned char)buffer[i + 1]) : (plen == 0 ? 1005 : -1);
 			ILibWebClient_Disconnect(wcdo);
 			break;
 		case WEBSOCKET_OPCODE_PING:
@@ -2113,6 +2126,8 @@ void ILibWebClient_OnConnect(ILibAsyncSocket_SocketModule socketModule, int Conn
 	if (wcdo->Closing != 0) return; // Already closing, exit now
 
 	wcdo->SOCK = socketModule;
+	ILibAsyncSocket_GetConnectionDiagnostics(socketModule, &wcdo->diagnostics);
+	wcdo->webSocketCloseCode = 0;
 	if (socketModule != NULL)
 	{
 #ifdef WIN32
@@ -2201,6 +2216,7 @@ void ILibWebClient_OnDisconnectSink(ILibAsyncSocket_SocketModule socketModule, v
 	//printf("ILibWebClient_OnDisconnectSink()\r\n");
 
 	if (wcdo == NULL) { return; }
+	ILibAsyncSocket_GetConnectionDiagnostics(socketModule, &wcdo->diagnostics);
 	if (wcdo->DeferDestruction && wcdo->CancelRequest == 0) { return; }
 
 	if (wcdo->DisconnectSent != 0)

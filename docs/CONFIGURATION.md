@@ -152,8 +152,9 @@ EXE when diagnosing an access-denied report.
 Process lists, process details, service lists, and account SID resolution use
 Win32 APIs in the agent. They do not launch a shell or require an inventory
 helper. Protected processes may omit optional owner information. Enumeration
-closes snapshot, process, token, and SCM handles on failure as well as success,
-and consumes all service enumeration pages.
+closes snapshot, process, token, SCM, and registry handles on failure as well as
+success, and consumes all service enumeration pages. Service detail requests
+close their service and SCM handles before returning a reply.
 
 Interactive terminals and run commands use `MeshConsoleBridgeW`. The bridge
 must send its ready marker before input is flushed; a startup failure closes the
@@ -171,6 +172,9 @@ for endpoints installed with older bindings until those bindings are migrated.
 
 MeshCentral core overrides carry the source module's UTC modification date into
 `addModule`. Undated overrides cannot replace dated embedded modules. Deployment
+selects one source for each module name: minified files when core minification is
+enabled, plain files otherwise, with fallback when only one variant exists.
+This avoids duplicate registration when both files are present. Deployment
 generates the patched core loader from the target server's installed package and
 publishes inventory/clipboard modules into both normal and minified module
 directories under the data and package roots. The tracked transformation preserves
@@ -256,6 +260,58 @@ If a proxy is required, provide an explicit MeshCentral `WebProxy` value.
 Ambient proxy discovery is not used by the active agent path; do not rely on
 WPAD, per-user browser settings, or heuristic proxy fallback. Stock reconnect
 handling remains part of MeshAgent and is not an endpoint-selection fallback.
+
+## Connection failure diagnostics
+
+On Windows, the core, native service host, lifecycle installer, runtime policy,
+monitor, and KVM helpers all write to one log: the branding `logPath` directory
+plus `artifacts.logFileName` (normally `logs/diagnostics.log`). No separate debug,
+installer, TEMP, or `.bak` log is created. `require('MeshAgent').logPath` exposes
+the absolute path, and `util-agentlog` reads it by default. Records use UTF-8,
+local timestamps with milliseconds, PID, TID, and component labels. An existing
+UTF-16 installer log at that path is converted in place. Concurrent processes
+serialize writes with a file lock; at 2 MiB the newest approximately 1 MiB of
+complete lines is retained in the same file. Existing historical logs are not
+silently deleted. Uninstall still removes the installed log and stops file
+logging before directory removal; uninstall validation does not recreate it.
+Explicit regression reports and optional crash dumps are validation artifacts,
+not additional runtime logs. Non-Windows critical logging remains unchanged.
+
+The agent always writes control-channel failures.
+`[CONTROLCHANNEL_FAILURE]` records the failed stage, connection/authentication
+state, HTTP status, WebSocket close code, socket/TLS error codes, heartbeat/data
+ages, uptime, and PID. `[TRANSPORT_FAILURE]` preserves the first native socket or
+TLS failure before cleanup; `[AUTH_FAILURE]` identifies rejected authentication.
+These records do not require `controlChannelDebug`, `logUpdate`, or
+`SERVICE_CONTROLCHANNEL_TRACE` and do not log packet bodies, credentials, or keys.
+
+Ordinary traffic, successful connects, transient would-block/interrupted I/O,
+explicit script disconnects, and chain shutdown do not produce failure records.
+A peer EOF is recorded only when it terminates the persistent control channel;
+it proves the peer closed the stream, not why. A WebSocket close code describes
+the peer's protocol response, not the cause inside a relay or server.
+Close code `0` means no close frame was received, `1005` means an empty close
+frame, and `-1` means a malformed one-byte close payload. Correlate
+the unified agent log with server/relay logs to investigate an offline endpoint.
+`[START_FAILURE]` identifies failures reached during service startup;
+`[UNEXPECTED_EXIT]` records core return without a stop request. Accepted SCM stops
+and OS shutdowns have distinct lifecycle markers. The unhandled-exception filter
+records `[AGENT_CRASH]` with exception code, module and offset, and access-violation
+operation/target when available, without suppressing Windows crash handling.
+A versioned registry `TelemetrySession` under the service's `Parameters` key
+records startup/running/stop/exit state. On restart, `[PREVIOUS_SESSION]`
+distinguishes a recorded crash from an unclean exit with unknown cause; it never
+claims to identify an external terminating program. Failure to persist telemetry
+is itself logged. These observations are best effort, not full OS crash telemetry.
+KVM launch/protocol/unexpected-helper-exit failures are logged by the privileged
+parent. Capture failures from a restricted session helper are forwarded through
+its existing pipe when it cannot write the protected log. In-process helper
+crash metadata still requires write access and a functioning exception handler.
+Missing error records do not rule out forced termination or
+Windows heap-corruption fail-fast, which may bypass in-process handlers; those
+require the endpoint's Windows Application/SCM events and a crash dump.
+Failure to load the executable/DLL before agent code runs also needs SCM/OS
+evidence, or the installer's logged service-start error.
 
 ## Windows Files actions
 

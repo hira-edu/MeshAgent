@@ -26,7 +26,7 @@ function parseLine(entry)
 {
 
     // Use a regex to parse the log entry
-    var test = entry.match(/^\[.*M\]/);
+    var test = entry.match(/^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:.]+(?: [AP]M)?\]/);
     if (test == null)
     {
         // Use a regex to find a windows crash entry
@@ -86,11 +86,14 @@ function parseLine(entry)
     var dd = test.substring(1, test.length -1);
     var c = dd.split(' ');
     var t = c[1].split(':');
-    if (c[2] == 'PM') { t[0] = parseInt(t[0]) + 12; if (t[0] == 24) { t[0] = 0; } }
+    if (c[2] == 'PM' && parseInt(t[0]) != 12) { t[0] = parseInt(t[0]) + 12; }
+    if (c[2] == 'AM' && parseInt(t[0]) == 12) { t[0] = '00'; }
 
     // Parse out the message and the agent hash
     var d = Date.parse(c[0] + 'T' + t.join(':'));
     var msg = entry.substring(test.length).trim();
+    var metadata = msg.match(/^\[pid=([0-9]+) tid=([0-9]+)\] \[([^\]]+)\] */);
+    if (metadata != null) { msg = msg.substring(metadata[0].length); }
     var hash = msg.match(/^\[[0-9a-fA-F]{16}\]/);
     if (hash != null)
     {
@@ -108,6 +111,12 @@ function parseLine(entry)
     }
 
     var log = { t: Math.floor(d / 1000), m: msg };
+    if (metadata != null)
+    {
+        log.pid = parseInt(metadata[1], 10);
+        log.tid = parseInt(metadata[2], 10);
+        log.component = metadata[3];
+    }
     if (hash != null) { log.h = hash; }
 
     // Check for File/Line in generic log entry
@@ -180,7 +189,9 @@ function readLogEx(path)
 //
 function readLog(criteria, path)
 {
-    var objects = readLogEx(path == null ? (process.execPath.split('.exe').join('') + '.log') : path);
+    var defaultPath = null;
+    try { defaultPath = require('MeshAgent').logPath; } catch (e) { }
+    var objects = readLogEx(path == null ? (defaultPath || (process.execPath.split('.exe').join('') + '.log')) : path);
     var ret = [];
 
     if (typeof (criteria) == 'string')

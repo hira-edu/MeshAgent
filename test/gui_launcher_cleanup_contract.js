@@ -114,8 +114,7 @@ function main() {
             contract.includes('MeshRuntimeHost_CombinePathW(lifecycleDir, _countof(lifecycleDir), stateRoot, L"runtime-host-lifecycle")'),
         installerLogPathDoesNotAliasCombineOutput:
             !installer.includes('MeshInstaller_CombinePath(logDir, _countof(logDir), logDir, L"logs")') &&
-            installer.includes('wchar_t defaultRoot[MAX_PATH] = {0};') &&
-            installer.includes('MeshInstaller_CombinePath(logDir, _countof(logDir), defaultRoot, L"logs")'),
+            installer.includes('MeshDiagnosticLog_GetPathW(g_InstallLogPath, _countof(g_InstallLogPath))'),
         uninstallValidationUsesTempHostArtifacts:
             contract.includes('MeshRuntimeHost_PrepareTempManifestPathW') &&
             contract.includes('MeshAgent-runtime-host-lifecycle') &&

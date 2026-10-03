@@ -79,7 +79,7 @@ function verifyRetireInstalledImage(deployment) {
     const acquire = uninstall.indexOf('ServiceDeploy_AcquireLifecycleMutex()');
     const operation = uninstall.indexOf('ServiceDeploy_RunLifecycleHostOperationLocked(');
     const retire = uninstall.indexOf('ServiceDeploy_RetireRunningInstalledImage(');
-    const release = uninstall.indexOf('ReleaseMutex(mutex)');
+    const release = uninstall.lastIndexOf('ReleaseMutex(mutex)');
     assert(acquire >= 0 && operation > acquire && retire > operation && release > retire,
         'uninstall and retirement must be completed under one mutex acquisition');
 }

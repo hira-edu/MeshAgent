@@ -139,9 +139,9 @@ function main() {
     const checks = {
         installedProvisioningFallsBackToDatastoreNodeId:
             installedProvisioningBlock.includes('configHealthy && mshHealthy') &&
-            installedProvisioningBlock.includes('ServiceDeploy_DataStoreValueExists(paths->dbPath, "NodeID", NULL, 0, NULL)'),
+            installedProvisioningBlock.includes('ServiceDeploy_DataStoreIdentityPresent(paths->dbPath)'),
         prepareRecordsInstalledDatastoreIdentity:
-            prepareBlock.includes('installedDbIdentityPresent = ServiceDeploy_DataStoreValueExists(paths->dbPath, "NodeID", NULL, 0, NULL);'),
+            normalize(prepareBlock).includes('installedDbIdentityPresent = ServiceDeploy_DataStoreIdentityPresent( g_HaveIncumbentPaths ? g_IncumbentPaths.dbPath : paths->dbPath);'),
         dataStoreDeleteWrapperMatchesDeleteSuccessSemantics:
             dataStoreDeleteBlock.includes('const int deleteStatus = ILibSimpleDataStore_DeleteEx(') &&
             dataStoreDeleteBlock.includes('return (deleteStatus != 0);') &&
@@ -185,7 +185,7 @@ function main() {
             source.includes('ServiceIdentitySnapshot postUpdateIdentity;') &&
             backupBlock.includes('ServiceDeploy_CaptureIdentitySnapshot(paths->dbPath, &tx->rollbackIdentity)') &&
             source.includes('ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity, 30000)') &&
-            source.includes('ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.rollbackIdentity, 30000)') &&
+            normalize(source).includes('g_HaveIncumbentPaths ? g_IncumbentPaths.dbPath : paths.dbPath, &tx.rollbackIdentity, 30000)') &&
             !source.includes('ServiceIdentitySnapshot expectedIdentity;'),
         stagedProvisioningCannotReplaceNodeId:
             loadProvisioningIdentityBlock.includes('preservedIdentity->nodeIdPresent != provisioningIdentity->nodeIdPresent') &&

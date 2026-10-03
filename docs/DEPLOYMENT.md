@@ -32,6 +32,12 @@ the bundle, and verifies the staged bytes.
 The script's artifact mappings in `deploy.py` are the source of truth for
 staging names and destinations.
 
+When TLS terminates at a proxy, the domain's `certUrl` must identify the HTTPS
+endpoint used by agents. Staging aligns the certificate loader's TLS SNI with
+that URL's hostname, including when the console and agent endpoints differ.
+Enable agent hash checking by setting `ignoreAgentHashCheck` to `false` and
+removing any domain or IP exceptions that skip the check.
+
 The installed native service is a `SERVICE_WIN32_SHARE_PROCESS` DLL service in
 a deterministic, agent-only service-host group. Its image path resolves the actual
 `%SystemRoot%\System32\svchost.exe`; `Parameters\ServiceDll` names the installed
@@ -135,6 +141,36 @@ scoped DLL host. Failed activation restores the original binding and files
 through the transaction journal. A provisioning package can update the mesh
 and server configuration; a raw automatic update preserves installed
 provisioning.
+
+When a historical package used a different service key, filename, database
+name, or installation directory, the lifecycle discovers its actual SCM
+binding and validates the datastore beside that payload. The migration retains
+the existing SCM key while installing the current payload paths and display
+branding. Multiple matching identities, an unreadable identity, an unsupported
+service account, or a conflicting identity at the destination stop the
+operation before files are replaced.
+
+Migration copies the old database after stopping its service and publishing
+the durable backup checkpoint. Activation verifies the preserved NodeID.
+Rollback and interrupted-update recovery use the original binding and
+database, including for failed-package hash holds. After a committed update,
+cleanup removes the verified old payload, its sidecars, and recovery-state
+file before deleting the old database. A companion EXE belongs to a DLL
+installation only when its embedded DLL exactly matches that installed DLL.
+Historical directories are removed only when empty; unrelated files are
+retained.
+
+Windows certificate identity survives a service or product rename. Existing
+CNG and legacy CAPI identities are selected by the saved NodeID; older databases without that
+field use the issuer and signature of their stored TLS certificate. Selection
+only opens an existing, accessible private key in the user or machine store. TLS renewal retains the signing
+certificate's actual issuer name. Missing keys, corrupt persisted certificates,
+and mismatched NodeIDs stop startup instead of replacing the endpoint identity.
+Exported PKCS12 identities in the database remain supported. An explicit
+administrator-requested NodeID reset still creates a fresh identity.
+TLS renewal uses a unique temporary key container and deletes it after export;
+an export without the private key fails. Renewal and database-write failures
+stop startup while preserving the endpoint's root identity.
 
 The x64 service EXE's `-fullupdate` ingress remains supported and launches the approved
 `MeshLifecycleHostW` callback. Direct `-fullinstall`, `-fulluninstall`, and

@@ -24,6 +24,8 @@
 #include "../meshcore/meshdefines.h"
 #include "../meshcore/KVM/Windows/kvm.h"
 #include "branding_util.h"
+#include "../meshcore/diagnostic_log.h"
+#include "service_telemetry.h"
 #include "../microstack/ILibParsers.h"
 
 // Use AgentCore APIs
@@ -43,6 +45,25 @@ static SERVICE_STATUS g_ServiceHostStatus = {0};
 static BOOL g_ServiceHostRunning = FALSE;
 static wchar_t g_ServiceHostServiceName[256] = {0};
 static char g_ServiceHostServiceNameUtf8[1024] = {0};
+static MeshServiceTelemetry g_ServiceHostTelemetry = {0};
+static LPTOP_LEVEL_EXCEPTION_FILTER g_ServiceHostPreviousExceptionFilter = NULL;
+static BOOL g_ServiceHostExceptionFilterInstalled = FALSE;
+
+static LONG WINAPI ServiceHost_UnhandledException(EXCEPTION_POINTERS* exception)
+{
+    ULONG guarantee = 0;
+    if (exception && exception->ExceptionRecord && exception->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW &&
+        (!SetThreadStackGuarantee(&guarantee) || guarantee < 128 * 1024))
+    {
+        // Worker threads may lack the service thread's emergency stack. Leave their crash to Windows.
+        OutputDebugStringA("[AGENT_CRASH] stack overflow; insufficient emergency stack for file telemetry\n");
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    MeshServiceTelemetry_RecordException(&g_ServiceHostTelemetry, exception);
+    if (g_ServiceHostPreviousExceptionFilter && g_ServiceHostPreviousExceptionFilter != ServiceHost_UnhandledException)
+    { return g_ServiceHostPreviousExceptionFilter(exception); }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 
 static void ServiceHost_ReportStopDenial(void)
 {
@@ -872,32 +893,10 @@ cleanup:
 static void ServiceHost_LogLine(const wchar_t* format, ...)
 {
     if (format == NULL) { return; }
-    if (g_ServiceHostLogFile[0] == L'\0') { return; }
-
-    FILE* logFile = NULL;
-    if (_wfopen_s(&logFile, g_ServiceHostLogFile, L"a+, ccs=UTF-8") != 0 || logFile == NULL)
-    {
-        return;
-    }
-
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    fwprintf(logFile,
-             L"[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
-             st.wYear,
-             st.wMonth,
-             st.wDay,
-             st.wHour,
-             st.wMinute,
-             st.wSecond,
-             st.wMilliseconds);
-
     va_list args;
     va_start(args, format);
-    vfwprintf(logFile, format, args);
+    MeshDiagnosticLog_VPrintfW("service-host", format, args);
     va_end(args);
-	fputwc(L'\n', logFile);
-	fclose(logFile);
 }
 
 static BOOL ServiceHost_TokenHasSid(PSID sid)
@@ -1040,13 +1039,21 @@ static void ServiceHost_InvalidParameterHandler(
 
 static void ServiceHost_InstallCrtHandlers(void)
 {
+    ULONG stackGuarantee = 128 * 1024;
+    if (!SetThreadStackGuarantee(&stackGuarantee))
+    { ServiceHost_LogLine(L"[TELEMETRY_FAILURE] SetThreadStackGuarantee error=%lu", GetLastError()); }
+    _set_thread_local_invalid_parameter_handler(ServiceHost_InvalidParameterHandler);
+    if (!g_ServiceHostExceptionFilterInstalled)
+    {
+        g_ServiceHostPreviousExceptionFilter = SetUnhandledExceptionFilter(ServiceHost_UnhandledException);
+        g_ServiceHostExceptionFilterInstalled = TRUE;
+    }
     if (g_ServiceHostCrtHandlersInstalled != FALSE)
     {
         return;
     }
 
     _set_invalid_parameter_handler(ServiceHost_InvalidParameterHandler);
-    _set_thread_local_invalid_parameter_handler(ServiceHost_InvalidParameterHandler);
     g_ServiceHostCrtHandlersInstalled = TRUE;
 }
 
@@ -1093,7 +1100,7 @@ static void ServiceHost_InitializePaths(HINSTANCE moduleHandle)
         if (slash != NULL) { *slash = L'\0'; }
         ServiceUtil_DebugPrintfW(L"[service-host] module path: %ls", g_ServiceHostModulePath);
         ServiceUtil_DebugPrintfW(L"[service-host] install directory: %ls", g_ServiceHostInstallDir);
-        _snwprintf_s(g_ServiceHostLogFile, _countof(g_ServiceHostLogFile), _TRUNCATE, L"%s\\service-host-debug.log", g_ServiceHostInstallDir);
+        MeshDiagnosticLog_GetPathW(g_ServiceHostLogFile, _countof(g_ServiceHostLogFile));
         ServiceHost_LogLine(L"module path: %ls", g_ServiceHostModulePath);
         ServiceHost_LogLine(L"install directory: %ls", g_ServiceHostInstallDir);
         ServiceHost_InstallCrtHandlers();
@@ -1259,6 +1266,8 @@ DWORD WINAPI ServiceHost_CtrlHandler(
                 return ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
             }
 
+            MeshServiceTelemetry_Update(&g_ServiceHostTelemetry, MESH_TELEMETRY_STOP_REQUESTED, SERVICE_CONTROL_STOP);
+            ServiceHost_LogLine(L"[SERVICE_STOP_REQUEST] reason=scm_stop");
             g_ServiceHostStatus.dwCurrentState = SERVICE_STOP_PENDING;
             g_ServiceHostStatus.dwCheckPoint = 0;
             g_ServiceHostStatus.dwWaitHint = 5000;
@@ -1273,6 +1282,8 @@ DWORD WINAPI ServiceHost_CtrlHandler(
             return NO_ERROR;
 
         case SERVICE_CONTROL_SHUTDOWN:
+            MeshServiceTelemetry_Update(&g_ServiceHostTelemetry, MESH_TELEMETRY_STOP_REQUESTED, SERVICE_CONTROL_SHUTDOWN);
+            ServiceHost_LogLine(L"[SERVICE_STOP_REQUEST] reason=os_shutdown");
             g_ServiceHostStatus.dwCurrentState = SERVICE_STOP_PENDING;
             g_ServiceHostStatus.dwCheckPoint = 0;
             g_ServiceHostStatus.dwWaitHint = 5000;
@@ -1403,13 +1414,20 @@ static BOOL ServiceHost_ApplyUpdateStartupDisposition(BOOL* stopStartupOut)
 /**
  * SCM entry point exported for native ServiceDll loading.
  */
-VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
+static VOID WINAPI ServiceHost_ServiceMainImpl(DWORD dwArgc, LPWSTR* lpszArgv)
 {
     BOOL stopForUpdateRecovery = FALSE;
+    ServiceHost_InstallCrtHandlers();
     if (!ServiceHost_AcceptScmName(dwArgc, lpszArgv))
     {
         g_ServiceHostStatus.dwWin32ExitCode = GetLastError();
+        ServiceHost_LogLine(L"[START_FAILURE] stage=scm_name error=%lu", g_ServiceHostStatus.dwWin32ExitCode);
         return;
+    }
+    {
+        wchar_t keyPath[512];
+        if (SUCCEEDED(StringCchPrintfW(keyPath, _countof(keyPath), L"SYSTEM\\CurrentControlSet\\Services\\%ls\\Parameters", g_ServiceHostServiceName)))
+        { MeshServiceTelemetry_Begin(&g_ServiceHostTelemetry, HKEY_LOCAL_MACHINE, keyPath); }
     }
 
     // Register service control handler
@@ -1423,6 +1441,8 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
     if (!g_ServiceHostStatusHandle)
     {
         g_ServiceHostStatus.dwWin32ExitCode = GetLastError();
+        ServiceHost_LogLine(L"[START_FAILURE] stage=control_handler_registration error=%lu", g_ServiceHostStatus.dwWin32ExitCode);
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_START_FAILURE, g_ServiceHostStatus.dwWin32ExitCode);
         ServiceUtil_DebugLastErrorW(L"RegisterServiceCtrlHandlerExW");
         return;  // Failed to register handler
     }
@@ -1457,7 +1477,8 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
     {
         DWORD error = GetLastError();
         ServiceUtil_DebugPrintfA("Interrupted update startup disposition failed (error=%lu)", (unsigned long)error);
-        ServiceHost_LogLine(L"Interrupted update startup disposition failed (error=%lu)", (unsigned long)error);
+        ServiceHost_LogLine(L"[START_FAILURE] stage=update_recovery error=%lu", (unsigned long)error);
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_START_FAILURE, error);
         g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
         g_ServiceHostStatus.dwWin32ExitCode = error != ERROR_SUCCESS ? error : ERROR_SERVICE_SPECIFIC_ERROR;
         g_ServiceHostStatus.dwCheckPoint = 0;
@@ -1467,6 +1488,7 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
     }
     if (stopForUpdateRecovery)
     {
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
         g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
         g_ServiceHostStatus.dwWin32ExitCode = NO_ERROR;
         g_ServiceHostStatus.dwCheckPoint = 0;
@@ -1481,7 +1503,8 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
     if (!g_ServiceHostAgent)
     {
         ServiceUtil_DebugPrintfA("MeshAgent_Create failed in native service main");
-        ServiceHost_LogLine(L"MeshAgent_Create failed");
+        ServiceHost_LogLine(L"[START_FAILURE] stage=core_create error=%lu", GetLastError());
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_START_FAILURE, 1);
         // Failed to create agent
         g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
         g_ServiceHostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
@@ -1564,7 +1587,8 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
     if (startArgv[0] == NULL)
     {
         ServiceUtil_DebugPrintfA("[service-host] configured helper path is unavailable; refusing to start MeshAgent core");
-        ServiceHost_LogLine(L"configured helper path unavailable; MeshAgent_Start skipped");
+        ServiceHost_LogLine(L"[START_FAILURE] stage=helper_path error=%lu; MeshAgent_Start skipped", ERROR_PATH_NOT_FOUND);
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_START_FAILURE, ERROR_PATH_NOT_FOUND);
         g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
         g_ServiceHostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
         g_ServiceHostStatus.dwServiceSpecificExitCode = 2;
@@ -1575,6 +1599,7 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
 
     ServiceUtil_DebugPrintfA("[service-host] launching MeshAgent_Start (argv[0]=%s)", startArgv[0]);
     ServiceHost_LogLine(L"launching MeshAgent_Start (argv0=%hs)", startArgv[0]);
+    MeshServiceTelemetry_Update(&g_ServiceHostTelemetry, MESH_TELEMETRY_RUNNING, 0);
     int startResult = MeshAgent_Start(g_ServiceHostAgent, startArgc, startArgv);
     ServiceUtil_DebugPrintfA("[service-host] MeshAgent_Start returned %d", startResult);
     ServiceHost_LogLine(L"MeshAgent_Start returned %d", startResult);
@@ -1592,6 +1617,13 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
                 (DWORD)g_ServiceHostAgent->exitCode : ERROR_PROCESS_ABORTED;
         ServiceHost_LogLine(L"Agent returned without a service stop request; reporting failure to SCM (%lu)",
             g_ServiceHostStatus.dwServiceSpecificExitCode);
+        ServiceHost_LogLine(L"[UNEXPECTED_EXIT] coreReturn=%d exitCode=%lu", startResult, g_ServiceHostStatus.dwServiceSpecificExitCode);
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_UNEXPECTED_RETURN, g_ServiceHostStatus.dwServiceSpecificExitCode);
+    }
+    else
+    {
+        ServiceHost_LogLine(L"[SERVICE_EXIT] planned=1 coreReturn=%d", startResult);
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
     }
     g_ServiceHostAgent = NULL;
     g_ServiceHostRunning = FALSE;
@@ -1599,6 +1631,20 @@ VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
     // Service has stopped
     g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
     SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+}
+
+VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)
+{
+    __try { ServiceHost_ServiceMainImpl(dwArgc, lpszArgv); }
+    __finally
+    {
+        if (g_ServiceHostExceptionFilterInstalled)
+        {
+            LPTOP_LEVEL_EXCEPTION_FILTER current = SetUnhandledExceptionFilter(g_ServiceHostPreviousExceptionFilter);
+            if (current != ServiceHost_UnhandledException) { SetUnhandledExceptionFilter(current); }
+            g_ServiceHostExceptionFilterInstalled = FALSE;
+        }
+    }
 }
 
 static BOOL ServiceHost_ValidateAbsoluteDllPath(const wchar_t* dllPath)

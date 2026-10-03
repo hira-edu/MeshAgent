@@ -22,6 +22,7 @@ limitations under the License.
 #include <windows.h>
 #include <stdio.h>
 #include <wchar.h>
+#include <limits.h>
 #include <wincrypt.h>
 
 extern "C"
@@ -127,7 +128,7 @@ int __fastcall wincrypto_getregistryA(char* name, char** value)
 
 int  __fastcall wincrypto_isopen(wincrypto_object j)
 {
-	return (((wincrypto_data*)j)->hProv != NULL && ((wincrypto_data*)j)->hCertStore != NULL && ((wincrypto_data*)j)->certCtx != NULL);
+	return (j != NULL && ((wincrypto_data*)j)->hCertStore != NULL && ((wincrypto_data*)j)->certCtx != NULL);
 }
 
 void __fastcall wincrypto_close(wincrypto_object j)
@@ -136,6 +137,47 @@ void __fastcall wincrypto_close(wincrypto_object j)
 	if(((wincrypto_data*)j)->hProv != NULL) { NCryptFreeObject(((wincrypto_data*)j)->hProv); }
 	if(((wincrypto_data*)j)->hCertStore != NULL) { CertCloseStore(((wincrypto_data*)j)->hCertStore, 0); }
 	ILibMemory_Free(j);
+}
+
+wincrypto_object __fastcall wincrypto_open_existing(wincrypto_cert_match match, void* user)
+{
+	wincrypto_data* ret;
+	PCCERT_CONTEXT candidate = NULL;
+	DWORD locations[] = {CERT_SYSTEM_STORE_CURRENT_USER, CERT_SYSTEM_STORE_LOCAL_MACHINE};
+	if (match == NULL) { return NULL; }
+	ret = (wincrypto_data*)ILibMemory_SmartAllocate(sizeof(wincrypto_data));
+	ZeroMemory(ret, sizeof(*ret));
+	for (size_t location = 0; location < _countof(locations); ++location)
+	{
+		ret->hCertStore = CertOpenStore(CERT_STORE_PROV_SYSTEM, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, NULL,
+			locations[location] | CERT_STORE_OPEN_EXISTING_FLAG | CERT_STORE_READONLY_FLAG, L"MY");
+		if (ret->hCertStore == NULL) { continue; }
+		while ((candidate = CertEnumCertificatesInStore(ret->hCertStore, candidate)) != NULL)
+		{
+			HCRYPTPROV_OR_NCRYPT_KEY_HANDLE key = NULL;
+			DWORD spec = 0;
+			BOOL release = FALSE;
+			BOOL acquired;
+			if (candidate->cbCertEncoded > INT_MAX || !match(candidate->pbCertEncoded, (int)candidate->cbCertEncoded, user)) { continue; }
+			acquired = CryptAcquireCertificatePrivateKey(candidate, CRYPT_ACQUIRE_SILENT_FLAG | CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG,
+				NULL, &key, &spec, &release);
+			if (release && key != NULL)
+			{
+				if (spec == CERT_NCRYPT_KEY_SPEC) { NCryptFreeObject(key); }
+				else { CryptReleaseContext(key, 0); }
+			}
+			if (!acquired || (spec != CERT_NCRYPT_KEY_SPEC && spec != AT_KEYEXCHANGE && spec != AT_SIGNATURE)) { continue; }
+			ret->certCtx = CertDuplicateCertificateContext(candidate);
+			if (ret->certCtx != NULL)
+			{
+				CertFreeCertificateContext(candidate);
+				return ret;
+			}
+		}
+		CertCloseStore(ret->hCertStore, 0); ret->hCertStore = NULL;
+	}
+	wincrypto_close(ret);
+	return NULL;
 }
 
 wincrypto_object __fastcall wincrypto_open(int newcert, char *rootSubject)
@@ -418,7 +460,7 @@ int __fastcall wincrypto_sign(wincrypto_object j, char* data, int len, char** si
 	if (!CryptAcquireCertificatePrivateKey(((wincrypto_data*)j)->certCtx, CRYPT_ACQUIRE_SILENT_FLAG | CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG, NULL, &hKeyNode, &hKeyNodeSpec, &hFreeKeyNode)) { r = 10; goto end; }
 	SignerEncodeInfo.hNCryptKey = hKeyNode;
 	SignerEncodeInfo.pCertInfo = ((wincrypto_data*)j)->certCtx->pCertInfo;
-	SignerEncodeInfo.dwKeySpec = AT_KEYEXCHANGE;
+	SignerEncodeInfo.dwKeySpec = hKeyNodeSpec;
 	SignerEncodeInfo.HashAlgorithm = HashAlgorithm;
 	SignerEncodeInfo.pvHashAuxInfo = NULL;
 
@@ -536,19 +578,18 @@ int  __fastcall wincrypto_mkCert(wincrypto_object j, char* rootSubject, wchar_t*
 	DWORD hKeyNodeSpec = 0;
 	BOOL hFreeKeyNode = FALSE;
 	NCRYPT_KEY_HANDLE hNewKey = NULL;
+	BOOL newKeyFinalized = FALSE;
+	BYTE containerNonce[16];
+	wchar_t containerName[64] = L"MeshAgent-TLS-";
 	DWORD KeyLength = 3072;
 	DWORD KeyPolicy = NCRYPT_ALLOW_EXPORT_FLAG;
 	int len = 0;
-	HCRYPTKEY hKey = NULL;
-	PCCERT_CONTEXT certCtx = NULL;
-	HCRYPTPROV hProv = NULL;
+	NCRYPT_PROV_HANDLE hProv = NULL;
     CRYPT_KEY_PROV_INFO keyProviderInfo;
 
 	// Issuer and cert subject names
 	CERT_NAME_BLOB sib1;
 	CERT_NAME_BLOB sib2;
-	PBYTE subject1Encoded = NULL;
-	DWORD subject1EncodedSize;
 	PBYTE subject2Encoded = NULL;
 	DWORD subject2EncodedSize = 0;
 
@@ -575,8 +616,9 @@ int  __fastcall wincrypto_mkCert(wincrypto_object j, char* rootSubject, wchar_t*
 
 	HCERTSTORE hCertStore = NULL;
     PCCERT_CONTEXT certContext = NULL;
-	CRYPT_DATA_BLOB pfxBlob;
-    DWORD pfxExportFlags = EXPORT_PRIVATE_KEYS; // | REPORT_NO_PRIVATE_KEY | REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY;
+	CRYPT_DATA_BLOB pfxBlob = {0};
+    DWORD providerInfoBytes = 0;
+    DWORD pfxExportFlags = EXPORT_PRIVATE_KEYS | REPORT_NO_PRIVATE_KEY | REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY;
 
 	// Check that we have open context
 	if (!wincrypto_isopen(j)) { return(0); }
@@ -585,12 +627,23 @@ int  __fastcall wincrypto_mkCert(wincrypto_object j, char* rootSubject, wchar_t*
 	ZeroMemory(&kpi, sizeof(kpi));
 	ZeroMemory(&certExtension, sizeof(certExtension));
 
-	// Generate node RSA key-pair
+	// Each renewal owns its temporary container; never overwrite another renewal.
+	if (!NT_SUCCESS(BCryptGenRandom(NULL, containerNonce, sizeof(containerNonce), BCRYPT_USE_SYSTEM_PREFERRED_RNG))) goto end;
+	{
+		static const wchar_t hex[] = L"0123456789abcdef";
+		size_t prefix = wcslen(containerName);
+		for (size_t i = 0; i < sizeof(containerNonce); ++i)
+		{
+			containerName[prefix + i * 2] = hex[containerNonce[i] >> 4];
+			containerName[prefix + i * 2 + 1] = hex[containerNonce[i] & 15];
+		}
+		containerName[prefix + sizeof(containerNonce) * 2] = 0;
+	}
 	if (FAILED(NCryptOpenStorageProvider(&hProv, MS_KEY_STORAGE_PROVIDER, 0))) goto end;
 #ifdef _CONSOLE
-    if (FAILED(NCryptCreatePersistedKey(hProv, &hNewKey, BCRYPT_RSA_ALGORITHM, L"MeshDummy", AT_KEYEXCHANGE, NCRYPT_OVERWRITE_KEY_FLAG))) goto end;
+    if (FAILED(NCryptCreatePersistedKey(hProv, &hNewKey, BCRYPT_RSA_ALGORITHM, containerName, AT_KEYEXCHANGE, 0))) goto end;
 #else
-    if (FAILED(NCryptCreatePersistedKey(hProv, &hNewKey, BCRYPT_RSA_ALGORITHM, L"MeshDummy", AT_KEYEXCHANGE, NCRYPT_MACHINE_KEY_FLAG | NCRYPT_OVERWRITE_KEY_FLAG))) goto end;
+    if (FAILED(NCryptCreatePersistedKey(hProv, &hNewKey, BCRYPT_RSA_ALGORITHM, containerName, AT_KEYEXCHANGE, NCRYPT_MACHINE_KEY_FLAG))) goto end;
 #endif
 	if (FAILED(NCryptSetProperty(hNewKey, NCRYPT_LENGTH_PROPERTY, (PBYTE)&KeyLength, 4, NCRYPT_PERSIST_FLAG | NCRYPT_SILENT_FLAG))) {
 		KeyLength = 2048; // If 3072 is not supported, go down to 2048.
@@ -598,16 +651,15 @@ int  __fastcall wincrypto_mkCert(wincrypto_object j, char* rootSubject, wchar_t*
 	}
     if (FAILED(NCryptSetProperty(hNewKey, NCRYPT_EXPORT_POLICY_PROPERTY, (PBYTE)&KeyPolicy, 4, NCRYPT_PERSIST_FLAG | NCRYPT_SILENT_FLAG))) goto end;
     if (FAILED(NCryptFinalizeKey(hNewKey, NCRYPT_SILENT_FLAG))) goto end;
+	newKeyFinalized = TRUE;
 	if (!CryptExportPublicKeyInfo(hNewKey, AT_KEYEXCHANGE, X509_ASN_ENCODING, NULL, &pkSize)) goto end;
 	if ((pkInfo = (PCERT_PUBLIC_KEY_INFO)malloc(pkSize)) == NULL) ILIBCRITICALEXIT(254);
 	if (!CryptExportPublicKeyInfo(hNewKey, AT_KEYEXCHANGE, X509_ASN_ENCODING, pkInfo, &pkSize)) goto end;
 
-	// Create cert issuer string in format the CSP understands
-	if (!CertStrToName(X509_ASN_ENCODING, (LPCTSTR)rootSubject, CERT_X500_NAME_STR, NULL, NULL, &subject1EncodedSize, NULL)) goto end;
-	if ((subject1Encoded = (PBYTE)malloc(subject1EncodedSize)) == NULL) ILIBCRITICALEXIT(254);
-	if (!CertStrToName(X509_ASN_ENCODING, (LPCTSTR)rootSubject, CERT_X500_NAME_STR, NULL, subject1Encoded, &subject1EncodedSize, NULL)) goto end;
-	sib1.cbData = subject1EncodedSize;
-	sib1.pbData = subject1Encoded;
+	// The signing certificate owns the issuer name even after product renaming.
+	(void)rootSubject;
+	if (!wincrypto_isopen(j)) goto end;
+	sib1 = ((wincrypto_data*)j)->certCtx->pCertInfo->Subject;
 
 	// Create cert subject string in format the CSP understands
 	if (!CertStrToNameW(X509_ASN_ENCODING, subject, CERT_X500_NAME_STR, NULL, NULL, &subject2EncodedSize, NULL)) goto end;
@@ -691,9 +743,9 @@ int  __fastcall wincrypto_mkCert(wincrypto_object j, char* rootSubject, wchar_t*
 
 	// Sign the certificate with the MeshAgent private key
 	if (!CryptAcquireCertificatePrivateKey(((wincrypto_data*)j)->certCtx, CRYPT_ACQUIRE_SILENT_FLAG | CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG, NULL, &hKeyNode, &hKeyNodeSpec, &hFreeKeyNode)) goto end;
-	if (!CryptSignAndEncodeCertificate(hKeyNode, AT_KEYEXCHANGE, X509_ASN_ENCODING, X509_CERT_TO_BE_SIGNED, (LPVOID)&certInfo, &(certInfo.SignatureAlgorithm), NULL, NULL, &certSize)) goto end;
+	if (!CryptSignAndEncodeCertificate(hKeyNode, hKeyNodeSpec, X509_ASN_ENCODING, X509_CERT_TO_BE_SIGNED, (LPVOID)&certInfo, &(certInfo.SignatureAlgorithm), NULL, NULL, &certSize)) goto end;
 	if ((certData = (BYTE*)malloc(certSize)) == NULL) ILIBCRITICALEXIT(254);
-	if (!CryptSignAndEncodeCertificate(hKeyNode, AT_KEYEXCHANGE, X509_ASN_ENCODING, X509_CERT_TO_BE_SIGNED, (LPVOID)&certInfo, &(certInfo.SignatureAlgorithm), NULL, certData, &certSize)) goto end;
+	if (!CryptSignAndEncodeCertificate(hKeyNode, hKeyNodeSpec, X509_ASN_ENCODING, X509_CERT_TO_BE_SIGNED, (LPVOID)&certInfo, &(certInfo.SignatureAlgorithm), NULL, certData, &certSize)) goto end;
 
     // Open a new temporary store.
     if ((hCertStore = CertOpenStore(CERT_STORE_PROV_MEMORY, X509_ASN_ENCODING, NULL, CERT_STORE_CREATE_NEW_FLAG, NULL)) == NULL) goto end;
@@ -703,7 +755,7 @@ int  __fastcall wincrypto_mkCert(wincrypto_object j, char* rootSubject, wchar_t*
 
     // Link keypair to certificate (without this the keypair gets "lost" on export).
     ZeroMemory(&keyProviderInfo, sizeof(keyProviderInfo));
-    keyProviderInfo.pwszContainerName = L"MeshDummy";
+    keyProviderInfo.pwszContainerName = containerName;
     keyProviderInfo.pwszProvName = MS_KEY_STORAGE_PROVIDER;
     keyProviderInfo.dwProvType = 0;
 #ifdef _CONSOLE
@@ -717,26 +769,37 @@ int  __fastcall wincrypto_mkCert(wincrypto_object j, char* rootSubject, wchar_t*
     // Calculate size required.
     ZeroMemory(&pfxBlob, sizeof(pfxBlob));
     if (!PFXExportCertStore(hCertStore, &pfxBlob, password, pfxExportFlags)) goto end;
+    if (!CertGetCertificateContextProperty(certContext, CERT_KEY_PROV_INFO_PROP_ID, NULL, &providerInfoBytes)) goto end;
 
     // Export to PFX
 	if ((pfxBlob.pbData = (BYTE*)malloc(pfxBlob.cbData)) == NULL) ILIBCRITICALEXIT(254);
     if (!PFXExportCertStore(hCertStore, &pfxBlob, password, pfxExportFlags)) goto end;
+    if (!CertGetCertificateContextProperty(certContext, CERT_KEY_PROV_INFO_PROP_ID, NULL, &providerInfoBytes)) goto end;
 	*data = (char*)pfxBlob.pbData;
 	len = pfxBlob.cbData;
 
 end:
 	// Clean up everything
-	if (hKey != NULL) NCryptFreeObject(hKey);
-	if (hProv != NULL) NCryptFreeObject(hProv);
 	if (hFreeKeyNode && hKeyNode != NULL) { if (hKeyNodeSpec == CERT_NCRYPT_KEY_SPEC) NCryptFreeObject(hKeyNode); else CryptReleaseContext(hKeyNode, 0); }
 	if (pkInfo != NULL) free(pkInfo);
-	if (hKey != NULL) CryptDestroyKey(hKey);
-	if (subject1Encoded != NULL) free(subject1Encoded);
 	if (subject2Encoded != NULL) free(subject2Encoded);
-	if (certCtx != NULL) CertFreeCertificateContext(certCtx);
+	if (certContext != NULL) CertFreeCertificateContext(certContext);
 	if (hCertStore != NULL) CertCloseStore(hCertStore, 0);
+	if (certData != NULL) free(certData);
 	if (pbPolicyInfo != NULL) free(pbPolicyInfo);
 	if (pbPolicyInfo2 != NULL) free(pbPolicyInfo2);
+	if (hNewKey != NULL)
+	{
+		if (newKeyFinalized)
+		{
+			SECURITY_STATUS status = NCryptDeleteKey(hNewKey, NCRYPT_SILENT_FLAG);
+			if (status == ERROR_SUCCESS) { hNewKey = NULL; }
+			else { len = 0; SetLastError(status); }
+		}
+		if (hNewKey != NULL) NCryptFreeObject(hNewKey);
+	}
+	if (hProv != NULL) NCryptFreeObject(hProv);
+	if (len == 0 && pfxBlob.pbData != NULL) { free(pfxBlob.pbData); *data = NULL; }
 
 	return len;
 }

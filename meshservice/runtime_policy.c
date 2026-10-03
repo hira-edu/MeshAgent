@@ -15,6 +15,7 @@
 
 #include "runtime_policy.h"
 #include "runtime_core.h"
+#include "../meshcore/diagnostic_log.h"
 #include "branding_util.h"
 #include "service_monitor.h"
 #include "config_registry.h"
@@ -121,8 +122,7 @@ BOOL RuntimePolicy_Init(const RuntimePolicyConfig* config)
         wcscpy_s(g_RuntimePolicy.config.serviceName, 64, SERVICE_FALLBACK_SERVICE_NAME);
         ServiceUtil_GetDataFilePathW(g_RuntimePolicy.config.serviceName, L"state.json",
                                   g_RuntimePolicy.config.stateFilePath, MAX_PATH);
-        ServiceUtil_GetDataFilePathW(g_RuntimePolicy.config.serviceName, L"runtime-policy.log",
-                                  g_RuntimePolicy.config.logFilePath, MAX_PATH);
+        MeshDiagnosticLog_GetPathW(g_RuntimePolicy.config.logFilePath, MAX_PATH);
     }
 
     /* Try to load existing state */
@@ -1089,21 +1089,7 @@ static BOOL RestoreRegistryValue(const StateEntry* entry)
 
 static void LogEvent(RuntimePolicyEventType eventType, DWORD featureId, const WCHAR* message)
 {
-    FILE* fp;
-    SYSTEMTIME st;
-
-    GetLocalTime(&st);
-
-    /* Log to file */
-    if (g_RuntimePolicy.config.logFilePath[0]) {
-        if (_wfopen_s(&fp, g_RuntimePolicy.config.logFilePath, L"a") == 0 && fp) {
-            fwprintf(fp, L"[%04d-%02d-%02d %02d:%02d:%02d] Event=%d Feature=0x%08X: %s\n",
-                     st.wYear, st.wMonth, st.wDay,
-                     st.wHour, st.wMinute, st.wSecond,
-                     eventType, featureId, message);
-            fclose(fp);
-        }
-    }
+    MeshDiagnosticLog_PrintfW("runtime-policy", L"Event=%d Feature=0x%08X: %ls", eventType, featureId, message);
 
     /* Invoke callback */
     if (g_RuntimePolicy.eventCallback) {

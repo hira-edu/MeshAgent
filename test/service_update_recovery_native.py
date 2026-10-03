@@ -68,7 +68,7 @@ typedef void* HANDLE;
 #define _wcsicmp wcscmp
 #define UNREFERENCED_PARAMETER(p) ((void)p)
 typedef struct { wchar_t installDir[MAX_PATH], logsDir[MAX_PATH], exePath[MAX_PATH], dllPath[MAX_PATH], confPath[MAX_PATH], dbPath[MAX_PATH]; } ServiceInstallPaths;
-typedef struct { int unused; } ServiceIdentitySnapshot;
+typedef struct { int unused; BOOL nodeIdPresent; } ServiceIdentitySnapshot;
 typedef struct { DWORD dwStartType, dwServiceType; } binding_config;
 typedef struct { binding_config* config; BOOL running, legacy; } ServiceBindingSnapshot;
 typedef struct {
@@ -94,6 +94,16 @@ static DWORD retainedPhase;
 static mesh_persistence_profile_t profile;
 static binding_config savedConfig;
 static ServiceBindingSnapshot savedBinding;
+static ServiceInstallPaths g_IncumbentPaths;
+static BOOL g_HaveIncumbentPaths;
+static int migratedCopies, copyFailure, identityCaptureFailure, failureHolds;
+static long g_MeshDiagnosticLogDisabled;
+#define InterlockedExchange(p,v) (*(p)=(v))
+static BOOL record_hold(const ServiceInstallPaths* paths) {
+    assert(!running);
+    assert(!g_HaveIncumbentPaths || !wcscmp(paths->dbPath,L"old-identity.db"));
+    ++failureHolds; return TRUE;
+}
 static void log_event(const wchar_t* fmt, ...) { (void)fmt; }
 static BOOL mock_paths(ServiceInstallPaths* p) {
     memset(p, 0, sizeof(*p)); wcscpy(p->exePath,L"agent.exe"); wcscpy(p->dllPath,L"agent.dll"); wcscpy(p->dbPath,L"agent.db"); return TRUE;
@@ -125,8 +135,8 @@ static BOOL commit(void) { assert(!running); liveVersion = failAt == 2 || failAt
 static BOOL registration(void) { bindingVersion = 3; installed = 1; return failAt != 11; }
 static BOOL rollback(void) {
     assert(!running); ++rolledBack; if (failAt == 3) return FALSE;
-    liveVersion = originalExists ? 1 : 0;
-    if (originalExists) return restore_binding();
+    liveVersion = (originalExists || g_HaveIncumbentPaths) ? 1 : 0;
+    if (originalExists || g_HaveIncumbentPaths) return restore_binding();
     bindingVersion = 0; installed = 0; return TRUE;
 }
 static BOOL stop_service(void) { ++stops; if (failAt == 9) return FALSE; running = 0; return TRUE; }
@@ -157,6 +167,10 @@ static BOOL reconcile(ServiceUpdateTransaction* tx) {
     if (failAt == 15) return FALSE;
     running = 1; ++discarded; ++deletedArtifacts; retainedPhase = 0; return TRUE;
 }
+static BOOL migration_copy(void) {
+    assert(!running && retainedPhase == SERVICE_JOURNAL_BACKED_UP);
+    ++migratedCopies; return !copyFailure;
+}
 #define ServiceDeploy_LogInstallEvent log_event
 #define MeshConfig_GetPersistence() (&profile)
 #define ServiceDeploy_GetInstallPaths(p) mock_paths(p)
@@ -180,6 +194,10 @@ static BOOL reconcile(ServiceUpdateTransaction* tx) {
 #define ServiceDeploy_WaitForExpectedIdentity(...) (failAt != 8 || liveVersion == 1)
 #define ServiceDeploy_FlushUpdateFiles(...) (failAt != 18 || liveVersion == 1)
 #define ServiceDeploy_RefreshQuiescedFileCheckpoint(...) (failAt != 19)
+#define ServiceDeploy_BindingHasMovedRoot(...) g_HaveIncumbentPaths
+#define ServiceDeploy_CaptureIdentitySnapshot(p,s) ((s)->nodeIdPresent=TRUE,!identityCaptureFailure)
+#define ServiceDeploy_CopyFileOverwrite(a,b) migration_copy()
+#define ServiceDeploy_RecordUpdateActivationFailureHold(p) record_hold(p)
 #define ServiceDeploy_WriteTransactionPhase(tx,n,p) publish(tx,p)
 #define ServiceDeploy_ResolveUpdateTransaction(tx,n) resolve(tx)
 #define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx) reconcile(tx)
@@ -236,6 +254,19 @@ static void install_case(int config, int exists, int ownProcess, int failure) {
     if (result) assert(prepared == 1 && running && liveVersion == 3);
     packageHasConfig = 1;
 }
+static void migration_case(int copyFail, int identityFail, int commitFail) {
+    reset(commitFail?2:0,1,1,3,1);
+    originalExists=0; /* New branding root is empty; old service/DB still exist. */
+    g_HaveIncumbentPaths=TRUE;wcscpy(g_IncumbentPaths.dbPath,L"old-identity.db");
+    copyFailure=copyFail;identityCaptureFailure=identityFail;migratedCopies=failureHolds=0;
+    BOOL result=ServiceDeploy_ApplyUpdateFlow(L"new.exe",L"new.dll",FALSE);
+    assert(result == !(copyFail||identityFail||commitFail));
+    assert(migratedCopies == !identityFail && mixedStarts==0);
+    if(copyFail||identityFail||commitFail)assert(installed&&running&&bindingVersion==1&&rolledBack==1&&failureHolds==1);
+    else assert(installed&&running&&bindingVersion==3);
+    g_HaveIncumbentPaths=FALSE;copyFailure=identityCaptureFailure=0;
+    memset(&g_IncumbentPaths,0,sizeof(g_IncumbentPaths));
+}
 int main(void) {
     int count = 0;
     for (int own = 0; own < 2; ++own) {
@@ -258,6 +289,7 @@ int main(void) {
     }
     install_case(1,0,0,0); install_case(0,0,0,0); install_case(1,0,0,2); count += 3;
     packageHasConfig = 0; run_case(0,1,1,3,0); ++count; /* Binary-only update retains installed identity. */
+    migration_case(0,0,0);migration_case(1,0,0);migration_case(0,1,0);migration_case(0,0,1);count+=4;
     printf("Service transaction native orchestration: %d cases passed\n",count);
     return 0;
 }
@@ -318,8 +350,14 @@ static Config config={16,3};static ServiceBindingSnapshot binding={&config,TRUE,
 static ServiceJournalRecord saved;
 static int loadOk,journalExists,unknownBackup,unknownBinding,missingBackup,failRestore,failReconcile,failCleanup,failPublish;
 static int mutations,stops,starts,restores,rollbacks,reconciles,deleted,phaseWritten;static DWORD error;
+static int movedRoot, missingOldIdentity, holds, identityChecks;
 static void log_event(const wchar_t* f,...){(void)f;}
-static BOOL mock_recovery_paths(ServiceInstallPaths* p){memset(p,0,sizeof(*p));return TRUE;}
+static BOOL mock_recovery_paths(ServiceInstallPaths* p){memset(p,0,sizeof(*p));wcscpy(p->dbPath,L"current.db");return TRUE;}
+static BOOL binding_payload(wchar_t* p){wcscpy(p,L"old-agent.exe");return TRUE;}
+static BOOL original_paths(ServiceInstallPaths* p){memset(p,0,sizeof(*p));wcscpy(p->dbPath,L"old.db");return !missingOldIdentity;}
+static BOOL capture_identity(const wchar_t* p,int* identity){*identity=1;return wcscmp(p,L"old.db")||!missingOldIdentity;}
+static BOOL record_hold(const ServiceInstallPaths* p){assert(stops&&!starts);assert(!movedRoot||!wcscmp(p->dbPath,L"old.db"));++holds;return TRUE;}
+static BOOL wait_identity(const wchar_t* p){assert(!movedRoot||!wcscmp(p,L"old.db"));++identityChecks;return TRUE;}
 static BOOL txpaths(ServiceUpdateTransaction* t){wcscpy(t->journalPath,L"journal");wcscpy(t->stageDir,L"stage");wcscpy(t->backupDir,L"backup");wcscpy(t->backupExePath,L"exe");return TRUE;}
 static BOOL load(ServiceJournalRecord** out){*out=journalExists?&saved:NULL;return loadOk;}
 static BOOL capture_ok(void){return !unknownBinding;}
@@ -342,6 +380,10 @@ static int mock_snwprintf(wchar_t* out,size_t size,size_t trunc,const wchar_t* f
 #define ServiceJournal_Free(...) ((void)0)
 #define ServiceDeploy_TransactionPathsSafe(...) TRUE
 #define ServiceBinding_SharedPayloadSupported(...) TRUE
+#define ServiceDeploy_SuspendOriginalRestarters(...) TRUE
+#define ServiceDeploy_BindingHasMovedRoot(...) movedRoot
+#define ServiceDeploy_BindingPayloadPath(b,p,n) binding_payload(p)
+#define ServiceDeploy_FindIncumbentPaths(payload,p) original_paths(p)
 #define ServiceDeploy_TransactionDirectoryEmpty(...) (!unknownBackup)
 #define ServiceBinding_ImageSupported(n,c,e,d,l) (*(l)=FALSE,TRUE)
 #define ServiceBinding_QueryExists(n,e) (*(e)=TRUE,TRUE)
@@ -356,9 +398,9 @@ static int mock_snwprintf(wchar_t* out,size_t size,size_t trunc,const wchar_t* f
 #define ServiceHost_UnregisterServiceHostService(...) restore()
 #define ServiceDeploy_RollbackUpdateTransaction(...) rollback()
 #define ServiceDeploy_StartServiceHostServiceAndWait(...) start()
-#define ServiceDeploy_CaptureIdentitySnapshot(...) TRUE
-#define ServiceDeploy_WaitForExpectedIdentity(...) TRUE
-#define ServiceDeploy_RecordUpdateActivationFailureHold(...) TRUE
+#define ServiceDeploy_CaptureIdentitySnapshot(p,s) capture_identity(p,s)
+#define ServiceDeploy_WaitForExpectedIdentity(p,s,t) wait_identity(p)
+#define ServiceDeploy_RecordUpdateActivationFailureHold(p) record_hold(p)
 #define ServiceDeploy_ReconcileServiceRecovery(...) TRUE
 #define ServiceDeploy_CreateRecoveryStartupAuthorization(out) (*(out)=(HANDLE)1,TRUE)
 #define CloseHandle(...) TRUE
@@ -374,6 +416,7 @@ static void reset(DWORD phase){
     memset(&saved,0,sizeof(saved));saved.phase=phase;saved.fileMask=1;saved.binding=&binding;saved.dacl[0]=(void*)1;saved.attributes[0]=32;
     loadOk=journalExists=1;unknownBackup=unknownBinding=missingBackup=failRestore=failReconcile=failCleanup=failPublish=0;
     mutations=stops=starts=restores=rollbacks=reconciles=deleted=phaseWritten=0;
+    movedRoot=missingOldIdentity=holds=identityChecks=0;
 }
 int main(void){
     reset(1);journalExists=0;assert(ServiceDeploy_RecoverInterruptedTransaction()&&!mutations&&!deleted);
@@ -391,7 +434,13 @@ int main(void){
     reset(3);assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&reconciles==1&&!mutations);
     reset(4);failCleanup=1;assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!mutations&&!reconciles);
     reset(4);assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&!mutations&&!reconciles);
-    puts("Service crash recovery: 15 preservation, retry, rollback and cleanup cases passed");return 0;
+    for(int phase=1;phase<=5;++phase){if(phase==3||phase==4)continue;
+        reset(phase);movedRoot=1;saved.fileMask=0;
+        assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&starts==1&&holds==1&&identityChecks==1);
+    }
+    reset(2);movedRoot=missingOldIdentity=1;saved.fileMask=0;
+    assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!mutations&&!deleted);
+    puts("Service crash recovery: 19 preservation, retry, rollback, migration and cleanup cases passed");return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='meshagent-crash-recovery-') as directory:

@@ -184,31 +184,17 @@ function windows_registry()
             throw ('Opening Registry Key: ' + path + ' => Returned Error: ' + err);
         }
 
-        var achClass = this._marshal.CreateVariable(1024);
-        var achKey = this._marshal.CreateVariable(1024);
-        var achValue = this._marshal.CreateVariable(32768);
-        var achValueSize = this._marshal.CreateVariable(4);
-        var nameSize = this._marshal.CreateVariable(4);
-        var achClassSize = this._marshal.CreateVariable(4); achClassSize.toBuffer().writeUInt32LE(1024);
-        var numSubKeys = this._marshal.CreateVariable(4);
-        var numValues = this._marshal.CreateVariable(4);
-        var longestSubkeySize = this._marshal.CreateVariable(4);
-        var longestClassString = this._marshal.CreateVariable(4);
-        var longestValueName = this._marshal.CreateVariable(4);
-        var longestValueData = this._marshal.CreateVariable(4);
-        var securityDescriptor = this._marshal.CreateVariable(4);
-        var lastWriteTime = this._marshal.CreateVariable(8);
-
-        // Get the metadata for the registry value
-        v = this._AdvApi.RegQueryInfoKeyW(h.Deref(), achClass, achClassSize, 0,
-            numSubKeys, longestSubkeySize, longestClassString, numValues,
-            longestValueName, longestValueData, securityDescriptor, lastWriteTime);
-        if (v.Val != 0) { throw ('RegQueryInfoKeyW() returned error: ' + v.Val); }
-
-        // Convert the time format
-        var systime = this._marshal.CreateVariable(16);
-        if (this._Kernel32.FileTimeToSystemTime(lastWriteTime, systime).Val == 0) { throw ('Error parsing time'); }
-        return (require('fs').convertFileTime(lastWriteTime));
+        try
+        {
+            var lastWriteTime = this._marshal.CreateVariable(8);
+            // Only request the timestamp. Optional outputs need no buffers.
+            v = this._AdvApi.RegQueryInfoKeyW(h.Deref(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, lastWriteTime);
+            if (v.Val != 0) { throw ('RegQueryInfoKeyW() returned error: ' + v.Val); }
+            var systime = this._marshal.CreateVariable(16);
+            if (this._Kernel32.FileTimeToSystemTime(lastWriteTime, systime).Val == 0) { throw ('Error parsing time'); }
+            return (require('fs').convertFileTime(lastWriteTime));
+        }
+        finally { this._AdvApi.RegCloseKey(h.Deref()); }
     };
 
     this.WriteKey = function WriteKey(hkey, path, key, value)

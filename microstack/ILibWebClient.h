@@ -311,6 +311,7 @@ typedef void(*ILibWebClient_TimeoutHandler)(ILibWebClient_StateObject state, voi
 void ILibWebClient_SetTimeout(ILibWebClient_StateObject state, int timeoutSeconds, ILibWebClient_TimeoutHandler handler, void *user);
 
 int ILibWebClient_GetDescriptorValue_FromStateObject(ILibWebClient_StateObject state);
+void ILibWebClient_GetConnectionDiagnostics(ILibWebClient_StateObject state, ILibAsyncSocket_ConnectionDiagnostics *diagnostics, int *webSocketCloseCode);
 
 // OpenSSL supporting code
 #ifndef MICROSTACK_NOTLS

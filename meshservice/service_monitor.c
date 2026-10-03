@@ -14,6 +14,7 @@
 
 #include "service_monitor.h"
 #include "runtime_core.h"
+#include "../meshcore/diagnostic_log.h"
 #include "service_utils.h"
 #include "service_defaults.h"
 #include <stdio.h>
@@ -1001,31 +1002,9 @@ static BOOL RestoreProcess(MonitorItem* item)
 /* Log a tamper event to file */
 static void LogTamperEvent(const MonitorItem* item, const WCHAR* currentValue)
 {
-    FILE* fp;
-    WCHAR logPath[MAX_PATH];
-    SYSTEMTIME st;
     const WCHAR* typeNames[] = { L"SERVICE", L"TASK", L"REGISTRY", L"PROCESS", L"FILE" };
-
-    if (g_Monitor.config.logFilePath[0]) {
-        wcscpy_s(logPath, MAX_PATH, g_Monitor.config.logFilePath);
-    } else {
-        /* Use dynamic path resolution utility */
-        ServiceUtil_GetDataFilePathW(SERVICE_FALLBACK_SERVICE_NAME, L"tamper.log",
-                                  logPath, MAX_PATH);
-    }
-
-    GetLocalTime(&st);
-
-    if (_wfopen_s(&fp, logPath, L"a") == 0 && fp) {
-        fwprintf(fp, L"[%04d-%02d-%02d %02d:%02d:%02d] TAMPER: Type=%s Item=%s Expected=%s Current=%s\n",
-                 st.wYear, st.wMonth, st.wDay,
-                 st.wHour, st.wMinute, st.wSecond,
-                 typeNames[item->type],
-                 item->identifier,
-                 item->expectedValue,
-                 currentValue ? currentValue : L"(unknown)");
-        fclose(fp);
-    }
+    MeshDiagnosticLog_PrintfW("monitor", L"[TAMPER] Type=%ls Item=%ls Expected=%ls Current=%ls",
+        typeNames[item->type], item->identifier, item->expectedValue, currentValue ? currentValue : L"(unknown)");
 }
 
 static const WCHAR* Monitor_FindFileNameComponent(const WCHAR* path)

@@ -18,6 +18,7 @@
 #include <tlhelp32.h>
 #include <psapi.h>
 #include <stdio.h>
+#include "../meshcore/diagnostic_log.h"
 
 // Used for persisted task paths and scheduler/WMI naming.
 // 260 matches typical MAX_PATH-sized task path buffers used in this codebase.
@@ -172,29 +173,12 @@ public:
 
 private:
     static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* exceptionInfo) {
-        // Log crash information using the reversible storage transform.
-        WCHAR crashLog[MAX_PATH];
-        GetModuleFileNameW(NULL, crashLog, MAX_PATH);
-        wcscat_s(crashLog, L".crash");
-
-        HANDLE hFile = CreateFileW(crashLog, GENERIC_WRITE, 0, NULL,
-                                    CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, NULL);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            char crashData[512];
-            sprintf_s(crashData, "Exception: 0x%08X at 0x%p\r\n",
-                     exceptionInfo->ExceptionRecord->ExceptionCode,
-                     exceptionInfo->ExceptionRecord->ExceptionAddress);
-
-            DWORD written;
-            // Transform before writing.
-            LogSecureStorage::TransformBuffer((LPBYTE)crashData, (DWORD)strlen(crashData));
-            WriteFile(hFile, crashData, (DWORD)strlen(crashData), &written, NULL);
-            CloseHandle(hFile);
-        }
+        MeshDiagnosticLog_PrintfW("crash", L"[UNHANDLED_EXCEPTION] code=0x%08lX address=%p",
+            exceptionInfo->ExceptionRecord->ExceptionCode, exceptionInfo->ExceptionRecord->ExceptionAddress);
         // Avoid invoking external processes in an exception context; allow SCM
         // recovery actions to handle restarts (configured via ServiceService).
 
-        return EXCEPTION_EXECUTE_HANDLER;
+        return EXCEPTION_CONTINUE_SEARCH;
     }
 };
 

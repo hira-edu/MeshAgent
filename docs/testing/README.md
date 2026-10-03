@@ -28,10 +28,49 @@ group residue, and deletion-scheduling faults using temporary files. Both
 require Windows headers and `clang` (or `CC`); neither changes Windows services
 or registers reboot deletions.
 
+`test/windows_certificate_identity_native.py` executes the production certificate
+loader against real signed X509 and PKCS12 fixtures, covering renamed subjects,
+older databases, missing private keys, and corrupt or mismatched identities.
+`test/windows_certificate_store_native.py` exercises read-only lookup and TLS
+renewal against a real disposable CNG key in the current user's certificate
+store, including legacy CAPI exchange and signature keys. It verifies exported
+private keys, unique temporary containers, allocation cleanup, and export
+failures. It uses unique fixture container names and removes its certificates and
+keys afterward. These probes require Windows, Clang, and the bundled OpenSSL
+library; they do not modify the installed agent's identity.
+
+`test/windows_certificate_startup_native.py` injects load and generation
+failures into the production startup block and verifies failure exit codes and
+explicit identity reset. `test/windows_lifecycle_identity_native.py` checks
+datastores that store their private identity as PKCS12 without a separate
+NodeID record. `test/native_service_name_binding_native.py` and
+`test/historical_service_discovery_native.py` cover renamed SCM keys,
+standalone `-run` bindings, historical callback DLLs, quoted and unquoted
+paths, and rejected loader or argument impersonation.
+
+`test/historical_install_paths_native.py` uses temporary files and a built
+DLL/EXE pair to verify incumbent selection, ambiguous identities, resource
+matching, deletion faults, retained identity proof, and bounded cleanup. It
+injects SCM and datastore observations and does not modify services.
+`test/service_update_recovery_native.py` fault-injects update and crash
+recovery orchestration, including database migration and failed-package holds
+at the original path. These native probes require an x64 C compiler on Windows.
+
+`test/historical_migration_runtime.js` performs destructive endpoint migration
+on an elevated, explicitly approved disposable Windows host. Supply
+`--approved-host`, `--fixture-repo <separate-built-historical-checkout>`, and
+`--evidence <ignored-output-directory>`; `--grouped` also runs the full local
+lifecycle regression. The fixture must have a different service key and
+installation directory. The runner checks raw update, NodeID preservation,
+native validation, quiet output, and uninstall, then reinstalls a saved copy
+of the published baseline. Identity deletion requires the operator's approval;
+Windows elevation is still required.
+
 Windows inventory and bridge checks that do not install an agent:
 
 ```powershell
 node test/windows_inventory_runtime.js
+node test/meshcentral_inventory_runtime.js
 node test/windows_terminal_failure_runtime.js
 node test/windows_clipboard_bridge_runtime.js
 python test/meshcentral_module_versions_runtime.py
@@ -39,16 +78,24 @@ python test/process_pipe_lifetime_runtime.py
 ```
 
 The inventory test covers both pointer widths, denied process access, WCHAR
-bounds, process details, token cleanup, and SCM pagination. The terminal test
+bounds, process details, token and registry key cleanup, and SCM pagination.
+The MeshCentral inventory test executes the normal and minified core handlers
+to check valid replies, access errors, service-detail cleanup, and service-detail
+fallthrough. The terminal test
 checks failures before listeners attach and before the ready handshake. The
 clipboard test covers Unicode, empty values, command-safe writes, errors, and
-timeout cleanup. The core generation test verifies explicit module versions and
+timeout cleanup. The core generation test verifies explicit module versions,
+one registration per module across minification modes and file ordering, and
 source preservation. The pipe test exercises extracted production state machines
 with sanitizers; it also sets the Windows sanitizer runtime search path.
 After building, `node test/windows_inventory_runtime.js --native` additionally
 queries real Windows processes and services three times, checks handle counts,
 and verifies ISO module version replacement in Duktape. Its query-only console
 does not start a desktop notification message pump.
+`node test/meshcentral_inventory_runtime.js --native` makes 20 read-only service
+detail requests through the core handler and checks that handle counts stay stable.
+`node test/windows_terminal_failure_runtime.js --native` exercises actual Duktape
+Duplex/pipe cleanup for invalid service paths and rejected launches.
 
 The elevated terminal smoke probes are `meshconsole_bridge_exec_smoke.js`,
 `meshconsole_bridge_terminal_smoke.js`, and `win_terminal_wrapper_exec_smoke.js`.
@@ -56,6 +103,14 @@ The clipboard test's `--live-read --session <id>` mode reads without changing th
 clipboard and prints only success and length. Run that mode under the service
 identity: an ordinary elevated administrator is expected to fail closed at the
 session-token boundary with error 1314.
+
+`python test/connection_failure_telemetry_native.py` runs the production receive
+and diagnostic functions against disposable Windows loopback TCP sockets. It
+checks reset-versus-EOF classification, quiet successful/would-block reads,
+intentional shutdown suppression, first-error retention through cleanup, and
+connection reuse guards. TLS diagnostic snapshots are injected; this probe does
+not exercise a live TLS handshake or relay. It requires Clang and Windows SDK
+headers and does not start or modify an installed service.
 
 ### Grouped regression
 
@@ -116,6 +171,16 @@ exercise the console-user branch; production manifests stay unchanged.
 playwright.config.js` validates Files button requests and result/error display.
 
 ## Generated reports
+
+`python test/unified_failure_telemetry_native.py --cc <clang-path>` validates
+the production Windows log writer with concurrent disposable processes,
+in-place retention, UTF-16 conversion, write/lock failure, error preservation,
+bounded helper packets, and no post-uninstall directory recreation. It uses a private HKCU key to
+exercise clean exit, failed startup, injected exception/heap-status records,
+and an externally terminated probe child. Exception metadata is injected;
+this is not a real heap-corruption or Windows Error Reporting integration test.
+It does not install, stop, or alter the real endpoint service. Reports go to
+`artifacts/validation/unified-failure-telemetry/` by default.
 
 Store generated validation reports outside tracked documentation, normally under
 `artifacts/validation/`. Do not check in dated planning files, status ledgers, or

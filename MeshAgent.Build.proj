@@ -15,7 +15,11 @@
     <MeshServiceRuntimeBuildProperties>$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=x64;MeshAgentSkipMeshServiceBundleDependencyBuild=1;MeshAgentX64ExeLinkPdbFile=$(RepoRoot)meshservice\x64\MeshServiceRuntime\MeshService-2022-MeshServiceRuntime-buildproj-$(BuildInvocationId).pdb</MeshServiceRuntimeBuildProperties>
   </PropertyGroup>
 
-  <Target Name="BuildMeshServiceBundle">
+  <Target Name="GenerateCommitHeader">
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(RepoRoot)tools\generate_commit_header.py&quot;" />
+  </Target>
+
+  <Target Name="BuildMeshServiceBundle" DependsOnTargets="GenerateCommitHeader">
     <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(MeshServiceBundleBuildProperties)" />
   </Target>
 

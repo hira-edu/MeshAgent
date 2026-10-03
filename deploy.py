@@ -325,7 +325,7 @@ CORE_ARTIFACTS = {
     },
 }
 
-for _core_module in ("clipboard", "process-manager", "service-manager", "user-sessions"):
+for _core_module in ("clipboard", "process-manager", "service-manager", "user-sessions", "win-registry"):
     for _core_folder, _core_suffix in (("modules_meshcore", ".js"), ("modules_meshcore_min", ".js"), ("modules_meshcore_min", ".min.js")):
         _core_relative = f"{_core_folder}/{_core_module}{_core_suffix}"
         CORE_ARTIFACTS[_core_relative] = {
@@ -978,20 +978,40 @@ def build_local_artifact_entries():
 
 
 def version_meshcentral_module_loader(source):
-    """Carry source mtime into addModule so dated embedded modules can be updated."""
-    if "const moduleVersion = obj.fs.statSync(modulePath).mtime.toISOString();" in source:
-        return source
+    """Select one module variant and carry its mtime into addModule."""
     pattern = re.compile(r"(?m)^(\s*)const moduleData = \['try \{ addModule\([^\n]+addedModules\.push[^\n]+$")
     matches = list(pattern.finditer(source))
     if len(matches) != 1:
         raise ValueError("Unsupported MeshCentral JS module loader; expected one addModule builder")
     indent = matches[0].group(1)
+    selection = (
+        indent + "const preferredModule = moduleName + (obj.args.minifycore === false ? '.js' : '.min.js');\n" +
+        indent + "if (modulesDir[i] !== preferredModule && modulesDir.indexOf(preferredModule) >= 0) { continue; }\n"
+    )
+    if "const moduleVersion = obj.fs.statSync(modulePath).mtime.toISOString();" in source:
+        if "const preferredModule = moduleName + (obj.args.minifycore === false ? '.js' : '.min.js');" in source:
+            return source
+        path_line = indent + "const modulePath = obj.path.join(moduleDirPath, modulesDir[i]);"
+        if source.count(path_line) != 1:
+            raise ValueError("Unsupported versioned MeshCentral module loader; expected one module path")
+        return source.replace(path_line, selection + path_line, 1)
     replacement = (
-        indent + "const modulePath = obj.path.join(moduleDirPath, modulesDir[i]);\n" +
+        selection + indent + "const modulePath = obj.path.join(moduleDirPath, modulesDir[i]);\n" +
         indent + "const moduleVersion = obj.fs.statSync(modulePath).mtime.toISOString();\n" +
         indent + "const moduleData = ['try { addModule(\"', moduleName, '\", \"', obj.escapeCodeString(obj.fs.readFileSync(modulePath).toString('binary')), '\", \"', moduleVersion, '\"); addedModules.push(\"', moduleName, '\"); } catch (ex) { }\\r\\n'];"
     )
     return pattern.sub(lambda match: replacement, source, count=1)
+
+
+def align_proxy_certificate_sni(source):
+    """Read the certificate presented by the configured HTTPS endpoint's hostname."""
+    original = "obj.certificateOperations.loadCertificate(obj.config.domains[i].certurl, dnsname, obj.config.domains[i],"
+    aligned = "obj.certificateOperations.loadCertificate(obj.config.domains[i].certurl, (obj.config.domains[i].certurl.startsWith('https:') ? new URL(obj.config.domains[i].certurl).hostname : dnsname), obj.config.domains[i],"
+    if aligned in source:
+        return source
+    if source.count(original) != 1:
+        raise ValueError("Unsupported MeshCentral proxy certificate loader; expected one loadCertificate call")
+    return source.replace(original, aligned, 1)
 
 
 def prepare_versioned_core_loader():
@@ -1006,7 +1026,9 @@ def prepare_versioned_core_loader():
     if response is None:
         raise RuntimeError("Cannot read the installed MeshCentral loader; staging aborted")
     baseline = json.loads(response)
-    patched = version_meshcentral_module_loader(baseline["source"])
+    if hashlib.sha384(baseline["source"].encode("utf-8")).hexdigest().upper() != baseline["sha384"]:
+        raise ValueError("Installed MeshCentral loader digest mismatch; staging aborted")
+    patched = align_proxy_certificate_sni(version_meshcentral_module_loader(baseline["source"]))
     generated = LOCAL_REPO / CORE_ARTIFACTS["meshcentral.js"]["local_path"]
     generated.parent.mkdir(parents=True, exist_ok=True)
     generated.write_bytes(patched.encode("utf-8"))
@@ -1657,7 +1679,10 @@ def publish_staged_payloads(agent_artifacts, public_artifacts=None, core_artifac
         if entry["name"] == "meshcentral.js":
             loader_path = get_core_publish_path("module-root", "meshcentral.js")
             metadata = collect_remote_file_metadata([loader_path], "sha384")
-            current_hash = (metadata or {}).get(loader_path, {}).get("hash", "").upper()
+            if metadata is None:
+                print("[ERROR] Cannot verify the installed MeshCentral loader; no payloads published.")
+                return False
+            current_hash = (metadata.get(loader_path) or {}).get("hash", "").upper()
             if current_hash not in (entry.get("source_sha384"), entry["sha384"].upper()):
                 print("[ERROR] MeshCentral loader changed after staging; restage before publishing.")
                 return False

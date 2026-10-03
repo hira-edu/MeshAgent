@@ -6044,7 +6044,7 @@ static BOOL MeshService_BuildIntegrationConfig(ServiceIntegrationConfig* config)
 	}
 	else if (paths.logsDir[0] != L'\0')
 	{
-		MeshService_JoinPath(config->logFilePath, _countof(config->logFilePath), paths.logsDir, L"integration.log");
+		MeshDiagnosticLog_GetPathW(config->logFilePath, _countof(config->logFilePath));
 	}
 	else
 	{
@@ -7016,21 +7016,12 @@ int APIENTRY _tWinMain(HINSTANCE hInstance,
 static void MeshService_TraceKvmServiceWrite(const char* phase, char* buffer, int bufferLen, DWORD errorCode, DWORD bytesTransferred)
 {
 	WCHAR enabled[8] = { 0 };
-	WCHAR tempPath[MAX_PATH] = { 0 };
-	WCHAR logPath[MAX_PATH] = { 0 };
-	HANDLE fileHandle = INVALID_HANDLE_VALUE;
 	char line[160];
 	int len = 0;
 	unsigned short packetType = 0;
-	DWORD written = 0;
 
 	if (phase == NULL || buffer == NULL || bufferLen < 4) { return; }
-	if (GetEnvironmentVariableW(L"KVM_TRACE_SERVICE_WRITES", enabled, (DWORD)_countof(enabled)) == 0) { return; }
-	if (ExpandEnvironmentStringsW(L"%TEMP%\\", tempPath, (DWORD)_countof(tempPath)) == 0 || tempPath[0] == L'\0')
-	{
-		GetTempPathW((DWORD)_countof(tempPath), tempPath);
-	}
-	if (FAILED(StringCchPrintfW(logPath, _countof(logPath), L"%lsmeshagent_kvm_service_trace.log", tempPath))) { return; }
+	if (errorCode == ERROR_SUCCESS && GetEnvironmentVariableW(L"KVM_TRACE_SERVICE_WRITES", enabled, (DWORD)_countof(enabled)) == 0) { return; }
 
 	packetType = (unsigned short)ntohs(((unsigned short*)buffer)[0]);
 	len = sprintf_s(
@@ -7044,10 +7035,7 @@ static void MeshService_TraceKvmServiceWrite(const char* phase, char* buffer, in
 		(unsigned long)errorCode);
 	if (len <= 0) { return; }
 
-	fileHandle = CreateFileW(logPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (fileHandle == INVALID_HANDLE_VALUE) { return; }
-	WriteFile(fileHandle, line, (DWORD)len, &written, NULL);
-	CloseHandle(fileHandle);
+	MeshDiagnosticLog_Write("kvm-transport", line);
 }
 
 
@@ -9063,7 +9051,7 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 				}
 				else
 				{
-					StringCchPrintfW(errorMessage, _countof(errorMessage), L"%ls failed (exit=%lu). Check native-install.log and %%TEMP%%\\MeshInstaller.log.", actionName, actionExitCode);
+					StringCchPrintfW(errorMessage, _countof(errorMessage), L"%ls failed (exit=%lu). Check the unified diagnostics log.", actionName, actionExitCode);
 				}
 				MessageBoxW(hDlg, errorMessage, L"Mesh Agent", MB_OK | MB_ICONERROR);
 				EnableWindow(GetDlgItem(hDlg, IDC_INSTALLBUTTON), TRUE);

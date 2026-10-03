@@ -94,6 +94,10 @@ limitations under the License.
 #include "ILibParsers.h"
 #include "ILibRemoteLogging.h"
 #include "ILibCrypto.h"
+#ifdef WIN32
+#include "../meshcore/diagnostic_log.h"
+volatile LONG g_MeshDiagnosticLogDisabled = 0;
+#endif
 
 #define MINPORTNUMBER 50000
 #define PORTNUMBERRANGE 15000
@@ -10990,7 +10994,17 @@ char* ILibCriticalLog (const char* msg, const char* file, int line, int user1, i
 	{
 		len = sprintf_s(ILibCriticalLogBuffer, sizeof(ILibCriticalLogBuffer), "\r\n[%s] [%s] %s", timeStamp, g_ILibCrashID_HASH != NULL ? g_ILibCrashID_HASH : "", msg);
 	}
+#ifdef WIN32
+	if (file != NULL)
+	{
+		char entry[8192];
+		_snprintf_s(entry, sizeof(entry), _TRUNCATE, "[%s] %s:%d (%d,%d) %s", g_ILibCrashID_HASH != NULL ? g_ILibCrashID_HASH : "", file, line, user1, user2, msg);
+		MeshDiagnosticLog_Write("core", entry);
+	}
+	else { MeshDiagnosticLog_Write("core", msg); }
+#else
 	if (len > 0 && len < (int)sizeof(ILibCriticalLogBuffer) && ILibCriticalLogFilename != NULL) ILibAppendStringToDiskEx2(ILibCriticalLogFilename, ILibCriticalLogBuffer, len, ILibCriticalLog_MaxSize);
+#endif
 	if (file != NULL)
 	{
 		ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_1, "%s:%d (%d,%d) %s", file, line, user1, user2, msg);

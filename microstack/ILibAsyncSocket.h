@@ -81,6 +81,15 @@ typedef enum ILibAsyncSocket_MemoryOwnership
 \brief The handle for an ILibAsyncSocket module
 */
 typedef void* ILibAsyncSocket_SocketModule;
+typedef struct ILibAsyncSocket_ConnectionDiagnostics
+{
+	const char *stage;
+	int nativeError;
+	int tlsError;
+	unsigned long opensslError;
+} ILibAsyncSocket_ConnectionDiagnostics;
+
+void ILibAsyncSocket_GetConnectionDiagnostics(ILibAsyncSocket_SocketModule socketModule, ILibAsyncSocket_ConnectionDiagnostics *diagnostics);
 /*! \typedef ILibAsyncSocket_OnInterrupt
 \brief Handler for when a session was interrupted by a call to ILibStopChain
 \param socketModule The \a ILibAsyncSocket_SocketModule that was interrupted

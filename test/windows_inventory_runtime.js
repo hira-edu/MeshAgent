@@ -114,14 +114,47 @@ for (const bits of [4, 8]) for (const fail of [false, true]) {
     else assert.equal(enumerate.call(state).length, 2, 'enumeration must consume both SCM pages');
     assert.equal(closed, 1, 'SCM handle must close on every path');
 }
+const registryTimestamp = vm.runInNewContext('(' + method('modules/win-registry.js', 'this.QueryKeyLastModified = function') + ')',
+    {KEY_QUERY_VALUE: 1, require: () => ({convertFileTime: () => 'timestamp'})});
+for (const failure of ['open', 'query', 'time', null]) {
+    let closed = 0;
+    const state = {_marshal: {CreateVariable: size => variable(typeof size === 'string' ? (size.length + 1) * 2 : size), CreatePointer: () => ({Deref: () => 31})},
+        _AdvApi: {
+            RegOpenKeyExW: () => ({Val: failure === 'open' ? 5 : 0}),
+            RegQueryInfoKeyW(...args) {
+                assert.equal(args.length, 12);
+                assert(args.slice(1, 11).every(value => value === 0), 'unused registry metadata must not allocate output buffers');
+                return {Val: failure === 'query' ? 5 : 0};
+            },
+            RegCloseKey(handle) { assert.equal(handle, 31); ++closed; }
+        }, _Kernel32: {FileTimeToSystemTime: () => ({Val: failure === 'time' ? 0 : 1})}};
+    if (failure) assert.throws(() => registryTimestamp.call(state, 1, 'probe'));
+    else assert.equal(registryTimestamp.call(state, 1, 'probe'), 'timestamp');
+    assert.equal(closed, failure === 'open' ? 0 : 1, 'registry keys must close on success and every post-open failure');
+}
+const getService = vm.runInNewContext('(' + method('modules/service-manager.js', 'this.getService = function getService') + ')',
+    {require: () => ({HKEY:{LocalMachine:1}, QueryKeyLastModified: () => 'timestamp'})});
+for (const opened of [false, true]) {
+    const closed = [];
+    const state = {isAdmin: () => false,
+        GM: {PointerSize:8, CreateVariable: size => variable(typeof size === 'string' ? (size.length + 1) * 2 : size), CreatePointer: () => variable(8)},
+        proxy: {
+            OpenSCManagerA: () => ({Val:30}), OpenServiceW: () => ({Val:opened ? 31 : 0}),
+            QueryServiceStatusEx(handle, level, buffer, size, needed) {needed.toBuffer().writeUInt32LE(36);return {Val:0};},
+            CloseServiceHandle(handle) {closed.push(handle.Val);}
+        }};
+    assert.throws(() => getService.call(state, 'probe'), /could not find service/);
+    assert.deepEqual(closed.sort(), opened ? [30,31] : [30], 'failed service status queries must release both handles');
+}
 console.log('Windows inventory: bitness, WCHAR bounds, denied processes, token failures, service pagination and cleanup passed');
 if (process.argv.includes('--native')) {
     assert.equal(process.platform, 'win32', '--native requires Windows');
     const code = ['global._noMessagePump=true;']; // A query-only process does not subscribe to desktop notifications.
-    for (const name of ['process-manager', 'service-manager', 'user-sessions']) {
-        code.push('addModule(' + JSON.stringify(name) + ',require("fs").readFileSync(' + JSON.stringify(path.join(root, 'modules', name + '.js')) + ').toString());');
+    for (const name of ['process-manager', 'service-manager', 'user-sessions', 'win-registry']) {
+        code.push('addModule(' + JSON.stringify(name) + ',require("fs").readFileSync(' + JSON.stringify(path.join(root, 'modules', name + '.js')) + ').toString(),' + JSON.stringify(new Date().toISOString()) + ');');
     }
     code.push(`
+try {
 var pm=require('process-manager'), sm=require('service-manager').manager;
 var before, after, counts=[];
 pm.getProcesses(function(p){if(!p[process.pid])throw Error('Current process missing');});
@@ -142,13 +175,14 @@ if(getJSModule('version-probe').indexOf('old')<0)throw Error('Undated module une
 addModule('version-probe','module.exports="updated";', '2026-10-03T10:30:00.000Z');
 if(getJSModule('version-probe').indexOf('updated')<0 || getJSModuleDate('version-probe')!=1791023400)throw Error('ISO module version was not accepted');
 console.log(JSON.stringify({success:true,counts:counts,handlesBefore:before,handlesAfter:after,moduleVersionAccepted:true}));
+} catch(error) {console.log(JSON.stringify({success:false,error:''+error}));}
 process.exit();`);
     const result = require('child_process').spawnSync(path.join(root, 'meshconsole/Release/MeshConsole64.exe'),
         ['-b64exec', Buffer.from(code.join('\n')).toString('base64')], {encoding:'utf8', timeout:30000, windowsHide:true});
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     const report = JSON.parse(result.stdout.trim());
-    assert.equal(report.success, true);
+    assert.equal(report.success, true, report.error);
     assert(report.counts.every(count => count.processes > 0 && count.services > 0));
     console.log(JSON.stringify(report));
 }

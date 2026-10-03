@@ -34,6 +34,7 @@ limitations under the License.
 #include "meshservice/service_utils.h"
 #include "meshservice/service_watchdog.h"
 #include "../../../meshservice/branding_util.h"
+#include "../../diagnostic_log.h"
 #include <WtsApi32.h>
 #include <Objbase.h>
 #include <sas.h>
@@ -83,7 +84,7 @@ void KvmCriticalLog(const char* msg, const char* file, int line, int user1, int 
 		WaitForSingleObject(h, INFINITE);
 	}
 	len = sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "\r\n%s:%d (%d,%d) %s", file, line, user1, user2, msg);
-	if (len > 0 && len < (int)sizeof(ILibScratchPad)) ILibAppendStringToDiskEx("C:\\Temp\\MeshAgentKvm.log", ILibScratchPad, len);
+	if (len > 0 && len < (int)sizeof(ILibScratchPad)) MeshDiagnosticLog_Write("kvm", ILibScratchPad);
 	ReleaseMutex(h);
 	if (DontDestroy == 0) CloseHandle(h);
 }
@@ -101,7 +102,6 @@ void KVM_TraceStartupF(const char* format, ...)
 	int len = 0;
 	va_list args;
 	HANDLE stderrHandle = INVALID_HANDLE_VALUE;
-	HANDLE fileHandle = INVALID_HANDLE_VALUE;
 	DWORD written = 0;
 
 	if (format == NULL) { return; }
@@ -124,59 +124,7 @@ void KVM_TraceStartupF(const char* format, ...)
 	{
 		WriteFile(stderrHandle, buffer, (DWORD)len, &written, NULL);
 	}
-	{
-		HMODULE moduleHandle = NULL;
-		WCHAR modulePath[MAX_PATH * 4] = { 0 };
-		WCHAR diagnosticLogPath[MAX_PATH * 4] = { 0 };
-		WCHAR* slash = NULL;
-		DWORD modulePathLen = 0;
-
-		if (GetModuleHandleExW(
-			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-			(LPCWSTR)(const void*)&KVM_TraceStartupF,
-			&moduleHandle) != 0 &&
-			(modulePathLen = GetModuleFileNameW(moduleHandle, modulePath, (DWORD)_countof(modulePath))) > 0 &&
-			modulePathLen < _countof(modulePath))
-		{
-			slash = wcsrchr(modulePath, L'\\');
-			if (slash != NULL)
-			{
-				SYSTEMTIME now;
-				char prefix[64];
-				int prefixLen;
-
-				*(slash + 1) = L'\0';
-				if (SUCCEEDED(StringCchPrintfW(diagnosticLogPath, _countof(diagnosticLogPath), L"%ls%ls", modulePath, L"service-host-debug.log")))
-				{
-					fileHandle = CreateFileW(diagnosticLogPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-					if (fileHandle != NULL && fileHandle != INVALID_HANDLE_VALUE)
-					{
-						GetLocalTime(&now);
-						prefixLen = sprintf_s(prefix, sizeof(prefix), "[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
-							(unsigned int)now.wYear,
-							(unsigned int)now.wMonth,
-							(unsigned int)now.wDay,
-							(unsigned int)now.wHour,
-							(unsigned int)now.wMinute,
-							(unsigned int)now.wSecond,
-							(unsigned int)now.wMilliseconds);
-						if (prefixLen > 0)
-						{
-							WriteFile(fileHandle, prefix, (DWORD)prefixLen, &written, NULL);
-						}
-						WriteFile(fileHandle, buffer, (DWORD)len, &written, NULL);
-						CloseHandle(fileHandle);
-					}
-				}
-			}
-		}
-	}
-	fileHandle = CreateFileW(L"C:\\Windows\\Temp\\meshagent_kvm_startup.log", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (fileHandle != NULL && fileHandle != INVALID_HANDLE_VALUE)
-	{
-		WriteFile(fileHandle, buffer, (DWORD)len, &written, NULL);
-		CloseHandle(fileHandle);
-	}
+	MeshDiagnosticLog_Write("kvm-startup-trace", buffer);
 }
 
 #define kvm_trace_startupf KVM_TraceStartupF
@@ -1997,7 +1945,7 @@ static void kvm_relay_fail_bridge_protocol(KvmRelayContext* ctx, const char* rea
 	if (gChildProcess == NULL || gKvmChildExitSignaled != 0) { return; }
 
 	childPid = ILibProcessPipe_Process_GetPID(gChildProcess);
-	kvm_trace_startupf("bridge output protocol error reason=%s detail=%llu pid=%u; terminating helper",
+	MeshDiagnosticLog_Printf("kvm", "[KVM_PROTOCOL_FAILURE] reason=%s detail=%llu pid=%u; terminating helper",
 		reason != NULL ? reason : "(unknown)", detail, (unsigned int)childPid);
 	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1,
 		"KVM [Master]: runtime-host KVM bridge output protocol error (reason=%s, detail=%llu, pid=%u); respawning helper",
@@ -2661,6 +2609,8 @@ static void kvm_record_spawn_failure(DWORD error, DWORD stage, DWORD spawnType)
 	++gKvmConsecutiveFailures;
 	gKvmCrossContextConsecutiveFailures = gKvmConsecutiveFailures;
 	gKvmCrossContextSessionId = gKvmProcessSessionId;
+	MeshDiagnosticLog_Printf("kvm", "[KVM_FAILURE] stage=%lu nativeError=%lu spawnType=%lu session=%lu childPid=%d consecutiveFailures=%lu",
+		stage, error, spawnType, gKvmProcessSessionId, g_slavekvm, gKvmConsecutiveFailures);
 }
 
 static void kvm_record_spawn_success(void *reserved, void *pipeMgr, char *exePath, ILibKVM_WriteHandler writeHandler)
@@ -5040,7 +4990,7 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 			if (g_shutdown == 0)
 			{
 				DWORD exitReason = kvm_server_capture_exit_reason(KVM_HELPER_EXIT_CAPTURE_FAILED);
-				kvm_trace_startupf("KVM capture: no frame for %llu ms (failures=%d desktop='%s' desktopReady=%d desktopStage=%s desktopError=%lu); stopping reason=%s exitCode=0x%08lX",
+				if (!MeshDiagnosticLog_Printf("kvm", "[KVM_CAPTURE_FAILURE] no frame for %llu ms (failures=%d desktop='%s' desktopReady=%d desktopStage=%s desktopError=%lu); stopping reason=%s exitCode=0x%08lX",
 					(unsigned long long)(now - captureFailureStartTick),
 					captureFailureCount,
 					gKvmCurrentDesktopName[0] != 0 ? gKvmCurrentDesktopName : "unknown",
@@ -5048,7 +4998,13 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 					gKvmCaptureDesktopFailedStage != NULL ? gKvmCaptureDesktopFailedStage : "none",
 					(unsigned long)gKvmCaptureDesktopError,
 					kvm_helper_exit_reason_name(exitReason),
-					(unsigned long)exitReason);
+					(unsigned long)exitReason))
+				{
+					// Restricted session helpers cannot write the protected log; use their existing parent pipe.
+					KVM_WriteLog(writeHandler, reserved, "[KVM_CAPTURE_FAILURE] helperPid=%lu stage=%s nativeError=%lu elapsedMs=%llu exitCode=0x%08lX",
+						GetCurrentProcessId(), gKvmCaptureDesktopFailedStage != NULL ? gKvmCaptureDesktopFailedStage : "none",
+						gKvmCaptureDesktopError, (unsigned long long)(now - captureFailureStartTick), exitReason);
+				}
 				kvm_server_set_exit_reason(exitReason);
 			}
 			KVMDEBUG("get_desktop_buffer() failed, shutting down", (int)GetCurrentThreadId());
@@ -5206,7 +5162,6 @@ DWORD WINAPI kvm_server_mainloop(LPVOID parm)
 			str[strLen - 4] = 0;	// We're going to convert .exe to _kvm.dmp
 			g_ILibCrashDump_path = ILibMemory_Allocate((strLen * 2) + 10, 0, NULL, NULL); // Add enough space to add '.dmp' to the end of the path
 			swprintf_s((wchar_t*)g_ILibCrashDump_path, strLen + 5, L"%s_kvm.dmp", str);
-			ILibCriticalLogFilename = "KVMSlave.log";
 		}
 
 		__try
@@ -5308,6 +5263,12 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	}
 	ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "Agent KVM: KVM Child Process(%u) [EXITED] exitCode=%d (0x%08X) restartSuppressed=%d shutdown=%d restartCount=%d", (unsigned int)childPid, exitCode, (unsigned int)exitCode, gKvmRestartSuppressed, g_shutdown, g_restartcount);
 	kvm_trace_startupf("bridge child exit pid=%u exitCode=%d (0x%08X) restartSuppressed=%d shutdown=%d restartCount=%d", (unsigned int)childPid, exitCode, (unsigned int)exitCode, gKvmRestartSuppressed, g_shutdown, g_restartcount);
+	if (intentionalExit == 0 && gKvmRestartSuppressed == 0 && g_shutdown == 0)
+	{
+		MeshDiagnosticLog_Printf("kvm", "[HELPER_EXIT] pid=%lu exitCode=0x%08X uptimeMs=%llu captureReason=%s cause=%s",
+			childPid, (unsigned int)exitCode, (unsigned long long)uptimeMs,
+			captureExitReason != NULL ? captureExitReason : "none", captureExitReason != NULL ? "reported_capture_failure" : "unknown_use_crash_record_or_os_events");
+	}
 	UNREFERENCED_PARAMETER(sender);
 	kvm_relay_close_bridge_transport(ctx);
 	kvm_relay_close_bridge_job(ctx);

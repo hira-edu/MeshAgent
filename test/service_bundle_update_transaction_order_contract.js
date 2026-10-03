@@ -66,7 +66,7 @@ function main() {
     assert(exeRollbackIndex >= 0, 'rollback must explicitly restore live EXE backup');
     assert(dllRollbackIndex < exeRollbackIndex, 'rollback must restore ServiceDll before host EXE');
     assert(
-        installer.includes('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') &&
+        updateFlow.includes('ServiceDeploy_RecordUpdateActivationFailureHold(g_HaveIncumbentPaths ? &g_IncumbentPaths : &paths)') &&
         installer.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]")'),
         'update transaction must clear activation holds on success and promote the target hold on failure'
     );

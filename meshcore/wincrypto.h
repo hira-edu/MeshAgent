@@ -27,6 +27,11 @@ int  __fastcall wincrypto_getregistryA(char* name, char** value);
 int  __fastcall wincrypto_isopen(wincrypto_object j);
 void __fastcall wincrypto_close(wincrypto_object j);
 wincrypto_object __fastcall wincrypto_open(int newcert, char *rootSubject);
+/* Read-only identity lookup. The filter must authenticate the public certificate;
+ * this function additionally requires an accessible CNG or legacy CAPI key.
+ * Historical identities may reside in either the user or machine store. */
+typedef int (*wincrypto_cert_match)(const unsigned char* certificate, int length, void* user);
+wincrypto_object __fastcall wincrypto_open_existing(wincrypto_cert_match match, void* user);
 void __fastcall wincrypto_random(int length, char* result);
 int  __fastcall wincrypto_md5(char* data, int datalen, char* result);
 int  __fastcall wincrypto_sha256(char* data, int datalen, char* result);
