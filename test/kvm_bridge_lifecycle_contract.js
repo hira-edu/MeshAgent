@@ -81,6 +81,7 @@ function main() {
 
     const ensureLock = extractFunction(kvm, 'static void kvm_relay_ensure_registry_lock()');
     const lookup = extractFunction(kvm, 'static KvmRelayContext* kvm_relay_lookup_context(void* reserved)');
+    const loadContext = extractFunction(kvm, 'static void kvm_relay_load_context(KvmRelayContext* ctx)');
     const activate = extractFunction(kvm, 'static void kvm_relay_activate_context(KvmRelayContext* ctx)');
     const deactivate = extractFunction(kvm, 'static void kvm_relay_deactivate_context()');
     const getContext = extractFunction(kvm, 'static KvmRelayContext* kvm_relay_get_context()');
@@ -156,6 +157,15 @@ function main() {
             cleanup.includes('kvm_server_signal_remote_resume_waiters();') &&
             cleanup.includes('if (destroyNow && kvm_relay_context_is_active_in_outer_frame(ctx))') &&
             cleanup.includes('ILibLifeTime_AddEx(ILibGetBaseTimer(gILibChain), ctx, 0, &kvm_retry_timer_callback, NULL);'),
+        nestedCleanupKeepsStoppingHelperForOuterCapture:
+            // An outer frame that still has this context live captures the globals after
+            // cleanup returns; cleanup must leave the helper it is stopping in them.
+            cleanup.indexOf('ctx->childProcess = childProcessForExit;') > 0 &&
+            cleanup.indexOf('ctx->childProcess = childProcessForExit;') < cleanup.lastIndexOf('kvm_relay_deactivate_context();') &&
+            cleanup.lastIndexOf('kvm_relay_deactivate_context();') < cleanup.indexOf('if (gKvmActiveContext == ctx)\n\t{') &&
+            cleanup.indexOf('if (gKvmActiveContext == ctx)\n\t{') < cleanup.indexOf('kvm_relay_load_context(ctx);') &&
+            cleanup.indexOf('kvm_relay_load_context(ctx);') < cleanup.indexOf('if (destroyNow && kvm_relay_context_is_active_in_outer_frame(ctx))') &&
+            loadContext.includes('gChildProcess = ctx->childProcess;'),
         bridgeInputWritesAreBounded:
             writeInput.includes('waitResult = WaitForSingleObject(overlapped.hEvent, KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS);') &&
             writeInput.includes('CancelIoEx(ctx->bridgeInputPipeHandle, &overlapped);') &&

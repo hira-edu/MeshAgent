@@ -80,6 +80,19 @@ function main() {
 	const verifyClientBody = extractFunction(kvmSource, 'static BOOL kvm_relay_verify_bridge_client(HANDLE pipeHandle, DWORD expectedPid, DWORD* errorOut)');
 	const writeInputBody = extractFunction(kvmSource, 'static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int bufferLen)\n{');
 	const abandonStalledBody = extractFunction(kvmSource, 'static void kvm_relay_abandon_stalled_bridge(KvmRelayContext* ctx)');
+	const inputDataBody = extractFunction(kvmSource, 'int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHandler, void *reserved)');
+	const refreshCaseStart = inputDataBody.indexOf('case MNG_KVM_REFRESH:');
+	assert(refreshCaseStart >= 0, 'MNG_KVM_REFRESH case not found');
+	const refreshCaseEnd = inputDataBody.indexOf('case ', refreshCaseStart + 'case MNG_KVM_REFRESH:'.length);
+	const refreshCaseBody = inputDataBody.slice(refreshCaseStart, refreshCaseEnd > refreshCaseStart ? refreshCaseEnd : undefined);
+	const refreshHeaderBody = extractFunction(kvmSource, 'static int kvm_server_send_refresh_header(ILibKVM_WriteHandler writeHandler, void *reserved)');
+	const captureLoopBody = extractFunction(kvmSource, 'DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)');
+	const frameScanLockIndex = captureLoopBody.indexOf('kvm_server_enter_tile_info_lock("frame-scan")');
+	const frameScanGenerationIndex = captureLoopBody.indexOf('if (captureTileGeneration != InterlockedCompareExchange(&gKvmTileInfoGeneration, 0, 0))', frameScanLockIndex);
+	const refreshResetIndex = captureLoopBody.indexOf('kvm_server_reset_tile_info_locked("refresh", 1, 0)');
+	const frameScanResetIndex = captureLoopBody.indexOf('kvm_server_reset_tile_info_locked("frame-scan"');
+	const frameScanUnlockIndex = captureLoopBody.indexOf('kvm_server_leave_tile_info_lock();', frameScanResetIndex);
+	const refreshConsumeIndex = captureLoopBody.indexOf('if (InterlockedExchange(&gKvmRefreshRequested, 0) != 0)');
 
     const checks = {
         masterBuildsGuidPipeBaseName: kvmSource.includes('\\\\\\\\.\\\\pipe\\\\MeshKvm_%ls'),
@@ -156,6 +169,27 @@ function main() {
             kvmSource.includes('kvm_server_reset_tile_info_locked("frame-scan"') &&
 			kvmSource.includes('kvm_server_free_tile_info(cleanupTileInfo, cleanupTileHeightCount)') &&
 			!kvmSource.includes('ILIBCRITICALEXIT(254)'),
+		// The frame scan holds the tile lock across blocking output writes, so the
+		// input path (bridge input thread, kvm_mainloopinput_ex, chain thread) must
+		// only flag a refresh; the capture thread answers it and resets the CRCs.
+		slaveRefreshDoesNotTakeTileLockOnInputPath:
+			kvmSource.includes('static volatile LONG gKvmRefreshRequested = 0;') &&
+			refreshCaseBody.includes('InterlockedExchange(&gKvmRefreshRequested, 1);') &&
+			!refreshCaseBody.includes('tile_info_lock') &&
+			!refreshCaseBody.includes('reset_tile_info') &&
+			!refreshCaseBody.includes('writeHandler') &&
+			!refreshCaseBody.includes('kvm_send_display_list') &&
+			refreshHeaderBody.includes('MNG_KVM_SCREEN') &&
+			refreshHeaderBody.includes('kvm_send_display_list(writeHandler, reserved);') &&
+			captureLoopBody.includes('InterlockedExchange(&gKvmRefreshRequested, 0);') &&
+			refreshConsumeIndex >= 0 &&
+			captureLoopBody.includes('if (!kvm_server_send_refresh_header(writeHandler, reserved)) { break; }') &&
+			refreshConsumeIndex < frameScanLockIndex &&
+			frameScanLockIndex < frameScanGenerationIndex &&
+			frameScanGenerationIndex < refreshResetIndex &&
+			refreshResetIndex < frameScanResetIndex &&
+			frameScanResetIndex < frameScanUnlockIndex &&
+			captureLoopBody.includes('InterlockedCompareExchange(&gKvmRefreshRequested, 0, 0) == 0'),
 		slaveSkipsCaptureWhenDesktopUnavailable:
 			kvmSource.includes('int gKvmDesktopCaptureReady = 1;') &&
 			kvmSource.includes('result->accessible = 0;') &&

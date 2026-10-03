@@ -212,6 +212,9 @@ static HANDLE gKvmRemoteResumeEvent = NULL;
 static INIT_ONCE gKvmTileInfoLockOnce = INIT_ONCE_STATIC_INIT;
 static CRITICAL_SECTION gKvmTileInfoLock;
 static LONG gKvmTileInfoGeneration = 0;
+// Set by the input path on MNG_KVM_REFRESH and consumed by the capture thread,
+// which answers the refresh itself (see kvm_server_send_refresh_header).
+static volatile LONG gKvmRefreshRequested = 0;
 int g_restartcount = 0;
 struct tileInfo_t **tileInfo = NULL;
 int g_slavekvm = 0;
@@ -476,7 +479,14 @@ typedef struct KvmRelayProcessUser
 	void* reserved;
 	void* pipeMgr;
 	char* exePath;
+	struct KvmRelayProcessUser* next;
+	struct KvmRelayProcessUser* prev;
 }KvmRelayProcessUser;
+
+// Every live helper record, so destroying a context can detach all records that name it, including
+// those of superseded helpers that ctx->processUser no longer points to. Guarded by
+// gKvmRelayContextLock.
+static KvmRelayProcessUser* gKvmProcessUsers = NULL;
 
 static void kvm_relay_linger_timer_callback(void* object);
 
@@ -640,9 +650,46 @@ static void kvm_relay_refresh_registered_context_count_locked()
 	gKvmRegisteredContextCount = count;
 }
 
+static int kvm_relay_context_is_registered_locked(KvmRelayContext* ctx)
+{
+	int i;
+	if (ctx == NULL) { return 0; }
+	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
+	{
+		if (gKvmRelayContexts[i] == ctx) { return 1; }
+	}
+	return 0;
+}
+
+static void kvm_relay_link_process_user(KvmRelayProcessUser* user)
+{
+	if (user == NULL) { return; }
+	kvm_relay_lock();
+	user->prev = NULL;
+	user->next = gKvmProcessUsers;
+	if (gKvmProcessUsers != NULL) { gKvmProcessUsers->prev = user; }
+	gKvmProcessUsers = user;
+	kvm_relay_unlock();
+}
+
+// Must run before a record is freed: afterwards neither the list nor its context refers to it.
+static void kvm_relay_unlink_process_user(KvmRelayProcessUser* user)
+{
+	if (user == NULL) { return; }
+	kvm_relay_lock();
+	if (user->prev != NULL) { user->prev->next = user->next; }
+	else if (gKvmProcessUsers == user) { gKvmProcessUsers = user->next; }
+	if (user->next != NULL) { user->next->prev = user->prev; }
+	user->next = NULL;
+	user->prev = NULL;
+	if (user->ctx != NULL && user->ctx->processUser == user) { user->ctx->processUser = NULL; }
+	kvm_relay_unlock();
+}
+
 static KvmRelayContext* kvm_relay_allocate_context()
 {
-	KvmRelayContext* ctx = (KvmRelayContext*)ILibMemory_Allocate(sizeof(KvmRelayContext), 0, NULL, NULL);
+	// Smart allocation: ILibMemory_Free only releases blocks that carry its header.
+	KvmRelayContext* ctx = (KvmRelayContext*)ILibMemory_SmartAllocate(sizeof(KvmRelayContext));
 	if (ctx == NULL) { return NULL; }
 	memset(ctx, 0, sizeof(KvmRelayContext));
 	ctx->bridgeInputPipeHandle = INVALID_HANDLE_VALUE;
@@ -660,14 +707,36 @@ static KvmRelayContext* kvm_relay_allocate_context()
 	return ctx;
 }
 
+static int kvm_relay_context_is_active_in_outer_frame(KvmRelayContext* ctx);
+static void kvm_relay_unregister_context_locked(KvmRelayContext* ctx);
+
 static void kvm_relay_destroy_context(KvmRelayContext* ctx)
 {
 	KvmRelayCachedControlPacket* packet = NULL;
+	KvmRelayProcessUser* processUser = NULL;
 	HANDLE sessionChangeEvent = NULL;
+	int activeInFrame = 0;
+	int offChain = 0;
 
 	if (ctx == NULL) { return; }
-	// Callers unregister ctx before destroying it. Taking the signal lock here waits out any
-	// kvm_notify_session_change() that found ctx in the registry before it was unregistered.
+	kvm_relay_lock();
+	activeInFrame = kvm_relay_context_is_active_in_outer_frame(ctx);
+	// Callers unregister ctx first; this only keeps a stray caller from leaving a dangling slot.
+	kvm_relay_unregister_context_locked(ctx);
+	kvm_relay_unlock();
+	// Off the chain thread, ILibLifeTime_Remove is deferred and cannot reach an entry that is already
+	// being dispatched, so a timer could still fire on ctx after it is released.
+	offChain = (gILibChain != NULL && !ILibIsRunningOnChainThread(gILibChain)) ? 1 : 0;
+	if (activeInFrame || offChain)
+	{
+		// Leave ctx allocated rather than risk a use after free. An activation frame on this stack
+		// would capture into it on unwind; kvm_cleanup defers that case to the retry timer, and
+		// every relay teardown runs on the chain thread, so reaching here means a caller broke a rule.
+		kvm_trace_startupf("relay context destroy refused ctx=%p activeInFrame=%d offChain=%d", ctx, activeInFrame, offChain);
+		return;
+	}
+	// Taking the signal lock here waits out any kvm_notify_session_change() that found ctx in the
+	// registry before it was unregistered.
 	kvm_relay_signal_lock();
 	sessionChangeEvent = ctx->sessionChangeEvent;
 	ctx->sessionChangeEvent = NULL;
@@ -681,13 +750,19 @@ static void kvm_relay_destroy_context(KvmRelayContext* ctx)
 		if (timer != NULL) { ILibLifeTime_Remove(timer, &ctx->awaitingChildExit); }
 		if (timer != NULL) { ILibLifeTime_Remove(timer, &ctx->lingerTimerToken); }
 	}
-	if (ctx->processUser != NULL)
+	// Detach every helper record that still names ctx, not only ctx->processUser: a superseded
+	// helper's record outlives its replacement, and its exit or stdout callback must then find no
+	// context instead of a released one.
+	kvm_relay_lock();
+	for (processUser = gKvmProcessUsers; processUser != NULL; processUser = processUser->next)
 	{
-		ctx->processUser->ctx = NULL;
-		ctx->processUser->writeHandler = NULL;
-		ctx->processUser->reserved = NULL;
-		ctx->processUser = NULL;
+		if (processUser->ctx != ctx) { continue; }
+		processUser->ctx = NULL;
+		processUser->writeHandler = NULL;
+		processUser->reserved = NULL;
 	}
+	ctx->processUser = NULL;
+	kvm_relay_unlock();
 	kvm_relay_close_bridge_transport(ctx);
 	kvm_relay_close_bridge_job(ctx);
 	if (InterlockedCompareExchange(&ctx->cacheInitialized, 0, 0) != 0)
@@ -3526,12 +3601,18 @@ void kvm_send_display_list(ILibKVM_WriteHandler writeHandler, void *reserved)
 		if (kvm_server_write_packet_checked(writeHandler, dwData + 4, (((unsigned short*)dwData)[0]) * 10 + 4, reserved, "display-info") == ILibTransport_DoneState_ERROR) return;
 	}
 
+	// The capture thread updates SCREEN_COUNT/SCREEN_SEL without a lock while the input thread can
+	// send this list (refresh, display query), so read each once: the stack buffer below is sized
+	// from the count and must not be filled from a larger value.
+	int screenCount = SCREEN_COUNT;
+	int screenSel = SCREEN_SEL;
+
 	// Not looked at the number of screens yet
-	if (SCREEN_COUNT == -1) return;
-	char *buffer = ILibMemory_AllocateA((5 + SCREEN_COUNT) * 2);
+	if (screenCount == -1) return;
+	char *buffer = ILibMemory_AllocateA((5 + screenCount) * 2);
 	memset(buffer, 0xFF, ILibMemory_AllocateA_Size(buffer));
 	// Send the list of possible displays to remote
-	if (SCREEN_COUNT == 0 || SCREEN_COUNT == 1)
+	if (screenCount == 0 || screenCount == 1)
 	{
 		// Only one display, send empty
 		((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_GET_DISPLAYS);		// Write the type
@@ -3545,19 +3626,19 @@ void kvm_send_display_list(ILibKVM_WriteHandler writeHandler, void *reserved)
 	{
 		// Many displays
 		((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_GET_DISPLAYS);		// Write the type
-		((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)(10 + (2 * SCREEN_COUNT)));	// Write the size
-		((unsigned short*)buffer)[2] = (unsigned short)htons((unsigned short)(SCREEN_COUNT + 1));			// Screen Count
+		((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)(10 + (2 * screenCount)));	// Write the size
+		((unsigned short*)buffer)[2] = (unsigned short)htons((unsigned short)(screenCount + 1));			// Screen Count
 		((unsigned short*)buffer)[3] = (unsigned short)htons((unsigned short)(-1));						// Possible Screen (ALL)
-		for (i = 0; i < SCREEN_COUNT; i++) {
+		for (i = 0; i < screenCount; i++) {
 			((unsigned short*)buffer)[4 + i] = (unsigned short)htons((unsigned short)(i + 1));				// Possible Screen
 		}
-		if (SCREEN_SEL == 0) {
+		if (screenSel == 0) {
 			((unsigned short*)buffer)[4 + i] = (unsigned short)htons((unsigned short)(-1));				// Selected Screen (All)
 		} else {
-			((unsigned short*)buffer)[4 + i] = (unsigned short)htons((unsigned short)(SCREEN_SEL));		// Selected Screen
+			((unsigned short*)buffer)[4 + i] = (unsigned short)htons((unsigned short)(screenSel));		// Selected Screen
 		}
 
-		kvm_server_write_packet_checked(writeHandler, buffer, (10 + (2 * SCREEN_COUNT)), reserved, "display-list");
+		kvm_server_write_packet_checked(writeHandler, buffer, (10 + (2 * screenCount)), reserved, "display-list");
 	}
 }
 
@@ -4122,28 +4203,15 @@ int kvm_server_inputdata(char* block, int blocklen, ILibKVM_WriteHandler writeHa
 		}
 	case MNG_KVM_REFRESH: // Refresh
 		{
-			char buffer[8];
 			if (size != 4) break;
 
-			((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_SCREEN);	// Write the type
-			((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)8);				// Write the size
-			((unsigned short*)buffer)[2] = (unsigned short)htons((unsigned short)SCALED_WIDTH);		// X position
-			((unsigned short*)buffer)[3] = (unsigned short)htons((unsigned short)SCALED_HEIGHT);	// Y position
-
-			if (kvm_server_write_packet_checked(writeHandler, (char*)buffer, 8, reserved, "refresh-resolution") == ILibTransport_DoneState_ERROR) break;
-
-			// Send the list of available displays
-			kvm_send_display_list(writeHandler, reserved);
-
-			// Reset all tile information
-			if (!kvm_server_enter_tile_info_lock("refresh")) { break; }
-			if (!kvm_server_reset_tile_info_locked("refresh", 1, 0))
-			{
-				kvm_server_leave_tile_info_lock();
-				break;
-			}
-			kvm_server_leave_tile_info_lock();
-
+			// Only flag the request. A frame scan holds the tile lock across
+			// blocking transport writes, so taking that lock (or writing) here
+			// would stall the input reader behind a full output pipe, and the
+			// service kills a bridge helper whose input stops draining. The
+			// capture thread sends the screen size and display list and resets
+			// every tile CRC at the start of its next scan.
+			InterlockedExchange(&gKvmRefreshRequested, 1);
 			break;
 		}
 	case MNG_KVM_PAUSE: // Pause
@@ -4547,6 +4615,25 @@ void kvm_server_SetResolution(ILibKVM_WriteHandler writeHandler, void *reserved)
 	kvm_server_write_packet_checked(writeHandler, (char*)buffer, 8, reserved, "resolution");
 }
 
+// Capture thread only: answers a viewer refresh with the screen size and the
+// display list. The caller then resets every tile CRC under the frame-scan
+// tile lock so that scan sends the full screen. Returns 0 on a write error.
+static int kvm_server_send_refresh_header(ILibKVM_WriteHandler writeHandler, void *reserved)
+{
+	char buffer[8];
+
+	((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_SCREEN);	// Write the type
+	((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)8);				// Write the size
+	((unsigned short*)buffer)[2] = (unsigned short)htons((unsigned short)SCALED_WIDTH);		// X position
+	((unsigned short*)buffer)[3] = (unsigned short)htons((unsigned short)SCALED_HEIGHT);	// Y position
+
+	if (kvm_server_write_packet_checked(writeHandler, (char*)buffer, 8, reserved, "refresh-resolution") == ILibTransport_DoneState_ERROR) return 0;
+
+	// Send the list of available displays
+	kvm_send_display_list(writeHandler, reserved);
+	return 1;
+}
+
 #define BUFSIZE 65535
 #ifdef _WINSERVICE
 DWORD WINAPI kvm_mainloopinput_ex(LPVOID Param)
@@ -4647,6 +4734,7 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	BITMAPINFO bmpInfo;
 	int row, col;
 	LONG captureTileGeneration = 0;
+	int refreshTilesPending = 0;
 	ILibKVM_WriteHandler writeHandler = (ILibKVM_WriteHandler)((void**)parm)[0];
 	void *reserved = ((void**)parm)[1];
 	char *tmoBuffer;
@@ -4674,6 +4762,9 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	ThreadRunning = 1;
 	g_shutdown = 0;
 	InterlockedExchange(&gKvmServerExitReason, 0);
+	// Startup sends the screen size, display list and every tile anyway, so a
+	// refresh left over from an earlier session would only repeat them.
+	InterlockedExchange(&gKvmRefreshRequested, 0);
 	kvm_thread_desktop_state_reset(&gKvmCaptureDesktopState);
 
 		g_pause = 0;
@@ -4891,10 +4982,19 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 			}
 		}
 
-		// A refresh runs on the chain thread and takes the tile lock. Wait for
-		// transport output before taking that lock so the chain can also resume us.
+		// Wait for transport output before writing or taking the tile lock; the
+		// chain thread resumes us once the viewer transport drains.
 		while (!g_shutdown && g_pause != 0) { Sleep(50); }
 		if (g_shutdown) { break; }
+
+		// Answer a viewer refresh here rather than on the input path. The tile
+		// CRCs are reset under the frame-scan lock below; the request stays
+		// pending until a scan actually applies it.
+		if (InterlockedExchange(&gKvmRefreshRequested, 0) != 0)
+		{
+			if (!kvm_server_send_refresh_header(writeHandler, reserved)) { break; }
+			refreshTilesPending = 1;
+		}
 
 		// Scan the desktop
 		if (kvm_read_env_bool("KVM_TRACE_LOOP", 0) != 0 && InterlockedIncrement(&gKvmLoopTraceCounter) <= 64)
@@ -4975,6 +5075,16 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 				desktopsize = 0;
 				continue;
 			}
+			if (refreshTilesPending != 0)
+			{
+				if (!kvm_server_reset_tile_info_locked("refresh", 1, 0))
+				{
+					kvm_server_leave_tile_info_lock();
+					if (desktop) { free(desktop); desktop = NULL; }
+					break;
+				}
+				refreshTilesPending = 0;
+			}
 #ifdef KVM_ALL_TILES
 			if (!kvm_server_reset_tile_info_locked("frame-scan", 1, (char)TILE_TODO))
 #else
@@ -5027,9 +5137,10 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 
 		KVMDEBUG("kvm_server_mainloop / loop3", (int)GetCurrentThreadId());
 
-		// We can't go full speed here, we need to slow this down.
+		// We can't go full speed here, we need to slow this down. A pending
+		// refresh ends the wait so the viewer is not held for a full frame period.
 		height = FRAME_RATE_TIMER;
-		while (!g_shutdown && height > 0) { if (height > 50) { height -= 50; Sleep(50); } else { Sleep(height); height = 0; } SleepEx(0, TRUE); }
+		while (!g_shutdown && height > 0 && InterlockedCompareExchange(&gKvmRefreshRequested, 0, 0) == 0) { if (height > 50) { height -= 50; Sleep(50); } else { Sleep(height); height = 0; } SleepEx(0, TRUE); }
 	}
 
 	KVMDEBUG("kvm_server_mainloop / end3", (int)GetCurrentThreadId());
@@ -5152,10 +5263,13 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	// Non-NULL when the helper stopped itself because it could not capture the input desktop.
 	const char* captureExitReason = kvm_helper_exit_reason_name((DWORD)exitCode);
 
+	// processUser->ctx is either a live context or NULL: destroying a context detaches every record
+	// that names it. Once unlinked here, the record is owned by this handler alone.
 	if (processUser != NULL)
 	{
 		if (ctx != NULL && ctx->processUser == processUser) { ctx->processUser = NULL; }
 		ILibProcessPipe_Process_UpdateUserObject(sender, NULL);
+		kvm_relay_unlink_process_user(processUser);
 	}
 
 	kvm_relay_lock();
@@ -5408,7 +5522,8 @@ void kvm_relay_StdErrHandler(ILibProcessPipe_Process sender, char *buffer, size_
 
 int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHandler writeHandler, void *reserved)
 {
-	KvmRelayProcessUser* user = (KvmRelayProcessUser*)ILibMemory_Allocate(sizeof(KvmRelayProcessUser), 0, NULL, NULL);
+	// Smart allocation: ILibMemory_Free only releases blocks that carry its header.
+	KvmRelayProcessUser* user = (KvmRelayProcessUser*)ILibMemory_SmartAllocate(sizeof(KvmRelayProcessUser));
 	KvmRelayContext* ctx = kvm_relay_get_context();
 	char runtimeHostPathA[MAX_PATH * 4] = { 0 };
 	char dllPathA[MAX_PATH * 4] = { 0 };
@@ -5456,6 +5571,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 	user->pipeMgr = pipeMgr;
 	user->exePath = exePath;
 	if (ctx != NULL) { ctx->processUser = user; }
+	kvm_relay_link_process_user(user);
 	
 	KVMDEBUG("kvm_relay_restart / start", paused);
 
@@ -5492,6 +5608,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			gKvmLastBridgeFailureSpawnType = (DWORD)primaryType;
 			kvm_update_runtime_state(0, 0);
 			if (ctx != NULL && ctx->processUser == user) { ctx->processUser = NULL; }
+			kvm_relay_unlink_process_user(user);
 			ILibMemory_Free(user);
 			SetLastError(ERROR_INVALID_PARAMETER);
 			return 0;
@@ -5881,6 +5998,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			gKvmLastBridgeFailureSpawnType = (DWORD)primaryType;
 			kvm_update_runtime_state(0, 0);
 			if (ctx != NULL && ctx->processUser == user) { ctx->processUser = NULL; }
+			kvm_relay_unlink_process_user(user);
 			ILibMemory_Free(user);
 			SetLastError(ERROR_OPERATION_ABORTED);
 			return 0;
@@ -5896,6 +6014,7 @@ int kvm_relay_restart(int paused, void *pipeMgr, char *exePath, ILibKVM_WriteHan
 			kvm_record_spawn_failure(lastError, 7, (DWORD)primaryType);
 			kvm_update_runtime_state(0, 0);
 			if (ctx != NULL && ctx->processUser == user) { ctx->processUser = NULL; }
+			kvm_relay_unlink_process_user(user);
 			ILibMemory_Free(user);
 			SetLastError(lastError);
 			return 0;
@@ -6485,6 +6604,13 @@ void kvm_cleanup(void *reserved)
 		ctx->pipeMgr = NULL;
 		ctx->writeHandler = NULL;
 		ctx->reserved = NULL;
+		// The stdout handler prefers these copies over the context's; the viewer object they point
+		// to is released after this returns, so output from the exiting helper must not reach it.
+		if (ctx->processUser != NULL)
+		{
+			ctx->processUser->writeHandler = NULL;
+			ctx->processUser->reserved = NULL;
+		}
 		kvm_relay_reset_cached_control_state(ctx);
 	}
 	kvm_relay_capture_context(ctx);
@@ -6500,6 +6626,15 @@ void kvm_cleanup(void *reserved)
 		destroyNow = 1;
 	}
 	kvm_relay_deactivate_context();
+	if (gKvmActiveContext == ctx)
+	{
+		// Cleanup re-entered from a frame that has this context live (for example a
+		// bridge read callback whose output ended the stream). Deactivation keeps the
+		// globals as they are, and that frame captures them before it unwinds, so
+		// publish the final context state: otherwise the cleared gChildProcess would
+		// overwrite the helper kept above for the deferred-stop timer and exit handler.
+		kvm_relay_load_context(ctx);
+	}
 	if (destroyNow && kvm_relay_context_is_active_in_outer_frame(ctx))
 	{
 		// Cleanup re-entered from a callback of a frame that still uses this
@@ -6732,7 +6867,9 @@ static void kvm_relay_dispatch_session_change_on_chain(void* chain, void* user)
 	}
 	for (i = 0; i < KVM_MAX_RELAY_CONTEXTS; ++i)
 	{
-		if (snapshot[i] != NULL)
+		// A handler can call out to a viewer callback that tears down another session; skip a
+		// snapshot entry that is no longer registered, since it may already be released.
+		if (snapshot[i] != NULL && kvm_relay_context_is_registered_locked(snapshot[i]))
 		{
 			kvm_relay_handle_session_change_for_context(snapshot[i], request->eventType, request->sessionId);
 		}
