@@ -1560,46 +1560,70 @@ failed:
     return FALSE;
 }
 
-BOOL MeshRuntimeHost_GetSystemHostPathW(wchar_t* runtimeHostPath, size_t runtimeHostPathCch)
+// Normalizes a path for host-identity comparison: '/' -> '\', GetFullPathNameW, '/' -> '\'
+// again. Matches the rule the launch chokepoint and watchdog predicates use.
+static void MeshRuntimeHost_NormalizeHostPathW(const wchar_t* value, wchar_t* output, size_t outputCch)
+{
+    wchar_t scratch[MAX_PATH * 4];
+    DWORD fullLen;
+    size_t i;
+    if (output == NULL || outputCch == 0) { return; }
+    output[0] = L'\0';
+    if (value == NULL || value[0] == L'\0') { return; }
+    if (FAILED(StringCchCopyW(scratch, _countof(scratch), value))) { return; }
+    for (i = 0; scratch[i] != L'\0'; ++i) { if (scratch[i] == L'/') { scratch[i] = L'\\'; } }
+    fullLen = GetFullPathNameW(scratch, (DWORD)outputCch, output, NULL);
+    if (fullLen == 0 || fullLen >= outputCch) { StringCchCopyW(output, outputCch, scratch); }
+    for (i = 0; output[i] != L'\0'; ++i) { if (output[i] == L'/') { output[i] = L'\\'; } }
+}
+
+BOOL MeshRuntimeHost_BuildSystemBinaryPathW(const wchar_t* binaryName, BOOL requireExistingFile, wchar_t* output, size_t outputCch)
 {
     UINT len = 0;
-    if (runtimeHostPath == NULL || runtimeHostPathCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
-    runtimeHostPath[0] = L'\0';
-    len = GetSystemDirectoryW(runtimeHostPath, (UINT)runtimeHostPathCch);
-    if (len == 0 || len >= runtimeHostPathCch)
+    if (binaryName == NULL || binaryName[0] == L'\0' || output == NULL || outputCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    output[0] = L'\0';
+    len = GetSystemDirectoryW(output, (UINT)outputCch);
+    if (len == 0 || len >= outputCch)
     {
         SetLastError(len == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER);
-        runtimeHostPath[0] = L'\0';
+        output[0] = L'\0';
         return FALSE;
     }
-    if (FAILED(StringCchCatW(runtimeHostPath, runtimeHostPathCch, L"\\rundll32.exe")))
+    if (FAILED(StringCchCatW(output, outputCch, L"\\")) || FAILED(StringCchCatW(output, outputCch, binaryName)))
     {
-        runtimeHostPath[0] = L'\0';
+        output[0] = L'\0';
         SetLastError(ERROR_INSUFFICIENT_BUFFER);
         return FALSE;
     }
-    return MeshRuntimeHost_FileExistsW(runtimeHostPath);
+    // The launch chokepoint must not accept a directory named like the host binary.
+    if (requireExistingFile && !MeshRuntimeHost_FileExistsW(output)) { return FALSE; }
+    return TRUE;
+}
+
+BOOL MeshRuntimeHost_IsExactSystemBinaryPathW(const wchar_t* binaryName, const wchar_t* value)
+{
+    wchar_t canonical[MAX_PATH * 4];
+    wchar_t normalizedValue[MAX_PATH * 4];
+    wchar_t normalizedCanonical[MAX_PATH * 4];
+    if (value == NULL || value[0] == L'\0') { return FALSE; }
+    // Construct-only: a policy match must not depend on the file being present at this instant,
+    // and uses the same construction as the resolver so the two cannot disagree.
+    if (!MeshRuntimeHost_BuildSystemBinaryPathW(binaryName, FALSE, canonical, _countof(canonical))) { return FALSE; }
+    MeshRuntimeHost_NormalizeHostPathW(value, normalizedValue, _countof(normalizedValue));
+    if (normalizedValue[0] == L'\0') { return FALSE; }
+    MeshRuntimeHost_NormalizeHostPathW(canonical, normalizedCanonical, _countof(normalizedCanonical));
+    if (normalizedCanonical[0] == L'\0') { return FALSE; }
+    return (_wcsicmp(normalizedValue, normalizedCanonical) == 0) ? TRUE : FALSE;
+}
+
+BOOL MeshRuntimeHost_GetSystemHostPathW(wchar_t* runtimeHostPath, size_t runtimeHostPathCch)
+{
+    return MeshRuntimeHost_BuildSystemBinaryPathW(MESH_RUNTIME_HOST_BINARY_RUNDLL32_W, TRUE, runtimeHostPath, runtimeHostPathCch);
 }
 
 BOOL MeshRuntimeHost_GetServiceHostPathW(wchar_t* serviceHostPath, size_t serviceHostPathCch)
 {
-    UINT len = 0;
-    if (serviceHostPath == NULL || serviceHostPathCch == 0) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
-    serviceHostPath[0] = L'\0';
-    len = GetSystemDirectoryW(serviceHostPath, (UINT)serviceHostPathCch);
-    if (len == 0 || len >= serviceHostPathCch)
-    {
-        serviceHostPath[0] = L'\0';
-        SetLastError(len == 0 ? GetLastError() : ERROR_INSUFFICIENT_BUFFER);
-        return FALSE;
-    }
-    if (FAILED(StringCchCatW(serviceHostPath, serviceHostPathCch, L"\\svchost.exe")))
-    {
-        serviceHostPath[0] = L'\0';
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        return FALSE;
-    }
-    return MeshRuntimeHost_FileExistsW(serviceHostPath);
+    return MeshRuntimeHost_BuildSystemBinaryPathW(MESH_RUNTIME_HOST_BINARY_SVCHOST_W, TRUE, serviceHostPath, serviceHostPathCch);
 }
 
 // Removes the staged manifest and host DLL of a host that has exited or never started.

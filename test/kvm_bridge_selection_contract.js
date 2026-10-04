@@ -90,8 +90,9 @@ function main() {
             !processPipeSource.includes('ILibProcessPipe_IsApprovedAgentSelfSpawnLaunchA') &&
             !processPipeSource.includes('MESHAGENT_SELF_SPAWN_PATH'),
         relayResolvesRuntimeHost: kvmSource.includes('kvm_relay_resolve_runtime_host_pathW') &&
-            kvmSource.includes('systemLen = GetSystemDirectoryW(output, (UINT)outputLen);') &&
-            kvmSource.includes('StringCchCatW(output, outputLen, L"\\\\rundll32.exe")') &&
+            // Delegates to the single shared resolver (which rejects a directory named rundll32.exe)
+            // instead of a private GetSystemDirectory construction.
+            kvmSource.includes('return MeshRuntimeHost_GetSystemHostPathW(output, outputLen);') &&
             !kvmSource.includes('ExpandEnvironmentStringsW(L"%SystemRoot%\\\\System32\\\\rundll32.exe"'),
         serviceMainBridgeResolvesRuntimeHostThroughSharedContract:
             serviceMainSource.includes('static BOOL MeshService_ResolveRuntimeHostPathW(WCHAR* output, size_t outputLen)') &&

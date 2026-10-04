@@ -8,6 +8,7 @@ EXPORTS
     MeshUmhHostW
     MeshUserConsentW
     MeshLifecycleHostW
+    MeshLauncherCleanupW
     MeshPreProtectionCaptureW
     MeshSelfTestHostW
     MeshKvmProbeHostW

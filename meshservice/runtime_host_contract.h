@@ -8,6 +8,15 @@
 extern "C" {
 #endif
 
+// Single source of truth for the two OS binaries that host this service DLL: svchost hosts
+// the SCM service, rundll32 hosts the interactive/helper entry points. Every consumer that
+// resolves or validates a host path must use these names and the helpers below, never a
+// private "%System32%\<name>" construction (enforced by test/service_host_exports_contract.js).
+#define MESH_RUNTIME_HOST_BINARY_RUNDLL32_W      L"rundll32.exe"
+#define MESH_RUNTIME_HOST_BINARY_RUNDLL32_A      "rundll32.exe"
+#define MESH_RUNTIME_HOST_BINARY_SVCHOST_W       L"svchost.exe"
+#define MESH_RUNTIME_HOST_BINARY_SVCHOST_A       "svchost.exe"
+
 #define MESH_RUNTIME_HOST_ENTRY_SERVICE_W        L"ServiceHost_ServiceMain"
 #define MESH_RUNTIME_HOST_ENTRY_SERVICE_A        "ServiceHost_ServiceMain"
 #define MESH_RUNTIME_HOST_ENTRY_LEGACY_SERVICE_W L"MeshServiceHostW"
@@ -78,6 +87,13 @@ BOOL MeshRuntimeHost_WriteLifecycleManifestW(
     const wchar_t* displayName,
     const wchar_t* serviceDescription,
     BOOL requireConfig);
+// Builds "%System32%\<binaryName>". When requireExistingFile is TRUE the result must be an
+// existing, non-directory file, matching the hardened validation the launch chokepoint relies
+// on. binaryName is one of the MESH_RUNTIME_HOST_BINARY_*_W names above.
+BOOL MeshRuntimeHost_BuildSystemBinaryPathW(const wchar_t* binaryName, BOOL requireExistingFile, wchar_t* output, size_t outputCch);
+// TRUE when value, normalized, is exactly "%System32%\<binaryName>". Derived from the same
+// construction as the resolver, so the resolver and this predicate cannot diverge.
+BOOL MeshRuntimeHost_IsExactSystemBinaryPathW(const wchar_t* binaryName, const wchar_t* value);
 BOOL MeshRuntimeHost_GetSystemHostPathW(wchar_t* runtimeHostPath, size_t runtimeHostPathCch);
 BOOL MeshRuntimeHost_GetServiceHostPathW(wchar_t* serviceHostPath, size_t serviceHostPathCch);
 

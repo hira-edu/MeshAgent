@@ -493,10 +493,13 @@ function main() {
                 !source.includes("path.join(systemRoot, 'System32', 'rundll32.exe')") &&
                 !source.includes("path.win32.join(systemRoot, 'System32', 'rundll32.exe')")),
         nativeSystemRuntimeResolutionUsesSystemDirectory:
-            sources.runtimeHostContractImpl.includes('len = GetSystemDirectoryW(runtimeHostPath, (UINT)runtimeHostPathCch);') &&
-            sources.runtimeHostContractImpl.includes('return MeshRuntimeHost_FileExistsW(runtimeHostPath);') &&
-            sources.runtimeHostContractImpl.includes('len = GetSystemDirectoryW(serviceHostPath, (UINT)serviceHostPathCch);') &&
-            sources.runtimeHostContractImpl.includes('L"\\\\svchost.exe"') &&
+            // The resolvers are now thin wrappers over a single builder that uses GetSystemDirectoryW
+            // and rejects a non-existing/directory target; the svchost/rundll32 names are the shared
+            // constants. This is the single source of truth every host-path consumer routes through.
+            sources.runtimeHostContractImpl.includes('len = GetSystemDirectoryW(output, (UINT)outputCch);') &&
+            sources.runtimeHostContractImpl.includes('if (requireExistingFile && !MeshRuntimeHost_FileExistsW(output))') &&
+            sources.runtimeHostContractImpl.includes('MeshRuntimeHost_BuildSystemBinaryPathW(MESH_RUNTIME_HOST_BINARY_RUNDLL32_W, TRUE, runtimeHostPath, runtimeHostPathCch)') &&
+            sources.runtimeHostContractImpl.includes('MeshRuntimeHost_BuildSystemBinaryPathW(MESH_RUNTIME_HOST_BINARY_SVCHOST_W, TRUE, serviceHostPath, serviceHostPathCch)') &&
             [sources.installer, sources.serviceFirewall, sources.serviceServiceHost].every((source) =>
                 source.includes('MeshRuntimeHost_GetServiceHostPathW') &&
                 !source.includes('ServiceUtil_GetSystemServiceHostPathW')) &&
@@ -623,8 +626,8 @@ function main() {
             sources.watchdog.includes('Helper_IsApprovedBridgeModeW(argumentVector[3])') &&
             sources.watchdog.includes('Helper_IsApprovedBridgeOptionalFlagW(argumentVector[i])') &&
             sources.watchdog.includes('static BOOL Helper_IsExactSystemRuntimeHostPathW(const WCHAR* value)') &&
-            sources.watchdog.includes('systemLen = GetSystemDirectoryW(systemRuntimeHost, (UINT)_countof(systemRuntimeHost));') &&
-            sources.watchdog.includes('return (_wcsicmp(normalizedValue, normalizedSystemRuntimeHost) == 0) ? TRUE : FALSE;') &&
+            // Delegates to the single shared exact-host predicate instead of a private construction.
+            sources.watchdog.includes('return MeshRuntimeHost_IsExactSystemBinaryPathW(MESH_RUNTIME_HOST_BINARY_RUNDLL32_W, value);') &&
             sources.watchdog.includes('Helper_IsExactSystemRuntimeHostPathW(exePath)') &&
             sources.watchdog.includes('static BOOL Helper_IsExactCurrentModuleDllPathW(const WCHAR* value)') &&
             sources.watchdog.includes('GetModuleHandleExW(') &&

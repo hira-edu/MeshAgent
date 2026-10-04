@@ -1702,24 +1702,9 @@ static void Helper_NormalizePathW(const WCHAR* value, WCHAR* output, size_t outp
 
 static BOOL Helper_IsExactSystemRuntimeHostPathW(const WCHAR* value)
 {
-    WCHAR normalizedValue[MAX_PATH * 4];
-    WCHAR systemRuntimeHost[MAX_PATH * 4];
-    WCHAR normalizedSystemRuntimeHost[MAX_PATH * 4];
-    UINT systemLen;
-
-    if (value == NULL || value[0] == L'\0') { return FALSE; }
-    Helper_NormalizePathW(value, normalizedValue, _countof(normalizedValue));
-    if (normalizedValue[0] == L'\0') { return FALSE; }
-
-    systemRuntimeHost[0] = L'\0';
-    normalizedSystemRuntimeHost[0] = L'\0';
-    systemLen = GetSystemDirectoryW(systemRuntimeHost, (UINT)_countof(systemRuntimeHost));
-    if (systemLen == 0 || systemLen >= _countof(systemRuntimeHost)) { return FALSE; }
-    if (FAILED(StringCchCatW(systemRuntimeHost, _countof(systemRuntimeHost), L"\\rundll32.exe"))) { return FALSE; }
-
-    Helper_NormalizePathW(systemRuntimeHost, normalizedSystemRuntimeHost, _countof(normalizedSystemRuntimeHost));
-    if (normalizedSystemRuntimeHost[0] == L'\0') { return FALSE; }
-    return (_wcsicmp(normalizedValue, normalizedSystemRuntimeHost) == 0) ? TRUE : FALSE;
+    // Single source of truth for "is this exactly %System32%\rundll32.exe" (same construction
+    // and normalization rule as the former local copy).
+    return MeshRuntimeHost_IsExactSystemBinaryPathW(MESH_RUNTIME_HOST_BINARY_RUNDLL32_W, value);
 }
 
 static BOOL Helper_IsExactCurrentModuleDllPathW(const WCHAR* value)

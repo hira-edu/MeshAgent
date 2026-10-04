@@ -153,7 +153,8 @@ static int ILibProcessPipe_IsExactSystemRuntimeHostTargetA(char* target)
 	normalizedSystemRuntimeHost[0] = 0;
 	systemLen = GetSystemDirectoryA(systemRuntimeHost, (UINT)sizeof(systemRuntimeHost));
 	if (systemLen == 0 || systemLen >= sizeof(systemRuntimeHost)) { return 0; }
-	if (strcat_s(systemRuntimeHost, sizeof(systemRuntimeHost), "\\rundll32.exe") != 0) { return 0; }
+	// Binary name is single-sourced; this gate keeps its own hardened ASCII normalize+compare.
+	if (strcat_s(systemRuntimeHost, sizeof(systemRuntimeHost), "\\" MESH_RUNTIME_HOST_BINARY_RUNDLL32_A) != 0) { return 0; }
 
 	ILibProcessPipe_NormalizePathA(systemRuntimeHost, normalizedSystemRuntimeHost, sizeof(normalizedSystemRuntimeHost));
 	if (normalizedSystemRuntimeHost[0] == 0) { return 0; }

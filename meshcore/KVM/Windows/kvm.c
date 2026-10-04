@@ -2126,23 +2126,9 @@ static void kvm_relay_close_bridge_job(KvmRelayContext* ctx)
 
 static BOOL kvm_relay_resolve_runtime_host_pathW(WCHAR* output, size_t outputLen)
 {
-	UINT systemLen = 0;
-
-	if (output == NULL || outputLen == 0) { return FALSE; }
-	output[0] = L'\0';
-
-	systemLen = GetSystemDirectoryW(output, (UINT)outputLen);
-	if (systemLen == 0 || systemLen >= outputLen)
-	{
-		output[0] = L'\0';
-		return FALSE;
-	}
-	if (FAILED(StringCchCatW(output, outputLen, L"\\rundll32.exe")))
-	{
-		output[0] = L'\0';
-		return FALSE;
-	}
-	return (GetFileAttributesW(output) != INVALID_FILE_ATTRIBUTES);
+	// Single source of truth for the system rundll32 host path. Unlike the former local copy,
+	// this rejects a directory named "rundll32.exe", matching the launch chokepoint's check.
+	return MeshRuntimeHost_GetSystemHostPathW(output, outputLen);
 }
 
 static BOOL kvm_relay_resolve_bridge_dll_pathW(char *exePath, WCHAR* output, size_t outputLen)
