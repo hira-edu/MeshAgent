@@ -56,7 +56,7 @@ function evaluateDesktopSource(source) {
     return {
         firstScreenPromotesConnectedState:
             source.includes('if (obj.parent != null && obj.parent.State < 3) { obj.parent.xxStateChange(3); }') ||
-            source.includes('null!=n.parent&&n.parent.State<3&&n.parent.xxStateChange(3)')
+            /null!=([\w$]+)\.parent&&\1\.parent\.State<3&&\1\.parent\.xxStateChange\(3\)/.test(source)
     };
 }
 

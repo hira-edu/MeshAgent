@@ -289,6 +289,17 @@ Ambient proxy discovery is not used by the active agent path; do not rely on
 WPAD, per-user browser settings, or heuristic proxy fallback. Stock reconnect
 handling remains part of MeshAgent and is not an endpoint-selection fallback.
 
+## Windows KVM startup input
+
+The MeshCentral KVM viewer starts without synthesizing keyboard or mouse input.
+Screen-size updates release only keys recorded as pressed by that viewer before
+resetting its stream state; they do not send a blanket modifier-key reset.
+This behavior is implemented in the standard and minified
+`agent-desktop-0.0.2` viewer assets in the MeshCentral repository and requires
+those assets to be published and the viewer page reloaded. The regression probe
+is `node test/meshcentral_desktop_startup_input_runtime.js --browsers`; it checks
+both assets in Chromium, Firefox, and WebKit without connecting to an endpoint.
+
 ## Connection failure diagnostics
 
 On Windows, the core, native service host, lifecycle installer, runtime policy,

@@ -63,6 +63,9 @@ function evaluateStandardAsset(source) {
 }
 
 function evaluateMinifiedAsset(source) {
+    // Minifiers may rename the viewer object when its reference counts change.
+    const objectName = source.match(/([\w$]+)\.ProcessScreenMsg=function\(/);
+    if (objectName) { source = source.replace(new RegExp('\\b' + objectName[1].replace(/\$/g, '\\$') + '\\b', 'g'), 'n'); }
     return {
         functionLocated: source.includes('n.ProcessScreenMsg=function(e,t){'),
         acceptsSameSizeScreenPackets: !source.includes('n.ScreenWidth!=e||n.ScreenHeight!=t'),
