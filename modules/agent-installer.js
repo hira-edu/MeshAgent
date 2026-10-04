@@ -795,52 +795,47 @@ function installService(params)
     try
     {
         // Let's actually install the service
-        require('service-manager').manager.installService(options);
+        var installation = require('service-manager').manager.installService(options);
         process.stdout.write(' [DONE]\n');
     }
     catch(sie)
     {
         throw new Error('Service installation failed: ' + sie);
     }
-    var svc = require('service-manager').manager.getService(options.name);
-
-    // macOS needs a LaunchAgent to help with some usages that need to run from within the user session, 
-    // so we can setup ourselves to accomplish that.
-    if (process.platform == 'darwin')
-    {
-        svc.load();
-        process.stdout.write('   -> setting up launch agent...');
-        try
-        {
-            require('service-manager').manager.installLaunchAgent(
-                {
-                    name: options.name,
-                    servicePath: svc.appLocation(),
-                    startType: 'AUTO_START',
-                    sessionTypes: ['LoginWindow'],
-                    parameters: ['-kvm1']
-                });
-            process.stdout.write(' [DONE]\n');
-        }
-        catch (sie)
-        {
-            svc.close();
-            throw new Error('Launch agent installation failed: ' + sie);
-        }
-    }
-
-    // Let's try to start the service that we just installed (non-Windows platforms)
-    process.stdout.write('   -> Starting service...');
+    var svc = null, launchAgentCreated = false;
     try
     {
+        svc = require('service-manager').manager.getService(options.name);
+        // Publish the same executable's LoginWindow entry before starting the
+        // daemon. A helper-install failure must not leave a running partial install.
+        if (process.platform == 'darwin')
+        {
+            process.stdout.write('   -> setting up launch agent...');
+            require('service-manager').manager.installLaunchAgent(
+                { name: options.name, servicePath: svc.appLocation(), startType: 'AUTO_START',
+                    sessionTypes: ['LoginWindow'], parameters: ['-kvm1'] });
+            launchAgentCreated = true;
+            process.stdout.write(' [DONE]\n');
+        }
+        process.stdout.write('   -> Starting service...');
         svc.start();
         process.stdout.write(' [OK]\n');
     }
-    catch (ee)
+    catch (e)
     {
-        throw new Error('Service start failed: ' + ee);
+        if (process.platform == 'darwin' && installation && typeof installation.rollback == 'function')
+        {
+            try
+            {
+                if (svc) { svc.unload(); }
+                if (launchAgentCreated) { uninstallMacLaunchAgent(options.name); }
+                installation.rollback();
+            }
+            catch (cleanup) { throw new Error('Service start/setup failed: ' + e + '; cleanup failed: ' + cleanup); }
+        }
+        throw new Error('Service start/setup failed: ' + e);
     }
-    finally { svc.close(); }
+    finally { if (svc) { svc.close(); } }
 
     if (parseInt(installerParameter(params, '__skipExit', 0)) == 0)
     {
@@ -848,27 +843,22 @@ function installService(params)
     }
 }
 
+function uninstallMacLaunchAgent(name)
+{
+    var launchagent = null;
+    try { launchagent = require('service-manager').manager.getLaunchAgent(name); }
+    catch (e) { if (isServiceAbsent(e)) { return; } throw e; }
+    try
+    {
+        launchagent.unload();
+        require('fs').unlinkSync(launchagent.plist);
+    }
+    finally { launchagent.close(); }
+}
+
 // The last step in uninstalling a service
 function uninstallService3(params)
 {
-    // macOS has a LaunchAgent, that we need to uninstall
-    if (process.platform == 'darwin')
-    {
-        process.stdout.write('   -> Uninstalling launch agent...');
-        try
-        {
-            var launchagent = require('service-manager').manager.getLaunchAgent(installerParameter(params, 'meshServiceName', 'meshagent'));
-            launchagent.unload();
-            require('fs').unlinkSync(launchagent.plist);
-            process.stdout.write(' [DONE]\n');
-        }
-        catch (e)
-        {
-            if (!isServiceAbsent(e)) { throw new Error('Launch agent uninstall failed: ' + e); }
-            process.stdout.write(' [NONE]\n');
-        }
-    }
-
     if (params != null && !params.includes('_stop'))
     {
         // Since we are done uninstalling a previously installed service, we can continue with installation
@@ -910,6 +900,7 @@ function uninstallService2(params, msh)
     try
     {
         // Let's actually try to uninstall the service
+        if (process.platform == 'darwin') { uninstallMacLaunchAgent(serviceName); }
         require('service-manager').manager.uninstallService(serviceName, uninstallOptions);
         process.stdout.write(' [DONE]\n');
         if (params.includes('_stop') && require('fs').existsSync(msh)) { require('fs').unlinkSync(msh); }
@@ -1036,7 +1027,7 @@ function fullUninstall(jsonString)
     var name = installerParameter(parms, 'meshServiceName', 'meshagent'); // Set the service name, using the defaults if not specified
 
     var s = resolveInstallerService(parms, null, explicitName);
-    if (s == null) { process.stdout.write(' [NONE]\n'); process.exit(0); return; }
+    if (s == null) { if (process.platform == 'darwin') { uninstallMacLaunchAgent(name); } process.stdout.write(' [NONE]\n'); process.exit(0); return; }
     var loc;
     try
     {

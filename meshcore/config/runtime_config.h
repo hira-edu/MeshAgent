@@ -3,6 +3,31 @@
 
 #include "config_common.h"
 
+/* Generated branding identifies the product; build flags may override these
+ * runtime defaults independently on Windows and POSIX targets. */
+#ifndef MESH_AGENT_RUNTIME_ENABLED
+#define MESH_AGENT_RUNTIME_ENABLED 1
+#endif
+#ifndef MESH_AGENT_MANAGE_FILES
+#define MESH_AGENT_MANAGE_FILES 1
+#endif
+#ifndef MESH_AGENT_MANAGE_REGISTRY
+#ifdef WIN32
+#define MESH_AGENT_MANAGE_REGISTRY 1
+#else
+#define MESH_AGENT_MANAGE_REGISTRY 0
+#endif
+#endif
+#ifndef MESH_AGENT_EVENT_TRACE_DIAGNOSTICS
+#define MESH_AGENT_EVENT_TRACE_DIAGNOSTICS 0
+#endif
+#ifndef MESH_AGENT_DEBUG_DIAGNOSTICS
+#define MESH_AGENT_DEBUG_DIAGNOSTICS 0
+#endif
+#ifndef MESH_AGENT_NATIVE_API_MODE
+#define MESH_AGENT_NATIVE_API_MODE 0
+#endif
+
 typedef struct mesh_runtime_profile_s
 {
     uint8_t runtimeEnabled;

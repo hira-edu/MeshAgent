@@ -221,3 +221,37 @@ It does not install, stop, or alter the real endpoint service. Reports go to
 Store generated validation reports outside tracked documentation, normally under
 `artifacts/validation/`. Do not check in dated planning files, status ledgers, or
 runtime evidence.
+
+## macOS permission checks
+
+`python3 test/macos_kvm_permissions_native.py` compiles production permission
+queries and input dispatch with injected authorization results under ASan/UBSan.
+It checks denied, granted, and revoked input, legacy OS fallback, and desktop
+status packets without accessing the screen or injecting input. It also guards
+against restoring startup permission requests and protected-file probes. A real
+macOS permission grant/revocation and remote desktop smoke test is still needed
+to validate OS integration; the injected test does not establish TCC approval.
+
+## macOS native update validation
+
+Run these probes on a macOS development host:
+
+```sh
+python3 test/macos_certificate_identity_native.py
+python3 test/posix_update_extraction_native.py
+python3 test/macos_update_transaction_native.py
+python3 test/macos_update_handoff_native.py
+python3 test/macos_identity_startup_runtime.py --agent /absolute/path/to/built/meshagent
+python3 test/compressed_update_runtime.py --console /absolute/path/to/built/meshagent --evidence artifacts/validation/macos-compressed-update
+```
+
+The certificate probe uses real OpenSSL PKCS12 identities. The transaction probe
+injects file-operation failures and process crashes at persistent boundaries,
+checking rollback, commit cleanup, lock contention and unrelated-file retention.
+The hand-off probe executes the production orchestration against temporary
+executables to check PID and argument preservation and failed-exec recovery.
+The startup probe runs the built agent with damaged temporary identity records,
+then verifies trial rollback and datastore lock release. These tests do not
+install a system service or establish a server connection; service installation,
+server-driven transfer/authentication, and live desktop/session features require
+separate integration validation.

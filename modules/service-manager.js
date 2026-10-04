@@ -297,416 +297,384 @@ if (process.platform == 'linux')
 
 if (process.platform == 'darwin')
 {
-    function getOSVersion()
+    function macPlistString(value)
     {
-        var child = require('child_process').execFile('/bin/sh', ['sh']);
-        child.stdout.str = '';
-        child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-        child.stdin.write("sw_vers | grep ProductVersion | awk '{ print $2 }'\nexit\n");
-        child.waitExit();
-
-        //child.stdout.str = '10.9';
-
-        var ret = { raw: child.stdout.str.trim().split('.'), toString: function () { return (this.raw.join('.')); } };
-        ret.compareTo = function compareTo(val)
-        {
-            var raw = (typeof (val) == 'string') ? val.split('.') : val.raw; if (!raw) { throw ('Invalid parameter'); }
-            var self = this.raw.join('.').split('.');
-
-            var r = null, s = null;
-            while (self.length > 0 && raw.length > 0)
-            {
-                s = parseInt(self.shift()); r = parseInt(raw.shift());
-                if (s < r) { return (-1); }
-                if (s > r) { return (1); }
-            }
-            if (self.length == raw.length) { return (0); }
-            if (self.length < raw.length) { return (-1); } else { return (1); }    
-        }
-        return (ret);
-    };
-
-
-    function fetchPlist(folder, name, userid)
+        value = '' + value;
+        if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(value)) { throw new Error('Invalid control character in launchd configuration'); }
+        return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+    }
+    function macServiceName(value)
     {
-        if (folder.endsWith('/')) { folder = folder.substring(0, folder.length - 1); }
-        var ret = { name: name, close: function () { }, _uid: userid };
-        if (!require('fs').existsSync(folder + '/' + name + '.plist'))
-        {
-            // Before we throw in the towel, let's enumerate all the plist files, and see if one has a matching label
-            var files = require('fs').readdirSync(folder);
-            for (var file in files)
-            {
-                if (!files[file].endsWith('.plist')) { continue; }
-                var child = require('child_process').execFile('/bin/sh', ['sh']);
-                child.stdout.str = '';
-                child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                child.stdin.write("cat " + folder + '/' + files[file] + " | tr '\n' '\.' | awk '{ split($0, a, \"<key>Label</key>\"); split(a[2], b, \"</string>\"); split(b[1], c, \"<string>\"); print c[2]; }'\nexit\n");
-                child.waitExit();
-                if (child.stdout.str.trim() == name)
-                {
-                    ret.name = files[file].endsWith('.plist') ? files[file].substring(0, files[file].length - 6) : files[file];
-                    Object.defineProperty(ret, 'alias', { value: name });
-                    Object.defineProperty(ret, 'plist', { value: folder + '/' + files[file] });
-                    break;
-                }
-            }
-            if (!ret.plist) { throw serviceNotFound(name); }
-        }
-        else
-        {
-            Object.defineProperty(ret, 'plist', { value: folder + '/' + name + '.plist' });
-            Object.defineProperty(ret, 'alias',
-                {
-                    get: function ()
-                        {
-                            var child = require('child_process').execFile('/bin/sh', ['sh']);
-                            child.stdout.str = '';
-                            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                            child.stdin.write("cat " + ret.plist + " | tr '\n' '\.' | awk '{ split($0, a, \"<key>Label</key>\"); split(a[2], b, \"</string>\"); split(b[1], c, \"<string>\"); print c[2]; }'\nexit\n");
-                            child.waitExit();
-                            return (child.stdout.str.trim());
-                        }
-                });
-        }
-        Object.defineProperty(ret, 'daemon', { value: ret.plist.split('/LaunchDaemons/').length > 1 ? true : false });
+        if (typeof value != 'string' || !value.length || value == '.' || value == '..' || /[\/\x00-\x1f]/.test(value))
+        { throw new Error('Invalid service name'); }
+        return value;
+    }
+    function macWritePlist(file, contents)
+    {
+        var fs = require('fs'), temporary = file + '.' + process.pid + '.tmp', fd = null, created = false;
         try
         {
-            Object.defineProperty(ret, 'installedDate', { value: require('fs').statSync(ret.plist).ctime });
+            // Exclusive creation avoids following an existing staging symlink.
+            fd = fs.openSync(temporary, 'wx');
+            created = true;
+            fs.chmodSync(temporary, 384);
+            fs.writeSync(fd, contents);
+            var closing = fd; fd = null;
+            fs.closeSync(closing);
+            macServiceCommand('/usr/bin/plutil', ['-lint', '--', temporary]);
+            fs.chmodSync(temporary, 420);
+            fs.renameSync(temporary, file);
         }
-        catch(xx)
+        catch (e)
         {
+            if (fd != null) { try { fs.closeSync(fd); } catch (ignored) { } }
+            if (created) { try { fs.unlinkSync(temporary); } catch (ignored) { } }
+            throw e;
         }
-        ret.appWorkingDirectory = function appWorkingDirectory()
+    }
+    function macPrepareFolders(folder, created)
+    {
+        var fs = require('fs'), path = '';
+        if (typeof folder != 'string' || folder.charAt(0) != '/' || /[\x00-\x1f]/.test(folder)) { throw new Error('Invalid installation directory'); }
+        var parts = folder.split('/');
+        for (var i = 1; i < parts.length; ++i)
         {
-            var child = require('child_process').execFile('/bin/sh', ['sh']);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write("cat " + this.plist + " | tr '\n' '\.' | awk '{ split($0, a, \"<key>WorkingDirectory</key>\"); split(a[2], b, \"</string>\"); split(b[1], c, \"<string>\"); gsub(/\\/$/,\"\",c[2]); printf \"%s/\",c[2]; }'\nexit\n");
-            child.waitExit();
-            child.stdout.str = child.stdout.str.trim();
-
-            return (child.stdout.str);
-        };
-        ret.appLocation = function appLocation()
-        {
-            var child = require('child_process').execFile('/bin/sh', ['sh']);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write("cat " + this.plist + " | tr '\n' '\.' | awk '{ split($0, a, \"<key>ProgramArguments</key>\"); split(a[2], b, \"</string>\"); split(b[1], c, \"<string>\"); print c[2]; }'\nexit\n");
-            child.waitExit();
-            return (child.stdout.str.trim());
-        };
-        Object.defineProperty(ret, '_runAtLoad',
+            if (!parts[i]) { continue; }
+            if (parts[i] == '.' || parts[i] == '..') { throw new Error('Installation directory must not contain dot segments'); }
+            path += '/' + parts[i];
+            if (fs.existsSync(path))
             {
-                get: function ()
-                {
-                    // We need to see if this is an Auto-Starting service, in order to figure out how to implement 'start'
-                    var child = require('child_process').execFile('/bin/sh', ['sh']);
-                    child.stdout.str = '';
-                    child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                    child.stdin.write("cat " + ret.plist + " | tr '\n' '\.' | awk '{ split($0, a, \"<key>RunAtLoad</key>\"); split(a[2], b, \"/>\"); split(b[1], c, \"<\"); print c[2]; }'\nexit\n");
-                    child.waitExit();
-                    return (child.stdout.str.trim().toUpperCase() == "TRUE");
-                }
-            });
-        Object.defineProperty(ret, 'startType',
-            {
-                get: function()
-                {
-                    if(this.daemon)
-                    {
-                        return (this._runAtLoad ? 'AUTO_START' : 'DEMAND_START');
-                    }
-                    else
-                    {
-                        return ('AUTO_START');
-                    }
-                }
-            });
-        Object.defineProperty(ret, "_keepAlive",
-            {
-                get: function () 
-                {
-                    var child = require('child_process').execFile('/bin/sh', ['sh']);
-                    child.stdout.str = '';
-                    child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                    child.stdin.write("cat " + ret.plist + " | tr '\n' '\.' | awk '{split($0, a, \"<key>KeepAlive</key>\"); split(a[2], b, \"<\"); split(b[2], c, \">\"); ");
-                    child.stdin.write(" if(c[1]==\"dict\"){ split(a[2], d, \"</dict>\"); if(split(d[1], truval, \"<true/>\")>1) { split(truval[1], kn1, \"<key>\"); split(kn1[2], kn2, \"</key>\"); print kn2[1]; } }");
-                    child.stdin.write(" else { split(c[1], ka, \"/\"); if(ka[1]==\"true\") {print \"ALWAYS\";} } }'\nexit\n");
-                    child.waitExit();
-                    return (child.stdout.str.trim());
-                }
-            });
-        ret.getPID = function getPID(uid, asString)
-        {
-            var options = undefined;
-            var command;
-            if (this._uid != null) { uid = this._uid; }
-
-            if (getOSVersion().compareTo('10.10') < 0)
-            {
-                command = "launchctl list | grep '" + this.alias + "' | awk '{ if($3==\"" + this.alias + "\"){print $1;}}'\nexit\n";
-                options = { uid: uid };
+                if (!fs.statSync(path).isDirectory()) { throw new Error('Not a directory: ' + path); }
             }
-            else
-            {
-                if (uid == null)
-                {
-                    command = 'launchctl print system | grep "' + this.alias + '" | awk \'{ if(split($0, tmp, " ")==3) { if($3=="' + this.alias + '") { print $1; } }}\'\nexit\n';
-                }
-                else
-                {
-                    command = 'launchctl print gui/' + uid + ' | grep "' + this.alias + '" | awk \'{ if(split($0, tmp, " ")==3) { if($3=="' + this.alias + '") { print $1; } }}\'\nexit\n';
-                }
-            }
-
-            var child = require('child_process').execFile('/bin/sh', ['sh'], options);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write(command);
-            child.waitExit();
-
-            if (asString == null || asString != true)
-            {
-                return (parseInt(child.stdout.str.trim()));
-            }
-            else
-            {
-                return (child.stdout.str.trim());
-            }
-        };
-        ret.isLoaded = function isLoaded(uid)
+            else { fs.mkdirSync(path); if (created) { created.push(path); } }
+        }
+    }
+    function macBuildLaunchdPlist(options, agent)
+    {
+        macServiceName(options.name);
+        var executable = agent ? options.servicePath : options.installPath + options.target;
+        var directory = options.workingDirectory || (agent ? executable.substring(0, executable.lastIndexOf('/')) || '/' : options.installPath);
+        if (typeof executable != 'string' || executable.charAt(0) != '/' || directory.charAt(0) != '/') { throw new Error('Launchd requires absolute program and working directory paths'); }
+        var parameters = options.parameters || [];
+        if (!Array.isArray(parameters)) { throw new Error('Invalid launchd parameters'); }
+        var xml = '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>';
+        xml += '<key>Label</key><string>' + macPlistString(options.name + (agent ? '-launchagent' : '')) + '</string>';
+        xml += '<key>ProgramArguments</key><array><string>' + macPlistString(executable) + '</string>';
+        for (var i = 0; i < parameters.length; ++i)
         {
-            if (this._uid != null) { uid = this._uid; }
-            return (this.getPID(uid, true) != '');
-        };
-        ret.isRunning = function isRunning(uid)
+            if (typeof parameters[i] != 'string') { throw new Error('Launchd arguments must be strings'); }
+            xml += '<string>' + macPlistString(parameters[i]) + '</string>';
+        }
+        xml += '</array><key>WorkingDirectory</key><string>' + macPlistString(directory) + '</string>';
+        var paths = { stdout: 'StandardOutPath', stderr: 'StandardErrorPath' };
+        for (var key in paths)
         {
-            if (this._uid != null) { uid = this._uid; }
-            return (this.getPID(uid) > 0);
-        };
-        ret.isMe = function isMe(uid)
+            if (options[key] != null)
+            {
+                if (typeof options[key] != 'string' || options[key].charAt(0) != '/') { throw new Error('Invalid launchd log path'); }
+                xml += '<key>' + paths[key] + '</key><string>' + macPlistString(options[key]) + '</string>';
+            }
+        }
+        if (agent && options.sessionTypes && options.sessionTypes.length)
         {
-            if (this._uid != null) { uid = this._uid; }
-            return (this.getPID(uid) == process.pid);
+            xml += '<key>LimitLoadToSessionType</key><array>';
+            for (var i = 0; i < options.sessionTypes.length; ++i)
+            {
+                if (['Aqua', 'LoginWindow', 'Background', 'StandardIO', 'System'].indexOf(options.sessionTypes[i]) < 0) { throw new Error('Invalid launchd session type'); }
+                xml += '<string>' + options.sessionTypes[i] + '</string>';
+            }
+            xml += '</array>';
+        }
+        xml += '<key>RunAtLoad</key>' + (options.startType == 'AUTO_START' || options.startType == 'BOOT_START' ? '<true/>' : '<false/>');
+        var restart = options.failureRestart;
+        if (restart != null && (typeof restart != 'number' || !isFinite(restart) || restart < 0)) { throw new Error('Invalid restart interval'); }
+        xml += '<key>KeepAlive</key>' + (restart == null || restart > 0
+            ? (agent ? '<dict><key>Crashed</key><true/></dict>' : '<dict><key>SuccessfulExit</key><false/></dict>') : '<false/>');
+        if (restart != null) { xml += '<key>ThrottleInterval</key><integer>' + Math.max(1, Math.ceil(restart / 1000)) + '</integer>'; }
+        return xml + '</dict></plist>';
+    }
+    function macInstallService(options, manager)
+    {
+        if (!manager.isAdmin()) { throw new Error('Installing as Service requires root'); }
+        var fs = require('fs'), created = [], directories = [];
+        macServiceName(options.name);
+        options.target = macServiceName(options.target || options.name);
+        if (options.installPath && options.installInPlace) { throw new Error('Cannot specify both installPath and installInPlace'); }
+        if (options.installInPlace)
+        {
+            if (!options.servicePath || options.servicePath.charAt(0) != '/') { throw new Error('Invalid in-place executable'); }
+            options.installPath = options.servicePath.substring(0, options.servicePath.lastIndexOf('/')) || '/';
+            if (options.target != options.servicePath.split('/').pop()) { throw new Error('In-place installation must preserve the executable basename'); }
+        }
+        if (options.installPath == null)
+        {
+            options.installPath = '/usr/local/mesh_services/' + (options.companyName != null ? macServiceName(options.companyName) + '/' : '') + options.name;
+        }
+        options.installPath = options.installPath.replace(/\/+$/, '') + '/';
+        var executable = options.installPath + options.target, plist = '/Library/LaunchDaemons/' + options.name + '.plist';
+        var xml = macBuildLaunchdPlist(options, false);
+        if (fs.existsSync(plist)) { throw new Error('Service already exists: ' + options.name); }
+        var receipt = { rollback: function ()
+        {
+            var errors = [];
+            for (var i = created.length - 1; i >= 0; --i)
+            {
+                try { fs.unlinkSync(created[i]); created.splice(i, 1); } catch (e) { errors.push(created[i] + ': ' + e); }
+            }
+            for (var i = directories.length - 1; i >= 0; --i) { try { fs.rmdirSync(directories[i]); } catch (ignored) { } }
+            if (errors.length) { throw new Error('Installation cleanup failed: ' + errors.join('; ')); }
+        } };
+        function createFile(path, content, mode)
+        {
+            var fd = null;
+            try
+            {
+                fd = fs.openSync(path, 'wx'); created.push(path);
+                fs.chmodSync(path, 384);
+                var bytes = Buffer.isBuffer(content) ? content : Buffer.from(content);
+                if (fs.writeSync(fd, bytes) != bytes.length) { throw new Error('Incomplete installation file: ' + path); }
+                var closing = fd; fd = null; fs.closeSync(closing);
+                fs.chmodSync(path, mode);
+            }
+            finally { if (fd != null) { fs.closeSync(fd); } }
+        }
+        try
+        {
+            macPrepareFolders(options.installPath, directories);
+            if (!options.binary && options.servicePath == executable)
+            {
+                if (!fs.statSync(executable).isFile()) { throw new Error('Invalid in-place executable'); }
+            }
+            else { createFile(executable, options.binary || fs.readFileSync(options.servicePath), 493); }
+            var files = options.files || [];
+            for (var i = 0; i < files.length; ++i)
+            {
+                var name = macServiceName(extractFileName(files[i])), destination = options.installPath + name;
+                var source = extractFileSource(files[i]);
+                if (source == destination) { continue; }
+                // Reinstall must retain the incumbent's identity and provisioning.
+                if (fs.existsSync(destination) && [options.target + '.db', options.target + '.msh', options.target + '.mshx', options.target + '.proxy'].indexOf(name) >= 0) { continue; }
+                createFile(destination, files[i]._buffer || fs.readFileSync(source), 384);
+            }
+            macPrepareFolders('/Library/LaunchDaemons', directories);
+            // Publish the job only after every required binary/provisioning write succeeded.
+            macWritePlist(plist, xml); created.push(plist);
+            return receipt;
+        }
+        catch (e)
+        {
+            try { receipt.rollback(); } catch (cleanup) { throw new Error(e + '; ' + cleanup); }
+            throw e;
+        }
+    }
+    // MeshAgent's execFile takes argv[0] explicitly. Never interpret service
+    // labels, paths, or arguments as shell input.
+    function macServiceCommand(executable, args, options)
+    {
+        var child = require('child_process').execFile(executable, [executable.split('/').pop()].concat(args), options);
+        var output = '', errors = '', code = null;
+        child.stdout.on('data', function (chunk) { output += chunk.toString(); });
+        child.stderr.on('data', function (chunk) { errors += chunk.toString(); });
+        child.on('exit', function (status) { code = status; });
+        child.waitExit(120000);
+        if (code == null)
+        {
+            try { child.kill(); } catch (ignored) { }
+            throw new Error(executable + ' timed out: ' + args[0]);
+        }
+        if (code !== 0)
+        {
+            var error = new Error(executable + ' ' + args[0] + ' failed (' + code + '): ' + errors.trim());
+            error.code = 'ELAUNCHD';
+            error.exitCode = code;
+            throw error;
+        }
+        return output;
+    }
+    function getOSVersion()
+    {
+        var value = macServiceCommand('/usr/bin/sw_vers', ['-productVersion']).trim();
+        if (!/^\d+(\.\d+)*$/.test(value)) { throw new Error('Invalid macOS version: ' + value); }
+        var ret = { raw: value.split('.'), toString: function () { return this.raw.join('.'); } };
+        ret.compareTo = function (val)
+        {
+            var other = typeof val == 'string' ? val.split('.') : val.raw;
+            for (var i = 0; i < Math.max(this.raw.length, other.length); ++i)
+            {
+                var a = parseInt(this.raw[i] || '0', 10), b = parseInt(other[i] || '0', 10);
+                if (a != b) { return a < b ? -1 : 1; }
+            }
+            return 0;
         };
-        ret.load = function load(uid)
+        return ret;
+    }
+    function macServicePlist(file)
+    {
+        // plutil handles both XML and binary plists, including escaped strings.
+        var data = JSON.parse(macServiceCommand('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', file]));
+        if (!data || typeof data.Label != 'string' || !data.Label.length || /[\/\x00-\x1f]/.test(data.Label))
+        { throw new Error('Invalid launchd Label in ' + file); }
+        return data;
+    }
+    function macLoginWindowDomains()
+    {
+        if (require('user-sessions').Self() != 0) { throw new Error('LoginWindow LaunchAgent requires root'); }
+        var output;
+        try { output = macServiceCommand('/bin/launchctl', ['print', 'user/0']); }
+        catch (e) { if (e.exitCode == 125) { return []; } throw e; }
+        var candidates = [], domains = [], match, pattern = /^\s*((?:gui|login)\/\d+)\s*$/gm;
+        while ((match = pattern.exec(output)) != null) { if (candidates.indexOf(match[1]) < 0) { candidates.push(match[1]); } }
+        match = /^\s*gui asid = (\d+)\s*$/m.exec(output);
+        if (match && candidates.indexOf('login/' + match[1]) < 0) { candidates.push('login/' + match[1]); }
+        for (var i = 0; i < candidates.length; ++i)
+        {
+            try { output = macServiceCommand('/bin/launchctl', ['print', candidates[i]]); }
+            catch (e) { if (e.exitCode == 125) { continue; } throw e; }
+            if (/^\s*session = LoginWindow\s*$/m.test(output)) { domains.push(candidates[i]); }
+        }
+        return domains;
+    }
+    function fetchPlist(folder, name, userid)
+    {
+        macServiceName(name);
+        var fs = require('fs');
+        folder = folder.replace(/\/$/, '');
+        var file = folder + '/' + name + '.plist';
+        if (!fs.existsSync(file))
+        {
+            var files;
+            if (!fs.existsSync(folder)) { throw serviceNotFound(name); }
+            try { files = fs.readdirSync(folder); }
+            catch (e) { if (e.code == 'ENOENT') { throw serviceNotFound(name); } throw e; }
+            file = null;
+            for (var i = 0; i < files.length; ++i)
+            {
+                if (!files[i].endsWith('.plist')) { continue; }
+                var candidate = folder + '/' + files[i];
+                if (macServicePlist(candidate).Label == name) { file = candidate; break; }
+            }
+            if (!file) { throw serviceNotFound(name); }
+        }
+        var data = macServicePlist(file);
+        var ret = { name: file.substring(folder.length + 1, file.length - 6), plist: file,
+            alias: data.Label, daemon: folder.endsWith('/LaunchDaemons'), _uid: userid, close: function () {} };
+        try { ret.installedDate = fs.statSync(file).ctime; } catch (ignored) { }
+        var types = data.LimitLoadToSessionType;
+        ret._loginWindowOnly = types == 'LoginWindow' || (Array.isArray(types) && types.length == 1 && types[0] == 'LoginWindow');
+        ret.appLocation = function ()
+        {
+            var config = macServicePlist(this.plist);
+            var executable = config.Program || (config.ProgramArguments && config.ProgramArguments[0]);
+            if (typeof executable != 'string' || executable.charAt(0) != '/') { throw new Error('Missing absolute launchd program: ' + this.plist); }
+            return executable;
+        };
+        ret.appWorkingDirectory = function ()
+        {
+            var directory = macServicePlist(this.plist).WorkingDirectory;
+            if (directory == null) { directory = '/'; }
+            if (typeof directory != 'string' || directory.charAt(0) != '/') { throw new Error('Invalid launchd working directory'); }
+            return directory.replace(/\/$/, '') + '/';
+        };
+        ret.parameters = function () { return macServicePlist(this.plist).ProgramArguments || []; };
+        Object.defineProperty(ret, '_runAtLoad', { get: function () { return macServicePlist(this.plist).RunAtLoad === true; } });
+        Object.defineProperty(ret, 'startType', { get: function () { return this._runAtLoad ? 'AUTO_START' : 'DEMAND_START'; } });
+        Object.defineProperty(ret, '_keepAlive', { get: function ()
+        {
+            var keep = macServicePlist(this.plist).KeepAlive;
+            if (!keep) { return ''; }
+            if (typeof keep == 'object' && Object.keys(keep).length == 1 && keep.Crashed === true) { return 'Crashed'; }
+            return 'ALWAYS';
+        } });
+        ret._domain = function (uid, mutate)
         {
             var self = require('user-sessions').Self();
-            var ver = getOSVersion();
-            var options = undefined;
-            var command = 'load';
             if (this._uid != null) { uid = this._uid; }
-
             if (this.daemon)
             {
-                if(uid!=null && uid!=0)
-                {
-                    throw ('LaunchDaemon must run as root');
-                }
+                if ((uid != null && uid != 0) || (mutate && self != 0)) { throw new Error('LaunchDaemon requires the system domain and root for changes'); }
+                return 'system';
             }
-            else
+            if (this._loginWindowOnly)
             {
-                if (uid == null) { uid = self; }
-                if(ver.compareTo('10.10') < 0 && uid != self && self != 0)
-                {
-                    throw ('On this version of MacOS, must be root to load this service into the specified user space');
-                }
-                else if (ver.compareTo('10.10') < 0)
-                {
-                    options = { uid: uid };
-                }
-                else
-                {
-                    command = 'bootstrap gui/' + uid;
-                }
+                if (uid != null && uid != 0) { throw new Error('LoginWindow LaunchAgent cannot run in a user GUI domain'); }
+                var domains = macLoginWindowDomains();
+                if (domains.length > 1) { throw new Error('Multiple LoginWindow domains; cannot select a startup session'); }
+                return domains.length ? domains[0] : null;
             }
-
-            var child = require('child_process').execFile('/bin/sh', ['sh'], options);
-            child.stdout.str = ''; child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stderr.str = ''; child.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write('launchctl ' + command + ' ' + this.plist + '\n\exit\n');
-            child.waitExit();
+            if (uid == null) { uid = self == 0 ? require('user-sessions').consoleUid() : self; }
+            if (!/^\d+$/.test('' + uid) || Number(uid) <= 0) { throw new Error('LaunchAgent requires a logged-in user UID'); }
+            if (mutate && self != 0 && Number(uid) != self) { throw new Error('Cannot change another user launchd domain'); }
+            return 'gui/' + uid;
         };
-        ret.unload = function unload(uid)
+        ret._stateInDomain = function (domain)
         {
-            var child = null;
-            var v = getOSVersion();
-            var self = require('user-sessions').Self();
-            var options = undefined;
-            var useBootout = false;
-            if (this._uid != null) { uid = this._uid; }
-
-            if(uid!=null)
+            if (domain == null) { return { loaded: false, pid: 0 }; }
+            var output;
+            try { output = macServiceCommand('/bin/launchctl', ['print', domain + '/' + this.alias]); }
+            catch (e)
             {
-                if (v.compareTo('10.10') <= 0 && self == 0)
-                {
-                    // We must switch to user context to unload the service
-                    options = { uid: uid };
-                }
-                else
-                {
-                    if(v.compareTo('10.10') > 0)
-                    {
-                        if(self == 0 || self == uid)
-                        {
-                            // use bootout
-                            useBootout = true;
-                        }
-                        else
-                        {
-                            // insufficient access
-                            throw ('Needs elevated privileges')
-                        }
-                    }
-                    else
-                    {
-                        if (self == uid)
-                        {
-                            // just unload, becuase we are already in the right context
-                            useBootout = false;
-                        }
-                        else
-                        {
-                            // insufficient access
-                            throw ('Needs elevated privileges')
-                        }
-                    }
-                }
+                // 113 is launchctl's missing-service result. Check the domain
+                // too so an unavailable login session is never reported healthy.
+                if (e.exitCode != 113) { throw e; }
+                macServiceCommand('/bin/launchctl', ['print', domain]);
+                return { loaded: false, pid: 0 };
             }
-            else
-            {
-                if(self == 0)
-                {
-                    if(v.compareTo('10.10') > 0)
-                    {
-                        // use bootout
-                        useBootout = true;
-                    }
-                    else
-                    {
-                        // just unload
-                        useBootout = false;
-                    }
-                }
-                else
-                {
-                    // Insufficient access
-                    throw ('Needs elevated privileges')
-                }
-            }
-
-            child = require('child_process').execFile('/bin/sh', ['sh'], options);
-            child.stdout.str = '';
-            child.stderr.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-            if (useBootout)
-            {
-                if (uid == null)
-                {
-                    child.stdin.write('launchctl bootout system ' + this.plist + '\nexit\n');
-                }
-                else
-                {
-                    child.stdin.write('launchctl bootout gui/' + uid + ' ' + this.plist + '\nexit\n');
-                }
-            }
-            else
-            {
-                child.stdin.write('launchctl unload ' + this.plist + '\nexit\n');
-            }
-            child.waitExit();
+            var pid = /^\s*pid = (\d+)\s*$/m.exec(output);
+            return { loaded: true, pid: pid ? parseInt(pid[1], 10) : 0 };
         };
-        ret.start = function start(uid)
+        ret._state = function (uid) { return this._stateInDomain(this._domain(uid, false)); };
+        ret.getPID = function (uid, asString)
         {
-            var options = undefined;
-            var self = require('user-sessions').Self();
-            if (this._uid != null) { uid = this._uid; }
-            if (!this.daemon && uid == null) { uid = self; }
-            if (!this.daemon && uid > 0 && self == 0) { options = { uid: uid }; }
-            if (!this.daemon && uid > 0 && self != 0 && uid != self) { throw ('Cannot start LaunchAgent into another user domain while not root'); }
-            if (this.daemon && self != 0) { throw ('Cannot start LaunchDaemon while not root'); }
-
+            var state = this._state(uid);
+            return asString ? (state.loaded ? '' + state.pid : '') : state.pid;
+        };
+        ret.isLoaded = function (uid) { return this._state(uid).loaded; };
+        ret.isRunning = function (uid) { return this._state(uid).pid > 0; };
+        ret.isMe = function (uid) { return this._state(uid).pid == process.pid; };
+        ret.load = function (uid)
+        {
+            var domain = this._domain(uid, true);
+            if (domain == null) { throw new Error('LoginWindow session is not active; launchd will load the agent when that session starts'); }
+            if (!this.isLoaded(uid)) { macServiceCommand('/bin/launchctl', ['bootstrap', domain, this.plist]); }
+            if (!this.isLoaded(uid)) { throw new Error('launchd did not load ' + this.alias); }
+        };
+        ret.unload = function (uid)
+        {
+            var domains;
+            if (this._loginWindowOnly)
+            {
+                if (uid != null && uid != 0) { throw new Error('LoginWindow LaunchAgent cannot run in a user GUI domain'); }
+                // Include historical system-domain registrations and every active
+                // LoginWindow context, without selecting an unrelated Aqua user.
+                domains = ['system'].concat(macLoginWindowDomains());
+            }
+            else { domains = [this._domain(uid, true)]; }
+            for (var i = 0; i < domains.length; ++i)
+            {
+                if (this._stateInDomain(domains[i]).loaded) { macServiceCommand('/bin/launchctl', ['bootout', domains[i] + '/' + this.alias]); }
+                if (this._stateInDomain(domains[i]).loaded) { throw new Error('launchd did not unload ' + this.alias); }
+            }
+        };
+        ret.start = function (uid)
+        {
+            var domain = this._domain(uid, true);
             this.load(uid);
-
-            var child = require('child_process').execFile('/bin/sh', ['sh'], options);
-            child.stdout.on('data', function (chunk) { });
-            child.stdin.write('launchctl start ' + this.alias + '\n\exit\n');
-            child.waitExit();
+            macServiceCommand('/bin/launchctl', ['kickstart', domain + '/' + this.alias]);
         };
-        ret.stop = function stop(uid)
+        ret.stop = function (uid)
         {
-            var options = undefined;
-            var self = require('user-sessions').Self();
-            if (this._uid != null) { uid = this._uid; }
-            if (!this.daemon && uid == null) { uid = self; }
-            if (!this.daemon && uid > 0 && self == 0) { options = { uid: uid }; }
-            if (!this.daemon && uid > 0 && self != 0 && uid != self) { throw ('Cannot stop LaunchAgent in another user domain while not root'); }
-            if (this.daemon && self != 0) { throw ('Cannot stop LaunchDaemon while not root'); }
-
-            if (!(this._keepAlive == 'Crashed' || this._keepAlive == ''))
-            {
-                // We must unload the service, rather than stopping it, because otherwise it'll likely restart
-                this.unload(uid);
-            }
-            else
-            {
-                var child = require('child_process').execFile('/bin/sh', ['sh'], options);
-                child.stdout.str = ''; child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                child.stderr.str = ''; child.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-                child.stdin.write('launchctl stop ' + this.alias + '\nexit\n');
-                child.waitExit();
-            }
+            // Removing the job prevents all KeepAlive policies from respawning it.
+            this.unload(uid);
         };
-        ret.restart = function restart(uid)
+        ret.restart = function (uid)
         {
-            if (this._uid != null) { uid = this._uid; }
-            if (getOSVersion().compareTo('10.10') < 0)
-            {
-                if (!this.daemon && uid == null) { uid = require('user-sessions').Self(); }
-                var command = 'launchctl unload ' + this.plist + '\nlaunchctl load ' + this.plist + '\nlaunchctl start ' + this.alias + '\nexit\n';
-                var child = require('child_process').execFile('/bin/sh', ['sh'], { detached: true, uid: uid });
-                child.stdout.str = ''; child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                child.stderr.str = ''; child.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-                child.stdin.write(command);
-                child.waitExit();
-            }
-            else
-            {
-                var command = this.daemon ? ('system/' + this.alias) : ('gui/' + (uid != null ? uid : require('user-sessions').Self()) + '/' + this.alias);
-                var child = require('child_process').execFile('/bin/sh', ['sh']);
-                child.stdout.str = ''; child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                child.stderr.str = ''; child.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-                child.stdin.write('launchctl kickstart -k ' + command + '\nexit\n');
-                child.waitExit();
-            }
+            var domain = this._domain(uid, true);
+            this.load(uid);
+            macServiceCommand('/bin/launchctl', ['kickstart', '-k', domain + '/' + this.alias]);
         };
-        ret.parameters = function parameters()
-        {
-            var child = require('child_process').execFile('/bin/sh', ['sh']);
-            child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
-            child.stderr.str = ''; child.stderr.on('data', function (c) { this.str += c.toString(); });
-            child.stdin.write("cat " + this.plist + " | tr '\\n' '`' | awk '");
-            child.stdin.write('{');
-            child.stdin.write('   a=split($0,A,"<key>ProgramArguments</key>");');
-            child.stdin.write('   split(A[2],B,"<array>");');
-            child.stdin.write('   split(B[2],C,"</array>");');
-            child.stdin.write('   num=split(C[1],tokens,"</string>");');
-            child.stdin.write('   for(i=1;i<num;++i)');
-            child.stdin.write('   {');
-            child.stdin.write('      gsub(/^.+<string>/,"",tokens[i]);');
-            child.stdin.write('      printf "%s%s",(i==1)?"":"\\n", tokens[i];');
-            child.stdin.write('   }');
-            child.stdin.write("}'\nexit\n");
-            child.waitExit();
-            return (child.stdout.str.split('\n'));
-        };
-        return (ret);
-    };
+        return ret;
+    }
 }
-
 
 
 function serviceManager()
@@ -2294,6 +2262,7 @@ function serviceManager()
     }
     this.installService = function installService(options)
     {
+        if (process.platform == 'darwin') { return macInstallService(options, this); }
         if (process.platform == 'linux') { options.name = options.serviceKey || this.escape(options.name); }
         if (!options.target) { options.target = options.name; }
         if (!options.displayName) { options.displayName = options.name; }
@@ -2709,67 +2678,6 @@ function serviceManager()
                     break;
             }
         }
-        if(process.platform == 'darwin')
-        {
-            if (!this.isAdmin()) { throw ('Installing as Service, requires root'); }
-
-            // Mac OS
-            var stdoutpath = (options.stdout ? ('<key>StandardOutPath</key>\n<string>' + options.stdout + '</string>') : '');
-            var autoStart = (options.startType == 'AUTO_START' ? '<true/>' : '<false/>');
-            var params =  '     <key>ProgramArguments</key>\n';
-            params += '     <array>\n';
-            params += ('         <string>' + options.installPath + options.target + '</string>\n');
-            if(options.parameters)
-            {
-                for(var itm in options.parameters)
-                {
-                    params += ('         <string>' + options.parameters[itm] + '</string>\n');
-                }
-            }        
-            params += '     </array>\n';
-            
-            var plist = '<?xml version="1.0" encoding="UTF-8"?>\n';
-            plist += '<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n';
-            plist += '<plist version="1.0">\n';
-            plist += '  <dict>\n';
-            plist += '      <key>Label</key>\n';
-            plist += ('     <string>' + options.name + '</string>\n');
-            plist += (params + '\n');
-            plist += '      <key>WorkingDirectory</key>\n';
-            plist += ('     <string>' + options.installPath + '</string>\n');
-            plist += (stdoutpath + '\n');
-            plist += '      <key>RunAtLoad</key>\n';
-            plist += (autoStart + '\n');
-            plist += '      <key>KeepAlive</key>\n';
-            if(options.failureRestart == null || options.failureRestart > 0)
-            {
-                plist += '      <dict>\n';
-                plist += '         <key>Crashed</key>\n';
-                plist += '         <true/>\n';
-                plist += '      </dict>\n';
-            }
-            else
-            {
-                plist += '      <false/>\n';
-            }
-            if(options.failureRestart != null)
-            {
-                plist += '      <key>ThrottleInterval</key>\n';
-                plist += '      <integer>' + (options.failureRestart / 1000) + '</integer>\n';
-            }
-
-            plist += '  </dict>\n';
-            plist += '</plist>';
-            if (!require('fs').existsSync('/Library/LaunchDaemons/' + options.name + '.plist'))
-            {
-                require('fs').writeFileSync('/Library/LaunchDaemons/' + options.name + '.plist', plist);
-            }
-            else
-            {
-                throw ('Service: ' + options.name + ' already exists');
-            }
-        }
-
         if (options.files)
         {
             for (var i in options.files)
@@ -2792,88 +2700,38 @@ function serviceManager()
     {
         this.installLaunchAgent = function installLaunchAgent(options)
         {
-            if (!(options.uid || options.user) && !this.isAdmin())
+            macServiceName(options.name);
+            var sessions = require('user-sessions'), fs = require('fs');
+            var uid = options.uid;
+            if (uid == null && options.user != null) { uid = sessions.getUid(options.user); }
+            if (uid != null && (!/^\d+$/.test('' + uid) || Number(uid) <= 0)) { throw new Error('Invalid LaunchAgent user UID'); }
+            if (!this.isAdmin() && (uid == null || Number(uid) != sessions.Self())) { throw new Error('Cannot install a LaunchAgent for another user'); }
+            var username = uid != null ? sessions.getUsername(uid) : null;
+            var folder = username != null ? sessions.getHomeFolder(username) + '/Library/LaunchAgents' : '/Library/LaunchAgents';
+            var file = folder + '/' + options.name + '.plist', created = false;
+            if (fs.existsSync(file)) { throw new Error('LaunchAgent already exists: ' + options.name); }
+            var xml = macBuildLaunchdPlist(options, true), directories = [];
+            try
             {
-                throw ('Installing a Global Agent/Daemon, requires admin');
-            }
-
-            var servicePathTokens = options.servicePath.split('/');
-            servicePathTokens.pop();
-            if (servicePathTokens.peek() == '.') { servicePathTokens.pop(); }
-            options.workingDirectory = servicePathTokens.join('/');
-
-            var autoStart = (options.startType == 'AUTO_START' ? '<true/>' : '<false/>');
-            var stdoutpath = (options.stdout ? ('<key>StandardOutPath</key>\n<string>' + options.stdout + '</string>') : '');
-            var params =         '     <key>ProgramArguments</key>\n';
-            params +=            '     <array>\n';
-            params +=           ('         <string>' + options.servicePath + '</string>\n');
-            if (options.parameters) {
-                for (var itm in options.parameters)
+                macPrepareFolders(folder, directories);
+                if (uid != null)
                 {
-                    params +=   ('         <string>' + options.parameters[itm] + '</string>\n');
+                    var gid = sessions.getGroupID(uid);
+                    for (var i = 0; i < directories.length; ++i) { fs.chownSync(directories[i], uid, gid); }
                 }
+                macWritePlist(file, xml); created = true;
+                if (uid != null) { fs.chownSync(file, uid, gid); }
+                return { plist: file };
             }
-            params +=            '     </array>\n';
-
-            var plist = '<?xml version="1.0" encoding="UTF-8"?>\n';
-            plist += '<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n';
-            plist += '<plist version="1.0">\n';
-            plist += '  <dict>\n';
-            plist += '      <key>Label</key>\n';
-            plist += ('     <string>' + options.name + '-launchagent</string>\n');
-            plist += (params + '\n');
-            plist += '      <key>WorkingDirectory</key>\n';
-            plist += ('     <string>' + options.workingDirectory + '</string>\n');
-            plist += (stdoutpath + '\n');
-            plist += '      <key>RunAtLoad</key>\n';
-            plist += (autoStart + '\n');
-            if (options.sessionTypes && options.sessionTypes.length > 0)
+            catch (e)
             {
-                plist += '      <key>LimitLoadToSessionType</key>\n';
-                plist += '      <array>\n';
-                for (var stype in options.sessionTypes)
-                {
-                    plist += ('          <string>' + options.sessionTypes[stype] + '</string>\n');
-                }
-                plist += '      </array>\n';
-            }
-            plist += '      <key>KeepAlive</key>\n';
-            if (options.failureRestart == null || options.failureRestart > 0) {
-                plist += '      <dict>\n';
-                plist += '         <key>Crashed</key>\n';
-                plist += '         <true/>\n';
-                plist += '      </dict>\n';
-            }
-            else {
-                plist += '      <false/>\n';
-            }
-            if (options.failureRestart != null) {
-                plist += '      <key>ThrottleInterval</key>\n';
-                plist += '      <integer>' + (options.failureRestart / 1000) + '</integer>\n';
-            }
-
-            plist += '  </dict>\n';
-            plist += '</plist>';
-
-            if (options.uid)
-            {
-                options.user = require('user-sessions').getUsername(options.uid);
-            }
-            
-            var folder = options.user ? (require('user-sessions').getHomeFolder(options.user) + '/Library/LaunchAgents/') : '/Library/LaunchAgents/';
-            options.gid = require('user-sessions').getGroupID(options.uid);
-            if (!require('fs').existsSync(folder))
-            {
-                require('fs').mkdirSync(folder);
-                require('fs').chownSync(folder, options.uid, options.gid);
-            }
-            require('fs').writeFileSync(folder + options.name + '.plist', plist);
-            if(options.user)
-            {
-                require('fs').chownSync(folder + options.name + '.plist', options.uid, options.gid);
+                if (created) { try { fs.unlinkSync(file); } catch (cleanup) { throw new Error(e + '; LaunchAgent cleanup failed: ' + cleanup); } }
+                for (var i = directories.length - 1; i >= 0; --i) { try { fs.rmdirSync(directories[i]); } catch (ignored) { } }
+                throw e;
             }
         };
     }
+
     this.uninstallService = function uninstallService(name, options)
     {
         if (process.platform == 'win32') { throw (windowsServiceManagerLifecycleDisabledError('uninstall')); }

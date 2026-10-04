@@ -49,6 +49,10 @@ limitations under the License.
 #endif
 
 #include "agentcore.h"
+#ifdef __APPLE__
+#include "macos_update.h"
+static void MeshAgent_MacSaveArguments(MeshAgentHostContainer *agent, int argc, char **argv);
+#endif
 #include "signcheck.h"
 #include "meshdefines.h"
 #include "meshinfo.h"
@@ -3412,27 +3416,30 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop_DomainIPC_DataSink(duk_context 
 	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)Duktape_GetPointerProperty(ctx, -1, KVM_IPC_SOCKET);
 	char *buffer;
 	duk_size_t bufferLen, consumed = 0;
-	unsigned short size;
+	size_t size;
 
 	buffer = (char*)Duktape_GetBuffer(ctx, 0, &bufferLen);
 	
 	// We need to properly frame the data before we propagate it up
-	if (bufferLen > 4)
+	while (consumed < bufferLen)
 	{
-		size = ntohs(((unsigned short*)(buffer))[1]);
-		if (size <= bufferLen)
+		int frame = MacKvm_FrameLength((const unsigned char*)buffer + consumed, bufferLen - consumed, &size);
+		if (frame == 0) { break; }
+		if (frame < 0)
 		{
-			// We have all the data, to be able to frame it
-			consumed = size;
-			ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(buffer, (int)size, ptrs);
+			MeshAgent_sendConsoleText(ctx, "Invalid macOS KVM frame; closing session");
+			if (ptrs != NULL && ptrs->stream != NULL) { ILibDuktape_DuplexStream_WriteEnd(ptrs->stream); }
+			return 0;
 		}
+		ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(buffer + consumed, (int)size, ptrs);
+		consumed += size;
 	}
 
 	if ((bufferLen - consumed) > 0)
 	{
 		// We need to unshift() the remainder to continue processing
 		duk_push_external_buffer(ctx);														// [ext]
-		duk_config_buffer(ctx, -1, buffer, bufferLen - consumed);
+		duk_config_buffer(ctx, -1, buffer + consumed, bufferLen - consumed);
 		duk_push_this(ctx);																	// [ext][IPC]
 		duk_get_prop_string(ctx, -1, "unshift");											// [ext][IPC][unshift]
 		duk_swap_top(ctx, -2);																// [ext][unshift][this]
@@ -4912,6 +4919,12 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 	len = ILibSimpleDataStore_Get(agent->masterDb, "SelfNodeCert", ILibScratchPad2, sizeof(ILibScratchPad2));
 	if (len == 0 || len > sizeof(ILibScratchPad2) || util_from_p12(ILibScratchPad2, len, "hidden", &(agent->selfcert)) == 0)
 	{
+#if defined(__APPLE__)
+        // macOS has no Windows certificate-store fallback. Any persisted identity
+        // evidence means this is a damaged install, not permission to create a node.
+        if (len != 0 || ILibSimpleDataStore_Get(agent->masterDb, "NodeID", NULL, 0) != 0 ||
+            ILibSimpleDataStore_Get(agent->masterDb, "SelfNodeTlsCert", NULL, 0) != 0) { return 2; }
+#endif
 #if defined(WIN32)
 		if (len != 0) { return 2; } // A persisted private-key identity must not be replaced after decode failure.
 		int nodeLength = ILibSimpleDataStore_Get(agent->masterDb, "NodeID", NULL, 0);
@@ -4993,7 +5006,7 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 
 	if (agent->selfcert.pkey == NULL)
 	{
-#if defined(WIN32)
+#if defined(WIN32) || defined(__APPLE__)
 		return 2;
 #else
 		return 1;
@@ -5009,7 +5022,7 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 			ILibRemoteLogging_printf(ILibChainGetLogger(agent->chain), ILibRemoteLogging_Modules_Agent_GuardPost, ILibRemoteLogging_Flags_VerbosityLevel_1, "...Failed to load TLS Certificate from Database");
 			util_freecert(&(agent->selfcert));
 			SSL_TRACE2("agent_LoadCertificates([ERROR: SelfNodeTlsCert])");
-#if defined(WIN32)
+#if defined(WIN32) || defined(__APPLE__)
 			return 2;
 #else
 			return 1;
@@ -5018,8 +5031,12 @@ int agent_LoadCertificates(MeshAgentHostContainer *agent)
 	}
 
 	// Compute this agent's nodeid.
+#if defined(__APPLE__)
+    if (util_keyhash(agent->selfcert, agent->g_selfid) != 0) { return 2; }
+#else
 	util_keyhash(agent->selfcert, agent->g_selfid);
-#if defined(WIN32)
+#endif
+#if defined(WIN32) || defined(__APPLE__)
 	{
 		char expected[UTIL_SHA384_HASHSIZE];
 		int nodeLength = ILibSimpleDataStore_Get(agent->masterDb, "NodeID", expected, sizeof(expected));
@@ -5352,6 +5369,15 @@ void MeshServer_ServerAuthenticated(ILibWebClient_StateObject WebStateObject, Me
 	// TODO: Verify with Bryan that only the core module will get this. No other modules should.
 	if (agent->serverAuthState == 3) 
 	{
+#ifdef __APPLE__
+        if (agent->macUpdateTrial)
+        {
+            // Authentication proves the replacement loaded the installed identity.
+            if (MeshMacUpdate_Commit(agent->exePath) != 0)
+            { ILIBLOGMESSAGEX("SelfUpdate -> macOS committed update cleanup failed: %d", errno); }
+            agent->macUpdateTrial = 0;
+        }
+#endif
 		agent->lastAuthenticatedTick = ILibGetUptime();
 		agent->retryTime = 0;
 		ILibDuktape_MeshAgent_PUSH(agent->meshCoreCtx, agent->chain);				// [agent]
@@ -5489,12 +5515,12 @@ void MeshServer_SendAgentInfo(MeshAgentHostContainer* agent, ILibWebClient_State
 // may still read it, or while an applied update waits for the service restart.
 static int MeshServer_UpdateTransferBlocked(MeshAgentHostContainer *agent)
 {
+    if (agent->updateUnzipPending != 0 || agent->performSelfUpdate != 0) { return 1; }
 #ifdef WIN32
 	char pendingBuf[8] = { 0 };
 	int pendingLen;
 
 	if (agent->updateActivation != NULL) { return 1; }
-	if (agent->updateUnzipPending != 0) { return 1; }	// update-helper still reads and replaces the package
 	pendingLen = ILibSimpleDataStore_Get(agent->masterDb, "PendingUpdate", pendingBuf, sizeof(pendingBuf));
 	if (pendingLen > 0 && pendingBuf[0] == '1') { return 1; }
 #else
@@ -5644,6 +5670,24 @@ static void MeshServer_ReleaseUpdateActivation(MeshAgentHostContainer *agent)
 
 void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 {
+#ifdef __APPLE__
+    // Preserve the launchd process/PID and original argv. No shell or launchctl
+    // restart may kill the process that still owns replacement and rollback.
+    char *staged = ILibString_Copy(MeshAgent_MakeAbsolutePath(agent->exePath, ".update"), 0);
+    if (agent->execparams == NULL || agent->macUpdateTrial ||
+        MeshMacUpdate_Preflight(agent->exePath, staged) != 0)
+    {
+        ILIBLOGMESSAGEX("SelfUpdate -> macOS preflight failed; keeping current agent online (errno %d)", errno);
+        util_deletefile(staged);
+        free(staged);
+        MeshServer_ReportUpdateFailure(agent);
+        return;
+    }
+    free(staged);
+    agent->performSelfUpdate = 999;
+    ILibStopChain(agent->chain);
+    return;
+#else
 #ifndef WIN32
 	// Set performSelfUpdate to the startupType, on Linux is this important: 1 = systemd, 2 = upstart, 3 = sysv-init
 	int len = ILibSimpleDataStore_Get(agent->masterDb, "StartupType", ILibScratchPad, sizeof(ILibScratchPad));
@@ -5772,15 +5816,14 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 	// Everything looks good, lets perform the update
 	ILIBLOGMESSAGEX("SelfUpdate -> Stopping Chain (%d)", agent->performSelfUpdate);
 	ILibStopChain(agent->chain);
+#endif // __APPLE__
 }
 duk_ret_t MeshServer_selfupdate_unzip_complete(duk_context *ctx)
 {
 	duk_eval_string(ctx, "require('MeshAgent')");					// [MeshAgent]
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, MESH_AGENT_PTR);
-#ifdef WIN32
 	if (agent->updateUnzipPending == 0) { return(0); }
 	agent->updateUnzipPending = 0;
-#endif
 	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Update successfully unzipped..."); }
 	MeshServer_selfupdate_continue(agent);
 	return(0);
@@ -5789,15 +5832,13 @@ duk_ret_t MeshServer_selfupdate_unzip_error(duk_context *ctx)
 {
 	duk_eval_string(ctx, "require('MeshAgent')");					// [MeshAgent]
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, MESH_AGENT_PTR);
-#ifdef WIN32
 	if (agent->updateUnzipPending == 0) { return(0); }
-#endif
+    agent->updateUnzipPending = 0;
 	duk_push_sprintf(ctx, "SelfUpdate -> FAILED to unzip update: %s", (char*)duk_safe_to_string(ctx, 0));
 	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE(duk_safe_to_string(ctx, -1)); }
 
 	// Delete the staged payload and any partial extraction.
 #ifdef WIN32
-	agent->updateUnzipPending = 0;
 	util_deletefile(MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_UNZIPPED_SUFFIX));
 	MeshServer_FailUpdateActivation(agent, 1);
 #else
@@ -5828,9 +5869,9 @@ static int MeshServer_UpdateFileLooksZip(char *updateFilePath)
 // A compressed package that cannot be extracted is abandoned like an extraction failure.
 static void MeshServer_FailCompressedUpdate(MeshAgentHostContainer *agent, char *updateFilePath)
 {
+    agent->updateUnzipPending = 0;
 #ifdef WIN32
 	(void)updateFilePath;
-	agent->updateUnzipPending = 0;
 	MeshServer_FailUpdateActivation(agent, 1);
 #else
 	util_deletefile(updateFilePath);
@@ -6482,13 +6523,11 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 				// Never update
 				memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE);
 			}
-#ifdef WIN32
 			else if (MeshServer_UpdateTransferBlocked(agent))
 			{
 				// A downloaded package is being extracted or activated; offer no new transfer until it finishes.
 				memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE);
 			}
-#endif
 			else if (agent->forceUpdate != 0 || agent->fakeUpdate != 0)
 			{
 				// Forced/fake update: a hash no binary has, for as long as the key is set.
@@ -6593,9 +6632,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 								MeshServer_FailCompressedUpdate(agent, updateFilePath);
 								break;
 							}
-#ifdef WIN32
 							agent->updateUnzipPending = 1;
-#endif
 							duk_prepare_method_call(agent->meshCoreCtx, -1, "start");			// [helper][start][this]
 							duk_push_string(agent->meshCoreCtx, updateFilePath);				// [helper][start][this][path]
 							if (duk_pcall_method(agent->meshCoreCtx, 1) == 0)					// [helper][promise]
@@ -6605,11 +6642,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 								duk_push_c_function(agent->meshCoreCtx, MeshServer_selfupdate_unzip_error, DUK_VARARGS);//[this][res][rej]
 								if (duk_pcall_method(agent->meshCoreCtx, 2) != 0)
 								{
-#ifdef WIN32
 									// A synchronous completion may already have transferred ownership
-									// to the lifecycle host before a promise callback throws.
+									// to activation before a promise callback throws.
 									if (agent->updateUnzipPending != 0)
-#endif
 									MeshServer_FailCompressedUpdate(agent, updateFilePath);
 								}
 							}
@@ -8134,10 +8169,6 @@ void agentDumpKeysSink(ILibSimpleDataStore sender, char* Key, int KeyLen, void *
 MeshAgentHostContainer* MeshAgent_Create(MeshCommand_AuthInfo_CapabilitiesMask capabilities)
 {
 
-#if defined(_LINKVM) && defined(__APPLE__)
-    //Before anything, check for permissions (macos requirement)
-    kvm_check_permission();
-#endif
 
 
 	MeshAgentHostContainer* retVal = (MeshAgentHostContainer*)ILibMemory_Allocate(sizeof(MeshAgentHostContainer), 0, NULL, NULL);
@@ -8310,6 +8341,13 @@ void MeshAgent_AgentMost_dbRetryCallback(void *object)
 	{
 		ILibStopChain(agentHost->chain);
 	}
+#ifdef __APPLE__
+    if (agentHost->exitCode != 0)
+    {
+        if (agentHost->macUpdateTrial) { agentHost->performSelfUpdate = -1; }
+        ILibStopChain(agentHost->chain);
+    }
+#endif
 	ILibMemory_Free(object);
 }
 
@@ -8385,6 +8423,17 @@ void MeshAgent_Agent_SemaphoreTrack_Sink(char *source, void *user, int init)
 	UNREFERENCED_PARAMETER(user);
 	printf("[%d] SEM_%s: %s\n", init == 0 ? (--MeshAgent_Agent_SemaphoreTrack_Counter) : (++MeshAgent_Agent_SemaphoreTrack_Counter), init == 0 ? "DESTROY" : "INIT", source);
 }
+
+#ifdef __APPLE__
+static void MeshAgent_MacUpdateTrialTimeout(void *object)
+{
+    MeshAgentHostContainer *agent = (MeshAgentHostContainer*)((char*)object - offsetof(MeshAgentHostContainer, macUpdateTrial));
+    if (!agent->macUpdateTrial) { return; }
+    ILIBLOGMESSAGEX("SelfUpdate -> macOS replacement did not authenticate within 120 seconds; restoring incumbent");
+    agent->performSelfUpdate = -1;
+    ILibStopChain(agent->chain);
+}
+#endif
 
 int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **param, int parseCommands)
 {
@@ -8740,6 +8789,36 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 			}
 		}
 	}
+
+#ifdef __APPLE__
+    // Only the normal agent that owns the writable datastore may consume a trial.
+    // CLI probes, scripts, KVM helpers and duplicate service starts must not do so.
+    if (!readonly && !selfTestRuntime && agentHost->execparams != NULL &&
+        (parseCommands == 0 || paramLen == 1 || (paramLen == 2 &&
+        (strcmp(param[1], "run") == 0 || strcmp(param[1], "connect") == 0))))
+    {
+        int recovery = MeshMacUpdate_Recover(agentHost->exePath, 0);
+        if (recovery < 0)
+        {
+            ILIBLOGMESSAGEX("SelfUpdate -> macOS recovery failed: %d", errno);
+            agentHost->exitCode = 1;
+            return 0;
+        }
+        if (recovery == 1)
+        {
+            ILibSimpleDataStore_Close(agentHost->masterDb);
+            agentHost->masterDb = NULL;
+            execv(agentHost->exePath, agentHost->execparams);
+            agentHost->exitCode = 1;
+            return 0;
+        }
+        if (recovery == 2)
+        {
+            agentHost->macUpdateTrial = 1;
+            ILibLifeTime_AddEx(ILibGetBaseTimer(agentHost->chain), &agentHost->macUpdateTrial, 120000, MeshAgent_MacUpdateTrialTimeout, NULL);
+        }
+    }
+#endif
 
 	agentHost->httpClientManager = ILibCreateWebClient(3, agentHost->chain);
 
@@ -9828,10 +9907,16 @@ void MeshAgent_ScriptMode_Dispatched(void *chain, void *user)
 }
 void MeshAgent_AgentMode_Dispatched(void *chain, void *user)
 {
-	if (MeshAgent_AgentMode((MeshAgentHostContainer*)((void**)user)[0], ((int*)((void**)user)[1])[0], (char**)((void**)user)[2], 1) == 0)
-	{
-		ILibStopChain(((MeshAgentHostContainer*)((void**)user)[0])->chain);
-	}
+    MeshAgentHostContainer *agent = (MeshAgentHostContainer*)((void**)user)[0];
+    int result = MeshAgent_AgentMode(agent, ((int*)((void**)user)[1])[0], (char**)((void**)user)[2], 1);
+#ifdef __APPLE__
+    if (agent->exitCode != 0)
+    {
+        if (agent->macUpdateTrial) { agent->performSelfUpdate = -1; }
+        result = 0;
+    }
+#endif
+    if (result == 0) { ILibStopChain(agent->chain); }
 }
 
 
@@ -9855,6 +9940,29 @@ int MeshAgent_System(char *cmd)
 	return(0);
 }
 
+#endif
+
+#ifdef __APPLE__
+static void MeshAgent_MacSaveArguments(MeshAgentHostContainer *agent, int argc, char **argv)
+{
+    size_t bytes = 0;
+    int i, count = 0;
+    for (i = 0; i < argc; ++i) { bytes += strlen(argv[i]) + 1; }
+    if (agent->execparams != NULL) { ILibMemory_Free(agent->execparams); }
+    agent->execparams = (char**)ILibMemory_SmartAllocateEx(((size_t)argc + 1) * sizeof(char*), bytes);
+    char *text = (char*)ILibMemory_Extra(agent->execparams);
+    for (i = 0; i < argc; ++i)
+    {
+        // Test substitution and explicit identity reset must not repeat on hand-off.
+        if (i != 0 && (strcmp(argv[i], "--fakeUpdate") == 0 || strncmp(argv[i], "--fakeUpdate=", 13) == 0 ||
+            strcmp(argv[i], "--resetnodeid") == 0)) { continue; }
+        size_t length = strlen(argv[i]) + 1;
+        memcpy(text, argv[i], length);
+        agent->execparams[count++] = text;
+        text += length;
+    }
+    agent->execparams[count] = NULL;
+}
 #endif
 
 int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **param)
@@ -9909,7 +10017,18 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 		WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)tmpExePath, -1, (LPSTR)exePath, (int)ILibMemory_Size(exePath), NULL, NULL);
 #elif defined(__APPLE__)
 		if (_NSGetExecutablePath(exePath, &len) != 0) ILIBCRITICALEXIT(247);
-	
+        // Make a relative launch path absolute without resolving symlinks: historical
+        // installs may keep .db/.msh files next to the launch alias, not its target.
+        if (exePath[0] != '/')
+        {
+            char absolute[PATH_MAX], workingDirectory[PATH_MAX];
+            if (getcwd(workingDirectory, sizeof(workingDirectory)) == NULL)
+            { agentHost->exitCode = 1; return 0; }
+            int pathLength = snprintf(absolute, sizeof(absolute), "%s/%s", workingDirectory, exePath);
+            if (pathLength < 0 || pathLength >= sizeof(absolute) || pathLength >= ILibMemory_Size(exePath))
+            { agentHost->exitCode = 1; return 0; }
+            strcpy(exePath, absolute);
+        }
 		agentHost->exePath = exePath;
 #elif defined(NACL)
 #else
@@ -9989,6 +10108,9 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 	else
 	{
 		// We are acting as an Agent
+#ifdef __APPLE__
+        MeshAgent_MacSaveArguments(agentHost, paramLen, param);
+#endif
 		ILibChain_RunOnMicrostackThreadEx(agentHost->chain, MeshAgent_AgentMode_Dispatched, reserved);
 		ILibStartChain(agentHost->chain);
 		agentHost->chain = NULL; // Mesh agent has exited, set the chain to NULL
@@ -10004,6 +10126,23 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 		// Check if we need to perform self-update (performSelfUpdate should indicate startup type on Liunx: 1 = systemd, 2 = upstart, 3 = sysv-init)
 		if (agentHost->performSelfUpdate != 0)
 		{
+#ifdef __APPLE__
+            char *staged = ILibString_Copy(MeshAgent_MakeAbsolutePath(agentHost->exePath, ".update"), 0);
+            if (agentHost->performSelfUpdate != -1 && MeshMacUpdate_Apply(agentHost->exePath, staged) == 0)
+            {
+                execv(agentHost->exePath, agentHost->execparams);
+                ILIBLOGMESSAGEX("SelfUpdate -> macOS replacement exec failed: %d", errno);
+            }
+            else if (agentHost->performSelfUpdate != -1)
+            { ILIBLOGMESSAGEX("SelfUpdate -> macOS replacement failed: %d", errno); }
+            free(staged);
+            // Either replacement or exec failed, or the trial could not connect.
+            // Resolve the journal before executing anything at the installed path.
+            if (MeshMacUpdate_Recover(agentHost->exePath, 1) >= 0 && agentHost->execparams != NULL)
+            { execv(agentHost->exePath, agentHost->execparams); }
+            ILIBLOGMESSAGEX("SelfUpdate -> macOS incumbent restart failed: %d", errno);
+            agentHost->exitCode = 1;
+#else
 			// Get the update executable path
 			char* updateFilePath = MeshAgent_MakeAbsolutePath(agentHost->exePath, ".update"); // uses ILibScratchPad2
 			if (agentHost->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Updating..."); }
@@ -10081,6 +10220,7 @@ int MeshAgent_Start(MeshAgentHostContainer *agentHost, int paramLen, char **para
 				execv(agentHost->exePath, agentHost->execparams);
 				_exit(1);
 			}
+#endif
 		}
 #endif
 	}

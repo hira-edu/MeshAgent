@@ -4254,7 +4254,15 @@ duk_ret_t ILibDuktape_ScriptContainer_Create(duk_context *ctx)
 		}
 
 
-		if (master->child == NULL) { return(ILibDuktape_Error(ctx, "ScriptContainer.Create(): Error spawning child process, using [%s], error=%u", exePath, (unsigned int)GetLastError())); }
+		if (master->child == NULL)
+		{
+#ifdef WIN32
+			unsigned int spawnError = (unsigned int)GetLastError();
+#else
+			unsigned int spawnError = (unsigned int)errno;
+#endif
+			return(ILibDuktape_Error(ctx, "ScriptContainer.Create(): Error spawning child process, using [%s], error=%u", exePath, spawnError));
+		}
 		
 		duk_push_true(ctx);
 		duk_put_prop_string(ctx, -2, ILibDuktape_ScriptContainer_ProcessIsolated);

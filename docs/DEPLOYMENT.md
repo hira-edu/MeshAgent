@@ -203,3 +203,60 @@ with a lifecycle manifest. Repository tests use
 ```powershell
 powershell -NoProfile -File .\tools\health_check.ps1
 ```
+
+## macOS privacy permissions
+
+Agent and helper startup do not request Screen Recording, Accessibility, or
+Full Disk Access and do not open System Settings. During a desktop session,
+KVM queries existing Screen Recording and Accessibility authorization without
+prompting. Missing Screen Recording authorization pauses capture; missing
+Accessibility authorization blocks remote keyboard and mouse input. A desktop
+protocol message explains the missing permission. Grant access to the installed
+MeshAgent executable in System Settings > Privacy & Security, then reconnect
+or restart the helper if required by macOS.
+
+Removing automatic requests does not grant access or suppress macOS-controlled
+notifications. Full Disk Access is not inferred by opening protected user files;
+file operations remain subject to macOS authorization.
+
+For managed Macs, deploy Apple's Privacy Preferences Policy Control (PPPC)
+payload through MDM using the installed binary's path and designated code signing
+requirement. PPPC can preapprove Accessibility and System Policy All Files.
+Screen Recording follows Apple's separate approval rules; do not treat it as a
+silent allow grant. Keep the installed path and signing identity consistent
+across updates so the deployment policy continues to identify the same agent.
+See [Apple's PPPC deployment settings](https://support.apple.com/guide/deployment/dep38df53c2a/web)
+and [payload examples](https://support.apple.com/guide/deployment/dep9ddb7e0b5/web).
+
+## macOS server-driven update recovery
+
+The macOS native agent validates a staged executable with its bounded
+`-updaterversion` probe before stopping the agent chain. A failed probe leaves
+the incumbent online and reports update failure. A symlinked executable is
+rejected for replacement without changing the launch path used for identity files.
+Package extraction owns the
+staged file until its completion or failure callback; additional transfers cannot
+truncate it during extraction.
+
+After closing the datastore, the agent keeps a hard-link backup of the incumbent,
+publishes a durable transaction record, atomically replaces the executable, and
+uses `execv` at the same installed path. The hand-off preserves the process ID,
+launchd job, working directory, and original argument values. It removes the
+one-shot `--fakeUpdate` and `--resetnodeid` arguments. It does not move or replace
+the datastore or provisioning files. An execution failure restores the incumbent
+before attempting to restart it.
+
+The installed executable owns `<executable>.update-backup`,
+`<executable>.update-state`, and a persistent `<executable>.update-lock` file.
+The first normal writable agent startup marks a trial; scripts, KVM helpers and
+read-only probes do not consume it. Authentication to the server commits the
+trial and retires the backup. Startup failure, a subsequent uncommitted startup,
+or failure to authenticate within 120 seconds restores the incumbent. A network
+outage during the trial can therefore cause a valid update to roll back. A
+malformed journal or a backup whose file identity no longer matches the record
+is reported as a recovery error; the agent does not delete unrelated files.
+
+A stored certificate that is corrupt, lacks its private key, or disagrees with a
+stored NodeID is an identity error on macOS. Startup exits nonzero instead of
+creating a replacement node. Historical databases with a valid private PKCS12
+certificate and no separate NodeID record remain supported.

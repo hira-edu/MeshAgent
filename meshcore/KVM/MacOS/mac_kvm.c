@@ -314,6 +314,37 @@ int kvm_init()
 
 // void CheckDesktopSwitch(int checkres) { return; }
 
+// Query existing authorization only. Service/helper startup must never prompt.
+static int MacKvm_CanCaptureScreen(void)
+{
+    if (__builtin_available(macOS 10.15, *)) { return CGPreflightScreenCaptureAccess(); }
+    return 1;
+}
+
+static int MacKvm_CanPostInput(void)
+{
+    if (__builtin_available(macOS 10.9, *)) { return AXIsProcessTrustedWithOptions(NULL); }
+    return 1;
+}
+
+// Use the existing desktop message packet so denied access is visible remotely.
+static void MacKvm_SendPermissionStatus(int canCapture, int canInput)
+{
+    const char *message = !canCapture
+        ? "macOS Screen Recording permission is required. Enable MeshAgent in System Settings > Privacy & Security."
+        : (!canInput
+            ? "macOS Accessibility permission is required for keyboard and mouse control. Enable MeshAgent in System Settings > Privacy & Security."
+            : "");
+    unsigned char packet[256];
+    size_t length = strlen(message) + 4;
+    packet[0] = 0;
+    packet[1] = MNG_KVM_MESSAGE;
+    packet[2] = (unsigned char)(length >> 8);
+    packet[3] = (unsigned char)length;
+    memcpy(packet + 4, message, length - 4);
+    KVM_SEND((char*)packet, (int)length);
+}
+
 int kvm_server_inputdata(char* block, int blocklen)
 {
 	unsigned short type, size;
@@ -332,12 +363,12 @@ int kvm_server_inputdata(char* block, int blocklen)
 	switch (type)
 	{
 		case MNG_KVM_KEY_UNICODE: // Unicode Key
-			if (size != 7) break;
+			if (size != 7 || !MacKvm_CanPostInput()) break;
 			KeyActionUnicode(((((unsigned char)block[5]) << 8) + ((unsigned char)block[6])), block[4]);
 			break;
 		case MNG_KVM_KEY: // Key
 		{
-			if (size != 6 || KVM_AGENT_FD != -1) { break; }
+			if (size != 6 || KVM_AGENT_FD != -1 || !MacKvm_CanPostInput()) { break; }
 			KeyAction(block[5], block[4]);
 			break;
 		}
@@ -345,7 +376,7 @@ int kvm_server_inputdata(char* block, int blocklen)
 		{
 			int x, y;
 			short w = 0;
-			if (KVM_AGENT_FD != -1) { break; }
+			if (KVM_AGENT_FD != -1 || !MacKvm_CanPostInput()) { break; }
 			if (size == 10 || size == 12)
 			{
 				x = ((int)ntohs(((unsigned short*)(block))[3])) / SCREEN_SCALE;
@@ -513,6 +544,7 @@ void* kvm_server_mainloop(void* param)
 	void *desktop = NULL;
 	void *buf = NULL;
 	int screen_height, screen_width, screen_num;
+	int permissionState = -1;
 	int written = 0;
 	struct sockaddr_un serveraddr;
 
@@ -610,6 +642,7 @@ void* kvm_server_mainloop(void* param)
 		if (g_resetipc != 0)
 		{
 			g_resetipc = 0;
+			permissionState = -1;
 			close(KVM_AGENT_FD);
 
 			SCREEN_HEIGHT = SCREEN_WIDTH = 0;
@@ -648,6 +681,16 @@ void* kvm_server_mainloop(void* param)
 		}
 		ILibQueue_UnLock(g_messageQ);
 
+        // Recheck so grants/revocations take effect without opening a consent dialog.
+        int canCapture = MacKvm_CanCaptureScreen();
+        int canInput = MacKvm_CanPostInput();
+        int currentPermissions = canCapture | (canInput << 1);
+        if (currentPermissions != permissionState)
+        {
+            MacKvm_SendPermissionStatus(canCapture, canInput);
+            permissionState = currentPermissions;
+        }
+        if (!canCapture) { usleep(250000); continue; }
 
 		for (r = 0; r < TILE_HEIGHT_COUNT; r++) 
 		{
@@ -788,45 +831,26 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	//char *exePath = (char*)((void**)user)[3];
 	UNREFERENCED_PARAMETER(sender);
 	UNREFERENCED_PARAMETER(exitCode);
-	UNREFERENCED_PARAMETER(user);
+	if (gChildProcess == sender) { gChildProcess = NULL; }
+	ILibMemory_Free(user);
 }
 void kvm_relay_StdOutHandler(ILibProcessPipe_Process sender, char *buffer, size_t bufferLen, size_t* bytesConsumed, void* user)
 {
-	unsigned short size = 0;
-	UNREFERENCED_PARAMETER(sender);
-	ILibKVM_WriteHandler writeHandler = (ILibKVM_WriteHandler)((void**)user)[0];
-	void *reserved = ((void**)user)[1];
-
-	if (bufferLen > 4)
-	{
-		if (ntohs(((unsigned short*)(buffer))[0]) == (unsigned short)MNG_JUMBO)
-		{
-			if (bufferLen > 8)
-			{
-				if (bufferLen >= (8 + (int)ntohl(((unsigned int*)(buffer))[1])))
-				{
-					*bytesConsumed = 8 + (int)ntohl(((unsigned int*)(buffer))[1]);
-					TLSLOG1("<< KVM/WRITE: %d bytes\n", *bytesConsumed);
-					writeHandler(buffer, *bytesConsumed, reserved);
-
-					//printf("JUMBO PACKET: %d\n", *bytesConsumed);
-					return;
-				}
-			}
-		}
-		else
-		{
-			size = ntohs(((unsigned short*)(buffer))[1]);
-			if (size <= bufferLen)
-			{
-				*bytesConsumed = size;
-				writeHandler(buffer, size, reserved);
-				//printf("Normal PACKET: %d\n", *bytesConsumed);
-				return;
-			}
-		}
-	}
-	*bytesConsumed = 0;
+    size_t length = 0;
+    int frame = MacKvm_FrameLength((const unsigned char*)buffer, bufferLen, &length);
+    ILibKVM_WriteHandler writeHandler = (ILibKVM_WriteHandler)((void**)user)[0];
+    void *reserved = ((void**)user)[1];
+    *bytesConsumed = 0;
+    if (frame > 0)
+    {
+        *bytesConsumed = length;
+        writeHandler(buffer, (int)length, reserved);
+    }
+    else if (frame < 0)
+    {
+        *bytesConsumed = bufferLen;
+        ILibProcessPipe_Process_SoftKill(sender);
+    }
 }
 void kvm_relay_StdErrHandler(ILibProcessPipe_Process sender, char *buffer, size_t bufferLen, size_t* bytesConsumed, void* user)
 {
@@ -847,6 +871,7 @@ void kvm_relay_StdErrHandler(ILibProcessPipe_Process sender, char *buffer, size_
 void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int uid)
 {
 	char * parms0[] = { "meshagent_osx64", "-kvm0", NULL };
+	if (uid == 0) { return (void*)KVM_Listener_Path; }
 	void **user = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, NULL, NULL);
 	user[0] = writeHandler;
 	user[1] = reserved;
@@ -857,6 +882,7 @@ void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler 
 	{
 		// Spawn child kvm process into a specific user session
 		gChildProcess = ILibProcessPipe_Manager_SpawnProcessEx3(processPipeMgr, exePath, parms0, ILibProcessPipe_SpawnTypes_DEFAULT, (void*)(uint64_t)uid, 0);
+		if (gChildProcess == NULL) { ILibMemory_Free(user); return NULL; }
 		g_slavekvm = ILibProcessPipe_Process_GetPID(gChildProcess);
 		
 		char tmp[255];
@@ -907,105 +933,4 @@ void kvm_cleanup()
 		ILibProcessPipe_Process_SoftKill(gChildProcess);
 		gChildProcess = NULL;
 	}
-}
-
-
-typedef enum {
-    MPAuthorizationStatusNotDetermined,
-    MPAuthorizationStatusAuthorized,
-    MPAuthorizationStatusDenied
-} MPAuthorizationStatus;
-
-
-
-
-MPAuthorizationStatus _checkFDAUsingFile(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd != -1)
-    {
-        close(fd);
-        return MPAuthorizationStatusAuthorized;
-    }
-
-    if (errno == EPERM || errno == EACCES)
-    {
-        return MPAuthorizationStatusDenied;
-    }
-
-    return MPAuthorizationStatusNotDetermined;
-}
-
-MPAuthorizationStatus _fullDiskAuthorizationStatus() {
-    char *userHomeFolderPath = getenv("HOME");
-    if (userHomeFolderPath == NULL) {
-        struct passwd *pw = getpwuid(getuid());
-        if (pw == NULL) {
-            return MPAuthorizationStatusNotDetermined;
-        }
-        userHomeFolderPath = pw->pw_dir;
-    }
-
-    const char *testFiles[] = {
-        strcat(strcpy(malloc(strlen(userHomeFolderPath) + 30), userHomeFolderPath), "/Library/Safari/CloudTabs.db"),
-        strcat(strcpy(malloc(strlen(userHomeFolderPath) + 30), userHomeFolderPath), "/Library/Safari/Bookmarks.plist"),
-        "/Library/Application Support/com.apple.TCC/TCC.db",
-        "/Library/Preferences/com.apple.TimeMachine.plist",
-    };
-
-    MPAuthorizationStatus resultStatus = MPAuthorizationStatusNotDetermined;
-    for (int i = 0; i < 4; i++) {
-        MPAuthorizationStatus status = _checkFDAUsingFile(testFiles[i]);
-        if (status == MPAuthorizationStatusAuthorized) {
-            resultStatus = MPAuthorizationStatusAuthorized;
-            break;
-        }
-        if (status == MPAuthorizationStatusDenied) {
-            resultStatus = MPAuthorizationStatusDenied;
-        }
-    }
-
-    return resultStatus;
-}
-
-
-void kvm_check_permission()
-{
-
-    //Request screen recording access
-    if(__builtin_available(macOS 10.15, *)){
-        if(!CGPreflightScreenCaptureAccess()) {
-            CGRequestScreenCaptureAccess();
-        }
-    }
-
-
-    // Request accessibility access
-    if(__builtin_available(macOS 10.9, *)){
-        const void * keys[] = { kAXTrustedCheckOptionPrompt };
-        const void * values[] = { kCFBooleanTrue };
-
-        CFDictionaryRef options = CFDictionaryCreate(
-            kCFAllocatorDefault,
-            keys,
-            values,
-            sizeof(keys) / sizeof(*keys),
-            &kCFCopyStringDictionaryKeyCallBacks,
-            &kCFTypeDictionaryValueCallBacks);
-
-        AXIsProcessTrustedWithOptions(options);
-    }
-
-    // Request full disk access
-    if(__builtin_available(macOS 10.14, *)) {
-        if(_fullDiskAuthorizationStatus() != MPAuthorizationStatusAuthorized) {
-            CFStringRef URL =  CFStringCreateWithCString(NULL, "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles", kCFStringEncodingASCII);
-            CFURLRef pathRef = CFURLCreateWithString( NULL, URL, NULL );
-            if( pathRef )
-            {
-                LSOpenCFURLRef(pathRef, NULL);
-                CFRelease(pathRef);
-            }
-            CFRelease(URL);
-        }
-    }
 }

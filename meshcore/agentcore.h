@@ -208,15 +208,18 @@ typedef struct MeshAgentHostContainer
 	MeshAgentHost_BatteryInfo batteryState;
 	char meshId[UTIL_SHA384_HASHSIZE];
 	int performSelfUpdate;
+#ifdef __APPLE__
+    int macUpdateTrial;
+#endif
 	int disableUpdate;
 	int forceUpdate;
 	int logUpdate;
 	int fakeUpdate;
 	int serverSupportsUpdateFailureStatus;
 	int updateDownloadActive;	// A command 13 start was accepted on this connection
+	int updateUnzipPending;      // update-helper is still extracting the staged package on any platform
 #ifdef WIN32
 	void *updateActivation;	// Lifecycle host still applying a downloaded update, NULL when idle
-	int updateUnzipPending;		// update-helper is still extracting the staged package
 #endif
 	int controlChannelDebug;
 	void *coreTimeout;

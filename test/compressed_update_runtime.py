@@ -48,7 +48,7 @@ def main():
         code = "require('update-helper').start(" + json.dumps(str(package)) + ").then(function(){console.log('complete');process.exit(0);},function(e){console.log('failed:'+e);process.exit(1);});"
         code += "setTimeout(function(){console.log('timeout');process.exit(2);},2000);"
         result = subprocess.run([str(args.console.resolve()), "-exec", code], cwd=evidence, capture_output=True,
-                                timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+                                timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         (evidence / (label + ".stdout.txt")).write_bytes(result.stdout)
         (evidence / (label + ".stderr.txt")).write_bytes(result.stderr)
         actual = package.read_bytes()
@@ -68,7 +68,7 @@ def main():
     code += "s.on('data',function(c){var b=Buffer.alloc(c.length);c.copy(b);parts.push(b);s.pause();setImmediate(function(){s.resume();});});});"
     code += "setTimeout(function(){console.log('timeout');process.exit(2);},5000);"
     result = subprocess.run([str(args.console.resolve()), "-exec", code], cwd=evidence, capture_output=True,
-                            timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+                            timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     (evidence / "backpressure.stdout.txt").write_bytes(result.stdout)
     (evidence / "backpressure.stderr.txt").write_bytes(result.stderr)
     ok = result.returncode == 0 and output.exists() and output.read_bytes() == content
