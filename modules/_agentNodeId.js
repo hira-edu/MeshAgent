@@ -14,6 +14,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Matches MeshAgent_MakeAbsolutePath(exePath, ".db") on Windows: the last extension of the file
+// name is replaced (any case), or '.db' is appended when there is none. A plain
+// replace('.exe', '.db') misses '.EXE' and edits the first '.exe' anywhere in the path.
+function _meshDbPath(exePath)
+{
+    var sep = Math.max(exePath.lastIndexOf('\\'), exePath.lastIndexOf('/'));
+    var dot = exePath.lastIndexOf('.');
+    return ((dot > sep ? exePath.substring(0, dot) : exePath) + '.db');
+}
+
+// The service name the running agent was started with, when the agent object is available.
+function _runtimeServiceName()
+{
+    try
+    {
+        var name = require('MeshAgent').serviceName;
+        if (typeof name == 'string' && name.length > 0) { return (name); }
+    }
+    catch (e)
+    {
+    }
+    return (null);
+}
+
 function _meshNodeId()
 {
     var ret = '';
@@ -34,7 +58,7 @@ function _meshNodeId()
             // First Check if the db Contains the NodeID
             try
             {
-                var db = require('SimpleDataStore').Create(process.execPath.replace('.exe', '.db'), { readOnly: true });
+                var db = require('SimpleDataStore').Create(_meshDbPath(process.execPath), { readOnly: true });
                 var v = db.GetBuffer('SelfNodeCert');
                 if (v)
                 {
@@ -64,7 +88,11 @@ function _meshNodeId()
 
 function _meshName()
 {
-    var name = _MSH().meshServiceName;
+    // On Windows the runtime name is the running service's SCM key. Elsewhere it falls back to
+    // this build's default, which can hide an upstream installation's real name, so it is only
+    // used after discovery.
+    var name = (process.platform == 'win32') ? _runtimeServiceName() : null;
+    if (name == null) { name = _MSH().meshServiceName; }
     if(name==null)
     {
         switch(process.platform)
@@ -73,18 +101,20 @@ function _meshName()
                 // Enumerate the registry to see if the we can find our NodeID           
                 var reg = require('win-registry');
                 var nid = _meshNodeId();
-                var key, regval;
+                var key, hive;
                 var source = [reg.HKEY.LocalMachine, reg.HKEY.CurrentUser];
                 var val;
 
-                while (name == null && source.length > 0)
+                // Without a NodeID every registry entry would be compared against '', so skip the scan.
+                while (nid != '' && name == null && source.length > 0)
                 {
-                    val = reg.QueryKey(source.shift(), 'Software\\Open Source');
+                    hive = source.shift();
+                    try { val = reg.QueryKey(hive, 'Software\\Open Source'); } catch (qe) { continue; }
                     for (key = 0; key < val.subkeys.length;++key)
                     {
                         try
                         {
-                            if (nid == Buffer.from(reg.QueryKey(reg.HKEY.LocalMachine, 'Software\\Open Source\\' + val.subkeys[key], 'NodeId').split('@').join('+').split('$').join('/'), 'base64').toString('hex'))
+                            if (nid == Buffer.from(reg.QueryKey(hive, 'Software\\Open Source\\' + val.subkeys[key], 'NodeId').split('@').join('+').split('$').join('/'), 'base64').toString('hex'))
                             {
                                 name = val.subkeys[key];
                                 break;
@@ -95,19 +125,28 @@ function _meshName()
                         }
                     }
                 }
-                if (name == null) { name = 'Mesh Agent'; }
+                if (name == null) { name = _runtimeServiceName(); }
+                if (name == null) { throw new Error('Cannot resolve the installed Windows agent service name.'); }
                 break;
             default:
-                var service = require('service-manager').manager.enumerateService();
-                name = 'meshagent';
+                var service = [];
+                try { service = require('service-manager').manager.enumerateService(); } catch (ee) { }
                 for (var i = 0; i < service.length; ++i)
                 {
-                    if(service[i].appLocation()==process.execPath)
+                    try
                     {
-                        name = service[i].name;
-                        break;
+                        if (service[i].appLocation() == process.execPath)
+                        {
+                            name = service[i].name;
+                            break;
+                        }
+                    }
+                    catch (ae)
+                    {
                     }
                 }
+                if (name == null) { name = _runtimeServiceName(); }
+                if (name == null) { name = 'meshagent'; }
                 break;
         }
     }

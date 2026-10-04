@@ -68,18 +68,26 @@ function main() {
         agentcoreChainHopIsExplicitAndNoLegacyPretendSuccess:
             agentcoreSource.includes('ILibChain_RunOnMicrostackThreadEx3(duk_ctx_chain(ptrs->ctx), ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain, NULL, bstate);') &&
             !agentcoreSource.includes("return ILibTransport_DoneState_COMPLETE;\t\t// Always returning complete, because we'll let the stream object handle flow control"),
+        // Off-thread output is queued to the chain thread and must backpressure the producer once a
+        // bounded backlog builds up (never pretend success unconditionally). Returning INCOMPLETE on
+        // every packet throttled capture to the 50 ms pause poll, so the bound is a byte high-water mark.
         agentcoreOffThreadMarshalBackpressuresBridge:
             offThreadBlock.includes('ILibChain_RunOnMicrostackThreadEx3(duk_ctx_chain(ptrs->ctx), ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain, NULL, bstate);') &&
-            offThreadBlock.includes('return ILibTransport_DoneState_INCOMPLETE;') &&
+            offThreadBlock.includes('queued = InterlockedExchangeAdd(&(ptrs->marshaledBytes), (LONG)bufferLen) + (LONG)bufferLen;') &&
+            offThreadBlock.includes('return (queued > REMOTE_DESKTOP_MARSHAL_HIGH_WATER) ? ILibTransport_DoneState_INCOMPLETE : ILibTransport_DoneState_COMPLETE;') &&
             !offThreadBlock.includes('return ILibTransport_DoneState_COMPLETE;'),
         agentcoreOffThreadAcceptedWriteResumesBridge:
-            chainWriteBlock.includes('ILibMemory_CanaryOK(ptrs)') &&
-            chainWriteBlock.includes('ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, (int)bufferLen) == 0') &&
+            chainWriteBlock.includes('ILibDuktape_MeshAgent_RemoteDesktop_PtrsIsLive(ptrs) && ILibMemory_CanaryOK(ptrs)') &&
+            chainWriteBlock.includes('ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, (int)bufferLen) == 0 && queued < REMOTE_DESKTOP_MARSHAL_LOW_WATER') &&
             chainWriteBlock.includes('kvm_pause(0, ptrs);'),
         bridgePauseUsesProtocolPacket: kvmSource.includes('static BOOL kvm_relay_write_bridge_pause(KvmRelayContext* ctx, int pause)') &&
             kvmSource.includes('((unsigned short*)pausePacket)[0] = (unsigned short)htons((unsigned short)MNG_KVM_PAUSE);'),
         masterBridgePauseRoutesOverPipe: kvmSource.includes('static BOOL kvm_relay_set_bridge_pause_state(KvmRelayContext* ctx, int normalizedPause, int forcePacket)') &&
-            kvmSource.includes('if ((forcePacket != 0 || previousState != normalizedPause) && !kvm_relay_write_bridge_pause(ctx, normalizedPause))'),
+            kvmSource.includes('if ((forcePacket != 0 || previousState != normalizedPause) &&') &&
+            // Ending agent backpressure must not unpause a helper the viewer itself paused.
+            kvmSource.includes('!kvm_relay_write_bridge_pause(ctx, normalizedPause || InterlockedCompareExchange(&ctx->viewerPauseState, 0, 0) != 0))') &&
+            // A nested pause sent while resuming the read pipe must not be overtaken by this stale state.
+            kvmSource.includes('if (InterlockedCompareExchange(&ctx->bridgeProtocolPauseState, 0, 0) != normalizedPause) { return TRUE; }'),
         masterSyncsInitialBridgePauseState: kvmSource.includes('if (!kvm_relay_set_bridge_pause_state(ctx, 0, 1))'),
         masterPausesBridgeReadPipeOnBackpressure: kvmSource.includes('ILibProcessPipe_Pipe_Pause(ctx->bridgeReadPipe);') &&
             kvmSource.includes('ILibProcessPipe_Pipe_Resume(ctx->bridgeReadPipe);'),

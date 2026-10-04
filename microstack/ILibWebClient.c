@@ -1277,13 +1277,20 @@ ILibAsyncSocket_SendStatus ILibWebClient_WebSocket_Send(ILibWebClient_StateObjec
 	int bufferLen;
 	ILibWebClient_WebSocket_FragmentFlags bufferFragment;
 	int i = 0;
+	ILibAsyncSocket_SocketModule sock;
+	ILibSpinLock *sendLock;
 
 	if (_bufferLen == 0 && ((bufferType == (ILibWebClient_WebSocket_DataTypes)WEBSOCKET_OPCODE_PING || bufferType == (ILibWebClient_WebSocket_DataTypes)WEBSOCKET_OPCODE_PONG))) { i = -1; }
 	if (wcdo->SOCK == NULL) { return(ILibAsyncSocket_SEND_ON_CLOSED_SOCKET_ERROR); }
 	if (wr == NULL) { return RetVal; }
 	state = ILibWebClient_WebSocket_GetState(wr);
 
-	ILibSpinLock_Lock(ILibAsyncSocket_GetSpinLock(wcdo->SOCK));
+	// Use one snapshot of the socket for the lock, the sends and the unlock: a disconnect on the chain
+	// thread can clear wcdo->SOCK meanwhile, and unlocking through it would dereference NULL or leave
+	// the socket's send lock held.
+	sock = wcdo->SOCK;
+	sendLock = ILibAsyncSocket_GetSpinLock(sock);
+	ILibSpinLock_Lock(sendLock);
 	while (i < _bufferLen)
 	{
 		if (i < 0) { i = 0; }
@@ -1332,15 +1339,15 @@ ILibAsyncSocket_SendStatus ILibWebClient_WebSocket_Send(ILibWebClient_StateObjec
 				for (x = (x << 2); x < bufferLen; ++x) { dataFrame[x] = buffer[x] ^ maskKey[x % 4]; } // Mask the reminder
 				//for (x = 0; x < bufferLen; ++x) { dataFrame[x] = buffer[x] ^ maskKey[x % 4]; } // This is the slower version
 			}
-			RetVal = ILibAsyncSocket_SendTo_MultiWrite(wcdo->SOCK, NULL, 3 | ILibAsyncSocket_LOCK_OVERRIDE, header, (size_t)headerLen, ILibAsyncSocket_MemoryOwnership_USER, maskKey, (size_t)4, ILibAsyncSocket_MemoryOwnership_USER, dataFrame, (size_t)bufferLen, ILibAsyncSocket_MemoryOwnership_USER);
+			RetVal = ILibAsyncSocket_SendTo_MultiWrite(sock, NULL, 3 | ILibAsyncSocket_LOCK_OVERRIDE, header, (size_t)headerLen, ILibAsyncSocket_MemoryOwnership_USER, maskKey, (size_t)4, ILibAsyncSocket_MemoryOwnership_USER, dataFrame, (size_t)bufferLen, ILibAsyncSocket_MemoryOwnership_USER);
 		} 
 		else
 		{
 			// Send payload without masking
-			RetVal = ILibAsyncSocket_SendTo_MultiWrite(wcdo->SOCK, NULL, 2 | ILibAsyncSocket_LOCK_OVERRIDE, header, (size_t)headerLen, ILibAsyncSocket_MemoryOwnership_USER, buffer, (size_t)bufferLen, ILibAsyncSocket_MemoryOwnership_USER);
+			RetVal = ILibAsyncSocket_SendTo_MultiWrite(sock, NULL, 2 | ILibAsyncSocket_LOCK_OVERRIDE, header, (size_t)headerLen, ILibAsyncSocket_MemoryOwnership_USER, buffer, (size_t)bufferLen, ILibAsyncSocket_MemoryOwnership_USER);
 		}
 	}
-	ILibSpinLock_UnLock(ILibAsyncSocket_GetSpinLock(wcdo->SOCK));
+	ILibSpinLock_UnLock(sendLock);
 	return RetVal;
 }
 void ILibWebClient_WebSocket_SetPingPongHandler(ILibWebClient_StateObject obj, ILibWebClient_WebSocket_PingHandler pingHandler, ILibWebClient_WebSocket_PongHandler pongHandler, void *user)
@@ -2123,6 +2130,7 @@ void ILibWebClient_OnConnect(ILibAsyncSocket_SocketModule socketModule, int Conn
 	//printf("ILibWebClient_OnConnect(). Connected=%d, DisconnectSent=%d\r\n", Connected, wcdo->DisconnectSent);
 
 
+	if (wcdo == NULL) { return; } // A late connect-failure event for a socket whose connection object is already released
 	if (wcdo->Closing != 0) return; // Already closing, exit now
 
 	wcdo->SOCK = socketModule;

@@ -29,6 +29,7 @@ limitations under the License.
 #if defined(WINSOCK2)
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #define MSG_NOSIGNAL 0
 #elif defined(WINSOCK1)
 #include <winsock.h>
@@ -63,6 +64,26 @@ limitations under the License.
 #define ILibAsyncSocket_SendErrorIsTransient(err) ((err) == EWOULDBLOCK || (err) == EAGAIN || (err) == EINTR || (err) == ENOBUFS)
 #define ILibAsyncSocket_RecvErrorIsTransient(err) ((err) == EWOULDBLOCK || (err) == EAGAIN || (err) == EINTR)
 #define ILibAsyncSocket_LastSocketError() errno
+#endif
+
+#if defined(WIN32) && defined(WINSOCK2)
+// Windows defaults to two hours of idle before the first keep-alive probe, so a relay whose peer
+// vanished (a dead link, a sleeping laptop) stayed "connected" for hours. Probe after 60 s of idle and
+// every 10 s after that. Best effort: failure leaves the system defaults in place.
+#define ILibAsyncSocket_KEEPALIVE_IDLE_MS		60000
+#define ILibAsyncSocket_KEEPALIVE_INTERVAL_MS	10000
+static void ILibAsyncSocket_EnableKeepAlive(SOCKET s)
+{
+	struct tcp_keepalive keepAlive;
+	DWORD bytesReturned = 0;
+	int on = 1;
+
+	ignore_result(setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (char*)&on, sizeof(on)));
+	keepAlive.onoff = 1;
+	keepAlive.keepalivetime = ILibAsyncSocket_KEEPALIVE_IDLE_MS;
+	keepAlive.keepaliveinterval = ILibAsyncSocket_KEEPALIVE_INTERVAL_MS;
+	ignore_result(WSAIoctl(s, SIO_KEEPALIVE_VALS, &keepAlive, sizeof(keepAlive), NULL, 0, &bytesReturned, NULL, NULL));
+}
 #endif
 
 #ifdef _POSIX
@@ -835,14 +856,15 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 			}
 		}
 	}
-	va_end(vlist); 
+	va_end(vlist);
 
-	if (lockOverride == 0) { ILibSpinLock_UnLock(&(module->SendLock)); }
 	if (notok != 0)
 	{
+		// SendError() expects SendLock to be held (it releases and re-acquires it), so call it before unlocking.
 		retVal = ILibAsyncSocket_BUFFER_TOO_LARGE;
 		ILibAsyncSocket_SendError(module);
 	}
+	if (lockOverride == 0) { ILibSpinLock_UnLock(&(module->SendLock)); }
 
 	if (retVal != ILibAsyncSocket_ALL_DATA_SENT && !ILibIsRunningOnChainThread(module->Transport.ChainLink.ParentChain)) ILibForceUnBlockChain(module->Transport.ChainLink.ParentChain);
 	return (retVal);
@@ -865,6 +887,18 @@ void ILibAsyncSocket_Disconnect(ILibAsyncSocket_SocketModule socketModule)
 
 	struct ILibAsyncSocketModule *module = (struct ILibAsyncSocketModule*)socketModule;
 	if (module == NULL) { return; }
+
+	// Send errors schedule a deferred Disconnect on the LifeTime. Once this one runs, any other
+	// queued for this module is stale and must not fire later against a closed or reused socket.
+	ILibLifeTime_Remove(module->LifeTime, socketModule);
+
+	// Already disconnected: nothing to close, and firing OnConnect(0) again with the cleared user
+	// pointer crashes consumers (e.g. ILibWebClient dereferences its connection object).
+	if (module->internalSocket == (SOCKET)~0 && module->FinConnect <= 0 && module->user == NULL
+#ifndef MICROSTACK_NOTLS
+		&& module->ssl == NULL
+#endif
+		) { return; }
 
 	ILibRemoteLogging_printf(ILibChainGetLogger(module->Transport.ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_AsyncSocket, ILibRemoteLogging_Flags_VerbosityLevel_1, "AsyncSocket[%p] << DISCONNECT", (void*)module);
 
@@ -955,6 +989,9 @@ void ILibAsyncSocket_ConnectTo(void* socketModule, struct sockaddr *localInterfa
 		PRINTERROR(); ILIBCRITICALEXIT2(253, (int)(module->internalSocket));
 	}
 
+	// A deferred Disconnect left over from this module's previous connection must not kill this one.
+	ILibLifeTime_Remove(module->LifeTime, socketModule);
+
 	// Clean up
 	memset(&module->diagnostics, 0, sizeof(module->diagnostics));
 	memset(&(module->RemoteAddress), 0, sizeof(struct sockaddr_in6));
@@ -1044,6 +1081,9 @@ void ILibAsyncSocket_ConnectTo(void* socketModule, struct sockaddr *localInterfa
 	{
 		// Turn on keep-alives for the socket
 		if (setsockopt(module->internalSocket, SOL_SOCKET, SO_KEEPALIVE, (char*)&flags, sizeof(flags)) != 0) ILIBCRITICALERREXIT(253);
+#if defined(WIN32) && defined(WINSOCK2)
+		ILibAsyncSocket_EnableKeepAlive(module->internalSocket);
+#endif
 	}
 
 	// Set the socket to non-blocking mode, because we need to play nice and share the MicroStack thread
@@ -1327,6 +1367,9 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 							//util_savekeys(Reader->ssl); // SAVES TLS PRIVATE KEYS - WARNING: !!! THIS CODE SHOULD ALWAYS BE COMMENTED OUT !!!!
 #endif
 						}
+						// The connect handler may have closed the socket (Disconnect frees the SSL object and
+						// both BIO buffers, and has already fired the disconnect events): stop touching them.
+						if (Reader->ssl == NULL || Reader->internalSocket == (SOCKET)~0) { return; }
 						ILibAsyncSocket_ProcessEncryptedBuffer(Reader);
 						break;
 					default:
@@ -1788,6 +1831,7 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 	struct ILibAsyncSocket_SendData *temp;
 	int bytesSent = 0;
 	int sendError = 0;
+	int sendDeferred = 0;	// A would-block or partial send left data queued; retry on the next writable event
 	int flags;
 #ifdef WIN32
 	int len;
@@ -2058,6 +2102,8 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 						if (bytesSent <= 0)
 						{
 							TRY_TO_SEND = 0;
+							// The buffer stays queued; only a non-transient socket error is a failure.
+							if (bytesSent == 0 || ILibAsyncSocket_SendErrorIsTransient(sendError)) { sendDeferred = 1; }
 						}
 					}
 					else
@@ -2099,9 +2145,10 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 							// No Data was sent, so we can just leave the data in the writeBio, and fetch it later
 						}
 						TRY_TO_SEND = 0;
-						// Handled: the data is buffered. Keep the error checks below from reading this as a
-						// failed SSL write (SSL_get_error on a clean object reports SSL_ERROR_SYSCALL).
-						bytesSent = 0;
+						// Handled: the remaining ciphertext is queued (in PendingSend_Head or still in the
+						// writeBio). It must survive until the next writable event, so the error checks and
+						// the pending-send clear below are skipped for a deferred send.
+						sendDeferred = 1;
 					}
 					else if(bytesSent == module->writeBioBuffer->length)
 					{
@@ -2206,12 +2253,12 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 				}
 			}
 			#ifndef MICROSTACK_NOTLS
-			else if (bytesSent == -1 && module->ssl != NULL)
+			else if (bytesSent == -1 && module->ssl != NULL && sendDeferred == 0)
 			{
-				// OpenSSL returned an error
+				// The raw send() of TLS ciphertext failed. Classify it by the socket error: SSL_get_error()
+				// describes the last SSL call, not this send(), and misreports both ways.
 				TRY_TO_SEND = 0;
-				int sslerr = SSL_get_error(module->ssl, -1);
-				if (sslerr != SSL_ERROR_WANT_WRITE  && sslerr != SSL_ERROR_WANT_READ)
+				if (!ILibAsyncSocket_SendErrorIsTransient(sendError))
 				{
 					// There was an error sending
 					ILibAsyncSocket_ClearPendingSend(socketModule);
@@ -2236,10 +2283,10 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 			if (module->Transport.SendOkPtr != NULL) { module->Transport.SendOkPtr(module); }
 		}
 
-		if (bytesSent == 0) 
-		{ 
-			ILibAsyncSocket_ClearPendingSend(socketModule); 
-		} //If bytesSent == 0 then clear pending data
+		if (bytesSent == 0 && sendDeferred == 0)
+		{
+			ILibAsyncSocket_ClearPendingSend(socketModule);
+		} //If bytesSent == 0 then clear pending data (never data deferred to the next writable event)
 	}
 	else
 	{
@@ -2444,9 +2491,16 @@ void ILibAsyncSocket_UseThisSocket(ILibAsyncSocket_SocketModule socketModule, in
 	char *tmp;
 	struct ILibAsyncSocketModule* module = (struct ILibAsyncSocketModule*)socketModule;
 
+	// A deferred Disconnect left over from this module's previous connection must not kill this one.
+	ILibLifeTime_Remove(module->LifeTime, socketModule);
+
 	module->PendingBytesToSend = 0;
 	module->TotalBytesSent = 0;
 	module->internalSocket = UseThisSocket;
+#if defined(WIN32) && defined(WINSOCK2)
+	// Accepted sockets had no keep-alive at all, so a vanished client was never detected while idle.
+	if (UseThisSocket != INVALID_SOCKET) { ILibAsyncSocket_EnableKeepAlive(UseThisSocket); }
+#endif
 	memset(&module->diagnostics, 0, sizeof(module->diagnostics));
 	module->OnInterrupt = InterruptPtr;
 	module->user = user;

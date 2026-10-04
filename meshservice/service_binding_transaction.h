@@ -28,6 +28,8 @@ typedef struct ServiceBindingSnapshot {
     BYTE* extra[_countof(ServiceBinding_ConfigLevels)];
     ServiceBindingValue values[_countof(ServiceBinding_ValueNames)];
     BOOL running, legacy, legacyGroupMember, serviceGroupMember, parametersExisted;
+    /* Verified before PREPARED; immutable during activation and retirement. */
+    wchar_t incumbentExePath[MAX_PATH], incumbentDllPath[MAX_PATH], incumbentDbPath[MAX_PATH];
 } ServiceBindingSnapshot;
 
 static void ServiceBinding_Free(ServiceBindingSnapshot* snapshot)
@@ -166,48 +168,93 @@ static BOOL ServiceBinding_IsLegacyExe(const wchar_t* path)
            !_wcsicmp(leaf, L"diaghost.exe");
 }
 
+/* Migration accepts historical serialization, while requiring the actual
+ * system loader and an exact supported callback. Final bindings stay canonical. */
+static BOOL ServiceBinding_ParseCallbackImage(const wchar_t* image, wchar_t* dll, size_t capacity)
+{
+    wchar_t expanded[MAX_PATH * 4], loader[MAX_PATH], system[MAX_PATH];
+    const wchar_t *p, *end, *start;
+    size_t length;
+    DWORD count;
+    if (!image || !dll || !capacity) { return FALSE; }
+    dll[0] = 0;
+    count = ExpandEnvironmentStringsW(image, expanded, _countof(expanded));
+    if (!count || count > _countof(expanded)) { return FALSE; }
+    length = wcslen(expanded);
+    while (length && (expanded[length - 1] == L' ' || expanded[length - 1] == L'\t')) { expanded[--length] = 0; }
+    p = expanded;
+    while (*p == L' ' || *p == L'\t') { ++p; }
+    count = GetSystemDirectoryW(system, _countof(system));
+    if (!count || count >= _countof(system) ||
+        _snwprintf_s(loader, _countof(loader), _TRUNCATE, L"%ls\\rundll32.exe", system) < 0) { return FALSE; }
+    if (*p == L'"')
+    {
+        start = ++p; end = wcschr(p, L'"');
+        if (!end || (size_t)(end - start) != wcslen(loader) || _wcsnicmp(start, loader, end - start)) { return FALSE; }
+        p = end + 1;
+    }
+    else
+    {
+        length = wcslen(loader);
+        if (_wcsnicmp(p, loader, length)) { return FALSE; }
+        p += length;
+    }
+    if (*p != L' ' && *p != L'\t') { return FALSE; }
+    while (*p == L' ' || *p == L'\t') { ++p; }
+    if (*p == L'"')
+    {
+        start = ++p; end = wcschr(p, L'"');
+        if (!end || end[1] != L',') { return FALSE; }
+        p = end + 2;
+    }
+    else
+    {
+        start = p; end = wcschr(p, L',');
+        if (!end) { return FALSE; }
+        for (p = start; p < end; ++p) { if (*p == L' ' || *p == L'\t' || *p == L'"') { return FALSE; } }
+        p = end + 1;
+    }
+    if (wcscmp(p, L"MeshServiceHostW") && wcscmp(p, L"Stealth_SvchostServiceMain")) { return FALSE; }
+    length = end - start;
+    if (length < 3 || length >= capacity || start[1] != L':' || start[2] != L'\\') { return FALSE; }
+    memcpy(dll, start, length * sizeof(wchar_t)); dll[length] = 0;
+    /* The loader DLL contract: drive-absolute, canonical, and a .dll file. */
+    if (length < 7 || length >= MAX_PATH || _wcsicmp(dll + length - 4, L".dll") ||
+        !((dll[0] >= L'A' && dll[0] <= L'Z') || (dll[0] >= L'a' && dll[0] <= L'z'))) { dll[0] = 0; return FALSE; }
+    for (p = dll; *p; ++p)
+    {
+        if (*p < L' ' || wcschr(L"\",/*?|<>", *p) || (*p == L':' && p != dll + 1)) { dll[0] = 0; return FALSE; }
+    }
+    count = GetFullPathNameW(dll, _countof(expanded), expanded, NULL);
+    if (!count || count >= _countof(expanded) || _wcsicmp(expanded, dll)) { dll[0] = 0; return FALSE; }
+    return TRUE;
+}
+
 /* Ownership is established from the executable/DLL command only. Parameters
  * may be malformed: their exact prior values must remain repairable. */
 static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVICE_CONFIGW* config,
     const wchar_t* installedExe, const wchar_t* installedDll, BOOL* legacy)
 {
     wchar_t expected[2 * MAX_PATH], systemDir[MAX_PATH], parsedDll[MAX_PATH];
-    wchar_t cleanImage[2 * MAX_PATH], extractedExe[MAX_PATH];
-    const wchar_t* oldEntry = L",Stealth_SvchostServiceMain";
-    const wchar_t* newEntry = L",MeshServiceHostW";
+    wchar_t cleanImage[2 * MAX_PATH], extractedExe[MAX_PATH], resolvedImage[MAX_PATH * 4];
     const wchar_t* image = config->lpBinaryPathName;
     const wchar_t* imgStart;
     const wchar_t* imgEnd;
     const wchar_t* space;
-    size_t imageLength, oldEntryLength, prefixLength, cleanLen;
+    size_t cleanLen;
     UINT length;
     DWORD ownProcessMask = 0x00000010;
     *legacy = FALSE;
     if (!image || !installedExe || !installedDll) { return FALSE; }
+    DWORD expandedCount = ExpandEnvironmentStringsW(image, resolvedImage, _countof(resolvedImage));
+    if (!expandedCount || expandedCount > _countof(resolvedImage)) { return FALSE; }
+    image = resolvedImage;
     if ((config->dwServiceType & ownProcessMask) == ownProcessMask &&
         (config->dwServiceType & ~0x00000110) == 0)
     {
-        if (ServiceHost_ParseImagePath(image, parsedDll, _countof(parsedDll)))
+        if (ServiceBinding_ParseCallbackImage(image, parsedDll, _countof(parsedDll)))
         {
             return !_wcsicmp(parsedDll, installedDll);
-        }
-        /* An older own-process installation used the same canonical system loader
-         * path and DLL but a different callback. Translate only that exact
-         * suffix, then let the current parser enforce the full path contract. */
-        imageLength = wcslen(image);
-        oldEntryLength = wcslen(oldEntry);
-        if (imageLength > oldEntryLength && wcscmp(image + imageLength - oldEntryLength, oldEntry) == 0)
-        {
-            prefixLength = imageLength - oldEntryLength;
-            if (prefixLength + wcslen(newEntry) < _countof(expected))
-            {
-                memcpy(expected, image, prefixLength * sizeof(wchar_t));
-                memcpy(expected + prefixLength, newEntry, (wcslen(newEntry) + 1) * sizeof(wchar_t));
-                if (ServiceHost_ParseImagePath(expected, parsedDll, _countof(parsedDll)) && !_wcsicmp(parsedDll, installedDll))
-                {
-                    return TRUE;
-                }
-            }
         }
 
         /* Check legacy own-process standalone executable commands. */
@@ -262,9 +309,10 @@ static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVI
                 *legacy = TRUE;
                 return TRUE;
             }
-            space = wcschr(cleanImage, L' ');
-            while (space)
+            space = cleanImage;
+            while (*space)
             {
+                if (*space != L' ' && *space != L'\t') { ++space; continue; }
                 size_t partLen = (size_t)(space - cleanImage);
                 if (partLen > 0 && partLen < _countof(extractedExe))
                 {
@@ -278,7 +326,7 @@ static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVI
                         return TRUE;
                     }
                 }
-                space = wcschr(space + 1, L' ');
+                ++space;
             }
         }
         return FALSE;

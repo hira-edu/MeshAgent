@@ -1,5 +1,7 @@
 /* Durable, bounded checkpoint for the known deployment mutation surface.
- * Version 1 uses DWORD scalars and UTF-16 strings, never native pointers.
+ * Version 2 adds verified incumbent paths and is written only when they are
+ * present; otherwise the version 1 layout is written. Both are readable.
+ * DWORD scalars and UTF-16 strings are used, never native pointers.
  * The caller supplies canonical paths in the protected deployment state folder. */
 #ifndef MESH_SERVICE_TRANSACTION_JOURNAL_H
 #define MESH_SERVICE_TRANSACTION_JOURNAL_H
@@ -27,6 +29,7 @@ static BOOL ServiceJournal_PhaseRequiresBackups(DWORD phase)
 
 typedef struct ServiceJournalRecord {
     DWORD phase, fileMask;
+    wchar_t serviceName[256];
     ServiceBindingSnapshot* binding;
     PSECURITY_DESCRIPTOR dacl[5];
     DWORD attributes[5];
@@ -151,9 +154,13 @@ static BOOL ServiceJournal_Encode(ServiceJournalBuffer* b, const wchar_t* name, 
 {
     size_t i;
     const QUERY_SERVICE_CONFIGW* c;
+    BOOL incumbent;
     if ((s && !s->config) || !ServiceJournal_PhaseValid(phase) || fileMask & ~31UL) { return FALSE; }
     c = s ? s->config : NULL;
-    ServiceJournal_Put32(b, 0x4a42534dUL); ServiceJournal_Put32(b, 1);
+    /* An older service DLL may run recovery after a crash, and it reads only
+     * version 1. Write version 2 only when incumbent paths must be preserved. */
+    incumbent = s && (s->incumbentExePath[0] || s->incumbentDllPath[0] || s->incumbentDbPath[0]);
+    ServiceJournal_Put32(b, 0x4a42534dUL); ServiceJournal_Put32(b, incumbent ? 2 : 1);
     ServiceJournal_Put32(b, phase); ServiceJournal_Put32(b, fileMask);
     ServiceJournal_PutText(b, name, 512, name, FALSE);
     ServiceJournal_Put32(b, s ? 1 : 0);
@@ -209,6 +216,12 @@ static BOOL ServiceJournal_Encode(ServiceJournalBuffer* b, const wchar_t* name, 
         ServiceJournal_Put32(b, attrs ? attrs[i] : INVALID_FILE_ATTRIBUTES);
         ServiceJournal_Put32(b, size); if (size) { ServiceJournal_Put(b, dacl[i], size); }
     }
+    if (incumbent)
+    {
+        ServiceJournal_PutText(b, s->incumbentExePath, sizeof(s->incumbentExePath), s->incumbentExePath, FALSE);
+        ServiceJournal_PutText(b, s->incumbentDllPath, sizeof(s->incumbentDllPath), s->incumbentDllPath, FALSE);
+        ServiceJournal_PutText(b, s->incumbentDbPath, sizeof(s->incumbentDbPath), s->incumbentDbPath, FALSE);
+    }
     if (!b->ok) { return FALSE; }
     ServiceJournal_Put32(b, ServiceJournal_Checksum(b->data, b->offset));
     return b->ok;
@@ -218,7 +231,7 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
     ServiceJournalRecord* r = (ServiceJournalRecord*)calloc(1, sizeof(*r));
     ServiceBindingSnapshot* s;
     QUERY_SERVICE_CONFIGW* c;
-    DWORD used, flags, checksum;
+    DWORD used, flags, checksum, version;
     size_t i;
     wchar_t savedName[256];
     if (!r) { return NULL; }
@@ -227,13 +240,17 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
     memcpy(&checksum, b->data + b->size - 4, 4);
     if (checksum != ServiceJournal_Checksum(b->data, b->size - 4)) { goto fail; }
     b->size -= 4;
-    if (ServiceJournal_Get32(b) != 0x4a42534dUL || ServiceJournal_Get32(b) != 1) { goto fail; }
+    if (ServiceJournal_Get32(b) != 0x4a42534dUL) { goto fail; }
+    version = ServiceJournal_Get32(b);
+    if (version != 1 && version != 2) { goto fail; }
     r->phase = ServiceJournal_Get32(b); r->fileMask = ServiceJournal_Get32(b);
     if (!ServiceJournal_PhaseValid(r->phase) || r->fileMask & ~31UL) { goto fail; }
     used = ServiceJournal_Get32(b);
     if (used > sizeof(savedName) || used > b->size - b->offset) { goto fail; }
     ServiceJournal_Get(b, savedName, used);
-    if (!b->ok || !ServiceJournal_TextValid(savedName, used, FALSE) || _wcsicmp(name, savedName)) { goto fail; }
+    if (!b->ok || !ServiceJournal_TextValid(savedName, used, FALSE) || !savedName[0] ||
+        (name && _wcsicmp(name, savedName))) { goto fail; }
+    memcpy(r->serviceName, savedName, used);
     flags = ServiceJournal_Get32(b);
     if (!b->ok || flags > 1) { goto fail; }
     if (flags)
@@ -256,9 +273,12 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
     c->lpServiceStartName = ServiceJournal_GetText(b, (BYTE*)c, &used, FALSE);
     c->lpDisplayName = ServiceJournal_GetText(b, (BYTE*)c, &used, FALSE);
     if (!b->ok || !c->lpBinaryPathName || !c->lpDisplayName || !c->lpServiceStartName ||
-        _wcsicmp(c->lpServiceStartName, L"LocalSystem") || c->dwStartType > SERVICE_DISABLED ||
+        (_wcsicmp(c->lpServiceStartName, L"LocalSystem") &&
+         _wcsicmp(c->lpServiceStartName, L".\\LocalSystem") &&
+         _wcsicmp(c->lpServiceStartName, L"NT AUTHORITY\\System")) || c->dwStartType > SERVICE_DISABLED ||
         c->dwErrorControl > SERVICE_ERROR_CRITICAL ||
-        (c->dwServiceType != SERVICE_WIN32_OWN_PROCESS && c->dwServiceType != SERVICE_WIN32_SHARE_PROCESS)) { goto fail; }
+        (c->dwServiceType != SERVICE_WIN32_OWN_PROCESS && c->dwServiceType != (SERVICE_WIN32_OWN_PROCESS | 0x100) &&
+         c->dwServiceType != SERVICE_WIN32_SHARE_PROCESS)) { goto fail; }
     for (i = 0; i < 5; ++i)
     {
         BYTE* e = s->extra[i] = (BYTE*)calloc(1, SERVICE_BINDING_MAX_BYTES);
@@ -313,6 +333,17 @@ static ServiceJournalRecord* ServiceJournal_Decode(ServiceJournalBuffer* b, cons
             if (!r->dacl[i]) { goto fail; }
             ServiceJournal_Get(b, r->dacl[i], size);
             if (!ServiceJournal_SecurityValid((const BYTE*)r->dacl[i], size)) { goto fail; }
+        }
+    }
+    if (version >= 2 && s)
+    {
+        wchar_t* paths[] = {s->incumbentExePath, s->incumbentDllPath, s->incumbentDbPath};
+        for (i = 0; i < 3; ++i)
+        {
+            DWORD bytes = ServiceJournal_Get32(b);
+            if (!b->ok || bytes > MAX_PATH * sizeof(wchar_t) || bytes > b->size - b->offset) { goto fail; }
+            ServiceJournal_Get(b, paths[i], bytes);
+            if (!b->ok || !ServiceJournal_TextValid(paths[i], bytes, FALSE)) { goto fail; }
         }
     }
     if (!b->ok || b->offset != b->size) { goto fail; }

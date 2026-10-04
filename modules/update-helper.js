@@ -16,11 +16,25 @@ limitations under the License.
 
 var promise = require('promise');
 
+// Native agentcore accepts no new update transfer until this promise settles, so an
+// extraction that never finishes (a stalled stream or a throwing async callback) must fail.
+var EXTRACT_TIMEOUT_MS = 600000;
+
 function start(updatePath)
 {
     var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-    if (!require('zip-reader').isZip(updatePath)) { ret._res(); return (ret); }
-    ret._readpromise = require('zip-reader').read(updatePath);
+    try
+    {
+        if (!require('zip-reader').isZip(updatePath)) { ret._res(); return (ret); }
+        ret._readpromise = require('zip-reader').read(updatePath);
+    }
+    catch (e) { ret._rej(e); return ret; }
+    ret._timeout = setTimeout(function ()
+    {
+        ret.timedOut = true;
+        try { require('fs').unlinkSync(updatePath + '_unzipped'); } catch (ignored) { }
+        ret._rej(new Error('Update extraction timed out'));
+    }, EXTRACT_TIMEOUT_MS);
     ret._readpromise.then(function _updatehelper(zipped)
     {
         var p = new promise(function (res, rej) { this._res = res; this._rej = rej; });
@@ -29,6 +43,8 @@ function start(updatePath)
         {
             if (this.failed) { return; }
             this.failed = true;
+            if (this.source && this.dest && typeof this.source.unpipe == 'function') { try { this.source.unpipe(this.dest); } catch (ignored) { } }
+            if (this.dest) { try { this.dest.end(); } catch (ignored) { } }
             try { zipped.close(); } catch (ignored) { }
             try { require('fs').unlinkSync(updatePath + '_unzipped'); } catch (ignored) { }
             this._rej(e);
@@ -56,29 +72,37 @@ function start(updatePath)
             p.dest.on('close', function ()
             {
                 if (this.prom.failed) { try { require('fs').unlinkSync(updatePath + '_unzipped'); } catch (ignored) { } return; }
-                var actualSize = -1;
-                try { actualSize = require('fs').statSync(updatePath + '_unzipped').size; } catch (e) { this.prom.fail(e); return; }
-                if (actualSize != this.zipped.size(this.entryName))
+                if (this.prom.completed) { return; }
+                try
                 {
-                    this.prom.fail('Extracted update size mismatch');
-                    return;
+                    var actualSize = require('fs').statSync(updatePath + '_unzipped').size;
+                    if (actualSize != this.zipped.size(this.entryName)) { throw new Error('Extracted update size mismatch'); }
+                    if (this.prom.source.crc != this.zipped.crc(this.entryName)) { throw new Error('Extracted update CRC mismatch'); }
+                    this.zipped.close();
+                    this.prom.completed = true;
+                    this.prom._res();
                 }
-                if (this.prom.source.crc != this.zipped.crc(this.entryName))
-                {
-                    this.prom.fail('Extracted update CRC mismatch');
-                    return;
-                }
-                this.zipped.close();
-                this.prom._res();
+                catch (e) { this.prom.fail(e); }
             });
-            p.source = zipped.getStream(entryName);
-            p.source.on('error', function (e) { p.fail(e); try { p.dest.end(); } catch (ignored) { } });
-            p.source.pipe(p.dest);
+            try
+            {
+                p.source = zipped.getStream(entryName);
+                p.source.on('error', function (e) { p.fail(e); });
+                p.source.pipe(p.dest);
+            }
+            catch (e) { p.fail(e); }
         }
         return (p);
     })
     .then(function ()
     {
+        clearTimeout(ret._timeout);
+        if (ret.timedOut)
+        {
+            // The agent already abandoned this package; do not recreate it.
+            try { require('fs').unlinkSync(updatePath + '_unzipped'); } catch (ignored) { }
+            return;
+        }
         try
         {
             require('fs').copyFileSync(updatePath + '_unzipped', updatePath);
@@ -92,7 +116,7 @@ function start(updatePath)
         try { require('fs').unlinkSync(updatePath + '_unzipped'); } catch (ignored) { }
         ret._res('done');
     })
-    .catch(function (e) { ret._rej(e); });
+    .catch(function (e) { clearTimeout(ret._timeout); ret._rej(e); });
 
     return (ret);
 }

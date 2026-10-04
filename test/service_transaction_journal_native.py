@@ -135,6 +135,23 @@ static ServiceBindingSnapshot* fixture(void){
 }
 static ServiceJournalRecord* decode(BYTE* data,DWORD bytes){ServiceJournalBuffer b={data,bytes,0,TRUE};return ServiceJournal_Decode(&b,L"Agent");}
 static void rehash(BYTE* data,DWORD n){DWORD h=ServiceJournal_Checksum(data,n-4);memcpy(data+n-4,&h,4);}
+/* Independent of the production decoder: walk the exact version 1 wire layout
+ * that an older service DLL accepts, requiring every byte to be consumed. */
+static BOOL take(DWORD n,DWORD* at,DWORD k){if(n<4||k>n-4-*at)return FALSE;*at+=k;return TRUE;}
+static BOOL word(const BYTE* d,DWORD n,DWORD* at,DWORD* out){if(n<4||4>n-4-*at)return FALSE;memcpy(out,d+*at,4);*at+=4;return TRUE;}
+static BOOL text(const BYTE* d,DWORD n,DWORD* at){DWORD k;return word(d,n,at,&k)&&(k==0xffffffffu||take(n,at,k));}
+static BOOL v1_layout(const BYTE* d,DWORD n){
+    DWORD at=0,v,flag,count,i;
+    if(!word(d,n,&at,&v)||v!=0x4a42534du||!word(d,n,&at,&v)||v!=1||!take(n,&at,8)||!text(d,n,&at)||!word(d,n,&at,&flag)||flag>1)return FALSE;
+    if(flag){
+        if(!take(n,&at,20))return FALSE; /* flags, type, start, error control, tag */
+        for(i=0;i<6;++i)if(!text(d,n,&at))return FALSE; /* image, group, dependencies, account, display, description */
+        if(!take(n,&at,4)||!text(d,n,&at)||!text(d,n,&at)||!word(d,n,&at,&count)||count>n||!take(n,&at,count*8)||!take(n,&at,12))return FALSE;
+        for(i=0;i<_countof(((ServiceBindingSnapshot*)0)->values);++i)if(!take(n,&at,8)||!word(d,n,&at,&v)||!take(n,&at,v))return FALSE;
+    }
+    for(i=0;i<5;++i)if(!take(n,&at,4)||!word(d,n,&at,&v)||!take(n,&at,v))return FALSE;
+    memcpy(&v,d+n-4,4);return at==n-4&&v==ServiceJournal_Checksum(d,n-4);
+}
 int main(void){
     assert(ServiceBinding_ValueNames[0][0]==L'T'&&ServiceBinding_ConfigLevels[0]==SERVICE_CONFIG_DESCRIPTION);
     ServiceBindingSnapshot* s=fixture(); BYTE* data=malloc(SERVICE_JOURNAL_MAX_BYTES);ServiceJournalBuffer b={data,SERVICE_JOURNAL_MAX_BYTES,0,TRUE};
@@ -146,9 +163,15 @@ int main(void){
     assert(r->binding->config->lpDependencies[6]=='T');assert(((SERVICE_FAILURE_ACTIONSW*)r->binding->extra[1])->lpsaActions[1].Delay==15000);
     assert(r->binding->values[9].size==3&&!memcmp(r->binding->values[9].data,"bad",3));assert(r->attributes[0]==32&&r->dacl[0]);
     ServiceJournalBuffer again={malloc(SERVICE_JOURNAL_MAX_BYTES),SERVICE_JOURNAL_MAX_BYTES,0,TRUE};assert(ServiceJournal_Encode(&again,L"Agent",r->phase,r->fileMask,r->binding,r->dacl,r->attributes));assert(again.offset==length&&!memcmp(again.data,data,length));free(again.data);ServiceJournal_Free(r);
+    /* Without incumbent paths the record keeps the version 1 layout an older
+     * service DLL decodes. Version 2 appends three path fields (18 bytes here). */
+    assert(*(DWORD*)(data+4)==1&&v1_layout(data,length));
+    BYTE* v2=malloc(length+18);memcpy(v2,data,length-4);*(DWORD*)(v2+4)=2;
+    for(DWORD i=0;i<3;++i){DWORD two=2;memcpy(v2+length-4+i*6,&two,4);v2[length+i*6]=0;v2[length+i*6+1]=0;}rehash(v2,length+18);
+    r=decode(v2,length+18);assert(r&&!r->binding->incumbentDbPath[0]);ServiceJournal_Free(r);assert(!v1_layout(v2,length+18));free(v2);
     for(DWORD n=0;n<length;++n){r=decode(data,n);assert(!r);} /* Every truncation boundary. */
     for(DWORD n=0;n<length;n+=7){data[n]^=0x40;r=decode(data,length);assert(!r);data[n]^=0x40;}
-    BYTE* changed=malloc(length+4);memcpy(changed,data,length);*(DWORD*)(changed+4)=2;rehash(changed,length);assert(!decode(changed,length));
+    BYTE* changed=malloc(length+4);memcpy(changed,data,length);*(DWORD*)(changed+4)=3;rehash(changed,length);assert(!decode(changed,length));
     memcpy(changed,data,length);*(DWORD*)(changed+8)=6;rehash(changed,length);assert(!decode(changed,length));
     memcpy(changed,data,length);*(DWORD*)(changed+12)=32;rehash(changed,length);assert(!decode(changed,length));
     memcpy(changed,data,length);changed[20]=0x00;changed[21]=0xd8;rehash(changed,length);assert(!decode(changed,length));
@@ -171,6 +194,15 @@ int main(void){
     assert(ServiceJournal_Save(L"journal",L"Agent",4,1,s,descriptors,attrs));assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&r->phase==4);ServiceJournal_Free(r);
     assert(ServiceJournal_Save(L"journal",L"Agent",5,1,s,descriptors,attrs));assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&r->phase==5);ServiceJournal_Free(r);
     assert(ServiceJournal_Save(L"journal",L"Agent",1,0,NULL,NULL,NULL));assert(ServiceJournal_Load(L"journal",L"Agent",&r)&&r&&!r->binding);ServiceJournal_Free(r);
+    /* Path ownership and capture-compatible historical account/type survive reboot. */
+    memcpy(s->incumbentDbPath,L"C:\\Old\\identity.db",sizeof(L"C:\\Old\\identity.db"));
+    memcpy(s->incumbentExePath,L"C:\\Old\\agent.exe",sizeof(L"C:\\Old\\agent.exe"));
+    DWORD aliasPos=2000;s->config->lpServiceStartName=add_text((BYTE*)s->config,&aliasPos,L"NT AUTHORITY\\System",20);
+    s->config->dwServiceType=SERVICE_WIN32_OWN_PROCESS|0x100;
+    assert(ServiceJournal_Save(L"journal",L"Agent",1,0,s,NULL,NULL));
+    assert(lengths[2]>8&&*(DWORD*)(files[2]+4)==2&&!v1_layout(files[2],lengths[2]));
+    assert(ServiceJournal_Load(L"journal",NULL,&r)&&r&&!_wcsicmp(r->serviceName,L"Agent")&&
+        !_wcsicmp(r->binding->incumbentDbPath,s->incumbentDbPath)&&r->binding->config->dwServiceType==(SERVICE_WIN32_OWN_PROCESS|0x100));ServiceJournal_Free(r);
     free(original);free(changed);free(data);ServiceBinding_Free(s);DeleteFileW(L"journal");DeleteFileW(L"journal.tmp");
     puts("service transaction journal: roundtrip, bounds, corrupt/truncated input, raw repair values, ACLs and atomic write faults passed");return 0;
 }

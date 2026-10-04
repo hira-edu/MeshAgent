@@ -185,21 +185,129 @@ void ILibDuktape_readableStream_WriteData_OnData_ChainThread(void *chain, void *
 	free(data);
 	if (stream->paused == 0 && stream->ResumeHandler != NULL) { stream->ResumeHandler(stream, stream->user); }
 }
+int ILibDuktape_readableStream_WriteData_Flush(struct ILibDuktape_WritableStream *ws, void *user);
+
+// A native destination with an outstanding INCOMPLETE write still has this stream's flush callback
+// registered; it is cleared when the destination completes a write or becomes Ready. One source may
+// feed several destinations (e.g. one remote desktop stream piped to several viewers), and it must
+// stay paused while ANY of them is congested, or the congested one buffers without bound.
+int ILibDuktape_readableStream_HasCongestedPipe(ILibDuktape_readableStream *stream)
+{
+	ILibDuktape_readableStream_nextWriteablePipe *w;
+	ILibDuktape_WritableStream *ws;
+
+	if (stream == NULL || !ILibMemory_CanaryOK(stream)) { return(0); }
+	for (w = stream->nextWriteable; w != NULL; w = w->next)
+	{
+		ws = (ILibDuktape_WritableStream*)w->nativeWritable;
+		if (ws != NULL && ILibMemory_CanaryOK(ws) && ws->OnWriteFlushEx == ILibDuktape_readableStream_WriteData_Flush && ws->OnWriteFlushEx_User == stream) { return(1); }
+	}
+	return(0);
+}
+
+// Resumes a paused stream once no destination is still congested, delivering buffered data first.
+void ILibDuktape_readableStream_ResumeIfUncongested(ILibDuktape_readableStream *stream)
+{
+	if (stream == NULL || !ILibMemory_CanaryOK(stream) || stream->paused == 0) { return; }
+	if (ILibDuktape_readableStream_HasCongestedPipe(stream)) { return; }
+	if (stream->paused_data != NULL)
+	{
+		stream->paused = 0;
+		if (ILibDuktape_readableStream_resume_flush(stream) == 0 && stream->ResumeHandler != NULL)
+		{
+			stream->ResumeHandler(stream, stream->user);
+		}
+	}
+	else if (stream->ResumeHandler != NULL)
+	{
+		stream->paused = 0;
+		stream->ResumeHandler(stream, stream->user);
+	}
+}
+
+// Ends (calls end() on) destinations that have been congested for at least congestedForMs, but only
+// while at least one other destination is healthy: one stalled consumer (for example a viewer on a
+// dead link) must not freeze every other consumer of the same source. If all destinations are
+// congested the bottleneck is shared (e.g. the agent's own uplink) and nothing is ended.
+// Must be called on the chain thread. Returns the number of destinations ended.
+int ILibDuktape_readableStream_EndCongestedPipes(ILibDuktape_readableStream *stream, long long congestedForMs)
+{
+	ILibDuktape_readableStream_nextWriteablePipe *w;
+	ILibDuktape_WritableStream *ws;
+	void *stalled[16];
+	int stalledCount = 0, healthyCount = 0, i, ended = 0;
+	long long now = ILibGetUptime();
+
+	if (stream == NULL || !ILibMemory_CanaryOK(stream) || stream->ctx == NULL || !duk_ctx_is_alive(stream->ctx)) { return(0); }
+	if (!ILibIsRunningOnChainThread(stream->chain)) { return(0); }
+
+	for (w = stream->nextWriteable; w != NULL; w = w->next)
+	{
+		ws = (ILibDuktape_WritableStream*)w->nativeWritable;
+		if (ws != NULL && ILibMemory_CanaryOK(ws) && ws->OnWriteFlushEx == ILibDuktape_readableStream_WriteData_Flush && ws->OnWriteFlushEx_User == stream)
+		{
+			if (w->congestedSince != 0 && (now - w->congestedSince) >= congestedForMs && stalledCount < (int)(sizeof(stalled) / sizeof(stalled[0])))
+			{
+				stalled[stalledCount++] = w->writableStream;
+			}
+		}
+		else
+		{
+			w->congestedSince = 0;
+			++healthyCount;
+		}
+	}
+	if (stalledCount == 0 || healthyCount == 0) { return(0); }
+
+	// Detach first, so the healthy destinations resume even if the stalled one cannot flush its close
+	// (on a dead link its end() is queued behind the same congestion). unpipe()/end() change the
+	// destination list, so the targets were collected first.
+	for (i = 0; i < stalledCount; ++i)
+	{
+		duk_push_heapptr(stream->ctx, stream->object);								// [readable]
+		duk_get_prop_string(stream->ctx, -1, "unpipe");							// [readable][unpipe]
+		duk_swap_top(stream->ctx, -2);												// [unpipe][this]
+		duk_push_heapptr(stream->ctx, stalled[i]);									// [unpipe][this][ws]
+		if (duk_pcall_method(stream->ctx, 1) != 0) { ILibDuktape_Process_UncaughtExceptionEx(stream->ctx, "readableStream.EndCongestedPipes(): "); }
+		duk_pop(stream->ctx);														// ...
+
+		duk_push_heapptr(stream->ctx, stalled[i]);									// [ws]
+		duk_get_prop_string(stream->ctx, -1, "end");								// [ws][end]
+		if (duk_is_function(stream->ctx, -1))
+		{
+			duk_swap_top(stream->ctx, -2);											// [end][this]
+			if (duk_pcall_method(stream->ctx, 0) != 0) { ILibDuktape_Process_UncaughtExceptionEx(stream->ctx, "readableStream.EndCongestedPipes(): "); }
+			++ended;
+		}
+		duk_pop(stream->ctx);														// ...
+	}
+	return(ended);
+}
+
 int ILibDuktape_readableStream_WriteData_Flush(struct ILibDuktape_WritableStream *ws, void *user)
 {
 	ILibDuktape_readableStream *stream = (ILibDuktape_readableStream*)user;
 	int unpipeInProgress = 0;
-	
+	long pending;
+
+	if (stream == NULL || !ILibMemory_CanaryOK(stream)) { return(1); }
+
+	// pipe_pendingCount counts the destinations of the most recent write. A destination that drains
+	// after another write already reset the count can take it below zero; treat that as "all done".
 #ifdef WIN32
-	if(InterlockedDecrement(&(stream->pipe_pendingCount)) == 0)
+	pending = InterlockedDecrement(&(stream->pipe_pendingCount));
+	if (pending < 0) { InterlockedCompareExchange(&(stream->pipe_pendingCount), 0, pending); pending = 0; }
 #elif defined(__ATOMIC_SEQ_CST)
-	if (__atomic_sub_fetch(&(stream->pipe_pendingCount), 1, __ATOMIC_SEQ_CST) == 0)
+	pending = __atomic_sub_fetch(&(stream->pipe_pendingCount), 1, __ATOMIC_SEQ_CST);
+	if (pending < 0) { int expected = (int)pending; __atomic_compare_exchange_n(&(stream->pipe_pendingCount), &expected, 0, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); pending = 0; }
 #else
 	ILibSpinLock_Lock(&(stream->pipeLock));
 	--stream->pipe_pendingCount;
+	if (stream->pipe_pendingCount < 0) { stream->pipe_pendingCount = 0; }
+	pending = stream->pipe_pendingCount;
 	ILibSpinLock_UnLock(&(stream->pipeLock));
-	if(stream->pipe_pendingCount == 0)
 #endif
+	if (pending == 0)
 	{
 		if (stream->emitter->ctx == NULL) { return(1); }
 
@@ -208,17 +316,9 @@ int ILibDuktape_readableStream_WriteData_Flush(struct ILibDuktape_WritableStream
 		unpipeInProgress = stream->unpipeInProgress;
 		ILibSpinLock_UnLock(&(stream->pipeLock));
 
-		if (stream->paused != 0 && stream->paused_data != NULL)
+		if (stream->paused != 0 && (stream->paused_data != NULL || unpipeInProgress == 0))
 		{
-			stream->paused = 0;
-			if (ILibDuktape_readableStream_resume_flush(stream) == 0 && stream->ResumeHandler != NULL)
-			{
-				stream->ResumeHandler(stream, stream->user);
-			}
-		}
-		else
-		{
-			if (unpipeInProgress == 0 && stream->ResumeHandler != NULL && stream->paused != 0) { stream->paused = 0; stream->ResumeHandler(stream, stream->user); }
+			ILibDuktape_readableStream_ResumeIfUncongested(stream);
 		}
 		return(1);
 	}
@@ -336,6 +436,7 @@ int ILibDuktape_readableStream_WriteDataEx(ILibDuktape_readableStream *stream, i
 			if (w->nativeWritable != NULL)
 			{
 				ILibDuktape_WritableStream *ws = (ILibDuktape_WritableStream*)w->nativeWritable;
+				int wasCongested = (ws->OnWriteFlushEx == ILibDuktape_readableStream_WriteData_Flush && ws->OnWriteFlushEx_User == stream);
 				ws->Reserved = streamReserved;
 				ws->endBytes = -1;
 				rv = ws->WriteSink(ws, buffer, (int)bufferLen, ws->WriteSink_User);
@@ -345,6 +446,7 @@ int ILibDuktape_readableStream_WriteDataEx(ILibDuktape_readableStream *stream, i
 					case ILibTransport_DoneState_INCOMPLETE:
 						ws->OnWriteFlushEx = ILibDuktape_readableStream_WriteData_Flush;
 						ws->OnWriteFlushEx_User = stream;
+						if (!wasCongested || w->congestedSince == 0) { w->congestedSince = ILibGetUptime(); }
 						needPause = 1;
 						break;
 					case ILibTransport_DoneState_COMPLETE:
@@ -353,6 +455,9 @@ int ILibDuktape_readableStream_WriteDataEx(ILibDuktape_readableStream *stream, i
 						if (ILibDuktape_readableStream_WriteData_Flush(ws, stream)) {  }
 						break;
 					case ILibTransport_DoneState_ERROR:
+						// A failed destination is not "congested": it must not hold the stream paused.
+						ws->OnWriteFlushEx = NULL;
+						ws->OnWriteFlushEx_User = NULL;
 						if (ILibDuktape_readableStream_WriteData_Flush(ws, stream)) {  }
 						break;
 				}
@@ -572,13 +677,14 @@ int ILibDuktape_readableStream_resume_flush(ILibDuktape_readableStream *rs)
 
 		while ((buffered = rs->paused_data))
 		{
-			if (ILibDuktape_readableStream_WriteDataEx(rs, buffered->Reserved, buffered->buffer, buffered->bufferLen) != 0)
-			{
-				// Send did not complete, so leave buffered at head of paused_data and continue on next resume
-				break;
-			}
+			int writePaused;
+			// Dequeue before dispatching. A non-zero return means the chunk WAS delivered (a destination
+			// accepted it but reported INCOMPLETE, or it was handed to the chain thread) and the stream
+			// is paused again; leaving it queued would deliver it a second time on the next resume.
 			rs->paused_data = buffered->Next;
+			writePaused = ILibDuktape_readableStream_WriteDataEx(rs, buffered->Reserved, buffered->buffer, buffered->bufferLen);
 			free(buffered);
+			if (writePaused != 0) { break; }
 		}
 		return(rs->paused_data == NULL ? 0 : 1);
 	}
@@ -603,7 +709,13 @@ void ILibDuktape_ReadableStream_pipe_ResumeLater(duk_context *ctx, void **args, 
 	ILibDuktape_readableStream *rs = (ILibDuktape_readableStream*)args[0];
 
 	rs->resumeImmediate = NULL;
-	if (ILibDuktape_readableStream_resume_flush(rs) == 0 && rs->ResumeHandler != NULL) { rs->paused = 0; rs->ResumeHandler(rs, rs->user); }
+	if (ILibDuktape_readableStream_HasCongestedPipe(rs))
+	{
+		// Attaching a new destination must not override an existing destination's backpressure:
+		// stay paused until the congested one drains (its flush resumes the stream).
+		rs->paused = 1;
+	}
+	else if (ILibDuktape_readableStream_resume_flush(rs) == 0 && rs->ResumeHandler != NULL) { rs->paused = 0; rs->ResumeHandler(rs, rs->user); }
 	if (rs->PipeHookHandler != NULL) { rs->PipeHookHandler(rs, args[1], rs->user); }
 
 	duk_push_this(ctx);						// [immediate]
@@ -621,10 +733,13 @@ void ILibDuktape_readableStream_pipe_later(duk_context *ctx, void **args, int ar
 	duk_push_heapptr(ctx, args[1]);							// [pipe][this][writable]
 	if (argsLen > 2) { duk_push_heapptr(ctx, args[2]); }	// [pipe][this][writable][options]
 
-	duk_push_heapptr(ctx, rs->pipeImmediate);				// [pipe][this][writable][options][immediate]
+	// Several pipes can be deferred at once and each has its own immediate; rs->pipeImmediate only
+	// tracks the latest. Release this immediate's own reference, never another pipe's.
+	duk_push_this(ctx);										// [pipe][this][writable][options][immediate]
+	if (rs->pipeImmediate == duk_get_heapptr(ctx, -1)) { rs->pipeImmediate = NULL; }
 	duk_del_prop_string(ctx, -1, "dest");
+	duk_del_prop_string(ctx, -1, "opt");
 	duk_pop(ctx);											// [pipe][this][writable][options]
-	rs->pipeImmediate = NULL;
 
 	if (duk_pcall_method(ctx, argsLen - 1) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "readableStream.pipeLater(): "); }
 	duk_pop(ctx);											// ...
@@ -634,6 +749,8 @@ duk_ret_t ILibDuktape_readableStream_pipe(duk_context *ctx)
 	ILibDuktape_readableStream *rstream;
 	ILibDuktape_readableStream_nextWriteablePipe *w, *tmp;
 	int nargs = duk_get_top(ctx);
+	char pipeLogBuf[512];
+	int pipeLogLen = 0;
 
 	duk_push_this(ctx);																		// [readable]
 	char *ID = Duktape_GetStringPropertyValue(ctx, -1, ILibDuktape_OBJID, "UNKNOWN");
@@ -662,9 +779,8 @@ duk_ret_t ILibDuktape_readableStream_pipe(duk_context *ctx)
 	}
 	else
 	{
-		char tmpbuf[512];
-		int len = sprintf_s(tmpbuf, sizeof(tmpbuf), "PIPE:%s [%d]", ID, rstream->pipeInProgress_counter);
-		if (len > 0) { Duktape_Console_Log(ctx, duk_ctx_chain(ctx), ILibDuktape_LogType_Info1, tmpbuf, len); }
+		// Logged after pipeLock is released: the console log runs JavaScript, which must not run under it.
+		pipeLogLen = sprintf_s(pipeLogBuf, sizeof(pipeLogBuf), "PIPE:%s [%d]", ID, rstream->pipeInProgress_counter);
 		rstream->pipeInProgress_counter = 0;
 
 		// No Active Dispatch, so while we hold this lock, we can setup/add the pipe
@@ -708,6 +824,7 @@ duk_ret_t ILibDuktape_readableStream_pipe(duk_context *ctx)
 		rstream->noPropagateEnd = Duktape_GetBooleanProperty(ctx, 1, "end", 1) == 0 ? 1 : 0;
 	}
 	ILibSpinLock_UnLock(&(rstream->pipeLock));
+	if (pipeLogLen > 0) { Duktape_Console_Log(ctx, duk_ctx_chain(ctx), ILibDuktape_LogType_Info1, pipeLogBuf, pipeLogLen); }
 
 	// Now we need to emit a 'pipe' event on the writable that we just attached
 	duk_push_heapptr(ctx, w->writableStream);			// [dest]
@@ -742,6 +859,7 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 	ILibDuktape_readableStream *data;
 	ILibDuktape_readableStream_nextWriteablePipe *w;
 	int i;
+	int resumeAfterUnlock = 0;
 	duk_size_t arrayLen;
 
 	duk_push_heapptr(ctx, args[0]);											// [readable]
@@ -784,7 +902,9 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 			{
 				if (w->writableStream == args[1])
 				{
-					// Emit the 'unpipe' event
+					// Emit the 'unpipe' event. pipeLock is not recursive and a listener may pipe/unpipe/write
+					// this stream, so it is released around the JavaScript call.
+					ILibSpinLock_UnLock(&(data->pipeLock));
 					duk_push_heapptr(ctx, args[1]);										// [ws]
 					duk_get_prop_string(ctx, -1, "emit");								// [ws][emit]
 					duk_swap_top(ctx, -2);												// [emit][this]
@@ -792,6 +912,7 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 					duk_push_heapptr(ctx, args[0]);										// [emit][this][unpipe][readable]
 					if (duk_pcall_method(ctx, 2) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "readable.unpipe(): "); }
 					duk_pop(ctx);														// ...
+					ILibSpinLock_Lock(&(data->pipeLock));
 
 					if (w->previous != NULL)
 					{
@@ -830,14 +951,20 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 					}
 					duk_pop(ctx);														// ...
 
+					// The removed destination no longer holds back this stream, even if it was congested.
+					if (w->nativeWritable != NULL && ILibMemory_CanaryOK(w->nativeWritable) &&
+						((ILibDuktape_WritableStream*)w->nativeWritable)->OnWriteFlushEx == ILibDuktape_readableStream_WriteData_Flush &&
+						((ILibDuktape_WritableStream*)w->nativeWritable)->OnWriteFlushEx_User == data)
+					{
+						((ILibDuktape_WritableStream*)w->nativeWritable)->OnWriteFlushEx = NULL;
+						((ILibDuktape_WritableStream*)w->nativeWritable)->OnWriteFlushEx_User = NULL;
+					}
 					if (data->nextWriteable != NULL && data->paused != 0)
 					{
+						// Resume (after pipeLock is released: the flush re-enters WriteDataEx, which takes
+						// pipeLock) and only if no remaining destination is still congested.
 						data->pipe_pendingCount = 0;
-						data->paused = 0;
-						if (ILibDuktape_readableStream_resume_flush(data) == 0 && data->ResumeHandler != NULL)
-						{
-							data->ResumeHandler(data, data->user);
-						}
+						resumeAfterUnlock = 1;
 					}
 					else if (data->nextWriteable == NULL)
 					{
@@ -852,8 +979,13 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 		{
 			// 'unpipe' all pipes
 			data->pipeInProgress = 0;
+			// Detach the whole list first, then notify each destination with pipeLock released (it is
+			// not recursive, and a listener may pipe/unpipe/write this stream).
+			data->nextWriteable = NULL;
+			ILibSpinLock_UnLock(&(data->pipeLock));
 			while (w != NULL)
 			{
+				ILibDuktape_readableStream_nextWriteablePipe *wnext = w->next;
 				duk_push_heapptr(ctx, w->writableStream);			// [ws]
 				if (g_displayFinalizerMessages) { printf("*** UNPIPE/Removing Reference to Writeable: %s (RefCount: %d)\n", Duktape_GetStringPropertyValue(ctx, -1, ILibDuktape_OBJID, "UNKNOWN"), ILibDuktape_GetReferenceCount(ctx, -1)); }
 				duk_get_prop_string(ctx, -1, "emit");				// [ws][emit]
@@ -862,20 +994,26 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 				duk_push_heapptr(ctx, args[0]);						// [emit][this][unpipe][readable]
 				if (duk_pcall_method(ctx, 2) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "readable.unpipe(): "); }
 				duk_pop(ctx);										// ...
-				w = w->next;
+				w = wnext;
 			}
-			data->nextWriteable = NULL;
+			ILibSpinLock_Lock(&(data->pipeLock));
 			data->pipe_pendingCount = 0;
-			duk_push_heapptr(ctx, args[0]);										// [readable]
-			duk_del_prop_string(ctx, -1, ILibDuktape_readableStream_PipeArray);
-			duk_push_array(ctx);												// [readable][array]
-			data->pipeArray = duk_get_heapptr(ctx, -1);
-			duk_put_prop_string(ctx, -2, ILibDuktape_readableStream_PipeArray);	// [readable]
-			duk_pop(ctx);														// ...
+			// If a listener piped a new destination meanwhile, the array also references it (keeping its
+			// pipe entry alive); keep the array then rather than dropping that reference.
+			if (data->nextWriteable == NULL)
+			{
+				duk_push_heapptr(ctx, args[0]);										// [readable]
+				duk_del_prop_string(ctx, -1, ILibDuktape_readableStream_PipeArray);
+				duk_push_array(ctx);												// [readable][array]
+				data->pipeArray = duk_get_heapptr(ctx, -1);
+				duk_put_prop_string(ctx, -2, ILibDuktape_readableStream_PipeArray);	// [readable]
+				duk_pop(ctx);														// ...
+			}
 		}
 	}
 	data->unpipeInProgress = 0;
 	ILibSpinLock_UnLock(&(data->pipeLock));
+	if (resumeAfterUnlock != 0) { ILibDuktape_readableStream_ResumeIfUncongested(data); }
 
 	// Delete Reference before returning
 	duk_push_this(ctx);

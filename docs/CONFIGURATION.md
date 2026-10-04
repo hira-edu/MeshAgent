@@ -203,24 +203,52 @@ Native command 13 verifies `GenerateSHA384FileHash`: Windows EXEs normalize PE
 checksum/signature fields and appended provisioning; ZIP files use their full
 byte hash. Raw native transfers must end with MeshCentral's `agentExeInfo.hash`,
 and compressed transfers with `zhash`. `fileHash` is the complete HTTP download
-hash used by the JavaScript HTTP updater and cannot substitute for the native
-EXE hash.
+hash used by the JavaScript HTTP updater. For compatibility with older RAM
+senders, the Windows receiver also accepts an exact whole-file SHA-384 after
+the normalized hash reader validates the input. New native senders continue
+using the normalized EXE hash; malformed images and mismatched digests fail.
 
 Capability `0x100` retains its existing compression meaning. Native streaming
 ZIP updates additionally require `0x200`, advertised by the corrected decoder.
-Older agents receive raw native updates so they can install that decoder. Hash
+Eligible agents without that decoder receive raw native updates. Hash
 verification remains mandatory for both formats.
 
+Capability `0x400` is advertised by Windows service agents that apply native
+packages through the lifecycle host. MeshCentral pushes a native package to a
+Windows service agent only when it advertises `0x400` or `0x200` (every agent
+with the corrected decoder already has the lifecycle host). A historical agent
+without either bit would hand the package to its own updater, which overwrites
+the service EXE with a binary that is not an SCM host, so it is left on its
+current version instead.
+
+The agent keeps no failed-package or forced-update hold. Whenever the reported
+executable hash differs from the server's package, the server may send it again,
+including a package that failed before. On connect the agent deletes hold keys
+written by earlier builds (`UpdateActivationTargetHash`, `UpdateActivationFailureHash`,
+`UpdateActivationFailureCompressed`, `UpdateForceAttempt`, `forceUpdateHold`,
+`forceUpdatePending`).
+
 The Windows self-update activation is asynchronous: `MeshServer_selfupdate_continue`
-stages the package, records its activation target hash, and calls
+stages and hashes the package, and calls
 `MeshServer_StartUpdateActivation`, which launches the update-only compatibility
 lifecycle host and registers the process with the agent chain. This host also
 provides uninstall and interrupted-update recovery for older callback-based
 service bindings; normal service startup uses the scoped service group. The activation result is
 observed in `MeshServer_UpdateActivation_Sink`; on failure the staged payload is
 dropped and the failure is reported through `MeshServer_FailUpdateActivation`
-(fail-closed). Builds without the RuntimeHost feature set refuse the update and
-delete the staged payload rather than falling back to a legacy command shell.
+(fail-closed). Builds without the RuntimeHost feature set advertise updates as
+disabled (an all-zero agent hash), so servers never start a transfer they cannot
+apply.
+
+While `forceUpdate` or `fakeUpdate` is set, the agent reports a hash that no
+binary has on every connection, so the server sends its package each time.
+Clear the key after the update.
+
+An activation timeout does not prove the lifecycle process exited. The agent
+keeps that process handle and the staged package, and refuses another transfer
+until it observes the process exit. It stays available while the lifecycle host
+works. Native block writes acknowledge only complete writes and successful
+flush/close; a partial write aborts the transfer instead of appending a retry.
 
 ## Generated outputs
 

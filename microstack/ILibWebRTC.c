@@ -5272,13 +5272,15 @@ void ILibStun_ProcessSctpPacket(struct ILibStun_Module *obj, int session, char* 
 				streamId = ntohs(data->StreamID);
 				pid = ntohl(data->ProtocolID);
 
-				if (tsn == o->intsn + 1)
+				if (tsn == o->intsn + 1 ||
+					(tsn > o->intsn + 1 && ILibLinkedList_GetNode_Search(o->receiveHoldBuffer, &ILibSCTP_HoldingQueue_TSNComparer, data) == NULL))
 				{
+					// ILibStun_SctpProcessStreamData() takes o->Lock itself and returns with it released, so
+					// drop it around the call (as the ordered path below does) to avoid a self-deadlock.
+					ILibSpinLock_UnLock(&(o->Lock));
 					ILibStun_SctpProcessStreamData(obj, session, streamId, 0, chunkflags, pid, data->UserData, chunksize - 16);
-				}
-				else if (tsn > o->intsn + 1 && ILibLinkedList_GetNode_Search(o->receiveHoldBuffer, &ILibSCTP_HoldingQueue_TSNComparer, data) == NULL)
-				{
-					ILibStun_SctpProcessStreamData(obj, session, streamId, 0, chunkflags, pid, data->UserData, chunksize - 16);
+					if (obj->dTlsSessions[session] == NULL || obj->dTlsSessions[session]->state == 0) return;
+					ILibSpinLock_Lock(&(o->Lock));
 				}
 			}
 

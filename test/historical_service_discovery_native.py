@@ -63,6 +63,8 @@ static void rejected(const wchar_t* command) {
 int main(void) {
     accepted(L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Legacy\\diagsvc.dll\",MeshServiceHostW",L"C:\\Legacy\\diagsvc.dll");
     accepted(L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Legacy\\meshsvc.dll\",Stealth_SvchostServiceMain",L"C:\\Legacy\\meshsvc.dll");
+    accepted(L"C:\\Windows\\System32\\rundll32.exe \"C:\\Legacy\\meshsvc.dll\",Stealth_SvchostServiceMain",L"C:\\Legacy\\meshsvc.dll");
+    accepted(L"\"C:\\Windows\\System32\\rundll32.exe\"\t\"C:\\Legacy\\meshsvc.dll\",MeshServiceHostW  ",L"C:\\Legacy\\meshsvc.dll");
     accepted(L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe -run",L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe");
     hijackedPrefix=1;rejected(L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe -run");
     accepted(L"\"C:\\Program Files\\Mesh Agent\\MeshAgent.exe\" -run",L"C:\\Program Files\\Mesh Agent\\MeshAgent.exe");hijackedPrefix=0;
@@ -71,6 +73,8 @@ int main(void) {
     rejected(L"\"C:\\fake\\rundll32.exe\" \"C:\\Legacy\\meshsvc.dll\",Stealth_SvchostServiceMain");
     rejected(L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Legacy\\meshsvc.dll\",OtherExport");
     rejected(L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Legacy\\meshsvc.dll\",Stealth_SvchostServiceMain extra");
+    rejected(L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Legacy\\..\\meshsvc.dll\",MeshServiceHostW");
+    rejected(L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Legacy\\meshsvc.exe\",MeshServiceHostW");
     entry=L"Stealth_SvchostServiceMain";parameterDll=L"C:\\Legacy\\meshsvc.dll";
     accepted(L"%SystemRoot%\\System32\\svchost.exe -k netsvcs -p",parameterDll);
     rejected(L"C:\\fake\\svchost.exe -k netsvcs");rejected(NULL);
@@ -80,9 +84,9 @@ int main(void) {
 }
 '''
 arrays = '\n'.join(re.search(r'static const wchar_t\* const '+name+r'\[\] = \{.*?\};', deploy, re.S).group()
-                   for name in ('g_LegacyExeNames', 'g_LegacyDllNames'))
+                   for name in ('g_LegacyExeNames',))
 production = (extract(host,'ServiceHost_ParseImagePath') + extract(binding,'ServiceBinding_IsLegacyExe') +
-              extract(binding,'ServiceBinding_ImageSupported') + arrays + extract(deploy,'ServiceDeploy_wcsistr') +
+              extract(binding,'ServiceBinding_ParseCallbackImage') + extract(binding,'ServiceBinding_ImageSupported') + arrays + extract(deploy,'ServiceDeploy_wcsistr') +
               extract(deploy,'ServiceDeploy_PathContainsLeafInsensitive') + extract(deploy,'ServiceDeploy_ExtractExecutableFromCommand') +
               extract(deploy,'ServiceDeploy_IsLegacyMeshAgentService'))
 with tempfile.TemporaryDirectory(prefix='historical-discovery-') as temporary:

@@ -31,6 +31,87 @@ function windowsServiceManagerLifecycleDisabledError(operation)
     }
 }
 
+function serviceNotFound(name)
+{
+    var error = new Error('Service not found: ' + name);
+    error.code = 'ENOENT';
+    return error;
+}
+function windowsServiceError(operation, code)
+{
+    var error = new Error(operation + ' failed (Windows error ' + code + ')');
+    error.code = code == 1060 ? 'ENOENT' : 'EWIN32';
+    error.win32Error = code;
+    return error;
+}
+function windowsServiceExecutable(command)
+{
+    command = ('' + command).replace(/%([^%]+)%/g, function (match, name)
+    {
+        for (var key in process.env) { if (key.toLowerCase() == name.toLowerCase()) { return process.env[key]; } }
+        throw new Error('Unresolved service path environment variable: ' + name);
+    }).trim();
+    var match = command.charAt(0) == '"' ? /^"([^"\r\n]+)"(?:\s|$)/.exec(command) : /^(.+?\.exe)(?:\s|$)/i.exec(command);
+    if (!match || !/\.exe$/i.test(match[1])) { throw new Error('Invalid service executable command line: ' + command); }
+    return match[1];
+}
+
+function readSystemdDirective(file, name)
+{
+    var lines = require('fs').readFileSync(file).toString().replace(/\\\r?\n/g, ' ').split(/\r?\n/);
+    var value = null;
+    for (var i = 0; i < lines.length; ++i)
+    {
+        var match = /^\s*([A-Za-z]+)\s*=(.*)$/.exec(lines[i]);
+        if (match && match[1] == name) { value = match[2].trim(); }
+    }
+    return value;
+}
+function unresolvedServicePath(file)
+{
+    var error = new Error('Unresolved service executable in ' + file);
+    error.code = 'EUNRESOLVEDPATH';
+    return error;
+}
+function systemdExecutable(file)
+{
+    var value = readSystemdDirective(file, 'ExecStart');
+    if (!value) { throw unresolvedServicePath(file); }
+    value = value.replace(/^[-@:+!]+/, '');
+    var match = /^(?:"((?:\\.|[^"\\])*)"|'([^']*)'|(\S+))/.exec(value);
+    if (!match) { throw unresolvedServicePath(file); }
+    var executable = (match[1] || match[2] || match[3]).replace(/\\x([0-9a-f]{2})/gi, function (_, hex) { return String.fromCharCode(parseInt(hex, 16)); }).replace(/\\([\\"'])/g, '$1');
+    if (executable.charAt(0) != '/' || executable.indexOf('%') >= 0) { throw unresolvedServicePath(file); }
+    return executable;
+}
+
+// Use argv directly so historical service keys containing spaces/backslashes survive intact.
+function runSystemctl(args)
+{
+    var fs = require('fs');
+    var executable = fs.existsSync('/bin/systemctl') ? '/bin/systemctl' : '/usr/bin/systemctl';
+    var child = require('child_process').execFile(executable, ['systemctl'].concat(args));
+    var output = '', errors = '', code = null;
+    child.stdout.on('data', function (chunk) { output += chunk.toString(); });
+    child.stderr.on('data', function (chunk) { errors += chunk.toString(); });
+    child.on('exit', function (status) { code = status; });
+    child.waitExit(120000);
+    if (code == null) { try { child.kill(); } catch (e) { } throw new Error('systemctl timed out: ' + args[0]); }
+    if (code !== 0) { throw new Error('systemctl ' + args[0] + ' failed (' + code + '): ' + errors.trim()); }
+    return output;
+}
+function systemdIsRunning(name)
+{
+    var output = runSystemctl(['show', '--property=ActiveState', '--property=MainPID', name + '.service']);
+    var state = /^ActiveState=(.*)$/m.exec(output);
+    var pid = /^MainPID=(\d+)$/m.exec(output);
+    if (!state || !pid) { throw new Error('Unable to verify service state: ' + name); }
+    if (parseInt(pid[1]) != 0) { return true; }
+    if (state[1] == 'inactive' || state[1] == 'failed') { return false; }
+    if (/^(active|activating|deactivating|reloading|refreshing)$/.test(state[1])) { return true; }
+    throw new Error('Unrecognized service state: ' + state[1]);
+}
+
 function failureActionToInteger(action)
 {
     var ret;
@@ -270,7 +351,7 @@ if (process.platform == 'darwin')
                     break;
                 }
             }
-            if (ret.name == name) { throw (' ' + (folder.split('LaunchDaemon').length>1 ? 'LaunchDaemon' : 'LaunchAgent') + ' (' + name + ') NOT FOUND'); }
+            if (!ret.plist) { throw serviceNotFound(name); }
         }
         else
         {
@@ -734,8 +815,16 @@ function serviceManager()
             var ptr = this.GM.CreatePointer();
             var bytesNeeded = this.GM.CreateVariable(ptr._size);
             var handle = this.proxy.OpenSCManagerA(0x00, 0x00, 0x0001 | 0x0004 | 0x0010 | (isroot ? 0x0020 : 0x00));
-            if (handle.Val == 0) { throw ('could not open ServiceManager'); }
+            if (handle.Val == 0) { throw windowsServiceError('OpenSCManager', this.proxy2.GetLastError().Val); }
             var h = this.proxy.OpenServiceW(handle, serviceName, 0x0001 | 0x0004 | (isroot ? (0x0002 | 0x0020 | 0x0010 | 0x00010000): 0x00));
+            if (h.Val == 0)
+            {
+                var openError = this.proxy2.GetLastError().Val;
+                this.proxy.CloseServiceHandle(handle);
+                throw windowsServiceError('OpenService(' + name + ')', openError);
+            }
+            try
+            {
             if (h.Val != 0)
             {
                 var retVal = { _ObjectID: 'service-manager.service' }
@@ -793,6 +882,7 @@ function serviceManager()
                     require('events').EventEmitter.call(retVal);
                     retVal.close = function ()
                     {
+                        if (this._stopPromise && !this._stopPromise._settled) { this._stopPromise.finish(new Error('Service handle closed while waiting for stop')); }
                         if(this._service && this._scm)
                         {
                             this._proxy.CloseServiceHandle(this._service);
@@ -830,9 +920,7 @@ function serviceManager()
                     {
                         var reg = require('win-registry');
                         var imagePath = reg.QueryKey(reg.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + this.name, 'ImagePath').toString();
-                        var ret = imagePath.split('.exe')[0] + '.exe';
-                        if (ret.startsWith('"')) { ret = ret.substring(1); }
-                        return (ret);
+                        return windowsServiceExecutable(imagePath);
                     };
                     retVal.appWorkingDirectory = function ()
                     {
@@ -860,93 +948,65 @@ function serviceManager()
                     };
                     retVal.isRunning = function ()
                     {
-                        return (this.status.state == 'RUNNING');
+                        var status = this.status;
+                        if (status.state == 'UNKNOWN') { throw new Error('Unable to query service state'); }
+                        return status.state != 'STOPPED' || status.pid > 0;
                     };
 
                     retVal._stopEx = function(s, p)
                     {
-                        var current = s.status.state;
-                        var pid = s.status.pid;
-
-                        switch (current)
+                        if (p._settled) { return; }
+                        try
                         {
-                            case 'STOPPED':
-                                p._res('STOPPED');
-                                break;
-                            case 'STOP_PENDING':
-                                p._elapsedTime = Date.now() - p._startTime;
-                                if (p._elapsedTime < 10000)
+                            if (!s._service) { throw new Error('Service handle closed while waiting for stop'); }
+                            var status = s.status;
+                            if (status.state == 'UNKNOWN') { throw new Error('Unable to query service stop status'); }
+                            if (status.state == 'STOPPED' && !(status.pid > 0)) { p.finish(null); return; }
+                            if (Date.now() - p._startTime >= 10000) { throw new Error('Timed out waiting for ' + s.name + ' to stop (' + status.state + ')'); }
+                            if (!p._stopRequested && (status.state == 'RUNNING' || status.state == 'PAUSED'))
+                            {
+                                var newstate = s._GM.CreateVariable(36);
+                                if (s._proxy.ControlService(s._service, 0x00000001, newstate).Val == 0)
                                 {
-                                    p.timer = setTimeout(s._stopEx, p._waitTime, s, p);
+                                    var reason = s._proxy2.GetLastError().Val;
+                                    if (reason != 1062) { throw windowsServiceError(s.name + '.stop()', reason); }
                                 }
-                                else
-                                {
-                                    if (pid > 0)
-                                    {
-                                        process.kill(pid);
-                                        p._res('STOPPED/KILLED');
-                                    }
-                                    else
-                                    {
-                                        p._rej('timeout waiting for service to stop');
-                                    }
-                                }
-                                break;
-                            default:
-                                if (pid > 0)
-                                {
-
-                                }
-                                else
-                                {
-                                    p._rej('Unexpected state: ' + current);
-                                }
-                                break;
+                                p._stopRequested = true;
+                            }
+                            p.timer = setTimeout(s._stopEx, p._waitTime, s, p);
                         }
-                    }
-
+                        catch (e) { p.finish(e); }
+                    };
                     retVal.stop = function ()
                     {
+                        if (this._stopPromise && !this._stopPromise._settled) { return this._stopPromise; }
                         var ret = new promise(function (a, r) { this._res = a; this._rej = r; });
-                        var status = this.status;
-                        var pid = this.status.pid;
-                        if(status.state == 'RUNNING')
+                        this._stopPromise = ret;
+                        ret._settled = false;
+                        ret.finish = function (error)
                         {
-                            // Stop Service
-                            var newstate = this._GM.CreateVariable(36);
-                            var reason;
-                            if(this._proxy.ControlService(this._service, 0x00000001, newstate).Val == 0 && (reason = this._proxy2.GetLastError().Val)!=0)
-                            {
-                                ret._rej(this.name + '.stop() failed with error: ' + reason);
-                            }
-                            else
-                            {
-                                // Now we need to setup a timed callback to check the status
-                                ret._startTime = Date.now();
-                                ret._elapsedTime = 0;
-                                ret._waitTime = status.waitHint / 10;
-                                if (ret._waitTime < 500) { ret._waitTime = 500; }
-                                if (ret._waitTime > 5000) { ret._waitTime = 5000; }
-                                ret.timer = setTimeout(this._stopEx, ret._waitTime, this, ret);
-                            }
-                        }
-                        else if (status.state == 'STOP_PENDING' && pid > 0)
+                            if (this._settled) { return; }
+                            this._settled = true;
+                            if (this.timer != null) { clearTimeout(this.timer); this.timer = null; }
+                            if (error != null) { this._rej(error); } else { this._res('STOPPED'); }
+                        };
+                        ret._startTime = Date.now();
+                        try
                         {
-                            process.kill(pid);
-                            ret._res('STOPPED/KILLED');
+                            var status = this.status;
+                            ret._waitTime = Math.max(500, Math.min(5000, (status.waitHint || 5000) / 10));
+                            // Poll every transitional state under one deadline; never kill a shared host.
+                            this._stopEx(this, ret);
                         }
-                        else
-                        {
-                            ret._rej('cannot call ' + this.name + '.stop(), when current state is: ' + this.status.state);
-                        }
-                        return (ret);
-                    }
+                        catch (e) { ret.finish(e); }
+                        return ret;
+                    };
                     retVal.start = function ()
                     {
                         if (this.status.state == 'STOPPED')
                         {
                             var success = this._proxy.StartServiceA(this._service, 0, 0);
-                            if (success == 0)
+                            if (success.Val == 0)
                             {
                                 throw (this.name + '.start() failed');
                             }
@@ -1041,13 +1101,16 @@ function serviceManager()
                     }
                     return (retVal);
                 }
-                else {
-                    this.proxy.CloseServiceHandle(h);
-                }
+                else { throw windowsServiceError('QueryServiceStatusEx(' + name + ')', this.proxy2.GetLastError().Val); }
             }
-
-            this.proxy.CloseServiceHandle(handle);
-            throw ('could not find service: ' + name);
+            }
+            catch (e)
+            {
+                this.proxy.CloseServiceHandle(h);
+                this.proxy.CloseServiceHandle(handle);
+                if (retVal) { retVal._service = retVal._scm = null; }
+                throw e;
+            }
         }
     }
     else
@@ -1110,7 +1173,7 @@ function serviceManager()
                 }
                 else
                 {
-                    throw ('Service: ' + name + ' not found');
+                    throw serviceNotFound(name);
                 }
                 Object.defineProperty(ret, "startType",
                     {
@@ -1399,7 +1462,7 @@ function serviceManager()
                 switch(platform)
                 {
                     case 'procd':
-                        if (!require('fs').existsSync('/etc/init.d/' + name)) { throw (platform + ' Service (' + name + ') NOT FOUND'); }
+                        if (!require('fs').existsSync('/etc/init.d/' + name)) { throw serviceNotFound(name); }
                         ret.conf = '/etc/init.d/' + name;
                         ret.appWorkingDirectory = function appWorkingDirectory()
                         {
@@ -1840,23 +1903,20 @@ function serviceManager()
                         }
                         else
                         {
-                            throw (platform + ' Service (' + name + ') NOT FOUND');
+                            throw serviceNotFound(name);
                         }
                         break;
                     case 'systemd':
-                        var tries = 0;
-                        do
+                        var unitNames = [this.escape(name), name];
+                        var unitDirs = ['/etc/systemd/system/', '/lib/systemd/system/', '/usr/lib/systemd/system/'];
+                        for (var unitDir = 0; unitDir < unitDirs.length && !ret.conf; ++unitDir)
                         {
-                            ret.escname = tries == 0 ? this.escape(name) : name;
-                            if (require('fs').existsSync('/lib/systemd/system/' + ret.escname + '.service'))
+                            for (var unitName = 0; unitName < unitNames.length && !ret.conf; ++unitName)
                             {
-                                ret.conf = '/lib/systemd/system/' + ret.escname + '.service';
+                                var unitPath = unitDirs[unitDir] + unitNames[unitName] + '.service';
+                                if (require('fs').existsSync(unitPath)) { ret.conf = unitPath; ret.escname = unitNames[unitName]; }
                             }
-                            else if (require('fs').existsSync('/usr/lib/systemd/system/' + ret.escname + '.service'))
-                            {
-                                ret.conf = '/usr/lib/systemd/system/' + ret.escname + '.service';
-                            }
-                        } while (ret.conf == null && tries++<1);
+                        }
 
                         if (ret.conf)
                         {
@@ -1892,42 +1952,13 @@ function serviceManager()
                             }
                             ret.appWorkingDirectory = function appWorkingDirectory()
                             {
-                                var child = require('child_process').execFile('/bin/sh', ['sh']);
-                                child.stdout.str = '';
-                                child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                                if (require('fs').existsSync('/lib/systemd/system/' + this.escname.split('\\').join('\\\\') + '.service'))
-                                {
-                                    child.stdin.write("cat /lib/systemd/system/" + this.escname.split('\\').join('\\\\') + ".service | grep 'WorkingDirectory=' | awk 'NR==1" + '{ gsub(/^.+=/,"",$0); gsub("/$","",$0); printf "%s/",$0; }\'\n\exit\n');
-                                }
-                                else
-                                {
-                                    child.stdin.write("cat /usr/lib/systemd/system/" + this.escname.split('\\').join('\\\\') + ".service | grep 'WorkingDirectory=' | awk 'NR==1" + '{ gsub(/^.+=/,"",$0); gsub("/$","",$0); printf "%s/",$0; }\'\n\exit\n');
-                                }
-                                child.waitExit();
-                                return (child.stdout.str.trim());
+                                var value = readSystemdDirective(this.conf, 'WorkingDirectory');
+                                if (value == null || value == '') { return '/'; }
+                                if (value.charAt(0) == '-') { value = value.substring(1); }
+                                if (value.charAt(0) == '"' && value.charAt(value.length - 1) == '"') { value = value.substring(1, value.length - 1); }
+                                return value.replace(/\\x([0-9a-f]{2})/gi, function (_, hex) { return String.fromCharCode(parseInt(hex, 16)); });
                             };
-                            ret.appLocation = function ()
-                            {
-                                var child = require('child_process').execFile('/bin/sh', ['sh']);
-                                child.stdout.str = '';
-                                child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                                if (require('fs').existsSync('/lib/systemd/system/' + this.escname.split('\\').join('\\\\') + '.service'))
-                                {
-                                    child.stdin.write("cat /lib/systemd/system/" + this.escname.split('\\').join('\\\\') + ".service | grep 'ExecStart=' | awk -F= '");
-                                }
-                                else
-                                {
-                                    child.stdin.write("cat /usr/lib/systemd/system/" + this.escname.split('\\').join('\\\\') + ".service | grep 'ExecStart=' | awk -F= '");
-                                }
-                                child.stdin.write('{');
-                                child.stdin.write('   split($2, a, " ");');
-                                child.stdin.write('   gsub(/-/,"\\\\x2d",a[1]);');
-                                child.stdin.write('   sh=sprintf("systemd-escape -u \\"%s\\"",a[1]);');
-                                child.stdin.write('   system(sh);')
-                                child.stdin.write("}'\nexit\n");
-                                child.waitExit();
-                                return (child.stdout.str.trim());
-                            };
+                            ret.appLocation = function () { return systemdExecutable(this.conf); };
                             ret.isMe = function isMe()
                             {
                                 var child = require('child_process').execFile('/bin/sh', ['sh']);
@@ -1938,34 +1969,10 @@ function serviceManager()
                                 child.waitExit();
                                 return (parseInt(child.stdout.str.trim()) == process.pid);
                             };
-                            ret.isRunning = function isRunning()
-                            {
-                                var child = require('child_process').execFile('/bin/sh', ['sh']);
-                                child.stdout.str = '';
-                                child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                                child.stdin.write("systemctl status " + this.escname.split('\\').join('\\\\') + ".service | grep 'Active:' | awk 'NR==1{print $2}'\nexit\n");
-                                child.waitExit();
-                                return (child.stdout.str.trim() == 'active');         
-                            };
-                            ret.start = function start()
-                            {
-                                var child = require('child_process').execFile('/bin/sh', ['sh'], { type: require('child_process').SpawnTypes.TERM });
-                                child.stdout.on('data', function (chunk) { });
-                                child.stdin.write('systemctl start ' + this.escname.split('\\').join('\\\\') + '.service\nexit\n');
-                                child.waitExit();
-                            };
-                            ret.stop = function stop() {
-                                var child = require('child_process').execFile('/bin/sh', ['sh'], { type: require('child_process').SpawnTypes.TERM });
-                                child.stdout.on('data', function (chunk) { });
-                                child.stdin.write('systemctl stop ' + this.escname.split('\\').join('\\\\') + '.service\nexit\n');
-                                child.waitExit();
-                            };
-                            ret.restart = function restart() {
-                                var child = require('child_process').execFile('/bin/sh', ['sh'], { type: require('child_process').SpawnTypes.TERM });
-                                child.stdout.on('data', function (chunk) { });
-                                child.stdin.write('systemctl restart ' + this.escname.split('\\').join('\\\\') + '.service\nexit\n');
-                                child.waitExit();
-                            };
+                            ret.isRunning = function isRunning() { return systemdIsRunning(this.escname); };
+                            ret.start = function start() { runSystemctl(['start', this.escname + '.service']); };
+                            ret.stop = function stop() { runSystemctl(['stop', this.escname + '.service']); };
+                            ret.restart = function restart() { runSystemctl(['restart', this.escname + '.service']); };
                             ret.status = function status() {
                                 var child = require('child_process').execFile('/bin/sh', ['sh']);
                                 child.stdout._str = '';
@@ -1987,7 +1994,7 @@ function serviceManager()
                         }
                         else
                         {
-                            throw (platform + ' Service (' + name + ') NOT FOUND');
+                            throw serviceNotFound(name);
                         }
                         break;
                     default:
@@ -2128,7 +2135,7 @@ function serviceManager()
                         }
                         else
                         {
-                            throw ('MeshDaemon (' + name + ') NOT FOUND');
+                            throw serviceNotFound(name);
                         }
                         break;
                 }
@@ -2161,6 +2168,7 @@ function serviceManager()
                             runtable = _upstart_GetServiceTable();
                             break;
                         case 'systemd':
+                            paths.push('/etc/systemd/system');
                             paths.push('/lib/systemd/system');
                             paths.push('/usr/lib/systemd/system');
                             runtable = _systemd_GetServiceTable();
@@ -2182,6 +2190,7 @@ function serviceManager()
 
             for(var i in paths)
             {
+                if (!require('fs').existsSync(paths[i])) { continue; }
                 var files = require('fs').readdirSync(paths[i]);
                 for(var j in files)
                 {
@@ -2285,7 +2294,7 @@ function serviceManager()
     }
     this.installService = function installService(options)
     {
-        if (process.platform == 'linux') { options.name = this.escape(options.name); }
+        if (process.platform == 'linux') { options.name = options.serviceKey || this.escape(options.name); }
         if (!options.target) { options.target = options.name; }
         if (!options.displayName) { options.displayName = options.name; }
         if (options.installPath && options.installInPlace) { throw ('Cannot specify both installPath and installInPlace'); }
@@ -2293,7 +2302,7 @@ function serviceManager()
         if (process.platform != 'win32')
         {
             if (!options.servicePlatform) { options.servicePlatform = this.getServiceType(); }
-            if (options.servicePlatform == 'systemd') { options.target = options.target.split("'").join('-'); }
+            if (options.servicePlatform == 'systemd' && options.target.indexOf("'") >= 0) { throw new Error('Unsupported apostrophe in executable basename; refusing to rename identity.'); }
             if (options.installInPlace)
             {
                 var svcPath = options.servicePath.replace(/\/+$/, '');
@@ -2874,6 +2883,12 @@ function serviceManager()
         var service = this.getService(name);
         var servicePath = service.appLocation();
         var workingPath = service.appWorkingDirectory();
+        // procd service objects have no isRunning(); their stop is handled per service type below.
+        if (typeof service.isRunning == 'function' && service.isRunning())
+        {
+            if (process.platform == 'darwin') { service.unload(); } else { service.stop(); }
+            if (service.isRunning()) { throw new Error('Service remains running; uninstall aborted: ' + name); }
+        }
 
         if(process.platform == 'linux')
         {
@@ -2959,32 +2974,17 @@ function serviceManager()
                     }
                     break;
                 case 'systemd':
-                    this._update = require('child_process').execFile('/bin/sh', ['sh'], { type: require('child_process').SpawnTypes.TERM });
-                    this._update.stdout.on('data', function (chunk) { });
-                    this._update.stdin.write('systemctl stop ' + name + '.service\n');
-                    this._update.stdin.write('systemctl disable ' + name + '.service\n');
-                    this._update.stdin.write('exit\n');
-                    this._update.waitExit();
-                    try
-                    {
-                        if (!options || !options.skipDeleteBinary)
-                        {
-                            if (require('fs').existsSync(servicePath)) { require('fs').unlinkSync(servicePath); }                 
-                        }
-                        if (require('fs').existsSync('/lib/systemd/system/' + name + '.service')) { require('fs').unlinkSync('/lib/systemd/system/' + name + '.service'); }
-                        if (require('fs').existsSync('/usr/lib/systemd/system/' + name + '.service')) { require('fs').unlinkSync('/usr/lib/systemd/system/' + name + '.service'); }
-                        var escname = this.escape(name);
-                        if (require('fs').existsSync('/lib/systemd/system/' + escname + '.service')) { require('fs').unlinkSync('/lib/systemd/system/' + escname + '.service'); }
-                        if (require('fs').existsSync('/usr/lib/systemd/system/' + escname + '.service')) { require('fs').unlinkSync('/usr/lib/systemd/system/' + escname + '.service'); }
-                        console.log(name + ' uninstalled');
-                    }
-                    catch (e)
-                    {
-                        console.log(name + ' could not be uninstalled', e)
-                    }
+                    service.stop();
+                    if (service.isRunning()) { throw new Error('Service remains running; uninstall aborted: ' + name); }
+                    runSystemctl(['disable', service.escname + '.service']);
+                    // Delete the resolved binding only; guessed vendor paths may belong to another instance.
+                    if (service.conf && require('fs').existsSync(service.conf)) { require('fs').unlinkSync(service.conf); }
+                    runSystemctl(['daemon-reload']);
+                    if ((!options || !options.skipDeleteBinary) && require('fs').existsSync(servicePath)) { require('fs').unlinkSync(servicePath); }
+                    console.log(name + ' uninstalled');
                     break;
                 default: // unknown platform service type
-                    if (service.isRunning())
+                    if (typeof service.isRunning == 'function' && service.isRunning())
                     {
                         service.stop();
                     }
@@ -3227,7 +3227,9 @@ function serviceManager()
         console.log('parameters => ' + JSON.stringify(parameters, null, 1));
         console.log('options => ' + JSON.stringify(options, null, 1));
     
-        var z =  parameters.getParameterIndex('meshServiceName');
+        var z = -1;
+        for (var parameterIndex = 0; parameterIndex < parameters.length; ++parameterIndex)
+        { if (parameters[parameterIndex].indexOf('--meshServiceName=') == 0) { z = parameterIndex; break; } }
         console.log('meshServiceName => ' + z);
         if (z >= 0)
         {

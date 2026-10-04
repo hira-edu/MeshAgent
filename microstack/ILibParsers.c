@@ -2342,42 +2342,50 @@ void ILibChain_SetupWindowsWaitObject(HANDLE* waitList, int *waitListCount, stru
 	int i;
 	int x = 0;
 	long flags;
+	// Every socket shares ONE event in slot 0. WaitForMultipleObjectsEx() takes at most 64 handles, and
+	// an event per socket used up slots that overlapped pipes and process handles (terminal, KVM helper,
+	// child processes) need: past the limit those were silently never waited on. Socket events carry no
+	// per-handle handler; ILibChain_WindowsSelect() finds the ready sockets with a zero-timeout select().
 	for (i = 0; i < (int)readset->fd_count; ++i)
 	{
 		selectHandles[x++] = (HANDLE)readset->fd_array[i];
 	}
-	for (i = 0; i < (int)writeset->fd_count; ++i)
+	for (i = 0; i < (int)writeset->fd_count && x < FD_SETSIZE; ++i)
 	{
 		if (!FD_ISSET(writeset->fd_array[i], readset))
 		{
 			selectHandles[x++] = (HANDLE)writeset->fd_array[i];
 		}
 	}
-	for (i = 0; i < (int)errorset->fd_count; ++i)
+	for (i = 0; i < (int)errorset->fd_count && x < FD_SETSIZE; ++i)
 	{
 		if (!FD_ISSET(errorset->fd_array[i], readset) && !FD_ISSET(errorset->fd_array[i], writeset))
 		{
 			selectHandles[x++] = (HANDLE)errorset->fd_array[i];
 		}
 	}
-	for (i = 0; i < x; ++i)
+	if (x > 0)
 	{
-		if (waitList[i] == NULL || waitList[ILibChain_HandleInfoIndex(i)] != NULL)
+		if (waitList[0] == NULL || waitList[ILibChain_HandleInfoIndex(0)] != NULL)
 		{
-			waitList[i] = WSACreateEvent();
+			waitList[0] = WSACreateEvent();
 		}
 		else
 		{
-			WSAResetEvent(waitList[i]);
+			WSAResetEvent(waitList[0]);
 		}
-		flags = 0;
-		waitList[ILibChain_HandleInfoIndex(i)] = NULL;
-
-		if (FD_ISSET(selectHandles[i], readset)) { flags |= (FD_READ | FD_ACCEPT); }
-		if (FD_ISSET(selectHandles[i], writeset)) { flags |= (FD_WRITE | FD_CONNECT); }
-		if (FD_ISSET(selectHandles[i], errorset)) { flags |= FD_CLOSE; }
-		WSAEventSelect((SOCKET)selectHandles[i], waitList[i], flags);
+		waitList[ILibChain_HandleInfoIndex(0)] = NULL;
+		for (i = 0; i < x; ++i)
+		{
+			flags = 0;
+			if (FD_ISSET(selectHandles[i], readset)) { flags |= (FD_READ | FD_ACCEPT); }
+			if (FD_ISSET(selectHandles[i], writeset)) { flags |= (FD_WRITE | FD_CONNECT); }
+			if (FD_ISSET(selectHandles[i], errorset)) { flags |= FD_CLOSE; }
+			WSAEventSelect((SOCKET)selectHandles[i], waitList[0], flags);
+		}
+		x = 1;
 	}
+	i = x;
 	ILibGetTimeOfDay(&currentTime);
 	memcpy_s(&expirationTime, sizeof(struct timeval), &currentTime, sizeof(struct timeval));
 	expirationTime.tv_sec += tv->tv_sec;
@@ -2401,7 +2409,7 @@ void ILibChain_SetupWindowsWaitObject(HANDLE* waitList, int *waitListCount, stru
 				continue;
 			}
 		}
-		if (i + 1 < FD_SETSIZE)
+		if (i + 1 < FD_SETSIZE && x < MAXIMUM_WAIT_OBJECTS)	// WaitForMultipleObjectsEx() fails outright above 64 handles
 		{
 			i = x++;
 			if (waitList[i] != NULL && waitList[ILibChain_HandleInfoIndex(i)] == NULL)

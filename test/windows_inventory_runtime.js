@@ -132,18 +132,19 @@ for (const failure of ['open', 'query', 'time', null]) {
     else assert.equal(registryTimestamp.call(state, 1, 'probe'), 'timestamp');
     assert.equal(closed, failure === 'open' ? 0 : 1, 'registry keys must close on success and every post-open failure');
 }
-const getService = vm.runInNewContext('(' + method('modules/service-manager.js', 'this.getService = function getService') + ')',
+const getService = vm.runInNewContext(method('modules/service-manager.js', 'function windowsServiceError(') + ';(' + method('modules/service-manager.js', 'this.getService = function getService') + ')',
     {require: () => ({HKEY:{LocalMachine:1}, QueryKeyLastModified: () => 'timestamp'})});
 for (const opened of [false, true]) {
     const closed = [];
     const state = {isAdmin: () => false,
+        proxy2: {GetLastError: () => ({Val: opened ? 5 : 1060})},
         GM: {PointerSize:8, CreateVariable: size => variable(typeof size === 'string' ? (size.length + 1) * 2 : size), CreatePointer: () => variable(8)},
         proxy: {
             OpenSCManagerA: () => ({Val:30}), OpenServiceW: () => ({Val:opened ? 31 : 0}),
             QueryServiceStatusEx(handle, level, buffer, size, needed) {needed.toBuffer().writeUInt32LE(36);return {Val:0};},
             CloseServiceHandle(handle) {closed.push(handle.Val);}
         }};
-    assert.throws(() => getService.call(state, 'probe'), /could not find service/);
+    assert.throws(() => getService.call(state, 'probe'), (error) => error.code === (opened ? 'EWIN32' : 'ENOENT') && error.win32Error === (opened ? 5 : 1060));
     assert.deepEqual(closed.sort(), opened ? [30,31] : [30], 'failed service status queries must release both handles');
 }
 console.log('Windows inventory: bitness, WCHAR bounds, denied processes, token failures, service pagination and cleanup passed');

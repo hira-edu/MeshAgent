@@ -155,6 +155,7 @@ int FRAME_RATE_TIMER = 0;
 HANDLE kvmthread = NULL;
 int g_shutdown = 999;
 int g_pause = 0;
+static volatile LONG gKvmResumeEpoch = 0;	// Incremented by every resume (kvm_pause(0)) before g_pause is cleared
 int g_remotepause = 1;
 static HANDLE gKvmRemoteResumeEvent = NULL;
 static INIT_ONCE gKvmTileInfoLockOnce = INIT_ONCE_STATIC_INIT;
@@ -252,6 +253,9 @@ static void kvm_write_scaling_factor(volatile LONG* scalingFactor, int scaling)
 #endif
 // A bridge input write only pends once the helper has left the 1 MB pipe buffer unread, so a
 // write still pending after this long means the helper has stopped draining its input.
+#ifndef KVM_BRIDGE_INPUT_MOVE_WRITE_TIMEOUT_MS
+#define KVM_BRIDGE_INPUT_MOVE_WRITE_TIMEOUT_MS 100
+#endif
 #ifndef KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS
 #define KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS 2000
 #endif
@@ -303,7 +307,8 @@ typedef struct KvmRelayContext
 	HANDLE bridgeJobObject;
 	LONG bridgeClientConnected;
 	LONG bridgeTransportAttached;
-	LONG bridgeProtocolPauseState;
+	LONG bridgeProtocolPauseState;		// Agent-side backpressure pause sent to the helper
+	LONG viewerPauseState;				// Last MNG_KVM_PAUSE requested by the viewer(s)
 	LONG childUsesBridge;
 	LONG cacheInitialized;
 	CRITICAL_SECTION cacheLock;
@@ -1159,6 +1164,8 @@ static int kvm_relay_handle_refresh_probe_timeout(KvmRelayContext* ctx, const ch
 	// A paused viewer (network backpressure) has told the helper to stop sending pictures, so an
 	// unanswered refresh is expected; the probe window restarts when the viewer resumes.
 	if (InterlockedCompareExchange(&ctx->bridgeProtocolPauseState, 0, 0) != 0) { return 0; }
+	// Likewise when the viewers paused the stream themselves: a healthy helper is not sending pictures.
+	if (InterlockedCompareExchange(&ctx->viewerPauseState, 0, 0) != 0) { return 0; }
 	if (!kvm_relay_refresh_probe_timed_out(GetTickCount64(), &ageMs)) { return 0; }
 
 	childPid = ILibProcessPipe_Process_GetPID(gChildProcess);
@@ -1438,6 +1445,13 @@ static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int
 	BOOL result = FALSE;
 	DWORD errorCode = ERROR_SUCCESS;
 	DWORD waitResult = WAIT_FAILED;
+	// A pure mouse move (no button, no wheel) is superseded by the next one. While the helper is slow to
+	// read input, waiting up to the full timeout for each move blocks the chain thread, and with it every
+	// viewer's I/O; give moves a short wait and drop one the pipe could not take.
+	int droppableMove = (bufferLen >= 4 && ntohs(((unsigned short*)buffer)[0]) == MNG_KVM_MOUSE &&
+		(bufferLen <= 5 || (unsigned char)buffer[5] == 0) &&
+		(bufferLen < 12 || ntohs(((unsigned short*)(buffer + 10))[0]) == 0));
+	DWORD waitTimeoutMs = droppableMove ? KVM_BRIDGE_INPUT_MOVE_WRITE_TIMEOUT_MS : KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS;
 
 	if (ctx == NULL || ctx->bridgeInputPipeHandle == NULL || ctx->bridgeInputPipeHandle == INVALID_HANDLE_VALUE || buffer == NULL || bufferLen <= 0) { return FALSE; }
 
@@ -1456,7 +1470,7 @@ static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int
 		if (errorCode == ERROR_IO_PENDING)
 		{
 			// This runs on the chain thread under the relay lock, so it must not wait indefinitely.
-			waitResult = WaitForSingleObject(overlapped.hEvent, KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS);
+			waitResult = WaitForSingleObject(overlapped.hEvent, waitTimeoutMs);
 			if (waitResult == WAIT_OBJECT_0)
 			{
 				result = GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, FALSE);
@@ -1469,6 +1483,13 @@ static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int
 				errorCode = (waitResult == WAIT_TIMEOUT) ? ERROR_TIMEOUT : GetLastError();
 				CancelIoEx(ctx->bridgeInputPipeHandle, &overlapped);
 				result = GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, TRUE);
+				if (!result && droppableMove && waitResult == WAIT_TIMEOUT && GetLastError() == ERROR_OPERATION_ABORTED && bytesWritten == 0)
+				{
+					// Nothing of the move reached the pipe, so the input stream is still framed correctly:
+					// drop it and keep the helper (a partially written packet still abandons it below).
+					CloseHandle(overlapped.hEvent);
+					return TRUE;
+				}
 				if (!result)
 				{
 					DWORD cancelError = GetLastError();
@@ -1861,7 +1882,13 @@ static BOOL kvm_relay_set_bridge_pause_state(KvmRelayContext* ctx, int normalize
 
 	if (InterlockedCompareExchange(&ctx->bridgeTransportAttached, 0, 0) != 0)
 	{
-		if ((forcePacket != 0 || previousState != normalizedPause) && !kvm_relay_write_bridge_pause(ctx, normalizedPause))
+		// Resuming the read pipe drains buffered output synchronously, which can re-enter this function
+		// and pause again. That nested call has already sent the current state; sending this now-stale
+		// one after it would leave the helper streaming while the agent is paused.
+		if (InterlockedCompareExchange(&ctx->bridgeProtocolPauseState, 0, 0) != normalizedPause) { return TRUE; }
+		// Ending agent backpressure must not unpause a helper the viewers themselves paused.
+		if ((forcePacket != 0 || previousState != normalizedPause) &&
+			!kvm_relay_write_bridge_pause(ctx, normalizedPause || InterlockedCompareExchange(&ctx->viewerPauseState, 0, 0) != 0))
 		{
 			return FALSE;
 		}
@@ -2695,6 +2722,7 @@ static int kvm_retry_pending_unqueryable_start(KvmRelayContext* ctx)
 	}
 	if (gKvmPendingUnqueryableStartRetryCount >= KVM_SESSION_START_TOKEN_RETRY_MAX)
 	{
+		DWORD consoleSessionId = WTSGetActiveConsoleSessionId();
 		kvm_trace_startupf("session start token retry exhausted event=%u session=%u retries=%u current=%u tsid=%d",
 			(unsigned int)eventType,
 			(unsigned int)sessionId,
@@ -2702,6 +2730,15 @@ static int kvm_retry_pending_unqueryable_start(KvmRelayContext* ctx)
 			(unsigned int)gKvmProcessSessionId,
 			gProcessTSID);
 		kvm_clear_pending_unqueryable_start();
+		if (kvm_session_id_is_valid(consoleSessionId) && consoleSessionId != sessionId)
+		{
+			// Don't leave the viewer frozen with restarts suppressed: show the console session (which
+			// needs no user token) until the requested session becomes usable.
+			kvm_trace_startupf("session start token retry falling back to console session=%u", (unsigned int)consoleSessionId);
+			kvm_relay_capture_context(ctx);
+			kvm_relay_handle_session_change_for_context(ctx, WTS_CONSOLE_CONNECT, consoleSessionId);
+			return 1;
+		}
 		return 0;
 	}
 
@@ -3341,6 +3378,7 @@ static ILibTransport_DoneState kvm_server_write_packet_checked(ILibKVM_WriteHand
 {
 	ILibTransport_DoneState writeState;
 	unsigned short packetType = 0;
+	LONG resumeEpochBefore;
 
 	if (buffer != NULL && bufferLen >= 2)
 	{
@@ -3358,6 +3396,7 @@ static ILibTransport_DoneState kvm_server_write_packet_checked(ILibKVM_WriteHand
 		return ILibTransport_DoneState_ERROR;
 	}
 
+	resumeEpochBefore = InterlockedCompareExchange(&gKvmResumeEpoch, 0, 0);
 	writeState = writeHandler(buffer, bufferLen, reserved);
 	switch (writeState)
 	{
@@ -3365,6 +3404,9 @@ static ILibTransport_DoneState kvm_server_write_packet_checked(ILibKVM_WriteHand
 		break;
 	case ILibTransport_DoneState_INCOMPLETE:
 		g_pause = 1;
+		// The consumer may already have drained this write and resumed us (kvm_pause(0)) on another
+		// thread before we got here; setting g_pause after that resume would hold capture forever.
+		if (InterlockedCompareExchange(&gKvmResumeEpoch, 0, 0) != resumeEpochBefore) { g_pause = 0; }
 		kvm_trace_startupf("KVM output: backpressure stage=%s type=%u len=%d",
 			stage != NULL ? stage : "unknown",
 			(unsigned int)packetType,
@@ -3528,7 +3570,10 @@ static int kvm_server_reset_tile_info_locked(const char* stage, int resetCrc, ch
 	{
 		for (col = 0; col < TILE_WIDTH_COUNT; ++col)
 		{
-			if (resetCrc != 0)
+			// A tile marked changed but never sent (the scan stopped on backpressure first) already had
+			// its new CRC committed. Keeping that CRC would make the next frame see it as unchanged and
+			// never send it, leaving a stale region on every viewer; invalidate it so it is re-sent.
+			if (resetCrc != 0 || tileInfo[row][col].flags == (char)TILE_MARKED_NOT_SENT)
 			{
 				tileInfo[row][col].crc = 0xFF;
 			}
@@ -4292,6 +4337,12 @@ int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, vo
 	if (buf != NULL && len >= 4)
 	{
 		kvm_bridge_debug_note_input(buf, (size_t)len);
+		if (ctx != NULL && len == 5 && ntohs(((unsigned short*)buf)[0]) == MNG_KVM_PAUSE)
+		{
+			// The helper has a single pause flag shared with agent backpressure; remember what the
+			// viewer asked for so neither the refresh probe nor a backpressure resume overrides it.
+			InterlockedExchange(&ctx->viewerPauseState, buf[4] != 0 ? 1 : 0);
+		}
 		if (kvm_relay_handle_refresh_probe_timeout(ctx, "input") != 0)
 		{
 			consumed = 0;
@@ -4436,7 +4487,13 @@ void kvm_pause(int pause, void *reserved)
 		// No relay for this session. The in-process console backend is the
 		// only owner of the bare globals; otherwise they belong to whichever
 		// session ran last and must not be touched.
-		if (kvmConsoleMode != 0) { g_pause = normalizedPause; }
+		if (kvmConsoleMode != 0)
+		{
+			// Bump the epoch before clearing, so a capture thread that sets g_pause after its write
+			// returned INCOMPLETE sees this resume and undoes its own pause.
+			if (normalizedPause == 0) { InterlockedIncrement(&gKvmResumeEpoch); }
+			g_pause = normalizedPause;
+		}
 		kvm_relay_unlock();
 		return;
 	}
@@ -4444,6 +4501,7 @@ void kvm_pause(int pause, void *reserved)
 	// KVMDEBUG("kvm_pause", pause);
 	if (gChildProcess == NULL)
 	{
+		if (normalizedPause == 0) { InterlockedIncrement(&gKvmResumeEpoch); }
 		g_pause = normalizedPause;
 		if (ctx != NULL)
 		{
@@ -6125,7 +6183,12 @@ static int kvm_relay_session_change_affects_context(KvmRelayContext* ctx, DWORD 
 		if (ignoreReasonOut != NULL) { *ignoreReasonOut = KVM_SESSION_CHANGE_IGNORE_UNRELATED_STOP; }
 		return 0;
 	}
-	if (!explicitTsid && startEvent && validSessionId && !sessionMatches && queryUserToken != 0 && !kvm_session_id_has_user_token(sessionId))
+	// The active console session needs no user token: the helper is launched there with the WINLOGON
+	// spawn type (SYSTEM token). After a logoff or switch-user it shows the logon screen and has no
+	// user yet; waiting for a token there left the viewer frozen with restarts suppressed until
+	// somebody logged on.
+	if (!explicitTsid && startEvent && validSessionId && !sessionMatches && queryUserToken != 0 &&
+		sessionId != WTSGetActiveConsoleSessionId() && !kvm_session_id_has_user_token(sessionId))
 	{
 		if (ignoreReasonOut != NULL) { *ignoreReasonOut = KVM_SESSION_CHANGE_IGNORE_UNQUERYABLE_START; }
 		return 0;

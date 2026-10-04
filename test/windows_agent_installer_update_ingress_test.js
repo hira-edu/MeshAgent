@@ -25,24 +25,7 @@ function extractFunction(source, signature) {
 }
 
 function makeParameters(values) {
-    const parameters = {
-        length: 0,
-        getParameter(name, defaultValue) {
-            return Object.prototype.hasOwnProperty.call(values, name) ? values[name] : defaultValue;
-        },
-        push(value) {
-            const match = /^--([^=]+)=(.*)$/.exec(value);
-            if (match != null) {
-                let parameterValue = match[2];
-                if (parameterValue.startsWith('"') && parameterValue.endsWith('"')) {
-                    parameterValue = parameterValue.substring(1, parameterValue.length - 1);
-                }
-                values[match[1]] = parameterValue;
-            }
-            this[this.length++] = value;
-        }
-    };
-    return parameters;
+    return Object.keys(values).map((name) => '--' + name + '=' + values[name]);
 }
 
 function makeMsh(values) {
@@ -79,6 +62,9 @@ function main() {
     const sourcePath = path.resolve('modules', 'agent-installer.js');
     const source = fs.readFileSync(sourcePath, 'utf8').replace(/\r\n?/g, '\n');
     const functionSource = [
+        extractFunction(source, 'function installerParameterValue(parms, index)'),
+        extractFunction(source, 'function installerParameterEx(parms, name, defaultValue)'),
+        extractFunction(source, 'function installerParameter(parms, name, defaultValue)'),
         extractFunction(source, 'function hasWindowsUnsupportedStandaloneParameter(parms)'),
         extractFunction(source, 'function prepareWindowsNativeLifecycleParameters(parms)'),
         extractFunction(source, 'function getWindowsNativeUpdateSource(parms)'),

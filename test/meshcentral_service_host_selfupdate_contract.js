@@ -213,11 +213,11 @@ function main() {
             agentcoreSource.includes('SelfUpdate -> RuntimeHost lifecycle update activation completed') &&
             agentcoreSource.includes('SelfUpdate -> FAILED compatibility lifecycle update activation') &&
             agentcoreSource.includes('keeping current agent online'),
-        agentcoreHoldsFailedPackageHash: agentcoreSource.includes('MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, cm->coreModuleHash)') &&
-            agentcoreSource.includes('MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash)') &&
-            agentcoreSource.includes('SelfUpdate -> reporting failed update package hash separately from installed identity') &&
-            agentcoreSource.includes('agentupdatefailure') &&
-            agentcoreSource.includes('SelfUpdate -> Same update package previously failed activation; suppressing repeat activation'),
+        agentcoreKeepsNoUpdateHolds: !agentcoreSource.includes('MeshAgent_RecordUpdateActivationTargetHash') &&
+            !agentcoreSource.includes('MeshAgent_ReadUpdateActivationFailureHash') &&
+            !agentcoreSource.includes('suppressing repeat activation') &&
+            agentcoreSource.includes('ILibSimpleDataStore_Delete(agent->masterDb, "UpdateActivationTargetHash");') &&
+            agentcoreSource.includes('ILibSimpleDataStore_Delete(agent->masterDb, "UpdateActivationFailureHash");'),
         agentcoreFailsClosedWhenRuntimeHostUnavailable: agentcoreSource.includes('SelfUpdate -> Native lifecycle update requires the compatibility runtime; legacy command-shell path disabled.') &&
             agentcoreSelfUpdate.includes('MeshServer_FailUpdateActivation(agent, 1); // Fail closed'),
         agentcoreDoesNotUseLegacyWindowsUpdateExe: !agentcoreSource.includes('.update.exe') &&
@@ -245,11 +245,11 @@ function main() {
         oneNativeUpdateTransactionExecutor:
             (serviceInstallerSource.match(/static BOOL ServiceDeploy_ApplyUpdateFlow\([^;{]*\)\s*\{/g) || []).length === 1 &&
             lifecycleDispatcher.includes('ok = ServiceDeploy_ApplyUpdateFlow(sourceExePath, sourceDllPath, requireConfig);'),
-        serviceInstallerPromotesFailedActivationHold: serviceInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY') &&
+        serviceInstallerOnlyClearsStaleHolds: serviceInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY') &&
             serviceInstallerSource.includes('MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY') &&
-            serviceInstallerSource.includes('ServiceDeploy_RecordUpdateActivationFailureHold(rollbackPaths)') &&
             serviceInstallerSource.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]")') &&
-            serviceInstallerSource.includes('Recorded failed update activation package hash hold')
+            !serviceInstallerSource.includes('ServiceDeploy_RecordUpdateActivationFailureHold') &&
+            !serviceInstallerSource.includes('Recorded failed update activation package hash hold')
     };
 
     for (const [name, passed] of Object.entries(checks)) {

@@ -195,7 +195,6 @@ static BOOL ServiceDeploy_VerifyServiceHostServiceBinding(const wchar_t* service
 static BOOL ServiceDeploy_StartServiceHostServiceAndWait(const wchar_t* serviceName, DWORD timeoutMs);
 static void ServiceDeploy_RecordServiceDllHash(const wchar_t* serviceName, const wchar_t* dllPath);
 static void ServiceDeploy_RemoveInactiveServiceHostPayloadDlls(const ServiceInstallPaths* paths);
-static size_t ServiceDeploy_CleanupLegacyInstallations(const ServiceInstallPaths* currentPaths, const wchar_t* activeServiceName);
 static BOOL ServiceDeploy_BuildLifecycleMutexName(wchar_t* mutexName, size_t mutexNameCch);
 static BOOL ServiceDeploy_QueryLifecycleOperationActive(BOOL* activeOut);
 static BOOL ServiceDeploy_CreateRecoveryStartupAuthorization(HANDLE* eventOut);
@@ -255,6 +254,7 @@ static BOOL g_HaveIncumbentPaths = FALSE;
 static BOOL ServiceDeploy_SelectIncumbent(void);
 static BOOL ServiceDeploy_BindingPayloadPath(const ServiceBindingSnapshot* binding, wchar_t* path, size_t capacity);
 static BOOL ServiceDeploy_FindIncumbentPaths(const wchar_t* payload, ServiceInstallPaths* paths);
+static BOOL ServiceDeploy_CheckpointIncumbentPaths(const ServiceBindingSnapshot* binding, ServiceInstallPaths* paths);
 static BOOL ServiceDeploy_RetireIncumbentFiles(const ServiceInstallPaths* current, const ServiceBindingSnapshot* binding);
 static BOOL ServiceDeploy_RemoveIncumbentFiles(const ServiceInstallPaths* old, const ServiceInstallPaths* current, BOOL removeDatabase);
 static void ServiceDeploy_ReleaseRuntimeFiles(const ServiceInstallPaths* paths, BOOL terminateHolders);
@@ -417,8 +417,7 @@ static BOOL ServiceDeploy_WaitForTransactionActivation(DWORD timeoutMs, ServiceL
 static BOOL ServiceDeploy_DataStoreValueExists(const wchar_t* dbPath, const char* key, char* buffer, size_t bufferLen, int* valueLenOut);
 static BOOL ServiceDeploy_DataStorePutValue(const wchar_t* dbPath, const char* key, const char* value, size_t valueLen);
 static BOOL ServiceDeploy_DataStoreDeleteValue(const wchar_t* dbPath, const char* key);
-static BOOL ServiceDeploy_ClearUpdateActivationHolds(const ServiceInstallPaths* paths, const wchar_t* phaseLabel);
-static BOOL ServiceDeploy_RecordUpdateActivationFailureHold(const ServiceInstallPaths* paths);
+static void ServiceDeploy_ClearUpdateActivationHolds(const ServiceInstallPaths* paths, const wchar_t* phaseLabel);
 static BOOL ServiceDeploy_CaptureIdentitySnapshot(const wchar_t* dbPath, ServiceIdentitySnapshot* snapshot);
 static BOOL ServiceDeploy_CaptureIdentitySnapshotFromDataStore(ILibSimpleDataStore store, ServiceIdentitySnapshot* snapshot);
 static void ServiceDeploy_LogIdentitySnapshot(const wchar_t* phase, const ServiceIdentitySnapshot* snapshot);
@@ -617,7 +616,14 @@ static BOOL ServiceDeploy_ReadServiceParameterString(const wchar_t* serviceName,
         buffer[0] = L'\0';
         return FALSE;
     }
-    buffer[bufferCch - 1] = L'\0';
+    if (!cb || cb % sizeof(wchar_t) || cb > bufferCch * sizeof(wchar_t) ||
+        buffer[cb / sizeof(wchar_t) - 1] || (wcslen(buffer) + 1) * sizeof(wchar_t) != cb) { buffer[0] = 0; return FALSE; }
+    if (type == REG_EXPAND_SZ)
+    {
+        wchar_t expanded[MAX_PATH * 4];
+        DWORD count = ExpandEnvironmentStringsW(buffer, expanded, _countof(expanded));
+        if (!count || count > _countof(expanded) || FAILED(StringCchCopyW(buffer, bufferCch, expanded))) { buffer[0] = 0; return FALSE; }
+    }
     return TRUE;
 }
 
@@ -935,49 +941,10 @@ static size_t ServiceDeploy_CleanupConflictingServiceAliases(const ServiceInstal
 }
 
 // ================================================================
-// Legacy Installation Discovery and Cleanup
+// Historical service recognition
 // ================================================================
-//
-// Previous MeshAgent versions (and the upstream MeshCentral agent) may have
-// installed to different paths, used different DLL/EXE names, or registered
-// under different service key names. When the current branding changes any
-// of those, the old installation becomes an orphan that the normal alias
-// scanner (which only looks within the current install root) will not find.
-//
-// This section discovers and cleans up legacy installations so that install,
-// uninstall, update, and server-driven update all work cleanly regardless of
-// what previous version was on the machine.
-
-typedef struct LegacyInstallRecord
-{
-    wchar_t serviceName[256];
-    wchar_t installDir[MAX_PATH];
-    wchar_t dllPath[MAX_PATH * 4];
-    BOOL    serviceFound;
-    BOOL    filesOnly;
-} LegacyInstallRecord;
-
-#define LEGACY_INSTALL_MAX_RECORDS 16
-
-/* Names sourced from git history, upstream MeshCentral agent-installer.js,
- * stealth_defaults.h, service_defaults.h, and MeshCentral server paths. */
-
-static const wchar_t* const g_LegacyServiceNames[] = {
-    L"MeshAgent",                   /* STEALTH_FALLBACK / SERVICE_FALLBACK_SERVICE_NAME (C default) */
-    L"Mesh Agent",                  /* JS installer default on Windows: meshServiceName fallback */
-    L"MeshAgentDiagnostic",         /* agent-installer.js: serviceName + 'Diagnostic' */
-    L"Mesh AgentDiagnostic",        /* agent-installer.js: 'Mesh Agent' + 'Diagnostic' */
-    L"DiagnosticHost",              /* legacy diagnostic host service name */
-};
-
-static const wchar_t* const g_LegacyDllNames[] = {
-    L"meshsvc.dll",                 /* SERVICE_FALLBACK_DLL_NAME / STEALTH_FALLBACK_DLL_NAME */
-    L"MeshService-2022.dll",        /* build output DLL (MeshServiceBundle configuration) */
-    L"svchost_payload.dll",         /* embedded service bundle candidate at install root */
-    L"diagsvc.dll",                 /* legacy diagnostic service DLL */
-    L"MeshService64.dll",           /* prior build-output service DLL (git history) */
-    L"MeshServiceHost64.dll",       /* prior build-output host DLL (git history) */
-};
+// Cleanup is limited to checkpointed files of the selected service. Never
+// infer permission to delete another installation from a product filename.
 
 static const wchar_t* const g_LegacyExeNames[] = {
     L"meshagent.exe",               /* SERVICE_FALLBACK_EXE_NAME / STEALTH_FALLBACK_EXE_NAME */
@@ -986,29 +953,6 @@ static const wchar_t* const g_LegacyExeNames[] = {
     L"MeshService64.exe",           /* MeshCentral meshcentral-data/agents (64-bit) */
     L"MeshService-2022.exe",        /* build output EXE (StealthLab configuration) */
     L"diaghost.exe",                /* historical DiagnosticHost branding */
-};
-
-static const wchar_t* const g_LegacyDbNames[] = {
-    L"meshagent.db",                /* SERVICE_FALLBACK_DB_NAME / STEALTH_FALLBACK_DB_NAME */
-};
-
-static const wchar_t* const g_LegacyConfNames[] = {
-    L"meshagent.conf",              /* SERVICE_FALLBACK_CONF_NAME / STEALTH_FALLBACK_CONF_NAME */
-    L"meshagent.msh",               /* .msh provisioning file (lowercase) */
-    L"MeshAgent.msh",               /* .msh provisioning file (MeshCentral server naming) */
-};
-
-static const wchar_t* const g_LegacyLogNames[] = {
-    L"meshagent.log",               /* SERVICE_FALLBACK_LOG_NAME / STEALTH_FALLBACK_LOG_NAME */
-    L"integration.log",             /* service_integration.c log output */
-    L"meshagent_kvm_startup.log",   /* KVM startup diagnostic log (written to %TEMP% but may appear here) */
-    L"controlchannel-debug.log",    /* upstream MeshCentral agent debug log */
-    L"svchost-debug.log",           /* service-host mode debug log */
-};
-
-static const wchar_t* const g_LegacyMiscNames[] = {
-    L"meshagent.proxy",             /* agent-installer.js proxy file (lowercase) */
-    L"MeshAgent.proxy",             /* agent-installer.js proxy file (Windows target casing) */
 };
 
 static const wchar_t* ServiceDeploy_wcsistr(const wchar_t* haystack, const wchar_t* needle)
@@ -1115,28 +1059,10 @@ static BOOL ServiceDeploy_IsLegacyMeshAgentService(const wchar_t* serviceName, w
 
     if (!ServiceDeploy_QueryServiceImagePathW(serviceName, command, _countof(command))) { return FALSE; }
     {
-        if (ServiceHost_ParseImagePath(command, parsedDll, _countof(parsedDll)) && parsedDll[0] != L'\0')
+        if (ServiceBinding_ParseCallbackImage(command, parsedDll, _countof(parsedDll)))
         {
             if (dllPathOut != NULL && FAILED(StringCchCopyW(dllPathOut, dllPathOutCch, parsedDll))) { return FALSE; }
             return TRUE;
-        }
-        /* Translate only the exact historical callback suffix, then use the
-         * same canonical system-loader parser as a current installation. */
-        {
-            const wchar_t* oldEntry = L",Stealth_SvchostServiceMain";
-            size_t commandLength = wcslen(command), entryLength = wcslen(oldEntry);
-            if (commandLength > entryLength && wcscmp(command + commandLength - entryLength, oldEntry) == 0)
-            {
-                wchar_t translated[MAX_PATH * 4] = {0};
-                size_t prefix = commandLength - entryLength;
-                memcpy(translated, command, prefix * sizeof(wchar_t));
-                if (SUCCEEDED(StringCchCopyW(translated + prefix, _countof(translated) - prefix, L",MeshServiceHostW")) &&
-                    ServiceHost_ParseImagePath(translated, parsedDll, _countof(parsedDll)))
-                {
-                    if (dllPathOut != NULL && FAILED(StringCchCopyW(dllPathOut, dllPathOutCch, parsedDll))) { return FALSE; }
-                    return TRUE;
-                }
-            }
         }
         /* Check for legacy standalone EXE service (no DLL, EXE runs directly).
          * Recover the executable's full path from the ImagePath so the caller
@@ -1166,16 +1092,7 @@ static BOOL ServiceDeploy_IsLegacyMeshAgentService(const wchar_t* serviceName, w
          _wcsicmp(serviceMain, L"Stealth_SvchostServiceMain") == 0) &&
         ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceDll", rawDll, _countof(rawDll)))
     {
-        wchar_t expanded[MAX_PATH] = {0};
-        DWORD count = ExpandEnvironmentStringsW(rawDll, expanded, _countof(expanded));
-        if (count > 0 && count <= _countof(expanded) && expanded[0] != L'\0')
-        {
-            if (dllPathOut != NULL && FAILED(StringCchCopyW(dllPathOut, dllPathOutCch, expanded))) { return FALSE; }
-            return TRUE;
-        }
-        /* Expansion failed or overflowed — skip rather than returning
-         * an unexpanded %VAR% string that would bypass path comparisons. */
-        return FALSE;
+        return rawDll[0] && (dllPathOut == NULL || SUCCEEDED(StringCchCopyW(dllPathOut, dllPathOutCch, rawDll)));
     }
 
     return FALSE;
@@ -1195,382 +1112,6 @@ static BOOL ServiceDeploy_ExtractDirectoryFromPath(const wchar_t* filePath, wcha
     memcpy(dirOut, filePath, dirLen * sizeof(wchar_t));
     dirOut[dirLen] = L'\0';
     return TRUE;
-}
-
-static void ServiceDeploy_AddLegacyRecord(
-    LegacyInstallRecord* records, size_t capacity, size_t* count,
-    const wchar_t* serviceName, const wchar_t* installDir, const wchar_t* dllPath,
-    BOOL serviceFound, BOOL filesOnly)
-{
-    if (*count >= capacity) { return; }
-    /* Deduplicate: only merge a files-only record into a service record for the
-     * same directory. Two different services sharing the same directory each get
-     * their own record so both are unregistered from SCM. */
-    if (installDir != NULL && installDir[0] != L'\0')
-    {
-        for (size_t i = 0; i < *count; ++i)
-        {
-            if (records[i].installDir[0] != L'\0' && _wcsicmp(records[i].installDir, installDir) == 0)
-            {
-                if (!serviceFound && records[i].serviceFound)
-                {
-                    /* Files-only record for a directory that already has a service record — skip. */
-                    return;
-                }
-                if (serviceFound && !records[i].serviceFound)
-                {
-                    /* Upgrade files-only record to service record. */
-                    records[i].serviceFound = TRUE;
-                    records[i].filesOnly = FALSE;
-                    if (serviceName != NULL) { StringCchCopyW(records[i].serviceName, _countof(records[i].serviceName), serviceName); }
-                    if (dllPath != NULL) { StringCchCopyW(records[i].dllPath, _countof(records[i].dllPath), dllPath); }
-                    return;
-                }
-                /* Both are service records — fall through to add a second record
-                 * so both services get unregistered. File cleanup only runs on
-                 * the first record (the second shares installDir). */
-            }
-        }
-    }
-    ZeroMemory(&records[*count], sizeof(records[*count]));
-    if (serviceName != NULL) { StringCchCopyW(records[*count].serviceName, _countof(records[*count].serviceName), serviceName); }
-    if (installDir != NULL) { StringCchCopyW(records[*count].installDir, _countof(records[*count].installDir), installDir); }
-    if (dllPath != NULL) { StringCchCopyW(records[*count].dllPath, _countof(records[*count].dllPath), dllPath); }
-    records[*count].serviceFound = serviceFound;
-    records[*count].filesOnly = filesOnly;
-    ++(*count);
-}
-
-static size_t ServiceDeploy_DiscoverLegacyInstallations(
-    const ServiceInstallPaths* currentPaths,
-    const wchar_t* activeServiceName,
-    LegacyInstallRecord* records,
-    size_t capacity)
-{
-    HKEY hServices = NULL;
-    DWORD index = 0;
-    size_t count = 0;
-
-    /* Phase 1: Scan all SCM services for MeshAgent DLLs at paths outside the
-     * current install root. This catches renamed services and moved installs. */
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services", 0, KEY_ENUMERATE_SUB_KEYS, &hServices) == ERROR_SUCCESS)
-    {
-        while (count < capacity)
-        {
-            wchar_t serviceName[512] = {0};
-            wchar_t dllPath[MAX_PATH * 4] = {0};
-            wchar_t installDir[MAX_PATH] = {0};
-            DWORD serviceNameCch = (DWORD)_countof(serviceName);
-            LSTATUS enumStatus = RegEnumKeyExW(hServices, index, serviceName, &serviceNameCch, NULL, NULL, NULL, NULL);
-
-            if (enumStatus == ERROR_NO_MORE_ITEMS) { break; }
-            if (enumStatus != ERROR_SUCCESS) { ++index; continue; }
-
-            /* Skip the active service. */
-            if (activeServiceName != NULL && activeServiceName[0] != L'\0' && _wcsicmp(serviceName, activeServiceName) == 0)
-            { ++index; continue; }
-
-            if (ServiceDeploy_IsLegacyMeshAgentService(serviceName, dllPath, _countof(dllPath)))
-            {
-                /* Skip services whose DLL is inside the current install root (alias scanner handles those). */
-                if (dllPath[0] != L'\0' && currentPaths != NULL && currentPaths->installDir[0] != L'\0' &&
-                    ServiceDeploy_PathStartsWithDirectoryInsensitive(dllPath, currentPaths->installDir))
-                { ++index; continue; }
-
-                if (dllPath[0] != L'\0' && ServiceDeploy_ExtractDirectoryFromPath(dllPath, installDir, _countof(installDir)))
-                {
-                    ServiceDeploy_AddLegacyRecord(records, capacity, &count, serviceName, installDir, dllPath, TRUE, FALSE);
-                }
-                else
-                {
-                    /* Service found but cannot determine install dir from DLL path; still record it for service cleanup. */
-                    ServiceDeploy_AddLegacyRecord(records, capacity, &count, serviceName, L"", dllPath, TRUE, FALSE);
-                }
-            }
-            ++index;
-        }
-        RegCloseKey(hServices);
-    }
-
-    /* Phase 2: Probe known legacy install directories for remnant files. */
-    {
-        wchar_t expandedPath[MAX_PATH] = {0};
-        const wchar_t* legacyRootPatterns[] = {
-            L"%ProgramFiles%\\Mesh Agent",
-            L"%ProgramFiles(x86)%\\Mesh Agent",
-            L"%ProgramData%\\Mesh Agent",
-            L"%ProgramData%\\MeshAgent",
-            L"%ProgramData%\\DiagnosticHost",      /* legacy diagnostic host install path */
-            L"%PUBLIC%\\Documents\\MeshAgent",     /* KVM startup log path (git: service_host.c) */
-        };
-
-        for (size_t r = 0; r < _countof(legacyRootPatterns) && count < capacity; ++r)
-        {
-            DWORD expandCount = ExpandEnvironmentStringsW(legacyRootPatterns[r], expandedPath, _countof(expandedPath));
-            if (expandCount == 0 || expandCount >= _countof(expandedPath)) { continue; }
-
-            /* Skip the current install root (use path-prefix comparison to handle
-             * trailing-separator differences between branding config and expanded env). */
-            if (currentPaths != NULL && currentPaths->installDir[0] != L'\0' &&
-                (ServiceDeploy_PathStartsWithDirectoryInsensitive(expandedPath, currentPaths->installDir) ||
-                 ServiceDeploy_PathStartsWithDirectoryInsensitive(currentPaths->installDir, expandedPath))) { continue; }
-
-            if (GetFileAttributesW(expandedPath) == INVALID_FILE_ATTRIBUTES) { continue; }
-
-            /* Check for any DLL or EXE with a known MeshAgent name. */
-            BOOL hasRemnant = FALSE;
-            for (size_t d = 0; d < _countof(g_LegacyDllNames) && !hasRemnant; ++d)
-            {
-                wchar_t probe[MAX_PATH] = {0};
-                if (MeshInstaller_CombinePath(probe, _countof(probe), expandedPath, g_LegacyDllNames[d]) &&
-                    GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES)
-                {
-                    hasRemnant = TRUE;
-                }
-            }
-            for (size_t e = 0; e < _countof(g_LegacyExeNames) && !hasRemnant; ++e)
-            {
-                wchar_t probe[MAX_PATH] = {0};
-                if (MeshInstaller_CombinePath(probe, _countof(probe), expandedPath, g_LegacyExeNames[e]) &&
-                    GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES)
-                {
-                    hasRemnant = TRUE;
-                }
-            }
-            if (hasRemnant)
-            {
-                ServiceDeploy_AddLegacyRecord(records, capacity, &count, NULL, expandedPath, NULL, FALSE, TRUE);
-            }
-        }
-    }
-
-    /* Phase 3: Check for known legacy service names that weren't found by the SCM scan
-     * (service may have been deleted but registry key tree and files remain). */
-    for (size_t n = 0; n < _countof(g_LegacyServiceNames) && count < capacity; ++n)
-    {
-        wchar_t keyPath[512] = {0};
-        HKEY hKey = NULL;
-
-        if (activeServiceName != NULL && _wcsicmp(g_LegacyServiceNames[n], activeServiceName) == 0) { continue; }
-
-        /* Already discovered by SCM scan? */
-        BOOL alreadyFound = FALSE;
-        for (size_t i = 0; i < count; ++i)
-        {
-            if (records[i].serviceFound && _wcsicmp(records[i].serviceName, g_LegacyServiceNames[n]) == 0) { alreadyFound = TRUE; break; }
-        }
-        if (alreadyFound) { continue; }
-
-        /* Check for orphaned state registry tree. */
-        if (SUCCEEDED(StringCchPrintfW(keyPath, _countof(keyPath), L"SOFTWARE\\Open Source\\%ls", g_LegacyServiceNames[n])) &&
-            RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath, 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
-        {
-            RegCloseKey(hKey);
-            ServiceDeploy_AddLegacyRecord(records, capacity, &count, g_LegacyServiceNames[n], L"", NULL, FALSE, FALSE);
-        }
-    }
-
-    return count;
-}
-
-/* Defense-in-depth: refuse to run file/directory removal against a directory
- * that is (or contains, or is contained by) a Windows system location, or a
- * drive root. A malformed or hostile legacy service ImagePath could otherwise
- * steer the per-name deletions (including the "svchost.exe" remnant removal)
- * at System32. Discovery should never produce such a directory, but file
- * deletion is irreversible, so guard it here as well. */
-static BOOL ServiceDeploy_IsUnsafeLegacyInstallDir(const wchar_t* dir)
-{
-    wchar_t systemDir[MAX_PATH] = {0};
-    wchar_t windowsDir[MAX_PATH] = {0};
-    size_t len;
-
-    if (dir == NULL) { return TRUE; }
-    len = wcslen(dir);
-    /* Empty, or too short to be anything but a drive root (e.g. "C:" / "C:\"). */
-    if (len < 4) { return TRUE; }
-    /* Drive root like "C:\" (3 chars handled above) or "C:\\" with nothing else. */
-    if (dir[1] == L':' && (dir[2] == L'\\' || dir[2] == L'/') && dir[3] == L'\0') { return TRUE; }
-
-    if (GetSystemDirectoryW(systemDir, _countof(systemDir)) > 0)
-    {
-        if (_wcsicmp(dir, systemDir) == 0 ||
-            ServiceDeploy_PathStartsWithDirectoryInsensitive(dir, systemDir) ||
-            ServiceDeploy_PathStartsWithDirectoryInsensitive(systemDir, dir)) { return TRUE; }
-    }
-    if (GetWindowsDirectoryW(windowsDir, _countof(windowsDir)) > 0)
-    {
-        if (_wcsicmp(dir, windowsDir) == 0 ||
-            ServiceDeploy_PathStartsWithDirectoryInsensitive(windowsDir, dir)) { return TRUE; }
-    }
-    return FALSE;
-}
-
-static void ServiceDeploy_CleanupLegacyRecord(const LegacyInstallRecord* record)
-{
-    const mesh_persistence_profile_t* persistence = MeshConfig_GetPersistence();
-
-    ServiceDeploy_LogInstallEvent(L"[LEGACY] Cleaning up legacy installation (service=%ls dir=%ls dll=%ls serviceFound=%u filesOnly=%u)",
-        record->serviceName[0] ? record->serviceName : L"(none)",
-        record->installDir[0] ? record->installDir : L"(none)",
-        record->dllPath[0] ? record->dllPath : L"(none)",
-        record->serviceFound,
-        record->filesOnly);
-
-    /* Stop and unregister the legacy service. */
-    if (record->serviceName[0] != L'\0')
-    {
-        wchar_t displayName[256] = {0};
-        ServiceDeploy_GetServiceDisplayNameForCleanup(record->serviceName, displayName, _countof(displayName));
-
-        if (record->serviceFound)
-        {
-            ServiceDeploy_ClearServiceRecovery(record->serviceName);
-            ServiceDeploy_RemoveRunKeyEntry(record->serviceName);
-            ServiceDeploy_RemoveScheduledTasks(persistence, displayName, record->serviceName);
-            (void)ServiceDeploy_StopServiceAndWait(record->serviceName, 30000, TRUE);
-
-            if (record->dllPath[0] != L'\0')
-            {
-                ServiceDeploy_TerminateProcessesByLoadedModulePath(record->dllPath);
-            }
-
-            /* For standalone-EXE legacy services (no DLL), terminate the EXE process
-             * directly so it cannot restart via recovery before we unregister. */
-            if (record->dllPath[0] == L'\0' && record->installDir[0] != L'\0')
-            {
-                wchar_t exePath[MAX_PATH] = {0};
-                for (size_t e = 0; e < _countof(g_LegacyExeNames); ++e)
-                {
-                    if (MeshInstaller_CombinePath(exePath, _countof(exePath), record->installDir, g_LegacyExeNames[e]))
-                    {
-                        ServiceDeploy_TerminateProcessesByPath(exePath);
-                    }
-                }
-            }
-
-            if (!ServiceHost_UnregisterServiceHostService(record->serviceName))
-            {
-                ServiceDeploy_LogInstallEvent(L"[LEGACY] Failed to unregister legacy service %ls (error=%lu)", record->serviceName, GetLastError());
-            }
-
-            (void)Security_RemoveFirewallRuleForService(record->serviceName);
-        }
-
-        /* Clean up orphaned state registry even for services already removed from SCM. */
-        (void)ServiceDeploy_DeleteServiceStateRegistryTree(record->serviceName);
-    }
-
-    /* Remove files at the legacy install directory. */
-    if (record->installDir[0] != L'\0' && GetFileAttributesW(record->installDir) != INVALID_FILE_ATTRIBUTES &&
-        !ServiceDeploy_IsUnsafeLegacyInstallDir(record->installDir))
-    {
-        size_t i;
-        wchar_t filePath[MAX_PATH] = {0};
-
-        for (i = 0; i < _countof(g_LegacyDllNames); ++i)
-        {
-            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyDllNames[i]))
-            {
-                (void)ServiceDeploy_RemoveFileIfExistsWithTimeout(filePath, 30000, TRUE);
-            }
-        }
-        for (i = 0; i < _countof(g_LegacyExeNames); ++i)
-        {
-            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyExeNames[i]))
-            {
-                ServiceDeploy_TerminateProcessesByPath(filePath);
-                Security_RemoveFirewallRulesByExePath(filePath);
-                (void)ServiceDeploy_RemoveFileIfExistsWithTimeout(filePath, 30000, TRUE);
-            }
-        }
-        for (i = 0; i < _countof(g_LegacyDbNames); ++i)
-        {
-            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyDbNames[i]))
-            {
-                (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
-            }
-        }
-        for (i = 0; i < _countof(g_LegacyConfNames); ++i)
-        {
-            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyConfNames[i]))
-            {
-                (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
-            }
-        }
-        for (i = 0; i < _countof(g_LegacyLogNames); ++i)
-        {
-            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyLogNames[i]))
-            {
-                (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
-            }
-        }
-        /* Legacy svchost.exe remnant. */
-        if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, L"svchost.exe"))
-        {
-            ServiceDeploy_TerminateProcessesByPath(filePath);
-            Security_RemoveFirewallRulesByExePath(filePath);
-            (void)ServiceDeploy_RemoveFileIfExistsWithTimeout(filePath, 30000, TRUE);
-        }
-        /* Proxy and misc files (agent-installer.js). */
-        for (i = 0; i < _countof(g_LegacyMiscNames); ++i)
-        {
-            if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, g_LegacyMiscNames[i]))
-            {
-                (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
-            }
-        }
-        /* Update staging files (meshcore/agentcore.c: ".update.exe"). */
-        if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, L".update.exe"))
-        {
-            (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
-        }
-        /* Legacy state files. */
-        if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, L"state.dat"))
-        {
-            (void)ServiceDeploy_RemoveFileIfExists(filePath, TRUE);
-        }
-
-        /* Remove state and logs subdirectories. */
-        if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, L"state"))
-        {
-            (void)ServiceDeploy_RemoveDirectoryTree(filePath, TRUE);
-        }
-        if (MeshInstaller_CombinePath(filePath, _countof(filePath), record->installDir, L"logs"))
-        {
-            (void)ServiceDeploy_RemoveDirectoryTree(filePath, TRUE);
-        }
-
-        /* Remove the legacy install root only if it is now empty. */
-        (void)RemoveDirectoryW(record->installDir);
-    }
-    else if (record->installDir[0] != L'\0' && ServiceDeploy_IsUnsafeLegacyInstallDir(record->installDir))
-    {
-        ServiceDeploy_LogInstallEvent(L"[LEGACY] Skipped file cleanup for unsafe/system directory %ls", record->installDir);
-    }
-
-    ServiceDeploy_LogInstallEvent(L"[LEGACY] Legacy installation cleanup completed for %ls",
-        record->serviceName[0] ? record->serviceName : record->installDir);
-}
-
-static size_t ServiceDeploy_CleanupLegacyInstallations(const ServiceInstallPaths* currentPaths, const wchar_t* activeServiceName)
-{
-    LegacyInstallRecord records[LEGACY_INSTALL_MAX_RECORDS];
-    size_t count, i;
-
-    ZeroMemory(records, sizeof(records));
-    count = ServiceDeploy_DiscoverLegacyInstallations(currentPaths, activeServiceName, records, _countof(records));
-
-    if (count == 0) { return 0; }
-
-    ServiceDeploy_LogInstallEvent(L"[LEGACY] Discovered %Iu legacy installation(s) to clean up", count);
-
-    for (i = 0; i < count; ++i)
-    {
-        ServiceDeploy_CleanupLegacyRecord(&records[i]);
-    }
-
-    return count;
 }
 
 // ================================================================
@@ -2696,9 +2237,9 @@ static BOOL ServiceDeploy_InstalledProvisioningHealthy(const ServiceInstallPaths
         mshPathCch = _countof(localMshPath);
     }
 
-    if (!ServiceDeploy_BuildInstalledMshPath(paths->exePath, mshPath, mshPathCch)) { return FALSE; }
+    BOOL haveMshPath = ServiceDeploy_BuildInstalledMshPath(paths->exePath, mshPath, mshPathCch);
     configHealthy = ServiceDeploy_ConfigHasRequiredKeys(paths->confPath);
-    mshHealthy = ServiceDeploy_ConfigHasRequiredKeys(mshPath);
+    mshHealthy = haveMshPath && ServiceDeploy_ConfigHasRequiredKeys(mshPath);
     if (configHealthy && mshHealthy) { return TRUE; }
 
     return ServiceDeploy_DataStoreIdentityPresent(paths->dbPath);
@@ -2711,7 +2252,7 @@ static BOOL ServiceDeploy_BuildSiblingPathWithExtension(const wchar_t* sourcePat
     if (FAILED(StringCchCopyW(outPath, outPathCch, sourcePath))) { return FALSE; }
 
     wchar_t* dot = wcsrchr(outPath, L'.');
-    if (dot != NULL)
+    if (dot != NULL && dot >= MeshInstaller_GetPathLeaf(outPath))
     {
         return SUCCEEDED(StringCchCopyW(dot, outPathCch - (size_t)(dot - outPath), extension));
     }
@@ -2769,48 +2310,65 @@ static BOOL ServiceDeploy_DirectoryHasEntries(const wchar_t* path)
     return FALSE;
 }
 
+/* Publish a fully copied and flushed sibling before replacing the destination.
+ * A failed read/write/rename must never delete the only usable live database. */
 static BOOL ServiceDeploy_CopyFileOverwrite(const wchar_t* sourcePath, const wchar_t* destPath)
 {
-    const DWORD timeoutMs = 60000;
     const DWORD startTick = GetTickCount();
-    DWORD delay = 100;
-    DWORD lastErr = ERROR_SUCCESS;
-
-    if (sourcePath == NULL || sourcePath[0] == L'\0' || destPath == NULL || destPath[0] == L'\0') { return FALSE; }
-    if (!ServiceDeploy_PathExists(sourcePath)) { return FALSE; }
-
-    while ((GetTickCount() - startTick) < timeoutMs)
+    DWORD error = ERROR_SUCCESS, attributes;
+    wchar_t directory[MAX_PATH], temporary[MAX_PATH] = {0};
+    HANDLE file = INVALID_HANDLE_VALUE;
+    BOOL ok = FALSE;
+    if (!sourcePath || !*sourcePath || !destPath || !*destPath ||
+        !ServiceDeploy_ExtractDirectoryFromPath(destPath, directory, _countof(directory)))
+    { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    if (ServiceUtil_PathsReferToSameFileW(sourcePath, destPath)) { return TRUE; }
+    if (!GetTempFileNameW(directory, L"mcu", 0, temporary)) { return FALSE; }
+    do
     {
-        SetFileAttributesW(destPath, FILE_ATTRIBUTE_NORMAL);
-        if (DeleteFileW(destPath) || GetLastError() == ERROR_FILE_NOT_FOUND)
-        {
-            SetLastError(ERROR_SUCCESS);
-            if (CopyFileW(sourcePath, destPath, FALSE))
-            {
-                return TRUE;
-            }
-            lastErr = GetLastError();
-        }
-        else
-        {
-            lastErr = GetLastError();
-        }
-
-        if (lastErr == ERROR_SHARING_VIOLATION ||
-            lastErr == ERROR_LOCK_VIOLATION ||
-            lastErr == ERROR_ACCESS_DENIED ||
-            lastErr == ERROR_ALREADY_EXISTS)
-        {
-            Sleep(delay);
-            if (delay < 1000) { delay += 100; }
-            continue;
-        }
-        break;
+        if (CopyFileW(sourcePath, temporary, FALSE)) { ok = TRUE; break; }
+        error = GetLastError();
+        if (error != ERROR_SHARING_VIOLATION && error != ERROR_LOCK_VIOLATION && error != ERROR_ACCESS_DENIED) { break; }
+        Sleep(100);
+    } while (GetTickCount() - startTick < 60000);
+    if (!ok) { goto done; }
+    ok = FALSE;
+    if (!SetFileAttributesW(temporary, FILE_ATTRIBUTE_NORMAL)) { error = GetLastError(); goto done; }
+    file = CreateFileW(temporary, GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) { error = GetLastError(); goto done; }
+    if (!FlushFileBuffers(file)) { error = GetLastError(); goto done; }
+    CloseHandle(file); file = INVALID_HANDLE_VALUE;
+    attributes = GetFileAttributesW(destPath);
+    if (attributes == INVALID_FILE_ATTRIBUTES)
+    {
+        error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) { goto done; }
     }
-
-    ServiceDeploy_LogInstallEvent(L"[UPDATE] Copy failed (%ls -> %ls, error=%lu)", sourcePath, destPath, lastErr);
-    SetLastError(lastErr);
-    return FALSE;
+    else
+    {
+        if (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) { error = ERROR_ACCESS_DENIED; goto done; }
+        if ((attributes & FILE_ATTRIBUTE_READONLY) && !SetFileAttributesW(destPath, attributes & ~FILE_ATTRIBUTE_READONLY))
+        { error = GetLastError(); goto done; }
+    }
+    do
+    {
+        ok = MoveFileExW(temporary, destPath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        if (ok) { break; }
+        error = GetLastError();
+        if (error != ERROR_SHARING_VIOLATION && error != ERROR_LOCK_VIOLATION && error != ERROR_ACCESS_DENIED) { break; }
+        Sleep(100);
+    } while (GetTickCount() - startTick < 60000);
+    if (!ok && attributes != INVALID_FILE_ATTRIBUTES) { SetFileAttributesW(destPath, attributes); }
+done:
+    if (file != INVALID_HANDLE_VALUE) { CloseHandle(file); }
+    if (!ok)
+    {
+        SetFileAttributesW(temporary, FILE_ATTRIBUTE_NORMAL);
+        DeleteFileW(temporary);
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Copy failed (%ls -> %ls, error=%lu)", sourcePath, destPath, error);
+        SetLastError(error);
+    }
+    return ok;
 }
 
 static BOOL ServiceDeploy_WaitForUpdateTargetQuiesced(const ServiceInstallPaths* paths, const wchar_t* targetPath, DWORD timeoutMs, const wchar_t* phaseTag)
@@ -3700,14 +3258,15 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
         ok = ServiceDeploy_DeleteUpdateTransactionArtifacts(&tx);
         goto verifyCleanup;
     }
-    if (ServiceDeploy_BindingHasMovedRoot(&paths, tx.originalBinding))
+    if (tx.originalBinding && (tx.originalBinding->incumbentDbPath[0] || ServiceDeploy_BindingHasMovedRoot(&paths, tx.originalBinding)))
     {
-        wchar_t originalPayload[MAX_PATH];
-        if (!ServiceDeploy_BindingPayloadPath(tx.originalBinding, originalPayload, _countof(originalPayload)) ||
-            !ServiceDeploy_FindIncumbentPaths(originalPayload, &originalPaths) ||
-            !ServiceDeploy_CaptureIdentitySnapshot(originalPaths.dbPath, &tx.rollbackIdentity)) { goto done; }
-        rollbackPaths = &originalPaths;
-        tx.rollbackIdentityReady = TRUE;
+        if (!ServiceDeploy_CheckpointIncumbentPaths(tx.originalBinding, &originalPaths)) { goto done; }
+        if (_wcsicmp(originalPaths.dbPath, paths.dbPath))
+        {
+            if (!ServiceDeploy_CaptureIdentitySnapshot(originalPaths.dbPath, &tx.rollbackIdentity) || !tx.rollbackIdentity.nodeIdPresent) { goto done; }
+            rollbackPaths = &originalPaths;
+            tx.rollbackIdentityReady = TRUE;
+        }
     }
     if (ServiceJournal_PhaseRequiresBackups(tx.journalPhase))
     {
@@ -3749,11 +3308,6 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
         else if (ok && currentExists) { ok = ServiceHost_UnregisterServiceHostService(serviceName); }
     }
     if (ok && tx.originalBinding) { ok = ServiceDeploy_SetServiceStartType(serviceName, tx.originalBinding->config->dwStartType); }
-    if (ok && (tx.liveDbExists || rollbackPaths != &paths) && !ServiceDeploy_RecordUpdateActivationFailureHold(rollbackPaths))
-    {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to record interrupted-update activation hold before restart");
-        ok = FALSE;
-    }
     if (ok && !ServiceDeploy_BindingHasMovedRoot(&paths, tx.originalBinding) && !ServiceDeploy_ReconcileServiceRecovery())
     {
         ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Restored recovery companions require later reconciliation");
@@ -4062,9 +3616,7 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     BOOL restartService = TRUE;
     BOOL serviceExists = FALSE;
     BOOL serviceWasRunning = FALSE;
-    BOOL incumbentQuiesced = FALSE;
     BOOL rollbackCompleted = FALSE;
-    BOOL failureHoldRecorded = FALSE;
     HANDLE rollbackStartupAuthorization = NULL;
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
@@ -4142,6 +3694,9 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
             ServiceDeploy_LogInstallEvent(L"[UPDATE] Cannot preserve incumbent configuration; requires LocalSystem, a stable Win32 service and managed legacy EXE path. Aborting before quiesce");
             return FALSE;
         }
+        StringCchCopyW(tx.originalBinding->incumbentExePath, _countof(tx.originalBinding->incumbentExePath), g_IncumbentPaths.exePath);
+        StringCchCopyW(tx.originalBinding->incumbentDllPath, _countof(tx.originalBinding->incumbentDllPath), g_IncumbentPaths.dllPath);
+        StringCchCopyW(tx.originalBinding->incumbentDbPath, _countof(tx.originalBinding->incumbentDbPath), g_IncumbentPaths.dbPath);
         serviceWasRunning = tx.originalBinding->running;
     }
 
@@ -4191,8 +3746,6 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         success = FALSE;
         goto CLEANUP;
     }
-    // From here on nothing else holds the datastore, so a failure hold can be written.
-    incumbentQuiesced = TRUE;
     ServiceDeploy_ReleaseRuntimeFiles(&paths, TRUE);
     if (g_HaveIncumbentPaths) { ServiceDeploy_ReleaseRuntimeFiles(&g_IncumbentPaths, TRUE); }
 
@@ -4226,6 +3779,15 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         tx.rollbackIdentityReady = TRUE;
         tx.postUpdateIdentity = tx.rollbackIdentity;
         tx.postUpdateIdentityReady = TRUE;
+    }
+    /* A registration without an identity DB stays repairable; an existing DB
+     * must carry a NodeID so activation never replaces it with a fresh one. */
+    if (serviceExists && (tx.liveDbExists || g_HaveIncumbentPaths) &&
+        (!tx.rollbackIdentityReady || !tx.rollbackIdentity.nodeIdPresent))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Existing service has no verified NodeID; refusing fresh identity activation");
+        success = FALSE;
+        goto CLEANUP;
     }
     if (!allowInstalledProvisioning)
     {
@@ -4285,8 +3847,8 @@ CLEANUP:
     // Clear successful-activation markers while the service is still stopped.
     if (success)
     {
-        if (!ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]") ||
-            !ServiceDeploy_FinalizeUpdateTransaction(&paths, &tx))
+        ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]");
+        if (!ServiceDeploy_FinalizeUpdateTransaction(&paths, &tx))
         {
             ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Transaction cleanup incomplete before service restart; retaining rollback capability");
             success = FALSE;
@@ -4387,13 +3949,6 @@ ROLLBACK:
             if (rollbackOk && tx.originalBinding) { rollbackOk = ServiceBinding_Restore(serviceKeyName, tx.originalBinding); }
             else if (rollbackOk && currentExists) { rollbackOk = ServiceHost_UnregisterServiceHostService(serviceKeyName); }
         }
-        // The hold must be written while the incumbent is still stopped: once it runs it
-        // owns the datastore, and the agent that requested this update was stopped by it.
-        if (rollbackOk && (tx.backupsReady || incumbentQuiesced))
-        {
-            failureHoldRecorded = !(tx.liveDbExists || g_HaveIncumbentPaths) ||
-                ServiceDeploy_RecordUpdateActivationFailureHold(g_HaveIncumbentPaths ? &g_IncumbentPaths : &paths);
-        }
         if (rollbackOk && tx.backupsReady)
         {
             rollbackOk = ServiceDeploy_FlushUpdateFiles(&paths, &tx);
@@ -4434,12 +3989,6 @@ ROLLBACK:
     }
     else
     {
-        if (tx.journalPhase != SERVICE_JOURNAL_COMMITTED && (tx.backupsReady || incumbentQuiesced) &&
-            (tx.liveDbExists || g_HaveIncumbentPaths) && !failureHoldRecorded &&
-            !ServiceDeploy_RecordUpdateActivationFailureHold(g_HaveIncumbentPaths ? &g_IncumbentPaths : &paths))
-        {
-            ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Unable to persist failed package hold");
-        }
         if (rollbackCompleted)
         {
             ServiceDeploy_DeleteUpdateTransactionArtifacts(&tx);
@@ -4849,8 +4398,9 @@ static BOOL ServiceDeploy_DataStorePutValue(const wchar_t* dbPath, const char* k
     if (store == NULL) { return FALSE; }
 
     const int putStatus = ILibSimpleDataStore_PutEx(store, (char*)key, (size_t)strnlen_s(key, 255), (char*)value, valueLen);
+    const int flushStatus = ILibSimpleDataStore_Flush(store);
     ILibSimpleDataStore_Close(store);
-    return (putStatus == 0);
+    return (putStatus == 0 && flushStatus == 0);
 }
 
 static BOOL ServiceDeploy_DataStoreDeleteValue(const wchar_t* dbPath, const char* key)
@@ -4869,8 +4419,9 @@ static BOOL ServiceDeploy_DataStoreDeleteValue(const wchar_t* dbPath, const char
     if (store == NULL) { return FALSE; }
 
     const int deleteStatus = ILibSimpleDataStore_DeleteEx(store, (char*)key, (size_t)strnlen_s(key, 255));
+    const int flushStatus = ILibSimpleDataStore_Flush(store);
     ILibSimpleDataStore_Close(store);
-    return (deleteStatus != 0);
+    return (deleteStatus != 0 && flushStatus == 0);
 }
 
 static BOOL ServiceDeploy_LoadProvisioningIdentity(const wchar_t* configPath, const wchar_t* workingDbPath, const ServiceIdentitySnapshot* preservedIdentity, BOOL enforcePreservedNodeId, ServiceIdentitySnapshot* provisioningIdentity)
@@ -4982,82 +4533,30 @@ static BOOL ServiceDeploy_DerivePostUpdateIdentity(const ServiceUpdateTransactio
         postUpdateIdentity);
 }
 
-static BOOL ServiceDeploy_ReadUpdateActivationTargetHash(const ServiceInstallPaths* paths, char* valueOut, size_t valueOutLen, int* valueLenOut)
+/* Update holds were removed. Delete keys written by earlier builds so a
+ * rollback to one of them does not act on a stale hold. A key that cannot be
+ * deleted is logged and never fails the transaction. */
+static void ServiceDeploy_ClearUpdateActivationHolds(const ServiceInstallPaths* paths, const wchar_t* phaseLabel)
 {
-    char value[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 4] = {0};
-    int valueLen = 0;
-
-    if (valueLenOut != NULL) { *valueLenOut = 0; }
-    if (valueOut != NULL && valueOutLen > 0) { valueOut[0] = 0; }
-    if (paths == NULL || paths->dbPath[0] == L'\0') { return FALSE; }
-    if (!ServiceDeploy_DataStoreValueExists(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY, value, sizeof(value), &valueLen)) { return FALSE; }
-    valueLen = MeshAgent_NormalizeUpdateHashHex(value, valueLen, sizeof(value));
-    if (valueLen == 0)
-    {
-        (void)ServiceDeploy_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY);
-        return FALSE;
-    }
-    if (valueOut != NULL && valueOutLen > 0)
-    {
-        if (valueOutLen <= (size_t)valueLen) { return FALSE; }
-        memcpy_s(valueOut, valueOutLen, value, (size_t)valueLen + 1);
-    }
-    if (valueLenOut != NULL) { *valueLenOut = valueLen; }
-    return TRUE;
-}
-
-static BOOL ServiceDeploy_ClearUpdateActivationHolds(const ServiceInstallPaths* paths, const wchar_t* phaseLabel)
-{
+    static const char* const staleKeys[] = {
+        MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY,
+        "UpdateActivationFailureCompressed", "UpdateForceAttempt", "forceUpdateHold", "forceUpdatePending",
+    };
     const wchar_t* safePhase = (phaseLabel != NULL && phaseLabel[0] != L'\0') ? phaseLabel : L"[UPDATE]";
-    BOOL ok = TRUE;
-    if (paths == NULL || paths->dbPath[0] == L'\0') { return FALSE; }
+    if (paths == NULL || paths->dbPath[0] == L'\0') { return; }
 
-    if (ServiceDeploy_DataStoreValueExists(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY, NULL, 0, NULL))
+    for (size_t i = 0; i < _countof(staleKeys); ++i)
     {
-        if (ServiceDeploy_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY))
+        if (!ServiceDeploy_DataStoreValueExists(paths->dbPath, staleKeys[i], NULL, 0, NULL)) { continue; }
+        if (ServiceDeploy_DataStoreDeleteValue(paths->dbPath, staleKeys[i]))
         {
-            ServiceDeploy_LogInstallEvent(L"%ls Cleared update activation target marker", safePhase);
+            ServiceDeploy_LogInstallEvent(L"%ls Cleared stale update key %hs", safePhase, staleKeys[i]);
         }
         else
         {
-            ServiceDeploy_LogInstallEvent(L"%ls Failed to clear update activation target marker", safePhase);
-            ok = FALSE;
+            ServiceDeploy_LogInstallEvent(L"[WARN] %ls Failed to clear stale update key %hs", safePhase, staleKeys[i]);
         }
     }
-    if (ServiceDeploy_DataStoreValueExists(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY, NULL, 0, NULL))
-    {
-        if (ServiceDeploy_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY))
-        {
-            ServiceDeploy_LogInstallEvent(L"%ls Cleared update activation failure marker", safePhase);
-        }
-        else
-        {
-            ServiceDeploy_LogInstallEvent(L"%ls Failed to clear update activation failure marker", safePhase);
-            ok = FALSE;
-        }
-    }
-    return ok;
-}
-
-static BOOL ServiceDeploy_RecordUpdateActivationFailureHold(const ServiceInstallPaths* paths)
-{
-    char targetHash[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 1] = {0};
-    int targetHashLen = 0;
-
-    if (paths == NULL || paths->dbPath[0] == L'\0') { return FALSE; }
-    if (!ServiceDeploy_ReadUpdateActivationTargetHash(paths, targetHash, sizeof(targetHash), &targetHashLen)) { return FALSE; }
-
-    if (ServiceDeploy_DataStorePutValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY, targetHash, (size_t)targetHashLen))
-    {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Recorded failed update activation package hash hold");
-        (void)ServiceDeploy_DataStoreDeleteValue(paths->dbPath, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY);
-        return TRUE;
-    }
-    else
-    {
-        ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to record update activation package hash hold");
-    }
-    return FALSE;
 }
 
 static BOOL ServiceDeploy_IsPrintableIdentityValue(const char* value, int valueLen)
@@ -5207,34 +4706,29 @@ static BOOL ServiceDeploy_DataStoreIdentityPresent(const wchar_t* dbPath)
 
 static BOOL ServiceDeploy_BindingPayloadPath(const ServiceBindingSnapshot* binding, wchar_t* path, size_t capacity)
 {
-    wchar_t translated[MAX_PATH * 4];
-    const wchar_t* image;
-    const wchar_t* oldEntry = L",Stealth_SvchostServiceMain";
-    size_t length, suffix = wcslen(oldEntry);
+    wchar_t expanded[MAX_PATH * 4];
     if (!binding || !binding->config || !path || !capacity) { return FALSE; }
     path[0] = 0;
-    image = binding->config->lpBinaryPathName;
-    if (!image) { return FALSE; }
     if (binding->config->dwServiceType == SERVICE_WIN32_SHARE_PROCESS)
     {
         const ServiceBindingValue* value = &binding->values[9];
         if (!value->present || !value->data || !value->size || value->size % sizeof(wchar_t) ||
             (value->type != REG_SZ && value->type != REG_EXPAND_SZ) ||
             ((wchar_t*)value->data)[value->size / sizeof(wchar_t) - 1]) { return FALSE; }
-        DWORD count = ExpandEnvironmentStringsW((wchar_t*)value->data, path, (DWORD)capacity);
-        return count && count <= capacity && ServiceBinding_SharedPayloadSupported(binding, path);
+        if (value->type == REG_SZ)
+        { if (FAILED(StringCchCopyW(path, capacity, (wchar_t*)value->data))) { return FALSE; } }
+        else
+        {
+            DWORD count = ExpandEnvironmentStringsW((wchar_t*)value->data, path, (DWORD)capacity);
+            if (!count || count > capacity) { return FALSE; }
+        }
+        return ServiceBinding_SharedPayloadSupported(binding, path);
     }
-    if (ServiceHost_ParseImagePath(image, path, capacity)) { return TRUE; }
-    length = wcslen(image);
-    if (length > suffix && !wcscmp(image + length - suffix, oldEntry))
-    {
-        size_t prefix = length - suffix;
-        if (prefix >= _countof(translated)) { return FALSE; }
-        memcpy(translated, image, prefix * sizeof(wchar_t));
-        if (FAILED(StringCchCopyW(translated + prefix, _countof(translated) - prefix, L",MeshServiceHostW"))) { return FALSE; }
-        return ServiceHost_ParseImagePath(translated, path, capacity);
-    }
-    return binding->legacy && ServiceDeploy_ExtractExecutableFromCommand(image, path, capacity);
+    if (!binding->config->lpBinaryPathName) { return FALSE; }
+    DWORD count = ExpandEnvironmentStringsW(binding->config->lpBinaryPathName, expanded, _countof(expanded));
+    if (!count || count > _countof(expanded)) { return FALSE; }
+    if (ServiceBinding_ParseCallbackImage(expanded, path, capacity)) { return TRUE; }
+    return binding->legacy && ServiceDeploy_ExtractExecutableFromCommand(expanded, path, capacity);
 }
 
 static BOOL ServiceDeploy_EmbeddedPayloadMatchesDll(const wchar_t* executable, const wchar_t* dll)
@@ -5290,6 +4784,84 @@ static BOOL ServiceDeploy_SuspendOriginalRestarters(const ServiceInstallPaths* c
     return ok;
 }
 
+/* A conventional backup copy is not a second live datastore. Only exclude
+ * byte-identical .bak/.backup siblings of an existing file; never pick between
+ * unrelated stores or different revisions based on NodeID alone. */
+static BOOL ServiceDeploy_IsDuplicateDatabaseBackup(const wchar_t* path)
+{
+    wchar_t original[MAX_PATH];
+    const wchar_t* suffix = wcsrchr(path, L'.');
+    HANDLE left = INVALID_HANDLE_VALUE, right = INVALID_HANDLE_VALUE;
+    BOOL equal = FALSE;
+    LARGE_INTEGER a, b;
+    BYTE x[16384], y[16384];
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!suffix || (_wcsicmp(suffix, L".bak") && _wcsicmp(suffix, L".backup")) ||
+        FAILED(StringCchCopyW(original, _countof(original), path))) { return FALSE; }
+    original[suffix - path] = 0;
+    left = CreateFileW(original, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    right = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (left == INVALID_HANDLE_VALUE || right == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(left, &info) || (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+        !GetFileInformationByHandle(right, &info) || (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+        !GetFileSizeEx(left, &a) || !GetFileSizeEx(right, &b) || a.QuadPart != b.QuadPart) { goto done; }
+    do
+    {
+        DWORD n, m;
+        if (!ReadFile(left, x, sizeof(x), &n, NULL) || !ReadFile(right, y, sizeof(y), &m, NULL) ||
+            n != m || memcmp(x, y, n)) { goto done; }
+        if (!n) { equal = TRUE; break; }
+    } while (TRUE);
+done:
+    if (left != INVALID_HANDLE_VALUE) { CloseHandle(left); }
+    if (right != INVALID_HANDLE_VALUE) { CloseHandle(right); }
+    return equal;
+}
+
+/* Recovery must not rediscover ownership from a directory activation changed.
+ * Older v1 journals have no paths and retain the conservative discovery path. */
+static BOOL ServiceDeploy_CheckpointIncumbentPaths(const ServiceBindingSnapshot* binding, ServiceInstallPaths* paths)
+{
+    wchar_t payload[MAX_PATH], root[MAX_PATH], canonical[MAX_PATH], directory[MAX_PATH];
+    if (!binding || !ServiceDeploy_BindingPayloadPath(binding, payload, _countof(payload))) { return FALSE; }
+    if (!binding->incumbentDbPath[0]) { return ServiceDeploy_FindIncumbentPaths(payload, paths); }
+    if (wcslen(payload) < 4 || payload[1] != L':' || (payload[2] != L'\\' && payload[2] != L'/')) { return FALSE; }
+    ZeroMemory(paths, sizeof(*paths));
+    DWORD count = GetFullPathNameW(payload, _countof(canonical), canonical, NULL);
+    if (!count || count >= _countof(canonical) ||
+        !ServiceDeploy_ExtractDirectoryFromPath(canonical, root, _countof(root)) || wcslen(root) < 4 ||
+        (_wcsicmp(canonical, binding->incumbentExePath) && _wcsicmp(canonical, binding->incumbentDllPath))) { return FALSE; }
+    const wchar_t* saved[] = {binding->incumbentExePath, binding->incumbentDllPath, binding->incumbentDbPath};
+    wchar_t* destinations[] = {paths->exePath, paths->dllPath, paths->dbPath};
+    for (size_t i = 0; i < _countof(saved); ++i)
+    {
+        if (!saved[i][0]) { continue; }
+        count = GetFullPathNameW(saved[i], _countof(canonical), canonical, NULL);
+        if (!count || count >= _countof(canonical) || _wcsicmp(canonical, saved[i]) ||
+            !ServiceDeploy_ExtractDirectoryFromPath(canonical, directory, _countof(directory)) || _wcsicmp(directory, root)) { return FALSE; }
+        DWORD attributes = GetFileAttributesW(canonical), error = GetLastError();
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        { if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) { return FALSE; } }
+        else if (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) { return FALSE; }
+        StringCchCopyW(destinations[i], MAX_PATH, canonical);
+    }
+    StringCchCopyW(paths->installDir, _countof(paths->installDir), root);
+    /* Refuse reparse traversal even if a previously owned root was replaced. */
+    StringCchCopyW(directory, _countof(directory), root);
+    while (wcslen(directory) >= 3)
+    {
+        DWORD attributes = GetFileAttributesW(directory), error = GetLastError();
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        { if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) { return FALSE; } }
+        else if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) { return FALSE; }
+        if (wcslen(directory) == 3) { break; }
+        wchar_t* separator = wcsrchr(directory, L'\\');
+        if (!separator || separator < directory + 2) { return FALSE; }
+        if (separator == directory + 2) { separator[1] = 0; } else { *separator = 0; }
+    }
+    return ServiceDeploy_BuildSiblingPathWithExtension(paths->dbPath, L".conf", paths->confPath, _countof(paths->confPath));
+}
+
 /* A valid datastore beside a managed service supplies ownership independently
  * of product spelling. Refuse multiple identities rather than picking one. */
 static BOOL ServiceDeploy_FindIncumbentPaths(const wchar_t* payload, ServiceInstallPaths* paths)
@@ -5299,7 +4871,7 @@ static BOOL ServiceDeploy_FindIncumbentPaths(const wchar_t* payload, ServiceInst
     WIN32_FIND_DATAW entry;
     HANDLE search;
     DWORD attributes, error;
-    unsigned found = 0;
+    unsigned found = 0, companions = 0;
     ServiceIdentitySnapshot identity;
     ZeroMemory(paths, sizeof(*paths));
     if (!payload || wcslen(payload) < 4 || payload[1] != L':' ||
@@ -5330,6 +4902,13 @@ static BOOL ServiceDeploy_FindIncumbentPaths(const wchar_t* payload, ServiceInst
     {
         if (entry.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) { continue; }
         if (!MeshInstaller_CombinePath(candidate, _countof(candidate), paths->installDir, entry.cFileName)) { found = 2; break; }
+        if (ServiceDeploy_IsDuplicateDatabaseBackup(candidate)) { continue; }
+        /* An interrupted copy (mcu*.tmp) or datastore compaction (*.db.tmp) holds a
+         * duplicate identity but is never a live store. Leave it in place. */
+        size_t nameLength = wcslen(entry.cFileName);
+        if (nameLength > 4 && !_wcsicmp(entry.cFileName + nameLength - 4, L".tmp") &&
+            (!_wcsnicmp(entry.cFileName, L"mcu", 3) ||
+             (nameLength > 7 && !_wcsicmp(entry.cFileName + nameLength - 7, L".db.tmp")))) { continue; }
         if (ServiceDeploy_CaptureIdentitySnapshot(candidate, &identity) && identity.nodeIdPresent &&
             identity.meshIdPresent && identity.serverIdPresent && identity.meshServerPresent)
         {
@@ -5361,8 +4940,8 @@ static BOOL ServiceDeploy_FindIncumbentPaths(const wchar_t* payload, ServiceInst
                 if (!MeshInstaller_CombinePath(candidate, _countof(candidate), paths->installDir, entry.cFileName)) { FindClose(search); return FALSE; }
                 if (ServiceDeploy_EmbeddedPayloadMatchesDll(candidate, canonical))
                 {
-                    if (paths->exePath[0]) { FindClose(search); return FALSE; }
-                    StringCchCopyW(paths->exePath, _countof(paths->exePath), candidate);
+                    if (++companions == 1) { StringCchCopyW(paths->exePath, _countof(paths->exePath), candidate); }
+                    else { paths->exePath[0] = 0; } /* Retain ambiguous companions; the DLL binding is sufficient. */
                 }
             } while (FindNextFileW(search, &entry));
             error = GetLastError(); FindClose(search);
@@ -5370,6 +4949,21 @@ static BOOL ServiceDeploy_FindIncumbentPaths(const wchar_t* payload, ServiceInst
         }
     }
     return ServiceDeploy_BuildSiblingPathWithExtension(paths->dbPath, L".conf", paths->confPath, _countof(paths->confPath));
+}
+
+static BOOL ServiceDeploy_SelectJournalService(const ServiceInstallPaths* paths, BOOL* found)
+{
+    ServiceUpdateTransaction tx = {0};
+    ServiceJournalRecord* record = NULL;
+    *found = FALSE;
+    if (!ServiceDeploy_InitializeUpdateTransactionPaths(paths, &tx) || !ServiceDeploy_TransactionPathsSafe(paths, &tx) ||
+        !ServiceJournal_Load(tx.journalPath, NULL, &record)) { return FALSE; }
+    if (!record) { return TRUE; }
+    StringCchCopyW(g_RuntimeBrandingOverrides.serviceKeyName, _countof(g_RuntimeBrandingOverrides.serviceKeyName), record->serviceName);
+    g_RuntimeBrandingOverrides.hasServiceKeyName = TRUE;
+    *found = TRUE;
+    ServiceJournal_Free(record);
+    return TRUE;
 }
 
 static BOOL ServiceDeploy_SelectIncumbent(void)
@@ -5383,9 +4977,13 @@ static BOOL ServiceDeploy_SelectIncumbent(void)
     g_HaveIncumbentPaths = FALSE;
     ZeroMemory(&g_IncumbentPaths, sizeof(g_IncumbentPaths));
     if (!ServiceDeploy_GetInstallPaths(&current)) { return FALSE; }
+    BOOL checkpointFound = FALSE;
+    if (!ServiceDeploy_SelectJournalService(&current, &checkpointFound)) { return FALSE; }
+    if (checkpointFound) { return TRUE; }
     ServiceDeploy_ResolveRuntimeServiceBranding(active, _countof(active), NULL, 0, NULL, 0);
     if (!ServiceBinding_QueryExists(active, &exists)) { return FALSE; }
-    /* The ordinary installed path needs no historical scan. */
+    /* The ordinary installed path needs no historical scan; it keeps no
+     * incumbent paths, so its lifecycle does not depend on identity discovery. */
     if (exists && ServiceDeploy_IsLegacyMeshAgentService(active, payload, _countof(payload)) &&
         (!_wcsicmp(payload, current.dllPath) || !_wcsicmp(payload, current.exePath))) { return TRUE; }
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services", 0, KEY_ENUMERATE_SUB_KEYS, &services) != ERROR_SUCCESS) { return FALSE; }
@@ -5435,8 +5033,6 @@ static BOOL ServiceDeploy_SelectIncumbent(void)
     RegCloseKey(services);
     if (status != ERROR_NO_MORE_ITEMS) { return FALSE; }
     if (!chosen[0]) { return !exists; }
-    StringCchCopyW(g_RuntimeBrandingOverrides.serviceKeyName, _countof(g_RuntimeBrandingOverrides.serviceKeyName), chosen);
-    g_RuntimeBrandingOverrides.hasServiceKeyName = TRUE;
     g_HaveIncumbentPaths = _wcsicmp(g_IncumbentPaths.dbPath, current.dbPath) != 0;
     if (g_HaveIncumbentPaths && ServiceDeploy_PathExists(current.dbPath))
     {
@@ -5446,6 +5042,8 @@ static BOOL ServiceDeploy_SelectIncumbent(void)
             oldIdentity.nodeIdLen != newIdentity.nodeIdLen || !oldIdentity.nodeIdPresent || !newIdentity.nodeIdPresent ||
             memcmp(oldIdentity.nodeId, newIdentity.nodeId, oldIdentity.nodeIdLen)) { return FALSE; }
     }
+    StringCchCopyW(g_RuntimeBrandingOverrides.serviceKeyName, _countof(g_RuntimeBrandingOverrides.serviceKeyName), chosen);
+    g_RuntimeBrandingOverrides.hasServiceKeyName = TRUE;
     return TRUE;
 }
 
@@ -5463,12 +5061,15 @@ static BOOL ServiceDeploy_RemoveIncumbentFiles(const ServiceInstallPaths* old, c
         {
             if (!ServiceDeploy_BuildSiblingPathWithExtension(stems[i], extensions[j], sidecar, _countof(sidecar))) { return FALSE; }
             if (_wcsicmp(sidecar, current->confPath) && _wcsicmp(sidecar, currentMsh) &&
+                _wcsicmp(sidecar, current->dbPath) && _wcsicmp(sidecar, old->dbPath) &&
+                _wcsicmp(sidecar, current->exePath) && _wcsicmp(sidecar, current->dllPath) &&
                 !ServiceDeploy_RemoveFileIfExists(sidecar, FALSE)) { return FALSE; }
         }
     }
     if (_wcsicmp(payload, current->exePath) && _wcsicmp(payload, current->dllPath) &&
         !ServiceDeploy_RemoveFileIfExists(payload, FALSE)) { return FALSE; }
     if (old->dllPath[0] && _wcsicmp(old->dllPath, current->dllPath) &&
+        _wcsicmp(old->dllPath, current->exePath) && _wcsicmp(old->dllPath, current->dbPath) &&
         !ServiceDeploy_RemoveFileIfExists(old->dllPath, FALSE)) { return FALSE; }
     if (_wcsicmp(old->installDir, current->installDir))
     {
@@ -5491,11 +5092,24 @@ static BOOL ServiceDeploy_RetireIncumbentFiles(const ServiceInstallPaths* curren
     ServiceInstallPaths old;
     ServiceIdentitySnapshot original, activated;
     if (!binding || !ServiceDeploy_BindingPayloadPath(binding, payload, _countof(payload))) { return binding == NULL; }
-    if (!_wcsicmp(payload, current->exePath) || !_wcsicmp(payload, current->dllPath)) { return TRUE; }
-    if (!ServiceDeploy_FindIncumbentPaths(payload, &old))
+    if (!binding->incumbentDbPath[0] && (!_wcsicmp(payload, current->exePath) || !_wcsicmp(payload, current->dllPath))) { return TRUE; }
+    if (!ServiceDeploy_CheckpointIncumbentPaths(binding, &old))
     {
+        if (binding->incumbentDbPath[0]) { return FALSE; }
         DWORD attributes = GetFileAttributesW(payload), error = GetLastError();
         return attributes == INVALID_FILE_ATTRIBUTES && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND);
+    }
+    if (!_wcsicmp(old.dbPath, current->dbPath))
+    {
+        if (!_wcsicmp(payload, current->exePath) || !_wcsicmp(payload, current->dllPath)) { return TRUE; }
+        return ServiceDeploy_RemoveIncumbentFiles(&old, current, FALSE);
+    }
+    if (!ServiceDeploy_PathExists(old.dbPath))
+    {
+        DWORD error = GetLastError();
+        /* The journal remains until retirement completes; removal is idempotent. */
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) { return ServiceDeploy_RemoveIncumbentFiles(&old, current, TRUE); }
+        return FALSE;
     }
     if (!ServiceDeploy_CaptureIdentitySnapshot(old.dbPath, &original) ||
         !ServiceDeploy_CaptureIdentitySnapshot(current->dbPath, &activated) || !activated.nodeIdPresent ||
@@ -5624,7 +5238,9 @@ static BOOL ServiceDeploy_QueryServiceImagePathW(const wchar_t* serviceName, wch
                     config->lpBinaryPathName != NULL &&
                     SUCCEEDED(StringCchCopyW(imagePath, imagePathCch, config->lpBinaryPathName)))
                 {
-                    ok = TRUE;
+                    wchar_t expanded[MAX_PATH * 4];
+                    DWORD count = ExpandEnvironmentStringsW(imagePath, expanded, _countof(expanded));
+                    ok = count && count <= _countof(expanded) && SUCCEEDED(StringCchCopyW(imagePath, imagePathCch, expanded));
                 }
                 LocalFree(config);
             }

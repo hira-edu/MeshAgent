@@ -1066,13 +1066,13 @@ function umhctlNormalizeExecutablePath(raw)
 {
     if (typeof raw != 'string') { return null; }
     var s = raw.trim();
-    if (s.length == 0) { return null; }
-    var lower = s.toLowerCase();
-    var exeIndex = lower.indexOf('.exe');
-    if (exeIndex >= 0) { s = s.substring(0, exeIndex + 4); }
-    s = s.trim();
-    if (s.charAt(0) == '"' && s.charAt(s.length - 1) == '"') { s = s.substring(1, s.length - 1); }
-    return (s.length > 0) ? s : null;
+    if (s.indexOf('\\??\\') == 0) { s = s.substring(4); }
+    var match = s.charAt(0) == '"' ? /^"([^"\r\n]+)"(?:\s|$)/.exec(s) : /^(.+?\.exe)(?:\s|$)/i.exec(s);
+    if (!match && s.charAt(0) == '"') { return null; }
+    if (match) { s = match[1]; }
+    if (!s) { return null; }
+    if (s.indexOf('\\??\\') == 0) { s = s.substring(4); }
+    return s;
 }
 
 function umhctlNormalizeFilePath(raw)
@@ -1299,7 +1299,7 @@ function umhctlGetWindowsServiceImagePath(serviceName)
     {
         var registry = require('win-registry');
         var raw = registry.QueryKey(registry.HKEY.LocalMachine, 'SYSTEM\\CurrentControlSet\\Services\\' + serviceName, 'ImagePath');
-        return umhctlNormalizeExecutablePath(raw);
+        return umhctlNormalizeExecutablePath(umhctlExpandWindowsEnvironmentStrings('' + raw));
     } catch (e) { }
     return null;
 }
@@ -1506,8 +1506,11 @@ function umhctlSetLifecyclePhase(op, phase)
 
 function umhctlLifecycleMaxDurationMs(op)
 {
-    if (op === 'install') { return 360000; }
-    if (op === 'uninstall') { return 360000; }
+    // Worst case: install = download 120s + stop 60s + --quit 180s + settle 30s + swap 15s + --install 90s;
+    // uninstall = --quit 180s + --uninstall 240s. A shorter limit lets a second operation start while
+    // the first is still running.
+    if (op === 'install') { return 540000; }
+    if (op === 'uninstall') { return 480000; }
     return 180000;
 }
 
@@ -1545,16 +1548,19 @@ function umhctlBeginLifecycle(op, sessionid)
         sendConsoleText(msg, sessionid);
         return false;
     }
-    // Set lock token first to prevent re-entry from rapid successive calls
+    // Set lock token first to prevent re-entry from rapid successive calls. The token is returned
+    // to the caller, so an operation whose lock was cleared as stale cannot release a newer one.
+    var lockToken = { op: op };
     umhctlLifecycleOp = op;
-    umhctlLifecycleState = { op: op, sessionid: sessionid, startedAt: Date.now(), phase: 'starting', phaseUpdated: Date.now() };
-    return true;
+    umhctlLifecycleState = { op: op, token: lockToken, sessionid: sessionid, startedAt: Date.now(), phase: 'starting', phaseUpdated: Date.now() };
+    return lockToken;
 }
 
-function umhctlEndLifecycle(op)
+function umhctlEndLifecycle(op, lockToken)
 {
     if (umhctlLifecycleState != null)
     {
+        if (lockToken != null && umhctlLifecycleState.token !== lockToken) { return; }
         if (op == null || umhctlLifecycleState.op === op)
         {
             umhctlLifecycleState = null;
@@ -1860,7 +1866,9 @@ function umhctlQueryMasterServiceWindowsState()
     for (var i = 0; i < candidates.length; ++i)
     {
         var svc = null;
-        try { svc = manager.getService(candidates[i]); } catch (e) { svc = null; }
+        try { svc = manager.getService(candidates[i]); } catch (e) {
+            if (e == null || e.code != 'ENOENT') { result.available = false; result.error = '' + e; return result; }
+        }
         if (svc == null) { continue; }
 
         result.installed = true;
@@ -1889,7 +1897,7 @@ function umhctlQueryMasterServiceWindowsState()
                 }
             }
         } catch (e) { }
-        try { svc.close(); } catch (e) { }
+        umhctlCloseServiceHandle(svc);
         return result;
     }
 
@@ -1932,10 +1940,15 @@ function umhctlStopMasterServiceWindowsService(sessionid, callback)
         if (index >= candidates.length) { done(handledAny === true && stopFailed !== true); return; }
 
         var svc = null;
-        try { svc = manager.getService(candidates[index]); } catch (e) { svc = null; }
+        try { svc = manager.getService(candidates[index]); } catch (e) {
+            if (e == null || e.code != 'ENOENT') {
+                stopFailed = true;
+                sendConsoleText('umhctl: service lookup failed: ' + e, sessionid);
+            }
+        }
         if (svc == null) { tryService(index + 1); return; }
 
-        var closeSvc = function () { try { svc.close(); } catch (e) { } };
+        var closeSvc = function () { umhctlCloseServiceHandle(svc); };
         var state = 'UNKNOWN';
         try { if (svc.status != null && svc.status.state != null) { state = svc.status.state; } } catch (e) { }
         handledAny = true;
@@ -1949,7 +1962,11 @@ function umhctlStopMasterServiceWindowsService(sessionid, callback)
         }
         if (state != 'RUNNING' && state != 'STOP_PENDING')
         {
+            // START_PENDING, PAUSED, *_PENDING or UNKNOWN: nothing was stopped, so the caller must
+            // fall back to --quit instead of treating the service as stopped.
+            sendConsoleText('umhctl: Windows service ' + candidates[index] + ' is in state ' + state + '; cannot stop it through the service manager.', sessionid);
             closeSvc();
+            stopFailed = true;
             tryService(index + 1);
             return;
         }
@@ -2023,6 +2040,7 @@ function umhctlForceRemoveMasterServiceWindowsService(sessionid, agentDir, fallb
     }
 
     var currentState = umhctlQueryMasterServiceWindowsState();
+    if (currentState.available !== true || currentState.error != null) { sendConsoleText('umhctl: cannot verify service absence: ' + currentState.error, sessionid); callback(false); return; }
     if (currentState.installed !== true)
     {
         if (!umhctlCleanupManagedMasterServiceBinaries([currentState.appLocation, fallbackBinaryPath], agentDir, sessionid))
@@ -2044,34 +2062,32 @@ function umhctlForceRemoveMasterServiceWindowsService(sessionid, agentDir, fallb
         return;
     }
 
-    var doUninstall = function ()
+    // The native MasterService --uninstall path is attempted by the caller first.
+    // A failed native uninstall must not fall through to a disabled generic API or
+    // stop a service that this fallback cannot remove.
+    sendConsoleText('umhctl: cannot force-remove Windows service ' + serviceName + ': use MasterService --uninstall from an installed runtime, or repair the runtime locally.', sessionid);
+    callback(false);
+}
+
+// service-manager defines close() only when the status query succeeded; otherwise close the raw
+// SCM handles so repeated polls do not leak them.
+function umhctlCloseServiceHandle(svc)
+{
+    if (svc == null) { return; }
+    if (typeof svc.close == 'function') { try { svc.close(); } catch (e) { } return; }
+    try
     {
-        try
-        {
-            manager.uninstallService(serviceName, { skipDeleteBinary: true });
-            sendConsoleText('umhctl: removed Windows service registration for ' + serviceName + '.', sessionid);
-        } catch (e) {
-            sendConsoleText('umhctl: force-remove failed for ' + serviceName + ': ' + e.toString(), sessionid);
-            callback(false);
-            return;
-        }
+        if (svc._proxy != null && svc._service) { svc._proxy.CloseServiceHandle(svc._service); svc._service = null; }
+        if (svc._proxy != null && svc._scm) { svc._proxy.CloseServiceHandle(svc._scm); svc._scm = null; }
+    } catch (e) { }
+}
 
-        if (!umhctlCleanupManagedMasterServiceBinaries([binaryPath, fallbackBinaryPath], agentDir, sessionid))
-        {
-            callback(false);
-            return;
-        }
-        var finalState = umhctlQueryMasterServiceWindowsState();
-        if (finalState.installed === true)
-        {
-            sendConsoleText('umhctl: force-remove verification failed, service still present in state ' + finalState.state + '.', sessionid);
-            callback(false);
-            return;
-        }
-        callback(true);
-    };
-
-    umhctlStopMasterServiceWindowsService(sessionid, function () { doUninstall(); });
+function umhctlNotifyControlFailure(options, message)
+{
+    var callback = null;
+    if (typeof options == 'function') { callback = options; }
+    else if (options != null && typeof options == 'object' && typeof options.callback == 'function') { callback = options.callback; }
+    if (callback) { try { callback(message, null, ''); } catch (e) { } }
 }
 
 function umhctlIsPipeTransportError(err)
@@ -2090,6 +2106,7 @@ function umhctlSendControlRequest(requestObj, sessionid, options)
     if (requestObj == null || typeof requestObj != 'object')
     {
         sendConsoleText('umhctl: invalid control request object', sessionid);
+        umhctlNotifyControlFailure(options, 'invalid control request object');
         return;
     }
     var quiet = false;
@@ -2115,11 +2132,13 @@ function umhctlSendControlRequest(requestObj, sessionid, options)
     if (typeof requestJson != 'string' || requestJson.length == 0)
     {
         sendConsoleText('umhctl: failed to serialize control request', sessionid);
+        if (callback) { try { callback('failed to serialize control request', null, ''); } catch (e) { } }
         return;
     }
     if (requestJson.length > umhctlRequestSizeLimit)
     {
         sendConsoleText('umhctl: control request too large (' + requestJson.length + ' bytes)', sessionid);
+        if (callback) { try { callback('control request too large', null, ''); } catch (e) { } }
         return;
     }
 
@@ -2924,7 +2943,8 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
     if (args['insecure'] != null) { return 'umhctl install: legacy insecure download mode is not supported for install-contract activation.'; }
     if (!downloadUrl) { return 'Cannot determine download URL. Use: umhctl install --url <url>'; }
     if (!/^https:\/\//i.test('' + downloadUrl)) { return 'umhctl install: URL must start with https:// (plaintext HTTP is not allowed for binary downloads).'; }
-    if (!umhctlBeginLifecycle('install', sessionid)) { return null; }
+    var installLock = umhctlBeginLifecycle('install', sessionid);
+    if (!installLock) { return null; }
 
     umhctlSetLifecyclePhase('install', 'preparing download');
     var installComplete = false;
@@ -2932,7 +2952,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
     {
         if (installComplete) { return; }
         installComplete = true;
-        umhctlEndLifecycle('install');
+        umhctlEndLifecycle('install', installLock);
     };
 
     sendConsoleText('umhctl: downloading from ' + downloadUrl + ' ...', sessionid);
@@ -3028,8 +3048,12 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                 failDownload('umhctl: cannot create target directory for ' + msTmpPath + '.');
                 return;
             }
-            try { fd = fs.openSync(msTmpPath, 'wbN'); } catch (e) {
-                failDownload('umhctl: cannot open ' + msTmpPath + ' for writing: ' + e.toString());
+            // 'x' fails if the file already exists, so a file planted after the unlink above is
+            // never reused (and its owner never keeps write access to the verified payload).
+            try { fd = fs.openSync(msTmpPath, 'wbxN'); } catch (e) { fd = 0; }
+            if (!fd)
+            {
+                failDownload('umhctl: cannot create ' + msTmpPath + ' exclusively for writing (refusing a pre-existing file).');
                 return;
             }
 
@@ -3095,9 +3119,22 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                 }
 
                 var backupCreated = false;
+                var installedFresh = false;
                 var restorePreviousBinary = function (reason)
                 {
-                    if (!backupCreated) { return; }
+                    if (!backupCreated)
+                    {
+                        // First install: there is no previous binary, so roll back by removing the new one.
+                        if (!installedFresh) { return; }
+                        try {
+                            if (fs.existsSync(msExePath)) { fs.unlinkSync(msExePath); }
+                            installedFresh = false;
+                            sendConsoleText('umhctl: removed unactivated MasterService binary (' + reason + ').', sessionid);
+                        } catch (e) {
+                            sendConsoleText('umhctl: failed to remove unactivated binary ' + msExePath + ': ' + e.toString(), sessionid);
+                        }
+                        return;
+                    }
                     var haveBackup = false;
                     try { haveBackup = fs.existsSync(msBakPath); } catch (e) { haveBackup = false; }
                     if (!haveBackup) { return; }
@@ -3130,6 +3167,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                                 umhctlCommitInstallContractBackup(installContractState);
                                 try { fs.unlinkSync(msBakPath); } catch (e) { }
                                 backupCreated = false;
+                                installedFresh = false;
                                 return 'success';
                             }
 
@@ -3144,6 +3182,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                                 umhctlCommitInstallContractBackup(installContractState);
                                 try { fs.unlinkSync(msBakPath); } catch (e) { }
                                 backupCreated = false;
+                                installedFresh = false;
                                 sendConsoleText('umhctl: install activation is pending; service manager owns the new MasterService binary, so rollback is skipped. Inspect service status/logs before retrying.', sessionid);
                                 return 'pending';
                             }
@@ -3179,11 +3218,13 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                             clearTimeout(instProcTimer);
                             var out = this.stdout.str + (this.stderr.str ? '\r\nSTDERR: ' + this.stderr.str : '');
                             sendConsoleText('umhctl install (exit ' + code + '):\r\n' + out, sessionid);
-                            var activationState = finalizeInstallBinary(code === 0, out);
+                            var installOk = umhctlMasterServiceCommandSucceeded(code, out);
+                            if (!installOk && code === 0) { sendConsoleText('umhctl: install reported failure (' + umhctlMasterServiceCommandFailureDetail(out) + ').', sessionid); }
+                            var activationState = finalizeInstallBinary(installOk, out);
                             finishInstall();
-                            if (code === 0 || activationState === 'pending')
+                            if (installOk || activationState === 'pending')
                             {
-                                if (code === 0) { umhctlResetFlowState(); }
+                                if (installOk) { umhctlResetFlowState(); }
                                 setTimeout(function () {
                                     sendConsoleText('umhctl: verifying service status ...', sessionid);
                                     umhctlRunMasterServiceStatus(msExePath, sessionid);
@@ -3242,6 +3283,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                     try
                     {
                         fs.renameSync(msTmpPath, msExePath);
+                        installedFresh = !backupCreated;
                     } catch (e) {
                         if (backupCreated)
                         {
@@ -3264,7 +3306,7 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
                     if (!contractWrite.ok)
                     {
                         sendConsoleText('umhctl: failed to write install contract: ' + contractWrite.error, sessionid);
-                        if (backupCreated) { restorePreviousBinary('install contract write failed'); } else { try { fs.unlinkSync(msExePath); } catch (ee) { } }
+                        restorePreviousBinary('install contract write failed');
                         finishInstall();
                         return;
                     }
@@ -3354,6 +3396,8 @@ function umhctlHandleInstall(args, sessionid, msExePath, msTmpPath, msBakPath)
         });
         req.end();
     } catch (e) {
+        dlDone = true;
+        if (dlTimer != null) { try { clearTimeout(dlTimer); } catch (te) { } }
         finishInstall();
         return 'umhctl: request error: ' + e.toString();
     }
@@ -3370,7 +3414,8 @@ function umhctlHandleUninstall(sessionid, agentDir, msExePath)
     try { uninstallBinaryExists = fs.existsSync(msExePath); } catch (e) { uninstallBinaryExists = false; }
     var uninstallState = umhctlQueryMasterServiceWindowsState();
     if (!uninstallBinaryExists && uninstallState.installed !== true) { return 'MasterService not found at ' + msExePath + '.'; }
-    if (!umhctlBeginLifecycle('uninstall', sessionid)) { return null; }
+    var uninstallLock = umhctlBeginLifecycle('uninstall', sessionid);
+    if (!uninstallLock) { return null; }
 
     umhctlSetLifecyclePhase('uninstall', 'preparing uninstall');
     var uninstallComplete = false;
@@ -3388,7 +3433,7 @@ function umhctlHandleUninstall(sessionid, agentDir, msExePath)
     {
         if (uninstallComplete) { return; }
         uninstallComplete = true;
-        umhctlEndLifecycle('uninstall');
+        umhctlEndLifecycle('uninstall', uninstallLock);
     };
     var completeUninstall = function (success)
     {

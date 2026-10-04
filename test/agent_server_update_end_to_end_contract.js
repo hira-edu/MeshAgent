@@ -54,7 +54,7 @@ const selectorFactory = new Function('obj', 'args', 'domain', 'parent', [
 
 function select(id, agentHash, options = {}) {
     const obj = {
-        agentInfo: { capabilities: 0 },
+        agentInfo: { capabilities: (options.capabilities !== undefined) ? options.capabilities : 0x400 },
         AgentCommitDate: options.commitDate,
         agentUpdateFailureHash: options.failedHash
     };
@@ -74,6 +74,12 @@ assert.strictEqual(select(4, 'OLD', { failedHash: 'NEW' }), 0, 'raw failed packa
 assert.strictEqual(select(4, 'OLD', { failedHash: 'RAW' }), 0, 'served-file failed package must suppress re-download');
 assert.strictEqual(select(4, 'OLD', { failedHash: 'ZIP' }), 0, 'compressed failed package must suppress re-download');
 assert.strictEqual(select(4, 'OLD', { failedHash: 'OTHER' }), 1, 'a different package must remain eligible');
+assert.strictEqual(select(4, 'OLD', { capabilities: 0x100 }), 0, 'historical Windows agents without the lifecycle host must not receive the package');
+assert.strictEqual(select(3, 'OLD', { capabilities: 0 }), 0, 'historical Windows x86 agents must not receive the package');
+assert.strictEqual(select(4, 'OLD', { capabilities: 0x100, system: 2 }), 0, 'recovery mode must not bypass the lifecycle capability gate');
+assert.strictEqual(select(4, 'OLD', { capabilities: 0x300 }), 1, 'agents advertising the corrected decoder already have the lifecycle host');
+assert.strictEqual(select(4, 'OLD', { capabilities: 0x400 }), 1, 'agents with raw-only updates keep lifecycle update eligibility');
+assert.strictEqual(select(4, 'NEW', { capabilities: 0x100 }), 0, 'a current historical agent stays current');
 
 const manualUpdate = server.slice(server.indexOf("case 'agentupdate':"), server.indexOf("case 'agentupdatefailure':"));
 assert(manualUpdate.includes('isWindowsServiceAgentArchitecture(obj.agentInfo.agentId)'), 'manual Windows update must branch to native routing');
@@ -104,11 +110,13 @@ assert(server.includes("JSON.parse(msg).action == 'agentupdatefailed'"), 'termin
 assert(server.includes('agentExeInfo.zhash == obj.agentUpdateFailureHash'), 'server must recognize compressed failed-package hashes');
 
 const agentHashCase = agentcore.slice(agentcore.indexOf('case MeshCommand_AgentHash:'), agentcore.indexOf('case MeshCommand_AgentUpdate:'));
-assert(agentHashCase.includes('agentupdatefailure'), 'agent must report failed package separately');
 assert(agentHashCase.includes('agent->agentHash'), 'agent must report the actual executable hash');
-assert(agentHashCase.includes('agent->serverSupportsUpdateFailureStatus'), 'truthful failure reporting must be capability-gated');
-assert(agentHashCase.indexOf('agent->agentHash') < agentHashCase.indexOf('agent->serverSupportsUpdateFailureStatus'), 'capable servers must receive installed identity separately from failure status');
-assert(agentHashCase.includes('Legacy servers do not understand the separate failure frame'), 'older servers must retain same-package suppression compatibility');
+const normalHashResponse = agentHashCase.slice(agentHashCase.indexOf('// Update when necessary'));
+assert(normalHashResponse.indexOf('memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash') >= 0, 'ordinary negotiation must report the installed identity');
+assert(!agentHashCase.includes('agentupdatefailure'), 'agent must not report a failed-package hold');
+assert(!agentHashCase.includes('forceUpdateHold') && !agentHashCase.includes('forceUpdatePending'), 'forced updates must not keep per-binary hold state');
+assert(agentHashCase.includes('memset(rcm->coreModuleHash, 0xFF, UTIL_SHA384_HASHSIZE)'), 'forced updates must report a hash no binary has');
+assert(!agentcore.includes('UpdateActivationFailureHash(agent') && !agentcore.includes('MeshServer_ConsumeForceFakeUpdateAttempt'), 'agent must not hold failed packages or consume force requests');
 assert(agentcore.includes('strcmp(action, "agentupdatefailurecapability") == 0'), 'agent must consume the server capability advertisement natively');
 assert(agentcore.includes('static void MeshServer_ReportUpdateFailure(MeshAgentHostContainer *agent)'), 'agent must report native update aborts');
 assert(agentcore.includes('"{\\"action\\":\\"agentupdatefailed\\"}"'), 'agent abort report must use the server restoration action');
@@ -124,7 +132,7 @@ assert(installer.includes('static BOOL ServiceDeploy_ReconcileCommittedTransacti
 const updateFlow = extractFunction(installer, 'static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL requireConfig)');
 const rollbackFlow = updateFlow.slice(updateFlow.indexOf('ROLLBACK:'));
 const lifecycleConverged = extractFunction(installer, 'static BOOL ServiceDeploy_IsPrimaryLifecycleConverged(const ServiceLifecycleDiscovery* discovery, BOOL requirePendingClear)');
-assert(rollbackFlow.indexOf('ServiceDeploy_RecordUpdateActivationFailureHold(&paths)') < rollbackFlow.indexOf('ServiceDeploy_StartServiceHostServiceAndWait(serviceKeyName, 30000)'), 'failure hold must be written before rollback service restart');
+assert(!updateFlow.includes('UpdateActivationFailureHold'), 'rollback must not record a failed-package hold');
 assert(rollbackFlow.includes('ServiceDeploy_CreateRecoveryStartupAuthorization(&rollbackStartupAuthorization)'), 'rollback restart must be explicitly authorized through the startup checkpoint gate');
 assert(updateFlow.indexOf('ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity') < updateFlow.indexOf('ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_COMMITTED)'), 'backup must survive post-update identity validation');
 assert(updateFlow.includes('Preserving transaction artifacts after failed rollback'), 'failed rollback must preserve recovery artifacts');

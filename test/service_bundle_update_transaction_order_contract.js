@@ -66,9 +66,9 @@ function main() {
     assert(exeRollbackIndex >= 0, 'rollback must explicitly restore live EXE backup');
     assert(dllRollbackIndex < exeRollbackIndex, 'rollback must restore ServiceDll before host EXE');
     assert(
-        updateFlow.includes('ServiceDeploy_RecordUpdateActivationFailureHold(g_HaveIncumbentPaths ? &g_IncumbentPaths : &paths)') &&
+        !installer.includes('UpdateActivationFailureHold') &&
         installer.includes('ServiceDeploy_ClearUpdateActivationHolds(&paths, L"[UPDATE]")'),
-        'update transaction must clear activation holds on success and promote the target hold on failure'
+        'update transaction must clear stale hold keys on success and record no hold on failure'
     );
     const checkpoint = updateFlow.indexOf('ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_PREPARED)');
     const suspendRestarters = updateFlow.indexOf('ServiceDeploy_SuspendServiceRecoveryRestarters()');

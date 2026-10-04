@@ -170,7 +170,16 @@ static int get_desktop_buffer_gdi(void **buffer, long long *bufferSize, long* mo
 	if ((*buffer = malloc((size_t)*bufferSize)) == NULL) { KVMDEBUG("malloc() failed", 0); return 1; }
 
 	bmpInfo.bmiHeader.biCompression = BI_RGB;
-	if (GetDIBits(hDesktopDC, hCapturedBitmap, 0, bmpInfo.bmiHeader.biHeight, *buffer, &bmpInfo, DIB_RGB_COLORS) == 0) { KVMDEBUG("GetDIBits() failed", 0); free(*buffer); return(1); }
+	if (GetDIBits(hDesktopDC, hCapturedBitmap, 0, bmpInfo.bmiHeader.biHeight, *buffer, &bmpInfo, DIB_RGB_COLORS) == 0)
+	{
+		// Typically a desktop or display-mode switch mid-capture. The caller frees *buffer on failure,
+		// so it must not be left pointing at freed memory (that double free corrupted the helper heap).
+		KVMDEBUG("GetDIBits() failed", 0);
+		free(*buffer);
+		*buffer = NULL;
+		*bufferSize = 0;
+		return(1);
+	}
 
 	return 0;
 }

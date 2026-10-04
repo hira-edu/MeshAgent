@@ -47,6 +47,7 @@ function getPathDirName(filePath)
     }
     return filePath.substring(0, idx);
 }
+
 function assertWindowsStandaloneDisabled(operation)
 {
     if (WINDOWS_SERVICE_HOST_ONLY)
@@ -70,9 +71,9 @@ function hasWindowsUnsupportedStandaloneParameter(parms)
 function prepareWindowsNativeLifecycleParameters(parms)
 {
     var msh = _MSH();
-    if (parms.getParameter('description', null) == null && msh.description != null) { parms.push('--description="' + ('' + msh.description).split('"').join('') + '"'); }
-    if (parms.getParameter('displayName', null) == null && msh.displayName != null) { parms.push('--displayName="' + ('' + msh.displayName).split('"').join('') + '"'); }
-    if (parms.getParameter('companyName', null) == null && msh.companyName != null) { parms.push('--companyName="' + ('' + msh.companyName).split('"').join('') + '"'); }
+    if (installerParameter(parms, 'description', null) == null && msh.description != null) { parms.push('--description="' + ('' + msh.description).split('"').join('') + '"'); }
+    if (installerParameter(parms, 'displayName', null) == null && msh.displayName != null) { parms.push('--displayName="' + ('' + msh.displayName).split('"').join('') + '"'); }
+    if (installerParameter(parms, 'companyName', null) == null && msh.companyName != null) { parms.push('--companyName="' + ('' + msh.companyName).split('"').join('') + '"'); }
 
     if (hasWindowsUnsupportedStandaloneParameter(parms))
     {
@@ -89,7 +90,7 @@ function runWindowsChildProcessAndCapture(targetBinary, args, options)
     child.on('exit', function (code) { this.exitCode = code; });
     child.waitExit();
     return ({
-        status: typeof child.exitCode === 'number' ? child.exitCode : 0,
+        status: typeof child.exitCode === 'number' ? child.exitCode : 1,
         stdout: child.stdout.str,
         stderr: child.stderr.str
     });
@@ -139,9 +140,9 @@ function expandWindowsEnvironmentStrings(value)
 function getWindowsLifecycleServiceName(parms)
 {
     var msh, serviceName = null;
-    if (parms != null && typeof parms.getParameter == 'function')
+    if (parms != null && Array.isArray(parms))
     {
-        serviceName = parms.getParameter('meshServiceName', null);
+        serviceName = installerParameter(parms, 'meshServiceName', null);
         if (serviceName != null && serviceName.length > 0) { return (serviceName); }
     }
     try
@@ -362,8 +363,8 @@ function writeWindowsLifecycleManifest(actionName, targetBinary, sourceDll, parm
         'Action=' + actionName,
         'SourceExe=' + sanitizeWindowsLifecycleManifestValue(targetBinary),
         'SourceDll=' + sanitizeWindowsLifecycleManifestValue(sourceDll),
-        'DisplayName=' + sanitizeWindowsLifecycleManifestValue(parms.getParameter('displayName', '')),
-        'Description=' + sanitizeWindowsLifecycleManifestValue(parms.getParameter('description', '')),
+        'DisplayName=' + sanitizeWindowsLifecycleManifestValue(installerParameter(parms, 'displayName', '')),
+        'Description=' + sanitizeWindowsLifecycleManifestValue(installerParameter(parms, 'description', '')),
         'RequireConfig=1',
         ''
     ];
@@ -380,7 +381,7 @@ function runWindowsNativeLifecycle(actionName, parms, gOptions)
     var args, result, runError = null, manifestPath = null, cleanupPaths = [];
     var targetBinary = process.execPath;
     var runtimeHostPath, sourceDll;
-    var skipExit = parseInt(parms.getParameter('__skipExit', 0)) != 0;
+    var skipExit = parseInt(installerParameter(parms, '__skipExit', 0)) != 0;
     if (gOptions != null && gOptions.binary != null) { targetBinary = gOptions.binary; }
 
     assertWindowsLifecycleActionName(actionName);
@@ -426,94 +427,210 @@ function runWindowsNativeLifecycle(actionName, parms, gOptions)
     if (!skipExit) { process.exit(0); }
 }
 
-try
+// The agent imports a ".msh" value written as 0x<hex> into the database as binary, and
+// any other value as text, so compare a database entry in the form it was imported.
+function installerDbValueMatches(db, key, mshValue)
 {
-    // This property is a polyfill for an Array, to fetch the specified element if it exists, removing the surrounding quotes if they are there
-    Object.defineProperty(Array.prototype, 'getParameterEx',
-        {
-            value: function (name, defaultValue)
-            {
-                var i, ret;
-                for (i = 0; i < this.length; ++i)
-                {
-                    if (this[i].startsWith(name + '='))
-                    {
-                        ret = this[i].substring(name.length + 1);
-                        if (ret.startsWith('"')) { ret = ret.substring(1, ret.length - 1); }
-                        return (ret);
-                    }
-                }
-                return (defaultValue);
-            }
-        });
+    if (mshValue == null) { return false; }
+    var text = ('' + mshValue).trim();
+    var storedText = db.Get(key);
+    if (text.length > 2 && text.substring(0, 2).toLowerCase() == '0x')
+    {
+        // An older database may still hold the unconverted text form.
+        if (storedText != null && ('' + storedText).toLowerCase() == text.toLowerCase()) { return true; }
+        var stored = db.GetBuffer(key);
+        return stored != null && stored.toString('hex').toLowerCase() == text.substring(2).toLowerCase();
+    }
+    return storedText == text;
+}
 
-    // This property is a polyfill for an Array, to fetch the specified element if it exists 
-    Object.defineProperty(Array.prototype, 'getParameter',
-        {
-            value: function (name, defaultValue)
-            {
-                return (this.getParameterEx('--' + name, defaultValue));
-            }
-        });
-}
-catch(x)
-{ }
-try
+// Installer options are local: interactive and embedded cores may define incompatible
+// Array.prototype helpers. Never inherit their option grammar or mutate their prototypes.
+function installerParameterIndex(parms, name)
 {
-    // This property is a polyfill for an Array, to fetch the index of the specified element, if it exists
-    Object.defineProperty(Array.prototype, 'getParameterIndex',
+    for (var i = 0; i < parms.length; ++i)
+    {
+        if (typeof parms[i] == 'string' && parms[i].indexOf('--' + name + '=') == 0) { return i; }
+    }
+    return -1;
+}
+function installerParameterValue(parms, index)
+{
+    if (index < 0 || index >= parms.length || typeof parms[index] != 'string') { return null; }
+    var value = parms[index].substring(parms[index].indexOf('=') + 1);
+    if (value.charAt(0) == '"' && value.charAt(value.length - 1) == '"') { value = value.substring(1, value.length - 1); }
+    return value;
+}
+function installerParameterEx(parms, name, defaultValue)
+{
+    for (var i = 0; i < parms.length; ++i)
+    {
+        if (typeof parms[i] == 'string' && parms[i].indexOf(name + '=') == 0) { return installerParameterValue(parms, i); }
+    }
+    return defaultValue;
+}
+function installerParameter(parms, name, defaultValue)
+{
+    return installerParameterEx(parms, '--' + name, defaultValue);
+}
+function installerDeleteParameter(parms, name)
+{
+    var index;
+    while ((index = installerParameterIndex(parms, name)) >= 0) { parms.splice(index, 1); }
+}
+function installerSetParameter(parms, name, value)
+{
+    installerDeleteParameter(parms, name);
+    parms.push('--' + name + '=' + value);
+}
+function validateInstallerParameters(parms)
+{
+    if (!Array.isArray(parms)) { throw new Error('Installer parameters must be an array.'); }
+    for (var i = 0; i < parms.length; ++i)
+    {
+        if (typeof parms[i] != 'string' || /[\r\n\0]/.test(parms[i])) { throw new Error('Invalid installer parameter.'); }
+    }
+    return parms;
+}
+function isServiceAbsent(error)
+{
+    return error != null && error.code == 'ENOENT';
+}
+
+// Resolve a historical instance by its actual binding, never by executing an
+// arbitrary old binary with -name. Provisioning must identify a unique candidate.
+function resolveInstallerService(parms, expectedPath, explicitName)
+{
+    var manager = require('service-manager').manager;
+    var requested = installerParameter(parms, 'meshServiceName', 'meshagent');
+    var service = null;
+    try { service = manager.getService(requested); }
+    catch (e) { if (!isServiceAbsent(e)) { throw e; } }
+    if (service != null)
+    {
+        try
         {
-            value: function (name)
+            if (!expectedPath || service.appLocation() == expectedPath) { return service; }
+        }
+        catch (e) { service.close(); throw e; }
+        service.close();
+        if (explicitName) { throw new Error('Requested service does not own the update destination.'); }
+    }
+    if (explicitName && !expectedPath) { return null; }
+    var msh = _MSH();
+    var selected = null;
+    var candidates = manager.enumerateService();
+    var seen = {};
+    try
+    {
+        for (var i = 0; i < candidates.length; ++i)
+        {
+            var candidate = candidates[i];
+            if (seen['service:' + candidate.name]) { continue; }
+            seen['service:' + candidate.name] = true;
+            var location;
+            try { location = candidate.appLocation(); }
+            catch (e) { if (e && e.code == 'EUNRESOLVEDPATH') { continue; } throw e; }
+            var matches = expectedPath ? location == expectedPath : false;
+            if (!expectedPath && msh.MeshID && msh.ServerID && msh.MeshServer && require('fs').existsSync(location + '.db'))
             {
-                var i;
-                for (i = 0; i < this.length; ++i)
+                var db = require('SimpleDataStore').Create(location + '.db', { readOnly: true });
+                try
                 {
-                    if (this[i].startsWith('--' + name + '='))
-                    {
-                        return (i);
-                    }
+                    matches = installerDbValueMatches(db, 'MeshID', msh.MeshID) && installerDbValueMatches(db, 'ServerID', msh.ServerID) && db.Get('MeshServer') == msh.MeshServer &&
+                        (db.GetBuffer('SelfNodeCert') != null || db.GetBuffer('NodeID') != null);
                 }
-                return (-1);
+                finally { if (typeof db.close == 'function') { db.close(); } }
             }
-        });
+            if (!matches) { continue; }
+            if (selected != null) { throw new Error('Multiple installed identities match; specify --meshServiceName explicitly.'); }
+            selected = candidate.name;
+        }
+    }
+    finally
+    {
+        for (var j = 0; j < candidates.length; ++j) { if (typeof candidates[j].close == 'function') { candidates[j].close(); } }
+    }
+    if (selected == null) { return null; }
+    installerSetParameter(parms, 'meshServiceName', selected);
+    return manager.getService(selected);
 }
-catch(x)
-{ }
-try
+function preserveInstallerLocation(service, parms)
 {
-    // This property is a polyfill for an Array, to remove the specified element, if it exists
-    Object.defineProperty(Array.prototype, 'deleteParameter',
-        {
-            value: function (name)
-            {
-                var i = this.getParameterIndex(name);
-                if(i>=0)
-                {
-                    this.splice(i, 1);
-                }
-            }
-        });
+    var location = service.appLocation();
+    if (!location || location.charAt(0) != '/') { throw new Error('Installed executable path is unavailable or not absolute.'); }
+    var directory = getPathDirName(location);
+    var target = getPathBaseName(location);
+    var requestedDirectory = installerParameter(parms, 'installPath', directory).replace(/\/+$/, '');
+    var requestedTarget = installerParameter(parms, 'target', target);
+    if (requestedDirectory != directory || requestedTarget != target)
+    {
+        throw new Error('Refusing to relocate an installed identity during reinstall; retain ' + location + ' or use an explicit datastore migration.');
+    }
+    // installService copies from gOptions.binary when set, otherwise from process.execPath.
+    var sourceBinary = (global.gOptions && global.gOptions.binary != null) ? global.gOptions.binary : process.execPath;
+    if (sourceBinary == location)
+    {
+        // Native -install runs from the installed binary (_localService). Keep that file in place;
+        // service-manager skips the copy when the source already is the install target.
+        if (parms.indexOf('__skipBinaryDelete') < 0) { parms.push('__skipBinaryDelete'); }
+    }
+    else if (process.execPath == location)
+    {
+        throw new Error('Stage the installer outside the installed executable before replacing it.');
+    }
+    global._workingpath = directory;
+    global._installedServiceKey = service.escname || null;
+    installerSetParameter(parms, 'target', target);
+    installerSetParameter(parms, 'installPath', directory);
+    return location;
 }
-catch(x)
-{ }
-try
+function stopInstallerService(service, onStopped, onError)
 {
-    // This property is a polyfill for an Array, to to fetch the value YY of an element XX in the format --XX=YY, if it exists
-    Object.defineProperty(Array.prototype, 'getParameterValue',
+    var completed = false;
+    function fail(error)
+    {
+        if (completed) { return; }
+        completed = true;
+        service.close();
+        onError(error);
+    }
+    function stopped()
+    {
+        if (completed) { return; }
+        try
         {
-            value: function (i)
-            {
-                if (i < 0 || i >= this.length || typeof this[i] != 'string') { return null; }
-                var eqIdx = this[i].indexOf('=');
-                if (eqIdx < 0) { return this[i]; }
-                var ret = this[i].substring(eqIdx + 1);
-                if (ret.startsWith('"')) { ret = ret.substring(1, ret.length - 1); }
-                return (ret);
-            }
-        });
+            if (typeof service.isRunning == 'function' && service.isRunning()) { throw new Error('Service is still running after stop.'); }
+        }
+        catch (e) { fail(e); return; }
+        completed = true;
+        service.close();
+        onStopped();
+    }
+    try
+    {
+        if (typeof service.isRunning == 'function' && !service.isRunning()) { stopped(); return; }
+        var result = process.platform == 'darwin' ? service.unload() : service.stop();
+        if (result != null && typeof result.then == 'function')
+        {
+            result.then(function () { runInstallerContinuation(stopped); }, function (error) { runInstallerContinuation(function () { fail(error); }); });
+        }
+        else { stopped(); }
+    }
+    catch (e) { if (completed) { throw e; } fail(e); }
 }
-catch(x)
-{ }
+// Errors raised after a promise or task-scheduler boundary cannot reach the native caller
+// and would otherwise become unhandled rejections. Report them and exit non-zero.
+function runInstallerContinuation(continuation)
+{
+    try { continuation(); }
+    catch (e)
+    {
+        if (('' + e).indexOf('Process.exit() forced script termination') >= 0) { throw e; }
+        process.stderr.write('Installer failed: ' + ((e != null && e.message) ? e.message : e) + '\n');
+        process.exit(1);
+    }
+}
 
 // This function performs some checks on the parameter structure, to make sure the minimum set of requried elements are present
 var winSystemPaths = null;
@@ -526,22 +643,23 @@ function getOfficialSystem32Path(relativePath)
 function checkParameters(parms)
 {
     var msh = _MSH();
-    if (parms.getParameter('description', null) == null && msh.description != null) { parms.push('--description="' + ('' + msh.description).split('"').join('') + '"'); }
-    if (parms.getParameter('displayName', null) == null && msh.displayName != null) { parms.push('--displayName="' + ('' + msh.displayName).split('"').join('') + '"'); }
-    if (parms.getParameter('companyName', null) == null && msh.companyName != null) { parms.push('--companyName="' + ('' + msh.companyName).split('"').join('') + '"'); }
+    if (installerParameter(parms, 'description', null) == null && msh.description != null) { parms.push('--description="' + ('' + msh.description).split('"').join('') + '"'); }
+    if (installerParameter(parms, 'displayName', null) == null && msh.displayName != null) { parms.push('--displayName="' + ('' + msh.displayName).split('"').join('') + '"'); }
+    if (installerParameter(parms, 'companyName', null) == null && msh.companyName != null) { parms.push('--companyName="' + ('' + msh.companyName).split('"').join('') + '"'); }
 
-    if (msh.fileName != null)
+    if (installerParameter(parms, 'target', null) == null && (installerParameter(parms, 'fileName', null) != null || msh.fileName != null))
     {
         // This converts the --fileName parameter of the installer, to the --target=XXX format required by service-manager.js
-        var i = parms.getParameterIndex('fileName');
+        var fileName = installerParameter(parms, 'fileName', msh.fileName);
+        var i = installerParameterIndex(parms, 'fileName');
         if(i>=0)
         {
             parms.splice(i, 1);
         }
-        parms.push('--target="' + msh.fileName + '"');
+        parms.push('--target="' + fileName + '"');
     }
 
-    if (parms.getParameter('meshServiceName', null) == null)
+    if (installerParameter(parms, 'meshServiceName', null) == null)
     {
         if(msh.meshServiceName != null)
         {
@@ -550,21 +668,9 @@ function checkParameters(parms)
         }
         else
         {
-            // Still no meshServiceName specified... Let's also check installed services...
-            var tmp = 'meshagent';
-            try
-            {
-                tmp = require('_agentNodeId').serviceName();
-            }
-            catch(xx)
-            {
-            }
+            // Historical discovery happens against installed bindings below. The
+            // staged executable's own path cannot identify an installed service.
 
-            // The default is 'meshagent' on non-Windows service-manager paths.
-            if(tmp != 'meshagent')
-            {
-                parms.push('--meshServiceName="' + tmp + '"');
-            }
         }
     }
 }
@@ -577,13 +683,13 @@ function installService(params)
     console.info1('');
 
     var target = null;
-    var targetx = params.getParameterIndex('target');
+    var targetx = installerParameterIndex(params, 'target');
     if (targetx >= 0)
     {
-        // Let's remove any embedded spaces in 'target' as that can mess up some OSes
-        target = params.getParameterValue(targetx);
+        // Preserve the exact basename because it selects the adjacent datastore.
+        target = installerParameterValue(params, targetx);
         params.splice(targetx, 1);
-        target = target.split(' ').join('');
+        if (/[\\/\r\n]/.test(target) || target == '.' || target == '..') { throw new Error('Invalid executable basename.'); }
         if (target.length == 0) { target = null; }
     }
 
@@ -606,15 +712,16 @@ function installService(params)
     // values that were passed into the installer, using default values for the ones that aren't specified.
     var options =
         {
-            name: params.getParameter('meshServiceName', 'meshagent'),
+            name: installerParameter(params, 'meshServiceName', 'meshagent'),
             target: target==null?'meshagent':target,
             servicePath: process.execPath,
             startType: 'AUTO_START',
             parameters: params,
-            _installer: true
+            _installer: true,
+            serviceKey: global._installedServiceKey || null
         };
-    options.displayName = params.getParameter('displayName', options.name); params.deleteParameter('displayName');
-    options.description = params.getParameter('description', options.name + ' background service'); params.deleteParameter('description');
+    options.displayName = installerParameter(params, 'displayName', options.name); installerDeleteParameter(params, 'displayName');
+    options.description = installerParameter(params, 'description', options.name + ' background service'); installerDeleteParameter(params, 'description');
 
     if (global.gOptions != null)
     {
@@ -638,13 +745,13 @@ function installService(params)
     // Non-Windows agents keep the upstream external .msh installer flow. Windows packages use
     // MeshCentral's embedded MSH payload and the rundll32 lifecycle host instead.
     var i;
-    if ((i = params.indexOf('--copy-msh="1"')) >= 0)
+    if (installerParameter(params, 'copy-msh', '0') == '1')
     {
         var mshFile = process.execPath + '.msh';
         if (options.files == null) { options.files = []; }
         var newtarget = (process.platform == 'linux' && require('service-manager').manager.getServiceType() == 'systemd') ? options.target.split("'").join('-') : options.target;
         options.files.push({ source: mshFile, newName: newtarget + '.msh' });
-        options.parameters.splice(i, 1);
+        installerDeleteParameter(options.parameters, 'copy-msh');
     }
     if ((i=params.indexOf('--_localService="1"'))>=0)
     {
@@ -669,17 +776,17 @@ function installService(params)
             options.parameters.push('--installPath="' + global._workingpath + '"');
         }
     }
-    if ((i = options.parameters.getParameterIndex('installPath')) >= 0)
+    if ((i = installerParameterIndex(options.parameters, 'installPath')) >= 0)
     {
-        options.installPath = options.parameters.getParameterValue(i);
+        options.installPath = installerParameterValue(options.parameters, i);
         options.installInPlace = false;
         options.parameters.splice(i, 1);
     }
 
     // If companyName was specified, we're going to move it into the structure
-    if ((i = options.parameters.getParameterIndex('companyName')) >= 0)
+    if ((i = installerParameterIndex(options.parameters, 'companyName')) >= 0)
     {
-        options.companyName = options.parameters.getParameterValue(i);
+        options.companyName = installerParameterValue(options.parameters, i);
         options.parameters.splice(i, 1);
     }
 
@@ -693,8 +800,7 @@ function installService(params)
     }
     catch(sie)
     {
-        process.stdout.write(' [ERROR] ' + sie);
-        process.exit();
+        throw new Error('Service installation failed: ' + sie);
     }
     var svc = require('service-manager').manager.getService(options.name);
 
@@ -718,7 +824,8 @@ function installService(params)
         }
         catch (sie)
         {
-            process.stdout.write(' [ERROR] ' + sie);
+            svc.close();
+            throw new Error('Launch agent installation failed: ' + sie);
         }
     }
 
@@ -731,10 +838,11 @@ function installService(params)
     }
     catch (ee)
     {
-        process.stdout.write(' [ERROR]\n');
+        throw new Error('Service start failed: ' + ee);
     }
+    finally { svc.close(); }
 
-    if (parseInt(params.getParameter('__skipExit', 0)) == 0)
+    if (parseInt(installerParameter(params, '__skipExit', 0)) == 0)
     {
         process.exit();
     }
@@ -749,14 +857,15 @@ function uninstallService3(params)
         process.stdout.write('   -> Uninstalling launch agent...');
         try
         {
-            var launchagent = require('service-manager').manager.getLaunchAgent(params.getParameter('meshServiceName', 'meshagent'));
+            var launchagent = require('service-manager').manager.getLaunchAgent(installerParameter(params, 'meshServiceName', 'meshagent'));
             launchagent.unload();
             require('fs').unlinkSync(launchagent.plist);
             process.stdout.write(' [DONE]\n');
         }
         catch (e)
         {
-            process.stdout.write(' [ERROR]\n');
+            if (!isServiceAbsent(e)) { throw new Error('Launch agent uninstall failed: ' + e); }
+            process.stdout.write(' [NONE]\n');
         }
     }
 
@@ -780,10 +889,9 @@ function uninstallService2(params, msh)
     var dataFolder = null;
     var appPrefix = null;
     var uninstallOptions = null;
-    var serviceName = params.getParameter('meshServiceName', 'meshagent'); // get the service name, using the provided defaults if not specified
+    var serviceName = installerParameter(params, 'meshServiceName', 'meshagent'); // get the service name, using the provided defaults if not specified
 
-    // Remove the .msh file if present
-    try { require('fs').unlinkSync(msh); } catch (mshe) { }
+    // Retain provisioning during a reinstall; remove it only after a successful uninstall.
     if ((i = params.indexOf('__skipBinaryDelete')) >= 0)
     {
         // We will skip deleting of the actual binary, if this option was provided. 
@@ -791,11 +899,11 @@ function uninstallService2(params, msh)
         params.splice(i, 1);
         uninstallOptions = { skipDeleteBinary: true };
     }
-    if (params && params.includes('--_deleteData="1"'))
+    if (params.includes('_stop') && installerParameter(params, '_deleteData', '0') == '1')
     {
         // This will facilitate cleanup of the files associated with the agent
-        dataFolder = params.getParameterEx('_workingDir', null);
-        appPrefix = params.getParameterEx('_appPrefix', null);
+        dataFolder = installerParameterEx(params, '_workingDir', null);
+        appPrefix = installerParameterEx(params, '_appPrefix', null);
     }
 
     process.stdout.write('   -> Uninstalling previous installation...');
@@ -804,6 +912,7 @@ function uninstallService2(params, msh)
         // Let's actually try to uninstall the service
         require('service-manager').manager.uninstallService(serviceName, uninstallOptions);
         process.stdout.write(' [DONE]\n');
+        if (params.includes('_stop') && require('fs').existsSync(msh)) { require('fs').unlinkSync(msh); }
 
         // Lets try to cleanup the uninstalled service
         if (dataFolder && appPrefix)
@@ -830,45 +939,31 @@ function uninstallService2(params, msh)
                 {
                     if (cleanupEntries[ci].indexOf(appPrefix + '.') === 0)
                     {
-                        try { fs.unlinkSync(dataFolder + '/' + cleanupEntries[ci]); } catch (ce) { }
+                        fs.unlinkSync(dataFolder + '/' + cleanupEntries[ci]);
                     }
                 }
-                try { fs.unlinkSync(dataFolder + '/DAIPC'); } catch (ce) { }
+                if (fs.existsSync(dataFolder + '/DAIPC')) { fs.unlinkSync(dataFolder + '/DAIPC'); }
                 try { fs.rmdirSync(dataFolder); } catch (ce) { }
                 try { fs.rmdirSync(levelUp); } catch (ce) { }
-            } catch (ce) { }
+            } catch (ce) { throw new Error('Agent data cleanup failed: ' + ce); }
 
             process.stdout.write(' [DONE]\n');
         }
     }
     catch (e)
     {
-        process.stdout.write(' [ERROR]\n');
+        throw new Error('Service uninstall failed: ' + e);
     }
 
-    // Check for secondary agent
-    try
+    // Check for secondary agent. Only absence permits continuing without cleanup.
+    var secondaryService = null;
+    try { secondaryService = require('service-manager').manager.getService(serviceName + 'Diagnostic'); }
+    catch (e) { if (!isServiceAbsent(e)) { throw e; } }
+    if (secondaryService != null)
     {
-        process.stdout.write('   -> Checking for secondary agent...');
-        var s = require('service-manager').manager.getService(serviceName + 'Diagnostic');
-        var loc = s.appLocation();
-        s.close();
-        process.stdout.write(' [FOUND]\n');
-        process.stdout.write('      -> Uninstalling secondary agent...');
+        secondaryService.close();
         secondaryagent = true;
-        try
-        {
-            require('service-manager').manager.uninstallService(serviceName + 'Diagnostic');
-            process.stdout.write(' [DONE]\n');
-        }
-        catch (e)
-        {
-            process.stdout.write(' [ERROR]\n');
-        }
-    }
-    catch (e)
-    {
-        process.stdout.write(' [NONE]\n');
+        require('service-manager').manager.uninstallService(serviceName + 'Diagnostic');
     }
 
     if(secondaryagent)
@@ -880,11 +975,12 @@ function uninstallService2(params, msh)
         p.then(function ()
         {
             process.stdout.write(' [DONE]\n');
-            uninstallService3(this._params);
-        }, function ()
+            var pendingParams = this._params;
+            runInstallerContinuation(function () { uninstallService3(pendingParams); });
+        }, function (error)
         {
-            process.stdout.write(' [ERROR]\n');
-            uninstallService3(this._params);
+            process.stderr.write('Secondary agent task cleanup failed: ' + error + '\n');
+            process.exit(1);
         });
     }
     else
@@ -896,32 +992,15 @@ function uninstallService2(params, msh)
 // First step in service uninstall
 function uninstallService(params)
 {
-    // Before we uninstall, we need to fetch the service from service-manager.js
-    var svc = require('service-manager').manager.getService(params.getParameter('meshServiceName', 'meshagent'));
-
-    // We can calculate what the .msh file location is, based on the appLocation of the service
-    var msh = svc.appLocation() + '.msh';
-
-    // Let's try to stop the service if we think it might be running
-    if (svc.isRunning == null || svc.isRunning())
+    var svc = require('service-manager').manager.getService(installerParameter(params, 'meshServiceName', 'meshagent'));
+    var msh;
+    try { msh = svc.appLocation() + '.msh'; }
+    catch (e) { svc.close(); throw e; }
+    stopInstallerService(svc, function () { uninstallService2(params, msh); }, function (e)
     {
-        process.stdout.write('   -> Stopping Service...');
-        if (process.platform == 'darwin')
-        {
-            // macOS requries us to unload the service
-            svc.unload();
-        }
-        else
-        {
-            svc.stop();
-        }
-        process.stdout.write(' [STOPPED]\n');
-        uninstallService2(params, msh);
-    }
-    else
-    {
-        uninstallService2(params, msh);
-    }
+        process.stderr.write('Service stop failed; uninstall aborted: ' + e + '\n');
+        process.exit(1);
+    });
 }
 
 // A previous service installation was found, so lets do some extra processing
@@ -935,13 +1014,13 @@ function serviceExists(loc, params)
 function fullUninstall(jsonString)
 {
     var parms;
-    try { parms = JSON.parse(jsonString); } catch (e) { process.stdout.write('ERROR: invalid JSON for fullUninstall: ' + e.message + '\n'); return; }
+    try { parms = validateInstallerParameters(JSON.parse(jsonString)); } catch (e) { throw new Error('Invalid fullUninstall parameters: ' + e.message); }
     if (WINDOWS_SERVICE_HOST_ONLY)
     {
         runWindowsNativeLifecycle('uninstall', parms, null);
         return;
     }
-    if (parseInt(parms.getParameter('verbose', 0)) == 0)
+    if (parseInt(installerParameter(parms, 'verbose', 0)) == 0)
     {
         console.setDestination(console.Destinations.DISABLED); // IF verbose is disabled(default), we will no-op console.log
     }
@@ -949,32 +1028,23 @@ function fullUninstall(jsonString)
     {
         console.setInfoLevel(1); // IF verbose is specified, we will show info level 1 messages
     }
+    var explicitName = installerParameter(parms, 'meshServiceName', null) != null;
     parms.push('_stop'); // Since we are intending to halt after uninstalling the service, we specify this, since we are re-using the uninstall code with the installer.
 
     checkParameters(parms); // Perform some checks on the passed in parameters
 
-    var name = parms.getParameter('meshServiceName', 'meshagent'); // Set the service name, using the defaults if not specified
+    var name = installerParameter(parms, 'meshServiceName', 'meshagent'); // Set the service name, using the defaults if not specified
 
-    var loc = null;
-    // Check for a previous installation of the service
+    var s = resolveInstallerService(parms, null, explicitName);
+    if (s == null) { process.stdout.write(' [NONE]\n'); process.exit(0); return; }
+    var loc;
     try
     {
-        process.stdout.write('...Checking for previous installation of "' + name + '"');
-        var s = require('service-manager').manager.getService(name);
         loc = s.appLocation();
-        var appPrefix = loc.split('/').pop();
-
-        parms.push('_workingDir=' + s.appWorkingDirectory());
-        parms.push('_appPrefix=' + appPrefix);
-
-        s.close();
+        parms.push('_workingDir=' + getPathDirName(loc));
+        parms.push('_appPrefix=' + getPathBaseName(loc));
     }
-    catch (e)
-    {
-        // No previous installation was found, so we can just exit
-        process.stdout.write(' [NONE]\n');
-        process.exit();
-    }
+    finally { s.close(); }
     serviceExists(loc, parms);
 }
 
@@ -982,7 +1052,7 @@ function fullUninstall(jsonString)
 function fullInstall(jsonString, gOptions)
 {
     var parms;
-    try { parms = JSON.parse(jsonString); } catch (e) { process.stdout.write('ERROR: invalid JSON for fullInstall: ' + e.message + '\n'); return; }
+    try { parms = validateInstallerParameters(JSON.parse(jsonString)); } catch (e) { throw new Error('Invalid fullInstall parameters: ' + e.message); }
     if (WINDOWS_SERVICE_HOST_ONLY)
     {
         runWindowsNativeLifecycle('install', parms, gOptions);
@@ -994,6 +1064,10 @@ function fullInstall(jsonString, gOptions)
 // Entry point for Windows full install lifecycle requests, using JSON object
 function fullInstallEx(parms, gOptions)
 {
+    validateInstallerParameters(parms);
+    global._workingpath = null;
+    global._installedServiceKey = null;
+    global.gOptions = gOptions || null;
     if (WINDOWS_SERVICE_HOST_ONLY)
     {
         runWindowsNativeLifecycle('install', parms, gOptions);
@@ -1001,48 +1075,35 @@ function fullInstallEx(parms, gOptions)
     }
     if (gOptions != null) { global.gOptions = gOptions; }
 
-    // Perform some checks on the specified parameters
+    // Preserve whether the operator selected a service before adding package defaults.
+    var explicitName = installerParameter(parms, 'meshServiceName', null) != null;
+    var explicitTarget = installerParameter(parms, 'target', null) != null || installerParameter(parms, 'fileName', null) != null;
     checkParameters(parms);
 
-    var loc = null;
-    var i;
-    var name = parms.getParameter('meshServiceName', 'meshagent'); // Set the service name, using defaults if not specified
-    name = name.split(' ').join('_');
-
     // No-op console.log() if verbose is not specified, otherwise set the verbosity level to level 1
-    if (parseInt(parms.getParameter('verbose', 0)) == 0)
+    if (parseInt(installerParameter(parms, 'verbose', 0)) == 0)
     {
         console.setDestination(console.Destinations.DISABLED);
     }
     else
     {
-        console.setInfoLevel(1); 
+        console.setInfoLevel(1);
     }
 
-    // Check for a previous installation of the service
-    try
+    var s = resolveInstallerService(parms, null, explicitName);
+    if (s == null)
     {
-        process.stdout.write('...Checking for previous installation of "' + name + '"');
-        var s = require('service-manager').manager.getService(name);
-        loc = s.appLocation();
-
-        global._workingpath = s.appWorkingDirectory();
-        console.info1('');
-        console.info1('Previous Working Path: ' + global._workingpath);
-        s.close();
-    }
-    catch (e)
-    {
-        // No previous installation was found, so we can continue with installation
         process.stdout.write(' [NONE]\n');
         installService(parms);
         return;
     }
-    if (process.execPath == loc)
-    {
-        parms.push('__skipBinaryDelete'); // If the installer is running from the installed service path, skip deleting the binary
-    }
-    serviceExists(loc, parms); // Previous installation was found, so we need to do some extra processing before we continue with installation
+    // A package's default basename must not relocate an incumbent datastore.
+    if (!explicitTarget) { installerDeleteParameter(parms, 'target'); }
+    var loc;
+    try { loc = preserveInstallerLocation(s, parms); }
+    finally { s.close(); }
+    serviceExists(loc, parms);
+
 }
 
 
@@ -1067,28 +1128,28 @@ function parseWindowsNativeUpdateParameters(b64)
         {
             throw new Error('Native Windows update received invalid parameter payload: ' + e.message);
         }
-        if (!(parms instanceof Array))
+        if (!Array.isArray(parms))
         {
             throw new Error('Native Windows update parameter payload must be an array.');
         }
     }
-    if (typeof(parms.getParameterIndex) == 'function')
+    if (Array.isArray(parms))
     {
-        var px = parms.getParameterIndex('fakeUpdate');
+        var px = installerParameterIndex(parms, 'fakeUpdate');
         if (px >= 0) { parms.splice(px, 1); }
     }
-    return (parms);
+    return validateInstallerParameters(parms);
 }
 
 function getWindowsNativeUpdateSource(parms)
 {
     var updateSource = null;
-    if (parms != null && typeof(parms.getParameter) == 'function')
+    if (parms != null && Array.isArray(parms))
     {
-        updateSource = parms.getParameter('update-source', null);
+        updateSource = installerParameter(parms, 'update-source', null);
         if (updateSource == null || updateSource.length == 0)
         {
-            updateSource = parms.getParameter('updateSource', null);
+            updateSource = installerParameter(parms, 'updateSource', null);
         }
     }
     if (updateSource == null) { return (null); }
@@ -1099,12 +1160,12 @@ function getWindowsNativeUpdateSource(parms)
 function getWindowsNativeUpdateDll(parms)
 {
     var updateDll = null;
-    if (parms != null && typeof(parms.getParameter) == 'function')
+    if (parms != null && Array.isArray(parms))
     {
-        updateDll = parms.getParameter('update-dll', null);
+        updateDll = installerParameter(parms, 'update-dll', null);
         if (updateDll == null || updateDll.length == 0)
         {
-            updateDll = parms.getParameter('updateDll', null);
+            updateDll = installerParameter(parms, 'updateDll', null);
         }
     }
     if (updateDll == null) { return (null); }
@@ -1116,7 +1177,7 @@ function runWindowsNativeUpdateActivation(parms)
 {
     var updateSource = getWindowsNativeUpdateSource(parms);
     var updateDll = getWindowsNativeUpdateDll(parms);
-    var skipExit = parseInt(parms.getParameter('__skipExit', 0)) != 0;
+    var skipExit = parseInt(installerParameter(parms, '__skipExit', 0)) != 0;
     var displayName, description;
     var meshAgent;
 
@@ -1125,8 +1186,8 @@ function runWindowsNativeUpdateActivation(parms)
         throw new Error('Native Windows update requires an explicit staged package path.');
     }
     prepareWindowsNativeLifecycleParameters(parms);
-    displayName = parms.getParameter('displayName', null);
-    description = parms.getParameter('description', null);
+    displayName = installerParameter(parms, 'displayName', null);
+    description = installerParameter(parms, 'description', null);
     meshAgent = require('MeshAgent');
     if (meshAgent.nativeFullUpdate !== true || typeof meshAgent.activateNativeUpdate != 'function')
     {
@@ -1136,7 +1197,7 @@ function runWindowsNativeUpdateActivation(parms)
     {
         throw new Error('Native Windows update activation did not accept the staged package.');
     }
-    if (!skipExit) { process.exit(0); }
+    return !skipExit;
 }
 
 function windowsNativeUpdate(isservice, b64)
@@ -1149,16 +1210,19 @@ function windowsNativeUpdate(isservice, b64)
     {
         throw new Error('Windows console self-update is disabled. Windows updates must use the native service lifecycle.');
     }
+    var shouldExit;
     try
     {
         var parms = parseWindowsNativeUpdateParameters(b64);
-        runWindowsNativeUpdateActivation(parms);
+        shouldExit = runWindowsNativeUpdateActivation(parms);
     }
     catch (e)
     {
         process.stdout.write('Native Windows update failed: ' + e.message + '\n');
         process.exit(1);
+        return;
     }
+    if (shouldExit) { process.exit(0); }
 }
 
 function windowsNativeConsoleUpdate()
@@ -1168,140 +1232,92 @@ function windowsNativeConsoleUpdate()
 
 
 // Non-Windows helper function to perform a self-update. Windows uses the native rundll32 lifecycle.
+// meshconsole passes "-update:*" options as base64 JSON, or the string 'null' when there
+// are none, and a legacy "-update:" argument as a one-element array that carries no options.
+function sysUpdateParameters(b64)
+{
+    if (b64 == null || b64 === 'null' || b64 === '') { return []; }
+    if (Array.isArray(b64))
+    {
+        return validateInstallerParameters(b64.filter(function (value) { return typeof value == 'string' && value.indexOf('--') == 0; }));
+    }
+    return validateInstallerParameters(JSON.parse(Buffer.from(b64, 'base64').toString()));
+}
 function sys_update(isservice, b64)
 {
     if (process.platform == 'win32') { return (windowsNativeUpdate(isservice, b64)); }
-
-    // This is run on the 'updated' agent. 
-    
+    var fs = require('fs');
+    var parms = sysUpdateParameters(b64);
+    installerDeleteParameter(parms, 'fakeUpdate');
+    var explicitName = installerParameter(parms, 'meshServiceName', null) != null;
+    var destination = installerParameter(parms, 'update-target', null);
+    if (destination == null && !explicitName)
+    {
+        if (!/\.update$/.test(process.execPath)) { throw new Error('Update requires --update-target or a validated .update staging suffix.'); }
+        destination = process.execPath.slice(0, -'.update'.length);
+    }
     var service = null;
-    var serviceLocation = "";
-    var px;
-
     if (isservice)
     {
-        var parm = b64 != null ? JSON.parse(Buffer.from(b64, 'base64').toString()) : null;
-        if (parm != null)
-        {
-            console.info1('sys_update(' + isservice + ', ' + JSON.stringify(parm) + ')');
-            if ((px = parm.getParameterIndex('fakeUpdate')) >= 0)
-            {
-                console.info1('Removing "fakeUpdate" parameter');
-                parm.splice(px, 1);
-            }
-        }
-
-        //
-        // Service  Mode
-        //
-
-        // Check if we have sufficient permission
-        if (!require('user-sessions').isRoot())
-        {
-            // We don't have enough permissions, so copying the binary will likely fail, and we can't start...
-            // This is just to prevent looping, because agentcore.c should not call us in this scenario
-            console.log('* insufficient permission to continue with update');
-            process._exit();
-            return;
-        }
-        var servicename = parm != null ? parm.getParameter('meshServiceName', 'meshagent') : 'meshagent';
+        if (!require('user-sessions').isRoot()) { throw new Error('Insufficient permission to update the service.'); }
+        service = resolveInstallerService(parms, destination, explicitName);
+        if (service == null) { throw new Error('Installed update service was not found; no files changed.'); }
+        try { destination = service.appLocation(); }
+        catch (e) { service.close(); throw e; }
+    }
+    if (!destination || destination.charAt(0) != '/' || destination == process.execPath || !fs.existsSync(destination))
+    {
+        if (service) { service.close(); }
+        throw new Error('Invalid or missing installed update destination.');
+    }
+    var serviceName = service ? service.name : null;
+    function replaceBinary()
+    {
+        // Rename a sibling to avoid overwriting a mapped executable or partial
+        // copies at the installed path. Datastore and provisioning remain in place.
+        var staged = destination + '.replacement-' + process.pid + '-' + Date.now();
+        var committed = false;
+        var exitCode = 0;
         try
         {
-            service = require('service-manager').manager.getService(servicename)
-            serviceLocation = service.appLocation();
-            console.log(' Updating service: ' + servicename);
-        }
-        catch (f)
-        {
-            // Check to see if we can figure out the service name before we fail
-            var old = process.execPath.substring(0, process.execPath.length - 7);
-            var child = require('child_process').execFile(old, [getPathBaseName(old), '-name']);
-            child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
-            child.waitExit();
-              
-            if (child.stdout.str.trim() == '' && b64 == null) { child.stdout.str = 'Mesh Agent'; }
-            if (child.stdout.str.trim() != '')
+            var mode = fs.statSync(destination).mode;
+            fs.copyFileSync(process.execPath, staged);
+            fs.chmodSync(staged, mode);
+            fs.renameSync(staged, destination);
+            committed = true;
+            if (serviceName != null)
             {
-                if (child.stdout.str.trim().split('\n').length > 1) { child.stdout.str = 'Mesh Agent'; }
+                var restarted = require('service-manager').manager.getService(serviceName);
                 try
                 {
-                    service = require('service-manager').manager.getService(child.stdout.str.trim())
-                    serviceLocation = service.appLocation();
-                    console.log(' Updating service: ' + child.stdout.str.trim());
+                    restarted.start();
+                    if (typeof restarted.isRunning == 'function' && !restarted.isRunning()) { throw new Error('Updated service did not start.'); }
                 }
-                catch (ff)
-                {
-                    console.log(' * ' + servicename + ' SERVICE NOT FOUND *');
-                    console.log(' * ' + child.stdout.str.trim() + ' SERVICE NOT FOUND *');
-                    process._exit();
-                }
+                finally { restarted.close(); }
             }
-            else
-            {
-                console.log(' * ' + servicename + ' SERVICE NOT FOUND *');
-                process._exit();
-            }
+            process.stdout.write('Agent update complete.' + (serviceName == null ? ' Please restart the agent.' : '') + '\n');
+
         }
-    }
-
-    if (!global._interval)
-    {
-        global._interval = setInterval(sys_update, 60000, isservice, b64);
-    }
-
-    if (isservice === false)
-    {
-        //
-        // Console Mode
-        //
-        serviceLocation = process.execPath.substring(0, process.execPath.length - 7);
-
-        if (serviceLocation != process.execPath)
+        catch (e)
         {
-            try
+            if (fs.existsSync(staged)) { try { fs.unlinkSync(staged); } catch (cleanupError) { } }
+            if (!committed && serviceName != null)
             {
-                require('fs').copyFileSync(process.execPath, serviceLocation);
+                var original = null;
+                try { original = require('service-manager').manager.getService(serviceName); original.start(); }
+                catch (restartError) { process.stderr.write('Original service restart failed: ' + restartError + '\n'); }
+                finally { if (original) { original.close(); } }
             }
-            catch (ce)
-            {
-                console.log('\nAn error occured while updating agent.');
-                process.exit();
-            }
+            process.stderr.write('Agent update failed: ' + e + '\n');
+            exitCode = 1;
         }
-
-        // Copied agent binary... Need to start agent in console mode
-        console.log('\nAgent update complete... Please re-start agent.');
-        process.exit();
+        process.exit(exitCode);
     }
-
-
-    service.stop().finally(function ()
+    if (service == null) { replaceBinary(); return; }
+    stopInstallerService(service, replaceBinary, function (e)
     {
-        require('process-manager').enumerateProcesses().then(function (proc)
-        {
-            for (var p in proc)
-            {
-                if (proc[p].path == serviceLocation)
-                {
-                    process.kill(proc[p].pid);
-                }
-            }
-
-            try
-            {
-                require('fs').copyFileSync(process.execPath, serviceLocation);
-            }
-            catch (ce)
-            {
-                console.log('Could not copy file.. Trying again in 60 seconds');
-                service.close();
-                return;
-            }
-
-            console.log('Agent update complete. Starting service...');
-            service.start();
-            process._exit();
-        });
+        process.stderr.write('Update aborted before replacement: ' + e + '\n');
+        process.exit(1);
     });
 }
 
@@ -1322,7 +1338,10 @@ function agent_updaterVersion(updatePath)
         return (0);
     }
     child.stdout.str = ''; child.stdout.on('data', function (c) { this.str += c.toString(); });
-    child.waitExit();
+    var exited = false;
+    child.on('exit', function () { exited = true; });
+    child.waitExit(10000);
+    if (!exited) { try { child.kill(); } catch (e) { } return 0; }
 
     if(child.stdout.str.trim() == '')
     {

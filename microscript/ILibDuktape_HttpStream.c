@@ -4702,12 +4702,21 @@ void ILibDuktape_httpStream_webSocket_EncodedResumeSink_Chain(void *chain, void 
 	duk_context *ctx = state->decodedStream->writableStream->ctx;
 	if (ctx == NULL || !duk_ctx_is_alive(ctx) || duk_ctx_shutting_down(ctx)) { return; }
 
-	if (state->decodedStream->writableStream->pipedReadable == NULL) { return; }
-	duk_push_heapptr(ctx, state->decodedStream->writableStream->pipedReadable);			// [readable]
-	duk_get_prop_string(ctx, -1, "resume");												// [readable][resume]
-	duk_swap_top(ctx, -2);																// [resume][this]
-	if (duk_pcall_method(ctx, 0) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "http.webSocketStream.Encoded_Resume(): Error resuming upstream "); }
-	duk_pop(ctx);																		// ...
+	if (state->decodedStream->writableStream->pipedReadable != NULL)
+	{
+		duk_push_heapptr(ctx, state->decodedStream->writableStream->pipedReadable);			// [readable]
+		duk_get_prop_string(ctx, -1, "resume");												// [readable][resume]
+		duk_swap_top(ctx, -2);																// [resume][this]
+		if (duk_pcall_method(ctx, 0) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "http.webSocketStream.Encoded_Resume(): Error resuming upstream "); }
+		duk_pop(ctx);																		// ...
+	}
+	// The transport drained: complete the decoded writable's pending write too. Without this a direct
+	// ws.write() caller never got 'drain', and an end() deferred by backpressure never sent its CLOSE
+	// frame or emitted 'finish'.
+	if (ILibDuktape_httpStream_webSocket_HasDecodedWritable(state))
+	{
+		ILibDuktape_WritableStream_Ready(state->decodedStream->writableStream);
+	}
 }
 void ILibDuktape_httpStream_webSocket_EncodedResumeSink(ILibDuktape_DuplexStream *sender, void *user)
 {
@@ -4716,8 +4725,18 @@ void ILibDuktape_httpStream_webSocket_EncodedResumeSink(ILibDuktape_DuplexStream
 	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasDecodedWritable(state)) { return; }
 	if (state->decodedStream->writableStream->pipedReadable_native != NULL && state->decodedStream->writableStream->pipedReadable_native->ResumeHandler != NULL)
 	{
-		state->decodedStream->writableStream->pipedReadable_native->paused = 0;
-		state->decodedStream->writableStream->pipedReadable_native->ResumeHandler(state->decodedStream->writableStream->pipedReadable_native, state->decodedStream->writableStream->pipedReadable_native->user);
+		ILibDuktape_WritableStream *decodedWritable = state->decodedStream->writableStream;
+		// The source may also feed other destinations (several viewers of one remote desktop stream).
+		// Resuming it directly here would override a still-congested sibling. Instead complete this
+		// destination's outstanding pipe write: the source's flush resumes it once none is congested.
+		if (decodedWritable->OnWriteFlushEx != NULL)
+		{
+			ILibDuktape_WritableStream_Ready(decodedWritable);
+		}
+		else
+		{
+			ILibDuktape_readableStream_ResumeIfUncongested(decodedWritable->pipedReadable_native);
+		}
 	}
 	else
 	{

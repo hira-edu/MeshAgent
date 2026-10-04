@@ -2072,6 +2072,7 @@ void* ILibDuktape_GlobalGenericCallback_Process(int numParms, ...)
 
 	for (i = 0; i < count; ++i)
 	{
+		int globalListLocked = 1;
 		user = NULL;
 		ILibLinkedList_Lock(GlobalCallbackList);
 		if (ILibMemory_CanaryOK(refList[i]))
@@ -2104,12 +2105,17 @@ void* ILibDuktape_GlobalGenericCallback_Process(int numParms, ...)
 			}
 			else
 			{
-				// No need to context switch
-				duk_push_heapptr(refList[i]->emitter->ctx, refList[i]->emitter->object);										// [obj]
-				duk_del_prop_string(refList[i]->emitter->ctx, -1, ILibDuktape_GenericMarshal_GlobalCallback_ThreadID);
-				duk_del_prop_string(refList[i]->emitter->ctx, -1, ILibDuktape_GenericMarshal_GlobalSet);
-				duk_pop(refList[i]->emitter->ctx);																				// ...
-				ILibDuktape_EventEmitter_SetupEmit(refList[i]->emitter->ctx, refList[i]->emitter->object, "GlobalCallback");	// [emit][this][GlobalCallback]
+				// No need to context switch. Release the list lock before running JavaScript: a listener can
+				// trigger another global callback on this thread, which would take the lock again. Entries are
+				// only freed on their owning chain thread (this one), so the emitter stays valid here.
+				ILibDuktape_EventEmitter *chainEmitter = refList[i]->emitter;
+				ILibLinkedList_UnLock(GlobalCallbackList);
+				globalListLocked = 0;
+				duk_push_heapptr(chainEmitter->ctx, chainEmitter->object);										// [obj]
+				duk_del_prop_string(chainEmitter->ctx, -1, ILibDuktape_GenericMarshal_GlobalCallback_ThreadID);
+				duk_del_prop_string(chainEmitter->ctx, -1, ILibDuktape_GenericMarshal_GlobalSet);
+				duk_pop(chainEmitter->ctx);																				// ...
+				ILibDuktape_EventEmitter_SetupEmit(chainEmitter->ctx, chainEmitter->object, "GlobalCallback");	// [emit][this][GlobalCallback]
 				if (numParms > 0)
 				{
 					int z;
@@ -2118,31 +2124,31 @@ void* ILibDuktape_GlobalGenericCallback_Process(int numParms, ...)
 					for (z = 0; z < numParms; ++z)
 					{
 						v = va_arg(vlist, PTRSIZE);
-						ILibDuktape_GenericMarshal_Variable_PUSH(refList[i]->emitter->ctx, (void*)v, sizeof(void*));
-						ILibDuktape_GenericMarshal_Variable_DisableAutoFree(refList[i]->emitter->ctx, -1);
+						ILibDuktape_GenericMarshal_Variable_PUSH(chainEmitter->ctx, (void*)v, sizeof(void*));
+						ILibDuktape_GenericMarshal_Variable_DisableAutoFree(chainEmitter->ctx, -1);
 					}
 					va_end(vlist);
 				}
-				if (duk_pcall_method(refList[i]->emitter->ctx, numParms + 1) != 0)
+				if (duk_pcall_method(chainEmitter->ctx, numParms + 1) != 0)
 				{
-					ILibDuktape_Process_UncaughtException(refList[i]->emitter->ctx);
+					ILibDuktape_Process_UncaughtException(chainEmitter->ctx);
 				}
 				else
 				{
-					if ((retVal = refList[i]->emitter->lastReturnValue) != NULL)
+					if ((retVal = chainEmitter->lastReturnValue) != NULL)
 					{
-						duk_push_heapptr(refList[i]->emitter->ctx, refList[i]->emitter->lastReturnValue);				// [retVal]
-						if (duk_has_prop_string(refList[i]->emitter->ctx, -1, ILibDuktape_GenericMarshal_VariableType))
+						duk_push_heapptr(chainEmitter->ctx, chainEmitter->lastReturnValue);				// [retVal]
+						if (duk_has_prop_string(chainEmitter->ctx, -1, ILibDuktape_GenericMarshal_VariableType))
 						{
-							retVal = Duktape_GetPointerProperty(refList[i]->emitter->ctx, -1, "_ptr");
+							retVal = Duktape_GetPointerProperty(chainEmitter->ctx, -1, "_ptr");
 						}
-						duk_pop(refList[i]->emitter->ctx);																// ...
+						duk_pop(chainEmitter->ctx);																// ...
 					}
 				}
-				duk_pop(refList[i]->emitter->ctx);
+				duk_pop(chainEmitter->ctx);
 			}
 		}
-		ILibLinkedList_UnLock(GlobalCallbackList);	
+		if (globalListLocked != 0) { ILibLinkedList_UnLock(GlobalCallbackList); }
 
 		if (user != NULL)
 		{

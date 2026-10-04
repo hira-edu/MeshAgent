@@ -321,11 +321,21 @@ long ILibGetTimeStamp();
 	typedef volatile int ILibSpinLock;
 #endif
 	static inline void ILibSpinLock_Init(ILibSpinLock *lock) { *lock = 0; }
-	static inline void ILibSpinLock_UnLock(ILibSpinLock *lock) { *lock = 0; }
+	static inline void ILibSpinLock_UnLock(ILibSpinLock *lock)
+	{
+		// Release with a barrier: a plain store does not order the protected writes before it on ARM64.
+#ifdef WIN32
+		InterlockedExchange(lock, 0);
+#else
+		__sync_lock_release(lock);
+#endif
+	}
 	static inline void ILibSpinLock_Lock(ILibSpinLock *lock)
 	{
 #ifdef WIN32
-		while (!InterlockedCompareExchange(lock, 1, 0))
+		// InterlockedCompareExchange returns the PREVIOUS value: the lock is ours only when that was 0.
+		// (Testing !previous never blocked while the lock was held, so it provided no mutual exclusion.)
+		while (InterlockedCompareExchange(lock, 1, 0) != 0)
 		{
 			YieldProcessor();
 		}

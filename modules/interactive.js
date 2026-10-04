@@ -125,31 +125,21 @@ limitations under the License.
 
 /*****/
 
-    Object.defineProperty(Array.prototype, 'getParameterEx',
+    function interactiveParameter(name, defaultValue)
+    {
+        for (var i = 0; i < process.argv.length; ++i)
         {
-            value: function (name, defaultValue)
+            var token = process.argv[i];
+            if (token == '-' + name) { return null; }
+            if (token.indexOf('-' + name + '=') == 0)
             {
-                var i, ret;
-                for (i = 0; i < this.length; ++i)
-                {
-                    if (this[i] == name) { return (null); }
-                    if (this[i].startsWith(name + '='))
-                    {
-                        ret = this[i].substring(name.length + 1);
-                        if (ret.startsWith('"')) { ret = ret.substring(1, ret.length - 1); }
-                        return (ret);
-                    }
-                }
-                return (defaultValue);
+                var value = token.substring(name.length + 2);
+                if (value.charAt(0) == '"' && value.charAt(value.length - 1) == '"') { value = value.substring(1, value.length - 1); }
+                return value;
             }
-        });
-    Object.defineProperty(Array.prototype, 'getParameter',
-        {
-            value: function (name, defaultValue)
-            {
-                return (this.getParameterEx('-' + name, defaultValue));
-            }
-        });
+        }
+        return defaultValue;
+    }
 
     // The folloing line just below with 'msh=' needs to stay exactly like this since MeshCentral will replace it with the correct settings.
     //var msh = {};
@@ -157,14 +147,14 @@ limitations under the License.
 
     var lang = require('util-language').current;
     if (lang == null) { lang = 'en'; }
-    if (process.argv.getParameter('lang', lang) == null)
+    if (interactiveParameter('lang', lang) == null)
     {
         console.log('\nCurrent Language: ' + lang + '\n');
         process.exit();
     }
     else
     {
-        lang = process.argv.getParameter('lang', lang).toLowerCase();
+        lang = interactiveParameter('lang', lang).toLowerCase();
         lang = lang.split('_').join('-');
         if (translation[lang] == null)
         {
@@ -194,7 +184,18 @@ limitations under the License.
     var s = null, buttons = [translation[lang].cancel], skip = false;
     var serviceName = msh.meshServiceName ? msh.meshServiceName : 'meshagent';
 
-    try { s = require('service-manager').manager.getService(serviceName); } catch (e) { }
+    function readInteractiveServiceStatus(name)
+    {
+        var service = null;
+        try
+        {
+            service = require('service-manager').manager.getService(name);
+            return { running: service.isRunning() };
+        }
+        catch (e) { if (!e || e.code != 'ENOENT') { throw e; } return null; }
+        finally { if (service) { service.close(); } }
+    }
+    s = readInteractiveServiceStatus(serviceName);
 
     var connectArgs = [process.execPath.split('/').pop(), '--disableUpdate=1'];
     if (process.platform != 'win32') { connectArgs.push('--no-embedded=1'); }
@@ -224,12 +225,9 @@ limitations under the License.
 
         if (process.platform != 'win32')
         {
-            var mstr = require('fs').createWriteStream(process.execPath + '.msh', { flags: 'wb' });
-            for (i in msh)
-            {
-                mstr.write(i + '=' + msh[i] + '\n');
-            }
-            mstr.end();
+            var mshText = '';
+            for (i in msh) { mshText += i + '=' + msh[i] + '\n'; }
+            require('fs').writeFileSync(process.execPath + '.msh', mshText);
         }
 
         if (parms == null) { parms = []; }
@@ -406,7 +404,7 @@ if (process.argv.includes('-help') || (process.platform == 'linux' && process.en
             msg = translation[lang].agent + ": " + translation[lang].status[0] + '\n';
         } else
         {
-            msg = translation[lang].agent + ": " + (s.isRunning() ? translation[lang].status[1] : translation[lang].status[2]) + '\n';
+            msg = translation[lang].agent + ": " + (s.running ? translation[lang].status[1] : translation[lang].status[2]) + '\n';
         }
 
         msg += (translation[lang].group + ": " + msh.MeshName + '\n');

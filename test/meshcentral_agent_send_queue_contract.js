@@ -52,8 +52,12 @@ function main() {
     const checks = {
         sendToAgentLocated: sendToAgentBlock.length > 0,
         queueBacklogUsesLength: sendToAgentBlock.includes('if (obj.agent.sendQueue.length > 10) {'),
-        marksSendingBeforeSend: sendToAgentBlock.includes('obj.agent.sending = true;') &&
-            sendToAgentBlock.includes('obj.agent.ws.send(data, sendAgentNext);'),
+        // The completion callback is bound to the agent the data was sent to, so a stalled agent that was
+        // replaced cannot advance (or stall) the replacement's queue when its late write callback fires.
+        marksSendingBeforeSend: sendToAgentBlock.includes('const agent = obj.agent;') &&
+            sendToAgentBlock.includes('agent.sending = true;') &&
+            sendToAgentBlock.includes('agent.ws.send(data, function () { sendAgentNext(agent); });') &&
+            sendToAgentBlock.indexOf('agent.sending = true;') < sendToAgentBlock.indexOf('agent.ws.send(data, function () { sendAgentNext(agent); });'),
         fixesAgentOutTrafficAccounting: source.includes('if (peer.agentOutTraffic) { outTraffc += peer.agentOutTraffic; }')
     };
 

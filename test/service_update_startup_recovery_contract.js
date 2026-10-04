@@ -58,10 +58,9 @@ assert(runtimeHeader.includes('MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W L"recover-
     'the recovery lifecycle action must round-trip through the manifest contract');
 assert(deployment.includes('return ServiceDeploy_RecoverInterruptedTransaction();'),
     'the recovery lifecycle host must invoke transaction recovery directly under the mutex');
-assert(interruptedRecovery.includes('ServiceDeploy_RecordUpdateActivationFailureHold(rollbackPaths)') &&
-    interruptedRecovery.indexOf('ServiceDeploy_RecordUpdateActivationFailureHold(rollbackPaths)') <
-        interruptedRecovery.indexOf('ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000)'),
-    'interrupted recovery must record the failure hold before restarting the service');
+assert(!interruptedRecovery.includes('UpdateActivationFailureHold') &&
+    interruptedRecovery.includes('ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000)'),
+    'interrupted recovery must record no update hold and must not fail for a missing activation target');
 assert(interruptedRecovery.includes('Restored service did not report its original identity in time') &&
     interruptedRecovery.includes('if (ok) { ok = ServiceDeploy_ResolveUpdateTransaction(&tx, serviceName); }'),
     'identity timeout must be advisory and the restored checkpoint must be resolved');
@@ -77,7 +76,7 @@ console.log(JSON.stringify({
         recoveryTriggersSuspendedDuringStop: true,
         abandonedRecoveryDelegatedBeforeAgentCreate: true,
         recoveryManifestActionRoundTrips: true,
-        failureHoldPrecedesRestart: true,
+        recoveryRecordsNoUpdateHold: true,
         identityTimeoutDoesNotRetainCheckpoint: true
     }
 }, null, 2));

@@ -55,6 +55,7 @@ typedef struct ILibSimpleDataStore_Root
 	void* warningSinkUser;
 	int error;
 	int createdAsNew;
+	int readOnly; // Snapshot readers must never compact, repair or reopen as writers.
 	ILibSimpleDataStore_WriteErrorHandler ErrorHandler;
 	void *ErrorHandlerUser;
 } ILibSimpleDataStore_Root;
@@ -232,8 +233,9 @@ uint64_t ILibSimpleDataStore_WriteRecord(FILE *f, char* key, int keyLen, char* v
 	uint64_t curlen;
 	uint64_t written = 0;
 
-	fseek(f, 0, SEEK_END);
+	if (f == NULL || fseek(f, 0, SEEK_END) != 0) { return 0; }
 	curlen = ILibSimpleDataStore_GetPosition(f);
+	if (curlen == (uint64_t)-1) { return 0; }
 
 	header->nodeSize = htonl(sizeof(ILibSimpleDataStore_RecordHeader_NG) + keyLen + valueLen);
 	header->keyLen = htonl(keyLen);
@@ -244,9 +246,10 @@ uint64_t ILibSimpleDataStore_WriteRecord(FILE *f, char* key, int keyLen, char* v
 	written += (uint64_t)fwrite(key, 1, keyLen, f);
 	offset = ILibSimpleDataStore_GetPosition(f);
 	if (value != NULL) { written += (uint64_t)fwrite(value, 1, valueLen, f); }
-	fflush(f);
+	int flushStatus = fflush(f);
 
-	if (written < (sizeof(ILibSimpleDataStore_RecordHeader_NG) + keyLen + (value!=NULL?valueLen:0)))
+	if (flushStatus != 0 || ferror(f) || offset == (uint64_t)-1 ||
+		written < (sizeof(ILibSimpleDataStore_RecordHeader_NG) + keyLen + (value!=NULL?valueLen:0)))
 	{
 		//
 		// Unable to write all data, probably because insufficient disc space,
@@ -260,6 +263,8 @@ uint64_t ILibSimpleDataStore_WriteRecord(FILE *f, char* key, int keyLen, char* v
 #else
 		ignore_result(ftruncate(fileno(f), curlen));
 #endif
+		// A sticky stream error would fail every later write on this handle.
+		clearerr(f);
 		return(0);
 	}
 	return offset;
@@ -310,7 +315,9 @@ ILibSimpleDataStore_RecordHeader_NG* ILibSimpleDataStore_ReadNextRecord(ILibSimp
 	node->valueLength = (int)ntohl(node->valueLength);
 	ILibSimpleDataStore_RecordHeader_ValueOffset(node) = (uint64_t)((uint64_t)ILibSimpleDataStore_GetPosition(root->dataFile) + (uint64_t)node->keyLen);
 
-	if (node->keyLen > (int)((sizeof(ILibScratchPad) - nodeSize - sizeof(uint64_t))))
+	// Older builds could write an empty key, so only a negative length is invalid.
+	if (node->keyLen < 0 || node->valueLength < 0 ||
+		node->keyLen > (int)(sizeof(root->scratchPad) - nodeSize - sizeof(uint64_t)))
 	{
 		// Invalid record
 		ILibSimpleDataStore_SeekPosition(root->dataFile, currentOffset, SEEK_SET);
@@ -332,7 +339,11 @@ ILibSimpleDataStore_RecordHeader_NG* ILibSimpleDataStore_ReadNextRecord(ILibSimp
 	while (bytesLeft > 0)
 	{
 		i = (int)fread(data, 1, bytesLeft > 4096 ? 4096 : bytesLeft, root->dataFile);
-		if (i <= 0) { bytesLeft = 0; break; }
+		if (i <= 0)
+		{
+			ILibSimpleDataStore_SeekPosition(root->dataFile, currentOffset, SEEK_SET);
+			return NULL;
+		}
 		SHA384_Update(&c, data, i);
 		bytesLeft -= i;
 	}
@@ -345,7 +356,10 @@ ILibSimpleDataStore_RecordHeader_NG* ILibSimpleDataStore_ReadNextRecord(ILibSimp
 		// Before we assume this is a bad hash check, we need to verify it's not a compressed node
 		if (node->keyLen > sizeof(uint32_t))
 		{
-			if (crc32c(0, (unsigned char*)node->key, node->keyLen - sizeof(uint32_t)) == ((uint32_t*)(node->key + node->keyLen - sizeof(uint32_t)))[0])
+			unsigned char* key = (unsigned char*)node + nodeSize;
+			uint32_t storedCrc;
+			memcpy(&storedCrc, key + node->keyLen - sizeof(storedCrc), sizeof(storedCrc));
+			if (crc32c(0, key, node->keyLen - sizeof(uint32_t)) == storedCrc)
 			{
 				return(node);
 			}
@@ -482,12 +496,12 @@ void ILibSimpleDataStore_RebuildKeyTable(ILibSimpleDataStore_Root *root)
 
 		// Set the size of the entire data store file, and call 'Compact', to convert the db to NG format
 		root->fileSize = ILibSimpleDataStore_GetPosition(root->dataFile);
-		ILibSimpleDataStore_Compact((ILibSimpleDataStore)root);
+		if (!root->readOnly) { ILibSimpleDataStore_Compact((ILibSimpleDataStore)root); }
 	}
 	else
 	{
 		// No need to convert db format, because we're already NG format
-		if ((newoffset = ILibSimpleDataStore_GetPosition(root->dataFile)) != root->fileSize)
+		if (!root->readOnly && (newoffset = ILibSimpleDataStore_GetPosition(root->dataFile)) != root->fileSize)
 		{
 			// DB corruption detected
 			ILIBLOGMESSAGEX("DB Corruption Detected");
@@ -547,6 +561,7 @@ FILE* ILibSimpleDataStore_OpenFileEx3(char* filePath, int forceTruncateIfNonZero
 	}
 #else
 	char *flag = readonly == 0 ? "rb+": "rb";
+	if (readonly != 0) { return fopen(filePath, "rb"); }
 
 	if (forceTruncateIfNonZero != 0 || (f = fopen(filePath, flag)) == NULL)
 	{
@@ -574,6 +589,7 @@ int ILibSimpleDataStore_Exists(char *filePath)
 __EXPORT_TYPE ILibSimpleDataStore ILibSimpleDataStore_CreateEx2(char* filePath, int userExtraMemorySize, int readonly)
 {
 	ILibSimpleDataStore_Root* retVal = (ILibSimpleDataStore_Root*)ILibMemory_Allocate(ILibMemory_SimpleDataStore_CONTAINERSIZE, userExtraMemorySize, NULL, NULL);
+	retVal->readOnly = readonly != 0;
 
 	if (filePath != NULL)
 	{
@@ -595,6 +611,7 @@ __EXPORT_TYPE ILibSimpleDataStore ILibSimpleDataStore_CreateEx2(char* filePath, 
 void ILibSimpleDataStore_ReOpenReadOnly(ILibSimpleDataStore dataStore, char* filePath)
 {
 	ILibSimpleDataStore_Root *root = (ILibSimpleDataStore_Root*)dataStore;
+	root->readOnly = 1;
 
 	if (root->dataFile != NULL)
 	{
@@ -633,13 +650,30 @@ __EXPORT_TYPE void ILibSimpleDataStore_Close(ILibSimpleDataStore dataStore)
 	if (root->filePath != NULL)
 	{
 		free(root->filePath);
+		// A failed read-only reopen leaves the path without a file.
+		if (root->dataFile != NULL)
+		{
 #ifdef _POSIX
-		flock(fileno(root->dataFile), LOCK_UN);
+			flock(fileno(root->dataFile), LOCK_UN);
 #endif
-		fclose(root->dataFile);
+			fclose(root->dataFile);
+		}
 	}
 
 	free(root);
+}
+
+// Call after Put when a transaction requires persistence rather than cached success.
+__EXPORT_TYPE int ILibSimpleDataStore_Flush(ILibSimpleDataStore dataStore)
+{
+	ILibSimpleDataStore_Root *root = (ILibSimpleDataStore_Root*)dataStore;
+	if (root == NULL || root->readOnly || root->dataFile == NULL || root->filePath == NULL ||
+		fflush(root->dataFile) != 0 || ferror(root->dataFile)) { return 1; }
+#ifdef WIN32
+	return FlushFileBuffers((HANDLE)_get_osfhandle(_fileno(root->dataFile))) ? 0 : 1;
+#else
+	return fsync(fileno(root->dataFile)) == 0 ? 0 : 1;
+#endif
 }
 
 // Store a key/value pair in the data store
@@ -921,21 +955,25 @@ __EXPORT_TYPE int ILibSimpleDataStore_DeleteEx(ILibSimpleDataStore dataStore, ch
 	ILibSimpleDataStore_Root *root = (ILibSimpleDataStore_Root*)dataStore;
 	ILibSimpleDataStore_TableEntry *entry;
 	
-	if (root == NULL) return 0;
-	entry = (ILibSimpleDataStore_TableEntry*)ILibHashtable_Remove(root->keyTable, NULL, key, (int)keyLen); // no dataloss, capped to INT32_MAX
+	if (root == NULL || root->readOnly || root->dataFile == NULL) return 0;
+	entry = (ILibSimpleDataStore_TableEntry*)ILibHashtable_Get(root->keyTable, NULL, key, (int)keyLen); // no dataloss, capped to INT32_MAX
 	if (entry == NULL)
 	{
 		// Check to see if this is a compressed record, before we return an error
 		char *tmpkey = (char*)ILibMemory_SmartAllocate(keyLen + sizeof(uint32_t));
 		memcpy_s(tmpkey, ILibMemory_Size(tmpkey), key, keyLen);
-		((uint32_t*)(tmpkey + keyLen))[0] = crc32c(0, (unsigned char*)key, (uint32_t)keyLen); // no dataloss, capped to INT32_MAX
-		entry = (ILibSimpleDataStore_TableEntry*)ILibHashtable_Remove(root->keyTable, NULL, tmpkey, (int)ILibMemory_Size(tmpkey));
+		uint32_t crc = crc32c(0, (unsigned char*)key, (uint32_t)keyLen);
+		memcpy(tmpkey + keyLen, &crc, sizeof(crc));
+		entry = (ILibSimpleDataStore_TableEntry*)ILibHashtable_Get(root->keyTable, NULL, tmpkey, (int)ILibMemory_Size(tmpkey));
 		if (entry != NULL)
 		{
 			if (ILibSimpleDataStore_WriteRecord(root->dataFile, tmpkey, (int)ILibMemory_Size(tmpkey), NULL, 0, NULL) == 0)
 			{
 				if (root->ErrorHandler != NULL) { root->ErrorHandler(root, root->ErrorHandlerUser); }
+				ILibMemory_Free(tmpkey);
+				return 0;
 			}
+			ILibHashtable_Remove(root->keyTable, NULL, tmpkey, (int)ILibMemory_Size(tmpkey));
 			free(entry);
 			ILibMemory_Free(tmpkey);
 			return 1;
@@ -947,7 +985,9 @@ __EXPORT_TYPE int ILibSimpleDataStore_DeleteEx(ILibSimpleDataStore dataStore, ch
 		if (ILibSimpleDataStore_WriteRecord(root->dataFile, key, (int)keyLen, NULL, 0, NULL) == 0) // no dataloss, capped to INT32_MAX
 		{
 			if (root->ErrorHandler != NULL) { root->ErrorHandler(root, root->ErrorHandlerUser); }
+			return 0;
 		}
+		ILibHashtable_Remove(root->keyTable, NULL, key, (int)keyLen);
 		free(entry); 
 		return 1;
 	}
@@ -1085,7 +1125,7 @@ __EXPORT_TYPE int ILibSimpleDataStore_Compact(ILibSimpleDataStore dataStore)
 	void* state[2];
 	int retVal = 0;
 
-	if (root == NULL || root->dirtySize < root->minimumDirtySize || root->filePath == NULL) return 1; // Error
+	if (root == NULL || root->readOnly || root->dirtySize < root->minimumDirtySize || root->filePath == NULL) return 1; // Error
 	tmp = ILibString_Cat(root->filePath, -1, ".tmp", -1); // Create the name of the temporary data store
 
 	// Start by opening a temporary .tmp file. Will be used to write the compacted data store.

@@ -58,6 +58,9 @@ int ILibSimpleDataStore_Exists(char *filePath);
 
 // Close the data store.
 __EXPORT_TYPE void ILibSimpleDataStore_Close(ILibSimpleDataStore dataStore);
+// Flush file-backed writes to the OS/device. Returns 0 on success, 1 for errors,
+// read-only or cache-only stores. Does not persist explicitly cached values.
+__EXPORT_TYPE int ILibSimpleDataStore_Flush(ILibSimpleDataStore dataStore);
 __EXPORT_TYPE void ILibSimpleDataStore_CachedEx(ILibSimpleDataStore dataStore, char* key, size_t keyLen, char* value, size_t valueLen, char *vhash);
 #define ILibSimpleDataStore_Cached(dataStore, key, keyLen, value, valueLen) ILibSimpleDataStore_CachedEx(dataStore, key, keyLen, value, valueLen, NULL)
 __EXPORT_TYPE int ILibSimpleDataStore_Cached_GetValues(ILibSimpleDataStore dataStore, ILibSimpleDataStore_GetValuesHandler handler, void *user);
@@ -66,6 +69,8 @@ __EXPORT_TYPE void ILibSimpleDataStore_ConfigCompact(ILibSimpleDataStore dataSto
 __EXPORT_TYPE void ILibSimpleDataStore_ConfigSizeLimit(ILibSimpleDataStore dataStore, uint64_t sizeLimit, ILibSimpleDataStore_SizeWarningHandler handler, void *user);
 void ILibSimpleDataStore_ConfigWriteErrorHandler(ILibSimpleDataStore dataStore, ILibSimpleDataStore_WriteErrorHandler handler, void *user);
 
+// Returns 0 when the value is readable through Get, not when it is on disk: a failed write
+// keeps the value cached and reopens the store read-only. Call Flush when it must persist.
 __EXPORT_TYPE int ILibSimpleDataStore_PutEx2(ILibSimpleDataStore dataStore, char* key, size_t keyLen, char* value, size_t valueLen, char *hash);
 #define ILibSimpleDataStore_Put(dataStore, key, value) ILibSimpleDataStore_PutEx(dataStore, key, strnlen_s(key, ILibSimpleDataStore_MaxKeyLength), value, strnlen_s(value, ILibSimpleDataStore_MaxUnspecifiedValueLen))
 #define ILibSimpleDataStore_PutEx(dataStore, key, keyLen, value, valueLen) ILibSimpleDataStore_PutEx2(dataStore, key, keyLen, value, valueLen, NULL)

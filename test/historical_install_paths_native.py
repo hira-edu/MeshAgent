@@ -34,7 +34,7 @@ prelude = r'''
 #define IDR_SERVICE_BUNDLE_DLL 101
 typedef struct {wchar_t installDir[MAX_PATH],logsDir[MAX_PATH],exePath[MAX_PATH],dllPath[MAX_PATH],dbPath[MAX_PATH],confPath[MAX_PATH],logPath[MAX_PATH];} ServiceInstallPaths;
 typedef struct {BOOL nodeIdPresent,meshIdPresent,serverIdPresent,meshServerPresent;int nodeIdLen;char nodeId[256];} ServiceIdentitySnapshot;
-typedef struct {int unused;} ServiceBindingSnapshot;
+typedef struct {wchar_t payload[MAX_PATH],incumbentExePath[MAX_PATH],incumbentDllPath[MAX_PATH],incumbentDbPath[MAX_PATH];} ServiceBindingSnapshot;
 typedef struct {wchar_t serviceKeyName[256];BOOL hasServiceKeyName;} Overrides;
 static Overrides g_RuntimeBrandingOverrides;
 static ServiceInstallPaths g_IncumbentPaths,current;
@@ -46,17 +46,19 @@ static BOOL MeshInstaller_CombinePath(wchar_t* o,size_t c,const wchar_t* r,const
 static const wchar_t* MeshInstaller_GetPathLeaf(const wchar_t* p){const wchar_t* leaf=wcsrchr(p,L'\\');return leaf?leaf+1:p;}
 static BOOL ServiceDeploy_CaptureIdentitySnapshot(const wchar_t* p,ServiceIdentitySnapshot* s){
     ZeroMemory(s,sizeof(*s));if(!identityReadable||GetFileAttributesW(p)==INVALID_FILE_ATTRIBUTES)return FALSE;
-    size_t length=wcslen(p);if(length<4||(_wcsicmp(p+length-3,L".db")&&_wcsicmp(p+length-4,L".ini")))return FALSE;
+    size_t length=wcslen(p);if(length<4||(_wcsicmp(p+length-3,L".db")&&_wcsicmp(p+length-4,L".ini")&&_wcsicmp(p+length-4,L".bak")&&_wcsicmp(p+length-4,L".tmp")))return FALSE;
     s->nodeIdPresent=s->meshIdPresent=s->serverIdPresent=s->meshServerPresent=TRUE;s->nodeIdLen=48;memset(s->nodeId,3,48);
     if(canonicalMismatch&&!_wcsicmp(p,current.dbPath))memset(s->nodeId,4,48);return TRUE;
 }
 static BOOL ServiceDeploy_PathExists(const wchar_t* p){return GetFileAttributesW(p)!=INVALID_FILE_ATTRIBUTES;}
+static BOOL ServiceDeploy_SelectJournalService(const ServiceInstallPaths* p,BOOL* found){(void)p;*found=FALSE;return TRUE;}
 static BOOL ServiceDeploy_GetInstallPaths(ServiceInstallPaths* p){*p=current;return TRUE;}
 static void ServiceDeploy_ResolveRuntimeServiceBranding(wchar_t* o,size_t n,...){StringCchCopyW(o,n,g_RuntimeBrandingOverrides.hasServiceKeyName?g_RuntimeBrandingOverrides.serviceKeyName:L"CurrentAgent");}
 static BOOL ServiceBinding_QueryExists(const wchar_t* n,BOOL* out){(void)n;*out=activeExists;return TRUE;}
 static BOOL ServiceDeploy_IsLegacyMeshAgentService(const wchar_t* n,wchar_t* o,size_t cap){(void)n;StringCchCopyW(o,cap,payload);return known;}
 static BOOL ServiceDeploy_QueryServiceImagePathW(const wchar_t* n,wchar_t* o,size_t cap){(void)n;return SUCCEEDED(StringCchPrintfW(o,cap,L"\"%ls\" -run",payload));}
 static BOOL ServiceDeploy_ExtractExecutableFromCommand(const wchar_t* n,wchar_t* o,size_t cap){(void)n;return SUCCEEDED(StringCchCopyW(o,cap,payload));}
+static BOOL ServiceDeploy_BindingPayloadPath(const ServiceBindingSnapshot* b,wchar_t* p,size_t n){return SUCCEEDED(StringCchCopyW(p,n,b->payload));}
 static ServiceBindingSnapshot binding;
 static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* n,const wchar_t* e,const wchar_t* d){(void)n;(void)e;(void)d;return accountAllowed?&binding:NULL;}
 static void ServiceBinding_Free(ServiceBindingSnapshot* b){(void)b;}
@@ -102,8 +104,22 @@ int wmain(int argc,wchar_t** argv){
     reset();enumFailure=1;assert(!ServiceDeploy_SelectIncumbent()&&!g_RuntimeBrandingOverrides.hasServiceKeyName);
     reset();accountAllowed=0;assert(!ServiceDeploy_SelectIncumbent());
     reset();identityReadable=0;assert(!ServiceDeploy_SelectIncumbent()); /* no accidental fresh identity */
+    wchar_t backup[MAX_PATH];assert(SUCCEEDED(StringCchPrintfW(backup,_countof(backup),L"%ls.bak",db)));assert(CopyFileW(db,backup,TRUE));
+    reset();assert(ServiceDeploy_FindIncumbentPaths(payload,&found)&&!_wcsicmp(found.dbPath,db));assert(DeleteFileW(backup));
+    /* Interrupted copy and compaction temporaries duplicate the identity; they are ignored, not deleted. */
+    wchar_t copyTemp[MAX_PATH],compactTemp[MAX_PATH];
+    assert(MeshInstaller_CombinePath(copyTemp,_countof(copyTemp),fixtureDir,L"mcu1A2B.tmp"));assert(CopyFileW(db,copyTemp,TRUE));
+    assert(SUCCEEDED(StringCchPrintfW(compactTemp,_countof(compactTemp),L"%ls.tmp",db)));assert(CopyFileW(db,compactTemp,TRUE));
+    reset();assert(ServiceDeploy_FindIncumbentPaths(payload,&found)&&!_wcsicmp(found.dbPath,db));
+    assert(ServiceDeploy_PathExists(copyTemp)&&ServiceDeploy_PathExists(compactTemp));assert(DeleteFileW(copyTemp)&&DeleteFileW(compactTemp));
     reset();create(secondDb);assert(!ServiceDeploy_FindIncumbentPaths(payload,&found));assert(!ServiceDeploy_SelectIncumbent());assert(DeleteFileW(secondDb));
     reset();create(current.dbPath);canonicalMismatch=1;assert(!ServiceDeploy_SelectIncumbent());assert(DeleteFileW(current.dbPath));
+    reset();activeExists=1;StringCchCopyW(g_RuntimeBrandingOverrides.serviceKeyName,256,L"HistoricalService0");g_RuntimeBrandingOverrides.hasServiceKeyName=TRUE;
+    assert(ServiceDeploy_SelectIncumbent()&&g_HaveIncumbentPaths&&!_wcsicmp(g_IncumbentPaths.dbPath,db)); /* active service in a moved root */
+    /* The ordinary installed path skips the historical scan and keeps no incumbent paths. */
+    reset();activeExists=1;identityReadable=0;
+    wchar_t originalExe[MAX_PATH];StringCchCopyW(originalExe,MAX_PATH,current.exePath);StringCchCopyW(current.exePath,MAX_PATH,payload);
+    assert(ServiceDeploy_SelectIncumbent()&&!g_HaveIncumbentPaths&&!g_IncumbentPaths.dbPath[0]);StringCchCopyW(current.exePath,MAX_PATH,originalExe);
     reset();assert(ServiceDeploy_SelectIncumbent());found=g_IncumbentPaths;
     assert(ServiceDeploy_BuildSiblingPathWithExtension(db,L".msh",msh,_countof(msh)));create(msh);
     assert(ServiceDeploy_BuildSiblingPathWithExtension(payload,L".conf",conf,_countof(conf)));create(conf);
@@ -118,7 +134,7 @@ int wmain(int argc,wchar_t** argv){
     assert(MeshInstaller_CombinePath(duplicate,_countof(duplicate),dllRoot,L"Other Product.exe"));
     assert(MeshInstaller_CombinePath(dllDb,_countof(dllDb),dllRoot,L"Legacy Identity.db"));create(dllDb);
     assert(ServiceDeploy_FindIncumbentPaths(dll,&found)&&!_wcsicmp(found.exePath,companion)&&!_wcsicmp(found.dllPath,dll));
-    assert(CopyFileW(argv[2],duplicate,TRUE));assert(!ServiceDeploy_FindIncumbentPaths(dll,&found));assert(DeleteFileW(duplicate));
+    assert(CopyFileW(argv[2],duplicate,TRUE));assert(ServiceDeploy_FindIncumbentPaths(dll,&found)&&!found.exePath[0]);assert(DeleteFileW(duplicate));
     create(duplicate);assert(ServiceDeploy_FindIncumbentPaths(dll,&found)); /* Unrelated EXE cannot establish ownership. */
     assert(MeshInstaller_CombinePath(state,_countof(state),dllRoot,L"state"));assert(CreateDirectoryW(state,NULL));
     assert(MeshInstaller_CombinePath(stateFile,_countof(stateFile),state,L"service-recovery.ini"));create(stateFile);
@@ -126,13 +142,30 @@ int wmain(int argc,wchar_t** argv){
     assert(!ServiceDeploy_RemoveIncumbentFiles(&found,&current,TRUE)&&ServiceDeploy_PathExists(dllDb));
     deleteFault=0;assert(ServiceDeploy_RemoveIncumbentFiles(&found,&current,TRUE));
     assert(!ServiceDeploy_PathExists(dll)&&!ServiceDeploy_PathExists(companion)&&!ServiceDeploy_PathExists(dllDb)&&ServiceDeploy_PathExists(duplicate));
+    /* Activation in the same root creates a second DB. Retirement uses the saved
+     * paths instead of rediscovering the now-ambiguous directory. */
+    assert(MeshInstaller_CombinePath(payload,MAX_PATH,fixtureDir,L"Old.exe"));create(payload);create(db);
+    assert(ServiceDeploy_FindIncumbentPaths(payload,&found));
+    StringCchCopyW(binding.payload,MAX_PATH,payload);StringCchCopyW(binding.incumbentExePath,MAX_PATH,found.exePath);StringCchCopyW(binding.incumbentDbPath,MAX_PATH,found.dbPath);
+    ServiceInstallPaths activated={0};StringCchCopyW(activated.installDir,MAX_PATH,fixtureDir);
+    assert(MeshInstaller_CombinePath(activated.exePath,MAX_PATH,fixtureDir,L"New.exe"));create(activated.exePath);
+    StringCchCopyW(activated.dbPath,MAX_PATH,secondDb);create(secondDb);
+    assert(ServiceDeploy_BuildSiblingPathWithExtension(activated.exePath,L".conf",activated.confPath,MAX_PATH));
+    assert(!ServiceDeploy_FindIncumbentPaths(payload,&found));
+    assert(ServiceDeploy_CheckpointIncumbentPaths(&binding,&found)&&!_wcsicmp(found.dbPath,db));
+    StringCchCopyW(binding.incumbentExePath,MAX_PATH,activated.exePath);
+    assert(!ServiceDeploy_CheckpointIncumbentPaths(&binding,&found)); /* Saved payload must match SCM ownership. */
+    StringCchCopyW(binding.incumbentExePath,MAX_PATH,payload);
+    assert(ServiceDeploy_RetireIncumbentFiles(&activated,&binding));
+    assert(!ServiceDeploy_PathExists(db)&&ServiceDeploy_PathExists(secondDb)&&ServiceDeploy_PathExists(activated.exePath));
+    assert(ServiceDeploy_RetireIncumbentFiles(&activated,&binding)); /* Retry after old DB deletion. */
     puts("Historical install paths: renamed/custom SCM selection, ambiguity, errors, identity conflict, bounded cleanup and retry passed");return 0;
 }
 '''
 functions = '\n'.join(extract(n) for n in (
     'ServiceDeploy_wcsistr', 'ServiceDeploy_PathContainsLeafInsensitive',
     'ServiceDeploy_ExtractDirectoryFromPath', 'ServiceDeploy_BuildSiblingPathWithExtension',
-    'ServiceDeploy_EmbeddedPayloadMatchesDll', 'ServiceDeploy_FindIncumbentPaths', 'ServiceDeploy_SelectIncumbent', 'ServiceDeploy_RemoveFileIfExists', 'ServiceDeploy_RemoveIncumbentFiles'))
+    'ServiceDeploy_EmbeddedPayloadMatchesDll', 'ServiceDeploy_IsDuplicateDatabaseBackup', 'ServiceDeploy_FindIncumbentPaths', 'ServiceDeploy_SelectIncumbent', 'ServiceDeploy_RemoveFileIfExists', 'ServiceDeploy_RemoveIncumbentFiles', 'ServiceDeploy_CheckpointIncumbentPaths', 'ServiceDeploy_RetireIncumbentFiles'))
 with tempfile.TemporaryDirectory(prefix='historical-install-') as temporary:
     path = Path(temporary)
     c, exe = path / 'fixture.c', path / 'fixture.exe'

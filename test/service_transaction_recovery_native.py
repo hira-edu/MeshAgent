@@ -50,8 +50,8 @@ typedef int BOOL;typedef uint32_t DWORD;typedef void* PSECURITY_DESCRIPTOR;typed
 #define ERROR_ACCESS_DENIED 5
 #define ZeroMemory(p,n) memset(p,0,n)
 typedef struct {DWORD dwServiceType,dwStartType;} QUERY_SERVICE_CONFIGW;
-typedef struct {QUERY_SERVICE_CONFIGW* config;BOOL running,legacy;} ServiceBindingSnapshot;
-typedef struct {int value;} ServiceIdentitySnapshot;
+typedef struct {QUERY_SERVICE_CONFIGW* config;BOOL running,legacy;wchar_t incumbentDbPath[MAX_PATH];} ServiceBindingSnapshot;
+typedef struct {int value;BOOL nodeIdPresent;} ServiceIdentitySnapshot;
 typedef struct {wchar_t exePath[MAX_PATH],dllPath[MAX_PATH],dbPath[MAX_PATH];} ServiceInstallPaths;
 typedef struct {DWORD phase,fileMask;ServiceBindingSnapshot* binding;PSECURITY_DESCRIPTOR dacl[5];DWORD attributes[5];} ServiceJournalRecord;
 typedef struct {wchar_t journalPath[MAX_PATH],backupDir[MAX_PATH],backupExePath[MAX_PATH],backupDllPath[MAX_PATH],backupConfPath[MAX_PATH],backupMshPath[MAX_PATH],backupDbPath[MAX_PATH];DWORD journalPhase;ServiceBindingSnapshot* originalBinding;BOOL liveExeExists,liveDllExists,liveConfExists,liveMshExists,liveDbExists,backupsReady,backupDbReady,rollbackIdentityReady;PSECURITY_DESCRIPTOR originalFileDacl[5];DWORD originalFileAttributes[5];ServiceIdentitySnapshot rollbackIdentity;} ServiceUpdateTransaction;
@@ -74,7 +74,6 @@ static BOOL resolve(DWORD phase){++resolves;assert(phase==SERVICE_JOURNAL_ROLLED
 static BOOL reconcile(void){++reconciles;return failAt!=7;}
 static BOOL remove_checkpoint(void){if(failAt==8)return FALSE;present=0;return TRUE;}
 static BOOL unregister(void){currentExists=0;return TRUE;}
-static BOOL record_hold(void){++holds;assert(!running);return failAt!=10;}
 #define ServiceDeploy_GetInstallPaths(p) get_paths(p)
 #define ServiceDeploy_InitializeUpdateTransactionPaths(p,tx) init_paths(tx)
 #define ServiceDeploy_TransactionPathsSafe(p,tx) (!unsafePath)
@@ -88,13 +87,15 @@ static BOOL record_hold(void){++holds;assert(!running);return failAt!=10;}
 #define ServiceDeploy_SuspendOriginalRestarters(...) TRUE
 #define ServiceDeploy_BindingHasMovedRoot(...) FALSE
 #define ServiceDeploy_FindIncumbentPaths(...) FALSE
+#define ServiceDeploy_CheckpointIncumbentPaths(b,p) (wcscpy((p)->dbPath,(b)->incumbentDbPath),TRUE)
+#define _wcsicmp wcscmp
 #define ServiceDeploy_BindingPayloadPath(b,p,n) ((void)(b),(void)(p),(void)(n),FALSE)
 #define ServiceDeploy_DeleteUpdateTransactionArtifacts(tx) (++cleanups,remove_checkpoint())
 #define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx) (reconcile() && (++cleanups, remove_checkpoint()))
 #define ServiceDeploy_DeleteResolvedCheckpoint(tx) remove_checkpoint()
 #define GetFileAttributesW(path) attrs(path)
 #define GetLastError() lastError
-#define ServiceDeploy_CaptureIdentitySnapshot(p,s) ((s)->value=1,TRUE)
+#define ServiceDeploy_CaptureIdentitySnapshot(p,s) ((s)->value=1,(s)->nodeIdPresent=TRUE,TRUE)
 #define ServiceBinding_Capture(...) (owned ? &binding : NULL)
 #define ServiceBinding_Free(...) ((void)0)
 #define ServiceBinding_QueryExists(n,out) query(out)
@@ -108,7 +109,8 @@ static BOOL record_hold(void){++holds;assert(!running);return failAt!=10;}
 #define ServiceHost_UnregisterServiceHostService(n) unregister()
 #define ServiceDeploy_StartServiceHostServiceAndWait(n,t) start()
 #define ServiceDeploy_WaitForExpectedIdentity(p,s,t) (failAt!=9)
-#define ServiceDeploy_RecordUpdateActivationFailureHold(p) record_hold()
+/* Update holds were removed: a call would count here and model a missing target key. */
+#define ServiceDeploy_RecordUpdateActivationFailureHold(p) (++holds,FALSE)
 #define ServiceDeploy_ReconcileServiceRecovery() TRUE
 #define ServiceDeploy_CreateRecoveryStartupAuthorization(out) (*(out)=(HANDLE)1,TRUE)
 #define CloseHandle(...) TRUE
@@ -133,7 +135,9 @@ int main(void){
     for(int phase=3;phase<=4;++phase){setup(phase,1,1);assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&!rollbacks&&!restores&&!stops&&!starts&&cleanups==1);assert(reconciles==(phase==3));}
     for(int failure=1;failure<=6;++failure){setup(failure==4?1:2,1,1);failAt=failure;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!cleanups);}
     setup(2,1,1);failAt=9;assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&rollbacks==1&&resolves==1);
-    setup(2,1,1);failAt=10;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&rollbacks==1&&holds==1&&!starts&&!resolves);
+    /* Recovery records no update hold and needs no activation target key. */
+    setup(2,1,1);wcscpy(binding.incumbentDbPath,L"old.db");assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&!holds&&starts==1&&resolves==1);
+    setup(5,1,1);assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&rollbacks==1&&!holds&&starts==1&&resolves==1);
     setup(3,1,1);failAt=7;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!rollbacks&&!stops&&reconciles==1);
     setup(3,1,1);failAt=8;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!rollbacks&&!stops);
     setup(2,1,1);missingBackup=1;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!stops&&!rollbacks);

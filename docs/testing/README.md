@@ -52,9 +52,32 @@ paths, and rejected loader or argument impersonation.
 DLL/EXE pair to verify incumbent selection, ambiguous identities, resource
 matching, deletion faults, retained identity proof, and bounded cleanup. It
 injects SCM and datastore observations and does not modify services.
+It also covers identical backup copies, multiple optional companion EXEs, and
+same-directory migration retirement using journaled ownership paths.
+These filesystem probes require an x64 C compiler on Windows.
+
 `test/service_update_recovery_native.py` fault-injects update and crash
-recovery orchestration, including database migration and failed-package holds
-at the original path. These native probes require an x64 C compiler on Windows.
+recovery orchestration, including database migration at the original path,
+the NodeID gate for existing databases, and recovery that records no update
+hold. `test/service_transaction_journal_native.py` checks that a checkpoint
+without incumbent paths keeps the version 1 layout. The binding, transaction
+journal, transaction recovery, and update recovery native probes also run on
+macOS with Clang and sanitizers.
+
+`test/service_deployment_copy_native.py` injects copy, flush, attribute, and
+rename failures into production replacement code and checks that live files
+survive. It also covers DLL-only provisioning and dotted parent directories.
+`test/datastore_readonly_native.py` reads real NG and legacy datastore fixtures
+and verifies that discovery never alters their bytes or creates missing files.
+`test/datastore_persistence_native.py` covers flush failures, read-only and
+cache-only rejection, and failed plain/compressed record deletion. These probes
+use Clang with ASan/UBSan; the datastore probes run on POSIX hosts and the
+read-only probe needs OpenSSL (`OPENSSL_ROOT` can select its installation).
+
+`node test/installer_compatibility_runtime.js` and
+`node test/update_packaging_runtime.js` exercise installer compatibility and
+update packaging using injected platform observations and temporary packaging
+files. They do not change live services.
 
 `test/historical_migration_runtime.js` performs destructive endpoint migration
 on an elevated, explicitly approved disposable Windows host. Supply
@@ -111,6 +134,19 @@ intentional shutdown suppression, first-error retention through cleanup, and
 connection reuse guards. TLS diagnostic snapshots are injected; this probe does
 not exercise a live TLS handshake or relay. It requires Clang and Windows SDK
 headers and does not start or modify an installed service.
+
+`python3 test/native_update_state_runtime.py` compiles production update
+functions with process, datastore, and file-I/O mocks. It checks durable force
+consumption, interrupted consumption, late activation completion, transfer
+ownership, and partial-write/flush/close failures. It requires Clang and runs
+with ASan/UBSan on POSIX; it never launches an updater or modifies a service.
+
+`python3 test/native_update_hash_portable.py` compiles the production Windows
+normalized-hash reader against OpenSSL. Its disposable fixtures cover raw
+files, signed PE32/PE32+ images, appended provisioning, malformed offsets,
+header lengths, and normalized versus historical whole-file transfer hashes.
+It requires Clang and OpenSSL development headers/libraries
+(Homebrew OpenSSL 3 is detected on Apple Silicon) and uses ASan/UBSan.
 
 ### Grouped regression
 

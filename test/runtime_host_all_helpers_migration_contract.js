@@ -1044,7 +1044,7 @@ function main() {
             sources.agentInstaller.includes("runWindowsNativeLifecycle('install', parms, gOptions);") &&
             sources.agentInstaller.includes("runWindowsNativeLifecycle('uninstall', parms, null);") &&
             sources.agentInstaller.includes('function getWindowsNativeUpdateSource(parms)') &&
-            sources.agentInstaller.includes("updateSource = parms.getParameter('update-source', null);") &&
+            sources.agentInstaller.includes("updateSource = installerParameter(parms, 'update-source', null);") &&
             sources.agentInstaller.includes('var parms = parseWindowsNativeUpdateParameters(b64);') &&
             sources.agentInstaller.includes('function runWindowsNativeUpdateActivation(parms)') &&
             sources.agentInstaller.includes("meshAgent = require('MeshAgent');") &&

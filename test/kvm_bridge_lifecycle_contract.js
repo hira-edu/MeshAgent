@@ -167,7 +167,10 @@ function main() {
             cleanup.indexOf('kvm_relay_load_context(ctx);') < cleanup.indexOf('if (destroyNow && kvm_relay_context_is_active_in_outer_frame(ctx))') &&
             loadContext.includes('gChildProcess = ctx->childProcess;'),
         bridgeInputWritesAreBounded:
-            writeInput.includes('waitResult = WaitForSingleObject(overlapped.hEvent, KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS);') &&
+            // Every write waits a bounded time: the full timeout, or a short one for a pure mouse move that
+            // is superseded by the next (so a slow helper cannot hold the chain thread for each move).
+            writeInput.includes('DWORD waitTimeoutMs = droppableMove ? KVM_BRIDGE_INPUT_MOVE_WRITE_TIMEOUT_MS : KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS;') &&
+            writeInput.includes('waitResult = WaitForSingleObject(overlapped.hEvent, waitTimeoutMs);') &&
             writeInput.includes('CancelIoEx(ctx->bridgeInputPipeHandle, &overlapped);') &&
             writeInput.includes('kvm_relay_abandon_stalled_bridge(ctx);') &&
             countOccurrences(writeInput, 'GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, TRUE)') === 1,

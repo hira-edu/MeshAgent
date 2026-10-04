@@ -118,7 +118,11 @@ function main() {
             kvmSource.indexOf('!kvm_relay_verify_bridge_client(ctx->bridgeInputPipeHandle') < kvmSource.indexOf('!kvm_relay_attach_bridge_transport(ctx, ctx->bridgeInputPipeHandle, ctx->bridgeOutputPipeHandle)') &&
             kvmSource.indexOf('!kvm_relay_verify_bridge_client(ctx->bridgeOutputPipeHandle') < kvmSource.indexOf('!kvm_relay_attach_bridge_transport(ctx, ctx->bridgeInputPipeHandle, ctx->bridgeOutputPipeHandle)'),
         masterBoundsBridgeInputWrites: kvmSource.includes('#define KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS 2000') &&
-            writeInputBody.includes('WaitForSingleObject(overlapped.hEvent, KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS)') &&
+            kvmSource.includes('#define KVM_BRIDGE_INPUT_MOVE_WRITE_TIMEOUT_MS 100') &&
+            writeInputBody.includes('DWORD waitTimeoutMs = droppableMove ? KVM_BRIDGE_INPUT_MOVE_WRITE_TIMEOUT_MS : KVM_BRIDGE_INPUT_WRITE_TIMEOUT_MS;') &&
+            writeInputBody.includes('WaitForSingleObject(overlapped.hEvent, waitTimeoutMs)') &&
+            // Only a move that never reached the pipe is dropped; a partial write still abandons the helper.
+            writeInputBody.includes('droppableMove && waitResult == WAIT_TIMEOUT && GetLastError() == ERROR_OPERATION_ABORTED && bytesWritten == 0') &&
             writeInputBody.includes('CancelIoEx(ctx->bridgeInputPipeHandle, &overlapped)') &&
             writeInputBody.indexOf('CancelIoEx(ctx->bridgeInputPipeHandle, &overlapped)') < writeInputBody.indexOf('GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, TRUE)') &&
             writeInputBody.includes('GetOverlappedResult(ctx->bridgeInputPipeHandle, &overlapped, &bytesWritten, FALSE)') &&
@@ -139,7 +143,7 @@ function main() {
         masterWritesInputToPipe: kvmSource.includes('static BOOL kvm_relay_write_bridge_input(KvmRelayContext* ctx, char* buffer, int bufferLen)') &&
             kvmSource.includes('kvm_relay_write_bridge_input(ctx, buf, len)') &&
             kvmSource.includes('kvm_relay_write_bridge_input(ctx, packet->buffer, packet->bufferLen)'),
-        masterWritesPausePacketsToPipe: kvmSource.includes('static BOOL kvm_relay_write_bridge_pause(KvmRelayContext* ctx, int pause)') && kvmSource.includes('MNG_KVM_PAUSE') && kvmSource.includes('kvm_relay_write_bridge_pause(ctx, normalizedPause)'),
+        masterWritesPausePacketsToPipe: kvmSource.includes('static BOOL kvm_relay_write_bridge_pause(KvmRelayContext* ctx, int pause)') && kvmSource.includes('MNG_KVM_PAUSE') && kvmSource.includes('kvm_relay_write_bridge_pause(ctx, normalizedPause || InterlockedCompareExchange(&ctx->viewerPauseState, 0, 0) != 0)'),
         slaveStartupPacketsHonorWriteBackpressure:
             kvmSource.includes('static ILibTransport_DoneState kvm_server_write_packet_checked(') &&
             kvmSource.includes('static int kvm_server_wait_for_remote_resume(') &&

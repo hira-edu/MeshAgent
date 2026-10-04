@@ -148,17 +148,39 @@ binding and validates the datastore beside that payload. The migration retains
 the existing SCM key while installing the current payload paths and display
 branding. Multiple matching identities, an unreadable identity, an unsupported
 service account, or a conflicting identity at the destination stop the
-operation before files are replaced.
+operation before files are replaced. A service already bound to the current
+payload path skips this discovery, so uninstall, repair, and update of an
+ordinary installation do not depend on its database. An existing service whose
+database lacks a NodeID is not updated; a registration without a database
+remains repairable.
+
+Identity discovery opens databases without repair, conversion, compaction, or
+file creation, including legacy 32-bit and 64-bit datastore formats. Identical
+`.bak` or `.backup` copies of an existing file do not count as another identity;
+different database contents still require operator selection. Historical
+callback bindings accept quoted or unquoted system loaders and expandable
+paths, require a canonical absolute `.dll` path, and retain the exact original
+SCM settings for rollback. Interrupted copies (`mcu*.tmp`) and datastore
+compaction files (`*.db.tmp`) are ignored as identities and left in place.
 
 Migration copies the old database after stopping its service and publishing
 the durable backup checkpoint. Activation verifies the preserved NodeID.
 Rollback and interrupted-update recovery use the original binding and
-database, including for failed-package hash holds. After a committed update,
-cleanup removes the verified old payload, its sidecars, and recovery-state
-file before deleting the old database. A companion EXE belongs to a DLL
-installation only when its embedded DLL exactly matches that installed DLL.
-Historical directories are removed only when empty; unrelated files are
-retained.
+database. The service host records no failed-package hold, and recovery does
+not depend on an update activation target key. A successful update deletes
+hold keys written by earlier builds; a key that cannot be deleted is logged and
+does not fail the update. When verified incumbent paths must be preserved, the
+journal is written as version 2, so recovery and retirement also work when old
+and new databases share a directory. Otherwise the journal keeps the version 1
+layout, which an older installed service DLL can still recover after a crash.
+Both versions are readable. Database replacement copies and flushes a
+temporary sibling before replacing the destination; a failed copy does not
+first delete the live database. After a committed update, cleanup removes the
+verified old payload, its sidecars, and recovery-state file before deleting
+the old database. A companion EXE belongs to a DLL installation only when its
+embedded DLL exactly matches that installed DLL. Multiple matching companion
+EXEs are retained instead of blocking migration. Historical directories are
+removed only when empty; unrelated files are retained.
 
 Windows certificate identity survives a service or product rename. Existing
 CNG and legacy CAPI identities are selected by the saved NodeID; older databases without that

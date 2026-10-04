@@ -20,6 +20,8 @@ limitations under the License.
 #include "ILibDuktape_EventEmitter.h"
 #include "ILibDuktape_Polyfills.h"
 
+int ILibDuktape_readableStream_WriteData_Flush(struct ILibDuktape_WritableStream *ws, void *user);
+
 #ifdef __DOXY__
 /*!
 \implements EventEmitter
@@ -145,7 +147,9 @@ void ILibDuktape_WritableStream_Ready(ILibDuktape_WritableStream *stream)
 	}
 	else
 	{
-		// End of Stream
+		// End of Stream: a deferred end() completes exactly once, however many drains follow it.
+		if (stream->WaitForEnd != 1) { return; }
+		stream->WaitForEnd = 2;
 		if (stream->EndSink != NULL)
 		{
 			stream->EndSink(stream, stream->WriteSink_User);
@@ -290,6 +294,13 @@ duk_ret_t ILibDuktape_WritableStream_UnPipeSink(duk_context *ctx)
 		ws = (ILibDuktape_WritableStream*)Duktape_GetBuffer(ctx, -1, NULL);
 		ws->pipedReadable = NULL;
 		ws->pipedReadable_native = NULL;
+		// A flush callback registered by the readable we were piped from must not fire after the unpipe
+		// (other owners, e.g. the HTTP response writer, register their own and keep them).
+		if (ws->OnWriteFlushEx == ILibDuktape_readableStream_WriteData_Flush)
+		{
+			ws->OnWriteFlushEx = NULL;
+			ws->OnWriteFlushEx_User = NULL;
+		}
 		duk_pop(ctx);														// [readable][writable]
 		if (g_displayStreamPipeMessages) { printf("UNPIPE: [%s] => X => [%s:%d]\n", Duktape_GetStringPropertyValue(ctx, -2, ILibDuktape_OBJID, "unknown"), Duktape_GetStringPropertyValue(ctx, -1, ILibDuktape_OBJID, "unknown"), ILibDuktape_GetReferenceCount(ctx, -1) - 1);	if (g_displayFinalizerMessages) { duk_eval_string(ctx, "_debugGC();"); duk_pop(ctx); } }
 	}

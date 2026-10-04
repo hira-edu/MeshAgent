@@ -123,9 +123,6 @@ static void MeshAgent_ControlChannelFailureLog(MeshAgentHostContainer *agent, IL
 
 #ifdef WIN32
 #include "config/update_defines.h"
-#if MESHAGENT_UPDATE_HASH_HEX_LENGTH != (UTIL_SHA384_HASHSIZE * 2)
-#error MESHAGENT_UPDATE_HASH_HEX_LENGTH must describe a SHA-384 hexadecimal digest
-#endif
 #endif
 
 static void MeshAgent_AddHostHeader(ILibHTTPPacket *req, const char* overrideHost, const char* host, unsigned short port, int useDefaultPort)
@@ -2258,6 +2255,9 @@ typedef struct RemoteDesktop_Ptrs
 	MeshAgentHostContainer *agent;
 	int tsid;
 	ULONGLONG lastPipeResetTick;
+	int pipeResetDeferred;				// A viewer attached inside the reset throttle window; refresh once it ends
+	int stallWatchArmed;				// Stall watchdog timer is scheduled (chain thread only)
+	volatile LONG marshaledBytes;		// Capture output queued to the chain thread and not yet written
 #endif
 #ifdef _POSIX
 	void *kvmPipe;
@@ -2981,6 +2981,87 @@ void ILibDuktape_MeshAgent_Ready(ILibDuktape_EventEmitter *sender, char *eventNa
 }
 #ifdef _LINKVM
 #ifdef WIN32
+// Capture output produced off the chain thread is queued to it. The capture thread keeps producing
+// until this much is queued (returning INCOMPLETE per packet throttled capture to the 50 ms pause
+// poll, ~20 tiles/s), and is released again once the chain drains below the low-water mark.
+#define REMOTE_DESKTOP_MARSHAL_HIGH_WATER	(4 * 1024 * 1024)
+#define REMOTE_DESKTOP_MARSHAL_LOW_WATER	(1 * 1024 * 1024)
+// A viewer whose transport stays congested this long while another viewer is healthy is ended, so it
+// cannot freeze the shared desktop stream for everyone (it reconnects and gets a full refresh).
+#define REMOTE_DESKTOP_VIEWER_STALL_MS		20000
+
+// Live remote desktop streams. Queued chain-thread work validates its stream here instead of trusting a
+// raw pointer to a buffer the JavaScript heap may already have freed. Chain thread only.
+static RemoteDesktop_Ptrs *g_RemoteDesktopLivePtrs[16];
+static void ILibDuktape_MeshAgent_RemoteDesktop_RegisterPtrs(RemoteDesktop_Ptrs *ptrs)
+{
+	int i;
+	for (i = 0; i < (int)(sizeof(g_RemoteDesktopLivePtrs) / sizeof(g_RemoteDesktopLivePtrs[0])); ++i)
+	{
+		if (g_RemoteDesktopLivePtrs[i] == NULL) { g_RemoteDesktopLivePtrs[i] = ptrs; return; }
+	}
+}
+static void ILibDuktape_MeshAgent_RemoteDesktop_UnregisterPtrs(RemoteDesktop_Ptrs *ptrs)
+{
+	int i;
+	for (i = 0; i < (int)(sizeof(g_RemoteDesktopLivePtrs) / sizeof(g_RemoteDesktopLivePtrs[0])); ++i)
+	{
+		if (g_RemoteDesktopLivePtrs[i] == ptrs) { g_RemoteDesktopLivePtrs[i] = NULL; }
+	}
+}
+static int ILibDuktape_MeshAgent_RemoteDesktop_PtrsIsLive(RemoteDesktop_Ptrs *ptrs)
+{
+	int i;
+	if (ptrs == NULL) { return(0); }
+	for (i = 0; i < (int)(sizeof(g_RemoteDesktopLivePtrs) / sizeof(g_RemoteDesktopLivePtrs[0])); ++i)
+	{
+		if (g_RemoteDesktopLivePtrs[i] == ptrs) { return(1); }
+	}
+	return(0);
+}
+// Called wherever a stream's state is torn down: queued work and the stall watchdog must not use it again.
+static void ILibDuktape_MeshAgent_RemoteDesktop_ReleasePtrs(RemoteDesktop_Ptrs *ptrs)
+{
+	if (ptrs == NULL) { return; }
+	ILibDuktape_MeshAgent_RemoteDesktop_UnregisterPtrs(ptrs);
+	if (ptrs->ctx != NULL) { ILibLifeTime_Remove(ILibGetBaseTimer(duk_ctx_chain(ptrs->ctx)), ptrs); }
+	ptrs->stallWatchArmed = 0;
+}
+
+static void ILibDuktape_MeshAgent_RemoteDesktop_StallCheck(void *object)
+{
+	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)object;
+	int ended;
+
+	if (!ILibDuktape_MeshAgent_RemoteDesktop_PtrsIsLive(ptrs) || !ILibMemory_CanaryOK(ptrs)) { return; }
+	ptrs->stallWatchArmed = 0;
+	if (ptrs->stream == NULL || ptrs->ctx == NULL || !duk_ctx_is_alive(ptrs->ctx) || !ILibMemory_CanaryOK(ptrs->stream) ||
+		ptrs->stream->readableStream == NULL || ptrs->stream->readableStream->paused == 0)
+	{
+		return;
+	}
+
+	ended = ILibDuktape_readableStream_EndCongestedPipes(ptrs->stream->readableStream, REMOTE_DESKTOP_VIEWER_STALL_MS);
+	if (ended > 0)
+	{
+		Duktape_Console_LogEx(ptrs->ctx, ILibDuktape_LogType_Info1, "KVM: ended %d viewer(s) stalled for over %d ms; other viewers continue", ended, REMOTE_DESKTOP_VIEWER_STALL_MS);
+	}
+	// Still paused (a shared bottleneck, or an ended viewer still detaching): keep watching.
+	if (ILibDuktape_MeshAgent_RemoteDesktop_PtrsIsLive(ptrs) && ptrs->ctx != NULL && ptrs->stream != NULL &&
+		ptrs->stream->readableStream != NULL && ptrs->stream->readableStream->paused != 0)
+	{
+		ptrs->stallWatchArmed = 1;
+		ILibLifeTime_AddEx(ILibGetBaseTimer(duk_ctx_chain(ptrs->ctx)), ptrs, REMOTE_DESKTOP_VIEWER_STALL_MS / 2, ILibDuktape_MeshAgent_RemoteDesktop_StallCheck, NULL);
+	}
+}
+static void ILibDuktape_MeshAgent_RemoteDesktop_ArmStallWatch(RemoteDesktop_Ptrs *ptrs)
+{
+	if (ptrs == NULL || !ILibMemory_CanaryOK(ptrs) || ptrs->stallWatchArmed != 0 || ptrs->ctx == NULL || !duk_ctx_is_alive(ptrs->ctx)) { return; }
+	if (!ILibIsRunningOnChainThread(duk_ctx_chain(ptrs->ctx)) || !ILibDuktape_MeshAgent_RemoteDesktop_PtrsIsLive(ptrs)) { return; }
+	ptrs->stallWatchArmed = 1;
+	ILibLifeTime_AddEx(ILibGetBaseTimer(duk_ctx_chain(ptrs->ctx)), ptrs, REMOTE_DESKTOP_VIEWER_STALL_MS / 2, ILibDuktape_MeshAgent_RemoteDesktop_StallCheck, NULL);
+}
+
 void ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain(void *chain, void *user)
 {
 	if (user == NULL) { return; }
@@ -2990,10 +3071,12 @@ void ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain(void *chain, void *
 	char *buffer = (char*)user;
 	size_t bufferLen = ILibMemory_Size(user);
 
-	if (ptrs != NULL && ILibMemory_CanaryOK(ptrs) && ptrs->stream != NULL && ptrs->ctx != NULL && duk_ctx_is_alive(ptrs->ctx))
+	if (ILibDuktape_MeshAgent_RemoteDesktop_PtrsIsLive(ptrs) && ILibMemory_CanaryOK(ptrs) && ptrs->stream != NULL && ptrs->ctx != NULL && duk_ctx_is_alive(ptrs->ctx))
 	{
-		if (ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, (int)bufferLen) == 0)
+		LONG queued = InterlockedExchangeAdd(&(ptrs->marshaledBytes), -(LONG)bufferLen) - (LONG)bufferLen;
+		if (ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, (int)bufferLen) == 0 && queued < REMOTE_DESKTOP_MARSHAL_LOW_WATER)
 		{
+			// The viewers accepted it and the queue has drained: release a capture thread held at the high-water mark.
 			kvm_pause(0, ptrs);
 		}
 	}
@@ -3057,10 +3140,14 @@ ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(char *
 		if (!ILibIsRunningOnChainThread(duk_ctx_chain(ptrs->ctx)))
 		{
 			char *bstate = ILibMemory_SmartAllocateEx(bufferLen, sizeof(void*));
+			LONG queued;
 			memcpy_s(bstate, (size_t)bufferLen, buffer, (size_t)bufferLen);
 			((void**)ILibMemory_Extra(bstate))[0] = ptrs;
+			queued = InterlockedExchangeAdd(&(ptrs->marshaledBytes), (LONG)bufferLen) + (LONG)bufferLen;
 			ILibChain_RunOnMicrostackThreadEx3(duk_ctx_chain(ptrs->ctx), ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink_Chain, NULL, bstate);
-			return ILibTransport_DoneState_INCOMPLETE;
+			// Only hold the capture thread once a real backlog has built up; the chain thread releases it
+			// (kvm_pause(0)) after draining below the low-water mark.
+			return (queued > REMOTE_DESKTOP_MARSHAL_HIGH_WATER) ? ILibTransport_DoneState_INCOMPLETE : ILibTransport_DoneState_COMPLETE;
 		}
 	}
 #endif
@@ -3155,6 +3242,7 @@ void ILibDuktape_MeshAgent_RemoteDesktop_EndSink(ILibDuktape_DuplexStream *strea
 #endif
 	}
 #ifdef WIN32
+	ILibDuktape_MeshAgent_RemoteDesktop_ReleasePtrs(ptrs);
 	kvm_cleanup(ptrs);
 #else
 	kvm_cleanup();
@@ -3180,6 +3268,8 @@ void ILibDuktape_MeshAgent_RemoteDesktop_PauseSink(ILibDuktape_DuplexStream *sen
 #endif
 #else
 	kvm_pause(1, user);
+	// Backpressure from the viewers: watch for one viewer stalling the stream for all of them.
+	ILibDuktape_MeshAgent_RemoteDesktop_ArmStallWatch((RemoteDesktop_Ptrs*)user);
 #endif
 }
 void ILibDuktape_MeshAgent_RemoteDesktop_ResumeSink(ILibDuktape_DuplexStream *sender, void *user)
@@ -3220,26 +3310,51 @@ duk_ret_t ILibDuktape_MeshAgent_RemoteDesktop_Finalizer(duk_context *ctx)
 		if (ptrs->kvmPipe != NULL) { ILibProcessPipe_FreePipe(ptrs->kvmPipe); }
 #endif
 #ifdef WIN32
+		ILibDuktape_MeshAgent_RemoteDesktop_ReleasePtrs(ptrs);
 		kvm_cleanup(ptrs);
 #else
 		kvm_cleanup(ptrs);
 #endif
 #endif
 	}
+#if defined(_LINKVM) && defined(WIN32)
+	// EndSink zeroes ptrs (ctx == NULL) but this buffer is now being freed: drop any registry entry left.
+	ILibDuktape_MeshAgent_RemoteDesktop_UnregisterPtrs(ptrs);
+#endif
 	return 0;
 }
+#if defined(_LINKVM) && defined(WIN32)
+#define REMOTE_DESKTOP_PIPE_RESET_THROTTLE_MS 500
+static void ILibDuktape_MeshAgent_RemoteDesktop_DeferredPipeReset(void *object)
+{
+	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)object;
+	if (!ILibDuktape_MeshAgent_RemoteDesktop_PtrsIsLive(ptrs) || !ILibMemory_CanaryOK(ptrs) || ptrs->stream == NULL) { return; }
+	ptrs->pipeResetDeferred = 0;
+	ptrs->lastPipeResetTick = GetTickCount64();
+	kvm_relay_reset(ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs);
+}
+#endif
 void ILibDuktape_MeshAgent_RemoteDesktop_PipeHook(ILibDuktape_readableStream *stream, void *wstream, void *user)
 {
 #ifdef _LINKVM
 #ifdef WIN32
 	ILibDuktape_DuplexStream *ds = (ILibDuktape_DuplexStream*)user;
-	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)ds->user;
+	RemoteDesktop_Ptrs *ptrs;
 	ULONGLONG now = GetTickCount64();
-	if (ptrs != NULL && ptrs->lastPipeResetTick != 0 && (now - ptrs->lastPipeResetTick) < 500)
+	if (ds == NULL || !ILibMemory_CanaryOK(ds) || ds->user == NULL) { return; }
+	ptrs = (RemoteDesktop_Ptrs*)ds->user;
+	if (ptrs->lastPipeResetTick != 0 && (now - ptrs->lastPipeResetTick) < REMOTE_DESKTOP_PIPE_RESET_THROTTLE_MS)
 	{
+		// Coalesce, but never drop: the earlier refresh may already have been scanned before this viewer
+		// joined, and without its own refresh the new viewer only ever receives changed tiles.
+		if (ptrs->pipeResetDeferred == 0 && ptrs->ctx != NULL && ILibDuktape_MeshAgent_RemoteDesktop_PtrsIsLive(ptrs))
+		{
+			ptrs->pipeResetDeferred = 1;
+			ILibLifeTime_AddEx(ILibGetBaseTimer(duk_ctx_chain(ptrs->ctx)), ptrs, (int)(REMOTE_DESKTOP_PIPE_RESET_THROTTLE_MS - (now - ptrs->lastPipeResetTick)), ILibDuktape_MeshAgent_RemoteDesktop_DeferredPipeReset, NULL);
+		}
 		return;
 	}
-	if (ptrs != NULL) { ptrs->lastPipeResetTick = now; }
+	ptrs->lastPipeResetTick = now;
 	kvm_relay_reset(ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ds->user);
 #else
 	kvm_relay_reset();
@@ -3471,6 +3586,12 @@ static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(duk_context 
 
 	duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM);	// [MeshAgent][RemoteDesktop]
 	if (ptrs == NULL || !ILibMemory_CanaryOK(ptrs)) { duk_pop(ctx); return; }
+#ifdef WIN32
+	ILibDuktape_MeshAgent_RemoteDesktop_ReleasePtrs(ptrs);	// No queued work or stall watchdog may use it past this point
+#endif
+	// Viewers may still be piped to this stream. Discarding it silently would leave them connected but
+	// frozen forever (no producer, no 'end'); end it so they close and reconnect to the new stream.
+	if (ptrs->stream != NULL) { ILibDuktape_DuplexStream_WriteEnd(ptrs->stream); }
 #if defined(_POSIX) && !defined(__APPLE__)
 	if (ptrs->kvmPipe != NULL)
 	{
@@ -3555,6 +3676,7 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 #ifdef WIN32
 	ptrs->agent = agent;
 	ptrs->tsid = TSID;
+	ILibDuktape_MeshAgent_RemoteDesktop_RegisterPtrs(ptrs);
 #endif
 	ptrs->stream = ILibDuktape_DuplexStream_InitEx(ctx, ILibDuktape_MeshAgent_RemoteDesktop_WriteSink, ILibDuktape_MeshAgent_RemoteDesktop_EndSink, ILibDuktape_MeshAgent_RemoteDesktop_PauseSink, ILibDuktape_MeshAgent_RemoteDesktop_ResumeSink, ILibDuktape_MeshAgent_remoteDesktop_unshiftSink, ptrs);
 	ILibDuktape_CreateFinalizer(ctx, ILibDuktape_MeshAgent_RemoteDesktop_Finalizer);
@@ -4204,9 +4326,15 @@ duk_ret_t ILibDuktape_MeshAgent_coreHash(duk_context *ctx)
 #ifdef _LINKVM 
 duk_ret_t ILibDuktape_KVM_Refresh(duk_context *ctx)
 {
-	duk_push_this(ctx);
-	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)Duktape_GetBufferProperty(ctx, -1, REMOTE_DESKTOP_ptrs);
-	if (ptrs != NULL) { ILibDuktape_MeshAgent_RemoteDesktop_PipeHook(NULL, NULL, ptrs->stream); }
+	RemoteDesktop_Ptrs *ptrs = NULL;
+	duk_push_this(ctx);																// [MeshAgent]
+	// The stream state lives on the cached remote desktop stream object, not on MeshAgent itself.
+	if (duk_has_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM))
+	{
+		duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM);						// [MeshAgent][RD]
+		ptrs = (RemoteDesktop_Ptrs*)Duktape_GetBufferProperty(ctx, -1, REMOTE_DESKTOP_ptrs);
+	}
+	if (ptrs != NULL && ptrs->stream != NULL) { ILibDuktape_MeshAgent_RemoteDesktop_PipeHook(NULL, NULL, ptrs->stream); }
 	return(0);
 }
 #endif
@@ -5029,6 +5157,7 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 	size_t bytesRead;
 	unsigned int checkSumIndex = 0;
 	unsigned int tableIndex = 0;
+	long fileSize;
 
 #ifdef WIN32
 	int retVal = 1;
@@ -5037,6 +5166,10 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 	tmpFile = fopen(filePath, "rb");
 #endif
 	if (tmpFile == NULL) { return(1); }
+	if (fseek(tmpFile, 0, SEEK_END) != 0 || (fileSize = ftell(tmpFile)) < 0 || (unsigned long long)fileSize > UINT_MAX)
+	{
+		fclose(tmpFile); return(1);
+	}
 
 #ifdef WIN32
 	// We need to check if this is a signed binary
@@ -5044,8 +5177,7 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 	char *optHeader = NULL;
 	unsigned int NTHeaderIndex = 0;
 	fseek(tmpFile, 0, SEEK_SET);
-	ignore_result(fread(ILibScratchPad, 1, 2, tmpFile));
-	if (ntohs(((uint16_t*)ILibScratchPad)[0]) == 19802) // 5A4D
+	if (fread(ILibScratchPad, 1, 2, tmpFile) == 2 && ntohs(((uint16_t*)ILibScratchPad)[0]) == 19802) // 5A4D
 	{
 		fseek(tmpFile, 60, SEEK_SET);
 		if (fread((void*)&NTHeaderIndex, 1, 4, tmpFile) != 4) { fclose(tmpFile); return(1); }
@@ -5066,7 +5198,7 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 				switch (((unsigned short*)optHeader)[0])
 				{
 				case 0x10B:
-					if (ILibMemory_AllocateA_Size(optHeader) >= 132)
+					if (ILibMemory_AllocateA_Size(optHeader) >= 136)
 					{
 						if (((unsigned int*)(optHeader + 128))[0] != 0)
 						{
@@ -5077,7 +5209,7 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 					}
 					break;
 				case 0x20B:
-					if (ILibMemory_AllocateA_Size(optHeader) >= 148)
+					if (ILibMemory_AllocateA_Size(optHeader) >= 152)
 					{
 						if (((unsigned int*)(optHeader + 144))[0] != 0)
 						{
@@ -5097,6 +5229,9 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 			fclose(tmpFile);
 			return(1);
 		}
+		// The normalized prefix includes both zeroed header fields. Reject certificate
+		// offsets inside that prefix or beyond EOF instead of hashing a truncated image.
+		if (endIndex != 0 && (endIndex < tableIndex + 8 || endIndex > (unsigned long)fileSize)) { fclose(tmpFile); return(1); }
 	}
 #endif
 
@@ -5105,7 +5240,6 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 		// We just need to check for Embedded MSH file
 		int mshLen = 0;
 		fseek(tmpFile, 0, SEEK_END);
-		long fileSize = ftell(tmpFile);
 		if (fileSize < 16)
 		{
 			// Too small to carry a 16-byte policy GUID trailer: hash the whole file.
@@ -5140,6 +5274,7 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 	}
 
 	SHA512_CTX ctx;
+	if (checkSumIndex != 0 && endIndex < tableIndex + 8) { fclose(tmpFile); return(1); }
 	SHA384_Init(&ctx);
 	bytesLeft = endIndex;
 	fseek(tmpFile, 0, SEEK_SET);
@@ -5161,7 +5296,7 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 		if (endIndex > 0) { bytesLeft -= (unsigned int)bytesRead; }
 	}
 
-	while ((bytesRead = fread(ILibScratchPad, 1, endIndex == 0 ? sizeof(ILibScratchPad) : (bytesLeft > sizeof(ILibScratchPad) ? sizeof(ILibScratchPad) : bytesLeft), tmpFile)) > 0)
+	while ((bytesRead = fread(ILibScratchPad, 1, bytesLeft > sizeof(ILibScratchPad) ? sizeof(ILibScratchPad) : bytesLeft, tmpFile)) > 0)
 	{
 		SHA384_Update(&ctx, ILibScratchPad, bytesRead);
 		if (endIndex > 0) 
@@ -5170,10 +5305,37 @@ int GenerateSHA384FileHash(char *filePath, char *fileHash)
 			if (bytesLeft == 0) { break; }
 		}
 	}
+	if (ferror(tmpFile) || bytesLeft != 0) { fclose(tmpFile); return(1); }
 	SHA384_Final((unsigned char*)fileHash, &ctx);
 	fclose(tmpFile);
 
 	return(0);
+}
+
+static int MeshServer_VerifyUpdateFileHash(char *path, const char *expected)
+{
+	char hash[UTIL_SHA384_HASHSIZE];
+	// Keep malformed PE/trailer handling identical to installed-image hashing.
+	if (GenerateSHA384FileHash(path, hash) != 0) { return 0; }
+	if (memcmp(hash, expected, sizeof(hash)) == 0) { return 1; }
+#ifdef WIN32
+	// Older RAM senders terminate raw transfers with fileHash, including the
+	// signature and appended policy. Accept that SHA-384 domain as well, while
+	// still requiring an exact digest of the received bytes and a parseable image.
+	FILE *file = NULL;
+	SHA512_CTX context;
+	size_t length;
+	_wfopen_s(&file, ILibUTF8ToWide(path, -1), L"rb");
+	if (file == NULL) { return 0; }
+	SHA384_Init(&context);
+	while ((length = fread(ILibScratchPad, 1, sizeof(ILibScratchPad), file)) > 0) { SHA384_Update(&context, ILibScratchPad, length); }
+	int failed = ferror(file);
+	if (fclose(file) != 0 || failed) { return 0; }
+	SHA384_Final((unsigned char*)hash, &context);
+	return memcmp(hash, expected, sizeof(hash)) == 0;
+#else
+	return 0;
+#endif
 }
 
 // Called when the connection of the mesh server is fully authenticated
@@ -5213,9 +5375,26 @@ void MeshServer_SendJSON(MeshAgentHostContainer* agent, ILibWebClient_StateObjec
 {
 	ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_TEXT, JSON, JSONLength, ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
 }
+// Capabilities sent in AuthInfo. Update-related bits describe what this process can apply
+// now, so they are derived per connection rather than stored in agent->capabilities.
+static int MeshServer_AdvertisedCapabilities(MeshAgentHostContainer *agent)
+{
+	int capabilities = agent->capabilities;
+#ifdef WIN32
+#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
+	if (agent->JSRunningAsService != 0) { capabilities |= MeshCommand_AuthInfo_CapabilitiesMask_LIFECYCLE_UPDATE; }
+	else { capabilities &= ~MeshCommand_AuthInfo_CapabilitiesMask_LIFECYCLE_UPDATE; }
+#else
+	capabilities &= ~MeshCommand_AuthInfo_CapabilitiesMask_LIFECYCLE_UPDATE;
+#endif
+#endif
+	return capabilities;
+}
+
 void MeshServer_SendAgentInfo(MeshAgentHostContainer* agent, ILibWebClient_StateObject WebStateObject) 
 {
 	int hostnamelen = (int)strnlen_s(agent->hostname, sizeof(agent->hostname));
+	int capabilities = MeshServer_AdvertisedCapabilities(agent);	// Before the packet is built in ILibScratchPad2
 
 	int agentNameLen = 0;
 
@@ -5228,7 +5407,7 @@ void MeshServer_SendAgentInfo(MeshAgentHostContainer* agent, ILibWebClient_State
 	info->agentVersion = htonl(agent->version);
 	info->platformType = htonl(((agent->batteryState != MeshAgentHost_BatteryInfo_NONE) && (agent->batteryState != MeshAgentHost_BatteryInfo_UNKNOWN)) ? MeshCommand_AuthInfo_PlatformType_LAPTOP : MeshCommand_AuthInfo_PlatformType_DESKTOP);
 	memcpy_s(info->MeshID, sizeof(info->MeshID), agent->meshId, sizeof(agent->meshId));
-	info->capabilities = htonl(agent->capabilities);
+	info->capabilities = htonl(capabilities);
 	
 	memcpy_s(info->hostname, hostnamelen, agent->hostname, hostnamelen);
 	info->hostnameLen = htons(hostnamelen);
@@ -5306,34 +5485,6 @@ void MeshServer_SendAgentInfo(MeshAgentHostContainer* agent, ILibWebClient_State
 	if (agent->serverAuthState == 3) { MeshServer_ServerAuthenticated(WebStateObject, agent); }
 }
 
-static void MeshServer_MarkForceFakeUpdateConsumed(MeshAgentHostContainer *agent)
-{
-	if (agent == NULL || (agent->fakeUpdate == 0 && agent->forceUpdate == 0)) { return; }
-
-	// Mark consumption only after the selected update path is ready to continue.
-	// If unzip/activation setup fails earlier, leave the trigger intact so the
-	// next reconnect can retry instead of recording the old binary as satisfied.
-	ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdate");
-	ILibSimpleDataStore_Delete(agent->masterDb, "fakeUpdate");
-	ILibSimpleDataStore_Put(agent->masterDb, "forceUpdatePending", "1");
-	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> force/fake trigger consumed; future updates remain enabled"); }
-}
-
-#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-static void MeshServer_RestoreForceFakeUpdateTrigger(MeshAgentHostContainer *agent)
-{
-	if (agent == NULL || (agent->fakeUpdate == 0 && agent->forceUpdate == 0)) { return; }
-
-	// The trigger is consumed before activation starts, because a successful
-	// activation stops this process. An activation that failed while this agent
-	// kept running did not satisfy it, so the next reconnect must retry.
-	if (agent->forceUpdate != 0) { ILibSimpleDataStore_Put(agent->masterDb, "forceUpdate", "1"); }
-	if (agent->fakeUpdate != 0) { ILibSimpleDataStore_Put(agent->masterDb, "fakeUpdate", "1"); }
-	ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdatePending");
-	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> force/fake trigger restored after failed activation"); }
-}
-#endif
-
 // Transfers must not replace or extend the staged package while a lifecycle host
 // may still read it, or while an applied update waits for the service restart.
 static int MeshServer_UpdateTransferBlocked(MeshAgentHostContainer *agent)
@@ -5343,6 +5494,7 @@ static int MeshServer_UpdateTransferBlocked(MeshAgentHostContainer *agent)
 	int pendingLen;
 
 	if (agent->updateActivation != NULL) { return 1; }
+	if (agent->updateUnzipPending != 0) { return 1; }	// update-helper still reads and replaces the package
 	pendingLen = ILibSimpleDataStore_Get(agent->masterDb, "PendingUpdate", pendingBuf, sizeof(pendingBuf));
 	if (pendingLen > 0 && pendingBuf[0] == '1') { return 1; }
 #else
@@ -5351,77 +5503,41 @@ static int MeshServer_UpdateTransferBlocked(MeshAgentHostContainer *agent)
 	return 0;
 }
 
+// Retry opening a busy file, never retry a write that may already have written a prefix.
+static int MeshServer_WriteUpdateBlock(char *path, const char *data, size_t length, int truncate)
+{
+	FILE *file = NULL;
+	int attempt, ok;
+	for (attempt = 0; attempt < 4; ++attempt)
+	{
 #ifdef WIN32
-static int MeshAgent_ReadUpdateHashKey(ILibSimpleDataStore db, const char *key, char *hashOut, char *hexOut, size_t hexOutLen)
-{
-	char value[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 4];
-	int valueLen;
-	if (db == NULL || key == NULL || key[0] == 0) { return 0; }
-	valueLen = ILibSimpleDataStore_Get(db, (char*)key, value, sizeof(value));
-	valueLen = MeshAgent_NormalizeUpdateHashHex(value, valueLen, sizeof(value));
-	if (valueLen == 0)
-	{
-		ILibSimpleDataStore_Delete(db, (char*)key);
-		return 0;
-	}
-	if (hashOut != NULL && util_hexToBuf(value, (size_t)valueLen, hashOut) != UTIL_SHA384_HASHSIZE) { return 0; }
-	if (hexOut != NULL && hexOutLen > 0)
-	{
-		if (hexOutLen <= (size_t)valueLen) { return 0; }
-		memcpy_s(hexOut, hexOutLen, value, (size_t)valueLen + 1);
-	}
-	return 1;
-}
-
-static void MeshAgent_WriteUpdateHashKey(ILibSimpleDataStore db, const char *key, const char *hash)
-{
-	char value[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 1];
-	if (db == NULL || key == NULL || key[0] == 0 || hash == NULL) { return; }
-	util_tohex((char*)hash, UTIL_SHA384_HASHSIZE, value);
-	ILibSimpleDataStore_PutEx(db, (char*)key, strnlen_s(key, 128), value, MESHAGENT_UPDATE_HASH_HEX_LENGTH);
-}
-
-static void MeshAgent_ClearUpdateHashKey(ILibSimpleDataStore db, const char *key)
-{
-	if (db == NULL || key == NULL || key[0] == 0) { return; }
-	ILibSimpleDataStore_Delete(db, (char*)key);
-}
-
-static int MeshAgent_ReadUpdateActivationTargetHash(ILibSimpleDataStore db, char *hashOut)
-{
-	return MeshAgent_ReadUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY, hashOut, NULL, 0);
-}
-
-static void MeshAgent_RecordUpdateActivationTargetHash(ILibSimpleDataStore db, const char *hash)
-{
-	MeshAgent_WriteUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY, hash);
-}
-
-static void MeshAgent_ClearUpdateActivationTargetHash(ILibSimpleDataStore db)
-{
-	MeshAgent_ClearUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_TARGET_KEY);
-}
-
-static int MeshAgent_ReadUpdateActivationFailureHash(ILibSimpleDataStore db, char *hashOut)
-{
-	return MeshAgent_ReadUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY, hashOut, NULL, 0);
-}
-
-static void MeshAgent_RecordUpdateActivationFailureHash(ILibSimpleDataStore db, const char *hash)
-{
-	MeshAgent_WriteUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY, hash);
-}
-
-static void MeshAgent_ClearUpdateActivationFailureHash(ILibSimpleDataStore db)
-{
-	MeshAgent_ClearUpdateHashKey(db, MESHAGENT_UPDATE_ACTIVATION_FAILURE_KEY);
-}
+		_wfopen_s(&file, ILibUTF8ToWide(path, -1), truncate ? L"wb" : L"ab");
+#else
+		file = fopen(path, truncate ? "wb" : "ab");
 #endif
+		if (file != NULL) { break; }
+		if (attempt < 3)
+		{
+#ifdef WIN32
+			Sleep(100);
+#else
+			usleep(100 * 1000);
+#endif
+		}
+	}
+	if (file == NULL) { return 0; }
+	ok = (length == 0 || fwrite(data, 1, length, file) == length);
+	if (fflush(file) != 0) { ok = 0; }
+	if (fclose(file) != 0) { ok = 0; }
+	return ok;
+}
 
 static void MeshServer_ReportUpdateFailure(MeshAgentHostContainer *agent)
 {
 	static char updateFailed[] = "{\"action\":\"agentupdatefailed\"}";
-	if (agent == NULL || agent->controlChannel == NULL) { return; }
+	if (agent == NULL) { return; }
+	agent->updateDownloadActive = 0;
+	if (agent->controlChannel == NULL) { return; }
 	MeshServer_SendJSON(agent, agent->controlChannel, updateFailed, (int)(sizeof(updateFailed) - 1));
 	// New servers restore the core immediately from the status above. Reconnect is
 	// the compatibility fallback only for older servers that ignore the JSON action.
@@ -5429,14 +5545,9 @@ static void MeshServer_ReportUpdateFailure(MeshAgentHostContainer *agent)
 }
 
 #ifdef WIN32
-// The activation target becomes the failed-package hold, so the server stops
-// offering the same package. A host that may still be running keeps the package.
+// Abandons the staged package. A host that may still be running keeps the package.
 static void MeshServer_FailUpdateActivation(MeshAgentHostContainer *agent, int deletePackage)
 {
-	char failedHash[UTIL_SHA384_HASHSIZE];
-
-	if (MeshAgent_ReadUpdateActivationTargetHash(agent->masterDb, failedHash)) { MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, failedHash); }
-	MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
 	if (deletePackage != 0) { util_deletefile(MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX)); }
 	MeshServer_ReportUpdateFailure(agent);
 }
@@ -5460,13 +5571,28 @@ static BOOL MeshServer_UpdateActivation_Sink(void *chain, HANDLE h, ILibWaitHand
 	DWORD exitCode = ERROR_GEN_FAILURE;
 	UNREFERENCED_PARAMETER(h);
 
+	if (status == ILibWaitHandle_ErrorStatus_TIMEOUT)
+	{
+		// The live host still owns the package. Replace the expired wait with an
+		// unbounded process wait, retaining the transfer gate until it really exits.
+		ILIBLOGMESSSAGE("SelfUpdate -> activation still running; keeping package ownership and current agent online");
+		ILibChain_AddWaitHandle(chain, activation->launch.process, -1, MeshServer_UpdateActivation_Sink, activation);
+		MeshServer_ReportUpdateFailure(agent);
+		return FALSE;
+	}
+	if (status != ILibWaitHandle_ErrorStatus_NONE && status != ILibWaitHandle_ErrorStatus_REMOVED)
+	{
+		// An invalid/failed wait is not proof of child exit. Keep the activation gate
+		// and artifacts until shutdown; ReleaseUpdateActivation owns final cleanup.
+		ILIBLOGMESSAGEX("SelfUpdate -> unable to observe activation (status %d); refusing overlapping updates", (int)status);
+		MeshServer_ReportUpdateFailure(agent);
+		return FALSE;
+	}
 	if (agent->updateActivation == activation) { agent->updateActivation = NULL; }
 	if (status == ILibWaitHandle_ErrorStatus_NONE)
 	{
 		if (MeshRuntimeHost_CompleteLifecycleHostW(&(activation->launch), &exitCode))
 		{
-			MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
-			MeshAgent_ClearUpdateActivationFailureHash(agent->masterDb);
 			ILIBLOGMESSAGEX("SelfUpdate -> RuntimeHost lifecycle update activation completed (exit %lu)", exitCode);
 			ILIBLOGMESSAGEX("SelfUpdate -> Stopping Chain (%d)", agent->performSelfUpdate);
 			ILibStopChain(chain);
@@ -5474,21 +5600,12 @@ static BOOL MeshServer_UpdateActivation_Sink(void *chain, HANDLE h, ILibWaitHand
 		else
 		{
 			ILIBLOGMESSAGEX("SelfUpdate -> FAILED compatibility lifecycle update activation (exit %lu, error %lu); keeping current agent online", exitCode, GetLastError());
-			MeshServer_RestoreForceFakeUpdateTrigger(agent);
 			MeshServer_FailUpdateActivation(agent, 1);
 		}
 	}
 	else if (status == ILibWaitHandle_ErrorStatus_REMOVED)
 	{
 		MeshRuntimeHost_ReleaseLifecycleHostW(&(activation->launch));
-	}
-	else
-	{
-		// The host has neither stopped this service nor finished. It may still be
-		// mid-transaction, so leave it running with its package and stop waiting.
-		ILIBLOGMESSAGEX("SelfUpdate -> compatibility lifecycle update activation did not finish (status %d); keeping current agent online", (int)status);
-		MeshRuntimeHost_ReleaseLifecycleHostW(&(activation->launch));
-		MeshServer_FailUpdateActivation(agent, 0);
 	}
 	free(activation);
 	return(FALSE);
@@ -5577,34 +5694,17 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 		WCHAR w_updatefile[4096] = { 0 };
 		char *updatefile = MeshAgent_MakeAbsolutePathEx(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX, 0);
 		char packageHash[UTIL_SHA384_HASHSIZE] = { 0 };
-		char failedActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
 
 		ILibUTF8ToWideEx(updatefile, (int)strnlen_s(updatefile, 4096), w_updatefile, 4096);
-		// Hold the package by its executable hash, which is how the server identifies it.
-		// A compressed transfer's hash changes whenever the server rebuilds the archive.
+		// The staged package, also an extracted one, must be a hashable executable image.
 		if (GenerateSHA384FileHash(updatefile, packageHash) != 0)
 		{
 			ILIBLOGMESSAGEX("SelfUpdate -> Unable to hash the staged update package; keeping current agent online");
 			MeshServer_FailUpdateActivation(agent, 1);
 			return;
 		}
-		if (agent->forceUpdate == 0 && agent->fakeUpdate == 0 &&
-			MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash) &&
-			memcmp(failedActivationHash, packageHash, UTIL_SHA384_HASHSIZE) == 0)
-		{
-			if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Same update package previously failed activation; suppressing repeat activation"); }
-			MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
-			util_deletefile(updatefile);
-			MeshServer_ReportUpdateFailure(agent);
-			return;
-		}
-		MeshAgent_ClearUpdateActivationFailureHash(agent->masterDb);
-		MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, packageHash);
 
 #if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
-		// A successful activation stops this service before the host returns, so
-		// nothing after the hand-off runs here. Consume the one-shot trigger now.
-		MeshServer_MarkForceFakeUpdateConsumed(agent);
 		ILIBLOGMESSAGEX("SelfUpdate -> Launching compatibility lifecycle update activation...");
 		if (MeshServer_StartUpdateActivation(agent, w_updatefile))
 		{
@@ -5612,7 +5712,6 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 			return;
 		}
 		ILIBLOGMESSAGEX("SelfUpdate -> FAILED compatibility lifecycle update activation (error %lu); keeping current agent online", GetLastError());
-		MeshServer_RestoreForceFakeUpdateTrigger(agent);
 		MeshServer_FailUpdateActivation(agent, 1); // Fail closed: drop the staged payload so a failed activation does not leave it behind
 		return;
 #else
@@ -5671,7 +5770,6 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 #endif
 
 	// Everything looks good, lets perform the update
-	MeshServer_MarkForceFakeUpdateConsumed(agent);
 	ILIBLOGMESSAGEX("SelfUpdate -> Stopping Chain (%d)", agent->performSelfUpdate);
 	ILibStopChain(agent->chain);
 }
@@ -5679,6 +5777,10 @@ duk_ret_t MeshServer_selfupdate_unzip_complete(duk_context *ctx)
 {
 	duk_eval_string(ctx, "require('MeshAgent')");					// [MeshAgent]
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, MESH_AGENT_PTR);
+#ifdef WIN32
+	if (agent->updateUnzipPending == 0) { return(0); }
+	agent->updateUnzipPending = 0;
+#endif
 	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Update successfully unzipped..."); }
 	MeshServer_selfupdate_continue(agent);
 	return(0);
@@ -5687,12 +5789,15 @@ duk_ret_t MeshServer_selfupdate_unzip_error(duk_context *ctx)
 {
 	duk_eval_string(ctx, "require('MeshAgent')");					// [MeshAgent]
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)Duktape_GetPointerProperty(ctx, -1, MESH_AGENT_PTR);
+#ifdef WIN32
+	if (agent->updateUnzipPending == 0) { return(0); }
+#endif
 	duk_push_sprintf(ctx, "SelfUpdate -> FAILED to unzip update: %s", (char*)duk_safe_to_string(ctx, 0));
 	if (agent->logUpdate != 0) { ILIBLOGMESSSAGE(duk_safe_to_string(ctx, -1)); }
 
-	// Delete the staged payload and any partial extraction. On Windows the package is also
-	// held, so a corrupt archive is not re-downloaded and re-unzipped on every reconnect.
+	// Delete the staged payload and any partial extraction.
 #ifdef WIN32
+	agent->updateUnzipPending = 0;
 	util_deletefile(MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_UNZIPPED_SUFFIX));
 	MeshServer_FailUpdateActivation(agent, 1);
 #else
@@ -5718,6 +5823,19 @@ static int MeshServer_UpdateFileLooksZip(char *updateFilePath)
 	}
 	if (header != NULL) { free(header); }
 	return retVal;
+}
+
+// A compressed package that cannot be extracted is abandoned like an extraction failure.
+static void MeshServer_FailCompressedUpdate(MeshAgentHostContainer *agent, char *updateFilePath)
+{
+#ifdef WIN32
+	(void)updateFilePath;
+	agent->updateUnzipPending = 0;
+	MeshServer_FailUpdateActivation(agent, 1);
+#else
+	util_deletefile(updateFilePath);
+	MeshServer_ReportUpdateFailure(agent);
+#endif
 }
 
 // Process MeshCentral server commands. 
@@ -6365,82 +6483,22 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 				memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE);
 			}
 #ifdef WIN32
-			else if (agent->updateActivation != NULL)
+			else if (MeshServer_UpdateTransferBlocked(agent))
 			{
-				// A downloaded package is being activated; offer no new transfer until it finishes.
+				// A downloaded package is being extracted or activated; offer no new transfer until it finishes.
 				memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE);
 			}
 #endif
 			else if (agent->forceUpdate != 0 || agent->fakeUpdate != 0)
 			{
-				// C9: one-shot forced/fake update. forceUpdatePending is set in the datastore when an update
-				// completes; on the next connect we record the ACTUAL resulting binary hash (works for raw AND
-				// zip updates) as the hold, then stop forcing. forceUpdatePending is only ever "1" or absent,
-				// so a plain length check is correct here.
-				char holdHex[(2 * UTIL_SHA384_HASHSIZE) + 1];
-				char curHex[(2 * UTIL_SHA384_HASHSIZE) + 1];
-				util_tohex(agent->agentHash, UTIL_SHA384_HASHSIZE, curHex);
-				if (ILibSimpleDataStore_Get(agent->masterDb, "forceUpdatePending", NULL, 0) != 0)
-				{
-					// A forced/fake update just completed; we are now running the result. Record it and stop forcing.
-					ILibSimpleDataStore_Put(agent->masterDb, "forceUpdateHold", curHex);
-					ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdatePending");
-					if (agent->fakeUpdate != 0) { memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE); } // fake: neutralize (never-update)
-					else { memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE); }
-					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> forced/fake update completed for this binary"); }
-				}
-				else
-				{
-					int holdLen = ILibSimpleDataStore_Get(agent->masterDb, "forceUpdateHold", holdHex, sizeof(holdHex));
-					if (holdLen > 0 && holdLen < (int)sizeof(holdHex)) { holdHex[holdLen] = 0; } else { holdHex[0] = 0; }
-					if (holdHex[0] != 0 && strcmp(holdHex, curHex) == 0)
-					{
-						// Already satisfied for this exact binary: do not force again.
-						if (agent->fakeUpdate != 0) { memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE); }
-						else { memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE); }
-						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> forced update already satisfied for this binary"); }
-					}
-					else
-					{
-						// Not yet satisfied for this binary: force an update.
-						memset(rcm->coreModuleHash, 0xFFFF, UTIL_SHA384_HASHSIZE);
-						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Forcing Update..."); }
-					}
-				}
+				// Forced/fake update: a hash no binary has, for as long as the key is set.
+				memset(rcm->coreModuleHash, 0xFF, UTIL_SHA384_HASHSIZE);
+				if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Forcing Update..."); }
 			}
 			else
 			{
 				// Update when necessary
-				memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE);// Report the executable that is actually running to capable servers.
-				// forceUpdatePending is only consumed while the force/fake trigger is set. Once
-				// the trigger is gone it is stale, and would swallow the next forced update.
-				if (ILibSimpleDataStore_Get(agent->masterDb, "forceUpdatePending", NULL, 0) != 0) { ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdatePending"); }
-#ifdef WIN32
-				char failedActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
-				char failedActivationHashHex[MESHAGENT_UPDATE_HASH_HEX_LENGTH + 1] = { 0 };
-				if (MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash))
-				{
-					if (agent->serverSupportsUpdateFailureStatus)
-					{
-						int jsonLen;
-						util_tohex(failedActivationHash, UTIL_SHA384_HASHSIZE, failedActivationHashHex);
-						jsonLen = sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "{\"action\":\"agentupdatefailure\",\"hash\":\"%s\"}", failedActivationHashHex);
-						if (jsonLen > 0) { MeshServer_SendJSON(agent, WebStateObject, ILibScratchPad, jsonLen); }
-						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> reporting failed update package hash separately from installed identity"); }
-					}
-					else
-					{
-						// Legacy servers do not understand the separate failure frame.
-						// Preserve their historical same-package suppression behavior.
-						memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), failedActivationHash, UTIL_SHA384_HASHSIZE);
-					}
-				}
-				else if (agent->serverSupportsUpdateFailureStatus)
-				{
-					static const char noFailedUpdate[] = "{\"action\":\"agentupdatefailure\"}";
-					MeshServer_SendJSON(agent, WebStateObject, (char*)noFailedUpdate, (int)(sizeof(noFailedUpdate) - 1));
-				}
-#endif
+				memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE);
 			}
 
 			// Send the self hash back to the server
@@ -6463,44 +6521,25 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 #else
 			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, ".update");
 #endif
-			char updateFileHash[UTIL_SHA384_HASHSIZE];
 			MeshCommand_BinaryPacket_CoreModule *cm = (MeshCommand_BinaryPacket_CoreModule*)cmd;
 
 			if (cmdLen == 4) 
 			{
 				// Indicates the start of the agent update transfer
 				if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Starting download..."); }
-#ifdef WIN32
-				MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
-#endif
-				util_deletefile(updateFilePath);
+				agent->updateDownloadActive = MeshServer_WriteUpdateBlock(updateFilePath, NULL, 0, 1);
+				if (!agent->updateDownloadActive) { MeshServer_ReportUpdateFailure(agent); }
 			} else if (cmdLen == sizeof(MeshCommand_BinaryPacket_CoreModule)) 
 			{
+				if (!agent->updateDownloadActive) { MeshServer_ReportUpdateFailure(agent); break; }
+				agent->updateDownloadActive = 0;
 				// Indicates the end of the agent update transfer
 				// Check the SHA384 hash of the received file against the file we got.
-				if ((GenerateSHA384FileHash(updateFilePath, updateFileHash) == 0) && (memcmp(updateFileHash, cm->coreModuleHash, sizeof(cm->coreModuleHash)) == 0))
+				if (MeshServer_VerifyUpdateFileHash(updateFilePath, cm->coreModuleHash))
 				{
 					//printf("UPDATE: End OK\r\n");
 					int updateTop = duk_get_top(agent->meshCoreCtx);
 					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Download Complete... Hash verified"); }
-#ifdef WIN32
-					{
-						// A raw package's transfer hash is its executable identity, so a held package
-						// is refused before it is staged. A compressed package is checked again once
-						// extracted; until then the transfer hash is the package's only identity.
-						char failedActivationHash[UTIL_SHA384_HASHSIZE] = { 0 };
-						if (agent->forceUpdate == 0 && agent->fakeUpdate == 0 &&
-							MeshAgent_ReadUpdateActivationFailureHash(agent->masterDb, failedActivationHash) &&
-							memcmp(failedActivationHash, cm->coreModuleHash, UTIL_SHA384_HASHSIZE) == 0)
-						{
-							if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Same update package previously failed activation; suppressing repeat activation"); }
-							util_deletefile(updateFilePath);
-							MeshServer_ReportUpdateFailure(agent);
-							break;
-						}
-						MeshAgent_RecordUpdateActivationTargetHash(agent->masterDb, cm->coreModuleHash);
-					}
-#endif
 					{
 						static const char agentUpdateDownloadedAck[] = "{\"action\":\"agentupdatedownloaded\"}";
 						ILibWebClient_WebSocket_Send(WebStateObject, ILibWebClient_WebSocket_DataType_TEXT, (char*)agentUpdateDownloadedAck, (int)(sizeof(agentUpdateDownloadedAck) - 1), ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
@@ -6521,8 +6560,18 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 						{
 							if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Overriding update with provided zip..."); }
 						}
-						if (fsz > 0) { ILibWriteStringToDiskEx(updateFilePath, fsc, fsz); }
+						int fakeWritten = fsz > 0 && MeshServer_WriteUpdateBlock(updateFilePath, fsc, (size_t)fsz, 1);
 						if (fsc != NULL) { free(fsc); }
+						if (!fakeWritten)
+						{
+#ifdef WIN32
+							MeshServer_FailUpdateActivation(agent, 1);
+#else
+							util_deletefile(updateFilePath);
+							MeshServer_ReportUpdateFailure(agent);
+#endif
+							break;
+						}
 					}
 					if (duk_peval_string(agent->meshCoreCtx, "require('zip-reader')") == 0)	// [reader]
 					{
@@ -6541,10 +6590,12 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 									ILIBLOGMESSSAGE(ILibScratchPad);
 								}
 								duk_set_top(agent->meshCoreCtx, updateTop);
-								util_deletefile(updateFilePath);
-								MeshServer_ReportUpdateFailure(agent);
+								MeshServer_FailCompressedUpdate(agent, updateFilePath);
 								break;
 							}
+#ifdef WIN32
+							agent->updateUnzipPending = 1;
+#endif
 							duk_prepare_method_call(agent->meshCoreCtx, -1, "start");			// [helper][start][this]
 							duk_push_string(agent->meshCoreCtx, updateFilePath);				// [helper][start][this][path]
 							if (duk_pcall_method(agent->meshCoreCtx, 1) == 0)					// [helper][promise]
@@ -6554,8 +6605,12 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 								duk_push_c_function(agent->meshCoreCtx, MeshServer_selfupdate_unzip_error, DUK_VARARGS);//[this][res][rej]
 								if (duk_pcall_method(agent->meshCoreCtx, 2) != 0)
 								{
-									util_deletefile(updateFilePath);
-									MeshServer_ReportUpdateFailure(agent);
+#ifdef WIN32
+									// A synchronous completion may already have transferred ownership
+									// to the lifecycle host before a promise callback throws.
+									if (agent->updateUnzipPending != 0)
+#endif
+									MeshServer_FailCompressedUpdate(agent, updateFilePath);
 								}
 							}
 							else
@@ -6565,8 +6620,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 									sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "SelfUpdate -> Error Unzipping: %s", duk_safe_to_string(agent->meshCoreCtx, -1));
 									ILIBLOGMESSSAGE(ILibScratchPad);
 								}
-								util_deletefile(updateFilePath);
-								MeshServer_ReportUpdateFailure(agent);
+								MeshServer_FailCompressedUpdate(agent, updateFilePath);
 							}
 							duk_set_top(agent->meshCoreCtx, updateTop);							// ...
 							break; // Break out here, and continue when finished unzipping (or in the case of error, abort)
@@ -6581,8 +6635,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 							if (MeshServer_UpdateFileLooksZip(updateFilePath))
 							{
 								duk_set_top(agent->meshCoreCtx, updateTop);
-								util_deletefile(updateFilePath);
-								MeshServer_ReportUpdateFailure(agent);
+								MeshServer_FailCompressedUpdate(agent, updateFilePath);
 								break;
 							}
 						}
@@ -6595,8 +6648,7 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 							ILIBLOGMESSSAGE(ILibScratchPad);
 						}
 						duk_set_top(agent->meshCoreCtx, updateTop);
-						util_deletefile(updateFilePath);
-						MeshServer_ReportUpdateFailure(agent);
+						MeshServer_FailCompressedUpdate(agent, updateFilePath);
 						break;
 					}
 					else if (agent->logUpdate != 0)
@@ -6612,18 +6664,6 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					// Hash check failed, delete the file. On next server reconnect, we will try again.
 					if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Download Complete... Hash FAILED, aborting update..."); }
 					util_deletefile(updateFilePath);
-#ifdef WIN32
-					// A second failure for the same advertised hash means the server sends bytes that
-					// never match it. Hold that package so it is not re-sent on every reconnect.
-					if (agent->updateHashMismatchSet != 0 && memcmp(agent->updateHashMismatch, cm->coreModuleHash, UTIL_SHA384_HASHSIZE) == 0)
-					{
-						MeshAgent_RecordUpdateActivationFailureHash(agent->masterDb, cm->coreModuleHash);
-						MeshAgent_ClearUpdateActivationTargetHash(agent->masterDb);
-						if (agent->logUpdate != 0) { ILIBLOGMESSSAGE("SelfUpdate -> Package failed hash verification again; holding it"); }
-					}
-					memcpy_s(agent->updateHashMismatch, sizeof(agent->updateHashMismatch), cm->coreModuleHash, UTIL_SHA384_HASHSIZE);
-					agent->updateHashMismatchSet = 1;
-#endif
 					MeshServer_ReportUpdateFailure(agent);
 				}
 			}
@@ -6634,27 +6674,18 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 		{
 			if (agent->disableUpdate != 0) { break; }	 // Ignore if updates are disabled
 			if (MeshServer_UpdateTransferBlocked(agent)) { break; }	 // Never extend a package that is being activated
+			if (!agent->updateDownloadActive) { MeshServer_ReportUpdateFailure(agent); break; }
 
 			// Write the mesh agent block to file
-			int retryCount = 0;
 #ifdef WIN32
 			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, MESHAGENT_WINDOWS_UPDATE_PACKAGE_SUFFIX);
 #else
 			char* updateFilePath = MeshAgent_MakeAbsolutePath(agent->exePath, ".update");
 #endif
 
-			// We have to try to write until it works, fopen sometimes fails. An empty block has
-			// nothing to append (fwrite reports 0 items), so it is only acknowledged.
-			while (cmdLen > 4 && util_appendfile(updateFilePath, cmd + 4, cmdLen - 4) == 0 && ++retryCount < 4)
-			{ 
-#ifdef WIN32
-				Sleep(100);
-#else
-				usleep(100 * 1000); // 100 ms, matching the Windows branch (POSIX sleep() is seconds)
-#endif
-			}
-
-			if (retryCount < 4)
+			// A partial write must never be appended again, and buffered close errors must
+			// fail the transfer before its ACK. Empty protocol blocks need no disk write.
+			if (cmdLen == 4 || MeshServer_WriteUpdateBlock(updateFilePath, cmd + 4, (size_t)(cmdLen - 4), 0))
 			{
 				// Confirm we got a mesh agent update block
 				((unsigned short*)ILibScratchPad2)[0] = htons(MeshCommand_AgentUpdateBlock);             // MeshCommand_AgentHash (14), SHA384 hash of the agent executable
@@ -7733,11 +7764,25 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	// Windows console/tray replacement is intentionally unsupported. Advertise
 	// updates as disabled instead of accepting a package that cannot be applied.
 	if (agent->JSRunningAsService == 0) { agent->disableUpdate = 1; }
+#if !defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
+	// Without the lifecycle host this build refuses every staged package after the full
+	// download. Advertise updates as disabled so servers never start the transfer.
+	agent->disableUpdate = 1;
+#endif
 #endif
 	agent->forceUpdate = MeshAgent_DbGetBoolean(agent->masterDb, "forceUpdate");
 	agent->logUpdate = ILibSimpleDataStore_Get(agent->masterDb, "logUpdate", NULL, 0); // intentionally legacy length-semantics
 	agent->fakeUpdate = MeshAgent_DbGetBoolean(agent->masterDb, "fakeUpdate");
+	// Update holds were removed. Drop keys written by earlier builds, so a rollback to one
+	// of them does not act on a stale hold. Deleting an absent key writes nothing.
+	ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdateHold");
+	ILibSimpleDataStore_Delete(agent->masterDb, "forceUpdatePending");
+	ILibSimpleDataStore_Delete(agent->masterDb, "UpdateForceAttempt");
+	ILibSimpleDataStore_Delete(agent->masterDb, "UpdateActivationFailureHash");
+	ILibSimpleDataStore_Delete(agent->masterDb, "UpdateActivationFailureCompressed");
+	ILibSimpleDataStore_Delete(agent->masterDb, "UpdateActivationTargetHash");
 	agent->serverSupportsUpdateFailureStatus = 0;
+	agent->updateDownloadActive = 0;
 	agent->controlChannelDebug = ILibSimpleDataStore_Get(agent->masterDb, "controlChannelDebug", NULL, 0);
 	ILibDuktape_HECI_Debug = (ILibSimpleDataStore_Get(agent->masterDb, "heciDebug", NULL, 0) != 0);
 	agent->timerLogging = ILibSimpleDataStore_Get(agent->masterDb, "timerLogging", NULL, 0);
@@ -8303,9 +8348,13 @@ void MeshAgent_AgentMode_Core_ServerTimeout(duk_context *ctx, void ** args, int 
 
 void MeshAgent_AgentInstallerCTX_Finalizer(duk_context *ctx, void *user)
 {
-	if (ILibIsChainBeingDestroyed(user) == 0)
+	MeshAgentHostContainer *agentHost = (MeshAgentHostContainer*)user;
+	// Keep a process.exit() code; a failure already recorded is not reset by a clean heap teardown.
+	int exitCode = ILibDuktape_Process_GetExitCode(ctx);
+	if (exitCode != 0) { agentHost->exitCode = exitCode; }
+	if (ILibIsChainBeingDestroyed(agentHost->chain) == 0)
 	{
-		ILibStopChain(user);
+		ILibStopChain(agentHost->chain);
 	}
 }
 
@@ -8560,7 +8609,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 
 	if (fetchstate != 0)
 	{
-		duk_context *ctxx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, NULL, agentHost->exePath, NULL, MeshAgent_AgentInstallerCTX_Finalizer, agentHost->chain);
+		duk_context *ctxx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, NULL, agentHost->exePath, NULL, MeshAgent_AgentInstallerCTX_Finalizer, agentHost);
 		duk_eval_string(ctxx, "require('_agentStatus').start();");
 		return(1);
 	}
@@ -8572,7 +8621,11 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 #else
 		(void)preProtectionCapturePath;
 		printf("{\"ok\":false,\"error\":\"pre-protection-capture-not-supported\"}\n");
+#ifdef WIN32
 		exit(ERROR_NOT_SUPPORTED);
+#else
+		exit(1);	// ERROR_NOT_SUPPORTED is a Windows error code
+#endif
 #endif
 	}
 	else if (installFlag != 0)
@@ -8582,7 +8635,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		exit(ERROR_NOT_SUPPORTED);
 #endif
 
-		duk_context *ctxx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, NULL, agentHost->exePath, NULL, MeshAgent_AgentInstallerCTX_Finalizer, agentHost->chain);
+		duk_context *ctxx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, NULL, agentHost->exePath, NULL, MeshAgent_AgentInstallerCTX_Finalizer, agentHost);
 		ILibDuktape_MeshAgent_Init(ctxx, agentHost->chain, agentHost);
 
 		duk_eval_string(ctxx, "require('user-sessions').isRoot();");
@@ -8590,7 +8643,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 		{
 			printf("   Administrator permissions needed...\n");
 			installFlag = 0;
-			exit(0);
+			exit(1);
 		}
 
 #if !defined(WIN32) || !defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
@@ -8607,7 +8660,10 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 				{
 					if (strcmp(duk_safe_to_string(ctxx, -1), "Process.exit() forced script termination") != 0)
 					{
+						// Nothing else ends the chain after an installer exception.
 						printf("%s\n", duk_safe_to_string(ctxx, -1));
+						agentHost->exitCode = 1;
+						ILibStopChain(agentHost->chain);
 					}
 				}
 				duk_pop(ctxx);
@@ -8623,7 +8679,10 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 				{
 					if (strcmp(duk_safe_to_string(ctxx, -1), "Process.exit() forced script termination") != 0)
 					{
+						// Nothing else ends the chain after an installer exception.
 						printf("%s\n", duk_safe_to_string(ctxx, -1));
+						agentHost->exitCode = 1;
+						ILibStopChain(agentHost->chain);
 					}
 				}
 				duk_pop(ctxx);

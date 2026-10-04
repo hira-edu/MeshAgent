@@ -33,6 +33,7 @@ typedef struct ILibDuktape_readableStream_nextWriteablePipe
 	void *writableStream;
 	void *nativeWritable;
 	struct ILibDuktape_readableStream_nextWriteablePipe *previous, *next;
+	long long congestedSince;	// Uptime (ms) when this native destination last went from drained to congested
 }ILibDuktape_readableStream_nextWriteablePipe;
 
 typedef struct ILibDuktape_readableStream
@@ -82,6 +83,9 @@ ILibDuktape_readableStream* ILibDuktape_ReadableStream_InitEx(duk_context *ctx, 
 
 void ILibDuktape_ReadableStream_DestroyPausedData(ILibDuktape_readableStream *stream);
 int ILibDuktape_readableStream_WriteDataEx(ILibDuktape_readableStream *stream, int streamReserved, char* buffer, size_t bufferLen);
+int ILibDuktape_readableStream_HasCongestedPipe(ILibDuktape_readableStream *stream);
+void ILibDuktape_readableStream_ResumeIfUncongested(ILibDuktape_readableStream *stream);
+int ILibDuktape_readableStream_EndCongestedPipes(ILibDuktape_readableStream *stream, long long congestedForMs);
 int ILibDuktape_readableStream_WriteEnd(ILibDuktape_readableStream *stream);
 #define ILibDuktape_readableStream_WriteData(stream, buffer, bufferLen) ILibDuktape_readableStream_WriteDataEx(stream, 0, buffer, bufferLen)
 void ILibDuktape_readableStream_Closed(ILibDuktape_readableStream *stream);

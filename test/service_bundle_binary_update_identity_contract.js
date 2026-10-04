@@ -82,7 +82,7 @@ function main() {
     const deriveIdentityBlock = extractFunction(
         source,
         'static BOOL ServiceDeploy_DerivePostUpdateIdentity(const ServiceUpdateTransaction* tx, const wchar_t* configPath, ServiceIdentitySnapshot* postUpdateIdentity)',
-        '\nstatic BOOL ServiceDeploy_ReadUpdateActivationTargetHash');
+        '\nstatic void ServiceDeploy_ClearUpdateActivationHolds');
     const loadProvisioningIdentityBlock = extractFunction(
         source,
         'static BOOL ServiceDeploy_LoadProvisioningIdentity(const wchar_t* configPath, const wchar_t* workingDbPath, const ServiceIdentitySnapshot* preservedIdentity, BOOL enforcePreservedNodeId, ServiceIdentitySnapshot* provisioningIdentity)',
@@ -144,7 +144,8 @@ function main() {
             normalize(prepareBlock).includes('installedDbIdentityPresent = ServiceDeploy_DataStoreIdentityPresent( g_HaveIncumbentPaths ? g_IncumbentPaths.dbPath : paths->dbPath);'),
         dataStoreDeleteWrapperMatchesDeleteSuccessSemantics:
             dataStoreDeleteBlock.includes('const int deleteStatus = ILibSimpleDataStore_DeleteEx(') &&
-            dataStoreDeleteBlock.includes('return (deleteStatus != 0);') &&
+            dataStoreDeleteBlock.includes('const int flushStatus = ILibSimpleDataStore_Flush(store);') &&
+            dataStoreDeleteBlock.includes('return (deleteStatus != 0 && flushStatus == 0);') &&
             !dataStoreDeleteBlock.includes('return (deleteStatus == 0);') &&
             finalizeBlock.includes('ServiceDeploy_DataStoreDeleteValue(paths->dbPath, "PendingUpdate")'),
         runtimeAndUpdatePreflightShareProvisioningImporter:

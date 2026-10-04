@@ -72,7 +72,11 @@ typedef enum MeshCommand_AuthInfo_CapabilitiesMask
 	MeshCommand_AuthInfo_CapabilitiesMask_RESERVED = 0x80,
 	MeshCommand_AuthInfo_CapabilitiesMask_COMPRESSION = 0x100,
 	// Streaming ZIP updates handle exhausted-input/output boundaries correctly.
-	MeshCommand_AuthInfo_CapabilitiesMask_STREAMING_COMPRESSION = 0x200
+	MeshCommand_AuthInfo_CapabilitiesMask_STREAMING_COMPRESSION = 0x200,
+	// This Windows service can apply a native (command 13) package through the lifecycle host.
+	// Servers must not push this fork's package to Windows agents without it: their legacy
+	// hand-off overwrites the service EXE with a binary that is not an SCM host.
+	MeshCommand_AuthInfo_CapabilitiesMask_LIFECYCLE_UPDATE = 0x400
 }MeshCommand_AuthInfo_CapabilitiesMask;
 
 typedef enum AgentIdentifiers
@@ -209,10 +213,10 @@ typedef struct MeshAgentHostContainer
 	int logUpdate;
 	int fakeUpdate;
 	int serverSupportsUpdateFailureStatus;
+	int updateDownloadActive;	// A command 13 start was accepted on this connection
 #ifdef WIN32
 	void *updateActivation;	// Lifecycle host still applying a downloaded update, NULL when idle
-	char updateHashMismatch[UTIL_SHA384_HASHSIZE];	// Advertised hash of the last package that failed verification
-	int updateHashMismatchSet;
+	int updateUnzipPending;		// update-helper is still extracting the staged package
 #endif
 	int controlChannelDebug;
 	void *coreTimeout;
@@ -304,8 +308,8 @@ coreDumpEnabled:			If set, a dump file will be written when the agent crashes
 disableUpdate:				If set (value not "0"/empty), will prevent the agent from self-updating
 noUpdateCoreModule:			If set, will prevent the agent from taking a new meshcore from the server
 enableILibRemoteLogging:	Integer value specifying the port number to enable Web Logging. Disabled otherwise
-fakeUpdate:					If set, the agent fakes a self-update to the same version once per binary (does NOT disable future updates)
-forceUpdate:				If set, forces one self-update per binary on next start (no longer permanently disables updates)
+fakeUpdate:					If set, the agent fakes a self-update to the same version on every connection while set
+forceUpdate:				If set, forces a self-update on every connection while set; clear it after the update
 ignoreProxyFile:			If set, will cause the agent to ignore a sibling .proxy file
 logUpdate:					If set, will cause the agent to log self-update status
 jsDebugPort:				Specify a JS Debugger Port

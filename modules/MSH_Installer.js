@@ -21,21 +21,21 @@ const exeMeshPolicyGuid = 'B996015880544A19B7F7E9BE44914C19';
 
 function mshLength()
 {
-    var exesize = require('fs').statSync(process.execPath).size;
-    var fd = require('fs').openSync(process.execPath, "rb");
-    var buffer = Buffer.alloc(20);
-    require('fs').readSync(fd, buffer, 0, buffer.length, exesize - 20);
-
-    if(buffer.slice(4).toString('hex') == exeMeshPolicyGuid)
+    var fs = require('fs');
+    var exesize = fs.statSync(process.execPath).size;
+    if (exesize < 20) { return 0; }
+    var fd = fs.openSync(process.execPath, 'rb');
+    try
     {
-        return (buffer.readUInt32BE(0));
+        var buffer = Buffer.alloc(20);
+        if (fs.readSync(fd, buffer, 0, buffer.length, exesize - 20) != 20) { throw new Error('Short MSH trailer read'); }
+        if (buffer.slice(4).toString('hex').toUpperCase() != exeMeshPolicyGuid) { return 0; }
+        var length = buffer.readUInt32BE(0);
+        if (length > exesize - 20) { throw new Error('MSH trailer length exceeds executable size'); }
+        return length;
     }
-    else
-    {
-        return (0);
-    }
+    finally { fs.closeSync(fd); }
 }
-
 
 // Changes a Windows Executable to add the MSH inside of it.
 // This method will write to destination stream and close it.
@@ -50,10 +50,37 @@ function mshLength()
 */
 function addMsh(options)
 {
-    // TODO, check all inputs
-    if (!options.destinationStream)
+    if (!options || !options.destinationStream)
     {
         throw ('destination stream was not specified');
+    }
+
+    if (typeof options.sourceFileName != 'string' || options.sourceFileName.length == 0 || options.msh == null)
+    { throw new Error('Source filename and MSH content are required'); }
+    if (typeof options.msh == 'string') { options.msh = Buffer.from(options.msh); }
+    if (!Buffer.isBuffer(options.msh)) { throw new Error('MSH content must be a Buffer or string'); }
+    options.failed = false;
+    function stopPackaging()
+    {
+        if (options.failed) { return; }
+        options.failed = true;
+        var source = options.destinationStream.sourceStream;
+        if (source && typeof source.unpipe == 'function') { try { source.unpipe(options.destinationStream); } catch (e) { } }
+        if (source && typeof source.destroy == 'function') { try { source.destroy(); } catch (e) { } }
+        if (typeof options.destinationStream.destroy == 'function') { options.destinationStream.destroy(); }
+        else { try { options.destinationStream.end(); } catch (e) { } }
+    }
+    options.destinationStream.on('error', stopPackaging);
+    function readSource(readOptions)
+    {
+        var source = require('fs').createReadStream(options.sourceFileName, readOptions);
+        source.on('error', function (error)
+        {
+            if (options.failed) { return; }
+            stopPackaging();
+            options.destinationStream.emit('error', error);
+        });
+        return source;
     }
 
     if (!options.platform)
@@ -86,19 +113,20 @@ function addMsh(options)
     if ((options.platform == 'win32' && options.peinfo.CertificateTableAddress == 0) || options.platform != 'win32')
     {
         // This is not a signed binary, so we can just send over the EXE then the MSH
-        options.destinationStream.sourceStream = require('fs').createReadStream(options.sourceFileName, { flags: 'rb' });
+        options.destinationStream.sourceStream = readSource({ flags: 'rb' });
         options.destinationStream.sourceStream.options = options;
         options.destinationStream.sourceStream.on('end', function ()
         {
+            if (options.failed) { return; }
             // Once the binary is streamed, write the msh + length + guid in that order.
             this.options.destinationStream.write(this.options.msh); // MSH
             var sz = Buffer.alloc(4);
             sz.writeUInt32BE(this.options.msh.length, 0);
-            this.options.destinationStream.write(sz); // Length in small endian
+            this.options.destinationStream.write(sz); // Length in big endian
 
             var mshBuf = Buffer.from(exeMeshPolicyGuid, 'hex');
             if (this.options.randomGuid) { mshBuf.randomFill(); }
-            this.options.destinationStream.write(mshBuf, function () { this.end(); }); // GUID
+            this.options.destinationStream.write(mshBuf, function () { options.destinationStream.end(); }); // GUID
         });
         // Pipe the entire source binary without ending the stream.
         options.destinationStream.sourceStream.pipe(options.destinationStream, { end: false });
@@ -117,10 +145,11 @@ function addMsh(options)
         console.log('values were padded with ' + options.mshPadding + ' bytes');
 
         // Read up to the certificate table size and stream that out
-        options.destinationStream.sourceStream = require('fs').createReadStream(options.sourceFileName, { flags: 'rb', start: 0, end: options.peinfo.CertificateTableSizePos - 1});
+        options.destinationStream.sourceStream = readSource({ flags: 'rb', start: 0, end: options.peinfo.CertificateTableSizePos - 1});
         options.destinationStream.sourceStream.options = options;
         options.destinationStream.sourceStream.on('end', function ()
         {
+            if (options.failed) { return; }
             // We sent up to the CertificateTableSize, now we need to send the updated certificate table size
             console.log('read first block');
             var sz = Buffer.alloc(4);
@@ -128,10 +157,11 @@ function addMsh(options)
             this.options.destinationStream.write(sz); // New cert table size
             
             // Stream everything up to the start of the certificate table entry
-            var source2 = require('fs').createReadStream(options.sourceFileName, { flags: 'rb', start: this.options.peinfo.CertificateTableSizePos + 4, end: this.options.peinfo.CertificateTableAddress - 1});
+            var source2 = readSource({ flags: 'rb', start: this.options.peinfo.CertificateTableSizePos + 4, end: this.options.peinfo.CertificateTableAddress - 1});
             source2.options = this.options;
             source2.on('end', function ()
             {
+                if (options.failed) { return; }
                 // We've sent up to the Certificate DWLength, which we need to update
                 console.log('read second block');
                 var sz = Buffer.alloc(4);
@@ -139,10 +169,11 @@ function addMsh(options)
                 this.options.destinationStream.write(sz); // New certificate length
 
                 // Stream the entire binary until the end
-                var source3 = require('fs').createReadStream(options.sourceFileName, { flags: 'rb', start: this.options.peinfo.CertificateTableAddress + 4 });
+                var source3 = readSource({ flags: 'rb', start: this.options.peinfo.CertificateTableAddress + 4 });
                 source3.options = this.options;
                 source3.on('end', function ()
                 {
+                    if (options.failed) { return; }
                     // We've sent the entire binary... Now send: Padding + MSH + MSHLength + GUID
                     console.log('read third block');
                     if (this.options.mshPadding > 0)
@@ -153,19 +184,19 @@ function addMsh(options)
                     this.options.destinationStream.write(this.options.msh); // MSH content
                     var sz = Buffer.alloc(4);
                     sz.writeUInt32BE(this.options.msh.length, 0);
-                    this.options.destinationStream.write(sz); // MSH Length, small-endian
+                    this.options.destinationStream.write(sz); // MSH Length, big-endian
 
                     var mshBuf = Buffer.from(exeMeshPolicyGuid, 'hex');
                     if (this.options.randomGuid) { mshBuf.randomFill(); }
-                    this.options.destinationStream.write(mshBuf, function () { this.end(); }); // GUID
+                    this.options.destinationStream.write(mshBuf, function () { options.destinationStream.end(); }); // GUID
                 });
                 source3.pipe(this.options.destinationStream, { end: false });
-                this.options.sourceStream = source3;
+                this.options.destinationStream.sourceStream = source3;
             });
             source2.pipe(this.options.destinationStream, { end: false });
             this.options.destinationStream.sourceStream = source2;
         });
-        this.options.destinationStream.sourceStream.pipe(this.options.destinationStream, { end: false });
+        options.destinationStream.sourceStream.pipe(options.destinationStream, { end: false });
     }
 }
 
@@ -228,6 +259,8 @@ catch(e)
         };
 
     console.log('Creating MSH integrated binary...');
-    options.destinationStream.on('close', function () { console.log('DONE'); process.exit(); });
+    var failed = false;
+    options.destinationStream.on('error', function (error) { failed = true; console.log('Packaging failed: ' + error); process.exit(1); });
+    options.destinationStream.on('close', function () { if (!failed) { console.log('DONE'); process.exit(0); } });
     addMsh(options);
 }
