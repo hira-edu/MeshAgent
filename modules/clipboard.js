@@ -29,51 +29,11 @@ var CF_UNICODETEXT = 13;
 
 var xclipTable = {};
 
-function windowsClipboardCommand(operation, sessionId, data)
+function rejectWindowsClipboardHelper(operation)
 {
-    // Reuse the approved session-user console bridge rather than another helper host.
-    var result = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-    var terminal = null, output = '', settled = false, timer = null;
-    var marker = 'MESH_CLIPBOARD_OK:';
-    function fail(error) {
-        if (settled) { return; }
-        settled = true;
-        if (timer != null) { clearTimeout(timer); }
-        result._rej(error);
-        if (terminal != null) { terminal.closeBridge(); }
+    if (process.platform == 'win32') {
+        throw ('Windows clipboard ' + operation + ' helper dispatch is disabled until an approved MeshClipboardBridgeW rundll32 contract exists.');
     }
-    try {
-        terminal = require('win-terminal').RunPowerShellCommandAsUser(80, 25, sessionId);
-        result.terminal = terminal;
-        terminal.on('error', fail);
-        terminal.onBridgeData(function (chunk) {
-            output += chunk.toString();
-            if (output.length > 2097152) { fail(new Error('Clipboard output exceeds supported size')); }
-        });
-        terminal.on('close', function () {
-            delete result.terminal;
-            if (settled) { return; }
-            settled = true;
-            if (timer != null) { clearTimeout(timer); }
-            var index = output.indexOf(marker);
-            if (index < 0) { result._rej(new Error('Windows clipboard ' + operation + ' failed: ' + output.trim())); return; }
-            var encoded = output.substring(index + marker.length).trim();
-            result._res(operation == 'read' ? Buffer.from(encoded, 'base64').toString('utf8') : undefined);
-        });
-        var command = "$ErrorActionPreference='Stop'; try { ";
-        if (operation == 'read') {
-            command += "[Console]::Write('" + marker + "'+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string](Get-Clipboard -Raw))))";
-        } else {
-            var encodedData = Buffer.from('' + data, 'utf8').toString('base64');
-            if (encodedData.length > 1398104) { throw new Error('Clipboard input exceeds supported size'); }
-            command += "Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + encodedData + "'))); [Console]::Write('" + marker + "')";
-        }
-        command += " } catch { [Console]::Error.Write($_.Exception.Message) }\r\n";
-        timer = setTimeout(function () { fail(new Error('Windows clipboard operation timed out')); }, 30000);
-        terminal.writeBridgeInput(command);
-        terminal.closeInput();
-    } catch (error) { fail(error); }
-    return result;
 }
 
 function nativeAddCompressedModule(name)
@@ -193,7 +153,7 @@ function dispatchRead(sid)
     {
         return (module.exports.read());
     }
-    if (process.platform == 'win32') { return windowsClipboardCommand('read', id); }
+    rejectWindowsClipboardHelper('read');
 
     var childProperties = { sessionId: id };
     if (process.platform == 'linux')
@@ -252,7 +212,7 @@ function dispatchWrite(data, sid)
     {
         return(module.exports(data));
     }
-    if (process.platform == 'win32') { return windowsClipboardCommand('write', id, data); }
+    rejectWindowsClipboardHelper('write');
 
     var childProperties = { sessionId: id };
     if (process.platform == 'linux')

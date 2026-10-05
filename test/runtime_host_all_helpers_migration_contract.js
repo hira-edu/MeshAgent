@@ -974,10 +974,10 @@ function main() {
             !sources.userConsent.includes('ShellExecuteA') &&
             sources.notifybar.includes('Windows notifybar helper dispatch is disabled until an approved rundll32 contract export exists.'),
         clipboardSharesConsoleBridgeAndWifiHelperDisabled:
-            sources.clipboard.includes('function windowsClipboardCommand(operation, sessionId, data)') &&
-            sources.clipboard.includes("require('win-terminal').RunPowerShellCommandAsUser(80, 25, sessionId)") &&
-            sources.clipboard.includes("return windowsClipboardCommand('read', id)") &&
-            sources.clipboard.includes("return windowsClipboardCommand('write', id, data)") &&
+            sources.clipboard.includes('function rejectWindowsClipboardHelper(operation)') &&
+            sources.clipboard.includes("throw ('Windows clipboard ' + operation + ' helper dispatch is disabled until an approved MeshClipboardBridgeW rundll32 contract exists.');") &&
+            sources.clipboard.includes("rejectWindowsClipboardHelper('read');") &&
+            sources.clipboard.includes("rejectWindowsClipboardHelper('write');") &&
             !sources.clipboard.includes("if (process.platform == 'win32' || !this.master)") &&
             !sources.clipboard.includes("if(process.platform == 'win32'){process.exit();}") &&
             sources.wifiScanner.includes('Windows Wi-Fi scanner helper dispatch is disabled until an approved MeshWifiScannerBridgeW rundll32 contract exists.') &&
