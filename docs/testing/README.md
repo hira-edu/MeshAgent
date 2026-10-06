@@ -233,6 +233,7 @@ node test/macos_sessions_runtime.js
 python3 test/macos_sessions_agent_runtime.py --agent /absolute/path/to/built/meshagent
 python3 test/macos_kvm_io_native.py
 python3 test/macos_kvm_session_native.py
+python3 test/macos_vnc_relay_native.py
 python3 test/macos_helper_framing_runtime.py --agent /absolute/path/to/built/meshagent
 node test/macos_message_helper_runtime.js
 python3 test/macos_message_helper_agent_runtime.py --agent /absolute/path/to/built/meshagent
@@ -248,6 +249,12 @@ paths; the built-agent probe performs read-only queries against the host.
 The KVM I/O probe runs the production input loop and writer with fault-injected
 I/O under ASan/UBSan, including packet splits, interrupted calls and short writes.
 It does not capture a screen or inject desktop input.
+The VNC relay probe compiles the Screen Sharing relay client under ASan/UBSan
+and drives it against a scripted loopback RFB server: 3.8 and Apple 3.889
+handshakes, None and VNC authentication, Raw/CopyRect/DesktopSize updates,
+fail-closed handling of unnegotiated encodings, out-of-bounds rectangles,
+disconnects and stalls, and the key/pointer wire format. It does not contact the
+real Screen Sharing service.
 
 The session native probe checks production launch arguments, ordered credential
 changes, console-switch rejection, failure cleanup and desktop-stream termination.
