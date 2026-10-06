@@ -1,5 +1,4 @@
 #include "mac_events.h"
-#include "mac_hid.h"
 #include <assert.h>
 #include <SystemConfiguration/SystemConfiguration.h>
 #include <string.h>
@@ -270,9 +269,6 @@ static void MouseAction_CGEvent(double absX, double absY, int button, short whee
 
 void MouseAction(double absX, double absY, int button, short wheel)
 {
-	if (vhid_available()) {
-		if (vhid_mouse(absX, absY, button, wheel, SCREEN_WIDTH, SCREEN_HEIGHT) == 0) return;
-	}
 	MouseAction_CGEvent(absX, absY, button, wheel);
 }
 
@@ -311,10 +307,8 @@ static void KeyAction_CGEvent(unsigned char vk, int up)
 void KeyAction(unsigned char vk, int up)
 {
 	// Lock keys are toggled through IOHIDSetModifierLockState (set_kbd_state), which is the
-	// authoritative state the viewer is told about. They must not also be delivered through the
-	// virtual HID keyboard: a real HID caps lock press toggles the lock on key-down, and the
-	// key-up toggle below would then undo it. A CGEvent-posted lock key does not change the
-	// lock state, so the CGEvent fallback remains safe to dispatch.
+	// authoritative state the viewer is told about. A CGEvent-posted lock key does not change
+	// the lock state, so it is safe to dispatch alongside the toggle below.
 	int lockKey = (vk == VK_CAPITAL || vk == VK_NUMLOCK || vk == VK_SCROLL);
 
 	if (up == 4) { up = 0; }
@@ -349,9 +343,6 @@ void KeyAction(unsigned char vk, int up)
 
 	if (lockKey) { KeyAction_CGEvent(vk, up); return; }
 
-	if (vhid_available()) {
-		if (vhid_key(vk, up) == 0) return;
-	}
 	KeyAction_CGEvent(vk, up);
 }
 
@@ -361,7 +352,6 @@ void KeyActionUnicode(uint16_t unicode, int up)
 	if (up == 0)
 	{
 		UniChar ch = (UniChar)unicode;
-		if (vhid_available() && vhid_key_unicode(unicode, up) == 0) return;
 		CGEventRef key = CGEventCreateKeyboardEvent(NULL, 0, true);
 		if (key == NULL) return;
 		CGEventKeyboardSetUnicodeString(key, 1, &ch);

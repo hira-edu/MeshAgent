@@ -15,7 +15,6 @@ limitations under the License.
 */
 
 #include "mac_kvm.h"
-#include "mac_hid.h"
 #include "../../meshdefines.h"
 #include "../../meshinfo.h"
 #include "../../../microstack/ILibParsers.h"
@@ -324,7 +323,6 @@ static int MacKvm_CanCaptureScreen(void)
 
 static int MacKvm_CanPostInput(void)
 {
-    // A virtual device is an input transport, not a desktop authorization grant.
     if (__builtin_available(macOS 10.9, *)) { return AXIsProcessTrustedWithOptions(NULL); }
     return 1;
 }
@@ -588,10 +586,6 @@ void* kvm_server_mainloop(void* param)
 	g_messageQ = ILibQueue_Create();
 	if (kvm_init() != 0) { return (void*)-1; }
 
-	if (vhid_init()) {
-		KvmDebugLog("Virtual HID active\n");
-	}
-
 	g_shutdown = 0;
 	if (pthread_create(&kvmthread, NULL, kvm_mainloopinput, param) != 0) { kvmthread = (pthread_t)NULL; g_shutdown = 1; }
 
@@ -785,8 +779,6 @@ void* kvm_server_mainloop(void* param)
 		free(tilebuffer);
 		tilebuffer = NULL;
 	}
-
-	vhid_cleanup();
 
 	if (KVM_AGENT_FD != -1)
 	{

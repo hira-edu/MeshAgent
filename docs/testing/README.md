@@ -237,7 +237,6 @@ python3 test/macos_helper_framing_runtime.py --agent /absolute/path/to/built/mes
 node test/macos_message_helper_runtime.js
 python3 test/macos_message_helper_agent_runtime.py --agent /absolute/path/to/built/meshagent
 python3 test/posix_fs_modes_agent_runtime.py --agent /absolute/path/to/built/meshagent
-python3 test/macos_hid_reports_native.py
 ```
 
 Installation probes redirect `/Library` writes into temporary directories and
