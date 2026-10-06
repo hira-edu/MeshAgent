@@ -28,6 +28,7 @@
 #define VNC_BPP				4
 #define VNC_WHEEL_DELTA		120
 #define VNC_MAX_WHEEL_STEPS	10
+#define VNC_MAX_HELD_KEYS	32
 
 #define RFB_SEC_NONE		1
 #define RFB_SEC_VNC			2
@@ -47,7 +48,11 @@ struct vnc_relay
 	int height;
 	uint8_t *row;				// Pump-thread scratch for one Raw row
 	size_t row_size;
-	uint8_t buttons;
+	uint8_t buttons;			// Guarded by write_lock, like the fields below
+	int pointer_x, pointer_y;
+	int wheel_rest;				// Wheel delta not yet sent as a whole step
+	uint32_t held[VNC_MAX_HELD_KEYS];
+	int held_count;
 };
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
@@ -144,7 +149,8 @@ static int connect_loopback(uint16_t port, int timeout_ms)
 	socklen_t length = sizeof(error);
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) { return -1; }
-	setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+	// Without SO_NOSIGPIPE a send to a closed peer would kill the process.
+	if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one)) != 0) { close(fd); return -1; }
 	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
 	memset(&address, 0, sizeof(address));
@@ -209,7 +215,7 @@ static int request_update(vnc_relay *r, int incremental, int width, int height)
 	return send_locked(r, message, sizeof(message));
 }
 
-static int handshake(vnc_relay *r, const char *password)
+static int handshake(vnc_relay *r, const char *password, vnc_relay_peer_check peer_check, void *context)
 {
 	uint8_t buffer[24];
 	uint8_t types[255];
@@ -223,6 +229,8 @@ static int handshake(vnc_relay *r, const char *password)
 	int major = (buffer[4] - '0') * 100 + (buffer[5] - '0') * 10 + (buffer[6] - '0');
 	int minor = (buffer[8] - '0') * 100 + (buffer[9] - '0') * 10 + (buffer[10] - '0');
 	if (major != 3 || minor < 8) { return VNC_RELAY_E_UNSUPPORTED; }
+	// The server has accepted the connection, so its process now holds the peer socket.
+	if (peer_check != NULL && peer_check(r->fd, context) != 0) { return VNC_RELAY_E_PEER; }
 	if ((e = send_all(r, "RFB 003.008\n", 12)) != VNC_RELAY_OK) { return e; }
 
 	if ((e = recv_exact(r, &count, 1)) != VNC_RELAY_OK) { return e; }
@@ -232,11 +240,10 @@ static int handshake(vnc_relay *r, const char *password)
 		return e == VNC_RELAY_OK ? VNC_RELAY_E_UNSUPPORTED : e;
 	}
 	if ((e = recv_exact(r, types, count)) != VNC_RELAY_OK) { return e; }
-	for (i = 0; i < count; ++i)
-	{
-		if (types[i] == RFB_SEC_VNC && password != NULL && password[0] != 0) { chosen = RFB_SEC_VNC; }
-		else if (types[i] == RFB_SEC_NONE && chosen == 0) { chosen = RFB_SEC_NONE; }
-	}
+	// Screen Sharing never offers None. With a credential, accept only VNC authentication, so a
+	// server offering no authentication cannot be mistaken for it.
+	int wanted = (password != NULL && password[0] != 0) ? RFB_SEC_VNC : RFB_SEC_NONE;
+	for (i = 0; i < count; ++i) { if (types[i] == wanted) { chosen = wanted; } }
 	if (chosen == 0) { return VNC_RELAY_E_UNSUPPORTED; }
 	buffer[0] = (uint8_t)chosen;
 	if ((e = send_all(r, buffer, 1)) != VNC_RELAY_OK) { return e; }
@@ -254,8 +261,8 @@ static int handshake(vnc_relay *r, const char *password)
 	if ((e = recv_exact(r, buffer, 4)) != VNC_RELAY_OK) { return e; }
 	if (rd32(buffer) != 0)
 	{
-		e = read_reason(r);
-		return e == VNC_RELAY_OK || e == VNC_RELAY_E_CLOSED ? VNC_RELAY_E_AUTH : e;
+		read_reason(r);			// The credential was refused whatever the reason says or how it ends
+		return VNC_RELAY_E_AUTH;
 	}
 
 	buffer[0] = 1;	// Shared: do not disconnect other Screen Sharing viewers
@@ -284,17 +291,18 @@ static int handshake(vnc_relay *r, const char *password)
 	return request_update(r, 0, r->width, r->height);
 }
 
-vnc_relay* vnc_relay_open(uint16_t port, const char *password, int io_timeout_ms, int *error)
+vnc_relay* vnc_relay_open(uint16_t port, const char *password, int io_timeout_ms, vnc_relay_peer_check peer_check, void *context, int *error)
 {
 	int e = VNC_RELAY_OK;
 	vnc_relay *r = NULL;
 	if (io_timeout_ms <= 0) { e = VNC_RELAY_E_ARG; goto done; }
 	if ((r = (vnc_relay*)calloc(1, sizeof(*r))) == NULL) { e = VNC_RELAY_E_NOMEM; goto done; }
 	r->io_timeout_ms = io_timeout_ms;
-	pthread_mutex_init(&r->write_lock, NULL);
-	pthread_mutex_init(&r->fb_lock, NULL);
+	r->fd = -1;
+	if (pthread_mutex_init(&r->write_lock, NULL) != 0) { free(r); r = NULL; e = VNC_RELAY_E_NOMEM; goto done; }
+	if (pthread_mutex_init(&r->fb_lock, NULL) != 0) { pthread_mutex_destroy(&r->write_lock); free(r); r = NULL; e = VNC_RELAY_E_NOMEM; goto done; }
 	if ((r->fd = connect_loopback(port, io_timeout_ms)) < 0) { e = VNC_RELAY_E_CONNECT; goto done; }
-	e = handshake(r, password);
+	e = handshake(r, password, peer_check, context);
 
 done:
 	if (error != NULL) { *error = e; }
@@ -331,6 +339,7 @@ const char* vnc_relay_strerror(int error)
 		case VNC_RELAY_E_TIMEOUT: return "Screen Sharing stopped responding";
 		case VNC_RELAY_E_NOMEM: return "out of memory";
 		case VNC_RELAY_E_ARG: return "invalid argument";
+		case VNC_RELAY_E_PEER: return "the Screen Sharing connection is not served by a root process";
 		default: return "unknown error";
 	}
 }
@@ -409,16 +418,23 @@ static int read_update(vnc_relay *r)
 		if (encoding == RFB_ENC_DESKTOPSIZE)
 		{
 			if ((e = apply_resize(r, w, h)) != VNC_RELAY_OK) { return e; }
-			flags |= VNC_RELAY_RESIZED | VNC_RELAY_UPDATED;
+			flags |= VNC_RELAY_RESIZED;	// The new framebuffer is blank until its pixels arrive
 			continue;
 		}
 		// Only the pump thread changes the dimensions, so reading them here without fb_lock is safe.
 		if (x + w > r->width || y + h > r->height) { return VNC_RELAY_E_PROTOCOL; }
+		if (w == 0 || h == 0)
+		{
+			// Nothing to draw; a CopyRect still carries its source position.
+			if (encoding == RFB_ENC_RAW) { continue; }
+			if (encoding == RFB_ENC_COPYRECT) { if ((e = discard(r, 4)) != VNC_RELAY_OK) { return e; } continue; }
+			return VNC_RELAY_E_PROTOCOL;
+		}
 		if (encoding == RFB_ENC_RAW) { e = apply_raw(r, x, y, w, h); }
 		else if (encoding == RFB_ENC_COPYRECT) { e = apply_copyrect(r, x, y, w, h); }
 		else { return VNC_RELAY_E_PROTOCOL; }
 		if (e != VNC_RELAY_OK) { return e; }
-		if (w > 0 && h > 0) { flags |= VNC_RELAY_UPDATED; }
+		flags |= VNC_RELAY_UPDATED;
 	}
 
 	// Keep exactly one update request outstanding; after a resize ask for the whole new framebuffer.
@@ -497,10 +513,43 @@ int vnc_relay_copy_rgb24(vnc_relay *r, uint8_t *dst, size_t dst_size, size_t dst
 
 int vnc_relay_key(vnc_relay *r, uint32_t keysym, int down)
 {
+	int i, e;
 	if (r == NULL || keysym == 0) { return VNC_RELAY_E_ARG; }
 	uint8_t message[8] = { 4, (uint8_t)(down ? 1 : 0) };
 	wr32(message + 4, keysym);
-	return send_locked(r, message, sizeof(message));
+	pthread_mutex_lock(&r->write_lock);
+	e = send_all(r, message, sizeof(message));
+	// Remember pressed keys so vnc_relay_release_all can lift them when the session ends.
+	for (i = 0; i < r->held_count && r->held[i] != keysym; ++i) { }
+	if (e == VNC_RELAY_OK && down && i == r->held_count && r->held_count < VNC_MAX_HELD_KEYS) { r->held[r->held_count++] = keysym; }
+	else if (!down && i < r->held_count) { r->held[i] = r->held[--r->held_count]; }
+	pthread_mutex_unlock(&r->write_lock);
+	return e;
+}
+
+int vnc_relay_release_all(vnc_relay *r)
+{
+	uint8_t message[8] = { 4, 0 };
+	int e = VNC_RELAY_OK;
+	if (r == NULL) { return VNC_RELAY_E_ARG; }
+	pthread_mutex_lock(&r->write_lock);
+	while (r->held_count > 0 && e == VNC_RELAY_OK)
+	{
+		wr32(message + 4, r->held[--r->held_count]);
+		e = send_all(r, message, sizeof(message));
+	}
+	if (e == VNC_RELAY_OK && r->buttons != 0)
+	{
+		uint8_t pointer[6];
+		r->buttons = 0;
+		pointer[0] = 5; pointer[1] = 0;
+		wr16(pointer + 2, (uint16_t)r->pointer_x);
+		wr16(pointer + 4, (uint16_t)r->pointer_y);
+		e = send_all(r, pointer, sizeof(pointer));
+	}
+	r->held_count = 0;
+	pthread_mutex_unlock(&r->write_lock);
+	return e;
 }
 
 static size_t put_pointer(uint8_t *p, uint8_t mask, int x, int y)
@@ -514,17 +563,18 @@ static size_t put_pointer(uint8_t *p, uint8_t mask, int x, int y)
 
 int vnc_relay_mouse(vnc_relay *r, int x, int y, int button, short wheel)
 {
-	uint8_t messages[6 * (4 + 2 * VNC_MAX_WHEEL_STEPS)];
+	uint8_t messages[6 * (1 + 2 * VNC_MAX_WHEEL_STEPS)];
 	size_t length = 0;
 	int w, h, e;
 	if (r == NULL) { return VNC_RELAY_E_ARG; }
+	if (button == 0x88) { return relay_failed(r); }	// Double-click marker; both clicks were already sent
 
 	pthread_mutex_lock(&r->fb_lock);
 	w = r->width;
 	h = r->height;
 	pthread_mutex_unlock(&r->fb_lock);
-	if (x < 0) { x = 0; } else if (x >= w) { x = w - 1; }
-	if (y < 0) { y = 0; } else if (y >= h) { y = h - 1; }
+	if (x < 0 || w <= 0) { x = 0; } else if (x >= w) { x = w - 1; }
+	if (y < 0 || h <= 0) { y = 0; } else if (y >= h) { y = h - 1; }
 
 	pthread_mutex_lock(&r->write_lock);
 	switch (button)
@@ -535,24 +585,25 @@ int vnc_relay_mouse(vnc_relay *r, int x, int y, int button, short wheel)
 		case 0x10: r->buttons &= (uint8_t)~0x04; break;			// Right up
 		case 0x20: r->buttons |= 0x02; break;					// Middle down
 		case 0x40: r->buttons &= (uint8_t)~0x02; break;			// Middle up
-		case 0x88:												// Double click
-			for (int i = 0; i < 2; ++i)
-			{
-				length += put_pointer(messages + length, r->buttons | 0x01, x, y);
-				length += put_pointer(messages + length, r->buttons & (uint8_t)~0x01, x, y);
-			}
-			break;
 		default: break;											// Move only
 	}
-	if (length == 0) { length += put_pointer(messages + length, r->buttons, x, y); }
+	r->pointer_x = x;
+	r->pointer_y = y;
+	length += put_pointer(messages + length, r->buttons, x, y);
 
 	if (wheel != 0)
 	{
-		// RFB buttons 4 and 5 are one wheel notch up and down.
-		uint8_t notch = wheel > 0 ? 0x08 : 0x10;
-		int steps = abs((int)wheel) / VNC_WHEEL_DELTA;
-		if (steps < 1) { steps = 1; } else if (steps > VNC_MAX_WHEEL_STEPS) { steps = VNC_MAX_WHEEL_STEPS; }
-		for (int i = 0; i < steps; ++i)
+		// RFB buttons 4 and 5 are one wheel step up and down.
+		int total = r->wheel_rest + (int)wheel;
+		int steps = total / VNC_WHEEL_DELTA;
+		r->wheel_rest = total % VNC_WHEEL_DELTA;
+		if (steps > VNC_MAX_WHEEL_STEPS || steps < -VNC_MAX_WHEEL_STEPS)
+		{
+			steps = steps > 0 ? VNC_MAX_WHEEL_STEPS : -VNC_MAX_WHEEL_STEPS;
+			r->wheel_rest = 0;
+		}
+		uint8_t notch = steps > 0 ? 0x08 : 0x10;
+		for (int i = 0; i < abs(steps); ++i)
 		{
 			length += put_pointer(messages + length, r->buttons | notch, x, y);
 			length += put_pointer(messages + length, r->buttons, x, y);

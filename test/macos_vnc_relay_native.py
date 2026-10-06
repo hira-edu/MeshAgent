@@ -44,7 +44,7 @@ int main(void) {
         int a = 0, b = 0, c = 0, d = 0, w = 0, h = 0, e;
         unsigned int u = 0;
         if (sscanf(line, "open %d %127s %d", &a, arg, &b) == 3) {
-            relay = vnc_relay_open((uint16_t)a, strcmp(arg, "-") ? arg : NULL, b, &e);
+            relay = vnc_relay_open((uint16_t)a, strcmp(arg, "-") ? arg : NULL, b, NULL, NULL, &e);
             if (relay) vnc_relay_size(relay, &w, &h);
             say("open %d %d %d", e, w, h);
         } else if (sscanf(line, "pumpbg %d", &a) == 1) {
@@ -266,7 +266,7 @@ def test_raw_copyrect_resize(h):
     s.conn.sendall(bytes([0, 0]) + struct.pack('>H', 1) + rect(0, 0, 6, 5, -223))
     s.width, s.height = 6, 5
     s.fb = [[(0, 0, 0)] * 6 for _ in range(5)]
-    s.pump(3, incremental=0)
+    s.pump(2, incremental=0)                                     # Resized; the blank frame is not an update
     assert h.run('size') == ['0', '6', '5']
     s.check_fb()
     s.raw(0, 0, pattern(6, 5, 2))
@@ -280,6 +280,8 @@ def test_handshakes(h):
     s.close()
     s = Session(h, types=(1, 2), password='longer-than-eight', chosen=2)
     s.close()
+    s = Session(h, types=(1,), password='pw', chosen=None, expect_open=E_UNSUPPORTED)   # None is refused with a credential
+    s.conn.close()
     s = Session(h, types=(2,), chosen=None, expect_open=E_UNSUPPORTED)
     s.conn.close()
     s = Session(h, types=(30, 35), password='pw', chosen=None, expect_open=E_UNSUPPORTED)
@@ -358,9 +360,10 @@ def test_input(h):
         ((5, 6, 0x20, 0), [pointer(6, 5, 6)]),
         ((5, 6, 0x10, 0), [pointer(2, 5, 6)]),
         ((5, 6, 0x40, 0), [pointer(0, 5, 6)]),
-        ((7, 8, 0x88, 0), [pointer(1, 7, 8), pointer(0, 7, 8), pointer(1, 7, 8), pointer(0, 7, 8)]),
+        ((7, 8, 0x88, 0), []),                                # double-click marker: both clicks were already sent
         ((7, 8, 0, 240), [pointer(0, 7, 8)] + [pointer(8, 7, 8), pointer(0, 7, 8)] * 2),
-        ((7, 8, 0, -1), [pointer(0, 7, 8), pointer(16, 7, 8), pointer(0, 7, 8)]),
+        ((7, 8, 0, -1), [pointer(0, 7, 8)]),                  # below one step: carried over
+        ((7, 8, 0, -119), [pointer(0, 7, 8), pointer(16, 7, 8), pointer(0, 7, 8)]),  # carried -1 completes a step
         ((7, 8, 0, -32768), [pointer(0, 7, 8)] + [pointer(16, 7, 8), pointer(0, 7, 8)] * 10),
         ((5000, -5, 0, 0), [pointer(0, 1919, 0)]),
         ((-1, 9999, 0x99, 0), [pointer(0, 0, 1079)]),         # unknown button value only moves

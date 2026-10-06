@@ -22,6 +22,7 @@
 #define VNC_RELAY_E_TIMEOUT		-6	// Server stalled inside a message or handshake
 #define VNC_RELAY_E_NOMEM		-7
 #define VNC_RELAY_E_ARG			-8
+#define VNC_RELAY_E_PEER		-9	// The peer check refused the server process
 
 // vnc_relay_pump() result flags
 #define VNC_RELAY_UPDATED		1	// Framebuffer contents changed
@@ -29,8 +30,15 @@
 
 typedef struct vnc_relay vnc_relay;
 
-// Connects to 127.0.0.1:port. The password is used for VNC authentication only and is not retained.
-vnc_relay* vnc_relay_open(uint16_t port, const char *password, int io_timeout_ms, int *error);
+// Called with the connected socket once the server's greeting arrives, before the client sends
+// anything. Returns nonzero to refuse the connection.
+typedef int (*vnc_relay_peer_check)(int fd, void *context);
+
+// Connects to 127.0.0.1:port. With a password only VNC authentication is accepted; without one
+// only None is. The password is not retained. peer_check may be NULL.
+vnc_relay* vnc_relay_open(uint16_t port, const char *password, int io_timeout_ms, vnc_relay_peer_check peer_check, void *context, int *error);
+// Releases every key and button this relay holds down. Call before shutdown so none stay held.
+int vnc_relay_release_all(vnc_relay *relay);
 void vnc_relay_shutdown(vnc_relay *relay);
 void vnc_relay_close(vnc_relay *relay);
 const char* vnc_relay_strerror(int error);
@@ -42,7 +50,9 @@ int vnc_relay_size(vnc_relay *relay, int *width, int *height);
 int vnc_relay_copy_rgb24(vnc_relay *relay, uint8_t *dst, size_t dst_size, size_t dst_stride, int *width, int *height);
 
 int vnc_relay_key(vnc_relay *relay, uint32_t keysym, int down);
-// x/y are framebuffer pixels; button uses the MeshCentral MOUSEEVENTF_* values (0x88 is double click).
+// x/y are framebuffer pixels; button uses the MeshCentral MOUSEEVENTF_* values. The viewer
+// sends both clicks of a double click, so its 0x88 marker is ignored. Wheel deltas of 120 per
+// step accumulate across calls, so small trackpad deltas are not rounded up to whole steps.
 int vnc_relay_mouse(vnc_relay *relay, int x, int y, int button, short wheel);
 
 uint32_t vnc_relay_vk_to_keysym(unsigned char vk);
