@@ -91,6 +91,7 @@ static uint8_t *g_desktop = NULL;
 static size_t g_desktopSize = 0;
 extern void* tilebuffer;
 ILibProcessPipe_Process gChildProcess;
+static void **gChildUser = NULL;	// gChildProcess's { writeHandler, reserved }; zeroed when detached
 ILibQueue g_messageQ;
 
 void kvm_send_resolution()
@@ -266,7 +267,7 @@ static vnc_relay* MacKvm_OpenRelay(char *reason, size_t capacity)
 	switch (MacKvm_RelayListener(VNC_RELAY_DEFAULT_PORT))
 	{
 		case MAC_KVM_LISTENER_ROOT:
-			relay = vnc_relay_open(VNC_RELAY_DEFAULT_PORT, password, MAC_KVM_RELAY_TIMEOUT_MS, &error);
+			relay = vnc_relay_open(VNC_RELAY_DEFAULT_PORT, password, MAC_KVM_RELAY_TIMEOUT_MS, NULL, NULL, &error);
 			if (relay == NULL) { snprintf(reason, capacity, "Remote desktop is unavailable: %s.", vnc_relay_strerror(error)); }
 			break;
 		case MAC_KVM_LISTENER_NONE:
@@ -298,25 +299,29 @@ int kvm_relay_check(void)
 }
 
 // Adopts the relay's framebuffer size; the viewer's coordinates are framebuffer pixels.
+// Nothing changes unless the new screen buffer is allocated, so cleanup always frees the
+// tile rows that exist.
 static int kvm_init(void)
 {
 	int old_height_count = TILE_HEIGHT_COUNT, width, height;
 	if (vnc_relay_size(g_relay, &width, &height) != VNC_RELAY_OK) { return -1; }
 
-	SCREEN_WIDTH = width;
-	SCREEN_HEIGHT = height;
 	TILE_WIDTH = 32;
 	TILE_HEIGHT = 32;
-	COMPRESSION_RATIO = 50;
-	TILE_HEIGHT_COUNT = SCREEN_HEIGHT / TILE_HEIGHT;
-	TILE_WIDTH_COUNT = SCREEN_WIDTH / TILE_WIDTH;
-	if (SCREEN_WIDTH % TILE_WIDTH) { TILE_WIDTH_COUNT++; }
-	if (SCREEN_HEIGHT % TILE_HEIGHT) { TILE_HEIGHT_COUNT++; }
-
 	// Tiles read whole 32-pixel blocks, so the buffer is padded to tile multiples and kept zeroed there.
+	size_t paddedWidth = (size_t)((width + TILE_WIDTH - 1) / TILE_WIDTH) * TILE_WIDTH;
+	size_t paddedHeight = (size_t)((height + TILE_HEIGHT - 1) / TILE_HEIGHT) * TILE_HEIGHT;
+	uint8_t *desktop = (uint8_t*)calloc(1, paddedWidth * paddedHeight * 3);
+	if (desktop == NULL) { return -1; }
+
 	free(g_desktop);
-	g_desktopSize = (size_t)adjust_screen_size(SCREEN_WIDTH) * (size_t)adjust_screen_size(SCREEN_HEIGHT) * 3;
-	if ((g_desktop = (uint8_t*)calloc(1, g_desktopSize)) == NULL) { g_desktopSize = 0; return -1; }
+	g_desktop = desktop;
+	g_desktopSize = paddedWidth * paddedHeight * 3;
+	SCREEN_WIDTH = width;
+	SCREEN_HEIGHT = height;
+	COMPRESSION_RATIO = 50;
+	TILE_WIDTH_COUNT = (int)(paddedWidth / TILE_WIDTH);
+	TILE_HEIGHT_COUNT = (int)(paddedHeight / TILE_HEIGHT);
 
 	reset_tile_info(old_height_count);
 	kvm_send_resolution();
@@ -537,9 +542,10 @@ void* kvm_server_mainloop(void* param)
 		MacKvm_FlushMessages();
 		if (MacKvm_SendTiles() != 0) { break; }
 	}
-	failed = 0;
+	failed = g_shutdown ? 0 : 1;	// Ended by the agent, not by a relay, memory or pipe failure
 
 done:
+	if (g_relay != NULL) { vnc_relay_release_all(g_relay); }	// Leave no key or button held on the Mac
 	g_shutdown = 1;
 	if (g_relay != NULL) { vnc_relay_shutdown(g_relay); }
 	if (inputStarted) { pthread_join(input, NULL); }
@@ -572,6 +578,7 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 	void *reserved = ((void**)user)[1];
 	int active = gChildProcess == sender;
 	if (active) { gChildProcess = NULL; }
+	if (gChildUser == (void**)user) { gChildUser = NULL; }
 	// Pipe teardown can still deliver callbacks before deferred process destruction.
 	ILibProcessPipe_Process_UpdateUserObject(sender, NULL);
 	ILibMemory_Free(user);
@@ -579,7 +586,8 @@ void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* u
 }
 void kvm_relay_StdOutHandler(ILibProcessPipe_Process sender, char *buffer, size_t bufferLen, size_t* bytesConsumed, void* user)
 {
-    if (user == NULL) { *bytesConsumed = bufferLen; return; }
+    // Detached by kvm_cleanup: the session may already be gone, so drop late output.
+    if (user == NULL || ((void**)user)[0] == NULL) { *bytesConsumed = bufferLen; return; }
     size_t length = 0;
     int frame = MacKvm_FrameLength((const unsigned char*)buffer, bufferLen, &length);
     ILibKVM_WriteHandler writeHandler = (ILibKVM_WriteHandler)((void**)user)[0];
@@ -610,12 +618,13 @@ void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler 
 {
     if (exePath == NULL || exePath[0] != '/' || processPipeMgr == NULL || writeHandler == NULL) { return NULL; }
     char *args[] = { exePath, "-kvm0", NULL };
-    void **user = (void**)ILibMemory_Allocate(2 * sizeof(void*), 0, NULL, NULL);
+    void **user = (void**)ILibMemory_SmartAllocate(2 * sizeof(void*));	// Freed by ILibMemory_Free
     user[0] = writeHandler;
     user[1] = reserved;
 
     gChildProcess = ILibProcessPipe_Manager_SpawnProcessEx3(processPipeMgr, exePath, args, ILibProcessPipe_SpawnTypes_DEFAULT, NULL, 0);
     if (gChildProcess == NULL) { ILibMemory_Free(user); return NULL; }
+    gChildUser = user;
     char metadata[64];
     snprintf(metadata, sizeof(metadata), "Screen Sharing relay (pid: %d)", ILibProcessPipe_Process_GetPID(gChildProcess));
     ILibProcessPipe_Process_ResetMetadata(gChildProcess, metadata);
@@ -624,7 +633,7 @@ void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler 
 }
 
 // Force a KVM reset & refresh
-void kvm_relay_reset()
+void kvm_relay_reset(void)
 {
 	char buffer[4];
 	((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_REFRESH);	// Write the type
@@ -632,12 +641,18 @@ void kvm_relay_reset()
 	kvm_relay_feeddata(buffer, 4);
 }
 
-// Clean up the KVM session.
-void kvm_cleanup()
+// Ends the helper serving the session `reserved`; a call for any other session does nothing.
+// Callbacks are detached first, so output already in the pipe cannot reach a session being torn
+// down, and the output pipe is resumed in case viewer backpressure paused it, so its EOF is read
+// and the process is released.
+void kvm_cleanup(void *reserved)
 {
-	if (gChildProcess != NULL)
-	{
-		ILibProcessPipe_Process_SoftKill(gChildProcess);
-		gChildProcess = NULL;
-	}
+	ILibProcessPipe_Process process = gChildProcess;
+	if (process == NULL || gChildUser == NULL || gChildUser[1] != reserved) { return; }
+	gChildUser[0] = NULL;
+	gChildUser[1] = NULL;
+	gChildUser = NULL;
+	gChildProcess = NULL;
+	ILibProcessPipe_Process_SoftKill(process);
+	ILibProcessPipe_Pipe_Resume(ILibProcessPipe_Process_GetStdOut(process));
 }

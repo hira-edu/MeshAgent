@@ -64,7 +64,8 @@ int calc_opt_compr_send(int x, int y, int captureWidth, int captureHeight, void*
 	{
 		if (tilebuffer != NULL) free(tilebuffer);
 		tilebuffersize = captureWidth * captureHeight * 3;
-		if ((tilebuffer = malloc(tilebuffersize)) == NULL) return 0;
+		// A failed allocation must not leave a size that lets the next call write through NULL.
+		if ((tilebuffer = malloc(tilebuffersize)) == NULL) { tilebuffersize = 0; return 0; }
 	}
 	
 	//Get the final coalesced tile
@@ -187,8 +188,10 @@ int reset_tile_info(int old_height_count) {
 	}
 	
 	g_tileInfo = (struct tileInfo_t **) malloc(sizeof(struct tileInfo_t *) * TILE_HEIGHT_COUNT);
+	if (g_tileInfo == NULL) { ILIBCRITICALEXIT(254); }
 	for (row = 0; row < TILE_HEIGHT_COUNT; row++) {
 		g_tileInfo[row] = (struct tileInfo_t *) calloc (TILE_WIDTH_COUNT, sizeof(struct tileInfo_t));
+		if (g_tileInfo[row] == NULL) { ILIBCRITICALEXIT(254); }
 		for (col = 0; col < TILE_WIDTH_COUNT; col++) { g_tileInfo[row][col].crc = 0xff; }
 	}
 	

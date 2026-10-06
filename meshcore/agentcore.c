@@ -3251,13 +3251,21 @@ void ILibDuktape_MeshAgent_RemoteDesktop_EndSink(ILibDuktape_DuplexStream *strea
 #if defined(_LINKVM) && defined(_POSIX) && !defined(__APPLE__)
 		if (ptrs->kvmPipe != NULL) { ILibProcessPipe_FreePipe(ptrs->kvmPipe); }
 #endif
+#if defined(_LINKVM) && defined(__APPLE__)
+		// Stop this session's helper. Its exit no longer reaches this stream, so end the readable
+		// side here; the pipe is dropped first because ending unpipes viewers, which pauses it.
+		kvm_cleanup(ptrs);
+		ptrs->kvmPipe = NULL;
+		if (ptrs->stream != NULL) { ILibDuktape_DuplexStream_WriteEnd(ptrs->stream); }
+#endif
 	}
 #ifdef WIN32
 	ILibDuktape_MeshAgent_RemoteDesktop_ReleasePtrs(ptrs);
 	kvm_cleanup(ptrs);
-#else
+#elif !defined(__APPLE__)
 	kvm_cleanup();
 #endif
+	// A repeated end() arrives with ptrs already cleared and must not touch a newer session.
 	if (ptrs != NULL) { memset(ptrs, 0, sizeof(RemoteDesktop_Ptrs)); }
 }
 
@@ -3288,6 +3296,9 @@ duk_ret_t ILibDuktape_MeshAgent_RemoteDesktop_Finalizer(duk_context *ctx)
 
 	duk_get_prop_string(ctx, 0, REMOTE_DESKTOP_ptrs);
 	ptrs = (RemoteDesktop_Ptrs*)Duktape_GetBuffer(ctx, -1, NULL);
+#if defined(_LINKVM) && defined(__APPLE__)
+	ILibLifeTime_Remove(ILibGetBaseTimer(duk_ctx_chain(ctx)), ptrs);	// A pending spawn-failure report
+#endif
 
 	if (ptrs->ctx != NULL)
 	{
@@ -3359,6 +3370,25 @@ int ILibDuktape_MeshAgent_remoteDesktop_unshiftSink(ILibDuktape_DuplexStream *se
 {
 	return(0);
 }
+
+#if defined(_LINKVM) && defined(__APPLE__)
+// The relay helper could not start. Viewers are piped only after getRemoteDesktop returns, so the
+// reason and the end are sent on the next chain turn, where the viewer receives both.
+void ILibDuktape_MeshAgent_RemoteDesktop_SpawnFailed(void *object)
+{
+	static const char message[] = "Remote desktop could not start the Screen Sharing relay helper.";
+	unsigned char packet[4 + sizeof(message) - 1];
+	RemoteDesktop_Ptrs *ptrs = (RemoteDesktop_Ptrs*)object;
+	if (!ILibMemory_CanaryOK(ptrs) || ptrs->ctx == NULL || ptrs->stream == NULL) { return; }
+	packet[0] = 0;
+	packet[1] = MNG_KVM_MESSAGE;
+	packet[2] = (unsigned char)(sizeof(packet) >> 8);
+	packet[3] = (unsigned char)sizeof(packet);
+	memcpy(packet + 4, message, sizeof(message) - 1);
+	ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink((char*)packet, (int)sizeof(packet), ptrs);
+	ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(NULL, 0, ptrs);
+}
+#endif
 
 #if defined(_LINKVM)
 void ILibDuktape_MeshAgent_RemoteDesktop_SendError(RemoteDesktop_Ptrs* ptrs, char *msg)
@@ -3505,6 +3535,9 @@ static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(duk_context 
 #endif
 #ifdef WIN32
 	kvm_cleanup(ptrs);
+#elif defined(__APPLE__)
+	kvm_cleanup(ptrs);
+	ptrs->kvmPipe = NULL;
 #else
 	kvm_cleanup();
 #endif
@@ -3596,7 +3629,7 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 #elif defined(__APPLE__)
 	// One root relay helper serves the login window and whichever user owns the console.
 	ptrs->kvmPipe = kvm_relay_setup(agent->exePath, agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs);
-	if (ptrs->kvmPipe == NULL) { ILibDuktape_DuplexStream_WriteEnd(ptrs->stream); }
+	if (ptrs->kvmPipe == NULL) { ILibLifeTime_AddEx(ILibGetBaseTimer(duk_ctx_chain(ctx)), ptrs, 0, ILibDuktape_MeshAgent_RemoteDesktop_SpawnFailed, NULL); }
 #else
 	int console_uid = 0;
 	if (duk_peval_string(ctx, "require('user-sessions').consoleUid();") == 0) { console_uid = duk_get_int(ctx, -1); }

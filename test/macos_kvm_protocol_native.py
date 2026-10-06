@@ -70,6 +70,10 @@ int main(void) {
     reset(); size_t consumed = 0;
     kvm_relay_StdOutHandler((void*)1, (char*)stream, sizeof(stream), &consumed, NULL);
     assert(consumed == sizeof(stream) && !emittedLength && !killed);
+    // After kvm_cleanup detaches the session, output still in the pipe is dropped, not forwarded.
+    void *detached[2] = { NULL, NULL }; consumed = 0;
+    kvm_relay_StdOutHandler((void*)1, (char*)stream, sizeof(stream), &consumed, detached);
+    assert(consumed == sizeof(stream) && !emittedLength && !killed);
     // Exercise unaligned headers and every declared ordinary length.
     unsigned char sample[16] = {0}; size_t length;
     for (unsigned value = 0; value < 65536; ++value) {

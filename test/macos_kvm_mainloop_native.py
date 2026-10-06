@@ -132,7 +132,9 @@ int vnc_relay_copy_rgb24(vnc_relay *relay, uint8_t *dst, size_t size, size_t str
     for (int y = 0; y < relayHeight; ++y) { memset(dst + (size_t)y * stride, frame, (size_t)relayWidth * 3); }
     *width = relayWidth; *height = relayHeight; return 0;
 }
-void vnc_relay_shutdown(vnc_relay *relay) { assert(relay == &relayObject); ++shutdownCalls; }
+static int releaseCalls;
+int vnc_relay_release_all(vnc_relay *relay) { assert(relay == &relayObject && shutdownCalls == 0); ++releaseCalls; return 0; }
+void vnc_relay_shutdown(vnc_relay *relay) { assert(relay == &relayObject && releaseCalls == 1); ++shutdownCalls; }
 void vnc_relay_close(vnc_relay *relay) { assert(relay == NULL || relay == &relayObject); if (relay) { assert(inputJoined || !inputStarted); ++closeCalls; } }
 const char* vnc_relay_strerror(int error) { return error == VNC_RELAY_E_TIMEOUT ? "Screen Sharing stopped responding" : "Screen Sharing connection closed"; }
 static void* kvm_mainloopinput(void *param) {
@@ -162,7 +164,7 @@ static void parse(void) {
 }
 static void run(const Step *steps, int count, int width, int height, void *expected) {
     script = steps; scriptLength = count; scriptAt = 0; relayWidth = width; relayHeight = height; frame = 0;
-    outLength = 0; shutdownCalls = closeCalls = pumpCalls = inputStarted = inputJoined = 0; g_refresh = g_remotepause = 0;
+    outLength = 0; shutdownCalls = closeCalls = pumpCalls = inputStarted = inputJoined = releaseCalls = 0; g_refresh = g_remotepause = 0;
     assert(kvm_server_mainloop(NULL) == expected);
     assert(g_tileInfo == NULL && g_desktop == NULL && g_relay == NULL);
     parse();
@@ -175,7 +177,7 @@ static void expect_tiles(int *at, int tiles, int value) {
 int main(void) {
     openFails = 1; run(NULL, 0, 0, 0, (void*)1);
     assert(packetCount == 1 && !strcmp(message, "Remote desktop is unavailable: Screen Sharing is turned off on this Mac."));
-    assert(!inputStarted && shutdownCalls == 0);
+    assert(!inputStarted && shutdownCalls == 0 && releaseCalls == 0);
     openFails = 0;
 
     const Step session[] = {
@@ -189,7 +191,7 @@ int main(void) {
         {STEP_RESIZE, VNC_RELAY_RESIZED | VNC_RELAY_UPDATED, 64, 64},	// Frame 3 at a new size
         {STEP_PUMP, VNC_RELAY_E_TIMEOUT, 0, 0},		// Relay stalls
     };
-    run(session, sizeof(session) / sizeof(session[0]), 100, 40, (void*)0);
+    run(session, sizeof(session) / sizeof(session[0]), 100, 40, (void*)1);	// Ended by a relay failure
     int at = 0;
     expect_screen(&at, 100, 40);
     expect_screen(&at, 100, 40);
@@ -201,7 +203,7 @@ int main(void) {
     expect_tiles(&at, 4, 3);
     assert(packets[at].type == MNG_KVM_MESSAGE && ++at == packetCount);
     assert(!strcmp(message, "Remote desktop ended: Screen Sharing stopped responding."));
-    assert(inputStarted && inputJoined && shutdownCalls == 1 && closeCalls == 1);
+    assert(inputStarted && inputJoined && releaseCalls == 1 && shutdownCalls == 1 && closeCalls == 1);	// Held keys released first
 
     const Step stop[] = { {STEP_PUMP, VNC_RELAY_UPDATED, 0, 0}, {STEP_STOP, 0, 0, 0} };
     run(stop, 2, 32, 32, (void*)0);
@@ -213,7 +215,7 @@ int main(void) {
     assert(packetCount == 1 && packets[0].type == MNG_KVM_SCREEN);	// Shutdown-induced relay error is not reported
 
     const Step broken[] = { {STEP_PUMP, VNC_RELAY_UPDATED, 0, 0}, {STEP_PUMP, VNC_RELAY_UPDATED, 0, 0} };
-    failWrites = 1; run(broken, 2, 64, 32, (void*)0); failWrites = 0;
+    failWrites = 1; run(broken, 2, 64, 32, (void*)1); failWrites = 0;
     assert(outLength == 0 && scriptAt == 1 && inputJoined);	// The agent pipe closed: stop at the first failed tile
     puts("PASS: relay session loop ordering, first-frame gating, refresh, pause, resize, relay failure, viewer disconnect and pipe failure");
 }
@@ -222,6 +224,6 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='mesh-kvm-mainloop-') as folder:
     target = Path(folder)
     (target / 'probe.c').write_text(prelude + constants + globals_and_messages + fakes + init + loop + main)
-    subprocess.run([os.environ.get('CC', 'clang'), '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
+    subprocess.run([os.environ.get('CC', 'clang'), '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-Wno-unused-variable',
                     '-fsanitize=address,undefined', '-I', str(root), str(target / 'probe.c'), '-o', str(target / 'probe')], check=True)
     subprocess.run([str(target / 'probe')], check=True, timeout=30)

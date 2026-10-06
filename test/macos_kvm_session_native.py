@@ -40,6 +40,7 @@ checker = between('int kvm_relay_check(', '\n// Adopts the relay')
 dispatch = between('int kvm_server_inputdata(', '\n\nint kvm_relay_feeddata(')
 exit_handler = between('void kvm_relay_ExitHandler(', '\nvoid kvm_relay_StdOutHandler(')
 launcher = between('void* kvm_relay_setup(', '\n// Force a KVM reset')
+cleanup = between('void kvm_cleanup(void *reserved)', '\n}\n') + '\n}\n'
 
 headers = r'''
 #define __STDC_WANT_LIB_EXT1__ 1
@@ -261,8 +262,8 @@ int MacKvm_ReadRelaySecret(const char *directory, char *password, size_t capacit
     return secretResult;
 }
 int MacKvm_RelayListener(uint16_t port) { assert(port == 5900); ++listenerCalls; return listenerResult; }
-vnc_relay* vnc_relay_open(uint16_t port, const char *password, int timeout, int *error) {
-    assert(port == 5900 && timeout == 5000 && listenerCalls == 1);
+vnc_relay* vnc_relay_open(uint16_t port, const char *password, int timeout, vnc_relay_peer_check check, void *context, int *error) {
+    assert(port == 5900 && timeout == 5000 && listenerCalls == 1 && check == NULL && context == NULL);
     ++openCalls; strlcpy(openedPassword, password, sizeof(openedPassword)); *error = openError;
     return openError == 0 ? &fakeRelay : NULL;
 }
@@ -284,8 +285,10 @@ typedef void* ILibProcessPipe_Process;
 typedef int (*ILibKVM_WriteHandler)(char*, int, void*);
 #define ILibProcessPipe_SpawnTypes_DEFAULT 0
 static void *gChildProcess, *lastUser;
+static void **gChildUser;
+static int killCount, resumeCount;
 static int spawnCount, spawnFail, freed, ended;
-static void *ILibMemory_Allocate(size_t size, int extra, void *a, void *b) { (void)extra; (void)a; (void)b; return calloc(1, size); }
+static void *ILibMemory_SmartAllocate(size_t size) { return calloc(1, size); }
 static void ILibMemory_Free(void *p) { ++freed; free(p); }
 static void kvm_relay_StdOutHandler(void) {}
 static void kvm_relay_StdErrHandler(void) {}
@@ -301,8 +304,10 @@ static void ILibProcessPipe_Process_AddHandlers(void *p, int size, void *exit, v
     (void)exit; (void)out; (void)err; assert(p == (void*)1 && size == 65535 && ok == NULL); lastUser = user;
 }
 static void *ILibProcessPipe_Process_GetStdOut(void *p) { assert(p == (void*)1); return (void*)2; }
+static void ILibProcessPipe_Process_SoftKill(void *p) { assert(p == (void*)1); ++killCount; }
+static void ILibProcessPipe_Pipe_Resume(void *p) { assert(p == (void*)2 && killCount > 0); ++resumeCount; }
 static int endSession(char *buffer, int length, void *reserved) { assert(buffer == NULL && length == 0 && reserved == (void*)3); ++ended; return 0; }
-''' + exit_handler + launcher + r'''
+''' + exit_handler + launcher + cleanup + r'''
 static char reason[256];
 static vnc_relay *open_with(uid_t euid, int dirFails, int secret, int listenerState, int error) {
     effectiveId = euid; directoryFails = dirFails; secretResult = secret; listenerResult = listenerState; openError = error;
@@ -367,6 +372,15 @@ int main(void) {
     kvm_relay_ExitHandler((void*)1, 1, NULL); assert(ended == 1 && freed == 2);
     assert(kvm_relay_setup("/fixture/quoted ' agent", (void*)9, endSession, (void*)3) == (void*)2);
     gChildProcess = NULL; kvm_relay_ExitHandler((void*)1, 1, lastUser); assert(ended == 1 && lastUser == NULL);	// Owner already closed
+    // Cleanup acts only for the session it serves, and detaches it before killing the helper.
+    assert(kvm_relay_setup("/fixture/quoted ' agent", (void*)9, endSession, (void*)3) == (void*)2);
+    void **attached = (void**)lastUser;
+    kvm_cleanup((void*)4); assert(killCount == 0 && gChildProcess == (void*)1);	// A stale or other session
+    kvm_cleanup((void*)3); assert(killCount == 1 && resumeCount == 1 && gChildProcess == NULL && gChildUser == NULL);
+    assert(attached[0] == NULL && attached[1] == NULL);
+    kvm_cleanup((void*)3); assert(killCount == 1);	// A repeated end() does nothing
+    kvm_relay_ExitHandler((void*)1, 0, attached); assert(ended == 1);	// Detached: the ended session is not called back
+    kvm_cleanup(NULL); assert(killCount == 1);
     puts("PASS: relay setup order, failure reasons and readiness check, key/unicode/mouse/control dispatch, framing errors, root helper launch and exit cleanup");
 }
 '''
