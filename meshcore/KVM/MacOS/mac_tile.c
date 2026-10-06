@@ -12,11 +12,8 @@
 #include "../../meshdefines.h"
 #include "../../../microstack/ILibParsers.h"
 
-extern CGDirectDisplayID SCREEN_NUM;
 extern int SCREEN_WIDTH;
 extern int SCREEN_HEIGHT;
-extern int SCREEN_SCALE;
-extern int SCREEN_DEPTH;
 extern int TILE_WIDTH;
 extern int TILE_HEIGHT;
 extern int TILE_WIDTH_COUNT;
@@ -399,137 +396,6 @@ int getTileAt(int x, int y, void** buffer, long long *bufferSize, void *desktop,
 	}
 	
 	return retval;
-}
-
-
-// Get screen buffer from the CGImageRef structure
-int getScreenBuffer(unsigned char **desktop, long long *desktopsize, CGImageRef image)
-{	
-	unsigned int row, col, bpp, len, width_padding_size, height_padding_size, i;
-	unsigned char *output;
-	int height = CGImageGetHeight(image);
-	int width = CGImageGetWidth(image);
-
-	CGImageAlphaInfo alphaInfo = CGImageGetAlphaInfo(image);
-	
-	CFDataRef dataRef = CGDataProviderCopyData(CGImageGetDataProvider(image));
-	const unsigned char *sourceBytesPtr = CFDataGetBytePtr(dataRef);
-	len = CFDataGetLength(dataRef);
-	
-	if (*desktopsize != len) {
-		if (*desktop != NULL) { free(*desktop); }
-		*desktopsize = len;
-		*desktop = (unsigned char *) malloc (*desktopsize);
-	}
-	
-	output = *desktop;
-	bpp = CGImageGetBitsPerPixel(image);
-	width_padding_size = (adjust_screen_size(SCREEN_WIDTH) - width) * 3;
-	
-	switch(bpp) {
-		case 16:
-		{
-			const unsigned short *tmpPtr = (const unsigned short *)sourceBytesPtr;
-			if(alphaInfo == kCGImageAlphaNoneSkipFirst ||
-					alphaInfo == kCGImageAlphaPremultipliedFirst ||
-					alphaInfo == kCGImageAlphaFirst) {
-				for (row = 0; row < height; row++) {
-					for (col = 0; col < width; col++) {
-						*output++ = (*tmpPtr & 0x7C00) >> 7;
-						*output++ = (*tmpPtr & 0x3E0) >> 2;
-						*output++ = (*tmpPtr & 0x1F) << 3;
-						tmpPtr++;
-					}
-
-					if (width_padding_size != 0) {
-						for (i = 0; i < width_padding_size; i++) {
-							*output++ = 0;
-						}
-					}
-					tmpPtr += (CGImageGetBytesPerRow(image) - (bpp >> 3) * width) >> 2;
-				}
-			}
-			else if (alphaInfo == kCGImageAlphaNone ||
-					alphaInfo == kCGImageAlphaNoneSkipLast ||
-					alphaInfo == kCGImageAlphaPremultipliedLast ||
-					alphaInfo == kCGImageAlphaLast) {
-				for (row = 0; row < height; row++) {
-					for (col = 0; col < width; col++) {
-						*output++ = (*tmpPtr & 0xF800) >> 8;
-						*output++ = (*tmpPtr & 0x7C0) >> 3;
-						*output++ = (*tmpPtr & 0x3E) << 2;
-						tmpPtr++;
-					}
-					if (width_padding_size != 0) {
-						for (i = 0; i < width_padding_size; i++) {
-							*output++ = 0;
-						}
-					}
-					tmpPtr += (CGImageGetBytesPerRow(image) - (bpp >> 3) * width) >> 2;
-				}
-			}
-		}
-		break;
-		case 32:
-		{
-			const unsigned int *tmpPtr1 = (const unsigned int *)sourceBytesPtr;
-			if(alphaInfo == kCGImageAlphaNoneSkipFirst ||
-					alphaInfo == kCGImageAlphaPremultipliedFirst ||
-					alphaInfo == kCGImageAlphaFirst) {
-				for (row = 0; row < height; row++) {
-					for (col = 0; col < width; col++) {
-						*output++ = (*tmpPtr1 & 0x0ff0000) >> 16;
-						*output++ = (*tmpPtr1 & 0x0ff00) >> 8;
-						*output++ = (*tmpPtr1 & 0x0FF);
-						tmpPtr1++;
-					}
-					if (width_padding_size > 0) {
-						for (i = 0; i < width_padding_size; i++) {
-							*output++ = 0;
-						}
-					}
-					tmpPtr1 += (CGImageGetBytesPerRow(image) - (bpp >> 3) * width) >> 2;
-				}
-			}
-			else if (alphaInfo == kCGImageAlphaNone ||
-					alphaInfo == kCGImageAlphaNoneSkipLast ||
-					alphaInfo == kCGImageAlphaPremultipliedLast ||
-					alphaInfo == kCGImageAlphaLast) {
-				for (row = 0; row < height; row++) {
-					for (col = 0; col < width; col++) {
-						*output++ = (*tmpPtr1 & 0xFF000000) >> 24;
-						*output++ = (*tmpPtr1 & 0x0ff0000) >> 16;
-						*output++ = (*tmpPtr1 & 0x0ff00) >> 8;
-						tmpPtr1++;
-					}
-					if (width_padding_size != 0) {
-						for (i = 0; i < width_padding_size; i++) {
-							*output++ = 0;
-						}
-					}
-					tmpPtr1 += (CGImageGetBytesPerRow(image) - (bpp >> 3) * width) >> 2;
-				}
-			}
-		}
-		break;
-		default:
-			fprintf(stderr, "This image depth is not supported.\n");
-			return -1;
-	}
-	
-	height_padding_size = adjust_screen_size(SCREEN_HEIGHT) - height;
-	
-	if (height_padding_size > 0) {
-		for (row = 0; row < height_padding_size; row++) {
-			for (col = 0; col < (width * 3) + width_padding_size; col++) {
-				*output++ = 0;
-			}
-		}
-	}
-	
-	CFRelease(dataRef);
-	
-	return 0;
 }
 
 

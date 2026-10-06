@@ -71,7 +71,6 @@ void BreakSink(int s)
 
 #if defined(_LINKVM) && defined(__APPLE__)
 extern void* kvm_server_mainloop(void *parm);
-extern int MacKvm_InitializeSessionUser(const char *uid);
 extern void senddebug(int val);
 ILibTransport_DoneState kvm_serviceWriteSink(char *buffer, int bufferLen, void *reserved)
 {
@@ -279,18 +278,14 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 #if defined(_LINKVM) && defined(__APPLE__)
 	if (argc > 1 && strcasecmp(argv[1], "-kvm0") == 0)
 	{
-		if ((argc != 2 && (argc != 4 || strcmp(argv[2], "--session-uid") != 0)) ||
-			MacKvm_InitializeSessionUser(argc == 4 ? argv[3] : NULL) != 0)
-		{
-			fprintf(stderr, "KVM session user initialization failed\n");
-			return 1;
-		}
-		kvm_server_mainloop(NULL);
-		return 0;
+		// Screen Sharing relay helper; the agent starts it with its own root credentials.
+		if (argc != 2) { fprintf(stderr, "Usage: -kvm0\n"); return 1; }
+		return kvm_server_mainloop(NULL) == NULL ? 0 : 1;
 	}
 	else if (argc > 1 && strcasecmp(argv[1], "-kvm1") == 0)
 	{
-		kvm_server_mainloop((void*)(uint64_t)getpid());
+		// Earlier releases installed a LoginWindow LaunchAgent with this switch. Exit cleanly so
+		// that job neither respawns nor starts an agent; reinstalling removes it.
 		return 0;
 	}
 #endif

@@ -14,47 +14,59 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+/*
+ * macOS remote desktop relays Apple Screen Sharing (screensharingd) on loopback.
+ *
+ * The agent starts one root-owned helper (-kvm0) per session. The helper reads
+ * the VNC credential that installation stored beside the executable, checks that
+ * only root holds the Screen Sharing port, and translates between the RFB
+ * session and the MeshCentral tile protocol on stdin/stdout. screensharingd owns
+ * capture, input, the login window and user switching, so there is no other
+ * capture or input path: any failure ends the session with a visible reason.
+ */
+
 #include "mac_kvm.h"
+#include "mac_vnc_relay.h"
 #include "../../meshdefines.h"
 #include "../../meshinfo.h"
 #include "../../../microstack/ILibParsers.h"
-#include "../../../microstack/ILibAsyncSocket.h"
-#include "../../../microstack/ILibAsyncServerSocket.h"
 #include "../../../microstack/ILibProcessPipe.h"
-#include <IOKit/IOKitLib.h>
-#include <IOKit/hidsystem/IOHIDLib.h>
-#include <IOKit/hidsystem/IOHIDParameter.h>
-#include <CoreFoundation/CoreFoundation.h>
-#include <CoreGraphics/CoreGraphics.h>
-#include <CoreServices/CoreServices.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-
-#include <string.h>
-#include <pwd.h>
-#include <grp.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <libproc.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdatomic.h>
+#include <string.h>
+#include <sys/proc_info.h>
+#include <sys/stat.h>
 
-int KVM_Listener_FD = -1;
-#define KVM_Listener_Path "/usr/local/mesh_services/meshagent/kvm"
-#if defined(_TLSLOG)
-#define TLSLOG1 printf
-#else
-#define TLSLOG1(...) ;
-#endif
+#define MAC_KVM_RELAY_SECRET		"vncrelay.secret"
+#define MAC_KVM_RELAY_SECRET_MAX	8		// VNC authentication uses at most eight password bytes
+#define MAC_KVM_RELAY_TIMEOUT_MS	5000
+#define MAC_KVM_FRAME_MS			100
+#define MAC_KVM_MAX_DRAIN			32		// Server messages applied before the next tile pass
 
+#define MAC_KVM_SECRET_OK			0
+#define MAC_KVM_SECRET_MISSING		-1
+#define MAC_KVM_SECRET_UNSAFE		-2
+#define MAC_KVM_SECRET_INVALID		-3
 
-int KVM_AGENT_FD = -1;
+#define MAC_KVM_LISTENER_ROOT		1
+#define MAC_KVM_LISTENER_NONE		0
+#define MAC_KVM_LISTENER_FOREIGN	-1
+#define MAC_KVM_LISTENER_ERROR		-2
+
 int KVM_SEND(char *buffer, int bufferLen)
 {
-    int fd = KVM_AGENT_FD == -1 ? STDOUT_FILENO : KVM_AGENT_FD;
     int sent = 0;
     if (bufferLen < 0) { errno = EINVAL; return -1; }
     while (sent < bufferLen)
     {
-        ssize_t count = write(fd, buffer + sent, (size_t)(bufferLen - sent));
+        ssize_t count = write(STDOUT_FILENO, buffer + sent, (size_t)(bufferLen - sent));
         if (count < 0 && errno == EINTR) { continue; }
         if (count <= 0) { if (count == 0) { errno = EIO; } return -1; }
         sent += (int)count;
@@ -63,294 +75,243 @@ int KVM_SEND(char *buffer, int bufferLen)
 }
 
 
-
-CGDirectDisplayID SCREEN_NUM = 0;
-int SH_HANDLE = 0;
 int SCREEN_WIDTH = 0;
 int SCREEN_HEIGHT = 0;
-int SCREEN_SCALE = 1;
-int SCREEN_SCALE_SET = 0;
-int SCREEN_DEPTH = 0;
 int TILE_WIDTH = 0;
 int TILE_HEIGHT = 0;
 int TILE_WIDTH_COUNT = 0;
 int TILE_HEIGHT_COUNT = 0;
 int COMPRESSION_RATIO = 0;
-int FRAME_RATE_TIMER = 0;
 struct tileInfo_t **g_tileInfo = NULL;
-int g_remotepause = 0;
-int g_pause = 0;
+static atomic_int g_remotepause = 0;
 static atomic_int g_shutdown = 0;
-static atomic_int g_resetipc = 0;
-int kvm_clientProcessId = 0;
-int g_restartcount = 0;
-int g_totalRestartCount = 0;
-int restartKvm = 0;
+static atomic_int g_refresh = 0;
+static vnc_relay *g_relay = NULL;
+static uint8_t *g_desktop = NULL;
+static size_t g_desktopSize = 0;
 extern void* tilebuffer;
-pid_t g_slavekvm = 0;
-pthread_t kvmthread = (pthread_t)NULL;
 ILibProcessPipe_Process gChildProcess;
 ILibQueue g_messageQ;
 
-//int logenabled = 1;
-//FILE *logfile = NULL;
-//#define MASTERLOGFILE "/dev/null"
-//#define SLAVELOGFILE "/dev/null"
-//#define LOGFILE "/dev/null"
-
-
-#define KvmDebugLog(...)
-//#define KvmDebugLog(...) printf(__VA_ARGS__); if (logfile != NULL) fprintf(logfile, __VA_ARGS__);
-//#define KvmDebugLog(x) if (logenabled) printf(x);
-//#define KvmDebugLog(x) if (logenabled) fprintf(logfile, "Writing from slave in kvm_send_resolution\n");
-
-void senddebug(int val)
-{
-	char *buffer = (char*)ILibMemory_SmartAllocate(8);
-
-	((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_DEBUG);	// Write the type
-	((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)8);			// Write the size
-	((int*)buffer)[1] = val;
-
-	ILibQueue_Lock(g_messageQ);
-	ILibQueue_EnQueue(g_messageQ, buffer);
-	ILibQueue_UnLock(g_messageQ);
-}
-
-
-
-void kvm_send_resolution() 
+void kvm_send_resolution()
 {
 	char *buffer = ILibMemory_SmartAllocate(8);
-	
+
 	((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_SCREEN);	// Write the type
 	((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)8);				// Write the size
 	((unsigned short*)buffer)[2] = (unsigned short)htons((unsigned short)SCREEN_WIDTH);		// X position
 	((unsigned short*)buffer)[3] = (unsigned short)htons((unsigned short)SCREEN_HEIGHT);	// Y position
 
-
-	// Write the reply to the pipe.
 	ILibQueue_Lock(g_messageQ);
 	ILibQueue_EnQueue(g_messageQ, buffer);
 	ILibQueue_UnLock(g_messageQ);
 }
 
-#define BUFSIZE 65535
-
-int set_kbd_state(int input_state)
+static void MacKvm_FlushMessages(void)
 {
-	int ret = 0;
-	kern_return_t kr;
-	io_service_t ios;
-	io_connect_t ioc;
-	CFMutableDictionaryRef mdict;
-
-	while (1)
+	char *buf;
+	ILibQueue_Lock(g_messageQ);
+	while (ILibQueue_IsEmpty(g_messageQ) == 0)
 	{
-		mdict = IOServiceMatching(kIOHIDSystemClass);
-		ios = IOServiceGetMatchingService(kIOMasterPortDefault, (CFDictionaryRef)mdict);
-		if (!ios)
+		if ((buf = (char*)ILibQueue_DeQueue(g_messageQ)) != NULL)
 		{
-			if (mdict)
-			{
-				CFRelease(mdict);
-			}
-			ILIBLOGMESSAGEX("IOServiceGetMatchingService() failed\n");
-			break;
+			KVM_SEND(buf, (int)ILibMemory_Size(buf));
+			ILibMemory_Free(buf);
 		}
-
-		kr = IOServiceOpen(ios, mach_task_self(), kIOHIDParamConnectType, &ioc);
-		IOObjectRelease(ios);
-		if (kr != KERN_SUCCESS)
-		{
-			ILIBLOGMESSAGEX("IOServiceOpen() failed: %x\n", kr);
-			break;
-		}
-
-		// Set CAPSLOCK
-		kr = IOHIDSetModifierLockState(ioc, kIOHIDCapsLockState, (input_state & 4) == 4);
-		if (kr != KERN_SUCCESS)
-		{
-			IOServiceClose(ioc);
-			ILIBLOGMESSAGEX("IOHIDGetModifierLockState() failed: %x\n", kr);
-			break;
-		}
-
-		// Set NUMLOCK
-		kr = IOHIDSetModifierLockState(ioc, kIOHIDNumLockState, (input_state & 1) == 1);
-		if (kr != KERN_SUCCESS)
-		{
-			IOServiceClose(ioc);
-			ILIBLOGMESSAGEX("IOHIDGetModifierLockState() failed: %x\n", kr);
-			break;
-		}
-
-		// CAPSLOCK_QUERY
-		bool state;
-		kr = IOHIDGetModifierLockState(ioc, kIOHIDCapsLockState, &state);
-		if (kr != KERN_SUCCESS)
-		{
-			IOServiceClose(ioc);
-			ILIBLOGMESSAGEX("IOHIDGetModifierLockState() failed: %x\n", kr);
-			break;
-		}
-		ret |= (state << 2);
-
-		// NUMLOCK_QUERY
-		kr = IOHIDGetModifierLockState(ioc, kIOHIDNumLockState, &state);
-		if (kr != KERN_SUCCESS)
-		{
-			IOServiceClose(ioc);
-			ILIBLOGMESSAGEX("IOHIDGetModifierLockState() failed: %x\n", kr);
-			break;
-		}
-		ret |= state;
-
-		IOServiceClose(ioc);
-		break;
 	}
-	return(ret);
-}
-int get_kbd_state()
-{
-	int ret = 0;
-	kern_return_t kr;
-	io_service_t ios;
-	io_connect_t ioc;
-	CFMutableDictionaryRef mdict;
-
-	while (1)
-	{
-		mdict = IOServiceMatching(kIOHIDSystemClass);
-		ios = IOServiceGetMatchingService(kIOMasterPortDefault, (CFDictionaryRef)mdict);
-		if (!ios)
-		{
-			if (mdict)
-			{
-				CFRelease(mdict);
-			}
-			ILIBLOGMESSAGEX("IOServiceGetMatchingService() failed\n");
-			break;
-		}
-
-		kr = IOServiceOpen(ios, mach_task_self(), kIOHIDParamConnectType, &ioc);
-		IOObjectRelease(ios);
-		if (kr != KERN_SUCCESS)
-		{
-			ILIBLOGMESSAGEX("IOServiceOpen() failed: %x\n", kr);
-			break;
-		}
-
-		// CAPSLOCK_QUERY
-		bool state;
-		kr = IOHIDGetModifierLockState(ioc, kIOHIDCapsLockState, &state);
-		if (kr != KERN_SUCCESS)
-		{
-			IOServiceClose(ioc);
-			ILIBLOGMESSAGEX("IOHIDGetModifierLockState() failed: %x\n", kr);
-			break;
-		}
-		ret |= (state << 2);
-
-		// NUMLOCK_QUERY
-		kr = IOHIDGetModifierLockState(ioc, kIOHIDNumLockState, &state);
-		if (kr != KERN_SUCCESS)
-		{
-			IOServiceClose(ioc);
-			ILIBLOGMESSAGEX("IOHIDGetModifierLockState() failed: %x\n", kr);
-			break;
-		}
-		ret |= state;
-
-		IOServiceClose(ioc);
-		break;
-	}
-	return(ret);
+	ILibQueue_UnLock(g_messageQ);
 }
 
-
-int kvm_init()
+// Shows the reason in the viewer's desktop message bar.
+static void MacKvm_SendMessage(const char *message)
 {
-	ILibCriticalLogFilename = "KVMSlave.log";
-	int old_height_count = TILE_HEIGHT_COUNT;
-	
-	SCREEN_NUM = CGMainDisplayID();
-	
-	if (SCREEN_WIDTH > 0)
+	unsigned char packet[512];
+	size_t length = strlen(message);
+	if (length > sizeof(packet) - 4) { length = sizeof(packet) - 4; }
+	packet[0] = 0;
+	packet[1] = MNG_KVM_MESSAGE;
+	packet[2] = (unsigned char)((length + 4) >> 8);
+	packet[3] = (unsigned char)(length + 4);
+	memcpy(packet + 4, message, length);
+	KVM_SEND((char*)packet, (int)length + 4);
+}
+
+static int MacKvm_ExecutableDirectory(char *path, size_t capacity)
+{
+	char image[PATH_MAX], resolved[PATH_MAX];
+	uint32_t size = sizeof(image);
+	char *slash;
+	if (_NSGetExecutablePath(image, &size) != 0 || realpath(image, resolved) == NULL) { return -1; }
+	if ((slash = strrchr(resolved, '/')) == NULL) { return -1; }
+	if (slash == resolved) { slash[1] = 0; } else { *slash = 0; }
+	return strlcpy(path, resolved, capacity) < capacity ? 0 : -1;
+}
+
+// Installation stores the Screen Sharing VNC password beside the executable. The
+// directory and file must be root-owned and closed to other accounts, and the file
+// must be a regular, singly linked file, so no other account can substitute it.
+int MacKvm_ReadRelaySecret(const char *directory, char *password, size_t capacity)
+{
+	char buffer[MAC_KVM_RELAY_SECRET_MAX + 3];
+	struct stat info;
+	ssize_t count;
+	size_t length, i;
+	int dir = -1, fd = -1, result = MAC_KVM_SECRET_INVALID;
+
+	if (password == NULL || capacity < MAC_KVM_RELAY_SECRET_MAX + 1) { return MAC_KVM_SECRET_INVALID; }
+	password[0] = 0;
+	if ((dir = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) { result = MAC_KVM_SECRET_UNSAFE; goto done; }
+	if (fstat(dir, &info) != 0 || info.st_uid != 0 || (info.st_mode & (S_IWGRP | S_IWOTH)) != 0) { result = MAC_KVM_SECRET_UNSAFE; goto done; }
+	if ((fd = openat(dir, MAC_KVM_RELAY_SECRET, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) < 0)
 	{
-		CGDisplayModeRef mode = CGDisplayCopyDisplayMode(SCREEN_NUM);
-		SCREEN_SCALE = (int) CGDisplayModeGetPixelWidth(mode) / SCREEN_WIDTH;
-		if (SCREEN_SCALE < 1) SCREEN_SCALE = 1; // Guard against a 0 scale (would zero the screen dims and divide-by-zero in mouse scaling).
-		CGDisplayModeRelease(mode);
+		result = errno == ENOENT ? MAC_KVM_SECRET_MISSING : MAC_KVM_SECRET_UNSAFE;
+		goto done;
+	}
+	if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_uid != 0 || (info.st_mode & (S_IRWXG | S_IRWXO)) != 0 || info.st_nlink != 1)
+	{
+		result = MAC_KVM_SECRET_UNSAFE;
+		goto done;
+	}
+	do { count = read(fd, buffer, sizeof(buffer)); } while (count < 0 && errno == EINTR);
+	if (count <= 0) { goto done; }
+	length = (size_t)count;
+	if (buffer[length - 1] == '\n') { --length; }
+	if (length == 0 || length > MAC_KVM_RELAY_SECRET_MAX) { goto done; }
+	for (i = 0; i < length; ++i) { if ((unsigned char)buffer[i] < 0x20 || (unsigned char)buffer[i] > 0x7E) { goto done; } }
+	memcpy(password, buffer, length);
+	password[length] = 0;
+	result = MAC_KVM_SECRET_OK;
+
+done:
+	memset_s(buffer, sizeof(buffer), 0, sizeof(buffer));
+	if (fd >= 0) { close(fd); }
+	if (dir >= 0) { close(dir); }
+	return result;
+}
+
+// screensharingd is socket-activated by launchd, so while Screen Sharing is on only
+// root processes hold the port. When it is off, any account could listen there and
+// collect the VNC authentication exchange, so every process holding a listener on the
+// port must run entirely as root. Socket info reports no owner, so the holding
+// process's credentials are checked. Other accounts' descriptors are only visible to root.
+int MacKvm_RelayListener(uint16_t port)
+{
+	pid_t *pids = NULL;
+	struct proc_fdinfo *fds = NULL;
+	int fdCapacity = 0, found = 0, foreign = 0;
+	int bytes = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+	if (bytes <= 0) { return MAC_KVM_LISTENER_ERROR; }
+	bytes += 64 * (int)sizeof(pid_t);
+	if ((pids = (pid_t*)malloc((size_t)bytes)) == NULL) { return MAC_KVM_LISTENER_ERROR; }
+	if ((bytes = proc_listpids(PROC_ALL_PIDS, 0, pids, bytes)) <= 0) { free(pids); return MAC_KVM_LISTENER_ERROR; }
+
+	for (int p = 0; p < bytes / (int)sizeof(pid_t); ++p)
+	{
+		if (pids[p] <= 0) { continue; }
+		int size = proc_pidinfo(pids[p], PROC_PIDLISTFDS, 0, NULL, 0);
+		if (size <= 0) { continue; }	// Exited, or holds no descriptors
+		size += 32 * (int)PROC_PIDLISTFD_SIZE;	// Room for descriptors opened before the second call
+		if (size > fdCapacity)
+		{
+			struct proc_fdinfo *grown = (struct proc_fdinfo*)realloc(fds, (size_t)size);
+			if (grown == NULL) { foreign = 1; break; }
+			fds = grown;
+			fdCapacity = size;
+		}
+		if ((size = proc_pidinfo(pids[p], PROC_PIDLISTFDS, 0, fds, fdCapacity)) <= 0) { continue; }
+		int listening = 0;
+		for (int i = 0; i < size / (int)PROC_PIDLISTFD_SIZE && !listening; ++i)
+		{
+			struct socket_fdinfo socket;
+			if (fds[i].proc_fdtype != PROX_FDTYPE_SOCKET) { continue; }
+			if (proc_pidfdinfo(pids[p], fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &socket, sizeof(socket)) != (int)sizeof(socket)) { continue; }
+			if (socket.psi.soi_kind != SOCKINFO_TCP || socket.psi.soi_proto.pri_tcp.tcpsi_state != TSI_S_LISTEN) { continue; }
+			listening = ntohs((uint16_t)socket.psi.soi_proto.pri_tcp.tcpsi_ini.insi_lport) == port;
+		}
+		if (!listening) { continue; }
+		struct proc_bsdinfo owner;
+		// A holder whose credentials cannot be read is treated as foreign.
+		if (proc_pidinfo(pids[p], PROC_PIDTBSDINFO, 0, &owner, sizeof(owner)) == (int)sizeof(owner) &&
+			owner.pbi_uid == 0 && owner.pbi_ruid == 0 && owner.pbi_svuid == 0) { found = 1; }
+		else { foreign = 1; }
+	}
+	free(fds);
+	free(pids);
+	return foreign ? MAC_KVM_LISTENER_FOREIGN : (found ? MAC_KVM_LISTENER_ROOT : MAC_KVM_LISTENER_NONE);
+}
+
+static vnc_relay* MacKvm_OpenRelay(char *reason, size_t capacity)
+{
+	char directory[PATH_MAX], password[MAC_KVM_RELAY_SECRET_MAX + 1];
+	vnc_relay *relay = NULL;
+	int error = VNC_RELAY_OK;
+
+	if (geteuid() != 0) { strlcpy(reason, "Remote desktop requires the agent to run as the root service.", capacity); return NULL; }
+	if (MacKvm_ExecutableDirectory(directory, sizeof(directory)) != 0) { strlcpy(reason, "Remote desktop could not locate the agent installation.", capacity); return NULL; }
+	switch (MacKvm_ReadRelaySecret(directory, password, sizeof(password)))
+	{
+		case MAC_KVM_SECRET_OK:
+			break;
+		case MAC_KVM_SECRET_MISSING:
+			strlcpy(reason, "Remote desktop is not set up on this Mac: the Screen Sharing credential is missing. Reinstall the agent to enable it.", capacity);
+			return NULL;
+		case MAC_KVM_SECRET_UNSAFE:
+			strlcpy(reason, "Remote desktop is disabled: the Screen Sharing credential has unsafe ownership or permissions.", capacity);
+			return NULL;
+		default:
+			strlcpy(reason, "Remote desktop is disabled: the Screen Sharing credential is invalid.", capacity);
+			return NULL;
 	}
 
-	SCREEN_HEIGHT = CGDisplayPixelsHigh(SCREEN_NUM) * SCREEN_SCALE;
-	SCREEN_WIDTH = CGDisplayPixelsWide(SCREEN_NUM) * SCREEN_SCALE;
-	// Some magic numbers.
+	switch (MacKvm_RelayListener(VNC_RELAY_DEFAULT_PORT))
+	{
+		case MAC_KVM_LISTENER_ROOT:
+			relay = vnc_relay_open(VNC_RELAY_DEFAULT_PORT, password, MAC_KVM_RELAY_TIMEOUT_MS, &error);
+			if (relay == NULL) { snprintf(reason, capacity, "Remote desktop is unavailable: %s.", vnc_relay_strerror(error)); }
+			break;
+		case MAC_KVM_LISTENER_NONE:
+			strlcpy(reason, "Remote desktop is unavailable: Screen Sharing is turned off on this Mac.", capacity);
+			break;
+		case MAC_KVM_LISTENER_FOREIGN:
+			strlcpy(reason, "Remote desktop is disabled: a process not owned by root is listening on the Screen Sharing port.", capacity);
+			break;
+		default:
+			strlcpy(reason, "Remote desktop is unavailable: the Screen Sharing listener could not be verified.", capacity);
+			break;
+	}
+	memset_s(password, sizeof(password), 0, sizeof(password));
+	return relay;
+}
+
+// Adopts the relay's framebuffer size; the viewer's coordinates are framebuffer pixels.
+static int kvm_init(void)
+{
+	int old_height_count = TILE_HEIGHT_COUNT, width, height;
+	if (vnc_relay_size(g_relay, &width, &height) != VNC_RELAY_OK) { return -1; }
+
+	SCREEN_WIDTH = width;
+	SCREEN_HEIGHT = height;
 	TILE_WIDTH = 32;
 	TILE_HEIGHT = 32;
 	COMPRESSION_RATIO = 50;
-	FRAME_RATE_TIMER = 100;
-	
 	TILE_HEIGHT_COUNT = SCREEN_HEIGHT / TILE_HEIGHT;
 	TILE_WIDTH_COUNT = SCREEN_WIDTH / TILE_WIDTH;
 	if (SCREEN_WIDTH % TILE_WIDTH) { TILE_WIDTH_COUNT++; }
 	if (SCREEN_HEIGHT % TILE_HEIGHT) { TILE_HEIGHT_COUNT++; }
-	
-	kvm_send_resolution();
+
+	// Tiles read whole 32-pixel blocks, so the buffer is padded to tile multiples and kept zeroed there.
+	free(g_desktop);
+	g_desktopSize = (size_t)adjust_screen_size(SCREEN_WIDTH) * (size_t)adjust_screen_size(SCREEN_HEIGHT) * 3;
+	if ((g_desktop = (uint8_t*)calloc(1, g_desktopSize)) == NULL) { g_desktopSize = 0; return -1; }
+
 	reset_tile_info(old_height_count);
-	
-	unsigned char *buffer = ILibMemory_SmartAllocate(5);
-	((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_KEYSTATE);		// Write the type
-	((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)5);					// Write the size
-	buffer[4] = (unsigned char)get_kbd_state();
-
-	// Write the reply to the pipe.
-	ILibQueue_Lock(g_messageQ);
-	ILibQueue_EnQueue(g_messageQ, buffer);
-	ILibQueue_UnLock(g_messageQ);
+	kvm_send_resolution();
 	return 0;
-}
-
-// void CheckDesktopSwitch(int checkres) { return; }
-
-// Query existing authorization only. Service/helper startup must never prompt.
-static int MacKvm_CanCaptureScreen(void)
-{
-    if (__builtin_available(macOS 10.15, *)) { return CGPreflightScreenCaptureAccess(); }
-    return 1;
-}
-
-static int MacKvm_CanPostInput(void)
-{
-    if (__builtin_available(macOS 10.9, *)) { return AXIsProcessTrustedWithOptions(NULL); }
-    return 1;
-}
-
-// Use the existing desktop message packet so denied access is visible remotely.
-static void MacKvm_SendPermissionStatus(int canCapture, int canInput)
-{
-    const char *message = !canCapture
-        ? "macOS Screen Recording permission is required. Enable MeshAgent in System Settings > Privacy & Security."
-        : (!canInput
-            ? "macOS Accessibility permission is required for keyboard and mouse control. Enable MeshAgent in System Settings > Privacy & Security."
-            : "");
-    unsigned char packet[256];
-    size_t length = strlen(message) + 4;
-    packet[0] = 0;
-    packet[1] = MNG_KVM_MESSAGE;
-    packet[2] = (unsigned char)(length >> 8);
-    packet[3] = (unsigned char)length;
-    memcpy(packet + 4, message, length - 4);
-    KVM_SEND((char*)packet, (int)length);
 }
 
 int kvm_server_inputdata(char* block, int blocklen)
 {
 	unsigned short type, size;
-	//CheckDesktopSwitch(0);
-	
-	//senddebug(100+blocklen);
 
 	// Decode the block header
 	if (blocklen < 4) return 0;
@@ -363,30 +324,33 @@ int kvm_server_inputdata(char* block, int blocklen)
 	switch (type)
 	{
 		case MNG_KVM_KEY_UNICODE: // Unicode Key
-			if (size != 7 || !MacKvm_CanPostInput()) break;
-			KeyActionUnicode(((((unsigned char)block[5]) << 8) + ((unsigned char)block[6])), block[4]);
+		{
+			if (size != 7) break;
+			// Actions 0 and 4 are key down. The character is typed as a press and release on
+			// key down, so a lost key-up message cannot leave it held.
+			if (block[4] != 0 && block[4] != 4) break;
+			uint32_t keysym = vnc_relay_unicode_to_keysym((uint16_t)((((unsigned char)block[5]) << 8) | (unsigned char)block[6]));
+			if (keysym == 0) break;
+			if (vnc_relay_key(g_relay, keysym, 1) == VNC_RELAY_OK) { vnc_relay_key(g_relay, keysym, 0); }
 			break;
+		}
 		case MNG_KVM_KEY: // Key
 		{
-			if (size != 6 || KVM_AGENT_FD != -1 || !MacKvm_CanPostInput()) { break; }
-			KeyAction(block[5], block[4]);
+			if (size != 6) break;
+			uint32_t keysym = vnc_relay_vk_to_keysym((unsigned char)block[5]);
+			if (keysym != 0) { vnc_relay_key(g_relay, keysym, block[4] == 0 || block[4] == 4); }
 			break;
 		}
 		case MNG_KVM_MOUSE: // Mouse
 		{
 			int x, y;
 			short w = 0;
-			if (KVM_AGENT_FD != -1 || !MacKvm_CanPostInput()) { break; }
 			if (size == 10 || size == 12)
 			{
-				if (SCREEN_SCALE < 1) { break; }
-				x = (((int)(unsigned char)block[6] << 8) | (unsigned char)block[7]) / SCREEN_SCALE;
-				y = (((int)(unsigned char)block[8] << 8) | (unsigned char)block[9]) / SCREEN_SCALE;
-				
+				x = ((int)(unsigned char)block[6] << 8) | (unsigned char)block[7];
+				y = ((int)(unsigned char)block[8] << 8) | (unsigned char)block[9];
 				if (size == 12) w = (short)(((unsigned int)(unsigned char)block[10] << 8) | (unsigned char)block[11]);
-				
-				//printf("x:%d, y:%d, b:%d, w:%d\n", x, y, block[5], w);
-				MouseAction(x, y, (int)(unsigned char)(block[5]), w);
+				vnc_relay_mouse(g_relay, x, y, (int)(unsigned char)(block[5]), w);
 			}
 			break;
 		}
@@ -399,34 +363,14 @@ int kvm_server_inputdata(char* block, int blocklen)
 		}
 		case MNG_KVM_REFRESH: // Refresh
 		{
-			kvm_send_resolution();
-
-			int row, col;
-			if (size != 4) break;
-			if (g_tileInfo == NULL) {
-				if ((g_tileInfo = (struct tileInfo_t **) malloc(TILE_HEIGHT_COUNT * sizeof(struct tileInfo_t *))) == NULL) ILIBCRITICALEXIT(254);
-				for (row = 0; row < TILE_HEIGHT_COUNT; row++) {
-					if ((g_tileInfo[row] = (struct tileInfo_t *) malloc(TILE_WIDTH_COUNT * sizeof(struct tileInfo_t))) == NULL) ILIBCRITICALEXIT(254);
-				}
-			}
-			for (row = 0; row < TILE_HEIGHT_COUNT; row++) {
-				for (col = 0; col < TILE_WIDTH_COUNT; col++) {
-					g_tileInfo[row][col].crc = 0xFF;
-					g_tileInfo[row][col].flag = 0;
-				}
-			}
+			// The main loop owns the tile state; it resends the resolution and every tile.
+			if (size == 4) { g_refresh = 1; }
 			break;
 		}
 		case MNG_KVM_PAUSE: // Pause
 		{
 			if (size != 5) break;
 			g_remotepause = block[4];
-			break;
-		}
-		case MNG_KVM_FRAME_RATE_TIMER:
-		{
-			//int fr = ((int)ntohs(((unsigned short*)(block))[2]));
-			//if (fr > 20 && fr < 2000) FRAME_RATE_TIMER = fr;
 			break;
 		}
 	}
@@ -437,14 +381,15 @@ int kvm_server_inputdata(char* block, int blocklen)
 
 int kvm_relay_feeddata(char* buf, int len)
 {
+	if (gChildProcess == NULL) { return 0; }
 	ILibProcessPipe_Process_WriteStdIn(gChildProcess, buf, len, ILibTransport_MemoryOwnership_USER);
 	return(len);
 }
 
-// Set the KVM pause state
+// Viewer flow control is applied to the helper's output pipe by the agent.
 void kvm_pause(int pause)
 {
-	g_pause = pause;
+	UNREFERENCED_PARAMETER(pause);
 }
 
 
@@ -452,16 +397,15 @@ void* kvm_mainloopinput(void* param)
 {
     unsigned char buffer[65535];
     size_t length = 0;
-    int fd = KVM_AGENT_FD == -1 ? STDIN_FILENO : KVM_AGENT_FD;
     UNREFERENCED_PARAMETER(param);
-    while (!g_shutdown && !g_resetipc)
+    while (!g_shutdown)
     {
-        struct pollfd pending = { fd, POLLIN, 0 };
+        struct pollfd pending = { STDIN_FILENO, POLLIN, 0 };
         int ready = poll(&pending, 1, 100);
         if (ready < 0 && errno == EINTR) { continue; }
         if (ready < 0 || (pending.revents & (POLLERR | POLLNVAL))) { break; }
         if (ready == 0) { continue; }
-        ssize_t count = read(fd, buffer + length, sizeof(buffer) - length);
+        ssize_t count = read(STDIN_FILENO, buffer + length, sizeof(buffer) - length);
         if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) { continue; }
         if (count <= 0) { break; }
         length += (size_t)count;
@@ -481,312 +425,129 @@ void* kvm_mainloopinput(void* param)
         if (length == sizeof(buffer)) { break; }
     }
 disconnected:
-    if (KVM_AGENT_FD == -1) { g_shutdown = 1; }
-    else { g_resetipc = 1; }
+    g_shutdown = 1;
     return NULL;
 }
 
-void ExitSink(int s)
+// Encodes and sends every changed tile of the current framebuffer copy.
+static int MacKvm_SendTiles(void)
 {
-	UNREFERENCED_PARAMETER(s);
+	void *buf = NULL;
+	long long tilesize = 0;
+	int x, y, r, c;
 
-	signal(SIGTERM, SIG_IGN);	
-	
-	if (KVM_Listener_FD > 0) 
+	for (r = 0; r < TILE_HEIGHT_COUNT; r++)
 	{
-		write(STDOUT_FILENO, "EXITING\n", 8);
-		fsync(STDOUT_FILENO);
-		close(KVM_Listener_FD); 
+		for (c = 0; c < TILE_WIDTH_COUNT; c++) { g_tileInfo[r][c].flag = TILE_TODO; }
 	}
-	g_shutdown = 1;
+	for (y = 0; y < TILE_HEIGHT_COUNT && !g_shutdown; y++)
+	{
+		for (x = 0; x < TILE_WIDTH_COUNT && !g_shutdown; x++)
+		{
+			if (g_tileInfo[y][x].flag == TILE_SENT || g_tileInfo[y][x].flag == TILE_DONT_SEND) { continue; }
+			getTileAt(TILE_WIDTH * x, TILE_HEIGHT * y, &buf, &tilesize, g_desktop, (long long)g_desktopSize, y, x);
+			if (buf != NULL)
+			{
+				int written = KVM_SEND(buf, (int)tilesize);
+				free(buf);
+				buf = NULL;
+				if (written == -1) { return -1; }
+			}
+		}
+	}
+	return 0;
 }
+
 void* kvm_server_mainloop(void* param)
 {
-	int x, y, height, width, r, c = 0;
-	long long desktopsize = 0;
-	long long tilesize = 0;
-	void *desktop = NULL;
-	void *buf = NULL;
-	int screen_height, screen_width, screen_num;
-	int permissionState = -1;
-	int written = 0;
-	struct sockaddr_un serveraddr;
+	char reason[256];
+	pthread_t input;
+	int inputStarted = 0, ready = 0, dirty = 0, failed = 1, r, c;
+	UNREFERENCED_PARAMETER(param);
 
+	ILibCriticalLogFilename = "KVMSlave.log";
 	signal(SIGPIPE, SIG_IGN);
-	if (param == NULL)
-	{
-		// This is doing I/O via StdIn/StdOut
-
-		int flags;
-		flags = fcntl(STDOUT_FILENO, F_GETFL, 0);
-		if (fcntl(STDOUT_FILENO, F_SETFL, (O_NONBLOCK | flags) ^ O_NONBLOCK) == -1) {}
-	}
-	else
-	{
-		// this is doing I/O via a Unix Domain Socket
-		if ((KVM_Listener_FD = socket(AF_UNIX, SOCK_STREAM, 0)) < 0)
-		{
-			char tmp[255];
-			int tmplen = sprintf_s(tmp, sizeof(tmp), "ERROR CREATING DOMAIN SOCKET: %d\n", errno);
-			// Error creating domain socket
-			written = write(STDOUT_FILENO, tmp, tmplen);
-			fsync(STDOUT_FILENO);
-			return(NULL);
-		}
-
-		int flags;
-		flags = fcntl(KVM_Listener_FD, F_GETFL, 0);
-		if (fcntl(KVM_Listener_FD, F_SETFL, (O_NONBLOCK | flags) ^ O_NONBLOCK) == -1) { }
-
-		written = write(STDOUT_FILENO, "Set FCNTL2\n", 11);
-		fsync(STDOUT_FILENO);
-
-		memset(&serveraddr, 0, sizeof(serveraddr));
-		serveraddr.sun_family = AF_UNIX;
-		strcpy(serveraddr.sun_path, KVM_Listener_Path);
-		remove(KVM_Listener_Path);
-		if (bind(KVM_Listener_FD, (struct sockaddr *)&serveraddr, SUN_LEN(&serveraddr)) < 0)
-		{
-			char tmp[255];
-			int tmplen = sprintf_s(tmp, sizeof(tmp), "BIND ERROR on DOMAIN SOCKET: %d\n", errno);
-			// Error creating domain socket
-			written = write(STDOUT_FILENO, tmp, tmplen);
-			fsync(STDOUT_FILENO);
-			return(NULL);
-		}
-
-		if (listen(KVM_Listener_FD, 1) < 0)
-		{
-			written = write(STDOUT_FILENO, "LISTEN ERROR ON DOMAIN SOCKET", 29);
-			fsync(STDOUT_FILENO);
-			return(NULL);
-		}
-
-		written = write(STDOUT_FILENO, "LISTENING ON DOMAIN SOCKET\n", 27);
-		fsync(STDOUT_FILENO);
-
-		signal(SIGTERM, ExitSink);
-
-		if ((KVM_AGENT_FD = accept(KVM_Listener_FD, NULL, NULL)) < 0)
-		{
-			written = write(STDOUT_FILENO, "ACCEPT ERROR ON DOMAIN SOCKET", 29);
-			fsync(STDOUT_FILENO);
-			return(NULL);
-		}
-		else
-		{
-			char tmp[255];
-			int tmpLen = sprintf_s(tmp, sizeof(tmp), "ACCEPTed new connection %d on Domain Socket\n", KVM_AGENT_FD);
-			written = write(STDOUT_FILENO, tmp, tmpLen);
-			fsync(STDOUT_FILENO);
-
-		}
-	}
-	// Init the kvm
-	g_messageQ = ILibQueue_Create();
-	if (kvm_init() != 0) { return (void*)-1; }
-
 	g_shutdown = 0;
-	if (pthread_create(&kvmthread, NULL, kvm_mainloopinput, param) != 0) { kvmthread = (pthread_t)NULL; g_shutdown = 1; }
+	g_messageQ = ILibQueue_Create();
 
+	if ((g_relay = MacKvm_OpenRelay(reason, sizeof(reason))) == NULL) { MacKvm_SendMessage(reason); goto done; }
+	if (kvm_init() != 0) { MacKvm_SendMessage("Remote desktop could not allocate the screen buffer."); goto done; }
+	if (pthread_create(&input, NULL, kvm_mainloopinput, NULL) != 0) { MacKvm_SendMessage("Remote desktop could not start its input thread."); goto done; }
+	inputStarted = 1;
 
-	if (KVM_AGENT_FD != -1)
+	while (!g_shutdown)
 	{
-		written = write(STDOUT_FILENO, "Starting Loop []\n", 14);
-		fsync(STDOUT_FILENO);
+		MacKvm_FlushMessages();
 
-		char stmp[255];
-		int stmpLen = sprintf_s(stmp, sizeof(stmp), "TILE_HEIGHT_COUNT=%d, TILE_WIDTH_COUNT=%d\n", TILE_HEIGHT_COUNT, TILE_WIDTH_COUNT);
-		written = write(STDOUT_FILENO, stmp, stmpLen);
-		fsync(STDOUT_FILENO);
+		int flags = vnc_relay_pump(g_relay, MAC_KVM_FRAME_MS);
+		for (int i = 0; flags > 0 && i < MAC_KVM_MAX_DRAIN; ++i)
+		{
+			int more = vnc_relay_pump(g_relay, 0);
+			if (more == 0) { break; }
+			flags = more < 0 ? more : (flags | more);
+		}
+		if (flags < 0)
+		{
+			if (!g_shutdown)
+			{
+				snprintf(reason, sizeof(reason), "Remote desktop ended: %s.", vnc_relay_strerror(flags));
+				MacKvm_FlushMessages();
+				MacKvm_SendMessage(reason);
+			}
+			break;
+		}
+
+		if ((flags & VNC_RELAY_RESIZED) && kvm_init() != 0)
+		{
+			MacKvm_SendMessage("Remote desktop could not allocate the screen buffer.");
+			break;
+		}
+		if (flags & VNC_RELAY_UPDATED) { ready = dirty = 1; }
+		if (g_refresh)
+		{
+			g_refresh = 0;
+			kvm_send_resolution();
+			for (r = 0; r < TILE_HEIGHT_COUNT; r++)
+			{
+				for (c = 0; c < TILE_WIDTH_COUNT; c++) { g_tileInfo[r][c].crc = 0xFF; g_tileInfo[r][c].flag = TILE_TODO; }
+			}
+			dirty = 1;
+		}
+		// Hold tiles until Screen Sharing delivers its first full frame, and while the viewer is paused.
+		if (!ready || !dirty || g_remotepause) { continue; }
+
+		int width, height;
+		if (vnc_relay_copy_rgb24(g_relay, g_desktop, g_desktopSize, (size_t)adjust_screen_size(SCREEN_WIDTH) * 3, &width, &height) != VNC_RELAY_OK) { continue; }
+		if (width != SCREEN_WIDTH || height != SCREEN_HEIGHT) { continue; }
+		dirty = 0;
+		MacKvm_FlushMessages();
+		if (MacKvm_SendTiles() != 0) { break; }
 	}
+	failed = 0;
 
-	while (!g_shutdown) 
-	{
-		if (g_resetipc != 0)
-		{
-			if (kvmthread != (pthread_t)NULL) { pthread_join(kvmthread, NULL); kvmthread = (pthread_t)NULL; }
-			g_resetipc = 0;
-			permissionState = -1;
-			close(KVM_AGENT_FD);
-
-			SCREEN_HEIGHT = SCREEN_WIDTH = 0;
-
-			char stmp[255];
-			int stmpLen = sprintf_s(stmp, sizeof(stmp), "Waiting for NEXT DomainSocket, TILE_HEIGHT_COUNT=%d, TILE_WIDTH_COUNT=%d\n", TILE_HEIGHT_COUNT, TILE_WIDTH_COUNT);
-			written = write(STDOUT_FILENO, stmp, stmpLen);
-			fsync(STDOUT_FILENO);
-
-			if ((KVM_AGENT_FD = accept(KVM_Listener_FD, NULL, NULL)) < 0)
-			{
-				g_shutdown = 1;
-				written = write(STDOUT_FILENO, "ACCEPT ERROR ON DOMAIN SOCKET", 29);
-				fsync(STDOUT_FILENO);
-				break;
-			}
-			else
-			{
-				char tmp[255];
-				int tmpLen = sprintf_s(tmp, sizeof(tmp), "ACCEPTed new connection %d on Domain Socket\n", KVM_AGENT_FD);
-				written = write(STDOUT_FILENO, tmp, tmpLen);
-				fsync(STDOUT_FILENO);
-				if (pthread_create(&kvmthread, NULL, kvm_mainloopinput, param) != 0) { kvmthread = (pthread_t)NULL; g_shutdown = 1; break; }
-			}
-		}
-		
-		// Check if there are pending messages to be sent
-		ILibQueue_Lock(g_messageQ);
-		while (ILibQueue_IsEmpty(g_messageQ) == 0)
-		{
-			if ((buf = (char*)ILibQueue_DeQueue(g_messageQ)) != NULL)
-			{
-				KVM_SEND(buf, (int)ILibMemory_Size(buf));
-				ILibMemory_Free(buf);
-			}
-		}
-		ILibQueue_UnLock(g_messageQ);
-
-        // Recheck so grants/revocations take effect without opening a consent dialog.
-        int canCapture = MacKvm_CanCaptureScreen();
-        int canInput = MacKvm_CanPostInput();
-        int currentPermissions = canCapture | (canInput << 1);
-        if (currentPermissions != permissionState)
-        {
-            MacKvm_SendPermissionStatus(canCapture, canInput);
-            permissionState = currentPermissions;
-        }
-        if (!canCapture) { usleep(250000); continue; }
-
-		for (r = 0; r < TILE_HEIGHT_COUNT; r++) 
-		{
-			for (c = 0; c < TILE_WIDTH_COUNT; c++) 
-			{
-				g_tileInfo[r][c].flag = TILE_TODO;
-#ifdef KVM_ALL_TILES
-				g_tileInfo[r][c].crc = 0xFF;
-#endif
-			}
-		}
-
-		screen_num = CGMainDisplayID();
-
-		if (screen_num == 0) { g_shutdown = 1; senddebug(-2); break; }
-		
-		if (SCREEN_SCALE_SET == 0)
-		{
-			CGDisplayModeRef mode = CGDisplayCopyDisplayMode(screen_num);
-			if (SCREEN_WIDTH > 0 && SCREEN_SCALE < (int) CGDisplayModeGetPixelWidth(mode) / SCREEN_WIDTH)
-			{
-				SCREEN_SCALE = (int) CGDisplayModeGetPixelWidth(mode) / SCREEN_WIDTH;
-				SCREEN_SCALE_SET = 1;
-			}			 
-			CGDisplayModeRelease(mode);
-		}
-		
-		screen_height = CGDisplayPixelsHigh(screen_num) * SCREEN_SCALE;
-		screen_width = CGDisplayPixelsWide(screen_num) * SCREEN_SCALE;
-		
-		if ((SCREEN_HEIGHT != screen_height || (SCREEN_WIDTH != screen_width) || SCREEN_NUM != screen_num)) 
-		{
-			kvm_init();
-			continue;
-		}
-
-		//senddebug(screen_num);
-		CGImageRef image = CGDisplayCreateImage(screen_num);
-		//senddebug(99);
-		if (image == NULL) 
-		{
-			g_shutdown = 1;
-			senddebug(0);
-		}
-		else {
-			//senddebug(100);
-			getScreenBuffer((unsigned char **)&desktop, &desktopsize, image);
-
-			if (KVM_AGENT_FD != -1)
-			{
-				char tmp[255];
-				int tmpLen = sprintf_s(tmp, sizeof(tmp), "...Enter for loop\n");
-				written = write(STDOUT_FILENO, tmp, tmpLen);
-				fsync(STDOUT_FILENO);
-			}
-
-			for (y = 0; y < TILE_HEIGHT_COUNT; y++) 
-			{
-				for (x = 0; x < TILE_WIDTH_COUNT; x++) {
-					height = TILE_HEIGHT * y;
-					width = TILE_WIDTH * x;
-					if (!g_shutdown && (g_pause)) { usleep(100000); g_pause = 0; } //HACK: Change this
-					
-					if (g_shutdown) { x = TILE_WIDTH_COUNT; y = TILE_HEIGHT_COUNT; break; }
-					
-					if (g_tileInfo[y][x].flag == TILE_SENT || g_tileInfo[y][x].flag == TILE_DONT_SEND) {
-						continue;
-					}
-					
-					getTileAt(width, height, &buf, &tilesize, desktop, desktopsize, y, x);
-					
-					if (buf && !g_shutdown)
-					{	
-						// Write the reply to the pipe.
-						//KvmDebugLog("Writing to master in kvm_server_mainloop\n");
-
-						written = KVM_SEND(buf, tilesize);
-
-						//KvmDebugLog("Wrote %d bytes to master in kvm_server_mainloop\n", written);
-						if (written == -1) 
-						{ 
-							/*ILIBMESSAGE("KVMBREAK-K2\r\n");*/ 
-							if(KVM_AGENT_FD == -1)
-							{
-								// This is a User Session, so if the connection fails, we exit out... We can be spawned again later
-								g_shutdown = 1; height = SCREEN_HEIGHT; width = SCREEN_WIDTH; break;
-							}
-						}
-						//else
-						//{
-						//	char tmp[255];
-						//	int tmpLen = sprintf_s(tmp, sizeof(tmp), "KVM_SEND => tilesize: %d\n", tilesize);
-						//	written = write(STDOUT_FILENO, tmp, tmpLen);
-						//	fsync(STDOUT_FILENO);
-						//}
-						free(buf);
-
-					}
-				}
-			}
-
-			if (KVM_AGENT_FD != -1)
-			{
-				char tmp[255];
-				int tmpLen = sprintf_s(tmp, sizeof(tmp), "...exit for loop\n");
-				written = write(STDOUT_FILENO, tmp, tmpLen);
-				fsync(STDOUT_FILENO);
-			}
-
-		}
-		CGImageRelease(image);
-	}
-	
+done:
 	g_shutdown = 1;
-	if (kvmthread != (pthread_t)NULL) { pthread_join(kvmthread, NULL); }
-	kvmthread = (pthread_t)NULL;
+	if (g_relay != NULL) { vnc_relay_shutdown(g_relay); }
+	if (inputStarted) { pthread_join(input, NULL); }
+	vnc_relay_close(g_relay);
+	g_relay = NULL;
 
-	if (g_tileInfo != NULL) { for (r = 0; r < TILE_HEIGHT_COUNT; r++) { free(g_tileInfo[r]); } }
-	g_tileInfo = NULL;
-	if(tilebuffer != NULL) {
+	if (g_tileInfo != NULL)
+	{
+		for (r = 0; r < TILE_HEIGHT_COUNT; r++) { free(g_tileInfo[r]); }
+		free(g_tileInfo);
+		g_tileInfo = NULL;
+	}
+	free(g_desktop);
+	g_desktop = NULL;
+	g_desktopSize = 0;
+	if (tilebuffer != NULL)
+	{
 		free(tilebuffer);
 		tilebuffer = NULL;
 	}
-
-	if (KVM_AGENT_FD != -1)
-	{
-		written = write(STDOUT_FILENO, "Exiting...\n", 11);
-		fsync(STDOUT_FILENO);
-	}
 	ILibQueue_Destroy(g_messageQ);
-	return (void*)0;
+	return (void*)(intptr_t)failed;
 }
 
 void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* user)
@@ -823,83 +584,28 @@ void kvm_relay_StdOutHandler(ILibProcessPipe_Process sender, char *buffer, size_
 }
 void kvm_relay_StdErrHandler(ILibProcessPipe_Process sender, char *buffer, size_t bufferLen, size_t* bytesConsumed, void* user)
 {
-	//KVMDebugLog *log = (KVMDebugLog*)buffer;
-
-	//UNREFERENCED_PARAMETER(sender);
-	//UNREFERENCED_PARAMETER(user);
-
-	//if (bufferLen < sizeof(KVMDebugLog) || bufferLen < log->length) { *bytesConsumed = 0;  return; }
-	//*bytesConsumed = log->length;
-	////ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), (ILibRemoteLogging_Modules)log->logType, (ILibRemoteLogging_Flags)log->logFlags, "%s", log->logData);
-	//ILibRemoteLogging_printf(ILibChainGetLogger(gILibChain), ILibRemoteLogging_Modules_Microstack_Generic, (ILibRemoteLogging_Flags)log->logFlags, "%s", log->logData);
+	UNREFERENCED_PARAMETER(sender);
+	UNREFERENCED_PARAMETER(buffer);
+	UNREFERENCED_PARAMETER(user);
 	*bytesConsumed = bufferLen;
 }
 
-
-// launchctl asuser changes the GUI bootstrap/audit context, not credentials.
-// Run this in the new helper before opening any desktop or input API.
-int MacKvm_InitializeSessionUser(const char *value)
+// Starts the relay helper with the agent's own credentials. It must stay root to read
+// the Screen Sharing credential, and it serves the login window and every user alike.
+void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved)
 {
-    uid_t uid = geteuid();
-    if (value != NULL)
-    {
-        unsigned long number = 0;
-        if (*value == 0) { errno = EINVAL; return -1; }
-        for (const unsigned char *p = (const unsigned char*)value; *p; ++p)
-        {
-            if (*p < '0' || *p > '9' || number > ((unsigned long)INT_MAX - (*p - '0')) / 10)
-            { errno = EINVAL; return -1; }
-            number = number * 10 + (*p - '0');
-        }
-        uid = (uid_t)number;
-    }
-    if (uid == 0 || uid > INT_MAX || (geteuid() != 0 && geteuid() != uid)) { errno = EPERM; return -1; }
-    struct stat console;
-    if (stat("/dev/console", &console) != 0) { return -1; }
-    if (console.st_uid != uid) { errno = ESTALE; return -1; }
-    struct passwd account, *found = NULL;
-    char scratch[16384];
-    int error = getpwuid_r(uid, &account, scratch, sizeof(scratch), &found);
-    if (error != 0 || found == NULL) { errno = error != 0 ? error : ENOENT; return -1; }
-    if (account.pw_uid != uid || account.pw_gid == (gid_t)-1 || account.pw_name == NULL || !*account.pw_name || account.pw_dir == NULL || account.pw_dir[0] != '/')
-    { errno = EINVAL; return -1; }
-    if (geteuid() == 0)
-    {
-        if (initgroups(account.pw_name, account.pw_gid) != 0 || setgid(account.pw_gid) != 0 || setuid(uid) != 0) { return -1; }
-    }
-    if (getuid() != uid || geteuid() != uid || getgid() != account.pw_gid || getegid() != account.pw_gid)
-    { errno = EPERM; return -1; }
-    if (setenv("HOME", account.pw_dir, 1) != 0 || setenv("USER", account.pw_name, 1) != 0 || setenv("LOGNAME", account.pw_name, 1) != 0 ||
-        setenv("SHELL", account.pw_shell != NULL && *account.pw_shell ? account.pw_shell : "/bin/sh", 1) != 0 || unsetenv("TMPDIR") != 0 || chdir("/") != 0)
-    { return -1; }
-    return 0;
-}
-
-// Return the output pipe, or the LoginWindow socket path when no user is logged in.
-void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int uid)
-{
-    if (uid == 0) { return (void*)KVM_Listener_Path; }
-    if (uid < 0 || exePath == NULL || exePath[0] != '/' || (geteuid() != 0 && geteuid() != (uid_t)uid)) { return NULL; }
-    char userId[16];
-    snprintf(userId, sizeof(userId), "%u", (unsigned int)uid);
-    char *gui[] = { "launchctl", "asuser", userId, exePath, "-kvm0", "--session-uid", userId, NULL };
-    void **user = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, NULL, NULL);
+    if (exePath == NULL || exePath[0] != '/' || processPipeMgr == NULL || writeHandler == NULL) { return NULL; }
+    char *args[] = { exePath, "-kvm0", NULL };
+    void **user = (void**)ILibMemory_Allocate(2 * sizeof(void*), 0, NULL, NULL);
     user[0] = writeHandler;
     user[1] = reserved;
-    user[2] = processPipeMgr;
-    user[3] = exePath;
 
-    // Keep root until the helper can establish all supplementary groups and its
-    // primary GID as well as UID. The generic pipe spawn only calls setuid().
-    gChildProcess = ILibProcessPipe_Manager_SpawnProcessEx3(processPipeMgr, "/bin/launchctl",
-        gui, ILibProcessPipe_SpawnTypes_DEFAULT, NULL, 0);
+    gChildProcess = ILibProcessPipe_Manager_SpawnProcessEx3(processPipeMgr, exePath, args, ILibProcessPipe_SpawnTypes_DEFAULT, NULL, 0);
     if (gChildProcess == NULL) { ILibMemory_Free(user); return NULL; }
-    g_slavekvm = ILibProcessPipe_Process_GetPID(gChildProcess);
     char metadata[64];
-    snprintf(metadata, sizeof(metadata), "Child KVM (pid: %d)", g_slavekvm);
+    snprintf(metadata, sizeof(metadata), "Screen Sharing relay (pid: %d)", ILibProcessPipe_Process_GetPID(gChildProcess));
     ILibProcessPipe_Process_ResetMetadata(gChildProcess, metadata);
     ILibProcessPipe_Process_AddHandlers(gChildProcess, 65535, &kvm_relay_ExitHandler, &kvm_relay_StdOutHandler, &kvm_relay_StdErrHandler, NULL, user);
-    g_shutdown = 0;
     return ILibProcessPipe_Process_GetStdOut(gChildProcess);
 }
 
@@ -915,8 +621,6 @@ void kvm_relay_reset()
 // Clean up the KVM session.
 void kvm_cleanup()
 {
-	KvmDebugLog("kvm_cleanup\n");
-	g_shutdown = 1;
 	if (gChildProcess != NULL)
 	{
 		ILibProcessPipe_Process_SoftKill(gChildProcess);

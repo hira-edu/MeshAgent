@@ -11,7 +11,7 @@ const agentStart = managerSource.indexOf('this.installLaunchAgent = function');
 const agentEnd = managerSource.indexOf('\n    this.uninstallService =', agentStart);
 const installAgent = managerSource.slice(agentStart, agentEnd).replace('this.installLaunchAgent =', 'var installAgent =').replace(/\n    }\s*$/, '');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-mac-install-'));
-let failWrite = '', failStart = false, failAgent = false, failChown = false;
+let failWrite = '', failStart = false, failChown = false, agentInstalls = 0;
 let closed = 0, commands = [], loaded = new Set(), userDomain = '', domainData = {};
 const map = p => typeof p === 'string' && (p === '/Library' || p.startsWith('/Library/')) ? root + '/system' + p : p;
 fs.mkdirSync(root + '/system');
@@ -58,11 +58,11 @@ const c = {Buffer, Date, global: {}, module: {exports: {}}, console: {log() {}, 
 vm.createContext(c);vm.runInContext(managerSource.slice(start,end)+'\n'+installAgent,c);
 const manager = {isAdmin: () => true,
     installService: options => c.macInstallService(options, manager),
-    installLaunchAgent(options) { if(failAgent)throw Error('injected LaunchAgent failure');return c.installAgent.call(manager,options); },
+    installLaunchAgent(options) { agentInstalls++;return c.installAgent.call(manager,options); },
     getLaunchAgent(name) {return c.fetchPlist('/Library/LaunchAgents',name);},
     getService(name) {const job=c.fetchPlist('/Library/LaunchDaemons',name);return {
         appLocation: () => job.appLocation(),
-        start() { assert(fs.existsSync(map('/Library/LaunchAgents/'+name+'.plist')));if(failStart)throw Error('injected start failure'); },
+        start() { assert(fs.existsSync(map('/Library/LaunchDaemons/'+name+'.plist')));if(failStart)throw Error('injected start failure'); },
         unload() {}, close() {closed++;}
     };}};
 try {
@@ -92,15 +92,16 @@ try {
     assert(!fs.existsSync(root+'/home/Library/LaunchAgents/user-helper.plist'));
     // Run the production installer orchestration, including rollback of only its own files.
     vm.runInContext(installerSource,c);
-    for (const scenario of ['agent','start','success']) {
-        failAgent=scenario==='agent';failStart=scenario==='start';userDomain='';domainData={};commands=[];
+    // Remote desktop relays Screen Sharing from the daemon, so installation publishes no KVM LaunchAgent.
+    for (const scenario of ['start','success']) {
+        failStart=scenario==='start';userDomain='';domainData={};commands=[];agentInstalls=0;
         const params=['--meshServiceName=Orchestrated','--target=main','--installPath='+root+'/orchestrated','--__skipExit=1'];
         if(scenario==='success')c.installService(params);else assert.throws(()=>c.installService(params),/Service start\/setup failed/);
         const daemon=map('/Library/LaunchDaemons/Orchestrated.plist'),helper=map('/Library/LaunchAgents/Orchestrated.plist');
-        assert.equal(fs.existsSync(daemon),scenario==='success');assert.equal(fs.existsSync(helper),scenario==='success');
+        assert.equal(fs.existsSync(daemon),scenario==='success');assert(!fs.existsSync(helper)&&agentInstalls===0);
         assert.equal(fs.existsSync(root+'/orchestrated/main'),scenario==='success');
-        assert(!commands.some(a=>a[1]==='bootstrap'),'orchestrator must not load daemon before helper publication');
+        assert(!commands.some(a=>a[1]==='bootstrap'),'orchestrator starts the daemon only through the service object');
     }
-    assert.equal(closed,3);
-    console.log('PASS: macOS install ordering, owned rollback, retained provisioning, LaunchAgent ownership, LoginWindow domain cleanup, start/setup failures');
+    assert.equal(closed,2);
+    console.log('PASS: macOS install ordering, owned rollback, retained provisioning, LaunchAgent ownership, LoginWindow domain cleanup, no KVM LaunchAgent, start/setup failures');
 } finally {fs.rmSync(root,{recursive:true,force:true});}

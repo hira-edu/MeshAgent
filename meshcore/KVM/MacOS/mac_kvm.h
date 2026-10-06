@@ -9,7 +9,6 @@
 #ifndef LINUX_KVM_H_
 #define LINUX_KVM_H_
 
-#include <ApplicationServices/ApplicationServices.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <pthread.h>
@@ -21,7 +20,6 @@
 #include <unistd.h>
 
 #include "mac_tile.h"
-#include "mac_events.h"
 #include "mac_kvm_protocol.h"
 #include "../../../microstack/ILibParsers.h"
 
@@ -29,8 +27,7 @@ typedef ILibTransport_DoneState(*ILibKVM_WriteHandler)(char *buffer, int bufferL
 
 int kvm_relay_feeddata(char* buf, int len);
 void kvm_pause(int pause);
-int MacKvm_InitializeSessionUser(const char *uid);
-void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int uid);
+void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved);
 void kvm_relay_reset();
 void kvm_cleanup();
 

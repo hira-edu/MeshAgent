@@ -206,50 +206,68 @@ powershell -NoProfile -File .\tools\health_check.ps1
 
 ## macOS privacy permissions
 
-Agent and helper startup do not request Screen Recording, Accessibility, or
-Full Disk Access and do not open System Settings. During a desktop session,
-KVM queries existing Screen Recording and Accessibility authorization without
-prompting. Missing Screen Recording authorization pauses capture; missing
-Accessibility authorization blocks remote keyboard and mouse input. A desktop
-protocol message explains the missing permission. Grant access to the installed
-MeshAgent executable in System Settings > Privacy & Security, then reconnect
-or restart the helper if required by macOS.
-
+Agent and helper startup do not request Accessibility or Full Disk Access and do
+not open System Settings. Remote desktop uses Apple Screen Sharing (see below),
+so the agent itself needs neither Screen Recording nor Accessibility for it.
 Removing automatic requests does not grant access or suppress macOS-controlled
 notifications. Full Disk Access is not inferred by opening protected user files;
 file operations remain subject to macOS authorization.
 
-For managed Macs, deploy Apple's Privacy Preferences Policy Control (PPPC)
-payload through MDM using the installed binary's path and designated code signing
-requirement. PPPC can preapprove Accessibility and System Policy All Files.
-Screen Recording follows Apple's separate approval rules; do not treat it as a
-silent allow grant. Keep the installed path and signing identity consistent
-across updates so the deployment policy continues to identify the same agent.
-See [Apple's PPPC deployment settings](https://support.apple.com/guide/deployment/dep38df53c2a/web)
+Lock requests post a keyboard shortcut and need Accessibility access. For managed
+Macs, deploy Apple's Privacy Preferences Policy Control (PPPC) payload through MDM
+using the installed binary's path and designated code signing requirement. Keep
+the installed path and signing identity consistent across updates so the
+deployment policy continues to identify the same agent. See
+[Apple's PPPC deployment settings](https://support.apple.com/guide/deployment/dep38df53c2a/web)
 and [payload examples](https://support.apple.com/guide/deployment/dep9ddb7e0b5/web).
 
-On supervised Macs running macOS 15.1 or later, an MDM Restrictions payload can
-set `forceBypassScreenCaptureAlert` to suppress recurring capture alerts. This
-does not grant initial Screen Recording access. Apple's Persistent Content
-Capture entitlement is available for eligible VNC-style applications, but
-requires approval from Apple and the corresponding signing profile; adding an
-entitlement key to an unprovisioned build does not enable it. See Apple's
-[Restrictions reference](https://developer.apple.com/documentation/devicemanagement/restrictions)
-and [Persistent Content Capture entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.persistent-content-capture).
+## macOS remote desktop
+
+Remote desktop relays Apple Screen Sharing (`screensharingd`). For each session
+the daemon starts its own executable with `-kvm0`, keeping root credentials. That
+helper connects to `127.0.0.1:5900` as an RFB client and translates between RFB
+and the MeshCentral tile protocol on its standard input and output. Screen
+Sharing captures the screen, applies input, and serves the login window and
+every user session, so one helper covers all of them, including user switching.
+macOS shows its own Screen Sharing indicator while a session is connected. There
+is no other capture or input path.
+
+Before authenticating, the helper requires:
+
+- the agent to run as root;
+- the VNC password in `vncrelay.secret` beside the installed executable. The
+  directory must be root-owned and not writable by group or others. The file must
+  be a root-owned regular file with no group or other permissions, not a symlink,
+  with one hard link, holding 1 to 8 printable ASCII characters and an optional
+  trailing newline;
+- every process holding a TCP listener on port 5900 to run as root, which is
+  launchd or `screensharingd` while Screen Sharing is on. Otherwise, while
+  Screen Sharing is off, any account could listen on the port and collect the
+  VNC authentication exchange.
+
+If any requirement fails, or Screen Sharing rejects the password, stops
+responding, or sends an unsupported message, the helper sends the reason to the
+viewer's desktop message bar and the session ends. The relay negotiates only Raw,
+CopyRect, and DesktopSize encodings and shares the screen with any other Screen
+Sharing viewers. Screen Sharing must have VNC password access enabled with the
+same password; the agent does not change Screen Sharing settings at session time.
+
+Earlier releases installed a LoginWindow LaunchAgent that ran the executable with
+`-kvm1`. Installation no longer creates it, and uninstall or reinstall removes an
+existing one. Until then, the current executable exits immediately when launchd
+starts it with `-kvm1`.
 
 ## macOS service installation and user sessions
 
-The daemon and LoginWindow LaunchAgent use the same installed executable.
 Installation writes the executable and provisioning before publishing the daemon
-plist, installs the LoginWindow job, then starts the daemon. A failed setup removes
-files created by that installation and preserves preexisting provisioning. This
-cleanup covers handled failures; it is not crash recovery for an interrupted
-installation or restoration of a previously uninstalled version.
+plist, then starts the daemon. A failed setup removes files created by that
+installation and preserves preexisting provisioning. This cleanup covers handled
+failures; it is not crash recovery for an interrupted installation or
+restoration of a previously uninstalled version.
 
-LoginWindow job cleanup addresses its actual launchd login domain and any
-historical system-domain binding. It does not select the logged-in Aqua user's
-domain. When no LoginWindow session exists, launchd loads the installed job at
-the next applicable session.
+Removing a legacy LoginWindow job addresses its actual launchd login domain and
+any historical system-domain binding. It does not select the logged-in Aqua
+user's domain.
 
 Interactive operations select the foreground user from `/dev/console` ownership.
 SSH login order does not determine the desktop user. The login window and Setup
@@ -257,16 +275,6 @@ Assistant are not treated as ordinary user desktops. Account lookups use checked
 bounded processes with literal arguments; home-directory records are decoded as
 plists to preserve spaces and special characters. Session enumeration reports
 live logins with each user's resolved UID.
-
-KVM launches the same executable through `launchctl asuser` to select the user's
-GUI bootstrap and audit context. That command preserves credentials. The KVM
-entry point therefore checks that the selected UID still owns `/dev/console`,
-initializes supplementary groups, sets the primary GID and UID, and verifies the
-result before accessing desktop APIs. It sets the user's home/account environment
-and clears an inherited temporary-directory override. A failed transition exits
-the helper and closes the desktop stream. A non-root process outside the GUI
-audit session may be unable to make this transition; the system service retains
-root until the helper has entered the selected context.
 
 Dialogs, clipboard operations, notifications and lock requests launch the same
 installed executable as a temporary Aqua LaunchAgent for the foreground user.

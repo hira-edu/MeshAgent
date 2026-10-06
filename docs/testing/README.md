@@ -222,7 +222,7 @@ Store generated validation reports outside tracked documentation, normally under
 `artifacts/validation/`. Do not check in dated planning files, status ledgers, or
 runtime evidence.
 
-## macOS permission checks
+## macOS lifecycle and remote desktop checks
 
 Mac lifecycle and session probes:
 
@@ -231,8 +231,11 @@ node test/macos_install_runtime.js
 python3 test/macos_install_agent_runtime.py --agent /absolute/path/to/built/meshagent
 node test/macos_sessions_runtime.js
 python3 test/macos_sessions_agent_runtime.py --agent /absolute/path/to/built/meshagent
+node test/macos_kvm_relay_contract.js
 python3 test/macos_kvm_io_native.py
-python3 test/macos_kvm_session_native.py
+python3 test/macos_kvm_protocol_native.py
+python3 test/macos_kvm_mainloop_native.py
+python3 test/macos_kvm_session_native.py --agent /absolute/path/to/built/meshagent
 python3 test/macos_vnc_relay_native.py
 python3 test/macos_helper_framing_runtime.py --agent /absolute/path/to/built/meshagent
 node test/macos_message_helper_runtime.js
@@ -246,9 +249,19 @@ provisioning. The Node fixture injects launchctl state; these tests do not prove
 live root install/uninstall or reboot. Session probes cover console selection,
 account lookup failures, literal arguments, signed legacy IDs and Unicode home
 paths; the built-agent probe performs read-only queries against the host.
+The relay contract is a source guard: no native capture, input or privacy
+permission API remains, one root helper is spawned without a session hop, the
+helper checks the credential and port owner before authenticating, the relay
+connects to loopback only, and installation creates no KVM LaunchAgent.
 The KVM I/O probe runs the production input loop and writer with fault-injected
 I/O under ASan/UBSan, including packet splits, interrupted calls and short writes.
-It does not capture a screen or inject desktop input.
+The protocol probe drives the helper-pipe output handler the way the process pipe
+does, across every split and with invalid frames. The main-loop probe runs the
+production session loop against a scripted relay and checks that the resolution
+precedes tiles, nothing is sent before the first frame, refresh resends every
+tile, pause holds an update, resize reallocates, and relay, viewer and pipe
+failures end the session with the right message. These probes do not capture a
+screen or inject desktop input.
 The VNC relay probe compiles the Screen Sharing relay client under ASan/UBSan
 and drives it against a scripted loopback RFB server: 3.8 and Apple 3.889
 handshakes, None and VNC authentication, Raw/CopyRect/DesktopSize updates,
@@ -256,10 +269,17 @@ fail-closed handling of unnegotiated encodings, out-of-bounds rectangles,
 disconnects and stalls, and the key/pointer wire format. It does not contact the
 real Screen Sharing service.
 
-The session native probe checks production launch arguments, ordered credential
-changes, console-switch rejection, failure cleanup and desktop-stream termination.
-It injects the privileged credential operations and separately runs the real
-initializer as the current user. Helper framing tests compare Node and native
+The session native probe reads the relay credential from real temporary files,
+with fstat reporting the current user as root, and covers content, length, modes,
+hard links, symlinks, FIFOs and the parent directory. It checks port ownership
+against injected process tables and against real libproc data for a temporary
+listener owned by the current user. It also covers failure reasons in check order,
+key, Unicode, mouse and control dispatch to the relay, the root helper's launch
+arguments, and exit cleanup. With `--agent` it runs the built `-kvm0` without
+root, which must report the root requirement to the viewer, and the legacy `-kvm1`
+switch, which must exit cleanly. It does not prove a live Screen Sharing session.
+Validate that on a Mac with Screen Sharing and VNC password access enabled and the
+credential installed. Helper framing tests compare Node and native
 wire bytes and exercise a real temporary Unix socket without starting GUI helpers.
 
 The message-helper Node test runs the production parent/client code with real
@@ -273,27 +293,6 @@ startup diagnostics. It does not prove root-to-user delivery or live UI behavior
 
 The filesystem probe creates only temporary files, starts its child with umask
 zero and checks initial modes, exclusive collisions, symlinks and invalid modes.
-The HID report probe compiles production report encoding under ASan/UBSan with a
-fake delivery sink. It covers keypad mapping, six-key rollover, modifiers,
-coordinate bounds, failed reports and held-button preservation during double
-clicks. It never creates a virtual device or injects desktop input.
-
-`test/macos_kvm_launcher_runtime.py --agent /absolute/path/to/built/meshagent`
-uses disposable launchd jobs to check the context transition. An unprivileged
-background job may be denied entry to the GUI audit session; the test reports
-that condition as skipped (exit 77), not a passing privileged transition. On an
-authorized root test host, run it with `--uid <active-desktop-uid>` to verify a
-system-job-to-Aqua transition. The probe verifies that `launchctl asuser` retains
-the launcher's credentials, so the helper's separate credential checks remain
-necessary. It removes only its unique fixture jobs and never invokes KVM.
-
-`python3 test/macos_kvm_permissions_native.py` compiles production permission
-queries and input dispatch with injected authorization results under ASan/UBSan.
-It checks denied, granted, and revoked input, legacy OS fallback, and desktop
-status packets without accessing the screen or injecting input. It also guards
-against restoring startup permission requests and protected-file probes. A real
-macOS permission grant/revocation and remote desktop smoke test is still needed
-to validate OS integration; the injected test does not establish TCC approval.
 
 ## macOS native update validation
 

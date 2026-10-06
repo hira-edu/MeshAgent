@@ -11,8 +11,8 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 source = (root / 'meshcore/KVM/MacOS/mac_kvm.c').read_text()
-writer = source[source.index('int KVM_SEND('):source.index('\n\n\nCGDirectDisplayID')]
-reader = source[source.index('void* kvm_mainloopinput('):source.index('\nvoid ExitSink(')]
+writer = source[source.index('int KVM_SEND('):source.index('\n\n\nint SCREEN_WIDTH')]
+reader = source[source.index('void* kvm_mainloopinput('):source.index('\n// Encodes and sends every changed tile')]
 prelude = r'''
 #include <assert.h>
 #include <errno.h>
@@ -22,12 +22,12 @@ prelude = r'''
 #include <string.h>
 #include <unistd.h>
 #define UNREFERENCED_PARAMETER(x) (void)(x)
-static int KVM_AGENT_FD=-1, g_shutdown, g_resetipc;
+static int g_shutdown;
 static unsigned char incoming[70000], received[70000], outgoing[70000];
 static size_t incomingLength, offset, receivedLength, outgoingLength, readLimit, firstRead;
 static int readInterrupt, pollInterrupt, writeInterrupt, readCalls, writeFailure, stopOnPoll;
 static ssize_t fake_read(int fd, void *buffer, size_t size) {
-    assert(fd==(KVM_AGENT_FD==-1?STDIN_FILENO:KVM_AGENT_FD));++readCalls;
+    assert(fd==STDIN_FILENO);++readCalls;
     if(readInterrupt){readInterrupt=0;errno=EINTR;return -1;}
     size_t count=incomingLength-offset;
     if(readCalls==1 && firstRead && count>firstRead)count=firstRead;
@@ -41,7 +41,7 @@ static int fake_poll(struct pollfd *p,nfds_t n,int timeout) {
     p->revents=POLLIN;return 1;
 }
 static ssize_t fake_write(int fd,const void *buffer,size_t length) {
-    assert(fd==(KVM_AGENT_FD==-1?STDOUT_FILENO:KVM_AGENT_FD));
+    assert(fd==STDOUT_FILENO);
     if(writeInterrupt){writeInterrupt=0;errno=EINTR;return -1;}
     if(writeFailure){errno=EPIPE;return writeFailure==1?-1:0;}
     size_t count=length>3?3:length;assert(outgoingLength+count<=sizeof(outgoing));
@@ -60,18 +60,18 @@ static int kvm_server_inputdata(char *data,int length) {
 '''
 main = r'''
 static void reset(void) {
-    g_shutdown=g_resetipc=readCalls=0;offset=receivedLength=outgoingLength=0;
+    g_shutdown=readCalls=0;offset=receivedLength=outgoingLength=0;
     readInterrupt=pollInterrupt=writeInterrupt=writeFailure=stopOnPoll=0;
     readLimit=sizeof(incoming);firstRead=0;
 }
 int main(void) {
     unsigned char packets[]={0,1,0,6,0,65, 0,85,0,7,0,0,66, 0,2,0,10,0,0,0,1,0,2, 0,5,0,4};
     memcpy(incoming,packets,sizeof(packets));incomingLength=sizeof(packets);
-    for(int socket=0;socket<2;++socket)for(size_t split=1;split<=sizeof(packets);++split) {
-        reset();KVM_AGENT_FD=socket?4:-1;firstRead=split;
+    for(size_t split=1;split<=sizeof(packets);++split) {
+        reset();firstRead=split;
         kvm_mainloopinput(NULL);
         assert(receivedLength==sizeof(packets) && !memcmp(received,packets,sizeof(packets)));
-        assert(socket?g_resetipc:g_shutdown);
+        assert(g_shutdown);
     }
     reset();readLimit=1;readInterrupt=pollInterrupt=1;kvm_mainloopinput(NULL);
     assert(receivedLength==sizeof(packets)&&!memcmp(received,packets,sizeof(packets)));
@@ -79,13 +79,11 @@ int main(void) {
     kvm_mainloopinput(NULL);assert(receivedLength==65535&&!memcmp(incoming,received,65535));
     reset();incomingLength=4;incoming[2]=0;incoming[3]=3;kvm_mainloopinput(NULL);assert(receivedLength==0&&readCalls==1);
     reset();stopOnPoll=1;kvm_mainloopinput(NULL);assert(g_shutdown&&readCalls==0);
-    for(int socket=0;socket<2;++socket) {
-        reset();KVM_AGENT_FD=socket?4:-1;writeInterrupt=1;
-        assert(KVM_SEND((char*)packets,sizeof(packets))==(int)sizeof(packets));
-        assert(outgoingLength==sizeof(packets)&&!memcmp(packets,outgoing,sizeof(packets)));
-        writeFailure=1;assert(KVM_SEND((char*)packets,sizeof(packets))==-1&&errno==EPIPE);
-        writeFailure=2;assert(KVM_SEND((char*)packets,sizeof(packets))==-1&&errno==EIO);
-    }
+    reset();writeInterrupt=1;
+    assert(KVM_SEND((char*)packets,sizeof(packets))==(int)sizeof(packets));
+    assert(outgoingLength==sizeof(packets)&&!memcmp(packets,outgoing,sizeof(packets)));
+    writeFailure=1;assert(KVM_SEND((char*)packets,sizeof(packets))==-1&&errno==EPIPE);
+    writeFailure=2;assert(KVM_SEND((char*)packets,sizeof(packets))==-1&&errno==EIO);
     puts("PASS: KVM fragmented/coalesced input, 65535-byte frame, EINTR, invalid frame, shutdown, short output writes and disconnects");
 }
 '''

@@ -14,7 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
-#include <Carbon/Carbon.h>
 #include "../Linux/linux_compression.h"
 
 enum TILE_FLAGS_ENUM {
@@ -33,7 +32,6 @@ struct tileInfo_t {
 extern int reset_tile_info(int old_height_count);
 extern int adjust_screen_size(int pixles);
 extern int getTileAt(int x, int y, void** buffer, long long *bufferSize, void *desktop, long long desktopsize, int row, int col);
-extern int getScreenBuffer(unsigned char **desktop, long long *desktopsize, CGImageRef image);
 extern void set_tile_compression(int type, int level);
 
 

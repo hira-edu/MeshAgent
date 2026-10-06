@@ -858,21 +858,10 @@ function installService(params)
     {
         throw new Error('Service installation failed: ' + sie);
     }
-    var svc = null, launchAgentCreated = false;
+    var svc = null;
     try
     {
         svc = require('service-manager').manager.getService(options.name);
-        // Publish the same executable's LoginWindow entry before starting the
-        // daemon. A helper-install failure must not leave a running partial install.
-        if (process.platform == 'darwin')
-        {
-            process.stdout.write('   -> setting up launch agent...');
-            require('service-manager').manager.installLaunchAgent(
-                { name: options.name, servicePath: svc.appLocation(), startType: 'AUTO_START',
-                    sessionTypes: ['LoginWindow'], parameters: ['-kvm1'] });
-            launchAgentCreated = true;
-            process.stdout.write(' [DONE]\n');
-        }
         process.stdout.write('   -> Starting service...');
         svc.start();
         process.stdout.write(' [OK]\n');
@@ -884,7 +873,6 @@ function installService(params)
             try
             {
                 if (svc) { svc.unload(); }
-                if (launchAgentCreated) { uninstallMacLaunchAgent(options.name); }
                 installation.rollback();
             }
             catch (cleanup) { throw new Error('Service start/setup failed: ' + e + '; cleanup failed: ' + cleanup); }
@@ -899,6 +887,7 @@ function installService(params)
     }
 }
 
+// Removes the LoginWindow LaunchAgent that releases before the Screen Sharing relay installed.
 function uninstallMacLaunchAgent(name)
 {
     var launchagent = null;
