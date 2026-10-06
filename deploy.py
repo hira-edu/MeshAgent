@@ -228,6 +228,11 @@ CORE_ARTIFACTS = {
         "remote_relative_path": "meshdesktopmultiplex.js",
         "publish_targets": ("module-root",),
     },
+    "macosinstaller.js": {
+        "local_path": "../MeshCentral/macosinstaller.js",
+        "remote_relative_path": "macosinstaller.js",
+        "publish_targets": ("module-root",),
+    },
     "meshcore.js": {
         "local_path": "../MeshCentral/agents/meshcore.js",
         "remote_relative_path": "meshcore.js",
