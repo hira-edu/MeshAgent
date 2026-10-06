@@ -47,6 +47,7 @@ WNDCLASSEXA CUR_WNDCLASS;
 HWND CUR_HWND = NULL;
 HANDLE CUR_APCTHREAD = NULL;
 HANDLE CUR_WORKTHREAD = NULL;
+DWORD CUR_WORKTHREADID = 0;
 volatile LONG KVM_DESKTOP_SWITCH_EVENT = 0;
 
 int CUR_CURRENT = 0;
@@ -267,17 +268,35 @@ void CALLBACK KVMWinEventProc(
 
 void KVM_StopMessagePump()
 {
-	if (CUR_HWND != NULL) 
+	int waited = 0;
+
+	if (CUR_WORKTHREAD != NULL)
 	{
-		PostMessageA(CUR_HWND, WM_QUIT, 0, 0);
+		// The pump thread publishes CUR_HWND once its window exists. A capture loop that fails during
+		// startup can get here first; without the window there is nothing to post WM_QUIT to, and the
+		// thread (and its hooks) would outlive this session while the next one re-created them.
+		while (CUR_HWND == NULL && waited < 200 && WaitForSingleObject(CUR_WORKTHREAD, 0) == WAIT_TIMEOUT) { ++waited; Sleep(10); }
+		if (CUR_HWND != NULL)
+		{
+			PostMessageA(CUR_HWND, WM_QUIT, 0, 0);
+		}
+		else
+		{
+			// No window (creation failed): the pump filters on a NULL window, so a thread message reaches it.
+			PostThreadMessageA(CUR_WORKTHREADID, WM_QUIT, 0, 0);
+		}
 		WaitForSingleObjectEx(CUR_WORKTHREAD, 5000, TRUE);
-		if (CUR_WORKTHREAD != NULL) { CloseHandle(CUR_WORKTHREAD); CUR_WORKTHREAD = NULL; }
-		if (CUR_APCTHREAD != NULL) { CloseHandle(CUR_APCTHREAD); CUR_APCTHREAD = NULL; }
+		CloseHandle(CUR_WORKTHREAD); CUR_WORKTHREAD = NULL;
+		CUR_WORKTHREADID = 0;
 	}
+	if (CUR_APCTHREAD != NULL) { CloseHandle(CUR_APCTHREAD); CUR_APCTHREAD = NULL; }
 }
 
 void KVM_UnInitMouseCursors()
 {
+	// Stop the pump before unhooking: the hooks are installed on the pump thread, and it is the
+	// thread the event callbacks run on.
+	KVM_StopMessagePump();
 	if (DESKTOP_HOOK != NULL)
 	{
 		UnhookWinEvent(DESKTOP_HOOK);
@@ -287,8 +306,6 @@ void KVM_UnInitMouseCursors()
 	{
 		UnhookWinEvent(CUR_HOOK);
 		CUR_HOOK = NULL;
-
-		KVM_StopMessagePump();
 	}
 }
 
@@ -401,7 +418,7 @@ DWORD WINAPI KVM_InitMessagePumpEx(LPVOID parm)
 void KVM_InitMessagePump()
 {
 	CUR_APCTHREAD = OpenThread(THREAD_SET_CONTEXT, FALSE, GetCurrentThreadId());
-	CUR_WORKTHREAD = CreateThread(NULL, 0, KVM_InitMessagePumpEx, NULL, 0, 0);
+	CUR_WORKTHREAD = CreateThread(NULL, 0, KVM_InitMessagePumpEx, NULL, 0, &CUR_WORKTHREADID);
 }
 
 void KVM_InitMouseCursors(void *pendingPackets)

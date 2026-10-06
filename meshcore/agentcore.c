@@ -282,6 +282,7 @@ static BOOL MeshAgent_RunNativeServiceFullInstall(struct MeshAgentHostContainer*
 			NULL,
 			NULL,
 			NULL,
+			NULL,
 			TRUE,
 			TRUE,
 			600000,
@@ -294,6 +295,7 @@ static BOOL MeshAgent_RunNativeServiceFullInstall(struct MeshAgentHostContainer*
 
 	if (MeshRuntimeHost_LaunchLifecycleHostW(
 			previouslyInstalled ? MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE : MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL,
+			NULL,
 			NULL,
 			NULL,
 			NULL,
@@ -323,6 +325,7 @@ static BOOL MeshAgent_RunNativeServiceFullUninstall(void)
 			NULL,
 			NULL,
 			NULL,
+			NULL,
 			TRUE,
 			TRUE,
 			600000,
@@ -334,6 +337,7 @@ static BOOL MeshAgent_RunNativeServiceFullUninstall(void)
 	// Treat a fully clean final state as success even if teardown reported a non-fatal error code.
 	if (MeshRuntimeHost_LaunchLifecycleHostW(
 			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
+			NULL,
 			NULL,
 			NULL,
 			NULL,
@@ -1760,6 +1764,7 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 				sourceDll,
 				displayName,
 				serviceDescription,
+				NULL,
 				TRUE,
 				FALSE,
 				0,
@@ -1787,6 +1792,7 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 			sourceDll,
 			displayName,
 			serviceDescription,
+			NULL,
 			TRUE,
 			TRUE,
 			600000,
@@ -1803,6 +1809,7 @@ static BOOL MeshAgent_RunNativeServiceFullUpdate(
 			NULL,
 			displayName,
 			serviceDescription,
+			NULL,
 			TRUE,
 			TRUE,
 			120000,
@@ -1839,6 +1846,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 			NULL,
 			NULL,
 			NULL,
+			NULL,
 			TRUE,
 			TRUE,
 			600000,
@@ -1862,6 +1870,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 
 	if (!MeshRuntimeHost_LaunchLifecycleHostW(
 			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_INSTALL,
+			NULL,
 			NULL,
 			NULL,
 			NULL,
@@ -2000,6 +2009,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 			updateDllPath,
 			NULL,
 			NULL,
+			NULL,
 			TRUE,
 			TRUE,
 			600000,
@@ -2017,6 +2027,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 
 	if (!MeshRuntimeHost_LaunchLifecycleHostW(
 			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UPDATE,
+			NULL,
 			NULL,
 			NULL,
 			NULL,
@@ -2106,6 +2117,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 			NULL,
 			NULL,
 			NULL,
+			NULL,
 			TRUE,
 			TRUE,
 			600000,
@@ -2117,6 +2129,7 @@ static BOOL MeshAgent_RunNativeRegression(struct MeshAgentHostContainer* agentHo
 
 	if (!MeshRuntimeHost_LaunchLifecycleHostW(
 			MESH_RUNTIME_HOST_LIFECYCLE_ACTION_VALIDATE_UNINSTALL,
+			NULL,
 			NULL,
 			NULL,
 			NULL,
@@ -3170,10 +3183,31 @@ ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(char *
 	return (ILibDuktape_DuplexStream_WriteData(ptrs->stream, buffer, bufferLen) == 0)
 		? ILibTransport_DoneState_COMPLETE : ILibTransport_DoneState_INCOMPLETE;
 }
+#if defined(_LINKVM) && defined(WIN32)
+// Number of viewers the desktop stream is currently piped to.
+static int ILibDuktape_MeshAgent_RemoteDesktop_PipedViewerCount(RemoteDesktop_Ptrs *ptrs)
+{
+	ILibDuktape_readableStream_nextWriteablePipe *w;
+	int count = 0;
+
+	if (ptrs == NULL || !ILibMemory_CanaryOK(ptrs) || ptrs->stream == NULL || ptrs->stream->readableStream == NULL) { return 0; }
+	for (w = ptrs->stream->readableStream->nextWriteable; w != NULL; w = w->next) { ++count; }
+	return count;
+}
+#endif
 ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_WriteSink(ILibDuktape_DuplexStream *stream, char *buffer, int bufferLen, void *user)
 {
 #ifdef _LINKVM
 #ifdef WIN32
+	if (buffer != NULL && bufferLen == 5 && ntohs(((unsigned short*)buffer)[0]) == MNG_KVM_PAUSE && buffer[4] != 0 &&
+		ILibDuktape_MeshAgent_RemoteDesktop_PipedViewerCount((RemoteDesktop_Ptrs*)user) > 1)
+	{
+		// The helper has a single pause flag shared by every viewer. The web viewer sends this when its
+		// tab is hidden; honoring it with other viewers attached freezes the desktop for all of them
+		// (and a viewer that disconnects while hidden would leave it frozen). A lone viewer still
+		// pauses capture as before.
+		return ILibTransport_DoneState_COMPLETE;
+	}
 	kvm_relay_feeddata(buffer, bufferLen, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, user);
 #else
 #ifdef __APPLE__
@@ -3375,7 +3409,7 @@ int ILibDuktape_MeshAgent_remoteDesktop_unshiftSink(ILibDuktape_DuplexStream *se
 	return(0);
 }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && defined(_LINKVM)
 duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop_DomainIPC_EndSink(duk_context *ctx)
 {
 	MeshAgent_sendConsoleText(ctx, "IPC Connection Closed...");
@@ -3397,6 +3431,7 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop_DomainIPC_EndSink(duk_context *
 			duk_get_prop_string(ctx, -1, MESH_AGENT_PTR);
 			MeshAgentHostContainer *agent = (MeshAgentHostContainer*)duk_get_pointer(ctx, -1);
 			ptrs->kvmPipe = kvm_relay_setup(agent->exePath, agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, console_uid);
+			if (ptrs->kvmPipe == NULL) { ILibDuktape_DuplexStream_WriteEnd(ptrs->stream); }
 		}
 	}
 	else
@@ -3567,8 +3602,13 @@ static int ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(RemoteDesktop_
 		KvmBridgeDebugSnapshot snapshot;
 		ULONGLONG now;
 		if (!kvm_bridge_debug_get_snapshot_for_reserved(ptrs, &snapshot)) { return 0; }
-		if (snapshot.childPresent == 0 || snapshot.transportActive == 0) { return 0; }
-		if (ptrs->stream->readableStream->paused != 0) { return 1; }
+		// No helper behind the stream is only stale when nothing will bring one back. During a normal
+		// respawn (helper exit, broken pipe, backoff retry) the relay recovers on its own; discarding
+		// the stream here instead would end it for every viewer already attached.
+		if ((snapshot.childPresent == 0 || snapshot.transportActive == 0) && snapshot.restartPending == 0) { return 0; }
+		if (snapshot.childPresent == 0 || snapshot.transportActive == 0) { return 1; }
+		// Backpressure, or a pause the viewers asked for: a healthy helper sends no pictures either way.
+		if (ptrs->stream->readableStream->paused != 0 || snapshot.viewerPaused != 0) { return 1; }
 		now = GetTickCount64();
 		if (snapshot.sessionStartTickMs != 0 &&
 			snapshot.lastScreenTickMs == 0 &&
@@ -3720,6 +3760,7 @@ duk_ret_t ILibDuktape_MeshAgent_getRemoteDesktop(duk_context *ctx)
 		else
 		{
 			ptrs->kvmPipe = kvm_relay_setup(agent->exePath, agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs, console_uid);
+			if (ptrs->kvmPipe == NULL) { ILibDuktape_DuplexStream_WriteEnd(ptrs->stream); }
 		}
 	#else
 		if (TSID != -1) 
@@ -5640,11 +5681,20 @@ static BOOL MeshServer_UpdateActivation_Sink(void *chain, HANDLE h, ILibWaitHand
 static int MeshServer_StartUpdateActivation(MeshAgentHostContainer *agent, WCHAR *updateFile)
 {
 	MeshServer_UpdateActivation *activation = (MeshServer_UpdateActivation*)malloc(sizeof(MeshServer_UpdateActivation));
+	WCHAR serviceNameW[256] = { 0 };
 	if (activation == NULL) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return 0; }
 	memset(activation, 0, sizeof(MeshServer_UpdateActivation));
 	activation->agent = agent;
 
-	if (!MeshRuntimeHost_StartLifecycleHostW(MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE, updateFile, NULL, NULL, NULL, FALSE, &(activation->launch)))
+	// The host resolves the target from branding unless told otherwise. An agent
+	// installed under an older or custom SCM name hands over its own identity so the
+	// host updates that service instead of discovering (or refusing) historical ones.
+	if (agent->meshServiceName != NULL && agent->meshServiceName[0] != 0 &&
+		MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, agent->meshServiceName, -1, serviceNameW, (int)_countof(serviceNameW)) <= 0)
+	{
+		serviceNameW[0] = 0;
+	}
+	if (!MeshRuntimeHost_StartLifecycleHostW(MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UPDATE, updateFile, NULL, NULL, NULL, serviceNameW[0] != 0 ? serviceNameW : NULL, FALSE, &(activation->launch)))
 	{
 		DWORD error = GetLastError();
 		free(activation);
@@ -6969,7 +7019,7 @@ void MeshServer_OnResponse(ILibWebClient_StateObject WebStateObject, int Interru
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user1;
 	MeshServer_ControlChannelRequestState *requestState = (MeshServer_ControlChannelRequestState*)user2;
 	int isTrackedControlChannelRequest = (requestState != NULL && agent->controlChannelRequest == requestState);
-	ILibChain_Link_SetMetadata(ILibChain_GetCurrentLink(agent->chain), "MeshServer_ControlChannel");
+	ILibChain_Link_SetMetadata(ILibChain_GetCurrentLink(agent->chain), ILibMemory_SmartAllocate_FromString("MeshServer_ControlChannel"));
 	
 	MeshAgent_ControlChannelDebugLog(agent, "MeshServer_OnResponse: recvStatus=%d interrupt=%d header=%s status=%d descriptor=%d begin=%d end=%d",
 		(int)recvStatus,
@@ -8659,7 +8709,16 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	if (fetchstate != 0)
 	{
 		duk_context *ctxx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, NULL, agentHost->exePath, NULL, MeshAgent_AgentInstallerCTX_Finalizer, agentHost);
-		duk_eval_string(ctxx, "require('_agentStatus').start();");
+		if (duk_peval_string(ctxx, "require('_agentStatus').start();") != 0 &&
+			strcmp(duk_safe_to_string(ctxx, -1), "Process.exit() forced script termination") != 0)
+		{
+			// Nothing else ends the chain after a status-probe exception. A process.exit()
+			// unwinds through here too; its own exit code reaches the finalizer.
+			printf("%s\n", duk_safe_to_string(ctxx, -1));
+			agentHost->exitCode = 1;
+			ILibStopChain(agentHost->chain);
+		}
+		duk_pop(ctxx);
 		return(1);
 	}
 	else if (preProtectionCaptureFlag != 0)

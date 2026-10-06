@@ -2324,9 +2324,16 @@ int ILibChain_WindowsSelect(void *chain, fd_set *readset, fd_set *writeset, fd_s
 	}
 	return(slct);
 }
+// Where the next overflowing wait walk starts, and when an overflow was last logged.
+static volatile LONG ILibChain_WaitRotation = 0;
+static ULONGLONG ILibChain_WaitOverflowLastLog = 0;
+#define ILibChain_WAIT_OVERFLOW_ROUND_MS 100
+
 void ILibChain_SetupWindowsWaitObject(HANDLE* waitList, int *waitListCount, struct timeval *tv, DWORD *timeout, fd_set *readset, fd_set *writeset, fd_set *errorset, ILibLinkedList handleList, HANDLE **onlyHandles)
 {
 	HANDLE selectHandles[FD_SETSIZE];
+	int waitCapacity, handleCount, nodeIndex, rotationPass;
+	int overflow = 0, rotationStart = 0;
 	memset(selectHandles, 0, sizeof(selectHandles));
 
 	if (readset->fd_count == 0 && writeset->fd_count == 0 && ILibLinkedList_GetNode_Head(handleList) == NULL)
@@ -2390,52 +2397,85 @@ void ILibChain_SetupWindowsWaitObject(HANDLE* waitList, int *waitListCount, stru
 	memcpy_s(&expirationTime, sizeof(struct timeval), &currentTime, sizeof(struct timeval));
 	expirationTime.tv_sec += tv->tv_sec;
 	expirationTime.tv_usec += tv->tv_usec;
-	node = ILibLinkedList_GetNode_Head(handleList);
-	while (node != NULL)
+	// WaitForMultipleObjectsEx() fails outright above 64 handles, so only that many fit. A fixed walk
+	// from the list head would hand the slots to the oldest handles every time and starve the newest
+	// (a freshly spawned helper's pipes and process handle) for as long as the overflow lasts. When
+	// the list does not fit, start each walk where the previous one stopped and cap the wait below,
+	// so every handle is waited on within a few short rounds.
+	waitCapacity = ((FD_SETSIZE < MAXIMUM_WAIT_OBJECTS) ? FD_SETSIZE : MAXIMUM_WAIT_OBJECTS) - x;
+	handleCount = (onlyHandles == NULL) ? (int)ILibLinkedList_GetCount(handleList) : 0;
+	if (waitCapacity > 0 && handleCount > waitCapacity)
 	{
-		if (onlyHandles != NULL)
+		ULONGLONG now = GetTickCount64();
+		overflow = 1;
+		rotationStart = (int)((unsigned long)ILibChain_WaitRotation % (unsigned long)handleCount);
+		InterlockedExchangeAdd(&ILibChain_WaitRotation, waitCapacity);
+		if (ILibChain_WaitOverflowLastLog == 0 || now - ILibChain_WaitOverflowLastLog >= 60000)
 		{
-			for (chkIndex = 0; onlyHandles[chkIndex] != NULL; ++chkIndex)
+			ILibChain_WaitOverflowLastLog = now;
+			ILibCriticalLog("[CHAIN_WAIT_OVERFLOW] wait handles exceed WaitForMultipleObjects capacity; rotating", __FILE__, __LINE__, handleCount, waitCapacity);
+		}
+	}
+	for (rotationPass = 0; rotationPass < 2; ++rotationPass)
+	{
+		nodeIndex = 0;
+		node = ILibLinkedList_GetNode_Head(handleList);
+		while (node != NULL)
+		{
+			if (overflow != 0 && ((rotationPass == 0 && nodeIndex < rotationStart) || (rotationPass == 1 && nodeIndex >= rotationStart)))
 			{
-				if ((HANDLE)ILibLinkedList_GetDataFromNode(node) == onlyHandles[chkIndex])
-				{
-					chkIndex = -1;
-					break;
-				}
-			}
-			if (chkIndex != -1)
-			{
+				++nodeIndex;
 				node = ILibLinkedList_GetNextNode(node);
 				continue;
 			}
-		}
-		if (i + 1 < FD_SETSIZE && x < MAXIMUM_WAIT_OBJECTS)	// WaitForMultipleObjectsEx() fails outright above 64 handles
-		{
-			i = x++;
-			if (waitList[i] != NULL && waitList[ILibChain_HandleInfoIndex(i)] == NULL)
+			++nodeIndex;
+			if (onlyHandles != NULL)
 			{
-				WSACloseEvent(waitList[i]);
-			}
-			waitList[i] = (HANDLE)ILibLinkedList_GetDataFromNode(node);
-			waitList[ILibChain_HandleInfoIndex(i)] = (HANDLE)ILibMemory_Extra(node);
-			if (((ILibChain_WaitHandleInfo*)ILibMemory_Extra(node))->expiration.tv_sec != 0 || ((ILibChain_WaitHandleInfo*)ILibMemory_Extra(node))->expiration.tv_usec != 0)
-			{
-				// Timeout was specified
-				if (tv2LTtv1(&expirationTime, &(((ILibChain_WaitHandleInfo*)ILibMemory_Extra(node))->expiration)))
+				for (chkIndex = 0; onlyHandles[chkIndex] != NULL; ++chkIndex)
 				{
-					expirationTime.tv_sec = ((ILibChain_WaitHandleInfo*)ILibMemory_Extra(node))->expiration.tv_sec;
-					expirationTime.tv_usec = ((ILibChain_WaitHandleInfo*)ILibMemory_Extra(node))->expiration.tv_usec;
-
-					// If the expiration happens in the past, we need to set the timeout to zero
-					if (tv2LTtv1(&expirationTime, &currentTime)) { expirationTime.tv_sec = currentTime.tv_sec; expirationTime.tv_usec = currentTime.tv_usec; }
+					if ((HANDLE)ILibLinkedList_GetDataFromNode(node) == onlyHandles[chkIndex])
+					{
+						chkIndex = -1;
+						break;
+					}
+				}
+				if (chkIndex != -1)
+				{
+					node = ILibLinkedList_GetNextNode(node);
+					continue;
 				}
 			}
+			if (i + 1 < FD_SETSIZE && x < MAXIMUM_WAIT_OBJECTS)	// WaitForMultipleObjectsEx() fails outright above 64 handles
+			{
+				i = x++;
+				if (waitList[i] != NULL && waitList[ILibChain_HandleInfoIndex(i)] == NULL)
+				{
+					WSACloseEvent(waitList[i]);
+				}
+				waitList[i] = (HANDLE)ILibLinkedList_GetDataFromNode(node);
+				waitList[ILibChain_HandleInfoIndex(i)] = (HANDLE)ILibMemory_Extra(node);
+				if (((ILibChain_WaitHandleInfo*)ILibMemory_Extra(node))->expiration.tv_sec != 0 || ((ILibChain_WaitHandleInfo*)ILibMemory_Extra(node))->expiration.tv_usec != 0)
+				{
+					// Timeout was specified
+					if (tv2LTtv1(&expirationTime, &(((ILibChain_WaitHandleInfo*)ILibMemory_Extra(node))->expiration)))
+					{
+						expirationTime.tv_sec = ((ILibChain_WaitHandleInfo*)ILibMemory_Extra(node))->expiration.tv_sec;
+						expirationTime.tv_usec = ((ILibChain_WaitHandleInfo*)ILibMemory_Extra(node))->expiration.tv_usec;
+
+						// If the expiration happens in the past, we need to set the timeout to zero
+						if (tv2LTtv1(&expirationTime, &currentTime)) { expirationTime.tv_sec = currentTime.tv_sec; expirationTime.tv_usec = currentTime.tv_usec; }
+					}
+				}
+			}
+			node = ILibLinkedList_GetNextNode(node);
 		}
-		node = ILibLinkedList_GetNextNode(node);
+		if (overflow == 0) { break; }
 	}
 	expirationTime.tv_sec -= currentTime.tv_sec; if (expirationTime.tv_sec < 0) { expirationTime.tv_sec = 0; }
 	expirationTime.tv_usec -= currentTime.tv_usec; if (expirationTime.tv_usec < 0) { expirationTime.tv_usec = 0; }
 	*timeout = (DWORD)((expirationTime.tv_sec * 1000) + (expirationTime.tv_usec * 0.001));
+	// Handles left out of this round can be signaled (or expire) without waking the wait.
+	if (overflow != 0 && *timeout > ILibChain_WAIT_OVERFLOW_ROUND_MS) { *timeout = ILibChain_WAIT_OVERFLOW_ROUND_MS; }
 	*waitListCount = x;
 }
 #endif

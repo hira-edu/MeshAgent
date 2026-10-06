@@ -58,6 +58,7 @@ typedef struct ILibDuktape_net_socket
 	void *chain;
 	void *OnSetTimeout;
 	int unshiftBytes;
+	int endPending;			// end() was called with bytes still queued in the socket; disconnect once they are sent
 	ILibDuktape_EventEmitter *emitter;
 #ifndef MICROSTACK_NOTLS
 	SSL_CTX *ssl_ctx;
@@ -82,6 +83,7 @@ typedef struct ILibDuktape_net_server_session
 	ILibDuktape_DuplexStream *stream;
 
 	int unshiftBytes;
+	int endPending;			// end() was called with bytes still queued in the socket; disconnect once they are sent
 }ILibDuktape_net_server_session;
 
 int ILibDuktape_TLS_ctx2socket = -1;
@@ -280,6 +282,13 @@ void ILibDuktape_net_socket_OnDisconnect(ILibAsyncSocket_SocketModule socketModu
 void ILibDuktape_net_socket_OnSendOK(ILibAsyncSocket_SocketModule socketModule, void *user)
 {
 	ILibDuktape_net_socket *ptrs = (ILibDuktape_net_socket*)((ILibChain_Link*)socketModule)->ExtraMemoryPtr;
+	if (ptrs->endPending != 0)
+	{
+		// The queue end() found non-empty has drained: close now, as end() would have.
+		ptrs->endPending = 0;
+		ILibAsyncSocket_Disconnect(ptrs->socketModule);
+		return;
+	}
 	ILibDuktape_DuplexStream_Ready((ILibDuktape_DuplexStream*)ptrs->duplexStream);
 }
 ILibTransport_DoneState ILibDuktape_net_socket_WriteHandler(ILibDuktape_DuplexStream *stream, char *buffer, int bufferLen, void *user)
@@ -298,6 +307,13 @@ ILibTransport_DoneState ILibDuktape_net_socket_WriteHandler(ILibDuktape_DuplexSt
 void ILibDuktape_net_socket_EndHandler(ILibDuktape_DuplexStream *stream, void *user)
 {
 	ILibDuktape_net_socket *ptrs = (ILibDuktape_net_socket*)user;
+	// Disconnect discards whatever is still queued to send, so end() after a write() that could not
+	// complete would truncate the tail. Let OnSendOK close the socket once the queue has drained.
+	if (ILibAsyncSocket_IsConnected(ptrs->socketModule) != 0 && ILibAsyncSocket_GetPendingBytesToSend(ptrs->socketModule) > 0)
+	{
+		ptrs->endPending = 1;
+		return;
+	}
 	ILibAsyncSocket_Disconnect(ptrs->socketModule);
 }
 void ILibDuktape_net_socket_PauseHandler(ILibDuktape_DuplexStream *sender, void *user)
@@ -525,7 +541,7 @@ duk_ret_t ILibDuktape_net_socket_connect(duk_context *ctx)
 			}
 			else
 			{
-				ILibChain_Link_SetMetadata(ptrs->socketModule, "net.ipcSocket");
+				ILibChain_Link_SetMetadata(ptrs->socketModule, ILibMemory_SmartAllocate_FromString("net.ipcSocket"));
 			}
 		}
 
@@ -715,7 +731,8 @@ void ILibDuktape_net_socket_PUSH(duk_context *ctx, ILibAsyncSocket_SocketModule 
 	ptrs->chain = ((ILibChain_Link*)module)->ParentChain;
 	ptrs->object = duk_get_heapptr(ctx, -1);
 	ptrs->socketModule = module;
-	ILibChain_Link_SetMetadata(module, "net.socket");
+	ptrs->endPending = 0;
+	ILibChain_Link_SetMetadata(module, ILibMemory_SmartAllocate_FromString("net.socket"));
 	duk_push_pointer(ctx, ptrs->socketModule); duk_put_prop_string(ctx, -2, ILibDuktape_ChainLinkPtr);
 
 	duk_push_pointer(ctx, ptrs);								// [obj][ptrs]
@@ -815,7 +832,16 @@ void ILibDuktape_net_server_EndSink(ILibDuktape_DuplexStream *stream, void *user
 	ILibDuktape_net_server_session *session = (ILibDuktape_net_server_session*)user;
 	if (!ILibMemory_CanaryOK(session)) { return; }
 
-	if (session->connection != NULL) { ILibAsyncServerSocket_Disconnect(NULL, session->connection); }
+	if (session->connection != NULL)
+	{
+		// Disconnect discards whatever is still queued to send; close from OnSendOK once it has drained.
+		if (ILibAsyncSocket_IsConnected(session->connection) != 0 && ILibAsyncSocket_GetPendingBytesToSend(session->connection) > 0)
+		{
+			session->endPending = 1;
+			return;
+		}
+		ILibAsyncServerSocket_Disconnect(NULL, session->connection);
+	}
 }
 void ILibDuktape_net_server_PauseSink(ILibDuktape_DuplexStream *sender, void *user)
 {
@@ -867,11 +893,11 @@ void ILibDuktape_net_server_OnConnect(ILibAsyncServerSocket_ServerModule AsyncSe
 	duk_push_heapptr(ptr->ctx, ptr->self);																					// [server]
 	if (strcmp(Duktape_GetStringPropertyValue(ptr->ctx, -1, ILibDuktape_OBJID, ""), "net.ipcServer") == 0)
 	{
-		((ILibChain_Link*)ConnectionToken)->MetaData = "net.ipcServer.ipcSocketConnection";
+		ILibChain_Link_SetMetadata(ConnectionToken, ILibMemory_SmartAllocate_FromString("net.ipcServer.ipcSocketConnection"));
 	}
 	else
 	{
-		((ILibChain_Link*)ConnectionToken)->MetaData = isTLS == 0 ? "net.serverSocketConnection" : "tls.serverSocketConnection";
+		ILibChain_Link_SetMetadata(ConnectionToken, ILibMemory_SmartAllocate_FromString(isTLS == 0 ? "net.serverSocketConnection" : "tls.serverSocketConnection"));
 	}
 
 	duk_get_prop_string(ptr->ctx, -1, "emit");																				// [server][emit]
@@ -960,6 +986,13 @@ void ILibDuktape_net_server_OnSendOK(ILibAsyncServerSocket_ServerModule AsyncSer
 	ILibDuktape_net_server_session *session = (ILibDuktape_net_server_session*)user;
 	if (!ILibMemory_CanaryOK(session)) { return; }
 
+	if (session->endPending != 0)
+	{
+		// The queue end() found non-empty has drained: close now, as end() would have.
+		session->endPending = 0;
+		if (session->connection != NULL) { ILibAsyncServerSocket_Disconnect(NULL, session->connection); }
+		return;
+	}
 	ILibDuktape_DuplexStream_Ready(session->stream);
 }
 
@@ -1609,7 +1642,7 @@ duk_ret_t ILibDuktape_net_server_listen(duk_context *ctx)
 			duk_dup(ctx, -1);												// [server][metadata][clone]
 			duk_put_prop_string(ctx, -3, ILibDuktape_net_server_metadata);	// [server][metadata]
 		}
-		ILibChain_Link_SetMetadata(server->server, (char*)duk_get_string(ctx, -1));
+		ILibChain_Link_SetMetadata(server->server, ILibMemory_SmartAllocate_FromString((char*)duk_get_string(ctx, -1)));
 		duk_pop(ctx);
 	}
 
@@ -2429,7 +2462,7 @@ duk_ret_t ILibDuktape_TLS_connect(duk_context *ctx)
 
 	ILibDuktape_net_socket_PUSH(ctx, module);													// [socket]
 	ILibDuktape_WriteID(ctx, "tls.socket");
-	ILibChain_Link_SetMetadata(module, "tls.socket")
+	ILibChain_Link_SetMetadata(module, ILibMemory_SmartAllocate_FromString("tls.socket"));
 #ifdef _SSL_KEYS_EXPORTABLE
 	ILibDuktape_CreateInstanceMethod(ctx, "_exportKeys", ILibDuktape_TLS_exportKeys, 0);
 #endif

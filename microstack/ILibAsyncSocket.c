@@ -66,6 +66,14 @@ limitations under the License.
 #define ILibAsyncSocket_LastSocketError() errno
 #endif
 
+// A paused socket is kept out of the select sets, so a peer FIN/RST would otherwise go unnoticed for as long
+// as the consumer stays paused. PostSelect peeks the socket at this interval instead (see ILibAsyncSocket_PostSelect).
+#define ILibAsyncSocket_PAUSED_PEER_PROBE_MS		5000
+#ifdef MICROSTACK_PROXY
+// Longest wait for the HTTP proxy's reply to CONNECT before the connection attempt is failed.
+#define ILibAsyncSocket_PROXY_CONNECT_TIMEOUT_MS	30000
+#endif
+
 #if defined(WIN32) && defined(WINSOCK2)
 // Windows defaults to two hours of idle before the first keep-alive probe, so a relay whose peer
 // vanished (a dead link, a sleeping laptop) stayed "connected" for hours. Probe after 60 s of idle and
@@ -193,6 +201,7 @@ typedef struct ILibAsyncSocketModule
 	int ProxyState;
 	char* ProxyUser;
 	char* ProxyPass;
+	long long ProxyDeadline;	// ILibGetUptime() by which the proxy must have answered CONNECT
 #endif
 
 	ILibAsyncSocket_OnData OnData;
@@ -219,6 +228,7 @@ typedef struct ILibAsyncSocketModule
 	struct ILibAsyncSocket_SendData *PendingSend_Head;
 	struct ILibAsyncSocket_SendData *PendingSend_Tail;
 	ILibSpinLock SendLock;
+	long long pausedProbeTick;	// ILibGetUptime() of the last peer-close probe while paused
 
 	int MaxBufferSize;
 	int MaxBufferSizeExceeded;
@@ -233,6 +243,9 @@ typedef struct ILibAsyncSocketModule
 	BIO *readBio, *writeBio;
 	BUF_MEM *readBioBuffer, *writeBioBuffer;
 	char readBioBuffer_mem[MEMORYCHUNKSIZE];
+	// Plaintext that SSL_write() refused with WANT_READ/WANT_WRITE (a handshake step is still outstanding).
+	// It is encrypted in order once the handshake progresses; see ILibAsyncSocket_TLSFlushPendingPlain().
+	struct ILibAsyncSocket_SendData *PendingPlain_Head, *PendingPlain_Tail;
 	int TLSHandshakeCompleted;
 #ifdef MICROSTACK_TLS_DETECT
 	int TLSChecked;
@@ -277,6 +290,9 @@ static void ILibAsyncSocket_RecordSendActivity(ILibAsyncSocketModule *module, in
 
 void ILibAsyncSocket_PostSelect(void* object,int slct, fd_set *readset, fd_set *writeset, fd_set *errorset);
 void ILibAsyncSocket_PreSelect(void* object,fd_set *readset, fd_set *writeset, fd_set *errorset, int* blocktime);
+#ifndef MICROSTACK_NOTLS
+static void ILibAsyncSocket_ClearPendingPlain(struct ILibAsyncSocketModule *module);
+#endif
 const int ILibMemory_ASYNCSOCKET_CONTAINERSIZE = (const int)sizeof(ILibAsyncSocketModule);
 
 typedef enum ILibAsyncSocket_TLSPlainText_ContentType
@@ -475,10 +491,12 @@ void ILibAsyncSocket_Destroy(void *socketModule)
 		free(current);
 		current = temp;
 	}
+	module->PendingSend_Head = module->PendingSend_Tail = NULL;
 
 	module->FinConnect = 0;
 	module->user = NULL;
 	#ifndef MICROSTACK_NOTLS
+	ILibAsyncSocket_ClearPendingPlain(module);
 	module->SSLConnect = 0;
 	#endif
 }
@@ -571,7 +589,74 @@ void ILibAsyncSocket_ClearPendingSend(ILibAsyncSocket_SocketModule socketModule)
 		free(data);
 		data = temp;
 	}
+#ifndef MICROSTACK_NOTLS
+	ILibAsyncSocket_ClearPendingPlain(module);
+#endif
 }
+
+#ifndef MICROSTACK_NOTLS
+// Drops plaintext still waiting for SSL_write(). Each copy lives in its node's extra memory, so one free() per node.
+static void ILibAsyncSocket_ClearPendingPlain(struct ILibAsyncSocketModule *module)
+{
+	struct ILibAsyncSocket_SendData *data = module->PendingPlain_Head, *temp;
+	module->PendingPlain_Head = module->PendingPlain_Tail = NULL;
+	while (data != NULL)
+	{
+		temp = data->Next;
+		free(data);
+		data = temp;
+	}
+}
+
+// Bytes not yet on the wire for a TLS socket: ciphertext still in the write BIO or pulled out of it into the
+// pending node, plus plaintext OpenSSL has not accepted yet. SendLock must be held and module->ssl valid.
+static unsigned int ILibAsyncSocket_TLSPendingBytes(struct ILibAsyncSocketModule *module)
+{
+	unsigned int r = (unsigned int)module->writeBioBuffer->length;
+	struct ILibAsyncSocket_SendData *data;
+	if (module->PendingSend_Head != NULL && module->PendingSend_Head->buffer != NULL && module->PendingSend_Head->bufferSize > module->PendingSend_Head->bytesSent)
+	{
+		r += (unsigned int)(module->PendingSend_Head->bufferSize - module->PendingSend_Head->bytesSent);
+	}
+	for (data = module->PendingPlain_Head; data != NULL; data = data->Next) { r += (unsigned int)data->bufferSize; }
+	return r;
+}
+
+// Copies plaintext that SSL_write() could not take yet, preserving send order. SendLock must be held.
+static void ILibAsyncSocket_TLSQueuePlain(struct ILibAsyncSocketModule *module, char *buffer, int bufferLen)
+{
+	struct ILibAsyncSocket_SendData *data = (struct ILibAsyncSocket_SendData*)ILibMemory_Allocate(sizeof(struct ILibAsyncSocket_SendData), bufferLen, NULL, NULL);
+	data->buffer = (char*)ILibMemory_GetExtraMemory(data, sizeof(struct ILibAsyncSocket_SendData));
+	data->bufferSize = bufferLen;
+	data->UserFree = ILibAsyncSocket_MemoryOwnership_BIO;	// Buffer is part of the node, never freed on its own
+	memcpy_s(data->buffer, bufferLen, buffer, bufferLen);
+	if (module->PendingPlain_Tail == NULL) { module->PendingPlain_Head = module->PendingPlain_Tail = data; }
+	else { module->PendingPlain_Tail->Next = data; module->PendingPlain_Tail = data; }
+}
+
+// Hands queued plaintext to SSL_write() in order. SendLock must be held and module->ssl valid.
+// Returns 1 when the queue drained, 0 when OpenSSL still needs a handshake step first (WANT_READ/WANT_WRITE:
+// the record stays queued and the same buffer is retried later, as OpenSSL requires), -1 on a fatal TLS error.
+static int ILibAsyncSocket_TLSFlushPendingPlain(struct ILibAsyncSocketModule *module)
+{
+	struct ILibAsyncSocket_SendData *data;
+	while ((data = module->PendingPlain_Head) != NULL)
+	{
+		int tlsResult = SSL_write(module->ssl, data->buffer, data->bufferSize);
+		if (tlsResult <= 0)
+		{
+			int tlsError = SSL_get_error(module->ssl, tlsResult);
+			if (tlsError == SSL_ERROR_WANT_READ || tlsError == SSL_ERROR_WANT_WRITE) { return 0; }
+			ILibAsyncSocket_RecordFailure(module, "tls_write", 0, tlsError, ERR_peek_last_error());
+			return -1;
+		}
+		module->PendingPlain_Head = data->Next;
+		if (module->PendingPlain_Head == NULL) { module->PendingPlain_Tail = NULL; }
+		free(data);	// The plaintext copy lives in the node's extra memory
+	}
+	return 1;
+}
+#endif
 
 void ILibAsyncSocket_SendError(ILibAsyncSocket_SocketModule socketModule)
 {
@@ -619,41 +704,74 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 	int notok = 0;
 
 	va_list vlist;
-	va_start(vlist, count); 
-	
+	va_start(vlist, count);
+
+	// Take the lock before looking at module->ssl: Disconnect() tears the SSL object down under this lock,
+	// so testing it first and locking second could use a freed SSL object from another thread.
+	if (lockOverride == 0) { ILibSpinLock_Lock(&(module->SendLock)); }
 #ifndef MICROSTACK_NOTLS
 	if (module->ssl != NULL)
 	{
-		if (lockOverride == 0) { ILibSpinLock_Lock(&(module->SendLock)); }
-		
+		int tlsFatal = 0;
+
 		for (vi = 0; vi < count; ++vi)
 		{
 			buffer = va_arg(vlist, char*);
 			bufferLen = va_arg(vlist, size_t);
 			UserFree = va_arg(vlist, ILibAsyncSocket_MemoryOwnership);
 
-			if (bufferLen > INT32_MAX || notok != 0)
+			if (bufferLen > INT32_MAX || notok != 0 || tlsFatal != 0)
 			{
 				if (UserFree == ILibAsyncSocket_MemoryOwnership_CHAIN) { free(buffer); }
-				notok = 1;
+				if (tlsFatal == 0) { notok = 1; }
+				continue;
+			}
+			if (bufferLen == 0)
+			{
+				// Nothing to encrypt; SSL_write() with a zero length produces no record either
+				if (UserFree == ILibAsyncSocket_MemoryOwnership_CHAIN) { free(buffer); }
+				continue;
+			}
+			if (module->PendingPlain_Head != NULL)
+			{
+				// Earlier plaintext is still waiting on a handshake step: queue behind it so the stream stays in order
+				ILibAsyncSocket_TLSQueuePlain(module, buffer, (int)bufferLen);
+				if (UserFree == ILibAsyncSocket_MemoryOwnership_CHAIN) { free(buffer); }
 				continue;
 			}
 
 			SSL_TRACE1("SSL_write()");
 			int tlsResult = SSL_write(module->ssl, buffer, (int)bufferLen); // No dataloss, becuase we capped at INT32_MAX
-			if (bufferLen > 0 && tlsResult <= 0)
+			if (tlsResult <= 0)
 			{
 				int tlsError = SSL_get_error(module->ssl, tlsResult);
-				if (tlsError != SSL_ERROR_WANT_READ && tlsError != SSL_ERROR_WANT_WRITE) { ILibAsyncSocket_RecordFailure(module, "tls_write", 0, tlsError, ERR_peek_last_error()); }
+				if (tlsError == SSL_ERROR_WANT_READ || tlsError == SSL_ERROR_WANT_WRITE)
+				{
+					// OpenSSL took none of this record (a handshake step must complete first). Hold the plaintext
+					// and retry it from the read path; dropping it here desynchronised the application stream.
+					ILibAsyncSocket_TLSQueuePlain(module, buffer, (int)bufferLen);
+				}
+				else
+				{
+					// The TLS session is unusable. Drop the remaining buffers and close the socket below instead of
+					// reporting a successful send that never happened.
+					ILibAsyncSocket_RecordFailure(module, "tls_write", 0, tlsError, ERR_peek_last_error());
+					tlsFatal = 1;
+				}
 			}
 			SSL_TRACE2("SSL_write()");
 			TLSLOG1("SSL_write[%d]: %d bytes...\n", module->internalSocket, bufferLen);
 
 			if (UserFree == ILibAsyncSocket_MemoryOwnership_CHAIN) { free(buffer); }
 		}
-		va_end(vlist); 
-	
-		if (notok == 0)
+		va_end(vlist);
+
+		if (tlsFatal != 0)
+		{
+			retVal = ILibAsyncSocket_SEND_ON_CLOSED_SOCKET_ERROR;
+			ILibAsyncSocket_SendError(module);
+		}
+		else if (notok == 0)
 		{
 			if (module->PendingSend_Tail == NULL)
 			{
@@ -684,7 +802,7 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 							memcpy_s(module->PendingSend_Head->buffer, module->PendingSend_Head->bufferSize, module->writeBioBuffer->data + bytesSent, module->PendingSend_Head->bufferSize);
 
 							module->TotalBytesSent += bytesSent;
-							module->PendingBytesToSend = (unsigned int)(module->PendingSend_Head->bufferSize);
+							module->PendingBytesToSend = ILibAsyncSocket_TLSPendingBytes(module);
 							ILibAsyncSocket_RecordSendActivity(module, bytesSent);
 							TLSLOG1("   --> BUFFERING[%d]: %d bytes...\n", module->internalSocket, module->PendingSend_Head->bufferSize);
 
@@ -692,6 +810,8 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 						}
 						else if (bytesSent < 0)
 						{
+							// Nothing left the write BIO yet, so everything in it is still pending
+							module->PendingBytesToSend = ILibAsyncSocket_TLSPendingBytes(module);
 							TLSLOG1("   -- > [INCOMPLETE] Accumulated into BIOBUFFER[%d]\n", module->internalSocket);
 						}
 						retVal = ILibAsyncSocket_NOT_ALL_DATA_SENT_YET;
@@ -701,7 +821,7 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 						retVal = ILibAsyncSocket_ALL_DATA_SENT;
 						ignore_result(BIO_reset(module->writeBio));
 						module->TotalBytesSent += bytesSent;
-						module->PendingBytesToSend = (unsigned int)(module->writeBioBuffer->length);
+						module->PendingBytesToSend = ILibAsyncSocket_TLSPendingBytes(module);
 						ILibAsyncSocket_RecordSendActivity(module, bytesSent);
 						TLSLOG1("   --> COMPLETE[%d]\n", module->internalSocket);
 					}
@@ -713,17 +833,23 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 				}
 				else
 				{
-					// Something went wrong
-					retVal = ILibAsyncSocket_SEND_ON_CLOSED_SOCKET_ERROR;
-					ILibAsyncSocket_SendError(module);
+					// No ciphertext was produced: either every buffer was empty, or the plaintext is held until the
+					// handshake step in progress completes. Neither is a socket failure.
+					retVal = ILibAsyncSocket_ALL_DATA_SENT;
 				}
 			}
 			else
 			{
 				// Send will happen in ILibAsyncSocket_PostSelect()
 				retVal = ILibAsyncSocket_NOT_ALL_DATA_SENT_YET;
-				module->PendingBytesToSend = (unsigned int)(module->writeBioBuffer->length);
+				module->PendingBytesToSend = ILibAsyncSocket_TLSPendingBytes(module);
 				TLSLOG1("   --> [IN PROGRESS] Accumulated into BIOBUFFER[%d]...\n", module->internalSocket);
+			}
+			if (module->PendingPlain_Head != NULL)
+			{
+				// Held plaintext has not been sent, whatever happened to the ciphertext already produced
+				retVal = ILibAsyncSocket_NOT_ALL_DATA_SENT_YET;
+				module->PendingBytesToSend = ILibAsyncSocket_TLSPendingBytes(module);
 			}
 		}
 		else
@@ -738,15 +864,14 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 	}
 #endif
 
-	// If we got here, we aren't doing TLS
-	if (lockOverride == 0) { ILibSpinLock_Lock(&(module->SendLock)); }
+	// If we got here, we aren't doing TLS (SendLock is already held)
 	if (module->internalSocket == ~0)
 	{
 		// Too Bad, the socket closed
 		for (vi = 0; vi < count; ++vi)
 		{
 			buffer = va_arg(vlist, char*);
-			bufferLen = va_arg(vlist, int);
+			bufferLen = va_arg(vlist, size_t);	// Callers pass size_t (see the ILibAsyncSocket_Send macros)
 			UserFree = va_arg(vlist, ILibAsyncSocket_MemoryOwnership);
 			if (UserFree == ILibAsyncSocket_MemoryOwnership_CHAIN) { free(buffer); }
 		}
@@ -764,6 +889,13 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 		if (bufferLen > INT32_MAX || notok != 0)
 		{
 			notok = 1;
+			if (UserFree == ILibAsyncSocket_MemoryOwnership_CHAIN) { free(buffer); }
+			continue;
+		}
+		if (bufferLen == 0 && (remoteAddress == NULL || remoteAddress->sa_family == AF_UNIX) && (module->PendingSend_Tail != NULL || module->FinConnect == 0))
+		{
+			// An empty stream write has nothing to deliver. Queued, it would come back from send() as 0 bytes in
+			// PostSelect, which that path reads as a dead connection and answers by discarding the whole queue.
 			if (UserFree == ILibAsyncSocket_MemoryOwnership_CHAIN) { free(buffer); }
 			continue;
 		}
@@ -800,7 +932,10 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_SendTo_MultiWrite(ILibAsyncSocket_Soc
 		}
 		else if (module->PendingSend_Tail == NULL && module->FinConnect != 0)
 		{
-			// No pending data, so we can try to send now
+			// No pending data, so we can try to send now. Count the whole buffer as pending first: the
+			// bytes that do go out are subtracted below, so a partial or would-block send leaves the queued
+			// remainder correctly reported by ILibAsyncSocket_GetPendingBytesToSend().
+			module->PendingBytesToSend += (unsigned int)bufferLen;
 			if (remoteAddress == NULL || remoteAddress->sa_family == AF_UNIX)
 			{
 				// Set MSG_NOSIGNAL since we don't want to get Broken Pipe signals in Linux, ignored if Windows.
@@ -910,11 +1045,20 @@ void ILibAsyncSocket_Disconnect(ILibAsyncSocket_SocketModule socketModule)
 	wasssl = module->ssl;
 	if (module->ssl != NULL)
 	{
+		// Keep SendLock across the teardown: a sender on another thread tests module->ssl under this lock
+		// (ILibAsyncSocket_SendTo_MultiWrite), so it must never observe a non-NULL pointer to a freed object.
+		// SSL_free() on memory BIOs is plain deallocation and calls back into nothing here.
 		SSL_TRACE1("ILibAsyncSocket_Disconnect()");
-		SSL_shutdown(module->ssl);
-		ILibSpinLock_UnLock(&(module->SendLock));
+		SSL_shutdown(module->ssl); // Writes a close_notify alert into the write BIO
+		// Flush the close_notify (and any ciphertext still queued) before the socket is torn down, so the peer sees
+		// a clean TLS shutdown instead of a bare TCP close. Best effort and non-blocking: the socket is O_NONBLOCK,
+		// and whatever cannot go out immediately is dropped when the BIOs are freed just below.
+		if (module->writeBioBuffer != NULL && module->writeBioBuffer->length > 0 && module->internalSocket != (SOCKET)~0)
+		{
+			BIO_clear_retry_flags(module->writeBio);
+			ignore_result(send(module->internalSocket, module->writeBioBuffer->data, (int)(module->writeBioBuffer->length), MSG_NOSIGNAL));
+		}
 		SSL_free(module->ssl); // Frees SSL session and both BIO buffers at the same time
-		ILibSpinLock_Lock(&(module->SendLock));
 		module->ssl = NULL;
 		SSL_TRACE2("ILibAsyncSocket_Disconnect()");
 	}
@@ -1209,6 +1353,7 @@ void ILibAsyncSocket_ConnectToProxyEx(void* socketModule, struct sockaddr *local
 ILibAsyncSocket_SendStatus ILibAsyncSocket_ProcessEncryptedBuffer(ILibAsyncSocketModule *Reader)
 {
 	int j;
+	int failed = 0;
 	ILibAsyncSocket_SendData *data;
 	ILibAsyncSocket_SendStatus retVal = ILibAsyncSocket_SEND_ON_CLOSED_SOCKET_ERROR;
 
@@ -1233,9 +1378,28 @@ ILibAsyncSocket_SendStatus ILibAsyncSocket_ProcessEncryptedBuffer(ILibAsyncSocke
 				if (j < 0)
 				{
 					int error = ILibAsyncSocket_LastSocketError();
-					if (!ILibAsyncSocket_SendErrorIsTransient(error)) { ILibAsyncSocket_RecordFailure(Reader, "tls_flush", error, 0, 0); }
+					if (!ILibAsyncSocket_SendErrorIsTransient(error))
+					{
+						// The flight cannot be delivered: fail the connection the way PostSelect does for a
+						// send error, rather than leaving a half-done handshake waiting for a reply that cannot come.
+						ILibAsyncSocket_RecordFailure(Reader, "tls_flush", error, 0, 0);
+						ILibAsyncSocket_ClearPendingSend(Reader);
+						ILibLifeTime_Add(Reader->LifeTime, Reader, 0, &ILibAsyncSocket_Disconnect, NULL);
+						j = 1;	// Fully handled; skip the queueing below
+					}
 				}
-				if (j > 0)
+				if (j <= 0)
+				{
+					// Would-block with the whole flight still in the write BIO. PreSelect only arms the writeset while
+					// a pending node exists, so queue an (empty) BIO node or the flight sits there until the peer
+					// happens to send something, which during a handshake it never will.
+					data = (ILibAsyncSocket_SendData*)ILibMemory_Allocate(sizeof(ILibAsyncSocket_SendData), 0, NULL, NULL);
+					data->UserFree = ILibAsyncSocket_MemoryOwnership_BIO;
+					Reader->PendingSend_Head = Reader->PendingSend_Tail = data;
+					Reader->PendingBytesToSend = ILibAsyncSocket_TLSPendingBytes(Reader);
+					retVal = ILibAsyncSocket_NOT_ALL_DATA_SENT_YET;
+				}
+				else
 				{
 					if (j < (int)(Reader->writeBioBuffer->length))
 					{
@@ -1423,8 +1587,35 @@ void ILibProcessAsyncSocket(struct ILibAsyncSocketModule *Reader, int pendingRea
 						{
 							ILibAsyncSocket_ProcessEncryptedBuffer(Reader);
 						}
+						// A peer close_notify (ZERO_RETURN) or a fatal TLS error ends the session. Drive the graceful
+						// close path below (bytesReceived<=0) instead of leaving a dead TLS socket open and readable.
+						if (sslerror == SSL_ERROR_ZERO_RETURN || sslerror == SSL_ERROR_SSL || sslerror == SSL_ERROR_SYSCALL)
+						{
+							bytesReceived = 0;
+						}
 					}
 					SSL_TRACE2("SSL_read()");
+				}
+				// Plaintext that SSL_write() held for a handshake step may now be acceptable. Encrypt it in order,
+				// then hand the resulting ciphertext to the normal pending-send path so the actual send and the
+				// OnSendOK notification happen in PostSelect (not from a user callback fired mid-read). A fatal TLS
+				// error here closes the socket the same way a send error does.
+				if (Reader->TLSHandshakeCompleted == 1 && Reader->ssl != NULL && Reader->PendingPlain_Head != NULL && bytesReceived > 0)
+				{
+					int fr;
+					ILibSpinLock_Lock(&(Reader->SendLock));
+					fr = ILibAsyncSocket_TLSFlushPendingPlain(Reader);
+					if (fr >= 0 && Reader->writeBioBuffer->length > 0 && Reader->PendingSend_Head == NULL)
+					{
+						// Arm the writeset via a pending node so PostSelect drains the writeBio and fires OnSendOK.
+						ILibAsyncSocket_SendData *pdata = (ILibAsyncSocket_SendData*)ILibMemory_Allocate(sizeof(ILibAsyncSocket_SendData), 0, NULL, NULL);
+						pdata->UserFree = ILibAsyncSocket_MemoryOwnership_BIO;
+						Reader->PendingSend_Head = Reader->PendingSend_Tail = pdata;
+						Reader->PendingBytesToSend = ILibAsyncSocket_TLSPendingBytes(Reader);
+					}
+					ILibSpinLock_UnLock(&(Reader->SendLock));
+					if (fr < 0) { ILibLifeTime_Add(Reader->LifeTime, Reader, 0, &ILibAsyncSocket_Disconnect, NULL); }
+					else { ILibForceUnBlockChain(Reader->Transport.ChainLink.ParentChain); }
 				}
 			}
 			if (Reader->readBioBuffer->length == 0)
@@ -1719,6 +1910,63 @@ void ILibAsyncSocket_PreSelect(void* socketModule,fd_set *readset, fd_set *write
 		}
 
 		if (module->PAUSE < 0) *blocktime = 0;
+
+#ifdef MICROSTACK_PROXY
+		// Enforce the proxy CONNECT timeout. The reply is awaited via the readset, so without this a proxy that
+		// never answers would keep the attempt alive until some outer idle timeout (or forever).
+		if (module->ProxyState == 1 && module->ProxyDeadline != 0)
+		{
+			long long nowp = ILibGetUptime();
+			if (nowp >= module->ProxyDeadline)
+			{
+				ILibAsyncSocket_RecordFailure(module, "proxy_connect", 0, 0, 0);
+				module->ProxyDeadline = 0;
+				ILibLifeTime_Add(module->LifeTime, socketModule, 0, &ILibAsyncSocket_Disconnect, NULL);
+			}
+			else if (*blocktime > (int)(module->ProxyDeadline - nowp))
+			{
+				*blocktime = (int)(module->ProxyDeadline - nowp);
+			}
+		}
+#endif
+
+		// A paused socket is kept out of the read and error sets, so a peer FIN/RST would otherwise go unnoticed
+		// until some other timeout. Peek the socket at a bounded interval to detect a vanished peer while paused.
+		if (module->PAUSE > 0 && module->FinConnect > 0 && module->internalSocket != ~0)
+		{
+			long long nowp = ILibGetUptime();
+			if (module->pausedProbeTick == 0) { module->pausedProbeTick = nowp; }
+			if (nowp - module->pausedProbeTick >= ILibAsyncSocket_PAUSED_PEER_PROBE_MS)
+			{
+				char probeByte;
+				int pr = 1;
+				int soType = 0;
+#ifdef WIN32
+				int soTypeLen = sizeof(soType);
+#else
+				socklen_t soTypeLen = sizeof(soType);
+#endif
+				// Only a stream socket signals a closed peer this way. UDP sockets also run through this module
+				// (ILibAsyncUDPSocket), where a 1-byte peek of a larger datagram fails with WSAEMSGSIZE and a
+				// zero-length datagram reads as 0: neither is a disconnect.
+				if (getsockopt(module->internalSocket, SOL_SOCKET, SO_TYPE, (char*)&soType, &soTypeLen) == 0 && soType == SOCK_STREAM)
+				{
+					pr = (int)recv(module->internalSocket, &probeByte, 1, MSG_PEEK | MSG_NOSIGNAL);
+				}
+				module->pausedProbeTick = nowp;
+				if (pr == 0 || (pr < 0 && !ILibAsyncSocket_RecvErrorIsTransient(ILibAsyncSocket_LastSocketError())))
+				{
+					ILibAsyncSocket_RecordFailure(module, pr == 0 ? "peer_eof" : "receive", pr == 0 ? 0 : ILibAsyncSocket_LastSocketError(), 0, 0);
+					ILibLifeTime_Add(module->LifeTime, socketModule, 0, &ILibAsyncSocket_Disconnect, NULL);
+				}
+			}
+			if (*blocktime > ILibAsyncSocket_PAUSED_PEER_PROBE_MS) { *blocktime = ILibAsyncSocket_PAUSED_PEER_PROBE_MS; }
+		}
+		else if (module->PAUSE <= 0)
+		{
+			module->pausedProbeTick = 0; // Reset so a future pause starts a fresh probe interval
+		}
+
 		if (module->FinConnect == 0)
 		{
 			// Not Connected Yet
@@ -1889,24 +2137,59 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 	}
 
 	#ifdef MICROSTACK_PROXY
-	// Handle proxy, we need to read the proxy response, all of it and not a byte more.
+	// Handle proxy, we need to read the proxy response. The reply can span several TCP segments, so accumulate
+	// into the receive buffer until the full header block arrives instead of demanding it in one recv().
 	if (module->FinConnect == 1 && module->ProxyState == 1 && serr == 0 && fd_read != 0 && module->RemoteAddress.sin6_family != AF_UNIX)
 	{
 		char *ptr1, *ptr2;
 		int len2;
 		int slen = sizeof(struct sockaddr_in6);
-		serr = 555; // Fake proxy error
-		len2 = recvfrom(module->internalSocket, ILibScratchPad2, 1024, 0, (struct sockaddr*)&(module->SourceAddress), (socklen_t*)&slen);
-		if (len2 > 0 && len2 < 1024)
+		// Reserve one byte for the NUL terminator used by strstr below.
+		int space = module->MallocSize - module->EndPointer - 1;
+		if (space <= 0)
 		{
-			ILibScratchPad2[len2] = 0;
-			ptr1 = strstr(ILibScratchPad2, "\r\n\r\n");
-			ptr2 = strstr(ILibScratchPad2, " 200 ");
-			if (ptr1 != NULL && ptr2 != NULL && ptr2 < ptr1)
+			serr = 555; // Header block larger than the buffer: treat the proxy as having failed.
+		}
+		else
+		{
+			len2 = recvfrom(module->internalSocket, module->buffer + module->EndPointer, space, 0, (struct sockaddr*)&(module->SourceAddress), (socklen_t*)&slen);
+			if (len2 > 0)
 			{
-				module->FinConnect = 0; // Let pretend we never connected, this will trigger all the connection stuff.
-				module->ProxyState = 2; // Move the proxy connection state forward.
-				serr = 0;				// Proxy connected collectly.
+				module->EndPointer += len2;
+				module->buffer[module->EndPointer] = 0;
+				ptr1 = strstr(module->buffer, "\r\n\r\n");
+				if (ptr1 != NULL)
+				{
+					// Full status line + headers received.
+					ptr2 = strstr(module->buffer, " 200 ");
+					if (ptr2 != NULL && ptr2 < ptr1)
+					{
+						module->FinConnect = 0;	// Pretend we never connected; this re-triggers all the connection stuff.
+						module->ProxyState = 2;	// Move the proxy connection state forward.
+						module->ProxyDeadline = 0;
+						module->BeginPointer = module->EndPointer = 0;	// Discard the proxy reply before the real session
+						serr = 0;				// Proxy connected correctly.
+					}
+					else
+					{
+						serr = 555;				// Non-2xx final response from the proxy.
+					}
+				}
+				else if (module->EndPointer >= module->MallocSize - 1)
+				{
+					serr = 555;					// Buffer full without a complete header block.
+				}
+				// else: headers still incomplete. Leave serr == 0, FinConnect/ProxyState unchanged, and wait for
+				// more data on the next readable event (the connect-complete and write paths stay inert meanwhile).
+			}
+			else if (len2 == 0)
+			{
+				serr = 555;						// Proxy closed the connection before answering.
+			}
+			else
+			{
+				int perr = ILibAsyncSocket_LastSocketError();
+				if (!ILibAsyncSocket_RecvErrorIsTransient(perr)) { serr = 555; }
 			}
 		}
 	}
@@ -1994,9 +2277,10 @@ void ILibAsyncSocket_PostSelect(void* socketModule, int slct, fd_set *readset, f
 					module->timeout_lastActivity = ILibGetUptime();
 					send(module->internalSocket, ILibScratchPad2, len2, MSG_NOSIGNAL); // Klockwork says this could block, but it can't becuase socket was set to nonblock
 					module->ProxyState = 1;
-					// TODO: Set timeout. If the proxy does not respond, we need to close this connection.
-					// On the other hand... This is not generally a problem, proxies will disconnect after a timeout anyway.
-					
+					// Bound the wait for the proxy's reply. PreSelect fails the connection once this passes, so a
+					// silent or stalled proxy no longer wedges the attempt indefinitely.
+					module->ProxyDeadline = ILibGetUptime() + ILibAsyncSocket_PROXY_CONNECT_TIMEOUT_MS;
+
 					ILibSpinLock_UnLock(&(module->SendLock));
 					return;
 				}

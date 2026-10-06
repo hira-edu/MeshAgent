@@ -71,6 +71,7 @@ void BreakSink(int s)
 
 #if defined(_LINKVM) && defined(__APPLE__)
 extern void* kvm_server_mainloop(void *parm);
+extern int MacKvm_InitializeSessionUser(const char *uid);
 extern void senddebug(int val);
 ILibTransport_DoneState kvm_serviceWriteSink(char *buffer, int bufferLen, void *reserved)
 {
@@ -147,15 +148,16 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 		integratedJavaScript = NULL;
 		integratedJavaScriptLen = ILibBase64Decode((unsigned char *)argv[2], (const int)strnlen_s(argv[2], sizeof(ILibScratchPad2)), (unsigned char**)&integratedJavaScript);
 	}
+	// A script exception does not end the process, so these probes must always reach process.exit().
 	if (argc > 1 && strcasecmp(argv[1], "-nodeid") == 0 && integratedJavaScriptLen == 0)
 	{
-		char script[] = "console.log(require('_agentNodeId')());process.exit();";
+		char script[] = "try{console.log(require('_agentNodeId')());process.exit();}catch(e){process.stderr.write('Unable to resolve the agent node id: '+e+'\\n');process.exit(1);}";
 		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
 		integratedJavaScriptLen = (int)sizeof(script) - 1;
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-name") == 0 && integratedJavaScriptLen == 0)
 	{
-		char script[] = "console.log(require('_agentNodeId').serviceName());process.exit();";
+		char script[] = "var n=null;try{n=require('_agentNodeId').serviceName();}catch(e){n=null;}if(n==null||n==''){process.stderr.write('Unable to resolve the installed agent service name.\\n');process.exit(1);}console.log(n);process.exit();";
 		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
 		integratedJavaScriptLen = (int)sizeof(script) - 1;
 	}
@@ -277,6 +279,12 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 #if defined(_LINKVM) && defined(__APPLE__)
 	if (argc > 1 && strcasecmp(argv[1], "-kvm0") == 0)
 	{
+		if ((argc != 2 && (argc != 4 || strcmp(argv[2], "--session-uid") != 0)) ||
+			MacKvm_InitializeSessionUser(argc == 4 ? argv[3] : NULL) != 0)
+		{
+			fprintf(stderr, "KVM session user initialization failed\n");
+			return 1;
+		}
 		kvm_server_mainloop(NULL);
 		return 0;
 	}
@@ -330,17 +338,30 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 	{
 		if (argc >= 2 && strnlen_s(argv[1], 9) >= 8 && strncmp(argv[1], "-update:", 8) == 0)
 		{
-			ILibMemory_AllocateRaw(integratedJavaScript, 1024);
+			// The option payload is caller supplied; size the script for it and escape it as a
+			// JavaScript string literal. A fixed 1 KiB buffer failed on long base64 option lists.
+			char *updateArg = argc > 2 ? argv[2] : NULL;
+			size_t updateArgLen = updateArg != NULL ? strnlen_s(updateArg, 1048576) : 0;
+			size_t scriptSize = (updateArgLen * 2) + 128;
+			size_t ai, si;
+			ILibMemory_AllocateRaw(integratedJavaScript, scriptSize);
 			if (argv[1][8] == '*')
 			{
 				// New Style
-				integratedJavaScriptLen = sprintf_s(integratedJavaScript, 1024, "require('agent-installer').update(false, '%s');", argc > 2 ? argv[2] : "null");
+				si = (size_t)sprintf_s(integratedJavaScript, scriptSize, "require('agent-installer').update(false, %s", updateArg != NULL ? "'" : "null");
 			}
 			else
 			{
 				// Legacy
-				integratedJavaScriptLen = sprintf_s(integratedJavaScript, 1024, "require('agent-installer').update(false, ['%s']);", argc > 2 ? argv[2] : "");
+				si = (size_t)sprintf_s(integratedJavaScript, scriptSize, "require('agent-installer').update(false, ['");
 			}
+			for (ai = 0; ai < updateArgLen; ++ai)
+			{
+				if (updateArg[ai] == '\\' || updateArg[ai] == '\'') { integratedJavaScript[si++] = '\\'; }
+				integratedJavaScript[si++] = updateArg[ai];
+			}
+			si += (size_t)sprintf_s(integratedJavaScript + si, scriptSize - si, "%s);", argv[1][8] == '*' ? (updateArg != NULL ? "'" : "") : "']");
+			integratedJavaScriptLen = (int)si;
 		}
 	}
 #ifdef WIN32

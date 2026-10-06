@@ -1,14 +1,15 @@
 #include "mac_events.h"
+#include "mac_hid.h"
 #include <assert.h>
 #include <SystemConfiguration/SystemConfiguration.h>
 #include <string.h>
 #include "../../../microstack/ILibParsers.h"
 #include "../../meshdefines.h"
 
-static const int g_keymapLen = 114; // Modify this when you change anything in g_keymap.
 static int g_capsLock = 0;
 static int g_lMouseDown = 0;
 static int g_rMouseDown = 0;
+static int g_mMouseDown = 0;
 
 static struct keymap_t g_keymap[] = {
 	{ kVK_Space,		 VK_SPACE },
@@ -126,6 +127,7 @@ static struct keymap_t g_keymap[] = {
 	{ kVK_ANSI_RightBracket,	   VK_OEM_6 },
 	{ kVK_ANSI_Quote,	   VK_OEM_7 }
 };
+static const int g_keymapLen = (int)(sizeof(g_keymap) / sizeof(g_keymap[0]));
 extern int KVM_SEND(char *buffer, int bufferLen);
 
 void kvm_server_sendmsg(char *msg)
@@ -164,7 +166,10 @@ char* getCurrentSession() {
 	return buf;
 }
 
-void MouseAction(double absX, double absY, int button, short wheel)
+extern int SCREEN_WIDTH;
+extern int SCREEN_HEIGHT;
+
+static void MouseAction_CGEvent(double absX, double absY, int button, short wheel)
 {
 	CGPoint curPos;
 	CGEventRef e;
@@ -175,20 +180,25 @@ void MouseAction(double absX, double absY, int button, short wheel)
 	curPos.y = absY;
 
 	source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-	
-	
-	if (g_lMouseDown || g_rMouseDown) {
-		event = g_lMouseDown ? kCGEventLeftMouseDragged : kCGEventRightMouseDragged;
-		e = CGEventCreateMouseEvent(source, event, curPos, 1);
-		CGEventPost(kCGHIDEventTap, e);
-		CGEventPost(kCGSessionEventTap, e);
-		CFRelease(e);
+
+
+	if (g_lMouseDown || g_rMouseDown || g_mMouseDown) {
+		event = g_lMouseDown ? kCGEventLeftMouseDragged : (g_rMouseDown ? kCGEventRightMouseDragged : kCGEventOtherMouseDragged);
+		e = CGEventCreateMouseEvent(source, event, curPos, kCGMouseButtonCenter);
+		if (e != NULL)
+		{
+			CGEventPost(kCGHIDEventTap, e);
+			CGEventPost(kCGSessionEventTap, e);
+			CFRelease(e);
+		}
 	}
 	else {
 		CGWarpMouseCursorPosition (curPos);
 	}
-	
+
 	if (button != 0) {
+		int known = 1;
+		event = kCGEventNull;
 
 		switch (button) {
 			case MOUSEEVENTF_LEFTDOWN:
@@ -199,6 +209,10 @@ void MouseAction(double absX, double absY, int button, short wheel)
 				g_rMouseDown = 1;
 				event = kCGEventRightMouseDown;
 				break;
+			case MOUSEEVENTF_MIDDLEDOWN:
+				g_mMouseDown = 1;
+				event = kCGEventOtherMouseDown;
+				break;
 			case MOUSEEVENTF_LEFTUP:
 				g_lMouseDown = 0;
 				event = kCGEventLeftMouseUp;
@@ -207,44 +221,105 @@ void MouseAction(double absX, double absY, int button, short wheel)
 				g_rMouseDown = 0;
 				event = kCGEventRightMouseUp;
 				break;
+			case MOUSEEVENTF_MIDDLEUP:
+				g_mMouseDown = 0;
+				event = kCGEventOtherMouseUp;
+				break;
+			case 0x88:
+				break;
 			default:
+				known = 0;
 				break;
 		}
 
-		if (button == 0x88) 
+		if (button == 0x88)
 		{
 			// Double click, this is useful on MacOS.
-			e = CGEventCreateMouseEvent(source, kCGEventLeftMouseDown, curPos, 1);
-			CGEventSetIntegerValueField(e, kCGMouseEventClickState, 2);
-			CGEventPost(kCGHIDEventTap, e);
-			CGEventSetType(e, kCGEventLeftMouseUp);
-			CGEventPost(kCGHIDEventTap, e);
+			e = CGEventCreateMouseEvent(source, kCGEventLeftMouseDown, curPos, kCGMouseButtonLeft);
+			if (e != NULL)
+			{
+				CGEventSetIntegerValueField(e, kCGMouseEventClickState, 2);
+				CGEventPost(kCGHIDEventTap, e);
+				CGEventSetType(e, kCGEventLeftMouseUp);
+				CGEventPost(kCGHIDEventTap, e);
+				CFRelease(e);
+			}
 		}
-		else
+		else if (known)
 		{
-			e = CGEventCreateMouseEvent(source, event, curPos, 1);
-			CGEventPost(kCGHIDEventTap, e);
+			// The button argument is only consulted for OtherMouse* events; center is the only such button we emit.
+			e = CGEventCreateMouseEvent(source, event, curPos, kCGMouseButtonCenter);
+			if (e != NULL)
+			{
+				CGEventPost(kCGHIDEventTap, e);
+				CFRelease(e);
+			}
 		}
-		CFRelease(e);
 	}
 	else if (wheel != 0)
 	{
 		e = CGEventCreateScrollWheelEvent(source, kCGScrollEventUnitPixel, 1, wheel);
-		CGEventPost(kCGHIDEventTap, e);
-		CFRelease(e);
+		if (e != NULL)
+		{
+			CGEventPost(kCGHIDEventTap, e);
+			CFRelease(e);
+		}
 	}
 	if (source != NULL) CFRelease(source);
+}
+
+void MouseAction(double absX, double absY, int button, short wheel)
+{
+	if (vhid_available()) {
+		if (vhid_mouse(absX, absY, button, wheel, SCREEN_WIDTH, SCREEN_HEIGHT) == 0) return;
+	}
+	MouseAction_CGEvent(absX, absY, button, wheel);
 }
 
 extern int set_kbd_state(int state);
 extern int get_kbd_state();
 extern ILibQueue g_messageQ;
-void KeyAction(unsigned char vk, int up) 
+
+static void KeyAction_CGEvent(unsigned char vk, int up)
 {
-	//ILIBLOGMESSAGEX("NORMAL: %u [%d]", vk, up);
+	int i;
+	CGKeyCode keycode;
+	CGEventSourceRef source;
+
+	source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+	for (i = 0 ; i < g_keymapLen; i++) {
+		if (g_keymap[i].vk == vk) {
+			keycode = g_keymap[i].keycode;
+			break;
+		}
+	}
+
+	if (i == g_keymapLen) { if (source) CFRelease(source); return; }
+
+	// g_capsLock is reconciled against the real lock state in KeyAction() whenever caps lock is toggled.
+	CGEventRef key = CGEventCreateKeyboardEvent(source, keycode, !up);
+	if (key != NULL)
+	{
+		if (g_capsLock) { CGEventSetFlags(key, kCGEventFlagMaskAlphaShift); }
+		CGEventPost(kCGHIDEventTap, key);
+		CFRelease(key);
+	}
+
+	if (source != NULL) CFRelease(source);
+}
+
+void KeyAction(unsigned char vk, int up)
+{
+	// Lock keys are toggled through IOHIDSetModifierLockState (set_kbd_state), which is the
+	// authoritative state the viewer is told about. They must not also be delivered through the
+	// virtual HID keyboard: a real HID caps lock press toggles the lock on key-down, and the
+	// key-up toggle below would then undo it. A CGEvent-posted lock key does not change the
+	// lock state, so the CGEvent fallback remains safe to dispatch.
+	int lockKey = (vk == VK_CAPITAL || vk == VK_NUMLOCK || vk == VK_SCROLL);
+
 	if (up == 4) { up = 0; }
 
-	if (up && (vk == 0x14 || vk == 0x90 || vk == 0x91))
+	if (up && lockKey)
 	{
 		int state = get_kbd_state();
 
@@ -265,45 +340,34 @@ void KeyAction(unsigned char vk, int up)
 		((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_KEYSTATE);		// Write the type
 		((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)5);					// Write the size
 		buffer[4] = (unsigned char)get_kbd_state();
+		g_capsLock = (buffer[4] & 4) ? 1 : 0;
 
-		// Write the reply to the pipe.
 		ILibQueue_Lock(g_messageQ);
 		ILibQueue_EnQueue(g_messageQ, buffer);
 		ILibQueue_UnLock(g_messageQ);
-		return;
 	}
 
+	if (lockKey) { KeyAction_CGEvent(vk, up); return; }
 
-	int i;
-	CGKeyCode keycode;
-	CGEventSourceRef source;
-	if (up == 4) { up = 0; }
-
-	source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-	for (i = 0 ; i < g_keymapLen; i++) {
-		if (g_keymap[i].vk == vk) {
-			keycode = g_keymap[i].keycode;
-			break;
-		}
+	if (vhid_available()) {
+		if (vhid_key(vk, up) == 0) return;
 	}
-
-	if (i == g_keymapLen) { return; }
-	if (vk == VK_CAPITAL && up) { g_capsLock = g_capsLock ? 0 : 1; }
-
-	CGEventRef key = CGEventCreateKeyboardEvent(source, keycode, !up);
-	if (g_capsLock) { CGEventSetFlags(key, kCGEventFlagMaskAlphaShift); }
-	CGEventPost(kCGHIDEventTap, key);
-	CFRelease(key);
-
-	if (source != NULL) CFRelease(source);
+	KeyAction_CGEvent(vk, up);
 }
+
 void KeyActionUnicode(uint16_t unicode, int up)
 {
+	if (up == 4) { up = 0; }
 	if (up == 0)
 	{
-		//ILIBLOGMESSAGEX("UNICODE: %u [%d]", unicode, up);
+		UniChar ch = (UniChar)unicode;
+		if (vhid_available() && vhid_key_unicode(unicode, up) == 0) return;
 		CGEventRef key = CGEventCreateKeyboardEvent(NULL, 0, true);
-		CGEventKeyboardSetUnicodeString(key, 1, (UniChar*)&unicode);
+		if (key == NULL) return;
+		CGEventKeyboardSetUnicodeString(key, 1, &ch);
+		CGEventPost(kCGHIDEventTap, key);
+		// Release the synthetic key so keycode 0 is not left held in the HID key state.
+		CGEventSetType(key, kCGEventKeyUp);
 		CGEventPost(kCGHIDEventTap, key);
 		CFRelease(key);
 	}

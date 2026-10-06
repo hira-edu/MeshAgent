@@ -66,6 +66,8 @@ typedef struct KvmBridgeDebugSnapshot
 	unsigned short lastOutputType;
 	unsigned int pendingProbeMask;
 	ULONGLONG pendingProbeSinceTickMs;
+	int restartPending;			// no helper or transport right now, but the relay will respawn it (exit handler or retry timer)
+	int viewerPaused;			// the viewers paused the stream themselves (MNG_KVM_PAUSE), so no pictures are expected
 } KvmBridgeDebugSnapshot;
 void kvm_notify_session_change(DWORD eventType, DWORD sessionId);
 int kvm_bridge_debug_get_child_present(void);

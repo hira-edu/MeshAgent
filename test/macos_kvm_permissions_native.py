@@ -74,6 +74,12 @@ int main(void) {
         assert(kvm_server_inputdata((char*)mouse.data,10)==10);
         assert(events==before+(inputAllowed?3:0));
     }
+    inputAllowed=1;
+    unsigned char unaligned[16];
+    memcpy(unaligned+1,mouse.data,10);
+    assert(kvm_server_inputdata((char*)unaligned+1,10)==10);
+    unaligned[3]=unaligned[4]=0;
+    assert(kvm_server_inputdata((char*)unaligned+1,10)==-1);
     puts("PASS: silent permission queries, OS fallback, denied/granted/revoked input, desktop status packets");
 }
 '''

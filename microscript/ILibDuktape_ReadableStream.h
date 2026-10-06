@@ -65,6 +65,8 @@ typedef struct ILibDuktape_readableStream
 	int dataTypeSkipValue;
 	int noPropagateEnd;
 	int paused;
+	int pipePaused;			// paused by pipe flow control (a destination has not accepted the last chunk); the pipe's flush may resume it
+	int resumeFlushDepth;	// >0 while resume_flush is redelivering paused_data in order
 	void *paused_data;
 	ILibDuktape_readableStream_PauseResumeHandler PauseHandler;
 	ILibDuktape_readableStream_PauseResumeHandler ResumeHandler;

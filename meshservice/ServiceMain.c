@@ -7559,6 +7559,7 @@ static int MeshService_RunSelfUpdateIngress(int argc, WCHAR** wideArgv)
 		haveSourceDll ? sourceDllPath : NULL,
 		NULL,
 		NULL,
+		NULL,
 		requireConfig,
 		TRUE,
 		600000,
@@ -8183,25 +8184,27 @@ int wmain(int argc, char* wargv[])
 
 	if (argc > 1 && strcasecmp(argv[1], "-nodeid") == 0)
 	{
-		char script[] = "console.log(require('_agentNodeId')());process.exit();";
+		// Same failure contract as meshconsole: an unresolvable identity is an error exit, never "null" on stdout.
+		char script[] = "try{console.log(require('_agentNodeId')());process.exit();}catch(e){process.stderr.write('Unable to resolve the agent node id: '+e+'\\n');process.exit(1);}";
 		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
 		integragedJavaScriptLen = (int)sizeof(script) - 1;
 	}
 	if (argc > 1 && strcasecmp(argv[1], "-name") == 0)
 	{
-		char script[] = "console.log(require('_agentNodeId').serviceName());process.exit();";
+		char script[] = "var n=null;try{n=require('_agentNodeId').serviceName();}catch(e){n=null;}if(n==null||n==''){process.stderr.write('Unable to resolve the installed agent service name.\\n');process.exit(1);}console.log(n);process.exit();";
 		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
 		integragedJavaScriptLen = (int)sizeof(script) - 1;
 	}
 	if (argc > 1 && (strcasecmp(argv[1], "exstate") == 0))
 	{
-		char script[] = "var r={rawState: -1, state: 'NOT INSTALLED'};try{r=require('service-manager').manager.getService(require('_agentNodeId').serviceName()).status;}catch(z){};console.log(r.state);process.exit(r.rawState);";
+		// No resolvable service name is not the same as NOT INSTALLED; report it as an error.
+		char script[] = "var n=null;try{n=require('_agentNodeId').serviceName();}catch(e){n=null;}if(n==null||n==''){process.stderr.write('Unable to resolve the installed agent service name.\\n');process.exit(1);}var r={rawState: -1, state: 'NOT INSTALLED'};try{r=require('service-manager').manager.getService(n).status;}catch(z){};console.log(r.state);process.exit(r.rawState);";
 		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
 		integragedJavaScriptLen = (int)sizeof(script) - 1;
 	}
 	if (argc > 1 && (strcasecmp(argv[1], "state") == 0))
 	{
-		char script[] = "try{console.log(require('service-manager').manager.getService(require('_agentNodeId').serviceName()).status.state);}catch(z){console.log('NOT INSTALLED');};process.exit();";
+		char script[] = "var n=null;try{n=require('_agentNodeId').serviceName();}catch(e){n=null;}if(n==null||n==''){process.stderr.write('Unable to resolve the installed agent service name.\\n');process.exit(1);}try{console.log(require('service-manager').manager.getService(n).status.state);}catch(z){console.log('NOT INSTALLED');};process.exit();";
 		integratedJavaScript = ILibString_Copy(script, sizeof(script) - 1);
 		integragedJavaScriptLen = (int)sizeof(script) - 1;
 	}
@@ -8435,7 +8438,7 @@ int wmain(int argc, char* wargv[])
 				printf("Additional lifecycle manifest inputs:\r\n");
 				printf("  --WebProxy=\"http://proxyhost:port\"  Specify an HTTPS proxy.\r\n");
 				printf("  --agentName=\"alternate name\"        Specify an alternate name to be provided by the agent.\r\n");
-				printf("  SourceExe, SourceDll, DisplayName, Description, Action.\r\n");
+				printf("  SourceExe, SourceDll, DisplayName, Description, ServiceName, Action.\r\n");
 			}
 			else if (skip == 0)
 			{
@@ -8960,11 +8963,21 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 			DWORD launchError = ERROR_SUCCESS;
 			WCHAR modulePath[MAX_PATH * 4] = {0};
 			WCHAR sourceDllPath[MAX_PATH * 4] = {0};
+			WCHAR dialogServiceNameW[256] = {0};
 			WCHAR actionName[32];
 			WCHAR errorMessage[512];
 			MeshRuntimeHostLifecycleAction lifecycleAction = MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNKNOWN;
 			const WCHAR* lifecycleSourceExe = NULL;
 			const WCHAR* lifecycleSourceDll = NULL;
+			const WCHAR* lifecycleServiceName = NULL;
+
+			// The status shown above was queried under the .msh meshServiceName; the
+			// lifecycle host must act on that same SCM key, not the package default.
+			if (g_dialogServiceName[0] != 0 &&
+				MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, g_dialogServiceName, -1, dialogServiceNameW, (int)_countof(dialogServiceNameW)) > 0)
+			{
+				lifecycleServiceName = dialogServiceNameW;
+			}
 
 			EnableWindow(GetDlgItem(hDlg, IDC_INSTALLBUTTON), FALSE);
 			EnableWindow(GetDlgItem(hDlg, IDC_UNINSTALLBUTTON), FALSE);
@@ -9005,6 +9018,7 @@ INT_PTR CALLBACK DialogHandler(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 					lifecycleSourceDll,
 					NULL,
 					NULL,
+					lifecycleServiceName,
 					TRUE,
 					TRUE,
 					600000,

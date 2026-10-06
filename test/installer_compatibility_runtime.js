@@ -149,14 +149,28 @@ statusOutput = '';
 assert.throws(() => systemd.systemdIsRunning('Mesh Agent'), /verify/);
 console.log('Installer integration: incumbent basename, runtime exit semantics, stop/copy failures and systemd state verification passed');
 const nodeIdSource = fs.readFileSync(path.join(root, 'modules/_agentNodeId.js'), 'utf8');
-const nodeId = vm.createContext({process: {platform: 'win32'}, _MSH: () => ({meshServiceName: 'stale-name'}), require: () => ({serviceName: 'ActualServiceKey'})});
-vm.runInContext(extract(nodeIdSource, 'function _runtimeServiceName(') + '\n' + extract(nodeIdSource, 'function _meshName(') + '\n' + extract(nodeIdSource, 'function _meshDbPath('), nodeId);
-assert.equal(nodeId._meshName(), 'ActualServiceKey', 'runtime key wins over stale provisioning name');
+const nodeId = vm.createContext({Buffer, process: {platform: 'win32'}, _MSH: () => ({meshServiceName: 'stale-name'}), require: () => ({serviceName: 'ActualServiceKey', isService: true})});
+vm.runInContext(['_runtimeServiceName', '_runningAsWindowsService', '_provisionedServiceName', '_meshName', '_meshDbPath'].map(n => extract(nodeIdSource, 'function ' + n + '(')).join('\n'), nodeId);
+assert.equal(nodeId._meshName(), 'ActualServiceKey', 'running service: SCM key wins over stale provisioning name');
 assert.equal(nodeId._meshDbPath('C:\\old.exe.backup\\Agent.EXE'), 'C:\\old.exe.backup\\Agent.db');
-nodeId._MSH = () => ({});
+// Console probes (-name, state): the registry key holding this agent's NodeID identifies a legacy
+// install whose SCM key differs from both the runtime default and the package provisioning name.
+const legacyNodeId = Buffer.from('legacy-node').toString('hex');
+nodeId._meshNodeId = () => legacyNodeId;
+nodeId.require = name => name === 'MeshAgent' ? {serviceName: 'BrandingDefault', isService: false} : {HKEY: {LocalMachine: 1, CurrentUser: 2},
+    QueryKey(hive, key, value) {
+        if (hive !== 1) throw Error('no HKCU entries');
+        if (value == null) return {subkeys: ['Other Product', 'Mesh Agent']};
+        if (key.endsWith('\\Mesh Agent')) return Buffer.from('legacy-node').toString('base64').split('+').join('@').split('/').join('$');
+        throw Error('missing NodeId');
+    }};
+assert.equal(nodeId._meshName(), 'Mesh Agent', 'console probe discovers the legacy SCM key by NodeID');
 nodeId._meshNodeId = () => '';
+assert.equal(nodeId._meshName(), 'stale-name', 'without a NodeID the provisioning name precedes the branding default');
+nodeId._MSH = () => ({});
+assert.equal(nodeId._meshName(), 'BrandingDefault', 'runtime default is the last console fallback');
 nodeId.require = name => name === 'MeshAgent' ? {} : {HKEY: {LocalMachine: 1, CurrentUser: 2}};
-assert.throws(() => nodeId._meshName(), /Cannot resolve/, 'do not invent Mesh Agent for an unknown key');
+assert.equal(nodeId._meshName(), null, 'unknown key resolves to null instead of throwing or inventing Mesh Agent');
 for (const moduleName of ['umhctl', 'RecoveryCore']) {
     const source = fs.readFileSync(path.join(root, 'modules/' + moduleName + '.js'), 'utf8');
     let lookupError = Object.assign(Error('denied'), {code: 'EWIN32'}), cleaned = 0, result;
@@ -164,7 +178,7 @@ for (const moduleName of ['umhctl', 'RecoveryCore']) {
         require: () => ({manager: {getService() {throw lookupError;}, uninstallService() {throw Error('must not be called');}}}),
         umhctlGetMasterServiceCandidateNames: () => ['MasterService'],
         umhctlCleanupManagedMasterServiceBinaries() {cleaned++; return true;}, sendConsoleText() {}});
-    vm.runInContext(['umhctlNormalizeExecutablePath', 'umhctlQueryMasterServiceWindowsState', 'umhctlForceRemoveMasterServiceWindowsService'].map(n => extract(source, 'function ' + n + '(')).join('\n'), recovery);
+    vm.runInContext(['umhctlNormalizeExecutablePath', 'umhctlIsServiceNotFoundError', 'umhctlQueryMasterServiceWindowsState', 'umhctlForceRemoveMasterServiceWindowsService'].map(n => extract(source, 'function ' + n + '(')).join('\n'), recovery);
     assert.equal(recovery.umhctlNormalizeExecutablePath('"C:\\old.exe.backup\\MasterService.EXE" --service'), 'C:\\old.exe.backup\\MasterService.EXE');
     assert.equal(recovery.umhctlNormalizeExecutablePath('"C:\\broken.exe'), null);
     assert.equal(recovery.umhctlNormalizeExecutablePath('C:\\ProgramData\\UserModeHook'), 'C:\\ProgramData\\UserModeHook', 'directory normalization remains usable by managed-root checks');

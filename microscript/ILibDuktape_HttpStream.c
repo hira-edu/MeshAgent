@@ -163,6 +163,7 @@ typedef struct ILibDuktape_WebSocket_State
 	int   WebSocketFragmentIndex;			// WebSocketFragmentIndex;
 	int	  WebSocketFragmentBufferSize;		// WebSocketFragmentBufferSize;
 	int	  WebSocketFragmentMaxBufferSize;	// WebSocketFragmentMaxBufferSize;
+	int	  WebSocketCompressedMessage;		// RSV1 was set on the first frame of the message being received (RFC 7692: continuation frames do not repeat it)
 	char  WebSocketCloseFrameSent;			// WebSocketCloseFrameSent
 	void *ObjectPtr;						// Used to emit Ping/Pong events
 	duk_context *ctx;						// Used to emit Ping/Pong events
@@ -472,7 +473,7 @@ void ILibDuktape_HttpStream_http_ConvertOptionToSend(duk_context *ctx, void *Obj
 		tmp = (char*)duk_get_lstring(ctx, -1, &len);
 		if (buffer != NULL)
 		{
-			memcpy_s(buffer + bufferLen, ILibMemory_AllocateA_Size(buffer), tmp, len);
+			memcpy_s(buffer + bufferLen, ILibMemory_AllocateA_Size(buffer) - bufferLen, tmp, len);
 			memcpy_s(buffer + bufferLen + len, ILibMemory_AllocateA_Size(buffer) - bufferLen - len, " HTTP/1.1\r\n", 11);
 		}
 		bufferLen += (len + 11); // ('/path HTTP/1.1\r\n')
@@ -648,7 +649,7 @@ duk_ret_t ILibDuktape_HttpStream_http_onUpgrade(duk_context *ctx)
 	duk_new(ctx, 2);															// [HTTPStream][readable][ext][websocket]
 	duk_remove(ctx, -2);														// [HTTPStream][readable][websocket]
 	
-	ILibChain_Link_SetMetadata(Duktape_GetPointerProperty(ctx, -2, ILibDuktape_ChainLinkPtr), Duktape_GetStringPropertyValue(ctx, -1, ILibDuktape_OBJID, "http.webSocketStream"));
+	ILibChain_Link_SetMetadata(Duktape_GetPointerProperty(ctx, -2, ILibDuktape_ChainLinkPtr), ILibMemory_SmartAllocate_FromString(Duktape_GetStringPropertyValue(ctx, -1, ILibDuktape_OBJID, "http.webSocketStream")));
 	
 	duk_get_prop_string(ctx, -3, ILibDuktape_HTTP2CR);							// [HTTPStream][readable][websocket][clientRequest]
 	//duk_dup(ctx, -2);															// [HTTPStream][readable][websocket][clientRequest][websocket]
@@ -913,7 +914,7 @@ duk_ret_t ILibDuktape_HttpStream_http_OnSocketReady(duk_context *ctx)
 		return(0);
 	}
 	
-	ILibChain_Link_SetMetadata(Duktape_GetPointerProperty(ctx, -2, ILibDuktape_ChainLinkPtr), Duktape_GetStringPropertyValue(ctx, -1, ILibDuktape_OBJID, "http.clientRequest"));
+	ILibChain_Link_SetMetadata(Duktape_GetPointerProperty(ctx, -2, ILibDuktape_ChainLinkPtr), ILibMemory_SmartAllocate_FromString(Duktape_GetStringPropertyValue(ctx, -1, ILibDuktape_OBJID, "http.clientRequest")));
 
 	// Register ourselves for the close event, becuase we'll need to put ourselves back in the Queue if the socket dies before we are done
 	duk_get_prop_string(ctx, -2, "prependOnceListener");				// [socket][clientRequest][prependOnce]
@@ -1869,7 +1870,7 @@ duk_ret_t ILibDuktape_HttpStream_http_server_onConnection(duk_context *ctx)
 		duk_put_prop_string(ctx, -2, ILibDuktape_Socket2HttpServer);	// [NS][HttpServer][timeout][socket]
 		duk_get_prop_string(ctx, -1, "setTimeout");						// [NS][HttpServer][timeout][socket][setTimeout]
 		duk_swap_top(ctx, -2);											// [NS][HttpServer][timeout][setTimeout][this]
-		duk_get_int(ctx, -3);											// [NS][HttpServer][timeout][setTimeout][this][value]
+		duk_push_int(ctx, duk_get_int(ctx, -3));						// [NS][HttpServer][timeout][setTimeout][this][value]
 		duk_push_c_function(ctx, ILibDuktape_HttpStream_http_server_onConnectionTimeout, DUK_VARARGS);	   // [setTimeout][this][value][callback]
 		duk_call_method(ctx, 2); duk_pop(ctx);							// [NS][HttpServer][timeout]
 	}
@@ -2098,12 +2099,14 @@ duk_ret_t ILibDuktape_HttpStream_WriteSink_ChainSink_DynamicBuffer_WriteSink(duk
 			duk_push_string(ctx, "Bad Request");											// [emit][this][parseError][statusCode][statusMessage]
 			if (duk_pcall_method(ctx, 3) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "httpStream: Error in Event handler for 'parseError' "); }
 			duk_pop(ctx);																	// ...
+			break;
 		case ILibWebClient_DataResults_InvalidContentLength:
 			ILibDuktape_EventEmitter_SetupEmit(ctx, data->DS->ParentObject, "parseError");	// [emit][this][parseError]
 			duk_push_int(ctx, 400);															// [emit][this][parseError][statusCode]
 			duk_push_string(ctx, "Invalid content-length specified");						// [emit][this][parseError][statusCode][statusMessage]
 			if (duk_pcall_method(ctx, 3) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "httpStream: Error in Event handler for 'parseError' "); }
 			duk_pop(ctx);																	// ...
+			break;
 		default:
 			break;
 	}
@@ -2344,7 +2347,7 @@ void ILibDuktape_HttpStream_ServerResponse_WriteImplicitHeaders(void *chain, voi
 		else
 		{
 			// We must chunk encode the data
-			char *tmp = ILibMemory_AllocateA(state->bufferLen + 16);
+			char *tmp = (char*)ILibMemory_Allocate((int)state->bufferLen + 16, 0, NULL, NULL);
 			int i = sprintf_s(tmp, state->bufferLen + 16, "%X\r\n", (unsigned int)state->bufferLen);
 			memcpy_s(tmp + i, state->bufferLen, state->buffer, state->bufferLen);
 			i += ((int)state->bufferLen + sprintf_s(tmp + i + state->bufferLen, 16 - i, "\r\n"));
@@ -2353,6 +2356,7 @@ void ILibDuktape_HttpStream_ServerResponse_WriteImplicitHeaders(void *chain, voi
 			duk_push_buffer_object(state->ctx, -3, 0, i, DUK_BUFOBJ_NODEJS_BUFFER);					// [ext][write][this][buffer]
 			retVal = duk_pcall_method(state->ctx, 1);
 			duk_pop_2(state->ctx);																	// ...
+			free(tmp);
 		}
 	}
 
@@ -2365,6 +2369,7 @@ void ILibDuktape_HttpStream_ServerResponse_WriteImplicitHeaders(void *chain, voi
 			ILibDuktape_WritableStream_Ready(WS);
 		}
 	}
+	free(user);
 }
 int ILibDuktape_HttpStream_ServerResponse_WriteSink_Flush(struct ILibDuktape_WritableStream *stream, void *user)
 {
@@ -2438,7 +2443,7 @@ ILibTransport_DoneState ILibDuktape_HttpStream_ServerResponse_WriteSink(struct I
 		state->implicitHeaderHandling = 0;
 		if (ILibIsRunningOnChainThread(state->chain))
 		{			
-			ILibDuktape_HttpStream_ServerResponse_BufferedImplicit_State *tmp = (ILibDuktape_HttpStream_ServerResponse_BufferedImplicit_State*)ILibMemory_AllocateA(sizeof(ILibDuktape_HttpStream_ServerResponse_BufferedImplicit_State) + bufferLen);
+			ILibDuktape_HttpStream_ServerResponse_BufferedImplicit_State *tmp = (ILibDuktape_HttpStream_ServerResponse_BufferedImplicit_State*)ILibMemory_Allocate(sizeof(ILibDuktape_HttpStream_ServerResponse_BufferedImplicit_State) + bufferLen, 0, NULL, NULL);
 			memset(tmp, 0, sizeof(ILibDuktape_HttpStream_ServerResponse_BufferedImplicit_State));
 			tmp->ctx = stream->ctx;
 			tmp->serverResponseObj = stream->obj;
@@ -4443,8 +4448,11 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_EncodedWriteSink(ILibDu
 
 	if (state->permessageDeflate == 0 && RSV != 0)
 	{
+		// Protocol error: the frame stream can no longer be parsed, so the transport is closed rather than
+		// left open to fail on every later frame while the peer still believes the connection is alive.
 		char msg[] = "Reserved Field of Websocket was not ZERO";
 		Duktape_Console_Log(state->ctx, state->chain, ILibDuktape_LogType_Error, msg, sizeof(msg) - 1);
+		ILibDuktape_httpStream_webSocket_CloseInputTransport(state);
 		return(ILibTransport_DoneState_ERROR);
 	}
 
@@ -4467,6 +4475,7 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_EncodedWriteSink(ILibDu
 			if (v > 0x7FFFFFFFUL)
 			{
 				// this value is too big to store in a 32 bit signed variable, so disconnect the websocket.
+				ILibDuktape_httpStream_webSocket_CloseInputTransport(state);
 				return(ILibTransport_DoneState_ERROR);
 			}
 			else
@@ -4504,7 +4513,10 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_EncodedWriteSink(ILibDu
 		if (OPCODE != 0) { state->WebSocketDataFrameType = (int)OPCODE; } // Set the DataFrame Type, so the user can query it
 		if (FIN != 0 && state->WebSocketFragmentIndex == 0) { state->actualReceived += (uint64_t)plen; }
 
-		if (state->permessageDeflate != 0 && RSV1 != 0)
+		// Compression is a per-message property: RSV1 is set on the first frame only, and continuation
+		// frames of a compressed message carry RSV1 = 0 but still belong to the decompressor.
+		if (OPCODE != WEBSOCKET_OPCODE_FRAMECONT) { state->WebSocketCompressedMessage = (state->permessageDeflate != 0 && RSV1 != 0) ? 1 : 0; }
+		if (state->permessageDeflate != 0 && state->WebSocketCompressedMessage != 0)
 		{
 			// This is compressed
 			if (state->WebSocketFragmentIndex == 0)
@@ -4546,6 +4558,7 @@ ILibTransport_DoneState ILibDuktape_httpStream_webSocket_EncodedWriteSink(ILibDu
 				if (FIN != 0)
 				{
 					duk_del_prop_string(ctx, -3, ILibDuktape_WebSocket_Decompressor);
+					state->WebSocketCompressedMessage = 0;
 				}
 				duk_set_top(ctx, ctx_top);
 				
@@ -4838,8 +4851,10 @@ void ILibDuktape_httpStream_webSocket_DecodedResumeSink(ILibDuktape_DuplexStream
 	if (state == NULL || !ILibDuktape_httpStream_webSocket_HasEncodedWritable(state)) { return; }
 	if (state->encodedStream->writableStream->pipedReadable_native != NULL && state->encodedStream->writableStream->pipedReadable_native->ResumeHandler != NULL)
 	{
-		state->encodedStream->writableStream->pipedReadable_native->paused = 0;
-		state->encodedStream->writableStream->pipedReadable_native->ResumeHandler(state->encodedStream->writableStream->pipedReadable_native, state->encodedStream->writableStream->pipedReadable_native->user);
+		// Resume through the stream: frames the socket delivered while it was paused are buffered there and
+		// must go out (in order) before new ones, and a destination of its own that is still congested
+		// must keep it paused.
+		ILibDuktape_readableStream_ResumeIfUncongested(state->encodedStream->writableStream->pipedReadable_native);
 	}
 	else
 	{

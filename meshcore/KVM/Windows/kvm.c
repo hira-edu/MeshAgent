@@ -4338,7 +4338,7 @@ int kvm_relay_feeddata(char* buf, int len, ILibKVM_WriteHandler writeHandler, vo
 
 	if (gChildProcess != NULL)
 	{
-		if (len >= 2 && ntohs(((unsigned short*)buf)[0]) == MNG_CTRLALTDEL)
+		if (buf != NULL && len >= 2 && ntohs(((unsigned short*)buf)[0]) == MNG_CTRLALTDEL)
 		{
 			HANDLE ht = CreateThread(NULL, 0, kvm_ctrlaltdel, 0, 0, 0);
 			if (ht != NULL) CloseHandle(ht);
@@ -4635,6 +4635,7 @@ DWORD WINAPI kvm_mainloopinput_ex(LPVOID Param)
 	int ptr = 0;
 	int ptr2 = 0;
 	int len = 0;
+	int skipBytes = 0;		// Remainder of an oversized packet still to be discarded from the stream
 	char pchRequest2[30000];
 	BOOL fSuccess = FALSE;
 	DWORD cbBytesRead = 0;
@@ -4651,19 +4652,32 @@ DWORD WINAPI kvm_mainloopinput_ex(LPVOID Param)
 	{
 		if (len >= (int)sizeof(pchRequest2))
 		{
-			kvm_trace_startupf("KVM input loop: dropping full unconsumed buffer len=%d ptr=%d", len, ptr);
+			// ptr is 0 here, so the buffer starts with a packet whose declared size exceeds the buffer
+			// and can never be consumed. Discard the whole packet, not just the buffered part: parsing
+			// its tail as packet headers would desynchronize every command that follows.
+			unsigned short headSize = (len >= 4) ? ntohs(((unsigned short*)pchRequest2)[1]) : 0;
+			skipBytes = ((int)headSize > len) ? (int)headSize - len : 0;
+			kvm_trace_startupf("KVM input loop: dropping oversized packet size=%u buffered=%d remaining=%d", (unsigned int)headSize, len, skipBytes);
 			len = 0;
 			ptr = 0;
 		}
 		fSuccess = ReadFile(hStdIn, pchRequest2 + len, (DWORD)(sizeof(pchRequest2) - len), &cbBytesRead, NULL);
-		if (!fSuccess || cbBytesRead == 0 || g_shutdown) 
-		{ 
+		if (!fSuccess || cbBytesRead == 0 || g_shutdown)
+		{
 			ILibRemoteLogging_printf(gKVMRemoteLogging, ILibRemoteLogging_Modules_Agent_KVM, ILibRemoteLogging_Flags_VerbosityLevel_1, "KVM [SLAVE]: fSuccess/%d  cbBytesRead/%d  g_shutdown/%d", fSuccess, cbBytesRead, g_shutdown);
 			kvm_trace_startupf("KVM input loop: ReadFile exit fSuccess=%d cbBytesRead=%lu shutdown=%d error=%lu", fSuccess, (unsigned long)cbBytesRead, g_shutdown, (unsigned long)GetLastError());
 			KVMDEBUG("ReadFile() failed", 0); /*ILIBMESSAGE("KVMBREAK-K1\r\n");*/
 			g_shutdown = 1;
 			kvm_server_signal_remote_resume_waiters();
 			break;
+		}
+		if (skipBytes > 0)
+		{
+			// Still inside the oversized packet: drop its remaining bytes before parsing resumes.
+			int skip = ((int)cbBytesRead < skipBytes) ? (int)cbBytesRead : skipBytes;
+			skipBytes -= skip;
+			if (skip < (int)cbBytesRead) { memmove(pchRequest2 + len, pchRequest2 + len + skip, (size_t)((int)cbBytesRead - skip)); }
+			cbBytesRead -= (DWORD)skip;
 		}
 		len += (int)cbBytesRead;
 		ptr2 = 0;
@@ -4736,6 +4750,14 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	int sentHideCursor = 0;
 
 	kvm_trace_startupf("kvm_server_mainloop_ex entered parm=%p kvmConsoleMode=%d ThreadRunning=%d", parm, kvmConsoleMode, ThreadRunning);
+
+	// This basic lock will prevent 2 thread from running at the same time. Gives time for the first one to fully exit.
+	// It must come before any shared state is created: the previous loop's cleanup still owns
+	// gPendingPackets and the cursor hooks, and would destroy ones created here for the new loop.
+	while (ThreadRunning != 0 && height < 200) { height++; Sleep(50); }
+	if (height >= 200 && ThreadRunning != 0) { kvm_trace_startupf("kvm_server_mainloop_ex ABORT ThreadRunning stuck"); free(parm); return 0; }
+	ThreadRunning = 1;
+
 	gPendingPackets = ILibQueue_Create();
 	KVM_InitMouseCursors(gPendingPackets);
 	kvm_trace_startupf("kvm_server_mainloop_ex step1 queue+cursors OK");
@@ -4750,10 +4772,6 @@ DWORD WINAPI kvm_server_mainloop_ex(LPVOID parm)
 	kvm_trace_startupf("kvm_server_mainloop_ex step2 logging OK kvmConsoleMode=%d", kvmConsoleMode);
 #endif
 
-	// This basic lock will prevent 2 thread from running at the same time. Gives time for the first one to fully exit.
-	while (ThreadRunning != 0 && height < 200) { height++; Sleep(50); }
-	if (height >= 200 && ThreadRunning != 0) { kvm_trace_startupf("kvm_server_mainloop_ex ABORT ThreadRunning stuck"); return 0; }
-	ThreadRunning = 1;
 	g_shutdown = 0;
 	InterlockedExchange(&gKvmServerExitReason, 0);
 	// Startup sends the screen size, display list and every tile anyway, so a
@@ -6417,10 +6435,13 @@ int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler wr
 	else
 	{
 		// if (kvmthread != NULL && g_shutdown == 0) return 0;
-		void **parms = (void**)ILibMemory_Allocate((2 * sizeof(void*)) + sizeof(int), 0, NULL, NULL);
+		// Same layout as the service and bridge callers: [0] handler, [1] reserved, [2] start paused,
+		// [3] core-dump flag. kvm_server_mainloop reads [3], so the block must hold all four slots.
+		void **parms = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, NULL, NULL);
 		parms[0] = writeHandler;
 		parms[1] = reserved;
 		((int*)(&parms[2]))[0] = 1;
+		((int*)(&parms[3]))[0] = 0;
 		kvmConsoleMode = 1;
 
 		if (ThreadRunning == 1 && g_shutdown == 0) { KVMDEBUG("kvm_relay_setup() session already exists", 0); free(parms); return 0; }
@@ -6433,8 +6454,16 @@ int kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler wr
 // Force a KVM reset & refresh
 void kvm_relay_reset(ILibKVM_WriteHandler writeHandler, void *reserved)
 {
-	char buffer[4];
+	char buffer[5];
 	KVMDEBUG("kvm_relay_reset", 0);
+	// A reset is requested for a viewer that wants to see the desktop now: one that just attached, or
+	// an explicit kvmRefresh. The helper has one pause flag shared by every viewer, so a viewer that
+	// paused the stream (hidden tab) and then went away would otherwise leave the new one frozen on
+	// the refresh it never receives; resume first, then refresh.
+	((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_PAUSE);	// Write the type
+	((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)5);				// Write the size
+	buffer[4] = 0;																			// Resume
+	kvm_relay_feeddata(buffer, 5, writeHandler, reserved);
 	((unsigned short*)buffer)[0] = (unsigned short)htons((unsigned short)MNG_KVM_REFRESH);	// Write the type
 	((unsigned short*)buffer)[1] = (unsigned short)htons((unsigned short)4);				// Write the size
 	kvm_relay_feeddata(buffer, 4, writeHandler, reserved);
@@ -6777,6 +6806,27 @@ static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DW
 			kvm_clear_pending_unqueryable_start();
 		}
 		gKvmRestartSuppressed = 1;
+		if (!explicitTsid && ctx->parked == 0 && ctx->destroyPending == 0)
+		{
+			// The viewer asked for "the desktop", not for this session. Once the session is gone, the
+			// active console (the logon screen after a logoff, the local desktop after an RDP
+			// disconnect) is what a physical screen shows, and a WINLOGON launch there needs no user
+			// token. Waiting for a start event instead froze the viewer on its last frame, with nobody
+			// able to log back on through it. A later start event for another session rebinds as usual.
+			DWORD consoleSessionId = WTSGetActiveConsoleSessionId();
+			if (kvm_session_id_is_valid(consoleSessionId))
+			{
+				kvm_trace_startupf("session stop rebinding auto-selected KVM session to the console event=%u stoppedSession=%u console=%u tsid=%d",
+					(unsigned int)eventType,
+					(unsigned int)sessionId,
+					(unsigned int)consoleSessionId,
+					ctx->processTSID);
+				gProcessTSID = (int)consoleSessionId;
+				gKvmProcessSessionId = consoleSessionId;
+				gKvmRestartSuppressed = 0;
+				g_restartcount = 0;
+			}
+		}
 		if (ctx != NULL && ctx->parked != 0)
 		{
 			if (gILibChain != NULL)
@@ -6789,10 +6839,19 @@ static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DW
 		}
 		if (gChildProcess != NULL)
 		{
+			// The exit handler applies the restart policy: suppressed, or (console rebind above) respawned.
 			gKvmChildExitSignaled = 1;
 			kvm_update_runtime_state(0, 0);
 			ILibProcessPipe_Process_SoftKill(gChildProcess);
 		}
+#ifdef _WINSERVICE
+		else if (gKvmRestartSuppressed == 0 && g_shutdown == 0 && gKvmRetryScheduled == 0 &&
+			gKvmPipeMgr != NULL && gKvmExePath != NULL && gKvmWriteHandler != NULL)
+		{
+			// No helper exit to drive the console rebind; launch once the session teardown has settled.
+			kvm_schedule_retry_timer_at_least(KVM_BRIDGE_MIN_RETRY_DELAY_MS);
+		}
+#endif
 		break;
 	case WTS_SESSION_UNLOCK:
 	case WTS_CONSOLE_CONNECT:
@@ -7171,6 +7230,12 @@ int kvm_bridge_debug_get_snapshot_for_reserved(void *reserved, KvmBridgeDebugSna
 	snapshotOut->lastOutputType = ctx->lastOutputType;
 	snapshotOut->pendingProbeMask = (unsigned int)ctx->pendingProbeMask;
 	snapshotOut->pendingProbeSinceTickMs = ctx->pendingProbeSinceTickMs;
+	// A helper that exited (or lost its transport) is replaced by the exit handler or the retry
+	// timer while the relay is neither stopped, suppressed by a session stop, nor being torn down.
+	// agentcore must not treat that window as a dead stream: discarding it would end every viewer.
+	snapshotOut->restartPending = (ctx->shutdown == 0 && ctx->restartSuppressed == 0 && ctx->destroyPending == 0 && ctx->parked == 0 &&
+		(ctx->retryScheduled != 0 || ctx->childProcess != NULL)) ? 1 : 0;
+	snapshotOut->viewerPaused = (InterlockedCompareExchange(&ctx->viewerPauseState, 0, 0) != 0) ? 1 : 0;
 	kvm_relay_unlock();
 	return 1;
 }

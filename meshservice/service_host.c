@@ -1401,6 +1401,7 @@ static BOOL ServiceHost_ApplyUpdateStartupDisposition(BOOL* stopStartupOut)
             paths.dllPath,
             NULL,
             NULL,
+            g_ServiceHostServiceName,
             FALSE,
             &launch))
     {

@@ -216,7 +216,7 @@ duk_ret_t ILibDuktape_DGram_Socket_bind(duk_context *ctx)
 		4096, (struct sockaddr*)&local,
 		((config & ILibDuktape_DGRAM_Config_ReuseAddr) == ILibDuktape_DGRAM_Config_ReuseAddr) ? ILibAsyncUDPSocket_Reuse_SHARED : ILibAsyncUDPSocket_Reuse_EXCLUSIVE,
 		ILibDuktape_Dgram_Socket_OnData, ILibDuktape_Dgram_Socket_OnSendOK, ptrs);
-	ILibChain_Link_SetMetadata(ptrs->mSocket, "net.dgram");
+	ILibChain_Link_SetMetadata(ptrs->mSocket, ILibMemory_SmartAllocate_FromString("net.dgram"));
 	if (ptrs->mSocket == NULL)
 	{
 #ifdef WIN32

@@ -1340,7 +1340,8 @@ void ILibDuktape_ScriptContainer_Process_Init(duk_context *ctx, char **argList)
 	ILibDuktape_EventEmitter *emitter;
 #ifndef MICROSTACK_NOTLS
 	char *sslv = (char*)SSLeay_version(SSLEAY_VERSION);
-	char *sslvS = strstr(sslv, " ") + 1;
+	char *sslvS = strstr(sslv, " ");
+	if (sslvS != NULL) { ++sslvS; }
 #endif
 
 	duk_push_global_object(ctx);														// [g]
@@ -1397,7 +1398,7 @@ void ILibDuktape_ScriptContainer_Process_Init(duk_context *ctx, char **argList)
 	duk_push_object(ctx);
 
 #ifndef MICROSTACK_NOTLS
-	if (sslvS != ((char*)NULL + 1))
+	if (sslvS != NULL)
 	{
 		char *tmp = strstr(sslvS, " ");
 		if (tmp != NULL)
@@ -1550,7 +1551,7 @@ void ILibDuktape_ScriptContainer_Process_Init(duk_context *ctx, char **argList)
 			ILibChain_Link *k = ILibChain_Link_Allocate(sizeof(ILibChain_Link), 2 * sizeof(void*));
 			((void**)k->ExtraMemoryPtr)[0] = ctx;
 			((void**)k->ExtraMemoryPtr)[1] = emitter->object;
-			k->MetaData = "Signal_Listener";
+			k->MetaData = ILibMemory_SmartAllocate_FromString("Signal_Listener");
 			k->PreSelectHandler = ILibDuktape_ScriptContainer_Process_SignalListener_PreSelect;
 			k->PostSelectHandler = ILibDuktape_ScriptContainer_Process_SignalListener_PostSelect;
 			ILibAddToChain(chain, k);

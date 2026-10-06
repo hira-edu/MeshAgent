@@ -1386,7 +1386,14 @@ static OVERLAPPED* ILibProcessPipe_GetWriteOverlapped(ILibProcessPipe_PipeObject
 	if (pipeObject->mwOverlapped == NULL)
 	{
 		pipeObject->mwOverlapped = (OVERLAPPED*)ILibMemory_Allocate(sizeof(OVERLAPPED), sizeof(void*), NULL, &extra);
-		if ((pipeObject->mwOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL) { ILIBCRITICALEXIT(254); }
+		if ((pipeObject->mwOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
+		{
+			// Callers treat NULL as a failed write on this pipe; event exhaustion must not end the agent.
+			ILibCriticalLog("[PROCESS_PIPE] write event creation failed; write refused", __FILE__, __LINE__, 0, (int)GetLastError());
+			free(pipeObject->mwOverlapped);
+			pipeObject->mwOverlapped = NULL;
+			return NULL;
+		}
 		((void**)extra)[0] = pipeObject;
 	}
 	return pipeObject->mwOverlapped;
@@ -1433,11 +1440,38 @@ void ILibProcessPipe_Pipe_SetBrokenPipeHandler(ILibProcessPipe_Pipe targetPipe, 
 	if (ILibMemory_CanaryOK(targetPipe)) { ((ILibProcessPipe_PipeObject*)targetPipe)->brokenPipeHandler = (ILibProcessPipe_GenericBrokenPipeHandler)handler; }
 }
 
+#ifdef WIN32
+// Process-wide sequence for child stdio pipe names. A name derived only from the pipe object's heap
+// address repeats once that address is reused, while a child that inherited the earlier pipe can
+// still hold it open; FILE_FLAG_FIRST_PIPE_INSTANCE then fails the new pipe.
+static volatile LONG ILibProcessPipe_PipeNameSequence = 0;
+#define ILibProcessPipe_PIPE_NAME_ATTEMPTS 8
+
+// Releases a pipe object that never became usable and preserves the error for the spawn caller.
+static void ILibProcessPipe_CreatePipe_Abandon(ILibProcessPipe_PipeObject* pipeObject, DWORD error, const char* stage)
+{
+	if (error == ERROR_SUCCESS) { error = ERROR_GEN_FAILURE; }
+	ILibCriticalLog(stage, __FILE__, __LINE__, 0, (int)error);
+	if (pipeObject->mPipe_WriteEnd != NULL && pipeObject->mPipe_WriteEnd != INVALID_HANDLE_VALUE) { CloseHandle(pipeObject->mPipe_WriteEnd); }
+	if (pipeObject->mPipe_ReadEnd != NULL && pipeObject->mPipe_ReadEnd != INVALID_HANDLE_VALUE) { CloseHandle(pipeObject->mPipe_ReadEnd); }
+	if (pipeObject->mOverlapped != NULL)
+	{
+		if (pipeObject->mOverlapped->hEvent != NULL) { CloseHandle(pipeObject->mOverlapped->hEvent); }
+		free(pipeObject->mOverlapped);
+	}
+	ILibMemory_Free(pipeObject);
+	SetLastError(error);
+}
+#endif
+
+// Returns NULL when the pipe cannot be created (last error set on Windows, errno on POSIX). A failed
+// pipe fails only the spawn that asked for it; it must never take the agent down.
 ILibProcessPipe_PipeObject* ILibProcessPipe_CreatePipe(ILibProcessPipe_Manager manager, int pipeBufferSize, ILibProcessPipe_GenericBrokenPipeHandler brokenPipeHandler, int extraMemorySize)
 {
 	ILibProcessPipe_PipeObject* retVal = NULL;
 #ifdef WIN32
-	unsigned int pipeCounter = 0;
+	int attempt;
+	DWORD createError = ERROR_SUCCESS;
 	char pipeName[255];
 	SECURITY_ATTRIBUTES saAttr;
 #else
@@ -1453,29 +1487,58 @@ ILibProcessPipe_PipeObject* ILibProcessPipe_CreatePipe(ILibProcessPipe_Manager m
 	saAttr.bInheritHandle = TRUE;
 	saAttr.lpSecurityDescriptor = NULL;
 
-	do
+	retVal->mPipe_ReadEnd = INVALID_HANDLE_VALUE;
+	for (attempt = 0; attempt < ILibProcessPipe_PIPE_NAME_ATTEMPTS; ++attempt)
 	{
-		sprintf_s(pipeName, sizeof(pipeName), "\\\\.\\pipe\\%p%u", (void*)retVal, pipeCounter++);
+		sprintf_s(pipeName, sizeof(pipeName), "\\\\.\\pipe\\ILibProcessPipe_%lu_%ld_%p", (unsigned long)GetCurrentProcessId(), (long)InterlockedIncrement(&ILibProcessPipe_PipeNameSequence), (void*)retVal);
 		retVal->mPipe_ReadEnd = CreateNamedPipeA(pipeName, FILE_FLAG_FIRST_PIPE_INSTANCE | PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE, 1, pipeBufferSize, pipeBufferSize, 0, &saAttr);
-		if (retVal->mPipe_ReadEnd == (HANDLE)INVALID_HANDLE_VALUE) { ILIBCRITICALEXIT(254); }
-	} while (retVal->mPipe_ReadEnd == (HANDLE)ERROR_ACCESS_DENIED);
+		if (retVal->mPipe_ReadEnd != INVALID_HANDLE_VALUE) { break; }
+		createError = GetLastError();
+		// Only a name collision is worth another name; anything else (quota, handles) will not clear by retrying.
+		if (createError != ERROR_ACCESS_DENIED && createError != ERROR_PIPE_BUSY) { break; }
+	}
+	if (retVal->mPipe_ReadEnd == INVALID_HANDLE_VALUE)
+	{
+		ILibProcessPipe_CreatePipe_Abandon(retVal, createError, "[PROCESS_PIPE] CreateNamedPipe failed; spawn refused");
+		return NULL;
+	}
 
-	if ((retVal->mOverlapped = (struct _OVERLAPPED*)malloc(sizeof(struct _OVERLAPPED))) == NULL) { ILIBCRITICALEXIT(254); }
+	if ((retVal->mOverlapped = (struct _OVERLAPPED*)malloc(sizeof(struct _OVERLAPPED))) == NULL)
+	{
+		ILibProcessPipe_CreatePipe_Abandon(retVal, ERROR_OUTOFMEMORY, "[PROCESS_PIPE] overlapped allocation failed; spawn refused");
+		return NULL;
+	}
 	memset(retVal->mOverlapped, 0, sizeof(struct _OVERLAPPED));
-	if ((retVal->mOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL) { ILIBCRITICALEXIT(254); }
+	if ((retVal->mOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
+	{
+		ILibProcessPipe_CreatePipe_Abandon(retVal, GetLastError(), "[PROCESS_PIPE] CreateEvent failed; spawn refused");
+		return NULL;
+	}
 
 	retVal->mPipe_WriteEnd = CreateFileA(pipeName, GENERIC_WRITE, 0, &saAttr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (retVal->mPipe_WriteEnd == INVALID_HANDLE_VALUE) { ILIBCRITICALEXIT(254); }
-#else
-	if(pipe(fd)==0) 
+	if (retVal->mPipe_WriteEnd == INVALID_HANDLE_VALUE)
 	{
-		fcntl(fd[0], F_SETFL, O_NONBLOCK); 
+		ILibProcessPipe_CreatePipe_Abandon(retVal, GetLastError(), "[PROCESS_PIPE] pipe client open failed; spawn refused");
+		return NULL;
+	}
+#else
+	if(pipe(fd)==0)
+	{
+		fcntl(fd[0], F_SETFL, O_NONBLOCK);
 		fcntl(fd[1], F_SETFL, O_NONBLOCK);
 		retVal->mPipe_ReadEnd = fd[0];
 		retVal->mPipe_WriteEnd = fd[1];
 	}
+	else
+	{
+		// The zeroed object would otherwise carry descriptor 0, and freeing it would close the agent's stdin.
+		int pipeError = errno;
+		ILibMemory_Free(retVal);
+		errno = pipeError;
+		return NULL;
+	}
 #endif
-	
+
 	return retVal;
 }
 
@@ -1542,6 +1605,18 @@ void ILibProcessPipe_Process_HardKill(ILibProcessPipe_Process p)
 	ILibProcessPipe_Process_Destroy(p);
 }
 #ifdef WIN32
+// Releases the user token and environment that SpawnProcessEx5 acquires before the child's stdio
+// pipes exist, keeping the caller's last error.
+static void ILibProcessPipe_Spawn_ReleaseUserContext(HANDLE token, HANDLE userToken, LPVOID tokenEnvironment, ILibProcessPipe_DestroyEnvironmentBlockFn destroyEnvironmentBlock, HMODULE userEnvModule)
+{
+	DWORD error = GetLastError();
+	if (token != NULL) { CloseHandle(token); }
+	if (userToken != NULL) { CloseHandle(userToken); }
+	if (tokenEnvironment != NULL && destroyEnvironmentBlock != NULL) { destroyEnvironmentBlock(tokenEnvironment); }
+	if (userEnvModule != NULL) { FreeLibrary(userEnvModule); }
+	SetLastError(error);
+}
+
 ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx5(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sid, void *envvars, int extraMemorySize, ILibProcessPipe_ProcessPreStartHandler preStartHandler, void* preStartUser)
 #else
 ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_Manager pipeManager, char* target, char* const* parameters, ILibProcessPipe_SpawnTypes spawnType, void *sid, void *envvars, int extraMemorySize)
@@ -1607,6 +1682,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 		if (parms == NULL)
 		{
 			SetLastError(ERROR_OUTOFMEMORY);
+			ILibProcessPipe_Spawn_ReleaseUserContext(token, userToken, tokenEnvironment, destroyEnvironmentBlock, userEnvModule);
 			return(NULL);
 		}
 		parms[0] = 0;
@@ -1619,6 +1695,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 			{
 				free(parms);
 				SetLastError(ERROR_INSUFFICIENT_BUFFER);
+				ILibProcessPipe_Spawn_ReleaseUserContext(token, userToken, tokenEnvironment, destroyEnvironmentBlock, userEnvModule);
 				return(NULL);
 			}
 			++i;
@@ -1636,6 +1713,15 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
 		retVal->stdErr = ILibProcessPipe_CreatePipe(pipeManager, 4096, NULL, extraMemorySize);
+		if (retVal->stdErr == NULL)
+		{
+#ifdef WIN32
+			if (allocParms != 0) { free(parms); }
+			ILibProcessPipe_Spawn_ReleaseUserContext(token, userToken, tokenEnvironment, destroyEnvironmentBlock, userEnvModule);
+#endif
+			ILibMemory_Free(retVal);
+			return(NULL);
+		}
 		retVal->stdErr->mProcess = retVal;
 	}
 	retVal->parent = (ILibProcessPipe_Manager_Object*)pipeManager;
@@ -1652,8 +1738,19 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 	if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
 		retVal->stdIn = ILibProcessPipe_CreatePipe(pipeManager, 4096, NULL, extraMemorySize);
+		retVal->stdOut = (retVal->stdIn != NULL) ? ILibProcessPipe_CreatePipe(pipeManager, 4096, NULL, extraMemorySize) : NULL;
+		if (retVal->stdIn == NULL || retVal->stdOut == NULL)
+		{
+			DWORD pipeError = GetLastError();
+			ILibProcessPipe_FreePipe(retVal->stdErr);
+			ILibProcessPipe_FreePipe(retVal->stdIn);
+			if (allocParms != 0) { free(parms); }
+			ILibMemory_Free(retVal);
+			SetLastError(pipeError);
+			ILibProcessPipe_Spawn_ReleaseUserContext(token, userToken, tokenEnvironment, destroyEnvironmentBlock, userEnvModule);
+			return(NULL);
+		}
 		retVal->stdIn->mProcess = retVal;
-		retVal->stdOut = ILibProcessPipe_CreatePipe(pipeManager, 4096, NULL, extraMemorySize);
 		retVal->stdOut->mProcess = retVal;
 
 		ILibProcessPipe_PipeObject_DisableInherit(&(retVal->stdIn->mPipe_WriteEnd));
@@ -1927,8 +2024,18 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 		if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 		{
 			retVal->stdIn = ILibProcessPipe_CreatePipe(pipeManager, 4096, NULL, extraMemorySize);
+			retVal->stdOut = (retVal->stdIn != NULL) ? ILibProcessPipe_CreatePipe(pipeManager, 4096, (ILibProcessPipe_GenericBrokenPipeHandler)ILibProcessPipe_Process_BrokenPipeSink, extraMemorySize) : NULL;
+			if (retVal->stdIn == NULL || retVal->stdOut == NULL)
+			{
+				int pipeError = errno;
+				ILibProcessPipe_FreePipe(retVal->stdErr);
+				ILibProcessPipe_FreePipe(retVal->stdIn);
+				ILibMemory_Free(vars);
+				ILibMemory_Free(retVal);
+				errno = pipeError;
+				return(NULL);
+			}
 			retVal->stdIn->mProcess = retVal;
-			retVal->stdOut = ILibProcessPipe_CreatePipe(pipeManager, 4096, (ILibProcessPipe_GenericBrokenPipeHandler)ILibProcessPipe_Process_BrokenPipeSink, extraMemorySize);
 			retVal->stdOut->mProcess = retVal;
 		}
 #ifdef __APPLE__
@@ -3105,7 +3212,15 @@ ILibTransport_DoneState ILibProcessPipe_Pipe_WriteEx(ILibProcessPipe_Pipe target
 	{
 		void **extra;
 		j->mwOverlapped = (OVERLAPPED*)ILibMemory_Allocate(sizeof(OVERLAPPED), sizeof(void*), NULL, (void**)&extra);
-		if ((j->mwOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL) { ILIBCRITICALEXIT(254); }
+		if ((j->mwOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
+		{
+			// Report it like any other write error; event exhaustion must not end the agent.
+			ILibCriticalLog("[PROCESS_PIPE] write event creation failed; write refused", __FILE__, __LINE__, 0, (int)GetLastError());
+			free(j->mwOverlapped);
+			j->mwOverlapped = NULL;
+			if (OnWriteHandler != NULL) { OnWriteHandler(j, user, 1, 0); }
+			return(ILibTransport_DoneState_ERROR);
+		}
 		extra[0] = j;
 	}
 	j->user3 = user;

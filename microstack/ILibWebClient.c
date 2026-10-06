@@ -754,6 +754,7 @@ void ILibWebClient_FinishedResponse(ILibAsyncSocket_SocketModule socketModule, s
 {
 	int i;
 	struct ILibWebRequest *wr;
+	struct ILibWebRequest *toDestroy;	// Destroyed after QLock is released; DestroyWebRequest fires a user callback
 	int closeSpecified = 0;
 	UNREFERENCED_PARAMETER( socketModule );
 
@@ -806,26 +807,24 @@ void ILibWebClient_FinishedResponse(ILibAsyncSocket_SocketModule socketModule, s
 	if (wcdo->SOCK == NULL || ILibAsyncSocket_IsFree(wcdo->SOCK))
 	{
 		ILibSpinLock_Lock(&(wcdo->Parent->QLock));
-		wr = (struct ILibWebRequest*)ILibQueue_DeQueue(wcdo->RequestQueue);
-		if (wr != NULL)
-		{
-			wr->connectionCloseWasSpecified = 2;
-			ILibWebClient_DestroyWebRequest(wr);
-		}
+		toDestroy = (struct ILibWebRequest*)ILibQueue_DeQueue(wcdo->RequestQueue);
+		if (toDestroy != NULL) { toDestroy->connectionCloseWasSpecified = 2; }
 		ILibSpinLock_UnLock(&(wcdo->Parent->QLock));
+		// DestroyWebRequest fires the user DisconnectSink, so run it outside QLock: a callback that re-enters
+		// ILibWebClient (now that the lock really locks) would otherwise self-deadlock on this same lock.
+		if (toDestroy != NULL) { ILibWebClient_DestroyWebRequest(toDestroy); }
 		return;
 	}
 
 	ILibSpinLock_Lock(&(wcdo->Parent->QLock));
-	wr = (struct ILibWebRequest*)ILibQueue_DeQueue(wcdo->RequestQueue);
-	if (wr != NULL)
+	toDestroy = (struct ILibWebRequest*)ILibQueue_DeQueue(wcdo->RequestQueue);
+	if (toDestroy != NULL)
 	{
 		//
 		// Only execute this logic, if there was a pending request. If there wasn't one, that means
 		// that this session was closed the last time the app as called with data, making this next step unnecessary.
 		//
-		wr->connectionCloseWasSpecified = closeSpecified;
-		ILibWebClient_DestroyWebRequest(wr);
+		toDestroy->connectionCloseWasSpecified = closeSpecified;
 		wr = (struct ILibWebRequest*)ILibQueue_PeekQueue(wcdo->RequestQueue);
 		if (wr == NULL)
 		{
@@ -835,11 +834,14 @@ void ILibWebClient_FinishedResponse(ILibAsyncSocket_SocketModule socketModule, s
 			//
 			if (ILibIsChainBeingDestroyed(wcdo->Parent->ChainLink.ParentChain) == 0)
 			{
-				ILibLifeTime_Add(wcdo->Parent->timer, wcdo, HTTP_SESSION_IDLE_TIMEOUT, &ILibWebClient_TimerSink, &ILibWebClient_TimerInterruptSink);		
+				ILibLifeTime_Add(wcdo->Parent->timer, wcdo, HTTP_SESSION_IDLE_TIMEOUT, &ILibWebClient_TimerSink, &ILibWebClient_TimerInterruptSink);
 			}
 		}
 	}
+	else { wr = NULL; }
 	ILibSpinLock_UnLock(&(wcdo->Parent->QLock));
+	// Fire the user callback (via DestroyWebRequest) only after releasing QLock; see note above.
+	if (toDestroy != NULL) { ILibWebClient_DestroyWebRequest(toDestroy); }
 
 //{{{ REMOVE_THIS_FOR_HTTP/1.0_ONLY_SUPPORT--> }}}
 	if (wr != NULL)
@@ -2732,6 +2734,8 @@ ILibWebClient_RequestToken ILibWebClient_PipelineRequestEx2(
 	struct ILibWebClientManager *wcm = (struct ILibWebClientManager*)WebClient;
 	struct ILibWebClientDataObject *wcdo;
 	struct ILibWebRequest *request;
+	void *streamedSendOKSocket = NULL;	// Deferred OnSendOK dispatch target, fired after QLock is released
+	void *streamedSendOKWcdo = NULL;
 	int i = 0;
 
 	int indexWithLeast;
@@ -2873,7 +2877,10 @@ ILibWebClient_RequestToken ILibWebClient_PipelineRequestEx2(
 					if (request->streamedState != NULL)
 					{
 						if (request->streamedState->idleTimeout > 0 && request->streamedState->idleTimeoutHandler != NULL) { ILibAsyncSocket_SetTimeoutEx(wcdo->SOCK, request->streamedState->idleTimeout, request->streamedState->idleTimeoutHandler); }
-						ILibWebClient_OnSendOKSink(wcdo->SOCK, wcdo);
+						// OnSendOKSink fires the user streamed-send callback: defer it past the QLock release below so
+						// a callback that re-enters ILibWebClient cannot self-deadlock on this same lock.
+						streamedSendOKSocket = wcdo->SOCK;
+						streamedSendOKWcdo = wcdo;
 					}
 				}
 			}
@@ -2909,6 +2916,7 @@ ILibWebClient_RequestToken ILibWebClient_PipelineRequestEx2(
 	}
 
 	ILibSpinLock_UnLock(&(wcm->QLock));
+	if (streamedSendOKSocket != NULL) { ILibWebClient_OnSendOKSink(streamedSendOKSocket, streamedSendOKWcdo); }
 	if (ForceUnBlock != 0) ILibForceUnBlockChain(wcm->ChainLink.ParentChain);
 	SESSION_TRACK(request->requestToken, NULL, "PipelinedRequestEx");
 	return(request->requestToken);

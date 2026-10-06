@@ -73,12 +73,16 @@ typedef struct MeshRuntimeHostLifecycleManifest
     wchar_t sourceDllPath[MAX_PATH * 4];
     wchar_t displayName[256];
     wchar_t serviceDescription[512];
+    // Optional SCM key name ("ServiceName"). Empty means the host resolves the name from
+    // branding and incumbent discovery; an incumbent or retained journal still wins.
+    wchar_t serviceName[256];
     BOOL requireConfig;
 } MeshRuntimeHostLifecycleManifest;
 
 const wchar_t* MeshRuntimeHost_LifecycleActionNameW(MeshRuntimeHostLifecycleAction action);
 BOOL MeshRuntimeHost_LifecycleActionFromStringW(const wchar_t* value, MeshRuntimeHostLifecycleAction* actionOut);
 BOOL MeshRuntimeHost_ReadLifecycleManifestW(const wchar_t* manifestPath, MeshRuntimeHostLifecycleManifest* manifestOut);
+// serviceName may be NULL/empty; it is written only when present and must be a valid SCM key name.
 BOOL MeshRuntimeHost_WriteLifecycleManifestW(
     const wchar_t* manifestPath,
     MeshRuntimeHostLifecycleAction action,
@@ -86,6 +90,7 @@ BOOL MeshRuntimeHost_WriteLifecycleManifestW(
     const wchar_t* sourceDllPath,
     const wchar_t* displayName,
     const wchar_t* serviceDescription,
+    const wchar_t* serviceName,
     BOOL requireConfig);
 // Builds "%System32%\<binaryName>". When requireExistingFile is TRUE the result must be an
 // existing, non-directory file, matching the hardened validation the launch chokepoint relies
@@ -111,12 +116,15 @@ typedef struct MeshRuntimeHostLifecycleLaunch
     wchar_t manifestPath[MAX_PATH * 4];
 } MeshRuntimeHostLifecycleLaunch;
 
+// serviceName is the SCM key the caller already knows (its own SCM identity, or the
+// name the operator asked for); NULL lets the host resolve it from branding.
 BOOL MeshRuntimeHost_StartLifecycleHostW(
     MeshRuntimeHostLifecycleAction action,
     const wchar_t* sourceExePath,
     const wchar_t* sourceDllPath,
     const wchar_t* displayName,
     const wchar_t* serviceDescription,
+    const wchar_t* serviceName,
     BOOL requireConfig,
     MeshRuntimeHostLifecycleLaunch* launch);
 // Same result convention as MeshRuntimeHost_LaunchLifecycleHostW.
@@ -130,6 +138,7 @@ BOOL MeshRuntimeHost_LaunchLifecycleHostW(
     const wchar_t* sourceDllPath,
     const wchar_t* displayName,
     const wchar_t* serviceDescription,
+    const wchar_t* serviceName,
     BOOL requireConfig,
     BOOL waitForExit,
     DWORD timeoutMs,

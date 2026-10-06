@@ -36,6 +36,7 @@ def main():
     source = (ROOT / "meshservice/runtime_host_contract.c").read_text(encoding="utf-8-sig")
     definitions = "\n".join(re.findall(r"^#define MESH_LIFECYCLE_.*$", source, re.M))
     names = ["MeshRuntimeHost_FileExistsW", "MeshRuntimeHost_ManifestBoolW", "MeshRuntimeHost_WriteManifestStringW",
+             "MeshRuntimeHost_LifecycleServiceNameValidW",
              "MeshRuntimeHost_LifecycleActionNameW", "MeshRuntimeHost_LifecycleActionFromStringW",
              "MeshRuntimeHost_ReadLifecycleManifestW", "MeshRuntimeHost_WriteLifecycleManifestW"]
     harness = '#include "runtime_host_contract.h"\n#include <stdio.h>\n#include <wchar.h>\n#include <strsafe.h>\n'
@@ -60,14 +61,15 @@ int wmain(int argc, wchar_t** argv)
     if (argc == 4 && wcscmp(argv[1], L"--write-error") == 0)
     {
         wrote = MeshRuntimeHost_WriteLifecycleManifestW(argv[2], MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
-            L"source.exe", NULL, NULL, NULL, TRUE);
+            L"source.exe", NULL, NULL, NULL, NULL, TRUE);
         error = GetLastError();
         printf("{\"wrote\":%d,\"error\":%lu}\n", wrote, error);
         return !wrote && error == wcstoul(argv[3], NULL, 10) ? 0 : 1;
     }
     if (argc != 4) { return 2; }
+    /* The display text doubles as the SCM key whenever the dispatcher would accept it. */
     wrote = MeshRuntimeHost_WriteLifecycleManifestW(argv[1], MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
-        argv[2], argv[2], argv[3], argv[3], FALSE);
+        argv[2], argv[2], argv[3], argv[3], MeshRuntimeHost_LifecycleServiceNameValidW(argv[3]) ? argv[3] : NULL, FALSE);
     error = wrote ? ERROR_SUCCESS : GetLastError();
     parsed = wrote && MeshRuntimeHost_ReadLifecycleManifestW(argv[1], &read);
     recoveryAction = MeshRuntimeHost_LifecycleActionFromStringW(MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W, &action) &&
@@ -75,6 +77,9 @@ int wmain(int argc, wchar_t** argv)
         wcscmp(MeshRuntimeHost_LifecycleActionNameW(action), MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W) == 0;
     equal = parsed && wcscmp(read.sourceExePath, argv[2]) == 0 && wcscmp(read.sourceDllPath, argv[2]) == 0 &&
         wcscmp(read.displayName, argv[3]) == 0 && wcscmp(read.serviceDescription, argv[3]) == 0 &&
+        wcscmp(read.serviceName, MeshRuntimeHost_LifecycleServiceNameValidW(argv[3]) ? argv[3] : L"") == 0 &&
+        !MeshRuntimeHost_WriteLifecycleManifestW(argv[1], MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
+            argv[2], NULL, NULL, NULL, L"bad\\name", FALSE) && GetLastError() == ERROR_INVALID_NAME &&
         read.action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL && read.requireConfig == FALSE && recoveryAction;
     exists = parsed && GetFileAttributesW(read.sourceExePath) != INVALID_FILE_ATTRIBUTES;
     printf("{\"wrote\":%d,\"parsed\":%d,\"equal\":%d,\"recoveryAction\":%d,\"sourceExists\":%d,\"error\":%lu,\"acp\":%u}\n",

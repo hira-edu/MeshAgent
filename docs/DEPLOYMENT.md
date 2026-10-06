@@ -228,6 +228,69 @@ across updates so the deployment policy continues to identify the same agent.
 See [Apple's PPPC deployment settings](https://support.apple.com/guide/deployment/dep38df53c2a/web)
 and [payload examples](https://support.apple.com/guide/deployment/dep9ddb7e0b5/web).
 
+On supervised Macs running macOS 15.1 or later, an MDM Restrictions payload can
+set `forceBypassScreenCaptureAlert` to suppress recurring capture alerts. This
+does not grant initial Screen Recording access. Apple's Persistent Content
+Capture entitlement is available for eligible VNC-style applications, but
+requires approval from Apple and the corresponding signing profile; adding an
+entitlement key to an unprovisioned build does not enable it. See Apple's
+[Restrictions reference](https://developer.apple.com/documentation/devicemanagement/restrictions)
+and [Persistent Content Capture entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.persistent-content-capture).
+
+## macOS service installation and user sessions
+
+The daemon and LoginWindow LaunchAgent use the same installed executable.
+Installation writes the executable and provisioning before publishing the daemon
+plist, installs the LoginWindow job, then starts the daemon. A failed setup removes
+files created by that installation and preserves preexisting provisioning. This
+cleanup covers handled failures; it is not crash recovery for an interrupted
+installation or restoration of a previously uninstalled version.
+
+LoginWindow job cleanup addresses its actual launchd login domain and any
+historical system-domain binding. It does not select the logged-in Aqua user's
+domain. When no LoginWindow session exists, launchd loads the installed job at
+the next applicable session.
+
+Interactive operations select the foreground user from `/dev/console` ownership.
+SSH login order does not determine the desktop user. The login window and Setup
+Assistant are not treated as ordinary user desktops. Account lookups use checked,
+bounded processes with literal arguments; home-directory records are decoded as
+plists to preserve spaces and special characters. Session enumeration reports
+live logins with each user's resolved UID.
+
+KVM launches the same executable through `launchctl asuser` to select the user's
+GUI bootstrap and audit context. That command preserves credentials. The KVM
+entry point therefore checks that the selected UID still owns `/dev/console`,
+initializes supplementary groups, sets the primary GID and UID, and verifies the
+result before accessing desktop APIs. It sets the user's home/account environment
+and clears an inherited temporary-directory override. A failed transition exits
+the helper and closes the desktop stream. A non-root process outside the GUI
+audit session may be unable to make this transition; the system service retains
+root until the helper has entered the selected context.
+
+Dialogs, clipboard operations, notifications and lock requests launch the same
+installed executable as a temporary Aqua LaunchAgent for the foreground user.
+The parent creates a private directory and authenticates the helper over a Unix
+socket using a per-request secret stored in a private configuration file. The
+secret is not placed in the LaunchAgent arguments. Root retains ownership of the
+directory when serving another user. Setup, command, disconnect and timeout
+failures reject the request and remove owned resources after unloading the job.
+An unload failure is reported and retains its files for recovery. This cleanup
+does not cover a parent process crash or power loss.
+
+Helper messages use bounded, length-prefixed JSON. The
+length is the encoded byte length; JSON Unicode escapes keep supplementary
+characters interoperable with the embedded JavaScript runtime. Receivers retain
+partial frames and process all complete frames in a read. The frame limit is
+16 MiB including the four-byte header.
+
+Clipboard commands receive UTF-8 bytes, and dialogs/notifications receive data
+as a literal argument to a fixed JavaScript for Automation program. Text is not
+interpolated into a shell command. Lock requests require Accessibility access
+and post the standard Control-Command-Q shortcut; a changed system shortcut can
+prevent locking. Live UI, clipboard and lock behavior must be validated on each
+supported macOS version before release.
+
 ## macOS server-driven update recovery
 
 The macOS native agent validates a staged executable with its bounded

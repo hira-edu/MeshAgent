@@ -41,6 +41,18 @@ limitations under the License.
 
 #define INET_SOCKADDR_LENGTH(x) ((x==AF_INET6?sizeof(struct sockaddr_in6):sizeof(struct sockaddr_in)))
 
+// After accept() fails because the process is out of file descriptors or buffers, the pending connection stays in
+// the listen backlog and keeps the socket readable, so re-accepting it immediately would spin the microstack at
+// 100% CPU. Keep the listen socket out of the readset for this long to let the pressure clear.
+#define ILibAsyncServerSocket_ACCEPT_BACKOFF_MS 250
+#if defined(WIN32)
+#define ILibAsyncServerSocket_LastSocketError() WSAGetLastError()
+#define ILibAsyncServerSocket_AcceptErrorIsResourceLimit(e) ((e) == WSAEMFILE || (e) == WSAENOBUFS)
+#else
+#define ILibAsyncServerSocket_LastSocketError() errno
+#define ILibAsyncServerSocket_AcceptErrorIsResourceLimit(e) ((e) == EMFILE || (e) == ENFILE || (e) == ENOBUFS || (e) == ENOMEM)
+#endif
+
 typedef struct ILibAsyncServerSocketModule
 {
 	ILibChain_Link ChainLink;
@@ -53,6 +65,7 @@ typedef struct ILibAsyncServerSocketModule
 	unsigned short portNumber, initialPortNumber;
 	int listening;
 	int loopbackFlag;
+	long long acceptBackoffUntil;	// ILibGetUptime() until which the listen socket is kept out of the readset after a resource-exhaustion accept() failure
 
 	ILibAsyncServerSocket_OnReceive OnReceive;
 	ILibAsyncServerSocket_OnConnect OnConnect;
@@ -155,10 +168,22 @@ void ILibAsyncServerSocket_PreSelect(void* socketModule, fd_set *readset, fd_set
 
 	UNREFERENCED_PARAMETER( writeset );
 	UNREFERENCED_PARAMETER( errorset );
-	UNREFERENCED_PARAMETER( blocktime );
 
 	if (module->ListenSocket != ~0)
 	{
+		if (module->acceptBackoffUntil != 0)
+		{
+			// Still backing off from a resource-exhaustion accept() failure: leave the listen socket out of the
+			// readset and wake when the backoff expires, instead of spinning on a connection we cannot accept.
+			long long now = ILibGetUptime();
+			if (now < module->acceptBackoffUntil)
+			{
+				int remaining = (int)(module->acceptBackoffUntil - now);
+				if (*blocktime > remaining) { *blocktime = remaining; }
+				return;
+			}
+			module->acceptBackoffUntil = 0;
+		}
 		// Only put the ListenSocket in the readset, if we are able to handle a new socket
 		for(i = 0; i < module->MaxConnection; ++i)
 		{
@@ -315,7 +340,16 @@ void ILibAsyncServerSocket_PostSelect(void* socketModule, int slct, fd_set *read
 						module->OnConnect(module, module->AsyncSockets[i], &(data->user));
 					}
 				}
-				else {break;}
+				else
+				{
+					// accept() failed. WOULDBLOCK just means the backlog is drained; a resource-exhaustion error
+					// (out of descriptors/buffers) leaves the connection pending, so back off to avoid a CPU spin.
+					if (ILibAsyncServerSocket_AcceptErrorIsResourceLimit(ILibAsyncServerSocket_LastSocketError()))
+					{
+						module->acceptBackoffUntil = ILibGetUptime() + ILibAsyncServerSocket_ACCEPT_BACKOFF_MS;
+					}
+					break;
+				}
 			}
 		}
 	}

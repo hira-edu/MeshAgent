@@ -155,6 +155,7 @@ void ILibDuktape_readableStream_WriteData_OnData_ChainThread(void *chain, void *
 	}
 
 	stream->paused = 0;
+	stream->pipePaused = 0;
 	if(duk_stream_flags_isBuffer(data->Reserved))
 	{
 		duk_push_external_buffer(stream->ctx);																// [ext]
@@ -183,6 +184,8 @@ void ILibDuktape_readableStream_WriteData_OnData_ChainThread(void *chain, void *
 		duk_pop(stream->ctx);																				// ...
 	}
 	free(data);
+	// Chunks that arrived while this one was in flight were buffered; they go out before the source resumes.
+	if (stream->paused == 0 && stream->paused_data != NULL && ILibDuktape_readableStream_resume_flush(stream) != 0) { return; }
 	if (stream->paused == 0 && stream->ResumeHandler != NULL) { stream->ResumeHandler(stream, stream->user); }
 }
 int ILibDuktape_readableStream_WriteData_Flush(struct ILibDuktape_WritableStream *ws, void *user);
@@ -213,6 +216,7 @@ void ILibDuktape_readableStream_ResumeIfUncongested(ILibDuktape_readableStream *
 	if (stream->paused_data != NULL)
 	{
 		stream->paused = 0;
+		stream->pipePaused = 0;
 		if (ILibDuktape_readableStream_resume_flush(stream) == 0 && stream->ResumeHandler != NULL)
 		{
 			stream->ResumeHandler(stream, stream->user);
@@ -221,6 +225,7 @@ void ILibDuktape_readableStream_ResumeIfUncongested(ILibDuktape_readableStream *
 	else if (stream->ResumeHandler != NULL)
 	{
 		stream->paused = 0;
+		stream->pipePaused = 0;
 		stream->ResumeHandler(stream, stream->user);
 	}
 }
@@ -316,7 +321,10 @@ int ILibDuktape_readableStream_WriteData_Flush(struct ILibDuktape_WritableStream
 		unpipeInProgress = stream->unpipeInProgress;
 		ILibSpinLock_UnLock(&(stream->pipeLock));
 
-		if (stream->paused != 0 && (stream->paused_data != NULL || unpipeInProgress == 0))
+		// Only a pause applied by pipe flow control is lifted here. A pause applied by someone else while
+		// the destination was processing the write (e.g. the WebSocket decoder pausing its socket because
+		// a downstream consumer is congested) must survive the write completing, or backpressure is lost.
+		if (stream->paused != 0 && stream->pipePaused != 0 && (stream->paused_data != NULL || unpipeInProgress == 0))
 		{
 			ILibDuktape_readableStream_ResumeIfUncongested(stream);
 		}
@@ -350,9 +358,13 @@ int ILibDuktape_readableStream_WriteDataEx_Chain_Dispatch(ILibDuktape_readableSt
 	if (duk_pcall_method(stream->ctx, 2) != 0)													// [ext][...]
 	{
 		ILibDuktape_Process_UncaughtExceptionEx(stream->ctx, "readable.write(): Error Piping ");
-		if (ILibDuktape_readableStream_WriteData_Flush(NULL, stream)) { retVal = 2; }
+		// A failed destination is not congested; it completes its share of the dispatch now.
+		retVal = ILibDuktape_readableStream_WriteData_Flush(NULL, stream) ? 2 : 1;
 	}
-	retVal = duk_to_boolean(stream->ctx, -1) ? 1 : 0;
+	else
+	{
+		retVal = duk_to_boolean(stream->ctx, -1) ? 1 : 0;
+	}
 	duk_pop_2(stream->ctx);
 
 	return(retVal);
@@ -393,14 +405,9 @@ void __stdcall ILibDuktape_readableStream_WriteData_OnData_ChainThread_APC(ULONG
 }
 #endif
 
+static int ILibDuktape_readableStream_Dispatch(ILibDuktape_readableStream *stream, int streamReserved, char* buffer, size_t bufferLen);
 int ILibDuktape_readableStream_WriteDataEx(ILibDuktape_readableStream *stream, int streamReserved, char* buffer, size_t bufferLen)
 {
-	ILibTransport_DoneState rv;
-	ILibDuktape_readableStream_nextWriteablePipe *w, *wnext;
-	int dispatchedNonNative = 0;
-	int dispatched = 0;
-	int needPause = 0;
-
 	if (stream == NULL || !ILibMemory_CanaryOK(stream) || bufferLen > INT32_MAX) { return(1); } // ToDo: Add support for larger data sets
 
 	if (stream->paused != 0)
@@ -409,6 +416,29 @@ int ILibDuktape_readableStream_WriteDataEx(ILibDuktape_readableStream *stream, i
 		if (stream->paused == 0 && stream->PauseHandler != NULL) { stream->paused = 1; stream->PauseHandler(stream, stream->user); }
 		return(stream->paused);
 	}
+	if (stream->paused_data != NULL && stream->resumeFlushDepth == 0)
+	{
+		// Not paused, but chunks buffered while paused are still undelivered (a resume that did not flush,
+		// or pipe() deferring its flush to the next tick): queue behind them and deliver everything in order.
+		ILibDuktape_readableStream_WriteData_buffer(stream, streamReserved, buffer, (int)bufferLen);
+		if (ILibDuktape_readableStream_resume_flush(stream) != 0 && stream->paused == 0 && stream->PauseHandler != NULL)
+		{
+			// Nothing is receiving yet: hold the source, as the unconsumed path in Dispatch does.
+			stream->paused = 1; stream->pipePaused = 1; stream->PauseHandler(stream, stream->user);
+		}
+		return(stream->paused);
+	}
+	return(ILibDuktape_readableStream_Dispatch(stream, streamReserved, buffer, bufferLen));
+}
+// Delivers one chunk to the piped destinations or 'data' listeners regardless of the paused state;
+// the callers (WriteDataEx, resume_flush, WriteEnd) decide whether it may be delivered now.
+static int ILibDuktape_readableStream_Dispatch(ILibDuktape_readableStream *stream, int streamReserved, char* buffer, size_t bufferLen)
+{
+	ILibTransport_DoneState rv;
+	ILibDuktape_readableStream_nextWriteablePipe *w, *wnext;
+	int dispatchedNonNative = 0;
+	int dispatched = 0;
+	int needPause = 0;
 
 	if (stream->dataTypeSkipValue == 0 || stream->dataTypeSkipValue != streamReserved)
 	{
@@ -541,6 +571,7 @@ int ILibDuktape_readableStream_WriteDataEx(ILibDuktape_readableStream *stream, i
 				needPause = 1;
 #ifdef WIN32
 				// We are going to PAUSE first, do the APC, then exit, to prevent a race condition. We don't want to PAUSE after the APC completes.
+				stream->pipePaused = 1;
 				if (stream->paused == 0 && stream->PauseHandler != NULL) { stream->paused = 1; stream->PauseHandler(stream, stream->user); }
 				((void**)ILibMemory_GetExtraMemory(tmp, sizeof(ILibDuktape_readableStream_bufferedData) + bufferLen))[0] = stream->chain;
 				QueueUserAPC((PAPCFUNC)ILibDuktape_readableStream_WriteData_OnData_ChainThread_APC, ILibChain_GetMicrostackThreadHandle(stream->chain), (ULONG_PTR)tmp);
@@ -564,6 +595,8 @@ int ILibDuktape_readableStream_WriteDataEx(ILibDuktape_readableStream *stream, i
 	}
 	if (needPause)
 	{
+		// Marked even if someone else already paused the stream: the pipe's flush must still be able to resume it.
+		stream->pipePaused = 1;
 		if (stream->paused == 0 && stream->PauseHandler != NULL) { stream->paused = 1; stream->PauseHandler(stream, stream->user); }
 	}
 	return(stream->paused);
@@ -585,10 +618,28 @@ int ILibDuktape_readableStream_WriteEnd(ILibDuktape_readableStream *stream)
 	else
 	{
 		if (stream->endRelayed != 0) { return(retVal); }
-		
+
 		stream->endRelayed = 1;
 		ILibDuktape_readableStream_nextWriteablePipe *next;
-		
+
+		if (stream->paused_data != NULL && (stream->nextWriteable != NULL || ILibDuktape_EventEmitter_HasListeners(stream->emitter, "data") != 0))
+		{
+			// Chunks buffered under backpressure must not be overtaken by the end (the tail of a transfer
+			// would be lost). Destinations queue what they cannot send yet (sockets, the WebSocket encoder,
+			// files), so delivering them now loses nothing. The list is detached first: a chunk nobody
+			// consumes is re-buffered by Dispatch and must not be looped over again.
+			ILibDuktape_readableStream_bufferedData *buffered = (ILibDuktape_readableStream_bufferedData*)stream->paused_data, *bnext;
+			stream->paused_data = NULL;
+			while (buffered != NULL)
+			{
+				bnext = buffered->Next;
+				if (ILibMemory_CanaryOK(stream)) { ILibDuktape_readableStream_Dispatch(stream, buffered->Reserved, buffered->buffer, (size_t)buffered->bufferLen); }
+				free(buffered);
+				buffered = bnext;
+			}
+			if (!ILibMemory_CanaryOK(stream)) { return(retVal); }
+		}
+
 		if (stream->noPropagateEnd == 0 && stream->nextWriteable != NULL)
 		{
 			next = stream->nextWriteable;
@@ -674,6 +725,8 @@ int ILibDuktape_readableStream_resume_flush(ILibDuktape_readableStream *rs)
 		// Let's try to resend as much as we can...
 		ILibDuktape_readableStream_bufferedData *buffered;
 		rs->paused = 0;
+		rs->pipePaused = 0;
+		++rs->resumeFlushDepth;
 
 		while ((buffered = rs->paused_data))
 		{
@@ -684,8 +737,10 @@ int ILibDuktape_readableStream_resume_flush(ILibDuktape_readableStream *rs)
 			rs->paused_data = buffered->Next;
 			writePaused = ILibDuktape_readableStream_WriteDataEx(rs, buffered->Reserved, buffered->buffer, buffered->bufferLen);
 			free(buffered);
+			if (!ILibMemory_CanaryOK(rs)) { return(1); }
 			if (writePaused != 0) { break; }
 		}
+		--rs->resumeFlushDepth;
 		return(rs->paused_data == NULL ? 0 : 1);
 	}
 }
@@ -700,7 +755,7 @@ duk_ret_t ILibDuktape_readableStream_resume(duk_context *ctx)
 	duk_pop(ctx);															// [stream]
 	if (ptr->ResumeHandler == NULL) { return(ILibDuktape_Error(ctx, "Resume not supported")); }
 	if (!ptr->paused) { return(0); }
-	if (ILibDuktape_readableStream_resume_flush(ptr) == 0 && ptr->ResumeHandler != NULL) { ptr->paused = 0; ptr->ResumeHandler(ptr, ptr->user); }
+	if (ILibDuktape_readableStream_resume_flush(ptr) == 0 && ptr->ResumeHandler != NULL) { ptr->paused = 0; ptr->pipePaused = 0; ptr->ResumeHandler(ptr, ptr->user); }
 	return 1;
 }
 
@@ -714,8 +769,9 @@ void ILibDuktape_ReadableStream_pipe_ResumeLater(duk_context *ctx, void **args, 
 		// Attaching a new destination must not override an existing destination's backpressure:
 		// stay paused until the congested one drains (its flush resumes the stream).
 		rs->paused = 1;
+		rs->pipePaused = 1;
 	}
-	else if (ILibDuktape_readableStream_resume_flush(rs) == 0 && rs->ResumeHandler != NULL) { rs->paused = 0; rs->ResumeHandler(rs, rs->user); }
+	else if (ILibDuktape_readableStream_resume_flush(rs) == 0 && rs->ResumeHandler != NULL) { rs->paused = 0; rs->pipePaused = 0; rs->ResumeHandler(rs, rs->user); }
 	if (rs->PipeHookHandler != NULL) { rs->PipeHookHandler(rs, args[1], rs->user); }
 
 	duk_push_this(ctx);						// [immediate]
@@ -751,13 +807,21 @@ duk_ret_t ILibDuktape_readableStream_pipe(duk_context *ctx)
 	int nargs = duk_get_top(ctx);
 	char pipeLogBuf[512];
 	int pipeLogLen = 0;
+	int hasOptions = nargs > 1 && duk_is_object(ctx, 1);
+	int dataTypeSkipValue = 0, noPropagateEnd = 0;
 
 	duk_push_this(ctx);																		// [readable]
 	char *ID = Duktape_GetStringPropertyValue(ctx, -1, ILibDuktape_OBJID, "UNKNOWN");
 	duk_get_prop_string(ctx, -1, ILibDuktape_readableStream_RSPTRS);						// [readable][ptrs]
 	rstream = (ILibDuktape_readableStream*)Duktape_GetBuffer(ctx, -1, NULL);
 	duk_pop_2(ctx);																			// ...
-	
+	if (hasOptions)
+	{
+		// Read before taking pipeLock: the options object is caller-supplied and a getter would run JavaScript under the lock.
+		dataTypeSkipValue = Duktape_GetIntPropertyValue(ctx, 1, "dataTypeSkip", 0);
+		noPropagateEnd = Duktape_GetBooleanProperty(ctx, 1, "end", 1) == 0 ? 1 : 0;
+	}
+
 	ILibSpinLock_Lock(&(rstream->pipeLock));
 	if (rstream->pipeInProgress != 0 && rstream->pipeInProgress_counter < 10)
 	{
@@ -818,10 +882,10 @@ duk_ret_t ILibDuktape_readableStream_pipe(duk_context *ctx)
 			w->previous = tmp;
 		}
 	}
-	if (nargs > 1 && duk_is_object(ctx, 1))
+	if (hasOptions)
 	{
-		rstream->dataTypeSkipValue = Duktape_GetIntPropertyValue(ctx, 1, "dataTypeSkip", 0);
-		rstream->noPropagateEnd = Duktape_GetBooleanProperty(ctx, 1, "end", 1) == 0 ? 1 : 0;
+		rstream->dataTypeSkipValue = dataTypeSkipValue;
+		rstream->noPropagateEnd = noPropagateEnd;
 	}
 	ILibSpinLock_UnLock(&(rstream->pipeLock));
 	if (pipeLogLen > 0) { Duktape_Console_Log(ctx, duk_ctx_chain(ctx), ILibDuktape_LogType_Info1, pipeLogBuf, pipeLogLen); }
@@ -838,6 +902,7 @@ duk_ret_t ILibDuktape_readableStream_pipe(duk_context *ctx)
 	if (rstream->paused != 0)
 	{
 		rstream->paused = 0; // Set state now, so nobody tries to resume before we can finish piping
+		rstream->pipePaused = 0;
 
 		// We are paused, so we should yield and resume... We yield, so in case the user tries to chain multiple pipes, it will chain first
 		rstream->resumeImmediate = ILibDuktape_Immediate(ctx, (void*[]) { rstream, duk_get_heapptr(ctx, 0) }, 2, ILibDuktape_ReadableStream_pipe_ResumeLater);
@@ -860,6 +925,7 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 	ILibDuktape_readableStream_nextWriteablePipe *w;
 	int i;
 	int resumeAfterUnlock = 0;
+	int emitUnpipe = 0;
 	duk_size_t arrayLen;
 
 	duk_push_heapptr(ctx, args[0]);											// [readable]
@@ -902,18 +968,11 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 			{
 				if (w->writableStream == args[1])
 				{
-					// Emit the 'unpipe' event. pipeLock is not recursive and a listener may pipe/unpipe/write
-					// this stream, so it is released around the JavaScript call.
-					ILibSpinLock_UnLock(&(data->pipeLock));
-					duk_push_heapptr(ctx, args[1]);										// [ws]
-					duk_get_prop_string(ctx, -1, "emit");								// [ws][emit]
-					duk_swap_top(ctx, -2);												// [emit][this]
-					duk_push_string(ctx, "unpipe");										// [emit][this][unpipe]
-					duk_push_heapptr(ctx, args[0]);										// [emit][this][unpipe][readable]
-					if (duk_pcall_method(ctx, 2) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "readable.unpipe(): "); }
-					duk_pop(ctx);														// ...
-					ILibSpinLock_Lock(&(data->pipeLock));
-
+					// The list is modified while pipeLock is still held from the dispatch check above: releasing
+					// it in between would let a dispatch on another thread start iterating the list we then
+					// unlink from. The 'unpipe' event is emitted after the lock is released (it is not
+					// recursive, and a listener may pipe/unpipe/write this stream).
+					emitUnpipe = 1;
 					if (w->previous != NULL)
 					{
 						w->previous->next = w->next;
@@ -959,16 +1018,19 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 						((ILibDuktape_WritableStream*)w->nativeWritable)->OnWriteFlushEx = NULL;
 						((ILibDuktape_WritableStream*)w->nativeWritable)->OnWriteFlushEx_User = NULL;
 					}
-					if (data->nextWriteable != NULL && data->paused != 0)
+					if (data->nextWriteable != NULL && data->paused != 0 && data->pipePaused != 0)
 					{
 						// Resume (after pipeLock is released: the flush re-enters WriteDataEx, which takes
-						// pipeLock) and only if no remaining destination is still congested.
+						// pipeLock) and only if no remaining destination is still congested. A pause that
+						// pipe flow control did not apply is left to whoever applied it.
 						data->pipe_pendingCount = 0;
 						resumeAfterUnlock = 1;
 					}
 					else if (data->nextWriteable == NULL)
 					{
+						// No destination is left to complete the dispatch the removed one may have been holding.
 						data->pipe_pendingCount = 0;
+						data->pipeInProgress = 0;
 					}
 					break;
 				}
@@ -1013,6 +1075,16 @@ void ILibDuktape_readableStream_unpipe_later(duk_context *ctx, void ** args, int
 	}
 	data->unpipeInProgress = 0;
 	ILibSpinLock_UnLock(&(data->pipeLock));
+	if (emitUnpipe != 0)
+	{
+		duk_push_heapptr(ctx, args[1]);										// [ws]
+		duk_get_prop_string(ctx, -1, "emit");								// [ws][emit]
+		duk_swap_top(ctx, -2);												// [emit][this]
+		duk_push_string(ctx, "unpipe");										// [emit][this][unpipe]
+		duk_push_heapptr(ctx, args[0]);										// [emit][this][unpipe][readable]
+		if (duk_pcall_method(ctx, 2) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "readable.unpipe(): "); }
+		duk_pop(ctx);														// ...
+	}
 	if (resumeAfterUnlock != 0) { ILibDuktape_readableStream_ResumeIfUncongested(data); }
 
 	// Delete Reference before returning

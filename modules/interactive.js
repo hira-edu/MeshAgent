@@ -240,14 +240,28 @@ limitations under the License.
             parms.unshift('--copy-msh=1');
             parms.unshift('--no-embedded=1');
         }
-        require('agent-installer').fullInstallEx(parms, null);
+        _runLifecycle('install', function () { require('agent-installer').fullInstallEx(parms, null); });
     }
 
     function _uninstall()
     {
         var parms = ['--meshServiceName="' + serviceName + '"'];
         if (process.platform != 'win32') { parms.unshift('--no-embedded=1'); }
-        require('agent-installer').fullUninstall(JSON.stringify(parms));
+        _runLifecycle('uninstall', function () { require('agent-installer').fullUninstall(JSON.stringify(parms)); });
+    }
+
+    // The installer exits the process itself on success. A failure must reach the operator and
+    // the exit code, whether it was started from a button or from -install/-uninstall; the
+    // GUI and terminal paths previously fell through to process.exit() with code 0.
+    function _runLifecycle(operation, action)
+    {
+        try { action(); }
+        catch (e)
+        {
+            if (('' + e).indexOf('Process.exit() forced script termination') >= 0) { throw e; }
+            process.stderr.write('Agent ' + operation + ' failed: ' + ((e != null && e.message) ? e.message : e) + '\n');
+            process.exit(1);
+        }
     }
 
     if (msh.InstallFlags == null)

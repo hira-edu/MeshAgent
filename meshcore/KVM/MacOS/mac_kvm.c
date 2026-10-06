@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "mac_kvm.h"
+#include "mac_hid.h"
 #include "../../meshdefines.h"
 #include "../../meshinfo.h"
 #include "../../../microstack/ILibParsers.h"
@@ -33,6 +34,9 @@ limitations under the License.
 
 #include <string.h>
 #include <pwd.h>
+#include <grp.h>
+#include <poll.h>
+#include <stdatomic.h>
 
 int KVM_Listener_FD = -1;
 #define KVM_Listener_Path "/usr/local/mesh_services/meshagent/kvm"
@@ -46,20 +50,17 @@ int KVM_Listener_FD = -1;
 int KVM_AGENT_FD = -1;
 int KVM_SEND(char *buffer, int bufferLen)
 {
-	int retVal = -1;
-	retVal = write(KVM_AGENT_FD == -1 ? STDOUT_FILENO : KVM_AGENT_FD, buffer, bufferLen);
-	if (KVM_AGENT_FD == -1) { fsync(STDOUT_FILENO); }
-	else
-	{
-		if (retVal < 0)
-		{
-			char tmp[255];
-			int tmpLen = sprintf_s(tmp, sizeof(tmp), "Write Error: %d on %d\n", errno, KVM_AGENT_FD);
-			write(STDOUT_FILENO, tmp, tmpLen);
-			fsync(STDOUT_FILENO);
-		}
-	}
-	return(retVal);
+    int fd = KVM_AGENT_FD == -1 ? STDOUT_FILENO : KVM_AGENT_FD;
+    int sent = 0;
+    if (bufferLen < 0) { errno = EINVAL; return -1; }
+    while (sent < bufferLen)
+    {
+        ssize_t count = write(fd, buffer + sent, (size_t)(bufferLen - sent));
+        if (count < 0 && errno == EINTR) { continue; }
+        if (count <= 0) { if (count == 0) { errno = EIO; } return -1; }
+        sent += (int)count;
+    }
+    return sent;
 }
 
 
@@ -80,8 +81,8 @@ int FRAME_RATE_TIMER = 0;
 struct tileInfo_t **g_tileInfo = NULL;
 int g_remotepause = 0;
 int g_pause = 0;
-int g_shutdown = 0;
-int g_resetipc = 0;
+static atomic_int g_shutdown = 0;
+static atomic_int g_resetipc = 0;
 int kvm_clientProcessId = 0;
 int g_restartcount = 0;
 int g_totalRestartCount = 0;
@@ -323,6 +324,7 @@ static int MacKvm_CanCaptureScreen(void)
 
 static int MacKvm_CanPostInput(void)
 {
+    // A virtual device is an input transport, not a desktop authorization grant.
     if (__builtin_available(macOS 10.9, *)) { return AXIsProcessTrustedWithOptions(NULL); }
     return 1;
 }
@@ -354,11 +356,11 @@ int kvm_server_inputdata(char* block, int blocklen)
 
 	// Decode the block header
 	if (blocklen < 4) return 0;
-	type = ntohs(((unsigned short*)(block))[0]);
-	size = ntohs(((unsigned short*)(block))[1]);
+	type = ((unsigned short)(unsigned char)block[0] << 8) | (unsigned char)block[1];
+	size = ((unsigned short)(unsigned char)block[2] << 8) | (unsigned char)block[3];
 
 	if (size > blocklen) return 0;
-	if (size < 4) return blocklen; // Malformed header; drop the rest to avoid a stall/desync of the input stream.
+	if (size < 4) return -1; // Stop this stream; its packet boundary is no longer trustworthy.
 
 	switch (type)
 	{
@@ -379,10 +381,11 @@ int kvm_server_inputdata(char* block, int blocklen)
 			if (KVM_AGENT_FD != -1 || !MacKvm_CanPostInput()) { break; }
 			if (size == 10 || size == 12)
 			{
-				x = ((int)ntohs(((unsigned short*)(block))[3])) / SCREEN_SCALE;
-				y = ((int)ntohs(((unsigned short*)(block))[4])) / SCREEN_SCALE;
+				if (SCREEN_SCALE < 1) { break; }
+				x = (((int)(unsigned char)block[6] << 8) | (unsigned char)block[7]) / SCREEN_SCALE;
+				y = (((int)(unsigned char)block[8] << 8) | (unsigned char)block[9]) / SCREEN_SCALE;
 				
-				if (size == 12) w = ((short)ntohs(((short*)(block))[5]));
+				if (size == 12) w = (short)(((unsigned int)(unsigned char)block[10] << 8) | (unsigned char)block[11]);
 				
 				//printf("x:%d, y:%d, b:%d, w:%d\n", x, y, block[5], w);
 				MouseAction(x, y, (int)(unsigned char)(block[5]), w);
@@ -449,79 +452,42 @@ void kvm_pause(int pause)
 
 void* kvm_mainloopinput(void* param)
 {
-	int ptr = 0;
-	int ptr2 = 0;
-	int len = 0;
-	char* pchRequest2[30000];
-	int cbBytesRead = 0;
-
-	char tmp[255];
-	int tmpLen;
-
-	if (KVM_AGENT_FD == -1)
-	{
-		int flags;
-		flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-		if (fcntl(STDIN_FILENO, F_SETFL, (O_NONBLOCK | flags) ^ O_NONBLOCK) == -1) { senddebug(-999); }
-	}
-
-	while (!g_shutdown)
-	{
-		if (KVM_AGENT_FD != -1)
-		{
-			tmpLen = sprintf_s(tmp, sizeof(tmp), "About to read from IPC Socket\n");
-			write(STDOUT_FILENO, tmp, tmpLen);
-			fsync(STDOUT_FILENO);
-		}
-
-		KvmDebugLog("Reading from master in kvm_mainloopinput\n");
-		cbBytesRead = read(KVM_AGENT_FD == -1 ? STDIN_FILENO: KVM_AGENT_FD, pchRequest2 + len, 30000 - len);
-		KvmDebugLog("Read %d bytes from master in kvm_mainloopinput\n", cbBytesRead);
-
-		if (KVM_AGENT_FD != -1)
-		{
-			tmpLen = sprintf_s(tmp, sizeof(tmp), "Read %d bytes from IPC-xx-Socket\n", cbBytesRead);
-			write(STDOUT_FILENO, tmp, tmpLen);
-			fsync(STDOUT_FILENO);
-		}
-
-		if (cbBytesRead == -1 || cbBytesRead == 0) 
-		{ 
-			/*ILIBMESSAGE("KVMBREAK-K1\r\n"); g_shutdown = 1; printf("shutdown\n");*/ 
-			if (KVM_AGENT_FD == -1)
-			{
-				g_shutdown = 1;
-			}
-			else
-			{
-				g_resetipc = 1;
-			}
-			break; 
-		}
-		len += cbBytesRead;
-		ptr2 = 0;
-		
-		if (KVM_AGENT_FD != -1)
-		{
-			tmpLen = sprintf_s(tmp, sizeof(tmp), "enter while\n");
-			write(STDOUT_FILENO, tmp, tmpLen);
-			fsync(STDOUT_FILENO);
-		}
-		while ((ptr2 = kvm_server_inputdata((char*)pchRequest2 + ptr, cbBytesRead - ptr)) != 0) { ptr += ptr2; }
-
-		if (KVM_AGENT_FD != -1)
-		{
-			tmpLen = sprintf_s(tmp, sizeof(tmp), "exited while\n");
-			write(STDOUT_FILENO, tmp, tmpLen);
-			fsync(STDOUT_FILENO);
-		}
-
-		if (ptr == len) { len = 0; ptr = 0; }
-		// TODO: else move the reminder.
-	}
-
-	return 0;
+    unsigned char buffer[65535];
+    size_t length = 0;
+    int fd = KVM_AGENT_FD == -1 ? STDIN_FILENO : KVM_AGENT_FD;
+    UNREFERENCED_PARAMETER(param);
+    while (!g_shutdown && !g_resetipc)
+    {
+        struct pollfd pending = { fd, POLLIN, 0 };
+        int ready = poll(&pending, 1, 100);
+        if (ready < 0 && errno == EINTR) { continue; }
+        if (ready < 0 || (pending.revents & (POLLERR | POLLNVAL))) { break; }
+        if (ready == 0) { continue; }
+        ssize_t count = read(fd, buffer + length, sizeof(buffer) - length);
+        if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) { continue; }
+        if (count <= 0) { break; }
+        length += (size_t)count;
+        size_t consumed = 0;
+        while (consumed < length)
+        {
+            int size = kvm_server_inputdata((char*)buffer + consumed, (int)(length - consumed));
+            if (size < 0 || (size_t)size > length - consumed) { goto disconnected; }
+            if (size == 0) { break; }
+            consumed += (size_t)size;
+        }
+        if (consumed)
+        {
+            length -= consumed;
+            memmove(buffer, buffer + consumed, length);
+        }
+        if (length == sizeof(buffer)) { break; }
+    }
+disconnected:
+    if (KVM_AGENT_FD == -1) { g_shutdown = 1; }
+    else { g_resetipc = 1; }
+    return NULL;
 }
+
 void ExitSink(int s)
 {
 	UNREFERENCED_PARAMETER(s);
@@ -548,6 +514,7 @@ void* kvm_server_mainloop(void* param)
 	int written = 0;
 	struct sockaddr_un serveraddr;
 
+	signal(SIGPIPE, SIG_IGN);
 	if (param == NULL)
 	{
 		// This is doing I/O via StdIn/StdOut
@@ -621,9 +588,12 @@ void* kvm_server_mainloop(void* param)
 	g_messageQ = ILibQueue_Create();
 	if (kvm_init() != 0) { return (void*)-1; }
 
+	if (vhid_init()) {
+		KvmDebugLog("Virtual HID active\n");
+	}
 
 	g_shutdown = 0;
-	pthread_create(&kvmthread, NULL, kvm_mainloopinput, param);
+	if (pthread_create(&kvmthread, NULL, kvm_mainloopinput, param) != 0) { kvmthread = (pthread_t)NULL; g_shutdown = 1; }
 
 
 	if (KVM_AGENT_FD != -1)
@@ -641,6 +611,7 @@ void* kvm_server_mainloop(void* param)
 	{
 		if (g_resetipc != 0)
 		{
+			if (kvmthread != (pthread_t)NULL) { pthread_join(kvmthread, NULL); kvmthread = (pthread_t)NULL; }
 			g_resetipc = 0;
 			permissionState = -1;
 			close(KVM_AGENT_FD);
@@ -665,7 +636,7 @@ void* kvm_server_mainloop(void* param)
 				int tmpLen = sprintf_s(tmp, sizeof(tmp), "ACCEPTed new connection %d on Domain Socket\n", KVM_AGENT_FD);
 				written = write(STDOUT_FILENO, tmp, tmpLen);
 				fsync(STDOUT_FILENO);
-				pthread_create(&kvmthread, NULL, kvm_mainloopinput, param);
+				if (pthread_create(&kvmthread, NULL, kvm_mainloopinput, param) != 0) { kvmthread = (pthread_t)NULL; g_shutdown = 1; break; }
 			}
 		}
 		
@@ -804,7 +775,8 @@ void* kvm_server_mainloop(void* param)
 		CGImageRelease(image);
 	}
 	
-	pthread_join(kvmthread, NULL);
+	g_shutdown = 1;
+	if (kvmthread != (pthread_t)NULL) { pthread_join(kvmthread, NULL); }
 	kvmthread = (pthread_t)NULL;
 
 	if (g_tileInfo != NULL) { for (r = 0; r < TILE_HEIGHT_COUNT; r++) { free(g_tileInfo[r]); } }
@@ -813,6 +785,8 @@ void* kvm_server_mainloop(void* param)
 		free(tilebuffer);
 		tilebuffer = NULL;
 	}
+
+	vhid_cleanup();
 
 	if (KVM_AGENT_FD != -1)
 	{
@@ -825,17 +799,20 @@ void* kvm_server_mainloop(void* param)
 
 void kvm_relay_ExitHandler(ILibProcessPipe_Process sender, int exitCode, void* user)
 {
-	//ILibKVM_WriteHandler writeHandler = (ILibKVM_WriteHandler)((void**)user)[0];
-	//void *reserved = ((void**)user)[1];
-	//void *pipeMgr = ((void**)user)[2];
-	//char *exePath = (char*)((void**)user)[3];
-	UNREFERENCED_PARAMETER(sender);
 	UNREFERENCED_PARAMETER(exitCode);
-	if (gChildProcess == sender) { gChildProcess = NULL; }
+	if (user == NULL) { return; }
+	ILibKVM_WriteHandler writeHandler = (ILibKVM_WriteHandler)((void**)user)[0];
+	void *reserved = ((void**)user)[1];
+	int active = gChildProcess == sender;
+	if (active) { gChildProcess = NULL; }
+	// Pipe teardown can still deliver callbacks before deferred process destruction.
+	ILibProcessPipe_Process_UpdateUserObject(sender, NULL);
 	ILibMemory_Free(user);
+	if (active && writeHandler != NULL) { writeHandler(NULL, 0, reserved); }
 }
 void kvm_relay_StdOutHandler(ILibProcessPipe_Process sender, char *buffer, size_t bufferLen, size_t* bytesConsumed, void* user)
 {
+    if (user == NULL) { *bytesConsumed = bufferLen; return; }
     size_t length = 0;
     int frame = MacKvm_FrameLength((const unsigned char*)buffer, bufferLen, &length);
     ILibKVM_WriteHandler writeHandler = (ILibKVM_WriteHandler)((void**)user)[0];
@@ -867,51 +844,71 @@ void kvm_relay_StdErrHandler(ILibProcessPipe_Process sender, char *buffer, size_
 }
 
 
-// Setup the KVM session. Return 1 if ok, 0 if it could not be setup.
+// launchctl asuser changes the GUI bootstrap/audit context, not credentials.
+// Run this in the new helper before opening any desktop or input API.
+int MacKvm_InitializeSessionUser(const char *value)
+{
+    uid_t uid = geteuid();
+    if (value != NULL)
+    {
+        unsigned long number = 0;
+        if (*value == 0) { errno = EINVAL; return -1; }
+        for (const unsigned char *p = (const unsigned char*)value; *p; ++p)
+        {
+            if (*p < '0' || *p > '9' || number > ((unsigned long)INT_MAX - (*p - '0')) / 10)
+            { errno = EINVAL; return -1; }
+            number = number * 10 + (*p - '0');
+        }
+        uid = (uid_t)number;
+    }
+    if (uid == 0 || uid > INT_MAX || (geteuid() != 0 && geteuid() != uid)) { errno = EPERM; return -1; }
+    struct stat console;
+    if (stat("/dev/console", &console) != 0) { return -1; }
+    if (console.st_uid != uid) { errno = ESTALE; return -1; }
+    struct passwd account, *found = NULL;
+    char scratch[16384];
+    int error = getpwuid_r(uid, &account, scratch, sizeof(scratch), &found);
+    if (error != 0 || found == NULL) { errno = error != 0 ? error : ENOENT; return -1; }
+    if (account.pw_uid != uid || account.pw_gid == (gid_t)-1 || account.pw_name == NULL || !*account.pw_name || account.pw_dir == NULL || account.pw_dir[0] != '/')
+    { errno = EINVAL; return -1; }
+    if (geteuid() == 0)
+    {
+        if (initgroups(account.pw_name, account.pw_gid) != 0 || setgid(account.pw_gid) != 0 || setuid(uid) != 0) { return -1; }
+    }
+    if (getuid() != uid || geteuid() != uid || getgid() != account.pw_gid || getegid() != account.pw_gid)
+    { errno = EPERM; return -1; }
+    if (setenv("HOME", account.pw_dir, 1) != 0 || setenv("USER", account.pw_name, 1) != 0 || setenv("LOGNAME", account.pw_name, 1) != 0 ||
+        setenv("SHELL", account.pw_shell != NULL && *account.pw_shell ? account.pw_shell : "/bin/sh", 1) != 0 || unsetenv("TMPDIR") != 0 || chdir("/") != 0)
+    { return -1; }
+    return 0;
+}
+
+// Return the output pipe, or the LoginWindow socket path when no user is logged in.
 void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int uid)
 {
-	char * parms0[] = { "meshagent_osx64", "-kvm0", NULL };
-	if (uid == 0) { return (void*)KVM_Listener_Path; }
-	void **user = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, NULL, NULL);
-	user[0] = writeHandler;
-	user[1] = reserved;
-	user[2] = processPipeMgr;
-	user[3] = exePath;
+    if (uid == 0) { return (void*)KVM_Listener_Path; }
+    if (uid < 0 || exePath == NULL || exePath[0] != '/' || (geteuid() != 0 && geteuid() != (uid_t)uid)) { return NULL; }
+    char userId[16];
+    snprintf(userId, sizeof(userId), "%u", (unsigned int)uid);
+    char *gui[] = { "launchctl", "asuser", userId, exePath, "-kvm0", "--session-uid", userId, NULL };
+    void **user = (void**)ILibMemory_Allocate(4 * sizeof(void*), 0, NULL, NULL);
+    user[0] = writeHandler;
+    user[1] = reserved;
+    user[2] = processPipeMgr;
+    user[3] = exePath;
 
-	if (uid != 0)
-	{
-		// Spawn child kvm process into a specific user session
-		gChildProcess = ILibProcessPipe_Manager_SpawnProcessEx3(processPipeMgr, exePath, parms0, ILibProcessPipe_SpawnTypes_DEFAULT, (void*)(uint64_t)uid, 0);
-		if (gChildProcess == NULL) { ILibMemory_Free(user); return NULL; }
-		g_slavekvm = ILibProcessPipe_Process_GetPID(gChildProcess);
-		
-		char tmp[255];
-		sprintf_s(tmp, sizeof(tmp), "Child KVM (pid: %d)", g_slavekvm);
-		ILibProcessPipe_Process_ResetMetadata(gChildProcess, tmp);
-		
-		ILibProcessPipe_Process_AddHandlers(gChildProcess, 65535, &kvm_relay_ExitHandler, &kvm_relay_StdOutHandler, &kvm_relay_StdErrHandler, NULL, user);
-
-		// Run the relay
-		g_shutdown = 0;
-		return(ILibProcessPipe_Process_GetStdOut(gChildProcess));
-	}
-	else
-	{
-		// No users are logged in. This is a special case for MacOS
-		//int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-		//if (!fd < 0)
-		//{
-		//	struct sockaddr_un serveraddr;
-		//	memset(&serveraddr, 0, sizeof(serveraddr));
-		//	serveraddr.sun_family = AF_UNIX;
-		//	strcpy(serveraddr.sun_path, KVM_Listener_Path);
-		//	if (!connect(fd, (struct sockaddr *)&serveraddr, SUN_LEN(&serveraddr)) < 0)
-		//	{
-		//		return((void*)(uint64_t)fd);
-		//	}
-		//}
-		return((void*)KVM_Listener_Path);
-	}
+    // Keep root until the helper can establish all supplementary groups and its
+    // primary GID as well as UID. The generic pipe spawn only calls setuid().
+    gChildProcess = ILibProcessPipe_Manager_SpawnProcessEx3(processPipeMgr, "/bin/launchctl",
+        gui, ILibProcessPipe_SpawnTypes_DEFAULT, NULL, 0);
+    if (gChildProcess == NULL) { ILibMemory_Free(user); return NULL; }
+    g_slavekvm = ILibProcessPipe_Process_GetPID(gChildProcess);
+    char metadata[64];
+    snprintf(metadata, sizeof(metadata), "Child KVM (pid: %d)", g_slavekvm);
+    ILibProcessPipe_Process_ResetMetadata(gChildProcess, metadata);
+    ILibProcessPipe_Process_AddHandlers(gChildProcess, 65535, &kvm_relay_ExitHandler, &kvm_relay_StdOutHandler, &kvm_relay_StdErrHandler, NULL, user);
+    g_shutdown = 0;
+    return ILibProcessPipe_Process_GetStdOut(gChildProcess);
 }
 
 // Force a KVM reset & refresh

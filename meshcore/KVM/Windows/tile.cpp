@@ -83,20 +83,25 @@ int adjust_screen_size(int pixles);
 static int get_desktop_buffer_gdi(void **buffer, long long *bufferSize, long* mouseMove)
 {
 	BITMAPINFO bmpInfo;
+	HBITMAP newBitmap = NULL;
 
 	*buffer = NULL;
 	*bufferSize = 0;
 
 	if (hDesktopDC) ReleaseDC(NULL, hDesktopDC);
 	if ((hDesktopDC = GetDC(NULL)) == NULL) { KVMDEBUG("GetDC(NULL) returned NULL", 0); return 1; }
-	if (hCapturedBitmap) DeleteObject(hCapturedBitmap);
-	if ((hCapturedBitmap = CreateCompatibleBitmap(hDesktopDC, adjust_screen_size(SCALED_WIDTH), adjust_screen_size(SCALED_HEIGHT))) == NULL)
+	if ((newBitmap = CreateCompatibleBitmap(hDesktopDC, adjust_screen_size(SCALED_WIDTH), adjust_screen_size(SCALED_HEIGHT))) == NULL)
 	{
 		KVMDEBUG("CreateCompatibleBitmap() returned NULL", 0);
 		return 1;
 	}
 
-	if (SelectObject(hCaptureDC, hCapturedBitmap) == NULL) { KVMDEBUG("SelectObject() failed", 0); return(1); }
+	// The previous frame's bitmap is still selected into hCaptureDC, and DeleteObject() refuses a
+	// bitmap that is selected into a DC. Select the new one first so the old one can be deleted;
+	// deleting it while selected leaked one screen-sized GDI bitmap per captured frame.
+	if (SelectObject(hCaptureDC, newBitmap) == NULL) { KVMDEBUG("SelectObject() failed", 0); DeleteObject(newBitmap); return(1); }
+	if (hCapturedBitmap) DeleteObject(hCapturedBitmap);
+	hCapturedBitmap = newBitmap;
 	if (SCALING_FACTOR == 1024)
 	{
 		if (BitBlt(hCaptureDC, 0, 0, adjust_screen_size(SCREEN_WIDTH), adjust_screen_size(SCREEN_HEIGHT), hDesktopDC, SCREEN_X, SCREEN_Y, SRCCOPY) == FALSE)
@@ -297,6 +302,15 @@ int calc_opt_compr_send(int x, int y, int captureWidth, int captureHeight, void*
 
 	// Construct GDI+ Image object from the BMP stream.
 	Gdiplus::Image* DIBImage = Gdiplus::Image::FromStream(bmpStream);
+	if (DIBImage == NULL)
+	{
+		// FromStream returns NULL (not a failed Image) when GDI+ cannot decode the stream, for
+		// example when a display-mode switch left PIXEL_SIZE and the captured bits inconsistent.
+		KVMDEBUG("Image::FromStream() returned NULL", 0);
+		bmpStream->Release();
+		ILibCriticalLog(NULL, __FILE__, __LINE__, 252, GetLastError());
+		return 0;
+	}
 
 	// Create stream to receive the encoded JPEG.
 	IStream* jpegStream = NULL;

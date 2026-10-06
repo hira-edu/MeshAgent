@@ -180,8 +180,15 @@ function main() {
     assert(runtimeHostHeader.includes('BOOL MeshRuntimeHost_GetServiceHostPathW'), 'canonical service-host resolver must be declared');
     const resolveHost = extractFunction(runtimeHostSource, 'BOOL MeshRuntimeHost_GetSystemHostPathW');
     const resolveServiceHost = extractFunction(runtimeHostSource, 'BOOL MeshRuntimeHost_GetServiceHostPathW');
-    assert(resolveHost.includes('GetSystemDirectoryW') && resolveHost.includes('rundll32.exe'), 'runtime host resolution must use the Windows system directory');
-    assert(resolveServiceHost.includes('GetSystemDirectoryW') && resolveServiceHost.includes('svchost.exe'), 'service host resolution must use the actual system service-host path');
+    // Both resolvers share one construction (MeshRuntimeHost_BuildSystemBinaryPathW) so they
+    // cannot diverge; the system directory lookup and the binary names live there.
+    const buildSystemBinaryPath = extractFunction(runtimeHostSource, 'BOOL MeshRuntimeHost_BuildSystemBinaryPathW');
+    assert(buildSystemBinaryPath.includes('GetSystemDirectoryW(output, (UINT)outputCch)'), 'system binary resolution must use the Windows system directory');
+    assert(buildSystemBinaryPath.includes('if (requireExistingFile && !MeshRuntimeHost_FileExistsW(output)) { return FALSE; }'), 'system binary resolution must reject a missing or directory host binary when asked');
+    assert(runtimeHostHeader.includes('#define MESH_RUNTIME_HOST_BINARY_RUNDLL32_W      L"rundll32.exe"'), 'canonical rundll32 host name must be defined once');
+    assert(runtimeHostHeader.includes('#define MESH_RUNTIME_HOST_BINARY_SVCHOST_W       L"svchost.exe"'), 'canonical svchost host name must be defined once');
+    assert(resolveHost.includes('MeshRuntimeHost_BuildSystemBinaryPathW(MESH_RUNTIME_HOST_BINARY_RUNDLL32_W, TRUE, runtimeHostPath, runtimeHostPathCch)'), 'runtime host resolution must use the Windows system directory');
+    assert(resolveServiceHost.includes('MeshRuntimeHost_BuildSystemBinaryPathW(MESH_RUNTIME_HOST_BINARY_SVCHOST_W, TRUE, serviceHostPath, serviceHostPathCch)'), 'service host resolution must use the actual system service-host path');
     assert(!serviceUtilsHeader.includes('ServiceUtil_GetSystemServiceHostPathW') && !serviceUtils.includes('ServiceUtil_GetSystemServiceHostPathW'), 'obsolete service-host resolver must be removed');
     assert(serviceServiceHost.includes('MeshRuntimeHost_GetServiceHostPathW'), 'SCM registration must use canonical service-host resolution');
     assert(serviceFirewall.includes('MeshRuntimeHost_GetServiceHostPathW'), 'firewall maintenance must use canonical service-host resolution');
@@ -203,7 +210,9 @@ function main() {
     assert(!defaultInstallRootBody.includes('GetWindowsDirectoryW'), 'default install root must not synthesize ProgramData from Windows directory');
     assert(!defaultInstallRootBody.includes('C:\\\\ProgramData'), 'default install root must not use literal C:\\ProgramData fallback');
     assert(!serviceInstaller.includes('MeshInstaller_GetProgramDataRoot'), 'installer must not keep a secondary ProgramData fallback helper');
-    const defaultLogPathBody = extractFunction(serviceInstaller, 'static void ServiceDeploy_ResolveDefaultLogPath');
+    // The installer log path comes only from the unified diagnostics log (active branding paths).
+    const defaultLogPathBody = extractFunction(serviceInstaller, 'void ServiceDeploy_EnsureLoggingDefaults');
+    assert(defaultLogPathBody.includes('MeshDiagnosticLog_GetPathW(g_InstallLogPath, _countof(g_InstallLogPath))'), 'default log path must come from the unified diagnostics log location');
     assert(defaultLogPathBody.includes('SetLastError(ERROR_PATH_NOT_FOUND);'), 'default log path must fail closed when active install paths are unavailable');
     assert(!defaultLogPathBody.includes('C:\\\\ProgramData'), 'default log path must not use literal C:\\ProgramData fallback');
     assert(!defaultLogPathBody.includes('fallbackLogDir'), 'default log path must not create fallback log directories');
@@ -235,7 +244,13 @@ function main() {
     const activeLogsBody = extractFunction(agentCore, 'static BOOL MeshAgent_GetActiveServiceLogsDirW');
     assert(activeLogsBody.includes('ServiceDeploy_GetInstallPaths(&paths)'), 'native log paths must resolve through ServiceDeploy_GetInstallPaths');
     const nativeLogBody = extractFunction(agentCore, 'static void MeshAgent_LogNativeInstallerEvent');
-    assert(nativeLogBody.includes('MeshAgent_GetActiveServiceLogsDirW'), 'native install log must use active branded logs directory');
+    // Native installer events go to the unified diagnostics log, whose path is derived from the
+    // active branding (meshcore/diagnostic_log.h), never from a synthesized ProgramData location.
+    const diagnosticLog = readRepoFile(repoRoot, 'meshcore/diagnostic_log.h');
+    const diagnosticLogPathBody = extractFunction(diagnosticLog, 'static __inline BOOL MeshDiagnosticLog_GetPathW');
+    assert(nativeLogBody.includes('MeshDiagnosticLog_Write("lifecycle", buffer);'), 'native install log must use the unified diagnostics log');
+    assert(diagnosticLogPathBody.includes('branding->logFileName') && !diagnosticLogPathBody.includes('C:\\\\ProgramData'), 'diagnostics log path must come from active branding, not a literal ProgramData fallback');
+    assert(agentCore.includes('MeshAgent_GetActiveServiceLogsDirW(logDir, _countof(logDir))'), 'native evidence paths must use active branded logs directory');
     assert(!nativeLogBody.includes('CSIDL_COMMON_APPDATA'), 'native install log must not synthesize a ProgramData fallback path');
     const preProtectionBody = extractFunction(agentCore, 'static BOOL MeshAgent_BuildDefaultPreProtectionCapturePathW');
     assert(preProtectionBody.includes('MeshAgent_GetActiveServiceLogsDirW'), 'default pre-protection capture path must use active branded logs directory');

@@ -426,31 +426,23 @@ char* Duktape_GetBuffer(duk_context *ctx, duk_idx_t i, duk_size_t *bufLen)
 	{
 		retVal = (char*)duk_get_lstring(ctx, i, bufLen);
 	}
-	else if (duk_is_buffer(ctx, i))
+	else if (duk_is_buffer(ctx, i) || duk_is_buffer_data(ctx, i))
 	{
-		retVal = (char*)duk_require_buffer(ctx, i, &len);
-		if (ILibMemory_CanaryOK(ILibMemory_FromRaw(retVal)) && ILibMemory_RawSize(ILibMemory_FromRaw(retVal)) == len)
+		retVal = duk_is_buffer(ctx, i) ? (char*)duk_require_buffer(ctx, i, &len) : (char*)duk_require_buffer_data(ctx, i, &len);
+		// Ordinary buffers and sliced stream views do not necessarily contain a
+		// header, have room for one, or start at a native alignment boundary.
+		if (retVal != NULL && len >= sizeof(ILibMemory_Header))
 		{
-			retVal = ILibMemory_FromRaw(retVal);
-			if (bufLen != NULL) { *bufLen = ILibMemory_Size(retVal); }
+			ILibMemory_Header header;
+			memcpy(&header, retVal, sizeof(header));
+			if (memcmp(&header.CANARY, "broe", sizeof(header.CANARY)) == 0 &&
+				header.size <= len - sizeof(header) && header.extraSize == len - sizeof(header) - header.size)
+			{
+				retVal += sizeof(header);
+				len = header.size;
+			}
 		}
-		else if (bufLen != NULL)
-		{
-			*bufLen = len;
-		}
-	}
-	else if(duk_is_buffer_data(ctx, i))
-	{
-		retVal = (char*)duk_require_buffer_data(ctx, i, &len);
-		if (ILibMemory_CanaryOK(ILibMemory_FromRaw(retVal)) && ILibMemory_RawSize(ILibMemory_FromRaw(retVal)) == len)
-		{
-			retVal = ILibMemory_FromRaw(retVal);
-			if (bufLen != NULL) { *bufLen = ILibMemory_Size(retVal); }
-		}
-		else if (bufLen != NULL)
-		{
-			*bufLen = len;
-		}
+		if (bufLen != NULL) { *bufLen = len; }
 	}
 	else if (duk_is_object(ctx, i))
 	{
@@ -1325,4 +1317,3 @@ void ILibDuktape_DisplayProperties(duk_context *ctx, duk_idx_t idx)
 	duk_pcall_method(ctx, 1);
 	duk_set_top(ctx, i);
 }
-

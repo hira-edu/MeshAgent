@@ -9,10 +9,11 @@ static BOOL TestPrepare(MeshRuntimeHostLifecycleAction action, const wchar_t* ex
     *remove = TRUE; return TestPath(path, count);
 }
 static BOOL TestWrite(const wchar_t* path, MeshRuntimeHostLifecycleAction action, const wchar_t* exe,
-    const wchar_t* dll, const wchar_t* name, const wchar_t* description, BOOL config)
+    const wchar_t* dll, const wchar_t* name, const wchar_t* description, const wchar_t* serviceName, BOOL config)
 {
     UNREFERENCED_PARAMETER(path); UNREFERENCED_PARAMETER(action); UNREFERENCED_PARAMETER(exe);
-    UNREFERENCED_PARAMETER(dll); UNREFERENCED_PARAMETER(name); UNREFERENCED_PARAMETER(description); UNREFERENCED_PARAMETER(config);
+    UNREFERENCED_PARAMETER(dll); UNREFERENCED_PARAMETER(name); UNREFERENCED_PARAMETER(description);
+    UNREFERENCED_PARAMETER(serviceName); UNREFERENCED_PARAMETER(config);
     if (testMode == 3) { SetLastError(ERROR_WRITE_FAULT); return FALSE; }
     return TRUE;
 }
@@ -88,7 +89,7 @@ static int TestLaunchErrors(void)
         BOOL result;
         SetLastError(ERROR_ACCESS_DENIED);
         result = MeshRuntimeHost_LaunchLifecycleHostW(MESH_RUNTIME_HOST_LIFECYCLE_ACTION_INSTALL,
-            L"fixture.exe", NULL, NULL, NULL, TRUE, TRUE, 1, &exitCode);
+            L"fixture.exe", NULL, NULL, NULL, NULL, TRUE, TRUE, 1, &exitCode);
         error = GetLastError();
         if (result != (testMode == 0) || error != expected[testMode] ||
             (testMode == 1 && exitCode != ERROR_INSTALL_FAILURE)) { ++failures; }

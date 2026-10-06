@@ -1848,6 +1848,18 @@ function umhctlInstallOutputOwnsManagedBinary(outputText, msExePath)
     return false;
 }
 
+// Service lookup failures that mean "not installed". The current service-manager throws an
+// Error with code ENOENT (win32 1060); the service-manager embedded in older agents that run
+// RecoveryCore throws the plain string 'could not find service: <name>'. Anything else is a
+// real lookup failure and must not be mistaken for absence.
+function umhctlIsServiceNotFoundError(e)
+{
+    if (e == null) { return false; }
+    if (e.code == 'ENOENT' || e.win32Error == 1060) { return true; }
+    var text = ('' + ((typeof e == 'object' && e.message != null) ? e.message : e)).toLowerCase();
+    return (text.indexOf('could not find service') >= 0 || text.indexOf('service not found') >= 0 || text.indexOf('windows error 1060') >= 0);
+}
+
 function umhctlQueryMasterServiceWindowsState()
 {
     var result = { available: false, installed: false, running: false, stopped: false, state: 'UNKNOWN', name: null, appLocation: null, startType: null, error: null };
@@ -1863,7 +1875,7 @@ function umhctlQueryMasterServiceWindowsState()
     {
         var svc = null;
         try { svc = manager.getService(candidates[i]); } catch (e) {
-            if (e == null || e.code != 'ENOENT') { result.available = false; result.error = '' + e; return result; }
+            if (!umhctlIsServiceNotFoundError(e)) { result.available = false; result.error = '' + e; return result; }
         }
         if (svc == null) { continue; }
 
@@ -1937,7 +1949,7 @@ function umhctlStopMasterServiceWindowsService(sessionid, callback)
 
         var svc = null;
         try { svc = manager.getService(candidates[index]); } catch (e) {
-            if (e == null || e.code != 'ENOENT') {
+            if (!umhctlIsServiceNotFoundError(e)) {
                 stopFailed = true;
                 sendConsoleText('umhctl: service lookup failed: ' + e, sessionid);
             }

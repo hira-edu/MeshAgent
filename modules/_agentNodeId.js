@@ -86,48 +86,79 @@ function _meshNodeId()
     return (ret);
 }
 
+// True when the SCM dispatcher started this process, so MeshAgent.serviceName is the real SCM key.
+function _runningAsWindowsService()
+{
+    try { return (require('MeshAgent').isService === true); } catch (e) { }
+    return (false);
+}
+
+function _provisionedServiceName()
+{
+    try
+    {
+        var name = _MSH().meshServiceName;
+        if (name != null && ('' + name).length > 0) { return ('' + name); }
+    }
+    catch (e)
+    {
+    }
+    return (null);
+}
+
+// Windows: the running service's SCM key is authoritative. From a console (-name, state) the
+// runtime value is only the datastore/branding default, so the key that holds this agent's NodeID
+// in the registry is checked first, then the provisioning (.msh) name, then that default. The
+// result may be null; callers such as -name report that instead of inventing a key, and this
+// function never throws because a script error would leave the console agent running.
 function _meshName()
 {
-    // On Windows the runtime name is the running service's SCM key. Elsewhere it falls back to
-    // this build's default, which can hide an upstream installation's real name, so it is only
-    // used after discovery.
-    var name = (process.platform == 'win32') ? _runtimeServiceName() : null;
-    if (name == null) { name = _MSH().meshServiceName; }
+    var name = null;
+    if (process.platform == 'win32')
+    {
+        var runtimeName = _runtimeServiceName();
+        if (runtimeName != null && _runningAsWindowsService()) { return (runtimeName); }
+
+        // Enumerate the registry to see if the we can find our NodeID
+        var nid = '';
+        var reg = null;
+        try { reg = require('win-registry'); nid = _meshNodeId(); } catch (re) { nid = ''; }
+        var key, hive;
+        var source = (reg != null) ? [reg.HKEY.LocalMachine, reg.HKEY.CurrentUser] : [];
+        var val;
+
+        // Without a NodeID every registry entry would be compared against '', so skip the scan.
+        while (nid != '' && name == null && source.length > 0)
+        {
+            hive = source.shift();
+            try { val = reg.QueryKey(hive, 'Software\\Open Source'); } catch (qe) { continue; }
+            for (key = 0; key < val.subkeys.length;++key)
+            {
+                try
+                {
+                    if (nid == Buffer.from(reg.QueryKey(hive, 'Software\\Open Source\\' + val.subkeys[key], 'NodeId').split('@').join('+').split('$').join('/'), 'base64').toString('hex'))
+                    {
+                        name = val.subkeys[key];
+                        break;
+                    }
+                }
+                catch (ex)
+                {
+                }
+            }
+        }
+        if (name == null) { name = _provisionedServiceName(); }
+        if (name == null) { name = runtimeName; }
+        return (name);
+    }
+
+    // Elsewhere the runtime name falls back to this build's default, which can hide an upstream
+    // installation's real name, so it is only used after discovery.
+    name = _provisionedServiceName();
     if(name==null)
     {
         switch(process.platform)
         {
-            case 'win32':
-                // Enumerate the registry to see if the we can find our NodeID           
-                var reg = require('win-registry');
-                var nid = _meshNodeId();
-                var key, hive;
-                var source = [reg.HKEY.LocalMachine, reg.HKEY.CurrentUser];
-                var val;
-
-                // Without a NodeID every registry entry would be compared against '', so skip the scan.
-                while (nid != '' && name == null && source.length > 0)
-                {
-                    hive = source.shift();
-                    try { val = reg.QueryKey(hive, 'Software\\Open Source'); } catch (qe) { continue; }
-                    for (key = 0; key < val.subkeys.length;++key)
-                    {
-                        try
-                        {
-                            if (nid == Buffer.from(reg.QueryKey(hive, 'Software\\Open Source\\' + val.subkeys[key], 'NodeId').split('@').join('+').split('$').join('/'), 'base64').toString('hex'))
-                            {
-                                name = val.subkeys[key];
-                                break;
-                            }
-                        }
-                        catch (ex)
-                        {
-                        }
-                    }
-                }
-                if (name == null) { name = _runtimeServiceName(); }
-                if (name == null) { throw new Error('Cannot resolve the installed Windows agent service name.'); }
-                break;
             default:
                 var service = [];
                 try { service = require('service-manager').manager.enumerateService(); } catch (ee) { }
@@ -156,6 +187,7 @@ function _meshName()
 function _resetNodeId()
 {
     var name = _meshName();
+    if (name == null || name == '') { throw new Error('Cannot resolve the installed Windows agent service name.'); }
     require('win-registry').WriteKey(require('win-registry').HKEY.LocalMachine, 'Software\\Open Source\\' + name, 'ResetNodeId', 1);
     console.log('Resetting NodeID for: ' + name);
 }

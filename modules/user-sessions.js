@@ -1230,146 +1230,106 @@ function UserSessions()
     }
     else if(process.platform == 'darwin')
     {
+        function macSessionCommand(executable, args, input)
+        {
+            var child = require('child_process').execFile(executable, [executable.split('/').pop()].concat(args));
+            var output = [], errors = [], status = null;
+            child.stdout.on('data', function (chunk) { output.push(Buffer.concat([chunk])); });
+            child.stderr.on('data', function (chunk) { errors.push(Buffer.concat([chunk])); });
+            child.on('exit', function (code) { status = code; });
+            child.stdin.end(input == null ? '' : input);
+            child.waitExit(30000);
+            if (status == null)
+            {
+                try { child.kill(); } catch (ignored) { }
+                throw new Error(executable + ' timed out');
+            }
+            if (status !== 0) { throw new Error(executable + ' failed (' + status + '): ' + (Buffer.concat(errors).toString() || '').trim()); }
+            return Buffer.concat(output).toString() || '';
+        }
+        function macAccountId(value, allowUnspecified)
+        {
+            if ((typeof value != 'number' && typeof value != 'string') || !/^-?\d+$/.test('' + value) || Number(value) < -2147483648 || Number(value) > 4294967295)
+            { throw new Error('Invalid account ID'); }
+            var id = Number(value);
+            if (id < 0) { id += 4294967296; }
+            if (id == 4294967295 && !allowUnspecified) { throw new Error('Invalid account ID'); }
+            return id;
+        }
+        function macAccountName(value)
+        {
+            if (typeof value != 'string' || !value.length || value == '.' || value == '..' || /[\/\x00-\x1f\x7f]/.test(value))
+            { throw new Error('Invalid account name'); }
+            return value;
+        }
+        function macAccountTable(kind, attribute)
+        {
+            var lines = macSessionCommand('/usr/bin/dscl', ['.', '-list', kind, attribute]).split('\n'), table = {};
+            for (var i = 0; i < lines.length; ++i)
+            {
+                if (!lines[i].trim()) { continue; }
+                var row = /^(.*?)\s+(-?\d+)\s*$/.exec(lines[i]);
+                if (!row) { throw new Error('Invalid directory account record'); }
+                // Directory Services prints historical nobody/nogroup IDs as
+                // signed values; id(1) and filesystem ownership use uint32.
+                var id = Number(row[2]);
+                if (id < -2147483648 || id > 4294967295) { throw new Error('Invalid directory account ID'); }
+                if (id < 0) { id += 4294967296; }
+                Object.defineProperty(table, macAccountName(row[1]), {value: '' + id, enumerable: true});
+            }
+            return table;
+        }
         this.getUid = function getUid(username)
         {
-            var child = require('child_process').execFile('/bin/sh', ['sh']);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write("id " + username + " | awk '{ split($1, token, \"=\"); split(token[2], uid, \"(\"); print uid[1]; }'\nexit\n");
-            child.waitExit();
-            var ret = parseInt(child.stdout.str.trim());
-            child = null;
-            return (ret);
+            return macAccountId(macSessionCommand('/usr/bin/id', ['-u', '--', macAccountName(username)]).trim());
         };
         this.getGroupID = function getGroupID(uid)
         {
-            var child = require('child_process').execFile('/bin/sh', ['sh']);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write("id " + uid + " | awk '{ split($2, gid, \"=\"); if(gid[1]==\"gid\") { split(gid[2], gidnum, \"(\"); print gidnum[1];  } }'\nexit\n");
-            child.waitExit();
-            return (parseInt(child.stdout.str.trim()));
-        }
+            return macAccountId(macSessionCommand('/usr/bin/id', ['-g', '--', '' + macAccountId(uid)]).trim());
+        };
         this.getUsername = function getUsername(uid)
         {
-            var child = require('child_process').execFile('/bin/sh', ['sh']);
-            child.stderr.str = '';
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write("dscl . list /Users UniqueID | grep " + uid + " | awk '{ if($2==" + uid + "){ print $1 }}'\nexit\n");
-            child.waitExit();
-            var ret = child.stdout.str.trim();
-            child = null;
-            if(ret != '')
-            {
-                return (ret);
-            }
-            else
-            {
-                throw ('uid: ' + uid + ' not found');
-            }
+            return macAccountName(macSessionCommand('/usr/bin/id', ['-un', '--', '' + macAccountId(uid)]).trim());
         };
         this.getGroupname = function getGroupname(gid)
         {
-            var child = require('child_process').execFile('/bin/sh', ['sh']);
-            child.stderr.str = '';
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write("dscl . list /Groups PrimaryGroupID | grep " + gid + " | awk '{ if($2==" + gid + "){ print $1 }}'\nexit\n");
-            child.waitExit();
-            if(child.stdout.str.trim() != '')
-            {
-                return (child.stdout.str.trim());
-            }
-            else
-            {
-                throw ('gid: ' + gid + ' not found');
-            }
+            gid = macAccountId(gid, true);
+            var groups = macAccountTable('/Groups', 'PrimaryGroupID');
+            for (var name in groups) { if (Number(groups[name]) == gid) { return name; } }
+            throw new Error('gid: ' + gid + ' not found');
         };
         this.consoleUid = function consoleUid()
         {
-            var child = require('child_process').execFile('/bin/sh', ['sh']);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write("who | tr '\n' '\.' | awk '{ print $1 }'\nexit\n");
-            child.waitExit();
-
-            var ret = child.stdout.str.trim();
-            child = null;
-            if (ret != '')
-            {
-                return (this.getUid(ret));
-            }
-            throw ('nobody logged into console');     
-        }
+            // /dev/console follows the foreground GUI session. `who` can start
+            // with an SSH login or a different fast-user-switching session.
+            var uid = macAccountId(require('fs').statSync('/dev/console').uid);
+            if (uid == 0) { throw new Error('nobody logged into console'); }
+            var name = this.getUsername(uid);
+            if (name == 'loginwindow' || name == '_mbsetupuser' || name == 'nobody') { throw new Error('nobody logged into console'); }
+            return uid;
+        };
         this.getHomeFolder = function getHomeFolder(user)
         {
-            var child = require('child_process').execFile('/bin/sh', ['sh']);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write("dscl . -read /Users/" + user + " | grep NFSHomeDirectory | awk -F: '{ print $2 }'\nexit\n");
-            child.waitExit();
-            if (child.stdout.str.trim() != '')
-            {
-                return (child.stdout.str.trim());
-            }
-            else
-            {
-                throw ('user: ' + user + ' not found');
-            }
+            var xml = macSessionCommand('/usr/bin/dscl', ['-plist', '.', '-read', '/Users/' + macAccountName(user), 'NFSHomeDirectory']);
+            var record = JSON.parse(macSessionCommand('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', '-'], xml));
+            var homes = record['dsAttrTypeStandard:NFSHomeDirectory'];
+            if (!Array.isArray(homes) || homes.length != 1 || typeof homes[0] != 'string' || homes[0].charAt(0) != '/' || /[\x00-\x1f]/.test(homes[0]))
+            { throw new Error('Invalid home directory for user: ' + user); }
+            return homes[0];
         };
-        this._users = function ()
+        this._users = function () { return macAccountTable('/Users', 'UniqueID'); };
+        this._uids = function ()
         {
-            var child = require('child_process').execFile('/usr/bin/dscl', ['dscl', '.', 'list', '/Users', 'UniqueID']);
-            child.stdout.str = '';
-            child.stderr.str = '';
-            child.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write('exit\n');
-            child.waitExit();
+            var names = this._users(), users = {};
+            for (var name in names) { users[names[name]] = name; }
+            return users;
+        };
 
-
-            var lines = child.stdout.str.split('\n');
-            var tokens, i;
-            var users = {};
-
-            for (i = 0; i < lines.length; ++i) {
-                tokens = lines[i].split(' ');
-                if (tokens[0]) { users[tokens[0]] = tokens[tokens.length - 1]; }
-            }
-
-            return (users);
-        }
-        this._uids = function () {
-            var child = require('child_process').execFile('/usr/bin/dscl', ['dscl', '.', 'list', '/Users', 'UniqueID']);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write('exit\n');
-            child.waitExit();
-
-            var lines = child.stdout.str.split('\n');
-            var tokens, i;
-            var users = {};
-
-            for (i = 0; i < lines.length; ++i) {
-                tokens = lines[i].split(' ');
-                if (tokens[0]) { users[tokens[tokens.length - 1]] = tokens[0]; }
-            }
-
-            return (users);
-        }
         this._idTable = function()
         {
             var table = {};
-            var child = require('child_process').execFile('/usr/bin/id', ['id']);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.waitExit();
-
-            var lines = child.stdout.str.split('\n')[0].split(' ');
-            child = null;
+            var output = macSessionCommand('/usr/bin/id', []);
+            var lines = output.trim().split(/\s+/);
             for (var i = 0; i < lines.length; ++i) {
                 var types = lines[i].split('=');
                 var tokens = types[1].split(',');
@@ -1387,37 +1347,23 @@ function UserSessions()
         }
         this.Current = function (cb)
         {
-            var users = {};
-            var table = this._idTable();
-            var child = require('child_process').execFile('/usr/bin/last', ['last']);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.waitExit();
-
-            var lines = child.stdout.str.split('\n');
-            for (var i = 0; i < lines.length && lines[i].length > 0; ++i)
+            var users = {}, ids = this._users();
+            var lines = macSessionCommand('/usr/bin/who', []).split('\n');
+            for (var i = 0; i < lines.length; ++i)
             {
-                if (!users[lines[i].split(' ')[0]])
-                {
-                    try
-                    {
-                        users[lines[i].split(' ')[0]] = { Username: lines[i].split(' ')[0], State: lines[i].split('still logged in').length > 1 ? 'Active' : 'Inactive', uid: table.uid[lines[i].split(' ')[0]] };
-                    }
-                    catch(e)
-                    {}
-                }
-                else
-                {
-                    if(users[lines[i].split(' ')[0]].State != 'Active' && lines[i].split('still logged in').length > 1)
-                    {
-                        users[lines[i].split(' ')[0]].State = 'Active';
-                    }
-                }
+                var fields = lines[i].trim().split(/\s+/);
+                if (fields.length < 2 || !fields[0]) { continue; }
+                var name = macAccountName(fields[0]);
+                var uid = Object.prototype.hasOwnProperty.call(ids, name) ? macAccountId(ids[name]) : this.getUid(name);
+                // Enumerate live sessions, not reboot/shutdown entries or stale
+                // login history; resolve every user's UID, not just our own.
+                Object.defineProperty(users, name, {value: {Username:name, State:'Active', uid:uid}, enumerable:true, configurable:true});
             }
-
             Object.defineProperty(users, 'Active', { value: showActiveOnly(users) });
             if (cb) { cb.call(this, users); }
-        }
+            return users;
+        };
+
     }
 
     if(process.platform != 'win32') // Linux, MacOS, FreeBSD
@@ -1435,6 +1381,7 @@ function UserSessions()
         }
         this.Self = function Self()
         {
+            if (process.platform == 'darwin') { return macAccountId(macSessionCommand('/usr/bin/id', ['-u']).trim()); }
             var child = require('child_process').execFile('/usr/bin/id', ['id', '-u']);
             child.stdout.str = '';
             child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });

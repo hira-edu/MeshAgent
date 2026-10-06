@@ -56,6 +56,7 @@ typedef struct ILibSimpleDataStore_Root
 	int error;
 	int createdAsNew;
 	int readOnly; // Snapshot readers must never compact, repair or reopen as writers.
+	int compacting; // Rebuilding the table after a failed compaction must not compact again.
 	ILibSimpleDataStore_WriteErrorHandler ErrorHandler;
 	void *ErrorHandlerUser;
 } ILibSimpleDataStore_Root;
@@ -513,6 +514,7 @@ void ILibSimpleDataStore_RebuildKeyTable(ILibSimpleDataStore_Root *root)
 #else
 			ignore_result(ftruncate(fileno(root->dataFile), newoffset));
 #endif
+			root->fileSize = newoffset;
 		}
 	}
 }
@@ -689,7 +691,10 @@ __EXPORT_TYPE int ILibSimpleDataStore_PutEx2(ILibSimpleDataStore dataStore, char
 	int origkeylen = (int)keyLen;
 
 	if (root == NULL) { return 0; }
-	if (root->dataFile == NULL)
+	// A snapshot reader has no writable handle. Keep the value readable through Get
+	// without the failed-write path, which would reopen the file, rebuild the key
+	// table and report a DBError for every Put.
+	if (root->dataFile == NULL || root->readOnly)
 	{
 		ILibSimpleDataStore_CachedEx(dataStore, key, keyLen, value, valueLen, vhash);
 		return(0);
@@ -725,9 +730,13 @@ __EXPORT_TYPE int ILibSimpleDataStore_PutEx2(ILibSimpleDataStore dataStore, char
 		entry = (ILibSimpleDataStore_TableEntry*)ILibMemory_Allocate(sizeof(ILibSimpleDataStore_TableEntry), 0, NULL, NULL); 
 		allocated = 1;
 	}
-	else 
+	else
 	{
-		if (memcmp(entry->valueHash, hash, SHA384HASHSIZE) == 0) { return 0; }
+		if (memcmp(entry->valueHash, hash, SHA384HASHSIZE) == 0)
+		{
+			if (keyAllocated) { ILibMemory_Free(key); }
+			return 0;
+		}
 		root->dirtySize += entry->valueLength;
 	}
 
@@ -1125,11 +1134,12 @@ __EXPORT_TYPE int ILibSimpleDataStore_Compact(ILibSimpleDataStore dataStore)
 	void* state[2];
 	int retVal = 0;
 
-	if (root == NULL || root->readOnly || root->dirtySize < root->minimumDirtySize || root->filePath == NULL) return 1; // Error
+	if (root == NULL || root->readOnly || root->compacting || root->dirtySize < root->minimumDirtySize || root->filePath == NULL) return 1; // Error
 	tmp = ILibString_Cat(root->filePath, -1, ".tmp", -1); // Create the name of the temporary data store
 
 	// Start by opening a temporary .tmp file. Will be used to write the compacted data store.
 	if ((compacted = ILibSimpleDataStore_OpenFileEx(tmp, 1)) == NULL) { free(tmp); return 1; }
+	root->compacting = 1;
 
 	// Enumerate all keys and write them all into the temporary data store
 	state[0] = root;
@@ -1151,16 +1161,50 @@ __EXPORT_TYPE int ILibSimpleDataStore_Compact(ILibSimpleDataStore dataStore)
 #ifdef WIN32
 		WCHAR tmptmp[4096];
 		MultiByteToWideChar(CP_UTF8, 0, (LPCCH)tmp, -1, (LPWSTR)tmptmp, (int)sizeof(tmptmp) / 2);
-		if (CopyFileW(tmptmp, ILibUTF8ToWide(root->filePath, -1), FALSE) == FALSE) { retVal = 1; }
+		// A rename never leaves the live store half written if this process dies or the
+		// disk fills part way through. It fails while a snapshot reader holds the live
+		// file open, so the in-place copy remains the fallback for that window.
+		if (MoveFileExW(tmptmp, ILibUTF8ToWide(root->filePath, -1), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE &&
+			CopyFileW(tmptmp, ILibUTF8ToWide(root->filePath, -1), FALSE) == FALSE) { retVal = 1; }
 		DeleteFileW(tmptmp);
 #else
 		if (rename(tmp, root->filePath) != 0) { retVal = 1; }
 #endif
 
 		// We then open the newly compacted data store
-		if ((root->dataFile = ILibSimpleDataStore_OpenFile(root->filePath)) != NULL) { root->fileSize = ILibSimpleDataStore_GetPosition(root->dataFile); } else { retVal = 1; }
+		if ((root->dataFile = ILibSimpleDataStore_OpenFile(root->filePath)) != NULL)
+		{
+			root->fileSize = ILibSimpleDataStore_GetPosition(root->dataFile);
+			if (retVal == 0)
+			{
+				root->dirtySize = 0; // Every live record was rewritten exactly once.
+			}
+			else
+			{
+				// The table now points into the discarded temporary layout while the
+				// live file is unchanged; without this every Get fails its hash check.
+				root->dirtySize = 0;
+				ILibSimpleDataStore_RebuildKeyTable(root);
+			}
+		}
+		else { retVal = 1; }
+	}
+	else
+	{
+		// A record could not be copied (disk full, read error). Entries already written
+		// hold offsets into the temporary file, so rebuild them from the untouched live file.
+		fclose(compacted);
+#ifdef WIN32
+		DeleteFileW(ILibUTF8ToWide(tmp, -1));
+#else
+		remove(tmp);
+#endif
+		root->dirtySize = 0;
+		ILibSimpleDataStore_RebuildKeyTable(root);
+		retVal = 1;
 	}
 
+	root->compacting = 0;
 	free(tmp); // Free the temporary file name
 	return retVal; // Return 1 if we got an error, 0 if everything finished correctly
 }

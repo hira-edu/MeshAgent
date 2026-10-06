@@ -29,6 +29,7 @@ typedef ILibTransport_DoneState(*ILibKVM_WriteHandler)(char *buffer, int bufferL
 
 int kvm_relay_feeddata(char* buf, int len);
 void kvm_pause(int pause);
+int MacKvm_InitializeSessionUser(const char *uid);
 void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved, int uid);
 void kvm_relay_reset();
 void kvm_cleanup();

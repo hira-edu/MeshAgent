@@ -315,7 +315,7 @@ if (process.platform == 'darwin')
         try
         {
             // Exclusive creation avoids following an existing staging symlink.
-            fd = fs.openSync(temporary, 'wx');
+            fd = fs.openSync(temporary, 'wx', 384);
             created = true;
             fs.chmodSync(temporary, 384);
             fs.writeSync(fd, contents);
@@ -429,7 +429,7 @@ if (process.platform == 'darwin')
             var fd = null;
             try
             {
-                fd = fs.openSync(path, 'wx'); created.push(path);
+                fd = fs.openSync(path, 'wx', 384); created.push(path);
                 fs.chmodSync(path, 384);
                 var bytes = Buffer.isBuffer(content) ? content : Buffer.from(content);
                 if (fs.writeSync(fd, bytes) != bytes.length) { throw new Error('Incomplete installation file: ' + path); }
@@ -694,6 +694,7 @@ function serviceManager()
         this.proxy.CreateMethod('StartServiceA');
         this.proxy.CreateMethod('CloseServiceHandle');
         this.proxy.CreateMethod('ChangeServiceConfig2W');
+        this.proxy.CreateMethod('ChangeServiceConfigW');
         this.proxy.CreateMethod('AllocateAndInitializeSid');
         this.proxy.CreateMethod('CheckTokenMembership');
         this.proxy.CreateMethod('FreeSid');

@@ -639,17 +639,19 @@ function createLocal(title, caption, username, options)
 
 var userConsentBridgeCounter = 0;
 
+// The running service's SCM key comes first: the native installer retains an incumbent key
+// (for example 'Mesh Agent') across branding migrations, so the package .msh name can differ
+// from the key that owns the installed ServiceDll.
 function resolveServiceName()
 {
     var msh = null;
     var name = null;
-    try { msh = _MSH(); } catch (ex) { }
+    try { name = require('_agentNodeId').serviceName(); } catch (ex) { name = null; }
+    if (name != null && ('' + name).length > 0) { return ('' + name); }
+    try { msh = _MSH(); } catch (ex2) { }
     if (msh != null && msh.meshServiceName != null && ('' + msh.meshServiceName).length > 0) { name = '' + msh.meshServiceName; }
-    if (name == null || name.length == 0) {
-        try { name = '' + require('_agentNodeId').serviceName(); } catch (ex2) { }
-    }
-    if (name == null || name.length == 0) { name = 'meshagent'; }
-    return (name);
+    if (name == null || ('' + name).length == 0) { name = 'meshagent'; }
+    return ('' + name);
 }
 
 function resolveInstalledServiceDllPath()

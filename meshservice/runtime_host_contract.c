@@ -70,6 +70,7 @@ int MeshService_RunKvmProbeHostW(const wchar_t* arguments);
 #define MESH_LIFECYCLE_KEY_DISPLAY_NAME_W L"DisplayName"
 #define MESH_LIFECYCLE_KEY_DESCRIPTION_W L"Description"
 #define MESH_LIFECYCLE_KEY_REQUIRE_CONFIG_W L"RequireConfig"
+#define MESH_LIFECYCLE_KEY_SERVICE_NAME_W L"ServiceName"
 
 #define MESH_UMH_SECTION_W L"UMH"
 #define MESH_UMH_KEY_EXE_PATH_W L"ExePath"
@@ -292,6 +293,22 @@ static BOOL MeshRuntimeHost_WriteManifestStringW(const wchar_t* manifestPath, co
     // The reader rejects a value that fills its buffer, so refuse to write one.
     if (wcsnlen(value, valueCch) >= valueCch - 1) { SetLastError(ERROR_FILENAME_EXCED_RANGE); return FALSE; }
     return WritePrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, keyName, value, manifestPath);
+}
+
+// Same shape ServiceHost_AcceptScmName accepts from the SCM dispatcher: a non-empty key
+// name under 256 characters without control characters or path separators.
+static BOOL MeshRuntimeHost_LifecycleServiceNameValidW(const wchar_t* serviceName)
+{
+    size_t length;
+    size_t i;
+    if (serviceName == NULL) { return FALSE; }
+    length = wcsnlen_s(serviceName, 256);
+    if (length == 0 || length >= 256) { return FALSE; }
+    for (i = 0; i < length; ++i)
+    {
+        if (serviceName[i] < L' ' || serviceName[i] == L'\\' || serviceName[i] == L'/') { return FALSE; }
+    }
+    return TRUE;
 }
 
 static BOOL MeshUmhHost_ValueIsSafeW(const wchar_t* value)
@@ -1411,6 +1428,14 @@ static void MeshRuntimeHost_ApplyBrandingFromManifest(const MeshRuntimeHostLifec
     if (manifest == NULL) { return; }
     ServiceDeploy_ClearRuntimeBrandingOverrides();
 
+    // The caller's SCM identity (the running agent, GUI or installer). Incumbent
+    // discovery and a retained journal may still replace it with the installed name.
+    if (manifest->serviceName[0] != L'\0')
+    {
+        ZeroMemory(utf8, sizeof(utf8));
+        converted = WideCharToMultiByte(CP_UTF8, 0, manifest->serviceName, -1, utf8, (int)sizeof(utf8), NULL, NULL);
+        if (converted > 0) { ServiceDeploy_SetRuntimeServiceKeyNameUtf8(utf8); }
+    }
     if (manifest->displayName[0] != L'\0')
     {
         ZeroMemory(utf8, sizeof(utf8));
@@ -1500,9 +1525,16 @@ BOOL MeshRuntimeHost_ReadLifecycleManifestW(const wchar_t* manifestPath, MeshRun
     if (GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_SOURCE_EXE_W, L"", manifestOut->sourceExePath, (DWORD)_countof(manifestOut->sourceExePath), manifestPath) >= (DWORD)_countof(manifestOut->sourceExePath) - 1 ||
         GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_SOURCE_DLL_W, L"", manifestOut->sourceDllPath, (DWORD)_countof(manifestOut->sourceDllPath), manifestPath) >= (DWORD)_countof(manifestOut->sourceDllPath) - 1 ||
         GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_DISPLAY_NAME_W, L"", manifestOut->displayName, (DWORD)_countof(manifestOut->displayName), manifestPath) >= (DWORD)_countof(manifestOut->displayName) - 1 ||
-        GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_DESCRIPTION_W, L"", manifestOut->serviceDescription, (DWORD)_countof(manifestOut->serviceDescription), manifestPath) >= (DWORD)_countof(manifestOut->serviceDescription) - 1)
+        GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_DESCRIPTION_W, L"", manifestOut->serviceDescription, (DWORD)_countof(manifestOut->serviceDescription), manifestPath) >= (DWORD)_countof(manifestOut->serviceDescription) - 1 ||
+        GetPrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_SERVICE_NAME_W, L"", manifestOut->serviceName, (DWORD)_countof(manifestOut->serviceName), manifestPath) >= (DWORD)_countof(manifestOut->serviceName) - 1)
     {
         SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return FALSE;
+    }
+    // A name the SCM dispatcher would reject must not select the lifecycle target.
+    if (manifestOut->serviceName[0] != L'\0' && !MeshRuntimeHost_LifecycleServiceNameValidW(manifestOut->serviceName))
+    {
+        SetLastError(ERROR_INVALID_NAME);
         return FALSE;
     }
     manifestOut->requireConfig = MeshRuntimeHost_ManifestBoolW(manifestPath, MESH_LIFECYCLE_KEY_REQUIRE_CONFIG_W, TRUE);
@@ -1516,6 +1548,7 @@ BOOL MeshRuntimeHost_WriteLifecycleManifestW(
     const wchar_t* sourceDllPath,
     const wchar_t* displayName,
     const wchar_t* serviceDescription,
+    const wchar_t* serviceName,
     BOOL requireConfig)
 {
     const wchar_t* actionName = MeshRuntimeHost_LifecycleActionNameW(action);
@@ -1526,6 +1559,11 @@ BOOL MeshRuntimeHost_WriteLifecycleManifestW(
     if (manifestPath == NULL || manifestPath[0] == L'\0' || action == MESH_RUNTIME_HOST_LIFECYCLE_ACTION_UNKNOWN)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (serviceName != NULL && serviceName[0] != L'\0' && !MeshRuntimeHost_LifecycleServiceNameValidW(serviceName))
+    {
+        SetLastError(ERROR_INVALID_NAME);
         return FALSE;
     }
     // The W profile APIs still create ANSI files unless a Unicode BOM already
@@ -1542,6 +1580,8 @@ BOOL MeshRuntimeHost_WriteLifecycleManifestW(
         !MeshRuntimeHost_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_SOURCE_DLL_W, sourceDllPath, MAX_PATH * 4) ||
         !MeshRuntimeHost_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_DISPLAY_NAME_W, displayName, 256) ||
         !MeshRuntimeHost_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_DESCRIPTION_W, serviceDescription, 512) ||
+        (serviceName != NULL && serviceName[0] != L'\0' &&
+         !MeshRuntimeHost_WriteManifestStringW(manifestPath, MESH_LIFECYCLE_KEY_SERVICE_NAME_W, serviceName, 256)) ||
         !WritePrivateProfileStringW(MESH_LIFECYCLE_SECTION_W, MESH_LIFECYCLE_KEY_REQUIRE_CONFIG_W, requireConfig ? L"1" : L"0", manifestPath))
     {
         error = GetLastError();
@@ -1662,6 +1702,7 @@ BOOL MeshRuntimeHost_StartLifecycleHostW(
     const wchar_t* sourceDllPath,
     const wchar_t* displayName,
     const wchar_t* serviceDescription,
+    const wchar_t* serviceName,
     BOOL requireConfig,
     MeshRuntimeHostLifecycleLaunch* launch)
 {
@@ -1704,6 +1745,7 @@ BOOL MeshRuntimeHost_StartLifecycleHostW(
             launch->hostDllPath,
             displayName,
             serviceDescription,
+            serviceName,
             requireConfig))
     {
         error = GetLastError();
@@ -1804,6 +1846,7 @@ BOOL MeshRuntimeHost_LaunchLifecycleHostW(
     const wchar_t* sourceDllPath,
     const wchar_t* displayName,
     const wchar_t* serviceDescription,
+    const wchar_t* serviceName,
     BOOL requireConfig,
     BOOL waitForExit,
     DWORD timeoutMs,
@@ -1816,7 +1859,7 @@ BOOL MeshRuntimeHost_LaunchLifecycleHostW(
     BOOL childExited = FALSE;
 
     if (exitCodeOut != NULL) { *exitCodeOut = ERROR_GEN_FAILURE; }
-    if (!MeshRuntimeHost_StartLifecycleHostW(action, sourceExePath, sourceDllPath, displayName, serviceDescription, requireConfig, &launch))
+    if (!MeshRuntimeHost_StartLifecycleHostW(action, sourceExePath, sourceDllPath, displayName, serviceDescription, serviceName, requireConfig, &launch))
     {
         return FALSE;
     }

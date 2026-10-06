@@ -674,604 +674,346 @@ function linux_messageBox()
 
 if (process.platform == 'darwin')
 {
+    var MAC_HELPER_MAX_FRAME = 16 * 1024 * 1024;
     function translateObject(obj)
     {
-        var j = JSON.stringify(obj);
-        var b = Buffer.alloc(j.length + 4);
-        b.writeUInt32LE(j.length + 4);
-        Buffer.from(j).copy(b, 4);
-        return (b);
+        // Duktape strings can contain CESU-8 surrogate bytes. JSON escapes keep
+        // the wire valid UTF-8 and identical to standard JSON implementations.
+        var serialized = JSON.stringify(obj).replace(/[\u007f-\uffff]/g, function (character)
+        {
+            return '\\u' + ('0000' + character.charCodeAt(0).toString(16)).slice(-4);
+        });
+        var json = Buffer.from(serialized);
+        if (json.length > MAC_HELPER_MAX_FRAME - 4) { throw new Error('macOS helper message is too large'); }
+        var frame = Buffer.alloc(json.length + 4);
+        frame.writeUInt32LE(frame.length, 0);
+        json.copy(frame, 4);
+        return frame;
     }
+    function readMacHelperMessage(socket, buffer)
+    {
+        if (buffer.length < 4) { socket.unshift(buffer); return null; }
+        var length = buffer.readUInt32LE(0);
+        if (length < 6 || length > MAC_HELPER_MAX_FRAME)
+        {
+            if (socket.promise) { socket.promise._rej('Invalid macOS helper message length'); }
+            socket.end(); return null;
+        }
+        if (length > buffer.length) { socket.unshift(buffer); return null; }
+        var value;
+        try
+        {
+            value = JSON.parse(buffer.slice(4, length).toString());
+            if (value == null || typeof value != 'object' || Array.isArray(value) || typeof value.command != 'string') { throw new Error('Invalid command'); }
+        }
+        catch (error)
+        {
+            if (socket.promise) { socket.promise._rej('Invalid macOS helper message'); }
+            socket.end(); return null;
+        }
+        return value;
+    }
+    function macHelperDataHandler(handler)
+    {
+        return function (buffer)
+        {
+            var offset = 0;
+            while (offset < buffer.length)
+            {
+                var remainder = buffer.slice(offset);
+                var message = readMacHelperMessage(this, remainder);
+                if (message == null) { return; }
+                offset += remainder.readUInt32LE(0);
+                try { handler.call(this, message); }
+                catch (error) { if (this.promise) { this.promise._rej(error); } this.end(); return; }
+            }
+        };
+    }
+    function macJsonText(value)
+    {
+        return JSON.stringify(value).replace(/[\u007f-\uffff]/g, function (c) { return '\\u' + ('0000' + c.charCodeAt(0).toString(16)).slice(-4); });
+    }
+    function macUtf8Encode(value)
+    {
+        var escaped = encodeURIComponent(value), buffer = Buffer.alloc(escaped.length), offset = 0;
+        for (var i = 0; i < escaped.length; ++i)
+        {
+            if (escaped[i] == '%') { buffer[offset++] = parseInt(escaped.substring(i + 1, i + 3), 16); i += 2; }
+            else { buffer[offset++] = escaped.charCodeAt(i); }
+        }
+        return buffer.slice(0, offset);
+    }
+    function macUtf8Decode(buffer)
+    {
+        var escaped = [];
+        for (var i = 0; i < buffer.length; ++i) { escaped.push('%' + ('0' + buffer[i].toString(16)).slice(-2)); }
+        return decodeURIComponent(escaped.join(''));
+    }
+    var MAC_UI_SCRIPT = 'function run(argv) {\n' +
+        'var p=JSON.parse(argv[0]), app=Application.currentApplication(); app.includeStandardAdditions=true;\n' +
+        'if(p.command==="NOTIFY"){app.displayNotification(p.caption,{withTitle:p.title});return "{}";}\n' +
+        'if(p.command==="LOCK"){ObjC.import("ApplicationServices"); if(!$.AXIsProcessTrusted()){throw new Error("Accessibility permission is required to lock the desktop");}' +
+        'var down=$.CGEventCreateKeyboardEvent(null,12,true), up=$.CGEventCreateKeyboardEvent(null,12,false);' +
+        'try{if(!down||!up){throw new Error("Could not create lock shortcut");}' +
+        '$.CGEventSetFlags(down,$.kCGEventFlagMaskControl|$.kCGEventFlagMaskCommand);$.CGEventSetFlags(up,$.kCGEventFlagMaskControl|$.kCGEventFlagMaskCommand);' +
+        '$.CGEventPost($.kCGHIDEventTap,down);$.CGEventPost($.kCGHIDEventTap,up);}' +
+        'finally{if(down){$.CFRelease(down);}if(up){$.CFRelease(up);}}return "{}";}\n' +
+        'var options={withTitle:p.title,withIcon:"caution",buttons:p.buttons,defaultButton:p.buttons[p.buttons.length-1]};' +
+        'if(p.timeout>0){options.givingUpAfter=p.timeout;}' +
+        'try{var r=app.displayDialog(p.caption,options);return JSON.stringify({button:r.buttonReturned,timeout:!!r.gaveUp});}' +
+        'catch(e){if(e.errorNumber===-128||e.number===-128){return JSON.stringify({cancelled:true});}throw e;}\n}';
+    function macExecuteHelperCommand(client, request, callback)
+    {
+        if (!request || ['writeClip','readClip','DIALOG','NOTIFY','LOCK'].indexOf(request.command) < 0) { throw new Error('Unknown helper command'); }
+        var executable, argv, input = null, seconds = 15;
+        if (request.command == 'writeClip')
+        {
+            if (typeof request.clipText != 'string') { throw new Error('Invalid clipboard text'); }
+            executable = '/usr/bin/pbcopy'; argv = ['pbcopy']; input = macUtf8Encode(request.clipText);
+        }
+        else if (request.command == 'readClip') { executable = '/usr/bin/pbpaste'; argv = ['pbpaste']; }
+        else
+        {
+            if (request.command != 'LOCK' && (typeof request.title != 'string' || typeof request.caption != 'string')) { throw new Error('Invalid helper text'); }
+            if (request.command == 'DIALOG')
+            {
+                if (!Array.isArray(request.buttons) || request.buttons.length < 1 || request.buttons.length > 3 ||
+                    request.buttons.some(function (b) { return typeof b != 'string' || !b.length; }) ||
+                    typeof request.timeout != 'number' || !isFinite(request.timeout) || request.timeout < 0 || request.timeout > 86400 || Math.floor(request.timeout) != request.timeout)
+                { throw new Error('Invalid helper dialog'); }
+                seconds = request.timeout;
+            }
+            executable = '/usr/bin/osascript'; argv = ['osascript','-l','JavaScript','-e',MAC_UI_SCRIPT,'--',macJsonText(request)];
+        }
+        var environment = {};
+        for (var key in process.env) { environment[key] = process.env[key]; }
+        environment.LANG = 'en_US.UTF-8'; environment.LC_CTYPE = 'en_US.UTF-8';
+        var child = require('child_process').execFile(executable, argv, {env:environment});
+        client._shell = child;
+        var output = [], errors = [], total = 0, done = false;
+        function finish(error, result)
+        {
+            if (done) { return; } done = true;
+            if (client._deadline) { clearTimeout(client._deadline); client._deadline = null; }
+            client._shell = null;
+            callback(error, result);
+        }
+        function collect(destination, chunk)
+        {
+            total += chunk.length;
+            if (total > MAC_HELPER_MAX_FRAME) { try { child.kill(); } catch (ignored) {} finish('Helper output exceeds the message limit'); return; }
+            destination.push(Buffer.concat([chunk]));
+        }
+        child.stdout.on('data', function (chunk) { collect(output, chunk); });
+        child.stderr.on('data', function (chunk) { collect(errors, chunk); });
+        child.on('exit', function (code)
+        {
+            if (done) { return; }
+            try
+            {
+                var error = macUtf8Decode(Buffer.concat(errors));
+                if (code !== 0)
+                {
+                    if (request.command == 'DIALOG' && error.indexOf('(-128)') >= 0) { finish(null, {cancelled:true}); }
+                    else { finish(error || 'Helper command failed (' + code + ')'); }
+                    return;
+                }
+                var text = macUtf8Decode(Buffer.concat(output));
+                if (request.command == 'readClip') { finish(null, {value:text}); }
+                else if (request.command == 'writeClip') { finish(null, {}); }
+                else { finish(null, JSON.parse(text)); }
+            }
+            catch (e) { finish(e); }
+        });
+        child.on('error', function (e) { finish(e); });
+        if (seconds > 0)
+        {
+            client._deadline = setTimeout(function () { client._deadline = null; finish('Helper command timeout'); try { child.kill(); } catch (ignored) {} }, (seconds + 5) * 1000);
+        }
+        try { child.stdin.end(input == null ? '' : input); }
+        catch (e) { try { child.kill(); } catch (ignored) {} finish(e); }
+    }
+
 }
 
 function macos_messageBox()
 {
     this._ObjectID = 'message-box';
-    this._initIPCBase = function _initIPCBase()
+    this._request = function (request, interpret)
     {
         var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-
+        var fs = require('fs'), sessions = require('user-sessions'), manager = require('service-manager').manager;
+        ret._done = false;
+        ret._finish = function (error, response)
+        {
+            if (ret._done) { return; }
+            ret._done = true;
+            if (ret.timer) { clearTimeout(ret.timer); ret.timer = null; }
+            // launchctl waits run a nested native event loop. Cleanup must not
+            // remove the server while its receive callback is still on the stack.
+            setImmediate(function ()
+            {
+                var cleanup = [];
+                if (ret.connection) { try { ret.connection.end(); } catch (e) { cleanup.push('socket: ' + e); } }
+                if (ret.server) { try { ret.server.close(); } catch (e) { cleanup.push('listener: ' + e); } }
+                var stopped = true;
+                if (ret.job)
+                {
+                    try { ret.job.unload(); } catch (e) { stopped = false; cleanup.push('LaunchAgent stop: ' + e); }
+                    try { ret.job.close(); } catch (ignored) { }
+                }
+                if (stopped)
+                {
+                    var files = [ret.plist, ret.config, ret.path];
+                    for (var i = 0; i < files.length; ++i)
+                    {
+                        if (files[i]) { try { if (fs.existsSync(files[i])) { fs.unlinkSync(files[i]); } } catch (e) { cleanup.push('file cleanup: ' + e); } }
+                    }
+                    if (ret.directory) { try { fs.rmdirSync(ret.directory); } catch (e) { cleanup.push('directory cleanup: ' + e); } }
+                }
+                if (cleanup.length) { error = (error ? error + '; ' : '') + cleanup.join('; '); }
+                if (error) { ret._rej('' + error); }
+                else { try { ret._res(interpret(response)); } catch (e) { ret._rej('' + e); } }
+            });
+        };
+        ret.close = function () { ret._finish('denied'); };
         try
         {
-            ret.uid = require('user-sessions').consoleUid();
+            ret.uid = sessions.consoleUid();
+            var self = sessions.Self(), gid = sessions.getGroupID(ret.uid);
+            if (self != 0 && self != ret.uid) { throw new Error('Cannot launch a helper for another desktop user'); }
+            var nonce = require('tls').generateRandomInteger('0', '340282366920938463463374607431768211455');
+            ret.token = require('tls').generateRandomInteger('0', '115792089237316195423570985008687907853269984665640564039457584007913129639935');
+            if (!/^\d{1,39}$/.test(nonce) || !/^\d{1,78}$/.test(ret.token)) { throw new Error('Invalid helper randomness'); }
+            var directory = '/var/tmp/mesh-ui-' + nonce;
+            // Exclusive mkdir with its initial mode closes the chmod-after-create race.
+            fs.mkdirSync(directory, 448); ret.directory = directory;
+            ret.path = directory + '/ipc'; ret.config = directory + '/config.json';
+            ret.service = 'mesh-ui-' + nonce;
+            var fd = fs.openSync(ret.config, 'wx', 384);
+            try { fs.chmodSync(ret.config, 384); fs.writeSync(fd, JSON.stringify({path:ret.path, token:ret.token, uid:ret.uid})); }
+            finally { fs.closeSync(fd); }
+            fs.chownSync(ret.config, ret.uid, gid);
+            ret.timer = setTimeout(function () { ret.timer = null; ret._finish('macOS helper connection timeout'); }, 15000);
+            ret.server = require('net').createServer();
+            ret.server.on('error', function (e) { ret._finish(e); });
+            ret.server.on('connection', function (socket)
+            {
+                if (ret._done || ret.connection) { socket.end(); return; }
+                socket.on('error', function (e) { if (socket === ret.connection) { ret._finish(e); } });
+                socket.on('end', function () { if (socket === ret.connection && !ret._done) { ret._finish('macOS helper disconnected'); } });
+                socket.on('data', macHelperDataHandler(function (message)
+                {
+                    if (ret._done) { this.end(); return; }
+                    if (!this.authenticated)
+                    {
+                        if (message.command != 'HELLO' || message.token !== ret.token || message.uid !== ret.uid || ret.connection)
+                        { this.end(); return; }
+                        this.promise = {_rej:function (e) { ret._finish(e); }};
+                        if (sessions.consoleUid() !== ret.uid) { ret._finish('Desktop user changed'); return; }
+                        this.authenticated = true; ret.connection = this;
+                        clearTimeout(ret.timer); ret.timer = null;
+                        var seconds = request.command == 'DIALOG' ? request.timeout : 15;
+                        if (seconds > 0) { ret.timer = setTimeout(function () { ret.timer = null; ret._finish('macOS helper operation timeout'); }, (seconds + 10) * 1000); }
+                        this.write(translateObject({command:'REQUEST',token:ret.token,request:request}));
+                        return;
+                    }
+                    if (message.command != 'RESULT' || message.token !== ret.token || message.request !== request.command)
+                    { ret._finish('Invalid macOS helper response'); return; }
+                    ret._finish(message.error || null, message);
+                }));
+            });
+            ret.server.listen({path:ret.path}, function ()
+            {
+                if (ret._done) { return; }
+                try
+                {
+                    fs.chmodSync(ret.path, 384); fs.chownSync(ret.path, ret.uid, gid);
+                    // Root retains ownership of the directory: the desktop user
+                    // cannot replace path components before privileged cleanup.
+                    fs.chownSync(directory, self, gid); fs.chmodSync(directory, self == ret.uid ? 448 : 456);
+                    var code = 'try { var c=require("message-box").startClient({config:' + JSON.stringify(ret.config) + '}); c.on("close",function(){process.exit();}).on("error",function(){process.exit(1);}); } catch(e) { process.exit(1); }';
+                    var installed = manager.installLaunchAgent({name:ret.service,servicePath:process.execPath,uid:ret.uid,
+                        sessionTypes:['Aqua'],startType:'AUTO_START',failureRestart:0,parameters:['-exec',code]});
+                    ret.plist = installed.plist;
+                    ret.job = manager.getLaunchAgent(ret.service, ret.uid);
+                    ret.job.load();
+                }
+                catch (e) { ret._finish(e); }
+            });
         }
-        catch (e)
-        {
-            ret._rej(e);
-            return (ret);
-        }
-
-        ret.path = '/var/tmp/' + process.execPath.split('/').pop() + '_ev';
-        var n;
-
-        try
-        {
-            n = require('tls').generateRandomInteger('1', '99999');
-        }
-        catch (e)
-        {
-            n = 0;
-        }
-        while (require('fs').existsSync(ret.path + n))
-        {
-            try {
-                n = require('tls').generateRandomInteger('1', '99999');
-            }
-            catch (e) {
-                ++n;
-            }
-        }
-        ret.path = ret.path + n;
-        ret.tmpServiceName = 'meshNotificationServer' + n;
-        return (ret);
+        catch (e) { ret._finish(e); }
+        return ret;
     };
-    
-    this.create = function create(title, caption, timeout, layout)
+    this.create = function (title, caption, timeout, layout)
     {
-        if (title == 'MeshCentral') { try { title = require('MeshAgent').displayName; } catch (x) { } }
-        var userLayout = Array.isArray(layout);
-        caption = caption.split('\n').join('\\n');
-        if (Array.isArray(layout) && layout.length > 3)
+        if (title == 'MeshCentral') { try { title = require('MeshAgent').displayName; } catch (ignored) { } }
+        var custom = Array.isArray(layout), buttons = custom ? layout.slice() : layout == null ? ['Yes','No'] : ['OK'];
+        var seconds = timeout == null ? 60 : timeout;
+        if (typeof title != 'string' || typeof caption != 'string' || !buttons.length || buttons.length > 3 ||
+            typeof seconds != 'number' || !isFinite(seconds) || seconds < 0 || seconds > 86400 || Math.floor(seconds) != seconds ||
+            buttons.some(function (b) { return typeof b != 'string' || !b.length; }))
+        { return new promise(function (res, rej) { rej('Invalid macOS dialog options'); }); }
+        return this._request({command:'DIALOG',title:title,caption:caption,timeout:seconds,buttons:buttons}, function (reply)
         {
-            ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-            ret._rej('This system only supports a maximum of 3 buttons');
-            return (ret);
+            if (reply.timeout) { throw new Error('TIMEOUT'); }
+            if (reply.cancelled) { if (custom) { return 'Cancel'; } throw new Error('denied'); }
+            if (buttons.indexOf(reply.button) < 0) { throw new Error('Invalid dialog button'); }
+            if (!custom && reply.button != 'Yes' && reply.button != 'OK') { throw new Error('denied'); }
+            return reply.button;
+        });
+    };
+    this.setClipboard = function (text)
+    {
+        if (typeof text != 'string') { return new promise(function (res, rej) { rej('Clipboard text must be a string'); }); }
+        return this._request({command:'writeClip',clipText:text}, function () {});
+    };
+    this.getClipboard = function () { return this._request({command:'readClip'}, function (reply) { if (typeof reply.value != 'string') { throw new Error('Invalid clipboard response'); } return reply.value; }); };
+    this.lock = function () { return this._request({command:'LOCK'}, function () {}); };
+    this.notify = function (title, caption)
+    {
+        if (title == 'MeshCentral') { try { title = require('MeshAgent').displayName; } catch (ignored) { } }
+        return this._request({command:'NOTIFY',title:title,caption:caption}, function () { return 'DISMISSED'; });
+    };
+    this.startClient = function (options)
+    {
+        if (!options || typeof options.config != 'string') { throw new Error('Missing private helper configuration'); }
+        var config = JSON.parse(require('fs').readFileSync(options.config).toString()), sessions = require('user-sessions');
+        if (!config || typeof config.token != 'string' || !/^\d{1,78}$/.test(config.token) ||
+            config.uid !== sessions.Self() || config.uid !== sessions.consoleUid() || config.uid <= 0 ||
+            config.path !== options.config.substring(0, options.config.lastIndexOf('/')) + '/ipc')
+        { throw new Error('Invalid helper session configuration'); }
+        var client = require('net').createConnection({path:config.path}, function () { this.write(translateObject({command:'HELLO',token:config.token,uid:config.uid})); });
+        client._deadline = setTimeout(function () { client._deadline = null; client.end(); }, 15000);
+        function dispose()
+        {
+            if (client._deadline) { clearTimeout(client._deadline); client._deadline = null; }
+            if (client._shell) { try { client._shell.kill(); } catch (ignored) { } client._shell = null; }
         }
-
-        if (require('user-sessions').isRoot())
+        client.on('end', dispose).on('close', dispose).on('error', dispose);
+        client.on('data', macHelperDataHandler(function (message)
         {
-            ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-
+            if (this._started || message.command != 'REQUEST' || message.token !== config.token) { this.end(); return; }
+            this._started = true;
+            clearTimeout(this._deadline); this._deadline = null;
+            var request = message.request;
+            function respond(error, result)
+            {
+                if (client._replied) { return; } client._replied = true;
+                if (client._deadline) { clearTimeout(client._deadline); client._deadline = null; }
+                var reply = result || {};
+                reply.command = 'RESULT'; reply.token = config.token; reply.request = request && request.command;
+                if (error) { reply.error = '' + error; }
+                try { client.end(translateObject(reply)); } catch (e) { client.end(translateObject({command:'RESULT',token:config.token,request:reply.request,error:''+e})); }
+            }
             try
             {
-                ret.uid = require('user-sessions').consoleUid();
-                ret.name = require('user-sessions').getUsername(ret.uid);
+                if (sessions.consoleUid() !== config.uid) { throw new Error('Desktop user changed'); }
+                macExecuteHelperCommand(client, request, respond);
             }
-            catch (ff)
-            {
-                ret._rej('No users logged in');
-                return (ret);
-            }
-            ret.user = userLayout;
-            if (layout == null)
-            {
-                layout = ['Yes', 'No'];
-            }
-            else if (typeof (layout) != 'object')
-            {
-                layout = ['OK'];
-            }
-
-            var buttons = 'buttons ' + JSON.stringify(layout).replace('[', '{').replace(']', '}');
-            buttons += (' default button "' + layout[layout.length - 1] + '"');
-            timeout = (' giving up after ' + timeout);
-            var icon = 'with icon caution';
-            var str = 'tell current application to display dialog "' + caption + '" with title "' + title + '" ' + icon + ' ' + buttons + timeout;
-            str = Buffer.from("console.log('" + str + "'); process.exit();").toString('base64');
-
-            ret.child = require('child_process').execFile('/bin/zsh', ['zsh'], { type: require('child_process').SpawnTypes.TERM });
-            ret.child.descriptorMetadata = 'message-box';
-            ret.child.promise = ret;
-            ret.child.stdout.str = ''; ret.child.stdout.on('data', function (c) { this.str += c.toString(); });
-            ret.child.on('exit', function (code)
-            {
-                var res = this.stdout.str.split('\x1e');
-                if (this.promise.user && !res[1]) { this.promise._res('Cancel'); }
-                if (!res[1]) { return; }
-                res = res[1].trim();
-                if (res == '_TIMEOUT_')
-                {
-                    this.promise._rej('TIMEOUT');
-                }
-                else
-                {
-                    if(this.promise.user || res == 'Yes' || res == 'OK')
-                    {
-                        this.promise._res(res);
-                    }
-                    else
-                    {
-                        this.promise._rej('denied');
-                    }
-                }
-                this.promise.child = null;
-            });
-            ret.child.stdin.write('su - ' + ret.name + '\n');
-            ret.child.stdin.write(process.execPath.split('./').join('').split(' ').join('\\ ') + ' -b64exec ' + str + ' | osascript 2>/dev/null | awk \'{ printf "\\x1e"; c=split($0, tokens, ","); split(tokens[1], val, ":"); if(c==1) { print val[2] } else { split(tokens[2], gu, ":"); if(gu[2]=="true") { print "_TIMEOUT_" } else { print val[2]  }  } printf "\\x1e"; }\'\nexit\nexit\n');
-            ret.close = function close()
-            {
-                if (this.child) { this.child.kill(); }
-            };
-
-            return (ret);
-        }
-
-
-        // Start Local Server
-        var ret = this._initIPCBase();
-        ret.metadata = 'message-box/create'
-        ret.title = title; ret.caption = caption; ret.timeout = timeout;
-        if (layout == null)
-        {
-            ret.layout = ['Yes', 'No'];
-        }
-        else if(!Array.isArray(layout))
-        {
-            ret.layout = ['OK'];
-        }
-        else
-        {
-            ret.layout = layout;
-            Object.defineProperty(ret.layout, "user", { value: true });
-        }
-        ret.server = this.startMessageServer(ret);
-        ret.server.ret = ret;
-        ret.server.on('connection', function (c)
-        {
-            this._connection = c;
-            c.promise = this.ret;
-            c.on('data', function (buffer)
-            {
-                if (buffer.len < 4 || buffer.readUInt32LE(0) > buffer.len) { this.unshift(buffer); }
-                var p = JSON.parse(buffer.slice(4, buffer.readUInt32LE(0)).toString());
-                switch (p.command)
-                {
-                    case 'ERROR':
-                        this.promise._rej(p.reason);
-                        break;
-                    case 'DIALOG':
-                        if (p.timeout)
-                        {
-                            this.promise._rej('TIMEOUT');
-                        }
-                        else
-                        {
-                            if (p.button == 'Yes' || p.button == 'OK' || this.promise.layout.user)
-                            {
-                                this.promise._res(p.button);
-                            }
-                            else
-                            {
-                                this.promise._rej('denied');
-                            }
-                        }
-                        break;
-                }
-                this.promise.server.close();
-            });
-            for (var x in this.ret.layout)
-            {
-                this.ret.layout[x] = '"' + this.ret.layout[x] + '"';
-            }
-            c.write(translateObject({ command: 'DIALOG', title: this.ret.title, caption: this.ret.caption, icon: 'caution', buttons: this.ret.layout, buttonDefault: this.ret.layout[this.ret.layout.length-1], timeout: this.ret.timeout }));
-        });
-        ret.close = function close()
-        {
-            if (this.server) { this.server.close(); }
-        };
-        return (ret);
-    };
-    this.setClipboard = function setClipboard(clipText)
-    {
-        if (require('user-sessions').isRoot())
-        {
-            ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-            try
-            {
-                ret.uid = require('user-sessions').consoleUid();
-                ret.name = require('user-sessions').getUsername(ret.uid);
-            }
-            catch(ff)
-            {
-                ret._rej('No users logged in');
-                return (ret);
-            }
-
-            var agent = process.execPath.split('./').join('').split(' ').join('\\ ');
-            var str = Buffer.from('console.log("' + clipText + '");process.exit();').toString('base64');
-            ret.child = require('child_process').execFile('/bin/zsh', ['zsh'], { type: require('child_process').SpawnTypes.TERM });
-            ret.child.promise = ret;
-            ret.child.stdout.on('data', function (c) { });
-            ret.child.on('exit', function () { this.promise._res(); });
-            ret.child.stdin.write('su - ' + ret.name + '\n');
-            ret.child.stdin.write(agent + ' -b64exec ' + str + ' | LANG=en_US.UTF-8 pbcopy\nexit\nexit\n');
-            return (ret);
-        }
-
-        // Start Local Server
-        var ret = this._initIPCBase();
-        ret.metadata = 'clipboard/set'
-        ret.server = this.startMessageServer(ret);
-        ret.server.ret = ret;
-        ret.server.clipText = clipText;
-        ret.server.on('connection', function (c)
-        {
-            this._connection = c;
-            c.promise = this.ret;
-            c.on('end', function () { this.promise.server.close(); });
-            c.on('data', function (buffer)
-            {
-                if (buffer.len < 4 || buffer.readUInt32LE(0) > buffer.len) { this.unshift(buffer); }
-                var p = JSON.parse(buffer.slice(4, buffer.readUInt32LE(0)).toString());
-                switch (p.command)
-                {
-                    case 'writeClip':
-                        if (p.clipError)
-                        {
-                            this.promise._rej(p.clipError);
-                        }
-                        else
-                        {
-                            this.promise._res();
-                        }
-                        break;
-                }
-            });
-            c.write(translateObject({ command: 'writeClip', clipText: this.clipText }));
-        });
-
-        return (ret);
-    };
-    this.getClipboard = function getClipboard()
-    {
-        if (require('user-sessions').isRoot())
-        {
-            ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-            try
-            {
-                ret.uid = require('user-sessions').consoleUid();
-                ret.name = require('user-sessions').getUsername(ret.uid);
-            }
-            catch(ff)
-            {
-                ret._rej('No users logged in');
-                return (ret);
-            }
-            ret.child = require('child_process').execFile('/bin/zsh', ['zsh'], { type: require('child_process').SpawnTypes.TERM });
-            ret.child.promise = ret;
-            ret.child.stdout.str = ''; ret.child.stdout.on('data', function (c) { this.str += c.toString(); });
-            ret.child.on('exit', function ()
-            {
-                var res = this.stdout.str.split('\x1e')[1];
-                // if (res.length > 2) { res = res.substring(0, res.length - 2); }
-                this.promise._res(res);
-            });
-            ret.child.stdin.write('su - ' + ret.name + '\n');
-            ret.child.stdin.write("LANG=en_US.UTF-8 pbpaste | tr '\\n' '\\035' | awk -F'\\035' '");
-            ret.child.stdin.write('{');
-            ret.child.stdin.write('   printf "\\036";');
-            ret.child.stdin.write('   for(i=1;i<=NF;++i)');
-            ret.child.stdin.write('   {');
-            ret.child.stdin.write('      printf "%s%s", (i==1?"":"\\n"), $i;')
-            ret.child.stdin.write('   }');
-            ret.child.stdin.write('   printf "\\036";');
-            ret.child.stdin.write("}'");
-            ret.child.stdin.write('\nexit\nexit\n');
-            return (ret);
-        }
-
-        // Start Local Server
-        var ret = this._initIPCBase();
-        ret.metadata = 'clipboard/get'
-        ret.server = this.startMessageServer(ret);
-        ret.server.ret = ret;
-        ret.server.on('connection', function (c)
-        {
-            this._connection = c;
-            c.promise = this.ret;
-            c.on('end', function () { this.promise.server.close(); });
-            c.on('data', function (buffer)
-            {
-                if (buffer.len < 4 || buffer.readUInt32LE(0) > buffer.len) { this.unshift(buffer); }
-                var p = JSON.parse(buffer.slice(4, buffer.readUInt32LE(0)).toString());
-                switch (p.command)
-                {
-                    case 'readClip':
-                        if (p.clipError)
-                        {
-                            this.promise._rej(p.clipError);
-                        }
-                        else
-                        {
-                            this.promise._res(p.clipValue);
-                        }
-                        break;
-                }
-            });
-            c.write(translateObject({ command: 'readClip' }));
-        });
-
-        return (ret);
-    };
-    this.lock = function lock()
-    {
-        // Start Local Server
-        var ret = this._initIPCBase();
-        ret.metadata = 'desktop/lock'
-        ret.server = this.startMessageServer(ret);
-        ret.server.ret = ret;
-        ret.server.on('connection', function (c)
-        {
-            this._connection = c;
-            c.promise = this.ret;
-            c.on('end', function () { this.promise.server.close(); });
-            c.on('data', function (buffer)
-            {
-                if (buffer.len < 4 || buffer.readUInt32LE(0) > buffer.len) { this.unshift(buffer); }
-                var p = JSON.parse(buffer.slice(4, buffer.readUInt32LE(0)).toString());
-                switch (p.command)
-                {
-                    case 'ERROR':
-                        this.promise._rej(p.reason);
-                        break;
-                    case 'LOCK':
-                        this.promise._res();
-                        break;
-                }
-            });
-            c.write(translateObject({ command: 'LOCK' }));
-        });
-
-        return (ret);
-    };
-    this.notify = function notify(title, caption)
-    {
-        if (title == 'MeshCentral') { try { title = require('MeshAgent').displayName; } catch (x) { } }
-        if (require('user-sessions').isRoot())
-        {
-            var str = 'tell current application to display notification "' + caption + '" with title "' + title + '"';
-            str = Buffer.from("console.log('" + str + "');process.exit();").toString('base64');
-
-            var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-            ret.uid = require('user-sessions').consoleUid();
-            ret.name = require('user-sessions').getUsername(ret.uid);
-            ret.child = require('child_process').execFile('/bin/zsh', ['zsh'], { type: require('child_process').SpawnTypes.TERM });
-            ret.child.descriptorMetadata = "notify/toast";
-            ret.child.promise = ret;
-            ret.child.stderr.on('data', function () { });
-            ret.child.stdout.on('data', function (c) { });
-            ret.child.on('exit', function (code) { this.promise.child = null; this.promise._res('DISMISSED'); });
-
-            ret.child.stdin.write('su - ' + ret.name + '\n');
-            ret.child.stdin.write(process.execPath.split('./').join('').split(' ').join('\\ ') + ' -b64exec ' + str + ' | osascript\nexit\nexit\n');
-            return (ret);
-        }
-
-        // Start Local Server
-        var ret = this._initIPCBase();
-        ret.metadata = 'notify'
-        ret.title = title; ret.caption = caption; 
-        ret.server = this.startMessageServer(ret);
-        ret.server.ret = ret;
-        ret.server.on('connection', function (c)
-        {
-            this._connection = c;
-            c.promise = this.ret;
-            c.on('end', function () { this.promise.server.close(); });
-            c.on('data', function (buffer)
-            {
-                if (buffer.len < 4 || buffer.readUInt32LE(0) > buffer.len) { this.unshift(buffer); }
-                var p = JSON.parse(buffer.slice(4, buffer.readUInt32LE(0)).toString());
-                switch (p.command)
-                {
-                    case 'ERROR':
-                        this.promise._rej(p.reason);
-                        break;
-                    case 'NOTIFY':
-
-                        this.promise._res();
-                        break;
-                }
-            });
-            c.write(translateObject({ command: 'NOTIFY', title: this.ret.title, caption: this.ret.caption }));
-        });
-
-        return (ret);
-    };
-    this.startClient = function startClient(options)
-    {
-        // Create the Client
-        options.osversion = require('service-manager').getOSVersion();
-        options.uid = require('user-sessions').consoleUid();
-        this.client = require('net').createConnection(options);
-        this.client._options = options;
-        this.client.on('data', function (buffer)
-        {
-            if (buffer.len < 4 || buffer.readUInt32LE(0) > buffer.len) { this.unshift(buffer); }
-            var p = JSON.parse(buffer.slice(4, buffer.readUInt32LE(0)).toString());
-            switch (p.command)
-            {
-                case 'writeClip':
-                    this._shell = require('child_process').execFile('/usr/bin/pbcopy', ['pbcopy']);
-                    this._shell.ipc = this;
-                    this._shell.stdout.str = ''; this._shell.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                    this._shell.stderr.str = ''; this._shell.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-                    this._shell.stdin.write(p.clipText, function () { this.end(); });
-                    this._shell.on('exit', function ()
-                    {
-                        if (this.stderr.str != '')
-                        {
-                            this.ipc.end(translateObject({ command: 'writeClip', clipError: this.stderr.str }));
-                        }
-                        else
-                        {
-                            this.ipc.end(translateObject({ command: 'writeClip' }));
-                        }
-                    });
-                    break;
-                case 'readClip':
-                    this._shell = require('child_process').execFile('/usr/bin/pbpaste', ['pbpaste']);
-                    this._shell.stdout.str = ''; this._shell.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                    this._shell.stderr.str = ''; this._shell.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-                    this._shell.waitExit();
-                    if (this._shell.stderr.str != '')
-                    {
-                        this.end(translateObject({ command: 'readClip', clipError: this._shell.stderr.str }));
-                    }
-                    else
-                    {
-                        // if (this._shell.stdout.str.length > 2) { this._shell.stdout.str = this._shell.stdout.str.substring(0, this._shell.stdout.str.length - 2); }
-                        this.end(translateObject({ command: 'readClip', clipValue: this._shell.stdout.str }));
-                    }
-                    break;
-                case 'LOCK':
-                    this._shell = require('child_process').execFile('/bin/sh', ['sh']);
-                    this._shell.stdout.str = ''; this._shell.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                    this._shell.stderr.str = ''; this._shell.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-                    this._shell.stdin.write('/System/Library/CoreServices/Menu\\ Extras/User.menu/Contents/Resources/CGSession -suspend\nexit\n');
-                    this._shell.waitExit();
-                    if (this._shell.stderr.str != '')
-                    {
-                        this.end(translateObject({ command: 'ERROR', reason: this._shell.stderr.str }));
-                    }
-                    else
-                    {
-                        this.end(translateObject({ command: 'LOCK', status: 0 }));
-                    }
-                    break;
-                case 'NOTIFY':
-                    this._shell = require('child_process').execFile('/bin/sh', ['sh']);
-                    this._shell.stdout.str = ''; this._shell.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                    this._shell.stderr.str = ''; this._shell.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-                    this._shell.stdin.write('osascript -e \'tell current application to display notification "' + p.caption + '" with title "' + p.title + '"\'\nexit\n');
-                    this._shell.waitExit();
-                    if (this._shell.stderr.str != '')
-                    {
-                        this.end(translateObject({ command: 'ERROR', reason: this._shell.stderr.str }));
-                    }
-                    else
-                    {
-                        this.end(translateObject({ command: 'NOTIFY', status: 0 }));
-                    }
-                    break;
-                case 'DIALOG':
-                    var timeout = p.timeout ? (' giving up after ' + p.timeout) : '';
-                    var icon = p.icon ? ('with icon ' + p.icon) : '';
-
-                    var buttons = p.buttons ? ('buttons {' + p.buttons.toString() + '}') : '';
-                    if (p.buttonDefault != null)
-                    {
-                        buttons += (' default button ' + p.buttonDefault)
-                    }
-                    this._shell = require('child_process').execFile('/bin/sh', ['sh']);
-                    this._shell.that = this;
-                    this._shell.stdout.str = ''; this._shell.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-                    this._shell.stderr.str = ''; this._shell.stderr.on('data', function (chunk) { this.str += chunk.toString(); });
-                    this._shell.stdin.write('osascript -e \'tell current application to display dialog "' + p.caption + '" with title "' + p.title + '" ' + icon + ' ' + buttons + timeout + '\' | awk \'{ c=split($0, tokens, ","); split(tokens[1], val, ":"); if(c==1) { print val[2] } else { split(tokens[2], gu, ":"); if(gu[2]=="true") { print "_TIMEOUT_" } else { print val[2]  }  } }\'\nexit\n');
-                    this._shell.on('exit', function ()
-                    {
-                        if (this.stderr.str != '' && !this.stderr.str.includes('OpenGL'))
-                        {
-                            if (this.stderr.str.includes('(-128)'))
-                            {
-                                this.that.end(translateObject({ command: 'DIALOG', button: 'Cancel' }));
-                            }
-                            else
-                            {
-                                this.that.end(translateObject({ command: 'ERROR', reason: this.stderr.str }));
-                            }
-                        }
-                        else
-                        {
-                            if (this.stdout.str.trim() == '_TIMEOUT_')
-                            {
-                                this.that.end(translateObject({ command: 'DIALOG', timeout: true }));
-                            }
-                            else
-                            {
-                                this.that.end(translateObject({ command: 'DIALOG', button: this.stdout.str.trim() }));
-                            }
-                        }
-                        this.that._shell = null;
-                    });
-                    this.on('close', function ()
-                    {
-                        if (this._shell) { this._shell.kill(); }
-                    });
-
-                    //this._shell.waitExit();
-                    //if (this._shell.stderr.str != '' && !this._shell.stderr.str.includes('OpenGL'))
-                    //{
-                    //    this.end(translateObject({ command: 'ERROR', reason: this._shell.stderr.str }));
-                    //}
-                    //else
-                    //{
-                    //    if (this._shell.stdout.str.trim() == '_TIMEOUT_')
-                    //    {
-                    //        this.end(translateObject({ command: 'DIALOG', timeout: true }));
-                    //    }
-                    //    else
-                    //    {
-                    //        this.end(translateObject({ command: 'DIALOG', button: this._shell.stdout.str.trim() }));
-                    //    }
-                    //}
-                    break;
-                default:
-                    break;
-            }
-        });
-        this.client.on('error', function () { this.uninstall(); }).on('end', function () { this.uninstall(); });
-        this.client.uninstall = function ()
-        {
-            // Need to uninstall ourselves
-            var child = require('child_process').execFile(process.execPath, [process.execPath.split('/').pop(), '-exec', "var s=require('service-manager').manager.getLaunchAgent('" + this._options.service + "', " + this._options.uid + "); s.unload(); require('fs').unlinkSync(s.plist);process.exit();"], { detached: true, type: require('child_process').SpawnTypes.DETACHED });
-            child.waitExit();
-        };
-        return (this.client);
-    };
-    this.startMessageServer = function startMessageServer(options)
-    {
-        if (require('fs').existsSync(options.path)) { require('fs').unlinkSync(options.path); }
-        options.writableAll = true;
-
-        var ret = require('net').createServer();
-        ret.descriptorMetadata = ('[' + options.path + ']' + (options.metadata ? (', ' + options.metadata) : ''));
-        ret.uid = require('user-sessions').consoleUid();
-        ret.osversion = require('service-manager').getOSVersion();
-        ret._options = options;
-        ret.timer = setTimeout(function (obj)
-        {
-            obj.close();
-            obj._options._rej('Connection timeout');
-        }, 5000, ret);
-        ret.listen(options);
-        ret.on('connection', function (c)
-        {
-            clearTimeout(this.timer);
-        });
-        ret.on('~', function ()
-        {
-            require('fs').unlinkSync(this._options.path);
-        });
-
-        require('service-manager').manager.installLaunchAgent(
-            {
-                name: options.tmpServiceName, servicePath: process.execPath, startType: 'AUTO_START', uid: ret.uid,
-                sessionTypes: ['Aqua'], parameters: ['-exec', "require('message-box').startClient({ path: '" + options.path + "', service: '" + options.tmpServiceName + "' }).on('end', function () { process.exit(); }).on('error', function () { process.exit(); });"]
-            });
-        require('service-manager').manager.getLaunchAgent(options.tmpServiceName, ret.uid).load();
-
-        return (ret);
+            catch (e) { respond(e); }
+        }));
+        return client;
     };
 }
 
@@ -1289,9 +1031,5 @@ switch(process.platform)
         module.exports = new macos_messageBox();
         break;
 }
-
-
-
-
 
 

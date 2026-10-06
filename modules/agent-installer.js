@@ -156,11 +156,21 @@ function getWindowsLifecycleServiceName(parms)
     catch (e) { }
     return (null);
 }
+// The native installer retains an incumbent SCM key (for example 'Mesh Agent') across branding
+// migrations, so when the requested or provisioned name does not own a service DLL the running
+// service's own key is tried before giving up on the installed DLL.
 function readWindowsInstalledServiceDllPath(parms)
 {
     var serviceName = getWindowsLifecycleServiceName(parms);
-    if (serviceName == null || serviceName.length == 0) { return (null); }
-    try { return require('win-system-paths').installedServiceRuntimeDll(serviceName); }
+    var runtimeName = null;
+    if (serviceName != null && serviceName.length > 0)
+    {
+        try { return require('win-system-paths').installedServiceRuntimeDll(serviceName); }
+        catch (e) { }
+    }
+    try { runtimeName = require('_agentNodeId').serviceName(); } catch (e) { runtimeName = null; }
+    if (runtimeName == null || ('' + runtimeName).length == 0 || runtimeName == serviceName) { return (null); }
+    try { return require('win-system-paths').installedServiceRuntimeDll('' + runtimeName); }
     catch (e) { return (null); }
 }
 function readPeUInt16(fd, offset)
@@ -275,13 +285,29 @@ function extractWindowsEmbeddedLifecycleDll(targetBinary, cleanupPaths)
 
     tempDir = process.env.TEMP || process.env.TMP;
     if (tempDir == null || tempDir.length == 0) { return (null); }
-    try { randomPart = require('crypto').randomBytes(8).toString('hex'); } catch (randomError) { randomPart = Math.floor(Math.random() * 0xFFFFFFFF).toString(16); }
-    workDir = tempDir + '\\mesh-lifecycle-' + process.pid + '-' + Date.now() + '-' + randomPart;
-    fs.mkdirSync(workDir);
+    workDir = createWindowsLifecycleWorkDir(cleanupPaths);
     outPath = workDir + '\\host.dll';
     fs.writeFileSync(outPath, payload);
-    if (cleanupPaths != null) { cleanupPaths.push(outPath); cleanupPaths.push(workDir); }
+    if (cleanupPaths != null) { cleanupPaths.push(outPath); }
     return (outPath);
+}
+// %TEMP% is shared with every local user, so lifecycle files live in a fresh directory whose
+// name cannot be predicted and whose creation fails if it already exists.
+var windowsLifecycleWorkDirCount = 0;
+function createWindowsLifecycleWorkDir(cleanupPaths)
+{
+    var fs = require('fs');
+    var tempDir = process.env.TEMP || process.env.TMP;
+    var randomPart, workDir;
+    if (tempDir == null || tempDir.length == 0)
+    {
+        throw new Error('TEMP is not available; cannot stage Windows lifecycle files.');
+    }
+    try { randomPart = require('crypto').randomBytes(8).toString('hex'); } catch (randomError) { randomPart = Math.floor(Math.random() * 0xFFFFFFFF).toString(16); }
+    workDir = tempDir.replace(/[\\\/]+$/, '') + '\\mesh-lifecycle-' + process.pid + '-' + Date.now() + '-' + (++windowsLifecycleWorkDirCount) + '-' + randomPart;
+    fs.mkdirSync(workDir);
+    if (cleanupPaths != null) { cleanupPaths.push(workDir); }
+    return (workDir);
 }
 function isWindowsInstalledLifecycleAction(actionName)
 {
@@ -309,11 +335,10 @@ function findWindowsLifecycleServiceDll(targetBinary, actionName, parms, cleanup
 
     if (isWindowsInstalledLifecycleAction(actionName))
     {
+        // Installed DLL first, then the DLL carried inside the signed package executable; a
+        // loose sibling DLL is the last resort because its origin cannot be tied to the package.
         installedDll = readWindowsInstalledServiceDllPath(parms);
         if (installedDll != null && fs.existsSync(installedDll)) { return (installedDll); }
-
-        siblingDll = trySiblingDll(targetBinary) || trySiblingDll(process.execPath);
-        if (siblingDll != null) { return (siblingDll); }
 
         embeddedDll = extractWindowsEmbeddedLifecycleDll(targetBinary, cleanupPaths);
         if (embeddedDll != null && fs.existsSync(embeddedDll)) { return (embeddedDll); }
@@ -322,6 +347,9 @@ function findWindowsLifecycleServiceDll(targetBinary, actionName, parms, cleanup
             embeddedDll = extractWindowsEmbeddedLifecycleDll(process.execPath, cleanupPaths);
             if (embeddedDll != null && fs.existsSync(embeddedDll)) { return (embeddedDll); }
         }
+
+        siblingDll = trySiblingDll(targetBinary) || trySiblingDll(process.execPath);
+        if (siblingDll != null) { return (siblingDll); }
 
         throw new Error('Windows rundll32 lifecycle requires a valid service DLL for action: ' + actionName);
     }
@@ -348,26 +376,42 @@ function findWindowsLifecycleServiceDll(targetBinary, actionName, parms, cleanup
 
     throw new Error('Unsupported Windows lifecycle action: ' + actionName);
 }
-function writeWindowsLifecycleManifest(actionName, targetBinary, sourceDll, parms)
+// Mirrors MeshRuntimeHost_LifecycleServiceNameValidW: the host rejects the whole manifest
+// (ERROR_INVALID_NAME) for an empty name, 256+ characters, control characters, '\' or '/'.
+function isWindowsLifecycleServiceNameValid(name)
+{
+    if (typeof name != 'string' || name.length == 0 || name.length >= 256) { return (false); }
+    for (var i = 0; i < name.length; ++i)
+    {
+        var c = name.charCodeAt(i);
+        if (c < 0x20 || c == 0x5C || c == 0x2F) { return (false); }
+    }
+    return (true);
+}
+function writeWindowsLifecycleManifest(actionName, targetBinary, sourceDll, parms, cleanupPaths)
 {
     var fs = require('fs');
-    var tempDir = process.env.TEMP || process.env.TMP;
     var manifestPath, lines, text, bytes, i;
-    if (tempDir == null || tempDir.length == 0)
-    {
-        throw new Error('TEMP is not available; cannot write Windows lifecycle manifest.');
-    }
-    manifestPath = tempDir + '\\mesh-lifecycle-' + process.pid + '-' + Date.now() + '.ini';
+    var serviceName = getWindowsLifecycleServiceName(parms);
+    manifestPath = createWindowsLifecycleWorkDir(cleanupPaths) + '\\lifecycle.ini';
+    if (cleanupPaths != null) { cleanupPaths.push(manifestPath); }
     lines = [
         '[Lifecycle]',
         'Action=' + actionName,
         'SourceExe=' + sanitizeWindowsLifecycleManifestValue(targetBinary),
         'SourceDll=' + sanitizeWindowsLifecycleManifestValue(sourceDll),
         'DisplayName=' + sanitizeWindowsLifecycleManifestValue(installerParameter(parms, 'displayName', '')),
-        'Description=' + sanitizeWindowsLifecycleManifestValue(installerParameter(parms, 'description', '')),
-        'RequireConfig=1',
-        ''
+        'Description=' + sanitizeWindowsLifecycleManifestValue(installerParameter(parms, 'description', ''))
     ];
+    // A requested or provisioned name lets the host target that SCM key directly; a name the host
+    // would reject is omitted so it falls back to its own incumbent discovery.
+    if (serviceName != null)
+    {
+        serviceName = sanitizeWindowsLifecycleManifestValue(serviceName);
+        if (isWindowsLifecycleServiceNameValid(serviceName)) { lines.push('ServiceName=' + serviceName); }
+    }
+    lines.push('RequireConfig=1');
+    lines.push('');
     // Windows profile APIs require a UTF-16 BOM; UTF-8 is read as the ANSI code page.
     // Encode code units explicitly because the agent's Buffer lacks utf16le support.
     text = '\ufeff' + lines.join('\r\n');
@@ -391,7 +435,7 @@ function runWindowsNativeLifecycle(actionName, parms, gOptions)
     {
         runtimeHostPath = getWindowsSystemRuntimeHostPath();
         sourceDll = findWindowsLifecycleServiceDll(targetBinary, actionName, parms, cleanupPaths);
-        manifestPath = writeWindowsLifecycleManifest(actionName, targetBinary, sourceDll, parms);
+        manifestPath = writeWindowsLifecycleManifest(actionName, targetBinary, sourceDll, parms, cleanupPaths);
         args = [sourceDll + ',MeshLifecycleHostW', manifestPath];
         result = runWindowsChildProcessAndCapture(runtimeHostPath, args, { cwd: getPathDirName(targetBinary) });
         if (result.stdout && result.stdout.length > 0) { process.stdout.write(result.stdout); }
@@ -413,7 +457,8 @@ function runWindowsNativeLifecycle(actionName, parms, gOptions)
         {
             try { require('fs').unlinkSync(manifestPath); } catch (manifestDeleteError) { }
         }
-        for (var cleanupIndex = 0; cleanupIndex < cleanupPaths.length; ++cleanupIndex)
+        // Reverse order: files are pushed after the directory that holds them.
+        for (var cleanupIndex = cleanupPaths.length - 1; cleanupIndex >= 0; --cleanupIndex)
         {
             try { require('fs').unlinkSync(cleanupPaths[cleanupIndex]); }
             catch (cleanupError)
@@ -454,11 +499,22 @@ function installerParameterIndex(parms, name)
     }
     return -1;
 }
+// The native caller passes cached datastore values as --key=<JSON string literal>, so a quoted
+// value whose escapes are all \" \\ or \uXXXX is decoded. Other callers quote raw text, and a raw
+// Windows path such as "C:\temp" is also valid JSON (\t), so control-character escapes are
+// deliberately left alone rather than guessed.
 function installerParameterValue(parms, index)
 {
     if (index < 0 || index >= parms.length || typeof parms[index] != 'string') { return null; }
     var value = parms[index].substring(parms[index].indexOf('=') + 1);
-    if (value.charAt(0) == '"' && value.charAt(value.length - 1) == '"') { value = value.substring(1, value.length - 1); }
+    if (value.length >= 2 && value.charAt(0) == '"' && value.charAt(value.length - 1) == '"')
+    {
+        if (value.indexOf('\\') >= 0 && /^"(?:[^"\\]|\\["\\]|\\u[0-9a-fA-F]{4})*"$/.test(value))
+        {
+            try { var decoded = JSON.parse(value); if (typeof decoded == 'string') { return decoded; } } catch (e) { }
+        }
+        value = value.substring(1, value.length - 1);
+    }
     return value;
 }
 function installerParameterEx(parms, name, defaultValue)

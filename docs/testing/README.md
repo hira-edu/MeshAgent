@@ -224,6 +224,63 @@ runtime evidence.
 
 ## macOS permission checks
 
+Mac lifecycle and session probes:
+
+```sh
+node test/macos_install_runtime.js
+python3 test/macos_install_agent_runtime.py --agent /absolute/path/to/built/meshagent
+node test/macos_sessions_runtime.js
+python3 test/macos_sessions_agent_runtime.py --agent /absolute/path/to/built/meshagent
+python3 test/macos_kvm_io_native.py
+python3 test/macos_kvm_session_native.py
+python3 test/macos_helper_framing_runtime.py --agent /absolute/path/to/built/meshagent
+node test/macos_message_helper_runtime.js
+python3 test/macos_message_helper_agent_runtime.py --agent /absolute/path/to/built/meshagent
+python3 test/posix_fs_modes_agent_runtime.py --agent /absolute/path/to/built/meshagent
+python3 test/macos_hid_reports_native.py
+```
+
+Installation probes redirect `/Library` writes into temporary directories and
+verify publication order, handled-failure cleanup, private file modes and retained
+provisioning. The Node fixture injects launchctl state; these tests do not prove a
+live root install/uninstall or reboot. Session probes cover console selection,
+account lookup failures, literal arguments, signed legacy IDs and Unicode home
+paths; the built-agent probe performs read-only queries against the host.
+The KVM I/O probe runs the production input loop and writer with fault-injected
+I/O under ASan/UBSan, including packet splits, interrupted calls and short writes.
+It does not capture a screen or inject desktop input.
+
+The session native probe checks production launch arguments, ordered credential
+changes, console-switch rejection, failure cleanup and desktop-stream termination.
+It injects the privileged credential operations and separately runs the real
+initializer as the current user. Helper framing tests compare Node and native
+wire bytes and exercise a real temporary Unix socket without starting GUI helpers.
+
+The message-helper Node test runs the production parent/client code with real
+private sockets and injected launchd/command execution. It covers authentication,
+dialog outcomes, UTF-8 data, setup failures, expired timers and cleanup. The
+built-agent helper probe registers a disposable Aqua LaunchAgent using the same
+binary and sends an unsupported request; this verifies launch, authentication,
+error delivery and removal without accessing the clipboard or showing UI.
+Run it as the foreground user, without sudo. `--child-logs` enables temporary
+startup diagnostics. It does not prove root-to-user delivery or live UI behavior.
+
+The filesystem probe creates only temporary files, starts its child with umask
+zero and checks initial modes, exclusive collisions, symlinks and invalid modes.
+The HID report probe compiles production report encoding under ASan/UBSan with a
+fake delivery sink. It covers keypad mapping, six-key rollover, modifiers,
+coordinate bounds, failed reports and held-button preservation during double
+clicks. It never creates a virtual device or injects desktop input.
+
+`test/macos_kvm_launcher_runtime.py --agent /absolute/path/to/built/meshagent`
+uses disposable launchd jobs to check the context transition. An unprivileged
+background job may be denied entry to the GUI audit session; the test reports
+that condition as skipped (exit 77), not a passing privileged transition. On an
+authorized root test host, run it with `--uid <active-desktop-uid>` to verify a
+system-job-to-Aqua transition. The probe verifies that `launchctl asuser` retains
+the launcher's credentials, so the helper's separate credential checks remain
+necessary. It removes only its unique fixture jobs and never invokes KVM.
+
 `python3 test/macos_kvm_permissions_native.py` compiles production permission
 queries and input dispatch with injected authorization results under ASan/UBSan.
 It checks denied, granted, and revoked input, legacy OS fallback, and desktop

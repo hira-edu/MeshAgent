@@ -305,7 +305,7 @@ duk_ret_t ILibDuktape_fs_closeSync(duk_context *ctx)
 }
 
 // Helper method to open a file and map the FILE* to an integral descriptor
-int ILibDuktape_fs_openSyncEx(duk_context *ctx, char *path, char *flags, char *mode)
+int ILibDuktape_fs_openSyncEx(duk_context *ctx, char *path, char *flags, int mode)
 {
 	int retVal;
 	FILE *f;
@@ -320,7 +320,40 @@ int ILibDuktape_fs_openSyncEx(duk_context *ctx, char *path, char *flags, char *m
 #ifdef WIN32
 	_wfopen_s(&f, (const wchar_t*)ILibDuktape_String_UTF8ToWide(ctx, path), (const wchar_t*)ILibDuktape_String_UTF8ToWide(ctx, flags));
 #else
-	f = fopen(path, flags);
+	if (mode < 0) { f = fopen(path, flags); }
+	else
+	{
+		// fopen cannot specify creation permissions. Open atomically with the
+		// requested mode, then retain the existing FILE* descriptor mapping.
+		int access = 0, update = 0, exclusive = 0, valid = 1;
+		const char *p = flags;
+		char streamFlags[3];
+		if (*p == 'w') { access = O_CREAT | O_TRUNC; }
+		else if (*p == 'a') { access = O_CREAT | O_APPEND; }
+		else if (*p != 'r') { valid = 0; }
+		if (*p) { ++p; }
+		for (; *p; ++p)
+		{
+			if (*p == '+') { update = 1; }
+			else if (*p == 'x') { exclusive = 1; }
+			else if (*p != 'b') { valid = 0; }
+		}
+		if (exclusive && flags[0] == 'r') { valid = 0; }
+		access |= update ? O_RDWR : flags[0] == 'r' ? O_RDONLY : O_WRONLY;
+		if (exclusive) { access |= O_EXCL; }
+		f = NULL;
+		if (valid)
+		{
+			int fd = open(path, access, (mode_t)mode);
+			if (fd >= 0)
+			{
+				streamFlags[0] = flags[0]; streamFlags[1] = update ? '+' : 0; streamFlags[2] = 0;
+				f = fdopen(fd, streamFlags);
+				if (f == NULL) { int error = errno; close(fd); errno = error; }
+			}
+		}
+		else { errno = EINVAL; }
+	}
 #endif
 	if (f != NULL)
 	{
@@ -345,6 +378,16 @@ int ILibDuktape_fs_openSyncEx(duk_context *ctx, char *path, char *flags, char *m
 duk_ret_t ILibDuktape_fs_openSync(duk_context *ctx)
 {
 	int nargs = duk_get_top(ctx);
+	int creationMode = -1;
+#ifndef WIN32
+	if (nargs > 2 && !duk_is_undefined(ctx, 2))
+	{
+		double value = duk_require_number(ctx, 2);
+		if (!(value >= 0 && value <= 07777) || value != (double)(unsigned int)value)
+		{ return(ILibDuktape_Error(ctx, "fs.openSync(): Invalid mode")); }
+		creationMode = (int)value;
+	}
+#endif
 #ifdef WIN32
 	char *path = (char*)duk_require_string(ctx, 0);
 #else
@@ -358,7 +401,7 @@ duk_ret_t ILibDuktape_fs_openSync(duk_context *ctx)
 
 		if (nargs < 2) { return(ILibDuktape_Error(ctx, "Too few arguments")); }
 
-		retVal = ILibDuktape_fs_openSyncEx(ctx, path, flags, NULL);
+		retVal = ILibDuktape_fs_openSyncEx(ctx, path, flags, creationMode);
 		if (retVal > 0)
 		{
 			duk_push_int(ctx, retVal);
@@ -410,7 +453,7 @@ duk_ret_t ILibDuktape_fs_openSync(duk_context *ctx)
 	data->write_p.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 	duk_push_uint(ctx, (duk_uint_t)(uintptr_t)fd);
 #else
-	int fd = open(path, flags);
+	int fd = open(path, flags, (mode_t)(creationMode < 0 ? 0666 : creationMode));
 	duk_push_int(ctx, fd);
 #ifdef _POSIX
 	if (fd >= 0 && (flags & O_NONBLOCK) == O_NONBLOCK)
@@ -1157,7 +1200,7 @@ duk_ret_t ILibDuktape_fs_createWriteStream(duk_context *ctx)
 	if (fd == 0)
 	{
 		// If a descriptor is not set, then we'll open the file first
-		fd = ILibDuktape_fs_openSyncEx(ctx, path, flags, NULL);
+		fd = ILibDuktape_fs_openSyncEx(ctx, path, flags, -1);
 	}
 	f = ILibDuktape_fs_getFilePtr(ctx, fd);
 	if (f != NULL)
@@ -1365,7 +1408,7 @@ duk_ret_t ILibDuktape_fs_createReadStream(duk_context *ctx)
 
 	if (fd == 0)
 	{
-		fd = ILibDuktape_fs_openSyncEx(ctx, path, flags, NULL);
+		fd = ILibDuktape_fs_openSyncEx(ctx, path, flags, -1);
 	}
 	f = ILibDuktape_fs_getFilePtr(ctx, fd);
 	if (f == NULL)
@@ -2380,7 +2423,14 @@ duk_ret_t ILibDuktape_fs_mkdirSync(duk_context *ctx)
 	if (_wmkdir((const wchar_t*)path) != 0)
 #else
 	char *path = ILibDuktape_fs_fixLinuxPath((char*)duk_require_string(ctx, 0));
-	if (mkdir(path, 0777) != 0)
+	mode_t mode = 0777;
+	if (duk_get_top(ctx) > 1 && !duk_is_undefined(ctx, 1))
+	{
+		double value = duk_require_number(ctx, 1);
+		if (!(value >= 0 && value <= 07777) || value != (double)(unsigned int)value) { return ILibDuktape_Error(ctx, "Invalid directory mode"); }
+		mode = (mode_t)value;
+	}
+	if (mkdir(path, mode) != 0)
 #endif
 	{
 		return(ILibDuktape_Error(ctx, "fs.mkdirSync(): Unable to create dir: %s", ILibDuktape_String_WideToUTF8(ctx, path)));
