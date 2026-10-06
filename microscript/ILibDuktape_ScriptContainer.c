@@ -1092,6 +1092,8 @@ void ILibDuktape_ScriptContainer_Process_SignalListener_PostSelect(void* object,
 			{
 				fcntl(SignalDescriptors[0], F_SETFL, O_NONBLOCK);
 				fcntl(SignalDescriptors[1], F_SETFL, O_NONBLOCK);
+				fcntl(SignalDescriptors[0], F_SETFD, FD_CLOEXEC);
+				fcntl(SignalDescriptors[1], F_SETFD, FD_CLOEXEC);
 			}
 		}
 	}
@@ -1546,6 +1548,9 @@ void ILibDuktape_ScriptContainer_Process_Init(duk_context *ctx, char **argList)
 		{
 			fcntl(SignalDescriptors[0], F_SETFL, O_NONBLOCK);
 			fcntl(SignalDescriptors[1], F_SETFL, O_NONBLOCK);
+			// A child holding the write end could inject signal events into the agent.
+			fcntl(SignalDescriptors[0], F_SETFD, FD_CLOEXEC);
+			fcntl(SignalDescriptors[1], F_SETFD, FD_CLOEXEC);
 
 			void *chain = Duktape_GetChain(ctx);
 			ILibChain_Link *k = ILibChain_Link_Allocate(sizeof(ILibChain_Link), 2 * sizeof(void*));

@@ -1526,6 +1526,10 @@ ILibProcessPipe_PipeObject* ILibProcessPipe_CreatePipe(ILibProcessPipe_Manager m
 	{
 		fcntl(fd[0], F_SETFL, O_NONBLOCK);
 		fcntl(fd[1], F_SETFL, O_NONBLOCK);
+		// Only the child this pipe was made for may hold it: it receives its end through dup2, which
+		// clears close-on-exec. Without this, every later child inherits every open pipe end.
+		fcntl(fd[0], F_SETFD, FD_CLOEXEC);
+		fcntl(fd[1], F_SETFD, FD_CLOEXEC);
 		retVal->mPipe_ReadEnd = fd[0];
 		retVal->mPipe_WriteEnd = fd[1];
 	}
@@ -1566,7 +1570,7 @@ void ILibProcessPipe_Process_BrokenPipeSink_DestroyHandler(void *object)
 void ILibProcessPipe_Process_BrokenPipeSink(ILibProcessPipe_Pipe sender)
 {
 	ILibProcessPipe_Process_Object *p = ((ILibProcessPipe_PipeObject*)sender)->mProcess;
-	int status;
+	int status = 0;
 	if (ILibIsRunningOnChainThread(((ILibProcessPipe_PipeObject*)sender)->manager->ChainLink.ParentChain) != 0)
 	{
 		// This was called from the Reader
@@ -1592,8 +1596,13 @@ void ILibProcessPipe_Process_SoftKill(ILibProcessPipe_Process p)
 	TerminateProcess(j->hProcess, 1067);
 #else
 	int code;
-	kill((pid_t)j->PID, SIGKILL);
-	waitpid((pid_t)j->PID, &code, 0);
+	// Another SIGCHLD handler may already have reaped the child, and its PID may be reused;
+	// only signal a child that is still ours and running.
+	if (waitpid((pid_t)j->PID, &code, WNOHANG) == 0)
+	{
+		kill((pid_t)j->PID, SIGKILL);
+		waitpid((pid_t)j->PID, &code, 0);
+	}
 #endif
 }
 
@@ -2078,7 +2087,8 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 		{
 			close(retVal->stdErr->mPipe_ReadEnd); //close read end of stderr pipe
 			dup2(retVal->stdErr->mPipe_WriteEnd, STDERR_FILENO);
-			close(retVal->stdErr->mPipe_WriteEnd);
+			if (retVal->stdErr->mPipe_WriteEnd != STDERR_FILENO) { close(retVal->stdErr->mPipe_WriteEnd); }
+			fcntl(STDERR_FILENO, F_SETFD, 0); // dup2 onto the same descriptor keeps close-on-exec
 		}
 		if (spawnType == ILibProcessPipe_SpawnTypes_TERM)
 		{
@@ -2095,8 +2105,10 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 				dup2(retVal->stdIn->mPipe_ReadEnd, STDIN_FILENO);
 				dup2(retVal->stdOut->mPipe_WriteEnd, STDOUT_FILENO);
 
-				close(retVal->stdIn->mPipe_ReadEnd);
-				close(retVal->stdOut->mPipe_WriteEnd);
+				if (retVal->stdIn->mPipe_ReadEnd != STDIN_FILENO) { close(retVal->stdIn->mPipe_ReadEnd); }
+				if (retVal->stdOut->mPipe_WriteEnd != STDOUT_FILENO) { close(retVal->stdOut->mPipe_WriteEnd); }
+				fcntl(STDIN_FILENO, F_SETFD, 0);
+				fcntl(STDOUT_FILENO, F_SETFD, 0);
 
 				int f = fcntl(STDIN_FILENO, F_GETFL);
 				f &= ~O_NONBLOCK;
@@ -2416,6 +2428,10 @@ void ILibProcessPipe_Process_SetWriteHandler(ILibProcessPipe_PipeObject *pipeObj
 void ILibProcessPipe_Process_StartPipeReaderWriterEx(void *object)
 {
 	ILibProcessPipe_PipeObject* pipeObject = (ILibProcessPipe_PipeObject*)object;
+	// Resume may run while the pipe is already active, and Pause may land before this deferred
+	// start; a second list entry would deliver EOF, and destroy the process, twice.
+	if (pipeObject->PAUSED != 0) { return; }
+	if (ILibLinkedList_GetNode_Search(pipeObject->manager->ActivePipes, NULL, pipeObject) != NULL) { return; }
 	ILibLinkedList_AddTail(pipeObject->manager->ActivePipes, pipeObject);
 }
 

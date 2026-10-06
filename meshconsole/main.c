@@ -280,6 +280,9 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 	{
 		// Screen Sharing relay helper; the agent starts it with its own root credentials.
 		if (argc != 2) { fprintf(stderr, "Usage: -kvm0\n"); return 1; }
+		// Keep only stdio: descriptors inherited from the agent (sockets, database) must not stay
+		// open in a root process that outlives a session.
+		for (int fd = getdtablesize() - 1; fd > STDERR_FILENO; --fd) { close(fd); }
 		return kvm_server_mainloop(NULL) == NULL ? 0 : 1;
 	}
 	else if (argc > 1 && strcasecmp(argv[1], "-kvmcheck") == 0)

@@ -82,6 +82,7 @@ function main() {
     const consoleMain = read('meshconsole/main.c');
     const installer = read('modules/agent-installer.js');
     const makefile = read('makefile');
+    const pipeSource = read('microstack/ILibProcessPipe.c');
 
     const setup = functionBody(kvm, 'void* kvm_relay_setup(');
     const open = functionBody(kvm, 'static vnc_relay* MacKvm_OpenRelay(');
@@ -109,6 +110,11 @@ function main() {
         // When the helper exits, the agent drops its pipe before ending the stream; viewer unpipe
         // pauses the source, and pausing the destroyed pipe crashed the agent.
         helperExitDropsPipe: /if \(buffer == NULL \|\| bufferLen <= 0\)\s*\{\s*#if defined\(__APPLE__\) && defined\(_LINKVM\)[\s\S]*?ptrs->kvmPipe = NULL;\s*#endif\s*if \(ptrs->stream != NULL\) \{ ILibDuktape_DuplexStream_WriteEnd\(ptrs->stream\); \}/.test(core),
+        // Cleanup ends only the helper of the session it is called for, detached before the kill.
+        cleanupOwnsSession: /void kvm_cleanup\(void \*reserved\)\s*\{[\s\S]*?gChildUser\[1\] != reserved\) \{ return; \}[\s\S]*?gChildUser\[0\] = NULL;[\s\S]*?SoftKill\(process\);\s*ILibProcessPipe_Pipe_Resume/.test(kvm),
+        // Pipes reach only their own child, and the root helper keeps only stdio.
+        pipesCloseOnExec: (pipeSource.match(/fcntl\(fd\[[01]\], F_SETFD, FD_CLOEXEC\);/g) || []).length === 2,
+        helperClosesInheritedFds: entry != null && entry.includes('for (int fd = getdtablesize() - 1; fd > STDERR_FILENO; --fd) { close(fd); }'),
         coreUsesHelperPipeOnly: coreApple != null &&
             coreApple.includes('ptrs->kvmPipe = kvm_relay_setup(agent->exePath, agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs);') &&
             !core.includes('KVM_IPC_SOCKET') && !core.includes('DomainIPC') && !core.includes('kvmDomainSocket'),
