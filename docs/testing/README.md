@@ -245,7 +245,9 @@ python3 test/posix_fs_modes_agent_runtime.py --agent /absolute/path/to/built/mes
 
 Installation probes redirect `/Library` writes into temporary directories and
 verify publication order, handled-failure cleanup, private file modes and retained
-provisioning. The Node fixture injects launchctl state; these tests do not prove a
+provisioning. The Node fixture also runs the uninstall flow to check that a
+reinstall keeps the Screen Sharing relay credential and a completed uninstall
+removes it. The fixture injects launchctl state; these tests do not prove a
 live root install/uninstall or reboot. Session probes cover console selection,
 account lookup failures, literal arguments, signed legacy IDs and Unicode home
 paths; the built-agent probe performs read-only queries against the host.
@@ -274,12 +276,12 @@ with fstat reporting the current user as root, and covers content, length, modes
 hard links, symlinks, FIFOs and the parent directory. It checks port ownership
 against injected process tables and against real libproc data for a temporary
 listener owned by the current user. It also covers failure reasons in check order,
-key, Unicode, mouse and control dispatch to the relay, the root helper's launch
-arguments, and exit cleanup. With `--agent` it runs the built `-kvm0` without
-root, which must report the root requirement to the viewer, and the legacy `-kvm1`
-switch, which must exit cleanly. It does not prove a live Screen Sharing session.
-Validate that on a Mac with Screen Sharing and VNC password access enabled and the
-credential installed. Helper framing tests compare Node and native
+key, Unicode, mouse and control dispatch to the relay, the readiness check, the
+root helper's launch arguments, and exit cleanup. With `--agent` it runs the
+built `-kvm0` and `-kvmcheck` without root, which must report the root
+requirement, and the legacy `-kvm1` switch, which must exit cleanly. It does not prove a live Screen Sharing session.
+Validate that on a Mac set up as described in the deployment guide: run
+`sudo <installed executable> -kvmcheck`, then a remote desktop session. Helper framing tests compare Node and native
 wire bytes and exercise a real temporary Unix socket without starting GUI helpers.
 
 The message-helper Node test runs the production parent/client code with real

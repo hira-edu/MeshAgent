@@ -35,7 +35,8 @@ def between(start, end):
 constants = between('#define MAC_KVM_RELAY_SECRET\t', '\nint KVM_SEND(')
 reader = between('int MacKvm_ReadRelaySecret(', '\n// screensharingd is socket-activated')
 listener = between('int MacKvm_RelayListener(', '\nstatic vnc_relay* MacKvm_OpenRelay(')
-opener = between('static vnc_relay* MacKvm_OpenRelay(', '\n// Adopts the relay')
+opener = between('static vnc_relay* MacKvm_OpenRelay(', '\n// Runs the session\'s checks')
+checker = between('int kvm_relay_check(', '\n// Adopts the relay')
 dispatch = between('int kvm_server_inputdata(', '\n\nint kvm_relay_feeddata(')
 exit_handler = between('void kvm_relay_ExitHandler(', '\nvoid kvm_relay_StdOutHandler(')
 launcher = between('void* kvm_relay_setup(', '\n// Force a KVM reset')
@@ -266,6 +267,9 @@ vnc_relay* vnc_relay_open(uint16_t port, const char *password, int timeout, int 
     return openError == 0 ? &fakeRelay : NULL;
 }
 const char* vnc_relay_strerror(int error) { return error == VNC_RELAY_E_AUTH ? "credential rejected" : "other"; }
+static int closeCalls;
+int vnc_relay_size(vnc_relay *relay, int *width, int *height) { assert(relay == &fakeRelay); *width = 1440; *height = 900; return 0; }
+void vnc_relay_close(vnc_relay *relay) { assert(relay == &fakeRelay); ++closeCalls; }
 int vnc_relay_key(vnc_relay *relay, uint32_t keysym, int down) {
     assert(relay == &fakeRelay && keyCount < 16); keys[keyCount] = keysym; downs[keyCount++] = down; return 0;
 }
@@ -275,7 +279,7 @@ int vnc_relay_mouse(vnc_relay *relay, int x, int y, int button, short wheel) {
 uint32_t vnc_relay_vk_to_keysym(unsigned char vk) { return vk == 0x41 ? 'a' : (vk == 0x14 ? 0xFFE5 : 0); }
 uint32_t vnc_relay_unicode_to_keysym(uint16_t unicode) { return unicode == 0x1F ? 0 : 0x01000000u | unicode; }
 static void set_tile_compression(int type, int level) { compressionType = type; compressionLevel = level; }
-''' + opener + dispatch + r'''
+''' + opener + checker + dispatch + r'''
 typedef void* ILibProcessPipe_Process;
 typedef int (*ILibKVM_WriteHandler)(char*, int, void*);
 #define ILibProcessPipe_SpawnTypes_DEFAULT 0
@@ -317,6 +321,11 @@ int main(void) {
     assert(open_with(0, 0, 0, MAC_KVM_LISTENER_FOREIGN, 0) == NULL && strstr(reason, "not owned by root") && openCalls == 0);
     assert(open_with(0, 0, 0, MAC_KVM_LISTENER_ERROR, 0) == NULL && strstr(reason, "could not be verified") && openCalls == 0);
     assert(open_with(0, 0, 0, MAC_KVM_LISTENER_ROOT, VNC_RELAY_E_AUTH) == NULL && !strcmp(reason, "Remote desktop is unavailable: credential rejected."));
+    // The readiness check reports the same outcome and disconnects after a successful handshake.
+    effectiveId = 0; directoryFails = 0; secretResult = 0; listenerResult = MAC_KVM_LISTENER_ROOT; openError = 0; listenerCalls = 0;
+    assert(kvm_relay_check() == 0 && closeCalls == 1);
+    listenerResult = MAC_KVM_LISTENER_FOREIGN; listenerCalls = 0;
+    assert(kvm_relay_check() == 1 && closeCalls == 1);
 
     const unsigned char keyDown[] = {0, MNG_KVM_KEY, 0, 6, 0, 0x41}, keyUp[] = {0, MNG_KVM_KEY, 0, 6, 1, 0x41};
     const unsigned char extDown[] = {0, MNG_KVM_KEY, 0, 6, 4, 0x14}, extUp[] = {0, MNG_KVM_KEY, 0, 6, 3, 0x14};
@@ -358,7 +367,7 @@ int main(void) {
     kvm_relay_ExitHandler((void*)1, 1, NULL); assert(ended == 1 && freed == 2);
     assert(kvm_relay_setup("/fixture/quoted ' agent", (void*)9, endSession, (void*)3) == (void*)2);
     gChildProcess = NULL; kvm_relay_ExitHandler((void*)1, 1, lastUser); assert(ended == 1 && lastUser == NULL);	// Owner already closed
-    puts("PASS: relay setup order and failure reasons, key/unicode/mouse/control dispatch, framing errors, root helper launch and exit cleanup");
+    puts("PASS: relay setup order, failure reasons and readiness check, key/unicode/mouse/control dispatch, framing errors, root helper launch and exit cleanup");
 }
 '''
 
@@ -395,6 +404,11 @@ if args.agent:
         assert result.returncode == 1 and result.stdout == bytes([0, 17, 0, len(message) + 4]) + message, result
     result = subprocess.run([agent, '-kvm0', '--session-uid', '501'], stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
     assert result.returncode == 1 and not result.stdout and b'Usage: -kvm0' in result.stderr, result
+    result = subprocess.run([agent, '-kvmcheck'], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    if os.geteuid() != 0:
+        assert result.returncode == 1 and result.stdout == 'NOT READY: ' + message.decode() + '\n', result
+    result = subprocess.run([agent, '-kvmcheck', 'extra'], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1 and not result.stdout and 'Usage: -kvmcheck' in result.stderr, result
     result = subprocess.run([agent, '-kvm1'], stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
     assert result.returncode == 0 and not result.stdout, result
-    print('PASS: built -kvm0 reports the root requirement to the viewer, rejects extra arguments; legacy -kvm1 exits cleanly')
+    print('PASS: built -kvm0 and -kvmcheck report the root requirement and reject extra arguments; legacy -kvm1 exits cleanly')

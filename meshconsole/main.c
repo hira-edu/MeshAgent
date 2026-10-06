@@ -71,7 +71,7 @@ void BreakSink(int s)
 
 #if defined(_LINKVM) && defined(__APPLE__)
 extern void* kvm_server_mainloop(void *parm);
-extern void senddebug(int val);
+extern int kvm_relay_check(void);
 ILibTransport_DoneState kvm_serviceWriteSink(char *buffer, int bufferLen, void *reserved)
 {
 	ignore_result(write(STDOUT_FILENO, (void*)buffer, bufferLen));
@@ -281,6 +281,12 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 		// Screen Sharing relay helper; the agent starts it with its own root credentials.
 		if (argc != 2) { fprintf(stderr, "Usage: -kvm0\n"); return 1; }
 		return kvm_server_mainloop(NULL) == NULL ? 0 : 1;
+	}
+	else if (argc > 1 && strcasecmp(argv[1], "-kvmcheck") == 0)
+	{
+		// Administrator readiness check for the Screen Sharing relay; run as root.
+		if (argc != 2) { fprintf(stderr, "Usage: -kvmcheck\n"); return 1; }
+		return kvm_relay_check();
 	}
 	else if (argc > 1 && strcasecmp(argv[1], "-kvm1") == 0)
 	{

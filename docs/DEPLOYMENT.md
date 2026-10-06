@@ -249,8 +249,38 @@ If any requirement fails, or Screen Sharing rejects the password, stops
 responding, or sends an unsupported message, the helper sends the reason to the
 viewer's desktop message bar and the session ends. The relay negotiates only Raw,
 CopyRect, and DesktopSize encodings and shares the screen with any other Screen
-Sharing viewers. Screen Sharing must have VNC password access enabled with the
-same password; the agent does not change Screen Sharing settings at session time.
+Sharing viewers.
+
+The agent never changes Screen Sharing settings or creates the credential. An
+administrator sets up each Mac:
+
+1. In System Settings > General > Sharing, turn on Screen Sharing. In its options,
+   turn on "VNC viewers may control screen with password" and set a password of up
+   to eight characters. A managed fleet can apply the same settings through MDM.
+2. Store the same password beside the installed executable. With the default
+   service name:
+
+   ```sh
+   sudo /bin/bash -c 'umask 077; IFS= read -r -s p; printf "%s\n" "$p" > /usr/local/mesh_services/meshagent/vncrelay.secret'
+   ```
+
+   Type the password and press Return; it is not echoed or kept in shell history.
+   The file is created by root with mode 0600.
+3. Confirm the setup:
+
+   ```sh
+   sudo /usr/local/mesh_services/meshagent/meshagent -kvmcheck
+   ```
+
+   It runs the same checks and Screen Sharing handshake as a session, prints
+   `READY` or `NOT READY` with the reason, and exits 0 or 1. Like a session, it
+   briefly connects as a Screen Sharing viewer.
+
+Screen Sharing listens on every network interface and VNC passwords are short,
+so restrict port 5900 to the Mac itself with the firewall or network policy your
+organization uses. If Screen Sharing is later turned off, sessions report that it
+is off until an administrator turns it back on. A reinstall keeps the credential;
+a completed uninstall removes it but leaves the Screen Sharing settings as they are.
 
 Earlier releases installed a LoginWindow LaunchAgent that ran the executable with
 `-kvm1`. Installation no longer creates it, and uninstall or reinstall removes an

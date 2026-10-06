@@ -283,6 +283,20 @@ static vnc_relay* MacKvm_OpenRelay(char *reason, size_t capacity)
 	return relay;
 }
 
+// Runs the session's checks and Screen Sharing handshake, then disconnects, so an
+// administrator can confirm the setup. Like a session, it briefly connects as a viewer.
+int kvm_relay_check(void)
+{
+	char reason[256];
+	int width = 0, height = 0;
+	vnc_relay *relay = MacKvm_OpenRelay(reason, sizeof(reason));
+	if (relay == NULL) { printf("NOT READY: %s\n", reason); return 1; }
+	vnc_relay_size(relay, &width, &height);
+	vnc_relay_close(relay);
+	printf("READY: Screen Sharing accepted the agent credential (%dx%d framebuffer).\n", width, height);
+	return 0;
+}
+
 // Adopts the relay's framebuffer size; the viewer's coordinates are framebuffer pixels.
 static int kvm_init(void)
 {

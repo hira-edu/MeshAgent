@@ -12,7 +12,7 @@ const agentEnd = managerSource.indexOf('\n    this.uninstallService =', agentSta
 const installAgent = managerSource.slice(agentStart, agentEnd).replace('this.installLaunchAgent =', 'var installAgent =').replace(/\n    }\s*$/, '');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-mac-install-'));
 let failWrite = '', failStart = false, failChown = false, agentInstalls = 0;
-let closed = 0, commands = [], loaded = new Set(), userDomain = '', domainData = {};
+let closed = 0, uninstalled = [], commands = [], loaded = new Set(), userDomain = '', domainData = {};
 const map = p => typeof p === 'string' && (p === '/Library' || p.startsWith('/Library/')) ? root + '/system' + p : p;
 fs.mkdirSync(root + '/system');
 const fixtureFS = {};
@@ -60,6 +60,7 @@ const manager = {isAdmin: () => true,
     installService: options => c.macInstallService(options, manager),
     installLaunchAgent(options) { agentInstalls++;return c.installAgent.call(manager,options); },
     getLaunchAgent(name) {return c.fetchPlist('/Library/LaunchAgents',name);},
+    uninstallService(name, options) { uninstalled.push([name, options]); },
     getService(name) {const job=c.fetchPlist('/Library/LaunchDaemons',name);return {
         appLocation: () => job.appLocation(),
         start() { assert(fs.existsSync(map('/Library/LaunchDaemons/'+name+'.plist')));if(failStart)throw Error('injected start failure'); },
@@ -103,5 +104,17 @@ try {
         assert(!commands.some(a=>a[1]==='bootstrap'),'orchestrator starts the daemon only through the service object');
     }
     assert.equal(closed,2);
-    console.log('PASS: macOS install ordering, owned rollback, retained provisioning, LaunchAgent ownership, LoginWindow domain cleanup, no KVM LaunchAgent, start/setup failures');
+    // The relay credential survives a reinstall and is removed by a completed uninstall.
+    fs.mkdirSync(root+'/relay');
+    const relayMsh=root+'/relay/Orchestrated.msh', relaySecret=root+'/relay/vncrelay.secret';
+    for (const stop of [false, true]) {
+        fs.writeFileSync(relayMsh,'provisioning');fs.writeFileSync(relaySecret,'secret\n',{mode:0o600});
+        const params=['--meshServiceName=Orchestrated'];if(stop)params.push('_stop');
+        let reinstalled=0;const install=c.installService;c.installService=()=>{reinstalled++;};
+        try { c.uninstallService2(params, relayMsh); } finally { c.installService=install; }
+        assert.equal(uninstalled.pop()[0],'Orchestrated');
+        assert.equal(fs.existsSync(relaySecret),!stop);assert.equal(fs.existsSync(relayMsh),!stop);assert.equal(reinstalled,stop?0:1);
+    }
+    c.removeMacRelaySecret(null);c.removeMacRelaySecret(relayMsh);	// Absent credential or path: nothing to do
+    console.log('PASS: macOS install ordering, owned rollback, retained provisioning, LaunchAgent ownership, LoginWindow domain cleanup, no KVM LaunchAgent, relay credential kept on reinstall and removed on uninstall, start/setup failures');
 } finally {fs.rmSync(root,{recursive:true,force:true});}

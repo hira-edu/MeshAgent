@@ -9,7 +9,8 @@
 //      there is no launchctl/asuser hop, no LoginWindow socket and no LaunchAgent for KVM.
 //   3. The helper reads the credential, verifies root owns the port, then authenticates; it
 //      wipes the password and connects to loopback only.
-//   4. Installation no longer publishes the LoginWindow -kvm1 job but still removes an old one.
+//   4. Installation no longer publishes the LoginWindow -kvm1 job but still removes an old one,
+//      and a completed uninstall removes the relay credential.
 //
 // This is a source-shape guard. test/macos_kvm_session_native.py and
 // test/macos_vnc_relay_native.py exercise the behavior.
@@ -87,6 +88,7 @@ function main() {
     const input = functionBody(kvm, 'int kvm_server_inputdata(');
     const mainloop = functionBody(kvm, 'void* kvm_server_mainloop(');
     const listener = functionBody(kvm, 'int MacKvm_RelayListener(');
+    const readiness = functionBody(kvm, 'int kvm_relay_check(');
     const coreApple = macBlock(core, '#elif defined(__APPLE__)\n\t// One root relay helper', '#else');
     const entry = macBlock(consoleMain, 'if (argc > 1 && strcasecmp(argv[1], "-kvm0") == 0)', '#endif');
     const install = functionBody(installer, 'function installService(params)');
@@ -131,6 +133,12 @@ function main() {
 
         // Installation stops publishing the LoginWindow job; uninstall still removes an existing one.
         installerHasNoKvmLaunchAgent: install != null && !install.includes('installLaunchAgent') && !installer.includes("'-kvm1'"),
+        // The administrator check runs exactly the session's checks and disconnects.
+        readinessUsesSessionChecks: readiness != null && readiness.includes('MacKvm_OpenRelay(') && readiness.includes('vnc_relay_close(relay)') &&
+            entry != null && /"-kvmcheck"\) == 0\)\s*\{[\s\S]*?return kvm_relay_check\(\);\s*\}/.test(entry),
+        // Like provisioning, the relay credential survives a reinstall and is removed by a completed uninstall.
+        uninstallRemovesCredential: uninstall != null &&
+            uninstall.includes("if (params.includes('_stop') && process.platform == 'darwin') { removeMacRelaySecret(msh); }"),
         uninstallRemovesLegacyAgent: uninstall != null && uninstall.includes("if (process.platform == 'darwin') { uninstallMacLaunchAgent(serviceName); }")
     };
 

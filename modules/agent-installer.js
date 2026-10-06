@@ -887,6 +887,17 @@ function installService(params)
     }
 }
 
+// The Screen Sharing relay credential sits beside the executable. Like provisioning,
+// a reinstall keeps it and a completed uninstall removes it.
+function removeMacRelaySecret(msh)
+{
+    if (msh == null) { return; }
+    var parts = msh.split('/');
+    parts.pop();
+    var secret = parts.join('/') + '/vncrelay.secret';
+    if (require('fs').existsSync(secret)) { require('fs').unlinkSync(secret); }
+}
+
 // Removes the LoginWindow LaunchAgent that releases before the Screen Sharing relay installed.
 function uninstallMacLaunchAgent(name)
 {
@@ -949,6 +960,7 @@ function uninstallService2(params, msh)
         require('service-manager').manager.uninstallService(serviceName, uninstallOptions);
         process.stdout.write(' [DONE]\n');
         if (params.includes('_stop') && require('fs').existsSync(msh)) { require('fs').unlinkSync(msh); }
+        if (params.includes('_stop') && process.platform == 'darwin') { removeMacRelaySecret(msh); }
 
         // Lets try to cleanup the uninstalled service
         if (dataFolder && appPrefix)
