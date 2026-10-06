@@ -3140,6 +3140,11 @@ ILibTransport_DoneState ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink(char *
 
 	if (buffer == NULL || bufferLen <= 0)
 	{
+#if defined(__APPLE__) && defined(_LINKVM)
+		// The relay helper exited and its pipes are being destroyed. Ending the stream unpipes
+		// viewers, which pauses the source, so drop the pipe before it can be touched again.
+		ptrs->kvmPipe = NULL;
+#endif
 		if (ptrs->stream != NULL) { ILibDuktape_DuplexStream_WriteEnd(ptrs->stream); }
 		return ILibTransport_DoneState_COMPLETE;
 	}

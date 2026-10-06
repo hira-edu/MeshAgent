@@ -106,6 +106,9 @@ function main() {
             setup.includes('SpawnProcessEx3(processPipeMgr, exePath, args, ILibProcessPipe_SpawnTypes_DEFAULT, NULL, 0)'),
         noSessionHop: !kvm.includes('launchctl') && !kvm.includes('asuser') && !kvm.includes('setuid(') &&
             !kvm.includes('--session-uid') && !kvm.includes('KVM_Listener_Path') && !kvm.includes('AF_UNIX'),
+        // When the helper exits, the agent drops its pipe before ending the stream; viewer unpipe
+        // pauses the source, and pausing the destroyed pipe crashed the agent.
+        helperExitDropsPipe: /if \(buffer == NULL \|\| bufferLen <= 0\)\s*\{\s*#if defined\(__APPLE__\) && defined\(_LINKVM\)[\s\S]*?ptrs->kvmPipe = NULL;\s*#endif\s*if \(ptrs->stream != NULL\) \{ ILibDuktape_DuplexStream_WriteEnd\(ptrs->stream\); \}/.test(core),
         coreUsesHelperPipeOnly: coreApple != null &&
             coreApple.includes('ptrs->kvmPipe = kvm_relay_setup(agent->exePath, agent->pipeManager, ILibDuktape_MeshAgent_RemoteDesktop_KVM_WriteSink, ptrs);') &&
             !core.includes('KVM_IPC_SOCKET') && !core.includes('DomainIPC') && !core.includes('kvmDomainSocket'),
