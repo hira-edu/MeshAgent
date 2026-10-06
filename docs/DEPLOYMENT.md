@@ -38,6 +38,46 @@ that URL's hostname, including when the console and agent endpoints differ.
 Enable agent hash checking by setting `ignoreAgentHashCheck` to `false` and
 removing any domain or IP exceptions that skip the check.
 
+### Historical web certificates
+
+The tracked MeshCentral `meshagent.js` supports domain-scoped
+`agentwebcerthashes`: an explicit array of 96-character SHA384 certificate or
+RSA public-key hashes. These pins extend only web-certificate admission. The
+agent's nonce signature, NodeID, mesh authorization, and pinned server identity
+are still required. Unknown, malformed, wildcard, and all-zero pins are rejected;
+reported agent hashes are never automatically trusted. Successful historical
+connections emit `[AGENT_CERT_COMPAT]` after signature verification.
+
+On the VPS, `tools/configure_agent_certificate_history.js` can collect pins from
+saved public web certificates and operator-designated HTTPS endpoints. Endpoint
+collection requires CA and hostname validation. For example:
+
+```sh
+node configure_agent_certificate_history.js \
+  --config /opt/meshcentral/meshcentral-data/config.json \
+  --history-dir /opt/meshcentral/meshcentral-data \
+  --endpoint https://old-agent.example/ \
+  --endpoint https://agents.example/
+```
+
+`--certificate <public-crt>` adds a specific historical listener certificate.
+The default domain is selected unless `--domain <id>` is supplied. The tool
+preserves existing valid pins, rejects private-key inputs, saves a private config
+backup, and replaces the configuration atomically. Deploy the server change and
+restart MeshCentral to apply the pins. Configured endpoints are retained as
+`agentwebcerturls`. A rejected certificate triggers a CA/hostname-validated
+refresh of these endpoints, at most once per domain every two minutes, with
+15-second timeouts. New validated hashes extend the in-memory history and held
+connections restart with fresh nonces; failed fetches never grant trust.
+Re-run the inventory tool to persist newly observed certificates across server
+restarts. Remove retired pins and endpoints after migration is verified.
+
+This does not replace agent identities or rewrite the agent's server public-key
+pin. A changed server identity needs proof from the previously trusted private
+key or separately authorized endpoint reprovisioning. Missing historical
+certificates must be recovered from operator backups, not inferred from rejected
+connection logs.
+
 The installed native service is a `SERVICE_WIN32_SHARE_PROCESS` DLL service in
 a deterministic, agent-only service-host group. Its image path resolves the actual
 `%SystemRoot%\System32\svchost.exe`; `Parameters\ServiceDll` names the installed

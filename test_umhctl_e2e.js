@@ -227,13 +227,13 @@ function runLifecycleStaleLockChecks(results, sandbox) {
         sandbox.umhctlLifecycleState = {
             op: 'install',
             sessionid: 'old-session',
-            startedAt: Date.now() - 361000,
+            startedAt: Date.now() - 541000,
             phase: 'running install command',
-            phaseUpdated: Date.now() - 360000
+            phaseUpdated: Date.now() - 540000
         };
 
         const began = sandbox.umhctlBeginLifecycle('install', 'new-session');
-        assert(began === true, 'stale lifecycle lock should be cleared after max duration');
+        assert(began && typeof began === 'object', 'stale lifecycle lock should be cleared after max duration');
         assert(messages.some((entry) => entry.msg.indexOf('clearing stale lifecycle operation install') >= 0),
             'stale lifecycle clear message missing');
         assert(sandbox.umhctlLifecycleState && sandbox.umhctlLifecycleState.sessionid === 'new-session',
