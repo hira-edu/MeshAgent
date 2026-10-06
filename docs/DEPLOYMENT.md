@@ -287,6 +287,15 @@ Earlier releases installed a LoginWindow LaunchAgent that ran the executable wit
 existing one. Until then, the current executable exits immediately when launchd
 starts it with `-kvm1`.
 
+MeshCentral's macOS `.pkg` installs the executable in
+`/usr/local/mesh_services/meshagent/meshagent/`, so the credential goes in that
+directory, and adds a LaunchAgent that starts `-kvmagent` with `KeepAlive` in
+the login window and every user session. The relay needs no session helper, so
+that switch stays idle until launchd stops the job instead of starting a second
+agent. The package is unsigned; macOS blocks it until it is allowed in System
+Settings > Privacy & Security, or signed with a Developer ID Installer
+certificate and notarized.
+
 ## macOS service installation and user sessions
 
 Installation writes the executable and provisioning before publishing the daemon

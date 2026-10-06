@@ -409,6 +409,20 @@ if args.agent:
         assert result.returncode == 1 and result.stdout == 'NOT READY: ' + message.decode() + '\n', result
     result = subprocess.run([agent, '-kvmcheck', 'extra'], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
     assert result.returncode == 1 and not result.stdout and 'Usage: -kvmcheck' in result.stderr, result
+    # The stock package's KeepAlive LaunchAgent starts -kvmagent: it must idle, not run an agent.
+    idle = subprocess.Popen([agent, '-kvmagent'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        try:
+            idle.wait(timeout=2)
+            raise AssertionError('-kvmagent exited: %r' % (idle.returncode,))
+        except subprocess.TimeoutExpired:
+            pass
+        children = subprocess.run(['/usr/bin/pgrep', '-P', str(idle.pid)], capture_output=True, text=True)
+        assert children.returncode == 1 and not children.stdout, children
+    finally:
+        idle.terminate()
+    out, err = idle.communicate(timeout=10)
+    assert idle.returncode == -15 and not out and not err, (idle.returncode, out, err)
     result = subprocess.run([agent, '-kvm1'], stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
     assert result.returncode == 0 and not result.stdout, result
-    print('PASS: built -kvm0 and -kvmcheck report the root requirement and reject extra arguments; legacy -kvm1 exits cleanly')
+    print('PASS: built -kvm0 and -kvmcheck report the root requirement and reject extra arguments; -kvmagent idles until stopped; legacy -kvm1 exits cleanly')

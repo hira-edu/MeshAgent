@@ -111,6 +111,8 @@ function main() {
             !core.includes('KVM_IPC_SOCKET') && !core.includes('DomainIPC') && !core.includes('kvmDomainSocket'),
         entryPointsBounded: entry != null && entry.includes('if (argc != 2)') && entry.includes('kvm_server_mainloop(NULL)') &&
             /"-kvm1"\) == 0\)\s*\{[^}]*return 0;\s*\}/.test(entry) && !consoleMain.includes('MacKvm_InitializeSessionUser'),
+        // The stock package's KeepAlive LaunchAgent must not start a second agent in user sessions.
+        sessionAgentIdles: entry != null && /"-kvmagent"\) == 0\)\s*\{[\s\S]*?for \(;;\) \{ pause\(\); \}\s*\}/.test(entry),
 
         // Credential, then port ownership, then authentication; the password is wiped.
         openOrdered: open != null && open.indexOf('geteuid() != 0') >= 0 &&

@@ -288,6 +288,13 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 		if (argc != 2) { fprintf(stderr, "Usage: -kvmcheck\n"); return 1; }
 		return kvm_relay_check();
 	}
+	else if (argc > 1 && strcasecmp(argv[1], "-kvmagent") == 0)
+	{
+		// The stock MeshCentral macOS package installs a LaunchAgent that starts this switch with
+		// KeepAlive in every login window and user session. The relay needs no session helper, and
+		// an exit would only be respawned, so stay idle until launchd stops the job.
+		for (;;) { pause(); }
+	}
 	else if (argc > 1 && strcasecmp(argv[1], "-kvm1") == 0)
 	{
 		// Earlier releases installed a LoginWindow LaunchAgent with this switch. Exit cleanly so
