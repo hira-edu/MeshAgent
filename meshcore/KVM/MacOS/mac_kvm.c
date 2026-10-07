@@ -50,6 +50,8 @@ limitations under the License.
 #define MAC_KVM_RELAY_TIMEOUT_MS	5000
 #define MAC_KVM_FRAME_MS			100
 #define MAC_KVM_MAX_DRAIN			32		// Server messages applied before the next tile pass
+#define MAC_KVM_FIRST_FRAME_TIMEOUT_MS 15000
+#define MAC_KVM_NO_FRAME_MESSAGE "Screen Sharing authenticated but supplied no screen image. Enable Screen Sharing in System Settings > General > Sharing and approve macOS screen access; if already enabled, turn it off and on, then reconnect."
 
 #define MAC_KVM_SECRET_OK			0
 #define MAC_KVM_SECRET_MISSING		-1
@@ -314,7 +316,7 @@ static vnc_relay* MacKvm_OpenRelay(char *reason, size_t capacity)
 	return relay;
 }
 
-// Runs the session's checks and Screen Sharing handshake, then disconnects, so an
+// Runs the session's checks, handshake and first-frame check, then disconnects, so an
 // administrator can confirm the setup. Like a session, it briefly connects as a viewer.
 int kvm_relay_check(void)
 {
@@ -322,9 +324,22 @@ int kvm_relay_check(void)
 	int width = 0, height = 0;
 	vnc_relay *relay = MacKvm_OpenRelay(reason, sizeof(reason));
 	if (relay == NULL) { printf("NOT READY: %s\n", reason); return 1; }
+	uint64_t started = ILibGetUptime();
+	int flags = 0;
+	while (ILibGetUptime() - started < MAC_KVM_FIRST_FRAME_TIMEOUT_MS)
+	{
+		flags = vnc_relay_pump(relay, MAC_KVM_FRAME_MS);
+		if (flags < 0 || (flags & VNC_RELAY_UPDATED)) { break; }
+	}
+	if (flags < 0 || !(flags & VNC_RELAY_UPDATED))
+	{
+		printf("NOT READY: %s\n", flags < 0 ? vnc_relay_strerror(flags) : MAC_KVM_NO_FRAME_MESSAGE);
+		vnc_relay_close(relay);
+		return 1;
+	}
 	vnc_relay_size(relay, &width, &height);
 	vnc_relay_close(relay);
-	printf("READY: Screen Sharing accepted the agent credential (%dx%d framebuffer).\n", width, height);
+	printf("READY: Screen Sharing supplied a screen image (%dx%d framebuffer).\n", width, height);
 	return 0;
 }
 
@@ -592,6 +607,7 @@ void* kvm_server_mainloop(void* param)
 	char reason[256];
 	pthread_t input;
 	int inputStarted = 0, ready = 0, dirty = 0, failed = 1, r, c;
+	uint64_t firstFrameStarted = 0;
 	UNREFERENCED_PARAMETER(param);
 
 	ILibCriticalLogFilename = "KVMSlave.log";
@@ -603,6 +619,7 @@ void* kvm_server_mainloop(void* param)
 	if (kvm_init() != 0) { MacKvm_SendMessage("Remote desktop could not allocate the screen buffer."); goto done; }
 	if (pthread_create(&input, NULL, kvm_mainloopinput, NULL) != 0) { MacKvm_SendMessage("Remote desktop could not start its input thread."); goto done; }
 	inputStarted = 1;
+	firstFrameStarted = ILibGetUptime();
 
 	while (!g_shutdown)
 	{
@@ -632,6 +649,11 @@ void* kvm_server_mainloop(void* param)
 			break;
 		}
 		if (flags & VNC_RELAY_UPDATED) { ready = dirty = 1; }
+		if (!ready && !g_shutdown && ILibGetUptime() - firstFrameStarted >= MAC_KVM_FIRST_FRAME_TIMEOUT_MS)
+		{
+			MacKvm_SendMessage(MAC_KVM_NO_FRAME_MESSAGE);
+			break;
+		}
 		if (g_refresh)
 		{
 			g_refresh = 0;

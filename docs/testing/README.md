@@ -335,7 +335,8 @@ I/O under ASan/UBSan, including packet splits, interrupted calls and short write
 The protocol probe drives the helper-pipe output handler the way the process pipe
 does, across every split and with invalid frames. The main-loop probe runs the
 production session loop against a scripted relay and checks that the resolution
-precedes tiles, nothing is sent before the first frame, refresh resends every
+precedes tiles, nothing is sent before the first frame, missing first frames
+produce a visible timeout, delayed first frames still work, refresh resends every
 tile, pause holds an update, resize reallocates, and relay, viewer and pipe
 failures end the session with the right message. These probes do not capture a
 screen or inject desktop input.
@@ -369,7 +370,8 @@ with fstat reporting the current user as root, and covers content, length, modes
 hard links, symlinks, FIFOs and the parent directory. It checks port ownership
 against injected process tables and against real libproc data for a temporary
 listener owned by the current user. It also covers failure reasons in check order,
-key, Unicode, mouse and control dispatch to the relay, the readiness check, the
+key, Unicode, mouse and control dispatch to the relay, the readiness check
+(including authentication without an image and connection failure), the
 root helper's launch arguments, and exit cleanup. With `--agent` it runs the
 built `-kvm0` and `-kvmcheck` without root, which must report the root
 requirement, and the legacy `-kvm1` switch, which must exit cleanly. It does not prove a live Screen Sharing session.

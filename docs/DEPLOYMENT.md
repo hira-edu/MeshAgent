@@ -366,6 +366,14 @@ viewer's desktop message bar and the session ends. The relay negotiates only Raw
 CopyRect, and DesktopSize encodings and shares the screen with any other Screen
 Sharing viewers.
 
+Authentication and framebuffer dimensions do not prove that macOS allowed screen
+capture. If no image arrives within 15 seconds, the session reports this and
+disconnects. When a viewer connects but stays black, check Apple's Screen Sharing
+capture permission: enable Screen Sharing through System Settings > General >
+Sharing and approve the native prompts. If it is already on, turn it off and on,
+then reconnect with the existing VNC password. Starting the listener from a shell
+alone does not replace this permission step.
+
 The agent sets console selection and saves the VNC credential through a one-time
 macOS password dialog. It does not enable Screen Sharing. Set up each Mac:
 
@@ -393,7 +401,8 @@ macOS password dialog. It does not enable Screen Sharing. Set up each Mac:
    sudo /usr/local/mesh_services/meshagent/meshagent -kvmcheck
    ```
 
-   It runs the same checks and Screen Sharing handshake as a session, prints
+   It runs the same checks and Screen Sharing handshake as a session and waits
+   up to 15 seconds for an actual image before reporting readiness. It prints
    `READY` or `NOT READY` with the reason, and exits 0 or 1. Like a session, it
    briefly connects as a Screen Sharing viewer.
 

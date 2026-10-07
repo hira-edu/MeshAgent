@@ -316,6 +316,14 @@ vnc_relay* vnc_relay_open(uint16_t port, const char *password, int timeout, vnc_
 }
 const char* vnc_relay_strerror(int error) { return error == VNC_RELAY_E_AUTH ? "credential rejected" : "other"; }
 static int closeCalls;
+static uint64_t fakeTime;
+static uint64_t ILibGetUptime(void) { return fakeTime; }
+static int frameResult = VNC_RELAY_UPDATED, framePumps;
+int vnc_relay_pump(vnc_relay *relay, int wait) {
+    assert(relay == &fakeRelay && wait == 100);
+    fakeTime += (uint64_t)wait; ++framePumps;
+    return framePumps <= 2 ? VNC_RELAY_RESIZED : frameResult;
+}
 int vnc_relay_size(vnc_relay *relay, int *width, int *height) { assert(relay == &fakeRelay); *width = 1440; *height = 900; return 0; }
 void vnc_relay_close(vnc_relay *relay) { assert(relay == &fakeRelay); ++closeCalls; }
 int vnc_relay_key(vnc_relay *relay, uint32_t keysym, int down) {
@@ -377,11 +385,15 @@ int main(void) {
     assert(open_with(0, 0, 0, MAC_KVM_LISTENER_ROOT, 0) == NULL && strstr(reason, "current console desktop") && consoleCalls == 1 && openCalls == 0);
     consoleResult = 0;
     assert(open_with(0, 0, 0, MAC_KVM_LISTENER_ROOT, VNC_RELAY_E_AUTH) == NULL && !strcmp(reason, "Remote desktop is unavailable: credential rejected."));
-    // The readiness check reports the same outcome and disconnects after a successful handshake.
+    // Authentication and dimensions alone do not prove screen capture permission.
     effectiveId = 0; directoryFails = 0; secretResult = 0; listenerResult = MAC_KVM_LISTENER_ROOT; openError = 0; listenerCalls = openCalls = 0;
-    assert(kvm_relay_check() == 0 && closeCalls == 1);
+    assert(kvm_relay_check() == 0 && closeCalls == 1 && framePumps == 3);
+    listenerCalls = openCalls = framePumps = 0; frameResult = 0;
+    assert(kvm_relay_check() == 1 && closeCalls == 2 && framePumps == 150);
+    listenerCalls = openCalls = framePumps = 0; frameResult = VNC_RELAY_E_CLOSED;
+    assert(kvm_relay_check() == 1 && closeCalls == 3 && framePumps == 3);
     listenerResult = MAC_KVM_LISTENER_FOREIGN; listenerCalls = 0;
-    assert(kvm_relay_check() == 1 && closeCalls == 1);
+    assert(kvm_relay_check() == 1 && closeCalls == 3);
 
     const unsigned char keyDown[] = {0, MNG_KVM_KEY, 0, 6, 0, 0x41}, keyUp[] = {0, MNG_KVM_KEY, 0, 6, 1, 0x41};
     const unsigned char extDown[] = {0, MNG_KVM_KEY, 0, 6, 4, 0x14}, extUp[] = {0, MNG_KVM_KEY, 0, 6, 3, 0x14};

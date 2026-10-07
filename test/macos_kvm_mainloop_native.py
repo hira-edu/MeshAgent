@@ -48,6 +48,8 @@ typedef void* ILibProcessPipe_Process;
 typedef struct { void *items[64]; int head, tail; } FakeQueue;
 typedef FakeQueue* ILibQueue;
 static char *ILibCriticalLogFilename;
+static uint64_t fakeTime;
+static uint64_t ILibGetUptime(void) { return fakeTime; }
 static ILibQueue ILibQueue_Create(void) { return calloc(1, sizeof(FakeQueue)); }
 static void ILibQueue_Destroy(ILibQueue q) { assert(q->head == q->tail); free(q); }
 static void ILibQueue_Lock(ILibQueue q) { (void)q; }
@@ -112,6 +114,7 @@ static vnc_relay* MacKvm_OpenRelay(char *reason, size_t capacity) {
 int vnc_relay_pump(vnc_relay *relay, int wait) {
     assert(relay == &relayObject && (wait == 100 || wait == 0)); ++pumpCalls;
     if (wait == 0) { return 0; }	// Nothing further queued
+    fakeTime += (uint64_t)wait;
     if (scriptAt == scriptLength) { return VNC_RELAY_E_CLOSED; }
     const Step *step = &script[scriptAt++];
     switch (step->action) {
@@ -164,7 +167,7 @@ static void parse(void) {
 }
 static void run(const Step *steps, int count, int width, int height, void *expected) {
     script = steps; scriptLength = count; scriptAt = 0; relayWidth = width; relayHeight = height; frame = 0;
-    outLength = 0; shutdownCalls = closeCalls = pumpCalls = inputStarted = inputJoined = releaseCalls = 0; g_refresh = g_remotepause = 0;
+    outLength = 0; shutdownCalls = closeCalls = pumpCalls = inputStarted = inputJoined = releaseCalls = 0; g_refresh = g_remotepause = 0; fakeTime = 0;
     assert(kvm_server_mainloop(NULL) == expected);
     assert(g_tileInfo == NULL && g_desktop == NULL && g_relay == NULL);
     parse();
@@ -179,6 +182,17 @@ int main(void) {
     assert(packetCount == 1 && !strcmp(message, "Remote desktop is unavailable: Screen Sharing is turned off on this Mac."));
     assert(!inputStarted && shutdownCalls == 0 && releaseCalls == 0);
     openFails = 0;
+
+    Step noFrame[151] = {0};
+    run(noFrame, 151, 3024, 1964, (void*)1);
+    assert(scriptAt == 150 && packetCount == 2 && packets[0].type == MNG_KVM_SCREEN);
+    assert(!strcmp(message, MAC_KVM_NO_FRAME_MESSAGE) && inputJoined && closeCalls == 1 && releaseCalls == 1);
+
+    Step delayedFrame[154] = {0};
+    delayedFrame[148].result = VNC_RELAY_UPDATED;
+    delayedFrame[153].action = STEP_STOP;
+    run(delayedFrame, 154, 32, 32, (void*)0);
+    assert(packetCount == 2 && packets[1].type == MNG_KVM_PICTURE && !message[0]);
 
     const Step session[] = {
         {STEP_PUMP, 0, 0, 0},						// Nothing yet
