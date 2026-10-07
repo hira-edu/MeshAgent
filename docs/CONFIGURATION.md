@@ -205,7 +205,11 @@ process/session boundaries. Legacy update and uninstall callbacks remain needed
 for endpoints installed with older bindings until those bindings are migrated.
 
 MeshCentral core overrides carry the source module's UTC modification date into
-`addModule`. Undated overrides cannot replace dated embedded modules. Deployment
+`addModule`. Undated overrides cannot replace dated embedded modules, and an
+override dated later than the embedded copy replaces it on agents. After changing
+a module, re-embed it with `python3 tools/embed_modules.py <name>...`, which
+compresses `modules/<name>.js` into `microscript/ILibDuktape_Polyfills.c` with the
+current UTC time and keeps the single-line or chunked form MSVC accepts. Deployment
 selects one source for each module name: minified files when core minification is
 enabled, plain files otherwise, with fallback when only one variant exists.
 This avoids duplicate registration when both files are present. Deployment
