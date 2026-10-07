@@ -8,6 +8,7 @@ completion and cancellation lifetimes come unchanged from production source.
 """
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from process_pipe_write_runtime import ROOT, FUNCTIONS, extract
@@ -35,6 +36,7 @@ struct ILibProcessPipe_PipeObject {
  ILibProcessPipe_Manager_Object *manager; Process *mProcess;
  LONG closeRequested,finalFreePending,finalizing,activeReadCallbacks,activeWriteHandler,resumePending,pendingWrite;
  int PAUSED,writeClosing,writeOverlappedHandle;
+ size_t writeQueuedBytes;
  HANDLE mPipe_ReadEnd,mPipe_WriteEnd,mPipe_Reader_ResumeEvent;
  OVERLAPPED *mOverlapped,*mwOverlapped;
  void *handler,*user1,*user2,*user3,*user4,*metadata,*WriteBuffer;
@@ -130,7 +132,11 @@ def main():
     source=(ROOT/'microstack/ILibProcessPipe.c').read_text()
     names=FUNCTIONS+['ILibProcessPipe_CreatePipe_Abandon','ILibProcessPipe_CreatePipeEx','ILibProcessPipe_PipeObject_DisableInherit']
     functions=[extract(source,n) for n in names]
-    fixture=out/'windows-pipe.c';fixture.write_text(PRELUDE+'\n'+'\n'.join(s+';' for s,_ in functions)+'\n'+'\n'.join(s+'\n'+b for s,b in functions)+TESTS)
+    # The production queue bound and the chain's real cancel-and-confirm helper.
+    limit=re.search(r'#define ILibProcessPipe_MAX_QUEUED_WRITE_BYTES (.+)',source).group(1)
+    retire=extract((ROOT/'microstack/ILibParsers.c').read_text(),'ILibChain_RetireCancelledIo')
+    support='#define ILibProcessPipe_MAX_QUEUED_WRITE_BYTES '+limit+'\n'+retire[0]+'\n'+retire[1]+'\n'
+    fixture=out/'windows-pipe.c';fixture.write_text(PRELUDE+'\n'+support+'\n'.join(s+';' for s,_ in functions)+'\n'+'\n'.join(s+'\n'+b for s,b in functions)+TESTS)
     compiler=(shutil.which('clang') if os.name=='nt' else shutil.which('x86_64-w64-mingw32-gcc'))
     if not compiler: print('SKIP real Windows pipe probe: Windows compiler unavailable');return
     binary=out/'windows-pipe.exe'
