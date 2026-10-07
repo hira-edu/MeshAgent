@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -28,6 +29,7 @@ import sys
 import tempfile
 import time
 import zipfile
+import zlib
 try:
     from datetime import UTC, datetime
 except ImportError:
@@ -151,10 +153,22 @@ def load_windows_branding_defaults():
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             continue
 
-    raise RuntimeError(
-        "Active Windows branding installRoot/serviceDllName is required; set "
-        "MESHCENTRAL_BRANDING_CONFIG or explicit MESHCENTRAL_INSTALL_ROOT and MESHCENTRAL_LIFECYCLE_DLL"
-    )
+    # Only Windows lifecycle activation uses these paths. The Windows profile still
+    # requires them before any command runs (require_windows_branding); the macOS
+    # profile releases a Mac build without a Windows branding configuration.
+    return {"install_root": None, "service_dll_path": None, "lifecycle_state_dir": None}
+
+
+WINDOWS_BRANDING_REQUIRED_MESSAGE = (
+    "Active Windows branding installRoot/serviceDllName is required; set "
+    "MESHCENTRAL_BRANDING_CONFIG or explicit MESHCENTRAL_INSTALL_ROOT and MESHCENTRAL_LIFECYCLE_DLL"
+)
+
+
+def require_windows_branding():
+    """Fail unless the Windows install root and lifecycle DLL paths are configured."""
+    if not WINDOWS_INSTALL_ROOT or not WINDOWS_LIFECYCLE_DLL or not WINDOWS_LIFECYCLE_STATE_DIR:
+        raise RuntimeError(WINDOWS_BRANDING_REQUIRED_MESSAGE)
 
 
 WINDOWS_BRANDING_DEFAULTS = load_windows_branding_defaults()
@@ -366,6 +380,172 @@ WINDOWS_UPDATE_PACKAGE_SUFFIXES = (".update.exe", ".update.pkg")
 WINDOWS_UPDATE_PACKAGE_SUFFIX = WINDOWS_UPDATE_PACKAGE_SUFFIXES[0]
 WINDOWS_LIFECYCLE_DLL = os.environ.get("MESHCENTRAL_LIFECYCLE_DLL", WINDOWS_BRANDING_DEFAULTS["service_dll_path"])
 WINDOWS_LIFECYCLE_STATE_DIR = os.environ.get("MESHCENTRAL_LIFECYCLE_STATE_DIR", WINDOWS_BRANDING_DEFAULTS["lifecycle_state_dir"])
+
+# ─── Platform Profiles ────────────────────────────────────────────────────────
+# "windows" (the default) is the full release from the Windows workstation. "macos"
+# publishes only the macOS agent and macOS server support from a Mac: it needs no
+# Windows artifacts or branding and leaves Windows payloads and shared modules alone.
+DEPLOY_PLATFORM = "windows"
+MACOS_AGENT_ARTIFACTS = {
+    "meshagent_osx-arm-64": {
+        "local_path": "meshagent_osx-arm-64",
+        "remote_filename": "meshagent_osx-arm-64",
+        "publish_targets": ("data",),
+    },
+}
+MACOS_CORE_ARTIFACT_NAMES = ("macosinstaller.js",)
+MACOS_STAGING_DIR = f"{MESHCENTRAL_BASE}/staging-macos"
+MACOS_POLYFILLS = "microscript/ILibDuktape_Polyfills.c"
+# MeshCentral sends these module copies inside the agent core. A copy dated later
+# than the agent's embedded module replaces it, so a macOS release checks them.
+CORE_MODULE_DIRS = (
+    f"{DATA_ROOT}/modules_meshcore",
+    f"{DATA_ROOT}/modules_meshcore_min",
+    f"{MODULE_AGENTS}/modules_meshcore",
+    f"{MODULE_AGENTS}/modules_meshcore_min",
+)
+MACHO_MAGIC_64 = 0xFEEDFACF
+MACHO_CPU_TYPE_ARM64 = 0x0100000C
+
+
+def apply_platform_profile(platform):
+    """Select the artifact set and checks for one release platform."""
+    global DEPLOY_PLATFORM, ARTIFACTS, CORE_ARTIFACTS, REQUIRED_AGENT_ARTIFACTS
+    global HASHAGENTS_TRACKED_FILENAMES, SIGNED_RUNTIME_MUTABLE_FILENAMES, STAGING_DIR
+    DEPLOY_PLATFORM = platform
+    if platform == "windows":
+        require_windows_branding()
+        return
+    if platform != "macos":
+        raise ValueError(f"Unknown platform: {platform}")
+    ARTIFACTS = {name: dict(config) for name, config in MACOS_AGENT_ARTIFACTS.items()}
+    CORE_ARTIFACTS = {name: dict(CORE_ARTIFACTS[name]) for name in MACOS_CORE_ARTIFACT_NAMES}
+    REQUIRED_AGENT_ARTIFACTS = set(MACOS_AGENT_ARTIFACTS)
+    # macOS binaries are not part of the MeshService hashagents/signed runtime model.
+    HASHAGENTS_TRACKED_FILENAMES = set()
+    SIGNED_RUNTIME_MUTABLE_FILENAMES = set()
+    # A Windows release staged from the workstation must not be mixed with this one.
+    STAGING_DIR = MACOS_STAGING_DIR
+
+
+def decode_embedded_modules(polyfills_source):
+    """Return {name: {"source", "timestamp", "literals"}} for the agent's embedded modules."""
+    modules = {}
+    single = re.compile(r"addCompressedModule\('([^']+)', Buffer\.from\('([^']*)', 'base64'\)(?:, '([^']*)')?\);")
+    for match in single.finditer(polyfills_source):
+        # The whole statement is one C string literal, so its date is checkable too.
+        modules[match.group(1)] = {
+            "payload": match.group(2), "timestamp": match.group(3), "literals": [match.group(0)],
+            "marker": f"addCompressedModule('{match.group(1)}', Buffer.from('",
+        }
+    chunks = {}
+    for match in re.finditer(r'memcpy_s\(_(\w+) \+ (\d+), \d+, "([^"]*)", \d+\);', polyfills_source):
+        chunks.setdefault(match.group(1), []).append((int(match.group(2)), match.group(3)))
+    for match in re.finditer(r'ILibDuktape_AddCompressedModuleEx\(ctx, "([^"]+)", _(\w+)(?:, "([^"]*)")?\);', polyfills_source):
+        parts = [chunk for _, chunk in sorted(chunks.get(match.group(2), []))]
+        modules[match.group(1)] = {"payload": "".join(parts), "timestamp": match.group(3), "literals": parts, "marker": None}
+    for entry in modules.values():
+        source = zlib.decompress(base64.b64decode(entry.pop("payload"))).decode("utf-8")
+        entry["source"] = source.replace("\r\n", "\n").replace("\r", "\n")
+    return modules
+
+
+def parse_utc_timestamp(value):
+    """Parse an ISO-8601 UTC timestamp such as 2026-10-07T00:00:00.000Z."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def find_core_module_override_conflicts(embedded_modules, server_modules):
+    """Return server core module copies that would replace a different embedded module.
+
+    server_modules: [{"path", "module", "mtime", "source"}] with mtime in UTC ISO form.
+    A copy replaces the embedded module when it is dated later, or the embedded one is
+    undated; identical content is harmless either way.
+    """
+    conflicts = []
+    for entry in server_modules:
+        embedded = embedded_modules.get(entry["module"])
+        if embedded is None:
+            continue
+        if entry["source"].replace("\r\n", "\n").replace("\r", "\n") == embedded["source"]:
+            continue
+        if embedded["timestamp"] and parse_utc_timestamp(entry["mtime"]) < parse_utc_timestamp(embedded["timestamp"]):
+            continue
+        conflicts.append(
+            f"{entry['path']} (dated {entry['mtime']}) differs from the agent's embedded {entry['module']} "
+            f"(dated {embedded['timestamp'] or 'none'}) and would replace it; re-embed the module with "
+            f"tools/embed_modules.py {entry['module']} and rebuild"
+        )
+    return conflicts
+
+
+def validate_macos_agent_binary(binary_path, embedded_modules, sources_path=None):
+    """Return errors unless the file is an arm64 Mach-O executable built from these modules."""
+    try:
+        data = Path(binary_path).read_bytes()
+        binary_mtime = Path(binary_path).stat().st_mtime
+    except OSError as error:
+        return [f"Unable to read {binary_path}: {error}"]
+    if len(data) < 8 or int.from_bytes(data[0:4], "little") != MACHO_MAGIC_64 or int.from_bytes(data[4:8], "little") != MACHO_CPU_TYPE_ARM64:
+        return [f"{binary_path} is not an arm64 Mach-O executable"]
+    if sources_path is not None and binary_mtime < Path(sources_path).stat().st_mtime:
+        return [f"{binary_path} is older than {sources_path}; rebuild it"]
+    # Platform-gated modules are not compiled into a macOS build. A module counts as built
+    # in when its single-line statement prefix, or any of its chunks, is in the binary;
+    # then every literal of the current embed (single-line ones include the date) must be.
+    stale = []
+    for name, entry in sorted(embedded_modules.items()):
+        present = [literal.encode("ascii") in data for literal in entry["literals"]]
+        built_in = entry["marker"].encode("ascii") in data if entry.get("marker") else any(present)
+        if built_in and not all(present):
+            stale.append(name)
+    if stale:
+        return [f"{binary_path} was not built from the current {MACOS_POLYFILLS}; rebuild it (stale: {', '.join(stale[:5])})"]
+    return []
+
+
+def collect_remote_core_modules():
+    """Return the server's core module copies as [{"path", "module", "mtime", "source"}], or None."""
+    script = (
+        "import base64,datetime,json,pathlib\n"
+        f"dirs={json.dumps(list(CORE_MODULE_DIRS))}\n"
+        "out=[]\n"
+        "for d in dirs:\n"
+        "    base=pathlib.Path(d)\n"
+        "    if not base.is_dir():\n"
+        "        continue\n"
+        "    for f in sorted(base.glob('*.js')):\n"
+        "        name=f.name[:-7] if f.name.endswith('.min.js') else f.name[:-3]\n"
+        "        mtime=datetime.datetime.fromtimestamp(f.stat().st_mtime,datetime.timezone.utc).isoformat().replace('+00:00','Z')\n"
+        "        out.append({'path':str(f),'module':name,'mtime':mtime,'source':base64.b64encode(f.read_bytes()).decode()})\n"
+        "print(json.dumps(out))\n"
+    )
+    response = ssh_cmd("python3 -c " + remote_quote(script))
+    if response is None:
+        return None
+    modules = json.loads(response)
+    for entry in modules:
+        entry["source"] = base64.b64decode(entry["source"]).decode("utf-8", errors="replace")
+    return modules
+
+
+def validate_macos_release(local_artifacts):
+    """Return errors that block a macOS release of the local build."""
+    polyfills = LOCAL_REPO / MACOS_POLYFILLS
+    try:
+        embedded = decode_embedded_modules(polyfills.read_text(encoding="utf-8"))
+    except (OSError, ValueError, zlib.error) as error:
+        return [f"Unable to decode embedded modules from {polyfills}: {error}"]
+    errors = []
+    for entry in local_artifacts:
+        if entry["name"] in MACOS_AGENT_ARTIFACTS:
+            errors.extend(validate_macos_agent_binary(entry["local_path"], embedded, polyfills))
+    server_modules = collect_remote_core_modules()
+    if server_modules is None:
+        errors.append("Unable to read the server's core module copies; a stale copy could replace the agent's modules")
+    else:
+        errors.extend(find_core_module_override_conflicts(embedded, server_modules))
+    return errors
 
 
 def read_nonnegative_finite_env_float(name, default):
@@ -2031,6 +2211,7 @@ def extract_pending_update_paths(command_output):
 
 def get_node_pending_updates(nodeid, login_user, login_key_file):
     """Return staged pending update payload paths on a remote Windows node."""
+    require_windows_branding()
     filters = ",".join(f"'{suffix}'" for suffix in WINDOWS_UPDATE_PACKAGE_SUFFIXES)
     command = (
         f"$filters = @({filters}); "
@@ -2115,6 +2296,7 @@ def probe_remote_update_activation_inputs(nodeid, update_path, login_user, login
 
 def activate_remote_pending_update(nodeid, update_path, login_user, login_key_file):
     """Trigger the compatibility lifecycle host on a node with a staged update package."""
+    require_windows_branding()
     paths = derive_update_install_paths(update_path)
     manifest_path = f"{WINDOWS_LIFECYCLE_STATE_DIR}\\deploy-activate.ini"
     command = (
@@ -2522,11 +2704,12 @@ def cmd_stage(args):
     print("  Staging Artifacts")
     print("=" * 60)
 
-    try:
-        prepare_versioned_core_loader()
-    except (RuntimeError, ValueError, KeyError) as error:
-        print(f"[ERROR] {error}")
-        return False
+    if DEPLOY_PLATFORM == "windows":
+        try:
+            prepare_versioned_core_loader()
+        except (RuntimeError, ValueError, KeyError) as error:
+            print(f"[ERROR] {error}")
+            return False
     local_artifacts = get_present_local_artifacts()
     core_artifacts = get_present_local_core_artifacts()
     missing_required = validate_required_deploy_artifacts(local_artifacts)
@@ -2541,13 +2724,22 @@ def cmd_stage(args):
         for name in missing_core:
             print(f"  - {name}")
         return False
-    payload_report = validate_local_service_bundle_artifacts(local_artifacts)
-    if payload_report["ok"] is False:
-        print("[ERROR] Local service bundle contract failed:")
-        for error in payload_report["errors"]:
-            print(f"  - {error}")
-        return False
-    print("  [OK] MeshService64.exe embeds the current service bundle DLL.")
+    if DEPLOY_PLATFORM == "macos":
+        macos_errors = validate_macos_release(local_artifacts)
+        if macos_errors:
+            print("[ERROR] macOS release checks failed:")
+            for error in macos_errors:
+                print(f"  - {error}")
+            return False
+        print("  [OK] arm64 agent embeds the current modules; no server core module overrides them.")
+    else:
+        payload_report = validate_local_service_bundle_artifacts(local_artifacts)
+        if payload_report["ok"] is False:
+            print("[ERROR] Local service bundle contract failed:")
+            for error in payload_report["errors"]:
+                print(f"  - {error}")
+            return False
+        print("  [OK] MeshService64.exe embeds the current service bundle DLL.")
 
     # Create staging dir
     if ssh_cmd(f"mkdir -p {STAGING_DIR}") is None:
@@ -2662,7 +2854,12 @@ def cmd_deploy(args):
     core_artifacts = get_present_local_core_artifacts()
     missing_required = validate_required_deploy_artifacts(local_artifacts)
     missing_core = validate_required_core_artifacts(core_artifacts)
-    payload_report = validate_local_service_bundle_artifacts(local_artifacts)
+    if DEPLOY_PLATFORM == "macos":
+        # Re-check at publish time: the server's core modules can change after staging.
+        macos_errors = validate_macos_release(local_artifacts) if local_artifacts else []
+        payload_report = {"ok": not macos_errors, "errors": macos_errors}
+    else:
+        payload_report = validate_local_service_bundle_artifacts(local_artifacts)
     agent_artifacts = get_agent_publish_artifacts(local_artifacts)
     public_artifacts = get_public_download_artifacts(local_artifacts)
     if not local_artifacts:
@@ -2679,7 +2876,7 @@ def cmd_deploy(args):
             print(f"  - {name}")
         return False
     if payload_report["ok"] is False:
-        print("[ERROR] Local service bundle contract failed:")
+        print("[ERROR] Local service bundle contract failed:" if DEPLOY_PLATFORM == "windows" else "[ERROR] macOS release checks failed:")
         for error in payload_report["errors"]:
             print(f"  - {error}")
         return False
@@ -2730,7 +2927,8 @@ def cmd_deploy(args):
 
     # Step 1: Backup current agents
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    backup_path = f"{BACKUP_DIR}/{ts}"
+    # Platform-tagged so a Windows rollback never selects a macOS-only backup by accident.
+    backup_path = f"{BACKUP_DIR}/{ts}" if DEPLOY_PLATFORM == "windows" else f"{BACKUP_DIR}/{ts}-{DEPLOY_PLATFORM}"
     print(f"\n  [1/6] Backing up current agents → {backup_path}")
     if backup_current_agents(backup_path) is False:
         return False
@@ -3343,6 +3541,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    parser.add_argument(
+        "--platform", choices=("windows", "macos"), default="windows",
+        help="Release profile: windows (full release, default) or macos (macOS agent and macOS server support only)",
+    )
     sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("status", help="Server status and deployed agents")
@@ -3388,6 +3590,10 @@ def main():
     if not args.cmd:
         parser.print_help()
         return
+    try:
+        apply_platform_profile(args.platform)
+    except RuntimeError as error:
+        sys.exit(f"ERROR: {error}")
 
     commands = {
         "status": cmd_status,

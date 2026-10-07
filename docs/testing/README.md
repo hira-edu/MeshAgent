@@ -105,6 +105,7 @@ python test/process_pipe_write_runtime.py
 python test/chain_write_runtime.py
 python test/chain_wait_dispatch_runtime.py
 python3 test/embed_modules_runtime.py
+python3 test/deploy_macos_profile_runtime.py --agent ./meshagent_osx-arm-64
 python test/process_pipe_windows_runtime.py
 ```
 

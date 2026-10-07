@@ -132,6 +132,31 @@ expected binary and service health. `deploy.py deploy` checks this setting and
 stops before publishing if it cannot confirm it; `--allow-fleet-update` is the
 explicit override for a planned fleet rollout.
 
+## macOS release
+
+A Mac releases the macOS agent with the `macos` profile; the Windows workstation
+keeps releasing the Windows payloads and the shared MeshCentral core and modules.
+The profile stages only `meshagent_osx-arm-64` (published to
+`meshcentral-data/agents`) and the macOS installer builder `macosinstaller.js`. It
+needs no Windows artifacts or branding, uses its own staging directory, and tags
+its backups with `-macos`. Pass the profile before the command:
+
+```sh
+export MESHCENTRAL_SERVER="<vps-host>"
+make macos ARCHID=29
+python3 deploy.py --platform macos stage
+python3 deploy.py --platform macos deploy --allow-fleet-update
+python3 deploy.py --platform macos health
+```
+
+Build from a commit. Staging and deployment refuse a binary that is not an arm64
+Mach-O executable, is older than `microscript/ILibDuktape_Polyfills.c`, or lacks
+any embedded module of the current tree. They also read the server's
+`modules_meshcore` copies: a copy that differs from the agent's embedded module
+and is dated later replaces it on agents, so the release stops and names the
+module. Re-embed it with `python3 tools/embed_modules.py <name>` and rebuild. The
+fleet update guard and `--allow-fleet-update` apply as for Windows releases.
+
 ## Endpoint install, update, and uninstall
 
 The x64 service EXE supports native lifecycle operations from an elevated terminal.
