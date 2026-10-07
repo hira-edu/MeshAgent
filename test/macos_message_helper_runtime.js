@@ -62,7 +62,12 @@ const wait=ms=>new Promise(r=>setTimeout(r,ms));
 async function outcome(p){try{return {value:await p};}catch(e){return {error:String(e)};}}
 // After the idle period the helper is unloaded and every file it owned is gone.
 async function expectIdleCleanup(m){
- await wait(450);
+ // The capped idle timer closes the session; its files go one event-loop turn later. Poll a
+ // bounded number of turns rather than wall-clock time: when the host throttles or freezes
+ // the process, overdue timers still fire in order, so the idle close lands before the next
+ // poll, whereas a fixed delay or deadline can expire inside the freeze.
+ const owned=()=>fs.readdirSync(agents).concat(fs.readdirSync(root)).filter(n=>n.startsWith('mesh-ui-'));
+ for(let turn=0;turn<120&&(m._session!==null||owned().length);++turn)await wait(25);
  assert.equal(m._session,null,'helper still active after idle');
  assert.deepEqual(fs.readdirSync(agents).filter(n=>n.startsWith('mesh-ui-')),[],'helper plist retained');
  assert.deepEqual(fs.readdirSync(root).filter(n=>n.startsWith('mesh-ui-')),[],'helper directory retained');
