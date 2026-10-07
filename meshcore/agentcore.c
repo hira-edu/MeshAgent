@@ -3495,7 +3495,7 @@ static int ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(RemoteDesktop_
 		if ((snapshot.childPresent == 0 || snapshot.transportActive == 0) && snapshot.restartPending == 0) { return 0; }
 		if (snapshot.childPresent == 0 || snapshot.transportActive == 0) { return 1; }
 		// Backpressure, or a pause the viewers asked for: a healthy helper sends no pictures either way.
-		if (ptrs->stream->readableStream->paused != 0 || snapshot.viewerPaused != 0) { return 1; }
+		if (ptrs->stream->readableStream->paused != 0 || snapshot.viewerPaused != 0 || snapshot.bridgePaused != 0) { return 1; }
 		now = GetTickCount64();
 		if (snapshot.sessionStartTickMs != 0 &&
 			snapshot.lastScreenTickMs == 0 &&
@@ -3503,9 +3503,12 @@ static int ILibDuktape_MeshAgent_RemoteDesktop_CachedStreamIsLive(RemoteDesktop_
 		{
 			return 0;
 		}
-		if ((snapshot.pendingProbeMask & KVM_PENDING_PROBE_REFRESH) != 0 &&
-			(snapshot.pendingProbeSinceTickMs == 0 ||
-				(now - snapshot.pendingProbeSinceTickMs) > REMOTE_DESKTOP_REFRESH_PROBE_TIMEOUT_MS))
+		// A paused viewer (backpressure) cannot read the refresh reply, so its age says nothing
+		// while the bridge is paused; the relay's own watchdog makes the same exception.
+		if (snapshot.bridgePaused == 0 &&
+			(snapshot.pendingProbeMask & KVM_PENDING_PROBE_REFRESH) != 0 &&
+			(snapshot.refreshProbeSinceTickMs == 0 ||
+				(now - snapshot.refreshProbeSinceTickMs) > REMOTE_DESKTOP_REFRESH_PROBE_TIMEOUT_MS))
 		{
 			return 0;
 		}
@@ -3533,6 +3536,7 @@ static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(duk_context 
 		ptrs->kvmPipe = NULL;
 	}
 #endif
+	ILibDuktape_DuplexStream *discardedStream = ptrs->stream;
 #ifdef WIN32
 	kvm_cleanup(ptrs);
 #elif defined(__APPLE__)
@@ -3542,6 +3546,9 @@ static void ILibDuktape_MeshAgent_RemoteDesktop_DiscardCachedStream(duk_context 
 	kvm_cleanup();
 #endif
 	memset(ptrs, 0, sizeof(RemoteDesktop_Ptrs));
+	// Viewers still piped to the discarded stream would otherwise keep a dead stream that
+	// never ends: no output, input dropped. Ending it lets them reconnect to the new one.
+	if (discardedStream != NULL) { ILibDuktape_DuplexStream_WriteEnd(discardedStream); }
 	duk_del_prop_string(ctx, -2, REMOTE_DESKTOP_STREAM);
 	duk_pop(ctx);											// [MeshAgent]
 }
@@ -4252,7 +4259,7 @@ duk_ret_t ILibDuktape_KVM_Refresh(duk_context *ctx)
 		duk_get_prop_string(ctx, -1, REMOTE_DESKTOP_STREAM);						// [MeshAgent][RD]
 		ptrs = (RemoteDesktop_Ptrs*)Duktape_GetBufferProperty(ctx, -1, REMOTE_DESKTOP_ptrs);
 	}
-	if (ptrs != NULL && ptrs->stream != NULL) { ILibDuktape_MeshAgent_RemoteDesktop_PipeHook(NULL, NULL, ptrs->stream); }
+	if (ptrs != NULL && ILibMemory_CanaryOK(ptrs) && ptrs->stream != NULL) { ILibDuktape_MeshAgent_RemoteDesktop_PipeHook(NULL, NULL, ptrs->stream); }
 	return(0);
 }
 #endif

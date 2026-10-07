@@ -90,6 +90,9 @@ void ILibDuktape_readableStream_ResumeIfUncongested(ILibDuktape_readableStream *
 int ILibDuktape_readableStream_EndCongestedPipes(ILibDuktape_readableStream *stream, long long congestedForMs);
 int ILibDuktape_readableStream_WriteEnd(ILibDuktape_readableStream *stream);
 #define ILibDuktape_readableStream_WriteData(stream, buffer, bufferLen) ILibDuktape_readableStream_WriteDataEx(stream, 0, buffer, bufferLen)
+// Re-delivers data buffered while paused; returns 0 when everything was flushed (the stream
+// may then be resumed) and 1 when a destination is still congested (the stream stays paused).
+int ILibDuktape_readableStream_resume_flush(ILibDuktape_readableStream *rs);
 void ILibDuktape_readableStream_Closed(ILibDuktape_readableStream *stream);
 
 #endif
