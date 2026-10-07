@@ -451,3 +451,14 @@ query
 
 # Runtime evidence belongs in artifacts/validation, never tracked history.
 /verification/
+
+# Local macOS build outputs and self-install runtime files at the repository root.
+# Release binaries are published by deploy.py; sources live under modules/.
+/meshagent
+/meshagent_osx-*
+/DEBUG_meshagent_*
+/.meshagent.pid
+/.meshagent_cron.sh
+/agent-installer.js
+/service-host.js
+/service-manager.js
