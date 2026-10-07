@@ -218,6 +218,11 @@ CORE_ARTIFACTS = {
         "remote_relative_path": "meshagent.js",
         "publish_targets": ("module-root",),
     },
+    "agentcertificatehistory.js": {
+        "local_path": "tools/configure_agent_certificate_history.js",
+        "remote_relative_path": "agentcertificatehistory.js",
+        "publish_targets": ("module-root",),
+    },
     "meshctrl.js": {
         "local_path": "../MeshCentral/meshctrl.js",
         "remote_relative_path": "meshctrl.js",

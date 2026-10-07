@@ -208,6 +208,13 @@ playwright.config.js` validates Files button requests and result/error display.
 
 ## Generated reports
 
+`node test/meshcentral_historical_certificate_runtime.js` executes the tracked
+server authentication request and signature verifier with real RSA signatures.
+It checks current and explicitly pinned historical web certificates, rejection
+of unknown/malformed/zero pins and invalid proofs, domain isolation, and replay
+guards. `meshcentral_certificate_admission_runtime.js` verifies a live signed
+server proof without enrolling a device or sending remote commands.
+
 `python test/unified_failure_telemetry_native.py --cc <clang-path>` validates
 the production Windows log writer with concurrent disposable processes,
 in-place retention, UTF-16 conversion, write/lock failure, error preservation,
