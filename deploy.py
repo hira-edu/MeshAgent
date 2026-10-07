@@ -396,14 +396,9 @@ MACOS_AGENT_ARTIFACTS = {
 MACOS_CORE_ARTIFACT_NAMES = ("macosinstaller.js",)
 MACOS_STAGING_DIR = f"{MESHCENTRAL_BASE}/staging-macos"
 MACOS_POLYFILLS = "microscript/ILibDuktape_Polyfills.c"
-# MeshCentral sends these module copies inside the agent core. A copy dated later
-# than the agent's embedded module replaces it, so a macOS release checks them.
-CORE_MODULE_DIRS = (
-    f"{DATA_ROOT}/modules_meshcore",
-    f"{DATA_ROOT}/modules_meshcore_min",
-    f"{MODULE_AGENTS}/modules_meshcore",
-    f"{MODULE_AGENTS}/modules_meshcore_min",
-)
+# MeshCentral sends module copies inside the agent core, versioned by file mtime; one
+# dated later than the agent's embedded module replaces it, so a macOS release checks
+# exactly the copies the server's loader sends to macOS cores (see select_macos_core_modules).
 MACHO_MAGIC_64 = 0xFEEDFACF
 MACHO_CPU_TYPE_ARM64 = 0x0100000C
 
@@ -504,29 +499,55 @@ def validate_macos_agent_binary(binary_path, embedded_modules, sources_path=None
     return []
 
 
+def select_macos_core_modules(directory, minify, files):
+    """Return the module copies MeshCentral's core loader sends to macOS agents.
+
+    Mirrors the loader: one directory; per module the .min.js file when minifying and
+    present (else .js); macOS agents get the linux-noamt core, which excludes win-*,
+    amt-* and smbios. files: [{"name", "mtime", "source"}] from that directory.
+    """
+    names = {entry["name"] for entry in files}
+    selected = []
+    for entry in files:
+        if not entry["name"].endswith(".js"):
+            continue
+        module = entry["name"][:-3]
+        if module.endswith(".min"):
+            module = module[:-4]
+        preferred = module + (".min.js" if minify else ".js")
+        if entry["name"] != preferred and preferred in names:
+            continue
+        if module.startswith("win-") or module.startswith("amt-") or module == "smbios":
+            continue
+        selected.append({"path": f"{directory}/{entry['name']}", "module": module, "mtime": entry["mtime"], "source": entry["source"]})
+    return selected
+
+
 def collect_remote_core_modules():
-    """Return the server's core module copies as [{"path", "module", "mtime", "source"}], or None."""
+    """Return the module copies the server sends to macOS cores, or None."""
+    # Resolve the loader's directory exactly as meshcentral.js does: the data path when it
+    # holds meshcore.js, else the package agents folder; the _min folder unless
+    # minifycore is false and the folder exists.
     script = (
         "import base64,datetime,json,pathlib\n"
-        f"dirs={json.dumps(list(CORE_MODULE_DIRS))}\n"
-        "out=[]\n"
-        "for d in dirs:\n"
-        "    base=pathlib.Path(d)\n"
-        "    if not base.is_dir():\n"
-        "        continue\n"
-        "    for f in sorted(base.glob('*.js')):\n"
-        "        name=f.name[:-7] if f.name.endswith('.min.js') else f.name[:-3]\n"
-        "        mtime=datetime.datetime.fromtimestamp(f.stat().st_mtime,datetime.timezone.utc).isoformat().replace('+00:00','Z')\n"
-        "        out.append({'path':str(f),'module':name,'mtime':mtime,'source':base64.b64encode(f.read_bytes()).decode()})\n"
-        "print(json.dumps(out))\n"
+        f"data=pathlib.Path({DATA_ROOT!r}); package=pathlib.Path({MODULE_AGENTS!r})\n"
+        f"config=json.loads(pathlib.Path({CONFIG_FILE!r}).read_text(encoding='utf-8'))\n"
+        "minify=(config.get('settings') or {}).get('minifycore') is not False\n"
+        "core=data if (data/'meshcore.js').exists() else package\n"
+        "d=core/'modules_meshcore_min' if minify and (core/'modules_meshcore_min').is_dir() else core/'modules_meshcore'\n"
+        "files=[]\n"
+        "for f in sorted(d.glob('*.js')) if d.is_dir() else []:\n"
+        "    mtime=datetime.datetime.fromtimestamp(f.stat().st_mtime,datetime.timezone.utc).isoformat().replace('+00:00','Z')\n"
+        "    files.append({'name':f.name,'mtime':mtime,'source':base64.b64encode(f.read_bytes()).decode()})\n"
+        "print(json.dumps({'directory':str(d),'minify':minify,'files':files}))\n"
     )
     response = ssh_cmd("python3 -c " + remote_quote(script))
     if response is None:
         return None
-    modules = json.loads(response)
-    for entry in modules:
+    listing = json.loads(response)
+    for entry in listing["files"]:
         entry["source"] = base64.b64decode(entry["source"]).decode("utf-8", errors="replace")
-    return modules
+    return select_macos_core_modules(listing["directory"], listing["minify"], listing["files"])
 
 
 def validate_macos_release(local_artifacts):

@@ -67,6 +67,14 @@ assert conflicts('dated', 'new\r\n', '2026-10-08T00:00:00Z') == [], 'line ending
 assert len(conflicts('undated', 'old\n', '2020-01-01T00:00:00Z')) == 1
 assert conflicts('absent', 'old\n', '2030-01-01T00:00:00Z') == []
 
+# Loader selection: one directory, .min.js preferred when minifying, no Windows/AMT modules.
+listing = [{'name': n, 'mtime': 't', 'source': n} for n in
+           ('clipboard.js', 'clipboard.min.js', 'user-sessions.js', 'win-console.min.js', 'amt-lme.js', 'smbios.min.js', 'linux-dbus.min.js', 'notes.json')]
+chosen = {e['module']: e['path'] for e in deployment.select_macos_core_modules('/d', True, listing)}
+assert chosen == {'clipboard': '/d/clipboard.min.js', 'user-sessions': '/d/user-sessions.js', 'linux-dbus': '/d/linux-dbus.min.js'}, chosen
+chosen = {e['module']: e['path'] for e in deployment.select_macos_core_modules('/d', False, listing)}
+assert chosen['clipboard'] == '/d/clipboard.js' and 'win-console' not in chosen, chosen
+
 # Binary checks: arm64 Mach-O; every literal of each built-in module present, where a
 # single-line literal includes its date; gated modules absent from the build are ignored.
 literals = {
