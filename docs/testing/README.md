@@ -104,6 +104,7 @@ python test/process_pipe_lifetime_runtime.py
 python test/process_pipe_write_runtime.py
 python test/chain_write_runtime.py
 python test/chain_wait_dispatch_runtime.py
+python3 test/embed_modules_runtime.py
 python test/process_pipe_windows_runtime.py
 ```
 
