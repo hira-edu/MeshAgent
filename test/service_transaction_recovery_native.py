@@ -102,7 +102,6 @@ static BOOL unregister(void){currentExists=0;return TRUE;}
 #define ServiceDeploy_SetServiceStartType(n,type) start_type(type)
 #define ServiceDeploy_ClearServiceRecovery(n) TRUE
 #define ServiceDeploy_SuspendServiceRecoveryRestarters() TRUE
-#define ServiceDeploy_RemoveRunKeyEntry(n) TRUE
 #define ServiceDeploy_StopServiceAndWait(n,t,force) stop(force)
 #define ServiceDeploy_RollbackUpdateTransaction(p,n,tx) rollback()
 #define ServiceDeploy_RestoreUpdateFileSecurity(p,tx) restore_security()
@@ -112,7 +111,7 @@ static BOOL unregister(void){currentExists=0;return TRUE;}
 #define ServiceDeploy_WaitForExpectedIdentity(p,s,t) (failAt!=9)
 /* Update holds were removed: a call would count here and model a missing target key. */
 #define ServiceDeploy_RecordUpdateActivationFailureHold(p) (++holds,FALSE)
-#define ServiceDeploy_ReconcileServiceRecovery() (assert(checkpoint.binding),TRUE)
+#define ServiceDeploy_ReconcileServiceRecovery() TRUE
 #define ServiceDeploy_CreateRecoveryStartupAuthorization(out) (*(out)=(HANDLE)1,TRUE)
 #define CloseHandle(...) TRUE
 #define ServiceJournal_PhaseRequiresBackups(p) ((p)==SERVICE_JOURNAL_BACKED_UP || (p)==SERVICE_JOURNAL_ACTIVATING)

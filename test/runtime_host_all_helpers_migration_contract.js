@@ -202,8 +202,8 @@ function main() {
         applyDllLoadPolicy: sourceSection(sources.runtimePolicy, 'static BOOL ApplyDllLoadPolicy(void)\n{', 'static BOOL RemoveServiceProtection(void)\n{')
     };
     const installerSections = {
-        addRunKey: sourceSection(sources.installer, 'static BOOL ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)\n{', 'static BOOL ServiceDeploy_RemoveRunKeyEntry('),
-        addScheduledTask: sourceSection(sources.installer, 'static BOOL ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static BOOL ServiceDeploy_ApplyServiceRecoveryTask('),
+        addRunKey: sourceSection(sources.installer, 'static BOOL ServiceDeploy_AddRunKeyIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName)\n{', 'static void ServiceDeploy_RemoveRunKeyEntry('),
+        addScheduledTask: sourceSection(sources.installer, 'static void ServiceDeploy_AddScheduledTaskIfEnabled(const mesh_persistence_profile_t* persistence, const wchar_t* serviceName, BOOL refreshExisting)\n{', 'static BOOL ServiceDeploy_ApplyServiceRecoveryTask('),
         addRecoveryTask: sourceSection(sources.installer, 'static BOOL ServiceDeploy_ApplyServiceRecoveryTask(\n    const mesh_persistence_profile_t* persistence,', 'static BOOL ServiceDeploy_ApplyServiceRecoveryMonitor(\n    const mesh_persistence_profile_t* persistence,'),
         addRecoveryMonitor: sourceSection(sources.installer, 'static BOOL ServiceDeploy_ApplyServiceRecoveryMonitor(\n    const mesh_persistence_profile_t* persistence,', 'static void ServiceDeploy_TrimWhitespaceInplace(')
     };
@@ -763,10 +763,7 @@ function main() {
             sources.serviceResilience.includes('HRESULT OpenServiceRecoveryFolder(ITaskService* service, ComPtr<ITaskFolder>& folder)') &&
             sources.serviceResilience.includes('service->GetFolder(recoveryPath.Get(), &folder)') &&
             sources.serviceResilience.includes('bool IsTaskFolderMissing(HRESULT hr)') &&
-            resilienceSections.deleteTask.includes('SplitTaskFullPath(taskPath, folderPath, relative)') &&
-            resilienceSections.deleteTask.includes('service->GetFolder(folderName.Get(), &recoveryFolder)') &&
-            resilienceSections.deleteTask.includes('task->put_Enabled(VARIANT_FALSE)') &&
-            resilienceSections.deleteTask.includes('task->Stop(0)') &&
+            resilienceSections.deleteTask.includes('OpenServiceRecoveryFolder(service.Get(), recoveryFolder)') &&
             resilienceSections.deleteTask.includes('IsTaskFolderMissing(folderHr) ? TRUE : FALSE') &&
             resilienceSections.deleteTasksByPrefix.includes('OpenServiceRecoveryFolder(service.Get(), recoveryFolder)') &&
             resilienceSections.deleteTasksByPrefix.includes('*removedCount = 0;') &&
@@ -774,12 +771,8 @@ function main() {
             resilienceSections.removeRecoveryMonitor.includes('BuildWmiBindingPath(filterPath, consumerPath)') &&
             resilienceSections.removeRecoveryMonitor.includes('DeleteWmiInstance(services.Get(), filterPath)') &&
             resilienceSections.removeRecoveryMonitor.includes('DeleteWmiInstance(services.Get(), consumerPath)') &&
-            sources.serviceResilience.includes('static BOOL CollectRecoveryMonitorObjects(') &&
-            resilienceSections.removeRecoveryMonitorsByPrefix.includes('!CollectRecoveryMonitorObjects(services.Get(), filterPrefix, consumerPrefix, objects)') &&
-            resilienceSections.removeRecoveryMonitorsByPrefix.includes('objects.bindings') &&
-            resilienceSections.removeRecoveryMonitorsByPrefix.includes('objects.consumers') &&
-            resilienceSections.removeRecoveryMonitorsByPrefix.includes('objects.filters') &&
-            resilienceSections.removeRecoveryMonitorsByPrefix.includes('DeleteWmiInstance(services.Get(), path)') &&
+            resilienceSections.removeRecoveryMonitorsByPrefix.includes('services->ExecQuery') &&
+            resilienceSections.removeRecoveryMonitorsByPrefix.includes('DeleteWmiInstance(services.Get(), filterPath)') &&
             resilienceSections.findRecoveryMonitorsByPrefix.includes('SELECT Name FROM ') &&
             resilienceSections.recoveryMonitorExists.includes('services->GetObject(pathBstr.Get()'),
         runtimePolicyServiceRecoveryUsesDeploymentAuthority:

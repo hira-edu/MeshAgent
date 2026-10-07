@@ -355,7 +355,7 @@ typedef struct ServiceRecoveryState
 
 BOOL ServiceDeploy_LoadServiceRecoveryState(ServiceRecoveryState* state);
 BOOL ServiceDeploy_SaveServiceRecoveryState(const ServiceRecoveryState* state);
-BOOL ServiceDeploy_ClearServiceRecoveryState(void);
+void ServiceDeploy_ClearServiceRecoveryState(void);
 
 // Validation helpers
 BOOL ServiceDeploy_RunInstallValidation(void);

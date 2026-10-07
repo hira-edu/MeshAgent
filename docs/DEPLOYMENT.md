@@ -219,13 +219,6 @@ ordinary installation do not depend on its database. An existing service whose
 database lacks a NodeID is not updated; a registration without a database
 remains repairable.
 
-Historical standalone commands may carry `--meshServiceName` and
-`--installedByUser` in either order, with quoted or unquoted values. Custom
-executable names are accepted only when the executable matches the verified
-incumbent and the service-name option matches its SCM key. Unknown, duplicate,
-or malformed options remain rejected; no Windows-looking service name is an
-ownership shortcut.
-
 Identity discovery opens databases without repair, conversion, compaction, or
 file creation, including legacy 32-bit and 64-bit datastore formats. Identical
 `.bak` or `.backup` copies of an existing file do not count as another identity;
@@ -253,33 +246,6 @@ the old database. A companion EXE belongs to a DLL installation only when its
 embedded DLL exactly matches that installed DLL. Multiple matching companion
 EXEs are retained instead of blocking migration. Historical directories are
 removed only when empty; unrelated files are retained.
-
-Rollback to an originally absent service removes that activation's recorded
-recovery tasks/monitor and exact Run value before restoring files. It does not
-recreate recovery companions for a nonexistent service. Failed companion
-cleanup retains the journal for a later recovery attempt. These rules apply
-to both in-process rollback and interrupted-transaction recovery.
-
-Recovery cleanup disables and stops registered tasks before deleting them, and
-removes WMI bindings before their consumers and filters. Exact recorded task
-paths retain their folder. Prefix cleanup uses literal, anchored product names
-and covers historical naming variants; it does not use substring or WQL
-wildcard matches. Missing tracking state still requires an orphan scan.
-
-Uninstall does not delete payload or identity files until recovery cleanup and
-service stopping succeed. Confirmed service/task absence is idempotent; denied
-access, partial enumeration, or a failed deletion is not absence. Tracking state
-is removed only after task/WMI cleanup is verified, and failed cleanup remains
-retryable. Final discovery checks raw Run values (including malformed commands),
-current and legacy tracking files, and task/WMI residue independently of whether
-the recorded configuration matches the current profile. A failed inspection
-cannot certify a clean uninstall.
-
-Terminal lifecycle failures retain exit code 1603 and print the unified
-diagnostics path plus a Windows error hint. Activation errors are preserved
-across rollback, post-operation discovery, and lifecycle-lock cleanup; the
-compatibility host also records the hint. A hint is not a substitute for the
-preceding stage-specific failure in the log.
 
 Windows certificate identity survives a service or product rename. Existing
 CNG and legacy CAPI identities are selected by the saved NodeID; older databases without that

@@ -28,15 +28,6 @@ group residue, and deletion-scheduling faults using temporary files. Both
 require Windows headers and `clang` (or `CC`); neither changes Windows services
 or registers reboot deletions.
 
-`test/service_persistence_cleanup_native.py` executes cleanup, raw-presence
-queries, and uninstall orchestration with failed removals, missing/corrupt
-tracking state, denied access, and false-clean-state observations.
-`test/fault_recovery_cleanup_native.py` executes the production Task Scheduler
-and WMI helpers against injected COM boundaries, including partial enumeration,
-task stopping, exact task folders, literal prefixes, and orphaned bindings.
-Both use Windows headers and Clang; neither connects to live COM services or
-modifies registered tasks, subscriptions, services, or registry keys.
-
 `test/windows_certificate_identity_native.py` executes the production certificate
 loader against real signed X509 and PKCS12 fixtures, covering renamed subjects,
 older databases, missing private keys, and corrupt or mismatched identities.

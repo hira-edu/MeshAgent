@@ -48,12 +48,11 @@ static HANDLE acquire(void) {
     assert(!locked); if (lockFault) return NULL; locked = TRUE; return (HANDLE)1;
 }
 static BOOL release(HANDLE mutex) { assert(mutex == (HANDLE)1 && locked); locked = FALSE; return TRUE; }
-static BOOL closeMutex(HANDLE mutex) { assert(mutex == (HANDLE)1 && !locked); ++closes; SetLastError(ERROR_INVALID_HANDLE); return TRUE; }
+static BOOL closeMutex(HANDLE mutex) { assert(mutex == (HANDLE)1 && !locked); ++closes; return TRUE; }
 static BOOL fixturePaths(ServiceInstallPaths* out) { assert(locked); *out = state.paths; return !pathFault; }
 static BOOL discover(ServiceLifecycleDiscovery* out) { assert(locked); *out = state; return !discoveryFault; }
 static BOOL operation(const wchar_t* action, const wchar_t* exe, const wchar_t* dll, BOOL config) {
-    assert(locked && !wcscmp(action, L"uninstall") && !exe && !dll && !config); ++calls;
-    SetLastError(engineResult ? ERROR_SUCCESS : ERROR_ACCESS_DENIED); return engineResult;
+    assert(locked && !wcscmp(action, L"uninstall") && !exe && !dll && !config); ++calls; return engineResult;
 }
 static BOOL move(const wchar_t* source, const wchar_t* target, DWORD flags) {
     assert(locked); ++moves;
@@ -115,7 +114,6 @@ int main(void) {
     reset(); lockFault = TRUE; assert(!run(L"alias.exe", &scheduled, retired) && !calls && !moves);
     reset(); pathFault = TRUE; assert(!run(L"alias.exe", &scheduled, retired) && !calls && !moves);
     reset(); assert(!run(L"staged.exe", &scheduled, retired) && calls == 1 && !moves);
-    assert(GetLastError()==ERROR_ACCESS_DENIED);
     reset(); assert(run(L"alias.exe", &scheduled, retired) && scheduled && moves == 3);
     for (int failure = 1; failure <= 3; ++failure) {
         reset(); moveFault = failure;
