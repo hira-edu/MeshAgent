@@ -61,6 +61,7 @@ typedef void* HANDLE;
 #define FILE_ATTRIBUTE_NORMAL 1
 #define ERROR_SHARING_VIOLATION 32
 #define ERROR_LOCK_VIOLATION 33
+#define ERROR_SUCCESS 0
 #ifndef _countof
 #define _countof(a) (sizeof(a) / sizeof((a)[0]))
 #endif
@@ -91,12 +92,14 @@ typedef struct {
 static int failAt, running, liveVersion, bindingVersion, startType, starts, mixedStarts, stops, prepared, rolledBack, convergence, discarded, incumbentRepairs, restoredBindings, deletedArtifacts;
 static int installed = 1, legacy = 0, packageHasConfig = 1, originalExists = 1;
 static DWORD retainedPhase;
+static DWORD errorValue;
 static mesh_persistence_profile_t profile;
 static binding_config savedConfig;
 static ServiceBindingSnapshot savedBinding;
 static ServiceInstallPaths g_IncumbentPaths;
 static BOOL g_HaveIncumbentPaths;
 static int migratedCopies, copyFailure, identityCaptureFailure, failureHolds, noDb, dbWithoutNode;
+static int restarters, runEntry, cleanupDenied;
 static long g_MeshDiagnosticLogDisabled;
 #define InterlockedExchange(p,v) (*(p)=(v))
 static void log_event(const wchar_t* fmt, ...) { (void)fmt; }
@@ -130,7 +133,8 @@ static BOOL backup(ServiceUpdateTransaction* tx) {
 static BOOL commit(void) { assert(!running); liveVersion = failAt == 2 || failAt == 3 || failAt == 10 || failAt == 17 ? 2 : 3; return liveVersion == 3; }
 static BOOL registration(void) { bindingVersion = 3; installed = 1; return failAt != 11; }
 static BOOL rollback(void) {
-    assert(!running); ++rolledBack; if (failAt == 3) return FALSE;
+    errorValue = 5; /* Cleanup can overwrite the activation failure. */
+    assert(!running && !restarters); ++rolledBack; if (failAt == 3) return FALSE;
     liveVersion = (originalExists || g_HaveIncumbentPaths) ? 1 : 0;
     if (originalExists || g_HaveIncumbentPaths) return restore_binding();
     bindingVersion = 0; installed = 0; return TRUE;
@@ -140,7 +144,8 @@ static BOOL start_service(BOOL allowRepair) {
     ++starts; if (liveVersion == 2 || liveVersion != bindingVersion) ++mixedStarts;
     assert(startType != SERVICE_DISABLED);
     if (liveVersion == 1 && allowRepair) ++incumbentRepairs;
-    if (failAt == 7 && liveVersion == 3) return FALSE;
+    if (failAt == 7 && liveVersion == 3) { errorValue = 193; return FALSE; }
+    if (liveVersion == 3) restarters = runEntry = 1;
     running = 1; return TRUE;
 }
 static BOOL set_start(DWORD value) { startType = (int)value; return TRUE; }
@@ -198,13 +203,17 @@ static BOOL migration_copy(void) {
 #define ServiceDeploy_WriteTransactionPhase(tx,n,p) publish(tx,p)
 #define ServiceDeploy_ResolveUpdateTransaction(tx,n) resolve(tx)
 #define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx) reconcile(tx)
+#define ServiceDeploy_ReconcileServiceRecovery(...) (assert(installed),TRUE)
+#define ServiceDeploy_SuspendServiceRecoveryRestarters(...) (restarters=0,TRUE)
+#define ServiceDeploy_RemoveRunKeyEntry(...) (cleanupDenied?FALSE:(runEntry=0,TRUE))
 #define ServiceDeploy_DeleteUpdateTransactionArtifacts(...) (++deletedArtifacts)
 #define ServiceDeploy_BuildSiblingPathWithExtension(e,x,o,c) sibling(x,o)
 #define ServiceDeploy_PathExists(p) (wcscmp(p,L"agent.mshx") != 0)
 #define ServiceDeploy_TerminateProcessesByLoadedModulePath(...) ((void)0)
 #define ServiceDeploy_TerminateProcessesByPath(...) ((void)0)
 #define GetFileAttributesW(...) INVALID_FILE_ATTRIBUTES
-#define GetLastError() 1
+#define GetLastError() errorValue
+#define SetLastError(e) (errorValue=(e))
 #define GetTickCount() 1
 #define CreateFileW(...) INVALID_HANDLE_VALUE
 '''
@@ -221,10 +230,13 @@ static void reset(int failure, int exists, int wasRunning, int originalStart, in
     retainedPhase = 0; failAt = failure; originalExists = installed = exists; legacy = ownProcess;
     running = wasRunning; liveVersion = bindingVersion = exists ? 1 : 0; startType = originalStart;
     starts = mixedStarts = stops = prepared = rolledBack = convergence = discarded = incumbentRepairs = restoredBindings = deletedArtifacts = 0;
+    restarters = runEntry = cleanupDenied = 0;
+    errorValue = 0;
 }
 static void run_case(int failure, int exists, int wasRunning, int originalStart, int ownProcess) {
     reset(failure, exists, wasRunning, originalStart, ownProcess);
     BOOL result = ServiceDeploy_ApplyUpdateFlow(L"new.exe",L"new.dll",FALSE);
+    if (failure == 7) assert(errorValue == 193);
     if (result != (failure == 0)) fprintf(stderr,"unexpected failure=%d result=%d exists=%d active=%d\n",failure,result,exists,wasRunning);
     assert(result == (failure == 0));
     assert(mixedStarts == 0 && incumbentRepairs == 0 && failureHolds == 0);
@@ -236,6 +248,7 @@ static void run_case(int failure, int exists, int wasRunning, int originalStart,
     if (failure == 3) { assert(!running && liveVersion == 2 && !discarded && !deletedArtifacts); return; }
     if (failure == 10) { assert(!running && !discarded && !deletedArtifacts); return; }
     assert(running == wasRunning && liveVersion == (exists ? 1 : 0) && installed == exists);
+    if (!exists) assert(!restarters && !runEntry);
     if (failure == 9) assert(stops == 1 && restoredBindings == 1 && discarded == 1);
     if (failure == 4 || failure == 5 || failure == 6 || failure == 12) assert(stops == 0);
     if (failure == 6) assert(deletedArtifacts == 1);
@@ -297,6 +310,9 @@ int main(void) {
     packageHasConfig = 0; run_case(0,1,1,3,0); ++count; /* Binary-only update retains installed identity. */
     migration_case(0,0,0);migration_case(1,0,0);migration_case(0,1,0);migration_case(0,0,1);count+=4;
     identity_case(1);identity_case(0);count+=2;
+    reset(7,0,0,2,0);cleanupDenied=1;
+    assert(!ServiceDeploy_ApplyUpdateFlow(L"new.exe",L"new.dll",FALSE));
+    assert(retainedPhase && !deletedArtifacts && !rolledBack);++count;
     printf("Service transaction native orchestration: %d cases passed\n",count);
     return 0;
 }
@@ -307,6 +323,55 @@ with tempfile.TemporaryDirectory(prefix='meshagent-update-recovery-') as directo
     executable = Path(directory) / ('recovery.exe' if os.name == 'nt' else 'recovery')
     c_path.write_text(prelude + generic + '\n' + flow + '\n' + install + '\n' + cases)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wno-unused-value', str(c_path), '-o', str(executable)], check=True)
+    subprocess.run([str(executable)], check=True)
+
+# The Run-value remover must distinguish absence from access failure, and must
+# never enumerate/delete other values. Mock registry calls, not the remover.
+run_key_fixture = r'''
+#include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <wchar.h>
+typedef int BOOL; typedef long LONG; typedef unsigned long DWORD; typedef void* HKEY;
+#define TRUE 1
+#define FALSE 0
+#define HKEY_LOCAL_MACHINE ((HKEY)1)
+#define KEY_SET_VALUE 2
+#define ERROR_SUCCESS 0
+#define ERROR_FILE_NOT_FOUND 2
+#define ERROR_PATH_NOT_FOUND 3
+#define ERROR_ACCESS_DENIED 5
+#define ERROR_INVALID_PARAMETER 87
+static LONG openResult, deleteResult;static DWORD error;static int opened,deleted,closed;
+static void SetLastError(DWORD value){error=value;}
+static void ServiceDeploy_LogInstallEvent(const wchar_t* format,...){(void)format;}
+static LONG RegOpenKeyExW(HKEY root,const wchar_t* path,DWORD options,DWORD access,HKEY* out){
+    assert(root==HKEY_LOCAL_MACHINE&&options==0&&access==KEY_SET_VALUE);
+    assert(!wcscmp(path,L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"));
+    ++opened;*out=(HKEY)2;return openResult;
+}
+static LONG RegDeleteValueW(HKEY key,const wchar_t* name){assert(key==(HKEY)2&&!wcscmp(name,L"Agent"));++deleted;return deleteResult;}
+static LONG RegCloseKey(HKEY key){assert(key==(HKEY)2);++closed;return 0;}
+'''
+run_key_cases = r'''
+int main(void){
+    assert(!ServiceDeploy_RemoveRunKeyEntry(NULL)&&error==ERROR_INVALID_PARAMETER&&!opened);
+    assert(!ServiceDeploy_RemoveRunKeyEntry(L"")&&error==ERROR_INVALID_PARAMETER&&!opened);
+    openResult=ERROR_FILE_NOT_FOUND;assert(ServiceDeploy_RemoveRunKeyEntry(L"Agent")&&!deleted&&!closed);
+    openResult=ERROR_PATH_NOT_FOUND;assert(ServiceDeploy_RemoveRunKeyEntry(L"Agent")&&!deleted&&!closed);
+    openResult=ERROR_ACCESS_DENIED;assert(!ServiceDeploy_RemoveRunKeyEntry(L"Agent")&&error==ERROR_ACCESS_DENIED&&!deleted&&!closed);
+    openResult=ERROR_SUCCESS;
+    deleteResult=ERROR_ACCESS_DENIED;assert(!ServiceDeploy_RemoveRunKeyEntry(L"Agent")&&error==ERROR_ACCESS_DENIED&&closed==1);
+    deleteResult=ERROR_FILE_NOT_FOUND;assert(ServiceDeploy_RemoveRunKeyEntry(L"Agent")&&closed==2);
+    deleteResult=ERROR_SUCCESS;assert(ServiceDeploy_RemoveRunKeyEntry(L"Agent")&&closed==3&&deleted==3);
+    puts("Recovery Run cleanup: exact-value removal, idempotent absence, handle cleanup and denied access passed");return 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix='meshagent-run-cleanup-') as directory:
+    c_path = Path(directory) / 'run.c'
+    executable = Path(directory) / ('run.exe' if os.name == 'nt' else 'run')
+    c_path.write_text(run_key_fixture + extract('ServiceDeploy_RemoveRunKeyEntry') + run_key_cases)
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror', str(c_path), '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)
 
 # Exercise actual crash-recovery and cleanup orchestration separately from the
@@ -358,6 +423,7 @@ static ServiceJournalRecord saved;
 static int loadOk,journalExists,unknownBackup,unknownBinding,missingBackup,failRestore,failReconcile,failCleanup,failPublish;
 static int mutations,stops,starts,restores,rollbacks,reconciles,deleted,phaseWritten;static DWORD error;
 static int movedRoot, missingOldIdentity, holds, identityChecks;
+static int restarters, runEntry, cleanupDenied;
 static void log_event(const wchar_t* f,...){(void)f;}
 static BOOL mock_recovery_paths(ServiceInstallPaths* p){memset(p,0,sizeof(*p));wcscpy(p->dbPath,L"current.db");return TRUE;}
 static BOOL binding_payload(wchar_t* p){wcscpy(p,L"old-agent.exe");return TRUE;}
@@ -370,7 +436,7 @@ static BOOL capture_ok(void){return !unknownBinding;}
 static BOOL set_start(void){++mutations;return TRUE;}
 static BOOL stop(void){++mutations;++stops;return TRUE;}
 static BOOL restore(void){++mutations;++restores;return !failRestore;}
-static BOOL rollback(void){++mutations;++rollbacks;return !failRestore;}
+static BOOL rollback(void){assert(!restarters);++mutations;++rollbacks;return !failRestore;}
 static BOOL start(void){++mutations;++starts;return TRUE;}
 static BOOL publish(ServiceUpdateTransaction* tx,DWORD phase){if(failPublish)return FALSE;phaseWritten=saved.phase=tx->journalPhase=phase;return TRUE;}
 static BOOL remove_dir(void){++deleted;return !failCleanup;}
@@ -400,7 +466,8 @@ static int mock_snwprintf(wchar_t* out,size_t size,size_t trunc,const wchar_t* f
 #define ServiceBinding_Free(...) ((void)0)
 #define ServiceDeploy_SetServiceStartType(...) set_start()
 #define ServiceDeploy_ClearServiceRecovery(...) set_start()
-#define ServiceDeploy_SuspendServiceRecoveryRestarters(...) TRUE
+#define ServiceDeploy_SuspendServiceRecoveryRestarters(...) (restarters=0,TRUE)
+#define ServiceDeploy_RemoveRunKeyEntry(...) (cleanupDenied?FALSE:(runEntry=0,TRUE))
 #define ServiceDeploy_StopServiceAndWait(...) stop()
 #define ServiceDeploy_RestoreUpdateFileSecurity(...) restore()
 #define ServiceBinding_Restore(...) restore()
@@ -411,7 +478,7 @@ static int mock_snwprintf(wchar_t* out,size_t size,size_t trunc,const wchar_t* f
 #define ServiceDeploy_WaitForExpectedIdentity(p,s,t) wait_identity(p)
 /* No hold is recorded, and a missing activation target never blocks recovery. */
 #define ServiceDeploy_RecordUpdateActivationFailureHold(p) (++holds,FALSE)
-#define ServiceDeploy_ReconcileServiceRecovery(...) TRUE
+#define ServiceDeploy_ReconcileServiceRecovery(...) (assert(saved.binding),TRUE)
 #define ServiceDeploy_CreateRecoveryStartupAuthorization(out) (*(out)=(HANDLE)1,TRUE)
 #define CloseHandle(...) TRUE
 #define ServiceJournal_PhaseRequiresBackups(p) ((p)==SERVICE_JOURNAL_BACKED_UP || (p)==SERVICE_JOURNAL_ACTIVATING)
@@ -427,6 +494,7 @@ static void reset(DWORD phase){
     loadOk=journalExists=1;unknownBackup=unknownBinding=missingBackup=failRestore=failReconcile=failCleanup=failPublish=0;
     mutations=stops=starts=restores=rollbacks=reconciles=deleted=phaseWritten=0;
     movedRoot=missingOldIdentity=holds=identityChecks=0;
+    restarters=runEntry=1;cleanupDenied=0;
 }
 int main(void){
     reset(1);journalExists=0;assert(ServiceDeploy_RecoverInterruptedTransaction()&&!mutations&&!deleted);
@@ -450,7 +518,13 @@ int main(void){
     }
     reset(2);movedRoot=missingOldIdentity=1;saved.fileMask=0;
     assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!mutations&&!deleted);
-    puts("Service crash recovery: 19 preservation, retry, rollback, migration and cleanup cases passed");return 0;
+    for(int phase=1;phase<=5;++phase){if(phase==3||phase==4)continue;
+        reset(phase);saved.binding=NULL;saved.fileMask=0;
+        assert(ServiceDeploy_RecoverInterruptedTransaction()&&!journalExists&&!starts&&!restarters&&!runEntry);
+    }
+    reset(5);saved.binding=NULL;saved.fileMask=0;cleanupDenied=1;
+    assert(!ServiceDeploy_RecoverInterruptedTransaction()&&journalExists&&!mutations&&!deleted);
+    puts("Service crash recovery: 23 preservation, retry, rollback, migration and cleanup cases passed");return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='meshagent-crash-recovery-') as directory:

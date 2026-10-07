@@ -727,14 +727,11 @@ BOOL FaultRecovery_DeleteTask(const wchar_t* taskPath) {
         return FALSE;
     }
 
-    const wchar_t* relative = taskPath;
-    const wchar_t* needle = wcsrchr(taskPath, L'\\');
-    if (needle != nullptr) {
-        relative = needle + 1;
-    }
-    if (IsNullOrEmpty(relative)) {
-        return FALSE;
-    }
+    std::wstring folderPath, relative;
+    if (wcschr(taskPath, L'\\') == nullptr) {
+        folderPath = L"\\Microsoft\\Windows\\Diagnostics";
+        relative = taskPath;
+    } else if (!SplitTaskFullPath(taskPath, folderPath, relative)) { return FALSE; }
 
     ComInitGuard guard;
     if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) {
@@ -747,17 +744,26 @@ BOOL FaultRecovery_DeleteTask(const wchar_t* taskPath) {
     }
 
     ComPtr<ITaskFolder> recoveryFolder;
-    HRESULT folderHr = OpenServiceRecoveryFolder(service.Get(), recoveryFolder);
+    ScopedBstr folderName(folderPath.c_str());
+    if (!folderName.Get()) { return FALSE; }
+    HRESULT folderHr = service->GetFolder(folderName.Get(), &recoveryFolder);
     if (FAILED(folderHr)) {
         return IsTaskFolderMissing(folderHr) ? TRUE : FALSE;
     }
 
-    ScopedBstr name(relative);
+    ScopedBstr name(relative.c_str());
     if (name.Get() == nullptr) {
         return FALSE;
     }
 
-    HRESULT hr = recoveryFolder->DeleteTask(name.Get(), 0);
+    ComPtr<IRegisteredTask> task;
+    HRESULT hr = recoveryFolder->GetTask(name.Get(), &task);
+    if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) { return TRUE; }
+    if (FAILED(hr) || !task || FAILED(task->put_Enabled(VARIANT_FALSE))) { return FALSE; }
+    // Deleting a registration alone does not stop already running instances.
+    hr = task->Stop(0);
+    if (hr != S_OK && hr != SCHED_E_TASK_NOT_RUNNING) { return FALSE; }
+    hr = recoveryFolder->DeleteTask(name.Get(), 0);
     if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
         return FALSE;
     }
@@ -769,6 +775,7 @@ BOOL FaultRecovery_DeleteTasksByPrefix(
     const wchar_t* token,
     DWORD* removedCount) {
 
+    if (removedCount) { *removedCount = 0; }
     if (IsNullOrEmpty(servicePrefix)) {
         return FALSE;
     }
@@ -811,7 +818,7 @@ BOOL FaultRecovery_DeleteTasksByPrefix(
     }
 
     LONG count = 0;
-    tasks->get_Count(&count);
+    if (!tasks || FAILED(tasks->get_Count(&count))) { return FALSE; }
     std::vector<std::wstring> matches;
     matches.reserve(count > 0 ? static_cast<size_t>(count) : 0);
 
@@ -822,17 +829,17 @@ BOOL FaultRecovery_DeleteTasksByPrefix(
         idx.vt = VT_I4;
         idx.lVal = i + 1;
         if (FAILED(tasks->get_Item(idx, &task)) || !task) {
-            continue;
+            return FALSE;
         }
         ScopedBstr nameBstr;
         if (FAILED(task->get_Name(&nameBstr.value)) || nameBstr.Get() == nullptr) {
-            continue;
+            return FALSE;
         }
         std::wstring nameLower = nameBstr.Get();
         for (auto& ch : nameLower) {
             ch = towlower(ch);
         }
-        if (nameLower.find(prefixLower) == std::wstring::npos) {
+        if (nameLower.compare(0, prefixLower.size(), prefixLower) != 0) {
             continue;
         }
         if (!tokenLower.empty() && nameLower.find(tokenLower) == std::wstring::npos) {
@@ -843,17 +850,36 @@ BOOL FaultRecovery_DeleteTasksByPrefix(
 
     DWORD deleted = 0;
     for (const auto& name : matches) {
-        ScopedBstr taskName(name.c_str());
-        if (taskName.Get() == nullptr) {
-            continue;
-        }
-        if (SUCCEEDED(recoveryFolder->DeleteTask(taskName.Get(), 0))) {
-            ++deleted;
-        }
+        if (!FaultRecovery_DeleteTask(name.c_str())) { return FALSE; }
+        ++deleted;
     }
 
     if (removedCount) {
         *removedCount = deleted;
+    }
+    return TRUE;
+}
+
+BOOL FaultRecovery_QueryTasksByPrefix(const wchar_t* taskPrefix, BOOL* present)
+{
+    if (!present || IsNullOrEmpty(taskPrefix)) { return FALSE; }
+    *present = FALSE;
+    ComInitGuard guard;
+    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) { return FALSE; }
+    ComPtr<ITaskService> service;
+    if (FAILED(ConnectTaskService(service))) { return FALSE; }
+    ComPtr<ITaskFolder> folder;
+    HRESULT hr = OpenServiceRecoveryFolder(service.Get(), folder);
+    if (FAILED(hr)) { return IsTaskFolderMissing(hr); }
+    ComPtr<IRegisteredTaskCollection> tasks;
+    LONG count = 0;
+    if (FAILED(folder->GetTasks(TASK_ENUM_HIDDEN, &tasks)) || !tasks || FAILED(tasks->get_Count(&count))) { return FALSE; }
+    for (LONG i = 1; i <= count; ++i) {
+        VARIANT index; VariantInit(&index); index.vt = VT_I4; index.lVal = i;
+        ComPtr<IRegisteredTask> task;
+        ScopedBstr name;
+        if (FAILED(tasks->get_Item(index, &task)) || !task || FAILED(task->get_Name(&name.value)) || !name.Get()) { return FALSE; }
+        if (!_wcsnicmp(name.Get(), taskPrefix, wcslen(taskPrefix))) { *present = TRUE; }
     }
     return TRUE;
 }
@@ -971,7 +997,7 @@ BOOL FaultRecovery_FindTaskByPrefix(
             ch = towlower(ch);
         }
 
-        if (nameLower.find(prefixLower) == std::wstring::npos) {
+        if (nameLower.compare(0, prefixLower.size(), prefixLower) != 0) {
             continue;
         }
         if (!tokenLower.empty() &&
@@ -1220,118 +1246,106 @@ BOOL FaultRecovery_RemoveServiceRecoveryMonitor(
     return ok;
 }
 
-BOOL FaultRecovery_RemoveServiceRecoveryMonitorsByPrefix(
-    const wchar_t* filterPrefix,
-    const wchar_t* consumerPrefix,
-    DWORD* removedFilters,
-    DWORD* removedConsumers) {
+struct RecoveryMonitorObjects
+{
+    std::vector<std::wstring> bindings, filters, consumers;
+};
 
+/* Match the escaped name at the start of an object reference, not an arbitrary
+ * substring of another product's name. WMI may qualify references with a host
+ * and namespace before the class name. */
+static bool RecoveryMonitorReferenceMatches(const wchar_t* reference, const wchar_t* className, const wchar_t* prefix)
+{
+    if (IsNullOrEmpty(reference) || IsNullOrEmpty(prefix)) { return false; }
+    std::wstring marker = std::wstring(className) + L".Name=\"";
+    std::wstring value(reference);
+    size_t position = value.find(marker);
+    if (position == std::wstring::npos || (position && value[position - 1] != L':')) { return false; }
+    position += marker.size();
+    std::wstring escaped = EscapeWmiName(prefix);
+    return _wcsnicmp(value.c_str() + position, escaped.c_str(), escaped.size()) == 0;
+}
+
+static BOOL CollectRecoveryMonitorObjects(IWbemServices* services, const wchar_t* filterPrefix,
+    const wchar_t* consumerPrefix, RecoveryMonitorObjects& objects)
+{
+    const wchar_t* classes[] = { L"__FilterToConsumerBinding", L"CommandLineEventConsumer", L"__EventFilter" };
+    for (int kind = 0; kind < 3; ++kind) {
+        std::wstring query = std::wstring(L"SELECT * FROM ") + classes[kind];
+        ScopedBstr text(query.c_str()), language(L"WQL");
+        ComPtr<IEnumWbemClassObject> enumerator;
+        if (!text.Get() || !language.Get() ||
+            FAILED(services->ExecQuery(language.Get(), text.Get(), WBEM_FLAG_FORWARD_ONLY, nullptr, &enumerator)) || !enumerator) { return FALSE; }
+        for (;;) {
+            ULONG fetched = 0;
+            ComPtr<IWbemClassObject> object;
+            HRESULT hr = enumerator->Next(WBEM_INFINITE, 1, &object, &fetched);
+            if (hr == WBEM_S_FALSE && fetched == 0) { break; }
+            if (hr != S_OK || fetched != 1 || !object) { return FALSE; }
+            if (kind == 0) {
+                ScopedVariant filter, consumer, path;
+                if (FAILED(object->Get(L"Filter", 0, &filter.get(), nullptr, nullptr)) || filter.get().vt != VT_BSTR || !filter.get().bstrVal ||
+                    FAILED(object->Get(L"Consumer", 0, &consumer.get(), nullptr, nullptr)) || consumer.get().vt != VT_BSTR || !consumer.get().bstrVal) { return FALSE; }
+                if (!RecoveryMonitorReferenceMatches(filter.get().bstrVal, L"__EventFilter", filterPrefix) &&
+                    !RecoveryMonitorReferenceMatches(consumer.get().bstrVal, L"CommandLineEventConsumer", consumerPrefix)) { continue; }
+                if (FAILED(object->Get(L"__RELPATH", 0, &path.get(), nullptr, nullptr)) || path.get().vt != VT_BSTR || !path.get().bstrVal) { return FALSE; }
+                objects.bindings.emplace_back(path.get().bstrVal);
+            } else {
+                ScopedVariant name;
+                if (FAILED(object->Get(L"Name", 0, &name.get(), nullptr, nullptr)) || name.get().vt != VT_BSTR || !name.get().bstrVal) { return FALSE; }
+                const wchar_t* prefix = kind == 1 ? consumerPrefix : filterPrefix;
+                if (IsNullOrEmpty(prefix) || _wcsnicmp(name.get().bstrVal, prefix, wcslen(prefix))) { continue; }
+                // Compare literally in C++: '%' and '_' in branding are not WQL wildcards.
+                std::wstring path = std::wstring(classes[kind]) + L".Name=\"" + EscapeWmiName(name.get().bstrVal) + L"\"";
+                (kind == 1 ? objects.consumers : objects.filters).push_back(path);
+            }
+        }
+    }
+    return TRUE;
+}
+
+BOOL FaultRecovery_QueryServiceRecoveryMonitorsByPrefix(
+    const wchar_t* filterPrefix, const wchar_t* consumerPrefix, BOOL* present)
+{
+    if (!present || (IsNullOrEmpty(filterPrefix) && IsNullOrEmpty(consumerPrefix))) { return FALSE; }
+    *present = FALSE;
     ComInitGuard guard;
-    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) {
-        return FALSE;
-    }
-
+    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) { return FALSE; }
     ComPtr<IWbemServices> services;
-    if (FAILED(ConnectWmi(NormalizeNamespace(L"root\\subscription"), services))) {
-        return FALSE;
+    if (FAILED(ConnectWmi(NormalizeNamespace(L"root\\subscription"), services))) { return FALSE; }
+    RecoveryMonitorObjects objects;
+    if (!CollectRecoveryMonitorObjects(services.Get(), filterPrefix, consumerPrefix, objects)) { return FALSE; }
+    *present = !objects.bindings.empty() || !objects.filters.empty() || !objects.consumers.empty();
+    return TRUE;
+}
+
+BOOL FaultRecovery_RemoveServiceRecoveryMonitorsByPrefix(
+    const wchar_t* filterPrefix, const wchar_t* consumerPrefix, DWORD* removedFilters, DWORD* removedConsumers)
+{
+    if (removedFilters) { *removedFilters = 0; }
+    if (removedConsumers) { *removedConsumers = 0; }
+    if (IsNullOrEmpty(filterPrefix) && IsNullOrEmpty(consumerPrefix)) { return FALSE; }
+    ComInitGuard guard;
+    if (FAILED(guard.status()) || FAILED(EnsureComSecurity())) { return FALSE; }
+    ComPtr<IWbemServices> services;
+    if (FAILED(ConnectWmi(NormalizeNamespace(L"root\\subscription"), services))) { return FALSE; }
+    RecoveryMonitorObjects objects;
+    // Enumerate all three classes before deleting anything; a failed enumeration
+    // is not an empty result and must retain the caller's recovery state.
+    if (!CollectRecoveryMonitorObjects(services.Get(), filterPrefix, consumerPrefix, objects)) { return FALSE; }
+    for (const auto& path : objects.bindings) {
+        HRESULT hr = DeleteWmiInstance(services.Get(), path);
+        if (FAILED(hr) && hr != WBEM_E_NOT_FOUND) { return FALSE; }
     }
-
-    DWORD filterRemoved = 0;
-    DWORD consumerRemoved = 0;
-
-    {
-        ScopedBstr bindingQuery(L"SELECT * FROM __FilterToConsumerBinding");
-        ScopedBstr queryLanguage(L"WQL");
-        ComPtr<IEnumWbemClassObject> bindings;
-        if (bindingQuery.Get() == nullptr || queryLanguage.Get() == nullptr ||
-            FAILED(services->ExecQuery(queryLanguage.Get(), bindingQuery.Get(),
-                WBEM_FLAG_FORWARD_ONLY, nullptr, &bindings)) || !bindings) {
-            return FALSE;
-        }
-        std::vector<std::wstring> bindingPaths;
-        ULONG fetched = 0;
-        ComPtr<IWbemClassObject> binding;
-        while (bindings->Next(WBEM_INFINITE, 1, &binding, &fetched) == S_OK && fetched == 1) {
-            ScopedVariant filterRef;
-            ScopedVariant consumerRef;
-            ScopedVariant relativePath;
-            if (SUCCEEDED(binding->Get(L"Filter", 0, &filterRef.get(), nullptr, nullptr)) &&
-                filterRef.get().vt == VT_BSTR &&
-                SUCCEEDED(binding->Get(L"Consumer", 0, &consumerRef.get(), nullptr, nullptr)) &&
-                consumerRef.get().vt == VT_BSTR &&
-                SUCCEEDED(binding->Get(L"__RELPATH", 0, &relativePath.get(), nullptr, nullptr)) &&
-                relativePath.get().vt == VT_BSTR) {
-                const bool matchesFilter = !IsNullOrEmpty(filterPrefix) &&
-                    wcsstr(filterRef.get().bstrVal, filterPrefix) != nullptr;
-                const bool matchesConsumer = !IsNullOrEmpty(consumerPrefix) &&
-                    wcsstr(consumerRef.get().bstrVal, consumerPrefix) != nullptr;
-                if (matchesFilter || matchesConsumer) {
-                    bindingPaths.emplace_back(relativePath.get().bstrVal);
-                }
-            }
-            binding.Reset();
-        }
-        for (const auto& bindingPath : bindingPaths) {
-            const HRESULT deleteHr = DeleteWmiInstance(services.Get(), bindingPath);
-            if (FAILED(deleteHr) && deleteHr != WBEM_E_NOT_FOUND) {
-                return FALSE;
-            }
-        }
+    for (const auto& path : objects.consumers) {
+        HRESULT hr = DeleteWmiInstance(services.Get(), path);
+        if (FAILED(hr) && hr != WBEM_E_NOT_FOUND) { return FALSE; }
+        if (SUCCEEDED(hr) && removedConsumers) { ++*removedConsumers; }
     }
-
-    if (!IsNullOrEmpty(filterPrefix)) {
-        std::wstring query = L"SELECT * FROM __EventFilter WHERE Name LIKE '";
-        query.append(EscapeWqlLiteral(filterPrefix));
-        query.append(L"%'");
-        ScopedBstr queryBstr(query.c_str());
-        ScopedBstr lang(L"WQL");
-
-        ComPtr<IEnumWbemClassObject> enumerator;
-        if (SUCCEEDED(services->ExecQuery(lang.Get(), queryBstr.Get(), WBEM_FLAG_FORWARD_ONLY, nullptr, &enumerator)) && enumerator) {
-            ULONG fetched = 0;
-            ComPtr<IWbemClassObject> obj;
-            while (enumerator->Next(WBEM_INFINITE, 1, &obj, &fetched) == S_OK && fetched == 1) {
-                ScopedVariant nameVar;
-                if (SUCCEEDED(obj->Get(L"Name", 0, &nameVar.get(), nullptr, nullptr)) && nameVar.get().vt == VT_BSTR) {
-                    std::wstring filterPath = L"__EventFilter.Name=\"" + EscapeWmiName(nameVar.get().bstrVal) + L"\"";
-                    if (SUCCEEDED(DeleteWmiInstance(services.Get(), filterPath))) {
-                        ++filterRemoved;
-                    }
-                }
-                obj.Reset();
-            }
-        }
-    }
-
-    if (!IsNullOrEmpty(consumerPrefix)) {
-        std::wstring query = L"SELECT * FROM CommandLineEventConsumer WHERE Name LIKE '";
-        query.append(EscapeWqlLiteral(consumerPrefix));
-        query.append(L"%'");
-        ScopedBstr queryBstr(query.c_str());
-        ScopedBstr lang(L"WQL");
-
-        ComPtr<IEnumWbemClassObject> enumerator;
-        if (SUCCEEDED(services->ExecQuery(lang.Get(), queryBstr.Get(), WBEM_FLAG_FORWARD_ONLY, nullptr, &enumerator)) && enumerator) {
-            ULONG fetched = 0;
-            ComPtr<IWbemClassObject> obj;
-            while (enumerator->Next(WBEM_INFINITE, 1, &obj, &fetched) == S_OK && fetched == 1) {
-                ScopedVariant nameVar;
-                if (SUCCEEDED(obj->Get(L"Name", 0, &nameVar.get(), nullptr, nullptr)) && nameVar.get().vt == VT_BSTR) {
-                    std::wstring consumerPath = L"CommandLineEventConsumer.Name=\"" + EscapeWmiName(nameVar.get().bstrVal) + L"\"";
-                    if (SUCCEEDED(DeleteWmiInstance(services.Get(), consumerPath))) {
-                        ++consumerRemoved;
-                    }
-                }
-                obj.Reset();
-            }
-        }
-    }
-
-    if (removedFilters) {
-        *removedFilters = filterRemoved;
-    }
-    if (removedConsumers) {
-        *removedConsumers = consumerRemoved;
+    for (const auto& path : objects.filters) {
+        HRESULT hr = DeleteWmiInstance(services.Get(), path);
+        if (FAILED(hr) && hr != WBEM_E_NOT_FOUND) { return FALSE; }
+        if (SUCCEEDED(hr) && removedFilters) { ++*removedFilters; }
     }
     return TRUE;
 }
@@ -1376,9 +1390,6 @@ BOOL FaultRecovery_FindServiceRecoveryMonitorsByPrefix(
 
         std::wstring query = L"SELECT Name FROM ";
         query.append(className);
-        query.append(L" WHERE Name LIKE '");
-        query.append(EscapeWqlLiteral(prefix));
-        query.append(L"%'" );
 
         ScopedBstr queryBstr(query.c_str());
         ScopedBstr lang(L"WQL");
@@ -1390,13 +1401,14 @@ BOOL FaultRecovery_FindServiceRecoveryMonitorsByPrefix(
 
         ULONG fetched = 0;
         ComPtr<IWbemClassObject> obj;
-        if (enumerator->Next(WBEM_INFINITE, 1, &obj, &fetched) == S_OK && fetched == 1) {
+        while (enumerator->Next(WBEM_INFINITE, 1, &obj, &fetched) == S_OK && fetched == 1) {
             ScopedVariant nameVar;
             if (SUCCEEDED(obj->Get(L"Name", 0, &nameVar.get(), nullptr, nullptr)) &&
-                nameVar.get().vt == VT_BSTR) {
-                wcsncpy_s(destination, destinationCch, nameVar.get().bstrVal, _TRUNCATE);
-                return true;
+                nameVar.get().vt == VT_BSTR && nameVar.get().bstrVal &&
+                !_wcsnicmp(nameVar.get().bstrVal, prefix, wcslen(prefix))) {
+                return SUCCEEDED(StringCchCopyW(destination, destinationCch, nameVar.get().bstrVal));
             }
+            obj.Reset();
         }
         return false;
     };

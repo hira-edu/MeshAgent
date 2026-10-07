@@ -35,6 +35,11 @@ BOOL FaultRecovery_ServiceRecoveryTaskMatches(
 
 BOOL FaultRecovery_DeleteTask(const wchar_t* taskPath);
 
+/* TRUE means inspection succeeded; presence is returned separately. */
+BOOL FaultRecovery_QueryTasksByPrefix(const wchar_t* taskPrefix, BOOL* present);
+BOOL FaultRecovery_QueryServiceRecoveryMonitorsByPrefix(
+    const wchar_t* filterPrefix, const wchar_t* consumerPrefix, BOOL* present);
+
 BOOL FaultRecovery_DeleteTasksByPrefix(
     const wchar_t* servicePrefix,
     const wchar_t* token,

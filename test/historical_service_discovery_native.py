@@ -86,7 +86,7 @@ int main(void) {
 arrays = '\n'.join(re.search(r'static const wchar_t\* const '+name+r'\[\] = \{.*?\};', deploy, re.S).group()
                    for name in ('g_LegacyExeNames',))
 production = (extract(host,'ServiceHost_ParseImagePath') + extract(binding,'ServiceBinding_IsLegacyExe') +
-              extract(binding,'ServiceBinding_ParseCallbackImage') + extract(binding,'ServiceBinding_ImageSupported') + arrays + extract(deploy,'ServiceDeploy_wcsistr') +
+              extract(binding,'ServiceBinding_ParseCallbackImage') + extract(binding,'ServiceBinding_LegacyArgumentsSupported') + extract(binding,'ServiceBinding_ImageSupported') + arrays + extract(deploy,'ServiceDeploy_wcsistr') +
               extract(deploy,'ServiceDeploy_PathContainsLeafInsensitive') + extract(deploy,'ServiceDeploy_ExtractExecutableFromCommand') +
               extract(deploy,'ServiceDeploy_IsLegacyMeshAgentService'))
 with tempfile.TemporaryDirectory(prefix='historical-discovery-') as temporary:

@@ -3148,9 +3148,9 @@ void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
         manifest.sourceDllPath[0] != L'\0' ? manifest.sourceDllPath : NULL,
         manifest.requireConfig);
 
-    ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Completed action=%ls status=%ls",
+    ServiceDeploy_LogInstallEvent(L"[LIFECYCLE_HOST] Completed action=%ls status=%ls (Windows error hint=%lu)",
         MeshRuntimeHost_LifecycleActionNameW(manifest.action),
-        ok ? L"success" : L"failed");
+        ok ? L"success" : L"failed", ok ? ERROR_SUCCESS : GetLastError());
     // ExitProcess bypasses CRT shutdown; preserve redirected validation JSON.
     if (fflush(stdout) != 0) { ok = FALSE; }
     (void)fflush(stderr);

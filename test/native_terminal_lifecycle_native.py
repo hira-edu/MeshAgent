@@ -59,7 +59,7 @@ static BOOL fixturePreflight(const WCHAR* path, BOOL require, ServicePackagePref
 static BOOL engine(const WCHAR* action, const WCHAR* exe, const WCHAR* dll, BOOL require) {
     (void)exe; (void)dll; passedConfig = require;
     if (!wcsncmp(action, L"validate-", 9)) { ++validationCalls; return TRUE; }
-    ++calls; return engineResult;
+    ++calls; SetLastError(engineResult ? ERROR_SUCCESS : ERROR_BAD_EXE_FORMAT); return engineResult;
 }
 static BOOL uninstall(const WCHAR* path, WCHAR* retired, size_t capacity, BOOL* scheduled) {
     (void)path; (void)retired; (void)capacity; *scheduled = FALSE;
@@ -89,6 +89,7 @@ static void log_event(const WCHAR* format, ...) { (void)format; }
 #define ServiceDeploy_EnsureLoggingDefaults() ((void)0)
 #define ServiceDeploy_SetInstallerLogPathToTemp(p) ((void)0)
 #define ServiceDeploy_LogInstallEvent log_event
+#define MeshDiagnosticLog_GetPathW(out,size) (wcscpy_s(out,size,L"C:\\Agent\\logs\\diagnostics.log"),TRUE)
 '''
 
 cases = r'''
@@ -145,11 +146,15 @@ if os.name != 'nt':
     raise SystemExit('This harness requires Windows headers')
 with tempfile.TemporaryDirectory(prefix='mesh-terminal-') as directory:
     c_path = Path(directory) / 'terminal.c'
-    executable = Path(directory) / 'terminal.exe'
     c_path.write_text(prelude + extract('MeshService_RunNativeTerminalLifecycle') + cases)
     for architecture in [[], ['-m32']]:
+        executable = Path(directory) / ('terminal32.exe' if architecture else 'terminal64.exe')
         subprocess.run([os.environ.get('CC', 'clang'), *architecture, '-std=c11', str(c_path), '-o', str(executable)], check=True)
-        subprocess.run([str(executable)], check=True)
+        result = subprocess.run([str(executable)], capture_output=True, check=True)
+        if not architecture:
+            assert b'exit=1603; Windows error hint=193' in result.stdout
+            assert b'Installer diagnostics: C:\\Agent\\logs\\diagnostics.log' in result.stdout
+        print(result.stdout.decode(errors='replace'), end='')
     # Use the real CRT and Win32 streams to verify silence with redirected pipes.
     c_path.write_text(r'''
 #include <windows.h>
@@ -166,6 +171,7 @@ int main(int argc, char** argv) {
     return 0;
 }
 ''')
+    executable = Path(directory) / 'quiet.exe'
     subprocess.run([os.environ.get('CC', 'clang'), '-std=c11', str(c_path), '-o', str(executable)], check=True)
     control = subprocess.run([str(executable)], capture_output=True, check=True)
     assert b'stdout marker' in control.stdout and b'stderr marker' in control.stderr
