@@ -500,6 +500,27 @@ static int ILibProcessPipe_IsApprovedConsoleBridgeLaunchA(char* target, char* co
 	ILibProcessPipe_SetBridgePolicyRejectReasonA("ok-console");
 	return 1;
 }
+static int ILibProcessPipe_IsApprovedClipboardBridgeLaunchA(char* target, char* const* parameters)
+{
+    char modulePath[MAX_PATH * 4];
+    const char* cursor;
+    unsigned long session = 0;
+    if (!ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target) || parameters == NULL ||
+        parameters[0] == NULL || parameters[1] == NULL || parameters[2] != NULL) { return 0; }
+    if (!ILibProcessPipe_TryParseRuntimeHostModuleEntryA(parameters[0], MESH_RUNTIME_HOST_ENTRY_CLIPBOARD_BRIDGE_A,
+        modulePath, sizeof(modulePath), "clipboard-module") ||
+        !ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNTIME_HOST_ENTRY_CLIPBOARD_BRIDGE_A)) { return 0; }
+    if (strcmp(parameters[1], "local") == 0) { ILibProcessPipe_SetBridgePolicyRejectReasonA("ok-clipboard"); return 1; }
+    if (strncmp(parameters[1], "tsid=", 5) != 0 || parameters[1][5] == 0) { return 0; }
+    for (cursor = parameters[1] + 5; *cursor != 0; ++cursor)
+    {
+        if (*cursor < '0' || *cursor > '9' || session > (0xFFFFFFFEUL - (*cursor - '0')) / 10) { return 0; }
+        session = session * 10 + (*cursor - '0');
+    }
+    if (session == 0) { return 0; }
+    ILibProcessPipe_SetBridgePolicyRejectReasonA("ok-clipboard");
+    return 1;
+}
 static int ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(const char* value, const char* expectedEntry, char* output, size_t outputLen)
 {
 	char modulePath[MAX_PATH * 4];
@@ -514,6 +535,7 @@ static int ILibProcessPipe_FormatKnownRuntimeHostModuleEntryForCommandLineA(cons
 {
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_CLIPBOARD_BRIDGE_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_UMH_HOST_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_A, output, outputLen)) { return 1; }
@@ -883,6 +905,12 @@ static int ILibProcessPipe_IsWindowsSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 		return 1;
 	}
 
+	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedClipboardBridgeLaunchA(target, parameters))
+    {
+        ILibProcessPipe_LogPolicyDecisionA("allow-runtime-host-clipboard", "clipboard-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+        return 1;
+    }
+
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedLifecycleContractLaunchA(target, parameters))
 	{
 		ILibProcessPipe_LogPolicyDecisionA("allow-runtime-host-lifecycle", "runtime-host-contract", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
@@ -958,6 +986,10 @@ typedef struct ILibProcessPipe_PipeObject
 	LONG finalizing;
 	LONG activeReadCallbacks;
 	LONG activeWriteHandler;
+	LONG pendingWrite; // Pins OVERLAPPED and the head buffer until terminal completion.
+	int writeClosing;
+	int writeOverlappedHandle;
+	size_t writeQueuedBytes; // Bytes queued for stdin, bounded by ILibProcessPipe_MAX_QUEUED_WRITE_BYTES.
 	LONG resumePending;
 	HANDLE mPipe_Reader_ResumeEvent;
 	HANDLE mPipe_ReadEnd;
@@ -1005,6 +1037,7 @@ typedef struct ILibProcessPipe_WriteData
 {
 	char *buffer;
 	int bufferLen;
+	int offset;
 	ILibTransport_MemoryOwnership ownership;
 }ILibProcessPipe_WriteData;
 
@@ -1012,12 +1045,26 @@ ILibProcessPipe_WriteData* ILibProcessPipe_WriteData_Create(char* buffer, int bu
 {
 	ILibProcessPipe_WriteData* retVal;
 
-	if ((retVal = (ILibProcessPipe_WriteData*)malloc(sizeof(ILibProcessPipe_WriteData))) == NULL) { ILIBCRITICALEXIT(254); }
+	if ((retVal = (ILibProcessPipe_WriteData*)malloc(sizeof(ILibProcessPipe_WriteData))) == NULL)
+	{
+#ifdef WIN32
+		return NULL;
+#else
+		ILIBCRITICALEXIT(254);
+#endif
+	}
 	memset(retVal, 0, sizeof(ILibProcessPipe_WriteData));
 	retVal->bufferLen = bufferLen;
 	if (ownership == ILibTransport_MemoryOwnership_USER)
 	{
-		if ((retVal->buffer = (char*)malloc(bufferLen)) == NULL) { ILIBCRITICALEXIT(254); }
+		if ((retVal->buffer = (char*)malloc(bufferLen > 0 ? bufferLen : 1)) == NULL)
+		{
+#ifdef WIN32
+			free(retVal); return NULL;
+#else
+			ILIBCRITICALEXIT(254);
+#endif
+		}
 		memcpy_s(retVal->buffer, bufferLen, buffer, bufferLen);
 		retVal->ownership = ILibTransport_MemoryOwnership_CHAIN;
 	}
@@ -1222,10 +1269,20 @@ static BOOL ILibProcessPipe_FailInvalidReadWindow(ILibProcessPipe_PipeObject *pi
 }
 static void ILibProcessPipe_FreePipe_Finalize(ILibProcessPipe_PipeObject *pipeObject);
 static void ILibProcessPipe_FreePipe_TryFinalizeOnChain(void *chain, void *user);
+static void ILibProcessPipe_FreePipe_DeferredFinalize(void *chain, void *user);
 static void ILibProcessPipe_FreePipe_RequestClose(ILibProcessPipe_PipeObject *pipeObject)
 {
 	if (pipeObject == NULL) { return; }
 
+	// Spawn failure can discard the process before a queued close runs. Detach
+	// while the process is still alive, rather than dereferencing it at final free.
+	if (pipeObject->mProcess != NULL)
+	{
+		if (pipeObject->mProcess->stdIn == pipeObject) { pipeObject->mProcess->stdIn = NULL; }
+		if (pipeObject->mProcess->stdOut == pipeObject) { pipeObject->mProcess->stdOut = NULL; }
+		if (pipeObject->mProcess->stdErr == pipeObject) { pipeObject->mProcess->stdErr = NULL; }
+		pipeObject->mProcess = NULL;
+	}
 	pipeObject->PAUSED = 1;
 	pipeObject->handler = NULL;
 	pipeObject->brokenPipeHandler = NULL;
@@ -1238,10 +1295,13 @@ static void ILibProcessPipe_FreePipe_RequestClose(ILibProcessPipe_PipeObject *pi
 	{
 		CancelIoEx(pipeObject->mPipe_ReadEnd, pipeObject->mOverlapped);
 	}
+	if (pipeObject->WriteBuffer != NULL) { ILibQueue_Lock(pipeObject->WriteBuffer); }
+	pipeObject->writeClosing = 1;
 	if (pipeObject->mPipe_WriteEnd != NULL && pipeObject->mPipe_WriteEnd != INVALID_HANDLE_VALUE && pipeObject->mwOverlapped != NULL)
 	{
 		CancelIoEx(pipeObject->mPipe_WriteEnd, pipeObject->mwOverlapped);
 	}
+	if (pipeObject->WriteBuffer != NULL) { ILibQueue_UnLock(pipeObject->WriteBuffer); }
 	if (pipeObject->mPipe_Reader_ResumeEvent != NULL)
 	{
 		SetEvent(pipeObject->mPipe_Reader_ResumeEvent);
@@ -1255,12 +1315,24 @@ static void ILibProcessPipe_FreePipe_TryFinalize(ILibProcessPipe_PipeObject *pip
 	chain = pipeObject->manager != NULL ? pipeObject->manager->ChainLink.ParentChain : NULL;
 	if (chain != NULL)
 	{
-		ILibChain_RunOnMicrostackThread(chain, ILibProcessPipe_FreePipe_TryFinalizeOnChain, pipeObject);
+		if (ILibIsRunningOnChainThread(chain)) { ILibProcessPipe_FreePipe_TryFinalizeOnChain(chain, pipeObject); }
+		else if (InterlockedCompareExchange(&pipeObject->finalFreePending, 1, 0) == 0)
+		{
+			// A queued callback itself owns the pipe. Multiple close callers must
+			// not queue stale pointers or let an I/O callback free it first.
+			ILibChain_RunOnMicrostackThreadEx3(chain, ILibProcessPipe_FreePipe_DeferredFinalize, ILibProcessPipe_FreePipe_DeferredFinalize, pipeObject);
+		}
 	}
 	else
 	{
 		ILibProcessPipe_FreePipe_Finalize(pipeObject);
 	}
+}
+static void ILibProcessPipe_FreePipe_DeferredFinalize(void *chain, void *user)
+{
+	ILibProcessPipe_PipeObject *p = (ILibProcessPipe_PipeObject*)user;
+	InterlockedExchange(&p->finalFreePending, 0);
+	ILibProcessPipe_FreePipe_TryFinalizeOnChain(chain, p);
 }
 static void ILibProcessPipe_FreePipe_TryFinalizeOnChain(void *chain, void *user)
 {
@@ -1269,10 +1341,10 @@ static void ILibProcessPipe_FreePipe_TryFinalizeOnChain(void *chain, void *user)
 	UNREFERENCED_PARAMETER(chain);
 	if (pipeObject == NULL || !ILibMemory_CanaryOK(pipeObject)) { return; }
 
-	InterlockedExchange(&pipeObject->finalFreePending, 1);
+	if (ILibProcessPipe_GetStateLong(&pipeObject->finalFreePending) != 0) { return; }
 	if (pipeObject->manager != NULL && pipeObject->manager->ChainLink.ParentChain != NULL)
 	{
-		if (pipeObject->mwOverlapped != NULL && pipeObject->mwOverlapped->hEvent != NULL)
+		if (ILibProcessPipe_GetStateLong(&pipeObject->pendingWrite) == 0 && pipeObject->mwOverlapped != NULL && pipeObject->mwOverlapped->hEvent != NULL)
 		{
 			ILibChain_RemoveWaitHandleEx(pipeObject->manager->ChainLink.ParentChain, pipeObject->mwOverlapped->hEvent, 0);
 		}
@@ -1280,6 +1352,7 @@ static void ILibProcessPipe_FreePipe_TryFinalizeOnChain(void *chain, void *user)
 
 	if (ILibProcessPipe_GetStateLong(&pipeObject->activeReadCallbacks) == 0 &&
 		ILibProcessPipe_GetStateLong(&pipeObject->activeWriteHandler) == 0 &&
+		ILibProcessPipe_GetStateLong(&pipeObject->pendingWrite) == 0 &&
 		ILibProcessPipe_GetStateLong(&pipeObject->resumePending) == 0)
 	{
 		ILibProcessPipe_FreePipe_Finalize(pipeObject);
@@ -1292,6 +1365,11 @@ static void ILibProcessPipe_FreePipe_Finalize(ILibProcessPipe_PipeObject *pipeOb
 {
 	if (!ILibMemory_CanaryOK(pipeObject)) { return; }
 #ifdef WIN32
+	if (ILibProcessPipe_GetStateLong(&pipeObject->activeReadCallbacks) != 0 ||
+		ILibProcessPipe_GetStateLong(&pipeObject->activeWriteHandler) != 0 ||
+		ILibProcessPipe_GetStateLong(&pipeObject->pendingWrite) != 0 ||
+		ILibProcessPipe_GetStateLong(&pipeObject->resumePending) != 0 ||
+		ILibProcessPipe_GetStateLong(&pipeObject->finalFreePending) != 0) { return; }
 	if (InterlockedCompareExchange(&pipeObject->finalizing, 1, 0) != 0) { return; }
 	if (pipeObject->manager != NULL && pipeObject->manager->ChainLink.ParentChain != NULL)
 	{
@@ -1380,12 +1458,11 @@ void ILibProcessPipe_FreePipe(ILibProcessPipe_Pipe pipe)
 #ifdef WIN32
 static OVERLAPPED* ILibProcessPipe_GetWriteOverlapped(ILibProcessPipe_PipeObject* pipeObject)
 {
-	void* extra = NULL;
-
 	if (pipeObject == NULL) { return NULL; }
 	if (pipeObject->mwOverlapped == NULL)
 	{
-		pipeObject->mwOverlapped = (OVERLAPPED*)ILibMemory_Allocate(sizeof(OVERLAPPED), sizeof(void*), NULL, &extra);
+		pipeObject->mwOverlapped = (OVERLAPPED*)calloc(1, sizeof(OVERLAPPED));
+		if (pipeObject->mwOverlapped == NULL) { return NULL; }
 		if ((pipeObject->mwOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
 		{
 			// Callers treat NULL as a failed write on this pipe; event exhaustion must not end the agent.
@@ -1394,16 +1471,14 @@ static OVERLAPPED* ILibProcessPipe_GetWriteOverlapped(ILibProcessPipe_PipeObject
 			pipeObject->mwOverlapped = NULL;
 			return NULL;
 		}
-		((void**)extra)[0] = pipeObject;
 	}
 	return pipeObject->mwOverlapped;
 }
 
-void ILibProcessPipe_PipeObject_DisableInherit(HANDLE* h)
+BOOL ILibProcessPipe_PipeObject_DisableInherit(HANDLE* h)
 {
-	HANDLE tmpRead = *h;
-	DuplicateHandle(GetCurrentProcess(), tmpRead, GetCurrentProcess(), h,  0, FALSE, DUPLICATE_SAME_ACCESS);
-	CloseHandle(tmpRead);
+	// Preserve the handle on failure; duplicating then blindly closing it loses stdio.
+	return SetHandleInformation(*h, HANDLE_FLAG_INHERIT, 0);
 }
 #endif
 
@@ -1419,8 +1494,10 @@ ILibProcessPipe_Pipe ILibProcessPipe_Pipe_CreateFromExistingWithExtraMemory(ILib
 	retVal->manager = (ILibProcessPipe_Manager_Object*)manager;
 
 #ifdef WIN32
+	retVal->WriteBuffer = ILibQueue_Create();
 	if (handleType == ILibProcessPipe_Pipe_ReaderHandleType_Overlapped)
 	{
+		retVal->writeOverlappedHandle = 1;
 		void *tmpExtra;
 		retVal->mOverlapped = (OVERLAPPED*)ILibMemory_Allocate(sizeof(OVERLAPPED), sizeof(void*), NULL, &tmpExtra);
 		if ((retVal->mOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL) { ILIBCRITICALEXIT(254); }
@@ -1446,6 +1523,10 @@ void ILibProcessPipe_Pipe_SetBrokenPipeHandler(ILibProcessPipe_Pipe targetPipe, 
 // still hold it open; FILE_FLAG_FIRST_PIPE_INSTANCE then fails the new pipe.
 static volatile LONG ILibProcessPipe_PipeNameSequence = 0;
 #define ILibProcessPipe_PIPE_NAME_ATTEMPTS 8
+// A live child that stops reading must not grow agent memory without bound. Several writers
+// ignore the write result, so exceeding this closes the pipe rather than dropping bytes
+// from the middle of the stream.
+#define ILibProcessPipe_MAX_QUEUED_WRITE_BYTES (64 * 1024 * 1024)
 
 // Releases a pipe object that never became usable and preserves the error for the spawn caller.
 static void ILibProcessPipe_CreatePipe_Abandon(ILibProcessPipe_PipeObject* pipeObject, DWORD error, const char* stage)
@@ -1459,6 +1540,7 @@ static void ILibProcessPipe_CreatePipe_Abandon(ILibProcessPipe_PipeObject* pipeO
 		if (pipeObject->mOverlapped->hEvent != NULL) { CloseHandle(pipeObject->mOverlapped->hEvent); }
 		free(pipeObject->mOverlapped);
 	}
+	if (pipeObject->WriteBuffer != NULL) { ILibQueue_Destroy(pipeObject->WriteBuffer); }
 	ILibMemory_Free(pipeObject);
 	SetLastError(error);
 }
@@ -1466,7 +1548,11 @@ static void ILibProcessPipe_CreatePipe_Abandon(ILibProcessPipe_PipeObject* pipeO
 
 // Returns NULL when the pipe cannot be created (last error set on Windows, errno on POSIX). A failed
 // pipe fails only the spawn that asked for it; it must never take the agent down.
+#ifdef WIN32
+static ILibProcessPipe_PipeObject* ILibProcessPipe_CreatePipeEx(ILibProcessPipe_Manager manager, int pipeBufferSize, ILibProcessPipe_GenericBrokenPipeHandler brokenPipeHandler, int extraMemorySize, BOOL parentWrites)
+#else
 ILibProcessPipe_PipeObject* ILibProcessPipe_CreatePipe(ILibProcessPipe_Manager manager, int pipeBufferSize, ILibProcessPipe_GenericBrokenPipeHandler brokenPipeHandler, int extraMemorySize)
+#endif
 {
 	ILibProcessPipe_PipeObject* retVal = NULL;
 #ifdef WIN32
@@ -1474,6 +1560,7 @@ ILibProcessPipe_PipeObject* ILibProcessPipe_CreatePipe(ILibProcessPipe_Manager m
 	DWORD createError = ERROR_SUCCESS;
 	char pipeName[255];
 	SECURITY_ATTRIBUTES saAttr;
+	HANDLE server, client;
 #else
 	int fd[2];
 #endif
@@ -1483,40 +1570,49 @@ ILibProcessPipe_PipeObject* ILibProcessPipe_CreatePipe(ILibProcessPipe_Manager m
 	retVal->manager = (ILibProcessPipe_Manager_Object*)manager;
 
 #ifdef WIN32
+	retVal->WriteBuffer = ILibQueue_Create();
 	saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
 	saAttr.bInheritHandle = TRUE;
 	saAttr.lpSecurityDescriptor = NULL;
 
-	retVal->mPipe_ReadEnd = INVALID_HANDLE_VALUE;
+	server = INVALID_HANDLE_VALUE;
 	for (attempt = 0; attempt < ILibProcessPipe_PIPE_NAME_ATTEMPTS; ++attempt)
 	{
 		sprintf_s(pipeName, sizeof(pipeName), "\\\\.\\pipe\\ILibProcessPipe_%lu_%ld_%p", (unsigned long)GetCurrentProcessId(), (long)InterlockedIncrement(&ILibProcessPipe_PipeNameSequence), (void*)retVal);
-		retVal->mPipe_ReadEnd = CreateNamedPipeA(pipeName, FILE_FLAG_FIRST_PIPE_INSTANCE | PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE, 1, pipeBufferSize, pipeBufferSize, 0, &saAttr);
-		if (retVal->mPipe_ReadEnd != INVALID_HANDLE_VALUE) { break; }
+		server = CreateNamedPipeA(pipeName, FILE_FLAG_FIRST_PIPE_INSTANCE | (parentWrites ? PIPE_ACCESS_OUTBOUND : PIPE_ACCESS_INBOUND) | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS, 1, pipeBufferSize, pipeBufferSize, 0, &saAttr);
+		if (server != INVALID_HANDLE_VALUE) { break; }
 		createError = GetLastError();
 		// Only a name collision is worth another name; anything else (quota, handles) will not clear by retrying.
 		if (createError != ERROR_ACCESS_DENIED && createError != ERROR_PIPE_BUSY) { break; }
 	}
-	if (retVal->mPipe_ReadEnd == INVALID_HANDLE_VALUE)
+	if (parentWrites) { retVal->mPipe_WriteEnd = server; retVal->writeOverlappedHandle = 1; }
+	else { retVal->mPipe_ReadEnd = server; }
+	if (server == INVALID_HANDLE_VALUE)
 	{
 		ILibProcessPipe_CreatePipe_Abandon(retVal, createError, "[PROCESS_PIPE] CreateNamedPipe failed; spawn refused");
 		return NULL;
 	}
 
-	if ((retVal->mOverlapped = (struct _OVERLAPPED*)malloc(sizeof(struct _OVERLAPPED))) == NULL)
+	if (!parentWrites)
 	{
-		ILibProcessPipe_CreatePipe_Abandon(retVal, ERROR_OUTOFMEMORY, "[PROCESS_PIPE] overlapped allocation failed; spawn refused");
-		return NULL;
-	}
-	memset(retVal->mOverlapped, 0, sizeof(struct _OVERLAPPED));
-	if ((retVal->mOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
-	{
-		ILibProcessPipe_CreatePipe_Abandon(retVal, GetLastError(), "[PROCESS_PIPE] CreateEvent failed; spawn refused");
-		return NULL;
-	}
+		if ((retVal->mOverlapped = (struct _OVERLAPPED*)malloc(sizeof(struct _OVERLAPPED))) == NULL)
+		{
+			ILibProcessPipe_CreatePipe_Abandon(retVal, ERROR_OUTOFMEMORY, "[PROCESS_PIPE] overlapped allocation failed; spawn refused");
+			return NULL;
+		}
+		memset(retVal->mOverlapped, 0, sizeof(struct _OVERLAPPED));
+		if ((retVal->mOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
+		{
+			ILibProcessPipe_CreatePipe_Abandon(retVal, GetLastError(), "[PROCESS_PIPE] CreateEvent failed; spawn refused");
+			return NULL;
+		}
 
-	retVal->mPipe_WriteEnd = CreateFileA(pipeName, GENERIC_WRITE, 0, &saAttr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (retVal->mPipe_WriteEnd == INVALID_HANDLE_VALUE)
+	}
+	// The parent end is overlapped; ordinary child stdio must remain synchronous.
+	client = CreateFileA(pipeName, parentWrites ? GENERIC_READ : GENERIC_WRITE, 0, &saAttr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (parentWrites) { retVal->mPipe_ReadEnd = client; }
+	else { retVal->mPipe_WriteEnd = client; }
+	if (client == INVALID_HANDLE_VALUE)
 	{
 		ILibProcessPipe_CreatePipe_Abandon(retVal, GetLastError(), "[PROCESS_PIPE] pipe client open failed; spawn refused");
 		return NULL;
@@ -1546,11 +1642,21 @@ ILibProcessPipe_PipeObject* ILibProcessPipe_CreatePipe(ILibProcessPipe_Manager m
 	return retVal;
 }
 
+#ifdef WIN32
+ILibProcessPipe_PipeObject* ILibProcessPipe_CreatePipe(ILibProcessPipe_Manager manager, int pipeBufferSize, ILibProcessPipe_GenericBrokenPipeHandler brokenPipeHandler, int extraMemorySize)
+{
+	return ILibProcessPipe_CreatePipeEx(manager, pipeBufferSize, brokenPipeHandler, extraMemorySize, FALSE);
+}
+#endif
+
 void ILibProcessPipe_Process_Destroy(ILibProcessPipe_Process_Object *p)
 {
 	if (!ILibMemory_CanaryOK(p)) { return; }
 
 	if (p->exiting != 0) { return; }
+#ifdef WIN32
+	if (p->hProcess != NULL && p->chain != NULL) { ILibChain_RemoveWaitHandle(p->chain, p->hProcess); }
+#endif
 	// Pending read completions can keep a pipe alive after its process is freed.
 	// Detach the back-reference before asking the pipe to close.
 	if (p->stdIn != NULL) { p->stdIn->mProcess = NULL; ILibProcessPipe_FreePipe(p->stdIn); }
@@ -1746,7 +1852,7 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 
 	if (spawnType != ILibProcessPipe_SpawnTypes_DETACHED)
 	{
-		retVal->stdIn = ILibProcessPipe_CreatePipe(pipeManager, 4096, NULL, extraMemorySize);
+		retVal->stdIn = ILibProcessPipe_CreatePipeEx(pipeManager, 4096, NULL, extraMemorySize, TRUE);
 		retVal->stdOut = (retVal->stdIn != NULL) ? ILibProcessPipe_CreatePipe(pipeManager, 4096, NULL, extraMemorySize) : NULL;
 		if (retVal->stdIn == NULL || retVal->stdOut == NULL)
 		{
@@ -1762,9 +1868,17 @@ ILibProcessPipe_Process ILibProcessPipe_Manager_SpawnProcessEx4(ILibProcessPipe_
 		retVal->stdIn->mProcess = retVal;
 		retVal->stdOut->mProcess = retVal;
 
-		ILibProcessPipe_PipeObject_DisableInherit(&(retVal->stdIn->mPipe_WriteEnd));
-		ILibProcessPipe_PipeObject_DisableInherit(&(retVal->stdOut->mPipe_ReadEnd));
-		ILibProcessPipe_PipeObject_DisableInherit(&(retVal->stdErr->mPipe_ReadEnd));
+		if (!ILibProcessPipe_PipeObject_DisableInherit(&(retVal->stdIn->mPipe_WriteEnd)) ||
+			!ILibProcessPipe_PipeObject_DisableInherit(&(retVal->stdOut->mPipe_ReadEnd)) ||
+			!ILibProcessPipe_PipeObject_DisableInherit(&(retVal->stdErr->mPipe_ReadEnd)))
+		{
+			DWORD pipeError = GetLastError();
+			ILibProcessPipe_Process_Destroy(retVal);
+			if (allocParms != 0) { free(parms); }
+			ILibProcessPipe_Spawn_ReleaseUserContext(token, userToken, tokenEnvironment, destroyEnvironmentBlock, userEnvModule);
+			SetLastError(pipeError);
+			return NULL;
+		}
 
 		info.hStdError = retVal->stdErr->mPipe_WriteEnd;
 		info.hStdInput = retVal->stdIn->mPipe_ReadEnd;
@@ -2288,7 +2402,7 @@ void ILibProcessPipe_Process_ReadHandler(void* user)
 		if (pipeObject->PAUSED == 0)
 		{
 			pipeObject->inProgress = 1;
-			if (ReadFile(pipeObject->mPipe_ReadEnd, pipeObject->buffer + pipeObject->readOffset + pipeObject->totalRead, (DWORD)(pipeObject->bufferSize - pipeObject->totalRead), &bytesRead, pipeObject->mOverlapped) != TRUE)
+			if (ReadFile(pipeObject->mPipe_ReadEnd, pipeObject->buffer + pipeObject->readOffset + pipeObject->totalRead, (DWORD)(pipeObject->bufferSize - pipeObject->readOffset - pipeObject->totalRead), &bytesRead, pipeObject->mOverlapped) != TRUE)
 			{
 				if (GetLastError() == ERROR_IO_PENDING) { return(TRUE); }
 				break;
@@ -2342,80 +2456,151 @@ void ILibProcessPipe_Process_ReadHandler(void* user)
 #endif
 }
 #ifdef WIN32
+// Called with the queue lock held. A queued buffer stays owned until all bytes
+// are acknowledged; ERROR_IO_PENDING pins both it and OVERLAPPED across close.
+static ILibTransport_DoneState ILibProcessPipe_WindowsWritePump(ILibProcessPipe_PipeObject *p)
+{
+	ILibProcessPipe_WriteData *data;
+	DWORD written;
+	BOOL result;
+	OVERLAPPED *ov = ILibProcessPipe_GetWriteOverlapped(p);
+	if (ov == NULL) { return ILibTransport_DoneState_ERROR; }
+	while ((data = (ILibProcessPipe_WriteData*)ILibQueue_PeekQueue(p->WriteBuffer)) != NULL)
+	{
+		if (data->offset == data->bufferLen)
+		{
+			ILibQueue_DeQueue(p->WriteBuffer);
+			p->writeQueuedBytes -= (size_t)data->bufferLen;
+			ILibProcessPipe_WriteData_Destroy(data);
+			continue;
+		}
+		ResetEvent(ov->hEvent);
+		written = 0;
+		result = WriteFile(p->mPipe_WriteEnd, data->buffer + data->offset, (DWORD)(data->bufferLen - data->offset), &written, ov);
+		if (!result)
+		{
+			if (GetLastError() != ERROR_IO_PENDING) { return ILibTransport_DoneState_ERROR; }
+			InterlockedExchange(&p->pendingWrite, 1);
+			return ILibTransport_DoneState_INCOMPLETE;
+		}
+		if (written == 0 || written > (DWORD)(data->bufferLen - data->offset)) { return ILibTransport_DoneState_ERROR; }
+		data->offset += (int)written;
+	}
+	if (p->writeClosing && p->mPipe_WriteEnd != NULL)
+	{
+		CloseHandle(p->mPipe_WriteEnd);
+		p->mPipe_WriteEnd = NULL;
+	}
+	return ILibTransport_DoneState_COMPLETE;
+}
 BOOL ILibProcessPipe_Process_WindowsWriteHandler(void *chain, HANDLE event, ILibWaitHandle_ErrorStatus errors, void* user)
 {
-	ILibProcessPipe_PipeObject *pipeObject = (ILibProcessPipe_PipeObject*)user;
-	OVERLAPPED* writeOverlapped = ILibProcessPipe_GetWriteOverlapped(pipeObject);
-	BOOL result;
-	BOOL keepWaitHandle = TRUE;
-	DWORD bytesWritten;
-	ILibProcessPipe_WriteData* data;
-	
+	ILibProcessPipe_PipeObject *p = (ILibProcessPipe_PipeObject*)user;
+	ILibProcessPipe_WriteData *data;
+	ILibTransport_DoneState state = ILibTransport_DoneState_ERROR;
+	DWORD written = 0, error;
+	BOOL result, keep;
 	UNREFERENCED_PARAMETER(event);
-	if (errors != ILibWaitHandle_ErrorStatus_NONE || pipeObject == NULL || !ILibMemory_CanaryOK(pipeObject)) { return(FALSE); }
-	InterlockedExchange(&pipeObject->activeWriteHandler, 1);
-	if (writeOverlapped == NULL) { keepWaitHandle = FALSE; goto done; }
-	if (ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) != 0)
+	if (p == NULL || !ILibMemory_CanaryOK(p)) { return FALSE; }
+	InterlockedIncrement(&p->activeWriteHandler);
+	ILibQueue_Lock(p->WriteBuffer);
+	result = GetOverlappedResult(p->mPipe_WriteEnd, p->mwOverlapped, &written, FALSE);
+	error = result ? ERROR_SUCCESS : GetLastError();
+	if (!result && (error == ERROR_IO_INCOMPLETE || error == ERROR_IO_PENDING))
 	{
-		ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent);
-		keepWaitHandle = FALSE;
-		goto done;
-	}
-	result = GetOverlappedResult(pipeObject->mPipe_WriteEnd, writeOverlapped, &bytesWritten, FALSE);
-	if (result == FALSE)
-	{ 
-		// Broken Pipe
-		ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent);
-		ILibRemoteLogging_printf(ILibChainGetLogger(pipeObject->manager->ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_Pipe, ILibRemoteLogging_Flags_VerbosityLevel_1, "ILibProcessPipe[WriteHandler]: BrokenPipe(%d) on Pipe: %p", GetLastError(), (void*)pipeObject);
-		if (pipeObject->brokenPipeHandler != NULL) { ((ILibProcessPipe_GenericBrokenPipeHandler)pipeObject->brokenPipeHandler)(pipeObject); }
-		ILibProcessPipe_FreePipe(pipeObject);
-		keepWaitHandle = FALSE;
-		goto done;
-	}
-
-	ILibQueue_Lock(pipeObject->WriteBuffer);
-	while ((data = (ILibProcessPipe_WriteData*)ILibQueue_DeQueue(pipeObject->WriteBuffer)) != NULL)
-	{
-		ILibProcessPipe_WriteData_Destroy(data);
-		data = (ILibProcessPipe_WriteData*)ILibQueue_PeekQueue(pipeObject->WriteBuffer);
-		if (data != NULL)
+		// CancelIoEx can return before the completion. Never retire this wait early,
+		// unless the chain reported a failed wait: it drops the registration after that,
+		// so no completion callback would ever arrive. If cancellation cannot be confirmed
+		// the OVERLAPPED and head buffer stay pinned; leaking them is safe, freeing is not.
+		if (errors == ILibWaitHandle_ErrorStatus_NONE || !ILibChain_RetireCancelledIo(p->mPipe_WriteEnd, p->mwOverlapped))
 		{
-			result = WriteFile(pipeObject->mPipe_WriteEnd, data->buffer, data->bufferLen, NULL, writeOverlapped);
-			if (result == TRUE) { continue; }
-			if (GetLastError() != ERROR_IO_PENDING)
-			{
-				// Broken Pipe
-				ILibQueue_UnLock(pipeObject->WriteBuffer);
-				ILibRemoteLogging_printf(ILibChainGetLogger(pipeObject->manager->ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_Pipe, ILibRemoteLogging_Flags_VerbosityLevel_1, "ILibProcessPipe[WriteHandler]: BrokenPipe(%d) on Pipe: %p", GetLastError(), (void*)pipeObject);
-				ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent);
-				if (pipeObject->brokenPipeHandler != NULL) { ((ILibProcessPipe_GenericBrokenPipeHandler)pipeObject->brokenPipeHandler)(pipeObject); }
-				ILibProcessPipe_FreePipe(pipeObject);
-				keepWaitHandle = FALSE;
-				goto done;
-			}
-			break;
+			ILibQueue_UnLock(p->WriteBuffer);
+			InterlockedDecrement(&p->activeWriteHandler);
+			return errors == ILibWaitHandle_ErrorStatus_NONE;
+		}
+		result = FALSE;
+	}
+	InterlockedExchange(&p->pendingWrite, 0);
+	if (ILibProcessPipe_GetStateLong(&p->closeRequested) == 0)
+	{
+		data = (ILibProcessPipe_WriteData*)ILibQueue_PeekQueue(p->WriteBuffer);
+		if (result && data != NULL && written != 0 && written <= (DWORD)(data->bufferLen - data->offset))
+		{
+			data->offset += (int)written;
+			state = ILibProcessPipe_WindowsWritePump(p);
 		}
 	}
-	if (ILibQueue_IsEmpty(pipeObject->WriteBuffer) != 0)
+	keep = ILibProcessPipe_GetStateLong(&p->pendingWrite) != 0;
+	ILibQueue_UnLock(p->WriteBuffer);
+	if (!keep) { ILibChain_RemoveWaitHandleEx(chain, p->mwOverlapped->hEvent, 0); }
+	if (ILibProcessPipe_GetStateLong(&p->closeRequested) == 0)
 	{
-		ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent);
-		ILibQueue_UnLock(pipeObject->WriteBuffer);
-		if (pipeObject->handler != NULL) ((ILibProcessPipe_GenericSendOKHandler)pipeObject->handler)(pipeObject->user1, pipeObject->user2);
-		keepWaitHandle = FALSE;
+		if (state == ILibTransport_DoneState_ERROR)
+		{
+			if (p->brokenPipeHandler != NULL) { p->brokenPipeHandler(p); }
+			ILibProcessPipe_FreePipe(p);
+		}
+		else if (state == ILibTransport_DoneState_COMPLETE && p->handler != NULL)
+		{
+			((ILibProcessPipe_GenericSendOKHandler)p->handler)(p->user1, p->user2);
+		}
 	}
-	else
+	// User callbacks may synchronously close this pipe or enqueue another write.
+	keep = ILibProcessPipe_GetStateLong(&p->pendingWrite) != 0;
+	InterlockedDecrement(&p->activeWriteHandler);
+	if (ILibProcessPipe_GetStateLong(&p->closeRequested) != 0) { ILibProcessPipe_FreePipe_TryFinalizeOnChain(chain, p); }
+	return keep;
+}
+static ILibTransport_DoneState ILibProcessPipe_WindowsWrite(ILibProcessPipe_PipeObject *p, char *buffer, int length, ILibTransport_MemoryOwnership ownership)
+{
+	ILibProcessPipe_WriteData *data;
+	ILibTransport_DoneState state = ILibTransport_DoneState_ERROR;
+	BOOL refused = FALSE;
+	void *chain;
+	if (p == NULL || !ILibMemory_CanaryOK(p) || length < 0 || (length > 0 && buffer == NULL)) { return state; }
+	InterlockedIncrement(&p->activeWriteHandler);
+	chain = p->manager != NULL ? p->manager->ChainLink.ParentChain : NULL;
+	if (p->WriteBuffer == NULL) { p->WriteBuffer = ILibQueue_Create(); }
+	ILibQueue_Lock(p->WriteBuffer);
+	if (ILibProcessPipe_GetStateLong(&p->closeRequested) != 0 || p->writeClosing ||
+		!p->writeOverlappedHandle || chain == NULL || p->mPipe_WriteEnd == NULL ||
+		(ILibProcessPipe_GetStateLong(&p->pendingWrite) != 0 && ILibQueue_IsEmpty(p->WriteBuffer)))
 	{
-		ILibQueue_UnLock(pipeObject->WriteBuffer);
+		// Reject this request without cancelling an earlier write or destroying the pipe.
+		refused = TRUE;
+		if (ownership == ILibTransport_MemoryOwnership_CHAIN) { free(buffer); }
 	}
-done:
-	InterlockedExchange(&pipeObject->activeWriteHandler, 0);
-	if (ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) != 0 &&
-		ILibProcessPipe_GetStateLong(&pipeObject->activeReadCallbacks) == 0 &&
-		ILibProcessPipe_GetStateLong(&pipeObject->resumePending) == 0)
+	else if ((size_t)length > ILibProcessPipe_MAX_QUEUED_WRITE_BYTES - p->writeQueuedBytes)
 	{
-		ILibProcessPipe_FreePipe_TryFinalizeOnChain(chain, pipeObject);
+		// Fail closed: the child gets EOF instead of a stream with a gap in it.
+		if (ownership == ILibTransport_MemoryOwnership_CHAIN) { free(buffer); }
 	}
-	return(keepWaitHandle);
+	else if ((data = ILibProcessPipe_WriteData_Create(buffer, length, ownership)) != NULL)
+	{
+		ILibQueue_EnQueue(p->WriteBuffer, data);
+		p->writeQueuedBytes += (size_t)length;
+		if (ILibProcessPipe_GetStateLong(&p->pendingWrite) != 0) { state = ILibTransport_DoneState_INCOMPLETE; }
+		else
+		{
+			state = ILibProcessPipe_WindowsWritePump(p);
+			if (state == ILibTransport_DoneState_INCOMPLETE)
+			{
+				// The ILibChain_AddWaitHandle macro allocates metadata that the chain only copies,
+				// leaking on every registration; per-write and per-resume sites pass a literal.
+				ILibChain_AddWaitHandleEx(chain, p->mwOverlapped->hEvent, -1, ILibProcessPipe_Process_WindowsWriteHandler, p, "ILibProcessPipe stdin write");
+			}
+		}
+	}
+	else if (ownership == ILibTransport_MemoryOwnership_CHAIN) { free(buffer); }
+	ILibQueue_UnLock(p->WriteBuffer);
+	if (!refused && state == ILibTransport_DoneState_ERROR && ILibProcessPipe_GetStateLong(&p->closeRequested) == 0)
+	{
+		if (p->brokenPipeHandler != NULL) { p->brokenPipeHandler(p); }
+		ILibProcessPipe_FreePipe(p);
+	}
+	InterlockedDecrement(&p->activeWriteHandler);
+	if (ILibProcessPipe_GetStateLong(&p->closeRequested) != 0) { ILibProcessPipe_FreePipe_TryFinalize(p); }
+	return state;
 }
 #endif
 void ILibProcessPipe_Process_SetWriteHandler(ILibProcessPipe_PipeObject *pipeObject, ILibProcessPipe_GenericSendOKHandler handler, void* user1, void* user2)
@@ -2518,7 +2703,7 @@ void ILibProcessPipe_Pipe_ResumeEx(ILibProcessPipe_PipeObject* p)
 	ILibRemoteLogging_printf(ILibChainGetLogger(p->manager->ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_Generic, ILibRemoteLogging_Flags_VerbosityLevel_1, "ProcessPipe.ResumeEx(): processingLoop = %d", p->processingLoop);
 
 #ifdef WIN32
-	ILibChain_AddWaitHandle(p->manager->ChainLink.ParentChain, p->mOverlapped->hEvent, -1, ILibProcessPipe_Process_ReadHandler, p);
+	ILibChain_AddWaitHandleEx(p->manager->ChainLink.ParentChain, p->mOverlapped->hEvent, -1, ILibProcessPipe_Process_ReadHandler, p, "ILibProcessPipe read");
 	p->PAUSED = 0;
 #else
 	ILibProcessPipe_Pipe_ResumeEx_ContinueProcessing(p);
@@ -2549,7 +2734,7 @@ static void ILibProcessPipe_Pipe_Resume_Continue(ILibProcessPipe_PipeObject *p)
 	if (p->mProcess != NULL && p->mProcess->hProcess_needAdd != 0 && p->mProcess->disabled == 0)
 	{
 		p->mProcess->hProcess_needAdd = 0;
-		ILibChain_AddWaitHandle(p->manager->ChainLink.ParentChain, p->mProcess->hProcess, -1, ILibProcessPipe_Process_OnExit, p->mProcess);
+		ILibChain_AddWaitHandleEx(p->manager->ChainLink.ParentChain, p->mProcess->hProcess, -1, ILibProcessPipe_Process_OnExit, p->mProcess, "ILibProcessPipe process exit");
 	}
 	if (InterlockedDecrement(&p->activeReadCallbacks) == 0 &&
 		ILibProcessPipe_GetStateLong(&p->closeRequested) != 0 &&
@@ -2869,6 +3054,11 @@ void ILibProcessPipe_Process_StartPipeReaderEx(ILibProcessPipe_PipeObject *pipeO
 void ILibProcessPipe_Process_PipeHandler_StdOut(char *buffer, size_t bufferLen, size_t* bytesConsumed, void* user1, void *user2)
 {
 	ILibProcessPipe_Process_Object *j = (ILibProcessPipe_Process_Object*)user1;
+	// RemoveHandlers means the owner (a collected JS object or closed container) is gone;
+	// its userObject must not be touched. Discard the output so the pipe keeps draining.
+#ifdef WIN32
+	if (!ILibMemory_CanaryOK(j) || j->disabled != 0) { *bytesConsumed = bufferLen; return; }
+#endif
 	if (user2 != NULL)
 	{
 		((ILibProcessPipe_Process_OutputHandler)user2)(j, buffer, bufferLen, bytesConsumed, j->userObject);
@@ -2879,6 +3069,10 @@ void ILibProcessPipe_Process_PipeHandler_StdIn(void *user1, void *user2)
 	ILibProcessPipe_Process_Object* j = (ILibProcessPipe_Process_Object*)user1;
 	ILibProcessPipe_Process_SendOKHandler sendOk = (ILibProcessPipe_Process_SendOKHandler)user2;
 
+	// Stdin writes now complete asynchronously, so one can finish after RemoveHandlers.
+#ifdef WIN32
+	if (!ILibMemory_CanaryOK(j) || j->disabled != 0) { return; }
+#endif
 	if (sendOk != NULL) sendOk(j, j->userObject);
 }
 
@@ -2888,7 +3082,7 @@ void ILibProcessPipe_Process_OnExit_ChainSink(void *chain, void *user)
 	ILibProcessPipe_Process_Object* j = (ILibProcessPipe_Process_Object*)user;
 	DWORD exitCode;
 	BOOL result;
-	if (j->disabled != 0) { return; }
+	if (j->disabled != 0) { ILibProcessPipe_Process_Destroy(j); return; }
 
 	result = GetExitCodeProcess(j->hProcess, &exitCode);
 	j->exiting = 1;
@@ -2911,7 +3105,7 @@ BOOL ILibProcessPipe_Process_OnExit(void *chain, HANDLE event, ILibWaitHandle_Er
 	UNREFERENCED_PARAMETER(event);
 	ILibChain_RemoveWaitHandle(j->chain, j->hProcess);
 
-	if ((j->stdOut->PAUSED != 0 && j->stdOut->totalRead > 0) || (j->stdErr->PAUSED != 0 && j->stdErr->totalRead > 0))
+	if (j->disabled == 0 && ((j->stdOut != NULL && j->stdOut->PAUSED != 0 && j->stdOut->totalRead > 0) || (j->stdErr != NULL && j->stdErr->PAUSED != 0 && j->stdErr->totalRead > 0)))
 	{
 		j->hProcess_needAdd = 1;
 		return(TRUE);
@@ -2941,7 +3135,15 @@ void ILibProcessPipe_Process_RemoveHandlers(ILibProcessPipe_Process module)
 	if (j != NULL && ILibMemory_CanaryOK(j))
 	{
 		j->disabled = 1;
-		ILibChain_RemoveWaitHandle(j->chain, j->hProcess);
+		j->userObject = NULL;
+		j->exitHandler = NULL;
+		// Keep observing native exit after the owner is gone. A paused output stream
+		// may already have deferred this wait; there is no owner left to resume it.
+		if (j->hProcess_needAdd != 0 && j->hProcess != NULL)
+		{
+			j->hProcess_needAdd = 0;
+			ILibChain_AddWaitHandleEx(j->chain, j->hProcess, -1, ILibProcessPipe_Process_OnExit, j, j->metadata);
+		}
 	}
 }
 #endif
@@ -2977,43 +3179,44 @@ void ILibProcessPipe_Process_GetWaitHandles(ILibProcessPipe_Process p, HANDLE *h
 	if (hProcess != NULL) { *hProcess = j->hProcess; }
 	if (read != NULL && j->stdOut != NULL && j->stdOut->mOverlapped != NULL) { *read = j->stdOut->mOverlapped->hEvent; }
 	if (error != NULL && j->stdErr != NULL && j->stdErr->mOverlapped != NULL) { *error = j->stdErr->mOverlapped->hEvent; }
-	if (write != NULL && j->stdIn != NULL && j->stdIn->mOverlapped != NULL) { *write = j->stdIn->mOverlapped->hEvent; }
+	if (write != NULL && j->stdIn != NULL && j->stdIn->mwOverlapped != NULL) { *write = j->stdIn->mwOverlapped->hEvent; }
 }
 #endif
 void ILibProcessPipe_Pipe_Close(ILibProcessPipe_Pipe po)
 {
 	ILibProcessPipe_PipeObject* pipeObject = (ILibProcessPipe_PipeObject*)po;
-	if (pipeObject != NULL)
+	if (pipeObject != NULL && ILibMemory_CanaryOK(pipeObject))
 	{
 #ifdef WIN32
-		CloseHandle(pipeObject->mPipe_WriteEnd);
-		pipeObject->mPipe_WriteEnd = NULL;
+		// end() means EOF after queued bytes drain. Forced destruction uses CancelIoEx.
+		if (pipeObject->WriteBuffer != NULL) { ILibQueue_Lock(pipeObject->WriteBuffer); }
+		pipeObject->writeClosing = 1;
+		if (ILibProcessPipe_GetStateLong(&pipeObject->pendingWrite) == 0 &&
+			(pipeObject->WriteBuffer == NULL || ILibQueue_IsEmpty(pipeObject->WriteBuffer)))
+		{
+			if (pipeObject->mPipe_WriteEnd != NULL) { CloseHandle(pipeObject->mPipe_WriteEnd); pipeObject->mPipe_WriteEnd = NULL; }
+		}
+		if (pipeObject->WriteBuffer != NULL) { ILibQueue_UnLock(pipeObject->WriteBuffer); }
 #else
-		close(pipeObject->mPipe_WriteEnd);
-		pipeObject->mPipe_WriteEnd = -1;
+		if (pipeObject->mPipe_WriteEnd != -1) { close(pipeObject->mPipe_WriteEnd); pipeObject->mPipe_WriteEnd = -1; }
 #endif
 	}
 }
 
 ILibTransport_DoneState ILibProcessPipe_Pipe_Write(ILibProcessPipe_Pipe po, char* buffer, int bufferLen, ILibTransport_MemoryOwnership ownership)
 {
+#ifdef WIN32
+	return ILibProcessPipe_WindowsWrite((ILibProcessPipe_PipeObject*)po, buffer, bufferLen, ownership);
+#else
+
 	ILibProcessPipe_PipeObject* pipeObject = (ILibProcessPipe_PipeObject*)po;
 	ILibTransport_DoneState retVal = ILibTransport_DoneState_ERROR;
 	ILibProcessPipe_WriteData* pendingData = NULL;
-#ifdef WIN32
-	OVERLAPPED* writeOverlapped = NULL;
-#endif
 
 	if (pipeObject == NULL)
 	{
 		return(ILibTransport_DoneState_ERROR);
 	}
-#ifdef WIN32
-	if (ILibProcessPipe_GetStateLong(&pipeObject->closeRequested) != 0)
-	{
-		return(ILibTransport_DoneState_ERROR);
-	}
-#endif
 
 	if (pipeObject->WriteBuffer == NULL)
 	{
@@ -3027,24 +3230,6 @@ ILibTransport_DoneState ILibProcessPipe_Pipe_Write(ILibProcessPipe_Pipe po, char
 	}
 	else
 	{
-#ifdef WIN32
-		BOOL result;
-		pendingData = ILibProcessPipe_WriteData_Create(buffer, bufferLen, ownership);
-		writeOverlapped = ILibProcessPipe_GetWriteOverlapped(pipeObject);
-		if (writeOverlapped == NULL)
-		{
-			if (pendingData != NULL) { ILibProcessPipe_WriteData_Destroy(pendingData); }
-			ILibQueue_UnLock(pipeObject->WriteBuffer);
-			return(ILibTransport_DoneState_ERROR);
-		}
-		result = WriteFile(pipeObject->mPipe_WriteEnd, pendingData->buffer, pendingData->bufferLen, NULL, writeOverlapped);
-		if (result == TRUE)
-		{
-			retVal = ILibTransport_DoneState_COMPLETE;
-			ILibProcessPipe_WriteData_Destroy(pendingData);
-			pendingData = NULL;
-		}
-#else
 		int result = (int)write(pipeObject->mPipe_WriteEnd, buffer, bufferLen);
 		while (result >= 0 && result < bufferLen)
 		{
@@ -3053,43 +3238,24 @@ ILibTransport_DoneState ILibProcessPipe_Pipe_Write(ILibProcessPipe_Pipe po, char
 			result = (int)write(pipeObject->mPipe_WriteEnd, buffer, bufferLen);
 		}
 		if (result == bufferLen) { retVal = ILibTransport_DoneState_COMPLETE; }
-#endif
 		else
 		{
-#ifdef WIN32
-			if (GetLastError() == ERROR_IO_PENDING)
-#else
 			if (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-#endif
 			{
 				retVal = ILibTransport_DoneState_INCOMPLETE;
 				ILibQueue_EnQueue(pipeObject->WriteBuffer, pendingData);
 				pendingData = NULL;
-#ifdef WIN32
-				ILibChain_AddWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent, -1, ILibProcessPipe_Process_WindowsWriteHandler, pipeObject);
-#else
 				ILibLifeTime_Add(ILibGetBaseTimer(pipeObject->manager->ChainLink.ParentChain), pipeObject, 0, &ILibProcessPipe_Process_StartPipeReaderWriterEx, NULL); // Need to context switch to Chain Thread
-#endif
 			}
 			else
 			{
 				if (pipeObject->manager != NULL)
 				{
-#ifdef WIN32
-					ILibRemoteLogging_printf(ILibChainGetLogger(pipeObject->manager->ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_Pipe, ILibRemoteLogging_Flags_VerbosityLevel_1, "ILibProcessPipe[Write]: BrokenPipe(%d) on Pipe: %p", GetLastError(), (void*)pipeObject);
-#else
 					ILibRemoteLogging_printf(ILibChainGetLogger(pipeObject->manager->ChainLink.ParentChain), ILibRemoteLogging_Modules_Microstack_Pipe, ILibRemoteLogging_Flags_VerbosityLevel_1, "ILibProcessPipe[Write]: BrokenPipe(%d) on Pipe: %p", result < 0 ? errno : 0, (void*)pipeObject);
-#endif
 				}
 				ILibQueue_UnLock(pipeObject->WriteBuffer);
 				if (pipeObject->brokenPipeHandler != NULL)
 				{
-#ifdef WIN32
-					if (pipeObject->manager != NULL)
-					{
-						ILibChain_RemoveWaitHandle(pipeObject->manager->ChainLink.ParentChain, writeOverlapped->hEvent);
-					}
-#endif
 					if (pendingData != NULL) { ILibProcessPipe_WriteData_Destroy(pendingData); pendingData = NULL; }
 					((ILibProcessPipe_GenericBrokenPipeHandler)pipeObject->brokenPipeHandler)(pipeObject);
 				}
@@ -3106,7 +3272,9 @@ ILibTransport_DoneState ILibProcessPipe_Pipe_Write(ILibProcessPipe_Pipe po, char
 	ILibQueue_UnLock(pipeObject->WriteBuffer);
 	
 	return retVal;
+#endif
 }
+
 void ILibProcessPipe_Process_CloseStdIn(ILibProcessPipe_Process p)
 {
 	ILibProcessPipe_Process_Object *j = (ILibProcessPipe_Process_Object*)p;
@@ -3184,7 +3352,7 @@ int ILibProcessPipe_Pipe_ReadEx(ILibProcessPipe_Pipe targetPipe, char *buffer, i
 			j->bufferOwner = ILibTransport_MemoryOwnership_USER;
 			j->user1 = user;
 			j->user2 = OnReadHandler;
-			ILibChain_AddWaitHandle(j->manager->ChainLink.ParentChain, j->mOverlapped->hEvent, -1, ILibProcessPipe_Pipe_ReadEx_sink, j);
+			ILibChain_AddWaitHandleEx(j->manager->ChainLink.ParentChain, j->mOverlapped->hEvent, -1, ILibProcessPipe_Pipe_ReadEx_sink, j, "ILibProcessPipe readex");
 		}
 		else
 		{
@@ -3196,88 +3364,75 @@ int ILibProcessPipe_Pipe_ReadEx(ILibProcessPipe_Pipe targetPipe, char *buffer, i
 BOOL ILibProcessPipe_Pipe_WriteEx_sink(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, void* user)
 {
 	ILibProcessPipe_PipeObject *j = (ILibProcessPipe_PipeObject*)user;
-	DWORD bytesWritten;
-
-	if (GetOverlappedResult(j->mPipe_WriteEnd, j->mwOverlapped, &bytesWritten, FALSE))
+	DWORD bytesWritten = 0, error;
+	BOOL result;
+	UNREFERENCED_PARAMETER(h);
+	if (j == NULL || !ILibMemory_CanaryOK(j)) { return FALSE; }
+	InterlockedIncrement(&j->activeWriteHandler);
+	result = GetOverlappedResult(j->mPipe_WriteEnd, j->mwOverlapped, &bytesWritten, FALSE);
+	error = result ? ERROR_SUCCESS : GetLastError();
+	if (!result && (error == ERROR_IO_INCOMPLETE || error == ERROR_IO_PENDING))
 	{
-		if (j->user4 != NULL)
+		// As in the queued handler: retire only after a failed wait, and only once the
+		// kernel has released the OVERLAPPED; otherwise keep it pinned.
+		if (status == ILibWaitHandle_ErrorStatus_NONE || !ILibChain_RetireCancelledIo(j->mPipe_WriteEnd, j->mwOverlapped))
 		{
-			((ILibProcessPipe_Pipe_WriteExHandler)j->user4)(j, j->user3, bytesWritten > 0 ? 0 : 1, (int)bytesWritten);
+			InterlockedDecrement(&j->activeWriteHandler);
+			return status == ILibWaitHandle_ErrorStatus_NONE;
 		}
+		result = FALSE;
+		bytesWritten = 0;
 	}
-	else
+	InterlockedExchange(&j->pendingWrite, 0);
+	ILibChain_RemoveWaitHandleEx(chain, j->mwOverlapped->hEvent, 0);
+	if (j->writeClosing && j->mPipe_WriteEnd != NULL) { CloseHandle(j->mPipe_WriteEnd); j->mPipe_WriteEnd = NULL; }
+	if (ILibProcessPipe_GetStateLong(&j->closeRequested) == 0 && j->user4 != NULL)
 	{
-		if (GetLastError() == ERROR_IO_PENDING)
-		{
-			return(TRUE);
-		}
-		else
-		{
-			if (j->user4 != NULL)
-			{
-				((ILibProcessPipe_Pipe_WriteExHandler)j->user4)(j, j->user3, 1, 0);
-			}
-		}
+		ILibProcessPipe_Pipe_WriteExHandler callback = (ILibProcessPipe_Pipe_WriteExHandler)j->user4;
+		void *context = j->user3;
+		j->user3 = NULL; j->user4 = NULL;
+		callback(j, context, result && bytesWritten > 0 ? 0 : 1, (int)bytesWritten);
 	}
-	return(FALSE);
+	InterlockedDecrement(&j->activeWriteHandler);
+	if (ILibProcessPipe_GetStateLong(&j->closeRequested) != 0) { ILibProcessPipe_FreePipe_TryFinalizeOnChain(chain, j); }
+	return FALSE;
 }
 ILibTransport_DoneState ILibProcessPipe_Pipe_WriteEx(ILibProcessPipe_Pipe targetPipe, char *buffer, int bufferLength, void *user, ILibProcessPipe_Pipe_WriteExHandler OnWriteHandler)
 {
 	ILibProcessPipe_PipeObject *j = (ILibProcessPipe_PipeObject*)targetPipe;
-	if (j->mwOverlapped == NULL)
+	DWORD bytesWritten = 0;
+	BOOL result;
+	ILibTransport_DoneState state = ILibTransport_DoneState_ERROR;
+	void *chain;
+	if (j == NULL || !ILibMemory_CanaryOK(j) || bufferLength < 0 || (bufferLength > 0 && buffer == NULL)) { return state; }
+	InterlockedIncrement(&j->activeWriteHandler);
+	chain = j->manager != NULL ? j->manager->ChainLink.ParentChain : NULL;
+	if (j->WriteBuffer == NULL) { j->WriteBuffer = ILibQueue_Create(); }
+	ILibQueue_Lock(j->WriteBuffer);
+	// Never reuse an OVERLAPPED that belongs to a queued or direct pending write.
+	if (ILibProcessPipe_GetStateLong(&j->closeRequested) == 0 && !j->writeClosing && j->writeOverlappedHandle &&
+		chain != NULL && j->mPipe_WriteEnd != NULL && ILibProcessPipe_GetStateLong(&j->pendingWrite) == 0 &&
+		ILibQueue_IsEmpty(j->WriteBuffer) && ILibProcessPipe_GetWriteOverlapped(j) != NULL)
 	{
-		void **extra;
-		j->mwOverlapped = (OVERLAPPED*)ILibMemory_Allocate(sizeof(OVERLAPPED), sizeof(void*), NULL, (void**)&extra);
-		if ((j->mwOverlapped->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
+		ResetEvent(j->mwOverlapped->hEvent);
+		result = WriteFile(j->mPipe_WriteEnd, buffer, (DWORD)bufferLength, &bytesWritten, j->mwOverlapped);
+		if (result) { state = ILibTransport_DoneState_COMPLETE; }
+		else if (GetLastError() == ERROR_IO_PENDING)
 		{
-			// Report it like any other write error; event exhaustion must not end the agent.
-			ILibCriticalLog("[PROCESS_PIPE] write event creation failed; write refused", __FILE__, __LINE__, 0, (int)GetLastError());
-			free(j->mwOverlapped);
-			j->mwOverlapped = NULL;
-			if (OnWriteHandler != NULL) { OnWriteHandler(j, user, 1, 0); }
-			return(ILibTransport_DoneState_ERROR);
+			j->user3 = user; j->user4 = OnWriteHandler;
+			InterlockedExchange(&j->pendingWrite, 1);
+			ILibChain_AddWaitHandleEx(chain, j->mwOverlapped->hEvent, -1, ILibProcessPipe_Pipe_WriteEx_sink, j, "ILibProcessPipe writeex");
+			state = ILibTransport_DoneState_INCOMPLETE;
 		}
-		extra[0] = j;
 	}
-	j->user3 = user;
-	j->user4 = OnWriteHandler;
-
-	if (!WriteFile(j->mPipe_WriteEnd, buffer, bufferLength, NULL, j->mwOverlapped))
+	ILibQueue_UnLock(j->WriteBuffer);
+	if (state != ILibTransport_DoneState_INCOMPLETE && OnWriteHandler != NULL && ILibProcessPipe_GetStateLong(&j->closeRequested) == 0)
 	{
-		if (GetLastError() == ERROR_IO_PENDING)
-		{
-			ILibChain_AddWaitHandle(j->manager->ChainLink.ParentChain, j->mwOverlapped->hEvent, -1, ILibProcessPipe_Pipe_WriteEx_sink, j);
-			return(ILibTransport_DoneState_INCOMPLETE);
-		}
-		// Error
-		if (OnWriteHandler != NULL) { OnWriteHandler(j, user, 1, 0); }
-		return(ILibTransport_DoneState_ERROR);
+		OnWriteHandler(j, user, state == ILibTransport_DoneState_COMPLETE ? 0 : 1, (int)bytesWritten);
 	}
-	else
-	{
-		// Write completed
-		if (OnWriteHandler != NULL) { OnWriteHandler(j, user, 0, bufferLength); }
-		return(ILibTransport_DoneState_COMPLETE);
-	}
-
-
-//	ILibProcessPipe_PipeObject *j = (ILibProcessPipe_PipeObject*)targetPipe;
-//	if (j->mwOverlapped == NULL)
-//	{
-//		void **extra;
-//		j->mwOverlapped = (OVERLAPPED*)ILibMemory_Allocate(sizeof(OVERLAPPED), sizeof(void*), NULL, (void**)&extra);
-//		extra[0] = j;
-//}
-//	j->user3 = user;
-//	j->user4 = OnWriteHandler;
-//	if (!WriteFileEx(j->mPipe_WriteEnd, buffer, bufferLength, j->mwOverlapped, ILibProcessPipe_Pipe_Write_CompletionRoutine))
-//	{
-//		return(GetLastError());
-//	}
-//	else
-//	{
-//		return(0);
-//	}
+	InterlockedDecrement(&j->activeWriteHandler);
+	if (ILibProcessPipe_GetStateLong(&j->closeRequested) != 0) { ILibProcessPipe_FreePipe_TryFinalize(j); }
+	return state;
 }
 DWORD ILibProcessPipe_Process_GetPID(ILibProcessPipe_Process p) { return(p != NULL ? (DWORD)((ILibProcessPipe_Process_Object*)p)->PID : 0); }
 #else

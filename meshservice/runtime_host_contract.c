@@ -3445,3 +3445,18 @@ void CALLBACK MeshConsoleBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine
     ServiceDeploy_LogInstallEvent(L"[CONSOLE_BRIDGE] Completed exit=%lu", (unsigned long)exitCode);
     ExitProcess(exitCode);
 }
+
+#include "clipboard_bridge.h"
+
+void CALLBACK MeshClipboardBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
+{
+    wchar_t tail[4096] = {0};
+    DWORD error;
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(nCmdShow);
+    if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_CLIPBOARD_BRIDGE_W, lpCmdLine, tail, _countof(tail)))
+    { ExitProcess(ERROR_INVALID_PARAMETER); }
+    error = MeshClipboard_Run(tail, hinstDLL);
+    // The parent receives errors as operation status or process exit; never log clipboard text.
+    ExitProcess(error);
+}

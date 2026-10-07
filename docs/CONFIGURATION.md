@@ -159,12 +159,46 @@ close their service and SCM handles before returning a reply.
 Interactive terminals and run commands use `MeshConsoleBridgeW`. The bridge
 must send its ready marker before input is flushed; a startup failure closes the
 tunnel with an error. `win-virtual-terminal` remains a compatibility alias.
-Clipboard dispatch reuses the console bridge in the interactive user's session
-with `token=session-user`, running Windows PowerShell clipboard commands. It
-does not start a ScriptContainer, create another callback export, or fall back
-to the service identity. Clipboard operations have a 30-second bound and a
-1 MiB text input limit. An elevated administrator alone cannot call
-`WTSQueryUserToken`; the service performs the session transition.
+Clipboard dispatch uses the native `MeshClipboardBridgeW` callback and Win32
+Unicode clipboard APIs. A broker selects the explicit WTS session-user token,
+verifies the suspended child before resuming it, and keeps that helper in a job
+that terminates it when the broker exits. A private, local-only pipe restricts
+access to SYSTEM and that user and verifies the child PID. Each request verifies
+the original logon AuthenticationId, so session ID reuse cannot retain an old
+user helper. Clipboard text never
+appears in command arguments or helper logs. A write owns the clipboard through
+a message-only window that exists only for that write, so an idle helper holds no
+window that broadcasts or other clipboard users can wait on. Reads accept
+over-allocated clipboard blocks and stop scanning at the 1 MiB limit.
+
+Each agent module keeps at most four session helpers. Requests are serialized,
+concurrent adjacent reads share a request, and each session queue holds at most
+16 waiting operations, with at most 64 callers sharing a pending read. Text is
+limited to 1 MiB of UTF-8; embedded NULs are rejected. A new helper's first
+request times out after 30 seconds because it includes the helper start; later
+requests time out after 15 seconds. Idle helpers close after 60 seconds, the
+helper's own idle bound is 120 seconds, and failed launches wait 30 seconds before
+retrying. Timeout and idle cleanup tolerate Duktape's `clearTimeout`, which throws
+for a timer that already fired. Replacement also waits for the previous helper
+to exit; a denied or delayed kill cannot create overlapping brokers. The parent
+uses overlapped writes, retains I/O storage through cancellation completion, and
+drains queued input before graceful EOF. Each child's queued stdin is bounded at
+64 MiB; a write beyond that closes the child's stdin rather than growing agent
+memory or dropping bytes from the stream. A write whose completion wait fails is
+cancelled and released once Windows confirms it; otherwise its storage stays
+allocated. With no active session, dispatch fails closed.
+Reads and writes return
+promises; callers must handle rejection and acknowledge writes after completion.
+In the MeshCentral message handler, write replies carry `success` and are sent
+after completion. Read failures and non-text results send no reply, because
+viewers copy `getclip` data without checking for failure. Empty text reaches the
+clipboard dialog (tag 1) but not clipboard pulls or auto-sync (tags 2 and 3), so
+non-text remote content never clears the operator's clipboard. The console
+handler reports read and write failures as text. The agent's embedded clipboard
+module must match `modules/clipboard.js`; the callback must be present in the
+installed DLL and the server must publish the updated clipboard module and core
+together. An ordinary elevated administrator cannot call `WTSQueryUserToken`;
+the service performs that session transition.
 
 Desktop capture, consent, and service lifecycle callbacks retain their required
 process/session boundaries. Legacy update and uninstall callbacks remain needed

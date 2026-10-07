@@ -973,13 +973,14 @@ function main() {
             !sources.userConsent.includes("CreateNativeProxy('Shell32.dll')") &&
             !sources.userConsent.includes('ShellExecuteA') &&
             sources.notifybar.includes('Windows notifybar helper dispatch is disabled until an approved rundll32 contract export exists.'),
-        clipboardSharesConsoleBridgeAndWifiHelperDisabled:
-            sources.clipboard.includes('function rejectWindowsClipboardHelper(operation)') &&
-            sources.clipboard.includes("throw ('Windows clipboard ' + operation + ' helper dispatch is disabled until an approved MeshClipboardBridgeW rundll32 contract exists.');") &&
-            sources.clipboard.includes("rejectWindowsClipboardHelper('read');") &&
-            sources.clipboard.includes("rejectWindowsClipboardHelper('write');") &&
-            !sources.clipboard.includes("if (process.platform == 'win32' || !this.master)") &&
-            !sources.clipboard.includes("if(process.platform == 'win32'){process.exit();}") &&
+        clipboardUsesNativeBridgeAndWifiHelperDisabled:
+            sources.clipboard.includes("dll + ',MeshClipboardBridgeW'") &&
+            sources.clipboard.includes('function windowsClipboardRequest(') &&
+            !sources.clipboard.includes('rejectWindowsClipboardHelper') &&
+            !sources.clipboard.includes('RunPowerShellCommandAsUser') &&
+            !sources.clipboard.includes('Get-Clipboard') &&
+            sources.runtimeHostContractImpl.includes('void CALLBACK MeshClipboardBridgeW') &&
+            sources.processPipe.includes('allow-runtime-host-clipboard') &&
             sources.wifiScanner.includes('Windows Wi-Fi scanner helper dispatch is disabled until an approved MeshWifiScannerBridgeW rundll32 contract exists.') &&
             !sources.wifiScanner.includes('WindowsChildScript') &&
             !sources.wifiScanner.includes("require('ScriptContainer').Create(15"),

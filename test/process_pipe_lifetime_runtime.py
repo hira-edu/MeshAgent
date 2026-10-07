@@ -18,9 +18,13 @@ FUNCTIONS = [
     "ILibProcessPipe_FreePipe_RequestClose",
     "ILibProcessPipe_FreePipe_TryFinalize",
     "ILibProcessPipe_FreePipe_TryFinalizeOnChain",
+    "ILibProcessPipe_FreePipe_DeferredFinalize",
     "ILibProcessPipe_FreePipe_Finalize",
     "ILibProcessPipe_FreePipe",
     "ILibProcessPipe_Process_Destroy",
+    "ILibProcessPipe_Process_RemoveHandlers",
+    "ILibProcessPipe_Process_OnExit",
+    "ILibProcessPipe_Process_OnExit_ChainSink",
     "ILibProcessPipe_Pipe_Resume_Continue",
     "ILibProcessPipe_Pipe_Resume_OnChain",
     "ILibProcessPipe_Process_ScheduleRead",
@@ -69,18 +73,23 @@ typedef enum { ILibWaitHandle_ErrorStatus_NONE, ILibWaitHandle_ErrorStatus_IO_ER
 typedef struct ILibProcessPipe_PipeObject ILibProcessPipe_PipeObject;
 typedef ILibProcessPipe_PipeObject *ILibProcessPipe_Pipe;
 typedef struct ILibProcessPipe_Process_Object ILibProcessPipe_Process_Object;
+typedef ILibProcessPipe_Process_Object *ILibProcessPipe_Process;
 typedef void (*ILibProcessPipe_GenericReadHandler)(char *, size_t, size_t *, void *, void *);
 typedef struct { struct { void *ParentChain; } ChainLink; } Manager;
 struct ILibProcessPipe_Process_Object {
     int exiting, hProcess_needAdd, disabled;
+    void *chain;
     ILibProcessPipe_PipeObject *stdIn, *stdOut, *stdErr;
     void *metadata;
     HANDLE hProcess;
+    void *userObject;
+    void (*exitHandler)(ILibProcessPipe_Process, int, void *);
 };
 struct ILibProcessPipe_PipeObject {
     Manager *manager;
     ILibProcessPipe_Process_Object *mProcess;
-    LONG activeReadCallbacks, activeWriteHandler, resumePending;
+    LONG activeReadCallbacks, activeWriteHandler, resumePending, pendingWrite;
+    int writeClosing;
     LONG closeRequested, finalFreePending, finalizing;
     int PAUSED, bufferOwner;
     void *handler, *user1, *user2, *user3, *user4;
@@ -96,6 +105,8 @@ enum { ILibTransport_MemoryOwnership_CHAIN = 0 };
 static Manager manager = {{(void *)1}};
 static ILibProcessPipe_PipeObject *watched_pipe;
 static int pipe_frees, reads_issued, data_calls, on_chain = 1;
+static ILibProcessPipe_Process_Object *watched_process;
+static int process_frees, process_wait, exit_calls;
 static void (*queued)(void *, void *);
 static void *queued_user;
 static LONG InterlockedIncrement(LONG *v) { return ++*v; }
@@ -106,12 +117,15 @@ static LONG InterlockedCompareExchange(LONG *v, LONG n, LONG expected) {
 }
 static LONG ILibProcessPipe_GetStateLong(LONG *v) { return *v; }
 static int ILibMemory_CanaryOK(void *p) { return p != NULL; }
-static void ILibMemory_Free(void *p) { if (p && p == watched_pipe) { ++pipe_frees; } free(p); }
+static void ILibMemory_Free(void *p) { if (p && p == watched_pipe) { ++pipe_frees; } if (p && p == watched_process) { ++process_frees; } free(p); }
+static BOOL GetExitCodeProcess(HANDLE h, DWORD *code) { (void)h; *code = 0; return TRUE; }
 static int CloseHandle(HANDLE h) { (void)h; return 1; }
 static void CancelIoEx(HANDLE h, OVERLAPPED *o) { (void)h; (void)o; }
 static void SetEvent(HANDLE h) { (void)h; }
 static void ILibChain_RemoveWaitHandleEx(void *c, HANDLE h, int n) { (void)c; (void)h; (void)n; }
-static void ILibChain_RemoveWaitHandle(void *c, HANDLE h) { (void)c; (void)h; }
+static void ILibChain_RemoveWaitHandle(void *c, HANDLE h) { (void)c; if (h == (void *)4) { process_wait = 0; } }
+static void ILibQueue_Lock(void *q) { (void)q; }
+static void ILibQueue_UnLock(void *q) { (void)q; }
 static void *ILibQueue_DeQueue(void *q) { (void)q; return NULL; }
 static void ILibQueue_Destroy(void *q) { (void)q; }
 static void ILibProcessPipe_WriteData_Destroy(void *d) { (void)d; }
@@ -121,6 +135,10 @@ static void ILibChain_RunOnMicrostackThreadEx3(void *c, void (*f)(void *, void *
 }
 #define ILibChain_RunOnMicrostackThread(c,f,u) do { if(on_chain) { f(c,u); } else { ILibChain_RunOnMicrostackThreadEx3(c,f,NULL,u); } } while(0)
 #define ILibChain_AddWaitHandle(...) ((void)0)
+static void ILibChain_AddWaitHandleEx(void *c, HANDLE h, int timeout, BOOL (*f)(void *, HANDLE, ILibWaitHandle_ErrorStatus, void *), void *u, char *m) {
+    (void)c; (void)timeout; (void)f; (void)u; (void)m;
+    if (h == (void *)4) { assert(!process_wait); process_wait = 1; }
+}
 static BOOL ILibProcessPipe_ReadWindowIsValid(ILibProcessPipe_PipeObject *p) {
     return p->buffer && p->readOffset <= p->bufferSize && p->totalRead <= p->bufferSize-p->readOffset;
 }
@@ -142,6 +160,7 @@ static void memmove_s(void *d, size_t cap, const void *s, size_t n) { assert(n <
 '''
 
 TESTS = r'''
+static void exited(ILibProcessPipe_Process p, int code, void *u) { (void)p; (void)code; (void)u; ++exit_calls; }
 static void consume(char *b, size_t n, size_t *used, void *u1, void *u2) {
     (void)b; (void)u1; (void)u2; ++data_calls; *used = n;
 }
@@ -193,6 +212,16 @@ int main(int argc, char **argv) {
         ILibProcessPipe_Process_Pipe_ReadExHandler_Dispatch(manager.ChainLink.ParentChain,p->mPipe_ReadEnd,
             ILibWaitHandle_ErrorStatus_IO_ERROR,NULL,0,p);
         assert(pipe_frees == 1);
+    } else if (!strcmp(argv[1],"pipe-close-process-free")) {
+        ILibProcessPipe_Process_Object *process = calloc(1,sizeof(*process));
+        p->mProcess = process; process->stdOut = p;
+        assert(ILibProcessPipe_Process_ScheduleRead(p));
+        ILibProcessPipe_FreePipe(p);
+        assert(!process->stdOut && !p->mProcess && !pipe_frees);
+        free(process);
+        ILibProcessPipe_Process_Pipe_ReadExHandler_Dispatch(manager.ChainLink.ParentChain,p->mPipe_ReadEnd,
+            ILibWaitHandle_ErrorStatus_IO_ERROR,NULL,0,p);
+        assert(pipe_frees == 1);
     } else if (!strcmp(argv[1],"close-queued-resume")) {
         p->PAUSED = 1; on_chain = 0;
         ILibProcessPipe_Pipe_Resume(p);
@@ -209,6 +238,30 @@ int main(int argc, char **argv) {
         ILibProcessPipe_Process_Pipe_ReadExHandler_Dispatch(manager.ChainLink.ParentChain,p->mPipe_ReadEnd,
             ILibWaitHandle_ErrorStatus_IO_ERROR,NULL,0,p);
         assert(pipe_frees == 1);
+    } else if (!strcmp(argv[1],"owner-collected") || !strcmp(argv[1],"owner-collected-paused") || !strcmp(argv[1],"owner-collected-deferred-exit")) {
+        ILibProcessPipe_Process_Object *process = calloc(1,sizeof(*process));
+        watched_process = process; process->chain = manager.ChainLink.ParentChain;
+        process->hProcess = (void *)4; process->stdOut = p; p->mProcess = process;
+        process->userObject = (void *)5; process->exitHandler = exited;
+        process_wait = 1;
+        assert(ILibProcessPipe_Process_ScheduleRead(p));
+        if (!strcmp(argv[1],"owner-collected-paused")) {
+            p->PAUSED = 1; p->totalRead = 4;
+            assert(ILibProcessPipe_Process_OnExit(process->chain,process->hProcess,ILibWaitHandle_ErrorStatus_NONE,process));
+            assert(!process_wait && process->hProcess_needAdd && !process_frees);
+        }
+        ILibProcessPipe_Process_RemoveHandlers(process);
+        ILibProcessPipe_Process_RemoveHandlers(process); // Repeated finalization must not add a duplicate wait.
+        assert(process_wait && process->disabled && !process->userObject && !process->exitHandler);
+        if (!strcmp(argv[1],"owner-collected-deferred-exit")) {
+            ILibProcessPipe_Process_OnExit_ChainSink(process->chain,process);
+        } else {
+            assert(!ILibProcessPipe_Process_OnExit(process->chain,process->hProcess,ILibWaitHandle_ErrorStatus_NONE,process));
+        }
+        assert(process_frees == 1 && !process_wait && !exit_calls && !pipe_frees && !p->mProcess);
+        ILibProcessPipe_Process_Pipe_ReadExHandler_Dispatch(manager.ChainLink.ParentChain,p->mPipe_ReadEnd,
+            ILibWaitHandle_ErrorStatus_IO_ERROR,NULL,0,p);
+        assert(pipe_frees == 1 && !data_calls);
     } else { assert(!"unknown test"); }
     puts("PASS"); return 0;
 }
@@ -238,7 +291,7 @@ def main():
             if runtimes:
                 runtime_env["PATH"] = str(runtimes[0].parent) + os.pathsep + runtime_env.get("PATH", "")
     failures = []
-    for case in ["resume-close", "resume-pending", "process-close-pending", "close-queued-resume", "resume-buffered"]:
+    for case in ["resume-close", "resume-pending", "process-close-pending", "pipe-close-process-free", "close-queued-resume", "resume-buffered", "owner-collected", "owner-collected-paused", "owner-collected-deferred-exit"]:
         result = subprocess.run([str(executable.resolve()), case], text=True, capture_output=True, env=runtime_env)
         (args.evidence / (case + ".log")).write_text("exit=" + str(result.returncode) + "\n" + result.stdout + result.stderr)
         print(f"{'PASS' if result.returncode == 0 else 'FAIL'} {case}")

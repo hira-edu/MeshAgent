@@ -29,11 +29,214 @@ var CF_UNICODETEXT = 13;
 
 var xclipTable = {};
 
-function rejectWindowsClipboardHelper(operation)
+// One native broker per session, with serialized requests and shared adjacent reads.
+// A failed start is cached for 30 seconds so KVM polling cannot create a launch storm.
+var windowsClipboardHelpers = {};
+var windowsClipboardLimit = 1024 * 1024;
+// Duktape buffers expose raw string bytes rather than Node's UTF-8 codec.
+// URI conversion also normalizes surrogate pairs from JSON into real UTF-8.
+function windowsClipboardEncode(value)
 {
-    if (process.platform == 'win32') {
-        throw ('Windows clipboard ' + operation + ' helper dispatch is disabled until an approved MeshClipboardBridgeW rundll32 contract exists.');
+    var escaped = encodeURIComponent(value), buffer = Buffer.alloc(escaped.length), offset = 0;
+    for (var i = 0; i < escaped.length; ++i)
+    {
+        if (escaped[i] == '%') { buffer[offset++] = parseInt(escaped.substring(i + 1, i + 3), 16); i += 2; }
+        else { buffer[offset++] = escaped.charCodeAt(i); }
     }
+    return buffer.slice(0, offset);
+}
+function windowsClipboardDecode(buffer)
+{
+    var escaped = [];
+    for (var i = 0; i < buffer.length; ++i) { escaped.push('%' + ('0' + buffer[i].toString(16)).slice(-2)); }
+    return decodeURIComponent(escaped.join(''));
+}
+function windowsClipboardPromise()
+{
+    var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
+    // Legacy callers ignore write returns. Keep failures contained while preserving
+    // the rejected result for callers that attach their own rejection handler.
+    ret.catch(function () {});
+    return ret;
+}
+function windowsClipboardSettle(results, error, value)
+{
+    // A caller callback can throw or re-enter dispatch. Settle every independent
+    // waiter even when another consumer fails, without corrupting helper state.
+    for (var i = 0; i < results.length; ++i)
+    {
+        try { if (error) { results[i]._rej(error); } else { results[i]._res(value); } }
+        catch (consumerError) { }
+    }
+}
+// Duktape's clearTimeout throws for a timer that already fired, unlike Node.
+// Timer callbacks drop their own handle first; this guard covers any other path.
+function windowsClipboardCancel(timer)
+{
+    try { if (timer) { clearTimeout(timer); } } catch (timerError) { }
+    return null;
+}
+function windowsClipboardClose(state, error)
+{
+    if (state.closed) { return; }
+    state.closed = true;
+    state.timer = windowsClipboardCancel(state.timer);
+    state.idle = windowsClipboardCancel(state.idle);
+    state.retryAt = error ? Date.now() + 30000 : 0;
+    state.error = error;
+    var child = state.child;
+    // Retain the child until its exit event confirms termination. A denied kill
+    // must not permit another broker to overlap it after the retry cooldown.
+    try { if (child) { child.stdin.end(); } } catch (inputCleanupError) {}
+    try { if (child) { child.kill(); } } catch (processCleanupError) {}
+    var requests = state.queue;
+    state.queue = [];
+    if (state.active) { requests.unshift(state.active); state.active = null; }
+    state.buffer = Buffer.alloc(0);
+    for (var i = 0; i < requests.length; ++i)
+    {
+        windowsClipboardSettle(requests[i].results, error || new Error('Clipboard helper closed.'));
+    }
+    if (!error && !state.child && windowsClipboardHelpers[state.key] === state) { delete windowsClipboardHelpers[state.key]; }
+}
+function windowsClipboardPump(state)
+{
+    if (state.closed || state.active || state.queue.length == 0) { return; }
+    state.idle = windowsClipboardCancel(state.idle);
+    var request = state.queue.shift();
+    state.active = request;
+    // The first request also covers token selection, helper start and pipe connection.
+    state.timer = setTimeout(function ()
+    {
+        state.timer = null;
+        windowsClipboardClose(state, new Error('Windows clipboard request timed out.'));
+    }, state.ready ? 15000 : 30000);
+    var header = Buffer.alloc(12);
+    header.writeUInt32LE(request.id, 0);
+    header.writeUInt32LE(request.operation, 4);
+    header.writeUInt32LE(request.text.length, 8);
+    try
+    {
+        state.child.stdin.write(Buffer.concat([header, request.text]));
+    }
+    catch (error) { windowsClipboardClose(state, error); }
+}
+function windowsClipboardData(state, chunk)
+{
+    if (state.closed) { return; }
+    try
+    {
+        if (!state.active || state.buffer.length + chunk.length > windowsClipboardLimit + 12)
+        { throw new Error('Invalid Windows clipboard response.'); }
+        state.buffer = Buffer.concat([state.buffer, chunk]);
+        if (state.buffer.length < 12) { return; }
+        var id = state.buffer.readUInt32LE(0), code = state.buffer.readUInt32LE(4), length = state.buffer.readUInt32LE(8);
+        if (id != state.active.id || length > windowsClipboardLimit || (code != 0 && length != 0) ||
+            (state.active.operation == 2 && length != 0) || state.buffer.length > length + 12)
+        { throw new Error('Invalid Windows clipboard response.'); }
+        if (state.buffer.length < length + 12) { return; }
+        var request = state.active;
+        var value = windowsClipboardDecode(state.buffer.slice(12));
+        state.timer = windowsClipboardCancel(state.timer);
+        state.ready = true;
+        state.active = null;
+        state.buffer = Buffer.alloc(0);
+        if (state.queue.length == 0)
+        {
+            state.idle = setTimeout(function () { state.idle = null; windowsClipboardClose(state, null); }, 60000);
+        }
+        windowsClipboardSettle(request.results,
+            code == 0 ? null : new Error('Windows clipboard operation failed (error=' + code + ').'),
+            request.operation == 1 ? value : undefined);
+        windowsClipboardPump(state);
+    }
+    catch (error) { windowsClipboardClose(state, error); }
+}
+function windowsClipboardRequest(operation, data, sid, local)
+{
+    var ret = null;
+    try
+    {
+        var id = sid;
+        if (!local && id == null)
+        {
+            var active = require('user-sessions').Current().Active;
+            if (active.length == 0) { throw new Error('No interactive Windows clipboard session.'); }
+            id = Number(active[0].SessionId);
+        }
+        if (!local && (typeof(id) != 'number' || !isFinite(id) || Math.floor(id) != id || id <= 0 || id >= 0xFFFFFFFF))
+        { throw new Error('Invalid Windows clipboard session ID.'); }
+        if (operation == 2 && (typeof(data) != 'string' || data.indexOf('\x00') >= 0 || data.length > windowsClipboardLimit))
+        { throw new Error('Invalid Windows clipboard text.'); }
+        var text = operation == 2 ? windowsClipboardEncode(data) : Buffer.alloc(0);
+        if (text.length > windowsClipboardLimit) { throw new Error('Windows clipboard text exceeds 1 MiB.'); }
+        var key = local ? 'local' : 'tsid=' + id;
+        var state = windowsClipboardHelpers[key];
+        if (state && state.closed)
+        {
+            if (Date.now() < state.retryAt) { throw state.error; }
+            if (state.child) { throw new Error('Windows clipboard helper is still terminating.'); }
+            delete windowsClipboardHelpers[key]; state = null;
+        }
+        if (!state)
+        {
+            var keys = Object.keys(windowsClipboardHelpers);
+            for (var k = 0; k < keys.length; ++k)
+            {
+                var old = windowsClipboardHelpers[keys[k]];
+                if (old.closed && !old.child && Date.now() >= old.retryAt) { delete windowsClipboardHelpers[keys[k]]; }
+            }
+            if (Object.keys(windowsClipboardHelpers).length >= 4) { throw new Error('Windows clipboard session limit reached.'); }
+            state = { key: key, queue: [], active: null, buffer: Buffer.alloc(0), child: null,
+                timer: null, idle: null, closed: false, ready: false, nextId: 0 };
+            windowsClipboardHelpers[key] = state;
+            try
+            {
+                var paths = require('win-system-paths');
+                var serviceName = null, msh = null;
+                try { serviceName = require('_agentNodeId').serviceName(); } catch (identityError) {}
+                if (!serviceName) { try { msh = _MSH(); } catch (mshError) {} serviceName = msh && msh.meshServiceName ? msh.meshServiceName : 'meshagent'; }
+                var dll = paths.installedServiceRuntimeDll('' + serviceName);
+                state.child = require('child_process').execFile(paths.system32Path('rundll32.exe'), [dll + ',MeshClipboardBridgeW', key]);
+                if (!state.child) { throw new Error('Windows clipboard helper launch denied.'); }
+                // Only binary response frames go to stdout; discard incidental stderr.
+                state.child.stdout.on('data', function (chunk) { windowsClipboardData(state, chunk); });
+                state.child.stderr.on('data', function () {});
+                state.child.stdout.on('end', function () { windowsClipboardClose(state, new Error('Windows clipboard helper output ended.')); });
+                state.child.stdin.on('error', function (error) { windowsClipboardClose(state, error); });
+                state.child.stdout.on('error', function (error) { windowsClipboardClose(state, error); });
+                state.child.stderr.on('error', function (error) { windowsClipboardClose(state, error); });
+                state.child.on('error', function (error) { windowsClipboardClose(state, error); });
+                state.child.on('exit', function (code)
+                {
+                    state.child = null;
+                    if (state.closed && !state.retryAt && windowsClipboardHelpers[state.key] === state) { delete windowsClipboardHelpers[state.key]; }
+                    windowsClipboardClose(state, new Error('Windows clipboard helper exited (error=' + code + ').'));
+                });
+            }
+            catch (startError) { windowsClipboardClose(state, startError); throw startError; }
+        }
+        if (state.closed) { throw state.error || new Error('Windows clipboard helper closed during launch.'); }
+        // Share only adjacent reads: a read after a queued write must observe that write.
+        var tail = state.queue.length ? state.queue[state.queue.length - 1] : state.active;
+        if (operation == 1 && tail && tail.operation == 1)
+        {
+            if (tail.results.length >= 64) { throw new Error('Windows clipboard read waiter limit reached.'); }
+            // The embedded promise has one child slot: give each caller its own
+            // promise so multiple then() subscribers do not strand child promises.
+            ret = windowsClipboardPromise();
+            tail.results.push(ret);
+            return ret;
+        }
+        if (state.queue.length >= 16) { throw new Error('Windows clipboard request queue is full.'); }
+        state.nextId = (state.nextId + 1) >>> 0;
+        if (state.nextId == 0) { state.nextId = 1; }
+        ret = windowsClipboardPromise();
+        state.queue.push({ id: state.nextId, operation: operation, text: text, results: [ret] });
+        windowsClipboardPump(state);
+    }
+    catch (error) { if (!ret) { ret = windowsClipboardPromise(); } ret._rej(error); }
+    return ret;
 }
 
 function nativeAddCompressedModule(name)
@@ -127,6 +330,7 @@ function nativeAddModule(name,single)
 }
 function dispatchRead(sid)
 {
+    if (process.platform == 'win32') { return windowsClipboardRequest(1, null, sid, false); }
     var id = 0;
 
     if(sid==null)
@@ -153,7 +357,6 @@ function dispatchRead(sid)
     {
         return (module.exports.read());
     }
-    rejectWindowsClipboardHelper('read');
 
     var childProperties = { sessionId: id };
     if (process.platform == 'linux')
@@ -186,6 +389,7 @@ function dispatchRead(sid)
 
 function dispatchWrite(data, sid)
 {
+    if (process.platform == 'win32') { return windowsClipboardRequest(2, data, sid, false); }
     var id = 0;
 
     if(sid == null)
@@ -212,7 +416,6 @@ function dispatchWrite(data, sid)
     {
         return(module.exports(data));
     }
-    rejectWindowsClipboardHelper('write');
 
     var childProperties = { sessionId: id };
     if (process.platform == 'linux')
@@ -552,78 +755,11 @@ function lin_copytext(txt)
 
 function win_readtext()
 {
-    var h;
-    var ret = '';
-    var GM = require('_GenericMarshal');
-    var user32 = GM.CreateNativeProxy('user32.dll');
-    var kernel32 = GM.CreateNativeProxy('kernel32.dll');
-    kernel32.CreateMethod('GlobalAlloc');
-    kernel32.CreateMethod('GlobalLock');
-    kernel32.CreateMethod('GlobalUnlock');
-
-    user32.CreateMethod('CloseClipboard');
-    user32.CreateMethod('IsClipboardFormatAvailable');
-    user32.CreateMethod('GetClipboardData');
-    user32.CreateMethod('OpenClipboard');
-
-    user32.OpenClipboard(0);
-
-    if (user32.IsClipboardFormatAvailable(CF_UNICODETEXT).Val != 0)
-    {
-        h = user32.GetClipboardData(CF_UNICODETEXT);
-        if (h.Val != 0)
-        {
-            var hbuffer = kernel32.GlobalLock(h);
-            hbuffer._size = -1;
-            ret = hbuffer.Wide2UTF8;
-            kernel32.GlobalUnlock(h);
-        }
-    }
-    else
-    {
-        var p = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-        p._rej('Unknown Clipboard Data');
-        return (p);
-    }
-
-
-    user32.CloseClipboard();
-
-    var p = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-    p._res(ret);
-    return (p);
+    return windowsClipboardRequest(1, null, null, true);
 }
-
 function win_copytext(txt)
 {
-    var GMEM_MOVEABLE = 0x0002;
-    var CF_TEXT = 1;
-
-    var GM = require('_GenericMarshal');
-    var user32 = GM.CreateNativeProxy('user32.dll');
-    var kernel32 = GM.CreateNativeProxy('kernel32.dll');
-    kernel32.CreateMethod('GlobalAlloc');
-    kernel32.CreateMethod('GlobalLock');
-    kernel32.CreateMethod('GlobalUnlock');
-    user32.CreateMethod('CloseClipboard');
-    user32.CreateMethod('EmptyClipboard');
-    user32.CreateMethod('IsClipboardFormatAvailable');
-    user32.CreateMethod('OpenClipboard');
-    user32.CreateMethod('SetClipboardData');
-
-    var mtxt = GM.CreateVariable(txt, { wide: true }); 
-    var h = kernel32.GlobalAlloc(GMEM_MOVEABLE, mtxt._size);
-    h.autoFree(false);
-    var hbuffer = kernel32.GlobalLock(h);
-    hbuffer.autoFree(false);
-
-    mtxt.toBuffer().copy(hbuffer.Deref(0, (2 * txt.length) + 2).toBuffer());
-    kernel32.GlobalUnlock(h);
-
-    user32.OpenClipboard(0);
-    user32.EmptyClipboard();
-    user32.SetClipboardData(CF_UNICODETEXT, h);
-    user32.CloseClipboard();
+    return windowsClipboardRequest(2, txt, null, true);
 }
 function macos_copytext(clipText)
 {

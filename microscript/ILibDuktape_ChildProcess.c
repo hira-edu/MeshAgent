@@ -245,8 +245,14 @@ duk_ret_t ILibDuktape_ChildProcess_waitExit(duk_context *ctx)
 	void *mods[] = { ILibGetBaseTimer(Duktape_GetChain(ctx)), Duktape_GetPointerProperty(ctx, -1, ILibDuktape_ChildProcess_Manager), ILibDuktape_Process_GetSignalListener(ctx) };
 #ifdef WIN32
 	HANDLE handles[] = { NULL, NULL, NULL, NULL, NULL };
+	HANDLE found[] = { NULL, NULL, NULL, NULL };
+	int handleCount = 0, handleIndex;
 	ILibProcessPipe_Process p = Duktape_GetPointerProperty(ctx, -1, ILibDuktape_ChildProcess_Process);
-	ILibProcessPipe_Process_GetWaitHandles(p, &(handles[0]), &(handles[1]), &(handles[2]), &(handles[3]));
+	ILibProcessPipe_Process_GetWaitHandles(p, &(found[0]), &(found[1]), &(found[2]), &(found[3]));
+	// The chain ends this list at its first NULL. Stdin has no write event until its first
+	// write and none after it closes, so compact; otherwise stderr goes unserviced and a
+	// child blocked on a full stderr pipe never exits.
+	for (handleIndex = 0; handleIndex < 4; ++handleIndex) { if (found[handleIndex] != NULL) { handles[handleCount++] = found[handleIndex]; } }
 	continueResult = ILibChain_Continue(chain, (ILibChain_Link**)mods, 2, timeout, (HANDLE**)handles);
 #else
 	continueResult = ILibChain_Continue(chain, (ILibChain_Link**)mods, 3, timeout);

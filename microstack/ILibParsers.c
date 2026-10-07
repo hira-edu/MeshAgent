@@ -2171,6 +2171,27 @@ void ILibChain_UpdateEventHook(ILibChain_EventHookToken token, int maxTimeout)
 
 
 #ifdef WIN32
+// Dispatches a TIMEOUT or INVALID_HANDLE result with the same handshake as a signaled
+// handle: a handler that removes or re-adds its own registration clears currentHandle,
+// so the chain never removes (or touches) that node a second time.
+static void ILibChain_DispatchWaitHandleError(ILibBaseChain *chain, HANDLE *waitList, int i, ILibWaitHandle_ErrorStatus status)
+{
+	ILibChain_WaitHandleInfo *info = (ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)];
+	BOOL keep = FALSE;
+	chain->currentHandle = waitList[i];
+	chain->currentInfo = info;
+	waitList[ILibChain_HandleInfoIndex(i)] = NULL;
+	waitList[i] = NULL;
+	if (info->handler != NULL) { keep = info->handler(chain, chain->currentHandle, status, info->user); }
+	// An invalid handle can never be waited on again, whatever the handler returned.
+	if (chain->currentHandle != NULL && (keep == FALSE || status == ILibWaitHandle_ErrorStatus_INVALID_HANDLE) && ILibMemory_CanaryOK(info))
+	{
+		info->user = NULL;
+		ILibLinkedList_Remove(info->node);
+	}
+	chain->currentHandle = NULL;
+	chain->currentInfo = NULL;
+}
 int ILibChain_WindowsSelect(void *chain, fd_set *readset, fd_set *writeset, fd_set *errorset, HANDLE *waitList, int waitListCount, DWORD waitTimeout)
 {
 	int slct = -1;
@@ -2227,20 +2248,7 @@ int ILibChain_WindowsSelect(void *chain, fd_set *readset, fd_set *writeset, fd_s
 					if (tv2LTEtv1(&currentTime, &(((ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)])->expiration)))
 					{
 						// TIMEOUT occured
-						if (((ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)])->handler != NULL)
-						{
-							if (((ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)])->handler(chain, waitList[i], ILibWaitHandle_ErrorStatus_TIMEOUT, ((ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)])->user) == FALSE)
-							{
-								ILibLinkedList_Remove(((ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)])->node);
-							}
-						}
-						else
-						{
-							ILibLinkedList_Remove(((ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)])->node);
-						}
-						
-						waitList[i] = NULL;
-						waitList[ILibChain_HandleInfoIndex(i)] = NULL;
+						ILibChain_DispatchWaitHandleError((ILibBaseChain*)chain, waitList, i, ILibWaitHandle_ErrorStatus_TIMEOUT);
 					}
 				}
 			}
@@ -2254,13 +2262,7 @@ int ILibChain_WindowsSelect(void *chain, fd_set *readset, fd_set *writeset, fd_s
 				{
 					if (WaitForSingleObject(waitList[i], 0) == WAIT_FAILED)
 					{
-						if (((ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)])->handler != NULL)
-						{
-							((ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)])->handler(chain, waitList[i], ILibWaitHandle_ErrorStatus_INVALID_HANDLE, ((ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)])->user);
-						}
-						ILibLinkedList_Remove(((ILibChain_WaitHandleInfo*)waitList[ILibChain_HandleInfoIndex(i)])->node);
-						waitList[i] = NULL;
-						waitList[ILibChain_HandleInfoIndex(i)] = NULL;
+						ILibChain_DispatchWaitHandleError((ILibBaseChain*)chain, waitList, i, ILibWaitHandle_ErrorStatus_INVALID_HANDLE);
 					}
 				}
 			}
@@ -3634,6 +3636,31 @@ char *ILibChain_MetaData(char *file, int number)
 	return(ret);
 }
 #ifdef WIN32
+// Cancels an overlapped operation whose completion wait can no longer be serviced and
+// confirms that the kernel released its OVERLAPPED and buffer. FALSE means the kernel may
+// still own them; the caller must keep that storage pinned rather than free it.
+BOOL ILibChain_RetireCancelledIo(HANDLE h, OVERLAPPED *p)
+{
+	DWORD bytes = 0;
+	int spins;
+	CancelIoEx(h, p);
+	for (spins = 0; spins < 2000 && !HasOverlappedIoCompleted(p); ++spins) { Sleep(1); }
+	if (!HasOverlappedIoCompleted(p)) { return FALSE; }
+	GetOverlappedResult(h, p, &bytes, FALSE);
+	return TRUE;
+}
+// File writes are positioned by OVERLAPPED.Offset; pipes ignore it. A reissued remainder
+// continues after the bytes already written. Callers get their base back, because they
+// advance their position by the reported total themselves (fs.write()).
+static ULONGLONG ILibChain_WriteEx_GetOffset(OVERLAPPED *p)
+{
+	return (((ULONGLONG)p->OffsetHigh) << 32) | (ULONGLONG)p->Offset;
+}
+static void ILibChain_WriteEx_SetOffset(OVERLAPPED *p, ULONGLONG offset)
+{
+	p->Offset = (DWORD)offset;
+	p->OffsetHigh = (DWORD)(offset >> 32);
+}
 BOOL ILibChain_WriteEx_Sink(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, void *user);
 BOOL ILibChain_WriteEx_Sink2(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, DWORD bytesWritten, void *user)
 {
@@ -3642,65 +3669,46 @@ BOOL ILibChain_WriteEx_Sink2(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus s
 BOOL ILibChain_WriteEx_Sink(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, void *user)
 {
 	ILibChain_WriteEx_data *data = (ILibChain_WriteEx_data*)user;
-	DWORD bytesWritten = 0;
-
-	if (GetOverlappedResult(data->fileHandle, data->p, &bytesWritten, FALSE) && bytesWritten > 0)
+	DWORD bytesWritten = 0, error;
+	BOOL result = GetOverlappedResult(data->fileHandle, data->p, &bytesWritten, FALSE);
+	UNREFERENCED_PARAMETER(h);
+	error = result ? ERROR_SUCCESS : GetLastError();
+	if (!result && (error == ERROR_IO_PENDING || error == ERROR_IO_INCOMPLETE))
 	{
-		data->bytesLeft -= (int)bytesWritten;
-		data->totalWritten += (int)bytesWritten;
-		data->buffer = data->buffer + bytesWritten;
+		if (status == ILibWaitHandle_ErrorStatus_NONE) { return TRUE; }
+		// The chain drops this registration after a failed wait, so no completion follows.
+		// Storage the kernel may still own stays pinned; leaking it is safe, freeing is not.
+		if (!ILibChain_RetireCancelledIo(data->fileHandle, data->p)) { return FALSE; }
+		result = FALSE;
+	}
+	for (;;)
+	{
+		if (!result || bytesWritten == 0 || bytesWritten > data->bytesLeft)
+		{
+			ILibChain_WriteEx_SetOffset(data->p, data->baseOffset);
+			if (data->handler != NULL) { data->handler(chain, data->fileHandle, ILibWaitHandle_ErrorStatus_IO_ERROR, data->totalWritten, data->user); }
+			break;
+		}
+		data->bytesLeft -= bytesWritten;
+		data->totalWritten += bytesWritten;
+		data->buffer += bytesWritten;
 		if (data->bytesLeft == 0)
 		{
-			// Done Writing
+			ILibChain_WriteEx_SetOffset(data->p, data->baseOffset);
 			if (data->handler != NULL) { data->handler(chain, data->fileHandle, ILibWaitHandle_ErrorStatus_NONE, data->totalWritten, data->user); }
-			ILibMemory_Free(data->metadata);
-			ILibMemory_Free(data);
-			return(FALSE);
+			break;
 		}
-		else
-		{
-			// More Data to write
-			BOOL ret = FALSE;
-			switch (ILibChain_WriteEx2(chain, h, data->p, data->buffer, data->bytesLeft, ILibChain_WriteEx_Sink2, data, data->metadata))
-			{
-				case ILibTransport_DoneState_COMPLETE:
-					data->totalWritten += data->bytesLeft;
-					data->bytesLeft = 0;
-					if (data->handler != NULL) { data->handler(chain, data->fileHandle, ILibWaitHandle_ErrorStatus_NONE, data->totalWritten, data->user); }
-					ILibMemory_Free(data->metadata);
-					ILibMemory_Free(data);
-					ret = FALSE;
-					break;
-				case ILibTransport_DoneState_INCOMPLETE:
-					ret = TRUE;
-					ILibMemory_Free(data);
-				case ILibTransport_DoneState_ERROR:
-					if (data->handler != NULL) { data->handler(chain, data->fileHandle, ILibWaitHandle_ErrorStatus_IO_ERROR, 0, data->user); }
-					ILibMemory_Free(data->metadata);
-					ILibMemory_Free(data);
-					ret = FALSE;
-					break;
-			}
-			return(ret);
-		}
+		// Keep one state and metadata owner across partial completions. Recursive
+		// WriteEx2 wrappers used to free this state while a successor still used it.
+		ILibChain_WriteEx_SetOffset(data->p, data->baseOffset + data->totalWritten);
+		ResetEvent(data->p->hEvent);
+		bytesWritten = 0;
+		result = WriteFile(data->fileHandle, data->buffer, data->bytesLeft, &bytesWritten, data->p);
+		if (!result && GetLastError() == ERROR_IO_PENDING) { return TRUE; }
 	}
-	else
-	{
-		if (GetLastError() == ERROR_IO_PENDING)
-		{
-			// Still pending, so wait for another callback
-			return(TRUE);
-		}
-		else
-		{
-			// ERROR
-			if (data->handler != NULL) { data->handler(chain, data->fileHandle, ILibWaitHandle_ErrorStatus_IO_ERROR, 0, data->user); }
-			ILibMemory_Free(data->metadata);
-			ILibMemory_Free(data);
-			return(FALSE);
-		}
-
-	}
+	ILibMemory_Free(data->metadata);
+	ILibMemory_Free(data);
+	return FALSE;
 }
 BOOL ILibChain_ReadEx_Sink(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus status, void *user)
 {
@@ -3743,37 +3751,38 @@ BOOL ILibChain_ReadEx_Sink(void *chain, HANDLE h, ILibWaitHandle_ErrorStatus sta
 }
 ILibTransport_DoneState ILibChain_WriteEx2(void *chain, HANDLE h, OVERLAPPED *p, char *buffer, DWORD bufferLen, ILibChain_WriteEx_Handler handler, void *user, char *metadata)
 {
-	int e = 0;
-	if (bufferLen > UINT32_MAX) { return(ILibTransport_DoneState_ERROR); }
-
-	if (!WriteFile(h, buffer, (DWORD)bufferLen, NULL, p))
+	DWORD bytesWritten, totalWritten = 0;
+	ULONGLONG base;
+	if (p == NULL || (bufferLen != 0 && buffer == NULL)) { return ILibTransport_DoneState_ERROR; }
+	base = ILibChain_WriteEx_GetOffset(p);
+	while (bufferLen != 0)
 	{
-		if ((e = GetLastError()) == ERROR_IO_PENDING)
+		ILibChain_WriteEx_SetOffset(p, base + totalWritten);
+		ResetEvent(p->hEvent);
+		bytesWritten = 0;
+		if (!WriteFile(h, buffer, bufferLen, &bytesWritten, p))
 		{
-			// Completing Asynchronously
+			if (GetLastError() != ERROR_IO_PENDING) { ILibChain_WriteEx_SetOffset(p, base); return ILibTransport_DoneState_ERROR; }
 			ILibChain_WriteEx_data *state = (ILibChain_WriteEx_data*)ILibMemory_SmartAllocate(sizeof(ILibChain_WriteEx_data));
 			state->buffer = buffer;
-			state->bytesLeft = (DWORD)bufferLen;
-			state->totalWritten = 0;
+			state->bytesLeft = bufferLen;
+			state->totalWritten = totalWritten;
+			state->baseOffset = base;
 			state->p = p;
 			state->handler = handler;
 			state->fileHandle = h;
 			state->user = user;
 			state->metadata = metadata;
 			ILibChain_AddWaitHandleEx(chain, p->hEvent, -1, ILibChain_WriteEx_Sink, state, metadata);
-			return(ILibTransport_DoneState_INCOMPLETE);
+			return ILibTransport_DoneState_INCOMPLETE;
 		}
-		else
-		{
-			// IO Error
-			return(ILibTransport_DoneState_ERROR);
-		}
+		if (bytesWritten == 0 || bytesWritten > bufferLen) { ILibChain_WriteEx_SetOffset(p, base); return ILibTransport_DoneState_ERROR; }
+		totalWritten += bytesWritten;
+		buffer += bytesWritten;
+		bufferLen -= bytesWritten;
 	}
-	else
-	{
-		// Write Completed 
-		return(ILibTransport_DoneState_COMPLETE);
-	}
+	ILibChain_WriteEx_SetOffset(p, base);
+	return ILibTransport_DoneState_COMPLETE;
 }
 
 void ILibChain_ReadEx2_UnwindHandler(void *chain, void *user)

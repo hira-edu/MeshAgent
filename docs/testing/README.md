@@ -96,8 +96,15 @@ node test/windows_inventory_runtime.js
 node test/meshcentral_inventory_runtime.js
 node test/windows_terminal_failure_runtime.js
 node test/windows_clipboard_bridge_runtime.js
+node test/meshcentral_clipboard_runtime.js
+python3 test/windows_clipboard_native.py
+python3 test/windows_clipboard_agent_runtime.py --agent /absolute/path/to/built/meshagent
 python test/meshcentral_module_versions_runtime.py
 python test/process_pipe_lifetime_runtime.py
+python test/process_pipe_write_runtime.py
+python test/chain_write_runtime.py
+python test/chain_wait_dispatch_runtime.py
+python test/process_pipe_windows_runtime.py
 ```
 
 The inventory test covers both pointer widths, denied process access, WCHAR
@@ -106,11 +113,52 @@ The MeshCentral inventory test executes the normal and minified core handlers
 to check valid replies, access errors, service-detail cleanup, and service-detail
 fallthrough. The terminal test
 checks failures before listeners attach and before the ready handshake. The
-clipboard test covers Unicode, empty values, command-safe writes, errors, and
-timeout cleanup. The core generation test verifies explicit module versions,
+clipboard dispatch fixture covers helper reuse, adjacent read coalescing, ordered
+writes, Unicode and empty values, queue/session limits, failed-start backoff,
+malformed replies, stderr errors, throwing consumers, denied/delayed termination
+and timeout cleanup, first-request and steady-state timeouts, and idle
+retirement. Its injected `clearTimeout` throws for fired timers, as Duktape's
+does. It also fails when the clipboard module embedded in
+`microscript/ILibDuktape_Polyfills.c` differs from `modules/clipboard.js`. It
+injects child processes and timers and runs on any Node host without accessing a
+clipboard. The MeshCentral fixture executes both core variants' message and console
+clipboard cases, including synchronous and asynchronous failures, silent read
+failures, empty and non-text reads for each viewer tag, and completion
+acknowledgements. The
+native Python probe executes the production Win32 clipboard ownership/cleanup
+logic, write-only message-window lifetime, over-allocated reads, helper launch
+validation and logon identity changes with injected API failures under ASan/UBSan.
+When MinGW is available it also cross-compiles the complete native bridge against
+Windows headers with warnings treated as errors. The built-agent probe runs the
+production module with injected Windows dependencies and real Duktape promises,
+buffers and timers (delays scaled down); it verifies independent read subscribers,
+UTF-8 surrogate pairs, empty writes, rejection containment, timeout and idle
+cleanup on fired timers and consumer exception isolation on any platform. The core generation test
+verifies explicit module versions,
 one registration per module across minification modes and file ordering, and
 source preservation. The pipe test exercises extracted production state machines
 with sanitizers; it also sets the Windows sanitizer runtime search path.
+The write probes cover partial completions, delayed cancellation, off-thread and
+reentrant close, reentrant writes, EOF ordering, invalid byte counts, event
+and allocation exhaustion, process detachment before deferred free, and the generic chain writer's state ownership.
+`test/kvm_bridge_wait_handle_contract.js` also requires `waitExit()` to compact
+its wait list, because the chain stops at the first NULL and stdin has no write
+event before its first write, and requires process-pipe registrations to pass
+static metadata instead of the allocating `ILibChain_AddWaitHandle` macro.
+The write probes also cover the 64 MiB stdin queue bound and its accounting, and
+writes whose completion wait failed: they are retired after a confirmed
+cancellation and otherwise stay pinned. The chain writer probe checks that a
+reissued partial file write continues at the right file offset and that callers
+get their base offset back. `test/chain_wait_dispatch_runtime.py` runs the
+production TIMEOUT/INVALID_HANDLE dispatch under ASan, including handlers that
+remove their own registration, which previously freed a node the chain then
+removed again. The Windows pipe
+probe compiles the production transport against real handles and starts only
+its own disposable reader children. On Windows it runs 30 drain, cancellation
+and child-crash rounds; on other hosts it cross-compiles and explicitly skips
+execution. The portable write probe also cross-compiles the full process-pipe
+translation unit when MinGW is available. Neither replaces a service-DLL build
+or the installed-service integration gate.
 After building, `node test/windows_inventory_runtime.js --native` additionally
 queries real Windows processes and services three times, checks handle counts,
 and verifies ISO module version replacement in Duktape. Its query-only console
@@ -122,10 +170,16 @@ Duplex/pipe cleanup for invalid service paths and rejected launches.
 
 The elevated terminal smoke probes are `meshconsole_bridge_exec_smoke.js`,
 `meshconsole_bridge_terminal_smoke.js`, and `win_terminal_wrapper_exec_smoke.js`.
-The clipboard test's `--live-read --session <id>` mode reads without changing the
-clipboard and prints only success and length. Run that mode under the service
-identity: an ordinary elevated administrator is expected to fail closed at the
-session-token boundary with error 1314.
+After a Windows package build, validate clipboard reads, empty/Unicode writes,
+repeated KVM polling, user-session changes, helper idle retirement and agent
+termination cleanup through the installed service on an authorized test endpoint.
+Include blocked stdin writes, simultaneous timeout/helper exit, denied kill,
+logoff/relogin with session reuse and forced broker termination.
+These portable fixtures do not prove a live WTS session transition, pipe ACL,
+job teardown or remote desktop integration. The installed DLL, server clipboard
+module and both core variants must be updated together. An ordinary elevated
+administrator is expected to fail closed at `WTSQueryUserToken` with error 1314;
+the cross-session integration check must run through the service identity.
 
 `python test/connection_failure_telemetry_native.py` runs the production receive
 and diagnostic functions against disposable Windows loopback TCP sockets. It

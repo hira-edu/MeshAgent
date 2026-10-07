@@ -1119,11 +1119,13 @@ int ILibIsRunningOnChainThread(void* chain);
 		char *buffer;
 		DWORD bytesLeft;
 		DWORD totalWritten;
+		ULONGLONG baseOffset;	// Caller's OVERLAPPED offset; restored before the handler runs
 		HANDLE fileHandle;
 		OVERLAPPED *p;
 		void *user;
 		char *metadata;
 	}ILibChain_WriteEx_data;
+	BOOL ILibChain_RetireCancelledIo(HANDLE h, OVERLAPPED *p);
 
 	void* ILibChain_WaitHandle_RemoveAndSaveState(void *chain, HANDLE h);
 	void ILibChain_WaitHandle_RestoreState(void *chain, void *state);

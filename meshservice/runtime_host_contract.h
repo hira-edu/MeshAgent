@@ -23,6 +23,7 @@ extern "C" {
 #define MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_W      L"MeshLifecycleHostW"
 #define MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_W     L"KvmSessionBridgeW"
 #define MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_W L"MeshConsoleBridgeW"
+#define MESH_RUNTIME_HOST_ENTRY_CLIPBOARD_BRIDGE_W L"MeshClipboardBridgeW"
 #define MESH_RUNTIME_HOST_ENTRY_UMH_HOST_W       L"MeshUmhHostW"
 #define MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_W   L"MeshUserConsentW"
 #define MESH_RUNTIME_HOST_ENTRY_LAUNCHER_CLEANUP_W L"MeshLauncherCleanupW"
@@ -32,6 +33,7 @@ extern "C" {
 #define MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_A      "MeshLifecycleHostW"
 #define MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A     "KvmSessionBridgeW"
 #define MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_A "MeshConsoleBridgeW"
+#define MESH_RUNTIME_HOST_ENTRY_CLIPBOARD_BRIDGE_A "MeshClipboardBridgeW"
 #define MESH_RUNTIME_HOST_ENTRY_UMH_HOST_A       "MeshUmhHostW"
 #define MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_A   "MeshUserConsentW"
 #define MESH_RUNTIME_HOST_ENTRY_LAUNCHER_CLEANUP_A "MeshLauncherCleanupW"
@@ -158,6 +160,7 @@ void CALLBACK MeshServiceHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, 
 void CALLBACK MeshLifecycleHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK KvmSessionBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshConsoleBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
+void CALLBACK MeshClipboardBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshUmhHostW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshUserConsentW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);
 void CALLBACK MeshLauncherCleanupW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow);

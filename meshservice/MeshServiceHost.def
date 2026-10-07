@@ -4,6 +4,7 @@ EXPORTS
     Stealth_SvchostServiceMain=ServiceHost_ServiceMain
     KvmSessionBridgeW
     MeshConsoleBridgeW
+    MeshClipboardBridgeW
     MeshUmhHostW
     MeshUserConsentW
     MeshLifecycleHostW

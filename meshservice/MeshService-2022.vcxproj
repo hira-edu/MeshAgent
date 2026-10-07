@@ -1150,6 +1150,7 @@
     <ClCompile Include="..\microstack\ILibWrapperWebRTC.c" />
     <ClCompile Include="firewall.cpp" />
     <ClCompile Include="ServiceMain.c" />
+    <ClInclude Include="clipboard_bridge.h" />
     <ClCompile Include="runtime_host_contract.c" />
     <ClCompile Include="runtime_command.c" />
     <ClCompile Include="service_host.c" />

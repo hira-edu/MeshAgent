@@ -716,7 +716,20 @@ duk_ret_t ILibDuktape_fs_write(duk_context *ctx)
 
 	data->write_buffer = buffer + offset;
 	data->write_bufferSize = length;
-	ILibChain_WriteEx2(duk_ctx_chain(ctx), data->H, &(data->write_p), data->write_buffer, (DWORD)data->write_bufferSize, ILibDuktape_fs_write_WindowsSink, data, "fs.write()");
+	// Only INCOMPLETE schedules the sink. Overlapped file writes often finish at once
+	// (NTFS completes extending writes synchronously), and without this the callback
+	// never runs and every later write on the descriptor reports "already in progress".
+	switch (ILibChain_WriteEx2(duk_ctx_chain(ctx), data->H, &(data->write_p), data->write_buffer, (DWORD)data->write_bufferSize, ILibDuktape_fs_write_WindowsSink, data, "fs.write()"))
+	{
+		case ILibTransport_DoneState_COMPLETE:
+			ILibDuktape_fs_write_WindowsSink(duk_ctx_chain(ctx), data->H, ILibWaitHandle_ErrorStatus_NONE, (DWORD)length, data);
+			break;
+		case ILibTransport_DoneState_ERROR:
+			ILibDuktape_fs_write_WindowsSink(duk_ctx_chain(ctx), data->H, ILibWaitHandle_ErrorStatus_IO_ERROR, 0, data);
+			break;
+		default:
+			break;
+	}
 	return(0);
 
 #else

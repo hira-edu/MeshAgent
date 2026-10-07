@@ -47,6 +47,7 @@ function main() {
     const processPipePath = path.resolve('microstack', 'ILibProcessPipe.c');
     const kvmSource = fs.readFileSync(kvmPath, 'utf8');
     const processPipeSource = fs.readFileSync(processPipePath, 'utf8');
+    const childProcessSource = fs.readFileSync(path.resolve(path.dirname(processPipePath), '..', 'microscript', 'ILibDuktape_ChildProcess.c'), 'utf8');
 
     const checks = {
         hardeningUsesPreStartCreateHandle:
@@ -72,7 +73,15 @@ function main() {
         waitHandleGetterGuardsPipeOutputs:
             processPipeSource.includes('read != NULL && j->stdOut != NULL && j->stdOut->mOverlapped != NULL') &&
             processPipeSource.includes('error != NULL && j->stdErr != NULL && j->stdErr->mOverlapped != NULL') &&
-            processPipeSource.includes('write != NULL && j->stdIn != NULL && j->stdIn->mOverlapped != NULL')
+            // Child stdin is an outbound overlapped pipe; its wait handle is the write completion.
+            processPipeSource.includes('write != NULL && j->stdIn != NULL && j->stdIn->mwOverlapped != NULL') &&
+            processPipeSource.includes('*write = j->stdIn->mwOverlapped->hEvent;'),
+        // The chain stops at the first NULL in waitExit's list; a missing stdin event
+        // must not drop the stderr handle that follows it.
+        waitExitCompactsMissingHandles:
+            childProcessSource.includes('if (found[handleIndex] != NULL) { handles[handleCount++] = found[handleIndex]; }'),
+        // The registration macro allocates metadata that the chain never frees.
+        processPipeRegistrationsDoNotLeakMetadata: !/ILibChain_AddWaitHandle\(/.test(processPipeSource)
     };
 
     for (const [name, passed] of Object.entries(checks)) {
