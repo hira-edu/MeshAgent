@@ -30,5 +30,7 @@ void kvm_pause(int pause);
 void* kvm_relay_setup(char *exePath, void *processPipeMgr, ILibKVM_WriteHandler writeHandler, void *reserved);
 void kvm_relay_reset(void);
 void kvm_cleanup(void *reserved);
+int kvm_relay_credential_status(void);
+int kvm_relay_provision(void);
 
 #endif /* LINUX_KVM_H_ */

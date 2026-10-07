@@ -236,10 +236,13 @@ python3 test/macos_kvm_io_native.py
 python3 test/macos_kvm_protocol_native.py
 python3 test/macos_kvm_mainloop_native.py
 python3 test/macos_kvm_session_native.py --agent /absolute/path/to/built/meshagent
+python3 test/macos_kvm_provision_native.py --agent /absolute/path/to/built/meshagent
+node test/macos_kvm_setup_runtime.js
 python3 test/macos_vnc_relay_native.py
 python3 test/macos_helper_framing_runtime.py --agent /absolute/path/to/built/meshagent
 node test/macos_message_helper_runtime.js
 python3 test/macos_message_helper_agent_runtime.py --agent /absolute/path/to/built/meshagent
+python3 test/js_timer_retention_runtime.py --agent /absolute/path/to/built/meshagent
 python3 test/posix_fs_modes_agent_runtime.py --agent /absolute/path/to/built/meshagent
 ```
 
@@ -271,6 +274,24 @@ fail-closed handling of unnegotiated encodings, out-of-bounds rectangles,
 disconnects and stalls, and the key/pointer wire format. It does not contact the
 real Screen Sharing service.
 
+The session native probe exercises console selection with injected CoreFoundation
+preference calls: missing/false/invalid values are set to a system-wide boolean,
+an existing true value needs no write, and load, save or readback failures prevent
+authentication. It does not change real Screen Sharing preferences. Its session
+fixture verifies selection runs after credential and listener checks and before
+the RFB handshake. A live regression check must start from an unlocked Mac and
+confirm the viewer shows the same current desktop; when the physical console is
+locked, the viewer should show that console's lock screen.
+
+First-start setup probes run the production orchestration with injected UI and
+private pipes and exercise native provisioning under ASan/UBSan with real
+temporary files. They cover saved-credential reuse, boot before login, cancel,
+invalid input, verified authentication before saving, exclusive root-only mode
+0600 storage, unsafe incumbents, symlinks, failed-write cleanup and password
+buffer cleanup. They do not show a real password dialog or contact Screen Sharing.
+A live setup check should show one masked macOS dialog on first root-agent start,
+save only an accepted password, and show no dialog after reconnect or restart.
+
 The session native probe reads the relay credential from real temporary files,
 with fstat reporting the current user as root, and covers content, length, modes,
 hard links, symlinks, FIFOs and the parent directory. It checks port ownership
@@ -286,12 +307,20 @@ wire bytes and exercise a real temporary Unix socket without starting GUI helper
 
 The message-helper Node test runs the production parent/client code with real
 private sockets and injected launchd/command execution. It covers authentication,
-dialog outcomes, UTF-8 data, setup failures, expired timers and cleanup. The
-built-agent helper probe registers a disposable Aqua LaunchAgent using the same
-binary and sends an unsupported request; this verifies launch, authentication,
-error delivery and removal without accessing the clipboard or showing UI.
-Run it as the foreground user, without sudo. `--child-logs` enables temporary
-startup diagnostics. It does not prove root-to-user delivery or live UI behavior.
+one reused helper per desktop user, serialized requests, shared concurrent
+clipboard reads, idle removal, the retry delay after a failed start, removal of
+helpers left by an earlier agent, cancellation, dialog outcomes, UTF-8 data and
+file removal when unloading fails. The built-agent helper probe registers a
+disposable Aqua LaunchAgent using the same binary, sends two unsupported requests
+through one helper, and verifies launch, authentication, error delivery and
+removal without accessing the clipboard or showing UI. Run it as the foreground
+user, without sudo. `--child-logs` enables temporary startup diagnostics. It does
+not prove root-to-user delivery or live UI behavior.
+
+The timer probe runs the built agent on a script that drops the objects returned
+by `setTimeout` in immediates, promise handlers, timers and top-level code, and
+checks that every timeout fires, that a cleared one does not, and that intervals
+behave as before.
 
 The filesystem probe creates only temporary files, starts its child with umask
 zero and checks initial modes, exclusive collisions, symlinks and invalid modes.

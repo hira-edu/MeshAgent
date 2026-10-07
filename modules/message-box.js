@@ -759,12 +759,13 @@ if (process.platform == 'darwin')
         '$.CGEventPost($.kCGHIDEventTap,down);$.CGEventPost($.kCGHIDEventTap,up);}' +
         'finally{if(down){$.CFRelease(down);}if(up){$.CFRelease(up);}}return "{}";}\n' +
         'var options={withTitle:p.title,withIcon:"caution",buttons:p.buttons,defaultButton:p.buttons[p.buttons.length-1]};' +
+        'if(p.command==="PASSWORD"){options.defaultAnswer="";options.hiddenAnswer=true;}' +
         'if(p.timeout>0){options.givingUpAfter=p.timeout;}' +
-        'try{var r=app.displayDialog(p.caption,options);return JSON.stringify({button:r.buttonReturned,timeout:!!r.gaveUp});}' +
+        'try{var r=app.displayDialog(p.caption,options);return JSON.stringify({button:r.buttonReturned,timeout:!!r.gaveUp,value:p.command==="PASSWORD"?r.textReturned:undefined});}' +
         'catch(e){if(e.errorNumber===-128||e.number===-128){return JSON.stringify({cancelled:true});}throw e;}\n}';
     function macExecuteHelperCommand(client, request, callback)
     {
-        if (!request || ['writeClip','readClip','DIALOG','NOTIFY','LOCK'].indexOf(request.command) < 0) { throw new Error('Unknown helper command'); }
+        if (!request || ['writeClip','readClip','DIALOG','PASSWORD','NOTIFY','LOCK'].indexOf(request.command) < 0) { throw new Error('Unknown helper command'); }
         var executable, argv, input = null, seconds = 15;
         if (request.command == 'writeClip')
         {
@@ -775,7 +776,7 @@ if (process.platform == 'darwin')
         else
         {
             if (request.command != 'LOCK' && (typeof request.title != 'string' || typeof request.caption != 'string')) { throw new Error('Invalid helper text'); }
-            if (request.command == 'DIALOG')
+            if (request.command == 'DIALOG' || request.command == 'PASSWORD')
             {
                 if (!Array.isArray(request.buttons) || request.buttons.length < 1 || request.buttons.length > 3 ||
                     request.buttons.some(function (b) { return typeof b != 'string' || !b.length; }) ||
@@ -814,8 +815,8 @@ if (process.platform == 'darwin')
                 var error = macUtf8Decode(Buffer.concat(errors));
                 if (code !== 0)
                 {
-                    if (request.command == 'DIALOG' && error.indexOf('(-128)') >= 0) { finish(null, {cancelled:true}); }
-                    else { finish(error || 'Helper command failed (' + code + ')'); }
+                    if ((request.command == 'DIALOG' || request.command == 'PASSWORD') && error.indexOf('(-128)') >= 0) { finish(null, {cancelled:true}); }
+                    else { finish(request.command == 'PASSWORD' ? 'Password dialog failed' : error || 'Helper command failed (' + code + ')'); }
                     return;
                 }
                 var text = macUtf8Decode(Buffer.concat(output));
@@ -823,7 +824,15 @@ if (process.platform == 'darwin')
                 else if (request.command == 'writeClip') { finish(null, {}); }
                 else { finish(null, JSON.parse(text)); }
             }
-            catch (e) { finish(e); }
+            catch (e) { finish(request.command == 'PASSWORD' ? 'Password dialog failed' : e); }
+            finally
+            {
+                if (request.command == 'PASSWORD')
+                {
+                    output.concat(errors).forEach(function (b) { b.fill(0); });
+                    output = []; errors = [];
+                }
+            }
         });
         child.on('error', function (e) { finish(e); });
         if (seconds > 0)
@@ -839,111 +848,258 @@ if (process.platform == 'darwin')
 function macos_messageBox()
 {
     this._ObjectID = 'message-box';
+    // One helper LaunchAgent per desktop user serves queued requests over one authenticated
+    // connection and is removed after it has been idle. Every LaunchAgent load posts a macOS
+    // background-item notification, and remote desktop polls the clipboard every few seconds,
+    // so requests must never each start their own helper or run concurrently.
+    var MAC_HELPER_IDLE_MS = 30000, MAC_HELPER_START_MS = 15000, MAC_HELPER_RETRY_MS = 30000;
+    var self = this, fs = require('fs'), sessions = require('user-sessions');
+    this._queue = [];
+    this._session = null;
+    this._active = null;
+    this._failedUntil = 0;
+    this._failure = null;
+    this._swept = false;
+    this._nextId = 0;
+
+    // Removing the plist removes the background item; the helper exits when its connection closes.
+    function removeSessionFiles(session)
+    {
+        var files = [session.plist, session.config, session.path];
+        for (var i = 0; i < files.length; ++i) { if (files[i]) { try { if (fs.existsSync(files[i])) { fs.unlinkSync(files[i]); } } catch (ignored) { } } }
+        if (session.directory) { try { fs.rmdirSync(session.directory); } catch (ignored) { } }
+    }
+    // An agent that stops or updates while a helper is running must not leave it registered.
+    function releaseAtExit() { if (self._session != null) { var s = self._session; self._session = null; removeSessionFiles(s); } }
+    try { require('events').EventEmitter.call(this); this.on('~', releaseAtExit); } catch (ignored) { }
+    try { process.on('exit', releaseAtExit); } catch (ignored) { }
+
     this._request = function (request, interpret)
     {
         var ret = new promise(function (res, rej) { this._res = res; this._rej = rej; });
-        var fs = require('fs'), sessions = require('user-sessions'), manager = require('service-manager').manager;
-        ret._done = false;
-        ret._finish = function (error, response)
+        ret.request = request; ret.interpret = interpret; ret._done = false;
+        ret.close = function () { self._cancel(ret); };
+        // A read queued after any other request must see its effect, so it cannot share an earlier read.
+        if (request.command != 'readClip') { this._pendingRead = null; }
+        if (Date.now() < this._failedUntil)
         {
-            if (ret._done) { return; }
-            ret._done = true;
-            if (ret.timer) { clearTimeout(ret.timer); ret.timer = null; }
-            // launchctl waits run a nested native event loop. Cleanup must not
-            // remove the server while its receive callback is still on the stack.
-            setImmediate(function ()
+            // A helper that just failed to start would fail again; do not register another one.
+            ret._done = true; ret._rej('macOS helper unavailable: ' + this._failure);
+            return ret;
+        }
+        this._queue.push(ret);
+        this._pump();
+        return ret;
+    };
+    this._settle = function (ret, error, response)
+    {
+        if (ret._done) { return; }
+        ret._done = true;
+        if (ret.timer) { clearTimeout(ret.timer); ret.timer = null; }
+        if (error) { ret._rej('' + error); return; }
+        try { ret._res(ret.interpret(response)); } catch (e) { ret._rej('' + e); }
+    };
+    this._cancel = function (ret)
+    {
+        var index = this._queue.indexOf(ret);
+        if (index >= 0) { this._queue.splice(index, 1); this._settle(ret, 'denied'); return; }
+        // Closing the helper ends a dialog or command that is still on screen or running.
+        if (this._active === ret && this._session != null) { this._sessionFailed(this._session, 'denied'); }
+    };
+    this._pump = function ()
+    {
+        if (this._active != null || this._queue.length == 0) { return; }
+        var uid;
+        try { uid = sessions.consoleUid(); }
+        catch (e) { this._rejectQueue(e); return; }
+        var session = this._session;
+        if (session != null && session.uid !== uid) { this._closeSession(session); session = null; }
+        if (session == null)
+        {
+            session = this._startSession(uid);
+            if (session == null) { return; }
+        }
+        if (!session.ready) { return; }	// _onReady pumps once the helper authenticates
+        if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null; }
+        var ret = this._queue.shift();
+        ret.id = ++this._nextId;
+        this._active = ret;
+        var seconds = (ret.request.command == 'DIALOG' || ret.request.command == 'PASSWORD') ? ret.request.timeout : 15;
+        if (seconds > 0) { ret.timer = setTimeout(function () { ret.timer = null; self._sessionFailed(session, 'macOS helper operation timeout'); }, (seconds + 10) * 1000); }
+        try { session.connection.write(translateObject({command:'REQUEST',token:session.token,id:ret.id,request:ret.request})); }
+        catch (e) { this._sessionFailed(session, e); }
+    };
+    this._onReady = function (session)
+    {
+        if (session.closed || this._session !== session) { return; }
+        session.ready = true;
+        if (session.startTimer) { clearTimeout(session.startTimer); session.startTimer = null; }
+        this._failedUntil = 0; this._failure = null;
+        this._pump();
+    };
+    this._complete = function (session, message)
+    {
+        var ret = this._active;
+        if (ret == null || message.command != 'RESULT' || message.token !== session.token || message.id !== ret.id || message.request !== ret.request.command)
+        { this._sessionFailed(session, 'Invalid macOS helper response'); return; }
+        if (ret.request.command == 'PASSWORD')
+        {
+            try { if (require('user-sessions').consoleUid() !== session.uid) { throw new Error('Desktop user changed'); } }
+            catch (e) { this._sessionFailed(session, 'Desktop user changed'); return; }
+        }
+        this._active = null;
+        this._settle(ret, message.error || null, message);
+        this._next(session);
+    };
+    this._next = function (session)
+    {
+        setImmediate(function ()
+        {
+            if (self._queue.length > 0) { self._pump(); return; }
+            if (self._session === session && self._active == null && session.idleTimer == null)
             {
-                var cleanup = [];
-                if (ret.connection) { try { ret.connection.end(); } catch (e) { cleanup.push('socket: ' + e); } }
-                if (ret.server) { try { ret.server.close(); } catch (e) { cleanup.push('listener: ' + e); } }
-                var stopped = true;
-                if (ret.job)
+                session.idleTimer = setTimeout(function ()
                 {
-                    try { ret.job.unload(); } catch (e) { stopped = false; cleanup.push('LaunchAgent stop: ' + e); }
-                    try { ret.job.close(); } catch (ignored) { }
-                }
-                if (stopped)
-                {
-                    var files = [ret.plist, ret.config, ret.path];
-                    for (var i = 0; i < files.length; ++i)
-                    {
-                        if (files[i]) { try { if (fs.existsSync(files[i])) { fs.unlinkSync(files[i]); } } catch (e) { cleanup.push('file cleanup: ' + e); } }
-                    }
-                    if (ret.directory) { try { fs.rmdirSync(ret.directory); } catch (e) { cleanup.push('directory cleanup: ' + e); } }
-                }
-                if (cleanup.length) { error = (error ? error + '; ' : '') + cleanup.join('; '); }
-                if (error) { ret._rej('' + error); }
-                else { try { ret._res(interpret(response)); } catch (e) { ret._rej('' + e); } }
-            });
-        };
-        ret.close = function () { ret._finish('denied'); };
+                    session.idleTimer = null;
+                    if (self._session === session && self._active == null && self._queue.length == 0) { self._closeSession(session); }
+                }, MAC_HELPER_IDLE_MS);
+            }
+        });
+    };
+    this._rejectQueue = function (error)
+    {
+        var queued = this._queue; this._queue = [];
+        for (var i = 0; i < queued.length; ++i) { this._settle(queued[i], error); }
+    };
+    // A helper that never became ready fails every queued request and starts a retry delay, so
+    // clipboard polling cannot register a new LaunchAgent every few seconds. A ready helper that
+    // fails only fails the request it was serving; the next request starts a fresh helper.
+    this._sessionFailed = function (session, error)
+    {
+        if (this._session !== session) { return; }
+        var wasReady = session.ready;
+        this._closeSession(session);
+        if (this._active != null) { var ret = this._active; this._active = null; this._settle(ret, error); }
+        if (!wasReady)
+        {
+            this._failedUntil = Date.now() + MAC_HELPER_RETRY_MS;
+            this._failure = '' + error;
+            this._rejectQueue(error);
+        }
+        else if (this._queue.length > 0) { setImmediate(function () { self._pump(); }); }
+    };
+    this._closeSession = function (session)
+    {
+        if (this._session === session) { this._session = null; }
+        if (session.closed) { return; }
+        session.closed = true;
+        if (session.startTimer) { clearTimeout(session.startTimer); session.startTimer = null; }
+        if (session.idleTimer) { clearTimeout(session.idleTimer); session.idleTimer = null; }
+        // launchctl waits run a nested native event loop. Cleanup must not remove the server
+        // while its receive callback is still on the stack.
+        setImmediate(function ()
+        {
+            if (session.connection) { try { session.connection.end(); } catch (ignored) { } }
+            if (session.server) { try { session.server.close(); } catch (ignored) { } }
+            if (session.job)
+            {
+                try { session.job.unload(); } catch (ignored) { }
+                try { session.job.close(); } catch (ignored) { }
+            }
+            // Remove the files even if launchd kept the job: a plist left behind keeps a background
+            // item registered, while a job without one disappears at logout.
+            removeSessionFiles(session);
+        });
+    };
+    // Helpers left by an agent that exited while one was running.
+    this._sweep = function (uid, manager)
+    {
+        if (this._swept) { return; }
+        this._swept = true;
+        var folder;
+        try { folder = sessions.getHomeFolder(sessions.getUsername(uid)) + '/Library/LaunchAgents'; } catch (e) { return; }
+        var names = [];
+        try { names = fs.readdirSync(folder); } catch (e) { return; }
+        for (var i = 0; i < names.length; ++i)
+        {
+            var match = /^(mesh-ui-\d{1,39})\.plist$/.exec(names[i]);
+            if (match == null) { continue; }
+            try { var job = manager.getLaunchAgent(match[1], uid); try { job.unload(); } finally { job.close(); } } catch (ignored) { }
+            try { fs.unlinkSync(folder + '/' + names[i]); } catch (ignored) { }
+        }
+    };
+    this._startSession = function (uid)
+    {
+        var manager = require('service-manager').manager;
+        var session = { uid: uid, ready: false, closed: false };
+        this._session = session;
         try
         {
-            ret.uid = sessions.consoleUid();
-            var self = sessions.Self(), gid = sessions.getGroupID(ret.uid);
-            if (self != 0 && self != ret.uid) { throw new Error('Cannot launch a helper for another desktop user'); }
+            var me = sessions.Self(), gid = sessions.getGroupID(uid);
+            if (me != 0 && me != uid) { throw new Error('Cannot launch a helper for another desktop user'); }
+            this._sweep(uid, manager);
             var nonce = require('tls').generateRandomInteger('0', '340282366920938463463374607431768211455');
-            ret.token = require('tls').generateRandomInteger('0', '115792089237316195423570985008687907853269984665640564039457584007913129639935');
-            if (!/^\d{1,39}$/.test(nonce) || !/^\d{1,78}$/.test(ret.token)) { throw new Error('Invalid helper randomness'); }
+            session.token = require('tls').generateRandomInteger('0', '115792089237316195423570985008687907853269984665640564039457584007913129639935');
+            if (!/^\d{1,39}$/.test(nonce) || !/^\d{1,78}$/.test(session.token)) { throw new Error('Invalid helper randomness'); }
             var directory = '/var/tmp/mesh-ui-' + nonce;
             // Exclusive mkdir with its initial mode closes the chmod-after-create race.
-            fs.mkdirSync(directory, 448); ret.directory = directory;
-            ret.path = directory + '/ipc'; ret.config = directory + '/config.json';
-            ret.service = 'mesh-ui-' + nonce;
-            var fd = fs.openSync(ret.config, 'wx', 384);
-            try { fs.chmodSync(ret.config, 384); fs.writeSync(fd, JSON.stringify({path:ret.path, token:ret.token, uid:ret.uid})); }
+            fs.mkdirSync(directory, 448); session.directory = directory;
+            session.path = directory + '/ipc'; session.config = directory + '/config.json';
+            session.service = 'mesh-ui-' + nonce;
+            var fd = fs.openSync(session.config, 'wx', 384);
+            try { fs.chmodSync(session.config, 384); fs.writeSync(fd, JSON.stringify({path:session.path, token:session.token, uid:uid})); }
             finally { fs.closeSync(fd); }
-            fs.chownSync(ret.config, ret.uid, gid);
-            ret.timer = setTimeout(function () { ret.timer = null; ret._finish('macOS helper connection timeout'); }, 15000);
-            ret.server = require('net').createServer();
-            ret.server.on('error', function (e) { ret._finish(e); });
-            ret.server.on('connection', function (socket)
+            fs.chownSync(session.config, uid, gid);
+            session.startTimer = setTimeout(function () { session.startTimer = null; self._sessionFailed(session, 'macOS helper connection timeout'); }, MAC_HELPER_START_MS);
+            session.server = require('net').createServer();
+            session.server.on('error', function (e) { self._sessionFailed(session, e); });
+            session.server.on('connection', function (socket)
             {
-                if (ret._done || ret.connection) { socket.end(); return; }
-                socket.on('error', function (e) { if (socket === ret.connection) { ret._finish(e); } });
-                socket.on('end', function () { if (socket === ret.connection && !ret._done) { ret._finish('macOS helper disconnected'); } });
+                if (session.closed || session.connection) { socket.end(); return; }
+                socket.on('error', function (e) { if (socket === session.connection) { self._sessionFailed(session, e); } });
+                socket.on('end', function () { if (socket === session.connection) { self._sessionFailed(session, 'macOS helper disconnected'); } });
                 socket.on('data', macHelperDataHandler(function (message)
                 {
-                    if (ret._done) { this.end(); return; }
+                    if (session.closed) { this.end(); return; }
                     if (!this.authenticated)
                     {
-                        if (message.command != 'HELLO' || message.token !== ret.token || message.uid !== ret.uid || ret.connection)
+                        if (message.command != 'HELLO' || message.token !== session.token || message.uid !== uid || session.connection)
                         { this.end(); return; }
-                        this.promise = {_rej:function (e) { ret._finish(e); }};
-                        if (sessions.consoleUid() !== ret.uid) { ret._finish('Desktop user changed'); return; }
-                        this.authenticated = true; ret.connection = this;
-                        clearTimeout(ret.timer); ret.timer = null;
-                        var seconds = request.command == 'DIALOG' ? request.timeout : 15;
-                        if (seconds > 0) { ret.timer = setTimeout(function () { ret.timer = null; ret._finish('macOS helper operation timeout'); }, (seconds + 10) * 1000); }
-                        this.write(translateObject({command:'REQUEST',token:ret.token,request:request}));
+                        this.promise = {_rej:function (e) { self._sessionFailed(session, e); }};
+                        if (sessions.consoleUid() !== uid) { self._sessionFailed(session, 'Desktop user changed'); return; }
+                        this.authenticated = true; session.connection = this;
+                        // The helper usually connects while launchctl load is still waiting in a nested
+                        // event loop. Requests and callers' callbacks must not run there: timers created
+                        // inside it never fire. Finish once load returns.
+                        if (session.loading) { session.pendingReady = true; } else { self._onReady(session); }
                         return;
                     }
-                    if (message.command != 'RESULT' || message.token !== ret.token || message.request !== request.command)
-                    { ret._finish('Invalid macOS helper response'); return; }
-                    ret._finish(message.error || null, message);
+                    self._complete(session, message);
                 }));
             });
-            ret.server.listen({path:ret.path}, function ()
+            session.server.listen({path:session.path}, function ()
             {
-                if (ret._done) { return; }
+                if (session.closed) { return; }
                 try
                 {
-                    fs.chmodSync(ret.path, 384); fs.chownSync(ret.path, ret.uid, gid);
+                    fs.chmodSync(session.path, 384); fs.chownSync(session.path, uid, gid);
                     // Root retains ownership of the directory: the desktop user
                     // cannot replace path components before privileged cleanup.
-                    fs.chownSync(directory, self, gid); fs.chmodSync(directory, self == ret.uid ? 448 : 456);
-                    var code = 'try { var c=require("message-box").startClient({config:' + JSON.stringify(ret.config) + '}); c.on("close",function(){process.exit();}).on("error",function(){process.exit(1);}); } catch(e) { process.exit(1); }';
-                    var installed = manager.installLaunchAgent({name:ret.service,servicePath:process.execPath,uid:ret.uid,
+                    fs.chownSync(directory, me, gid); fs.chmodSync(directory, me == uid ? 448 : 456);
+                    var code = 'try { var c=require("message-box").startClient({config:' + JSON.stringify(session.config) + '}); c.on("close",function(){process.exit();}).on("error",function(){process.exit(1);}); } catch(e) { process.exit(1); }';
+                    var installed = manager.installLaunchAgent({name:session.service,servicePath:process.execPath,uid:uid,
                         sessionTypes:['Aqua'],startType:'AUTO_START',failureRestart:0,parameters:['-exec',code]});
-                    ret.plist = installed.plist;
-                    ret.job = manager.getLaunchAgent(ret.service, ret.uid);
-                    ret.job.load();
+                    session.plist = installed.plist;
+                    session.job = manager.getLaunchAgent(session.service, uid);
+                    session.loading = true;
+                    try { session.job.load(); } finally { session.loading = false; }
                 }
-                catch (e) { ret._finish(e); }
+                catch (e) { self._sessionFailed(session, e); return; }
+                if (session.pendingReady) { session.pendingReady = false; self._onReady(session); }
             });
         }
-        catch (e) { ret._finish(e); }
-        return ret;
+        catch (e) { this._sessionFailed(session, e); return null; }
+        return session;
     };
     this.create = function (title, caption, timeout, layout)
     {
@@ -968,23 +1124,46 @@ function macos_messageBox()
         if (typeof text != 'string') { return new promise(function (res, rej) { rej('Clipboard text must be a string'); }); }
         return this._request({command:'writeClip',clipText:text}, function () {});
     };
-    this.getClipboard = function () { return this._request({command:'readClip'}, function (reply) { if (typeof reply.value != 'string') { throw new Error('Invalid clipboard response'); } return reply.value; }); };
+    // The answer travels only through the helper's private pipes and authenticated IPC.
+    // It is never included in osascript arguments, notifications or errors.
+    this.password = function (title, caption)
+    {
+        if (typeof title != 'string' || typeof caption != 'string')
+        { return new promise(function (res, rej) { rej('Invalid password dialog options'); }); }
+        return this._request({command:'PASSWORD',title:title,caption:caption,timeout:120,buttons:['Cancel','Save']}, function (reply)
+        {
+            if (reply.cancelled || reply.timeout || reply.button != 'Save') { throw new Error('Password setup cancelled'); }
+            if (typeof reply.value != 'string') { throw new Error('Invalid password dialog response'); }
+            return reply.value;
+        });
+    };
+    // Remote desktop polls the clipboard; callers arriving while a read is pending share it.
+    this.getClipboard = function ()
+    {
+        if (this._pendingRead != null && !this._pendingRead._done) { return this._pendingRead; }
+        var ret = this._request({command:'readClip'}, function (reply) { if (typeof reply.value != 'string') { throw new Error('Invalid clipboard response'); } return reply.value; });
+        this._pendingRead = ret;
+        return ret;
+    };
     this.lock = function () { return this._request({command:'LOCK'}, function () {}); };
     this.notify = function (title, caption)
     {
         if (title == 'MeshCentral') { try { title = require('MeshAgent').displayName; } catch (ignored) { } }
         return this._request({command:'NOTIFY',title:title,caption:caption}, function () { return 'DISMISSED'; });
     };
+    // Runs in the helper LaunchAgent: serves requests one at a time until the agent closes the
+    // connection, and exits on its own if no request arrives for longer than the agent's idle time.
     this.startClient = function (options)
     {
         if (!options || typeof options.config != 'string') { throw new Error('Missing private helper configuration'); }
-        var config = JSON.parse(require('fs').readFileSync(options.config).toString()), sessions = require('user-sessions');
+        var config = JSON.parse(require('fs').readFileSync(options.config).toString());
         if (!config || typeof config.token != 'string' || !/^\d{1,78}$/.test(config.token) ||
             config.uid !== sessions.Self() || config.uid !== sessions.consoleUid() || config.uid <= 0 ||
             config.path !== options.config.substring(0, options.config.lastIndexOf('/')) + '/ipc')
         { throw new Error('Invalid helper session configuration'); }
         var client = require('net').createConnection({path:config.path}, function () { this.write(translateObject({command:'HELLO',token:config.token,uid:config.uid})); });
-        client._deadline = setTimeout(function () { client._deadline = null; client.end(); }, 15000);
+        function idle(ms) { if (client._deadline) { clearTimeout(client._deadline); } client._deadline = setTimeout(function () { client._deadline = null; client.end(); }, ms); }
+        idle(MAC_HELPER_START_MS);
         function dispose()
         {
             if (client._deadline) { clearTimeout(client._deadline); client._deadline = null; }
@@ -993,18 +1172,20 @@ function macos_messageBox()
         client.on('end', dispose).on('close', dispose).on('error', dispose);
         client.on('data', macHelperDataHandler(function (message)
         {
-            if (this._started || message.command != 'REQUEST' || message.token !== config.token) { this.end(); return; }
-            this._started = true;
-            clearTimeout(this._deadline); this._deadline = null;
-            var request = message.request;
+            if (this._busy || message.command != 'REQUEST' || message.token !== config.token || typeof message.id != 'number') { this.end(); return; }
+            this._busy = true;
+            if (this._deadline) { clearTimeout(this._deadline); this._deadline = null; }
+            var request = message.request, id = message.id, replied = false;
             function respond(error, result)
             {
-                if (client._replied) { return; } client._replied = true;
+                if (replied) { return; } replied = true;
                 if (client._deadline) { clearTimeout(client._deadline); client._deadline = null; }
                 var reply = result || {};
-                reply.command = 'RESULT'; reply.token = config.token; reply.request = request && request.command;
+                reply.command = 'RESULT'; reply.token = config.token; reply.id = id; reply.request = request && request.command;
                 if (error) { reply.error = '' + error; }
-                try { client.end(translateObject(reply)); } catch (e) { client.end(translateObject({command:'RESULT',token:config.token,request:reply.request,error:''+e})); }
+                client._busy = false;
+                try { client.write(translateObject(reply)); } catch (e) { client.write(translateObject({command:'RESULT',token:config.token,id:id,request:reply.request,error:''+e})); }
+                idle(MAC_HELPER_IDLE_MS * 2);
             }
             try
             {
@@ -1016,7 +1197,6 @@ function macos_messageBox()
         return client;
     };
 }
-
 
 switch(process.platform)
 {
@@ -1031,5 +1211,3 @@ switch(process.platform)
         module.exports = new macos_messageBox();
         break;
 }
-
-

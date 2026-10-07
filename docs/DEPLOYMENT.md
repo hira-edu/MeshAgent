@@ -245,28 +245,50 @@ Before authenticating, the helper requires:
   Screen Sharing is off, any account could listen on the port and collect the
   VNC authentication exchange.
 
+Before connecting, the root helper ensures the system-wide boolean
+`VNCAlwaysStartOnConsole` in `com.apple.RemoteManagement` is true. Password-based
+VNC otherwise can start in a separate login-window session while the physical
+screen remains unlocked. This setting attaches new VNC viewers to the current
+physical console, including its actual lock screen when locked. It also applies
+to other VNC clients on this Mac and remains set after disconnect and uninstall.
+If the setting cannot be saved and verified, the helper reports the failure and
+does not connect.
+
+For an installed agent built before console selection was added, set the same
+preference on the affected Mac and reconnect the remote desktop session:
+
+```sh
+sudo /usr/bin/defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
+```
+
 If any requirement fails, or Screen Sharing rejects the password, stops
 responding, or sends an unsupported message, the helper sends the reason to the
 viewer's desktop message bar and the session ends. The relay negotiates only Raw,
 CopyRect, and DesktopSize encodings and shares the screen with any other Screen
 Sharing viewers.
 
-The agent never changes Screen Sharing settings or creates the credential. An
-administrator sets up each Mac:
+The agent sets console selection and saves the VNC credential through a one-time
+macOS password dialog. It does not enable Screen Sharing. Set up each Mac:
 
 1. In System Settings > General > Sharing, turn on Screen Sharing. In its options,
    turn on "VNC viewers may control screen with password" and set a password of up
    to eight characters. A managed fleet can apply the same settings through MDM.
-2. Store the same password beside the installed executable. With the default
-   service name:
+2. Start the installed root agent. If its credential is missing, the foreground
+   desktop shows a masked **Screen Sharing setup** dialog. Enter the same VNC
+   password. The agent verifies the root-owned listener and authenticates before
+   creating `vncrelay.secret` beside its executable with root ownership and mode
+   0600. The answer travels through private pipes and authenticated helper IPC;
+   it is never placed in shell arguments or agent logs. A boot before login waits
+   for a desktop user. A saved credential skips the dialog on subsequent starts,
+   reboots, user switches and KVM connections.
 
-   ```sh
-   sudo /bin/bash -c 'umask 077; IFS= read -r -s p; printf "%s\n" "$p" > /usr/local/mesh_services/meshagent/vncrelay.secret'
-   ```
-
-   Type the password and press Return; it is not echoed or kept in shell history.
-   The file is created by root with mode 0600.
-3. Confirm the setup:
+   Cancellation, timeout, invalid input or failed verification saves nothing and
+   leaves KVM unavailable. Setup asks once per agent start; correct the Screen
+   Sharing settings and restart the agent to retry. An unsafe or invalid existing
+   credential is never replaced automatically. If the VNC password changes,
+   remove the old credential as an administrator and restart the agent to enter
+   the replacement through the dialog.
+3. An administrator can optionally confirm readiness:
 
    ```sh
    sudo /usr/local/mesh_services/meshagent/meshagent -kvmcheck
@@ -298,8 +320,13 @@ certificate and notarized.
 
 ## macOS service installation and user sessions
 
-Installation writes the executable and provisioning before publishing the daemon
-plist, then starts the daemon. A failed setup removes files created by that
+Native self-installation writes the executable, provisioning and
+`.meshagent_cron.sh` heartbeat before registering it in the installing root
+account's crontab, then starts the daemon. The heartbeat runs once per minute
+and starts the agent with `--__daemon` when its recorded process is absent.
+Service lookup supports this registration and older LaunchDaemon installations.
+This self-installation path is separate from MeshCentral's macOS package, which
+publishes launchd jobs. A failed setup removes files created by that
 installation and preserves preexisting provisioning. This cleanup covers handled
 failures; it is not crash recovery for an interrupted installation or
 restoration of a previously uninstalled version.
@@ -315,15 +342,21 @@ bounded processes with literal arguments; home-directory records are decoded as
 plists to preserve spaces and special characters. Session enumeration reports
 live logins with each user's resolved UID.
 
-Dialogs, clipboard operations, notifications and lock requests launch the same
-installed executable as a temporary Aqua LaunchAgent for the foreground user.
-The parent creates a private directory and authenticates the helper over a Unix
-socket using a per-request secret stored in a private configuration file. The
-secret is not placed in the LaunchAgent arguments. Root retains ownership of the
-directory when serving another user. Setup, command, disconnect and timeout
-failures reject the request and remove owned resources after unloading the job.
-An unload failure is reported and retains its files for recovery. This cleanup
-does not cover a parent process crash or power loss.
+Dialogs, clipboard operations, notifications and lock requests run through a
+helper that launches the same installed executable as a temporary Aqua
+LaunchAgent for the foreground user. One helper serves all requests for that user,
+one at a time over a single authenticated connection, and is removed after 30
+seconds without requests. macOS posts a background-item notification each time a
+LaunchAgent is loaded, so remote desktop's clipboard polling must not start a
+helper per request; concurrent clipboard reads share one read. If a helper fails
+to start, further requests fail immediately for 30 seconds instead of loading
+another one. The parent creates a private directory and authenticates the helper
+over a Unix socket using a per-session secret stored in a private configuration
+file. The secret is not placed in the LaunchAgent arguments. Root retains
+ownership of the directory when serving another user. Removing a helper deletes
+its plist and private files even if launchd refuses to unload the job. Helpers
+left by an agent that stopped while one was running are removed the next time a
+helper starts.
 
 Helper messages use bounded, length-prefixed JSON. The
 length is the encoded byte length; JSON Unicode escapes keep supplementary

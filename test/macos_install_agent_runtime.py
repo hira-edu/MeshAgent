@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Exercise production macOS installation with native MeshAgent filesystem APIs.
 
-All /Library paths are redirected into a temporary directory. No live service
-is installed, started, or removed; plutil validates the actual resulting files.
+All /Library paths are redirected into a temporary directory and crontab reads
+and writes use a fixture array. No live service or crontab is changed.
 """
 import argparse
 import json
@@ -39,6 +39,11 @@ macServiceCommand = function (executable, argv, options) {
     check(executable == '/usr/bin/plutil', 'Unexpected child: ' + executable);
     return originalCommand(executable, argv.map(map), options);
 };
+// Service installation uses cron. Intercept it before the first operation so
+// an assertion failure cannot publish a heartbeat into the caller's crontab.
+var fixtureCrontab = ['# unrelated fixture entry'];
+macCrontabRead = function () { return fixtureCrontab.slice(); };
+macCrontabWrite = function (lines) { fixtureCrontab = lines.slice(); };
 try {
     nativeFS.mkdirSync(root+'/system');
     nativeFS.writeFileSync(root+'/source', 'binary fixture');
@@ -47,12 +52,16 @@ try {
     function options() { return {name:'Mesh & fixture', target:'agent', servicePath:root+'/source', installPath:root+'/installed', startType:'AUTO_START', files:[{source:root+'/source.msh',newName:'agent.msh'}]}; }
     var receipt = macInstallService(options(), manager);
     check(nativeFS.readFileSync(root+'/installed/agent.msh').toString() == 'incoming provisioning', 'native file copy');
-    var config = JSON.parse(macServiceCommand('/usr/bin/plutil',['-convert','json','-o','-','--','/Library/LaunchDaemons/Mesh & fixture.plist']));
-    check(config.ProgramArguments[0] == root+'/installed/agent' && config.KeepAlive.SuccessfulExit === false, 'installed launchd configuration');
+    var marker = macCronMarker('Mesh & fixture');
+    check(macCrontabFind(marker).indexOf(root+'/installed/.meshagent_cron.sh') >= 0, 'installed cron heartbeat');
+    var heartbeat = nativeFS.readFileSync(root+'/installed/.meshagent_cron.sh').toString();
+    check(heartbeat.indexOf(root+'/installed') >= 0 && heartbeat.indexOf('./agent ') >= 0 && heartbeat.indexOf('--__daemon') >= 0, 'heartbeat starts the installed agent');
+    check(!nativeFS.existsSync(map('/Library/LaunchDaemons/Mesh & fixture.plist')), 'cron installation creates no LaunchDaemon');
     check((nativeFS.statSync(root+'/installed/agent').mode & 511) == 493, 'executable mode');
     check((nativeFS.statSync(root+'/installed/agent.msh').mode & 511) == 384, 'private provisioning mode');
     receipt.rollback();
     check(!nativeFS.existsSync(root+'/installed'), 'rollback removes new files and directory');
+    check(macCrontabFind(marker) == null && fixtureCrontab.length == 1, 'rollback removes only the fixture heartbeat');
     nativeFS.mkdirSync(root+'/installed');
     nativeFS.writeFileSync(root+'/installed/agent.msh', 'incumbent identity');
     receipt = macInstallService(options(), manager); receipt.rollback();
@@ -62,7 +71,8 @@ try {
     var failed = false; try { macInstallService(options(), manager); } catch(e) { failed = (''+e).indexOf('injected failure') >= 0; }
     check(failed && !nativeFS.existsSync(root+'/installed/agent'), 'failed extras roll back binary');
     check(!nativeFS.existsSync(map('/Library/LaunchDaemons/Mesh & fixture.plist')), 'failed install never publishes job');
-    console.log('PASS: native installation writes, modes, plutil, rollback, and incumbent provisioning');
+    check(macCrontabFind(marker) == null && fixtureCrontab.length == 1, 'failed install leaves the fixture crontab intact');
+    console.log('PASS: native installation writes, modes, isolated cron heartbeat, rollback, and incumbent provisioning');
     process.exit(0);
 } catch(e) {
     if ((''+e).indexOf('Process.exit() forced script termination') >= 0) { throw e; }

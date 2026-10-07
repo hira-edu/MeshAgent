@@ -176,6 +176,9 @@ typedef struct MeshAgentHostContainer
 
 	duk_context *meshCoreCtx;
 	duk_context *bootstrapCoreCtx;
+#if defined(__APPLE__) && defined(_LINKVM)
+	duk_context *macRelaySetupCtx; // Local onboarding survives control-core replacement.
+#endif
 	char *meshCoreCtx_embeddedScript;
 	int meshCoreCtx_embeddedScriptLen;
 	ILibProcessPipe_Manager *pipeManager;

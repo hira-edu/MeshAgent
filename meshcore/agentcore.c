@@ -8177,6 +8177,13 @@ void MeshAgent_Slave(MeshAgentHostContainer *agentHost)
 void MeshAgent_ChainEnd(void *chain, void *user)
 {
 	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)user;
+#if defined(__APPLE__) && defined(_LINKVM)
+	if (agent->macRelaySetupCtx != NULL)
+	{
+		Duktape_SafeDestroyHeap(agent->macRelaySetupCtx);
+		agent->macRelaySetupCtx = NULL;
+	}
+#endif
 	if (agent->meshCoreCtx != NULL) 
 	{
 		if (g_displayFinalizerMessages) { printf("\n\n==> Stopping JavaScript Engine\n"); }
@@ -8205,6 +8212,14 @@ void MeshAgent_CoreModule_UncaughtException(duk_context *ctx, char *msg, void *u
 {
 	printf("UncaughtException: %s\n", msg);
 }
+#if defined(__APPLE__) && defined(_LINKVM)
+static void MeshAgent_MacRelaySetup_UncaughtException(duk_context *ctx, char *msg, void *user)
+{
+	UNREFERENCED_PARAMETER(ctx); UNREFERENCED_PARAMETER(msg); UNREFERENCED_PARAMETER(user);
+	// Never log a dialog result or exception containing user-entered text.
+	fprintf(stderr, "Screen Sharing first-start setup could not finish.\n");
+}
+#endif
 void MeshAgent_AgentMode_IPAddressChanged_Handler(ILibIPAddressMonitor sender, void *user)
 {
 	MeshAgentHostContainer *agentHost = (MeshAgentHostContainer*)user;
@@ -9237,6 +9252,22 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 			agentHost->meshCoreCtx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, agentHost->masterDb, agentHost->exePath, agentHost->pipeManager, NULL, NULL);
 			ILibDuktape_MeshAgent_Init(agentHost->meshCoreCtx, agentHost->chain, agentHost);
 			ILibDuktape_SetNativeUncaughtExceptionHandler(agentHost->meshCoreCtx, MeshAgent_CoreModule_UncaughtException, agentHost);
+#if defined(__APPLE__) && defined(_LINKVM)
+			// First-start password setup uses the foreground Aqua helper, never a shell.
+			// Existing credentials skip the dialog; a boot at the login window waits for login.
+			if (agentHost->macRelaySetupCtx == NULL && kvm_relay_credential_status() == 1)
+			{
+				// The server can replace the control core during startup. Keep local setup
+				// in its own bounded context so that replacement cannot dismiss the dialog
+				// or discard the wait for the first desktop login.
+				agentHost->macRelaySetupCtx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, NULL, agentHost->exePath, agentHost->pipeManager, NULL, NULL);
+				if (agentHost->macRelaySetupCtx != NULL)
+				{
+					ILibDuktape_SetNativeUncaughtExceptionHandler(agentHost->macRelaySetupCtx, MeshAgent_MacRelaySetup_UncaughtException, agentHost);
+					duk_peval_string_noresult(agentHost->macRelaySetupCtx, "require('agent-installer').startMacRelaySetup();");
+				}
+			}
+#endif
 			if ((agentHost->coreDumpEnabled = ILibSimpleDataStore_Get(agentHost->masterDb, "coreDumpEnabled", NULL, 0)) != 0)
 			{
 				duk_eval_string_noresult(agentHost->meshCoreCtx, "process.coreDumpLocation = process.platform=='win32'?(process.execPath.replace('.exe', '.dmp')):(process.execPath + '.dmp');");

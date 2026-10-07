@@ -72,6 +72,8 @@ void BreakSink(int s)
 #if defined(_LINKVM) && defined(__APPLE__)
 extern void* kvm_server_mainloop(void *parm);
 extern int kvm_relay_check(void);
+extern int kvm_relay_credential_status(void);
+extern int kvm_relay_provision(void);
 ILibTransport_DoneState kvm_serviceWriteSink(char *buffer, int bufferLen, void *reserved)
 {
 	ignore_result(write(STDOUT_FILENO, (void*)buffer, bufferLen));
@@ -290,6 +292,18 @@ char* crashMemory = ILib_POSIX_InstallCrashHandler(argv[0]);
 		// Administrator readiness check for the Screen Sharing relay; run as root.
 		if (argc != 2) { fprintf(stderr, "Usage: -kvmcheck\n"); return 1; }
 		return kvm_relay_check();
+	}
+	else if (argc > 1 && strcasecmp(argv[1], "-kvmcredentialstatus") == 0)
+	{
+		if (argc != 2) { return 2; }
+		return kvm_relay_credential_status();
+	}
+	else if (argc > 1 && strcasecmp(argv[1], "-kvmprovision") == 0)
+	{
+		// Internal first-start setup: the answer comes from the Aqua dialog over stdin.
+		if (argc != 2) { return 1; }
+		for (int fd = getdtablesize() - 1; fd > STDERR_FILENO; --fd) { close(fd); }
+		return kvm_relay_provision();
 	}
 	else if (argc > 1 && strcasecmp(argv[1], "-kvmagent") == 0)
 	{

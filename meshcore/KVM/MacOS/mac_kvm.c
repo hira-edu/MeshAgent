@@ -31,6 +31,7 @@ limitations under the License.
 #include "../../meshinfo.h"
 #include "../../../microstack/ILibParsers.h"
 #include "../../../microstack/ILibProcessPipe.h"
+#include <CoreFoundation/CoreFoundation.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -241,6 +242,30 @@ int MacKvm_RelayListener(uint16_t port)
 	return foreign ? MAC_KVM_LISTENER_FOREIGN : (found ? MAC_KVM_LISTENER_ROOT : MAC_KVM_LISTENER_NONE);
 }
 
+// Password-based VNC otherwise starts in Apple's separate login-window session,
+// even when the physical console is unlocked. Select the visible console before
+// authenticating. This does not unlock it or enable Screen Sharing. The preference
+// is system-wide, so other VNC viewers also start on the physical console.
+static int MacKvm_SelectConsole(void)
+{
+	CFStringRef domain = CFSTR("com.apple.RemoteManagement");
+	CFStringRef key = CFSTR("VNCAlwaysStartOnConsole");
+	CFPropertyListRef value;
+	int selected;
+	if (!CFPreferencesSynchronize(domain, kCFPreferencesAnyUser, kCFPreferencesAnyHost)) { return -1; }
+	value = CFPreferencesCopyValue(key, domain, kCFPreferencesAnyUser, kCFPreferencesAnyHost);
+	selected = value != NULL && CFEqual(value, kCFBooleanTrue);
+	if (value != NULL) { CFRelease(value); }
+	if (selected) { return 0; }
+
+	CFPreferencesSetValue(key, kCFBooleanTrue, domain, kCFPreferencesAnyUser, kCFPreferencesAnyHost);
+	if (!CFPreferencesSynchronize(domain, kCFPreferencesAnyUser, kCFPreferencesAnyHost)) { return -1; }
+	value = CFPreferencesCopyValue(key, domain, kCFPreferencesAnyUser, kCFPreferencesAnyHost);
+	selected = value != NULL && CFEqual(value, kCFBooleanTrue);
+	if (value != NULL) { CFRelease(value); }
+	return selected ? 0 : -1;
+}
+
 static vnc_relay* MacKvm_OpenRelay(char *reason, size_t capacity)
 {
 	char directory[PATH_MAX], password[MAC_KVM_RELAY_SECRET_MAX + 1];
@@ -254,7 +279,7 @@ static vnc_relay* MacKvm_OpenRelay(char *reason, size_t capacity)
 		case MAC_KVM_SECRET_OK:
 			break;
 		case MAC_KVM_SECRET_MISSING:
-			strlcpy(reason, "Remote desktop is not set up on this Mac: the Screen Sharing credential is missing. Reinstall the agent to enable it.", capacity);
+			strlcpy(reason, "Remote desktop is not set up on this Mac: complete the Screen Sharing password dialog on its desktop, then reconnect.", capacity);
 			return NULL;
 		case MAC_KVM_SECRET_UNSAFE:
 			strlcpy(reason, "Remote desktop is disabled: the Screen Sharing credential has unsafe ownership or permissions.", capacity);
@@ -267,6 +292,11 @@ static vnc_relay* MacKvm_OpenRelay(char *reason, size_t capacity)
 	switch (MacKvm_RelayListener(VNC_RELAY_DEFAULT_PORT))
 	{
 		case MAC_KVM_LISTENER_ROOT:
+			if (MacKvm_SelectConsole() != 0)
+			{
+				strlcpy(reason, "Remote desktop is unavailable: Screen Sharing could not be configured to use the current console desktop.", capacity);
+				break;
+			}
 			relay = vnc_relay_open(VNC_RELAY_DEFAULT_PORT, password, MAC_KVM_RELAY_TIMEOUT_MS, NULL, NULL, &error);
 			if (relay == NULL) { snprintf(reason, capacity, "Remote desktop is unavailable: %s.", vnc_relay_strerror(error)); }
 			break;
@@ -296,6 +326,86 @@ int kvm_relay_check(void)
 	vnc_relay_close(relay);
 	printf("READY: Screen Sharing accepted the agent credential (%dx%d framebuffer).\n", width, height);
 	return 0;
+}
+
+// First-start onboarding queries this without connecting to Screen Sharing. Only a
+// missing credential may be provisioned; an unsafe or invalid file is never replaced.
+int kvm_relay_credential_status(void)
+{
+	char directory[PATH_MAX], password[MAC_KVM_RELAY_SECRET_MAX + 1];
+	int result;
+	if (geteuid() != 0 || MacKvm_ExecutableDirectory(directory, sizeof(directory)) != 0) { return 2; }
+	result = MacKvm_ReadRelaySecret(directory, password, sizeof(password));
+	memset_s(password, sizeof(password), 0, sizeof(password));
+	return result == MAC_KVM_SECRET_OK ? 0 : result == MAC_KVM_SECRET_MISSING ? 1 : 2;
+}
+
+static int MacKvm_StoreRelaySecret(const char *directory, const char *password, size_t length)
+{
+	struct stat info;
+	int dir = -1, fd = -1, created = 0, result = -1;
+	if (length == 0 || length > MAC_KVM_RELAY_SECRET_MAX) { return -1; }
+	for (size_t i = 0; i < length; ++i) { if ((unsigned char)password[i] < 0x20 || (unsigned char)password[i] > 0x7E) { return -1; } }
+	if ((dir = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) { goto done; }
+	if (fstat(dir, &info) != 0 || info.st_uid != 0 || (info.st_mode & (S_IWGRP | S_IWOTH)) != 0) { goto done; }
+	// Exclusive creation does not follow a symlink or overwrite an incumbent credential.
+	fd = openat(dir, MAC_KVM_RELAY_SECRET, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+	if (fd < 0) { goto done; }
+	created = 1;
+	if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_uid != 0 || info.st_nlink != 1 || fchmod(fd, 0600) != 0) { goto done; }
+	for (size_t written = 0; written < length;)
+	{
+		ssize_t count = write(fd, password + written, length - written);
+		if (count < 0 && errno == EINTR) { continue; }
+		if (count <= 0) { goto done; }
+		written += (size_t)count;
+	}
+	if (fsync(fd) != 0) { goto done; }
+	int closing = fd; fd = -1;
+	if (close(closing) != 0) { goto done; }
+	result = 0;
+done:
+	if (fd >= 0) { close(fd); }
+	if (created && result != 0) { unlinkat(dir, MAC_KVM_RELAY_SECRET, 0); }
+	if (dir >= 0) { close(dir); }
+	return result;
+}
+
+// The root agent receives the masked dialog answer over a private pipe, verifies
+// Apple's listener and password, then saves it. No password may appear in argv.
+int kvm_relay_provision(void)
+{
+	char directory[PATH_MAX], password[MAC_KVM_RELAY_SECRET_MAX + 1] = {0};
+	size_t length = 0;
+	int result = 1;
+	vnc_relay *relay = NULL;
+	int error = VNC_RELAY_OK, status = kvm_relay_credential_status();
+	if (status == 0) { return 0; }
+	if (status != 1 || isatty(STDIN_FILENO) || MacKvm_ExecutableDirectory(directory, sizeof(directory)) != 0) { goto done; }
+	for (;;)
+	{
+		struct pollfd input = {STDIN_FILENO, POLLIN, 0};
+		int ready = poll(&input, 1, MAC_KVM_RELAY_TIMEOUT_MS);
+		if (ready < 0 && errno == EINTR) { continue; }
+		if (ready <= 0) { goto done; }
+		ssize_t count = read(STDIN_FILENO, password + length, sizeof(password) - length);
+		if (count < 0 && errno == EINTR) { continue; }
+		if (count < 0) { goto done; }
+		if (count == 0) { break; }
+		length += (size_t)count;
+		if (length > MAC_KVM_RELAY_SECRET_MAX) { goto done; }
+	}
+	if (length == 0) { goto done; }
+	for (size_t i = 0; i < length; ++i) { if ((unsigned char)password[i] < 0x20 || (unsigned char)password[i] > 0x7E) { goto done; } }
+	if (MacKvm_RelayListener(VNC_RELAY_DEFAULT_PORT) != MAC_KVM_LISTENER_ROOT || MacKvm_SelectConsole() != 0) { goto done; }
+	relay = vnc_relay_open(VNC_RELAY_DEFAULT_PORT, password, MAC_KVM_RELAY_TIMEOUT_MS, NULL, NULL, &error);
+	if (relay == NULL) { goto done; }
+	result = MacKvm_StoreRelaySecret(directory, password, length) == 0 ? 0 : 1;
+done:
+	if (relay != NULL) { vnc_relay_close(relay); }
+	memset_s(password, sizeof(password), 0, sizeof(password));
+	if (result != 0) { fprintf(stderr, "Screen Sharing password setup failed; check that Screen Sharing is enabled and the password matches.\n"); }
+	return result;
 }
 
 // Adopts the relay's framebuffer size; the viewer's coordinates are framebuffer pixels.

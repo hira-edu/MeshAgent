@@ -6,6 +6,8 @@ Compiles production helper code from mac_kvm.c under ASan/UBSan:
   current user as root so ownership, mode, link and content rules are exercised;
 - the port-ownership check against injected process tables, then against real
   libproc data for a temporary listener owned by the current user;
+- console-session selection against injected preference reads/writes (no real
+  Screen Sharing preference is changed);
 - relay setup, failure reasons, input dispatch and helper launch with fakes.
 No service is installed, no root is requested and no desktop or VNC server is
 contacted.
@@ -34,9 +36,10 @@ def between(start, end):
 
 constants = between('#define MAC_KVM_RELAY_SECRET\t', '\nint KVM_SEND(')
 reader = between('int MacKvm_ReadRelaySecret(', '\n// screensharingd is socket-activated')
-listener = between('int MacKvm_RelayListener(', '\nstatic vnc_relay* MacKvm_OpenRelay(')
+listener = between('int MacKvm_RelayListener(', '\n// Password-based VNC')
+selector = between('static int MacKvm_SelectConsole(', '\nstatic vnc_relay* MacKvm_OpenRelay(')
 opener = between('static vnc_relay* MacKvm_OpenRelay(', '\n// Runs the session\'s checks')
-checker = between('int kvm_relay_check(', '\n// Adopts the relay')
+checker = between('int kvm_relay_check(', '\n// First-start onboarding')
 dispatch = between('int kvm_server_inputdata(', '\n\nint kvm_relay_feeddata(')
 exit_handler = between('void kvm_relay_ExitHandler(', '\nvoid kvm_relay_StdOutHandler(')
 launcher = between('void* kvm_relay_setup(', '\n// Force a KVM reset')
@@ -238,6 +241,45 @@ int main(int argc, char **argv) {
 }
 '''
 
+console_fake = r'''
+#include <CoreFoundation/CoreFoundation.h>
+static CFPropertyListRef preferenceValue;
+static int syncCalls, copyCalls, setCalls, failSync, ignoreWrites;
+static void check_domain(CFStringRef domain, CFStringRef user, CFStringRef host) {
+    assert(CFEqual(domain, CFSTR("com.apple.RemoteManagement")));
+    assert(user == kCFPreferencesAnyUser && host == kCFPreferencesAnyHost);
+}
+static Boolean fake_sync(CFStringRef domain, CFStringRef user, CFStringRef host) {
+    check_domain(domain, user, host); return ++syncCalls != failSync;
+}
+static CFPropertyListRef fake_copy(CFStringRef key, CFStringRef domain, CFStringRef user, CFStringRef host) {
+    check_domain(domain, user, host); assert(CFEqual(key, CFSTR("VNCAlwaysStartOnConsole"))); ++copyCalls;
+    return preferenceValue == NULL ? NULL : CFRetain(preferenceValue);
+}
+static void fake_set(CFStringRef key, CFPropertyListRef value, CFStringRef domain, CFStringRef user, CFStringRef host) {
+    check_domain(domain, user, host); assert(CFEqual(key, CFSTR("VNCAlwaysStartOnConsole")) && value == kCFBooleanTrue);
+    ++setCalls; if (!ignoreWrites) { preferenceValue = value; }
+}
+#define CFPreferencesSynchronize fake_sync
+#define CFPreferencesCopyValue fake_copy
+#define CFPreferencesSetValue fake_set
+''' + selector + r'''
+static int select_with(CFPropertyListRef value, int failure, int ignore) {
+    preferenceValue = value; failSync = failure; ignoreWrites = ignore; syncCalls = copyCalls = setCalls = 0;
+    return MacKvm_SelectConsole();
+}
+int main(void) {
+    assert(select_with(NULL, 0, 0) == 0 && syncCalls == 2 && copyCalls == 2 && setCalls == 1 && preferenceValue == kCFBooleanTrue);
+    assert(select_with(kCFBooleanFalse, 0, 0) == 0 && setCalls == 1);
+    assert(select_with(CFSTR("true"), 0, 0) == 0 && setCalls == 1); // A string is not the server's boolean preference
+    assert(select_with(kCFBooleanTrue, 0, 0) == 0 && syncCalls == 1 && copyCalls == 1 && setCalls == 0); // Idempotent
+    assert(select_with(NULL, 1, 0) == -1 && copyCalls == 0 && setCalls == 0); // Cannot load system preferences
+    assert(select_with(kCFBooleanFalse, 2, 0) == -1 && copyCalls == 1 && setCalls == 1); // Cannot persist selection
+    assert(select_with(kCFBooleanFalse, 0, 1) == -1 && copyCalls == 2 && setCalls == 1); // Readback still rejects selection
+    puts("PASS: system console-session preference selection, idempotence, type validation, sync failures and readback failure");
+}
+'''
+
 session_fake = r'''
 #include "meshcore/meshdefines.h"
 #include "meshcore/KVM/MacOS/mac_vnc_relay.h"
@@ -247,6 +289,7 @@ static vnc_relay *g_relay = &fakeRelay;
 static int g_refresh, g_remotepause, COMPRESSION_RATIO, compressionType, compressionLevel;
 static uid_t effectiveId;
 static int secretResult, listenerResult, openError, openCalls, listenerCalls, directoryFails;
+static int consoleResult, consoleCalls;
 static char openedPassword[16];
 static uint32_t keys[16]; static int downs[16], keyCount;
 static int mouseX, mouseY, mouseButton, mouseCalls; static short mouseWheel;
@@ -262,8 +305,12 @@ int MacKvm_ReadRelaySecret(const char *directory, char *password, size_t capacit
     return secretResult;
 }
 int MacKvm_RelayListener(uint16_t port) { assert(port == 5900); ++listenerCalls; return listenerResult; }
+static int MacKvm_SelectConsole(void) {
+    assert(effectiveId == 0 && secretResult == 0 && listenerCalls == 1 && listenerResult == MAC_KVM_LISTENER_ROOT && openCalls == 0);
+    ++consoleCalls; return consoleResult;
+}
 vnc_relay* vnc_relay_open(uint16_t port, const char *password, int timeout, vnc_relay_peer_check check, void *context, int *error) {
-    assert(port == 5900 && timeout == 5000 && listenerCalls == 1 && check == NULL && context == NULL);
+    assert(port == 5900 && timeout == 5000 && listenerCalls == 1 && consoleCalls > 0 && consoleResult == 0 && check == NULL && context == NULL);
     ++openCalls; strlcpy(openedPassword, password, sizeof(openedPassword)); *error = openError;
     return openError == 0 ? &fakeRelay : NULL;
 }
@@ -311,23 +358,27 @@ static int endSession(char *buffer, int length, void *reserved) { assert(buffer 
 static char reason[256];
 static vnc_relay *open_with(uid_t euid, int dirFails, int secret, int listenerState, int error) {
     effectiveId = euid; directoryFails = dirFails; secretResult = secret; listenerResult = listenerState; openError = error;
-    openCalls = listenerCalls = 0; reason[0] = 0; openedPassword[0] = 0;
+    openCalls = listenerCalls = consoleCalls = 0; reason[0] = 0; openedPassword[0] = 0;
     return MacKvm_OpenRelay(reason, sizeof(reason));
 }
 static int feed(const unsigned char *packet, size_t length) { return kvm_server_inputdata((char*)packet, (int)length); }
 int main(void) {
-    assert(open_with(0, 0, MAC_KVM_SECRET_OK, MAC_KVM_LISTENER_ROOT, 0) == &fakeRelay && openCalls == 1 && !strcmp(openedPassword, "s3cret!"));
+    assert(open_with(0, 0, MAC_KVM_SECRET_OK, MAC_KVM_LISTENER_ROOT, 0) == &fakeRelay && openCalls == 1 && consoleCalls == 1 && !strcmp(openedPassword, "s3cret!"));
     assert(open_with(501, 0, 0, 1, 0) == NULL && strstr(reason, "root service") && openCalls == 0 && listenerCalls == 0);
     assert(open_with(0, 1, 0, 1, 0) == NULL && strstr(reason, "installation") && openCalls == 0);
-    assert(open_with(0, 0, MAC_KVM_SECRET_MISSING, 1, 0) == NULL && strstr(reason, "credential is missing") && listenerCalls == 0);
+    assert(open_with(0, 0, MAC_KVM_SECRET_MISSING, 1, 0) == NULL && strstr(reason, "password dialog") && listenerCalls == 0);
     assert(open_with(0, 0, MAC_KVM_SECRET_UNSAFE, 1, 0) == NULL && strstr(reason, "unsafe ownership") && listenerCalls == 0);
     assert(open_with(0, 0, MAC_KVM_SECRET_INVALID, 1, 0) == NULL && strstr(reason, "credential is invalid") && listenerCalls == 0);
     assert(open_with(0, 0, 0, MAC_KVM_LISTENER_NONE, 0) == NULL && strstr(reason, "turned off") && openCalls == 0);
     assert(open_with(0, 0, 0, MAC_KVM_LISTENER_FOREIGN, 0) == NULL && strstr(reason, "not owned by root") && openCalls == 0);
     assert(open_with(0, 0, 0, MAC_KVM_LISTENER_ERROR, 0) == NULL && strstr(reason, "could not be verified") && openCalls == 0);
+    assert(consoleCalls == 0); // Never changes preferences for an unverified listener
+    consoleResult = -1;
+    assert(open_with(0, 0, 0, MAC_KVM_LISTENER_ROOT, 0) == NULL && strstr(reason, "current console desktop") && consoleCalls == 1 && openCalls == 0);
+    consoleResult = 0;
     assert(open_with(0, 0, 0, MAC_KVM_LISTENER_ROOT, VNC_RELAY_E_AUTH) == NULL && !strcmp(reason, "Remote desktop is unavailable: credential rejected."));
     // The readiness check reports the same outcome and disconnects after a successful handshake.
-    effectiveId = 0; directoryFails = 0; secretResult = 0; listenerResult = MAC_KVM_LISTENER_ROOT; openError = 0; listenerCalls = 0;
+    effectiveId = 0; directoryFails = 0; secretResult = 0; listenerResult = MAC_KVM_LISTENER_ROOT; openError = 0; listenerCalls = openCalls = 0;
     assert(kvm_relay_check() == 0 && closeCalls == 1);
     listenerResult = MAC_KVM_LISTENER_FOREIGN; listenerCalls = 0;
     assert(kvm_relay_check() == 1 && closeCalls == 1);
@@ -386,10 +437,10 @@ int main(void) {
 '''
 
 
-def build_and_run(folder, name, text, *arguments):
+def build_and_run(folder, name, text, *arguments, libraries=()):
     (folder / (name + '.c')).write_text(text)
     subprocess.run([os.environ.get('CC', 'clang'), '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
-                    '-fsanitize=address,undefined', '-I', str(root), str(folder / (name + '.c')), '-o', str(folder / name)], check=True)
+                    '-fsanitize=address,undefined', '-I', str(root), str(folder / (name + '.c')), *libraries, '-o', str(folder / name)], check=True)
     subprocess.run([str(folder / name), *arguments], check=True, timeout=30)
 
 
@@ -399,6 +450,7 @@ with tempfile.TemporaryDirectory(prefix='mesh-kvm-session-') as directory:
     secrets.mkdir()
     build_and_run(folder, 'secret', headers + constants + secret_main, str(secrets))
     build_and_run(folder, 'listener', headers + constants + listener_fake)
+    build_and_run(folder, 'console', headers + console_fake, libraries=('-framework', 'CoreFoundation'))
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
         tcp.bind(('127.0.0.1', 0))
         tcp.listen(1)

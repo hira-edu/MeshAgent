@@ -898,6 +898,64 @@ function removeMacRelaySecret(msh)
     if (require('fs').existsSync(secret)) { require('fs').unlinkSync(secret); }
 }
 
+// First daemon start asks the foreground desktop user once. A persisted credential
+// skips all UI on later starts and KVM sessions. At boot, wait for an Aqua login.
+var macRelaySetupStarted = false;
+function startMacRelaySetup()
+{
+    if (process.platform != 'darwin' || macRelaySetupStarted || require('user-sessions').Self() != 0) { return; }
+    macRelaySetupStarted = true;
+    function run(switchName, input, complete)
+    {
+        var child, timer, done = false;
+        function finish(code)
+        {
+            if (done) { return; } done = true;
+            if (timer) { clearTimeout(timer); }
+            if (input) { input.fill(0); input = null; }
+            complete(code);
+        }
+        try
+        {
+            child = child_process.execFile(process.execPath, [getPathBaseName(process.execPath), switchName]);
+            // Never copy a password, helper output or stderr into the agent log.
+            child.stdout.on('data', function () {}); child.stderr.on('data', function () {});
+            child.on('exit', finish).on('error', function () { finish(2); });
+            timer = setTimeout(function () { try { child.kill(); } catch (ignored) {} finish(2); }, 20000);
+            child.stdin.end(input || '');
+        }
+        catch (e) { if (child) { try { child.kill(); } catch (ignored) {} } finish(2); }
+    }
+    function attempt()
+    {
+        run('-kvmcredentialstatus', null, function (status)
+        {
+            if (status != 1) { return; } // Existing, unsafe or invalid: never replace it.
+            try { require('user-sessions').consoleUid(); }
+            catch (e) { setTimeout(attempt, 30000); return; }
+            var ui = require('message-box');
+            ui.password('Screen Sharing setup', 'Enter the VNC password configured in System Settings > General > Sharing > Screen Sharing. This password is saved once for future remote desktop sessions. Use 1 to 8 printable ASCII characters.').then(function (value)
+            {
+                if (typeof value != 'string' || !/^[\x20-\x7e]{1,8}$/.test(value))
+                {
+                    value = null;
+                    ui.create('Screen Sharing setup', 'The password must contain 1 to 8 printable ASCII characters. Nothing was saved. Restart the agent to try setup again.', 60, ['OK']).then(function () {}, function () {});
+                    return;
+                }
+                var input = Buffer.from(value); value = null;
+                run('-kvmprovision', input, function (code)
+                {
+                    if (code != 0)
+                    {
+                        ui.create('Screen Sharing setup', 'The password could not be verified and saved. Enable Screen Sharing and its VNC password option in System Settings, then restart the agent to try again.', 60, ['OK']).then(function () {}, function () {});
+                    }
+                });
+            }, function () {}); // Cancellation does not save or enable remote desktop.
+        });
+    }
+    setImmediate(attempt);
+}
+
 // Removes the LoginWindow LaunchAgent that releases before the Screen Sharing relay installed.
 function uninstallMacLaunchAgent(name)
 {
@@ -1161,6 +1219,7 @@ module.exports =
         fullInstall: fullInstall,
         fullUninstall: fullUninstall
     };
+module.exports.startMacRelaySetup = startMacRelaySetup;
 
 
 function parseWindowsNativeUpdateParameters(b64)

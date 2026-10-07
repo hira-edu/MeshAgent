@@ -46,19 +46,34 @@ if(childLog){manager.installLaunchAgent=function(options){
 };}
 function fail(e) { console.log('FAIL: '+e);process.exit(1); }
 ret=helper._request({command:'UNSUPPORTED_PROBE'},function(){throw new Error('Unexpected success');});
-fs.writeFileSync(marker,JSON.stringify({service:ret.service,directory:ret.directory,uid:ret.uid}));
-if (!ret.directory || (fs.statSync(ret.directory).mode & 511)!==448) { fail('Private directory mode'); }
-ret.then(function(){fail('Unsupported request accepted');},function(error){
+var session=helper._session;
+if (!session) { fail('No helper session'); }
+fs.writeFileSync(marker,JSON.stringify({service:session.service,directory:session.directory,uid:session.uid}));
+if (!session.directory || (fs.statSync(session.directory).mode & 511)!==448) { fail('Private directory mode'); }
+function unsupported(error, label) {
     if ((''+error).indexOf('Unknown helper command')<0) {
-        console.log('STATE: job='+!!ret.job+', authenticated='+!!ret.connection);
+        console.log('STATE ('+label+'): job='+!!session.job+', authenticated='+!!session.connection);
         if(childLog&&fs.existsSync(childLog)){console.log(fs.readFileSync(childLog).toString());}
-        fail(error);return;
+        fail(error);return false;
     }
-    if (fs.existsSync(ret.directory)||fs.existsSync(ret.plist)) { fail('Helper files retained: '+error);return; }
-    console.log('PASS: embedded same-binary Aqua helper, authenticated IPC, error response and cleanup');
-    process.exit(0);
+    return true;
+}
+ret.then(function(){fail('Unsupported request accepted');},function(error){
+    if (!unsupported(error,'first')) { return; }
+    // The next request reuses the same helper: one LaunchAgent, one background item.
+    var second=helper._request({command:'UNSUPPORTED_PROBE'},function(){throw new Error('Unexpected success');});
+    if (helper._session!==session) { fail('Second request started another helper');return; }
+    second.then(function(){fail('Unsupported request accepted');},function(error2){
+        if (!unsupported(error2,'second')) { return; }
+        helper._closeSession(session);
+        setTimeout(function(){
+            if (fs.existsSync(session.directory)||fs.existsSync(session.plist)) { fail('Helper files retained');return; }
+            console.log('PASS: embedded same-binary Aqua helper, authenticated IPC, reused for a second request, error responses and cleanup');
+            process.exit(0);
+        },2000);
+    });
 });
-setTimeout(function(){fail('Probe deadline; done='+ret._done+', job='+!!ret.job+', authenticated='+!!ret.connection);},25000);
+setTimeout(function(){fail('Probe deadline; done='+ret._done+', job='+!!session.job+', authenticated='+!!session.connection);},25000);
 '''
     probe = root / 'probe.js'
     probe.write_text(script)

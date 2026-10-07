@@ -307,30 +307,41 @@ function serviceHost(serviceName)
         }
         else if(process.platform == 'darwin')
         {
-            // First let's fetch all the PIDs of running services
-            var child = require('child_process').execFile('/bin/sh', ['sh']);
-            child.stdout.str = '';
-            child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
-            child.stdin.write('launchctl list\nexit\n');
-            child.waitExit();
-
-            var lines = child.stdout.str.split('\n');
-            var tokens, i;
-            var p = {};
-            for (i = 1; i < lines.length; ++i)
+            var cronDaemon = false;
+            for (var ai = 0; ai < process.argv.length; ++ai)
             {
-                tokens = lines[i].split('\t');
-                if (tokens[0] && tokens[0] != '-') { p[tokens[0]] = tokens[0]; }
+                if (process.argv[ai] == '--__daemon') { cronDaemon = true; break; }
             }
 
-            if(p[process.pid.toString()])
+            if (cronDaemon)
             {
-                // We are a service!
                 this.emit('serviceStart');
             }
             else
             {
-                this.emit('normalStart');
+                var child = require('child_process').execFile('/bin/sh', ['sh']);
+                child.stdout.str = '';
+                child.stdout.on('data', function (chunk) { this.str += chunk.toString(); });
+                child.stdin.write('launchctl list\nexit\n');
+                child.waitExit();
+
+                var lines = child.stdout.str.split('\n');
+                var tokens, i;
+                var p = {};
+                for (i = 1; i < lines.length; ++i)
+                {
+                    tokens = lines[i].split('\t');
+                    if (tokens[0] && tokens[0] != '-') { p[tokens[0]] = tokens[0]; }
+                }
+
+                if(p[process.pid.toString()])
+                {
+                    this.emit('serviceStart');
+                }
+                else
+                {
+                    this.emit('normalStart');
+                }
             }
         }
     };

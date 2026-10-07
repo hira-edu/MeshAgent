@@ -86,10 +86,12 @@ function main() {
 
     const setup = functionBody(kvm, 'void* kvm_relay_setup(');
     const open = functionBody(kvm, 'static vnc_relay* MacKvm_OpenRelay(');
+    const consoleSelection = functionBody(kvm, 'static int MacKvm_SelectConsole(');
     const input = functionBody(kvm, 'int kvm_server_inputdata(');
     const mainloop = functionBody(kvm, 'void* kvm_server_mainloop(');
     const listener = functionBody(kvm, 'int MacKvm_RelayListener(');
     const readiness = functionBody(kvm, 'int kvm_relay_check(');
+    const provision = functionBody(kvm, 'int kvm_relay_provision(');
     const coreApple = macBlock(core, '#elif defined(__APPLE__)\n\t// One root relay helper', '#else');
     const entry = macBlock(consoleMain, 'if (argc > 1 && strcasecmp(argv[1], "-kvm0") == 0)', '#endif');
     const install = functionBody(installer, 'function installService(params)');
@@ -129,8 +131,26 @@ function main() {
             open.indexOf('MacKvm_ReadRelaySecret(') < open.indexOf('MacKvm_RelayListener(') &&
             open.indexOf('MacKvm_RelayListener(') < open.indexOf('vnc_relay_open(') &&
             open.includes('case MAC_KVM_LISTENER_ROOT:') && open.includes('memset_s(password'),
-        relayOpenedOnlyThroughCheck: (kvm.match(/vnc_relay_open\(/g) || []).length === 1 && mainloop != null &&
+        relayOpenedOnlyThroughCheckedPaths: (kvm.match(/vnc_relay_open\(/g) || []).length === 2 && mainloop != null &&
             mainloop.includes('MacKvm_OpenRelay(') && !mainloop.includes('vnc_relay_open('),
+        provisioningVerifiesBeforeSaving: provision != null &&
+            provision.indexOf('MacKvm_RelayListener(') < provision.indexOf('vnc_relay_open(') &&
+            provision.indexOf('MacKvm_SelectConsole(') < provision.indexOf('vnc_relay_open(') &&
+            provision.indexOf('vnc_relay_open(') < provision.indexOf('MacKvm_StoreRelaySecret(') &&
+            provision.includes('read(STDIN_FILENO') && provision.includes('memset_s(password'),
+        firstStartUsesPasswordDialog: core.includes("require('agent-installer').startMacRelaySetup();") &&
+            installer.includes('ui.password(') && installer.includes("run('-kvmcredentialstatus'") &&
+            installer.includes("run('-kvmprovision', input") && installer.includes('macRelaySetupStarted'),
+        setupSurvivesCoreReloadAndCleansUp: core.includes('agentHost->macRelaySetupCtx == NULL && kvm_relay_credential_status() == 1') &&
+            core.includes('duk_peval_string_noresult(agentHost->macRelaySetupCtx,') &&
+            functionBody(core, 'void MeshAgent_ChainEnd(').includes('Duktape_SafeDestroyHeap(agent->macRelaySetupCtx)'),
+        selectsPhysicalConsoleBeforeAuth: open != null && consoleSelection != null &&
+            open.indexOf('MacKvm_RelayListener(') < open.indexOf('MacKvm_SelectConsole(') &&
+            open.indexOf('MacKvm_SelectConsole(') < open.indexOf('vnc_relay_open(') &&
+            consoleSelection.includes('VNCAlwaysStartOnConsole') && consoleSelection.includes('com.apple.RemoteManagement') &&
+            consoleSelection.includes('CFPreferencesSetValue(key, kCFBooleanTrue') &&
+            consoleSelection.includes('kCFPreferencesAnyUser, kCFPreferencesAnyHost') &&
+            open.includes('current console desktop'),
         listenerUsesProcessCredentials: listener != null && listener.includes('PROC_PIDTBSDINFO') &&
             listener.includes('owner.pbi_uid == 0 && owner.pbi_ruid == 0 && owner.pbi_svuid == 0') && !listener.includes('vst_uid'),
         secretRules: kvm.includes('O_NOFOLLOW') && kvm.includes('info.st_nlink != 1') && kvm.includes('S_IRWXG | S_IRWXO') &&

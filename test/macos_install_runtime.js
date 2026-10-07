@@ -12,7 +12,7 @@ const agentEnd = managerSource.indexOf('\n    this.uninstallService =', agentSta
 const installAgent = managerSource.slice(agentStart, agentEnd).replace('this.installLaunchAgent =', 'var installAgent =').replace(/\n    }\s*$/, '');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mesh-mac-install-'));
 let failWrite = '', failStart = false, failChown = false, agentInstalls = 0;
-let closed = 0, uninstalled = [], commands = [], loaded = new Set(), userDomain = '', domainData = {};
+let closed = 0, uninstalled = [], commands = [], loaded = new Set(), userDomain = '', domainData = {}, mockCrontab = '';
 const map = p => typeof p === 'string' && (p === '/Library' || p.startsWith('/Library/')) ? root + '/system' + p : p;
 fs.mkdirSync(root + '/system');
 const fixtureFS = {};
@@ -35,7 +35,7 @@ const c = {Buffer, Date, global: {}, module: {exports: {}}, console: {log() {}, 
         if (name === 'user-sessions') return sessions;
         if (name === 'service-manager') return {manager};
         if (name === 'child_process') return {execFile(exe, argv) {
-            const child = new EventEmitter();child.stdout = new EventEmitter();child.stderr = new EventEmitter();child.kill = () => {};
+            const child = new EventEmitter();child.stdout = new EventEmitter();child.stderr = new EventEmitter();child.stdin={_data:'',write(d){this._data+=d;},end(){}};child.kill = () => {};
             child.waitExit = () => {
                 const args = Array.from(argv.slice(1));commands.push([exe, ...args]);let status=0, out='', err='';
                 if (exe === '/usr/bin/plutil') {
@@ -49,6 +49,11 @@ const c = {Buffer, Date, global: {}, module: {exports: {}}, console: {log() {}, 
                         else { status=113; }
                     } else if (args[0] === 'bootout') { loaded.delete(args[1]); }
                     else throw Error('Unexpected launchctl '+args);
+                } else if (exe === '/usr/bin/crontab') {
+                    if (args[0] === '-l') { if (mockCrontab) { out = mockCrontab; } else { status = 1; } }
+                    else if (args[0] === '-') { mockCrontab = child.stdin._data; }
+                } else if (exe === '/bin/kill' || exe === '/bin/sh' || exe === '/bin/sleep') {
+                    // no-op for test
                 } else throw Error('Unexpected executable '+exe);
                 if(out)child.stdout.emit('data',Buffer.from(out));if(err)child.stderr.emit('data',Buffer.from(err));child.emit('exit',status);
             };return child;
@@ -61,9 +66,9 @@ const manager = {isAdmin: () => true,
     installLaunchAgent(options) { agentInstalls++;return c.installAgent.call(manager,options); },
     getLaunchAgent(name) {return c.fetchPlist('/Library/LaunchAgents',name);},
     uninstallService(name, options) { uninstalled.push([name, options]); },
-    getService(name) {const job=c.fetchPlist('/Library/LaunchDaemons',name);return {
-        appLocation: () => job.appLocation(),
-        start() { assert(fs.existsSync(map('/Library/LaunchDaemons/'+name+'.plist')));if(failStart)throw Error('injected start failure'); },
+    getService(name) {var cron=c.fetchCronService(name),loc=cron?cron.appLocation.bind(cron):c.fetchPlist('/Library/LaunchDaemons',name).appLocation;return {
+        appLocation: () => loc(),
+        start() { if(cron){assert(c.macCrontabFind(c.macCronMarker(name))!=null);}else{assert(fs.existsSync(map('/Library/LaunchDaemons/'+name+'.plist')));}if(failStart)throw Error('injected start failure'); },
         unload() {}, close() {closed++;}
     };}};
 try {
@@ -71,12 +76,12 @@ try {
     const provision=root+'/source.msh';fs.writeFileSync(provision,'provisioning');
     const opts=()=>({name:'Mesh & Agent',target:'historical-agent',servicePath:c.process.execPath,installPath:root+'/installed',startType:'AUTO_START',parameters:['--value=a & "b"'],files:[{source:provision,newName:'historical-agent.msh'}]});
     let receipt=manager.installService(opts());
-    let config=JSON.parse(cp.execFileSync('/usr/bin/plutil',['-convert','json','-o','-',map('/Library/LaunchDaemons/Mesh & Agent.plist')],{encoding:'utf8'}));
-    assert.equal(config.ProgramArguments[1],'--value=a & "b"');assert.deepEqual(config.KeepAlive,{SuccessfulExit:false});
+    let heartbeat=fs.readFileSync(root+'/installed/.meshagent_cron.sh','utf8');
+    assert(heartbeat.indexOf('\'--value=a & "b"\'')>=0,'heartbeat must contain quoted parameter');assert(heartbeat.indexOf('--__daemon')>=0);assert(mockCrontab.indexOf('meshagent-cron:Mesh & Agent')>=0);
     assert.equal(fs.readFileSync(root+'/installed/historical-agent.msh','utf8'),'provisioning');
     assert.throws(()=>manager.installService(opts()),/already exists/);receipt.rollback();assert(!fs.existsSync(root+'/installed'));
     failWrite='historical-agent.msh';assert.throws(()=>manager.installService(opts()),/write failure/);failWrite='';
-    assert(!fs.existsSync(root+'/installed')&&!fs.existsSync(map('/Library/LaunchDaemons/Mesh & Agent.plist')));
+    assert(!fs.existsSync(root+'/installed')&&mockCrontab.indexOf('meshagent-cron:Mesh & Agent')<0);
     fs.mkdirSync(root+'/installed');fs.writeFileSync(root+'/installed/historical-agent.msh','incumbent identity');
     receipt=manager.installService(opts());assert.equal(fs.readFileSync(root+'/installed/historical-agent.msh','utf8'),'incumbent identity');receipt.rollback();
     assert.equal(fs.readFileSync(root+'/installed/historical-agent.msh','utf8'),'incumbent identity');
@@ -95,11 +100,11 @@ try {
     vm.runInContext(installerSource,c);
     // Remote desktop relays Screen Sharing from the daemon, so installation publishes no KVM LaunchAgent.
     for (const scenario of ['start','success']) {
-        failStart=scenario==='start';userDomain='';domainData={};commands=[];agentInstalls=0;
+        failStart=scenario==='start';userDomain='';domainData={};commands=[];agentInstalls=0;mockCrontab='';
         const params=['--meshServiceName=Orchestrated','--target=main','--installPath='+root+'/orchestrated','--__skipExit=1'];
         if(scenario==='success')c.installService(params);else assert.throws(()=>c.installService(params),/Service start\/setup failed/);
-        const daemon=map('/Library/LaunchDaemons/Orchestrated.plist'),helper=map('/Library/LaunchAgents/Orchestrated.plist');
-        assert.equal(fs.existsSync(daemon),scenario==='success');assert(!fs.existsSync(helper)&&agentInstalls===0);
+        const helper=map('/Library/LaunchAgents/Orchestrated.plist');
+        assert.equal(mockCrontab.indexOf('meshagent-cron:Orchestrated')>=0,scenario==='success');assert(!fs.existsSync(helper)&&agentInstalls===0);
         assert.equal(fs.existsSync(root+'/orchestrated/main'),scenario==='success');
         assert(!commands.some(a=>a[1]==='bootstrap'),'orchestrator starts the daemon only through the service object');
     }
