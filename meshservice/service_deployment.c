@@ -3299,7 +3299,10 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
     if (currentExists && (!ServiceDeploy_SuspendOriginalRestarters(&paths, tx.originalBinding) ||
         !ServiceDeploy_SuspendServiceRecoveryRestarters() ||
         !ServiceDeploy_ClearServiceRecovery(serviceName) ||
-        !ServiceDeploy_StopServiceAndWait(serviceName, 30000, TRUE))) { goto done; }
+        /* PREPARED has not replaced live bytes. Match in-process rollback:
+         * restore the incumbent's policy without requiring another stop. */
+        ((tx.journalPhase != SERVICE_JOURNAL_PREPARED || !tx.originalBinding) &&
+         !ServiceDeploy_StopServiceAndWait(serviceName, 30000, TRUE)))) { goto done; }
     if (tx.backupsReady) { ok = ServiceDeploy_RollbackUpdateTransaction(&paths, serviceName, &tx); }
     else
     {
@@ -8608,8 +8611,13 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
     BOOL stopped = FALSE;
     BOOL allowStopSet = FALSE;
     SERVICE_STATUS_PROCESS ssp = {0};
+    SERVICE_STATUS controlStatus = {0};
     DWORD needed = 0;
+    DWORD stopStarted = GetTickCount();
+    DWORD stopError = ERROR_TIMEOUT;
+    BOOL statusKnown = FALSE;
     DWORD lastStopAttempt = 0;
+    BOOL stopAttempted = FALSE;
     BOOL loggedStopFailure = FALSE;
     wchar_t serviceDll[MAX_PATH * 4] = {0};
 
@@ -8625,10 +8633,12 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
 
     if (QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed))
     {
-        if (ssp.dwCurrentState != SERVICE_STOPPED && canStop)
+        if (ssp.dwCurrentState != SERVICE_STOPPED && ssp.dwCurrentState != SERVICE_STOP_PENDING &&
+            ssp.dwCurrentState != SERVICE_START_PENDING && canStop)
         {
             lastStopAttempt = GetTickCount();
-            if (!ControlService(hService, SERVICE_CONTROL_STOP, (LPSERVICE_STATUS)&ssp))
+            stopAttempted = TRUE;
+            if (!ControlService(hService, SERVICE_CONTROL_STOP, &controlStatus))
             {
                 DWORD ctrlErr = GetLastError();
                 if (!loggedStopFailure)
@@ -8641,8 +8651,8 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
                     if (ServiceDeploy_SetServiceAllowStop(serviceName, TRUE))
                     {
                         allowStopSet = TRUE;
-                        ControlService(hService, SERVICE_CONTROL_INTERROGATE, (LPSERVICE_STATUS)&ssp);
-                        ControlService(hService, SERVICE_CONTROL_STOP, (LPSERVICE_STATUS)&ssp);
+                        ControlService(hService, SERVICE_CONTROL_INTERROGATE, &controlStatus);
+                        // Re-query before retrying: STOP may already be pending.
                     }
                 }
             }
@@ -8650,24 +8660,31 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
     }
 
     DWORD waited = 0;
-    while (waited < timeoutMs)
+    for (;;)
     {
         if (!QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed))
         {
+            stopError = GetLastError();
+            statusKnown = FALSE;
+            ServiceDeploy_LogInstallEvent(L"[WARN] Service status query failed during stop for %ls (error=%lu)", serviceName, stopError);
             break;
         }
+        statusKnown = TRUE;
         if (ssp.dwCurrentState == SERVICE_STOPPED)
         {
             stopped = TRUE;
             break;
         }
-        if (canStop && ssp.dwCurrentState != SERVICE_STOPPED)
+        waited = GetTickCount() - stopStarted;
+        if (waited >= timeoutMs) { break; }
+        if (canStop && ssp.dwCurrentState != SERVICE_STOP_PENDING && ssp.dwCurrentState != SERVICE_START_PENDING)
         {
             DWORD now = GetTickCount();
-            if (lastStopAttempt == 0 || (now - lastStopAttempt) >= 2000)
+            if (!stopAttempted || (now - lastStopAttempt) >= 2000)
             {
                 lastStopAttempt = now;
-                if (!ControlService(hService, SERVICE_CONTROL_STOP, (LPSERVICE_STATUS)&ssp))
+                stopAttempted = TRUE;
+                if (!ControlService(hService, SERVICE_CONTROL_STOP, &controlStatus))
                 {
                     DWORD ctrlErr = GetLastError();
                     if (!loggedStopFailure)
@@ -8677,7 +8694,7 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
                     }
                     if (ctrlErr == ERROR_SERVICE_CANNOT_ACCEPT_CTRL || ctrlErr == ERROR_ACCESS_DENIED)
                     {
-                            if (ServiceDeploy_SetServiceAllowStop(serviceName, TRUE))
+                        if (ServiceDeploy_SetServiceAllowStop(serviceName, TRUE))
                         {
                             allowStopSet = TRUE;
                         }
@@ -8685,22 +8702,22 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
                 }
             }
         }
-        Sleep(500);
-        waited += 500;
+        waited = GetTickCount() - stopStarted;
+        if (waited < timeoutMs) { Sleep((timeoutMs - waited) < 500 ? (timeoutMs - waited) : 500); }
     }
 
-    if (!stopped)
+    if (!stopped && statusKnown)
     {
         ServiceDeploy_LogInstallEvent(L"[WARN] Service stop timed out for %ls (state=%lu pid=%lu)", serviceName, ssp.dwCurrentState, ssp.dwProcessId);
     }
 
     /* Terminating a generic shared service host could stop unrelated services.
      * It is permitted only after proving our one-service group. */
-    BOOL processIsExclusivelyOurs = ssp.dwServiceType == SERVICE_WIN32_OWN_PROCESS ||
+    BOOL processIsExclusivelyOurs = statusKnown && (ssp.dwServiceType == SERVICE_WIN32_OWN_PROCESS ||
         (ssp.dwServiceType == SERVICE_WIN32_SHARE_PROCESS &&
          ServiceDeploy_ResolveServiceDllPath(serviceName, serviceDll, _countof(serviceDll)) &&
          ServiceHost_ValidateServiceBinding(serviceName, serviceDll) &&
-         ServiceDeploy_ProcessHostsOnlyService(serviceName, ssp.dwProcessId));
+         ServiceDeploy_ProcessHostsOnlyService(serviceName, ssp.dwProcessId)));
     if (!stopped && forceTerminate && processIsExclusivelyOurs && ssp.dwProcessId != 0)
     {
         HANDLE hProcess = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, ssp.dwProcessId);
@@ -8710,17 +8727,30 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
             {
                 ServiceDeploy_LogInstallEvent(L"[WARN] Stop control denied for %ls; terminating PID %lu", serviceName, ssp.dwProcessId);
             }
-            TerminateProcess(hProcess, 0);
-            WaitForSingleObject(hProcess, 5000);
+            if (!TerminateProcess(hProcess, 0))
+            {
+                stopError = GetLastError();
+                ServiceDeploy_LogInstallEvent(L"[WARN] Service process termination failed for %ls (pid=%lu error=%lu)", serviceName, ssp.dwProcessId, stopError);
+            }
+            else { WaitForSingleObject(hProcess, 5000); }
             CloseHandle(hProcess);
+        }
+        else
+        {
+            stopError = GetLastError();
+            ServiceDeploy_LogInstallEvent(L"[WARN] Service process could not be opened for stop for %ls (pid=%lu error=%lu)", serviceName, ssp.dwProcessId, stopError);
         }
         // SCM notices the process exit asynchronously, so STOP_PENDING can outlive it briefly.
         for (waited = 0; waited <= 10000; waited += 250)
         {
-            if (!QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed)) { break; }
+            if (!QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp, sizeof(ssp), &needed)) { stopError = GetLastError(); break; }
             if (ssp.dwCurrentState == SERVICE_STOPPED) { stopped = TRUE; break; }
             Sleep(250);
         }
+    }
+    else if (!stopped && forceTerminate && statusKnown)
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] Service stop remains incomplete for %ls; exclusive process ownership was not established (state=%lu pid=%lu). Retaining transaction for retry after service recovery or reboot", serviceName, ssp.dwCurrentState, ssp.dwProcessId);
     }
 
     CloseServiceHandle(hService);
@@ -8730,6 +8760,7 @@ static BOOL ServiceDeploy_StopServiceAndWait(const wchar_t* serviceName, DWORD t
     {
         ServiceDeploy_SetServiceAllowStop(serviceName, FALSE);
     }
+    if (!stopped) { SetLastError(stopError); }
     return stopped;
 }
 

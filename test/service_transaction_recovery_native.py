@@ -134,6 +134,11 @@ int main(void){
     }
     for(int phase=3;phase<=4;++phase){setup(phase,1,1);assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&!rollbacks&&!restores&&!stops&&!starts&&cleanups==1);assert(reconciles==(phase==3));}
     for(int failure=1;failure<=6;++failure){setup(failure==4?1:2,1,1);failAt=failure;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!cleanups);}
+    /* A PREPARED checkpoint owns unchanged live bytes. Restore incumbent policy
+     * even if another stop would fail; later phases still require quiescence. */
+    setup(1,1,1);failAt=2;assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&!stops&&restores==1&&starts==1);
+    setup(1,1,0);failAt=2;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&stops==1&&!restores&&!starts);
+    setup(5,1,1);failAt=2;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&stops==1&&!rollbacks&&!restores&&!starts);
     setup(2,1,1);failAt=9;assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&rollbacks==1&&resolves==1);
     /* Recovery records no update hold and needs no activation target key. */
     setup(2,1,1);wcscpy(binding.incumbentDbPath,L"old.db");assert(ServiceDeploy_RecoverInterruptedTransaction());assert(!present&&!holds&&starts==1&&resolves==1);
