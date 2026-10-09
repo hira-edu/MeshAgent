@@ -3311,7 +3311,7 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
         else if (ok && currentExists) { ok = ServiceHost_UnregisterServiceHostService(serviceName); }
     }
     if (ok && tx.originalBinding) { ok = ServiceDeploy_SetServiceStartType(serviceName, tx.originalBinding->config->dwStartType); }
-    if (ok && !ServiceDeploy_BindingHasMovedRoot(&paths, tx.originalBinding) && !ServiceDeploy_ReconcileServiceRecovery())
+    if (ok && tx.originalBinding && !ServiceDeploy_BindingHasMovedRoot(&paths, tx.originalBinding) && !ServiceDeploy_ReconcileServiceRecovery())
     {
         ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Restored recovery companions require later reconciliation");
     }
@@ -3620,6 +3620,7 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     BOOL serviceExists = FALSE;
     BOOL serviceWasRunning = FALSE;
     BOOL rollbackCompleted = FALSE;
+    DWORD operationError = ERROR_SUCCESS;
     HANDLE rollbackStartupAuthorization = NULL;
     wchar_t serviceKeyName[256] = {0};
     wchar_t serviceDisplayName[256] = {0};
@@ -3928,6 +3929,9 @@ CLEANUP:
     }
 
 ROLLBACK:
+    /* Keep the activation error (for example SCM error 193), not a registry
+     * or filesystem result produced while restoring the original package. */
+    if (!success) { operationError = GetLastError(); }
     if (!success && tx.journalPhase != SERVICE_JOURNAL_COMMITTED)
     {
         BOOL rollbackOk = TRUE;
@@ -3956,7 +3960,7 @@ ROLLBACK:
         {
             rollbackOk = ServiceDeploy_FlushUpdateFiles(&paths, &tx);
         }
-        if (rollbackOk && !ServiceDeploy_BindingHasMovedRoot(&paths, tx.originalBinding) && !ServiceDeploy_ReconcileServiceRecovery())
+        if (rollbackOk && tx.originalBinding && !ServiceDeploy_BindingHasMovedRoot(&paths, tx.originalBinding) && !ServiceDeploy_ReconcileServiceRecovery())
         { ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Restored recovery companions require later reconciliation"); }
         // The checkpoint is still in flight and this operation holds the lifecycle
         // mutex, so the restored service's startup gate would quiesce it. Authorize
@@ -4004,6 +4008,7 @@ ROLLBACK:
     }
     ServiceBinding_Free(tx.originalBinding);
     for (size_t i = 0; i < _countof(tx.originalFileDacl); ++i) { free(tx.originalFileDacl[i]); }
+    if (!success) { SetLastError(operationError); }
     return success;
 }
 
@@ -5811,11 +5816,14 @@ static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request,
             break;
     }
 
+    DWORD operationError = GetLastError();
     ServiceLifecycleDiscovery postState;
     if (ServiceDeploy_DiscoverCurrentState(&postState))
     {
         ServiceDeploy_LogLifecycleSnapshot(ok ? L"after" : L"after-failed", &postState, &plan);
     }
+
+    if (!ok) { SetLastError(operationError); }
 
     return ok;
 }
@@ -5922,7 +5930,9 @@ BOOL ServiceDeploy_RunLifecycleHostOperation(
     ServiceDeploy_ResolveRuntimeServiceBranding(selectedName, _countof(selectedName), NULL, 0, NULL, 0);
     if (_wcsicmp(lockedName, selectedName)) { ReleaseMutex(mutex); CloseHandle(mutex); return FALSE; }
     ok = ServiceDeploy_RunLifecycleHostOperationLocked(actionName, sourceExePath, sourceDllPath, requireConfig);
+    DWORD operationError = GetLastError();
     ReleaseMutex(mutex); CloseHandle(mutex);
+    if (!ok) { SetLastError(operationError); }
     return ok;
 }
 
@@ -5990,9 +6000,11 @@ BOOL ServiceDeploy_RunTerminalUninstall(const wchar_t* runningExePath,
     if (_wcsicmp(lockedName, selectedName)) { ReleaseMutex(mutex); CloseHandle(mutex); return FALSE; }
     ZeroMemory(&paths, sizeof(paths));
     ok = ServiceDeploy_GetInstallPaths(&paths);
+    DWORD operationError = GetLastError();
     if (ok)
     {
         ok = ServiceDeploy_RunLifecycleHostOperationLocked(MESH_LIFECYCLE_ACTION_UNINSTALL_W, NULL, NULL, FALSE);
+        operationError = GetLastError();
         if (!ok)
         {
             ok = ServiceDeploy_RetireRunningInstalledImage(runningExePath, &paths,
@@ -6000,6 +6012,7 @@ BOOL ServiceDeploy_RunTerminalUninstall(const wchar_t* runningExePath,
         }
     }
     ReleaseMutex(mutex); CloseHandle(mutex);
+    if (!ok) { SetLastError(operationError); }
     return ok;
 }
 

@@ -230,6 +230,46 @@ static BOOL ServiceBinding_ParseCallbackImage(const wchar_t* image, wchar_t* dll
     return TRUE;
 }
 
+/* Historical standalone agents append their SCM name and installer SID. The
+ * caller must also match the executable to the identity-verified incumbent;
+ * these options alone never establish ownership of an arbitrary service. */
+static BOOL ServiceBinding_LegacyArgumentsSupported(const wchar_t* name, const wchar_t* args)
+{
+    BOOL haveName = FALSE, haveUser = FALSE;
+    if (!_wcsicmp(args, L"-run")) { return TRUE; }
+    while (*args)
+    {
+        const wchar_t* value;
+        size_t length;
+        BOOL isName, quoted;
+        if (!_wcsnicmp(args, L"--meshServiceName=", 18))
+        { if (haveName) { return FALSE; } haveName = TRUE; isName = TRUE; args += 18; }
+        else if (!_wcsnicmp(args, L"--installedByUser=", 18))
+        { if (haveUser) { return FALSE; } haveUser = TRUE; isName = FALSE; args += 18; }
+        else { return FALSE; }
+        quoted = *args == L'"';
+        if (quoted) { ++args; }
+        value = args;
+        while (*args && (quoted ? *args != L'"' : (*args != L' ' && *args != L'\t'))) { ++args; }
+        length = (size_t)(args - value);
+        if (!length || (quoted && *args != L'"')) { return FALSE; }
+        if (isName)
+        {
+            if (!name || wcslen(name) != length || _wcsnicmp(value, name, length)) { return FALSE; }
+        }
+        else
+        {
+            if (length < 5 || _wcsnicmp(value, L"S-1-", 4)) { return FALSE; }
+            for (size_t i = 4; i < length; ++i)
+            { if (value[i] != L'-' && (value[i] < L'0' || value[i] > L'9')) { return FALSE; } }
+        }
+        if (quoted) { ++args; }
+        if (*args && *args != L' ' && *args != L'\t') { return FALSE; }
+        while (*args == L' ' || *args == L'\t') { ++args; }
+    }
+    return haveName;
+}
+
 /* Ownership is established from the executable/DLL command only. Parameters
  * may be malformed: their exact prior values must remain repairable. */
 static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVICE_CONFIGW* config,
@@ -295,7 +335,7 @@ static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVI
             }
             else
             {
-                if ((!_wcsicmp(extractedExe, installedExe) && !_wcsicmp(after, L"-run")) || ServiceBinding_IsLegacyExe(extractedExe))
+                if ((!_wcsicmp(extractedExe, installedExe) && ServiceBinding_LegacyArgumentsSupported(name, after)) || ServiceBinding_IsLegacyExe(extractedExe))
                 {
                     *legacy = TRUE;
                     return TRUE;
@@ -320,7 +360,7 @@ static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVI
                     extractedExe[partLen] = L'\0';
                     const wchar_t* after = space;
                     while (*after == L' ' || *after == L'\t') { ++after; }
-                    if ((!_wcsicmp(extractedExe, installedExe) && !_wcsicmp(after, L"-run")) || ServiceBinding_IsLegacyExe(extractedExe))
+                    if ((!_wcsicmp(extractedExe, installedExe) && ServiceBinding_LegacyArgumentsSupported(name, after)) || ServiceBinding_IsLegacyExe(extractedExe))
                     {
                         *legacy = TRUE;
                         return TRUE;

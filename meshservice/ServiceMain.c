@@ -7836,7 +7836,12 @@ static int MeshService_RunNativeTerminalLifecycle(int argc, char** argv)
 
 	// Match the compatibility lifecycle host's failure exit code.
 	ServiceDeploy_LogInstallEvent(L"[TERMINAL] Native in-process %hs failed (LastError hint=%lu)", label, lastErr);
-	printf("[-] Service %s failed. See the installer log for details.\n", label);
+	printf("[-] Service %s failed (exit=%lu; Windows error hint=%lu).\n", label, (DWORD)ERROR_INSTALL_FAILURE, lastErr);
+	WCHAR diagnosticPath[MAX_PATH * 4] = { 0 };
+	if (MeshDiagnosticLog_GetPathW(diagnosticPath, _countof(diagnosticPath)))
+	{
+		printf("    Installer diagnostics: %ls\n", diagnosticPath);
+	}
 	if (retiredPath[0] != L'\0' && !removalScheduled)
 	{
 		printf("[!] Delete %ls after this process exits.\n", retiredPath);

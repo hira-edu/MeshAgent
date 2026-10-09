@@ -109,6 +109,22 @@ int main(void){
     QUERY_SERVICE_CONFIGW config={0};BOOL legacy=FALSE;config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\"";
     assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
     config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\" -other";assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    /* Historical custom branding is admitted only for the verified payload and service name. */
+    config.dwServiceType=0x110;
+    config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\" --meshServiceName=\"Agent\" --installedByUser=\"S-1-5-21-123-1001\"";
+    assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    assert(!ServiceBinding_ImageSupported(L"Other",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Other\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"C:\\Agent\\agent.exe --installedByUser=S-1-5-18 --meshServiceName=Agent";
+    assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\" -run";
+    assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
+    config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\" --meshServiceName=\"Agent\" --other=value";
+    assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    const wchar_t* badArgs[]={L"--meshServiceName=\"Agent",L"--meshServiceName=\"Agent\"extra",L"--meshServiceName=Agent --meshServiceName=Agent",L"--installedByUser=S-1-5-18",L"--meshServiceName=Agent --installedByUser=invalid",L"--meshServiceName=Agent --installedByUser=S-1-5-18 --installedByUser=S-1-5-18",L"--meshServiceName=",L"-other"};
+    for(size_t i=0;i<_countof(badArgs);++i)assert(!ServiceBinding_LegacyArgumentsSupported(L"Agent",badArgs[i]));
+    assert(ServiceBinding_LegacyArgumentsSupported(L"Agent Service",L"--meshServiceName=\"Agent Service\"\t--installedByUser=\"S-1-5-18\""));
+    config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;
     config.lpBinaryPathName=L"C:\\Another\\agent.exe";assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.dwServiceType=0x110;config.lpBinaryPathName=L"\"C:\\Agent\\agent.exe\"";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
     config.lpBinaryPathName=L"\"C:\\Program Files\\Mesh Agent\\MeshAgent.exe\" -run";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&legacy);
@@ -169,7 +185,7 @@ int main(void){
     ServiceBinding_Free(s);puts("service binding transaction: owned image selection, membership restoration, exact value ordering, disabled running state and failure propagation passed");return 0;
 }
 '''
-functions = '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_IsLegacyExe', 'ServiceBinding_ParseCallbackImage', 'ServiceBinding_ImageSupported', 'ServiceBinding_SharedImageSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_ApplyExtra', 'ServiceBinding_Restore'])
+functions = '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_IsLegacyExe', 'ServiceBinding_ParseCallbackImage', 'ServiceBinding_LegacyArgumentsSupported', 'ServiceBinding_ImageSupported', 'ServiceBinding_SharedImageSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_ApplyExtra', 'ServiceBinding_Restore'])
 with tempfile.TemporaryDirectory(prefix='mesh-service-binding-') as tmp:
     src, exe = Path(tmp) / 'binding.c', Path(tmp) / 'binding'
     harness = prelude + prefix + mocks + functions + cases

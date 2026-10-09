@@ -205,6 +205,8 @@ static BOOL migration_copy(void) {
 #define ServiceDeploy_TerminateProcessesByPath(...) ((void)0)
 #define GetFileAttributesW(...) INVALID_FILE_ATTRIBUTES
 #define GetLastError() 1
+#define SetLastError(e) ((void)(e))
+#define ERROR_SUCCESS 0
 #define GetTickCount() 1
 #define CreateFileW(...) INVALID_HANDLE_VALUE
 '''
