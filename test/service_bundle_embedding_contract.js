@@ -46,12 +46,12 @@ function sha256File(filePath) {
     return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex').toUpperCase();
 }
 
-function extractEmbeddedPayload(exePath) {
+function extractEmbeddedServiceBundle(exePath) {
     const script = [
         'import hashlib, json, pathlib, sys',
         'import deploy',
-        'payload = deploy.extract_embedded_service_bundle(pathlib.Path(sys.argv[1]))',
-        'print(json.dumps({"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest().upper()}))'
+        'bundle = deploy.extract_embedded_service_bundle(pathlib.Path(sys.argv[1]))',
+        'print(json.dumps({"size": len(bundle), "sha256": hashlib.sha256(bundle).hexdigest().upper()}))'
     ].join('\n');
     const result = childProcess.spawnSync('python', ['-c', script, exePath], {
         cwd: path.resolve(__dirname, '..'),
@@ -60,13 +60,37 @@ function extractEmbeddedPayload(exePath) {
         timeout: 120000
     });
     if (result.status !== 0) {
-        throw new Error(`embedded payload extraction failed: ${result.stderr || result.stdout || result.error}`);
+        throw new Error(`embedded service-bundle extraction failed: ${result.stderr || result.stdout || result.error}`);
     }
     return JSON.parse(result.stdout);
 }
 
-function main() {
+function buildChecks(embedded, dllSha256, dllSize) {
+    const present = embedded.size > 0;
+    const hashMatches = embedded.sha256 === dllSha256;
+    const sizeMatches = embedded.size === dllSize;
+    return {
+        embeddedServiceBundlePresent: present,
+        embeddedServiceBundleMatchesDllHash: hashMatches,
+        embeddedServiceBundleMatchesDllSize: sizeMatches
+    };
+}
+
+function buildLegacyChecks(embedded, dllSha256, dllSize) {
+    const present = embedded.size > 0;
+    const hashMatches = embedded.sha256 === dllSha256;
+    const sizeMatches = embedded.size === dllSize;
+    return {
+        // Exact compatibility schema used only by the legacy entry point.
+        embeddedPayloadPresent: present,
+        embeddedPayloadMatchesDllHash: hashMatches,
+        embeddedPayloadMatchesDllSize: sizeMatches
+    };
+}
+
+function main(options = {}) {
     const args = parseArgs(process.argv);
+    const legacyEvidence = options.legacyEvidence === true || args['legacy-evidence-schema'] === true;
     const evidenceDir = args.evidence ? path.resolve(args.evidence) : null;
     const exePath = path.resolve('meshservice', 'x64', 'MeshServiceRuntime', 'MeshService-2022.exe');
     const dllPath = path.resolve('meshservice', 'x64', 'MeshServiceBundle', 'MeshService-2022.dll');
@@ -74,14 +98,12 @@ function main() {
     assert(fs.existsSync(exePath), `missing x64 agent package: ${exePath}`);
     assert(fs.existsSync(dllPath), `missing x64 service bundle DLL: ${dllPath}`);
 
-    const embedded = extractEmbeddedPayload(exePath);
+    const embedded = extractEmbeddedServiceBundle(exePath);
     const dllSha256 = sha256File(dllPath);
     const dllSize = fs.statSync(dllPath).size;
-    const checks = {
-        embeddedPayloadPresent: embedded.size > 0,
-        embeddedPayloadMatchesDllHash: embedded.sha256 === dllSha256,
-        embeddedPayloadMatchesDllSize: embedded.size === dllSize
-    };
+    const checks = legacyEvidence ?
+        buildLegacyChecks(embedded, dllSha256, dllSize) :
+        buildChecks(embedded, dllSha256, dllSize);
 
     for (const [name, passed] of Object.entries(checks)) {
         assert(passed, `${name} failed`);
@@ -100,7 +122,7 @@ function main() {
     };
 
     if (evidenceDir) {
-        writeJson(path.join(evidenceDir, 'service_bundle_embedded_payload_contract.json'), report);
+        writeJson(path.join(evidenceDir, 'service_bundle_embedding_contract.json'), report);
         writeText(path.join(evidenceDir, 'summary.txt'), [
             `GENERATED_UTC=${report.generatedUtc}`,
             `EXE=${exePath}`,
@@ -113,9 +135,13 @@ function main() {
     }
 }
 
-try {
-    main();
-} catch (error) {
-    console.error(error && error.stack ? error.stack : String(error));
-    process.exit(1);
+if (require.main === module) {
+    try {
+        main();
+    } catch (error) {
+        console.error(error && error.stack ? error.stack : String(error));
+        process.exit(1);
+    }
 }
+
+module.exports = { buildChecks, buildLegacyChecks, main };

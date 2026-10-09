@@ -47,10 +47,10 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def refresh_payload(repo_root: Path, dll_path: Path, config_path: Path) -> None:
+def refresh_service_bundle(repo_root: Path, dll_path: Path, config_path: Path) -> None:
     if not dll_path.exists():
         raise FileNotFoundError(
-            f"Missing payload DLL '{dll_path}'. Build MeshServiceBundle|x64 before MeshServiceRuntime|x64."
+            f"Missing service-bundle DLL '{dll_path}'. Build MeshServiceBundle|x64 before MeshServiceRuntime|x64."
         )
 
     installer_dll_name = load_service_dll_name(config_path)
@@ -59,7 +59,7 @@ def refresh_payload(repo_root: Path, dll_path: Path, config_path: Path) -> None:
     metadata_path = generated_dir / "service_bundle.json"
     embedded_dir = repo_root / "meshservice" / "embedded"
     embedded_dll_path = embedded_dir / "service_bundle.dll"
-    installer_dir = repo_root / "meshservice" / "installer" / "payload"
+    installer_dir = repo_root / "meshservice" / "installer" / "components"
     installer_dll_path = installer_dir / installer_dll_name
 
     for directory in [generated_dir, embedded_dir, installer_dir]:
@@ -75,7 +75,7 @@ def refresh_payload(repo_root: Path, dll_path: Path, config_path: Path) -> None:
     if header_path.exists():
         header_path.unlink()
 
-    payload = {
+    metadata = {
         "input": str(dll_path.resolve()),
         "sha256": file_sha256(dll_path),
         "size": dll_path.stat().st_size,
@@ -83,12 +83,12 @@ def refresh_payload(repo_root: Path, dll_path: Path, config_path: Path) -> None:
         "installerDll": str(installer_dll_path.resolve()),
         "generatedUtc": datetime.now(timezone.utc).isoformat(),
     }
-    metadata_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
-    print(f"[OK] Synced payload from {dll_path}")
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8", newline="\n")
+    print(f"[OK] Synced service bundle from {dll_path}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Refresh the embedded service-host service payload from the built DLL.")
+    parser = argparse.ArgumentParser(description="Refresh the embedded service bundle from the built DLL.")
     parser.add_argument("--repo-root", dest="repo_root")
     parser.add_argument("--dll", dest="dll_path")
     parser.add_argument("--config", dest="config_path")
@@ -102,7 +102,7 @@ def main() -> int:
     )
     try:
         config_path = choose_config_path(repo_root, args.config_path)
-        refresh_payload(repo_root, dll_path, config_path)
+        refresh_service_bundle(repo_root, dll_path, config_path)
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1

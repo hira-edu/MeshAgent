@@ -873,12 +873,12 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|Win32'">
     <ClCompile>
       <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>MESHAGENT_RUNTIME_FEATURES_DEFAULT;MESHAGENT_ENABLE_RUNTIME_FEATURES;BUILD_SERVICE_BUNDLE_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MESH_RUNTIME_COMPONENTS_EMBEDDED;MESHAGENT_RUNTIME_FEATURES_DEFAULT;MESHAGENT_ENABLE_RUNTIME_FEATURES;BUILD_SERVICE_BUNDLE_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ExceptionHandling>Async</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Advapi32.lib;Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcrypto32MT.lib;..\openssl\libstatic\libssl32MT.lib;ole32.lib;oleaut32.lib;taskschd.lib;wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Advapi32.lib;Bcrypt.lib;Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcrypto32MT.lib;..\openssl\libstatic\libssl32MT.lib;ole32.lib;oleaut32.lib;taskschd.lib;wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Windows</SubSystem>
       <TargetMachine>MachineX86</TargetMachine>
       <ModuleDefinitionFile>MeshServiceHost.def</ModuleDefinitionFile>
@@ -889,12 +889,12 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'">
     <ClCompile>
       <AdditionalIncludeDirectories>..\openssl\include;..\;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>MESHAGENT_RUNTIME_FEATURES_DEFAULT;MESHAGENT_ENABLE_RUNTIME_FEATURES;BUILD_SERVICE_BUNDLE_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MESH_RUNTIME_COMPONENTS_EMBEDDED;MESHAGENT_RUNTIME_FEATURES_DEFAULT;MESHAGENT_ENABLE_RUNTIME_FEATURES;BUILD_SERVICE_BUNDLE_DLL;MESH_AGENTID=4;DUK_USE_DATE_NOW_WINDOWS;MICROSTACK_PROXY;_WINSERVICE;NOLMSCOMMANDER;WIN32;WIN64;_LINKVM;NDEBUG;_CONSOLE;MICROSTACK_NO_STDAFX;WINSOCK2;MICROSTACK_TLS_DETECT;_MSC_PLATFORM_TOOLSET_$(PlatformToolset);ILibChain_WATCHDOG_TIMEOUT=600000;DUK_USE_DEBUGGER_SUPPORT;DUK_USE_INTERRUPT_COUNTER;DUK_USE_DEBUGGER_INSPECT;DUK_USE_DEBUGGER_PAUSE_UNCAUGHT;DUK_USE_DEBUGGER_DUMPHEAP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ExceptionHandling>Async</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Advapi32.lib;Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcrypto64MT.lib;..\openssl\libstatic\libssl64MT.lib;ole32.lib;oleaut32.lib;taskschd.lib;wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Advapi32.lib;Bcrypt.lib;Comctl32.lib;SetupAPI.lib;DbgHelp.lib;Iphlpapi.lib;ws2_32.lib;Setupapi.lib;Psapi.lib;Crypt32.lib;Wintrust.lib;Version.lib;Wtsapi32.lib;Gdiplus.lib;Winhttp.lib;Ncrypt.lib;..\openssl\libstatic\libcrypto64MT.lib;..\openssl\libstatic\libssl64MT.lib;ole32.lib;oleaut32.lib;taskschd.lib;wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Windows</SubSystem>
       <TargetMachine>MachineX64</TargetMachine>
       <ModuleDefinitionFile>MeshServiceHost.def</ModuleDefinitionFile>
@@ -1153,6 +1153,21 @@
     <ClInclude Include="clipboard_bridge.h" />
     <ClCompile Include="runtime_host_contract.c" />
     <ClCompile Include="runtime_command.c" />
+    <ClCompile Include="runtime_components.c">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'">false</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="runtime_controller.c">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'">false</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\meshcore\runtime_control_binding.c">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|Win32'">false</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'">false</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="service_host.c" />
     <ClCompile Include="security_firewall.c" />
     <ClCompile Include="service_deployment.c" />
@@ -1233,6 +1248,10 @@
     <ClInclude Include="..\microstack\ILibWebServer.h" />
     <ClInclude Include="..\microstack\ILibWrapperWebRTC.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="runtime_component_resources.h" />
+    <ClInclude Include="runtime_components.h" />
+    <ClInclude Include="runtime_controller.h" />
+    <ClInclude Include="..\meshcore\runtime_control_binding.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="runtime_core.h" />
     <ClInclude Include="fault_recovery.h" />

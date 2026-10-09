@@ -56,7 +56,7 @@ function main() {
     assert(dllInstallIndex >= 0 && exeInstallIndex >= 0, 'update commit must install both staged binaries');
     assert(dllInstallIndex < exeInstallIndex, 'staged ServiceDll install must precede staged EXE install');
     assert(
-        commit.indexOf('ServiceDeploy_ValidateServiceHostPayloadDll(paths->dllPath)') < exeInstallIndex,
+        commit.indexOf('ServiceDeploy_ValidateServiceHostDll(paths->dllPath)') < exeInstallIndex,
         'committed ServiceDll must validate before host EXE replacement'
     );
 

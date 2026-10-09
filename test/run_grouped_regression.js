@@ -288,8 +288,8 @@ function queryExecutableNodeId(runCommand, executablePath, label = 'query-instal
 }
 
 function resolveInstalledAgentExe(statusRecord) {
-    const payload = parseValidationJson(statusRecord);
-    const installedExe = payload.installedExePath;
+    const validationReport = parseValidationJson(statusRecord);
+    const installedExe = validationReport.installedExePath;
     if (typeof installedExe !== 'string' || !fs.existsSync(installedExe)) {
         throw new Error('Runtime validation did not provide an existing installedExePath');
     }
@@ -301,10 +301,10 @@ function sleepMs(milliseconds) {
 }
 
 function isSuccessfulValidationRecord(record) {
-    const payload = parseValidationJson(record);
+    const validationReport = parseValidationJson(record);
     if (record && record.lifecycleAction && record.exitCode === 0) {
         return {
-            payload: {
+            report: {
                 success: true,
                 phase: record.lifecycleAction,
                 checks: { lifecycleHostExit: true },
@@ -318,8 +318,8 @@ function isSuccessfulValidationRecord(record) {
         };
     }
     return {
-        payload,
-        success: !record.error && record.exitCode === 0 && payload != null && payload.success === true
+        report: validationReport,
+        success: !record.error && record.exitCode === 0 && validationReport != null && validationReport.success === true
     };
 }
 
@@ -329,7 +329,7 @@ function runValidationWithRetries(runCommand, runnerExe, phaseDir, artifactStem,
     const timeoutMs = options.timeoutMs || 180000;
     const cwd = options.cwd || path.dirname(runnerExe);
     let lastRecord = null;
-    let lastValidation = { payload: null, success: false };
+    let lastValidation = { report: null, success: false };
 
     for (let attempt = 1; attempt <= attempts; ++attempt) {
         const record = runCommand(`${artifactStem}-attempt-${attempt}`, runnerExe, args, {
@@ -344,7 +344,7 @@ function runValidationWithRetries(runCommand, runnerExe, phaseDir, artifactStem,
             writeCommandArtifacts(phaseDir, artifactStem, record);
             return {
                 attempts: attempt,
-                payload: lastValidation.payload,
+                report: lastValidation.report,
                 record
             };
         }
@@ -557,9 +557,14 @@ function runMeshCentralSameSizeContracts(runCommand, phaseDir) {
             evidenceDir: path.join(phaseDir, 'kvm_initial_frame_runtime')
         },
         {
-            name: 'service-bundle-embedded-payload-contract',
-            script: path.join(REPO_ROOT, 'test', 'service_bundle_embedded_payload_contract.js'),
-            evidenceDir: path.join(phaseDir, 'service_bundle_embedded_payload_contract')
+            name: 'service-bundle-embedding-contract',
+            script: path.join(REPO_ROOT, 'test', 'service_bundle_embedding_contract.js'),
+            evidenceDir: path.join(phaseDir, 'service_bundle_embedding_contract')
+        },
+        {
+            name: 'service-bundle-evidence-schema-contract',
+            script: path.join(REPO_ROOT, 'test', 'service_bundle_evidence_schema_contract.js'),
+            evidenceDir: path.join(phaseDir, 'service_bundle_evidence_schema_contract')
         },
         {
             name: 'kvm-system-picture-runtime',

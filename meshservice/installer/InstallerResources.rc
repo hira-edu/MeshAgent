@@ -4,11 +4,10 @@
 #define IDR_PROVISIONING    102
 
 #ifndef INSTALLER_SERVICE_BUNDLE_PATH
-#define INSTALLER_SERVICE_BUNDLE_PATH "payload\\meshsvc.dll"
+#define INSTALLER_SERVICE_BUNDLE_PATH "components\\meshsvc.dll"
 #endif
 
 IDR_SERVICE_BUNDLE_DLL  RCDATA INSTALLER_SERVICE_BUNDLE_PATH
 #ifdef EMBED_PROVISIONING
-IDR_PROVISIONING RCDATA "payload\\meshagent.msh"
+IDR_PROVISIONING RCDATA "components\\meshagent.msh"
 #endif
-

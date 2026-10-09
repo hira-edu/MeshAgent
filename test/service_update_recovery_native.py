@@ -360,7 +360,7 @@ static int mutations,stops,starts,restores,rollbacks,reconciles,deleted,phaseWri
 static int movedRoot, missingOldIdentity, holds, identityChecks;
 static void log_event(const wchar_t* f,...){(void)f;}
 static BOOL mock_recovery_paths(ServiceInstallPaths* p){memset(p,0,sizeof(*p));wcscpy(p->dbPath,L"current.db");return TRUE;}
-static BOOL binding_payload(wchar_t* p){wcscpy(p,L"old-agent.exe");return TRUE;}
+static BOOL binding_image_path(wchar_t* p){wcscpy(p,L"old-agent.exe");return TRUE;}
 static BOOL original_paths(ServiceInstallPaths* p){memset(p,0,sizeof(*p));wcscpy(p->dbPath,L"old.db");return !missingOldIdentity;}
 static BOOL capture_identity(const wchar_t* p,void* identity){*(BOOL*)identity=TRUE;return wcscmp(p,L"old.db")||!missingOldIdentity;}
 static BOOL wait_identity(const wchar_t* p){assert(!movedRoot||!wcscmp(p,L"old.db"));++identityChecks;return TRUE;}
@@ -385,11 +385,11 @@ static int mock_snwprintf(wchar_t* out,size_t size,size_t trunc,const wchar_t* f
 #define ServiceJournal_Load(p,n,r) load(r)
 #define ServiceJournal_Free(...) ((void)0)
 #define ServiceDeploy_TransactionPathsSafe(...) TRUE
-#define ServiceBinding_SharedPayloadSupported(...) TRUE
+#define ServiceBinding_SharedImageSupported(...) TRUE
 #define ServiceDeploy_SuspendOriginalRestarters(...) TRUE
 #define ServiceDeploy_BindingHasMovedRoot(...) movedRoot
-#define ServiceDeploy_BindingPayloadPath(b,p,n) binding_payload(p)
-#define ServiceDeploy_FindIncumbentPaths(payload,p) original_paths(p)
+#define ServiceDeploy_BindingImagePath(b,p,n) binding_image_path(p)
+#define ServiceDeploy_FindIncumbentPaths(imagePath,p) original_paths(p)
 #define ServiceDeploy_CheckpointIncumbentPaths(b,p) original_paths(p)
 #define _wcsicmp wcscmp
 #define _snwprintf_s mock_snwprintf

@@ -26,6 +26,10 @@
 #include "branding_util.h"
 #include "../meshcore/diagnostic_log.h"
 #include "service_telemetry.h"
+#include "runtime_components.h"
+#if defined(MESH_RUNTIME_COMPONENTS_EMBEDDED)
+#include "../meshcore/runtime_control_binding.h"
+#endif
 #include "../microstack/ILibParsers.h"
 
 // Use AgentCore APIs
@@ -43,11 +47,18 @@ static void MeshAgent_Run(MeshAgentHostContainer* agent)
 static SERVICE_STATUS_HANDLE g_ServiceHostStatusHandle = NULL;
 static SERVICE_STATUS g_ServiceHostStatus = {0};
 static BOOL g_ServiceHostRunning = FALSE;
+static SRWLOCK g_ServiceHostControlLock = SRWLOCK_INIT;
+static BOOL g_ServiceHostStopRequested = FALSE;
+static BOOL g_ServiceHostFinalStatusReserved = FALSE;
+static BOOL g_ServiceHostCompletionPlanned = FALSE;
+static BOOL g_ServiceHostStatusTerminal = FALSE;
 static wchar_t g_ServiceHostServiceName[256] = {0};
 static char g_ServiceHostServiceNameUtf8[1024] = {0};
 static MeshServiceTelemetry g_ServiceHostTelemetry = {0};
 static LPTOP_LEVEL_EXCEPTION_FILTER g_ServiceHostPreviousExceptionFilter = NULL;
 static BOOL g_ServiceHostExceptionFilterInstalled = FALSE;
+static void ServiceHost_LogLine(const wchar_t* format, ...);
+static void ServiceHost_DestroyAgent(MeshAgentHostContainer* agent);
 
 static LONG WINAPI ServiceHost_UnhandledException(EXCEPTION_POINTERS* exception)
 {
@@ -101,9 +112,24 @@ static void ServiceHost_StopAgentOnChain(void* chain, void* user)
     }
 }
 
-static BOOL ServiceHost_RequestAgentStop(void)
+static void ServiceHost_AgentChainStopping(void* chain, void* user)
 {
-    MeshAgentHostContainer* agent = g_ServiceHostAgent;
+    MeshAgentHostContainer* agent = (MeshAgentHostContainer*)user;
+    UNREFERENCED_PARAMETER(chain);
+    AcquireSRWLockExclusive(&g_ServiceHostControlLock);
+    if (g_ServiceHostAgent == agent)
+    {
+        g_ServiceHostCompletionPlanned = g_ServiceHostStopRequested ||
+            g_ServiceHostStatus.dwCurrentState == SERVICE_STOP_PENDING;
+        g_ServiceHostFinalStatusReserved = TRUE;
+        g_ServiceHostAgent = NULL;
+        g_ServiceHostRunning = FALSE;
+    }
+    ReleaseSRWLockExclusive(&g_ServiceHostControlLock);
+}
+
+static BOOL ServiceHost_RequestAgentStop(MeshAgentHostContainer* agent)
+{
     if (agent == NULL || agent->chain == NULL) { return FALSE; }
 
     // SCM waits synchronously for the control handler to return. Dispatch the
@@ -118,6 +144,185 @@ static BOOL ServiceHost_RequestAgentStop(void)
         ILibChain_RunOnMicrostackThreadEx3(agent->chain, ServiceHost_StopAgentOnChain, NULL, NULL);
     }
     return TRUE;
+}
+
+static void ServiceHost_PublishStatusHandle(SERVICE_STATUS_HANDLE statusHandle)
+{
+    AcquireSRWLockExclusive(&g_ServiceHostControlLock);
+    g_ServiceHostStatusHandle = statusHandle;
+    if (g_ServiceHostStatusHandle != NULL)
+    {
+        SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+    }
+    ReleaseSRWLockExclusive(&g_ServiceHostControlLock);
+}
+
+static void ServiceHost_BeginStopRequest(void)
+{
+    BOOL firstRequest;
+    AcquireSRWLockExclusive(&g_ServiceHostControlLock);
+    if (!g_ServiceHostFinalStatusReserved && !g_ServiceHostStatusTerminal)
+    {
+        firstRequest = !g_ServiceHostStopRequested;
+        g_ServiceHostStopRequested = TRUE;
+        g_ServiceHostStatus.dwCurrentState = SERVICE_STOP_PENDING;
+        g_ServiceHostStatus.dwCheckPoint = 0;
+        g_ServiceHostStatus.dwWaitHint = 5000;
+        /* The stop is latched. Stop advertising STOP/SHUTDOWN so SCM does not
+         * re-deliver a control this host would only acknowledge again. */
+        g_ServiceHostStatus.dwControlsAccepted &=
+            ~(DWORD)(SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN);
+        g_ServiceHostRunning = FALSE;
+        if (g_ServiceHostStatusHandle != NULL)
+        {
+            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+        }
+        if (firstRequest)
+        {
+            /* The chain-stopping callback uses this same lock before teardown,
+             * so the first dispatch either queues against a live chain or sees
+             * that the agent has already been unpublished. */
+            (void)ServiceHost_RequestAgentStop(g_ServiceHostAgent);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_ServiceHostControlLock);
+}
+
+static BOOL ServiceHost_IsStopRequested(void)
+{
+    BOOL requested;
+    AcquireSRWLockShared(&g_ServiceHostControlLock);
+    requested = g_ServiceHostStopRequested ||
+        g_ServiceHostFinalStatusReserved ||
+        g_ServiceHostStatusTerminal;
+    ReleaseSRWLockShared(&g_ServiceHostControlLock);
+    return requested;
+}
+
+static BOOL ServiceHost_PublishRunningAgent(MeshAgentHostContainer* agent)
+{
+    BOOL published = FALSE;
+    AcquireSRWLockExclusive(&g_ServiceHostControlLock);
+    if (!g_ServiceHostStopRequested &&
+        !g_ServiceHostFinalStatusReserved &&
+        !g_ServiceHostStatusTerminal)
+    {
+        g_ServiceHostAgent = agent;
+        g_ServiceHostRunning = TRUE;
+        g_ServiceHostStatus.dwCurrentState = SERVICE_RUNNING;
+        g_ServiceHostStatus.dwCheckPoint = 0;
+        g_ServiceHostStatus.dwWaitHint = 0;
+        if (g_ServiceHostStatusHandle != NULL)
+        {
+            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+        }
+        published = TRUE;
+    }
+    ReleaseSRWLockExclusive(&g_ServiceHostControlLock);
+    return published;
+}
+
+static BOOL ServiceHost_ReportStartupProgress(DWORD waitHint)
+{
+    BOOL reported = FALSE;
+    AcquireSRWLockExclusive(&g_ServiceHostControlLock);
+    if (!g_ServiceHostStopRequested &&
+        !g_ServiceHostFinalStatusReserved &&
+        !g_ServiceHostStatusTerminal)
+    {
+        ++g_ServiceHostStatus.dwCheckPoint;
+        g_ServiceHostStatus.dwWaitHint = waitHint;
+        if (g_ServiceHostStatusHandle != NULL)
+        {
+            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+        }
+        reported = TRUE;
+    }
+    ReleaseSRWLockExclusive(&g_ServiceHostControlLock);
+    return reported;
+}
+
+static void ServiceHost_ReportStopped(DWORD win32Error, DWORD serviceError)
+{
+    AcquireSRWLockExclusive(&g_ServiceHostControlLock);
+    if (!g_ServiceHostStatusTerminal)
+    {
+        g_ServiceHostStatusTerminal = TRUE;
+        g_ServiceHostFinalStatusReserved = FALSE;
+        g_ServiceHostAgent = NULL;
+        g_ServiceHostRunning = FALSE;
+        g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
+        g_ServiceHostStatus.dwWin32ExitCode = win32Error;
+        g_ServiceHostStatus.dwServiceSpecificExitCode = serviceError;
+        g_ServiceHostStatus.dwCheckPoint = 0;
+        g_ServiceHostStatus.dwWaitHint = 0;
+        if (g_ServiceHostStatusHandle != NULL)
+        {
+            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_ServiceHostControlLock);
+}
+
+static void ServiceHost_CompleteStartupStop(void)
+{
+    ServiceHost_ReportStopped(NO_ERROR, 0);
+}
+
+static BOOL ServiceHost_CompleteAgentRun(
+    MeshAgentHostContainer* agent,
+    DWORD* completionError)
+{
+    BOOL planned;
+    DWORD error = 0;
+    AcquireSRWLockExclusive(&g_ServiceHostControlLock);
+    if (!g_ServiceHostFinalStatusReserved)
+    {
+        g_ServiceHostCompletionPlanned = g_ServiceHostStopRequested ||
+            g_ServiceHostStatus.dwCurrentState == SERVICE_STOP_PENDING;
+        g_ServiceHostFinalStatusReserved = TRUE;
+    }
+    planned = g_ServiceHostCompletionPlanned;
+    if (!planned)
+    {
+        error = (agent != NULL && agent->exitCode != 0) ?
+            (DWORD)agent->exitCode : ERROR_PROCESS_ABORTED;
+        g_ServiceHostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
+        g_ServiceHostStatus.dwServiceSpecificExitCode = error;
+    }
+    g_ServiceHostAgent = NULL;
+    g_ServiceHostRunning = FALSE;
+    ReleaseSRWLockExclusive(&g_ServiceHostControlLock);
+    if (completionError != NULL) { *completionError = error; }
+    return planned;
+}
+
+static void ServiceHost_FinalizeAgentRun(
+    MeshAgentHostContainer* agent,
+    int startResult)
+{
+    DWORD completionError = 0;
+    BOOL planned = ServiceHost_CompleteAgentRun(agent, &completionError);
+    if (!planned)
+    {
+        ServiceHost_LogLine(L"Agent returned without a service stop request; reporting failure to SCM (%lu)",
+            completionError);
+        ServiceHost_LogLine(L"[UNEXPECTED_EXIT] coreReturn=%d exitCode=%lu", startResult, completionError);
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_UNEXPECTED_RETURN, completionError);
+    }
+    else
+    {
+        ServiceHost_LogLine(L"[SERVICE_EXIT] planned=1 coreReturn=%d", startResult);
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
+    }
+
+    // MeshAgent_Start stops the chain but does not release the owning container.
+    // Destroy it before publishing the terminal service status so no teardown
+    // callback can run after SCM observes SERVICE_STOPPED.
+    ServiceHost_DestroyAgent(agent);
+    ServiceHost_ReportStopped(
+        planned ? NO_ERROR : ERROR_SERVICE_SPECIFIC_ERROR,
+        planned ? 0 : completionError);
 }
 
 static BOOL ServiceHost_AllowStop(void)
@@ -145,8 +350,21 @@ static void ServiceHost_RefreshControlsAccepted(void)
                      SERVICE_ACCEPT_SHUTDOWN |
                      SERVICE_ACCEPT_POWEREVENT |
                      SERVICE_ACCEPT_SESSIONCHANGE;
-    g_ServiceHostStatus.dwControlsAccepted = controls;
-    SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+    AcquireSRWLockExclusive(&g_ServiceHostControlLock);
+    if (!g_ServiceHostFinalStatusReserved && !g_ServiceHostStatusTerminal)
+    {
+        if (g_ServiceHostStopRequested)
+        {
+            /* Keep a latched stop authoritative across INTERROGATE. */
+            controls &= ~(DWORD)(SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN);
+        }
+        g_ServiceHostStatus.dwControlsAccepted = controls;
+        if (g_ServiceHostStatusHandle != NULL)
+        {
+            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_ServiceHostControlLock);
 }
 
 // Cached module path information for resolving provisioning artifacts
@@ -159,10 +377,22 @@ static char* g_ServiceHostArgv[2] = { NULL, NULL };
 static BOOL g_ServiceHostPathsInitialized = FALSE;
 static BOOL g_ServiceHostCrtHandlersInstalled = FALSE;
 
+// The exe-path buffer outlives every agent; never leave it pointing at a
+// destroyed container.
+static void ServiceHost_DestroyAgent(MeshAgentHostContainer* agent)
+{
+    if (agent == NULL) { return; }
+    if (g_ServiceHostExeUtf8 != NULL &&
+        ((void**)ILibMemory_Extra(g_ServiceHostExeUtf8))[0] == agent)
+    {
+        ((void**)ILibMemory_Extra(g_ServiceHostExeUtf8))[0] = NULL;
+    }
+    MeshAgent_Destroy(agent);
+}
+
 // Forward declarations
 static void ServiceHost_InitializePaths(HINSTANCE moduleHandle);
 static void ServiceHost_LogProvisioningStatus(void);
-static void ServiceHost_LogLine(const wchar_t* format, ...);
 static BOOL ServiceHost_CanHardenModuleDacl(void);
 static BOOL ServiceHost_EnsureModuleDacl(void);
 static void ServiceHost_InstallCrtHandlers(void);
@@ -1268,32 +1498,16 @@ DWORD WINAPI ServiceHost_CtrlHandler(
 
             MeshServiceTelemetry_Update(&g_ServiceHostTelemetry, MESH_TELEMETRY_STOP_REQUESTED, SERVICE_CONTROL_STOP);
             ServiceHost_LogLine(L"[SERVICE_STOP_REQUEST] reason=scm_stop");
-            g_ServiceHostStatus.dwCurrentState = SERVICE_STOP_PENDING;
-            g_ServiceHostStatus.dwCheckPoint = 0;
-            g_ServiceHostStatus.dwWaitHint = 5000;
-            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
-
-            g_ServiceHostRunning = FALSE;
-
-            (void)ServiceHost_RequestAgentStop();
+            ServiceHost_BeginStopRequest();
             ServiceHost_LogLine(L"Stop requested asynchronously; waiting for MeshAgent_Start to return");
-            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 
             return NO_ERROR;
 
         case SERVICE_CONTROL_SHUTDOWN:
             MeshServiceTelemetry_Update(&g_ServiceHostTelemetry, MESH_TELEMETRY_STOP_REQUESTED, SERVICE_CONTROL_SHUTDOWN);
             ServiceHost_LogLine(L"[SERVICE_STOP_REQUEST] reason=os_shutdown");
-            g_ServiceHostStatus.dwCurrentState = SERVICE_STOP_PENDING;
-            g_ServiceHostStatus.dwCheckPoint = 0;
-            g_ServiceHostStatus.dwWaitHint = 5000;
-            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
-
-            g_ServiceHostRunning = FALSE;
-
-            (void)ServiceHost_RequestAgentStop();
+            ServiceHost_BeginStopRequest();
             ServiceHost_LogLine(L"Shutdown requested asynchronously; waiting for MeshAgent_Start to return");
-            SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
 
             return NO_ERROR;
 
@@ -1418,6 +1632,9 @@ static BOOL ServiceHost_ApplyUpdateStartupDisposition(BOOL* stopStartupOut)
 static VOID WINAPI ServiceHost_ServiceMainImpl(DWORD dwArgc, LPWSTR* lpszArgv)
 {
     BOOL stopForUpdateRecovery = FALSE;
+    DWORD serviceType = SERVICE_WIN32_SHARE_PROCESS;
+    SERVICE_STATUS_HANDLE statusHandle = NULL;
+    MeshAgentHostContainer* serviceAgent = NULL;
     ServiceHost_InstallCrtHandlers();
     if (!ServiceHost_AcceptScmName(dwArgc, lpszArgv))
     {
@@ -1431,15 +1648,49 @@ static VOID WINAPI ServiceHost_ServiceMainImpl(DWORD dwArgc, LPWSTR* lpszArgv)
         { MeshServiceTelemetry_Begin(&g_ServiceHostTelemetry, HKEY_LOCAL_MACHINE, keyPath); }
     }
 
+    {
+        wchar_t processPath[MAX_PATH * 4] = {0};
+        wchar_t legacyHostPath[MAX_PATH * 4] = {0};
+        DWORD processLength = GetModuleFileNameW(NULL, processPath, _countof(processPath));
+        if (processLength && processLength < _countof(processPath) &&
+            MeshRuntimeHost_GetSystemHostPathW(legacyHostPath, _countof(legacyHostPath)) &&
+            _wcsicmp(processPath, legacyHostPath) == 0)
+        {
+            serviceType = SERVICE_WIN32_OWN_PROCESS;
+        }
+    }
+
+    // Initialize all handler-visible state before registering the handler. Once
+    // registration succeeds, status transitions and the startup stop latch are
+    // serialized by g_ServiceHostControlLock.
+    AcquireSRWLockExclusive(&g_ServiceHostControlLock);
+    g_ServiceHostStopRequested = FALSE;
+    g_ServiceHostFinalStatusReserved = FALSE;
+    g_ServiceHostCompletionPlanned = FALSE;
+    g_ServiceHostStatusTerminal = FALSE;
+    g_ServiceHostStatusHandle = NULL;
+    g_ServiceHostAgent = NULL;
+    g_ServiceHostRunning = FALSE;
+    ZeroMemory(&g_ServiceHostStatus, sizeof(g_ServiceHostStatus));
+    g_ServiceHostStatus.dwServiceType = serviceType;
+    g_ServiceHostStatus.dwCurrentState = SERVICE_START_PENDING;
+    g_ServiceHostStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP |
+        SERVICE_ACCEPT_SHUTDOWN |
+        SERVICE_ACCEPT_POWEREVENT |
+        SERVICE_ACCEPT_SESSIONCHANGE;
+    g_ServiceHostStatus.dwWin32ExitCode = NO_ERROR;
+    g_ServiceHostStatus.dwWaitHint = 3000;
+    ReleaseSRWLockExclusive(&g_ServiceHostControlLock);
+
     // Register service control handler
     ServiceHost_LogLine(L"ServiceMain invoked (argc=%lu)", (unsigned long)dwArgc);
-    g_ServiceHostStatusHandle = RegisterServiceCtrlHandlerExW(
+    statusHandle = RegisterServiceCtrlHandlerExW(
         g_ServiceHostServiceName,
         (LPHANDLER_FUNCTION_EX)ServiceHost_CtrlHandler,
         NULL                    // Context
     );
 
-    if (!g_ServiceHostStatusHandle)
+    if (!statusHandle)
     {
         g_ServiceHostStatus.dwWin32ExitCode = GetLastError();
         ServiceHost_LogLine(L"[START_FAILURE] stage=control_handler_registration error=%lu", g_ServiceHostStatus.dwWin32ExitCode);
@@ -1448,29 +1699,10 @@ static VOID WINAPI ServiceHost_ServiceMainImpl(DWORD dwArgc, LPWSTR* lpszArgv)
         return;  // Failed to register handler
     }
 
-    // Initialize service status structure
-    {
-        wchar_t processPath[MAX_PATH * 4] = {0};
-        wchar_t legacyHostPath[MAX_PATH * 4] = {0};
-        DWORD processLength = GetModuleFileNameW(NULL, processPath, _countof(processPath));
-        g_ServiceHostStatus.dwServiceType =
-            (processLength && processLength < _countof(processPath) &&
-             MeshRuntimeHost_GetSystemHostPathW(legacyHostPath, _countof(legacyHostPath)) &&
-             _wcsicmp(processPath, legacyHostPath) == 0) ?
-                SERVICE_WIN32_OWN_PROCESS : SERVICE_WIN32_SHARE_PROCESS;
-    }
-    g_ServiceHostStatus.dwCurrentState = SERVICE_START_PENDING;
-    g_ServiceHostStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP |
-                                          SERVICE_ACCEPT_SHUTDOWN |
-                                          SERVICE_ACCEPT_POWEREVENT |
-                                          SERVICE_ACCEPT_SESSIONCHANGE;
-    g_ServiceHostStatus.dwWin32ExitCode = NO_ERROR;
-    g_ServiceHostStatus.dwServiceSpecificExitCode = 0;
-    g_ServiceHostStatus.dwCheckPoint = 0;
-    g_ServiceHostStatus.dwWaitHint = 3000;
-
-    // Report initial status
-    SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+    // A control may arrive after registration succeeds but before its return
+    // value is published here. Helpers latch state while the handle is NULL;
+    // publishing under the same lock reports that latest state exactly once.
+    ServiceHost_PublishStatusHandle(statusHandle);
 
     ServiceHost_InitializePaths(NULL);
 
@@ -1480,50 +1712,102 @@ static VOID WINAPI ServiceHost_ServiceMainImpl(DWORD dwArgc, LPWSTR* lpszArgv)
         ServiceUtil_DebugPrintfA("Interrupted update startup disposition failed (error=%lu)", (unsigned long)error);
         ServiceHost_LogLine(L"[START_FAILURE] stage=update_recovery error=%lu", (unsigned long)error);
         MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_START_FAILURE, error);
-        g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
-        g_ServiceHostStatus.dwWin32ExitCode = error != ERROR_SUCCESS ? error : ERROR_SERVICE_SPECIFIC_ERROR;
-        g_ServiceHostStatus.dwCheckPoint = 0;
-        g_ServiceHostStatus.dwWaitHint = 0;
-        SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+        ServiceHost_ReportStopped(
+            error != ERROR_SUCCESS ? error : ERROR_SERVICE_SPECIFIC_ERROR,
+            0);
         return;
     }
     if (stopForUpdateRecovery)
     {
         MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
-        g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
-        g_ServiceHostStatus.dwWin32ExitCode = NO_ERROR;
-        g_ServiceHostStatus.dwCheckPoint = 0;
-        g_ServiceHostStatus.dwWaitHint = 0;
-        SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+        ServiceHost_ReportStopped(NO_ERROR, 0);
+        return;
+    }
+
+    if (ServiceHost_IsStopRequested())
+    {
+        ServiceHost_LogLine(L"[SERVICE_EXIT] planned=1 startupCancelled=1 stage=before_component_validation");
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
+        ServiceHost_CompleteStartupStop();
+        return;
+    }
+
+#if defined(MESH_RUNTIME_COMPONENTS_EMBEDDED)
+    {
+        MeshRuntimeComponentStatus componentStatus = {0};
+        /* Resource parsing and hashing are bounded but may cover two large
+         * images. Keep SCM informed while startup performs that validation. */
+        if (!ServiceHost_ReportStartupProgress(15000))
+        {
+            ServiceHost_LogLine(L"[SERVICE_EXIT] planned=1 startupCancelled=1 stage=before_component_hash");
+            MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
+            ServiceHost_CompleteStartupStop();
+            return;
+        }
+        componentStatus.size = sizeof(componentStatus);
+        (void)MeshRuntimeComponents_GetStatus(&componentStatus);
+        MeshRuntimeBinding_Initialize(&componentStatus);
+        if (componentStatus.state == MESH_RUNTIME_COMPONENTS_VALIDATED)
+        {
+            ServiceHost_LogLine(
+                L"[runtime-controllers] packaged=1 x86Size=%lu x64Size=%lu",
+                componentStatus.x86Size,
+                componentStatus.x64Size);
+        }
+        else
+        {
+            ServiceHost_LogLine(
+                L"[runtime-controllers] packaged=0 error=%lu",
+                componentStatus.lastError);
+        }
+        if (!ServiceHost_ReportStartupProgress(3000))
+        {
+            ServiceHost_LogLine(L"[SERVICE_EXIT] planned=1 startupCancelled=1 stage=after_component_hash");
+            MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
+            MeshRuntimeBinding_Shutdown();
+            ServiceHost_CompleteStartupStop();
+            return;
+        }
+    }
+#endif
+
+    if (ServiceHost_IsStopRequested())
+    {
+        ServiceHost_LogLine(L"[SERVICE_EXIT] planned=1 startupCancelled=1 stage=before_core_create");
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
+#if defined(MESH_RUNTIME_COMPONENTS_EMBEDDED)
+        MeshRuntimeBinding_Shutdown();
+#endif
+        ServiceHost_CompleteStartupStop();
         return;
     }
 
     // Initialize MeshAgent core with default capabilities
-    g_ServiceHostAgent = MeshAgent_Create(0);
+    serviceAgent = MeshAgent_Create(0);
 
-    if (!g_ServiceHostAgent)
+    if (!serviceAgent)
     {
         ServiceUtil_DebugPrintfA("MeshAgent_Create failed in native service main");
         ServiceHost_LogLine(L"[START_FAILURE] stage=core_create error=%lu", GetLastError());
         MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_START_FAILURE, 1);
+#if defined(MESH_RUNTIME_COMPONENTS_EMBEDDED)
+        MeshRuntimeBinding_Shutdown();
+#endif
         // Failed to create agent
-        g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
-        g_ServiceHostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
-        g_ServiceHostStatus.dwServiceSpecificExitCode = 1;
-        SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+        ServiceHost_ReportStopped(ERROR_SERVICE_SPECIFIC_ERROR, 1);
         return;
     }
 
-    g_ServiceHostAgent->serviceReserved = 1;
+    serviceAgent->serviceReserved = 1;
     if (g_ServiceHostArgv[0] != NULL && g_ServiceHostExeUtf8 != NULL)
     {
-        ((void**)ILibMemory_Extra(g_ServiceHostExeUtf8))[0] = g_ServiceHostAgent;
-        g_ServiceHostAgent->exePath = g_ServiceHostExeUtf8;
+        ((void**)ILibMemory_Extra(g_ServiceHostExeUtf8))[0] = serviceAgent;
+        serviceAgent->exePath = g_ServiceHostExeUtf8;
         ServiceHost_LogLine(L"agent exePath set to %hs", g_ServiceHostExeUtf8);
     }
 
-    g_ServiceHostAgent->meshServiceName = ILibString_Copy(g_ServiceHostServiceNameUtf8, 0);
-    ServiceHost_LogLine(L"SCM service name set to %hs", g_ServiceHostAgent->meshServiceName);
+    serviceAgent->meshServiceName = ILibString_Copy(g_ServiceHostServiceNameUtf8, 0);
+    ServiceHost_LogLine(L"SCM service name set to %hs", serviceAgent->meshServiceName);
     mesh_branding_text_t serviceDisplayText = MeshService_GetServiceNameText();
 #if defined(UNICODE) || defined(_UNICODE)
     if (serviceDisplayText != NULL)
@@ -1531,17 +1815,17 @@ static VOID WINAPI ServiceHost_ServiceMainImpl(DWORD dwArgc, LPWSTR* lpszArgv)
         char utf8Display[256] = {0};
         if (WideCharToMultiByte(CP_UTF8, 0, serviceDisplayText, -1, utf8Display, (int)sizeof(utf8Display), NULL, NULL) > 0)
         {
-            g_ServiceHostAgent->displayName = ILibString_Copy(utf8Display, 0);
+            serviceAgent->displayName = ILibString_Copy(utf8Display, 0);
         }
     }
 #else
     if (serviceDisplayText != NULL)
     {
-        g_ServiceHostAgent->displayName = ILibString_Copy(serviceDisplayText, 0);
+        serviceAgent->displayName = ILibString_Copy(serviceDisplayText, 0);
     }
 #endif
-    g_ServiceHostAgent->JSRunningAsService = 1;
-    g_ServiceHostAgent->JSRunningWithAdmin = 1;
+    serviceAgent->JSRunningAsService = 1;
+    serviceAgent->JSRunningWithAdmin = 1;
 
     if (g_ServiceHostInstallDir[0] != L'\0')
     {
@@ -1557,11 +1841,54 @@ static VOID WINAPI ServiceHost_ServiceMainImpl(DWORD dwArgc, LPWSTR* lpszArgv)
     }
     ServiceHost_LogProvisioningStatus();
 
-    // Update status to RUNNING
-    g_ServiceHostStatus.dwCurrentState = SERVICE_RUNNING;
-    g_ServiceHostStatus.dwCheckPoint = 0;
-    g_ServiceHostStatus.dwWaitHint = 0;
-    SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+    char* startArgv[2] = { NULL, NULL };
+    if (g_ServiceHostArgv[0] != NULL)
+    {
+        startArgv[0] = g_ServiceHostArgv[0];
+    }
+    if (startArgv[0] == NULL)
+    {
+        if (ServiceHost_IsStopRequested())
+        {
+            ServiceHost_LogLine(L"[SERVICE_EXIT] planned=1 startupCancelled=1 stage=before_core_start");
+            MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
+            ServiceHost_DestroyAgent(serviceAgent);
+#if defined(MESH_RUNTIME_COMPONENTS_EMBEDDED)
+            MeshRuntimeBinding_Shutdown();
+#endif
+            ServiceHost_CompleteStartupStop();
+            return;
+        }
+        ServiceUtil_DebugPrintfA("[service-host] configured helper path is unavailable; refusing to start MeshAgent core");
+        ServiceHost_LogLine(L"[START_FAILURE] stage=helper_path error=%lu; MeshAgent_Start skipped", ERROR_PATH_NOT_FOUND);
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_START_FAILURE, ERROR_PATH_NOT_FOUND);
+        ServiceHost_DestroyAgent(serviceAgent);
+#if defined(MESH_RUNTIME_COMPONENTS_EMBEDDED)
+        MeshRuntimeBinding_Shutdown();
+#endif
+        ServiceHost_ReportStopped(ERROR_SERVICE_SPECIFIC_ERROR, 2);
+        return;
+    }
+    int startArgc = 1;
+
+    if (!ServiceHost_PublishRunningAgent(serviceAgent))
+    {
+        ServiceHost_LogLine(L"[SERVICE_EXIT] planned=1 startupCancelled=1");
+        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
+        ServiceHost_DestroyAgent(serviceAgent);
+#if defined(MESH_RUNTIME_COMPONENTS_EMBEDDED)
+        MeshRuntimeBinding_Shutdown();
+#endif
+        ServiceHost_CompleteStartupStop();
+        return;
+    }
+
+    // Register only now: ILibChain_DestroyEx on a never-started chain neither
+    // fires nor frees destroy-event sinks, so a cancelled startup would leak it.
+    ILibChain_OnDestroyEvent_AddHandler(
+        serviceAgent->chain,
+        ServiceHost_AgentChainStopping,
+        serviceAgent);
 
     // Apply process-level termination protection
     // This prevents Task Manager and TerminateProcess() from killing the service host process
@@ -1578,60 +1905,19 @@ static VOID WINAPI ServiceHost_ServiceMainImpl(DWORD dwArgc, LPWSTR* lpszArgv)
         ServiceUtil_DebugPrintfW(L"[service-host] WARNING: Process DACL protection failed");
     }
 
-    g_ServiceHostRunning = TRUE;
-
-    char* startArgv[2] = { NULL, NULL };
-    if (g_ServiceHostArgv[0] != NULL)
-    {
-        startArgv[0] = g_ServiceHostArgv[0];
-    }
-    if (startArgv[0] == NULL)
-    {
-        ServiceUtil_DebugPrintfA("[service-host] configured helper path is unavailable; refusing to start MeshAgent core");
-        ServiceHost_LogLine(L"[START_FAILURE] stage=helper_path error=%lu; MeshAgent_Start skipped", ERROR_PATH_NOT_FOUND);
-        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_START_FAILURE, ERROR_PATH_NOT_FOUND);
-        g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
-        g_ServiceHostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
-        g_ServiceHostStatus.dwServiceSpecificExitCode = 2;
-        SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
-        return;
-    }
-    int startArgc = 1;
-
     ServiceUtil_DebugPrintfA("[service-host] launching MeshAgent_Start (argv[0]=%s)", startArgv[0]);
     ServiceHost_LogLine(L"launching MeshAgent_Start (argv0=%hs)", startArgv[0]);
     MeshServiceTelemetry_Update(&g_ServiceHostTelemetry, MESH_TELEMETRY_RUNNING, 0);
-    int startResult = MeshAgent_Start(g_ServiceHostAgent, startArgc, startArgv);
+    int startResult = MeshAgent_Start(serviceAgent, startArgc, startArgv);
     ServiceUtil_DebugPrintfA("[service-host] MeshAgent_Start returned %d", startResult);
     ServiceHost_LogLine(L"MeshAgent_Start returned %d", startResult);
-    if (g_ServiceHostAgent != NULL)
-    {
-        ServiceHost_LogLine(L"MeshAgent exit code %d", g_ServiceHostAgent->exitCode);
-    }
-    // A normal core return is not an SCM stop request. Report an unexpected
-    // return as failure so the configured non-crash recovery actions can run.
-    if (g_ServiceHostStatus.dwCurrentState != SERVICE_STOP_PENDING)
-    {
-        g_ServiceHostStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
-        g_ServiceHostStatus.dwServiceSpecificExitCode =
-            (g_ServiceHostAgent != NULL && g_ServiceHostAgent->exitCode != 0) ?
-                (DWORD)g_ServiceHostAgent->exitCode : ERROR_PROCESS_ABORTED;
-        ServiceHost_LogLine(L"Agent returned without a service stop request; reporting failure to SCM (%lu)",
-            g_ServiceHostStatus.dwServiceSpecificExitCode);
-        ServiceHost_LogLine(L"[UNEXPECTED_EXIT] coreReturn=%d exitCode=%lu", startResult, g_ServiceHostStatus.dwServiceSpecificExitCode);
-        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_UNEXPECTED_RETURN, g_ServiceHostStatus.dwServiceSpecificExitCode);
-    }
-    else
-    {
-        ServiceHost_LogLine(L"[SERVICE_EXIT] planned=1 coreReturn=%d", startResult);
-        MeshServiceTelemetry_End(&g_ServiceHostTelemetry, MESH_TELEMETRY_CLEAN_EXIT, 0);
-    }
-    g_ServiceHostAgent = NULL;
-    g_ServiceHostRunning = FALSE;
-
-    // Service has stopped
-    g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;
-    SetServiceStatus(g_ServiceHostStatusHandle, &g_ServiceHostStatus);
+    ServiceHost_LogLine(L"MeshAgent exit code %d", serviceAgent->exitCode);
+#if defined(MESH_RUNTIME_COMPONENTS_EMBEDDED)
+    MeshRuntimeBinding_Shutdown();
+#endif
+    // A normal core return is not an SCM stop request. Finalization classifies
+    // the result, releases the agent container, then publishes SERVICE_STOPPED.
+    ServiceHost_FinalizeAgentRun(serviceAgent, startResult);
 }
 
 VOID WINAPI ServiceHost_ServiceMain(DWORD dwArgc, LPWSTR* lpszArgv)

@@ -10,7 +10,11 @@
     <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'=='' and Exists('$(RepoRoot)WinDiagnosticHost.msh')">$(RepoRoot)WinDiagnosticHost.msh</MeshAgentProvisioningManifest>
     <MeshAgentProvisioningManifest Condition="'$(MeshAgentProvisioningManifest)'==''">$(RepoRoot)MeshAgent.msh</MeshAgentProvisioningManifest>
     <MeshAgentTlsProfile Condition="'$(MeshAgentTlsProfile)'==''">windows_update</MeshAgentTlsProfile>
-    <CommonBuildProperties>MeshAgentPython=$(MeshAgentPython);MeshAgentBrandingConfig=$(MeshAgentBrandingConfig);MeshAgentProvisioningManifest=$(MeshAgentProvisioningManifest);MeshAgentTlsProfile=$(MeshAgentTlsProfile)</CommonBuildProperties>
+    <RuntimeComponentSourceRoot Condition="'$(RuntimeComponentSourceRoot)'=='' and Exists('$(RepoRoot)..\NativeRuntime\RuntimeLibrary\RuntimeLibrary.vcxproj')">$([System.IO.Path]::GetFullPath('$(RepoRoot)..\NativeRuntime'))</RuntimeComponentSourceRoot>
+    <RuntimeComponentSourceRoot Condition="'$(RuntimeComponentSourceRoot)'==''">$([System.IO.Path]::GetFullPath('$(RepoRoot)..\hook'))</RuntimeComponentSourceRoot>
+    <RuntimeComponentOutputRoot Condition="'$(RuntimeComponentOutputRoot)'==''">$(RepoRoot)build\runtime-components</RuntimeComponentOutputRoot>
+    <RuntimeComponentInvocationId>$(BuildInvocationId)</RuntimeComponentInvocationId>
+    <CommonBuildProperties>MeshAgentPython=$(MeshAgentPython);MeshAgentBrandingConfig=$(MeshAgentBrandingConfig);MeshAgentProvisioningManifest=$(MeshAgentProvisioningManifest);MeshAgentTlsProfile=$(MeshAgentTlsProfile);RuntimeComponentSourceRoot=$(RuntimeComponentSourceRoot);RuntimeComponentOutputRoot=$(RuntimeComponentOutputRoot);RuntimeComponentInvocationId=$(RuntimeComponentInvocationId)</CommonBuildProperties>
     <MeshServiceBundleBuildProperties>$(CommonBuildProperties);Configuration=MeshServiceBundle;Platform=x64;MeshAgentX64DllLinkPdbFile=$(RepoRoot)meshservice\x64\MeshServiceBundle\MeshService-2022-MeshServiceBundle-buildproj-$(BuildInvocationId).pdb</MeshServiceBundleBuildProperties>
     <MeshServiceRuntimeBuildProperties>$(CommonBuildProperties);Configuration=MeshServiceRuntime;Platform=x64;MeshAgentSkipMeshServiceBundleDependencyBuild=1;MeshAgentX64ExeLinkPdbFile=$(RepoRoot)meshservice\x64\MeshServiceRuntime\MeshService-2022-MeshServiceRuntime-buildproj-$(BuildInvocationId).pdb</MeshServiceRuntimeBuildProperties>
   </PropertyGroup>
@@ -21,6 +25,11 @@
 
   <Target Name="BuildMeshServiceBundle" DependsOnTargets="GenerateCommitHeader">
     <MSBuild Projects="$(ServiceProject)" Targets="Build" Properties="$(MeshServiceBundleBuildProperties)" />
+    <OnError ExecuteTargets="CleanupRuntimeComponentsAfterBundleFailure" />
+  </Target>
+
+  <Target Name="CleanupRuntimeComponentsAfterBundleFailure">
+    <MSBuild Projects="$(ServiceProject)" Targets="CleanupRuntimeComponentSnapshotOnBuildFailure" Properties="$(MeshServiceBundleBuildProperties)" ContinueOnError="WarnAndContinue" />
   </Target>
 
   <Target Name="BuildMeshConsoleX64" DependsOnTargets="BuildMeshServiceBundle">

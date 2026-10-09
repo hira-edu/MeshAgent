@@ -348,7 +348,7 @@ static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVI
         !_wcsicmp(image, L"\"%SystemRoot%\\System32\\svchost.exe\" -k netsvcs -p");
 }
 
-static BOOL ServiceBinding_SharedPayloadSupported(const ServiceBindingSnapshot* snapshot, const wchar_t* installedDll)
+static BOOL ServiceBinding_SharedImageSupported(const ServiceBindingSnapshot* snapshot, const wchar_t* installedDll)
 {
     const ServiceBindingValue* dll = &snapshot->values[9];
     const ServiceBindingValue* entry = &snapshot->values[10];
@@ -473,8 +473,8 @@ static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* name, const
         HKEY target = i < SERVICE_BINDING_PARAMETER_FIRST ? key : parameters;
         if (target && !ServiceBinding_ReadValue(target, ServiceBinding_ValueNames[i], &snapshot->values[i])) { goto done; }
     }
-    failure = L"shared-payload";
-    if (!ServiceBinding_SharedPayloadSupported(snapshot, installedDll)) { goto done; }
+    failure = L"shared-image";
+    if (!ServiceBinding_SharedImageSupported(snapshot, installedDll)) { goto done; }
     failure = L"group-membership";
     {
         wchar_t serviceGroup[64] = {0};

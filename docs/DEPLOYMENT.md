@@ -13,6 +13,36 @@ Build the package on Windows using the ordered build entry point:
 msbuild .\MeshAgent.Build.proj /m /nologo /verbosity:minimal
 ```
 
+The `MeshServiceBundle` configuration embeds the x86 and x64 persistent
+`RuntimeLoader` controller executables built from a sibling checkout. Each
+controller contains and owns its architecture-specific runtime image. The build looks for
+`..\NativeRuntime\RuntimeLibrary\RuntimeLibrary.vcxproj` and then `..\hook`
+relative to the repository root, and fails with a message naming the missing
+project when neither exists. Set the MSBuild property
+`RuntimeComponentSourceRoot` when that checkout lives elsewhere. Passing
+`MeshAgentSkipRuntimeComponentBuild=1` builds the service DLL without the
+components; the service then logs `[runtime-components] available=0` at start,
+and such a DLL is not a release candidate. Each invocation copies the two native
+projects into `build\runtime-components\<invocation id>`, uses distinct
+library/loader intermediate and output directories per architecture, stages the
+loader's resource inputs inside that copy, and removes the snapshot after the
+build.
+
+At service startup MeshAgent validates, extracts beside the installed service,
+launches and supervises both controllers with `--controller`. It does not select
+targets or own runtime policy/state. Authenticated `nativeRuntime` requests are
+limited to `getStatus`, `load`, and `unload`; MeshAgent translates them to the
+controller's fixed 32-byte local named-pipe request and returns each controller's
+validated 64-byte response without inventing target state. `load` and `unload`
+are asynchronous acknowledgements, so callers poll `getStatus` while the
+controller reports its pending flag. Each architecture relay has a one-second
+connect/write/read deadline. Timed-out overlapped I/O is cancelled and joined
+before its handle and buffers are released. The endpoints are queried serially;
+controller process startup and OS cancellation-completion scheduling are outside
+that I/O deadline, so it is not an absolute two-second wall-clock guarantee.
+Older/non-bundle agents may not answer this
+action, which consumers must treat as unavailable.
+
 Configure `MESHCENTRAL_SERVER` for the target host and make sure the selected
 SSH host and user can connect. The script defaults to SSH host alias
 `meshcentral` and user `root`; `MESHCENTRAL_SSH_HOST`, `MESHCENTRAL_USER`, and

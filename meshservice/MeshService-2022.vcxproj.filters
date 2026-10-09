@@ -39,6 +39,17 @@
     <ClCompile Include="service_bundle.c" />
     <ClCompile Include="ServiceMain.c" />
     <ClCompile Include="runtime_host_contract.c" />
+    <ClCompile Include="runtime_components.c" />
+    <ClCompile Include="runtime_controller.c" />
+    <ClCompile Include="..\meshcore\runtime_control_binding.c">
+      <Filter>Meshcore</Filter>
+    </ClCompile>
+    <ClInclude Include="runtime_component_resources.h" />
+    <ClInclude Include="runtime_components.h" />
+    <ClInclude Include="runtime_controller.h" />
+    <ClInclude Include="..\meshcore\runtime_control_binding.h">
+      <Filter>Meshcore</Filter>
+    </ClInclude>
     <ClCompile Include="..\microscript\duktape.c">
       <Filter>Microscript</Filter>
     </ClCompile>

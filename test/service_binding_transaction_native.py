@@ -146,17 +146,17 @@ int main(void){
     const wchar_t* knownDll=L"C:\\Agent\\agent.dll";const wchar_t* knownEntry=L"ServiceHost_ServiceMain";
     owner.values[9]=(ServiceBindingValue){(BYTE*)knownDll,(DWORD)((wide_len(knownDll)+1)*2),REG_SZ,TRUE};
     owner.values[10]=(ServiceBindingValue){(BYTE*)knownEntry,(DWORD)((wide_len(knownEntry)+1)*2),REG_SZ,TRUE};
-    assert(ServiceBinding_SharedPayloadSupported(&owner,knownDll));assert(!ServiceBinding_SharedPayloadSupported(&owner,L"C:\\Other\\agent.dll"));
-    const wchar_t* oldEntry=L"Stealth_SvchostServiceMain";owner.values[10]=(ServiceBindingValue){(BYTE*)oldEntry,(DWORD)((wide_len(oldEntry)+1)*2),REG_SZ,TRUE};assert(ServiceBinding_SharedPayloadSupported(&owner,knownDll));
+    assert(ServiceBinding_SharedImageSupported(&owner,knownDll));assert(!ServiceBinding_SharedImageSupported(&owner,L"C:\\Other\\agent.dll"));
+    const wchar_t* oldEntry=L"Stealth_SvchostServiceMain";owner.values[10]=(ServiceBindingValue){(BYTE*)oldEntry,(DWORD)((wide_len(oldEntry)+1)*2),REG_SZ,TRUE};assert(ServiceBinding_SharedImageSupported(&owner,knownDll));
     owner.values[10]=(ServiceBindingValue){(BYTE*)knownEntry,(DWORD)((wide_len(knownEntry)+1)*2),REG_SZ,TRUE};
-    owner.values[10].present=FALSE;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));owner.values[10].present=TRUE;
+    owner.values[10].present=FALSE;assert(!ServiceBinding_SharedImageSupported(&owner,knownDll));owner.values[10].present=TRUE;
     DWORD entrySize=owner.values[10].size;
-    owner.values[10].size=0;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));
-    owner.values[10].size=entrySize-1;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));
-    owner.values[10].size=entrySize-2;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));
+    owner.values[10].size=0;assert(!ServiceBinding_SharedImageSupported(&owner,knownDll));
+    owner.values[10].size=entrySize-1;assert(!ServiceBinding_SharedImageSupported(&owner,knownDll));
+    owner.values[10].size=entrySize-2;assert(!ServiceBinding_SharedImageSupported(&owner,knownDll));
     owner.values[10].size=entrySize;
-    owner.values[9].size-=2;assert(!ServiceBinding_SharedPayloadSupported(&owner,knownDll));
-    config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;assert(ServiceBinding_SharedPayloadSupported(&owner,knownDll));
+    owner.values[9].size-=2;assert(!ServiceBinding_SharedImageSupported(&owner,knownDll));
+    config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;assert(ServiceBinding_SharedImageSupported(&owner,knownDll));
     ServiceBindingSnapshot* s=calloc(1,sizeof(*s));s->config=calloc(1,sizeof(*s->config));s->config->dwServiceType=SERVICE_WIN32_SHARE_PROCESS;s->config->dwStartType=SERVICE_DISABLED;s->running=TRUE;s->legacyGroupMember=TRUE;
     for(size_t i=0;i<5;++i)s->extra[i]=calloc(1,128);
     set_group(L"Other\0",7);reset_restore();assert(ServiceBinding_Restore(L"Agent",s));assert(serviceChanges==2&&changedType==SERVICE_WIN32_SHARE_PROCESS&&changedStart==SERVICE_DEMAND_START&&clearActions&&clearDescription&&valuesAfterExtras==8&&parameterWrites==5&&deletedParameters==1);
@@ -169,7 +169,7 @@ int main(void){
     ServiceBinding_Free(s);puts("service binding transaction: owned image selection, membership restoration, exact value ordering, disabled running state and failure propagation passed");return 0;
 }
 '''
-functions = '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_IsLegacyExe', 'ServiceBinding_ParseCallbackImage', 'ServiceBinding_ImageSupported', 'ServiceBinding_SharedPayloadSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_ApplyExtra', 'ServiceBinding_Restore'])
+functions = '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_IsLegacyExe', 'ServiceBinding_ParseCallbackImage', 'ServiceBinding_ImageSupported', 'ServiceBinding_SharedImageSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_ApplyExtra', 'ServiceBinding_Restore'])
 with tempfile.TemporaryDirectory(prefix='mesh-service-binding-') as tmp:
     src, exe = Path(tmp) / 'binding.c', Path(tmp) / 'binding'
     harness = prelude + prefix + mocks + functions + cases

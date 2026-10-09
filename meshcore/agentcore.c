@@ -38,6 +38,9 @@ limitations under the License.
 #include <shellscalingapi.h>
 #include <process.h>
 #include "native_file_actions.h"
+#if defined(MESH_RUNTIME_COMPONENTS_EMBEDDED)
+#include "runtime_control_binding.h"
+#endif
 #include "diagnostic_log.h"
 #include "../meshservice/runtime_core.h"
 #pragma comment(lib, "winhttp.lib")
@@ -4522,6 +4525,9 @@ void ILibDuktape_MeshAgent_PUSH(duk_context *ctx, void *chain)
 #ifdef WIN32
         ILibDuktape_CreateInstanceMethod(ctx, "fileAction", ILibDuktape_MeshAgent_FileAction, 3);
 #endif
+#if defined(WIN32) && defined(MESH_RUNTIME_COMPONENTS_EMBEDDED)
+        ILibDuktape_CreateInstanceMethod(ctx, "nativeRuntime", MeshRuntimeBinding_Execute, 1);
+#endif
 		ILibDuktape_CreateReadonlyProperty_int(ctx, "ARCHID", MESH_AGENTID);
 	#if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 		ILibDuktape_CreateInstanceMethod(ctx, "activateNativeUpdate", ILibDuktape_MeshAgent_ActivateNativeUpdate, 4);
@@ -6099,6 +6105,30 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 					{
 						ILIBLOGMESSAGEX("MeshServer_ProcessCommand: JSON action=%s len=%d", action, cmdLen);
 					}
+#if defined(WIN32) && defined(MESH_RUNTIME_COMPONENTS_EMBEDDED) && !defined(MICROSTACK_NOTLS)
+                    if (strcmp(action, "nativeRuntime") == 0)
+                    {
+                        /* This path is reached only after server certificate
+                         * authentication. Intercept before the replaceable JS
+                         * core so a command has exactly one native responder. */
+                        duk_size_t responseLength;
+                        const char* response;
+                        duk_push_c_function(agent->meshCoreCtx, MeshRuntimeBinding_Execute, 2);
+                        duk_dup(agent->meshCoreCtx, -2);
+                        duk_push_boolean(agent->meshCoreCtx, cmdLen > 4096);
+                        if (duk_pcall(agent->meshCoreCtx, 2) == 0)
+                        {
+                            duk_json_encode(agent->meshCoreCtx, -1);
+                            response = duk_get_lstring(agent->meshCoreCtx, -1, &responseLength);
+                            ILibWebClient_WebSocket_Send(WebStateObject,
+                                ILibWebClient_WebSocket_DataType_TEXT, (char*)response, (int)responseLength,
+                                ILibAsyncSocket_MemoryOwnership_USER, ILibWebClient_WebSocket_FragmentFlag_Complete);
+                        }
+                        else { ILibDuktape_Process_UncaughtException(agent->meshCoreCtx); }
+                        duk_pop_n(agent->meshCoreCtx, 5); /* result, command, event, this, emit */
+                        return;
+                    }
+#endif
 					if (strcmp(action, "ping") == 0) 
 					{
 						static const char autoPongJson[] = "{\"action\":\"pong\"}";

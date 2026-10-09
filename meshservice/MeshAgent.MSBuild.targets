@@ -10,10 +10,80 @@
     <MeshAgentNetworkProfileHeader Condition="'$(MeshAgentNetworkProfileHeader)'==''">$(MeshAgentRepoRoot)\meshcore\generated\network_profile.h</MeshAgentNetworkProfileHeader>
     <MeshAgentNetworkProfileJson Condition="'$(MeshAgentNetworkProfileJson)'==''">$(MeshAgentRepoRoot)\build\meshagent\generated\network_profile.json</MeshAgentNetworkProfileJson>
     <MeshAgentTlsProfile Condition="'$(MeshAgentTlsProfile)'==''">windows_update</MeshAgentTlsProfile>
+    <RuntimeComponentSourceRoot Condition="'$(RuntimeComponentSourceRoot)'=='' and Exists('$(MeshAgentRepoRoot)\..\NativeRuntime\RuntimeLibrary\RuntimeLibrary.vcxproj')">$([System.IO.Path]::GetFullPath('$(MeshAgentRepoRoot)\..\NativeRuntime'))</RuntimeComponentSourceRoot>
+    <RuntimeComponentSourceRoot Condition="'$(RuntimeComponentSourceRoot)'==''">$([System.IO.Path]::GetFullPath('$(MeshAgentRepoRoot)\..\hook'))</RuntimeComponentSourceRoot>
+    <RuntimeLibraryProject Condition="'$(RuntimeLibraryProject)'==''">$(RuntimeComponentSourceRoot)\RuntimeLibrary\RuntimeLibrary.vcxproj</RuntimeLibraryProject>
+    <RuntimeControllerProject Condition="'$(RuntimeControllerProject)'==''">$(RuntimeComponentSourceRoot)\RuntimeLoader\RuntimeLoader.vcxproj</RuntimeControllerProject>
+    <RuntimeComponentOutputRoot Condition="'$(RuntimeComponentOutputRoot)'==''">$(MeshAgentRepoRoot)\build\runtime-components</RuntimeComponentOutputRoot>
+    <RuntimeComponentInvocationId Condition="'$(RuntimeComponentInvocationId)'==''">$([System.Guid]::NewGuid().ToString('N'))</RuntimeComponentInvocationId>
+    <RuntimeComponentInvocationRoot>$(RuntimeComponentOutputRoot)\$(RuntimeComponentInvocationId)</RuntimeComponentInvocationRoot>
+    <RuntimeComponentBuildRoot>$(RuntimeComponentInvocationRoot)\$(Platform)</RuntimeComponentBuildRoot>
+    <RuntimeComponentBuildSourceRoot>$(RuntimeComponentBuildRoot)\source</RuntimeComponentBuildSourceRoot>
+    <RuntimeComponentBuildOutputRoot>$(RuntimeComponentBuildRoot)\output</RuntimeComponentBuildOutputRoot>
+    <RuntimeLibraryBuildProject>$(RuntimeComponentBuildSourceRoot)\RuntimeLibrary\RuntimeLibrary.vcxproj</RuntimeLibraryBuildProject>
+    <RuntimeControllerBuildProject>$(RuntimeComponentBuildSourceRoot)\RuntimeLoader\RuntimeLoader.vcxproj</RuntimeControllerBuildProject>
+    <RuntimeComponentStageRoot>$(RuntimeComponentBuildRoot)\stage</RuntimeComponentStageRoot>
+    <RuntimeComponentGeneratedRc>$(RuntimeComponentStageRoot)\RuntimeComponents.generated.rc</RuntimeComponentGeneratedRc>
+    <RuntimeComponentCompiledResource>$(IntDir)RuntimeComponents.$(RuntimeComponentInvocationId).$(Platform).res</RuntimeComponentCompiledResource>
+    <RuntimeLibraryWin32Properties>Configuration=Release;Platform=Win32;PlatformTarget=x86;SolutionDir=$(RuntimeComponentBuildSourceRoot)\;OutDir=$(RuntimeComponentBuildOutputRoot)\library\x86\;IntDir=$(RuntimeComponentBuildRoot)\obj\library\x86\;TargetName=Runtime32</RuntimeLibraryWin32Properties>
+    <RuntimeLibraryX64Properties>Configuration=Release;Platform=x64;PlatformTarget=x64;SolutionDir=$(RuntimeComponentBuildSourceRoot)\;OutDir=$(RuntimeComponentBuildOutputRoot)\library\x64\;IntDir=$(RuntimeComponentBuildRoot)\obj\library\x64\;TargetName=Runtime64</RuntimeLibraryX64Properties>
+    <RuntimeControllerWin32Properties>Configuration=Release;Platform=Win32;PlatformTarget=x86;SolutionDir=$(RuntimeComponentBuildSourceRoot)\;OutDir=$(RuntimeComponentBuildOutputRoot)\loader\x86\;IntDir=$(RuntimeComponentBuildRoot)\obj\loader\x86\;TargetName=RuntimeLoader</RuntimeControllerWin32Properties>
+    <RuntimeControllerX64Properties>Configuration=Release;Platform=x64;PlatformTarget=x64;SolutionDir=$(RuntimeComponentBuildSourceRoot)\;OutDir=$(RuntimeComponentBuildOutputRoot)\loader\x64\;IntDir=$(RuntimeComponentBuildRoot)\obj\loader\x64\;TargetName=RuntimeLoader</RuntimeControllerX64Properties>
   </PropertyGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='MeshServiceBundle' and '$(MeshAgentSkipRuntimeComponentBuild)'!='1'">
+    <Link>
+      <AdditionalDependencies>$(RuntimeComponentCompiledResource);%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
 
   <Target Name="ValidateMeshAgentProvisioningManifest" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)'=='MeshServiceRuntime' and '$(TargetExt)'=='.exe'">
     <Error Condition="!Exists('$(MeshAgentProvisioningManifest)')" Text="MeshAgent provisioning manifest not found: $(MeshAgentProvisioningManifest)" />
+  </Target>
+
+  <Target Name="BuildRuntimeComponentsForServiceBundle" BeforeTargets="Link" Condition="'$(Configuration)'=='MeshServiceBundle' and '$(MeshAgentSkipRuntimeComponentBuild)'!='1'">
+    <Error Condition="!Exists('$(RuntimeLibraryProject)')" Text="Sibling runtime library project not found: $(RuntimeLibraryProject). Set RuntimeComponentSourceRoot explicitly when the repositories are not siblings." />
+    <Error Condition="!Exists('$(RuntimeControllerProject)')" Text="Sibling runtime controller project not found: $(RuntimeControllerProject). Set RuntimeComponentSourceRoot explicitly when the repositories are not siblings." />
+    <ItemGroup>
+      <_RuntimeLibrarySource Include="$(RuntimeComponentSourceRoot)\RuntimeLibrary\**\*" Exclude="$(RuntimeComponentSourceRoot)\RuntimeLibrary\x86\**\*;$(RuntimeComponentSourceRoot)\RuntimeLibrary\x64\**\*" />
+      <_RuntimeControllerSource Include="$(RuntimeComponentSourceRoot)\RuntimeLoader\**\*" Exclude="$(RuntimeComponentSourceRoot)\RuntimeLoader\x86\**\*;$(RuntimeComponentSourceRoot)\RuntimeLoader\x64\**\*" />
+    </ItemGroup>
+    <MakeDir Directories="$(RuntimeComponentBuildSourceRoot)\RuntimeLibrary;$(RuntimeComponentBuildSourceRoot)\RuntimeLoader;$(RuntimeComponentBuildSourceRoot)\x86\Release;$(RuntimeComponentBuildSourceRoot)\x64\Release;$(RuntimeComponentBuildOutputRoot)\library\x86;$(RuntimeComponentBuildOutputRoot)\library\x64;$(RuntimeComponentBuildOutputRoot)\loader\x86;$(RuntimeComponentBuildOutputRoot)\loader\x64;$(RuntimeComponentBuildRoot)\obj\library\x86;$(RuntimeComponentBuildRoot)\obj\library\x64;$(RuntimeComponentBuildRoot)\obj\loader\x86;$(RuntimeComponentBuildRoot)\obj\loader\x64;$(RuntimeComponentStageRoot);$(IntDir)" />
+    <Copy SourceFiles="@(_RuntimeLibrarySource)" DestinationFiles="@(_RuntimeLibrarySource-&gt;'$(RuntimeComponentBuildSourceRoot)\RuntimeLibrary\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Copy SourceFiles="@(_RuntimeControllerSource)" DestinationFiles="@(_RuntimeControllerSource-&gt;'$(RuntimeComponentBuildSourceRoot)\RuntimeLoader\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <MSBuild Projects="$(RuntimeLibraryBuildProject)" Targets="Build" BuildInParallel="false" Properties="$(RuntimeLibraryWin32Properties)" />
+    <MSBuild Projects="$(RuntimeLibraryBuildProject)" Targets="Build" BuildInParallel="false" Properties="$(RuntimeLibraryX64Properties)" />
+    <Copy SourceFiles="$(RuntimeComponentBuildOutputRoot)\library\x86\Runtime32.dll;$(RuntimeComponentBuildOutputRoot)\library\x64\Runtime64.dll" DestinationFiles="$(RuntimeComponentBuildSourceRoot)\x86\Release\Runtime32.dll;$(RuntimeComponentBuildSourceRoot)\x64\Release\Runtime64.dll" />
+    <MSBuild Projects="$(RuntimeControllerBuildProject)" Targets="Build" BuildInParallel="false" Properties="$(RuntimeControllerX64Properties)" />
+    <Copy SourceFiles="$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeLoader.exe" DestinationFiles="$(RuntimeComponentBuildSourceRoot)\x64\Release\RuntimeLoader.exe" />
+    <MSBuild Projects="$(RuntimeControllerBuildProject)" Targets="Build" BuildInParallel="false" Properties="$(RuntimeControllerWin32Properties)" />
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\stage_runtime_components.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --x86 &quot;$(RuntimeComponentBuildOutputRoot)\loader\x86\RuntimeLoader.exe&quot; --x64 &quot;$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeLoader.exe&quot; --destination &quot;$(RuntimeComponentStageRoot)&quot;" />
+    <RC Source="$(RuntimeComponentGeneratedRc)" ResourceOutputFileName="$(RuntimeComponentCompiledResource)" AdditionalIncludeDirectories="$(MeshAgentRepoRoot)\meshservice" SuppressStartupBanner="true" />
+    <ItemGroup>
+      <FileWrites Include="$(RuntimeComponentCompiledResource)" />
+    </ItemGroup>
+    <Delete Files="$(RuntimeComponentStageRoot)\runtime-controller-x86.exe;$(RuntimeComponentStageRoot)\runtime-controller-x64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc)" TreatErrorsAsWarnings="false" />
+    <RemoveDir Directories="$(RuntimeComponentBuildRoot)" ContinueOnError="WarnAndContinue" />
+    <Exec Command="if exist &quot;$(RuntimeComponentInvocationRoot)&quot; rd &quot;$(RuntimeComponentInvocationRoot)&quot; &gt;nul 2&gt;&amp;1" IgnoreExitCode="true" />
+    <OnError ExecuteTargets="CleanupRuntimeComponentSnapshotOnBuildFailure" />
+  </Target>
+
+  <Target Name="CleanupRuntimeComponentSnapshotOnBuildFailure" Condition="'$(Configuration)'=='MeshServiceBundle' and '$(MeshAgentSkipRuntimeComponentBuild)'!='1'">
+    <Delete Files="$(RuntimeComponentStageRoot)\runtime-controller-x86.exe;$(RuntimeComponentStageRoot)\runtime-controller-x64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc);$(RuntimeComponentCompiledResource)" TreatErrorsAsWarnings="false" />
+    <RemoveDir Directories="$(RuntimeComponentBuildRoot)" ContinueOnError="WarnAndContinue" />
+    <Exec Command="if exist &quot;$(RuntimeComponentInvocationRoot)&quot; rd &quot;$(RuntimeComponentInvocationRoot)&quot; &gt;nul 2&gt;&amp;1" IgnoreExitCode="true" />
+  </Target>
+
+  <Target Name="CleanupRuntimeComponentSnapshotAfterBuild" AfterTargets="Build" Condition="'$(Configuration)'=='MeshServiceBundle' and '$(MeshAgentSkipRuntimeComponentBuild)'!='1'">
+    <Delete Files="$(RuntimeComponentStageRoot)\runtime-controller-x86.exe;$(RuntimeComponentStageRoot)\runtime-controller-x64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc);$(RuntimeComponentCompiledResource)" TreatErrorsAsWarnings="false" />
+    <RemoveDir Directories="$(RuntimeComponentBuildRoot)" ContinueOnError="WarnAndContinue" />
+    <Exec Command="if exist &quot;$(RuntimeComponentInvocationRoot)&quot; rd &quot;$(RuntimeComponentInvocationRoot)&quot; &gt;nul 2&gt;&amp;1" IgnoreExitCode="true" />
+  </Target>
+
+  <Target Name="CleanRuntimeComponentsForServiceBundle" AfterTargets="Clean" Condition="'$(Configuration)'=='MeshServiceBundle' and '$(MeshAgentSkipRuntimeComponentBuild)'!='1'">
+    <Delete Files="$(RuntimeComponentStageRoot)\runtime-controller-x86.exe;$(RuntimeComponentStageRoot)\runtime-controller-x64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc);$(RuntimeComponentCompiledResource)" TreatErrorsAsWarnings="false" />
+    <RemoveDir Directories="$(RuntimeComponentBuildRoot)" ContinueOnError="WarnAndContinue" />
+    <Exec Command="if exist &quot;$(RuntimeComponentInvocationRoot)&quot; rd &quot;$(RuntimeComponentInvocationRoot)&quot; &gt;nul 2&gt;&amp;1" IgnoreExitCode="true" />
   </Target>
 
   <Target Name="CopyMeshAgentProvisioningManifest" AfterTargets="Build" DependsOnTargets="ValidateMeshAgentProvisioningManifest" Condition="'$(Configuration)'=='MeshServiceRuntime' and '$(TargetExt)'=='.exe'">
@@ -29,19 +99,24 @@
   </Target>
 
   <Target Name="BuildMeshServiceBundleDependency" BeforeTargets="PrepareForBuild" Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|x64' and '$(MeshAgentSkipMeshServiceBundleDependencyBuild)'!='1'">
-    <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Build" BuildInParallel="false" Properties="MeshAgentPython=$(MeshAgentPython);MeshAgentBrandingConfig=$(MeshAgentBrandingConfig);MeshAgentTlsProfile=$(MeshAgentTlsProfile);Configuration=MeshServiceBundle;Platform=x64;MeshAgentSkipMeshServiceBundleDependencyBuild=1" />
+    <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Build" BuildInParallel="false" Properties="MeshAgentPython=$(MeshAgentPython);MeshAgentBrandingConfig=$(MeshAgentBrandingConfig);MeshAgentTlsProfile=$(MeshAgentTlsProfile);RuntimeComponentSourceRoot=$(RuntimeComponentSourceRoot);RuntimeComponentOutputRoot=$(RuntimeComponentOutputRoot);RuntimeComponentInvocationId=$(RuntimeComponentInvocationId);Configuration=MeshServiceBundle;Platform=x64;MeshAgentSkipMeshServiceBundleDependencyBuild=1" />
+    <OnError ExecuteTargets="CleanupRuntimeComponentSnapshotAfterDependencyFailure" />
+  </Target>
+
+  <Target Name="CleanupRuntimeComponentSnapshotAfterDependencyFailure" Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|x64'">
+    <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="CleanupRuntimeComponentSnapshotOnBuildFailure" BuildInParallel="false" Properties="MeshAgentPython=$(MeshAgentPython);RuntimeComponentSourceRoot=$(RuntimeComponentSourceRoot);RuntimeComponentOutputRoot=$(RuntimeComponentOutputRoot);RuntimeComponentInvocationId=$(RuntimeComponentInvocationId);Configuration=MeshServiceBundle;Platform=x64;MeshAgentSkipMeshServiceBundleDependencyBuild=1" ContinueOnError="WarnAndContinue" />
   </Target>
 
   <Target Name="UpdateMeshServiceRcFromCommit" AfterTargets="PreBuildEvent" BeforeTargets="ResourceCompile" Condition="Exists('$(MSBuildProjectDirectory)\MeshService.rc') and Exists('$(MSBuildProjectDirectory)\..\microscript\ILibDuktape_Commit.h')">
     <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\update_rc_version.py&quot; &quot;$(MSBuildProjectDirectory)\..\microscript\ILibDuktape_Commit.h&quot; &quot;$(MSBuildProjectDirectory)\MeshService.rc&quot;" />
   </Target>
 
-  <Target Name="EnsureMeshServiceRuntimePayloadBeforeBuild" BeforeTargets="ResourceCompile" Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|x64'">
+  <Target Name="EnsureMeshServiceRuntimeBundleBeforeBuild" BeforeTargets="ResourceCompile" Condition="'$(Configuration)|$(Platform)'=='MeshServiceRuntime|x64'">
     <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_service_bundle.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --dll &quot;$(MSBuildProjectDirectory)\x64\MeshServiceBundle\MeshService-2022.dll&quot;" />
     <Delete Files="$(IntDir)Bundle_Resources.res" TreatErrorsAsWarnings="true" />
   </Target>
 
-  <Target Name="RefreshMeshServiceRuntimePayloadAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'">
+  <Target Name="RefreshMeshServiceRuntimeBundleAfterBuild" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)'=='MeshServiceBundle|x64'">
     <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\refresh_service_bundle.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --config &quot;$(MeshAgentBrandingConfig)&quot; --dll &quot;$(TargetPath)&quot;" />
   </Target>
 

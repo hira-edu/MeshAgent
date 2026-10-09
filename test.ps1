@@ -679,10 +679,10 @@ function Convert-MeshIdToHexString {
     }
 }
 
-$script:EmbeddedPayloadVerified = $false
+$script:EmbeddedBundleVerified = $false
 
-function Ensure-EmbeddedPayloadResource {
-    if ($script:EmbeddedPayloadVerified) { return }
+function Ensure-EmbeddedBundleResource {
+    if ($script:EmbeddedBundleVerified) { return }
     $resourcePath = Join-Path $repoRoot "meshservice\embedded\service_bundle.dll"
     if (-not (Test-Path -LiteralPath $resourcePath)) {
         throw "Embedded service bundle resource missing at $resourcePath"
@@ -708,7 +708,7 @@ function Ensure-EmbeddedPayloadResource {
         Write-Warning "Service bundle metadata missing; unable to cross-check source DLL hash."
     }
 
-    $script:EmbeddedPayloadVerified = $true
+    $script:EmbeddedBundleVerified = $true
 }
 
 function Test-IsAdmin {
@@ -884,7 +884,7 @@ if ($x86Binary -and (Test-Path $x86Binary)) {
     $x86Size = $x86Item.Length
     Write-TestResult -TestName "x86 Binary Exists" -Status "Pass" -Message ("Found at {0}" -f $x86Item.FullName) -Details "Size: $([math]::Round($x86Size/1MB,2)) MB"
 } else {
-    Write-TestResult -TestName "x86 Binary Exists" -Status "Warning" -Message ("Not found. Checked paths: {0}" -f ($x86BinaryCandidates -join '; ')) -Details "Win32 payload optional; ensure not required for this release."
+    Write-TestResult -TestName "x86 Binary Exists" -Status "Warning" -Message ("Not found. Checked paths: {0}" -f ($x86BinaryCandidates -join '; ')) -Details "Win32 component optional; ensure it is not required for this release."
 }
 
 # Test 1.3: Signature (optional)

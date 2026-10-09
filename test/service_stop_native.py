@@ -65,8 +65,8 @@ static DWORD ticks, origin, lastError, finishAt, controlCost;
 static SERVICE_STATUS_PROCESS current;
 static int queries, failQueryAt, stopCalls, pendingControls, interrogates;
 static int allowOn, allowOff, closed, processOpens, kills, processCloses;
-static int deniedControlAccess, rejectStops, pendingRace, autoStart, exclusive;
-static int openProcessFails, terminateFails, queryWarnings, timeoutWarnings, ownershipWarnings;
+static int deniedControlAccess, rejectStops, rejectWhileStarting, pendingRace, autoStart, exclusive;
+static int openProcessFails, terminateFails, queryWarnings, timeoutWarnings, ownershipWarnings, noProcessWarnings;
 static DWORD elapsed(void) { return ticks - origin; }
 static SC_HANDLE open_scm(void) { return (SC_HANDLE)(uintptr_t)1; }
 static SC_HANDLE open_service(DWORD access) {
@@ -82,6 +82,7 @@ static void log_event(const wchar_t* fmt) {
     if(wcsstr(fmt,L"status query failed"))++queryWarnings;
     if(wcsstr(fmt,L"stop timed out"))++timeoutWarnings;
     if(wcsstr(fmt,L"exclusive process ownership"))++ownershipWarnings;
+    if(wcsstr(fmt,L"no process to terminate"))++noProcessWarnings;
     lastError=183;
 }
 static BOOL query_status(SC_HANDLE h, BYTE* buffer, DWORD size, DWORD* needed) {
@@ -96,8 +97,9 @@ static BOOL control_service(SC_HANDLE h, DWORD control, SERVICE_STATUS* status) 
     assert(h==(SC_HANDLE)(uintptr_t)2);
     if(control==SERVICE_CONTROL_INTERROGATE) { ++interrogates; return TRUE; }
     assert(control==SERVICE_CONTROL_STOP); ++stopCalls;
-    if(current.dwCurrentState==SERVICE_STOP_PENDING || current.dwCurrentState==SERVICE_START_PENDING)++pendingControls;
+    if(current.dwCurrentState==SERVICE_STOP_PENDING)++pendingControls;
     ticks+=controlCost;
+    if(rejectWhileStarting && current.dwCurrentState==SERVICE_START_PENDING) { lastError=ERROR_SERVICE_CANNOT_ACCEPT_CTRL; return FALSE; }
     if(pendingRace) { current.dwCurrentState=SERVICE_STOP_PENDING; lastError=ERROR_SERVICE_CANNOT_ACCEPT_CTRL; return FALSE; }
     if(rejectStops || pendingControls) { lastError=ERROR_SERVICE_CANNOT_ACCEPT_CTRL; return FALSE; }
     current.dwCurrentState=SERVICE_STOP_PENDING;
@@ -141,8 +143,8 @@ static void reset(DWORD state) {
     ticks=origin=100; lastError=183; finishAt=UINT32_MAX; controlCost=0;
     queries=failQueryAt=stopCalls=pendingControls=interrogates=0;
     allowOn=allowOff=closed=processOpens=kills=processCloses=0;
-    deniedControlAccess=rejectStops=pendingRace=autoStart=0; exclusive=1;
-    openProcessFails=terminateFails=queryWarnings=timeoutWarnings=ownershipWarnings=0;
+    deniedControlAccess=rejectStops=rejectWhileStarting=pendingRace=autoStart=0; exclusive=1;
+    openProcessFails=terminateFails=queryWarnings=timeoutWarnings=ownershipWarnings=noProcessWarnings=0;
 }
 static void cleanup_checks(void) { assert(closed==2 && allowOff==(allowOn>0) && processCloses==processOpens-((openProcessFails&&processOpens)?1:0)); }
 static BOOL run(DWORD timeout, BOOL force) {
@@ -152,27 +154,31 @@ static BOOL run(DWORD timeout, BOOL force) {
 int main(void) {
     reset(SERVICE_RUNNING); finishAt=2500; assert(run(5000,TRUE)); assert(stopCalls==1&&!kills);
     reset(SERVICE_STOP_PENDING); finishAt=2500; assert(run(5000,TRUE)); assert(!stopCalls&&!kills);
-    reset(SERVICE_START_PENDING); autoStart=1; finishAt=2500; assert(run(5000,FALSE)); assert(stopCalls==1);
-    reset(SERVICE_START_PENDING); assert(!run(2000,FALSE)); assert(!stopCalls&&lastError==ERROR_TIMEOUT);
+    /* The service host accepts STOP while START_PENDING: send it, and when SCM
+     * rejects it retry once immediately after INTERROGATE, then every 2s. */
+    reset(SERVICE_START_PENDING); finishAt=2500; assert(run(5000,FALSE)); assert(stopCalls==1&&elapsed()==2500);
+    reset(SERVICE_START_PENDING); autoStart=1; rejectWhileStarting=1; finishAt=3500; assert(run(5000,FALSE)); assert(stopCalls==3&&interrogates==1&&elapsed()==3500);
+    reset(SERVICE_START_PENDING); rejectWhileStarting=1; assert(!run(2000,FALSE)); assert(stopCalls==2&&lastError==ERROR_TIMEOUT);
     reset(SERVICE_RUNNING); pendingRace=1; finishAt=2500; assert(run(5000,FALSE)); assert(stopCalls==1&&interrogates==1);
     /* Query at the deadline before claiming a timeout, including zero timeout. */
     reset(SERVICE_STOP_PENDING); finishAt=2000; assert(run(2000,FALSE)); assert(!timeoutWarnings);
     reset(SERVICE_STOPPED); assert(run(0,TRUE)); assert(!stopCalls&&!processOpens);
     /* Time in a synchronous SCM call counts against the stop budget. */
     reset(SERVICE_RUNNING); controlCost=2500; assert(!run(2000,FALSE)); assert(elapsed()==2500&&lastError==ERROR_TIMEOUT);
-    reset(SERVICE_RUNNING); rejectStops=1; assert(!run(4000,FALSE)); assert(stopCalls==2&&elapsed()==4000);
-    reset(SERVICE_RUNNING); ticks=origin=0; rejectStops=1; assert(!run(4000,FALSE)); assert(stopCalls==2);
+    reset(SERVICE_RUNNING); rejectStops=1; assert(!run(4000,FALSE)); assert(stopCalls==3&&elapsed()==4000);
+    reset(SERVICE_RUNNING); ticks=origin=0; rejectStops=1; assert(!run(4000,FALSE)); assert(stopCalls==3);
     reset(SERVICE_STOP_PENDING); ticks=origin=UINT32_MAX-999; finishAt=2000; assert(run(2000,FALSE)); assert(elapsed()==2000);
     /* Never terminate a process using a stale status after a failed query. */
     reset(SERVICE_RUNNING); failQueryAt=4; assert(!run(2000,TRUE)); assert(!kills&&!processOpens&&queryWarnings==1&&!timeoutWarnings&&lastError==ERROR_ACCESS_DENIED);
-    reset(SERVICE_STOP_PENDING); exclusive=0; assert(!run(2000,TRUE)); assert(!kills&&!processOpens&&ownershipWarnings==1&&lastError==ERROR_TIMEOUT);
+    reset(SERVICE_STOP_PENDING); exclusive=0; assert(!run(2000,TRUE)); assert(!kills&&!processOpens&&ownershipWarnings==1&&!noProcessWarnings&&lastError==ERROR_TIMEOUT);
+    reset(SERVICE_STOP_PENDING); current.dwProcessId=0; assert(!run(2000,TRUE)); assert(!kills&&!processOpens&&noProcessWarnings==1&&!ownershipWarnings&&lastError==ERROR_TIMEOUT);
     reset(SERVICE_STOP_PENDING); assert(!run(2000,FALSE)); assert(!kills&&!processOpens&&lastError==ERROR_TIMEOUT);
     reset(SERVICE_STOP_PENDING); assert(run(2000,TRUE)); assert(kills==1&&elapsed()==2750);
     reset(SERVICE_RUNNING); deniedControlAccess=1; assert(run(2000,TRUE)); assert(!stopCalls&&!allowOn&&kills==1);
     reset(SERVICE_STOP_PENDING); openProcessFails=1; assert(!run(2000,TRUE)); assert(!kills&&lastError==ERROR_ACCESS_DENIED);
     reset(SERVICE_STOP_PENDING); terminateFails=1; assert(!run(2000,TRUE)); assert(kills==1&&lastError==ERROR_ACCESS_DENIED);
     reset(SERVICE_STOP_PENDING); failQueryAt=7; assert(!run(2000,TRUE)); assert(kills==1&&lastError==ERROR_ACCESS_DENIED);
-    puts("service stop: 19 cases passed (pending states, deadlines, retries, query faults, ownership, termination faults and cleanup)");
+    puts("service stop: 21 cases passed (pending states, deadlines, retries, query faults, ownership, termination faults and cleanup)");
     return 0;
 }
 '''

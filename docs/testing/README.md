@@ -63,6 +63,24 @@ hold. `test/service_transaction_journal_native.py` checks that a checkpoint
 without incumbent paths keeps the version 1 layout. The binding, transaction
 journal, transaction recovery, and update recovery native probes also run on
 macOS with Clang and sanitizers.
+`test/service_stop_native.py` runs the production service-stop loop against a
+deterministic SCM and clock. It covers pending states, deadlines and tick
+wraparound, stop retries, status-query faults, process-ownership checks and
+termination faults without touching any real service. It runs on macOS with
+Clang and sanitizers, and when MinGW is installed it also compiles the loop
+against the real Windows status structures.
+`test/service_startup_control_native.py` extracts the production startup-control
+transition and races it against accepted stop requests. It verifies that an
+early stop remains latched and cannot be overwritten by `SERVICE_RUNNING`.
+
+`python3 test/native_runtime_controller_native.py` compiles the fixed-width
+controller relay protocol under ASan/UBSan and verifies exact request/response
+correlation. It also checks that the MeshAgent binding contains only bounded
+install/supervision/pipe-relay behavior and no policy or target state. The
+source contract requires overlapped named-pipe I/O, deadline accounting and
+`CancelIoEx`, and verifies pipe waits do not hold the supervision/shutdown lock.
+`python3 test/runtime_component_packaging_contract.py` checks PE/catalog
+validation and architecture-specific controller-executable staging.
 
 `test/service_deployment_copy_native.py` injects copy, flush, attribute, and
 rename failures into production replacement code and checks that live files
@@ -239,10 +257,13 @@ endpoint identity databases are excluded.
 ## Builds before binary-reading tests
 
 Runtime probes and any contract that reads built binaries need a current build
-first. In particular, `test/service_bundle_embedded_payload_contract.js` reads
-the built service binaries and their embedded payload, so build the package (or
+first. In particular, `test/service_bundle_embedding_contract.js` reads
+the built service binaries and their embedded component, so build the package (or
 at least the service-DLL gate) before running it; otherwise it has nothing valid
-to read.
+to read. Automation migrating from the original evidence fields can invoke the
+same neutral entry point with `--legacy-evidence-schema`; this emits the exact
+three-field compatibility schema while retaining the neutral script and evidence
+filenames.
 
 ```powershell
 msbuild .\MeshAgent.Build.proj /m /nologo /verbosity:minimal

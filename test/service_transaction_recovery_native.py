@@ -83,13 +83,13 @@ static BOOL unregister(void){currentExists=0;return TRUE;}
 #define ServiceDeploy_LogInstallEvent(...) ((void)0)
 #define ServiceDeploy_TransactionDirectoryEmpty(path) (!unowned)
 #define ServiceBinding_ImageSupported(n,c,e,d,l) image(l)
-#define ServiceBinding_SharedPayloadSupported(s,d) owned
+#define ServiceBinding_SharedImageSupported(s,d) owned
 #define ServiceDeploy_SuspendOriginalRestarters(...) TRUE
 #define ServiceDeploy_BindingHasMovedRoot(...) FALSE
 #define ServiceDeploy_FindIncumbentPaths(...) FALSE
 #define ServiceDeploy_CheckpointIncumbentPaths(b,p) (wcscpy((p)->dbPath,(b)->incumbentDbPath),TRUE)
 #define _wcsicmp wcscmp
-#define ServiceDeploy_BindingPayloadPath(b,p,n) ((void)(b),(void)(p),(void)(n),FALSE)
+#define ServiceDeploy_BindingImagePath(b,p,n) ((void)(b),(void)(p),(void)(n),FALSE)
 #define ServiceDeploy_DeleteUpdateTransactionArtifacts(tx) (++cleanups,remove_checkpoint())
 #define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx) (reconcile() && (++cleanups, remove_checkpoint()))
 #define ServiceDeploy_DeleteResolvedCheckpoint(tx) remove_checkpoint()

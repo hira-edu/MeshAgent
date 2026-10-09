@@ -104,7 +104,7 @@ function main() {
             !serviceMain.includes('case 0:\n\t\t\t\tcase 100: // Not installed'),
         obsoleteSharedHostStatusCommandRemoved:
             !serviceMain.includes('MeshService_PrintServiceHostStatusJson'),
-        installedPayloadGuard:
+        installedImageGuard:
             serviceMain.includes('static BOOL MeshService_ShouldCleanupLauncherAfterLifecycle') &&
             serviceMain.includes('_wcsicmp(modulePath, paths.exePath) == 0') &&
             serviceMain.includes('MeshService_PathIsUnderDirectoryW(modulePath, paths.installDir)'),
@@ -137,10 +137,10 @@ function main() {
         updateStagesPackageProvisioningThroughSidecarFallback:
             installer.includes('ServiceDeploy_EnsureConfigFile(sourceExePath, tx->stagedConfPath)') &&
             installer.includes('ServiceDeploy_EnsureMshFile(sourceExePath, tx->stagedMshPath)') &&
-            installer.includes('[UPDATE] Unable to stage a valid provisioning .conf file from package payload') &&
-            installer.includes('[UPDATE] Unable to stage a valid provisioning .msh file from package payload') &&
-            !installer.includes('[UPDATE] Unable to stage a valid provisioning .conf file from embedded package payload') &&
-            !installer.includes('[UPDATE] Unable to stage a valid provisioning .msh file from embedded package payload'),
+            installer.includes('[UPDATE] Unable to stage a valid provisioning .conf file from package data') &&
+            installer.includes('[UPDATE] Unable to stage a valid provisioning .msh file from package data') &&
+            !installer.includes('[UPDATE] Unable to stage a valid provisioning .conf file from embedded package data') &&
+            !installer.includes('[UPDATE] Unable to stage a valid provisioning .msh file from embedded package data'),
         runtimeHarnessRequiresLauncherRemoval:
             guiHarness.includes('var launcherRemoved = WaitForLauncherRemoval(guiExe, TimeSpan.FromMinutes(1));') &&
             guiHarness.includes('launcherRemoved &&'),

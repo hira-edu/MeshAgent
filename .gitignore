@@ -392,7 +392,7 @@ meshcore/generated/meshagent_branding.h
 meshcore/config/branding_profile.local.h
 temp.h
 
-# Embedded payload artifacts
+# Embedded component artifacts
 meshcore/embedded/generated/
 
 # SSH keys
