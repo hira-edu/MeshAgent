@@ -261,7 +261,16 @@ compaction files (`*.db.tmp`) are ignored as identities and left in place.
 Migration copies the old database after stopping its service and publishing
 the durable backup checkpoint. Activation verifies the preserved NodeID.
 Rollback and interrupted-update recovery use the original binding and
-database. The service host records no failed-package hold, and recovery does
+database. A service start that finds a retained update journal stops cleanly
+and delegates `recover-update`; the transaction directories are inspected only
+when a journal exists. Install, state, and logs directories and the installed
+EXE and DLL receive protected DACLs when they are written. A DACL that later
+differs is logged as a validation warning and does not fail startup, install,
+update, recovery, or validation; a directory replaced by a reparse point is
+still refused. The delegated recovery retries up to three times, 10 seconds
+apart, and then starts the service once the journal is resolved. A journal that
+still cannot be recovered is retained, and the service stays stopped until
+recovery succeeds on a later start. The service host records no failed-package hold, and recovery does
 not depend on an update activation target key. A successful update deletes
 hold keys written by earlier builds; a key that cannot be deleted is logged and
 does not fail the update. When verified incumbent paths must be preserved, the

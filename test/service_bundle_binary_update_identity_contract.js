@@ -211,13 +211,18 @@ function main() {
         convergenceUsesConfigOrDatastoreIdentity:
             convergedBlock.includes('const BOOL identityHealthy = (discovery->configKeysValid ||') &&
             convergedBlock.includes('(discovery->dbExists && discovery->nodeIdPresent))') &&
-            normalizedConverged.includes('discovery->dllDaclValid && identityHealthy'),
+            normalizedConverged.includes('discovery->dllExists && identityHealthy'),
+        convergenceIgnoresPathDaclDrift:
+            !normalizedConverged.includes('DaclValid && identityHealthy') &&
+            !convergedBlock.includes('discovery->installRootDaclValid') &&
+            !convergedBlock.includes('discovery->logsDirDaclValid'),
         convergenceDoesNotRequireConfFile:
             !normalizedConverged.includes('discovery->confExists &&'),
         discoveryClassifiesDatastoreIdentityAsHealthy:
             discoveryBlock.includes('const BOOL identityHealthy = (discovery->configKeysValid ||') &&
             discoveryBlock.includes('(discovery->dbExists && discovery->nodeIdPresent))') &&
-            normalizedDiscovery.includes('discovery->exeDaclValid && identityHealthy'),
+            normalizedDiscovery.includes('discovery->dllExists && identityHealthy') &&
+            !normalizedDiscovery.includes('discovery->exeDaclValid && identityHealthy'),
         discoveryDoesNotRequireConfFileForHealthyState:
             !normalizedDiscovery.includes('discovery->confExists && discovery->installRootDaclValid'),
         lifecycleKeepsBinaryOnlyUpdateAsUpdate:

@@ -50,14 +50,25 @@ assert(serviceHost.includes('ServiceHost_ApplyUpdateStartupDisposition(&stopForU
     serviceHost.includes('MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RECOVER_UPDATE') &&
     serviceHost.includes('MeshRuntimeHost_ReleaseLifecycleHostW(&launch)'),
     'ServiceMain must delegate abandoned recovery before creating the agent');
-assert(serviceHost.indexOf('ServiceHost_ApplyUpdateStartupDisposition(&stopForUpdateRecovery)') <
-    serviceHost.indexOf('g_ServiceHostAgent = MeshAgent_Create(0)'),
+assert(serviceHost.indexOf('MeshAgent_Create(0)') > 0 &&
+    serviceHost.indexOf('ServiceHost_ApplyUpdateStartupDisposition(&stopForUpdateRecovery)') <
+    serviceHost.indexOf('MeshAgent_Create(0)'),
     'startup recovery must run before MeshAgent_Create');
+const disposition = extractFunction(deployment, 'BOOL ServiceDeploy_GetUpdateStartupDisposition(');
+assert(disposition.indexOf('GetFileAttributesW(tx.journalPath)') >= 0 &&
+    disposition.indexOf('GetFileAttributesW(tx.journalPath)') < disposition.indexOf('ServiceDeploy_TransactionPathsSafe(&paths, &tx)'),
+    'an absent checkpoint must proceed before state directory validation can block startup');
 assert(runtimeHeader.includes('MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W L"recover-update"') &&
     runtimeContract.includes('MESH_RUNTIME_HOST_LIFECYCLE_ACTION_RECOVER_UPDATE'),
     'the recovery lifecycle action must round-trip through the manifest contract');
-assert(deployment.includes('return ServiceDeploy_RecoverInterruptedTransaction();'),
-    'the recovery lifecycle host must invoke transaction recovery directly under the mutex');
+const delegatedRecovery = extractFunction(deployment, 'static BOOL ServiceDeploy_RunDelegatedUpdateRecovery(void)');
+assert(deployment.includes('return ServiceDeploy_RunDelegatedUpdateRecovery();') &&
+    delegatedRecovery.includes('ok = ServiceDeploy_RecoverInterruptedTransaction();') &&
+    delegatedRecovery.includes('attempt <= 3'),
+    'the recovery lifecycle host must invoke bounded transaction recovery under the mutex');
+assert(delegatedRecovery.indexOf('if (!ok) { return FALSE; }') >= 0 &&
+    delegatedRecovery.indexOf('if (!ok) { return FALSE; }') < delegatedRecovery.indexOf('ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000)'),
+    'delegated recovery must start the service only after the checkpoint is resolved');
 assert(!interruptedRecovery.includes('UpdateActivationFailureHold') &&
     interruptedRecovery.includes('ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000)'),
     'interrupted recovery must record no update hold and must not fail for a missing activation target');
@@ -77,6 +88,8 @@ console.log(JSON.stringify({
         abandonedRecoveryDelegatedBeforeAgentCreate: true,
         recoveryManifestActionRoundTrips: true,
         recoveryRecordsNoUpdateHold: true,
-        identityTimeoutDoesNotRetainCheckpoint: true
+        identityTimeoutDoesNotRetainCheckpoint: true,
+        absentCheckpointProceedsBeforeStateValidation: true,
+        delegatedRecoveryRetriesThenStartsResolvedService: true
     }
 }, null, 2));

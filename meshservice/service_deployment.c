@@ -2641,8 +2641,15 @@ BOOL ServiceDeploy_GetUpdateStartupDisposition(ServiceUpdateStartupDisposition* 
     if (dispositionOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     *dispositionOut = SERVICE_UPDATE_STARTUP_PROCEED;
     if (!ServiceDeploy_GetInstallPaths(&paths) ||
-        !ServiceDeploy_InitializeUpdateTransactionPaths(&paths, &tx) ||
-        !ServiceDeploy_TransactionPathsSafe(&paths, &tx)) { return FALSE; }
+        !ServiceDeploy_InitializeUpdateTransactionPaths(&paths, &tx)) { return FALSE; }
+    /* Absence is the common case: proceed before inspecting the transaction
+     * directories, so their state cannot stop a start with nothing to recover.
+     * Same absence rule as ServiceJournal_Load. */
+    {
+        DWORD attributes = GetFileAttributesW(tx.journalPath), error = GetLastError();
+        if (attributes == INVALID_FILE_ATTRIBUTES && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)) { return TRUE; }
+    }
+    if (!ServiceDeploy_TransactionPathsSafe(&paths, &tx)) { return FALSE; }
     ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
     if (!ServiceJournal_Load(tx.journalPath, serviceName, &record)) { return FALSE; }
     if (record == NULL) { return TRUE; }
@@ -2705,8 +2712,7 @@ static BOOL ServiceDeploy_TransactionPathsSafe(const ServiceInstallPaths* paths,
         {
             if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) { return FALSE; }
         }
-        else if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
-            (i == 1 && !ServiceDeploy_ValidatePathDacl(tx->stateDir))) { return FALSE; }
+        else if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) { return FALSE; }
     }
     return TRUE;
 }
@@ -2786,7 +2792,7 @@ static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* pa
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Retained transaction requires recovery before staging (%ls)", tx->journalPath);
         return FALSE;
     }
-    if (!Security_CreateInstallationDirectory(tx->stateDir) || !ServiceDeploy_ValidatePathDacl(tx->stateDir)) { return FALSE; }
+    if (!Security_CreateInstallationDirectory(tx->stateDir)) { return FALSE; }
     if (!ServiceDeploy_DeleteUpdateTransactionArtifacts(tx) ||
         !Security_CreateInstallationDirectory(tx->stageDir) ||
         !Security_CreateInstallationDirectory(tx->backupDir)) { return FALSE; }
@@ -5317,14 +5323,12 @@ static BOOL ServiceDeploy_IsPrimaryLifecycleConverged(const ServiceLifecycleDisc
 
     const BOOL identityHealthy = (discovery->configKeysValid ||
                                   (discovery->dbExists && discovery->nodeIdPresent));
+    /* Path DACLs are applied when files and directories are written and are
+     * logged by discovery; drift alone must not fail an install or update. */
     const BOOL filesystemHealthy = (discovery->installRootExists &&
                                     discovery->logsDirExists &&
                                     discovery->exeExists &&
                                     discovery->dllExists &&
-                                    discovery->installRootDaclValid &&
-                                    discovery->logsDirDaclValid &&
-                                    discovery->exeDaclValid &&
-                                    discovery->dllDaclValid &&
                                     identityHealthy);
     const BOOL serviceHealthy = (discovery->serviceExists &&
                                  discovery->serviceRunning &&
@@ -5696,9 +5700,6 @@ static BOOL ServiceDeploy_DiscoverCurrentState(ServiceLifecycleDiscovery* discov
                                     discovery->logsDirExists &&
                                     discovery->exeExists &&
                                     discovery->dllExists &&
-                                    discovery->installRootDaclValid &&
-                                    discovery->logsDirDaclValid &&
-                                    discovery->exeDaclValid &&
                                     identityHealthy);
     const BOOL serviceHealthy = (discovery->serviceExists &&
                                  discovery->serviceKeyExists &&
@@ -5834,6 +5835,36 @@ static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request,
 
 
 
+/* ServiceMain delegates here after stopping for an abandoned checkpoint, so a
+ * start was requested. Recovery is idempotent: retry transient failures (file
+ * locks, slow SCM transitions), then start the service once the checkpoint is
+ * gone. Recovery itself starts it only when it was running before the update,
+ * and a clean ServiceMain exit triggers no SCM retry, so without this start
+ * the agent stays offline until the next boot. A retained checkpoint is never
+ * started over: the startup gate would only delegate again. */
+static BOOL ServiceDeploy_RunDelegatedUpdateRecovery(void)
+{
+    wchar_t serviceName[256] = {0};
+    BOOL ok = FALSE, exists = FALSE;
+    for (int attempt = 1; attempt <= 3 && !ok; ++attempt)
+    {
+        if (attempt > 1)
+        {
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] Retrying interrupted transaction recovery in 10s (attempt %d of 3)", attempt);
+            Sleep(10000);
+        }
+        ok = ServiceDeploy_RecoverInterruptedTransaction();
+    }
+    if (!ok) { return FALSE; }
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
+    if (ServiceBinding_QueryExists(serviceName, &exists) && exists &&
+        !ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000))
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Recovered service %ls did not start (error=%lu)", serviceName, GetLastError());
+    }
+    return TRUE;
+}
+
 static BOOL ServiceDeploy_RunLifecycleHostOperationLocked(
     const wchar_t* actionName,
     const wchar_t* sourceExePath,
@@ -5868,7 +5899,7 @@ static BOOL ServiceDeploy_RunLifecycleHostOperationLocked(
     }
     if (_wcsicmp(actionName, MESH_LIFECYCLE_ACTION_RECOVER_UPDATE_W) == 0)
     {
-        return ServiceDeploy_RecoverInterruptedTransaction();
+        return ServiceDeploy_RunDelegatedUpdateRecovery();
     }
     if (_wcsicmp(actionName, L"validate-install") == 0)
     {
@@ -6670,8 +6701,8 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     }
     else if (!summary.installRootDacl)
     {
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Install root DACL mismatch: %ls", paths.installDir);
-        summary.success = FALSE;
+        // Reported only: DACL drift must not fail install or update validation.
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] [WARN] Install root DACL differs from default: %ls", paths.installDir);
     }
     if (!summary.logsRoot)
     {
@@ -6680,8 +6711,7 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     }
     else if (!summary.logsRootDacl)
     {
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Logs root DACL mismatch: %ls", paths.logsDir);
-        summary.success = FALSE;
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] [WARN] Logs root DACL differs from default: %ls", paths.logsDir);
     }
     if (!summary.exePresent)
     {
@@ -6690,8 +6720,7 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     }
     else if (!summary.exeDacl)
     {
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Host executable DACL mismatch: %ls", paths.exePath);
-        summary.success = FALSE;
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] [WARN] Host executable DACL differs from default: %ls", paths.exePath);
     }
     if (!summary.dllPresent)
     {
@@ -6700,8 +6729,7 @@ static BOOL ServiceDeploy_RunInstallValidationInternal(const char* phase)
     }
     else if (!summary.dllDacl)
     {
-        ServiceDeploy_LogInstallEvent(L"[VALIDATION] Service DLL DACL mismatch: %ls", paths.dllPath);
-        summary.success = FALSE;
+        ServiceDeploy_LogInstallEvent(L"[VALIDATION] [WARN] Service DLL DACL differs from default: %ls", paths.dllPath);
     }
     if (!summary.configPresent)
     {
