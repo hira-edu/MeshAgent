@@ -1309,6 +1309,14 @@ static int ILibDuktape_GenericMarshal_AsyncData_IsRunning(ILibDuktape_FFI_AsyncD
 	ILibLinkedList_UnLock(data->tracker);
 	return(running);
 }
+// A pending promise holds a reference so its finalizer never reads freed data.
+static void ILibDuktape_GenericMarshal_AsyncData_AddRef(ILibDuktape_FFI_AsyncData *data)
+{
+	if (data->tracker == NULL) { ++(data->refs); return; }
+	ILibLinkedList_Lock(data->tracker);
+	++(data->refs);
+	ILibLinkedList_UnLock(data->tracker);
+}
 // Drops one reference. The worker also unregisters in the same step, and after that it
 // touches nothing but this data, so a teardown that sees it gone may free the heap.
 static void ILibDuktape_GenericMarshal_AsyncData_Release(ILibDuktape_FFI_AsyncData *data, int fromWorker)
@@ -1347,6 +1355,9 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatch(void *chain, voi
 	{
 		return;
 	}
+	// The promise was collected before the call finished: the call is done, but nothing to resolve.
+	if (data->promise == ILibDuktape_GenericMarshal_INVALID_PROMISE) { data->promise = NULL; return; }
+	if (data->promise == NULL) { return; }
 	duk_context *ctx = data->ctx;
 
 	duk_push_heapptr(data->ctx, data->promise);																// [promise]
@@ -1595,6 +1606,7 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_Done_chain(void *chain, void* 
 	}
 
 	duk_push_heapptr(data->ctx, data->promise);																// [promise]
+	duk_del_prop_string(data->ctx, -1, "_data");															// data is freed below; promfin must not read it
 	duk_get_prop_string(data->ctx, -1, "_RES");																// [promise][resolver]
 	duk_swap_top(data->ctx, -2);																			// [resolver][this]
 	ILibDuktape_GenericMarshal_Variable_PUSH(data->ctx, (void*)data->workAvailable, (int)sizeof(void*));	// [resolver][this][var]
@@ -1634,6 +1646,19 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_promfin(duk_context *ctx)
 	if (ILibMemory_CanaryOK(data) && data->promise == h)
 	{
 		data->promise = ILibDuktape_GenericMarshal_INVALID_PROMISE;
+	}
+	return(0);
+}
+duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_promfinTracked(duk_context *ctx)
+{
+	ILibDuktape_FFI_AsyncData *data = (ILibDuktape_FFI_AsyncData*)Duktape_GetPointerProperty(ctx, 0, "_data");
+	void *h = duk_get_heapptr(ctx, 0);
+
+	if (data != NULL)
+	{
+		// This promise holds a reference, so data is still allocated here.
+		if (data->promise == h) { data->promise = ILibDuktape_GenericMarshal_INVALID_PROMISE; }
+		ILibDuktape_GenericMarshal_AsyncData_Release(data, 0);
 	}
 	return(0);
 }
@@ -1734,7 +1759,8 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync(duk_context *ctx)
 			duk_eval_string(ctx, "require('promise');");		// [func][promise]
 			duk_push_c_function(ctx, ILibDuktape_GenericMarshal_MethodInvokeAsync_promise, 2);
 			duk_new(ctx, 1);
-			ILibDuktape_CreateFinalizer(ctx, ILibDuktape_GenericMarshal_MethodInvokeAsync_promfin);
+			ILibDuktape_GenericMarshal_AsyncData_AddRef(data);
+			ILibDuktape_CreateFinalizer(ctx, ILibDuktape_GenericMarshal_MethodInvokeAsync_promfinTracked);
 			duk_push_pointer(ctx, data); duk_put_prop_string(ctx, -2, "_data");
 			data->promise = duk_get_heapptr(ctx, -1);
 		}
@@ -1789,6 +1815,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync(duk_context *ctx)
 	}
 #endif
 
+	if (data->promise == NULL) { return(0); }	// .wait(): the caller collects the result from workFinished
 	duk_push_heapptr(ctx, data->promise);		// [promise]
 
 	duk_push_current_function(ctx);				// [promise][func]
@@ -1827,6 +1854,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_wait(duk_context *ctx)
 	}
 
 	if (data->waitingForResult == WAITING_FOR_RESULT__DISPATCHER) { return(ILibDuktape_Error(ctx, "This method call is not waitable")); }
+	if (data->promise != NULL) { return(ILibDuktape_Error(ctx, "Async Operation already in progress")); }
 
 	// If we set this flag, a promise won't be created, instead we can just wait for the response
 	data->waitingForResult = 1;																				// [func]
@@ -1839,7 +1867,12 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_wait(duk_context *ctx)
 		duk_dup(ctx, i);																					// [apply][this][this][args][arg]
 		duk_put_prop_index(ctx, -2, i);																		// [apply][this][this][args]
 	}
-	duk_call_method(ctx, 2);
+	if (duk_pcall_method(ctx, 2) != 0)
+	{
+		// No work was queued, so a later fully async call must not be treated as waited on
+		data->waitingForResult = 0;
+		return(duk_throw(ctx));
+	}
 	
 	sem_wait(&(data->workFinished));
 	ILibDuktape_GenericMarshal_Variable_PUSH(ctx, (void*)(PTRSIZE)data->vars, (int)sizeof(void*));			

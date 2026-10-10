@@ -77,6 +77,11 @@ function main() {
     const globalCallbackBody = extractFunction(genericMarshal, 'void* ILibDuktape_GlobalGenericCallback_Process(int numParms, ...)');
     const invokeAsyncBody = extractFunction(genericMarshal, 'duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync(duk_context *ctx)');
     const waitBody = extractFunction(genericMarshal, 'duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_wait(duk_context *ctx)');
+    const scriptContainer = fs.readFileSync(path.resolve('microscript', 'ILibDuktape_ScriptContainer.c'), 'utf8');
+    const engineFreeBody = extractFunction(scriptContainer, 'void ILibDuktape_ScriptContainer_Engine_free(void *udata, void *ptr)\n{');
+    const engineReallocBody = extractFunction(scriptContainer, 'void *ILibDuktape_ScriptContainer_Engine_realloc(void *udata, void *ptr, duk_size_t size)');
+    const trackedPromiseFinalizerBody = extractFunction(genericMarshal, 'duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_promfinTracked(duk_context *ctx)');
+    const dispatcherDoneBody = extractFunction(genericMarshal, 'void ILibDuktape_GenericMarshal_MethodInvokeAsync_Done_chain(void *chain, void* u)');
     const stopWorkersIndex = destroyBody.indexOf('ILibDuktape_GenericMarshal_StopAsyncWorkers(ctx)');
     const heapFreeIndex = destroyBody.indexOf('duk_destroy_heap(ctx);');
     const nativeCallIndex = workerBody.indexOf('ILibDuktape_GenericMarshal_MethodInvoke_Native');
@@ -110,6 +115,15 @@ function main() {
         shutdownRefusesNewWorkers: invokeAsyncBody.includes('Cannot start an async worker during shutdown') && waitBody.includes('Cannot start an async worker during shutdown'),
         pinnedVariablesAreNotFreed: variableFinalizerBody.includes('if (!ILibDuktape_GenericMarshal_NativeMemoryPinned(ctx)) { free(ptr); }'),
         pinnedModulesAreNotUnloaded: (proxyFinalizerBody.match(/!ILibDuktape_GenericMarshal_NativeMemoryPinned\(ctx\)/g) || []).length === 2,
+        pinnedHeapBlocksAreKept: engineFreeBody.includes('duk_native_memory_pinned') && engineFreeBody.indexOf('return;') < engineFreeBody.indexOf('ILibMemory_Free(ptr);'),
+        pinnedHeapBlocksStopLookingAlive: engineFreeBody.includes('ILibMemory_SecureZero(ILibMemory_RawPtr(ptr), sizeof(ILibMemory_Header));'),
+        pinnedHeapBlocksAreNotMoved: engineReallocBody.includes('duk_native_memory_pinned') && engineReallocBody.includes('ILibDuktape_ScriptContainer_Engine_free(udata, ptr);'),
+        asyncPromiseHoldsDataReference: invokeAsyncBody.includes('ILibDuktape_GenericMarshal_AsyncData_AddRef(data);') && invokeAsyncBody.includes('ILibDuktape_CreateFinalizer(ctx, ILibDuktape_GenericMarshal_MethodInvokeAsync_promfinTracked);'),
+        asyncPromiseFinalizerReleasesReference: trackedPromiseFinalizerBody.includes('ILibDuktape_GenericMarshal_AsyncData_Release(data, 0);') && !trackedPromiseFinalizerBody.includes('ILibMemory_CanaryOK'),
+        dispatcherDetachesPromiseBeforeFree: dispatcherDoneBody.indexOf('duk_del_prop_string(data->ctx, -1, "_data");') >= 0 && dispatcherDoneBody.indexOf('duk_del_prop_string(data->ctx, -1, "_data");') < dispatcherDoneBody.indexOf('ILibMemory_Free(data);'),
+        dispatchNeverPushesCollectedPromise: dispatchBody.includes('if (data->promise == ILibDuktape_GenericMarshal_INVALID_PROMISE) { data->promise = NULL; return; }'),
+        waitModeReturnsWithoutPromise: invokeAsyncBody.includes('if (data->promise == NULL) { return(0); }'),
+        waitResetsAfterFailedCall: waitBody.includes('if (duk_pcall_method(ctx, 2) != 0)') && waitBody.includes('data->waitingForResult = 0;'),
         crossThreadCallbacksSkipTornDownHeap: globalCallbackBody.includes('if (crossThread && (targetData == NULL || (targetData->flags & duk_destroy_heap_in_progress) == duk_destroy_heap_in_progress))'),
     };
 

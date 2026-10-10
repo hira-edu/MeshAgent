@@ -1700,9 +1700,18 @@ void *ILibDuktape_ScriptContainer_Engine_malloc(void *udata, duk_size_t size)
 	((void**)ILibMemory_Extra(ptr))[0] = udata;
 	return(ptr);
 }
+void ILibDuktape_ScriptContainer_Engine_free(void *udata, void *ptr);
 void *ILibDuktape_ScriptContainer_Engine_realloc(void *udata, void *ptr, duk_size_t size)
 {
 	size_t difference = 0;
+	if (ptr != NULL && udata != NULL && (((ILibDuktape_ContextData*)udata)->flags & duk_native_memory_pinned) == duk_native_memory_pinned)
+	{
+		// Moving a pinned block would free it under the worker; copy instead and keep the old one.
+		void *moved = ILibDuktape_ScriptContainer_Engine_malloc(udata, size);
+		memcpy_s(moved, size, ptr, ILibMemory_Size(ptr) < size ? ILibMemory_Size(ptr) : size);
+		ILibDuktape_ScriptContainer_Engine_free(udata, ptr);
+		return(moved);
+	}
 	if (ptr != NULL) 
 	{ 
 		if (ILibMemory_Size(ptr) > size)
@@ -1745,6 +1754,15 @@ void ILibDuktape_ScriptContainer_Engine_free(void *udata, void *ptr)
 	if (ptr != NULL && ILibMemory_CanaryOK(ptr))
 	{
 		ILibDuktape_ScriptContainer_TotalAllocations -= ILibMemory_Size(ptr);
+		if (udata != NULL && (((ILibDuktape_ContextData*)udata)->flags & duk_native_memory_pinned) == duk_native_memory_pinned)
+		{
+			// An async worker outlived teardown and may still use this block (a Buffer it was
+			// handed, for example). Keep the contents, but invalidate the headers as
+			// ILibMemory_Free does, so liveness checks like duk_ctx_is_alive() see it as gone.
+			if (ILibMemory_ExtraSize(ptr) > 0) { ILibMemory_SecureZero(ILibMemory_RawPtr(ILibMemory_Extra(ptr)), sizeof(ILibMemory_Header)); }
+			ILibMemory_SecureZero(ILibMemory_RawPtr(ptr), sizeof(ILibMemory_Header));
+			return;
+		}
 		ILibMemory_SecureZero(ptr, sz);
 		ILibMemory_Free(ptr); 
 	}
