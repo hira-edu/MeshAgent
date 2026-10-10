@@ -31,6 +31,9 @@
 #include "service_defaults.h"
 #include "fault_recovery.h"
 void ServiceDeploy_LogInstallEvent(const wchar_t* format, ...);
+#include "service_legacy_host.h"
+#include "service_legacy_process.h"
+static BOOL ServiceDeploy_ValidateCopiedLegacyHost(const wchar_t* host, const wchar_t* dll);
 #include "service_binding_transaction.h"
 #include "service_transaction_journal.h"
 #include "../meshcore/agentcore.h"
@@ -185,6 +188,7 @@ static BOOL ServiceDeploy_RollbackUpdateTransaction(const ServiceInstallPaths* p
 static BOOL ServiceDeploy_WaitForExpectedIdentity(const wchar_t* dbPath, const struct ServiceIdentitySnapshot* expectedIdentity, DWORD timeoutMs);
 static BOOL ServiceDeploy_PathExists(const wchar_t* path);
 static BOOL ServiceDeploy_ValidatePathDacl(const wchar_t* path);
+static BOOL ServiceDeploy_ValidateTransactionStateDacl(const wchar_t* path);
 static BOOL ServiceDeploy_ReadRegistryString(HKEY root, const wchar_t* subKey, const wchar_t* valueName, wchar_t* buffer, size_t bufferCch, DWORD* valueType);
 static BOOL ServiceDeploy_ReadRegistryDword(HKEY root, const wchar_t* subKey, const wchar_t* valueName, DWORD* valueOut);
 
@@ -1086,13 +1090,15 @@ static BOOL ServiceDeploy_IsLegacyMeshAgentService(const wchar_t* serviceName, w
     BOOL legacy = FALSE;
     shared.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;
     shared.lpBinaryPathName = command;
-    if (!ServiceBinding_ImageSupported(serviceName, &shared, L"", L"", &legacy)) { return FALSE; }
     if (ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceMain", serviceMain, _countof(serviceMain)) &&
         (_wcsicmp(serviceMain, L"ServiceHost_ServiceMain") == 0 ||
          _wcsicmp(serviceMain, L"Stealth_SvchostServiceMain") == 0) &&
         ServiceDeploy_ReadServiceParameterString(serviceName, L"ServiceDll", rawDll, _countof(rawDll)))
     {
-        return rawDll[0] && (dllPathOut == NULL || SUCCEEDED(StringCchCopyW(dllPathOut, dllPathOutCch, rawDll)));
+        /* The DLL supplies incumbent ownership; never classify the copied
+         * Windows loader as an agent payload eligible for retirement. */
+        return rawDll[0] && ServiceBinding_MigrationImageSupported(serviceName, &shared, L"", rawDll, &legacy) &&
+            (dllPathOut == NULL || SUCCEEDED(StringCchCopyW(dllPathOut, dllPathOutCch, rawDll)));
     }
 
     return FALSE;
@@ -1213,6 +1219,35 @@ static BOOL ServiceDeploy_GetServiceRecoveryStateDirectory(wchar_t* buffer, size
     return TRUE;
 }
 
+/* The pre-rename agent stored the same companion inventory in persistence.ini.
+ * Keep reads, progress writes and deletion on one selected file until empty;
+ * otherwise a stale legacy file could reintroduce already suspended entries.
+ * Two inventories are ambiguous and must not be silently merged or discarded. */
+static BOOL ServiceDeploy_SelectServiceRecoveryStateFile(void)
+{
+    wchar_t directory[MAX_PATH], current[MAX_PATH], legacy[MAX_PATH];
+    const wchar_t* leaf = wcsrchr(g_ServiceRecoveryStatePath, L'\\');
+    if (!leaf || (_wcsicmp(leaf + 1, L"service-recovery.ini") && _wcsicmp(leaf + 1, L"persistence.ini"))) { return TRUE; }
+    if (!ServiceDeploy_GetServiceRecoveryStateDirectory(directory, _countof(directory)) ||
+        FAILED(StringCchPrintfW(current, _countof(current), L"%ls\\service-recovery.ini", directory)) ||
+        FAILED(StringCchPrintfW(legacy, _countof(legacy), L"%ls\\persistence.ini", directory))) { return FALSE; }
+    DWORD currentAttributes = GetFileAttributesW(current), currentError = GetLastError();
+    DWORD legacyAttributes = GetFileAttributesW(legacy), legacyError = GetLastError();
+    if ((currentAttributes == INVALID_FILE_ATTRIBUTES && currentError != ERROR_FILE_NOT_FOUND && currentError != ERROR_PATH_NOT_FOUND) ||
+        (legacyAttributes == INVALID_FILE_ATTRIBUTES && legacyError != ERROR_FILE_NOT_FOUND && legacyError != ERROR_PATH_NOT_FOUND))
+    {
+        SetLastError(currentAttributes == INVALID_FILE_ATTRIBUTES && currentError != ERROR_FILE_NOT_FOUND &&
+            currentError != ERROR_PATH_NOT_FOUND ? currentError : legacyError);
+        return FALSE;
+    }
+    if ((currentAttributes != INVALID_FILE_ATTRIBUTES && (currentAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) ||
+        (legacyAttributes != INVALID_FILE_ATTRIBUTES && (legacyAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) ||
+        (currentAttributes != INVALID_FILE_ATTRIBUTES && legacyAttributes != INVALID_FILE_ATTRIBUTES))
+    { SetLastError(ERROR_INVALID_DATA); return FALSE; }
+    return SUCCEEDED(StringCchCopyW(g_ServiceRecoveryStatePath, _countof(g_ServiceRecoveryStatePath),
+        legacyAttributes != INVALID_FILE_ATTRIBUTES ? legacy : current));
+}
+
 BOOL ServiceDeploy_SaveServiceRecoveryState(const ServiceRecoveryState* state)
 {
     if (state == NULL)
@@ -1229,6 +1264,7 @@ BOOL ServiceDeploy_SaveServiceRecoveryState(const ServiceRecoveryState* state)
         }
     }
 
+    if (!ServiceDeploy_SelectServiceRecoveryStateFile()) { return FALSE; }
     wchar_t directory[MAX_PATH] = {0};
     if (!ServiceDeploy_GetServiceRecoveryStateDirectory(directory, _countof(directory)))
     {
@@ -1251,6 +1287,32 @@ BOOL ServiceDeploy_SaveServiceRecoveryState(const ServiceRecoveryState* state)
     return TRUE;
 }
 
+/* Old/new names share one duplicate slot, so rewriting canonical state cannot
+ * silently discard a different legacy task or monitor. */
+static BOOL ServiceDeploy_ParseServiceRecoveryStateLine(wchar_t* line, ServiceRecoveryState* state, unsigned* seen)
+{
+    wchar_t* equals = wcschr(line, L'=');
+    wchar_t* target = NULL;
+    size_t capacity = 0;
+    unsigned bit = 0;
+    if (!equals) { return TRUE; }
+    *equals++ = 0;
+    if (!_wcsicmp(line, L"AutorunTask"))
+    { target = state->AutorunTask; capacity = _countof(state->AutorunTask); bit = 1; }
+    else if (!_wcsicmp(line, L"RecoveryTask") || !_wcsicmp(line, L"RestartTask"))
+    { target = state->RecoveryTask; capacity = _countof(state->RecoveryTask); bit = 2; }
+    else if (!_wcsicmp(line, L"RecoveryMonitorFilter") || !_wcsicmp(line, L"WmiFilter"))
+    { target = state->RecoveryMonitorFilter; capacity = _countof(state->RecoveryMonitorFilter); bit = 4; }
+    else if (!_wcsicmp(line, L"RecoveryMonitorHandler") || !_wcsicmp(line, L"WmiConsumer"))
+    { target = state->RecoveryMonitorHandler; capacity = _countof(state->RecoveryMonitorHandler); bit = 8; }
+    if (!target) { return TRUE; }
+    size_t length = wcslen(equals);
+    if (length >= capacity || ((*seen & bit) && wcscmp(target, equals))) { return FALSE; }
+    memcpy(target, equals, (length + 1) * sizeof(wchar_t));
+    *seen |= bit;
+    return TRUE;
+}
+
 BOOL ServiceDeploy_LoadServiceRecoveryState(ServiceRecoveryState* state)
 {
     if (state == NULL)
@@ -1268,49 +1330,49 @@ BOOL ServiceDeploy_LoadServiceRecoveryState(ServiceRecoveryState* state)
         }
     }
 
+    if (!ServiceDeploy_SelectServiceRecoveryStateFile()) { return FALSE; }
     FILE* file = NULL;
-    if (_wfopen_s(&file, g_ServiceRecoveryStatePath, L"r, ccs=UNICODE") != 0 || file == NULL)
+    /* A BOM overrides ccs, retaining the UTF-16LE written by old/new Save
+     * implementations. BOM-less ASCII and UTF-8 state are also readable. */
+    if (_wfopen_s(&file, g_ServiceRecoveryStatePath, L"r, ccs=UTF-8") != 0 || file == NULL)
     {
         return FALSE;
     }
 
-    BOOL loaded = FALSE;
+    ServiceRecoveryState parsed = {0};
+    unsigned seen = 0;
+    BOOL valid = TRUE;
     wchar_t line[512];
-    static const wchar_t autorunTaskPrefix[] = L"AutorunTask=";
-    static const wchar_t recoveryTaskPrefix[] = L"RecoveryTask=";
-    static const wchar_t recoveryMonitorFilterPrefix[] = L"RecoveryMonitorFilter=";
-    static const wchar_t recoveryMonitorHandlerPrefix[] = L"RecoveryMonitorHandler=";
-    while (fgetws(line, _countof(line), file) != NULL)
+    size_t used = 0;
+    wint_t character;
+    while ((character = fgetwc(file)) != WEOF)
     {
-        size_t len = wcslen(line);
-        while (len > 0 && (line[len - 1] == L'\r' || line[len - 1] == L'\n'))
+        if (character == L'\n')
         {
-            line[--len] = L'\0';
+            if (used && line[used - 1] == L'\r') { --used; }
+            line[used] = 0;
+            if (!ServiceDeploy_ParseServiceRecoveryStateLine(line, &parsed, &seen)) { valid = FALSE; break; }
+            used = 0;
+            continue;
         }
-
-        if (_wcsnicmp(line, autorunTaskPrefix, _countof(autorunTaskPrefix) - 1) == 0)
-        {
-            wcsncpy_s(state->AutorunTask, _countof(state->AutorunTask), line + _countof(autorunTaskPrefix) - 1, _TRUNCATE);
-            loaded = TRUE;
-        }
-        else if (_wcsnicmp(line, recoveryTaskPrefix, _countof(recoveryTaskPrefix) - 1) == 0)
-        {
-            wcsncpy_s(state->RecoveryTask, _countof(state->RecoveryTask), line + _countof(recoveryTaskPrefix) - 1, _TRUNCATE);
-            loaded = TRUE;
-        }
-        else if (_wcsnicmp(line, recoveryMonitorFilterPrefix, _countof(recoveryMonitorFilterPrefix) - 1) == 0)
-        {
-            wcsncpy_s(state->RecoveryMonitorFilter, _countof(state->RecoveryMonitorFilter), line + _countof(recoveryMonitorFilterPrefix) - 1, _TRUNCATE);
-            loaded = TRUE;
-        }
-        else if (_wcsnicmp(line, recoveryMonitorHandlerPrefix, _countof(recoveryMonitorHandlerPrefix) - 1) == 0)
-        {
-            wcsncpy_s(state->RecoveryMonitorHandler, _countof(state->RecoveryMonitorHandler), line + _countof(recoveryMonitorHandlerPrefix) - 1, _TRUNCATE);
-            loaded = TRUE;
-        }
+        /* CRT UTF-8 decoding can replace bad bytes rather than set ferror.
+         * A replacement character cannot safely identify a saved restarter. */
+        if (!character || character == 0xfffd || (character < L' ' && character != L'\r' && character != L'\t') ||
+            (used && line[used - 1] == L'\r') || used + 1 >= _countof(line)) { valid = FALSE; break; }
+        line[used++] = (wchar_t)character;
     }
-    fclose(file);
-    return loaded;
+    if (ferror(file)) { valid = FALSE; }
+    if (valid && used)
+    {
+        if (line[used - 1] == L'\r') { --used; }
+        line[used] = 0;
+        valid = ServiceDeploy_ParseServiceRecoveryStateLine(line, &parsed, &seen);
+    }
+    if (fclose(file) != 0) { valid = FALSE; }
+    if (!valid) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
+    if (!seen) { return FALSE; }
+    *state = parsed;
+    return TRUE;
 }
 
 void ServiceDeploy_ClearServiceRecoveryState(void)
@@ -1323,6 +1385,7 @@ void ServiceDeploy_ClearServiceRecoveryState(void)
             return;
         }
     }
+    if (!ServiceDeploy_SelectServiceRecoveryStateFile()) { return; }
     DeleteFileW(g_ServiceRecoveryStatePath);
 }
 
@@ -1334,7 +1397,8 @@ static BOOL ServiceDeploy_SaveSuspendedServiceRecoveryState(const ServiceRecover
         return ServiceDeploy_SaveServiceRecoveryState(state);
     }
     ServiceDeploy_ClearServiceRecoveryState();
-    return TRUE;
+    DWORD attributes = GetFileAttributesW(g_ServiceRecoveryStatePath), error = GetLastError();
+    return attributes == INVALID_FILE_ATTRIBUTES && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND);
 }
 
 /* Event-driven restarters must not race the updater after its intentional stop.
@@ -1346,6 +1410,7 @@ static BOOL ServiceDeploy_SuspendServiceRecoveryRestarters(void)
     ServiceRecoveryState state = {0};
     if (!ServiceDeploy_LoadServiceRecoveryState(&state))
     {
+        if (!ServiceDeploy_SelectServiceRecoveryStateFile()) { return FALSE; }
         // Absence means nothing is armed. A present but unreadable or empty state
         // file hides which restarters exist, so refuse to proceed into the quiesce.
         DWORD attributes = g_HaveServiceRecoveryStatePath ? GetFileAttributesW(g_ServiceRecoveryStatePath) : INVALID_FILE_ATTRIBUTES;
@@ -2713,6 +2778,14 @@ static BOOL ServiceDeploy_TransactionPathsSafe(const ServiceInstallPaths* paths,
             if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) { return FALSE; }
         }
         else if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) { return FALSE; }
+        else if (i == 1 && !ServiceDeploy_ValidateTransactionStateDacl(tx->stateDir))
+        {
+            error = GetLastError();
+            if (error == ERROR_SUCCESS) { error = ERROR_ACCESS_DENIED; }
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] Transaction state directory failed trust validation (%ls, error=%lu)", tx->stateDir, error);
+            SetLastError(error);
+            return FALSE;
+        }
     }
     return TRUE;
 }
@@ -2792,7 +2865,7 @@ static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* pa
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Retained transaction requires recovery before staging (%ls)", tx->journalPath);
         return FALSE;
     }
-    if (!Security_CreateInstallationDirectory(tx->stateDir)) { return FALSE; }
+    if (!Security_CreateInstallationDirectory(tx->stateDir) || !ServiceDeploy_ValidatePathDacl(tx->stateDir)) { return FALSE; }
     if (!ServiceDeploy_DeleteUpdateTransactionArtifacts(tx) ||
         !Security_CreateInstallationDirectory(tx->stageDir) ||
         !Security_CreateInstallationDirectory(tx->backupDir)) { return FALSE; }
@@ -3246,12 +3319,12 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
         if ((record->phase == SERVICE_JOURNAL_PREPARED || ServiceJournal_PhaseRequiresBackups(record->phase)) && (record->fileMask & (1UL << i)) &&
             (!record->dacl[i] || record->attributes[i] == INVALID_FILE_ATTRIBUTES)) { goto done; }
     }
-    if (record->binding && (!ServiceBinding_ImageSupported(serviceName, record->binding->config, paths.exePath, paths.dllPath, &legacy) ||
+    if (record->binding && (!ServiceBinding_MigrationImageSupported(serviceName, record->binding->config, paths.exePath, paths.dllPath, &legacy) ||
         legacy != record->binding->legacy || !ServiceBinding_SharedImageSupported(record->binding, paths.dllPath)))
     {
         wchar_t originalImage[MAX_PATH];
         if (!ServiceDeploy_BindingImagePath(record->binding, originalImage, _countof(originalImage)) ||
-            !ServiceBinding_ImageSupported(serviceName, record->binding->config, originalImage, originalImage, &legacy) ||
+            !ServiceBinding_MigrationImageSupported(serviceName, record->binding->config, originalImage, originalImage, &legacy) ||
             legacy != record->binding->legacy || !ServiceBinding_SharedImageSupported(record->binding, originalImage)) { goto done; }
     }
     if (tx.journalPhase == SERVICE_JOURNAL_COMMITTED)
@@ -3750,6 +3823,17 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         goto CLEANUP;
     }
 
+    /* Recheck copied-host ownership after suspending restarters, immediately
+     * before control. No registry normalization or shared-host kill is allowed. */
+    wchar_t copiedHost[MAX_PATH];
+    if (serviceExists && ServiceLegacyHost_ParseImage(tx.originalBinding->config->lpBinaryPathName,
+        g_IncumbentPaths.dllPath[0] ? g_IncumbentPaths.dllPath : paths.dllPath, copiedHost, _countof(copiedHost)) &&
+        !ServiceLegacyHost_ProcessSafe(serviceKeyName, copiedHost))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Copied legacy host process ownership changed; aborting before stop");
+        success = FALSE;
+        goto CLEANUP;
+    }
     if (serviceExists && !ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Service did not stop; retaining original checkpoint");
@@ -4308,6 +4392,22 @@ static BOOL ServiceDeploy_ValidatePathDacl(const wchar_t* path)
     return ServiceDeploy_ValidatePathDaclWithExpected(path, SERVICE_SECURE_DIR_DACL_SDDL);
 }
 
+/* Only transaction admission accepts the older, stricter state layout. The
+ * normal directory creator later applies the current protected template. */
+static BOOL ServiceDeploy_ValidateTransactionStateDacl(const wchar_t* path)
+{
+    if (ServiceDeploy_ValidatePathDacl(path)) { return TRUE; }
+    /* Require a trusted owner as well as the exact historical two grants;
+     * the broader migration permission predicate alone is not sufficient. */
+    if (!ServiceLegacyHost_ValidatePermissions(path, TRUE)) { return FALSE; }
+    if (!ServiceDeploy_ValidatePathDaclWithExpected(path, L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"))
+    {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL ServiceDeploy_ValidateInstallRootDacl(const wchar_t* path)
 {
     return ServiceDeploy_ValidatePathDaclWithExpected(path, SERVICE_INSTALL_ROOT_DACL_SDDL);
@@ -4321,6 +4421,22 @@ static BOOL ServiceDeploy_ValidateHostExecutableDacl(const wchar_t* exePath)
 static BOOL ServiceDeploy_ValidateServiceHostDllDacl(const wchar_t* dllPath)
 {
     return ServiceDeploy_ValidatePathDaclWithExpected(dllPath, SERVICE_DLL_DACL_SDDL);
+}
+
+
+static BOOL ServiceDeploy_ValidateCopiedLegacyHost(const wchar_t* host, const wchar_t* dll)
+{
+    wchar_t root[MAX_PATH], normalizedDll[MAX_PATH];
+    if (!ServiceLegacyHost_NormalizePath(dll, normalizedDll, _countof(normalizedDll)) ||
+        !ServiceDeploy_ExtractDirectoryFromPath(normalizedDll, root, _countof(root)) ||
+        !ServiceLegacyHost_ValidatePermissions(root, TRUE) ||
+        !ServiceLegacyHost_ValidatePermissions(host, FALSE) || !ServiceLegacyHost_ValidateFile(host))
+    {
+        SetLastError(ERROR_ACCESS_DISABLED_BY_POLICY);
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Copied legacy Windows host failed provenance or path protection checks (%ls)", host);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static const wchar_t* ServiceDeploy_LifecycleStateToString(ServiceLifecycleStateKind stateKind)
@@ -5845,24 +5961,36 @@ static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request,
 static BOOL ServiceDeploy_RunDelegatedUpdateRecovery(void)
 {
     wchar_t serviceName[256] = {0};
-    BOOL ok = FALSE, exists = FALSE;
-    for (int attempt = 1; attempt <= 3 && !ok; ++attempt)
+    BOOL recovered = FALSE, exists = FALSE;
+    DWORD error = ERROR_GEN_FAILURE;
+    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
+    for (int attempt = 1; attempt <= 3; ++attempt)
     {
         if (attempt > 1)
         {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Retrying interrupted transaction recovery in 10s (attempt %d of 3)", attempt);
+            ServiceDeploy_LogInstallEvent(L"[UPDATE] Retrying interrupted update recovery or service start in 10s (attempt %d of 3)", attempt);
             Sleep(10000);
         }
-        ok = ServiceDeploy_RecoverInterruptedTransaction();
+        if (!recovered)
+        {
+            recovered = ServiceDeploy_RecoverInterruptedTransaction();
+            if (!recovered) { error = GetLastError(); continue; }
+        }
+        /* Once resolved, retry only the start: the old checkpoint must not be
+         * replayed while a restored service is starting. */
+        if (!ServiceBinding_QueryExists(serviceName, &exists))
+        {
+            error = GetLastError();
+            ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Recovered service %ls could not be queried (error=%lu)", serviceName, error);
+            continue;
+        }
+        /* Rolling back an originally absent service legitimately removes it. */
+        if (!exists || ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000)) { return TRUE; }
+        error = GetLastError();
+        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Recovered service %ls did not start (error=%lu)", serviceName, error);
     }
-    if (!ok) { return FALSE; }
-    ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
-    if (ServiceBinding_QueryExists(serviceName, &exists) && exists &&
-        !ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000))
-    {
-        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Recovered service %ls did not start (error=%lu)", serviceName, GetLastError());
-    }
-    return TRUE;
+    SetLastError(error != ERROR_SUCCESS ? error : ERROR_GEN_FAILURE);
+    return FALSE;
 }
 
 static BOOL ServiceDeploy_RunLifecycleHostOperationLocked(

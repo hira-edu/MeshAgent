@@ -123,6 +123,22 @@ def main():
                 deploy.os.environ["MESHCENTRAL_TEST_DELAY"] = old_value
 
     original_run = deploy.subprocess.run
+    local_run_options = {}
+
+    def capture_local_run(command, **kwargs):
+        local_run_options.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "[]", "")
+
+    try:
+        deploy.subprocess.run = capture_local_run
+        deploy.run_local_command(["node", "meshctrl.js"], ROOT, timeout=17)
+    finally:
+        deploy.subprocess.run = original_run
+    assert local_run_options["encoding"] == "utf-8"
+    assert local_run_options["text"] is True
+    assert local_run_options["timeout"] == 17
+
+    original_run = deploy.subprocess.run
     original_sleep = deploy.time.sleep
     original_retries = deploy.REMOTE_COMMAND_RETRIES
     original_success_delay = deploy.REMOTE_SUCCESS_DELAY_SECONDS

@@ -90,6 +90,7 @@ PUBLISH_ROLE_BACKUP_DIRS = {
 HASHAGENTS_MANIFEST_ROLES = ("module", "signed")
 CORE_PUBLISH_ROLE_DIRS = {
     "data-core": DATA_ROOT,
+    "data-plugin": f"{DATA_ROOT}/plugins",
     "module-core": MODULE_AGENTS,
     "module-root": f"{MESHCENTRAL_BASE}/node_modules/meshcentral",
     "module-public": f"{MESHCENTRAL_BASE}/node_modules/meshcentral/public",
@@ -97,6 +98,7 @@ CORE_PUBLISH_ROLE_DIRS = {
 }
 CORE_PUBLISH_ROLE_BACKUP_DIRS = {
     "data-core": "datacore",
+    "data-plugin": "dataplugins",
     "module-core": "modulecore",
     "module-root": "moduleroot",
     "module-public": "modulepublic",
@@ -346,6 +348,26 @@ CORE_ARTIFACTS = {
         "local_path": "../MeshCentral/public/scripts/agent-desktop-0.0.2-min.js",
         "remote_relative_path": "scripts/agent-desktop-0.0.2-min.js",
         "publish_targets": ("module-public", "web-public"),
+    },
+    "plugins/nativeruntime/README.md": {
+        "local_path": "../MeshCentral/plugins/nativeruntime/README.md",
+        "remote_relative_path": "nativeruntime/README.md",
+        "publish_targets": ("data-plugin",),
+    },
+    "plugins/nativeruntime/client.js": {
+        "local_path": "../MeshCentral/plugins/nativeruntime/client.js",
+        "remote_relative_path": "nativeruntime/client.js",
+        "publish_targets": ("data-plugin",),
+    },
+    "plugins/nativeruntime/config.json": {
+        "local_path": "../MeshCentral/plugins/nativeruntime/config.json",
+        "remote_relative_path": "nativeruntime/config.json",
+        "publish_targets": ("data-plugin",),
+    },
+    "plugins/nativeruntime/nativeruntime.js": {
+        "local_path": "../MeshCentral/plugins/nativeruntime/nativeruntime.js",
+        "remote_relative_path": "nativeruntime/nativeruntime.js",
+        "publish_targets": ("data-plugin",),
     },
 }
 
@@ -1989,6 +2011,7 @@ def run_local_command(command, cwd, timeout=120):
         cwd=str(cwd),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=timeout,
     )
 

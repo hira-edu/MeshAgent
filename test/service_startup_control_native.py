@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Exercise the production service-start transition against concurrent stop requests."""
 
+import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 
@@ -42,9 +44,9 @@ def main() -> None:
     )
     fixture = r'''
 #include <assert.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <threads.h>
 #include <wchar.h>
 
 #define TRUE 1
@@ -68,8 +70,8 @@ typedef int BOOL;
 typedef unsigned long DWORD;
 typedef void* SERVICE_STATUS_HANDLE;
 typedef struct MeshAgentHostContainer { int marker; int exitCode; } MeshAgentHostContainer;
-typedef pthread_mutex_t SRWLOCK;
-#define SRWLOCK_INIT PTHREAD_MUTEX_INITIALIZER
+typedef mtx_t SRWLOCK;
+#define SRWLOCK_INIT {0}
 typedef struct SERVICE_STATUS {
     unsigned long dwCurrentState;
     unsigned long dwControlsAccepted;
@@ -94,8 +96,8 @@ static unsigned destroyCalls;
 static unsigned telemetryCalls;
 static int g_ServiceHostTelemetry;
 
-static void AcquireSRWLockExclusive(SRWLOCK* lock) { assert(pthread_mutex_lock(lock) == 0); }
-static void ReleaseSRWLockExclusive(SRWLOCK* lock) { assert(pthread_mutex_unlock(lock) == 0); }
+static void AcquireSRWLockExclusive(SRWLOCK* lock) { assert(mtx_lock(lock) == thrd_success); }
+static void ReleaseSRWLockExclusive(SRWLOCK* lock) { assert(mtx_unlock(lock) == thrd_success); }
 static void AcquireSRWLockShared(SRWLOCK* lock) { AcquireSRWLockExclusive(lock); }
 static void ReleaseSRWLockShared(SRWLOCK* lock) { ReleaseSRWLockExclusive(lock); }
 static BOOL SetServiceStatus(SERVICE_STATUS_HANDLE handle, SERVICE_STATUS* status) {
@@ -136,26 +138,27 @@ static void reset(void) {
     telemetryCalls = 0;
 }
 
-static void* publish_thread(void* ignored) {
+static int publish_thread(void* ignored) {
     (void)ignored;
     (void)ServiceHost_PublishRunningAgent(&agent);
-    return NULL;
+    return 0;
 }
 
-static void* stop_thread(void* ignored) {
+static int stop_thread(void* ignored) {
     (void)ignored;
     ServiceHost_BeginStopRequest();
-    return NULL;
+    return 0;
 }
 
-static void* chain_stop_thread(void* ignored) {
+static int chain_stop_thread(void* ignored) {
     (void)ignored;
     ServiceHost_AgentChainStopping(NULL, &agent);
-    return NULL;
+    return 0;
 }
 
 int main(void) {
     unsigned index;
+    assert(mtx_init(&g_ServiceHostControlLock, mtx_plain) == thrd_success);
     reset();
     g_ServiceHostStatusHandle = NULL;
     ServiceHost_BeginStopRequest();
@@ -218,27 +221,27 @@ int main(void) {
     assert(g_ServiceHostStatus.dwCurrentState == SERVICE_STOPPED);
 
     for (index = 0; index < 10000; ++index) {
-        pthread_t publish;
-        pthread_t stop;
+        thrd_t publish;
+        thrd_t stop;
         reset();
-        assert(pthread_create(&publish, NULL, publish_thread, NULL) == 0);
-        assert(pthread_create(&stop, NULL, stop_thread, NULL) == 0);
-        assert(pthread_join(publish, NULL) == 0);
-        assert(pthread_join(stop, NULL) == 0);
+        assert(thrd_create(&publish, publish_thread, NULL) == thrd_success);
+        assert(thrd_create(&stop, stop_thread, NULL) == thrd_success);
+        assert(thrd_join(publish, NULL) == thrd_success);
+        assert(thrd_join(stop, NULL) == thrd_success);
         assert(g_ServiceHostStopRequested);
         assert(g_ServiceHostStatus.dwCurrentState == SERVICE_STOP_PENDING);
         assert(!g_ServiceHostRunning);
         if (g_ServiceHostAgent != NULL) { assert(stopDispatches == 1); }
     }
     for (index = 0; index < 10000; ++index) {
-        pthread_t chainStop;
-        pthread_t stop;
+        thrd_t chainStop;
+        thrd_t stop;
         reset();
         assert(ServiceHost_PublishRunningAgent(&agent));
-        assert(pthread_create(&chainStop, NULL, chain_stop_thread, NULL) == 0);
-        assert(pthread_create(&stop, NULL, stop_thread, NULL) == 0);
-        assert(pthread_join(chainStop, NULL) == 0);
-        assert(pthread_join(stop, NULL) == 0);
+        assert(thrd_create(&chainStop, chain_stop_thread, NULL) == thrd_success);
+        assert(thrd_create(&stop, stop_thread, NULL) == thrd_success);
+        assert(thrd_join(chainStop, NULL) == thrd_success);
+        assert(thrd_join(stop, NULL) == thrd_success);
         assert(g_ServiceHostAgent == NULL);
         assert(!g_ServiceHostRunning);
         assert(stopDispatches <= 1);
@@ -251,6 +254,7 @@ int main(void) {
             if (!planned) { assert(completionError == ERROR_PROCESS_ABORTED); }
         }
     }
+    mtx_destroy(&g_ServiceHostControlLock);
     puts("service startup control: early and concurrent stop requests remain latched");
     return 0;
 }
@@ -260,22 +264,37 @@ int main(void) {
         source_path = work / "fixture.c"
         binary_path = work / "fixture"
         source_path.write_text(fixture)
-        subprocess.run(
-            [
-                "cc",
+        compiler = os.environ.get("CC", "clang" if os.name == "nt" else "cc")
+        command = [
+                compiler,
                 "-std=c11",
                 "-Wall",
                 "-Wextra",
                 "-Werror",
                 "-fsanitize=address,undefined",
-                "-pthread",
                 str(source_path),
                 "-o",
                 str(binary_path),
-            ],
-            check=True,
-        )
-        subprocess.run([str(binary_path)], check=True, timeout=60)
+            ]
+        if os.name != "nt":
+            command.insert(-3, "-pthread")
+        subprocess.run(command, check=True)
+        runtime_env = os.environ.copy()
+        if os.name == "nt":
+            compiler_path = shutil.which(compiler)
+            if compiler_path:
+                runtimes = list(
+                    pathlib.Path(compiler_path).parent.parent.glob(
+                        "lib/clang/*/lib/windows/clang_rt.asan_dynamic-*.dll"
+                    )
+                )
+                if runtimes:
+                    runtime_env["PATH"] = (
+                        str(runtimes[0].parent)
+                        + os.pathsep
+                        + runtime_env.get("PATH", "")
+                    )
+        subprocess.run([str(binary_path)], check=True, timeout=60, env=runtime_env)
 
 
 if __name__ == "__main__":

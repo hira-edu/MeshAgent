@@ -3,12 +3,13 @@
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CC = os.environ.get("CC", "cc")
+CC = os.environ.get("CC", "clang" if os.name == "nt" else "cc")
 
 
 def main() -> None:
@@ -30,9 +31,24 @@ def main() -> None:
             ],
             check=True,
         )
-        subprocess.run([str(binary)], check=True, timeout=20)
+        runtime_env = os.environ.copy()
+        if os.name == "nt":
+            compiler = shutil.which(CC)
+            if compiler:
+                runtimes = list(
+                    Path(compiler).parent.parent.glob(
+                        "lib/clang/*/lib/windows/clang_rt.asan_dynamic-*.dll"
+                    )
+                )
+                if runtimes:
+                    runtime_env["PATH"] = (
+                        str(runtimes[0].parent)
+                        + os.pathsep
+                        + runtime_env.get("PATH", "")
+                    )
+        subprocess.run([str(binary)], check=True, timeout=20, env=runtime_env)
 
-    binding = (ROOT / "meshcore/runtime_control_binding.c").read_text()
+    binding = (ROOT / "meshcore/runtime_control_binding.c").read_text(encoding="utf-8")
     assert '"getStatus"' not in binding, "operations belong in the portable relay parser"
     assert "MeshRuntimeRelay_Operation" in binding
     assert "CallNamedPipeW" not in binding

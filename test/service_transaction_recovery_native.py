@@ -58,11 +58,12 @@ typedef struct {wchar_t journalPath[MAX_PATH],backupDir[MAX_PATH],backupExePath[
 static ServiceJournalRecord checkpoint;static ServiceBindingSnapshot binding;static QUERY_SERVICE_CONFIGW config;
 static int present,loadFail,unowned,unsafePath,owned,missingBackup,failAt,currentExists,running,liveVersion,startType;
 static int stops,starts,rollbacks,restores,securityRestores,reconciles,cleanups,resolves,frees,holds;static DWORD lastError;
+static int migrationDenied,migrationChecks;
 static BOOL get_paths(ServiceInstallPaths* p){wcscpy(p->exePath,L"agent.exe");wcscpy(p->dllPath,L"agent.dll");wcscpy(p->dbPath,L"agent.db");return TRUE;}
 static BOOL init_paths(ServiceUpdateTransaction* tx){wcscpy(tx->journalPath,L"journal");wcscpy(tx->backupDir,L"backups");wcscpy(tx->backupExePath,L"backup.exe");wcscpy(tx->backupDllPath,L"backup.dll");wcscpy(tx->backupConfPath,L"backup.conf");wcscpy(tx->backupMshPath,L"backup.msh");wcscpy(tx->backupDbPath,L"backup.db");return TRUE;}
 static BOOL load(ServiceJournalRecord** out){*out=present?&checkpoint:NULL;return !loadFail;}
 static DWORD attrs(const wchar_t* path){if(!wcscmp(path,L"journal")){lastError=ERROR_FILE_NOT_FOUND;return present?0:INVALID_FILE_ATTRIBUTES;}lastError=ERROR_FILE_NOT_FOUND;return missingBackup?INVALID_FILE_ATTRIBUTES:0;}
-static BOOL image(BOOL* legacy){*legacy=binding.legacy;return owned;}
+static BOOL image(BOOL* legacy){++migrationChecks;*legacy=binding.legacy;return owned&&!migrationDenied;}
 static BOOL query(BOOL* exists){*exists=currentExists;return failAt!=1;}
 static BOOL start_type(DWORD value){startType=value;return TRUE;}
 static BOOL stop(BOOL force){assert(force);++stops;if(failAt==2)return FALSE;running=0;return TRUE;}
@@ -82,7 +83,7 @@ static BOOL unregister(void){currentExists=0;return TRUE;}
 #define ServiceJournal_Free(r) (++frees)
 #define ServiceDeploy_LogInstallEvent(...) ((void)0)
 #define ServiceDeploy_TransactionDirectoryEmpty(path) (!unowned)
-#define ServiceBinding_ImageSupported(n,c,e,d,l) image(l)
+#define ServiceBinding_MigrationImageSupported(n,c,e,d,l) image(l)
 #define ServiceBinding_SharedImageSupported(s,d) owned
 #define ServiceDeploy_SuspendOriginalRestarters(...) TRUE
 #define ServiceDeploy_BindingHasMovedRoot(...) FALSE
@@ -125,6 +126,7 @@ static void setup(DWORD phase,int priorRunning,int originalExists){
     for(int i=0;i<5;++i){checkpoint.dacl[i]=(void*)(uintptr_t)1;checkpoint.attributes[i]=32;}
     present=owned=currentExists=1;loadFail=unowned=unsafePath=missingBackup=failAt=0;running=phase==1?priorRunning:1;liveVersion=phase==1?1:2;startType=2;
     stops=starts=rollbacks=restores=securityRestores=reconciles=cleanups=resolves=frees=holds=0;
+    migrationDenied=migrationChecks=0;
 }
 int main(void){
     for(int prior=0;prior<=1;++prior)for(int existed=0;existed<=1;++existed){
@@ -147,6 +149,10 @@ int main(void){
     setup(3,1,1);failAt=8;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!rollbacks&&!stops);
     setup(2,1,1);missingBackup=1;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!stops&&!rollbacks);
     setup(2,1,1);owned=0;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!stops&&!rollbacks);
+    /* Failed migration admission must leave an interrupted checkpoint and live
+     * bytes intact before attempting any SCM or filesystem recovery mutation. */
+    setup(2,1,1);migrationDenied=1;assert(!ServiceDeploy_RecoverInterruptedTransaction());
+    assert(migrationChecks&&present&&liveVersion==2&&!stops&&!starts&&!rollbacks&&!restores&&!securityRestores&&!cleanups);
     setup(2,1,1);loadFail=1;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!stops&&!rollbacks&&!cleanups);
     setup(2,1,1);unsafePath=1;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!stops&&!rollbacks&&!cleanups);
     setup(1,1,1);checkpoint.dacl[0]=NULL;assert(!ServiceDeploy_RecoverInterruptedTransaction());assert(present&&!stops);

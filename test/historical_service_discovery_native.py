@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 deploy = (ROOT / 'meshservice/service_deployment.c').read_text()
 binding = (ROOT / 'meshservice/service_binding_transaction.h').read_text()
 host = (ROOT / 'meshservice/service_host.c').read_text()
+legacy_host = (ROOT / 'meshservice/service_legacy_host.h').read_text()
 
 def extract(source, name):
     masked = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
@@ -29,6 +30,13 @@ prelude = r'''
 #define MESH_RUNTIME_HOST_ENTRY_LEGACY_SERVICE_W L"MeshServiceHostW"
 static const wchar_t *image, *entry, *parameterDll;
 static int hijackedPrefix;
+/* Trust, reparse and ACL probes belong to the dedicated host-validation suite.
+ * This fixture checks that discovery propagates each denied result. */
+static int copiedTrust=1, copiedReparse, copiedWritable, copiedValidationCalls;
+static BOOL ServiceDeploy_ValidateCopiedLegacyHost(const wchar_t* hostPath,const wchar_t* dll) {
+    assert(hostPath&&*hostPath&&dll&&*dll);++copiedValidationCalls;
+    return copiedTrust&&!copiedReparse&&!copiedWritable;
+}
 static DWORD fixtureAttributes(const wchar_t* path) {
     if(hijackedPrefix&&!_wcsicmp(path,L"C:\\Program.exe"))return FILE_ATTRIBUTE_NORMAL;
     SetLastError(ERROR_FILE_NOT_FOUND);return INVALID_FILE_ATTRIBUTES;
@@ -78,15 +86,39 @@ int main(void) {
     entry=L"Stealth_SvchostServiceMain";parameterDll=L"C:\\Legacy\\meshsvc.dll";
     accepted(L"%SystemRoot%\\System32\\svchost.exe -k netsvcs -p",parameterDll);
     rejected(L"C:\\fake\\svchost.exe -k netsvcs");rejected(NULL);
+    accepted(L"C:\\Legacy\\svchost.exe -k netsvcs -p",parameterDll);
+    accepted(L"\"C:\\Legacy\\svchost.exe\" -k netsvcs",parameterDll);
+    rejected(L"C:\\Other\\svchost.exe -k netsvcs -p");
+    rejected(L"C:\\Legacy\\svchost.exe -k netsvcs -p extra");
+    rejected(L"C:\\Legacy\\svchost.exe -k other");
+    rejected(L"C:\\Legacy\\other.exe -k netsvcs -p");
+    rejected(L"C:\\Legacy\\..\\Legacy\\svchost.exe -k netsvcs -p");
+    rejected(L"\\\\server\\Legacy\\svchost.exe -k netsvcs -p");
+    wchar_t normalizedHost[MAX_PATH];
+    assert(!ServiceLegacyHost_ParseImage(L"C:\\\\Legacy\\\\svchost.exe -k netsvcs -p",L"C:\\\\Legacy\\\\meshsvc.dll",normalizedHost,MAX_PATH));
+    assert(!normalizedHost[0]);
+    parameterDll=L"C:\\\\Legacy\\\\meshsvc.dll";
+    rejected(L"C:\\\\Legacy\\\\svchost.exe -k netsvcs -p");
+    parameterDll=L"C:\\Legacy\\meshsvc.dll";
+    copiedTrust=0;rejected(L"C:\\Legacy\\svchost.exe -k netsvcs -p");copiedTrust=1;
+    copiedReparse=1;rejected(L"C:\\Legacy\\svchost.exe -k netsvcs -p");copiedReparse=0;
+    copiedWritable=1;rejected(L"C:\\Legacy\\svchost.exe -k netsvcs -p");copiedWritable=0;
+    int beforeInvalidEntry=copiedValidationCalls;entry=L"OtherExport";
+    rejected(L"C:\\Legacy\\svchost.exe -k netsvcs -p");assert(copiedValidationCalls==beforeInvalidEntry);
+    entry=L"Stealth_SvchostServiceMain";parameterDll=L"C:\\Program Files\\Legacy\\meshsvc.dll";
+    rejected(L"C:\\Program Files\\Legacy\\svchost.exe -k netsvcs -p");
+    accepted(L"\"C:\\Program Files\\Legacy\\svchost.exe\" -k netsvcs -p",parameterDll);
     image=L"\"C:\\Windows\\System32\\rundll32.exe\" \"C:\\Legacy\\diagsvc.dll\",MeshServiceHostW";
     wchar_t tiny[1];assert(!ServiceDeploy_IsLegacyMeshAgentService(L"Agent",tiny,_countof(tiny)));
-    puts("Historical discovery: quoted/unquoted EXE, old callback, shared host, arguments and foreign hosts passed");return 0;
+    puts("Historical discovery: EXE/callback/shared hosts, copied-host migration and denied trust/ownership passed");return 0;
 }
 '''
 arrays = '\n'.join(re.search(r'static const wchar_t\* const '+name+r'\[\] = \{.*?\};', deploy, re.S).group()
                    for name in ('g_LegacyExeNames',))
-production = (extract(host,'ServiceHost_ParseImagePath') + extract(binding,'ServiceBinding_IsLegacyExe') +
-              extract(binding,'ServiceBinding_ParseCallbackImage') + extract(binding,'ServiceBinding_LegacyArgumentsSupported') + extract(binding,'ServiceBinding_ImageSupported') + arrays + extract(deploy,'ServiceDeploy_wcsistr') +
+production = (extract(legacy_host,'ServiceLegacyHost_NormalizePath') + extract(legacy_host,'ServiceLegacyHost_IsCanonicalPath') + extract(legacy_host,'ServiceLegacyHost_ParseImage') +
+              extract(host,'ServiceHost_ParseImagePath') + extract(binding,'ServiceBinding_IsLegacyExe') +
+              extract(binding,'ServiceBinding_ParseCallbackImage') + extract(binding,'ServiceBinding_LegacyArgumentsSupported') + extract(binding,'ServiceBinding_ImageSupported') +
+              extract(binding,'ServiceBinding_MigrationImageSupported') + arrays + extract(deploy,'ServiceDeploy_wcsistr') +
               extract(deploy,'ServiceDeploy_PathContainsLeafInsensitive') + extract(deploy,'ServiceDeploy_ExtractExecutableFromCommand') +
               extract(deploy,'ServiceDeploy_IsLegacyMeshAgentService'))
 with tempfile.TemporaryDirectory(prefix='historical-discovery-') as temporary:

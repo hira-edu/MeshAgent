@@ -13,6 +13,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 source = (ROOT / 'meshservice/service_binding_transaction.h').read_text()
+legacy_host = (ROOT / 'meshservice/service_legacy_host.h').read_text()
 prefix = source[:source.index('static BOOL ServiceBinding_ReadValue')]
 prefix = prefix.replace('#ifndef MESH_SERVICE_BINDING_TRANSACTION_H', '').replace('#define MESH_SERVICE_BINDING_TRANSACTION_H', '')
 # Read shared test definitions as data, without running another suite.
@@ -21,14 +22,15 @@ prelude = next(ast.literal_eval(node.value) for node in module.body if isinstanc
 # Only the UTF-16/types portion is needed here; atomic file mocks are separate.
 prelude = prelude[:prelude.index('/* Two files model atomic replacement')].replace('#include <wchar.h>', '')
 masked = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', lambda m: ' ' * len(m.group()), source, flags=re.S)
-def extract(name):
-    match = re.search(r'static BOOL ' + name + r'\s*\([^;{]+\)\s*\{', masked)
+def extract(name, text=source):
+    selected_mask = masked if text is source else re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', lambda m: ' ' * len(m.group()), text, flags=re.S)
+    match = re.search(r'static BOOL ' + name + r'\s*\([^;{]+\)\s*\{', selected_mask)
     assert match, name
     end, depth = match.end(), 1
     while depth:
-        depth += (masked[end] == '{') - (masked[end] == '}')
+        depth += (selected_mask[end] == '{') - (selected_mask[end] == '}')
         end += 1
-    return source[match.start():end]
+    return text[match.start():end]
 
 mocks = r'''
 typedef intptr_t HKEY; typedef intptr_t SC_HANDLE; typedef int LONG; typedef unsigned int UINT;
@@ -49,6 +51,8 @@ typedef intptr_t HKEY; typedef intptr_t SC_HANDLE; typedef int LONG; typedef uns
 #define wcslen wide_len
 static wchar_t* wide_chr(const wchar_t* p,wchar_t c){for(;;++p){if(*p==c)return (wchar_t*)p;if(!*p)return NULL;}}
 #define wcschr wide_chr
+static wchar_t* wide_rchr(const wchar_t* p,wchar_t c){const wchar_t* result=NULL;do{if(*p==c)result=p;}while(*p++);return (wchar_t*)result;}
+#define wcsrchr wide_rchr
 static int wide_compare(const wchar_t* a,const wchar_t* b){while(*a&&*a==*b){++a;++b;}return *a-*b;}
 #define wcscmp wide_compare
 static int wide_nicmp(const wchar_t* a,const wchar_t* b,size_t n){for(size_t i=0;i<n;++i){int x=a[i],y=b[i];if(x>='A'&&x<='Z')x+=32;if(y>='A'&&y<='Z')y+=32;if(x!=y||!x)return x-y;}return 0;}
@@ -69,7 +73,7 @@ static void SetLastError(DWORD error){privilegeError=error;}
 static DWORD GetLastError(void){return privilegeError;}
 static BOOL AdjustTokenPrivileges(HANDLE token,BOOL all,TOKEN_PRIVILEGES* requested,DWORD size,TOKEN_PRIVILEGES* previous,DWORD* used){(void)token;(void)all;(void)size;(void)used;if(privilegeDenied){privilegeError=1300;return TRUE;}if(previous){*previous=*requested;previous->Privileges[0].Attributes=privilegeEnabled?2:0;}privilegeEnabled=requested->Privileges[0].Attributes==2;return TRUE;}
 static BOOL CloseHandle(HANDLE token){(void)token;return TRUE;}
-static DWORD changedStart,changedType;static int clearActions,clearDescription,valuesAfterExtras,deletedParameters;
+static const wchar_t* changedImage;static DWORD changedStart,changedType;static int clearActions,clearDescription,valuesAfterExtras,deletedParameters;
 static BOOL step(void){return !failAt||++ops!=failAt;}
 static LONG RegOpenKeyExW(HKEY key,const wchar_t* path,DWORD unused,DWORD access,HKEY* out){(void)key;(void)unused;(void)access;if(!step())return 5;if(wide_chr(path,L'S')&&path[0]=='S'&&path[1]=='O'&&groupOpenError)return groupOpenError;*out=2;return ERROR_SUCCESS;}
 static LONG RegQueryValueExW(HKEY key,const wchar_t* name,void* unused,DWORD* type,BYTE* data,DWORD* size){(void)key;(void)name;(void)unused;if(!step())return 5;if(!groupPresent)return ERROR_FILE_NOT_FOUND;*type=groupType;if(!data){*size=groupSize;return ERROR_SUCCESS;}assert(*size>=groupSize);memcpy(data,group,groupSize);*size=groupSize;return ERROR_SUCCESS;}
@@ -82,7 +86,7 @@ static LONG RegDeleteKeyW(HKEY key,const wchar_t* name){(void)key;(void)name;if(
 static SC_HANDLE OpenSCManagerW(void* a,void* b,DWORD access){(void)a;(void)b;(void)access;return step()?1:0;}
 static SC_HANDLE OpenServiceW(SC_HANDLE scm,const wchar_t* name,DWORD access){(void)scm;(void)name;(void)access;return step()?2:0;}
 static BOOL CloseServiceHandle(SC_HANDLE h){(void)h;return TRUE;}
-static BOOL ChangeServiceConfigW(SC_HANDLE h,DWORD type,DWORD start,DWORD error,const wchar_t* image,const wchar_t* groupName,void* tag,const wchar_t* deps,const wchar_t* account,const wchar_t* pass,const wchar_t* display){(void)h;(void)error;(void)image;(void)display;assert(!groupName&&!tag&&!deps&&!account&&!pass);if(!step())return FALSE;assert(parameterWrites==5);if(type==SERVICE_NO_CHANGE){assert(extraChanges==5);}else{assert(start==SERVICE_DISABLED);}changedStart=start;if(type!=SERVICE_NO_CHANGE)changedType=type;++serviceChanges;return TRUE;}
+static BOOL ChangeServiceConfigW(SC_HANDLE h,DWORD type,DWORD start,DWORD error,const wchar_t* image,const wchar_t* groupName,void* tag,const wchar_t* deps,const wchar_t* account,const wchar_t* pass,const wchar_t* display){(void)h;(void)error;(void)image;(void)display;assert(!groupName&&!tag&&!deps&&!account&&!pass);if(!step())return FALSE;assert(parameterWrites==5);if(type==SERVICE_NO_CHANGE){assert(extraChanges==5);}else{assert(start==SERVICE_DISABLED);}changedStart=start;if(type!=SERVICE_NO_CHANGE){changedType=type;changedImage=image;}++serviceChanges;return TRUE;}
 static BOOL ChangeServiceConfig2W(SC_HANDLE h,DWORD level,void* data){(void)h;if(!step())return FALSE;++extraChanges;if(level==SERVICE_CONFIG_DESCRIPTION)clearDescription=((SERVICE_DESCRIPTIONW*)data)->lpDescription&&!*(((SERVICE_DESCRIPTIONW*)data)->lpDescription);if(level==SERVICE_CONFIG_FAILURE_ACTIONS){SERVICE_FAILURE_ACTIONSW* a=data;if(a->cActions&&a->lpsaActions[0].Type==SC_ACTION_REBOOT)assert(privilegeEnabled);clearActions=a->lpCommand&&!*a->lpCommand&&a->lpRebootMsg&&!*a->lpRebootMsg&&a->lpsaActions&&a->cActions==0;}return TRUE;}
 static UINT GetSystemDirectoryW(wchar_t* out,UINT cap){const wchar_t* p=L"C:\\Windows\\System32";assert(cap>wide_len(p));memcpy(out,p,(wide_len(p)+1)*2);return (UINT)wide_len(p);}
 static DWORD ExpandEnvironmentStringsW(const wchar_t* source,wchar_t* out,DWORD cap){DWORD n=(DWORD)wide_len(source)+1;if(n<=cap)memcpy(out,source,n*2);return n;}
@@ -91,6 +95,10 @@ static DWORD GetFullPathNameW(const wchar_t* path,DWORD cap,wchar_t* out,wchar_t
 
         static BOOL ServiceHost_IsServiceImagePath(const wchar_t* name,const wchar_t* command){(void)name;return !_wcsicmp(command,L"\"C:\\Windows\\System32\\svchost.exe\" -k MeshAgent-Test");}
 static BOOL ServiceHost_BuildGroupName(const wchar_t* name,wchar_t* groupName,size_t cap){(void)name;const wchar_t* value=L"MeshAgent-Test";if(cap<=wide_len(value))return FALSE;memcpy(groupName,value,(wide_len(value)+1)*2);return TRUE;}
+/* OS trust/path/ACL probes are mocked here; their dedicated suite tests them.
+ * These switches exercise the migration wrapper's fail-closed propagation. */
+static int copiedTrust=1,copiedReparse,copiedWritable,copiedValidationCalls;
+static BOOL ServiceDeploy_ValidateCopiedLegacyHost(const wchar_t* host,const wchar_t* dll){assert(host&&*host&&dll&&*dll);++copiedValidationCalls;return copiedTrust&&!copiedReparse&&!copiedWritable;}
 '''
 cases = r'''
 static void set_group(const wchar_t* entries,size_t chars){memcpy(group,entries,chars*2);groupSize=(DWORD)(chars*2);groupType=REG_MULTI_SZ;groupPresent=1;groupOpenError=0;regWrites=ops=failAt=0;}
@@ -157,6 +165,29 @@ int main(void){
     config.lpBinaryPathName=L"\"C:\\Windows\\System32\\svchost.exe\" -k netsvcs -p";assert(ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
     config.lpBinaryPathName=L"C:\\Windows\\System32\\svchost.exe -k netsvcs -p extra";assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.lpBinaryPathName=L"C:\\Malware\\svchost.exe -k netsvcs";assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    assert(!ServiceBinding_MigrationImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"C:\\Agent\\svchost.exe -k netsvcs -p";
+    assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
+    assert(ServiceBinding_MigrationImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
+    config.lpBinaryPathName=L"\"C:\\Agent\\svchost.exe\" -k netsvcs";
+    assert(ServiceBinding_MigrationImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy)&&!legacy);
+    copiedTrust=0;assert(!ServiceBinding_MigrationImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));copiedTrust=1;
+    copiedReparse=1;assert(!ServiceBinding_MigrationImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));copiedReparse=0;
+    copiedWritable=1;assert(!ServiceBinding_MigrationImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));copiedWritable=0;
+    assert(!ServiceBinding_MigrationImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Other\\agent.dll",&legacy));
+    const wchar_t* badHosts[]={L"C:\\Agent\\svchost.exe -k netsvcs -p extra",L"C:\\Agent\\svchost.exe -k other",L"C:\\fake\\svchost.exe -k netsvcs",L"C:\\Agent\\..\\Agent\\svchost.exe -k netsvcs",L"\\\\server\\Agent\\svchost.exe -k netsvcs"};
+    for(size_t i=0;i<_countof(badHosts);++i){config.lpBinaryPathName=(wchar_t*)badHosts[i];assert(!ServiceBinding_MigrationImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));}
+    config.lpBinaryPathName=L"C:\\Program Files\\Agent\\svchost.exe -k netsvcs -p";
+    assert(!ServiceBinding_MigrationImageSupported(L"Agent",&config,L"",L"C:\\Program Files\\Agent\\agent.dll",&legacy));
+    config.lpBinaryPathName=L"\"C:\\Program Files\\Agent\\svchost.exe\" -k netsvcs -p";
+    assert(ServiceBinding_MigrationImageSupported(L"Agent",&config,L"",L"C:\\Program Files\\Agent\\agent.dll",&legacy)&&!legacy);
+    config.lpBinaryPathName=L"C:\\\\Agent\\\\svchost.exe -k netsvcs -p";
+    assert(!ServiceLegacyHost_ParseImage(config.lpBinaryPathName,L"C:\\\\Agent\\\\agent.dll",parsed,MAX_PATH)&&!parsed[0]);
+    assert(ServiceLegacyHost_IsCanonicalPath(L"C:\\Agent\\svchost.exe"));
+    assert(!ServiceLegacyHost_IsCanonicalPath(L"C:\\\\Agent\\\\svchost.exe"));
+    assert(!ServiceBinding_MigrationImageSupported(L"Agent",&config,L"",L"C:\\\\Agent\\\\agent.dll",&legacy));
+    config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;
+    assert(!ServiceBinding_MigrationImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     config.dwServiceType=1;assert(!ServiceBinding_ImageSupported(L"Agent",&config,L"C:\\Agent\\agent.exe",L"C:\\Agent\\agent.dll",&legacy));
     ServiceBindingSnapshot owner={0};owner.config=&config;config.dwServiceType=SERVICE_WIN32_SHARE_PROCESS;
     const wchar_t* knownDll=L"C:\\Agent\\agent.dll";const wchar_t* knownEntry=L"ServiceHost_ServiceMain";
@@ -173,9 +204,10 @@ int main(void){
     owner.values[10].size=entrySize;
     owner.values[9].size-=2;assert(!ServiceBinding_SharedImageSupported(&owner,knownDll));
     config.dwServiceType=SERVICE_WIN32_OWN_PROCESS;assert(ServiceBinding_SharedImageSupported(&owner,knownDll));
-    ServiceBindingSnapshot* s=calloc(1,sizeof(*s));s->config=calloc(1,sizeof(*s->config));s->config->dwServiceType=SERVICE_WIN32_SHARE_PROCESS;s->config->dwStartType=SERVICE_DISABLED;s->running=TRUE;s->legacyGroupMember=TRUE;
+    ServiceBindingSnapshot* s=calloc(1,sizeof(*s));s->config=calloc(1,sizeof(*s->config));s->config->dwServiceType=SERVICE_WIN32_SHARE_PROCESS;s->config->dwStartType=SERVICE_DISABLED;s->running=TRUE;s->legacyGroupMember=TRUE;s->config->lpBinaryPathName=L"C:\\Agent\\svchost.exe -k netsvcs -p";
     for(size_t i=0;i<5;++i)s->extra[i]=calloc(1,128);
     set_group(L"Other\0",7);reset_restore();assert(ServiceBinding_Restore(L"Agent",s));assert(serviceChanges==2&&changedType==SERVICE_WIN32_SHARE_PROCESS&&changedStart==SERVICE_DEMAND_START&&clearActions&&clearDescription&&valuesAfterExtras==8&&parameterWrites==5&&deletedParameters==1);
+    assert(changedImage&&!_wcsicmp(changedImage,s->config->lpBinaryPathName));
     int operationCount=ops; /* Every mutation/query boundary must fail closed. */
     for(int failure=1;failure<=operationCount;++failure){set_group(L"Other\0",7);reset_restore();failAt=failure;assert(!ServiceBinding_Restore(L"Agent",s));}
     /* Reboot action restoration acquires and restores the shutdown privilege. */
@@ -185,7 +217,8 @@ int main(void){
     ServiceBinding_Free(s);puts("service binding transaction: owned image selection, membership restoration, exact value ordering, disabled running state and failure propagation passed");return 0;
 }
 '''
-functions = '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_IsLegacyExe', 'ServiceBinding_ParseCallbackImage', 'ServiceBinding_LegacyArgumentsSupported', 'ServiceBinding_ImageSupported', 'ServiceBinding_SharedImageSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_ApplyExtra', 'ServiceBinding_Restore'])
+functions = ('\n'.join(extract(name, legacy_host) for name in ['ServiceLegacyHost_NormalizePath', 'ServiceLegacyHost_IsCanonicalPath', 'ServiceLegacyHost_ParseImage']) +
+             '\n'.join(extract(name) for name in ['ServiceBinding_ReadValue', 'ServiceBinding_Group', 'ServiceBinding_IsLegacyExe', 'ServiceBinding_ParseCallbackImage', 'ServiceBinding_LegacyArgumentsSupported', 'ServiceBinding_ImageSupported', 'ServiceBinding_MigrationImageSupported', 'ServiceBinding_SharedImageSupported', 'ServiceBinding_AcquireRecoveryPrivilege', 'ServiceBinding_ReleaseRecoveryPrivilege', 'ServiceBinding_ApplyExtra', 'ServiceBinding_Restore']))
 with tempfile.TemporaryDirectory(prefix='mesh-service-binding-') as tmp:
     src, exe = Path(tmp) / 'binding.c', Path(tmp) / 'binding'
     harness = prelude + prefix + mocks + functions + cases

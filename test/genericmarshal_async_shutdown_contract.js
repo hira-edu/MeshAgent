@@ -36,6 +36,7 @@ function assert(condition, message) {
 }
 
 function extractFunction(source, signature) {
+    source = source.replace(/\r\n/g, '\n');
     const start = source.indexOf(signature);
     assert(start >= 0, `${signature} not found`);
     const bodyStart = source.indexOf('{', start);

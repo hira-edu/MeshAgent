@@ -13,7 +13,8 @@ import sys
 import tempfile
 
 SOURCE = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[1] / 'meshservice/service_deployment.c'
-source = SOURCE.read_text()
+source = SOURCE.read_text(encoding='utf-8-sig')
+compiler = os.environ.get('CC', 'clang' if os.name == 'nt' else 'cc')
 masked = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
                 lambda m: ' ' * len(m.group()), source, flags=re.S)
 def extract(name):
@@ -69,7 +70,7 @@ typedef void* HANDLE;
 #define UNREFERENCED_PARAMETER(p) ((void)p)
 typedef struct { wchar_t installDir[MAX_PATH], logsDir[MAX_PATH], exePath[MAX_PATH], dllPath[MAX_PATH], confPath[MAX_PATH], dbPath[MAX_PATH]; } ServiceInstallPaths;
 typedef struct { int unused; BOOL nodeIdPresent; } ServiceIdentitySnapshot;
-typedef struct { DWORD dwStartType, dwServiceType; } binding_config;
+typedef struct { DWORD dwStartType, dwServiceType; const wchar_t* lpBinaryPathName; } binding_config;
 typedef struct { binding_config* config; BOOL running, legacy; wchar_t incumbentExePath[MAX_PATH],incumbentDllPath[MAX_PATH],incumbentDbPath[MAX_PATH]; } ServiceBindingSnapshot;
 typedef struct {
     BOOL backupsReady, liveDbExists, stagedMshReady, postUpdateIdentityReady, rollbackIdentityReady;
@@ -97,6 +98,7 @@ static ServiceBindingSnapshot savedBinding;
 static ServiceInstallPaths g_IncumbentPaths;
 static BOOL g_HaveIncumbentPaths;
 static int migratedCopies, copyFailure, identityCaptureFailure, failureHolds, noDb, dbWithoutNode;
+static int copiedHost, processGuardAllowed, processGuardCalls, restartersSuspended, backupCalls, commitCalls;
 static long g_MeshDiagnosticLogDisabled;
 #define InterlockedExchange(p,v) (*(p)=(v))
 static void log_event(const wchar_t* fmt, ...) { (void)fmt; }
@@ -111,6 +113,7 @@ static BOOL query_exists(BOOL* out) { *out = installed; return TRUE; }
 static ServiceBindingSnapshot* capture(void) {
     if (failAt == 4) return NULL;
     savedConfig.dwServiceType = legacy ? SERVICE_WIN32_OWN_PROCESS : SERVICE_WIN32_SHARE_PROCESS; savedConfig.dwStartType = startType; savedBinding.config = &savedConfig;
+    savedConfig.lpBinaryPathName = copiedHost ? L"copied-host" : L"canonical-host";
     savedBinding.running = running; savedBinding.legacy = legacy; return &savedBinding;
 }
 static BOOL restore_binding(void) {
@@ -123,11 +126,12 @@ static BOOL sibling(const wchar_t* ext, wchar_t* out) { wcscpy(out, wcscmp(ext,L
 /* Scenario 6 fails after the staging area is owned, so its cleanup is expected. */
 static BOOL prepare(ServiceUpdateTransaction* tx) { ++prepared; tx->liveDbExists = originalExists && !noDb; tx->stagingOwned = TRUE; return failAt != 6; }
 static BOOL backup(ServiceUpdateTransaction* tx) {
+    ++backupCalls;
     assert(!running); if (failAt == 1 || failAt == 16) return FALSE;
     tx->backupsReady = TRUE; tx->rollbackIdentity.nodeIdPresent = originalExists && !noDb && !dbWithoutNode;
     tx->rollbackIdentityReady = tx->postUpdateIdentityReady = originalExists && !noDb; return TRUE;
 }
-static BOOL commit(void) { assert(!running); liveVersion = failAt == 2 || failAt == 3 || failAt == 10 || failAt == 17 ? 2 : 3; return liveVersion == 3; }
+static BOOL commit(void) { ++commitCalls; assert(!running); liveVersion = failAt == 2 || failAt == 3 || failAt == 10 || failAt == 17 ? 2 : 3; return liveVersion == 3; }
 static BOOL registration(void) { bindingVersion = 3; installed = 1; return failAt != 11; }
 static BOOL rollback(void) {
     assert(!running); ++rolledBack; if (failAt == 3) return FALSE;
@@ -167,6 +171,19 @@ static BOOL migration_copy(void) {
     assert(!running && retainedPhase == SERVICE_JOURNAL_BACKED_UP);
     ++migratedCopies; return !copyFailure;
 }
+/* Pure parser and OS process checks have dedicated native suites. Here their
+ * boundary verdicts exercise the production transaction's pre-stop ordering. */
+static BOOL copied_host_parse(const wchar_t* image,const wchar_t* dll,wchar_t* output,size_t capacity) {
+    (void)dll;assert(image&&capacity>12);if(!copiedHost)return FALSE;
+    assert(!wcscmp(image,L"copied-host"));wcscpy(output,L"copied-host");return TRUE;
+}
+static BOOL process_safe(void) {
+    ++processGuardCalls;assert(prepared==1&&retainedPhase==SERVICE_JOURNAL_PREPARED&&restartersSuspended&&!stops);
+    return processGuardAllowed;
+}
+#define ServiceLegacyHost_ParseImage(i,d,o,n) copied_host_parse(i,d,o,n)
+#define ServiceLegacyHost_ProcessSafe(n,h) process_safe()
+#define ServiceDeploy_SuspendServiceRecoveryRestarters(...) (++restartersSuspended,TRUE)
 #define ServiceDeploy_LogInstallEvent log_event
 #define MeshConfig_GetPersistence() (&profile)
 #define ServiceDeploy_GetInstallPaths(p) mock_paths(p)
@@ -223,6 +240,7 @@ static void reset(int failure, int exists, int wasRunning, int originalStart, in
     retainedPhase = 0; failAt = failure; originalExists = installed = exists; legacy = ownProcess;
     running = wasRunning; liveVersion = bindingVersion = exists ? 1 : 0; startType = originalStart;
     starts = mixedStarts = stops = prepared = rolledBack = convergence = discarded = incumbentRepairs = restoredBindings = deletedArtifacts = 0;
+    copiedHost=processGuardCalls=restartersSuspended=backupCalls=commitCalls=0;processGuardAllowed=1;
 }
 static void run_case(int failure, int exists, int wasRunning, int originalStart, int ownProcess) {
     reset(failure, exists, wasRunning, originalStart, ownProcess);
@@ -275,6 +293,14 @@ static void identity_case(int withoutDb) {
     else assert(liveVersion==1&&bindingVersion==1&&rolledBack==1);
     noDb=dbWithoutNode=0;
 }
+static void copied_host_guard_case(int restoreFails) {
+    reset(restoreFails?16:0,1,1,3,0);copiedHost=1;processGuardAllowed=0;
+    assert(!ServiceDeploy_ApplyUpdateFlow(L"new.exe",L"new.dll",FALSE));
+    assert(processGuardCalls==1&&!stops&&!backupCalls&&!commitCalls&&!rolledBack);
+    assert(running&&liveVersion==1&&bindingVersion==1&&restoredBindings==1&&!mixedStarts);
+    if(restoreFails)assert(retainedPhase==SERVICE_JOURNAL_PREPARED&&!deletedArtifacts&&!starts);
+    else assert(!retainedPhase&&deletedArtifacts==2&&discarded==1&&starts==1);
+}
 int main(void) {
     int count = 0;
     for (int own = 0; own < 2; ++own) {
@@ -299,6 +325,9 @@ int main(void) {
     packageHasConfig = 0; run_case(0,1,1,3,0); ++count; /* Binary-only update retains installed identity. */
     migration_case(0,0,0);migration_case(1,0,0);migration_case(0,1,0);migration_case(0,0,1);count+=4;
     identity_case(1);identity_case(0);count+=2;
+    copied_host_guard_case(0);copied_host_guard_case(1);count+=2;
+    reset(0,1,1,3,0);copiedHost=1;assert(ServiceDeploy_ApplyUpdateFlow(L"new.exe",L"new.dll",FALSE));
+    assert(processGuardCalls==1&&backupCalls==1&&commitCalls==1&&liveVersion==3);++count;
     printf("Service transaction native orchestration: %d cases passed\n",count);
     return 0;
 }
@@ -307,8 +336,8 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='meshagent-update-recovery-') as directory:
     c_path = Path(directory) / 'recovery.c'
     executable = Path(directory) / ('recovery.exe' if os.name == 'nt' else 'recovery')
-    c_path.write_text(prelude + generic + '\n' + flow + '\n' + install + '\n' + cases)
-    subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wno-unused-value', str(c_path), '-o', str(executable)], check=True)
+    c_path.write_text(prelude + generic + '\n' + flow + '\n' + install + '\n' + cases, encoding='utf-8')
+    subprocess.run([compiler, '-std=c11', '-Wno-unused-value', str(c_path), '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)
 
 # Exercise actual crash-recovery and cleanup orchestration separately from the
@@ -396,7 +425,7 @@ static int mock_snwprintf(wchar_t* out,size_t size,size_t trunc,const wchar_t* f
 #define _wcsicmp wcscmp
 #define _snwprintf_s mock_snwprintf
 #define ServiceDeploy_TransactionDirectoryEmpty(...) (!unknownBackup)
-#define ServiceBinding_ImageSupported(n,c,e,d,l) (*(l)=FALSE,TRUE)
+#define ServiceBinding_MigrationImageSupported(n,c,e,d,l) (*(l)=FALSE,TRUE)
 #define ServiceBinding_QueryExists(n,e) (*(e)=TRUE,TRUE)
 #define ServiceBinding_Capture(...) (capture_ok()?&binding:NULL)
 #define ServiceBinding_Free(...) ((void)0)
@@ -464,6 +493,6 @@ with tempfile.TemporaryDirectory(prefix='meshagent-crash-recovery-') as director
         'ServiceDeploy_RecoverInterruptedTransaction'))
     if os.name == 'nt':
         recovery_flow = recovery_flow.replace('_snwprintf_s(', 'mock_snwprintf(')
-    c_path.write_text(recovery_prelude + '\n' + recovery_flow + '\n' + recovery_cases)
-    subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wno-unused-value', str(c_path), '-o', str(executable)], check=True)
+    c_path.write_text(recovery_prelude + '\n' + recovery_flow + '\n' + recovery_cases, encoding='utf-8')
+    subprocess.run([compiler, '-std=c11', '-Wno-unused-value', str(c_path), '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)
