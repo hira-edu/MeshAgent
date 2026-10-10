@@ -46,6 +46,13 @@ typedef uintptr_t PTRSIZE;
 
 #define ILibDuktape_GenericMarshal_INVALID_PROMISE		((void*)(uintptr_t)0x01)
 
+// Set when teardown could not confirm every async worker stopped (see Duktape_SafeDestroyHeap)
+static int ILibDuktape_GenericMarshal_NativeMemoryPinned(duk_context *ctx)
+{
+	ILibDuktape_ContextData *ctxd = duk_ctx_context_data(ctx);
+	return(ctxd != NULL && (ctxd->flags & duk_native_memory_pinned) == duk_native_memory_pinned);
+}
+
 #define ILibDuktape_GenericMarshal_FuncHandler			"\xFF_GenericMarshal_FuncHandler"
 #define ILibDuktape_GenericMarshal_VariableType			"\xFF_GenericMarshal_VarType"
 #define ILibDuktape_GenericMarshal_GlobalSet_List		"\xFF_GenericMarshal_GlobalSet_List"
@@ -627,7 +634,7 @@ duk_ret_t ILibDuktape_GenericMarshal_Variable_Finalizer(duk_context *ctx)
 		ptr = duk_to_pointer(ctx, -1);
 		if (ptr != NULL)
 		{
-			free(ptr);
+			if (!ILibDuktape_GenericMarshal_NativeMemoryPinned(ctx)) { free(ptr); }
 			duk_del_prop_string(ctx, 0, "_ptr");
 		}
 	}
@@ -1263,6 +1270,7 @@ typedef struct ILibDuktape_FFI_AsyncData
 	void *fptr_redirection;
 	char *fptr_redirectionName;
 	int abort;
+	int stopRequested;
 	int waitingForResult;
 	PTRSIZE *vars;
 	void *promise;
@@ -1271,7 +1279,65 @@ typedef struct ILibDuktape_FFI_AsyncData
 	sem_t workAvailable;
 	sem_t workStarted;
 	sem_t workFinished;
+	void *tracker;			// ILibDuktape_ContextData.asyncWorkers; its lock guards refs and trackerNode
+	void *trackerNode;		// Non-NULL while the worker thread may still use this data or its arguments
+	int refs;				// The worker thread and the JavaScript function that stores this data
 }ILibDuktape_FFI_AsyncData;
+
+#define ILibDuktape_GenericMarshal_AsyncStopTimeoutMS	6000
+
+// Registers a new worker before it starts. One reference belongs to the worker thread and
+// one to the JavaScript function holding ILibDuktape_FFI_AsyncDataPtr.
+static int ILibDuktape_GenericMarshal_AsyncData_Track(duk_context *ctx, ILibDuktape_FFI_AsyncData *data)
+{
+	ILibDuktape_ContextData *ctxd = duk_ctx_context_data(ctx);
+	data->refs = 1;
+	if (ctxd == NULL || ctxd->asyncWorkers == NULL) { return(0); }
+	data->tracker = ctxd->asyncWorkers;
+	ILibLinkedList_Lock(data->tracker);
+	data->trackerNode = ILibLinkedList_AddTail(data->tracker, data);
+	if (data->trackerNode != NULL) { data->refs = 2; }
+	ILibLinkedList_UnLock(data->tracker);
+	return(data->trackerNode != NULL);
+}
+static int ILibDuktape_GenericMarshal_AsyncData_IsRunning(ILibDuktape_FFI_AsyncData *data)
+{
+	int running;
+	if (data->tracker == NULL) { return(0); }
+	ILibLinkedList_Lock(data->tracker);
+	running = data->trackerNode != NULL;
+	ILibLinkedList_UnLock(data->tracker);
+	return(running);
+}
+// Drops one reference. The worker also unregisters in the same step, and after that it
+// touches nothing but this data, so a teardown that sees it gone may free the heap.
+static void ILibDuktape_GenericMarshal_AsyncData_Release(ILibDuktape_FFI_AsyncData *data, int fromWorker)
+{
+	int refs;
+	if (data->tracker == NULL)
+	{
+		// Never tracked, so no worker thread exists: only the function holds it.
+		refs = --(data->refs);
+	}
+	else
+	{
+		ILibLinkedList_Lock(data->tracker);
+		if (fromWorker != 0 && data->trackerNode != NULL)
+		{
+			ILibLinkedList_Remove(data->trackerNode);
+			data->trackerNode = NULL;
+		}
+		refs = --(data->refs);
+		ILibLinkedList_UnLock(data->tracker);
+	}
+	if (refs == 0)
+	{
+		sem_destroy(&(data->workAvailable));
+		sem_destroy(&(data->workStarted));
+		sem_destroy(&(data->workFinished));
+		ILibMemory_Free(data);
+	}
+}
 
 void ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatch(void *chain, void *user)
 {
@@ -1293,16 +1359,28 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatch(void *chain, voi
 	if (duk_pcall_method(data->ctx, 1) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "Error Resolving Promise: "); }
 	duk_pop(ctx);																						// ...
 }
+#ifdef WIN32
+static BOOL CALLBACK ILibDuktape_GenericMarshal_PostQuitToWindow(HWND hwnd, LPARAM lParam)
+{
+	UNREFERENCED_PARAMETER(lParam);
+	PostMessageW(hwnd, WM_QUIT, 0, 0);
+	return(TRUE);
+}
+#endif
 void ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(ILibDuktape_FFI_AsyncData *data)
 {
-	if (data != NULL && ILibMemory_CanaryOK(data))
+	if (data != NULL && ILibMemory_CanaryOK(data) && data->stopRequested == 0)
 	{
+		data->stopRequested = 1;
 		data->abort = 1;
 		sem_post(&(data->workAvailable));
 #ifdef WIN32
 		if (data->workerThreadId != 0)
 		{
 			PostThreadMessageW(data->workerThreadId, WM_QUIT, 0, 0);
+			// GetMessageW filtered on a window never retrieves the thread message above, so
+			// also post the quit to each top-level window the worker thread owns.
+			EnumThreadWindows(data->workerThreadId, ILibDuktape_GenericMarshal_PostQuitToWindow, 0);
 		}
 #endif
 	}
@@ -1359,10 +1437,65 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_WorkerRunLoop(void *arg)
 			}
 		}
 	}
-	sem_destroy(&(data->workAvailable));
-	sem_destroy(&(data->workStarted));
-	sem_destroy(&(data->workFinished));
-	ILibMemory_Free(data);
+	ILibDuktape_GenericMarshal_AsyncData_Release(data, 1);
+}
+// Registers and starts the worker for data. A worker that never started holds nothing, so it
+// is released and marked stopped; later calls then fail instead of waiting on it.
+static void ILibDuktape_GenericMarshal_MethodInvokeAsync_StartWorker(duk_context *ctx, ILibDuktape_FFI_AsyncData *data)
+{
+	if (ILibDuktape_GenericMarshal_AsyncData_Track(ctx, data) == 0)
+	{
+		data->stopRequested = data->abort = 1;
+		return;
+	}
+	data->workerThread = ILibSpawnNormalThreadEx(ILibDuktape_GenericMarshal_MethodInvokeAsync_WorkerRunLoop, data, 0);
+	if (data->workerThread == NULL)
+	{
+		data->stopRequested = data->abort = 1;
+		ILibDuktape_GenericMarshal_AsyncData_Release(data, 1);
+	}
+}
+// Called by Duktape_SafeDestroyHeap before the heap is freed. Wakes every worker of ctx and
+// waits for each to unregister. Returns 0 if any is still running at the deadline.
+int ILibDuktape_GenericMarshal_StopAsyncWorkers(duk_context *ctx)
+{
+	ILibDuktape_ContextData *ctxd = duk_ctx_context_data(ctx);
+	void *node;
+	long running;
+	int waited = 0;
+
+	if (ctxd == NULL || ctxd->asyncWorkers == NULL) { return(1); }
+
+	// Global callbacks check the shutdown flag under this lock; publish it to their threads.
+	if (GlobalCallbackList != NULL) { ILibLinkedList_Lock(GlobalCallbackList); ILibLinkedList_UnLock(GlobalCallbackList); }
+
+	ILibLinkedList_Lock(ctxd->asyncWorkers);
+	node = ILibLinkedList_GetNode_Head(ctxd->asyncWorkers);
+	while (node != NULL)
+	{
+		ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop((ILibDuktape_FFI_AsyncData*)ILibLinkedList_GetDataFromNode(node));
+		node = ILibLinkedList_GetNextNode(node);
+	}
+	running = ILibLinkedList_GetCount(ctxd->asyncWorkers);
+	ILibLinkedList_UnLock(ctxd->asyncWorkers);
+
+	while (running > 0 && waited < ILibDuktape_GenericMarshal_AsyncStopTimeoutMS)
+	{
+#ifdef WIN32
+		Sleep(10);
+#else
+		usleep(10 * 1000);
+#endif
+		waited += 10;
+		ILibLinkedList_Lock(ctxd->asyncWorkers);
+		running = ILibLinkedList_GetCount(ctxd->asyncWorkers);
+		ILibLinkedList_UnLock(ctxd->asyncWorkers);
+	}
+	if (running > 0)
+	{
+		ILibCriticalLog("[FFI_ASYNC_TEARDOWN] async workers still running; native memory kept allocated", __FILE__, __LINE__, (int)running, ILibDuktape_GenericMarshal_AsyncStopTimeoutMS);
+	}
+	return(running == 0);
 }
 duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_promise(duk_context *ctx)
 {
@@ -1385,7 +1518,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_abort(duk_context *ctx)
 
 			// We can gracefully exit this thread
 			ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(data);
-			ILibThread_Join(workerThread);
+			if (workerThread != NULL) { ILibThread_Join(workerThread); }
 		}
 		else
 		{
@@ -1418,6 +1551,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_abort(duk_context *ctx)
 		}
 		duk_push_this(ctx);
 		duk_del_prop_string(ctx, -1, ILibDuktape_FFI_AsyncDataPtr);
+		ILibDuktape_GenericMarshal_AsyncData_Release(data, 0);
 	}
 	return(0);
 }
@@ -1432,16 +1566,19 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_dataFinalizer(duk_context
 			void *workerThread = data->workerThread;
 
 			ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(data);
-			ILibThread_Join(workerThread);
+			if (workerThread != NULL) { ILibThread_Join(workerThread); }
 		}
 		else
 		{
-			if (duk_ctx_shutting_down(ctx))
+			// A worker teardown could not confirm stopped may be waiting on this chain;
+			// joining it after the heap is gone would hang, and its memory stays pinned.
+			if (duk_ctx_shutting_down(ctx) && !ILibDuktape_GenericMarshal_AsyncData_IsRunning(data))
 			{
 				ILibLinkedList_AddTail(duk_ctx_context_data(ctx)->threads, data->workerThread);
 			}
 			ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(data);
 		}
+		ILibDuktape_GenericMarshal_AsyncData_Release(data, 0);
 	}
 	return(0);
 }
@@ -1563,6 +1700,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync(duk_context *ctx)
 			data = (ILibDuktape_FFI_AsyncData*)Duktape_GetPointerProperty(ctx, -1, ILibDuktape_FFI_AsyncDataPtr);
 			if (data == NULL)
 			{
+				if (duk_ctx_shutting_down(ctx)) { return(ILibDuktape_Error(ctx, "Cannot start an async worker during shutdown")); }
 				data = ILibMemory_SmartAllocate(sizeof(ILibDuktape_FFI_AsyncData));								// [func][buff]
 				duk_push_pointer(ctx, data);
 				duk_push_current_function(ctx);																	// [func][buff][func]
@@ -1579,7 +1717,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync(duk_context *ctx)
 				sem_init(&(data->workAvailable), 0, 0);
 				sem_init(&(data->workStarted), 0, 0);
 				sem_init(&(data->workFinished), 0, 0);
-				data->workerThread = ILibSpawnNormalThreadEx(ILibDuktape_GenericMarshal_MethodInvokeAsync_WorkerRunLoop, data, 0);
+				ILibDuktape_GenericMarshal_MethodInvokeAsync_StartWorker(ctx, data);
 			}
 		}
 		else
@@ -1589,6 +1727,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync(duk_context *ctx)
 			redirectionPtrName = Duktape_GetStringPropertyValue(ctx, -1, "_funcName", NULL);		
 		}
 		if (data->promise != NULL) { return(ILibDuktape_Error(ctx, "Async Operation already in progress")); }
+		if (data->stopRequested != 0) { return(ILibDuktape_Error(ctx, "Async worker has been stopped")); }
 		if (data->waitingForResult == 0)
 		{
 			// Only need to create a promise, if it's fully async
@@ -1668,6 +1807,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_wait(duk_context *ctx)
 	data = (ILibDuktape_FFI_AsyncData*)Duktape_GetPointerProperty(ctx, -1, ILibDuktape_FFI_AsyncDataPtr);
 	if (data == NULL)
 	{
+		if (duk_ctx_shutting_down(ctx)) { return(ILibDuktape_Error(ctx, "Cannot start an async worker during shutdown")); }
 		data = ILibMemory_SmartAllocate(sizeof(ILibDuktape_FFI_AsyncData));									// [func][buffer]
 		duk_push_pointer(ctx, data);
 		duk_push_this(ctx);																					// [func][buffer][func]
@@ -1683,7 +1823,7 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_wait(duk_context *ctx)
 		sem_init(&(data->workAvailable), 0, 0);
 		sem_init(&(data->workStarted), 0, 0);
 		sem_init(&(data->workFinished), 0, 0);
-		data->workerThread = ILibSpawnNormalThreadEx(ILibDuktape_GenericMarshal_MethodInvokeAsync_WorkerRunLoop, data, 0);
+		ILibDuktape_GenericMarshal_MethodInvokeAsync_StartWorker(ctx, data);
 	}
 
 	if (data->waitingForResult == WAITING_FOR_RESULT__DISPATCHER) { return(ILibDuktape_Error(ctx, "This method call is not waitable")); }
@@ -1905,13 +2045,13 @@ duk_ret_t ILibDuktape_GenericMarshal_NativeProxy_Finalizer(duk_context *ctx)
 {
 #ifdef WIN32
 	HMODULE hm = (HMODULE)Duktape_GetPointerProperty(ctx, 0, "_moduleAddress");
-	if (hm != NULL)
+	if (hm != NULL && !ILibDuktape_GenericMarshal_NativeMemoryPinned(ctx))
 	{
 		FreeLibrary(hm);
 	}
 #else
 	void *hm = Duktape_GetPointerProperty(ctx, 0, "_moduleAddress");
-	if (hm != NULL)
+	if (hm != NULL && !ILibDuktape_GenericMarshal_NativeMemoryPinned(ctx))
 	{
 		dlclose(hm);
 	}
@@ -2077,7 +2217,14 @@ void* ILibDuktape_GlobalGenericCallback_Process(int numParms, ...)
 		ILibLinkedList_Lock(GlobalCallbackList);
 		if (ILibMemory_CanaryOK(refList[i]))
 		{
-			if (!ILibIsRunningOnChainThread(refList[i]->chain))
+			int crossThread = !ILibIsRunningOnChainThread(refList[i]->chain);
+			ILibDuktape_ContextData *targetData = crossThread ? duk_ctx_context_data(refList[i]->emitter->ctx) : NULL;
+			if (crossThread && (targetData == NULL || (targetData->flags & duk_destroy_heap_in_progress) == duk_destroy_heap_in_progress))
+			{
+				// The owning heap is being torn down and its chain thread is waiting for workers
+				// to stop: do not queue a call it will never run, and do not wait for one.
+			}
+			else if (crossThread)
 			{
 				// Need to context switch
 				user = ILibMemory_SmartAllocate(sizeof(Duktape_GlobalGeneric_Data) + (numParms * sizeof(PTRSIZE)));

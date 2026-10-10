@@ -29,6 +29,7 @@ limitations under the License.
 #include "ILibDuktape_Helpers.h"
 #include "microstack/ILibCrypto.h"
 #include "ILibDuktape_EventEmitter.h"
+#include "ILibDuktape_GenericMarshal.h"
 
 char stash_key[32];
 struct sockaddr_in6 duktape_internalAddress;
@@ -800,6 +801,11 @@ void Duktape_SafeDestroyHeap(duk_context *ctx)
 		duk_set_top(ctx, top);
 	}
 
+	// Async FFI workers write into native buffers this heap frees. Their finalizers only
+	// request a stop, so confirm they are gone first; if one cannot be confirmed, keep
+	// native memory allocated instead of freeing it under a running thread.
+	if (ILibDuktape_GenericMarshal_StopAsyncWorkers(ctx) == 0) { ctxd->flags |= duk_native_memory_pinned; }
+
 	duk_require_stack(ctx, 2 * DUK_API_ENTRY_STACK);				
 	duk_destroy_heap(ctx);
 
@@ -824,6 +830,8 @@ void Duktape_SafeDestroyHeap(duk_context *ctx)
 		}	
 	}
 	ILibLinkedList_Destroy(ctxd->threads);	
+	// A worker that outlived teardown still unregisters itself from this list.
+	if ((ctxd->flags & duk_native_memory_pinned) == 0) { ILibLinkedList_Destroy(ctxd->asyncWorkers); }
 
 	ILibMemory_Free(ctxd);
 }

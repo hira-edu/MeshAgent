@@ -27,6 +27,7 @@ typedef enum ILibDuktape_GenericMarshal_CallTypes
 }ILibDuktape_GenericMarshal_CallTypes;
 
 void ILibDuktape_GenericMarshal_init(duk_context *ctx);
+int ILibDuktape_GenericMarshal_StopAsyncWorkers(duk_context *ctx);
 
 
 #endif

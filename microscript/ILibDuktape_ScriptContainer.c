@@ -2731,6 +2731,7 @@ duk_context *ILibDuktape_ScriptContainer_InitializeJavaScriptEngine_minimal()
 	util_openssl_uninit();
 #endif
 	ctxd->threads = ILibLinkedList_Create();
+	ctxd->asyncWorkers = ILibLinkedList_Create();
 
 #ifdef DUKTAPE_EXECUTION_MAXTIMEOUT
 	ctxd->maxExecutionTime = DUKTAPE_EXECUTION_MAXTIMEOUT;

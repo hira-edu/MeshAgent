@@ -69,6 +69,16 @@ function main() {
     const dispatchBody = extractFunction(genericMarshal, 'void ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatch(void *chain, void *user)');
     const requestStopBody = extractFunction(genericMarshal, 'void ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(ILibDuktape_FFI_AsyncData *data)');
     const destroyBody = extractFunction(helpers, 'void Duktape_SafeDestroyHeap(duk_context *ctx)');
+    const stopWorkersBody = extractFunction(genericMarshal, 'int ILibDuktape_GenericMarshal_StopAsyncWorkers(duk_context *ctx)');
+    const releaseBody = extractFunction(genericMarshal, 'static void ILibDuktape_GenericMarshal_AsyncData_Release(ILibDuktape_FFI_AsyncData *data, int fromWorker)');
+    const startWorkerBody = extractFunction(genericMarshal, 'static void ILibDuktape_GenericMarshal_MethodInvokeAsync_StartWorker(duk_context *ctx, ILibDuktape_FFI_AsyncData *data)');
+    const variableFinalizerBody = extractFunction(genericMarshal, 'duk_ret_t ILibDuktape_GenericMarshal_Variable_Finalizer(duk_context *ctx)');
+    const proxyFinalizerBody = extractFunction(genericMarshal, 'duk_ret_t ILibDuktape_GenericMarshal_NativeProxy_Finalizer(duk_context *ctx)');
+    const globalCallbackBody = extractFunction(genericMarshal, 'void* ILibDuktape_GlobalGenericCallback_Process(int numParms, ...)');
+    const invokeAsyncBody = extractFunction(genericMarshal, 'duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync(duk_context *ctx)');
+    const waitBody = extractFunction(genericMarshal, 'duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_wait(duk_context *ctx)');
+    const stopWorkersIndex = destroyBody.indexOf('ILibDuktape_GenericMarshal_StopAsyncWorkers(ctx)');
+    const heapFreeIndex = destroyBody.indexOf('duk_destroy_heap(ctx);');
     const nativeCallIndex = workerBody.indexOf('ILibDuktape_GenericMarshal_MethodInvoke_Native');
     const postNativeAbortIndex = workerBody.indexOf('if (data->abort != 0)', nativeCallIndex);
     const dispatchIndex = workerBody.indexOf('Duktape_RunOnEventLoop', nativeCallIndex);
@@ -85,6 +95,22 @@ function main() {
         dispatchDoesNotRaceWorkerFree: !dispatchBody.includes('ILibMemory_Free(data);'),
         duktapeDestroyJoinsRecordedThreads: destroyBody.includes('ILibThread_Join(thr);'),
         duktapeDestroyHasNoTimedThreadSkip: !destroyBody.includes('WaitForMultipleObjectsEx') && !destroyBody.includes('ILibThread_TimedJoinEx') && !destroyBody.includes('WAIT_TIMEOUT'),
+        duktapeDestroyStopsWorkersBeforeFreeingHeap: stopWorkersIndex >= 0 && heapFreeIndex > stopWorkersIndex,
+        duktapeDestroyPinsNativeMemoryForUnconfirmedWorkers: destroyBody.includes('ctxd->flags |= duk_native_memory_pinned;'),
+        duktapeDestroyKeepsWorkerListWhilePinned: destroyBody.includes('if ((ctxd->flags & duk_native_memory_pinned) == 0) { ILibLinkedList_Destroy(ctxd->asyncWorkers); }'),
+        stopWaitsForWorkersToUnregister: stopWorkersBody.includes('ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(') && stopWorkersBody.includes('ILibLinkedList_GetCount(ctxd->asyncWorkers)') && stopWorkersBody.includes('return(running == 0);'),
+        stopRequestIsIdempotent: requestStopBody.includes('data->stopRequested == 0') && requestStopBody.includes('data->stopRequested = 1;'),
+        shutdownWakesWindowFilteredMessageWaits: requestStopBody.includes('EnumThreadWindows(data->workerThreadId, ILibDuktape_GenericMarshal_PostQuitToWindow, 0);'),
+        workerReleasesInsteadOfFreeing: workerBody.includes('ILibDuktape_GenericMarshal_AsyncData_Release(data, 1);') && !workerBody.includes('ILibMemory_Free(data);'),
+        workerUnregistersUnderTrackerLock: releaseBody.indexOf('ILibLinkedList_Lock(data->tracker);') >= 0 && releaseBody.indexOf('ILibLinkedList_Remove(data->trackerNode);') > releaseBody.indexOf('ILibLinkedList_Lock(data->tracker);'),
+        ownerPathsReleaseData: abortBody.includes('ILibDuktape_GenericMarshal_AsyncData_Release(data, 0);') && finalizerBody.includes('ILibDuktape_GenericMarshal_AsyncData_Release(data, 0);'),
+        finalizerDoesNotJoinUnconfirmedWorker: finalizerBody.includes('duk_ctx_shutting_down(ctx) && !ILibDuktape_GenericMarshal_AsyncData_IsRunning(data)'),
+        workerThatNeverStartedIsReleased: startWorkerBody.includes('if (data->workerThread == NULL)') && startWorkerBody.includes('ILibDuktape_GenericMarshal_AsyncData_Release(data, 1);'),
+        stoppedWorkerRejectsNewWork: invokeAsyncBody.includes('if (data->stopRequested != 0) { return(ILibDuktape_Error(ctx, "Async worker has been stopped")); }'),
+        shutdownRefusesNewWorkers: invokeAsyncBody.includes('Cannot start an async worker during shutdown') && waitBody.includes('Cannot start an async worker during shutdown'),
+        pinnedVariablesAreNotFreed: variableFinalizerBody.includes('if (!ILibDuktape_GenericMarshal_NativeMemoryPinned(ctx)) { free(ptr); }'),
+        pinnedModulesAreNotUnloaded: (proxyFinalizerBody.match(/!ILibDuktape_GenericMarshal_NativeMemoryPinned\(ctx\)/g) || []).length === 2,
+        crossThreadCallbacksSkipTornDownHeap: globalCallbackBody.includes('if (crossThread && (targetData == NULL || (targetData->flags & duk_destroy_heap_in_progress) == duk_destroy_heap_in_progress))'),
     };
 
     for (const [name, passed] of Object.entries(checks)) {

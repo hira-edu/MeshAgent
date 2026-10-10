@@ -58,6 +58,7 @@ typedef struct ILibDuktape_ContextData
 	uint64_t executionTime;
 	uint32_t maxExecutionTime;
 	void *threads;
+	void *asyncWorkers;			// GenericMarshal async FFI workers still running for this context
 	int fakechain;
 	void *chain;
 	void *user;
@@ -65,6 +66,7 @@ typedef struct ILibDuktape_ContextData
 
 #define DUKTAPE_DEFAULT_MAX_EXECUTION_TIMEOUT 0
 #define duk_destroy_heap_in_progress	0x01
+#define duk_native_memory_pinned		0x02	// A worker outlived teardown: keep native memory it may still use
 #define duk_ctx_context_data(ctx) ((ILibDuktape_ContextData*)(ILibMemory_CanaryOK(ctx)?((void**)ILibMemory_Extra(ctx))[0]:NULL))
 #define duk_ctx_nonce(ctx) (duk_ctx_context_data(ctx)->nonce)
 #define duk_ctx_is_alive(ctx) (ILibMemory_CanaryOK(ctx)&&ILibMemory_ExtraSize(ctx)==sizeof(void*))
