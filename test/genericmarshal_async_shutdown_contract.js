@@ -84,6 +84,9 @@ function main() {
     const dispatcherDoneBody = extractFunction(genericMarshal, 'void ILibDuktape_GenericMarshal_MethodInvokeAsync_Done_chain(void *chain, void* u)');
     const sanityCheckBody = extractFunction(helpers, 'void __stdcall Duktape_RunOnEventLoop_SanityCheck(ULONG_PTR u)');
     const callbackExBody = extractFunction(genericMarshal, 'PTRSIZE ILibDuktape_GlobalGenericCallbackEx_Process(PTRSIZE arg1, int index, va_list args)');
+    const threadSinkBody = extractFunction(genericMarshal, 'void ILibDuktape_GenericMarshal_MethodInvoke_ThreadSink(void *args)');
+    const methodInvokeBody = extractFunction(genericMarshal, 'duk_ret_t ILibDuktape_GenericMarshal_MethodInvoke(duk_context *ctx)');
+    const marshalFinalizerBody = extractFunction(genericMarshal, 'duk_ret_t ILibDuktape_GenericMarshal_Finalizer(duk_context *ctx)');
     const stopTimeoutMatch = genericMarshal.match(/#define ILibDuktape_GenericMarshal_AsyncStopTimeoutMS\s+(\d+)/);
     const stopWorkersIndex = destroyBody.indexOf('ILibDuktape_GenericMarshal_StopAsyncWorkers(ctx)');
     const heapFreeIndex = destroyBody.indexOf('duk_destroy_heap(ctx);');
@@ -132,6 +135,11 @@ function main() {
         callbackExUsesNonceCheckedDispatch: callbackExBody.includes('Duktape_RunOnEventLoop(user->chain, ILibDuktape_GlobalGenericCallbackEx_nonce[index], target, ILibDuktape_GlobalGenericCallbackEx_Process_ChainEx, ILibDuktape_GlobalGenericCallback_ProcessEx_Abort, user);') && !callbackExBody.includes('ILibChain_RunOnMicrostackThread('),
         callbackExSkipsTornDownHeap: callbackExBody.includes('(targetData->flags & duk_destroy_heap_in_progress) == duk_destroy_heap_in_progress'),
         sanityCheckAbortsOnceAndSkipsFreeMarker: sanityCheckBody.includes('d->abortHandler = NULL;') && sanityCheckBody.includes('d->abortHandler != (Duktape_EventLoopDispatch)(uintptr_t)0x01'),
+        asyncReferencesAreAtomic: releaseBody.includes('ILibDuktape_GenericMarshal_AtomicDecrement(&(data->refs)) == 0'),
+        queuedDispatchHoldsReference: workerBody.includes('ILibDuktape_GenericMarshal_AsyncData_AddRef(data);') && workerBody.includes('ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatchRef, ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatchAbort, data);'),
+        threadedInvokeIsWaitedFor: methodInvokeBody.includes('args[7] = ILibLinkedList_AddTail(args[6], NULL);') && threadSinkBody.lastIndexOf('ILibLinkedList_Remove(trackerNode);') > threadSinkBody.indexOf('Duktape_RunOnEventLoop('),
+        rejectedArgumentReleasesCallSlot: invokeAsyncBody.includes('if (data->waitingForResult == 0) { data->promise = NULL; }'),
+        teardownClearsExCallbackSlots: marshalFinalizerBody.includes('ILibDuktape_GlobalGenericCallbackEx_ctx[exIndex] = NULL;'),
         crossThreadCallbacksSkipTornDownHeap: globalCallbackBody.includes('if (crossThread && (targetData == NULL || (targetData->flags & duk_destroy_heap_in_progress) == duk_destroy_heap_in_progress))'),
     };
 

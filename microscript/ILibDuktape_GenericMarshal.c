@@ -1248,10 +1248,20 @@ void ILibDuktape_GenericMarshal_MethodInvoke_ThreadSink(void *args)
 	int parms = (int)(PTRSIZE)((void**)args)[3];
 	void *fptr = ((void**)args)[4];
 	uintptr_t nonce = (uintptr_t)((void**)args)[5];
+	void *tracker = ((void**)args)[6];
+	void *trackerNode = ((void**)args)[7];
 	PTRSIZE retVal = ILibDuktape_GenericMarshal_MethodInvoke_Native(parms, fptr, vars);
 
 	((void**)args)[3] = (void*)retVal;
 	Duktape_RunOnEventLoop(chain, nonce, e->ctx, ILibDuktape_GenericMarshal_MethodInvoke_ThreadSink_Return, NULL, args);
+
+	// Last step: heap teardown waits for this, so nothing above runs on freed memory.
+	if (tracker != NULL && trackerNode != NULL)
+	{
+		ILibLinkedList_Lock(tracker);
+		ILibLinkedList_Remove(trackerNode);
+		ILibLinkedList_UnLock(tracker);
+	}
 }
 
 #define ILibDuktape_FFI_AsyncDataPtr "\xFF_FFI_AsyncDataPtr"
@@ -1279,10 +1289,20 @@ typedef struct ILibDuktape_FFI_AsyncData
 	sem_t workAvailable;
 	sem_t workStarted;
 	sem_t workFinished;
-	void *tracker;			// ILibDuktape_ContextData.asyncWorkers; its lock guards refs and trackerNode
+	void *tracker;			// ILibDuktape_ContextData.asyncWorkers; its lock guards trackerNode
 	void *trackerNode;		// Non-NULL while the worker thread may still use this data or its arguments
-	int refs;				// The worker thread and the JavaScript function that stores this data
+	volatile long refs;		// Worker thread, owning function, pending promise, queued ChainDispatch (atomic)
 }ILibDuktape_FFI_AsyncData;
+
+// References are atomic so a release never needs the tracker list, which can be gone by
+// the time a queued ChainDispatch is aborted after heap teardown.
+#ifdef WIN32
+#define ILibDuktape_GenericMarshal_AtomicIncrement(p) InterlockedIncrement((p))
+#define ILibDuktape_GenericMarshal_AtomicDecrement(p) InterlockedDecrement((p))
+#else
+#define ILibDuktape_GenericMarshal_AtomicIncrement(p) __sync_add_and_fetch((p), 1)
+#define ILibDuktape_GenericMarshal_AtomicDecrement(p) __sync_sub_and_fetch((p), 1)
+#endif
 
 // Stays under the service's 5000 ms stop wait hint. A worker parked in a cross-thread
 // callback cannot finish until the chain thread runs again, so it always reaches this
@@ -1312,36 +1332,26 @@ static int ILibDuktape_GenericMarshal_AsyncData_IsRunning(ILibDuktape_FFI_AsyncD
 	ILibLinkedList_UnLock(data->tracker);
 	return(running);
 }
-// A pending promise holds a reference so its finalizer never reads freed data.
+// A pending promise or queued dispatch holds a reference so it never reads freed data.
 static void ILibDuktape_GenericMarshal_AsyncData_AddRef(ILibDuktape_FFI_AsyncData *data)
 {
-	if (data->tracker == NULL) { ++(data->refs); return; }
-	ILibLinkedList_Lock(data->tracker);
-	++(data->refs);
-	ILibLinkedList_UnLock(data->tracker);
+	ILibDuktape_GenericMarshal_AtomicIncrement(&(data->refs));
 }
 // Drops one reference. The worker also unregisters in the same step, and after that it
 // touches nothing but this data, so a teardown that sees it gone may free the heap.
 static void ILibDuktape_GenericMarshal_AsyncData_Release(ILibDuktape_FFI_AsyncData *data, int fromWorker)
 {
-	int refs;
-	if (data->tracker == NULL)
-	{
-		// Never tracked, so no worker thread exists: only the function holds it.
-		refs = --(data->refs);
-	}
-	else
+	if (fromWorker != 0 && data->tracker != NULL)
 	{
 		ILibLinkedList_Lock(data->tracker);
-		if (fromWorker != 0 && data->trackerNode != NULL)
+		if (data->trackerNode != NULL)
 		{
 			ILibLinkedList_Remove(data->trackerNode);
 			data->trackerNode = NULL;
 		}
-		refs = --(data->refs);
 		ILibLinkedList_UnLock(data->tracker);
 	}
-	if (refs == 0)
+	if (ILibDuktape_GenericMarshal_AtomicDecrement(&(data->refs)) == 0)
 	{
 		sem_destroy(&(data->workAvailable));
 		sem_destroy(&(data->workStarted));
@@ -1372,6 +1382,17 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatch(void *chain, voi
 
 	if (duk_pcall_method(data->ctx, 1) != 0) { ILibDuktape_Process_UncaughtExceptionEx(ctx, "Error Resolving Promise: "); }
 	duk_pop(ctx);																						// ...
+}
+// The worker queues ChainDispatch holding a reference; exactly one of these drops it.
+static void ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatchRef(void *chain, void *user)
+{
+	ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatch(chain, user);
+	ILibDuktape_GenericMarshal_AsyncData_Release((ILibDuktape_FFI_AsyncData*)user, 0);
+}
+static void ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatchAbort(void *chain, void *user)
+{
+	UNREFERENCED_PARAMETER(chain);
+	ILibDuktape_GenericMarshal_AsyncData_Release((ILibDuktape_FFI_AsyncData*)user, 0);
 }
 #ifdef WIN32
 static BOOL CALLBACK ILibDuktape_GenericMarshal_PostQuitToWindow(HWND hwnd, LPARAM lParam)
@@ -1443,7 +1464,8 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_WorkerRunLoop(void *arg)
 		{
 			if (data->waitingForResult == 0)
 			{
-				Duktape_RunOnEventLoop(data->chain, data->ctxnonce, data->ctx, ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatch, NULL, data);
+				ILibDuktape_GenericMarshal_AsyncData_AddRef(data);
+				Duktape_RunOnEventLoop(data->chain, data->ctxnonce, data->ctx, ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatchRef, ILibDuktape_GenericMarshal_MethodInvokeAsync_ChainDispatchAbort, data);
 			}
 			else
 			{
@@ -1809,6 +1831,8 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync(duk_context *ctx)
 		}
 		else if(!(i==0 && duk_is_function(ctx, 0)))
 		{
+			// Nothing was queued: release the call slot (the promise keeps its own reference)
+			if (data->waitingForResult == 0) { data->promise = NULL; }
 			return(ILibDuktape_Error(ctx, "INVALID Parameter"));
 		}
 	}
@@ -1908,7 +1932,8 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvoke(duk_context *ctx)
 	ILibDuktape_GenericMarshal_CallTypes calltypes = Duktape_GetIntPropertyValue(ctx, -1, "_callType", ILibDuktape_GenericMarshal_CallTypes_DEFAULT);
 	if (sizeof(void*) != 4) { calltypes = ILibDuktape_GenericMarshal_CallTypes_DEFAULT; }
 #endif
-	PTRSIZE *vars = spawnThread == 0 ? ILibMemory_AllocateA(sizeof(PTRSIZE)*parms) : ILibMemory_SmartAllocateEx(sizeof(PTRSIZE)*parms, 6 * sizeof(void*));
+	if (spawnThread != 0 && duk_ctx_shutting_down(ctx)) { return(ILibDuktape_Error(ctx, "Cannot start a native call thread during shutdown")); }
+	PTRSIZE *vars = spawnThread == 0 ? ILibMemory_AllocateA(sizeof(PTRSIZE)*parms) : ILibMemory_SmartAllocateEx(sizeof(PTRSIZE)*parms, 8 * sizeof(void*));
 	duk_get_prop_string(ctx, -1, "_address");		// [func][addr]
 	fptr = duk_to_pointer(ctx, -1);
 
@@ -1985,8 +2010,20 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvoke(duk_context *ctx)
 			args[3] = (void*)(PTRSIZE)parms;
 			args[4] = fptr;
 			args[5] = (void*)duk_ctx_nonce(ctx);
+			// Registered like an async worker so heap teardown waits for it; its node carries
+			// no data because there is nothing to request, the native call cannot be woken.
+			args[6] = duk_ctx_context_data(ctx)->asyncWorkers;
+			ILibLinkedList_Lock(args[6]);
+			args[7] = ILibLinkedList_AddTail(args[6], NULL);
+			ILibLinkedList_UnLock(args[6]);
 
 			void *thptr = ILibSpawnNormalThread(ILibDuktape_GenericMarshal_MethodInvoke_ThreadSink, args);
+			if (thptr == NULL)
+			{
+				ILibLinkedList_Lock(args[6]);
+				ILibLinkedList_Remove(args[7]);
+				ILibLinkedList_UnLock(args[6]);
+			}
 			duk_push_fixed_buffer(ctx, sizeof(void*));									// [ret][buffer]
 			((void**)Duktape_GetBuffer(ctx, -1, NULL))[0] = thptr;
 			duk_push_buffer_object(ctx, -1, 0, sizeof(void*), DUK_BUFOBJ_NODEJS_BUFFER);// [ret][buffer][NodeBuffer]
@@ -3184,6 +3221,18 @@ duk_ret_t ILibDuktape_GenericMarshal_GetGlobalGenericCallback(duk_context *ctx)
 }
 duk_ret_t ILibDuktape_GenericMarshal_Finalizer(duk_context *ctx)
 {
+	int exIndex;
+	// Ex callback slots must not keep pointing at this heap once it is gone
+	for (exIndex = 0; exIndex < (int)(sizeof(ILibDuktape_GlobalGenericCallbackEx_ctx) / sizeof(ILibDuktape_GlobalGenericCallbackEx_ctx[0])); ++exIndex)
+	{
+		if (ILibDuktape_GlobalGenericCallbackEx_ctx[exIndex] == ctx)
+		{
+			ILibDuktape_GlobalGenericCallbackEx_active[exIndex] = 0;
+			ILibDuktape_GlobalGenericCallbackEx_nctx[exIndex] = NULL;
+			ILibDuktape_GlobalGenericCallbackEx_ctx[exIndex] = NULL;
+			ILibDuktape_GlobalGenericCallbackEx_nonce[exIndex] = 0;
+		}
+	}
 	if (GlobalCallbackList != NULL)
 	{
 		ILibLinkedList_Lock(GlobalCallbackList);

@@ -2910,7 +2910,7 @@ duk_ret_t ILibDuktape_PAC_Create(duk_context *ctx)
 	{
 		char *err = (char*)duk_safe_to_string(ex, -1);
 		sprintf_s(ILibScratchPad, sizeof(ILibScratchPad), "%s", err);
-		Duktape_SafeDestroyHeap(ex);	// Also frees the context data raw duk_destroy_heap leaks
+		duk_destroy_heap(ex);
 		return(ILibDuktape_Error(ctx, "Error in WPAD: %s", ILibScratchPad));
 	}
 	duk_pop(ex);
