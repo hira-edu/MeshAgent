@@ -151,7 +151,15 @@ void __stdcall Duktape_RunOnEventLoop_SanityCheck(ULONG_PTR u)
 	{
 		if ((d->ctxd->flags & duk_destroy_heap_in_progress) == duk_destroy_heap_in_progress)
 		{
-			if (d->abortHandler != NULL) { d->abortHandler(d->chain, d->user); }
+			// 0x01 is AbortSink's "free user" marker, not a function. Abort only once: the
+			// queued item still runs later, and must not abort the same call again.
+			if (d->abortHandler != NULL && d->abortHandler != (Duktape_EventLoopDispatch)(uintptr_t)0x01)
+			{
+				Duktape_EventLoopDispatch abortHandler = d->abortHandler;
+				d->abortHandler = NULL;
+				d->handler = NULL;
+				abortHandler(d->chain, d->user);
+			}
 		}
 	}
 }

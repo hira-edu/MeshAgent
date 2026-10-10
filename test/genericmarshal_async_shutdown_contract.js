@@ -82,6 +82,9 @@ function main() {
     const engineReallocBody = extractFunction(scriptContainer, 'void *ILibDuktape_ScriptContainer_Engine_realloc(void *udata, void *ptr, duk_size_t size)');
     const trackedPromiseFinalizerBody = extractFunction(genericMarshal, 'duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_promfinTracked(duk_context *ctx)');
     const dispatcherDoneBody = extractFunction(genericMarshal, 'void ILibDuktape_GenericMarshal_MethodInvokeAsync_Done_chain(void *chain, void* u)');
+    const sanityCheckBody = extractFunction(helpers, 'void __stdcall Duktape_RunOnEventLoop_SanityCheck(ULONG_PTR u)');
+    const callbackExBody = extractFunction(genericMarshal, 'PTRSIZE ILibDuktape_GlobalGenericCallbackEx_Process(PTRSIZE arg1, int index, va_list args)');
+    const stopTimeoutMatch = genericMarshal.match(/#define ILibDuktape_GenericMarshal_AsyncStopTimeoutMS\s+(\d+)/);
     const stopWorkersIndex = destroyBody.indexOf('ILibDuktape_GenericMarshal_StopAsyncWorkers(ctx)');
     const heapFreeIndex = destroyBody.indexOf('duk_destroy_heap(ctx);');
     const nativeCallIndex = workerBody.indexOf('ILibDuktape_GenericMarshal_MethodInvoke_Native');
@@ -124,6 +127,11 @@ function main() {
         dispatchNeverPushesCollectedPromise: dispatchBody.includes('if (data->promise == ILibDuktape_GenericMarshal_INVALID_PROMISE) { data->promise = NULL; return; }'),
         waitModeReturnsWithoutPromise: invokeAsyncBody.includes('if (data->promise == NULL) { return(0); }'),
         waitResetsAfterFailedCall: waitBody.includes('if (duk_pcall_method(ctx, 2) != 0)') && waitBody.includes('data->waitingForResult = 0;'),
+        stopWaitFitsServiceStopHint: stopTimeoutMatch != null && Number(stopTimeoutMatch[1]) < 5000,
+        stopWakesWindowsBeforeIdleWorker: requestStopBody.indexOf('EnumThreadWindows(') >= 0 && requestStopBody.indexOf('sem_post(&(data->workAvailable));') > requestStopBody.indexOf('EnumThreadWindows('),
+        callbackExUsesNonceCheckedDispatch: callbackExBody.includes('Duktape_RunOnEventLoop(user->chain, ILibDuktape_GlobalGenericCallbackEx_nonce[index], target, ILibDuktape_GlobalGenericCallbackEx_Process_ChainEx, ILibDuktape_GlobalGenericCallback_ProcessEx_Abort, user);') && !callbackExBody.includes('ILibChain_RunOnMicrostackThread('),
+        callbackExSkipsTornDownHeap: callbackExBody.includes('(targetData->flags & duk_destroy_heap_in_progress) == duk_destroy_heap_in_progress'),
+        sanityCheckAbortsOnceAndSkipsFreeMarker: sanityCheckBody.includes('d->abortHandler = NULL;') && sanityCheckBody.includes('d->abortHandler != (Duktape_EventLoopDispatch)(uintptr_t)0x01'),
         crossThreadCallbacksSkipTornDownHeap: globalCallbackBody.includes('if (crossThread && (targetData == NULL || (targetData->flags & duk_destroy_heap_in_progress) == duk_destroy_heap_in_progress))'),
     };
 

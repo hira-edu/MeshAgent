@@ -1284,7 +1284,10 @@ typedef struct ILibDuktape_FFI_AsyncData
 	int refs;				// The worker thread and the JavaScript function that stores this data
 }ILibDuktape_FFI_AsyncData;
 
-#define ILibDuktape_GenericMarshal_AsyncStopTimeoutMS	6000
+// Stays under the service's 5000 ms stop wait hint. A worker parked in a cross-thread
+// callback cannot finish until the chain thread runs again, so it always reaches this
+// deadline and its memory is pinned instead of freed.
+#define ILibDuktape_GenericMarshal_AsyncStopTimeoutMS	3000
 
 // Registers a new worker before it starts. One reference belongs to the worker thread and
 // one to the JavaScript function holding ILibDuktape_FFI_AsyncDataPtr.
@@ -1384,8 +1387,8 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(ILibDuktape_FFI_As
 	{
 		data->stopRequested = 1;
 		data->abort = 1;
-		sem_post(&(data->workAvailable));
 #ifdef WIN32
+		// Post these before waking an idle worker, which could otherwise exit first.
 		if (data->workerThreadId != 0)
 		{
 			PostThreadMessageW(data->workerThreadId, WM_QUIT, 0, 0);
@@ -1394,6 +1397,7 @@ void ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(ILibDuktape_FFI_As
 			EnumThreadWindows(data->workerThreadId, ILibDuktape_GenericMarshal_PostQuitToWindow, 0);
 		}
 #endif
+		sem_post(&(data->workAvailable));
 	}
 }
 void ILibDuktape_GenericMarshal_MethodInvokeAsync_WorkerRunLoop(void *arg)
@@ -1587,6 +1591,14 @@ duk_ret_t ILibDuktape_GenericMarshal_MethodInvokeAsync_dataFinalizer(duk_context
 			{
 				ILibLinkedList_AddTail(duk_ctx_context_data(ctx)->threads, data->workerThread);
 			}
+#ifdef WIN32
+			else if (data->workerThread != NULL)
+			{
+				// Nobody joins this worker; it exits on its own once stopped.
+				CloseHandle((HANDLE)data->workerThread);
+				data->workerThread = NULL;
+			}
+#endif
 			ILibDuktape_GenericMarshal_MethodInvokeAsync_RequestStop(data);
 		}
 		ILibDuktape_GenericMarshal_AsyncData_Release(data, 0);
@@ -2573,6 +2585,9 @@ duk_ret_t ILibDuktape_GenericMarshal_GlobalCallback_close(duk_context *ctx)
 int ILibDuktape_GlobalGenericCallbackEx_n[22] = { 0 };
 int ILibDuktape_GlobalGenericCallbackEx_active[22] = { 0 };
 ILibDuktape_EventEmitter *ILibDuktape_GlobalGenericCallbackEx_nctx[22] = { 0 };
+// The owning context, recorded at registration so another thread never reads the emitter
+duk_context *ILibDuktape_GlobalGenericCallbackEx_ctx[22] = { 0 };
+uintptr_t ILibDuktape_GlobalGenericCallbackEx_nonce[22] = { 0 };
 extern void* gILibChain;
 
 duk_ret_t ILibDuktape_GlobalGenericCallbackEx_Process_ChainEx_2(ILibDuktape_EventEmitter *emitter)
@@ -2618,7 +2633,9 @@ void ILibDuktape_GlobalGenericCallbackEx_Process_ChainEx(void * chain, void *use
 		{
 			duk_push_heapptr(ctx, data->emitter->object);			// [obj]
 			duk_prepare_method_call(ctx, -1, "emit_returnValue");	// [obj][emitRV][this]
-			if (duk_pcall_method(ctx, 0) == 0)
+			// A handler that returns nothing yields undefined; reading _ptr from it throws
+			// outside any pcall and is fatal.
+			if (duk_pcall_method(ctx, 0) == 0 && duk_is_object(ctx, -1))
 			{
 				data->retVal = Duktape_GetPointerProperty(ctx, -1, "_ptr");
 			}
@@ -2650,8 +2667,20 @@ PTRSIZE ILibDuktape_GlobalGenericCallbackEx_Process(PTRSIZE arg1, int index, va_
 		{
 			user->args[i] = i == 0 ? arg1 : va_arg(args, PTRSIZE);
 		}
-		sem_init(&(user->contextWaiter), 0, 0);
-		ILibChain_RunOnMicrostackThread(user->chain, ILibDuktape_GlobalGenericCallbackEx_Process_ChainEx, user);
+		{
+			// Like GlobalGenericCallback_Process: never queue onto a heap being torn down, and
+			// queue with the context nonce so a heap destroyed meanwhile aborts the call
+			// (waking this thread) instead of running JavaScript on it.
+			duk_context *target = ILibDuktape_GlobalGenericCallbackEx_ctx[index];
+			ILibDuktape_ContextData *targetData = target == NULL ? NULL : duk_ctx_context_data(target);
+			if (targetData == NULL || (targetData->flags & duk_destroy_heap_in_progress) == duk_destroy_heap_in_progress)
+			{
+				ILibMemory_Free(user);
+				return(0);
+			}
+			sem_init(&(user->contextWaiter), 0, 0);
+			Duktape_RunOnEventLoop(user->chain, ILibDuktape_GlobalGenericCallbackEx_nonce[index], target, ILibDuktape_GlobalGenericCallbackEx_Process_ChainEx, ILibDuktape_GlobalGenericCallback_ProcessEx_Abort, user);
+		}
 		
 		sem_wait(&(user->contextWaiter));
 		if (user->retVal != NULL) { ret = user->retVal; }
@@ -2910,6 +2939,8 @@ duk_ret_t ILibDuktape_GenericMarshal_PutGlobalGenericCallbackEx(duk_context *ctx
 	ILibDuktape_GlobalGenericCallbackEx_n[index] = 0;
 	ILibDuktape_GlobalGenericCallbackEx_active[index] = 0;
 	ILibDuktape_GlobalGenericCallbackEx_nctx[index] = NULL;
+	ILibDuktape_GlobalGenericCallbackEx_ctx[index] = NULL;
+	ILibDuktape_GlobalGenericCallbackEx_nonce[index] = 0;
 
 	return(0);
 }
@@ -3056,6 +3087,8 @@ duk_ret_t ILibDuktape_GenericMarshal_GetGlobalGenericCallbackEx(duk_context *ctx
 	ILibDuktape_GlobalGenericCallbackEx_n[index] = numParms;
 	ILibDuktape_GlobalGenericCallbackEx_active[index] = 1;
 	ILibDuktape_GlobalGenericCallbackEx_nctx[index] = ILibDuktape_EventEmitter_GetEmitter(ctx, -1);
+	ILibDuktape_GlobalGenericCallbackEx_ctx[index] = ctx;
+	ILibDuktape_GlobalGenericCallbackEx_nonce[index] = duk_ctx_nonce(ctx);
 	return(1);
 }
 duk_ret_t ILibDuktape_GenericMarshal_GetGlobalGenericCallback(duk_context *ctx)
