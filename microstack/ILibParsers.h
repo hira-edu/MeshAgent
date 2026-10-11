@@ -1628,8 +1628,10 @@ int ILibIsRunningOnChainThread(void* chain);
 	extern uint64_t ILibCriticalLog_MaxSize;
 #define ILIBCRITICALEXITMSG(code, msg) {printf("%s", ILibCriticalLog(msg, __FILE__, __LINE__, 0, 0)); exit(code);}
 #define ILIBLOGMESSSAGE(msg) ILibCriticalLog(msg, __FILE__, __LINE__, 0, 0)
-	void ILIBLOGMESSAGEX(char *format, ...);
-	void ILIBLOGMESSAGEX2(uint32_t m, char *format, ...);
+	void ILibLogMessageAt(const char *file, int line, char *format, ...);
+	void ILibLogMessageAt2(const char *file, int line, uint32_t mask, char *format, ...);
+#define ILIBLOGMESSAGEX(...) ILibLogMessageAt(__FILE__, __LINE__, __VA_ARGS__)
+#define ILIBLOGMESSAGEX2(...) ILibLogMessageAt2(__FILE__, __LINE__, __VA_ARGS__)
 	void ILIBLOGMESSAGEX2_SetMask(uint32_t m);
 
 #if defined(WIN32)

@@ -11072,7 +11072,7 @@ char* ILibCriticalLog (const char* msg, const char* file, int line, int user1, i
 	}
 	return(ILibCriticalLogBuffer);
 }
-void ILIBLOGMESSAGEX(char *format, ...)
+void ILibLogMessageAt(const char *file, int line, char *format, ...)
 {
 	char dest[4096];
 	int len = 0;
@@ -11082,9 +11082,9 @@ void ILIBLOGMESSAGEX(char *format, ...)
 	len += vsnprintf(dest + len, sizeof(dest) - len, format, argptr);
 	va_end(argptr);
 
-	ILIBLOGMESSSAGE(dest);
+	ILibCriticalLog(dest, file, line, 0, 0);
 }
-void ILIBLOGMESSAGEX2(uint32_t mask, char *format, ...)
+void ILibLogMessageAt2(const char *file, int line, uint32_t mask, char *format, ...)
 {
 	if ((_g_logMessageX & mask) == mask)
 	{
@@ -11096,7 +11096,7 @@ void ILIBLOGMESSAGEX2(uint32_t mask, char *format, ...)
 		len += vsnprintf(dest + len, sizeof(dest) - len, format, argptr);
 		va_end(argptr);
 
-		ILIBLOGMESSSAGE(dest);
+		ILibCriticalLog(dest, file, line, 0, 0);
 	}
 }
 void ILIBLOGMESSAGEX2_SetMask(uint32_t m)
