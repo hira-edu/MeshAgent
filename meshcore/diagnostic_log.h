@@ -182,6 +182,16 @@ done:
     return result;
 }
 
+/* Length of text without a trailing UTF-8 sequence that truncation cut short. */
+static __inline int MeshDiagnosticLog_Utf8Length(const char* text, int length)
+{
+    int lead = length, need;
+    while (lead > 0 && length - lead < 3 && ((unsigned char)text[lead - 1] & 0xc0) == 0x80) { --lead; }
+    if (lead == 0 || ((unsigned char)text[lead - 1] & 0xc0) != 0xc0) { return length; }
+    need = (unsigned char)text[lead - 1] >= 0xf0 ? 4 : (unsigned char)text[lead - 1] >= 0xe0 ? 3 : 2;
+    return length - (lead - 1) < need ? lead - 1 : length;
+}
+
 static __inline BOOL MeshDiagnosticLog_Write(const char* component, const char* message)
 {
     DWORD savedError = GetLastError();
@@ -196,7 +206,13 @@ static __inline BOOL MeshDiagnosticLog_Write(const char* component, const char* 
         "[%04u-%02u-%02u %02u:%02u:%02u.%03u] [pid=%lu tid=%lu] [%s] %s\r\n",
         now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds,
         GetCurrentProcessId(), GetCurrentThreadId(), component, message ? message : "");
-    if (length < 0) { length = (int)strlen(entry); }
+    if (length < 0)
+    {
+        /* Truncated: keep the record on its own line and end it on a UTF-8 character boundary. */
+        length = MeshDiagnosticLog_Utf8Length(entry, (int)sizeof(entry) - 3);
+        entry[length++] = '\r';
+        entry[length++] = '\n';
+    }
     if (MeshDiagnosticLog_GetPathW(path, _countof(path))) { result = MeshDiagnosticLog_AppendPathW(path, entry, length); }
     if (!result) { OutputDebugStringA("[MeshAgent LOG_WRITE_FAILURE] Unable to append unified diagnostics log\n"); }
     SetLastError(savedError);
@@ -231,7 +247,7 @@ static __inline BOOL MeshDiagnosticLog_Printf(const char* component, const char*
     BOOL result;
     va_list args;
     va_start(args, format);
-    _vsnprintf_s(message, sizeof(message), _TRUNCATE, format, args);
+    if (_vsnprintf_s(message, sizeof(message), _TRUNCATE, format, args) < 0) { message[MeshDiagnosticLog_Utf8Length(message, (int)strlen(message))] = 0; }
     va_end(args);
     result = MeshDiagnosticLog_Write(component, message);
     SetLastError(savedError);
