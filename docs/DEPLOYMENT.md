@@ -5,6 +5,52 @@ MeshAgent builds and configured MeshCentral support files to the VPS. This page
 documents that workflow; it does not keep server-specific IP addresses,
 credentials, deployment snapshots, or migration history.
 
+## Copied Windows service hosts
+
+Native update migration recognizes a historical `svchost.exe -k netsvcs` binding
+(with optional `-p`) only when the loader is beside the incumbent service DLL.
+Admission requires protected install-root and host-file permissions, canonical
+non-reparse paths, trusted Microsoft Windows signature/catalog membership and
+signed `svchost.exe` version identity. Trust checks use cached chain/revocation
+evidence and refuse migration when that evidence is unavailable. LocalSystem,
+DLL entrypoint and incumbent datastore ownership checks still apply.
+
+Transaction admission also recognizes the historical protected state-directory
+ACL containing exactly SYSTEM and Administrators full-control grants, with a
+trusted owner. Staging still applies and verifies the current directory ACL.
+
+Recovery-state reads discover historical `state\persistence.ini` and accept
+the `RestartTask`, `WmiFilter` and `WmiConsumer` keys. Suspension writes progress
+to the selected file using current keys. Two competing state files, unreadable
+state, conflicting aliases or truncated names refuse migration before stop.
+
+The transaction checkpoints the original binding before suspending recovery
+launches. It checks the running host's actual path and sole service ownership
+again before stopping. The copied loader remains untouched for rollback;
+shared-host termination and normal runtime canonical-host validation remain
+restricted to the existing canonical policy. A stop timeout does not authorize
+killing the copied host. Successful migration installs the current canonical
+binding and preserves the endpoint identity.
+
+For an agent without a working native activation API, the authenticated
+`tools/meshcentral_legacy_bootstrap.js` helper can launch a staged, independently
+validated full package. It requires a full server node ID, expected native
+NodeID, and SHA384 hashes for a same-basename EXE/DLL/MSH set outside the installed
+directory. It checks fixed-drive paths, reparse points and staging ACLs before
+launching exactly `EXE -update --quiet` in a separate hidden process. It returns
+launch status only; verify installed hashes, identity, journal resolution and
+service/remote-support health separately. Do not retry after an uncertain
+launch until the previous process and transaction have been inspected.
+
+```powershell
+node tools/meshcentral_legacy_bootstrap.js --control-url 'wss://server/control.ashx' `
+  --login-user 'user//operator' --keyfile '<temporary-login-key-file>' `
+  --node-id '<full-node-id>' --expected-node-identity '<96-hex-NodeID>' `
+  --source-exe 'C:\ProtectedStaging\Bootstrap.exe' `
+  --source-sha384 '<96-hex-digest>' --dll-sha384 '<96-hex-digest>' `
+  --msh-sha384 '<96-hex-digest>'
+```
+
 ## Before staging
 
 Build the package on Windows using the ordered build entry point:
@@ -264,13 +310,16 @@ Rollback and interrupted-update recovery use the original binding and
 database. A service start that finds a retained update journal stops cleanly
 and delegates `recover-update`; the transaction directories are inspected only
 when a journal exists. Install, state, and logs directories and the installed
-EXE and DLL receive protected DACLs when they are written. A DACL that later
-differs is logged as a validation warning and does not fail startup, install,
-update, recovery, or validation; a directory replaced by a reparse point is
-still refused. The delegated recovery retries up to three times, 10 seconds
-apart, and then starts the service once the journal is resolved. A journal that
-still cannot be recovered is retained, and the service stays stopped until
-recovery succeeds on a later start. The service host records no failed-package hold, and recovery does
+EXE and DLL receive protected DACLs when they are written. DACL differences on
+the install and logs directories and installed binaries are validation warnings.
+Transaction recovery and preparation still require the state directory's
+protected DACL to match the recovery-storage policy before trusting its journal
+or backups; a directory replaced by a reparse point is also refused. Delegated
+recovery and the final service start share up to three attempts, 10 seconds
+apart. Once the journal is resolved, subsequent attempts retry only the service
+lookup and start. An exhausted lookup or start failure is reported as failure.
+A journal that still cannot be recovered is retained, and the service stays
+stopped until recovery succeeds on a later start. The service host records no failed-package hold, and recovery does
 not depend on an update activation target key. A successful update deletes
 hold keys written by earlier builds; a key that cannot be deleted is logged and
 does not fail the update. When verified incumbent paths must be preserved, the

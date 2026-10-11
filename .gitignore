@@ -394,6 +394,7 @@ temp.h
 
 # Embedded component artifacts
 meshcore/embedded/generated/
+meshservice/installer/components/
 
 # SSH keys
 .ssh/

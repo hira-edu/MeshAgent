@@ -388,6 +388,19 @@ static BOOL ServiceBinding_ImageSupported(const wchar_t* name, const QUERY_SERVI
         !_wcsicmp(image, L"\"%SystemRoot%\\System32\\svchost.exe\" -k netsvcs -p");
 }
 
+/* A copied Windows loader is migration-only. The normal canonical host and
+ * forced-stop validators deliberately do not use this admission path. */
+static BOOL ServiceBinding_MigrationImageSupported(const wchar_t* name, const QUERY_SERVICE_CONFIGW* config,
+    const wchar_t* installedExe, const wchar_t* installedDll, BOOL* legacy)
+{
+    wchar_t host[MAX_PATH];
+    if (ServiceBinding_ImageSupported(name, config, installedExe, installedDll, legacy)) { return TRUE; }
+    *legacy = FALSE; /* This flag denotes a standalone agent EXE, never its loader. */
+    return config->dwServiceType == SERVICE_WIN32_SHARE_PROCESS &&
+        ServiceLegacyHost_ParseImage(config->lpBinaryPathName, installedDll, host, _countof(host)) &&
+        ServiceDeploy_ValidateCopiedLegacyHost(host, installedDll);
+}
+
 static BOOL ServiceBinding_SharedImageSupported(const ServiceBindingSnapshot* snapshot, const wchar_t* installedDll)
 {
     const ServiceBindingValue* dll = &snapshot->values[9];
@@ -482,7 +495,7 @@ static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* name, const
          _wcsicmp(snapshot->config->lpServiceStartName, L".\\LocalSystem") != 0 &&
          _wcsicmp(snapshot->config->lpServiceStartName, L"NT AUTHORITY\\System") != 0)) { goto done; }
     failure = L"service-image";
-    if (!ServiceBinding_ImageSupported(name, snapshot->config, installedExe, installedDll, &snapshot->legacy)) { goto done; }
+    if (!ServiceBinding_MigrationImageSupported(name, snapshot->config, installedExe, installedDll, &snapshot->legacy)) { goto done; }
     failure = L"QueryServiceStatus";
     if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (BYTE*)&status, sizeof(status), &size) ||
         (status.dwCurrentState != SERVICE_RUNNING && status.dwCurrentState != SERVICE_STOPPED)) { goto done; }
@@ -515,6 +528,10 @@ static ServiceBindingSnapshot* ServiceBinding_Capture(const wchar_t* name, const
     }
     failure = L"shared-image";
     if (!ServiceBinding_SharedImageSupported(snapshot, installedDll)) { goto done; }
+    failure = L"copied-host-process";
+    wchar_t copiedHost[MAX_PATH];
+    if (ServiceLegacyHost_ParseImage(snapshot->config->lpBinaryPathName, installedDll, copiedHost, _countof(copiedHost)) &&
+        !ServiceLegacyHost_ProcessSafe(name, copiedHost)) { goto done; }
     failure = L"group-membership";
     {
         wchar_t serviceGroup[64] = {0};

@@ -48,6 +48,23 @@ NodeID record. `test/native_service_name_binding_native.py` and
 standalone `-run` bindings, historical callback DLLs, quoted and unquoted
 paths, and rejected loader or argument impersonation.
 
+`test/service_legacy_host_native.py` exercises copied-host command parsing and
+real embedded/catalog trust, including tampered images, wrong Windows binaries
+and junction traversal. `test/service_legacy_process_native.py` fault-injects
+read-only process admission: shared PIDs, wrong images, process exit, state races,
+query failures and handle cleanup. Neither probe changes installed services.
+
+`test/service_transaction_state_dacl_native.py` checks current and historical
+state ACL admission using real Windows security descriptors, including trusted
+ownership, exact grants, inheritance and access failures.
+
+`test/service_recovery_state_native.py` uses real temporary files to cover
+historical filenames and recovery keys, suspension progress and retry, ambiguous
+files, BOM encodings, conflicting aliases, truncated names and read errors.
+`test/meshcentral_legacy_bootstrap_runtime.js`
+uses mocked transport/native APIs to check staging, identity, hash and ACL
+refusals and bounded, correlated process launch; it does not exercise an endpoint.
+
 `test/historical_install_paths_native.py` uses temporary files and a built
 DLL/EXE pair to verify incumbent selection, ambiguous identities, resource
 matching, deletion faults, retained identity proof, and bounded cleanup. It
@@ -59,7 +76,10 @@ These filesystem probes require an x64 C compiler on Windows.
 `test/service_update_recovery_native.py` fault-injects update and crash
 recovery orchestration, including database migration at the original path,
 the NodeID gate for existing databases, and recovery that records no update
-hold. `test/service_transaction_journal_native.py` checks that a checkpoint
+hold. `test/service_update_recovery_policy_native.py` checks bounded delegated
+recovery and restart retries, failure reporting, and transaction-directory
+trust checks without changing real services or permissions.
+`test/service_transaction_journal_native.py` checks that a checkpoint
 without incumbent paths keeps the version 1 layout. The binding, transaction
 journal, transaction recovery, and update recovery native probes also run on
 macOS with Clang and sanitizers.
