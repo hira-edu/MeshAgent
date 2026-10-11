@@ -46,8 +46,26 @@ static __inline BOOL MeshDiagnosticLog_Seek(HANDLE file, LONGLONG offset)
     return SetFilePointerEx(file, position, NULL, FILE_BEGIN);
 }
 
+/* Re-stamp a fixed-width "[YYYY-MM-DD HH:MM:SS.mmm]" prefix in place; called under the file lock so file order matches time order. */
+static __inline void MeshDiagnosticLog_Restamp(char* entry, DWORD length)
+{
+    static const char shape[] = "[0000-00-00 00:00:00.000]";
+    char stamp[32];
+    SYSTEMTIME now;
+    DWORD i;
+    if (!entry || length < sizeof(shape) - 1) { return; }
+    for (i = 0; i < sizeof(shape) - 1; ++i)
+    {
+        if (shape[i] == '0' ? (entry[i] < '0' || entry[i] > '9') : entry[i] != shape[i]) { return; }
+    }
+    GetLocalTime(&now);
+    if (_snprintf_s(stamp, sizeof(stamp), _TRUNCATE, "[%04u-%02u-%02u %02u:%02u:%02u.%03u]",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds) == (int)(sizeof(shape) - 1))
+    { memcpy(entry, stamp, sizeof(shape) - 1); }
+}
+
 /* One file lock covers conversion, pruning, and the complete append across processes. */
-static __inline BOOL MeshDiagnosticLog_AppendPathW(const wchar_t* path, const char* entry, DWORD length)
+static __inline BOOL MeshDiagnosticLog_AppendPathW(const wchar_t* path, char* entry, DWORD length)
 {
     HANDLE file;
     OVERLAPPED lock = {0};
@@ -153,6 +171,7 @@ static __inline BOOL MeshDiagnosticLog_AppendPathW(const wchar_t* path, const ch
         size.QuadPart = dest;
         if (!MeshDiagnosticLog_Seek(file, dest) || !SetEndOfFile(file)) { error = GetLastError(); goto done; }
     }
+    MeshDiagnosticLog_Restamp(entry, length);
     if (!MeshDiagnosticLog_Seek(file, size.QuadPart) || !WriteFile(file, entry, length, &written, NULL) || written != length || !FlushFileBuffers(file))
     { error = GetLastError(); if (!error) { error = ERROR_WRITE_FAULT; } goto done; }
     result = TRUE;
