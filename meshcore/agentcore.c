@@ -5303,6 +5303,18 @@ void MeshServer_ServerAuthenticated(ILibWebClient_StateObject WebStateObject, Me
         }
 #endif
 		agent->lastAuthenticatedTick = ILibGetUptime();
+		{
+			// Always-on recovery record that pairs with [CONTROLCHANNEL_FAILURE]. Written before the
+			// backoff reset so previousRetryMs still shows the reconnect delay that led to this session.
+			unsigned long processId = 0;
+#ifdef WIN32
+			processId = GetCurrentProcessId();
+#elif defined(_POSIX)
+			processId = (unsigned long)getpid();
+#endif
+			ILIBLOGMESSAGEX("[CONTROLCHANNEL_CONNECTED] descriptor=%d idleTimeoutSeconds=%d previousRetryMs=%d pid=%lu",
+				ILibWebClient_GetDescriptorValue_FromStateObject(WebStateObject), agent->controlChannel_idleTimeout_seconds, agent->retryTime, processId);
+		}
 		agent->retryTime = 0;
 		ILibDuktape_MeshAgent_PUSH(agent->meshCoreCtx, agent->chain);				// [agent]
 		duk_get_prop_string(agent->meshCoreCtx, -1, "emit");						// [agent][emit]

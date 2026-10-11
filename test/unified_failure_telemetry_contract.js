@@ -29,6 +29,18 @@ assert(read('meshcore/KVM/Windows/kvm.c').includes('[KVM_FAILURE]'));
 assert(read('meshcore/KVM/Windows/kvm.c').includes('[HELPER_EXIT]'));
 assert(read('meshcore/agentcore.c').includes('MeshAgent_LogKvmFailurePacket(buffer, bufferLen)'));
 assert(read('meshcore/agentcore.c').includes('"%.*s", messageLen, buffer + 4'));
+{
+    const core = read('meshcore/agentcore.c').replace(/\r\n/g, '\n');
+    const start = core.indexOf('void MeshServer_ServerAuthenticated(ILibWebClient_StateObject WebStateObject, MeshAgentHostContainer *agent) {');
+    const end = start >= 0 ? core.indexOf('\n}\n', start) : -1;
+    const body = end > start ? core.slice(start, end) : '';
+    const authenticated = body.indexOf('if (agent->serverAuthState == 3)');
+    const connected = body.indexOf('ILIBLOGMESSAGEX("[CONTROLCHANNEL_CONNECTED]');
+    const reset = body.indexOf('agent->retryTime = 0;');
+    assert(authenticated >= 0 && connected > authenticated, 'CONTROLCHANNEL_CONNECTED must be logged inside the authenticated block');
+    assert(reset > connected, 'CONTROLCHANNEL_CONNECTED must be logged before the reconnect backoff reset');
+    assert(body.slice(connected, reset).includes('agent->retryTime, processId'));
+}
 
 let requestedPath;
 let input = '[2026-10-03 07:48:55.123] [pid=123 tid=456] [core] [] core.c:123 (1,2) [CONTROLCHANNEL_FAILURE] reason=receive\n' +

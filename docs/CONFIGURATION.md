@@ -362,8 +362,30 @@ TLS failure before cleanup; `[AUTH_FAILURE]` identifies rejected authentication.
 These records do not require `controlChannelDebug`, `logUpdate`, or
 `SERVICE_CONTROLCHANNEL_TRACE` and do not log packet bodies, credentials, or keys.
 
-Ordinary traffic, successful connects, transient would-block/interrupted I/O,
-explicit script disconnects, and chain shutdown do not produce failure records.
+Each server-authenticated session writes one always-on
+`[CONTROLCHANNEL_CONNECTED] descriptor= idleTimeoutSeconds= previousRetryMs= pid=`
+record, so the log shows recovery after a failure. `previousRetryMs` is the
+reconnect backoff value in effect before authentication resets it to `0`; small
+values (500-3000) mean an immediate or first-step reconnect, larger values mean
+earlier attempts failed.
+
+Control-channel keepalive: after `controlChannelIdleTimeout` seconds (default
+120, minimum 30) with no socket activity in either direction, the agent sends a
+WebSocket ping. A pong is due within 15 seconds; a missed pong is re-probed up to
+3 times (received data resets the count) before `reason=pong_timeout`.
+
+| `[CONTROLCHANNEL_FAILURE]` field | Meaning |
+|---|---|
+| `uptimeMs` | System uptime (Windows `GetTickCount64`, Linux `CLOCK_MONOTONIC`, macOS time since boot), not process uptime. |
+| `pingAgeMs` | Age of the outstanding keepalive ping; `-1` means no ping was outstanding (cleared at connect and on each pong), not that none was ever sent. |
+| `pongProbes` | Re-pings sent after missed pongs for the current ping (0-3). |
+| `lastDataAgeMs` | Time since the last received data frame, pong, or connect; sends do not update it. |
+| `httpStatus` | `-1` means no HTTP response header was available (socket teardown, connect timeout, DNS failure), not an HTTP error. |
+| `interrupt` | WebClient interrupt code; `5` is `WEBCLIENT_DESTROYED` (connection object torn down). |
+
+Ordinary traffic, transient would-block/interrupted I/O, explicit script
+disconnects, and chain shutdown do not produce failure records; a successful
+connect produces only the `[CONTROLCHANNEL_CONNECTED]` record.
 A peer EOF is recorded only when it terminates the persistent control channel;
 it proves the peer closed the stream, not why. A WebSocket close code describes
 the peer's protocol response, not the cause inside a relay or server.
