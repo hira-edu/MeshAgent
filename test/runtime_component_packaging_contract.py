@@ -50,8 +50,8 @@ class RuntimeControllerPackaging(unittest.TestCase):
             x64.write_bytes(executable(MODULE.IMAGE_FILE_MACHINE_AMD64))
             output = root / "out"
             metadata = MODULE.stage_components(root, x86, x64, output)
-            self.assertEqual((output / "runtime-controller-x86.exe").read_bytes(), x86.read_bytes())
-            self.assertEqual((output / "runtime-controller-x64.exe").read_bytes(), x64.read_bytes())
+            self.assertEqual((output / "RuntimeController32.exe").read_bytes(), x86.read_bytes())
+            self.assertEqual((output / "RuntimeController64.exe").read_bytes(), x64.read_bytes())
             self.assertEqual(metadata["components"][0]["sha256"], hashlib.sha256(x86.read_bytes()).hexdigest())
             catalog = (output / "catalog.bin").read_bytes()
             self.assertEqual(struct.unpack_from("<IIII", catalog),
@@ -138,9 +138,9 @@ class RuntimeControllerPackaging(unittest.TestCase):
         self.assertEqual(dependency_copies[0].attrib["DestinationFiles"],
                          r"$(RuntimeComponentBuildSourceRoot)\x86\Release\Runtime32.dll;$(RuntimeComponentBuildSourceRoot)\x64\Release\Runtime64.dll")
         self.assertEqual(dependency_copies[1].attrib["SourceFiles"],
-                         r"$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeLoader.exe")
+                         r"$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeController64.exe")
         self.assertEqual(dependency_copies[1].attrib["DestinationFiles"],
-                         r"$(RuntimeComponentBuildSourceRoot)\x64\Release\RuntimeLoader.exe")
+                         r"$(RuntimeComponentBuildSourceRoot)\x64\Release\RuntimeController64.exe")
 
         build_actions = []
         for child in target:
@@ -156,14 +156,14 @@ class RuntimeControllerPackaging(unittest.TestCase):
             "$(RuntimeLibraryX64Properties)",
             r"$(RuntimeComponentBuildOutputRoot)\library\x86\Runtime32.dll;$(RuntimeComponentBuildOutputRoot)\library\x64\Runtime64.dll",
             "$(RuntimeControllerX64Properties)",
-            r"$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeLoader.exe",
+            r"$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeController64.exe",
             "$(RuntimeControllerWin32Properties)",
             "stage",
         ])
 
         command = target.find("m:Exec", namespace).attrib["Command"]
-        self.assertIn(r'--x86 "$(RuntimeComponentBuildOutputRoot)\loader\x86\RuntimeLoader.exe"', command)
-        self.assertIn(r'--x64 "$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeLoader.exe"', command)
+        self.assertIn(r'--x86 "$(RuntimeComponentBuildOutputRoot)\loader\x86\RuntimeController32.exe"', command)
+        self.assertIn(r'--x64 "$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeController64.exe"', command)
         self.assertNotIn(r"$(RuntimeComponentSourceRoot)\x86\Release", command)
         self.assertNotIn(r"$(RuntimeComponentSourceRoot)\x64\Release", command)
         serialized_target = ET.tostring(target, encoding="unicode")

@@ -52,22 +52,28 @@ def main() -> None:
     assert '"getStatus"' not in binding, "operations belong in the portable relay parser"
     assert "MeshRuntimeRelay_Operation" in binding
     assert "CallNamedPipeW" not in binding
-    assert "FILE_FLAG_OVERLAPPED" in binding and "CreateProcessW" in binding
-    assert "CancelIoEx" in binding and "GetOverlappedResult" in binding
-    assert "MeshRuntimeBinding_Remaining" in binding
+    assert "CreateProcessW" in binding, "process launch must use CreateProcessW"
+    assert "CREATE_SUSPENDED" in binding, "process launch must create suspended thread before job assignment"
+    assert "ResumeThread" in binding, "primary thread must be resumed after job assignment"
+    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in binding, "Job Object must enforce kill-on-close limit"
+    assert "TerminateJobObject" in binding, "unload must terminate via Job Object"
+    assert "--controller" not in binding, "binary must launch directly without --controller daemon flag"
+    assert "MESH_RUNTIME_PIPE_TIMEOUT_MS" not in binding, "controller pipe timeout must be removed"
+    assert "FILE_FLAG_OVERLAPPED" not in binding, "named pipe overlapped I/O must be removed"
+    assert "CancelIoEx" not in binding
+    assert "GetOverlappedResult" not in binding
+    assert "MeshRuntimeBinding_Supervisor" not in binding
+    assert "SCRIPT_ENGINE_NO_MESH_AGENT_ACCESS" in binding, "binding must check script container security flags"
     execute = binding[binding.index("duk_ret_t MeshRuntimeBinding_Execute"):]
-    assert execute.index("ReleaseSRWLockExclusive(&g_MeshRuntimeBindingLock)") < execute.index(
-        "AcquireSRWLockExclusive(&g_MeshRuntimeTransactionLock)"
-    ), "pipe I/O must not hold the supervision/shutdown lock"
-    assert "CreateThread" in binding and "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in binding
+    assert "MeshRuntimeComponents_InstallControllers" not in execute, \
+        "command processing must not hash or rewrite controller images on the event loop"
+    assert "g_MeshRuntimeInstallError" in execute, "load must fail closed on a startup install error"
+    assert "endpoint->launchError = jobError;" in execute, "load must fail closed without a kill-on-close job"
+    assert "ERROR_PROCESS_ABORTED" in execute, "status must distinguish a crashed controller from never-started"
     assert "MeshRuntimeBinding_Shutdown" in binding
     for forbidden in ("expectedGeneration", "controllerEpoch", "MeshRuntimeTarget", "policy"):
         assert forbidden not in binding, f"MeshAgent must not own {forbidden}"
-    assert "MESH_RUNTIME_PIPE_TIMEOUT_MS" in binding
-    assert "#define MESH_RUNTIME_PIPE_TIMEOUT_MS 1000u" in binding
-    assert "one absolute connect/write/read deadline" in binding
-    assert "outside a wall-clock claim" in binding
-    print("PASS native runtime boundary: install/supervise/fixed relay only; no policy or target state")
+    print("PASS native runtime boundary: direct process lifecycle via job object; no controller pipe or policy")
 
 
 if __name__ == "__main__":

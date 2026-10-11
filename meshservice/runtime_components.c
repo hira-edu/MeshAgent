@@ -578,8 +578,11 @@ BOOL MeshRuntimeComponents_InstallControllers(
     slash = wcsrchr(modulePath, L'\\');
     if (slash == NULL) { SetLastError(ERROR_BAD_PATHNAME); return FALSE; }
     *slash = 0;
-    if (swprintf_s(x86Path, x86PathCount, L"%s\\native-runtime-controller-x86.exe", modulePath) < 0 ||
-        swprintf_s(x64Path, x64PathCount, L"%s\\native-runtime-controller-x64.exe", modulePath) < 0)
+    if ((size_t)(slash - modulePath) + 25 > x86PathCount ||
+        (size_t)(slash - modulePath) + 25 > x64PathCount)
+    { SetLastError(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
+    if (swprintf_s(x86Path, x86PathCount, L"%s\\RuntimeController32.exe", modulePath) < 0 ||
+        swprintf_s(x64Path, x64PathCount, L"%s\\RuntimeController64.exe", modulePath) < 0)
     { SetLastError(ERROR_INSUFFICIENT_BUFFER); return FALSE; }
     if (!MeshRuntimeComponents_LoadResource(module, IDR_RUNTIME_CONTROLLER_X86, &x86) ||
         !MeshRuntimeComponents_LoadResource(module, IDR_RUNTIME_CONTROLLER_X64, &x64))

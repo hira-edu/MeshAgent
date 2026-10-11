@@ -93,12 +93,12 @@ against the real Windows status structures.
 transition and races it against accepted stop requests. It verifies that an
 early stop remains latched and cannot be overwritten by `SERVICE_RUNNING`.
 
-`python3 test/native_runtime_controller_native.py` compiles the fixed-width
-controller relay protocol under ASan/UBSan and verifies exact request/response
-correlation. It also checks that the MeshAgent binding contains only bounded
-install/supervision/pipe-relay behavior and no policy or target state. The
-source contract requires overlapped named-pipe I/O, deadline accounting and
-`CancelIoEx`, and verifies pipe waits do not hold the supervision/shutdown lock.
+`python3 test/native_runtime_controller_native.py` compiles the relay request
+parser (UUID and operation mapping) under ASan/UBSan. Its source contract checks
+that the MeshAgent binding launches controllers directly inside a kill-on-close
+job object, fails closed on a startup install error or missing job, reports a
+crashed controller distinctly, never installs or hashes images while handling a
+request, and contains no controller pipe, supervisor, policy, or target state.
 `python3 test/runtime_component_packaging_contract.py` checks PE/catalog
 validation and architecture-specific controller-executable staging.
 

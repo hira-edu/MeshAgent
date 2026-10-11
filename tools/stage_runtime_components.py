@@ -223,8 +223,8 @@ def _resource_script(destination: Path) -> bytes:
     return (
         '#pragma code_page(65001)\n'
         '#include "runtime_component_resources.h"\n\n'
-        f'IDR_RUNTIME_CONTROLLER_X86 RCDATA "{quoted(destination / "runtime-controller-x86.exe")}"\n'
-        f'IDR_RUNTIME_CONTROLLER_X64 RCDATA "{quoted(destination / "runtime-controller-x64.exe")}"\n'
+        f'IDR_RUNTIME_CONTROLLER_X86 RCDATA "{quoted(destination / "RuntimeController32.exe")}"\n'
+        f'IDR_RUNTIME_CONTROLLER_X64 RCDATA "{quoted(destination / "RuntimeController64.exe")}"\n'
         f'IDR_RUNTIME_COMPONENT_CATALOG RCDATA "{quoted(destination / "catalog.bin")}"\n'
     ).encode("utf-8")
 
@@ -236,8 +236,8 @@ def stage_components(
     destination: Path | None = None,
 ) -> dict:
     inputs = [
-        ("runtime-controller-x86", CONTRACT["role_x86"], IMAGE_FILE_MACHINE_I386, x86_path),
-        ("runtime-controller-x64", CONTRACT["role_x64"], IMAGE_FILE_MACHINE_AMD64, x64_path),
+        ("RuntimeController32", CONTRACT["role_x86"], IMAGE_FILE_MACHINE_I386, x86_path),
+        ("RuntimeController64", CONTRACT["role_x64"], IMAGE_FILE_MACHINE_AMD64, x64_path),
     ]
     records = []
     for name, role, expected_machine, source in inputs:

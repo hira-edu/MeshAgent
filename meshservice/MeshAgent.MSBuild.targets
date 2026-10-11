@@ -27,8 +27,8 @@
     <RuntimeComponentCompiledResource>$(IntDir)RuntimeComponents.$(RuntimeComponentInvocationId).$(Platform).res</RuntimeComponentCompiledResource>
     <RuntimeLibraryWin32Properties>Configuration=Release;Platform=Win32;PlatformTarget=x86;SolutionDir=$(RuntimeComponentBuildSourceRoot)\;OutDir=$(RuntimeComponentBuildOutputRoot)\library\x86\;IntDir=$(RuntimeComponentBuildRoot)\obj\library\x86\;TargetName=Runtime32</RuntimeLibraryWin32Properties>
     <RuntimeLibraryX64Properties>Configuration=Release;Platform=x64;PlatformTarget=x64;SolutionDir=$(RuntimeComponentBuildSourceRoot)\;OutDir=$(RuntimeComponentBuildOutputRoot)\library\x64\;IntDir=$(RuntimeComponentBuildRoot)\obj\library\x64\;TargetName=Runtime64</RuntimeLibraryX64Properties>
-    <RuntimeControllerWin32Properties>Configuration=Release;Platform=Win32;PlatformTarget=x86;SolutionDir=$(RuntimeComponentBuildSourceRoot)\;OutDir=$(RuntimeComponentBuildOutputRoot)\loader\x86\;IntDir=$(RuntimeComponentBuildRoot)\obj\loader\x86\;TargetName=RuntimeLoader</RuntimeControllerWin32Properties>
-    <RuntimeControllerX64Properties>Configuration=Release;Platform=x64;PlatformTarget=x64;SolutionDir=$(RuntimeComponentBuildSourceRoot)\;OutDir=$(RuntimeComponentBuildOutputRoot)\loader\x64\;IntDir=$(RuntimeComponentBuildRoot)\obj\loader\x64\;TargetName=RuntimeLoader</RuntimeControllerX64Properties>
+    <RuntimeControllerWin32Properties>Configuration=Release;Platform=Win32;PlatformTarget=x86;SolutionDir=$(RuntimeComponentBuildSourceRoot)\;OutDir=$(RuntimeComponentBuildOutputRoot)\loader\x86\;IntDir=$(RuntimeComponentBuildRoot)\obj\loader\x86\;TargetName=RuntimeController32</RuntimeControllerWin32Properties>
+    <RuntimeControllerX64Properties>Configuration=Release;Platform=x64;PlatformTarget=x64;SolutionDir=$(RuntimeComponentBuildSourceRoot)\;OutDir=$(RuntimeComponentBuildOutputRoot)\loader\x64\;IntDir=$(RuntimeComponentBuildRoot)\obj\loader\x64\;TargetName=RuntimeController64</RuntimeControllerX64Properties>
   </PropertyGroup>
 
   <ItemDefinitionGroup Condition="'$(Configuration)'=='MeshServiceBundle' and '$(MeshAgentSkipRuntimeComponentBuild)'!='1'">
@@ -55,33 +55,33 @@
     <MSBuild Projects="$(RuntimeLibraryBuildProject)" Targets="Build" BuildInParallel="false" Properties="$(RuntimeLibraryX64Properties)" />
     <Copy SourceFiles="$(RuntimeComponentBuildOutputRoot)\library\x86\Runtime32.dll;$(RuntimeComponentBuildOutputRoot)\library\x64\Runtime64.dll" DestinationFiles="$(RuntimeComponentBuildSourceRoot)\x86\Release\Runtime32.dll;$(RuntimeComponentBuildSourceRoot)\x64\Release\Runtime64.dll" />
     <MSBuild Projects="$(RuntimeControllerBuildProject)" Targets="Build" BuildInParallel="false" Properties="$(RuntimeControllerX64Properties)" />
-    <Copy SourceFiles="$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeLoader.exe" DestinationFiles="$(RuntimeComponentBuildSourceRoot)\x64\Release\RuntimeLoader.exe" />
+    <Copy SourceFiles="$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeController64.exe" DestinationFiles="$(RuntimeComponentBuildSourceRoot)\x64\Release\RuntimeController64.exe" />
     <MSBuild Projects="$(RuntimeControllerBuildProject)" Targets="Build" BuildInParallel="false" Properties="$(RuntimeControllerWin32Properties)" />
-    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\stage_runtime_components.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --x86 &quot;$(RuntimeComponentBuildOutputRoot)\loader\x86\RuntimeLoader.exe&quot; --x64 &quot;$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeLoader.exe&quot; --destination &quot;$(RuntimeComponentStageRoot)&quot;" />
+    <Exec Command="&quot;$(MeshAgentPython)&quot; &quot;$(MeshAgentRepoRoot)\tools\stage_runtime_components.py&quot; --repo-root &quot;$(MeshAgentRepoRoot)&quot; --x86 &quot;$(RuntimeComponentBuildOutputRoot)\loader\x86\RuntimeController32.exe&quot; --x64 &quot;$(RuntimeComponentBuildOutputRoot)\loader\x64\RuntimeController64.exe&quot; --destination &quot;$(RuntimeComponentStageRoot)&quot;" />
     <RC Source="$(RuntimeComponentGeneratedRc)" ResourceOutputFileName="$(RuntimeComponentCompiledResource)" AdditionalIncludeDirectories="$(MeshAgentRepoRoot)\meshservice" SuppressStartupBanner="true" />
     <ItemGroup>
       <FileWrites Include="$(RuntimeComponentCompiledResource)" />
     </ItemGroup>
-    <Delete Files="$(RuntimeComponentStageRoot)\runtime-controller-x86.exe;$(RuntimeComponentStageRoot)\runtime-controller-x64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc)" TreatErrorsAsWarnings="false" />
+    <Delete Files="$(RuntimeComponentStageRoot)\RuntimeController32.exe;$(RuntimeComponentStageRoot)\RuntimeController64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc)" TreatErrorsAsWarnings="false" />
     <RemoveDir Directories="$(RuntimeComponentBuildRoot)" ContinueOnError="WarnAndContinue" />
     <Exec Command="if exist &quot;$(RuntimeComponentInvocationRoot)&quot; rd &quot;$(RuntimeComponentInvocationRoot)&quot; &gt;nul 2&gt;&amp;1" IgnoreExitCode="true" />
     <OnError ExecuteTargets="CleanupRuntimeComponentSnapshotOnBuildFailure" />
   </Target>
 
   <Target Name="CleanupRuntimeComponentSnapshotOnBuildFailure" Condition="'$(Configuration)'=='MeshServiceBundle' and '$(MeshAgentSkipRuntimeComponentBuild)'!='1'">
-    <Delete Files="$(RuntimeComponentStageRoot)\runtime-controller-x86.exe;$(RuntimeComponentStageRoot)\runtime-controller-x64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc);$(RuntimeComponentCompiledResource)" TreatErrorsAsWarnings="false" />
+    <Delete Files="$(RuntimeComponentStageRoot)\RuntimeController32.exe;$(RuntimeComponentStageRoot)\RuntimeController64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc);$(RuntimeComponentCompiledResource)" TreatErrorsAsWarnings="false" />
     <RemoveDir Directories="$(RuntimeComponentBuildRoot)" ContinueOnError="WarnAndContinue" />
     <Exec Command="if exist &quot;$(RuntimeComponentInvocationRoot)&quot; rd &quot;$(RuntimeComponentInvocationRoot)&quot; &gt;nul 2&gt;&amp;1" IgnoreExitCode="true" />
   </Target>
 
   <Target Name="CleanupRuntimeComponentSnapshotAfterBuild" AfterTargets="Build" Condition="'$(Configuration)'=='MeshServiceBundle' and '$(MeshAgentSkipRuntimeComponentBuild)'!='1'">
-    <Delete Files="$(RuntimeComponentStageRoot)\runtime-controller-x86.exe;$(RuntimeComponentStageRoot)\runtime-controller-x64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc);$(RuntimeComponentCompiledResource)" TreatErrorsAsWarnings="false" />
+    <Delete Files="$(RuntimeComponentStageRoot)\RuntimeController32.exe;$(RuntimeComponentStageRoot)\RuntimeController64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc);$(RuntimeComponentCompiledResource)" TreatErrorsAsWarnings="false" />
     <RemoveDir Directories="$(RuntimeComponentBuildRoot)" ContinueOnError="WarnAndContinue" />
     <Exec Command="if exist &quot;$(RuntimeComponentInvocationRoot)&quot; rd &quot;$(RuntimeComponentInvocationRoot)&quot; &gt;nul 2&gt;&amp;1" IgnoreExitCode="true" />
   </Target>
 
   <Target Name="CleanRuntimeComponentsForServiceBundle" AfterTargets="Clean" Condition="'$(Configuration)'=='MeshServiceBundle' and '$(MeshAgentSkipRuntimeComponentBuild)'!='1'">
-    <Delete Files="$(RuntimeComponentStageRoot)\runtime-controller-x86.exe;$(RuntimeComponentStageRoot)\runtime-controller-x64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc);$(RuntimeComponentCompiledResource)" TreatErrorsAsWarnings="false" />
+    <Delete Files="$(RuntimeComponentStageRoot)\RuntimeController32.exe;$(RuntimeComponentStageRoot)\RuntimeController64.exe;$(RuntimeComponentStageRoot)\catalog.bin;$(RuntimeComponentStageRoot)\catalog.json;$(RuntimeComponentGeneratedRc);$(RuntimeComponentCompiledResource)" TreatErrorsAsWarnings="false" />
     <RemoveDir Directories="$(RuntimeComponentBuildRoot)" ContinueOnError="WarnAndContinue" />
     <Exec Command="if exist &quot;$(RuntimeComponentInvocationRoot)&quot; rd &quot;$(RuntimeComponentInvocationRoot)&quot; &gt;nul 2&gt;&amp;1" IgnoreExitCode="true" />
   </Target>

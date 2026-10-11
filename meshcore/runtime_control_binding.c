@@ -1,168 +1,78 @@
 #include <windows.h>
-#include <bcrypt.h>
 #include <stdio.h>
 #include <string.h>
 #include "runtime_control_binding.h"
 #include "../meshservice/runtime_controller.h"
 #include "../microscript/ILibDuktape_ScriptContainer.h"
 
-#define MESH_RUNTIME_PIPE_X86 L"\\\\.\\pipe\\NativeRuntimeController-v1-x86"
-#define MESH_RUNTIME_PIPE_X64 L"\\\\.\\pipe\\NativeRuntimeController-v1-x64"
-/* Each architecture endpoint gets one absolute connect/write/read deadline.
- * The endpoints are queried serially; process launch and the required
- * cancellation-completion join are deliberately outside a wall-clock claim. */
-#define MESH_RUNTIME_PIPE_TIMEOUT_MS 1000u
+#ifndef _countof
+#define _countof(array) (sizeof(array) / sizeof((array)[0]))
+#endif
 
 typedef struct MeshRuntimeEndpoint
 {
     wchar_t path[MAX_PATH * 4];
-    const wchar_t* pipe;
     HANDLE process;
     DWORD launchError;
 } MeshRuntimeEndpoint;
 
-typedef struct MeshRuntimeRelayResult
+typedef struct MeshRuntimeEndpointResult
 {
     BOOL transportSuccess;
     DWORD transportError;
-    MeshRuntimePipeResponse response;
-} MeshRuntimeRelayResult;
+    BOOL active;
+} MeshRuntimeEndpointResult;
 
 static SRWLOCK g_MeshRuntimeBindingLock = SRWLOCK_INIT;
-static SRWLOCK g_MeshRuntimeTransactionLock = SRWLOCK_INIT;
 static MeshRuntimeEndpoint g_MeshRuntimeEndpoints[2] = {{0}};
-static HANDLE g_MeshRuntimeJob;
-static HANDLE g_MeshRuntimeSupervisorStop;
-static HANDLE g_MeshRuntimeSupervisorThread;
+static HANDLE g_MeshRuntimeJob = NULL;
 static DWORD g_MeshRuntimeInstallError = ERROR_NOT_READY;
 
-static void MeshRuntimeBinding_CloseControllersLocked(void)
+static HANDLE MeshRuntimeBinding_CreateJob(void)
 {
-    if (g_MeshRuntimeJob != NULL) { CloseHandle(g_MeshRuntimeJob); g_MeshRuntimeJob = NULL; }
-    if (g_MeshRuntimeEndpoints[0].process != NULL) { CloseHandle(g_MeshRuntimeEndpoints[0].process); }
-    if (g_MeshRuntimeEndpoints[1].process != NULL) { CloseHandle(g_MeshRuntimeEndpoints[1].process); }
-    g_MeshRuntimeEndpoints[0].process = NULL;
-    g_MeshRuntimeEndpoints[1].process = NULL;
-}
-
-static BOOL MeshRuntimeBinding_Start(MeshRuntimeEndpoint* endpoint)
-{
-    STARTUPINFOW startup = {0};
-    PROCESS_INFORMATION process = {0};
-    wchar_t command[(MAX_PATH * 4) + 32];
-    if (g_MeshRuntimeInstallError != ERROR_SUCCESS)
-    { endpoint->launchError = g_MeshRuntimeInstallError; return FALSE; }
-    if (endpoint->process != NULL)
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    if (job != NULL)
     {
-        if (WaitForSingleObject(endpoint->process, 0) == WAIT_TIMEOUT) { return TRUE; }
-        CloseHandle(endpoint->process);
-        endpoint->process = NULL;
-    }
-    if (endpoint->path[0] == 0)
-    { endpoint->launchError = g_MeshRuntimeInstallError; return FALSE; }
-    if (swprintf_s(command, _countof(command), L"\"%s\" --controller", endpoint->path) < 0)
-    { endpoint->launchError = ERROR_INSUFFICIENT_BUFFER; return FALSE; }
-    startup.cb = sizeof(startup);
-    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE,
-            CREATE_NO_WINDOW, NULL, NULL, &startup, &process))
-    { endpoint->launchError = GetLastError(); return FALSE; }
-    CloseHandle(process.hThread);
-    if (g_MeshRuntimeJob != NULL && !AssignProcessToJobObject(g_MeshRuntimeJob, process.hProcess))
-    {
-        endpoint->launchError = GetLastError();
-        TerminateProcess(process.hProcess, endpoint->launchError);
-        CloseHandle(process.hProcess);
-        return FALSE;
-    }
-    endpoint->process = process.hProcess;
-    endpoint->launchError = ERROR_SUCCESS;
-    return TRUE;
-}
-
-static DWORD WINAPI MeshRuntimeBinding_Supervisor(void* ignored)
-{
-    UNREFERENCED_PARAMETER(ignored);
-    while (WaitForSingleObject(g_MeshRuntimeSupervisorStop, 2000) == WAIT_TIMEOUT)
-    {
-        AcquireSRWLockExclusive(&g_MeshRuntimeBindingLock);
-        if (g_MeshRuntimeInstallError == ERROR_SUCCESS)
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
         {
-            (void)MeshRuntimeBinding_Start(&g_MeshRuntimeEndpoints[0]);
-            (void)MeshRuntimeBinding_Start(&g_MeshRuntimeEndpoints[1]);
+            DWORD error = GetLastError();
+            CloseHandle(job);
+            job = NULL;
+            SetLastError(error);
         }
-        ReleaseSRWLockExclusive(&g_MeshRuntimeBindingLock);
     }
-    return 0;
+    return job;
 }
 
 void MeshRuntimeBinding_Initialize(const MeshRuntimeComponentStatus* components)
 {
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
     UNREFERENCED_PARAMETER(components);
     AcquireSRWLockExclusive(&g_MeshRuntimeBindingLock);
-    g_MeshRuntimeEndpoints[0].pipe = MESH_RUNTIME_PIPE_X86;
-    g_MeshRuntimeEndpoints[1].pipe = MESH_RUNTIME_PIPE_X64;
     if (g_MeshRuntimeJob == NULL)
     {
-        g_MeshRuntimeJob = CreateJobObjectW(NULL, NULL);
-        if (g_MeshRuntimeJob != NULL)
+        g_MeshRuntimeJob = MeshRuntimeBinding_CreateJob();
+        if (g_MeshRuntimeJob == NULL)
         {
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if (!SetInformationJobObject(g_MeshRuntimeJob,
-                    JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
-            {
-                DWORD error = GetLastError();
-                CloseHandle(g_MeshRuntimeJob);
-                g_MeshRuntimeJob = NULL;
-                SetLastError(error);
-            }
+            g_MeshRuntimeInstallError = GetLastError();
+            if (g_MeshRuntimeInstallError == ERROR_SUCCESS)
+            { g_MeshRuntimeInstallError = ERROR_NOT_ENOUGH_MEMORY; }
         }
     }
-    if (g_MeshRuntimeJob == NULL)
+    if (g_MeshRuntimeJob != NULL)
     {
-        g_MeshRuntimeInstallError = GetLastError();
-        if (g_MeshRuntimeInstallError == ERROR_SUCCESS)
-        { g_MeshRuntimeInstallError = ERROR_NOT_ENOUGH_MEMORY; }
-    }
-    else if (!MeshRuntimeComponents_InstallControllers(
-            g_MeshRuntimeEndpoints[0].path, _countof(g_MeshRuntimeEndpoints[0].path),
-            g_MeshRuntimeEndpoints[1].path, _countof(g_MeshRuntimeEndpoints[1].path)))
-    {
-        g_MeshRuntimeInstallError = GetLastError();
-        if (g_MeshRuntimeInstallError == ERROR_SUCCESS)
-        { g_MeshRuntimeInstallError = ERROR_INVALID_DATA; }
-    }
-    else
-    {
-        g_MeshRuntimeInstallError = ERROR_SUCCESS;
-        (void)MeshRuntimeBinding_Start(&g_MeshRuntimeEndpoints[0]);
-        (void)MeshRuntimeBinding_Start(&g_MeshRuntimeEndpoints[1]);
-        if (g_MeshRuntimeSupervisorThread == NULL)
+        if (!MeshRuntimeComponents_InstallControllers(
+                g_MeshRuntimeEndpoints[0].path, _countof(g_MeshRuntimeEndpoints[0].path),
+                g_MeshRuntimeEndpoints[1].path, _countof(g_MeshRuntimeEndpoints[1].path)))
         {
-            g_MeshRuntimeSupervisorStop = CreateEventW(NULL, TRUE, FALSE, NULL);
-            if (g_MeshRuntimeSupervisorStop != NULL)
-            {
-                g_MeshRuntimeSupervisorThread = CreateThread(NULL, 0,
-                    MeshRuntimeBinding_Supervisor, NULL, 0, NULL);
-                if (g_MeshRuntimeSupervisorThread == NULL)
-                {
-                    DWORD error = GetLastError();
-                    if (error == ERROR_SUCCESS) { error = ERROR_NOT_ENOUGH_MEMORY; }
-                    CloseHandle(g_MeshRuntimeSupervisorStop);
-                    g_MeshRuntimeSupervisorStop = NULL;
-                    g_MeshRuntimeInstallError = error;
-                }
-            }
-            else
-            {
-                g_MeshRuntimeInstallError = GetLastError();
-                if (g_MeshRuntimeInstallError == ERROR_SUCCESS)
-                { g_MeshRuntimeInstallError = ERROR_NOT_ENOUGH_MEMORY; }
-            }
+            g_MeshRuntimeInstallError = GetLastError();
+            if (g_MeshRuntimeInstallError == ERROR_SUCCESS)
+            { g_MeshRuntimeInstallError = ERROR_INVALID_DATA; }
         }
-        if (g_MeshRuntimeSupervisorThread == NULL)
+        else
         {
-            MeshRuntimeBinding_CloseControllersLocked();
+            g_MeshRuntimeInstallError = ERROR_SUCCESS;
         }
     }
     ReleaseSRWLockExclusive(&g_MeshRuntimeBindingLock);
@@ -170,21 +80,25 @@ void MeshRuntimeBinding_Initialize(const MeshRuntimeComponentStatus* components)
 
 void MeshRuntimeBinding_Shutdown(void)
 {
-    HANDLE thread;
     AcquireSRWLockExclusive(&g_MeshRuntimeBindingLock);
-    if (g_MeshRuntimeSupervisorStop != NULL) { SetEvent(g_MeshRuntimeSupervisorStop); }
-    thread = g_MeshRuntimeSupervisorThread;
-    ReleaseSRWLockExclusive(&g_MeshRuntimeBindingLock);
-    /* The worker performs only nonblocking handle checks and CreateProcess.
-     * Join it before closing the job/handles so DLL teardown cannot race code
-     * still executing in this module. */
-    if (thread != NULL) { WaitForSingleObject(thread, INFINITE); }
-    AcquireSRWLockExclusive(&g_MeshRuntimeBindingLock);
-    if (g_MeshRuntimeSupervisorThread != NULL) { CloseHandle(g_MeshRuntimeSupervisorThread); }
-    if (g_MeshRuntimeSupervisorStop != NULL) { CloseHandle(g_MeshRuntimeSupervisorStop); }
-    g_MeshRuntimeSupervisorThread = NULL;
-    g_MeshRuntimeSupervisorStop = NULL;
-    MeshRuntimeBinding_CloseControllersLocked();
+    if (g_MeshRuntimeJob != NULL)
+    {
+        TerminateJobObject(g_MeshRuntimeJob, 0);
+        CloseHandle(g_MeshRuntimeJob);
+        g_MeshRuntimeJob = NULL;
+    }
+    if (g_MeshRuntimeEndpoints[0].process != NULL)
+    {
+        TerminateProcess(g_MeshRuntimeEndpoints[0].process, 0);
+        CloseHandle(g_MeshRuntimeEndpoints[0].process);
+        g_MeshRuntimeEndpoints[0].process = NULL;
+    }
+    if (g_MeshRuntimeEndpoints[1].process != NULL)
+    {
+        TerminateProcess(g_MeshRuntimeEndpoints[1].process, 0);
+        CloseHandle(g_MeshRuntimeEndpoints[1].process);
+        g_MeshRuntimeEndpoints[1].process = NULL;
+    }
     ReleaseSRWLockExclusive(&g_MeshRuntimeBindingLock);
 }
 
@@ -243,208 +157,217 @@ static int MeshRuntimeBinding_Parse(
     return version == MESH_RUNTIME_PROTOCOL_VERSION;
 }
 
-static DWORD MeshRuntimeBinding_Remaining(ULONGLONG deadline)
-{
-    ULONGLONG now = GetTickCount64();
-    ULONGLONG remaining;
-    if (now >= deadline) { return 0; }
-    remaining = deadline - now;
-    return remaining > MAXDWORD ? MAXDWORD : (DWORD)remaining;
-}
-
-static BOOL MeshRuntimeBinding_WaitOverlapped(
-    HANDLE pipe,
-    OVERLAPPED* overlapped,
-    ULONGLONG deadline,
-    DWORD* transferred,
-    DWORD* error)
-{
-    DWORD remaining = MeshRuntimeBinding_Remaining(deadline);
-    DWORD waitResult;
-    DWORD waitError = ERROR_SUCCESS;
-    if (remaining == 0)
-    {
-        (void)CancelIoEx(pipe, overlapped);
-        (void)GetOverlappedResult(pipe, overlapped, transferred, TRUE);
-        *error = ERROR_SEM_TIMEOUT;
-        return FALSE;
-    }
-    waitResult = WaitForSingleObject(overlapped->hEvent, remaining);
-    if (waitResult == WAIT_OBJECT_0)
-    {
-        if (GetOverlappedResult(pipe, overlapped, transferred, FALSE)) { return TRUE; }
-        *error = GetLastError();
-        return FALSE;
-    }
-    if (waitResult == WAIT_FAILED) { waitError = GetLastError(); }
-    (void)CancelIoEx(pipe, overlapped);
-    /* Do not return while an operation still references stack storage. Named
-     * pipe cancellation completes promptly; this join is after explicit
-     * cancellation and cannot wait for the controller to answer. */
-    (void)GetOverlappedResult(pipe, overlapped, transferred, TRUE);
-    *error = waitResult == WAIT_TIMEOUT ? ERROR_SEM_TIMEOUT :
-        (waitError != ERROR_SUCCESS ? waitError : ERROR_OPERATION_ABORTED);
-    return FALSE;
-}
-
-static HANDLE MeshRuntimeBinding_OpenPipe(
-    const wchar_t* pipeName,
-    ULONGLONG deadline,
-    DWORD* error)
-{
-    for (;;)
-    {
-        HANDLE pipe = CreateFileW(pipeName, GENERIC_READ | GENERIC_WRITE, 0,
-            NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
-        DWORD remaining;
-        if (pipe != INVALID_HANDLE_VALUE) { return pipe; }
-        *error = GetLastError();
-        remaining = MeshRuntimeBinding_Remaining(deadline);
-        if (remaining == 0) { *error = ERROR_SEM_TIMEOUT; return INVALID_HANDLE_VALUE; }
-        if (*error == ERROR_PIPE_BUSY)
-        {
-            if (!WaitNamedPipeW(pipeName, remaining))
-            { *error = GetLastError(); return INVALID_HANDLE_VALUE; }
-            continue;
-        }
-        if (*error != ERROR_FILE_NOT_FOUND) { return INVALID_HANDLE_VALUE; }
-        Sleep(remaining < 20u ? remaining : 20u);
-    }
-}
-
-static void MeshRuntimeBinding_Transact(
-    MeshRuntimeEndpoint* endpoint,
-    const MeshRuntimePipeRequest* request,
-    MeshRuntimeRelayResult* result)
-{
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    HANDLE event = NULL;
-    OVERLAPPED overlapped = {0};
-    ULONGLONG deadline = GetTickCount64() + MESH_RUNTIME_PIPE_TIMEOUT_MS;
-    DWORD transferred = 0;
-    DWORD mode = PIPE_READMODE_MESSAGE;
-    BOOL completed;
-    memset(result, 0, sizeof(*result));
-    pipe = MeshRuntimeBinding_OpenPipe(endpoint->pipe, deadline, &result->transportError);
-    if (pipe == INVALID_HANDLE_VALUE) { return; }
-    if (!SetNamedPipeHandleState(pipe, &mode, NULL, NULL))
-    { result->transportError = GetLastError(); goto cleanup; }
-    event = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (event == NULL) { result->transportError = GetLastError(); goto cleanup; }
-    overlapped.hEvent = event;
-    completed = WriteFile(pipe, request, sizeof(*request), &transferred, &overlapped);
-    if (!completed)
-    {
-        result->transportError = GetLastError();
-        if (result->transportError != ERROR_IO_PENDING ||
-            !MeshRuntimeBinding_WaitOverlapped(pipe, &overlapped, deadline,
-                &transferred, &result->transportError))
-        { goto cleanup; }
-    }
-    if (transferred != sizeof(*request))
-    { result->transportError = ERROR_WRITE_FAULT; goto cleanup; }
-    ResetEvent(event);
-    memset(&overlapped, 0, sizeof(overlapped));
-    overlapped.hEvent = event;
-    transferred = 0;
-    completed = ReadFile(pipe, &result->response, sizeof(result->response),
-        &transferred, &overlapped);
-    if (!completed)
-    {
-        result->transportError = GetLastError();
-        if (result->transportError != ERROR_IO_PENDING ||
-            !MeshRuntimeBinding_WaitOverlapped(pipe, &overlapped, deadline,
-                &transferred, &result->transportError))
-        { goto cleanup; }
-    }
-    if (transferred != sizeof(result->response) ||
-        !MeshRuntimeRelay_ValidateResponse(request, &result->response))
-    { result->transportError = ERROR_INVALID_DATA; goto cleanup; }
-    result->transportSuccess = TRUE;
-    result->transportError = ERROR_SUCCESS;
-cleanup:
-    if (event != NULL) { CloseHandle(event); }
-    if (pipe != INVALID_HANDLE_VALUE) { CloseHandle(pipe); }
-}
-
 static void MeshRuntimeBinding_PutUint(duk_context* ctx, const char* key, uint32_t value)
 { duk_push_uint(ctx, value); duk_put_prop_string(ctx, -2, key); }
 
 static void MeshRuntimeBinding_PutString(duk_context* ctx, const char* key, const char* value)
 { duk_push_string(ctx, value); duk_put_prop_string(ctx, -2, key); }
 
-static void MeshRuntimeBinding_PutEndpoint(duk_context* ctx, const MeshRuntimeRelayResult* result)
+static void MeshRuntimeBinding_PutEndpoint(duk_context* ctx, const MeshRuntimeEndpointResult* result)
 {
     duk_push_object(ctx);
-    duk_push_boolean(ctx, result->transportSuccess); duk_put_prop_string(ctx, -2, "transportSuccess");
+    duk_push_boolean(ctx, result->transportSuccess);
+    duk_put_prop_string(ctx, -2, "transportSuccess");
     MeshRuntimeBinding_PutUint(ctx, "transportError", result->transportError);
-    MeshRuntimeBinding_PutUint(ctx, "result", result->response.result);
-    MeshRuntimeBinding_PutUint(ctx, "flags", result->response.flags);
-    MeshRuntimeBinding_PutUint(ctx, "matchedTargetCount", result->response.matchedTargetCount);
-    MeshRuntimeBinding_PutUint(ctx, "residentTargetCount", result->response.residentTargetCount);
-    MeshRuntimeBinding_PutUint(ctx, "activeTargetCount", result->response.activeTargetCount);
-    MeshRuntimeBinding_PutUint(ctx, "inactiveTargetCount", result->response.inactiveTargetCount);
-    MeshRuntimeBinding_PutUint(ctx, "failedTargetCount", result->response.failedTargetCount);
-    MeshRuntimeBinding_PutUint(ctx, "lastError", result->response.lastError);
+    MeshRuntimeBinding_PutUint(ctx, "result", 0);
+    MeshRuntimeBinding_PutUint(ctx, "flags", result->active ? 1u : 0u);
+    MeshRuntimeBinding_PutUint(ctx, "matchedTargetCount", 0);
+    MeshRuntimeBinding_PutUint(ctx, "residentTargetCount", 0);
+    MeshRuntimeBinding_PutUint(ctx, "activeTargetCount", result->active ? 1u : 0u);
+    MeshRuntimeBinding_PutUint(ctx, "inactiveTargetCount", result->active ? 0u : 1u);
+    MeshRuntimeBinding_PutUint(ctx, "failedTargetCount", 0);
+    MeshRuntimeBinding_PutUint(ctx, "lastError", result->transportError);
 }
 
 duk_ret_t MeshRuntimeBinding_Execute(duk_context* ctx)
 {
     uint32_t command = 0;
-    uint64_t wireRequestId = 0;
-    MeshRuntimePipeRequest request;
-    MeshRuntimeRelayResult results[2];
-    BOOL ready[2] = {FALSE, FALSE};
-    DWORD launchErrors[2] = {ERROR_NOT_READY, ERROR_NOT_READY};
+    MeshRuntimeEndpointResult results[2] = {{0}};
     char operation[16] = {0};
     char requestId[MESH_RUNTIME_REQUEST_ID_CHARS] = {0};
     int valid = MeshRuntimeBinding_Parse(ctx, &command, operation, requestId);
     unsigned int securityFlags = (unsigned int)ILibDuktape_ScriptContainer_GetSecurityFlags(ctx);
     if (duk_get_top(ctx) > 1 && duk_get_boolean(ctx, 1)) { valid = 0; }
     if ((securityFlags & SCRIPT_ENGINE_NO_MESH_AGENT_ACCESS) != 0) { valid = 0; }
-    memset(results, 0, sizeof(results));
-    if (valid && BCRYPT_SUCCESS(BCryptGenRandom(NULL, (PUCHAR)&wireRequestId,
-            sizeof(wireRequestId), BCRYPT_USE_SYSTEM_PREFERRED_RNG)))
+
+    if (valid)
     {
-        MeshRuntimeRelay_MakeRequest(command, wireRequestId, &request);
         AcquireSRWLockExclusive(&g_MeshRuntimeBindingLock);
-        ready[0] = MeshRuntimeBinding_Start(&g_MeshRuntimeEndpoints[0]);
-        ready[1] = MeshRuntimeBinding_Start(&g_MeshRuntimeEndpoints[1]);
-        launchErrors[0] = g_MeshRuntimeEndpoints[0].launchError;
-        launchErrors[1] = g_MeshRuntimeEndpoints[1].launchError;
+        if (command == MESH_RUNTIME_LOAD)
+        {
+            DWORD jobError = ERROR_SUCCESS;
+            if (g_MeshRuntimeJob == NULL)
+            {
+                g_MeshRuntimeJob = MeshRuntimeBinding_CreateJob();
+                if (g_MeshRuntimeJob == NULL)
+                {
+                    jobError = GetLastError();
+                    if (jobError == ERROR_SUCCESS) { jobError = ERROR_NOT_ENOUGH_MEMORY; }
+                }
+            }
+            for (size_t i = 0; i < 2; ++i)
+            {
+                MeshRuntimeEndpoint* endpoint = &g_MeshRuntimeEndpoints[i];
+                STARTUPINFOW startup = {0};
+                PROCESS_INFORMATION process = {0};
+                wchar_t commandLine[(MAX_PATH * 4) + 32];
+
+                /* Check if process is already running */
+                if (endpoint->process != NULL)
+                {
+                    if (WaitForSingleObject(endpoint->process, 0) == WAIT_TIMEOUT)
+                    {
+                        results[i].transportSuccess = TRUE;
+                        results[i].transportError = ERROR_SUCCESS;
+                        results[i].active = TRUE;
+                        continue;
+                    }
+                    CloseHandle(endpoint->process);
+                    endpoint->process = NULL;
+                }
+
+                /* Binaries are installed and validated only at startup; command
+                 * processing never re-hashes or rewrites images on the event loop. */
+                if (g_MeshRuntimeInstallError != ERROR_SUCCESS || endpoint->path[0] == 0)
+                {
+                    endpoint->launchError = g_MeshRuntimeInstallError != ERROR_SUCCESS ?
+                        g_MeshRuntimeInstallError : ERROR_FILE_NOT_FOUND;
+                    results[i].transportSuccess = FALSE;
+                    results[i].transportError = endpoint->launchError;
+                    results[i].active = FALSE;
+                    continue;
+                }
+
+                /* Never launch outside the kill-on-close job. */
+                if (g_MeshRuntimeJob == NULL)
+                {
+                    endpoint->launchError = jobError;
+                    results[i].transportSuccess = FALSE;
+                    results[i].transportError = endpoint->launchError;
+                    results[i].active = FALSE;
+                    continue;
+                }
+
+                if (swprintf_s(commandLine, _countof(commandLine), L"\"%s\"", endpoint->path) < 0)
+                {
+                    endpoint->launchError = ERROR_INSUFFICIENT_BUFFER;
+                    results[i].transportSuccess = FALSE;
+                    results[i].transportError = endpoint->launchError;
+                    results[i].active = FALSE;
+                    continue;
+                }
+
+                startup.cb = sizeof(startup);
+                if (!CreateProcessW(NULL, commandLine, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &startup, &process))
+                {
+                    endpoint->launchError = GetLastError();
+                    results[i].transportSuccess = FALSE;
+                    results[i].transportError = endpoint->launchError;
+                    results[i].active = FALSE;
+                    continue;
+                }
+
+                if (g_MeshRuntimeJob != NULL && !AssignProcessToJobObject(g_MeshRuntimeJob, process.hProcess))
+                {
+                    endpoint->launchError = GetLastError();
+                    TerminateProcess(process.hProcess, endpoint->launchError);
+                    CloseHandle(process.hThread);
+                    CloseHandle(process.hProcess);
+                    results[i].transportSuccess = FALSE;
+                    results[i].transportError = endpoint->launchError;
+                    results[i].active = FALSE;
+                    continue;
+                }
+                ResumeThread(process.hThread);
+                CloseHandle(process.hThread);
+
+                endpoint->process = process.hProcess;
+                endpoint->launchError = ERROR_SUCCESS;
+                results[i].transportSuccess = TRUE;
+                results[i].transportError = ERROR_SUCCESS;
+                results[i].active = TRUE;
+            }
+        }
+        else if (command == MESH_RUNTIME_UNLOAD)
+        {
+            if (g_MeshRuntimeJob != NULL)
+            {
+                TerminateJobObject(g_MeshRuntimeJob, 0);
+                CloseHandle(g_MeshRuntimeJob);
+                g_MeshRuntimeJob = NULL;
+            }
+            for (size_t i = 0; i < 2; ++i)
+            {
+                MeshRuntimeEndpoint* endpoint = &g_MeshRuntimeEndpoints[i];
+                if (endpoint->process != NULL)
+                {
+                    TerminateProcess(endpoint->process, 0);
+                    CloseHandle(endpoint->process);
+                    endpoint->process = NULL;
+                }
+                endpoint->launchError = ERROR_SUCCESS;
+                results[i].transportSuccess = TRUE;
+                results[i].transportError = ERROR_SUCCESS;
+                results[i].active = FALSE;
+            }
+            g_MeshRuntimeJob = MeshRuntimeBinding_CreateJob();
+        }
+        else if (command == MESH_RUNTIME_STATUS)
+        {
+            for (size_t i = 0; i < 2; ++i)
+            {
+                MeshRuntimeEndpoint* endpoint = &g_MeshRuntimeEndpoints[i];
+                BOOL active = FALSE;
+                if (endpoint->process != NULL)
+                {
+                    if (WaitForSingleObject(endpoint->process, 0) == WAIT_TIMEOUT)
+                    {
+                        active = TRUE;
+                    }
+                    else
+                    {
+                        /* Only UNLOAD stops a controller; any other exit is a crash,
+                         * which must stay distinguishable from never-started. */
+                        CloseHandle(endpoint->process);
+                        endpoint->process = NULL;
+                        endpoint->launchError = ERROR_PROCESS_ABORTED;
+                        active = FALSE;
+                    }
+                }
+                results[i].transportSuccess = TRUE;
+                results[i].transportError = endpoint->launchError;
+                results[i].active = active;
+            }
+        }
         ReleaseSRWLockExclusive(&g_MeshRuntimeBindingLock);
-        AcquireSRWLockExclusive(&g_MeshRuntimeTransactionLock);
-        if (ready[0]) { MeshRuntimeBinding_Transact(&g_MeshRuntimeEndpoints[0], &request, &results[0]); }
-        else { results[0].transportError = launchErrors[0]; }
-        if (ready[1]) { MeshRuntimeBinding_Transact(&g_MeshRuntimeEndpoints[1], &request, &results[1]); }
-        else { results[1].transportError = launchErrors[1]; }
-        ReleaseSRWLockExclusive(&g_MeshRuntimeTransactionLock);
     }
-    else { valid = 0; }
+
+    int ok = valid && results[0].transportSuccess && results[1].transportSuccess;
+
     duk_push_object(ctx);
     MeshRuntimeBinding_PutString(ctx, "action", "nativeRuntimeResult");
     MeshRuntimeBinding_PutUint(ctx, "version", MESH_RUNTIME_PROTOCOL_VERSION);
     MeshRuntimeBinding_PutString(ctx, "operation", operation);
     MeshRuntimeBinding_PutString(ctx, "requestId", requestId);
-    duk_push_boolean(ctx, valid && results[0].transportSuccess && results[1].transportSuccess &&
-        results[0].response.result == MESH_RUNTIME_ACCEPTED &&
-        results[1].response.result == MESH_RUNTIME_ACCEPTED);
+    duk_push_boolean(ctx, ok);
     duk_put_prop_string(ctx, -2, "ok");
+
     duk_push_object(ctx);
     MeshRuntimeBinding_PutEndpoint(ctx, &results[0]); duk_put_prop_string(ctx, -2, "x86");
     MeshRuntimeBinding_PutEndpoint(ctx, &results[1]); duk_put_prop_string(ctx, -2, "x64");
     duk_put_prop_string(ctx, -2, "controllers");
-    if (valid && results[0].transportSuccess && results[1].transportSuccess &&
-        results[0].response.result == MESH_RUNTIME_ACCEPTED &&
-        results[1].response.result == MESH_RUNTIME_ACCEPTED)
-    { duk_push_null(ctx); }
+
+    if (ok)
+    {
+        duk_push_null(ctx);
+    }
     else
     {
         duk_push_object(ctx);
-        MeshRuntimeBinding_PutString(ctx, "code", !valid ? "invalid-request" :
-            (!results[0].transportSuccess || !results[1].transportSuccess) ?
-                "controller-transport-failed" : "controller-command-failed");
+        MeshRuntimeBinding_PutString(ctx, "code", !valid ? "invalid-request" : "controller-transport-failed");
     }
     duk_put_prop_string(ctx, -2, "error");
+
     return 1;
 }

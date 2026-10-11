@@ -67,25 +67,23 @@ relative to the repository root, and fails with a message naming the missing
 project when neither exists. Set the MSBuild property
 `RuntimeComponentSourceRoot` when that checkout lives elsewhere. Passing
 `MeshAgentSkipRuntimeComponentBuild=1` builds the service DLL without the
-components; the service then logs `[runtime-components] available=0` at start,
+components; the service then logs `[runtime-controllers] packaged=0` at start,
 and such a DLL is not a release candidate. Each invocation copies the two native
 projects into `build\runtime-components\<invocation id>`, uses distinct
 library/loader intermediate and output directories per architecture, stages the
 loader's resource inputs inside that copy, and removes the snapshot after the
 build.
 
-At service startup MeshAgent validates, extracts beside the installed service,
-launches and supervises both controllers with `--controller`. It does not select
-targets or own runtime policy/state. Authenticated `nativeRuntime` requests are
-limited to `getStatus`, `load`, and `unload`; MeshAgent translates them to the
-controller's fixed 32-byte local named-pipe request and returns each controller's
-validated 64-byte response without inventing target state. `load` and `unload`
-are asynchronous acknowledgements, so callers poll `getStatus` while the
-controller reports its pending flag. Each architecture relay has a one-second
-connect/write/read deadline. Timed-out overlapped I/O is cancelled and joined
-before its handle and buffers are released. The endpoints are queried serially;
-controller process startup and OS cancellation-completion scheduling are outside
-that I/O deadline, so it is not an absolute two-second wall-clock guarantee.
+At service startup MeshAgent validates both controllers and extracts them beside
+the installed service (`RuntimeController32.exe` and `RuntimeController64.exe`); requests never re-extract or re-hash them. It does not
+select targets or own runtime policy/state. Authenticated `nativeRuntime`
+requests are limited to `getStatus`, `load`, and `unload`. `load` launches each
+controller directly inside a kill-on-close job object and is idempotent for a
+controller that is still running; it fails closed, without launching, when startup extraction failed or
+the job object is unavailable. `unload` terminates the job. `getStatus` reports
+each controller as active while its process is alive. Nothing restarts a
+controller that exits on its own; `getStatus` then reports it inactive with
+`ERROR_PROCESS_ABORTED` until the next `load` or `unload`.
 Older/non-bundle agents may not answer this
 action, which consumers must treat as unavailable.
 
