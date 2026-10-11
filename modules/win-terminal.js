@@ -486,6 +486,20 @@ ConsoleBridgeTerminal.prototype.closeBridge = function closeBridge()
     child = this.child;
     if (child != null)
     {
+        try
+        {
+            if (typeof(console.rawLog) == 'function')
+            {
+                var lastError = '' + (this.stream._meshTerminalLastError || '');
+                lastError = lastError.replace(/[\r\n]+/g, ' ');
+                if (lastError.length > 200) { lastError = lastError.substring(0, 200); }
+                console.rawLog('[CONSOLE_BRIDGE] Agent terminating bridge pid=' + (child.pid ? child.pid : 0) +
+                    ' shell=' + this.shellName + ' mode=' + this.mode + ' token_mode=' + this.tokenMode +
+                    ' ready=' + (this.readyEmitted ? 1 : 0) + ' reason=' + ((lastError.length > 0) ? 'failed' : 'closed') +
+                    ' error=' + lastError);
+            }
+        }
+        catch (exLog) { }
         try { child.kill(); } catch (ex5) { }
     }
     while (this.pendingWrites.length > 0)
