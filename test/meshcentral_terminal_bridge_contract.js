@@ -315,9 +315,10 @@ function checkMeshCore(source) {
 
 function checkMeshCtrl(source) {
     return {
-        runCommandDefaultUsesShellType:
-            source.includes("type: ((args.powershell) ? 2 : 1)") &&
-            !source.includes("type: ((args.powershell) ? 2 : 0)")
+        // Type 0 lets the server pick each agent's shell (cmd on Windows, sh elsewhere); type 1 is rejected for non-Windows agents.
+        runCommandDefaultUsesAgentShellType:
+            source.includes("type: ((args.powershell) ? 2 : 0)") &&
+            !source.includes("type: ((args.powershell) ? 2 : 1)")
     };
 }
 

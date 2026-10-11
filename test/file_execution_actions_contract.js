@@ -79,6 +79,8 @@ function runOverlay(customSource, options) {
     const intervalCallbacks = [];
     const document = {
         readyState: 'complete',
+        currentScript: { src: 'https://example.invalid/scripts/custom.js' },
+        head: makeElement('head', registry),
         createElement(tag) { return makeElement(tag, registry); },
         getElementById(id) { return registry[id] || null; },
         getElementsByName(name) { return name === 'fd' ? [checkbox] : []; },
@@ -102,7 +104,7 @@ function runOverlay(customSource, options) {
         clearTimeout() { }
     };
     window.window = window;
-    const sandbox = { window, document, Buffer, console };
+    const sandbox = { window, document, URL, Buffer, console };
     vm.runInNewContext(customSource, sandbox, { filename: 'custom.js' });
     for (const callback of intervalCallbacks) callback();
     return { window, registry, sends };
