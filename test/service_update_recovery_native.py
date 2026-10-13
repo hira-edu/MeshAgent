@@ -162,8 +162,11 @@ static BOOL resolve(ServiceUpdateTransaction* tx) {
     if (!publish(tx, SERVICE_JOURNAL_ROLLED_BACK)) return FALSE;
     ++discarded; ++deletedArtifacts; retainedPhase = 0; return TRUE;
 }
-static BOOL reconcile(ServiceUpdateTransaction* tx) {
-    assert(tx->journalPhase == SERVICE_JOURNAL_COMMITTED);
+/* failAt 21: the committed agent runs and its journal resolves, but recovery
+ * companions or firewall rules did not reconcile. */
+static BOOL reconcile(ServiceUpdateTransaction* tx, BOOL* companionsReconciled) {
+    assert(tx->journalPhase == SERVICE_JOURNAL_COMMITTED && companionsReconciled);
+    *companionsReconciled = failAt != 21;
     if (failAt == 15) return FALSE;
     running = 1; ++discarded; ++deletedArtifacts; retainedPhase = 0; return TRUE;
 }
@@ -214,7 +217,8 @@ static BOOL process_safe(void) {
 #define ServiceDeploy_RecordUpdateActivationFailureHold(p) (++failureHolds,FALSE)
 #define ServiceDeploy_WriteTransactionPhase(tx,n,p) publish(tx,p)
 #define ServiceDeploy_ResolveUpdateTransaction(tx,n) resolve(tx)
-#define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx) reconcile(tx)
+#define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx,c) reconcile(tx,c)
+#define ERROR_INSTALL_FAILURE 1603
 #define ServiceDeploy_DeleteUpdateTransactionArtifacts(...) (++deletedArtifacts)
 #define ServiceDeploy_BuildSiblingPathWithExtension(e,x,o,c) sibling(x,o)
 #define ServiceDeploy_PathExists(p) (wcscmp(p,L"agent.mshx") != 0)
@@ -249,6 +253,7 @@ static void run_case(int failure, int exists, int wasRunning, int originalStart,
     assert(result == (failure == 0));
     assert(mixedStarts == 0 && incumbentRepairs == 0 && failureHolds == 0);
     if (!failure) { assert(running && liveVersion == 3 && installed); return; }
+    if (failure == 21) { assert(running && liveVersion == 3 && bindingVersion == 3 && !rolledBack && !retainedPhase && deletedArtifacts); return; }
     if (failure == 15) { assert(!running && liveVersion == 3 && bindingVersion == 3 && !rolledBack && retainedPhase == SERVICE_JOURNAL_COMMITTED && !deletedArtifacts); return; }
     if (failure == 17) { assert(running && liveVersion == 1 && retainedPhase == SERVICE_JOURNAL_BACKED_UP && !deletedArtifacts); return; }
     if (failure == 16) { assert(!running && liveVersion == 1 && !deletedArtifacts && retainedPhase == SERVICE_JOURNAL_PREPARED); return; }
@@ -314,6 +319,7 @@ int main(void) {
         run_case(11,1,1,3,own); ++count; /* Partially applied registration is rolled back. */
     }
     for (int failure = 12; failure <= 19; ++failure) { run_case(failure,1,1,3,0); ++count; }
+    run_case(21,1,1,3,0); ++count; /* Committed, but companions did not reconcile. */
     for (int failure = 0; failure <= 8; ++failure) {
         if (failure == 4 || failure == 3) continue;
         run_case(failure,0,0,2,0); ++count;
@@ -449,8 +455,8 @@ static int mock_snwprintf(wchar_t* out,size_t size,size_t trunc,const wchar_t* f
 #define ServiceDeploy_WriteTransactionPhase(tx,n,phase) publish(tx,phase)
 #define ServiceDeploy_RemoveDirectoryTree(...) remove_dir()
 static BOOL ServiceDeploy_DeleteUpdateTransactionArtifacts(const ServiceUpdateTransaction*);
-static BOOL reconcile(ServiceUpdateTransaction* tx){++reconciles;if(failReconcile)return FALSE;return ServiceDeploy_DeleteUpdateTransactionArtifacts(tx);}
-#define ServiceDeploy_ReconcileCommittedTransaction(p,n,t) reconcile(t)
+static BOOL reconcile(ServiceUpdateTransaction* tx,BOOL* companions){++reconciles;assert(!companions);if(failReconcile)return FALSE;return ServiceDeploy_DeleteUpdateTransactionArtifacts(tx);}
+#define ServiceDeploy_ReconcileCommittedTransaction(p,n,t,c) reconcile(t,c)
 '''
 recovery_cases = r'''
 static void reset(DWORD phase){

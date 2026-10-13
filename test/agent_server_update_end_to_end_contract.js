@@ -136,7 +136,7 @@ assert(!updateFlow.includes('UpdateActivationFailureHold'), 'rollback must not r
 assert(rollbackFlow.includes('ServiceDeploy_CreateRecoveryStartupAuthorization(&rollbackStartupAuthorization)'), 'rollback restart must be explicitly authorized through the startup checkpoint gate');
 assert(updateFlow.indexOf('ServiceDeploy_WaitForExpectedIdentity(paths.dbPath, &tx.postUpdateIdentity') < updateFlow.indexOf('ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_COMMITTED)'), 'backup must survive post-update identity validation');
 assert(updateFlow.includes('Preserving transaction artifacts after failed rollback'), 'failed rollback must preserve recovery artifacts');
-assert(updateFlow.indexOf('ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_COMMITTED)') < updateFlow.indexOf('ServiceDeploy_ReconcileCommittedTransaction(&paths, serviceKeyName, &tx)'), 'durable commit must precede reconciliation and backup disposal');
+assert(updateFlow.indexOf('ServiceDeploy_WriteTransactionPhase(&tx, serviceKeyName, SERVICE_JOURNAL_COMMITTED)') < updateFlow.indexOf('ServiceDeploy_ReconcileCommittedTransaction(&paths, serviceKeyName, &tx, &companionsReconciled)'), 'durable commit must precede reconciliation and backup disposal');
 assert(lifecycleConverged.includes('discovery->serviceRunning'), 'transaction commit health must require a running service');
 
 assert(fsBinding.includes('bytesWritten != (int)length'), 'writeSync must reject short writes');

@@ -92,7 +92,7 @@ static BOOL unregister(void){currentExists=0;return TRUE;}
 #define _wcsicmp wcscmp
 #define ServiceDeploy_BindingImagePath(b,p,n) ((void)(b),(void)(p),(void)(n),FALSE)
 #define ServiceDeploy_DeleteUpdateTransactionArtifacts(tx) (++cleanups,remove_checkpoint())
-#define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx) (reconcile() && (++cleanups, remove_checkpoint()))
+#define ServiceDeploy_ReconcileCommittedTransaction(p,n,tx,c) ((void)(c), reconcile() && (++cleanups, remove_checkpoint()))
 #define ServiceDeploy_DeleteResolvedCheckpoint(tx) remove_checkpoint()
 #define GetFileAttributesW(path) attrs(path)
 #define GetLastError() lastError

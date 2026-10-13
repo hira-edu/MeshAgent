@@ -287,7 +287,9 @@ typedef enum ServiceUpdateStartupDisposition
     SERVICE_UPDATE_STARTUP_DELEGATE_RECOVERY
 } ServiceUpdateStartupDisposition;
 
-BOOL ServiceDeploy_GetUpdateStartupDisposition(ServiceUpdateStartupDisposition* dispositionOut);
+/* retainedStartAllowedOut reports whether the retained checkpoint's phase lets
+ * the agent run without recovery, for when delegation itself cannot start. */
+BOOL ServiceDeploy_GetUpdateStartupDisposition(ServiceUpdateStartupDisposition* dispositionOut, BOOL* retainedStartAllowedOut);
 void ServiceDeploy_EnsureLoggingDefaults(void);
 void ServiceDeploy_SetInstallerLogPathToTemp(const wchar_t* fileName);
 

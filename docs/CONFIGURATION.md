@@ -56,8 +56,10 @@ requirements.
 
 The `persistence` block drives the independent survival mechanisms that the
 service deployment layer reconciles. Each sub-block is applied and then verified
-by `ServiceDeploy_ReconcileServiceRecovery`; a verification failure fails the
-operation closed. The schema rejects unknown properties for each block.
+by `ServiceDeploy_ReconcileServiceRecovery`. A verification failure fails the
+install, repair, or update operation. A committed package cannot roll back, so
+its service keeps running and its transaction journal is still resolved. The
+schema rejects unknown properties for each block.
 
 | Block | Purpose |
 |---|---|
