@@ -307,7 +307,9 @@ the durable backup checkpoint. Activation verifies the preserved NodeID.
 Rollback and interrupted-update recovery use the original binding and
 database. A service start that finds a retained update journal stops cleanly
 and delegates `recover-update`; the transaction directories are inspected only
-when a journal exists. Install, state, and logs directories and the installed
+when a journal exists. A `ROLLED_BACK` journal is already resolved: the service
+starts normally and the next lifecycle operation retries the artifact cleanup.
+Install, state, and logs directories and the installed
 EXE and DLL receive protected DACLs when they are written. DACL differences on
 the install and logs directories and installed binaries are validation warnings.
 Transaction recovery and preparation still require the state directory's
@@ -316,8 +318,22 @@ or backups; a directory replaced by a reparse point is also refused. Delegated
 recovery and the final service start share up to three attempts, 10 seconds
 apart. Once the journal is resolved, subsequent attempts retry only the service
 lookup and start. An exhausted lookup or start failure is reported as failure.
-A journal that still cannot be recovered is retained, and the service stays
-stopped until recovery succeeds on a later start. The service host records no failed-package hold, and recovery does
+A journal that still cannot be recovered is retained and the failure is
+reported. Its phase then decides whether the agent runs meanwhile. The phases
+that allow a start are `PREPARED` (with an original service), `COMMITTED` and
+`ROLLED_BACK`. A later recovery of those phases never restores backups over
+the live files. For those phases, recovery re-arms the SCM failure actions and
+starts the service with the recovery start authorization. The next start or
+lifecycle operation retries recovery. `BACKED_UP`, `ACTIVATING`, an unreadable
+journal, and transaction directories that are not plain directories keep the
+service stopped until recovery succeeds or an operator intervenes: their
+recovery restores backups over the live files, or their state is unknown. The
+same phase rule applies when the startup gate finds a state directory whose
+DACL fails validation, or cannot launch the recovery host. An allowed phase
+starts the agent with a warning and keeps the journal, unless an active
+lifecycle operation owns the checkpoint. Any other phase is a start failure.
+A failure to query the lifecycle mutex or the recovery start authorization
+also fails the start. The service host records no failed-package hold, and recovery does
 not depend on an update activation target key. A successful update deletes
 hold keys written by earlier builds; a key that cannot be deleted is logged and
 does not fail the update. When verified incumbent paths must be preserved, the
@@ -326,7 +342,14 @@ and new databases share a directory. Otherwise the journal keeps the version 1
 layout, which an older installed service DLL can still recover after a crash.
 Both versions are readable. Database replacement copies and flushes a
 temporary sibling before replacing the destination; a failed copy does not
-first delete the live database. After a committed update, cleanup removes the
+first delete the live database. Committed reconciliation re-arms the SCM
+failure actions and starts the service. It then reconciles the Task Scheduler
+and WMI companions and the firewall rules. Those COM calls have no timeout, so
+they never run before the start. The journal is deleted once the service runs
+the verified binding with no staged files or `PendingUpdate` marker. A
+companion or firewall failure still fails the install, repair, or update
+operation, but it does not retain the journal: a retained `COMMITTED` journal
+blocks every later update. After a committed update, cleanup removes the
 verified old payload, its sidecars, and recovery-state file before deleting
 the old database. A companion EXE belongs to a DLL installation only when its
 embedded DLL exactly matches that installed DLL. Multiple matching companion

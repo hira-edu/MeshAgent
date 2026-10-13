@@ -1591,15 +1591,16 @@ static BOOL ServiceHost_AcceptScmName(DWORD argc, LPWSTR* argv)
 static BOOL ServiceHost_ApplyUpdateStartupDisposition(BOOL* stopStartupOut)
 {
     ServiceUpdateStartupDisposition disposition = SERVICE_UPDATE_STARTUP_PROCEED;
+    BOOL retainedStartAllowed = FALSE;
     ServiceInstallPaths paths;
     MeshRuntimeHostLifecycleLaunch launch = {0};
     if (stopStartupOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     *stopStartupOut = FALSE;
-    if (!ServiceDeploy_GetUpdateStartupDisposition(&disposition)) { return FALSE; }
+    if (!ServiceDeploy_GetUpdateStartupDisposition(&disposition, &retainedStartAllowed)) { return FALSE; }
     if (disposition == SERVICE_UPDATE_STARTUP_PROCEED) { return TRUE; }
-    *stopStartupOut = TRUE;
     if (disposition == SERVICE_UPDATE_STARTUP_QUIESCE_FOR_ACTIVE_LIFECYCLE)
     {
+        *stopStartupOut = TRUE;
         ServiceHost_LogLine(L"Update checkpoint is owned by an active lifecycle operation; remaining quiesced");
         return TRUE;
     }
@@ -1619,8 +1620,15 @@ static BOOL ServiceHost_ApplyUpdateStartupDisposition(BOOL* stopStartupOut)
             FALSE,
             &launch))
     {
-        return FALSE;
+        /* Nothing else would start the agent before the next boot. A phase
+         * that may run retained starts now; the next start delegates again. */
+        DWORD error = GetLastError();
+        if (!retainedStartAllowed) { SetLastError(error); return FALSE; }
+        ServiceHost_LogLine(L"[WARN] Interrupted update recovery could not be delegated (error=%lu); starting with the checkpoint retained",
+            (unsigned long)error);
+        return TRUE;
     }
+    *stopStartupOut = TRUE;
     MeshRuntimeHost_ReleaseLifecycleHostW(&launch);
     ServiceHost_LogLine(L"Delegated interrupted update recovery before agent startup");
     return TRUE;

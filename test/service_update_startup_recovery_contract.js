@@ -68,7 +68,36 @@ assert(deployment.includes('return ServiceDeploy_RunDelegatedUpdateRecovery();')
     'the recovery lifecycle host must invoke bounded transaction recovery under the mutex');
 assert(delegatedRecovery.indexOf('if (!recovered) { error = GetLastError(); continue; }') >= 0 &&
     delegatedRecovery.indexOf('if (!recovered) { error = GetLastError(); continue; }') < delegatedRecovery.indexOf('ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000)'),
-    'delegated recovery must start the service only after the checkpoint is resolved');
+    'delegated recovery must start the service normally only after the checkpoint is resolved');
+const retainedStart = extractFunction(deployment, 'static void ServiceDeploy_StartWithRetainedTransaction(');
+const retainedPolicy = extractFunction(deployment, 'static BOOL ServiceDeploy_JournalRecordAllowsRetainedStart(const ServiceJournalRecord* record)\n{');
+assert(delegatedRecovery.includes('if (!recovered) { ServiceDeploy_StartWithRetainedTransaction(serviceName); }') &&
+    delegatedRecovery.lastIndexOf('return FALSE;') > delegatedRecovery.indexOf('ServiceDeploy_StartWithRetainedTransaction(serviceName)'),
+    'exhausted recovery must try a retained-phase start and still report the recovery failure');
+assert(retainedStart.indexOf('ServiceDeploy_RetainedTransactionAllowsStart(') >= 0 &&
+    retainedStart.indexOf('ServiceDeploy_RetainedTransactionAllowsStart(') < retainedStart.indexOf('ServiceDeploy_StartServiceHostServiceAndWait(') &&
+    retainedStart.indexOf('ServiceDeploy_ConfigureServiceRecoveryIfEnabled(') < retainedStart.indexOf('ServiceDeploy_StartServiceHostServiceAndWait(') &&
+    retainedStart.indexOf('ServiceDeploy_CreateRecoveryStartupAuthorization(&authorization)') < retainedStart.indexOf('ServiceDeploy_StartServiceHostServiceAndWait('),
+    'a retained-phase start must check the phase, re-arm SCM failure actions and authorize the start first');
+assert(retainedPolicy.includes('SERVICE_JOURNAL_PREPARED && record->binding != NULL') &&
+    retainedPolicy.includes('SERVICE_JOURNAL_COMMITTED') && retainedPolicy.includes('SERVICE_JOURNAL_ROLLED_BACK') &&
+    !retainedPolicy.includes('SERVICE_JOURNAL_BACKED_UP') && !retainedPolicy.includes('SERVICE_JOURNAL_ACTIVATING'),
+    'mid-commit phases must never run with their checkpoint retained');
+assert(disposition.includes('if (record->phase == SERVICE_JOURNAL_ROLLED_BACK)') &&
+    disposition.indexOf('if (record->phase == SERVICE_JOURNAL_ROLLED_BACK)') < disposition.indexOf('ServiceDeploy_QueryLifecycleOperationActive(&lifecycleActive)'),
+    'a resolved checkpoint awaiting cleanup must not stop startup');
+const applyDisposition = extractFunction(serviceHost, 'static BOOL ServiceHost_ApplyUpdateStartupDisposition(');
+assert(applyDisposition.includes('ServiceDeploy_GetUpdateStartupDisposition(&disposition, &retainedStartAllowed)') &&
+    applyDisposition.includes('if (!retainedStartAllowed) { SetLastError(error); return FALSE; }') &&
+    applyDisposition.indexOf('*stopStartupOut = TRUE;\n    MeshRuntimeHost_ReleaseLifecycleHostW(&launch);') > 0,
+    'a failed recovery delegation may start only a retained phase that allows it');
+const committed = extractFunction(deployment, 'static BOOL ServiceDeploy_ReconcileCommittedTransaction(');
+assert(committed.indexOf('started = ServiceDeploy_StartServiceHostServiceAndWait(name, 30000);') > 0 &&
+    committed.indexOf('started = ServiceDeploy_StartServiceHostServiceAndWait(name, 30000);') < committed.indexOf('ServiceDeploy_ReconcileServiceRecovery()') &&
+    committed.indexOf('started = ServiceDeploy_StartServiceHostServiceAndWait(name, 30000);') < committed.indexOf('ServiceDeploy_RefreshFirewallRulesWithRetry(') &&
+    committed.includes('ServiceDeploy_WaitForTransactionActivation(30000, &state)') &&
+    !committed.includes('ServiceDeploy_WaitForPrimaryLifecycleOperational('),
+    'committed reconciliation must start the agent before COM companion work and not retain the journal for companions');
 assert(!interruptedRecovery.includes('UpdateActivationFailureHold') &&
     interruptedRecovery.includes('ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000)'),
     'interrupted recovery must record no update hold and must not fail for a missing activation target');
@@ -90,6 +119,10 @@ console.log(JSON.stringify({
         recoveryRecordsNoUpdateHold: true,
         identityTimeoutDoesNotRetainCheckpoint: true,
         absentCheckpointProceedsBeforeStateValidation: true,
-        delegatedRecoveryRetriesThenStartsResolvedService: true
+        delegatedRecoveryRetriesThenStartsResolvedService: true,
+        exhaustedRecoveryStartsOnlyCoherentRetainedPhases: true,
+        resolvedCheckpointDoesNotStopStartup: true,
+        failedDelegationStartsOnlyCoherentRetainedPhases: true,
+        committedReconciliationStartsBeforeCompanions: true
     }
 }, null, 2));

@@ -119,9 +119,11 @@ function main() {
     assert(applyRecoveryMonitor.includes('FaultRecovery_CreateServiceRecoveryMonitor(') &&
         applyRecoveryMonitor.includes('FaultRecovery_ServiceRecoveryMonitorMatches('),
         'deployment creates and verifies the service recovery monitor');
-    assert(deployment.includes('if (!ServiceDeploy_ReconcileServiceRecovery()) { ok = FALSE; }') &&
+    const committed = extractFunction(deployment, 'ServiceDeploy_ReconcileCommittedTransaction');
+    assert(committed.includes('companionsOk = ServiceDeploy_ReconcileServiceRecovery();') &&
+        committed.includes('Committed update companions require later reconciliation') &&
         runtimeInit.includes('if (!ServiceDeploy_ReconcileServiceRecovery())'),
-        'install reconciliation and runtime initialization observe recovery failures');
+        'committed reconciliation and runtime initialization observe recovery failures');
 
     // TASK_CREATE_OR_UPDATE lives in the shared RegisterTaskDefinition helper the
     // create path calls, so keep it whole-file; the trigger/action belong to the

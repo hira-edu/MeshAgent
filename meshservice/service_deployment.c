@@ -179,7 +179,11 @@ static BOOL ServiceDeploy_ExtractEmbeddedServiceHostDllFromExe(const wchar_t* ex
 static void ServiceDeploy_DeleteFileIfPresent(const wchar_t* path);
 static const wchar_t* MeshInstaller_GetPathLeaf(const wchar_t* path);
 static BOOL ServiceDeploy_DeleteUpdateTransactionArtifacts(const struct ServiceUpdateTransaction* tx);
+static BOOL ServiceDeploy_CheckTransactionPaths(const ServiceInstallPaths* paths, const struct ServiceUpdateTransaction* tx, BOOL requireTrustedState);
 static BOOL ServiceDeploy_TransactionPathsSafe(const ServiceInstallPaths* paths, const struct ServiceUpdateTransaction* tx);
+static BOOL ServiceDeploy_RetainedTransactionAllowsStart(const ServiceInstallPaths* paths, const struct ServiceUpdateTransaction* tx,
+    const wchar_t* serviceName, DWORD* phaseOut);
+static BOOL ServiceDeploy_JournalRecordAllowsRetainedStart(const ServiceJournalRecord* record);
 static BOOL ServiceDeploy_FinalizeUpdateTransaction(const ServiceInstallPaths* paths, struct ServiceUpdateTransaction* tx);
 static BOOL ServiceDeploy_PrepareUpdateTransaction(const ServiceInstallPaths* paths, const wchar_t* sourceExePath, const wchar_t* sourceDllPath, BOOL allowInstalledProvisioning, struct ServiceUpdateTransaction* tx);
 static BOOL ServiceDeploy_BackupUpdateTransaction(const ServiceInstallPaths* paths, struct ServiceUpdateTransaction* tx);
@@ -416,7 +420,6 @@ static BOOL ServiceDeploy_IsPrimaryLifecycleHealthy(const ServiceLifecycleDiscov
 static BOOL ServiceDeploy_IsPrimaryLifecycleOperational(const ServiceLifecycleDiscovery* discovery);
 static BOOL ServiceDeploy_WaitForPrimaryLifecycleConverged(DWORD timeoutMs, BOOL requirePendingClear, ServiceLifecycleDiscovery* discoveryOut);
 static BOOL ServiceDeploy_WaitForPrimaryLifecycleHealthy(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut);
-static BOOL ServiceDeploy_WaitForPrimaryLifecycleOperational(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut);
 static BOOL ServiceDeploy_WaitForTransactionActivation(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut);
 static BOOL ServiceDeploy_DataStoreValueExists(const wchar_t* dbPath, const char* key, char* buffer, size_t bufferLen, int* valueLenOut);
 static BOOL ServiceDeploy_DataStorePutValue(const wchar_t* dbPath, const char* key, const char* value, size_t valueLen);
@@ -2696,36 +2699,64 @@ static BOOL ServiceDeploy_QueryRecoveryStartupAuthorized(BOOL* authorizedOut)
     return TRUE;
 }
 
-BOOL ServiceDeploy_GetUpdateStartupDisposition(ServiceUpdateStartupDisposition* dispositionOut)
+BOOL ServiceDeploy_GetUpdateStartupDisposition(ServiceUpdateStartupDisposition* dispositionOut, BOOL* retainedStartAllowedOut)
 {
     ServiceInstallPaths paths;
     ServiceUpdateTransaction tx = {0};
     ServiceJournalRecord* record = NULL;
     wchar_t serviceName[256] = {0};
-    BOOL lifecycleActive = FALSE, recoveryStartAuthorized = FALSE;
-    if (dispositionOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    BOOL lifecycleActive = FALSE, recoveryStartAuthorized = FALSE, trusted;
+    DWORD error;
+    if (dispositionOut == NULL || retainedStartAllowedOut == NULL) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     *dispositionOut = SERVICE_UPDATE_STARTUP_PROCEED;
+    *retainedStartAllowedOut = FALSE;
     if (!ServiceDeploy_GetInstallPaths(&paths) ||
         !ServiceDeploy_InitializeUpdateTransactionPaths(&paths, &tx)) { return FALSE; }
     /* Absence is the common case: proceed before inspecting the transaction
      * directories, so their state cannot stop a start with nothing to recover.
      * Same absence rule as ServiceJournal_Load. */
     {
-        DWORD attributes = GetFileAttributesW(tx.journalPath), error = GetLastError();
+        DWORD attributes = GetFileAttributesW(tx.journalPath);
+        error = GetLastError();
         if (attributes == INVALID_FILE_ATTRIBUTES && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)) { return TRUE; }
     }
-    if (!ServiceDeploy_TransactionPathsSafe(&paths, &tx)) { return FALSE; }
     ServiceDeploy_ResolveRuntimeServiceBranding(serviceName, _countof(serviceName), NULL, 0, NULL, 0);
+    /* Recovery refuses a state directory whose DACL fails validation, so
+     * delegating would stop the agent on every start. Its journal is still read
+     * (never through a reparse point) to choose between starting with the
+     * checkpoint retained and failing; nothing in it drives recovery here. */
+    trusted = ServiceDeploy_TransactionPathsSafe(&paths, &tx);
+    error = GetLastError();
+    if (!trusted && !ServiceDeploy_CheckTransactionPaths(&paths, &tx, FALSE)) { SetLastError(error); return FALSE; }
     if (!ServiceJournal_Load(tx.journalPath, serviceName, &record)) { return FALSE; }
     if (record == NULL) { return TRUE; }
+    if (record->phase == SERVICE_JOURNAL_ROLLED_BACK)
+    {
+        /* Rollback completed before this phase was published. Only artifact
+         * cleanup remains, which the next lifecycle operation retries. */
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Resolved checkpoint awaits artifact cleanup; starting (%ls)", tx.journalPath);
+        ServiceJournal_Free(record);
+        return TRUE;
+    }
+    *retainedStartAllowedOut = ServiceDeploy_JournalRecordAllowsRetainedStart(record);
+    if (!trusted && !*retainedStartAllowedOut)
+    {
+        ServiceJournal_Free(record);
+        SetLastError(error != ERROR_SUCCESS ? error : ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
     if (!ServiceDeploy_QueryLifecycleOperationActive(&lifecycleActive))
     {
         ServiceJournal_Free(record);
         return FALSE;
     }
-    if (!lifecycleActive)
+    if (!lifecycleActive && trusted)
     {
         *dispositionOut = SERVICE_UPDATE_STARTUP_DELEGATE_RECOVERY;
+    }
+    else if (!lifecycleActive)
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Untrusted transaction state; starting with the checkpoint retained for operator recovery (phase=%lu)", record->phase);
     }
     else if (!ServiceDeploy_QueryRecoveryStartupAuthorized(&recoveryStartAuthorized))
     {
@@ -2767,7 +2798,9 @@ static BOOL ServiceDeploy_TransactionDirectoryEmpty(const wchar_t* path)
     return empty && error == ERROR_NO_MORE_FILES;
 }
 
-static BOOL ServiceDeploy_TransactionPathsSafe(const ServiceInstallPaths* paths, const ServiceUpdateTransaction* tx)
+/* Structural checks alone (real directories, no reparse points) are enough to
+ * read the journal for a start decision; recovery also requires the DACL. */
+static BOOL ServiceDeploy_CheckTransactionPaths(const ServiceInstallPaths* paths, const ServiceUpdateTransaction* tx, BOOL requireTrustedState)
 {
     const wchar_t* dirs[] = {paths->installDir, tx->stateDir, tx->stageDir, tx->backupDir};
     for (size_t i = 0; i < _countof(dirs); ++i)
@@ -2778,7 +2811,7 @@ static BOOL ServiceDeploy_TransactionPathsSafe(const ServiceInstallPaths* paths,
             if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) { return FALSE; }
         }
         else if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) { return FALSE; }
-        else if (i == 1 && !ServiceDeploy_ValidateTransactionStateDacl(tx->stateDir))
+        else if (i == 1 && requireTrustedState && !ServiceDeploy_ValidateTransactionStateDacl(tx->stateDir))
         {
             error = GetLastError();
             if (error == ERROR_SUCCESS) { error = ERROR_ACCESS_DENIED; }
@@ -2788,6 +2821,41 @@ static BOOL ServiceDeploy_TransactionPathsSafe(const ServiceInstallPaths* paths,
         }
     }
     return TRUE;
+}
+
+static BOOL ServiceDeploy_TransactionPathsSafe(const ServiceInstallPaths* paths, const ServiceUpdateTransaction* tx)
+{
+    return ServiceDeploy_CheckTransactionPaths(paths, tx, TRUE);
+}
+
+/* Whether the live install may run while this checkpoint is retained.
+ * PREPARED never replaced the incumbent's bytes, COMMITTED is irreversible,
+ * and ROLLED_BACK is resolved, so a later recovery of those phases never
+ * restores backups over what the running agent writes. BACKED_UP and
+ * ACTIVATING may leave a mixed file set whose recovery restores the backups,
+ * so they stay stopped until recovery succeeds. */
+static BOOL ServiceDeploy_JournalRecordAllowsRetainedStart(const ServiceJournalRecord* record)
+{
+    return (record->phase == SERVICE_JOURNAL_PREPARED && record->binding != NULL) ||
+        record->phase == SERVICE_JOURNAL_COMMITTED || record->phase == SERVICE_JOURNAL_ROLLED_BACK;
+}
+
+/* The journal only chooses between a start and staying stopped here; nothing
+ * it contains drives recovery, so the state DACL is not required. An absent
+ * journal allows the start, as the startup gate does. */
+static BOOL ServiceDeploy_RetainedTransactionAllowsStart(const ServiceInstallPaths* paths, const ServiceUpdateTransaction* tx,
+    const wchar_t* serviceName, DWORD* phaseOut)
+{
+    ServiceJournalRecord* record = NULL;
+    BOOL allowed;
+    if (phaseOut != NULL) { *phaseOut = 0; }
+    if (!ServiceDeploy_CheckTransactionPaths(paths, tx, FALSE) ||
+        !ServiceJournal_Load(tx->journalPath, serviceName, &record)) { return FALSE; }
+    if (record == NULL) { return TRUE; }
+    if (phaseOut != NULL) { *phaseOut = record->phase; }
+    allowed = ServiceDeploy_JournalRecordAllowsRetainedStart(record);
+    ServiceJournal_Free(record);
+    return allowed;
 }
 
 static DWORD ServiceDeploy_UpdateFileMask(const ServiceUpdateTransaction* tx)
@@ -2815,19 +2883,19 @@ static BOOL ServiceDeploy_ResolveUpdateTransaction(ServiceUpdateTransaction* tx,
     return ServiceDeploy_DeleteUpdateTransactionArtifacts(tx);
 }
 
-/* COMMITTED is irreversible. Retry companion reconciliation before deleting
- * its journal, and report failure without restoring obsolete runtime bytes. */
+/* COMMITTED is irreversible. Retry reconciliation before deleting its journal,
+ * and report failure without restoring obsolete runtime bytes. Companion and
+ * firewall results go to companionsReconciledOut instead of retaining it. */
 static BOOL ServiceDeploy_ReconcileCommittedTransaction(const ServiceInstallPaths* paths,
-    const wchar_t* name, ServiceUpdateTransaction* tx)
+    const wchar_t* name, ServiceUpdateTransaction* tx, BOOL* companionsReconciledOut)
 {
     wchar_t hostPath[MAX_PATH] = {0};
-    ServiceLifecycleDiscovery state;
-    BOOL ok;
+    ServiceLifecycleDiscovery state = {0};
+    BOOL ok, started, companionsOk, firewallOk;
     // Nothing can roll back a COMMITTED update, so a failed check must not leave the
     // service stopped: still restore its recovery policy and start it, then report failure.
     ok = ServiceDeploy_VerifyServiceHostServiceBinding(name, paths->dllPath);
     if (!ServiceDeploy_ConfigureServiceRecoveryIfEnabled(MeshConfig_GetPersistence(), name)) { ok = FALSE; }
-    if (!ServiceDeploy_ReconcileServiceRecovery()) { ok = FALSE; }
     MeshService_HardenServiceDaclByName(name);
     ServiceUtil_ProtectServiceFromTermination(name);
     Security_CreateInstallRootDirectory(paths->installDir);
@@ -2835,12 +2903,30 @@ static BOOL ServiceDeploy_ReconcileCommittedTransaction(const ServiceInstallPath
     // This returns the number of aliases removed; zero is the healthy case.
     // The final lifecycle health check verifies that no aliases remain.
     (void)ServiceDeploy_CleanupConflictingServiceAliases(paths, name);
-    if (!MeshRuntimeHost_GetServiceHostPathW(hostPath, _countof(hostPath)) ||
-        !ServiceDeploy_RefreshFirewallRulesWithRetry(name, hostPath, paths->exePath)) { ok = FALSE; }
+    // Start before the Task Scheduler, WMI and firewall COM work: those calls
+    // have no timeout and must not keep the committed agent offline.
+    started = ServiceDeploy_StartServiceHostServiceAndWait(name, 30000);
+    if (!started) { ok = FALSE; }
+    // Companions and firewall rules do not decide whether the committed payload
+    // runs. A failure is reported to the caller and left to the next repair;
+    // it does not retain the journal, which would block every later update.
+    companionsOk = ServiceDeploy_ReconcileServiceRecovery();
+    firewallOk = MeshRuntimeHost_GetServiceHostPathW(hostPath, _countof(hostPath)) &&
+        ServiceDeploy_RefreshFirewallRulesWithRetry(name, hostPath, paths->exePath);
+    if (companionsReconciledOut != NULL) { *companionsReconciledOut = companionsOk && firewallOk; }
+    if (!companionsOk || !firewallOk)
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Committed update companions require later reconciliation (recovery=%u firewall=%u)",
+            companionsOk, firewallOk);
+    }
     // A committed backup remains until this function removes it, so the
     // pre-cleanup gate must allow that one pending artifact.
-    if (!ServiceDeploy_StartServiceHostServiceAndWait(name, 30000) ||
-        !ServiceDeploy_WaitForPrimaryLifecycleOperational(30000, &state)) { ok = FALSE; }
+    if (started && !ServiceDeploy_WaitForTransactionActivation(30000, &state)) { ok = FALSE; }
+    if (ok && !ServiceDeploy_IsPrimaryLifecycleOperational(&state))
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Committed service runs before full lifecycle convergence (firewall=%u persistence=%u dacl=%u aliases=%u)",
+            state.firewallHealthy, state.persistenceHealthy, state.serviceDaclValid, state.serviceAliasClean);
+    }
     if (ok && (state.updateStageArtifactsPresent ||
         ServiceDeploy_DataStoreValueExists(paths->dbPath, "PendingUpdate", NULL, 0, NULL)))
     {
@@ -3329,7 +3415,7 @@ static BOOL ServiceDeploy_RecoverInterruptedTransaction(void)
     }
     if (tx.journalPhase == SERVICE_JOURNAL_COMMITTED)
     {
-        ok = ServiceDeploy_ReconcileCommittedTransaction(&paths, serviceName, &tx);
+        ok = ServiceDeploy_ReconcileCommittedTransaction(&paths, serviceName, &tx, NULL);
         goto verifyCleanup;
     }
     if (tx.journalPhase == SERVICE_JOURNAL_ROLLED_BACK)
@@ -3699,6 +3785,7 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
     BOOL serviceExists = FALSE;
     BOOL serviceWasRunning = FALSE;
     BOOL rollbackCompleted = FALSE;
+    BOOL companionsReconciled = TRUE;
     DWORD operationError = ERROR_SUCCESS;
     HANDLE rollbackStartupAuthorization = NULL;
     wchar_t serviceKeyName[256] = {0};
@@ -4014,7 +4101,7 @@ CLEANUP:
                 success = FALSE;
                 goto ROLLBACK;
             }
-            success = ServiceDeploy_ReconcileCommittedTransaction(&paths, serviceKeyName, &tx);
+            success = ServiceDeploy_ReconcileCommittedTransaction(&paths, serviceKeyName, &tx, &companionsReconciled);
         }
     }
 
@@ -4099,6 +4186,14 @@ ROLLBACK:
     ServiceBinding_Free(tx.originalBinding);
     for (size_t i = 0; i < _countof(tx.originalFileDacl); ++i) { free(tx.originalFileDacl[i]); }
     if (!success) { SetLastError(operationError); }
+    // The committed payload runs and its journal is resolved, but install,
+    // repair and update still report companions that did not reconcile.
+    if (success && !companionsReconciled)
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Committed %ls without reconciled recovery companions or firewall rules", serviceKeyName);
+        SetLastError(ERROR_INSTALL_FAILURE);
+        return FALSE;
+    }
     return success;
 }
 
@@ -5515,11 +5610,6 @@ static BOOL ServiceDeploy_WaitForPrimaryLifecycleHealthy(DWORD timeoutMs, Servic
     return ServiceDeploy_WaitForPrimaryLifecycleConverged(timeoutMs, TRUE, discoveryOut);
 }
 
-static BOOL ServiceDeploy_WaitForPrimaryLifecycleOperational(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut)
-{
-    return ServiceDeploy_WaitForPrimaryLifecycleConverged(timeoutMs, FALSE, discoveryOut);
-}
-
 static BOOL ServiceDeploy_BuildTransitionPlan(const ServiceLifecycleDiscovery* discovery, ServiceLifecycleRequest request, ServiceLifecyclePlan* plan)
 {
     if (discovery == NULL || plan == NULL) { return FALSE; }
@@ -5951,13 +6041,47 @@ static BOOL ServiceDeploy_RunLifecycleOperation(ServiceLifecycleRequest request,
 
 
 
+/* Recovery could not resolve the checkpoint, yet ServiceMain stopped cleanly
+ * so SCM will not retry. When the retained phase lets the live install run,
+ * re-arm SCM failure actions and start it under the recovery authorization;
+ * the next start or lifecycle operation retries recovery. Other phases stay
+ * stopped: their recovery restores backups over the live files. */
+static void ServiceDeploy_StartWithRetainedTransaction(const wchar_t* serviceName)
+{
+    ServiceInstallPaths paths;
+    ServiceUpdateTransaction tx = {0};
+    HANDLE authorization = NULL;
+    BOOL exists = FALSE;
+    DWORD phase = 0;
+    if (!ServiceDeploy_GetInstallPaths(&paths) || !ServiceDeploy_InitializeUpdateTransactionPaths(&paths, &tx) ||
+        !ServiceBinding_QueryExists(serviceName, &exists) || !exists) { return; }
+    if (!ServiceDeploy_RetainedTransactionAllowsStart(&paths, &tx, serviceName, &phase))
+    {
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Retained checkpoint keeps %ls stopped until recovery succeeds (phase=%lu)", serviceName, phase);
+        return;
+    }
+    if (!ServiceDeploy_ConfigureServiceRecoveryIfEnabled(MeshConfig_GetPersistence(), serviceName))
+    { ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] SCM recovery actions for %ls were not re-armed", serviceName); }
+    if (ServiceDeploy_CreateRecoveryStartupAuthorization(&authorization) &&
+        ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000))
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Started %ls with the interrupted update checkpoint retained (phase=%lu); recovery retries on the next start", serviceName, phase);
+    }
+    else
+    {
+        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] %ls did not start with the checkpoint retained (error=%lu)", serviceName, GetLastError());
+    }
+    if (authorization != NULL) { CloseHandle(authorization); }
+}
+
 /* ServiceMain delegates here after stopping for an abandoned checkpoint, so a
  * start was requested. Recovery is idempotent: retry transient failures (file
  * locks, slow SCM transitions), then start the service once the checkpoint is
  * gone. Recovery itself starts it only when it was running before the update,
  * and a clean ServiceMain exit triggers no SCM retry, so without this start
- * the agent stays offline until the next boot. A retained checkpoint is never
- * started over: the startup gate would only delegate again. */
+ * the agent stays offline until the next boot. A checkpoint that is still
+ * retained after the last attempt starts the service only when its phase
+ * allows it; the result still reports the recovery failure. */
 static BOOL ServiceDeploy_RunDelegatedUpdateRecovery(void)
 {
     wchar_t serviceName[256] = {0};
@@ -5989,6 +6113,7 @@ static BOOL ServiceDeploy_RunDelegatedUpdateRecovery(void)
         error = GetLastError();
         ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Recovered service %ls did not start (error=%lu)", serviceName, error);
     }
+    if (!recovered) { ServiceDeploy_StartWithRetainedTransaction(serviceName); }
     SetLastError(error != ERROR_SUCCESS ? error : ERROR_GEN_FAILURE);
     return FALSE;
 }
