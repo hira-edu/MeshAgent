@@ -51,9 +51,17 @@ function main() {
     assert(exeCommitIndex >= 0, 'update commit must explicitly handle staged EXE');
     assert(dllCommitIndex < exeCommitIndex, 'update commit must replace ServiceDll before host EXE');
 
-    const dllInstallIndex = commit.indexOf('Security_InstallFiles(tx->stagedDllPath, paths->dllPath)');
-    const exeInstallIndex = commit.indexOf('Security_InstallFiles(tx->stagedExePath, paths->exePath)');
-    assert(dllInstallIndex >= 0 && exeInstallIndex >= 0, 'update commit must install both staged binaries');
+    const dllInstallIndex = commit.indexOf('ServiceDeploy_CopyFileOverwrite(tx->stagedDllPath, paths->dllPath)');
+    const exeInstallIndex = commit.indexOf('ServiceDeploy_CopyFileOverwrite(tx->stagedExePath, paths->exePath)');
+    assert(dllInstallIndex >= 0 && exeInstallIndex >= 0, 'update commit must install both staged binaries by flushed atomic replace');
+    assert(!commit.includes('Security_InstallFiles') && !commit.includes('ServiceDeploy_RemoveFileIfExistsWithTimeout'),
+        'update commit must never delete a live binary before its replacement is durable');
+    const dllQuiesceIndex = commit.indexOf('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->dllPath');
+    const exeQuiesceIndex = commit.indexOf('ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->exePath');
+    assert(dllQuiesceIndex >= 0 && dllQuiesceIndex < dllInstallIndex && exeQuiesceIndex > dllInstallIndex && exeQuiesceIndex < exeInstallIndex,
+        'each live binary must be quiesced before its replacement');
+    assert(commit.indexOf('ServiceDeploy_HardenServiceHostDllDacl(paths->dllPath)') > dllInstallIndex,
+        'committed ServiceDll must be DACL-hardened after replacement');
     assert(dllInstallIndex < exeInstallIndex, 'staged ServiceDll install must precede staged EXE install');
     assert(
         commit.indexOf('ServiceDeploy_ValidateServiceHostDll(paths->dllPath)') < exeInstallIndex,
@@ -91,6 +99,7 @@ function main() {
         checks: {
             serviceDllCommittedBeforeExe: true,
             serviceDllValidatedBeforeExe: true,
+            binariesCommittedByAtomicReplace: true,
             serviceDllRolledBackBeforeExe: true,
             updateActivationHoldConvergesWithTransaction: true,
             durableCheckpointPrecedesRecoveryTriggerSuspension: true,

@@ -588,13 +588,15 @@ static BOOL ServiceBinding_Restore(const wchar_t* name, const ServiceBindingSnap
     SC_HANDLE scm = NULL, service = NULL;
     HKEY key = NULL, parameters = NULL;
     wchar_t keyPath[512];
-    BOOL ok = FALSE;
+    BOOL ok = FALSE, launchesDisabled = FALSE;
     HANDLE privilegeToken = NULL;
     TOKEN_PRIVILEGES previous = {0};
     size_t i;
+    DWORD restoredStart;
     const QUERY_SERVICE_CONFIGW* config;
     if (!snapshot) { return FALSE; }
     config = snapshot->config;
+    restoredStart = snapshot->running && config->dwStartType == SERVICE_DISABLED ? SERVICE_DEMAND_START : config->dwStartType;
     if (!ServiceBinding_AcquireRecoveryPrivilege(snapshot, &privilegeToken, &previous)) { return FALSE; }
     scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (!scm) { goto done; }
@@ -621,6 +623,7 @@ static BOOL ServiceBinding_Restore(const wchar_t* name, const ServiceBindingSnap
         SERVICE_DISABLED,
         config->dwErrorControl, config->lpBinaryPathName, NULL, NULL, NULL,
         NULL, NULL, config->lpDisplayName)) { goto done; }
+    launchesDisabled = TRUE;
     for (i = 0; i < _countof(snapshot->extra); ++i)
     {
         if (i == 1 || i == 2) { continue; }
@@ -656,9 +659,9 @@ static BOOL ServiceBinding_Restore(const wchar_t* name, const ServiceBindingSnap
     }
     if (!ServiceBinding_ApplyExtra(service, 1, snapshot->extra[1]) ||
         !ServiceBinding_ApplyExtra(service, 2, snapshot->extra[2])) { goto done; }
-    if (!ChangeServiceConfigW(service, SERVICE_NO_CHANGE,
-        snapshot->running && config->dwStartType == SERVICE_DISABLED ? SERVICE_DEMAND_START : config->dwStartType,
+    if (!ChangeServiceConfigW(service, SERVICE_NO_CHANGE, restoredStart,
         SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, NULL, NULL, NULL)) { goto done; }
+    launchesDisabled = FALSE;
     if (!(snapshot->running && config->dwStartType == SERVICE_DISABLED))
     {
         const ServiceBindingValue* value = &snapshot->values[1];
@@ -667,6 +670,17 @@ static BOOL ServiceBinding_Restore(const wchar_t* name, const ServiceBindingSnap
     }
     ok = TRUE;
 done:
+    /* A failed restore keeps its journal, so the startup gate still diverts a
+     * launch into recovery. DISABLED would stop that recovery from ever running. */
+    if (launchesDisabled)
+    {
+        DWORD error = GetLastError();
+        BOOL reenabled = ChangeServiceConfigW(service, SERVICE_NO_CHANGE, restoredStart,
+            SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+        ServiceDeploy_LogInstallEvent(L"[BINDING] Restore failed with launches disabled (error=%lu); start type %lu %ls (error=%lu)",
+            error, restoredStart, reenabled ? L"restored" : L"not restored", reenabled ? ERROR_SUCCESS : GetLastError());
+        SetLastError(error);
+    }
     if (!ServiceBinding_ReleaseRecoveryPrivilege(privilegeToken, &previous)) { ok = FALSE; }
     if (parameters) { RegCloseKey(parameters); }
     if (key) { RegCloseKey(key); }

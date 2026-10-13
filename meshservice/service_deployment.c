@@ -3095,15 +3095,13 @@ static BOOL ServiceDeploy_CommitUpdateTransaction(const ServiceInstallPaths* pat
 {
     if (paths == NULL || tx == NULL) { return FALSE; }
 
+    /* Replace live binaries by flushed same-directory rename. An interruption
+     * leaves the SCM-bound ServiceDll and host EXE whole (incumbent or staged),
+     * never missing or torn, so the startup gate can still load and recover. */
     if (tx->stagedDllReady)
     {
         if (!ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->dllPath, 60000, L"[UPDATE]") ||
-            !ServiceDeploy_RemoveFileIfExistsWithTimeout(paths->dllPath, 60000, TRUE))
-        {
-            ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to remove existing runtime DLL (%ls)", paths->dllPath);
-            return FALSE;
-        }
-        if (!Security_InstallFiles(tx->stagedDllPath, paths->dllPath))
+            !ServiceDeploy_CopyFileOverwrite(tx->stagedDllPath, paths->dllPath))
         {
             ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to commit staged runtime DLL to %ls", paths->dllPath);
             return FALSE;
@@ -3122,7 +3120,7 @@ static BOOL ServiceDeploy_CommitUpdateTransaction(const ServiceInstallPaths* pat
 
     if (tx->stagedExeReady &&
         (!ServiceDeploy_WaitForUpdateTargetQuiesced(paths, paths->exePath, 60000, L"[UPDATE]") ||
-         !Security_InstallFiles(tx->stagedExePath, paths->exePath)))
+         !ServiceDeploy_CopyFileOverwrite(tx->stagedExePath, paths->exePath)))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Failed to commit staged executable to %ls", paths->exePath);
         return FALSE;

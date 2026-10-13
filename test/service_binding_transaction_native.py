@@ -46,6 +46,7 @@ typedef intptr_t HKEY; typedef intptr_t SC_HANDLE; typedef int LONG; typedef uns
 #define SERVICE_QUERY_STATUS 2
 #define SERVICE_CHANGE_CONFIG 4
 #define SERVICE_START 8
+#define SERVICE_AUTO_START 2
 #define SERVICE_DEMAND_START 3
 #define SERVICE_NO_CHANGE 0xffffffffUL
 #define wcslen wide_len
@@ -74,11 +75,14 @@ static DWORD GetLastError(void){return privilegeError;}
 static BOOL AdjustTokenPrivileges(HANDLE token,BOOL all,TOKEN_PRIVILEGES* requested,DWORD size,TOKEN_PRIVILEGES* previous,DWORD* used){(void)token;(void)all;(void)size;(void)used;if(privilegeDenied){privilegeError=1300;return TRUE;}if(previous){*previous=*requested;previous->Privileges[0].Attributes=privilegeEnabled?2:0;}privilegeEnabled=requested->Privileges[0].Attributes==2;return TRUE;}
 static BOOL CloseHandle(HANDLE token){(void)token;return TRUE;}
 static const wchar_t* changedImage;static DWORD changedStart,changedType;static int clearActions,clearDescription,valuesAfterExtras,deletedParameters;
-static BOOL step(void){return !failAt||++ops!=failAt;}
+/* Every boundary counts, so a clean run measures how many failure points exist. */
+static int injected,disabledApplied,reenables,failReenable,logged;static DWORD currentStart;
+static BOOL step(void){if(++ops!=failAt)return TRUE;injected=1;return FALSE;}
+static void ServiceDeploy_LogInstallEvent(const wchar_t* format,...){(void)format;++logged;}
 static LONG RegOpenKeyExW(HKEY key,const wchar_t* path,DWORD unused,DWORD access,HKEY* out){(void)key;(void)unused;(void)access;if(!step())return 5;if(wide_chr(path,L'S')&&path[0]=='S'&&path[1]=='O'&&groupOpenError)return groupOpenError;*out=2;return ERROR_SUCCESS;}
 static LONG RegQueryValueExW(HKEY key,const wchar_t* name,void* unused,DWORD* type,BYTE* data,DWORD* size){(void)key;(void)name;(void)unused;if(!step())return 5;if(!groupPresent)return ERROR_FILE_NOT_FOUND;*type=groupType;if(!data){*size=groupSize;return ERROR_SUCCESS;}assert(*size>=groupSize);memcpy(data,group,groupSize);*size=groupSize;return ERROR_SUCCESS;}
-static LONG RegSetValueExW(HKEY key,const wchar_t* name,DWORD unused,DWORD type,const BYTE* data,DWORD size){(void)key;(void)unused;if(!step())return 5;++regWrites;if(!_wcsicmp(name,L"netsvcs")){assert(size<=sizeof(group));memcpy(group,data,size);groupSize=size;groupType=type;groupPresent=1;}else{if(key==3){assert(serviceChanges==0);++parameterWrites;}else{assert(extraChanges==3);++valuesAfterExtras;}}return ERROR_SUCCESS;}
-static LONG RegDeleteValueW(HKEY key,const wchar_t* name){(void)key;(void)name;if(!step())return 5;if(key==3){assert(serviceChanges==0);++parameterWrites;}else{assert(extraChanges==3);++valuesAfterExtras;}return ERROR_FILE_NOT_FOUND;}
+static LONG RegSetValueExW(HKEY key,const wchar_t* name,DWORD unused,DWORD type,const BYTE* data,DWORD size){(void)key;(void)unused;if(!step())return 5;++regWrites;if(!_wcsicmp(name,L"netsvcs")){assert(size<=sizeof(group));memcpy(group,data,size);groupSize=size;groupType=type;groupPresent=1;}else{if(key==3){assert(serviceChanges==0);++parameterWrites;}else{assert(extraChanges==3||(extraChanges==5&&!_wcsicmp(name,L"Start")));++valuesAfterExtras;}}return ERROR_SUCCESS;}
+static LONG RegDeleteValueW(HKEY key,const wchar_t* name){if(!step())return 5;if(key==3){assert(serviceChanges==0);++parameterWrites;}else{assert(extraChanges==3||(extraChanges==5&&!_wcsicmp(name,L"Start")));++valuesAfterExtras;}return ERROR_FILE_NOT_FOUND;}
 static LONG RegCloseKey(HKEY key){(void)key;return ERROR_SUCCESS;}
 static LONG RegCreateKeyExW(HKEY key,const wchar_t* path,DWORD a,void* b,DWORD c,DWORD d,void* e,HKEY* out,void* f){(void)key;(void)path;(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;if(!step())return 5;*out=3;return ERROR_SUCCESS;}
 static LONG RegQueryInfoKeyW(HKEY key,void* a,void* b,void* c,DWORD* subs,void* d,void* e,DWORD* values,void* f,void* g,void* h,void* i){(void)key;(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;if(!step())return 5;*subs=*values=0;return ERROR_SUCCESS;}
@@ -86,7 +90,10 @@ static LONG RegDeleteKeyW(HKEY key,const wchar_t* name){(void)key;(void)name;if(
 static SC_HANDLE OpenSCManagerW(void* a,void* b,DWORD access){(void)a;(void)b;(void)access;return step()?1:0;}
 static SC_HANDLE OpenServiceW(SC_HANDLE scm,const wchar_t* name,DWORD access){(void)scm;(void)name;(void)access;return step()?2:0;}
 static BOOL CloseServiceHandle(SC_HANDLE h){(void)h;return TRUE;}
-static BOOL ChangeServiceConfigW(SC_HANDLE h,DWORD type,DWORD start,DWORD error,const wchar_t* image,const wchar_t* groupName,void* tag,const wchar_t* deps,const wchar_t* account,const wchar_t* pass,const wchar_t* display){(void)h;(void)error;(void)image;(void)display;assert(!groupName&&!tag&&!deps&&!account&&!pass);if(!step())return FALSE;assert(parameterWrites==5);if(type==SERVICE_NO_CHANGE){assert(extraChanges==5);}else{assert(start==SERVICE_DISABLED);}changedStart=start;if(type!=SERVICE_NO_CHANGE){changedType=type;changedImage=image;}++serviceChanges;return TRUE;}
+/* After an injected failure the only permitted SCM change is re-enabling launches. */
+static BOOL ChangeServiceConfigW(SC_HANDLE h,DWORD type,DWORD start,DWORD error,const wchar_t* image,const wchar_t* groupName,void* tag,const wchar_t* deps,const wchar_t* account,const wchar_t* pass,const wchar_t* display){(void)h;(void)error;(void)image;(void)display;assert(!groupName&&!tag&&!deps&&!account&&!pass);
+    if(injected){assert(type==SERVICE_NO_CHANGE&&disabledApplied&&currentStart==SERVICE_DISABLED&&start!=SERVICE_DISABLED&&!image);++reenables;if(failReenable)return FALSE;currentStart=start;return TRUE;}
+    if(!step())return FALSE;assert(parameterWrites==5);if(type==SERVICE_NO_CHANGE){assert(extraChanges==5);}else{assert(start==SERVICE_DISABLED);disabledApplied=1;}changedStart=currentStart=start;if(type!=SERVICE_NO_CHANGE){changedType=type;changedImage=image;}++serviceChanges;return TRUE;}
 static BOOL ChangeServiceConfig2W(SC_HANDLE h,DWORD level,void* data){(void)h;if(!step())return FALSE;++extraChanges;if(level==SERVICE_CONFIG_DESCRIPTION)clearDescription=((SERVICE_DESCRIPTIONW*)data)->lpDescription&&!*(((SERVICE_DESCRIPTIONW*)data)->lpDescription);if(level==SERVICE_CONFIG_FAILURE_ACTIONS){SERVICE_FAILURE_ACTIONSW* a=data;if(a->cActions&&a->lpsaActions[0].Type==SC_ACTION_REBOOT)assert(privilegeEnabled);clearActions=a->lpCommand&&!*a->lpCommand&&a->lpRebootMsg&&!*a->lpRebootMsg&&a->lpsaActions&&a->cActions==0;}return TRUE;}
 static UINT GetSystemDirectoryW(wchar_t* out,UINT cap){const wchar_t* p=L"C:\\Windows\\System32";assert(cap>wide_len(p));memcpy(out,p,(wide_len(p)+1)*2);return (UINT)wide_len(p);}
 static DWORD ExpandEnvironmentStringsW(const wchar_t* source,wchar_t* out,DWORD cap){DWORD n=(DWORD)wide_len(source)+1;if(n<=cap)memcpy(out,source,n*2);return n;}
@@ -102,7 +109,23 @@ static BOOL ServiceDeploy_ValidateCopiedLegacyHost(const wchar_t* host,const wch
 '''
 cases = r'''
 static void set_group(const wchar_t* entries,size_t chars){memcpy(group,entries,chars*2);groupSize=(DWORD)(chars*2);groupType=REG_MULTI_SZ;groupPresent=1;groupOpenError=0;regWrites=ops=failAt=0;}
-static void reset_restore(void){serviceChanges=extraChanges=valuesAfterExtras=deletedParameters=ops=failAt=parameterWrites=0;}
+static DWORD initialStart=SERVICE_AUTO_START;
+static void reset_restore(void){serviceChanges=extraChanges=valuesAfterExtras=deletedParameters=ops=failAt=parameterWrites=0;injected=disabledApplied=reenables=failReenable=logged=0;currentStart=initialStart;}
+/* Inject a failure at every boundary. A failed restore keeps its journal for the
+ * startup gate, so it must never leave the service DISABLED; once launches were
+ * disabled, the snapshot's own start type is what remains. */
+static int restore_failures(ServiceBindingSnapshot* s,DWORD expectedStart,int* firstWindowFailure){
+    set_group(L"Other\0",7);reset_restore();assert(ServiceBinding_Restore(L"Agent",s)&&currentStart==expectedStart&&!reenables&&!logged);
+    int operationCount=ops,windowFailures=0;*firstWindowFailure=0;assert(operationCount>10);
+    for(int failure=1;failure<=operationCount;++failure){
+        set_group(L"Other\0",7);reset_restore();failAt=failure;assert(!ServiceBinding_Restore(L"Agent",s)&&injected);
+        assert(currentStart!=SERVICE_DISABLED);
+        assert(currentStart==(disabledApplied?expectedStart:initialStart));
+        assert(reenables<=1&&logged==reenables);
+        if(reenables){++windowFailures;if(!*firstWindowFailure)*firstWindowFailure=failure;}
+    }
+    return windowFailures;
+}
 int main(void){
     /* Mark shared journal-only helpers used while keeping warning gates strict. */
     SECURITY_DESCRIPTOR_RELATIVE sd={1,0,SE_SELF_RELATIVE,0,0,0,0};assert(IsValidSecurityDescriptor(&sd)&&GetSecurityDescriptorLength(&sd)==sizeof(sd));
@@ -208,13 +231,18 @@ int main(void){
     for(size_t i=0;i<5;++i)s->extra[i]=calloc(1,128);
     set_group(L"Other\0",7);reset_restore();assert(ServiceBinding_Restore(L"Agent",s));assert(serviceChanges==2&&changedType==SERVICE_WIN32_SHARE_PROCESS&&changedStart==SERVICE_DEMAND_START&&clearActions&&clearDescription&&valuesAfterExtras==8&&parameterWrites==5&&deletedParameters==1);
     assert(changedImage&&!_wcsicmp(changedImage,s->config->lpBinaryPathName));
-    int operationCount=ops; /* Every mutation/query boundary must fail closed. */
-    for(int failure=1;failure<=operationCount;++failure){set_group(L"Other\0",7);reset_restore();failAt=failure;assert(!ServiceBinding_Restore(L"Agent",s));}
+    int windowFailure=0;assert(restore_failures(s,SERVICE_DEMAND_START,&windowFailure)>5&&windowFailure);
+    /* A failed re-enable is reported, not hidden, and the restore still fails. */
+    set_group(L"Other\0",7);reset_restore();failAt=windowFailure;failReenable=1;
+    assert(!ServiceBinding_Restore(L"Agent",s)&&reenables==1&&logged==1&&currentStart==SERVICE_DISABLED);
     /* Reboot action restoration acquires and restores the shutdown privilege. */
     SERVICE_FAILURE_ACTIONSW* actions=(SERVICE_FAILURE_ACTIONSW*)s->extra[1];SC_ACTION reboot={SC_ACTION_REBOOT,1000};actions->cActions=1;actions->lpsaActions=&reboot;
     set_group(L"Other\0",7);reset_restore();privilegeDenied=1;assert(!ServiceBinding_Restore(L"Agent",s)&&!serviceChanges&&!parameterWrites&&!privilegeEnabled);
     privilegeDenied=0;reset_restore();assert(ServiceBinding_Restore(L"Agent",s)&&!privilegeEnabled);
-    ServiceBinding_Free(s);puts("service binding transaction: owned image selection, membership restoration, exact value ordering, disabled running state and failure propagation passed");return 0;
+    /* A stopped auto-start incumbent returns to auto-start from every failure inside the window. */
+    actions->cActions=0;actions->lpsaActions=NULL;s->running=FALSE;s->config->dwStartType=SERVICE_AUTO_START;initialStart=SERVICE_DEMAND_START;
+    assert(restore_failures(s,SERVICE_AUTO_START,&windowFailure)>5);initialStart=SERVICE_AUTO_START;
+    ServiceBinding_Free(s);puts("service binding transaction: owned image selection, membership restoration, exact value ordering, disabled running state, failure propagation and start-type recovery on every restore failure passed");return 0;
 }
 '''
 functions = ('\n'.join(extract(name, legacy_host) for name in ['ServiceLegacyHost_NormalizePath', 'ServiceLegacyHost_IsCanonicalPath', 'ServiceLegacyHost_ParseImage']) +
