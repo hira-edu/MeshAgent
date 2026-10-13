@@ -2646,6 +2646,17 @@ static BOOL ServiceDeploy_QueryLifecycleOperationActive(BOOL* activeOut)
     return FALSE;
 }
 
+/* A lifecycle host must not begin replacing binaries once Windows is shutting down:
+ * the remaining steps could be cut off, and rollback from PREPARED/BACKED_UP is safe.
+ * Returns FALSE, with ERROR_SHUTDOWN_IN_PROGRESS, when the update must stop here. */
+static BOOL ServiceDeploy_UpdateCanContinue(const wchar_t* stage)
+{
+    if (GetSystemMetrics(SM_SHUTTINGDOWN) == 0) { return TRUE; }
+    ServiceDeploy_LogInstallEvent(L"[UPDATE] System shutdown in progress; aborting %ls and restoring the original installation", stage);
+    SetLastError(ERROR_SHUTDOWN_IN_PROGRESS);
+    return FALSE;
+}
+
 static BOOL ServiceDeploy_BuildRecoveryStartupEventName(wchar_t* eventName, size_t eventNameCch)
 {
     wchar_t serviceName[256] = {0};
@@ -3834,6 +3845,11 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         success = FALSE;
         goto CLEANUP;
     }
+    if (!ServiceDeploy_UpdateCanContinue(L"before stopping the service"))
+    {
+        success = FALSE;
+        goto CLEANUP;
+    }
     if (serviceExists && !ServiceDeploy_StopServiceAndWait(serviceKeyName, 30000, TRUE))
     {
         ServiceDeploy_LogInstallEvent(L"[UPDATE] Service did not stop; retaining original checkpoint");
@@ -3911,6 +3927,12 @@ static BOOL ServiceDeploy_ApplyUpdateFlow(const wchar_t* sourceExePath, const wc
         ServiceDeploy_LogInstallEvent(L"[UPDATE] PendingUpdate marker written prior to commit");
     }
 
+    // Last point at which the incumbent binaries are untouched.
+    if (!ServiceDeploy_UpdateCanContinue(L"before commit"))
+    {
+        success = FALSE;
+        goto CLEANUP;
+    }
     if (!ServiceDeploy_CommitUpdateTransaction(&paths, &tx))
     {
         success = FALSE;

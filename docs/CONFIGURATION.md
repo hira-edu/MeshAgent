@@ -259,12 +259,45 @@ without either bit would hand the package to its own updater, which overwrites
 the service EXE with a binary that is not an SCM host, so it is left on its
 current version instead.
 
-The agent keeps no failed-package or forced-update hold. Whenever the reported
-executable hash differs from the server's package, the server may send it again,
-including a package that failed before. On connect the agent deletes hold keys
-written by earlier builds (`UpdateActivationTargetHash`, `UpdateActivationFailureHash`,
-`UpdateActivationFailureCompressed`, `UpdateForceAttempt`, `forceUpdateHold`,
-`forceUpdatePending`).
+A Windows service agent defers a server-pushed update while Windows is shutting
+down (`SM_SHUTTINGDOWN`) or a Windows Installer transaction holds
+`Global\_MSIExecute`. Setting `updateMinUptimeSeconds` (default 0, off) also
+defers it until the system has been up that many seconds. The agent checks at
+hash negotiation and again before the lifecycle handoff. At negotiation a
+deferral answers an all-zero hash, as a blocked transfer does, so no transfer
+starts and the server runs its normal core check; the reason is only logged
+locally. Before the handoff a deferral drops the staged package and reports
+`agentupdatefailed`, so the server restores the core, and the reason is also sent
+as a device event (`Agent update deferred: <reason>`). The server negotiates only
+on connect or on an operator request, so the agent rechecks every 300 seconds and
+reconnects the control channel once, when the deferral clears. With automatic
+agent updates disabled on the server, an operator update request that arrives
+during a deferral is dropped and must be repeated.
+
+Each lifecycle handoff is counted before it starts, per package hash, in the
+datastore key `UpdateRetryState` (`1 <attempts> <unix time> <SHA-384 hex>`), so a
+host that dies mid-update has used its attempt. A different package starts again
+at one; the record is deleted once the running binary's hash equals it. Automatic
+retries of the same package wait 1, 2, 4, 8 and 16 hours, then 24 hours each,
+with no attempt limit. While the package waits, a server that sent
+`agentupdatefailurecapability` receives
+`{"action":"agentupdatefailure","hash":"<hex>"}` before the hash reply and skips
+it; an operator's explicit update request still proceeds and is counted. A server
+without that capability receives an all-zero hash until the retry is due. When
+the wait ends the agent reconnects once so the server offers the package again.
+`forceUpdate` and `fakeUpdate` skip the wait but not the readiness checks. Delete
+`UpdateRetryState` to reset the count. On connect the agent deletes hold keys
+written by earlier builds (`UpdateActivationTargetHash`,
+`UpdateActivationFailureHash`, `UpdateActivationFailureCompressed`,
+`UpdateForceAttempt`, `forceUpdateHold`, `forceUpdatePending`); none of them is
+read.
+
+The lifecycle host checks `SM_SHUTTINGDOWN` before it stops the incumbent service
+and again immediately before the commit. During shutdown it aborts and restores
+the original installation from the PREPARED or BACKED_UP checkpoint instead of
+replacing binaries. `SM_SHUTTINGDOWN` describes the caller's session; whether it
+is set for these session 0 processes during a system shutdown still needs
+validation on a Windows host.
 
 The Windows self-update activation is asynchronous: `MeshServer_selfupdate_continue`
 stages and hashes the package, and calls

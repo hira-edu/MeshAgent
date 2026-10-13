@@ -181,6 +181,14 @@ static BOOL process_safe(void) {
     ++processGuardCalls;assert(prepared==1&&retainedPhase==SERVICE_JOURNAL_PREPARED&&restartersSuspended&&!stops);
     return processGuardAllowed;
 }
+/* Windows begins shutting down at the named lifecycle step (1: before stop, 2: before commit). */
+static int shutdownAt;
+static BOOL shutdown_gate(const wchar_t* stage) {
+    if (shutdownAt == 1 && !wcscmp(stage, L"before stopping the service")) { assert(running && !stops && !backupCalls); return FALSE; }
+    if (shutdownAt == 2 && !wcscmp(stage, L"before commit")) { assert(!running && backupCalls == 1 && !commitCalls && retainedPhase == SERVICE_JOURNAL_BACKED_UP); return FALSE; }
+    return TRUE;
+}
+#define ServiceDeploy_UpdateCanContinue(stage) shutdown_gate(stage)
 #define ServiceLegacyHost_ParseImage(i,d,o,n) copied_host_parse(i,d,o,n)
 #define ServiceLegacyHost_ProcessSafe(n,h) process_safe()
 #define ServiceDeploy_SuspendServiceRecoveryRestarters(...) (++restartersSuspended,TRUE)
@@ -301,8 +309,19 @@ static void copied_host_guard_case(int restoreFails) {
     if(restoreFails)assert(retainedPhase==SERVICE_JOURNAL_PREPARED&&!deletedArtifacts&&!starts);
     else assert(!retainedPhase&&deletedArtifacts==2&&discarded==1&&starts==1);
 }
+/* Shutdown aborts before any live byte changes and restores the original installation. */
+static void shutdown_case(int at) {
+    reset(0,1,1,3,0); shutdownAt = at;
+    assert(!ServiceDeploy_ApplyUpdateFlow(L"new.exe",L"new.dll",FALSE));
+    assert(!commitCalls && liveVersion == 1 && bindingVersion == 1 && running && installed && !mixedStarts && startType == 3);
+    assert(discarded == 1 && !retainedPhase && !failureHolds);
+    if (at == 1) assert(!stops && !backupCalls && !rolledBack && restoredBindings == 1);
+    else assert(backupCalls == 1 && rolledBack == 1 && restoredBindings == 1);
+    shutdownAt = 0;
+}
 int main(void) {
     int count = 0;
+    shutdown_case(1); shutdown_case(2); count += 2;
     for (int own = 0; own < 2; ++own) {
         for (int active = 0; active < 2; ++active) {
             for (int failure = 0; failure <= 8; ++failure) {

@@ -113,7 +113,21 @@ const agentHashCase = agentcore.slice(agentcore.indexOf('case MeshCommand_AgentH
 assert(agentHashCase.includes('agent->agentHash'), 'agent must report the actual executable hash');
 const normalHashResponse = agentHashCase.slice(agentHashCase.indexOf('// Update when necessary'));
 assert(normalHashResponse.indexOf('memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash') >= 0, 'ordinary negotiation must report the installed identity');
-assert(!agentHashCase.includes('agentupdatefailure'), 'agent must not report a failed-package hold');
+// A failed package is skipped only under the bounded retry policy: the agent names it
+// to a capable server before its truthful hash, and the server parses that status.
+const retrySuppression = extractFunction(agentcore, 'static void MeshServer_SendUpdateRetrySuppression(MeshAgentHostContainer *agent, long long now)');
+assert(agentHashCase.indexOf('MeshServer_SendUpdateRetrySuppression(agent,') >= 0 &&
+    agentHashCase.indexOf('MeshServer_SendUpdateRetrySuppression(agent,') < agentHashCase.indexOf('ILibWebClient_WebSocket_Send(WebStateObject'),
+    'failed-package status must precede the hash reply');
+assert(!agentHashCase.includes('agentupdatefailure'), 'the hash negotiation must not hold packages outside the retry policy');
+assert(retrySuppression.includes('!agent->serverSupportsUpdateFailureStatus'), 'failed-package status is sent only to servers that advertise it');
+assert(retrySuppression.includes('!MeshServer_UpdateRetry_Pending(agent, now, &state)) { return; }'), 'a package whose retry is due must not be suppressed');
+assert(retrySuppression.includes('"{\\"action\\":\\"agentupdatefailure\\",\\"hash\\":\\"%s\\"}"'), 'failed-package status must carry the package hash');
+const failureCase = server.slice(server.indexOf("case 'agentupdatefailure':"), server.indexOf("case 'agentupdatefailed':"));
+const failureHashPattern = failureCase.match(/\/\^\[0-9a-f\]\{96\}\$\/i/);
+assert(failureHashPattern, 'server must validate the failed-package hash');
+assert(/^[0-9a-f]{96}$/i.test('A1'.repeat(48)), 'the agent\'s uppercase hex hash must satisfy the server pattern');
+assert.strictEqual(Buffer.from('A1'.repeat(48), 'hex').toString('binary'), String.fromCharCode(0xA1).repeat(48), 'uppercase hex must decode to the binary package hash the server compares');
 assert(!agentHashCase.includes('forceUpdateHold') && !agentHashCase.includes('forceUpdatePending'), 'forced updates must not keep per-binary hold state');
 assert(agentHashCase.includes('memset(rcm->coreModuleHash, 0xFF, UTIL_SHA384_HASHSIZE)'), 'forced updates must report a hash no binary has');
 assert(!agentcore.includes('UpdateActivationFailureHash(agent') && !agentcore.includes('MeshServer_ConsumeForceFakeUpdateAttempt'), 'agent must not hold failed packages or consume force requests');

@@ -5515,6 +5515,231 @@ static void MeshServer_FailUpdateActivation(MeshAgentHostContainer *agent, int d
 }
 #endif
 
+#ifdef WIN32
+// Server-pushed update readiness and retry backoff (docs/CONFIGURATION.md).
+typedef struct MeshServer_UpdateRetryState
+{
+	int attempts;					// Lifecycle handoffs of this package so far
+	long long lastAttempt;			// Unix time of the latest handoff
+	char hashHex[UTIL_SHA384_HASHSIZE * 2 + 1];
+}MeshServer_UpdateRetryState;
+
+// Writes why the system is not ready for a service stop and binary swap and returns 1,
+// or returns 0. Each condition clears by itself.
+static int MeshServer_UpdateNotReady(MeshAgentHostContainer *agent, char *reason, size_t reasonLen)
+{
+	HANDLE installer;
+	int minUptime;
+	unsigned long long uptime;
+
+	if (GetSystemMetrics(SM_SHUTTINGDOWN) != 0)
+	{
+		sprintf_s(reason, reasonLen, "system shutdown in progress");
+		return 1;
+	}
+	installer = OpenMutexW(SYNCHRONIZE, FALSE, L"Global\\_MSIExecute");
+	if (installer != NULL)
+	{
+		CloseHandle(installer);
+		sprintf_s(reason, reasonLen, "Windows Installer transaction in progress");
+		return 1;
+	}
+	minUptime = ILibSimpleDataStore_GetInt(agent->masterDb, "updateMinUptimeSeconds", MESHAGENT_UPDATE_MIN_UPTIME_SECONDS);
+	uptime = GetTickCount64() / 1000;
+	if (minUptime > 0 && uptime < (unsigned long long)minUptime)
+	{
+		sprintf_s(reason, reasonLen, "system uptime %llus is below the %ds minimum", uptime, minUptime);
+		return 1;
+	}
+	return 0;
+}
+
+static void MeshServer_ReportUpdateDeferral(MeshAgentHostContainer *agent, const char *reason)
+{
+	char json[200];
+	int len;
+	ILIBLOGMESSAGEX("SelfUpdate -> update deferred: %s; current agent stays online", reason);
+	if (agent->controlChannel == NULL) { return; }
+	len = sprintf_s(json, sizeof(json), "{\"action\":\"log\",\"msg\":\"Agent update deferred: %s\"}", reason);
+	if (len > 0) { MeshServer_SendJSON(agent, agent->controlChannel, json, len); }
+}
+
+// Loads the attempt record. A malformed record is discarded.
+static int MeshServer_UpdateRetry_Load(MeshAgentHostContainer *agent, MeshServer_UpdateRetryState *state)
+{
+	char text[160];
+	char *cursor, *end;
+	long attempts;
+	size_t i;
+	int len = ILibSimpleDataStore_Get(agent->masterDb, MESHAGENT_UPDATE_RETRY_STATE_KEY, text, sizeof(text) - 1);
+
+	memset(state, 0, sizeof(*state));
+	if (len <= 0) { return 0; }
+	if (len < (int)sizeof(text) - 1)
+	{
+		text[len] = 0;
+		if (text[0] == '1' && text[1] == ' ' && isdigit((unsigned char)text[2]))
+		{
+			attempts = strtol(text + 2, &cursor, 10);
+			if (*cursor == ' ' && isdigit((unsigned char)cursor[1]) && attempts >= 1 && attempts <= 1000000)
+			{
+				state->lastAttempt = strtoll(cursor + 1, &end, 10);
+				if (*end == ' ' && strlen(end + 1) == UTIL_SHA384_HASHSIZE * 2)
+				{
+					for (i = 0; end[1 + i] != 0 && isxdigit((unsigned char)end[1 + i]); ++i) {}
+					if (i == UTIL_SHA384_HASHSIZE * 2)
+					{
+						state->attempts = (int)attempts;
+						memcpy(state->hashHex, end + 1, sizeof(state->hashHex));
+						return 1;
+					}
+				}
+			}
+		}
+	}
+	ILIBLOGMESSSAGE("SelfUpdate -> discarding malformed update retry record");
+	ILibSimpleDataStore_Delete(agent->masterDb, MESHAGENT_UPDATE_RETRY_STATE_KEY);
+	memset(state, 0, sizeof(*state));
+	return 0;
+}
+
+// Returns 1 while an automatic retry of the recorded package must still wait.
+static int MeshServer_UpdateRetry_Waiting(const MeshServer_UpdateRetryState *state, long long now)
+{
+	long long delay = MESHAGENT_UPDATE_RETRY_BASE_SECONDS;
+	int i;
+	for (i = 1; i < state->attempts && delay < MESHAGENT_UPDATE_RETRY_MAX_SECONDS; ++i) { delay *= 2; }
+	if (delay > MESHAGENT_UPDATE_RETRY_MAX_SECONDS) { delay = MESHAGENT_UPDATE_RETRY_MAX_SECONDS; }
+	// A handoff recorded further ahead than the longest wait means the clock moved back.
+	if (state->lastAttempt > now + MESHAGENT_UPDATE_RETRY_MAX_SECONDS) { return 0; }
+	return now < state->lastAttempt + delay;
+}
+
+// Returns 1 while the recorded package waits for an automatic retry. Forced and fake
+// updates do not wait.
+static int MeshServer_UpdateRetry_Pending(MeshAgentHostContainer *agent, long long now, MeshServer_UpdateRetryState *state)
+{
+	if (agent->forceUpdate != 0 || agent->fakeUpdate != 0) { return 0; }
+	return MeshServer_UpdateRetry_Load(agent, state) && MeshServer_UpdateRetry_Waiting(state, now);
+}
+
+// The running binary is the package last handed off, so that update completed.
+static void MeshServer_UpdateRetry_Reconcile(MeshAgentHostContainer *agent)
+{
+	MeshServer_UpdateRetryState state;
+	char hex[UTIL_SHA384_HASHSIZE * 2 + 1];
+	if (!MeshServer_UpdateRetry_Load(agent, &state)) { return; }
+	util_tohex(agent->agentHash, UTIL_SHA384_HASHSIZE, hex);
+	if (_stricmp(state.hashHex, hex) == 0)
+	{
+		ILIBLOGMESSAGEX("SelfUpdate -> running the package handed off after %d attempt(s); cleared update retry record", state.attempts);
+		ILibSimpleDataStore_Delete(agent->masterDb, MESHAGENT_UPDATE_RETRY_STATE_KEY);
+	}
+}
+
+static void MeshServer_UpdateRenegotiate_Check(void *data);
+
+// The server negotiates only on connect or on an operator request. One pending check per
+// agent reconnects once after the deferral or backoff of this connection clears.
+static void MeshServer_UpdateRenegotiate_Arm(MeshAgentHostContainer *agent)
+{
+	if (agent->controlChannel == NULL) { return; }
+	// A check still pending from an earlier connection now serves this one.
+	agent->updateRenegotiateChannel = agent->controlChannel;
+	if (agent->updateRenegotiateArmed != 0) { return; }
+	agent->updateRenegotiateArmed = 1;
+	ILibLifeTime_Add(ILibGetBaseTimer(agent->chain), &(agent->updateRenegotiateArmed), MESHAGENT_UPDATE_RENEGOTIATE_RECHECK_SECONDS, MeshServer_UpdateRenegotiate_Check, NULL);
+}
+
+static void MeshServer_UpdateRenegotiate_Check(void *data)
+{
+	MeshAgentHostContainer *agent = (MeshAgentHostContainer*)((char*)data - offsetof(MeshAgentHostContainer, updateRenegotiateArmed));
+	MeshServer_UpdateRetryState state;
+	char reason[96];
+
+	agent->updateRenegotiateArmed = 0;
+	// A new connection negotiates by itself, and a transfer in progress owns the outcome.
+	if (agent->controlChannel == NULL || agent->controlChannel != agent->updateRenegotiateChannel) { return; }
+	if (agent->disableUpdate != 0 || agent->updateDownloadActive != 0 || MeshServer_UpdateTransferBlocked(agent)) { return; }
+	if (MeshServer_UpdateNotReady(agent, reason, sizeof(reason)) ||
+		MeshServer_UpdateRetry_Pending(agent, (long long)time(NULL), &state))
+	{
+		MeshServer_UpdateRenegotiate_Arm(agent);
+		return;
+	}
+	ILIBLOGMESSSAGE("SelfUpdate -> update deferral cleared; reconnecting so the server negotiates again");
+	agent->controlChannelIntentionalDisconnect = 1;
+	ILibWebClient_Disconnect(agent->controlChannel);
+	agent->controlChannelIntentionalDisconnect = 0;
+}
+
+// Returns 1 and the reason when this negotiation must offer no transfer, 0 otherwise.
+static int MeshServer_UpdateNegotiationDeferred(MeshAgentHostContainer *agent, long long now, char *reason, size_t reasonLen)
+{
+	MeshServer_UpdateRetryState state;
+	if (MeshServer_UpdateNotReady(agent, reason, reasonLen))
+	{
+		MeshServer_UpdateRenegotiate_Arm(agent);
+		return 1;
+	}
+	// A server without failure status cannot skip one package, so offer it nothing until
+	// the recorded package may be retried. Capable servers are told the hash instead.
+	if (!agent->serverSupportsUpdateFailureStatus && MeshServer_UpdateRetry_Pending(agent, now, &state))
+	{
+		sprintf_s(reason, reasonLen, "retry of the last failed package is not due");
+		MeshServer_UpdateRenegotiate_Arm(agent);
+		return 1;
+	}
+	return 0;
+}
+
+// Sent before the hash reply: a capable server skips a package that is still backing
+// off. An operator's explicit update request still proceeds.
+static void MeshServer_SendUpdateRetrySuppression(MeshAgentHostContainer *agent, long long now)
+{
+	MeshServer_UpdateRetryState state;
+	char json[200];
+	int len;
+	if (!agent->serverSupportsUpdateFailureStatus || agent->controlChannel == NULL || !MeshServer_UpdateRetry_Pending(agent, now, &state)) { return; }
+	len = sprintf_s(json, sizeof(json), "{\"action\":\"agentupdatefailure\",\"hash\":\"%s\"}", state.hashHex);
+	if (len > 0) { MeshServer_SendJSON(agent, agent->controlChannel, json, len); }
+	MeshServer_UpdateRenegotiate_Arm(agent);
+}
+
+#if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
+// Last check before the lifecycle host stops this service. A readiness deferral is not
+// a failed attempt. A handoff is counted before it starts, so a host or agent that dies
+// mid-update has used its attempt.
+static int MeshServer_UpdateActivationAllowed(MeshAgentHostContainer *agent, const char *packageHash)
+{
+	MeshServer_UpdateRetryState state;
+	char hex[UTIL_SHA384_HASHSIZE * 2 + 1];
+	char text[160];
+	char reason[96];
+	int len;
+
+	if (MeshServer_UpdateNotReady(agent, reason, sizeof(reason)))
+	{
+		MeshServer_ReportUpdateDeferral(agent, reason);
+		MeshServer_UpdateRenegotiate_Arm(agent);
+		return 0;
+	}
+	util_tohex((char*)packageHash, UTIL_SHA384_HASHSIZE, hex);
+	if (!MeshServer_UpdateRetry_Load(agent, &state) || _stricmp(state.hashHex, hex) != 0)
+	{
+		memset(&state, 0, sizeof(state));
+		memcpy(state.hashHex, hex, sizeof(state.hashHex));
+	}
+	state.attempts += 1;
+	state.lastAttempt = (long long)time(NULL);
+	len = sprintf_s(text, sizeof(text), "1 %d %lld %s", state.attempts, state.lastAttempt, state.hashHex);
+	if (len > 0) { ILibSimpleDataStore_PutEx(agent->masterDb, MESHAGENT_UPDATE_RETRY_STATE_KEY, sizeof(MESHAGENT_UPDATE_RETRY_STATE_KEY) - 1, text, (size_t)len); }
+	ILIBLOGMESSAGEX("SelfUpdate -> readiness checks passed; activation attempt %d for this package", state.attempts);
+	return 1;
+}
+#endif
+#endif
+
 #if defined(WIN32) && defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
 typedef struct MeshServer_UpdateActivation
 {
@@ -5694,6 +5919,11 @@ void MeshServer_selfupdate_continue(MeshAgentHostContainer *agent)
 		}
 
 #if defined(MESHAGENT_ENABLE_RUNTIME_FEATURES)
+		if (!MeshServer_UpdateActivationAllowed(agent, packageHash))
+		{
+			MeshServer_FailUpdateActivation(agent, 1);
+			return;
+		}
 		ILIBLOGMESSAGEX("SelfUpdate -> Launching compatibility lifecycle update activation...");
 		if (MeshServer_StartUpdateActivation(agent, w_updatefile))
 		{
@@ -6485,6 +6715,9 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			// This is a request for the hash of the agent binary
 			// Built the response that includes our self hash
 			MeshCommand_BinaryPacket_CoreModule *rcm = (MeshCommand_BinaryPacket_CoreModule*)ILibScratchPad2;
+#ifdef WIN32
+			char deferralReason[96];
+#endif
 			rcm->command = htons(MeshCommand_AgentHash);						// MeshCommand_AgentHash (12), SHA384 hash of the agent executable
 			rcm->request = htons(requestid);									// Request id
 			if (agent->disableUpdate != 0)
@@ -6497,6 +6730,15 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 				// A downloaded package is being extracted or activated; offer no new transfer until it finishes.
 				memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE);
 			}
+#ifdef WIN32
+			else if (MeshServer_UpdateNegotiationDeferred(agent, (long long)time(NULL), deferralReason, sizeof(deferralReason)))
+			{
+				// Not ready for a service stop and binary swap, or a server that cannot skip one
+				// package would resend one still backing off. Offer no transfer, as above.
+				memset(rcm->coreModuleHash, 0, UTIL_SHA384_HASHSIZE);
+				ILIBLOGMESSAGEX("SelfUpdate -> update negotiation deferred: %s; current agent stays online", deferralReason);
+			}
+#endif
 			else if (agent->forceUpdate != 0 || agent->fakeUpdate != 0)
 			{
 				// Forced/fake update: a hash no binary has, for as long as the key is set.
@@ -6505,6 +6747,10 @@ void MeshServer_ProcessCommand(ILibWebClient_StateObject WebStateObject, MeshAge
 			}
 			else
 			{
+#ifdef WIN32
+				// Sent before the hash reply so a capable server skips a package still backing off.
+				MeshServer_SendUpdateRetrySuppression(agent, (long long)time(NULL));
+#endif
 				// Update when necessary
 				memcpy_s(rcm->coreModuleHash, sizeof(rcm->coreModuleHash), agent->agentHash, UTIL_SHA384_HASHSIZE);
 			}
@@ -7787,6 +8033,9 @@ void MeshServer_Connect(MeshAgentHostContainer *agent)
 	ILibSimpleDataStore_Delete(agent->masterDb, "UpdateActivationTargetHash");
 	agent->serverSupportsUpdateFailureStatus = 0;
 	agent->updateDownloadActive = 0;
+#ifdef WIN32
+	MeshServer_UpdateRetry_Reconcile(agent);
+#endif
 	agent->controlChannelDebug = ILibSimpleDataStore_Get(agent->masterDb, "controlChannelDebug", NULL, 0);
 	ILibDuktape_HECI_Debug = (ILibSimpleDataStore_Get(agent->masterDb, "heciDebug", NULL, 0) != 0);
 	agent->timerLogging = ILibSimpleDataStore_Get(agent->masterDb, "timerLogging", NULL, 0);

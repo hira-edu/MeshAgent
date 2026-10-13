@@ -223,6 +223,8 @@ typedef struct MeshAgentHostContainer
 	int updateUnzipPending;      // update-helper is still extracting the staged package on any platform
 #ifdef WIN32
 	void *updateActivation;	// Lifecycle host still applying a downloaded update, NULL when idle
+	int updateRenegotiateArmed;	// Recheck pending for a deferred or backed-off update negotiation
+	void *updateRenegotiateChannel;	// Control channel that recheck belongs to
 #endif
 	int controlChannelDebug;
 	void *coreTimeout;
@@ -327,6 +329,7 @@ remoteMouseRender:			If set, will always render the remote mouse cursor for KVM
 showModuleNames:			If set, will display the name of modules when they are loaded for the first time
 skipmaccheck:				If set, the agent will not change NodeID on local mac address changes.
 slaveKvmLog:				[Linux] If set, will enable logging inside the Child KVM Process.
+updateMinUptimeSeconds:		[Windows] Defer server-pushed updates until the system has been up this many seconds (default 0, off)
 WebProxy:					Explicit proxy configuration. Ambient proxy discovery is not used.
 *
 *
