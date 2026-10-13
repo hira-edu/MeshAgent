@@ -235,6 +235,14 @@ consumption, interrupted consumption, late activation completion, transfer
 ownership, and partial-write/flush/close failures. It requires Clang and runs
 with ASan/UBSan on POSIX; it never launches an updater or modifies a service.
 
+`python3 test/update_readiness_backoff_native.py` compiles the production
+Windows update readiness and retry-backoff functions against mutex, clock,
+datastore, timer and control-channel fakes. It covers each deferral reason, the
+per-package attempt record and its wait, malformed records, forced updates, the
+failed-package status for capable and older servers, and the single intentional
+reconnect after a deferral or wait clears. It requires Clang and runs
+with ASan/UBSan on POSIX.
+
 `python3 test/native_update_hash_portable.py` compiles the production Windows
 normalized-hash reader against OpenSSL. Its disposable fixtures cover raw
 files, signed PE32/PE32+ images, appended provisioning, malformed offsets,
