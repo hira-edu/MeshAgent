@@ -162,11 +162,11 @@ static BOOL resolve(ServiceUpdateTransaction* tx) {
     if (!publish(tx, SERVICE_JOURNAL_ROLLED_BACK)) return FALSE;
     ++discarded; ++deletedArtifacts; retainedPhase = 0; return TRUE;
 }
-/* failAt 20: the committed agent runs and its journal resolves, but recovery
+/* failAt 21: the committed agent runs and its journal resolves, but recovery
  * companions or firewall rules did not reconcile. */
 static BOOL reconcile(ServiceUpdateTransaction* tx, BOOL* companionsReconciled) {
     assert(tx->journalPhase == SERVICE_JOURNAL_COMMITTED && companionsReconciled);
-    *companionsReconciled = failAt != 20;
+    *companionsReconciled = failAt != 21;
     if (failAt == 15) return FALSE;
     running = 1; ++discarded; ++deletedArtifacts; retainedPhase = 0; return TRUE;
 }
@@ -253,7 +253,7 @@ static void run_case(int failure, int exists, int wasRunning, int originalStart,
     assert(result == (failure == 0));
     assert(mixedStarts == 0 && incumbentRepairs == 0 && failureHolds == 0);
     if (!failure) { assert(running && liveVersion == 3 && installed); return; }
-    if (failure == 20) { assert(running && liveVersion == 3 && bindingVersion == 3 && !rolledBack && !retainedPhase && deletedArtifacts); return; }
+    if (failure == 21) { assert(running && liveVersion == 3 && bindingVersion == 3 && !rolledBack && !retainedPhase && deletedArtifacts); return; }
     if (failure == 15) { assert(!running && liveVersion == 3 && bindingVersion == 3 && !rolledBack && retainedPhase == SERVICE_JOURNAL_COMMITTED && !deletedArtifacts); return; }
     if (failure == 17) { assert(running && liveVersion == 1 && retainedPhase == SERVICE_JOURNAL_BACKED_UP && !deletedArtifacts); return; }
     if (failure == 16) { assert(!running && liveVersion == 1 && !deletedArtifacts && retainedPhase == SERVICE_JOURNAL_PREPARED); return; }
@@ -318,7 +318,8 @@ int main(void) {
         run_case(9,1,1,3,own); ++count; /* Stop failure leaves incumbent intact. */
         run_case(11,1,1,3,own); ++count; /* Partially applied registration is rolled back. */
     }
-    for (int failure = 12; failure <= 20; ++failure) { run_case(failure,1,1,3,0); ++count; }
+    for (int failure = 12; failure <= 19; ++failure) { run_case(failure,1,1,3,0); ++count; }
+    run_case(21,1,1,3,0); ++count; /* Committed, but companions did not reconcile. */
     for (int failure = 0; failure <= 8; ++failure) {
         if (failure == 4 || failure == 3) continue;
         run_case(failure,0,0,2,0); ++count;

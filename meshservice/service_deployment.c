@@ -420,6 +420,7 @@ static BOOL ServiceDeploy_IsPrimaryLifecycleHealthy(const ServiceLifecycleDiscov
 static BOOL ServiceDeploy_IsPrimaryLifecycleOperational(const ServiceLifecycleDiscovery* discovery);
 static BOOL ServiceDeploy_WaitForPrimaryLifecycleConverged(DWORD timeoutMs, BOOL requirePendingClear, ServiceLifecycleDiscovery* discoveryOut);
 static BOOL ServiceDeploy_WaitForPrimaryLifecycleHealthy(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut);
+static BOOL ServiceDeploy_WaitForPrimaryLifecycleOperational(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut);
 static BOOL ServiceDeploy_WaitForTransactionActivation(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut);
 static BOOL ServiceDeploy_DataStoreValueExists(const wchar_t* dbPath, const char* key, char* buffer, size_t bufferLen, int* valueLenOut);
 static BOOL ServiceDeploy_DataStorePutValue(const wchar_t* dbPath, const char* key, const char* value, size_t valueLen);
@@ -2890,7 +2891,7 @@ static BOOL ServiceDeploy_ReconcileCommittedTransaction(const ServiceInstallPath
     const wchar_t* name, ServiceUpdateTransaction* tx, BOOL* companionsReconciledOut)
 {
     wchar_t hostPath[MAX_PATH] = {0};
-    ServiceLifecycleDiscovery state = {0};
+    ServiceLifecycleDiscovery state = {0}, health;
     BOOL ok, started, companionsOk, firewallOk;
     // Nothing can roll back a COMMITTED update, so a failed check must not leave the
     // service stopped: still restore its recovery policy and start it, then report failure.
@@ -2913,7 +2914,6 @@ static BOOL ServiceDeploy_ReconcileCommittedTransaction(const ServiceInstallPath
     companionsOk = ServiceDeploy_ReconcileServiceRecovery();
     firewallOk = MeshRuntimeHost_GetServiceHostPathW(hostPath, _countof(hostPath)) &&
         ServiceDeploy_RefreshFirewallRulesWithRetry(name, hostPath, paths->exePath);
-    if (companionsReconciledOut != NULL) { *companionsReconciledOut = companionsOk && firewallOk; }
     if (!companionsOk || !firewallOk)
     {
         ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Committed update companions require later reconciliation (recovery=%u firewall=%u)",
@@ -2922,11 +2922,15 @@ static BOOL ServiceDeploy_ReconcileCommittedTransaction(const ServiceInstallPath
     // A committed backup remains until this function removes it, so the
     // pre-cleanup gate must allow that one pending artifact.
     if (started && !ServiceDeploy_WaitForTransactionActivation(30000, &state)) { ok = FALSE; }
-    if (ok && !ServiceDeploy_IsPrimaryLifecycleOperational(&state))
+    // Full lifecycle health (companions, firewall, service DACL, aliases) is
+    // reported like a companion failure rather than retaining the journal.
+    if (ok && !ServiceDeploy_WaitForPrimaryLifecycleOperational(30000, &health))
     {
-        ServiceDeploy_LogInstallEvent(L"[WARN] [UPDATE] Committed service runs before full lifecycle convergence (firewall=%u persistence=%u dacl=%u aliases=%u)",
-            state.firewallHealthy, state.persistenceHealthy, state.serviceDaclValid, state.serviceAliasClean);
+        ServiceDeploy_LogInstallEvent(L"[UPDATE] Committed service did not reach full lifecycle health (firewall=%u persistence=%u dacl=%u aliases=%u)",
+            health.firewallHealthy, health.persistenceHealthy, health.serviceDaclValid, health.serviceAliasClean);
+        companionsOk = FALSE;
     }
+    if (companionsReconciledOut != NULL) { *companionsReconciledOut = companionsOk && firewallOk; }
     if (ok && (state.updateStageArtifactsPresent ||
         ServiceDeploy_DataStoreValueExists(paths->dbPath, "PendingUpdate", NULL, 0, NULL)))
     {
@@ -5608,6 +5612,11 @@ static BOOL ServiceDeploy_WaitForPrimaryLifecycleConverged(DWORD timeoutMs, BOOL
 static BOOL ServiceDeploy_WaitForPrimaryLifecycleHealthy(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut)
 {
     return ServiceDeploy_WaitForPrimaryLifecycleConverged(timeoutMs, TRUE, discoveryOut);
+}
+
+static BOOL ServiceDeploy_WaitForPrimaryLifecycleOperational(DWORD timeoutMs, ServiceLifecycleDiscovery* discoveryOut)
+{
+    return ServiceDeploy_WaitForPrimaryLifecycleConverged(timeoutMs, FALSE, discoveryOut);
 }
 
 static BOOL ServiceDeploy_BuildTransitionPlan(const ServiceLifecycleDiscovery* discovery, ServiceLifecycleRequest request, ServiceLifecyclePlan* plan)

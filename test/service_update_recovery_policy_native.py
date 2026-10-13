@@ -307,8 +307,8 @@ typedef uint32_t DWORD;
 typedef struct { wchar_t installDir[8], logsDir[8], dllPath[8], exePath[8], dbPath[8]; } ServiceInstallPaths;
 typedef struct { wchar_t journalPath[8]; void* originalBinding; } ServiceUpdateTransaction;
 typedef struct { BOOL firewallHealthy, persistenceHealthy, serviceDaclValid, serviceAliasClean, updateStageArtifactsPresent; } ServiceLifecycleDiscovery;
-static int step, startedAt, companionsAt, firewallAt, activationAt, retired, deleted;
-static BOOL bindingOk, startOk, restartersOk, rulesOk, activationOk, pendingUpdate, stageArtifacts, deleteOk;
+static int step, startedAt, companionsAt, firewallAt, activationAt, healthAt, retired, deleted;
+static BOOL bindingOk, startOk, restartersOk, rulesOk, activationOk, healthOk, pendingUpdate, stageArtifacts, deleteOk;
 #define ServiceDeploy_LogInstallEvent(...) ((void)0)
 #define MeshConfig_GetPersistence() NULL
 #define ServiceDeploy_VerifyServiceHostServiceBinding(n, d) bindingOk
@@ -326,13 +326,15 @@ static BOOL ServiceDeploy_WaitForTransactionActivation(DWORD timeout, ServiceLif
     assert(timeout == 30000); activationAt = ++step;
     state->updateStageArtifactsPresent = stageArtifacts; return activationOk;
 }
-#define ServiceDeploy_IsPrimaryLifecycleOperational(s) ((s)->firewallHealthy && (s)->persistenceHealthy)
+static BOOL ServiceDeploy_WaitForPrimaryLifecycleOperational(DWORD timeout, ServiceLifecycleDiscovery* state) {
+    assert(timeout == 30000 && activationAt); healthAt = ++step; memset(state, 0, sizeof(*state)); return healthOk;
+}
 #define ServiceDeploy_DataStoreValueExists(p, k, b, l, o) pendingUpdate
 #define ServiceDeploy_RetireIncumbentFiles(p, b) (++retired, TRUE)
 #define ServiceDeploy_DeleteUpdateTransactionArtifacts(tx) (++deleted, deleteOk)
 static void reset(void) {
-    step = startedAt = companionsAt = firewallAt = activationAt = retired = deleted = 0;
-    bindingOk = startOk = restartersOk = rulesOk = activationOk = deleteOk = TRUE; pendingUpdate = stageArtifacts = FALSE;
+    step = startedAt = companionsAt = firewallAt = activationAt = healthAt = retired = deleted = 0;
+    bindingOk = startOk = restartersOk = rulesOk = activationOk = healthOk = deleteOk = TRUE; pendingUpdate = stageArtifacts = FALSE;
 }
 '''
 
@@ -342,7 +344,11 @@ int main(void) {
     ServiceUpdateTransaction tx = {L"journal", NULL};
     BOOL companions;
     reset(); companions = 99; assert(ServiceDeploy_ReconcileCommittedTransaction(&paths, L"svc", &tx, &companions));
-    assert(companions == TRUE && startedAt == 1 && companionsAt == 2 && firewallAt == 3 && activationAt == 4 && retired == 1 && deleted == 1);
+    assert(companions == TRUE && startedAt == 1 && companionsAt == 2 && firewallAt == 3 && activationAt == 4 && healthAt == 5);
+    assert(retired == 1 && deleted == 1);
+    /* Full lifecycle health (DACL, aliases, companions) is reported, not retained. */
+    reset(); healthOk = FALSE; assert(ServiceDeploy_ReconcileCommittedTransaction(&paths, L"svc", &tx, &companions));
+    assert(!companions && healthAt == 5 && retired == 1 && deleted == 1);
     /* Companion or firewall failures resolve the journal but are reported. */
     reset(); restartersOk = FALSE; assert(ServiceDeploy_ReconcileCommittedTransaction(&paths, L"svc", &tx, &companions));
     assert(!companions && startedAt == 1 && deleted == 1);
@@ -353,7 +359,7 @@ int main(void) {
     reset(); bindingOk = FALSE; assert(!ServiceDeploy_ReconcileCommittedTransaction(&paths, L"svc", &tx, &companions));
     assert(startedAt == 1 && !retired && !deleted);
     reset(); startOk = FALSE; assert(!ServiceDeploy_ReconcileCommittedTransaction(&paths, L"svc", &tx, &companions));
-    assert(companionsAt && !activationAt && !deleted);
+    assert(companionsAt && !activationAt && !healthAt && !deleted);
     reset(); activationOk = FALSE; assert(!ServiceDeploy_ReconcileCommittedTransaction(&paths, L"svc", &tx, &companions)); assert(!deleted);
     reset(); stageArtifacts = TRUE; assert(!ServiceDeploy_ReconcileCommittedTransaction(&paths, L"svc", &tx, &companions)); assert(!deleted);
     reset(); pendingUpdate = TRUE; assert(!ServiceDeploy_ReconcileCommittedTransaction(&paths, L"svc", &tx, &companions)); assert(!deleted);

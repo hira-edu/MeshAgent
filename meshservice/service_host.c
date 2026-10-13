@@ -1622,10 +1622,9 @@ static BOOL ServiceHost_ApplyUpdateStartupDisposition(BOOL* stopStartupOut)
     {
         /* Nothing else would start the agent before the next boot. A phase
          * that may run retained starts now; the next start delegates again. */
-        DWORD error = GetLastError();
-        if (!retainedStartAllowed) { SetLastError(error); return FALSE; }
+        if (!retainedStartAllowed) { return FALSE; }
         ServiceHost_LogLine(L"[WARN] Interrupted update recovery could not be delegated (error=%lu); starting with the checkpoint retained",
-            (unsigned long)error);
+            (unsigned long)GetLastError());
         return TRUE;
     }
     *stopStartupOut = TRUE;

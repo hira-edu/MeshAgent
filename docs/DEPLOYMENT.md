@@ -347,9 +347,10 @@ failure actions and starts the service. It then reconciles the Task Scheduler
 and WMI companions and the firewall rules. Those COM calls have no timeout, so
 they never run before the start. The journal is deleted once the service runs
 the verified binding with no staged files or `PendingUpdate` marker. A
-companion or firewall failure still fails the install, repair, or update
-operation, but it does not retain the journal: a retained `COMMITTED` journal
-blocks every later update. After a committed update, cleanup removes the
+companion or firewall failure, or a service that does not reach full lifecycle
+health (including its service DACL and alias cleanup), still fails the
+install, repair, or update operation. It does not retain the journal: a
+retained `COMMITTED` journal blocks every later update. After a committed update, cleanup removes the
 verified old payload, its sidecars, and recovery-state file before deleting
 the old database. A companion EXE belongs to a DLL installation only when its
 embedded DLL exactly matches that installed DLL. Multiple matching companion

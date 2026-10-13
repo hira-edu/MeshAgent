@@ -88,7 +88,7 @@ assert(disposition.includes('if (record->phase == SERVICE_JOURNAL_ROLLED_BACK)')
     'a resolved checkpoint awaiting cleanup must not stop startup');
 const applyDisposition = extractFunction(serviceHost, 'static BOOL ServiceHost_ApplyUpdateStartupDisposition(');
 assert(applyDisposition.includes('ServiceDeploy_GetUpdateStartupDisposition(&disposition, &retainedStartAllowed)') &&
-    applyDisposition.includes('if (!retainedStartAllowed) { SetLastError(error); return FALSE; }') &&
+    applyDisposition.includes('if (!retainedStartAllowed) { return FALSE; }') &&
     applyDisposition.indexOf('*stopStartupOut = TRUE;\n    MeshRuntimeHost_ReleaseLifecycleHostW(&launch);') > 0,
     'a failed recovery delegation may start only a retained phase that allows it');
 const committed = extractFunction(deployment, 'static BOOL ServiceDeploy_ReconcileCommittedTransaction(');
@@ -96,8 +96,9 @@ assert(committed.indexOf('started = ServiceDeploy_StartServiceHostServiceAndWait
     committed.indexOf('started = ServiceDeploy_StartServiceHostServiceAndWait(name, 30000);') < committed.indexOf('ServiceDeploy_ReconcileServiceRecovery()') &&
     committed.indexOf('started = ServiceDeploy_StartServiceHostServiceAndWait(name, 30000);') < committed.indexOf('ServiceDeploy_RefreshFirewallRulesWithRetry(') &&
     committed.includes('ServiceDeploy_WaitForTransactionActivation(30000, &state)') &&
-    !committed.includes('ServiceDeploy_WaitForPrimaryLifecycleOperational('),
-    'committed reconciliation must start the agent before COM companion work and not retain the journal for companions');
+    committed.indexOf('ServiceDeploy_WaitForPrimaryLifecycleOperational(30000, &health)') > committed.indexOf('ServiceDeploy_RefreshFirewallRulesWithRetry(') &&
+    committed.indexOf('*companionsReconciledOut = companionsOk && firewallOk;') > committed.indexOf('ServiceDeploy_WaitForPrimaryLifecycleOperational(30000, &health)'),
+    'committed reconciliation must start the agent before COM companion work and report, not retain, companion and health failures');
 assert(!interruptedRecovery.includes('UpdateActivationFailureHold') &&
     interruptedRecovery.includes('ServiceDeploy_StartServiceHostServiceAndWait(serviceName, 30000)'),
     'interrupted recovery must record no update hold and must not fail for a missing activation target');
