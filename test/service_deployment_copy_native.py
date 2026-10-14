@@ -19,6 +19,7 @@ def extract(name):
         depth+=(masked[end]=='{')-(masked[end]=='}');end+=1
     return source[m.start():end]
 prelude=r'''
+#define _CRT_SECURE_NO_WARNINGS 1
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -47,7 +48,9 @@ typedef int BOOL;typedef uint32_t DWORD;typedef int HANDLE;
 #define OPEN_EXISTING 1
 #define MOVEFILE_REPLACE_EXISTING 1
 #define MOVEFILE_WRITE_THROUGH 8
+#ifndef _countof
 #define _countof(a) (sizeof(a)/sizeof(*(a)))
+#endif
 #define FAILED(x) ((x)<0)
 #define SUCCEEDED(x) ((x)>=0)
 static int StringCchCopyW(wchar_t* d,size_t n,const wchar_t* s){size_t k=wcslen(s);if(k>=n)return -1;memcpy(d,s,(k+1)*sizeof(wchar_t));return 0;}

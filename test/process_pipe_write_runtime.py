@@ -124,7 +124,9 @@ static void ILibQueue_EnQueue(void*q,void*v){Queue*a=q;Node*n=calloc(1,sizeof(No
 static void *ILibQueue_PeekQueue(void*q){Queue*a=q;return a->head?a->head->value:NULL;}
 static void *ILibQueue_DeQueue(void*q){Queue*a=q;Node*n=a->head;if(!n)return NULL;void*v=n->value;a->head=n->next;if(!a->head)a->tail=NULL;free(n);return v;}
 static void ILibQueue_Destroy(void*q){assert(ILibQueue_IsEmpty(q));assert(!((Queue*)q)->locked);free(q);}
+#ifndef _WIN32
 static void memcpy_s(void*d,size_t cap,const void*s,size_t n){assert(n<=cap);memcpy(d,s,n);}
+#endif
 static void deliver(const char*b,DWORD n){assert(deliveredLength+n<=sizeof(delivered));memcpy(delivered+deliveredLength,b,n);deliveredLength+=n;}
 static BOOL WriteFile(HANDLE h,char*b,DWORD n,DWORD*written,OVERLAPPED*ov){
  assert(h==(void*)7 && ov && ov->hEvent==(void*)9 && !heldOv);if(writeCalls<16)offsets[writeCalls]=ov->Offset;++writeCalls;
@@ -267,13 +269,18 @@ def main():
     retire = '\nstatic BOOL ILibChain_RetireCancelledIo(HANDLE h,OVERLAPPED*ov){DWORD n=0;CancelIoEx(h,ov);if(!ready)return FALSE;GetOverlappedResult(h,ov,&n,FALSE);return TRUE;}\n'
     source = PRELUDE+'#define ILibProcessPipe_MAX_QUEUED_WRITE_BYTES '+limit+'\n'+ALLOCATORS+retire+'\nstatic void ILibChain_AddWaitHandleEx(void*c,HANDLE h,int t,BOOL(*f)(void*,HANDLE,ILibWaitHandle_ErrorStatus,void*),void*u,char*m){assert(m && *m);ILibChain_AddWaitHandle(c,h,t,f,u);}\n'+'\n'.join(signature+';' for signature, _ in functions)+'\n'+'\n'.join(signature+'\n'+body for signature,body in functions)+'\n'+TESTS
     fixture = out/'write-runtime.c'; fixture.write_text(source)
-    binary = out/'write-runtime'
+    binary = out/('write-runtime.exe' if os.name=='nt' else 'write-runtime')
     compiler = shutil.which('clang') or shutil.which('cc')
     subprocess.run([compiler,'-std=c11','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer','-Werror','-Wall','-Wextra',str(fixture),'-o',str(binary)],check=True)
+    runtime_env = os.environ.copy()
+    if os.name == 'nt' and compiler:
+        runtimes = list(Path(compiler).parent.parent.glob('lib/clang/*/lib/windows/clang_rt.asan_dynamic-*.dll'))
+        if runtimes:
+            runtime_env['PATH'] = str(runtimes[0].parent) + os.pathsep + runtime_env.get('PATH', '')
     cases = ['cancel-delayed','off-thread-close','partial-order-eof','broken-reentrant','completion-close','completion-write','cancel-success-race','bad-count','sync-partial','event-failure','data-allocation-failure','io-allocation-failure','direct-cancel','direct-reentrant','sync-handle-refused','write-after-end','mixed-write-refused','queue-accounting','queue-limit','wait-failed-retired','wait-failed-pinned','direct-wait-failed']
     for case in cases:
-        leaks = '0' if sys.platform=='darwin' or case=='wait-failed-pinned' else '1'
-        result = subprocess.run([str(binary),case],capture_output=True,text=True,env={**os.environ,'ASAN_OPTIONS':'detect_leaks=' + leaks})
+        leaks = '0' if sys.platform in ('darwin','win32') or case=='wait-failed-pinned' else '1'
+        result = subprocess.run([str(binary),case],capture_output=True,text=True,env={**runtime_env,'ASAN_OPTIONS':'detect_leaks=' + leaks})
         (out/(case+'.log')).write_text('exit='+str(result.returncode)+'\n'+result.stdout+result.stderr)
         result.check_returncode(); assert result.stdout.strip()=='PASS'; print('PASS '+case)
     mingw = shutil.which('x86_64-w64-mingw32-gcc')

@@ -71,11 +71,11 @@ setTimeout(function(){
     console.log('CLIPBOARD '+JSON.stringify({failures:failures,completed:completed,errors:errors,launches:launches,kills:kills}));process.exit(failures.length?1:0);
 },250);
 '''
-script = script.replace('SOURCE', json.dumps(prefix+(root/'modules/clipboard.js').read_text()))
+script = script.replace('SOURCE', json.dumps(prefix+(root/'modules/clipboard.js').read_text(encoding='utf-8')))
 with tempfile.TemporaryDirectory(prefix='mesh-clipboard-agent-') as directory:
     probe=Path(directory)/'probe.js'
-    probe.write_text(script)
-    result=subprocess.run([str(args.agent.resolve()),str(probe)],cwd=directory,capture_output=True,text=True,timeout=20)
+    probe.write_text(script, encoding='utf-8')
+    result=subprocess.run([str(args.agent.resolve()),str(probe)],cwd=directory,capture_output=True,text=True,encoding='utf-8',timeout=20)
     line=next((line for line in result.stdout.splitlines() if line.startswith('CLIPBOARD ')),None)
     assert result.returncode==0 and line is not None, result
     report=json.loads(line[len('CLIPBOARD '):])

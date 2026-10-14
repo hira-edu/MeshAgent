@@ -100,11 +100,22 @@ function runOverlay(customSource, options) {
         confirm() { return true; },
         btoa(value) { return Buffer.from(value, 'binary').toString('base64'); },
         setInterval(fn) { intervalCallbacks.push(fn); return intervalCallbacks.length; },
+        clearInterval() { },
         setTimeout(fn) { return 1; },
         clearTimeout() { }
     };
     window.window = window;
-    const sandbox = { window, document, URL, Buffer, console };
+    const sandbox = {
+        window,
+        document,
+        URL,
+        Buffer,
+        console,
+        setInterval: window.setInterval,
+        clearInterval: window.clearInterval,
+        setTimeout: window.setTimeout,
+        clearTimeout: window.clearTimeout
+    };
     vm.runInNewContext(customSource, sandbox, { filename: 'custom.js' });
     for (const callback of intervalCallbacks) callback();
     return { window, registry, sends };

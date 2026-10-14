@@ -159,8 +159,14 @@ def main():
         c = directory/'probe.c'
         c.write_text(PRELUDE + SESSION + extract(clipboard,'MeshClipboard_SessionMatches') + extract(clipboard,'MeshClipboard_Text') + extract(policy,'ILibProcessPipe_IsApprovedClipboardBridgeLaunchA') + MAIN)
         compiler = os.environ.get('CC',shutil.which('clang') or 'cc')
-        subprocess.run([compiler,'-std=c11','-g','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',str(c),'-o',str(directory/'probe')],check=True)
-        subprocess.run([str(directory/'probe')],check=True)
+        probe = directory/('probe.exe' if os.name=='nt' else 'probe')
+        subprocess.run([compiler,'-std=c11','-g','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',str(c),'-o',str(probe)],check=True)
+        runtime_env = os.environ.copy()
+        if os.name == 'nt' and shutil.which(compiler):
+            runtimes = list(Path(shutil.which(compiler)).parent.parent.glob('lib/clang/*/lib/windows/clang_rt.asan_dynamic-*.dll'))
+            if runtimes:
+                runtime_env['PATH'] = str(runtimes[0].parent) + os.pathsep + runtime_env.get('PATH', '')
+        subprocess.run([str(probe)],check=True,env=runtime_env)
         cross = shutil.which('x86_64-w64-mingw32-gcc')
         if cross:
             c.write_text('''#include <windows.h>

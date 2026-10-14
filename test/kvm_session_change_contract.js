@@ -103,14 +103,16 @@ function main() {
             serviceHostSource.includes('#include "service_integration.h"') &&
             serviceHostControlBody.includes('ServiceIntegration_HandleSessionChange(dwEventType, sessionId);'),
         serviceHostControlHandlerDefersFinalStopToServiceMain:
-            serviceHostControlBody.includes('ServiceHost_RequestAgentStop();') &&
+            serviceHostControlBody.includes('ServiceHost_BeginStopRequest();') &&
+            serviceHostSource.includes('(void)ServiceHost_RequestAgentStop(g_ServiceHostAgent);') &&
             serviceHostControlBody.includes('Stop requested asynchronously; waiting for MeshAgent_Start to return') &&
             serviceHostControlBody.includes('Shutdown requested asynchronously; waiting for MeshAgent_Start to return') &&
             !serviceHostControlBody.includes('MeshAgent_Stop(g_ServiceHostAgent);') &&
             !serviceHostControlBody.includes('g_ServiceHostAgent = NULL;') &&
             !serviceHostControlBody.includes('g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;') &&
             serviceHostSource.includes('ILibChain_RunOnMicrostackThreadEx3(agent->chain, ServiceHost_StopAgentOnChain, NULL, NULL);') &&
-            serviceHostSource.includes('int startResult = MeshAgent_Start(g_ServiceHostAgent, startArgc, startArgv);') &&
+            serviceHostSource.includes('int startResult = MeshAgent_Start(serviceAgent, startArgc, startArgv);') &&
+            serviceHostSource.includes('ServiceHost_FinalizeAgentRun(serviceAgent, startResult);') &&
             serviceHostSource.includes('g_ServiceHostAgent = NULL;') &&
             serviceHostSource.includes('g_ServiceHostStatus.dwCurrentState = SERVICE_STOPPED;'),
         relayDefinesSessionChangeDispatcher: kvmSource.includes('static void kvm_relay_handle_session_change_for_context(KvmRelayContext* ctx, DWORD eventType, DWORD sessionId)'),

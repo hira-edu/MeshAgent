@@ -9103,7 +9103,6 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	duk_context *tmpCtx = ILibDuktape_ScriptContainer_InitializeJavaScriptEngineEx(0, 0, agentHost->chain, NULL, NULL, agentHost->exePath, NULL, NULL, NULL);
 	duk_peval_string_noresult(tmpCtx, "require('linux-pathfix')();");
 	int msnlen;
-	char *tmpString;
 
 	agentHost->platformType = MeshAgent_Posix_PlatformTypes_UNKNOWN;
 	agentHost->JSRunningAsService = 0;
@@ -9164,6 +9163,7 @@ int MeshAgent_AgentMode(MeshAgentHostContainer *agentHost, int paramLen, char **
 	agentHost->platformType = MeshAgent_Posix_PlatformTypes_WINDOWS;
 	agentHost->JSRunningAsService = agentHost->serviceReserved != 0;
 #else
+	char *tmpString;
 	duk_push_string(tmpCtx, agentHost->meshServiceName);
 	duk_json_encode(tmpCtx, -1);
 	duk_push_sprintf(tmpCtx, "require('service-manager').manager.getService(%s).isMe();", duk_get_string(tmpCtx, -1));

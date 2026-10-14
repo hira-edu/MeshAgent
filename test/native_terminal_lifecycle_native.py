@@ -89,6 +89,7 @@ static void log_event(const WCHAR* format, ...) { (void)format; }
 #define ServiceDeploy_EnsureLoggingDefaults() ((void)0)
 #define ServiceDeploy_SetInstallerLogPathToTemp(p) ((void)0)
 #define ServiceDeploy_LogInstallEvent log_event
+#define MeshDiagnosticLog_GetPathW(p, c) FALSE
 '''
 
 cases = r'''

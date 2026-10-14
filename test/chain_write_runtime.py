@@ -82,12 +82,18 @@ def main():
     source=(ROOT/'microstack/ILibParsers.c').read_text()
     functions=[extract(source,n) for n in ['ILibChain_RetireCancelledIo','ILibChain_WriteEx_GetOffset','ILibChain_WriteEx_SetOffset','ILibChain_WriteEx_Sink','ILibChain_WriteEx2']]
     fixture=out/'chain-write.c';fixture.write_text(PRELUDE+EXTRA+'\n'+'\n'.join(s+';' for s,_ in functions)+'\n'+'\n'.join(s+'\n'+b for s,b in functions)+TEST)
-    binary=out/'chain-write'
-    subprocess.run([shutil.which('clang') or 'cc','-std=c11','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(fixture),'-o',str(binary)],check=True)
+    binary=out/('chain-write.exe' if os.name=='nt' else 'chain-write')
+    compiler=shutil.which('clang') or 'cc'
+    subprocess.run([compiler,'-std=c11','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(fixture),'-o',str(binary)],check=True)
+    runtime_env=os.environ.copy()
+    if os.name=='nt' and shutil.which(compiler):
+        runtimes=list(Path(shutil.which(compiler)).parent.parent.glob('lib/clang/*/lib/windows/clang_rt.asan_dynamic-*.dll'))
+        if runtimes:
+            runtime_env['PATH']=str(runtimes[0].parent)+os.pathsep+runtime_env.get('PATH','')
     for case in ['sync-partial','async-partial','partial-then-error','partial-then-sync-error','offset-sync-partial','offset-async-partial','wait-failed-retired','wait-failed-pinned']:
         # The pinned case deliberately leaks storage the kernel might still own.
-        leaks='0' if sys.platform=='darwin' or case=='wait-failed-pinned' else '1'
-        result=subprocess.run([str(binary),case],capture_output=True,text=True,env={**os.environ,'ASAN_OPTIONS':'detect_leaks='+leaks})
+        leaks='0' if sys.platform in ('darwin','win32') or case=='wait-failed-pinned' else '1'
+        result=subprocess.run([str(binary),case],capture_output=True,text=True,env={**runtime_env,'ASAN_OPTIONS':'detect_leaks='+leaks})
         (out/(case+'.log')).write_text(result.stdout+result.stderr);result.check_returncode();print('PASS chain writer '+case)
     cross=shutil.which('x86_64-w64-mingw32-gcc')
     if cross:

@@ -30,7 +30,7 @@ function parseArgs(argv) {
 }
 
 const root = path.resolve(__dirname, '..');
-function read(relPath) { return fs.readFileSync(path.join(root, relPath), 'utf8'); }
+function read(relPath) { return fs.readFileSync(path.join(root, relPath), 'utf8').replace(/\r\n?/g, '\n'); }
 
 // Returns the brace-matched body of the first function whose signature contains `marker`.
 function functionBody(source, marker) {

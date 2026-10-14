@@ -79,7 +79,7 @@ static BOOL ServiceLegacyHost_PermissionsSupported(PSECURITY_DESCRIPTOR descript
                 INHERIT_ONLY_ACE | INHERITED_ACE)) ||
             ace->Header.AceSize < FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) + 8) { return FALSE; }
         sid = (PSID)&ace->SidStart;
-        if (!IsValidSid(sid) || GetLengthSid(sid) > ace->Header.AceSize - FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart)) { return FALSE; }
+        if (!IsValidSid(sid) || GetLengthSid(sid) > (DWORD)(ace->Header.AceSize - FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart))) { return FALSE; }
         system = IsWellKnownSid(sid, WinLocalSystemSid);
         administrators = IsWellKnownSid(sid, WinBuiltinAdministratorsSid);
         mask = ace->Mask;

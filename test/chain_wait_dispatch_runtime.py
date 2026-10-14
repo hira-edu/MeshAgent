@@ -87,11 +87,17 @@ def main():
     functions = [extract(source, name) for name in ['ILibChain_RemoveWaitHandle_APC', 'ILibChain_DispatchWaitHandleError']]
     fixture = out/'dispatch.c'
     fixture.write_text(PRELUDE+'\n'.join(s+';' for s, _ in functions)+'\n'+'\n'.join(s+'\n'+b for s, b in functions)+TEST)
-    binary = out/'dispatch'
+    binary = out/('dispatch.exe' if os.name=='nt' else 'dispatch')
     compiler = shutil.which('clang') or shutil.which('cc')
     subprocess.run([compiler,'-std=c11','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer','-Werror','-Wall','-Wextra',str(fixture),'-o',str(binary)], check=True)
+    runtime_env = os.environ.copy()
+    if os.name == 'nt' and compiler:
+        from pathlib import Path
+        runtimes = list(Path(compiler).parent.parent.glob('lib/clang/*/lib/windows/clang_rt.asan_dynamic-*.dll'))
+        if runtimes:
+            runtime_env['PATH'] = str(runtimes[0].parent) + os.pathsep + runtime_env.get('PATH', '')
     for case in CASES:
-        result = subprocess.run([str(binary), case], capture_output=True, text=True, env={**os.environ, 'ASAN_OPTIONS': 'detect_leaks='+('0' if sys.platform=='darwin' else '1')})
+        result = subprocess.run([str(binary), case], capture_output=True, text=True, env={**runtime_env, 'ASAN_OPTIONS': 'detect_leaks='+('0' if sys.platform in ('darwin','win32') else '1')})
         (out/(case+'.log')).write_text('exit='+str(result.returncode)+'\n'+result.stdout+result.stderr)
         result.check_returncode(); assert result.stdout.strip() == 'PASS'; print('PASS chain wait dispatch '+case)
 
