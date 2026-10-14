@@ -1151,7 +1151,11 @@
     <ClCompile Include="firewall.cpp" />
     <ClCompile Include="ServiceMain.c" />
     <ClInclude Include="clipboard_bridge.h" />
-    <ClCompile Include="runtime_host_contract.c" />
+    <ClInclude Include="audio_bridge.h" />
+    <ClCompile Include="runtime_host_contract.c">
+      <!-- audio_bridge.h uses the libopus public API (<opus.h>). -->
+      <AdditionalIncludeDirectories>..\opus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
     <ClCompile Include="runtime_command.c" />
     <ClCompile Include="runtime_components.c">
       <ExcludedFromBuild>true</ExcludedFromBuild>
@@ -1264,6 +1268,774 @@
     <ClInclude Include="runtime_state.h" />
     <ClInclude Include="service_integration.h" />
     <ClInclude Include="service_utils.h" />
+  </ItemGroup>
+  <PropertyGroup Label="MeshAgentOpus">
+    <!--
+      libopus 1.5.2 encoder, vendored under ..\opus (..\opus\config.h records the
+      upstream release, the source subset and the float/SIMD configuration). It is
+      compiled in every configuration because runtime_host_contract.c, which hosts
+      the audio bridge, is. Include paths and defines are set on the libopus items
+      only, so its internal headers (arch.h, main.h, structs.h, ...) never shadow
+      agent headers. The x86 SIMD sources pick SSE4.1 at run time and are excluded
+      from ARM64, which builds the portable C code. The /w4 options move the same
+      conversion warnings to level 4 that upstream's MSVC build moves.
+    -->
+    <MeshAgentOpusIncludeDirectories>..\opus;..\opus\include;..\opus\celt;..\opus\silk;..\opus\silk\float</MeshAgentOpusIncludeDirectories>
+    <MeshAgentOpusPreprocessorDefinitions>HAVE_CONFIG_H;_CRT_SECURE_NO_WARNINGS</MeshAgentOpusPreprocessorDefinitions>
+    <MeshAgentOpusAdditionalOptions>/w44244 /w44305 /w44267</MeshAgentOpusAdditionalOptions>
+  </PropertyGroup>
+  <ItemGroup Label="MeshAgentOpus">
+    <ClCompile Include="..\opus\src\opus.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\src\opus_decoder.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\src\opus_encoder.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\src\extensions.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\src\repacketizer.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\src\analysis.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\src\mlp.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\src\mlp_data.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\bands.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\celt.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\celt_encoder.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\celt_decoder.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\cwrs.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\entcode.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\entdec.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\entenc.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\kiss_fft.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\laplace.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\mathops.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\mdct.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\modes.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\pitch.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\celt_lpc.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\quant_bands.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\rate.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\vq.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\CNG.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\code_signs.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\init_decoder.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\decode_core.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\decode_frame.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\decode_parameters.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\decode_indices.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\decode_pulses.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\decoder_set_fs.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\dec_API.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\enc_API.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\encode_indices.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\encode_pulses.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\gain_quant.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\interpolate.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\LP_variable_cutoff.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\NLSF_decode.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\NSQ.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\NSQ_del_dec.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\PLC.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\shell_coder.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\tables_gain.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\tables_LTP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\tables_NLSF_CB_NB_MB.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\tables_NLSF_CB_WB.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\tables_other.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\tables_pitch_lag.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\tables_pulses_per_block.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\VAD.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\control_audio_bandwidth.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\quant_LTP_gains.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\VQ_WMat_EC.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\HP_variable_cutoff.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\NLSF_encode.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\NLSF_VQ.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\NLSF_unpack.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\NLSF_del_dec_quant.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\process_NLSFs.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\stereo_LR_to_MS.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\stereo_MS_to_LR.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\check_control_input.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\control_SNR.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\init_encoder.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\control_codec.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\A2NLSF.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\ana_filt_bank_1.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\biquad_alt.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\bwexpander_32.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\bwexpander.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\decode_pitch.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\inner_prod_aligned.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\lin2log.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\log2lin.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\LPC_analysis_filter.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\LPC_inv_pred_gain.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\table_LSF_cos.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\NLSF2A.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\NLSF_stabilize.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\NLSF_VQ_weights_laroia.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\pitch_est_tables.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\resampler.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\resampler_down2_3.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\resampler_down2.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\resampler_private_AR2.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\resampler_private_down_FIR.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\resampler_private_IIR_FIR.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\resampler_private_up2_HQ.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\resampler_rom.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\sigm_Q15.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\sort.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\sum_sqr_shift.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\stereo_decode_pred.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\stereo_encode_pred.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\stereo_find_predictor.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\stereo_quant_pred.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\LPC_fit.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\apply_sine_window_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\corrMatrix_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\encode_frame_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\find_LPC_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\find_LTP_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\find_pitch_lags_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\find_pred_coefs_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\LPC_analysis_filter_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\LTP_analysis_filter_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\LTP_scale_ctrl_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\noise_shape_analysis_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\process_gains_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\residual_energy_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\warped_autocorrelation_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\wrappers_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\autocorrelation_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\burg_modified_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\bwexpander_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\energy_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\inner_product_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\k2a_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\pitch_analysis_core_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\scale_copy_vector_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\scale_vector_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\schur_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\float\sort_FLP.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\x86\x86cpu.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+      <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\x86\x86_silk_map.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+      <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\x86\pitch_sse.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+      <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\opus\celt\x86\vq_sse2.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+      <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\x86\NSQ_sse4_1.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+      <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\x86\NSQ_del_dec_sse4_1.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+      <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\x86\VAD_sse4_1.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+      <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\opus\silk\x86\VQ_WMat_EC_sse4_1.c">
+      <AdditionalIncludeDirectories>$(MeshAgentOpusIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(MeshAgentOpusPreprocessorDefinitions);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>$(MeshAgentOpusAdditionalOptions) %(AdditionalOptions)</AdditionalOptions>
+      <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClInclude Include="..\opus\celt\_kiss_fft_guts.h" />
+    <ClInclude Include="..\opus\celt\arch.h" />
+    <ClInclude Include="..\opus\celt\bands.h" />
+    <ClInclude Include="..\opus\celt\celt.h" />
+    <ClInclude Include="..\opus\celt\celt_lpc.h" />
+    <ClInclude Include="..\opus\celt\cpu_support.h" />
+    <ClInclude Include="..\opus\celt\cwrs.h" />
+    <ClInclude Include="..\opus\celt\ecintrin.h" />
+    <ClInclude Include="..\opus\celt\entcode.h" />
+    <ClInclude Include="..\opus\celt\entdec.h" />
+    <ClInclude Include="..\opus\celt\entenc.h" />
+    <ClInclude Include="..\opus\celt\float_cast.h" />
+    <ClInclude Include="..\opus\celt\kiss_fft.h" />
+    <ClInclude Include="..\opus\celt\laplace.h" />
+    <ClInclude Include="..\opus\celt\mathops.h" />
+    <ClInclude Include="..\opus\celt\mdct.h" />
+    <ClInclude Include="..\opus\celt\mfrngcod.h" />
+    <ClInclude Include="..\opus\celt\modes.h" />
+    <ClInclude Include="..\opus\celt\os_support.h" />
+    <ClInclude Include="..\opus\celt\pitch.h" />
+    <ClInclude Include="..\opus\celt\quant_bands.h" />
+    <ClInclude Include="..\opus\celt\rate.h" />
+    <ClInclude Include="..\opus\celt\stack_alloc.h" />
+    <ClInclude Include="..\opus\celt\static_modes_float.h" />
+    <ClInclude Include="..\opus\celt\vq.h" />
+    <ClInclude Include="..\opus\celt\x86\celt_lpc_sse.h" />
+    <ClInclude Include="..\opus\celt\x86\pitch_sse.h" />
+    <ClInclude Include="..\opus\celt\x86\vq_sse.h" />
+    <ClInclude Include="..\opus\celt\x86\x86cpu.h" />
+    <ClInclude Include="..\opus\config.h" />
+    <ClInclude Include="..\opus\include\opus.h" />
+    <ClInclude Include="..\opus\include\opus_custom.h" />
+    <ClInclude Include="..\opus\include\opus_defines.h" />
+    <ClInclude Include="..\opus\include\opus_types.h" />
+    <ClInclude Include="..\opus\silk\API.h" />
+    <ClInclude Include="..\opus\silk\Inlines.h" />
+    <ClInclude Include="..\opus\silk\MacroCount.h" />
+    <ClInclude Include="..\opus\silk\MacroDebug.h" />
+    <ClInclude Include="..\opus\silk\NSQ.h" />
+    <ClInclude Include="..\opus\silk\PLC.h" />
+    <ClInclude Include="..\opus\silk\SigProc_FIX.h" />
+    <ClInclude Include="..\opus\silk\control.h" />
+    <ClInclude Include="..\opus\silk\debug.h" />
+    <ClInclude Include="..\opus\silk\define.h" />
+    <ClInclude Include="..\opus\silk\errors.h" />
+    <ClInclude Include="..\opus\silk\float\SigProc_FLP.h" />
+    <ClInclude Include="..\opus\silk\float\main_FLP.h" />
+    <ClInclude Include="..\opus\silk\float\structs_FLP.h" />
+    <ClInclude Include="..\opus\silk\macros.h" />
+    <ClInclude Include="..\opus\silk\main.h" />
+    <ClInclude Include="..\opus\silk\pitch_est_defines.h" />
+    <ClInclude Include="..\opus\silk\resampler_private.h" />
+    <ClInclude Include="..\opus\silk\resampler_rom.h" />
+    <ClInclude Include="..\opus\silk\resampler_structs.h" />
+    <ClInclude Include="..\opus\silk\structs.h" />
+    <ClInclude Include="..\opus\silk\tables.h" />
+    <ClInclude Include="..\opus\silk\tuning_parameters.h" />
+    <ClInclude Include="..\opus\silk\typedef.h" />
+    <ClInclude Include="..\opus\silk\x86\SigProc_FIX_sse.h" />
+    <ClInclude Include="..\opus\silk\x86\main_sse.h" />
+    <ClInclude Include="..\opus\src\analysis.h" />
+    <ClInclude Include="..\opus\src\mlp.h" />
+    <ClInclude Include="..\opus\src\opus_private.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="$(ProjectDir)MeshAgent.MSBuild.targets" Condition="Exists('$(ProjectDir)MeshAgent.MSBuild.targets')" />

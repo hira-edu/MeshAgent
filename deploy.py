@@ -249,6 +249,11 @@ CORE_ARTIFACTS = {
         "remote_relative_path": "meshdesktopmultiplex.js",
         "publish_targets": ("module-root",),
     },
+    "meshrelay.js": {
+        "local_path": "../MeshCentral/meshrelay.js",
+        "remote_relative_path": "meshrelay.js",
+        "publish_targets": ("module-root",),
+    },
     "macosinstaller.js": {
         "local_path": "../MeshCentral/macosinstaller.js",
         "remote_relative_path": "macosinstaller.js",
@@ -349,6 +354,21 @@ CORE_ARTIFACTS = {
         "remote_relative_path": "scripts/agent-desktop-0.0.2-min.js",
         "publish_targets": ("module-public", "web-public"),
     },
+    "public/scripts/agent-desktop-audio-0.0.1.js": {
+        "local_path": "../MeshCentral/public/scripts/agent-desktop-audio-0.0.1.js",
+        "remote_relative_path": "scripts/agent-desktop-audio-0.0.1.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/opus-decoder-0.7.11.min.js": {
+        "local_path": "../MeshCentral/public/scripts/opus-decoder-0.7.11.min.js",
+        "remote_relative_path": "scripts/opus-decoder-0.7.11.min.js",
+        "publish_targets": ("module-public", "web-public"),
+    },
+    "public/scripts/opus-decoder-0.7.11.LICENSE.txt": {
+        "local_path": "../MeshCentral/public/scripts/opus-decoder-0.7.11.LICENSE.txt",
+        "remote_relative_path": "scripts/opus-decoder-0.7.11.LICENSE.txt",
+        "publish_targets": ("module-public", "web-public"),
+    },
     "plugins/nativeruntime/README.md": {
         "local_path": "../MeshCentral/plugins/nativeruntime/README.md",
         "remote_relative_path": "nativeruntime/README.md",
@@ -371,7 +391,7 @@ CORE_ARTIFACTS = {
     },
 }
 
-for _core_module in ("clipboard", "process-manager", "service-manager", "user-sessions", "win-registry"):
+for _core_module in ("clipboard", "desktop-audio", "process-manager", "service-manager", "user-sessions", "win-registry"):
     for _core_folder, _core_suffix in (("modules_meshcore", ".js"), ("modules_meshcore_min", ".js"), ("modules_meshcore_min", ".min.js")):
         _core_relative = f"{_core_folder}/{_core_module}{_core_suffix}"
         CORE_ARTIFACTS[_core_relative] = {

@@ -3462,3 +3462,18 @@ void CALLBACK MeshClipboardBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLi
     // The parent receives errors as operation status or process exit; never log clipboard text.
     ExitProcess(error);
 }
+
+#include "audio_bridge.h"
+
+void CALLBACK MeshAudioBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
+{
+    wchar_t tail[4096] = {0};
+    DWORD error;
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(nCmdShow);
+    if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_AUDIO_BRIDGE_W, lpCmdLine, tail, _countof(tail)))
+    { ExitProcess(ERROR_INVALID_PARAMETER); }
+    error = MeshAudio_Run(tail, hinstDLL);
+    // Errors reach the parent as a STATUS packet and the process exit code; never log audio content.
+    ExitProcess(error);
+}

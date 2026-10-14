@@ -221,6 +221,37 @@ module and both core variants must be updated together. An ordinary elevated
 administrator is expected to fail closed at `WTSQueryUserToken` with error 1314;
 the cross-session integration check must run through the service identity.
 
+`node test/desktop_audio_bridge_contract.js` is the source-only gate for the
+native desktop-audio loopback helper (`MeshAudioBridgeW`). It asserts the helper
+is registered on the same runtime-host surface as the clipboard bridge (export
+declaration, `meshservice/audio_bridge.h` include, both architecture `.def`
+files, and the entry-name constants), that `microstack/ILibProcessPipe.c` defines
+and consults `ILibProcessPipe_IsApprovedAudioBridgeLaunchA` for only the
+agent-reachable `local`/`tsid=` launch forms, that the packet framing constants
+and the CONFIG payload match the shared audio spec, that the capture path is
+WASAPI shared-mode loopback with libopus and an `IMMNotificationClient`
+default-device re-init, that the broker/user split carries a kill-on-close job
+object, and that the helper never writes audio to disk or logs it. It also guards
+that `meshcore/KVM/**`, `meshcore/agentcore.c`, `meshcore/meshdefines.h` and
+`meshservice/ServiceMain.c` remain free of audio-helper edits. The new export is
+also covered by `service_host_exports_contract.js` and
+`runtime_host_all_helpers_migration_contract.js`. After a Windows package build,
+`node test/desktop_audio_bridge_runtime.js <ServiceDll> <evidence-dir>` launches
+the built DLL in `local` mode on an authorized interactive desktop, parses the
+stdout packet stream, and validates the CONFIG handshake, header invariants,
+AUDIO/SILENCE cadence and a clean shutdown on stdin EOF; captured audio is parsed
+for structure only and discarded. It skips cleanly on non-Windows hosts.
+
+The agent-side `desktop-audio` module is covered by
+`node test/desktop_audio_module_contract.js`, a source-only contract that checks
+the module launches `MeshAudioBridgeW tsid=<sessionId>` through the system
+rundll32, parses and validates the framed packet stream, refcounts one helper per
+tsid, enforces the global helper cap and the failed-start backoff, and stays fail
+closed on malformed frames; and by `node test/desktop_audio_module_runtime.js`,
+which runs the module under a Node `vm` with injected child processes, pipes and
+timers to exercise packet delivery, status and close events, backpressure drops
+and helper teardown on any platform without launching a Windows process.
+
 `python test/connection_failure_telemetry_native.py` runs the production receive
 and diagnostic functions against disposable Windows loopback TCP sockets. It
 checks reset-versus-EOF classification, quiet successful/would-block reads,

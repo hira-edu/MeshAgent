@@ -143,6 +143,30 @@ const tests = {
         assert(closedFds.indexOf(9) >= 0, 'descriptor closed after the late header write');
         assert(mux.recordingFile == null, 'no recording attached after late header write');
     },
+    'desktop audio availability reaches current viewers and viewers that join later'() {
+        const { parent } = makeParent();
+        let mux = null;
+        sandbox.CreateDesktopMultiplexor(parent, { id: '' }, 'node/test/device', 'sess', m => { mux = m; });
+        parent.desktoprelays['node/test/device'] = mux;
+        const sent = v => { const out = []; v.ws.send = (d, cb) => { out.push(typeof d == 'string' ? d : null); if (cb) cb(); }; return out; };
+        const first = recordingViewer(mux), firstOut = sent(first);
+        mux.addPeer(first);
+        runOnce();
+        const available = '{"ctrlChannel":"102938","type":"audio","state":"available","protocol":20}';
+        mux.processAgentData('{"ctrlChannel":"102938","type":"audio","state":"started"}');
+        mux.processAgentData('{"ctrlChannel":"102938","type":"webrtc0"}');
+        mux.processAgentData(available);
+        assert.deepStrictEqual(firstOut.filter(d => d && d.indexOf('"audio"') >= 0), [available], 'only the availability message is forwarded');
+        const late = recordingViewer(mux), lateOut = sent(late);
+        mux.addPeer(late);
+        runOnce();
+        assert(lateOut.indexOf(available) >= 0, 'a viewer joining later receives the cached availability message');
+        mux.addPeer({ req: { query: {} }, ws: fakeWs(), deskMultiplexor: mux }); // A second agent tunnel: refused while the agent is responsive
+        mux.agent.paused = false; mux.agentLastRx = 0; // The current agent went silent, so the next agent tunnel replaces it
+        const replacement = { req: { query: {} }, ws: fakeWs(), deskMultiplexor: mux };
+        assert.strictEqual(mux.addPeer(replacement), true, 'a silent agent is replaced');
+        assert.strictEqual(mux.lastAudioMessage, null, 'a replacement agent must advertise audio itself before late viewers see it');
+    },
     'a peer closing on a disposed multiplexor does not remove a newer one for the same node'() {
         const { parent } = makeParent();
         const a = agentRelay(parent, { id: '' });

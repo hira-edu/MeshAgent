@@ -57,6 +57,7 @@ function main() {
     const deploymentDocPath = path.resolve('docs', 'DEPLOYMENT.md');
     const requiredEntries = [
         'meshdesktopmultiplex.js',
+        'meshrelay.js',
         'meshagent.js',
         'meshctrl.js',
         'public/scripts/agent-redir-ws-0.1.1.js',

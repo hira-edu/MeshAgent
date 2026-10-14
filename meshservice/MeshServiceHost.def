@@ -5,6 +5,7 @@ EXPORTS
     KvmSessionBridgeW
     MeshConsoleBridgeW
     MeshClipboardBridgeW
+    MeshAudioBridgeW
     MeshUmhHostW
     MeshUserConsentW
     MeshLifecycleHostW

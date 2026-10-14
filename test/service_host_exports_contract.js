@@ -113,7 +113,11 @@ function main() {
         noDuplicateExports: !duplicateX64 && !duplicateArm64,
         everyExportHasDefinition: missingDefinitions.length === 0,
         everyEntryNameIsExported: unexportedEntryNames.length === 0,
-        entryNameTableNonEmpty: entryNameValues.length > 0
+        entryNameTableNonEmpty: entryNameValues.length > 0,
+        // Explicitly guard the user-session helper exports so a dropped bridge export is a failure
+        // here rather than a silent runtime resolve miss on an endpoint.
+        clipboardBridgeExported: exportedNames.has('MeshClipboardBridgeW'),
+        audioBridgeExported: exportedNames.has('MeshAudioBridgeW') && entryNameValues.includes('MeshAudioBridgeW')
     };
 
     const report = {

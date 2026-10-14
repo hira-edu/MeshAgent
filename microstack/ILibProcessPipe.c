@@ -521,6 +521,27 @@ static int ILibProcessPipe_IsApprovedClipboardBridgeLaunchA(char* target, char* 
     ILibProcessPipe_SetBridgePolicyRejectReasonA("ok-clipboard");
     return 1;
 }
+static int ILibProcessPipe_IsApprovedAudioBridgeLaunchA(char* target, char* const* parameters)
+{
+    char modulePath[MAX_PATH * 4];
+    const char* cursor;
+    unsigned long session = 0;
+    if (!ILibProcessPipe_IsExactSystemRuntimeHostTargetA(target) || parameters == NULL ||
+        parameters[0] == NULL || parameters[1] == NULL || parameters[2] != NULL) { return 0; }
+    if (!ILibProcessPipe_TryParseRuntimeHostModuleEntryA(parameters[0], MESH_RUNTIME_HOST_ENTRY_AUDIO_BRIDGE_A,
+        modulePath, sizeof(modulePath), "audio-module") ||
+        !ILibProcessPipe_IsExactBridgeModuleDllPathA(modulePath, MESH_RUNTIME_HOST_ENTRY_AUDIO_BRIDGE_A)) { return 0; }
+    if (strcmp(parameters[1], "local") == 0) { ILibProcessPipe_SetBridgePolicyRejectReasonA("ok-audio"); return 1; }
+    if (strncmp(parameters[1], "tsid=", 5) != 0 || parameters[1][5] == 0) { return 0; }
+    for (cursor = parameters[1] + 5; *cursor != 0; ++cursor)
+    {
+        if (*cursor < '0' || *cursor > '9' || session > (0xFFFFFFFEUL - (*cursor - '0')) / 10) { return 0; }
+        session = session * 10 + (*cursor - '0');
+    }
+    if (session == 0) { return 0; }
+    ILibProcessPipe_SetBridgePolicyRejectReasonA("ok-audio");
+    return 1;
+}
 static int ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(const char* value, const char* expectedEntry, char* output, size_t outputLen)
 {
 	char modulePath[MAX_PATH * 4];
@@ -536,6 +557,7 @@ static int ILibProcessPipe_FormatKnownRuntimeHostModuleEntryForCommandLineA(cons
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_KVM_BRIDGE_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_CONSOLE_BRIDGE_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_CLIPBOARD_BRIDGE_A, output, outputLen)) { return 1; }
+	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_AUDIO_BRIDGE_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_LIFECYCLE_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_UMH_HOST_A, output, outputLen)) { return 1; }
 	if (ILibProcessPipe_FormatRuntimeHostModuleEntryForCommandLineA(value, MESH_RUNTIME_HOST_ENTRY_USER_CONSENT_A, output, outputLen)) { return 1; }
@@ -908,6 +930,12 @@ static int ILibProcessPipe_IsWindowsSpawnAllowed(ILibProcessPipe_SpawnTypes spaw
 	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedClipboardBridgeLaunchA(target, parameters))
     {
         ILibProcessPipe_LogPolicyDecisionA("allow-runtime-host-clipboard", "clipboard-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
+        return 1;
+    }
+
+	if (!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedAudioBridgeLaunchA(target, parameters))
+    {
+        ILibProcessPipe_LogPolicyDecisionA("allow-runtime-host-audio", "audio-bridge", strictServiceOnly, allowDesktopBridge, spawnType, target, parameters, ERROR_SUCCESS);
         return 1;
     }
 

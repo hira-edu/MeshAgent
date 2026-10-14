@@ -984,6 +984,22 @@ function main() {
             sources.wifiScanner.includes('Windows Wi-Fi scanner helper dispatch is disabled until an approved MeshWifiScannerBridgeW rundll32 contract exists.') &&
             !sources.wifiScanner.includes('WindowsChildScript') &&
             !sources.wifiScanner.includes("require('ScriptContainer').Create(15"),
+        audioBridgeSurfaceApproved:
+            // Desktop-audio loopback helper: rundll32 export mirroring the clipboard bridge, an
+            // ILibProcessPipe launch validator for the agent-reachable "local"/"tsid=" forms, and
+            // parity in both architecture .def files.
+            sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_AUDIO_BRIDGE_W') &&
+            sources.runtimeHostContract.includes('MESH_RUNTIME_HOST_ENTRY_AUDIO_BRIDGE_A') &&
+            sources.runtimeHostContract.includes('void CALLBACK MeshAudioBridgeW') &&
+            sources.runtimeHostContractImpl.includes('#include "audio_bridge.h"') &&
+            sources.runtimeHostContractImpl.includes('void CALLBACK MeshAudioBridgeW') &&
+            sources.runtimeHostContractImpl.includes('MeshAudio_Run(tail, hinstDLL)') &&
+            sources.serviceHostDef.includes('MeshAudioBridgeW') &&
+            sources.serviceHostArm64Def.includes('MeshAudioBridgeW') &&
+            sources.processPipe.includes('ILibProcessPipe_IsApprovedAudioBridgeLaunchA') &&
+            sources.processPipe.includes('MESH_RUNTIME_HOST_ENTRY_AUDIO_BRIDGE_A') &&
+            sources.processPipe.includes('allow-runtime-host-audio') &&
+            sources.processPipe.includes('!ILibProcessPipe_IsUserSessionSpawnType(spawnType) && ILibProcessPipe_IsApprovedAudioBridgeLaunchA(target, parameters)'),
         winBcdExternalUtilitiesDisabled:
             sources.winBcd.includes('is disabled by the approved runtime-host contract') &&
             sources.winBcd.includes("return rejectWinBcdOperation('SafeBoot service registration');") &&

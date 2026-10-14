@@ -223,6 +223,61 @@ rejects a loader that changed afterward. Local npm copies are not release source
 Refresh the target's default core
 after publication; a server loader change requires a server restart.
 
+## Windows desktop audio
+
+The `desktop-audio` module streams the endpoint's speaker output (WASAPI
+loopback, never the microphone) for one Windows session through the native
+`MeshAudioBridgeW` callback. It launches
+`rundll32.exe "<ServiceDll>",MeshAudioBridgeW tsid=<session>` with the same
+system `rundll32.exe` path and installed service-DLL resolution as clipboard
+dispatch; the broker starts the capture child in that session.
+
+`supported()` is true only for a Windows service agent whose installed service
+DLL is the module loaded in the agent process and exports `MeshAudioBridgeW`.
+Console agents report no support, as does an installed DLL that is not yet
+running (an update pending restart).
+
+Set the agent datastore key `desktopAudio` to `0` (for example with the agent
+console command `dbset desktopAudio 0`) to disable audio on that device. Any
+other value, or no key, leaves it enabled. If the shared datastore cannot be
+read, audio is treated as disabled. While disabled, `disabled()` is true and
+every `open()` ends with status `unavailable`; a running helper is not stopped
+by changing the key.
+
+`open(tsid)` takes a session ID from 1 to 0xFFFFFFFE, or `null` for the active
+console session that the desktop shows without one, and returns a stream that
+emits `status`, `packet` and `close`. Events start after `open()` returns. Each
+stream gets at most one `started` status, then exactly one terminal status
+(`stopped`, `unavailable` or `error`, with `code` and `reason` when known) and
+`close`; `close()` ends the stream with `stopped`, and no event follows it.
+All streams for a session share one helper, which ends with the last stream.
+A stream that joins a running helper receives `started` and the current
+configuration packet first. The module keeps at most four helpers; a failed
+helper blocks new streams for that session for 30 seconds, and a stopped helper
+blocks them until its process exits, so brokers never overlap. A helper that
+sends no configuration within 30 seconds, or no packet for 10 seconds after
+starting, is closed as an error.
+
+The helper's stdout is split into packets with a 16-byte header (version 1,
+type, flags, sequence, timestamp, payload length of at most 4,096 bytes).
+Configuration packets must announce Opus at 48 kHz, stereo, 20 ms frames with
+the discontinuity flag and come first; silence packets are empty, audio packets
+are not, and status payloads hold a code and at most 256 bytes of UTF-8. Any
+other frame stops the helper and ends every stream with `error`. A helper status
+packet ends the helper: code 0 is `stopped`; `ERROR_NOT_FOUND`, `E_NOTFOUND`,
+`AUDCLNT_E_DEVICE_INVALIDATED` and `AUDCLNT_E_SERVICE_NOT_RUNNING` are
+`unavailable`; other codes are `error`. An unexpected exit or broken pipe is
+`error`. Packets are forwarded unchanged to every stream as they arrive. The
+module retains only the trailing partial frame and the current configuration
+packet; it never queues, stores or logs audio. Flow control belongs to the
+consumer, which drops packets it cannot send.
+
+The agent's embedded copy (Windows builds) must match
+`modules/desktop-audio.js`. The MeshCentral core copies in
+`agents/modules_meshcore/desktop-audio.js` and
+`agents/modules_meshcore_min/desktop-audio.js` and `desktop-audio.min.js` are
+identical to it, and the installed DLL must export `MeshAudioBridgeW`.
+
 ## Windows lifecycle manifest encoding and errors
 
 Every lifecycle INI writer uses UTF-16LE with a BOM. `WritePrivateProfileStringW`
