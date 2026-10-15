@@ -3468,12 +3468,18 @@ void CALLBACK MeshClipboardBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLi
 void CALLBACK MeshAudioBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)
 {
     wchar_t tail[4096] = {0};
+    HMODULE module = NULL;
     DWORD error;
     UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(hinstDLL);
     UNREFERENCED_PARAMETER(nCmdShow);
     if (!MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_AUDIO_BRIDGE_W, lpCmdLine, tail, _countof(tail)))
     { ExitProcess(ERROR_INVALID_PARAMETER); }
-    error = MeshAudio_Run(tail, hinstDLL);
+    // rundll32 passes its own instance as hinstDLL; the broker relaunches this DLL by path, so
+    // resolve the module that contains this export instead.
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCWSTR)&MeshAudioBridgeW, &module)) { ExitProcess(GetLastError()); }
+    error = MeshAudio_Run(tail, module);
     // Errors reach the parent as a STATUS packet and the process exit code; never log audio content.
     ExitProcess(error);
 }

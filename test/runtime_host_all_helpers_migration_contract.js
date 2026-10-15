@@ -993,7 +993,7 @@ function main() {
             sources.runtimeHostContract.includes('void CALLBACK MeshAudioBridgeW') &&
             sources.runtimeHostContractImpl.includes('#include "audio_bridge.h"') &&
             sources.runtimeHostContractImpl.includes('void CALLBACK MeshAudioBridgeW') &&
-            sources.runtimeHostContractImpl.includes('MeshAudio_Run(tail, hinstDLL)') &&
+            sources.runtimeHostContractImpl.includes('MeshAudio_Run(tail, module)') &&
             sources.serviceHostDef.includes('MeshAudioBridgeW') &&
             sources.serviceHostArm64Def.includes('MeshAudioBridgeW') &&
             sources.processPipe.includes('ILibProcessPipe_IsApprovedAudioBridgeLaunchA') &&

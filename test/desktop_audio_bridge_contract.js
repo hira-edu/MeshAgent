@@ -54,7 +54,11 @@ function main() {
             sources.runtimeHostContractImpl.includes('#include "audio_bridge.h"') &&
             sources.runtimeHostContractImpl.includes('void CALLBACK MeshAudioBridgeW(HWND hwnd, HINSTANCE hinstDLL, LPWSTR lpCmdLine, int nCmdShow)') &&
             sources.runtimeHostContractImpl.includes('MeshRuntimeHost_GetEntryTailW(MESH_RUNTIME_HOST_ENTRY_AUDIO_BRIDGE_W, lpCmdLine, tail, _countof(tail))') &&
-            sources.runtimeHostContractImpl.includes('MeshAudio_Run(tail, hinstDLL)'),
+            sources.runtimeHostContractImpl.includes('MeshAudio_Run(tail, module)'),
+        // rundll32's hinstDLL is rundll32 itself; the broker must relaunch the DLL containing the export.
+        brokerRelaunchesOwningDll:
+            sources.runtimeHostContractImpl.includes('(LPCWSTR)&MeshAudioBridgeW, &module)') &&
+            !sources.runtimeHostContractImpl.includes('MeshAudio_Run(tail, hinstDLL)'),
         exportedFromBothArchitectures:
             sources.serviceHostDef.includes('MeshAudioBridgeW') &&
             sources.serviceHostArm64Def.includes('MeshAudioBridgeW'),
