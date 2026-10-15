@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import json
 import math
@@ -677,7 +678,7 @@ def should_retry_remote_result(result):
     return any(snippet in stderr for snippet in RETRYABLE_REMOTE_ERROR_SNIPPETS)
 
 
-def run_remote_process(full_cmd, timeout):
+def run_remote_process(full_cmd, timeout, stdin_text=None):
     """Run an SSH-family process with retries for transient transport failures."""
     last_result = None
     last_timeout = None
@@ -685,13 +686,25 @@ def run_remote_process(full_cmd, timeout):
     for attempt in range(1, attempts + 1):
         stdout_path = None
         stderr_path = None
+        stdin_path = None
         try:
             with tempfile.NamedTemporaryFile(delete=False) as stdout_file:
                 stdout_path = Path(stdout_file.name)
             with tempfile.NamedTemporaryFile(delete=False) as stderr_file:
                 stderr_path = Path(stderr_file.name)
-            with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_handle, stderr_path.open("w", encoding="utf-8", errors="replace") as stderr_handle:
-                completed = subprocess.run(full_cmd, stdout=stdout_handle, stderr=stderr_handle, stdin=subprocess.DEVNULL, timeout=timeout)
+            if stdin_text is not None:
+                with tempfile.NamedTemporaryFile(delete=False) as stdin_file:
+                    stdin_file.write(stdin_text.encode("utf-8"))
+                    stdin_path = Path(stdin_file.name)
+            with contextlib.ExitStack() as stack:
+                stdout_handle = stack.enter_context(stdout_path.open("w", encoding="utf-8", errors="replace"))
+                stderr_handle = stack.enter_context(stderr_path.open("w", encoding="utf-8", errors="replace"))
+                stdin_handle = (
+                    stack.enter_context(stdin_path.open("rb"))
+                    if stdin_path is not None
+                    else subprocess.DEVNULL
+                )
+                completed = subprocess.run(full_cmd, stdout=stdout_handle, stderr=stderr_handle, stdin=stdin_handle, timeout=timeout)
             result = subprocess.CompletedProcess(
                 completed.args,
                 completed.returncode,
@@ -705,7 +718,7 @@ def run_remote_process(full_cmd, timeout):
                 continue
             return None, ex
         finally:
-            for temp_output in (stdout_path, stderr_path):
+            for temp_output in (stdout_path, stderr_path, stdin_path):
                 if temp_output is not None:
                     try:
                         temp_output.unlink()
@@ -737,8 +750,16 @@ def get_remote_target():
 
 def ssh_cmd(command, capture=True, check=True, timeout=None):
     """Execute a command on the remote server via SSH."""
-    full_cmd = build_remote_cmd("ssh") + [get_remote_target(), command]
-    result, timeout_error = run_remote_process(full_cmd, timeout=timeout or REMOTE_COMMAND_TIMEOUT_SECONDS)
+    if len(command) > 4000:
+        full_cmd = build_remote_cmd("ssh") + [get_remote_target(), "sh -s"]
+        result, timeout_error = run_remote_process(
+            full_cmd,
+            timeout=timeout or REMOTE_COMMAND_TIMEOUT_SECONDS,
+            stdin_text=command,
+        )
+    else:
+        full_cmd = build_remote_cmd("ssh") + [get_remote_target(), command]
+        result, timeout_error = run_remote_process(full_cmd, timeout=timeout or REMOTE_COMMAND_TIMEOUT_SECONDS)
     if timeout_error is not None:
         if check:
             print("[ERROR] Remote command timed out:")
