@@ -17,6 +17,7 @@ const signingGate = read('test/release_signing_bundle_gate.js');
 const testHarness = read('test.ps1');
 const runtimeHarness = read('tools/Invoke-RuntimeValidation.ps1');
 const releaseWorkflow = read('.github/workflows/build-release.yml');
+const agentCore = read('meshcore/agentcore.c');
 
 function conditionedBlock(source, element, condition) {
     const escaped = condition.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -145,6 +146,7 @@ assert(runtimeHarness.includes('RuntimeArchitecture   = $Architecture'), 'runtim
 assert(runtimeHarness.includes('Assert-NativeArchitecture -RequestedArchitecture $Architecture'), 'runtime wrapper does not require a native matching host');
 assert(runtimeHarness.includes('RuntimeInformation]::OSArchitecture'), 'runtime wrapper does not inspect native OS architecture');
 assert(testHarness.includes('grouped lifecycle validation was not started'), 'lower-level runtime validation does not fail closed on a mismatched host');
+assert(agentCore.includes('strcasecmp(param[ri], "-nodeid") == 0') && agentCore.includes('readonly = 1;'), '-nodeid must inspect the live datastore read-only while the service owns the writer');
 
 for (const required of [
     'arch: [x64, x86, arm64]',
@@ -166,8 +168,13 @@ for (const required of [
     'Architecture          = $architecture',
     'runtime_agent_base_url',
     'MeshCentralGenericDownload',
+    'repository: hira-edu/MeshCentral',
     'meshconsole/MeshConsole-2022.vcxproj',
     'actions/setup-dotnet@v4',
+    "MeshServiceRuntime-${{ matrix.architecture == 'ARM64' && 'MeshServiceARM64.exe' || 'MeshService64.exe' }}",
+    "${{ matrix.architecture == 'ARM64' && 'MeshServiceRuntime-MeshServiceARM64.dll' || 'MeshServiceRuntime-diagsvc.dll' }}",
+    'Stage exact build artifacts and build MeshConsole',
+    'artifacts/validation/ci/grouped-regression/**',
     'cp /tmp/MeshServiceARM64.exe',
     'cp /tmp/MeshServiceARM64.dll'
 ]) {

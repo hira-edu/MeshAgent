@@ -321,8 +321,12 @@ For credential-free validation against an already deployed server, set
 the public type 4 and type 43 packages contain the exact locally built binary
 and a valid generic server-binding trailer. Authenticated control URL, mesh ID,
 and credentials remain available when group-specific embedded-MSH comparison is
-required. Runtime jobs build and verify matching console, EXE, and DLL machines
-before any install, update, or uninstall mutation.
+required. Runtime jobs consume the exact EXE, MSH, and DLL artifacts produced by
+the build matrix, build the matching console, and verify all native machines
+before any install, update, or uninstall mutation. Ordinary stock builds use the
+checked-in branding fallback and need no branding secret. A
+`BRANDING_CONFIG_JSON` secret is only needed when the runtime package must match
+an already deployed private branding identity.
 Fresh installation after uninstall generates a new endpoint identity. A backup
 of the `.db` alone cannot restore an identity backed by a Windows CNG key;
 identity-preserving recovery also requires the corresponding certificate and

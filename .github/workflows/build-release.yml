@@ -663,13 +663,17 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Checkout pinned runtime components
-        uses: actions/checkout@v4
+      - name: Download matching agent package
+        uses: actions/download-artifact@v4
         with:
-          repository: hira-edu/hook
-          ref: 8b0e4deeb283634517cc5c957624a402a2ed3f82
-          path: runtime-source
-          ssh-key: ${{ secrets.RUNTIME_COMPONENT_DEPLOY_KEY }}
+          name: MeshServiceRuntime-${{ matrix.architecture == 'ARM64' && 'MeshServiceARM64.exe' || 'MeshService64.exe' }}
+          path: runtime-package
+
+      - name: Download matching service DLL
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.architecture == 'ARM64' && 'MeshServiceRuntime-MeshServiceARM64.dll' || 'MeshServiceRuntime-diagsvc.dll' }}
+          path: runtime-dll
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3
@@ -714,27 +718,32 @@ jobs:
             --allow-placeholders
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build MeshServiceRuntime (${{ matrix.architecture }})
+      - name: Stage exact build artifacts and build MeshConsole (${{ matrix.architecture }})
         shell: pwsh
         run: |
-          msbuild "meshservice/MeshService-2022.vcxproj" `
-            /p:Configuration=MeshServiceBundle `
-            /p:Platform=${{ matrix.platform }} `
-            /p:RuntimeComponentSourceRoot="$env:GITHUB_WORKSPACE\runtime-source" `
-            /p:WindowsTargetPlatformVersion=10.0 `
-            /p:PlatformToolset=v143 `
-            /m /v:minimal
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          msbuild "meshservice/MeshService-2022.vcxproj" `
-            /p:Configuration=MeshServiceRuntime `
-            /p:Platform=${{ matrix.platform }} `
-            /p:RuntimeComponentSourceRoot="$env:GITHUB_WORKSPACE\runtime-source" `
-            /p:WindowsTargetPlatformVersion=10.0 `
-            /p:PlatformToolset=v143 `
-            /p:MeshAgentSkipMeshServiceBundleDependencyBuild=1 `
-            /m /v:minimal
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node ./test/service_bundle_embedding_contract.js --architecture '${{ matrix.architecture }}'
+          $architecture = '${{ matrix.architecture }}'
+          $runtimeDir = Join-Path (Get-Location) ("meshservice\{0}\MeshServiceRuntime" -f $architecture)
+          $bundleDir = Join-Path (Get-Location) ("meshservice\{0}\MeshServiceBundle" -f $architecture)
+          New-Item -ItemType Directory -Force -Path $runtimeDir, $bundleDir | Out-Null
+
+          $exeSource = @(Get-ChildItem -LiteralPath runtime-package -Recurse -File -Filter '*.exe')
+          $mshSource = @(Get-ChildItem -LiteralPath runtime-package -Recurse -File -Filter '*.msh')
+          $dllSource = @(Get-ChildItem -LiteralPath runtime-dll -Recurse -File -Filter '*.dll')
+          if ($exeSource.Count -ne 1 -or $mshSource.Count -ne 1 -or $dllSource.Count -ne 1) {
+            throw "Expected exactly one EXE, MSH, and DLL artifact; found EXE=$($exeSource.Count) MSH=$($mshSource.Count) DLL=$($dllSource.Count)."
+          }
+
+          $runtimeExe = Join-Path $runtimeDir 'MeshService-2022.exe'
+          $runtimeMsh = Join-Path $runtimeDir 'MeshService-2022.msh'
+          $runtimeDll = Join-Path $bundleDir 'MeshService-2022.dll'
+          Copy-Item -LiteralPath $exeSource[0].FullName -Destination $runtimeExe -Force
+          Copy-Item -LiteralPath $mshSource[0].FullName -Destination $runtimeMsh -Force
+          Copy-Item -LiteralPath $dllSource[0].FullName -Destination $runtimeDll -Force
+
+          node ./test/service_bundle_embedding_contract.js `
+            --architecture $architecture `
+            --exe $runtimeExe `
+            --dll $runtimeDll
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           msbuild "meshconsole/MeshConsole-2022.vcxproj" `
             /p:Configuration=Release `
@@ -745,17 +754,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Checkout MeshCentral repo (custom)
-        if: env.RUNTIME_AGENT_BASE_URL == '' && env.RUNTIME_MESHCENTRAL_REPO != ''
+        if: env.RUNTIME_MESHCENTRAL_REPO != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ env.RUNTIME_MESHCENTRAL_REPO }}
           path: MeshCentral
 
       - name: Checkout MeshCentral repo (default)
-        if: env.RUNTIME_AGENT_BASE_URL == '' && env.RUNTIME_MESHCENTRAL_REPO == ''
+        if: env.RUNTIME_MESHCENTRAL_REPO == ''
         uses: actions/checkout@v4
         with:
-          repository: Ylianst/MeshCentral
+          repository: hira-edu/MeshCentral
           path: MeshCentral
 
       - name: Run runtime validation
@@ -806,5 +815,6 @@ jobs:
           path: |
             artifacts/validation/ci/runtime-${{ matrix.architecture == 'ARM64' && 'arm64' || 'x64' }}.json
             artifacts/validation/ci/runtime-${{ matrix.architecture == 'ARM64' && 'arm64' || 'x64' }}.log
+            artifacts/validation/ci/grouped-regression/**
           if-no-files-found: error
           retention-days: 30
