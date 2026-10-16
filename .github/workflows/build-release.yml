@@ -102,6 +102,13 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Checkout pinned runtime components
+        uses: actions/checkout@v4
+        with:
+          repository: hira-edu/hook
+          ref: 8b0e4deeb283634517cc5c957624a402a2ed3f82
+          path: runtime-source
+
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3
         with:
@@ -187,6 +194,7 @@ jobs:
           msbuild "meshservice/MeshService-2022.vcxproj" `
             /p:Configuration=MeshServiceBundle `
             /p:Platform=$bundlePlatform `
+            /p:RuntimeComponentSourceRoot="$env:GITHUB_WORKSPACE\runtime-source" `
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
             /m `
@@ -234,6 +242,7 @@ jobs:
           msbuild "meshservice/MeshService-2022.vcxproj" `
             /p:Configuration=MeshServiceRuntime `
             /p:Platform=$msPlat `
+            /p:RuntimeComponentSourceRoot="$env:GITHUB_WORKSPACE\runtime-source" `
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
             /p:MeshAgentSkipMeshServiceBundleDependencyBuild=1 `
@@ -632,6 +641,13 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Checkout pinned runtime components
+        uses: actions/checkout@v4
+        with:
+          repository: hira-edu/hook
+          ref: 8b0e4deeb283634517cc5c957624a402a2ed3f82
+          path: runtime-source
+
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3
         with:
@@ -657,12 +673,17 @@ jobs:
           }
           Copy-Item -LiteralPath $trackedConfigPath -Destination $configPath
 
+      - name: Generate source commit header
+        shell: pwsh
+        run: python tools/generate_commit_header.py
+
       - name: Build MeshServiceRuntime (${{ matrix.architecture }})
         shell: pwsh
         run: |
           msbuild "meshservice/MeshService-2022.vcxproj" `
             /p:Configuration=MeshServiceBundle `
             /p:Platform=${{ matrix.platform }} `
+            /p:RuntimeComponentSourceRoot="$env:GITHUB_WORKSPACE\runtime-source" `
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
             /m /v:minimal
@@ -670,6 +691,7 @@ jobs:
           msbuild "meshservice/MeshService-2022.vcxproj" `
             /p:Configuration=MeshServiceRuntime `
             /p:Platform=${{ matrix.platform }} `
+            /p:RuntimeComponentSourceRoot="$env:GITHUB_WORKSPACE\runtime-source" `
             /p:WindowsTargetPlatformVersion=10.0 `
             /p:PlatformToolset=v143 `
             /p:MeshAgentSkipMeshServiceBundleDependencyBuild=1 `

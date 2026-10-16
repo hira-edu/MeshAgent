@@ -156,6 +156,9 @@ for (const required of [
     'windows-11-arm',
     'architecture: ARM64',
     'python tools/generate_commit_header.py',
+    'repository: hira-edu/hook',
+    'ref: 8b0e4deeb283634517cc5c957624a402a2ed3f82',
+    '/p:RuntimeComponentSourceRoot="$env:GITHUB_WORKSPACE\\runtime-source"',
     'Architecture          = $architecture',
     'cp /tmp/MeshServiceARM64.exe',
     'cp /tmp/MeshServiceARM64.dll'
