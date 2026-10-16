@@ -68,7 +68,7 @@ env:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     env:
       CODE_SIGN_PFX_BASE64: ${{ secrets.CODE_SIGN_PFX_BASE64 }}
       CODE_SIGN_PASSWORD: ${{ secrets.CODE_SIGN_PASSWORD }}
@@ -608,7 +608,7 @@ jobs:
         include:
           - architecture: x64
             platform: x64
-            runner: windows-latest
+            runner: windows-2022
             msbuild_architecture: x64
           - architecture: ARM64
             platform: ARM64
