@@ -310,6 +310,9 @@ lifecycle suite. It also fails before any lifecycle mutation unless the native
 Windows host architecture matches the selected package. `test.ps1
 -RuntimeArchitecture ARM64 -RuntimeValidation` is the equivalent lower-level
 selector when inputs are supplied directly and applies the same host check.
+By default, `test.ps1` inspects only the selected architecture. Use `-FullRelease`
+to require all three Windows executables. Authenticated server downloads request
+agent type 4 for x64 and 43 for ARM64.
 When runtime validation is enabled in `build-release.yml`, the workflow runs
 the same gate as separate x64 and ARM64 jobs; the ARM64 leg uses the native
 `windows-11-arm` runner rather than treating cross-compilation as runtime proof.
