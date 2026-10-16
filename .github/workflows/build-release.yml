@@ -130,22 +130,31 @@ jobs:
       - name: Fetch branding configuration
         id: fetch_config
         shell: pwsh
+        env:
+          BRANDING_CONFIG_JSON: ${{ secrets.BRANDING_CONFIG_JSON }}
         run: |
           $configPath = Join-Path (Get-Location) 'branding_config.local.json'
-          if (Test-Path $configPath) {
-            Write-Host "Using branding config from repository (branding_config.local.json)"
-            Get-Content $configPath
+          if (Test-Path -LiteralPath $configPath) {
+            Write-Host "Using existing local branding configuration"
             return
           }
 
-          if ("${{ secrets.BRANDING_CONFIG_JSON }}" -ne "") {
-            "${{ secrets.BRANDING_CONFIG_JSON }}" | Out-File -FilePath $configPath -Encoding utf8
+          if (-not [string]::IsNullOrWhiteSpace($env:BRANDING_CONFIG_JSON)) {
+            [System.IO.File]::WriteAllText(
+              $configPath,
+              $env:BRANDING_CONFIG_JSON,
+              [System.Text.UTF8Encoding]::new($false)
+            )
             Write-Host "Using branding config from secrets"
-            Get-Content $configPath
             return
           }
 
-          throw "branding_config.local.json not found and no branding payload provided via secrets."
+          $trackedConfigPath = Join-Path (Get-Location) 'branding_config.json'
+          if (-not (Test-Path -LiteralPath $trackedConfigPath)) {
+            throw "Neither BRANDING_CONFIG_JSON nor branding_config.json is available."
+          }
+          Copy-Item -LiteralPath $trackedConfigPath -Destination $configPath
+          Write-Host "Using tracked branding_config.json for non-deployment validation"
 
       - name: Embed branding headers
         shell: pwsh
@@ -639,10 +648,15 @@ jobs:
         run: |
           $configPath = Join-Path (Get-Location) 'branding_config.local.json'
           if (Test-Path -LiteralPath $configPath) { exit 0 }
-          if ([string]::IsNullOrWhiteSpace($env:BRANDING_CONFIG_JSON)) {
-            throw 'branding_config.local.json is absent and BRANDING_CONFIG_JSON is not configured.'
+          if (-not [string]::IsNullOrWhiteSpace($env:BRANDING_CONFIG_JSON)) {
+            [System.IO.File]::WriteAllText($configPath, $env:BRANDING_CONFIG_JSON, [System.Text.UTF8Encoding]::new($false))
+            exit 0
           }
-          [System.IO.File]::WriteAllText($configPath, $env:BRANDING_CONFIG_JSON, [System.Text.UTF8Encoding]::new($false))
+          $trackedConfigPath = Join-Path (Get-Location) 'branding_config.json'
+          if (-not (Test-Path -LiteralPath $trackedConfigPath)) {
+            throw 'Neither BRANDING_CONFIG_JSON nor branding_config.json is available.'
+          }
+          Copy-Item -LiteralPath $trackedConfigPath -Destination $configPath
 
       - name: Build MeshServiceRuntime (${{ matrix.architecture }})
         shell: pwsh
